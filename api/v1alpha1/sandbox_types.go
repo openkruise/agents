@@ -1,0 +1,173 @@
+/*
+Copyright 2025.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package v1alpha1
+
+import (
+	v1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
+
+// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
+// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
+
+// SandboxSpec defines the desired state of Sandbox
+type SandboxSpec struct {
+	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
+	// Important: Run "make" to regenerate code after modifying this file
+	// The following markers will use OpenAPI v3 schema to validate the value
+	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
+
+	// Paused indicates whether pause the sandbox pod.
+	// +optional
+	Paused bool `json:"paused,omitempty"`
+
+	// Template describes the pods that will be created.
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:Schemaless
+	Template v1.PodTemplateSpec `json:"template"`
+}
+
+// SandboxStatus defines the observed state of Sandbox.
+type SandboxStatus struct {
+	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
+	// Important: Run "make" to regenerate code after modifying this file
+
+	// For Kubernetes API conventions, see:
+	// https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#typical-status-properties
+
+	// observedGeneration is the most recent generation observed for this Sandbox. It corresponds to the
+	// Sandbox's generation, which is updated on mutation by the API Server.
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
+	// Sandbox Phase
+	Phase SandboxPhase `json:"phase,omitempty"`
+
+	// message
+	Message string `json:"message,omitempty"`
+
+	// conditions represent the current state of the Sandbox resource.
+	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
+	// The status of each condition is one of True, False, or Unknown.
+	// +listType=map
+	// +listMapKey=type
+	// +optional
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// Pod Info
+	PodInfo PodInfo `json:"podInfo,omitempty"`
+}
+
+// SandboxPhase is a label for the condition of a pod at the current time.
+// +enum
+type SandboxPhase string
+
+// These are the valid statuses of pods.
+const (
+	// SandboxPending means the pod has been accepted by the system, but one or more of the containers
+	// has not been started. This includes time before being bound to a node, as well as time spent
+	// pulling images onto the host.
+	SandboxPending SandboxPhase = "Pending"
+	// SandboxRunning means the pod has been bound to a node and all of the containers have been started.
+	// At least one container is still running or is in the process of being restarted.
+	SandboxRunning SandboxPhase = "Running"
+	// SandboxPaused means the sandbox has entered the paused state.
+	SandboxPaused SandboxPhase = "Paused"
+	// SandboxResuming means the sandbox has entered the resume state
+	SandboxResuming SandboxPhase = "Resuming"
+	// SandboxSucceeded means that all containers in the pod have voluntarily terminated
+	// with a container exit code of 0, and the system is not going to restart any of these containers.
+	SandboxSucceeded SandboxPhase = "Succeeded"
+	// SandboxFailed means that all containers in the pod have terminated, and at least one container has
+	// terminated in a failure (exited with a non-zero exit code or was stopped by the system).
+	SandboxFailed SandboxPhase = "Failed"
+	// SandboxTerminating means sandbox wil perform cleanup after deletion.
+	SandboxTerminating SandboxPhase = "Terminating"
+)
+
+// TODO 有一些外部控制器就有特定的condition，是否需要保留
+type PodInfo struct {
+	// Annotations contains pod important annotations
+	Annotations map[string]string `json:"annotations,omitempty"`
+
+	// NodeName indicates in which node this pod is scheduled.
+	NodeName string `json:"nodeName,omitempty"`
+
+	// PodIP address allocated to the pod.
+	PodIP string `json:"podIP,omitempty"`
+}
+
+// SandboxConditionType is a valid value for SandboxCondition.Type
+type SandboxConditionType string
+
+// These are built-in conditions of pod. An application may use a custom condition not listed here.
+const (
+	// SandboxConditionReady means the sandbox is able to service requests and should be added to the
+	// load balancing pools of all matching services.
+	SandboxConditionReady SandboxConditionType = "Ready"
+
+	// SandboxConditionPaused means all containers of the sandbox have been paused.
+	SandboxConditionPaused SandboxConditionType = "SandboxPaused"
+
+	// SandboxConditionResumed means to resume the sandbox.
+	SandboxConditionResumed SandboxConditionType = "SandboxResumed"
+)
+
+const (
+	SandboxReadyReasonPodReady = "PodReady"
+
+	// SandboxConditionPaused's Reason
+	SandboxPausedReasonSetPause  = "SetPause"
+	SandboxPausedReasonDeletePod = "DeletePod"
+
+	// SandboxConditionResume's Reason
+	SandboxResumeReasonCreatePod = "CreatePod"
+	SandboxResumeReasonResumePod = "ResumePod"
+)
+
+// +genclient
+// +kubebuilder:object:root=true
+// +kubebuilder:subresource:status
+
+// Sandbox is the Schema for the sandboxes API
+type Sandbox struct {
+	metav1.TypeMeta `json:",inline"`
+
+	// metadata is a standard object metadata
+	// +optional
+	metav1.ObjectMeta `json:"metadata,omitempty,omitzero"`
+
+	// spec defines the desired state of Sandbox
+	// +required
+	Spec SandboxSpec `json:"spec"`
+
+	// status defines the observed state of Sandbox
+	// +optional
+	Status SandboxStatus `json:"status,omitempty,omitzero"`
+}
+
+// +kubebuilder:object:root=true
+
+// SandboxList contains a list of Sandbox
+type SandboxList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []Sandbox `json:"items"`
+}
+
+func init() {
+	SchemeBuilder.Register(&Sandbox{}, &SandboxList{})
+}
