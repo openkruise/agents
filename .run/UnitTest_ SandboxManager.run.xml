@@ -1,0 +1,13 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="UnitTest: SandboxManager" type="GoTestRunConfiguration" factoryName="Go Test">
+    <module name="agents" />
+    <working_directory value="$PROJECT_DIR$/pkg/sandbox-manager" />
+    <root_directory value="$PROJECT_DIR$" />
+    <kind value="DIRECTORY" />
+    <package value="github.com/openkruise/agents/pkg/sandbox-manager" />
+    <directory value="$PROJECT_DIR$/pkg/sandbox-manager" />
+    <filePath value="$PROJECT_DIR$" />
+    <framework value="gotest" />
+    <method v="2" />
+  </configuration>
+</component>
