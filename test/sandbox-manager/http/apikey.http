@@ -1,0 +1,14 @@
+POST https://api.e2b-demo.ultramarines.cn/api-keys
+Content-Type: application/json
+X-API-Key: GG
+
+{
+  "name": "test"
+}
+
+###
+### GET request to example server
+GET https://examples.http-client.intellij.net/get
+    ?generated-in=GoLand
+
+###
