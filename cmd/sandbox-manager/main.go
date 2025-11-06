@@ -28,9 +28,9 @@ func main() {
 	tlsSecret := os.Getenv("TLS_SECRET")
 	if tlsSecret == "" {
 		if debugMode {
-			tlsSecret = "e2b-sandbox-tls-local"
+			tlsSecret = "kruise-sandbox-tls-local"
 		} else {
-			tlsSecret = "e2b-sandbox-tls"
+			tlsSecret = "kruise-sandbox-tls"
 		}
 	}
 

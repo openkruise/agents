@@ -42,7 +42,7 @@ spec:
           image: "{{ .Values.controller.repository }}:{{ .Values.controller.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.controller.pullPolicy }}
           command:
-            - /root/helm
+            - /root/sandbox-manager
           args:
             - -v={{ .Values.controller.logLevel }}
           ports:

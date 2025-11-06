@@ -11,11 +11,12 @@ COPY ../go.mod go.sum ./
 COPY vendor ./vendor
 
 # Copy the source code
-COPY cmd ./cmd
+COPY ../cmd/sandbox-manager ./cmd/sandbox-manager
 COPY ../pkg ./pkg
-
+COPY ../api  ./api
+COPY ../client ./client
 # Build the binary
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o helm ./cmd/sandbox-manager
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o sandbox-manager ./cmd/sandbox-manager
 
 # Final stage
 FROM registry.cn-hangzhou.aliyuncs.com/airanthem/mirrors:alpine-3.21 as runtime
