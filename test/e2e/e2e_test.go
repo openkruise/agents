@@ -27,7 +27,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"gitlab.alibaba-inc.com/serverlessinfra/agents/test/utils"
+	"github.com/openkruise/agents/test/utils"
 )
 
 // namespace where the project is deployed in

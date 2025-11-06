@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"fmt"
 
-	"gitlab.alibaba-inc.com/serverlessinfra/agents/utils/webhookutils/generator"
+	"github.com/openkruise/agents/pkg/webhook/webhookutils/generator"
 )
 
 // CertGenerator is a certGenerator for testing.

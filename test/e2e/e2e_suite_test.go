@@ -25,7 +25,7 @@ import (
 	"os/exec"
 	"testing"
 
-	"gitlab.alibaba-inc.com/serverlessinfra/agents/test/utils"
+	"github.com/openkruise/agents/test/utils"
 )
 
 var (

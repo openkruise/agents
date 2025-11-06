@@ -21,6 +21,7 @@ import (
 	"flag"
 	"os"
 
+	"github.com/openkruise/agents/pkg/controller/sandbox"
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
@@ -35,8 +36,7 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
-	agentsv1alpha1 "gitlab.alibaba-inc.com/serverlessinfra/agents/api/v1alpha1"
-	"gitlab.alibaba-inc.com/serverlessinfra/agents/pkg/controller"
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -178,7 +178,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := (&controller.SandboxReconciler{
+	if err := (&sandbox.SandboxReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {

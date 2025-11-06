@@ -7,8 +7,8 @@ import (
 	"os"
 	"path"
 
-	"gitlab.alibaba-inc.com/serverlessinfra/agents/utils/webhookutils/generator"
-	"gitlab.alibaba-inc.com/serverlessinfra/agents/utils/webhookutils/writer/atomic"
+	"github.com/openkruise/agents/pkg/webhook/webhookutils/generator"
+	"github.com/openkruise/agents/pkg/webhook/webhookutils/writer/atomic"
 	"k8s.io/klog/v2"
 )
 

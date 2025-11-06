@@ -22,9 +22,9 @@ import (
 	sync "sync"
 	time "time"
 
-	versioned "gitlab.alibaba-inc.com/serverlessinfra/agents/client/clientset/versioned"
-	api "gitlab.alibaba-inc.com/serverlessinfra/agents/client/informers/externalversions/api"
-	internalinterfaces "gitlab.alibaba-inc.com/serverlessinfra/agents/client/informers/externalversions/internalinterfaces"
+	versioned "github.com/openkruise/agents/client/clientset/versioned"
+	api "github.com/openkruise/agents/client/informers/externalversions/api"
+	internalinterfaces "github.com/openkruise/agents/client/informers/externalversions/internalinterfaces"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
 	schema "k8s.io/apimachinery/pkg/runtime/schema"
