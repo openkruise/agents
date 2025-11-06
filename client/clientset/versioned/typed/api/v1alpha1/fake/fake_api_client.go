@@ -18,7 +18,7 @@ limitations under the License.
 package fake
 
 import (
-	v1alpha1 "gitlab.alibaba-inc.com/serverlessinfra/agents/client/clientset/versioned/typed/api/v1alpha1"
+	v1alpha1 "github.com/openkruise/agents/client/clientset/versioned/typed/api/v1alpha1"
 	rest "k8s.io/client-go/rest"
 	testing "k8s.io/client-go/testing"
 )

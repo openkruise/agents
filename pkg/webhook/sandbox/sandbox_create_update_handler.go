@@ -1,10 +1,10 @@
-package webhook
+package sandbox
 
 import (
 	"context"
 	"net/http"
 
-	agentsv1alpha1 "gitlab.alibaba-inc.com/serverlessinfra/agents/api/v1alpha1"
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	addmissionv1 "k8s.io/api/admission/v1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"sigs.k8s.io/controller-runtime/pkg/client"

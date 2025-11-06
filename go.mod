@@ -1,4 +1,4 @@
-module gitlab.alibaba-inc.com/serverlessinfra/agents
+module github.com/openkruise/agents
 
 go 1.23.0
 

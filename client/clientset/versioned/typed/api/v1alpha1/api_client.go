@@ -20,8 +20,8 @@ package v1alpha1
 import (
 	http "net/http"
 
-	apiv1alpha1 "gitlab.alibaba-inc.com/serverlessinfra/agents/api/v1alpha1"
-	scheme "gitlab.alibaba-inc.com/serverlessinfra/agents/client/clientset/versioned/scheme"
+	apiv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	scheme "github.com/openkruise/agents/client/clientset/versioned/scheme"
 	rest "k8s.io/client-go/rest"
 )
 

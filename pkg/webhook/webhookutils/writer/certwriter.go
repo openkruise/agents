@@ -7,7 +7,7 @@ import (
 	"errors"
 	"time"
 
-	"gitlab.alibaba-inc.com/serverlessinfra/agents/utils/webhookutils/generator"
+	"github.com/openkruise/agents/pkg/webhook/webhookutils/generator"
 	"k8s.io/klog/v2"
 )
 

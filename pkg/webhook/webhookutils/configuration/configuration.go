@@ -7,7 +7,7 @@ import (
 	"net/url"
 	"reflect"
 
-	"gitlab.alibaba-inc.com/serverlessinfra/agents/utils/webhookutils"
+	"github.com/openkruise/agents/pkg/webhook/webhookutils"
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	clientset "k8s.io/client-go/kubernetes"

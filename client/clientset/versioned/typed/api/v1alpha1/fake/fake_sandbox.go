@@ -18,8 +18,8 @@ limitations under the License.
 package fake
 
 import (
-	v1alpha1 "gitlab.alibaba-inc.com/serverlessinfra/agents/api/v1alpha1"
-	apiv1alpha1 "gitlab.alibaba-inc.com/serverlessinfra/agents/client/clientset/versioned/typed/api/v1alpha1"
+	v1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	apiv1alpha1 "github.com/openkruise/agents/client/clientset/versioned/typed/api/v1alpha1"
 	gentype "k8s.io/client-go/gentype"
 )
 

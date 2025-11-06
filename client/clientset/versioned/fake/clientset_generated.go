@@ -18,9 +18,9 @@ limitations under the License.
 package fake
 
 import (
-	clientset "gitlab.alibaba-inc.com/serverlessinfra/agents/client/clientset/versioned"
-	apiv1alpha1 "gitlab.alibaba-inc.com/serverlessinfra/agents/client/clientset/versioned/typed/api/v1alpha1"
-	fakeapiv1alpha1 "gitlab.alibaba-inc.com/serverlessinfra/agents/client/clientset/versioned/typed/api/v1alpha1/fake"
+	clientset "github.com/openkruise/agents/client/clientset/versioned"
+	apiv1alpha1 "github.com/openkruise/agents/client/clientset/versioned/typed/api/v1alpha1"
+	fakeapiv1alpha1 "github.com/openkruise/agents/client/clientset/versioned/typed/api/v1alpha1/fake"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/discovery"

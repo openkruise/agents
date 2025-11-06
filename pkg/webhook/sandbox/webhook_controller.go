@@ -1,4 +1,4 @@
-package webhook
+package sandbox
 
 import (
 	"context"
@@ -6,10 +6,10 @@ import (
 	"sync"
 	"time"
 
-	"gitlab.alibaba-inc.com/serverlessinfra/agents/utils/webhookutils"
-	"gitlab.alibaba-inc.com/serverlessinfra/agents/utils/webhookutils/configuration"
-	"gitlab.alibaba-inc.com/serverlessinfra/agents/utils/webhookutils/generator"
-	"gitlab.alibaba-inc.com/serverlessinfra/agents/utils/webhookutils/writer"
+	"github.com/openkruise/agents/pkg/webhook/webhookutils"
+	"github.com/openkruise/agents/pkg/webhook/webhookutils/configuration"
+	"github.com/openkruise/agents/pkg/webhook/webhookutils/generator"
+	"github.com/openkruise/agents/pkg/webhook/webhookutils/writer"
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"

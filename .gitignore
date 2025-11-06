@@ -27,3 +27,4 @@ go.work
 *~
 
 vendor/*
+dev/
