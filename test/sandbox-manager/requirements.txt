@@ -2,3 +2,4 @@ e2b-code-interpreter==2.0.0
 e2b-desktop==2.0.0
 browser-use==0.5.11
 agentscope==1.0.1
+pytest==9.0.0

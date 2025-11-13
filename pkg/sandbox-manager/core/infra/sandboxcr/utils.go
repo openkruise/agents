@@ -65,7 +65,7 @@ func FindSandboxGroup(sbx *v1alpha1.Sandbox, updateHash string) (group, reason s
 		return GroupFailed, "ResourceSucceeded"
 	case v1alpha1.SandboxTerminating:
 		return GroupFailed, "ResourceTerminating"
-	default:
+	default: // Running, Paused
 		switch sbx.Labels[consts.LabelSandboxState] {
 		case consts.SandboxStateRunning:
 			return GroupClaimed, "SandboxRunning"

@@ -110,7 +110,7 @@ func TestSandboxManager_RefreshProxy(t *testing.T) {
 			// 创建假的基础设施
 			eventer := events.NewEventer()
 			client := fake.NewClientset()
-			infraInstance, err := k8s.NewInfra("default", ".", eventer, client, &rest.Config{}, false)
+			infraInstance, err := k8s.NewInfra("default", ".", eventer, client, &rest.Config{})
 			assert.NoError(t, err)
 			assert.NoError(t, infraInstance.Run(context.Background()))
 			for _, sandbox := range tt.fakeSandboxes {

@@ -1,9 +1,9 @@
-FROM golang:1.24-alpine AS builder
+FROM registry.cn-hangzhou.aliyuncs.com/airanthem/mirrors:golang-1.24-alpine AS builder
 
 # Install dependencies
 RUN apk update && apk add --no-cache git curl bash
 
-RUN cd src && git clone https://github.com/e2b-dev/infra
+RUN cd src && git clone https://github.com/e2b-dev/infra -b 2025.33
 COPY authenticate.go.patch src/infra/packages/envd/internal/permissions/authenticate.go
 RUN cd src/infra/packages/envd && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -a -o bin/envd
 

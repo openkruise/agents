@@ -1,2 +1,3 @@
-#!/command/execlineb -P
-/usr/local/bin/envd
+#!/bin/bash
+export GODEBUG=multipathtcp=0
+exec /usr/local/bin/envd

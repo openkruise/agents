@@ -12,18 +12,21 @@ spec:
   template:
     metadata:
       # name、namespace、e2b.alibabacloud.com 开头的 label / annotation 会被运行时覆盖
-#      labels:
-#        alibabacloud.com/acs: 'true'
-#        alibabacloud.com/compute-class: general-purpose
-#        alibabacloud.com/compute-qos: default
-#      annotations:
-#        ops.alibabacloud.com/pause-enabled: "true"
+      labels:
+        alibabacloud.com/acs: 'true'
+        alibabacloud.com/compute-class: general-purpose
+        alibabacloud.com/compute-qos: default
+      annotations:
+        ops.alibabacloud.com/pause-enabled: "true"
 #        alibabacloud.com/cpu-vendors: "intel"
     spec:
       containers:
         - name: sandbox
+          env:
+            - name: GODEBUG
+              value: multipathtcp=0
           # 在这里定义 sandbox pod 的 image，必须指定
-          image: registry.cn-hangzhou.aliyuncs.com/airanthem/code-interpreter:v1.0
+          image: acs-image-test-01-registry.cn-hangzhou.cr.aliyuncs.com/e2b/code-interpreter:v1.3
           # 推荐设置资源需求，否则在 ACS 环境下会被设置成超小规格影响运行
           resources:
             requests:

@@ -205,3 +205,7 @@ func (i *Infra) onSandboxUpdate(oldObj, newObj any) {
 		})
 	}
 }
+
+func (i *Infra) InjectTemplateMetadata() metav1.ObjectMeta {
+	return metav1.ObjectMeta{}
+}

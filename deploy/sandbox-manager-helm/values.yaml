@@ -6,35 +6,36 @@
 replicaCount: 1
 
 e2b:
-  domain: "e2b-demo.ultramarines.cn"
-  adminApiKey: "GG"
+  domain: "your.domain.com"
+  enableAuth: false
+  adminApiKey: "admin-987654321"
 
 controller:
   repository: acs-image-test-01-registry.cn-hangzhou.cr.aliyuncs.com/e2b/e2b-on-k8s
   pullPolicy: IfNotPresent
-  tag: develop-20251106170210
+  tag: develop-20251113112544
   logLevel: 1 # set to 5 to see debug logs, set to 7 to see proxy logs
   infra: acs
   resources:
     limits:
-      cpu: 1000m
-      memory: 2Gi
+      cpu: 2000m
+      memory: 4Gi
     requests:
-      cpu: 1000m
-      memory: 2Gi
+      cpu: 2000m
+      memory: 4Gi
   hostNetwork: false
 
 proxy:
-  repository: registry.cn-hangzhou.aliyuncs.com/airanthem/mirrors
+  repository: registry-cn-hangzhou.ack.aliyuncs.com/ack-demo/envoy
   pullPolicy: IfNotPresent
-  tag: "envoy-v1.33"
+  tag: "v1.33"
   resources:
     limits:
-      cpu: 1000m
-      memory: 2Gi
+      cpu: 2000m
+      memory: 4Gi
     requests:
-      cpu: 1000m
-      memory: 2Gi
+      cpu: 2000m
+      memory: 4Gi
 
 service:
   type: ClusterIP
@@ -43,13 +44,14 @@ service:
 # This block is for setting up the ingress for more information can be found here: https://kubernetes.io/docs/concepts/services-networking/ingress/
 ingress:
   enabled: true
-  className: mse
+  className: nginx
   annotations: { }
-  secretName: kruise-sandbox-tls
+  certSecretName: kruise-sandbox-manager-tls
 
 
 # This is for the secrets for pulling an image from a private repository more information can be found here: https://kubernetes.io/docs/tasks/configure-pod-container/pull-image-private-registry/
-imagePullSecrets: [ ]
+imagePullSecrets:
+  - name: kruise-sandbox-manager-pull
 # This is to override the chart name.
 nameOverride: ""
 fullnameOverride: ""
@@ -81,8 +83,8 @@ securityContext: { }
   # capabilities:
   #   drop:
   #   - ALL
-  # readOnlyRootFilesystem: true
-  # runAsNonRoot: true
+# readOnlyRootFilesystem: true
+# runAsNonRoot: true
 # runAsUser: 1000
 
 

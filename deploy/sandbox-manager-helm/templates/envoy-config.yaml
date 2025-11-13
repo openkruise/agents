@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: sbx-envoy-config
+  name: sandbox-manager-envoy-config
 data:
   envoy.yaml: |
     admin:
@@ -35,6 +35,7 @@ data:
                                 prefix: "/"
                               route:
                                 cluster: sbx_original_dst_cluster
+                                timeout: 120s
                     http_filters:
                       - name: envoy.filters.http.ext_proc
                         typed_config:
@@ -69,7 +70,7 @@ data:
                           port_value: 9002
         - name: sbx_original_dst_cluster
           type: ORIGINAL_DST
-          connect_timeout: 5s
+          connect_timeout: 90s
           lb_policy: CLUSTER_PROVIDED
           original_dst_lb_config:
             use_http_header: true

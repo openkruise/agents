@@ -11,16 +11,8 @@ import (
 
 // ProxyRequest proxies the request to the sandbox
 // 当 apiServerURL 提供时，将会通过 apiServer 进行代理（需要同时提供 restConfig，否则通过 SandboxIP 直连
-func ProxyRequest(r *http.Request, path string, port int, ip string, apiServerURL string, restConfig *rest.Config) (*http.Response, error) {
-	var err error
-	var resp *http.Response
-	if apiServerURL != "" {
-		// In Debug mode, use Kubernetes API server to forward the request
-		resp, err = proxyRequestThroughAPIServer(r, apiServerURL, restConfig)
-	} else {
-		// In normal mode, connect directly to the pod IP
-		resp, err = proxyRequestDirectly(r, ip, path, port)
-	}
+func ProxyRequest(r *http.Request, path string, port int, ip string) (*http.Response, error) {
+	resp, err := proxyRequestDirectly(r, ip, path, port)
 	if err != nil {
 		klog.ErrorS(err, "failed to proxy request")
 		return nil, err

@@ -1,5 +1,5 @@
 ### create sandbox
-POST https://api.e2b-yunqi.ultramarines.cn/sandboxes
+POST https://api.e2b-demo.ultramarines.cn/sandboxes
 Content-Type: application/json
 X-API-Key: GG
 
@@ -32,6 +32,6 @@ Content-Type: application/json
 X-API-Key: GG
 
 ### get debug info
-GET https://api.e2b-yunqi.ultramarines.cn/debug/
+GET https://api.e2b-demo.ultramarines.cn/debug/
 Content-Type: application/json
 X-API-Key: GG

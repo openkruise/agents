@@ -1,5 +1,3 @@
-#file: noinspection ExcessiveWhitespaceTrimInspection
-#file: noinspection ExcessiveWhitespaceTrimInspection
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -56,15 +54,20 @@ spec:
                 fieldRef:
                   fieldPath: metadata.namespace
             - name: E2B_DOMAIN
-              value: {{ .Values.domain }}
-            - name: ADMIN_KEY
-              value: {{ .Values.adminApiKey }}
+              value: {{ .Values.e2b.domain }}
+            - name: E2B_ADMIN_KEY
+              value: {{ .Values.e2b.adminApiKey }}
+            - name: E2B_ENABLE_AUTH
+              value: {{ .Values.e2b.enableAuth | quote }}
             - name: INFRA
               value: {{ .Values.controller.infra }}
           {{- with .Values.controller.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+          volumeMounts:
+            - name: builtin-templates
+              mountPath: /root/builtin_templates
         - name: envoy-proxy
           {{- with .Values.securityContext }}
           securityContext:
@@ -92,7 +95,10 @@ spec:
       volumes:
         - name: envoy-config
           configMap:
-            name: sbx-envoy-config
+            name: sandbox-manager-envoy-config
+        - name: builtin-templates
+          configMap:
+            name: sandbox-manager-builtin-templates
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

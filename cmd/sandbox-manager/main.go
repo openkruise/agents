@@ -13,7 +13,6 @@ import (
 
 func main() {
 	// ============= Env ===============
-	debugMode := os.Getenv("DEBUG") == "true"
 	// Get listen address from environment variable or use default value
 	port := 8080
 	if portEnv, err := strconv.Atoi(os.Getenv("PORT")); err == nil {
@@ -27,11 +26,7 @@ func main() {
 
 	tlsSecret := os.Getenv("TLS_SECRET")
 	if tlsSecret == "" {
-		if debugMode {
-			tlsSecret = "kruise-sandbox-tls-local"
-		} else {
-			tlsSecret = "kruise-sandbox-tls"
-		}
+		tlsSecret = "kruise-sandbox-manager-tls"
 	}
 
 	infra := os.Getenv("INFRA")
@@ -39,7 +34,8 @@ func main() {
 		klog.Fatalf("env var INFRA is required")
 	}
 
-	adminKey := os.Getenv("ADMIN_KEY")
+	e2bAdminKey := os.Getenv("E2B_ADMIN_KEY")
+	e2bEnableAuth := os.Getenv("E2B_ENABLE_AUTH") == "true"
 	// =========== End Env =============
 
 	// Initialize Kubernetes client and config
@@ -49,18 +45,6 @@ func main() {
 	}
 
 	klog.InitFlags(nil)
-	if debugMode {
-		// 禁用alsoToStderr选项，防止日志同时输出到文件和stderr
-		_ = flag.Set("alsologtostderr", "false")
-		// 将stderrThreshold设置为一个较高的级别，防止Error日志自动输出到stderr
-		_ = flag.Set("stderrthreshold", "ERROR")
-		_ = flag.Set("logtostderr", "false")
-
-		klog.SetOutputBySeverity("ERROR", os.Stderr)
-		klog.SetOutputBySeverity("WARNING", os.Stdout)
-		klog.SetOutputBySeverity("INFO", os.Stdout)
-		klog.SetOutputBySeverity("FATAL", os.Stderr)
-	}
 	flag.Parse()
 
 	// Get domain from environment variable or use empty string
@@ -74,7 +58,7 @@ func main() {
 		e2b.Namespace = ns
 	}
 
-	sandboxController := e2b.NewController(domain, tlsSecret, adminKey, port, clientSet, debugMode)
+	sandboxController := e2b.NewController(domain, tlsSecret, e2bAdminKey, port, e2bEnableAuth, clientSet)
 	if err := sandboxController.Init(templateDir, infra); err != nil {
 		klog.Fatalf("Failed to initialize sandbox controller: %v", err)
 	}

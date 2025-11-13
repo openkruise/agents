@@ -49,6 +49,12 @@ type Pool struct {
 }
 
 func (p *Pool) AsSandbox(sbx *v1alpha1.Sandbox) *Sandbox {
+	if sbx.Annotations == nil {
+		sbx.Annotations = make(map[string]string)
+	}
+	if sbx.Labels == nil {
+		sbx.Labels = make(map[string]string)
+	}
 	return &Sandbox{
 		BaseSandbox: BaseSandbox[*v1alpha1.Sandbox]{
 			Sandbox:       sbx,

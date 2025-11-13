@@ -48,7 +48,7 @@ func testHandleFuncPreparation(t *testing.T, poolExists bool, client kubernetes.
 	template.Init("default")
 
 	// 创建 Infra 实例
-	infraInstance, err := NewInfra("default", ".", eventer, client, nil, false)
+	infraInstance, err := NewInfra("default", ".", eventer, client, nil)
 	assert.NoError(t, err)
 	err = infraInstance.Run(context.Background())
 	assert.NoError(t, err)

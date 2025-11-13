@@ -10,7 +10,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"k8s.io/client-go/rest"
 )
 
 //goland:noinspection DuplicatedCode
@@ -53,52 +52,37 @@ func TestSandbox_ProxyRequest(t *testing.T) {
 		name            string
 		path            string
 		ip              string
-		apiServer       string
 		wantErr         bool
 		wantStatus      int
 		wantErrContains string
 	}{
 		{
-			name:       "non-debug mode with valid pod IP",
+			name:       "valid pod IP",
 			path:       "/",
 			ip:         "127.0.0.1",
 			wantErr:    false,
 			wantStatus: http.StatusNoContent,
 		},
 		{
-			name:       "non-debug mode with specific path",
+			name:       "specific path",
 			path:       "/test-path",
 			ip:         "127.0.0.1",
 			wantErr:    false,
 			wantStatus: http.StatusOK,
 		},
 		{
-			name:            "non-debug mode with error response",
+			name:            "error response",
 			path:            "/error",
 			ip:              "127.0.0.1",
 			wantErr:         true, // 应该返回错误，因为状态码是5xx
 			wantErrContains: "internal server error",
 		},
 		{
-			name:       "debug mode with valid RestConfig",
-			path:       "/",
-			apiServer:  "http://127.0.0.1:11111",
-			wantErr:    false,
-			wantStatus: http.StatusNoContent,
-		},
-		{
-			name:            "non-debug mode with unreachable server",
+			name:            "unreachable server",
 			path:            "/",
 			ip:              "192.168.100.100", // 使用一个不可达的IP地址
 			wantErr:         true,              // 当服务器不可达时应该返回错误
 			wantErrContains: "failed to proxy request to sandbox",
-		},
-		{
-			name:            "debug mode with unreachable server",
-			path:            "/",
-			apiServer:       "192.168.100.100", // 使用一个不可达的IP地址
-			wantErr:         true,
-			wantErrContains: "failed to proxy request through Kubernetes API server",
 		},
 	}
 
@@ -112,13 +96,7 @@ func TestSandbox_ProxyRequest(t *testing.T) {
 			req.Header.Set("Content-Type", "application/json")
 
 			// 调用ProxyRequest方法
-			resp, err := ProxyRequest(req, tt.path, 11111, tt.ip, tt.apiServer, &rest.Config{
-				Host: tt.apiServer,
-				TLSClientConfig: rest.TLSClientConfig{
-					Insecure: true,
-				},
-				BearerToken: "aaa",
-			})
+			resp, err := ProxyRequest(req, tt.path, 11111, tt.ip)
 
 			// 检查错误
 			if tt.wantErr {

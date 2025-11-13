@@ -1,7 +1,7 @@
 # Variables
 DOMAIN ?= example.com
-REPOSITORY ?= openkruise/sandbox-manager
-INFRA ?= k8s
+REPOSITORY ?= acs-image-test-01-registry.cn-hangzhou.cr.aliyuncs.com/e2b/e2b-on-k8s
+INFRA ?= acs
 INGRESS ?= nginx
 HOST_NETWORK ?= false
 
@@ -164,17 +164,17 @@ build-and-deploy-sandbox-manager: build-and-push-sandbox-manager deploy-sandbox-
 
 .PHONY: deploy-sandbox-manager
 deploy-sandbox-manager:
-	helm upgrade --cleanup-on-fail --install\
+	helm upgrade --cleanup-on-fail --install --reset-values \
         --set controller.logLevel=7 \
         --set controller.repository=${REPOSITORY}\
         --set controller.infra=${INFRA}\
         --set ingress.className=${INGRESS}\
-        --set domain=${DOMAIN}\
+        --set e2b.domain=${DOMAIN}\
         --set hostNetwork=${HOST_NETWORK} \
-        sbx-develop ./deploy/sandbox-manager-helm/
+        sandbox-manager ./deploy/sandbox-manager-helm/
 
 undeploy-sandbox-manager:
-	helm uninstall sbx-develop
+	helm uninstall sandbox-manager
 
 ##@ Dependencies
 

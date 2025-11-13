@@ -31,6 +31,15 @@ func (a *MicroVMAdapter) Map(_, authority, _ string, _ int, headers map[string]s
 		return
 	}
 
+	extraHeaders = map[string]string{
+		"X-MICROSANDBOX-PORT": matches[1],
+		"X-Access-Token":      "",
+	}
+
+	// 解析用户
+	if a.Keys == nil {
+		return
+	}
 	if targetPort == models.CDPPort || targetPort == models.VNCPort {
 		// no auth for CDP
 		user = UserNoNeedToAuth
@@ -42,11 +51,6 @@ func (a *MicroVMAdapter) Map(_, authority, _ string, _ int, headers map[string]s
 		} else {
 			user = UserUnknown
 		}
-	}
-
-	extraHeaders = map[string]string{
-		"X-MICROSANDBOX-PORT": matches[1],
-		"X-Access-Token":      "",
 	}
 	return
 }

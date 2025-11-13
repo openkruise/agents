@@ -24,8 +24,7 @@ func setupTestManager(t *testing.T) *SandboxManager {
 	if err != nil {
 		t.Fatalf("Failed to get template dir: %v", err)
 	}
-	manager, err := NewSandboxManager("default", abs, client,
-		nil, nil, consts.InfraK8S, true)
+	manager, err := NewSandboxManager("default", abs, client, nil, nil, consts.InfraK8S)
 	if err != nil {
 		t.Fatalf("Failed to create manager: %v", err)
 	}

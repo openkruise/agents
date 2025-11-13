@@ -111,7 +111,6 @@ func (p *Pool) GroupAllSandboxes(ctx context.Context, sandboxes []*v1alpha1.Sand
 	log := klog.FromContext(ctx).WithValues("pool", p.template.Name)
 	templateHash := p.template.Labels[consts.LabelTemplateHash]
 	groups := GroupedSandboxes{}
-	var unknownSandboxes []*Sandbox
 	for _, s := range sandboxes {
 		debugLog := log.V(consts.DebugLogLevel).WithValues("sandbox", s.Name)
 		group, reason := FindSandboxGroup(s, templateHash)
@@ -132,7 +131,7 @@ func (p *Pool) GroupAllSandboxes(ctx context.Context, sandboxes []*v1alpha1.Sand
 	}
 	log.Info("sandbox group done", "total", len(sandboxes),
 		"creating", len(groups.Creating), "pending", len(groups.Pending),
-		"claimed", len(groups.Claimed), "failed", len(groups.Failed), "unknown", len(unknownSandboxes))
+		"claimed", len(groups.Claimed), "failed", len(groups.Failed))
 	return groups, nil
 }
 

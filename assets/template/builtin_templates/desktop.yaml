@@ -11,18 +11,21 @@ spec:
   # template 是一个 podTemplateSpec，用于定义 Sandbox Pod。注意：部分字段会被后端覆盖
   template:
     metadata:
-#      labels:
-#        alibabacloud.com/acs: 'true'
-#        alibabacloud.com/compute-class: general-purpose
-#        alibabacloud.com/compute-qos: default
-#      annotations:
-#        ops.alibabacloud.com/pause-enabled: "true"
+      labels:
+        alibabacloud.com/acs: 'true'
+        alibabacloud.com/compute-class: general-purpose
+        alibabacloud.com/compute-qos: default
+      annotations:
+        ops.alibabacloud.com/pause-enabled: "true"
 #        alibabacloud.com/cpu-vendors: "intel"
     spec:
       containers:
         - name: sandbox
           # 在这里定义 sandbox pod 的 image，必须指定
-          image: registry.cn-hangzhou.aliyuncs.com/airanthem/e2b-desktop:v0.7
+          image: registry-cn-hangzhou.ack.aliyuncs.com/ack-demo/e2b-sandbox-desktop:v0.7
+          env:
+            - name: GODEBUG
+              value: multipathtcp=0
           # 推荐设置资源需求，否则在 ACS 环境下会被设置成超小规格影响运行
           resources:
             requests:

@@ -1,5 +1,5 @@
 # Build stage
-FROM registry.cn-hangzhou.aliyuncs.com/airanthem/mirrors:golang-1.24.9-alpine AS builder
+FROM hub.docker.alibaba-inc.com/chorus-ci/golang:1.24 AS builder
 
 WORKDIR /app
 
@@ -19,7 +19,7 @@ COPY ../client ./client
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o sandbox-manager ./cmd/sandbox-manager
 
 # Final stage
-FROM registry.cn-hangzhou.aliyuncs.com/airanthem/mirrors:alpine-3.21 as runtime
+FROM hub.docker.alibaba-inc.com/chorus-ci/alpine:3.20 as runtime
 
 RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories && \
     apk --no-cache add ca-certificates
@@ -28,7 +28,6 @@ WORKDIR /root/
 
 # Copy the binary from builder stage
 COPY --from=builder /app/sandbox-manager .
-COPY ../assets/template/builtin_templates /root/builtin_templates
 
 # Expose port
 EXPOSE 8080

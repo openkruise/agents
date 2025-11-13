@@ -22,6 +22,8 @@ const (
 
 	AnnotationPodDeletionCost = "controller.kubernetes.io/pod-deletion-cost"
 	AnnotationACSPause        = "ops.alibabacloud.com/pause"
+
+	LabelACS = "alibabacloud.com/acs"
 )
 
 const (

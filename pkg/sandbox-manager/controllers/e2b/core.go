@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	adapters2 "github.com/openkruise/agents/pkg/sandbox-manager/controllers/e2b/adapters"
+	"github.com/openkruise/agents/pkg/sandbox-manager/controllers/e2b/adapters"
 	"github.com/openkruise/agents/pkg/sandbox-manager/controllers/e2b/keys"
 	"github.com/openkruise/agents/pkg/sandbox-manager/core"
 	"github.com/openkruise/agents/pkg/sandbox-manager/core/clients"
@@ -25,7 +25,6 @@ var DebugLevel = 5
 
 // Controller handles sandbox-related operations
 type Controller struct {
-	debug        bool
 	port         int
 	mux          *http.ServeMux
 	server       *http.Server
@@ -43,27 +42,29 @@ type Controller struct {
 //	Params:
 //	- domain: The domain name of the sandbox service, a TLS cert is required, e.g.
 //	- listenAddr: The address to listen on, e.g. ":8080"
-func NewController(domain, tlsSecret, adminKey string, port int, clientSet *clients.ClientSet, debugMode bool) *Controller {
+func NewController(domain, tlsSecret, adminKey string, port int, enableAuth bool, clientSet *clients.ClientSet) *Controller {
 	sc := &Controller{
-		debug:        debugMode,
 		mux:          http.NewServeMux(),
 		client:       clientSet,
 		domain:       domain,
 		clientConfig: clientSet.Config,
 		tlsSecret:    tlsSecret,
 		port:         port,
-		keys: &keys.SecretKeyStorage{
-			Namespace: Namespace,
-			AdminKey:  adminKey,
-			Client:    clientSet.K8sClient,
-			Stop:      make(chan struct{}),
-		},
 	}
 
 	sc.server = &http.Server{
 		Addr:              fmt.Sprintf(":%d", port),
 		Handler:           sc.mux,
 		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	if enableAuth {
+		sc.keys = &keys.SecretKeyStorage{
+			Namespace: Namespace,
+			AdminKey:  adminKey,
+			Client:    clientSet.K8sClient,
+			Stop:      make(chan struct{}),
+		}
 	}
 	return sc
 }
@@ -73,21 +74,23 @@ func (sc *Controller) Init(templateDir string, infrastructure string) error {
 	log := klog.FromContext(ctx)
 	log.Info("init controller", "infra", infrastructure, "templateDir", templateDir)
 	var adapter proxy.RequestAdapter
-	baseAdapter := &adapters2.CommonAdapter{Port: sc.port, Keys: sc.keys}
+	baseAdapter := &adapters.CommonAdapter{Port: sc.port, Keys: sc.keys}
 	if infrastructure == consts.InfraMicroVM {
-		adapter = &adapters2.MicroVMAdapter{CommonAdapter: baseAdapter}
+		adapter = &adapters.MicroVMAdapter{CommonAdapter: baseAdapter}
 	} else {
 		adapter = baseAdapter
 	}
-	sandboxManager, err := core.NewSandboxManager(Namespace, templateDir, sc.client, sc.clientConfig,
-		adapter, infrastructure, sc.debug)
+	sandboxManager, err := core.NewSandboxManager(Namespace, templateDir, sc.client, sc.clientConfig, adapter, infrastructure)
 	if err != nil {
 		return err
 	}
 	sc.manager = sandboxManager
 	sc.registerRoutes()
-	sc.registerHandlers()
-	return sc.keys.Init(ctx)
+	if sc.keys == nil {
+		return nil
+	} else {
+		return sc.keys.Init(ctx)
+	}
 }
 
 func (sc *Controller) Run() (context.Context, error) {

@@ -11,6 +11,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/core/logs"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	k8scache "k8s.io/client-go/tools/cache"
@@ -25,12 +26,10 @@ type Infra struct {
 	Cache      *Cache
 	Client     kubernetes.Interface
 	restConfig *rest.Config
-	Debug      bool
 }
 
 // NewInfra Creates a new sandbox Pool Manager
-func NewInfra(namespace string, templateDir string,
-	eventer *events.Eventer, client kubernetes.Interface, restConfig *rest.Config, debug bool) (*Infra, error) {
+func NewInfra(namespace string, templateDir string, eventer *events.Eventer, client kubernetes.Interface, restConfig *rest.Config) (*Infra, error) {
 
 	cache, err := NewCache(client, namespace)
 	if err != nil {
@@ -46,7 +45,6 @@ func NewInfra(namespace string, templateDir string,
 		Cache:      cache,
 		Client:     client,
 		restConfig: restConfig,
-		Debug:      debug,
 	}
 
 	cache.AddDeploymentEventHandler(k8scache.ResourceEventHandlerFuncs{
@@ -216,12 +214,14 @@ func (i *Infra) syncWithCluster(ctx context.Context) error {
 
 func (i *Infra) AsSandbox(pod *corev1.Pod) *Sandbox {
 	return &Sandbox{
-		Pod:        pod,
-		Client:     i.Client,
-		Cache:      i.Cache,
-		RestConfig: i.restConfig,
-		Debug:      i.Debug,
+		Pod:    pod,
+		Client: i.Client,
+		Cache:  i.Cache,
 	}
+}
+
+func (i *Infra) InjectTemplateMetadata() metav1.ObjectMeta {
+	return metav1.ObjectMeta{}
 }
 
 func (i *Infra) listSandboxWithState(state string, labels map[string]string) ([]infra.Sandbox, error) {

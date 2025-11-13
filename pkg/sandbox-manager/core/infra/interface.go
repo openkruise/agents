@@ -32,6 +32,7 @@ type Infrastructure interface {
 	LoadDebugInfo() map[string]any
 	SelectSandboxes(options SandboxSelectorOptions) ([]Sandbox, error) // Select Sandboxes based on the options provided
 	GetSandbox(sandboxID string) (Sandbox, error)                      // Get a Sandbox interface by its ID
+	InjectTemplateMetadata() metav1.ObjectMeta                         // Inject metadata into template
 }
 
 type SandboxPool interface {

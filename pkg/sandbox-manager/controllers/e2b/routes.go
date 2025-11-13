@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/google/uuid"
 	"github.com/openkruise/agents/pkg/sandbox-manager/controllers/e2b/models"
 	"github.com/openkruise/agents/pkg/sandbox-manager/web"
 	"k8s.io/klog/v2"
@@ -31,19 +32,32 @@ func (sc *Controller) registerRoutes() {
 	web.RegisterRoute(sc.mux, "GET /debug", sc.Debug, sc.CheckApiKey)
 
 	// API Keys management endpoints
-	web.RegisterRoute(sc.mux, "GET /api-keys", sc.ListAPIKeys, sc.CheckApiKey)
-	web.RegisterRoute(sc.mux, "POST /api-keys", sc.CreateAPIKey, sc.CheckApiKey)
-	web.RegisterRoute(sc.mux, "DELETE /api-keys/{apiKeyID}", sc.DeleteAPIKey, sc.CheckApiKey)
+	if sc.keys != nil {
+		web.RegisterRoute(sc.mux, "GET /api-keys", sc.ListAPIKeys, sc.CheckApiKey)
+		web.RegisterRoute(sc.mux, "POST /api-keys", sc.CreateAPIKey, sc.CheckApiKey)
+		web.RegisterRoute(sc.mux, "DELETE /api-keys/{apiKeyID}", sc.DeleteAPIKey, sc.CheckApiKey)
+	}
+}
+
+var AnonymousUser = &models.CreatedTeamAPIKey{
+	ID:   uuid.MustParse("550e8400-e29b-41d4-a716-446655440000"), // 无意义的随机数，用于在非鉴权模式下表示匿名用户
+	Name: "auth-disabled",
 }
 
 // CheckApiKey 实现了 Demo 的 ApiKey 验证，试验阶段写死 "GG" 为唯一合法值
 func (sc *Controller) CheckApiKey(ctx context.Context, r *http.Request) (context.Context, *web.ApiError) {
 	apiKey := r.Header.Get("X-API-KEY")
-	user, ok := sc.keys.LoadByKey(apiKey)
-	if !ok {
-		return ctx, &web.ApiError{
-			Code:    http.StatusUnauthorized,
-			Message: fmt.Sprintf("Invalid API Key: %s", apiKey),
+	var user *models.CreatedTeamAPIKey
+	var ok bool
+	if sc.keys == nil {
+		user = AnonymousUser
+	} else {
+		user, ok = sc.keys.LoadByKey(apiKey)
+		if !ok {
+			return ctx, &web.ApiError{
+				Code:    http.StatusUnauthorized,
+				Message: fmt.Sprintf("Invalid API Key: %s", apiKey),
+			}
 		}
 	}
 	if sandboxID := r.PathValue("sandboxID"); sandboxID != "" {
@@ -62,7 +76,7 @@ func (sc *Controller) CheckApiKey(ctx context.Context, r *http.Request) (context
 		}
 	}
 	logger := klog.FromContext(ctx).WithValues("user", user.Name)
-	return NewContextWithUser(klog.NewContext(ctx, logger), user), nil
+	return context.WithValue(klog.NewContext(ctx, logger), "user", user), nil
 }
 
 func GetUserFromContext(ctx context.Context) *models.CreatedTeamAPIKey {
@@ -72,8 +86,4 @@ func GetUserFromContext(ctx context.Context) *models.CreatedTeamAPIKey {
 		return nil
 	}
 	return user
-}
-
-func NewContextWithUser(ctx context.Context, user *models.CreatedTeamAPIKey) context.Context {
-	return context.WithValue(ctx, "user", user)
 }

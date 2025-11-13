@@ -159,6 +159,13 @@ func LoadBuiltinTemplates(ctx context.Context, infra Infrastructure, templateDir
 					return fmt.Errorf("template name conflict: %s", t.Name)
 				}
 				t.Init(namespace)
+				metadata := infra.InjectTemplateMetadata()
+				for k, v := range metadata.Labels {
+					t.Spec.Template.Labels[k] = v
+				}
+				for k, v := range metadata.Annotations {
+					t.Spec.Template.Annotations[k] = v
+				}
 				infra.AddPool(t.Name, infra.NewPoolFromTemplate(&t))
 			}
 		}

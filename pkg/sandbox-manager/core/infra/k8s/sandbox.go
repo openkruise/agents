@@ -15,17 +15,14 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 )
 
 type Sandbox struct {
 	*corev1.Pod
-	Client     kubernetes.Interface
-	Cache      *Cache
-	RestConfig *rest.Config
-	Debug      bool
+	Client kubernetes.Interface
+	Cache  *Cache
 }
 
 func (s *Sandbox) Pause(_ context.Context) error {
@@ -85,6 +82,9 @@ func (s *Sandbox) SaveTimer(ctx context.Context, afterSeconds int, event consts.
 
 func (s *Sandbox) LoadTimers(callback func(after time.Duration, eventType consts.EventType)) error {
 	for _, condition := range s.Status.Conditions {
+		if condition.Status != corev1.ConditionFalse {
+			continue
+		}
 		if err := utils.CheckAndLoadTimerFromCondition(
 			string(condition.Type), condition.Message, condition.LastTransitionTime.Time, callback); err != nil {
 			return err
@@ -121,13 +121,7 @@ func (s *Sandbox) Request(r *http.Request, path string, port int) (*http.Respons
 	if s.Status.Phase != corev1.PodRunning {
 		return nil, fmt.Errorf("sandbox pod is not running, current phase: %s", s.Status.Phase)
 	}
-	if s.Debug {
-		apiServerURL := fmt.Sprintf("%s/api/v1/namespaces/%s/pods/%s:%d/proxy%s",
-			s.RestConfig.Host, s.Namespace, s.Name, port, path)
-		return utils.ProxyRequest(r, path, port, s.GetIP(), apiServerURL, s.RestConfig)
-	} else {
-		return utils.ProxyRequest(r, path, port, s.GetIP(), "", s.RestConfig)
-	}
+	return utils.ProxyRequest(r, path, port, s.GetIP())
 }
 
 func (s *Sandbox) RetryModifyPodStatus(ctx context.Context, modifier func(pod *corev1.Pod)) error {

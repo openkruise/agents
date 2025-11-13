@@ -1,0 +1,50 @@
+    ###
+    ### 基础 Sandbox Template 定义，其中各字段有说明，可以参考这个文件编写自己的 Template
+    ###
+    kind: SandboxTemplate
+    metadata:
+      name: sandbox-fusion
+      # 默认模板的 namespace 会被替换成控制器的 namespace，没有设置的必要
+    spec:
+      minPoolSize: 2 # 启动后，沙箱 Pod 的个数，默认为 5
+      maxPoolSize: 5 # 最大 Sandbox 的个数（当可用 Sandbox 数量不足 1/4 时，会尝试扩容，最多扩容到这个数量），默认为 minPoolSize 的两倍
+      # template 是一个 podTemplateSpec，用于定义 Sandbox Pod。注意：部分字段会被后端覆盖
+      template:
+        metadata:
+          # name、namespace、e2b.alibabacloud.com 开头的 label / annotation 会被运行时覆盖
+          labels:
+            alibabacloud.com/acs: 'true'
+            alibabacloud.com/compute-class: general-purpose
+            alibabacloud.com/compute-qos: default
+          annotations:
+            ops.alibabacloud.com/pause-enabled: "true"
+        #        alibabacloud.com/cpu-vendors: "intel"
+        spec:
+          containers:
+            - name: sandbox
+              env:
+                - name: GODEBUG
+                  value: multipathtcp=0
+              # 在这里定义 sandbox pod 的 image，必须指定
+              image: vemlp-cn-beijing.cr.volces.com/preset-images/code-sandbox:server-20250609
+              # 推荐设置资源需求，否则在 ACS 环境下会被设置成超小规格影响运行
+              resources:
+                requests:
+                  cpu: 1
+                  memory: 1Gi
+                limits:
+                  cpu: 1
+                  memory: 1Gi
+              # 必须指定 ports：激活 sandbox 时会通过 ports 创建直连路由规则，如果不写无法被 Agent 访问
+              ports:
+                - name: server
+                  containerPort: 8080
+              # 推荐指定探针，只有 Ready 状态的 Pod 会被分配给 Agent
+              # 如果要使用 ACS Pause，不能配 liveness probe，会导致 Crash。sandbox-manager-helm 内 readiness probe 已经做了兼容可以使用
+              readinessProbe:
+                tcpSocket:
+                  port: 8080
+                initialDelaySeconds: 1
+                periodSeconds: 5
+                timeoutSeconds: 1
+                failureThreshold: 3

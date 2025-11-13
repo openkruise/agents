@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"runtime"
 	"strings"
 
 	"github.com/google/uuid"
@@ -48,16 +49,20 @@ func RegisterRoute[T any](mux *http.ServeMux, pattern string, handler Handler[T]
 		pattern = pattern[:len(pattern)-1]
 	}
 	handleFunc := func(w http.ResponseWriter, r *http.Request) {
-		defer func() {
-			if rec := recover(); rec != nil {
-				klog.ErrorS(fmt.Errorf("panic recovered: %v", rec), "Panic occurred in handler", "pattern", pattern)
-				http.Error(w, "panic", http.StatusInternalServerError)
-			}
-		}()
-
 		requestID := uuid.NewString()
 		ctx := logs.NewContextWithID(requestID)
 		log := klog.FromContext(ctx)
+
+		defer func() {
+			if rec := recover(); rec != nil {
+				buf := make([]byte, 4096)
+				n := runtime.Stack(buf, false)
+				log.Error(nil, "panic occurred in web handler",
+					"pattern", pattern,
+					"recover", rec,
+					"stack", string(buf[:n]))
+			}
+		}()
 
 		// 数一下 path 中 '/' 的个数；如果 path 以 '/' 结尾则数字 -1
 		if countSlashes(pattern) != countSlashes(r.URL.Path) {

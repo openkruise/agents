@@ -27,7 +27,7 @@ func TestInfra_GetSandbox(t *testing.T) {
 	}
 	eventer := events.NewEventer()
 	client := fake.NewClientset(pod)
-	infraInstance, err := NewInfra("default", ".", eventer, client, nil, false)
+	infraInstance, err := NewInfra("default", ".", eventer, client, nil)
 	assert.NoError(t, err)
 	err = infraInstance.Run(context.Background())
 	assert.NoError(t, err)
@@ -48,7 +48,7 @@ func TestInfra_GetSandbox(t *testing.T) {
 func TestInfra_Debug(t *testing.T) {
 	client := fake.NewClientset()
 	eventer := events.NewEventer()
-	infraInstance, err := NewInfra("default", ".", eventer, client, nil, false)
+	infraInstance, err := NewInfra("default", ".", eventer, client, nil)
 	assert.NoError(t, err)
 	info := infraInstance.LoadDebugInfo()
 	assert.Equal(t, "acs", info["infra"])

@@ -241,3 +241,11 @@ func (i *Infra) onSandboxUpdate(oldObj, newObj any) {
 		log.Error(err, "failed to scale pool")
 	}
 }
+
+func (i *Infra) InjectTemplateMetadata() metav1.ObjectMeta {
+	return metav1.ObjectMeta{
+		Labels: map[string]string{
+			consts.LabelACS: "true",
+		},
+	}
+}

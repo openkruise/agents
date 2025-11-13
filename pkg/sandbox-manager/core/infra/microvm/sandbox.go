@@ -46,7 +46,7 @@ func (s *Sandbox) Request(r *http.Request, path string, port int) (*http.Respons
 		r.Header.Set(k, v)
 	}
 	r.Header.Set("X-MICROSANDBOX-PORT", strconv.Itoa(port))
-	return utils.ProxyRequest(r, path, 5007, s.GetIP(), "", nil)
+	return utils.ProxyRequest(r, path, 5007, s.GetIP())
 }
 
 func (s *Sandbox) Pause(ctx context.Context) error {
@@ -62,10 +62,9 @@ func (s *Sandbox) Resume(ctx context.Context) error {
 	if s.Status.Phase != v1alpha1.SandboxPaused {
 		return fmt.Errorf("sandbox is not in paused state")
 	}
-	err := s.Patch(ctx, fmt.Sprintf(`{"metadata":{"labels":{"%s":"%s"}},"spec":{"paused":false}}`,
-		consts.LabelSandboxState, consts.SandboxStateRunning))
+	err := s.Patch(ctx, `{"spec":{"paused":false}}`)
 	if err != nil {
-		log.Error(err, "failed to patch sandbox")
+		log.Error(err, "failed to patch sandbox spec")
 		return err
 	}
 	log.Info("waiting sandbox resume")
@@ -84,6 +83,12 @@ func (s *Sandbox) Resume(ctx context.Context) error {
 		log.Error(err, "failed to wait sandbox resume")
 		return err
 	}
+	err = s.Patch(ctx, fmt.Sprintf(`{"metadata":{"labels":{"%s":"%s"}}}`,
+		consts.LabelSandboxState, consts.SandboxStateRunning))
+	if err != nil {
+		log.Error(err, "failed to patch sandbox state")
+		return err
+	}
 	log.Info("sandbox resumed", "cost", time.Since(start))
 	return nil
 }
@@ -95,6 +100,13 @@ func (s *Sandbox) checkPhase(phase v1alpha1.Phase) error {
 	}
 	if s.Status.Phase != phase {
 		return fmt.Errorf("check phase failed, expect: %s, actual: %s", phase, s.Status.Phase)
+	}
+	condition, ok := GetSandboxCondition(s.Sandbox, v1alpha1.SandboxConditionReady)
+	if !ok {
+		return fmt.Errorf("check condition failed, SandboxConditionReady not found")
+	}
+	if condition.Status != metav1.ConditionTrue {
+		return fmt.Errorf("check condition failed, expect: %s, actual: %s", metav1.ConditionTrue, condition.Status)
 	}
 	return nil
 }

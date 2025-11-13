@@ -1,9 +1,11 @@
 package acs
 
 import (
+	"github.com/openkruise/agents/pkg/sandbox-manager/core/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/core/events"
 	"github.com/openkruise/agents/pkg/sandbox-manager/core/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/core/infra/k8s"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 )
@@ -48,8 +50,15 @@ func (i *Infra) GetSandbox(sandboxID string) (infra.Sandbox, error) {
 	return i.convertToACSSandbox(sbx), err
 }
 
-func NewInfra(namespace string, templateDir string, eventer *events.Eventer, client kubernetes.Interface,
-	restConfig *rest.Config, debug bool) (*Infra, error) {
-	i, err := k8s.NewInfra(namespace, templateDir, eventer, client, restConfig, debug)
+func (i *Infra) InjectTemplateMetadata() metav1.ObjectMeta {
+	return metav1.ObjectMeta{
+		Labels: map[string]string{
+			consts.LabelACS: "true",
+		},
+	}
+}
+
+func NewInfra(namespace string, templateDir string, eventer *events.Eventer, client kubernetes.Interface, restConfig *rest.Config) (*Infra, error) {
+	i, err := k8s.NewInfra(namespace, templateDir, eventer, client, restConfig)
 	return &Infra{i}, err
 }

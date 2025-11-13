@@ -136,7 +136,7 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models2.S
 	}
 	initCost := time.Since(initStart)
 
-	log.Info("sandbox sbx allocated", "sbx", klog.KObj(sbx), "totalCost", time.Since(start),
+	log.Info("sandbox allocated", "sbx", klog.KObj(sbx), "totalCost", time.Since(start),
 		"claimCost", claimCost, "initCost", initCost)
 	return web.ApiResponse[*models2.Sandbox]{
 		Code: http.StatusCreated,

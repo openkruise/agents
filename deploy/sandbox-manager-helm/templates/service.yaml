@@ -1,4 +1,3 @@
-#file: noinspection ExcessiveWhitespaceTrimInspection
 apiVersion: v1
 kind: Service
 metadata:

@@ -24,7 +24,6 @@ var DebugLevel = 5
 
 type SandboxManager struct {
 	Namespace   string
-	Debug       bool
 	templateDir string
 
 	client     *clients.ClientSet
@@ -46,7 +45,7 @@ type SandboxManager struct {
 //	- adapter: The request adapter for mapping sandbox-manager-helm logic to a specific framework like 'e2b'
 //	- debug: run in prod or debug mode (debug mode is useful in developing, making it possible to run locally)
 func NewSandboxManager(namespace, templateDir string, client *clients.ClientSet, restConfig *rest.Config,
-	adapter proxy2.RequestAdapter, infra string, debug bool) (*SandboxManager, error) {
+	adapter proxy2.RequestAdapter, infra string) (*SandboxManager, error) {
 	eventer := events.NewEventer()
 
 	m := &SandboxManager{
@@ -54,16 +53,15 @@ func NewSandboxManager(namespace, templateDir string, client *clients.ClientSet,
 		restConfig:  restConfig,
 		Namespace:   namespace,
 		templateDir: templateDir,
-		Debug:       debug,
 		eventer:     eventer,
 		proxy:       proxy2.NewServer(adapter),
 	}
 	var err error
 	switch infra {
 	case consts2.InfraACS:
-		m.infra, err = acs.NewInfra(namespace, templateDir, eventer, client.K8sClient, restConfig, debug)
+		m.infra, err = acs.NewInfra(namespace, templateDir, eventer, client.K8sClient, restConfig)
 	case consts2.InfraK8S:
-		m.infra, err = k8s.NewInfra(namespace, templateDir, eventer, client.K8sClient, restConfig, debug)
+		m.infra, err = k8s.NewInfra(namespace, templateDir, eventer, client.K8sClient, restConfig)
 	case consts2.InfraSandboxCR:
 		m.infra, err = sandboxcr.NewInfra(namespace, templateDir, eventer, client.SandboxClient)
 	default:
