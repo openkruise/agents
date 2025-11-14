@@ -3,6 +3,7 @@ package sandboxcr
 import (
 	"context"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -281,4 +282,236 @@ func TestPool_Reconcile(t *testing.T) {
 			assert.Equal(t, tt.createCreatingSandboxes, info["creating"])
 		})
 	}
+}
+
+func TestPool_performScale_Down(t *testing.T) {
+	utils.InitKLogOutput()
+
+	tests := []struct {
+		name             string
+		specReplicas     int
+		initialSandboxes []*v1alpha1.Sandbox
+		checkFunc        func(t *testing.T, sandboxes []v1alpha1.Sandbox)
+	}{
+		{
+			name:         "scale down pending sandboxes",
+			specReplicas: 0,
+			initialSandboxes: []*v1alpha1.Sandbox{
+				createTestSandbox("pending-1", v1alpha1.SandboxRunning, map[string]string{
+					consts.LabelSandboxState: consts.SandboxStatePending,
+				}),
+			},
+			checkFunc: func(t *testing.T, sandboxes []v1alpha1.Sandbox) {
+				assert.Equal(t, 0, len(sandboxes))
+			},
+		},
+		{
+			name:         "scale down creating sandboxes",
+			specReplicas: 0,
+			initialSandboxes: []*v1alpha1.Sandbox{
+				createTestSandbox("creating-1", v1alpha1.SandboxPending, nil),
+			},
+			checkFunc: func(t *testing.T, sandboxes []v1alpha1.Sandbox) {
+				assert.Equal(t, 0, len(sandboxes))
+			},
+		},
+		{
+			name:         "scale down mixed sandboxes (creating first)",
+			specReplicas: 1,
+			initialSandboxes: []*v1alpha1.Sandbox{
+				createTestSandbox("pending-1", v1alpha1.SandboxRunning, map[string]string{
+					consts.LabelSandboxState: consts.SandboxStatePending,
+				}),
+				createTestSandbox("pending-2", v1alpha1.SandboxRunning, map[string]string{
+					consts.LabelSandboxState: consts.SandboxStatePending,
+				}),
+				createTestSandbox("creating-1", v1alpha1.SandboxPending, nil),
+				createTestSandbox("creating-2", v1alpha1.SandboxPending, nil),
+			},
+			checkFunc: func(t *testing.T, sandboxes []v1alpha1.Sandbox) {
+				assert.Equal(t, 1, len(sandboxes))
+				// pending left
+				assert.True(t, strings.HasPrefix(sandboxes[0].Name, "pending"))
+			},
+		},
+		{
+			name:         "scale down skips locked sandboxes",
+			specReplicas: 0,
+			initialSandboxes: []*v1alpha1.Sandbox{
+				createTestSandbox("locked-pending", v1alpha1.SandboxRunning, map[string]string{
+					consts.LabelSandboxState: consts.SandboxStatePending,
+				}, map[string]string{
+					consts.AnnotationLock:  "some-lock",
+					consts.AnnotationOwner: "some-owner",
+				}),
+				createTestSandbox("unlocked-pending", v1alpha1.SandboxRunning, map[string]string{
+					consts.LabelSandboxState: consts.SandboxStatePending,
+				}),
+			},
+			checkFunc: func(t *testing.T, sandboxes []v1alpha1.Sandbox) {
+				assert.Equal(t, 1, len(sandboxes))
+				assert.Equal(t, "locked-pending", sandboxes[0].Name)
+			},
+		},
+		{
+			name:         "scale down manager-owned locked sandboxes",
+			specReplicas: 0,
+			initialSandboxes: []*v1alpha1.Sandbox{
+				createTestSandbox("manager-locked", v1alpha1.SandboxRunning, map[string]string{
+					consts.LabelSandboxState: consts.SandboxStatePending,
+				}, map[string]string{
+					consts.AnnotationLock:  "some-lock",
+					consts.AnnotationOwner: consts.OwnerManager,
+				}),
+				createTestSandbox("unlocked-pending", v1alpha1.SandboxRunning, map[string]string{
+					consts.LabelSandboxState: consts.SandboxStatePending,
+				}),
+			},
+			checkFunc: func(t *testing.T, sandboxes []v1alpha1.Sandbox) {
+				assert.Equal(t, 0, len(sandboxes))
+			},
+		},
+		{
+			name:         "scale down skips claimed sandboxes",
+			specReplicas: 0,
+			initialSandboxes: []*v1alpha1.Sandbox{
+				createTestSandbox("pending-1", v1alpha1.SandboxRunning, map[string]string{
+					consts.LabelSandboxState: consts.SandboxStatePending,
+				}),
+				createTestSandbox("claimed-1", v1alpha1.SandboxRunning, map[string]string{
+					consts.LabelSandboxState: consts.SandboxStateRunning,
+				}),
+			},
+			checkFunc: func(t *testing.T, sandboxes []v1alpha1.Sandbox) {
+				assert.Equal(t, 1, len(sandboxes))
+				assert.Equal(t, "claimed-1", sandboxes[0].Name)
+			},
+		},
+		{
+			name:         "scale down skips deleted sandboxes",
+			specReplicas: 0,
+			initialSandboxes: []*v1alpha1.Sandbox{
+				createTestSandbox("pending-1", v1alpha1.SandboxRunning, map[string]string{
+					consts.LabelSandboxState: consts.SandboxStatePending,
+				}),
+				func() *v1alpha1.Sandbox {
+					sbx := createTestSandbox("deleted-1", v1alpha1.SandboxRunning, map[string]string{
+						consts.LabelSandboxState: consts.SandboxStatePending,
+					})
+					sbx.DeletionTimestamp = ptr.To(metav1.Now())
+					return sbx
+				}(),
+			},
+			checkFunc: func(t *testing.T, sandboxes []v1alpha1.Sandbox) {
+				assert.Equal(t, 1, len(sandboxes))
+				assert.Equal(t, "deleted-1", sandboxes[0].Name)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			client := fake.NewSimpleClientset()
+
+			// 设置缓存和池
+			informerFactory := informers.NewSharedInformerFactoryWithOptions(client, time.Minute*10, informers.WithNamespace("default"))
+			sandboxInformer := informerFactory.Api().V1alpha1().Sandboxes().Informer()
+			cache, err := NewCache[*v1alpha1.Sandbox]("default", informerFactory, sandboxInformer)
+			assert.NoError(t, err)
+
+			done := make(chan struct{})
+			go cache.Run(done)
+			<-done
+			time.Sleep(100 * time.Millisecond) // 等待缓存同步
+
+			pool := &Pool{
+				client:         client,
+				cache:          cache,
+				reconcileQueue: make(chan context.Context, 1),
+				template: &infra.SandboxTemplate{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-template",
+						Namespace: "default",
+						Labels: map[string]string{
+							consts.LabelTemplateHash: "test-hash",
+						},
+					},
+					Spec: infra.SandboxTemplateSpec{
+						Template: corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{Name: "test", Image: "test"},
+								},
+							},
+						},
+					},
+				},
+			}
+
+			// 创建初始沙箱
+			for _, sbx := range tt.initialSandboxes {
+				CreateSandboxWithStatus(t, client, sbx)
+			}
+
+			// 重新获取沙箱以确保缓存同步
+			allSandboxes, err := client.ApiV1alpha1().Sandboxes("default").List(ctx, metav1.ListOptions{})
+			assert.NoError(t, err)
+
+			// 转换为 []*v1alpha1.Sandbox
+			sandboxPtrs := make([]*v1alpha1.Sandbox, len(allSandboxes.Items))
+			for i := range allSandboxes.Items {
+				sandboxPtrs[i] = &allSandboxes.Items[i]
+			}
+
+			// 分组沙箱并执行缩容
+			groups, err := pool.GroupAllSandboxes(ctx, sandboxPtrs)
+			assert.NoError(t, err)
+
+			actualReplicas := len(allSandboxes.Items)
+			err = pool.performScale(ctx, groups, tt.specReplicas, actualReplicas)
+			assert.NoError(t, err)
+
+			// 验证结果
+			sandboxes, err := client.ApiV1alpha1().Sandboxes("default").List(ctx, metav1.ListOptions{})
+			assert.NoError(t, err)
+			tt.checkFunc(t, sandboxes.Items)
+
+			cache.Stop()
+			time.Sleep(100 * time.Millisecond)
+			close(done)
+		})
+	}
+}
+
+// Helper function to create test sandboxes
+func createTestSandbox(name string, phase v1alpha1.SandboxPhase, labels map[string]string, annotations ...map[string]string) *v1alpha1.Sandbox {
+	sbx := &v1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: "default",
+			Labels: map[string]string{
+				consts.LabelSandboxPool:  "test-template",
+				consts.LabelTemplateHash: "test-hash",
+			},
+		},
+		Status: v1alpha1.SandboxStatus{
+			Phase: phase,
+		},
+	}
+
+	// 添加额外标签
+	for k, v := range labels {
+		sbx.Labels[k] = v
+	}
+
+	// 添加注解（如果提供）
+	if len(annotations) > 0 && annotations[0] != nil {
+		sbx.Annotations = annotations[0]
+	} else if len(annotations) == 0 {
+		// 初始化空的注解映射
+		sbx.Annotations = make(map[string]string)
+	}
+
+	return sbx
 }

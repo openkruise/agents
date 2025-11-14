@@ -13,6 +13,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/core/events"
 	"github.com/openkruise/agents/pkg/sandbox-manager/core/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/core/utils"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog/v2"
 )
@@ -48,6 +49,8 @@ type Pool struct {
 	template *infra.SandboxTemplate
 }
 
+// AsSandbox converts the given sbx object to a Sandbox interface
+// NOTE: If the sbx object is about to be updated, you may have to DeepCopy it like `s := p.AsSandbox(sbx.DeepCopy())`
 func (p *Pool) AsSandbox(sbx *v1alpha1.Sandbox) *Sandbox {
 	if sbx.Annotations == nil {
 		sbx.Annotations = make(map[string]string)
@@ -134,6 +137,7 @@ func (p *Pool) ClaimSandbox(ctx context.Context, user string, modifier func(sbx 
 		return nil, fmt.Errorf("no pending sandboxes for template %s", p.template.Name)
 	}
 	lock := uuid.New().String()
+	log := klog.FromContext(ctx).WithValues("pool", klog.KObj(p.template))
 	for i := 0; i < 10; i++ {
 		objects, err := p.cache.SelectSandboxes(consts.LabelSandboxState, consts.SandboxStatePending,
 			consts.LabelSandboxPool, p.template.Name)
@@ -159,16 +163,28 @@ func (p *Pool) ClaimSandbox(ctx context.Context, user string, modifier func(sbx 
 			modifier(sbx)
 		}
 		sbx.Labels[consts.LabelSandboxState] = consts.SandboxStateRunning
-		sbx.Annotations[consts.AnnotationLock] = lock
-		sbx.Annotations[consts.AnnotationOwner] = user
-		updated, err := p.client.ApiV1alpha1().Sandboxes(sbx.Namespace).Update(ctx, sbx.Sandbox, metav1.UpdateOptions{})
+		err = p.LockSandbox(ctx, sbx, lock, user)
 		if err == nil {
-			sbx.Sandbox = updated
 			return sbx, nil
 		}
-		klog.ErrorS(err, "failed to acquire optimistic lock of pod", "pool", klog.KObj(p.template), "retries", i+1)
+		if !apierrors.IsConflict(err) {
+			log.Error(err, "failed to update pod")
+			return nil, err
+		}
+		log.Error(err, "failed to acquire optimistic lock of pod", "retries", i+1)
 	}
 	return nil, fmt.Errorf("failed to acquire optimistic lock of pod after max retries")
+}
+
+func (p *Pool) LockSandbox(ctx context.Context, sbx *Sandbox, lock string, owner string) error {
+	sbx.Annotations[consts.AnnotationLock] = lock
+	sbx.Annotations[consts.AnnotationOwner] = owner
+	updated, err := p.client.ApiV1alpha1().Sandboxes(sbx.Namespace).Update(ctx, sbx.Sandbox, metav1.UpdateOptions{})
+	if err == nil {
+		sbx.Sandbox = updated
+		return nil
+	}
+	return err
 }
 
 func (p *Pool) GetTemplate() *infra.SandboxTemplate {

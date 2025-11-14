@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/core/consts"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -150,9 +151,26 @@ func (p *Pool) performScale(ctx context.Context, groups GroupedSandboxes, expect
 		}
 	} else {
 		// 执行缩容，只缩未分配与创建中的 Sandbox
-		for _, sbx := range append(groups.Pending, groups.Creating...) {
+		lock := uuid.New().String()
+		for _, sbx := range append(groups.Creating, groups.Pending...) {
 			if offset >= 0 {
 				break
+			}
+			if err := sbx.InplaceRefresh(true); err != nil {
+				log.Error(err, "failed to refresh sandbox when scaling down", "sandbox", klog.KObj(sbx))
+				return err
+			}
+			if sbx.Annotations[consts.AnnotationLock] != "" && sbx.Annotations[consts.AnnotationOwner] != consts.OwnerManager {
+				log.Info("sandbox to be scaled down claimed before performed, skip", "sandbox", klog.KObj(sbx))
+				continue
+			}
+			if err := p.LockSandbox(ctx, sbx, lock, consts.OwnerManager); err != nil {
+				if !apierrors.IsConflict(err) {
+					log.Error(err, "failed to update pod when scaling down")
+					return err
+				}
+				log.Info("cannot lock the sandbox to be scaled, skip", "sandbox", klog.KObj(sbx))
+				continue
 			}
 			err := p.client.ApiV1alpha1().Sandboxes(sbx.Namespace).Delete(ctx, sbx.Name, metav1.DeleteOptions{})
 			if err != nil {

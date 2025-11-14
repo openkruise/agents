@@ -24,6 +24,8 @@ const (
 	AnnotationACSPause        = "ops.alibabacloud.com/pause"
 
 	LabelACS = "alibabacloud.com/acs"
+
+	OwnerManager = "manager"
 )
 
 const (

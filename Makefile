@@ -5,6 +5,8 @@ OPERATOR_REPOSITORY ?= acs-image-test-01-registry.cn-hangzhou.cr.aliyuncs.com/de
 INFRA ?= acs
 INGRESS ?= nginx
 HOST_NETWORK ?= false
+NAMESPACE ?= sandbox-system
+SBX_NAMESPACE ?= default
 
 BINARY_NAME=sandbox-manager
 GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
@@ -167,7 +169,7 @@ agent-sandbox-operator: build-and-push-sandbox-operator deploy
 
 .PHONY: deploy
 deploy:
-	helm upgrade --cleanup-on-fail --install --reset-values \
+	helm upgrade --cleanup-on-fail --install --reset-values --create-namespace \
         --set sandboxManager.controller.logLevel=7 \
         --set sandboxManager.controller.repository=${SANDBOX_MANAGER_REPOSITORY} \
         --set sandboxManager.controller.infra=${INFRA} \
@@ -175,6 +177,8 @@ deploy:
         --set sandboxManager.e2b.domain=${DOMAIN} \
         --set sandboxManager.controller.hostNetwork=${HOST_NETWORK} \
         --set sandboxOperator.image.controllerManager.repository=${OPERATOR_REPOSITORY} \
+        --set sandboxManager.namespace=${SBX_NAMESPACE} \
+        -n ${NAMESPACE} \
         sandbox-manager ./deploy/helm/
 
 .PHONY: all
