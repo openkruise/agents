@@ -1,0 +1,13 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="UnitTest: All" type="GoTestRunConfiguration" factoryName="Go Test">
+    <module name="agents" />
+    <working_directory value="$PROJECT_DIR$/pkg" />
+    <root_directory value="$PROJECT_DIR$" />
+    <kind value="DIRECTORY" />
+    <package value="github.com/openkruise/agents/pkg" />
+    <directory value="$PROJECT_DIR$/pkg" />
+    <filePath value="$PROJECT_DIR$" />
+    <framework value="gotest" />
+    <method v="2" />
+  </configuration>
+</component>

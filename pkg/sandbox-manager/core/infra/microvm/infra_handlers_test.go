@@ -9,7 +9,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/core/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/core/events"
 	"github.com/openkruise/agents/pkg/sandbox-manager/core/infra"
-	"github.com/openkruise/agents/pkg/sandbox-manager/utils"
+	"github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	"github.com/stretchr/testify/assert"
 	"gitlab.alibaba-inc.com/serverlessinfra/sandbox-operator/api/v1alpha1"
 	sandboxclient "gitlab.alibaba-inc.com/serverlessinfra/sandbox-operator/client/clientset/versioned"

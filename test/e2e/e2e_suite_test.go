@@ -1,6 +1,3 @@
-//go:build e2e
-// +build e2e
-
 /*
 Copyright 2025.
 
@@ -20,27 +17,48 @@ limitations under the License.
 package e2e
 
 import (
+	"context"
 	"fmt"
-	"os"
-	"os/exec"
 	"testing"
 
-	"github.com/openkruise/agents/test/utils"
+	. "github.com/onsi/ginkgo/v2"
+	"github.com/onsi/ginkgo/v2/types"
+	. "github.com/onsi/gomega"
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/test/e2e/utils"
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/rand"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/config"
 )
 
 var (
-	// Optional Environment Variables:
-	// - CERT_MANAGER_INSTALL_SKIP=true: Skips CertManager installation during test setup.
-	// These variables are useful if CertManager is already installed, avoiding
-	// re-installation and conflicts.
-	skipCertManagerInstall = os.Getenv("CERT_MANAGER_INSTALL_SKIP") == "true"
-	// isCertManagerAlreadyInstalled will be set true when CertManager CRDs be found on the cluster
-	isCertManagerAlreadyInstalled = false
-
-	// projectImage is the name of the image which will be build and loaded
-	// with the code source changes to be tested.
-	projectImage = "example.com/sandbox-operator:v0.0.1"
+	scheme    *runtime.Scheme
+	k8sClient client.Client
 )
+
+var (
+	LabelDescribe = "describe"
+	LabelIt       = "it"
+	Namespace     = "default"
+)
+
+func init() {
+	scheme = runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+	_ = appsv1.AddToScheme(scheme)
+
+	c, err := client.New(config.GetConfigOrDie(), client.Options{Scheme: scheme})
+	if err != nil {
+		panic(fmt.Sprintf("Failed to create client: %v", err))
+	}
+	k8sClient = c
+}
+
+// +kubebuilder:scaffold:e2e-webhooks-checks
 
 // TestE2E runs the end-to-end (e2e) test suite for the project. These tests execute in an isolated,
 // temporary environment to validate project changes with the purpose of being used in CI jobs.
@@ -49,41 +67,28 @@ var (
 func TestE2E(t *testing.T) {
 	RegisterFailHandler(Fail)
 	_, _ = fmt.Fprintf(GinkgoWriter, "Starting sandbox-operator integration test suite\n")
-	RunSpecs(t, "e2e suite")
+	customReporterConfig := types.NewDefaultReporterConfig()
+	customSuiteConfig := types.NewDefaultSuiteConfig()
+
+	//customSuiteConfig.FocusStrings = []string{"HardwareFaultHelper - Enabled"}
+	customReporterConfig.Verbose = true
+
+	RunSpecs(t, "e2e suite", customSuiteConfig, customReporterConfig)
 }
 
-var _ = BeforeSuite(func() {
-	By("building the manager(Operator) image")
-	cmd := exec.Command("make", "docker-build", fmt.Sprintf("IMG=%s", projectImage))
-	_, err := utils.Run(cmd)
-	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build the manager(Operator) image")
-
-	// TODO(user): If you want to change the e2e test vendor from Kind, ensure the image is
-	// built and available before running the tests. Also, remove the following block.
-	By("loading the manager(Operator) image on Kind")
-	err = utils.LoadImageToKindClusterWithName(projectImage)
-	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to load the manager(Operator) image into Kind")
-
-	// The tests-e2e are intended to run on a temporary cluster that is created and destroyed for testing.
-	// To prevent errors when tests run in environments with CertManager already installed,
-	// we check for its presence before execution.
-	// Setup CertManager before the suite if not skipped and if not already installed
-	if !skipCertManagerInstall {
-		By("checking if cert manager is installed already")
-		isCertManagerAlreadyInstalled = utils.IsCertManagerCRDsInstalled()
-		if !isCertManagerAlreadyInstalled {
-			_, _ = fmt.Fprintf(GinkgoWriter, "Installing CertManager...\n")
-			Expect(utils.InstallCertManager()).To(Succeed(), "Failed to install CertManager")
-		} else {
-			_, _ = fmt.Fprintf(GinkgoWriter, "WARNING: CertManager is already installed. Skipping installation...\n")
-		}
+func CreatePod(ctx context.Context, describe, it string, modifiers ...func(*corev1.PodTemplateSpec)) (pod *corev1.Pod, cleanup func()) {
+	template := utils.GetPodTemplate(map[string]string{
+		LabelDescribe: describe,
+		LabelIt:       it,
+	}, nil, modifiers...)
+	pod = &corev1.Pod{
+		ObjectMeta: template.ObjectMeta,
+		Spec:       template.Spec,
 	}
-})
-
-var _ = AfterSuite(func() {
-	// Teardown CertManager after the suite if not skipped and if it was not already installed
-	if !skipCertManagerInstall && !isCertManagerAlreadyInstalled {
-		_, _ = fmt.Fprintf(GinkgoWriter, "Uninstalling CertManager...\n")
-		utils.UninstallCertManager()
+	pod.Name = fmt.Sprintf("%s-%s-%s", describe, it, rand.String(5))
+	pod.Namespace = Namespace
+	Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+	return pod, func() {
+		Expect(k8sClient.Delete(ctx, pod)).To(Succeed())
 	}
-})
+}

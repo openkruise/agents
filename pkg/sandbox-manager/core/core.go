@@ -39,10 +39,10 @@ type SandboxManager struct {
 // NewSandboxManager creates a new SandboxManager instance.
 //
 //	Params:
-//	- namespace: The namespace where the sandbox-manager-helm and all managed sandbox pods are running
+//	- namespace: The namespace where the helm and all managed sandbox pods are running
 //	- templateDir: The directory where the built-in sandbox templates are stored
 //	- client / restConfig: The k8s client and rest config
-//	- adapter: The request adapter for mapping sandbox-manager-helm logic to a specific framework like 'e2b'
+//	- adapter: The request adapter for mapping helm logic to a specific framework like 'e2b'
 //	- debug: run in prod or debug mode (debug mode is useful in developing, making it possible to run locally)
 func NewSandboxManager(namespace, templateDir string, client *clients.ClientSet, restConfig *rest.Config,
 	adapter proxy2.RequestAdapter, infra string) (*SandboxManager, error) {

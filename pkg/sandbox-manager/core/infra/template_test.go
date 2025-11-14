@@ -31,6 +31,10 @@ type FakeInfra struct {
 	BaseInfra
 }
 
+func (f *FakeInfra) InjectTemplateMetadata() metav1.ObjectMeta {
+	return metav1.ObjectMeta{}
+}
+
 func (f *FakeInfra) Run(context.Context) error {
 	return nil
 }

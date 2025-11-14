@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/openkruise/agents/pkg/sandbox-manager/core/consts"
-	"github.com/openkruise/agents/pkg/sandbox-manager/utils"
+	"github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 

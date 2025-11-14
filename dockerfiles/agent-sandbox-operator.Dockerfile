@@ -1,5 +1,5 @@
 # Build the manager binary
-FROM hub.docker.alibaba-inc.com/chorus-ci/golang:1.23 AS builder
+FROM hub.docker.alibaba-inc.com/chorus-ci/golang:1.24 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 
@@ -7,18 +7,15 @@ WORKDIR /workspace
 # Copy the Go Modules manifests
 COPY ../go.mod go.mod
 COPY ../go.sum go.sum
+COPY vendor ./vendor
 # cache deps before building and copying source so that we don't need to re-download as much
 # and so that source changes don't invalidate our downloaded layer
-ENV GOPROXY=https://mirrors.aliyun.com/goproxy,direct
-ENV GOPRIVATE=gitlab.alibaba-inc.com
-RUN go mod download
 
 # Copy the go source
 COPY ../cmd/agent-sandbox-operator/main.go cmd/main.go
 COPY ../api api/
 COPY ../pkg pkg/
 COPY ../client client/
-COPY ../pkg/controller/sandbox/utils utils/
 
 # Build
 # the GOARCH has not a default value to allow the binary be built according to the host where the command
@@ -31,6 +28,9 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o ma
 # Refer to https://github.com/GoogleContainerTools/distroless for more details
 FROM hub.docker.alibaba-inc.com/chorus-ci/alpine:3.20
 WORKDIR /
+RUN mkdir -p /home/nonroot/agent-sandbox-operator-webhook-certs && \
+    chmod 777 /home/nonroot/agent-sandbox-operator-webhook-certs && \
+    chown 65532:65532 /home/nonroot/agent-sandbox-operator-webhook-certs
 COPY --from=builder /workspace/manager .
 USER 65532:65532
 

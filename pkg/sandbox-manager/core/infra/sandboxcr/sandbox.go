@@ -184,11 +184,16 @@ func (s *Sandbox) Pause(ctx context.Context) error {
 	if s.Status.Phase != kruise.SandboxRunning {
 		return fmt.Errorf("sandbox is not in running phase")
 	}
+	state := s.GetState()
+	if state != consts.SandboxStateRunning && state != consts.SandboxStatePending {
+		return fmt.Errorf("pausing is only available for the following state [%s,%s],not for the current state %s",
+			consts.SandboxStateRunning, consts.SandboxStatePending, state)
+	}
 	var nextState string
-	if s.GetState() == consts.SandboxStateRunning {
+	if state == consts.SandboxStateRunning {
 		nextState = consts.SandboxStatePaused
 	} else {
-		nextState = s.GetState()
+		nextState = state
 	}
 	return s.Patch(ctx, fmt.Sprintf(`{"metadata":{"labels":{"%s":"%s"}},"spec":{"paused":true}}`,
 		consts.LabelSandboxState, nextState))
@@ -198,6 +203,11 @@ func (s *Sandbox) Resume(ctx context.Context) error {
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(s.Sandbox))
 	if s.Status.Phase != kruise.SandboxPaused {
 		return fmt.Errorf("sandbox is not in paused state")
+	}
+	state := s.GetState()
+	if state != consts.SandboxStatePaused && state != consts.SandboxStatePending {
+		return fmt.Errorf("resuming is only available for the following state [%s,%s],not for the current state %s",
+			consts.SandboxStatePaused, consts.SandboxStatePending, state)
 	}
 	cond, ok := GetSandboxCondition(s.Sandbox, kruise.SandboxConditionPaused)
 	if !ok || cond.Status != metav1.ConditionTrue {
@@ -224,11 +234,13 @@ func (s *Sandbox) Resume(ctx context.Context) error {
 		log.Error(err, "failed to wait sandbox resume")
 		return err
 	}
-	err = s.Patch(ctx, fmt.Sprintf(`{"metadata":{"labels":{"%s":"%s"}}}`,
-		consts.LabelSandboxState, consts.SandboxStateRunning))
-	if err != nil {
-		log.Error(err, "failed to patch sandbox state")
-		return err
+	// 对于 paused state，转化为 running，其他的保持不变
+	if state == consts.SandboxStatePaused {
+		if err = s.Patch(ctx, fmt.Sprintf(`{"metadata":{"labels":{"%s":"%s"}}}`,
+			consts.LabelSandboxState, consts.SandboxStateRunning)); err != nil {
+			log.Error(err, "failed to patch sandbox state")
+			return err
+		}
 	}
 	log.Info("sandbox resumed", "cost", time.Since(start))
 	return nil

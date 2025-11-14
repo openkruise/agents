@@ -9,7 +9,7 @@ webhooks:
   - v1beta1
   clientConfig:
     service:
-      name: webhook-service
+      name: agent-sandbox-operator-webhook-service
       namespace: system
       path: /validate-rollouts-kruise-io-rollout
   failurePolicy: Fail

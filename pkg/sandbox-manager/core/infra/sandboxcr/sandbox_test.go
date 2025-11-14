@@ -14,6 +14,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	client2 "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 func AsSandbox(sbx *v1alpha1.Sandbox, client *fake.Clientset, cache Cache[*v1alpha1.Sandbox]) *Sandbox {
@@ -932,7 +934,9 @@ func TestSandbox_SetPause(t *testing.T) {
 		name          string
 		phase         v1alpha1.SandboxPhase
 		initialState  string
-		pause         bool
+		pauseFinished bool
+		originalPause bool
+		operatePause  bool
 		expectPaused  bool
 		expectedState string
 		expectError   bool
@@ -941,7 +945,8 @@ func TestSandbox_SetPause(t *testing.T) {
 			name:          "pause running / running sandbox",
 			phase:         v1alpha1.SandboxRunning,
 			initialState:  consts.SandboxStateRunning,
-			pause:         true,
+			originalPause: false,
+			operatePause:  true,
 			expectPaused:  true,
 			expectedState: consts.SandboxStatePaused,
 			expectError:   false,
@@ -950,7 +955,8 @@ func TestSandbox_SetPause(t *testing.T) {
 			name:          "pause running / pending sandbox",
 			phase:         v1alpha1.SandboxRunning,
 			initialState:  consts.SandboxStatePending,
-			pause:         true,
+			originalPause: false,
+			operatePause:  true,
 			expectPaused:  true,
 			expectedState: consts.SandboxStatePending,
 			expectError:   false,
@@ -959,16 +965,31 @@ func TestSandbox_SetPause(t *testing.T) {
 			name:          "resume paused / paused sandbox",
 			phase:         v1alpha1.SandboxPaused,
 			initialState:  consts.SandboxStatePaused,
-			pause:         false,
+			originalPause: true,
+			pauseFinished: true,
+			operatePause:  false,
 			expectPaused:  false,
 			expectedState: consts.SandboxStateRunning,
 			expectError:   false,
 		},
 		{
+			name:          "resume paused / pausing sandbox",
+			phase:         v1alpha1.SandboxPaused,
+			initialState:  consts.SandboxStatePaused,
+			originalPause: true,
+			pauseFinished: false,
+			operatePause:  false,
+			expectPaused:  false,
+			expectedState: consts.SandboxStateRunning,
+			expectError:   true,
+		},
+		{
 			name:          "resume paused / pending sandbox",
 			phase:         v1alpha1.SandboxPaused,
 			initialState:  consts.SandboxStatePending,
-			pause:         false,
+			originalPause: true,
+			pauseFinished: true,
+			operatePause:  false,
 			expectPaused:  false,
 			expectedState: consts.SandboxStatePending,
 			expectError:   false,
@@ -977,7 +998,8 @@ func TestSandbox_SetPause(t *testing.T) {
 			name:          "pause already paused sandbox",
 			phase:         v1alpha1.SandboxPaused,
 			initialState:  consts.SandboxStatePaused,
-			pause:         true,
+			originalPause: true,
+			operatePause:  true,
 			expectPaused:  true,
 			expectedState: consts.SandboxStatePaused,
 			expectError:   true,
@@ -986,9 +1008,30 @@ func TestSandbox_SetPause(t *testing.T) {
 			name:          "resume already running sandbox",
 			phase:         v1alpha1.SandboxRunning,
 			initialState:  consts.SandboxStateRunning,
-			pause:         false,
+			originalPause: false,
+			operatePause:  false,
 			expectPaused:  false,
 			expectedState: consts.SandboxStateRunning,
+			expectError:   true,
+		},
+		{
+			name:          "resume killing sandbox",
+			phase:         v1alpha1.SandboxPaused,
+			initialState:  consts.SandboxStateKilling,
+			originalPause: true,
+			operatePause:  false,
+			expectPaused:  true,
+			expectedState: consts.SandboxStateKilling,
+			expectError:   true,
+		},
+		{
+			name:          "pause killing sandbox",
+			phase:         v1alpha1.SandboxRunning,
+			initialState:  consts.SandboxStateKilling,
+			originalPause: false,
+			operatePause:  true,
+			expectPaused:  true,
+			expectedState: consts.SandboxStateKilling,
 			expectError:   true,
 		},
 	}
@@ -1009,25 +1052,64 @@ func TestSandbox_SetPause(t *testing.T) {
 
 			sandbox := ConvertPodToSandboxCR(pod)
 			sandbox.Status.Phase = tt.phase
-			if tt.phase == v1alpha1.SandboxPaused {
+			if tt.originalPause {
 				sandbox.Spec.Paused = true
+				var condStatus metav1.ConditionStatus
+				if tt.pauseFinished {
+					condStatus = metav1.ConditionTrue
+				} else {
+					condStatus = metav1.ConditionFalse
+				}
+				sandbox.Status.Conditions = append(sandbox.Status.Conditions, metav1.Condition{
+					Type:   string(v1alpha1.SandboxConditionPaused),
+					Status: condStatus,
+				})
 			}
 			// 使用 fake client
 			client := fake.NewSimpleClientset()
 			CreateSandboxWithStatus(t, client, sandbox)
 
+			// 创建 cache
+			informerFactory := informers.NewSharedInformerFactoryWithOptions(client, time.Minute*10, informers.WithNamespace("default"))
+			sandboxInformer := informerFactory.Api().V1alpha1().Sandboxes().Informer()
+			cache, err := NewCache[*v1alpha1.Sandbox]("default", informerFactory, sandboxInformer)
+			assert.NoError(t, err)
+
+			// 启动缓存并等待同步
+			done := make(chan struct{})
+			go cache.Run(done)
+			select {
+			case <-done:
+				// 缓存已同步
+			case <-time.After(1 * time.Second):
+				// 超时
+				t.Fatal("Cache sync timeout")
+			}
+
 			// 创建 Sandbox 实例
-			s := AsSandbox(sandbox, client, nil)
+			s := AsSandbox(sandbox, client, cache)
 
 			// 调用 SetPause 方法
-			var err error
-			if tt.pause {
+			if tt.operatePause {
 				err = s.Pause(context.Background())
 			} else {
+				if !tt.expectError {
+					time.AfterFunc(20*time.Millisecond, func() {
+						patch := client2.MergeFrom(s.Sandbox.DeepCopy())
+						s.Status.Phase = v1alpha1.SandboxRunning
+						SetSandboxCondition(s.Sandbox, string(v1alpha1.SandboxConditionReady), metav1.ConditionTrue, "Resume", "")
+						data, err := patch.Data(s.Sandbox)
+						assert.NoError(t, err)
+						_, err = client.ApiV1alpha1().Sandboxes("default").Patch(
+							context.Background(), s.Name, types.MergePatchType, data, metav1.PatchOptions{})
+						assert.NoError(t, err)
+					})
+				}
 				err = s.Resume(context.Background())
 			}
 			if tt.expectError {
 				assert.Error(t, err)
+				return
 			} else {
 				assert.NoError(t, err)
 			}
@@ -1039,7 +1121,7 @@ func TestSandbox_SetPause(t *testing.T) {
 			// 验证 Pod 状态是否正确更新
 			// 应该进行了 patch 操作
 			assert.Equal(t, tt.expectedState, updatedSbx.Labels[consts.LabelSandboxState])
-			assert.Equal(t, tt.pause, updatedSbx.Spec.Paused)
+			assert.Equal(t, tt.operatePause, updatedSbx.Spec.Paused)
 		})
 	}
 }

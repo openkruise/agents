@@ -21,7 +21,7 @@ import (
 	"flag"
 	"os"
 
-	"github.com/openkruise/agents/pkg/controller/sandbox"
+	customwebhook "github.com/openkruise/agents/pkg/webhook"
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
@@ -37,6 +37,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/controller"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -178,12 +179,28 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := (&sandbox.SandboxReconciler{
+	if err := (&controller.SandboxReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Sandbox")
 		os.Exit(1)
+	}
+
+	if err := (&controller.BypassPodReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "BypassPod")
+		os.Exit(1)
+	}
+
+	// nolint:goconst
+	if os.Getenv("ENABLE_WEBHOOKS") != "false" {
+		if err := customwebhook.SetupWithManager(setupLog, mgr); err != nil {
+			setupLog.Error(err, "unable to create webhooks")
+			os.Exit(1)
+		}
 	}
 	// +kubebuilder:scaffold:builder
 

@@ -12,7 +12,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/core/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/core/events"
 	"github.com/openkruise/agents/pkg/sandbox-manager/core/infra"
-	"github.com/openkruise/agents/pkg/sandbox-manager/utils"
+	"github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	"github.com/stretchr/testify/assert"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"

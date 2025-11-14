@@ -15,8 +15,8 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/core"
 	errors2 "github.com/openkruise/agents/pkg/sandbox-manager/core/errors"
 	utils2 "github.com/openkruise/agents/pkg/sandbox-manager/core/utils"
-	"github.com/openkruise/agents/pkg/sandbox-manager/utils"
 	"github.com/openkruise/agents/pkg/sandbox-manager/web"
+	"github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/klog/v2"
 )

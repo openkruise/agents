@@ -41,7 +41,7 @@ spec:
             - name: envd # envd 端口必须叫这个名字，叫别的名字会跳过初始化
               containerPort: 49983
           # 推荐指定探针，只有 Ready 状态的 Pod 会被分配给 Agent
-          # 如果要使用 ACS Pause，不能配 liveness probe，会导致 Crash。sandbox-manager-helm 内 readiness probe 已经做了兼容可以使用
+          # 如果要使用 ACS Pause，不能配 liveness probe，会导致 Crash。helm 内 readiness probe 已经做了兼容可以使用
           readinessProbe:
             tcpSocket:
               port: 49983

@@ -1,6 +1,7 @@
 # Variables
 DOMAIN ?= example.com
-REPOSITORY ?= acs-image-test-01-registry.cn-hangzhou.cr.aliyuncs.com/e2b/e2b-on-k8s
+SANDBOX_MANAGER_REPOSITORY ?= acs-image-test-01-registry.cn-hangzhou.cr.aliyuncs.com/develop/sandbox-manager
+OPERATOR_REPOSITORY ?= acs-image-test-01-registry.cn-hangzhou.cr.aliyuncs.com/develop/sandbox-controller
 INFRA ?= acs
 INGRESS ?= nginx
 HOST_NETWORK ?= false
@@ -34,9 +35,6 @@ CONTAINER_TOOL ?= docker
 # Options are set to exit when a recipe line exits non-zero or a piped command fails.
 SHELL = /usr/bin/env bash -o pipefail
 .SHELLFLAGS = -ec
-
-.PHONY: all
-all: build
 
 ##@ General
 
@@ -116,10 +114,6 @@ lint-config: golangci-lint ## Verify golangci-lint linter configuration
 	$(GOLANGCI_LINT) config verify
 
 ##@ Build
-
-.PHONY: build
-build:
-
 # PLATFORMS defines the target platforms for the manager image be built to provide support to multiple
 # architectures. (i.e. make docker-buildx IMG=myregistry/mypoperator:0.0.1). To use this option you need to:
 # - be able to use docker buildx. More info: https://docs.docker.com/build/buildx/
@@ -136,9 +130,6 @@ docker-buildx: ## Build and push docker image for the manager for cross-platform
 	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${IMG} -f Dockerfile.cross .
 	- $(CONTAINER_TOOL) buildx rm sandbox-operator-builder
 	rm Dockerfile.cross
-.PHONY: build-and-push-sandbox-manager
-build-and-push-sandbox-manager:
-	REPOSITORY=${REPOSITORY} bash deploy/build-and-push-sandbox-manager.sh
 
 .PHONY: build-installer
 build-installer: manifests generate kustomize ## Generate a consolidated YAML with CRDs and deployment.
@@ -159,21 +150,37 @@ install-crd: manifests kustomize ## Install CRDs into the K8s cluster specified 
 .PHONY: uninstall-crd
 uninstall-crd: manifests kustomize ## Uninstall CRDs from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
 	$(KUSTOMIZE) build config/crd | $(KUBECTL) delete --ignore-not-found=$(ignore-not-found) -f -
-.PHONY: build-and-deploy-sandbox-manager
-build-and-deploy-sandbox-manager: build-and-push-sandbox-manager deploy-sandbox-manager
 
-.PHONY: deploy-sandbox-manager
-deploy-sandbox-manager:
+.PHONY: build-and-push-sandbox-manager
+build-and-push-sandbox-manager:
+	REPOSITORY=${SANDBOX_MANAGER_REPOSITORY} bash deploy/build-and-push-sandbox-manager.sh
+
+.PHONY: build-and-push-sandbox-operator
+build-and-push-sandbox-operator:
+	REPOSITORY=${OPERATOR_REPOSITORY} bash deploy/build-and-push-operator.sh
+
+.PHONY: sandbox-manager
+sandbox-manager: build-and-push-sandbox-manager deploy
+
+.PHONY: agent-sandbox-operator
+agent-sandbox-operator: build-and-push-sandbox-operator deploy
+
+.PHONY: deploy
+deploy:
 	helm upgrade --cleanup-on-fail --install --reset-values \
-        --set controller.logLevel=7 \
-        --set controller.repository=${REPOSITORY}\
-        --set controller.infra=${INFRA}\
-        --set ingress.className=${INGRESS}\
-        --set e2b.domain=${DOMAIN}\
-        --set hostNetwork=${HOST_NETWORK} \
-        sandbox-manager ./deploy/sandbox-manager-helm/
+        --set sandboxManager.controller.logLevel=7 \
+        --set sandboxManager.controller.repository=${SANDBOX_MANAGER_REPOSITORY} \
+        --set sandboxManager.controller.infra=${INFRA} \
+        --set sandboxManager.ingress.className=${INGRESS} \
+        --set sandboxManager.e2b.domain=${DOMAIN} \
+        --set sandboxManager.controller.hostNetwork=${HOST_NETWORK} \
+        --set sandboxOperator.image.controllerManager.repository=${OPERATOR_REPOSITORY} \
+        sandbox-manager ./deploy/helm/
 
-undeploy-sandbox-manager:
+.PHONY: all
+all: build-and-push-sandbox-manager build-and-push-sandbox-operator deploy
+
+undeploy:
 	helm uninstall sandbox-manager
 
 ##@ Dependencies

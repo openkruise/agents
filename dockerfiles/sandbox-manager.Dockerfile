@@ -3,8 +3,6 @@ FROM hub.docker.alibaba-inc.com/chorus-ci/golang:1.24 AS builder
 
 WORKDIR /app
 
-ENV GOPROXY https://goproxy.cn,direct
-
 # Copy go mod and sum files
 COPY ../go.mod go.sum ./
 

@@ -514,7 +514,7 @@ func TestServer_Process(t *testing.T) {
 									}
 
 									sort.Slice(actualHeaders, func(i, j int) bool {
-										return expectedHeaders[i].Header.Key < expectedHeaders[j].Header.Key
+										return actualHeaders[i].Header.Key < actualHeaders[j].Header.Key
 									})
 									sort.Slice(expectedHeaders, func(i, j int) bool {
 										return expectedHeaders[i].Header.Key < expectedHeaders[j].Header.Key

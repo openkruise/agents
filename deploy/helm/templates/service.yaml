@@ -1,0 +1,18 @@
+{{- if .Values.sandboxManager.enabled -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: sandbox-manager
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "acs-sandbox-manager.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.sandboxManager.service.type }}
+  ports:
+    - port: {{ .Values.sandboxManager.service.port }}
+      targetPort: 7788
+      protocol: TCP
+      name: http-envoy
+  selector:
+    {{- include "acs-sandbox-manager.selectorLabels" . | nindent 4 }}
+{{- end }}

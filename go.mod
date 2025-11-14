@@ -8,6 +8,7 @@ require (
 	github.com/go-logr/logr v1.4.3
 	github.com/google/uuid v1.6.0
 	github.com/onsi/ginkgo/v2 v2.23.4
+	github.com/onsi/gomega v1.36.3
 	github.com/stretchr/testify v1.11.1
 	gitlab.alibaba-inc.com/serverlessinfra/sandbox-operator v0.1.0-microvm
 	golang.org/x/time v0.11.0

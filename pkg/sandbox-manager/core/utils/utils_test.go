@@ -6,7 +6,7 @@ import (
 
 	"github.com/openkruise/agents/pkg/sandbox-manager/core/consts"
 	infra2 "github.com/openkruise/agents/pkg/sandbox-manager/core/infra"
-	utils2 "github.com/openkruise/agents/pkg/sandbox-manager/utils"
+	utils2 "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"

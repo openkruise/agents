@@ -16,4 +16,4 @@ echo "Removing image: ${IMAGE}"
 docker rmi "${IMAGE}"
 
 echo "Updating tag in deploy/helm/values.yaml to ${TAG}"
-sed -i "" "/controller:/,/proxy:/ s/tag: .*/tag: ${TAG}/" deploy/sandbox-manager-helm/values.yaml
+sed -i "" "/^sandboxManager:/,/proxy:/ {/tag:/ s/tag: .*/tag: ${TAG}/;}" deploy/helm/values.yaml

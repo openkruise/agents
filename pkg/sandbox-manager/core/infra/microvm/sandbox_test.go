@@ -14,6 +14,8 @@ import (
 	informers "gitlab.alibaba-inc.com/serverlessinfra/sandbox-operator/client/informers/externalversions"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	client2 "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 func AsSandbox(sbx *v1alpha1.Sandbox, client *fake.Clientset, cache sandboxcr.Cache[*v1alpha1.Sandbox]) *Sandbox {
@@ -439,13 +441,15 @@ func TestSandbox_SetPause(t *testing.T) {
 			if tt.pause {
 				err = s.Pause(context.Background())
 			} else {
-				time.AfterFunc(100*time.Millisecond, func() {
-					got, err := client.ApiV1alpha1().Sandboxes("default").Get(context.Background(), "test-sandbox", metav1.GetOptions{})
+				time.AfterFunc(20*time.Millisecond, func() {
+					patch := client2.MergeFrom(s.Sandbox.DeepCopy())
+					s.Status.Phase = v1alpha1.SandboxRunning
+					SetSandboxCondition(s.Sandbox, string(v1alpha1.SandboxConditionReady), metav1.ConditionTrue, "Resume", "")
+					data, err := patch.Data(s.Sandbox)
 					assert.NoError(t, err)
-					got.Status.Phase = v1alpha1.SandboxRunning
-					_, err = client.ApiV1alpha1().Sandboxes("default").UpdateStatus(context.Background(), got, metav1.UpdateOptions{})
+					_, err = client.ApiV1alpha1().Sandboxes("default").Patch(
+						context.Background(), s.Name, types.MergePatchType, data, metav1.PatchOptions{})
 					assert.NoError(t, err)
-					t.Logf("phase %s updated", got.Name)
 				})
 				err = s.Resume(context.Background())
 			}

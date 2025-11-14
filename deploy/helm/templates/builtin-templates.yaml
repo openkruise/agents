@@ -1,0 +1,142 @@
+{{- if .Values.sandboxManager.enabled -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sandbox-manager-builtin-templates
+data:
+  code_interpreter.yaml: |
+    ###
+    ### 基础 Sandbox Template 定义，其中各字段有说明，可以参考这个文件编写自己的 Template
+    ###
+    kind: SandboxTemplate
+    metadata:
+      name: code-interpreter
+      # 默认模板的 namespace 会被替换成控制器的 namespace，没有设置的必要
+    spec:
+      minPoolSize: 2 # 启动后，沙箱 Pod 的个数，默认为 5
+      maxPoolSize: 5 # 最大 Sandbox 的个数（当可用 Sandbox 数量不足 1/4 时，会尝试扩容，最多扩容到这个数量），默认为 minPoolSize 的两倍
+      # template 是一个 podTemplateSpec，用于定义 Sandbox Pod。注意：部分字段会被后端覆盖
+      template:
+        spec:
+          containers:
+            - name: sandbox
+              env:
+                - name: GODEBUG
+                  value: multipathtcp=0
+              # 在这里定义 sandbox pod 的 image，必须指定
+              image: acs-image-test-01-registry.cn-hangzhou.cr.aliyuncs.com/e2b/code-interpreter:v1.3
+              # 推荐设置资源需求，否则在 ACS 环境下会被设置成超小规格影响运行
+              resources:
+                requests:
+                  cpu: 1
+                  memory: 1Gi
+                limits:
+                  cpu: 1
+                  memory: 1Gi
+              # 必须指定 ports：激活 sandbox 时会通过 ports 创建直连路由规则，如果不写无法被 Agent 访问
+              ports:
+                - name: interpreter
+                  containerPort: 49999
+                - name: envd
+                  containerPort: 49983
+              # 推荐指定探针，只有 Ready 状态的 Pod 会被分配给 Agent
+              # 如果要使用 ACS Pause，不能配 liveness probe，会导致 Crash。
+              readinessProbe:
+                tcpSocket:
+                  port: 49983
+                initialDelaySeconds: 1
+                periodSeconds: 5
+                timeoutSeconds: 1
+                failureThreshold: 3
+  browser.yaml: |
+    kind: SandboxTemplate
+    metadata:
+      name: browser
+      # 默认模板的 namespace 会被替换成控制器的 namespace，没有设置的必要
+    spec:
+      minPoolSize: 2 # 启动后，沙箱 Pod 的个数，默认为 5
+      maxPoolSize: 5 # 最大 Sandbox 的个数（当可用 Sandbox 数量不足 1/4 时，会尝试扩容，最多扩容到这个数量），默认为 minPoolSize 的两倍
+      # template 是一个 podTemplateSpec，用于定义 Sandbox Pod。注意：部分字段会被后端覆盖
+      template:
+        spec:
+          containers:
+            - name: sandbox
+              env:
+                - name: GODEBUG
+                  value: multipathtcp=0
+              # 在这里定义 sandbox pod 的 image，必须指定
+              image: registry-cn-hangzhou.ack.aliyuncs.com/ack-demo/e2b-sandbox-headless-shell:v1.1
+              # 推荐设置资源需求，否则在 ACS 环境下会被设置成超小规格影响运行
+              resources:
+                requests:
+                  cpu: 1
+                  memory: 1Gi
+                limits:
+                  cpu: 1
+                  memory: 1Gi
+              # 必须指定 ports：激活 sandbox 时会通过 ports 创建直连路由规则，如果不写无法被 Agent 访问
+              ports:
+                - name: cdp
+                  containerPort: 9222
+              # 推荐指定探针，只有 Ready 状态的 Pod 会被分配给 Agent
+              # 如果要使用 ACS Pause，不能配 liveness probe，会导致 Crash。
+              readinessProbe:
+                tcpSocket:
+                  port: 9222
+                initialDelaySeconds: 1
+                periodSeconds: 5
+                timeoutSeconds: 1
+                failureThreshold: 3
+  desktop.yaml: |
+    ###
+    ### 基础 Sandbox Template 定义，其中各字段有说明，可以参考这个文件编写自己的 Template
+    ###
+    kind: SandboxTemplate
+    metadata:
+      name: desktop
+      # 默认模板的 namespace 会被替换成控制器的 namespace，没有设置的必要
+    spec:
+      minPoolSize: 2 # 启动后，沙箱 Pod 的个数，默认为 5
+      maxPoolSize: 5 # 最大 Sandbox 的个数（当可用 Sandbox 数量不足 1/4 时，会尝试扩容，最多扩容到这个数量），默认为 minPoolSize 的两倍
+      # template 是一个 podTemplateSpec，用于定义 Sandbox Pod。注意：部分字段会被后端覆盖
+      template:
+        metadata:
+          labels:
+            alibabacloud.com/acs: 'true'
+            alibabacloud.com/compute-class: general-purpose
+            alibabacloud.com/compute-qos: default
+          annotations:
+            ops.alibabacloud.com/pause-enabled: "true"
+        #        alibabacloud.com/cpu-vendors: "intel"
+        spec:
+          containers:
+            - name: sandbox
+              # 在这里定义 sandbox pod 的 image，必须指定
+              image: registry-cn-hangzhou.ack.aliyuncs.com/ack-demo/e2b-sandbox-desktop:v0.7
+              env:
+                - name: GODEBUG
+                  value: multipathtcp=0
+              # 推荐设置资源需求，否则在 ACS 环境下会被设置成超小规格影响运行
+              resources:
+                requests:
+                  cpu: 1
+                  memory: 1Gi
+                limits:
+                  cpu: 1
+                  memory: 1Gi
+              # 必须指定 ports：激活 sandbox 时会通过 ports 创建直连路由规则，如果不写无法被 Agent 访问
+              ports:
+                - name: vnc
+                  containerPort: 6080
+                - name: envd # envd 端口必须叫这个名字，叫别的名字会跳过初始化
+                  containerPort: 49983
+              # 推荐指定探针，只有 Ready 状态的 Pod 会被分配给 Agent
+              # 如果要使用 ACS Pause，不能配 liveness probe，会导致 Crash。
+              readinessProbe:
+                tcpSocket:
+                  port: 49983
+                initialDelaySeconds: 1
+                periodSeconds: 5
+                timeoutSeconds: 1
+                failureThreshold: 3
+{{- end }}
