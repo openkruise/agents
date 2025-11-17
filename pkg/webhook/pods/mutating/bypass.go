@@ -105,8 +105,9 @@ func (h *PodBypassSandboxHandler) HandleBypassSandboxCreate(ctx context.Context,
 	}
 	pod.Spec = box.Spec.Template.Spec
 	utils.InjectResumedPod(box, pod)
-	pod.Annotations[utils.PodAnnotationEnablePaused] = "true"
-	pod.Annotations[utils.PodAnnotationCreatedBy] = "" // this will be patched by controller
+	// 用户重建Pod的场景一定是想唤醒，所以强制将用户的 ops.alibabacloud.com/sandbox-pause 标去掉，防止一些 corner case的情况。
+	delete(pod.Annotations, utils.PodAnnotationSandboxPause)
+	pod.Annotations[utils.PodAnnotationCreatedBy] = utils.CreatedByExternal // this will be patched by controller
 	return types.Response{
 		Result:  types.Patch,
 		Message: "pod is overwritten by sandbox",

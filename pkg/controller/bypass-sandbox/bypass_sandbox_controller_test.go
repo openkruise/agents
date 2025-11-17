@@ -1,4 +1,4 @@
-package sandbox
+package bypass_sandbox
 
 import (
 	"context"
@@ -217,9 +217,9 @@ func TestBypassPodReconciler_Reconcile(t *testing.T) {
 					Name:      "test-pod",
 					Namespace: "default",
 					Annotations: map[string]string{
-						utils.PodAnnotationSandboxPause: utils.True,
-						utils.PodAnnotationEnablePaused: utils.True,
-						utils.PodAnnotationRecreating:   utils.True,
+						utils.PodAnnotationSandboxPause:  utils.True,
+						utils.PodAnnotationEnablePaused:  utils.True,
+						utils.PodAnnotationPodRecreating: utils.True,
 					},
 					Labels: map[string]string{
 						utils.PodLabelEnableAutoCreateSandbox: utils.True,

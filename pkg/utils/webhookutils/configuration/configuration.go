@@ -16,8 +16,8 @@ import (
 )
 
 const (
-	ValidatingWebhookConfigurationName = "kruise-sandbox-operator-validating-webhook-configuration"
-	MutatingWebhookConfigurationName   = "kruise-sandbox-operator-mutating-webhook-configuration"
+	ValidatingWebhookConfigurationName = "sandbox-controller-validating-webhook-configuration"
+	MutatingWebhookConfigurationName   = "sandbox-controller-mutating-webhook-configuration"
 )
 
 // Ensure ensures the webhook configurations are up to date.

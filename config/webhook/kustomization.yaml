@@ -1,0 +1,5 @@
+# Adds namespace to all resources.
+namespace: sandbox-system
+
+resources:
+- manifests.yaml

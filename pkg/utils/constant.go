@@ -5,6 +5,8 @@ const (
 
 	PodAnnotationSandboxPause = "ops.alibabacloud.com/sandbox-pause"
 
+	PodAnnotationPodRecreating = "ops.alibabacloud.com/recreating"
+
 	PodAnnotationEnablePaused = "ops.alibabacloud.com/pause-enabled"
 
 	PodAnnotationReserveInstance = "ops.alibabacloud.com/reserve-instance"
@@ -28,8 +30,11 @@ const (
 	SandboxAnnotationDisablePodDeletion = "agents.kruise.io/disable-pod-deletion"
 	// PodAnnotationCreatedBy 用于标识 Pod 来源：被 Sandbox 控制器创建或外部创建（旁路 Sandbox 语法糖）
 	PodAnnotationCreatedBy = "agents.kruise.io/created-by"
-	// PodAnnotationRecreating 用于标识 Pod 是一个正在重建的唤醒 Pod
-	PodAnnotationRecreating = "agents.kruise.io/recreating"
+
+	TolerationVirtualKubeletProviderKey   = "virtual-kubelet.io/provider"
+	TolerationVirtualKubeletProviderValue = "alibabacloud"
+	TolerationNodeNotReadyKey             = "node.kubernetes.io/not-ready"
+	TolerationNodeUnreachableKey          = "node.kubernetes.io/unreachable"
 )
 
 const (

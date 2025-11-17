@@ -1,4 +1,4 @@
-package sandbox
+package bypass_sandbox
 
 import (
 	"context"
@@ -17,7 +17,20 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 )
+
+func Add(mgr manager.Manager) error {
+	err := (&BypassPodReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr)
+	if err != nil {
+		return err
+	}
+	klog.Infof("start BypassPodReconciler success")
+	return nil
+}
 
 // BypassPodReconciler 用于处理通过更新 pod 上的深休眠协议 annotation 触发旁路 Sandbox 创建的语法糖
 type BypassPodReconciler struct {
@@ -33,7 +46,7 @@ func (r *BypassPodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	log := logf.FromContext(ctx).WithValues("pod", klog.KObj(pod))
-	if !NeedsBypassSandbox(pod) {
+	if !utils.NeedsBypassSandbox(pod) {
 		log.Info("skip process for pod doesn't need bypass sandbox")
 		return ctrl.Result{}, nil
 	}
@@ -103,11 +116,10 @@ func (r *BypassPodReconciler) patchSandboxAndPod(ctx context.Context, pod *corev
 	}
 
 	var expectPaused bool
-	if pod.Annotations[utils.PodAnnotationRecreating] == utils.True {
-		// 重建中的 Pod，强制设置 paused=false
-		expectPaused = false
+	if pod.Annotations[utils.PodAnnotationSandboxPause] == utils.True {
+		expectPaused = true
 	} else {
-		expectPaused = pod.Annotations[utils.PodAnnotationSandboxPause] == utils.True
+		expectPaused = false
 	}
 	if box.Spec.Paused == expectPaused {
 		log.Info("no need to patch sandbox", "expect", expectPaused, "spec", box.Spec.Paused)

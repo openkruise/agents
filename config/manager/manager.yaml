@@ -7,19 +7,34 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: system
 ---
+apiVersion: v1
+kind: Service
+metadata:
+  name: controller-manager-webhook-service
+  namespace: system
+  labels:
+    control-plane: sandbox-controller-manager
+spec:
+  ports:
+    - port: 443
+      protocol: TCP
+      targetPort: 9443
+  selector:
+    control-plane: sandbox-controller-manager
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: controller-manager
   namespace: system
   labels:
-    control-plane: controller-manager
-    app.kubernetes.io/name: sandbox-operator
+    control-plane: sandbox-controller-manager
+    app.kubernetes.io/name: sandbox-controller-manager
     app.kubernetes.io/managed-by: kustomize
 spec:
   selector:
     matchLabels:
-      control-plane: controller-manager
+      control-plane: sandbox-controller-manager
       app.kubernetes.io/name: sandbox-operator
   replicas: 1
   template:
@@ -27,7 +42,7 @@ spec:
       annotations:
         kubectl.kubernetes.io/default-container: manager
       labels:
-        control-plane: controller-manager
+        control-plane: sandbox-controller-manager
         app.kubernetes.io/name: sandbox-operator
     spec:
       # TODO(user): Uncomment the following code to configure the nodeAffinity expression
@@ -63,11 +78,12 @@ spec:
         args:
           - --leader-elect
           - --health-probe-bind-address=:8081
+          - --webhook-cert-path=/home/nonroot/sandbox-controller-webhook-certs
         image: controller:latest
         name: manager
         ports: []
         securityContext:
-          readOnlyRootFilesystem: true
+          readOnlyRootFilesystem: false
           allowPrivilegeEscalation: false
           capabilities:
             drop:
@@ -93,7 +109,12 @@ spec:
           requests:
             cpu: 10m
             memory: 64Mi
-        volumeMounts: []
-      volumes: []
+        volumeMounts:
+        - name: config-volume
+          mountPath: /configuration
+      volumes:
+      - name: config-volume
+        configMap:
+          name: configuration
       serviceAccountName: controller-manager
       terminationGracePeriodSeconds: 10
