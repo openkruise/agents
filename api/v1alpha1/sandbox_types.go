@@ -102,10 +102,10 @@ const (
 type PodInfo struct {
 	// Annotations contains pod important annotations
 	Annotations map[string]string `json:"annotations,omitempty"`
-
+	// Labels contains pod important labels
+	Labels map[string]string `json:"labels,omitempty"`
 	// NodeName indicates in which node this pod is scheduled.
 	NodeName string `json:"nodeName,omitempty"`
-
 	// PodIP address allocated to the pod.
 	PodIP string `json:"podIP,omitempty"`
 }

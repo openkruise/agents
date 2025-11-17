@@ -27,10 +27,9 @@ import (
 )
 
 const (
-	validatingWebhookConfigurationName = "kruise-sandbox-operator-validating-webhook-configuration"
-	mutatingWebhookConfigurationName   = "kruise-sandbox-operator-mutating-webhook-configuration"
-
-	defaultResyncPeriod = time.Minute
+	validatingWebhookConfigurationName = "sandbox-controller-validating-webhook-configuration"
+	mutatingWebhookConfigurationName   = "sandbox-controller-mutating-webhook-configuration"
+	defaultResyncPeriod                = time.Minute
 )
 
 var (
@@ -181,17 +180,10 @@ func (c *Controller) sync(ctx context.Context) error {
 	}
 	log.Info("dns name got", "dnsName", dnsName)
 
-	certWriterType := webhookutils.GetCertWriter()
-	if certWriterType == writer.FsCertWriter || (len(certWriterType) == 0 && len(webhookutils.GetHost()) != 0) {
-		certWriter, err = writer.NewFSCertWriter(writer.FSCertWriterOptions{
-			Path: webhookutils.GetCertDir(),
-		})
-	} else {
-		certWriter, err = writer.NewSecretCertWriter(writer.SecretCertWriterOptions{
-			Clientset: c.kubeClient,
-			Secret:    &types.NamespacedName{Namespace: webhookutils.GetNamespace(), Name: webhookutils.GetSecretName()},
-		})
-	}
+	certWriter, err = writer.NewSecretCertWriter(writer.SecretCertWriterOptions{
+		Clientset: c.kubeClient,
+		Secret:    &types.NamespacedName{Namespace: webhookutils.GetNamespace(), Name: webhookutils.GetSecretName()},
+	})
 	if err != nil {
 		return fmt.Errorf("failed to ensure certs: %v", err)
 	}

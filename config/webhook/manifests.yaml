@@ -2,15 +2,15 @@
 apiVersion: admissionregistration.k8s.io/v1
 kind: MutatingWebhookConfiguration
 metadata:
-  name: mutating-webhook-configuration
+  name: controller-mutating-webhook-configuration
 webhooks:
 - admissionReviewVersions:
   - v1
   - v1beta1
   clientConfig:
     service:
-      name: webhook-service
-      namespace: system
+      name: sandbox-controller-manager-webhook-service
+      namespace: sandbox-system
       path: /pod-bypass-sandbox
   failurePolicy: Fail
   name: mbypass-sbx.kb.io
@@ -29,8 +29,8 @@ webhooks:
   - v1beta1
   clientConfig:
     service:
-      name: webhook-service
-      namespace: system
+      name: sandbox-controller-manager-webhook-service
+      namespace: sandbox-system
       path: /default-sandboxset
   failurePolicy: Fail
   name: md-sbs.kb.io
@@ -49,15 +49,15 @@ webhooks:
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingWebhookConfiguration
 metadata:
-  name: validating-webhook-configuration
+  name: controller-validating-webhook-configuration
 webhooks:
 - admissionReviewVersions:
   - v1
   - v1beta1
   clientConfig:
     service:
-      name: webhook-service
-      namespace: system
+      name: sandbox-controller-manager-webhook-service
+      namespace: sandbox-system
       path: /validate-sandboxset
   failurePolicy: Fail
   name: v-sbs.kb.io

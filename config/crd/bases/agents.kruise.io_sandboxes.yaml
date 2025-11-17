@@ -146,6 +146,11 @@ spec:
                       type: string
                     description: Annotations contains pod important annotations
                     type: object
+                  labels:
+                    additionalProperties:
+                      type: string
+                    description: Labels contains pod important labels
+                    type: object
                   nodeName:
                     description: NodeName indicates in which node this pod is scheduled.
                     type: string

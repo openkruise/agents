@@ -7,7 +7,6 @@ WORKDIR /workspace
 # Copy the Go Modules manifests
 COPY ../go.mod go.mod
 COPY ../go.sum go.sum
-COPY vendor ./vendor
 # cache deps before building and copying source so that we don't need to re-download as much
 # and so that source changes don't invalidate our downloaded layer
 
@@ -28,9 +27,9 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o ma
 # Refer to https://github.com/GoogleContainerTools/distroless for more details
 FROM hub.docker.alibaba-inc.com/chorus-ci/alpine:3.20
 WORKDIR /
-RUN mkdir -p /home/nonroot/agent-sandbox-operator-webhook-certs && \
-    chmod 777 /home/nonroot/agent-sandbox-operator-webhook-certs && \
-    chown 65532:65532 /home/nonroot/agent-sandbox-operator-webhook-certs
+RUN mkdir -p /home/nonroot/sandbox-controller-webhook-certs && \
+    chmod 777 /home/nonroot/sandbox-controller-webhook-certs && \
+    chown 65532:65532 /home/nonroot/sandbox-controller-webhook-certs
 COPY --from=builder /workspace/manager .
 USER 65532:65532
 

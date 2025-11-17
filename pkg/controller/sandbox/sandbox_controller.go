@@ -27,22 +27,35 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/utils"
+	"github.com/openkruise/agents/pkg/utils/configuration"
 )
 
 var (
 	sandboxControllerKind = agentsv1alpha1.GroupVersion.WithKind("Sandbox")
 )
+
+func Add(mgr manager.Manager) error {
+	err := (&SandboxReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr)
+	if err != nil {
+		return err
+	}
+	klog.Infof("start SandboxReconciler success")
+	return nil
+}
 
 // SandboxReconciler reconciles a Sandbox object
 type SandboxReconciler struct {
@@ -116,7 +129,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, r.updateSandboxStatus(ctx, *newStatus, box)
 	} else if pod.Status.Phase == corev1.PodFailed &&
 		box.Status.Phase != agentsv1alpha1.SandboxPaused &&
-		!NeedsBypassSandbox(pod) {
+		!utils.NeedsBypassSandbox(pod) {
 		// paused过程中，Pod会变为 Failed 状态，需要忽略。
 		// NeedsBypassSandbox 用于忽略旁路 Sandbox 场景下 Pod 由于深休眠提前进入 Failed 的情况。
 		newStatus.Phase = agentsv1alpha1.SandboxFailed
@@ -150,17 +163,6 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		utils.SetSandboxCondition(newStatus, cond)
 	}
 
-	if pod != nil {
-		newStatus.PodInfo = agentsv1alpha1.PodInfo{
-			PodIP:    pod.Status.PodIP,
-			NodeName: pod.Spec.NodeName,
-		}
-		newStatus.PodInfo.Annotations = map[string]string{
-			utils.PodAnnotationAcsInstanceId: pod.Annotations[utils.PodAnnotationAcsInstanceId],
-			utils.PodAnnotationSourcePodUID:  string(pod.UID),
-		}
-	}
-
 	switch newStatus.Phase {
 	case agentsv1alpha1.SandboxPending:
 		err = r.handlerPhasePending(ctx, pod, box, newStatus)
@@ -170,7 +172,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, r.updateSandboxStatus(ctx, *newStatus, box)
 
 	case agentsv1alpha1.SandboxRunning:
-		err = r.handlerPhaseRunning(ctx, pod, newStatus)
+		err = r.handlerPhaseRunning(ctx, box, pod, newStatus)
 		if err != nil {
 			return reconcile.Result{}, err
 		}
@@ -204,8 +206,12 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 func (r *SandboxReconciler) handlerPhasePending(ctx context.Context, pod *corev1.Pod, box *agentsv1alpha1.Sandbox, newStatus *agentsv1alpha1.SandboxStatus) error {
 	// 如果 Pod 不存在，首先需要创建 Pod
 	if pod == nil {
-		return r.createPod(ctx, box, newStatus)
-	} else if pod.Status.Phase == corev1.PodRunning || NeedsBypassSandbox(pod) {
+		if _, err := r.createPod(ctx, box, newStatus); err != nil && !errors.IsAlreadyExists(err) {
+			return err
+		}
+		return nil
+
+	} else if pod.Status.Phase == corev1.PodRunning || utils.NeedsBypassSandbox(pod) {
 		// Sandbox 托管 Pod 进入到 Running 才会使 Sandbox 进入 Running 阶段
 		// 旁路 Sandbox Pod 由于状态不可预测，将会尽快使 Sandbox 进入 Running 阶段
 		newStatus.Phase = agentsv1alpha1.SandboxRunning
@@ -228,11 +234,12 @@ func (r *SandboxReconciler) handlerPhasePending(ctx context.Context, pod *corev1
 	return nil
 }
 
-func (r *SandboxReconciler) createPod(ctx context.Context, box *agentsv1alpha1.Sandbox, newStatus *agentsv1alpha1.SandboxStatus) error {
+func (r *SandboxReconciler) createPod(ctx context.Context, box *agentsv1alpha1.Sandbox, newStatus *agentsv1alpha1.SandboxStatus) (*corev1.Pod, error) {
 	logger := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
+
 	if box.Annotations[utils.SandboxAnnotationDisablePodCreation] == utils.True {
 		logger.Info("pod creation disabled")
-		return nil
+		return nil, nil
 	}
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -252,34 +259,56 @@ func (r *SandboxReconciler) createPod(ctx context.Context, box *agentsv1alpha1.S
 	// 当sandbox在resume状态时，需要带上一些额外的annotations
 	if newStatus.Phase == agentsv1alpha1.SandboxResuming {
 		utils.InjectResumedPod(box, pod)
-		pod.Annotations[utils.PodAnnotationRecoverFromInstanceID] = box.Status.PodInfo.Annotations[utils.PodAnnotationAcsInstanceId]
 	}
 	err := r.Create(ctx, pod)
-	if err != nil && errors.IsAlreadyExists(err) {
-		logger.Error(err, "create pod failed", "Pod", klog.KObj(pod))
-		return err
+	if err != nil {
+		logger.Error(err, "create pod failed")
+		return nil, err
 	}
-	logger.Info("Create pod success", "Pod", klog.KObj(pod))
-	return nil
+	logger.Info("Create pod success", "Body", utils.DumpJson(pod))
+	return pod, nil
 }
 
-func (r *SandboxReconciler) handlerPhaseRunning(ctx context.Context, pod *corev1.Pod, newStatus *agentsv1alpha1.SandboxStatus) error {
+func (r *SandboxReconciler) handlerPhaseRunning(ctx context.Context, box *agentsv1alpha1.Sandbox, pod *corev1.Pod, newStatus *agentsv1alpha1.SandboxStatus) error {
+	// Running 状态如果 Pod 不在了，应该是异常情况。
 	if pod == nil {
 		newStatus.Phase = agentsv1alpha1.SandboxFailed
 		newStatus.Message = "Sandbox Pod Not Found"
-	} else {
-		pCond := utils.GetPodCondition(&pod.Status, corev1.PodReady)
-		cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionReady))
-		if pCond != nil && string(pCond.Status) != string(cond.Status) {
-			cond.Status = metav1.ConditionStatus(pCond.Status)
-			cond.LastTransitionTime = pCond.LastTransitionTime
+		return nil
+	}
+
+	// resume pod 时需要使用 podInfo 来恢复一些重要的配置
+	newStatus.PodInfo = agentsv1alpha1.PodInfo{
+		PodIP:    pod.Status.PodIP,
+		NodeName: pod.Spec.NodeName,
+	}
+	// resume pod 时需要带上这些 annotations
+	newStatus.PodInfo.Annotations = map[string]string{
+		utils.PodAnnotationRecoverFromInstanceID: pod.Annotations[utils.PodAnnotationAcsInstanceId],
+		utils.PodAnnotationSourcePodUID:          string(pod.UID),
+		utils.PodAnnotationPodRecreating:         utils.True,
+	}
+	// store pod info in sandbox status
+	if content := configuration.GetSandboxResumeAcsPodPersistentContent(); content != nil {
+		for _, key := range content.AnnotationKeys {
+			if value, _ := pod.Annotations[key]; value != "" {
+				newStatus.PodInfo.Annotations[key] = value
+			}
 		}
-		utils.SetSandboxCondition(newStatus, *cond)
-		if pod.Annotations[utils.PodAnnotationRecreating] != "" {
-			return r.Patch(ctx, pod, client.RawPatch(types.MergePatchType,
-				[]byte(fmt.Sprintf(`{"metadata":{"annotations":{"%s":null}}}`, utils.PodAnnotationRecreating))))
+		newStatus.PodInfo.Labels = map[string]string{}
+		for _, key := range content.LabelKeys {
+			if value, _ := pod.Labels[key]; value != "" {
+				newStatus.PodInfo.Labels[key] = value
+			}
 		}
 	}
+	pCond := utils.GetPodCondition(&pod.Status, corev1.PodReady)
+	cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionReady))
+	if pCond != nil && string(pCond.Status) != string(cond.Status) {
+		cond.Status = metav1.ConditionStatus(pCond.Status)
+		cond.LastTransitionTime = pCond.LastTransitionTime
+	}
+	utils.SetSandboxCondition(newStatus, *cond)
 	return nil
 }
 
@@ -308,11 +337,6 @@ func (r *SandboxReconciler) handlerPhasePaused(ctx context.Context, pod *corev1.
 	var err error
 	switch cond.Reason {
 	case agentsv1alpha1.SandboxPausedReasonSetPause:
-		if pod == nil {
-			newStatus.Phase = agentsv1alpha1.SandboxFailed
-			newStatus.Message = "Sandbox Pod Not Found"
-			return nil
-		}
 		// patch pod paused
 		if value, ok := pod.Annotations[utils.PodAnnotationSandboxPause]; !ok || value != utils.True {
 			clone := pod.DeepCopy()
@@ -365,83 +389,66 @@ func (r *SandboxReconciler) handlerPhasePaused(ctx context.Context, pod *corev1.
 }
 
 func (r *SandboxReconciler) handlerPhaseResume(ctx context.Context, pod *corev1.Pod, box *agentsv1alpha1.Sandbox, newStatus *agentsv1alpha1.SandboxStatus) error {
-	logger := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(box), "pod", klog.KObj(pod))
-
-	cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionResumed))
-	switch cond.Reason {
-	case agentsv1alpha1.SandboxResumeReasonCreatePod:
-		// 首先创建 Pod
-		if pod == nil {
-			return r.createPod(ctx, box, newStatus)
-		}
-		// 需要pod condition paused=true之后，才能 resume Pod
-		podCond := utils.GetPodCondition(&pod.Status, utils.PodConditionContainersPaused)
-		if podCond == nil {
-			// 对于非 sandbox 创建的 Pod，需要 patch 外部创建的 annotate
-			if box.Annotations[utils.SandboxAnnotationDisablePodCreation] == utils.True {
-				// 现在的 VK 状态同步存在问题：
-				// 1. VK 需要 Pod 的一次 Update 事件来触发同步管控 Condition 的逻辑（ContainersPaused）并设置 Pod 休眠状态
-				// 2. Pod 创建后较长时间内 Update 会被忽略（原因排查中）
-				// 因而，需要在创建后延迟足够时间更新 Pod，触发后续流程。
-				// 这段代码只在通过 Pod 协议的语法糖中生效。
-				if pod.Annotations[utils.PodAnnotationCreatedBy] == "" {
-					// 给外部创建的 pod 加上标记，确保能够触发 VK 的更新逻辑刷新 pause/resume 的 condition
-					err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-						clone := &corev1.Pod{}
-						err := r.Get(context.Background(), client.ObjectKeyFromObject(pod), clone)
-						if err != nil {
-							return err
-						}
-						clone.Annotations[utils.PodAnnotationCreatedBy] = utils.CreatedByExternal
-						return r.Update(ctx, clone)
-					})
-					if err != nil {
-						logger.Error(err, "update pod annotation[created-by=external] Failed",
-							"at", agentsv1alpha1.SandboxResumeReasonCreatePod)
-					} else {
-						logger.Info("update pod annotation[created-by=external] success",
-							"at", agentsv1alpha1.SandboxResumeReasonCreatePod)
-					}
-				}
-			}
-		} else if podCond.Status == corev1.ConditionFalse {
-			logger.Info("Sandbox wait pod paused condition=True")
-			return nil
-		} else {
-			cond.Reason = agentsv1alpha1.SandboxResumeReasonResumePod
-			utils.SetSandboxCondition(newStatus, *cond)
-		}
-
-	case agentsv1alpha1.SandboxResumeReasonResumePod:
-		if pod == nil {
-			newStatus.Phase = agentsv1alpha1.SandboxFailed
-			newStatus.Message = "Sandbox Pod Not Found"
+	// 首先创建 Pod
+	var err error
+	if pod == nil {
+		pod, err = r.createPod(ctx, box, newStatus)
+		if err != nil && !errors.IsAlreadyExists(err) {
+			return err
+			// 如果已经存在了，需要等待 informer 缓存数据
+		} else if errors.IsAlreadyExists(err) {
 			return nil
 		}
-		if value, ok := pod.Annotations[utils.PodAnnotationSandboxPause]; ok && value == utils.True {
-			clone := pod.DeepCopy()
-			clone.Annotations[utils.PodAnnotationSandboxPause] = utils.False
-			patchBody := client.MergeFromWithOptions(pod, client.MergeFromWithOptimisticLock{})
-			err := r.Patch(ctx, clone, patchBody)
-			if err != nil {
-				logger.Error(err, "Patch Pod Annotation Failed",
-					"at", agentsv1alpha1.SandboxResumeReasonResumePod)
-				return err
-			}
-			logger.Info("Patch pod annotations[alibabacloud.com/pause=false] success",
-				"at", agentsv1alpha1.SandboxPausedReasonSetPause)
-		} else if pod.Status.Phase == corev1.PodRunning {
-			newStatus.Phase = agentsv1alpha1.SandboxRunning
-			pCond := utils.GetPodCondition(&pod.Status, corev1.PodReady)
-			rCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionReady))
-			if pCond != nil && string(pCond.Status) != string(rCond.Status) {
-				rCond.Status = metav1.ConditionStatus(pCond.Status)
-				rCond.LastTransitionTime = pCond.LastTransitionTime
-			}
-			utils.SetSandboxCondition(newStatus, *rCond)
-			utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionResumed))
+		// ACS场景Resume逻辑如下：
+		// 1. 创建Pod带上 podInfo 中记录的 annotations、labels
+		// 2. 创建 Pod 增加一个额外的 annotations ops.alibabacloud.com/recreating
+		// 3. vk reconcile 时对于 annotations ops.alibabacloud.com/recreating 的Pod会跳过，不会处理
+		// 4. sandbox-controller 创建Pod之后，立马 patch pod.status.condition[ContainersPaused]=true，并且去掉 pod annotations ops.alibabacloud.com/recreating
+		// 5. vk 看到上述Pod，pod.status.condition[ContainersPaused]=true 并且 没有 annotations ops.alibabacloud.com/recreating 会直接调用 plm resume 接口
+		if err = r.resumeAcsPod(ctx, pod); err != nil {
+			return err
+		}
+		// 兜底场景：如果第一次创建 Create Pod成功了，但是 patch pod 失败了，需要这里进行兜底。
+	} else if v, ok := pod.Annotations[utils.PodAnnotationPodRecreating]; ok && v == "true" {
+		if err = r.resumeAcsPod(ctx, pod); err != nil {
+			return err
 		}
 	}
+
+	if pod != nil && pod.Status.Phase == corev1.PodRunning {
+		newStatus.Phase = agentsv1alpha1.SandboxRunning
+		pCond := utils.GetPodCondition(&pod.Status, corev1.PodReady)
+		rCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionReady))
+		if pCond != nil && string(pCond.Status) != string(rCond.Status) {
+			rCond.Status = metav1.ConditionStatus(pCond.Status)
+			rCond.LastTransitionTime = pCond.LastTransitionTime
+		}
+		utils.SetSandboxCondition(newStatus, *rCond)
+	}
+	return nil
+}
+
+func (r *SandboxReconciler) resumeAcsPod(ctx context.Context, pod *corev1.Pod) error {
+	logger := logf.FromContext(ctx).WithValues("pod", klog.KObj(pod))
+
+	// patch pod condition
+	conditions := corev1.PodStatus{
+		Conditions: []corev1.PodCondition{
+			{
+				Type:               corev1.PodConditionType(utils.PodConditionContainersPaused),
+				Status:             corev1.ConditionTrue,
+				LastTransitionTime: metav1.Now(),
+			},
+		},
+	}
+	patchBody := fmt.Sprintf(`{"metadata":{"annotations":{"%s":null}},"status":%s}`, utils.PodAnnotationPodRecreating, utils.DumpJson(conditions))
+	rcvObject := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: pod.Namespace, Name: pod.Name}}
+	err := r.Status().Patch(ctx, rcvObject, client.RawPatch(types.StrategicMergePatchType, []byte(patchBody)))
+	if err != nil {
+		logger.Error(err, "resume and patch pod failed")
+		return err
+	}
+	logger.Info("resume and patch pod success")
 	return nil
 }
 

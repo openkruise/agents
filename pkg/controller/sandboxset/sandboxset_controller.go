@@ -42,11 +42,24 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 )
 
 var (
 	sandboxSetControllerKind = agentsv1alpha1.GroupVersion.WithKind("SandboxSet")
 )
+
+func Add(mgr manager.Manager) error {
+	err := (&Reconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr)
+	if err != nil {
+		return err
+	}
+	klog.Infof("start SandboxSetReconciler success")
+	return nil
+}
 
 // Reconciler reconciles a Sandbox object
 type Reconciler struct {
