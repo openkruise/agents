@@ -16,31 +16,31 @@ import (
 )
 
 const (
-	ValidatingWebhookConfigurationName = "kruise-sandbox-validating-webhook-configuration"
-	MutatingWebhookConfigurationName   = "agent-sandbox-operator-mutating-webhook-configuration"
+	ValidatingWebhookConfigurationName = "kruise-sandbox-operator-validating-webhook-configuration"
+	MutatingWebhookConfigurationName   = "kruise-sandbox-operator-mutating-webhook-configuration"
 )
 
-// Ensure ensures the webhook configurations are up to date. TODO: uncomment to enable validating webhook ensurance
+// Ensure ensures the webhook configurations are up to date.
 func Ensure(kubeClient clientset.Interface, handlers map[string]admission.Handler, caBundle []byte) error {
 	mutatingConfig, err := kubeClient.AdmissionregistrationV1().MutatingWebhookConfigurations().Get(context.TODO(), MutatingWebhookConfigurationName, metav1.GetOptions{})
 	if err != nil {
 		return fmt.Errorf("not found MutatingWebhookConfiguration %s", MutatingWebhookConfigurationName)
 	}
-	//validatingConfig, err := kubeClient.AdmissionregistrationV1().ValidatingWebhookConfigurations().Get(context.TODO(), ValidatingWebhookConfigurationName, metav1.GetOptions{})
-	//if err != nil {
-	//	return fmt.Errorf("not found ValidatingWebhookConfiguration %s", ValidatingWebhookConfigurationName)
-	//}
+	validatingConfig, err := kubeClient.AdmissionregistrationV1().ValidatingWebhookConfigurations().Get(context.TODO(), ValidatingWebhookConfigurationName, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("not found ValidatingWebhookConfiguration %s", ValidatingWebhookConfigurationName)
+	}
 	oldMutatingConfig := mutatingConfig.DeepCopy()
-	//oldValidatingConfig := validatingConfig.DeepCopy()
+	oldValidatingConfig := validatingConfig.DeepCopy()
 
 	mutatingTemplate, err := parseMutatingTemplate(mutatingConfig)
 	if err != nil {
 		return err
 	}
-	//validatingTemplate, err := parseValidatingTemplate(validatingConfig)
-	//if err != nil {
-	//	return err
-	//}
+	validatingTemplate, err := parseValidatingTemplate(validatingConfig)
+	if err != nil {
+		return err
+	}
 
 	var mutatingWHs []admissionregistrationv1.MutatingWebhook
 	for i := range mutatingTemplate {
@@ -65,28 +65,28 @@ func Ensure(kubeClient clientset.Interface, handlers map[string]admission.Handle
 	}
 	mutatingConfig.Webhooks = mutatingWHs
 
-	//var validatingWHs []admissionregistrationv1.ValidatingWebhook
-	//for i := range validatingTemplate {
-	//	wh := &validatingTemplate[i]
-	//	wh.ClientConfig.CABundle = caBundle
-	//	path, err := getPath(&wh.ClientConfig)
-	//	if err != nil {
-	//		return err
-	//	}
-	//	if _, ok := handlers[path]; !ok {
-	//		klog.Warningf("Ignore webhook for %s in configuration", path)
-	//		continue
-	//	}
-	//	if wh.ClientConfig.Service != nil {
-	//		wh.ClientConfig.Service.Namespace = webhookutils.GetNamespace()
-	//		wh.ClientConfig.Service.Name = webhookutils.GetServiceName()
-	//	}
-	//	if host := webhookutils.GetHost(); len(host) > 0 && wh.ClientConfig.Service != nil {
-	//		convertClientConfig(&wh.ClientConfig, host, webhookutils.GetPort())
-	//	}
-	//	validatingWHs = append(validatingWHs, *wh)
-	//}
-	//validatingConfig.Webhooks = validatingWHs
+	var validatingWHs []admissionregistrationv1.ValidatingWebhook
+	for i := range validatingTemplate {
+		wh := &validatingTemplate[i]
+		wh.ClientConfig.CABundle = caBundle
+		path, err := getPath(&wh.ClientConfig)
+		if err != nil {
+			return err
+		}
+		if _, ok := handlers[path]; !ok {
+			klog.Warningf("Ignore webhook for %s in configuration", path)
+			continue
+		}
+		if wh.ClientConfig.Service != nil {
+			wh.ClientConfig.Service.Namespace = webhookutils.GetNamespace()
+			wh.ClientConfig.Service.Name = webhookutils.GetServiceName()
+		}
+		if host := webhookutils.GetHost(); len(host) > 0 && wh.ClientConfig.Service != nil {
+			convertClientConfig(&wh.ClientConfig, host, webhookutils.GetPort())
+		}
+		validatingWHs = append(validatingWHs, *wh)
+	}
+	validatingConfig.Webhooks = validatingWHs
 
 	if !reflect.DeepEqual(mutatingConfig, oldMutatingConfig) {
 		if _, err := kubeClient.AdmissionregistrationV1().MutatingWebhookConfigurations().Update(context.TODO(), mutatingConfig, metav1.UpdateOptions{}); err != nil {
@@ -94,11 +94,11 @@ func Ensure(kubeClient clientset.Interface, handlers map[string]admission.Handle
 		}
 	}
 
-	//if !reflect.DeepEqual(validatingConfig, oldValidatingConfig) {
-	//	if _, err := kubeClient.AdmissionregistrationV1().ValidatingWebhookConfigurations().Update(context.TODO(), validatingConfig, metav1.UpdateOptions{}); err != nil {
-	//		return fmt.Errorf("failed to update %s: %v", ValidatingWebhookConfigurationName, err)
-	//	}
-	//}
+	if !reflect.DeepEqual(validatingConfig, oldValidatingConfig) {
+		if _, err := kubeClient.AdmissionregistrationV1().ValidatingWebhookConfigurations().Update(context.TODO(), validatingConfig, metav1.UpdateOptions{}); err != nil {
+			return fmt.Errorf("failed to update %s: %v", ValidatingWebhookConfigurationName, err)
+		}
+	}
 
 	return nil
 }

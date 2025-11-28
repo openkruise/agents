@@ -7,6 +7,12 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - events
+  verbs:
+  - create
+- apiGroups:
+  - ""
+  resources:
   - pods
   verbs:
   - create
@@ -25,9 +31,21 @@ rules:
   - patch
   - update
 - apiGroups:
+  - admissionregistration.k8s.io
+  resources:
+  - mutatingwebhookconfigurations
+  - validatingwebhookconfigurations
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
   - agents.kruise.io
   resources:
   - sandboxes
+  - sandboxsets
   verbs:
   - create
   - delete
@@ -40,13 +58,34 @@ rules:
   - agents.kruise.io
   resources:
   - sandboxes/finalizers
+  - sandboxsets/finalizers
   verbs:
   - update
 - apiGroups:
   - agents.kruise.io
   resources:
   - sandboxes/status
+  - sandboxsets/status
   verbs:
   - get
   - patch
   - update
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: manager-role
+  namespace: sandbox-system
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch

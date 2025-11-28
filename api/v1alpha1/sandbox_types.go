@@ -141,6 +141,11 @@ const (
 // +genclient
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:resource:path=sandboxes,shortName={sbx},singular=sandbox
+// +kubebuilder:storageversion
+// +kubebuilder:printcolumn:name="Status",type="string",JSONPath=".status.phase"
+// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
+// +kubebuilder:printcolumn:name="Message",type="string",JSONPath=".status.message"
 
 // Sandbox is the Schema for the sandboxes API
 type Sandbox struct {

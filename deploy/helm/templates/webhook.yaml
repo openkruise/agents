@@ -16,7 +16,7 @@ spec:
 apiVersion: admissionregistration.k8s.io/v1
 kind: MutatingWebhookConfiguration
 metadata:
-  name: agent-sandbox-operator-mutating-webhook-configuration
+  name: kruise-sandbox-operator-mutating-webhook-configuration
 webhooks:
   - admissionReviewVersions:
       - v1
@@ -50,3 +50,51 @@ webhooks:
           operator: NotIn
           values:
             - kube-system
+  - admissionReviewVersions:
+      - v1
+      - v1beta1
+    clientConfig:
+      service:
+        name: agent-sandbox-operator-webhook-service
+        namespace: {{ .Release.Namespace }}
+        path: /default-sandboxset
+    failurePolicy: Fail
+    name: md-sbs.kb.io
+    rules:
+      - apiGroups:
+          - agents.kruise.io
+        apiVersions:
+          - v1alpha1
+        operations:
+          - CREATE
+          - UPDATE
+        resources:
+          - sandboxsets
+    sideEffects: None
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: kruise-sandbox-operator-validating-webhook-configuration
+webhooks:
+  - admissionReviewVersions:
+      - v1
+      - v1beta1
+    clientConfig:
+      service:
+        name: agent-sandbox-operator-webhook-service
+        namespace: {{ .Release.Namespace }}
+        path: /validate-sandboxset
+    failurePolicy: Fail
+    name: v-sbs.kb.io
+    rules:
+      - apiGroups:
+          - agents.kruise.io
+        apiVersions:
+          - v1alpha1
+        operations:
+          - CREATE
+          - UPDATE
+        resources:
+          - sandboxsets
+    sideEffects: None

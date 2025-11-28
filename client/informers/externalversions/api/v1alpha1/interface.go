@@ -25,6 +25,8 @@ import (
 type Interface interface {
 	// Sandboxes returns a SandboxInformer.
 	Sandboxes() SandboxInformer
+	// SandboxSets returns a SandboxSetInformer.
+	SandboxSets() SandboxSetInformer
 }
 
 type version struct {
@@ -41,4 +43,9 @@ func New(f internalinterfaces.SharedInformerFactory, namespace string, tweakList
 // Sandboxes returns a SandboxInformer.
 func (v *version) Sandboxes() SandboxInformer {
 	return &sandboxInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
+}
+
+// SandboxSets returns a SandboxSetInformer.
+func (v *version) SandboxSets() SandboxSetInformer {
+	return &sandboxSetInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
 }

@@ -1,6 +1,6 @@
-POST https://api.e2b-demo.ultramarines.cn/api-keys
+POST https://api.e2b-ths.ultramarines.cn/api-keys
 Content-Type: application/json
-X-API-Key: GG
+X-API-Key: admin-987654321
 
 {
   "name": "test"

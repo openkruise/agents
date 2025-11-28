@@ -27,8 +27,8 @@ import (
 )
 
 const (
-	validatingWebhookConfigurationName = "kruise-sandbox-validating-webhook-configuration"
-	mutatingWebhookConfigurationName   = "agent-sandbox-operator-mutating-webhook-configuration"
+	validatingWebhookConfigurationName = "kruise-sandbox-operator-validating-webhook-configuration"
+	mutatingWebhookConfigurationName   = "kruise-sandbox-operator-mutating-webhook-configuration"
 
 	defaultResyncPeriod = time.Minute
 )

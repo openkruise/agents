@@ -31,6 +31,10 @@ func (c *FakeApiV1alpha1) Sandboxes(namespace string) v1alpha1.SandboxInterface 
 	return newFakeSandboxes(c, namespace)
 }
 
+func (c *FakeApiV1alpha1) SandboxSets(namespace string) v1alpha1.SandboxSetInterface {
+	return newFakeSandboxSets(c, namespace)
+}
+
 // RESTClient returns a RESTClient that is used to communicate
 // with API server by this client implementation.
 func (c *FakeApiV1alpha1) RESTClient() rest.Interface {

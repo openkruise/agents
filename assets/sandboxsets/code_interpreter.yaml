@@ -1,0 +1,39 @@
+apiVersion: agents.kruise.io/v1alpha1
+kind: SandboxSet
+metadata:
+  name: code-interpreter
+  namespace: default
+  annotations:
+    e2b.agents.kruise.io/should-init-envd: "true"
+spec:
+  replicas: 10
+  template:
+    metadata:
+      labels:
+        alibabacloud.com/acs: 'true'
+    spec:
+      containers:
+        - name: sandbox
+          env:
+            - name: GODEBUG
+              value: multipathtcp=0
+          image: acs-image-test-01-registry.cn-hangzhou.cr.aliyuncs.com/e2b/code-interpreter:v1.3
+          resources:
+            requests:
+              cpu: 1
+              memory: 1Gi
+            limits:
+              cpu: 1
+              memory: 1Gi
+          ports:
+            - name: interpreter
+              containerPort: 49999
+            - name: envd
+              containerPort: 49983
+          startupProbe:
+            tcpSocket:
+              port: 49983
+            initialDelaySeconds: 1
+            periodSeconds: 5
+            timeoutSeconds: 1
+            failureThreshold: 3

@@ -21,6 +21,9 @@ import (
 	"flag"
 	"os"
 
+	"github.com/openkruise/agents/pkg/controller/sandbox"
+	"github.com/openkruise/agents/pkg/controller/sandboxset"
+	"github.com/openkruise/agents/pkg/utils/fieldindex"
 	customwebhook "github.com/openkruise/agents/pkg/webhook"
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -37,7 +40,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/controller"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -179,7 +181,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := (&controller.SandboxReconciler{
+	if err := (&sandbox.SandboxReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
@@ -187,11 +189,25 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := (&controller.BypassPodReconciler{
+	if err := (&sandbox.BypassPodReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "BypassPod")
+		os.Exit(1)
+	}
+
+	if err := (&sandboxset.Reconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "Sandbox")
+		os.Exit(1)
+	}
+
+	setupLog.Info("register field index")
+	if err := fieldindex.RegisterFieldIndexes(mgr.GetCache()); err != nil {
+		setupLog.Error(err, "failed to register field index")
 		os.Exit(1)
 	}
 

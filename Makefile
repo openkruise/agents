@@ -2,7 +2,7 @@
 DOMAIN ?= example.com
 SANDBOX_MANAGER_REPOSITORY ?= acs-image-test-01-registry.cn-hangzhou.cr.aliyuncs.com/develop/sandbox-manager
 OPERATOR_REPOSITORY ?= acs-image-test-01-registry.cn-hangzhou.cr.aliyuncs.com/develop/sandbox-controller
-INFRA ?= acs
+INFRA ?= sandbox-cr
 INGRESS ?= nginx
 HOST_NETWORK ?= false
 NAMESPACE ?= sandbox-system
@@ -185,7 +185,7 @@ deploy:
 all: build-and-push-sandbox-manager build-and-push-sandbox-operator deploy
 
 undeploy:
-	helm uninstall sandbox-manager
+	helm uninstall sandbox-manager -n ${NAMESPACE}
 
 ##@ Dependencies
 

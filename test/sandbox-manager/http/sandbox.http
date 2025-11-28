@@ -21,7 +21,7 @@ X-ACCESS-TOKEN: GG
 
 ### resume sandbox
 
-POST https://api.e2b-demo.ultramarines.cn/sandboxes/code-interpreter-b55cd6bb6-b468n/resume
+POST https://api.e2b-demo.ultramarines.cn/sandboxes/code-interpreter-58c67749bf-tgmhm/resume
 Content-Type: application/json
 X-API-Key: c04c7990-c845-4bba-b824-b294acca45e8
 
@@ -32,6 +32,6 @@ Content-Type: application/json
 X-API-Key: GG
 
 ### get debug info
-GET https://api.e2b-demo.ultramarines.cn/debug/
+GET https://api.e2b-ths.ultramarines.cn/debug/
 Content-Type: application/json
-X-API-Key: GG
+X-API-Key: admin-987654321

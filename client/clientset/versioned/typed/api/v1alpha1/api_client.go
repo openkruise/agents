@@ -28,6 +28,7 @@ import (
 type ApiV1alpha1Interface interface {
 	RESTClient() rest.Interface
 	SandboxesGetter
+	SandboxSetsGetter
 }
 
 // ApiV1alpha1Client is used to interact with features provided by the api group.
@@ -39,14 +40,16 @@ func (c *ApiV1alpha1Client) Sandboxes(namespace string) SandboxInterface {
 	return newSandboxes(c, namespace)
 }
 
+func (c *ApiV1alpha1Client) SandboxSets(namespace string) SandboxSetInterface {
+	return newSandboxSets(c, namespace)
+}
+
 // NewForConfig creates a new ApiV1alpha1Client for the given config.
 // NewForConfig is equivalent to NewForConfigAndClient(c, httpClient),
 // where httpClient was generated with rest.HTTPClientFor(c).
 func NewForConfig(c *rest.Config) (*ApiV1alpha1Client, error) {
 	config := *c
-	if err := setConfigDefaults(&config); err != nil {
-		return nil, err
-	}
+	setConfigDefaults(&config)
 	httpClient, err := rest.HTTPClientFor(&config)
 	if err != nil {
 		return nil, err
@@ -58,9 +61,7 @@ func NewForConfig(c *rest.Config) (*ApiV1alpha1Client, error) {
 // Note the http client provided takes precedence over the configured transport values.
 func NewForConfigAndClient(c *rest.Config, h *http.Client) (*ApiV1alpha1Client, error) {
 	config := *c
-	if err := setConfigDefaults(&config); err != nil {
-		return nil, err
-	}
+	setConfigDefaults(&config)
 	client, err := rest.RESTClientForConfigAndClient(&config, h)
 	if err != nil {
 		return nil, err
@@ -83,7 +84,7 @@ func New(c rest.Interface) *ApiV1alpha1Client {
 	return &ApiV1alpha1Client{c}
 }
 
-func setConfigDefaults(config *rest.Config) error {
+func setConfigDefaults(config *rest.Config) {
 	gv := apiv1alpha1.SchemeGroupVersion
 	config.GroupVersion = &gv
 	config.APIPath = "/apis"
@@ -92,8 +93,6 @@ func setConfigDefaults(config *rest.Config) error {
 	if config.UserAgent == "" {
 		config.UserAgent = rest.DefaultKubernetesUserAgent()
 	}
-
-	return nil
 }
 
 // RESTClient returns a RESTClient that is used to communicate

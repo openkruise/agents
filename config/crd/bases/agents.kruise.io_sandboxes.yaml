@@ -11,10 +11,22 @@ spec:
     kind: Sandbox
     listKind: SandboxList
     plural: sandboxes
+    shortNames:
+    - sbx
     singular: sandbox
   scope: Namespaced
   versions:
-  - name: v1alpha1
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Status
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    - jsonPath: .status.message
+      name: Message
+      type: string
+    name: v1alpha1
     schema:
       openAPIV3Schema:
         description: Sandbox is the Schema for the sandboxes API

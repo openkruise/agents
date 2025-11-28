@@ -24,3 +24,11 @@ type SandboxListerExpansion interface{}
 // SandboxNamespaceListerExpansion allows custom methods to be added to
 // SandboxNamespaceLister.
 type SandboxNamespaceListerExpansion interface{}
+
+// SandboxSetListerExpansion allows custom methods to be added to
+// SandboxSetLister.
+type SandboxSetListerExpansion interface{}
+
+// SandboxSetNamespaceListerExpansion allows custom methods to be added to
+// SandboxSetNamespaceLister.
+type SandboxSetNamespaceListerExpansion interface{}

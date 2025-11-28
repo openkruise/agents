@@ -1,0 +1,43 @@
+apiVersion: agents.kruise.io/v1alpha1
+kind: SandboxSet
+metadata:
+  name: desktop
+  namespace: default
+  annotations:
+    e2b.agents.kruise.io/should-init-envd: "true"
+spec:
+  minPoolSize: 2
+  maxPoolSize: 10
+  highWaterMark: 40%
+  lowWaterMark: 20%
+  maxUnused: 2
+  template:
+    metadata:
+      labels:
+        alibabacloud.com/acs: 'true'
+    spec:
+      containers:
+        - name: sandbox
+          env:
+            - name: GODEBUG
+              value: multipathtcp=0
+          image: registry-cn-hangzhou.ack.aliyuncs.com/ack-demo/e2b-sandbox-desktop:v0.7
+          resources:
+            requests:
+              cpu: 1
+              memory: 1Gi
+            limits:
+              cpu: 1
+              memory: 1Gi
+          ports:
+            - name: vnc
+              containerPort: 6080
+            - name: envd
+              containerPort: 49983
+          startupProbe:
+            tcpSocket:
+              port: 49983
+            initialDelaySeconds: 1
+            periodSeconds: 5
+            timeoutSeconds: 1
+            failureThreshold: 3

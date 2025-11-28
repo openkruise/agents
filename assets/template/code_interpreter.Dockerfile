@@ -1,4 +1,4 @@
-FROM registry.cn-hangzhou.aliyuncs.com/airanthem/mirrors:golang-1.24-alpine AS builder
+FROM golang:1.24-alpine AS builder
 
 # Install dependencies
 RUN apk update && apk add --no-cache git curl bash

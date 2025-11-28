@@ -31,6 +31,7 @@ spec:
             - --leader-elect
             - --health-probe-bind-address=:8081
             - --webhook-cert-path=/home/nonroot/agent-sandbox-operator-webhook-certs
+            - --zap-log-level={{ .Values.sandboxOperator.logLevel }}
           command:
             - /manager
           env:

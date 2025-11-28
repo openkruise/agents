@@ -113,6 +113,7 @@ rules:
       - agents.kruise.io
     resources:
       - sandboxes
+      - sandboxsets
     verbs:
       - create
       - delete
@@ -125,12 +126,14 @@ rules:
       - agents.kruise.io
     resources:
       - sandboxes/finalizers
+      - sandboxsets/finalizers
     verbs:
       - update
   - apiGroups:
       - agents.kruise.io
     resources:
       - sandboxes/status
+      - sandboxsets/status
     verbs:
       - get
       - patch
@@ -176,12 +179,14 @@ rules:
       - agents.kruise.io
     resources:
       - sandboxes
+      - sandboxsets
     verbs:
       - '*'
   - apiGroups:
       - agents.kruise.io
     resources:
       - sandboxes/status
+      - sandboxsets/status
     verbs:
       - get
 ---
@@ -197,6 +202,7 @@ rules:
       - agents.kruise.io
     resources:
       - sandboxes
+      - sandboxsets
     verbs:
       - create
       - delete
@@ -209,6 +215,7 @@ rules:
       - agents.kruise.io
     resources:
       - sandboxes/status
+      - sandboxsets/status
     verbs:
       - get
 ---
@@ -224,6 +231,7 @@ rules:
       - agents.kruise.io
     resources:
       - sandboxes
+      - sandboxsets
     verbs:
       - get
       - list
@@ -232,6 +240,7 @@ rules:
       - agents.kruise.io
     resources:
       - sandboxes/status
+      - sandboxsets/status
     verbs:
       - get
 ---

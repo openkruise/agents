@@ -16,9 +16,9 @@ sandboxManager:
   controller:
     repository: acs-image-test-01-registry.cn-hangzhou.cr.aliyuncs.com/develop/sandbox-manager
     pullPolicy: IfNotPresent
-    tag: develop-20251114121614
+    tag: develop-20251126201632
     logLevel: 1 # set to 5 to see debug logs, set to 7 to see proxy logs
-    infra: acs
+    infra: sandbox-cr
     resources:
       limits:
         cpu: 2000m
@@ -52,13 +52,14 @@ sandboxManager:
 
 sandboxOperator:
   replicaCount: 2
+  logLevel: 5
 
   # Customize controlerManager
   image:
     controllerManager:
       repository: acs-image-test-01-registry.cn-hangzhou.cr.aliyuncs.com/develop/sandbox-controller
       # tag, if defined will use the given image tag, else Chart.AppVersion will be used
-      tag: develop-20251114105943
+      tag: develop-20251128143857
 
   resources:
     requests:

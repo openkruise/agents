@@ -6,8 +6,8 @@ import (
 	"os"
 	"strconv"
 
-	"github.com/openkruise/agents/pkg/sandbox-manager/controllers/e2b"
-	"github.com/openkruise/agents/pkg/sandbox-manager/core/clients"
+	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
+	"github.com/openkruise/agents/pkg/servers/e2b"
 	"k8s.io/klog/v2"
 )
 

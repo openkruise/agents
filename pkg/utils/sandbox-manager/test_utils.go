@@ -8,11 +8,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/openkruise/agents/pkg/sandbox-manager/core/consts"
-	"github.com/openkruise/agents/pkg/sandbox-manager/core/infra"
+	consts2 "github.com/openkruise/agents/pkg/sandbox-manager/consts"
+	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 type FakeSandbox struct {
@@ -176,11 +177,11 @@ func (f FakeSandbox) SetState(context.Context, string) error {
 	return nil
 }
 
-func (f FakeSandbox) SaveTimer(context.Context, int, consts.EventType, bool, string) error {
+func (f FakeSandbox) SaveTimer(context.Context, int, consts2.EventType, bool, string) error {
 	return nil
 }
 
-func (f FakeSandbox) LoadTimers(func(time.Duration, consts.EventType)) error {
+func (f FakeSandbox) LoadTimers(func(time.Duration, consts2.EventType)) error {
 	return nil
 }
 
@@ -202,10 +203,11 @@ func (f FakeSandbox) GetRouteHeader() map[string]string {
 
 var initOnce sync.Once
 
-func InitKLogOutput() {
+func InitLogOutput() {
 	initOnce.Do(func() {
+		logf.SetLogger(klog.NewKlogr())
 		klog.InitFlags(nil)
-		_ = flag.Set("v", fmt.Sprintf("%d", consts.DebugLogLevel))
+		_ = flag.Set("v", fmt.Sprintf("%d", consts2.DebugLogLevel))
 		flag.Parse()
 	})
 }
