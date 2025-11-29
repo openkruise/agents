@@ -17,6 +17,7 @@ limitations under the License.
 package v1alpha1
 
 import (
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -44,7 +45,13 @@ type SandboxSetSpec struct {
 	// Replicas is the number of unused sandboxes, including available and creating ones.
 	Replicas int32 `json:"replicas"`
 
-	SandboxTemplate `json:",inline"`
+	// PersistentContents indicates resume pod with persistent content, Enum: ip, memory, filesystem
+	PersistentContents []string `json:"persistentContents,omitempty"`
+
+	// Template describes the pods that will be created.
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:Schemaless
+	Template v1.PodTemplateSpec `json:"template"`
 }
 
 // SandboxSetStatus defines the observed state of SandboxSet.
