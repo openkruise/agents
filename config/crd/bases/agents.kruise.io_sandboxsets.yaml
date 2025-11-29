@@ -55,6 +55,12 @@ spec:
           spec:
             description: spec defines the desired state of SandboxSet
             properties:
+              persistentContents:
+                description: 'PersistentContents indicates resume pod with persistent
+                  content, Enum: ip, memory, filesystem'
+                items:
+                  type: string
+                type: array
               replicas:
                 description: Replicas is the number of unused sandboxes, including
                   available and creating ones.

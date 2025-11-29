@@ -35,11 +35,24 @@ type SandboxSpec struct {
 	// +optional
 	Paused bool `json:"paused,omitempty"`
 
+	SandboxTemplate `json:",inline"`
+}
+
+type SandboxTemplate struct {
+	// PersistentContents indicates resume pod with persistent content, Enum: ip, memory, filesystem
+	PersistentContents []string `json:"persistentContents,omitempty"`
+
 	// Template describes the pods that will be created.
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +kubebuilder:validation:Schemaless
 	Template v1.PodTemplateSpec `json:"template"`
 }
+
+const (
+	PersistentContentIp         string = "ip"
+	PersistentContentMemory     string = "memory"
+	PersistentContentFilesystem string = "filesystem"
+)
 
 // SandboxStatus defines the observed state of Sandbox.
 type SandboxStatus struct {

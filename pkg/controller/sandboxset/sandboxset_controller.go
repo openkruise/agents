@@ -236,7 +236,10 @@ func (r *Reconciler) createSandbox(ctx context.Context, sbs *agentsv1alpha1.Sand
 			Annotations:  sbs.Spec.Template.Annotations,
 		},
 		Spec: agentsv1alpha1.SandboxSpec{
-			Template: sbs.Spec.Template,
+			SandboxTemplate: agentsv1alpha1.SandboxTemplate{
+				Template:           sbs.Spec.Template,
+				PersistentContents: sbs.Spec.PersistentContents,
+			},
 		},
 	}
 	sbx.Annotations = clearAndInitInnerKeys(sbx.Annotations)

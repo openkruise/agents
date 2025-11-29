@@ -54,6 +54,12 @@ spec:
               paused:
                 description: Paused indicates whether pause the sandbox pod.
                 type: boolean
+              persistentContents:
+                description: 'PersistentContents indicates resume pod with persistent
+                  content, Enum: ip, memory, filesystem'
+                items:
+                  type: string
+                type: array
               template:
                 description: Template describes the pods that will be created.
                 x-kubernetes-preserve-unknown-fields: true
