@@ -19,6 +19,7 @@ package sandbox
 import (
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"reflect"
 	"time"
@@ -31,6 +32,7 @@ import (
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -42,7 +44,12 @@ import (
 	"github.com/openkruise/agents/pkg/utils"
 )
 
+func init() {
+	flag.IntVar(&concurrentReconciles, "sandbox-workers", concurrentReconciles, "Max concurrent workers for Sandbox controller.")
+}
+
 var (
+	concurrentReconciles  = 100
 	sandboxControllerKind = agentsv1alpha1.GroupVersion.WithKind("Sandbox")
 )
 
@@ -229,6 +236,7 @@ func (r *SandboxReconciler) getControl(pod *corev1.Pod) core.SandboxControl {
 // SetupWithManager sets up the controller with the Manager.
 func (r *SandboxReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
+		WithOptions(controller.Options{MaxConcurrentReconciles: concurrentReconciles}).
 		For(&agentsv1alpha1.Sandbox{}).
 		Named("sandbox").
 		Watches(&agentsv1alpha1.Sandbox{}, &handler.EnqueueRequestForObject{}).
