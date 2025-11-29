@@ -1,5 +1,10 @@
 # Adds namespace to all resources.
 namespace: sandbox-system
 
+namePrefix: controller-
+
 resources:
-- manifests.yaml
+  - manifests.yaml
+
+patchesStrategicMerge:
+  - patch_manifests.yaml

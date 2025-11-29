@@ -11,7 +11,7 @@ COPY ../go.sum go.sum
 # and so that source changes don't invalidate our downloaded layer
 
 # Copy the go source
-COPY ../cmd/agent-sandbox-operator/main.go cmd/main.go
+COPY ../cmd/agent-sandbox-controller/main.go cmd/main.go
 COPY ../api api/
 COPY ../pkg pkg/
 COPY ../client client/

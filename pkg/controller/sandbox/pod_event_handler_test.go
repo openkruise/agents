@@ -83,11 +83,9 @@ func TestSandboxPodEventHandler_Create(t *testing.T) {
 			name: "有enable-paused注解",
 			pod: &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-pod",
-					Namespace: "default",
-					Annotations: map[string]string{
-						utils.PodAnnotationEnablePaused: utils.CreatedBySandbox,
-					},
+					Name:        "test-pod",
+					Namespace:   "default",
+					Annotations: map[string]string{},
 				},
 			},
 			shouldAddToQueue: true,
@@ -106,11 +104,9 @@ func TestSandboxPodEventHandler_Create(t *testing.T) {
 			name: "enable-paused注解为空",
 			pod: &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-pod",
-					Namespace: "default",
-					Annotations: map[string]string{
-						utils.PodAnnotationEnablePaused: "",
-					},
+					Name:        "test-pod",
+					Namespace:   "default",
+					Annotations: map[string]string{},
 				},
 			},
 			shouldAddToQueue: false,

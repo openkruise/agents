@@ -3,26 +3,3 @@ kind: ConfigMap
 metadata:
   name: configuration
   namespace: system
-data:
-  sandbox.resume.acs.pod.persistent.content.json: |
-    {
-      "annotationKeys": [
-        "alibabacloud.com/instance-id",
-        "ProviderCreate",
-        "alibabacloud.com/cpu-vendors",
-        "alibabacloud.com/pod-ephemeral-storage",
-        "alibabacloud.com/pod-use-spec",
-        "alibabacloud.com/required-timezone",
-        "alibabacloud.com/schedule-result",
-        "kubernetes.io/pod-stream-port",
-        "kubernetes.io/resource-type",
-        "ops.alibabacloud.com/pause-enabled",
-        "topology.kubernetes.io/region",
-        "topology.kubernetes.io/zone"
-      ],
-      "labelKeys": [
-        "alibabacloud.com/acs",
-        "alibabacloud.com/compute-class",
-        "alibabacloud.com/compute-qos"
-      ]
-    }

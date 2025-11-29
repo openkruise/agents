@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
-	"github.com/openkruise/agents/pkg/webhook/pods"
 	"github.com/openkruise/agents/pkg/webhook/sandboxset"
 	"github.com/openkruise/agents/pkg/webhook/types"
 	"k8s.io/client-go/rest"
@@ -26,7 +25,6 @@ var (
 )
 
 func init() {
-	HandlerGetters = append(HandlerGetters, pods.GetHandlerGetters()...)
 	HandlerGetters = append(HandlerGetters, sandboxset.GetHandlerGetters()...)
 }
 

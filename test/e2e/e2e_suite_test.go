@@ -17,7 +17,6 @@ limitations under the License.
 package e2e
 
 import (
-	"context"
 	"fmt"
 	"testing"
 
@@ -25,11 +24,9 @@ import (
 	"github.com/onsi/ginkgo/v2/types"
 	. "github.com/onsi/gomega"
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/test/e2e/utils"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/util/rand"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 )
@@ -74,21 +71,4 @@ func TestE2E(t *testing.T) {
 	customReporterConfig.Verbose = true
 
 	RunSpecs(t, "e2e suite", customSuiteConfig, customReporterConfig)
-}
-
-func CreatePod(ctx context.Context, describe, it string, modifiers ...func(*corev1.PodTemplateSpec)) (pod *corev1.Pod, cleanup func()) {
-	template := utils.GetPodTemplate(map[string]string{
-		LabelDescribe: describe,
-		LabelIt:       it,
-	}, nil, modifiers...)
-	pod = &corev1.Pod{
-		ObjectMeta: template.ObjectMeta,
-		Spec:       template.Spec,
-	}
-	pod.Name = fmt.Sprintf("%s-%s-%s", describe, it, rand.String(5))
-	pod.Namespace = Namespace
-	Expect(k8sClient.Create(ctx, pod)).To(Succeed())
-	return pod, func() {
-		Expect(k8sClient.Delete(ctx, pod)).To(Succeed())
-	}
 }

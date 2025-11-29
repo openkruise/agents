@@ -112,57 +112,6 @@ func DumpJson(o interface{}) string {
 	return string(by)
 }
 
-func InjectResumedPod(box *agentsv1alpha1.Sandbox, pod *corev1.Pod) {
-	if pod.Annotations == nil {
-		pod.Annotations = make(map[string]string)
-	}
-	if pod.Labels == nil {
-		pod.Labels = make(map[string]string)
-	}
-	// 添加保存在 sandbox status 中的 annotations
-	for k, v := range box.Status.PodInfo.Annotations {
-		pod.Annotations[k] = v
-	}
-	for k, v := range box.Status.PodInfo.Labels {
-		pod.Labels[k] = v
-	}
-	pod.Spec.NodeName = box.Status.PodInfo.NodeName
-	// Inject tolerations
-	injectAcsPodTolerations(pod)
-}
-
-func injectAcsPodTolerations(pod *corev1.Pod) {
-	curTolerations := sets.NewString()
-	for _, toleration := range pod.Spec.Tolerations {
-		curTolerations.Insert(toleration.Key)
-	}
-
-	acsTolerations := []corev1.Toleration{
-		{
-			Key:      TolerationVirtualKubeletProviderKey,
-			Operator: corev1.TolerationOpEqual,
-			Value:    TolerationVirtualKubeletProviderValue,
-			Effect:   corev1.TaintEffectNoSchedule,
-		},
-		{
-			Key:      TolerationNodeNotReadyKey,
-			Operator: corev1.TolerationOpExists,
-			Effect:   corev1.TaintEffectNoExecute,
-		},
-		{
-			Key:      TolerationNodeUnreachableKey,
-			Operator: corev1.TolerationOpExists,
-			Effect:   corev1.TaintEffectNoExecute,
-		},
-	}
-	for i := range acsTolerations {
-		obj := acsTolerations[i]
-		if !curTolerations.Has(obj.Key) {
-			pod.Spec.Tolerations = append(pod.Spec.Tolerations, obj)
-		}
-	}
-}
-
 var klogInitOnce sync.Once
 
 func InitKLogOutput() {
@@ -215,28 +164,4 @@ func DoItSlowly(count int, initialBatchSize int, fn func() error) (int, error) {
 		remaining -= batchSize
 	}
 	return successes, nil
-}
-
-// NeedsBypassSandbox 判断 pod 是否启用旁路 sandbox 能力，即需要控制器根据 pod 上的 pause 协议创建、修改相应的 Sandbox 资源
-func NeedsBypassSandbox(pod *corev1.Pod) bool {
-	if pod.DeletionTimestamp != nil {
-		return false
-	}
-	// 使用旁路 Sandbox 必须要启用 pause 功能
-	if pod.Annotations[PodAnnotationEnablePaused] != True {
-		return false
-	}
-	// 使用旁路 Sandbox 必须要带有 webhook 过滤标签
-	if pod.Labels[PodLabelEnableAutoCreateSandbox] != True {
-		return false
-	}
-	pausedCond := GetPodCondition(&pod.Status, PodConditionContainersPaused)
-	resumeCond := GetPodCondition(&pod.Status, PodConditionContainersResumed)
-	if pausedCond != nil || resumeCond != nil {
-		// pause / resume 流程中的 Pod 跳过状态判断
-		return true
-	} else {
-		// 非 pause / resume 流程中的 Pod 需要判断状态
-		return corev1.PodSucceeded != pod.Status.Phase && corev1.PodFailed != pod.Status.Phase
-	}
 }

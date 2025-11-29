@@ -64,8 +64,10 @@ type SandboxStatus struct {
 	// The status of each condition is one of True, False, or Unknown.
 	// +listType=map
 	// +listMapKey=type
+	// +patchMergeKey=type
+	// +patchStrategy=merge
 	// +optional
-	Conditions []metav1.Condition `json:"conditions,omitempty"`
+	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
 
 	// Pod Info
 	PodInfo PodInfo `json:"podInfo,omitempty"`

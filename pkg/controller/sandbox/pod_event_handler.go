@@ -14,7 +14,7 @@ import (
 type SandboxPodEventHandler struct{}
 
 func (e *SandboxPodEventHandler) Create(_ context.Context, evt event.TypedCreateEvent[client.Object], w workqueue.TypedRateLimitingInterface[reconcile.Request]) {
-	if evt.Object.GetAnnotations()[utils.PodAnnotationEnablePaused] != "" {
+	if evt.Object.GetAnnotations()[utils.PodAnnotationCreatedBy] != "" {
 		w.Add(reconcile.Request{NamespacedName: client.ObjectKeyFromObject(evt.Object)})
 	}
 }

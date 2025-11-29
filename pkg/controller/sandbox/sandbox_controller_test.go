@@ -60,11 +60,9 @@ var (
 
 	podDemo = &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-box-1",
-			Namespace: "default",
-			Annotations: map[string]string{
-				utils.PodAnnotationAcsInstanceId: "acs-2ze00987m29zidm3kiwy",
-			},
+			Name:            "test-box-1",
+			Namespace:       "default",
+			Annotations:     map[string]string{},
 			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(boxDemo, sandboxControllerKind)},
 		},
 		Spec: corev1.PodSpec{
@@ -127,8 +125,7 @@ func TestSandboxReconcile(t *testing.T) {
 				obj := podDemo.DeepCopy()
 				obj.Status = corev1.PodStatus{}
 				obj.Annotations = map[string]string{
-					utils.PodAnnotationCreatedBy:    utils.CreatedBySandbox,
-					utils.PodAnnotationEnablePaused: utils.True,
+					utils.PodAnnotationCreatedBy: utils.CreatedBySandbox,
 				}
 				obj.Spec.NodeName = ""
 				return obj
@@ -169,11 +166,9 @@ func TestSandboxReconcile(t *testing.T) {
 						},
 					},
 					PodInfo: agentsv1alpha1.PodInfo{
-						Annotations: map[string]string{
-							utils.PodAnnotationAcsInstanceId: "acs-2ze00987m29zidm3kiwy",
-						},
-						NodeName: "virtual-kubelet-cn-beijing-d",
-						PodIP:    "172.17.0.61",
+						Annotations: map[string]string{},
+						NodeName:    "virtual-kubelet-cn-beijing-d",
+						PodIP:       "172.17.0.61",
 					},
 				}
 				return obj
@@ -205,11 +200,9 @@ func TestSandboxReconcile(t *testing.T) {
 						},
 					},
 					PodInfo: agentsv1alpha1.PodInfo{
-						Annotations: map[string]string{
-							utils.PodAnnotationAcsInstanceId: "acs-2ze00987m29zidm3kiwy",
-						},
-						NodeName: "virtual-kubelet-cn-beijing-d",
-						PodIP:    "172.17.0.61",
+						Annotations: map[string]string{},
+						NodeName:    "virtual-kubelet-cn-beijing-d",
+						PodIP:       "172.17.0.61",
 					},
 				}
 				return obj
@@ -238,11 +231,9 @@ func TestSandboxReconcile(t *testing.T) {
 						},
 					},
 					PodInfo: agentsv1alpha1.PodInfo{
-						Annotations: map[string]string{
-							utils.PodAnnotationAcsInstanceId: "acs-2ze00987m29zidm3kiwy",
-						},
-						NodeName: "virtual-kubelet-cn-beijing-d",
-						PodIP:    "172.17.0.61",
+						Annotations: map[string]string{},
+						NodeName:    "virtual-kubelet-cn-beijing-d",
+						PodIP:       "172.17.0.61",
 					},
 				}
 				return obj
@@ -275,11 +266,9 @@ func TestSandboxReconcile(t *testing.T) {
 						},
 					},
 					PodInfo: agentsv1alpha1.PodInfo{
-						Annotations: map[string]string{
-							utils.PodAnnotationAcsInstanceId: "acs-2ze00987m29zidm3kiwy",
-						},
-						NodeName: "virtual-kubelet-cn-beijing-d",
-						PodIP:    "172.17.0.61",
+						Annotations: map[string]string{},
+						NodeName:    "virtual-kubelet-cn-beijing-d",
+						PodIP:       "172.17.0.61",
 					},
 				}
 				return obj
@@ -315,22 +304,16 @@ func TestSandboxReconcile(t *testing.T) {
 						},
 					},
 					PodInfo: agentsv1alpha1.PodInfo{
-						Annotations: map[string]string{
-							utils.PodAnnotationAcsInstanceId: "acs-2ze00987m29zidm3kiwy",
-						},
-						NodeName: "virtual-kubelet-cn-beijing-d",
-						PodIP:    "172.17.0.61",
+						Annotations: map[string]string{},
+						NodeName:    "virtual-kubelet-cn-beijing-d",
+						PodIP:       "172.17.0.61",
 					},
 				}
 				return obj
 			},
 			expectedPod: func() *corev1.Pod {
 				obj := podDemo.DeepCopy()
-				obj.Annotations = map[string]string{
-					utils.PodAnnotationAcsInstanceId:   "acs-2ze00987m29zidm3kiwy",
-					utils.PodAnnotationSandboxPause:    "true",
-					utils.PodAnnotationReserveInstance: "true",
-				}
+				obj.Annotations = map[string]string{}
 				obj.Status.Conditions = []corev1.PodCondition{
 					{
 						Type:               corev1.PodReady,
@@ -363,11 +346,9 @@ func TestSandboxReconcile(t *testing.T) {
 						},
 					},
 					PodInfo: agentsv1alpha1.PodInfo{
-						Annotations: map[string]string{
-							utils.PodAnnotationAcsInstanceId: "acs-2ze00987m29zidm3kiwy",
-						},
-						NodeName: "virtual-kubelet-cn-beijing-d",
-						PodIP:    "172.17.0.61",
+						Annotations: map[string]string{},
+						NodeName:    "virtual-kubelet-cn-beijing-d",
+						PodIP:       "172.17.0.61",
 					},
 				}
 				return obj
@@ -395,11 +376,9 @@ func TestSandboxReconcile(t *testing.T) {
 						},
 					},
 					PodInfo: agentsv1alpha1.PodInfo{
-						Annotations: map[string]string{
-							utils.PodAnnotationAcsInstanceId: "acs-2ze00987m29zidm3kiwy",
-						},
-						NodeName: "virtual-kubelet-cn-beijing-d",
-						PodIP:    "172.17.0.61",
+						Annotations: map[string]string{},
+						NodeName:    "virtual-kubelet-cn-beijing-d",
+						PodIP:       "172.17.0.61",
 					},
 				}
 				return obj
@@ -430,11 +409,9 @@ func TestSandboxReconcile(t *testing.T) {
 						},
 					},
 					PodInfo: agentsv1alpha1.PodInfo{
-						Annotations: map[string]string{
-							utils.PodAnnotationAcsInstanceId: "acs-2ze00987m29zidm3kiwy",
-						},
-						NodeName: "virtual-kubelet-cn-beijing-d",
-						PodIP:    "172.17.0.61",
+						Annotations: map[string]string{},
+						NodeName:    "virtual-kubelet-cn-beijing-d",
+						PodIP:       "172.17.0.61",
 					},
 				}
 				return obj
@@ -462,21 +439,16 @@ func TestSandboxReconcile(t *testing.T) {
 						},
 					},
 					PodInfo: agentsv1alpha1.PodInfo{
-						Annotations: map[string]string{
-							utils.PodAnnotationAcsInstanceId: "acs-2ze00987m29zidm3kiwy",
-						},
-						NodeName: "virtual-kubelet-cn-beijing-d",
-						PodIP:    "172.17.0.61",
+						Annotations: map[string]string{},
+						NodeName:    "virtual-kubelet-cn-beijing-d",
+						PodIP:       "172.17.0.61",
 					},
 				}
 				return obj
 			},
 			expectedPod: func() *corev1.Pod {
 				obj := podDemo.DeepCopy()
-				obj.Annotations = map[string]string{
-					utils.PodAnnotationAcsInstanceId: "acs-2ze00987m29zidm3kiwy",
-					utils.PodAnnotationSandboxPause:  "true",
-				}
+				obj.Annotations = map[string]string{}
 				obj.Status = corev1.PodStatus{}
 				return obj
 			},
@@ -503,21 +475,16 @@ func TestSandboxReconcile(t *testing.T) {
 						},
 					},
 					PodInfo: agentsv1alpha1.PodInfo{
-						Annotations: map[string]string{
-							utils.PodAnnotationAcsInstanceId: "acs-2ze00987m29zidm3kiwy",
-						},
-						NodeName: "virtual-kubelet-cn-beijing-d",
-						PodIP:    "172.17.0.61",
+						Annotations: map[string]string{},
+						NodeName:    "virtual-kubelet-cn-beijing-d",
+						PodIP:       "172.17.0.61",
 					},
 				}
 				return obj
 			},
 			getPod: func() *corev1.Pod {
 				obj := podDemo.DeepCopy()
-				obj.Annotations = map[string]string{
-					utils.PodAnnotationAcsInstanceId: "acs-2ze00987m29zidm3kiwy",
-					utils.PodAnnotationSandboxPause:  "true",
-				}
+				obj.Annotations = map[string]string{}
 				obj.Status = corev1.PodStatus{}
 				return obj
 			},
@@ -541,21 +508,16 @@ func TestSandboxReconcile(t *testing.T) {
 						},
 					},
 					PodInfo: agentsv1alpha1.PodInfo{
-						Annotations: map[string]string{
-							utils.PodAnnotationAcsInstanceId: "acs-2ze00987m29zidm3kiwy",
-						},
-						NodeName: "virtual-kubelet-cn-beijing-d",
-						PodIP:    "172.17.0.61",
+						Annotations: map[string]string{},
+						NodeName:    "virtual-kubelet-cn-beijing-d",
+						PodIP:       "172.17.0.61",
 					},
 				}
 				return obj
 			},
 			expectedPod: func() *corev1.Pod {
 				obj := podDemo.DeepCopy()
-				obj.Annotations = map[string]string{
-					utils.PodAnnotationAcsInstanceId: "acs-2ze00987m29zidm3kiwy",
-					utils.PodAnnotationSandboxPause:  "false",
-				}
+				obj.Annotations = map[string]string{}
 				obj.Status = corev1.PodStatus{}
 				return obj
 			},
@@ -582,21 +544,16 @@ func TestSandboxReconcile(t *testing.T) {
 						},
 					},
 					PodInfo: agentsv1alpha1.PodInfo{
-						Annotations: map[string]string{
-							utils.PodAnnotationAcsInstanceId: "acs-2ze00987m29zidm3kiwy",
-						},
-						NodeName: "virtual-kubelet-cn-beijing-d",
-						PodIP:    "172.17.0.61",
+						Annotations: map[string]string{},
+						NodeName:    "virtual-kubelet-cn-beijing-d",
+						PodIP:       "172.17.0.61",
 					},
 				}
 				return obj
 			},
 			getPod: func() *corev1.Pod {
 				obj := podDemo.DeepCopy()
-				obj.Annotations = map[string]string{
-					utils.PodAnnotationAcsInstanceId: "acs-2ze00987m29zidm3kiwy",
-					utils.PodAnnotationSandboxPause:  "false",
-				}
+				obj.Annotations = map[string]string{}
 				return obj
 			},
 			expected: func() *agentsv1alpha1.Sandbox {
@@ -613,21 +570,16 @@ func TestSandboxReconcile(t *testing.T) {
 						},
 					},
 					PodInfo: agentsv1alpha1.PodInfo{
-						Annotations: map[string]string{
-							utils.PodAnnotationAcsInstanceId: "acs-2ze00987m29zidm3kiwy",
-						},
-						NodeName: "virtual-kubelet-cn-beijing-d",
-						PodIP:    "172.17.0.61",
+						Annotations: map[string]string{},
+						NodeName:    "virtual-kubelet-cn-beijing-d",
+						PodIP:       "172.17.0.61",
 					},
 				}
 				return obj
 			},
 			expectedPod: func() *corev1.Pod {
 				obj := podDemo.DeepCopy()
-				obj.Annotations = map[string]string{
-					utils.PodAnnotationAcsInstanceId: "acs-2ze00987m29zidm3kiwy",
-					utils.PodAnnotationSandboxPause:  "false",
-				}
+				obj.Annotations = map[string]string{}
 				return obj
 			},
 		},
@@ -653,11 +605,9 @@ func TestSandboxReconcile(t *testing.T) {
 						},
 					},
 					PodInfo: agentsv1alpha1.PodInfo{
-						Annotations: map[string]string{
-							utils.PodAnnotationAcsInstanceId: "acs-2ze00987m29zidm3kiwy",
-						},
-						NodeName: "virtual-kubelet-cn-beijing-d",
-						PodIP:    "172.17.0.61",
+						Annotations: map[string]string{},
+						NodeName:    "virtual-kubelet-cn-beijing-d",
+						PodIP:       "172.17.0.61",
 					},
 				}
 				return obj
@@ -667,9 +617,7 @@ func TestSandboxReconcile(t *testing.T) {
 			},
 			expected: func() *agentsv1alpha1.Sandbox {
 				obj := boxDemo.DeepCopy()
-				obj.Annotations = map[string]string{
-					utils.SandboxAnnotationEnableVKDeleteInstance: "true",
-				}
+				obj.Annotations = map[string]string{}
 				obj.Finalizers = []string{utils.SandboxFinalizer}
 				obj.Spec.Paused = true
 				obj.DeletionTimestamp = &nt
@@ -689,11 +637,9 @@ func TestSandboxReconcile(t *testing.T) {
 						},
 					},
 					PodInfo: agentsv1alpha1.PodInfo{
-						Annotations: map[string]string{
-							utils.PodAnnotationAcsInstanceId: "acs-2ze00987m29zidm3kiwy",
-						},
-						NodeName: "virtual-kubelet-cn-beijing-d",
-						PodIP:    "172.17.0.61",
+						Annotations: map[string]string{},
+						NodeName:    "virtual-kubelet-cn-beijing-d",
+						PodIP:       "172.17.0.61",
 					},
 				}
 				return obj
@@ -718,21 +664,16 @@ func TestSandboxReconcile(t *testing.T) {
 						},
 					},
 					PodInfo: agentsv1alpha1.PodInfo{
-						Annotations: map[string]string{
-							utils.PodAnnotationAcsInstanceId: "acs-2ze00987m29zidm3kiwy",
-						},
-						NodeName: "virtual-kubelet-cn-beijing-d",
-						PodIP:    "172.17.0.61",
+						Annotations: map[string]string{},
+						NodeName:    "virtual-kubelet-cn-beijing-d",
+						PodIP:       "172.17.0.61",
 					},
 				}
 				return obj
 			},
 			getPod: func() *corev1.Pod {
 				obj := podDemo.DeepCopy()
-				obj.Annotations = map[string]string{
-					utils.PodAnnotationAcsInstanceId: "acs-2ze00987m29zidm3kiwy",
-					utils.PodAnnotationSandboxPause:  "false",
-				}
+				obj.Annotations = map[string]string{}
 				return obj
 			},
 			expected: func() *agentsv1alpha1.Sandbox {
@@ -750,11 +691,9 @@ func TestSandboxReconcile(t *testing.T) {
 						},
 					},
 					PodInfo: agentsv1alpha1.PodInfo{
-						Annotations: map[string]string{
-							utils.PodAnnotationAcsInstanceId: "acs-2ze00987m29zidm3kiwy",
-						},
-						NodeName: "virtual-kubelet-cn-beijing-d",
-						PodIP:    "172.17.0.61",
+						Annotations: map[string]string{},
+						NodeName:    "virtual-kubelet-cn-beijing-d",
+						PodIP:       "172.17.0.61",
 					},
 				}
 				return obj
@@ -780,11 +719,9 @@ func TestSandboxReconcile(t *testing.T) {
 						},
 					},
 					PodInfo: agentsv1alpha1.PodInfo{
-						Annotations: map[string]string{
-							utils.PodAnnotationAcsInstanceId: "acs-2ze00987m29zidm3kiwy",
-						},
-						NodeName: "virtual-kubelet-cn-beijing-d",
-						PodIP:    "172.17.0.61",
+						Annotations: map[string]string{},
+						NodeName:    "virtual-kubelet-cn-beijing-d",
+						PodIP:       "172.17.0.61",
 					},
 				}
 				return obj

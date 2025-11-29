@@ -19,7 +19,6 @@ package controller
 import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
-	bypass_sandbox "github.com/openkruise/agents/pkg/controller/bypass-sandbox"
 	"github.com/openkruise/agents/pkg/controller/sandbox"
 	"github.com/openkruise/agents/pkg/controller/sandboxset"
 )
@@ -28,7 +27,6 @@ var controllerAddFuncs []func(manager.Manager) error
 
 func init() {
 	controllerAddFuncs = append(controllerAddFuncs, sandbox.Add)
-	controllerAddFuncs = append(controllerAddFuncs, bypass_sandbox.Add)
 	controllerAddFuncs = append(controllerAddFuncs, sandboxset.Add)
 }
 
