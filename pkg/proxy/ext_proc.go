@@ -14,6 +14,7 @@ import (
 	types "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"github.com/go-logr/logr"
 	"github.com/google/uuid"
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"k8s.io/klog/v2"
@@ -94,7 +95,8 @@ func (s *Server) handleRequestHeaders(requestHeaders *extProcPb.ProcessingReques
 	log.Info("request mapped", "sandboxID", sandboxID, "sandboxPort", sandboxPort, "extraHeaders", extraHeaders, "user", user)
 
 	route, ok := s.LoadRoute(sandboxID)
-	if !ok {
+	if !ok || route.State != agentsv1alpha1.SandboxStateRunning {
+		log.Info("route not found", "exists", ok, "state", route.State)
 		// Return 404 Not Found error
 		errorMsg := fmt.Sprintf("route for sandbox %s not found", sandboxID)
 		return s.logAndCreateErrorResponse(404, errorMsg, log)

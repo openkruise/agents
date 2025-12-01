@@ -10,7 +10,6 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/errors"
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
@@ -19,10 +18,27 @@ import (
 	"k8s.io/client-go/util/retry"
 )
 
+func ConvertPodToSandboxCR(pod *corev1.Pod) *agentsv1alpha1.Sandbox {
+	return &agentsv1alpha1.Sandbox{
+		ObjectMeta: pod.ObjectMeta,
+		Spec: agentsv1alpha1.SandboxSpec{
+			Template: corev1.PodTemplateSpec{
+				Spec: pod.Spec,
+			},
+		},
+		Status: agentsv1alpha1.SandboxStatus{
+			Phase: agentsv1alpha1.SandboxPhase(pod.Status.Phase),
+			PodInfo: agentsv1alpha1.PodInfo{
+				PodIP: pod.Status.PodIP,
+			},
+		},
+	}
+}
+
 func setupTestManager(t *testing.T) *SandboxManager {
 	// 创建fake client set
 	client := clients.NewFakeClientSet()
-	manager, err := NewSandboxManager("default", client, nil, nil, consts.InfraSandboxCR)
+	manager, err := NewSandboxManager("default", client, nil, consts.InfraSandboxCR)
 	if err != nil {
 		t.Fatalf("Failed to create manager: %v", err)
 	}
@@ -133,15 +149,7 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 			} else {
 				assert.NoError(t, err)
 				time.Sleep(100 * time.Millisecond)
-				// check timer
-				err = got.LoadTimers(func(after time.Duration, eventType consts.EventType) {
-					offset := time.Duration(tt.timeout)*time.Second - after
-					assert.True(t, offset > 0)
-					assert.True(t, offset < time.Second)
-					assert.Equal(t, consts.SandboxKill, eventType)
-				})
-				assert.NoError(t, err)
-				// check router
+				// check route
 				route, ok := manager.proxy.LoadRoute(got.GetName())
 				assert.True(t, ok)
 				assert.Equal(t, testSbx.Name, route.ID)
@@ -545,117 +553,6 @@ func TestSandboxManager_DeleteClaimedPod(t *testing.T) {
 				_, err := client.ApiV1alpha1().Sandboxes("default").Get(context.Background(), tt.sandboxID, metav1.GetOptions{})
 				if err == nil {
 					t.Errorf("Expected pod to be deleted but it still exists")
-				}
-			}
-		})
-	}
-}
-
-func TestSandboxManager_SetSandboxTimeout(t *testing.T) {
-	runningSbx := &agentsv1alpha1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "running-sbx",
-			Namespace: "default",
-			Labels: map[string]string{
-				agentsv1alpha1.LabelSandboxID:    "running-sbx",
-				agentsv1alpha1.LabelSandboxState: agentsv1alpha1.SandboxStateRunning,
-			},
-		},
-		Status: agentsv1alpha1.SandboxStatus{
-			Phase: agentsv1alpha1.SandboxRunning,
-		},
-	}
-
-	pausedSbx := &agentsv1alpha1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "paused-sbx",
-			Namespace: "default",
-			Labels: map[string]string{
-				agentsv1alpha1.LabelSandboxID:    "paused-sbx",
-				agentsv1alpha1.LabelSandboxState: agentsv1alpha1.SandboxStatePaused,
-			},
-		},
-		Status: agentsv1alpha1.SandboxStatus{
-			Phase: agentsv1alpha1.SandboxPaused,
-		},
-	}
-
-	tests := []struct {
-		name              string
-		sbx               *agentsv1alpha1.Sandbox
-		seconds           int
-		expectError       bool
-		expectedErrorCode errors.ErrorCode
-	}{
-		{
-			name:              "Set timeout for running sbx",
-			sbx:               runningSbx.DeepCopy(),
-			seconds:           10,
-			expectError:       false,
-			expectedErrorCode: "",
-		},
-		{
-			name:              "Set timeout for paused sbx should return error",
-			sbx:               pausedSbx.DeepCopy(),
-			seconds:           10,
-			expectError:       true,
-			expectedErrorCode: errors.ErrorConflict,
-		},
-		{
-			name:              "Set timeout with invalid seconds",
-			sbx:               runningSbx.DeepCopy(),
-			seconds:           -1,
-			expectError:       true, // Should fail in SetTimer
-			expectedErrorCode: errors.ErrorBadRequest,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			manager := setupTestManager(t)
-			client := manager.client.SandboxClient
-			// 添加pods到fake client
-			sbxs := []*agentsv1alpha1.Sandbox{runningSbx.DeepCopy(), pausedSbx.DeepCopy()}
-			for _, sbx := range sbxs {
-				_, err := client.ApiV1alpha1().Sandboxes("default").Create(context.Background(), sbx, metav1.CreateOptions{})
-				if err != nil {
-					t.Fatalf("Failed to create test sbx %s: %v", sbx.Name, err)
-				}
-			}
-
-			// 等待informer同步
-			time.Sleep(100 * time.Millisecond)
-
-			sbx := manager.infra.(*sandboxcr.Infra).AsSandbox(tt.sbx)
-			err := manager.SetSandboxTimeout(context.Background(), sbx, tt.seconds)
-
-			if tt.expectError {
-				if err == nil {
-					t.Errorf("Expected error but got none")
-				} else if errors.GetErrCode(err) != tt.expectedErrorCode {
-					t.Errorf("Expected error code %s, got %s", tt.expectedErrorCode, errors.GetErrCode(err))
-				}
-			} else {
-				if err != nil {
-					t.Errorf("Unexpected error: %v", err)
-				}
-
-				// 验证定时器条件是否设置
-				updatedPod, err := client.ApiV1alpha1().Sandboxes("default").Get(context.Background(), tt.sbx.Name, metav1.GetOptions{})
-				if err != nil {
-					t.Fatalf("Failed to get updated sbx: %v", err)
-				}
-
-				hasTimerCondition := false
-				for _, condition := range updatedPod.Status.Conditions {
-					if condition.Type == ("SandboxTimer." + string(consts.SandboxKill)) {
-						hasTimerCondition = true
-						break
-					}
-				}
-
-				if !hasTimerCondition {
-					t.Errorf("Expected timer condition to be set")
 				}
 			}
 		})

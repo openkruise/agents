@@ -106,7 +106,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		log.Error(err, "failed to init new status")
 		return ctrl.Result{}, err
 	}
-	groups, err := r.GroupAllSandboxes(ctx, sbs, newStatus.UpdateRevision)
+	groups, err := r.groupAllSandboxes(ctx, sbs)
 	if err != nil {
 		log.Error(err, "failed to group sandboxes")
 		return ctrl.Result{}, err
@@ -178,20 +178,27 @@ func (r *Reconciler) removeOwnerReference(ctx context.Context, idx int, sbx *age
 		return fmt.Errorf("index out of range: %d", idx)
 	}
 	// Remove the owner reference at the specified index
-	sbx.OwnerReferences = append(sbx.OwnerReferences[:idx], sbx.OwnerReferences[idx+1:]...)
+	if idx == len(sbx.OwnerReferences)-1 {
+		sbx.OwnerReferences = sbx.OwnerReferences[:idx]
+	} else {
+		sbx.OwnerReferences = append(sbx.OwnerReferences[:idx], sbx.OwnerReferences[idx+1:]...)
+	}
 	return r.Update(ctx, sbx)
 }
 
 func (r *Reconciler) processCreatedSandboxes(ctx context.Context, creating []*agentsv1alpha1.Sandbox, sbs *agentsv1alpha1.SandboxSet) error {
+	now := time.Now()
 	for _, sbx := range creating {
 		log := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
 		cond := utils.GetSandboxCondition(&sbx.Status, string(agentsv1alpha1.SandboxConditionReady))
 		if cond != nil && cond.Status == metav1.ConditionTrue {
-			if err := r.InitCreatedSandbox(ctx, sbx); err != nil {
+			if err := r.initCreatedSandbox(ctx, sbx); err != nil {
 				log.Error(err, "failed to patch sandbox")
 				return err
 			}
-			log.Info("sandbox is available")
+			log.Info("sandbox is available",
+				"readyCost", cond.LastTransitionTime.Sub(sbx.CreationTimestamp.Time),
+				"processedAfterReady", now.Sub(cond.LastTransitionTime.Time))
 			r.Recorder.Eventf(sbs, corev1.EventTypeNormal, EventSandboxAvailable, "Sandbox %s is available", klog.KObj(sbx))
 		}
 	}
@@ -235,15 +242,16 @@ func (r *Reconciler) performScale(ctx context.Context, groups GroupedSandboxes, 
 
 func (r *Reconciler) createSandbox(ctx context.Context, sbs *agentsv1alpha1.SandboxSet, revision string) (*agentsv1alpha1.Sandbox, error) {
 	generateName := fmt.Sprintf("%s-", sbs.Name)
+	template := sbs.Spec.Template.DeepCopy()
 	sbx := &agentsv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: generateName,
 			Namespace:    sbs.Namespace,
-			Labels:       sbs.Spec.Template.Labels,
-			Annotations:  sbs.Spec.Template.Annotations,
+			Labels:       template.Labels,
+			Annotations:  template.Annotations,
 		},
 		Spec: agentsv1alpha1.SandboxSpec{
-			Template:           sbs.Spec.Template,
+			Template:           *template,
 			PersistentContents: sbs.Spec.PersistentContents,
 		},
 	}
@@ -331,7 +339,7 @@ func (r *Reconciler) updateSandboxSetStatus(ctx context.Context, newStatus agent
 	return err
 }
 
-func (r *Reconciler) GroupAllSandboxes(ctx context.Context, sbs *agentsv1alpha1.SandboxSet, revision string) (GroupedSandboxes, error) {
+func (r *Reconciler) groupAllSandboxes(ctx context.Context, sbs *agentsv1alpha1.SandboxSet) (GroupedSandboxes, error) {
 	log := logf.FromContext(ctx)
 	sandboxList := &agentsv1alpha1.SandboxList{}
 	if err := r.List(ctx, sandboxList,
@@ -344,6 +352,7 @@ func (r *Reconciler) GroupAllSandboxes(ctx context.Context, sbs *agentsv1alpha1.
 	groups := GroupedSandboxes{}
 	for i := range sandboxList.Items {
 		sbx := &sandboxList.Items[i]
+		scaleExpectation.ObserveScale(GetControllerKey(sbs), expectations.Create, sbx.Name)
 		debugLog := log.V(consts.DebugLogLevel).WithValues("sandbox", sbx.Name)
 		group, reason := findSandboxGroup(sbx)
 		switch group {
@@ -365,9 +374,9 @@ func (r *Reconciler) GroupAllSandboxes(ctx context.Context, sbs *agentsv1alpha1.
 	return groups, nil
 }
 
-func (r *Reconciler) InitCreatedSandbox(ctx context.Context, sbx *agentsv1alpha1.Sandbox) error {
+func (r *Reconciler) initCreatedSandbox(ctx context.Context, sbx *agentsv1alpha1.Sandbox) error {
 	if sbx.Labels[agentsv1alpha1.LabelSandboxState] == "" || sbx.Labels[agentsv1alpha1.LabelSandboxID] == "" {
-		return r.PatchSandboxLabel(ctx, sbx, map[string]string{
+		return r.patchSandboxLabel(ctx, sbx, map[string]string{
 			agentsv1alpha1.LabelSandboxID:    sbx.GetName(),
 			agentsv1alpha1.LabelSandboxState: agentsv1alpha1.SandboxStateAvailable,
 		})
@@ -375,7 +384,7 @@ func (r *Reconciler) InitCreatedSandbox(ctx context.Context, sbx *agentsv1alpha1
 	return nil
 }
 
-func (r *Reconciler) PatchSandboxLabel(ctx context.Context, sbx *agentsv1alpha1.Sandbox, labels map[string]string) error {
+func (r *Reconciler) patchSandboxLabel(ctx context.Context, sbx *agentsv1alpha1.Sandbox, labels map[string]string) error {
 	if labels == nil || len(labels) == 0 {
 		return nil
 	}

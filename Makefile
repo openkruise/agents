@@ -1,7 +1,7 @@
 # Variables
 DOMAIN ?= example.com
-SANDBOX_MANAGER_REPOSITORY ?= acs-image-test-01-registry.cn-hangzhou.cr.aliyuncs.com/develop/sandbox-manager
-OPERATOR_REPOSITORY ?= acs-image-test-01-registry.cn-hangzhou.cr.aliyuncs.com/develop/sandbox-controller
+SANDBOX_MANAGER_REPOSITORY ?= openkruise/sandbox-manager
+OPERATOR_REPOSITORY ?= openkruise/sandbox-controller
 INFRA ?= sandbox-cr
 INGRESS ?= nginx
 HOST_NETWORK ?= false
@@ -161,15 +161,15 @@ uninstall-crd: manifests kustomize ## Uninstall CRDs from the K8s cluster specif
 build-and-push-sandbox-manager:
 	REPOSITORY=${SANDBOX_MANAGER_REPOSITORY} bash deploy/build-and-push-sandbox-manager.sh
 
-.PHONY: build-and-push-sandbox-operator
-build-and-push-sandbox-operator:
+.PHONY: build-and-push-sandbox-controller
+build-and-push-sandbox-controller:
 	REPOSITORY=${OPERATOR_REPOSITORY} bash deploy/build-and-push-operator.sh
 
 .PHONY: sandbox-manager
 sandbox-manager: build-and-push-sandbox-manager deploy
 
-.PHONY: agent-sandbox-operator
-agent-sandbox-operator: build-and-push-sandbox-operator deploy
+.PHONY: agent-sandbox-controller
+agent-sandbox-controller: build-and-push-sandbox-controller deploy
 
 .PHONY: deploy
 deploy:
@@ -182,11 +182,12 @@ deploy:
         --set sandboxManager.controller.hostNetwork=${HOST_NETWORK} \
         --set sandboxOperator.image.controllerManager.repository=${OPERATOR_REPOSITORY} \
         --set sandboxManager.namespace=${SBX_NAMESPACE} \
+        --set sandboxOperator.replicaCount=1 \
         -n ${NAMESPACE} \
         sandbox-manager ./deploy/helm/
 
 .PHONY: all
-all: build-and-push-sandbox-manager build-and-push-sandbox-operator deploy
+all: build-and-push-sandbox-manager build-and-push-sandbox-controller deploy
 
 undeploy:
 	helm uninstall sandbox-manager -n ${NAMESPACE}
@@ -236,8 +237,6 @@ $(ENVTEST): $(LOCALBIN)
 # TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
 # The default setup assumes Kind is pre-installed and builds/loads the Manager Docker image locally.
 # CertManager is installed by default; skip with:
-# - CERT_MANAGER_INSTALL_SKIP=true
-KIND_CLUSTER ?= sandbox-operator-test-e2e
 
 # PLATFORMS defines the target platforms for the manager image be built to provide support to multiple
 # architectures. (i.e. make docker-buildx IMG=myregistry/mypoperator:0.0.1). To use this option you need to:

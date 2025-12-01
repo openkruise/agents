@@ -10,7 +10,6 @@ import (
 	"github.com/openkruise/agents/client/clientset/versioned"
 	"github.com/openkruise/agents/client/clientset/versioned/fake"
 	informers "github.com/openkruise/agents/client/informers/externalversions"
-	"github.com/openkruise/agents/pkg/sandbox-manager/events"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
@@ -83,14 +82,11 @@ func TestPool_ClaimSandbox(t *testing.T) {
 			<-done
 			defer c.Stop()
 
-			eventer := events.NewEventer()
-
 			pool := &Pool{
 				Name:      "test-pool",
 				Namespace: "default",
 				client:    client,
 				cache:     c,
-				eventer:   eventer,
 			}
 
 			for i := 0; i < int(tt.available); i++ {

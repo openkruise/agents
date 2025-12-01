@@ -4,7 +4,6 @@
 package utils
 
 import (
-	"context"
 	"fmt"
 	"strings"
 
@@ -51,14 +50,4 @@ func LockSandbox(sbx client.Object, lock string, owner string) {
 	annotations[v1alpha1.AnnotationLock] = lock
 	annotations[v1alpha1.AnnotationOwner] = owner
 	sbx.SetAnnotations(annotations)
-}
-
-func InitCreatedSandbox(ctx context.Context, sbx infra.Sandbox) error {
-	if sbx.GetState() == "" || sbx.GetLabels()[v1alpha1.LabelSandboxID] == "" {
-		return sbx.PatchLabels(ctx, map[string]string{
-			v1alpha1.LabelSandboxID:    sbx.GetName(),
-			v1alpha1.LabelSandboxState: v1alpha1.SandboxStateAvailable,
-		})
-	}
-	return nil
 }

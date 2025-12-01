@@ -9,15 +9,16 @@ import (
 	"time"
 
 	kruise "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
+	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
-	utils2 "github.com/openkruise/agents/pkg/utils/sandbox-manager"
+	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	microvm "gitlab.alibaba-inc.com/serverlessinfra/sandbox-operator/api/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
+	"k8s.io/utils/ptr"
 )
 
 type SandboxCR interface {
@@ -39,6 +40,7 @@ type BaseSandbox[T SandboxCR] struct {
 
 	PatchSandbox  PatchFunc[T]
 	UpdateStatus  UpdateFunc[T]
+	Update        UpdateFunc[T]
 	DeleteFunc    DeleteFunc
 	SetCondition  SetConditionFunc[T]
 	GetConditions GetConditionsFunc[T]
@@ -84,10 +86,6 @@ func (s *BaseSandbox[T]) SetState(ctx context.Context, state string) error {
 	return s.Patch(ctx, fmt.Sprintf(`{"metadata":{"labels":{"%s":"%s"}}}`, kruise.LabelSandboxState, state))
 }
 
-func (s *BaseSandbox[T]) GetOwnerUser() string {
-	return s.Sandbox.GetAnnotations()[kruise.AnnotationOwner]
-}
-
 func (s *BaseSandbox[T]) InplaceRefresh(deepcopy bool) error {
 	sbx, err := s.Cache.GetSandbox(s.Sandbox.GetName())
 	if err != nil {
@@ -125,27 +123,6 @@ func (s *BaseSandbox[T]) retryUpdate(ctx context.Context, updateFunc UpdateFunc[
 	return err
 }
 
-func (s *BaseSandbox[T]) SaveTimer(ctx context.Context, afterSeconds int, event consts.EventType, triggered bool, result string) error {
-	key, status, reason, message := utils2.GenerateTimerCondition(afterSeconds, event, triggered, result)
-	modifier := func(sbx T) {
-		s.SetCondition(sbx, key, metav1.ConditionStatus(status), reason, message)
-	}
-	return s.RetryModifyStatus(ctx, modifier)
-}
-
-func (s *BaseSandbox[T]) LoadTimers(callback func(after time.Duration, eventType consts.EventType)) error {
-	for _, condition := range s.GetConditions(s.Sandbox) {
-		if condition.Status != metav1.ConditionFalse {
-			continue
-		}
-		if err := utils2.CheckAndLoadTimerFromCondition(
-			condition.Type, condition.Message, condition.LastTransitionTime.Time, callback); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func (s *BaseSandbox[T]) Kill(ctx context.Context) error {
 	if s.Sandbox.GetDeletionTimestamp() != nil {
 		return nil
@@ -161,23 +138,34 @@ type Sandbox struct {
 	*kruise.Sandbox
 }
 
-func (s *Sandbox) GetIP() string {
-	return s.Status.PodInfo.PodIP
+func (s *Sandbox) GetRoute() proxy.Route {
+	return proxy.Route{
+		IP:    s.Status.PodInfo.PodIP,
+		ID:    s.Name,
+		Owner: s.GetAnnotations()[kruise.AnnotationOwner],
+		State: s.GetState(),
+	}
 }
 
-func (s *Sandbox) GetRouteHeader() map[string]string {
-	return nil
+func (s *Sandbox) SetTimeout(ttl time.Duration) {
+	s.Sandbox.Spec.ShutdownTime = ptr.To(metav1.NewTime(time.Now().Add(ttl)))
+}
+
+func (s *Sandbox) SaveTimeout(ctx context.Context, ttl time.Duration) error {
+	return s.retryUpdate(ctx, s.Update, func(sbx *kruise.Sandbox) {
+		sbx.Spec.ShutdownTime = ptr.To(metav1.NewTime(time.Now().Add(ttl)))
+	})
 }
 
 func (s *Sandbox) GetResource() infra.SandboxResource {
-	return utils2.CalculateResourceFromContainers(s.Spec.Template.Spec.Containers)
+	return utils.CalculateResourceFromContainers(s.Spec.Template.Spec.Containers)
 }
 
 func (s *Sandbox) Request(r *http.Request, path string, port int) (*http.Response, error) {
 	if s.Status.Phase != kruise.SandboxRunning {
 		return nil, errors.New("sandbox is not running")
 	}
-	return utils2.ProxyRequest(r, path, port, s.GetIP())
+	return utils.ProxyRequest(r, path, port, s.Status.PodInfo.PodIP)
 }
 
 func (s *Sandbox) Pause(ctx context.Context) error {

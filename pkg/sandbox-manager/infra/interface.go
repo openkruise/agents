@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
+	"github.com/openkruise/agents/pkg/proxy"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -43,21 +43,17 @@ type SandboxPool interface {
 }
 
 type Sandbox interface {
-	metav1.Object                                                    // For K8s object metadata access
-	Pause(ctx context.Context) error                                 // Pause a Sandbox (not available for K8sInfra)
-	Resume(ctx context.Context) error                                // Resume a paused Sandbox
-	GetIP() string                                                   // Get IP address of the Sandbox
-	GetRouteHeader() map[string]string                               // What returned will be added to the headers of all requests to the Sandbox
+	metav1.Object                     // For K8s object metadata access
+	Pause(ctx context.Context) error  // Pause a Sandbox (not available for K8sInfra)
+	Resume(ctx context.Context) error // Resume a paused Sandbox
+	GetRoute() proxy.Route
 	GetState() string                                                // Get Sandbox State (pending, running, paused, killing, etc.)
 	SetState(ctx context.Context, state string) error                // Set the state of the Sandbox
 	GetTemplate() string                                             // Get the template name of the Sandbox
 	GetResource() SandboxResource                                    // Get the CPU / Memory requirements of the Sandbox
-	GetOwnerUser() string                                            // Get the Owner of the Sandbox
 	PatchLabels(ctx context.Context, labels map[string]string) error // Patch some labels to the Sandbox Resource
-	// SaveTimer persists a timer to the Sandbox resource
-	SaveTimer(ctx context.Context, afterSeconds int, event consts.EventType, triggered bool, result string) error
-	// LoadTimers loads all persisted timers from the Sandbox resource and calls the callback for each timer
-	LoadTimers(callback func(after time.Duration, eventType consts.EventType)) error
+	SetTimeout(ttl time.Duration)
+	SaveTimeout(ctx context.Context, ttl time.Duration) error
 	Kill(ctx context.Context) error                                         // Delete the Sandbox resource
 	InplaceRefresh(deepcopy bool) error                                     // Update the Sandbox resource object to the latest
 	Request(r *http.Request, path string, port int) (*http.Response, error) // Make a request to the Sandbox

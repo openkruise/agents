@@ -83,7 +83,7 @@ type SandboxSetStatus struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:path=sandboxsets,shortName={sbs},singular=sandboxset
 // +kubebuilder:storageversion
-// +kubebuilder:printcolumn:name="Replicas",type="integer",JSONPath=".spec.replicas"
+// +kubebuilder:printcolumn:name="Replicas",type="integer",JSONPath=".status.replicas"
 // +kubebuilder:printcolumn:name="Available",type="integer",JSONPath=".status.availableReplicas"
 // +kubebuilder:printcolumn:name="UpdateRevision",type="string",JSONPath=".status.updateRevision"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"

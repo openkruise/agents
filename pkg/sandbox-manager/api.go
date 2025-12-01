@@ -7,10 +7,9 @@ import (
 	"time"
 
 	"github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
+	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
-	"github.com/openkruise/agents/pkg/sandbox-manager/proxy"
 	"github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	"k8s.io/klog/v2"
 )
@@ -23,24 +22,15 @@ func (m *SandboxManager) ClaimSandbox(ctx context.Context, user, template string
 	if !ok {
 		return nil, errors.NewError(errors.ErrorNotFound, fmt.Sprintf("pool %s not found", template))
 	}
-	sandbox, err := pool.ClaimSandbox(ctx, user, nil)
+	sandbox, err := pool.ClaimSandbox(ctx, user, func(sbx infra.Sandbox) {
+		if timeoutSeconds > 0 {
+			sbx.SetTimeout(time.Duration(timeoutSeconds) * time.Second)
+		}
+	})
 	if err != nil {
 		return nil, errors.NewError(errors.ErrorInternal, fmt.Sprintf("failed to claim sandbox: %v", err))
 	}
-	go func() {
-		if timeoutSeconds > 0 {
-			err := m.SetTimer(ctx, sandbox, timeoutSeconds, consts.SandboxKill)
-			log.Info("timeout timer set", "sandbox", klog.KObj(sandbox), "seconds", timeoutSeconds, "error", err)
-		}
-	}()
-	route := proxy.Route{
-		ID:           sandbox.GetName(),
-		IP:           sandbox.GetIP(),
-		Owner:        user,
-		ExtraHeaders: sandbox.GetRouteHeader(),
-	}
-	m.proxy.SetRoute(sandbox.GetName(), route)
-	log.Info("sandbox claimed", "sandbox", klog.KObj(sandbox), "route", route.IP, "cost", time.Since(start))
+	log.Info("sandbox claimed", "sandbox", klog.KObj(sandbox), "cost", time.Since(start))
 	return sandbox, nil
 }
 
@@ -102,7 +92,6 @@ func (m *SandboxManager) killSandbox(ctx context.Context, sbx infra.Sandbox) err
 	if sbx == nil {
 		return nil
 	}
-	m.proxy.DeleteRoute(sbx.GetName())
 	if err := sbx.Kill(ctx); err != nil {
 		return errors.NewError(errors.ErrorInternal, fmt.Sprintf("failed to delete sandbox %s: %v", sbx.GetName(), err))
 	}
@@ -113,7 +102,7 @@ func (m *SandboxManager) SetSandboxTimeout(ctx context.Context, sbx infra.Sandbo
 	if sbx.GetState() != v1alpha1.SandboxStateRunning {
 		return errors.NewError(errors.ErrorConflict, fmt.Sprintf("sandbox %s is not running", sbx.GetName()))
 	}
-	return m.SetTimer(ctx, sbx, seconds, consts.SandboxKill)
+	return sbx.SaveTimeout(ctx, time.Duration(seconds)*time.Second)
 }
 
 func (m *SandboxManager) GetOwnerOfSandbox(sandboxID string) (string, bool) {
