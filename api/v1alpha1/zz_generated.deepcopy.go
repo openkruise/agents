@@ -223,6 +223,10 @@ func (in *SandboxSpec) DeepCopyInto(out *SandboxSpec) {
 		*out = make([]string, len(*in))
 		copy(*out, *in)
 	}
+	if in.ShutdownTime != nil {
+		in, out := &in.ShutdownTime, &out.ShutdownTime
+		*out = (*in).DeepCopy()
+	}
 	in.Template.DeepCopyInto(&out.Template)
 }
 

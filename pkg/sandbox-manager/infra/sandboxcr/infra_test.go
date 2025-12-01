@@ -9,7 +9,6 @@ import (
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/client/clientset/versioned/fake"
 	informers "github.com/openkruise/agents/client/informers/externalversions"
-	"github.com/openkruise/agents/pkg/sandbox-manager/events"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
@@ -265,11 +264,10 @@ func TestInfra_GetSandbox(t *testing.T) {
 			},
 		},
 	}
-	eventer := events.NewEventer()
 	client := fake.NewSimpleClientset()
 	_, err := client.ApiV1alpha1().Sandboxes("default").Create(context.Background(), sbx, metav1.CreateOptions{})
 	assert.NoError(t, err)
-	infraInstance, err := NewInfra("default", eventer, client)
+	infraInstance, err := NewInfra("default", client, nil)
 	assert.NoError(t, err)
 	err = infraInstance.Run(context.Background())
 	assert.NoError(t, err)

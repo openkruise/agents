@@ -1,7 +1,7 @@
 package sandbox_manager
 
 import (
-	"github.com/openkruise/agents/pkg/sandbox-manager/proxy"
+	"github.com/openkruise/agents/pkg/proxy"
 )
 
 type DebugInfo struct {

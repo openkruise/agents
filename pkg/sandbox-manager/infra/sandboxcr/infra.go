@@ -2,15 +2,14 @@ package sandboxcr
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	sandboxclient "github.com/openkruise/agents/client/clientset/versioned"
 	informers "github.com/openkruise/agents/client/informers/externalversions"
-	consts "github.com/openkruise/agents/pkg/sandbox-manager/consts"
-	"github.com/openkruise/agents/pkg/sandbox-manager/events"
-	infra "github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	"github.com/openkruise/agents/pkg/proxy"
+	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
+	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8scache "k8s.io/client-go/tools/cache"
 )
@@ -18,12 +17,12 @@ import (
 type Infra struct {
 	infra.BaseInfra
 
-	Cache   Cache[*v1alpha1.Sandbox]
-	Client  sandboxclient.Interface
-	Eventer *events.Eventer
+	Cache  Cache[*v1alpha1.Sandbox]
+	Client sandboxclient.Interface
+	Proxy  *proxy.Server
 }
 
-func NewInfra(namespace string, eventer *events.Eventer, client sandboxclient.Interface) (*Infra, error) {
+func NewInfra(namespace string, client sandboxclient.Interface, proxy *proxy.Server) (*Infra, error) {
 	informerFactory := informers.NewSharedInformerFactoryWithOptions(client, time.Minute*10, informers.WithNamespace(namespace))
 	sandboxInformer := informerFactory.Api().V1alpha1().Sandboxes().Informer()
 	sandboxSetInformer := informerFactory.Api().V1alpha1().SandboxSets().Informer()
@@ -36,11 +35,13 @@ func NewInfra(namespace string, eventer *events.Eventer, client sandboxclient.In
 		BaseInfra: infra.BaseInfra{},
 		Cache:     cache,
 		Client:    client,
-		Eventer:   eventer,
+		Proxy:     proxy,
 	}
 
 	cache.AddSandboxEventHandler(k8scache.ResourceEventHandlerFuncs{
+		AddFunc:    instance.onSandboxAdd,
 		DeleteFunc: instance.onSandboxDelete,
+		UpdateFunc: instance.onSandboxUpdate,
 	})
 
 	cache.AddSandboxSetEventHandler(k8scache.ResourceEventHandlerFuncs{
@@ -68,7 +69,6 @@ func (i *Infra) NewPool(name, namespace string) infra.SandboxPool {
 		Namespace: namespace,
 		client:    i.Client,
 		cache:     i.Cache,
-		eventer:   i.Eventer,
 	}
 }
 
@@ -126,6 +126,7 @@ func (i *Infra) AsSandbox(sbx *v1alpha1.Sandbox) *Sandbox {
 			Cache:         i.Cache,
 			PatchSandbox:  i.Client.ApiV1alpha1().Sandboxes(sbx.Namespace).Patch,
 			UpdateStatus:  i.Client.ApiV1alpha1().Sandboxes(sbx.Namespace).UpdateStatus,
+			Update:        i.Client.ApiV1alpha1().Sandboxes(sbx.Namespace).Update,
 			DeleteFunc:    i.Client.ApiV1alpha1().Sandboxes(sbx.Namespace).Delete,
 			SetCondition:  SetSandboxCondition,
 			GetConditions: ListSandboxConditions,
@@ -135,20 +136,41 @@ func (i *Infra) AsSandbox(sbx *v1alpha1.Sandbox) *Sandbox {
 	}
 }
 
+func (i *Infra) onSandboxAdd(obj any) {
+	sbx, ok := obj.(*v1alpha1.Sandbox)
+	if !ok {
+		return
+	}
+	route := i.AsSandbox(sbx).GetRoute()
+	i.Proxy.SetRoute(route.ID, route)
+}
+
 func (i *Infra) onSandboxDelete(obj any) {
 	sbx, ok := obj.(*v1alpha1.Sandbox)
 	if !ok {
 		return
 	}
-	if _, ok = i.GetPoolByObject(sbx); ok {
-		go i.Eventer.Trigger(events.Event{
-			Type:    consts.SandboxKill,
-			Sandbox: i.AsSandbox(sbx),
-			Source:  "SandboxDeleted",
-			Message: fmt.Sprintf("Sandbox %s is deleted", sbx.Name),
-		})
+	i.Proxy.DeleteRoute(sbx.Name)
+}
+
+func (i *Infra) onSandboxUpdate(_, newObj any) {
+	newSbx, ok := newObj.(*v1alpha1.Sandbox)
+	if !ok {
+		return
 	}
-	i.Eventer.OnSandboxDelete(i.AsSandbox(sbx))
+	_, ok = i.GetPoolByObject(newSbx)
+	if !ok {
+		return
+	}
+	i.refreshRoute(i.AsSandbox(newSbx))
+}
+
+func (i *Infra) refreshRoute(sbx infra.Sandbox) {
+	oldRoute, _ := i.Proxy.LoadRoute(sbx.GetName())
+	newRoute := sbx.GetRoute()
+	if newRoute.State != oldRoute.State || newRoute.IP != oldRoute.IP {
+		i.Proxy.SetRoute(newRoute.ID, newRoute)
+	}
 }
 
 func (i *Infra) onSandboxSetCreate(newObj interface{}) {

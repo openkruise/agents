@@ -1,11 +1,15 @@
 package proxy
 
+import "time"
+
 // Route 表示一条内部沙箱路由规则
 type Route struct {
-	IP           string
-	ID           string
-	Owner        string
-	ExtraHeaders map[string]string
+	IP                       string
+	ID                       string
+	Owner                    string
+	State                    string
+	ExtraHeaders             map[string]string
+	LastRequestApiServerTime time.Time
 }
 
 func (s *Server) SetRoute(id string, route Route) {

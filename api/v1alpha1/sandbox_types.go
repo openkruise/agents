@@ -38,6 +38,11 @@ type SandboxSpec struct {
 	// PersistentContents indicates resume pod with persistent content, Enum: ip, memory, filesystem
 	PersistentContents []string `json:"persistentContents,omitempty"`
 
+	// ShutdownTime - Absolute time when the sandbox is deleted.
+	// If a time in the past is provided, the sandbox will be deleted immediately.
+	// +kubebuilder:validation:Format="date-time"
+	ShutdownTime *metav1.Time `json:"shutdownTime,omitempty"`
+
 	// Template describes the pods that will be created.
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +kubebuilder:validation:Schemaless
@@ -156,6 +161,7 @@ const (
 // +kubebuilder:storageversion
 // +kubebuilder:printcolumn:name="Status",type="string",JSONPath=".status.phase"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
+// +kubebuilder:printcolumn:name="shutdown_time",type="string",JSONPath=".spec.shutdownTime"
 // +kubebuilder:printcolumn:name="Message",type="string",JSONPath=".status.message"
 
 // Sandbox is the Schema for the sandboxes API

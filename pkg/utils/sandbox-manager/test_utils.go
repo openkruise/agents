@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/openkruise/agents/pkg/proxy"
 	consts2 "github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -23,6 +24,13 @@ type FakeSandbox struct {
 
 func (f FakeSandbox) GetNamespace() string {
 	return ""
+}
+
+func (f FakeSandbox) SaveTimeout(ctx context.Context, ttl time.Duration) error {
+	return nil
+}
+
+func (f FakeSandbox) SetTimeout(ttl time.Duration) {
 }
 
 func (f FakeSandbox) SetNamespace(string) {
@@ -153,6 +161,10 @@ func (f FakeSandbox) GetIP() string {
 	return ""
 }
 
+func (f FakeSandbox) GetRoute() proxy.Route {
+	return proxy.Route{}
+}
+
 func (f FakeSandbox) GetState() string {
 	return f.State
 }
@@ -178,10 +190,6 @@ func (f FakeSandbox) SetState(context.Context, string) error {
 }
 
 func (f FakeSandbox) SaveTimer(context.Context, int, consts2.EventType, bool, string) error {
-	return nil
-}
-
-func (f FakeSandbox) LoadTimers(func(time.Duration, consts2.EventType)) error {
 	return nil
 }
 

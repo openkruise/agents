@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -112,7 +111,6 @@ func TestFakeSandbox_AllOtherMethods(t *testing.T) {
 		{"SaveTimer", func() interface{} {
 			return fs.SaveTimer(context.Background(), 1, "", false, "")
 		}},
-		{"LoadTimers", func() interface{} { return fs.LoadTimers(func(time.Duration, consts.EventType) {}) }},
 		{"Kill", func() interface{} { return fs.Kill(context.Background()) }},
 		{"InplaceRefresh", func() interface{} { return fs.InplaceRefresh(false) }},
 		{"Request", func() interface{} {

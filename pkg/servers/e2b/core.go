@@ -10,11 +10,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager"
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
-	"github.com/openkruise/agents/pkg/sandbox-manager/proxy"
 	adapters2 "github.com/openkruise/agents/pkg/servers/e2b/adapters"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"k8s.io/client-go/rest"
@@ -80,7 +80,7 @@ func (sc *Controller) Init(templateDir string, infrastructure string) error {
 	} else {
 		adapter = baseAdapter
 	}
-	sandboxManager, err := sandbox_manager.NewSandboxManager(Namespace, sc.client, sc.clientConfig, adapter, infrastructure)
+	sandboxManager, err := sandbox_manager.NewSandboxManager(Namespace, sc.client, adapter, infrastructure)
 	if err != nil {
 		return err
 	}

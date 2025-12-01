@@ -85,7 +85,6 @@ func (sc *Controller) pauseAndResumeSandbox(r *http.Request, pause bool) (web.Ap
 				Message: fmt.Sprintf("Failed to resume sandbox: %v", err),
 			}
 		}
-		sc.manager.RefreshSpecificProxy(ctx, sbx.GetName())
 		log.Info("sandbox resumed")
 	}
 	return web.ApiResponse[struct{}]{

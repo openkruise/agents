@@ -116,6 +116,18 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		logger.Info("add sandbox finalizer success")
 	}
 
+	// Check Shutdown
+	now := metav1.Now()
+	var requeueAfter time.Duration
+	if box.Spec.ShutdownTime != nil && box.DeletionTimestamp == nil {
+		if box.Spec.ShutdownTime.Before(&now) {
+			logger.Info("Sandbox is shutdown time reached, will be deleted")
+			return ctrl.Result{}, r.Delete(ctx, box)
+		} else {
+			requeueAfter = box.Spec.ShutdownTime.Time.Sub(now.Time)
+		}
+	}
+
 	logger.Info("Began to process Sandbox for reconcile")
 	newStatus := box.Status.DeepCopy()
 	newStatus.ObservedGeneration = box.Generation
@@ -133,16 +145,16 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		pod = nil
 	} else if !pod.DeletionTimestamp.IsZero() {
 		// Pod 正在删除过程中，等待 Pod 删除完成
-		return reconcile.Result{RequeueAfter: time.Second * 3}, nil
+		return reconcile.Result{RequeueAfter: min(requeueAfter, time.Second*3)}, nil
 	} else if pod.Status.Phase == corev1.PodSucceeded {
 		newStatus.Phase = agentsv1alpha1.SandboxSucceeded
-		return ctrl.Result{}, r.updateSandboxStatus(ctx, *newStatus, box)
+		return ctrl.Result{RequeueAfter: requeueAfter}, r.updateSandboxStatus(ctx, *newStatus, box)
 	} else if pod.Status.Phase == corev1.PodFailed &&
 		box.Status.Phase != agentsv1alpha1.SandboxPaused {
 		// paused过程中，Pod会变为 Failed 状态，需要忽略。
 		// NeedsBypassSandbox 用于忽略旁路 Sandbox 场景下 Pod 由于深休眠提前进入 Failed 的情况。
 		newStatus.Phase = agentsv1alpha1.SandboxFailed
-		return ctrl.Result{}, r.updateSandboxStatus(ctx, *newStatus, box)
+		return ctrl.Result{RequeueAfter: requeueAfter}, r.updateSandboxStatus(ctx, *newStatus, box)
 	}
 
 	if !box.DeletionTimestamp.IsZero() {
@@ -177,38 +189,38 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		if err != nil {
 			return reconcile.Result{}, err
 		}
-		return ctrl.Result{}, r.updateSandboxStatus(ctx, *newStatus, box)
+		return ctrl.Result{RequeueAfter: requeueAfter}, r.updateSandboxStatus(ctx, *newStatus, box)
 
 	case agentsv1alpha1.SandboxRunning:
 		err = r.getControl(args.Pod).EnsureSandboxPhaseRunning(ctx, args)
 		if err != nil {
 			return reconcile.Result{}, err
 		}
-		return ctrl.Result{}, r.updateSandboxStatus(ctx, *newStatus, box)
+		return ctrl.Result{RequeueAfter: requeueAfter}, r.updateSandboxStatus(ctx, *newStatus, box)
 
 	case agentsv1alpha1.SandboxPaused:
 		err = r.getControl(args.Pod).EnsureSandboxPhasePaused(ctx, args)
 		if err != nil {
 			return reconcile.Result{}, err
 		}
-		return ctrl.Result{}, r.updateSandboxStatus(ctx, *newStatus, box)
+		return ctrl.Result{RequeueAfter: requeueAfter}, r.updateSandboxStatus(ctx, *newStatus, box)
 
 	case agentsv1alpha1.SandboxResuming:
 		err = r.getControl(args.Pod).EnsureSandboxPhaseResuming(ctx, args)
 		if err != nil {
 			return reconcile.Result{}, err
 		}
-		return ctrl.Result{}, r.updateSandboxStatus(ctx, *newStatus, box)
+		return ctrl.Result{RequeueAfter: requeueAfter}, r.updateSandboxStatus(ctx, *newStatus, box)
 
 	case agentsv1alpha1.SandboxTerminating:
 		err = r.getControl(args.Pod).EnsureSandboxPhaseTerminating(ctx, args)
 		if err != nil {
 			return reconcile.Result{}, err
 		}
-		return ctrl.Result{}, r.updateSandboxStatus(ctx, *newStatus, box)
+		return ctrl.Result{RequeueAfter: requeueAfter}, r.updateSandboxStatus(ctx, *newStatus, box)
 	}
 	logger.Info("sandbox status phase is invalid", "phase", box.Status.Phase)
-	return ctrl.Result{}, nil
+	return ctrl.Result{RequeueAfter: requeueAfter}, nil
 }
 
 func (r *SandboxReconciler) updateSandboxStatus(ctx context.Context, newStatus agentsv1alpha1.SandboxStatus, box *agentsv1alpha1.Sandbox) error {

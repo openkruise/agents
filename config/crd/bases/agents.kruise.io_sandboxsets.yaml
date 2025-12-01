@@ -17,7 +17,7 @@ spec:
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
-    - jsonPath: .spec.replicas
+    - jsonPath: .status.replicas
       name: Replicas
       type: integer
     - jsonPath: .status.availableReplicas

@@ -29,3 +29,5 @@ go.work.sum
 *.pem
 vendor/*
 dev/
+deploy/
+assets/

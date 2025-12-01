@@ -10,11 +10,12 @@ import (
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	types "github.com/envoyproxy/go-control-plane/envoy/type/v3"
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
 
-// testRequestAdapter 是一个用于测试的 RequestAdapter 实现
+// testRequestAdapter is a RequestAdapter implementation for testing
 type testRequestAdapter struct {
 	entry            string
 	isSandboxRequest bool
@@ -46,7 +47,7 @@ func (t *testRequestAdapter) Entry() string {
 	return t.entry
 }
 
-// mockProcessServer 是 ExternalProcessor_ProcessServer 接口的模拟实现
+// mockProcessServer is a mock implementation of the ExternalProcessor_ProcessServer interface
 type mockProcessServer struct {
 	extProcPb.ExternalProcessor_ProcessServer
 	ctx  context.Context
@@ -95,7 +96,7 @@ func TestServer_Process(t *testing.T) {
 		expectResp  []*extProcPb.ProcessingResponse
 	}{
 		{
-			name: "正常处理请求头",
+			name: "normal",
 			setupRoutes: []Route{
 				{ID: "sandbox1", IP: "192.168.1.10", Owner: "user1"},
 			},
@@ -148,7 +149,7 @@ func TestServer_Process(t *testing.T) {
 			},
 		},
 		{
-			name:        "非沙箱请求，转发到负载均衡器",
+			name:        "non-sandbox",
 			setupRoutes: []Route{},
 			adapter: &testRequestAdapter{
 				isSandboxRequest: false,
@@ -192,7 +193,7 @@ func TestServer_Process(t *testing.T) {
 			},
 		},
 		{
-			name: "沙箱映射失败",
+			name: "mapping failed",
 			setupRoutes: []Route{
 				{ID: "sandbox1", IP: "192.168.1.10", Owner: "user1"},
 			},
@@ -236,7 +237,7 @@ func TestServer_Process(t *testing.T) {
 			},
 		},
 		{
-			name:        "沙箱路由未找到",
+			name:        "route not found",
 			setupRoutes: []Route{},
 			adapter: &testRequestAdapter{
 				isSandboxRequest: true,
@@ -279,7 +280,7 @@ func TestServer_Process(t *testing.T) {
 			},
 		},
 		{
-			name: "用户未授权访问沙箱",
+			name: "unauthorized",
 			setupRoutes: []Route{
 				{ID: "sandbox1", IP: "192.168.1.10", Owner: "owner1"},
 			},
@@ -324,7 +325,7 @@ func TestServer_Process(t *testing.T) {
 			},
 		},
 		{
-			name:        "接收请求时发生错误",
+			name:        "receive failed",
 			setupRoutes: []Route{},
 			adapter: &testRequestAdapter{
 				entry: "127.0.0.1:8080",
@@ -334,7 +335,7 @@ func TestServer_Process(t *testing.T) {
 			expectError: true,
 		},
 		{
-			name: "发送响应时发生错误",
+			name: "send response error",
 			setupRoutes: []Route{
 				{ID: "sandbox1", IP: "192.168.1.10", Owner: "user1"},
 			},
@@ -368,7 +369,7 @@ func TestServer_Process(t *testing.T) {
 			expectError: true,
 		},
 		{
-			name:        "未知请求类型",
+			name:        "unknown request type",
 			setupRoutes: []Route{},
 			adapter: &testRequestAdapter{
 				entry: "127.0.0.1:8080",
@@ -457,38 +458,39 @@ func TestServer_Process(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// 创建服务器
+			// Create server
 			server := NewServer(tt.adapter)
 
-			// 设置路由
+			// Setup routes
 			for _, route := range tt.setupRoutes {
+				route.State = agentsv1alpha1.SandboxStateRunning
 				server.SetRoute(route.ID, route)
 			}
 
-			// 创建模拟的处理服务器
+			// Create mock processing server
 			mockServer := &mockProcessServer{
 				reqs: tt.requests,
 				err:  tt.serverError,
 			}
 
-			// 执行测试
+			// Execute test
 			err := server.Process(mockServer)
 
-			// 验证结果
+			// Verify results
 			if tt.expectError {
 				if err == nil {
-					t.Errorf("期望错误但没有错误")
+					t.Errorf("an error is expected")
 				}
 			} else {
 				if err != nil {
-					t.Errorf("未期望错误但发生了错误: %v", err)
+					t.Errorf("unexpected error: %v", err)
 				}
 
-				// 验证响应数量
+				// Verify response count
 				if len(mockServer.resp) != len(tt.expectResp) {
-					t.Errorf("期望 %d 个响应，但得到了 %d 个", len(tt.expectResp), len(mockServer.resp))
+					t.Errorf("expect %d responses, got %d", len(tt.expectResp), len(mockServer.resp))
 				}
-				// 验证响应内容
+				// Verify response content
 				for i, expected := range tt.expectResp {
 					if i >= len(mockServer.resp) {
 						break
@@ -496,21 +498,21 @@ func TestServer_Process(t *testing.T) {
 
 					actual := mockServer.resp[i]
 
-					// 检查响应类型
+					// Check response type
 					switch expected.Response.(type) {
 					case *extProcPb.ProcessingResponse_RequestHeaders:
 						if actualHeader, ok := actual.Response.(*extProcPb.ProcessingResponse_RequestHeaders); ok {
 							expectedHeader := expected.Response.(*extProcPb.ProcessingResponse_RequestHeaders)
-							// 检查 HeaderMutation 是否存在
+							// Check if HeaderMutation exists
 							if expectedHeader.RequestHeaders.Response.HeaderMutation != nil {
 								if actualHeader.RequestHeaders.Response.HeaderMutation == nil {
-									t.Errorf("期望 HeaderMutation 但没有得到")
+									t.Errorf("expect HeaderMutation")
 								} else {
-									// 检查设置的头部数量
+									// Check number of set headers
 									expectedHeaders := expectedHeader.RequestHeaders.Response.HeaderMutation.SetHeaders
 									actualHeaders := actualHeader.RequestHeaders.Response.HeaderMutation.SetHeaders
 									if len(expectedHeaders) != len(actualHeaders) {
-										t.Errorf("期望 %d 个设置的头部，但得到了 %d 个", len(expectedHeaders), len(actualHeaders))
+										t.Errorf("expect %d setHeaders, got %d", len(expectedHeaders), len(actualHeaders))
 									}
 
 									sort.Slice(actualHeaders, func(i, j int) bool {
@@ -520,7 +522,7 @@ func TestServer_Process(t *testing.T) {
 										return expectedHeaders[i].Header.Key < expectedHeaders[j].Header.Key
 									})
 
-									// 检查每个头部
+									// Check each header
 									for j, expectedHeader := range expectedHeaders {
 										if j >= len(actualHeaders) {
 											continue
@@ -528,7 +530,7 @@ func TestServer_Process(t *testing.T) {
 										actualHeader := actualHeaders[j]
 
 										if string(expectedHeader.Header.RawValue) != string(actualHeader.Header.RawValue) {
-											t.Errorf("头部值 key %s 不匹配，期望: %s, 实际: %s", expectedHeader.Header.Key,
+											t.Errorf("header key %s not match, expect: %s, actual: %s", expectedHeader.Header.Key,
 												string(expectedHeader.Header.RawValue),
 												string(actualHeader.Header.RawValue))
 										}
@@ -536,27 +538,27 @@ func TestServer_Process(t *testing.T) {
 								}
 							}
 						} else {
-							t.Errorf("响应类型不匹配，期望 RequestHeaders")
+							t.Errorf("response type mismatch, expected RequestHeaders")
 						}
 					case *extProcPb.ProcessingResponse_ImmediateResponse:
 						if actualImmediate, ok := actual.Response.(*extProcPb.ProcessingResponse_ImmediateResponse); ok {
 							expectedImmediate := expected.Response.(*extProcPb.ProcessingResponse_ImmediateResponse)
 
-							// 检查状态码
+							// Check status code
 							if expectedImmediate.ImmediateResponse.Status.Code != actualImmediate.ImmediateResponse.Status.Code {
-								t.Errorf("状态码不匹配，期望: %v, 实际: %v",
+								t.Errorf("status code mismatch, expected: %v, actual: %v",
 									expectedImmediate.ImmediateResponse.Status.Code,
 									actualImmediate.ImmediateResponse.Status.Code)
 							}
 
-							// 检查响应体
+							// Check response body
 							if string(expectedImmediate.ImmediateResponse.Body) != string(actualImmediate.ImmediateResponse.Body) {
-								t.Errorf("响应体不匹配，期望: %s, 实际: %s",
+								t.Errorf("response body mismatch, expected: %s, actual: %s",
 									string(expectedImmediate.ImmediateResponse.Body),
 									string(actualImmediate.ImmediateResponse.Body))
 							}
 						} else {
-							t.Errorf("响应类型不匹配，期望 ImmediateResponse")
+							t.Errorf("response type mismatch, expected ImmediateResponse")
 						}
 					}
 				}
@@ -565,28 +567,28 @@ func TestServer_Process(t *testing.T) {
 	}
 }
 
-// TestServer_Run_Stop 测试服务器的启动和停止
+// TestServer_Run_Stop tests server start and stop
 func TestServer_Run_Stop(t *testing.T) {
-	// 创建测试适配器
+	// Create test adapter
 	adapter := &testRequestAdapter{
 		entry: "127.0.0.1:8080",
 	}
 
-	// 创建服务器
+	// Create server
 	server := NewServer(adapter)
 
-	// 在后台启动服务器
+	// Start server in background
 	go func() {
-		// 这里会因为端口占用而失败，但我们只关心API调用
+		// This will fail due to port occupation, but we only care about API calls
 		_ = server.Run()
 	}()
 
-	// 等待一点时间让 goroutine 启动
+	// Wait a bit for goroutine to start
 	time.Sleep(10 * time.Millisecond)
 
-	// 停止服务器
+	// Stop server
 	server.Stop()
 
-	// 再次停止应该不会有问题
+	// Stopping again should be fine
 	server.Stop()
 }

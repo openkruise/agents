@@ -40,9 +40,7 @@ func (r *Reconciler) initNewStatus(ss *agentsv1alpha1.SandboxSet) (*agentsv1alph
 	if err != nil {
 		return nil, err
 	}
-	if newStatus.UpdateRevision == "" {
-		newStatus.UpdateRevision = updateRevision.Labels[ControllerRevisionHashLabel]
-	}
+	newStatus.UpdateRevision = updateRevision.Labels[ControllerRevisionHashLabel]
 	newStatus.ObservedGeneration = ss.Generation
 	return newStatus, nil
 }

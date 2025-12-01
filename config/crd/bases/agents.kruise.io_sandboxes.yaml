@@ -23,6 +23,9 @@ spec:
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
+    - jsonPath: .spec.shutdownTime
+      name: shutdown_time
+      type: string
     - jsonPath: .status.message
       name: Message
       type: string
@@ -60,6 +63,12 @@ spec:
                 items:
                   type: string
                 type: array
+              shutdownTime:
+                description: |-
+                  ShutdownTime - Absolute time when the sandbox is deleted.
+                  If a time in the past is provided, the sandbox will be deleted immediately.
+                format: date-time
+                type: string
               template:
                 description: Template describes the pods that will be created.
                 x-kubernetes-preserve-unknown-fields: true

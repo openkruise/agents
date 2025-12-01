@@ -9,7 +9,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/openkruise/agents/api/v1alpha1"
 	sandboxclient "github.com/openkruise/agents/client/clientset/versioned"
-	"github.com/openkruise/agents/pkg/sandbox-manager/events"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -25,9 +24,8 @@ type Pool struct {
 	Annotations map[string]string
 
 	// Should init fields
-	eventer *events.Eventer
-	client  sandboxclient.Interface
-	cache   Cache[*v1alpha1.Sandbox]
+	client sandboxclient.Interface
+	cache  Cache[*v1alpha1.Sandbox]
 }
 
 // AsSandbox converts the given sbx object to a Sandbox interface
@@ -45,6 +43,7 @@ func (p *Pool) AsSandbox(sbx *v1alpha1.Sandbox) *Sandbox {
 			Cache:         p.cache,
 			PatchSandbox:  p.client.ApiV1alpha1().Sandboxes(p.Namespace).Patch,
 			UpdateStatus:  p.client.ApiV1alpha1().Sandboxes(p.Namespace).UpdateStatus,
+			Update:        p.client.ApiV1alpha1().Sandboxes(p.Namespace).Update,
 			DeleteFunc:    p.client.ApiV1alpha1().Sandboxes(p.Namespace).Delete,
 			SetCondition:  SetSandboxCondition,
 			GetConditions: ListSandboxConditions,
