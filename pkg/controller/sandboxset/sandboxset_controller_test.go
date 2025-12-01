@@ -328,7 +328,7 @@ func TestReconcile_ProcessCreating(t *testing.T) {
 	}
 	tests := []struct {
 		name         string
-		makeReady    bool // 是否将Creating状态的沙箱标记为就绪
+		makeReady    bool // Should sandboxes in the Creating state be marked as ready?
 		expectEvents []string
 		checkFunc    func(t *testing.T, client client.Client, sbs *v1alpha1.SandboxSet)
 	}{
@@ -362,7 +362,7 @@ func TestReconcile_ProcessCreating(t *testing.T) {
 				Codec:    codec,
 			}
 
-			// 创建沙箱
+			// create sandbox
 			newStatus, err := reconciler.initNewStatus(sbs)
 			assert.NoError(t, err)
 			sbs.Status = *newStatus

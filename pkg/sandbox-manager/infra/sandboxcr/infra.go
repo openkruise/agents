@@ -8,9 +8,7 @@ import (
 	sandboxclient "github.com/openkruise/agents/client/clientset/versioned"
 	informers "github.com/openkruise/agents/client/informers/externalversions"
 	"github.com/openkruise/agents/pkg/proxy"
-	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8scache "k8s.io/client-go/tools/cache"
 )
 
@@ -191,12 +189,4 @@ func (i *Infra) onSandboxSetDelete(obj interface{}) {
 		return
 	}
 	i.Pools.Delete(sbs.Name)
-}
-
-func (i *Infra) InjectTemplateMetadata() metav1.ObjectMeta {
-	return metav1.ObjectMeta{
-		Labels: map[string]string{
-			consts.LabelACS: "true",
-		},
-	}
 }

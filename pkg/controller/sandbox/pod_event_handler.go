@@ -10,7 +10,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
-// SandboxPodEventHandler 监控由 Sandbox 控制器创建的 Pod
+// SandboxPodEventHandler watches Pods created by the Sandbox controller.
 type SandboxPodEventHandler struct{}
 
 func (e *SandboxPodEventHandler) Create(_ context.Context, evt event.TypedCreateEvent[client.Object], w workqueue.TypedRateLimitingInterface[reconcile.Request]) {

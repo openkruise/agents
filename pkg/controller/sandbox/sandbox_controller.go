@@ -144,15 +144,13 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	} else if errors.IsNotFound(err) {
 		pod = nil
 	} else if !pod.DeletionTimestamp.IsZero() {
-		// Pod 正在删除过程中，等待 Pod 删除完成
 		return reconcile.Result{RequeueAfter: min(requeueAfter, time.Second*3)}, nil
 	} else if pod.Status.Phase == corev1.PodSucceeded {
 		newStatus.Phase = agentsv1alpha1.SandboxSucceeded
 		return ctrl.Result{RequeueAfter: requeueAfter}, r.updateSandboxStatus(ctx, *newStatus, box)
 	} else if pod.Status.Phase == corev1.PodFailed &&
 		box.Status.Phase != agentsv1alpha1.SandboxPaused {
-		// paused过程中，Pod会变为 Failed 状态，需要忽略。
-		// NeedsBypassSandbox 用于忽略旁路 Sandbox 场景下 Pod 由于深休眠提前进入 Failed 的情况。
+		// During the paused phase, the pod transitions to the Failed state and should be ignored.
 		newStatus.Phase = agentsv1alpha1.SandboxFailed
 		return ctrl.Result{RequeueAfter: requeueAfter}, r.updateSandboxStatus(ctx, *newStatus, box)
 	}
@@ -165,10 +163,10 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			cond.LastTransitionTime = metav1.Now()
 			utils.SetSandboxCondition(newStatus, *cond)
 		}
-		// 如果是 paused ，首先将 sandbox 设置为 Paused 状态
+		// If it is paused, first set the sandbox to the Paused state.
 	} else if box.Spec.Paused && box.Status.Phase == agentsv1alpha1.SandboxRunning {
 		newStatus.Phase = agentsv1alpha1.SandboxPaused
-		// 进入到resume阶段
+		// enter resume phase
 	} else if !box.Spec.Paused && newStatus.Phase == agentsv1alpha1.SandboxPaused {
 		// delete paused condition
 		utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))

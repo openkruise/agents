@@ -8,7 +8,6 @@ const (
 const (
 	DefaultMinPoolSize       = 5
 	DefaultMaxPoolSizeFactor = 2
-	LabelACS                 = "alibabacloud.com/acs"
 	OwnerManager             = "__manager"
 )
 

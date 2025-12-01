@@ -109,12 +109,5 @@ spec:
           requests:
             cpu: 10m
             memory: 64Mi
-        volumeMounts:
-        - name: config-volume
-          mountPath: /configuration
-      volumes:
-      - name: config-volume
-        configMap:
-          name: configuration
       serviceAccountName: controller-manager
       terminationGracePeriodSeconds: 10

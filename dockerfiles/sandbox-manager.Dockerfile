@@ -1,5 +1,5 @@
 # Build stage
-FROM hub.docker.alibaba-inc.com/chorus-ci/golang:1.24 AS builder
+FROM golang:1.24 AS builder
 
 WORKDIR /app
 
@@ -17,7 +17,7 @@ COPY ../client ./client
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o sandbox-manager ./cmd/sandbox-manager
 
 # Final stage
-FROM hub.docker.alibaba-inc.com/chorus-ci/alpine:3.20 as runtime
+FROM alpine:3.20 as runtime
 
 RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories && \
     apk --no-cache add ca-certificates

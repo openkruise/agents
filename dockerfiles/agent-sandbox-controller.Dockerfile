@@ -1,5 +1,5 @@
 # Build the manager binary
-FROM hub.docker.alibaba-inc.com/chorus-ci/golang:1.24 AS builder
+FROM golang:1.24 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 
@@ -25,7 +25,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o ma
 
 # Use distroless as minimal base image to package the manager binary
 # Refer to https://github.com/GoogleContainerTools/distroless for more details
-FROM hub.docker.alibaba-inc.com/chorus-ci/alpine:3.20
+FROM alpine:3.20
 WORKDIR /
 RUN mkdir -p /home/nonroot/sandbox-controller-webhook-certs && \
     chmod 777 /home/nonroot/sandbox-controller-webhook-certs && \

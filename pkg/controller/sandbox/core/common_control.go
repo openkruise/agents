@@ -23,14 +23,12 @@ type commonControl struct {
 
 func (r *commonControl) EnsureSandboxPhasePending(ctx context.Context, args EnsureFuncArgs) error {
 	pod, box, newStatus := args.Pod, args.Box, args.NewStatus
-	// 如果 Pod 不存在，首先需要创建 Pod
+	// If the Pod does not exist, it must first be created.
 	if pod == nil {
 		if _, err := r.createPod(ctx, box, newStatus); err != nil {
 			return err
 		}
 	} else if pod.Status.Phase == corev1.PodRunning {
-		// Sandbox 托管 Pod 进入到 Running 才会使 Sandbox 进入 Running 阶段
-		// 旁路 Sandbox Pod 由于状态不可预测，将会尽快使 Sandbox 进入 Running 阶段
 		newStatus.Phase = agentsv1alpha1.SandboxRunning
 		pCond := utils.GetPodCondition(&pod.Status, corev1.PodReady)
 		cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionReady))
@@ -54,7 +52,7 @@ func (r *commonControl) EnsureSandboxPhasePending(ctx context.Context, args Ensu
 
 func (r *commonControl) EnsureSandboxPhaseRunning(ctx context.Context, args EnsureFuncArgs) error {
 	pod, _, newStatus := args.Pod, args.Box, args.NewStatus
-	// Running 状态如果 Pod 不在了，应该是异常情况。
+	// If a Pod is no longer present in the Running state, it should be considered an abnormal situation.
 	if pod == nil {
 		newStatus.Phase = agentsv1alpha1.SandboxFailed
 		newStatus.Message = "Sandbox Pod Not Found"
@@ -91,25 +89,24 @@ func (r *commonControl) EnsureSandboxPhasePaused(ctx context.Context, args Ensur
 		return nil
 	}
 
-	// paused 阶段将 ready 设置为 false
+	// The paused phase sets condition ready to false.
 	if rCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionReady)); rCond.Status == metav1.ConditionTrue {
 		rCond.Status = metav1.ConditionFalse
 		rCond.LastTransitionTime = metav1.Now()
 		utils.SetSandboxCondition(newStatus, *rCond)
 	}
 
-	// Pod 删除完成，休眠完成
+	// Pod deletion completed, paused completed
 	if pod == nil {
 		cond.Status = metav1.ConditionTrue
 		utils.SetSandboxCondition(newStatus, *cond)
 		return nil
 	}
-	// Pod 删除未完成，等待
+	// Pod deletion incomplete, waiting
 	if !pod.DeletionTimestamp.IsZero() {
 		logger.Info("Sandbox wait pod paused")
 		return nil
 	}
-	// 删除 Pod
 	err := r.Delete(ctx, pod, &client.DeleteOptions{GracePeriodSeconds: pointer.Int64(30)})
 	if err != nil {
 		logger.Error(err, "Delete pod failed")
@@ -121,7 +118,7 @@ func (r *commonControl) EnsureSandboxPhasePaused(ctx context.Context, args Ensur
 
 func (r *commonControl) EnsureSandboxPhaseResuming(ctx context.Context, args EnsureFuncArgs) error {
 	pod, box, newStatus := args.Pod, args.Box, args.NewStatus
-	// 首先创建 Pod
+	// first create pod
 	var err error
 	if pod == nil {
 		_, err = r.createPod(ctx, box, newStatus)
@@ -145,7 +142,6 @@ func (r *commonControl) EnsureSandboxPhaseTerminating(ctx context.Context, args 
 	pod, box, _ := args.Pod, args.Box, args.NewStatus
 	logger := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
 	var err error
-	// 其它阶段，直接删除Pod即可
 	if pod == nil {
 		err = utils.UpdateFinalizer(r.Client, box, utils.RemoveFinalizerOpType, utils.SandboxFinalizer)
 		if err != nil {
