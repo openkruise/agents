@@ -33,7 +33,6 @@ type Controller struct {
 	clientConfig *rest.Config
 	domain       string
 	manager      *sandbox_manager.SandboxManager
-	tlsSecret    string
 	keys         *keys.SecretKeyStorage
 }
 
@@ -42,13 +41,12 @@ type Controller struct {
 //	Params:
 //	- domain: The domain name of the sandbox service, a TLS cert is required, e.g.
 //	- listenAddr: The address to listen on, e.g. ":8080"
-func NewController(domain, tlsSecret, adminKey string, port int, enableAuth bool, clientSet *clients.ClientSet) *Controller {
+func NewController(domain, adminKey string, port int, enableAuth bool, clientSet *clients.ClientSet) *Controller {
 	sc := &Controller{
 		mux:          http.NewServeMux(),
 		client:       clientSet,
 		domain:       domain,
 		clientConfig: clientSet.Config,
-		tlsSecret:    tlsSecret,
 		port:         port,
 	}
 
@@ -69,10 +67,10 @@ func NewController(domain, tlsSecret, adminKey string, port int, enableAuth bool
 	return sc
 }
 
-func (sc *Controller) Init(templateDir string, infrastructure string) error {
+func (sc *Controller) Init(infrastructure string) error {
 	ctx := logs.NewContext()
 	log := klog.FromContext(ctx)
-	log.Info("init controller", "infra", infrastructure, "templateDir", templateDir)
+	log.Info("init controller", "infra", infrastructure)
 	var adapter proxy.RequestAdapter
 	baseAdapter := &adapters2.CommonAdapter{Port: sc.port, Keys: sc.keys}
 	if infrastructure == consts.InfraMicroVM {
@@ -93,7 +91,7 @@ func (sc *Controller) Init(templateDir string, infrastructure string) error {
 	}
 }
 
-func (sc *Controller) Run() (context.Context, error) {
+func (sc *Controller) Run(sysNs, peerSelector string) (context.Context, error) {
 	if sc.stop != nil {
 		return nil, errors.New("controller already started")
 	}
@@ -101,7 +99,7 @@ func (sc *Controller) Run() (context.Context, error) {
 	// Channel to listen for interrupt signal
 	sc.stop = make(chan os.Signal, 1)
 	signal.Notify(sc.stop, syscall.SIGINT, syscall.SIGTERM)
-	if err := sc.manager.Run(ctx); err != nil {
+	if err := sc.manager.Run(ctx, sysNs, peerSelector); err != nil {
 		klog.Fatalf("Sandbox manager failed to start: %v", err)
 	}
 

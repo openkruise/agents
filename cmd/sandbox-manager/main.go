@@ -19,16 +19,6 @@ func main() {
 		port = portEnv
 	}
 
-	templateDir := os.Getenv("TEMPLATE_DIR")
-	if templateDir == "" {
-		templateDir = "/root/builtin_templates"
-	}
-
-	tlsSecret := os.Getenv("TLS_SECRET")
-	if tlsSecret == "" {
-		tlsSecret = "kruise-sandbox-manager-tls"
-	}
-
 	infra := os.Getenv("INFRA")
 	if infra == "" {
 		klog.Fatalf("env var INFRA is required")
@@ -36,16 +26,6 @@ func main() {
 
 	e2bAdminKey := os.Getenv("E2B_ADMIN_KEY")
 	e2bEnableAuth := os.Getenv("E2B_ENABLE_AUTH") == "true"
-	// =========== End Env =============
-
-	// Initialize Kubernetes client and config
-	clientSet, err := clients.NewClientSet(infra)
-	if err != nil {
-		klog.Fatalf("Failed to initialize Kubernetes client: %v", err)
-	}
-
-	klog.InitFlags(nil)
-	flag.Parse()
 
 	// Get domain from environment variable or use empty string
 	domain := "localhost"
@@ -58,13 +38,33 @@ func main() {
 		e2b.Namespace = ns
 	}
 
-	sandboxController := e2b.NewController(domain, tlsSecret, e2bAdminKey, port, e2bEnableAuth, clientSet)
-	if err := sandboxController.Init(templateDir, infra); err != nil {
+	sysNs := os.Getenv("SYSTEM_NAMESPACE")
+	if sysNs == "" {
+		klog.Fatalf("env var SYSTEM_NAMESPACE is required")
+	}
+
+	peerSelector := os.Getenv("PEER_SELECTOR")
+	if peerSelector == "" {
+		klog.Fatalf("env var PEER_SELECTOR is required")
+	}
+	// =========== End Env =============
+
+	// Initialize Kubernetes client and config
+	clientSet, err := clients.NewClientSet(infra)
+	if err != nil {
+		klog.Fatalf("Failed to initialize Kubernetes client: %v", err)
+	}
+
+	klog.InitFlags(nil)
+	flag.Parse()
+
+	sandboxController := e2b.NewController(domain, e2bAdminKey, port, e2bEnableAuth, clientSet)
+	if err := sandboxController.Init(infra); err != nil {
 		klog.Fatalf("Failed to initialize sandbox controller: %v", err)
 	}
 
 	// Start HTTP Server
-	sandboxCtx, err := sandboxController.Run()
+	sandboxCtx, err := sandboxController.Run(sysNs, peerSelector)
 	if err != nil {
 		klog.Fatalf("Failed to start sandbox controller: %v", err)
 	}

@@ -33,7 +33,7 @@ func NewScaleExpectations() ScaleExpectations {
 	}
 }
 
-var ExpectationTimeout = 5 * time.Minute
+var ExpectationTimeout = 5 * time.Second
 
 type realScaleExpectations struct {
 	sync.Mutex

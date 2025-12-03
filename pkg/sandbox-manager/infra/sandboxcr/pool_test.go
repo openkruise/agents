@@ -100,6 +100,9 @@ func TestPool_ClaimSandbox(t *testing.T) {
 						},
 						Annotations: map[string]string{},
 					},
+					Status: corev1.PodStatus{
+						Phase: corev1.PodRunning,
+					},
 				}
 				if tt.preModifier != nil {
 					tt.preModifier(pod)
@@ -110,7 +113,7 @@ func TestPool_ClaimSandbox(t *testing.T) {
 			time.Sleep(100 * time.Millisecond)
 
 			user := "test-user"
-			sbx, err := pool.ClaimSandbox(context.Background(), user, tt.modifier)
+			sbx, err := pool.ClaimSandbox(context.Background(), user, 1, tt.modifier)
 
 			if tt.expectError {
 				assert.Error(t, err)

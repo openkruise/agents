@@ -464,7 +464,7 @@ func TestServer_Process(t *testing.T) {
 			// Setup routes
 			for _, route := range tt.setupRoutes {
 				route.State = agentsv1alpha1.SandboxStateRunning
-				server.SetRoute(route.ID, route)
+				server.SetRoute(route)
 			}
 
 			// Create mock processing server

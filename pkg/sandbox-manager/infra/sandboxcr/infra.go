@@ -140,7 +140,7 @@ func (i *Infra) onSandboxAdd(obj any) {
 		return
 	}
 	route := i.AsSandbox(sbx).GetRoute()
-	i.Proxy.SetRoute(route.ID, route)
+	i.Proxy.SetRoute(route)
 }
 
 func (i *Infra) onSandboxDelete(obj any) {
@@ -167,7 +167,7 @@ func (i *Infra) refreshRoute(sbx infra.Sandbox) {
 	oldRoute, _ := i.Proxy.LoadRoute(sbx.GetName())
 	newRoute := sbx.GetRoute()
 	if newRoute.State != oldRoute.State || newRoute.IP != oldRoute.IP {
-		i.Proxy.SetRoute(newRoute.ID, newRoute)
+		i.Proxy.SetRoute(newRoute)
 	}
 }
 

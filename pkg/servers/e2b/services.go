@@ -12,11 +12,11 @@ import (
 	"time"
 
 	"github.com/openkruise/agents/pkg/sandbox-manager"
-	errors2 "github.com/openkruise/agents/pkg/sandbox-manager/errors"
+	innererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
-	utils2 "github.com/openkruise/agents/pkg/utils"
-	"github.com/openkruise/agents/pkg/utils/sandbox-manager"
+	"github.com/openkruise/agents/pkg/utils"
+	managerutils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/klog/v2"
 )
@@ -48,7 +48,7 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 			}
 		}
 
-		if err := utils.ValidatedCustomLabelKey(k); err != nil {
+		if err := managerutils.ValidatedCustomLabelKey(k); err != nil {
 			return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
 				Code:    http.StatusBadRequest,
 				Message: fmt.Sprintf("Invalid metadata key [%s]: %s", k, err),
@@ -86,7 +86,7 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 	}
 	var wg sync.WaitGroup
 	var errCh = make(chan error, 3)
-	if pool.GetAnnotations()[AnnotationShouldInitEnvd] == utils2.True {
+	if pool.GetAnnotations()[AnnotationShouldInitEnvd] == utils.True {
 		wg.Add(1)
 		go func() {
 			start := time.Now()
@@ -213,10 +213,10 @@ func (sc *Controller) DeleteSandbox(r *http.Request) (web.ApiResponse[struct{}],
 	err := sc.manager.DeleteClaimedSandbox(r.Context(), id)
 	if err != nil {
 		log.Error(err, "failed to delete sandbox", "id", id)
-		switch errors2.GetErrCode(err) {
-		case errors2.ErrorBadRequest:
+		switch innererrors.GetErrCode(err) {
+		case innererrors.ErrorBadRequest:
 			fallthrough // e2b 协议不支持这里返回 400，统一返回 404
-		case errors2.ErrorNotFound:
+		case innererrors.ErrorNotFound:
 			return web.ApiResponse[struct{}]{}, &web.ApiError{
 				Code:    http.StatusNotFound,
 				Message: fmt.Sprintf("Sandbox %s not found", id),
@@ -257,8 +257,8 @@ func (sc *Controller) SetSandboxTimeout(r *http.Request) (web.ApiResponse[struct
 	}
 	if err := sc.manager.SetSandboxTimeout(ctx, sbx, request.TimeoutSeconds); err != nil {
 		log.Error(err, "failed to set sandbox timeout", "id", id, "timeout", request.TimeoutSeconds)
-		switch errors2.GetErrCode(err) {
-		case errors2.ErrorNotFound:
+		switch innererrors.GetErrCode(err) {
+		case innererrors.ErrorNotFound:
 			return web.ApiResponse[struct{}]{}, &web.ApiError{
 				Code:    http.StatusNotFound,
 				Message: fmt.Sprintf("Sandbox %s not found", id),
@@ -320,7 +320,7 @@ func (sc *Controller) BrowserUse(r *http.Request) (web.ApiResponse[*browserHandS
 	}
 
 	h.WebSocketDebuggerURL = browserWebSocketReplacer.ReplaceAllString(h.WebSocketDebuggerURL,
-		fmt.Sprintf("wss://%s", utils.GetSandboxAddress(sandboxID, sc.domain, models.CDPPort)))
+		fmt.Sprintf("wss://%s", managerutils.GetSandboxAddress(sandboxID, sc.domain, models.CDPPort)))
 	return web.ApiResponse[*browserHandShake]{
 		Code: resp.StatusCode,
 		Body: &h,

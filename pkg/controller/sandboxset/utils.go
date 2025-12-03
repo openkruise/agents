@@ -57,7 +57,7 @@ func findSandboxGroup(sbx *agentsv1alpha1.Sandbox) (group, reason string) {
 	}
 	switch sbx.Status.Phase {
 	case "":
-		fallthrough
+		return GroupCreating, "ResourcePhaseEmpty"
 	case agentsv1alpha1.SandboxPending:
 		return GroupCreating, "ResourcePending"
 	case agentsv1alpha1.SandboxFailed:

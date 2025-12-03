@@ -1,19 +1,47 @@
 package proxy
 
-import "time"
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"strings"
+
+	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager/proxyutils"
+)
 
 // Route 表示一条内部沙箱路由规则
 type Route struct {
-	IP                       string
-	ID                       string
-	Owner                    string
-	State                    string
-	ExtraHeaders             map[string]string
-	LastRequestApiServerTime time.Time
+	IP           string            `json:"ip"`
+	ID           string            `json:"id"`
+	Owner        string            `json:"owner"`
+	State        string            `json:"state"`
+	ExtraHeaders map[string]string `json:"extra_headers"`
 }
 
-func (s *Server) SetRoute(id string, route Route) {
-	s.routes.Store(id, route)
+func (s *Server) SetRoute(route Route) {
+	s.routes.Store(route.ID, route)
+}
+
+func (s *Server) SyncRouteWithPeers(route Route) error {
+	body, err := json.Marshal(route)
+	if err != nil {
+		return err
+	}
+	var errStrings []string
+	for _, ip := range s.Peers {
+		request, err := http.NewRequest(http.MethodPost, RefreshAPI, bytes.NewBuffer(body))
+		if err != nil {
+			return err
+		}
+		if _, err = utils.ProxyRequest(request, RefreshAPI, SystemPort, ip); err != nil {
+			errStrings = append(errStrings, err.Error())
+		}
+	}
+	if len(errStrings) == 0 {
+		return nil
+	}
+	return errors.New(strings.Join(errStrings, ";"))
 }
 
 func (s *Server) LoadRoute(id string) (Route, bool) {

@@ -8,9 +8,11 @@ import (
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/proxy"
+	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/utils/sandbox-manager"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog/v2"
 )
 
@@ -22,15 +24,24 @@ func (m *SandboxManager) ClaimSandbox(ctx context.Context, user, template string
 	if !ok {
 		return nil, errors.NewError(errors.ErrorNotFound, fmt.Sprintf("pool %s not found", template))
 	}
-	sandbox, err := pool.ClaimSandbox(ctx, user, func(sbx infra.Sandbox) {
+	sandbox, err := pool.ClaimSandbox(ctx, user, consts.DefaultPoolingCandidateCounts, func(sbx infra.Sandbox) {
 		if timeoutSeconds > 0 {
 			sbx.SetTimeout(time.Duration(timeoutSeconds) * time.Second)
 		}
+		sbx.SetOwnerReferences([]metav1.OwnerReference{}) // TODO: just try empty slice
 	})
 	if err != nil {
 		return nil, errors.NewError(errors.ErrorInternal, fmt.Sprintf("failed to claim sandbox: %v", err))
 	}
 	log.Info("sandbox claimed", "sandbox", klog.KObj(sandbox), "cost", time.Since(start))
+	start = time.Now()
+	route := sandbox.GetRoute()
+	err = m.proxy.SyncRouteWithPeers(route)
+	if err != nil {
+		log.Error(err, "failed to sync route with peers", "cost", time.Since(start))
+	} else {
+		log.Info("route synced with peers", "cost", time.Since(start), "route", route)
+	}
 	return sandbox, nil
 }
 

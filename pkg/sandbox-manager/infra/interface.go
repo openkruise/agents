@@ -32,14 +32,13 @@ type Infrastructure interface {
 	LoadDebugInfo() map[string]any
 	SelectSandboxes(options SandboxSelectorOptions) ([]Sandbox, error) // Select Sandboxes based on the options provided
 	GetSandbox(sandboxID string) (Sandbox, error)                      // Get a Sandbox interface by its ID
-	InjectTemplateMetadata() metav1.ObjectMeta                         // Inject metadata into template
 }
 
 type SandboxPool interface {
 	GetName() string
 	GetAnnotations() map[string]string
 	// ClaimSandbox claims a Sandbox from the SandboxPool. Note: the claimed Sandbox is immutable
-	ClaimSandbox(ctx context.Context, user string, modifier func(sbx Sandbox)) (Sandbox, error)
+	ClaimSandbox(ctx context.Context, user string, maxCandidates int, modifier func(sbx Sandbox)) (Sandbox, error)
 }
 
 type Sandbox interface {

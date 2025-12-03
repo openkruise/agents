@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"strconv"
 	"strings"
 
@@ -90,16 +91,17 @@ func (s *Server) handleRequestHeaders(requestHeaders *extProcPb.ProcessingReques
 	if err != nil {
 		// Return error response instead of gRPC error
 		errorMsg := fmt.Sprintf("failed to map request to sandbox, URL=%s://%s%s", scheme, authority, path)
-		return s.logAndCreateErrorResponse(500, errorMsg, log)
+		return s.logAndCreateErrorResponse(http.StatusInternalServerError, errorMsg, log)
 	}
 	log.Info("request mapped", "sandboxID", sandboxID, "sandboxPort", sandboxPort, "extraHeaders", extraHeaders, "user", user)
 
 	route, ok := s.LoadRoute(sandboxID)
-	if !ok || route.State != agentsv1alpha1.SandboxStateRunning {
-		log.Info("route not found", "exists", ok, "state", route.State)
-		// Return 404 Not Found error
+	if !ok {
 		errorMsg := fmt.Sprintf("route for sandbox %s not found", sandboxID)
-		return s.logAndCreateErrorResponse(404, errorMsg, log)
+		return s.logAndCreateErrorResponse(http.StatusNotFound, errorMsg, log)
+	}
+	if route.State == agentsv1alpha1.SandboxStatePaused {
+		return s.logAndCreateErrorResponse(http.StatusForbidden, "sandbox is paused", log)
 	}
 	if extraHeaders == nil {
 		extraHeaders = make(map[string]string)

@@ -3,8 +3,10 @@ package sandboxcr
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/openkruise/agents/api/v1alpha1"
@@ -53,27 +55,38 @@ func (p *Pool) AsSandbox(sbx *v1alpha1.Sandbox) *Sandbox {
 	}
 }
 
-func (p *Pool) ClaimSandbox(ctx context.Context, user string, modifier func(sbx infra.Sandbox)) (infra.Sandbox, error) {
+var claimTimeout = 5 * time.Second
+
+func (p *Pool) ClaimSandbox(ctx context.Context, user string, candidateCounts int, modifier func(sbx infra.Sandbox)) (infra.Sandbox, error) {
 	lock := uuid.New().String()
 	log := klog.FromContext(ctx).WithValues("pool", p.Namespace+"/"+p.Name)
-	for i := 0; i < 10; i++ {
+	start := time.Now()
+	for i := 0; ; i++ {
 		objects, err := p.cache.SelectSandboxes(v1alpha1.LabelSandboxState, v1alpha1.SandboxStateAvailable,
 			v1alpha1.LabelSandboxPool, p.Name)
 		if err != nil {
 			return nil, err
 		}
 		if len(objects) == 0 {
-			return nil, fmt.Errorf("no available sandboxes for template %s", p.Name)
+			return nil, fmt.Errorf("no available sandboxes for template %s (no stock)", p.Name)
 		}
 		var obj *v1alpha1.Sandbox
+		candidates := make([]*v1alpha1.Sandbox, 0, candidateCounts)
 		for _, obj = range objects {
 			if obj.Status.Phase == v1alpha1.SandboxRunning && obj.Annotations[v1alpha1.AnnotationLock] == "" {
-				break
+				candidates = append(candidates, obj)
+				if len(candidates) >= candidateCounts {
+					break
+				}
 			}
 		}
-		if obj == nil || obj.Annotations[v1alpha1.AnnotationLock] != "" {
-			return nil, fmt.Errorf("all sandboxes are locked")
+
+		if len(candidates) == 0 {
+			return nil, fmt.Errorf("no available sandboxes for template %s (all sandboxes are locked)", p.Name)
 		}
+
+		r := rand.New(rand.NewSource(time.Now().UnixNano()))
+		obj = candidates[r.Intn(len(candidates))]
 
 		// Go to Sandbox interface
 		sbx := p.AsSandbox(obj.DeepCopy())
@@ -83,6 +96,7 @@ func (p *Pool) ClaimSandbox(ctx context.Context, user string, modifier func(sbx 
 		sbx.Labels[v1alpha1.LabelSandboxState] = v1alpha1.SandboxStateRunning
 		err = p.LockSandbox(ctx, sbx, lock, user)
 		if err == nil {
+			log.Info("acquired optimistic lock of pod", "cost", time.Since(start), "retries", i)
 			return sbx, nil
 		}
 		if !apierrors.IsConflict(err) {
@@ -90,8 +104,11 @@ func (p *Pool) ClaimSandbox(ctx context.Context, user string, modifier func(sbx 
 			return nil, err
 		}
 		log.Error(err, "failed to acquire optimistic lock of pod", "retries", i+1)
+		if time.Since(start) > claimTimeout {
+			break
+		}
 	}
-	return nil, fmt.Errorf("failed to acquire optimistic lock of pod after max retries")
+	return nil, fmt.Errorf("no available sandboxes for template %s (failed to acquire optimistic lock of pod after max retries)", p.Name)
 }
 
 func (p *Pool) LockSandbox(ctx context.Context, sbx *Sandbox, lock string, owner string) error {

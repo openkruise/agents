@@ -14,6 +14,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/homedir"
+	"k8s.io/klog/v2"
 )
 
 type K8sClient kubernetes.Interface
@@ -75,6 +76,7 @@ func NewClientSet(infra string) (*ClientSet, error) {
 		}
 	}
 	client.Config = config
+	klog.InfoS("client config", "qps", config.QPS, "burst", config.Burst)
 	// Create the client
 	client.K8sClient, err = kubernetes.NewForConfig(config)
 	if err != nil {
