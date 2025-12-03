@@ -12,6 +12,7 @@ import (
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
+	"github.com/openkruise/agents/pkg/utils/sandbox-manager/proxyutils"
 	microvm "gitlab.alibaba-inc.com/serverlessinfra/sandbox-operator/api/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -165,7 +166,7 @@ func (s *Sandbox) Request(r *http.Request, path string, port int) (*http.Respons
 	if s.Status.Phase != kruise.SandboxRunning {
 		return nil, errors.New("sandbox is not running")
 	}
-	return utils.ProxyRequest(r, path, port, s.Status.PodInfo.PodIP)
+	return proxyutils.ProxyRequest(r, path, port, s.Status.PodInfo.PodIP)
 }
 
 func (s *Sandbox) Pause(ctx context.Context) error {

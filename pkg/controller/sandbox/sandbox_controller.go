@@ -24,6 +24,7 @@ import (
 	"reflect"
 	"time"
 
+	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -49,7 +50,7 @@ func init() {
 }
 
 var (
-	concurrentReconciles  = 100
+	concurrentReconciles  = 500
 	sandboxControllerKind = agentsv1alpha1.GroupVersion.WithKind("Sandbox")
 )
 
@@ -128,7 +129,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 	}
 
-	logger.Info("Began to process Sandbox for reconcile")
+	logger.V(consts.DebugLogLevel).Info("Began to process Sandbox for reconcile")
 	newStatus := box.Status.DeepCopy()
 	newStatus.ObservedGeneration = box.Generation
 	if newStatus.Phase == "" {

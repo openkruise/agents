@@ -27,7 +27,7 @@ func (e *SandboxEventHandler) Update(_ context.Context, evt event.TypedUpdateEve
 	if evt.ObjectOld == nil || evt.ObjectNew == nil {
 		return
 	}
-	req, ok := getSandboxSetController(evt.ObjectNew)
+	req, ok := getSandboxSetController(evt.ObjectOld)
 	if !ok {
 		return
 	}
@@ -54,7 +54,6 @@ func (e *SandboxEventHandler) Update(_ context.Context, evt event.TypedUpdateEve
 
 func (e *SandboxEventHandler) Delete(_ context.Context, evt event.TypedDeleteEvent[client.Object], w workqueue.TypedRateLimitingInterface[reconcile.Request]) {
 	if req, ok := getSandboxSetController(evt.Object); ok {
-		scaleExpectation.ObserveScale(req.String(), expectations.Delete, evt.Object.GetName())
 		w.Add(req)
 	}
 }

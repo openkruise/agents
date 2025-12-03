@@ -9,6 +9,8 @@ const (
 	DefaultMinPoolSize       = 5
 	DefaultMaxPoolSizeFactor = 2
 	OwnerManager             = "__manager"
+
+	DefaultPoolingCandidateCounts = 100
 )
 
 const (

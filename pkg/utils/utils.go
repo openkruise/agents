@@ -12,6 +12,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -103,8 +104,9 @@ func UpdateFinalizer(c client.Client, object client.Object, op FinalizerOpType, 
 		finalizers = finalizerSet.Delete(finalizer).List()
 	}
 	fetchedObject.SetFinalizers(finalizers)
-	err := c.Update(context.TODO(), fetchedObject)
-	return err
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		return c.Update(context.TODO(), fetchedObject)
+	})
 }
 
 func DumpJson(o interface{}) string {
@@ -164,4 +166,15 @@ func DoItSlowly(count int, initialBatchSize int, fn func() error) (int, error) {
 		remaining -= batchSize
 	}
 	return successes, nil
+}
+
+func DoItSlowlyWithInputs[T any](inputs []T, initialBatchSize int, fn func(T) error) (int, error) {
+	inputCh := make(chan T, len(inputs))
+	for _, input := range inputs {
+		inputCh <- input
+	}
+	return DoItSlowly(len(inputs), initialBatchSize, func() error {
+		input := <-inputCh
+		return fn(input)
+	})
 }

@@ -1,4 +1,4 @@
-package utils
+package proxyutils
 
 import (
 	"fmt"
@@ -25,9 +25,9 @@ func ProxyRequest(r *http.Request, path string, port int, ip string) (*http.Resp
 			klog.ErrorS(err, "failed to read response body")
 			body = []byte(err.Error())
 		}
-		return resp, fmt.Errorf("sandbox proxy response not 2xx. code: %d, boddy: %s", resp.StatusCode, string(body))
+		return resp, fmt.Errorf("sandbox proxy response not 2xx. code: %d, body: %s", resp.StatusCode, string(body))
 	}
-	return resp, err
+	return resp, nil
 }
 
 // proxyRequestDirectly proxies the request directly to the sandbox IP

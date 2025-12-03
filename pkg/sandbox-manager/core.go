@@ -4,12 +4,16 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
+	"github.com/openkruise/agents/pkg/utils"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog/v2"
 )
 
@@ -49,7 +53,40 @@ func NewSandboxManager(namespace string, client *clients.ClientSet, adapter prox
 	return m, err
 }
 
-func (m *SandboxManager) Run(ctx context.Context) error {
+func (m *SandboxManager) Run(ctx context.Context, sysNs, peerSelector string) error {
+	log := klog.FromContext(ctx)
+	// TODO peer system is not optimized
+	for i := 0; i < 20; i++ {
+		peerList, err := m.client.CoreV1().Pods(sysNs).List(ctx, metav1.ListOptions{
+			LabelSelector: peerSelector,
+		})
+		if err != nil {
+			return err
+		}
+		var peers []string
+		for _, peer := range peerList.Items {
+			cond := utils.GetPodCondition(&peer.Status, corev1.PodReady)
+			if cond == nil || cond.Status != corev1.ConditionTrue {
+				log.Info("peer pod is not ready", "peer", peer.Name)
+				continue
+			}
+			ip := peer.Status.PodIP
+			if ip == "" {
+				log.Info("peer pod has no ip", "peer", peer.Name)
+				continue
+			}
+			peers = append(peers, ip)
+			log.Info("found peer", "peer", peer.Name, "ip", ip)
+		}
+		if len(peers) == len(peerList.Items) {
+			log.Info("all peers are ready")
+			m.proxy.SetPeers(peers)
+			break
+		} else {
+			log.Info("waiting for peers to start", "peers", len(peers), "total", len(peerList.Items))
+			time.Sleep(6 * time.Second)
+		}
+	}
 	go func() {
 		klog.InfoS("starting proxy")
 		err := m.proxy.Run()

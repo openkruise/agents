@@ -19,9 +19,11 @@ package sandboxset
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"reflect"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -32,12 +34,13 @@ import (
 	"github.com/openkruise/agents/pkg/utils/fieldindex"
 	managerutils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -49,11 +52,15 @@ import (
 
 func init() {
 	flag.IntVar(&concurrentReconciles, "sandboxset-workers", concurrentReconciles, "Max concurrent workers for SandboxSet controller.")
+	flag.IntVar(&initialBatchSize, "sandboxset-initial-batch-size", initialBatchSize, "The initial batch size to use for the api-server operation")
 }
 
 var (
 	concurrentReconciles     = 3
+	initialBatchSize         = 16
+	scaleUpCooldown          = 5 * time.Second
 	sandboxSetControllerKind = agentsv1alpha1.GroupVersion.WithKind("SandboxSet")
+	scaleUpRecord            sync.Map
 )
 
 func Add(mgr manager.Manager) error {
@@ -89,11 +96,12 @@ const (
 // +kubebuilder:rbac:groups=agents.kruise.io,resources=sandboxsets/finalizers,verbs=update
 
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	totalStart := time.Now()
 	log := logf.FromContext(ctx).WithValues("sandboxset", req.NamespacedName)
 	ctx = logf.IntoContext(ctx, log)
 	sbs := &agentsv1alpha1.SandboxSet{}
 	if err := r.Get(ctx, req.NamespacedName, sbs); err != nil {
-		if errors.IsNotFound(err) {
+		if apierrors.IsNotFound(err) {
 			scaleExpectation.DeleteExpectations(req.String())
 			return ctrl.Result{}, nil
 		}
@@ -113,34 +121,38 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 	actualReplicas := saveStatusFromGroup(newStatus, groups)
 
+	var allErrors error
 	// Step 1: release control of used sandboxes
+	start := time.Now()
 	if err = r.releaseControlOfUsedSandboxes(ctx, groups.Used, sbs); err != nil {
 		log.Error(err, "failed to release control of used sandboxes")
-		return ctrl.Result{}, err
+		allErrors = errors.Join(allErrors, err)
+	} else {
+		log.Info("all used sandboxes released", "cost", time.Since(start))
 	}
 
-	// Step 2: process creating sandboxes
+	// Step 2: process created sandboxes
+	start = time.Now()
 	if err = r.processCreatedSandboxes(ctx, groups.Creating, sbs); err != nil {
 		log.Error(err, "failed to process creating sandboxes")
-		return ctrl.Result{}, err
+		allErrors = errors.Join(allErrors, err)
+	} else {
+		log.Info("all created sandboxes patched as available", "cost", time.Since(start))
 	}
 
-	// Step 3: delete failed sandboxes
-	if err = r.deleteFailedSandboxes(ctx, groups.Failed); err != nil {
-		log.Error(err, "failed to perform garbage collection")
-		return ctrl.Result{}, err
-	}
-
-	// Step 4: perform scale
+	// Step 3: perform scale
 	var requeueAfter time.Duration
 	controllerKey := GetControllerKey(sbs)
-	if satisfied, unsatisfiedDuration, dirty := scaleExpectation.SatisfiedExpectations(controllerKey); satisfied {
-		newStatus.Replicas, err = r.performScale(ctx, groups, sbs.Spec.Replicas, actualReplicas, sbs, newStatus.UpdateRevision)
+	satisfied, unsatisfiedDuration, dirty := scaleExpectation.SatisfiedExpectations(controllerKey)
+	if satisfied {
+		start = time.Now()
+		newStatus.Replicas, requeueAfter, err = r.performScale(ctx, groups, sbs.Spec.Replicas, actualReplicas, sbs, newStatus.UpdateRevision)
 		if err != nil {
 			log.Error(err, "failed to perform scale")
-			return ctrl.Result{}, err
+			allErrors = errors.Join(allErrors, err)
+		} else {
+			log.Info("scale finished", "statusReplicas", newStatus.Replicas, "cost", time.Since(start))
 		}
-		log.V(consts.DebugLogLevel).Info("scale finished", "statusReplicas", newStatus.Replicas)
 	} else {
 		if unsatisfiedDuration > expectations.ExpectationTimeout {
 			requeueAfter = 10 * time.Second
@@ -153,24 +165,50 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		}
 	}
 
-	return ctrl.Result{RequeueAfter: requeueAfter}, r.updateSandboxSetStatus(ctx, *newStatus, sbs)
+	// Step 4: delete failed sandboxes
+	start = time.Now()
+	if err = r.deleteFailedSandboxes(ctx, groups.Failed); err != nil {
+		log.Error(err, "failed to perform garbage collection")
+		allErrors = errors.Join(allErrors, err)
+	} else {
+		log.Info("all failed sandboxes deleted", "cost", time.Since(start))
+	}
+	log.Info("reconcile done", "totalCost", time.Since(totalStart))
+	if err = r.updateSandboxSetStatus(ctx, *newStatus, sbs); err != nil {
+		log.Error(err, "failed to update sandboxset status")
+		allErrors = errors.Join(allErrors, err)
+	}
+	return ctrl.Result{RequeueAfter: requeueAfter}, allErrors
 }
 
 func (r *Reconciler) releaseControlOfUsedSandboxes(ctx context.Context, used []*agentsv1alpha1.Sandbox, sbs *agentsv1alpha1.SandboxSet) error {
+	usedSandboxes := make(chan client.ObjectKey, len(used))
 	for _, sbx := range used {
-		log := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
-		for i, ownerReference := range sbx.GetOwnerReferences() {
-			if ownerReference.UID == sbs.UID {
-				if err := r.removeOwnerReference(ctx, i, sbx.DeepCopy()); err != nil {
-					log.Error(err, "failed to remove owner reference of sandbox")
-					return err
-				}
-				log.Info("sandbox released")
-				r.Recorder.Eventf(sbs, corev1.EventTypeNormal, EventSandboxReleased, "Sandbox control %s is released for being used", klog.KObj(sbx))
-			}
-		}
+		usedSandboxes <- client.ObjectKeyFromObject(sbx)
 	}
-	return nil
+	_, err := utils.DoItSlowly(len(used), initialBatchSize, func() error {
+		key := <-usedSandboxes
+		return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			sbx := &agentsv1alpha1.Sandbox{}
+			if err := r.Get(ctx, key, sbx); err != nil {
+				return err
+			}
+			log := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
+			for i, ownerReference := range sbx.GetOwnerReferences() {
+				if ownerReference.UID == sbs.UID {
+					if err := r.removeOwnerReference(ctx, i, sbx); err != nil {
+						log.Error(err, "failed to remove owner reference of sandbox")
+						return err
+					}
+					log.Info("sandbox released")
+					r.Recorder.Eventf(sbs, corev1.EventTypeNormal, EventSandboxReleased, "Sandbox control %s is released for being used", klog.KObj(sbx))
+					break
+				}
+			}
+			return nil
+		})
+	})
+	return err
 }
 
 func (r *Reconciler) removeOwnerReference(ctx context.Context, idx int, sbx *agentsv1alpha1.Sandbox) error {
@@ -188,56 +226,83 @@ func (r *Reconciler) removeOwnerReference(ctx context.Context, idx int, sbx *age
 
 func (r *Reconciler) processCreatedSandboxes(ctx context.Context, creating []*agentsv1alpha1.Sandbox, sbs *agentsv1alpha1.SandboxSet) error {
 	now := time.Now()
+	creatingSandboxes := make(chan client.ObjectKey, len(creating))
 	for _, sbx := range creating {
-		log := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
-		cond := utils.GetSandboxCondition(&sbx.Status, string(agentsv1alpha1.SandboxConditionReady))
-		if cond != nil && cond.Status == metav1.ConditionTrue {
-			if err := r.initCreatedSandbox(ctx, sbx); err != nil {
-				log.Error(err, "failed to patch sandbox")
+		creatingSandboxes <- client.ObjectKeyFromObject(sbx)
+	}
+	_, err := utils.DoItSlowly(len(creating), initialBatchSize, func() error {
+		return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			key := <-creatingSandboxes
+			sbx := &agentsv1alpha1.Sandbox{}
+			if err := r.Get(ctx, key, sbx); err != nil {
 				return err
 			}
-			log.Info("sandbox is available",
-				"readyCost", cond.LastTransitionTime.Sub(sbx.CreationTimestamp.Time),
-				"processedAfterReady", now.Sub(cond.LastTransitionTime.Time))
-			r.Recorder.Eventf(sbs, corev1.EventTypeNormal, EventSandboxAvailable, "Sandbox %s is available", klog.KObj(sbx))
-		}
-	}
-	return nil
+			log := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
+			cond := utils.GetSandboxCondition(&sbx.Status, string(agentsv1alpha1.SandboxConditionReady))
+			if cond != nil && cond.Status == metav1.ConditionTrue {
+				if err := r.initCreatedSandbox(ctx, sbx); err != nil {
+					log.Error(err, "failed to patch sandbox")
+					return err
+				}
+				log.Info("sandbox is available",
+					"readyCost", cond.LastTransitionTime.Sub(sbx.CreationTimestamp.Time),
+					"processedAfterReady", now.Sub(cond.LastTransitionTime.Time))
+				r.Recorder.Eventf(sbs, corev1.EventTypeNormal, EventSandboxAvailable, "Sandbox %s is available", klog.KObj(sbx))
+			}
+			return nil
+		})
+	})
+	return err
 }
 
 func (r *Reconciler) performScale(ctx context.Context, groups GroupedSandboxes, expectReplicas, actualReplicas int32,
-	sbs *agentsv1alpha1.SandboxSet, revision string) (int32, error) {
-	log := logf.FromContext(ctx).V(consts.DebugLogLevel)
+	sbs *agentsv1alpha1.SandboxSet, revision string) (int32, time.Duration, error) {
+	log := logf.FromContext(ctx)
 	statusReplicas := actualReplicas
+	key := GetControllerKey(sbs)
 	if offset := expectReplicas - actualReplicas; offset > 0 {
-		successes, err := utils.DoItSlowly(int(offset), 1, func() error {
+		log.Info("scale up", "offset", offset)
+		successes, err := utils.DoItSlowly(int(offset), initialBatchSize, func() error {
 			created, err := r.createSandbox(ctx, sbs, revision)
 			if err != nil {
 				log.Error(err, "failed to create sandbox")
 				return err
 			}
-			log.Info("sandbox created", "sandbox", klog.KObj(created))
+			log.V(consts.DebugLogLevel).Info("sandbox created", "sandbox", klog.KObj(created))
 			return nil
 		})
-		return statusReplicas + int32(successes), err
-	} else {
-		lock := uuid.New().String()
-		for _, snapshot := range append(groups.Creating, groups.Available...) {
-			if offset >= 0 {
-				break
-			}
-			deleted, err := r.scaleDownSandbox(ctx, sbs, client.ObjectKeyFromObject(snapshot), lock)
-			if err != nil {
-				log.Error(err, "failed to scale down sandbox")
-				return statusReplicas, err
-			}
-			if deleted {
-				statusReplicas--
-				offset++
+		scaleUpRecord.Store(key, time.Now())
+		return statusReplicas + int32(successes), 0, err
+	} else if offset < 0 {
+		var lastScaleUp time.Time
+		if value, ok := scaleUpRecord.Load(key); ok {
+			lastScaleUp = value.(time.Time)
+		}
+		if time.Since(lastScaleUp) < scaleUpCooldown {
+			requeueAfter := scaleUpCooldown - time.Since(lastScaleUp)
+			log.Info("skip scale down for just scaled up", "requeueAfter", requeueAfter)
+			return statusReplicas, requeueAfter, nil
+		} else {
+			scaleUpRecord.Delete(key)
+			lock := uuid.New().String()
+			log.Info("scale down", "offset", offset)
+			for _, snapshot := range append(groups.Creating, groups.Available...) {
+				if offset >= 0 {
+					break
+				}
+				deleted, err := r.scaleDownSandbox(ctx, client.ObjectKeyFromObject(snapshot), lock)
+				if err != nil {
+					log.Error(err, "failed to scale down sandbox")
+					return statusReplicas, 0, err
+				}
+				if deleted {
+					statusReplicas--
+					offset++
+				}
 			}
 		}
 	}
-	return statusReplicas, nil
+	return statusReplicas, 0, nil
 }
 
 func (r *Reconciler) createSandbox(ctx context.Context, sbs *agentsv1alpha1.SandboxSet, revision string) (*agentsv1alpha1.Sandbox, error) {
@@ -270,7 +335,7 @@ func (r *Reconciler) createSandbox(ctx context.Context, sbs *agentsv1alpha1.Sand
 	return sbx, nil
 }
 
-func (r *Reconciler) scaleDownSandbox(ctx context.Context, sbs *agentsv1alpha1.SandboxSet, key client.ObjectKey, lock string) (deleted bool, err error) {
+func (r *Reconciler) scaleDownSandbox(ctx context.Context, key client.ObjectKey, lock string) (deleted bool, err error) {
 	log := logf.FromContext(ctx).WithValues("sandbox", key).V(consts.DebugLogLevel)
 	sbx := &agentsv1alpha1.Sandbox{}
 	log.Info("try to scale down sandbox")
@@ -282,20 +347,18 @@ func (r *Reconciler) scaleDownSandbox(ctx context.Context, sbs *agentsv1alpha1.S
 		return false, nil
 	}
 	managerutils.LockSandbox(sbx, lock, consts.OwnerManager)
+	if sbx.Labels == nil {
+		sbx.Labels = make(map[string]string, 1)
+	}
+	sbx.Labels[agentsv1alpha1.LabelSandboxState] = agentsv1alpha1.SandboxStateKilling
 	if err = r.Update(ctx, sbx); err != nil {
-		if errors.IsConflict(err) {
+		if apierrors.IsConflict(err) {
 			return false, nil // skip
 		}
 		return false, fmt.Errorf("failed to lock sandbox when scaling down: %s", err)
 	}
-	scaleExpectation.ExpectScale(GetControllerKey(sbs), expectations.Delete, sbx.Name)
-	if err = r.Delete(ctx, sbx); err != nil {
-		scaleExpectation.ObserveScale(GetControllerKey(sbs), expectations.Delete, sbx.Name)
-		log.Error(err, "failed to delete sandbox")
-		return false, err
-	}
-	log.Info("sandbox locked and deleted")
-	r.Recorder.Eventf(sbx, corev1.EventTypeNormal, EventSandboxScaledDown, "Sandbox %s locked and deleted", klog.KObj(sbx))
+	log.Info("sandbox locked and set to killing")
+	r.Recorder.Eventf(sbx, corev1.EventTypeNormal, EventSandboxScaledDown, "Sandbox %s will be scaled down", klog.KObj(sbx))
 	return true, nil
 }
 
