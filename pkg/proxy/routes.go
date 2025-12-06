@@ -1,13 +1,10 @@
 package proxy
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
-
-	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager/proxyutils"
 )
 
 // Route 表示一条内部沙箱路由规则
@@ -29,15 +26,13 @@ func (s *Server) SyncRouteWithPeers(route Route) error {
 		return err
 	}
 	var errStrings []string
-	for _, ip := range s.Peers {
-		request, err := http.NewRequest(http.MethodPost, RefreshAPI, bytes.NewBuffer(body))
-		if err != nil {
-			return err
-		}
-		if _, err = utils.ProxyRequest(request, RefreshAPI, SystemPort, ip); err != nil {
+	s.peerMu.RLock()
+	for ip := range s.peers {
+		if err = requestPeer(http.MethodPost, ip, RefreshAPI, body); err != nil {
 			errStrings = append(errStrings, err.Error())
 		}
 	}
+	s.peerMu.RUnlock()
 	if len(errStrings) == 0 {
 		return nil
 	}
@@ -59,6 +54,16 @@ func (s *Server) ListRoutes() []Route {
 		return true
 	})
 	return routes
+}
+
+func (s *Server) ListPeers() []Peer {
+	peers := make([]Peer, 0)
+	s.peerMu.RLock()
+	defer s.peerMu.RUnlock()
+	for _, peer := range s.peers {
+		peers = append(peers, peer)
+	}
+	return peers
 }
 
 func (s *Server) DeleteRoute(id string) {

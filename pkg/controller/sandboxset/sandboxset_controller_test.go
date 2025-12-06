@@ -805,7 +805,7 @@ func TestReconcile_ScaleDown(t *testing.T) {
 			replicas: 0,
 			request: createSandboxRequest{
 				createAvailableSandboxes: 1,
-				lockedOwner:              consts.OwnerManager,
+				lockedOwner:              consts.OwnerManagerScaleDown,
 			},
 			checkFunc: func(t *testing.T, sandboxes []v1alpha1.Sandbox) {
 				assert.Equal(t, 0, len(sandboxes))

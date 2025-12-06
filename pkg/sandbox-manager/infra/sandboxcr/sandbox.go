@@ -13,7 +13,6 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	"github.com/openkruise/agents/pkg/utils/sandbox-manager/proxyutils"
-	microvm "gitlab.alibaba-inc.com/serverlessinfra/sandbox-operator/api/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -23,7 +22,8 @@ import (
 )
 
 type SandboxCR interface {
-	*kruise.Sandbox | *microvm.Sandbox
+	//*kruise.Sandbox | *microvm.Sandbox
+	*kruise.Sandbox
 	metav1.Object
 }
 

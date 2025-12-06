@@ -6,9 +6,7 @@ const (
 )
 
 const (
-	DefaultMinPoolSize       = 5
-	DefaultMaxPoolSizeFactor = 2
-	OwnerManager             = "__manager"
+	OwnerManagerScaleDown = "__manager_scale_down"
 
 	DefaultPoolingCandidateCounts = 100
 )

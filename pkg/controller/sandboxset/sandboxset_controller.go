@@ -342,11 +342,11 @@ func (r *Reconciler) scaleDownSandbox(ctx context.Context, key client.ObjectKey,
 	if err = r.Get(ctx, key, sbx); err != nil {
 		return false, client.IgnoreNotFound(err)
 	}
-	if sbx.Annotations[agentsv1alpha1.AnnotationLock] != "" && sbx.Annotations[agentsv1alpha1.AnnotationOwner] != consts.OwnerManager {
+	if sbx.Annotations[agentsv1alpha1.AnnotationLock] != "" && sbx.Annotations[agentsv1alpha1.AnnotationOwner] != consts.OwnerManagerScaleDown {
 		log.Info("sandbox to be scaled down claimed before performed, skip")
 		return false, nil
 	}
-	managerutils.LockSandbox(sbx, lock, consts.OwnerManager)
+	managerutils.LockSandbox(sbx, lock, consts.OwnerManagerScaleDown)
 	if sbx.Labels == nil {
 		sbx.Labels = make(map[string]string, 1)
 	}

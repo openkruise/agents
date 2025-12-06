@@ -12,15 +12,26 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 )
 
-var KeySecretName = "e2b-key-store"
+var (
+	KeySecretName = "e2b-key-store"
+	AdminKeyID    uuid.UUID
+)
+
+func init() {
+	id, err := uuid.Parse("550e8400-e29b-41d4-a716-446655440000") // no means, just a const
+	if err != nil {
+		panic("cannot parse AdminKeyID as UUID")
+	}
+	AdminKeyID = id
+}
 
 // SecretKeyStorage is a simple implement for api-key storage using k8s secret as storage backend.
 // It is only for demo purpose.
@@ -39,48 +50,39 @@ func (k *SecretKeyStorage) Init(ctx context.Context) error {
 	log := klog.FromContext(ctx)
 	log.Info("ensuring api-key store secret")
 
-	_, err := k.Client.CoreV1().Secrets(k.Namespace).Get(ctx, KeySecretName, metav1.GetOptions{})
-	if err != nil && apierrors.IsNotFound(err) {
-		if k.AdminKey == "" {
-			k.AdminKey = uuid.NewString()
-		}
-		log.Info("api-key store secret not found, will create", "adminApiKey", k.AdminKey)
-		adminID := uuid.New()
-		adminKey := models.CreatedTeamAPIKey{
+	secret, err := k.Client.CoreV1().Secrets(k.Namespace).Get(ctx, KeySecretName, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+
+	// create admin key if needed
+	// all replicas does the same operation, no matter who eventually wins the race.
+	if _, ok := secret.Data[k.AdminKey]; !ok {
+		adminKey := &models.CreatedTeamAPIKey{
 			CreatedAt: time.Now(),
-			ID:        adminID,
+			ID:        AdminKeyID,
 			Key:       k.AdminKey,
-			Mask:      models.IdentifierMaskingDetails{},
 			Name:      "admin",
 		}
-		data, err := json.Marshal(adminKey)
-		if err != nil {
-			log.Error(err, "failed to marshal adminKey")
+		if err = k.retryUpdateSecret(ctx, AdminKeyID.String(), adminKey); err != nil && !apierrors.IsConflict(err) {
 			return err
+		} else if err == nil {
+			log.Info("create admin key success", "key", adminKey.Key)
 		}
-		_, err = k.Client.CoreV1().Secrets(k.Namespace).Create(ctx, &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: KeySecretName,
-			},
-			Data: map[string][]byte{
-				adminID.String(): data,
-			},
-		}, metav1.CreateOptions{})
-	} else if err != nil {
-		return err
 	}
 
 	go func() {
 		ticker := time.NewTicker(10 * time.Minute)
+		ctx := logs.NewContext()
+		log := klog.FromContext(ctx)
 		for {
 			select {
 			case <-ticker.C:
-				ctx := logs.NewContext()
 				if err := k.refresh(ctx); err != nil {
 					log.Error(err, "failed to refresh key store")
 				}
 			case <-k.Stop:
-				klog.InfoS("api-key refreshing stopped")
+				log.Info("api-key refreshing stopped")
 				return
 			}
 		}
@@ -138,12 +140,20 @@ func (k *SecretKeyStorage) LoadByID(id string) (*models.CreatedTeamAPIKey, bool)
 	return value.(*models.CreatedTeamAPIKey), true
 }
 
+func (k *SecretKeyStorage) retryUpdateSecret(ctx context.Context, id string, apiKey *models.CreatedTeamAPIKey) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		return k.updateSecret(ctx, id, apiKey)
+	})
+}
+
 func (k *SecretKeyStorage) updateSecret(ctx context.Context, id string, apiKey *models.CreatedTeamAPIKey) error {
 	secret, err := k.Client.CoreV1().Secrets(k.Namespace).Get(ctx, KeySecretName, metav1.GetOptions{})
 	if err != nil {
 		return err
 	}
-	secret = secret.DeepCopy()
+	if secret.Data == nil {
+		secret.Data = make(map[string][]byte)
+	}
 	if apiKey != nil {
 		marshaled, err := json.Marshal(apiKey)
 		if err != nil {
@@ -177,6 +187,9 @@ func (k *SecretKeyStorage) CreateKey(ctx context.Context, user *models.CreatedTe
 		if !ok1 && !ok2 {
 			break
 		}
+		if i == 99 {
+			return nil, errors.New("failed to generate unique api-key")
+		}
 	}
 
 	apiKey := &models.CreatedTeamAPIKey{
@@ -191,7 +204,7 @@ func (k *SecretKeyStorage) CreateKey(ctx context.Context, user *models.CreatedTe
 	}
 
 	log.Info("api-key generated", "key", apiKey)
-	if err := k.updateSecret(ctx, newID.String(), apiKey); err != nil {
+	if err := k.retryUpdateSecret(ctx, newID.String(), apiKey); err != nil {
 		log.Error(err, "failed to update api-key")
 		return nil, err
 	}
@@ -203,7 +216,7 @@ func (k *SecretKeyStorage) DeleteKey(ctx context.Context, key *models.CreatedTea
 	if key == nil {
 		return nil
 	}
-	err := k.updateSecret(ctx, key.ID.String(), nil)
+	err := k.retryUpdateSecret(ctx, key.ID.String(), nil)
 	if err != nil {
 		return err
 	}

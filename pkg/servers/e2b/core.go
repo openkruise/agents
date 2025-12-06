@@ -15,7 +15,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
-	adapters2 "github.com/openkruise/agents/pkg/servers/e2b/adapters"
+	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"k8s.io/client-go/rest"
 	"k8s.io/klog/v2"
@@ -41,7 +41,7 @@ type Controller struct {
 //	Params:
 //	- domain: The domain name of the sandbox service, a TLS cert is required, e.g.
 //	- listenAddr: The address to listen on, e.g. ":8080"
-func NewController(domain, adminKey string, port int, enableAuth bool, clientSet *clients.ClientSet) *Controller {
+func NewController(domain, adminKey, sysNs string, port int, enableAuth bool, clientSet *clients.ClientSet) *Controller {
 	sc := &Controller{
 		mux:          http.NewServeMux(),
 		client:       clientSet,
@@ -58,7 +58,7 @@ func NewController(domain, adminKey string, port int, enableAuth bool, clientSet
 
 	if enableAuth {
 		sc.keys = &keys.SecretKeyStorage{
-			Namespace: Namespace,
+			Namespace: sysNs,
 			AdminKey:  adminKey,
 			Client:    clientSet.K8sClient,
 			Stop:      make(chan struct{}),
@@ -72,9 +72,9 @@ func (sc *Controller) Init(infrastructure string) error {
 	log := klog.FromContext(ctx)
 	log.Info("init controller", "infra", infrastructure)
 	var adapter proxy.RequestAdapter
-	baseAdapter := &adapters2.CommonAdapter{Port: sc.port, Keys: sc.keys}
+	baseAdapter := &adapters.CommonAdapter{Port: sc.port, Keys: sc.keys}
 	if infrastructure == consts.InfraMicroVM {
-		adapter = &adapters2.MicroVMAdapter{CommonAdapter: baseAdapter}
+		adapter = &adapters.MicroVMAdapter{CommonAdapter: baseAdapter}
 	} else {
 		adapter = baseAdapter
 	}
@@ -120,9 +120,8 @@ func (sc *Controller) Run(sysNs, peerSelector string) (context.Context, error) {
 		sc.manager.Stop()
 		// Shutdown HTTP server
 		if err := sc.server.Shutdown(ctx); err != nil {
-			klog.InfoS("HTTP server forced to shutdown: %v", err)
+			klog.ErrorS(err, "HTTP server forced to shutdown")
 		}
-
 		klog.InfoS("Server exited")
 	}()
 	return ctx, nil

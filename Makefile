@@ -1,7 +1,5 @@
 # Variables
 DOMAIN ?= example.com
-SANDBOX_MANAGER_REPOSITORY ?= openkruise/sandbox-manager
-OPERATOR_REPOSITORY ?= openkruise/sandbox-controller
 INFRA ?= sandbox-cr
 INGRESS ?= nginx
 HOST_NETWORK ?= false
@@ -157,34 +155,18 @@ install-crd: manifests kustomize ## Install CRDs into the K8s cluster specified 
 uninstall-crd: manifests kustomize ## Uninstall CRDs from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
 	$(KUSTOMIZE) build config/crd | $(KUBECTL) delete --ignore-not-found=$(ignore-not-found) -f -
 
-.PHONY: build-and-push-sandbox-manager
-build-and-push-sandbox-manager:
-	REPOSITORY=${SANDBOX_MANAGER_REPOSITORY} bash deploy/build-and-push-sandbox-manager.sh
-
-.PHONY: build-and-push-sandbox-controller
-build-and-push-sandbox-controller:
-	REPOSITORY=${OPERATOR_REPOSITORY} bash deploy/build-and-push-operator.sh
-
-.PHONY: sandbox-manager
-sandbox-manager: build-and-push-sandbox-manager deploy
-
-.PHONY: agent-sandbox-controller
-agent-sandbox-controller: build-and-push-sandbox-controller deploy
-
-.PHONY: deploy
-deploy:
+.PHONY: deploy-sandbox-manager
+deploy-sandbox-manager:
 	helm upgrade --cleanup-on-fail --install --reset-values --create-namespace \
         --set sandboxManager.controller.logLevel=7 \
-        --set sandboxManager.controller.repository=${SANDBOX_MANAGER_REPOSITORY} \
         --set sandboxManager.controller.infra=${INFRA} \
         --set sandboxManager.ingress.className=${INGRESS} \
         --set sandboxManager.e2b.domain=${DOMAIN} \
         --set sandboxManager.controller.hostNetwork=${HOST_NETWORK} \
-        --set sandboxOperator.image.controllerManager.repository=${OPERATOR_REPOSITORY} \
         --set sandboxManager.namespace=${SBX_NAMESPACE} \
         --set sandboxOperator.replicaCount=1 \
         -n ${NAMESPACE} \
-        sandbox-manager ./deploy/helm/
+        sandbox-manager ./deploy/sandbox-manager/
 
 .PHONY: all
 all: build-and-push-sandbox-manager build-and-push-sandbox-controller deploy

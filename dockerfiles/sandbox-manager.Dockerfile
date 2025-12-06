@@ -20,15 +20,21 @@ RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o sandbox-manager .
 FROM alpine:3.20 as runtime
 
 RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories && \
-    apk --no-cache add ca-certificates
+    apk --no-cache add ca-certificates && \
+    rm -rf /usr/local/sbin/* && \
+    rm -rf /usr/local/bin/* && \
+    rm -rf /usr/sbin/* && \
+    rm -rf /usr/bin/* && \
+    rm -rf /sbin/* && \
+    rm -rf /bin/* \
 
-WORKDIR /root/
-
+WORKDIR /
 # Copy the binary from builder stage
 COPY --from=builder /app/sandbox-manager .
+USER 65532:65532
 
 # Expose port
 EXPOSE 8080
 
 # Run the binary
-CMD ["./sandbox-manager"]
+CMD ["/sandbox-manager"]

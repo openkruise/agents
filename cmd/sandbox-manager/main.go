@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 
+	"github.com/google/uuid"
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/servers/e2b"
 	"k8s.io/klog/v2"
@@ -25,6 +26,9 @@ func main() {
 	}
 
 	e2bAdminKey := os.Getenv("E2B_ADMIN_KEY")
+	if e2bAdminKey == "" {
+		e2bAdminKey = uuid.NewString()
+	}
 	e2bEnableAuth := os.Getenv("E2B_ENABLE_AUTH") == "true"
 
 	// Get domain from environment variable or use empty string
@@ -58,7 +62,7 @@ func main() {
 	klog.InitFlags(nil)
 	flag.Parse()
 
-	sandboxController := e2b.NewController(domain, e2bAdminKey, port, e2bEnableAuth, clientSet)
+	sandboxController := e2b.NewController(domain, e2bAdminKey, sysNs, port, e2bEnableAuth, clientSet)
 	if err := sandboxController.Init(infra); err != nil {
 		klog.Fatalf("Failed to initialize sandbox controller: %v", err)
 	}
