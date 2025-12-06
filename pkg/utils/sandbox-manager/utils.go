@@ -37,6 +37,10 @@ func CalculateResourceFromContainers(containers []corev1.Container) infra.Sandbo
 				// Convert memory quantity to MB (1 MB = 1024 * 1024 bytes)
 				resource.MemoryMB += memory.Value() / (1024 * 1024)
 			}
+			if disk, ok := requests[corev1.ResourceEphemeralStorage]; ok {
+				// Convert disk quantity to MB (1 MB = 1024 * 1024 bytes)
+				resource.DiskSizeMB += disk.Value() / (1024 * 1024)
+			}
 		}
 	}
 	return resource

@@ -18,8 +18,9 @@ type SandboxSelectorOptions struct {
 }
 
 type SandboxResource struct {
-	CPUMilli int64
-	MemoryMB int64
+	CPUMilli   int64
+	MemoryMB   int64
+	DiskSizeMB int64
 }
 
 type Infrastructure interface {

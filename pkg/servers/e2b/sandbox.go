@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/openkruise/agents/api/v1alpha1"
@@ -116,11 +117,25 @@ func (sc *Controller) convertToE2BSandbox(ctx context.Context, sbx infra.Sandbox
 	} else {
 		log.Info("skip convert sandbox route to e2b key: route for sandbox not found")
 	}
-	// Just for example
+
+	labels := sbx.GetLabels()
+	if len(labels) > 0 {
+		sandbox.Metadata = make(map[string]string, len(labels))
+	}
+Outer:
+	for key, val := range sbx.GetLabels() {
+		for _, prefix := range BlackListPrefix {
+			if strings.HasPrefix(key, prefix) {
+				continue Outer
+			}
+		}
+		sandbox.Metadata[key] = val
+	}
 	sandbox.StartedAt = sbx.GetCreationTimestamp().Format(time.RFC3339)
 	sandbox.EndAt = sbx.GetCreationTimestamp().Add(1000 * time.Hour).Format(time.RFC3339)
 	resource := sbx.GetResource()
 	sandbox.CPUCount = resource.CPUMilli / 1000
 	sandbox.MemoryMB = resource.MemoryMB
+	sandbox.DiskSizeMB = resource.DiskSizeMB
 	return sandbox
 }
