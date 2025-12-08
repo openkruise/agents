@@ -24,7 +24,7 @@ func TestSelectPods(t *testing.T) {
 		t.Fatalf("Failed to add label selector indexer: %v", err)
 	}
 
-	// 创建测试用的pods
+	// Create test pods
 	pods := []*corev1.Pod{
 		{
 			ObjectMeta: metav1.ObjectMeta{
@@ -68,7 +68,7 @@ func TestSelectPods(t *testing.T) {
 		},
 	}
 
-	// 添加pods到fake client
+	// Add pods to fake client
 	for _, pod := range pods {
 		_, err := client.CoreV1().Pods(pod.Namespace).Create(context.Background(), pod, metav1.CreateOptions{})
 		if err != nil {
@@ -76,10 +76,10 @@ func TestSelectPods(t *testing.T) {
 		}
 	}
 
-	// 等待informer同步
+	// Wait for informer sync
 	time.Sleep(100 * time.Millisecond)
 
-	// 测试用例
+	// Test cases
 	tests := []struct {
 		name          string
 		labels        []string
@@ -123,7 +123,7 @@ func TestSelectPods(t *testing.T) {
 				t.Errorf("Expected %d pods, got %d", tt.expectedCount, len(pods))
 			}
 
-			// 验证所有返回的pods都在default命名空间中
+			// Verify all returned pods are in the default namespace
 			for _, pod := range pods {
 				if pod.Namespace != "default" {
 					t.Errorf("Expected pod in 'default' namespace, got %s", pod.Namespace)

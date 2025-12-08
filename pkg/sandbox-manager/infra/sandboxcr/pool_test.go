@@ -26,7 +26,7 @@ func CreateSandboxWithStatus(t *testing.T, client versioned.Interface, sbx *v1al
 
 //goland:noinspection GoDeprecation
 func TestPool_ClaimSandbox(t *testing.T) {
-	// 测试用例
+	// Test cases
 	tests := []struct {
 		name        string
 		available   int32

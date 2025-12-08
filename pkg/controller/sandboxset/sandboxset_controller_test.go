@@ -368,14 +368,14 @@ func TestReconcile_ProcessCreating(t *testing.T) {
 			sbs.Status = *newStatus
 			CreateSandboxes(t, createSandboxRequest{createCreatingSandboxes: 2}, sbs, k8sClient)
 
-			// 如果需要，将Creating状态的沙箱标记为就绪
+			// If needed, mark sandboxes in Creating state as ready
 			if tt.makeReady {
 				var sandboxList v1alpha1.SandboxList
 				assert.NoError(t, k8sClient.List(ctx, &sandboxList))
 				for i := range sandboxList.Items {
 					sbx := &sandboxList.Items[i]
 					if sbx.Labels["type"] == "creating" {
-						// 添加Ready条件
+						// Add Ready condition
 						sbx.Status.Conditions = append(sbx.Status.Conditions, metav1.Condition{
 							Type:   string(v1alpha1.SandboxConditionReady),
 							Status: metav1.ConditionTrue,

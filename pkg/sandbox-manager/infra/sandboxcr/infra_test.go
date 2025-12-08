@@ -193,34 +193,34 @@ func TestInfra_SelectSandboxes(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// 创建 fake client
+			// Create fake client
 			client := fake.NewSimpleClientset()
 
-			// 创建 Pod
+			// Create Pod
 			for _, pod := range tt.pods {
 				sbx := ConvertPodToSandboxCR(pod)
 				_, err := client.ApiV1alpha1().Sandboxes("default").Create(context.Background(), sbx, metav1.CreateOptions{})
 				assert.NoError(t, err)
 			}
 
-			// 创建 cache
+			// Create cache
 			informerFactory := informers.NewSharedInformerFactoryWithOptions(client, time.Minute*10, informers.WithNamespace("default"))
 			sandboxInformer := informerFactory.Api().V1alpha1().Sandboxes().Informer()
 			cache, err := NewCache[*v1alpha1.Sandbox]("default", informerFactory, sandboxInformer)
 			assert.NoError(t, err)
 
-			// 启动缓存并等待同步
+			// Start cache and wait for sync
 			done := make(chan struct{})
 			go cache.Run(done)
 			select {
 			case <-done:
-				// 缓存已同步
+				// Cache synced
 			case <-time.After(1 * time.Second):
-				// 超时
+				// Timeout
 				t.Fatal("Cache sync timeout")
 			}
 
-			// 创建 Infra 实例
+			// Create Infra instance
 			infraInstance := &Infra{
 				BaseInfra: infra.BaseInfra{
 					Namespace: "default",
@@ -229,23 +229,23 @@ func TestInfra_SelectSandboxes(t *testing.T) {
 				Client: client,
 			}
 
-			// 调用 SelectSandboxes 方法
+			// Call SelectSandboxes method
 			sandboxes, err := infraInstance.SelectSandboxes(tt.options)
 			assert.NoError(t, err)
 			assert.Equal(t, tt.expectedCount, len(sandboxes))
 
-			// 验证返回的沙箱状态
+			// Verify returned sandbox states
 			actualStates := make([]string, len(sandboxes))
 			for i, sandbox := range sandboxes {
 				actualStates[i] = sandbox.GetState()
 			}
 
-			// 排序以确保比较的一致性
+			// Sort to ensure comparison consistency
 			sort.Strings(actualStates)
 			sort.Strings(tt.expectedStates)
 			assert.Equal(t, tt.expectedStates, actualStates)
 
-			// 停止缓存
+			// Stop cache
 			cache.Stop()
 		})
 	}

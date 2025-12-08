@@ -9,7 +9,7 @@ import (
 )
 
 // ProxyRequest proxies the request to the sandbox
-// 当 apiServerURL 提供时，将会通过 apiServer 进行代理（需要同时提供 restConfig，否则通过 SandboxIP 直连
+// When apiServerURL is provided, it will proxy through the apiServer (requires restConfig to be provided as well, otherwise connect directly via SandboxIP
 func ProxyRequest(r *http.Request, path string, port int, ip string) (*http.Response, error) {
 	resp, err := proxyRequestDirectly(r, ip, path, port)
 	if err != nil {

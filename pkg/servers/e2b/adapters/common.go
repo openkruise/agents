@@ -17,7 +17,7 @@ var (
 
 type CommonAdapter struct {
 	Port int
-	Keys *keys.SecretKeyStorage // 如果是 nil，表示不开启鉴权
+	Keys *keys.SecretKeyStorage // If nil, authentication is disabled
 }
 
 var hostRegex = regexp.MustCompile(`^(\d+)-([a-zA-Z0-9\-]+)\.`)
@@ -30,7 +30,7 @@ func (a *CommonAdapter) Map(_, authority, _ string, _ int, headers map[string]st
 		return
 	}
 
-	// 提取端口号和sandboxID
+	// Extract port number and sandboxID
 	sandboxPort, err = strconv.Atoi(matches[1])
 	if err != nil {
 		return
@@ -41,7 +41,7 @@ func (a *CommonAdapter) Map(_, authority, _ string, _ int, headers map[string]st
 		return
 	}
 
-	// 解析用户
+	// Parse user
 	if sandboxPort == models.CDPPort || sandboxPort == models.VNCPort {
 		// no auth for CDP
 		user = UserNoNeedToAuth

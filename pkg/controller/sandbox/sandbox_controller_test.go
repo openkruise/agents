@@ -784,7 +784,7 @@ func TestSandboxReconcile(t *testing.T) {
 				if gotCond == nil {
 					t.Errorf("sandbox condition not found, expect: %v", expectCond)
 				} else {
-					// 跳过时间检查
+					// Skip time check
 					gotCond.LastTransitionTime = metav1.Time{}
 					expectCond.LastTransitionTime = metav1.Time{}
 					if !reflect.DeepEqual(gotCond, expectCond) {

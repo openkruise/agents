@@ -291,7 +291,7 @@ func TestSandbox_SetState(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// 创建带有初始标签的 Pod
+			// Create Pod with initial labels
 			pod := &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-sandbox",
@@ -301,19 +301,19 @@ func TestSandbox_SetState(t *testing.T) {
 			}
 			sandbox := ConvertPodToSandboxCR(pod)
 
-			// 使用 fake client
+			// Using fake client
 			//goland:noinspection GoDeprecation
 			client := fake.NewSimpleClientset()
 			_, err := client.ApiV1alpha1().Sandboxes("default").Create(context.Background(), sandbox, metav1.CreateOptions{})
 			assert.NoError(t, err)
-			// 创建 Sandbox 实例
+			// Create Sandbox instance
 			s := AsSandbox(ConvertPodToSandboxCR(pod), client, nil)
 
-			// 调用 SetState 方法
+			// Call SetState method
 			err = s.SetState(context.Background(), tt.setState)
 			assert.NoError(t, err)
 
-			// 验证状态是否正确设置
+			// Verify that the state is set correctly
 			updatedSbx, err := client.ApiV1alpha1().Sandboxes("default").Get(context.Background(), "test-sandbox", metav1.GetOptions{})
 			assert.NoError(t, err)
 			assert.Equal(t, tt.expectedState, updatedSbx.Labels[v1alpha1.LabelSandboxState])
@@ -420,7 +420,7 @@ func TestSandbox_Kill(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// 创建带有初始状态的 Pod
+			// Create Pod with initial state
 			pod := &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-sandbox",
@@ -433,16 +433,16 @@ func TestSandbox_Kill(t *testing.T) {
 			}
 			sandbox := ConvertPodToSandboxCR(pod)
 
-			// 使用 fake client
+			// Using fake client
 			//goland:noinspection GoDeprecation
 			client := fake.NewSimpleClientset()
 			_, err := client.ApiV1alpha1().Sandboxes("default").Create(context.Background(), sandbox, metav1.CreateOptions{})
 			assert.NoError(t, err)
 
-			// 创建 Sandbox 实例
+			// Create Sandbox instance
 			s := AsSandbox(sandbox, client, nil)
 
-			// 调用 Kill 方法
+			// Call Kill method
 			err = s.Kill(context.Background())
 
 			if tt.expectError {
@@ -451,10 +451,10 @@ func TestSandbox_Kill(t *testing.T) {
 				assert.NoError(t, err)
 
 				if tt.deletionTimestamp == nil {
-					// 验证在删除前状态是否设置为 killing
-					// 由于 Pod 已被删除，我们需要检查是否调用了状态更新操作
-					// 在 fake client 中，我们可以通过检查是否有任何 patch 操作来验证
-					// 但在这里我们只能验证方法没有返回错误
+					// Verify that the state is set to killing before deletion
+					// Since the Pod has been deleted, we need to check if the status update operation was called
+					// In fake client, we can verify by checking if any patch operations occurred
+					// But here we can only verify that the method did not return an error
 				}
 			}
 		})
@@ -520,7 +520,7 @@ func TestSandbox_Patch(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// 创建带有初始标签和注解的 Pod
+			// Create Pod with initial labels and annotations
 			pod := &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:        "test-sandbox",
@@ -531,27 +531,27 @@ func TestSandbox_Patch(t *testing.T) {
 			}
 			sandbox := ConvertPodToSandboxCR(pod)
 
-			// 使用 fake client
+			// Using fake client
 			//goland:noinspection GoDeprecation
 			client := fake.NewSimpleClientset()
 			_, err := client.ApiV1alpha1().Sandboxes("default").Create(context.Background(), sandbox, metav1.CreateOptions{})
 			assert.NoError(t, err)
 
-			// 创建 Sandbox 实例
+			// Create Sandbox instance
 			s := AsSandbox(sandbox, client, nil)
 
-			// 调用 Patch 方法
+			// Call Patch method
 			err = s.Patch(context.Background(), tt.patchStr)
 			assert.NoError(t, err)
 
-			// 验证补丁是否正确应用
+			// Verify that the patch is applied correctly
 			updatedPod, err := client.ApiV1alpha1().Sandboxes("default").Get(context.Background(), "test-sandbox", metav1.GetOptions{})
 			assert.NoError(t, err)
 
-			// 对于空的map，我们需要特殊处理
+			// For empty maps, we need special handling
 			if len(tt.expectedLabels) == 0 {
 				if updatedPod.Labels == nil {
-					// 如果期望是空map，而实际是nil，这也可以接受
+					// If the expectation is an empty map but the actual is nil, this is acceptable
 					assert.True(t, len(updatedPod.Labels) == 0)
 				} else {
 					assert.Equal(t, tt.expectedLabels, updatedPod.Labels)
@@ -562,7 +562,7 @@ func TestSandbox_Patch(t *testing.T) {
 
 			if len(tt.expectedAnnotations) == 0 {
 				if updatedPod.Annotations == nil {
-					// 如果期望是空map，而实际是nil，这也可以接受
+					// If the expectation is an empty map but the actual is nil, this is acceptable
 					assert.True(t, len(updatedPod.Annotations) == 0)
 				} else {
 					assert.Equal(t, tt.expectedAnnotations, updatedPod.Annotations)
@@ -684,7 +684,7 @@ func TestSandbox_SetPause(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// 创建带有初始状态的 Pod
+			// Create Pod with initial state
 			pod := &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-sandbox",
@@ -711,31 +711,31 @@ func TestSandbox_SetPause(t *testing.T) {
 					Status: condStatus,
 				})
 			}
-			// 使用 fake client
+			// Using fake client
 			client := fake.NewSimpleClientset()
 			CreateSandboxWithStatus(t, client, sandbox)
 
-			// 创建 cache
+			// Create cache
 			informerFactory := informers.NewSharedInformerFactoryWithOptions(client, time.Minute*10, informers.WithNamespace("default"))
 			sandboxInformer := informerFactory.Api().V1alpha1().Sandboxes().Informer()
 			cache, err := NewCache[*v1alpha1.Sandbox]("default", informerFactory, sandboxInformer)
 			assert.NoError(t, err)
 
-			// 启动缓存并等待同步
+			// Start cache and wait for sync
 			done := make(chan struct{})
 			go cache.Run(done)
 			select {
 			case <-done:
-				// 缓存已同步
+				// Cache synced
 			case <-time.After(1 * time.Second):
-				// 超时
+				// Timeout
 				t.Fatal("Cache sync timeout")
 			}
 
-			// 创建 Sandbox 实例
+			// Create Sandbox instance
 			s := AsSandbox(sandbox, client, cache)
 
-			// 调用 SetPause 方法
+			// Call SetPause method
 			if tt.operatePause {
 				err = s.Pause(context.Background())
 			} else {
@@ -760,12 +760,12 @@ func TestSandbox_SetPause(t *testing.T) {
 				assert.NoError(t, err)
 			}
 
-			// 获取更新后的 Pod
+			// Get updated Pod
 			updatedSbx, err := client.ApiV1alpha1().Sandboxes("default").Get(context.Background(), "test-sandbox", metav1.GetOptions{})
 			assert.NoError(t, err)
 
-			// 验证 Pod 状态是否正确更新
-			// 应该进行了 patch 操作
+			// Verify that the Pod state is updated correctly
+			// Should have performed patch operation
 			assert.Equal(t, tt.expectedState, updatedSbx.Labels[v1alpha1.LabelSandboxState])
 			assert.Equal(t, tt.operatePause, updatedSbx.Spec.Paused)
 		})

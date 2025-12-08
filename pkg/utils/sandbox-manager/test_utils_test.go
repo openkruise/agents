@@ -10,13 +10,13 @@ import (
 )
 
 func TestFakeSandbox_AllMethods(t *testing.T) {
-	// 创建一个 FakeSandbox 实例
+	// Create a FakeSandbox instance
 	fs := FakeSandbox{
 		DeletionTimestamp: &metav1.Time{Time: time.Now()},
 		State:             "running",
 	}
 
-	// 测试所有 getter 方法
+	// Test all getter methods
 	tests := []struct {
 		name string
 		fn   func()
@@ -45,7 +45,7 @@ func TestFakeSandbox_AllMethods(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// 确保方法不会 panic
+			// Ensure method does not panic
 			defer func() {
 				if r := recover(); r != nil {
 					t.Errorf("%s panicked: %v", tt.name, r)
@@ -57,10 +57,10 @@ func TestFakeSandbox_AllMethods(t *testing.T) {
 }
 
 func TestFakeSandbox_AllSetterMethods(t *testing.T) {
-	// 创建一个 FakeSandbox 实例
+	// Create a FakeSandbox instance
 	fs := FakeSandbox{}
 
-	// 测试所有 setter 方法
+	// Test all setter methods
 	setterTests := []struct {
 		name string
 		fn   func()
@@ -85,7 +85,7 @@ func TestFakeSandbox_AllSetterMethods(t *testing.T) {
 
 	for _, tt := range setterTests {
 		t.Run(tt.name, func(t *testing.T) {
-			// 确保方法不会 panic
+			// Ensure method does not panic
 			defer func() {
 				if r := recover(); r != nil {
 					t.Errorf("%s panicked: %v", tt.name, r)
@@ -97,10 +97,10 @@ func TestFakeSandbox_AllSetterMethods(t *testing.T) {
 }
 
 func TestFakeSandbox_AllOtherMethods(t *testing.T) {
-	// 创建一个 FakeSandbox 实例
+	// Create a FakeSandbox instance
 	fs := FakeSandbox{}
 
-	// 测试其他方法
+	// Test other methods
 	otherTests := []struct {
 		name string
 		fn   func() interface{}
@@ -121,7 +121,7 @@ func TestFakeSandbox_AllOtherMethods(t *testing.T) {
 
 	for _, tt := range otherTests {
 		t.Run(tt.name, func(t *testing.T) {
-			// 确保方法不会 panic
+			// Ensure method does not panic
 			defer func() {
 				if r := recover(); r != nil {
 					t.Errorf("%s panicked: %v", tt.name, r)

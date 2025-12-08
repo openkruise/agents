@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-// Route 表示一条内部沙箱路由规则
+// Route represents an internal sandbox routing rule
 type Route struct {
 	IP           string            `json:"ip"`
 	ID           string            `json:"id"`
@@ -70,15 +70,15 @@ func (s *Server) DeleteRoute(id string) {
 	s.routes.Delete(id)
 }
 
-// RequestAdapter 用于注册来自业务侧的沙箱请求到内部逻辑的映射
+// RequestAdapter is used to register mapping from business-side sandbox requests to internal logic
 type RequestAdapter interface {
-	// Map 从请求中提取沙箱 id 和端口等信息
+	// Map extracts sandbox id and port information from the request
 	Map(scheme, authority, path string, port int, headers map[string]string) (
 		sandboxID string, sandboxPort int, extraHeaders map[string]string, user string, err error)
-	// Authorize 判断用户是否有权限访问该沙箱
+	// Authorize determines if the user has permission to access the sandbox
 	Authorize(user, owner string) bool
-	// IsSandboxRequest 判断该请求是否为沙箱请求，如果返回 true，代表是是请求沙箱的，否则是请求 API Server 的。只有沙箱请求会经过 Adapter 处理。
+	// IsSandboxRequest determines whether the request is a sandbox request. If it returns true, it means it's requesting a sandbox, otherwise it's requesting the API Server. Only sandbox requests will be processed by the Adapter.
 	IsSandboxRequest(authority, path string, port int) bool
-	// Entry 获取服务进程的入口地址，比如 "127.0.0.1:8080"
+	// Entry gets the entry address of the service process, such as "127.0.0.1:8080"
 	Entry() string
 }

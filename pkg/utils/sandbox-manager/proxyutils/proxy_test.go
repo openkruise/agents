@@ -14,25 +14,25 @@ import (
 
 //goland:noinspection DuplicatedCode
 func TestSandbox_ProxyRequest(t *testing.T) {
-	// 创建一个测试HTTP服务器
+	// Create a test HTTP server
 	server := http.NewServeMux()
 	server.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNoContent) // 返回204状态码
+		w.WriteHeader(http.StatusNoContent) // Return 204 status code
 	})
 
-	// 添加一个处理特定路径的处理器，用于测试路径转发
+	// Add a handler for a specific path, for testing path forwarding
 	server.HandleFunc("/test-path", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("test response"))
 	})
 
-	// 添加一个返回错误状态码的处理器
+	// Add a handler that returns an error status code
 	server.HandleFunc("/error", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = w.Write([]byte("internal server error"))
 	})
 
-	// 启动HTTP服务器监听本地端口
+	// Start HTTP server listening on local port
 	listener, err := net.Listen("tcp", "127.0.0.1:11111")
 	require.NoError(t, err)
 
@@ -41,7 +41,7 @@ func TestSandbox_ProxyRequest(t *testing.T) {
 		_ = httpServer.Serve(listener)
 	}()
 
-	// 确保服务器已启动
+	// Ensure server has started
 	time.Sleep(100 * time.Millisecond)
 
 	defer func() {
@@ -74,31 +74,31 @@ func TestSandbox_ProxyRequest(t *testing.T) {
 			name:            "error response",
 			path:            "/error",
 			ip:              "127.0.0.1",
-			wantErr:         true, // 应该返回错误，因为状态码是5xx
+			wantErr:         true, // Should return error because status code is 5xx
 			wantErrContains: "internal server error",
 		},
 		{
 			name:            "unreachable server",
 			path:            "/",
-			ip:              "192.168.100.100", // 使用一个不可达的IP地址
-			wantErr:         true,              // 当服务器不可达时应该返回错误
+			ip:              "192.168.100.100", // Use an unreachable IP address
+			wantErr:         true,              // Should return error when server is unreachable
 			wantErrContains: "failed to proxy request to sandbox",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// 创建一个测试请求
+			// Create a test request
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
 			req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://127.0.0.1:11111"+tt.path, nil)
 			require.NoError(t, err)
 			req.Header.Set("Content-Type", "application/json")
 
-			// 调用ProxyRequest方法
+			// Call ProxyRequest method
 			resp, err := ProxyRequest(req, tt.path, 11111, tt.ip)
 
-			// 检查错误
+			// Check errors
 			if tt.wantErr {
 				assert.Error(t, err)
 				if tt.wantErrContains != "" {
@@ -112,7 +112,7 @@ func TestSandbox_ProxyRequest(t *testing.T) {
 			assert.NotNil(t, resp)
 			assert.Equal(t, tt.wantStatus, resp.StatusCode)
 
-			// 关闭响应体
+			// Close response body
 			if resp.Body != nil {
 				_ = resp.Body.Close()
 			}

@@ -114,7 +114,7 @@ const (
 	SandboxTerminating SandboxPhase = "Terminating"
 )
 
-// TODO 有一些外部控制器就有特定的condition，是否需要保留
+// TODO Some external controllers have specific conditions, whether to keep them
 type PodInfo struct {
 	// Annotations contains pod important annotations
 	Annotations map[string]string `json:"annotations,omitempty"`

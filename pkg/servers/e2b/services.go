@@ -215,7 +215,7 @@ func (sc *Controller) DeleteSandbox(r *http.Request) (web.ApiResponse[struct{}],
 		log.Error(err, "failed to delete sandbox", "id", id)
 		switch innererrors.GetErrCode(err) {
 		case innererrors.ErrorBadRequest:
-			fallthrough // e2b 协议不支持这里返回 400，统一返回 404
+			fallthrough // e2b protocol does not support returning 400 here, uniformly return 404
 		case innererrors.ErrorNotFound:
 			return web.ApiResponse[struct{}]{}, &web.ApiError{
 				Code:    http.StatusNotFound,

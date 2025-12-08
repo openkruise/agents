@@ -68,7 +68,7 @@ func RegisterRoute[T any](mux *http.ServeMux, pattern string, handler Handler[T]
 			}
 		}()
 
-		// 数一下 path 中 '/' 的个数；如果 path 以 '/' 结尾则数字 -1
+		// Count the number of '/' in the path; if path ends with '/', subtract 1 from the count
 		if countSlashes(pattern) != countSlashes(r.URL.Path) {
 			log.V(consts.DebugLogLevel).Info("API Not Found", "path", r.URL.Path, "pattern", pattern)
 			writeJson(ctx, w, http.StatusNotFound, http.StatusNotFound, ApiError{

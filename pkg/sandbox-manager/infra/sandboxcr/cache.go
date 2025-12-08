@@ -9,7 +9,7 @@ import (
 	"k8s.io/klog/v2"
 )
 
-// SharedInformerFactory 是简化的 Sandbox SharedInformerFactory 接口，用于统一各分支 Sandbox CR 实现
+// SharedInformerFactory is a simplified Sandbox SharedInformerFactory interface, used to unify Sandbox CR implementations across branches
 type SharedInformerFactory interface {
 	// Start initializes all requested informers. They are handled in goroutines
 	// which run until the stop channel gets closed.

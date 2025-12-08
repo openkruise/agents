@@ -18,7 +18,7 @@ import (
 )
 
 func TestSandboxSetValidatingHandler_Handle(t *testing.T) {
-	// 添加 v1alpha1 到 scheme
+	// Add v1alpha1 to scheme
 	err := v1alpha1.AddToScheme(scheme.Scheme)
 	require.NoError(t, err)
 
@@ -81,7 +81,7 @@ func TestSandboxSetValidatingHandler_Handle(t *testing.T) {
 					Namespace: "default",
 				},
 				Spec: v1alpha1.SandboxSetSpec{
-					Replicas: -1, // 负数副本数无效
+					Replicas: -1, // Negative replicas are invalid
 				},
 			},
 			expectAllow:  false,
@@ -95,7 +95,7 @@ func TestSandboxSetValidatingHandler_Handle(t *testing.T) {
 					Name:      "test-sbs",
 					Namespace: "default",
 					Labels: map[string]string{
-						v1alpha1.InternalPrefix + "test": "value", // 内部前缀标签无效
+						v1alpha1.InternalPrefix + "test": "value", // Internal prefix labels are invalid
 					},
 				},
 				Spec: v1alpha1.SandboxSetSpec{
@@ -113,7 +113,7 @@ func TestSandboxSetValidatingHandler_Handle(t *testing.T) {
 					Name:      "test-sbs",
 					Namespace: "default",
 					Annotations: map[string]string{
-						v1alpha1.InternalPrefix + "test": "value", // 内部前缀注解无效
+						v1alpha1.InternalPrefix + "test": "value", // Internal prefix annotations are invalid
 					},
 				},
 				Spec: v1alpha1.SandboxSetSpec{
@@ -136,7 +136,7 @@ func TestSandboxSetValidatingHandler_Handle(t *testing.T) {
 					Template: corev1.PodTemplateSpec{
 						ObjectMeta: metav1.ObjectMeta{
 							Labels: map[string]string{
-								v1alpha1.InternalPrefix + "test": "value", // 模板内部前缀标签无效
+								v1alpha1.InternalPrefix + "test": "value", // Template internal prefix labels are invalid
 							},
 						},
 					},
@@ -152,20 +152,20 @@ func TestSandboxSetValidatingHandler_Handle(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			g := gomega.NewGomegaWithT(t)
 
-			// 创建 fake client
+			// Create fake client
 			objs := []runtime.Object{}
 			fakeClient := fake.NewClientBuilder().WithScheme(scheme.Scheme).WithRuntimeObjects(objs...).Build()
 
-			// 创建 decoder
+			// Create decoder
 			decoder := admission.NewDecoder(scheme.Scheme)
 
-			// 创建 handler
+			// Create handler
 			handler := &SandboxSetValidatingHandler{
 				Client:  fakeClient,
 				Decoder: decoder,
 			}
 
-			// 构造 admission 请求
+			// Construct admission request
 			sbsRaw, err := json.Marshal(tt.sandboxSet)
 			require.NoError(t, err)
 
@@ -180,7 +180,7 @@ func TestSandboxSetValidatingHandler_Handle(t *testing.T) {
 
 			response := handler.Handle(context.TODO(), req)
 
-			// 验证结果
+			// Verify results
 			if tt.expectAllow {
 				t.Log(response.String())
 				g.Expect(response.Allowed).To(gomega.BeTrue())

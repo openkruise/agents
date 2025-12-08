@@ -85,13 +85,13 @@ func TestSetSandboxCondition(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// 执行测试
+			// Execute test
 			SetSandboxCondition(tt.initialSbx, tt.tp, tt.status, tt.reason, tt.message)
 
-			// 验证结果
+			// Verify results
 			assert.Equal(t, tt.expectedCount, len(tt.initialSbx.Status.Conditions))
 
-			// 查找我们设置的条件
+			// Find the condition we set
 			var foundCond *metav1.Condition
 			for _, cond := range tt.initialSbx.Status.Conditions {
 				if cond.Type == tt.tp {
@@ -166,10 +166,10 @@ func TestGetSandboxCondition(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// 执行测试
+			// Execute test
 			cond, found := GetSandboxCondition(tt.sbx, tt.tp)
 
-			// 验证结果
+			// Verify results
 			assert.Equal(t, tt.expectedFound, found)
 			if tt.expectedFound {
 				assert.Equal(t, tt.expectedCond.Type, cond.Type)

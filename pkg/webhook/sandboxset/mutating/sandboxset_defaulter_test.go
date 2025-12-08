@@ -125,7 +125,7 @@ func TestSandboxSetDefaulter_Handle(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			g := gomega.NewGomegaWithT(t)
 
-			// 创建 fake client
+			// Create fake client
 			var objs []runtime.Object
 			fakeClient := fake.NewClientBuilder().WithScheme(scheme.Scheme).WithRuntimeObjects(objs...).Build()
 

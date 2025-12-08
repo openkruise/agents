@@ -237,7 +237,7 @@ func (s *Sandbox) Resume(ctx context.Context) error {
 		log.Error(err, "failed to wait sandbox resume")
 		return err
 	}
-	// 对于 paused state，转化为 running，其他的保持不变
+	// For paused state, convert to running, others remain unchanged
 	if state == kruise.SandboxStatePaused {
 		if err = s.Patch(ctx, fmt.Sprintf(`{"metadata":{"labels":{"%s":"%s"}}}`,
 			kruise.LabelSandboxState, kruise.SandboxStateRunning)); err != nil {

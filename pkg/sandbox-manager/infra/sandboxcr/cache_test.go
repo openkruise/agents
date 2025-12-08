@@ -13,21 +13,21 @@ import (
 
 //goland:noinspection GoDeprecation
 func TestCache_SelectSandboxes(t *testing.T) {
-	// 创建fake client set
+	// Create fake client set
 	client := fake.NewSimpleClientset()
 
-	// 创建cache
+	// Create cache
 	informerFactory := informers.NewSharedInformerFactoryWithOptions(client, time.Minute*10, informers.WithNamespace("default"))
 	sandboxInformer := informerFactory.Api().V1alpha1().Sandboxes().Informer()
 	cache, err := NewCache[*v1alpha1.Sandbox]("default", informerFactory, sandboxInformer)
 	if err != nil {
 		t.Fatalf("Failed to create cache: %v", err)
 	}
-	// 启动缓存
+	// Start cache
 	done := make(chan struct{})
 	go cache.Run(done)
 	<-done
-	// 创建测试用的pods
+	// Create test pods
 	sandboxes := []*v1alpha1.Sandbox{
 		{
 			ObjectMeta: metav1.ObjectMeta{
@@ -71,7 +71,7 @@ func TestCache_SelectSandboxes(t *testing.T) {
 		},
 	}
 
-	// 添加pods到fake client
+	// Add pods to fake client
 	for _, sandbox := range sandboxes {
 		_, err := client.ApiV1alpha1().Sandboxes(sandbox.Namespace).Create(context.Background(), sandbox, metav1.CreateOptions{})
 		if err != nil {
@@ -79,7 +79,7 @@ func TestCache_SelectSandboxes(t *testing.T) {
 		}
 	}
 
-	// 等待informer同步
+	// Wait for informer sync
 	t.Log("waiting informer synced")
 	start := time.Now()
 	for {
@@ -94,7 +94,7 @@ func TestCache_SelectSandboxes(t *testing.T) {
 		}
 	}
 
-	// 测试用例
+	// Test cases
 	tests := []struct {
 		name          string
 		labels        []string
@@ -138,7 +138,7 @@ func TestCache_SelectSandboxes(t *testing.T) {
 				t.Errorf("Expected %d sandboxes, got %d", tt.expectedCount, len(pods))
 			}
 
-			// 验证所有返回的pods都在default命名空间中
+			// Verify all returned pods are in the default namespace
 			for _, pod := range pods {
 				if pod.Namespace != "default" {
 					t.Errorf("Expected sandbox in 'default' namespace, got %s", pod.Namespace)
@@ -147,16 +147,16 @@ func TestCache_SelectSandboxes(t *testing.T) {
 		})
 	}
 
-	// 停止缓存
+	// Stop cache
 	cache.Stop()
 }
 
 //goland:noinspection GoDeprecation
 func TestCache_GetSandbox(t *testing.T) {
-	// 创建fake client set
+	// Create fake client set
 	client := fake.NewSimpleClientset()
 
-	// 创建cache
+	// Create cache
 	informerFactory := informers.NewSharedInformerFactoryWithOptions(client, time.Minute*10, informers.WithNamespace("default"))
 	sandboxInformer := informerFactory.Api().V1alpha1().Sandboxes().Informer()
 	cache, err := NewCache[*v1alpha1.Sandbox]("default", informerFactory, sandboxInformer)
@@ -164,12 +164,12 @@ func TestCache_GetSandbox(t *testing.T) {
 		t.Fatalf("Failed to create cache: %v", err)
 	}
 
-	// 启动缓存
+	// Start cache
 	done := make(chan struct{})
 	go cache.Run(done)
 	<-done
 
-	// 测试用例
+	// Test cases
 	tests := []struct {
 		name        string
 		sandbox     *v1alpha1.Sandbox
@@ -213,7 +213,7 @@ func TestCache_GetSandbox(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// 添加pod到fake client
+			// Add pod to fake client
 			if tt.sandbox != nil {
 				_, err := client.ApiV1alpha1().Sandboxes(tt.sandbox.Namespace).Create(
 					context.Background(), tt.sandbox, metav1.CreateOptions{})
@@ -221,11 +221,11 @@ func TestCache_GetSandbox(t *testing.T) {
 					t.Fatalf("Failed to create sandbox: %v", err)
 				}
 
-				// 等待informer同步
+				// Wait for informer sync
 				time.Sleep(100 * time.Millisecond)
 			}
 
-			// 测试GetPod
+			// Test GetPod
 			_, err := cache.GetSandbox(tt.lookupName)
 
 			if tt.expectError {
@@ -238,7 +238,7 @@ func TestCache_GetSandbox(t *testing.T) {
 				}
 			}
 
-			// 清理pod
+			// Clean up pod
 			if tt.sandbox != nil {
 				_ = client.ApiV1alpha1().Sandboxes(tt.sandbox.Namespace).Delete(
 					context.Background(), tt.sandbox.Name, metav1.DeleteOptions{})
@@ -247,6 +247,6 @@ func TestCache_GetSandbox(t *testing.T) {
 		})
 	}
 
-	// 停止缓存
+	// Stop cache
 	cache.Stop()
 }

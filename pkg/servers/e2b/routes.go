@@ -41,11 +41,11 @@ func (sc *Controller) registerRoutes() {
 }
 
 var AnonymousUser = &models.CreatedTeamAPIKey{
-	ID:   uuid.MustParse("550e8400-e29b-41d4-a716-446655440000"), // 无意义的随机数，用于在非鉴权模式下表示匿名用户
+	ID:   uuid.MustParse("550e8400-e29b-41d4-a716-446655440000"), // Meaningless random number, used to represent anonymous users in non-authentication mode
 	Name: "auth-disabled",
 }
 
-// CheckApiKey 实现了 Demo 的 ApiKey 验证，试验阶段写死 "GG" 为唯一合法值
+// CheckApiKey implements Demo's ApiKey validation
 func (sc *Controller) CheckApiKey(ctx context.Context, r *http.Request) (context.Context, *web.ApiError) {
 	logger := klog.FromContext(ctx)
 	middleWareLog := logger.WithValues("middleware", "CheckApiKey").V(consts.DebugLogLevel)

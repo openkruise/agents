@@ -36,7 +36,7 @@ func ConvertPodToSandboxCR(pod *corev1.Pod) *agentsv1alpha1.Sandbox {
 }
 
 func setupTestManager(t *testing.T) *SandboxManager {
-	// 创建fake client set
+	// Create fake client set
 	client := clients.NewFakeClientSet()
 	manager, err := NewSandboxManager("default", client, nil, consts.InfraSandboxCR)
 	if err != nil {
@@ -99,7 +99,7 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 
 			client := manager.client.SandboxClient
 
-			// 创建测试用的pod
+			// Create test pod
 			testSbx := &agentsv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-sandbox",
@@ -127,7 +127,7 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 
 			CreateSandboxWithStatus(t, client, testSbx)
 
-			// 等待informer同步
+			// Wait for informer sync
 			time.Sleep(100 * time.Millisecond)
 			err := retry.OnError(wait.Backoff{
 				Steps:    10,
@@ -164,7 +164,7 @@ func TestSandboxManager_GetClaimedPod(t *testing.T) {
 	manager := setupTestManager(t)
 	client := manager.client.SandboxClient
 
-	// 创建测试用的pods
+	// Create test pods
 	runningPod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "running-pod",
@@ -207,7 +207,7 @@ func TestSandboxManager_GetClaimedPod(t *testing.T) {
 		},
 	}
 
-	// 添加pods到fake client
+	// Add pods to fake client
 	pods := []*corev1.Pod{runningPod, pausedPod, pendingPod}
 	for _, pod := range pods {
 		_, err := client.ApiV1alpha1().Sandboxes("default").Create(context.Background(), ConvertPodToSandboxCR(pod), metav1.CreateOptions{})
@@ -216,7 +216,7 @@ func TestSandboxManager_GetClaimedPod(t *testing.T) {
 		}
 	}
 
-	// 等待informer同步
+	// Wait for informer sync
 	time.Sleep(100 * time.Millisecond)
 
 	tests := []struct {
@@ -284,7 +284,7 @@ func TestSandboxManager_ListClaimedPods(t *testing.T) {
 	manager := setupTestManager(t)
 	client := manager.client.SandboxClient
 
-	// 创建测试用的pods
+	// Create test pods
 	pods := []*corev1.Pod{
 		{
 			ObjectMeta: metav1.ObjectMeta{
@@ -358,7 +358,7 @@ func TestSandboxManager_ListClaimedPods(t *testing.T) {
 		},
 	}
 
-	// 添加pods到fake client
+	// Add pods to fake client
 	for _, pod := range pods {
 		_, err := client.ApiV1alpha1().Sandboxes("default").Create(context.Background(), ConvertPodToSandboxCR(pod), metav1.CreateOptions{})
 		if err != nil {
@@ -366,7 +366,7 @@ func TestSandboxManager_ListClaimedPods(t *testing.T) {
 		}
 	}
 
-	// 等待informer同步
+	// Wait for informer sync
 	time.Sleep(100 * time.Millisecond)
 
 	tests := []struct {
@@ -432,21 +432,21 @@ func TestSandboxManager_ListClaimedPods(t *testing.T) {
 				t.Errorf("Expected %d sandboxes, got %d", tt.expectedCount, len(sandboxes))
 			}
 
-			// 验证状态
+			// Verify status
 			stateCount := make(map[string]int)
 			for _, sbx := range sandboxes {
 				state := sbx.GetState()
 				stateCount[state]++
 			}
 
-			// 验证返回的pods是否只包含预期的状态
+			// Verify that returned pods only contain expected states
 			for _, expectedState := range tt.expectedStates {
 				if stateCount[expectedState] == 0 {
 					t.Errorf("Expected to find sandboxes with state %s, but none found", expectedState)
 				}
 			}
 
-			// 验证没有返回不期望的状态
+			// Verify that no unexpected states are returned
 			for state := range stateCount {
 				found := false
 				for _, expectedState := range tt.expectedStates {
@@ -467,7 +467,7 @@ func TestSandboxManager_DeleteClaimedPod(t *testing.T) {
 	manager := setupTestManager(t)
 	client := manager.client.SandboxClient
 
-	// 创建测试用的pods
+	// Create test pods
 	runningPod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "running-pod",
@@ -496,7 +496,7 @@ func TestSandboxManager_DeleteClaimedPod(t *testing.T) {
 		},
 	}
 
-	// 添加pods到fake client
+	// Add pods to fake client
 	pods := []*corev1.Pod{runningPod, pendingPod}
 	for _, pod := range pods {
 		_, err := client.ApiV1alpha1().Sandboxes("default").Create(context.Background(), ConvertPodToSandboxCR(pod), metav1.CreateOptions{})
@@ -505,7 +505,7 @@ func TestSandboxManager_DeleteClaimedPod(t *testing.T) {
 		}
 	}
 
-	// 等待informer同步
+	// Wait for informer sync
 	time.Sleep(100 * time.Millisecond)
 
 	tests := []struct {
@@ -549,7 +549,7 @@ func TestSandboxManager_DeleteClaimedPod(t *testing.T) {
 					t.Errorf("Unexpected error: %v", err)
 				}
 
-				// 验证pod已被删除
+				// Verify pod has been deleted
 				_, err := client.ApiV1alpha1().Sandboxes("default").Get(context.Background(), tt.sandboxID, metav1.GetOptions{})
 				if err == nil {
 					t.Errorf("Expected pod to be deleted but it still exists")
