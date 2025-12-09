@@ -5,8 +5,9 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/openkruise/agents/pkg/proxy"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/openkruise/agents/pkg/proxy"
 )
 
 type SandboxSelectorOptions struct {
@@ -24,12 +25,12 @@ type SandboxResource struct {
 }
 
 type Infrastructure interface {
-	Run(ctx context.Context) error                                 // Starts the infrastructure
-	Stop()                                                         // Stops the infrastructure
-	GetPoolByObject(sbx metav1.Object) (pool SandboxPool, ok bool) // Get the SandboxPool for the given object
-	GetPoolByTemplate(name string) (pool SandboxPool, ok bool)     // Get the SandboxPool for the given template name
-	NewPool(name, namespace string) SandboxPool                    // Create a new SandboxPool from a SandboxSet
-	AddPool(name string, pool SandboxPool)                         // Add a SandboxPool to the pool
+	Run(ctx context.Context) error                                             // Starts the infrastructure
+	Stop()                                                                     // Stops the infrastructure
+	GetPoolByObject(sbx metav1.Object) (pool SandboxPool, ok bool)             // Get the SandboxPool for the given object
+	GetPoolByTemplate(name string) (pool SandboxPool, ok bool)                 // Get the SandboxPool for the given template name
+	NewPool(name, namespace string, annotations map[string]string) SandboxPool // Create a new SandboxPool from a SandboxSet
+	AddPool(name string, pool SandboxPool)                                     // Add a SandboxPool to the pool
 	LoadDebugInfo() map[string]any
 	SelectSandboxes(options SandboxSelectorOptions) ([]Sandbox, error) // Select Sandboxes based on the options provided
 	GetSandbox(sandboxID string) (Sandbox, error)                      // Get a Sandbox interface by its ID

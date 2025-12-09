@@ -4,12 +4,13 @@ import (
 	"context"
 	"time"
 
+	k8scache "k8s.io/client-go/tools/cache"
+
 	"github.com/openkruise/agents/api/v1alpha1"
 	sandboxclient "github.com/openkruise/agents/client/clientset/versioned"
 	informers "github.com/openkruise/agents/client/informers/externalversions"
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
-	k8scache "k8s.io/client-go/tools/cache"
 )
 
 type Infra struct {
@@ -61,12 +62,13 @@ func (i *Infra) Stop() {
 	i.Cache.Stop()
 }
 
-func (i *Infra) NewPool(name, namespace string) infra.SandboxPool {
+func (i *Infra) NewPool(name, namespace string, annotations map[string]string) infra.SandboxPool {
 	return &Pool{
-		Name:      name,
-		Namespace: namespace,
-		client:    i.Client,
-		cache:     i.Cache,
+		Name:        name,
+		Namespace:   namespace,
+		Annotations: annotations,
+		client:      i.Client,
+		cache:       i.Cache,
 	}
 }
 
@@ -178,7 +180,7 @@ func (i *Infra) onSandboxSetCreate(newObj interface{}) {
 	}
 	pool, ok := i.GetPoolByTemplate(newSbs.Name)
 	if !ok {
-		pool = i.NewPool(newSbs.Name, newSbs.Namespace)
+		pool = i.NewPool(newSbs.Name, newSbs.Namespace, newSbs.Annotations)
 		i.AddPool(newSbs.Name, pool)
 	}
 }

@@ -5,17 +5,18 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/util/retry"
+
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/client/clientset/versioned"
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/utils/sandbox-manager"
-	"github.com/stretchr/testify/assert"
-	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/client-go/util/retry"
 )
 
 func ConvertPodToSandboxCR(pod *corev1.Pod) *agentsv1alpha1.Sandbox {
@@ -92,8 +93,8 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			manager := setupTestManager(t)
-			pool1 := manager.GetInfra().NewPool("exist-1", "default")
-			pool2 := manager.GetInfra().NewPool("exist-2", "default")
+			pool1 := manager.GetInfra().NewPool("exist-1", "default", map[string]string{})
+			pool2 := manager.GetInfra().NewPool("exist-2", "default", map[string]string{})
 			manager.GetInfra().AddPool("exist-1", pool1)
 			manager.GetInfra().AddPool("exist-2", pool2)
 
