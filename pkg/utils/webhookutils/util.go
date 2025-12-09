@@ -51,7 +51,3 @@ func GetCertDir() string {
 	}
 	return "/home/nonroot/sandbox-controller-webhook-certs"
 }
-
-func GetCertWriter() string {
-	return os.Getenv("WEBHOOK_CERT_WRITER")
-}

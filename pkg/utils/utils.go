@@ -109,6 +109,35 @@ func UpdateFinalizer(c client.Client, object client.Object, op FinalizerOpType, 
 	})
 }
 
+func PatchFinalizer(c client.Client, object client.Object, op FinalizerOpType, finalizer string) error {
+	switch op {
+	case AddFinalizerOpType, RemoveFinalizerOpType:
+	default:
+		panic("UpdateFinalizer Func 'op' parameter must be 'Add' or 'Remove'")
+	}
+	originObj := object.DeepCopyObject().(client.Object)
+	patch := client.MergeFrom(object.(client.Object))
+
+	finalizers := originObj.GetFinalizers()
+	switch op {
+	case AddFinalizerOpType:
+		if controllerutil.ContainsFinalizer(originObj, finalizer) {
+			return nil
+		}
+		controllerutil.AddFinalizer(originObj, finalizer)
+		finalizers = append(finalizers, finalizer)
+	case RemoveFinalizerOpType:
+		if !controllerutil.ContainsFinalizer(originObj, finalizer) {
+			return nil
+		}
+		controllerutil.RemoveFinalizer(originObj, finalizer)
+	}
+	if err := c.Patch(context.TODO(), originObj, patch); err != nil {
+		return fmt.Errorf("failed to patch finalizer: %w", err)
+	}
+	return nil
+}
+
 func DumpJson(o interface{}) string {
 	by, _ := json.Marshal(o)
 	return string(by)

@@ -240,10 +240,6 @@ func (r *SandboxReconciler) updateSandboxStatus(ctx context.Context, newStatus a
 	return nil
 }
 
-func (r *SandboxReconciler) getControl(pod *corev1.Pod) core.SandboxControl {
-	return r.controls[core.CommonControlName]
-}
-
 // SetupWithManager sets up the controller with the Manager.
 func (r *SandboxReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
