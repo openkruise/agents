@@ -5,10 +5,18 @@ import (
 	"encoding/json"
 	"net/http"
 
-	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
+
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/discovery"
+	"github.com/openkruise/agents/pkg/features"
+	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
+)
+
+var (
+	controllerKind = agentsv1alpha1.SchemeGroupVersion.WithKind("SandboxSet")
 )
 
 type SandboxSetDefaulter struct {
@@ -23,6 +31,9 @@ func (h *SandboxSetDefaulter) Path() string {
 }
 
 func (h *SandboxSetDefaulter) Enabled() bool {
+	if !utilfeature.DefaultFeatureGate.Enabled(features.SandboxSetGate) || !discovery.DiscoverGVK(controllerKind) {
+		return false
+	}
 	return true
 }
 

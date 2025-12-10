@@ -25,13 +25,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
-	"github.com/openkruise/agents/pkg/utils"
-	"github.com/openkruise/agents/pkg/utils/expectations"
-	"github.com/openkruise/agents/pkg/utils/fieldindex"
-	managerutils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
-	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -45,6 +38,17 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
+
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/discovery"
+	"github.com/openkruise/agents/pkg/features"
+	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
+	"github.com/openkruise/agents/pkg/utils"
+	"github.com/openkruise/agents/pkg/utils/expectations"
+	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
+	"github.com/openkruise/agents/pkg/utils/fieldindex"
+	managerutils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
+	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
 )
 
 func init() {
@@ -55,9 +59,13 @@ func init() {
 var (
 	concurrentReconciles = 3
 	initialBatchSize     = 16
+	controllerKind       = agentsv1alpha1.GroupVersion.WithKind("SandboxSet")
 )
 
 func Add(mgr manager.Manager) error {
+	if !utilfeature.DefaultFeatureGate.Enabled(features.SandboxSetGate) || !discovery.DiscoverGVK(controllerKind) {
+		return nil
+	}
 	err := (&Reconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),

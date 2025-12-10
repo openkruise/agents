@@ -24,7 +24,6 @@ import (
 	"reflect"
 	"time"
 
-	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -42,7 +41,11 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/controller/sandbox/core"
+	"github.com/openkruise/agents/pkg/discovery"
+	"github.com/openkruise/agents/pkg/features"
+	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/utils"
+	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 )
 
 func init() {
@@ -55,6 +58,9 @@ var (
 )
 
 func Add(mgr manager.Manager) error {
+	if !utilfeature.DefaultFeatureGate.Enabled(features.SandboxGate) || !discovery.DiscoverGVK(sandboxControllerKind) {
+		return nil
+	}
 	err := (&SandboxReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),

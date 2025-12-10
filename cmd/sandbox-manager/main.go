@@ -7,12 +7,20 @@ import (
 	"strconv"
 
 	"github.com/google/uuid"
+	"github.com/spf13/pflag"
+	"k8s.io/klog/v2"
+
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/servers/e2b"
-	"k8s.io/klog/v2"
+	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 )
 
 func main() {
+	utilfeature.DefaultMutableFeatureGate.AddFlag(pflag.CommandLine)
+	klog.InitFlags(nil)
+	pflag.CommandLine.AddGoFlagSet(flag.CommandLine)
+	pflag.Parse()
+
 	// ============= Env ===============
 	// Get listen address from environment variable or use default value
 	port := 8080
@@ -61,9 +69,6 @@ func main() {
 	if err != nil {
 		klog.Fatalf("Failed to initialize Kubernetes client: %v", err)
 	}
-
-	klog.InitFlags(nil)
-	flag.Parse()
 
 	sandboxController := e2b.NewController(domain, e2bAdminKey, sysNs, e2bMaxTimeout, port, e2bEnableAuth, clientSet)
 	if err := sandboxController.Init(infra); err != nil {

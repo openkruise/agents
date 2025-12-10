@@ -21,9 +21,8 @@ import (
 	"flag"
 	"os"
 
-	"github.com/openkruise/agents/pkg/controller"
-	"github.com/openkruise/agents/pkg/utils/fieldindex"
-	customwebhook "github.com/openkruise/agents/pkg/webhook"
+	"github.com/spf13/pflag"
+	"k8s.io/klog/v2"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -40,6 +39,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/client"
+	"github.com/openkruise/agents/pkg/controller"
+	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
+	"github.com/openkruise/agents/pkg/utils/fieldindex"
+	customwebhook "github.com/openkruise/agents/pkg/webhook"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -92,8 +96,10 @@ func main() {
 	opts := zap.Options{
 		Development: true,
 	}
-	opts.BindFlags(flag.CommandLine)
-	flag.Parse()
+	utilfeature.DefaultMutableFeatureGate.AddFlag(pflag.CommandLine)
+	klog.InitFlags(nil)
+	pflag.CommandLine.AddGoFlagSet(flag.CommandLine)
+	pflag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
@@ -168,7 +174,11 @@ func main() {
 	config.QPS = float32(clientQPS)
 	config.Burst = clientBurst
 	setupLog.Info("setup client", "qps", clientQPS, "burst", clientBurst)
-
+	err := client.NewRegistry(config)
+	if err != nil {
+		setupLog.Error(err, "unable to set up client")
+		os.Exit(1)
+	}
 	mgr, err := ctrl.NewManager(config, ctrl.Options{
 		Scheme:                  scheme,
 		Metrics:                 metricsServerOptions,
