@@ -174,6 +174,12 @@ spec:
                   running and paused sandboxes.
                 format: int32
                 type: integer
+              selector:
+                description: |-
+                  Selector is a label query over pods that should match the replica count.
+                  This is same as the label selector but in the string format to avoid
+                  duplication for CRDs that do not support structural schemas.
+                type: string
               updateRevision:
                 description: UpdateRevision is the template-hash calculated from `spec.template`.
                 type: string
@@ -187,4 +193,8 @@ spec:
     served: true
     storage: true
     subresources:
+      scale:
+        labelSelectorPath: .status.selector
+        specReplicasPath: .spec.replicas
+        statusReplicasPath: .status.replicas
       status: {}

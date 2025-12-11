@@ -121,6 +121,20 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 	actualReplicas := saveStatusFromGroup(newStatus, groups)
 
+	// Set selector in status for scale subresource
+	if newStatus.Selector == "" {
+		selector, err := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{
+			MatchLabels: map[string]string{
+				agentsv1alpha1.LabelSandboxPool: sbs.Name,
+			},
+		})
+		if err != nil {
+			log.Error(err, "failed to generate selector")
+		} else {
+			newStatus.Selector = selector.String()
+		}
+	}
+
 	var allErrors error
 
 	// Step 1: perform scale

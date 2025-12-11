@@ -83,11 +83,18 @@ type SandboxSetStatus struct {
 	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// Selector is a label query over pods that should match the replica count.
+	// This is same as the label selector but in the string format to avoid
+	// duplication for CRDs that do not support structural schemas.
+	// +optional
+	Selector string `json:"selector,omitempty"`
 }
 
 // +genclient
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:subresource:scale:specpath=.spec.replicas,statuspath=.status.replicas,selectorpath=.status.selector
 // +kubebuilder:resource:path=sandboxsets,shortName={sbs},singular=sandboxset
 // +kubebuilder:storageversion
 // +kubebuilder:printcolumn:name="Replicas",type="integer",JSONPath=".status.replicas"
