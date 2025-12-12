@@ -22,6 +22,6 @@ import (
 	"github.com/openkruise/agents/pkg/controller/sandbox/core"
 )
 
-func (r *SandboxReconciler) getControl(pod *corev1.Pod) core.SandboxControl {
+func (r *SandboxReconciler) getControl(_ *corev1.Pod) core.SandboxControl {
 	return r.controls[core.CommonControlName]
 }

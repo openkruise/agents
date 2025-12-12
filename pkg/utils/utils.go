@@ -114,16 +114,14 @@ func PatchFinalizer(c client.Client, object client.Object, op FinalizerOpType, f
 		panic("UpdateFinalizer Func 'op' parameter must be 'Add' or 'Remove'")
 	}
 	originObj := object.DeepCopyObject().(client.Object)
-	patch := client.MergeFrom(object.(client.Object))
+	patch := client.MergeFrom(object)
 
-	finalizers := originObj.GetFinalizers()
 	switch op {
 	case AddFinalizerOpType:
 		if controllerutil.ContainsFinalizer(originObj, finalizer) {
 			return nil
 		}
 		controllerutil.AddFinalizer(originObj, finalizer)
-		finalizers = append(finalizers, finalizer)
 	case RemoveFinalizerOpType:
 		if !controllerutil.ContainsFinalizer(originObj, finalizer) {
 			return nil

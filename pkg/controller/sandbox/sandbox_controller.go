@@ -85,14 +85,9 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// Fetch the sandbox instance
 	box := &agentsv1alpha1.Sandbox{}
 	err := r.Get(ctx, req.NamespacedName, box)
+
 	if err != nil {
-		if errors.IsNotFound(err) {
-			// Object not found, return.  Created objects are automatically garbage collected.
-			// For additional cleanup logic use finalizers.
-			return reconcile.Result{}, nil
-		}
-		// Error reading the object - requeue the request.
-		return reconcile.Result{}, err
+		return reconcile.Result{}, client.IgnoreNotFound(err)
 	} else if box.Status.Phase == agentsv1alpha1.SandboxFailed || box.Status.Phase == agentsv1alpha1.SandboxSucceeded {
 		return reconcile.Result{}, nil
 	}
@@ -119,9 +114,8 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		if box.Spec.ShutdownTime.Before(&now) {
 			logger.Info("Sandbox is shutdown time reached, will be deleted")
 			return ctrl.Result{}, r.Delete(ctx, box)
-		} else {
-			requeueAfter = box.Spec.ShutdownTime.Time.Sub(now.Time)
 		}
+		requeueAfter = box.Spec.ShutdownTime.Sub(now.Time)
 	}
 
 	logger.V(consts.DebugLogLevel).Info("Began to process Sandbox for reconcile")
@@ -134,7 +128,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// fetch pod
 	pod := &corev1.Pod{}
 	err = r.Get(ctx, client.ObjectKey{Namespace: box.Namespace, Name: box.Name}, pod)
-	if err != nil && !errors.IsNotFound(err) {
+	if client.IgnoreNotFound(err) != nil {
 		logger.Error(err, "Get Pod failed")
 		return reconcile.Result{}, err
 	} else if errors.IsNotFound(err) {
@@ -180,41 +174,22 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	switch newStatus.Phase {
 	case agentsv1alpha1.SandboxPending:
 		err = r.getControl(args.Pod).EnsureSandboxPhasePending(ctx, args)
-		if err != nil {
-			return reconcile.Result{}, err
-		}
-		return ctrl.Result{RequeueAfter: requeueAfter}, r.updateSandboxStatus(ctx, *newStatus, box)
-
 	case agentsv1alpha1.SandboxRunning:
 		err = r.getControl(args.Pod).EnsureSandboxPhaseRunning(ctx, args)
-		if err != nil {
-			return reconcile.Result{}, err
-		}
-		return ctrl.Result{RequeueAfter: requeueAfter}, r.updateSandboxStatus(ctx, *newStatus, box)
-
 	case agentsv1alpha1.SandboxPaused:
 		err = r.getControl(args.Pod).EnsureSandboxPhasePaused(ctx, args)
-		if err != nil {
-			return reconcile.Result{}, err
-		}
-		return ctrl.Result{RequeueAfter: requeueAfter}, r.updateSandboxStatus(ctx, *newStatus, box)
-
 	case agentsv1alpha1.SandboxResuming:
 		err = r.getControl(args.Pod).EnsureSandboxPhaseResuming(ctx, args)
-		if err != nil {
-			return reconcile.Result{}, err
-		}
-		return ctrl.Result{RequeueAfter: requeueAfter}, r.updateSandboxStatus(ctx, *newStatus, box)
-
 	case agentsv1alpha1.SandboxTerminating:
 		err = r.getControl(args.Pod).EnsureSandboxPhaseTerminating(ctx, args)
-		if err != nil {
-			return reconcile.Result{}, err
-		}
-		return ctrl.Result{RequeueAfter: requeueAfter}, r.updateSandboxStatus(ctx, *newStatus, box)
+	default:
+		logger.Info("sandbox status phase is invalid", "phase", box.Status.Phase)
+		return ctrl.Result{RequeueAfter: requeueAfter}, nil
 	}
-	logger.Info("sandbox status phase is invalid", "phase", box.Status.Phase)
-	return ctrl.Result{RequeueAfter: requeueAfter}, nil
+	if err != nil {
+		return reconcile.Result{}, err
+	}
+	return ctrl.Result{RequeueAfter: requeueAfter}, r.updateSandboxStatus(ctx, *newStatus, box)
 }
 
 func (r *SandboxReconciler) updateSandboxStatus(ctx context.Context, newStatus agentsv1alpha1.SandboxStatus, box *agentsv1alpha1.Sandbox) error {

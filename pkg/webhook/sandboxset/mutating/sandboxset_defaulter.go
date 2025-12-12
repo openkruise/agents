@@ -43,7 +43,7 @@ func (h *SandboxSetDefaulter) Handle(_ context.Context, req admission.Request) a
 		if err != nil {
 			return admission.Errored(http.StatusInternalServerError, err)
 		}
-		return admission.PatchResponseFromRaw(req.AdmissionRequest.Object.Raw, marshal)
+		return admission.PatchResponseFromRaw(req.Object.Raw, marshal)
 	}
 	return admission.Allowed("")
 }

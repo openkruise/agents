@@ -117,7 +117,7 @@ func (s *Sandbox) GetRoute() proxy.Route {
 }
 
 func (s *Sandbox) SetTimeout(ttl time.Duration) {
-	s.Sandbox.Spec.ShutdownTime = ptr.To(metav1.NewTime(time.Now().Add(ttl)))
+	s.Spec.ShutdownTime = ptr.To(metav1.NewTime(time.Now().Add(ttl)))
 }
 
 func (s *Sandbox) SaveTimeout(ctx context.Context, ttl time.Duration) error {
@@ -134,10 +134,10 @@ func (s *Sandbox) GetTimeout() time.Time {
 }
 
 func (s *Sandbox) GetResource() infra.SandboxResource {
-	if s.Sandbox.Spec.Template == nil {
+	if s.Spec.Template == nil {
 		return infra.SandboxResource{}
 	}
-	return utils.CalculateResourceFromContainers(s.Sandbox.Spec.Template.Spec.Containers)
+	return utils.CalculateResourceFromContainers(s.Spec.Template.Spec.Containers)
 }
 
 func (s *Sandbox) Request(r *http.Request, path string, port int) (*http.Response, error) {

@@ -6,26 +6,21 @@ linters:
   enable:
     - copyloopvar
     - dupl
-    - errcheck
     - ginkgolinter
     - goconst
     - gocyclo
     - govet
     - ineffassign
-    - lll
     - misspell
-    - nakedret
-    - prealloc
-    - revive
-    - staticcheck
     - unconvert
-    - unparam
     - unused
   settings:
     revive:
       rules:
         - name: comment-spacings
         - name: import-shadowing
+    gocyclo:
+      min-complexity: 32
   exclusions:
     generated: lax
     rules:

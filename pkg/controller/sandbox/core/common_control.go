@@ -168,7 +168,7 @@ func (r *commonControl) EnsureSandboxPhaseTerminating(ctx context.Context, args 
 	return nil
 }
 
-func (r *commonControl) createPod(ctx context.Context, box *agentsv1alpha1.Sandbox, newStatus *agentsv1alpha1.SandboxStatus) (*corev1.Pod, error) {
+func (r *commonControl) createPod(ctx context.Context, box *agentsv1alpha1.Sandbox, _ *agentsv1alpha1.SandboxStatus) (*corev1.Pod, error) {
 	logger := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
 
 	pod := &corev1.Pod{

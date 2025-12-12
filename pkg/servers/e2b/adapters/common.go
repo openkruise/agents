@@ -27,25 +27,25 @@ func (a *CommonAdapter) Map(_, authority, _ string, _ int, headers map[string]st
 	matches := hostRegex.FindStringSubmatch(authority)
 	if len(matches) != 3 {
 		err = fmt.Errorf("invalid authority format: %s", authority)
-		return
+		return sandboxID, sandboxPort, extraHeaders, user, err
 	}
 
 	// Extract port number and sandboxID
 	sandboxPort, err = strconv.Atoi(matches[1])
 	if err != nil {
-		return
+		return sandboxID, sandboxPort, extraHeaders, user, err
 	}
 	sandboxID = matches[2]
 
 	if a.Keys == nil {
-		return
+		return sandboxID, sandboxPort, extraHeaders, user, err
 	}
 
 	// Parse user
 	if sandboxPort == models.CDPPort || sandboxPort == models.VNCPort {
 		// no auth for CDP
 		user = UserNoNeedToAuth
-		return
+		return sandboxID, sandboxPort, extraHeaders, user, err
 	}
 
 	token := headers["x-access-token"] // from sandbox.EnvdAccessToken
@@ -55,7 +55,7 @@ func (a *CommonAdapter) Map(_, authority, _ string, _ int, headers map[string]st
 	} else {
 		user = UserUnknown
 	}
-	return
+	return sandboxID, sandboxPort, extraHeaders, user, err
 }
 
 func (a *CommonAdapter) Authorize(user, owner string) bool {

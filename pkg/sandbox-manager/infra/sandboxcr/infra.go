@@ -175,9 +175,9 @@ func (i *Infra) onSandboxSetCreate(newObj interface{}) {
 	if !ok {
 		return
 	}
-	pool, ok := i.GetPoolByTemplate(newSbs.Name)
+	_, ok = i.GetPoolByTemplate(newSbs.Name)
 	if !ok {
-		pool = i.NewPool(newSbs.Name, newSbs.Namespace, newSbs.Annotations)
+		pool := i.NewPool(newSbs.Name, newSbs.Namespace, newSbs.Annotations)
 		i.AddPool(newSbs.Name, pool)
 	}
 }

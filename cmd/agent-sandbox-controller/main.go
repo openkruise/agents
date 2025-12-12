@@ -24,6 +24,7 @@ import (
 	"github.com/openkruise/agents/pkg/controller"
 	"github.com/openkruise/agents/pkg/utils/fieldindex"
 	customwebhook "github.com/openkruise/agents/pkg/webhook"
+
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"

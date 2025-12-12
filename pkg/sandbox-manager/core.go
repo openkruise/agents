@@ -3,7 +3,6 @@ package sandbox_manager
 import (
 	"context"
 	"fmt"
-	"sync"
 	"time"
 
 	"github.com/openkruise/agents/pkg/proxy"
@@ -28,8 +27,6 @@ type SandboxManager struct {
 
 	infra infra.Infrastructure
 	proxy *proxy.Server
-
-	timers sync.Map
 }
 
 // NewSandboxManager creates a new SandboxManager instance.

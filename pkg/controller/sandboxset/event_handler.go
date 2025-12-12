@@ -55,7 +55,7 @@ func (e *SandboxEventHandler) Update(ctx context.Context, evt event.TypedUpdateE
 		now := time.Now()
 		if cond != nil {
 			afterReady = now.Sub(cond.LastTransitionTime.Time)
-			readyCost = cond.LastTransitionTime.Time.Sub(newSbx.CreationTimestamp.Time)
+			readyCost = cond.LastTransitionTime.Sub(newSbx.CreationTimestamp.Time)
 			totalCost = now.Sub(newSbx.CreationTimestamp.Time)
 		}
 		logf.FromContext(ctx).Info("sandbox available", "sandbox", klog.KObj(newSbx), "now", now,
