@@ -119,6 +119,7 @@ func TestPool_ClaimSandbox(t *testing.T) {
 								Status: corev1.ConditionTrue,
 							},
 						},
+						PodIP: "1.2.3.4",
 					},
 				}
 				if tt.preModifier != nil {

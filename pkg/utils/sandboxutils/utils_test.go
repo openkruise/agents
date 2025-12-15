@@ -27,6 +27,9 @@ func TestGetSandboxState(t *testing.T) {
 				},
 				Status: agentsv1alpha1.SandboxStatus{
 					Phase: agentsv1alpha1.SandboxRunning,
+					PodInfo: agentsv1alpha1.PodInfo{
+						PodIP: "1.2.3.4",
+					},
 				},
 			},
 			expectedState:  agentsv1alpha1.SandboxStateDead,
@@ -40,6 +43,9 @@ func TestGetSandboxState(t *testing.T) {
 				},
 				Status: agentsv1alpha1.SandboxStatus{
 					Phase: agentsv1alpha1.SandboxRunning,
+					PodInfo: agentsv1alpha1.PodInfo{
+						PodIP: "1.2.3.4",
+					},
 				},
 			},
 			expectedState:  agentsv1alpha1.SandboxStateDead,
@@ -59,6 +65,9 @@ func TestGetSandboxState(t *testing.T) {
 							Type:   string(agentsv1alpha1.SandboxConditionReady),
 							Status: metav1.ConditionTrue,
 						},
+					},
+					PodInfo: agentsv1alpha1.PodInfo{
+						PodIP: "1.2.3.4",
 					},
 				},
 			},
@@ -125,6 +134,9 @@ func TestGetSandboxState(t *testing.T) {
 							Status: metav1.ConditionTrue,
 						},
 					},
+					PodInfo: agentsv1alpha1.PodInfo{
+						PodIP: "1.2.3.4",
+					},
 				},
 			},
 			expectedState:  agentsv1alpha1.SandboxStateAvailable,
@@ -150,6 +162,34 @@ func TestGetSandboxState(t *testing.T) {
 							Status: metav1.ConditionFalse,
 						},
 					},
+					PodInfo: agentsv1alpha1.PodInfo{
+						PodIP: "1.2.3.4",
+					},
+				},
+			},
+			expectedState:  agentsv1alpha1.SandboxStateCreating,
+			expectedReason: "ResourceControlledBySbsButNotReady",
+		},
+		{
+			name: "Sandbox controlled by SandboxSet but has no ip",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: "agents.kruise.io/v1alpha1",
+							Kind:       "SandboxSet",
+							Controller: &[]bool{true}[0],
+						},
+					},
+				},
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxRunning,
+					Conditions: []metav1.Condition{
+						{
+							Type:   string(agentsv1alpha1.SandboxConditionReady),
+							Status: metav1.ConditionTrue,
+						},
+					},
 				},
 			},
 			expectedState:  agentsv1alpha1.SandboxStateCreating,
@@ -166,7 +206,9 @@ func TestGetSandboxState(t *testing.T) {
 							Status: metav1.ConditionTrue,
 						},
 					},
-				},
+					PodInfo: agentsv1alpha1.PodInfo{
+						PodIP: "1.2.3.4",
+					}},
 			},
 			expectedState:  agentsv1alpha1.SandboxStateRunning,
 			expectedReason: "RunningResourceClaimedAndReady",

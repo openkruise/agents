@@ -123,6 +123,7 @@ func CreateSandboxes(t *testing.T, tt createSandboxRequest, sbs *v1alpha1.Sandbo
 	for i := int32(0); i < tt.createAvailableSandboxes; i++ {
 		sbx := getBaseSandbox(idx, "available-", sbs.Status.UpdateRevision)
 		sbx.Status.Phase = v1alpha1.SandboxRunning
+		sbx.Status.PodInfo.PodIP = "1.2.3.4"
 		sbx.Status.Conditions = []metav1.Condition{
 			{
 				Type:   string(v1alpha1.SandboxConditionReady),
@@ -138,6 +139,7 @@ func CreateSandboxes(t *testing.T, tt createSandboxRequest, sbs *v1alpha1.Sandbo
 	}
 	for i := int32(0); i < tt.createRunningSandboxes; i++ {
 		sbx := getBaseSandbox(idx, "running-", sbs.Status.UpdateRevision)
+		sbx.Status.PodInfo.PodIP = "1.2.3.4"
 		sbx.Status.Phase = v1alpha1.SandboxRunning
 		sbx.Status.Conditions = []metav1.Condition{
 			{

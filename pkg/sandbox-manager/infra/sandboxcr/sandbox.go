@@ -134,7 +134,10 @@ func (s *Sandbox) GetTimeout() time.Time {
 }
 
 func (s *Sandbox) GetResource() infra.SandboxResource {
-	return utils.CalculateResourceFromContainers(s.Spec.Template.Spec.Containers)
+	if s.Sandbox.Spec.Template == nil {
+		return infra.SandboxResource{}
+	}
+	return utils.CalculateResourceFromContainers(s.Sandbox.Spec.Template.Spec.Containers)
 }
 
 func (s *Sandbox) Request(r *http.Request, path string, port int) (*http.Response, error) {

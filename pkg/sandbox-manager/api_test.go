@@ -225,6 +225,7 @@ func TestSandboxManager_GetClaimedSandbox(t *testing.T) {
 					Status: corev1.ConditionTrue,
 				},
 			},
+			PodIP: "1.2.3.4",
 		},
 	}
 
@@ -257,6 +258,7 @@ func TestSandboxManager_GetClaimedSandbox(t *testing.T) {
 					Status: corev1.ConditionTrue,
 				},
 			},
+			PodIP: "1.2.3.4",
 		},
 	}
 
@@ -386,6 +388,7 @@ func TestSandboxManager_DeleteClaimedPod(t *testing.T) {
 							Status: corev1.ConditionTrue,
 						},
 					},
+					PodIP: "1.2.3.4",
 				},
 			}
 
@@ -405,6 +408,7 @@ func TestSandboxManager_DeleteClaimedPod(t *testing.T) {
 							Status: corev1.ConditionTrue,
 						},
 					},
+					PodIP: "1.2.3.4",
 				},
 			}
 
@@ -416,7 +420,8 @@ func TestSandboxManager_DeleteClaimedPod(t *testing.T) {
 					OwnerReferences: GetSbsOwnerReference(),
 				},
 				Status: corev1.PodStatus{
-					Phase: corev1.PodPending,
+					Phase: corev1.PodRunning,
+					PodIP: "1.2.3.4",
 				},
 			}
 

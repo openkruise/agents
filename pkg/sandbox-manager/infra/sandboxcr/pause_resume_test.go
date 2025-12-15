@@ -164,6 +164,12 @@ func TestSandbox_SetPause(t *testing.T) {
 					Labels:      map[string]string{},
 					Annotations: map[string]string{},
 				},
+				Status: v1alpha1.SandboxStatus{
+					Phase: v1alpha1.SandboxRunning,
+					PodInfo: v1alpha1.PodInfo{
+						PodIP: "10.0.0.1",
+					},
+				},
 			}
 			tt.initSandbox(sandbox)
 
