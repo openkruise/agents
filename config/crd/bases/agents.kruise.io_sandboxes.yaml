@@ -70,10 +70,30 @@ spec:
                 format: date-time
                 type: string
               template:
-                description: Template describes the pods that will be created.
+                description: |-
+                  Template describes the pods that will be created.
+                  Template is mutual exclusive with TemplateRef
                 x-kubernetes-preserve-unknown-fields: true
-            required:
-            - template
+              templateRef:
+                description: TemplateRef references a SandboxTemplate, which will
+                  be used to create the sandbox.
+                properties:
+                  apiVersion:
+                    description: |-
+                      name of the SandboxTemplate apiVersion
+                      Default to v1
+                    type: string
+                  kind:
+                    description: |-
+                      name of the SandboxTemplate kind
+                      Default to PodTemplate
+                    type: string
+                  name:
+                    description: name of the SandboxTemplate
+                    type: string
+                required:
+                - name
+                type: object
             type: object
           status:
             description: status defines the observed state of Sandbox
@@ -144,6 +164,9 @@ spec:
               message:
                 description: message
                 type: string
+              nodeName:
+                description: NodeName indicates in which node this sandbox is scheduled.
+                type: string
               observedGeneration:
                 description: |-
                   observedGeneration is the most recent generation observed for this Sandbox. It corresponds to the
@@ -173,6 +196,9 @@ spec:
                     description: PodIP address allocated to the pod.
                     type: string
                 type: object
+              sandboxIp:
+                description: SandboxIp is the ip address allocated to the sandbox.
+                type: string
             type: object
         required:
         - spec
