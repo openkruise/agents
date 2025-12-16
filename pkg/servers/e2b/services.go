@@ -117,7 +117,11 @@ func (sc *Controller) PauseSandbox(r *http.Request) (web.ApiResponse[struct{}], 
 }
 
 func (sc *Controller) ResumeSandbox(r *http.Request) (web.ApiResponse[struct{}], *web.ApiError) {
-	return sc.pauseAndResumeSandbox(r, false)
+	resp, err := sc.pauseAndResumeSandbox(r, false)
+	if err != nil {
+		return resp, err
+	}
+	return sc.SetSandboxTimeout(r)
 }
 
 // DescribeSandbox returns details of a specific sandbox
