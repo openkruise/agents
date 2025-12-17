@@ -28,6 +28,7 @@ func (sc *Controller) registerRoutes() {
 	web.RegisterRoute(sc.mux, "DELETE /sandboxes/{sandboxID}", sc.DeleteSandbox, sc.CheckApiKey)
 	web.RegisterRoute(sc.mux, "POST /sandboxes/{sandboxID}/pause", sc.PauseSandbox, sc.CheckApiKey)
 	web.RegisterRoute(sc.mux, "POST /sandboxes/{sandboxID}/resume", sc.ResumeSandbox, sc.CheckApiKey)
+	web.RegisterRoute(sc.mux, "POST /sandboxes/{sandboxID}/connect", sc.ConnectSandbox, sc.CheckApiKey)
 	web.RegisterRoute(sc.mux, "POST /sandboxes/{sandboxID}/timeout", sc.SetSandboxTimeout, sc.CheckApiKey)
 	web.RegisterRoute(sc.mux, "GET /browser/{sandboxID}/json/version", sc.BrowserUse)
 	web.RegisterRoute(sc.mux, "GET /debug", sc.Debug, sc.CheckApiKey)

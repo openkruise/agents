@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
@@ -58,43 +57,12 @@ func (m *SandboxManager) GetClaimedSandbox(ctx context.Context, user, sandboxID 
 	return sbx, nil
 }
 
-func (m *SandboxManager) GetRoute(sandboxID string) (proxy.Route, bool) {
-	return m.proxy.LoadRoute(sandboxID)
-}
-
 func (m *SandboxManager) ListSandboxes(user string, limit int, filter func(infra.Sandbox) bool) ([]infra.Sandbox, error) {
 	sandboxes, err := m.infra.SelectSandboxes(user, limit, filter)
 	if err != nil {
 		return nil, errors.NewError(errors.ErrorNotFound, fmt.Sprintf("failed to list sandboxes: %v", err))
 	}
 	return sandboxes, nil
-}
-
-func (m *SandboxManager) DeleteClaimedSandbox(ctx context.Context, user, sandboxID string) error {
-	sbx, err := m.GetClaimedSandbox(ctx, user, sandboxID)
-	if err != nil {
-		return err
-	}
-	return m.killSandbox(ctx, sbx)
-}
-
-func (m *SandboxManager) killSandbox(ctx context.Context, sbx infra.Sandbox) error {
-	if sbx == nil {
-		return nil
-	}
-	if err := sbx.Kill(ctx); err != nil {
-		return errors.NewError(errors.ErrorInternal, fmt.Sprintf("failed to delete sandbox %s: %v", sbx.GetName(), err))
-	}
-	return nil
-}
-
-func (m *SandboxManager) SetSandboxTimeout(ctx context.Context, sbx infra.Sandbox, seconds int) error {
-	state, reason := sbx.GetState()
-	if state != v1alpha1.SandboxStateRunning {
-		klog.FromContext(ctx).Info("cannot set sandbox timeout for sandbox not running", "name", sbx.GetName(), "state", state, "reason", reason)
-		return errors.NewError(errors.ErrorConflict, fmt.Sprintf("sandbox %s is not running", sbx.GetName()))
-	}
-	return sbx.SaveTimeout(ctx, time.Duration(seconds)*time.Second)
 }
 
 func (m *SandboxManager) GetOwnerOfSandbox(sandboxID string) (string, bool) {

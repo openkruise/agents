@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/openkruise/agents/api/v1alpha1"
 	sandbox_manager "github.com/openkruise/agents/pkg/sandbox-manager"
-	innererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
@@ -112,38 +112,18 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 	}, nil
 }
 
-func (sc *Controller) PauseSandbox(r *http.Request) (web.ApiResponse[struct{}], *web.ApiError) {
-	return sc.pauseAndResumeSandbox(r, true)
-}
-
-func (sc *Controller) ResumeSandbox(r *http.Request) (web.ApiResponse[struct{}], *web.ApiError) {
-	resp, err := sc.pauseAndResumeSandbox(r, false)
-	if err != nil {
-		return resp, err
-	}
-	return sc.SetSandboxTimeout(r)
-}
-
 // DescribeSandbox returns details of a specific sandbox
-// This API is not used by demo, should delay
 func (sc *Controller) DescribeSandbox(r *http.Request) (web.ApiResponse[*models.Sandbox], *web.ApiError) {
 	id := r.PathValue("sandboxID")
 	log := klog.FromContext(r.Context())
 	log.Info("describe sandbox", "id", id)
-	user := GetUserFromContext(r.Context())
-	if user == nil {
-		return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
-			Message: "User not found",
-		}
-	}
-	sbx, err := sc.manager.GetClaimedSandbox(r.Context(), user.ID.String(), id)
+
+	sbx, err := sc.getSandboxOfUser(r.Context(), id)
 	if err != nil {
 		log.Error(err, "failed to get sandbox", "id", id)
-		return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
-			Code:    http.StatusNotFound,
-			Message: fmt.Sprintf("Sandbox with id %s not found: %v", id, err),
-		}
+		return web.ApiResponse[*models.Sandbox]{}, err
 	}
+
 	return web.ApiResponse[*models.Sandbox]{
 		Body: sc.convertToE2BSandbox(r.Context(), sbx),
 	}, nil
@@ -153,81 +133,81 @@ func (sc *Controller) DescribeSandbox(r *http.Request) (web.ApiResponse[*models.
 func (sc *Controller) DeleteSandbox(r *http.Request) (web.ApiResponse[struct{}], *web.ApiError) {
 	id := r.PathValue("sandboxID")
 	log := klog.FromContext(r.Context())
-	user := GetUserFromContext(r.Context())
-	if user == nil {
-		return web.ApiResponse[struct{}]{}, &web.ApiError{
-			Message: "User not found",
-		}
+	sbx, apiError := sc.getSandboxOfUser(r.Context(), id)
+	if apiError != nil {
+		return web.ApiResponse[struct{}]{}, apiError
 	}
-	err := sc.manager.DeleteClaimedSandbox(r.Context(), user.ID.String(), id)
-	if err != nil {
+
+	if err := sbx.Kill(r.Context()); err != nil {
 		log.Error(err, "failed to delete sandbox", "id", id)
-		switch innererrors.GetErrCode(err) {
-		case innererrors.ErrorBadRequest:
-			fallthrough // e2b protocol does not support returning 400 here, uniformly return 404
-		case innererrors.ErrorNotFound:
-			return web.ApiResponse[struct{}]{}, &web.ApiError{
-				Code:    http.StatusNotFound,
-				Message: fmt.Sprintf("Sandbox %s not found", id),
-			}
-		default:
-			return web.ApiResponse[struct{}]{}, &web.ApiError{
-				Message: fmt.Sprintf("Failed to delete sandbox: %v", err),
-			}
+		return web.ApiResponse[struct{}]{}, &web.ApiError{
+			Message: fmt.Sprintf("Failed to delete sandbox: %v", err),
 		}
 	}
+
 	log.Info("sandbox deleted", "id", id)
 	return web.ApiResponse[struct{}]{
 		Code: http.StatusNoContent,
 	}, nil
 }
 
+// SetSandboxTimeout sets the timeout of a claimed sandbox
 func (sc *Controller) SetSandboxTimeout(r *http.Request) (web.ApiResponse[struct{}], *web.ApiError) {
+	err := sc.setSandboxTimeout(r, false)
+	if err != nil {
+		if err.Code != http.StatusNotFound {
+			// Just to follow E2B spec, I don't know why it is designed
+			err.Code = http.StatusInternalServerError
+		}
+		return web.ApiResponse[struct{}]{}, err
+	}
+	return web.ApiResponse[struct{}]{
+		Code: http.StatusNoContent,
+	}, nil
+}
+
+func (sc *Controller) setSandboxTimeout(r *http.Request, allowNonRunning bool) *web.ApiError {
 	ctx := r.Context()
 	log := klog.FromContext(ctx)
-	id := r.PathValue("sandboxID")
-	user := GetUserFromContext(r.Context())
-	if user == nil {
-		return web.ApiResponse[struct{}]{}, &web.ApiError{
-			Message: "User not found",
-		}
-	}
+
 	var request models.SetTimeoutRequest
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-		return web.ApiResponse[struct{}]{}, &web.ApiError{
+		return &web.ApiError{
 			Message: err.Error(),
 		}
 	}
 	if request.TimeoutSeconds <= 0 || request.TimeoutSeconds > sc.maxTimeout {
-		return web.ApiResponse[struct{}]{}, &web.ApiError{
+		return &web.ApiError{
+			Code:    http.StatusBadRequest,
 			Message: fmt.Sprintf("timeout should between 30 and %d", sc.maxTimeout),
 		}
 	}
-	sbx, err := sc.manager.GetClaimedSandbox(ctx, user.ID.String(), id)
-	if err != nil {
-		return web.ApiResponse[struct{}]{}, &web.ApiError{
-			Code:    http.StatusNotFound,
-			Message: fmt.Sprintf("Sandbox %s not found", id),
-		}
+
+	id := r.PathValue("sandboxID")
+	sbx, apiErr := sc.getSandboxOfUser(ctx, id)
+	if apiErr != nil {
+		return apiErr
 	}
-	if err := sc.manager.SetSandboxTimeout(ctx, sbx, request.TimeoutSeconds); err != nil {
-		log.Error(err, "failed to set sandbox timeout", "id", id, "timeout", request.TimeoutSeconds)
-		switch innererrors.GetErrCode(err) {
-		case innererrors.ErrorNotFound:
-			return web.ApiResponse[struct{}]{}, &web.ApiError{
-				Code:    http.StatusNotFound,
-				Message: fmt.Sprintf("Sandbox %s not found", id),
-			}
-		default:
-			return web.ApiResponse[struct{}]{}, &web.ApiError{
-				Message: fmt.Sprintf("Failed to set sandbox timeout: %v", err),
+
+	if !allowNonRunning {
+		state, reason := sbx.GetState()
+		if state != v1alpha1.SandboxStateRunning {
+			log.Info("cannot set sandbox timeout for sandbox not running", "name", sbx.GetName(), "state", state, "reason", reason)
+			return &web.ApiError{
+				Code:    http.StatusConflict,
+				Message: fmt.Sprintf("sandbox %s is not running", sbx.GetName()),
 			}
 		}
 	}
+
+	if err := sbx.SaveTimeout(ctx, time.Duration(request.TimeoutSeconds)*time.Second); err != nil {
+		return &web.ApiError{
+			Message: fmt.Sprintf("Failed to set sandbox timeout: %v", err),
+		}
+	}
+
 	log.Info("sandbox timeout set", "id", id, "timeout", request.TimeoutSeconds)
-	return web.ApiResponse[struct{}]{
-		Code: http.StatusNoContent,
-	}, nil
+	return nil
 }
 
 type browserHandShake struct {
@@ -247,18 +227,9 @@ type browserHandShake struct {
 //	```
 func (sc *Controller) BrowserUse(r *http.Request) (web.ApiResponse[*browserHandShake], *web.ApiError) {
 	sandboxID := r.PathValue("sandboxID")
-	user := GetUserFromContext(r.Context())
-	if user == nil {
-		return web.ApiResponse[*browserHandShake]{}, &web.ApiError{
-			Message: "User not found",
-		}
-	}
-	sbx, err := sc.manager.GetClaimedSandbox(r.Context(), user.ID.String(), sandboxID)
-	if err != nil {
-		return web.ApiResponse[*browserHandShake]{}, &web.ApiError{
-			Code:    http.StatusNotFound,
-			Message: err.Error(),
-		}
+	sbx, apiErr := sc.getSandboxOfUser(r.Context(), sandboxID)
+	if apiErr != nil {
+		return web.ApiResponse[*browserHandShake]{}, apiErr
 	}
 
 	resp, err := sbx.Request(r, "/json/version", models.CDPPort)
@@ -291,86 +262,5 @@ func (sc *Controller) BrowserUse(r *http.Request) (web.ApiResponse[*browserHandS
 func (sc *Controller) Debug(_ *http.Request) (web.ApiResponse[sandbox_manager.DebugInfo], *web.ApiError) {
 	return web.ApiResponse[sandbox_manager.DebugInfo]{
 		Body: sc.manager.GetDebugInfo(),
-	}, nil
-}
-
-func (sc *Controller) ListAPIKeys(r *http.Request) (web.ApiResponse[[]*models.TeamAPIKey], *web.ApiError) {
-	ctx := r.Context()
-	user := GetUserFromContext(ctx)
-	if user == nil {
-		return web.ApiResponse[[]*models.TeamAPIKey]{}, &web.ApiError{
-			Message: "User not found",
-		}
-	}
-	apiKeys := sc.keys.ListByOwner(user.ID)
-
-	return web.ApiResponse[[]*models.TeamAPIKey]{
-		Body: apiKeys,
-	}, nil
-}
-
-func (sc *Controller) CreateAPIKey(r *http.Request) (web.ApiResponse[*models.CreatedTeamAPIKey], *web.ApiError) {
-	var request models.NewTeamAPIKey
-	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-		return web.ApiResponse[*models.CreatedTeamAPIKey]{}, &web.ApiError{
-			Message: err.Error(),
-		}
-	}
-
-	ctx := r.Context()
-	user := GetUserFromContext(ctx)
-	if user == nil {
-		return web.ApiResponse[*models.CreatedTeamAPIKey]{}, &web.ApiError{
-			Message: "User not found",
-		}
-	}
-	createdAPIKey, err := sc.keys.CreateKey(ctx, user, request.Name)
-	if err != nil {
-		return web.ApiResponse[*models.CreatedTeamAPIKey]{}, &web.ApiError{
-			Code:    http.StatusInternalServerError,
-			Message: fmt.Sprintf("Failed to create API key: %v", err),
-		}
-	}
-
-	return web.ApiResponse[*models.CreatedTeamAPIKey]{
-		Code: http.StatusCreated,
-		Body: createdAPIKey,
-	}, nil
-}
-
-func (sc *Controller) DeleteAPIKey(r *http.Request) (web.ApiResponse[struct{}], *web.ApiError) {
-	apiKeyID := r.PathValue("apiKeyID")
-
-	ctx := r.Context()
-	user := GetUserFromContext(ctx)
-	if user == nil {
-		return web.ApiResponse[struct{}]{}, &web.ApiError{
-			Code:    http.StatusInternalServerError,
-			Message: "User not found",
-		}
-	}
-
-	key, ok := sc.keys.LoadByID(apiKeyID)
-	if !ok {
-		return web.ApiResponse[struct{}]{}, &web.ApiError{
-			Code:    http.StatusNotFound,
-			Message: "API key not found",
-		}
-	}
-	if key.CreatedBy == nil || key.CreatedBy.ID != user.ID && key.ID != user.ID {
-		return web.ApiResponse[struct{}]{}, &web.ApiError{
-			Code:    http.StatusUnauthorized,
-			Message: "You are not allowed to delete this API key",
-		}
-	}
-	if err := sc.keys.DeleteKey(ctx, key); err != nil {
-		return web.ApiResponse[struct{}]{}, &web.ApiError{
-			Code:    http.StatusInternalServerError,
-			Message: fmt.Sprintf("Failed to delete API key: %v", err),
-		}
-	}
-
-	return web.ApiResponse[struct{}]{
-		Code: http.StatusNoContent,
 	}, nil
 }

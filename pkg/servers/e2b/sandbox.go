@@ -11,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
@@ -22,6 +21,23 @@ import (
 var (
 	browserWebSocketReplacer = regexp.MustCompile(`^ws://[^/]+`)
 )
+
+func (sc *Controller) getSandboxOfUser(ctx context.Context, sandboxID string) (infra.Sandbox, *web.ApiError) {
+	user := GetUserFromContext(ctx)
+	if user == nil {
+		return nil, &web.ApiError{
+			Message: "User not found",
+		}
+	}
+	sbx, err := sc.manager.GetClaimedSandbox(ctx, user.ID.String(), sandboxID)
+	if err != nil {
+		return nil, &web.ApiError{
+			Code:    http.StatusNotFound,
+			Message: fmt.Sprintf("Sandbox %s not found", sandboxID),
+		}
+	}
+	return sbx, nil
+}
 
 func (sc *Controller) initEnvd(ctx context.Context, sbx infra.Sandbox, envVars models.EnvVars) error {
 	start := time.Now()
@@ -47,57 +63,6 @@ func (sc *Controller) initEnvd(ctx context.Context, sbx infra.Sandbox, envVars m
 	return nil
 }
 
-func (sc *Controller) pauseAndResumeSandbox(r *http.Request, pause bool) (web.ApiResponse[struct{}], *web.ApiError) {
-	id := r.PathValue("sandboxID")
-	ctx := r.Context()
-	log := klog.FromContext(ctx).WithValues("sandboxID", id)
-	user := GetUserFromContext(ctx)
-	if user == nil {
-		return web.ApiResponse[struct{}]{}, &web.ApiError{
-			Message: "User not found",
-		}
-	}
-	sbx, err := sc.manager.GetClaimedSandbox(ctx, user.ID.String(), id)
-	if err != nil {
-		return web.ApiResponse[struct{}]{}, &web.ApiError{
-			Code:    http.StatusNotFound,
-			Message: fmt.Sprintf("Sandbox %s not found", id),
-		}
-	}
-	if pause {
-		if state, reason := sbx.GetState(); state != v1alpha1.SandboxStateRunning {
-			log.Info("skip pause sandbox: sandbox is not running", "state", state, "reason", reason)
-			return web.ApiResponse[struct{}]{}, &web.ApiError{
-				Code:    http.StatusConflict,
-				Message: fmt.Sprintf("Sandbox %s is not running", id),
-			}
-		}
-		if err = sbx.Pause(ctx); err != nil {
-			return web.ApiResponse[struct{}]{}, &web.ApiError{
-				Message: fmt.Sprintf("Failed to pause sandbox: %v", err),
-			}
-		}
-		log.Info("sandbox paused")
-	} else {
-		if state, reason := sbx.GetState(); state != v1alpha1.SandboxStatePaused {
-			log.Info("skip resume sandbox: sandbox is not paused", "state", state, "reason", reason)
-			return web.ApiResponse[struct{}]{}, &web.ApiError{
-				Code:    http.StatusConflict,
-				Message: fmt.Sprintf("Sandbox %s is not paused", id),
-			}
-		}
-		if err = sbx.Resume(ctx); err != nil {
-			return web.ApiResponse[struct{}]{}, &web.ApiError{
-				Message: fmt.Sprintf("Failed to resume sandbox: %v", err),
-			}
-		}
-		log.Info("sandbox resumed")
-	}
-	return web.ApiResponse[struct{}]{
-		Code: http.StatusNoContent,
-	}, nil
-}
-
 func (sc *Controller) convertToE2BSandbox(ctx context.Context, sbx infra.Sandbox) *models.Sandbox {
 	log := klog.FromContext(ctx).V(consts.DebugLogLevel).WithValues("sandbox", klog.KObj(sbx))
 
@@ -108,19 +73,15 @@ func (sc *Controller) convertToE2BSandbox(ctx context.Context, sbx infra.Sandbox
 		EnvdVersion: "0.1.1",
 	}
 	sandbox.State, _ = sbx.GetState()
-	route, ok := sc.manager.GetRoute(sbx.GetSandboxID())
-	if ok {
-		if sc.keys == nil {
-			sandbox.EnvdAccessToken = "whatever"
-		} else {
-			if key, ok := sc.keys.LoadByID(route.Owner); ok {
-				sandbox.EnvdAccessToken = key.Key
-			} else {
-				log.Info("skip convert sandbox route to e2b key: key for user not found")
-			}
-		}
+	route := sbx.GetRoute()
+	if sc.keys == nil {
+		sandbox.EnvdAccessToken = "whatever"
 	} else {
-		log.Info("skip convert sandbox route to e2b key: route for sandbox not found")
+		if key, ok := sc.keys.LoadByID(route.Owner); ok {
+			sandbox.EnvdAccessToken = key.Key
+		} else {
+			log.Info("skip convert sandbox route to e2b key: key for user not found")
+		}
 	}
 
 	annotations := sbx.GetAnnotations()

@@ -16,6 +16,11 @@ func TestListSandboxes(t *testing.T) {
 	templateName := "test-template"
 	controller, client, teardown := Setup(t)
 	defer teardown()
+	user := &models.CreatedTeamAPIKey{
+		ID:   keys.AdminKeyID,
+		Key:  InitKey,
+		Name: "admin",
+	}
 	tests := []struct {
 		name           string
 		createRequests []models.NewSandboxRequest // use metadata key "state" to control sandbox state, default running
@@ -122,12 +127,6 @@ func TestListSandboxes(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			cleanup := CreateSandboxPool(t, client.SandboxClient, templateName, 10)
 			defer cleanup()
-
-			user := &models.CreatedTeamAPIKey{
-				ID:   keys.AdminKeyID,
-				Key:  InitKey,
-				Name: "admin",
-			}
 
 			var expectedListed []models.Sandbox
 			var createdRequests []*http.Request

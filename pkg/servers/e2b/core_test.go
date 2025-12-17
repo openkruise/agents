@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -141,6 +142,8 @@ func CreateSandboxPool(t *testing.T, client versioned.Interface, name string, av
 					agentsv1alpha1.LabelSandboxPool: name,
 				},
 				OwnerReferences: GetSbsOwnerReference(sbs),
+				ResourceVersion: "1",
+				UID:             types.UID(uuid.NewString()),
 			},
 			Status: agentsv1alpha1.SandboxStatus{
 				Phase: agentsv1alpha1.SandboxRunning,
@@ -172,4 +175,20 @@ func AssertTimeAlmostEqual(t *testing.T, expected, actual time.Time) {
 		offset = -offset
 	}
 	assert.True(t, offset < time.Second, fmt.Sprintf("actual time %s should be almost equal to expected %s", actual, expected))
+}
+
+// AvoidGetFromCache makes the resourceVersionExpectation unsatisfied to avoid getting sandbox from cache,
+// which is useful in unit tests for zero-latency update
+func AvoidGetFromCache(t *testing.T, sandboxID string, client clients.SandboxClient) {
+	sbx := GetSandbox(t, sandboxID, client)
+	sbx.ResourceVersion = "100"
+	utils.ResourceVersionExpectationExpect(sbx)
+}
+
+func GetSandbox(t *testing.T, sandboxID string, client clients.SandboxClient) *agentsv1alpha1.Sandbox {
+	split := strings.Split(sandboxID, "--")
+	namespace, name := split[0], split[1]
+	sbx, err := client.ApiV1alpha1().Sandboxes(namespace).Get(context.Background(), name, metav1.GetOptions{})
+	assert.NoError(t, err)
+	return sbx
 }
