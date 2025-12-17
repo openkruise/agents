@@ -45,10 +45,15 @@ func TestSandboxSetValidatingHandler_Handle(t *testing.T) {
 							},
 						},
 						Spec: corev1.PodSpec{
+							RestartPolicy:                 corev1.RestartPolicyAlways,
+							DNSPolicy:                     corev1.DNSClusterFirst,
+							TerminationGracePeriodSeconds: new(int64),
 							Containers: []corev1.Container{
 								{
-									Name:  "test",
-									Image: "nginx:latest",
+									Name:                     "test",
+									Image:                    "nginx:latest",
+									ImagePullPolicy:          corev1.PullAlways,
+									TerminationMessagePolicy: corev1.TerminationMessageReadFile,
 								},
 							},
 						},
