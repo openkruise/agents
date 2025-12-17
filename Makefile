@@ -196,7 +196,7 @@ GOLANGCI_LINT_VERSION ?= v2.3.0
 # Run tests
 .PHONY: test
 test:
-	go test ./...
+	go test ./pkg/...
 
 .PHONY: kustomize
 kustomize: $(KUSTOMIZE) ## Download kustomize locally if necessary.

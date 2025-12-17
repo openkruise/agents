@@ -40,7 +40,7 @@ import (
 var (
 	scheme  *runtime.Scheme
 	nt      = metav1.Now()
-	ot      = metav1.NewTime(time.Date(2025, 9, 28, 11, 0, 0, 0, time.Local))
+	oldTime = metav1.NewTime(time.Date(2025, 9, 28, 11, 0, 0, 0, time.Local))
 	boxDemo = &agentsv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-box-1",
@@ -83,7 +83,7 @@ var (
 				{
 					Type:               corev1.PodReady,
 					Status:             corev1.ConditionTrue,
-					LastTransitionTime: ot,
+					LastTransitionTime: oldTime,
 				},
 			},
 		},
@@ -149,7 +149,7 @@ func TestSandboxReconcile(t *testing.T) {
 					{
 						Type:               corev1.PodReady,
 						Status:             corev1.ConditionFalse,
-						LastTransitionTime: ot,
+						LastTransitionTime: oldTime,
 					},
 				}
 				return obj
@@ -183,7 +183,7 @@ func TestSandboxReconcile(t *testing.T) {
 					{
 						Type:               corev1.PodReady,
 						Status:             corev1.ConditionFalse,
-						LastTransitionTime: ot,
+						LastTransitionTime: oldTime,
 					},
 				}
 				return obj
@@ -219,7 +219,7 @@ func TestSandboxReconcile(t *testing.T) {
 					{
 						Type:               corev1.PodReady,
 						Status:             corev1.ConditionTrue,
-						LastTransitionTime: ot,
+						LastTransitionTime: oldTime,
 					},
 				}
 				return obj
@@ -233,7 +233,7 @@ func TestSandboxReconcile(t *testing.T) {
 						{
 							Type:               string(agentsv1alpha1.SandboxConditionReady),
 							Status:             metav1.ConditionTrue,
-							LastTransitionTime: ot,
+							LastTransitionTime: oldTime,
 						},
 					},
 					PodInfo: agentsv1alpha1.PodInfo{
@@ -252,7 +252,7 @@ func TestSandboxReconcile(t *testing.T) {
 					{
 						Type:               corev1.PodReady,
 						Status:             corev1.ConditionTrue,
-						LastTransitionTime: ot,
+						LastTransitionTime: oldTime,
 					},
 				}
 				return obj
@@ -270,7 +270,7 @@ func TestSandboxReconcile(t *testing.T) {
 						{
 							Type:               string(agentsv1alpha1.SandboxConditionReady),
 							Status:             metav1.ConditionTrue,
-							LastTransitionTime: ot,
+							LastTransitionTime: oldTime,
 						},
 					},
 					PodInfo: agentsv1alpha1.PodInfo{
@@ -289,7 +289,7 @@ func TestSandboxReconcile(t *testing.T) {
 					{
 						Type:               corev1.PodReady,
 						Status:             corev1.ConditionTrue,
-						LastTransitionTime: ot,
+						LastTransitionTime: oldTime,
 					},
 				}
 				return obj
@@ -330,7 +330,7 @@ func TestSandboxReconcile(t *testing.T) {
 					{
 						Type:               corev1.PodReady,
 						Status:             corev1.ConditionTrue,
-						LastTransitionTime: ot,
+						LastTransitionTime: oldTime,
 					},
 				}
 				return obj
@@ -592,7 +592,7 @@ func TestSandboxReconcile(t *testing.T) {
 						{
 							Type:               string(agentsv1alpha1.SandboxConditionReady),
 							Status:             metav1.ConditionTrue,
-							LastTransitionTime: ot,
+							LastTransitionTime: oldTime,
 						},
 					},
 					PodInfo: agentsv1alpha1.PodInfo{

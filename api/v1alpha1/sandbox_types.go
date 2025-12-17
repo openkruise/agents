@@ -141,7 +141,7 @@ const (
 	// SandboxFailed means that all containers in the pod have terminated, and at least one container has
 	// terminated in a failure (exited with a non-zero exit code or was stopped by the system).
 	SandboxFailed SandboxPhase = "Failed"
-	// SandboxTerminating means sandbox wil perform cleanup after deletion.
+	// SandboxTerminating means sandbox will perform cleanup after deletion.
 	SandboxTerminating SandboxPhase = "Terminating"
 )
 
