@@ -68,14 +68,14 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 	claimStart := time.Now()
 	sbx, err := sc.manager.ClaimSandbox(ctx, user.ID.String(), request.TemplateID, func(sbx infra.Sandbox) {
 		sbx.SetTimeout(time.Duration(request.Timeout) * time.Second)
-		labels := sbx.GetLabels()
-		if labels == nil {
-			labels = make(map[string]string)
+		annotations := sbx.GetAnnotations()
+		if annotations == nil {
+			annotations = make(map[string]string)
 		}
 		for k, v := range request.Metadata {
-			labels[k] = v
+			annotations[k] = v
 		}
-		sbx.SetLabels(labels)
+		sbx.SetAnnotations(annotations)
 	})
 	if err != nil {
 		return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{

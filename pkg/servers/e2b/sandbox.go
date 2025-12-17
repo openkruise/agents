@@ -123,15 +123,24 @@ func (sc *Controller) convertToE2BSandbox(ctx context.Context, sbx infra.Sandbox
 		log.Info("skip convert sandbox route to e2b key: route for sandbox not found")
 	}
 
+	annotations := sbx.GetAnnotations()
 	labels := sbx.GetLabels()
-	if len(labels) > 0 {
-		sandbox.Metadata = make(map[string]string, len(labels))
-	}
-	for key, val := range sbx.GetLabels() {
+
+	sandbox.Metadata = make(map[string]string, len(annotations)+len(labels))
+
+	// try to read labels as metadata for backward compatibility
+	for key, val := range labels {
 		if ValidateMetadataKey(key) {
 			sandbox.Metadata[key] = val
 		}
 	}
+
+	for key, val := range annotations {
+		if ValidateMetadataKey(key) {
+			sandbox.Metadata[key] = val
+		}
+	}
+
 	claimTime, err := sbx.GetClaimTime()
 	if err != nil {
 		sandbox.StartedAt = "<unknown>"

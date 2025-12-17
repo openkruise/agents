@@ -189,7 +189,7 @@ func getListFilter(request ListSandboxesRequest) func(sbx infra.Sandbox) bool {
 
 		if len(request.Metadata) > 0 {
 			for key, value := range request.Metadata {
-				if sbx.GetLabels()[key] != value {
+				if sbx.GetAnnotations()[key] != value {
 					return false
 				}
 			}
