@@ -15,10 +15,10 @@ import (
 	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 type SandboxCR interface {
@@ -192,31 +192,16 @@ func (s *Sandbox) Resume(ctx context.Context) error {
 	utils.ResourceVersionExpectationExpect(s.Sandbox)
 	log.Info("waiting sandbox resume")
 	start := time.Now()
-	err = retry.OnError(wait.Backoff{
-		Steps:    900, // 1.5 min
-		Duration: 100 * time.Millisecond,
-		Factor:   1.0,
-		Jitter:   0.1,
-	}, func(err error) bool {
-		return true
-	}, func() error {
-		err := s.InplaceRefresh(false)
-		if err != nil {
-			return err
+	err = s.Cache.WaitForSandboxSatisfied(ctx, client.ObjectKeyFromObject(s.Sandbox), func(sbx *agentsv1alpha1.Sandbox) (bool, error) {
+		if sbx.Status.Phase != agentsv1alpha1.SandboxRunning {
+			return false, nil
 		}
-		utils.ResourceVersionExpectationObserve(s)
-		if s.Status.Phase != agentsv1alpha1.SandboxRunning {
-			return fmt.Errorf("check phase failed, expect: %s, actual: %s", agentsv1alpha1.SandboxRunning, s.Status.Phase)
-		}
-		condition, ok := GetSandboxCondition(s.Sandbox, agentsv1alpha1.SandboxConditionReady)
+		condition, ok := GetSandboxCondition(sbx, agentsv1alpha1.SandboxConditionReady)
 		if !ok {
-			return fmt.Errorf("check condition failed, SandboxConditionReady not found")
+			return false, nil
 		}
-		if condition.Status != metav1.ConditionTrue {
-			return fmt.Errorf("check condition failed, expect: %s, actual: %s", metav1.ConditionTrue, condition.Status)
-		}
-		return nil
-	})
+		return condition.Status == metav1.ConditionTrue, nil
+	}, time.Minute)
 	if err != nil {
 		log.Error(err, "failed to wait sandbox resume")
 		return err

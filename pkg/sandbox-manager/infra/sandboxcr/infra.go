@@ -160,6 +160,7 @@ func (i *Infra) onSandboxUpdate(_, newObj any) {
 		return
 	}
 	i.refreshRoute(i.AsSandbox(newSbx))
+	utils.ResourceVersionExpectationObserve(newSbx)
 }
 
 func (i *Infra) refreshRoute(sbx infra.Sandbox) {

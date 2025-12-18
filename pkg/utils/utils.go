@@ -193,3 +193,10 @@ func DoItSlowlyWithInputs[T any](inputs []T, initialBatchSize int, fn func(T) er
 		return fn(input)
 	})
 }
+
+func WriteChannelSafely[T any](ch chan T, data T) {
+	select {
+	case ch <- data:
+	default:
+	}
+}
