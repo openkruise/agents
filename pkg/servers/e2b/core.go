@@ -112,5 +112,9 @@ func (sc *Controller) Run(sysNs, peerSelector string) (context.Context, error) {
 		}
 		klog.InfoS("Server exited")
 	}()
+
+	if sc.keys != nil {
+		sc.keys.Run()
+	}
 	return ctx, nil
 }

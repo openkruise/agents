@@ -28,11 +28,14 @@ func (a *CustomizedE2BAdapter) Map(_, _, path string, _ int, headers map[string]
 		err = fmt.Errorf("invalid path: %s", path)
 		return
 	}
+	sandboxID = split[0]
 	sandboxPort, err = strconv.Atoi(split[1])
 	if err != nil {
 		return
 	}
-	sandboxID = split[0]
+	extraHeaders = map[string]string{
+		":path": "/" + split[2],
+	}
 	if a.Keys == nil {
 		return
 	}
@@ -41,9 +44,6 @@ func (a *CustomizedE2BAdapter) Map(_, _, path string, _ int, headers map[string]
 		// no auth for CDP
 		user = UserNoNeedToAuth
 		return
-	}
-	extraHeaders = map[string]string{
-		":path": "/" + split[2],
 	}
 
 	token := headers["x-access-token"] // from sandbox.EnvdAccessToken

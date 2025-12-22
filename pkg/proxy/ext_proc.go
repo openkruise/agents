@@ -95,6 +95,10 @@ func (s *Server) handleRequestHeaders(requestHeaders *extProcPb.ProcessingReques
 		errorMsg := fmt.Sprintf("failed to map request to sandbox, URL=%s://%s%s", scheme, authority, path)
 		return s.logAndCreateErrorResponse(http.StatusInternalServerError, errorMsg, log)
 	}
+	if sandboxPort < 0 || sandboxPort > 65535 {
+		errorMsg := fmt.Sprintf("invalid sandbox port: %d", sandboxPort)
+		return s.logAndCreateErrorResponse(http.StatusBadRequest, errorMsg, log)
+	}
 	log.Info("request mapped", "sandboxID", sandboxID, "sandboxPort", sandboxPort, "extraHeaders", extraHeaders)
 
 	route, ok := s.LoadRoute(sandboxID)
@@ -112,6 +116,12 @@ func (s *Server) handleRequestHeaders(requestHeaders *extProcPb.ProcessingReques
 		extraHeaders[k] = v
 	}
 	extraHeaders[OrigDstHeader] = fmt.Sprintf("%s:%d", route.IP, sandboxPort)
+
+	if !s.adapter.Authorize(user, route.Owner) {
+		// Return 401 Unauthorized error
+		errorMsg := fmt.Sprintf("user %s is not authorized to access sandbox %s", user, sandboxID)
+		return s.logAndCreateErrorResponse(401, errorMsg, log)
+	}
 
 	return s.logAndCreateDstResponse(requestHeaders.RequestHeaders, extraHeaders, log)
 }

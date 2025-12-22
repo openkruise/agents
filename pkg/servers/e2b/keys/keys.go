@@ -71,22 +71,6 @@ func (k *SecretKeyStorage) Init(ctx context.Context) error {
 		}
 	}
 
-	go func() {
-		ticker := time.NewTicker(10 * time.Minute)
-		ctx := logs.NewContext()
-		log := klog.FromContext(ctx)
-		for {
-			select {
-			case <-ticker.C:
-				if err := k.refresh(ctx); err != nil {
-					log.Error(err, "failed to refresh key store")
-				}
-			case <-k.Stop:
-				log.Info("api-key refreshing stopped")
-				return
-			}
-		}
-	}()
 	return k.refresh(ctx)
 }
 
@@ -122,6 +106,26 @@ func (k *SecretKeyStorage) refresh(ctx context.Context) error {
 		return true
 	})
 	return nil
+}
+
+func (k *SecretKeyStorage) Run() {
+	go func() {
+		ticker := time.NewTicker(10 * time.Minute)
+		ctx := logs.NewContext()
+		log := klog.FromContext(ctx)
+		for {
+			select {
+			case <-ticker.C:
+				if err := k.refresh(ctx); err != nil {
+					log.Error(err, "failed to refresh key store")
+				}
+			case <-k.Stop:
+				ticker.Stop()
+				log.Info("api-key refreshing stopped")
+				return
+			}
+		}
+	}()
 }
 
 func (k *SecretKeyStorage) LoadByKey(key string) (*models.CreatedTeamAPIKey, bool) {
