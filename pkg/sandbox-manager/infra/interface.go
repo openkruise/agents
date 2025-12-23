@@ -10,13 +10,9 @@ import (
 	"github.com/openkruise/agents/pkg/proxy"
 )
 
-type SandboxSelectorOptions struct {
-	TemplateName  string
-	Owner         string
-	WantPaused    bool
-	WantRunning   bool
-	WantAvailable bool
-	Labels        map[string]string
+type ClaimSandboxOptions struct {
+	Modifier func(sandbox Sandbox)
+	Image    string
 }
 
 type SandboxResource struct {
@@ -41,7 +37,7 @@ type SandboxPool interface {
 	GetName() string
 	GetAnnotations() map[string]string
 	// ClaimSandbox claims a Sandbox from the SandboxPool. Note: the claimed Sandbox is immutable
-	ClaimSandbox(ctx context.Context, user string, maxCandidates int, modifier func(sbx Sandbox)) (Sandbox, error)
+	ClaimSandbox(ctx context.Context, user string, maxCandidates int, opts ClaimSandboxOptions) (Sandbox, error)
 }
 
 type Sandbox interface {
@@ -55,6 +51,7 @@ type Sandbox interface {
 	GetResource() SandboxResource // Get the CPU / Memory requirements of the Sandbox
 	SetTimeout(ttl time.Duration)
 	SaveTimeout(ctx context.Context, ttl time.Duration) error
+	SetImage(image string)
 	GetTimeout() time.Time
 	GetClaimTime() (time.Time, error)
 	Kill(ctx context.Context) error                                         // Delete the Sandbox resource

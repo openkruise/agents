@@ -120,6 +120,11 @@ func (s *Sandbox) SetTimeout(ttl time.Duration) {
 	s.Spec.ShutdownTime = ptr.To(metav1.NewTime(time.Now().Add(ttl)))
 }
 
+func (s *Sandbox) SetImage(image string) {
+	// TODO: 讨论存在 runtime sidecar 的情况下，如何定位到主容器
+	s.Spec.Template.Spec.Containers[0].Image = image
+}
+
 func (s *Sandbox) SaveTimeout(ctx context.Context, ttl time.Duration) error {
 	return s.retryUpdate(ctx, s.Update, func(sbx *agentsv1alpha1.Sandbox) {
 		sbx.Spec.ShutdownTime = ptr.To(metav1.NewTime(time.Now().Add(ttl)))
@@ -178,8 +183,8 @@ func (s *Sandbox) Resume(ctx context.Context) error {
 		log.Error(err, "sandbox is not paused", "state", state, "reason", reason)
 		return err
 	}
-	cond, ok := GetSandboxCondition(s.Sandbox, agentsv1alpha1.SandboxConditionPaused)
-	if ok && cond.Status != metav1.ConditionTrue {
+	cond := GetSandboxCondition(s.Sandbox, agentsv1alpha1.SandboxConditionPaused)
+	if cond.Status == metav1.ConditionFalse {
 		return fmt.Errorf("sandbox is pausing, please wait a moment and try again")
 	}
 	if s.Sandbox.Spec.Paused {

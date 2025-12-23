@@ -8,9 +8,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/distribution/reference"
 	"github.com/google/uuid"
 	"github.com/openkruise/agents/api/v1alpha1"
 	sandbox_manager "github.com/openkruise/agents/pkg/sandbox-manager"
+	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
@@ -39,7 +41,7 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 		}
 	}
 
-	for k := range request.Metadata {
+	for k, v := range request.Metadata {
 		if errLists := validation.IsQualifiedName(k); len(errLists) > 0 {
 			return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
 				Code:    http.StatusBadRequest,
@@ -47,6 +49,25 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 			}
 		}
 
+		// extension
+		switch k {
+		// all extension keys are legal, no need to validate
+		case consts.ExtensionKeyClaimWithImage:
+			// validate image
+			if _, err := reference.ParseNormalizedNamed(v); err != nil {
+				return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
+					Code:    http.StatusBadRequest,
+					Message: fmt.Sprintf("Invalid image [%s]: %v", v, err),
+				}
+			}
+			// Should we delete the key from Metadata?
+			request.Extensions.Image = v
+			continue
+		default:
+			// do nothing
+		}
+
+		// validation
 		if !ValidateMetadataKey(k) {
 			return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
 				Code:    http.StatusBadRequest,
@@ -68,17 +89,20 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 
 	accessToken := uuid.NewString()
 	claimStart := time.Now()
-	sbx, err := sc.manager.ClaimSandbox(ctx, user.ID.String(), request.TemplateID, func(sbx infra.Sandbox) {
-		sbx.SetTimeout(time.Duration(request.Timeout) * time.Second)
-		annotations := sbx.GetAnnotations()
-		if annotations == nil {
-			annotations = make(map[string]string)
-		}
-		for k, v := range request.Metadata {
-			annotations[k] = v
-		}
-		annotations[AnnotationEnvdAccessToken] = accessToken
-		sbx.SetAnnotations(annotations)
+	sbx, err := sc.manager.ClaimSandbox(ctx, user.ID.String(), request.TemplateID, infra.ClaimSandboxOptions{
+		Modifier: func(sbx infra.Sandbox) {
+			sbx.SetTimeout(time.Duration(request.Timeout) * time.Second)
+			annotations := sbx.GetAnnotations()
+			if annotations == nil {
+				annotations = make(map[string]string)
+			}
+			for k, v := range request.Metadata {
+				annotations[k] = v
+			}
+			annotations[AnnotationEnvdAccessToken] = accessToken
+			sbx.SetAnnotations(annotations)
+		},
+		Image: request.Extensions.Image,
 	})
 	if err != nil {
 		return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{

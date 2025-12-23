@@ -32,6 +32,12 @@ type NewSandboxRequest struct {
 	Secure     bool              `json:"secure,omitempty"`
 	Metadata   map[string]string `json:"metadata,omitempty"`
 	EnvVars    EnvVars           `json:"envVars,omitempty"`
+
+	Extensions NewSandboxRequestExtension `json:"-"`
+}
+
+type NewSandboxRequestExtension struct {
+	Image string
 }
 
 // SandboxMetadata represents metadata for a sandbox

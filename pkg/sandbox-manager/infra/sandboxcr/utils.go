@@ -29,11 +29,11 @@ func ListSandboxConditions(sbx *v1alpha1.Sandbox) []metav1.Condition {
 	return sbx.Status.Conditions
 }
 
-func GetSandboxCondition(sbx *v1alpha1.Sandbox, tp v1alpha1.SandboxConditionType) (metav1.Condition, bool) {
+func GetSandboxCondition(sbx *v1alpha1.Sandbox, tp v1alpha1.SandboxConditionType) metav1.Condition {
 	for _, condition := range sbx.Status.Conditions {
 		if condition.Type == string(tp) {
-			return condition, true
+			return condition
 		}
 	}
-	return metav1.Condition{}, false
+	return metav1.Condition{}
 }
