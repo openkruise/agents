@@ -221,3 +221,86 @@ func TestSandbox_SetPause(t *testing.T) {
 		})
 	}
 }
+
+// TestSandbox_ResumeConcurrent tests concurrent resume operations on the same sandbox
+func TestSandbox_ResumeConcurrent(t *testing.T) {
+	utils.InitLogOutput()
+	sandbox := &v1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "test-sandbox",
+			Namespace:   "default",
+			Labels:      map[string]string{},
+			Annotations: map[string]string{},
+		},
+		Status: v1alpha1.SandboxStatus{
+			Phase: v1alpha1.SandboxPaused,
+			PodInfo: v1alpha1.PodInfo{
+				PodIP: "10.0.0.1",
+			},
+		},
+		Spec: v1alpha1.SandboxSpec{
+			Paused: true,
+		},
+	}
+
+	// Initialize the sandbox as paused (similar to "resume paused / paused sandbox" test case)
+	sandbox.Status.Phase = v1alpha1.SandboxPaused
+	sandbox.Status.Conditions = append(sandbox.Status.Conditions, metav1.Condition{
+		Type:   string(v1alpha1.SandboxConditionPaused),
+		Status: metav1.ConditionTrue,
+	})
+	state, reason := sandboxutils.GetSandboxState(sandbox)
+	assert.Equal(t, v1alpha1.SandboxStatePaused, state, reason)
+
+	cache, client := NewTestCache()
+	CreateSandboxWithStatus(t, client, sandbox)
+	time.Sleep(10 * time.Millisecond)
+
+	s := AsSandbox(sandbox, client, cache)
+
+	// Channel to collect results from goroutines
+	resultCh := make(chan error, 3)
+
+	start := time.Now()
+	// Start three goroutines calling Resume
+	for i := 0; i < 3; i++ {
+		go func() {
+			err := s.Resume(context.Background())
+			resultCh <- err
+		}()
+	}
+
+	// After 0.5 seconds, update the sandbox phase to Running and Ready condition to True
+	time.AfterFunc(500*time.Millisecond, func() {
+		patch := ctrl.MergeFrom(s.Sandbox.DeepCopy())
+		s.Status.Phase = v1alpha1.SandboxRunning
+		SetSandboxCondition(s.Sandbox, string(v1alpha1.SandboxConditionReady), metav1.ConditionTrue, "Resume", "")
+		data, err := patch.Data(s.Sandbox)
+		assert.NoError(t, err)
+		_, err = client.ApiV1alpha1().Sandboxes("default").Patch(
+			context.Background(), s.Name, types.MergePatchType, data, metav1.PatchOptions{})
+		assert.NoError(t, err)
+	})
+
+	// Wait for all goroutines to complete
+	results := make([]error, 3)
+	for i := 0; i < 3; i++ {
+		results[i] = <-resultCh
+	}
+
+	// Check that all goroutines returned nil (no error)
+	for i, result := range results {
+		if result != nil {
+			t.Errorf("Goroutine %d returned error: %v", i, result)
+		}
+	}
+
+	assert.True(t, time.Since(start) >= 500*time.Millisecond)
+
+	// Verify that the sandbox is in Running state
+	updatedSbx, err := client.ApiV1alpha1().Sandboxes("default").Get(context.Background(), "test-sandbox", metav1.GetOptions{})
+	assert.NoError(t, err)
+	state, reason = sandboxutils.GetSandboxState(updatedSbx)
+	assert.Equal(t, v1alpha1.SandboxStateRunning, state, reason)
+	assert.False(t, updatedSbx.Spec.Paused)
+}

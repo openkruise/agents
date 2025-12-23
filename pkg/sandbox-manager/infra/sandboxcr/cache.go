@@ -129,6 +129,11 @@ func (c *Cache) WaitForSandboxSatisfied(ctx context.Context, sbx *agentsv1alpha1
 	satisfiedFunc checkFunc, timeout time.Duration) error {
 	key := client.ObjectKeyFromObject(sbx)
 	log := klog.FromContext(ctx).V(consts.DebugLogLevel).WithValues("key", key)
+	satisfied, err := satisfiedFunc(sbx)
+	if satisfied || err != nil {
+		log.Info("no need to wait for satisfied", "satisfied", satisfied, "error", err)
+		return err
+	}
 	value, exists := c.waitHooks.LoadOrStore(key, &waitEntry{
 		ctx:     ctx,
 		done:    make(chan struct{}),
@@ -165,7 +170,7 @@ func (c *Cache) WaitForSandboxSatisfied(ctx context.Context, sbx *agentsv1alpha1
 }
 
 func (c *Cache) doubleCheckSandboxSatisfied(ctx context.Context, sbx *agentsv1alpha1.Sandbox, satisfiedFunc checkFunc) error {
-	log := klog.FromContext(ctx).WithValues("sandbox", sbx)
+	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
 	updated, err := c.GetSandbox(sandboxutils.GetSandboxID(sbx))
 	if err != nil {
 		log.Error(err, "failed to get sandbox while double checking")

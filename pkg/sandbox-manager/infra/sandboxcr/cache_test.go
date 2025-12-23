@@ -8,6 +8,7 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/client/clientset/versioned/fake"
 	informers "github.com/openkruise/agents/client/informers/externalversions"
+	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	"github.com/stretchr/testify/assert"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -30,6 +31,7 @@ func NewTestCache() (cache *Cache, client *fake.Clientset) {
 }
 
 func TestCache_WaitForSandboxSatisfied(t *testing.T) {
+	utils.InitLogOutput()
 	tests := []struct {
 		name        string
 		setupFunc   func(*testing.T, *Cache, *fake.Clientset) *agentsv1alpha1.Sandbox
@@ -53,7 +55,7 @@ func TestCache_WaitForSandboxSatisfied(t *testing.T) {
 				return sandbox
 			},
 			checkFunc: func(sbx *agentsv1alpha1.Sandbox) (bool, error) {
-				return sbx.Status.Phase == agentsv1alpha1.SandboxRunning, nil
+				return false, nil
 			},
 			timeout:     100 * time.Millisecond,
 			expectError: "double check failed",
@@ -74,7 +76,10 @@ func TestCache_WaitForSandboxSatisfied(t *testing.T) {
 				return sandbox
 			},
 			checkFunc: func(sbx *agentsv1alpha1.Sandbox) (bool, error) {
-				return false, assert.AnError
+				if sbx.ResourceVersion == "101" {
+					return false, assert.AnError
+				}
+				return false, nil
 			},
 			timeout:     1 * time.Second,
 			expectError: assert.AnError.Error(),
@@ -100,13 +105,34 @@ func TestCache_WaitForSandboxSatisfied(t *testing.T) {
 				return sandbox
 			},
 			checkFunc: func(sbx *agentsv1alpha1.Sandbox) (bool, error) {
-				return true, nil
+				return false, nil
 			},
 			timeout:     1 * time.Second,
 			expectError: "already exists",
 		},
 		{
-			name: "sandbox satisfied",
+			name: "sandbox satisfied after waiting",
+			setupFunc: func(t *testing.T, cache *Cache, client *fake.Clientset) *agentsv1alpha1.Sandbox {
+				sandbox := &agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-sandbox-2",
+						Namespace: "default",
+					},
+					Status: agentsv1alpha1.SandboxStatus{
+						Phase: agentsv1alpha1.SandboxPending,
+					},
+				}
+				CreateSandboxWithStatus(t, client, sandbox)
+				return sandbox
+			},
+			checkFunc: func(sbx *agentsv1alpha1.Sandbox) (bool, error) {
+				return sbx.ResourceVersion == "101", nil // this update will always be made
+			},
+			timeout:     1 * time.Second,
+			expectError: "",
+		},
+		{
+			name: "sandbox already satisfied",
 			setupFunc: func(t *testing.T, cache *Cache, client *fake.Clientset) *agentsv1alpha1.Sandbox {
 				sandbox := &agentsv1alpha1.Sandbox{
 					ObjectMeta: metav1.ObjectMeta{
@@ -125,6 +151,27 @@ func TestCache_WaitForSandboxSatisfied(t *testing.T) {
 			},
 			timeout:     1 * time.Second,
 			expectError: "",
+		},
+		{
+			name: "return error without waiting",
+			setupFunc: func(t *testing.T, cache *Cache, client *fake.Clientset) *agentsv1alpha1.Sandbox {
+				sandbox := &agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-sandbox-2",
+						Namespace: "default",
+					},
+					Status: agentsv1alpha1.SandboxStatus{
+						Phase: agentsv1alpha1.SandboxPending,
+					},
+				}
+				CreateSandboxWithStatus(t, client, sandbox)
+				return sandbox
+			},
+			checkFunc: func(sbx *agentsv1alpha1.Sandbox) (bool, error) {
+				return false, assert.AnError
+			},
+			timeout:     1 * time.Second,
+			expectError: assert.AnError.Error(),
 		},
 	}
 

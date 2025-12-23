@@ -83,9 +83,9 @@ func (s *BaseSandbox[T]) retryUpdate(ctx context.Context, updateFunc UpdateFunc[
 		return nil
 	})
 	if err != nil {
-		log.Error(err, "failed to update sandbox status after retries")
+		log.Error(err, "failed to update sandbox after retries")
 	} else {
-		log.Info("successfully updated sandbox status")
+		log.Info("sandbox updated successfully")
 	}
 	return err
 }
@@ -179,20 +179,21 @@ func (s *Sandbox) Resume(ctx context.Context) error {
 		return err
 	}
 	cond, ok := GetSandboxCondition(s.Sandbox, agentsv1alpha1.SandboxConditionPaused)
-	if !ok || cond.Status != metav1.ConditionTrue {
+	if ok && cond.Status != metav1.ConditionTrue {
 		return fmt.Errorf("sandbox is pausing, please wait a moment and try again")
 	}
-	err := s.retryUpdate(ctx, s.Update, func(sbx *agentsv1alpha1.Sandbox) {
-		sbx.Spec.Paused = false
-	})
-	if err != nil {
-		log.Error(err, "failed to update sandbox spec.paused")
-		return err
+	if s.Sandbox.Spec.Paused {
+		if err := s.retryUpdate(ctx, s.Update, func(sbx *agentsv1alpha1.Sandbox) {
+			sbx.Spec.Paused = false
+		}); err != nil {
+			log.Error(err, "failed to update sandbox spec.paused")
+			return err
+		}
 	}
 	utils.ResourceVersionExpectationExpect(s.Sandbox) // expect Resuming
 	log.Info("waiting sandbox resume")
 	start := time.Now()
-	err = s.Cache.WaitForSandboxSatisfied(ctx, s.Sandbox, WaitActionResume, func(sbx *agentsv1alpha1.Sandbox) (bool, error) {
+	err := s.Cache.WaitForSandboxSatisfied(ctx, s.Sandbox, WaitActionResume, func(sbx *agentsv1alpha1.Sandbox) (bool, error) {
 		state, reason := stateutils.GetSandboxState(sbx)
 		log.V(consts.DebugLogLevel).Info("sandbox state updated", "state", state, "reason", reason)
 		return state == agentsv1alpha1.SandboxStateRunning, nil
