@@ -2,6 +2,7 @@ package sandboxcr
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand"
 	"time"
@@ -12,8 +13,11 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
+	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 )
 
@@ -27,91 +31,136 @@ type Pool struct {
 	cache  *Cache
 }
 
-// AsSandbox converts the given sbx object to a Sandbox interface
-// NOTE: If the sbx object is about to be updated, you may have to DeepCopy it like `s := p.AsSandbox(sbx.DeepCopy())`
-func (p *Pool) AsSandbox(sbx *v1alpha1.Sandbox) *Sandbox {
-	if sbx.Annotations == nil {
-		sbx.Annotations = make(map[string]string)
-	}
-	if sbx.Labels == nil {
-		sbx.Labels = make(map[string]string)
-	}
-	return &Sandbox{
-		BaseSandbox: BaseSandbox[*v1alpha1.Sandbox]{
-			Sandbox:       sbx,
-			Cache:         p.cache,
-			PatchSandbox:  p.client.ApiV1alpha1().Sandboxes(p.Namespace).Patch,
-			UpdateStatus:  p.client.ApiV1alpha1().Sandboxes(p.Namespace).UpdateStatus,
-			Update:        p.client.ApiV1alpha1().Sandboxes(p.Namespace).Update,
-			DeleteFunc:    p.client.ApiV1alpha1().Sandboxes(p.Namespace).Delete,
-			SetCondition:  SetSandboxCondition,
-			GetConditions: ListSandboxConditions,
-			DeepCopy:      DeepCopy,
-		},
-		Sandbox: sbx,
-	}
+type retriableError struct {
+	Message string
 }
 
-var claimTimeout = 5 * time.Second
+func (e retriableError) Error() string {
+	return e.Message
+}
 
-func (p *Pool) ClaimSandbox(ctx context.Context, user string, candidateCounts int, modifier func(sbx infra.Sandbox)) (infra.Sandbox, error) {
+func (e retriableError) Is(target error) bool {
+	as := retriableError{}
+	if !errors.As(target, &as) {
+		return false
+	}
+	return as.Message == e.Message
+}
+
+func NoAvailableError(template, reason string) error {
+	return retriableError{Message: fmt.Sprintf("no available sandboxes for template %s (%s)", template, reason)}
+}
+
+// ClaimSandbox configurations
+const (
+	LockMaxRetries       = 8
+	LockBackoffFactor    = 2.0
+	LockJitter           = 0.1
+	InplaceUpdateTimeout = time.Minute
+)
+
+// ClaimSandbox claims a Sandbox CR as Sandbox from SandboxSet
+func (p *Pool) ClaimSandbox(ctx context.Context, user string, candidateCounts int, opts infra.ClaimSandboxOptions) (infra.Sandbox, error) {
 	lock := uuid.New().String()
 	log := klog.FromContext(ctx).WithValues("pool", p.Namespace+"/"+p.Name)
-	start := time.Now()
-	r := rand.New(rand.NewSource(start.UnixNano()))
-	for i := 0; ; i++ {
-		objects, err := p.cache.ListAvailableSandboxes(p.Name)
+	r := rand.New(rand.NewSource(time.Now().UnixNano()))
+
+	retries := -1
+	var claimedSandbox infra.Sandbox
+	return claimedSandbox, retry.OnError(wait.Backoff{
+		Steps:    LockMaxRetries,
+		Duration: 0,
+		Factor:   LockBackoffFactor,
+		Jitter:   LockJitter,
+	}, func(err error) bool {
+		// Conflict: optimistic locking failed; retriableError: retriable error
+		return apierrors.IsConflict(err) || errors.As(err, &retriableError{})
+	}, func() error {
+		retries++
+		log.Info("try to claim sandbox", "retries", retries)
+
+		sbx, err := p.pickAnAvailableSandbox(ctx, candidateCounts, r)
 		if err != nil {
-			return nil, err
+			log.Error(err, "failed to select available sandbox")
+			return err
 		}
-		if len(objects) == 0 {
-			return nil, fmt.Errorf("no available sandboxes for template %s (no stock)", p.Name)
+
+		claimLog := log.WithValues("sandbox", klog.KObj(sbx.Sandbox))
+		claimLog.Info("sandbox picked")
+
+		if err = p.modifyPickedSandbox(sbx, opts); err != nil {
+			claimLog.Error(err, "failed to modify picked sandbox")
+			return retriableError{Message: fmt.Sprintf("failed to modify picked sandbox: %s", err)}
 		}
-		var obj *v1alpha1.Sandbox
-		candidates := make([]*v1alpha1.Sandbox, 0, candidateCounts)
-		for _, obj = range objects {
-			if !utils.ResourceVersionExpectationSatisfied(obj) {
-				log.V(consts.DebugLogLevel).Info("skip out-dated sandbox cache", "sandbox", klog.KObj(obj))
-				continue
+
+		if err = p.lockSandbox(ctx, sbx, lock, user); err != nil {
+			claimLog.Error(err, "failed to lock sandbox")
+			return err
+		}
+		utils.ResourceVersionExpectationExpect(sbx)
+		claimLog.Info("sandbox locked")
+
+		if opts.Image != "" {
+			updateStart := time.Now()
+			claimLog.Info("waiting for inplace update", "oldImage", sbx.GetImage(), "newImage", opts.Image)
+			if err = p.waitForInplaceUpdate(ctx, sbx, InplaceUpdateTimeout); err != nil {
+				claimLog.Error(err, "failed to wait for inplace update")
+				return err
 			}
-			if obj.Status.Phase == v1alpha1.SandboxRunning && obj.Annotations[v1alpha1.AnnotationLock] == "" {
-				candidates = append(candidates, obj)
-				if len(candidates) >= candidateCounts {
-					break
-				}
-			}
+			claimLog.Info("inplace update completed", "cost", time.Since(updateStart))
 		}
-
-		if len(candidates) == 0 {
-			return nil, fmt.Errorf("no available sandboxes for template %s (no candidate)", p.Name)
-		}
-
-		obj = candidates[r.Intn(len(candidates))]
-
-		// Go to Sandbox interface
-		sbx := p.AsSandbox(obj.DeepCopy())
-		if modifier != nil {
-			modifier(sbx)
-		}
-		sbx.Annotations[v1alpha1.AnnotationClaimTime] = time.Now().Format(time.RFC3339)
-		if err = p.LockSandbox(ctx, sbx, lock, user); err == nil {
-			utils.ResourceVersionExpectationExpect(sbx)
-			log.Info("acquired optimistic lock of sandbox", "cost", time.Since(start), "retries", i)
-			return sbx, nil
-		}
-		if !apierrors.IsConflict(err) {
-			log.Error(err, "failed to update sandbox")
-			return nil, err
-		}
-		log.Error(err, "failed to acquire optimistic lock of sandbox", "retries", i+1)
-		if time.Since(start) > claimTimeout {
-			break
-		}
-	}
-	return nil, fmt.Errorf("no available sandboxes for template %s (failed to acquire optimistic lock of pod after max retries)", p.Name)
+		claimedSandbox = sbx
+		return nil
+	})
 }
 
-func (p *Pool) LockSandbox(ctx context.Context, sbx *Sandbox, lock string, owner string) error {
+func (p *Pool) pickAnAvailableSandbox(ctx context.Context, cnt int, r *rand.Rand) (*Sandbox, error) {
+	log := klog.FromContext(ctx).WithValues("pool", p.Namespace+"/"+p.Name).V(consts.DebugLogLevel)
+	objects, err := p.cache.ListAvailableSandboxes(p.Name)
+	if err != nil {
+		return nil, err
+	}
+	if len(objects) == 0 {
+		return nil, NoAvailableError(p.Name, "no stock")
+	}
+	var obj *v1alpha1.Sandbox
+	candidates := make([]*v1alpha1.Sandbox, 0, cnt)
+	for _, obj = range objects {
+		if !utils.ResourceVersionExpectationSatisfied(obj) {
+			log.Info("skip out-dated sandbox cache", "sandbox", klog.KObj(obj))
+			continue
+		}
+		if obj.Status.Phase == v1alpha1.SandboxRunning && obj.Annotations[v1alpha1.AnnotationLock] == "" {
+			candidates = append(candidates, obj)
+			if len(candidates) >= cnt {
+				break
+			}
+		}
+	}
+	if len(candidates) == 0 {
+		return nil, NoAvailableError(p.Name, "no candidate")
+	}
+	obj = candidates[r.Intn(len(candidates))]
+	return AsSandbox(obj, p.cache, p.client), nil
+}
+
+func (p *Pool) modifyPickedSandbox(sbx *Sandbox, opts infra.ClaimSandboxOptions) error {
+	if err := sbx.InplaceRefresh(true); err != nil {
+		return err
+	}
+	if opts.Modifier != nil {
+		opts.Modifier(sbx)
+	}
+	if opts.Image != "" {
+		// should perform an inplace update
+		sbx.SetImage(opts.Image)
+	}
+	sbx.SetOwnerReferences([]metav1.OwnerReference{}) // make SandboxSet scale up
+	sbx.Annotations[v1alpha1.AnnotationClaimTime] = time.Now().Format(time.RFC3339)
+	return nil
+}
+
+func (p *Pool) lockSandbox(ctx context.Context, sbx *Sandbox, lock string, owner string) error {
 	utils.LockSandbox(sbx.Sandbox, lock, owner)
 	updated, err := p.client.ApiV1alpha1().Sandboxes(sbx.Namespace).Update(ctx, sbx.Sandbox, metav1.UpdateOptions{})
 	if err == nil {
@@ -119,6 +168,39 @@ func (p *Pool) LockSandbox(ctx context.Context, sbx *Sandbox, lock string, owner
 		return nil
 	}
 	return err
+}
+
+func (p *Pool) waitForInplaceUpdate(ctx context.Context, sbx *Sandbox, timeout time.Duration) error {
+	return p.cache.WaitForSandboxSatisfied(ctx, sbx.Sandbox, WaitActionInplaceUpdate, func(sbx *v1alpha1.Sandbox) (bool, error) {
+		return p.checkSandboxInplaceUpdate(ctx, sbx)
+	}, timeout)
+}
+
+func (p *Pool) checkSandboxInplaceUpdate(ctx context.Context, sbx *v1alpha1.Sandbox) (bool, error) {
+	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx)).V(consts.DebugLogLevel)
+	if sbx.Status.ObservedGeneration != sbx.Generation {
+		log.Info("watched sandbox not updated", "generation", sbx.Generation, "observedGeneration", sbx.Status.ObservedGeneration)
+		return false, nil
+	}
+	cond := GetSandboxCondition(sbx, v1alpha1.SandboxConditionReady)
+	if cond.Reason == v1alpha1.SandboxReadyReasonStartContainerFailed {
+		err := retriableError{Message: fmt.Sprintf("sandbox inplace update failed: %s", cond.Message)}
+		log.Error(err, "sandbox inplace update failed")
+		if p.Annotations[v1alpha1.AnnotationReserveFailedSandbox] != v1alpha1.True {
+			go func() {
+				err := p.client.ApiV1alpha1().Sandboxes(sbx.Namespace).Delete(context.Background(), sbx.Name, metav1.DeleteOptions{})
+				if err != nil {
+					log.Error(err, "failed to delete failed sandbox")
+				} else {
+					log.Info("sandbox deleted")
+				}
+			}()
+		}
+		return false, err // stop early
+	}
+	state, reason := stateutils.GetSandboxState(sbx)
+	log.Info("sandbox update watched", "state", state, "reason", reason)
+	return state == v1alpha1.SandboxStateRunning, nil
 }
 
 func (p *Pool) GetAnnotations() map[string]string {

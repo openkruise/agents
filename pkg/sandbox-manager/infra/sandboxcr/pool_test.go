@@ -1,8 +1,9 @@
 package sandboxcr
 
 import (
-	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,9 +12,11 @@ import (
 	"github.com/openkruise/agents/client/clientset/versioned/fake"
 	informers "github.com/openkruise/agents/client/informers/externalversions"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	"github.com/openkruise/agents/pkg/utils/sandboxutils"
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -28,11 +31,32 @@ func GetSbsOwnerReference() []metav1.OwnerReference {
 }
 
 func CreateSandboxWithStatus(t *testing.T, client versioned.Interface, sbx *v1alpha1.Sandbox) {
-	ctx := context.Background()
-	_, err := client.ApiV1alpha1().Sandboxes(sbx.Namespace).Create(context.Background(), sbx, metav1.CreateOptions{})
+	_, err := client.ApiV1alpha1().Sandboxes(sbx.Namespace).Create(t.Context(), sbx, metav1.CreateOptions{})
 	assert.NoError(t, err)
-	_, err = client.ApiV1alpha1().Sandboxes(sbx.Namespace).UpdateStatus(ctx, sbx, metav1.UpdateOptions{})
+	_, err = client.ApiV1alpha1().Sandboxes(sbx.Namespace).UpdateStatus(t.Context(), sbx, metav1.UpdateOptions{})
 	assert.NoError(t, err)
+}
+
+//goland:noinspection GoDeprecation
+func NewTestPool(t *testing.T) (*Pool, versioned.Interface) {
+	client := fake.NewSimpleClientset()
+
+	informerFactory := informers.NewSharedInformerFactory(client, time.Minute*10)
+	sandboxInformer := informerFactory.Api().V1alpha1().Sandboxes().Informer()
+	c, err := NewCache(informerFactory, sandboxInformer, sandboxInformer)
+	if err != nil {
+		t.Fatalf("Failed to create cache: %v", err)
+	}
+
+	err = c.Run(t.Context())
+	assert.NoError(t, err)
+
+	return &Pool{
+		Name:      "test-pool",
+		Namespace: "default",
+		client:    client,
+		cache:     c,
+	}, client
 }
 
 //goland:noinspection GoDeprecation
@@ -41,68 +65,62 @@ func TestPool_ClaimSandbox(t *testing.T) {
 	tests := []struct {
 		name        string
 		available   int32
-		modifier    func(sbx infra.Sandbox)
-		expectError bool
-		preModifier func(pod *corev1.Pod)
+		options     infra.ClaimSandboxOptions
+		preModifier func(pod *v1alpha1.Sandbox)
+		postCheck   func(t *testing.T, sbx infra.Sandbox)
+		expectError string
 	}{
 		{
-			name:        "claim with available pods",
-			available:   2,
-			modifier:    nil,
-			expectError: false,
+			name:      "claim with available pods",
+			available: 2,
 		},
 		{
 			name:        "claim with no available pods",
 			available:   0,
-			modifier:    nil,
-			expectError: true,
+			expectError: "no stock",
 		},
 		{
 			name:      "claim with modifier",
 			available: 2,
-			modifier: func(sbx infra.Sandbox) {
-				sbx.SetAnnotations(map[string]string{
-					"test-annotation": "test-value",
-				})
+			options: infra.ClaimSandboxOptions{
+				Modifier: func(sbx infra.Sandbox) {
+					sbx.SetAnnotations(map[string]string{
+						"test-annotation": "test-value",
+					})
+				},
 			},
-			expectError: false,
+			postCheck: func(t *testing.T, sbx infra.Sandbox) {
+				assert.Equal(t, "test-value", sbx.GetAnnotations()["test-annotation"])
+			},
 		},
 		{
-			name:      "no stock",
+			name:      "all locked",
 			available: 10,
-			preModifier: func(pod *corev1.Pod) {
-				pod.Annotations[v1alpha1.AnnotationLock] = "XX"
+			preModifier: func(sbx *v1alpha1.Sandbox) {
+				sbx.Annotations[v1alpha1.AnnotationLock] = "XX"
 			},
-			expectError: true,
+			expectError: "no candidate",
+		},
+		{
+			name:      "claim with image",
+			available: 1,
+			options: infra.ClaimSandboxOptions{
+				Image: "new-image",
+			},
+			postCheck: func(t *testing.T, sbx infra.Sandbox) {
+				assert.Equal(t, "new-image", sbx.(*Sandbox).Spec.Template.Spec.Containers[0].Image)
+			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			client := fake.NewSimpleClientset()
-
-			informerFactory := informers.NewSharedInformerFactory(client, time.Minute*10)
-			sandboxInformer := informerFactory.Api().V1alpha1().Sandboxes().Informer()
-			c, err := NewCache(informerFactory, sandboxInformer, sandboxInformer)
-			if err != nil {
-				t.Fatalf("Failed to create cache: %v", err)
-			}
-
-			err = c.Run(context.Background())
-			assert.NoError(t, err)
-			defer c.Stop()
-
-			pool := &Pool{
-				Name:      "test-pool",
-				Namespace: "default",
-				client:    client,
-				cache:     c,
-			}
+			pool, client := NewTestPool(t)
 
 			for i := 0; i < int(tt.available); i++ {
-				pod := &corev1.Pod{
+				sbx := &v1alpha1.Sandbox{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      fmt.Sprintf("pod-%d", i),
+						Name:      fmt.Sprintf("sbx-%d", i),
 						Namespace: "default",
 						Labels: map[string]string{
 							v1alpha1.LabelSandboxPool: pool.Name,
@@ -110,42 +128,176 @@ func TestPool_ClaimSandbox(t *testing.T) {
 						Annotations:     map[string]string{},
 						OwnerReferences: GetSbsOwnerReference(),
 					},
-					Status: corev1.PodStatus{
-						Phase: corev1.PodRunning,
-						Conditions: []corev1.PodCondition{
-							{
-								Type:   corev1.PodReady,
-								Status: corev1.ConditionTrue,
+					Spec: v1alpha1.SandboxSpec{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name:  "main",
+										Image: "old-image",
+									},
+								},
 							},
 						},
-						PodIP: "1.2.3.4",
+					},
+					Status: v1alpha1.SandboxStatus{
+						Phase: v1alpha1.SandboxRunning,
+						Conditions: []metav1.Condition{
+							{
+								Type:   string(v1alpha1.SandboxConditionReady),
+								Status: metav1.ConditionTrue,
+							},
+						},
+						PodInfo: v1alpha1.PodInfo{
+							PodIP: "1.2.3.4",
+						},
 					},
 				}
 				if tt.preModifier != nil {
-					tt.preModifier(pod)
+					tt.preModifier(sbx)
 				}
-				sbx := ConvertPodToSandboxCR(pod)
 				state, reason := sandboxutils.GetSandboxState(sbx)
 				assert.Equal(t, v1alpha1.SandboxStateAvailable, state, "reason", reason)
 				CreateSandboxWithStatus(t, client, sbx)
 			}
-			c.Refresh()
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(10 * time.Millisecond)
 
 			user := "test-user"
-			sbx, err := pool.ClaimSandbox(context.Background(), user, 1, tt.modifier)
+			sbx, err := pool.ClaimSandbox(t.Context(), user, 1, tt.options)
 
-			if tt.expectError {
+			if tt.expectError != "" {
 				assert.Error(t, err)
-				return
+				assert.True(t, strings.Contains(err.Error(), tt.expectError))
 			} else {
 				assert.NoError(t, err)
 				assert.NotNil(t, sbx)
 				assert.NotEmpty(t, sbx.GetAnnotations()[v1alpha1.AnnotationLock])
 				assert.Equal(t, user, sbx.GetAnnotations()[v1alpha1.AnnotationOwner])
-				if tt.modifier != nil {
-					assert.Equal(t, "test-value", sbx.GetAnnotations()["test-annotation"])
+				if tt.postCheck != nil {
+					tt.postCheck(t, sbx)
 				}
+			}
+		})
+	}
+}
+
+func TestPool_checkSandboxInplaceUpdate(t *testing.T) {
+	utils.InitLogOutput()
+	tests := []struct {
+		name                   string
+		reserveFailedSandboxes string
+		generation             int64
+		observedGeneration     int64
+		condStatus             metav1.ConditionStatus
+		condReason             string
+		condMessage            string
+		expectResult           bool
+		expectError            error
+		expectDeleted          bool
+	}{
+		{
+			name:               "success",
+			generation:         1,
+			observedGeneration: 1,
+			condStatus:         metav1.ConditionTrue,
+			condReason:         v1alpha1.SandboxReadyReasonPodReady,
+			expectResult:       true,
+		},
+		{
+			name:               "not satisfied: out-dated cache",
+			generation:         2,
+			observedGeneration: 1,
+			condStatus:         metav1.ConditionTrue,
+			condReason:         v1alpha1.SandboxReadyReasonPodReady,
+			expectResult:       false,
+		},
+		{
+			name:               "not satisfied: inplace updating",
+			generation:         1,
+			observedGeneration: 1,
+			condStatus:         metav1.ConditionFalse,
+			condReason:         v1alpha1.SandboxReadyReasonInplaceUpdating,
+			expectResult:       false,
+		},
+		{
+			name:               "not satisfied: start container failed, deleted",
+			generation:         1,
+			observedGeneration: 1,
+			condStatus:         metav1.ConditionFalse,
+			condReason:         v1alpha1.SandboxReadyReasonStartContainerFailed,
+			condMessage:        "by test",
+			expectResult:       false,
+			expectError:        retriableError{Message: "sandbox inplace update failed: by test"},
+			expectDeleted:      true,
+		},
+		{
+			name:                   "not satisfied: start container failed, reserved",
+			generation:             1,
+			observedGeneration:     1,
+			reserveFailedSandboxes: v1alpha1.True,
+			condStatus:             metav1.ConditionFalse,
+			condReason:             v1alpha1.SandboxReadyReasonStartContainerFailed,
+			condMessage:            "by test",
+			expectResult:           false,
+			expectError:            retriableError{Message: "sandbox inplace update failed: by test"},
+			expectDeleted:          false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pool, client := NewTestPool(t)
+			pool.Annotations = map[string]string{
+				v1alpha1.AnnotationReserveFailedSandbox: tt.reserveFailedSandboxes,
+			}
+			sbx := &v1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "sbx-1",
+					Namespace: "default",
+					Labels: map[string]string{
+						v1alpha1.LabelSandboxPool: pool.Name,
+					},
+					Annotations: map[string]string{},
+					Generation:  tt.generation,
+				},
+				Status: v1alpha1.SandboxStatus{
+					Phase: v1alpha1.SandboxRunning,
+					Conditions: []metav1.Condition{
+						{
+							Type:    string(v1alpha1.SandboxConditionReady),
+							Status:  tt.condStatus,
+							Reason:  tt.condReason,
+							Message: tt.condMessage,
+						},
+					},
+					PodInfo: v1alpha1.PodInfo{
+						PodIP: "1.2.3.4",
+					},
+					ObservedGeneration: tt.observedGeneration,
+				},
+			}
+			CreateSandboxWithStatus(t, client, sbx)
+			time.Sleep(10 * time.Millisecond)
+
+			gotSbx, err := pool.cache.GetSandbox(sandboxutils.GetSandboxID(sbx))
+			assert.NoError(t, err)
+			if err != nil {
+				return
+			}
+			result, err := pool.checkSandboxInplaceUpdate(t.Context(), gotSbx)
+			assert.Equal(t, tt.expectResult, result)
+			if tt.expectError != nil {
+				assert.Error(t, err)
+				assert.True(t, errors.Is(err, tt.expectError))
+			} else {
+				assert.NoError(t, err)
+			}
+			time.Sleep(10 * time.Millisecond)
+			_, err = client.ApiV1alpha1().Sandboxes(sbx.Namespace).Get(t.Context(), sbx.Name, metav1.GetOptions{})
+			if tt.expectDeleted {
+				assert.True(t, apierrors.IsNotFound(err))
+			} else {
+				assert.NoError(t, err)
 			}
 		})
 	}

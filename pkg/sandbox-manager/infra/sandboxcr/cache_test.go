@@ -14,19 +14,15 @@ import (
 )
 
 //goland:noinspection GoDeprecation
-func NewTestCache() (cache *Cache, client *fake.Clientset) {
+func NewTestCache(t *testing.T) (cache *Cache, client *fake.Clientset) {
 	client = fake.NewSimpleClientset()
 	informerFactory := informers.NewSharedInformerFactory(client, time.Minute*10)
 	sandboxInformer := informerFactory.Api().V1alpha1().Sandboxes().Informer()
 	sandboxSetInformer := informerFactory.Api().V1alpha1().SandboxSets().Informer()
 	cache, err := NewCache(informerFactory, sandboxInformer, sandboxSetInformer)
-	if err != nil {
-		panic(err)
-	}
+	assert.NoError(t, err)
 	err = cache.Run(context.Background())
-	if err != nil {
-		panic(err)
-	}
+	assert.NoError(t, err)
 	return cache, client
 }
 
@@ -177,7 +173,7 @@ func TestCache_WaitForSandboxSatisfied(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cache, client := NewTestCache()
+			cache, client := NewTestCache(t)
 			defer cache.Stop()
 
 			// Setup test sandbox
@@ -186,8 +182,10 @@ func TestCache_WaitForSandboxSatisfied(t *testing.T) {
 
 			go func() {
 				time.Sleep(50 * time.Millisecond)
-				sandbox.ResourceVersion = "101"
-				_, err := client.ApiV1alpha1().Sandboxes("default").Update(context.Background(), sandbox, metav1.UpdateOptions{})
+				gotSbx, err := client.ApiV1alpha1().Sandboxes(sandbox.Namespace).Get(t.Context(), sandbox.Name, metav1.GetOptions{})
+				assert.NoError(t, err)
+				gotSbx.ResourceVersion = "101"
+				_, err = client.ApiV1alpha1().Sandboxes(sandbox.Namespace).Update(context.Background(), gotSbx, metav1.UpdateOptions{})
 				assert.NoError(t, err)
 			}()
 

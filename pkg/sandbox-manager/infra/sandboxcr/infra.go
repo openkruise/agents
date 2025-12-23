@@ -80,7 +80,7 @@ func (i *Infra) SelectSandboxes(user string, limit int, filter func(sandbox infr
 		if !utils.ResourceVersionExpectationSatisfied(obj) {
 			continue
 		}
-		sbx := i.AsSandbox(obj)
+		sbx := AsSandbox(obj, i.Cache, i.Client)
 		if filter == nil || filter(sbx) {
 			sandboxes = append(sandboxes, sbx)
 		}
@@ -103,24 +103,7 @@ func (i *Infra) GetSandbox(ctx context.Context, sandboxID string) (infra.Sandbox
 			return nil, err
 		}
 	}
-	return i.AsSandbox(sandbox), nil
-}
-
-func (i *Infra) AsSandbox(sbx *v1alpha1.Sandbox) *Sandbox {
-	return &Sandbox{
-		BaseSandbox: BaseSandbox[*v1alpha1.Sandbox]{
-			Sandbox:       sbx,
-			Cache:         i.Cache,
-			PatchSandbox:  i.Client.ApiV1alpha1().Sandboxes(sbx.Namespace).Patch,
-			UpdateStatus:  i.Client.ApiV1alpha1().Sandboxes(sbx.Namespace).UpdateStatus,
-			Update:        i.Client.ApiV1alpha1().Sandboxes(sbx.Namespace).Update,
-			DeleteFunc:    i.Client.ApiV1alpha1().Sandboxes(sbx.Namespace).Delete,
-			SetCondition:  SetSandboxCondition,
-			GetConditions: ListSandboxConditions,
-			DeepCopy:      DeepCopy,
-		},
-		Sandbox: sbx,
-	}
+	return AsSandbox(sandbox, i.Cache, i.Client), nil
 }
 
 func (i *Infra) onSandboxAdd(obj any) {
@@ -132,7 +115,7 @@ func (i *Infra) onSandboxAdd(obj any) {
 	if !ok {
 		return
 	}
-	route := i.AsSandbox(sbx).GetRoute()
+	route := AsSandbox(sbx, i.Cache, i.Client).GetRoute()
 	i.Proxy.SetRoute(route)
 	utils.ResourceVersionExpectationObserve(sbx)
 }
@@ -155,7 +138,7 @@ func (i *Infra) onSandboxUpdate(_, newObj any) {
 	if !ok {
 		return
 	}
-	i.refreshRoute(i.AsSandbox(newSbx))
+	i.refreshRoute(AsSandbox(newSbx, i.Cache, i.Client))
 	utils.ResourceVersionExpectationObserve(newSbx)
 }
 

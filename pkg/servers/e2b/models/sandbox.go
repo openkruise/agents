@@ -32,6 +32,18 @@ type NewSandboxRequest struct {
 	Secure     bool              `json:"secure,omitempty"`
 	Metadata   map[string]string `json:"metadata,omitempty"`
 	EnvVars    EnvVars           `json:"envVars,omitempty"`
+
+	Extensions NewSandboxRequestExtension `json:"-"`
+}
+
+type NewSandboxRequestExtension struct {
+	Image    string
+	CSIMount CSIMountExtension
+}
+
+type CSIMountExtension struct {
+	Driver  string `json:"driver"`
+	Request string `json:"request"` // base64 encoded csi.NodePublishVolumeRequest
 }
 
 // SandboxMetadata represents metadata for a sandbox

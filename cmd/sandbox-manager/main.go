@@ -14,6 +14,7 @@ import (
 
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/servers/e2b"
+	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 )
 
@@ -66,7 +67,7 @@ func main() {
 		domain = domainEnv
 	}
 
-	e2bMaxTimeout := e2b.DefaultMaxTimeout
+	e2bMaxTimeout := models.DefaultMaxTimeout
 	if value, err := strconv.Atoi(os.Getenv("E2B_MAX_TIMEOUT")); err == nil {
 		if value <= 0 {
 			klog.Fatalf("E2B_MAX_TIMEOUT must be greater than 0")

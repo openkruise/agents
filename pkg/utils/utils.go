@@ -3,10 +3,12 @@ package utils
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"sync"
 
+	"github.com/golang/protobuf/proto"
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -194,4 +196,20 @@ func HashData(by []byte) string {
 		hexStr = hexStr[:9]
 	}
 	return rand.SafeEncodeString(hexStr)
+}
+
+func EncodeBase64Proto[T proto.Message](data T) (string, error) {
+	marshal, err := proto.Marshal(data)
+	if err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(marshal), nil
+}
+
+func DecodeBase64Proto[T proto.Message](raw string, into T) error {
+	decoded, err := base64.StdEncoding.DecodeString(raw)
+	if err != nil {
+		return err
+	}
+	return proto.Unmarshal(decoded, into)
 }

@@ -94,6 +94,8 @@ func (s *Server) Run() error {
 		return errors.New("proxy server already started")
 	}
 
+	s.peerMu.Lock()
+
 	// HTTP
 	mux := http.NewServeMux()
 	web.RegisterRoute(mux, fmt.Sprintf("%s %s", http.MethodPost, RefreshAPI), s.handleRefresh)
@@ -103,15 +105,37 @@ func (s *Server) Run() error {
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
+	s.heartBeatTicker = time.NewTicker(HeartBeatInterval)
+
+	// GRPC
+	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", consts.ExtProcPort))
+	if err != nil {
+		return err
+	}
+	s.grpcSrv = grpc.NewServer(grpc.MaxConcurrentStreams(1000))
+	extProcPb.RegisterExternalProcessorServer(s.grpcSrv, s)
+	grpc_health_v1.RegisterHealthServer(s.grpcSrv, &healthServer{})
+	klog.InfoS("Starting envoy ext-proc gRPC server", "address", lis.Addr())
+
+	s.peerMu.Unlock()
+
+	// Start servers
 	go func() {
 		klog.InfoS("Starting proxy system server", "address", s.httpSrv.Addr)
 		if err := s.httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			klog.Fatalf("HTTP server failed to start: %v", err)
 		}
 	}()
+
+	go func() {
+		klog.InfoS("Starting proxy gRPC server", "address", lis.Addr())
+		if err := s.grpcSrv.Serve(lis); err != nil && !errors.Is(err, grpc.ErrServerStopped) {
+			klog.Fatalf("gRPC server failed to start: %v", err)
+		}
+	}()
+
 	go func(ctx context.Context) {
 		log := klog.FromContext(ctx).V(consts.DebugLogLevel)
-		s.heartBeatTicker = time.NewTicker(HeartBeatInterval)
 		for {
 			select {
 			case <-s.heartBeatTicker.C:
@@ -149,16 +173,7 @@ func (s *Server) Run() error {
 		}
 	}(logs.NewContext("component", "PeerHeartBeat"))
 
-	// GRPC
-	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", consts.ExtProcPort))
-	if err != nil {
-		return err
-	}
-	s.grpcSrv = grpc.NewServer(grpc.MaxConcurrentStreams(1000))
-	extProcPb.RegisterExternalProcessorServer(s.grpcSrv, s)
-	grpc_health_v1.RegisterHealthServer(s.grpcSrv, &healthServer{})
-	klog.InfoS("Starting envoy ext-proc gRPC server", "address", lis.Addr())
-	return s.grpcSrv.Serve(lis)
+	return nil
 }
 
 func (s *Server) HelloPeer(ip string) error {
@@ -166,6 +181,8 @@ func (s *Server) HelloPeer(ip string) error {
 }
 
 func (s *Server) Stop() {
+	s.peerMu.Lock()
+	defer s.peerMu.Unlock()
 	close(s.heartBeatStopCh)
 	s.heartBeatTicker.Stop()
 	if s.grpcSrv != nil {
