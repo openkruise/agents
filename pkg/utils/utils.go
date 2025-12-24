@@ -6,10 +6,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/golang/protobuf/proto"
-	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -18,6 +18,8 @@ import (
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 )
 
 func SetSandboxCondition(status *agentsv1alpha1.SandboxStatus, condition metav1.Condition) {
@@ -219,4 +221,11 @@ func DecodeBase64Proto[T proto.Message](raw string, into T) error {
 
 func GetControllerKey(obj client.Object) string {
 	return types.NamespacedName{Namespace: obj.GetNamespace(), Name: obj.GetName()}.String()
+}
+
+func StringToSlice(s, sep string) []string {
+	if s == "" {
+		return []string{}
+	}
+	return strings.Split(s, sep)
 }
