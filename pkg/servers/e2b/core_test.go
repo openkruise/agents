@@ -145,11 +145,27 @@ func CreateSandboxPool(t *testing.T, client versioned.Interface, name string, av
 				ResourceVersion: "1",
 				UID:             types.UID(uuid.NewString()),
 			},
+			Spec: agentsv1alpha1.SandboxSpec{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name:  "main",
+								Image: "old-image",
+							},
+						},
+					},
+				},
+			},
 			Status: agentsv1alpha1.SandboxStatus{
 				Phase: agentsv1alpha1.SandboxRunning,
 				Conditions: []metav1.Condition{
 					{
 						Type:   string(agentsv1alpha1.SandboxConditionReady),
+						Status: metav1.ConditionTrue,
+					},
+					{
+						Type:   "InPlaceUpdateReady", // TODO change to const
 						Status: metav1.ConditionTrue,
 					},
 				},

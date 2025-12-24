@@ -52,6 +52,7 @@ type Sandbox interface {
 	SetTimeout(ttl time.Duration)
 	SaveTimeout(ctx context.Context, ttl time.Duration) error
 	SetImage(image string)
+	GetImage() (string, error)
 	GetTimeout() time.Time
 	GetClaimTime() (time.Time, error)
 	Kill(ctx context.Context) error                                         // Delete the Sandbox resource

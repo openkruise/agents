@@ -122,7 +122,16 @@ func (s *Sandbox) SetTimeout(ttl time.Duration) {
 
 func (s *Sandbox) SetImage(image string) {
 	// TODO: 讨论存在 runtime sidecar 的情况下，如何定位到主容器
-	s.Spec.Template.Spec.Containers[0].Image = image
+	if s.Spec.Template != nil {
+		s.Spec.Template.Spec.Containers[0].Image = image
+	}
+}
+
+func (s *Sandbox) GetImage() (string, error) {
+	if s.Spec.Template != nil {
+		return s.Spec.Template.Spec.Containers[0].Image, nil
+	}
+	return "", errors.New("sandbox template is nil")
 }
 
 func (s *Sandbox) SaveTimeout(ctx context.Context, ttl time.Duration) error {
