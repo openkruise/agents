@@ -111,6 +111,6 @@ func (sc *Controller) ConnectSandbox(r *http.Request) (web.ApiResponse[*models.S
 	}
 	return web.ApiResponse[*models.Sandbox]{
 		Code: statusCode,
-		Body: sc.convertToE2BSandbox(ctx, sbx),
+		Body: sc.convertToE2BSandbox(sbx, sbx.GetAnnotations()[AnnotationEnvdAccessToken]),
 	}, nil
 }

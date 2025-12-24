@@ -171,7 +171,6 @@ func TestCreateSandbox(t *testing.T) {
 			} else {
 				assert.Nil(t, apiError)
 				sbx := resp.Body
-				assert.Equal(t, InitKey, sbx.EnvdAccessToken)
 				assert.True(t, strings.HasPrefix(sbx.SandboxID, fmt.Sprintf("%s--%s-", Namespace, templateName)))
 				for k, v := range tt.request.Metadata {
 					assert.Equal(t, v, sbx.Metadata[k], fmt.Sprintf("metadata key: %s", k))

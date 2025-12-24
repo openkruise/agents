@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/openkruise/agents/api/v1alpha1"
 	sandbox_manager "github.com/openkruise/agents/pkg/sandbox-manager"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
@@ -65,6 +66,7 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 		}
 	}
 
+	accessToken := uuid.NewString()
 	claimStart := time.Now()
 	sbx, err := sc.manager.ClaimSandbox(ctx, user.ID.String(), request.TemplateID, func(sbx infra.Sandbox) {
 		sbx.SetTimeout(time.Duration(request.Timeout) * time.Second)
@@ -75,6 +77,7 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 		for k, v := range request.Metadata {
 			annotations[k] = v
 		}
+		annotations[AnnotationEnvdAccessToken] = accessToken
 		sbx.SetAnnotations(annotations)
 	})
 	if err != nil {
@@ -94,7 +97,7 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 	}
 	if pool.GetAnnotations()[AnnotationShouldInitEnvd] == utils.True {
 		start = time.Now()
-		if err = sc.initEnvd(ctx, sbx, request.EnvVars); err != nil {
+		if err = sc.initEnvd(ctx, sbx, request.EnvVars, accessToken); err != nil {
 			log.Error(err, "failed to init envd")
 			return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
 				Message: err.Error(),
@@ -108,7 +111,7 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 		"claimCost", claimCost, "initCost", initCost)
 	return web.ApiResponse[*models.Sandbox]{
 		Code: http.StatusCreated,
-		Body: sc.convertToE2BSandbox(r.Context(), sbx),
+		Body: sc.convertToE2BSandbox(sbx, accessToken),
 	}, nil
 }
 
@@ -125,7 +128,7 @@ func (sc *Controller) DescribeSandbox(r *http.Request) (web.ApiResponse[*models.
 	}
 
 	return web.ApiResponse[*models.Sandbox]{
-		Body: sc.convertToE2BSandbox(r.Context(), sbx),
+		Body: sc.convertToE2BSandbox(sbx, sbx.GetAnnotations()[AnnotationEnvdAccessToken]),
 	}, nil
 }
 

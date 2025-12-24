@@ -65,7 +65,7 @@ func (sc *Controller) Init(infrastructure string) error {
 	ctx := logs.NewContext()
 	log := klog.FromContext(ctx)
 	log.Info("init controller", "infra", infrastructure)
-	adapter := &adapters.CommonAdapter{Port: sc.port, Keys: sc.keys}
+	adapter := &adapters.CommonAdapter{Port: sc.port}
 	sandboxManager, err := sandbox_manager.NewSandboxManager(sc.client, adapter, infrastructure)
 	if err != nil {
 		return err
@@ -74,9 +74,9 @@ func (sc *Controller) Init(infrastructure string) error {
 	sc.registerRoutes()
 	if sc.keys == nil {
 		return nil
-	} else {
-		return sc.keys.Init(ctx)
 	}
+
+	return sc.keys.Init(ctx)
 }
 
 func (sc *Controller) Run(sysNs, peerSelector string) (context.Context, error) {

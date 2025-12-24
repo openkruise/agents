@@ -138,7 +138,7 @@ func (sc *Controller) ListSandboxes(r *http.Request) (web.ApiResponse[[]*models.
 
 	e2bSandboxes := make([]*models.Sandbox, 0, len(sandboxes))
 	for _, sbx := range sandboxes {
-		e2bSandboxes = append(e2bSandboxes, sc.convertToE2BSandbox(r.Context(), sbx))
+		e2bSandboxes = append(e2bSandboxes, sc.convertToE2BSandbox(sbx, ""))
 	}
 	return web.ApiResponse[[]*models.Sandbox]{
 		Body: e2bSandboxes,

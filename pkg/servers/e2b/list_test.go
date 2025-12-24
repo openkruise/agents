@@ -157,7 +157,7 @@ func TestListSandboxes(t *testing.T) {
 				assert.Nil(t, err)
 				sandbox := describe.Body
 				assert.Equal(t, expectStates[i], sandbox.State)
-
+				sandbox.EnvdAccessToken = "" // token is not listed
 				if err == nil && tt.expectListed != nil && tt.expectListed(sandbox) {
 					expectedListed = append(expectedListed, *sandbox)
 				}

@@ -5,64 +5,30 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-
-	"github.com/openkruise/agents/pkg/servers/e2b/keys"
-	"github.com/openkruise/agents/pkg/servers/e2b/models"
-)
-
-var (
-	UserNoNeedToAuth = "<port-no-need-to-auth>"
-	UserUnknown      = "<unknown>"
 )
 
 type CommonAdapter struct {
 	Port int
-	Keys *keys.SecretKeyStorage // If nil, authentication is disabled
 }
 
 var hostRegex = regexp.MustCompile(`^(\d+)-([a-zA-Z0-9\-]+)\.`)
 
-func (a *CommonAdapter) Map(_, authority, _ string, _ int, headers map[string]string) (
-	sandboxID string, sandboxPort int, extraHeaders map[string]string, user string, err error) {
+func (a *CommonAdapter) Map(_, authority, _ string, _ int, _ map[string]string) (
+	sandboxID string, sandboxPort int, extraHeaders map[string]string, err error) {
 	matches := hostRegex.FindStringSubmatch(authority)
 	if len(matches) != 3 {
 		err = fmt.Errorf("invalid authority format: %s", authority)
-		return sandboxID, sandboxPort, extraHeaders, user, err
+		return
 	}
 
 	// Extract port number and sandboxID
 	sandboxPort, err = strconv.Atoi(matches[1])
 	if err != nil {
-		return sandboxID, sandboxPort, extraHeaders, user, err
+		return
 	}
 	sandboxID = matches[2]
 
-	if a.Keys == nil {
-		return sandboxID, sandboxPort, extraHeaders, user, err
-	}
-
-	// Parse user
-	if sandboxPort == models.CDPPort || sandboxPort == models.VNCPort {
-		// no auth for CDP
-		user = UserNoNeedToAuth
-		return sandboxID, sandboxPort, extraHeaders, user, err
-	}
-
-	token := headers["x-access-token"] // from sandbox.EnvdAccessToken
-	key, ok := a.Keys.LoadByKey(token)
-	if ok {
-		user = key.ID.String()
-	} else {
-		user = UserUnknown
-	}
-	return sandboxID, sandboxPort, extraHeaders, user, err
-}
-
-func (a *CommonAdapter) Authorize(user, owner string) bool {
-	if a.Keys == nil {
-		return true
-	}
-	return user == UserNoNeedToAuth || user == owner
+	return sandboxID, sandboxPort, extraHeaders, err
 }
 
 func (a *CommonAdapter) IsSandboxRequest(authority, _ string, _ int) bool {

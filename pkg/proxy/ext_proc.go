@@ -88,13 +88,13 @@ func (s *Server) handleRequestHeaders(requestHeaders *extProcPb.ProcessingReques
 			OrigDstHeader: s.LBEntry,
 		}, log)
 	}
-	sandboxID, sandboxPort, extraHeaders, user, err := s.adapter.Map(scheme, authority, path, port, headers)
+	sandboxID, sandboxPort, extraHeaders, err := s.adapter.Map(scheme, authority, path, port, headers)
 	if err != nil {
 		// Return error response instead of gRPC error
 		errorMsg := fmt.Sprintf("failed to map request to sandbox, URL=%s://%s%s", scheme, authority, path)
 		return s.logAndCreateErrorResponse(http.StatusInternalServerError, errorMsg, log)
 	}
-	log.Info("request mapped", "sandboxID", sandboxID, "sandboxPort", sandboxPort, "extraHeaders", extraHeaders, "user", user)
+	log.Info("request mapped", "sandboxID", sandboxID, "sandboxPort", sandboxPort, "extraHeaders", extraHeaders)
 
 	route, ok := s.LoadRoute(sandboxID)
 	if !ok {
@@ -111,12 +111,6 @@ func (s *Server) handleRequestHeaders(requestHeaders *extProcPb.ProcessingReques
 		extraHeaders[k] = v
 	}
 	extraHeaders[OrigDstHeader] = fmt.Sprintf("%s:%d", route.IP, sandboxPort)
-
-	if !s.adapter.Authorize(user, route.Owner) {
-		// Return 401 Unauthorized error
-		errorMsg := fmt.Sprintf("user %s is not authorized to access sandbox %s", user, sandboxID)
-		return s.logAndCreateErrorResponse(401, errorMsg, log)
-	}
 
 	return s.logAndCreateDstResponse(requestHeaders.RequestHeaders, extraHeaders, log)
 }

@@ -31,12 +31,8 @@ type mapResult struct {
 	err          error
 }
 
-func (t *testRequestAdapter) Map(string, string, string, int, map[string]string) (string, int, map[string]string, string, error) {
-	return t.mapResult.sandboxID, t.mapResult.sandboxPort, t.mapResult.extraHeaders, t.mapResult.user, t.mapResult.err
-}
-
-func (t *testRequestAdapter) Authorize(string, string) bool {
-	return t.authorizeResult
+func (t *testRequestAdapter) Map(string, string, string, int, map[string]string) (string, int, map[string]string, error) {
+	return t.mapResult.sandboxID, t.mapResult.sandboxPort, t.mapResult.extraHeaders, t.mapResult.err
 }
 
 func (t *testRequestAdapter) IsSandboxRequest(string, string, int) bool {
@@ -274,51 +270,6 @@ func TestServer_Process(t *testing.T) {
 								Code: types.StatusCode(404),
 							},
 							Body: []byte("route for sandbox nonexistent not found"),
-						},
-					},
-				},
-			},
-		},
-		{
-			name: "unauthorized",
-			setupRoutes: []Route{
-				{ID: "sandbox1", IP: "192.168.1.10", Owner: "owner1"},
-			},
-			adapter: &testRequestAdapter{
-				isSandboxRequest: true,
-				mapResult: mapResult{
-					sandboxID:   "sandbox1",
-					sandboxPort: 8080,
-					user:        "user2",
-					err:         nil,
-				},
-				authorizeResult: false,
-				entry:           "127.0.0.1:8080",
-			},
-			requests: []*extProcPb.ProcessingRequest{
-				{
-					Request: &extProcPb.ProcessingRequest_RequestHeaders{
-						RequestHeaders: &extProcPb.HttpHeaders{
-							Headers: &corev3.HeaderMap{
-								Headers: []*corev3.HeaderValue{
-									{Key: ":scheme", RawValue: []byte("http")},
-									{Key: ":authority", RawValue: []byte("localhost:9002")},
-									{Key: ":path", RawValue: []byte("/sandbox")},
-								},
-							},
-						},
-					},
-				},
-			},
-			expectError: false,
-			expectResp: []*extProcPb.ProcessingResponse{
-				{
-					Response: &extProcPb.ProcessingResponse_ImmediateResponse{
-						ImmediateResponse: &extProcPb.ImmediateResponse{
-							Status: &types.HttpStatus{
-								Code: types.StatusCode(401),
-							},
-							Body: []byte("user user2 is not authorized to access sandbox sandbox1"),
 						},
 					},
 				},

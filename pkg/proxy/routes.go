@@ -74,9 +74,7 @@ func (s *Server) DeleteRoute(id string) {
 type RequestAdapter interface {
 	// Map extracts sandbox ID, port and other information from the request
 	Map(scheme, authority, path string, port int, headers map[string]string) (
-		sandboxID string, sandboxPort int, extraHeaders map[string]string, user string, err error)
-	// Authorize checks if the user has permission to access the sandbox
-	Authorize(user, owner string) bool
+		sandboxID string, sandboxPort int, extraHeaders map[string]string, err error)
 	// IsSandboxRequest determines whether the request is a sandbox request. If it returns true, it's a sandbox request, otherwise it's an API Server request. Only sandbox requests are processed by the Adapter.
 	IsSandboxRequest(authority, path string, port int) bool
 	// Entry gets the entry address of the service process, such as "127.0.0.1:8080"

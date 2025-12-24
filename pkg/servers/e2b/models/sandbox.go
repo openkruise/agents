@@ -14,7 +14,7 @@ type Sandbox struct {
 	StartedAt       string            `json:"startedAt"`
 	EndAt           string            `json:"endAt"`
 	EnvdVersion     string            `json:"envdVersion"`
-	EnvdAccessToken string            `json:"envdAccessToken"`
+	EnvdAccessToken string            `json:"envdAccessToken,omitempty"`
 	Domain          string            `json:"domain"`
 	CPUCount        int64             `json:"cpuCount"`
 	MemoryMB        int64             `json:"memoryMB"`
@@ -49,5 +49,4 @@ const (
 	EnvdPort = 49983
 	// CDPPort is the port used for CDP (Chrome DevTools Port) communication
 	CDPPort = 9222
-	VNCPort = 6080
 )

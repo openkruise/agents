@@ -11,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
@@ -39,11 +38,12 @@ func (sc *Controller) getSandboxOfUser(ctx context.Context, sandboxID string) (i
 	return sbx, nil
 }
 
-func (sc *Controller) initEnvd(ctx context.Context, sbx infra.Sandbox, envVars models.EnvVars) error {
+func (sc *Controller) initEnvd(ctx context.Context, sbx infra.Sandbox, envVars models.EnvVars, accessToken string) error {
 	start := time.Now()
 	log := klog.FromContext(ctx).WithValues("sandboxID", sbx.GetName(), "envVars", envVars)
 	initBody, err := json.Marshal(map[string]any{
-		"envVars": envVars,
+		"envVars":     envVars,
+		"accessToken": accessToken,
 	})
 	if err != nil {
 		log.Error(err, "failed to marshal initBody")
@@ -63,27 +63,15 @@ func (sc *Controller) initEnvd(ctx context.Context, sbx infra.Sandbox, envVars m
 	return nil
 }
 
-func (sc *Controller) convertToE2BSandbox(ctx context.Context, sbx infra.Sandbox) *models.Sandbox {
-	log := klog.FromContext(ctx).V(consts.DebugLogLevel).WithValues("sandbox", klog.KObj(sbx))
-
+func (sc *Controller) convertToE2BSandbox(sbx infra.Sandbox, accessToken string) *models.Sandbox {
 	sandbox := &models.Sandbox{
-		SandboxID:   sbx.GetSandboxID(),
-		TemplateID:  sbx.GetTemplate(),
-		Domain:      sc.domain,
-		EnvdVersion: "0.1.1",
+		SandboxID:       sbx.GetSandboxID(),
+		TemplateID:      sbx.GetTemplate(),
+		Domain:          sc.domain,
+		EnvdVersion:     "0.1.1",
+		EnvdAccessToken: accessToken,
 	}
 	sandbox.State, _ = sbx.GetState()
-	route := sbx.GetRoute()
-	if sc.keys == nil {
-		sandbox.EnvdAccessToken = "whatever"
-	} else {
-		if key, ok := sc.keys.LoadByID(route.Owner); ok {
-			sandbox.EnvdAccessToken = key.Key
-		} else {
-			log.Info("skip convert sandbox route to e2b key: key for user not found")
-		}
-	}
-
 	annotations := sbx.GetAnnotations()
 	labels := sbx.GetLabels()
 

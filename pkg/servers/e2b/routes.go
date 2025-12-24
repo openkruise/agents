@@ -77,7 +77,7 @@ func (sc *Controller) CheckApiKey(ctx context.Context, r *http.Request) (context
 		if owner != AnonymousUser.ID.String() && owner != user.ID.String() {
 			return ctx, &web.ApiError{
 				Code:    http.StatusUnauthorized,
-				Message: fmt.Sprintf("The user of API key is not the owner of sandbox: %s", apiKey),
+				Message: fmt.Sprintf("The user of API key is not the owner of sandbox: %s", sandboxID),
 			}
 		}
 	}
