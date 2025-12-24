@@ -87,6 +87,7 @@ type Reconciler struct {
 
 const (
 	EventSandboxCreated       = "SandboxCreated"
+	EventCreateSandboxFailed  = "CreateSandboxFailed"
 	EventSandboxScaledDown    = "SandboxScaledDown"
 	EventFailedSandboxDeleted = "FailedSandboxDeleted"
 )
@@ -240,6 +241,7 @@ func (r *Reconciler) createSandbox(ctx context.Context, sbs *agentsv1alpha1.Sand
 			Annotations:  template.Annotations,
 		},
 		Spec: agentsv1alpha1.SandboxSpec{
+			TemplateRef:        sbs.Spec.TemplateRef,
 			Template:           template,
 			PersistentContents: sbs.Spec.PersistentContents,
 		},
@@ -252,6 +254,7 @@ func (r *Reconciler) createSandbox(ctx context.Context, sbs *agentsv1alpha1.Sand
 		return nil, err
 	}
 	if err := r.Create(ctx, sbx); err != nil {
+		r.Recorder.Eventf(sbs, corev1.EventTypeWarning, EventCreateSandboxFailed, "Failed to create sandbox: %s", err)
 		return nil, err
 	}
 	scaleUpExpectation.ExpectScale(GetControllerKey(sbs), expectations.Create, sbx.Name)
