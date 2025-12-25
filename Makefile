@@ -266,3 +266,20 @@ mv $(1) $(1)-$(3) ;\
 } ;\
 ln -sf $$(realpath $(1)-$(3)) $(1)
 endef
+
+# install-agents install agents with local build image to kube cluster.
+.PHONY: install-agents
+install-agents:
+	kubectl create namespace sandbox-system;
+ifeq ($(ENABLE_E2E_CONFIG), true)
+	@echo "Applying e2e config...";
+	kubectl apply -f test/agents-e2e-config.yaml;
+else
+	@echo "Skipping e2e config application...";
+endif
+	hack/install-agents.sh $(IMG)
+
+GINKGO_VERSION=v2.27.3
+GINKGO = $(shell pwd)/bin/ginkgo
+ginkgo: ## Download ginkgo locally if necessary.
+	$(call go-install-tool,$(GINKGO),github.com/onsi/ginkgo/v2/ginkgo,$(GINKGO_VERSION))
