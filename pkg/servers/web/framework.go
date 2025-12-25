@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"runtime"
-	"strings"
 
 	"github.com/google/uuid"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
@@ -37,19 +36,19 @@ func (r *ApiError) Error() string {
 	return string(j)
 }
 
-func countSlashes(path string) int {
-	count := strings.Count(path, "/")
-	if strings.HasSuffix(path, "/") {
-		count--
-	}
-	return count
-}
-
-func RegisterRoute[T any](mux *http.ServeMux, pattern string, handler Handler[T], middlewares ...MiddleWare) {
+func RegisterRoute[T any](mux *http.ServeMux, method, path string, handler Handler[T], middlewares ...MiddleWare) {
+	pattern := fmt.Sprintf("%s %s", method, path)
 	if len(pattern) > 1 && pattern[len(pattern)-1] == '/' {
 		pattern = pattern[:len(pattern)-1]
 	}
 	handleFunc := func(w http.ResponseWriter, r *http.Request) {
+		written := false
+		safeWriteJson := func(ctx context.Context, w http.ResponseWriter, code, defaultCode int, body any, requestID string) {
+			if !written {
+				written = true
+				writeJson(ctx, w, code, defaultCode, body, requestID)
+			}
+		}
 		requestID := r.Header.Get("X-Request-ID")
 		if requestID == "" {
 			requestID = uuid.NewString()
@@ -66,32 +65,28 @@ func RegisterRoute[T any](mux *http.ServeMux, pattern string, handler Handler[T]
 					"recover", rec,
 					"stack", string(buf[:n]))
 			}
-		}()
-
-		// Count the number of '/' in the path; if path ends with '/', subtract 1 from the count
-		if countSlashes(pattern) != countSlashes(r.URL.Path) {
-			log.V(consts.DebugLogLevel).Info("API Not Found", "path", r.URL.Path, "pattern", pattern)
-			writeJson(ctx, w, http.StatusNotFound, http.StatusNotFound, ApiError{
-				Code:    http.StatusNotFound,
-				Message: fmt.Sprintf("Not Found: %s", r.URL.Path),
-			}, requestID)
+			safeWriteJson(ctx, w, http.StatusInternalServerError, http.StatusInternalServerError,
+				&ApiError{
+					Code:    http.StatusInternalServerError,
+					Message: "Internal Server Error",
+				}, requestID)
 			return
-		}
+		}()
 
 		var err *ApiError
 		for _, m := range middlewares {
 			if ctx, err = m(ctx, r); err != nil {
-				writeJson(ctx, w, err.Code, http.StatusInternalServerError, err, requestID)
+				safeWriteJson(ctx, w, err.Code, http.StatusInternalServerError, err, requestID)
 				return
 			}
 		}
-		log.V(consts.DebugLogLevel).Info("start handling request", "pattern", pattern)
+		log.V(consts.DebugLogLevel+1).Info("start handling request", "pattern", pattern)
 		resp, err := handler(r.WithContext(ctx))
 		if err != nil {
 			log.Error(err, "API Error", "path", r.URL.Path)
-			writeJson(ctx, w, err.Code, http.StatusInternalServerError, err, requestID)
+			safeWriteJson(ctx, w, err.Code, http.StatusInternalServerError, err, requestID)
 		} else {
-			writeJson(ctx, w, resp.Code, http.StatusOK, resp.Body, requestID)
+			safeWriteJson(ctx, w, resp.Code, http.StatusOK, resp.Body, requestID)
 		}
 	}
 	mux.HandleFunc(pattern, handleFunc)

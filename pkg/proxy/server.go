@@ -96,8 +96,8 @@ func (s *Server) Run() error {
 
 	// HTTP
 	mux := http.NewServeMux()
-	web.RegisterRoute(mux, fmt.Sprintf("%s %s", http.MethodPost, RefreshAPI), s.handleRefresh)
-	web.RegisterRoute(mux, fmt.Sprintf("%s %s", http.MethodGet, HelloAPI), s.handleHello)
+	web.RegisterRoute(mux, http.MethodPost, RefreshAPI, s.handleRefresh)
+	web.RegisterRoute(mux, http.MethodGet, HelloAPI, s.handleHello)
 	s.httpSrv = &http.Server{
 		Addr:              fmt.Sprintf(":%d", SystemPort),
 		Handler:           mux,

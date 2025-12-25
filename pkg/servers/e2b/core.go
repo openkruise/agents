@@ -65,7 +65,7 @@ func (sc *Controller) Init(infrastructure string) error {
 	ctx := logs.NewContext()
 	log := klog.FromContext(ctx)
 	log.Info("init controller", "infra", infrastructure)
-	adapter := &adapters.CommonAdapter{Port: sc.port}
+	adapter := adapters.NewE2BAdapter(sc.port)
 	sandboxManager, err := sandbox_manager.NewSandboxManager(sc.client, adapter, infrastructure)
 	if err != nil {
 		return err
@@ -112,5 +112,9 @@ func (sc *Controller) Run(sysNs, peerSelector string) (context.Context, error) {
 		}
 		klog.InfoS("Server exited")
 	}()
+
+	if sc.keys != nil {
+		sc.keys.Run()
+	}
 	return ctx, nil
 }
