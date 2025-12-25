@@ -1,9 +1,26 @@
+/*
+Copyright 2025.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package core
 
 import (
 	"context"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
@@ -20,24 +37,24 @@ type EnsureFuncArgs struct {
 }
 
 type SandboxControl interface {
-	// EnsureSandboxPhasePending ensure sandbox status phase = Pending
-	EnsureSandboxPhasePending(ctx context.Context, args EnsureFuncArgs) error
+	// EnsureSandboxRunning handle sandbox with status phase = Pending
+	EnsureSandboxRunning(ctx context.Context, args EnsureFuncArgs) error
 
-	// EnsureSandboxPhaseRunning ensure sandbox status phase = Running
-	EnsureSandboxPhaseRunning(ctx context.Context, args EnsureFuncArgs) error
+	// EnsureSandboxUpdated handle sandbox with status phase = Running
+	EnsureSandboxUpdated(ctx context.Context, args EnsureFuncArgs) error
 
-	// EnsureSandboxPhasePaused ensure sandbox status phase = Paused
-	EnsureSandboxPhasePaused(ctx context.Context, args EnsureFuncArgs) error
+	// EnsureSandboxPaused handle sandbox with status phase = Paused
+	EnsureSandboxPaused(ctx context.Context, args EnsureFuncArgs) error
 
-	// EnsureSandboxPhaseResuming ensure sandbox status phase = Resume
-	EnsureSandboxPhaseResuming(ctx context.Context, args EnsureFuncArgs) error
+	// EnsureSandboxResumed handle sandbox with status phase = Resuming
+	EnsureSandboxResumed(ctx context.Context, args EnsureFuncArgs) error
 
-	// EnsureSandboxPhaseTerminating ensure sandbox status phase = Terminating
-	EnsureSandboxPhaseTerminating(ctx context.Context, args EnsureFuncArgs) error
+	// EnsureSandboxTerminated handle sandbox with status phase = Terminating
+	EnsureSandboxTerminated(ctx context.Context, args EnsureFuncArgs) error
 }
 
-func NewSandboxControl(c client.Client) map[string]SandboxControl {
+func NewSandboxControl(c client.Client, recorder record.EventRecorder) map[string]SandboxControl {
 	controls := map[string]SandboxControl{}
-	controls[CommonControlName] = &commonControl{Client: c}
+	controls[CommonControlName] = NewCommonControl(c, recorder)
 	return controls
 }

@@ -19,6 +19,15 @@ package v1alpha1
 import (
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+)
+
+const (
+	// SandboxHashWithoutImageAndResources represents the key of sandbox hash without image and resources.
+	SandboxHashWithoutImageAndResources = "sandbox.agents.kruise.io/hash-without-image-resources"
+
+	// PodLabelTemplateHash is pod template hash
+	PodLabelTemplateHash = "pod-template-hash"
 )
 
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
@@ -116,6 +125,10 @@ type SandboxStatus struct {
 	// SandboxIp is the ip address allocated to the sandbox.
 	// +optional
 	SandboxIp string `json:"sandboxIp,omitempty"`
+
+	// UpdateRevision is the template-hash calculated from `spec.template`.
+	// +optional
+	UpdateRevision string `json:"updateRevision,omitempty"`
 }
 
 // SandboxPhase is a label for the condition of a pod at the current time.
@@ -155,6 +168,8 @@ type PodInfo struct {
 	NodeName string `json:"nodeName,omitempty"`
 	// PodIP address allocated to the pod.
 	PodIP string `json:"podIP,omitempty"`
+	// PodUID is pod uid.
+	PodUID types.UID `json:"podUID,omitempty"`
 }
 
 // SandboxConditionType is a valid value for SandboxCondition.Type
@@ -171,16 +186,27 @@ const (
 
 	// SandboxConditionResumed means to resume the sandbox.
 	SandboxConditionResumed SandboxConditionType = "SandboxResumed"
+
+	// SandboxConditionInplaceUpdate means inplace update state.
+	SandboxConditionInplaceUpdate SandboxConditionType = "InplaceUpdate"
 )
 
 const (
-	SandboxReadyReasonPodReady = "PodReady"
+	// SandboxConditionReady Reason
+	SandboxReadyReasonPodReady             = "PodReady"
+	SandboxReadyReasonInplaceUpdating      = "InplaceUpdating"
+	SandboxReadyReasonStartContainerFailed = "StartContainerFailed"
 
-	// SandboxConditionPaused's Reason
+	// SandboxConditionInplaceUpdate Reason
+	SandboxInplaceUpdateReasonInplaceUpdating = "InplaceUpdating"
+	SandboxInplaceUpdateReasonSucceeded       = "Succeeded"
+	SandboxInplaceUpdateReasonFailed          = "Failed"
+
+	// SandboxConditionPaused Reason
 	SandboxPausedReasonSetPause  = "SetPause"
 	SandboxPausedReasonDeletePod = "DeletePod"
 
-	// SandboxConditionResume's Reason
+	// SandboxConditionResume Reason
 	SandboxResumeReasonCreatePod = "CreatePod"
 	SandboxResumeReasonResumePod = "ResumePod"
 )

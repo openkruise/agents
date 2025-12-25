@@ -63,7 +63,7 @@ func init() {
 // CertManager.
 func TestE2E(t *testing.T) {
 	RegisterFailHandler(Fail)
-	_, _ = fmt.Fprintf(GinkgoWriter, "Starting sandbox-operator integration test suite\n")
+	_, _ = fmt.Fprintf(GinkgoWriter, "Starting agent-sandbox integration test suite\n")
 	customReporterConfig := types.NewDefaultReporterConfig()
 	customSuiteConfig := types.NewDefaultSuiteConfig()
 

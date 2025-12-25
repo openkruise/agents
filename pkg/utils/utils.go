@@ -2,14 +2,15 @@ package utils
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
-	"os"
 	"sync"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -107,7 +108,7 @@ func UpdateFinalizer(c client.Client, object client.Object, op FinalizerOpType, 
 	})
 }
 
-func PatchFinalizer(c client.Client, object client.Object, op FinalizerOpType, finalizer string) error {
+func PatchFinalizer(ctx context.Context, c client.Client, object client.Object, op FinalizerOpType, finalizer string) (client.Object, error) {
 	switch op {
 	case AddFinalizerOpType, RemoveFinalizerOpType:
 	default:
@@ -115,35 +116,27 @@ func PatchFinalizer(c client.Client, object client.Object, op FinalizerOpType, f
 	}
 	originObj := object.DeepCopyObject().(client.Object)
 	patch := client.MergeFrom(object)
-
 	switch op {
 	case AddFinalizerOpType:
 		if controllerutil.ContainsFinalizer(originObj, finalizer) {
-			return nil
+			return object, nil
 		}
 		controllerutil.AddFinalizer(originObj, finalizer)
 	case RemoveFinalizerOpType:
 		if !controllerutil.ContainsFinalizer(originObj, finalizer) {
-			return nil
+			return object, nil
 		}
 		controllerutil.RemoveFinalizer(originObj, finalizer)
 	}
-	if err := c.Patch(context.TODO(), originObj, patch); err != nil {
-		return fmt.Errorf("failed to patch finalizer: %w", err)
+	if err := client.IgnoreNotFound(c.Patch(ctx, originObj, patch)); err != nil {
+		return nil, fmt.Errorf("failed to patch finalizer: %w", err)
 	}
-	return nil
+	return originObj, nil
 }
 
 func DumpJson(o interface{}) string {
 	by, _ := json.Marshal(o)
 	return string(by)
-}
-
-func GetAgentSandboxNamespace() string {
-	if ns := os.Getenv("POD_NAMESPACE"); len(ns) > 0 {
-		return ns
-	}
-	return "agent-sandbox-system"
 }
 
 // DoItSlowly tries to call the provided function a total of 'count' times,
@@ -192,4 +185,13 @@ func DoItSlowlyWithInputs[T any](inputs []T, initialBatchSize int, fn func(T) er
 		input := <-inputCh
 		return fn(input)
 	})
+}
+
+func HashData(by []byte) string {
+	shaSum := sha256.Sum256(by)
+	hexStr := fmt.Sprintf("%x", shaSum)
+	if len(hexStr) > 9 {
+		hexStr = hexStr[:9]
+	}
+	return rand.SafeEncodeString(hexStr)
 }

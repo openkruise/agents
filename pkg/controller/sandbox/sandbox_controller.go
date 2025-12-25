@@ -64,7 +64,7 @@ func Add(mgr manager.Manager) error {
 	err := (&SandboxReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
-		controls: core.NewSandboxControl(mgr.GetClient()),
+		controls: core.NewSandboxControl(mgr.GetClient(), mgr.GetEventRecorderFor("sandbox")),
 	}).SetupWithManager(mgr)
 	if err != nil {
 		return err
@@ -85,50 +85,26 @@ type SandboxReconciler struct {
 // +kubebuilder:rbac:groups=agents.kruise.io,resources=sandboxes/finalizers,verbs=update
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=pods/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=core,resources=events,verbs=create
+// +kubebuilder:rbac:groups=core,resources=events,verbs=create;update;patch
 
 func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	// Fetch the sandbox instance
 	box := &agentsv1alpha1.Sandbox{}
 	err := r.Get(ctx, req.NamespacedName, box)
-
 	if err != nil {
 		return reconcile.Result{}, client.IgnoreNotFound(err)
-	} else if box.Status.Phase == agentsv1alpha1.SandboxFailed || box.Status.Phase == agentsv1alpha1.SandboxSucceeded {
-		return reconcile.Result{}, nil
 	}
 	logger := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
 
 	if box.Spec.Template == nil {
+		logger.Info("sandbox template is nil, and ignore")
 		return reconcile.Result{}, nil
-	}
-
-	// Add finalizer
-	if box.DeletionTimestamp.IsZero() && !controllerutil.ContainsFinalizer(box, utils.SandboxFinalizer) {
-		err = utils.PatchFinalizer(r.Client, box, utils.AddFinalizerOpType, utils.SandboxFinalizer)
-		if err != nil {
-			logger.Error(err, "update sandbox finalizer failed")
-			return reconcile.Result{}, err
-		}
-		logger.Info("add sandbox finalizer success")
-	}
-
-	// Check Shutdown
-	now := metav1.Now()
-	var requeueAfter time.Duration
-	if box.Spec.ShutdownTime != nil && box.DeletionTimestamp == nil {
-		if box.Spec.ShutdownTime.Before(&now) {
-			logger.Info("Sandbox is shutdown time reached, will be deleted")
-			return ctrl.Result{}, r.Delete(ctx, box)
-		}
-		requeueAfter = box.Spec.ShutdownTime.Sub(now.Time)
 	}
 
 	logger.V(consts.DebugLogLevel).Info("Began to process Sandbox for reconcile")
 	newStatus := box.Status.DeepCopy()
-	newStatus.ObservedGeneration = box.Generation
-	if newStatus.Phase == "" {
-		newStatus.Phase = agentsv1alpha1.SandboxPending
+	if box.Annotations == nil {
+		box.Annotations = map[string]string{}
 	}
 
 	// fetch pod
@@ -139,29 +115,159 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return reconcile.Result{}, err
 	} else if errors.IsNotFound(err) {
 		pod = nil
-	} else if !pod.DeletionTimestamp.IsZero() {
-		return reconcile.Result{RequeueAfter: min(requeueAfter, time.Second*3)}, nil
-	} else if pod.Status.Phase == corev1.PodSucceeded {
-		newStatus.Phase = agentsv1alpha1.SandboxSucceeded
-		return ctrl.Result{RequeueAfter: requeueAfter}, r.updateSandboxStatus(ctx, *newStatus, box)
-	} else if pod.Status.Phase == corev1.PodFailed &&
-		box.Status.Phase != agentsv1alpha1.SandboxPaused {
-		// During the paused phase, the pod transitions to the Failed state and should be ignored.
-		newStatus.Phase = agentsv1alpha1.SandboxFailed
-		return ctrl.Result{RequeueAfter: requeueAfter}, r.updateSandboxStatus(ctx, *newStatus, box)
+	}
+	args := core.EnsureFuncArgs{Pod: pod, Box: box, NewStatus: newStatus}
+
+	// ensure sandbox terminating
+	if !box.DeletionTimestamp.IsZero() {
+		return r.handleTerminating(ctx, args)
 	}
 
-	if !box.DeletionTimestamp.IsZero() {
-		newStatus.Phase = agentsv1alpha1.SandboxTerminating
-		cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionReady))
-		if cond != nil && cond.Status == metav1.ConditionTrue {
-			cond.Status = metav1.ConditionFalse
-			cond.LastTransitionTime = metav1.Now()
-			utils.SetSandboxCondition(newStatus, *cond)
+	// if sandbox phase = Failed, Success
+	if r.isCompletedPhase(box.Status.Phase) {
+		return ctrl.Result{}, nil
+	}
+
+	// add finalizer
+	if box, err = r.ensureFinalizer(ctx, box); err != nil {
+		return reconcile.Result{}, err
+	}
+
+	// Check Shutdown
+	var requeueAfter time.Duration
+	if box.Spec.ShutdownTime != nil && box.DeletionTimestamp == nil {
+		now := metav1.Now()
+		if box.Spec.ShutdownTime.Before(&now) {
+			logger.Info("Sandbox shutdown time reached，and it will be deleted.")
+			return reconcile.Result{}, r.Delete(ctx, box)
 		}
-		// If it is paused, first set the sandbox to the Paused state.
-		// To prevent loss of state information, the state immediately before Paused must currently be Running.
-	} else if box.Spec.Paused && box.Status.Phase == agentsv1alpha1.SandboxRunning {
+		requeueAfter = box.Spec.ShutdownTime.Sub(now.Time)
+	}
+
+	// calculate sandbox status
+	var shouldRequeue bool
+	newStatus, shouldRequeue = calculateStatus(args)
+	if shouldRequeue {
+		return reconcile.Result{RequeueAfter: requeueAfter}, r.updateSandboxStatus(ctx, *newStatus, box)
+	}
+
+	switch newStatus.Phase {
+	case agentsv1alpha1.SandboxPending:
+		if box, err = r.patchSandboxAnnotationHash(ctx, box); err != nil {
+			return ctrl.Result{}, err
+		}
+		err = r.getControl(args.Pod).EnsureSandboxRunning(ctx, args)
+	case agentsv1alpha1.SandboxRunning:
+		err = r.getControl(args.Pod).EnsureSandboxUpdated(ctx, args)
+	case agentsv1alpha1.SandboxPaused:
+		err = r.getControl(args.Pod).EnsureSandboxPaused(ctx, args)
+	case agentsv1alpha1.SandboxResuming:
+		err = r.getControl(args.Pod).EnsureSandboxResumed(ctx, args)
+	default:
+		logger.Info("sandbox status phase is invalid", "phase", box.Status.Phase)
+		return ctrl.Result{RequeueAfter: requeueAfter}, nil
+	}
+	if err != nil {
+		return reconcile.Result{}, err
+	}
+	return ctrl.Result{RequeueAfter: requeueAfter}, r.updateSandboxStatus(ctx, *newStatus, box)
+}
+
+func (r *SandboxReconciler) handleTerminating(ctx context.Context, args core.EnsureFuncArgs) (ctrl.Result, error) {
+	pod, box, newStatus := args.Pod, args.Box, args.NewStatus
+	newStatus.Phase = agentsv1alpha1.SandboxTerminating
+	cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionReady))
+	if cond != nil && cond.Status == metav1.ConditionTrue {
+		cond.Status = metav1.ConditionFalse
+		cond.LastTransitionTime = metav1.Now()
+		utils.SetSandboxCondition(newStatus, *cond)
+	}
+	err := r.getControl(pod).EnsureSandboxTerminated(ctx, args)
+	if err != nil {
+		return reconcile.Result{}, err
+	}
+	return ctrl.Result{}, r.updateSandboxStatus(ctx, *newStatus, box)
+}
+
+func (r *SandboxReconciler) isCompletedPhase(phase agentsv1alpha1.SandboxPhase) bool {
+	return phase == agentsv1alpha1.SandboxFailed || phase == agentsv1alpha1.SandboxSucceeded
+}
+
+func (r *SandboxReconciler) ensureFinalizer(ctx context.Context, box *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) {
+	logger := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
+	if box.DeletionTimestamp.IsZero() && !controllerutil.ContainsFinalizer(box, utils.SandboxFinalizer) {
+		newObj, err := utils.PatchFinalizer(ctx, r.Client, box, utils.AddFinalizerOpType, utils.SandboxFinalizer)
+		if err != nil {
+			logger.Error(err, "patch finalizer failed")
+			return nil, err
+		}
+		box = newObj.(*agentsv1alpha1.Sandbox)
+		logger.Info("add sandbox finalizer success")
+	}
+	return box, nil
+}
+
+func (r *SandboxReconciler) patchSandboxAnnotationHash(ctx context.Context, box *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) {
+	if box.Annotations[agentsv1alpha1.SandboxHashWithoutImageAndResources] != "" {
+		return box, nil
+	}
+
+	logger := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
+	_, hashWithoutImageAndResource := core.HashSandbox(box)
+	clone := box.DeepCopy()
+	body := fmt.Sprintf(`{"metadata":{"annotations":{"%s":"%s"}}}`, agentsv1alpha1.SandboxHashWithoutImageAndResources, hashWithoutImageAndResource)
+	if err := r.Patch(ctx, clone, client.RawPatch(types.MergePatchType, []byte(body))); err != nil {
+		logger.Error(err, "patch sandbox annotation failed")
+		return nil, err
+	}
+	logger.Info("patch sandbox annotation success", "annotation", agentsv1alpha1.SandboxHashWithoutImageAndResources)
+	return clone, nil
+}
+
+func (r *SandboxReconciler) updateSandboxStatus(ctx context.Context, newStatus agentsv1alpha1.SandboxStatus, box *agentsv1alpha1.Sandbox) error {
+	logger := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
+	if reflect.DeepEqual(box.Status, newStatus) {
+		return nil
+	}
+
+	by, _ := json.Marshal(newStatus)
+	patchStatus := fmt.Sprintf(`{"status":%s}`, string(by))
+	rcvObject := &agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Namespace: box.Namespace, Name: box.Name}}
+	err := client.IgnoreNotFound(r.Status().Patch(ctx, rcvObject, client.RawPatch(types.MergePatchType, []byte(patchStatus))))
+	if err != nil {
+		logger.Error(err, "update sandbox status failed", "patchStatus", patchStatus)
+		return err
+	}
+	logger.Info("update sandbox status success", "status", utils.DumpJson(newStatus))
+	return nil
+}
+
+func calculateStatus(args core.EnsureFuncArgs) (*agentsv1alpha1.SandboxStatus, bool) {
+	pod, box, newStatus := args.Pod, args.Box, args.NewStatus
+
+	hash, _ := core.HashSandbox(box)
+	newStatus.ObservedGeneration = box.Generation
+	newStatus.UpdateRevision = hash
+	if newStatus.Phase == "" {
+		newStatus.Phase = agentsv1alpha1.SandboxPending
+	}
+
+	if pod != nil {
+		if !pod.DeletionTimestamp.IsZero() {
+			return newStatus, true
+		} else if pod.Status.Phase == corev1.PodSucceeded && !box.Spec.Paused {
+			newStatus.Phase = agentsv1alpha1.SandboxSucceeded
+			return newStatus, true
+		} else if pod.Status.Phase == corev1.PodFailed && !box.Spec.Paused {
+			// During the paused phase, the pod transitions to the Failed state and should be ignored.
+			newStatus.Phase = agentsv1alpha1.SandboxFailed
+			return newStatus, true
+		}
+	}
+
+	// If it is paused, first set the sandbox to the Paused state.
+	// To prevent loss of state information, the state immediately before Paused must currently be Running.
+	if box.Spec.Paused && box.Status.Phase == agentsv1alpha1.SandboxRunning {
 		// The paused and resumed condition are exclusive
 		utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionResumed))
 		newStatus.Phase = agentsv1alpha1.SandboxPaused
@@ -178,45 +284,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 		utils.SetSandboxCondition(newStatus, cond)
 	}
-
-	args := core.EnsureFuncArgs{Pod: pod, Box: box, NewStatus: newStatus}
-	switch newStatus.Phase {
-	case agentsv1alpha1.SandboxPending:
-		err = r.getControl(args.Pod).EnsureSandboxPhasePending(ctx, args)
-	case agentsv1alpha1.SandboxRunning:
-		err = r.getControl(args.Pod).EnsureSandboxPhaseRunning(ctx, args)
-	case agentsv1alpha1.SandboxPaused:
-		err = r.getControl(args.Pod).EnsureSandboxPhasePaused(ctx, args)
-	case agentsv1alpha1.SandboxResuming:
-		err = r.getControl(args.Pod).EnsureSandboxPhaseResuming(ctx, args)
-	case agentsv1alpha1.SandboxTerminating:
-		err = r.getControl(args.Pod).EnsureSandboxPhaseTerminating(ctx, args)
-	default:
-		logger.Info("sandbox status phase is invalid", "phase", box.Status.Phase)
-		return ctrl.Result{RequeueAfter: requeueAfter}, nil
-	}
-	if err != nil {
-		return reconcile.Result{}, err
-	}
-	return ctrl.Result{RequeueAfter: requeueAfter}, r.updateSandboxStatus(ctx, *newStatus, box)
-}
-
-func (r *SandboxReconciler) updateSandboxStatus(ctx context.Context, newStatus agentsv1alpha1.SandboxStatus, box *agentsv1alpha1.Sandbox) error {
-	logger := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
-	if reflect.DeepEqual(box.Status, newStatus) {
-		return nil
-	}
-
-	by, _ := json.Marshal(newStatus)
-	patchStatus := fmt.Sprintf(`{"status":%s}`, string(by))
-	rcvObject := &agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Namespace: box.Namespace, Name: box.Name}}
-	err := r.Status().Patch(context.TODO(), rcvObject, client.RawPatch(types.MergePatchType, []byte(patchStatus)))
-	if err != nil {
-		logger.Error(err, "update sandbox status failed")
-		return err
-	}
-	logger.Info("update sandbox status success", "status", utils.DumpJson(newStatus))
-	return nil
+	return newStatus, false
 }
 
 // SetupWithManager sets up the controller with the Manager.
