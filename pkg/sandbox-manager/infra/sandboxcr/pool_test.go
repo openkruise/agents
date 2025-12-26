@@ -1,8 +1,8 @@
 package sandboxcr
 
 import (
-	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -28,10 +28,9 @@ func GetSbsOwnerReference() []metav1.OwnerReference {
 }
 
 func CreateSandboxWithStatus(t *testing.T, client versioned.Interface, sbx *v1alpha1.Sandbox) {
-	ctx := context.Background()
-	_, err := client.ApiV1alpha1().Sandboxes(sbx.Namespace).Create(context.Background(), sbx, metav1.CreateOptions{})
+	_, err := client.ApiV1alpha1().Sandboxes(sbx.Namespace).Create(t.Context(), sbx, metav1.CreateOptions{})
 	assert.NoError(t, err)
-	_, err = client.ApiV1alpha1().Sandboxes(sbx.Namespace).UpdateStatus(ctx, sbx, metav1.UpdateOptions{})
+	_, err = client.ApiV1alpha1().Sandboxes(sbx.Namespace).UpdateStatus(t.Context(), sbx, metav1.UpdateOptions{})
 	assert.NoError(t, err)
 }
 
@@ -41,39 +40,51 @@ func TestPool_ClaimSandbox(t *testing.T) {
 	tests := []struct {
 		name        string
 		available   int32
-		modifier    func(sbx infra.Sandbox)
-		expectError bool
-		preModifier func(pod *corev1.Pod)
+		options     infra.ClaimSandboxOptions
+		preModifier func(pod *v1alpha1.Sandbox)
+		postCheck   func(t *testing.T, sbx infra.Sandbox)
+		expectError string
 	}{
 		{
-			name:        "claim with available pods",
-			available:   2,
-			modifier:    nil,
-			expectError: false,
+			name:      "claim with available pods",
+			available: 2,
 		},
 		{
 			name:        "claim with no available pods",
 			available:   0,
-			modifier:    nil,
-			expectError: true,
+			expectError: "no stock",
 		},
 		{
 			name:      "claim with modifier",
 			available: 2,
-			modifier: func(sbx infra.Sandbox) {
-				sbx.SetAnnotations(map[string]string{
-					"test-annotation": "test-value",
-				})
+			options: infra.ClaimSandboxOptions{
+				Modifier: func(sbx infra.Sandbox) {
+					sbx.SetAnnotations(map[string]string{
+						"test-annotation": "test-value",
+					})
+				},
 			},
-			expectError: false,
+			postCheck: func(t *testing.T, sbx infra.Sandbox) {
+				assert.Equal(t, "test-value", sbx.GetAnnotations()["test-annotation"])
+			},
 		},
 		{
-			name:      "no stock",
+			name:      "all locked",
 			available: 10,
-			preModifier: func(pod *corev1.Pod) {
-				pod.Annotations[v1alpha1.AnnotationLock] = "XX"
+			preModifier: func(sbx *v1alpha1.Sandbox) {
+				sbx.Annotations[v1alpha1.AnnotationLock] = "XX"
 			},
-			expectError: true,
+			expectError: "no candidate",
+		},
+		{
+			name:      "claim with image",
+			available: 1,
+			options: infra.ClaimSandboxOptions{
+				Image: "new-image",
+			},
+			postCheck: func(t *testing.T, sbx infra.Sandbox) {
+				assert.Equal(t, "new-image", sbx.(*Sandbox).Spec.Template.Spec.Containers[0].Image)
+			},
 		},
 	}
 
@@ -88,7 +99,7 @@ func TestPool_ClaimSandbox(t *testing.T) {
 				t.Fatalf("Failed to create cache: %v", err)
 			}
 
-			err = c.Run(context.Background())
+			err = c.Run(t.Context())
 			assert.NoError(t, err)
 			defer c.Stop()
 
@@ -100,9 +111,9 @@ func TestPool_ClaimSandbox(t *testing.T) {
 			}
 
 			for i := 0; i < int(tt.available); i++ {
-				pod := &corev1.Pod{
+				sbx := &v1alpha1.Sandbox{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      fmt.Sprintf("pod-%d", i),
+						Name:      fmt.Sprintf("sbx-%d", i),
 						Namespace: "default",
 						Labels: map[string]string{
 							v1alpha1.LabelSandboxPool: pool.Name,
@@ -110,41 +121,54 @@ func TestPool_ClaimSandbox(t *testing.T) {
 						Annotations:     map[string]string{},
 						OwnerReferences: GetSbsOwnerReference(),
 					},
-					Status: corev1.PodStatus{
-						Phase: corev1.PodRunning,
-						Conditions: []corev1.PodCondition{
-							{
-								Type:   corev1.PodReady,
-								Status: corev1.ConditionTrue,
+					Spec: v1alpha1.SandboxSpec{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name:  "main",
+										Image: "old-image",
+									},
+								},
 							},
 						},
-						PodIP: "1.2.3.4",
+					},
+					Status: v1alpha1.SandboxStatus{
+						Phase: v1alpha1.SandboxRunning,
+						Conditions: []metav1.Condition{
+							{
+								Type:   string(v1alpha1.SandboxConditionReady),
+								Status: metav1.ConditionTrue,
+							},
+						},
+						PodInfo: v1alpha1.PodInfo{
+							PodIP: "1.2.3.4",
+						},
 					},
 				}
 				if tt.preModifier != nil {
-					tt.preModifier(pod)
+					tt.preModifier(sbx)
 				}
-				sbx := ConvertPodToSandboxCR(pod)
 				state, reason := sandboxutils.GetSandboxState(sbx)
 				assert.Equal(t, v1alpha1.SandboxStateAvailable, state, "reason", reason)
 				CreateSandboxWithStatus(t, client, sbx)
 			}
 			c.Refresh()
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(10 * time.Millisecond)
 
 			user := "test-user"
-			sbx, err := pool.ClaimSandbox(context.Background(), user, 1, tt.modifier)
+			sbx, err := pool.ClaimSandbox(t.Context(), user, 1, tt.options)
 
-			if tt.expectError {
+			if tt.expectError != "" {
 				assert.Error(t, err)
-				return
+				assert.True(t, strings.Contains(err.Error(), tt.expectError))
 			} else {
 				assert.NoError(t, err)
 				assert.NotNil(t, sbx)
 				assert.NotEmpty(t, sbx.GetAnnotations()[v1alpha1.AnnotationLock])
 				assert.Equal(t, user, sbx.GetAnnotations()[v1alpha1.AnnotationOwner])
-				if tt.modifier != nil {
-					assert.Equal(t, "test-value", sbx.GetAnnotations()["test-annotation"])
+				if tt.postCheck != nil {
+					tt.postCheck(t, sbx)
 				}
 			}
 		})

@@ -2,6 +2,7 @@ package e2b
 
 import (
 	"fmt"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +12,19 @@ import (
 	"github.com/openkruise/agents/pkg/servers/web"
 	"github.com/stretchr/testify/assert"
 )
+
+func imageChecker(image string, controller *Controller) func(t *testing.T, resp *models.Sandbox) {
+	return func(t *testing.T, resp *models.Sandbox) {
+		sbx, err := controller.manager.GetClaimedSandbox(t.Context(), keys.AdminKeyID.String(), resp.SandboxID)
+		assert.NoError(t, err)
+		if err != nil {
+			return
+		}
+		got, err := sbx.GetImage()
+		assert.NoError(t, err)
+		assert.Equal(t, image, got)
+	}
+}
 
 func TestCreateSandbox(t *testing.T) {
 	controller, client, teardown := Setup(t)
@@ -22,6 +36,7 @@ func TestCreateSandbox(t *testing.T) {
 		userName    string
 		request     models.NewSandboxRequest
 		expectError *web.ApiError
+		postCheck   func(t *testing.T, resp *models.Sandbox)
 	}{
 		{
 			name:      "success",
@@ -37,6 +52,7 @@ func TestCreateSandbox(t *testing.T) {
 					"TEST_ENV": "test-value",
 				},
 			},
+			postCheck: imageChecker("old-image", controller),
 		},
 		{
 			name:      "success with default timeout",
@@ -115,7 +131,7 @@ func TestCreateSandbox(t *testing.T) {
 			request: models.NewSandboxRequest{
 				TemplateID: templateName,
 				Metadata: map[string]string{
-					InternalPrefix + "key": "test-value",
+					models.InternalPrefix + "key": "test-value",
 				},
 			},
 			expectError: &web.ApiError{
@@ -147,6 +163,33 @@ func TestCreateSandbox(t *testing.T) {
 				Message: "Internal: failed to claim sandbox: no available sandboxes for template test-template (no stock)",
 			},
 		},
+		{
+			name:      "claim with image",
+			available: 1,
+			userName:  "test-user",
+			request: models.NewSandboxRequest{
+				TemplateID: templateName,
+				Metadata: map[string]string{
+					models.ExtensionKeyClaimWithImage: "new-image",
+				},
+			},
+			postCheck: imageChecker("new-image", controller),
+		},
+		{
+			name:      "claim with bad image",
+			available: 1,
+			userName:  "test-user",
+			request: models.NewSandboxRequest{
+				TemplateID: templateName,
+				Metadata: map[string]string{
+					models.ExtensionKeyClaimWithImage: "bad-@@-image",
+				},
+			},
+			expectError: &web.ApiError{
+				Code:    http.StatusBadRequest,
+				Message: "Bad extension param: invalid image [bad-@@-image]: invalid reference format",
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -173,6 +216,9 @@ func TestCreateSandbox(t *testing.T) {
 				sbx := resp.Body
 				assert.True(t, strings.HasPrefix(sbx.SandboxID, fmt.Sprintf("%s--%s-", Namespace, templateName)))
 				for k, v := range tt.request.Metadata {
+					if !ValidateMetadataKey(k) {
+						continue
+					}
 					assert.Equal(t, v, sbx.Metadata[k], fmt.Sprintf("metadata key: %s", k))
 				}
 				startedAt, err := time.Parse(time.RFC3339, sbx.StartedAt)

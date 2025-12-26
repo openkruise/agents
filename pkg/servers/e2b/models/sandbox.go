@@ -1,6 +1,10 @@
 // Package models provides data models for the E2B sandbox API.
 package models
 
+import (
+	"github.com/openkruise/agents/pkg/sandbox-manager/storage"
+)
+
 const (
 	SandboxStateRunning = "running"
 	SandboxStatePaused  = "paused"
@@ -32,6 +36,13 @@ type NewSandboxRequest struct {
 	Secure     bool              `json:"secure,omitempty"`
 	Metadata   map[string]string `json:"metadata,omitempty"`
 	EnvVars    EnvVars           `json:"envVars,omitempty"`
+
+	Extensions NewSandboxRequestExtension `json:"-"`
+}
+
+type NewSandboxRequestExtension struct {
+	Image        string
+	StorageMount storage.MountOptions
 }
 
 // SandboxMetadata represents metadata for a sandbox

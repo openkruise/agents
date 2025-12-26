@@ -19,6 +19,7 @@ package v1alpha1
 import (
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
@@ -154,7 +155,8 @@ type PodInfo struct {
 	// NodeName indicates in which node this pod is scheduled.
 	NodeName string `json:"nodeName,omitempty"`
 	// PodIP address allocated to the pod.
-	PodIP string `json:"podIP,omitempty"`
+	PodIP string    `json:"podIP,omitempty"`
+	UID   types.UID `json:"uid,omitempty"`
 }
 
 // SandboxConditionType is a valid value for SandboxCondition.Type
@@ -174,7 +176,9 @@ const (
 )
 
 const (
-	SandboxReadyReasonPodReady = "PodReady"
+	SandboxReadyReasonPodReady            = "PodReady"
+	SandboxReadyReasonInplaceUpdating     = "InplaceUpdating"
+	SandboxReadyReasonInplaceUpdateFailed = "InplaceUpdateFailed"
 
 	// SandboxConditionPaused's Reason
 	SandboxPausedReasonSetPause  = "SetPause"

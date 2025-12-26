@@ -21,7 +21,7 @@ func TestSetSandboxCondition(t *testing.T) {
 		expectedCount int
 	}{
 		{
-			name:       "添加新条件",
+			name:       "Add new condition",
 			initialSbx: &v1alpha1.Sandbox{},
 			tp:         "Ready",
 			status:     metav1.ConditionTrue,
@@ -35,7 +35,7 @@ func TestSetSandboxCondition(t *testing.T) {
 			expectedCount: 1,
 		},
 		{
-			name: "更新现有条件",
+			name: "Update existing condition",
 			initialSbx: &v1alpha1.Sandbox{
 				Status: v1alpha1.SandboxStatus{
 					Conditions: []metav1.Condition{
@@ -59,7 +59,7 @@ func TestSetSandboxCondition(t *testing.T) {
 			expectedCount: 1,
 		},
 		{
-			name: "添加条件到现有条件列表",
+			name: "Add condition to existing list",
 			initialSbx: &v1alpha1.Sandbox{
 				Status: v1alpha1.SandboxStatus{
 					Conditions: []metav1.Condition{
@@ -112,14 +112,13 @@ func TestSetSandboxCondition(t *testing.T) {
 
 func TestGetSandboxCondition(t *testing.T) {
 	tests := []struct {
-		name          string
-		sbx           *v1alpha1.Sandbox
-		tp            v1alpha1.SandboxConditionType
-		expectedCond  metav1.Condition
-		expectedFound bool
+		name         string
+		sbx          *v1alpha1.Sandbox
+		tp           v1alpha1.SandboxConditionType
+		expectedCond metav1.Condition
 	}{
 		{
-			name: "找到条件",
+			name: "Find condition",
 			sbx: &v1alpha1.Sandbox{
 				Status: v1alpha1.SandboxStatus{
 					Conditions: []metav1.Condition{
@@ -137,10 +136,9 @@ func TestGetSandboxCondition(t *testing.T) {
 				Status: metav1.ConditionTrue,
 				Reason: "PodReady",
 			},
-			expectedFound: true,
 		},
 		{
-			name: "未找到条件",
+			name: "Condition not found",
 			sbx: &v1alpha1.Sandbox{
 				Status: v1alpha1.SandboxStatus{
 					Conditions: []metav1.Condition{
@@ -151,33 +149,24 @@ func TestGetSandboxCondition(t *testing.T) {
 					},
 				},
 			},
-			tp:            "Ready",
-			expectedCond:  metav1.Condition{},
-			expectedFound: false,
+			tp:           "Ready",
+			expectedCond: metav1.Condition{},
 		},
 		{
-			name:          "空条件列表",
-			sbx:           &v1alpha1.Sandbox{},
-			tp:            "Ready",
-			expectedCond:  metav1.Condition{},
-			expectedFound: false,
+			name:         "Empty condition list",
+			sbx:          &v1alpha1.Sandbox{},
+			tp:           "Ready",
+			expectedCond: metav1.Condition{},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Execute test
-			cond, found := GetSandboxCondition(tt.sbx, tt.tp)
+			cond := GetSandboxCondition(tt.sbx, tt.tp)
 
 			// Verify results
-			assert.Equal(t, tt.expectedFound, found)
-			if tt.expectedFound {
-				assert.Equal(t, tt.expectedCond.Type, cond.Type)
-				assert.Equal(t, tt.expectedCond.Status, cond.Status)
-				assert.Equal(t, tt.expectedCond.Reason, cond.Reason)
-			} else {
-				assert.Equal(t, tt.expectedCond, cond)
-			}
+			assert.Equal(t, tt.expectedCond, cond)
 		})
 	}
 }

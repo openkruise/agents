@@ -65,6 +65,7 @@ func (r *commonControl) EnsureSandboxPhaseRunning(ctx context.Context, args Ensu
 	newStatus.PodInfo = agentsv1alpha1.PodInfo{
 		PodIP:    pod.Status.PodIP,
 		NodeName: pod.Spec.NodeName,
+		UID:      pod.UID,
 	}
 	pCond := utils.GetPodCondition(&pod.Status, corev1.PodReady)
 	cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionReady))
