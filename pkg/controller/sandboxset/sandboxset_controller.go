@@ -95,6 +95,7 @@ const (
 // +kubebuilder:rbac:groups=agents.kruise.io,resources=sandboxsets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=agents.kruise.io,resources=sandboxsets/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=agents.kruise.io,resources=sandboxsets/finalizers,verbs=update
+// +kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch
 
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	totalStart := time.Now()
@@ -241,9 +242,10 @@ func (r *Reconciler) createSandbox(ctx context.Context, sbs *agentsv1alpha1.Sand
 			Annotations:  template.Annotations,
 		},
 		Spec: agentsv1alpha1.SandboxSpec{
-			TemplateRef:        sbs.Spec.TemplateRef,
-			Template:           template,
-			PersistentContents: sbs.Spec.PersistentContents,
+			TemplateRef:          sbs.Spec.TemplateRef,
+			Template:             template,
+			PersistentContents:   sbs.Spec.PersistentContents,
+			VolumeClaimTemplates: sbs.Spec.VolumeClaimTemplates,
 		},
 	}
 	sbx.Annotations = clearAndInitInnerKeys(sbx.Annotations)

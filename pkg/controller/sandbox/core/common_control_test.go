@@ -21,6 +21,7 @@ import (
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/inplaceupdate"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -766,6 +767,93 @@ func TestCommonControl_createPod(t *testing.T) {
 	}
 	if pod.Annotations[utils.PodAnnotationCreatedBy] != utils.CreatedBySandbox {
 		t.Errorf("Expected pod annotation %s to be %s, got %s", utils.PodAnnotationCreatedBy, utils.CreatedBySandbox, pod.Annotations[utils.PodAnnotationCreatedBy])
+	}
+
+	sandboxWithPVC := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-sandbox-with-pvc",
+			Namespace: "default",
+		},
+		Spec: agentsv1alpha1.SandboxSpec{
+			SandboxTemplate: agentsv1alpha1.SandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{
+						Labels:      map[string]string{"app": "test"},
+						Annotations: map[string]string{"annotation": "value"},
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name:  "test-container",
+								Image: "nginx:latest",
+								VolumeMounts: []corev1.VolumeMount{
+									{
+										Name:      "www",
+										MountPath: "/var/www",
+									},
+								},
+							},
+						},
+					},
+				},
+				VolumeClaimTemplates: []corev1.PersistentVolumeClaim{
+					{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: "www",
+						},
+						Spec: corev1.PersistentVolumeClaimSpec{
+							AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+							Resources: corev1.VolumeResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceStorage: resource.MustParse("1Gi"),
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	podWithPVC, err := control.createPod(context.TODO(), sandboxWithPVC, status)
+	if err != nil {
+		t.Fatalf("createPod() with PVC error = %v", err)
+	}
+
+	expectedPVCName, err := GeneratePVCName("www", "test-sandbox-with-pvc")
+	if err != nil {
+		t.Fatalf("GeneratePVCName() error = %v", err)
+	}
+
+	if len(podWithPVC.Spec.Volumes) != 1 {
+		t.Errorf("Expected 1 volume, got %d", len(podWithPVC.Spec.Volumes))
+	} else {
+		volume := podWithPVC.Spec.Volumes[0]
+		if volume.Name != "www" {
+			t.Errorf("Expected volume name to be 'www', got %s", volume.Name)
+		}
+		if volume.VolumeSource.PersistentVolumeClaim == nil {
+			t.Error("Expected volume source to be PersistentVolumeClaim")
+		} else if volume.VolumeSource.PersistentVolumeClaim.ClaimName != expectedPVCName {
+			t.Errorf("Expected PVC claim name to be %s, got %s", expectedPVCName, volume.VolumeSource.PersistentVolumeClaim.ClaimName)
+		}
+	}
+
+	if len(podWithPVC.Spec.Containers) != 1 {
+		t.Errorf("Expected 1 container, got %d", len(podWithPVC.Spec.Containers))
+	} else {
+		container := podWithPVC.Spec.Containers[0]
+		if len(container.VolumeMounts) != 1 {
+			t.Errorf("Expected 1 volume mount, got %d", len(container.VolumeMounts))
+		} else {
+			volumeMount := container.VolumeMounts[0]
+			if volumeMount.Name != "www" {
+				t.Errorf("Expected volume mount name to be 'www', got %s", volumeMount.Name)
+			}
+			if volumeMount.MountPath != "/var/www" {
+				t.Errorf("Expected volume mount path to be '/var/www', got %s", volumeMount.MountPath)
+			}
+		}
 	}
 }
 

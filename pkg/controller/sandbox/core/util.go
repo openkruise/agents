@@ -18,6 +18,7 @@ package core
 
 import (
 	"encoding/json"
+	"fmt"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/utils"
@@ -45,4 +46,15 @@ func HashSandbox(box *agentsv1alpha1.Sandbox) (string, string) {
 	by, _ = json.Marshal(*tempClone)
 	hashWithoutImageResources := utils.HashData(by)
 	return hash, hashWithoutImageResources
+}
+
+// GeneratePVCName generates a persistent volume claim name from template name and sandbox name
+func GeneratePVCName(templateName, sandboxName string) (string, error) {
+	if templateName == "" || sandboxName == "" {
+		return "", fmt.Errorf("template name and sandbox name cannot be empty")
+	}
+
+	name := fmt.Sprintf("%s-%s", templateName, sandboxName)
+
+	return name, nil
 }

@@ -258,6 +258,26 @@ func (r *commonControl) createPod(ctx context.Context, box *agentsv1alpha1.Sandb
 	}
 	// todo, when resume, create Pod based on the revision from the paused state.
 	pod.Labels[agentsv1alpha1.PodLabelTemplateHash] = newStatus.UpdateRevision
+
+	volumes := make([]corev1.Volume, 0, len(box.Spec.VolumeClaimTemplates))
+	for _, template := range box.Spec.VolumeClaimTemplates {
+		pvcName, err := GeneratePVCName(template.Name, box.Name)
+		if err != nil {
+			logger.Error(err, "failed to generate PVC name", "template", template.Name, "sandbox", box.Name)
+			return nil, err
+		}
+		volumes = append(volumes, corev1.Volume{
+			Name: template.Name,
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: pvcName,
+					ReadOnly:  false,
+				},
+			},
+		})
+	}
+	pod.Spec.Volumes = append(pod.Spec.Volumes, volumes...)
+
 	err := r.Create(ctx, pod)
 	if err != nil && !errors.IsAlreadyExists(err) {
 		logger.Error(err, "create pod failed")

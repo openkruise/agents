@@ -24,6 +24,7 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/controller/sandbox/core"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -548,5 +549,276 @@ func TestSandboxReconciler_ShutdownTime(t *testing.T) {
 	err = client.Get(context.TODO(), req.NamespacedName, updatedSandbox)
 	if err == nil && updatedSandbox.DeletionTimestamp.IsZero() {
 		t.Errorf("Expected sandbox to be deleted, but it still exists")
+	}
+}
+
+func TestSandboxReconcile_WithVolumeClaimTemplates(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	tests := []struct {
+		name           string
+		sandbox        *agentsv1alpha1.Sandbox
+		existingPVCs   []client.Object
+		expectPVCCount int
+		expectPVCNames []string
+		wantErr        bool
+	}{
+		{
+			name: "no volume claim templates - should not create any PVCs",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+				},
+				Spec: agentsv1alpha1.SandboxSpec{
+					Template: &corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{
+									Name:  "test-container",
+									Image: "nginx:latest",
+								},
+							},
+						},
+					},
+				},
+			},
+			expectPVCCount: 0,
+			expectPVCNames: []string{},
+			wantErr:        false,
+		},
+		{
+			name: "single volume claim template - should create one PVC",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+				},
+				Spec: agentsv1alpha1.SandboxSpec{
+					Template: &corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{
+									Name:  "test-container",
+									Image: "nginx:latest",
+								},
+							},
+						},
+					},
+					VolumeClaimTemplates: []corev1.PersistentVolumeClaim{
+						{
+							ObjectMeta: metav1.ObjectMeta{
+								Name: "www",
+							},
+							Spec: corev1.PersistentVolumeClaimSpec{
+								AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+								Resources: corev1.VolumeResourceRequirements{
+									Requests: corev1.ResourceList{
+										corev1.ResourceStorage: resource.MustParse("1Gi"),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectPVCCount: 1,
+			expectPVCNames: []string{"www-test-sandbox"},
+			wantErr:        false,
+		},
+		{
+			name: "multiple volume claim templates - should create multiple PVCs",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+				},
+				Spec: agentsv1alpha1.SandboxSpec{
+					Template: &corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{
+									Name:  "test-container",
+									Image: "nginx:latest",
+								},
+							},
+						},
+					},
+					VolumeClaimTemplates: []corev1.PersistentVolumeClaim{
+						{
+							ObjectMeta: metav1.ObjectMeta{
+								Name: "www",
+							},
+							Spec: corev1.PersistentVolumeClaimSpec{
+								AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+								Resources: corev1.VolumeResourceRequirements{
+									Requests: corev1.ResourceList{
+										corev1.ResourceStorage: resource.MustParse("1Gi"),
+									},
+								},
+							},
+						},
+						{
+							ObjectMeta: metav1.ObjectMeta{
+								Name: "data",
+							},
+							Spec: corev1.PersistentVolumeClaimSpec{
+								AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
+								Resources: corev1.VolumeResourceRequirements{
+									Requests: corev1.ResourceList{
+										corev1.ResourceStorage: resource.MustParse("5Gi"),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectPVCCount: 2,
+			expectPVCNames: []string{"www-test-sandbox", "data-test-sandbox"},
+			wantErr:        false,
+		},
+		{
+			name: "PVC already exists - should not create duplicate",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+				},
+				Spec: agentsv1alpha1.SandboxSpec{
+					Template: &corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{
+									Name:  "test-container",
+									Image: "nginx:latest",
+								},
+							},
+						},
+					},
+					VolumeClaimTemplates: []corev1.PersistentVolumeClaim{
+						{
+							ObjectMeta: metav1.ObjectMeta{
+								Name: "www",
+							},
+							Spec: corev1.PersistentVolumeClaimSpec{
+								AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+								Resources: corev1.VolumeResourceRequirements{
+									Requests: corev1.ResourceList{
+										corev1.ResourceStorage: resource.MustParse("1Gi"),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			existingPVCs: []client.Object{
+				&corev1.PersistentVolumeClaim{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "www-test-sandbox",
+						Namespace: "default",
+					},
+					Spec: corev1.PersistentVolumeClaimSpec{
+						AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+						Resources: corev1.VolumeResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceStorage: resource.MustParse("1Gi"),
+							},
+						},
+					},
+				},
+			},
+			expectPVCCount: 1,
+			expectPVCNames: []string{"www-test-sandbox"},
+			wantErr:        false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Setup client with existing PVCs if any
+			objects := []client.Object{}
+			if tt.sandbox != nil {
+				objects = append(objects, tt.sandbox)
+			}
+			objects = append(objects, tt.existingPVCs...)
+
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(objects...).
+				Build()
+
+			reconciler := &SandboxReconciler{
+				Client: fakeClient,
+				Scheme: scheme,
+			}
+
+			ctx := context.Background()
+			err := reconciler.ensureVolumeClaimTemplates(ctx, tt.sandbox)
+
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ensureVolumeClaimTemplates() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+
+			if !tt.wantErr {
+				// List PVCs to verify they were created
+				pvcList := &corev1.PersistentVolumeClaimList{}
+				err = fakeClient.List(ctx, pvcList, client.InNamespace(tt.sandbox.Namespace))
+				if err != nil {
+					t.Errorf("Failed to list PVCs: %v", err)
+					return
+				}
+
+				if len(pvcList.Items) != tt.expectPVCCount {
+					t.Errorf("Expected %d PVCs, got %d", tt.expectPVCCount, len(pvcList.Items))
+				}
+
+				// Verify expected PVC names exist
+				createdPVCNames := make([]string, len(pvcList.Items))
+				for i, pvc := range pvcList.Items {
+					createdPVCNames[i] = pvc.Name
+				}
+
+				for _, expectedName := range tt.expectPVCNames {
+					found := false
+					for _, actualName := range createdPVCNames {
+						if actualName == expectedName {
+							found = true
+							break
+						}
+					}
+					if !found {
+						t.Errorf("Expected PVC %s not found in created PVCs: %v", expectedName, createdPVCNames)
+					}
+				}
+
+				// Verify PVC ownership for newly created PVCs
+				for _, pvc := range pvcList.Items {
+					// Skip checking ownership for existing PVCs that were in the initial objects
+					isExistingPVC := false
+					for _, existingPVC := range tt.existingPVCs {
+						if existingPVC.GetName() == pvc.Name {
+							isExistingPVC = true
+							break
+						}
+					}
+
+					if !isExistingPVC {
+						if len(pvc.OwnerReferences) == 0 {
+							t.Errorf("PVC %s does not have owner reference", pvc.Name)
+							continue
+						}
+						ownerRef := pvc.OwnerReferences[0]
+						if ownerRef.Name != tt.sandbox.Name {
+							t.Errorf("PVC %s owner reference name is %s, expected %s", pvc.Name, ownerRef.Name, tt.sandbox.Name)
+						}
+					}
+				}
+			}
+		})
 	}
 }

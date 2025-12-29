@@ -3,6 +3,7 @@ package sandboxset
 import (
 	"context"
 	"fmt"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"strconv"
 	"strings"
 	"testing"
@@ -694,6 +695,102 @@ func TestReconcile_ScaleDown(t *testing.T) {
 			assert.NoError(t, k8sClient.List(ctx, sandboxes))
 			tt.checkFunc(t, sandboxes.Items)
 			CheckAllEvents(t, eventRecorder, tt.expectEvents)
+		})
+	}
+}
+
+func TestSandboxSetReconcile_WithVolumeClaimTemplates(t *testing.T) {
+	type Case struct {
+		name              string
+		getSandboxSet     func() *v1alpha1.SandboxSet
+		replicas          int32
+		expectedSandboxes int32
+		expectedPVCs      int
+		expectedPVCsFn    func(*testing.T, []corev1.PersistentVolumeClaim)
+	}
+
+	cases := []Case{
+		{
+			name: "sandboxset with volume claim templates creates sandboxes with PVC templates",
+			getSandboxSet: func() *v1alpha1.SandboxSet {
+				sbs := getSandboxSet(2)
+				sbs.Spec.VolumeClaimTemplates = []corev1.PersistentVolumeClaim{
+					{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: "www",
+						},
+						Spec: corev1.PersistentVolumeClaimSpec{
+							AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+							Resources: corev1.VolumeResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceStorage: resource.MustParse("1Gi"),
+								},
+							},
+						},
+					},
+				}
+				return sbs
+			},
+			replicas:          2,
+			expectedSandboxes: 2,
+			expectedPVCs:      0,
+			expectedPVCsFn: func(t *testing.T, pvcs []corev1.PersistentVolumeClaim) {
+				assert.Equal(t, 0, len(pvcs), "SandboxSet controller should not create PVCs directly")
+			},
+		},
+	}
+
+	for _, cs := range cases {
+		t.Run(cs.name, func(t *testing.T) {
+			ctx := context.Background()
+			k8sClient := NewClient()
+
+			sbs := cs.getSandboxSet()
+			sbs.Spec.Replicas = cs.replicas
+			eventRecorder := record.NewFakeRecorder(10)
+			reconciler := &Reconciler{
+				Client:   k8sClient,
+				Scheme:   testScheme,
+				Recorder: eventRecorder,
+				Codec:    codec,
+			}
+
+			assert.NoError(t, k8sClient.Create(ctx, sbs))
+			newStatus, err := reconciler.initNewStatus(sbs)
+			assert.NoError(t, err)
+			sbs.Status = *newStatus
+
+			// First reconcile to create sandboxes
+			_, err = reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(sbs)})
+			assert.NoError(t, err)
+
+			// Check that sandboxes were created with volume claim templates
+			sandboxList := &v1alpha1.SandboxList{}
+			err = k8sClient.List(ctx, sandboxList, client.InNamespace(sbs.Namespace))
+			assert.NoError(t, err)
+			assert.Equal(t, int(cs.expectedSandboxes), len(sandboxList.Items))
+
+			// Verify that each sandbox has the volume claim templates
+			for _, sbx := range sandboxList.Items {
+				assert.Equal(t, len(sbs.Spec.VolumeClaimTemplates), len(sbx.Spec.VolumeClaimTemplates))
+				// Check that templates are correctly propagated
+				for i, expectedTemplate := range sbs.Spec.VolumeClaimTemplates {
+					actualTemplate := sbx.Spec.VolumeClaimTemplates[i]
+					assert.Equal(t, expectedTemplate.Name, actualTemplate.Name)
+					assert.Equal(t, expectedTemplate.Spec.AccessModes, actualTemplate.Spec.AccessModes)
+				}
+			}
+
+			// List PVCs (should be 0 as Sandbox controller hasn't run)
+			pvcList := &corev1.PersistentVolumeClaimList{}
+			err = k8sClient.List(ctx, pvcList, client.InNamespace(sbs.Namespace))
+			assert.NoError(t, err)
+			assert.Equal(t, cs.expectedPVCs, len(pvcList.Items))
+
+			// Run additional validation
+			if cs.expectedPVCsFn != nil {
+				cs.expectedPVCsFn(t, pvcList.Items)
+			}
 		})
 	}
 }

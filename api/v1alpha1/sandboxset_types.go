@@ -59,6 +59,10 @@ type SandboxSetSpec struct {
 	// +kubebuilder:validation:Schemaless
 	// +optional
 	Template *v1.PodTemplateSpec `json:"template,omitempty"`
+
+	// VolumeClaimTemplates is a list of PVC templates to create for each Sandbox managed by this SandboxSet.
+	// +optional
+	VolumeClaimTemplates []v1.PersistentVolumeClaim `json:"volumeClaimTemplates,omitempty"`
 }
 
 // SandboxSetStatus defines the observed state of SandboxSet.
