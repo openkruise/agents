@@ -121,11 +121,35 @@ type SandboxClaimStatus struct {
     // +optional
     ReadyReplicas int32 `json:"readyReplicas,omitempty"`
 
+    // Sandboxes lists all claimed sandbox instances with their details
+    // This allows upper-layer platforms to route requests to specific sandbox instances
+    // +optional
+    Sandboxes []ClaimedSandboxInfo `json:"sandboxes,omitempty"`
+
     // Conditions represent the current state of the SandboxClaim
     // +optional
     // +listType=map
     // +listMapKey=type
     Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// ClaimedSandboxInfo contains information about a claimed sandbox instance
+type ClaimedSandboxInfo struct {
+    // Name is the Kubernetes resource name of the Sandbox
+    Name string `json:"name"`
+
+    // SandboxID is the unique identifier used for routing (e.g., "sb-abc123")
+    SandboxID string `json:"sandboxID"`
+
+    // State indicates the current state (Running, Paused, etc.)
+    State string `json:"state"`
+
+    // IP is the Pod IP address
+    // +optional
+    IP string `json:"ip,omitempty"`
+
+    // ClaimedAt is the timestamp when the sandbox was claimed
+    ClaimedAt metav1.Time `json:"claimedAt"`
 }
 
 // SandboxClaimPhase defines the phase of SandboxClaim
@@ -256,5 +280,155 @@ The controller continuously monitors claimed sandboxes and handles unhealthy/del
     - When all claimed sandboxes become ready
     - Phase transitions back to `Ready`
     - `ReadyReplicas` == `ClaimedReplicas` == `spec.replicas`
+
+#### Querying Claimed Sandboxes
+
+##### Method 1: Query SandboxClaim Status (Recommended)
+
+The `status.sandboxes` field lists all claimed sandbox instances with routing information:
+
+```bash
+# View claim status
+kubectl get sandboxclaim test-batch -o yaml
+```
+
+Example output:
+```yaml
+apiVersion: agents.kruise.io/v1alpha1
+kind: SandboxClaim
+metadata:
+  name: test-batch
+spec:
+  sandboxSetName: python-pool
+  replicas: 3
+status:
+  phase: Ready
+  claimedReplicas: 3
+  readyReplicas: 3
+  sandboxes:
+    - name: python-pool-abc123
+      sandboxID: sb-abc123
+      state: Running
+      ip: 10.244.0.10
+      claimedAt: "2025-12-30T10:00:00Z"
+    - name: python-pool-def456
+      sandboxID: sb-def456
+      state: Running
+      ip: 10.244.0.11
+      claimedAt: "2025-12-30T10:00:05Z"
+    - name: python-pool-ghi789
+      sandboxID: sb-ghi789
+      state: Running
+      ip: 10.244.0.12
+      claimedAt: "2025-12-30T10:00:10Z"
+```
+
+Extract sandbox IDs:
+```bash
+# Get all sandbox IDs
+kubectl get sandboxclaim test-batch -o jsonpath='{.status.sandboxes[*].sandboxID}'
+# Output: sb-abc123 sb-def456 sb-ghi789
+
+# Get sandbox IDs in JSON format
+kubectl get sandboxclaim test-batch -o jsonpath='{.status.sandboxes}' | jq
+```
+
+##### Method 2: Query via Kubernetes API (Using OwnerReference)
+
+Claimed sandboxes have the SandboxClaim set as their ownerReference:
+
+```bash
+# List all sandboxes owned by a specific claim
+kubectl get sandboxes -o json | jq '.items[] | select(.metadata.ownerReferences[]?.name == "test-batch")'
+
+```
+
+##### Method 3: Query via E2B API (Using Metadata)
+
+If the SandboxClaim sets a unique metadata annotation, sandboxes can be queried via E2B API:
+
+**Step 1**: Set unique metadata in SandboxClaim:
+```yaml
+apiVersion: agents.kruise.io/v1alpha1
+kind: SandboxClaim
+metadata:
+  name: test-batch
+spec:
+  sandboxSetName: python-pool
+  replicas: 3
+  metadata:
+    claim-id: "test-batch"  # Unique identifier for querying
+    project: "my-project"
+```
+
+**Step 2**: Query via E2B API:
+```bash
+# Query by metadata
+curl -H "X-API-KEY: $API_KEY" \
+  "https://api.example.com/v2/sandboxes?claim-id=test-batch&state=running,paused"
+```
+
+Response:
+```json
+[
+  {
+    "sandboxID": "sb-abc123",
+    "templateID": "python-pool",
+    "state": "running",
+    "metadata": {
+      "claim-id": "test-batch",
+      "project": "my-project"
+    },
+    "startedAt": "2025-12-30T10:00:00Z"
+  },
+  ...
+]
+```
+
+#### Routing to Specific Sandbox Instances
+
+
+##### Load Balancing Implementation
+
+Upper-layer platforms can implement custom load balancing strategies:
+##### Traffic Flow
+
+```
+┌─────────────────────┐
+│  Upper Platform     │
+│  (Load Balancer)    │
+└──────────┬──────────┘
+           │
+           │ 1. Query SandboxClaim status
+           │ 
+           │
+           ▼
+┌─────────────────────────────────────┐
+│  SandboxClaim Status                │
+│  sandboxes:                         │
+│  - sandboxID: sb-abc123, state: Running │
+│  - sandboxID: sb-def456, state: Running │
+│  - sandboxID: sb-ghi789, state: Running │
+└──────────┬──────────────────────────┘
+           │
+           │ 2. Select sandbox
+           │    Selected: sb-abc123
+           │
+           ▼
+┌─────────────────────────────────────┐
+│  Envoy Proxy                        │
+│  (External Processor)               │
+└──────────┬──────────────────────────┘
+           │
+           │ 3. Route to: 8080-sb-abc123.example.com
+           │    Envoy looks up route for sandboxID: sb-abc123
+           │    Sets x-envoy-original-dst-host: 10.244.0.10:8080
+           │
+           ▼
+┌─────────────────────────────────────┐
+│  Sandbox Pod (10.244.0.10:8080)    │
+│  sandboxID: sb-abc123               │
+└─────────────────────────────────────┘
+```
 
 
