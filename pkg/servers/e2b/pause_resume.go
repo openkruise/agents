@@ -3,6 +3,7 @@ package e2b
 import (
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
@@ -25,12 +26,13 @@ func (sc *Controller) PauseSandbox(r *http.Request) (web.ApiResponse[struct{}], 
 			Message: fmt.Sprintf("Sandbox %s is not running", id),
 		}
 	}
-	if err := sbx.Pause(ctx); err != nil {
+	shutdownTime := time.Now().Add(time.Duration(sc.maxTimeout) * time.Second)
+	if err := sbx.Pause(ctx, shutdownTime); err != nil {
 		return web.ApiResponse[struct{}]{}, &web.ApiError{
 			Message: fmt.Sprintf("Failed to pause sandbox: %v", err),
 		}
 	}
-	log.Info("sandbox paused")
+	log.Info("sandbox paused", "shutdownTime", shutdownTime)
 	return web.ApiResponse[struct{}]{
 		Code: http.StatusNoContent,
 	}, nil
