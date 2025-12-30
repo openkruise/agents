@@ -52,6 +52,9 @@ func TestPauseSandbox(t *testing.T) {
 	describeResp, err = controller.DescribeSandbox(req)
 	assert.Nil(t, err)
 	assert.Equal(t, models.SandboxStatePaused, describeResp.Body.State)
+	endAt, parseErr := time.Parse(time.RFC3339, describeResp.Body.EndAt)
+	assert.NoError(t, parseErr)
+	AssertTimeAlmostEqual(t, time.Now().Add(time.Duration(controller.maxTimeout)*time.Second), endAt)
 }
 
 func TestConnectSandbox(t *testing.T) {
@@ -148,7 +151,7 @@ func TestConnectSandbox(t *testing.T) {
 						Type:   string(agentsv1alpha1.SandboxConditionReady),
 						Status: metav1.ConditionTrue,
 					})
-					client.ApiV1alpha1().Sandboxes(sbx.Namespace).UpdateStatus(context.Background(), sbx, metav1.UpdateOptions{})
+					_, _ = client.ApiV1alpha1().Sandboxes(sbx.Namespace).UpdateStatus(context.Background(), sbx, metav1.UpdateOptions{})
 				})
 			}
 
@@ -277,7 +280,7 @@ func TestResumeSandbox(t *testing.T) {
 						Type:   string(agentsv1alpha1.SandboxConditionReady),
 						Status: metav1.ConditionTrue,
 					})
-					client.ApiV1alpha1().Sandboxes(sbx.Namespace).UpdateStatus(context.Background(), sbx, metav1.UpdateOptions{})
+					_, _ = client.ApiV1alpha1().Sandboxes(sbx.Namespace).UpdateStatus(context.Background(), sbx, metav1.UpdateOptions{})
 				})
 			}
 

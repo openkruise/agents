@@ -2,6 +2,7 @@ package sandboxcr
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -178,9 +179,10 @@ func TestSandbox_SetPause(t *testing.T) {
 			time.Sleep(10 * time.Millisecond)
 
 			s := AsSandbox(sandbox, client, cache)
+			shutdownTime := time.Now().Add(time.Hour)
 			var err error
 			if tt.operatePause {
-				err = s.Pause(context.Background())
+				err = s.Pause(context.Background(), shutdownTime)
 				if err == nil {
 					patch := ctrl.MergeFrom(s.Sandbox.DeepCopy())
 					s.Status.Phase = v1alpha1.SandboxPaused
@@ -208,9 +210,9 @@ func TestSandbox_SetPause(t *testing.T) {
 			if tt.expectError {
 				assert.Error(t, err)
 				return
-			} else {
-				assert.NoError(t, err)
 			}
+
+			assert.NoError(t, err)
 
 			updatedSbx, err := client.ApiV1alpha1().Sandboxes("default").Get(context.Background(), "test-sandbox", metav1.GetOptions{})
 			assert.NoError(t, err)
@@ -218,8 +220,20 @@ func TestSandbox_SetPause(t *testing.T) {
 			state, reason := sandboxutils.GetSandboxState(updatedSbx)
 			assert.Equal(t, tt.expectedState, state, reason)
 			assert.Equal(t, tt.operatePause, updatedSbx.Spec.Paused)
+
+			if tt.operatePause {
+				AssertTimeAlmostEqual(t, shutdownTime, updatedSbx.Spec.ShutdownTime.Time)
+			}
 		})
 	}
+}
+
+func AssertTimeAlmostEqual(t *testing.T, expected, actual time.Time) {
+	offset := expected.Sub(actual)
+	if offset < 0 {
+		offset = -offset
+	}
+	assert.True(t, offset < time.Second, fmt.Sprintf("actual time %s should be almost equal to expected %s", actual, expected))
 }
 
 // TestSandbox_ResumeConcurrent tests concurrent resume operations on the same sandbox

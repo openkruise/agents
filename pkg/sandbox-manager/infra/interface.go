@@ -45,9 +45,9 @@ type SandboxPool interface {
 }
 
 type Sandbox interface {
-	metav1.Object                     // For K8s object metadata access
-	Pause(ctx context.Context) error  // Pause a Sandbox (not available for K8sInfra)
-	Resume(ctx context.Context) error // Resume a paused Sandbox
+	metav1.Object                                            // For K8s object metadata access
+	Pause(ctx context.Context, shutdownTime time.Time) error // Pause a Sandbox (not available for K8sInfra)
+	Resume(ctx context.Context) error                        // Resume a paused Sandbox
 	GetSandboxID() string
 	GetRoute() proxy.Route
 	GetState() (string, string)   // Get Sandbox State (pending, running, paused, killing, etc.)

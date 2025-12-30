@@ -160,7 +160,7 @@ func CreateSandboxPool(t *testing.T, client versioned.Interface, name string, av
 		}
 		CreateSandboxWithStatus(t, client, sbx)
 	}
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	return func() {
 		assert.NoError(t, client.ApiV1alpha1().SandboxSets(Namespace).Delete(context.Background(), name, metav1.DeleteOptions{}))
 		for i := 0; i < available; i++ {

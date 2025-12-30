@@ -147,7 +147,7 @@ func (s *Sandbox) Request(r *http.Request, path string, port int) (*http.Respons
 	return proxyutils.ProxyRequest(r, path, port, s.Status.PodInfo.PodIP)
 }
 
-func (s *Sandbox) Pause(ctx context.Context) error {
+func (s *Sandbox) Pause(ctx context.Context, shutdownTime time.Time) error {
 	log := klog.FromContext(ctx)
 	if s.Status.Phase != agentsv1alpha1.SandboxRunning {
 		return fmt.Errorf("sandbox is not in running phase")
@@ -158,8 +158,10 @@ func (s *Sandbox) Pause(ctx context.Context) error {
 		log.Error(err, "sandbox is not running", "state", state, "reason", reason)
 		return err
 	}
+	specShutdownTime := metav1.NewTime(shutdownTime)
 	err := s.retryUpdate(ctx, s.Update, func(sbx *agentsv1alpha1.Sandbox) {
 		sbx.Spec.Paused = true
+		sbx.Spec.ShutdownTime = &specShutdownTime
 	})
 	if err != nil {
 		log.Error(err, "failed to update sandbox spec.paused")
