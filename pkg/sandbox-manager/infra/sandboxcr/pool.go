@@ -87,7 +87,7 @@ func (p *Pool) ClaimSandbox(ctx context.Context, user string, candidateCounts in
 		claimLog := log.WithValues("sandbox", klog.KObj(sbx.Sandbox))
 		claimLog.Info("sandbox picked")
 
-		if err = p.modifyPickedSandbox(sbx, opts); err != nil {
+		if err = p.modifyPickedSandbox(ctx, sbx, opts); err != nil {
 			claimLog.Error(err, "failed to modify picked sandbox")
 			return retriableError{Message: fmt.Sprintf("failed to modify picked sandbox: %s", err)}
 		}
@@ -159,8 +159,8 @@ func (p *Pool) pickAnAvailableSandbox(ctx context.Context, cnt int, r *rand.Rand
 	}
 }
 
-func (p *Pool) modifyPickedSandbox(sbx *Sandbox, opts infra.ClaimSandboxOptions) error {
-	if err := sbx.InplaceRefresh(true); err != nil {
+func (p *Pool) modifyPickedSandbox(ctx context.Context, sbx *Sandbox, opts infra.ClaimSandboxOptions) error {
+	if err := sbx.InplaceRefresh(ctx, true); err != nil {
 		return err
 	}
 	if opts.Modifier != nil {

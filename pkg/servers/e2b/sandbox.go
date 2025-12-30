@@ -96,7 +96,8 @@ func (sc *Controller) convertToE2BSandbox(sbx infra.Sandbox, accessToken string)
 	} else {
 		sandbox.StartedAt = claimTime.Format(time.RFC3339)
 	}
-	sandbox.EndAt = sbx.GetTimeout().Format(time.RFC3339)
+	_, endAt := ParseTimeout(sbx)
+	sandbox.EndAt = endAt.Format(time.RFC3339)
 	resource := sbx.GetResource()
 	sandbox.CPUCount = resource.CPUMilli / 1000
 	sandbox.MemoryMB = resource.MemoryMB
@@ -111,4 +112,12 @@ func ValidateMetadataKey(key string) bool {
 		}
 	}
 	return true
+}
+
+func ParseTimeout(sbx infra.Sandbox) (autoPause bool, timeoutAt time.Time) {
+	timeout := sbx.GetTimeout()
+	if timeout.PauseTime.IsZero() {
+		return false, timeout.ShutdownTime
+	}
+	return true, timeout.PauseTime
 }

@@ -40,6 +40,7 @@ func (m *SandboxManager) ClaimSandbox(ctx context.Context, user, template string
 	if err = m.syncRoute(ctx, sandbox, false); err != nil {
 		log.Error(err, "failed to sync route with peers after claim")
 	}
+	m.proxy.SetRoute(route)
 	return sandbox, nil
 }
 

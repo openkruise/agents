@@ -119,10 +119,11 @@ const (
 )
 
 type waitEntry struct {
-	ctx     context.Context
-	done    chan struct{}
-	action  WaitAction
-	checker checkFunc
+	ctx       context.Context
+	done      chan struct{}
+	action    WaitAction
+	checker   checkFunc
+	closeOnce sync.Once
 }
 
 func (c *Cache) WaitForSandboxSatisfied(ctx context.Context, sbx *agentsv1alpha1.Sandbox, action WaitAction,
@@ -205,7 +206,9 @@ func (c *Cache) watchSandboxSatisfied(obj interface{}) {
 	log.Info("watch sandbox satisfied result",
 		"satisfied", satisfied, "err", err, "resourceVersion", sbx.GetResourceVersion())
 	if satisfied || err != nil {
-		close(entry.done)
+		entry.closeOnce.Do(func() {
+			close(entry.done)
+		})
 		return
 	}
 }

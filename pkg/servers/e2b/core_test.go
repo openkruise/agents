@@ -83,7 +83,7 @@ func Setup(t *testing.T) (*Controller, *clients.ClientSet, func()) {
 		},
 		Data: map[string][]byte{},
 	}
-	_, err := clientSet.CoreV1().Secrets(namespace).Create(context.Background(), secret, metav1.CreateOptions{})
+	_, err := clientSet.CoreV1().Secrets(namespace).Create(t.Context(), secret, metav1.CreateOptions{})
 	assert.NoError(t, err)
 
 	controller := NewController("example.com", InitKey, namespace, models.DefaultMaxTimeout, TestServerPort, true, clientSet)
@@ -176,7 +176,7 @@ func CreateSandboxPool(t *testing.T, client versioned.Interface, name string, av
 		}
 		CreateSandboxWithStatus(t, client, sbx)
 	}
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	return func() {
 		assert.NoError(t, client.ApiV1alpha1().SandboxSets(Namespace).Delete(context.Background(), name, metav1.DeleteOptions{}))
 		for i := 0; i < available; i++ {
@@ -199,4 +199,44 @@ func GetSandbox(t *testing.T, sandboxID string, client clients.SandboxClient) *a
 	sbx, err := client.ApiV1alpha1().Sandboxes(namespace).Get(context.Background(), name, metav1.GetOptions{})
 	assert.NoError(t, err)
 	return sbx
+}
+
+type DoFunc func(t *testing.T, client clients.SandboxClient, sbx *agentsv1alpha1.Sandbox)
+type WhenFunc func(sbx *agentsv1alpha1.Sandbox) bool
+
+func UpdateSandboxWhen(t *testing.T, client clients.SandboxClient, sandboxID string, when WhenFunc, do DoFunc) {
+	var sbx *agentsv1alpha1.Sandbox
+	if !assert.Eventually(t, func() bool {
+		sbx = GetSandbox(t, sandboxID, client)
+		return when(sbx)
+	}, 5*time.Second, 10*time.Millisecond) {
+		return
+	}
+	if sbx != nil {
+		do(t, client, sbx.DeepCopy())
+	}
+}
+
+func DoSetSandboxStatus(phase agentsv1alpha1.SandboxPhase, pausedStatus, readyStatus metav1.ConditionStatus) DoFunc {
+	return func(t *testing.T, client clients.SandboxClient, sbx *agentsv1alpha1.Sandbox) {
+		sbx.Status.Phase = phase
+		sbx.Status.Conditions = []metav1.Condition{
+			{
+				Type:   string(agentsv1alpha1.SandboxConditionPaused),
+				Status: pausedStatus,
+			},
+			{
+				Type:   string(agentsv1alpha1.SandboxConditionReady),
+				Status: readyStatus,
+			},
+		}
+		_, err := client.ApiV1alpha1().Sandboxes(sbx.Namespace).UpdateStatus(context.Background(), sbx, metav1.UpdateOptions{})
+		assert.NoError(t, err)
+	}
+}
+
+func AssertEndAt(t *testing.T, expect time.Time, endAt string) {
+	endAtTime, err := time.Parse(time.RFC3339, endAt)
+	assert.NoError(t, err)
+	assert.WithinDuration(t, expect, endAtTime, 5*time.Second)
 }
