@@ -198,3 +198,26 @@ func GetSandbox(t *testing.T, sandboxID string, client clients.SandboxClient) *a
 	assert.NoError(t, err)
 	return sbx
 }
+
+func SetSandboxPauseStatus(t *testing.T, sandboxID string, paused bool, client clients.SandboxClient) {
+	status := metav1.ConditionFalse
+	phase := agentsv1alpha1.SandboxRunning
+	if paused {
+		status = metav1.ConditionTrue
+		phase = agentsv1alpha1.SandboxPaused
+	}
+	sbx := GetSandbox(t, sandboxID, client)
+	sbx.Status.Phase = phase
+	sbx.Status.Conditions = append(sbx.Status.Conditions, metav1.Condition{
+		Type:   string(agentsv1alpha1.SandboxConditionPaused),
+		Status: status,
+	})
+	_, err := client.ApiV1alpha1().Sandboxes(sbx.Namespace).UpdateStatus(context.Background(), sbx, metav1.UpdateOptions{})
+	assert.NoError(t, err)
+}
+
+func AssertEndAt(t *testing.T, expect time.Time, endAt string) {
+	endAtTime, err := time.Parse(time.RFC3339, endAt)
+	assert.NoError(t, err)
+	assert.WithinDuration(t, expect, endAtTime, 5*time.Second)
+}

@@ -155,15 +155,25 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return reconcile.Result{}, err
 	}
 
-	// Check Shutdown
+	// Check ShutdownTime and PauseTime
+	now := metav1.Now()
 	var requeueAfter time.Duration
 	if box.Spec.ShutdownTime != nil && box.DeletionTimestamp == nil {
-		now := metav1.Now()
 		if box.Spec.ShutdownTime.Before(&now) {
-			logger.Info("Sandbox shutdown time reached，and it will be deleted.")
-			return reconcile.Result{}, r.Delete(ctx, box)
+			logger.Info("sandbox shutdown time reached, will be deleted")
+			return ctrl.Result{}, r.Delete(ctx, box)
 		}
 		requeueAfter = box.Spec.ShutdownTime.Sub(now.Time)
+	}
+	if box.Spec.PauseTime != nil && !box.Spec.Paused {
+		if box.Spec.PauseTime.Before(&now) {
+			logger.Info("sandbox pause time reached, will be paused")
+			modified := box.DeepCopy()
+			patch := client.MergeFrom(box)
+			modified.Spec.Paused = true
+			return ctrl.Result{}, r.Patch(ctx, modified, patch)
+		}
+		requeueAfter = min(requeueAfter, box.Spec.PauseTime.Sub(now.Time))
 	}
 
 	// calculate sandbox status

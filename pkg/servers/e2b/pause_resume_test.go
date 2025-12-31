@@ -54,7 +54,7 @@ func TestPauseSandbox(t *testing.T) {
 	assert.Equal(t, models.SandboxStatePaused, describeResp.Body.State)
 	endAt, parseErr := time.Parse(time.RFC3339, describeResp.Body.EndAt)
 	assert.NoError(t, parseErr)
-	AssertTimeAlmostEqual(t, time.Now().Add(time.Duration(controller.maxTimeout)*time.Second), endAt)
+	assert.WithinDuration(t, time.Now().Add(time.Duration(controller.maxTimeout)*time.Second), endAt, time.Second)
 }
 
 func TestConnectSandbox(t *testing.T) {
@@ -132,18 +132,7 @@ func TestConnectSandbox(t *testing.T) {
 				describeResp, err := controller.DescribeSandbox(req)
 				assert.Nil(t, err)
 				assert.Equal(t, models.SandboxStatePaused, describeResp.Body.State)
-				status := metav1.ConditionTrue
-				if tt.pausing {
-					status = metav1.ConditionFalse
-				}
-				sbx := GetSandbox(t, createResp.Body.SandboxID, client.SandboxClient)
-				sbx.Status.Phase = agentsv1alpha1.SandboxPaused
-				sbx.Status.Conditions = append(sbx.Status.Conditions, metav1.Condition{
-					Type:   string(agentsv1alpha1.SandboxConditionPaused),
-					Status: status,
-				})
-				_, err2 := client.ApiV1alpha1().Sandboxes(sbx.Namespace).UpdateStatus(context.Background(), sbx, metav1.UpdateOptions{})
-				assert.NoError(t, err2)
+				SetSandboxPauseStatus(t, describeResp.Body.SandboxID, tt.paused, client.SandboxClient)
 				time.AfterFunc(60*time.Millisecond, func() {
 					sbx := GetSandbox(t, createResp.Body.SandboxID, client.SandboxClient)
 					sbx.Status.Phase = agentsv1alpha1.SandboxRunning

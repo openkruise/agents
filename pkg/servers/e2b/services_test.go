@@ -232,3 +232,124 @@ func TestCreateSandbox(t *testing.T) {
 		})
 	}
 }
+
+func TestAutoPause(t *testing.T) {
+	controller, client, teardown := Setup(t)
+	defer teardown()
+	timeout := 300
+	now := time.Now()
+	timeoutTime := now.Add(time.Duration(timeout) * time.Second)
+	maxTimeoutTime := now.Add(time.Duration(models.DefaultMaxTimeout) * time.Second)
+	templateName := "auto-pause"
+	user := &models.CreatedTeamAPIKey{
+		ID:   keys.AdminKeyID,
+		Key:  InitKey,
+		Name: "test-user",
+	}
+	tests := []struct {
+		name          string
+		autoPause     bool
+		createChecker func(t *testing.T, sbx *v1alpha1.Sandbox)
+		pauseChecker  func(t *testing.T, sbx *v1alpha1.Sandbox)
+		resumeChecker func(t *testing.T, sbx *v1alpha1.Sandbox)
+	}{
+		{
+			name:      "autoPause == false",
+			autoPause: false,
+			createChecker: func(t *testing.T, sbx *v1alpha1.Sandbox) {
+				assert.Nil(t, sbx.Spec.PauseTime)
+				assert.NotNil(t, sbx.Spec.ShutdownTime)
+				if sbx.Spec.ShutdownTime != nil {
+					assert.WithinDuration(t, sbx.Spec.ShutdownTime.Time, timeoutTime, 5*time.Second)
+				}
+			},
+			pauseChecker: func(t *testing.T, sbx *v1alpha1.Sandbox) {
+				assert.Nil(t, sbx.Spec.PauseTime)
+				assert.NotNil(t, sbx.Spec.ShutdownTime)
+				if sbx.Spec.ShutdownTime != nil {
+					assert.WithinDuration(t, sbx.Spec.ShutdownTime.Time, maxTimeoutTime, 5*time.Second)
+				}
+			},
+			resumeChecker: func(t *testing.T, sbx *v1alpha1.Sandbox) {
+				assert.Nil(t, sbx.Spec.PauseTime)
+				assert.NotNil(t, sbx.Spec.ShutdownTime)
+				if sbx.Spec.ShutdownTime != nil {
+					assert.WithinDuration(t, sbx.Spec.ShutdownTime.Time, timeoutTime, 5*time.Second)
+				}
+			},
+		},
+		{
+			name:      "autoPause == true",
+			autoPause: true,
+			createChecker: func(t *testing.T, sbx *v1alpha1.Sandbox) {
+				assert.NotNil(t, sbx.Spec.PauseTime)
+				if sbx.Spec.PauseTime != nil {
+					assert.WithinDuration(t, sbx.Spec.PauseTime.Time, timeoutTime, 5*time.Second)
+				}
+				assert.NotNil(t, sbx.Spec.ShutdownTime)
+				if sbx.Spec.ShutdownTime != nil {
+					assert.WithinDuration(t, sbx.Spec.ShutdownTime.Time, maxTimeoutTime, 5*time.Second)
+				}
+			},
+			pauseChecker: func(t *testing.T, sbx *v1alpha1.Sandbox) {
+				assert.NotNil(t, sbx.Spec.PauseTime)
+				if sbx.Spec.PauseTime != nil {
+					assert.WithinDuration(t, sbx.Spec.PauseTime.Time, maxTimeoutTime, 5*time.Second)
+				}
+				assert.NotNil(t, sbx.Spec.ShutdownTime)
+				if sbx.Spec.ShutdownTime != nil {
+					assert.WithinDuration(t, sbx.Spec.ShutdownTime.Time, maxTimeoutTime, 5*time.Second)
+				}
+			},
+			resumeChecker: func(t *testing.T, sbx *v1alpha1.Sandbox) {
+				assert.NotNil(t, sbx.Spec.PauseTime)
+				if sbx.Spec.PauseTime != nil {
+					assert.WithinDuration(t, sbx.Spec.PauseTime.Time, timeoutTime, 5*time.Second)
+				}
+				assert.NotNil(t, sbx.Spec.ShutdownTime)
+				if sbx.Spec.ShutdownTime != nil {
+					assert.WithinDuration(t, sbx.Spec.ShutdownTime.Time, maxTimeoutTime, 5*time.Second)
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cleanup := CreateSandboxPool(t, client.SandboxClient, templateName, 1)
+			defer cleanup()
+
+			createResp, apiError := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
+				TemplateID: templateName,
+				AutoPause:  tt.autoPause,
+				Timeout:    timeout,
+			}, nil, user))
+			assert.Nil(t, apiError)
+			AssertEndAt(t, timeoutTime, createResp.Body.EndAt)
+			tt.createChecker(t, GetSandbox(t, createResp.Body.SandboxID, client.SandboxClient))
+
+			_, apiError = controller.PauseSandbox(NewRequest(t, nil, nil, map[string]string{
+				"sandboxID": createResp.Body.SandboxID,
+			}, user))
+			assert.Nil(t, apiError)
+			SetSandboxPauseStatus(t, createResp.Body.SandboxID, true, client.SandboxClient)
+			describeResp, apiError := controller.DescribeSandbox(NewRequest(t, nil, nil, map[string]string{
+				"sandboxID": createResp.Body.SandboxID,
+			}, user))
+			assert.Nil(t, apiError)
+			AssertEndAt(t, maxTimeoutTime, describeResp.Body.EndAt)
+			tt.pauseChecker(t, GetSandbox(t, createResp.Body.SandboxID, client.SandboxClient))
+
+			time.AfterFunc(10*time.Millisecond, func() {
+				SetSandboxPauseStatus(t, createResp.Body.SandboxID, false, client.SandboxClient)
+			})
+			connectResp, apiError := controller.ConnectSandbox(NewRequest(t, nil, models.SetTimeoutRequest{
+				TimeoutSeconds: timeout,
+			}, map[string]string{
+				"sandboxID": createResp.Body.SandboxID,
+			}, user))
+			assert.Nil(t, apiError)
+			AssertEndAt(t, timeoutTime, connectResp.Body.EndAt)
+			tt.resumeChecker(t, GetSandbox(t, createResp.Body.SandboxID, client.SandboxClient))
+		})
+	}
+}

@@ -1,12 +1,11 @@
 package sandboxcr
 
 import (
-	"context"
-	"fmt"
 	"testing"
 	"time"
 
 	"github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	"github.com/openkruise/agents/pkg/utils/sandboxutils"
 	"github.com/stretchr/testify/assert"
@@ -158,6 +157,7 @@ func TestSandbox_SetPause(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			now := time.Now()
 			sandbox := &v1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:        "test-sandbox",
@@ -179,17 +179,22 @@ func TestSandbox_SetPause(t *testing.T) {
 			time.Sleep(10 * time.Millisecond)
 
 			s := AsSandboxForTest(sandbox, client, cache)
-			shutdownTime := time.Now().Add(time.Hour)
+			opts := infra.PauseOptions{
+				TimeoutOptions: infra.TimeoutOptions{
+					ShutdownTime: now.Add(time.Hour),
+					PauseTime:    now.Add(time.Minute),
+				},
+			}
 			var err error
 			if tt.operatePause {
-				err = s.Pause(context.Background(), shutdownTime)
+				err = s.Pause(t.Context(), opts)
 				if err == nil {
 					patch := ctrl.MergeFrom(s.Sandbox.DeepCopy())
 					s.Status.Phase = v1alpha1.SandboxPaused
 					data, err := patch.Data(s.Sandbox)
 					assert.NoError(t, err)
 					_, err = client.ApiV1alpha1().Sandboxes("default").Patch(
-						context.Background(), s.Name, types.MergePatchType, data, metav1.PatchOptions{})
+						t.Context(), s.Name, types.MergePatchType, data, metav1.PatchOptions{})
 					assert.NoError(t, err)
 				}
 			} else {
@@ -202,11 +207,11 @@ func TestSandbox_SetPause(t *testing.T) {
 						data, err := patch.Data(updated)
 						assert.NoError(t, err)
 						_, err = client.ApiV1alpha1().Sandboxes("default").Patch(
-							context.Background(), s.Name, types.MergePatchType, data, metav1.PatchOptions{})
+							t.Context(), s.Name, types.MergePatchType, data, metav1.PatchOptions{})
 						assert.NoError(t, err)
 					})
 				}
-				err = s.Resume(context.Background())
+				err = s.Resume(t.Context())
 			}
 			if tt.expectError {
 				assert.Error(t, err)
@@ -214,7 +219,7 @@ func TestSandbox_SetPause(t *testing.T) {
 			}
 
 			assert.NoError(t, err)
-			updatedSbx, err := client.ApiV1alpha1().Sandboxes("default").Get(context.Background(), "test-sandbox", metav1.GetOptions{})
+			updatedSbx, err := client.ApiV1alpha1().Sandboxes("default").Get(t.Context(), "test-sandbox", metav1.GetOptions{})
 			assert.NoError(t, err)
 
 			state, reason := sandboxutils.GetSandboxState(updatedSbx)
@@ -222,18 +227,16 @@ func TestSandbox_SetPause(t *testing.T) {
 			assert.Equal(t, tt.operatePause, updatedSbx.Spec.Paused)
 
 			if tt.operatePause {
-				AssertTimeAlmostEqual(t, shutdownTime, updatedSbx.Spec.ShutdownTime.Time)
+				if !opts.ShutdownTime.IsZero() {
+					// milliseconds will be removed by k8s
+					assert.WithinDuration(t, opts.ShutdownTime, updatedSbx.Spec.ShutdownTime.Time, time.Second)
+				}
+				if !opts.PauseTime.IsZero() {
+					assert.WithinDuration(t, opts.PauseTime, updatedSbx.Spec.PauseTime.Time, time.Second)
+				}
 			}
 		})
 	}
-}
-
-func AssertTimeAlmostEqual(t *testing.T, expected, actual time.Time) {
-	offset := expected.Sub(actual)
-	if offset < 0 {
-		offset = -offset
-	}
-	assert.True(t, offset < time.Second, fmt.Sprintf("actual time %s should be almost equal to expected %s", actual, expected))
 }
 
 // TestSandbox_ResumeConcurrent tests concurrent resume operations on the same sandbox
@@ -278,7 +281,7 @@ func TestSandbox_ResumeConcurrent(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		s := AsSandboxForTest(sandbox, client, cache)
 		go func() {
-			err := s.Resume(context.Background())
+			err := s.Resume(t.Context())
 			resultCh <- err
 		}()
 	}
@@ -292,7 +295,7 @@ func TestSandbox_ResumeConcurrent(t *testing.T) {
 		data, err := patch.Data(updated)
 		assert.NoError(t, err)
 		_, err = client.ApiV1alpha1().Sandboxes("default").Patch(
-			context.Background(), updated.Name, types.MergePatchType, data, metav1.PatchOptions{})
+			t.Context(), updated.Name, types.MergePatchType, data, metav1.PatchOptions{})
 		assert.NoError(t, err)
 	})
 
@@ -312,7 +315,7 @@ func TestSandbox_ResumeConcurrent(t *testing.T) {
 	assert.True(t, time.Since(start) >= 500*time.Millisecond)
 
 	// Verify that the sandbox is in Running state
-	updatedSbx, err := client.ApiV1alpha1().Sandboxes("default").Get(context.Background(), "test-sandbox", metav1.GetOptions{})
+	updatedSbx, err := client.ApiV1alpha1().Sandboxes("default").Get(t.Context(), "test-sandbox", metav1.GetOptions{})
 	assert.NoError(t, err)
 	state, reason = sandboxutils.GetSandboxState(updatedSbx)
 	assert.Equal(t, v1alpha1.SandboxStateRunning, state, reason)

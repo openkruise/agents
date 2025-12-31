@@ -21,6 +21,15 @@ type SandboxResource struct {
 	DiskSizeMB int64
 }
 
+type TimeoutOptions struct {
+	ShutdownTime time.Time
+	PauseTime    time.Time
+}
+
+type PauseOptions struct {
+	TimeoutOptions
+}
+
 type Infrastructure interface {
 	Run(ctx context.Context) error                                             // Starts the infrastructure
 	Stop()                                                                     // Stops the infrastructure
@@ -41,19 +50,19 @@ type SandboxPool interface {
 }
 
 type Sandbox interface {
-	metav1.Object                                            // For K8s object metadata access
-	Pause(ctx context.Context, shutdownTime time.Time) error // Pause a Sandbox (not available for K8sInfra)
-	Resume(ctx context.Context) error                        // Resume a paused Sandbox
+	metav1.Object                                       // For K8s object metadata access
+	Pause(ctx context.Context, opts PauseOptions) error // Pause a Sandbox
+	Resume(ctx context.Context) error                   // Resume a paused Sandbox
 	GetSandboxID() string
 	GetRoute() proxy.Route
 	GetState() (string, string)   // Get Sandbox State (pending, running, paused, killing, etc.)
 	GetTemplate() string          // Get the template name of the Sandbox
 	GetResource() SandboxResource // Get the CPU / Memory requirements of the Sandbox
-	SetTimeout(ttl time.Duration)
-	SaveTimeout(ctx context.Context, ttl time.Duration) error
 	SetImage(image string)
 	GetImage() string
-	GetTimeout() time.Time
+	SetTimeout(opts TimeoutOptions)
+	SaveTimeout(ctx context.Context, opts TimeoutOptions) error
+	GetTimeout() TimeoutOptions
 	GetClaimTime() (time.Time, error)
 	Kill(ctx context.Context) error                                         // Delete the Sandbox resource
 	InplaceRefresh(deepcopy bool) error                                     // Update the Sandbox resource object to the latest
