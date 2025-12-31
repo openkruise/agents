@@ -25,7 +25,7 @@ func (sc *Controller) PauseSandbox(r *http.Request) (web.ApiResponse[struct{}], 
 			Message: fmt.Sprintf("Sandbox %s is not running", id),
 		}
 	}
-	if err := sbx.Pause(ctx); err != nil {
+	if err := sc.manager.PauseSandbox(ctx, sbx); err != nil {
 		return web.ApiResponse[struct{}]{}, &web.ApiError{
 			Message: fmt.Sprintf("Failed to pause sandbox: %v", err),
 		}
@@ -63,7 +63,7 @@ func (sc *Controller) ResumeSandbox(r *http.Request) (web.ApiResponse[struct{}],
 		}
 	}
 	log.Info("resuming sandbox")
-	if err := sbx.Resume(ctx); err != nil {
+	if err := sc.manager.ResumeSandbox(ctx, sbx); err != nil {
 		return web.ApiResponse[struct{}]{}, &web.ApiError{
 			Message: fmt.Sprintf("Failed to resume sandbox: %v", err),
 		}
@@ -92,7 +92,7 @@ func (sc *Controller) ConnectSandbox(r *http.Request) (web.ApiResponse[*models.S
 	var statusCode = http.StatusOK
 	if state, reason := sbx.GetState(); state == v1alpha1.SandboxStatePaused {
 		log.Info("sandbox is paused, will resume it", "reason", reason)
-		if err := sbx.Resume(ctx); err != nil {
+		if err := sc.manager.ResumeSandbox(ctx, sbx); err != nil {
 			log.Error(err, "failed to resume sandbox")
 			return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
 				Message: fmt.Sprintf("Failed to resume sandbox: %v", err),

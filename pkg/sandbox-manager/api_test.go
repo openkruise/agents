@@ -375,3 +375,269 @@ func TestSandboxManager_Debug(t *testing.T) {
 	manager := setupTestManager(t)
 	manager.GetDebugInfo()
 }
+
+func TestSandboxManager_PauseSandbox(t *testing.T) {
+	utils.InitLogOutput()
+	manager := setupTestManager(t)
+	client := manager.client.SandboxClient
+
+	tests := []struct {
+		name          string
+		initSandbox   func(sbx *agentsv1alpha1.Sandbox)
+		expectError   bool
+		expectedState string
+		expectedIP    string
+	}{
+		{
+			name: "pause running sandbox successfully",
+			initSandbox: func(sbx *agentsv1alpha1.Sandbox) {
+				sbx.Status.Phase = agentsv1alpha1.SandboxRunning
+				sbx.Status.Conditions = []metav1.Condition{
+					{
+						Type:   string(agentsv1alpha1.SandboxConditionReady),
+						Status: metav1.ConditionTrue,
+					},
+				}
+				sbx.Spec.Paused = false
+				sbx.Status.PodInfo.PodIP = "10.0.0.1"
+			},
+			expectError:   false,
+			expectedState: agentsv1alpha1.SandboxStatePaused,
+			expectedIP:    "10.0.0.1",
+		},
+		{
+			name: "pause already paused sandbox should fail",
+			initSandbox: func(sbx *agentsv1alpha1.Sandbox) {
+				sbx.Status.Phase = agentsv1alpha1.SandboxPaused
+				sbx.Status.Conditions = []metav1.Condition{
+					{
+						Type:   string(agentsv1alpha1.SandboxConditionPaused),
+						Status: metav1.ConditionTrue,
+					},
+				}
+				sbx.Spec.Paused = true
+				sbx.Status.PodInfo.PodIP = "10.0.0.2"
+			},
+			expectError:   true,
+			expectedState: "",
+			expectedIP:    "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sandbox := &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("test-sandbox-%s", tt.name),
+					Namespace: "default",
+					Annotations: map[string]string{
+						agentsv1alpha1.AnnotationOwner: testUser,
+					},
+				},
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxRunning,
+					PodInfo: agentsv1alpha1.PodInfo{
+						PodIP: "10.0.0.1",
+					},
+				},
+			}
+			tt.initSandbox(sandbox)
+
+			CreateSandboxWithStatus(t, client, sandbox)
+			time.Sleep(100 * time.Millisecond)
+
+			// Get sandbox
+			sbx, err := manager.GetClaimedSandbox(context.Background(), testUser, sandboxutils.GetSandboxID(sandbox))
+			if err != nil {
+				t.Fatalf("Failed to get sandbox: %v", err)
+			}
+
+			// Pause sandbox
+			err = manager.PauseSandbox(context.Background(), sbx)
+
+			if tt.expectError {
+				assert.Error(t, err)
+				return
+			}
+
+			assert.NoError(t, err)
+
+			// Update sandbox status to Paused (simulate controller behavior)
+			time.Sleep(50 * time.Millisecond)
+			updated, err := client.ApiV1alpha1().Sandboxes("default").Get(context.Background(), sandbox.Name, metav1.GetOptions{})
+			assert.NoError(t, err)
+			updated.Status.Phase = agentsv1alpha1.SandboxPaused
+			updated.Status.Conditions = []metav1.Condition{
+				{
+					Type:   string(agentsv1alpha1.SandboxConditionPaused),
+					Status: metav1.ConditionTrue,
+				},
+			}
+			_, err = client.ApiV1alpha1().Sandboxes("default").UpdateStatus(context.Background(), updated, metav1.UpdateOptions{})
+			assert.NoError(t, err)
+
+			// Wait for informer to update
+			time.Sleep(200 * time.Millisecond)
+
+			// Verify route is synced (InplaceRefresh should have updated it)
+			route, ok := manager.proxy.LoadRoute(sandboxutils.GetSandboxID(sandbox))
+			assert.True(t, ok, "Route should be synced")
+			assert.Equal(t, sandboxutils.GetSandboxID(sandbox), route.ID)
+			assert.Equal(t, tt.expectedIP, route.IP)
+			assert.Equal(t, testUser, route.Owner)
+			// Verify sandbox state matches expected
+			if tt.expectedState != "" {
+				actualSbx, err := manager.GetClaimedSandbox(context.Background(), testUser, sandboxutils.GetSandboxID(sandbox))
+				if err == nil {
+					actualState, _ := actualSbx.GetState()
+					assert.Equal(t, tt.expectedState, actualState, "Sandbox state should match")
+				}
+			}
+		})
+	}
+}
+
+func TestSandboxManager_ResumeSandbox(t *testing.T) {
+	utils.InitLogOutput()
+	manager := setupTestManager(t)
+	client := manager.client.SandboxClient
+
+	tests := []struct {
+		name          string
+		initSandbox   func(sbx *agentsv1alpha1.Sandbox)
+		expectError   bool
+		expectedState string
+		expectedIP    string
+		ipChanged     bool
+	}{
+		{
+			name: "resume paused sandbox successfully",
+			initSandbox: func(sbx *agentsv1alpha1.Sandbox) {
+				sbx.Status.Phase = agentsv1alpha1.SandboxPaused
+				sbx.Status.Conditions = []metav1.Condition{
+					{
+						Type:   string(agentsv1alpha1.SandboxConditionPaused),
+						Status: metav1.ConditionTrue,
+					},
+				}
+				sbx.Spec.Paused = true
+				sbx.Status.PodInfo.PodIP = "10.0.0.1"
+			},
+			expectError:   false,
+			expectedState: agentsv1alpha1.SandboxStateRunning,
+			expectedIP:    "10.0.0.1",
+			ipChanged:     false,
+		},
+		{
+			name: "resume paused sandbox with IP change",
+			initSandbox: func(sbx *agentsv1alpha1.Sandbox) {
+				sbx.Status.Phase = agentsv1alpha1.SandboxPaused
+				sbx.Status.Conditions = []metav1.Condition{
+					{
+						Type:   string(agentsv1alpha1.SandboxConditionPaused),
+						Status: metav1.ConditionTrue,
+					},
+				}
+				sbx.Spec.Paused = true
+				sbx.Status.PodInfo.PodIP = "10.0.0.1"
+			},
+			expectError:   false,
+			expectedState: agentsv1alpha1.SandboxStateRunning,
+			expectedIP:    "10.0.0.2", // IP changed after resume
+			ipChanged:     true,
+		},
+		{
+			name: "resume already running sandbox should fail",
+			initSandbox: func(sbx *agentsv1alpha1.Sandbox) {
+				sbx.Status.Phase = agentsv1alpha1.SandboxRunning
+				sbx.Status.Conditions = []metav1.Condition{
+					{
+						Type:   string(agentsv1alpha1.SandboxConditionReady),
+						Status: metav1.ConditionTrue,
+					},
+				}
+				sbx.Spec.Paused = false
+				sbx.Status.PodInfo.PodIP = "10.0.0.1"
+			},
+			expectError:   true,
+			expectedState: "",
+			expectedIP:    "",
+			ipChanged:     false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sandbox := &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("test-sandbox-%s", tt.name),
+					Namespace: "default",
+					Annotations: map[string]string{
+						agentsv1alpha1.AnnotationOwner: testUser,
+					},
+				},
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxPaused,
+					PodInfo: agentsv1alpha1.PodInfo{
+						PodIP: "10.0.0.1",
+					},
+				},
+			}
+			tt.initSandbox(sandbox)
+
+			CreateSandboxWithStatus(t, client, sandbox)
+			time.Sleep(100 * time.Millisecond)
+
+			// Get sandbox
+			sbx, err := manager.GetClaimedSandbox(context.Background(), testUser, sandboxutils.GetSandboxID(sandbox))
+			if err != nil {
+				t.Fatalf("Failed to get sandbox: %v", err)
+			}
+
+			// Set initial route in proxy
+			initialRoute := sbx.GetRoute()
+			manager.proxy.SetRoute(initialRoute)
+
+			// Resume sandbox
+			if !tt.expectError {
+				// Simulate controller updating sandbox status after resume
+				time.AfterFunc(50*time.Millisecond, func() {
+					updated, err := client.ApiV1alpha1().Sandboxes("default").Get(context.Background(), sandbox.Name, metav1.GetOptions{})
+					if err != nil {
+						return
+					}
+					updated.Status.Phase = agentsv1alpha1.SandboxRunning
+					updated.Status.Conditions = []metav1.Condition{
+						{
+							Type:   string(agentsv1alpha1.SandboxConditionReady),
+							Status: metav1.ConditionTrue,
+						},
+					}
+					if tt.ipChanged {
+						updated.Status.PodInfo.PodIP = tt.expectedIP
+					}
+					_, _ = client.ApiV1alpha1().Sandboxes("default").UpdateStatus(context.Background(), updated, metav1.UpdateOptions{})
+				})
+			}
+
+			err = manager.ResumeSandbox(context.Background(), sbx)
+
+			if tt.expectError {
+				assert.Error(t, err)
+				return
+			}
+
+			assert.NoError(t, err)
+
+			time.Sleep(200 * time.Millisecond)
+
+			// Verify route is synced
+			route, ok := manager.proxy.LoadRoute(sandboxutils.GetSandboxID(sandbox))
+			assert.True(t, ok, "Route should be synced")
+			assert.Equal(t, sandboxutils.GetSandboxID(sandbox), route.ID)
+			assert.Equal(t, tt.expectedIP, route.IP)
+			assert.Equal(t, testUser, route.Owner)
+			assert.Equal(t, tt.expectedState, route.State)
+		})
+	}
+}
