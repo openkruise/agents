@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/openkruise/agents/api/v1alpha1"
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
@@ -23,7 +24,15 @@ func (m *SandboxManager) ClaimSandbox(ctx context.Context, user, template string
 	}
 	sandbox, err := pool.ClaimSandbox(ctx, user, consts.DefaultPoolingCandidateCounts, func(sbx infra.Sandbox) {
 		modifier(sbx)
+
+		// claim sandbox
 		sbx.SetOwnerReferences([]metav1.OwnerReference{}) // TODO: just try empty slice
+		labels := sbx.GetLabels()
+		if labels == nil {
+			labels = make(map[string]string, 1)
+		}
+		labels[agentsv1alpha1.LabelSandboxIsClaimed] = "true"
+		sbx.SetLabels(labels)
 	})
 	if err != nil {
 		return nil, errors.NewError(errors.ErrorInternal, fmt.Sprintf("failed to claim sandbox: %v", err))

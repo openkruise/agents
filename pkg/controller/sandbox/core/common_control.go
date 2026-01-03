@@ -18,12 +18,14 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/openkruise/agents/pkg/utils/inplaceupdate"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
@@ -104,6 +106,11 @@ func (r *commonControl) EnsureSandboxUpdated(ctx context.Context, args EnsureFun
 		PodUID:   pod.UID,
 	}
 	logger.Info("sandbox newStatus", "newStatus", utils.DumpJson(newStatus))
+
+	// update pod label
+	if err := r.handleClaimSandbox(ctx, args); err != nil {
+		return err
+	}
 	// inplace update
 	done, err := r.handleInplaceUpdateSandbox(ctx, args)
 	if err != nil {
@@ -258,6 +265,16 @@ func (r *commonControl) createPod(ctx context.Context, box *agentsv1alpha1.Sandb
 	}
 	// todo, when resume, create Pod based on the revision from the paused state.
 	pod.Labels[agentsv1alpha1.PodLabelTemplateHash] = newStatus.UpdateRevision
+	// Ensure SandboxSet can retrieve these pods using label selector
+	if box.GetLabels() != nil {
+		if value, exists := box.GetLabels()[agentsv1alpha1.LabelSandboxPool]; exists {
+			pod.Labels[agentsv1alpha1.LabelSandboxPool] = value
+		}
+		if value, exists := box.GetLabels()[agentsv1alpha1.LabelSandboxIsClaimed]; exists {
+			pod.Labels[agentsv1alpha1.LabelSandboxIsClaimed] = value
+		}
+	}
+
 	err := r.Create(ctx, pod)
 	if err != nil && !errors.IsAlreadyExists(err) {
 		logger.Error(err, "create pod failed")
@@ -265,6 +282,120 @@ func (r *commonControl) createPod(ctx context.Context, box *agentsv1alpha1.Sandb
 	}
 	logger.Info("Create pod success", "Body", utils.DumpJson(pod))
 	return pod, nil
+}
+
+// handleClaimSandbox synchronizes specific labels between sandbox and pod.
+// 1. If sandbox has a label but pod doesn't, add it to pod
+// 2. If sandbox doesn't have a label but pod does, delete it from pod
+// 3. If both have the label but values differ, update pod's value to match sandbox
+func (r *commonControl) handleClaimSandbox(ctx context.Context, args EnsureFuncArgs) error {
+	pod, box := args.Pod, args.Box
+	logger := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
+
+	// If pod doesn't exist, no action needed
+	if pod == nil {
+		return nil
+	}
+
+	// Define label keys to sync
+	labelsToSync := []string{
+		agentsv1alpha1.LabelSandboxPool,
+		agentsv1alpha1.LabelSandboxIsClaimed,
+	}
+
+	// Get labels from both sides (safe nil handling)
+	boxLabels := box.GetLabels()
+	podLabels := pod.GetLabels()
+
+	// Initialize pod labels map if nil
+	if podLabels == nil {
+		podLabels = make(map[string]string)
+	}
+
+	// Collect labels to update (including add and modify)
+	labelsToUpdate := make(map[string]string)
+	// Collect labels to delete
+	labelsToDelete := []string{}
+
+	// Iterate through label keys that need to be synced
+	for _, key := range labelsToSync {
+		boxValue, boxExists := "", false
+		if boxLabels != nil {
+			boxValue, boxExists = boxLabels[key]
+		}
+
+		podValue, podExists := podLabels[key]
+
+		// Case 1: sandbox has it, pod doesn't -> add to pod
+		if boxExists && !podExists {
+			labelsToUpdate[key] = boxValue
+			logger.Info("label missing in pod, will add",
+				"key", key,
+				"boxValue", boxValue)
+		} else if !boxExists && podExists {
+			// Case 2: sandbox doesn't have it, pod does -> delete from pod
+			labelsToDelete = append(labelsToDelete, key)
+			logger.Info("label not in box, will delete from pod",
+				"key", key,
+				"podValue", podValue)
+		} else if boxExists && podExists && boxValue != podValue {
+			// Case 3: both have it but values differ -> update pod's value
+			labelsToUpdate[key] = boxValue
+			logger.Info("label value mismatch, will update pod",
+				"key", key,
+				"boxValue", boxValue,
+				"podValue", podValue)
+		}
+		// Case 4: both don't have it or both have same value -> no action needed
+	}
+
+	// If nothing needs to be changed, return early
+	if len(labelsToUpdate) == 0 && len(labelsToDelete) == 0 {
+		logger.V(utils.DebugLogLevel).Info("pod labels already in sync, no action needed")
+		return nil
+	}
+
+	// Build patch data using Strategic Merge Patch:
+	// - Add/Update: directly set key: value
+	// - Delete: set key: null
+	labels := make(map[string]interface{})
+
+	// Add/Update operations
+	for k, v := range labelsToUpdate {
+		labels[k] = v
+	}
+
+	// Delete operations: set to null
+	for _, k := range labelsToDelete {
+		labels[k] = nil
+	}
+
+	patchData := map[string]interface{}{
+		"metadata": map[string]interface{}{
+			"labels": labels,
+		},
+	}
+
+	patchBytes, err := json.Marshal(patchData)
+	if err != nil {
+		logger.Error(err, "failed to marshal patch data")
+		return err
+	}
+
+	// Execute patch operation
+	// Note: using null to delete only affects specified keys, won't impact labels managed by other components
+	podCopy := pod.DeepCopy()
+	if err = r.Patch(ctx, podCopy, client.RawPatch(types.StrategicMergePatchType, patchBytes)); err != nil {
+		logger.Error(err, "failed to patch pod labels",
+			"labelsToUpdate", labelsToUpdate,
+			"labelsToDelete", labelsToDelete)
+		return err
+	}
+
+	logger.Info("successfully synced pod labels",
+		"labelsUpdated", labelsToUpdate,
+		"labelsDeleted", labelsToDelete)
+	return nil
 }
 
 func (r *commonControl) handleInplaceUpdateSandbox(ctx context.Context, args EnsureFuncArgs) (bool, error) {
