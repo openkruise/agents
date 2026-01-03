@@ -48,9 +48,6 @@ spec:
   # 预热池的大小，建议比预估的请求突发量略大
   replicas: 100
   template: # 声明一个 Pod 模板
-    metadata:
-      labels:
-        alibabacloud.com/acs: 'true'
     spec:
       initContainers:
         - name: init # 通过 native sidecar 注入 agent-runtime 组件

@@ -23,9 +23,6 @@ spec:
   # Pre-warming pool size, recommended to be slightly larger than the estimated request burst volume
   replicas: 100
   template: # Declare a Pod template
-    metadata:
-      labels:
-        alibabacloud.com/acs: 'true'
     spec:
       initContainers:
         - name: init # Inject agent-runtime component through native sidecar
@@ -172,7 +169,7 @@ async def main():
         # Create AI Agent
         agent = Agent(
             task="""
-            From the Alibaba Cloud ACS product billing official documentation (https://help.aliyun.com/zh/cs/product-overview/billing/), navigate to the billing instructions and summarize the cost differences for different regions, computing types, and computing power quality
+            Make a brief introduction to the projects of the OpenKruise family.
             """,
             llm=ChatOpenAI(
                 api_key=os.getenv("LLM_API_KEY"),

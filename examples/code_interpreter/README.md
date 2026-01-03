@@ -13,8 +13,8 @@ provides advanced features including Pause, Resume, Checkpoint, Fork, and in-pla
 ### SandboxSet
 
 `SandboxSet` is the workload that manages `Sandbox`. Its function is similar to a `ReplicaSet` that manages Pods.
-`SandboxSet` enables second-level sandbox startup by pre-warming a batch of sandbox instances. This workload is
-specially optimized for scaling performance and can timely replenish consumed sandboxes.
+It enables sub-second sandbox startup by pre-warming a pool of sandbox instances. Optimized specifically for scaling 
+performance, `SandboxSet` can rapidly replenish sandboxes as they are consumed.
 
 ### sandbox-manager
 
@@ -50,9 +50,6 @@ spec:
   # Pre-warming pool size, recommended to be slightly larger than the estimated request burst volume
   replicas: 100
   template: # Declare a Pod template
-    metadata:
-      labels:
-        alibabacloud.com/acs: 'true'
     spec:
       initContainers:
         - name: init # Inject agent-runtime component through native sidecar
@@ -100,8 +97,8 @@ and other functions. If the official images do not meet your requirements, you c
 
 ### 1.3 Cross-Namespace Template Deployment
 
-You can achieve cross-Namespace deployment of templates by creating multiple **same-named** `SandboxSet` in multiple
-Namespaces. This can effectively reduce cluster pressure in large-scale pre-warming scenarios.
+To reduce cluster load during large-scale pre-warming, you can deploy templates across namespaces by creating identically
+named `SandboxSet` resources in each target namespace.
 
 ## 2. Using Sandboxes via E2B Python SDK
 

@@ -21,9 +21,6 @@ spec:
   # 预热池的大小，建议比预估的请求突发量略大
   replicas: 100
   template: # 声明一个 Pod 模板
-    metadata:
-      labels:
-        alibabacloud.com/acs: 'true'
     spec:
       initContainers:
         - name: init # 通过 native sidecar 注入 agent-runtime 组件
@@ -167,7 +164,7 @@ async def main():
         # 创建 AI Agent
         agent = Agent(
             task="""
-            从阿里云 ACS 产品计费官方文档（https://help.aliyun.com/zh/cs/product-overview/billing/）进入计费说明，总结不同地域、计算类型、算力质量的费用差别
+            简要介绍一下 OpenKruise 家族的各个子项目。
             """,
             llm=ChatOpenAI(
                 api_key=os.getenv("LLM_API_KEY"),
