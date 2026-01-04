@@ -58,14 +58,31 @@ func (p *Pool) ClaimSandbox(ctx context.Context, user string, candidateCounts in
 	lock := uuid.New().String()
 	log := klog.FromContext(ctx).WithValues("pool", p.Namespace+"/"+p.Name)
 	start := time.Now()
+
+	// Logic to track metrics for the creation/claim request
+	var err error
+	defer func() {
+		// Record total latency from request start to return
+		SandboxCreationLatency.Observe(float64(time.Since(start).Milliseconds()))
+		if err != nil {
+			// Count failures
+			SandboxCreationResponses.WithLabelValues("failure").Inc()
+		} else {
+			// Count successes
+			SandboxCreationResponses.WithLabelValues("success").Inc()
+		}
+	}()
+
 	r := rand.New(rand.NewSource(start.UnixNano()))
 	for i := 0; ; i++ {
-		objects, err := p.cache.ListAvailableSandboxes(p.Name)
-		if err != nil {
+		objects, errList := p.cache.ListAvailableSandboxes(p.Name)
+		if errList != nil {
+			err = errList
 			return nil, err
 		}
 		if len(objects) == 0 {
-			return nil, fmt.Errorf("no available sandboxes for template %s (no stock)", p.Name)
+			err = fmt.Errorf("no available sandboxes for template %s (no stock)", p.Name)
+			return nil, err
 		}
 		var obj *v1alpha1.Sandbox
 		candidates := make([]*v1alpha1.Sandbox, 0, candidateCounts)
@@ -83,7 +100,8 @@ func (p *Pool) ClaimSandbox(ctx context.Context, user string, candidateCounts in
 		}
 
 		if len(candidates) == 0 {
-			return nil, fmt.Errorf("no available sandboxes for template %s (no candidate)", p.Name)
+			err = fmt.Errorf("no available sandboxes for template %s (no candidate)", p.Name)
+			return nil, err
 		}
 
 		obj = candidates[r.Intn(len(candidates))]
@@ -108,7 +126,8 @@ func (p *Pool) ClaimSandbox(ctx context.Context, user string, candidateCounts in
 			break
 		}
 	}
-	return nil, fmt.Errorf("no available sandboxes for template %s (failed to acquire optimistic lock of pod after max retries)", p.Name)
+	err = fmt.Errorf("no available sandboxes for template %s (failed to acquire optimistic lock of pod after max retries)", p.Name)
+	return nil, err
 }
 
 func (p *Pool) LockSandbox(ctx context.Context, sbx *Sandbox, lock string, owner string) error {
