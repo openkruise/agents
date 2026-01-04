@@ -86,6 +86,7 @@ type SandboxReconciler struct {
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=pods/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;update;patch
+// +kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 
 func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	// Fetch the sandbox instance
@@ -105,6 +106,12 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	newStatus := box.Status.DeepCopy()
 	if box.Annotations == nil {
 		box.Annotations = map[string]string{}
+	}
+
+	// Process VolumeClaimTemplates for persistent data recovery during sleep/wake operations
+	if err := r.ensureVolumeClaimTemplates(ctx, box); err != nil {
+		logger.Error(err, "failed to ensure volume claim templates")
+		return reconcile.Result{}, err
 	}
 
 	// fetch pod
@@ -296,4 +303,50 @@ func (r *SandboxReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&agentsv1alpha1.Sandbox{}, &handler.EnqueueRequestForObject{}).
 		Watches(&corev1.Pod{}, &SandboxPodEventHandler{}).
 		Complete(r)
+}
+
+// ensureVolumeClaimTemplates creates and ensures PVCs exist for persistent data recovery during sleep/wake operations
+func (r *SandboxReconciler) ensureVolumeClaimTemplates(ctx context.Context, box *agentsv1alpha1.Sandbox) error {
+	logger := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
+
+	if len(box.Spec.VolumeClaimTemplates) == 0 {
+		return nil
+	}
+
+	for _, template := range box.Spec.VolumeClaimTemplates {
+		// Create PVC object based on the template
+		pvc := &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      fmt.Sprintf("%s-%s", template.Name, box.Name),
+				Namespace: box.Namespace,
+				OwnerReferences: []metav1.OwnerReference{
+					*metav1.NewControllerRef(box, sandboxControllerKind),
+				},
+			},
+			Spec: template.Spec,
+		}
+
+		// Check if PVC already exists
+		existingPVC := &corev1.PersistentVolumeClaim{}
+		err := r.Get(ctx, client.ObjectKey{Namespace: box.Namespace, Name: pvc.Name}, existingPVC)
+
+		if err != nil {
+			if errors.IsNotFound(err) {
+				// Create new PVC for persistent data recovery
+				if err := r.Create(ctx, pvc); err != nil {
+					logger.Error(err, "failed to create PVC", "pvc", pvc.Name)
+					return err
+				}
+				logger.Info("created PVC for persistent data recovery", "pvc", pvc.Name)
+			} else {
+				logger.Error(err, "failed to get PVC", "pvc", pvc.Name)
+				return err
+			}
+		} else {
+			// If PVC exists, check if it needs to be updated (note: PVC specs are typically immutable)
+			logger.Info("PVC already exists for persistent data recovery", "pvc", pvc.Name)
+		}
+	}
+
+	return nil
 }
