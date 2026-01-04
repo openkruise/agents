@@ -1,6 +1,8 @@
 // Package models provides data models for the E2B sandbox API.
 package models
 
+import "github.com/container-storage-interface/spec/lib/go/csi"
+
 const (
 	SandboxStateRunning = "running"
 	SandboxStatePaused  = "paused"
@@ -32,6 +34,19 @@ type NewSandboxRequest struct {
 	Secure     bool              `json:"secure,omitempty"`
 	Metadata   map[string]string `json:"metadata,omitempty"`
 	EnvVars    EnvVars           `json:"envVars,omitempty"`
+
+	Extensions NewSandboxRequestExtension `json:"-"`
+}
+
+type NewSandboxRequestExtension struct {
+	Image    string
+	CSIMount CSIMountExtension
+}
+
+type CSIMountExtension struct {
+	Driver      string                       `json:"driver"`
+	Request     string                       `json:"request"` // base64 encoded csi.NodePublishVolumeRequest
+	RealRequest csi.NodePublishVolumeRequest `json:"-"`
 }
 
 // SandboxMetadata represents metadata for a sandbox

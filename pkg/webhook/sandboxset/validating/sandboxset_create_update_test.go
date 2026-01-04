@@ -105,7 +105,7 @@ func TestSandboxSetValidatingHandler_Handle(t *testing.T) {
 					Template: &corev1.PodTemplateSpec{
 						ObjectMeta: metav1.ObjectMeta{
 							Labels: map[string]string{
-								v1alpha1.InternalPrefix + "test": "value", // Template internal prefix labels are invalid
+								v1alpha1.E2BPrefix + "test": "value", // Template internal prefix labels are invalid
 							},
 						},
 					},
@@ -122,7 +122,7 @@ func TestSandboxSetValidatingHandler_Handle(t *testing.T) {
 					Name:      "test-sbs",
 					Namespace: "default",
 					Labels: map[string]string{
-						v1alpha1.InternalPrefix + "test": "value", // Internal prefix labels are invalid
+						v1alpha1.E2BPrefix + "test": "value", // Internal prefix labels are invalid
 					},
 				},
 				Spec: v1alpha1.SandboxSetSpec{
@@ -130,7 +130,7 @@ func TestSandboxSetValidatingHandler_Handle(t *testing.T) {
 					Template: &corev1.PodTemplateSpec{
 						ObjectMeta: metav1.ObjectMeta{
 							Labels: map[string]string{
-								v1alpha1.InternalPrefix + "test": "value", // Template internal prefix labels are invalid
+								v1alpha1.E2BPrefix + "test": "value", // Template internal prefix labels are invalid
 							},
 						},
 					},
@@ -138,7 +138,7 @@ func TestSandboxSetValidatingHandler_Handle(t *testing.T) {
 			},
 			expectAllow:  false,
 			expectError:  true,
-			errorMessage: "label cannot start with " + v1alpha1.InternalPrefix,
+			errorMessage: "label cannot start with " + v1alpha1.E2BPrefix,
 		},
 		{
 			name: "Annotation with internal prefix",
@@ -147,7 +147,7 @@ func TestSandboxSetValidatingHandler_Handle(t *testing.T) {
 					Name:      "test-sbs",
 					Namespace: "default",
 					Annotations: map[string]string{
-						v1alpha1.InternalPrefix + "test": "value", // Internal prefix annotations are invalid
+						v1alpha1.E2BPrefix + "test": "value", // Internal prefix annotations are invalid
 					},
 				},
 				Spec: v1alpha1.SandboxSetSpec{
@@ -155,7 +155,7 @@ func TestSandboxSetValidatingHandler_Handle(t *testing.T) {
 					Template: &corev1.PodTemplateSpec{
 						ObjectMeta: metav1.ObjectMeta{
 							Labels: map[string]string{
-								v1alpha1.InternalPrefix + "test": "value", // Template internal prefix labels are invalid
+								v1alpha1.E2BPrefix + "test": "value", // Template internal prefix labels are invalid
 							},
 						},
 					},
@@ -163,7 +163,7 @@ func TestSandboxSetValidatingHandler_Handle(t *testing.T) {
 			},
 			expectAllow:  false,
 			expectError:  true,
-			errorMessage: "annotation cannot start with " + v1alpha1.InternalPrefix,
+			errorMessage: "annotation cannot start with " + v1alpha1.E2BPrefix,
 		},
 		{
 			name: "Template label with internal prefix",
@@ -177,7 +177,7 @@ func TestSandboxSetValidatingHandler_Handle(t *testing.T) {
 					Template: &corev1.PodTemplateSpec{
 						ObjectMeta: metav1.ObjectMeta{
 							Labels: map[string]string{
-								v1alpha1.InternalPrefix + "test": "value", // Template internal prefix labels are invalid
+								v1alpha1.E2BPrefix + "test": "value", // Template internal prefix labels are invalid
 							},
 						},
 					},
@@ -185,7 +185,7 @@ func TestSandboxSetValidatingHandler_Handle(t *testing.T) {
 			},
 			expectAllow:  false,
 			expectError:  true,
-			errorMessage: "label cannot start with " + v1alpha1.InternalPrefix,
+			errorMessage: "label cannot start with " + v1alpha1.E2BPrefix,
 		},
 	}
 

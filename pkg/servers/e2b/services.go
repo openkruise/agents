@@ -39,6 +39,13 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 		}
 	}
 
+	if err := request.ParseExtensions(); err != nil {
+		return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
+			Code:    http.StatusBadRequest,
+			Message: fmt.Sprintf("Bad extension param: %s", err.Error()),
+		}
+	}
+
 	for k := range request.Metadata {
 		if errLists := validation.IsQualifiedName(k); len(errLists) > 0 {
 			return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
@@ -68,17 +75,22 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 
 	accessToken := uuid.NewString()
 	claimStart := time.Now()
-	sbx, err := sc.manager.ClaimSandbox(ctx, user.ID.String(), request.TemplateID, func(sbx infra.Sandbox) {
-		sbx.SetTimeout(time.Duration(request.Timeout) * time.Second)
-		annotations := sbx.GetAnnotations()
-		if annotations == nil {
-			annotations = make(map[string]string)
-		}
-		for k, v := range request.Metadata {
-			annotations[k] = v
-		}
-		annotations[AnnotationEnvdAccessToken] = accessToken
-		sbx.SetAnnotations(annotations)
+	sbx, err := sc.manager.ClaimSandbox(ctx, user.ID.String(), request.TemplateID, infra.ClaimSandboxOptions{
+		Modifier: func(sbx infra.Sandbox) {
+			sbx.SetTimeout(time.Duration(request.Timeout) * time.Second)
+			annotations := sbx.GetAnnotations()
+			if annotations == nil {
+				annotations = make(map[string]string)
+			}
+			for k, v := range request.Metadata {
+				annotations[k] = v
+			}
+			annotations[v1alpha1.AnnotationEnvdAccessToken] = accessToken
+			route := sbx.GetRoute()
+			annotations[v1alpha1.AnnotationEnvdURL] = fmt.Sprintf("http://%s:%d", route.IP, models.EnvdPort)
+			sbx.SetAnnotations(annotations)
+		},
+		Image: request.Extensions.Image,
 	})
 	if err != nil {
 		return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
@@ -87,7 +99,8 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 	}
 	claimCost := time.Since(claimStart)
 
-	initStart := time.Now()
+	initEnvdStart := time.Now()
+	initEnvdCost := time.Duration(0)
 	pool, ok := sc.manager.GetInfra().GetPoolByObject(sbx)
 	if !ok {
 		return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
@@ -95,20 +108,31 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 			Message: "Failed to get sandbox pool",
 		}
 	}
-	if pool.GetAnnotations()[AnnotationShouldInitEnvd] == utils.True {
-		start = time.Now()
+	if pool.GetAnnotations()[v1alpha1.AnnotationShouldInitEnvd] == utils.True {
 		if err = sc.initEnvd(ctx, sbx, request.EnvVars, accessToken); err != nil {
 			log.Error(err, "failed to init envd")
 			return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
 				Message: err.Error(),
 			}
 		}
-		log.Info("init envd done", "cost", time.Since(start))
+		initEnvdCost = time.Since(initEnvdStart)
+		log.Info("init envd done")
 	}
-	initCost := time.Since(initStart)
 
+	mountStart := time.Now()
+	mountCost := time.Duration(0)
+	if request.Extensions.CSIMount.Driver != "" {
+		if err = sbx.CSIMount(ctx, request.Extensions.CSIMount.Driver, &request.Extensions.CSIMount.RealRequest); err != nil {
+			log.Error(err, "failed to mount storage")
+			return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
+				Message: err.Error(),
+			}
+		}
+		mountCost = time.Since(mountStart)
+		log.Info("storage mounted")
+	}
 	log.Info("sandbox allocated", "id", sbx.GetSandboxID(), "sbx", klog.KObj(sbx), "totalCost", time.Since(start),
-		"claimCost", claimCost, "initCost", initCost)
+		"claimCost", claimCost, "initEnvdCost", initEnvdCost, "mountCost", mountCost)
 	return web.ApiResponse[*models.Sandbox]{
 		Code: http.StatusCreated,
 		Body: sc.convertToE2BSandbox(sbx, accessToken),
@@ -128,7 +152,7 @@ func (sc *Controller) DescribeSandbox(r *http.Request) (web.ApiResponse[*models.
 	}
 
 	return web.ApiResponse[*models.Sandbox]{
-		Body: sc.convertToE2BSandbox(sbx, sbx.GetAnnotations()[AnnotationEnvdAccessToken]),
+		Body: sc.convertToE2BSandbox(sbx, sbx.GetAnnotations()[v1alpha1.AnnotationEnvdAccessToken]),
 	}, nil
 }
 

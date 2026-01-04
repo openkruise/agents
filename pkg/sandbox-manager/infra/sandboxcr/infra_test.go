@@ -464,7 +464,7 @@ func TestInfra_onSandboxUpdate(t *testing.T) {
 				route, ok := infraInstance.Proxy.LoadRoute(stateutils.GetSandboxID(tt.newSandbox))
 				if tt.expectRouteUpdate {
 					assert.True(t, ok)
-					newSbx := infraInstance.AsSandbox(tt.newSandbox)
+					newSbx := AsSandbox(tt.newSandbox, infraInstance.Cache, infraInstance.Client)
 					expectedRoute := newSbx.GetRoute()
 					assert.Equal(t, expectedRoute.State, route.State)
 				}

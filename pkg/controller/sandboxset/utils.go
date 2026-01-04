@@ -94,7 +94,7 @@ func clearAndInitInnerKeys(m map[string]string) map[string]string {
 		return map[string]string{}
 	}
 	for k := range m {
-		if strings.HasPrefix(k, agentsv1alpha1.InternalPrefix) {
+		if strings.HasPrefix(k, agentsv1alpha1.E2BPrefix) {
 			delete(m, k)
 		}
 	}

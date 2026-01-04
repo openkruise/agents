@@ -9,22 +9,18 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog/v2"
 )
 
 // ClaimSandbox attempts to lock a Pod and assign it to the current caller
-func (m *SandboxManager) ClaimSandbox(ctx context.Context, user, template string, modifier func(sandbox infra.Sandbox)) (infra.Sandbox, error) {
+func (m *SandboxManager) ClaimSandbox(ctx context.Context, user, template string, opts infra.ClaimSandboxOptions) (infra.Sandbox, error) {
 	log := klog.FromContext(ctx)
 	start := time.Now()
 	pool, ok := m.infra.GetPoolByTemplate(template)
 	if !ok {
 		return nil, errors.NewError(errors.ErrorNotFound, fmt.Sprintf("pool %s not found", template))
 	}
-	sandbox, err := pool.ClaimSandbox(ctx, user, consts.DefaultPoolingCandidateCounts, func(sbx infra.Sandbox) {
-		modifier(sbx)
-		sbx.SetOwnerReferences([]metav1.OwnerReference{}) // TODO: just try empty slice
-	})
+	sandbox, err := pool.ClaimSandbox(ctx, user, consts.DefaultPoolingCandidateCounts, opts)
 	if err != nil {
 		return nil, errors.NewError(errors.ErrorInternal, fmt.Sprintf("failed to claim sandbox: %v", err))
 	}

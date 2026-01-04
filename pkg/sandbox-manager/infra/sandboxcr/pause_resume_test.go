@@ -173,11 +173,11 @@ func TestSandbox_SetPause(t *testing.T) {
 			}
 			tt.initSandbox(sandbox)
 
-			cache, client := NewTestCache()
+			cache, client := NewTestCache(t)
 			CreateSandboxWithStatus(t, client, sandbox)
 			time.Sleep(10 * time.Millisecond)
 
-			s := AsSandbox(sandbox, client, cache)
+			s := AsSandboxForTest(sandbox, client, cache)
 			var err error
 			if tt.operatePause {
 				err = s.Pause(context.Background())
@@ -252,11 +252,11 @@ func TestSandbox_ResumeConcurrent(t *testing.T) {
 	state, reason := sandboxutils.GetSandboxState(sandbox)
 	assert.Equal(t, v1alpha1.SandboxStatePaused, state, reason)
 
-	cache, client := NewTestCache()
+	cache, client := NewTestCache(t)
 	CreateSandboxWithStatus(t, client, sandbox)
 	time.Sleep(10 * time.Millisecond)
 
-	s := AsSandbox(sandbox, client, cache)
+	s := AsSandboxForTest(sandbox, client, cache)
 
 	// Channel to collect results from goroutines
 	resultCh := make(chan error, 3)

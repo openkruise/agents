@@ -84,7 +84,7 @@ func Setup(t *testing.T) (*Controller, *clients.ClientSet, func()) {
 	_, err := clientSet.CoreV1().Secrets(namespace).Create(context.Background(), secret, metav1.CreateOptions{})
 	assert.NoError(t, err)
 
-	controller := NewController("example.com", InitKey, namespace, DefaultMaxTimeout, TestServerPort, true, clientSet)
+	controller := NewController("example.com", InitKey, namespace, models.DefaultMaxTimeout, TestServerPort, true, clientSet)
 	assert.NoError(t, controller.Init(consts.InfraSandboxCR))
 	_, err = controller.Run(namespace, "component=sandbox-manager")
 	assert.NoError(t, err)
@@ -144,6 +144,18 @@ func CreateSandboxPool(t *testing.T, client versioned.Interface, name string, av
 				OwnerReferences: GetSbsOwnerReference(sbs),
 				ResourceVersion: "1",
 				UID:             types.UID(uuid.NewString()),
+			},
+			Spec: agentsv1alpha1.SandboxSpec{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name:  "main",
+								Image: "old-image",
+							},
+						},
+					},
+				},
 			},
 			Status: agentsv1alpha1.SandboxStatus{
 				Phase: agentsv1alpha1.SandboxRunning,

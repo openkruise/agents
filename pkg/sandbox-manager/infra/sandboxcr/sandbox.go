@@ -1,3 +1,19 @@
+/*
+Copyright 2025 The Kruise Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package sandboxcr
 
 import (
@@ -7,13 +23,17 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/container-storage-interface/spec/lib/go/csi"
+	"github.com/golang/protobuf/proto"
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	sandboxclient "github.com/openkruise/agents/client/clientset/versioned"
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	"github.com/openkruise/agents/pkg/utils/sandbox-manager/proxyutils"
 	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
+	"github.com/openkruise/agents/proto/envd/process"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
@@ -120,6 +140,20 @@ func (s *Sandbox) SetTimeout(ttl time.Duration) {
 	s.Spec.ShutdownTime = ptr.To(metav1.NewTime(time.Now().Add(ttl)))
 }
 
+func (s *Sandbox) SetImage(image string) {
+	// TODO: 讨论存在 runtime sidecar 的情况下，如何定位到主容器
+	if s.Spec.Template != nil {
+		s.Spec.Template.Spec.Containers[0].Image = image
+	}
+}
+
+func (s *Sandbox) GetImage() string {
+	if s.Spec.Template != nil {
+		return s.Spec.Template.Spec.Containers[0].Image
+	}
+	return ""
+}
+
 func (s *Sandbox) SaveTimeout(ctx context.Context, ttl time.Duration) error {
 	return s.retryUpdate(ctx, s.Update, func(sbx *agentsv1alpha1.Sandbox) {
 		sbx.Spec.ShutdownTime = ptr.To(metav1.NewTime(time.Now().Add(ttl)))
@@ -178,8 +212,8 @@ func (s *Sandbox) Resume(ctx context.Context) error {
 		log.Error(err, "sandbox is not paused", "state", state, "reason", reason)
 		return err
 	}
-	cond, ok := GetSandboxCondition(s.Sandbox, agentsv1alpha1.SandboxConditionPaused)
-	if ok && cond.Status != metav1.ConditionTrue {
+	cond := GetSandboxCondition(s.Sandbox, agentsv1alpha1.SandboxConditionPaused)
+	if cond.Status == metav1.ConditionFalse {
 		return fmt.Errorf("sandbox is pausing, please wait a moment and try again")
 	}
 	if s.Sandbox.Spec.Paused {
@@ -224,8 +258,60 @@ func (s *Sandbox) GetClaimTime() (time.Time, error) {
 	return time.Parse(time.RFC3339, claimTimestamp)
 }
 
+var MountCommand = "/todo/sandbox-storage"
+
+// CSIMount creates a dynamic mount point in Sandbox with `sandbox-storage` cli
+//
+// NOTE: `sandbox-storage` cli should be injected with `sandbox-runtime` and will be replaced by a built-in service of
+// `sandbox-runtime`.
+func (s *Sandbox) CSIMount(ctx context.Context, driver string, req *csi.NodePublishVolumeRequest) error {
+	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(s.Sandbox))
+	config, err := proto.Marshal(req)
+	if err != nil {
+		log.Error(err, "failed to marshal request")
+		return err
+	}
+	processConfig := &process.ProcessConfig{
+		Cmd: MountCommand,
+		Args: []string{
+			"mount",
+			"--driver", driver,
+			"--config", string(config),
+		},
+		Cwd: nil,
+	}
+	result, err := s.runCommandWithEnvd(ctx, processConfig, 5*time.Second)
+	if err != nil {
+		log.Error(err, "failed to run command")
+		return err
+	}
+	if result.ExitCode != 0 {
+		err = fmt.Errorf("command failed: [%d] %s", result.ExitCode, result.Stderr)
+		log.Error(err, "command failed", "exitCode", result.ExitCode)
+		return err
+	}
+	return nil
+}
+
 func DeepCopy(sbx *agentsv1alpha1.Sandbox) *agentsv1alpha1.Sandbox {
 	return sbx.DeepCopy()
 }
 
 var _ infra.Sandbox = &Sandbox{}
+
+func AsSandbox(sbx *agentsv1alpha1.Sandbox, cache *Cache, client sandboxclient.Interface) *Sandbox {
+	return &Sandbox{
+		BaseSandbox: BaseSandbox[*agentsv1alpha1.Sandbox]{
+			Sandbox:       sbx,
+			Cache:         cache,
+			PatchSandbox:  client.ApiV1alpha1().Sandboxes(sbx.Namespace).Patch,
+			UpdateStatus:  client.ApiV1alpha1().Sandboxes(sbx.Namespace).UpdateStatus,
+			Update:        client.ApiV1alpha1().Sandboxes(sbx.Namespace).Update,
+			DeleteFunc:    client.ApiV1alpha1().Sandboxes(sbx.Namespace).Delete,
+			SetCondition:  SetSandboxCondition,
+			GetConditions: ListSandboxConditions,
+			DeepCopy:      DeepCopy,
+		},
+		Sandbox: sbx,
+	}
+}

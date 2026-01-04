@@ -59,14 +59,14 @@ func validateLabelsAndAnnotations(metadata metav1.ObjectMeta, fldPath *field.Pat
 	var errList field.ErrorList
 	labelFld := fldPath.Child("labels")
 	for k := range metadata.Labels {
-		if strings.HasPrefix(k, agentsv1alpha1.InternalPrefix) {
-			errList = append(errList, field.Invalid(labelFld.Key(k), k, "label cannot start with "+agentsv1alpha1.InternalPrefix))
+		if strings.HasPrefix(k, agentsv1alpha1.E2BPrefix) {
+			errList = append(errList, field.Invalid(labelFld.Key(k), k, "label cannot start with "+agentsv1alpha1.E2BPrefix))
 		}
 	}
 	annoFld := fldPath.Child("annotations")
 	for k := range metadata.Annotations {
-		if strings.HasPrefix(k, agentsv1alpha1.InternalPrefix) {
-			errList = append(errList, field.Invalid(annoFld.Key(k), k, "annotation cannot start with "+agentsv1alpha1.InternalPrefix))
+		if strings.HasPrefix(k, agentsv1alpha1.E2BPrefix) {
+			errList = append(errList, field.Invalid(annoFld.Key(k), k, "annotation cannot start with "+agentsv1alpha1.E2BPrefix))
 		}
 	}
 	return errList

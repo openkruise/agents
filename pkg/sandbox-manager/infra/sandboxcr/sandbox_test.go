@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/client/clientset/versioned/fake"
 	"github.com/openkruise/agents/pkg/proxy"
@@ -15,9 +16,10 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 )
 
-func AsSandbox(sbx *v1alpha1.Sandbox, client *fake.Clientset, cache *Cache) *Sandbox {
+func AsSandboxForTest(sbx *v1alpha1.Sandbox, client *fake.Clientset, cache *Cache) *Sandbox {
 	s := &Sandbox{
 		BaseSandbox: BaseSandbox[*v1alpha1.Sandbox]{
 			Sandbox:       sbx,
@@ -105,7 +107,7 @@ func TestSandbox_GetTemplate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := AsSandbox(ConvertPodToSandboxCR(tt.pod), nil, nil)
+			s := AsSandboxForTest(ConvertPodToSandboxCR(tt.pod), nil, nil)
 			if got := s.GetTemplate(); got != tt.want {
 				t.Errorf("GetTemplate() = %v, want %v", got, tt.want)
 			}
@@ -208,7 +210,7 @@ func TestSandbox_GetResource(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := AsSandbox(ConvertPodToSandboxCR(tt.pod), nil, nil)
+			s := AsSandboxForTest(ConvertPodToSandboxCR(tt.pod), nil, nil)
 			got := s.GetResource()
 			if got.CPUMilli != tt.want.CPUMilli {
 				t.Errorf("GetResource().CPUMilli = %v, want %v", got.CPUMilli, tt.want.CPUMilli)
@@ -231,7 +233,7 @@ func TestSandbox_InplaceRefresh(t *testing.T) {
 		},
 	}
 
-	cache, client := NewTestCache()
+	cache, client := NewTestCache(t)
 	_, err := client.ApiV1alpha1().Sandboxes("default").Create(context.Background(), initialSandbox, metav1.CreateOptions{})
 	assert.NoError(t, err)
 	time.Sleep(10 * time.Millisecond)
@@ -242,7 +244,7 @@ func TestSandbox_InplaceRefresh(t *testing.T) {
 	assert.NoError(t, err)
 	time.Sleep(10 * time.Millisecond)
 
-	s := AsSandbox(initialSandbox, client, cache)
+	s := AsSandboxForTest(initialSandbox, client, cache)
 
 	assert.Equal(t, "value", s.Sandbox.Labels["initial"])
 	assert.Empty(t, s.Sandbox.Labels["updated"])
@@ -295,7 +297,7 @@ func TestSandbox_Kill(t *testing.T) {
 			_, err := client.ApiV1alpha1().Sandboxes("default").Create(context.Background(), sandbox, metav1.CreateOptions{})
 			assert.NoError(t, err)
 
-			s := AsSandbox(sandbox, client, nil)
+			s := AsSandboxForTest(sandbox, client, nil)
 
 			_, err = client.ApiV1alpha1().Sandboxes("default").Get(context.Background(), "test-sandbox", metav1.GetOptions{})
 			assert.NoError(t, err)
@@ -386,12 +388,12 @@ func TestSandbox_SaveTimeout(t *testing.T) {
 				},
 			}
 
-			cache, client := NewTestCache()
+			cache, client := NewTestCache(t)
 			_, err := client.ApiV1alpha1().Sandboxes("default").Create(context.Background(), sandbox, metav1.CreateOptions{})
 			assert.NoError(t, err)
-			time.Sleep(10 * time.Millisecond)
+			time.Sleep(20 * time.Millisecond)
 
-			s := AsSandbox(sandbox, client, cache)
+			s := AsSandboxForTest(sandbox, client, cache)
 
 			err = s.SaveTimeout(context.Background(), tt.ttl)
 			assert.NoError(t, err)
@@ -572,6 +574,88 @@ func TestSandbox_GetRoute(t *testing.T) {
 
 			route := s.GetRoute()
 			assert.Equal(t, tt.expectedRoute, route)
+		})
+	}
+}
+
+func TestSandbox_CSIMount(t *testing.T) {
+	tests := []struct {
+		name         string
+		result       RunCommandResult
+		processError *string
+		driver       string
+		req          *csi.NodePublishVolumeRequest
+		expectError  string
+	}{
+		{
+			name: "successful csi mount",
+			result: RunCommandResult{
+				ExitCode: 0,
+				Exited:   true,
+			},
+			driver: "csi-driver",
+			req: &csi.NodePublishVolumeRequest{
+				VolumeId: "volume-id",
+			},
+		},
+		{
+			name: "exits non-zero",
+			result: RunCommandResult{
+				ExitCode: 1,
+				Exited:   true,
+			},
+			driver: "csi-driver",
+			req: &csi.NodePublishVolumeRequest{
+				VolumeId: "volume-id",
+			},
+			expectError: "command failed: [1]",
+		},
+		{
+			name: "nil req",
+			result: RunCommandResult{
+				ExitCode: 0,
+				Exited:   true,
+			},
+			driver:      "csi-driver",
+			expectError: "Marshal called with nil",
+		},
+		{
+			name: "with process error",
+			result: RunCommandResult{
+				ExitCode: 0,
+				Exited:   true,
+			},
+			req: &csi.NodePublishVolumeRequest{
+				VolumeId: "volume-id",
+			},
+			processError: ptr.To("some error"),
+			expectError:  "some error",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := NewTestEnvdServer(tt.result, true, tt.processError)
+			defer server.Close()
+
+			cache, client := NewTestCache(t)
+			sbx := &v1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-sandbox",
+					Annotations: map[string]string{
+						v1alpha1.AnnotationEnvdURL:         server.URL,
+						v1alpha1.AnnotationEnvdAccessToken: AccessToken,
+					},
+				},
+			}
+			sandbox := AsSandboxForTest(sbx, client, cache)
+
+			err := sandbox.CSIMount(t.Context(), tt.driver, tt.req)
+			if tt.expectError != "" {
+				assert.Error(t, err)
+				assert.ErrorContains(t, err, tt.expectError)
+			} else {
+				assert.NoError(t, err)
+			}
 		})
 	}
 }
