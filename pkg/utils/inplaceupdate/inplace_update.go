@@ -98,6 +98,11 @@ func (c *InPlaceUpdateControl) Update(ctx context.Context, opts InPlaceUpdateOpt
 		obj := box.Spec.Template.Spec.Containers[i]
 		originContainers[obj.Name] = obj
 	}
+	// container.name -> imageId
+	originStatus := map[string]string{}
+	for _, status := range pod.Status.ContainerStatuses {
+		originStatus[status.Name] = status.ImageID
+	}
 
 	patchSpec := corev1.PodSpec{}
 	for i := range pod.Spec.Containers {
@@ -115,26 +120,24 @@ func (c *InPlaceUpdateControl) Update(ctx context.Context, opts InPlaceUpdateOpt
 		}
 		patchSpec.Containers = append(patchSpec.Containers, patchContainer)
 		state.UpdateImages = true
-		state.LastContainerStatuses[container.Name] = InPlaceUpdateContainerStatus{}
+		imageId := originStatus[container.Name]
+		state.LastContainerStatuses[container.Name] = InPlaceUpdateContainerStatus{
+			ImageID: imageId,
+		}
 	}
 	if len(patchSpec.Containers) == 0 {
 		logger.Info("Pod container images has not been modified")
 		return nil
 	}
-	for _, status := range pod.Status.ContainerStatuses {
-		cStatus, ok := state.LastContainerStatuses[status.Name]
-		if !ok {
-			continue
-		}
-		cStatus.ImageID = status.ImageID
-	}
 
 	annotations := map[string]string{
+		PodAnnotationInPlaceUpdateStateKey: utils.DumpJson(state),
+	}
+	labels := map[string]string{
 		agentsapiv1alpha1.PodLabelTemplateHash: revision,
-		PodAnnotationInPlaceUpdateStateKey:     utils.DumpJson(state),
 	}
 	clone := pod.DeepCopy()
-	patchBody := fmt.Sprintf(`{"metadata":{"annotations":%s},"spec":%s}`, utils.DumpJson(annotations), utils.DumpJson(patchSpec))
+	patchBody := fmt.Sprintf(`{"metadata":{"annotations":%s,"labels":%s},"spec":%s}`, utils.DumpJson(annotations), utils.DumpJson(labels), utils.DumpJson(patchSpec))
 	if err := c.Patch(ctx, clone, client.RawPatch(types.StrategicMergePatchType, []byte(patchBody))); err != nil {
 		logger.Error(err, "inplace update pod failed")
 		return err
