@@ -3,6 +3,8 @@ package main
 
 import (
 	"flag"
+	"net/http"         // Added for pprof server
+	_ "net/http/pprof" // Added to register pprof handlers
 	"os"
 	"strconv"
 
@@ -16,10 +18,29 @@ import (
 )
 
 func main() {
+	// Define variables for pprof configuration
+	var enablePprof bool
+	var pprofAddr string
+
 	utilfeature.DefaultMutableFeatureGate.AddFlag(pflag.CommandLine)
+
+	// Register the new pprof flags
+	pflag.BoolVar(&enablePprof, "enable-pprof", false, "Enable pprof profiling")
+	pflag.StringVar(&pprofAddr, "pprof-addr", ":6060", "The address the pprof debug maps to.")
+
 	klog.InitFlags(nil)
 	pflag.CommandLine.AddGoFlagSet(flag.CommandLine)
 	pflag.Parse()
+
+	// Start pprof server if enabled
+	if enablePprof {
+		go func() {
+			klog.Infof("Starting pprof server on %s", pprofAddr)
+			if err := http.ListenAndServe(pprofAddr, nil); err != nil {
+				klog.Errorf("Unable to start pprof server: %v", err)
+			}
+		}()
+	}
 
 	// ============= Env ===============
 	// Get listen address from environment variable or use default value

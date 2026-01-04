@@ -19,6 +19,8 @@ package main
 import (
 	"crypto/tls"
 	"flag"
+	"net/http"         // Added for pprof server
+	_ "net/http/pprof" // Added to register pprof handlers
 	"os"
 
 	"github.com/spf13/pflag"
@@ -72,6 +74,11 @@ func main() {
 	var tlsOpts []func(*tls.Config)
 	var clientQPS int
 	var clientBurst int
+
+	// New variables for pprof
+	var enablePprof bool
+	var pprofAddr string
+
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -93,6 +100,11 @@ func main() {
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
 	flag.IntVar(&clientQPS, "client-qps", 3000, "The QPS to use for the client")
 	flag.IntVar(&clientBurst, "client-burst", 6000, "The burst to use for the client")
+
+	// Define the pprof flags using the standard flag package (which is then merged into pflag)
+	flag.BoolVar(&enablePprof, "enable-pprof", false, "Enable pprof profiling")
+	flag.StringVar(&pprofAddr, "pprof-addr", ":6060", "The address the pprof debug maps to.")
+
 	opts := zap.Options{
 		Development: true,
 	}
@@ -102,6 +114,16 @@ func main() {
 	pflag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
+	// Start pprof server if enabled
+	if enablePprof {
+		go func() {
+			setupLog.Info("starting pprof server", "addr", pprofAddr)
+			if err := http.ListenAndServe(pprofAddr, nil); err != nil {
+				setupLog.Error(err, "unable to start pprof server")
+			}
+		}()
+	}
 
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
 	// due to its vulnerabilities. More specifically, disabling http/2 will
