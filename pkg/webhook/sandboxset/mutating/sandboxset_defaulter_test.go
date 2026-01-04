@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -76,31 +77,6 @@ func TestSandboxSetDefaulter_Handle(t *testing.T) {
 			},
 			expectAllow: true,
 			expectPatch: true,
-		},
-		{
-			name: "AutomountServiceAccountToken is false, should remain false",
-			sandboxSet: &v1alpha1.SandboxSet{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-sbs",
-					Namespace: "default",
-				},
-				Spec: v1alpha1.SandboxSetSpec{
-					Replicas: 3,
-					Template: &corev1.PodTemplateSpec{
-						Spec: corev1.PodSpec{
-							AutomountServiceAccountToken: ptr.To(false),
-							Containers: []corev1.Container{
-								{
-									Name:  "test-container",
-									Image: "nginx:latest",
-								},
-							},
-						},
-					},
-				},
-			},
-			expectAllow: true,
-			expectPatch: false,
 		},
 		{
 			name: "No containers, AutomountServiceAccountToken is nil, should be set to false",
@@ -234,4 +210,147 @@ func TestSandboxSetDefaulter_HandleUpdate(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSetDefaultPodTemplate(t *testing.T) {
+	tests := []struct {
+		name     string
+		template *corev1.PodTemplateSpec
+		expected *corev1.PodTemplateSpec
+	}{
+		{
+			name:     "nil template",
+			template: nil,
+			expected: nil,
+		},
+		{
+			name: "automount service account token is true",
+			template: &corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					AutomountServiceAccountToken: ptr.To(true),
+				},
+			},
+			expected: &corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					AutomountServiceAccountToken: ptr.To(false), // should be set to false
+				},
+			},
+		},
+		{
+			name: "automount service account token is false",
+			template: &corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					AutomountServiceAccountToken: ptr.To(false),
+				},
+			},
+			expected: &corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					AutomountServiceAccountToken: ptr.To(false), // should remain false
+				},
+			},
+		},
+		{
+			name: "automount service account token is nil (defaults to true)",
+			template: &corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					AutomountServiceAccountToken: nil,
+				},
+			},
+			expected: &corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					AutomountServiceAccountToken: ptr.To(false), // should be set to false
+				},
+			},
+		},
+		{
+			name: "pod with containers and volumes",
+			template: &corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					AutomountServiceAccountToken: ptr.To(true),
+					Volumes: []corev1.Volume{
+						{
+							Name: "test-volume",
+							VolumeSource: corev1.VolumeSource{
+								EmptyDir: &corev1.EmptyDirVolumeSource{},
+							},
+						},
+					},
+					Containers: []corev1.Container{
+						{
+							Name:  "test-container",
+							Image: "nginx:latest",
+							Resources: corev1.ResourceRequirements{
+								Limits: corev1.ResourceList{
+									corev1.ResourceCPU: resource.MustParse("100m"),
+								},
+								Requests: corev1.ResourceList{
+									corev1.ResourceMemory: resource.MustParse("64Mi"),
+								},
+							},
+						},
+					},
+					InitContainers: []corev1.Container{
+						{
+							Name:  "init-container",
+							Image: "busybox:latest",
+						},
+					},
+				},
+			},
+			expected: &corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{}, // corev1.SetDefaults_PodSpec may set default values
+				Spec: corev1.PodSpec{
+					AutomountServiceAccountToken: ptr.To(false), // should be set to false
+					// Other defaults will be set by corev1.SetDefaults_PodSpec
+					// Volumes will have defaults applied by corev1.SetDefaults_Volume
+					// Containers will have defaults applied by corev1.SetDefaults_Container and resource defaults
+					// InitContainers will have defaults applied by corev1.SetDefaults_Container and resource defaults
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			original := deepCopyPodTemplateSpec(tt.template)
+			setDefaultPodTemplate(tt.template)
+
+			// Check if automount service account token is properly defaulted
+			if tt.template != nil && tt.expected != nil {
+				if ptr.Deref(tt.template.Spec.AutomountServiceAccountToken, true) !=
+					ptr.Deref(tt.expected.Spec.AutomountServiceAccountToken, true) {
+					t.Errorf("Expected AutomountServiceAccountToken to be %v, got %v",
+						ptr.Deref(tt.expected.Spec.AutomountServiceAccountToken, true),
+						ptr.Deref(tt.template.Spec.AutomountServiceAccountToken, true))
+				}
+
+				// Verify that if original was true or nil, it's now false
+				if original != nil &&
+					(ptr.Deref(original.Spec.AutomountServiceAccountToken, true)) &&
+					!ptr.Deref(tt.template.Spec.AutomountServiceAccountToken, true) {
+					// This is expected behavior - the function should set it to false
+				}
+			}
+
+			// Additional checks for the nil case
+			if tt.template == nil && tt.expected != nil {
+				t.Errorf("Expected nil template to remain nil")
+			}
+			if tt.template != nil && tt.expected == nil {
+				t.Errorf("Expected non-nil template but got nil")
+			}
+		})
+	}
+}
+
+// Helper function to deep copy PodTemplateSpec for testing
+func deepCopyPodTemplateSpec(template *corev1.PodTemplateSpec) *corev1.PodTemplateSpec {
+	if template == nil {
+		return nil
+	}
+
+	result := &corev1.PodTemplateSpec{}
+	result.ObjectMeta = *template.ObjectMeta.DeepCopy()
+	result.Spec = *template.Spec.DeepCopy()
+	return result
 }

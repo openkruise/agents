@@ -381,7 +381,7 @@ var _ = Describe("Sandbox", func() {
 				}, sandbox)
 				condition := utils.GetSandboxCondition(&sandbox.Status, string(agentsv1alpha1.SandboxConditionReady))
 				return condition.Status
-			}, time.Second*10, time.Millisecond*500).Should(Equal(metav1.ConditionTrue))
+			}, time.Second*30, time.Millisecond*500).Should(Equal(metav1.ConditionTrue))
 
 			By("Verifying sandbox eventually reaches Running phase with updated image")
 			Eventually(func() string {

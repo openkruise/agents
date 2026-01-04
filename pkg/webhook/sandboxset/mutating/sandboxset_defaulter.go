@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"reflect"
 
+	"github.com/openkruise/agents/pkg/utils/defaults"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -44,12 +47,9 @@ func (h *SandboxSetDefaulter) Handle(_ context.Context, req admission.Request) a
 		return admission.Errored(http.StatusBadRequest, err)
 	}
 
-	modified := false
-	if ptr.Deref(obj.Spec.Template.Spec.AutomountServiceAccountToken, true) {
-		obj.Spec.Template.Spec.AutomountServiceAccountToken = ptr.To(false)
-		modified = true
-	}
-	if modified {
+	clone := obj.DeepCopy()
+	setDefaultPodTemplate(obj.Spec.Template)
+	if !reflect.DeepEqual(obj, clone) {
 		marshal, err := json.Marshal(obj)
 		if err != nil {
 			return admission.Errored(http.StatusInternalServerError, err)
@@ -57,4 +57,14 @@ func (h *SandboxSetDefaulter) Handle(_ context.Context, req admission.Request) a
 		return admission.PatchResponseFromRaw(req.Object.Raw, marshal)
 	}
 	return admission.Allowed("")
+}
+
+func setDefaultPodTemplate(template *v1.PodTemplateSpec) {
+	if template == nil {
+		return
+	}
+	if ptr.Deref(template.Spec.AutomountServiceAccountToken, true) {
+		template.Spec.AutomountServiceAccountToken = ptr.To(false)
+	}
+	defaults.SetDefaultPodSpec(&template.Spec)
 }
