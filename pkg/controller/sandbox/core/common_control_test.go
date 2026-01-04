@@ -914,3 +914,298 @@ func TestCommonControl_handleInplaceUpdateSandbox(t *testing.T) {
 		t.Errorf("Expected done to be true when revision is consistent and inplace update is completed")
 	}
 }
+
+func TestCommonControl_handleClaimSandbox(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	tests := []struct {
+		name               string
+		pod                *corev1.Pod
+		box                *agentsv1alpha1.Sandbox
+		wantErr            bool
+		expectLabelsUpdate map[string]string
+		expectLabelsDelete []string
+	}{
+		{
+			name: "pod is nil, should return early",
+			pod:  nil,
+			box: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+					Labels: map[string]string{
+						agentsv1alpha1.LabelSandboxPool:      "pool-1",
+						agentsv1alpha1.LabelSandboxIsClaimed: "true",
+					},
+				},
+			},
+			wantErr:            false,
+			expectLabelsUpdate: nil,
+			expectLabelsDelete: nil,
+		},
+		{
+			name: "labels already in sync, no action needed",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+					Labels: map[string]string{
+						agentsv1alpha1.LabelSandboxPool:      "pool-1",
+						agentsv1alpha1.LabelSandboxIsClaimed: "true",
+						"other-label":                        "keep-me",
+					},
+				},
+			},
+			box: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+					Labels: map[string]string{
+						agentsv1alpha1.LabelSandboxPool:      "pool-1",
+						agentsv1alpha1.LabelSandboxIsClaimed: "true",
+					},
+				},
+			},
+			wantErr:            false,
+			expectLabelsUpdate: nil,
+			expectLabelsDelete: nil,
+		},
+		{
+			name: "add missing labels to pod",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+					Labels: map[string]string{
+						"other-label": "keep-me",
+					},
+				},
+			},
+			box: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+					Labels: map[string]string{
+						agentsv1alpha1.LabelSandboxPool:      "pool-1",
+						agentsv1alpha1.LabelSandboxIsClaimed: "true",
+					},
+				},
+			},
+			wantErr: false,
+			expectLabelsUpdate: map[string]string{
+				agentsv1alpha1.LabelSandboxPool:      "pool-1",
+				agentsv1alpha1.LabelSandboxIsClaimed: "true",
+			},
+			expectLabelsDelete: nil,
+		},
+		{
+			name: "delete labels from pod that don't exist in sandbox",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+					Labels: map[string]string{
+						agentsv1alpha1.LabelSandboxPool:      "pool-1",
+						agentsv1alpha1.LabelSandboxIsClaimed: "true",
+						"other-label":                        "keep-me",
+					},
+				},
+			},
+			box: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+					Labels:    map[string]string{},
+				},
+			},
+			wantErr:            false,
+			expectLabelsUpdate: nil,
+			expectLabelsDelete: []string{
+				agentsv1alpha1.LabelSandboxPool,
+				agentsv1alpha1.LabelSandboxIsClaimed,
+			},
+		},
+		{
+			name: "update labels with different values",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+					Labels: map[string]string{
+						agentsv1alpha1.LabelSandboxPool:      "pool-1",
+						agentsv1alpha1.LabelSandboxIsClaimed: "false",
+						"other-label":                        "keep-me",
+					},
+				},
+			},
+			box: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+					Labels: map[string]string{
+						agentsv1alpha1.LabelSandboxPool:      "pool-2",
+						agentsv1alpha1.LabelSandboxIsClaimed: "true",
+					},
+				},
+			},
+			wantErr: false,
+			expectLabelsUpdate: map[string]string{
+				agentsv1alpha1.LabelSandboxPool:      "pool-2",
+				agentsv1alpha1.LabelSandboxIsClaimed: "true",
+			},
+			expectLabelsDelete: nil,
+		},
+		{
+			name: "mixed operations: add, update, and delete",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+					Labels: map[string]string{
+						agentsv1alpha1.LabelSandboxIsClaimed: "true",
+						// LabelSandboxIsClaimed missing
+						"other-label": "keep-me",
+					},
+				},
+			},
+			box: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+					Labels: map[string]string{
+						agentsv1alpha1.LabelSandboxPool: "pool-old",
+						// LabelSandboxPool missing (should be deleted)
+					},
+				},
+			},
+			wantErr: false,
+			expectLabelsUpdate: map[string]string{
+				agentsv1alpha1.LabelSandboxPool: "pool-old",
+			},
+			expectLabelsDelete: []string{
+				agentsv1alpha1.LabelSandboxIsClaimed,
+			},
+		},
+		{
+			name: "pod labels is nil, should add labels",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+					Labels:    nil,
+				},
+			},
+			box: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+					Labels: map[string]string{
+						agentsv1alpha1.LabelSandboxPool:      "pool-1",
+						agentsv1alpha1.LabelSandboxIsClaimed: "true",
+					},
+				},
+			},
+			wantErr: false,
+			expectLabelsUpdate: map[string]string{
+				agentsv1alpha1.LabelSandboxPool:      "pool-1",
+				agentsv1alpha1.LabelSandboxIsClaimed: "true",
+			},
+			expectLabelsDelete: nil,
+		},
+		{
+			name: "sandbox labels is nil, should delete all tracked labels",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+					Labels: map[string]string{
+						agentsv1alpha1.LabelSandboxPool:      "pool-1",
+						agentsv1alpha1.LabelSandboxIsClaimed: "true",
+						"other-label":                        "keep-me",
+					},
+				},
+			},
+			box: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+					Labels:    nil,
+				},
+			},
+			wantErr:            false,
+			expectLabelsUpdate: nil,
+			expectLabelsDelete: []string{
+				agentsv1alpha1.LabelSandboxPool,
+				agentsv1alpha1.LabelSandboxIsClaimed,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			objects := []client.Object{}
+			if tt.pod != nil {
+				objects = append(objects, tt.pod)
+			}
+
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
+			control := &commonControl{
+				Client:               fakeClient,
+				recorder:             record.NewFakeRecorder(10),
+				inplaceUpdateControl: inplaceupdate.InPlaceUpdateControl{Client: fakeClient},
+			}
+
+			args := EnsureFuncArgs{
+				Pod:       tt.pod,
+				Box:       tt.box,
+				NewStatus: &agentsv1alpha1.SandboxStatus{},
+			}
+
+			err := control.handleClaimSandbox(context.TODO(), args)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("handleClaimSandbox() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+
+			if tt.pod == nil {
+				return
+			}
+
+			// Verify pod labels were updated correctly
+			updatedPod := &corev1.Pod{}
+			err = fakeClient.Get(context.TODO(), types.NamespacedName{Name: tt.pod.Name, Namespace: tt.pod.Namespace}, updatedPod)
+			if err != nil {
+				t.Fatalf("Failed to get updated pod: %v", err)
+			}
+
+			// Check expected updates
+			if tt.expectLabelsUpdate != nil {
+				for key, expectedValue := range tt.expectLabelsUpdate {
+					if actualValue, exists := updatedPod.Labels[key]; !exists {
+						t.Errorf("Expected label %s to exist, but it doesn't", key)
+					} else if actualValue != expectedValue {
+						t.Errorf("Expected label %s to be %s, got %s", key, expectedValue, actualValue)
+					}
+				}
+			}
+
+			// Check expected deletions
+			if tt.expectLabelsDelete != nil {
+				for _, key := range tt.expectLabelsDelete {
+					if _, exists := updatedPod.Labels[key]; exists {
+						t.Errorf("Expected label %s to be deleted, but it still exists", key)
+					}
+				}
+			}
+
+			// Verify other labels are preserved
+			if otherValue, exists := tt.pod.Labels["other-label"]; exists {
+				if updatedPod.Labels["other-label"] != otherValue {
+					t.Errorf("Expected other-label to be preserved as %s, got %s", otherValue, updatedPod.Labels["other-label"])
+				}
+			}
+		})
+	}
+}
