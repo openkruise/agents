@@ -22,3 +22,22 @@ OpenKruise Agents delivers vendor-neutral sandboxes with the following key chara
 ## Relationship with Sig Agent-Sandbox
 
 OpenKruise Agents offers high-level APIs for sandbox management, enabling efficient resource provisioning, user management, and traffic routing. Under the hood, OpenKruise Agents includes built-in sandbox APIs and implementations, while maintaining compatibility with Sig Agent-Sandbox when available.
+
+## Usage
+To interact with the OpenKruise Agents programmatically, you can use the E2B SDK, which provides a high-level interface for creating and managing sandboxes.
+
+- [Running E2B Code Interpreter Sandbox](examples/code_interpreter/README.md)
+- [Running E2B Desktop Sandbox](examples/desktop/README.md)
+
+## Community
+Active communication channels:
+
+- Slack: [OpenKruise channel](https://kubernetes.slack.com/channels/openkruise) (*English*)
+- DingTalk：Search GroupID `23330762` (*Chinese*)
+- WeChat: Search User `openkruise` and let the robot invite you (*Chinese*)
+- Bi-weekly Community Meeting (APAC, *Chinese*):
+    - Thursday 19:30 GMT+8 (Asia/Shanghai), [Calendar](https://calendar.google.com/calendar/u/2?cid=MjdtbDZucXA2bjVpNTFyYTNpazV2dW8ybHNAZ3JvdXAuY2FsZW5kYXIuZ29vZ2xlLmNvbQ)
+    - Join Meeting(DingTalk): Search GroupID `23330762` (*Chinese*)
+    - [Notes and agenda](https://shimo.im/docs/gXqmeQOYBehZ4vqo)
+- Bi-weekly Community Meeting (*English*): TODO
+    - [Meeting Link(zoom)](https://us02web.zoom.us/j/87059136652?pwd=NlI4UThFWXVRZkxIU0dtR1NINncrQT09)
