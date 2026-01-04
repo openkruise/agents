@@ -34,7 +34,7 @@ metadata:
   name: user-sandbox
 spec:
   sandboxSetName: python-pool
-  timeout: 3600
+  shutdownTime: 3600
   envVars:
     API_KEY: "sk-..."
 ```
@@ -77,10 +77,10 @@ type SandboxClaimSpec struct {
     // +kubebuilder:validation:Minimum=1
     Replicas int32 `json:"replicas,omitempty"`
 
-    // Timeout specifies the lifetime of claimed sandboxes in seconds
-    // This will be converted to shutdownTime on the Sandbox
+    // ShutdownTime specifies the lifetime of claimed sandboxes in seconds
+    // This will be converted to spec.shutdownTime (absolute time) on the Sandbox
     // +optional
-    Timeout *int64 `json:"timeout,omitempty"`
+    ShutdownTime *int64 `json:"shutdownTime,omitempty"`
 
     // Metadata contains arbitrary key-value pairs to be added as annotations
     // to claimed Sandbox resources
@@ -181,7 +181,7 @@ The SandboxClaim CRD is designed to align with the E2B HTTP API's `NewSandboxReq
 | E2B API Field | SandboxClaim Field | Status | Notes |
 |---------------|-------------------|--------|-------|
 | `templateID` | `sandboxSetName` |  implementable | Maps to SandboxSet pool name |
-| `timeout` | `timeout` |  implementable | Lifetime in seconds |
+| `timeout` | `shutdownTime` |  implementable | Lifetime in seconds (converted to absolute time) |
 | `metadata` | `metadata` |  implementable | Custom annotations |
 | `envVars` | `envVars` | implementable | Environment variables for envd init |
 | `autoPause` | N/A |  Future Work | Not implemented in E2B Api |
@@ -192,18 +192,44 @@ The SandboxClaim CRD is designed to align with the E2B HTTP API's `NewSandboxReq
 ### Implementation Details
 
 **Claim Process**:
-1. List available sandboxes from the specified SandboxSet (state = Running and available)
-2. Randomly select a sandbox from candidates
-3. Update sandbox with:
+1. List available sandboxes from the specified SandboxSet (state = `available`, filtered by `IndexPoolAvailable` index)
+2. Filter candidates by checking:
+   - `Status.Phase == Running` (sandbox must be running)
+   - `AnnotationLock == ""` (pre-check to skip already-locked sandboxes)
+3. Randomly select a sandbox from candidates
+4. Update sandbox with:
     - Lock annotation (UUID)
     - Owner annotation (from `claim.spec.owner`)
     - Claim timestamp annotation
     - Custom metadata annotations (from `claim.spec.metadata`)
     - Remove SandboxSet ownerReference (detach from pool)
     - Add SandboxClaim ownerReference
-    - Set `shutdownTime` if timeout specified
-4. Inject environment variables via envd `/init` endpoint (if `claim.spec.envVars` specified)
+    - Set `spec.shutdownTime` (absolute time) if `shutdownTime` specified (converted from seconds to absolute time)
+5. Inject environment variables via envd `/init` endpoint (if `claim.spec.envVars` specified)
     - Failure to inject envVars logs error but doesn't fail the claim
+
+**Conflict Handling**:
+The claim process uses **optimistic locking** via Kubernetes resourceVersion to handle concurrent claims:
+
+- **Pre-check Filter**: Before attempting to claim, the controller filters out sandboxes that already have a `AnnotationLock` annotation. This reduces but doesn't eliminate race conditions.
+
+- **Race Window**: Between the pre-check and the actual update, another process (e.g., other sandbox-manager) may claim the same sandbox.
+
+- **Optimistic Locking**: When updating the sandbox, Kubernetes validates the resourceVersion. If the sandbox was modified by another process, the API returns a `Conflict` error.
+
+- **Declarative Retry Model**:
+  - **Per-Reconcile Attempt**: Each reconcile cycle attempts to claim one sandbox at a time
+  - **Conflict Handling**: If a `Conflict` error occurs:
+    - Logs the conflict event
+    - Updates status (remains in `Claiming` phase)
+    - Returns without error to trigger next reconcile
+    - On next reconcile, the candidate list will exclude the already-claimed sandbox
+  - **Continuous Reconciliation**: Controller keeps reconciling until:
+    - **Success**: All required sandboxes are claimed (transitions to `Ready` phase)
+    - **Persistent Failure**: Updates status to `Failed` phase with error message when:
+      - SandboxSet is deleted (immediate failure)
+      - No available sandboxes exist and pool remains empty for a significant duration (e.g., 10-30 minutes)
+      - Note: The exact timeout duration is a design decision to be made during implementation. Controller should track the first failure timestamp and transition to Failed after a configurable period (may be can add a new CRD field and status field to config and record this period ?).
 
 **Automatic Proxy Configuration**:
 - Existing infra watches sandbox changes and automatically updates proxy routes
