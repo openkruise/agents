@@ -120,6 +120,7 @@ func (i *Infra) AsSandbox(sbx *v1alpha1.Sandbox) *Sandbox {
 			DeepCopy:      DeepCopy,
 		},
 		Sandbox: sbx,
+		proxy:   i.Proxy,
 	}
 }
 

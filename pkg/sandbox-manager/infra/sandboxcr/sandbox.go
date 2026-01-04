@@ -100,6 +100,7 @@ func (s *BaseSandbox[T]) Kill(ctx context.Context) error {
 type Sandbox struct {
 	BaseSandbox[*agentsv1alpha1.Sandbox]
 	*agentsv1alpha1.Sandbox
+	proxy *proxy.Server
 }
 
 func (s *Sandbox) GetSandboxID() string {
@@ -182,6 +183,15 @@ func (s *Sandbox) Resume(ctx context.Context) error {
 	if ok && cond.Status != metav1.ConditionTrue {
 		return fmt.Errorf("sandbox is pausing, please wait a moment and try again")
 	}
+
+	// Record IP and State before resume to compare with values after resume
+	var oldPodIP, oldState string
+	if s.proxy != nil {
+		oldRoute, _ := s.proxy.LoadRoute(s.GetSandboxID())
+		oldPodIP = oldRoute.IP
+		oldState = oldRoute.State
+	}
+
 	if s.Sandbox.Spec.Paused {
 		if err := s.retryUpdate(ctx, s.Update, func(sbx *agentsv1alpha1.Sandbox) {
 			sbx.Spec.Paused = false
@@ -203,6 +213,34 @@ func (s *Sandbox) Resume(ctx context.Context) error {
 		return err
 	}
 	log.Info("sandbox resumed", "cost", time.Since(start))
+
+	// Force sync route immediately after resume to avoid waiting for informer watch
+	if s.proxy != nil {
+		// Refresh sandbox to get the latest IP and State
+		if err := s.InplaceRefresh(true); err != nil {
+			log.Error(err, "failed to refresh sandbox after resume, route sync may be delayed")
+		} else {
+			newRoute := s.GetRoute()
+			newPodIP := newRoute.IP
+			newState := newRoute.State
+
+			// Compare IP and State before and after resume to determine if sync is needed
+			ipChanged := oldPodIP != newPodIP
+			stateChanged := oldState != newState
+
+			if ipChanged || stateChanged {
+				// Update local route cache and sync with peers
+				s.proxy.SetRoute(newRoute)
+				if err := s.proxy.SyncRouteWithPeers(newRoute); err != nil {
+					log.Error(err, "failed to sync route with peers after resume", "route", newRoute)
+				} else {
+					log.Info("route synced with peers after resume", "route", newRoute,
+						"oldIP", oldPodIP, "newIP", newPodIP, "ipChanged", ipChanged,
+						"oldState", oldState, "newState", newState, "stateChanged", stateChanged)
+				}
+			}
+		}
+	}
 	return nil
 }
 
