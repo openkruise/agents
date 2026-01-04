@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
+	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
 	"k8s.io/klog/v2"
@@ -22,23 +23,30 @@ func (sc *Controller) registerRoutes() {
 	})
 
 	// Sandbox management endpoints
-	web.RegisterRoute(sc.mux, "POST /sandboxes", sc.CreateSandbox, sc.CheckApiKey)
-	web.RegisterRoute(sc.mux, "GET /v2/sandboxes", sc.ListSandboxes, sc.CheckApiKey)
-	web.RegisterRoute(sc.mux, "GET /sandboxes/{sandboxID}", sc.DescribeSandbox, sc.CheckApiKey)
-	web.RegisterRoute(sc.mux, "DELETE /sandboxes/{sandboxID}", sc.DeleteSandbox, sc.CheckApiKey)
-	web.RegisterRoute(sc.mux, "POST /sandboxes/{sandboxID}/pause", sc.PauseSandbox, sc.CheckApiKey)
-	web.RegisterRoute(sc.mux, "POST /sandboxes/{sandboxID}/resume", sc.ResumeSandbox, sc.CheckApiKey)
-	web.RegisterRoute(sc.mux, "POST /sandboxes/{sandboxID}/connect", sc.ConnectSandbox, sc.CheckApiKey)
-	web.RegisterRoute(sc.mux, "POST /sandboxes/{sandboxID}/timeout", sc.SetSandboxTimeout, sc.CheckApiKey)
-	web.RegisterRoute(sc.mux, "GET /browser/{sandboxID}/json/version", sc.BrowserUse)
-	web.RegisterRoute(sc.mux, "GET /debug", sc.Debug, sc.CheckApiKey)
+	RegisterE2BRoute(sc.mux, http.MethodPost, "/sandboxes", sc.CreateSandbox, sc.CheckApiKey)
+	RegisterE2BRoute(sc.mux, http.MethodGet, "/v2/sandboxes", sc.ListSandboxes, sc.CheckApiKey)
+	RegisterE2BRoute(sc.mux, http.MethodGet, "/sandboxes/{sandboxID}", sc.DescribeSandbox, sc.CheckApiKey)
+	RegisterE2BRoute(sc.mux, http.MethodDelete, "/sandboxes/{sandboxID}", sc.DeleteSandbox, sc.CheckApiKey)
+	RegisterE2BRoute(sc.mux, http.MethodPost, "/sandboxes/{sandboxID}/pause", sc.PauseSandbox, sc.CheckApiKey)
+	RegisterE2BRoute(sc.mux, http.MethodPost, "/sandboxes/{sandboxID}/resume", sc.ResumeSandbox, sc.CheckApiKey)
+	RegisterE2BRoute(sc.mux, http.MethodPost, "/sandboxes/{sandboxID}/connect", sc.ConnectSandbox, sc.CheckApiKey)
+	RegisterE2BRoute(sc.mux, http.MethodPost, "/sandboxes/{sandboxID}/timeout", sc.SetSandboxTimeout, sc.CheckApiKey)
+	RegisterE2BRoute(sc.mux, http.MethodGet, "/browser/{sandboxID}/json/version", sc.BrowserUse)
+	RegisterE2BRoute(sc.mux, http.MethodGet, "/debug", sc.Debug, sc.CheckApiKey)
 
 	// API Keys management endpoints
 	if sc.keys != nil {
-		web.RegisterRoute(sc.mux, "GET /api-keys", sc.ListAPIKeys, sc.CheckApiKey)
-		web.RegisterRoute(sc.mux, "POST /api-keys", sc.CreateAPIKey, sc.CheckApiKey)
-		web.RegisterRoute(sc.mux, "DELETE /api-keys/{apiKeyID}", sc.DeleteAPIKey, sc.CheckApiKey)
+		RegisterE2BRoute(sc.mux, http.MethodGet, "/api-keys", sc.ListAPIKeys, sc.CheckApiKey)
+		RegisterE2BRoute(sc.mux, http.MethodPost, "/api-keys", sc.CreateAPIKey, sc.CheckApiKey)
+		RegisterE2BRoute(sc.mux, http.MethodDelete, "/api-keys/{apiKeyID}", sc.DeleteAPIKey, sc.CheckApiKey)
 	}
+}
+
+func RegisterE2BRoute[T any](mux *http.ServeMux, method, path string, handler web.Handler[T], middlewares ...web.MiddleWare) {
+	// Native E2B API
+	web.RegisterRoute(mux, method, path, handler, middlewares...)
+	// Customized E2B API
+	web.RegisterRoute(mux, method, adapters.CustomPrefix+"/api"+path, handler, middlewares...)
 }
 
 var AnonymousUser = &models.CreatedTeamAPIKey{
