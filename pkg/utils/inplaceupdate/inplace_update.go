@@ -142,7 +142,7 @@ func (c *InPlaceUpdateControl) Update(ctx context.Context, opts InPlaceUpdateOpt
 		logger.Error(err, "inplace update pod failed")
 		return err
 	}
-	logger.Info("inplace update pod success", "revision", revision)
+	logger.Info("inplace update pod success", "revision", revision, "patchBody", patchBody)
 	return nil
 }
 

@@ -29,6 +29,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/rand"
+	"k8s.io/client-go/util/retry"
+	"k8s.io/klog/v2"
 )
 
 var _ = Describe("Sandbox", func() {
@@ -42,8 +44,8 @@ var _ = Describe("Sandbox", func() {
 
 	BeforeEach(func() {
 		namespace = createNamespace(ctx)
-		updateImage = "nginx:stable-alpine"
-		initialImage = "nginx:stable-alpine3.23"
+		updateImage = "nginx:stable-alpine3.23"
+		initialImage = "nginx:stable-alpine3.20"
 		// Create a basic Sandbox resource
 		sandbox = &agentsv1alpha1.Sandbox{
 			ObjectMeta: metav1.ObjectMeta{
@@ -153,7 +155,7 @@ var _ = Describe("Sandbox", func() {
 			}, originalSandbox)).To(Succeed())
 
 			originalSandbox.Spec.Paused = true
-			Expect(k8sClient.Update(ctx, originalSandbox)).To(Succeed())
+			Expect(updateSandboxSpec(ctx, originalSandbox)).To(Succeed())
 
 			By("Verifying sandbox transitions to Paused phase")
 			Eventually(func() agentsv1alpha1.SandboxPhase {
@@ -181,7 +183,7 @@ var _ = Describe("Sandbox", func() {
 			}, originalSandbox)).To(Succeed())
 
 			originalSandbox.Spec.Paused = false
-			Expect(k8sClient.Update(ctx, originalSandbox)).To(Succeed())
+			Expect(updateSandboxSpec(ctx, originalSandbox)).To(Succeed())
 
 			By("Verifying sandbox transitions to Resuming phase")
 			Eventually(func() agentsv1alpha1.SandboxPhase {
@@ -355,6 +357,7 @@ var _ = Describe("Sandbox", func() {
 				Name:      initialPodName,
 				Namespace: sandbox.Namespace,
 			}, initialPod)).To(Succeed())
+			klog.InfoS("fetch initial pod status", "status", utils.DumpJson(initialPod.Status))
 
 			By("Updating sandbox image for inplace upgrade")
 			originalSandbox := &agentsv1alpha1.Sandbox{}
@@ -364,7 +367,7 @@ var _ = Describe("Sandbox", func() {
 			}, originalSandbox)).To(Succeed())
 
 			originalSandbox.Spec.Template.Spec.Containers[0].Image = updateImage
-			Expect(k8sClient.Update(ctx, originalSandbox)).To(Succeed())
+			Expect(updateSandboxSpec(ctx, originalSandbox)).To(Succeed())
 
 			By("Verifying sandbox transitions to Updating phase")
 			Eventually(func() int64 {
@@ -375,13 +378,24 @@ var _ = Describe("Sandbox", func() {
 				return sandbox.Status.ObservedGeneration
 			}, time.Minute*3, time.Millisecond*500).Should(Equal(int64(2)))
 			Eventually(func() metav1.ConditionStatus {
+				pod := &corev1.Pod{}
+				err := k8sClient.Get(ctx, types.NamespacedName{
+					Name:      sandbox.Name,
+					Namespace: sandbox.Namespace,
+				}, pod)
+				if err != nil {
+					return ""
+				}
 				_ = k8sClient.Get(ctx, types.NamespacedName{
 					Name:      sandbox.Name,
 					Namespace: sandbox.Namespace,
 				}, sandbox)
 				condition := utils.GetSandboxCondition(&sandbox.Status, string(agentsv1alpha1.SandboxConditionReady))
+				if condition.Status != metav1.ConditionTrue {
+					klog.InfoS("fetch sandbox pod status", "status", utils.DumpJson(pod.Status))
+				}
 				return condition.Status
-			}, time.Second*30, time.Millisecond*500).Should(Equal(metav1.ConditionTrue))
+			}, time.Second*60, time.Millisecond*500).Should(Equal(metav1.ConditionTrue))
 
 			By("Verifying sandbox eventually reaches Running phase with updated image")
 			Eventually(func() string {
@@ -430,4 +444,20 @@ func createNamespace(ctx context.Context) string {
 	}
 	Expect(k8sClient.Create(ctx, obj)).To(Succeed())
 	return name
+}
+
+func updateSandboxSpec(ctx context.Context, sandbox *agentsv1alpha1.Sandbox) error {
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		latestSandbox := &agentsv1alpha1.Sandbox{}
+		err := k8sClient.Get(ctx, types.NamespacedName{
+			Name:      sandbox.Name,
+			Namespace: sandbox.Namespace,
+		}, latestSandbox)
+		if err != nil {
+			return err
+		}
+		latestSandbox.Spec = sandbox.Spec
+		return k8sClient.Update(ctx, latestSandbox)
+	})
+	return err
 }

@@ -25,6 +25,7 @@ import (
 
 	"github.com/spf13/pflag"
 	"k8s.io/klog/v2"
+	"k8s.io/kubernetes/pkg/capabilities"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -78,6 +79,7 @@ func main() {
 	// New variables for pprof
 	var enablePprof bool
 	var pprofAddr string
+	var allowPrivileged bool
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -104,6 +106,8 @@ func main() {
 	// Define the pprof flags using the standard flag package (which is then merged into pflag)
 	flag.BoolVar(&enablePprof, "enable-pprof", false, "Enable pprof profiling")
 	flag.StringVar(&pprofAddr, "pprof-addr", ":6060", "The address the pprof debug maps to.")
+	flag.BoolVar(&allowPrivileged, "allow-privileged", true, "If true, allow privileged containers. It will only work if api-server is also"+
+		"started with --allow-privileged=true.")
 
 	opts := zap.Options{
 		Development: true,
@@ -123,6 +127,12 @@ func main() {
 				setupLog.Error(err, "unable to start pprof server")
 			}
 		}()
+	}
+
+	if allowPrivileged {
+		capabilities.Initialize(capabilities.Capabilities{
+			AllowPrivileged: allowPrivileged,
+		})
 	}
 
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
