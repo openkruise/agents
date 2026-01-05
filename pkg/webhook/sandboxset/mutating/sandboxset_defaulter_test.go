@@ -38,12 +38,14 @@ func TestSandboxSetDefaulter_Handle(t *testing.T) {
 				},
 				Spec: v1alpha1.SandboxSetSpec{
 					Replicas: 3,
-					Template: &corev1.PodTemplateSpec{
-						Spec: corev1.PodSpec{
-							Containers: []corev1.Container{
-								{
-									Name:  "test-container",
-									Image: "nginx:latest",
+					SandboxTemplate: v1alpha1.SandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name:  "test-container",
+										Image: "nginx:latest",
+									},
 								},
 							},
 						},
@@ -62,13 +64,15 @@ func TestSandboxSetDefaulter_Handle(t *testing.T) {
 				},
 				Spec: v1alpha1.SandboxSetSpec{
 					Replicas: 3,
-					Template: &corev1.PodTemplateSpec{
-						Spec: corev1.PodSpec{
-							AutomountServiceAccountToken: ptr.To(true),
-							Containers: []corev1.Container{
-								{
-									Name:  "test-container",
-									Image: "nginx:latest",
+					SandboxTemplate: v1alpha1.SandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								AutomountServiceAccountToken: ptr.To(true),
+								Containers: []corev1.Container{
+									{
+										Name:  "test-container",
+										Image: "nginx:latest",
+									},
 								},
 							},
 						},
@@ -87,8 +91,10 @@ func TestSandboxSetDefaulter_Handle(t *testing.T) {
 				},
 				Spec: v1alpha1.SandboxSetSpec{
 					Replicas: 3,
-					Template: &corev1.PodTemplateSpec{
-						Spec: corev1.PodSpec{},
+					SandboxTemplate: v1alpha1.SandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{},
+						},
 					},
 				},
 			},
@@ -156,12 +162,14 @@ func TestSandboxSetDefaulter_HandleUpdate(t *testing.T) {
 				},
 				Spec: v1alpha1.SandboxSetSpec{
 					Replicas: 5, // Changed replicas
-					Template: &corev1.PodTemplateSpec{
-						Spec: corev1.PodSpec{
-							Containers: []corev1.Container{
-								{
-									Name:  "test-container",
-									Image: "nginx:latest",
+					SandboxTemplate: v1alpha1.SandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name:  "test-container",
+										Image: "nginx:latest",
+									},
 								},
 							},
 						},

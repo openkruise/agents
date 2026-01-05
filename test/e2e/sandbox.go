@@ -53,21 +53,23 @@ var _ = Describe("Sandbox", func() {
 				Namespace: namespace,
 			},
 			Spec: agentsv1alpha1.SandboxSpec{
-				Template: &corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{
-							{
-								Name:  "test-container",
-								Image: initialImage,
-								Ports: []corev1.ContainerPort{
-									{
-										Name:          "http",
-										ContainerPort: 80,
+				SandboxTemplate: agentsv1alpha1.SandboxTemplate{
+					Template: &corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{
+									Name:  "test-container",
+									Image: initialImage,
+									Ports: []corev1.ContainerPort{
+										{
+											Name:          "http",
+											ContainerPort: 80,
+										},
 									},
 								},
 							},
+							RestartPolicy: corev1.RestartPolicyNever,
 						},
-						RestartPolicy: corev1.RestartPolicyNever,
 					},
 				},
 			},
@@ -285,16 +287,18 @@ var _ = Describe("Sandbox", func() {
 					Namespace: Namespace,
 				},
 				Spec: agentsv1alpha1.SandboxSpec{
-					Template: &corev1.PodTemplateSpec{
-						Spec: corev1.PodSpec{
-							Containers: []corev1.Container{
-								{
-									Name:    "failing-container",
-									Image:   "busybox:latest",
-									Command: []string{"/bin/sh", "-c", "exit 1"},
+					SandboxTemplate: agentsv1alpha1.SandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name:    "failing-container",
+										Image:   "busybox:latest",
+										Command: []string{"/bin/sh", "-c", "exit 1"},
+									},
 								},
+								RestartPolicy: corev1.RestartPolicyNever,
 							},
-							RestartPolicy: corev1.RestartPolicyNever,
 						},
 					},
 				},

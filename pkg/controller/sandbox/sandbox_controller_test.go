@@ -69,7 +69,9 @@ func TestSandboxReconciler_Reconcile(t *testing.T) {
 					Namespace: "default",
 				},
 				Spec: agentsv1alpha1.SandboxSpec{
-					Template: nil,
+					SandboxTemplate: agentsv1alpha1.SandboxTemplate{
+						Template: nil,
+					},
 				},
 			},
 			pod:           nil,
@@ -84,12 +86,14 @@ func TestSandboxReconciler_Reconcile(t *testing.T) {
 					Namespace: "default",
 				},
 				Spec: agentsv1alpha1.SandboxSpec{
-					Template: &corev1.PodTemplateSpec{
-						Spec: corev1.PodSpec{
-							Containers: []corev1.Container{
-								{
-									Name:  "test-container",
-									Image: "nginx:latest",
+					SandboxTemplate: agentsv1alpha1.SandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name:  "test-container",
+										Image: "nginx:latest",
+									},
 								},
 							},
 						},
@@ -111,12 +115,14 @@ func TestSandboxReconciler_Reconcile(t *testing.T) {
 					Namespace: "default",
 				},
 				Spec: agentsv1alpha1.SandboxSpec{
-					Template: &corev1.PodTemplateSpec{
-						Spec: corev1.PodSpec{
-							Containers: []corev1.Container{
-								{
-									Name:  "test-container",
-									Image: "nginx:latest",
+					SandboxTemplate: agentsv1alpha1.SandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name:  "test-container",
+										Image: "nginx:latest",
+									},
 								},
 							},
 						},
@@ -139,12 +145,14 @@ func TestSandboxReconciler_Reconcile(t *testing.T) {
 					Generation: 1,
 				},
 				Spec: agentsv1alpha1.SandboxSpec{
-					Template: &corev1.PodTemplateSpec{
-						Spec: corev1.PodSpec{
-							Containers: []corev1.Container{
-								{
-									Name:  "test-container",
-									Image: "nginx:latest",
+					SandboxTemplate: agentsv1alpha1.SandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name:  "test-container",
+										Image: "nginx:latest",
+									},
 								},
 							},
 						},
@@ -164,12 +172,14 @@ func TestSandboxReconciler_Reconcile(t *testing.T) {
 					DeletionTimestamp: &metav1.Time{Time: time.Now()},
 				},
 				Spec: agentsv1alpha1.SandboxSpec{
-					Template: &corev1.PodTemplateSpec{
-						Spec: corev1.PodSpec{
-							Containers: []corev1.Container{
-								{
-									Name:  "test-container",
-									Image: "nginx:latest",
+					SandboxTemplate: agentsv1alpha1.SandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name:  "test-container",
+										Image: "nginx:latest",
+									},
 								},
 							},
 						},
@@ -199,12 +209,14 @@ func TestSandboxReconciler_Reconcile(t *testing.T) {
 					Namespace: "default",
 				},
 				Spec: agentsv1alpha1.SandboxSpec{
-					Template: &corev1.PodTemplateSpec{
-						Spec: corev1.PodSpec{
-							Containers: []corev1.Container{
-								{
-									Name:  "test-container",
-									Image: "nginx:latest",
+					SandboxTemplate: agentsv1alpha1.SandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name:  "test-container",
+										Image: "nginx:latest",
+									},
 								},
 							},
 						},
@@ -234,12 +246,14 @@ func TestSandboxReconciler_Reconcile(t *testing.T) {
 					Namespace: "default",
 				},
 				Spec: agentsv1alpha1.SandboxSpec{
-					Template: &corev1.PodTemplateSpec{
-						Spec: corev1.PodSpec{
-							Containers: []corev1.Container{
-								{
-									Name:  "test-container",
-									Image: "nginx:latest",
+					SandboxTemplate: agentsv1alpha1.SandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name:  "test-container",
+										Image: "nginx:latest",
+									},
 								},
 							},
 						},
@@ -270,12 +284,14 @@ func TestSandboxReconciler_Reconcile(t *testing.T) {
 				},
 				Spec: agentsv1alpha1.SandboxSpec{
 					Paused: true,
-					Template: &corev1.PodTemplateSpec{
-						Spec: corev1.PodSpec{
-							Containers: []corev1.Container{
-								{
-									Name:  "test-container",
-									Image: "nginx:latest",
+					SandboxTemplate: agentsv1alpha1.SandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name:  "test-container",
+										Image: "nginx:latest",
+									},
 								},
 							},
 						},
@@ -306,12 +322,14 @@ func TestSandboxReconciler_Reconcile(t *testing.T) {
 				},
 				Spec: agentsv1alpha1.SandboxSpec{
 					Paused: false,
-					Template: &corev1.PodTemplateSpec{
-						Spec: corev1.PodSpec{
-							Containers: []corev1.Container{
-								{
-									Name:  "test-container",
-									Image: "nginx:latest",
+					SandboxTemplate: agentsv1alpha1.SandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name:  "test-container",
+										Image: "nginx:latest",
+									},
 								},
 							},
 						},
@@ -514,12 +532,14 @@ func TestSandboxReconciler_ShutdownTime(t *testing.T) {
 		},
 		Spec: agentsv1alpha1.SandboxSpec{
 			ShutdownTime: &pastTime,
-			Template: &corev1.PodTemplateSpec{
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{
-							Name:  "test-container",
-							Image: "nginx:latest",
+			SandboxTemplate: agentsv1alpha1.SandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name:  "test-container",
+								Image: "nginx:latest",
+							},
 						},
 					},
 				},
@@ -573,12 +593,14 @@ func TestSandboxReconcile_WithVolumeClaimTemplates(t *testing.T) {
 					Namespace: "default",
 				},
 				Spec: agentsv1alpha1.SandboxSpec{
-					Template: &corev1.PodTemplateSpec{
-						Spec: corev1.PodSpec{
-							Containers: []corev1.Container{
-								{
-									Name:  "test-container",
-									Image: "nginx:latest",
+					SandboxTemplate: agentsv1alpha1.SandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name:  "test-container",
+										Image: "nginx:latest",
+									},
 								},
 							},
 						},
@@ -597,26 +619,28 @@ func TestSandboxReconcile_WithVolumeClaimTemplates(t *testing.T) {
 					Namespace: "default",
 				},
 				Spec: agentsv1alpha1.SandboxSpec{
-					Template: &corev1.PodTemplateSpec{
-						Spec: corev1.PodSpec{
-							Containers: []corev1.Container{
-								{
-									Name:  "test-container",
-									Image: "nginx:latest",
+					SandboxTemplate: agentsv1alpha1.SandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name:  "test-container",
+										Image: "nginx:latest",
+									},
 								},
 							},
 						},
-					},
-					VolumeClaimTemplates: []corev1.PersistentVolumeClaim{
-						{
-							ObjectMeta: metav1.ObjectMeta{
-								Name: "www",
-							},
-							Spec: corev1.PersistentVolumeClaimSpec{
-								AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-								Resources: corev1.VolumeResourceRequirements{
-									Requests: corev1.ResourceList{
-										corev1.ResourceStorage: resource.MustParse("1Gi"),
+						VolumeClaimTemplates: []corev1.PersistentVolumeClaim{
+							{
+								ObjectMeta: metav1.ObjectMeta{
+									Name: "www",
+								},
+								Spec: corev1.PersistentVolumeClaimSpec{
+									AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+									Resources: corev1.VolumeResourceRequirements{
+										Requests: corev1.ResourceList{
+											corev1.ResourceStorage: resource.MustParse("1Gi"),
+										},
 									},
 								},
 							},
@@ -636,39 +660,41 @@ func TestSandboxReconcile_WithVolumeClaimTemplates(t *testing.T) {
 					Namespace: "default",
 				},
 				Spec: agentsv1alpha1.SandboxSpec{
-					Template: &corev1.PodTemplateSpec{
-						Spec: corev1.PodSpec{
-							Containers: []corev1.Container{
-								{
-									Name:  "test-container",
-									Image: "nginx:latest",
-								},
-							},
-						},
-					},
-					VolumeClaimTemplates: []corev1.PersistentVolumeClaim{
-						{
-							ObjectMeta: metav1.ObjectMeta{
-								Name: "www",
-							},
-							Spec: corev1.PersistentVolumeClaimSpec{
-								AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-								Resources: corev1.VolumeResourceRequirements{
-									Requests: corev1.ResourceList{
-										corev1.ResourceStorage: resource.MustParse("1Gi"),
+					SandboxTemplate: agentsv1alpha1.SandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name:  "test-container",
+										Image: "nginx:latest",
 									},
 								},
 							},
 						},
-						{
-							ObjectMeta: metav1.ObjectMeta{
-								Name: "data",
+						VolumeClaimTemplates: []corev1.PersistentVolumeClaim{
+							{
+								ObjectMeta: metav1.ObjectMeta{
+									Name: "www",
+								},
+								Spec: corev1.PersistentVolumeClaimSpec{
+									AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+									Resources: corev1.VolumeResourceRequirements{
+										Requests: corev1.ResourceList{
+											corev1.ResourceStorage: resource.MustParse("1Gi"),
+										},
+									},
+								},
 							},
-							Spec: corev1.PersistentVolumeClaimSpec{
-								AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
-								Resources: corev1.VolumeResourceRequirements{
-									Requests: corev1.ResourceList{
-										corev1.ResourceStorage: resource.MustParse("5Gi"),
+							{
+								ObjectMeta: metav1.ObjectMeta{
+									Name: "data",
+								},
+								Spec: corev1.PersistentVolumeClaimSpec{
+									AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
+									Resources: corev1.VolumeResourceRequirements{
+										Requests: corev1.ResourceList{
+											corev1.ResourceStorage: resource.MustParse("5Gi"),
+										},
 									},
 								},
 							},
@@ -688,26 +714,28 @@ func TestSandboxReconcile_WithVolumeClaimTemplates(t *testing.T) {
 					Namespace: "default",
 				},
 				Spec: agentsv1alpha1.SandboxSpec{
-					Template: &corev1.PodTemplateSpec{
-						Spec: corev1.PodSpec{
-							Containers: []corev1.Container{
-								{
-									Name:  "test-container",
-									Image: "nginx:latest",
+					SandboxTemplate: agentsv1alpha1.SandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name:  "test-container",
+										Image: "nginx:latest",
+									},
 								},
 							},
 						},
-					},
-					VolumeClaimTemplates: []corev1.PersistentVolumeClaim{
-						{
-							ObjectMeta: metav1.ObjectMeta{
-								Name: "www",
-							},
-							Spec: corev1.PersistentVolumeClaimSpec{
-								AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-								Resources: corev1.VolumeResourceRequirements{
-									Requests: corev1.ResourceList{
-										corev1.ResourceStorage: resource.MustParse("1Gi"),
+						VolumeClaimTemplates: []corev1.PersistentVolumeClaim{
+							{
+								ObjectMeta: metav1.ObjectMeta{
+									Name: "www",
+								},
+								Spec: corev1.PersistentVolumeClaimSpec{
+									AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+									Resources: corev1.VolumeResourceRequirements{
+										Requests: corev1.ResourceList{
+											corev1.ResourceStorage: resource.MustParse("1Gi"),
+										},
 									},
 								},
 							},

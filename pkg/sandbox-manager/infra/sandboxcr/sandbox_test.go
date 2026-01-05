@@ -40,8 +40,10 @@ func ConvertPodToSandboxCR(pod *corev1.Pod) *v1alpha1.Sandbox {
 	sbx := &v1alpha1.Sandbox{
 		ObjectMeta: pod.ObjectMeta,
 		Spec: v1alpha1.SandboxSpec{
-			Template: &corev1.PodTemplateSpec{
-				Spec: pod.Spec,
+			SandboxTemplate: v1alpha1.SandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: pod.Spec,
+				},
 			},
 		},
 		Status: v1alpha1.SandboxStatus{

@@ -49,17 +49,19 @@ var _ = Describe("SandboxSet", func() {
 			},
 			Spec: agentsv1alpha1.SandboxSetSpec{
 				Replicas: 2,
-				Template: &corev1.PodTemplateSpec{
-					ObjectMeta: metav1.ObjectMeta{
-						Labels: map[string]string{
-							"sandboxset": "true",
+				SandboxTemplate: agentsv1alpha1.SandboxTemplate{
+					Template: &corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{
+							Labels: map[string]string{
+								"sandboxset": "true",
+							},
 						},
-					},
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{
-							{
-								Name:  "test-container",
-								Image: initialImage,
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{
+									Name:  "test-container",
+									Image: initialImage,
+								},
 							},
 						},
 					},

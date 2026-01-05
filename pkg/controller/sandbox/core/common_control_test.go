@@ -52,12 +52,14 @@ func TestCommonControl_EnsureSandboxRunning(t *testing.T) {
 						Namespace: "default",
 					},
 					Spec: agentsv1alpha1.SandboxSpec{
-						Template: &corev1.PodTemplateSpec{
-							Spec: corev1.PodSpec{
-								Containers: []corev1.Container{
-									{
-										Name:  "test-container",
-										Image: "nginx:latest",
+						SandboxTemplate: agentsv1alpha1.SandboxTemplate{
+							Template: &corev1.PodTemplateSpec{
+								Spec: corev1.PodSpec{
+									Containers: []corev1.Container{
+										{
+											Name:  "test-container",
+											Image: "nginx:latest",
+										},
 									},
 								},
 							},
@@ -210,9 +212,11 @@ func TestCommonControl_EnsureSandboxUpdated(t *testing.T) {
 						Namespace: "default",
 					},
 					Spec: agentsv1alpha1.SandboxSpec{
-						Template: &corev1.PodTemplateSpec{
-							Spec: corev1.PodSpec{
-								NodeName: "node-1",
+						SandboxTemplate: agentsv1alpha1.SandboxTemplate{
+							Template: &corev1.PodTemplateSpec{
+								Spec: corev1.PodSpec{
+									NodeName: "node-1",
+								},
 							},
 						},
 					},
@@ -274,9 +278,11 @@ func TestCommonControl_EnsureSandboxUpdated(t *testing.T) {
 						Namespace: "default",
 					},
 					Spec: agentsv1alpha1.SandboxSpec{
-						Template: &corev1.PodTemplateSpec{
-							Spec: corev1.PodSpec{
-								NodeName: "node-1",
+						SandboxTemplate: agentsv1alpha1.SandboxTemplate{
+							Template: &corev1.PodTemplateSpec{
+								Spec: corev1.PodSpec{
+									NodeName: "node-1",
+								},
 							},
 						},
 					},
@@ -493,12 +499,14 @@ func TestCommonControl_EnsureSandboxResumed(t *testing.T) {
 						Namespace: "default",
 					},
 					Spec: agentsv1alpha1.SandboxSpec{
-						Template: &corev1.PodTemplateSpec{
-							Spec: corev1.PodSpec{
-								Containers: []corev1.Container{
-									{
-										Name:  "test-container",
-										Image: "nginx:latest",
+						SandboxTemplate: agentsv1alpha1.SandboxTemplate{
+							Template: &corev1.PodTemplateSpec{
+								Spec: corev1.PodSpec{
+									Containers: []corev1.Container{
+										{
+											Name:  "test-container",
+											Image: "nginx:latest",
+										},
 									},
 								},
 							},
@@ -730,16 +738,18 @@ func TestCommonControl_createPod(t *testing.T) {
 			Namespace: "default",
 		},
 		Spec: agentsv1alpha1.SandboxSpec{
-			Template: &corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels:      map[string]string{"app": "test"},
-					Annotations: map[string]string{"annotation": "value"},
-				},
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{
-							Name:  "test-container",
-							Image: "nginx:latest",
+			SandboxTemplate: agentsv1alpha1.SandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{
+						Labels:      map[string]string{"app": "test"},
+						Annotations: map[string]string{"annotation": "value"},
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name:  "test-container",
+								Image: "nginx:latest",
+							},
 						},
 					},
 				},
@@ -877,12 +887,14 @@ func TestCommonControl_handleInplaceUpdateSandbox(t *testing.T) {
 			Namespace: "default",
 		},
 		Spec: agentsv1alpha1.SandboxSpec{
-			Template: &corev1.PodTemplateSpec{
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{
-							Name:  "test-container",
-							Image: "nginx:latest",
+			SandboxTemplate: agentsv1alpha1.SandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name:  "test-container",
+								Image: "nginx:latest",
+							},
 						},
 					},
 				},
@@ -922,12 +934,14 @@ func TestCommonControl_handleInplaceUpdateSandbox(t *testing.T) {
 			},
 		},
 		Spec: agentsv1alpha1.SandboxSpec{
-			Template: &corev1.PodTemplateSpec{
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{
-							Name:  "test-container",
-							Image: "nginx:latest",
+			SandboxTemplate: agentsv1alpha1.SandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name:  "test-container",
+								Image: "nginx:latest",
+							},
 						},
 					},
 				},
@@ -967,12 +981,14 @@ func TestCommonControl_handleInplaceUpdateSandbox(t *testing.T) {
 			},
 		},
 		Spec: agentsv1alpha1.SandboxSpec{
-			Template: &corev1.PodTemplateSpec{
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{
-							Name:  "test-container",
-							Image: "nginx:latest",
+			SandboxTemplate: agentsv1alpha1.SandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name:  "test-container",
+								Image: "nginx:latest",
+							},
 						},
 					},
 				},
