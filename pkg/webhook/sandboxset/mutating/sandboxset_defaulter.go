@@ -49,6 +49,10 @@ func (h *SandboxSetDefaulter) Handle(_ context.Context, req admission.Request) a
 
 	clone := obj.DeepCopy()
 	setDefaultPodTemplate(obj.Spec.Template)
+
+	// Apply defaulting logic to volume claim templates
+	setDefaultVolumeClaimTemplates(obj.Spec.VolumeClaimTemplates)
+
 	if !reflect.DeepEqual(obj, clone) {
 		marshal, err := json.Marshal(obj)
 		if err != nil {
@@ -67,4 +71,21 @@ func setDefaultPodTemplate(template *v1.PodTemplateSpec) {
 		template.Spec.AutomountServiceAccountToken = ptr.To(false)
 	}
 	defaults.SetDefaultPodSpec(&template.Spec)
+}
+
+// setDefaultVolumeClaimTemplates applies default values to the volume claim templates
+func setDefaultVolumeClaimTemplates(templates []v1.PersistentVolumeClaim) {
+	for i := range templates {
+		vct := &templates[i]
+		// Set default access modes if not specified
+		if len(vct.Spec.AccessModes) == 0 {
+			vct.Spec.AccessModes = []v1.PersistentVolumeAccessMode{v1.ReadWriteOnce}
+		}
+
+		// Set default volume mode if not specified
+		if vct.Spec.VolumeMode == nil {
+			volumeMode := v1.PersistentVolumeFilesystem
+			vct.Spec.VolumeMode = &volumeMode
+		}
+	}
 }

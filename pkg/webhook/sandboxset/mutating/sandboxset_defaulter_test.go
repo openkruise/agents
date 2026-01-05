@@ -343,6 +343,215 @@ func TestSetDefaultPodTemplate(t *testing.T) {
 	}
 }
 
+func TestSetDefaultVolumeClaimTemplates(t *testing.T) {
+	// Define common volume mode values
+	filesystemMode := corev1.PersistentVolumeFilesystem
+	blockMode := corev1.PersistentVolumeBlock
+
+	tests := []struct {
+		name      string
+		templates []corev1.PersistentVolumeClaim
+		expected  []corev1.PersistentVolumeClaim
+	}{
+		{
+			name:      "empty templates slice",
+			templates: []corev1.PersistentVolumeClaim{},
+			expected:  []corev1.PersistentVolumeClaim{},
+		},
+		{
+			name:      "nil templates slice",
+			templates: nil,
+			expected:  nil,
+		},
+		{
+			name: "PVC with no access modes - should default to ReadWriteOnce",
+			templates: []corev1.PersistentVolumeClaim{
+				{
+					Spec: corev1.PersistentVolumeClaimSpec{
+						AccessModes: []corev1.PersistentVolumeAccessMode{},
+					},
+				},
+			},
+			expected: []corev1.PersistentVolumeClaim{
+				{
+					Spec: corev1.PersistentVolumeClaimSpec{
+						AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+						VolumeMode:  &filesystemMode,
+					},
+				},
+			},
+		},
+		{
+			name: "PVC with existing access modes - should not change",
+			templates: []corev1.PersistentVolumeClaim{
+				{
+					Spec: corev1.PersistentVolumeClaimSpec{
+						AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadOnlyMany},
+					},
+				},
+			},
+			expected: []corev1.PersistentVolumeClaim{
+				{
+					Spec: corev1.PersistentVolumeClaimSpec{
+						AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadOnlyMany},
+						VolumeMode:  &filesystemMode,
+					},
+				},
+			},
+		},
+		{
+			name: "PVC with no volume mode - should default to Filesystem",
+			templates: []corev1.PersistentVolumeClaim{
+				{
+					Spec: corev1.PersistentVolumeClaimSpec{
+						AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+					},
+				},
+			},
+			expected: []corev1.PersistentVolumeClaim{
+				{
+					Spec: corev1.PersistentVolumeClaimSpec{
+						AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+						VolumeMode:  &filesystemMode,
+					},
+				},
+			},
+		},
+		{
+			name: "PVC with existing volume mode - should not change",
+			templates: []corev1.PersistentVolumeClaim{
+				{
+					Spec: corev1.PersistentVolumeClaimSpec{
+						AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+						VolumeMode:  &blockMode,
+					},
+				},
+			},
+			expected: []corev1.PersistentVolumeClaim{
+				{
+					Spec: corev1.PersistentVolumeClaimSpec{
+						AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+						VolumeMode:  &blockMode,
+					},
+				},
+			},
+		},
+		{
+			name: "PVC with both access modes and volume mode set - should not change",
+			templates: []corev1.PersistentVolumeClaim{
+				{
+					Spec: corev1.PersistentVolumeClaimSpec{
+						AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
+						VolumeMode:  &filesystemMode,
+					},
+				},
+			},
+			expected: []corev1.PersistentVolumeClaim{
+				{
+					Spec: corev1.PersistentVolumeClaimSpec{
+						AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
+						VolumeMode:  &filesystemMode,
+					},
+				},
+			},
+		},
+		{
+			name: "multiple PVCs with different configurations",
+			templates: []corev1.PersistentVolumeClaim{
+				{
+					Spec: corev1.PersistentVolumeClaimSpec{
+						AccessModes: []corev1.PersistentVolumeAccessMode{},
+					},
+				},
+				{
+					Spec: corev1.PersistentVolumeClaimSpec{
+						AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadOnlyMany},
+						VolumeMode:  &blockMode,
+					},
+				},
+				{
+					Spec: corev1.PersistentVolumeClaimSpec{},
+				},
+			},
+			expected: []corev1.PersistentVolumeClaim{
+				{
+					Spec: corev1.PersistentVolumeClaimSpec{
+						AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+						VolumeMode:  &filesystemMode,
+					},
+				},
+				{
+					Spec: corev1.PersistentVolumeClaimSpec{
+						AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadOnlyMany},
+						VolumeMode:  &blockMode,
+					},
+				},
+				{
+					Spec: corev1.PersistentVolumeClaimSpec{
+						AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+						VolumeMode:  &filesystemMode,
+					},
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setDefaultVolumeClaimTemplates(tt.templates)
+
+			// If expected is nil, actual should also be nil
+			if tt.expected == nil {
+				if tt.templates != nil {
+					t.Errorf("Expected nil slice, got non-nil slice")
+				}
+				return
+			}
+
+			// Compare slice length
+			if len(tt.templates) != len(tt.expected) {
+				t.Errorf("Expected slice length %d, got %d", len(tt.expected), len(tt.templates))
+				return
+			}
+
+			// Compare each PVC
+			for i := range tt.templates {
+				actualPVC := tt.templates[i]
+				expectedPVC := tt.expected[i]
+
+				// Compare AccessModes
+				if len(actualPVC.Spec.AccessModes) != len(expectedPVC.Spec.AccessModes) {
+					t.Errorf("PVC %d: Expected AccessModes length %d, got %d. Actual AccessModes: %v, Expected AccessModes: %v",
+						i, len(expectedPVC.Spec.AccessModes), len(actualPVC.Spec.AccessModes),
+						actualPVC.Spec.AccessModes, expectedPVC.Spec.AccessModes)
+					continue
+				}
+				for j, actualMode := range actualPVC.Spec.AccessModes {
+					if actualMode != expectedPVC.Spec.AccessModes[j] {
+						t.Errorf("PVC %d: Expected AccessMode %v at index %d, got %v",
+							i, expectedPVC.Spec.AccessModes[j], j, actualMode)
+					}
+				}
+
+				// Compare VolumeMode - need special handling for pointers
+				actualModeNil := actualPVC.Spec.VolumeMode == nil
+				expectedModeNil := expectedPVC.Spec.VolumeMode == nil
+
+				if actualModeNil != expectedModeNil {
+					t.Errorf("PVC %d: VolumeMode nil mismatch - actual is nil: %v, expected is nil: %v",
+						i, actualModeNil, expectedModeNil)
+					continue
+				}
+
+				if !actualModeNil && *actualPVC.Spec.VolumeMode != *expectedPVC.Spec.VolumeMode {
+					t.Errorf("PVC %d: Expected VolumeMode %v, got %v",
+						i, *expectedPVC.Spec.VolumeMode, *actualPVC.Spec.VolumeMode)
+				}
+			}
+		})
+	}
+}
+
 // Helper function to deep copy PodTemplateSpec for testing
 func deepCopyPodTemplateSpec(template *corev1.PodTemplateSpec) *corev1.PodTemplateSpec {
 	if template == nil {
