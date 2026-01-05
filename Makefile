@@ -196,7 +196,8 @@ GOLANGCI_LINT_VERSION ?= v2.3.0
 # Run tests
 .PHONY: test
 test:
-	go test ./pkg/...
+	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" go test -race ./pkg/... -coverprofile raw-cover.out
+	grep -v "pkg/client" raw-cover.out > cover.out
 
 .PHONY: kustomize
 kustomize: $(KUSTOMIZE) ## Download kustomize locally if necessary.
