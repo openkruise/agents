@@ -525,7 +525,6 @@ func TestSandboxReconciler_ShutdownTime(t *testing.T) {
 			},
 		},
 	}
-
 	// Add the sandbox to the client
 	err := client.Create(context.TODO(), sandbox)
 	if err != nil {
@@ -544,7 +543,6 @@ func TestSandboxReconciler_ShutdownTime(t *testing.T) {
 	if err != nil {
 		t.Errorf("Reconcile() error = %v", err)
 	}
-
 	// Verify the sandbox was deleted
 	updatedSandbox := &agentsv1alpha1.Sandbox{}
 	err = client.Get(context.TODO(), req.NamespacedName, updatedSandbox)

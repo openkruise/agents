@@ -49,7 +49,10 @@ type objectCacheVersions struct {
 func (r *realResourceVersionExpectation) Expect(obj metav1.Object) {
 	r.Lock()
 	defer r.Unlock()
-
+	// avoid situations where the UID is empty in UT
+	if obj.GetUID() == "" {
+		return
+	}
 	expectations := r.objectVersions[obj.GetUID()]
 	if expectations == nil {
 		r.objectVersions[obj.GetUID()] = &objectCacheVersions{}

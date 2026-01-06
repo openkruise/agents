@@ -31,27 +31,27 @@ func TestResourceVersionExpectation(t *testing.T) {
 		result      bool
 	}{
 		{
-			expect:      &v1.Pod{ObjectMeta: metav1.ObjectMeta{ResourceVersion: "2"}},
-			observe:     &v1.Pod{ObjectMeta: metav1.ObjectMeta{ResourceVersion: "1"}},
-			isSatisfied: &v1.Pod{ObjectMeta: metav1.ObjectMeta{ResourceVersion: "1"}},
+			expect:      &v1.Pod{ObjectMeta: metav1.ObjectMeta{ResourceVersion: "2", UID: "00"}},
+			observe:     &v1.Pod{ObjectMeta: metav1.ObjectMeta{ResourceVersion: "1", UID: "00"}},
+			isSatisfied: &v1.Pod{ObjectMeta: metav1.ObjectMeta{ResourceVersion: "1", UID: "00"}},
 			result:      false,
 		},
 		{
-			expect:      &v1.Pod{ObjectMeta: metav1.ObjectMeta{ResourceVersion: "2"}},
-			observe:     &v1.Pod{ObjectMeta: metav1.ObjectMeta{ResourceVersion: "2"}},
-			isSatisfied: &v1.Pod{ObjectMeta: metav1.ObjectMeta{ResourceVersion: "2"}},
+			expect:      &v1.Pod{ObjectMeta: metav1.ObjectMeta{ResourceVersion: "2", UID: "01"}},
+			observe:     &v1.Pod{ObjectMeta: metav1.ObjectMeta{ResourceVersion: "2", UID: "01"}},
+			isSatisfied: &v1.Pod{ObjectMeta: metav1.ObjectMeta{ResourceVersion: "2", UID: "01"}},
 			result:      true,
 		},
 		{
-			expect:      &v1.Pod{ObjectMeta: metav1.ObjectMeta{ResourceVersion: "2"}},
-			observe:     &v1.Pod{ObjectMeta: metav1.ObjectMeta{ResourceVersion: "1"}},
-			isSatisfied: &v1.Pod{ObjectMeta: metav1.ObjectMeta{ResourceVersion: "2"}},
+			expect:      &v1.Pod{ObjectMeta: metav1.ObjectMeta{ResourceVersion: "2", UID: "02"}},
+			observe:     &v1.Pod{ObjectMeta: metav1.ObjectMeta{ResourceVersion: "1", UID: "02"}},
+			isSatisfied: &v1.Pod{ObjectMeta: metav1.ObjectMeta{ResourceVersion: "2", UID: "02"}},
 			result:      true,
 		},
 		{
-			expect:      &v1.Pod{ObjectMeta: metav1.ObjectMeta{ResourceVersion: "2"}},
-			observe:     &v1.Pod{ObjectMeta: metav1.ObjectMeta{ResourceVersion: "2"}},
-			isSatisfied: &v1.Pod{ObjectMeta: metav1.ObjectMeta{ResourceVersion: "3"}},
+			expect:      &v1.Pod{ObjectMeta: metav1.ObjectMeta{ResourceVersion: "2", UID: "03"}},
+			observe:     &v1.Pod{ObjectMeta: metav1.ObjectMeta{ResourceVersion: "2", UID: "03"}},
+			isSatisfied: &v1.Pod{ObjectMeta: metav1.ObjectMeta{ResourceVersion: "3", UID: "03"}},
 			result:      true,
 		},
 	}

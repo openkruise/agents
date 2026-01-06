@@ -31,12 +31,15 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
@@ -45,6 +48,7 @@ import (
 	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/utils"
+	"github.com/openkruise/agents/pkg/utils/expectations"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 )
 
@@ -99,6 +103,17 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	if box.Spec.Template == nil {
 		logger.Info("sandbox template is nil, and ignore")
 		return reconcile.Result{}, nil
+	}
+
+	// If resourceVersion expectations have not satisfied yet, just skip this reconcile
+	core.ResourceVersionExpectations.Observe(box)
+	if isSatisfied, unsatisfiedDuration := core.ResourceVersionExpectations.IsSatisfied(box); !isSatisfied {
+		if unsatisfiedDuration < expectations.ExpectationTimeout {
+			logger.Info("Not satisfied resourceVersion for Sandbox, wait for cache event")
+			return reconcile.Result{RequeueAfter: expectations.ExpectationTimeout - unsatisfiedDuration}, nil
+		}
+		klog.InfoS("Expectation unsatisfied overtime for Sandbox, wait for cache event timeout", "timeout", unsatisfiedDuration)
+		core.ResourceVersionExpectations.Delete(box)
 	}
 
 	logger.V(consts.DebugLogLevel).Info("Began to process Sandbox for reconcile")
@@ -238,6 +253,7 @@ func (r *SandboxReconciler) updateSandboxStatus(ctx context.Context, newStatus a
 		logger.Error(err, "update sandbox status failed", "patchStatus", patchStatus)
 		return err
 	}
+	core.ResourceVersionExpectations.Expect(rcvObject)
 	logger.Info("update sandbox status success", "status", utils.DumpJson(newStatus))
 	return nil
 }
@@ -293,7 +309,15 @@ func (r *SandboxReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		WithOptions(controller.Options{MaxConcurrentReconciles: concurrentReconciles}).
 		For(&agentsv1alpha1.Sandbox{}).
 		Named("sandbox").
-		Watches(&agentsv1alpha1.Sandbox{}, &handler.EnqueueRequestForObject{}).
-		Watches(&corev1.Pod{}, &SandboxPodEventHandler{}).
+		Watches(&agentsv1alpha1.Sandbox{}, &handler.EnqueueRequestForObject{}, builder.WithPredicates(predicate.Funcs{
+			UpdateFunc: func(e event.UpdateEvent) bool {
+				core.ResourceVersionExpectations.Observe(e.ObjectNew)
+				return true
+			},
+			DeleteFunc: func(e event.DeleteEvent) bool {
+				core.ResourceVersionExpectations.Delete(e.Object)
+				return false
+			},
+		})).Watches(&corev1.Pod{}, &SandboxPodEventHandler{}).
 		Complete(r)
 }

@@ -24,10 +24,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/utils/expectations"
 )
 
 var (
-	sandboxControllerKind = agentsv1alpha1.GroupVersion.WithKind("Sandbox")
+	sandboxControllerKind       = agentsv1alpha1.GroupVersion.WithKind("Sandbox")
+	ResourceVersionExpectations = expectations.NewResourceVersionExpectation()
 )
 
 type EnsureFuncArgs struct {
