@@ -205,11 +205,24 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 			})
 			assert.NoError(t, err)
 
-			got, err := manager.ClaimSandbox(context.Background(), "test-user", tt.template, infra.ClaimSandboxOptions{
-				Modifier: func(sbx infra.Sandbox) {
-					sbx.SetTimeout(time.Duration(tt.timeout) * time.Second)
-				},
-				Image: tt.image,
+			var claimed infra.Sandbox
+			err = retry.OnError(wait.Backoff{
+				Duration: 100 * time.Millisecond,
+				Factor:   1,
+				Steps:    20,
+			}, func(err error) bool {
+				return strings.Contains(err.Error(), "no stock")
+			}, func() error {
+				got, err := manager.ClaimSandbox(context.Background(), "test-user", tt.template, infra.ClaimSandboxOptions{
+					Modifier: func(sbx infra.Sandbox) {
+						sbx.SetTimeout(time.Duration(tt.timeout) * time.Second)
+					},
+					Image: tt.image,
+				})
+				if err == nil {
+					claimed = got
+				}
+				return err
 			})
 
 			if tt.expectError {
@@ -219,9 +232,9 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 				assert.NoError(t, err)
 				time.Sleep(100 * time.Millisecond)
 				// check route
-				route, ok := manager.proxy.LoadRoute(got.GetSandboxID())
+				route, ok := manager.proxy.LoadRoute(claimed.GetSandboxID())
 				assert.True(t, ok)
-				assert.Equal(t, got.GetSandboxID(), route.ID)
+				assert.Equal(t, claimed.GetSandboxID(), route.ID)
 				assert.Equal(t, testSbx.Status.PodInfo.PodIP, route.IP)
 				assert.Equal(t, "test-user", route.Owner)
 			}
