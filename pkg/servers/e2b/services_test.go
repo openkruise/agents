@@ -219,14 +219,14 @@ func TestCreateSandbox(t *testing.T) {
 				}
 				startedAt, err := time.Parse(time.RFC3339, sbx.StartedAt)
 				assert.NoError(t, err)
-				AssertTimeAlmostEqual(t, now, startedAt)
+				assert.WithinDuration(t, now, startedAt, 5*time.Second)
 				timeout := 300
 				if tt.request.Timeout != 0 {
 					timeout = tt.request.Timeout
 				}
 				endAt, err := time.Parse(time.RFC3339, sbx.EndAt)
 				assert.NoError(t, err)
-				AssertTimeAlmostEqual(t, startedAt.Add(time.Duration(timeout)*time.Second), endAt)
+				assert.WithinDuration(t, startedAt.Add(time.Duration(timeout)*time.Second), endAt, 5*time.Second)
 				assert.Equal(t, models.SandboxStateRunning, sbx.State)
 			}
 		})

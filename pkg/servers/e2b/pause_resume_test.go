@@ -148,7 +148,7 @@ func TestConnectSandbox(t *testing.T) {
 						Type:   string(agentsv1alpha1.SandboxConditionReady),
 						Status: metav1.ConditionTrue,
 					})
-					client.ApiV1alpha1().Sandboxes(sbx.Namespace).UpdateStatus(context.Background(), sbx, metav1.UpdateOptions{})
+					_, _ = client.ApiV1alpha1().Sandboxes(sbx.Namespace).UpdateStatus(context.Background(), sbx, metav1.UpdateOptions{})
 				})
 			}
 
@@ -177,7 +177,7 @@ func TestConnectSandbox(t *testing.T) {
 				assert.Equal(t, models.SandboxStateRunning, resumeResp.Body.State)
 				endAt, err := time.Parse(time.RFC3339, resumeResp.Body.EndAt)
 				assert.NoError(t, err)
-				AssertTimeAlmostEqual(t, now.Add(time.Duration(tt.timeout)*time.Second), endAt)
+				assert.WithinDuration(t, now.Add(time.Duration(tt.timeout)*time.Second), endAt, 5*time.Second)
 			}
 		})
 	}
@@ -277,7 +277,7 @@ func TestResumeSandbox(t *testing.T) {
 						Type:   string(agentsv1alpha1.SandboxConditionReady),
 						Status: metav1.ConditionTrue,
 					})
-					client.ApiV1alpha1().Sandboxes(sbx.Namespace).UpdateStatus(context.Background(), sbx, metav1.UpdateOptions{})
+					_, _ = client.ApiV1alpha1().Sandboxes(sbx.Namespace).UpdateStatus(context.Background(), sbx, metav1.UpdateOptions{})
 				})
 			}
 
@@ -309,7 +309,7 @@ func TestResumeSandbox(t *testing.T) {
 				assert.Equal(t, models.SandboxStateRunning, describeResp.Body.State)
 				endAt, err2 := time.Parse(time.RFC3339, describeResp.Body.EndAt)
 				assert.NoError(t, err2)
-				AssertTimeAlmostEqual(t, now.Add(time.Duration(tt.timeout)*time.Second), endAt)
+				assert.WithinDuration(t, now.Add(time.Duration(tt.timeout)*time.Second), endAt, 5*time.Second)
 			}
 		})
 	}

@@ -183,14 +183,6 @@ func CreateSandboxPool(t *testing.T, client versioned.Interface, name string, av
 	}
 }
 
-func AssertTimeAlmostEqual(t *testing.T, expected, actual time.Time) {
-	offset := expected.Sub(actual)
-	if offset < 0 {
-		offset = -offset
-	}
-	assert.True(t, offset < time.Second, fmt.Sprintf("actual time %s should be almost equal to expected %s", actual, expected))
-}
-
 // AvoidGetFromCache makes the resourceVersionExpectation unsatisfied to avoid getting sandbox from cache,
 // which is useful in unit tests for zero-latency update
 func AvoidGetFromCache(t *testing.T, sandboxID string, client clients.SandboxClient) {
