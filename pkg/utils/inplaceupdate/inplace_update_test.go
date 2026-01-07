@@ -241,7 +241,7 @@ func TestInPlaceUpdateControl_Update(t *testing.T) {
 				Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(tt.opts.Pod).Build(),
 			}
 
-			err := client.Update(context.TODO(), tt.opts)
+			_, err = client.Update(context.TODO(), tt.opts)
 			if tt.expectError {
 				if err == nil {
 					t.Errorf("Expected error but got none")
@@ -315,8 +315,8 @@ func TestIsInplaceUpdateCompleted(t *testing.T) {
 			name: "no state annotation",
 			pod: &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:        "test-pod",
-					Namespace:   "default",
+					Name:      "test-pod",
+					Namespace: "default",
 					Annotations: map[string]string{
 						// No inplace update state annotation
 					},

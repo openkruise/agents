@@ -132,7 +132,7 @@ func TestCommonControl_EnsureSandboxRunning(t *testing.T) {
 			control := &commonControl{
 				Client:               client,
 				recorder:             record.NewFakeRecorder(10),
-				inplaceUpdateControl: inplaceupdate.InPlaceUpdateControl{Client: client},
+				inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(client, inplaceupdate.DefaultGeneratePatchBodyFunc),
 			}
 
 			err := control.EnsureSandboxRunning(context.TODO(), tt.args)
@@ -315,7 +315,7 @@ func TestCommonControl_EnsureSandboxUpdated(t *testing.T) {
 			control := &commonControl{
 				Client:               client,
 				recorder:             record.NewFakeRecorder(10),
-				inplaceUpdateControl: inplaceupdate.InPlaceUpdateControl{Client: client},
+				inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(client, inplaceupdate.DefaultGeneratePatchBodyFunc),
 			}
 
 			err := control.EnsureSandboxUpdated(context.TODO(), tt.args)
@@ -457,7 +457,7 @@ func TestCommonControl_EnsureSandboxPaused(t *testing.T) {
 			control := &commonControl{
 				Client:               client,
 				recorder:             record.NewFakeRecorder(10),
-				inplaceUpdateControl: inplaceupdate.InPlaceUpdateControl{Client: client},
+				inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(client, inplaceupdate.DefaultGeneratePatchBodyFunc),
 			}
 
 			err := control.EnsureSandboxPaused(context.TODO(), tt.args)
@@ -588,7 +588,7 @@ func TestCommonControl_EnsureSandboxResumed(t *testing.T) {
 			control := &commonControl{
 				Client:               client,
 				recorder:             record.NewFakeRecorder(10),
-				inplaceUpdateControl: inplaceupdate.InPlaceUpdateControl{Client: client},
+				inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(client, inplaceupdate.DefaultGeneratePatchBodyFunc),
 			}
 
 			err := control.EnsureSandboxResumed(context.TODO(), tt.args)
@@ -701,7 +701,7 @@ func TestCommonControl_EnsureSandboxTerminated(t *testing.T) {
 			control := &commonControl{
 				Client:               client,
 				recorder:             record.NewFakeRecorder(10),
-				inplaceUpdateControl: inplaceupdate.InPlaceUpdateControl{Client: client},
+				inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(client, inplaceupdate.DefaultGeneratePatchBodyFunc),
 			}
 
 			err := control.EnsureSandboxTerminated(context.TODO(), tt.args)
@@ -875,10 +875,8 @@ func TestCommonControl_handleInplaceUpdateSandbox(t *testing.T) {
 	control := &commonControl{
 		Client:   fake.NewClientBuilder().WithScheme(scheme).Build(),
 		recorder: record.NewFakeRecorder(10),
-		inplaceUpdateControl: inplaceupdate.InPlaceUpdateControl{
-			Client: fake.NewClientBuilder().WithScheme(scheme).Build(),
-		},
 	}
+	control.inplaceUpdateControl = inplaceupdate.NewInPlaceUpdateControl(control.Client, inplaceupdate.DefaultGeneratePatchBodyFunc)
 
 	// Test case 1: Pod doesn't have template hash label
 	sandbox1 := &agentsv1alpha1.Sandbox{

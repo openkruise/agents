@@ -20,7 +20,6 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/openkruise/agents/pkg/utils/inplaceupdate"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -32,6 +31,7 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/utils"
+	"github.com/openkruise/agents/pkg/utils/inplaceupdate"
 )
 
 const CommonControlName = "common"
@@ -39,14 +39,14 @@ const CommonControlName = "common"
 type commonControl struct {
 	client.Client
 	recorder             record.EventRecorder
-	inplaceUpdateControl inplaceupdate.InPlaceUpdateControl
+	inplaceUpdateControl *inplaceupdate.InPlaceUpdateControl
 }
 
 func NewCommonControl(c client.Client, recorder record.EventRecorder) SandboxControl {
 	control := &commonControl{
 		Client:               c,
 		recorder:             recorder,
-		inplaceUpdateControl: inplaceupdate.InPlaceUpdateControl{Client: c},
+		inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(c, inplaceupdate.DefaultGeneratePatchBodyFunc),
 	}
 	return control
 }
@@ -335,9 +335,13 @@ func (r *commonControl) handleInplaceUpdateSandbox(ctx context.Context, args Ens
 
 	// start inplace update sandbox
 	opts := inplaceupdate.InPlaceUpdateOptions{Pod: pod, Box: box, Revision: newStatus.UpdateRevision}
-	if err = r.inplaceUpdateControl.Update(ctx, opts); err != nil {
+	changed, err := r.inplaceUpdateControl.Update(ctx, opts)
+	if err != nil {
 		return false, err
+	} else if !changed {
+		return true, nil
 	}
+
 	// update sandbox inplace-update
 	cond := metav1.Condition{
 		Type:               string(agentsv1alpha1.SandboxConditionInplaceUpdate),

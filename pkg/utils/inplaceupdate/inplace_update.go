@@ -79,14 +79,23 @@ type InPlaceUpdateOptions struct {
 	Pod      *corev1.Pod
 }
 
+type GeneratePatchBodyFunc func(opts InPlaceUpdateOptions) string
+
 type InPlaceUpdateControl struct {
 	client.Client
+	generatePatchBodyFunc GeneratePatchBodyFunc
 }
 
-func (c *InPlaceUpdateControl) Update(ctx context.Context, opts InPlaceUpdateOptions) error {
-	box, pod, revision := opts.Box, opts.Pod, opts.Revision
-	logger := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
+func NewInPlaceUpdateControl(c client.Client, patchFunc GeneratePatchBodyFunc) *InPlaceUpdateControl {
+	control := &InPlaceUpdateControl{
+		Client:                c,
+		generatePatchBodyFunc: patchFunc,
+	}
+	return control
+}
 
+func DefaultGeneratePatchBodyFunc(opts InPlaceUpdateOptions) string {
+	box, pod, revision := opts.Box, opts.Pod, opts.Revision
 	state := &InPlaceUpdateState{
 		Revision:              revision,
 		UpdateTimestamp:       metav1.Now(),
@@ -109,7 +118,7 @@ func (c *InPlaceUpdateControl) Update(ctx context.Context, opts InPlaceUpdateOpt
 		container := pod.Spec.Containers[i]
 		origin, ok := originContainers[container.Name]
 		if !ok {
-			return fmt.Errorf("container %s not found in the sandbox", container.Name)
+			continue
 		}
 		if origin.Image == container.Image {
 			continue
@@ -126,8 +135,7 @@ func (c *InPlaceUpdateControl) Update(ctx context.Context, opts InPlaceUpdateOpt
 		}
 	}
 	if len(patchSpec.Containers) == 0 {
-		logger.Info("Pod container images has not been modified")
-		return nil
+		return ""
 	}
 
 	annotations := map[string]string{
@@ -136,14 +144,25 @@ func (c *InPlaceUpdateControl) Update(ctx context.Context, opts InPlaceUpdateOpt
 	labels := map[string]string{
 		agentsapiv1alpha1.PodLabelTemplateHash: revision,
 	}
+	return fmt.Sprintf(`{"metadata":{"annotations":%s,"labels":%s},"spec":%s}`, utils.DumpJson(annotations), utils.DumpJson(labels), utils.DumpJson(patchSpec))
+}
+
+func (c *InPlaceUpdateControl) Update(ctx context.Context, opts InPlaceUpdateOptions) (bool, error) {
+	box, pod, revision := opts.Box, opts.Pod, opts.Revision
+	logger := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
+
+	patchBody := c.generatePatchBodyFunc(opts)
+	if patchBody == "" {
+		return false, nil
+	}
+
 	clone := pod.DeepCopy()
-	patchBody := fmt.Sprintf(`{"metadata":{"annotations":%s,"labels":%s},"spec":%s}`, utils.DumpJson(annotations), utils.DumpJson(labels), utils.DumpJson(patchSpec))
 	if err := c.Patch(ctx, clone, client.RawPatch(types.StrategicMergePatchType, []byte(patchBody))); err != nil {
 		logger.Error(err, "inplace update pod failed")
-		return err
+		return false, err
 	}
 	logger.Info("inplace update pod success", "revision", revision, "patchBody", patchBody)
-	return nil
+	return true, nil
 }
 
 func IsInplaceUpdateCompleted(ctx context.Context, pod *corev1.Pod) bool {
