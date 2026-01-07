@@ -129,12 +129,14 @@ func TestPool_ClaimSandbox(t *testing.T) {
 						OwnerReferences: GetSbsOwnerReference(),
 					},
 					Spec: v1alpha1.SandboxSpec{
-						Template: &corev1.PodTemplateSpec{
-							Spec: corev1.PodSpec{
-								Containers: []corev1.Container{
-									{
-										Name:  "main",
-										Image: "old-image",
+						SandboxTemplate: v1alpha1.SandboxTemplate{
+							Template: &corev1.PodTemplateSpec{
+								Spec: corev1.PodSpec{
+									Containers: []corev1.Container{
+										{
+											Name:  "main",
+											Image: "old-image",
+										},
 									},
 								},
 							},

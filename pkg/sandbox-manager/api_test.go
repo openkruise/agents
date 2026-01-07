@@ -157,12 +157,14 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 					},
 				},
 				Spec: agentsv1alpha1.SandboxSpec{
-					Template: &corev1.PodTemplateSpec{
-						Spec: corev1.PodSpec{
-							Containers: []corev1.Container{
-								{
-									Name:  "main",
-									Image: "old-image",
+					SandboxTemplate: agentsv1alpha1.SandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name:  "main",
+										Image: "old-image",
+									},
 								},
 							},
 						},
