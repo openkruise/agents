@@ -13,6 +13,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	utils2 "github.com/openkruise/agents/pkg/utils"
 	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	"github.com/openkruise/agents/pkg/utils/sandboxutils"
@@ -114,7 +115,7 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 		},
 		{
 			name:              "Claim failed",
-			template:          "exist-2", // pool has no pending sandboxes
+			template:          "exist-2", // pool has no available sandboxes
 			timeout:           1234,
 			expectError:       true,
 			expectedErrorCode: errors.ErrorInternal,
@@ -126,6 +127,8 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 			timeout:  1234,
 		},
 	}
+
+	sandboxcr.SetClaimLockTimeout(100 * time.Millisecond)
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

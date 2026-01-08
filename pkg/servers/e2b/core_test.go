@@ -17,6 +17,7 @@ import (
 	"github.com/openkruise/agents/client/clientset/versioned"
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
+	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
@@ -49,6 +50,7 @@ func CreatePodWithStatus(t *testing.T, client kubernetes.Interface, pod *corev1.
 
 func Setup(t *testing.T) (*Controller, *clients.ClientSet, func()) {
 	utils.InitLogOutput()
+	sandboxcr.SetClaimLockTimeout(100 * time.Millisecond)
 	clientSet := clients.NewFakeClientSet()
 	namespace := "sandbox-system"
 	// mock self pod

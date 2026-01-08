@@ -61,6 +61,7 @@ func NewTestPool(t *testing.T) (*Pool, versioned.Interface) {
 
 //goland:noinspection GoDeprecation
 func TestPool_ClaimSandbox(t *testing.T) {
+	SetClaimLockTimeout(100 * time.Millisecond)
 	// Test cases
 	tests := []struct {
 		name        string
