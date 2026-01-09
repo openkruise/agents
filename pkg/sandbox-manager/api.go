@@ -44,6 +44,7 @@ func (m *SandboxManager) ClaimSandbox(ctx context.Context, user, template string
 	} else {
 		log.Info("route synced with peers", "cost", time.Since(startSync), "route", route)
 	}
+	m.proxy.SetRoute(route)
 	return sandbox, nil
 }
 

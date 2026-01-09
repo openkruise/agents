@@ -81,7 +81,7 @@ func Setup(t *testing.T) (*Controller, *clients.ClientSet, func()) {
 		},
 		Data: map[string][]byte{},
 	}
-	_, err := clientSet.CoreV1().Secrets(namespace).Create(context.Background(), secret, metav1.CreateOptions{})
+	_, err := clientSet.CoreV1().Secrets(namespace).Create(t.Context(), secret, metav1.CreateOptions{})
 	assert.NoError(t, err)
 
 	controller := NewController("example.com", InitKey, namespace, models.DefaultMaxTimeout, TestServerPort, true, clientSet)
