@@ -50,6 +50,7 @@ import (
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
+	"github.com/openkruise/agents/pkg/utils/sandboxutils"
 )
 
 func init() {
@@ -97,6 +98,9 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	box := &agentsv1alpha1.Sandbox{}
 	err := r.Get(ctx, req.NamespacedName, box)
 	if err != nil {
+		if errors.IsNotFound(err) {
+			sandboxutils.DeleteSandboxStateCache(req.Namespace, req.Name)
+		}
 		return reconcile.Result{}, client.IgnoreNotFound(err)
 	}
 	logger := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
