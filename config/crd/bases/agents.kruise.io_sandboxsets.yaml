@@ -67,7 +67,9 @@ spec:
                 format: int32
                 type: integer
               template:
-                description: Template describes the pods that will be created.
+                description: |-
+                  Template describes the pods that will be created.
+                  Template is mutual exclusive with TemplateRef
                 x-kubernetes-preserve-unknown-fields: true
               templateRef:
                 description: TemplateRef references a SandboxTemplate, which will
@@ -91,7 +93,7 @@ spec:
                 type: object
               volumeClaimTemplates:
                 description: VolumeClaimTemplates is a list of PVC templates to create
-                  for each Sandbox managed by this SandboxSet.
+                  for this Sandbox.
                 items:
                   description: PersistentVolumeClaim is a user's request for and claim
                     to a persistent volume

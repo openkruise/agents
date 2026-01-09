@@ -26,6 +26,7 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	sandboxclient "github.com/openkruise/agents/client/clientset/versioned"
 	"github.com/openkruise/agents/pkg/proxy"
+	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
@@ -55,6 +56,7 @@ type DeepCopyFunc[T any] func(src T) T
 type BaseSandbox[T SandboxCR] struct {
 	Sandbox T
 	Cache   *Cache
+	Client  clients.SandboxClient
 
 	PatchSandbox  PatchFunc[T]
 	UpdateStatus  UpdateFunc[T]
@@ -69,10 +71,18 @@ func (s *BaseSandbox[T]) GetTemplate() string {
 	return s.Sandbox.GetLabels()[agentsv1alpha1.LabelSandboxPool]
 }
 
-func (s *BaseSandbox[T]) InplaceRefresh(deepcopy bool) error {
+func (s *BaseSandbox[T]) InplaceRefresh(ctx context.Context, deepcopy bool) error {
+	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(s.Sandbox)).V(consts.DebugLogLevel)
 	sbx, err := s.Cache.GetSandbox(stateutils.GetSandboxID(s.Sandbox))
 	if err != nil {
 		return err
+	}
+	if !utils.ResourceVersionExpectationSatisfied(sbx) {
+		log.Info("sandbox cache is out-dated, fetch from api-server")
+		sbx, err = s.Client.ApiV1alpha1().Sandboxes(s.Sandbox.GetNamespace()).Get(ctx, s.Sandbox.GetName(), metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
 	}
 	if deepcopy {
 		s.Sandbox = s.DeepCopy(sbx)
@@ -97,6 +107,7 @@ func (s *BaseSandbox[T]) retryUpdate(ctx context.Context, updateFunc UpdateFunc[
 			return err
 		}
 		s.Sandbox = updated
+		utils.ResourceVersionExpectationExpect(updated)
 		return nil
 	})
 	if err != nil {
@@ -133,8 +144,21 @@ func (s *Sandbox) GetRoute() proxy.Route {
 	}
 }
 
-func (s *Sandbox) SetTimeout(ttl time.Duration) {
-	s.Spec.ShutdownTime = ptr.To(metav1.NewTime(time.Now().Add(ttl)))
+func setTimeout(s *agentsv1alpha1.Sandbox, opts infra.TimeoutOptions) {
+	if !opts.PauseTime.IsZero() {
+		s.Spec.PauseTime = ptr.To(metav1.NewTime(opts.PauseTime))
+	} else {
+		s.Spec.PauseTime = nil
+	}
+	if !opts.ShutdownTime.IsZero() {
+		s.Spec.ShutdownTime = ptr.To(metav1.NewTime(opts.ShutdownTime))
+	} else {
+		s.Spec.ShutdownTime = nil
+	}
+}
+
+func (s *Sandbox) SetTimeout(opts infra.TimeoutOptions) {
+	setTimeout(s.Sandbox, opts)
 }
 
 // SetImage sets the image of the first container
@@ -151,17 +175,21 @@ func (s *Sandbox) GetImage() string {
 	return ""
 }
 
-func (s *Sandbox) SaveTimeout(ctx context.Context, ttl time.Duration) error {
+func (s *Sandbox) SaveTimeout(ctx context.Context, opts infra.TimeoutOptions) error {
 	return s.retryUpdate(ctx, s.Update, func(sbx *agentsv1alpha1.Sandbox) {
-		sbx.Spec.ShutdownTime = ptr.To(metav1.NewTime(time.Now().Add(ttl)))
+		setTimeout(sbx, opts)
 	})
 }
 
-func (s *Sandbox) GetTimeout() time.Time {
-	if s.Spec.ShutdownTime == nil {
-		return time.Time{}
+func (s *Sandbox) GetTimeout() infra.TimeoutOptions {
+	opts := infra.TimeoutOptions{}
+	if s.Spec.ShutdownTime != nil {
+		opts.ShutdownTime = s.Spec.ShutdownTime.Time
 	}
-	return s.Spec.ShutdownTime.Time
+	if s.Spec.PauseTime != nil {
+		opts.PauseTime = s.Spec.PauseTime.Time
+	}
+	return opts
 }
 
 func (s *Sandbox) GetResource() infra.SandboxResource {
@@ -178,7 +206,7 @@ func (s *Sandbox) Request(r *http.Request, path string, port int) (*http.Respons
 	return proxyutils.ProxyRequest(r, path, port, s.Status.PodInfo.PodIP)
 }
 
-func (s *Sandbox) Pause(ctx context.Context) error {
+func (s *Sandbox) Pause(ctx context.Context, opts infra.PauseOptions) error {
 	log := klog.FromContext(ctx)
 	if s.Status.Phase != agentsv1alpha1.SandboxRunning {
 		return fmt.Errorf("sandbox is not in running phase")
@@ -191,6 +219,7 @@ func (s *Sandbox) Pause(ctx context.Context) error {
 	}
 	err := s.retryUpdate(ctx, s.Update, func(sbx *agentsv1alpha1.Sandbox) {
 		sbx.Spec.Paused = true
+		setTimeout(sbx, opts.TimeoutOptions)
 	})
 	if err != nil {
 		log.Error(err, "failed to update sandbox spec.paused")
@@ -226,7 +255,7 @@ func (s *Sandbox) Resume(ctx context.Context) error {
 	start := time.Now()
 	err := s.Cache.WaitForSandboxSatisfied(ctx, s.Sandbox, WaitActionResume, func(sbx *agentsv1alpha1.Sandbox) (bool, error) {
 		state, reason := stateutils.GetSandboxState(sbx)
-		log.V(consts.DebugLogLevel).Info("sandbox state updated", "state", state, "reason", reason)
+		log.V(consts.DebugLogLevel).Info("checking sandbox state", "state", state, "reason", reason)
 		return state == agentsv1alpha1.SandboxStateRunning, nil
 	}, time.Minute)
 	if err != nil {
@@ -234,11 +263,11 @@ func (s *Sandbox) Resume(ctx context.Context) error {
 		return err
 	}
 	log.Info("sandbox resumed", "cost", time.Since(start))
-	return nil
+	return s.InplaceRefresh(ctx, false)
 }
 
-func (s *Sandbox) InplaceRefresh(deepcopy bool) error {
-	err := s.BaseSandbox.InplaceRefresh(deepcopy)
+func (s *Sandbox) InplaceRefresh(ctx context.Context, deepcopy bool) error {
+	err := s.BaseSandbox.InplaceRefresh(ctx, deepcopy)
 	if err != nil {
 		return err
 	}
@@ -299,6 +328,7 @@ func AsSandbox(sbx *agentsv1alpha1.Sandbox, cache *Cache, client sandboxclient.I
 		BaseSandbox: BaseSandbox[*agentsv1alpha1.Sandbox]{
 			Sandbox:       sbx,
 			Cache:         cache,
+			Client:        client,
 			PatchSandbox:  client.ApiV1alpha1().Sandboxes(sbx.Namespace).Patch,
 			UpdateStatus:  client.ApiV1alpha1().Sandboxes(sbx.Namespace).UpdateStatus,
 			Update:        client.ApiV1alpha1().Sandboxes(sbx.Namespace).Update,
