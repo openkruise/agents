@@ -261,11 +261,7 @@ func (r *commonControl) createPod(ctx context.Context, box *agentsv1alpha1.Sandb
 
 	volumes := make([]corev1.Volume, 0, len(box.Spec.VolumeClaimTemplates))
 	for _, template := range box.Spec.VolumeClaimTemplates {
-		pvcName, err := GeneratePVCName(template.Name, box.Name)
-		if err != nil {
-			logger.Error(err, "failed to generate PVC name", "template", template.Name, "sandbox", box.Name)
-			return nil, err
-		}
+		pvcName := GeneratePVCName(template.Name, box.Name)
 		volumes = append(volumes, corev1.Volume{
 			Name: template.Name,
 			VolumeSource: corev1.VolumeSource{

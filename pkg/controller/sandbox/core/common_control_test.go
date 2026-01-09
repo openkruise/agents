@@ -830,10 +830,7 @@ func TestCommonControl_createPod(t *testing.T) {
 		t.Fatalf("createPod() with PVC error = %v", err)
 	}
 
-	expectedPVCName, err := GeneratePVCName("www", "test-sandbox-with-pvc")
-	if err != nil {
-		t.Fatalf("GeneratePVCName() error = %v", err)
-	}
+	expectedPVCName := GeneratePVCName("www", "test-sandbox-with-pvc")
 
 	if len(podWithPVC.Spec.Volumes) != 1 {
 		t.Errorf("Expected 1 volume, got %d", len(podWithPVC.Spec.Volumes))
