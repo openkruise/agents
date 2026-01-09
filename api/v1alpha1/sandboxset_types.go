@@ -23,8 +23,11 @@ import (
 const (
 	InternalPrefix = "agents.kruise.io/"
 
-	LabelSandboxPool  = InternalPrefix + "sandbox-pool"
-	LabelTemplateHash = InternalPrefix + "template-hash"
+	// LabelSandboxPool identifies which SandboxSet generated the sandbox
+	LabelSandboxPool = InternalPrefix + "sandbox-pool"
+	// LabelSandboxIsClaimed indicates whether the sandbox has been claimed by user
+	LabelSandboxIsClaimed = InternalPrefix + "sandbox-claimed"
+	LabelTemplateHash     = InternalPrefix + "template-hash"
 
 	AnnotationLock      = InternalPrefix + "lock"
 	AnnotationOwner     = InternalPrefix + "owner"

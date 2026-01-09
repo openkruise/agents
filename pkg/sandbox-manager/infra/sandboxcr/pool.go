@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/openkruise/agents/api/v1alpha1"
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	sandboxclient "github.com/openkruise/agents/client/clientset/versioned"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
@@ -155,7 +156,15 @@ func (p *Pool) modifyPickedSandbox(sbx *Sandbox, opts infra.ClaimSandboxOptions)
 		// should perform an inplace update
 		sbx.SetImage(opts.Image)
 	}
+	// claim sandbox
 	sbx.SetOwnerReferences([]metav1.OwnerReference{}) // make SandboxSet scale up
+	labels := sbx.GetLabels()
+	if labels == nil {
+		labels = make(map[string]string, 1)
+	}
+	labels[agentsv1alpha1.LabelSandboxIsClaimed] = "true"
+	sbx.SetLabels(labels)
+
 	sbx.Annotations[v1alpha1.AnnotationClaimTime] = time.Now().Format(time.RFC3339)
 	return nil
 }

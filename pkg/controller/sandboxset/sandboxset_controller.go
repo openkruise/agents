@@ -135,7 +135,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if newStatus.Selector == "" {
 		selector, err := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{
 			MatchLabels: map[string]string{
-				agentsv1alpha1.LabelSandboxPool: sbs.Name,
+				agentsv1alpha1.LabelSandboxPool:      sbs.Name,
+				agentsv1alpha1.LabelSandboxIsClaimed: "false",
 			},
 		})
 		if err != nil {
@@ -253,6 +254,7 @@ func (r *Reconciler) createSandbox(ctx context.Context, sbs *agentsv1alpha1.Sand
 	sbx.Annotations = clearAndInitInnerKeys(sbx.Annotations)
 	sbx.Labels = clearAndInitInnerKeys(sbx.Labels)
 	sbx.Labels[agentsv1alpha1.LabelSandboxPool] = sbs.Name
+	sbx.Labels[agentsv1alpha1.LabelSandboxIsClaimed] = "false"
 	sbx.Labels[agentsv1alpha1.LabelTemplateHash] = revision
 	if err := ctrl.SetControllerReference(sbs, sbx, r.Scheme); err != nil {
 		return nil, err
