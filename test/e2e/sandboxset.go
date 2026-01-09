@@ -146,6 +146,16 @@ var _ = Describe("SandboxSet", func() {
 										},
 									},
 								},
+								Volumes: []corev1.Volume{
+									{
+										Name: "www",
+										VolumeSource: corev1.VolumeSource{
+											PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+												ClaimName: "www",
+											},
+										},
+									},
+								},
 							},
 						},
 						VolumeClaimTemplates: []corev1.PersistentVolumeClaim{
