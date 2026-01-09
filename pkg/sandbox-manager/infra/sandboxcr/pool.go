@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -20,6 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 type Pool struct {
@@ -30,6 +32,8 @@ type Pool struct {
 	// Should init fields
 	client sandboxclient.Interface
 	cache  *Cache
+
+	pickCache sync.Map
 }
 
 type retriableError struct {
@@ -52,14 +56,6 @@ func NoAvailableError(template, reason string) error {
 	return retriableError{Message: fmt.Sprintf("no available sandboxes for template %s (%s)", template, reason)}
 }
 
-// ClaimSandbox configurations
-const (
-	LockMaxRetries       = 8
-	LockBackoffFactor    = 2.0
-	LockJitter           = 0.1
-	InplaceUpdateTimeout = time.Minute
-)
-
 // ClaimSandbox claims a Sandbox CR as Sandbox from SandboxSet
 func (p *Pool) ClaimSandbox(ctx context.Context, user string, candidateCounts int, opts infra.ClaimSandboxOptions) (infra.Sandbox, error) {
 	lock := uuid.New().String()
@@ -69,8 +65,9 @@ func (p *Pool) ClaimSandbox(ctx context.Context, user string, candidateCounts in
 	retries := -1
 	var claimedSandbox infra.Sandbox
 	return claimedSandbox, retry.OnError(wait.Backoff{
-		Steps:    LockMaxRetries,
-		Duration: 0,
+		Steps:    int(LockTimeout / RetryInterval),
+		Duration: RetryInterval,
+		Cap:      LockTimeout,
 		Factor:   LockBackoffFactor,
 		Jitter:   LockJitter,
 	}, func(err error) bool {
@@ -85,6 +82,7 @@ func (p *Pool) ClaimSandbox(ctx context.Context, user string, candidateCounts in
 			log.Error(err, "failed to select available sandbox")
 			return err
 		}
+		defer p.pickCache.Delete(getPickKey(sbx.Sandbox))
 
 		claimLog := log.WithValues("sandbox", klog.KObj(sbx.Sandbox))
 		claimLog.Info("sandbox picked")
@@ -115,6 +113,10 @@ func (p *Pool) ClaimSandbox(ctx context.Context, user string, candidateCounts in
 	})
 }
 
+func getPickKey(sbx *v1alpha1.Sandbox) string {
+	return client.ObjectKeyFromObject(sbx).String()
+}
+
 func (p *Pool) pickAnAvailableSandbox(ctx context.Context, cnt int, r *rand.Rand) (*Sandbox, error) {
 	log := klog.FromContext(ctx).WithValues("pool", p.Namespace+"/"+p.Name).V(consts.DebugLogLevel)
 	objects, err := p.cache.ListAvailableSandboxes(p.Name)
@@ -141,8 +143,20 @@ func (p *Pool) pickAnAvailableSandbox(ctx context.Context, cnt int, r *rand.Rand
 	if len(candidates) == 0 {
 		return nil, NoAvailableError(p.Name, "no candidate")
 	}
-	obj = candidates[r.Intn(len(candidates))]
-	return AsSandbox(obj, p.cache, p.client), nil
+	start := r.Intn(len(candidates))
+	i := start
+	for {
+		obj = candidates[i]
+		key := getPickKey(obj)
+		if _, loaded := p.pickCache.LoadOrStore(key, struct{}{}); !loaded {
+			return AsSandbox(obj, p.cache, p.client), nil
+		}
+		log.Info("candidate picked by another request", "key", key)
+		i = (i + 1) % len(candidates)
+		if i == start {
+			return nil, NoAvailableError(p.Name, "all candidates are picked")
+		}
+	}
 }
 
 func (p *Pool) modifyPickedSandbox(sbx *Sandbox, opts infra.ClaimSandboxOptions) error {
