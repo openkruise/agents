@@ -38,6 +38,7 @@ func (m *SandboxManager) ClaimSandbox(ctx context.Context, user, template string
 
 	startSync := time.Now()
 	route := sandbox.GetRoute()
+	m.proxy.SetRoute(route)
 	err = m.proxy.SyncRouteWithPeers(route)
 	if err != nil {
 		log.Error(err, "failed to sync route with peers", "cost", time.Since(startSync))
@@ -75,4 +76,50 @@ func (m *SandboxManager) ListSandboxes(user string, limit int, filter func(infra
 func (m *SandboxManager) GetOwnerOfSandbox(sandboxID string) (string, bool) {
 	route, ok := m.proxy.LoadRoute(sandboxID)
 	return route.Owner, ok
+}
+
+// PauseSandbox pauses a sandbox and syncs route with peers
+func (m *SandboxManager) PauseSandbox(ctx context.Context, sbx infra.Sandbox) error {
+	if err := sbx.Pause(ctx); err != nil {
+		return err
+	}
+	log := klog.FromContext(ctx)
+	// Refresh sandbox to get the latest State
+	if err := sbx.InplaceRefresh(true); err != nil {
+		log.Error(err, "failed to refresh sandbox after pause, route sync may use stale state")
+		// Continue to sync route even if refresh fails, as the route might still be valid
+	}
+	start := time.Now()
+	route := sbx.GetRoute()
+	m.proxy.SetRoute(route)
+	err := m.proxy.SyncRouteWithPeers(route)
+	if err != nil {
+		log.Error(err, "failed to sync route with peers", "cost", time.Since(start))
+	} else {
+		log.Info("route synced with peers", "cost", time.Since(start), "route", route)
+	}
+	return nil
+}
+
+// ResumeSandbox resumes a sandbox and syncs route with peers
+func (m *SandboxManager) ResumeSandbox(ctx context.Context, sbx infra.Sandbox) error {
+	if err := sbx.Resume(ctx); err != nil {
+		return err
+	}
+	log := klog.FromContext(ctx)
+	// Refresh sandbox to get the latest PodIP (which may change after Pod restart during resume)
+	if err := sbx.InplaceRefresh(true); err != nil {
+		log.Error(err, "failed to refresh sandbox after resume, route sync may use stale IP")
+		// Continue to sync route even if refresh fails, as the route might still be valid
+	}
+	start := time.Now()
+	route := sbx.GetRoute()
+	m.proxy.SetRoute(route)
+	err := m.proxy.SyncRouteWithPeers(route)
+	if err != nil {
+		log.Error(err, "failed to sync route with peers", "cost", time.Since(start))
+	} else {
+		log.Info("route synced with peers", "cost", time.Since(start), "route", route)
+	}
+	return nil
 }
