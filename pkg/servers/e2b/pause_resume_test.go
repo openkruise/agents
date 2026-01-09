@@ -132,7 +132,7 @@ func TestConnectSandbox(t *testing.T) {
 				describeResp, err := controller.DescribeSandbox(req)
 				assert.Nil(t, err)
 				assert.Equal(t, models.SandboxStatePaused, describeResp.Body.State)
-				SetSandboxPauseStatus(t, describeResp.Body.SandboxID, tt.paused, client.SandboxClient)
+				SetSandboxPauseStatus(t, describeResp.Body.SandboxID, !tt.pausing, client.SandboxClient)
 				time.AfterFunc(60*time.Millisecond, func() {
 					sbx := GetSandbox(t, createResp.Body.SandboxID, client.SandboxClient)
 					sbx.Status.Phase = agentsv1alpha1.SandboxRunning
@@ -156,7 +156,7 @@ func TestConnectSandbox(t *testing.T) {
 			}, user))
 
 			if tt.expectStatus >= 300 {
-				assert.NotNil(t, err)
+				assert.NotNil(t, err, fmt.Sprintf("%v", err))
 				if err != nil {
 					if err.Code == 0 {
 						err.Code = http.StatusInternalServerError
