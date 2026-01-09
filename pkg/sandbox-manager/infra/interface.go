@@ -65,7 +65,7 @@ type Sandbox interface {
 	GetTimeout() TimeoutOptions
 	GetClaimTime() (time.Time, error)
 	Kill(ctx context.Context) error                                         // Delete the Sandbox resource
-	InplaceRefresh(deepcopy bool) error                                     // Update the Sandbox resource object to the latest
+	InplaceRefresh(ctx context.Context, deepcopy bool) error                // Update the Sandbox resource object to the latest
 	Request(r *http.Request, path string, port int) (*http.Response, error) // Make a request to the Sandbox
 	CSIMount(ctx context.Context, driver string, request string) error      // request is base64 encoded csi.NodePublishVolumeRequest
 }

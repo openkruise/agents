@@ -132,16 +132,18 @@ func TestConnectSandbox(t *testing.T) {
 				describeResp, err := controller.DescribeSandbox(req)
 				assert.Nil(t, err)
 				assert.Equal(t, models.SandboxStatePaused, describeResp.Body.State)
-				SetSandboxPauseStatus(t, describeResp.Body.SandboxID, !tt.pausing, client.SandboxClient)
-				time.AfterFunc(60*time.Millisecond, func() {
-					sbx := GetSandbox(t, createResp.Body.SandboxID, client.SandboxClient)
-					sbx.Status.Phase = agentsv1alpha1.SandboxRunning
-					sbx.Status.Conditions = append(sbx.Status.Conditions, metav1.Condition{
-						Type:   string(agentsv1alpha1.SandboxConditionReady),
-						Status: metav1.ConditionTrue,
-					})
-					_, _ = client.ApiV1alpha1().Sandboxes(sbx.Namespace).UpdateStatus(context.Background(), sbx, metav1.UpdateOptions{})
-				})
+				var condStatus metav1.ConditionStatus
+				if tt.pausing {
+					condStatus = metav1.ConditionFalse
+				} else {
+					condStatus = metav1.ConditionTrue
+				}
+				UpdateSandboxWhen(t, client.SandboxClient, describeResp.Body.SandboxID, func(sbx *agentsv1alpha1.Sandbox) bool {
+					return sbx.Spec.Paused == true
+				}, DoSetSandboxStatus(agentsv1alpha1.SandboxPaused, condStatus, metav1.ConditionFalse))
+				go UpdateSandboxWhen(t, client.SandboxClient, describeResp.Body.SandboxID, func(sbx *agentsv1alpha1.Sandbox) bool {
+					return sbx.Spec.Paused == false
+				}, DoSetSandboxStatus(agentsv1alpha1.SandboxRunning, metav1.ConditionFalse, metav1.ConditionTrue))
 			}
 
 			if tt.sandboxID == "" {

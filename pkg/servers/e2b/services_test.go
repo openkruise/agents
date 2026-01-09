@@ -12,6 +12,7 @@ import (
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
 	"github.com/stretchr/testify/assert"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func imageChecker(image string, controller *Controller) func(t *testing.T, resp *models.Sandbox) {
@@ -326,22 +327,24 @@ func TestAutoPause(t *testing.T) {
 			assert.Nil(t, apiError)
 			AssertEndAt(t, timeoutTime, createResp.Body.EndAt)
 			tt.createChecker(t, GetSandbox(t, createResp.Body.SandboxID, client.SandboxClient))
+			AvoidGetFromCache(t, createResp.Body.SandboxID, client.SandboxClient)
 
 			_, apiError = controller.PauseSandbox(NewRequest(t, nil, nil, map[string]string{
 				"sandboxID": createResp.Body.SandboxID,
 			}, user))
 			assert.Nil(t, apiError)
-			SetSandboxPauseStatus(t, createResp.Body.SandboxID, true, client.SandboxClient)
+			UpdateSandboxWhen(t, client.SandboxClient, createResp.Body.SandboxID, func(sbx *v1alpha1.Sandbox) bool {
+				return sbx.Spec.Paused == true
+			}, DoSetSandboxStatus(v1alpha1.SandboxPaused, metav1.ConditionTrue, metav1.ConditionFalse))
 			describeResp, apiError := controller.DescribeSandbox(NewRequest(t, nil, nil, map[string]string{
 				"sandboxID": createResp.Body.SandboxID,
 			}, user))
 			assert.Nil(t, apiError)
 			AssertEndAt(t, maxTimeoutTime, describeResp.Body.EndAt)
 			tt.pauseChecker(t, GetSandbox(t, createResp.Body.SandboxID, client.SandboxClient))
-
-			time.AfterFunc(10*time.Millisecond, func() {
-				SetSandboxPauseStatus(t, createResp.Body.SandboxID, false, client.SandboxClient)
-			})
+			go UpdateSandboxWhen(t, client.SandboxClient, createResp.Body.SandboxID, func(sbx *v1alpha1.Sandbox) bool {
+				return sbx.Spec.Paused == false
+			}, DoSetSandboxStatus(v1alpha1.SandboxRunning, metav1.ConditionFalse, metav1.ConditionTrue))
 			connectResp, apiError := controller.ConnectSandbox(NewRequest(t, nil, models.SetTimeoutRequest{
 				TimeoutSeconds: timeout,
 			}, map[string]string{

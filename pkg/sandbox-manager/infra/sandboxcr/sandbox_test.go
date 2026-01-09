@@ -24,6 +24,7 @@ func AsSandboxForTest(sbx *v1alpha1.Sandbox, client *fake.Clientset, cache *Cach
 		BaseSandbox: BaseSandbox[*v1alpha1.Sandbox]{
 			Sandbox:       sbx,
 			Cache:         cache,
+			Client:        client,
 			SetCondition:  SetSandboxCondition,
 			GetConditions: ListSandboxConditions,
 			DeepCopy:      DeepCopy,
@@ -251,18 +252,19 @@ func TestSandbox_InplaceRefresh(t *testing.T) {
 	assert.Equal(t, "value", s.Sandbox.Labels["initial"])
 	assert.Empty(t, s.Sandbox.Labels["updated"])
 
-	err = s.InplaceRefresh(false)
+	err = s.InplaceRefresh(t.Context(), false)
 	assert.NoError(t, err)
 
 	assert.Equal(t, "value", s.Sandbox.Labels["initial"])
 	assert.Equal(t, "new-value", s.Sandbox.Labels["updated"])
 
-	err = s.InplaceRefresh(true)
+	err = s.InplaceRefresh(t.Context(), true)
 	assert.NoError(t, err)
 	assert.Equal(t, "value", s.Sandbox.Labels["initial"])
 	assert.Equal(t, "new-value", s.Sandbox.Labels["updated"])
 }
 
+//goland:noinspection GoDeprecation
 func TestSandbox_Kill(t *testing.T) {
 	tests := []struct {
 		name              string

@@ -199,21 +199,38 @@ func GetSandbox(t *testing.T, sandboxID string, client clients.SandboxClient) *a
 	return sbx
 }
 
-func SetSandboxPauseStatus(t *testing.T, sandboxID string, paused bool, client clients.SandboxClient) {
-	status := metav1.ConditionFalse
-	phase := agentsv1alpha1.SandboxRunning
-	if paused {
-		status = metav1.ConditionTrue
-		phase = agentsv1alpha1.SandboxPaused
+type DoFunc func(t *testing.T, client clients.SandboxClient, sbx *agentsv1alpha1.Sandbox)
+type WhenFunc func(sbx *agentsv1alpha1.Sandbox) bool
+
+func UpdateSandboxWhen(t *testing.T, client clients.SandboxClient, sandboxID string, when WhenFunc, do DoFunc) {
+	var sbx *agentsv1alpha1.Sandbox
+	if !assert.Eventually(t, func() bool {
+		sbx = GetSandbox(t, sandboxID, client)
+		return when(sbx)
+	}, 5*time.Second, 10*time.Millisecond) {
+		return
 	}
-	sbx := GetSandbox(t, sandboxID, client)
-	sbx.Status.Phase = phase
-	sbx.Status.Conditions = append(sbx.Status.Conditions, metav1.Condition{
-		Type:   string(agentsv1alpha1.SandboxConditionPaused),
-		Status: status,
-	})
-	_, err := client.ApiV1alpha1().Sandboxes(sbx.Namespace).UpdateStatus(context.Background(), sbx, metav1.UpdateOptions{})
-	assert.NoError(t, err)
+	if sbx != nil {
+		do(t, client, sbx.DeepCopy())
+	}
+}
+
+func DoSetSandboxStatus(phase agentsv1alpha1.SandboxPhase, pausedStatus, readyStatus metav1.ConditionStatus) DoFunc {
+	return func(t *testing.T, client clients.SandboxClient, sbx *agentsv1alpha1.Sandbox) {
+		sbx.Status.Phase = phase
+		sbx.Status.Conditions = []metav1.Condition{
+			{
+				Type:   string(agentsv1alpha1.SandboxConditionPaused),
+				Status: pausedStatus,
+			},
+			{
+				Type:   string(agentsv1alpha1.SandboxConditionReady),
+				Status: readyStatus,
+			},
+		}
+		_, err := client.ApiV1alpha1().Sandboxes(sbx.Namespace).UpdateStatus(context.Background(), sbx, metav1.UpdateOptions{})
+		assert.NoError(t, err)
+	}
 }
 
 func AssertEndAt(t *testing.T, expect time.Time, endAt string) {
