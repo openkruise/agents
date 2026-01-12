@@ -36,14 +36,9 @@ func (m *SandboxManager) ClaimSandbox(ctx context.Context, user, template string
 
 	log.Info("sandbox claimed", "sandbox", klog.KObj(sandbox), "cost", time.Since(start))
 
-	startSync := time.Now()
-	route := sandbox.GetRoute()
-	m.proxy.SetRoute(route)
-	err = m.proxy.SyncRouteWithPeers(route)
-	if err != nil {
-		log.Error(err, "failed to sync route with peers", "cost", time.Since(startSync))
-	} else {
-		log.Info("route synced with peers", "cost", time.Since(startSync), "route", route)
+	// Sync route without refresh since sandbox was just claimed and state is already up-to-date
+	if err = m.syncRoute(ctx, sandbox, false); err != nil {
+		log.Error(err, "failed to sync route with peers after claim")
 	}
 	return sandbox, nil
 }
@@ -78,48 +73,51 @@ func (m *SandboxManager) GetOwnerOfSandbox(sandboxID string) (string, bool) {
 	return route.Owner, ok
 }
 
-// PauseSandbox pauses a sandbox and syncs route with peers
-func (m *SandboxManager) PauseSandbox(ctx context.Context, sbx infra.Sandbox) error {
-	if err := sbx.Pause(ctx); err != nil {
-		return err
-	}
+// syncRoute syncs the sandbox route with peers
+// If refresh is true, it will refresh the sandbox state before syncing
+// Returns error if route sync fails, but refresh failures are logged and ignored
+func (m *SandboxManager) syncRoute(ctx context.Context, sbx infra.Sandbox, refresh bool) error {
 	log := klog.FromContext(ctx)
-	// Refresh sandbox to get the latest State
-	if err := sbx.InplaceRefresh(true); err != nil {
-		log.Error(err, "failed to refresh sandbox after pause, route sync may use stale state")
-		// Continue to sync route even if refresh fails, as the route might still be valid
+	// Refresh sandbox to get the latest state if needed
+	if refresh {
+		if err := sbx.InplaceRefresh(false); err != nil {
+			log.Error(err, "failed to refresh sandbox, route sync may use stale state")
+			// Continue to sync route even if refresh fails, as the route might still be valid
+		}
 	}
 	start := time.Now()
 	route := sbx.GetRoute()
 	m.proxy.SetRoute(route)
 	err := m.proxy.SyncRouteWithPeers(route)
 	if err != nil {
-		log.Error(err, "failed to sync route with peers", "cost", time.Since(start))
-	} else {
-		log.Info("route synced with peers", "cost", time.Since(start), "route", route)
+		return err
+	}
+	log.Info("route synced with peers", "cost", time.Since(start), "route", route)
+	return nil
+}
+
+// PauseSandbox pauses a sandbox and syncs route with peers
+func (m *SandboxManager) PauseSandbox(ctx context.Context, sbx infra.Sandbox) error {
+	log := klog.FromContext(ctx)
+	if err := sbx.Pause(ctx); err != nil {
+		log.Error(err, "failed to pause sandbox")
+		return err
+	}
+	if err := m.syncRoute(ctx, sbx, true); err != nil {
+		log.Error(err, "failed to sync route with peers after pause")
 	}
 	return nil
 }
 
 // ResumeSandbox resumes a sandbox and syncs route with peers
 func (m *SandboxManager) ResumeSandbox(ctx context.Context, sbx infra.Sandbox) error {
+	log := klog.FromContext(ctx)
 	if err := sbx.Resume(ctx); err != nil {
+		log.Error(err, "failed to resume sandbox")
 		return err
 	}
-	log := klog.FromContext(ctx)
-	// Refresh sandbox to get the latest PodIP (which may change after Pod restart during resume)
-	if err := sbx.InplaceRefresh(true); err != nil {
-		log.Error(err, "failed to refresh sandbox after resume, route sync may use stale IP")
-		// Continue to sync route even if refresh fails, as the route might still be valid
-	}
-	start := time.Now()
-	route := sbx.GetRoute()
-	m.proxy.SetRoute(route)
-	err := m.proxy.SyncRouteWithPeers(route)
-	if err != nil {
-		log.Error(err, "failed to sync route with peers", "cost", time.Since(start))
-	} else {
-		log.Info("route synced with peers", "cost", time.Since(start), "route", route)
+	if err := m.syncRoute(ctx, sbx, true); err != nil {
+		log.Error(err, "failed to sync route with peers after resume")
 	}
 	return nil
 }
