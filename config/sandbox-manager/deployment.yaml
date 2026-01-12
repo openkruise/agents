@@ -1,0 +1,129 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sandbox-manager
+  namespace: sandbox-system
+  labels:
+    control-plane: sandbox-manager
+    app.kubernetes.io/name: sandbox-manager
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      control-plane: sandbox-manager
+      app.kubernetes.io/name: sandbox-manager
+  template:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/default-container: controller
+      labels:
+        control-plane: sandbox-manager
+        app.kubernetes.io/name: sandbox-manager
+    spec:
+      serviceAccountName: sandbox-manager
+      containers:
+        - name: controller
+          image: sandbox-manager:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - /sandbox-manager
+          args:
+            - -v=7
+          ports:
+            - containerPort: 8080
+              name: http-manager
+            - containerPort: 9002
+              name: grpc-ext-proc
+          livenessProbe:
+            tcpSocket:
+              port: 8080
+            initialDelaySeconds: 120
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            tcpSocket:
+              port: 7789
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          startupProbe:
+            tcpSocket:
+              port: 7789
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 30
+            timeoutSeconds: 5
+          env:
+            - name: SYSTEM_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: PEER_SELECTOR
+              value: control-plane=sandbox-manager
+            - name: KUBE_CLIENT_QPS
+              value: "10000"
+            - name: KUBE_CLIENT_BURST
+              value: "30000"
+            - name: E2B_DOMAIN
+              value: replace.with.your.domain
+            - name: E2B_ADMIN_KEY
+              value: some-api-key
+            - name: E2B_ENABLE_AUTH
+              value: "true"
+            - name: E2B_MAX_TIMEOUT
+              value: "2592000"
+            - name: INFRA
+              value: sandbox-cr
+          resources:
+            limits:
+              cpu: "1"
+              memory: "2Gi"
+            requests:
+              cpu: "1"
+              memory: "2Gi"
+        - name: envoy-proxy
+          image: envoyproxy/envoy:v1.33-latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - "--config-path /etc/envoy/envoy.yaml"
+          livenessProbe:
+            tcpSocket:
+              port: 7788
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            tcpSocket:
+              port: 7788
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          startupProbe:
+            tcpSocket:
+              port: 7788
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 30
+            timeoutSeconds: 5
+          ports:
+            - containerPort: 7788
+          volumeMounts:
+            - name: envoy-config
+              mountPath: /etc/envoy/envoy.yaml
+              subPath: envoy.yaml
+          resources:
+            limits:
+              cpu: "1"
+              memory: "2Gi"
+            requests:
+              cpu: "1"
+              memory: "2Gi"
+      volumes:
+        - name: envoy-config
+          configMap:
+            name: sandbox-manager-envoy-config

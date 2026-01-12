@@ -1,0 +1,7 @@
+- op: replace
+  path: /spec/rules/0/host
+  value: "*.replace.with.your.domain"
+
+- op: replace
+  path: /spec/tls/0/hosts/0
+  value: "*.replace.with.your.domain"

@@ -1,0 +1,71 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: sandbox-manager
+  labels:
+    control-plane: sandbox-manager
+    app.kubernetes.io/name: sandbox-manager
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  - apiGroups: [ "agents.kruise.io" ]
+    resources: [ "sandboxes", "sandboxsets" ]
+    verbs: [ "get", "list", "watch", "update", "patch", "delete", "create" ]
+  - apiGroups: [ "agents.kruise.io" ]
+    resources: [ "sandboxes/status", "sandboxsets/status" ]
+    verbs: [ "get", "update", "patch" ]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: sandbox-manager-secrets
+  namespace: sandbox-system
+  labels:
+    control-plane: sandbox-manager
+    app.kubernetes.io/name: sandbox-manager
+rules:
+  - apiGroups: [ "" ]
+    resources: [ "secrets" ]
+    resourceNames:
+      - e2b-key-store
+    verbs: [ "get", "list", "watch", "update", "patch" ]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: sandbox-manager
+  labels:
+    control-plane: sandbox-manager
+    app.kubernetes.io/name: sandbox-manager
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: sandbox-manager
+subjects:
+  - kind: ServiceAccount
+    name: sandbox-manager
+    namespace: sandbox-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sandbox-manager-secrets
+  namespace: sandbox-system
+  labels:
+    control-plane: sandbox-manager
+    app.kubernetes.io/name: sandbox-manager
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: sandbox-manager-secrets
+subjects:
+  - kind: ServiceAccount
+    name: sandbox-manager
+    namespace: sandbox-system
