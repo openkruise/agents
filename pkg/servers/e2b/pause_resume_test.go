@@ -151,7 +151,7 @@ func TestConnectSandbox(t *testing.T) {
 			}
 			time.Sleep(10 * time.Millisecond)
 			now := time.Now()
-			resumeResp, err := controller.ConnectSandbox(NewRequest(t, nil, models.SetTimeoutRequest{
+			connectResp, err := controller.ConnectSandbox(NewRequest(t, nil, models.SetTimeoutRequest{
 				TimeoutSeconds: tt.timeout,
 			}, map[string]string{
 				"sandboxID": tt.sandboxID,
@@ -167,9 +167,9 @@ func TestConnectSandbox(t *testing.T) {
 				}
 			} else {
 				assert.Nil(t, err, fmt.Sprintf("err: %v", err))
-				assert.Equal(t, tt.expectStatus, resumeResp.Code)
-				assert.Equal(t, models.SandboxStateRunning, resumeResp.Body.State)
-				endAt, err := time.Parse(time.RFC3339, resumeResp.Body.EndAt)
+				assert.Equal(t, tt.expectStatus, connectResp.Code)
+				assert.Equal(t, models.SandboxStateRunning, connectResp.Body.State)
+				endAt, err := time.Parse(time.RFC3339, connectResp.Body.EndAt)
 				assert.NoError(t, err)
 				assert.WithinDuration(t, now.Add(time.Duration(tt.timeout)*time.Second), endAt, 5*time.Second)
 			}

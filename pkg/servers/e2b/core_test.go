@@ -204,6 +204,10 @@ func GetSandbox(t *testing.T, sandboxID string, client clients.SandboxClient) *a
 type DoFunc func(t *testing.T, client clients.SandboxClient, sbx *agentsv1alpha1.Sandbox)
 type WhenFunc func(sbx *agentsv1alpha1.Sandbox) bool
 
+func Immediately(sbx *agentsv1alpha1.Sandbox) bool {
+	return sbx != nil
+}
+
 func UpdateSandboxWhen(t *testing.T, client clients.SandboxClient, sandboxID string, when WhenFunc, do DoFunc) {
 	var sbx *agentsv1alpha1.Sandbox
 	if !assert.Eventually(t, func() bool {

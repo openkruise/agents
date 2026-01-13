@@ -2,6 +2,7 @@ package sandbox_manager
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -464,7 +465,7 @@ func TestSandboxManager_PauseSandbox(t *testing.T) {
 			}
 
 			// Pause sandbox
-			err = manager.PauseSandbox(context.Background(), sbx)
+			err = manager.PauseSandbox(context.Background(), sbx, infra.PauseOptions{})
 
 			if tt.expectError {
 				assert.Error(t, err)

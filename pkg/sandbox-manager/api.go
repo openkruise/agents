@@ -40,7 +40,6 @@ func (m *SandboxManager) ClaimSandbox(ctx context.Context, user, template string
 	if err = m.syncRoute(ctx, sandbox, false); err != nil {
 		log.Error(err, "failed to sync route with peers after claim")
 	}
-	m.proxy.SetRoute(route)
 	return sandbox, nil
 }
 
@@ -78,10 +77,10 @@ func (m *SandboxManager) GetOwnerOfSandbox(sandboxID string) (string, bool) {
 // If refresh is true, it will refresh the sandbox state before syncing
 // Returns error if route sync fails, but refresh failures are logged and ignored
 func (m *SandboxManager) syncRoute(ctx context.Context, sbx infra.Sandbox, refresh bool) error {
-	log := klog.FromContext(ctx)
+	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
 	// Refresh sandbox to get the latest state if needed
 	if refresh {
-		if err := sbx.InplaceRefresh(false); err != nil {
+		if err := sbx.InplaceRefresh(ctx, false); err != nil {
 			log.Error(err, "failed to refresh sandbox, route sync may use stale state")
 			// Continue to sync route even if refresh fails, as the route might still be valid
 		}
@@ -98,9 +97,9 @@ func (m *SandboxManager) syncRoute(ctx context.Context, sbx infra.Sandbox, refre
 }
 
 // PauseSandbox pauses a sandbox and syncs route with peers
-func (m *SandboxManager) PauseSandbox(ctx context.Context, sbx infra.Sandbox) error {
-	log := klog.FromContext(ctx)
-	if err := sbx.Pause(ctx); err != nil {
+func (m *SandboxManager) PauseSandbox(ctx context.Context, sbx infra.Sandbox, opts infra.PauseOptions) error {
+	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
+	if err := sbx.Pause(ctx, opts); err != nil {
 		log.Error(err, "failed to pause sandbox")
 		return err
 	}
@@ -112,7 +111,7 @@ func (m *SandboxManager) PauseSandbox(ctx context.Context, sbx infra.Sandbox) er
 
 // ResumeSandbox resumes a sandbox and syncs route with peers
 func (m *SandboxManager) ResumeSandbox(ctx context.Context, sbx infra.Sandbox) error {
-	log := klog.FromContext(ctx)
+	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
 	if err := sbx.Resume(ctx); err != nil {
 		log.Error(err, "failed to resume sandbox")
 		return err

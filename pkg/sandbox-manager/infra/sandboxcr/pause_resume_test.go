@@ -180,7 +180,7 @@ func TestSandbox_SetPause(t *testing.T) {
 
 			s := AsSandboxForTest(sandbox, client, cache)
 			opts := infra.PauseOptions{
-				TimeoutOptions: infra.TimeoutOptions{
+				Timeout: &infra.TimeoutOptions{
 					ShutdownTime: now.Add(time.Hour),
 					PauseTime:    now.Add(time.Minute),
 				},
@@ -227,13 +227,16 @@ func TestSandbox_SetPause(t *testing.T) {
 			assert.Equal(t, tt.operatePause, updatedSbx.Spec.Paused)
 
 			if tt.operatePause {
-				if !opts.ShutdownTime.IsZero() {
+				if !opts.Timeout.ShutdownTime.IsZero() {
 					// milliseconds will be removed by k8s
-					assert.WithinDuration(t, opts.ShutdownTime, updatedSbx.Spec.ShutdownTime.Time, time.Second)
+					assert.WithinDuration(t, opts.Timeout.ShutdownTime, updatedSbx.Spec.ShutdownTime.Time, time.Second)
 				}
-				if !opts.PauseTime.IsZero() {
-					assert.WithinDuration(t, opts.PauseTime, updatedSbx.Spec.PauseTime.Time, time.Second)
+				if !opts.Timeout.PauseTime.IsZero() {
+					assert.WithinDuration(t, opts.Timeout.PauseTime, updatedSbx.Spec.PauseTime.Time, time.Second)
 				}
+			} else {
+				assert.Nil(t, updatedSbx.Spec.ShutdownTime)
+				assert.Nil(t, updatedSbx.Spec.PauseTime)
 			}
 		})
 	}

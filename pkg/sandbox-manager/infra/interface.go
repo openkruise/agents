@@ -27,7 +27,7 @@ type TimeoutOptions struct {
 }
 
 type PauseOptions struct {
-	TimeoutOptions
+	Timeout *TimeoutOptions
 }
 
 type Infrastructure interface {

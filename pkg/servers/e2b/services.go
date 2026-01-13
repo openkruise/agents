@@ -206,69 +206,8 @@ func (sc *Controller) DeleteSandbox(r *http.Request) (web.ApiResponse[struct{}],
 	}, nil
 }
 
-// SetSandboxTimeout sets the timeout of a claimed sandbox
-func (sc *Controller) SetSandboxTimeout(r *http.Request) (web.ApiResponse[struct{}], *web.ApiError) {
-	err := sc.setSandboxTimeout(r, false)
-	if err != nil {
-		if err.Code != http.StatusNotFound {
-			// Just to follow E2B spec, I don't know why it is designed
-			err.Code = http.StatusInternalServerError
-		}
-		return web.ApiResponse[struct{}]{}, err
-	}
-	return web.ApiResponse[struct{}]{
-		Code: http.StatusNoContent,
-	}, nil
-}
-
-func (sc *Controller) setSandboxTimeout(r *http.Request, allowNonRunning bool) *web.ApiError {
-	ctx := r.Context()
-	log := klog.FromContext(ctx)
-	now := time.Now()
-
-	var request models.SetTimeoutRequest
-	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-		return &web.ApiError{
-			Message: err.Error(),
-		}
-	}
-	if request.TimeoutSeconds <= 0 || request.TimeoutSeconds > sc.maxTimeout {
-		return &web.ApiError{
-			Code:    http.StatusBadRequest,
-			Message: fmt.Sprintf("timeout should between 30 and %d", sc.maxTimeout),
-		}
-	}
-
-	id := r.PathValue("sandboxID")
-	sbx, apiErr := sc.getSandboxOfUser(ctx, id)
-	if apiErr != nil {
-		return apiErr
-	}
-
-	if !allowNonRunning {
-		state, reason := sbx.GetState()
-		if state != v1alpha1.SandboxStateRunning {
-			log.Info("cannot set sandbox timeout for sandbox not running", "name", sbx.GetName(), "state", state, "reason", reason)
-			return &web.ApiError{
-				Code:    http.StatusConflict,
-				Message: fmt.Sprintf("sandbox %s is not running", sbx.GetName()),
-			}
-		}
-	}
-
-	opts := sc.buildSetTimeoutOptions(sbx, now, request.TimeoutSeconds)
-	if err := sbx.SaveTimeout(ctx, opts); err != nil {
-		return &web.ApiError{
-			Message: fmt.Sprintf("Failed to set sandbox timeout: %v", err),
-		}
-	}
-
-	log.Info("sandbox timeout set", "id", id, "timeout", request.TimeoutSeconds, "options", opts)
-	return nil
-}
-
-func (sc *Controller) buildSetTimeoutOptions(sbx infra.Sandbox, now time.Time, timeoutSeconds int) infra.TimeoutOptions {
-	if autoPause, _ := ParseTimeout(sbx); autoPause {
+func (sc *Controller) buildSetTimeoutOptions(autoPause bool, now time.Time, timeoutSeconds int) infra.TimeoutOptions {
+	if autoPause {
 		return infra.TimeoutOptions{
 			PauseTime:    TimeAfterSeconds(now, timeoutSeconds),
 			ShutdownTime: TimeAfterSeconds(now, sc.maxTimeout),

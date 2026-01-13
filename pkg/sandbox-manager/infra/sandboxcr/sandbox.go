@@ -219,7 +219,9 @@ func (s *Sandbox) Pause(ctx context.Context, opts infra.PauseOptions) error {
 	}
 	err := s.retryUpdate(ctx, s.Update, func(sbx *agentsv1alpha1.Sandbox) {
 		sbx.Spec.Paused = true
-		setTimeout(sbx, opts.TimeoutOptions)
+		if opts.Timeout != nil {
+			setTimeout(sbx, *opts.Timeout)
+		}
 	})
 	if err != nil {
 		log.Error(err, "failed to update sandbox spec.paused")
@@ -245,6 +247,7 @@ func (s *Sandbox) Resume(ctx context.Context) error {
 	if s.Sandbox.Spec.Paused {
 		if err := s.retryUpdate(ctx, s.Update, func(sbx *agentsv1alpha1.Sandbox) {
 			sbx.Spec.Paused = false
+			setTimeout(sbx, infra.TimeoutOptions{}) // remove all timeout options
 		}); err != nil {
 			log.Error(err, "failed to update sandbox spec.paused")
 			return err
