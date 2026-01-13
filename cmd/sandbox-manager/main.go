@@ -50,11 +50,6 @@ func main() {
 		port = portEnv
 	}
 
-	infra := os.Getenv("INFRA")
-	if infra == "" {
-		klog.Fatalf("env var INFRA is required")
-	}
-
 	e2bAdminKey := os.Getenv("E2B_ADMIN_KEY")
 	if e2bAdminKey == "" {
 		e2bAdminKey = uuid.NewString()
@@ -87,13 +82,13 @@ func main() {
 	// =========== End Env =============
 
 	// Initialize Kubernetes client and config
-	clientSet, err := clients.NewClientSet(infra)
+	clientSet, err := clients.NewClientSet()
 	if err != nil {
 		klog.Fatalf("Failed to initialize Kubernetes client: %v", err)
 	}
 
 	sandboxController := e2b.NewController(domain, e2bAdminKey, sysNs, e2bMaxTimeout, port, e2bEnableAuth, clientSet)
-	if err := sandboxController.Init(infra); err != nil {
+	if err := sandboxController.Init(); err != nil {
 		klog.Fatalf("Failed to initialize sandbox controller: %v", err)
 	}
 

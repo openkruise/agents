@@ -115,7 +115,11 @@ func (s *Server) handleRequestHeaders(requestHeaders *extProcPb.ProcessingReques
 	for k, v := range route.ExtraHeaders {
 		extraHeaders[k] = v
 	}
-	extraHeaders[OrigDstHeader] = fmt.Sprintf("%s:%d", route.IP, sandboxPort)
+	// An adapter can set "x-envoy-original-dst-host" header to force route the request to a specific destination
+	if _, ok := extraHeaders[OrigDstHeader]; !ok {
+		extraHeaders[OrigDstHeader] = fmt.Sprintf("%s:%d", route.IP, sandboxPort)
+	}
+
 	return s.logAndCreateDstResponse(requestHeaders.RequestHeaders, extraHeaders, log)
 }
 

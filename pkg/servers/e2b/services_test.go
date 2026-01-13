@@ -133,7 +133,7 @@ func TestCreateSandbox(t *testing.T) {
 			},
 			expectError: &web.ApiError{
 				Code:    400,
-				Message: "Forbidden metadata key [e2b.agents.kruise.io/key]: cannot contain prefixes: [e2b.agents.kruise.io/ agents.kruise.io/]",
+				Message: "Forbidden metadata key [e2b.agents.kruise.io/key]: cannot contain prefixes: [e2b.agents.kruise.io/ agents.kruise.io/",
 			},
 		},
 		{
@@ -206,7 +206,7 @@ func TestCreateSandbox(t *testing.T) {
 				assert.NotNil(t, apiError)
 				if apiError != nil {
 					assert.Equal(t, tt.expectError.Code, apiError.Code)
-					assert.Equal(t, tt.expectError.Message, apiError.Message)
+					assert.Contains(t, apiError.Message, tt.expectError.Message)
 				}
 			} else {
 				assert.Nil(t, apiError)

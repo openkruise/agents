@@ -1,11 +1,6 @@
 package consts
 
 const (
-	InfraSandboxCR = "sandbox-cr"
-	InfraMicroVM   = "micro-vm"
-)
-
-const (
 	OwnerManagerScaleDown = "__manager_scale_down"
 
 	DefaultPoolingCandidateCounts = 100

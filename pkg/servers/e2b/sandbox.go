@@ -49,14 +49,10 @@ func (sc *Controller) initEnvd(ctx context.Context, sbx infra.Sandbox, envVars m
 		log.Error(err, "failed to marshal initBody")
 		return err
 	}
-	request, err := http.NewRequest(http.MethodPost, "/init", bytes.NewBuffer(initBody))
+	log.Info("sending request to envd")
+	_, err = sbx.Request(ctx, http.MethodPost, "/init", models.EnvdPort, bytes.NewBuffer(initBody))
 	if err != nil {
-		log.Error(err, "failed to create init request")
-		return err
-	}
-	_, err = sbx.Request(request, "/init", models.EnvdPort)
-	if err != nil {
-		log.Error(err, "failed to init envd")
+		log.Error(err, "init envd request failed")
 		return err
 	}
 	log.Info("envd inited", "cost", time.Since(start))

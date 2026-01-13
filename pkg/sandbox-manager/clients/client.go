@@ -8,7 +8,6 @@ import (
 
 	sandboxclient "github.com/openkruise/agents/client/clientset/versioned"
 	sandboxfake "github.com/openkruise/agents/client/clientset/versioned/fake"
-	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"k8s.io/client-go/kubernetes"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/rest"
@@ -26,7 +25,7 @@ type ClientSet struct {
 	*rest.Config
 }
 
-func NewClientSet(infra string) (*ClientSet, error) {
+func NewClientSet() (*ClientSet, error) {
 	client := &ClientSet{}
 	// Try to use in-cluster config first (when running inside a Kubernetes pod)
 	config, err := rest.InClusterConfig()
@@ -83,11 +82,9 @@ func NewClientSet(infra string) (*ClientSet, error) {
 		return nil, fmt.Errorf("failed to create client: %w", err)
 	}
 
-	if infra == consts.InfraSandboxCR {
-		client.SandboxClient, err = sandboxclient.NewForConfig(config)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create sandbox client: %w", err)
-		}
+	client.SandboxClient, err = sandboxclient.NewForConfig(config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create sandbox client: %w", err)
 	}
 
 	return client, nil

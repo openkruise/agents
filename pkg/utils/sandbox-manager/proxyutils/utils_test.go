@@ -96,7 +96,7 @@ func TestSandbox_ProxyRequest(t *testing.T) {
 			req.Header.Set("Content-Type", "application/json")
 
 			// Call ProxyRequest method
-			resp, err := ProxyRequest(req, tt.path, 11111, tt.ip)
+			resp, err := ProxyRequest(req)
 
 			// Check errors
 			if tt.wantErr {

@@ -61,12 +61,12 @@ func NewController(domain, adminKey string, sysNs string, maxTimeout int, port i
 	return sc
 }
 
-func (sc *Controller) Init(infrastructure string) error {
+func (sc *Controller) Init() error {
 	ctx := logs.NewContext()
 	log := klog.FromContext(ctx)
-	log.Info("init controller", "infra", infrastructure)
-	adapter := adapters.NewE2BAdapter(sc.port)
-	sandboxManager, err := sandbox_manager.NewSandboxManager(sc.client, adapter, infrastructure)
+	log.Info("init controller")
+	adapter := adapters.DefaultAdapterFactory(sc.port)
+	sandboxManager, err := sandbox_manager.NewSandboxManager(sc.client, adapter)
 	if err != nil {
 		return err
 	}

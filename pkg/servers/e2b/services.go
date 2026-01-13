@@ -232,10 +232,10 @@ type browserHandShake struct {
 }
 
 // BrowserUse is a cdp entry for browser_use to create a session
-// Use case:
+// Usage:
 //
 //	```python
-//	browser_session = BrowserSession(cdp_url=f"https://api.{CDP_DOMAIN}/browser/{sandbox_id}")
+//	browser_session = BrowserSession(cdp_url=f"https://api.{E2B_DOMAIN}/browser/{sandbox_id}")
 //	```
 func (sc *Controller) BrowserUse(r *http.Request) (web.ApiResponse[*browserHandShake], *web.ApiError) {
 	sandboxID := r.PathValue("sandboxID")
@@ -244,7 +244,7 @@ func (sc *Controller) BrowserUse(r *http.Request) (web.ApiResponse[*browserHandS
 		return web.ApiResponse[*browserHandShake]{}, apiErr
 	}
 
-	resp, err := sbx.Request(r, "/json/version", models.CDPPort)
+	resp, err := sbx.Request(r.Context(), r.Method, "/json/version", models.CDPPort, r.Body)
 	if err != nil {
 		return web.ApiResponse[*browserHandShake]{}, &web.ApiError{
 			Message: fmt.Sprintf("Failed to proxy request to sandbox port %d: %v", models.CDPPort, err),

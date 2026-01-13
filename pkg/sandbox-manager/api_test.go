@@ -11,7 +11,6 @@ import (
 	"github.com/openkruise/agents/client/clientset/versioned"
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
-	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
@@ -70,7 +69,7 @@ func GetSbsOwnerReference() []metav1.OwnerReference {
 
 func setupTestManager(t *testing.T) *SandboxManager {
 	client := clients.NewFakeClientSet()
-	manager, err := NewSandboxManager(client, nil, consts.InfraSandboxCR)
+	manager, err := NewSandboxManager(client, nil)
 	if err != nil {
 		t.Fatalf("Failed to create manager: %v", err)
 	}
@@ -148,8 +147,8 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			manager := setupTestManager(t)
-			pool1 := manager.GetInfra().NewPool("exist-1", "default", nil)
-			pool2 := manager.GetInfra().NewPool("exist-2", "default", nil)
+			pool1 := manager.GetInfra().(*sandboxcr.Infra).NewPool("exist-1", "default", nil)
+			pool2 := manager.GetInfra().(*sandboxcr.Infra).NewPool("exist-2", "default", nil)
 			manager.GetInfra().AddPool("exist-1", pool1)
 			manager.GetInfra().AddPool("exist-2", pool2)
 

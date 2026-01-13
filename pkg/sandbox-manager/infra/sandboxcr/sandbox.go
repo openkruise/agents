@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 
@@ -135,13 +136,7 @@ func (s *Sandbox) GetSandboxID() string {
 }
 
 func (s *Sandbox) GetRoute() proxy.Route {
-	state, _ := s.GetState()
-	return proxy.Route{
-		IP:    s.Status.PodInfo.PodIP,
-		ID:    s.GetSandboxID(),
-		Owner: s.GetAnnotations()[agentsv1alpha1.AnnotationOwner],
-		State: state,
-	}
+	return proxyutils.DefaultGetRouteFunc(s.Sandbox)
 }
 
 func setTimeout(s *agentsv1alpha1.Sandbox, opts infra.TimeoutOptions) {
@@ -199,11 +194,8 @@ func (s *Sandbox) GetResource() infra.SandboxResource {
 	return utils.CalculateResourceFromContainers(s.Spec.Template.Spec.Containers)
 }
 
-func (s *Sandbox) Request(r *http.Request, path string, port int) (*http.Response, error) {
-	if s.Status.Phase != agentsv1alpha1.SandboxRunning {
-		return nil, errors.New("sandbox is not running")
-	}
-	return proxyutils.ProxyRequest(r, path, port, s.Status.PodInfo.PodIP)
+func (s *Sandbox) Request(ctx context.Context, method, path string, port int, body io.Reader) (*http.Response, error) {
+	return proxyutils.DefaultRequestFunc(ctx, s.Sandbox, method, path, port, body)
 }
 
 func (s *Sandbox) Pause(ctx context.Context, opts infra.PauseOptions) error {

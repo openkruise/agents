@@ -3,7 +3,6 @@ package sandboxcr
 import (
 	"context"
 
-	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -20,7 +19,6 @@ func (i *Infra) LoadDebugInfo() map[string]any {
 		infos[pool.Name] = pool.LoadDebugInfo()
 		return true
 	})
-	infos["infra"] = consts.InfraSandboxCR
 	return infos
 }
 

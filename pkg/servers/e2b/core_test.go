@@ -16,7 +16,6 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/client/clientset/versioned"
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
-	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
@@ -87,7 +86,7 @@ func Setup(t *testing.T) (*Controller, *clients.ClientSet, func()) {
 	assert.NoError(t, err)
 
 	controller := NewController("example.com", InitKey, namespace, models.DefaultMaxTimeout, TestServerPort, true, clientSet)
-	assert.NoError(t, controller.Init(consts.InfraSandboxCR))
+	assert.NoError(t, controller.Init())
 	_, err = controller.Run(namespace, "component=sandbox-manager")
 	assert.NoError(t, err)
 	return controller, clientSet, func() {
@@ -176,7 +175,7 @@ func CreateSandboxPool(t *testing.T, client versioned.Interface, name string, av
 		}
 		CreateSandboxWithStatus(t, client, sbx)
 	}
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
 	return func() {
 		assert.NoError(t, client.ApiV1alpha1().SandboxSets(Namespace).Delete(context.Background(), name, metav1.DeleteOptions{}))
 		for i := 0; i < available; i++ {
