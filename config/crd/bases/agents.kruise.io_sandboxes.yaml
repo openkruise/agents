@@ -26,6 +26,9 @@ spec:
     - jsonPath: .spec.shutdownTime
       name: shutdown_time
       type: string
+    - jsonPath: .spec.pauseTime
+      name: pause_time
+      type: string
     - jsonPath: .status.message
       name: Message
       type: string
