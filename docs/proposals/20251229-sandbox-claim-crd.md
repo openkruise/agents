@@ -65,7 +65,7 @@ metadata:
 spec:
   templateName: python-pool
   replicas: 5
-  timeout: 10m  # Wait up to 10 minutes to claim sandboxes
+  claimTimeout: 10m  # Wait up to 10 minutes to claim sandboxes
   ttlAfterCompleted: 1h  # Auto-delete the claim 1 hour after completion
   labels:
     project: "my-project"
@@ -100,11 +100,11 @@ type SandboxClaimSpec struct {
     // +optional
     ShutdownTime *metav1.Time `json:"shutdownTime,omitempty"`
 
-    // Timeout specifies the maximum duration to wait for claiming sandboxes
+    // ClaimTimeout specifies the maximum duration to wait for claiming sandboxes
     // If the timeout is reached, the claim will be marked as Completed regardless of
     // whether all replicas were successfully claimed
     // +optional
-    Timeout *metav1.Duration `json:"timeout,omitempty"`
+    ClaimTimeout *metav1.Duration `json:"claimTimeout,omitempty"`
 
     // TTLAfterCompleted specifies the time to live after the claim reaches Completed phase
     // After this duration, the SandboxClaim will be automatically deleted.
@@ -200,7 +200,7 @@ The SandboxClaim CRD is designed to align with the E2B HTTP API's `NewSandboxReq
 ### Implementation Details
 
 **Claim Process**:
-1. Track the start time when entering `Claiming` phase (for timeout calculation)
+1. Track the start time when entering `Claiming` phase (for claimTimeout calculation)
 2. List available sandboxes from the specified SandboxSet (state = `available`, filtered by `IndexPoolAvailable` index)
 3. Filter candidates by checking:
    - `Status.Phase == Running` (sandbox must be running)
@@ -218,7 +218,7 @@ The SandboxClaim CRD is designed to align with the E2B HTTP API's `NewSandboxReq
     - Failure to inject envVars logs error but doesn't fail the claim
 7. Check completion conditions:
     - If `ClaimedReplicas == spec.replicas`: transition to `Completed`
-    - If `spec.timeout` is set and exceeded: transition to `Completed` (regardless of claimed count)
+    - If `spec.claimTimeout` is set and exceeded: transition to `Completed` (regardless of claimed count)
     - If SandboxSet is deleted: transition to `Completed` immediately
 8. If `spec.ttlAfterCompleted` is set and claim is `Completed`, schedule deletion after the TTL duration
 
@@ -240,7 +240,7 @@ The claim process uses **optimistic locking** via Kubernetes resourceVersion to 
     - On next reconcile, the candidate list will exclude the already-claimed sandbox
   - **Continuous Reconciliation**: Controller keeps reconciling until:
     - **Success**: All required sandboxes are claimed (ClaimedReplicas == spec.replicas, transitions to `Completed` phase)
-    - **Timeout**: If `spec.timeout` is set and exceeded, transitions to `Completed` phase regardless of claimed replicas count
+    - **Timeout**: If `spec.claimTimeout` is set and exceeded, transitions to `Completed` phase regardless of claimed replicas count
     - **Immediate Failure**: If SandboxSet is deleted, transitions to `Completed` phase immediately
   - **Completion Behavior**: Once `Completed`, the controller stops reconciling and no longer watches claimed sandboxes
 
@@ -280,7 +280,7 @@ State transitions:
 - `Pending` → `Claiming`: Start claiming process
 - `Claiming` → `Completed`: 
   - All required sandboxes claimed (ClaimedReplicas == spec.replicas), OR
-  - Timeout reached (spec.timeout exceeded)
+  - Timeout reached (spec.claimTimeout exceeded)
 - Once `Completed`, the claim will not transition to any other phase
 
 **User Experience**:
@@ -298,7 +298,7 @@ kubectl get sandboxclaim my-claim
 **Completion Conditions**:
 - The claim transitions to `Completed` phase when:
   1. All required sandboxes are claimed (ClaimedReplicas == spec.replicas), OR
-  2. The timeout period (spec.timeout) is reached, OR
+  2. The timeout period (spec.claimTimeout) is reached, OR
   3. The SandboxSet is deleted (immediate completion)
 
 **Post-Completion Behavior**:
