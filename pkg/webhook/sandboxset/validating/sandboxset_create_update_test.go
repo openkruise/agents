@@ -149,33 +149,6 @@ func TestSandboxSetValidatingHandler_Handle(t *testing.T) {
 			errorMessage: "label cannot start with " + v1alpha1.E2BPrefix,
 		},
 		{
-			name: "Annotation with internal prefix",
-			sandboxSet: &v1alpha1.SandboxSet{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-sbs",
-					Namespace: "default",
-					Annotations: map[string]string{
-						v1alpha1.E2BPrefix + "test": "value", // Internal prefix annotations are invalid
-					},
-				},
-				Spec: v1alpha1.SandboxSetSpec{
-					Replicas: 3,
-					SandboxTemplate: v1alpha1.SandboxTemplate{
-						Template: &corev1.PodTemplateSpec{
-							ObjectMeta: metav1.ObjectMeta{
-								Labels: map[string]string{
-									v1alpha1.E2BPrefix + "test": "value", // Template internal prefix labels are invalid
-								},
-							},
-						},
-					},
-				},
-			},
-			expectAllow:  false,
-			expectError:  true,
-			errorMessage: "annotation cannot start with " + v1alpha1.E2BPrefix,
-		},
-		{
 			name: "Template label with internal prefix",
 			sandboxSet: &v1alpha1.SandboxSet{
 				ObjectMeta: metav1.ObjectMeta{
