@@ -51,7 +51,6 @@ func (h *SandboxSetValidatingHandler) Handle(_ context.Context, req admission.Re
 func validateSandboxSetMetadata(metadata metav1.ObjectMeta, fldPath *field.Path) field.ErrorList {
 	var errList field.ErrorList
 	errList = append(errList, validation.ValidateObjectMeta(&metadata, true, validation.NameIsDNSSubdomain, fldPath)...)
-	errList = append(errList, validateLabelsAndAnnotations(metadata, fldPath)...)
 	return errList
 }
 
