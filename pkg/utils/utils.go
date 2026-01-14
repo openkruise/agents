@@ -22,14 +22,16 @@ import (
 func SetSandboxCondition(status *agentsv1alpha1.SandboxStatus, condition metav1.Condition) {
 	currentCond := GetSandboxCondition(status, condition.Type)
 	if currentCond != nil && currentCond.Status == condition.Status && currentCond.Reason == condition.Reason &&
-		currentCond.Message == condition.Message && currentCond.LastTransitionTime == condition.LastTransitionTime {
+		currentCond.Message == condition.Message {
 		return
 	} else if currentCond == nil {
 		status.Conditions = append(status.Conditions, condition)
 		return
 	}
+	if currentCond.Status != condition.Status {
+		currentCond.LastTransitionTime = condition.LastTransitionTime
+	}
 	currentCond.Status = condition.Status
-	currentCond.LastTransitionTime = condition.LastTransitionTime
 	currentCond.Reason = condition.Reason
 	currentCond.Message = condition.Message
 }

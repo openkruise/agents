@@ -46,7 +46,6 @@ import (
 	"github.com/openkruise/agents/pkg/controller/sandbox/core"
 	"github.com/openkruise/agents/pkg/discovery"
 	"github.com/openkruise/agents/pkg/features"
-	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
@@ -106,6 +105,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return reconcile.Result{}, nil
 	}
 
+	logger.Info("Began to process Sandbox for reconcile")
 	// If resourceVersion expectations have not satisfied yet, just skip this reconcile
 	core.ResourceVersionExpectations.Observe(box)
 	if isSatisfied, unsatisfiedDuration := core.ResourceVersionExpectations.IsSatisfied(box); !isSatisfied {
@@ -117,7 +117,6 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		core.ResourceVersionExpectations.Delete(box)
 	}
 
-	logger.V(consts.DebugLogLevel).Info("Began to process Sandbox for reconcile")
 	newStatus := box.Status.DeepCopy()
 	if box.Annotations == nil {
 		box.Annotations = map[string]string{}
