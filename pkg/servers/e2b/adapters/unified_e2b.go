@@ -12,6 +12,8 @@ type E2BMapper interface {
 	IsSandboxRequest(authority, path string, port int) bool
 }
 
+var DefaultAdapterFactory = NewE2BAdapter
+
 type E2BAdapter struct {
 	Port       int
 	native     *NativeE2BAdapter

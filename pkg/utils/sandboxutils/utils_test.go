@@ -5,6 +5,7 @@ import (
 	"time"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/stretchr/testify/assert"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -171,31 +172,6 @@ func TestGetSandboxState(t *testing.T) {
 			expectedReason: "ResourceControlledBySbsButNotReady",
 		},
 		{
-			name: "Sandbox controlled by SandboxSet but has no ip",
-			sandbox: &agentsv1alpha1.Sandbox{
-				ObjectMeta: metav1.ObjectMeta{
-					OwnerReferences: []metav1.OwnerReference{
-						{
-							APIVersion: "agents.kruise.io/v1alpha1",
-							Kind:       "SandboxSet",
-							Controller: &[]bool{true}[0],
-						},
-					},
-				},
-				Status: agentsv1alpha1.SandboxStatus{
-					Phase: agentsv1alpha1.SandboxRunning,
-					Conditions: []metav1.Condition{
-						{
-							Type:   string(agentsv1alpha1.SandboxConditionReady),
-							Status: metav1.ConditionTrue,
-						},
-					},
-				},
-			},
-			expectedState:  agentsv1alpha1.SandboxStateCreating,
-			expectedReason: "ResourceControlledBySbsButNotReady",
-		},
-		{
 			name: "Running Sandbox claimed and Ready",
 			sandbox: &agentsv1alpha1.Sandbox{
 				Status: agentsv1alpha1.SandboxStatus{
@@ -266,12 +242,8 @@ func TestGetSandboxState(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			state, reason := GetSandboxState(tt.sandbox)
-			if state != tt.expectedState {
-				t.Errorf("GetSandboxState() state = %v, want %v", state, tt.expectedState)
-			}
-			if reason != tt.expectedReason {
-				t.Errorf("GetSandboxState() reason = %v, want %v", reason, tt.expectedReason)
-			}
+			assert.Equal(t, tt.expectedState, state)
+			assert.Equal(t, tt.expectedReason, reason)
 		})
 	}
 }

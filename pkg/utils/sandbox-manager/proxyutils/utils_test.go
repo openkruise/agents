@@ -2,8 +2,9 @@ package proxyutils
 
 import (
 	"context"
-	"net"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -13,75 +14,58 @@ import (
 )
 
 //goland:noinspection DuplicatedCode
-func TestSandbox_ProxyRequest(t *testing.T) {
-	// Create a test HTTP server
-	server := http.NewServeMux()
-	server.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNoContent) // Return 204 status code
-	})
-
-	// Add a handler for a specific path, for testing path forwarding
-	server.HandleFunc("/test-path", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("test response"))
-	})
-
-	// Add a handler that returns an error status code
-	server.HandleFunc("/error", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte("internal server error"))
-	})
-
-	// Start HTTP server listening on local port
-	listener, err := net.Listen("tcp", "127.0.0.1:11111")
-	require.NoError(t, err)
-
-	httpServer := &http.Server{Handler: server}
-	go func() {
-		_ = httpServer.Serve(listener)
-	}()
-
-	// Ensure server has started
-	time.Sleep(100 * time.Millisecond)
-
-	defer func() {
-		_ = httpServer.Shutdown(context.Background())
-	}()
+func TestProxyRequest(t *testing.T) {
+	// Create test servers using httptest
+	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.WriteHeader(http.StatusNoContent) // Return 204 status code
+		case "/test-path":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("test response"))
+		case "/error":
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte("internal server error"))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer testServer.Close()
 
 	tests := []struct {
 		name            string
 		path            string
-		ip              string
+		url             string
 		wantErr         bool
 		wantStatus      int
 		wantErrContains string
 	}{
 		{
-			name:       "valid pod IP",
+			name:       "valid server URL",
 			path:       "/",
-			ip:         "127.0.0.1",
+			url:        testServer.URL,
 			wantErr:    false,
 			wantStatus: http.StatusNoContent,
 		},
 		{
 			name:       "specific path",
 			path:       "/test-path",
-			ip:         "127.0.0.1",
+			url:        testServer.URL,
 			wantErr:    false,
 			wantStatus: http.StatusOK,
 		},
 		{
 			name:            "error response",
 			path:            "/error",
-			ip:              "127.0.0.1",
+			url:             testServer.URL,
 			wantErr:         true, // Should return error because status code is 5xx
 			wantErrContains: "internal server error",
 		},
 		{
 			name:            "unreachable server",
 			path:            "/",
-			ip:              "192.168.100.100", // Use an unreachable IP address
-			wantErr:         true,              // Should return error when server is unreachable
+			url:             "http://192.168.100.100:8080", // Use an unreachable URL
+			wantErr:         true,                          // Should return error when server is unreachable
 			wantErrContains: "failed to proxy request to sandbox",
 		},
 	}
@@ -89,9 +73,9 @@ func TestSandbox_ProxyRequest(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Create a test request
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 			defer cancel()
-			req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://127.0.0.1:11111"+tt.path, nil)
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s%s", tt.url, tt.path), nil)
 			require.NoError(t, err)
 			req.Header.Set("Content-Type", "application/json")
 

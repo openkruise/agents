@@ -5,18 +5,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-
-	"github.com/openkruise/agents/pkg/proxy"
 )
-
-var DefaultAdapterFactory = NewCommonAdapter
-
-// FIXME
-func NewCommonAdapter(port int) proxy.RequestAdapter {
-	return &CommonAdapter{
-		Port: port,
-	}
-}
 
 type NativeE2BAdapter struct{}
 

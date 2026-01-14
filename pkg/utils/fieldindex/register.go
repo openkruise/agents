@@ -42,22 +42,12 @@ var OwnerIndexFunc = func(obj client.Object) []string {
 	return owners
 }
 
-// FIXME
 func RegisterFieldIndexes(c cache.Cache) error {
 	var err error
 	registerOnce.Do(func() {
 		// sandbox ownerReference
-		if utilfeature.DefaultFeatureGate.Enabled(features.SandboxSetGate) &&
-			discovery.DiscoverGVK(sandboxControllerKind) && discovery.DiscoverGVK(agentsv1alpha1.SandboxSetControllerKind) {
-			if err = c.IndexField(context.TODO(), &agentsv1alpha1.Sandbox{}, IndexNameForOwnerRefUID, OwnerIndexFunc); err != nil {
-				return
-			}
-		}
-		// inner code, commit
-		if utilfeature.DefaultFeatureGate.Enabled(features.CommitGate) && discovery.DiscoverGVK(commitControllerKind) {
-			if err = c.IndexField(context.TODO(), &agentsv1alpha1.Commit{}, IndexNameForPodName, PodNameIndexFunc); err != nil {
-				return
-			}
+		if err = c.IndexField(context.TODO(), &agentsv1alpha1.Sandbox{}, IndexNameForOwnerRefUID, OwnerIndexFunc); err != nil {
+			return
 		}
 	})
 	return err
