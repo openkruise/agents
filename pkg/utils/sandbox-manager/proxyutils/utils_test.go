@@ -13,10 +13,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-//goland:noinspection DuplicatedCode
-func TestProxyRequest(t *testing.T) {
-	// Create test servers using httptest
-	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+func NewTestServer() *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/":
 			w.WriteHeader(http.StatusNoContent) // Return 204 status code
@@ -30,6 +28,12 @@ func TestProxyRequest(t *testing.T) {
 			w.WriteHeader(http.StatusNotFound)
 		}
 	}))
+}
+
+//goland:noinspection DuplicatedCode
+func TestProxyRequest(t *testing.T) {
+	// Create test servers using httptest
+	testServer := NewTestServer()
 	defer testServer.Close()
 
 	tests := []struct {
