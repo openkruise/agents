@@ -15,7 +15,7 @@ docker build -t sandbox-manager:latest .
 ## 2. 部署
 
 1. 编辑两个 patch 文件，进行一些基础的自定义：
-    1. [deployment_patch.yaml](deployment_patch.yaml)
+    1. [deployment_patch.yaml](configuration_patch.yaml)
     2. [ingress_patch.yaml](ingress_patch.yaml)
 2. 通过以下命令生成完整的 yaml 文件并完成部署：
     ```shell

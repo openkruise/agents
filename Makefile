@@ -1,11 +1,4 @@
 # Variables
-DOMAIN ?= example.com
-INFRA ?= sandbox-cr
-INGRESS ?= nginx
-HOST_NETWORK ?= false
-NAMESPACE ?= sandbox-system
-SBX_NAMESPACE ?= default
-
 BINARY_NAME=sandbox-manager
 GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
 GOLANGCI_LINT_VERSION ?= v2.7.2
@@ -117,31 +110,17 @@ lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes
 lint-config: golangci-lint ## Verify golangci-lint linter configuration
 	$(GOLANGCI_LINT) config verify
 
-##@ Build
-# PLATFORMS defines the target platforms for the manager image be built to provide support to multiple
-# architectures. (i.e. make docker-buildx IMG=myregistry/mypoperator:0.0.1). To use this option you need to:
-# - be able to use docker buildx. More info: https://docs.docker.com/build/buildx/
-# - have enabled BuildKit. More info: https://docs.docker.com/develop/develop-images/build_enhancements/
-# - be able to push the image to your registry (i.e. if you do not set a valid value via IMG=<myregistry/image:<tag>> then the export will fail)
-# To adequately provide solutions that are compatible with multiple platforms, you should consider using this option.
-PLATFORMS ?= linux/arm64,linux/amd64,linux/s390x,linux/ppc64le
-.PHONY: docker-buildx
-docker-buildx: ## Build and push docker image for the manager for cross-platform support
-	# copy existing Dockerfile and insert --platform=${BUILDPLATFORM} into Dockerfile.cross, and preserve the original Dockerfile
-	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' Dockerfile > Dockerfile.cross
-	- $(CONTAINER_TOOL) buildx create --name sandbox-operator-builder
-	$(CONTAINER_TOOL) buildx use sandbox-operator-builder
-	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${IMG} -f Dockerfile.cross .
-	- $(CONTAINER_TOOL) buildx rm sandbox-operator-builder
-	rm Dockerfile.cross
+.PHONY: docker-build-controller
+docker-build-controller:
+	docker build --push -f dockerfiles/agent-sandbox-controller.Dockerfile -t ${IMG} .
 
-.PHONY: build-installer
-build-installer: manifests generate kustomize ## Generate a consolidated YAML with CRDs and deployment.
-	mkdir -p dist
-	cd config/manager && $(KUSTOMIZE) edit set image controller=${IMG}
-	$(KUSTOMIZE) build config/default > dist/install.yaml
+.PHONY: docker-build-manager
+docker-build-manager:
+	docker build --push -f dockerfiles/sandbox-manager.Dockerfile -t ${IMG} .
 
-##@ Deployment
+.PHONY: docker-build-runtime
+docker-build-runtime:
+	docker build --push -f dockerfiles/agent-runtime.Dockerfile -t ${IMG} .
 
 ifndef ignore-not-found
   ignore-not-found = false
@@ -156,23 +135,23 @@ uninstall-crd: manifests kustomize ## Uninstall CRDs from the K8s cluster specif
 	$(KUSTOMIZE) build config/crd | $(KUBECTL) delete --ignore-not-found=$(ignore-not-found) -f -
 
 .PHONY: deploy-sandbox-manager
-deploy-sandbox-manager:
-	helm upgrade --cleanup-on-fail --install --reset-values --create-namespace \
-        --set sandboxManager.controller.logLevel=7 \
-        --set sandboxManager.controller.infra=${INFRA} \
-        --set sandboxManager.ingress.className=${INGRESS} \
-        --set sandboxManager.e2b.domain=${DOMAIN} \
-        --set sandboxManager.controller.hostNetwork=${HOST_NETWORK} \
-        --set sandboxManager.namespace=${SBX_NAMESPACE} \
-        --set sandboxOperator.replicaCount=1 \
-        -n ${NAMESPACE} \
-        sandbox-manager ./deploy/sandbox-manager/
+deploy-sandbox-manager: kustomize
+	$(KUSTOMIZE) build config/sandbox-manager/ | kubectl apply -f -
 
-.PHONY: all
-all: build-and-push-sandbox-manager build-and-push-sandbox-controller deploy
+.PHONY: deploy-agent-sandbox-controller
+deploy-agent-sandbox-controller: kustomize
+	$(KUSTOMIZE) build config/default/ | kubectl apply -f -
 
-undeploy:
-	helm uninstall sandbox-manager -n ${NAMESPACE}
+.PHONY: undeploy-sandbox-manager
+undeploy-sandbox-manager: kustomize
+	$(KUSTOMIZE) build config/sandbox-manager/ | kubectl delete -f -
+
+.PHONY: undeploy-agent-sandbox-controller
+undeploy-agent-sandbox-controller: kustomize
+	$(KUSTOMIZE) build config/undeploy/ | kubectl delete -f -
+
+.PHONY: undeploy-all
+undeploy-all: undeploy-sandbox-manager undeploy-agent-sandbox-controller
 
 ##@ Dependencies
 
@@ -220,12 +199,6 @@ $(ENVTEST): $(LOCALBIN)
 # TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
 # The default setup assumes Kind is pre-installed and builds/loads the Manager Docker image locally.
 # CertManager is installed by default; skip with:
-
-# PLATFORMS defines the target platforms for the manager image be built to provide support to multiple
-# architectures. (i.e. make docker-buildx IMG=myregistry/mypoperator:0.0.1). To use this option you need to:
-# - be able to use docker buildx. More info: https://docs.docker.com/build/buildx/
-# - have enabled BuildKit. More info: https://docs.docker.com/develop/develop-images/build_enhancements/
-# - be able to push the image to your registry (i.e. if you do not set a valid value via IMG=<myregistry/image:<tag>> then the export will fail)
 
 ifndef ignore-not-found
   ignore-not-found = false

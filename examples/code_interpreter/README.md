@@ -32,63 +32,10 @@ OpenKruise Agents provides the E2B protocol-compatible backend management compon
 directly manage and operate sandboxes through the native E2B SDK. In this example, we will deploy an official E2B
 code-interpreter template in the K8s cluster.
 
-### 1.1 Deploying Pre-warming Pool via SandboxSet
+### 1.1 Deploying a Pre-warmed template via SandboxSet
 
 `SandboxSet`, as the workload managing `Sandbox`, will be automatically recognized as a template by `sandbox-manager`.
-By creating the following `SandboxSet` in K8s, you can create a template named `code-interpreter`.
-
-```yaml
-apiVersion: agents.kruise.io/v1alpha1
-kind: SandboxSet
-metadata:
-  annotations:
-    # Enable SandboxManager's Envd initialization capability
-    e2b.agents.kruise.io/should-init-envd: "true"
-  name: code-interpreter
-  namespace: default
-spec:
-  # Pre-warming pool size, recommended to be slightly larger than the estimated request burst volume
-  replicas: 100
-  template: # Declare a Pod template
-    spec:
-      initContainers:
-        - name: init # Inject agent-runtime component through native sidecar
-          image: registry-cn-hangzhou.ack.aliyuncs.com/acs/agent-runtime:v0.0.1
-          volumeMounts:
-            - name: agent-runtime-volume
-              mountPath: /mnt/agent-runtime
-          env:
-            - name: AGENT_RUNTIME_WORKSPACE
-              value: /mnt/agent-runtime
-          restartPolicy: Always
-      containers:
-        - name: sandbox
-          image: e2bdev/code-interpreter:latest # Use the official E2B code-interpreter image
-          resources:
-            requests:
-              cpu: 1
-              memory: 1Gi
-            limits:
-              cpu: 1
-              memory: 1Gi
-          env:
-            - name: AGENT_RUNTIME_WORKSPACE
-              value: /mnt/agent-runtime
-          volumeMounts:
-            - name: agent-runtime-volume
-              mountPath: /mnt/agent-runtime
-          startupProbe:
-            failureThreshold: 20
-            httpGet: # Health check interface in the official image
-              path: /health
-              port: 49999
-            initialDelaySeconds: 1
-            periodSeconds: 2
-            timeoutSeconds: 1
-      volumes:
-        - name: agent-runtime-volume # Define the shared directory between agent-runtime and main container
-          emptyDir: { }
-```
+You can refer to [sandboxset.yaml](sandboxset.yaml) to create a `SandboxSet` in K8s to create a template named `code-interpreter`.
 
 ### 1.2 Using Custom Images
 

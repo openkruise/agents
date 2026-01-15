@@ -17,7 +17,7 @@ If deploying to a real K8s cluster, please modify to an appropriate tag and push
 ## 2. Deployment
 
 1. Edit the two patch files for some basic customizations:
-    1. [deployment_patch.yaml](deployment_patch.yaml)
+    1. [deployment_patch.yaml](configuration_patch.yaml)
     2. [ingress_patch.yaml](ingress_patch.yaml)
 2. Generate the complete YAML file and complete the deployment with the following command:
     ```shell

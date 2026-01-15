@@ -1,0 +1,62 @@
+# Note: Currently, OpenKruise Agent Runtime is not yet released. To use E2B related features, you need to manually inject
+#  the E2B envd component into the sandbox container for now
+#  1. Inject the envd component into the sandbox container through the preview version of the agent-runtime image and emptyDir volume mount
+#  2. Start envd through the sandbox container's postStart hook
+apiVersion: agents.kruise.io/v1alpha1
+kind: SandboxSet
+metadata:
+  name: code-interpreter
+  namespace: default
+  annotations:
+    e2b.agents.kruise.io/should-init-envd: "true"
+spec:
+  replicas: 2
+  template:
+    spec:
+      initContainers:
+        - name: init
+          image: openkruise/agent-runtime:preview-v0.0.2
+          volumeMounts:
+            - name: envd-volume
+              mountPath: /mnt/envd
+          env:
+            - name: ENVD_DIR
+              value: /mnt/envd
+          restartPolicy: Always
+      containers:
+        - name: sandbox
+          image: e2bdev/code-interpreter:latest
+          resources:
+            requests:
+              cpu: 1
+              memory: 1Gi
+            limits:
+              cpu: 1
+              memory: 1Gi
+          env:
+            - name: PORT
+              value: "49999"
+            - name: ENVD_DIR
+              value: /mnt/envd
+          volumeMounts:
+            - name: envd-volume
+              mountPath: /mnt/envd
+          lifecycle:
+            postStart:
+              exec:
+                command:
+                  - bash
+                  - /mnt/envd/envd-run.sh
+          startupProbe:
+            failureThreshold: 20
+            httpGet:
+              path: /health
+              port: 49999
+            initialDelaySeconds: 1
+            periodSeconds: 2
+            timeoutSeconds: 1
+          ImagePullPolicy: IfNotPresent
+      terminationGracePeriodSeconds: 1
+      volumes:
+        - name: envd-volume
+          emptyDir: { }

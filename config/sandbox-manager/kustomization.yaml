@@ -10,7 +10,10 @@ resources:
 patches:
   - target:
       kind: Deployment
-    path: deployment_patch.yaml
+    path: configuration_patch.yaml
+  - target:
+      kind: Deployment
+    path: image_patch.yaml
   - target:
       kind: Ingress
     path: ingress_patch.yaml

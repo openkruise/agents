@@ -31,62 +31,9 @@ OpenKruise Agents 提供了兼容 E2B 协议的后端管控组件 `sandbox-manag
 
 ### 1.1 通过 SandboxSet 部署预热池
 
-`SandboxSet` 作为管理 `Sandbox` 的工作负载，将会自动被 `sandbox-manager` 作为模板所识别。通过在 K8s 中创建如下的
-`SandboxSet`，
-就可以创建一个名为 `code-interpreter` 的模板。
+`SandboxSet` 作为管理 `Sandbox` 的工作负载，将会自动被 `sandbox-manager` 作为模板所识别。您可以参考 [sandboxset.yaml](sandboxset.yaml)
+在 K8s 中创建一个 `SandboxSet`，以创建一个名为 `code-interpreter` 的模板。
 
-```yaml
-apiVersion: agents.kruise.io/v1alpha1
-kind: SandboxSet
-metadata:
-  annotations:
-    # 启用 SandboxManager 的 Envd 初始化能力
-    e2b.agents.kruise.io/should-init-envd: "true"
-  name: code-interpreter
-  namespace: default
-spec:
-  # 预热池的大小，建议比预估的请求突发量略大
-  replicas: 100
-  template: # 声明一个 Pod 模板
-    spec:
-      initContainers:
-        - name: init # 通过 native sidecar 注入 agent-runtime 组件
-          image: registry-cn-hangzhou.ack.aliyuncs.com/acs/agent-runtime:v0.0.1
-          volumeMounts:
-            - name: agent-runtime-volume
-              mountPath: /mnt/agent-runtime
-          env:
-            - name: AGENT_RUNTIME_WORKSPACE
-              value: /mnt/agent-runtime
-          restartPolicy: Always
-      containers:
-        - name: sandbox
-          image: e2bdev/code-interpreter:latest # 使用 E2B 官方的 code-interpreter 镜像
-          resources:
-            requests:
-              cpu: 1
-              memory: 1Gi
-            limits:
-              cpu: 1
-              memory: 1Gi
-          env:
-            - name: AGENT_RUNTIME_WORKSPACE
-              value: /mnt/agent-runtime
-          volumeMounts:
-            - name: agent-runtime-volume
-              mountPath: /mnt/agent-runtime
-          startupProbe:
-            failureThreshold: 20
-            httpGet: # 官方镜像中的 health 检查接口
-              path: /health
-              port: 49999
-            initialDelaySeconds: 1
-            periodSeconds: 2
-            timeoutSeconds: 1
-      volumes:
-        - name: agent-runtime-volume # 定义 agent-runtime 与主容器的共享目录
-          emptyDir: { }
-```
 
 ### 1.2 使用自定义镜像
 
