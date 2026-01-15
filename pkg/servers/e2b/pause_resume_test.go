@@ -245,6 +245,7 @@ func TestResumeSandbox(t *testing.T) {
 				"sandboxID": createResp.Body.SandboxID,
 			}, user)
 
+			done := make(chan struct{})
 			if tt.paused {
 				pauseResp, err := controller.PauseSandbox(req)
 				assert.Nil(t, err)
@@ -272,7 +273,10 @@ func TestResumeSandbox(t *testing.T) {
 						Status: metav1.ConditionTrue,
 					})
 					_, _ = client.ApiV1alpha1().Sandboxes(sbx.Namespace).UpdateStatus(context.Background(), sbx, metav1.UpdateOptions{})
+					close(done)
 				})
+			} else {
+				close(done)
 			}
 
 			if tt.sandboxID == "" {
@@ -305,6 +309,7 @@ func TestResumeSandbox(t *testing.T) {
 				assert.NoError(t, err2)
 				assert.WithinDuration(t, now.Add(time.Duration(tt.timeout)*time.Second), endAt, 5*time.Second)
 			}
+			<-done
 		})
 	}
 }
