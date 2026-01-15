@@ -123,6 +123,7 @@ var _ = Describe("Sandbox", func() {
 			}, time.Second*60, time.Millisecond*500).Should(Equal(agentsv1alpha1.SandboxRunning))
 
 			By("Verifying sandbox has pod information when running")
+			klog.Infof("sandbox status(%s)", utils.DumpJson(sandbox.Status))
 			Expect(sandbox.Status.PodInfo.PodIP).NotTo(BeEmpty())
 			Expect(sandbox.Status.PodInfo.NodeName).NotTo(BeEmpty())
 			Expect(sandbox.Status.SandboxIp).NotTo(BeEmpty())
