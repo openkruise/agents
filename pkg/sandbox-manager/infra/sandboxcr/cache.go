@@ -6,27 +6,34 @@ import (
 	"sync"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
+	k8sinformers "k8s.io/client-go/informers"
+	"k8s.io/client-go/tools/cache"
+	"k8s.io/klog/v2"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	informers "github.com/openkruise/agents/client/informers/externalversions"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	managerutils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	"github.com/openkruise/agents/pkg/utils/sandboxutils"
-	"k8s.io/client-go/tools/cache"
-	"k8s.io/klog/v2"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 type checkFunc func(sbx *agentsv1alpha1.Sandbox) (bool, error)
 
 type Cache struct {
-	informerFactory    informers.SharedInformerFactory
-	sandboxInformer    cache.SharedIndexInformer
-	sandboxSetInformer cache.SharedIndexInformer
-	stopCh             chan struct{}
-	waitHooks          sync.Map // Key: client.ObjectKey; Value: *waitEntry
+	informerFactory          informers.SharedInformerFactory
+	sandboxInformer          cache.SharedIndexInformer
+	sandboxSetInformer       cache.SharedIndexInformer
+	coreInformerFactory      k8sinformers.SharedInformerFactory
+	persistentVolumeInformer cache.SharedIndexInformer
+	secretInformer           cache.SharedIndexInformer
+	stopCh                   chan struct{}
+	waitHooks                *sync.Map // Key: client.ObjectKey; Value: *waitEntry
 }
 
-func NewCache(informerFactory informers.SharedInformerFactory, sandboxInformer, sandboxSetInformer cache.SharedIndexInformer) (*Cache, error) {
+func NewCache(informerFactory informers.SharedInformerFactory, sandboxInformer, sandboxSetInformer cache.SharedIndexInformer,
+	coreInformerFactory k8sinformers.SharedInformerFactory, informers ...cache.SharedIndexInformer) (*Cache, error) {
 	if err := AddLabelSelectorIndexerToInformer(sandboxInformer); err != nil {
 		return nil, err
 	}
@@ -35,6 +42,19 @@ func NewCache(informerFactory informers.SharedInformerFactory, sandboxInformer, 
 		sandboxInformer:    sandboxInformer,
 		sandboxSetInformer: sandboxSetInformer,
 		stopCh:             make(chan struct{}),
+		waitHooks:          &sync.Map{},
+	}
+	// import core informers
+	if coreInformerFactory != nil {
+		c.coreInformerFactory = coreInformerFactory
+		if len(informers) >= 1 {
+			pvInformer := informers[0]
+			c.persistentVolumeInformer = pvInformer
+		}
+		if len(informers) >= 2 {
+			secretInformer := informers[1]
+			c.secretInformer = secretInformer
+		}
 	}
 	return c, nil
 }
@@ -57,8 +77,14 @@ func (c *Cache) Run(ctx context.Context) error {
 		return err
 	}
 	c.informerFactory.Start(c.stopCh)
+	if c.coreInformerFactory != nil {
+		c.coreInformerFactory.Start(c.stopCh)
+	}
 	log.Info("Cache informer started")
 	c.informerFactory.WaitForCacheSync(c.stopCh)
+	if c.coreInformerFactory != nil {
+		c.coreInformerFactory.WaitForCacheSync(c.stopCh)
+	}
 	log.Info("Cache informer synced")
 	return nil
 }
@@ -211,4 +237,35 @@ func (c *Cache) watchSandboxSatisfied(obj interface{}) {
 		})
 		return
 	}
+}
+
+// GetPersistentVolume retrieves a PersistentVolume from the cache by name
+func (c *Cache) GetPersistentVolume(name string) (*corev1.PersistentVolume, error) {
+	obj, exists, err := c.persistentVolumeInformer.GetStore().GetByKey(name)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get persistentvolume %s from cache: %w", name, err)
+	}
+	if !exists {
+		return nil, fmt.Errorf("persistentvolume %s not found in cache", name)
+	}
+	if pv, ok := obj.(*corev1.PersistentVolume); ok {
+		return pv, nil
+	}
+	return nil, fmt.Errorf("object with key %s is not a PersistentVolume", name)
+}
+
+// GetSecret retrieves a Secret from the cache by namespace and name
+func (c *Cache) GetSecret(namespace, name string) (*corev1.Secret, error) {
+	key := fmt.Sprintf("%s/%s", namespace, name)
+	obj, exists, err := c.secretInformer.GetStore().GetByKey(key)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get secret %s/%s from cache: %w", namespace, name, err)
+	}
+	if !exists {
+		return nil, fmt.Errorf("secret %s/%s not found in cache", namespace, name)
+	}
+	if secret, ok := obj.(*corev1.Secret); ok {
+		return secret, nil
+	}
+	return nil, fmt.Errorf("object with key %s is not a Secret", key)
 }

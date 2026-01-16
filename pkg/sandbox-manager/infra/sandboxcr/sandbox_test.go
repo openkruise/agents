@@ -7,16 +7,17 @@ import (
 	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
-	"github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/client/clientset/versioned/fake"
-	"github.com/openkruise/agents/pkg/proxy"
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
-	utils2 "github.com/openkruise/agents/pkg/utils"
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
+
+	"github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/client/clientset/versioned/fake"
+	"github.com/openkruise/agents/pkg/proxy"
+	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	"github.com/openkruise/agents/pkg/utils"
 )
 
 func AsSandboxForTest(sbx *v1alpha1.Sandbox, client *fake.Clientset, cache *Cache) *Sandbox {
@@ -56,7 +57,7 @@ func ConvertPodToSandboxCR(pod *corev1.Pod) *v1alpha1.Sandbox {
 			},
 		},
 	}
-	cond := utils2.GetPodCondition(&pod.Status, corev1.PodReady)
+	cond := utils.GetPodCondition(&pod.Status, corev1.PodReady)
 	if cond != nil {
 		sbx.Status.Conditions = append(sbx.Status.Conditions, metav1.Condition{
 			Type:   string(v1alpha1.SandboxConditionReady),
@@ -236,7 +237,7 @@ func TestSandbox_InplaceRefresh(t *testing.T) {
 		},
 	}
 
-	cache, client := NewTestCache(t)
+	cache, _, client := NewTestCache(t)
 	_, err := client.ApiV1alpha1().Sandboxes("default").Create(context.Background(), initialSandbox, metav1.CreateOptions{})
 	assert.NoError(t, err)
 	time.Sleep(10 * time.Millisecond)
@@ -402,7 +403,7 @@ func TestSandbox_SaveTimeout(t *testing.T) {
 				},
 			}
 
-			cache, client := NewTestCache(t)
+			cache, _, client := NewTestCache(t)
 			_, err := client.ApiV1alpha1().Sandboxes("default").Create(context.Background(), sandbox, metav1.CreateOptions{})
 			assert.NoError(t, err)
 			time.Sleep(20 * time.Millisecond)
@@ -671,7 +672,7 @@ func TestSandbox_CSIMount(t *testing.T) {
 			server := NewTestEnvdServer(tt.result, true, tt.processError)
 			defer server.Close()
 
-			cache, client := NewTestCache(t)
+			cache, _, client := NewTestCache(t)
 			sbx := &v1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "test-sandbox",
@@ -682,7 +683,7 @@ func TestSandbox_CSIMount(t *testing.T) {
 				},
 			}
 			sandbox := AsSandboxForTest(sbx, client, cache)
-			request, err := utils2.EncodeBase64Proto(tt.req)
+			request, err := utils.EncodeBase64Proto(tt.req)
 			assert.NoError(t, err)
 			err = sandbox.CSIMount(t.Context(), tt.driver, request)
 			if tt.expectError != "" {

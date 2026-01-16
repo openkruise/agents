@@ -174,7 +174,7 @@ func TestSandbox_SetPause(t *testing.T) {
 			}
 			tt.initSandbox(sandbox)
 
-			cache, client := NewTestCache(t)
+			cache, _, client := NewTestCache(t)
 			CreateSandboxWithStatus(t, client, sandbox)
 			time.Sleep(10 * time.Millisecond)
 
@@ -272,7 +272,7 @@ func TestSandbox_ResumeConcurrent(t *testing.T) {
 	state, reason := sandboxutils.GetSandboxState(sandbox)
 	assert.Equal(t, v1alpha1.SandboxStatePaused, state, reason)
 
-	cache, client := NewTestCache(t)
+	cache, _, client := NewTestCache(t)
 	CreateSandboxWithStatus(t, client, sandbox)
 	time.Sleep(10 * time.Millisecond)
 

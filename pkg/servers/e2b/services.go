@@ -9,6 +9,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"k8s.io/apimachinery/pkg/util/validation"
+	"k8s.io/klog/v2"
+
 	"github.com/openkruise/agents/api/v1alpha1"
 	sandbox_manager "github.com/openkruise/agents/pkg/sandbox-manager"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
@@ -16,8 +19,6 @@ import (
 	"github.com/openkruise/agents/pkg/servers/web"
 	"github.com/openkruise/agents/pkg/utils"
 	managerutils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
-	"k8s.io/apimachinery/pkg/util/validation"
-	"k8s.io/klog/v2"
 )
 
 // CreateSandbox allocates a Pod as a new sandbox
@@ -144,8 +145,22 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 	mountCost := time.Duration(0)
 	// Currently, CSIMount depends on envd, which cannot be guaranteed to exist in all sandboxes.
 	// After agent-runtime is ready, move the CSI mount logic to pool.ClaimSandbox as a built-in process.
-	if request.Extensions.CSIMount.Driver != "" {
-		if err = sbx.CSIMount(ctx, request.Extensions.CSIMount.Driver, request.Extensions.CSIMount.Request); err != nil {
+	if request.Extensions.CSIMount.PersistentVolumeName != "" {
+		driverName, csiReqConfigRaw, err := sc.csiMountOptionsConfig(ctx,
+			request.Extensions.CSIMount.ContainerMountPoint, request.Extensions.CSIMount.PersistentVolumeName)
+		if err != nil {
+			log.Error(err, "failed to convert to node publish volume request")
+			if err := sbx.Kill(ctx); err != nil {
+				log.Error(err, "failed to kill sandbox", "id", sbx.GetSandboxID())
+			} else {
+				log.Info("sandbox killed", "id", sbx.GetSandboxID())
+			}
+			return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
+				Message: err.Error(),
+			}
+		}
+		log.Info("csi mount options raw", csiReqConfigRaw, "driver name", driverName)
+		if err = sbx.CSIMount(ctx, driverName, csiReqConfigRaw); err != nil {
 			log.Error(err, "failed to mount storage")
 			if err := sbx.Kill(ctx); err != nil {
 				log.Error(err, "failed to kill sandbox", "id", sbx.GetSandboxID())

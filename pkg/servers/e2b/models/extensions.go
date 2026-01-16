@@ -1,62 +1,80 @@
 package models
 
 import (
-	"encoding/json"
 	"fmt"
 
-	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/distribution/reference"
+
 	"github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/utils"
 )
 
 // Extension keys are annotations used by sandbox-manager only.
 
 const (
-	ExtensionKeyClaimWithImage    = v1alpha1.E2BPrefix + "image"
-	ExtensionKeyClaimWithCSIMount = v1alpha1.E2BPrefix + "csi"
+	ExtensionKeyClaimWithImage               = v1alpha1.E2BPrefix + "image"
+	ExtensionKeyClaimWithCSIMount            = v1alpha1.E2BPrefix + "csi"
+	ExtensionKeyClaimWithCSIMount_VolumeName = ExtensionKeyClaimWithCSIMount + "-volume-name"
+	ExtensionKeyClaimWithCSIMount_MountPoint = ExtensionKeyClaimWithCSIMount + "-mount-point"
 )
 
 // Extensions for NewSandboxRequest
 
 func (r *NewSandboxRequest) ParseExtensions() error {
-	for k, v := range r.Metadata {
-		isExtension := true
-		switch k {
-		case ExtensionKeyClaimWithImage:
-			if err := r.parseExtensionImage(v); err != nil {
-				return err
-			}
-		case ExtensionKeyClaimWithCSIMount:
-			if err := r.parseExtensionCSIMount(v); err != nil {
-				return err
-			}
-		default:
-			isExtension = false
-		}
-		if isExtension {
-			delete(r.Metadata, k)
-		}
+	if r.Metadata == nil {
+		return nil
+	}
+	// parse images
+	if err := r.parseExtensionImage(); err != nil {
+		return err
+	}
+	// parse csi mount config
+	if err := r.parseExtensionCSIMount(); err != nil {
+		return err
 	}
 	return nil
 }
 
-func (r *NewSandboxRequest) parseExtensionImage(image string) error {
+func (r *NewSandboxRequest) parseExtensionImage() error {
+	// just valid image when image string is not empty
+	image, ok := r.Metadata[ExtensionKeyClaimWithImage]
+	if !ok {
+		return nil
+	}
 	if _, err := reference.ParseNormalizedNamed(image); err != nil {
 		return fmt.Errorf("invalid image [%s]: %v", image, err)
 	}
 	r.Extensions.Image = image
+	delete(r.Metadata, ExtensionKeyClaimWithImage)
 	return nil
 }
 
-func (r *NewSandboxRequest) parseExtensionCSIMount(raw string) error {
-	if err := json.Unmarshal([]byte(raw), &r.Extensions.CSIMount); err != nil {
-		return fmt.Errorf("cannot unmarshal storage-mount extension into go map: %s", err.Error())
+func (r *NewSandboxRequest) parseExtensionCSIMount() error {
+	// Both ExtensionKeyClaimWithCSIMount_VolumeName and ExtensionKeyClaimWithCSIMount_MountPoint must exist together or not at all.
+	persistentVolumeName, volumeNameExists := r.Metadata[ExtensionKeyClaimWithCSIMount_VolumeName]
+	containerMountPoint, mountPointExists := r.Metadata[ExtensionKeyClaimWithCSIMount_MountPoint]
+
+	// If only one of the required fields exists, return an error
+	if volumeNameExists != mountPointExists {
+		return fmt.Errorf("both %s and %s must exist together or not at all",
+			ExtensionKeyClaimWithCSIMount_VolumeName,
+			ExtensionKeyClaimWithCSIMount_MountPoint)
 	}
-	var request csi.NodePublishVolumeRequest
-	if err := utils.DecodeBase64Proto(r.Extensions.CSIMount.Request, &request); err != nil {
-		return fmt.Errorf("cannot decode csi.NodePublishVolumeRequest from base64: %s", err.Error())
+
+	// If neither field exists, nothing to process
+	if !volumeNameExists && !mountPointExists {
+		return nil
 	}
-	// TODO: validate request
+
+	// validate containerMountPoint
+	if err := validateMountPoint(containerMountPoint); err != nil {
+		return fmt.Errorf("invalid containerMountPoint [%s]", containerMountPoint)
+	}
+
+	r.Extensions.CSIMount = CSIMountExtension{
+		ContainerMountPoint:  containerMountPoint,
+		PersistentVolumeName: persistentVolumeName,
+	}
+	delete(r.Metadata, ExtensionKeyClaimWithCSIMount_VolumeName)
+	delete(r.Metadata, ExtensionKeyClaimWithCSIMount_MountPoint)
 	return nil
 }

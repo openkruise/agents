@@ -214,7 +214,9 @@ from e2b_code_interpreter import Sandbox
 from kruise_agents.csi import AlibabaCloudNAS
 
 sbx = Sandbox.create(template="some-template", timeout=300, metadata={
-    "e2b.agents.kruise.io/csi": AlibabaCloudNAS(
-        mount_path="/mnt/nas", nas_type="fastnas", endpoint="ap-y******.3******.cn-hangzhou.nas.aliyuncs.com")
+    "e2b.agents.kruise.io/csi-volume-name": "oss-pv-test",
+    "e2b.agents.kruise.io/csi-mount-point": "/data"
 })
 ```
+The aforementioned example describes a scenario in which a CSI-type OSS-backed persistent volume (PV), named "oss-pv-test", 
+is mounted to the container's `/data` directory upon sandbox instantiation.

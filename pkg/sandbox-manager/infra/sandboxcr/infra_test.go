@@ -5,14 +5,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8sfake "k8s.io/client-go/kubernetes/fake"
+
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/client/clientset/versioned/fake"
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
-	"github.com/stretchr/testify/assert"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func createTestSandbox(name, user string, phase v1alpha1.SandboxPhase, ready bool) *v1alpha1.Sandbox {
@@ -44,7 +46,7 @@ func createTestSandbox(name, user string, phase v1alpha1.SandboxPhase, ready boo
 //goland:noinspection GoDeprecation
 func NewTestInfra(t *testing.T) (*Infra, *fake.Clientset) {
 	client := fake.NewSimpleClientset()
-	infraInstance, err := NewInfra(client, proxy.NewServer(nil))
+	infraInstance, err := NewInfra(client, k8sfake.NewSimpleClientset(), proxy.NewServer(nil))
 	assert.NoError(t, err)
 	assert.NoError(t, infraInstance.Run(context.Background()))
 	return infraInstance, client

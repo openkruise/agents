@@ -42,8 +42,8 @@ type NewSandboxRequestExtension struct {
 }
 
 type CSIMountExtension struct {
-	Driver  string `json:"driver"`
-	Request string `json:"request"` // base64 encoded csi.NodePublishVolumeRequest
+	ContainerMountPoint  string `json:"containerMountPoint"`  // path in container to mount the persistent volume
+	PersistentVolumeName string `json:"persistentVolumeName"` // persistent volume name to mount
 }
 
 // SandboxMetadata represents metadata for a sandbox

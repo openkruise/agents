@@ -4,15 +4,18 @@ import (
 	"context"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8sinformers "k8s.io/client-go/informers"
+	"k8s.io/client-go/kubernetes"
+	k8scache "k8s.io/client-go/tools/cache"
+	"k8s.io/klog/v2"
+
 	"github.com/openkruise/agents/api/v1alpha1"
 	sandboxclient "github.com/openkruise/agents/client/clientset/versioned"
 	informers "github.com/openkruise/agents/client/informers/externalversions"
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	k8scache "k8s.io/client-go/tools/cache"
-	"k8s.io/klog/v2"
 )
 
 type Infra struct {
@@ -23,11 +26,19 @@ type Infra struct {
 	Proxy  *proxy.Server
 }
 
-func NewInfra(client sandboxclient.Interface, proxy *proxy.Server) (*Infra, error) {
+func NewInfra(client sandboxclient.Interface, k8sClient kubernetes.Interface, proxy *proxy.Server) (*Infra, error) {
+	// Create informer factory for custom Sandbox resources
 	informerFactory := informers.NewSharedInformerFactory(client, time.Minute*10)
 	sandboxInformer := informerFactory.Api().V1alpha1().Sandboxes().Informer()
 	sandboxSetInformer := informerFactory.Api().V1alpha1().SandboxSets().Informer()
-	cache, err := NewCache(informerFactory, sandboxInformer, sandboxSetInformer)
+
+	// Create informer factory for native Kubernetes resources (PersistentVolume and Secret)
+	coreInformerFactory := k8sinformers.NewSharedInformerFactory(k8sClient, time.Minute*10)
+	persistentVolumeInformer := coreInformerFactory.Core().V1().PersistentVolumes().Informer()
+	secretInformer := coreInformerFactory.Core().V1().Secrets().Informer()
+
+	// Initialize cache with all required informers
+	cache, err := NewCache(informerFactory, sandboxInformer, sandboxSetInformer, coreInformerFactory, persistentVolumeInformer, secretInformer)
 	if err != nil {
 		return nil, err
 	}
@@ -58,6 +69,10 @@ func (i *Infra) Run(ctx context.Context) error {
 
 func (i *Infra) Stop() {
 	i.Cache.Stop()
+}
+
+func (i *Infra) GetCache() infra.CacheProvider {
+	return i.Cache
 }
 
 func (i *Infra) NewPool(name, namespace string, annotations map[string]string) infra.SandboxPool {

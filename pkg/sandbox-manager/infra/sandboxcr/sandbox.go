@@ -23,6 +23,12 @@ import (
 	"net/http"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
+	"k8s.io/klog/v2"
+	"k8s.io/utils/ptr"
+
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	sandboxclient "github.com/openkruise/agents/client/clientset/versioned"
 	"github.com/openkruise/agents/pkg/proxy"
@@ -33,11 +39,6 @@ import (
 	"github.com/openkruise/agents/pkg/utils/sandbox-manager/proxyutils"
 	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
 	"github.com/openkruise/agents/proto/envd/process"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/util/retry"
-	"k8s.io/klog/v2"
-	"k8s.io/utils/ptr"
 )
 
 type SandboxCR interface {
@@ -286,6 +287,7 @@ var MountCommand = "/mnt/envd/sandbox-runtime-storage"
 // `sandbox-runtime`.
 func (s *Sandbox) CSIMount(ctx context.Context, driver string, request string) error {
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(s.Sandbox))
+	startTime := time.Now()
 	processConfig := &process.ProcessConfig{
 		Cmd: MountCommand,
 		Args: []string{
@@ -308,6 +310,7 @@ func (s *Sandbox) CSIMount(ctx context.Context, driver string, request string) e
 		log.Error(err, "command failed", "exitCode", result.ExitCode)
 		return err
 	}
+	log.Info("execute csi mount command", "driverName", driver, "mountCost", time.Since(startTime))
 	return nil
 }
 

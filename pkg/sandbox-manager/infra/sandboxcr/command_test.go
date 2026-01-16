@@ -8,14 +8,15 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
-	"github.com/openkruise/agents/api/v1alpha1"
-	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
-	"github.com/openkruise/agents/proto/envd/process"
-	"github.com/openkruise/agents/proto/envd/process/processconnect"
 	"github.com/stretchr/testify/assert"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
+
+	"github.com/openkruise/agents/api/v1alpha1"
+	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
+	"github.com/openkruise/agents/proto/envd/process"
+	"github.com/openkruise/agents/proto/envd/process/processconnect"
 )
 
 var AccessToken = "access-token"
@@ -207,7 +208,7 @@ func TestSandbox_runCommandWithEnvd(t *testing.T) {
 			server := NewTestEnvdServer(tt.result, tt.immediately, tt.processError)
 			defer server.Close()
 
-			cache, client := NewTestCache(t)
+			cache, _, client := NewTestCache(t)
 			sbx := &v1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "test-sandbox",

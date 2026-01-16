@@ -5,12 +5,13 @@ import (
 	"fmt"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/klog/v2"
+
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/klog/v2"
 )
 
 // means 2 min timeout
@@ -35,7 +36,7 @@ func NewSandboxManager(client *clients.ClientSet, adapter proxy.RequestAdapter) 
 		proxy:  proxy.NewServer(adapter),
 	}
 	var err error
-	m.infra, err = sandboxcr.NewInfra(client.SandboxClient, m.proxy)
+	m.infra, err = sandboxcr.NewInfra(client.SandboxClient, client.K8sClient, m.proxy)
 	return m, err
 }
 

@@ -7,6 +7,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/client/clientset/versioned"
 	"github.com/openkruise/agents/client/clientset/versioned/fake"
@@ -14,10 +19,6 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	"github.com/openkruise/agents/pkg/utils/sandboxutils"
-	"github.com/stretchr/testify/assert"
-	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func GetSbsOwnerReference() []metav1.OwnerReference {
@@ -43,7 +44,7 @@ func NewTestPool(t *testing.T) (*Pool, versioned.Interface) {
 
 	informerFactory := informers.NewSharedInformerFactory(client, time.Minute*10)
 	sandboxInformer := informerFactory.Api().V1alpha1().Sandboxes().Informer()
-	c, err := NewCache(informerFactory, sandboxInformer, sandboxInformer)
+	c, err := NewCache(informerFactory, sandboxInformer, sandboxInformer, nil)
 	if err != nil {
 		t.Fatalf("Failed to create cache: %v", err)
 	}
