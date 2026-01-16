@@ -1,4 +1,4 @@
-name: Docker Image CI
+name: Build and push agent-runtime docker image
 
 on:
   workflow_dispatch:
@@ -25,4 +25,4 @@ jobs:
         run: |
           docker buildx create --use --platform=linux/amd64,linux/arm64,linux/ppc64le --name multi-platform-builder
           docker buildx ls
-          docker build -f dockerfiles/agent-runtime.Dockerfile -t openkruise/agent-runtime:${{ github.ref_name }} .
+          docker build --push -f dockerfiles/agent-runtime.Dockerfile -t openkruise/agent-runtime:${{ github.ref_name }} .
