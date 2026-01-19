@@ -50,7 +50,7 @@ make docker-build-runtime # build agent-runtime
 It is recommended to deploy OpenKruise Agents to a Kubernetes cluster via kustomize for testing. Any Kubernetes cluster
 should be ok, but we recommend using [kind](https://kind.sigs.k8s.io/) to create a local cluster.
 
-1. Modify the following patch files if you have built your own images.
+1. Modify the following patch files with your own images.
     1. [agent-sandbox-controller](config/default/image_patch.yaml)
     2. [sandbox-manager](config/sandbox-manager/image_patch.yaml)
 2. Deploy the components
