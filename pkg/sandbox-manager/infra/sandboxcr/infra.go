@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sinformers "k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
@@ -140,7 +141,7 @@ func (i *Infra) onSandboxDelete(obj any) {
 	if !ok {
 		return
 	}
-	i.Proxy.DeleteRoute(sbx.Name)
+	i.Proxy.DeleteRoute(stateutils.GetSandboxID(sbx))
 	utils.ResourceVersionExpectationDelete(sbx)
 }
 
