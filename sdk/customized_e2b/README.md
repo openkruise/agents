@@ -30,7 +30,7 @@ Requirements:
 - e2b >= 2.8.0
 
 ```python
-from kruise_agents.e2b import patch_e2b
+from kruise_agents.patch_e2b import patch_e2b
 from e2b_code_interpreter import Sandbox
 
 patch_e2b()  # patch sdk
@@ -81,7 +81,7 @@ Comparison between private protocol and native protocol:
     ```
 2. Patch client:
     ```python
-    from kruise_agents.e2b import patch_e2b
+    from kruise_agents.patch_e2b import patch_e2b
     patch_e2b()
     ```
 3. Resolve single domain `your.domain` to sandbox-manager ingress endpoint
@@ -101,7 +101,7 @@ Comparison between private protocol and native protocol:
     ```
 3. Patch client and disable HTTPS:
     ```python
-    from kruise_agents.e2b import patch_e2b
+    from kruise_agents.patch_e2b import patch_e2b
     patch_e2b(False)
     ```
 
@@ -119,6 +119,6 @@ Comparison between private protocol and native protocol:
    ```
 3. Patch client:
     ```python
-    from kruise_agents.e2b import patch_e2b
+    from kruise_agents.patch_e2b import patch_e2b
     patch_e2b(False)
     ```
