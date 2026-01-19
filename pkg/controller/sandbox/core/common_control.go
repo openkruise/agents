@@ -289,74 +289,9 @@ func (r *commonControl) createPod(ctx context.Context, box *agentsv1alpha1.Sandb
 
 func (r *commonControl) handleInplaceUpdateSandbox(ctx context.Context, args EnsureFuncArgs) (bool, error) {
 	pod, box, newStatus := args.Pod, args.Box, args.NewStatus
-	logger := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
-
-	_, hashWithoutImageAndResource := HashSandbox(box)
-	// old Pod do not include Labels[pod-template-hash] and do not support inplace update.
-	if pod.Labels[agentsv1alpha1.PodLabelTemplateHash] == "" {
-		return true, nil
-		// todo, update inplaceupdate condition
-	} else if box.Annotations[agentsv1alpha1.SandboxHashWithoutImageAndResources] != hashWithoutImageAndResource {
-		logger.Info("sandbox hash-without-image-resources changed, and does not permit in-place upgrades", "old hash",
-			box.Annotations[agentsv1alpha1.SandboxHashWithoutImageAndResources], "new hash", hashWithoutImageAndResource)
-		r.recorder.Eventf(box, corev1.EventTypeWarning, "InplaceUpdateForbidden", "InplaceUpdate only support image, resources")
-		return true, nil
+	handler := &CommonInPlaceUpdateHandler{
+		control:  r.inplaceUpdateControl,
+		recorder: r.recorder,
 	}
-	// revision consistent
-	if pod.Labels[agentsv1alpha1.PodLabelTemplateHash] == newStatus.UpdateRevision {
-		// inplace update is incompleted
-		if !inplaceupdate.IsInplaceUpdateCompleted(ctx, pod) {
-			return false, nil
-		}
-		cond := metav1.Condition{
-			Type:               string(agentsv1alpha1.SandboxConditionInplaceUpdate),
-			Status:             metav1.ConditionTrue,
-			Reason:             agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded,
-			LastTransitionTime: metav1.Now(),
-		}
-		utils.SetSandboxCondition(newStatus, cond)
-		return true, nil
-	}
-
-	state, err := inplaceupdate.GetPodInPlaceUpdateState(pod)
-	if err != nil {
-		return false, err
-		// state!=nil indicates that an in-place upgrade has already been performed previously.
-	} else if state != nil {
-		// currently, multiple in-place updates are not supported.
-		logger.Info("currently, multiple in-place updates are not supported")
-		r.recorder.Eventf(box, corev1.EventTypeWarning, "InplaceUpdateForbidden", "currently, multiple in-place updates are not supported")
-		// inplace update is incompleted
-		if !inplaceupdate.IsInplaceUpdateCompleted(ctx, pod) {
-			return false, nil
-		}
-		return true, nil
-	}
-
-	// start inplace update sandbox
-	opts := inplaceupdate.InPlaceUpdateOptions{Pod: pod, Box: box, Revision: newStatus.UpdateRevision}
-	changed, err := r.inplaceUpdateControl.Update(ctx, opts)
-	if err != nil {
-		return false, err
-	} else if !changed {
-		return true, nil
-	}
-
-	// update sandbox inplace-update
-	cond := metav1.Condition{
-		Type:               string(agentsv1alpha1.SandboxConditionInplaceUpdate),
-		Status:             metav1.ConditionFalse,
-		Reason:             agentsv1alpha1.SandboxInplaceUpdateReasonInplaceUpdating,
-		LastTransitionTime: metav1.Now(),
-	}
-	utils.SetSandboxCondition(newStatus, cond)
-	cond = metav1.Condition{
-		Type:               string(agentsv1alpha1.SandboxConditionReady),
-		Status:             metav1.ConditionFalse,
-		LastTransitionTime: metav1.Now(),
-		Reason:             agentsv1alpha1.SandboxReadyReasonInplaceUpdating,
-		Message:            "inplace update is incompleted",
-	}
-	utils.SetSandboxCondition(newStatus, cond)
-	return false, nil
+	return handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
 }
