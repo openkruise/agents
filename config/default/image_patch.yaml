@@ -1,4 +1,4 @@
 # Agent sandbox operator image
 - op: replace
   path: /spec/template/spec/containers/0/image
-  value: openkruise/agent-sandbox-controller:latest
+  value: agent-sandbox-controller:latest

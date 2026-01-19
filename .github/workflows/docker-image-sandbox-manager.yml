@@ -25,4 +25,5 @@ jobs:
         run: |
           docker buildx create --use --platform=linux/amd64,linux/arm64,linux/ppc64le --name multi-platform-builder
           docker buildx ls
-          IMG=openkruise/sandbox-manager:${{ github.ref_name }} make docker-build-manager
+          MANAGER_IMG=openkruise/sandbox-manager:${{ github.ref_name }} make docker-build-manager
+          docker push openkruise/sandbox-manager:${{ github.ref_name }}

@@ -1,7 +1,7 @@
 # Sandbox manager image
 - op: replace
   path: /spec/template/spec/containers/0/image
-  value: openkruise/sandbox-manager:latest
+  value: sandbox-manager:latest
 
 # Envoy proxy image
 - op: replace

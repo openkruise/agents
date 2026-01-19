@@ -25,4 +25,5 @@ jobs:
         run: |
           docker buildx create --use --platform=linux/amd64,linux/arm64,linux/ppc64le --name multi-platform-builder
           docker buildx ls
-          IMG=openkruise/agent-runtime:${{ github.ref_name }} make docker-build-runtime
+          RUNTIME_IMG=openkruise/agent-runtime:${{ github.ref_name }} make docker-build-runtime
+          docker push openkruise/agent-runtime:${{ github.ref_name }}

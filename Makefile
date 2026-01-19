@@ -9,7 +9,9 @@ $(LOCALBIN):
 
 # Default target
 # Image URL to use all building/pushing image targets
-IMG ?= controller:latest
+CONTROLLER_IMG ?= agent-sandbox-controller:latest
+MANAGER_IMG ?= sandbox-manager:latest
+RUNTIME_IMG ?= agent-runtime:latest
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -112,15 +114,15 @@ lint-config: golangci-lint ## Verify golangci-lint linter configuration
 
 .PHONY: docker-build-controller
 docker-build-controller:
-	docker build --push -f dockerfiles/agent-sandbox-controller.Dockerfile -t ${IMG} .
+	docker build -f dockerfiles/agent-sandbox-controller.Dockerfile -t ${CONTROLLER_IMG} .
 
 .PHONY: docker-build-manager
 docker-build-manager:
-	docker build --push -f dockerfiles/sandbox-manager.Dockerfile -t ${IMG} .
+	docker build -f dockerfiles/sandbox-manager.Dockerfile -t ${MANAGER_IMG} .
 
 .PHONY: docker-build-runtime
 docker-build-runtime:
-	docker build --push -f dockerfiles/agent-runtime.Dockerfile -t ${IMG} .
+	docker build -f dockerfiles/agent-runtime.Dockerfile -t ${RUNTIME_IMG} .
 
 ifndef ignore-not-found
   ignore-not-found = false
@@ -206,7 +208,7 @@ endif
 
 .PHONY: deploy-crd
 deploy-crd: manifests kustomize ## Deploy controller to the K8s cluster specified in ~/.kube/config.
-	cd config/manager && $(KUSTOMIZE) edit set image controller=${IMG}
+	cd config/manager && $(KUSTOMIZE) edit set image controller=${CONTROLLER_IMG}
 	$(KUSTOMIZE) build config/default | $(KUBECTL) apply -f -
 
 .PHONY: controller-gen
@@ -245,7 +247,7 @@ endef
 .PHONY: install-agents
 install-agents:
 	kubectl create namespace sandbox-system;
-	hack/install-agents.sh $(IMG)
+	hack/install-agents.sh $(CONTROLLER_IMG)
 
 GINKGO_VERSION=v2.27.3
 GINKGO = $(shell pwd)/bin/ginkgo
