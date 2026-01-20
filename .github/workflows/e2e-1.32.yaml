@@ -43,7 +43,7 @@ jobs:
           kind load docker-image --name=${KIND_CLUSTER_NAME} $IMAGE || { echo >&2 "kind not installed or error loading image: $IMAGE"; exit 1; }
       - name: Install Kruise Agents
         run: |
-          IMG=openkruise/agent-sandbox-controller:e2e-${GITHUB_RUN_ID} make install-agents
+          CONTROLLER_IMG=openkruise/agent-sandbox-controller:e2e-${GITHUB_RUN_ID} make install-agents
       - name: Run E2E Tests
         run: |
           export KUBECONFIG=/home/runner/.kube/config
