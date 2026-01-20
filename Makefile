@@ -243,12 +243,6 @@ mv $(1) $(1)-$(3) ;\
 ln -sf $$(realpath $(1)-$(3)) $(1)
 endef
 
-# install-agents install agents with local build image to kube cluster.
-.PHONY: install-agents
-install-agents:
-	kubectl create namespace sandbox-system;
-	hack/install-agents.sh $(CONTROLLER_IMG)
-
 GINKGO_VERSION=v2.27.3
 GINKGO = $(shell pwd)/bin/ginkgo
 ginkgo: ## Download ginkgo locally if necessary.
