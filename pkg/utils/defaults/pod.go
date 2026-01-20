@@ -47,9 +47,6 @@ func setDefaultInitContainers(containers []corev1.Container) {
 func setDefaultContainers(containers []corev1.Container) {
 	for i := range containers {
 		container := &containers[i]
-		if container.ImagePullPolicy == "" {
-			container.ImagePullPolicy = corev1.PullAlways
-		}
 		v1.SetDefaults_Container(container)
 		setDefaultContainerPorts(container)
 		setDefaultContainerEnv(container)
