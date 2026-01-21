@@ -85,7 +85,7 @@ resolution and certificates.
    export E2B_API_KEY=some-api-key # configured in config/sandbox-manager/configuration_patch.yaml
    ```
 
-5. Patch the client refer to this document
+5. Patch the client (refer to this document)
     1. Copy [patch_e2b.py](sdk/customized_e2b/kruise_agents/patch_e2b.py) to your python project
     2. Patch your E2B SDK before using it
        ```python

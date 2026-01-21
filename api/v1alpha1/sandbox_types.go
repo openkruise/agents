@@ -77,7 +77,7 @@ type SandboxTemplate struct {
 	VolumeClaimTemplates []v1.PersistentVolumeClaim `json:"volumeClaimTemplates,omitempty"`
 }
 
-// SandboxTemmplateRef references a SandboxTemplate
+// SandboxTemplateRef references a SandboxTemplate
 type SandboxTemplateRef struct {
 	// name of the SandboxTemplate
 	// +kubebuilder:validation:Required

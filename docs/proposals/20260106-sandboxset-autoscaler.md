@@ -223,20 +223,20 @@ type PoolAutoscaler struct {
 
 // PoolAutoscalerSpec describes the desired functionality of the PoolAutoscaler.
 type PoolAutoscalerSpec struct {
-	// ScaleTargetRef points to the target warming pool to scale, and is used to the pods for which instance status
+	// ScaleTargetRef points to the target warming pool to scale, and is used to select the pods for which instance status
 	// should be collected, as well as to actually change the replica count.
 	// +required
 	ScaleTargetRef CrossVersionObjectReference
 	// MaxReplicas is the upper limit for the number of replicas to which the autoscaler can scale up.
-	// It cannot be less that minReplicas.
+	// It cannot be less than minReplicas.
 	// +required
 	MaxReplicas int32
 	// MinReplicas is the lower limit for the number of replicas to which the autoscaler
 	// can scale down.
-	// It defaults to 0 pod.
+	// It defaults to 0 pods.
 	MinReplicas *int32
 
-	// CronPolicies is a list of potential cron scaling polices which can be used during scaling.
+	// CronPolicies is a list of potential cron scaling policies which can be used during scaling.
 	// +optional
 	CronPolicies []CronScalingPolicy
 
@@ -291,10 +291,10 @@ type CapacityPolicy struct {
 	// set, the default cluster-wide tolerance is applied (by default 10%).
 	// +optional
 	Tolerance *intstr.IntOrString
-	// scaleUp is scaling rule for scaling Up.
+	// ScaleUp is the scaling rule for scaling up.
 	// +optional
 	ScaleUp *CapacityScalingRules
-	// scaleDown is scaling rule for scaling Down.
+	// ScaleDown is the scaling rule for scaling down.
 	// +optional
 	ScaleDown *CapacityScalingRules
 }
@@ -386,7 +386,7 @@ type PoolAutoscalerConditionType string
 
 ##### Pool Capacity Control
 
-To ensure cost control and avoid runaway scaling due to misconfiguration, user need the ability
+To ensure cost control and avoid runaway scaling due to misconfiguration, users need the ability
 to cap the total capacity of the resource pool. At the same time, a minimum level of capacity is
 required during off-peak periods to serve baseline workloads. To support these requirements, the
 pool autoscaler introduces configurable upper and lower capacity limits.
@@ -394,8 +394,8 @@ pool autoscaler introduces configurable upper and lower capacity limits.
 | Field           | Description                                                                                                                                                                                                        | Use Cases                                                                                                                                                                                                                                                                                                                                                                                             | Validation Rules                                                                                                                                   |
 |-----------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------|
 | **maxReplicas** | The upper limit for the number of replicas to which the autoscaler can scale up.                                                                                                                                   | 1. *Limit scaling up*: Prevents autoscaler from scaling beyond the specified maximum, protecting cluster resources and controlling costs. Prevents infinite scaling that could exhaust cluster resources.<br/>2. *Immediate scale down*: When current replicas exceed `maxReplicas` (e.g., manual scaling or autoscaler config update), autoscaler immediately scales down to the maximum limit.<br/> | 1. *Required field*: Must be specified in the autoscaler spec.<br/>2. *Must be greater than 0.*<br/>3. *Must be >= `minReplicas`.*                 |
-| **minReplicas** | The lower limit for the number of replicas to which the autoscaler can scale down.                                                                                                                                 | 1. *Prevent excessive scale down*: Ensures a minimum number of pod are always available, maintaining service availability and handing baseline traffic.<br/> 2. *Default behavior*: If not specified, defaults to 0 pod.                                                                                                                                                                              | 1. *Option field*: Can be omitted, in which case it defaults to 0.<br/>2. *Relationship with maxReplicas*: `maxReplicas` must be >= `minReplicas`. |
-| **suspend**     | A boolean flag that controls whether the autoscaler controller should suspend subsequent policy executions. When set to `true`, the controller will not sync the policy. when `false`, the policy synced normally. | 1. *Temporary suspension*: Temporarily pause policy execution during maintenance, debugging, or troubleshooting without deleting the autoscaler object.<br/> 2. *Conditional execution*: Use suspend flag to enable/disable autoscaler based on external conditions or feature flags.                                                                                                                 | 1. *Optional field*: Can be omitted.                                                                                                               |
+| **minReplicas** | The lower limit for the number of replicas to which the autoscaler can scale down.                                                                                                                                 | 1. *Prevent excessive scale down*: Ensures a minimum number of pods are always available, maintaining service availability and handling baseline traffic.<br/> 2. *Default behavior*: If not specified, defaults to 0 pods.                                                                                                                                                                              | 1. *Optional field*: Can be omitted, in which case it defaults to 0.<br/>2. *Relationship with maxReplicas*: `maxReplicas` must be >= `minReplicas`. |
+| **suspend**     | A boolean flag that controls whether the autoscaler controller should suspend subsequent policy executions. When set to `true`, the controller will not sync the policy. When `false`, the policy is synced normally. | 1. *Temporary suspension*: Temporarily pause policy execution during maintenance, debugging, or troubleshooting without deleting the autoscaler object.<br/> 2. *Conditional execution*: Use suspend flag to enable/disable autoscaler based on external conditions or feature flags.                                                                                                                 | 1. *Optional field*: Can be omitted.                                                                                                               |
 
 All policy behaviors are governed by the pool capacity control.
 
@@ -413,7 +413,7 @@ resource consumption patterns.
 |--------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | **name**           | A unique identifier for the scaling policy. Used to track and manage individual scaling policy in the status conditions. The name helps distinguish between multiple policies and provides a reference for monitoring and debugging.                                        | 1. *Policy identification*: Uniquely identify each scaling policy in a cron autoscaler, enabling clear tracking of which policy executed and its result.<br/>2. *Status tracking*: Map policy execution results to specific policies in the `status.conditions` array, where each condition uses the policy name as the identifier. | 1. *Required field*: Must be specified, cannot be empty or omitted.                                                                                                                       |
 | **timezone**       | The time zone name for interpreting the schedule. Specifies the IANA time zone database name (e.g., "Asia/Shanghai", "UTC") that should be used when evaluating the cron schedule. If not specified, defaults to the time zone of the autoscale controller manager process. | 1. *Global deployments*: Ensure consistent scheduling across clusters in different geographic regions by explicitly setting timezones.                                                                                                                                                                                              | 1. *Optional field*: Can be omitted. If not specified, defaults to the autoscale controller manager process.<br/>2. *IANA timezone format*: Must be a valid IANA time zone database name. |
-| **schedule**       | A cron expression that defines when the scaling policy should be executed. Specifies that the exact time pattern (minute, hour, day, month, weekday) when the target workload should be scaled to the `targetReplicas`.                                                     | 1. *Time-based scalling*: Define specific time for scaling operation.                                                                                                                                                                                                                                                               | 1. *Required field*: Must be specified, cannot be empty or omitted.<br/>2. *Cron expression format*: Must be a valid cron expression.                                                     |
+| **schedule**       | A cron expression that defines when the scaling policy should be executed. Specifies the exact time pattern (minute, hour, day, month, weekday) when the target workload should be scaled to the `targetReplicas`.                                                     | 1. *Time-based scaling*: Define specific time for scaling operation.                                                                                                                                                                                                                                                               | 1. *Required field*: Must be specified, cannot be empty or omitted.<br/>2. *Cron expression format*: Must be a valid cron expression.                                                     |
 | **targetReplicas** | The desired number of replicas that the target pool should be scaled to when this policy executes. Represents the exact replica count that will be set on the target pool when the policy's schedule matches.                                                               | 1. *Fixed scaling targets*: Set specific replica counts for different times (e.g., 10 replicas during business hours, 2 replicas during off-hours).                                                                                                                                                                                 | 1. *Required field*: Must be specified, cannot be omitted.<br/>2. *Non-negative constraint*: Must be non-negative integer (>=0).                                                          |
 
 ###### Capacity Availability Policy

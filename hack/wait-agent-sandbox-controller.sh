@@ -37,7 +37,7 @@ kubectl get pod -n sandbox-system --no-headers | awk '{print $1}' | xargs kubect
 kubectl get pod -n sandbox-system --no-headers | awk '{print $1}' | xargs kubectl logs -n sandbox-system --previous=true
 set -e
 if [ "$PODS" -eq "1" ]; then
-  echo "Wait for agent-sandbox-controller ready successfully"
+  echo "Agent-sandbox-controller is ready"
 else
   echo "Timeout to wait for agent-sandbox-controller ready"
   exit 1

@@ -223,7 +223,7 @@ func (r *commonControl) EnsureSandboxTerminated(ctx context.Context, args Ensure
 		logger.Info("remove sandbox finalizer success")
 		return nil
 	} else if !pod.DeletionTimestamp.IsZero() {
-		logger.Info("Pod is in deleting, and wait a moment")
+		logger.Info("Pod is deleting, and wait a moment")
 		return nil
 	}
 
