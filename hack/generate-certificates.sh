@@ -4,7 +4,7 @@
 set -e
 
 # Default values
-DOMAIN="example.com"
+DOMAIN="your.domain.com"
 DAYS=365
 OUTPUT_DIR="."
 
@@ -13,14 +13,14 @@ show_help() {
     echo "Usage: $0 [OPTIONS]"
     echo ""
     echo "Options:"
-    echo "  -d, --domain DOMAIN     Specify certificate domain (default: example.com)"
+    echo "  -d, --domain DOMAIN     Specify certificate domain (default: your.domain.com)"
     echo "  -o, --output DIR        Specify output directory (default: .)"
     echo "  -D, --days DAYS         Specify certificate validity days (default: 365)"
     echo "  -h, --help              Show this help message"
     echo ""
     echo "Examples:"
-    echo "  $0 -d myapp.example.com"
-    echo "  $0 --domain api.example.com --days 730"
+    echo "  $0 -d myapp.your.domain.com"
+    echo "  $0 --domain api.your.domain.com --days 730"
 }
 
 # Parse command line arguments

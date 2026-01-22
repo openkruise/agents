@@ -25,14 +25,14 @@ $ bash generate-certificates.sh --help
 Usage: generate-certificates.sh [OPTIONS]
 
 Options:
-  -d, --domain DOMAIN     Specify certificate domain (default: example.com)
+  -d, --domain DOMAIN     Specify certificate domain (default: your.domain.com)
   -o, --output DIR        Specify output directory (default: .)
   -D, --days DAYS         Specify certificate validity days (default: 365)
   -h, --help              Show this help message
 
 Examples:
-  generate-certificates.sh -d myapp.example.com
-  generate-certificates.sh --domain api.example.com --days 730
+  generate-certificates.sh -d myapp.your.domain.com
+  generate-certificates.sh --domain api.your.domain.com --days 730
 ```
 
 After completing certificate generation, you will obtain the following files:
