@@ -37,8 +37,10 @@ type NewSandboxRequest struct {
 }
 
 type NewSandboxRequestExtension struct {
-	Image    string
-	CSIMount CSIMountExtension
+	Image                string
+	CSIMount             CSIMountExtension
+	SkipInitRuntime      bool
+	ReserveFailedSandbox bool
 }
 
 type CSIMountExtension struct {

@@ -1,11 +1,5 @@
 package sandboxcr
 
-import (
-	"context"
-
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-)
-
 type DebugInfo struct {
 	Pending int
 	Claimed int
@@ -14,23 +8,11 @@ type DebugInfo struct {
 
 func (i *Infra) LoadDebugInfo() map[string]any {
 	infos := make(map[string]any)
-	i.Pools.Range(func(key, value any) bool {
-		pool := value.(*Pool)
-		infos[pool.Name] = pool.LoadDebugInfo()
+	i.templates.Range(func(key, value any) bool {
+		infos[key.(string)] = map[string]any{
+			"namespaces": value.(int32),
+		}
 		return true
 	})
 	return infos
-}
-
-func (p *Pool) LoadDebugInfo() map[string]any {
-	sbs, err := p.client.ApiV1alpha1().SandboxSets(p.Namespace).Get(context.Background(), p.Name, metav1.GetOptions{})
-	if err != nil {
-		return map[string]any{
-			"error": err.Error(),
-		}
-	}
-	return map[string]any{
-		"total":     sbs.Status.Replicas,
-		"available": sbs.Status.AvailableReplicas,
-	}
 }

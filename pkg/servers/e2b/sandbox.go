@@ -2,9 +2,7 @@
 package e2b
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -14,7 +12,6 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
-	"k8s.io/klog/v2"
 )
 
 var (
@@ -36,27 +33,6 @@ func (sc *Controller) getSandboxOfUser(ctx context.Context, sandboxID string) (i
 		}
 	}
 	return sbx, nil
-}
-
-func (sc *Controller) initEnvd(ctx context.Context, sbx infra.Sandbox, envVars models.EnvVars, accessToken string) error {
-	start := time.Now()
-	log := klog.FromContext(ctx).WithValues("sandboxID", sbx.GetName(), "envVars", envVars)
-	initBody, err := json.Marshal(map[string]any{
-		"envVars":     envVars,
-		"accessToken": accessToken,
-	})
-	if err != nil {
-		log.Error(err, "failed to marshal initBody")
-		return err
-	}
-	log.Info("sending request to envd")
-	_, err = sbx.Request(ctx, http.MethodPost, "/init", models.EnvdPort, bytes.NewBuffer(initBody))
-	if err != nil {
-		log.Error(err, "init envd request failed")
-		return err
-	}
-	log.Info("envd inited", "cost", time.Since(start))
-	return nil
 }
 
 func (sc *Controller) convertToE2BSandbox(sbx infra.Sandbox, accessToken string) *models.Sandbox {

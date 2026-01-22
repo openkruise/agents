@@ -6,23 +6,20 @@ import (
 	"time"
 
 	"github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"k8s.io/klog/v2"
 )
 
 // ClaimSandbox attempts to lock a Pod and assign it to the current caller
-func (m *SandboxManager) ClaimSandbox(ctx context.Context, user, template string, opts infra.ClaimSandboxOptions) (infra.Sandbox, error) {
+func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions) (infra.Sandbox, error) {
 	log := klog.FromContext(ctx)
-	start := time.Now()
-	pool, ok := m.infra.GetPoolByTemplate(template)
-	if !ok {
+	if !m.infra.HasTemplate(opts.Template) {
 		// Requirement: Track failure in API layer
 		SandboxCreationResponses.WithLabelValues("failure").Inc()
-		return nil, errors.NewError(errors.ErrorNotFound, fmt.Sprintf("pool %s not found", template))
+		return nil, errors.NewError(errors.ErrorNotFound, fmt.Sprintf("template %s not found", opts.Template))
 	}
-	sandbox, err := pool.ClaimSandbox(ctx, user, consts.DefaultPoolingCandidateCounts, opts)
+	sandbox, metrics, err := m.infra.ClaimSandbox(ctx, opts)
 	if err != nil {
 		// Requirement: Track failure in API layer
 		SandboxCreationResponses.WithLabelValues("failure").Inc()
@@ -32,9 +29,9 @@ func (m *SandboxManager) ClaimSandbox(ctx context.Context, user, template string
 	// Success: Record metrics
 	SandboxCreationResponses.WithLabelValues("success").Inc()
 	// Requirement: Only measure the latency when no error exists
-	SandboxCreationLatency.Observe(float64(time.Since(start).Milliseconds()))
+	SandboxCreationLatency.Observe(float64(metrics.Total.Milliseconds()))
 
-	log.Info("sandbox claimed", "sandbox", klog.KObj(sandbox), "cost", time.Since(start))
+	log.Info("sandbox claimed", "sandbox", klog.KObj(sandbox), "metrics", metrics)
 
 	// Sync route without refresh since sandbox was just claimed and state is already up-to-date
 	if err = m.syncRoute(ctx, sandbox, false); err != nil {

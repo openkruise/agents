@@ -11,6 +11,7 @@ import (
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -27,8 +28,11 @@ func TestPauseSandbox(t *testing.T) {
 	}
 	createResp, err := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
 		TemplateID: templateName,
+		Metadata: map[string]string{
+			models.ExtensionKeySkipInitRuntime: agentsv1alpha1.True,
+		},
 	}, nil, user))
-	assert.Nil(t, err)
+	require.Nil(t, err)
 	assert.Equal(t, models.SandboxStateRunning, createResp.Body.State)
 
 	req := NewRequest(t, nil, nil, map[string]string{
@@ -115,6 +119,9 @@ func TestConnectSandbox(t *testing.T) {
 			defer cleanup()
 
 			createResp, err := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
+				Metadata: map[string]string{
+					models.ExtensionKeySkipInitRuntime: agentsv1alpha1.True,
+				},
 				TemplateID: templateName,
 			}, nil, user))
 			assert.Nil(t, err)
@@ -236,6 +243,9 @@ func TestResumeSandbox(t *testing.T) {
 
 			createResp, err := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
 				TemplateID: templateName,
+				Metadata: map[string]string{
+					models.ExtensionKeySkipInitRuntime: agentsv1alpha1.True,
+				},
 			}, nil, user))
 			assert.Nil(t, err)
 			assert.Equal(t, models.SandboxStateRunning, createResp.Body.State)

@@ -669,7 +669,7 @@ func TestSandbox_CSIMount(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			server := NewTestEnvdServer(tt.result, true, tt.processError)
+			server := NewTestRuntimeServer(tt.result, true, tt.processError)
 			defer server.Close()
 
 			cache, _, client := NewTestCache(t)
@@ -677,8 +677,8 @@ func TestSandbox_CSIMount(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "test-sandbox",
 					Annotations: map[string]string{
-						v1alpha1.AnnotationEnvdURL:         server.URL,
-						v1alpha1.AnnotationEnvdAccessToken: AccessToken,
+						v1alpha1.AnnotationRuntimeURL:         server.URL,
+						v1alpha1.AnnotationRuntimeAccessToken: AccessToken,
 					},
 				},
 			}

@@ -9,12 +9,14 @@ import (
 )
 
 // Extension keys are annotations used by sandbox-manager only.
-
+// Since they are all delivered through the E2B interface, they uniformly use the e2b.agents.kruise.io prefix
 const (
 	ExtensionKeyClaimWithImage               = v1alpha1.E2BPrefix + "image"
 	ExtensionKeyClaimWithCSIMount            = v1alpha1.E2BPrefix + "csi"
 	ExtensionKeyClaimWithCSIMount_VolumeName = ExtensionKeyClaimWithCSIMount + "-volume-name"
 	ExtensionKeyClaimWithCSIMount_MountPoint = ExtensionKeyClaimWithCSIMount + "-mount-point"
+	ExtensionKeySkipInitRuntime              = v1alpha1.E2BPrefix + "skip-init-runtime"
+	ExtensionKeyReserveFailedSandbox         = v1alpha1.E2BPrefix + "reserve-failed-sandbox"
 )
 
 // Extensions for NewSandboxRequest
@@ -22,6 +24,10 @@ const (
 func (r *NewSandboxRequest) ParseExtensions() error {
 	if r.Metadata == nil {
 		return nil
+	}
+	// common extensions
+	if err := r.parseCommonExtensions(); err != nil {
+		return err
 	}
 	// parse images
 	if err := r.parseExtensionImage(); err != nil {
@@ -31,6 +37,14 @@ func (r *NewSandboxRequest) ParseExtensions() error {
 	if err := r.parseExtensionCSIMount(); err != nil {
 		return err
 	}
+	return nil
+}
+
+func (r *NewSandboxRequest) parseCommonExtensions() error {
+	r.Extensions.SkipInitRuntime = r.Metadata[ExtensionKeySkipInitRuntime] == v1alpha1.True
+	r.Extensions.ReserveFailedSandbox = r.Metadata[ExtensionKeyReserveFailedSandbox] == v1alpha1.True
+	delete(r.Metadata, ExtensionKeySkipInitRuntime)
+	delete(r.Metadata, ExtensionKeyReserveFailedSandbox)
 	return nil
 }
 

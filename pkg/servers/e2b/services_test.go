@@ -12,6 +12,7 @@ import (
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -201,15 +202,20 @@ func TestCreateSandbox(t *testing.T) {
 			cleanup := CreateSandboxPool(t, client.SandboxClient, templateName, tt.available)
 			defer cleanup()
 			now := time.Now()
+			if tt.request.Metadata == nil {
+				tt.request.Metadata = make(map[string]string)
+			}
+			// mock runtime server is not supported in e2b layer, the runtime is tested in infra package
+			tt.request.Metadata[models.ExtensionKeySkipInitRuntime] = v1alpha1.True
 			resp, apiError := controller.CreateSandbox(NewRequest(t, nil, tt.request, nil, user))
 			if tt.expectError != nil {
-				assert.NotNil(t, apiError)
+				require.NotNil(t, apiError)
 				if apiError != nil {
 					assert.Equal(t, tt.expectError.Code, apiError.Code)
 					assert.Contains(t, apiError.Message, tt.expectError.Message)
 				}
 			} else {
-				assert.Nil(t, apiError)
+				require.Nil(t, apiError)
 				sbx := resp.Body
 				assert.True(t, strings.HasPrefix(sbx.SandboxID, fmt.Sprintf("%s--%s-", Namespace, templateName)))
 				for k, v := range tt.request.Metadata {
@@ -323,6 +329,9 @@ func TestAutoPause(t *testing.T) {
 				TemplateID: templateName,
 				AutoPause:  tt.autoPause,
 				Timeout:    timeout,
+				Metadata: map[string]string{
+					models.ExtensionKeySkipInitRuntime: v1alpha1.True,
+				},
 			}, nil, user))
 			assert.Nil(t, apiError)
 			AssertEndAt(t, timeoutTime, createResp.Body.EndAt)
