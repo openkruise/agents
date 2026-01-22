@@ -9,7 +9,6 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/client/clientset/versioned"
-	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
@@ -94,6 +93,7 @@ func CreateSandboxWithStatus(t *testing.T, client versioned.Interface, sbx *agen
 func TestSandboxManager_ClaimSandbox(t *testing.T) {
 	utils.InitLogOutput()
 	now := time.Now()
+	username := "test-user"
 	tests := []struct {
 		name              string
 		opts              infra.ClaimSandboxOptions
@@ -105,7 +105,7 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 		{
 			name: "Non-existent template should return error",
 			opts: infra.ClaimSandboxOptions{
-				User:     "test-user",
+				User:     username,
 				Template: "non-existent-template",
 			},
 			expectError:       "non-existent-template not found",
@@ -125,7 +125,7 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 		{
 			name: "Claim with timeout",
 			opts: infra.ClaimSandboxOptions{
-				User:     "test-user",
+				User:     username,
 				Template: "exist-1",
 				Modifier: func(sandbox infra.Sandbox) {
 					sandbox.SetTimeout(infra.TimeoutOptions{
@@ -146,7 +146,7 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 		{
 			name: "Claim failed with no stock",
 			opts: infra.ClaimSandboxOptions{
-				User:     "test-user",
+				User:     username,
 				Template: "exist-1",
 			},
 			templateSetup: map[string]int{
@@ -158,7 +158,7 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 		{
 			name: "Claim with inplace update",
 			opts: infra.ClaimSandboxOptions{
-				User:     "test-user",
+				User:     username,
 				Template: "exist-1",
 				InplaceUpdate: &infra.InplaceUpdateOptions{
 					Image: "new-image",
@@ -274,18 +274,16 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 				require.NoError(t, err)
 				tt.postCheck(t, claimed)
 				// check route
-				var route proxy.Route
 				assert.Eventually(t, func() bool {
-					loadRoute, ok := manager.proxy.LoadRoute(claimed.GetSandboxID())
+					route, ok := manager.proxy.LoadRoute(claimed.GetSandboxID())
 					if !ok {
 						return false
 					}
-					route = loadRoute
-					return true
+					idMatch := route.ID == claimed.GetSandboxID()
+					ipMatch := route.IP == testIP
+					ownerMatch := route.Owner == username
+					return idMatch && ipMatch && ownerMatch
 				}, time.Second, 10*time.Millisecond)
-				assert.Equal(t, claimed.GetSandboxID(), route.ID)
-				assert.Equal(t, testIP, route.IP)
-				assert.Equal(t, "test-user", route.Owner)
 			}
 		})
 	}
