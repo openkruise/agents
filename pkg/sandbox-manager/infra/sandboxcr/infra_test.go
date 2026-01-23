@@ -349,7 +349,7 @@ func TestInfra_onSandboxAdd(t *testing.T) {
 
 			// Create sandbox
 			tt.sandbox.Labels = map[string]string{
-				v1alpha1.LabelSandboxPool: "test-pool",
+				v1alpha1.LabelSandboxTemplate: "test-pool",
 			}
 			CreateSandboxWithStatus(t, client, tt.sandbox)
 			time.Sleep(50 * time.Millisecond)
@@ -458,7 +458,7 @@ func TestInfra_onSandboxUpdate(t *testing.T) {
 				}, 100*time.Millisecond, 5*time.Millisecond)
 				// Associate sandbox with pool
 				tt.newSandbox.Labels = map[string]string{
-					v1alpha1.LabelSandboxPool: template,
+					v1alpha1.LabelSandboxTemplate: template,
 				}
 			}
 

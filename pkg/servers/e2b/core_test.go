@@ -140,7 +140,7 @@ func CreateSandboxPool(t *testing.T, client versioned.Interface, name string, av
 				Name:      fmt.Sprintf("%s-%d", name, i),
 				Namespace: Namespace,
 				Labels: map[string]string{
-					agentsv1alpha1.LabelSandboxPool: name,
+					agentsv1alpha1.LabelSandboxTemplate: name,
 				},
 				OwnerReferences: GetSbsOwnerReference(sbs),
 				ResourceVersion: "1",

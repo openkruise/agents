@@ -81,7 +81,7 @@ func TestSandbox_GetTemplate(t *testing.T) {
 			pod: &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
-						v1alpha1.LabelSandboxPool: "test-template",
+						v1alpha1.LabelSandboxTemplate: "test-template",
 					},
 				},
 			},
@@ -92,7 +92,7 @@ func TestSandbox_GetTemplate(t *testing.T) {
 			pod: &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
-						v1alpha1.LabelSandboxPool: "",
+						v1alpha1.LabelSandboxTemplate: "",
 					},
 				},
 			},

@@ -9,7 +9,6 @@ import (
 
 	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
 	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	k8sinformers "k8s.io/client-go/informers"
@@ -103,8 +102,7 @@ func (i *Infra) ClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions
 		Factor:   LockBackoffFactor,
 		Jitter:   LockJitter,
 	}, func(err error) bool {
-		// Conflict: optimistic locking failed; retriableError: retriable error
-		return apierrors.IsConflict(err) || errors.As(err, &retriableError{})
+		return errors.As(err, &retriableError{})
 	}, func() error {
 		metrics.Retries++
 		log.Info("try to claim sandbox", "retries", metrics.Retries)
@@ -259,5 +257,9 @@ func (i *Infra) onSandboxSetDelete(obj interface{}) {
 }
 
 func GetTemplateFromSandbox(sbx metav1.Object) string {
-	return sbx.GetLabels()[v1alpha1.LabelSandboxPool]
+	tmpl := sbx.GetLabels()[v1alpha1.LabelSandboxTemplate]
+	if tmpl == "" {
+		tmpl = sbx.GetLabels()[v1alpha1.LabelLegacySandboxPool]
+	}
+	return tmpl
 }

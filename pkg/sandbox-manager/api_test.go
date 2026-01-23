@@ -198,7 +198,7 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 							Name:      fmt.Sprintf("%s-%d", template, i),
 							Namespace: "default",
 							Labels: map[string]string{
-								agentsv1alpha1.LabelSandboxPool: "exist-1",
+								agentsv1alpha1.LabelSandboxTemplate: "exist-1",
 							},
 							Annotations: map[string]string{},
 							OwnerReferences: []metav1.OwnerReference{

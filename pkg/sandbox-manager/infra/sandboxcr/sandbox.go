@@ -69,7 +69,7 @@ type BaseSandbox[T SandboxCR] struct {
 }
 
 func (s *BaseSandbox[T]) GetTemplate() string {
-	return s.Sandbox.GetLabels()[agentsv1alpha1.LabelSandboxPool]
+	return GetTemplateFromSandbox(s.Sandbox)
 }
 
 func (s *BaseSandbox[T]) InplaceRefresh(ctx context.Context, deepcopy bool) error {

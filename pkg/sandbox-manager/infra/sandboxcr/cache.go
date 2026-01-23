@@ -106,7 +106,7 @@ func (c *Cache) ListSandboxWithUser(user string) ([]*agentsv1alpha1.Sandbox, err
 }
 
 func (c *Cache) ListAvailableSandboxes(pool string) ([]*agentsv1alpha1.Sandbox, error) {
-	return managerutils.SelectObjectWithIndex[*agentsv1alpha1.Sandbox](c.sandboxInformer, IndexPoolAvailable, pool)
+	return managerutils.SelectObjectWithIndex[*agentsv1alpha1.Sandbox](c.sandboxInformer, IndexTemplateAvailable, pool)
 }
 
 func (c *Cache) GetSandbox(sandboxID string) (*agentsv1alpha1.Sandbox, error) {

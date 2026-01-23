@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/openkruise/agents/api/v1alpha1"
@@ -176,7 +178,7 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 						Name:      fmt.Sprintf("sbx-%d", i),
 						Namespace: "default",
 						Labels: map[string]string{
-							v1alpha1.LabelSandboxPool: existTemplate,
+							v1alpha1.LabelSandboxTemplate: existTemplate,
 						},
 						Annotations:     map[string]string{},
 						OwnerReferences: GetSbsOwnerReference(),
@@ -236,6 +238,151 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 				if tt.postCheck != nil {
 					tt.postCheck(t, sbx)
 				}
+			}
+		})
+	}
+}
+
+//goland:noinspection GoDeprecation
+func TestClaimSandboxFailed(t *testing.T) {
+	SetClaimLockTimeout(100 * time.Millisecond)
+	server := NewTestRuntimeServer(RunCommandResult{
+		PID:      1,
+		ExitCode: 1, // returns an error
+		Exited:   true,
+	}, true, nil)
+	defer server.Close()
+	existTemplate := "test-template"
+
+	// Test cases
+	tests := []struct {
+		name        string
+		options     infra.ClaimSandboxOptions
+		preModifier func(sbx *v1alpha1.Sandbox)
+		expectError string
+	}{
+		{
+			name: "inplace update failed, reserved",
+			options: infra.ClaimSandboxOptions{
+				User:                 "test-user",
+				Template:             existTemplate,
+				ReserveFailedSandbox: true,
+				InplaceUpdate: &infra.InplaceUpdateOptions{
+					Image: "new-image",
+				},
+			},
+			expectError: "sandbox inplace update failed",
+		},
+		{
+			name: "inplace update failed, not reserved",
+			options: infra.ClaimSandboxOptions{
+				User:                 "test-user",
+				Template:             existTemplate,
+				ReserveFailedSandbox: false,
+				InplaceUpdate: &infra.InplaceUpdateOptions{
+					Image: "new-image",
+				},
+			},
+			expectError: "sandbox inplace update failed",
+		},
+		{
+			name: "csi mount failed, reserved",
+			options: infra.ClaimSandboxOptions{
+				User:                 "test-user",
+				Template:             existTemplate,
+				ReserveFailedSandbox: true,
+				InitRuntime:          &infra.InitRuntimeOptions{},
+				CSIMount: &infra.CSIMountOptions{
+					Driver: "",
+				},
+			},
+			preModifier: func(sbx *v1alpha1.Sandbox) {
+				sbx.Annotations[v1alpha1.AnnotationRuntimeURL] = server.URL
+				sbx.Annotations[v1alpha1.AnnotationRuntimeAccessToken] = AccessToken
+			},
+			expectError: "command failed",
+		},
+		{
+			name: "csi mount failed, not reserved",
+			options: infra.ClaimSandboxOptions{
+				User:                 "test-user",
+				Template:             existTemplate,
+				ReserveFailedSandbox: false,
+				InitRuntime:          &infra.InitRuntimeOptions{},
+				CSIMount: &infra.CSIMountOptions{
+					Driver: "",
+				},
+			},
+			preModifier: func(sbx *v1alpha1.Sandbox) {
+				sbx.Annotations[v1alpha1.AnnotationRuntimeURL] = server.URL
+				sbx.Annotations[v1alpha1.AnnotationRuntimeAccessToken] = AccessToken
+			},
+			expectError: "command failed",
+		},
+	}
+
+	for _, tt := range tests {
+		r := rand.New(rand.NewSource(time.Now().UnixNano()))
+		t.Run(tt.name, func(t *testing.T) {
+			testInfra, client := NewTestInfra(t)
+			name := "test-sbx"
+			sbx := &v1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      name,
+					Namespace: "default",
+					Labels: map[string]string{
+						v1alpha1.LabelSandboxTemplate: existTemplate,
+					},
+					Annotations:     map[string]string{},
+					OwnerReferences: GetSbsOwnerReference(),
+				},
+				Spec: v1alpha1.SandboxSpec{
+					SandboxTemplate: v1alpha1.SandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name:  "main",
+										Image: "old-image",
+									},
+								},
+							},
+						},
+					},
+				},
+				Status: v1alpha1.SandboxStatus{
+					Phase: v1alpha1.SandboxRunning,
+					Conditions: []metav1.Condition{
+						{
+							Type:   string(v1alpha1.SandboxConditionReady),
+							Status: metav1.ConditionTrue,
+							// make inplace update fail
+							Reason: v1alpha1.SandboxReadyReasonStartContainerFailed,
+						},
+					},
+					PodInfo: v1alpha1.PodInfo{
+						PodIP: "1.2.3.4",
+					},
+				},
+			}
+			if tt.preModifier != nil {
+				tt.preModifier(sbx)
+			}
+			state, reason := sandboxutils.GetSandboxState(sbx)
+			require.Equal(t, v1alpha1.SandboxStateAvailable, state, "reason", reason)
+			CreateSandboxWithStatus(t, client, sbx)
+			require.Eventually(t, func() bool {
+				_, err := testInfra.GetSandbox(t.Context(), sandboxutils.GetSandboxID(sbx))
+				return err == nil
+			}, 100*time.Millisecond, 5*time.Millisecond)
+			_, _, err := TryClaimSandbox(t.Context(), tt.options, r, &testInfra.pickCache, testInfra.Cache, client)
+			require.Error(t, err)
+			assert.True(t, strings.Contains(err.Error(), tt.expectError))
+			_, err = client.ApiV1alpha1().Sandboxes(sbx.Namespace).Get(t.Context(), name, metav1.GetOptions{})
+			if tt.options.ReserveFailedSandbox {
+				assert.NoError(t, err)
+			} else {
+				assert.True(t, apierrors.IsNotFound(err))
 			}
 		})
 	}
@@ -309,7 +456,7 @@ func TestCheckSandboxInplaceUpdate(t *testing.T) {
 					Name:      "sbx-1",
 					Namespace: "default",
 					Labels: map[string]string{
-						v1alpha1.LabelSandboxPool: template,
+						v1alpha1.LabelSandboxTemplate: template,
 					},
 					Annotations: map[string]string{},
 					Generation:  tt.generation,
@@ -338,7 +485,7 @@ func TestCheckSandboxInplaceUpdate(t *testing.T) {
 			if err != nil {
 				return
 			}
-			result, err := CheckSandboxInplaceUpdate(t.Context(), gotSbx)
+			result, err := checkSandboxInplaceUpdate(t.Context(), gotSbx)
 			assert.Equal(t, tt.expectResult, result)
 			if tt.expectError != nil {
 				assert.Error(t, err)

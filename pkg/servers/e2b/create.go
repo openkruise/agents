@@ -149,13 +149,13 @@ func (sc *Controller) parseCreateSandboxRequest(r *http.Request) (models.NewSand
 	}
 
 	if request.Timeout == 0 {
-		request.Timeout = 300
+		request.Timeout = models.DefaultTimeoutSeconds
 	}
 
-	if request.Timeout < 30 || request.Timeout > sc.maxTimeout {
+	if request.Timeout < models.DefaultMinTimeoutSeconds || request.Timeout > sc.maxTimeout {
 		return request, &web.ApiError{
 			Code:    http.StatusBadRequest,
-			Message: fmt.Sprintf("timeout should between 30 and %d", sc.maxTimeout),
+			Message: fmt.Sprintf("timeout should between %d and %d", models.DefaultMinTimeoutSeconds, sc.maxTimeout),
 		}
 	}
 
