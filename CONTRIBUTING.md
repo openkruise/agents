@@ -93,7 +93,7 @@ resolution and certificates.
        from e2b_code_interpreter import Sandbox
        
        patch_e2b(False)
-       with Sandbox(template="code-interpreter") as sbx:
+       with Sandbox.create(template="code-interpreter") as sbx:
            sbx.run_code("print('hello world')")
        ```
 
