@@ -6,4 +6,20 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: sandbox-sample
 spec:
-  # TODO(user): Add fields here
+  template:
+    spec:
+      containers:
+      - name: sandbox
+        image: nginx:latest
+        volumeMounts:
+        - name: www
+          mountPath: /data
+  volumeClaimTemplates:
+  - metadata:
+      name: www
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      storageClassName: "alicloud-disk-ssd"
+      resources:
+        requests:
+          storage: 10Gi
