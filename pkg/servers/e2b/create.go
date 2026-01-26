@@ -32,7 +32,10 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 		return web.ApiResponse[*models.Sandbox]{}, parseErr
 	}
 
-	accessToken := uuid.NewString()
+	var accessToken string
+	if request.Secure {
+		accessToken = uuid.NewString()
+	}
 	claimStart := time.Now()
 	opts := infra.ClaimSandboxOptions{
 		Template: request.TemplateID,

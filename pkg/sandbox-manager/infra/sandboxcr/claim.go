@@ -235,10 +235,13 @@ func performLockSandbox(ctx context.Context, sbx *Sandbox, lock string, owner st
 func initRuntime(ctx context.Context, sbx *Sandbox, opts infra.InitRuntimeOptions) (time.Duration, error) {
 	log := klog.FromContext(ctx).WithValues("sandboxID", sbx.GetName(), "envVars", opts.EnvVars)
 	start := time.Now()
-	initBody, err := json.Marshal(map[string]any{
-		"envVars":     opts.EnvVars,
-		"accessToken": opts.AccessToken,
-	})
+	params := map[string]any{
+		"envVars": opts.EnvVars,
+	}
+	if opts.AccessToken != "" {
+		params["accessToken"] = opts.AccessToken
+	}
+	initBody, err := json.Marshal(params)
 	if err != nil {
 		log.Error(err, "failed to marshal initBody")
 		return 0, err
