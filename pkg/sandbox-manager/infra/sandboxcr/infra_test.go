@@ -288,8 +288,8 @@ func TestInfra_onSandboxSetDelete(t *testing.T) {
 
 			assert.Eventually(t, func() bool {
 				actual, ok := infraInstance.templates.Load(tt.deleted)
-				if tt.expectCnt == 0 {
-					return !ok
+				if !ok {
+					return tt.expectCnt == 0
 				}
 				return actual.(int32) == tt.expectCnt
 			}, 100*time.Millisecond, 5*time.Millisecond)
