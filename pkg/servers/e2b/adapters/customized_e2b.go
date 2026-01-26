@@ -19,7 +19,7 @@ func (a *CustomizedE2BAdapter) Map(_, _, path string, _ int, _ map[string]string
 	}
 	path = path[len(CustomPrefix)+1:] // remove prefix "/kruise/"
 	split := strings.SplitN(path, "/", 3)
-	if len(split) < 3 {
+	if len(split) < 2 {
 		err = fmt.Errorf("invalid path: %s", path)
 		return
 	}
@@ -28,8 +28,12 @@ func (a *CustomizedE2BAdapter) Map(_, _, path string, _ int, _ map[string]string
 	if err != nil {
 		return
 	}
+	realPath := "/"
+	if len(split) > 2 {
+		realPath += split[2]
+	}
 	extraHeaders = map[string]string{
-		":path": "/" + split[2],
+		":path": realPath,
 	}
 	return
 }

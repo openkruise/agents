@@ -5,13 +5,11 @@ import (
 	"time"
 )
 
-// ClaimSandbox configurations
 var (
-	LockTimeout          = time.Minute
-	RetryInterval        = 10 * time.Millisecond
-	LockBackoffFactor    = 1.0
-	LockJitter           = 0.1
-	InplaceUpdateTimeout = time.Minute
+	LockTimeout       = time.Minute
+	RetryInterval     = 10 * time.Millisecond
+	LockBackoffFactor = 1.0
+	LockJitter        = 0.1
 )
 
 var configMu sync.Mutex

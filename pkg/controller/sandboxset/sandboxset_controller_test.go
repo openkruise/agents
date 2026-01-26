@@ -76,9 +76,9 @@ func getBaseSandbox(idx int32, prefix, templateHash string) *v1alpha1.Sandbox {
 			Name:      prefix + strconv.Itoa(int(idx)),
 			Namespace: "default",
 			Labels: map[string]string{
-				v1alpha1.LabelTemplateHash:      templateHash,
-				v1alpha1.LabelLegacySandboxPool: "test",
-				v1alpha1.LabelSandboxIsClaimed:  "false",
+				v1alpha1.LabelTemplateHash:     templateHash,
+				v1alpha1.LabelSandboxPool:      "test",
+				v1alpha1.LabelSandboxIsClaimed: "false",
 			},
 			Annotations: map[string]string{},
 		},

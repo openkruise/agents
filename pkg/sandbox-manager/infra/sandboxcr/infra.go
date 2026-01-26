@@ -259,7 +259,7 @@ func (i *Infra) onSandboxSetDelete(obj interface{}) {
 func GetTemplateFromSandbox(sbx metav1.Object) string {
 	tmpl := sbx.GetLabels()[v1alpha1.LabelSandboxTemplate]
 	if tmpl == "" {
-		tmpl = sbx.GetLabels()[v1alpha1.LabelLegacySandboxPool]
+		tmpl = sbx.GetLabels()[v1alpha1.LabelSandboxPool]
 	}
 	return tmpl
 }

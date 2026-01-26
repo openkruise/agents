@@ -96,8 +96,8 @@ func TestParseExtensions_WithValidData(t *testing.T) {
 	}
 
 	// to verify that image extension is parsed correctly
-	if req.Extensions.Image != "nginx:latest" {
-		t.Errorf("Expected image 'nginx:latest', got '%s'", req.Extensions.Image)
+	if req.Extensions.InplaceUpdate.Image != "nginx:latest" {
+		t.Errorf("Expected image 'nginx:latest', got '%s'", req.Extensions.InplaceUpdate.Image)
 	}
 
 	// to verify that CSI mount extension is parsed correctly
@@ -211,28 +211,41 @@ func TestParseExtensionCSIMount(t *testing.T) {
 	}
 }
 
-func TestParseExtensionImage(t *testing.T) {
+func TestParseExtensionInplaceUpdate(t *testing.T) {
 	tests := []struct {
-		name        string
-		metadata    map[string]string
-		expectError bool
-		expectImage string
+		name          string
+		metadata      map[string]string
+		expectError   bool
+		expectImage   string
+		expectTimeout int
 	}{
 		{
 			name: "valid image extension",
 			metadata: map[string]string{
 				ExtensionKeyClaimWithImage: "nginx:latest",
 			},
-			expectError: false,
-			expectImage: "nginx:latest",
+			expectError:   false,
+			expectImage:   "nginx:latest",
+			expectTimeout: DefaultInplaceUpdateTimeoutSeconds,
+		},
+		{
+			name: "valid image extension with timeout",
+			metadata: map[string]string{
+				ExtensionKeyClaimWithImage:       "nginx:latest",
+				ExtensionKeyInplaceUpdateTimeout: "1234",
+			},
+			expectError:   false,
+			expectImage:   "nginx:latest",
+			expectTimeout: 1234,
 		},
 		{
 			name: "valid image with repository",
 			metadata: map[string]string{
 				ExtensionKeyClaimWithImage: "docker.io/library/ubuntu:20.04",
 			},
-			expectError: false,
-			expectImage: "docker.io/library/ubuntu:20.04",
+			expectError:   false,
+			expectImage:   "docker.io/library/ubuntu:20.04",
+			expectTimeout: DefaultInplaceUpdateTimeoutSeconds,
 		},
 		{
 			name: "invalid image format",
@@ -284,16 +297,23 @@ func TestParseExtensionImage(t *testing.T) {
 			}
 
 			if !tt.expectError {
-				if tt.expectImage != "" && req.Extensions.Image != tt.expectImage {
-					t.Errorf("Expected image '%s', got '%s'", tt.expectImage, req.Extensions.Image)
+				if tt.expectImage != "" && req.Extensions.InplaceUpdate.Image != tt.expectImage {
+					t.Errorf("Expected image '%s', got '%s'", tt.expectImage, req.Extensions.InplaceUpdate.Image)
 				}
-				if tt.expectImage == "" && req.Extensions.Image != "" {
-					t.Errorf("Expected no image, got '%s'", req.Extensions.Image)
+				if tt.expectImage == "" && req.Extensions.InplaceUpdate.Image != "" {
+					t.Errorf("Expected no image, got '%s'", req.Extensions.InplaceUpdate.Image)
+				}
+				if tt.expectTimeout != req.Extensions.InplaceUpdate.TimeoutSeconds {
+					t.Errorf("Expected timeout '%d', got '%d'", tt.expectTimeout, req.Extensions.InplaceUpdate.TimeoutSeconds)
 				}
 			}
 
 			// Check if the image key is removed from metadata when present
 			if _, exists := req.Metadata[ExtensionKeyClaimWithImage]; exists && tt.expectImage != "" {
+				t.Errorf("Expected image key to be removed from metadata")
+			}
+			// Check if the image key is removed from metadata when present
+			if _, exists := req.Metadata[ExtensionKeyInplaceUpdateTimeout]; exists && tt.expectImage != "" {
 				t.Errorf("Expected image key to be removed from metadata")
 			}
 		})

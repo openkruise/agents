@@ -193,6 +193,9 @@ func (c *Cache) WaitForSandboxSatisfied(ctx context.Context, sbx *agentsv1alpha1
 	case <-entry.done:
 		log.Info("satisfied signal received")
 		return c.doubleCheckSandboxSatisfied(ctx, sbx, satisfiedFunc)
+	case <-ctx.Done():
+		log.Info("context canceled")
+		return c.doubleCheckSandboxSatisfied(ctx, sbx, satisfiedFunc)
 	}
 }
 
@@ -205,11 +208,11 @@ func (c *Cache) doubleCheckSandboxSatisfied(ctx context.Context, sbx *agentsv1al
 	}
 	satisfied, err := satisfiedFunc(updated)
 	if err != nil {
-		log.Error(err, "failed to double check sandbox satisfied")
+		log.Error(err, "failed to check sandbox satisfied")
 		return err
 	}
 	if !satisfied {
-		err = fmt.Errorf("double check failed, maybe sandbox was updated after initial satisfaction")
+		err = fmt.Errorf("sandbox is not satisfied during double check")
 		log.Error(err, "sandbox not satisfied")
 		return err
 	}

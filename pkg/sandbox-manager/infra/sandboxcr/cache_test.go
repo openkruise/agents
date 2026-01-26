@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -93,7 +94,7 @@ func TestCache_WaitForSandboxSatisfied(t *testing.T) {
 				return false, nil
 			},
 			timeout:     100 * time.Millisecond,
-			expectError: "double check failed",
+			expectError: "sandbox is not satisfied during double check",
 		},
 		{
 			name: "check function returns error",
@@ -222,7 +223,7 @@ func TestCache_WaitForSandboxSatisfied(t *testing.T) {
 			go func() {
 				time.Sleep(50 * time.Millisecond)
 				gotSbx, err := client.ApiV1alpha1().Sandboxes(sandbox.Namespace).Get(t.Context(), sandbox.Name, metav1.GetOptions{})
-				assert.NoError(t, err)
+				require.NoError(t, err)
 				gotSbx.ResourceVersion = "101"
 				_, err = client.ApiV1alpha1().Sandboxes(sandbox.Namespace).Update(context.Background(), gotSbx, metav1.UpdateOptions{})
 				assert.NoError(t, err)
@@ -233,7 +234,7 @@ func TestCache_WaitForSandboxSatisfied(t *testing.T) {
 
 			// Check results
 			if tt.expectError != "" {
-				assert.Error(t, err)
+				require.Error(t, err)
 				if err != nil {
 					assert.Contains(t, err.Error(), tt.expectError)
 				}
@@ -242,6 +243,37 @@ func TestCache_WaitForSandboxSatisfied(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCache_WaitForSandboxSatisfied_Cancel(t *testing.T) {
+	utils.InitLogOutput()
+	cache, _, client := NewTestCache(t)
+	defer cache.Stop()
+	sbx := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-sandbox-1",
+			Namespace: "default",
+		},
+		Status: agentsv1alpha1.SandboxStatus{
+			Phase: agentsv1alpha1.SandboxPending,
+		},
+	}
+	CreateSandboxWithStatus(t, client, sbx)
+	ctx1, cancel := context.WithCancel(t.Context())
+	cancel()
+	// never get satisfied or timeout
+	err := cache.WaitForSandboxSatisfied(ctx1, sbx, "", func(sbx *agentsv1alpha1.Sandbox) (bool, error) {
+		return false, nil
+	}, time.Hour)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not satisfied")
+	ctx2, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	err = cache.WaitForSandboxSatisfied(ctx2, sbx, "", func(sbx *agentsv1alpha1.Sandbox) (bool, error) {
+		return false, nil
+	}, time.Hour)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not satisfied")
 }
 
 func TestCache_GetPersistentVolume(t *testing.T) {

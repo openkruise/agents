@@ -7,7 +7,7 @@ import (
 )
 
 var (
-	IndexTemplateAvailable = "poolAvailable"
+	IndexTemplateAvailable = "templateAvailable"
 	IndexSandboxID         = "sandboxID"
 	IndexUser              = "user"
 )

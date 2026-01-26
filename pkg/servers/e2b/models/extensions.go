@@ -2,6 +2,7 @@ package models
 
 import (
 	"fmt"
+	"strconv"
 
 	"github.com/distribution/reference"
 
@@ -12,6 +13,7 @@ import (
 // Since they are all delivered through the E2B interface, they uniformly use the e2b.agents.kruise.io prefix
 const (
 	ExtensionKeyClaimWithImage               = v1alpha1.E2BPrefix + "image"
+	ExtensionKeyInplaceUpdateTimeout         = v1alpha1.E2BPrefix + "inplace-update-timeout-seconds"
 	ExtensionKeyClaimWithCSIMount            = v1alpha1.E2BPrefix + "csi"
 	ExtensionKeyClaimWithCSIMount_VolumeName = ExtensionKeyClaimWithCSIMount + "-volume-name"
 	ExtensionKeyClaimWithCSIMount_MountPoint = ExtensionKeyClaimWithCSIMount + "-mount-point"
@@ -50,15 +52,24 @@ func (r *NewSandboxRequest) parseCommonExtensions() error {
 
 func (r *NewSandboxRequest) parseExtensionImage() error {
 	// just valid image when image string is not empty
-	image, ok := r.Metadata[ExtensionKeyClaimWithImage]
-	if !ok {
-		return nil
+	if image, ok := r.Metadata[ExtensionKeyClaimWithImage]; ok {
+		if _, err := reference.ParseNormalizedNamed(image); err != nil {
+			return fmt.Errorf("invalid image [%s]: %v", image, err)
+		}
+		r.Extensions.InplaceUpdate.Image = image
+		r.Extensions.InplaceUpdate.TimeoutSeconds = DefaultInplaceUpdateTimeoutSeconds
+		delete(r.Metadata, ExtensionKeyClaimWithImage)
 	}
-	if _, err := reference.ParseNormalizedNamed(image); err != nil {
-		return fmt.Errorf("invalid image [%s]: %v", image, err)
+	if timeoutStr, ok := r.Metadata[ExtensionKeyInplaceUpdateTimeout]; ok {
+		timeoutSeconds, err := strconv.Atoi(timeoutStr)
+		if err != nil {
+			return fmt.Errorf("invalid timeout [%s]: %v", timeoutStr, err)
+		}
+		if timeoutSeconds > 0 {
+			r.Extensions.InplaceUpdate.TimeoutSeconds = timeoutSeconds
+		}
+		delete(r.Metadata, ExtensionKeyInplaceUpdateTimeout)
 	}
-	r.Extensions.Image = image
-	delete(r.Metadata, ExtensionKeyClaimWithImage)
 	return nil
 }
 

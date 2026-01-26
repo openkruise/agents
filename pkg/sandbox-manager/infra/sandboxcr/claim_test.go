@@ -10,11 +10,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/client/clientset/versioned"
@@ -51,20 +53,21 @@ func GetMetricsFromSandbox(t *testing.T, sbx infra.Sandbox) infra.ClaimMetrics {
 
 //goland:noinspection GoDeprecation
 func TestInfra_ClaimSandbox(t *testing.T) {
-	SetClaimLockTimeout(100 * time.Millisecond)
+	SetClaimLockTimeout(50 * time.Millisecond)
 	server := NewTestRuntimeServer(RunCommandResult{
 		PID:    1,
 		Exited: true,
 	}, true, nil)
 	defer server.Close()
 	existTemplate := "test-template"
+	user := "test-user"
 
 	// Test cases
 	tests := []struct {
 		name        string
 		available   int
 		options     infra.ClaimSandboxOptions
-		preModifier func(sbx *v1alpha1.Sandbox)
+		preModifier func(sbx *v1alpha1.Sandbox, infra *Infra)
 		postCheck   func(t *testing.T, sbx infra.Sandbox)
 		expectError string
 	}{
@@ -72,7 +75,7 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 			name:      "claim with available pods",
 			available: 2,
 			options: infra.ClaimSandboxOptions{
-				User:     "test-user",
+				User:     user,
 				Template: existTemplate,
 			},
 		},
@@ -80,7 +83,7 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 			name:      "claim with no template",
 			available: 1,
 			options: infra.ClaimSandboxOptions{
-				User: "test-user",
+				User: user,
 			},
 			expectError: "template is required",
 		},
@@ -96,7 +99,7 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 			name:      "claim with no available pods",
 			available: 0,
 			options: infra.ClaimSandboxOptions{
-				User:     "test-user",
+				User:     user,
 				Template: existTemplate,
 			},
 			expectError: "no stock",
@@ -105,7 +108,7 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 			name:      "claim with modifier",
 			available: 2,
 			options: infra.ClaimSandboxOptions{
-				User:     "test-user",
+				User:     user,
 				Template: existTemplate,
 				Modifier: func(sbx infra.Sandbox) {
 					sbx.SetAnnotations(map[string]string{
@@ -121,10 +124,10 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 			name:      "all locked",
 			available: 10,
 			options: infra.ClaimSandboxOptions{
-				User:     "test-user",
+				User:     user,
 				Template: existTemplate,
 			},
-			preModifier: func(sbx *v1alpha1.Sandbox) {
+			preModifier: func(sbx *v1alpha1.Sandbox, infra *Infra) {
 				sbx.Annotations[v1alpha1.AnnotationLock] = "XX"
 			},
 			expectError: "no candidate",
@@ -133,7 +136,7 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 			name:      "claim with inplace update",
 			available: 1,
 			options: infra.ClaimSandboxOptions{
-				User:     "test-user",
+				User:     user,
 				Template: existTemplate,
 				InplaceUpdate: &infra.InplaceUpdateOptions{
 					Image: "new-image",
@@ -149,14 +152,14 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 			name:      "claim with csi mount",
 			available: 1,
 			options: infra.ClaimSandboxOptions{
-				User:        "test-user",
+				User:        user,
 				Template:    existTemplate,
 				InitRuntime: &infra.InitRuntimeOptions{},
 				CSIMount: &infra.CSIMountOptions{
 					Driver: "",
 				},
 			},
-			preModifier: func(sbx *v1alpha1.Sandbox) {
+			preModifier: func(sbx *v1alpha1.Sandbox, infra *Infra) {
 				sbx.Annotations[v1alpha1.AnnotationRuntimeURL] = server.URL
 				sbx.Annotations[v1alpha1.AnnotationRuntimeAccessToken] = AccessToken
 			},
@@ -166,11 +169,55 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 				assert.Greater(t, metrics.CSIMount, time.Duration(0))
 			},
 		},
+		{
+			name:      "claim with out-dated cache",
+			available: 1,
+			options: infra.ClaimSandboxOptions{
+				User:     user,
+				Template: existTemplate,
+			},
+			preModifier: func(sbx *v1alpha1.Sandbox, infra *Infra) {
+				sbx.UID = types.UID(uuid.NewString())
+				sbx = sbx.DeepCopy()
+				sbx.ResourceVersion = "100"
+				utils.ResourceVersionExpectationExpect(sbx)
+			},
+			expectError: "no candidate",
+		},
+		{
+			name:      "candidate picked by another request",
+			available: 10,
+			options: infra.ClaimSandboxOptions{
+				User:     user,
+				Template: existTemplate,
+			},
+			preModifier: func(sbx *v1alpha1.Sandbox, infra *Infra) {
+				if sbx.Name == "sbx-3" {
+					return
+				}
+				infra.pickCache.Store(getPickKey(sbx), struct{}{})
+			},
+			postCheck: func(t *testing.T, sbx infra.Sandbox) {
+				assert.Equal(t, "sbx-3", sbx.GetName())
+			},
+		},
+		{
+			name:      "all candidate are picked",
+			available: 2,
+			options: infra.ClaimSandboxOptions{
+				User:     user,
+				Template: existTemplate,
+			},
+			preModifier: func(sbx *v1alpha1.Sandbox, infra *Infra) {
+				infra.pickCache.Store(getPickKey(sbx), struct{}{})
+			},
+			expectError: "all candidates are picked",
+		},
 	}
 
 	for _, tt := range tests {
+		utils.InitLogOutput()
 		t.Run(tt.name, func(t *testing.T) {
-
 			testInfra, client := NewTestInfra(t)
 			for i := 0; i < tt.available; i++ {
 				sbx := &v1alpha1.Sandbox{
@@ -211,7 +258,7 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 					},
 				}
 				if tt.preModifier != nil {
-					tt.preModifier(sbx)
+					tt.preModifier(sbx, testInfra)
 				}
 				state, reason := sandboxutils.GetSandboxState(sbx)
 				require.Equal(t, v1alpha1.SandboxStateAvailable, state, "reason", reason)

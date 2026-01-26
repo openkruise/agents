@@ -83,9 +83,12 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 		}
 	}
 
-	if request.Extensions.Image != "" {
+	if extension := request.Extensions.InplaceUpdate; extension.Image != "" {
 		opts.InplaceUpdate = &infra.InplaceUpdateOptions{
-			Image: request.Extensions.Image,
+			Image: extension.Image,
+		}
+		if extension.TimeoutSeconds > 0 {
+			opts.InplaceUpdate.Timeout = time.Duration(extension.TimeoutSeconds) * time.Second
 		}
 	}
 
