@@ -1,6 +1,9 @@
 package infra
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 type ClaimSandboxOptions struct {
 	// User specifies the owner of sandbox, Required
@@ -31,6 +34,12 @@ type ClaimMetrics struct {
 	InplaceUpdate time.Duration
 	InitRuntime   time.Duration
 	CSIMount      time.Duration
+}
+
+func (m ClaimMetrics) String() string {
+	return fmt.Sprintf(
+		"ClaimMetrics{Retries: %d, Total: %s, Wait: %s, PickAndLock: %s, InplaceUpdate: %s, InitRuntime: %s, CSIMount: %s}",
+		m.Retries, m.Total, m.Wait, m.PickAndLock, m.InplaceUpdate, m.InitRuntime, m.CSIMount)
 }
 
 type InplaceUpdateOptions struct {
