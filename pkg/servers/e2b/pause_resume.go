@@ -132,12 +132,6 @@ func (sc *Controller) ConnectSandbox(r *http.Request) (web.ApiResponse[*models.S
 			Message: fmt.Sprintf("Failed to set sandbox timeout: %v", err),
 		}
 	}
-	if err := sbx.InplaceRefresh(ctx, false); err != nil {
-		log.Error(err, "failed to refresh sandbox")
-		return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
-			Message: fmt.Sprintf("Failed to refresh sandbox: %v", err),
-		}
-	}
 	return web.ApiResponse[*models.Sandbox]{
 		Code: statusCode,
 		Body: sc.convertToE2BSandbox(sbx, sbx.GetAccessToken()),

@@ -48,6 +48,7 @@ func TestPauseSandbox(t *testing.T) {
 	assert.Equal(t, models.SandboxStatePaused, describeResp.Body.State)
 
 	// pause again
+	start := time.Now()
 	pauseResp, err = controller.PauseSandbox(req)
 	assert.NotNil(t, err)
 	if err != nil {
@@ -58,7 +59,8 @@ func TestPauseSandbox(t *testing.T) {
 	assert.Equal(t, models.SandboxStatePaused, describeResp.Body.State)
 	endAt, parseErr := time.Parse(time.RFC3339, describeResp.Body.EndAt)
 	assert.NoError(t, parseErr)
-	assert.WithinDuration(t, time.Now().Add(time.Duration(controller.maxTimeout)*time.Second), endAt, time.Second)
+	expectEndAt := start.Add(time.Duration(controller.maxTimeout) * time.Second)
+	assert.WithinDuration(t, expectEndAt, endAt, 5*time.Second, "expect end at: %s, but got %s", expectEndAt, endAt)
 }
 
 func TestConnectSandbox(t *testing.T) {
@@ -165,20 +167,20 @@ func TestConnectSandbox(t *testing.T) {
 			}, user))
 
 			if tt.expectStatus >= 300 {
-				assert.NotNil(t, err, fmt.Sprintf("%v", err))
-				if err != nil {
-					if err.Code == 0 {
-						err.Code = http.StatusInternalServerError
-					}
-					assert.Equal(t, tt.expectStatus, err.Code)
+				require.NotNil(t, err, fmt.Sprintf("%v", err))
+				if err.Code == 0 {
+					err.Code = http.StatusInternalServerError
 				}
+				assert.Equal(t, tt.expectStatus, err.Code)
 			} else {
-				assert.Nil(t, err, fmt.Sprintf("err: %v", err))
+				require.Nil(t, err, fmt.Sprintf("err: %v", err))
 				assert.Equal(t, tt.expectStatus, connectResp.Code)
 				assert.Equal(t, models.SandboxStateRunning, connectResp.Body.State)
 				endAt, err := time.Parse(time.RFC3339, connectResp.Body.EndAt)
-				assert.NoError(t, err)
-				assert.WithinDuration(t, now.Add(time.Duration(tt.timeout)*time.Second), endAt, 5*time.Second)
+				require.NoError(t, err)
+				expectEndAt := now.Add(time.Duration(tt.timeout) * time.Second)
+				assert.WithinDuration(t, expectEndAt, endAt, 5*time.Second,
+					fmt.Sprintf("expect end at: %s, but got %s", expectEndAt, endAt))
 			}
 		})
 	}

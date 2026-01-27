@@ -20,26 +20,6 @@ import (
 	"github.com/openkruise/agents/pkg/utils"
 )
 
-func AsSandboxForTest(sbx *v1alpha1.Sandbox, client *fake.Clientset, cache *Cache) *Sandbox {
-	s := &Sandbox{
-		BaseSandbox: BaseSandbox[*v1alpha1.Sandbox]{
-			Sandbox:       sbx,
-			Cache:         cache,
-			Client:        client,
-			SetCondition:  SetSandboxCondition,
-			GetConditions: ListSandboxConditions,
-			DeepCopy:      DeepCopy,
-		},
-		Sandbox: sbx,
-	}
-	if client != nil {
-		s.PatchSandbox = client.ApiV1alpha1().Sandboxes("default").Patch
-		s.Update = client.ApiV1alpha1().Sandboxes("default").Update
-		s.DeleteFunc = client.ApiV1alpha1().Sandboxes("default").Delete
-	}
-	return s
-}
-
 func ConvertPodToSandboxCR(pod *corev1.Pod) *v1alpha1.Sandbox {
 	sbx := &v1alpha1.Sandbox{
 		ObjectMeta: pod.ObjectMeta,
@@ -111,7 +91,7 @@ func TestSandbox_GetTemplate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := AsSandboxForTest(ConvertPodToSandboxCR(tt.pod), nil, nil)
+			s := AsSandbox(ConvertPodToSandboxCR(tt.pod), nil, nil)
 			if got := s.GetTemplate(); got != tt.want {
 				t.Errorf("GetTemplate() = %v, want %v", got, tt.want)
 			}
@@ -214,7 +194,7 @@ func TestSandbox_GetResource(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := AsSandboxForTest(ConvertPodToSandboxCR(tt.pod), nil, nil)
+			s := AsSandbox(ConvertPodToSandboxCR(tt.pod), nil, nil)
 			got := s.GetResource()
 			if got.CPUMilli != tt.want.CPUMilli {
 				t.Errorf("GetResource().CPUMilli = %v, want %v", got.CPUMilli, tt.want.CPUMilli)
@@ -248,7 +228,7 @@ func TestSandbox_InplaceRefresh(t *testing.T) {
 	assert.NoError(t, err)
 	time.Sleep(10 * time.Millisecond)
 
-	s := AsSandboxForTest(initialSandbox, client, cache)
+	s := AsSandbox(initialSandbox, cache, client)
 
 	assert.Equal(t, "value", s.Sandbox.Labels["initial"])
 	assert.Empty(t, s.Sandbox.Labels["updated"])
@@ -302,7 +282,7 @@ func TestSandbox_Kill(t *testing.T) {
 			_, err := client.ApiV1alpha1().Sandboxes("default").Create(context.Background(), sandbox, metav1.CreateOptions{})
 			assert.NoError(t, err)
 
-			s := AsSandboxForTest(sandbox, client, nil)
+			s := AsSandbox(sandbox, nil, client)
 
 			_, err = client.ApiV1alpha1().Sandboxes("default").Get(context.Background(), "test-sandbox", metav1.GetOptions{})
 			assert.NoError(t, err)
@@ -408,7 +388,7 @@ func TestSandbox_SaveTimeout(t *testing.T) {
 			assert.NoError(t, err)
 			time.Sleep(20 * time.Millisecond)
 
-			s := AsSandboxForTest(sandbox, client, cache)
+			s := AsSandbox(sandbox, cache, client)
 
 			err = s.SaveTimeout(t.Context(), tt.opts)
 			assert.NoError(t, err)
@@ -682,7 +662,7 @@ func TestSandbox_CSIMount(t *testing.T) {
 					},
 				},
 			}
-			sandbox := AsSandboxForTest(sbx, client, cache)
+			sandbox := AsSandbox(sbx, cache, client)
 			request, err := utils.EncodeBase64Proto(tt.req)
 			assert.NoError(t, err)
 			err = sandbox.CSIMount(t.Context(), tt.driver, request)

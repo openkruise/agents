@@ -227,7 +227,7 @@ func TestSandbox_runCommandWithEnvd(t *testing.T) {
 					},
 				},
 			}
-			sandbox := AsSandboxForTest(sbx, client, cache)
+			sandbox := AsSandbox(sbx, cache, client)
 			result, err := sandbox.runCommandWithRuntime(context.Background(), &process.ProcessConfig{}, tt.timeout)
 
 			if tt.expectError != "" {

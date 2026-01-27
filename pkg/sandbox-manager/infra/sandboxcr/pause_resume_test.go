@@ -178,7 +178,7 @@ func TestSandbox_SetPause(t *testing.T) {
 			CreateSandboxWithStatus(t, client, sandbox)
 			time.Sleep(10 * time.Millisecond)
 
-			s := AsSandboxForTest(sandbox, client, cache)
+			s := AsSandbox(sandbox, cache, client)
 			opts := infra.PauseOptions{
 				Timeout: &infra.TimeoutOptions{
 					ShutdownTime: now.Add(time.Hour),
@@ -199,15 +199,11 @@ func TestSandbox_SetPause(t *testing.T) {
 				}
 			} else {
 				if !tt.expectError {
+					name := s.Name
 					time.AfterFunc(20*time.Millisecond, func() {
-						patch := ctrl.MergeFrom(s.Sandbox)
-						updated := s.Sandbox.DeepCopy()
-						updated.Status.Phase = v1alpha1.SandboxRunning
-						SetSandboxCondition(updated, string(v1alpha1.SandboxConditionReady), metav1.ConditionTrue, "Resume", "")
-						data, err := patch.Data(updated)
-						assert.NoError(t, err)
-						_, err = client.ApiV1alpha1().Sandboxes("default").Patch(
-							t.Context(), s.Name, types.MergePatchType, data, metav1.PatchOptions{})
+						jsonData := `{"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True","reason":"Resume"}]}}`
+						_, err := client.ApiV1alpha1().Sandboxes("default").Patch(
+							t.Context(), name, types.MergePatchType, []byte(jsonData), metav1.PatchOptions{})
 						assert.NoError(t, err)
 					})
 				}
@@ -282,7 +278,7 @@ func TestSandbox_ResumeConcurrent(t *testing.T) {
 	start := time.Now()
 	// Start three goroutines calling Resume
 	for i := 0; i < 3; i++ {
-		s := AsSandboxForTest(sandbox, client, cache)
+		s := AsSandbox(sandbox, cache, client)
 		go func() {
 			err := s.Resume(t.Context())
 			resultCh <- err

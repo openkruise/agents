@@ -23,8 +23,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
@@ -32,7 +32,6 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	sandboxclient "github.com/openkruise/agents/client/clientset/versioned"
 	"github.com/openkruise/agents/pkg/proxy"
-	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
@@ -41,38 +40,20 @@ import (
 	"github.com/openkruise/agents/proto/envd/process"
 )
 
-type SandboxCR interface {
+type UpdateFunc func(ctx context.Context, sbx *agentsv1alpha1.Sandbox, opts metav1.UpdateOptions) (*agentsv1alpha1.Sandbox, error)
+type ModifierFunc func(sbx *agentsv1alpha1.Sandbox)
+
+type Sandbox struct {
 	*agentsv1alpha1.Sandbox
-	metav1.Object
+	Cache  *Cache
+	Client clients.SandboxClient
 }
 
-type PatchFunc[T SandboxCR] func(ctx context.Context, name string, pt types.PatchType, data []byte, opts metav1.PatchOptions, subResources ...string) (result T, err error)
-type UpdateFunc[T SandboxCR] func(ctx context.Context, sbx T, opts metav1.UpdateOptions) (T, error)
-type DeleteFunc func(ctx context.Context, name string, opts metav1.DeleteOptions) error
-type ModifierFunc[T SandboxCR] func(sbx T)
-type SetConditionFunc[T SandboxCR] func(sbx T, tp string, status metav1.ConditionStatus, reason, message string)
-type GetConditionsFunc[T SandboxCR] func(sbx T) []metav1.Condition
-type DeepCopyFunc[T any] func(src T) T
-
-type BaseSandbox[T SandboxCR] struct {
-	Sandbox T
-	Cache   *Cache
-	Client  clients.SandboxClient
-
-	PatchSandbox  PatchFunc[T]
-	UpdateStatus  UpdateFunc[T]
-	Update        UpdateFunc[T]
-	DeleteFunc    DeleteFunc
-	SetCondition  SetConditionFunc[T]
-	GetConditions GetConditionsFunc[T]
-	DeepCopy      DeepCopyFunc[T]
-}
-
-func (s *BaseSandbox[T]) GetTemplate() string {
+func (s *Sandbox) GetTemplate() string {
 	return GetTemplateFromSandbox(s.Sandbox)
 }
 
-func (s *BaseSandbox[T]) InplaceRefresh(ctx context.Context, deepcopy bool) error {
+func (s *Sandbox) InplaceRefresh(ctx context.Context, deepcopy bool) error {
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(s.Sandbox)).V(consts.DebugLogLevel)
 	sbx, err := s.Cache.GetSandbox(stateutils.GetSandboxID(s.Sandbox))
 	if err != nil {
@@ -86,14 +67,14 @@ func (s *BaseSandbox[T]) InplaceRefresh(ctx context.Context, deepcopy bool) erro
 		}
 	}
 	if deepcopy {
-		s.Sandbox = s.DeepCopy(sbx)
+		s.Sandbox = sbx.DeepCopy()
 	} else {
 		s.Sandbox = sbx
 	}
 	return nil
 }
 
-func (s *BaseSandbox[T]) retryUpdate(ctx context.Context, updateFunc UpdateFunc[T], modifier func(sbx T)) error {
+func (s *Sandbox) retryUpdate(ctx context.Context, updateFunc UpdateFunc, modifier ModifierFunc) error {
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(s.Sandbox))
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		// get the latest sandbox
@@ -119,16 +100,11 @@ func (s *BaseSandbox[T]) retryUpdate(ctx context.Context, updateFunc UpdateFunc[
 	return err
 }
 
-func (s *BaseSandbox[T]) Kill(ctx context.Context) error {
-	if s.Sandbox.GetDeletionTimestamp() != nil {
+func (s *Sandbox) Kill(ctx context.Context) error {
+	if s.GetDeletionTimestamp() != nil {
 		return nil
 	}
-	return s.DeleteFunc(ctx, s.Sandbox.GetName(), metav1.DeleteOptions{})
-}
-
-type Sandbox struct {
-	BaseSandbox[*agentsv1alpha1.Sandbox]
-	*agentsv1alpha1.Sandbox
+	return s.Client.ApiV1alpha1().Sandboxes(s.GetNamespace()).Delete(ctx, s.GetName(), metav1.DeleteOptions{})
 }
 
 func (s *Sandbox) GetSandboxID() string {
@@ -171,7 +147,7 @@ func (s *Sandbox) GetImage() string {
 }
 
 func (s *Sandbox) SaveTimeout(ctx context.Context, opts infra.TimeoutOptions) error {
-	return s.retryUpdate(ctx, s.Update, func(sbx *agentsv1alpha1.Sandbox) {
+	return s.retryUpdate(ctx, s.Client.ApiV1alpha1().Sandboxes(s.GetNamespace()).Update, func(sbx *agentsv1alpha1.Sandbox) {
 		setTimeout(sbx, opts)
 	})
 }
@@ -209,7 +185,7 @@ func (s *Sandbox) Pause(ctx context.Context, opts infra.PauseOptions) error {
 		log.Error(err, "sandbox is not running", "state", state, "reason", reason)
 		return err
 	}
-	err := s.retryUpdate(ctx, s.Update, func(sbx *agentsv1alpha1.Sandbox) {
+	err := s.retryUpdate(ctx, s.Client.ApiV1alpha1().Sandboxes(s.GetNamespace()).Update, func(sbx *agentsv1alpha1.Sandbox) {
 		sbx.Spec.Paused = true
 		if opts.Timeout != nil {
 			setTimeout(sbx, *opts.Timeout)
@@ -237,7 +213,7 @@ func (s *Sandbox) Resume(ctx context.Context) error {
 		return fmt.Errorf("sandbox is pausing, please wait a moment and try again")
 	}
 	if s.Sandbox.Spec.Paused {
-		if err := s.retryUpdate(ctx, s.Update, func(sbx *agentsv1alpha1.Sandbox) {
+		if err := s.retryUpdate(ctx, s.Client.ApiV1alpha1().Sandboxes(s.GetNamespace()).Update, func(sbx *agentsv1alpha1.Sandbox) {
 			sbx.Spec.Paused = false
 			setTimeout(sbx, infra.TimeoutOptions{}) // remove all timeout options
 		}); err != nil {
@@ -259,15 +235,6 @@ func (s *Sandbox) Resume(ctx context.Context) error {
 	}
 	log.Info("sandbox resumed", "cost", time.Since(start))
 	return s.InplaceRefresh(ctx, false)
-}
-
-func (s *Sandbox) InplaceRefresh(ctx context.Context, deepcopy bool) error {
-	err := s.BaseSandbox.InplaceRefresh(ctx, deepcopy)
-	if err != nil {
-		return err
-	}
-	s.Sandbox = s.BaseSandbox.Sandbox
-	return nil
 }
 
 func (s *Sandbox) GetState() (string, string) {
@@ -314,26 +281,12 @@ func (s *Sandbox) CSIMount(ctx context.Context, driver string, request string) e
 	return nil
 }
 
-func DeepCopy(sbx *agentsv1alpha1.Sandbox) *agentsv1alpha1.Sandbox {
-	return sbx.DeepCopy()
-}
-
 var _ infra.Sandbox = &Sandbox{}
 
 func AsSandbox(sbx *agentsv1alpha1.Sandbox, cache *Cache, client sandboxclient.Interface) *Sandbox {
 	return &Sandbox{
-		BaseSandbox: BaseSandbox[*agentsv1alpha1.Sandbox]{
-			Sandbox:       sbx,
-			Cache:         cache,
-			Client:        client,
-			PatchSandbox:  client.ApiV1alpha1().Sandboxes(sbx.Namespace).Patch,
-			UpdateStatus:  client.ApiV1alpha1().Sandboxes(sbx.Namespace).UpdateStatus,
-			Update:        client.ApiV1alpha1().Sandboxes(sbx.Namespace).Update,
-			DeleteFunc:    client.ApiV1alpha1().Sandboxes(sbx.Namespace).Delete,
-			SetCondition:  SetSandboxCondition,
-			GetConditions: ListSandboxConditions,
-			DeepCopy:      DeepCopy,
-		},
+		Cache:   cache,
+		Client:  client,
 		Sandbox: sbx,
 	}
 }
