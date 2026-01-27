@@ -15,6 +15,8 @@ package utils
 
 import (
 	"context"
+	"sync"
+	"fmt"
 	"testing"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
@@ -618,6 +620,382 @@ func TestPatchFinalizer(t *testing.T) {
 					if hasFinalizer {
 						t.Errorf("Finalizer %s was not removed", tt.finalizer)
 					}
+				}
+			}
+		})
+	}
+}
+
+func TestDumpJson(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    interface{}
+		expected string
+	}{
+		{
+			name:     "simple string",
+			input:    "hello",
+			expected: `"hello"`,
+		},
+		{
+			name:     "integer",
+			input:    42,
+			expected: "42",
+		},
+		{
+			name:     "float",
+			input:    3.14,
+			expected: "3.14",
+		},
+		{
+			name:     "boolean true",
+			input:    true,
+			expected: "true",
+		},
+		{
+			name:     "boolean false",
+			input:    false,
+			expected: "false",
+		},
+		{
+			name:     "nil",
+			input:    nil,
+			expected: "null",
+		},
+		{
+			name:     "simple map",
+			input:    map[string]string{"key": "value"},
+			expected: `{"key":"value"}`,
+		},
+		{
+			name:     "simple slice",
+			input:    []int{1, 2, 3},
+			expected: "[1,2,3]",
+		},
+		{
+			name: "struct",
+			input: struct {
+				Name  string `json:"name"`
+				Value int    `json:"value"`
+			}{Name: "test", Value: 123},
+			expected: `{"name":"test","value":123}`,
+		},
+		{
+			name:     "empty map",
+			input:    map[string]string{},
+			expected: "{}",
+		},
+		{
+			name:     "empty slice",
+			input:    []int{},
+			expected: "[]",
+		},
+		{
+			name:     "nested structure",
+			input:    map[string]interface{}{"outer": map[string]int{"inner": 1}},
+			expected: `{"outer":{"inner":1}}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := DumpJson(tt.input)
+			if result != tt.expected {
+				t.Errorf("DumpJson() = %v, want %v", result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestDoItSlowly(t *testing.T) {
+	tests := []struct {
+		name             string
+		count            int
+		initialBatchSize int
+		failAtCall       int // -1 means no failure
+		wantSuccesses    int
+		wantError        bool
+	}{
+		{
+			name:             "all succeed with count 1",
+			count:            1,
+			initialBatchSize: 1,
+			failAtCall:       -1,
+			wantSuccesses:    1,
+			wantError:        false,
+		},
+		{
+			name:             "all succeed with count 5",
+			count:            5,
+			initialBatchSize: 1,
+			failAtCall:       -1,
+			wantSuccesses:    5,
+			wantError:        false,
+		},
+		{
+			name:             "all succeed with larger batch size",
+			count:            10,
+			initialBatchSize: 5,
+			failAtCall:       -1,
+			wantSuccesses:    10,
+			wantError:        false,
+		},
+		{
+			name:             "zero count",
+			count:            0,
+			initialBatchSize: 1,
+			failAtCall:       -1,
+			wantSuccesses:    0,
+			wantError:        false,
+		},
+		{
+			name:             "failure in first batch",
+			count:            5,
+			initialBatchSize: 2,
+			failAtCall:       1, // fail on first call
+			wantSuccesses:    1, // at least one succeeds before failure is detected
+			wantError:        true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			callCount := 0
+			var mu sync.Mutex
+
+			fn := func() error {
+				mu.Lock()
+				callCount++
+				currentCall := callCount
+				mu.Unlock()
+
+				if tt.failAtCall > 0 && currentCall >= tt.failAtCall {
+					return fmt.Errorf("intentional failure at call %d", currentCall)
+				}
+				return nil
+			}
+
+			successes, err := DoItSlowly(tt.count, tt.initialBatchSize, fn)
+
+			if tt.wantError {
+				if err == nil {
+					t.Errorf("DoItSlowly() expected error but got none")
+				}
+			} else {
+				if err != nil {
+					t.Errorf("DoItSlowly() unexpected error: %v", err)
+				}
+			}
+
+			if !tt.wantError && successes != tt.wantSuccesses {
+				t.Errorf("DoItSlowly() successes = %d, want %d", successes, tt.wantSuccesses)
+			}
+		})
+	}
+}
+
+func TestDoItSlowlyWithInputs(t *testing.T) {
+	tests := []struct {
+		name             string
+		inputs           []int
+		initialBatchSize int
+		failOnInput      int // -1 means no failure
+		wantSuccesses    int
+		wantError        bool
+	}{
+		{
+			name:             "all succeed empty inputs",
+			inputs:           []int{},
+			initialBatchSize: 1,
+			failOnInput:      -1,
+			wantSuccesses:    0,
+			wantError:        false,
+		},
+		{
+			name:             "all succeed single input",
+			inputs:           []int{1},
+			initialBatchSize: 1,
+			failOnInput:      -1,
+			wantSuccesses:    1,
+			wantError:        false,
+		},
+		{
+			name:             "all succeed multiple inputs",
+			inputs:           []int{1, 2, 3, 4, 5},
+			initialBatchSize: 2,
+			failOnInput:      -1,
+			wantSuccesses:    5,
+			wantError:        false,
+		},
+		{
+			name:             "process string inputs",
+			inputs:           []int{10, 20, 30},
+			initialBatchSize: 1,
+			failOnInput:      -1,
+			wantSuccesses:    3,
+			wantError:        false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			processedInputs := make([]int, 0)
+			var mu sync.Mutex
+
+			fn := func(input int) error {
+				mu.Lock()
+				processedInputs = append(processedInputs, input)
+				mu.Unlock()
+
+				if tt.failOnInput > 0 && input == tt.failOnInput {
+					return fmt.Errorf("intentional failure on input %d", input)
+				}
+				return nil
+			}
+
+			successes, err := DoItSlowlyWithInputs(tt.inputs, tt.initialBatchSize, fn)
+
+			if tt.wantError {
+				if err == nil {
+					t.Errorf("DoItSlowlyWithInputs() expected error but got none")
+				}
+			} else {
+				if err != nil {
+					t.Errorf("DoItSlowlyWithInputs() unexpected error: %v", err)
+				}
+			}
+
+			if !tt.wantError && successes != tt.wantSuccesses {
+				t.Errorf("DoItSlowlyWithInputs() successes = %d, want %d", successes, tt.wantSuccesses)
+			}
+
+			// Verify all inputs were processed when no error
+			if !tt.wantError && len(processedInputs) != len(tt.inputs) {
+				t.Errorf("DoItSlowlyWithInputs() processed %d inputs, want %d", len(processedInputs), len(tt.inputs))
+			}
+		})
+	}
+}
+
+func TestHashData(t *testing.T) {
+	tests := []struct {
+		name                string
+		input               []byte
+		expectNonEmpty      bool
+		expectDeterministic bool
+	}{
+		{
+			name:                "empty bytes",
+			input:               []byte{},
+			expectNonEmpty:      true,
+			expectDeterministic: true,
+		},
+		{
+			name:                "simple string bytes",
+			input:               []byte("hello world"),
+			expectNonEmpty:      true,
+			expectDeterministic: true,
+		},
+		{
+			name:                "binary data",
+			input:               []byte{0x00, 0x01, 0x02, 0x03, 0xff},
+			expectNonEmpty:      true,
+			expectDeterministic: true,
+		},
+		{
+			name:                "large data",
+			input:               make([]byte, 10000),
+			expectNonEmpty:      true,
+			expectDeterministic: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := HashData(tt.input)
+
+			if tt.expectNonEmpty && result == "" {
+				t.Errorf("HashData() returned empty string")
+			}
+
+			// Check max length constraint (9 chars after truncation + encoding)
+			if len(result) > 12 { // SafeEncodeString may add some chars
+				t.Errorf("HashData() result too long: %d chars", len(result))
+			}
+
+			// Verify determinism
+			if tt.expectDeterministic {
+				result2 := HashData(tt.input)
+				if result != result2 {
+					t.Errorf("HashData() not deterministic: %s != %s", result, result2)
+				}
+			}
+		})
+	}
+
+	// Test that different inputs produce different hashes
+	t.Run("different inputs produce different hashes", func(t *testing.T) {
+		hash1 := HashData([]byte("input1"))
+		hash2 := HashData([]byte("input2"))
+		if hash1 == hash2 {
+			t.Errorf("HashData() produced same hash for different inputs")
+		}
+	})
+}
+
+func TestFilterOutCondition(t *testing.T) {
+	tests := []struct {
+		name           string
+		conditions     []metav1.Condition
+		condType       string
+		expectedLength int
+	}{
+		{
+			name:           "empty conditions",
+			conditions:     []metav1.Condition{},
+			condType:       "Ready",
+			expectedLength: 0,
+		},
+		{
+			name: "remove existing condition",
+			conditions: []metav1.Condition{
+				{Type: "Ready", Status: metav1.ConditionTrue},
+				{Type: "Progressing", Status: metav1.ConditionFalse},
+			},
+			condType:       "Ready",
+			expectedLength: 1,
+		},
+		{
+			name: "remove non-existing condition",
+			conditions: []metav1.Condition{
+				{Type: "Ready", Status: metav1.ConditionTrue},
+				{Type: "Progressing", Status: metav1.ConditionFalse},
+			},
+			condType:       "NonExisting",
+			expectedLength: 2,
+		},
+		{
+			name: "remove all conditions of same type",
+			conditions: []metav1.Condition{
+				{Type: "Ready", Status: metav1.ConditionTrue},
+				{Type: "Ready", Status: metav1.ConditionFalse},
+			},
+			condType:       "Ready",
+			expectedLength: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := filterOutCondition(tt.conditions, tt.condType)
+			if len(result) != tt.expectedLength {
+				t.Errorf("filterOutCondition() returned %d conditions, want %d", len(result), tt.expectedLength)
+			}
+
+			// Verify the specific condition type was removed
+			for _, cond := range result {
+				if cond.Type == tt.condType {
+					t.Errorf("filterOutCondition() did not remove condition type %s", tt.condType)
 				}
 			}
 		})
