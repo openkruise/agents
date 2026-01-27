@@ -51,8 +51,8 @@ spec:
       - openkruise
   isCA: false
   dnsNames:
-    - "*.your.domian.com"
-    - "your.domian.com"
+    - "*.your.domain.com"
+    - "your.domain.com"
   issuerRef:
     name: sandbox-signing-issuer
     kind: Issuer
