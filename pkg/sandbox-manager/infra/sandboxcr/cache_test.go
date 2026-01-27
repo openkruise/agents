@@ -259,6 +259,7 @@ func TestCache_WaitForSandboxSatisfied_Cancel(t *testing.T) {
 		},
 	}
 	CreateSandboxWithStatus(t, client, sbx)
+	EnsureSandboxInCache(t, cache, sbx)
 	ctx1, cancel := context.WithCancel(t.Context())
 	cancel()
 	// never get satisfied or timeout

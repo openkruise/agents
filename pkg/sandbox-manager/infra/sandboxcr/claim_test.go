@@ -37,9 +37,16 @@ func GetSbsOwnerReference() []metav1.OwnerReference {
 
 func CreateSandboxWithStatus(t *testing.T, client versioned.Interface, sbx *v1alpha1.Sandbox) {
 	_, err := client.ApiV1alpha1().Sandboxes(sbx.Namespace).Create(t.Context(), sbx, metav1.CreateOptions{})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	_, err = client.ApiV1alpha1().Sandboxes(sbx.Namespace).UpdateStatus(t.Context(), sbx, metav1.UpdateOptions{})
-	assert.NoError(t, err)
+	require.NoError(t, err)
+}
+
+func EnsureSandboxInCache(t *testing.T, cache *Cache, sbx *v1alpha1.Sandbox) {
+	require.Eventually(t, func() bool {
+		_, err := cache.GetSandbox(sandboxutils.GetSandboxID(sbx))
+		return err == nil
+	}, time.Second, 10*time.Millisecond, "get sandbox from cache timeout")
 }
 
 var metricsAnnotationKey = v1alpha1.InternalPrefix + "metrics"
