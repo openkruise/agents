@@ -4,7 +4,7 @@ metadata:
   name: sandbox-manager
   namespace: sandbox-system
   labels:
-    control-plane: sandbox-manager
+    component: sandbox-manager
     app.kubernetes.io/name: sandbox-manager
     app.kubernetes.io/managed-by: kustomize
 spec:
@@ -12,9 +12,20 @@ spec:
   tls:
     - hosts:
         - "*.replace.with.your.domain"
+        - "replace.with.your.domain"
       secretName: sandbox-manager-tls
   rules:
     - host: "*.replace.with.your.domain"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: sandbox-manager
+                port:
+                  number: 7788
+    - host: "replace.with.your.domain"
       http:
         paths:
           - path: /

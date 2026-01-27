@@ -3,7 +3,7 @@ kind: ClusterRole
 metadata:
   name: sandbox-manager
   labels:
-    control-plane: sandbox-manager
+    component: sandbox-manager
     app.kubernetes.io/name: sandbox-manager
 rules:
   - apiGroups: [""]
@@ -34,7 +34,7 @@ metadata:
   name: sandbox-manager-secrets
   namespace: sandbox-system
   labels:
-    control-plane: sandbox-manager
+    component: sandbox-manager
     app.kubernetes.io/name: sandbox-manager
 rules:
   - apiGroups: [ "" ]
@@ -48,7 +48,7 @@ kind: ClusterRoleBinding
 metadata:
   name: sandbox-manager
   labels:
-    control-plane: sandbox-manager
+    component: sandbox-manager
     app.kubernetes.io/name: sandbox-manager
 roleRef:
   apiGroup: rbac.authorization.k8s.io
@@ -65,7 +65,7 @@ metadata:
   name: sandbox-manager-secrets
   namespace: sandbox-system
   labels:
-    control-plane: sandbox-manager
+    component: sandbox-manager
     app.kubernetes.io/name: sandbox-manager
 roleRef:
   apiGroup: rbac.authorization.k8s.io

@@ -1,0 +1,59 @@
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: sandbox-ca-issuer
+  namespace: sandbox-system
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: sandbox-signing-issuer
+  namespace: sandbox-system
+spec:
+  ca:
+    secretName: sandbox-ca-key-pair
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: sandbox-ca
+  namespace: sandbox-system
+spec:
+  isCA: true
+  duration: 87600h # 10 years
+  secretName: sandbox-ca-key-pair
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: sandbox-ca-issuer
+    kind: Issuer
+    group: cert-manager.io
+  commonName: sandbox-ca
+  subject:
+    organizations:
+      - openkruise
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: sandbox-manager-ingress-cert
+  namespace: sandbox-system
+spec:
+  secretName: sandbox-manager-tls
+  duration: 2160h # 90 days
+  renewBefore: 360h # 15 days
+  subject:
+    organizations:
+      - openkruise
+  isCA: false
+  dnsNames:
+    - "*.your.domian.com"
+    - "your.domian.com"
+  issuerRef:
+    name: sandbox-signing-issuer
+    kind: Issuer
+    group: cert-manager.io

@@ -4,21 +4,21 @@ metadata:
   name: sandbox-manager
   namespace: sandbox-system
   labels:
-    control-plane: sandbox-manager
+    component: sandbox-manager
     app.kubernetes.io/name: sandbox-manager
     app.kubernetes.io/managed-by: kustomize
 spec:
   replicas: 1
   selector:
     matchLabels:
-      control-plane: sandbox-manager
+      component: sandbox-manager
       app.kubernetes.io/name: sandbox-manager
   template:
     metadata:
       annotations:
         kubectl.kubernetes.io/default-container: controller
       labels:
-        control-plane: sandbox-manager
+        component: sandbox-manager
         app.kubernetes.io/name: sandbox-manager
     spec:
       serviceAccountName: sandbox-manager
@@ -62,7 +62,7 @@ spec:
                 fieldRef:
                   fieldPath: metadata.namespace
             - name: PEER_SELECTOR
-              value: control-plane=sandbox-manager
+              value: component=sandbox-manager
             - name: KUBE_CLIENT_QPS
               value: "10000"
             - name: KUBE_CLIENT_BURST
