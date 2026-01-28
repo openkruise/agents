@@ -432,3 +432,439 @@ func TestIsInplaceUpdateCompleted(t *testing.T) {
 		})
 	}
 }
+
+func TestDefaultGeneratePatchBodyFunc(t *testing.T) {
+	tests := []struct {
+		name           string
+		opts           InPlaceUpdateOptions
+		expectEmpty    bool
+		expectContains []string
+	}{
+		{
+			name: "no container changes - same image",
+			opts: InPlaceUpdateOptions{
+				Box: &agentsapiv1alpha1.Sandbox{
+					Spec: agentsapiv1alpha1.SandboxSpec{
+						SandboxTemplate: agentsapiv1alpha1.SandboxTemplate{
+							Template: &corev1.PodTemplateSpec{
+								Spec: corev1.PodSpec{
+									Containers: []corev1.Container{
+										{
+											Name:  "container1",
+											Image: "nginx:latest",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+				Pod: &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-pod",
+						Namespace: "default",
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name:  "container1",
+								Image: "nginx:latest", // same image
+							},
+						},
+					},
+					Status: corev1.PodStatus{
+						ContainerStatuses: []corev1.ContainerStatus{
+							{
+								Name:    "container1",
+								ImageID: "docker.io/nginx:latest",
+							},
+						},
+					},
+				},
+				Revision: "abc123",
+			},
+			expectEmpty: true,
+		},
+		{
+			name: "single container image change",
+			opts: InPlaceUpdateOptions{
+				Box: &agentsapiv1alpha1.Sandbox{
+					Spec: agentsapiv1alpha1.SandboxSpec{
+						SandboxTemplate: agentsapiv1alpha1.SandboxTemplate{
+							Template: &corev1.PodTemplateSpec{
+								Spec: corev1.PodSpec{
+									Containers: []corev1.Container{
+										{
+											Name:  "container1",
+											Image: "nginx:1.20", // new image
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+				Pod: &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-pod",
+						Namespace: "default",
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name:  "container1",
+								Image: "nginx:latest", // old image
+							},
+						},
+					},
+					Status: corev1.PodStatus{
+						ContainerStatuses: []corev1.ContainerStatus{
+							{
+								Name:    "container1",
+								ImageID: "docker.io/nginx:latest@sha256:abc",
+							},
+						},
+					},
+				},
+				Revision: "rev123",
+			},
+			expectEmpty: false,
+			expectContains: []string{
+				"nginx:1.20",    // new image in patch
+				"container1",   // container name
+				"rev123",       // revision
+				"annotations",  // should have annotations
+				"labels",       // should have labels
+			},
+		},
+		{
+			name: "multiple containers - partial update",
+			opts: InPlaceUpdateOptions{
+				Box: &agentsapiv1alpha1.Sandbox{
+					Spec: agentsapiv1alpha1.SandboxSpec{
+						SandboxTemplate: agentsapiv1alpha1.SandboxTemplate{
+							Template: &corev1.PodTemplateSpec{
+								Spec: corev1.PodSpec{
+									Containers: []corev1.Container{
+										{
+											Name:  "container1",
+											Image: "nginx:1.20", // changed
+										},
+										{
+											Name:  "container2",
+											Image: "redis:latest", // not changed
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+				Pod: &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-pod",
+						Namespace: "default",
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name:  "container1",
+								Image: "nginx:latest", // needs update
+							},
+							{
+								Name:  "container2",
+								Image: "redis:latest", // same
+							},
+						},
+					},
+					Status: corev1.PodStatus{
+						ContainerStatuses: []corev1.ContainerStatus{
+							{
+								Name:    "container1",
+								ImageID: "docker.io/nginx:latest@sha256:abc",
+							},
+							{
+								Name:    "container2",
+								ImageID: "docker.io/redis:latest@sha256:def",
+							},
+						},
+					},
+				},
+				Revision: "rev456",
+			},
+			expectEmpty: false,
+			expectContains: []string{
+				"nginx:1.20",   // new image for container1
+				"container1",  // container name
+				"rev456",      // revision
+			},
+		},
+		{
+			name: "container in pod not in sandbox spec",
+			opts: InPlaceUpdateOptions{
+				Box: &agentsapiv1alpha1.Sandbox{
+					Spec: agentsapiv1alpha1.SandboxSpec{
+						SandboxTemplate: agentsapiv1alpha1.SandboxTemplate{
+							Template: &corev1.PodTemplateSpec{
+								Spec: corev1.PodSpec{
+									Containers: []corev1.Container{
+										{
+											Name:  "container1",
+											Image: "nginx:1.20",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+				Pod: &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-pod",
+						Namespace: "default",
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name:  "container1",
+								Image: "nginx:latest",
+							},
+							{
+								Name:  "sidecar", // not in sandbox spec
+								Image: "envoy:latest",
+							},
+						},
+					},
+					Status: corev1.PodStatus{
+						ContainerStatuses: []corev1.ContainerStatus{
+							{
+								Name:    "container1",
+								ImageID: "docker.io/nginx:latest@sha256:abc",
+							},
+							{
+								Name:    "sidecar",
+								ImageID: "docker.io/envoy:latest@sha256:xyz",
+							},
+						},
+					},
+				},
+				Revision: "rev789",
+			},
+			expectEmpty: false,
+			expectContains: []string{
+				"nginx:1.20",   // should update container1
+				"container1",  // container1 name
+			},
+		},
+		{
+			name: "empty containers in sandbox",
+			opts: InPlaceUpdateOptions{
+				Box: &agentsapiv1alpha1.Sandbox{
+					Spec: agentsapiv1alpha1.SandboxSpec{
+						SandboxTemplate: agentsapiv1alpha1.SandboxTemplate{
+							Template: &corev1.PodTemplateSpec{
+								Spec: corev1.PodSpec{
+									Containers: []corev1.Container{}, // empty
+								},
+							},
+						},
+					},
+				},
+				Pod: &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-pod",
+						Namespace: "default",
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name:  "container1",
+								Image: "nginx:latest",
+							},
+						},
+					},
+				},
+				Revision: "abc123",
+			},
+			expectEmpty: true, // no matching containers
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := DefaultGeneratePatchBodyFunc(tt.opts)
+
+			if tt.expectEmpty {
+				if result != "" {
+					t.Errorf("Expected empty patch body, got: %s", result)
+				}
+				return
+			}
+
+			if result == "" {
+				t.Error("Expected non-empty patch body, got empty")
+				return
+			}
+
+			// Verify it's valid JSON
+			var jsonData map[string]interface{}
+			if err := json.Unmarshal([]byte(result), &jsonData); err != nil {
+				t.Errorf("Generated patch is not valid JSON: %v", err)
+				return
+			}
+
+			// Check for expected content
+			for _, expected := range tt.expectContains {
+				if !containsString(result, expected) {
+					t.Errorf("Expected patch to contain %q, but it didn't. Patch: %s", expected, result)
+				}
+			}
+
+			// Verify structure has metadata and spec
+			if _, ok := jsonData["metadata"]; !ok {
+				t.Error("Generated patch missing 'metadata' field")
+			}
+			if _, ok := jsonData["spec"]; !ok {
+				t.Error("Generated patch missing 'spec' field")
+			}
+		})
+	}
+}
+
+func TestNewInPlaceUpdateControl(t *testing.T) {
+	scheme, err := agentsapiv1alpha1.SchemeBuilder.Build()
+	if err != nil {
+		t.Fatalf("Failed to build scheme: %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("Failed to add corev1 to scheme: %v", err)
+	}
+
+	tests := []struct {
+		name      string
+		patchFunc GeneratePatchBodyFunc
+	}{
+		{
+			name:      "with default patch function",
+			patchFunc: DefaultGeneratePatchBodyFunc,
+		},
+		{
+			name:      "with nil patch function",
+			patchFunc: nil,
+		},
+		{
+			name: "with custom patch function",
+			patchFunc: func(opts InPlaceUpdateOptions) string {
+				return `{"custom":"patch"}`
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := fake.NewClientBuilder().WithScheme(scheme).Build()
+			control := NewInPlaceUpdateControl(client, tt.patchFunc)
+
+			if control == nil {
+				t.Error("NewInPlaceUpdateControl returned nil")
+				return
+			}
+
+			if control.Client == nil {
+				t.Error("InPlaceUpdateControl has nil Client")
+			}
+
+			// Verify the patch function is set (or nil as expected)
+			if tt.patchFunc != nil && control.generatePatchBodyFunc == nil {
+				t.Error("InPlaceUpdateControl has nil generatePatchBodyFunc when non-nil was provided")
+			}
+		})
+	}
+}
+
+func TestInPlaceUpdateControl_Update_WithCustomPatchFunc(t *testing.T) {
+	scheme, err := agentsapiv1alpha1.SchemeBuilder.Build()
+	if err != nil {
+		t.Fatalf("Failed to build scheme: %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("Failed to add corev1 to scheme: %v", err)
+	}
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-pod",
+			Namespace: "default",
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{
+					Name:  "container1",
+					Image: "nginx:latest",
+				},
+			},
+		},
+	}
+
+	sandbox := &agentsapiv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-sandbox",
+			Namespace: "default",
+		},
+	}
+
+	tests := []struct {
+		name         string
+		patchFunc    GeneratePatchBodyFunc
+		expectUpdate bool
+		expectError  bool
+	}{
+		{
+			name: "empty patch returns false",
+			patchFunc: func(opts InPlaceUpdateOptions) string {
+				return ""
+			},
+			expectUpdate: false,
+			expectError:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
+			control := NewInPlaceUpdateControl(client, tt.patchFunc)
+
+			opts := InPlaceUpdateOptions{
+				Box:      sandbox,
+				Pod:      pod,
+				Revision: "test-rev",
+			}
+
+			updated, err := control.Update(context.TODO(), opts)
+
+			if tt.expectError && err == nil {
+				t.Error("Expected error but got none")
+			}
+			if !tt.expectError && err != nil {
+				t.Errorf("Unexpected error: %v", err)
+			}
+			if updated != tt.expectUpdate {
+				t.Errorf("Expected updated=%v, got %v", tt.expectUpdate, updated)
+			}
+		})
+	}
+}
+
+// containsString is a helper to check if a string contains a substring
+func containsString(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsStringHelper(s, substr))
+}
+
+func containsStringHelper(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
+}
