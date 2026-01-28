@@ -64,4 +64,7 @@ ca-fullchain.pem) generated in Step 1:
 
 ```shell
 $ export SSL_CERT_FILE=/path/to/ca-fullchain.pem
+
+# If you need to access via single domain using the customized SDK, you also need to configure the following environment variable
+$ export REQUESTS_CA_BUNDLE=/path/to/ca-fullchain.pem
 ```

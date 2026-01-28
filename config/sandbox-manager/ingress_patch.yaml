@@ -3,5 +3,13 @@
   value: "*.replace.with.your.domain"
 
 - op: replace
+  path: /spec/rules/1/host
+  value: "replace.with.your.domain"
+
+- op: replace
   path: /spec/tls/0/hosts/0
   value: "*.replace.with.your.domain"
+
+- op: replace
+  path: /spec/tls/0/hosts/1
+  value: "replace.with.your.domain"
