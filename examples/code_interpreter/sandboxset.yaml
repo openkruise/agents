@@ -60,3 +60,12 @@ spec:
       volumes:
         - name: envd-volume
           emptyDir: { }
+  volumeClaimTemplates:
+  - metadata:
+      name: www
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      storageClassName: "alicloud-disk-ssd"
+      resources:
+        requests:
+          storage: 10Gi
