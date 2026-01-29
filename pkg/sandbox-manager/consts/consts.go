@@ -10,7 +10,9 @@ const (
 )
 
 const (
-	ExtProcPort = 9002
+	ExtProcPort        = 9002
+	ShutdownTimeout    = 90 * time.Second
+	RequestPeerTimeout = 100 * time.Millisecond
 )
 
 const DebugLogLevel = 5

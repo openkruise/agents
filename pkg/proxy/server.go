@@ -162,7 +162,7 @@ func (s *Server) Run() error {
 				}
 
 				for _, peer := range peersToCheck {
-					if err := requestPeer(http.MethodGet, peer.IP, HelloAPI, nil); err != nil {
+					if err := s.HelloPeer(peer.IP); err != nil {
 						log.Error(err, "failed to send heartbeat to peer", "ip", peer.IP)
 					}
 				}
