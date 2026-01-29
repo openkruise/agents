@@ -6,6 +6,9 @@ WORKDIR /app
 # Copy go mod and sum files
 COPY ../go.mod go.sum ./
 
+# Download dependencies
+RUN go mod download
+
 # Copy the source code
 COPY ../cmd/sandbox-manager ./cmd/sandbox-manager
 COPY ../pkg ./pkg

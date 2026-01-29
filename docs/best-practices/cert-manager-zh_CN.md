@@ -49,7 +49,4 @@ kubectl get secret sandbox-ca-key-pair -n sandbox-system -o jsonpath='{.data.tls
 
 ```bash
 export SSL_CERT_FILE=/path/to/ca.crt
-
-# 如果你需要通过定制 SDK 的方式使用单域名接入，还需要配置以下环境变量
-$ export REQUESTS_CA_BUNDLE=/path/to/ca.crt
 ```

@@ -51,7 +51,4 @@ Clients need to set the environment variable `SSL_CERT_FILE` to the path of the 
 
 ```bash
 export SSL_CERT_FILE=/path/to/ca.crt
-
-# If you need to access via single domain using the customized SDK, you also need to configure the following environment variable
-$ export REQUESTS_CA_BUNDLE=/path/to/ca.crt
 ```

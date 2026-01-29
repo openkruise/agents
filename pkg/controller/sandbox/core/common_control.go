@@ -131,7 +131,7 @@ func (r *commonControl) EnsureSandboxUpdated(ctx context.Context, args EnsureFun
 
 func (r *commonControl) EnsureSandboxPaused(ctx context.Context, args EnsureFuncArgs) error {
 	pod, box, newStatus := args.Pod, args.Box, args.NewStatus
-	logger := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(box), "pod", klog.KObj(pod))
+	logger := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(box), "pod", klog.KObj(pod), "phase", "EnsureSandboxPaused")
 	cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
 	if cond == nil {
 		cond = &metav1.Condition{
@@ -141,7 +141,9 @@ func (r *commonControl) EnsureSandboxPaused(ctx context.Context, args EnsureFunc
 			LastTransitionTime: metav1.Now(),
 		}
 		utils.SetSandboxCondition(newStatus, *cond)
+		logger.Info("Paused condition initialized")
 	} else if cond.Status == metav1.ConditionTrue {
+		logger.Info("Paused condition is already true")
 		return nil
 	}
 
@@ -150,6 +152,7 @@ func (r *commonControl) EnsureSandboxPaused(ctx context.Context, args EnsureFunc
 		rCond.Status = metav1.ConditionFalse
 		rCond.LastTransitionTime = metav1.Now()
 		utils.SetSandboxCondition(newStatus, *rCond)
+		logger.Info("The paused phase sets condition ready to false")
 	}
 
 	// Pod deletion completed, paused completed
@@ -158,14 +161,15 @@ func (r *commonControl) EnsureSandboxPaused(ctx context.Context, args EnsureFunc
 		cond.Status = metav1.ConditionTrue
 		cond.LastTransitionTime = metav1.Now()
 		utils.SetSandboxCondition(newStatus, *cond)
+		logger.Info("Pod deletion completed, pause phase completed")
 		return nil
 	}
 	// Pod deletion incomplete, waiting
-	if !pod.DeletionTimestamp.IsZero() {
+	if pod != nil && !pod.DeletionTimestamp.IsZero() {
 		logger.Info("Sandbox wait pod paused")
 		return nil
 	}
-	err := client.IgnoreNotFound(r.Delete(ctx, pod, &client.DeleteOptions{GracePeriodSeconds: ptr.To(int64(30))}))
+	err := client.IgnoreNotFound(r.Delete(ctx, pod, &client.DeleteOptions{GracePeriodSeconds: ptr.To(int64(5))}))
 	if err != nil {
 		logger.Error(err, "Delete pod failed")
 		return err
@@ -180,7 +184,7 @@ func (r *commonControl) EnsureSandboxResumed(ctx context.Context, args EnsureFun
 	// Consider the scenario where a pod is paused and immediately resumed,
 	// pod phase may be Running, but the actual state could be Terminating.
 	if pod != nil && !pod.DeletionTimestamp.IsZero() {
-		return fmt.Errorf("the pods created in the previous stage are still in the terminating state.")
+		return fmt.Errorf("the pods created in the previous stage are still in the terminating state")
 	}
 
 	// first create pod

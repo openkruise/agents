@@ -106,8 +106,8 @@ func (s *Server) handleRequestHeaders(requestHeaders *extProcPb.ProcessingReques
 		errorMsg := fmt.Sprintf("route for sandbox %s not found", sandboxID)
 		return s.logAndCreateErrorResponse(http.StatusNotFound, errorMsg, log)
 	}
-	if route.State == agentsv1alpha1.SandboxStatePaused {
-		return s.logAndCreateErrorResponse(http.StatusForbidden, "sandbox is paused", log)
+	if route.State != agentsv1alpha1.SandboxStateRunning {
+		return s.logAndCreateErrorResponse(http.StatusBadGateway, "sandbox is not running", log)
 	}
 	if extraHeaders == nil {
 		extraHeaders = make(map[string]string)

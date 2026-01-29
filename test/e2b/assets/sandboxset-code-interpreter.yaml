@@ -1,0 +1,51 @@
+apiVersion: agents.kruise.io/v1alpha1
+kind: SandboxSet
+metadata:
+  name: code-interpreter
+  namespace: default
+spec:
+  replicas: 4
+  template:
+    metadata:
+      annotations:
+    spec:
+      initContainers:
+        - name: runtime
+          image: agent-runtime:latest
+          imagePullPolicy: IfNotPresent
+          command: [ "sh", "/workspace/entrypoint.sh" ]
+          volumeMounts:
+            - name: envd-volume
+              mountPath: /mnt/envd
+          env:
+            - name: ENVD_DIR
+              value: /mnt/envd
+          restartPolicy: Always
+      containers:
+        - name: sandbox
+          image: registry-ap-southeast-1.ack.aliyuncs.com/acs/code-interpreter:v1.6
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: ENVD_DIR
+              value: /mnt/envd
+          volumeMounts:
+            - name: envd-volume
+              mountPath: /mnt/envd
+          lifecycle:
+            postStart:
+              exec:
+                command:
+                  - bash
+                  - /mnt/envd/envd-run.sh
+          startupProbe:
+            failureThreshold: 20
+            httpGet:
+              path: /health
+              port: 49999
+            initialDelaySeconds: 1
+            periodSeconds: 2
+            timeoutSeconds: 1
+      terminationGracePeriodSeconds: 1
+      volumes:
+        - name: envd-volume
+          emptyDir: {}

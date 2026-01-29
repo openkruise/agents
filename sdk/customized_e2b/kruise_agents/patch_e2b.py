@@ -1,9 +1,9 @@
 import os
 
-import requests
 from e2b import ConnectionConfig
 from e2b.sandbox.main import SandboxBase
-from e2b.sandbox_sync.main import Sandbox
+from e2b_code_interpreter.code_interpreter_sync import Sandbox as SandboxSync
+from e2b_code_interpreter.code_interpreter_sync import JUPYTER_PORT
 
 
 def __sandbox_get_host(self, port: int) -> str:
@@ -18,21 +18,17 @@ def __get_api_url(https: bool):
     return f"{'https' if https else 'http'}://{os.environ['E2B_DOMAIN']}/kruise/api"
 
 
-def __get_kill(api: str):
-    def __kill(self):
-        resp = requests.delete(f"{api}/sandboxes/{self.sandbox_id}", headers={
-            "X-Api-Key": os.environ["E2B_API_KEY"]
-        })
-        if resp.status_code != 204:
-            return resp.json()
-        return "success"
-    return __kill
+def __connection_config_get_sandbox_url_http(self, sandbox_id: str, sandbox_domain: str) -> str:
+    return f"http://{__connection_config_get_host(self, sandbox_id, sandbox_domain, ConnectionConfig.envd_port)}"
 
+
+def __jupyter_url_http(self) -> str:
+    return f"http://{__sandbox_get_host(self, JUPYTER_PORT)}"
 
 def patch_e2b(https: bool = True):
     os.environ["E2B_API_URL"] = __get_api_url(https)
-    if not https:
-        os.environ["E2B_DEBUG"] = "true"
     SandboxBase.get_host = __sandbox_get_host
     ConnectionConfig.get_host = __connection_config_get_host
-    Sandbox.kill = __get_kill(__get_api_url(https))
+    if not https:
+        ConnectionConfig.get_sandbox_url = __connection_config_get_sandbox_url_http
+        setattr(SandboxSync, '_jupyter_url', property(__jupyter_url_http))
