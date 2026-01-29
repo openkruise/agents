@@ -26,6 +26,9 @@ spec:
     - jsonPath: .spec.shutdownTime
       name: shutdown_time
       type: string
+    - jsonPath: .spec.pauseTime
+      name: pause_time
+      type: string
     - jsonPath: .status.message
       name: Message
       type: string
@@ -54,6 +57,11 @@ spec:
           spec:
             description: spec defines the desired state of Sandbox
             properties:
+              pauseTime:
+                description: PauseTime - Absolute time when the sandbox will be paused
+                  automatically.
+                format: date-time
+                type: string
               paused:
                 description: Paused indicates whether pause the sandbox pod.
                 type: boolean

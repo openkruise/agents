@@ -46,7 +46,6 @@ import (
 	"github.com/openkruise/agents/pkg/controller/sandbox/core"
 	"github.com/openkruise/agents/pkg/discovery"
 	"github.com/openkruise/agents/pkg/features"
-	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
@@ -73,7 +72,7 @@ func Add(mgr manager.Manager) error {
 	if err != nil {
 		return err
 	}
-	klog.Infof("start SandboxReconciler success")
+	klog.Infof("Started SandboxReconciler successfully")
 	return nil
 }
 
@@ -106,6 +105,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return reconcile.Result{}, nil
 	}
 
+	logger.Info("Began to process Sandbox for reconcile")
 	// If resourceVersion expectations have not satisfied yet, just skip this reconcile
 	core.ResourceVersionExpectations.Observe(box)
 	if isSatisfied, unsatisfiedDuration := core.ResourceVersionExpectations.IsSatisfied(box); !isSatisfied {
@@ -117,7 +117,6 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		core.ResourceVersionExpectations.Delete(box)
 	}
 
-	logger.V(consts.DebugLogLevel).Info("Began to process Sandbox for reconcile")
 	newStatus := box.Status.DeepCopy()
 	if box.Annotations == nil {
 		box.Annotations = map[string]string{}
@@ -155,15 +154,25 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return reconcile.Result{}, err
 	}
 
-	// Check Shutdown
+	// Check ShutdownTime and PauseTime
+	now := metav1.Now()
 	var requeueAfter time.Duration
 	if box.Spec.ShutdownTime != nil && box.DeletionTimestamp == nil {
-		now := metav1.Now()
 		if box.Spec.ShutdownTime.Before(&now) {
-			logger.Info("Sandbox shutdown time reached，and it will be deleted.")
-			return reconcile.Result{}, r.Delete(ctx, box)
+			logger.Info("sandbox shutdown time reached, will be deleted")
+			return ctrl.Result{}, r.Delete(ctx, box)
 		}
 		requeueAfter = box.Spec.ShutdownTime.Sub(now.Time)
+	}
+	if box.Spec.PauseTime != nil && !box.Spec.Paused {
+		if box.Spec.PauseTime.Before(&now) {
+			logger.Info("sandbox pause time reached, will be paused")
+			modified := box.DeepCopy()
+			patch := client.MergeFrom(box)
+			modified.Spec.Paused = true
+			return ctrl.Result{}, r.Patch(ctx, modified, patch)
+		}
+		requeueAfter = min(requeueAfter, box.Spec.PauseTime.Sub(now.Time))
 	}
 
 	// calculate sandbox status

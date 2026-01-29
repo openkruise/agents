@@ -3,10 +3,11 @@ package sandboxset
 import (
 	"context"
 	"fmt"
-	"k8s.io/apimachinery/pkg/api/resource"
 	"strconv"
 	"strings"
 	"testing"
+
+	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"

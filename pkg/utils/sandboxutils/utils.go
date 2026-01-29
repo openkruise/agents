@@ -71,9 +71,6 @@ func GetSandboxID(sbx *agentsv1alpha1.Sandbox) string {
 }
 
 func IsSandboxReady(sbx *agentsv1alpha1.Sandbox) bool {
-	if sbx.Status.PodInfo.PodIP == "" {
-		return false
-	}
 	readyCond := utils.GetSandboxCondition(&sbx.Status, string(agentsv1alpha1.SandboxConditionReady))
 	return readyCond != nil && readyCond.Status == metav1.ConditionTrue
 }

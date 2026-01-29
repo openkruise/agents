@@ -3,19 +3,25 @@ package sandboxcr
 
 import (
 	"context"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
 	"connectrpc.com/connect"
-	"github.com/openkruise/agents/api/v1alpha1"
-	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
-	"github.com/openkruise/agents/proto/envd/process"
-	"github.com/openkruise/agents/proto/envd/process/processconnect"
+
+	"github.com/openkruise/agents/pkg/servers/web"
+	constantUtils "github.com/openkruise/agents/pkg/utils"
+
 	"github.com/stretchr/testify/assert"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
+
+	"github.com/openkruise/agents/api/v1alpha1"
+	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
+	"github.com/openkruise/agents/proto/envd/process"
+	"github.com/openkruise/agents/proto/envd/process/processconnect"
 )
 
 var AccessToken = "access-token"
@@ -69,7 +75,7 @@ func (s *TestProcessService) SendSignal(context.Context, *connect.Request[proces
 	return connect.NewResponse(&process.SendSignalResponse{}), nil
 }
 
-func NewTestEnvdServer(result RunCommandResult, immediately bool, err *string) *httptest.Server {
+func NewTestRuntimeServer(result RunCommandResult, immediately bool, err *string) *httptest.Server {
 	testResponses := []process.StartResponse{
 		{
 			Event: &process.ProcessEvent{
@@ -131,9 +137,16 @@ func NewTestEnvdServer(result RunCommandResult, immediately bool, err *string) *
 		responses:   testResponses,
 		immediately: immediately,
 	}
-	_, handler := processconnect.NewProcessHandler(service)
-	server := httptest.NewServer(handler)
-	return server
+	mux := http.NewServeMux()
+	grpcPath, handler := processconnect.NewProcessHandler(service)
+	mux.Handle(grpcPath, handler)
+	web.RegisterRoute(mux, http.MethodPost, "/init", func(r *http.Request) (response web.ApiResponse[struct{}], err *web.ApiError) {
+		return web.ApiResponse[struct{}]{
+			Code: http.StatusNoContent,
+			Body: struct{}{},
+		}, nil
+	})
+	return httptest.NewServer(mux)
 }
 
 func TestSandbox_runCommandWithEnvd(t *testing.T) {
@@ -204,21 +217,21 @@ func TestSandbox_runCommandWithEnvd(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			server := NewTestEnvdServer(tt.result, tt.immediately, tt.processError)
+			server := NewTestRuntimeServer(tt.result, tt.immediately, tt.processError)
 			defer server.Close()
 
-			cache, client := NewTestCache(t)
+			cache, _, client := NewTestCache(t, constantUtils.DefaultSandboxDeployNamespace)
 			sbx := &v1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "test-sandbox",
 					Annotations: map[string]string{
-						v1alpha1.AnnotationEnvdURL:         server.URL,
-						v1alpha1.AnnotationEnvdAccessToken: tt.accessToken,
+						v1alpha1.AnnotationRuntimeURL:         server.URL,
+						v1alpha1.AnnotationRuntimeAccessToken: tt.accessToken,
 					},
 				},
 			}
-			sandbox := AsSandboxForTest(sbx, client, cache)
-			result, err := sandbox.runCommandWithEnvd(context.Background(), &process.ProcessConfig{}, tt.timeout)
+			sandbox := AsSandbox(sbx, cache, client)
+			result, err := sandbox.runCommandWithRuntime(context.Background(), &process.ProcessConfig{}, tt.timeout)
 
 			if tt.expectError != "" {
 				assert.Error(t, err)

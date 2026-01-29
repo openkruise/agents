@@ -73,7 +73,7 @@ func Add(mgr manager.Manager) error {
 	if err != nil {
 		return err
 	}
-	klog.Infof("start SandboxSetReconciler success")
+	klog.Infof("Started SandboxSetReconciler successfully")
 	return nil
 }
 

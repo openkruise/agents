@@ -5,146 +5,16 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 	"time"
 
-	"github.com/google/uuid"
-	"github.com/openkruise/agents/api/v1alpha1"
-	sandbox_manager "github.com/openkruise/agents/pkg/sandbox-manager"
+	"k8s.io/klog/v2"
+
+	sandboxmanager "github.com/openkruise/agents/pkg/sandbox-manager"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
-	"github.com/openkruise/agents/pkg/utils"
 	managerutils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
-	"k8s.io/apimachinery/pkg/util/validation"
-	"k8s.io/klog/v2"
 )
-
-// CreateSandbox allocates a Pod as a new sandbox
-func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sandbox], *web.ApiError) {
-	ctx := r.Context()
-	log := klog.FromContext(ctx)
-	start := time.Now()
-	user := GetUserFromContext(ctx)
-	if user == nil {
-		return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
-			Code:    http.StatusUnauthorized,
-			Message: "User is empty",
-		}
-	}
-	var request models.NewSandboxRequest
-	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-		return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
-			Message: err.Error(),
-		}
-	}
-
-	if err := request.ParseExtensions(); err != nil {
-		return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
-			Code:    http.StatusBadRequest,
-			Message: fmt.Sprintf("Bad extension param: %s", err.Error()),
-		}
-	}
-
-	for k := range request.Metadata {
-		if errLists := validation.IsQualifiedName(k); len(errLists) > 0 {
-			return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
-				Code:    http.StatusBadRequest,
-				Message: fmt.Sprintf("Unqualified metadata key [%s]: %s", k, strings.Join(errLists, ", ")),
-			}
-		}
-
-		if !ValidateMetadataKey(k) {
-			return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
-				Code:    http.StatusBadRequest,
-				Message: fmt.Sprintf("Forbidden metadata key [%s]: cannot contain prefixes: %v", k, BlackListPrefix),
-			}
-		}
-	}
-
-	if request.Timeout == 0 {
-		request.Timeout = 300
-	}
-
-	if request.Timeout < 30 || request.Timeout > sc.maxTimeout {
-		return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
-			Code:    http.StatusBadRequest,
-			Message: fmt.Sprintf("timeout should between 30 and %d", sc.maxTimeout),
-		}
-	}
-
-	accessToken := uuid.NewString()
-	claimStart := time.Now()
-	sbx, err := sc.manager.ClaimSandbox(ctx, user.ID.String(), request.TemplateID, infra.ClaimSandboxOptions{
-		Modifier: func(sbx infra.Sandbox) {
-			sbx.SetTimeout(time.Duration(request.Timeout) * time.Second)
-			annotations := sbx.GetAnnotations()
-			if annotations == nil {
-				annotations = make(map[string]string)
-			}
-			for k, v := range request.Metadata {
-				annotations[k] = v
-			}
-			annotations[v1alpha1.AnnotationEnvdAccessToken] = accessToken
-			route := sbx.GetRoute()
-			annotations[v1alpha1.AnnotationEnvdURL] = fmt.Sprintf("http://%s:%d", route.IP, models.EnvdPort)
-			sbx.SetAnnotations(annotations)
-		},
-		Image: request.Extensions.Image,
-	})
-	if err != nil {
-		return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
-			Message: err.Error(),
-		}
-	}
-	claimCost := time.Since(claimStart)
-
-	initEnvdStart := time.Now()
-	initEnvdCost := time.Duration(0)
-	pool, ok := sc.manager.GetInfra().GetPoolByObject(sbx)
-	if !ok {
-		return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
-			Code:    http.StatusInternalServerError,
-			Message: "Failed to get sandbox pool",
-		}
-	}
-	if pool.GetAnnotations()[v1alpha1.AnnotationShouldInitEnvd] == utils.True {
-		if err = sc.initEnvd(ctx, sbx, request.EnvVars, accessToken); err != nil {
-			log.Error(err, "failed to init envd")
-			return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
-				Message: err.Error(),
-			}
-		}
-		initEnvdCost = time.Since(initEnvdStart)
-		log.Info("init envd done")
-	}
-
-	mountStart := time.Now()
-	mountCost := time.Duration(0)
-	// Currently, CSIMount depends on envd, which cannot be guaranteed to exist in all sandboxes.
-	// After agent-runtime is ready, move the CSI mount logic to pool.ClaimSandbox as a built-in process.
-	if request.Extensions.CSIMount.Driver != "" {
-		if err = sbx.CSIMount(ctx, request.Extensions.CSIMount.Driver, request.Extensions.CSIMount.Request); err != nil {
-			log.Error(err, "failed to mount storage")
-			if err := sbx.Kill(ctx); err != nil {
-				log.Error(err, "failed to kill sandbox", "id", sbx.GetSandboxID())
-			} else {
-				log.Info("sandbox killed", "id", sbx.GetSandboxID())
-			}
-			return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
-				Message: err.Error(),
-			}
-		}
-		mountCost = time.Since(mountStart)
-		log.Info("storage mounted")
-	}
-	log.Info("sandbox allocated", "id", sbx.GetSandboxID(), "sbx", klog.KObj(sbx), "totalCost", time.Since(start),
-		"claimCost", claimCost, "initEnvdCost", initEnvdCost, "mountCost", mountCost)
-	return web.ApiResponse[*models.Sandbox]{
-		Code: http.StatusCreated,
-		Body: sc.convertToE2BSandbox(sbx, accessToken),
-	}, nil
-}
 
 // DescribeSandbox returns details of a specific sandbox
 func (sc *Controller) DescribeSandbox(r *http.Request) (web.ApiResponse[*models.Sandbox], *web.ApiError) {
@@ -159,7 +29,7 @@ func (sc *Controller) DescribeSandbox(r *http.Request) (web.ApiResponse[*models.
 	}
 
 	return web.ApiResponse[*models.Sandbox]{
-		Body: sc.convertToE2BSandbox(sbx, sbx.GetAnnotations()[v1alpha1.AnnotationEnvdAccessToken]),
+		Body: sc.convertToE2BSandbox(sbx, sbx.GetAccessToken()),
 	}, nil
 }
 
@@ -185,63 +55,20 @@ func (sc *Controller) DeleteSandbox(r *http.Request) (web.ApiResponse[struct{}],
 	}, nil
 }
 
-// SetSandboxTimeout sets the timeout of a claimed sandbox
-func (sc *Controller) SetSandboxTimeout(r *http.Request) (web.ApiResponse[struct{}], *web.ApiError) {
-	err := sc.setSandboxTimeout(r, false)
-	if err != nil {
-		if err.Code != http.StatusNotFound {
-			// Just to follow E2B spec, I don't know why it is designed
-			err.Code = http.StatusInternalServerError
+func (sc *Controller) buildSetTimeoutOptions(autoPause bool, now time.Time, timeoutSeconds int) infra.TimeoutOptions {
+	if autoPause {
+		return infra.TimeoutOptions{
+			PauseTime:    TimeAfterSeconds(now, timeoutSeconds),
+			ShutdownTime: TimeAfterSeconds(now, sc.maxTimeout),
 		}
-		return web.ApiResponse[struct{}]{}, err
 	}
-	return web.ApiResponse[struct{}]{
-		Code: http.StatusNoContent,
-	}, nil
+	return infra.TimeoutOptions{
+		ShutdownTime: TimeAfterSeconds(now, timeoutSeconds),
+	}
 }
 
-func (sc *Controller) setSandboxTimeout(r *http.Request, allowNonRunning bool) *web.ApiError {
-	ctx := r.Context()
-	log := klog.FromContext(ctx)
-
-	var request models.SetTimeoutRequest
-	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-		return &web.ApiError{
-			Message: err.Error(),
-		}
-	}
-	if request.TimeoutSeconds <= 0 || request.TimeoutSeconds > sc.maxTimeout {
-		return &web.ApiError{
-			Code:    http.StatusBadRequest,
-			Message: fmt.Sprintf("timeout should between 30 and %d", sc.maxTimeout),
-		}
-	}
-
-	id := r.PathValue("sandboxID")
-	sbx, apiErr := sc.getSandboxOfUser(ctx, id)
-	if apiErr != nil {
-		return apiErr
-	}
-
-	if !allowNonRunning {
-		state, reason := sbx.GetState()
-		if state != v1alpha1.SandboxStateRunning {
-			log.Info("cannot set sandbox timeout for sandbox not running", "name", sbx.GetName(), "state", state, "reason", reason)
-			return &web.ApiError{
-				Code:    http.StatusConflict,
-				Message: fmt.Sprintf("sandbox %s is not running", sbx.GetName()),
-			}
-		}
-	}
-
-	if err := sbx.SaveTimeout(ctx, time.Duration(request.TimeoutSeconds)*time.Second); err != nil {
-		return &web.ApiError{
-			Message: fmt.Sprintf("Failed to set sandbox timeout: %v", err),
-		}
-	}
-
-	log.Info("sandbox timeout set", "id", id, "timeout", request.TimeoutSeconds)
-	return nil
+func TimeAfterSeconds(now time.Time, afterSeconds int) time.Time {
+	return now.Add(time.Duration(afterSeconds) * time.Second)
 }
 
 type browserHandShake struct {
@@ -254,10 +81,10 @@ type browserHandShake struct {
 }
 
 // BrowserUse is a cdp entry for browser_use to create a session
-// Use case:
+// Usage:
 //
 //	```python
-//	browser_session = BrowserSession(cdp_url=f"https://api.{CDP_DOMAIN}/browser/{sandbox_id}")
+//	browser_session = BrowserSession(cdp_url=f"https://api.{E2B_DOMAIN}/browser/{sandbox_id}")
 //	```
 func (sc *Controller) BrowserUse(r *http.Request) (web.ApiResponse[*browserHandShake], *web.ApiError) {
 	sandboxID := r.PathValue("sandboxID")
@@ -266,7 +93,7 @@ func (sc *Controller) BrowserUse(r *http.Request) (web.ApiResponse[*browserHandS
 		return web.ApiResponse[*browserHandShake]{}, apiErr
 	}
 
-	resp, err := sbx.Request(r, "/json/version", models.CDPPort)
+	resp, err := sbx.Request(r.Context(), r.Method, "/json/version", models.CDPPort, r.Body)
 	if err != nil {
 		return web.ApiResponse[*browserHandShake]{}, &web.ApiError{
 			Message: fmt.Sprintf("Failed to proxy request to sandbox port %d: %v", models.CDPPort, err),
@@ -293,8 +120,8 @@ func (sc *Controller) BrowserUse(r *http.Request) (web.ApiResponse[*browserHandS
 	}, nil
 }
 
-func (sc *Controller) Debug(_ *http.Request) (web.ApiResponse[sandbox_manager.DebugInfo], *web.ApiError) {
-	return web.ApiResponse[sandbox_manager.DebugInfo]{
+func (sc *Controller) Debug(_ *http.Request) (web.ApiResponse[sandboxmanager.DebugInfo], *web.ApiError) {
+	return web.ApiResponse[sandboxmanager.DebugInfo]{
 		Body: sc.manager.GetDebugInfo(),
 	}, nil
 }

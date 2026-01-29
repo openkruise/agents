@@ -24,13 +24,28 @@ type RunCommandResult struct {
 	Error    error
 }
 
-// runCommandWithEnvd is a temporary solution to run command inside the sandbox,
-// which will be replaced by `sandbox-runtime` in the future
-func (s *Sandbox) runCommandWithEnvd(ctx context.Context, processConfig *process.ProcessConfig, timeout time.Duration) (RunCommandResult, error) {
-	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(s.Sandbox)).V(consts.DebugLogLevel)
-	url := s.GetAnnotations()[v1alpha1.AnnotationEnvdURL]
+func (s *Sandbox) GetRuntimeURL() string {
+	url := s.GetAnnotations()[v1alpha1.AnnotationRuntimeURL]
 	if url == "" {
-		return RunCommandResult{}, fmt.Errorf("envd url not found on sandbox")
+		url = s.GetAnnotations()[v1alpha1.AnnotationEnvdURL] // legacy
+	}
+	return url
+}
+
+func (s *Sandbox) GetAccessToken() string {
+	token := s.Annotations[v1alpha1.AnnotationRuntimeAccessToken]
+	if token == "" {
+		token = s.Annotations[v1alpha1.AnnotationEnvdAccessToken] // legacy
+	}
+	return token
+}
+
+// runCommandWithRuntime is a solution to run command inside the sandbox.
+func (s *Sandbox) runCommandWithRuntime(ctx context.Context, processConfig *process.ProcessConfig, timeout time.Duration) (RunCommandResult, error) {
+	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(s.Sandbox)).V(consts.DebugLogLevel)
+	url := s.GetRuntimeURL()
+	if url == "" {
+		return RunCommandResult{}, fmt.Errorf("runtime url not found on sandbox")
 	}
 	client := processconnect.NewProcessClient(
 		http.DefaultClient,
@@ -41,7 +56,7 @@ func (s *Sandbox) runCommandWithEnvd(ctx context.Context, processConfig *process
 	ctxWithTimeout, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	clientContext, callInfo := connect.NewClientContext(ctxWithTimeout)
-	callInfo.RequestHeader().Set("X-Access-Token", s.Annotations[v1alpha1.AnnotationEnvdAccessToken])
+	callInfo.RequestHeader().Set("X-Access-Token", s.GetAccessToken())
 	callInfo.RequestHeader().Set("Authorization", "Basic cm9vdDo=") // Basic root:
 
 	req := connect.NewRequest(&process.StartRequest{

@@ -31,62 +31,9 @@ OpenKruise Agents 提供了兼容 E2B 协议的后端管控组件 `sandbox-manag
 
 ### 1.1 通过 SandboxSet 部署预热池
 
-`SandboxSet` 作为管理 `Sandbox` 的工作负载，将会自动被 `sandbox-manager` 作为模板所识别。通过在 K8s 中创建如下的
-`SandboxSet`，
-就可以创建一个名为 `code-interpreter` 的模板。
+`SandboxSet` 作为管理 `Sandbox` 的工作负载，将会自动被 `sandbox-manager` 作为模板所识别。您可以参考 [sandboxset.yaml](sandboxset.yaml)
+在 K8s 中创建一个 `SandboxSet`，以创建一个名为 `code-interpreter` 的模板。
 
-```yaml
-apiVersion: agents.kruise.io/v1alpha1
-kind: SandboxSet
-metadata:
-  annotations:
-    # 启用 SandboxManager 的 Envd 初始化能力
-    e2b.agents.kruise.io/should-init-envd: "true"
-  name: code-interpreter
-  namespace: default
-spec:
-  # 预热池的大小，建议比预估的请求突发量略大
-  replicas: 100
-  template: # 声明一个 Pod 模板
-    spec:
-      initContainers:
-        - name: init # 通过 native sidecar 注入 agent-runtime 组件
-          image: registry-cn-hangzhou.ack.aliyuncs.com/acs/agent-runtime:v0.0.1
-          volumeMounts:
-            - name: agent-runtime-volume
-              mountPath: /mnt/agent-runtime
-          env:
-            - name: AGENT_RUNTIME_WORKSPACE
-              value: /mnt/agent-runtime
-          restartPolicy: Always
-      containers:
-        - name: sandbox
-          image: e2bdev/code-interpreter:latest # 使用 E2B 官方的 code-interpreter 镜像
-          resources:
-            requests:
-              cpu: 1
-              memory: 1Gi
-            limits:
-              cpu: 1
-              memory: 1Gi
-          env:
-            - name: AGENT_RUNTIME_WORKSPACE
-              value: /mnt/agent-runtime
-          volumeMounts:
-            - name: agent-runtime-volume
-              mountPath: /mnt/agent-runtime
-          startupProbe:
-            failureThreshold: 20
-            httpGet: # 官方镜像中的 health 检查接口
-              path: /health
-              port: 49999
-            initialDelaySeconds: 1
-            periodSeconds: 2
-            timeoutSeconds: 1
-      volumes:
-        - name: agent-runtime-volume # 定义 agent-runtime 与主容器的共享目录
-          emptyDir: { }
-```
 
 ### 1.2 使用自定义镜像
 
@@ -198,12 +145,14 @@ sbx = Sandbox.create(template="some-template", timeout=300, metadata={
 OpenKruise Agents 支持通过 `Sandbox.create` 创建沙箱时动态挂载 CSI Volume，为每个沙箱指定单独的挂载卷（如阿里云 NAS、OSS 等）。
 这个能力依赖 agent-runtime，并且也会影响交付效率。
 
+以下的例子中，这段代码演示了如何在创建沙箱时使用动态挂载功能，将指定的CSI存储卷（`oss-pv-test`）挂载到沙箱内的`/data`目录，使沙箱环境能够访问远程存储资源。
+
 ```python
 from e2b_code_interpreter import Sandbox
 from kruise_agents.csi import AlibabaCloudNAS
 
 sbx = Sandbox.create(template="some-template", timeout=300, metadata={
-    "e2b.agents.kruise.io/csi": AlibabaCloudNAS(
-        mount_path="/mnt/nas", nas_type="fastnas", endpoint="ap-y******.3******.cn-hangzhou.nas.aliyuncs.com")
+    "e2b.agents.kruise.io/csi-volume-name": "oss-pv-test",
+    "e2b.agents.kruise.io/csi-mount-point": "/data"
 })
 ```

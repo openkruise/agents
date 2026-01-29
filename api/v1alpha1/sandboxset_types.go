@@ -23,8 +23,10 @@ import (
 const (
 	InternalPrefix = "agents.kruise.io/"
 
-	// LabelSandboxPool identifies which SandboxSet generated the sandbox
+	// LabelSandboxPool identifies which SandboxSet generated the sandbox, which is deprecated and will be removed in the future
 	LabelSandboxPool = InternalPrefix + "sandbox-pool"
+	// LabelSandboxTemplate identifies which template generated the sandbox
+	LabelSandboxTemplate = InternalPrefix + "sandbox-template"
 	// LabelSandboxIsClaimed indicates whether the sandbox has been claimed by user
 	LabelSandboxIsClaimed = InternalPrefix + "sandbox-claimed"
 	LabelTemplateHash     = InternalPrefix + "template-hash"

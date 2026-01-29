@@ -15,31 +15,7 @@
 
 set -ex
 
-readonly IMAGE="$1"
-USE_GOPROXY=false
-
-while [[ $# -gt 1 ]]; do
-    key="$2"
-    case $key in
-        --use-goproxy)
-            USE_GOPROXY=true
-            shift # past argument
-            ;;
-        *)
-            echo "Unknown parameter passed: $key"
-            exit 1
-            ;;
-    esac
-    shift # past value
-done
-
-if [ "$USE_GOPROXY" = true ]; then
-    export GOPROXY=https://mirrors.aliyun.com/goproxy/
-fi
-
 kubectl cluster-info
-
-IMG=${IMAGE} ./hack/deploy_kind.sh
 
 for ((i=1;i<10;i++));
 do
@@ -61,7 +37,7 @@ kubectl get pod -n sandbox-system --no-headers | awk '{print $1}' | xargs kubect
 kubectl get pod -n sandbox-system --no-headers | awk '{print $1}' | xargs kubectl logs -n sandbox-system --previous=true
 set -e
 if [ "$PODS" -eq "1" ]; then
-  echo "Wait for agent-sandbox-controller ready successfully"
+  echo "Agent-sandbox-controller is ready"
 else
   echo "Timeout to wait for agent-sandbox-controller ready"
   exit 1

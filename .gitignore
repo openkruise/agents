@@ -26,6 +26,8 @@ go.work.sum
 *.swp
 *.swo
 *~
+
+*.crt
 *.pem
 vendor/*
 dev/

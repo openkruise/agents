@@ -13,7 +13,7 @@ see-also:
 replaces:
   - "/docs/proposals/20181231-replaced-proposal.md"
 superseded-by:
-  - "/docs/proposals/20190104-superceding-proposal.md"
+  - "/docs/proposals/20190104-superseding-proposal.md"
 ---
 
 # Title

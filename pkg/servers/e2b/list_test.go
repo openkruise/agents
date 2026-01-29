@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
@@ -132,6 +133,8 @@ func TestListSandboxes(t *testing.T) {
 			var createdRequests []*http.Request
 			var expectStates []string
 			for _, request := range tt.createRequests {
+				request.Extensions.SkipInitRuntime = true
+				request.Metadata[models.ExtensionKeySkipInitRuntime] = v1alpha1.True
 				resp, apiError := controller.CreateSandbox(NewRequest(t, nil, request, nil, user))
 				assert.Nil(t, apiError)
 				sandbox := resp.Body

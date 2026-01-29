@@ -5,6 +5,9 @@ const (
 	SandboxFinalizer = "agents.kruise.io/sandbox"
 	// PodAnnotationCreatedBy is used to identify Pod source: created by Sandbox controller or externally created (bypassing Sandbox syntax sugar)
 	PodAnnotationCreatedBy = "agents.kruise.io/created-by"
+
+	// default sandbox deploy namespace
+	DefaultSandboxDeployNamespace = "sandbox-system"
 )
 
 const (

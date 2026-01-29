@@ -3,8 +3,10 @@ package e2b
 import (
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
 	"k8s.io/klog/v2"
@@ -25,15 +27,28 @@ func (sc *Controller) PauseSandbox(r *http.Request) (web.ApiResponse[struct{}], 
 			Message: fmt.Sprintf("Sandbox %s is not running", id),
 		}
 	}
-	if err := sbx.Pause(ctx); err != nil {
+	timeoutOptions := sc.buildPauseTimeoutOptions(sbx, time.Now())
+	if err := sc.manager.PauseSandbox(ctx, sbx, infra.PauseOptions{
+		Timeout: &timeoutOptions,
+	}); err != nil {
 		return web.ApiResponse[struct{}]{}, &web.ApiError{
 			Message: fmt.Sprintf("Failed to pause sandbox: %v", err),
 		}
 	}
-	log.Info("sandbox paused")
+	log.Info("sandbox paused", "timeout", timeoutOptions)
 	return web.ApiResponse[struct{}]{
 		Code: http.StatusNoContent,
 	}, nil
+}
+
+func (sc *Controller) buildPauseTimeoutOptions(sbx infra.Sandbox, now time.Time) infra.TimeoutOptions {
+	timeout := TimeAfterSeconds(now, sc.maxTimeout)
+	opts := sbx.GetTimeout()
+	opts.ShutdownTime = timeout
+	if !opts.PauseTime.IsZero() {
+		opts.PauseTime = timeout
+	}
+	return opts
 }
 
 func (sc *Controller) ResumeSandbox(r *http.Request) (web.ApiResponse[struct{}], *web.ApiError) {
@@ -41,20 +56,18 @@ func (sc *Controller) ResumeSandbox(r *http.Request) (web.ApiResponse[struct{}],
 	ctx := r.Context()
 	log := klog.FromContext(ctx).WithValues("sandboxID", id)
 
-	log.Info("resetting sandbox timeout")
-	apiError := sc.setSandboxTimeout(r, true)
-	if apiError != nil {
-		if apiError.Code != http.StatusNotFound && apiError.Code != http.StatusConflict {
-			// Just to follow E2B spec, I don't know why it is designed
-			apiError.Code = http.StatusInternalServerError
-		}
-		return web.ApiResponse[struct{}]{}, apiError
+	request, apiErr := ParseSetTimeoutRequest(r, sc.maxTimeout)
+	if apiErr != nil {
+		apiErr.Code = http.StatusInternalServerError // E2B returns 500
+		return web.ApiResponse[struct{}]{}, apiErr
 	}
 
 	sbx, apiErr := sc.getSandboxOfUser(ctx, id)
 	if apiErr != nil {
 		return web.ApiResponse[struct{}]{}, apiErr
 	}
+	autoPause, _ := ParseTimeout(sbx)
+
 	if state, reason := sbx.GetState(); state != v1alpha1.SandboxStatePaused {
 		log.Info("skip resume sandbox: sandbox is not paused", "state", state, "reason", reason)
 		return web.ApiResponse[struct{}]{}, &web.ApiError{
@@ -63,12 +76,19 @@ func (sc *Controller) ResumeSandbox(r *http.Request) (web.ApiResponse[struct{}],
 		}
 	}
 	log.Info("resuming sandbox")
-	if err := sbx.Resume(ctx); err != nil {
+	if err := sc.manager.ResumeSandbox(ctx, sbx); err != nil {
 		return web.ApiResponse[struct{}]{}, &web.ApiError{
 			Message: fmt.Sprintf("Failed to resume sandbox: %v", err),
 		}
 	}
-	log.Info("sandbox resumed")
+
+	opts := sc.buildSetTimeoutOptions(autoPause, time.Now(), request.TimeoutSeconds)
+	log.Info("sandbox resumed, resetting sandbox timeout", "timeout", opts)
+	if err := sbx.SaveTimeout(ctx, opts); err != nil {
+		return web.ApiResponse[struct{}]{}, &web.ApiError{
+			Message: fmt.Sprintf("Failed to set sandbox timeout: %v", err),
+		}
+	}
 	return web.ApiResponse[struct{}]{
 		Code: http.StatusNoContent,
 	}, nil
@@ -79,38 +99,41 @@ func (sc *Controller) ConnectSandbox(r *http.Request) (web.ApiResponse[*models.S
 	ctx := r.Context()
 	log := klog.FromContext(ctx).WithValues("sandboxID", id)
 
-	log.Info("resetting sandbox timeout")
-	apiError := sc.setSandboxTimeout(r, true)
-	if apiError != nil {
-		return web.ApiResponse[*models.Sandbox]{}, apiError
+	request, apiErr := ParseSetTimeoutRequest(r, sc.maxTimeout)
+	if apiErr != nil {
+		return web.ApiResponse[*models.Sandbox]{}, apiErr
 	}
 
 	sbx, apiErr := sc.getSandboxOfUser(ctx, id)
 	if apiErr != nil {
 		return web.ApiResponse[*models.Sandbox]{}, apiErr
 	}
+	autoPause, _ := ParseTimeout(sbx)
+
 	var statusCode = http.StatusOK
 	if state, reason := sbx.GetState(); state == v1alpha1.SandboxStatePaused {
 		log.Info("sandbox is paused, will resume it", "reason", reason)
-		if err := sbx.Resume(ctx); err != nil {
+		if err := sc.manager.ResumeSandbox(ctx, sbx); err != nil {
 			log.Error(err, "failed to resume sandbox")
 			return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
 				Message: fmt.Sprintf("Failed to resume sandbox: %v", err),
 			}
 		}
 		statusCode = http.StatusCreated
-		log.Info("sandbox resumed")
+		log.Info("sandbox resumed", "timeout", sbx.GetTimeout())
 	} else {
 		log.Info("sandbox is not paused, skip resuming", "state", state, "reason", reason)
 	}
 
-	// refresh sandbox data
-	sbx, apiErr = sc.getSandboxOfUser(ctx, id)
-	if apiErr != nil {
-		return web.ApiResponse[*models.Sandbox]{}, apiErr
+	opts := sc.buildSetTimeoutOptions(autoPause, time.Now(), request.TimeoutSeconds)
+	log.Info("resetting timeout", "timeout", opts)
+	if err := sbx.SaveTimeout(ctx, opts); err != nil {
+		return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
+			Message: fmt.Sprintf("Failed to set sandbox timeout: %v", err),
+		}
 	}
 	return web.ApiResponse[*models.Sandbox]{
 		Code: statusCode,
-		Body: sc.convertToE2BSandbox(sbx, sbx.GetAnnotations()[v1alpha1.AnnotationEnvdAccessToken]),
-	}, nil
+		Body: sc.convertToE2BSandbox(sbx, sbx.GetAccessToken()),
+	}, apiErr
 }

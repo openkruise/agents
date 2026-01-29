@@ -19,12 +19,14 @@ package core
 import (
 	"context"
 
+	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/utils/expectations"
+	"github.com/openkruise/agents/pkg/utils/inplaceupdate"
 )
 
 var (
@@ -59,4 +61,11 @@ func NewSandboxControl(c client.Client, recorder record.EventRecorder) map[strin
 	controls := map[string]SandboxControl{}
 	controls[CommonControlName] = NewCommonControl(c, recorder)
 	return controls
+}
+
+// InPlaceUpdateHandler defines the interface for inplace update handlers
+type InPlaceUpdateHandler interface {
+	GetInPlaceUpdateControl() *inplaceupdate.InPlaceUpdateControl
+	GetRecorder() record.EventRecorder
+	GetLogger(ctx context.Context, box *agentsv1alpha1.Sandbox) logr.Logger
 }

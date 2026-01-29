@@ -38,12 +38,13 @@ jobs:
           version: ${{ env.KIND_VERSION }}
       - name: Build image
         run: |
-          export IMAGE="openkruise/agent-sandbox-controller:e2e-${GITHUB_RUN_ID}"
+          export IMAGE="agent-sandbox-controller:latest"
           docker build -f dockerfiles/agent-sandbox-controller.Dockerfile  --pull --no-cache . -t $IMAGE
           kind load docker-image --name=${KIND_CLUSTER_NAME} $IMAGE || { echo >&2 "kind not installed or error loading image: $IMAGE"; exit 1; }
       - name: Install Kruise Agents
         run: |
-          IMG=openkruise/agent-sandbox-controller:e2e-${GITHUB_RUN_ID} make install-agents
+          CONTROLLER_IMG=agent-sandbox-controller:latest make deploy-agent-sandbox-controller
+          bash hack/wait-agent-sandbox-controller.sh
       - name: Run E2E Tests
         run: |
           export KUBECONFIG=/home/runner/.kube/config

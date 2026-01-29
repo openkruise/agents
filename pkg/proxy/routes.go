@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync"
 )
 
 // Route represents an internal sandbox routing rule
@@ -25,14 +26,38 @@ func (s *Server) SyncRouteWithPeers(route Route) error {
 	if err != nil {
 		return err
 	}
-	var errStrings []string
+
+	// Collect peer IPs under read lock to minimize lock hold time
 	s.peerMu.RLock()
+	peerIPs := make([]string, 0, len(s.peers))
 	for ip := range s.peers {
-		if err = requestPeer(http.MethodPost, ip, RefreshAPI, body); err != nil {
-			errStrings = append(errStrings, err.Error())
-		}
+		peerIPs = append(peerIPs, ip)
 	}
 	s.peerMu.RUnlock()
+
+	if len(peerIPs) == 0 {
+		return nil
+	}
+
+	var (
+		wg         sync.WaitGroup
+		mu         sync.Mutex
+		errStrings []string
+	)
+
+	for _, ip := range peerIPs {
+		wg.Add(1)
+		go func(peerIP string) {
+			defer wg.Done()
+			if err := requestPeer(http.MethodPost, peerIP, RefreshAPI, body); err != nil {
+				mu.Lock()
+				errStrings = append(errStrings, err.Error())
+				mu.Unlock()
+			}
+		}(ip)
+	}
+	wg.Wait()
+
 	if len(errStrings) == 0 {
 		return nil
 	}

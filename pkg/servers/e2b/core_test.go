@@ -16,7 +16,7 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/client/clientset/versioned"
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
-	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
+	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
@@ -49,6 +49,7 @@ func CreatePodWithStatus(t *testing.T, client kubernetes.Interface, pod *corev1.
 
 func Setup(t *testing.T) (*Controller, *clients.ClientSet, func()) {
 	utils.InitLogOutput()
+	sandboxcr.SetClaimLockTimeout(100 * time.Millisecond)
 	clientSet := clients.NewFakeClientSet()
 	namespace := "sandbox-system"
 	// mock self pod
@@ -81,11 +82,11 @@ func Setup(t *testing.T) (*Controller, *clients.ClientSet, func()) {
 		},
 		Data: map[string][]byte{},
 	}
-	_, err := clientSet.CoreV1().Secrets(namespace).Create(context.Background(), secret, metav1.CreateOptions{})
+	_, err := clientSet.CoreV1().Secrets(namespace).Create(t.Context(), secret, metav1.CreateOptions{})
 	assert.NoError(t, err)
 
 	controller := NewController("example.com", InitKey, namespace, models.DefaultMaxTimeout, TestServerPort, true, clientSet)
-	assert.NoError(t, controller.Init(consts.InfraSandboxCR))
+	assert.NoError(t, controller.Init())
 	_, err = controller.Run(namespace, "component=sandbox-manager")
 	assert.NoError(t, err)
 	return controller, clientSet, func() {
@@ -139,7 +140,7 @@ func CreateSandboxPool(t *testing.T, client versioned.Interface, name string, av
 				Name:      fmt.Sprintf("%s-%d", name, i),
 				Namespace: Namespace,
 				Labels: map[string]string{
-					agentsv1alpha1.LabelSandboxPool: name,
+					agentsv1alpha1.LabelSandboxTemplate: name,
 				},
 				OwnerReferences: GetSbsOwnerReference(sbs),
 				ResourceVersion: "1",
@@ -197,4 +198,48 @@ func GetSandbox(t *testing.T, sandboxID string, client clients.SandboxClient) *a
 	sbx, err := client.ApiV1alpha1().Sandboxes(namespace).Get(context.Background(), name, metav1.GetOptions{})
 	assert.NoError(t, err)
 	return sbx
+}
+
+type DoFunc func(t *testing.T, client clients.SandboxClient, sbx *agentsv1alpha1.Sandbox)
+type WhenFunc func(sbx *agentsv1alpha1.Sandbox) bool
+
+func Immediately(sbx *agentsv1alpha1.Sandbox) bool {
+	return sbx != nil
+}
+
+func UpdateSandboxWhen(t *testing.T, client clients.SandboxClient, sandboxID string, when WhenFunc, do DoFunc) {
+	var sbx *agentsv1alpha1.Sandbox
+	if !assert.Eventually(t, func() bool {
+		sbx = GetSandbox(t, sandboxID, client)
+		return when(sbx)
+	}, 5*time.Second, 10*time.Millisecond) {
+		return
+	}
+	if sbx != nil {
+		do(t, client, sbx.DeepCopy())
+	}
+}
+
+func DoSetSandboxStatus(phase agentsv1alpha1.SandboxPhase, pausedStatus, readyStatus metav1.ConditionStatus) DoFunc {
+	return func(t *testing.T, client clients.SandboxClient, sbx *agentsv1alpha1.Sandbox) {
+		sbx.Status.Phase = phase
+		sbx.Status.Conditions = []metav1.Condition{
+			{
+				Type:   string(agentsv1alpha1.SandboxConditionPaused),
+				Status: pausedStatus,
+			},
+			{
+				Type:   string(agentsv1alpha1.SandboxConditionReady),
+				Status: readyStatus,
+			},
+		}
+		_, err := client.ApiV1alpha1().Sandboxes(sbx.Namespace).UpdateStatus(context.Background(), sbx, metav1.UpdateOptions{})
+		assert.NoError(t, err)
+	}
+}
+
+func AssertEndAt(t *testing.T, expect time.Time, endAt string) {
+	endAtTime, err := time.Parse(time.RFC3339, endAt)
+	assert.NoError(t, err)
+	assert.WithinDuration(t, expect, endAtTime, 5*time.Second)
 }
