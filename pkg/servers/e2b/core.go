@@ -10,7 +10,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"k8s.io/client-go/rest"
 	"k8s.io/klog/v2"
 
