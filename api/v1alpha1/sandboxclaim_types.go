@@ -44,6 +44,7 @@ type SandboxClaimSpec struct {
 	// If the timeout is reached, the claim will be marked as Completed regardless of
 	// whether all replicas were successfully claimed
 	// +optional
+	// +kubebuilder:default="1m"
 	ClaimTimeout *metav1.Duration `json:"claimTimeout,omitempty"`
 
 	// TTLAfterCompleted specifies the time to live after the claim reaches Completed phase

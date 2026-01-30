@@ -65,6 +65,7 @@ spec:
                   to claimed Sandbox resources
                 type: object
               claimTimeout:
+                default: 1m
                 description: |-
                   ClaimTimeout specifies the maximum duration to wait for claiming sandboxes
                   If the timeout is reached, the claim will be marked as Completed regardless of

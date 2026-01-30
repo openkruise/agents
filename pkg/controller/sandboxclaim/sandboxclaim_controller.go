@@ -57,7 +57,7 @@ func init() {
 }
 
 var (
-	concurrentReconciles = 10
+	concurrentReconciles = 500
 	maxClaimBatchSize    = 10
 	controllerKind       = agentsv1alpha1.GroupVersion.WithKind("SandboxClaim")
 )
