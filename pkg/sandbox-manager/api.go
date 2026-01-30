@@ -44,7 +44,7 @@ func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts infra.ClaimSandb
 func (m *SandboxManager) GetClaimedSandbox(ctx context.Context, user, sandboxID string) (infra.Sandbox, error) {
 	sbx, err := m.infra.GetSandbox(ctx, sandboxID)
 	if err != nil {
-		return nil, errors.NewError(errors.ErrorNotFound, fmt.Sprintf("sandbox %s not found", sandboxID))
+		return nil, errors.NewError(errors.ErrorNotFound, fmt.Sprintf("sandbox %s not found in cache: %v", sandboxID, err))
 	}
 
 	state, reason := sbx.GetState()
