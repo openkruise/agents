@@ -22,42 +22,11 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	constantUtils "github.com/openkruise/agents/pkg/utils"
-	utils2 "github.com/openkruise/agents/pkg/utils"
 	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	"github.com/openkruise/agents/pkg/utils/sandboxutils"
 )
 
 var testUser = "test-user"
-
-func ConvertPodToSandboxCR(pod *corev1.Pod) *agentsv1alpha1.Sandbox {
-	sbx := &agentsv1alpha1.Sandbox{
-		ObjectMeta: pod.ObjectMeta,
-		Spec: agentsv1alpha1.SandboxSpec{
-			SandboxTemplate: agentsv1alpha1.SandboxTemplate{
-				Template: &corev1.PodTemplateSpec{
-					Spec: pod.Spec,
-				},
-			},
-		},
-		Status: agentsv1alpha1.SandboxStatus{
-			Phase: agentsv1alpha1.SandboxPhase(pod.Status.Phase),
-			PodInfo: agentsv1alpha1.PodInfo{
-				PodIP: pod.Status.PodIP,
-			},
-		},
-	}
-	cond := utils2.GetPodCondition(&pod.Status, corev1.PodReady)
-	if cond != nil {
-		sbx.Status.Conditions = append(sbx.Status.Conditions, metav1.Condition{
-			Type:   string(agentsv1alpha1.SandboxConditionReady),
-			Status: metav1.ConditionStatus(cond.Status),
-		})
-	}
-	if strings.HasPrefix(pod.Name, "paused") {
-		sbx.Spec.Paused = true
-	}
-	return sbx
-}
 
 func GetSbsOwnerReference() []metav1.OwnerReference {
 	sbs := &agentsv1alpha1.SandboxSet{
@@ -295,7 +264,7 @@ func TestSandboxManager_GetClaimedSandbox(t *testing.T) {
 	manager := setupTestManager(t)
 	client := manager.client.SandboxClient
 
-	runningPod := &corev1.Pod{
+	runningSbx := &agentsv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "running-pod",
 			Namespace: "default",
@@ -304,19 +273,21 @@ func TestSandboxManager_GetClaimedSandbox(t *testing.T) {
 				agentsv1alpha1.AnnotationOwner: testUser,
 			},
 		},
-		Status: corev1.PodStatus{
-			Phase: corev1.PodRunning,
-			Conditions: []corev1.PodCondition{
+		Status: agentsv1alpha1.SandboxStatus{
+			Phase: agentsv1alpha1.SandboxRunning,
+			Conditions: []metav1.Condition{
 				{
-					Type:   corev1.PodReady,
-					Status: corev1.ConditionTrue,
+					Type:   string(agentsv1alpha1.SandboxConditionReady),
+					Status: metav1.ConditionTrue,
 				},
 			},
-			PodIP: "1.2.3.4",
+			PodInfo: agentsv1alpha1.PodInfo{
+				PodIP: "1.2.3.4",
+			},
 		},
 	}
 
-	pausedPod := &corev1.Pod{
+	pausedSbx := &agentsv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "paused-pod",
 			Namespace: "default",
@@ -325,35 +296,69 @@ func TestSandboxManager_GetClaimedSandbox(t *testing.T) {
 				agentsv1alpha1.AnnotationOwner: testUser,
 			},
 		},
-		Status: corev1.PodStatus{
-			Phase: corev1.PodRunning,
+		Spec: agentsv1alpha1.SandboxSpec{
+			Paused: true,
+		},
+		Status: agentsv1alpha1.SandboxStatus{
+			Phase: agentsv1alpha1.SandboxPaused,
+			Conditions: []metav1.Condition{
+				{
+					Type:   string(agentsv1alpha1.SandboxConditionPaused),
+					Status: metav1.ConditionTrue,
+				},
+			},
 		},
 	}
 
-	availablePod := &corev1.Pod{
+	availableSbx := &agentsv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            "available-pod",
 			Namespace:       "default",
 			Labels:          map[string]string{},
 			OwnerReferences: GetSbsOwnerReference(),
 		},
-		Status: corev1.PodStatus{
-			Phase: corev1.PodRunning,
-			Conditions: []corev1.PodCondition{
+		Status: agentsv1alpha1.SandboxStatus{
+			Phase: agentsv1alpha1.SandboxRunning,
+			Conditions: []metav1.Condition{
 				{
-					Type:   corev1.PodReady,
-					Status: corev1.ConditionTrue,
+					Type:   string(agentsv1alpha1.SandboxConditionReady),
+					Status: metav1.ConditionTrue,
 				},
 			},
-			PodIP: "1.2.3.4",
+			PodInfo: agentsv1alpha1.PodInfo{
+				PodIP: "1.2.3.4",
+			},
 		},
 	}
 
-	pods := []*corev1.Pod{runningPod, pausedPod, availablePod}
-	for _, pod := range pods {
-		_, err := client.ApiV1alpha1().Sandboxes("default").Create(context.Background(), ConvertPodToSandboxCR(pod), metav1.CreateOptions{})
+	failedSbx := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "failed-pod",
+			Namespace: "default",
+			Labels:    map[string]string{},
+			Annotations: map[string]string{
+				agentsv1alpha1.AnnotationOwner: testUser,
+			},
+		},
+		Status: agentsv1alpha1.SandboxStatus{
+			Phase: agentsv1alpha1.SandboxRunning,
+			Conditions: []metav1.Condition{
+				{
+					Type:   string(agentsv1alpha1.SandboxConditionReady),
+					Status: metav1.ConditionFalse,
+				},
+			},
+			PodInfo: agentsv1alpha1.PodInfo{
+				PodIP: "1.2.3.4",
+			},
+		},
+	}
+
+	sandboxes := []*agentsv1alpha1.Sandbox{runningSbx, pausedSbx, availableSbx, failedSbx}
+	for _, sbx := range sandboxes {
+		_, err := client.ApiV1alpha1().Sandboxes("default").Create(context.Background(), sbx, metav1.CreateOptions{})
 		if err != nil {
-			t.Fatalf("Failed to create test pod %s: %v", pod.Name, err)
+			t.Fatalf("Failed to create test pod %s: %v", sbx.Name, err)
 		}
 	}
 
@@ -385,6 +390,13 @@ func TestSandboxManager_GetClaimedSandbox(t *testing.T) {
 			sandboxID:         "default--available-pod",
 			expectError:       true,
 			expectedErrorCode: errors.ErrorNotFound,
+			expectedState:     "",
+		},
+		{
+			name:              "Get failed pod should return error",
+			sandboxID:         "default--failed-pod",
+			expectError:       true,
+			expectedErrorCode: errors.ErrorBadRequest,
 			expectedState:     "",
 		},
 		{

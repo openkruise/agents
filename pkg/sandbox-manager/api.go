@@ -42,17 +42,29 @@ func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts infra.ClaimSandb
 
 // GetClaimedSandbox returns a claimed (running or paused) Pod by its ID
 func (m *SandboxManager) GetClaimedSandbox(ctx context.Context, user, sandboxID string) (infra.Sandbox, error) {
+	log := klog.FromContext(ctx).WithValues("sandboxID", sandboxID)
+	log.Info("try to get claimed sandbox")
 	sbx, err := m.infra.GetSandbox(ctx, sandboxID)
 	if err != nil {
-		return nil, errors.NewError(errors.ErrorNotFound, fmt.Sprintf("sandbox %s not found in cache: %v", sandboxID, err))
+		log.Error(err, "failed to get sandbox from cache")
+		return nil, errors.NewError(errors.ErrorNotFound, fmt.Sprintf("sandbox %s not found", sandboxID))
 	}
 
 	state, reason := sbx.GetState()
-	if state != v1alpha1.SandboxStatePaused && state != v1alpha1.SandboxStateRunning {
-		return nil, errors.NewError(errors.ErrorNotFound, fmt.Sprintf("sandbox %s is not claimed (state %s, reason %s)", sandboxID, state, reason))
+	if state == v1alpha1.SandboxStateAvailable || state == v1alpha1.SandboxStateCreating {
+		// not claimed sandbox should return not found
+		log.Error(nil, "sandbox is not claimed", "state", state, "reason", reason)
+		return nil, errors.NewError(errors.ErrorNotFound, fmt.Sprintf("sandbox %s not found", sandboxID))
 	}
+
 	if sbx.GetRoute().Owner != user {
+		log.Error(nil, "sandbox is not owned by user")
 		return nil, errors.NewError(errors.ErrorNotAllowed, fmt.Sprintf("sandbox %s is not owned", sandboxID))
+	}
+
+	if state != v1alpha1.SandboxStatePaused && state != v1alpha1.SandboxStateRunning {
+		log.Error(nil, "sandbox is not healthy", "state", state, "reason", reason)
+		return nil, errors.NewError(errors.ErrorBadRequest, fmt.Sprintf("sandbox %s is not healthy (state %s, reason %s)", sandboxID, state, reason))
 	}
 	return sbx, nil
 }
