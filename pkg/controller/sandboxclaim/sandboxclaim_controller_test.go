@@ -187,12 +187,34 @@ func TestReconciler_Reconcile_Claiming(t *testing.T) {
 		},
 	}
 
+	controllerTrue := true
 	sandbox1 := &agentsv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "sandbox-1",
 			Namespace: "default",
 			Labels: map[string]string{
-				"sandboxset": "test-sandboxset",
+				agentsv1alpha1.LabelSandboxTemplate:  "test-sandboxset",
+				agentsv1alpha1.LabelSandboxIsClaimed: "false",
+			},
+			Annotations: map[string]string{}, // Initialize annotations map
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: "agents.kruise.io/v1alpha1",
+					Kind:       "SandboxSet",
+					Name:       "test-sandboxset",
+					UID:        "test-sandboxset-uid",
+					Controller: &controllerTrue,
+				},
+			},
+		},
+		Status: agentsv1alpha1.SandboxStatus{
+			Phase: agentsv1alpha1.SandboxRunning,
+			Conditions: []metav1.Condition{
+				{
+					Type:   string(agentsv1alpha1.SandboxConditionReady),
+					Status: metav1.ConditionTrue,
+					Reason: "PodReady",
+				},
 			},
 		},
 	}
@@ -202,7 +224,28 @@ func TestReconciler_Reconcile_Claiming(t *testing.T) {
 			Name:      "sandbox-2",
 			Namespace: "default",
 			Labels: map[string]string{
-				"sandboxset": "test-sandboxset",
+				agentsv1alpha1.LabelSandboxTemplate:  "test-sandboxset",
+				agentsv1alpha1.LabelSandboxIsClaimed: "false",
+			},
+			Annotations: map[string]string{}, // Initialize annotations map
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: "agents.kruise.io/v1alpha1",
+					Kind:       "SandboxSet",
+					Name:       "test-sandboxset",
+					UID:        "test-sandboxset-uid",
+					Controller: &controllerTrue,
+				},
+			},
+		},
+		Status: agentsv1alpha1.SandboxStatus{
+			Phase: agentsv1alpha1.SandboxRunning,
+			Conditions: []metav1.Condition{
+				{
+					Type:   string(agentsv1alpha1.SandboxConditionReady),
+					Status: metav1.ConditionTrue,
+					Reason: "PodReady",
+				},
 			},
 		},
 	}
@@ -216,7 +259,7 @@ func TestReconciler_Reconcile_Claiming(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create sandbox2 in sandboxClient: %v", err)
 	}
-	time.Sleep(100 * time.Millisecond) // Wait for cache sync
+	time.Sleep(300 * time.Millisecond) // Wait longer for cache sync
 
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -262,6 +305,46 @@ func TestReconciler_Reconcile_Claiming(t *testing.T) {
 	if updatedClaim.Status.Phase != agentsv1alpha1.SandboxClaimPhaseClaiming {
 		t.Errorf("After first reconcile, phase = %v, want Claiming", updatedClaim.Status.Phase)
 	}
+
+	time.Sleep(200 * time.Millisecond)
+
+	// Verify sandboxes are claimed with proper annotations and labels
+	allSandboxes, err := sandboxClient.ApiV1alpha1().Sandboxes("default").List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("Failed to list sandboxes: %v", err)
+	}
+
+	claimedCount := 0
+	for _, sandbox := range allSandboxes.Items {
+		if sandbox.Labels[agentsv1alpha1.LabelSandboxIsClaimed] == "true" {
+			claimedCount++
+
+			claimTime, exists := sandbox.Annotations[agentsv1alpha1.AnnotationClaimTime]
+			if !exists {
+				t.Errorf("Claimed sandbox %s missing claim timestamp annotation", sandbox.Name)
+			} else {
+				parsedTime, err := time.Parse(time.RFC3339, claimTime)
+				if err != nil {
+					t.Errorf("Sandbox %s has invalid claim timestamp format %q: %v",
+						sandbox.Name, claimTime, err)
+				}
+				if time.Since(parsedTime) > 2*time.Second {
+					t.Errorf("Sandbox %s claim timestamp is not recent: %v", sandbox.Name, parsedTime)
+				}
+			}
+
+			if len(sandbox.OwnerReferences) != 0 {
+				t.Errorf("Sandbox %s should have no OwnerReferences after being claimed, got %d",
+					sandbox.Name, len(sandbox.OwnerReferences))
+			}
+		}
+	}
+
+	if claimedCount == 0 {
+		t.Error("Expected at least 1 sandbox to be claimed, got 0")
+	}
+
+	t.Logf("Successfully claimed %d sandbox(es)", claimedCount)
 }
 
 func TestReconciler_Reconcile_ConditionalRequeue(t *testing.T) {

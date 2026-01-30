@@ -32,10 +32,14 @@ import (
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
@@ -155,7 +159,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			logger.Info("Not satisfied resourceVersion for SandboxClaim, wait for cache event")
 			return reconcile.Result{RequeueAfter: expectations.ExpectationTimeout - unsatisfiedDuration}, nil
 		}
-		klog.InfoS("Expectation unsatisfied overtime for SandboxClaim, wait for cache event timeout", "timeout", unsatisfiedDuration)
+		logger.Info("Expectation unsatisfied overtime for SandboxClaim, wait for cache event timeout", "timeout", unsatisfiedDuration)
 		core.ResourceVersionExpectations.Delete(claim)
 	}
 
@@ -168,10 +172,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if err := r.Get(ctx, sandboxSetKey, sandboxSet); err != nil {
 		if errors.IsNotFound(err) {
 			logger.Info("SandboxSet not found, marking claim as completed")
-			newStatus.Phase = agentsv1alpha1.SandboxClaimPhaseCompleted
-			newStatus.Message = fmt.Sprintf("SandboxSet %s not found", claim.Spec.TemplateName)
-			now := metav1.Now()
-			newStatus.CompletionTime = &now
+			core.TransitionToCompleted(newStatus, "SandboxSetNotFound",
+				fmt.Sprintf("SandboxSet %s not found", claim.Spec.TemplateName))
 			return ctrl.Result{}, r.updateClaimStatus(ctx, *newStatus, claim)
 		}
 		return reconcile.Result{}, err
@@ -279,5 +281,15 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Named("sandboxclaim-controller").
 		WithOptions(controller.Options{MaxConcurrentReconciles: concurrentReconciles}).
 		For(&agentsv1alpha1.SandboxClaim{}).
+		Watches(&agentsv1alpha1.SandboxClaim{}, &handler.EnqueueRequestForObject{}, builder.WithPredicates(predicate.Funcs{
+			UpdateFunc: func(e event.UpdateEvent) bool {
+				core.ResourceVersionExpectations.Observe(e.ObjectNew)
+				return true
+			},
+			DeleteFunc: func(e event.DeleteEvent) bool {
+				core.ResourceVersionExpectations.Delete(e.Object)
+				return false
+			},
+		})).
 		Complete(r)
 }

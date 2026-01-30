@@ -87,7 +87,7 @@ func (c *commonControl) EnsureClaimClaiming(ctx context.Context, args ClaimArgs)
 
 	// Step 4: Use max(statusCount, actualCount) to get current count
 	currentCount := statusCount
-	if actualCount > statusCount {
+	if actualCount > currentCount {
 		log.Info("Status count mismatch, using actual count",
 			"statusCount", statusCount,
 			"actualCount", actualCount)

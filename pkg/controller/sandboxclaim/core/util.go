@@ -36,11 +36,11 @@ import (
 //   - skipBusinessLogic: true if should skip Ensure* methods and go directly to status update
 //
 // Handled scenarios (in order):
-//  1. New claim (Phase == "")               → Claiming, continue
-//  2. Already Completed                     → Completed, continue (for TTL cleanup)
-//  3. SandboxSet not found                  → Completed, SKIP (terminal)
-//  4. Timeout exceeded                      → Completed, SKIP (terminal)
-//  5. All replicas claimed                  → Completed, SKIP (terminal)
+//  1. Already Completed                     → Completed, continue (for TTL cleanup)
+//  2. SandboxSet not found                  → Completed, SKIP (terminal, fail-fast)
+//  3. New claim (Phase == "")               → Claiming, continue
+//  4. All replicas claimed                  → Completed, SKIP (terminal)
+//  5. Timeout exceeded                      → Completed, SKIP (terminal)
 //  6. Otherwise                             → Current phase, continue
 //
 // Note: ObservedGeneration is always updated to track spec changes
@@ -51,7 +51,29 @@ func CalculateClaimStatus(args ClaimArgs) (*agentsv1alpha1.SandboxClaimStatus, b
 	// Always update ObservedGeneration to track spec changes
 	newStatus.ObservedGeneration = claim.Generation
 
-	// 1. Handle initial state - directly transition to Claiming phase
+	// 1. Handle terminal state
+	if newStatus.Phase == agentsv1alpha1.SandboxClaimPhaseCompleted {
+		klog.V(2).InfoS("SandboxClaim already completed, skipping state calculation",
+			"claim", klog.KObj(claim),
+			"completionTime", newStatus.CompletionTime)
+		// If already Completed, skip state calculation but allow EnsureClaimCompleted to run
+		// (for TTL cleanup logic)
+		return newStatus, false
+	}
+
+	// 2. Check if SandboxSet exists
+	// Transition: * → Completed (SandboxSet deleted)
+	if args.SandboxSet == nil {
+		klog.InfoS("SandboxSet not found, transitioning to Completed",
+			"claim", klog.KObj(claim),
+			"sandboxSet", claim.Spec.TemplateName)
+		return TransitionToCompleted(newStatus,
+			"SandboxSetNotFound",
+			"SandboxSet not found or deleted"), true
+	}
+
+	// 3. Handle initial state
+	// Transition: "" → Claiming
 	if newStatus.Phase == "" {
 		klog.InfoS("Initializing new SandboxClaim, starting claim process",
 			"claim", klog.KObj(claim),
@@ -63,28 +85,17 @@ func CalculateClaimStatus(args ClaimArgs) (*agentsv1alpha1.SandboxClaimStatus, b
 		return newStatus, false
 	}
 
-	// 2. Handle terminal state
-	if newStatus.Phase == agentsv1alpha1.SandboxClaimPhaseCompleted {
-		klog.V(2).InfoS("SandboxClaim already completed, skipping state calculation",
+	// 4. Check if desired replicas already met
+	// Transition: Claiming → Completed (All replicas claimed)
+	if isReplicasMet(claim, newStatus) {
+		klog.InfoS("All replicas claimed, transitioning to Completed",
 			"claim", klog.KObj(claim),
-			"completionTime", newStatus.CompletionTime)
-		// If already Completed, skip state calculation but allow EnsureClaimCompleted to run
-		// (for TTL cleanup logic)
-		return newStatus, false
+			"claimedReplicas", newStatus.ClaimedReplicas,
+			"desiredReplicas", getDesiredReplicas(claim))
+		return transitionToCompletedWithSuccess(newStatus, claim), true
 	}
 
-	// 3. Check if SandboxSet still exists
-	// Transition: * → Completed (SandboxSet deleted)
-	if args.SandboxSet == nil {
-		klog.InfoS("SandboxSet not found, transitioning to Completed",
-			"claim", klog.KObj(claim),
-			"sandboxSet", claim.Spec.TemplateName)
-		return transitionToCompleted(newStatus,
-			"SandboxSetNotFound",
-			"SandboxSet not found or deleted"), true
-	}
-
-	// 4. Early timeout detection
+	// 5. Early timeout detection
 	// Transition: Claiming → Completed (Timeout)
 	if isClaimTimeout(claim, newStatus) {
 		elapsed := time.Since(newStatus.ClaimStartTime.Time)
@@ -95,16 +106,6 @@ func CalculateClaimStatus(args ClaimArgs) (*agentsv1alpha1.SandboxClaimStatus, b
 			"claimedReplicas", newStatus.ClaimedReplicas,
 			"desiredReplicas", getDesiredReplicas(claim))
 		return transitionToCompletedWithTimeout(newStatus, elapsed, claim), true
-	}
-
-	// 5. Check if desired replicas already met
-	// Transition: Claiming → Completed (All replicas claimed)
-	if isReplicasMet(claim, newStatus) {
-		klog.InfoS("All replicas claimed, transitioning to Completed",
-			"claim", klog.KObj(claim),
-			"claimedReplicas", newStatus.ClaimedReplicas,
-			"desiredReplicas", getDesiredReplicas(claim))
-		return transitionToCompletedWithSuccess(newStatus, claim), true
 	}
 
 	// Continue with business logic
@@ -142,8 +143,8 @@ func isReplicasMet(claim *agentsv1alpha1.SandboxClaim, status *agentsv1alpha1.Sa
 	return status.ClaimedReplicas >= getDesiredReplicas(claim)
 }
 
-// transitionToCompleted transitions the claim to Completed state with a generic reason
-func transitionToCompleted(status *agentsv1alpha1.SandboxClaimStatus, reason, message string) *agentsv1alpha1.SandboxClaimStatus {
+// TransitionToCompleted transitions the claim to Completed state with a generic reason
+func TransitionToCompleted(status *agentsv1alpha1.SandboxClaimStatus, reason, message string) *agentsv1alpha1.SandboxClaimStatus {
 	status.Phase = agentsv1alpha1.SandboxClaimPhaseCompleted
 	status.Message = message
 	now := metav1.Now()
@@ -156,7 +157,7 @@ func transitionToCompleted(status *agentsv1alpha1.SandboxClaimStatus, reason, me
 		Message:            message,
 		LastTransitionTime: now,
 	}
-	setCondition(&status.Conditions, condition)
+	SetClaimCondition(status, condition)
 
 	return status
 }
@@ -179,7 +180,7 @@ func transitionToCompletedWithTimeout(status *agentsv1alpha1.SandboxClaimStatus,
 		Message:            fmt.Sprintf("Timeout after %v, claimed %d/%d", elapsed, status.ClaimedReplicas, desiredReplicas),
 		LastTransitionTime: now,
 	}
-	setCondition(&status.Conditions, condition)
+	SetClaimCondition(status, condition)
 
 	// Also set Completed condition
 	completedCondition := metav1.Condition{
@@ -189,7 +190,7 @@ func transitionToCompletedWithTimeout(status *agentsv1alpha1.SandboxClaimStatus,
 		Message:            status.Message,
 		LastTransitionTime: now,
 	}
-	setCondition(&status.Conditions, completedCondition)
+	SetClaimCondition(status, completedCondition)
 
 	return status
 }
@@ -210,31 +211,45 @@ func transitionToCompletedWithSuccess(status *agentsv1alpha1.SandboxClaimStatus,
 		Message:            fmt.Sprintf("Successfully claimed all %d sandboxes", status.ClaimedReplicas),
 		LastTransitionTime: now,
 	}
-	setCondition(&status.Conditions, condition)
+	SetClaimCondition(status, condition)
 
 	return status
 }
 
-// setCondition sets or updates a condition in the condition list
-func setCondition(conditions *[]metav1.Condition, newCondition metav1.Condition) {
-	if conditions == nil {
+// SetClaimCondition sets or updates a condition in the SandboxClaim status.
+func SetClaimCondition(status *agentsv1alpha1.SandboxClaimStatus, condition metav1.Condition) {
+	currentCond := GetClaimCondition(status, condition.Type)
+
+	// Check if there's any substantive change
+	if currentCond != nil && currentCond.Status == condition.Status &&
+		currentCond.Reason == condition.Reason &&
+		currentCond.Message == condition.Message {
+		// No change needed, avoid unnecessary update
+		return
+	} else if currentCond == nil {
+		// Add new condition
+		status.Conditions = append(status.Conditions, condition)
 		return
 	}
 
-	// Initialize if empty
-	if *conditions == nil {
-		*conditions = []metav1.Condition{}
+	// Only update LastTransitionTime when Status changes
+	if currentCond.Status != condition.Status {
+		currentCond.LastTransitionTime = condition.LastTransitionTime
 	}
 
-	// Find existing condition
-	for i := range *conditions {
-		if (*conditions)[i].Type == newCondition.Type {
-			// Update existing
-			(*conditions)[i] = newCondition
-			return
+	// Update other fields
+	currentCond.Status = condition.Status
+	currentCond.Reason = condition.Reason
+	currentCond.Message = condition.Message
+}
+
+// GetClaimCondition returns the condition with the provided type from SandboxClaim status
+func GetClaimCondition(status *agentsv1alpha1.SandboxClaimStatus, condType string) *metav1.Condition {
+	for i := range status.Conditions {
+		c := &status.Conditions[i]
+		if c.Type == condType {
+			return c
 		}
 	}
-
-	// Add new condition
-	*conditions = append(*conditions, newCondition)
+	return nil
 }

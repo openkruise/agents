@@ -283,6 +283,83 @@ func TestCommonControl_EnsureClaimClaiming(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "actualCount > statusCount - recovery from status update failure",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim-3",
+					Namespace: "default",
+					UID:       "test-uid-3",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "test-template",
+					Replicas:     int32Ptr(3),
+				},
+				Status: agentsv1alpha1.SandboxClaimStatus{
+					ClaimedReplicas: 1, // Status shows only 1 claimed
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template",
+					Namespace: "default",
+				},
+			},
+			newStatus: &agentsv1alpha1.SandboxClaimStatus{
+				Phase:           agentsv1alpha1.SandboxClaimPhaseClaiming,
+				ClaimedReplicas: 1, // Initial status count
+			},
+			setupSandboxes: func(t *testing.T) []*agentsv1alpha1.Sandbox {
+				// Create 2 sandboxes that are already claimed (simulating crash after claim but before status update)
+				// The status says 1, but actually 2 are claimed
+				sandboxes := []*agentsv1alpha1.Sandbox{
+					{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "sandbox-3a",
+							Namespace: "default",
+							Annotations: map[string]string{
+								agentsv1alpha1.AnnotationOwner: "test-uid-3",
+							},
+							Labels: map[string]string{
+								agentsv1alpha1.LabelSandboxTemplate:  "test-template",
+								agentsv1alpha1.LabelSandboxIsClaimed: "true",
+								agentsv1alpha1.LabelSandboxClaimName: "test-claim-3",
+							},
+						},
+					},
+					{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "sandbox-3b",
+							Namespace: "default",
+							Annotations: map[string]string{
+								agentsv1alpha1.AnnotationOwner: "test-uid-3",
+							},
+							Labels: map[string]string{
+								agentsv1alpha1.LabelSandboxTemplate:  "test-template",
+								agentsv1alpha1.LabelSandboxIsClaimed: "true",
+								agentsv1alpha1.LabelSandboxClaimName: "test-claim-3",
+							},
+						},
+					},
+				}
+				// Add sandboxes to cache
+				for _, sbx := range sandboxes {
+					_, err := sandboxClient.ApiV1alpha1().Sandboxes(sbx.Namespace).Create(ctx, sbx, metav1.CreateOptions{})
+					if err != nil {
+						t.Fatalf("Failed to create sandbox in sandboxClient: %v", err)
+					}
+				}
+				time.Sleep(100 * time.Millisecond) // Wait for cache sync
+				return sandboxes
+			},
+			expectedStrategy: RequeueAfter(ClaimRetryInterval), // Should retry to claim remaining 1
+			expectError:      false,
+			checkStatus: func(t *testing.T, status *agentsv1alpha1.SandboxClaimStatus) {
+				if status.ClaimedReplicas != 2 {
+					t.Errorf("Expected ClaimedReplicas to be recovered to 2 (actualCount), got %d", status.ClaimedReplicas)
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {
