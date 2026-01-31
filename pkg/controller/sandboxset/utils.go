@@ -6,6 +6,7 @@ import (
 	"time"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/controller/sandbox/core"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 	apps "k8s.io/api/apps/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -33,11 +34,12 @@ type GroupedSandboxes struct {
 
 func (r *Reconciler) initNewStatus(ss *agentsv1alpha1.SandboxSet) (*agentsv1alpha1.SandboxSetStatus, error) {
 	newStatus := ss.Status.DeepCopy()
-	updateRevision, err := r.newRevision(ss, 0, nil)
-	if err != nil {
-		return nil, err
-	}
-	newStatus.UpdateRevision = updateRevision.Labels[ControllerRevisionHashLabel]
+	hash, _ := core.HashSandbox(&agentsv1alpha1.Sandbox{
+		Spec: agentsv1alpha1.SandboxSpec{
+			SandboxTemplate: ss.Spec.SandboxTemplate,
+		},
+	})
+	newStatus.UpdateRevision = hash
 	newStatus.ObservedGeneration = ss.Generation
 	return newStatus, nil
 }
