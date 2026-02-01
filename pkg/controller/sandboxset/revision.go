@@ -3,13 +3,11 @@
 package sandboxset
 
 import (
-	"encoding/json"
 	"fmt"
 	"hash"
 	"hash/fnv"
 	"strconv"
 
-	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	apps "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -17,31 +15,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/dump"
 	"k8s.io/apimachinery/pkg/util/rand"
 )
-
-// getPatch returns a strategic merge patch that can be applied to restore a StatefulSet to a
-// previous version. If the returned error is nil the patch is valid. The current state that we save is just the
-// PodSpecTemplate. We can modify this later to encompass more state (or less) and remain compatible with previously
-// recorded patches.
-func (r *Reconciler) getPatch(set *agentsv1alpha1.SandboxSet) ([]byte, error) {
-	str, err := runtime.Encode(r.Codec, set)
-	if err != nil {
-		return nil, err
-	}
-	var raw map[string]interface{}
-	err = json.Unmarshal(str, &raw)
-	if err != nil {
-		return nil, err
-	}
-	objCopy := make(map[string]interface{})
-	specCopy := make(map[string]interface{})
-	spec := raw["spec"].(map[string]interface{})
-	template := spec["template"].(map[string]interface{})
-	specCopy["template"] = template
-	template["$patch"] = "replace"
-	objCopy["spec"] = specCopy
-	patch, err := json.Marshal(objCopy)
-	return patch, err
-}
 
 // NewControllerRevision returns a ControllerRevision with a ControllerRef pointing to parent and indicating that
 // parent is of parentKind. The ControllerRevision has labels matching template labels, contains Data equal to data, and
