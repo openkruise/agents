@@ -197,14 +197,13 @@ func (r *commonControl) EnsureSandboxResumed(ctx context.Context, args EnsureFun
 		utils.SetSandboxCondition(newStatus, *resumedCond)
 	}
 
-	if pod.Status.Phase == corev1.PodRunning {
+	// when pod is ready, sandbox status from resuming to running
+	pCond := utils.GetPodCondition(&pod.Status, corev1.PodReady)
+	if pod.Status.Phase == corev1.PodRunning && pCond != nil && pCond.Status == corev1.ConditionTrue {
 		newStatus.Phase = agentsv1alpha1.SandboxRunning
-		pCond := utils.GetPodCondition(&pod.Status, corev1.PodReady)
 		rCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionReady))
-		if pCond != nil && string(pCond.Status) != string(rCond.Status) {
-			rCond.Status = metav1.ConditionStatus(pCond.Status)
-			rCond.LastTransitionTime = pCond.LastTransitionTime
-		}
+		rCond.Status = metav1.ConditionStatus(pCond.Status)
+		rCond.LastTransitionTime = pCond.LastTransitionTime
 		utils.SetSandboxCondition(newStatus, *rCond)
 	}
 	return nil

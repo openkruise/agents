@@ -88,7 +88,7 @@ func TestRequestSandbox(t *testing.T) {
 	testServer := NewTestServer()
 	defer testServer.Close()
 
-	// 解析 testServer.URL 来获取 IP 和端口
+	// Parse testServer.URL to get IP and port
 	parsedURL, err := url.Parse(testServer.URL)
 	require.NoError(t, err)
 	host, portStr, err := net.SplitHostPort(parsedURL.Host)

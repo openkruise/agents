@@ -15,6 +15,7 @@ package core
 
 import (
 	"context"
+	"reflect"
 	"testing"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
@@ -483,11 +484,13 @@ func TestCommonControl_EnsureSandboxResumed(t *testing.T) {
 	_ = clientgoscheme.AddToScheme(scheme)
 	_ = agentsv1alpha1.AddToScheme(scheme)
 
+	now := metav1.Now()
 	tests := []struct {
-		name     string
-		args     EnsureFuncArgs
-		podExist bool
-		wantErr  bool
+		name           string
+		args           EnsureFuncArgs
+		podExist       bool
+		wantErr        bool
+		expectedStatus *agentsv1alpha1.SandboxStatus
 	}{
 		{
 			name: "pod does not exist, should create",
@@ -513,10 +516,31 @@ func TestCommonControl_EnsureSandboxResumed(t *testing.T) {
 						},
 					},
 				},
-				NewStatus: &agentsv1alpha1.SandboxStatus{},
+				NewStatus: &agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxResuming,
+					Conditions: []metav1.Condition{
+						{
+							Type:               string(agentsv1alpha1.SandboxConditionReady),
+							Status:             metav1.ConditionFalse,
+							LastTransitionTime: now,
+							Reason:             agentsv1alpha1.SandboxReadyReasonPodReady,
+						},
+					},
+				},
 			},
 			podExist: false,
 			wantErr:  false,
+			expectedStatus: &agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxResuming,
+				Conditions: []metav1.Condition{
+					{
+						Type:               string(agentsv1alpha1.SandboxConditionReady),
+						Status:             metav1.ConditionFalse,
+						LastTransitionTime: now,
+						Reason:             agentsv1alpha1.SandboxReadyReasonPodReady,
+					},
+				},
+			},
 		},
 		{
 			name: "pod exists but not running",
@@ -536,13 +560,34 @@ func TestCommonControl_EnsureSandboxResumed(t *testing.T) {
 						Namespace: "default",
 					},
 				},
-				NewStatus: &agentsv1alpha1.SandboxStatus{},
+				NewStatus: &agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxResuming,
+					Conditions: []metav1.Condition{
+						{
+							Type:               string(agentsv1alpha1.SandboxConditionReady),
+							Status:             metav1.ConditionFalse,
+							LastTransitionTime: now,
+							Reason:             agentsv1alpha1.SandboxReadyReasonPodReady,
+						},
+					},
+				},
 			},
 			podExist: true,
 			wantErr:  false,
+			expectedStatus: &agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxResuming,
+				Conditions: []metav1.Condition{
+					{
+						Type:               string(agentsv1alpha1.SandboxConditionReady),
+						Status:             metav1.ConditionFalse,
+						LastTransitionTime: now,
+						Reason:             agentsv1alpha1.SandboxReadyReasonPodReady,
+					},
+				},
+			},
 		},
 		{
-			name: "pod is running",
+			name: "pod is running and ready",
 			args: EnsureFuncArgs{
 				Pod: &corev1.Pod{
 					ObjectMeta: metav1.ObjectMeta{
@@ -555,7 +600,7 @@ func TestCommonControl_EnsureSandboxResumed(t *testing.T) {
 							{
 								Type:               corev1.PodReady,
 								Status:             corev1.ConditionTrue,
-								LastTransitionTime: metav1.Now(),
+								LastTransitionTime: now,
 							},
 						},
 					},
@@ -567,11 +612,12 @@ func TestCommonControl_EnsureSandboxResumed(t *testing.T) {
 					},
 				},
 				NewStatus: &agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxResuming,
 					Conditions: []metav1.Condition{
 						{
 							Type:               string(agentsv1alpha1.SandboxConditionReady),
 							Status:             metav1.ConditionFalse,
-							LastTransitionTime: metav1.Now(),
+							LastTransitionTime: now,
 							Reason:             agentsv1alpha1.SandboxReadyReasonPodReady,
 						},
 					},
@@ -579,6 +625,68 @@ func TestCommonControl_EnsureSandboxResumed(t *testing.T) {
 			},
 			podExist: true,
 			wantErr:  false,
+			expectedStatus: &agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxRunning,
+				Conditions: []metav1.Condition{
+					{
+						Type:               string(agentsv1alpha1.SandboxConditionReady),
+						Status:             metav1.ConditionTrue,
+						LastTransitionTime: now,
+						Reason:             agentsv1alpha1.SandboxReadyReasonPodReady,
+					},
+				},
+			},
+		},
+		{
+			name: "pod is running, but not ready",
+			args: EnsureFuncArgs{
+				Pod: &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-sandbox",
+						Namespace: "default",
+					},
+					Status: corev1.PodStatus{
+						Phase: corev1.PodRunning,
+						Conditions: []corev1.PodCondition{
+							{
+								Type:               corev1.PodReady,
+								Status:             corev1.ConditionFalse,
+								LastTransitionTime: now,
+							},
+						},
+					},
+				},
+				Box: &agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-sandbox",
+						Namespace: "default",
+					},
+				},
+				NewStatus: &agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxResuming,
+					Conditions: []metav1.Condition{
+						{
+							Type:               string(agentsv1alpha1.SandboxConditionReady),
+							Status:             metav1.ConditionFalse,
+							LastTransitionTime: now,
+							Reason:             agentsv1alpha1.SandboxReadyReasonPodReady,
+						},
+					},
+				},
+			},
+			podExist: true,
+			wantErr:  false,
+			expectedStatus: &agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxResuming,
+				Conditions: []metav1.Condition{
+					{
+						Type:               string(agentsv1alpha1.SandboxConditionReady),
+						Status:             metav1.ConditionFalse,
+						LastTransitionTime: now,
+						Reason:             agentsv1alpha1.SandboxReadyReasonPodReady,
+					},
+				},
+			},
 		},
 	}
 
@@ -606,11 +714,8 @@ func TestCommonControl_EnsureSandboxResumed(t *testing.T) {
 				}
 			}
 
-			// If pod is running, verify status was updated
-			if tt.args.Pod != nil && tt.args.Pod.Status.Phase == corev1.PodRunning {
-				if tt.args.NewStatus.Phase != agentsv1alpha1.SandboxRunning {
-					t.Errorf("Expected sandbox phase to be Running, got %v", tt.args.NewStatus.Phase)
-				}
+			if !reflect.DeepEqual(tt.args.NewStatus, tt.expectedStatus) {
+				t.Errorf("Expected sandbox(%s), got(%s)", utils.DumpJson(tt.expectedStatus), utils.DumpJson(tt.args.NewStatus))
 			}
 		})
 	}
