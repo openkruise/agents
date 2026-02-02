@@ -64,7 +64,7 @@ First, we'll create a LangChain tool that executes Python code inside a sandbox:
 
 ```python
 from langchain.tools import tool
-from e2b_code_interpreter import CodeInterpreter
+from e2b_code_interpreter import Sandbox as CodeInterpreter
 
 @tool
 def execute_python(code: str) -> str:
@@ -144,7 +144,7 @@ print(result["output"])
 For agents that need to maintain state across multiple executions, you can keep the sandbox alive:
 
 ```python
-from e2b_code_interpreter import CodeInterpreter
+from e2b_code_interpreter import Sandbox as CodeInterpreter
 
 # Create a persistent sandbox
 sandbox = CodeInterpreter()
@@ -190,7 +190,7 @@ Let's build a LangGraph workflow that analyzes data in multiple steps, all withi
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
 from typing import TypedDict, Annotated
-from e2b_code_interpreter import CodeInterpreter
+from e2b_code_interpreter import Sandbox as CodeInterpreter
 import operator
 
 # Define the state
@@ -432,7 +432,7 @@ huge_array = np.zeros((100000, 100000))  # May exceed memory quota
 **Timeout limits**: Long-running operations eventually terminate
 ```python
 # Handle timeouts gracefully
-from e2b_code_interpreter import CodeInterpreter
+from e2b_code_interpreter import Sandbox as CodeInterpreter
 
 sandbox = CodeInterpreter(timeout=300)  # 5-minute timeout
 ```
@@ -576,7 +576,7 @@ sandbox = CodeInterpreter(
 Always account for execution failures:
 
 ```python
-from e2b_code_interpreter import CodeInterpreter
+from e2b_code_interpreter import Sandbox as CodeInterpreter
 
 def safe_execute(code: str, retries=3):
     """Execute code with retry logic and error handling."""
