@@ -29,6 +29,8 @@ const (
 	LabelSandboxTemplate = InternalPrefix + "sandbox-template"
 	// LabelSandboxIsClaimed indicates whether the sandbox has been claimed by user
 	LabelSandboxIsClaimed = InternalPrefix + "sandbox-claimed"
+	// LabelSandboxClaimName indicates the name of the SandboxClaim that claimed this sandbox
+	LabelSandboxClaimName = InternalPrefix + "claim-name"
 	LabelTemplateHash     = InternalPrefix + "template-hash"
 
 	AnnotationLock      = InternalPrefix + "lock"

@@ -28,6 +28,7 @@ import (
 type ApiV1alpha1Interface interface {
 	RESTClient() rest.Interface
 	SandboxesGetter
+	SandboxClaimsGetter
 	SandboxSetsGetter
 }
 
@@ -38,6 +39,10 @@ type ApiV1alpha1Client struct {
 
 func (c *ApiV1alpha1Client) Sandboxes(namespace string) SandboxInterface {
 	return newSandboxes(c, namespace)
+}
+
+func (c *ApiV1alpha1Client) SandboxClaims(namespace string) SandboxClaimInterface {
+	return newSandboxClaims(c, namespace)
 }
 
 func (c *ApiV1alpha1Client) SandboxSets(namespace string) SandboxSetInterface {

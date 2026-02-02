@@ -19,4 +19,6 @@ package v1alpha1
 
 type SandboxExpansion interface{}
 
+type SandboxClaimExpansion interface{}
+
 type SandboxSetExpansion interface{}

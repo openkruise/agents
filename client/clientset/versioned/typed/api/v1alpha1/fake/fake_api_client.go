@@ -31,6 +31,10 @@ func (c *FakeApiV1alpha1) Sandboxes(namespace string) v1alpha1.SandboxInterface 
 	return newFakeSandboxes(c, namespace)
 }
 
+func (c *FakeApiV1alpha1) SandboxClaims(namespace string) v1alpha1.SandboxClaimInterface {
+	return newFakeSandboxClaims(c, namespace)
+}
+
 func (c *FakeApiV1alpha1) SandboxSets(namespace string) v1alpha1.SandboxSetInterface {
 	return newFakeSandboxSets(c, namespace)
 }

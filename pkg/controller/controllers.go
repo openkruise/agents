@@ -20,6 +20,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	"github.com/openkruise/agents/pkg/controller/sandbox"
+	"github.com/openkruise/agents/pkg/controller/sandboxclaim"
 	"github.com/openkruise/agents/pkg/controller/sandboxset"
 )
 
@@ -28,6 +29,7 @@ var controllerAddFuncs []func(manager.Manager) error
 func init() {
 	controllerAddFuncs = append(controllerAddFuncs, sandbox.Add)
 	controllerAddFuncs = append(controllerAddFuncs, sandboxset.Add)
+	controllerAddFuncs = append(controllerAddFuncs, sandboxclaim.Add)
 }
 
 func SetupWithManager(m manager.Manager) error {
