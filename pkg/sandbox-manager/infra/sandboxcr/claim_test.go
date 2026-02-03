@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math/rand"
 	"strings"
 	"testing"
 	"time"
@@ -376,7 +375,6 @@ func TestClaimSandboxFailed(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		r := rand.New(rand.NewSource(time.Now().UnixNano()))
 		t.Run(tt.name, func(t *testing.T) {
 			testInfra, client := NewTestInfra(t)
 			name := "test-sbx"
@@ -429,7 +427,7 @@ func TestClaimSandboxFailed(t *testing.T) {
 				_, err := testInfra.GetSandbox(t.Context(), sandboxutils.GetSandboxID(sbx))
 				return err == nil
 			}, 100*time.Millisecond, 5*time.Millisecond)
-			_, _, err := TryClaimSandbox(t.Context(), tt.options, r, &testInfra.pickCache, testInfra.Cache, client)
+			_, _, err := TryClaimSandbox(t.Context(), tt.options, &testInfra.pickCache, testInfra.Cache, client)
 			require.Error(t, err)
 			assert.True(t, strings.Contains(err.Error(), tt.expectError))
 			_, err = client.ApiV1alpha1().Sandboxes(sbx.Namespace).Get(t.Context(), name, metav1.GetOptions{})

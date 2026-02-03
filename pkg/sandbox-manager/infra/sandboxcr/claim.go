@@ -5,7 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"math/rand"
+	"math/rand/v2"
 	"net/http"
 	"sync"
 	"time"
@@ -49,7 +49,7 @@ func ValidateAndInitClaimOptions(opts infra.ClaimSandboxOptions) (infra.ClaimSan
 // the sandbox object should not be used anymore and needs appropriate handling.
 //
 // ValidateAndInitClaimOptions must be called before this function.
-func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, r *rand.Rand, pickCache *sync.Map,
+func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCache *sync.Map,
 	cache *Cache, client clients.SandboxClient) (claimed infra.Sandbox, metrics infra.ClaimMetrics, err error) {
 	log := klog.FromContext(ctx)
 	defer func() {
@@ -57,7 +57,7 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, r *ran
 	}()
 	// Step 1: Pick an available sandbox
 	var sbx *Sandbox
-	sbx, err = pickAnAvailableSandbox(ctx, opts.Template, opts.CandidateCounts, r, pickCache, cache, client)
+	sbx, err = pickAnAvailableSandbox(ctx, opts.Template, opts.CandidateCounts, pickCache, cache, client)
 	if err != nil {
 		log.Error(err, "failed to select available sandbox")
 		return
@@ -154,7 +154,7 @@ func getPickKey(sbx *v1alpha1.Sandbox) string {
 	return client.ObjectKeyFromObject(sbx).String()
 }
 
-func pickAnAvailableSandbox(ctx context.Context, template string, cnt int, r *rand.Rand, pickCache *sync.Map,
+func pickAnAvailableSandbox(ctx context.Context, template string, cnt int, pickCache *sync.Map,
 	cache *Cache, client clients.SandboxClient) (*Sandbox, error) {
 	log := klog.FromContext(ctx).WithValues("template", template).V(consts.DebugLogLevel)
 	objects, err := cache.ListAvailableSandboxes(template)
@@ -181,7 +181,9 @@ func pickAnAvailableSandbox(ctx context.Context, template string, cnt int, r *ra
 	if len(candidates) == 0 {
 		return nil, NoAvailableError(template, "no candidate")
 	}
-	start := r.Intn(len(candidates))
+
+	start := rand.IntN(len(candidates))
+
 	i := start
 	for {
 		obj = candidates[i]

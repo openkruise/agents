@@ -21,7 +21,10 @@ import "time"
 const (
 	// MaxClaimBatchSize is the maximum number of sandboxes to claim in a single reconcile cycle.
 	// This prevents overwhelming the API server with too many concurrent updates
-	MaxClaimBatchSize = 20
+	MaxClaimBatchSize = 50
+
+	// InitialClaimBatchSize is the initial batch size for concurrent claim operations.
+	InitialClaimBatchSize = 5
 
 	// DefaultReplicasCount is the default number of sandboxes to claim if not specified in spec.
 	DefaultReplicasCount = 1

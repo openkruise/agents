@@ -3,7 +3,6 @@ package sandboxcr
 import (
 	"context"
 	"errors"
-	"math/rand"
 	"sync"
 	"time"
 
@@ -91,7 +90,6 @@ func (i *Infra) Stop() {
 
 func (i *Infra) ClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions) (infra.Sandbox, infra.ClaimMetrics, error) {
 	log := klog.FromContext(ctx)
-	r := rand.New(rand.NewSource(time.Now().UnixNano()))
 	metrics := infra.ClaimMetrics{}
 
 	opts, err := ValidateAndInitClaimOptions(opts)
@@ -113,7 +111,7 @@ func (i *Infra) ClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions
 	}, func() error {
 		metrics.Retries++
 		log.Info("try to claim sandbox", "retries", metrics.Retries)
-		claimed, tryMetrics, claimErr := TryClaimSandbox(ctx, opts, r, &i.pickCache, i.Cache, i.Client)
+		claimed, tryMetrics, claimErr := TryClaimSandbox(ctx, opts, &i.pickCache, i.Cache, i.Client)
 		if claimErr == nil {
 			tryMetrics.Retries = metrics.Retries
 			tryMetrics.Wait = metrics.Wait

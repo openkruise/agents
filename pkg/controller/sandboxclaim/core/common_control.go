@@ -19,10 +19,10 @@ package core
 import (
 	"context"
 	"fmt"
-	"math/rand"
 	"sync"
 	"time"
 
+	"github.com/openkruise/agents/pkg/utils"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -39,7 +39,6 @@ type commonControl struct {
 	sandboxClient clients.SandboxClient
 	cache         *sandboxcr.Cache
 	pickCache     sync.Map
-	rand          *rand.Rand
 }
 
 func NewCommonControl(c client.Client, recorder record.EventRecorder, sandboxClient clients.SandboxClient, cache *sandboxcr.Cache) ClaimControl {
@@ -52,7 +51,6 @@ func NewCommonControl(c client.Client, recorder record.EventRecorder, sandboxCli
 		sandboxClient: sandboxClient,
 		cache:         cache,
 		pickCache:     sync.Map{},
-		rand:          rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 
 	return control
@@ -116,9 +114,8 @@ func (c *commonControl) EnsureClaimClaiming(ctx context.Context, args ClaimArgs)
 	// Step 8: Perform claim
 	claimed, err := c.claimSandboxes(ctx, claim, sandboxSet, batchSize)
 	if err != nil {
-		log.Error(err, "Failed to claim sandboxes")
-		// Return error to trigger exponential backoff retry
-		return NoRequeue(), err
+		log.Error(err, "Claim attempts completed with errors",
+			"claimed", claimed, "attempted", batchSize)
 	}
 
 	// Step 9: Update final count and status
@@ -196,29 +193,28 @@ func (c *commonControl) claimSandboxes(ctx context.Context, claim *agentsv1alpha
 		return 0, fmt.Errorf("failed to build claim options: %w", err)
 	}
 
-	// Attempt to claim sandboxes
-	// todo consider use go routines to concurrency claim
-	claimedCount := 0
-	for i := 0; i < batchSize; i++ {
-		sbx, metrics, err := sandboxcr.TryClaimSandbox(ctx, opts, c.rand, &c.pickCache, c.cache, c.sandboxClient)
-		if err != nil {
-			log.Error(err, "Failed to claim sandbox, trying next reconcile")
-			continue
+	// Attempt to claim sandboxes concurrently using DoItSlowly
+	claimedCount, err := utils.DoItSlowly(batchSize, InitialClaimBatchSize, func() error {
+		// Pass nil for rand so sandboxcr uses global rand (concurrent-safe).
+		sbx, metrics, claimErr := sandboxcr.TryClaimSandbox(ctx, opts, &c.pickCache, c.cache, c.sandboxClient)
+		if claimErr != nil {
+			log.Error(claimErr, "Failed to claim sandbox")
+			return claimErr
 		}
 
-		claimedCount++
 		log.Info("Successfully claimed sandbox",
 			"sandbox", sbx.GetName(),
 			"totalCost", metrics.Total,
 			"pickAndLock", metrics.PickAndLock,
 			"initRuntime", metrics.InitRuntime)
-	}
+		return nil
+	})
 
 	if claimedCount > 0 {
 		log.Info("Claimed sandboxes successfully", "count", claimedCount, "attempted", batchSize)
 	}
 
-	return claimedCount, nil
+	return claimedCount, err
 }
 
 // buildClaimOptions constructs ClaimSandboxOptions for TryClaimSandbox
