@@ -100,10 +100,8 @@ retVal=$?
 
 set +x
 
-# Step 4: Print logs if test failed
 if [ "$retVal" -ne 0 ]; then
     echo "Tests failed"
-#    kubectl logs -n sandbox-system -l component=sandbox-manager --tail=10000
 else
     echo "All E2B tests passed successfully!"
 fi

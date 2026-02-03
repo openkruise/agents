@@ -26,20 +26,14 @@ def test_run_code(sandbox_context):
     execute_python_code(sbx, """
     def bubble_sort(arr):
         n = len(arr)
-        # 创建数组副本，避免修改原数组
         sorted_arr = arr.copy()
 
-        # 外层循环控制排序轮数
         for i in range(n):
-            # 标记本轮是否发生交换
             swapped = False
-            # 内层循环进行相邻元素比较
             for j in range(0, n - i - 1):
-                # 如果前一个元素大于后一个元素，则交换
                 if sorted_arr[j] > sorted_arr[j + 1]:
                     sorted_arr[j], sorted_arr[j + 1] = sorted_arr[j + 1], sorted_arr[j]
                     swapped = True
-            # 如果本轮没有发生交换，说明数组已经有序，可以提前结束
             if not swapped:
                 break
 
