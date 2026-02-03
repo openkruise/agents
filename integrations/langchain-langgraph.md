@@ -73,7 +73,8 @@ def execute_python(code: str) -> str:
     Returns the output of the code execution.
     """
     with CodeInterpreter() as sandbox:
-        execution = sandbox.notebook.exec_cell(code)
+        execution = sandbox.run_code(code)
+
         
         if execution.error:
             return f"Error: {execution.error}"
@@ -152,7 +153,8 @@ sandbox = CodeInterpreter()
 @tool
 def execute_python_persistent(code: str) -> str:
     """Execute Python code in a persistent sandbox."""
-    execution = sandbox.notebook.exec_cell(code)
+    execution = sandbox.run_code(code)
+
     
     if execution.error:
         return f"Error: {execution.error}"
@@ -220,7 +222,7 @@ data = pd.DataFrame({
 print(data.head())
 """
     
-    execution = sandbox.notebook.exec_cell(code)
+    execution = sandbox.run_code(code)
     result = execution.logs.stdout or "Data loaded"
     
     return {
@@ -244,7 +246,8 @@ print(f"Net Profit: ${profit:,}")
 print(f"Average Monthly Revenue: ${avg_revenue:,.2f}")
 """
     
-    execution = sandbox.notebook.exec_cell(code)
+    execution = sandbox.run_code(code)
+
     result = execution.logs.stdout or "Analysis complete"
     
     return {
@@ -271,7 +274,8 @@ plt.tight_layout()
 print("Visualization created successfully")
 """
     
-    execution = sandbox.notebook.exec_cell(code)
+    execution = sandbox.run_code(code)
+
     result = execution.logs.stdout or "Visualization complete"
     
     return {
@@ -332,7 +336,7 @@ Sandboxes help you implement robust error handling in LangGraph:
 def safe_execute_node(state: AnalysisState):
     """Execute code with error handling."""
     try:
-        execution = sandbox.notebook.exec_cell(state["code_to_run"])
+        execution = sandbox.run_code(state["code_to_run"])
         
         if execution.error:
             return {
@@ -380,7 +384,7 @@ Understanding how sandboxes work over time helps you design better agent systems
 ```python
 # Sandbox created and destroyed automatically
 with CodeInterpreter() as sandbox:
-    result = sandbox.notebook.exec_cell("print('Hello')")
+    result = sandbox.run_code("print('Hello')")
 # Sandbox is destroyed here
 ```
 
@@ -395,8 +399,8 @@ Use ephemeral sandboxes when:
 sandbox = CodeInterpreter()
 
 # Multiple executions share state
-sandbox.notebook.exec_cell("x = 42")
-sandbox.notebook.exec_cell("print(x)")  # Outputs: 42
+sandbox.run_code("x = 42")
+sandbox.run_code("print(x)")  # Outputs: 42
 
 # Explicit cleanup
 sandbox.close()
@@ -471,7 +475,7 @@ def process_query(query: str) -> str:
     with CodeInterpreter() as sandbox:
         # Fresh environment each time
         code = generate_code_for_query(query)
-        result = sandbox.notebook.exec_cell(code)
+        result = sandbox.run_code(code)
         return result.logs.stdout
 
 # Use with caution: Stateful execution
@@ -481,7 +485,7 @@ def process_query_stateful(query: str) -> str:
     # State accumulates over time
     # Risk of side effects and harder to reason about
     code = generate_code_for_query(query)
-    result = sandbox.notebook.exec_cell(code)
+    result = sandbox.run_code(code)
     return result.logs.stdout
 ```
 
@@ -492,11 +496,11 @@ Only maintain sandbox state when there's a clear benefit:
 ```python
 # Good use case: Installing dependencies once
 sandbox = CodeInterpreter()
-sandbox.notebook.exec_cell("pip install scikit-learn pandas")
+sandbox.run_code("pip install scikit-learn pandas")
 
 # Now use the sandbox for multiple related tasks
 for dataset in datasets:
-    sandbox.notebook.exec_cell(f"analyze_data('{dataset}')")
+    sandbox.run_code(f"analyze_data('{dataset}')")
 
 sandbox.close()
 
@@ -583,7 +587,7 @@ def safe_execute(code: str, retries=3):
     for attempt in range(retries):
         try:
             with CodeInterpreter() as sandbox:
-                execution = sandbox.notebook.exec_cell(code)
+                execution = sandbox.run_code(code)
                 
                 if execution.error:
                     # Log error and potentially modify code
@@ -618,7 +622,7 @@ def execute_with_logging(code: str, context: dict):
         logger.info(f"Sandbox created: {sandbox.id}")
         
         start_time = datetime.now()
-        execution = sandbox.notebook.exec_cell(code)
+        execution = sandbox.run_code(code)
         duration = (datetime.now() - start_time).total_seconds()
         
         logger.info(f"Execution completed in {duration}s")
