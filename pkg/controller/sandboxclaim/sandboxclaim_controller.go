@@ -141,6 +141,7 @@ type Reconciler struct {
 // +kubebuilder:rbac:groups=agents.kruise.io,resources=sandboxes,verbs=get;list;update;patch
 // +kubebuilder:rbac:groups=agents.kruise.io,resources=sandboxsets,verbs=get
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;update;patch
+// +kubebuilder:rbac:groups=core,resources=persistentvolumes,verbs=get;list;watch
 
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	// Fetch the SandboxClaim instance
