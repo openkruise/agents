@@ -77,6 +77,7 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 			}
 			sbx.SetAnnotations(annotations)
 		},
+		ReserveFailedSandbox: request.Extensions.ReserveFailedSandbox,
 	}
 
 	if !request.Extensions.SkipInitRuntime {

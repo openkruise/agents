@@ -49,7 +49,7 @@ func CreatePodWithStatus(t *testing.T, client kubernetes.Interface, pod *corev1.
 
 func Setup(t *testing.T) (*Controller, *clients.ClientSet, func()) {
 	utils.InitLogOutput()
-	sandboxcr.SetClaimLockTimeout(100 * time.Millisecond)
+	sandboxcr.SetClaimTimeout(100 * time.Millisecond)
 	clientSet := clients.NewFakeClientSet()
 	namespace := "sandbox-system"
 	// mock self pod

@@ -7,23 +7,23 @@ import (
 
 type ClaimSandboxOptions struct {
 	// User specifies the owner of sandbox, Required
-	User string
+	User string `json:"user"`
 	// Template specifies the pool to claim sandbox from, Required
-	Template string
+	Template string `json:"template"`
 	// CandidateCounts is the maximum number of available sandboxes to select from the cache
-	CandidateCounts int
+	CandidateCounts int `json:"candidateCounts"`
 	// Lock string used in optimistic lock
-	LockString string
+	LockString string `json:"lockString"`
 	// Set Modifier to modify the Sandbox before it is updated
-	Modifier func(sandbox Sandbox)
+	Modifier func(sandbox Sandbox) `json:"-"`
 	// Set ReserveFailedSandbox to true to reserve failed sandboxes
-	ReserveFailedSandbox bool
+	ReserveFailedSandbox bool `json:"reserveFailedSandbox"`
 	// Set InplaceUpdate to non-empty string trigger an inplace-update
-	InplaceUpdate *InplaceUpdateOptions
+	InplaceUpdate *InplaceUpdateOptions `json:"inplaceUpdate"`
 	// Set InitRuntime to non-nil value to init the agent-runtime
-	InitRuntime *InitRuntimeOptions
+	InitRuntime *InitRuntimeOptions `json:"initRuntime"`
 	// Set CSIMount to non-nil value to mount a CSI volume
-	CSIMount *CSIMountOptions
+	CSIMount *CSIMountOptions `json:"CSIMount"`
 }
 
 type ClaimMetrics struct {

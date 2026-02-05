@@ -52,6 +52,13 @@ func ValidateAndInitClaimOptions(opts infra.ClaimSandboxOptions) (infra.ClaimSan
 func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCache *sync.Map,
 	cache *Cache, client clients.SandboxClient) (claimed infra.Sandbox, metrics infra.ClaimMetrics, err error) {
 	log := klog.FromContext(ctx)
+	select {
+	case <-ctx.Done():
+		err = fmt.Errorf("context canceled while retrying")
+		log.Error(ctx.Err(), "context canceled while retrying")
+		return
+	default:
+	}
 	defer func() {
 		clearFailedSandbox(ctx, claimed, err, opts.ReserveFailedSandbox)
 	}()

@@ -144,7 +144,7 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 		},
 	}
 
-	sandboxcr.SetClaimLockTimeout(100 * time.Millisecond)
+	sandboxcr.SetClaimTimeout(100 * time.Millisecond)
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

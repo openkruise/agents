@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	k8sinformers "k8s.io/client-go/informers"
@@ -98,12 +99,13 @@ func (i *Infra) ClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions
 		return nil, metrics, err
 	}
 
+	log.V(consts.DebugLogLevel).Info("claim sandbox options", "options", opts)
 	metrics.Retries = -1 // starts from 0
 	var claimedSandbox infra.Sandbox
 	return claimedSandbox, metrics, retry.OnError(wait.Backoff{
-		Steps:    int(LockTimeout / RetryInterval),
+		Steps:    int(DefaultClaimTimeout / RetryInterval),
 		Duration: RetryInterval,
-		Cap:      LockTimeout,
+		Cap:      DefaultClaimTimeout,
 		Factor:   LockBackoffFactor,
 		Jitter:   LockJitter,
 	}, func(err error) bool {

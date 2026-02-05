@@ -59,7 +59,7 @@ func GetMetricsFromSandbox(t *testing.T, sbx infra.Sandbox) infra.ClaimMetrics {
 
 //goland:noinspection GoDeprecation
 func TestInfra_ClaimSandbox(t *testing.T) {
-	SetClaimLockTimeout(50 * time.Millisecond)
+	SetClaimTimeout(50 * time.Millisecond)
 	server := NewTestRuntimeServer(RunCommandResult{
 		PID:    1,
 		Exited: true,
@@ -298,7 +298,7 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 
 //goland:noinspection GoDeprecation
 func TestClaimSandboxFailed(t *testing.T) {
-	SetClaimLockTimeout(100 * time.Millisecond)
+	SetClaimTimeout(100 * time.Millisecond)
 	server := NewTestRuntimeServer(RunCommandResult{
 		PID:      1,
 		ExitCode: 1, // returns an error
@@ -313,6 +313,7 @@ func TestClaimSandboxFailed(t *testing.T) {
 		options     infra.ClaimSandboxOptions
 		preModifier func(sbx *v1alpha1.Sandbox)
 		expectError string
+		getContext  func() context.Context
 	}{
 		{
 			name: "inplace update failed, reserved",
@@ -372,6 +373,21 @@ func TestClaimSandboxFailed(t *testing.T) {
 			},
 			expectError: "command failed",
 		},
+		{
+			name: "context canceled",
+			options: infra.ClaimSandboxOptions{
+				User:     "test-user",
+				Template: existTemplate,
+				// hack: the sandbox is not locked in this case, set true to pass the assertion
+				ReserveFailedSandbox: true,
+			},
+			getContext: func() context.Context {
+				ctx, cancel := context.WithCancel(t.Context())
+				cancel()
+				return ctx
+			},
+			expectError: "context canceled",
+		},
 	}
 
 	for _, tt := range tests {
@@ -427,9 +443,15 @@ func TestClaimSandboxFailed(t *testing.T) {
 				_, err := testInfra.GetSandbox(t.Context(), sandboxutils.GetSandboxID(sbx))
 				return err == nil
 			}, 100*time.Millisecond, 5*time.Millisecond)
-			_, _, err := TryClaimSandbox(t.Context(), tt.options, &testInfra.pickCache, testInfra.Cache, client)
+			var ctx context.Context
+			if tt.getContext == nil {
+				ctx = t.Context()
+			} else {
+				ctx = tt.getContext()
+			}
+			_, _, err := TryClaimSandbox(ctx, tt.options, &testInfra.pickCache, testInfra.Cache, client)
 			require.Error(t, err)
-			assert.True(t, strings.Contains(err.Error(), tt.expectError))
+			assert.Contains(t, err.Error(), tt.expectError)
 			_, err = client.ApiV1alpha1().Sandboxes(sbx.Namespace).Get(t.Context(), name, metav1.GetOptions{})
 			if tt.options.ReserveFailedSandbox {
 				assert.NoError(t, err)

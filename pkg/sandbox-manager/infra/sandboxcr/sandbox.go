@@ -269,7 +269,7 @@ func (s *Sandbox) CSIMount(ctx context.Context, driver string, request string) e
 	}
 	result, err := s.runCommandWithRuntime(ctx, processConfig, 5*time.Second)
 	if err != nil {
-		log.Error(err, "failed to run command")
+		log.Error(err, "failed to run command", "stdout", result.Stdout, "stderr", result.Stderr)
 		return err
 	}
 	if result.ExitCode != 0 {

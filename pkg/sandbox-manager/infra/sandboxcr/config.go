@@ -6,16 +6,16 @@ import (
 )
 
 var (
-	LockTimeout       = time.Minute
-	RetryInterval     = 10 * time.Millisecond
-	LockBackoffFactor = 1.0
-	LockJitter        = 0.1
+	DefaultClaimTimeout = time.Minute
+	RetryInterval       = 10 * time.Millisecond
+	LockBackoffFactor   = 1.0
+	LockJitter          = 0.1
 )
 
 var configMu sync.Mutex
 
-func SetClaimLockTimeout(duration time.Duration) {
+func SetClaimTimeout(duration time.Duration) {
 	configMu.Lock()
-	LockTimeout = duration
+	DefaultClaimTimeout = duration
 	configMu.Unlock()
 }
