@@ -145,7 +145,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	// if sandbox phase = Failed, Success
-	if r.isCompletedPhase(box.Status.Phase) {
+	if isSandboxCompletedPhase(box.Status.Phase) {
 		return ctrl.Result{}, nil
 	}
 
@@ -220,7 +220,7 @@ func (r *SandboxReconciler) handleTerminating(ctx context.Context, args core.Ens
 	return ctrl.Result{}, r.updateSandboxStatus(ctx, *newStatus, box)
 }
 
-func (r *SandboxReconciler) isCompletedPhase(phase agentsv1alpha1.SandboxPhase) bool {
+func isSandboxCompletedPhase(phase agentsv1alpha1.SandboxPhase) bool {
 	return phase == agentsv1alpha1.SandboxFailed || phase == agentsv1alpha1.SandboxSucceeded
 }
 
@@ -276,6 +276,7 @@ func (r *SandboxReconciler) updateSandboxStatus(ctx context.Context, newStatus a
 
 func calculateStatus(args core.EnsureFuncArgs) (*agentsv1alpha1.SandboxStatus, bool) {
 	pod, box, newStatus := args.Pod, args.Box, args.NewStatus
+	logger := logf.FromContext(context.TODO()).WithValues("sandbox", klog.KObj(box))
 
 	hash, _ := core.HashSandbox(box)
 	newStatus.ObservedGeneration = box.Generation
@@ -284,39 +285,64 @@ func calculateStatus(args core.EnsureFuncArgs) (*agentsv1alpha1.SandboxStatus, b
 		newStatus.Phase = agentsv1alpha1.SandboxPending
 	}
 
-	if pod != nil {
-		if !pod.DeletionTimestamp.IsZero() {
+	switch newStatus.Phase {
+	case agentsv1alpha1.SandboxPending:
+		updateStatusIfPodCompleted(pod, newStatus)
+		if isSandboxCompletedPhase(newStatus.Phase) {
 			return newStatus, true
-		} else if pod.Status.Phase == corev1.PodSucceeded && !box.Spec.Paused {
-			newStatus.Phase = agentsv1alpha1.SandboxSucceeded
-			return newStatus, true
-		} else if pod.Status.Phase == corev1.PodFailed && !box.Spec.Paused {
-			// During the paused phase, the pod transitions to the Failed state and should be ignored.
+		}
+	case agentsv1alpha1.SandboxRunning:
+		// At this stage, if the Pod does not exist, it can only be that the Pod was deleted externally, and the sandbox should enter the Failed state
+		if pod == nil || !pod.DeletionTimestamp.IsZero() {
 			newStatus.Phase = agentsv1alpha1.SandboxFailed
+			newStatus.Message = "Pod Not Found"
+		} else {
+			updateStatusIfPodCompleted(pod, newStatus)
+		}
+		if isSandboxCompletedPhase(newStatus.Phase) {
 			return newStatus, true
 		}
-	}
 
-	// If it is paused, first set the sandbox to the Paused state.
-	// To prevent loss of state information, the state immediately before Paused must currently be Running.
-	if box.Spec.Paused && box.Status.Phase == agentsv1alpha1.SandboxRunning {
-		// The paused and resumed condition are exclusive
-		utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionResumed))
-		newStatus.Phase = agentsv1alpha1.SandboxPaused
-		// enter resume phase
-	} else if !box.Spec.Paused && newStatus.Phase == agentsv1alpha1.SandboxPaused {
-		// delete paused condition
-		utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
-		newStatus.Phase = agentsv1alpha1.SandboxResuming
-		cond := metav1.Condition{
-			Type:               string(agentsv1alpha1.SandboxConditionResumed),
-			Status:             metav1.ConditionFalse,
-			Reason:             agentsv1alpha1.SandboxResumeReasonCreatePod,
-			LastTransitionTime: metav1.Now(),
+		// If it is paused, first set the sandbox to the Paused state.
+		// To prevent loss of state information, the state immediately before Paused must currently be Running.
+		if box.Spec.Paused {
+			// The paused and resumed condition are exclusive
+			utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionResumed))
+			newStatus.Phase = agentsv1alpha1.SandboxPaused
 		}
-		utils.SetSandboxCondition(newStatus, cond)
+
+	case agentsv1alpha1.SandboxPaused:
+		cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
+		// sandbox will only enter the resuming state after successful paused
+		if cond.Status == metav1.ConditionTrue && !box.Spec.Paused {
+			// delete paused condition
+			utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
+			newStatus.Phase = agentsv1alpha1.SandboxResuming
+			rCond := metav1.Condition{
+				Type:               string(agentsv1alpha1.SandboxConditionResumed),
+				Status:             metav1.ConditionFalse,
+				Reason:             agentsv1alpha1.SandboxResumeReasonCreatePod,
+				LastTransitionTime: metav1.Now(),
+			}
+			utils.SetSandboxCondition(newStatus, rCond)
+		} else if !box.Spec.Paused && cond.Status == metav1.ConditionFalse {
+			logger.Info("sandbox pause not completed, cannot enter resume state temporarily")
+		}
 	}
 	return newStatus, false
+}
+
+func updateStatusIfPodCompleted(pod *corev1.Pod, newStatus *agentsv1alpha1.SandboxStatus) {
+	if pod == nil || !pod.DeletionTimestamp.IsZero() {
+		return
+	}
+	if pod.Status.Phase == corev1.PodSucceeded {
+		newStatus.Phase = agentsv1alpha1.SandboxSucceeded
+		newStatus.Message = "Pod status phase is Succeeded"
+	} else if pod.Status.Phase == corev1.PodFailed {
+		newStatus.Phase = agentsv1alpha1.SandboxFailed
+		newStatus.Message = "Pod status phase is Failed"
+	}
 }
 
 // SetupWithManager sets up the controller with the Manager.

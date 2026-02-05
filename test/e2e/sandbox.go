@@ -305,7 +305,7 @@ var _ = Describe("Sandbox", func() {
 				},
 			}
 
-			By("Creating a failing Sandbox")
+			By(fmt.Sprintf("Creating a failing Sandbox(%s/%s)", failingSandbox.Namespace, failingSandbox.Name))
 			Expect(k8sClient.Create(ctx, failingSandbox)).To(Succeed())
 
 			By("Waiting for sandbox to transition to Failed phase")
@@ -315,7 +315,7 @@ var _ = Describe("Sandbox", func() {
 					Namespace: failingSandbox.Namespace,
 				}, failingSandbox)
 				return failingSandbox.Status.Phase
-			}, time.Second*90, time.Millisecond*500).Should(Equal(agentsv1alpha1.SandboxFailed))
+			}, time.Second*90, time.Second).Should(Equal(agentsv1alpha1.SandboxFailed))
 
 			// Clean up the failing sandbox
 			_ = k8sClient.Delete(ctx, failingSandbox)

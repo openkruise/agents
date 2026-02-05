@@ -55,10 +55,8 @@ func (r *commonControl) EnsureSandboxRunning(ctx context.Context, args EnsureFun
 	pod, box, newStatus := args.Pod, args.Box, args.NewStatus
 	// If the Pod does not exist, it must first be created.
 	if pod == nil {
-		if _, err := r.createPod(ctx, box, newStatus); err != nil {
-			return err
-		}
-		return nil
+		_, err := r.createPod(ctx, box, newStatus)
+		return err
 	}
 
 	// pod status running
