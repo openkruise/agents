@@ -109,6 +109,7 @@ spec:
                   from
                 type: string
               ttlAfterCompleted:
+                default: 5m
                 description: |-
                   TTLAfterCompleted specifies the time to live after the claim reaches Completed phase
                   After this duration, the SandboxClaim will be automatically deleted.

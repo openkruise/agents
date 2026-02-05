@@ -51,6 +51,7 @@ type SandboxClaimSpec struct {
 	// After this duration, the SandboxClaim will be automatically deleted.
 	// Note: Only the SandboxClaim resource will be deleted; the claimed sandboxes will NOT be deleted
 	// +optional
+	// +kubebuilder:default="5m"
 	TTLAfterCompleted *metav1.Duration `json:"ttlAfterCompleted,omitempty"`
 
 	// Labels contains key-value pairs to be added as labels
