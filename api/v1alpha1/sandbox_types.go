@@ -73,6 +73,8 @@ type SandboxTemplate struct {
 	Template *v1.PodTemplateSpec `json:"template,omitempty"`
 
 	// VolumeClaimTemplates is a list of PVC templates to create for this Sandbox.
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:Schemaless
 	// +optional
 	VolumeClaimTemplates []v1.PersistentVolumeClaim `json:"volumeClaimTemplates,omitempty"`
 }

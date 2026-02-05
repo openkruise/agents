@@ -76,6 +76,9 @@ func validateSandboxSetSpec(spec agentsv1alpha1.SandboxSetSpec, fldPath *field.P
 	if spec.Replicas < 0 {
 		errList = append(errList, field.Invalid(fldPath.Child("replicas"), spec.Replicas, "replicas cannot be negative"))
 	}
+	if spec.Template == nil {
+		return errList
+	}
 	errList = append(errList, validateLabelsAndAnnotations(spec.Template.ObjectMeta, fldPath.Child("template"))...)
 	errList = append(errList, validateSandboxSetPodTemplateSpec(spec, fldPath)...)
 	return errList
@@ -84,6 +87,12 @@ func validateSandboxSetSpec(spec agentsv1alpha1.SandboxSetSpec, fldPath *field.P
 func validateSandboxSetPodTemplateSpec(spec agentsv1alpha1.SandboxSetSpec, fldPath *field.Path) field.ErrorList {
 	errList := field.ErrorList{}
 	coreTemplate := &core.PodTemplateSpec{}
+
+	if len(spec.VolumeClaimTemplates) != 0 {
+		//TODO: validate the podtemplate if VolumeClaimTemplates is not empty
+		return errList
+	}
+
 	if err := corev1.Convert_v1_PodTemplateSpec_To_core_PodTemplateSpec(spec.Template.DeepCopy(), coreTemplate, nil); err != nil {
 		errList = append(errList, field.Invalid(fldPath.Child("template"), spec.Template, fmt.Sprintf("Convert_v1_PodTemplateSpec_To_core_PodTemplateSpec failed: %v", err)))
 		return errList

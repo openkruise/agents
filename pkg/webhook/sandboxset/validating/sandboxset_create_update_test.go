@@ -66,6 +66,73 @@ func TestSandboxSetValidatingHandler_Handle(t *testing.T) {
 			expectError: false,
 		},
 		{
+			name: "Valid SandboxSet With VolumeClaimTemplate",
+			sandboxSet: &v1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sbs",
+					Namespace: "default",
+				},
+				Spec: v1alpha1.SandboxSetSpec{
+					Replicas: 3,
+					SandboxTemplate: v1alpha1.SandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							ObjectMeta: metav1.ObjectMeta{
+								Labels: map[string]string{
+									"app": "test",
+								},
+							},
+							Spec: corev1.PodSpec{
+								RestartPolicy:                 corev1.RestartPolicyAlways,
+								DNSPolicy:                     corev1.DNSClusterFirst,
+								TerminationGracePeriodSeconds: new(int64),
+								Containers: []corev1.Container{
+									{
+										Name:                     "test",
+										Image:                    "nginx:latest",
+										ImagePullPolicy:          corev1.PullAlways,
+										TerminationMessagePolicy: corev1.TerminationMessageReadFile,
+									},
+								},
+							},
+						},
+						VolumeClaimTemplates: []corev1.PersistentVolumeClaim{
+							{
+								ObjectMeta: metav1.ObjectMeta{
+									Name: "test-pvc",
+								},
+								Spec: corev1.PersistentVolumeClaimSpec{
+									AccessModes: []corev1.PersistentVolumeAccessMode{
+										corev1.ReadWriteOnce,
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectAllow: true,
+			expectError: false,
+		},
+		{
+			name: "Valid SandboxSet with templateref",
+			sandboxSet: &v1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sbs",
+					Namespace: "default",
+				},
+				Spec: v1alpha1.SandboxSetSpec{
+					Replicas: 3,
+					SandboxTemplate: v1alpha1.SandboxTemplate{
+						TemplateRef: &v1alpha1.SandboxTemplateRef{
+							Name: "test-sbs",
+						},
+					},
+				},
+			},
+			expectAllow: true,
+			expectError: false,
+		},
+		{
 			name: "Invalid name",
 			sandboxSet: &v1alpha1.SandboxSet{
 				ObjectMeta: metav1.ObjectMeta{
