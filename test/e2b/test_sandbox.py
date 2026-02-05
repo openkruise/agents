@@ -32,7 +32,7 @@ def test_list_by_metadata(sandbox_context):
         template="code-interpreter",
         timeout=30,
         metadata={
-            'userId': random_user_id,  # 使用随机用户ID
+            'userId': random_user_id,
         },
     ))
     print(f"sandbox-id: {sandbox.sandbox_id}")
@@ -183,3 +183,17 @@ def test_is_running(sandbox_context):
 
     sbx.kill()
     assert not sbx.is_running()  # Returns False
+
+
+def test_inplace_update(sandbox_context):
+    sbx: Sandbox = sandbox_context.add(Sandbox.create(
+        template="code-interpreter",
+        timeout=30,
+        metadata={
+            "case": "inplace-update",
+            "e2b.agents.kruise.io/image": "agent-runtime:latest"
+        },
+    ))
+    file = sbx.files.read("/workspace/entrypoint.sh")
+    print(file)
+    assert file != ""

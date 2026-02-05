@@ -43,7 +43,7 @@ jobs:
           version: ${{ env.KIND_VERSION }}
 
       - name: Cache Docker images
-        uses: actions/cache@v3
+        uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: /tmp/docker-images
           key: ${{ runner.os }}-docker-${{ env.CODE_INTERPRETER_IMG }}
