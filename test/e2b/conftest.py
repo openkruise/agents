@@ -38,6 +38,18 @@ class SandboxContext:
 
     def cleanup(self, test_failed: bool = False):
         """Clean up all sandboxes in the context."""
+        # If no sandboxes, print sandbox manager logs
+        if not self.sandboxes:
+            print("\n=== No sandboxes to cleanup, printing sandbox-manager logs ===")
+            try:
+                kubectl("logs", "-n", "sandbox-system",
+                        "-l", "component=sandbox-manager",
+                        "--tail", "100")
+            except Exception as e:
+                print(f"Failed to get sandbox-manager logs: {e}")
+            print("=== End sandbox-manager logs ===\n")
+            return
+
         for sandbox in self.sandboxes:
             try:
                 sandbox_id = sandbox.sandbox_id.split("--")[1]
