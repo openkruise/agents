@@ -40,13 +40,23 @@ class SandboxContext:
         """Clean up all sandboxes in the context."""
         # If no sandboxes, print sandbox manager logs
         if not self.sandboxes:
-            print("\n=== No sandboxes to cleanup, printing sandbox-manager logs ===")
+            print("\n=== No sandboxes to cleanup, printing logs ===")
+            print("== sandbox-manager logs ==")
             try:
                 kubectl("logs", "-n", "sandbox-system",
                         "-l", "component=sandbox-manager",
                         "--tail", "100")
             except Exception as e:
                 print(f"Failed to get sandbox-manager logs: {e}")
+            print("== end sandbox-manager logs ==")
+            print("== sandbox-controller logs ==")
+            try:
+                kubectl("logs", "-n", "sandbox-system",
+                        "-l", "control-plane=sandbox-controller-manager",
+                        "--tail", "100")
+            except Exception as e:
+                print(f"Failed to get sandbox-controller logs: {e}")
+            print("== end sandbox-controller logs ==")
             print("=== End sandbox-manager logs ===\n")
             return
 
