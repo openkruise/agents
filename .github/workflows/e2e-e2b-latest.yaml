@@ -22,6 +22,7 @@ env:
   MANAGER_IMG: sandbox-manager:latest
   RUNTIME_IMG: agent-runtime:latest
   CODE_INTERPRETER_IMG: registry-ap-southeast-1.ack.aliyuncs.com/acs/code-interpreter:v1.6
+  INPLACE_UPDATE_IMG: registry-ap-southeast-1.ack.aliyuncs.com/acs/code-interpreter:v1.6-new
 
 jobs:
   sandbox:
