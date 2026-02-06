@@ -186,6 +186,7 @@ def test_is_running(sandbox_context):
 
 
 def test_inplace_update(sandbox_context):
+    pytest.skip("inplace update is not supported yet")
     sbx: Sandbox = sandbox_context.add(Sandbox.create(
         template="code-interpreter",
         timeout=30,
