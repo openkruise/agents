@@ -159,7 +159,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	var requeueAfter time.Duration
 	if box.Spec.ShutdownTime != nil && box.DeletionTimestamp == nil {
 		if box.Spec.ShutdownTime.Before(&now) {
-			logger.Info("sandbox shutdown time reached, will be deleted")
+			logger.Info("sandbox shutdown time reached, will be deleted", "shutdownTime", box.Spec.ShutdownTime)
 			return ctrl.Result{}, r.Delete(ctx, box)
 		}
 		requeueAfter = box.Spec.ShutdownTime.Sub(now.Time)

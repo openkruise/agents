@@ -62,6 +62,7 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 				timeoutOptions.ShutdownTime = TimeAfterSeconds(claimStart, request.Timeout)
 			}
 			sbx.SetTimeout(timeoutOptions)
+			log.Info("timeout options calculated", "options", timeoutOptions)
 
 			annotations := sbx.GetAnnotations()
 			if annotations == nil {
