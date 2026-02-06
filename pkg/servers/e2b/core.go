@@ -10,7 +10,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"k8s.io/client-go/rest"
 	"k8s.io/klog/v2"
 
@@ -105,27 +104,28 @@ func (sc *Controller) Run(sysNs, peerSelector string) (context.Context, error) {
 		klog.Fatalf("Sandbox manager failed to start: %v", err)
 	}
 
-	// Run HTTP server in a goroutine
-	go func() {
-		klog.InfoS("Starting Server", "address", sc.server.Addr)
-		if err := sc.server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			klog.Fatalf("HTTP server failed to start: %v", err)
-		}
-	}()
+	// NOTE: Legacy HTTP Server logic removed to avoid port conflicts with the new Web Server in main.go
+	/*
+		go func() {
+			klog.InfoS("Starting Server", "address", sc.server.Addr)
+			if err := sc.server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				klog.Fatalf("HTTP server failed to start: %v", err)
+			}
+		}()
+	*/
 
 	// stopper
 	go func() {
 		<-sc.stop
-		// Shutdown server gracefully
 		klog.InfoS("Shutting down server...")
 		defer cancel()
 		sc.manager.Stop()
-		// Shutdown HTTP server with timeout
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), consts.ShutdownTimeout)
-		defer shutdownCancel()
-		if err := sc.server.Shutdown(shutdownCtx); err != nil {
-			klog.ErrorS(err, "HTTP server forced to shutdown")
-		}
+
+		/*
+			if err := sc.server.Shutdown(ctx); err != nil {
+				klog.ErrorS(err, "HTTP server forced to shutdown")
+			}
+		*/
 		klog.InfoS("Server exited")
 	}()
 
