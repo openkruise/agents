@@ -54,12 +54,13 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 			// - During pause (pause interface):
 			//   - if autoPause == true: Set `ShutdownTime` to `time.Now().Add(maxTimeout)` and clear `PauseTime`
 			//   - if autoPause == false: Set `ShutdownTime` to `time.Now().Add(maxTimeout)`
+			now := time.Now()
 			timeoutOptions := infra.TimeoutOptions{}
 			if request.AutoPause {
-				timeoutOptions.ShutdownTime = TimeAfterSeconds(claimStart, sc.maxTimeout)
-				timeoutOptions.PauseTime = TimeAfterSeconds(claimStart, request.Timeout)
+				timeoutOptions.ShutdownTime = TimeAfterSeconds(now, sc.maxTimeout)
+				timeoutOptions.PauseTime = TimeAfterSeconds(now, request.Timeout)
 			} else {
-				timeoutOptions.ShutdownTime = TimeAfterSeconds(claimStart, request.Timeout)
+				timeoutOptions.ShutdownTime = TimeAfterSeconds(now, request.Timeout)
 			}
 			sbx.SetTimeout(timeoutOptions)
 			log.Info("timeout options calculated", "options", timeoutOptions)
