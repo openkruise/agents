@@ -49,6 +49,38 @@ def connect_sandbox(sbx: Sandbox, timeout: Optional[int] = None) -> Sandbox | No
     return None
 
 
+def run_code_sandbox(sbx: Sandbox, code: str, **kwargs):
+    """Run code in a sandbox with retry logic.
+    
+    Args:
+        sbx: The Sandbox instance to run code in.
+        code: The code to execute.
+        **kwargs: Additional arguments to pass to run_code (e.g., context, on_result).
+        
+    Returns:
+        The execution result from run_code.
+        
+    Raises:
+        Exception: If code execution fails after all retries.
+    """
+    max_retries = 5
+    retry_interval = 5  # seconds
+    
+    for attempt in range(max_retries):
+        try:
+            return sbx.run_code(code, request_timeout=120., **kwargs)
+        except Exception as e:
+            if attempt < max_retries - 1:
+                print(f"Failed to run code (attempt {attempt + 1}/{max_retries}): {e}")
+                print(f"Retrying in {retry_interval}s...")
+                time.sleep(retry_interval)
+                continue
+            else:
+                print(f"Failed to run code after {max_retries} attempts")
+                raise
+    return None
+
+
 def list_sandbox(query: SandboxQuery = None) -> List[SandboxInfo]:
     """List all sandboxes matching the given query with full pagination.
     

@@ -4,10 +4,12 @@ import time
 import pytest
 from e2b_code_interpreter import Sandbox
 
+from utils import run_code_sandbox
+
 
 def execute_python_code(s: Sandbox, code: str, expect_stdout: list[str]):
     # Execute Python code inside the sandbox
-    execution = s.run_code(code)
+    execution = run_code_sandbox(s, code)
     if execution.error:
         raise Exception(execution.error)
     assert execution.logs.stdout == expect_stdout
@@ -57,7 +59,7 @@ def test_static_charts(sandbox_context):
         metadata={"test_case": "test_static_charts"},
     ))
     # Run the code inside the sandbox
-    execution = sandbox.run_code(code_to_run)
+    execution = run_code_sandbox(sandbox, code_to_run)
 
     assert len(execution.results) == 1
     # There's only one result in this case - the plot displayed with `plt.show()`
@@ -100,7 +102,8 @@ def test_code_stream(sandbox_context):
         timeout=30,
         metadata={"test_case": "test_code_stream"},
     ))
-    sandbox.run_code(
+    run_code_sandbox(
+        sandbox,
         code_to_run,
         on_result=on_result_callback,
     )
@@ -122,11 +125,11 @@ def test_pause_resume_code_context(sandbox_context):
     print(f"Code context created: {context.id}")
 
     # 2) Run some Python code in the context
-    execution = sbx.run_code("x = 10", context=context)
+    execution = run_code_sandbox(sbx, "x = 10", context=context)
     assert not execution.error
-    execution = sbx.run_code("y = 20", context=context)
+    execution = run_code_sandbox(sbx, "y = 20", context=context)
     assert not execution.error
-    execution = sbx.run_code("print(f'x = {x}, y = {y}')", context=context)
+    execution = run_code_sandbox(sbx, "print(f'x = {x}, y = {y}')", context=context)
     assert not execution.error
     assert execution.logs.stdout == ["x = 10, y = 20\n"]
 
@@ -145,7 +148,7 @@ def test_pause_resume_code_context(sandbox_context):
     # 4) Run some Python code in the context (created before)
     # Variables and functions defined before pause should still exist
     # Use the same context ID
-    execution = sbx.run_code("print(f'x = {x}, y = {y}')", context=context)
+    execution = run_code_sandbox(sbx, "print(f'x = {x}, y = {y}')", context=context)
     assert not execution.error
     assert execution.logs.stdout == ["x = 10, y = 20\n"]
 

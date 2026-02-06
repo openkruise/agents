@@ -22,7 +22,7 @@ print("e2b client patched")
 # Import fixtures from utils directly to make them available to all tests
 # This needs to be imported after patch_e2b is applied
 # noinspection PyUnusedImports
-from utils import wait_for_sandbox, kubectl
+from utils import wait_for_sandbox, kubectl, run_code_sandbox
 
 
 class SandboxContext:
@@ -39,7 +39,7 @@ class SandboxContext:
     def cleanup(self, test_failed: bool = False):
         """Clean up all sandboxes in the context."""
         # If no sandboxes, print sandbox manager logs
-        if not self.sandboxes:
+        if test_failed and not self.sandboxes:
             print("\n=== No sandboxes to cleanup, printing logs ===")
             print("== sandbox-manager logs ==")
             try:

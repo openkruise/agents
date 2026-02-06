@@ -5,7 +5,7 @@ import pytest
 from e2b.exceptions import NotFoundException
 from e2b_code_interpreter import Sandbox, SandboxQuery, SandboxState
 
-from utils import list_sandbox, connect_sandbox
+from utils import list_sandbox, connect_sandbox, run_code_sandbox
 
 
 # Link: https://e2b.dev/docs/sandbox
@@ -113,7 +113,7 @@ def test_pause_connect_kill(sandbox_context):
     time.sleep(30)
     print(f"trying to connect sandbox")
     connect_sandbox(sandbox)
-    sandbox.run_code("Hello, world")  # check work
+    run_code_sandbox(sandbox, "Hello, world")  # check work
     print(f"sandbox is working after resume")
 
 
