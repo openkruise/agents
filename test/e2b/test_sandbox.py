@@ -191,9 +191,8 @@ def test_inplace_update(sandbox_context):
         timeout=30,
         metadata={
             "case": "inplace-update",
-            "e2b.agents.kruise.io/image": "agent-runtime:latest"
+            "e2b.agents.kruise.io/image": "registry-ap-southeast-1.ack.aliyuncs.com/acs/code-interpreter:v1.6-new"
         },
     ))
-    file = sbx.files.read("/workspace/entrypoint.sh")
-    print(file)
-    assert file != ""
+    file = sbx.files.read("/root/test-file")
+    assert file == "xxxx"

@@ -22,6 +22,7 @@ env:
   MANAGER_IMG: sandbox-manager:latest
   RUNTIME_IMG: agent-runtime:latest
   CODE_INTERPRETER_IMG: registry-ap-southeast-1.ack.aliyuncs.com/acs/code-interpreter:v1.6
+  INPLACE_UPDATE_IMG: registry-ap-southeast-1.ack.aliyuncs.com/acs/code-interpreter:v1.6-new
 
 jobs:
   sandbox:
@@ -63,6 +64,19 @@ jobs:
             echo "Cached code-interpreter image"
           fi
 
+      - name: Load cached inplace update images
+        run: |
+          if [ -f /tmp/docker-images/inplace-update.tar ]; then
+            echo "Using cached inplace-update image"
+            docker load -i /tmp/docker-images/inplace-update.tar
+          else
+            echo "Building inplace-update image: ${INPLACE_UPDATE_IMG}"
+            docker build -t ${INPLACE_UPDATE_IMG} -f test/e2b/assets/Dockerfile .
+            mkdir -p /tmp/docker-images
+            docker save ${INPLACE_UPDATE_IMG} -o /tmp/docker-images/inplace-update.tar
+            echo "Cached inplace-update image"
+          fi
+
       - name: Build image
         run: |
           make docker-build-manager
@@ -72,6 +86,7 @@ jobs:
           kind load docker-image --name=${KIND_CLUSTER_NAME} ${MANAGER_IMG} || { echo >&2 "kind not installed or error loading image: ${MANAGER_IMG}"; exit 1; }
           kind load docker-image --name=${KIND_CLUSTER_NAME} ${RUNTIME_IMG} || { echo >&2 "kind not installed or error loading image: ${RUNTIME_IMG}"; exit 1; }
           kind load docker-image --name=${KIND_CLUSTER_NAME} ${CODE_INTERPRETER_IMG} || { echo >&2 "kind not installed or error loading image: ${CODE_INTERPRETER_IMG}"; exit 1; }
+          kind load docker-image --name=${KIND_CLUSTER_NAME} ${INPLACE_UPDATE_IMG} || { echo >&2 "kind not installed or error loading image: ${INPLACE_UPDATE_IMG}"; exit 1; }
 
       - name: Install Kruise Agents
         run: |

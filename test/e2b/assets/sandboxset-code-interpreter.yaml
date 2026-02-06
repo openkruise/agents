@@ -39,8 +39,9 @@ spec:
                   - /mnt/envd/envd-run.sh
           startupProbe:
             failureThreshold: 20
-            tcpSocket:
-              port: 49983
+            httpGet:
+              path: /health
+              port: 49999
             initialDelaySeconds: 1
             periodSeconds: 2
             timeoutSeconds: 1
