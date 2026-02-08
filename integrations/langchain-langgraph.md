@@ -48,7 +48,7 @@ Let's build a LangChain agent that can execute Python code in a sandbox. We'll u
 Install the required packages:
 
 ```bash
-pip install langchain langchain-openai e2b-code-interpreter
+pip install langchain langchain-openai langgraph e2b-code-interpreter
 ```
 
 Set your API keys:
@@ -97,31 +97,26 @@ Now we'll create a LangChain agent that can use this tool:
 
 ```python
 from langchain_openai import ChatOpenAI
-from langchain.agents import create_tool_calling_agent, AgentExecutor
-from langchain.prompts import ChatPromptTemplate
+from langgraph.prebuilt import create_react_agent
 
 # Initialize the LLM
 llm = ChatOpenAI(model="gpt-4", temperature=0)
 
-# Define the agent prompt
-prompt = ChatPromptTemplate.from_messages([
-    ("system", "You are a helpful AI assistant with access to a Python sandbox. "
-               "Use the execute_python tool to run code when needed."),
-    ("human", "{input}"),
-    ("placeholder", "{agent_scratchpad}"),
-])
-
 # Create the agent with our sandbox tool
 tools = [execute_python]
-agent = create_tool_calling_agent(llm, tools, prompt)
-agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True)
+
+# Define the system prompt
+system_message = "You are a helpful AI assistant with access to a Python sandbox. Use the execute_python tool to run code when needed."
+
+# Create the agent
+agent_executor = create_react_agent(llm, tools, state_modifier=system_message)
 
 # Run the agent
 result = agent_executor.invoke({
-    "input": "Calculate the sum of squares of numbers from 1 to 100"
+    "messages": [("user", "Calculate the sum of squares of numbers from 1 to 100")]
 })
 
-print(result["output"])
+print(result["messages"][-1].content)
 ```
 
 **What's happening here:**
