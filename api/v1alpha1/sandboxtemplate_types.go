@@ -27,14 +27,12 @@ type SandboxTemplateSpec struct {
 	// Template is mutual exclusive with TemplateRef
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +kubebuilder:validation:Schemaless
-	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="Value is immutable"
 	// +optional
 	Template *v1.PodTemplateSpec `json:"template,omitempty"`
 
 	// VolumeClaimTemplates is a list of PVC templates to create for this Sandbox.
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +kubebuilder:validation:Schemaless
-	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="Value is immutable"
 	// +optional
 	VolumeClaimTemplates []v1.PersistentVolumeClaim `json:"volumeClaimTemplates,omitempty"`
 }
