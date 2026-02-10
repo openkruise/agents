@@ -31,6 +31,7 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 	if parseErr != nil {
 		return web.ApiResponse[*models.Sandbox]{}, parseErr
 	}
+	log.Info("create sandbox request received", "request", request)
 
 	var accessToken string
 	if request.Secure {

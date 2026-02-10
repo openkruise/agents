@@ -484,3 +484,186 @@ func TestInfra_onSandboxUpdate(t *testing.T) {
 		})
 	}
 }
+
+func TestInfra_reconcileRoutes(t *testing.T) {
+	tests := []struct {
+		name               string
+		sandboxes          []*v1alpha1.Sandbox
+		orphanedRoutes     []proxy.Route
+		expectDeletedCount int
+		expectRemainingIDs []string
+	}{
+		{
+			name: "no orphaned routes",
+			sandboxes: []*v1alpha1.Sandbox{
+				createTestSandboxWithDefaults("sandbox-1", "default"),
+				createTestSandboxWithDefaults("sandbox-2", "default"),
+			},
+			orphanedRoutes:     []proxy.Route{},
+			expectDeletedCount: 0,
+			expectRemainingIDs: []string{"default--sandbox-1", "default--sandbox-2"},
+		},
+		{
+			name: "one orphaned route",
+			sandboxes: []*v1alpha1.Sandbox{
+				createTestSandboxWithDefaults("sandbox-1", "default"),
+			},
+			orphanedRoutes: []proxy.Route{
+				{ID: "default--orphaned-sandbox", IP: "10.0.0.99", State: v1alpha1.SandboxStateRunning},
+			},
+			expectDeletedCount: 1,
+			expectRemainingIDs: []string{"default--sandbox-1"},
+		},
+		{
+			name: "multiple orphaned routes",
+			sandboxes: []*v1alpha1.Sandbox{
+				createTestSandboxWithDefaults("sandbox-1", "default"),
+			},
+			orphanedRoutes: []proxy.Route{
+				{ID: "default--orphaned-1", IP: "10.0.0.98", State: v1alpha1.SandboxStateRunning},
+				{ID: "default--orphaned-2", IP: "10.0.0.99", State: v1alpha1.SandboxStateRunning},
+			},
+			expectDeletedCount: 2,
+			expectRemainingIDs: []string{"default--sandbox-1"},
+		},
+		{
+			name:      "all routes are orphaned",
+			sandboxes: []*v1alpha1.Sandbox{},
+			orphanedRoutes: []proxy.Route{
+				{ID: "default--orphaned-1", IP: "10.0.0.98", State: v1alpha1.SandboxStateRunning},
+				{ID: "default--orphaned-2", IP: "10.0.0.99", State: v1alpha1.SandboxStateRunning},
+			},
+			expectDeletedCount: 2,
+			expectRemainingIDs: []string{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			infraInstance, client := NewTestInfra(t)
+
+			// Create sandboxes in cache
+			for _, sbx := range tt.sandboxes {
+				CreateSandboxWithStatus(t, client, sbx)
+				// Also add their routes to proxy
+				id := stateutils.GetSandboxID(sbx)
+				infraInstance.Proxy.SetRoute(proxy.Route{
+					ID:    id,
+					IP:    sbx.Status.PodInfo.PodIP,
+					State: v1alpha1.SandboxStateRunning,
+				})
+			}
+
+			// Add orphaned routes to proxy
+			for _, route := range tt.orphanedRoutes {
+				infraInstance.Proxy.SetRoute(route)
+			}
+
+			time.Sleep(50 * time.Millisecond)
+
+			// Run reconciliation
+			infraInstance.reconcileRoutes()
+
+			// Verify remaining routes
+			remainingRoutes := infraInstance.Proxy.ListRoutes()
+			assert.Len(t, remainingRoutes, len(tt.expectRemainingIDs), "expected %d routes remaining", len(tt.expectRemainingIDs))
+
+			// Verify orphaned routes are deleted
+			for _, route := range tt.orphanedRoutes {
+				_, ok := infraInstance.Proxy.LoadRoute(route.ID)
+				assert.False(t, ok, "orphaned route %s should be deleted", route.ID)
+			}
+
+			// Verify expected routes still exist
+			for _, expectedID := range tt.expectRemainingIDs {
+				_, ok := infraInstance.Proxy.LoadRoute(expectedID)
+				assert.True(t, ok, "route %s should still exist", expectedID)
+			}
+		})
+	}
+}
+
+func TestInfra_startRouteReconciler(t *testing.T) {
+	tests := []struct {
+		name              string
+		sandboxes         []*v1alpha1.Sandbox
+		orphanedRoutes    []proxy.Route
+		reconcileInterval time.Duration
+		waitTime          time.Duration
+		expectReconciled  bool
+	}{
+		{
+			name: "reconciler cleans up orphaned routes periodically",
+			sandboxes: []*v1alpha1.Sandbox{
+				createTestSandboxWithDefaults("sandbox-1", "default"),
+			},
+			orphanedRoutes: []proxy.Route{
+				{ID: "default--orphaned-sandbox", IP: "10.0.0.99", State: v1alpha1.SandboxStateRunning},
+			},
+			reconcileInterval: 100 * time.Millisecond,
+			waitTime:          200 * time.Millisecond,
+			expectReconciled:  true,
+		},
+		{
+			name: "reconciler stops when stop channel is closed",
+			sandboxes: []*v1alpha1.Sandbox{
+				createTestSandboxWithDefaults("sandbox-1", "default"),
+			},
+			orphanedRoutes: []proxy.Route{
+				{ID: "default--orphaned-sandbox", IP: "10.0.0.99", State: v1alpha1.SandboxStateRunning},
+			},
+			reconcileInterval: 1 * time.Second,
+			waitTime:          50 * time.Millisecond,
+			expectReconciled:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			infraInstance, client := NewTestInfra(t)
+
+			// Create sandboxes
+			for _, sbx := range tt.sandboxes {
+				CreateSandboxWithStatus(t, client, sbx)
+				id := stateutils.GetSandboxID(sbx)
+				infraInstance.Proxy.SetRoute(proxy.Route{
+					ID:    id,
+					IP:    sbx.Status.PodInfo.PodIP,
+					State: v1alpha1.SandboxStateRunning,
+				})
+			}
+
+			// Add orphaned routes
+			for _, route := range tt.orphanedRoutes {
+				infraInstance.Proxy.SetRoute(route)
+			}
+
+			time.Sleep(50 * time.Millisecond)
+
+			go infraInstance.startRouteReconciler(tt.reconcileInterval)
+
+			// Wait for reconciliation to happen (or not)
+			time.Sleep(tt.waitTime)
+
+			// Stop the reconciler
+			infraInstance.Stop()
+
+			// Verify orphaned routes are cleaned up (or not)
+			for _, route := range tt.orphanedRoutes {
+				_, ok := infraInstance.Proxy.LoadRoute(route.ID)
+				if tt.expectReconciled {
+					assert.False(t, ok, "orphaned route %s should be deleted after reconciliation", route.ID)
+				} else {
+					assert.True(t, ok, "orphaned route %s should still exist (reconciler stopped early)", route.ID)
+				}
+			}
+
+			// Verify valid routes still exist
+			for _, sbx := range tt.sandboxes {
+				id := stateutils.GetSandboxID(sbx)
+				_, ok := infraInstance.Proxy.LoadRoute(id)
+				assert.True(t, ok, "valid route %s should always exist", id)
+			}
+		})
+	}
+}

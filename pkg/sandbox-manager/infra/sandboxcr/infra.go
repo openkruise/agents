@@ -38,6 +38,8 @@ type Infra struct {
 	// if a sandboxset with the same name is created in two different namespaces, the corresponding value would be 2.
 	// In the future, this will be changed to integrate with Template CR.
 	templates sync.Map
+
+	reconcileStopCh chan struct{}
 }
 
 func NewInfra(client sandboxclient.Interface, k8sClient kubernetes.Interface, proxy *proxy.Server, systemNamespace string) (*Infra, error) {
@@ -64,9 +66,10 @@ func NewInfra(client sandboxclient.Interface, k8sClient kubernetes.Interface, pr
 	}
 
 	instance := &Infra{
-		Cache:  cache,
-		Client: client,
-		Proxy:  proxy,
+		Cache:           cache,
+		Client:          client,
+		Proxy:           proxy,
+		reconcileStopCh: make(chan struct{}),
 	}
 
 	cache.AddSandboxEventHandler(k8scache.ResourceEventHandlerFuncs{
@@ -79,6 +82,10 @@ func NewInfra(client sandboxclient.Interface, k8sClient kubernetes.Interface, pr
 		AddFunc:    instance.onSandboxSetCreate,
 		DeleteFunc: instance.onSandboxSetDelete,
 	})
+
+	// Start route reconciler to handle missed delete events
+	go instance.startRouteReconciler(RouteReconcileInterval)
+
 	return instance, nil
 }
 
@@ -87,6 +94,7 @@ func (i *Infra) Run(ctx context.Context) error {
 }
 
 func (i *Infra) Stop() {
+	close(i.reconcileStopCh)
 	i.Cache.Stop()
 }
 
@@ -203,7 +211,7 @@ func (i *Infra) onSandboxDelete(obj any) {
 	}
 	sandboxID := stateutils.GetSandboxID(sbx)
 	i.Proxy.DeleteRoute(sandboxID)
-	klog.Info("sandbox route deleted", "sandboxID", sandboxID)
+	klog.InfoS("sandbox route deleted", "sandboxID", sandboxID)
 	managerutils.ResourceVersionExpectationDelete(sbx)
 }
 
@@ -283,4 +291,61 @@ func GetTemplateFromSandbox(sbx metav1.Object) string {
 		tmpl = sbx.GetLabels()[v1alpha1.LabelSandboxPool]
 	}
 	return tmpl
+}
+
+const (
+	// RouteReconcileInterval is the interval for route reconciliation
+	RouteReconcileInterval = 5 * time.Minute
+)
+
+// startRouteReconciler periodically reconciles routes to clean up orphaned entries
+// that might be left due to missed delete events from Kubernetes informer
+func (i *Infra) startRouteReconciler(interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			i.reconcileRoutes()
+		case <-i.reconcileStopCh:
+			klog.Info("route reconciler stopped")
+			return
+		}
+	}
+}
+
+// reconcileRoutes compares routes in Proxy with Sandboxes in Cache
+// and deletes orphaned routes that no longer have corresponding Sandboxes
+func (i *Infra) reconcileRoutes() {
+	ctx := logs.NewContext()
+	log := klog.FromContext(ctx)
+	log.Info("starting route reconciliation")
+	// Build set of existing sandbox IDs from cache
+	existingSandboxIDs := make(map[string]struct{})
+
+	sandboxList := i.Cache.sandboxInformer.GetStore().List()
+	for _, obj := range sandboxList {
+		sbx, ok := obj.(*v1alpha1.Sandbox)
+		if !ok {
+			continue
+		}
+		sandboxID := stateutils.GetSandboxID(sbx)
+		existingSandboxIDs[sandboxID] = struct{}{}
+	}
+
+	// Check all routes and delete orphaned ones
+	routes := i.Proxy.ListRoutes()
+	deletedCount := 0
+	for _, route := range routes {
+		if _, exists := existingSandboxIDs[route.ID]; !exists {
+			i.Proxy.DeleteRoute(route.ID)
+			deletedCount++
+			log.Info("reconciler deleted orphaned route", "sandboxID", route.ID)
+		}
+	}
+
+	if deletedCount > 0 {
+		log.Info("route reconciliation completed", "orphanedRoutesDeleted", deletedCount, "totalRoutes", len(routes))
+	}
 }
