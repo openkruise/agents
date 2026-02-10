@@ -14,6 +14,8 @@ type ClaimSandboxOptions struct {
 	CandidateCounts int `json:"candidateCounts"`
 	// Lock string used in optimistic lock
 	LockString string `json:"lockString"`
+	// PreCheck checks the sandbox before modifying it
+	PreCheck func(sandbox Sandbox) error `json:"-"`
 	// Set Modifier to modify the Sandbox before it is updated
 	Modifier func(sandbox Sandbox) `json:"-"`
 	// Set ReserveFailedSandbox to true to reserve failed sandboxes
@@ -24,6 +26,8 @@ type ClaimSandboxOptions struct {
 	InitRuntime *InitRuntimeOptions `json:"initRuntime"`
 	// Set CSIMount to non-nil value to mount a CSI volume
 	CSIMount *CSIMountOptions `json:"CSIMount"`
+	// Max ClaimTimeout duration
+	ClaimTimeout time.Duration `json:"claimTimeout"`
 }
 
 type ClaimMetrics struct {
@@ -34,6 +38,7 @@ type ClaimMetrics struct {
 	InplaceUpdate time.Duration
 	InitRuntime   time.Duration
 	CSIMount      time.Duration
+	LastError     error
 }
 
 func (m ClaimMetrics) String() string {

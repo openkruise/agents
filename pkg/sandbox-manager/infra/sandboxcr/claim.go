@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand/v2"
 	"net/http"
@@ -19,6 +20,8 @@ import (
 	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -41,6 +44,9 @@ func ValidateAndInitClaimOptions(opts infra.ClaimSandboxOptions) (infra.ClaimSan
 	if opts.LockString == "" {
 		opts.LockString = utils.NewLockString()
 	}
+	if opts.ClaimTimeout <= 0 {
+		opts.ClaimTimeout = DefaultClaimTimeout
+	}
 	return opts, nil
 }
 
@@ -54,12 +60,13 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 	log := klog.FromContext(ctx)
 	select {
 	case <-ctx.Done():
-		err = fmt.Errorf("context canceled while retrying")
+		err = fmt.Errorf("context canceled while retrying: %v", ctx.Err())
 		log.Error(ctx.Err(), "context canceled while retrying")
 		return
 	default:
 	}
 	defer func() {
+		metrics.LastError = err
 		clearFailedSandbox(ctx, claimed, err, opts.ReserveFailedSandbox)
 	}()
 	// Step 1: Pick an available sandbox
@@ -161,8 +168,8 @@ func getPickKey(sbx *v1alpha1.Sandbox) string {
 	return client.ObjectKeyFromObject(sbx).String()
 }
 
-func pickAnAvailableSandbox(ctx context.Context, template string, cnt int, pickCache *sync.Map,
-	cache *Cache, client clients.SandboxClient) (*Sandbox, error) {
+func pickAnAvailableSandbox(ctx context.Context, template string, cnt int,
+	pickCache *sync.Map, cache *Cache, client clients.SandboxClient) (*Sandbox, error) {
 	log := klog.FromContext(ctx).WithValues("template", template).V(consts.DebugLogLevel)
 	objects, err := cache.ListAvailableSandboxes(template)
 	if err != nil {
@@ -194,16 +201,27 @@ func pickAnAvailableSandbox(ctx context.Context, template string, cnt int, pickC
 	i := start
 	for {
 		obj = candidates[i]
-		key := getPickKey(obj)
-		if _, loaded := pickCache.LoadOrStore(key, struct{}{}); !loaded {
-			return AsSandbox(obj, cache, client), nil
+		if checkErr := preCheckSandbox(obj); checkErr != nil {
+			log.Info("skip invalid sandbox", "sandbox", klog.KObj(obj), "err", checkErr)
+		} else {
+			key := getPickKey(obj)
+			if _, loaded := pickCache.LoadOrStore(key, struct{}{}); !loaded {
+				return AsSandbox(obj, cache, client), nil
+			}
+			log.Info("candidate picked by another request", "key", key)
 		}
-		log.Info("candidate picked by another request", "key", key)
 		i = (i + 1) % len(candidates)
 		if i == start {
 			return nil, NoAvailableError(template, "all candidates are picked")
 		}
 	}
+}
+
+func preCheckSandbox(sbx *v1alpha1.Sandbox) error {
+	if sbx.Status.PodInfo.PodIP == "" {
+		return errors.New("podIP is empty")
+	}
+	return nil
 }
 
 func modifyPickedSandbox(ctx context.Context, sbx *Sandbox, opts infra.ClaimSandboxOptions) error {
@@ -267,13 +285,29 @@ func initRuntime(ctx context.Context, sbx *Sandbox, opts infra.InitRuntimeOption
 		log.Error(err, "failed to create request")
 		return 0, err
 	}
-
-	resp, err := proxyutils.ProxyRequest(r)
-	if err != nil {
-		log.Error(err, "init runtime request failed")
-		return time.Since(start), err
-	}
-	return time.Since(start), resp.Body.Close()
+	retries := 0
+	return time.Since(start), retry.OnError(wait.Backoff{
+		// about retry 20s
+		Duration: 200 * time.Millisecond,
+		Factor:   2.0,
+		Steps:    5,
+		Cap:      10 * time.Second,
+	}, func(err error) bool {
+		return true
+	}, func() error {
+		var initErr error
+		defer func() {
+			if initErr != nil {
+				log.Error(initErr, "init runtime request failed", "retries", retries)
+			}
+		}()
+		resp, initErr := proxyutils.ProxyRequest(r)
+		if initErr != nil {
+			log.Error(initErr, "init runtime request failed")
+			return initErr
+		}
+		return resp.Body.Close()
+	})
 }
 
 func waitForInplaceUpdate(ctx context.Context, sbx *Sandbox, opts infra.InplaceUpdateOptions, cache *Cache) (cost time.Duration, err error) {
