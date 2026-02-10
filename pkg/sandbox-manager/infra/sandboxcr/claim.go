@@ -105,12 +105,12 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 	if opts.InplaceUpdate != nil {
 		log.Info("starting to wait for inplace update to complete")
 		metrics.InplaceUpdate, err = waitForInplaceUpdate(ctx, sbx, *opts.InplaceUpdate, cache)
+		metrics.Total += metrics.InplaceUpdate
 		if err != nil {
-			log.Error(err, "failed to wait for inplace update")
+			log.Error(err, "failed to wait for inplace update", "cost", metrics.InplaceUpdate)
 			err = retriableError{Message: fmt.Sprintf("failed to wait for inplace update: %s", err)}
 			return
 		}
-		metrics.Total += metrics.InplaceUpdate
 		log.Info("inplace update completed", "cost", metrics.InplaceUpdate)
 	}
 
