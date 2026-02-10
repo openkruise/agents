@@ -11,9 +11,12 @@ import (
 
 // Extension keys are annotations used by sandbox-manager only.
 // Since they are all delivered through the E2B interface, they uniformly use the e2b.agents.kruise.io prefix
+//
+//goland:noinspection GoSnakeCaseUsage
 const (
-	ExtensionKeyClaimWithImage               = v1alpha1.E2BPrefix + "image"
+	ExtensionKeyClaimTimeout                 = v1alpha1.E2BPrefix + "claim-timeout-seconds"
 	ExtensionKeyInplaceUpdateTimeout         = v1alpha1.E2BPrefix + "inplace-update-timeout-seconds"
+	ExtensionKeyClaimWithImage               = v1alpha1.E2BPrefix + "image"
 	ExtensionKeyClaimWithCSIMount            = v1alpha1.E2BPrefix + "csi"
 	ExtensionKeyClaimWithCSIMount_VolumeName = ExtensionKeyClaimWithCSIMount + "-volume-name"
 	ExtensionKeyClaimWithCSIMount_MountPoint = ExtensionKeyClaimWithCSIMount + "-mount-point"
@@ -47,28 +50,28 @@ func (r *NewSandboxRequest) parseCommonExtensions() error {
 	r.Extensions.ReserveFailedSandbox = r.Metadata[ExtensionKeyReserveFailedSandbox] == v1alpha1.True
 	delete(r.Metadata, ExtensionKeySkipInitRuntime)
 	delete(r.Metadata, ExtensionKeyReserveFailedSandbox)
+	var err error
+	if r.Extensions.TimeoutSeconds, err = r.parseIntExtension(ExtensionKeyClaimTimeout); err != nil {
+		return err
+	}
 	return nil
 }
 
 func (r *NewSandboxRequest) parseExtensionImage() error {
+	var err error
 	// just valid image when image string is not empty
 	if image, ok := r.Metadata[ExtensionKeyClaimWithImage]; ok {
 		if _, err := reference.ParseNormalizedNamed(image); err != nil {
 			return fmt.Errorf("invalid image [%s]: %v", image, err)
 		}
 		r.Extensions.InplaceUpdate.Image = image
-		r.Extensions.InplaceUpdate.TimeoutSeconds = DefaultInplaceUpdateTimeoutSeconds
 		delete(r.Metadata, ExtensionKeyClaimWithImage)
 	}
-	if timeoutStr, ok := r.Metadata[ExtensionKeyInplaceUpdateTimeout]; ok {
-		timeoutSeconds, err := strconv.Atoi(timeoutStr)
-		if err != nil {
-			return fmt.Errorf("invalid timeout [%s]: %v", timeoutStr, err)
-		}
-		if timeoutSeconds > 0 {
-			r.Extensions.InplaceUpdate.TimeoutSeconds = timeoutSeconds
-		}
-		delete(r.Metadata, ExtensionKeyInplaceUpdateTimeout)
+	if r.Extensions.InplaceUpdate.TimeoutSeconds, err = r.parseIntExtension(ExtensionKeyInplaceUpdateTimeout); err != nil {
+		return err
+	}
+	if r.Extensions.InplaceUpdate.TimeoutSeconds <= 0 {
+		r.Extensions.InplaceUpdate.TimeoutSeconds = DefaultInplaceUpdateTimeoutSeconds
 	}
 	return nil
 }
@@ -102,4 +105,18 @@ func (r *NewSandboxRequest) parseExtensionCSIMount() error {
 	delete(r.Metadata, ExtensionKeyClaimWithCSIMount_VolumeName)
 	delete(r.Metadata, ExtensionKeyClaimWithCSIMount_MountPoint)
 	return nil
+}
+
+func (r *NewSandboxRequest) parseIntExtension(key string) (int, error) {
+	if numStr, ok := r.Metadata[key]; ok {
+		defer delete(r.Metadata, key)
+		num, err := strconv.Atoi(numStr)
+		if err != nil {
+			return 0, fmt.Errorf("invalid number [%s]: %v", numStr, err)
+		}
+		if num > 0 {
+			return num, nil
+		}
+	}
+	return 0, nil
 }

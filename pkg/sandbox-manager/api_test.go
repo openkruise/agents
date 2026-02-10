@@ -20,7 +20,6 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	constantUtils "github.com/openkruise/agents/pkg/utils"
 	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	"github.com/openkruise/agents/pkg/utils/sandboxutils"
@@ -144,8 +143,6 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 		},
 	}
 
-	sandboxcr.SetClaimTimeout(100 * time.Millisecond)
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			manager := setupTestManager(t)
@@ -212,7 +209,7 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 					}
 					CreateSandboxWithStatus(t, client, testSbx)
 					require.Eventually(t, func() bool {
-						sbx, err := manager.GetInfra().GetSandbox(context.Background(), sandboxutils.GetSandboxID(testSbx))
+						sbx, err := manager.GetInfra().GetSandbox(t.Context(), sandboxutils.GetSandboxID(testSbx))
 						if err != nil {
 							return false
 						}
@@ -222,6 +219,7 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 				}
 			}
 
+			tt.opts.ClaimTimeout = 100 * time.Millisecond
 			var claimed infra.Sandbox
 			err := retry.OnError(wait.Backoff{
 				Duration: 100 * time.Millisecond,
@@ -230,7 +228,7 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 			}, func(err error) bool {
 				return strings.Contains(err.Error(), "no stock")
 			}, func() error {
-				got, err := manager.ClaimSandbox(context.Background(), tt.opts)
+				got, err := manager.ClaimSandbox(t.Context(), tt.opts)
 				if err == nil {
 					claimed = got
 				}

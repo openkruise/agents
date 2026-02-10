@@ -158,7 +158,7 @@ func TestCreateSandbox(t *testing.T) {
 			},
 			expectError: &web.ApiError{
 				Code:    0,
-				Message: "Internal: failed to claim sandbox: no available sandboxes for template test-template (no stock)",
+				Message: "no available sandboxes for template test-template (no stock)",
 			},
 		},
 		{
@@ -207,6 +207,7 @@ func TestCreateSandbox(t *testing.T) {
 			}
 			// mock runtime server is not supported in e2b layer, the runtime is tested in infra package
 			tt.request.Metadata[models.ExtensionKeySkipInitRuntime] = v1alpha1.True
+			tt.request.Metadata[models.ExtensionKeyClaimTimeout] = "1" // let errors like "no stock" stop early
 			resp, apiError := controller.CreateSandbox(NewRequest(t, nil, tt.request, nil, user))
 			if tt.expectError != nil {
 				require.NotNil(t, apiError)
