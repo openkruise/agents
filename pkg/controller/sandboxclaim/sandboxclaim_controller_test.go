@@ -26,6 +26,7 @@ import (
 	informers "github.com/openkruise/agents/client/informers/externalversions"
 	"github.com/openkruise/agents/pkg/controller/sandboxclaim/core"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
+	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -145,6 +146,7 @@ func TestReconciler_Reconcile_BasicFlow(t *testing.T) {
 }
 
 func TestReconciler_Reconcile_Claiming(t *testing.T) {
+	utils.InitLogOutput()
 	scheme := runtime.NewScheme()
 	_ = agentsv1alpha1.AddToScheme(scheme)
 
@@ -216,6 +218,7 @@ func TestReconciler_Reconcile_Claiming(t *testing.T) {
 					Reason: "PodReady",
 				},
 			},
+			// no pod ip, should be skipped
 		},
 	}
 
@@ -246,6 +249,9 @@ func TestReconciler_Reconcile_Claiming(t *testing.T) {
 					Status: metav1.ConditionTrue,
 					Reason: "PodReady",
 				},
+			},
+			PodInfo: agentsv1alpha1.PodInfo{
+				PodIP: "1.2.3.4",
 			},
 		},
 	}
@@ -336,6 +342,10 @@ func TestReconciler_Reconcile_Claiming(t *testing.T) {
 			if len(sandbox.OwnerReferences) != 0 {
 				t.Errorf("Sandbox %s should have no OwnerReferences after being claimed, got %d",
 					sandbox.Name, len(sandbox.OwnerReferences))
+			}
+
+			if sandbox.Name != sandbox2.Name {
+				t.Errorf("only %s should be claimed, got %s", sandbox2.Name, sandbox.Name)
 			}
 		}
 	}
