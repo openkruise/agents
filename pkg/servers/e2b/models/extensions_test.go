@@ -35,6 +35,13 @@ func TestParseExtensions(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "invalid inplace update timeout",
+			metadata: map[string]string{
+				ExtensionKeyInplaceUpdateTimeout: "invalid",
+			},
+			wantErr: true,
+		},
+		{
 			name: "valid csi mount extension",
 			metadata: map[string]string{
 				ExtensionKeyClaimWithCSIMount_VolumeName: "test-volume",
@@ -61,6 +68,13 @@ func TestParseExtensions(t *testing.T) {
 			metadata: map[string]string{
 				ExtensionKeyClaimWithCSIMount_VolumeName: "test-volume",
 				ExtensionKeyClaimWithCSIMount_MountPoint: "/invalid/../path",
+			},
+			wantErr: true,
+		},
+		{
+			name: "invalid claim timeout",
+			metadata: map[string]string{
+				ExtensionKeyClaimTimeout: "invalid",
 			},
 			wantErr: true,
 		},
@@ -266,20 +280,23 @@ func TestParseExtensionInplaceUpdate(t *testing.T) {
 			metadata: map[string]string{
 				"some-other-key": "some-value",
 			},
-			expectError: false,
-			expectImage: "",
+			expectError:   false,
+			expectImage:   "",
+			expectTimeout: DefaultInplaceUpdateTimeoutSeconds,
 		},
 		{
-			name:        "empty metadata",
-			metadata:    map[string]string{},
-			expectError: false,
-			expectImage: "",
+			name:          "empty metadata",
+			metadata:      map[string]string{},
+			expectError:   false,
+			expectImage:   "",
+			expectTimeout: DefaultInplaceUpdateTimeoutSeconds,
 		},
 		{
-			name:        "nil metadata",
-			metadata:    nil,
-			expectError: false,
-			expectImage: "",
+			name:          "nil metadata",
+			metadata:      nil,
+			expectError:   false,
+			expectImage:   "",
+			expectTimeout: DefaultInplaceUpdateTimeoutSeconds,
 		},
 	}
 

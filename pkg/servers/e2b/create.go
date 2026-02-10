@@ -38,8 +38,9 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 	}
 	claimStart := time.Now()
 	opts := infra.ClaimSandboxOptions{
-		Template: request.TemplateID,
-		User:     user.ID.String(),
+		Template:     request.TemplateID,
+		User:         user.ID.String(),
+		ClaimTimeout: time.Duration(request.Extensions.TimeoutSeconds) * time.Second,
 		Modifier: func(sbx infra.Sandbox) {
 			// The E2B Timeout feature involves three sets of interfaces: create, connect, and pause,
 			// with two behavioral modes based on the `autoPause` parameter during creation:

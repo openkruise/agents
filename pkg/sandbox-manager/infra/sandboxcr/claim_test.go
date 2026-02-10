@@ -59,7 +59,6 @@ func GetMetricsFromSandbox(t *testing.T, sbx infra.Sandbox) infra.ClaimMetrics {
 
 //goland:noinspection GoDeprecation
 func TestInfra_ClaimSandbox(t *testing.T) {
-	SetClaimTimeout(50 * time.Millisecond)
 	server := NewTestRuntimeServer(RunCommandResult{
 		PID:    1,
 		Exited: true,
@@ -223,6 +222,7 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 
 	for _, tt := range tests {
 		utils.InitLogOutput()
+		tt.options.ClaimTimeout = 50 * time.Millisecond
 		t.Run(tt.name, func(t *testing.T) {
 			testInfra, client := NewTestInfra(t)
 			for i := 0; i < tt.available; i++ {
@@ -298,7 +298,6 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 
 //goland:noinspection GoDeprecation
 func TestClaimSandboxFailed(t *testing.T) {
-	SetClaimTimeout(100 * time.Millisecond)
 	server := NewTestRuntimeServer(RunCommandResult{
 		PID:      1,
 		ExitCode: 1, // returns an error
@@ -388,10 +387,24 @@ func TestClaimSandboxFailed(t *testing.T) {
 			},
 			expectError: "context canceled",
 		},
+		{
+			name: "no ip",
+			options: infra.ClaimSandboxOptions{
+				User:     "test-user",
+				Template: existTemplate,
+				// hack: the sandbox is not locked in this case, set true to pass the assertion
+				ReserveFailedSandbox: true,
+			},
+			preModifier: func(sbx *v1alpha1.Sandbox) {
+				sbx.Status.PodInfo.PodIP = ""
+			},
+			expectError: "all candidates are picked",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			tt.options.ClaimTimeout = 100 * time.Millisecond
 			testInfra, client := NewTestInfra(t)
 			name := "test-sbx"
 			sbx := &v1alpha1.Sandbox{

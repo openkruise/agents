@@ -3,6 +3,7 @@ package sandboxcr
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -98,14 +99,14 @@ func (i *Infra) ClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions
 		log.Error(err, "invalid claim options")
 		return nil, metrics, err
 	}
-
+	claimCtx, cancel := context.WithTimeout(ctx, opts.ClaimTimeout)
+	defer cancel()
 	log.V(consts.DebugLogLevel).Info("claim sandbox options", "options", opts)
 	metrics.Retries = -1 // starts from 0
 	var claimedSandbox infra.Sandbox
-	return claimedSandbox, metrics, retry.OnError(wait.Backoff{
-		Steps:    int(DefaultClaimTimeout / RetryInterval),
+	err = retry.OnError(wait.Backoff{
+		Steps:    int(opts.ClaimTimeout / RetryInterval),
 		Duration: RetryInterval,
-		Cap:      DefaultClaimTimeout,
 		Factor:   LockBackoffFactor,
 		Jitter:   LockJitter,
 	}, func(err error) bool {
@@ -113,7 +114,7 @@ func (i *Infra) ClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions
 	}, func() error {
 		metrics.Retries++
 		log.Info("try to claim sandbox", "retries", metrics.Retries)
-		claimed, tryMetrics, claimErr := TryClaimSandbox(ctx, opts, &i.pickCache, i.Cache, i.Client)
+		claimed, tryMetrics, claimErr := TryClaimSandbox(claimCtx, opts, &i.pickCache, i.Cache, i.Client)
 		if claimErr == nil {
 			tryMetrics.Retries = metrics.Retries
 			tryMetrics.Wait = metrics.Wait
@@ -122,8 +123,19 @@ func (i *Infra) ClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions
 			claimedSandbox = claimed
 		}
 		metrics.Wait += tryMetrics.Total
+		if tryMetrics.LastError != nil {
+			metrics.LastError = tryMetrics.LastError
+		}
 		return claimErr
 	})
+	return claimedSandbox, metrics, buildClaimError(err, metrics.LastError)
+}
+
+func buildClaimError(err error, lastError error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%v, last error: %v", err, lastError)
 }
 
 func (i *Infra) GetCache() infra.CacheProvider {
@@ -189,7 +201,9 @@ func (i *Infra) onSandboxDelete(obj any) {
 	if !ok {
 		return
 	}
-	i.Proxy.DeleteRoute(stateutils.GetSandboxID(sbx))
+	sandboxID := stateutils.GetSandboxID(sbx)
+	i.Proxy.DeleteRoute(sandboxID)
+	klog.Info("sandbox route deleted", "sandboxID", sandboxID)
 	managerutils.ResourceVersionExpectationDelete(sbx)
 }
 

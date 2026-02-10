@@ -21,6 +21,7 @@ func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts infra.ClaimSandb
 	}
 	sandbox, metrics, err := m.infra.ClaimSandbox(ctx, opts)
 	if err != nil {
+		log.Error(err, "failed to claim sandbox", "metrics", metrics)
 		// Requirement: Track failure in API layer
 		SandboxCreationResponses.WithLabelValues("failure").Inc()
 		return nil, errors.NewError(errors.ErrorInternal, fmt.Sprintf("failed to claim sandbox: %v", err))
