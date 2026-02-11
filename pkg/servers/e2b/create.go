@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
@@ -76,7 +77,7 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 			}
 			if !request.Extensions.SkipInitRuntime {
 				route := sbx.GetRoute()
-				annotations[v1alpha1.AnnotationRuntimeURL] = fmt.Sprintf("http://%s:%d", route.IP, models.EnvdPort)
+				annotations[v1alpha1.AnnotationRuntimeURL] = fmt.Sprintf("http://%s:%d", route.IP, consts.RuntimePort)
 				annotations[v1alpha1.AnnotationRuntimeAccessToken] = accessToken
 			}
 			sbx.SetAnnotations(annotations)

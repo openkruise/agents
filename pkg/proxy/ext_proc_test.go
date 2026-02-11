@@ -11,6 +11,7 @@ import (
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	types "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/stretchr/testify/assert"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -494,20 +495,10 @@ func TestServer_Process(t *testing.T) {
 					case *extProcPb.ProcessingResponse_ImmediateResponse:
 						if actualImmediate, ok := actual.Response.(*extProcPb.ProcessingResponse_ImmediateResponse); ok {
 							expectedImmediate := expected.Response.(*extProcPb.ProcessingResponse_ImmediateResponse)
-
 							// Check status code
-							if expectedImmediate.ImmediateResponse.Status.Code != actualImmediate.ImmediateResponse.Status.Code {
-								t.Errorf("status code mismatch, expected: %v, actual: %v",
-									expectedImmediate.ImmediateResponse.Status.Code,
-									actualImmediate.ImmediateResponse.Status.Code)
-							}
-
+							assert.Equal(t, expectedImmediate.ImmediateResponse.Status.Code, actualImmediate.ImmediateResponse.Status.Code)
 							// Check response body
-							if string(expectedImmediate.ImmediateResponse.Body) != string(actualImmediate.ImmediateResponse.Body) {
-								t.Errorf("response body mismatch, expected: %s, actual: %s",
-									string(expectedImmediate.ImmediateResponse.Body),
-									string(actualImmediate.ImmediateResponse.Body))
-							}
+							assert.Contains(t, string(actualImmediate.ImmediateResponse.Body), string(expectedImmediate.ImmediateResponse.Body))
 						} else {
 							t.Errorf("response type mismatch, expected ImmediateResponse")
 						}

@@ -101,13 +101,15 @@ func (s *Server) handleRequestHeaders(requestHeaders *extProcPb.ProcessingReques
 	}
 	log.Info("request mapped", "sandboxID", sandboxID, "sandboxPort", sandboxPort, "extraHeaders", extraHeaders)
 
+	errorMsg := fmt.Sprintf("route for sandbox %s not found", sandboxID)
 	route, ok := s.LoadRoute(sandboxID)
 	if !ok {
-		errorMsg := fmt.Sprintf("route for sandbox %s not found", sandboxID)
+		log.Info("route not found", "sandboxID", sandboxID)
 		return s.logAndCreateErrorResponse(http.StatusNotFound, errorMsg, log)
 	}
 	if route.State != agentsv1alpha1.SandboxStateRunning {
-		return s.logAndCreateErrorResponse(http.StatusBadGateway, "sandbox is not running", log)
+		log.Info("sandbox is not running", "sandboxID", sandboxID)
+		return s.logAndCreateErrorResponse(http.StatusNotFound, errorMsg, log)
 	}
 	if extraHeaders == nil {
 		extraHeaders = make(map[string]string)
@@ -160,7 +162,7 @@ func (s *Server) logAndCreateErrorResponse(statusCode int, message string, log l
 				Status: &types.HttpStatus{
 					Code: types.StatusCode(statusCode),
 				},
-				Body: []byte(message),
+				Body: []byte(fmt.Sprintf("API Error: %s", message)),
 			},
 		},
 	}
