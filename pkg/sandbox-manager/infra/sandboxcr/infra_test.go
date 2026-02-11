@@ -547,7 +547,7 @@ func TestInfra_reconcileRoutes(t *testing.T) {
 				CreateSandboxWithStatus(t, client, sbx)
 				// Also add their routes to proxy
 				id := stateutils.GetSandboxID(sbx)
-				infraInstance.Proxy.SetRoute(proxy.Route{
+				infraInstance.Proxy.SetRoute(t.Context(), proxy.Route{
 					ID:    id,
 					IP:    sbx.Status.PodInfo.PodIP,
 					State: v1alpha1.SandboxStateRunning,
@@ -556,7 +556,7 @@ func TestInfra_reconcileRoutes(t *testing.T) {
 
 			// Add orphaned routes to proxy
 			for _, route := range tt.orphanedRoutes {
-				infraInstance.Proxy.SetRoute(route)
+				infraInstance.Proxy.SetRoute(t.Context(), route)
 			}
 
 			time.Sleep(50 * time.Millisecond)
@@ -626,7 +626,7 @@ func TestInfra_startRouteReconciler(t *testing.T) {
 			for _, sbx := range tt.sandboxes {
 				CreateSandboxWithStatus(t, client, sbx)
 				id := stateutils.GetSandboxID(sbx)
-				infraInstance.Proxy.SetRoute(proxy.Route{
+				infraInstance.Proxy.SetRoute(t.Context(), proxy.Route{
 					ID:    id,
 					IP:    sbx.Status.PodInfo.PodIP,
 					State: v1alpha1.SandboxStateRunning,
@@ -635,7 +635,7 @@ func TestInfra_startRouteReconciler(t *testing.T) {
 
 			// Add orphaned routes
 			for _, route := range tt.orphanedRoutes {
-				infraInstance.Proxy.SetRoute(route)
+				infraInstance.Proxy.SetRoute(t.Context(), route)
 			}
 
 			time.Sleep(50 * time.Millisecond)
