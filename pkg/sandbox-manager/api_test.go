@@ -655,7 +655,7 @@ func TestSandboxManager_ResumeSandbox(t *testing.T) {
 
 			// Set initial route in proxy
 			initialRoute := sbx.GetRoute()
-			manager.proxy.SetRoute(initialRoute)
+			manager.proxy.SetRoute(t.Context(), initialRoute)
 
 			// Resume sandbox
 			if !tt.expectError {

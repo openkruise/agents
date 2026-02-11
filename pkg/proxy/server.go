@@ -220,7 +220,7 @@ func (s *Server) handleRefresh(r *http.Request) (web.ApiResponse[struct{}], *web
 			Message: fmt.Sprintf("failed to unmarshal body: %s", err.Error()),
 		}
 	}
-	s.SetRoute(route)
+	s.SetRoute(ctx, route)
 	log.Info("route refreshed", "route", route)
 	return web.ApiResponse[struct{}]{
 		Code: http.StatusNoContent,

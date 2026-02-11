@@ -200,7 +200,7 @@ func (i *Infra) onSandboxAdd(obj any) {
 		return
 	}
 	route := AsSandbox(sbx, i.Cache, i.Client).GetRoute()
-	i.Proxy.SetRoute(route)
+	i.Proxy.SetRoute(logs.NewContext(), route)
 	managerutils.ResourceVersionExpectationObserve(sbx)
 }
 
@@ -231,7 +231,7 @@ func (i *Infra) refreshRoute(sbx infra.Sandbox) {
 	oldRoute, _ := i.Proxy.LoadRoute(sbx.GetName())
 	newRoute := sbx.GetRoute()
 	if newRoute.State != oldRoute.State || newRoute.IP != oldRoute.IP {
-		i.Proxy.SetRoute(newRoute)
+		i.Proxy.SetRoute(logs.NewContext(), newRoute)
 	}
 }
 

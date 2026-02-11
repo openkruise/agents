@@ -270,7 +270,7 @@ func TestServer_Process(t *testing.T) {
 							Status: &types.HttpStatus{
 								Code: types.StatusCode(404),
 							},
-							Body: []byte("route for sandbox nonexistent not found"),
+							Body: []byte("sandbox nonexistent not found"),
 						},
 					},
 				},
@@ -416,7 +416,7 @@ func TestServer_Process(t *testing.T) {
 			// Setup routes
 			for _, route := range tt.setupRoutes {
 				route.State = agentsv1alpha1.SandboxStateRunning
-				server.SetRoute(route)
+				server.SetRoute(t.Context(), route)
 			}
 
 			// Create mock processing server

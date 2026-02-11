@@ -97,9 +97,10 @@ func (m *SandboxManager) syncRoute(ctx context.Context, sbx infra.Sandbox, refre
 	}
 	start := time.Now()
 	route := sbx.GetRoute()
-	m.proxy.SetRoute(route)
+	m.proxy.SetRoute(ctx, route)
 	err := m.proxy.SyncRouteWithPeers(route)
 	if err != nil {
+		log.Error(err, "failed to sync route with peers")
 		return err
 	}
 	log.Info("route synced with peers", "cost", time.Since(start), "route", route)
