@@ -101,7 +101,7 @@ func (s *Server) handleRequestHeaders(requestHeaders *extProcPb.ProcessingReques
 	}
 	log.Info("request mapped", "sandboxID", sandboxID, "sandboxPort", sandboxPort, "extraHeaders", extraHeaders)
 
-	errorMsg := fmt.Sprintf("route for sandbox %s not found", sandboxID)
+	errorMsg := fmt.Sprintf("healthy sandbox %s not found", sandboxID)
 	route, ok := s.LoadRoute(sandboxID)
 	if !ok {
 		log.Info("route not found", "sandboxID", sandboxID)
@@ -113,9 +113,6 @@ func (s *Server) handleRequestHeaders(requestHeaders *extProcPb.ProcessingReques
 	}
 	if extraHeaders == nil {
 		extraHeaders = make(map[string]string)
-	}
-	for k, v := range route.ExtraHeaders {
-		extraHeaders[k] = v
 	}
 	// An adapter can set "x-envoy-original-dst-host" header to force route the request to a specific destination
 	if _, ok := extraHeaders[OrigDstHeader]; !ok {
