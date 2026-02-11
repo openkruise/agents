@@ -65,8 +65,6 @@ type SetTimeoutRequest struct {
 }
 
 const (
-	// EnvdPort is the port used for envd communication
-	EnvdPort = 49983
 	// CDPPort is the port used for CDP (Chrome DevTools Port) communication
 	CDPPort = 9222
 )

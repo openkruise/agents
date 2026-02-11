@@ -11,6 +11,7 @@ const (
 
 const (
 	ExtProcPort        = 9002
+	RuntimePort        = 49983
 	ShutdownTimeout    = 90 * time.Second
 	RequestPeerTimeout = 100 * time.Millisecond
 )
