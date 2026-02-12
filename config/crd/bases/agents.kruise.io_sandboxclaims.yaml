@@ -79,6 +79,22 @@ spec:
                   These will be passed to the sandbox's init endpoint (envd) after claiming
                   Only applicable if the SandboxSet has envd enabled
                 type: object
+              inplaceUpdate:
+                description: InplaceUpdate allows to perform inplace update for sandbox
+                  while claiming
+                properties:
+                  image:
+                    description: Image specifies the new image to update to
+                    type: string
+                  timeout:
+                    default: 15s
+                    description: |-
+                      Timeout specifies the maximum duration for waiting inplace update operation. Default: 15s
+                      Format: duration string (e.g., "3h", "200s", "15m")
+                    type: string
+                required:
+                - image
+                type: object
               labels:
                 additionalProperties:
                   type: string

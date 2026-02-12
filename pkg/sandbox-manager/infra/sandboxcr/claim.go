@@ -44,6 +44,11 @@ func ValidateAndInitClaimOptions(opts infra.ClaimSandboxOptions) (infra.ClaimSan
 			return infra.ClaimSandboxOptions{}, fmt.Errorf("init runtime is required when csi mount is specified")
 		}
 	}
+	if opts.InplaceUpdate != nil {
+		if opts.InplaceUpdate.Image == "" {
+			return infra.ClaimSandboxOptions{}, fmt.Errorf("inplace update image is required")
+		}
+	}
 	if opts.CandidateCounts <= 0 {
 		opts.CandidateCounts = consts.DefaultPoolingCandidateCounts
 	}

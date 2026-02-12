@@ -22,7 +22,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/utils"
+	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -256,6 +258,15 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 		},
 	}
 
+	if claim.Spec.InplaceUpdate != nil {
+		opts.InplaceUpdate = &config.InplaceUpdateOptions{
+			Image: claim.Spec.InplaceUpdate.Image,
+		}
+		if claim.Spec.InplaceUpdate.Timeout != nil {
+			opts.WaitReadyTimeout = claim.Spec.InplaceUpdate.Timeout.Duration
+		}
+	}
+
 	// todo support other options (like envvars, inplace update...)
 
 	// Validate and initialize
@@ -264,17 +275,19 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 
 // countClaimedSandboxes counts sandboxes that are claimed by this claim
 func (c *commonControl) countClaimedSandboxes(ctx context.Context, claim *agentsv1alpha1.SandboxClaim) (int32, error) {
+	log := logf.FromContext(ctx)
 	sandboxes, err := c.cache.ListSandboxWithUser(string(claim.UID))
 	if err != nil {
 		return 0, err
 	}
-
-	return int32(len(sandboxes)), nil
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
+	var cnt int32
+	for _, sbx := range sandboxes {
+		state, reason := stateutils.GetSandboxState(sbx)
+		if state == agentsv1alpha1.SandboxStateDead {
+			log.Info("skip counting dead sandbox", "reason", reason)
+			continue
+		}
+		cnt++
 	}
-	return b
+	return cnt, nil
 }
