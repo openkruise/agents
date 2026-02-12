@@ -15,13 +15,14 @@ import (
 //goland:noinspection GoSnakeCaseUsage
 const (
 	ExtensionKeyClaimTimeout                 = v1alpha1.E2BPrefix + "claim-timeout-seconds"
-	ExtensionKeyInplaceUpdateTimeout         = v1alpha1.E2BPrefix + "inplace-update-timeout-seconds"
+	ExtensionKeyWaitReadyTimeout             = v1alpha1.E2BPrefix + "wait-ready-timeout-seconds"
 	ExtensionKeyClaimWithImage               = v1alpha1.E2BPrefix + "image"
 	ExtensionKeyClaimWithCSIMount            = v1alpha1.E2BPrefix + "csi"
 	ExtensionKeyClaimWithCSIMount_VolumeName = ExtensionKeyClaimWithCSIMount + "-volume-name"
 	ExtensionKeyClaimWithCSIMount_MountPoint = ExtensionKeyClaimWithCSIMount + "-mount-point"
 	ExtensionKeySkipInitRuntime              = v1alpha1.E2BPrefix + "skip-init-runtime"
 	ExtensionKeyReserveFailedSandbox         = v1alpha1.E2BPrefix + "reserve-failed-sandbox"
+	ExtensionKeyCreateOnNoStock              = v1alpha1.E2BPrefix + "create-on-no-stock"
 )
 
 // Extensions for NewSandboxRequest
@@ -48,17 +49,21 @@ func (r *NewSandboxRequest) ParseExtensions() error {
 func (r *NewSandboxRequest) parseCommonExtensions() error {
 	r.Extensions.SkipInitRuntime = r.Metadata[ExtensionKeySkipInitRuntime] == v1alpha1.True
 	r.Extensions.ReserveFailedSandbox = r.Metadata[ExtensionKeyReserveFailedSandbox] == v1alpha1.True
+	r.Extensions.CreateOnNoStock = r.Metadata[ExtensionKeyCreateOnNoStock] == v1alpha1.True
 	delete(r.Metadata, ExtensionKeySkipInitRuntime)
 	delete(r.Metadata, ExtensionKeyReserveFailedSandbox)
+	delete(r.Metadata, ExtensionKeyCreateOnNoStock)
 	var err error
-	if r.Extensions.TimeoutSeconds, err = r.parseIntExtension(ExtensionKeyClaimTimeout); err != nil {
+	if r.Extensions.TimeoutSeconds, err = r.parseAndRemoveIntExtension(ExtensionKeyClaimTimeout); err != nil {
+		return err
+	}
+	if r.Extensions.WaitReadySeconds, err = r.parseAndRemoveIntExtension(ExtensionKeyWaitReadyTimeout); err != nil {
 		return err
 	}
 	return nil
 }
 
 func (r *NewSandboxRequest) parseExtensionImage() error {
-	var err error
 	// just valid image when image string is not empty
 	if image, ok := r.Metadata[ExtensionKeyClaimWithImage]; ok {
 		if _, err := reference.ParseNormalizedNamed(image); err != nil {
@@ -66,12 +71,6 @@ func (r *NewSandboxRequest) parseExtensionImage() error {
 		}
 		r.Extensions.InplaceUpdate.Image = image
 		delete(r.Metadata, ExtensionKeyClaimWithImage)
-	}
-	if r.Extensions.InplaceUpdate.TimeoutSeconds, err = r.parseIntExtension(ExtensionKeyInplaceUpdateTimeout); err != nil {
-		return err
-	}
-	if r.Extensions.InplaceUpdate.TimeoutSeconds <= 0 {
-		r.Extensions.InplaceUpdate.TimeoutSeconds = DefaultInplaceUpdateTimeoutSeconds
 	}
 	return nil
 }
@@ -107,7 +106,7 @@ func (r *NewSandboxRequest) parseExtensionCSIMount() error {
 	return nil
 }
 
-func (r *NewSandboxRequest) parseIntExtension(key string) (int, error) {
+func (r *NewSandboxRequest) parseAndRemoveIntExtension(key string) (int, error) {
 	if numStr, ok := r.Metadata[key]; ok {
 		defer delete(r.Metadata, key)
 		num, err := strconv.Atoi(numStr)

@@ -2,12 +2,14 @@ package sandboxset
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 	apps "k8s.io/api/apps/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -94,7 +96,7 @@ func clearAndInitInnerKeys(m map[string]string) map[string]string {
 		return map[string]string{}
 	}
 	for k := range m {
-		if strings.HasPrefix(k, agentsv1alpha1.E2BPrefix) {
+		if strings.HasPrefix(k, agentsv1alpha1.InternalPrefix) {
 			delete(m, k)
 		}
 	}
@@ -147,4 +149,36 @@ func scaleExpectationSatisfied(ctx context.Context, scaleExpectation expectation
 	requeueAfter = expectations.ExpectationTimeout - unsatisfiedDuration
 	log.Info("expectations not satisfied", "dirty", dirty, "requeueAfter", requeueAfter)
 	return false, requeueAfter
+}
+
+func NewSandboxFromSandboxSet(sbs *agentsv1alpha1.SandboxSet) *agentsv1alpha1.Sandbox {
+	generateName := fmt.Sprintf("%s-", sbs.Name)
+	template := sbs.Spec.Template.DeepCopy()
+	sbx := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			GenerateName: generateName,
+			Namespace:    sbs.Namespace,
+			Labels:       template.Labels,
+			Annotations:  template.Annotations,
+		},
+		Spec: agentsv1alpha1.SandboxSpec{
+			PersistentContents: sbs.Spec.PersistentContents,
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				TemplateRef:          sbs.Spec.TemplateRef,
+				Template:             template,
+				VolumeClaimTemplates: sbs.Spec.VolumeClaimTemplates,
+			},
+		},
+	}
+	sbx.Annotations = clearAndInitInnerKeys(sbx.Annotations)
+	sbx.Labels = clearAndInitInnerKeys(sbx.Labels)
+	sbx.Labels[agentsv1alpha1.LabelSandboxPool] = sbs.Name
+	sbx.Labels[agentsv1alpha1.LabelSandboxTemplate] = sbs.Name
+	sbx.Labels[agentsv1alpha1.LabelSandboxIsClaimed] = "false"
+	if sbs.Spec.TemplateRef != nil {
+		sbx.Labels[agentsv1alpha1.LabelSandboxTemplate] = sbs.Spec.TemplateRef.Name
+	} else {
+		sbx.Labels[agentsv1alpha1.LabelSandboxTemplate] = sbs.Name
+	}
+	return sbx
 }

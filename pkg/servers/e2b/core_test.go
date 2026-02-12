@@ -123,11 +123,26 @@ func GetSbsOwnerReference(sbs *agentsv1alpha1.SandboxSet) []metav1.OwnerReferenc
 }
 
 func CreateSandboxPool(t *testing.T, client versioned.Interface, name string, available int) func() {
+	tmpl := agentsv1alpha1.EmbeddedSandboxTemplate{
+		Template: &corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  "main",
+						Image: "old-image",
+					},
+				},
+			},
+		},
+	}
 	sbs := &agentsv1alpha1.SandboxSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: Namespace,
 			UID:       types.UID(uuid.NewString()),
+		},
+		Spec: agentsv1alpha1.SandboxSetSpec{
+			EmbeddedSandboxTemplate: tmpl,
 		},
 	}
 	_, err := client.ApiV1alpha1().SandboxSets(Namespace).Create(context.Background(), sbs, metav1.CreateOptions{})
@@ -145,18 +160,7 @@ func CreateSandboxPool(t *testing.T, client versioned.Interface, name string, av
 				UID:             types.UID(uuid.NewString()),
 			},
 			Spec: agentsv1alpha1.SandboxSpec{
-				EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
-					Template: &corev1.PodTemplateSpec{
-						Spec: corev1.PodSpec{
-							Containers: []corev1.Container{
-								{
-									Name:  "main",
-									Image: "old-image",
-								},
-							},
-						},
-					},
-				},
+				EmbeddedSandboxTemplate: tmpl,
 			},
 			Status: agentsv1alpha1.SandboxStatus{
 				Phase: agentsv1alpha1.SandboxRunning,

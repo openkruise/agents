@@ -36,7 +36,10 @@ type Cache struct {
 func NewCache(informerFactory informers.SharedInformerFactory, sandboxInformer, sandboxSetInformer cache.SharedIndexInformer,
 	coreInformerFactorySpecifiedNs k8sinformers.SharedInformerFactory, secretInformer cache.SharedIndexInformer,
 	coreInformerFactory k8sinformers.SharedInformerFactory, informers ...cache.SharedIndexInformer) (*Cache, error) {
-	if err := AddLabelSelectorIndexerToInformer(sandboxInformer); err != nil {
+	if err := AddIndexersToSandboxInformer(sandboxInformer); err != nil {
+		return nil, err
+	}
+	if err := AddIndexersToSandboxSetInformer(sandboxSetInformer); err != nil {
 		return nil, err
 	}
 	c := &Cache{
@@ -134,6 +137,18 @@ func (c *Cache) GetSandbox(sandboxID string) (*agentsv1alpha1.Sandbox, error) {
 	return list[0], nil
 }
 
+// GetSandboxSet gets a SandboxSet with given name randomly
+func (c *Cache) GetSandboxSet(name string) (*agentsv1alpha1.SandboxSet, error) {
+	list, err := managerutils.SelectObjectWithIndex[*agentsv1alpha1.SandboxSet](c.sandboxSetInformer, IndexTemplateID, name)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get sandboxset %s from cache: %w", name, err)
+	}
+	if len(list) == 0 {
+		return nil, fmt.Errorf("sandboxset %s not found in cache", name)
+	}
+	return list[0], nil
+}
+
 func (c *Cache) AddSandboxSetEventHandler(handler cache.ResourceEventHandlerFuncs) {
 	if c.sandboxSetInformer == nil {
 		panic("SandboxSet is not cached")
@@ -172,6 +187,10 @@ func (c *Cache) WaitForSandboxSatisfied(ctx context.Context, sbx *agentsv1alpha1
 		log.Info("no need to wait for satisfied", "satisfied", satisfied, "error", err)
 		return err
 	}
+	if timeout <= 0 {
+		log.Info("waiting is skipped due to zero timeout")
+		return fmt.Errorf("sandbox is not satisfied")
+	}
 	value, exists := c.waitHooks.LoadOrStore(key, &waitEntry{
 		ctx:     ctx,
 		done:    make(chan struct{}),
@@ -190,22 +209,19 @@ func (c *Cache) WaitForSandboxSatisfied(ctx context.Context, sbx *agentsv1alpha1
 		return err
 	}
 
-	timer := time.NewTimer(timeout)
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer func() {
-		timer.Stop()
+		cancel()
 		c.waitHooks.Delete(key)
 		log.Info("wait hook deleted")
 	}()
 
 	select {
-	case <-timer.C:
-		log.Info("timeout waiting for sandbox satisfied")
-		return c.doubleCheckSandboxSatisfied(ctx, sbx, satisfiedFunc)
 	case <-entry.done:
 		log.Info("satisfied signal received")
 		return c.doubleCheckSandboxSatisfied(ctx, sbx, satisfiedFunc)
-	case <-ctx.Done():
-		log.Info("stop waiting for sandbox satisfied: context canceled")
+	case <-waitCtx.Done():
+		log.Info("stop waiting for sandbox satisfied: context canceled", "reason", ctx.Err())
 		return c.doubleCheckSandboxSatisfied(ctx, sbx, satisfiedFunc)
 	}
 }

@@ -233,35 +233,8 @@ func (r *Reconciler) scaleDown(ctx context.Context, count int, sbs *agentsv1alph
 }
 
 func (r *Reconciler) createSandbox(ctx context.Context, sbs *agentsv1alpha1.SandboxSet, revision string) (*agentsv1alpha1.Sandbox, error) {
-	generateName := fmt.Sprintf("%s-", sbs.Name)
-	template := sbs.Spec.Template.DeepCopy()
-	sbx := &agentsv1alpha1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{
-			GenerateName: generateName,
-			Namespace:    sbs.Namespace,
-			Labels:       template.Labels,
-			Annotations:  template.Annotations,
-		},
-		Spec: agentsv1alpha1.SandboxSpec{
-			PersistentContents: sbs.Spec.PersistentContents,
-			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
-				TemplateRef:          sbs.Spec.TemplateRef,
-				Template:             template,
-				VolumeClaimTemplates: sbs.Spec.VolumeClaimTemplates,
-			},
-		},
-	}
-	sbx.Annotations = clearAndInitInnerKeys(sbx.Annotations)
-	sbx.Labels = clearAndInitInnerKeys(sbx.Labels)
-	sbx.Labels[agentsv1alpha1.LabelSandboxPool] = sbs.Name
-	sbx.Labels[agentsv1alpha1.LabelSandboxTemplate] = sbs.Name
-	sbx.Labels[agentsv1alpha1.LabelSandboxIsClaimed] = "false"
+	sbx := NewSandboxFromSandboxSet(sbs)
 	sbx.Labels[agentsv1alpha1.LabelTemplateHash] = revision
-	if sbs.Spec.TemplateRef != nil {
-		sbx.Labels[agentsv1alpha1.LabelSandboxTemplate] = sbs.Spec.TemplateRef.Name
-	} else {
-		sbx.Labels[agentsv1alpha1.LabelSandboxTemplate] = sbs.Name
-	}
 	if err := ctrl.SetControllerReference(sbs, sbx, r.Scheme); err != nil {
 		return nil, err
 	}
