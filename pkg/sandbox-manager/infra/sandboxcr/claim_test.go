@@ -5,11 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/openkruise/agents/client/clientset/versioned/fake"
+	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -59,6 +60,7 @@ func GetMetricsFromSandbox(t *testing.T, sbx infra.Sandbox) infra.ClaimMetrics {
 
 //goland:noinspection GoDeprecation
 func TestInfra_ClaimSandbox(t *testing.T) {
+	utils.InitLogOutput()
 	server := NewTestRuntimeServer(RunCommandResult{
 		PID:    1,
 		Exited: true,
@@ -67,11 +69,25 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 	existTemplate := "test-template"
 	user := "test-user"
 
+	tmpl := v1alpha1.EmbeddedSandboxTemplate{
+		Template: &corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  "main",
+						Image: "old-image",
+					},
+				},
+			},
+		},
+	}
+
 	// Test cases
 	tests := []struct {
 		name        string
 		available   int
 		options     infra.ClaimSandboxOptions
+		preProcess  func(t *testing.T, client *fake.Clientset)
 		preModifier func(sbx *v1alpha1.Sandbox, infra *Infra)
 		postCheck   func(t *testing.T, sbx infra.Sandbox)
 		expectError string
@@ -150,7 +166,7 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 			postCheck: func(t *testing.T, sbx infra.Sandbox) {
 				assert.Equal(t, "new-image", sbx.(*Sandbox).Spec.Template.Spec.Containers[0].Image)
 				metrics := GetMetricsFromSandbox(t, sbx)
-				assert.Greater(t, metrics.InplaceUpdate, time.Duration(0))
+				assert.Greater(t, metrics.WaitReady, time.Duration(0))
 			},
 		},
 		{
@@ -218,12 +234,74 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 			},
 			expectError: "all candidates are picked",
 		},
+		{
+			name:      "create on no stock",
+			available: 0,
+			options: infra.ClaimSandboxOptions{
+				User:            user,
+				Template:        existTemplate,
+				CreateOnNoStock: true,
+			},
+			preProcess: func(t *testing.T, client *fake.Clientset) {
+				sbs := v1alpha1.SandboxSet{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      existTemplate,
+						Namespace: "default",
+					},
+					Spec: v1alpha1.SandboxSetSpec{
+						EmbeddedSandboxTemplate: tmpl,
+					},
+				}
+				_, err := client.ApiV1alpha1().SandboxSets("default").Create(t.Context(), &sbs, metav1.CreateOptions{})
+				require.NoError(t, err)
+			},
+			postCheck: func(t *testing.T, sbx infra.Sandbox) {
+				assert.Equal(t, tmpl.Template.Spec.Containers[0].Name, sbx.(*Sandbox).Spec.Template.Spec.Containers[0].Name)
+			},
+		},
+		{
+			name:      "create on no stock with no sandboxset",
+			available: 0,
+			options: infra.ClaimSandboxOptions{
+				User:            user,
+				Template:        existTemplate,
+				CreateOnNoStock: true,
+			},
+			expectError: "cannot create new sandbox: sandboxset test-template not found in cache",
+		},
+		{
+			name:      "create on no stock with inplace update",
+			available: 0,
+			options: infra.ClaimSandboxOptions{
+				User:            user,
+				Template:        existTemplate,
+				CreateOnNoStock: true,
+				InplaceUpdate: &infra.InplaceUpdateOptions{
+					Image: "new-image",
+				},
+			},
+			preProcess: func(t *testing.T, client *fake.Clientset) {
+				sbs := v1alpha1.SandboxSet{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      existTemplate,
+						Namespace: "default",
+					},
+					Spec: v1alpha1.SandboxSetSpec{
+						EmbeddedSandboxTemplate: tmpl,
+					},
+				}
+				_, err := client.ApiV1alpha1().SandboxSets("default").Create(t.Context(), &sbs, metav1.CreateOptions{})
+				require.NoError(t, err)
+			},
+			postCheck: func(t *testing.T, sbx infra.Sandbox) {
+				assert.Equal(t, "new-image", sbx.(*Sandbox).Spec.Template.Spec.Containers[0].Image)
+			},
+		},
 	}
 
 	for _, tt := range tests {
-		utils.InitLogOutput()
-		tt.options.ClaimTimeout = 50 * time.Millisecond
 		t.Run(tt.name, func(t *testing.T) {
+			tt.options.ClaimTimeout = 50 * time.Millisecond
 			testInfra, client := NewTestInfra(t)
 			for i := 0; i < tt.available; i++ {
 				sbx := &v1alpha1.Sandbox{
@@ -237,18 +315,7 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 						OwnerReferences: GetSbsOwnerReference(),
 					},
 					Spec: v1alpha1.SandboxSpec{
-						EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
-							Template: &corev1.PodTemplateSpec{
-								Spec: corev1.PodSpec{
-									Containers: []corev1.Container{
-										{
-											Name:  "main",
-											Image: "old-image",
-										},
-									},
-								},
-							},
-						},
+						EmbeddedSandboxTemplate: tmpl,
 					},
 					Status: v1alpha1.SandboxStatus{
 						Phase: v1alpha1.SandboxRunning,
@@ -266,18 +333,23 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 				if tt.preModifier != nil {
 					tt.preModifier(sbx, testInfra)
 				}
-				state, reason := sandboxutils.GetSandboxState(sbx)
-				require.Equal(t, v1alpha1.SandboxStateAvailable, state, "reason", reason)
 				CreateSandboxWithStatus(t, client, sbx)
 				require.Eventually(t, func() bool {
 					_, err := testInfra.GetSandbox(t.Context(), sandboxutils.GetSandboxID(sbx))
 					return err == nil
 				}, 100*time.Millisecond, 5*time.Millisecond)
 			}
+
+			if tt.preProcess != nil {
+				tt.preProcess(t, client)
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			go KeepMakingAllSandboxesReady(ctx, t, client)
 			sbx, metrics, err := testInfra.ClaimSandbox(t.Context(), tt.options)
 			if tt.expectError != "" {
 				require.Error(t, err)
-				assert.True(t, strings.Contains(err.Error(), tt.expectError))
+				assert.Contains(t, err.Error(), tt.expectError)
 			} else {
 				require.NoError(t, err)
 				require.NotNil(t, sbx)
@@ -324,6 +396,16 @@ func TestClaimSandboxFailed(t *testing.T) {
 					Image: "new-image",
 				},
 			},
+			preModifier: func(sbx *v1alpha1.Sandbox) {
+				sbx.Status.Conditions = []metav1.Condition{
+					{
+						Type: string(v1alpha1.SandboxConditionReady),
+						// hack: both make sandbox available and inplace update failed
+						Status: metav1.ConditionTrue,
+						Reason: v1alpha1.SandboxReadyReasonStartContainerFailed,
+					},
+				}
+			},
 			expectError: "sandbox inplace update failed",
 		},
 		{
@@ -335,6 +417,16 @@ func TestClaimSandboxFailed(t *testing.T) {
 				InplaceUpdate: &infra.InplaceUpdateOptions{
 					Image: "new-image",
 				},
+			},
+			preModifier: func(sbx *v1alpha1.Sandbox) {
+				sbx.Status.Conditions = []metav1.Condition{
+					{
+						Type: string(v1alpha1.SandboxConditionReady),
+						// hack: both make sandbox available and inplace update failed
+						Status: metav1.ConditionTrue,
+						Reason: v1alpha1.SandboxReadyReasonStartContainerFailed,
+					},
+				}
 			},
 			expectError: "sandbox inplace update failed",
 		},
@@ -437,8 +529,6 @@ func TestClaimSandboxFailed(t *testing.T) {
 						{
 							Type:   string(v1alpha1.SandboxConditionReady),
 							Status: metav1.ConditionTrue,
-							// make inplace update fail
-							Reason: v1alpha1.SandboxReadyReasonStartContainerFailed,
 						},
 					},
 					PodInfo: v1alpha1.PodInfo{
@@ -450,7 +540,7 @@ func TestClaimSandboxFailed(t *testing.T) {
 				tt.preModifier(sbx)
 			}
 			state, reason := sandboxutils.GetSandboxState(sbx)
-			require.Equal(t, v1alpha1.SandboxStateAvailable, state, "reason", reason)
+			require.Equal(t, v1alpha1.SandboxStateAvailable, state, reason)
 			CreateSandboxWithStatus(t, client, sbx)
 			require.Eventually(t, func() bool {
 				_, err := testInfra.GetSandbox(t.Context(), sandboxutils.GetSandboxID(sbx))
@@ -572,7 +662,7 @@ func TestCheckSandboxInplaceUpdate(t *testing.T) {
 			if err != nil {
 				return
 			}
-			result, err := checkSandboxInplaceUpdate(t.Context(), gotSbx)
+			result, err := checkSandboxReady(t.Context(), gotSbx)
 			assert.Equal(t, tt.expectResult, result)
 			if tt.expectError != nil {
 				assert.Error(t, err)
@@ -581,5 +671,38 @@ func TestCheckSandboxInplaceUpdate(t *testing.T) {
 				assert.NoError(t, err)
 			}
 		})
+	}
+}
+
+func KeepMakingAllSandboxesReady(ctx context.Context, t *testing.T, client clients.SandboxClient) {
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	t.Log("start updating sandbox status")
+
+	for {
+		select {
+		case <-ctx.Done():
+			t.Log("stop updating sandbox status")
+			return
+		case <-ticker.C:
+			sandboxList, err := client.ApiV1alpha1().Sandboxes("default").List(context.Background(), metav1.ListOptions{})
+			require.NoError(t, err)
+			for _, sbx := range sandboxList.Items {
+				sbx.Status = v1alpha1.SandboxStatus{
+					Phase: v1alpha1.SandboxRunning,
+					Conditions: []metav1.Condition{
+						{
+							Type:   string(v1alpha1.SandboxConditionReady),
+							Status: metav1.ConditionTrue,
+						},
+					},
+					PodInfo: v1alpha1.PodInfo{
+						PodIP: "1.2.3.4",
+					},
+				}
+				_, err := client.ApiV1alpha1().Sandboxes(sbx.Namespace).UpdateStatus(context.Background(), &sbx, metav1.UpdateOptions{})
+				require.NoError(t, err)
+			}
+		}
 	}
 }

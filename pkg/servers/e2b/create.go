@@ -83,6 +83,7 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 			sbx.SetAnnotations(annotations)
 		},
 		ReserveFailedSandbox: request.Extensions.ReserveFailedSandbox,
+		CreateOnNoStock:      request.Extensions.CreateOnNoStock,
 	}
 
 	if !request.Extensions.SkipInitRuntime {
@@ -96,9 +97,10 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 		opts.InplaceUpdate = &infra.InplaceUpdateOptions{
 			Image: extension.Image,
 		}
-		if extension.TimeoutSeconds > 0 {
-			opts.InplaceUpdate.Timeout = time.Duration(extension.TimeoutSeconds) * time.Second
-		}
+	}
+
+	if request.Extensions.WaitReadySeconds > 0 {
+		opts.WaitReadyTimeout = time.Duration(request.Extensions.WaitReadySeconds) * time.Second
 	}
 
 	if request.Extensions.CSIMount.PersistentVolumeName != "" {

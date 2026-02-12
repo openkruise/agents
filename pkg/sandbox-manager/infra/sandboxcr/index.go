@@ -10,10 +10,10 @@ var (
 	IndexTemplateAvailable = "templateAvailable"
 	IndexSandboxID         = "sandboxID"
 	IndexUser              = "user"
+	IndexTemplateID        = "templateID"
 )
 
-// AddLabelSelectorIndexerToInformer add label selector indexer to informer
-func AddLabelSelectorIndexerToInformer(informer cache.SharedIndexInformer) error {
+func AddIndexersToSandboxInformer(informer cache.SharedIndexInformer) error {
 	return informer.AddIndexers(cache.Indexers{
 		IndexTemplateAvailable: func(obj interface{}) ([]string, error) {
 			result, ok := obj.(*agentsv1alpha1.Sandbox)
@@ -43,6 +43,18 @@ func AddLabelSelectorIndexerToInformer(informer cache.SharedIndexInformer) error
 				return []string{}, nil
 			}
 			return []string{result.GetAnnotations()[agentsv1alpha1.AnnotationOwner]}, nil
+		},
+	})
+}
+
+func AddIndexersToSandboxSetInformer(informer cache.SharedIndexInformer) error {
+	return informer.AddIndexers(cache.Indexers{
+		IndexTemplateID: func(obj interface{}) ([]string, error) {
+			result, ok := obj.(*agentsv1alpha1.SandboxSet)
+			if !ok {
+				return []string{}, nil
+			}
+			return []string{result.Name}, nil
 		},
 	})
 }
