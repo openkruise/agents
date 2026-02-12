@@ -22,9 +22,12 @@ import (
 	"time"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/client/clientset/versioned"
 	clientsetfake "github.com/openkruise/agents/client/clientset/versioned/fake"
 	informers "github.com/openkruise/agents/client/informers/externalversions"
+	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
+	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
@@ -360,6 +363,98 @@ func TestCommonControl_EnsureClaimClaiming(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "skip dead sandboxes",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim-4",
+					Namespace: "default",
+					UID:       "test-uid-4",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "test-template",
+					Replicas:     int32Ptr(3),
+				},
+				Status: agentsv1alpha1.SandboxClaimStatus{
+					ClaimedReplicas: 1, // Status shows only 1 claimed
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template",
+					Namespace: "default",
+				},
+			},
+			newStatus: &agentsv1alpha1.SandboxClaimStatus{
+				Phase:           agentsv1alpha1.SandboxClaimPhaseClaiming,
+				ClaimedReplicas: 1, // Initial status count
+			},
+			setupSandboxes: func(t *testing.T) []*agentsv1alpha1.Sandbox {
+				// Create 2 sandboxes that are already claimed (simulating crash after claim but before status update)
+				// The status says 1, but actually 2 are claimed, including 1 dead sandbox
+				sandboxes := []*agentsv1alpha1.Sandbox{
+					{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "sandbox-dead",
+							Namespace: "default",
+							Annotations: map[string]string{
+								agentsv1alpha1.AnnotationOwner: "test-uid-4",
+							},
+							Labels: map[string]string{
+								agentsv1alpha1.LabelSandboxTemplate:  "test-template",
+								agentsv1alpha1.LabelSandboxIsClaimed: "true",
+								agentsv1alpha1.LabelSandboxClaimName: "test-claim-3",
+							},
+						},
+						Status: agentsv1alpha1.SandboxStatus{
+							Phase: agentsv1alpha1.SandboxRunning,
+							Conditions: []metav1.Condition{
+								{
+									Type:   string(agentsv1alpha1.SandboxConditionReady),
+									Status: metav1.ConditionFalse,
+								},
+							},
+						},
+					},
+					{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "sandbox-alive",
+							Namespace: "default",
+							Annotations: map[string]string{
+								agentsv1alpha1.AnnotationOwner: "test-uid-4",
+							},
+							Labels: map[string]string{
+								agentsv1alpha1.LabelSandboxTemplate:  "test-template",
+								agentsv1alpha1.LabelSandboxIsClaimed: "true",
+								agentsv1alpha1.LabelSandboxClaimName: "test-claim-3",
+							},
+						},
+						Status: agentsv1alpha1.SandboxStatus{
+							Phase: agentsv1alpha1.SandboxRunning,
+							Conditions: []metav1.Condition{
+								{
+									Type:   string(agentsv1alpha1.SandboxConditionReady),
+									Status: metav1.ConditionTrue,
+								},
+							},
+						},
+					},
+				}
+				// Add sandboxes to cache
+				for _, sbx := range sandboxes {
+					CreateSandboxWithStatus(t, sandboxClient, sbx)
+				}
+				time.Sleep(100 * time.Millisecond) // Wait for cache sync
+				return sandboxes
+			},
+			expectedStrategy: RequeueAfter(ClaimRetryInterval), // Should retry to claim remaining 1
+			expectError:      false,
+			checkStatus: func(t *testing.T, status *agentsv1alpha1.SandboxClaimStatus) {
+				if status.ClaimedReplicas != 1 {
+					t.Errorf("Expected ClaimedReplicas to be still 1 (dead sandbox skipped), got %d", status.ClaimedReplicas)
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -585,7 +680,359 @@ func TestCommonControl_EnsureClaimCompleted(t *testing.T) {
 	}
 }
 
+func TestCommonControl_buildClaimOptions(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		Build()
+
+	fakeRecorder := record.NewFakeRecorder(10)
+	control := NewCommonControl(fakeClient, fakeRecorder, nil, nil).(*commonControl)
+
+	ctx := context.Background()
+	shutdownTime := metav1.Now()
+	timeoutDuration := metav1.Duration{Duration: 3 * time.Minute}
+
+	tests := []struct {
+		name        string
+		claim       *agentsv1alpha1.SandboxClaim
+		sandboxSet  *agentsv1alpha1.SandboxSet
+		expectError bool
+		validate    func(t *testing.T, opts infra.ClaimSandboxOptions)
+	}{
+		{
+			name: "basic claim without optional fields",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim",
+					Namespace: "default",
+					UID:       "test-uid-123",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "test-template",
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template",
+					Namespace: "default",
+				},
+			},
+			expectError: false,
+			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+				if opts.User != "test-uid-123" {
+					t.Errorf("User = %v, want %v", opts.User, "test-uid-123")
+				}
+				if opts.Template != "test-template" {
+					t.Errorf("Template = %v, want %v", opts.Template, "test-template")
+				}
+				if opts.Modifier == nil {
+					t.Error("Modifier should not be nil")
+				}
+				if opts.InplaceUpdate != nil {
+					t.Error("InplaceUpdate should be nil when not specified")
+				}
+			},
+		},
+		{
+			name: "claim with labels and annotations",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim",
+					Namespace: "default",
+					UID:       "test-uid-456",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "test-template",
+					Labels: map[string]string{
+						"env":  "test",
+						"team": "platform",
+					},
+					Annotations: map[string]string{
+						"description": "test annotation",
+					},
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template",
+					Namespace: "default",
+				},
+			},
+			expectError: false,
+			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+				if opts.User != "test-uid-456" {
+					t.Errorf("User = %v, want %v", opts.User, "test-uid-456")
+				}
+				if opts.Modifier == nil {
+					t.Error("Modifier should not be nil")
+				}
+			},
+		},
+		{
+			name: "claim with shutdownTime",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim",
+					Namespace: "default",
+					UID:       "test-uid-789",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "test-template",
+					ShutdownTime: &shutdownTime,
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template",
+					Namespace: "default",
+				},
+			},
+			expectError: false,
+			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+				if opts.User != "test-uid-789" {
+					t.Errorf("User = %v, want %v", opts.User, "test-uid-789")
+				}
+				if opts.Modifier == nil {
+					t.Error("Modifier should not be nil")
+				}
+			},
+		},
+		{
+			name: "claim with inplaceUpdate - image only",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim",
+					Namespace: "default",
+					UID:       "test-uid-update",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "test-template",
+					InplaceUpdate: &agentsv1alpha1.SandboxClaimInplaceUpdateOptions{
+						Image: "nginx:latest",
+					},
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template",
+					Namespace: "default",
+				},
+			},
+			expectError: false,
+			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+				if opts.InplaceUpdate == nil {
+					t.Fatal("InplaceUpdate should not be nil")
+				}
+				if opts.InplaceUpdate.Image != "nginx:latest" {
+					t.Errorf("InplaceUpdate.Image = %v, want %v", opts.InplaceUpdate.Image, "nginx:latest")
+				}
+				// Timeout should be set to default by ValidateAndInitClaimOptions
+				if opts.WaitReadyTimeout == 0 {
+					t.Error("WaitReadyTimeout should be set to default, got 0")
+				}
+			},
+		},
+		{
+			name: "claim with inplaceUpdate - image and timeout",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim",
+					Namespace: "default",
+					UID:       "test-uid-update-timeout",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "test-template",
+					InplaceUpdate: &agentsv1alpha1.SandboxClaimInplaceUpdateOptions{
+						Image:   "redis:7.0",
+						Timeout: &timeoutDuration,
+					},
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template",
+					Namespace: "default",
+				},
+			},
+			expectError: false,
+			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+				if opts.InplaceUpdate == nil {
+					t.Fatal("InplaceUpdate should not be nil")
+				}
+				if opts.InplaceUpdate.Image != "redis:7.0" {
+					t.Errorf("InplaceUpdate.Image = %v, want %v", opts.InplaceUpdate.Image, "redis:7.0")
+				}
+				if opts.WaitReadyTimeout != 3*time.Minute {
+					t.Errorf("WaitReadyTimeout = %v, want %v", opts.WaitReadyTimeout, 3*time.Minute)
+				}
+			},
+		},
+		{
+			name: "claim with all fields",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim-full",
+					Namespace: "default",
+					UID:       "test-uid-full",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "test-template",
+					Labels: map[string]string{
+						"app": "test",
+					},
+					Annotations: map[string]string{
+						"note": "test",
+					},
+					ShutdownTime: &shutdownTime,
+					InplaceUpdate: &agentsv1alpha1.SandboxClaimInplaceUpdateOptions{
+						Image:   "postgres:16",
+						Timeout: &timeoutDuration,
+					},
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template",
+					Namespace: "default",
+				},
+			},
+			expectError: false,
+			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+				if opts.User != "test-uid-full" {
+					t.Errorf("User = %v, want %v", opts.User, "test-uid-full")
+				}
+				if opts.Template != "test-template" {
+					t.Errorf("Template = %v, want %v", opts.Template, "test-template")
+				}
+				if opts.Modifier == nil {
+					t.Error("Modifier should not be nil")
+				}
+				if opts.InplaceUpdate == nil {
+					t.Fatal("InplaceUpdate should not be nil")
+				}
+				if opts.InplaceUpdate.Image != "postgres:16" {
+					t.Errorf("InplaceUpdate.Image = %v, want %v", opts.InplaceUpdate.Image, "postgres:16")
+				}
+				if opts.WaitReadyTimeout != 3*time.Minute {
+					t.Errorf("WaitReadyTimeout = %v, want %v", opts.WaitReadyTimeout, 3*time.Minute)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts, err := control.buildClaimOptions(ctx, tt.claim, tt.sandboxSet)
+			if (err != nil) != tt.expectError {
+				t.Errorf("buildClaimOptions() error = %v, expectError %v", err, tt.expectError)
+				return
+			}
+			if !tt.expectError && tt.validate != nil {
+				tt.validate(t, opts)
+			}
+		})
+	}
+}
+
+// TestCommonControl_buildClaimOptions_Modifier tests the modifier function behavior
+func TestCommonControl_buildClaimOptions_Modifier(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		Build()
+
+	fakeRecorder := record.NewFakeRecorder(10)
+	control := NewCommonControl(fakeClient, fakeRecorder, nil, nil).(*commonControl)
+
+	ctx := context.Background()
+	shutdownTime := metav1.Now()
+
+	claim := &agentsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-claim",
+			Namespace: "default",
+			UID:       "test-uid",
+		},
+		Spec: agentsv1alpha1.SandboxClaimSpec{
+			TemplateName: "test-template",
+			Labels: map[string]string{
+				"custom-label": "value1",
+			},
+			Annotations: map[string]string{
+				"custom-annotation": "value2",
+			},
+			ShutdownTime: &shutdownTime,
+		},
+	}
+
+	sandboxSet := &agentsv1alpha1.SandboxSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-template",
+			Namespace: "default",
+		},
+	}
+
+	opts, err := control.buildClaimOptions(ctx, claim, sandboxSet)
+	if err != nil {
+		t.Fatalf("buildClaimOptions() error = %v", err)
+	}
+
+	if opts.Modifier == nil {
+		t.Fatal("Modifier should not be nil")
+	}
+
+	// Create a mock sandbox to test the modifier
+	mockSandbox := &sandboxcr.Sandbox{
+		Sandbox: &agentsv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-sandbox",
+				Namespace: "default",
+				Labels: map[string]string{
+					"existing-label": "existing-value",
+				},
+			},
+		},
+	}
+
+	// Apply the modifier
+	opts.Modifier(mockSandbox)
+
+	// Verify labels were set correctly
+	if mockSandbox.Labels[agentsv1alpha1.LabelSandboxClaimName] != "test-claim" {
+		t.Errorf("Expected LabelSandboxClaimName = %v, got %v",
+			"test-claim", mockSandbox.Labels[agentsv1alpha1.LabelSandboxClaimName])
+	}
+
+	if mockSandbox.Labels["custom-label"] != "value1" {
+		t.Errorf("Expected custom-label = %v, got %v",
+			"value1", mockSandbox.Labels["custom-label"])
+	}
+
+	if mockSandbox.Labels["existing-label"] != "existing-value" {
+		t.Errorf("Expected existing-label to be preserved = %v, got %v",
+			"existing-value", mockSandbox.Labels["existing-label"])
+	}
+
+	// Verify annotations were set correctly
+	if mockSandbox.Annotations["custom-annotation"] != "value2" {
+		t.Errorf("Expected custom-annotation = %v, got %v",
+			"value2", mockSandbox.Annotations["custom-annotation"])
+	}
+}
+
 // Helper function for tests
 func int32Ptr(i int32) *int32 {
 	return &i
+}
+
+func CreateSandboxWithStatus(t *testing.T, client versioned.Interface, sbx *agentsv1alpha1.Sandbox) {
+	_, err := client.ApiV1alpha1().Sandboxes(sbx.Namespace).Create(t.Context(), sbx, metav1.CreateOptions{})
+	require.NoError(t, err)
+	_, err = client.ApiV1alpha1().Sandboxes(sbx.Namespace).UpdateStatus(t.Context(), sbx, metav1.UpdateOptions{})
+	require.NoError(t, err)
 }
