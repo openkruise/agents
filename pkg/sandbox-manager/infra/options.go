@@ -28,28 +28,31 @@ type ClaimSandboxOptions struct {
 	CSIMount *CSIMountOptions `json:"CSIMount"`
 	// Max ClaimTimeout duration
 	ClaimTimeout time.Duration `json:"claimTimeout"`
+	// Max WaitReadyTimeout duration
+	WaitReadyTimeout time.Duration `json:"waitReadyTimeout"`
+	// Create a Sandbox instance from the template if no available ones in SandboxSets
+	CreateOnNoStock bool `json:"createOnNoStock"`
 }
 
 type ClaimMetrics struct {
-	Retries       int
-	Total         time.Duration
-	Wait          time.Duration
-	PickAndLock   time.Duration
-	InplaceUpdate time.Duration
-	InitRuntime   time.Duration
-	CSIMount      time.Duration
-	LastError     error
+	Retries     int
+	Total       time.Duration
+	Wait        time.Duration
+	PickAndLock time.Duration
+	WaitReady   time.Duration
+	InitRuntime time.Duration
+	CSIMount    time.Duration
+	LastError   error
 }
 
 func (m ClaimMetrics) String() string {
 	return fmt.Sprintf(
 		"ClaimMetrics{Retries: %d, Total: %s, Wait: %s, PickAndLock: %s, InplaceUpdate: %s, InitRuntime: %s, CSIMount: %s}",
-		m.Retries, m.Total, m.Wait, m.PickAndLock, m.InplaceUpdate, m.InitRuntime, m.CSIMount)
+		m.Retries, m.Total, m.Wait, m.PickAndLock, m.WaitReady, m.InitRuntime, m.CSIMount)
 }
 
 type InplaceUpdateOptions struct {
-	Image   string
-	Timeout time.Duration
+	Image string
 }
 
 type InitRuntimeOptions struct {

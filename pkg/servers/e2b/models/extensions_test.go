@@ -2,13 +2,17 @@ package models
 
 import (
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestParseExtensions(t *testing.T) {
 	tests := []struct {
-		name     string
-		metadata map[string]string
-		wantErr  bool
+		name            string
+		metadata        map[string]string
+		wantErr         bool
+		expectExtension NewSandboxRequestExtension
 	}{
 		{
 			name:     "nil metadata",
@@ -26,6 +30,28 @@ func TestParseExtensions(t *testing.T) {
 				ExtensionKeyClaimWithImage: "nginx:latest",
 			},
 			wantErr: false,
+			expectExtension: NewSandboxRequestExtension{
+				InplaceUpdate: InplaceUpdateExtension{
+					Image: "nginx:latest",
+				},
+			},
+		},
+		{
+			name: "create on no stock == true",
+			metadata: map[string]string{
+				ExtensionKeyCreateOnNoStock: "true",
+			},
+			wantErr: false,
+			expectExtension: NewSandboxRequestExtension{
+				CreateOnNoStock: true,
+			},
+		},
+		{
+			name: "create on no stock == false",
+			metadata: map[string]string{
+				ExtensionKeyCreateOnNoStock: "false",
+			},
+			wantErr: false,
 		},
 		{
 			name: "invalid image extension",
@@ -35,11 +61,21 @@ func TestParseExtensions(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "invalid inplace update timeout",
+			name: "invalid wait ready timeout",
 			metadata: map[string]string{
-				ExtensionKeyInplaceUpdateTimeout: "invalid",
+				ExtensionKeyWaitReadyTimeout: "invalid",
 			},
 			wantErr: true,
+		},
+		{
+			name: "valid wait ready timeout",
+			metadata: map[string]string{
+				ExtensionKeyWaitReadyTimeout: "1234",
+			},
+			wantErr: false,
+			expectExtension: NewSandboxRequestExtension{
+				WaitReadySeconds: 1234,
+			},
 		},
 		{
 			name: "valid csi mount extension",
@@ -48,6 +84,12 @@ func TestParseExtensions(t *testing.T) {
 				ExtensionKeyClaimWithCSIMount_MountPoint: "/valid/path",
 			},
 			wantErr: false,
+			expectExtension: NewSandboxRequestExtension{
+				CSIMount: CSIMountExtension{
+					PersistentVolumeName: "test-volume",
+					ContainerMountPoint:  "/valid/path",
+				},
+			},
 		},
 		{
 			name: "invalid csi mount extension - missing volume name",
@@ -87,8 +129,12 @@ func TestParseExtensions(t *testing.T) {
 			}
 
 			err := req.ParseExtensions()
-			if (err != nil) != tt.wantErr {
-				t.Errorf("ParseExtensions() error = %v, wantErr %v", err, tt.wantErr)
+			if tt.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+				assert.EqualValues(t, tt.expectExtension, req.Extensions)
+				assert.Empty(t, req.Metadata)
 			}
 		})
 	}
@@ -227,39 +273,35 @@ func TestParseExtensionCSIMount(t *testing.T) {
 
 func TestParseExtensionInplaceUpdate(t *testing.T) {
 	tests := []struct {
-		name          string
-		metadata      map[string]string
-		expectError   bool
-		expectImage   string
-		expectTimeout int
+		name        string
+		metadata    map[string]string
+		expectError bool
+		expectImage string
 	}{
 		{
 			name: "valid image extension",
 			metadata: map[string]string{
 				ExtensionKeyClaimWithImage: "nginx:latest",
 			},
-			expectError:   false,
-			expectImage:   "nginx:latest",
-			expectTimeout: DefaultInplaceUpdateTimeoutSeconds,
+			expectError: false,
+			expectImage: "nginx:latest",
 		},
 		{
 			name: "valid image extension with timeout",
 			metadata: map[string]string{
-				ExtensionKeyClaimWithImage:       "nginx:latest",
-				ExtensionKeyInplaceUpdateTimeout: "1234",
+				ExtensionKeyClaimWithImage:   "nginx:latest",
+				ExtensionKeyWaitReadyTimeout: "1234",
 			},
-			expectError:   false,
-			expectImage:   "nginx:latest",
-			expectTimeout: 1234,
+			expectError: false,
+			expectImage: "nginx:latest",
 		},
 		{
 			name: "valid image with repository",
 			metadata: map[string]string{
 				ExtensionKeyClaimWithImage: "docker.io/library/ubuntu:20.04",
 			},
-			expectError:   false,
-			expectImage:   "docker.io/library/ubuntu:20.04",
-			expectTimeout: DefaultInplaceUpdateTimeoutSeconds,
+			expectError: false,
+			expectImage: "docker.io/library/ubuntu:20.04",
 		},
 		{
 			name: "invalid image format",
@@ -280,23 +322,20 @@ func TestParseExtensionInplaceUpdate(t *testing.T) {
 			metadata: map[string]string{
 				"some-other-key": "some-value",
 			},
-			expectError:   false,
-			expectImage:   "",
-			expectTimeout: DefaultInplaceUpdateTimeoutSeconds,
+			expectError: false,
+			expectImage: "",
 		},
 		{
-			name:          "empty metadata",
-			metadata:      map[string]string{},
-			expectError:   false,
-			expectImage:   "",
-			expectTimeout: DefaultInplaceUpdateTimeoutSeconds,
+			name:        "empty metadata",
+			metadata:    map[string]string{},
+			expectError: false,
+			expectImage: "",
 		},
 		{
-			name:          "nil metadata",
-			metadata:      nil,
-			expectError:   false,
-			expectImage:   "",
-			expectTimeout: DefaultInplaceUpdateTimeoutSeconds,
+			name:        "nil metadata",
+			metadata:    nil,
+			expectError: false,
+			expectImage: "",
 		},
 	}
 
@@ -306,7 +345,7 @@ func TestParseExtensionInplaceUpdate(t *testing.T) {
 				Metadata: tt.metadata,
 			}
 
-			err := req.parseExtensionImage()
+			err := req.ParseExtensions()
 
 			if (err != nil) != tt.expectError {
 				t.Errorf("parseExtensionImage() error = %v, expectError %v", err, tt.expectError)
@@ -320,9 +359,6 @@ func TestParseExtensionInplaceUpdate(t *testing.T) {
 				if tt.expectImage == "" && req.Extensions.InplaceUpdate.Image != "" {
 					t.Errorf("Expected no image, got '%s'", req.Extensions.InplaceUpdate.Image)
 				}
-				if tt.expectTimeout != req.Extensions.InplaceUpdate.TimeoutSeconds {
-					t.Errorf("Expected timeout '%d', got '%d'", tt.expectTimeout, req.Extensions.InplaceUpdate.TimeoutSeconds)
-				}
 			}
 
 			// Check if the image key is removed from metadata when present
@@ -330,8 +366,8 @@ func TestParseExtensionInplaceUpdate(t *testing.T) {
 				t.Errorf("Expected image key to be removed from metadata")
 			}
 			// Check if the image key is removed from metadata when present
-			if _, exists := req.Metadata[ExtensionKeyInplaceUpdateTimeout]; exists && tt.expectImage != "" {
-				t.Errorf("Expected image key to be removed from metadata")
+			if _, exists := req.Metadata[ExtensionKeyWaitReadyTimeout]; exists && tt.expectImage != "" {
+				t.Errorf("Expected key to be removed from metadata")
 			}
 		})
 	}
