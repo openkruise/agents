@@ -6,11 +6,12 @@ import (
 	"net/http"
 
 	"github.com/google/uuid"
+	"k8s.io/klog/v2"
+
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
-	"k8s.io/klog/v2"
 )
 
 func (sc *Controller) registerRoutes() {
