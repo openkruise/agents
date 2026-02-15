@@ -108,7 +108,7 @@ func (s *Server) handleRequestHeaders(requestHeaders *extProcPb.ProcessingReques
 		return s.logAndCreateErrorResponse(http.StatusNotFound, errorMsg, log)
 	}
 	if route.State != agentsv1alpha1.SandboxStateRunning {
-		log.Info("sandbox is not running", "sandboxID", sandboxID)
+		log.Info("sandbox is not running", "sandboxID", sandboxID, "route", route)
 		return s.logAndCreateErrorResponse(http.StatusNotFound, errorMsg, log)
 	}
 	if extraHeaders == nil {
