@@ -361,6 +361,9 @@ func (i *Infra) reconcileRoutes() {
 		if _, exists := existingSandboxIDs[route.ID]; !exists {
 			i.Proxy.DeleteRoute(route.ID)
 			deletedCount++
+			managerutils.ResourceVersionExpectationDelete(&metav1.ObjectMeta{
+				UID: route.UID,
+			})
 			log.Info("reconciler deleted orphaned route", "sandboxID", route.ID)
 		}
 	}
