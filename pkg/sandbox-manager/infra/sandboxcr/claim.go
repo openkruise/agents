@@ -331,7 +331,7 @@ func initRuntime(ctx context.Context, sbx *Sandbox, opts config.InitRuntimeOptio
 		log.Error(err, "failed to create request")
 		return 0, err
 	}
-	retries := 0
+	retries := -1
 	return time.Since(start), retry.OnError(wait.Backoff{
 		// about retry 20s
 		Duration: 200 * time.Millisecond,
@@ -339,9 +339,15 @@ func initRuntime(ctx context.Context, sbx *Sandbox, opts config.InitRuntimeOptio
 		Steps:    5,
 		Cap:      10 * time.Second,
 	}, func(err error) bool {
-		return true
+		select {
+		case <-ctx.Done():
+			return false
+		default:
+			return true
+		}
 	}, func() error {
 		var initErr error
+		retries++
 		defer func() {
 			if initErr != nil {
 				log.Error(initErr, "init runtime request failed", "retries", retries)
@@ -349,7 +355,6 @@ func initRuntime(ctx context.Context, sbx *Sandbox, opts config.InitRuntimeOptio
 		}()
 		resp, initErr := proxyutils.ProxyRequest(r)
 		if initErr != nil {
-			log.Error(initErr, "init runtime request failed")
 			return initErr
 		}
 		return resp.Body.Close()
