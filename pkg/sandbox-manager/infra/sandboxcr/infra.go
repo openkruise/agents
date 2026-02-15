@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
@@ -32,17 +33,20 @@ type Infra struct {
 	Client sandboxclient.Interface
 	Proxy  *proxy.Server
 
-	pickCache sync.Map
+	// For claiming sandbox
+	pickCache        sync.Map
+	claimLockChannel chan struct{}
+	noStock          atomic.Bool
 
 	// Currently, templates stores the mapping of sandboxset name -> number of namespaces. For example,
 	// if a sandboxset with the same name is created in two different namespaces, the corresponding value would be 2.
 	// In the future, this will be changed to integrate with Template CR.
 	templates sync.Map
 
-	reconcileStopCh chan struct{}
+	reconcileRouteStopCh chan struct{}
 }
 
-func NewInfra(client sandboxclient.Interface, k8sClient kubernetes.Interface, proxy *proxy.Server, systemNamespace string) (*Infra, error) {
+func NewInfra(client sandboxclient.Interface, k8sClient kubernetes.Interface, proxy *proxy.Server, opts infra.NewInfraOptions) (*Infra, error) {
 	// Create informer factory for custom Sandbox resources
 	informerFactory := informers.NewSharedInformerFactory(client, time.Minute*10)
 	sandboxInformer := informerFactory.Api().V1alpha1().Sandboxes().Informer()
@@ -52,10 +56,14 @@ func NewInfra(client sandboxclient.Interface, k8sClient kubernetes.Interface, pr
 	coreInformerFactory := k8sinformers.NewSharedInformerFactory(k8sClient, time.Minute*10)
 	persistentVolumeInformer := coreInformerFactory.Core().V1().PersistentVolumes().Informer()
 	// Create informer factory with specified namespace for native Kubernetes resources (Secret)
-	if systemNamespace == "" {
-		systemNamespace = commonutils.DefaultSandboxDeployNamespace
+	if opts.SystemNamespace == "" {
+		opts.SystemNamespace = commonutils.DefaultSandboxDeployNamespace
 	}
-	coreInformerFactorySpecifiedNs := k8sinformers.NewSharedInformerFactoryWithOptions(k8sClient, time.Minute*10, k8sinformers.WithNamespace(systemNamespace))
+	if opts.MaxClaimWorkers <= 0 {
+		opts.MaxClaimWorkers = consts.DefaultClaimWorkers
+	}
+	klog.InfoS("sandbox manager infra config", "options", opts, "type", "sandbox-cr")
+	coreInformerFactorySpecifiedNs := k8sinformers.NewSharedInformerFactoryWithOptions(k8sClient, time.Minute*10, k8sinformers.WithNamespace(opts.SystemNamespace))
 	// to generate informers only for the specified namespace to avoid potential security privilege escalation risks.
 	secretInformer := coreInformerFactorySpecifiedNs.Core().V1().Secrets().Informer()
 
@@ -66,10 +74,11 @@ func NewInfra(client sandboxclient.Interface, k8sClient kubernetes.Interface, pr
 	}
 
 	instance := &Infra{
-		Cache:           cache,
-		Client:          client,
-		Proxy:           proxy,
-		reconcileStopCh: make(chan struct{}),
+		Cache:                cache,
+		Client:               client,
+		Proxy:                proxy,
+		reconcileRouteStopCh: make(chan struct{}),
+		claimLockChannel:     make(chan struct{}, opts.MaxClaimWorkers),
 	}
 
 	cache.AddSandboxEventHandler(k8scache.ResourceEventHandlerFuncs{
@@ -94,7 +103,7 @@ func (i *Infra) Run(ctx context.Context) error {
 }
 
 func (i *Infra) Stop() {
-	close(i.reconcileStopCh)
+	close(i.reconcileRouteStopCh)
 	i.Cache.Stop()
 }
 
@@ -107,8 +116,26 @@ func (i *Infra) ClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions
 		log.Error(err, "invalid claim options")
 		return nil, metrics, err
 	}
+
 	claimCtx, cancel := context.WithTimeout(ctx, opts.ClaimTimeout)
 	defer cancel()
+	log.Info("waiting for a free claim worker")
+	startWaiting := time.Now()
+	select {
+	case <-claimCtx.Done():
+		metrics.Wait = time.Since(startWaiting)
+		err = fmt.Errorf("context cancelled before getting a free claim worker: %s", claimCtx.Err())
+		log.Error(err, "failed to get a free claim worker", "cost", metrics.Wait)
+		return nil, metrics, err
+	case i.claimLockChannel <- struct{}{}:
+		defer func() {
+			<-i.claimLockChannel // free the worker
+		}()
+		metrics.Wait = time.Since(startWaiting)
+		log.Info("got a free claim worker", "cost", metrics.Wait)
+	}
+
+	// Start claiming sandbox
 	log.V(consts.DebugLogLevel).Info("claim sandbox options", "options", opts)
 	metrics.Retries = -1 // starts from 0
 	var claimedSandbox infra.Sandbox
@@ -125,12 +152,12 @@ func (i *Infra) ClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions
 		claimed, tryMetrics, claimErr := TryClaimSandbox(claimCtx, opts, &i.pickCache, i.Cache, i.Client)
 		if claimErr == nil {
 			tryMetrics.Retries = metrics.Retries
-			tryMetrics.Wait = metrics.Wait
-			tryMetrics.Total += metrics.Wait
+			tryMetrics.RetryCost = metrics.RetryCost
+			tryMetrics.Total += metrics.RetryCost
 			metrics = tryMetrics
 			claimedSandbox = claimed
 		}
-		metrics.Wait += tryMetrics.Total
+		metrics.RetryCost += tryMetrics.Total
 		if tryMetrics.LastError != nil {
 			metrics.LastError = tryMetrics.LastError
 		}
@@ -308,7 +335,7 @@ func (i *Infra) startRouteReconciler(interval time.Duration) {
 		select {
 		case <-ticker.C:
 			i.reconcileRoutes()
-		case <-i.reconcileStopCh:
+		case <-i.reconcileRouteStopCh:
 			klog.Info("route reconciler stopped")
 			return
 		}

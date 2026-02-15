@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/openkruise/agents/client/clientset/versioned/fake"
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -84,13 +83,15 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 
 	// Test cases
 	tests := []struct {
-		name        string
-		available   int
-		options     infra.ClaimSandboxOptions
-		preProcess  func(t *testing.T, client *fake.Clientset)
-		preModifier func(sbx *v1alpha1.Sandbox, infra *Infra)
-		postCheck   func(t *testing.T, sbx infra.Sandbox)
-		expectError string
+		name         string
+		available    int
+		infraOptions infra.NewInfraOptions
+		options      infra.ClaimSandboxOptions
+		preProcess   func(t *testing.T, infra *Infra)
+		claimCtx     func(parent context.Context) context.Context
+		preModifier  func(sbx *v1alpha1.Sandbox, infra *Infra)
+		postCheck    func(t *testing.T, sbx infra.Sandbox)
+		expectError  string
 	}{
 		{
 			name:      "claim with available pods",
@@ -242,7 +243,7 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 				Template:        existTemplate,
 				CreateOnNoStock: true,
 			},
-			preProcess: func(t *testing.T, client *fake.Clientset) {
+			preProcess: func(t *testing.T, infra *Infra) {
 				sbs := v1alpha1.SandboxSet{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      existTemplate,
@@ -252,7 +253,7 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 						EmbeddedSandboxTemplate: tmpl,
 					},
 				}
-				_, err := client.ApiV1alpha1().SandboxSets("default").Create(t.Context(), &sbs, metav1.CreateOptions{})
+				_, err := infra.Client.ApiV1alpha1().SandboxSets("default").Create(t.Context(), &sbs, metav1.CreateOptions{})
 				require.NoError(t, err)
 			},
 			postCheck: func(t *testing.T, sbx infra.Sandbox) {
@@ -280,7 +281,7 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 					Image: "new-image",
 				},
 			},
-			preProcess: func(t *testing.T, client *fake.Clientset) {
+			preProcess: func(t *testing.T, infra *Infra) {
 				sbs := v1alpha1.SandboxSet{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      existTemplate,
@@ -290,19 +291,52 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 						EmbeddedSandboxTemplate: tmpl,
 					},
 				}
-				_, err := client.ApiV1alpha1().SandboxSets("default").Create(t.Context(), &sbs, metav1.CreateOptions{})
+				_, err := infra.Client.ApiV1alpha1().SandboxSets("default").Create(t.Context(), &sbs, metav1.CreateOptions{})
 				require.NoError(t, err)
 			},
 			postCheck: func(t *testing.T, sbx infra.Sandbox) {
 				assert.Equal(t, "new-image", sbx.(*Sandbox).Spec.Template.Spec.Containers[0].Image)
 			},
 		},
+		{
+			name: "failed to get worker: timeout",
+			infraOptions: infra.NewInfraOptions{
+				MaxClaimWorkers: 1,
+			},
+			preProcess: func(t *testing.T, infra *Infra) {
+				infra.claimLockChannel <- struct{}{}
+			},
+			options: infra.ClaimSandboxOptions{
+				User:     user,
+				Template: existTemplate,
+			},
+			expectError: "context cancelled before getting a free claim worker: context deadline exceeded",
+		},
+		{
+			name: "failed to get worker: cancelled",
+			infraOptions: infra.NewInfraOptions{
+				MaxClaimWorkers: 1,
+			},
+			preProcess: func(t *testing.T, infra *Infra) {
+				infra.claimLockChannel <- struct{}{}
+			},
+			claimCtx: func(parent context.Context) context.Context {
+				ctx, cancel := context.WithCancel(parent)
+				cancel()
+				return ctx
+			},
+			options: infra.ClaimSandboxOptions{
+				User:     user,
+				Template: existTemplate,
+			},
+			expectError: "context cancelled before getting a free claim worker: context canceled",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			tt.options.ClaimTimeout = 50 * time.Millisecond
-			testInfra, client := NewTestInfra(t)
+			testInfra, client := NewTestInfra(t, tt.infraOptions)
 			for i := 0; i < tt.available; i++ {
 				sbx := &v1alpha1.Sandbox{
 					ObjectMeta: metav1.ObjectMeta{
@@ -341,12 +375,23 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 			}
 
 			if tt.preProcess != nil {
-				tt.preProcess(t, client)
+				tt.preProcess(t, testInfra)
 			}
 			ctx, cancel := context.WithCancel(t.Context())
-			defer cancel()
-			go KeepMakingAllSandboxesReady(ctx, t, client)
-			sbx, metrics, err := testInfra.ClaimSandbox(t.Context(), tt.options)
+			done := make(chan struct{})
+			go func() {
+				KeepMakingAllSandboxesReady(ctx, t, client)
+				close(done)
+			}()
+			defer func() {
+				cancel()
+				<-done // 等待 goroutine 完全退出
+			}()
+			claimCtx := t.Context()
+			if tt.claimCtx != nil {
+				claimCtx = tt.claimCtx(t.Context())
+			}
+			sbx, metrics, err := testInfra.ClaimSandbox(claimCtx, tt.options)
 			if tt.expectError != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.expectError)
