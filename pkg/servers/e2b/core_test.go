@@ -16,7 +16,6 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/client/clientset/versioned"
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
@@ -49,7 +48,6 @@ func CreatePodWithStatus(t *testing.T, client kubernetes.Interface, pod *corev1.
 
 func Setup(t *testing.T) (*Controller, *clients.ClientSet, func()) {
 	utils.InitLogOutput()
-	sandboxcr.SetClaimTimeout(100 * time.Millisecond)
 	clientSet := clients.NewFakeClientSet()
 	namespace := "sandbox-system"
 	// mock self pod
@@ -85,7 +83,8 @@ func Setup(t *testing.T) (*Controller, *clients.ClientSet, func()) {
 	_, err := clientSet.CoreV1().Secrets(namespace).Create(t.Context(), secret, metav1.CreateOptions{})
 	assert.NoError(t, err)
 
-	controller := NewController("example.com", InitKey, namespace, models.DefaultMaxTimeout, TestServerPort, true, clientSet)
+	controller := NewController("example.com", InitKey, namespace, models.DefaultMaxTimeout, 10,
+		0, TestServerPort, true, clientSet)
 	assert.NoError(t, controller.Init())
 	_, err = controller.Run(namespace, "component=sandbox-manager")
 	assert.NoError(t, err)
@@ -125,11 +124,26 @@ func GetSbsOwnerReference(sbs *agentsv1alpha1.SandboxSet) []metav1.OwnerReferenc
 }
 
 func CreateSandboxPool(t *testing.T, client versioned.Interface, name string, available int) func() {
+	tmpl := agentsv1alpha1.EmbeddedSandboxTemplate{
+		Template: &corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  "main",
+						Image: "old-image",
+					},
+				},
+			},
+		},
+	}
 	sbs := &agentsv1alpha1.SandboxSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: Namespace,
 			UID:       types.UID(uuid.NewString()),
+		},
+		Spec: agentsv1alpha1.SandboxSetSpec{
+			EmbeddedSandboxTemplate: tmpl,
 		},
 	}
 	_, err := client.ApiV1alpha1().SandboxSets(Namespace).Create(context.Background(), sbs, metav1.CreateOptions{})
@@ -147,18 +161,7 @@ func CreateSandboxPool(t *testing.T, client versioned.Interface, name string, av
 				UID:             types.UID(uuid.NewString()),
 			},
 			Spec: agentsv1alpha1.SandboxSpec{
-				EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
-					Template: &corev1.PodTemplateSpec{
-						Spec: corev1.PodSpec{
-							Containers: []corev1.Container{
-								{
-									Name:  "main",
-									Image: "old-image",
-								},
-							},
-						},
-					},
-				},
+				EmbeddedSandboxTemplate: tmpl,
 			},
 			Status: agentsv1alpha1.SandboxStatus{
 				Phase: agentsv1alpha1.SandboxRunning,

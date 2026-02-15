@@ -21,6 +21,7 @@ func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts infra.ClaimSandb
 	}
 	sandbox, metrics, err := m.infra.ClaimSandbox(ctx, opts)
 	if err != nil {
+		log.Error(err, "failed to claim sandbox", "metrics", metrics)
 		// Requirement: Track failure in API layer
 		SandboxCreationResponses.WithLabelValues("failure").Inc()
 		return nil, errors.NewError(errors.ErrorInternal, fmt.Sprintf("failed to claim sandbox: %v", err))
@@ -96,9 +97,10 @@ func (m *SandboxManager) syncRoute(ctx context.Context, sbx infra.Sandbox, refre
 	}
 	start := time.Now()
 	route := sbx.GetRoute()
-	m.proxy.SetRoute(route)
+	m.proxy.SetRoute(ctx, route)
 	err := m.proxy.SyncRouteWithPeers(route)
 	if err != nil {
+		log.Error(err, "failed to sync route with peers")
 		return err
 	}
 	log.Info("route synced with peers", "cost", time.Since(start), "route", route)

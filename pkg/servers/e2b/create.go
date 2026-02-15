@@ -9,6 +9,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
@@ -31,6 +33,7 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 	if parseErr != nil {
 		return web.ApiResponse[*models.Sandbox]{}, parseErr
 	}
+	log.Info("create sandbox request received", "request", request)
 
 	var accessToken string
 	if request.Secure {
@@ -38,8 +41,9 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 	}
 	claimStart := time.Now()
 	opts := infra.ClaimSandboxOptions{
-		Template: request.TemplateID,
-		User:     user.ID.String(),
+		Template:     request.TemplateID,
+		User:         user.ID.String(),
+		ClaimTimeout: time.Duration(request.Extensions.TimeoutSeconds) * time.Second,
 		Modifier: func(sbx infra.Sandbox) {
 			// The E2B Timeout feature involves three sets of interfaces: create, connect, and pause,
 			// with two behavioral modes based on the `autoPause` parameter during creation:
@@ -74,28 +78,30 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 			}
 			if !request.Extensions.SkipInitRuntime {
 				route := sbx.GetRoute()
-				annotations[v1alpha1.AnnotationRuntimeURL] = fmt.Sprintf("http://%s:%d", route.IP, models.EnvdPort)
+				annotations[v1alpha1.AnnotationRuntimeURL] = fmt.Sprintf("http://%s:%d", route.IP, consts.RuntimePort)
 				annotations[v1alpha1.AnnotationRuntimeAccessToken] = accessToken
 			}
 			sbx.SetAnnotations(annotations)
 		},
 		ReserveFailedSandbox: request.Extensions.ReserveFailedSandbox,
+		CreateOnNoStock:      request.Extensions.CreateOnNoStock,
 	}
 
 	if !request.Extensions.SkipInitRuntime {
-		opts.InitRuntime = &infra.InitRuntimeOptions{
+		opts.InitRuntime = &config.InitRuntimeOptions{
 			EnvVars:     request.EnvVars,
 			AccessToken: accessToken,
 		}
 	}
 
 	if extension := request.Extensions.InplaceUpdate; extension.Image != "" {
-		opts.InplaceUpdate = &infra.InplaceUpdateOptions{
+		opts.InplaceUpdate = &config.InplaceUpdateOptions{
 			Image: extension.Image,
 		}
-		if extension.TimeoutSeconds > 0 {
-			opts.InplaceUpdate.Timeout = time.Duration(extension.TimeoutSeconds) * time.Second
-		}
+	}
+
+	if request.Extensions.WaitReadySeconds > 0 {
+		opts.WaitReadyTimeout = time.Duration(request.Extensions.WaitReadySeconds) * time.Second
 	}
 
 	if request.Extensions.CSIMount.PersistentVolumeName != "" {
@@ -107,7 +113,7 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 				Message: err.Error(),
 			}
 		}
-		opts.CSIMount = &infra.CSIMountOptions{
+		opts.CSIMount = &config.CSIMountOptions{
 			Driver:     driverName,
 			RequestRaw: csiReqConfigRaw,
 		}

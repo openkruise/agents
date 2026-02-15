@@ -3,6 +3,8 @@ package infra
 import (
 	"fmt"
 	"time"
+
+	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 )
 
 type ClaimSandboxOptions struct {
@@ -14,45 +16,40 @@ type ClaimSandboxOptions struct {
 	CandidateCounts int `json:"candidateCounts"`
 	// Lock string used in optimistic lock
 	LockString string `json:"lockString"`
+	// PreCheck checks the sandbox before modifying it
+	PreCheck func(sandbox Sandbox) error `json:"-"`
 	// Set Modifier to modify the Sandbox before it is updated
 	Modifier func(sandbox Sandbox) `json:"-"`
 	// Set ReserveFailedSandbox to true to reserve failed sandboxes
 	ReserveFailedSandbox bool `json:"reserveFailedSandbox"`
 	// Set InplaceUpdate to non-empty string trigger an inplace-update
-	InplaceUpdate *InplaceUpdateOptions `json:"inplaceUpdate"`
+	InplaceUpdate *config.InplaceUpdateOptions `json:"inplaceUpdate"`
 	// Set InitRuntime to non-nil value to init the agent-runtime
-	InitRuntime *InitRuntimeOptions `json:"initRuntime"`
+	InitRuntime *config.InitRuntimeOptions `json:"initRuntime"`
 	// Set CSIMount to non-nil value to mount a CSI volume
-	CSIMount *CSIMountOptions `json:"CSIMount"`
+	CSIMount *config.CSIMountOptions `json:"CSIMount"`
+	// Max ClaimTimeout duration
+	ClaimTimeout time.Duration `json:"claimTimeout"`
+	// Max WaitReadyTimeout duration
+	WaitReadyTimeout time.Duration `json:"waitReadyTimeout"`
+	// Create a Sandbox instance from the template if no available ones in SandboxSets
+	CreateOnNoStock bool `json:"createOnNoStock"`
 }
 
 type ClaimMetrics struct {
-	Retries       int
-	Total         time.Duration
-	Wait          time.Duration
-	PickAndLock   time.Duration
-	InplaceUpdate time.Duration
-	InitRuntime   time.Duration
-	CSIMount      time.Duration
+	Retries     int
+	Total       time.Duration
+	Wait        time.Duration
+	RetryCost   time.Duration
+	PickAndLock time.Duration
+	WaitReady   time.Duration
+	InitRuntime time.Duration
+	CSIMount    time.Duration
+	LastError   error
 }
 
 func (m ClaimMetrics) String() string {
 	return fmt.Sprintf(
 		"ClaimMetrics{Retries: %d, Total: %s, Wait: %s, PickAndLock: %s, InplaceUpdate: %s, InitRuntime: %s, CSIMount: %s}",
-		m.Retries, m.Total, m.Wait, m.PickAndLock, m.InplaceUpdate, m.InitRuntime, m.CSIMount)
-}
-
-type InplaceUpdateOptions struct {
-	Image   string
-	Timeout time.Duration
-}
-
-type InitRuntimeOptions struct {
-	EnvVars     map[string]string
-	AccessToken string
-}
-
-type CSIMountOptions struct {
-	Driver     string
-	RequestRaw string
+		m.Retries, m.Total, m.RetryCost, m.PickAndLock, m.WaitReady, m.InitRuntime, m.CSIMount)
 }

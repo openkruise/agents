@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -20,8 +21,6 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
-	constantUtils "github.com/openkruise/agents/pkg/utils"
 	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	"github.com/openkruise/agents/pkg/utils/sandboxutils"
 )
@@ -38,9 +37,13 @@ func GetSbsOwnerReference() []metav1.OwnerReference {
 	return []metav1.OwnerReference{*metav1.NewControllerRef(sbs, agentsv1alpha1.SandboxSetControllerKind)}
 }
 
-func setupTestManager(t *testing.T) *SandboxManager {
+func setupTestManager(t *testing.T, opts ...config.SandboxManagerOptions) *SandboxManager {
 	client := clients.NewFakeClientSet()
-	manager, err := NewSandboxManager(client, nil, constantUtils.DefaultSandboxDeployNamespace)
+	infraOption := config.SandboxManagerOptions{}
+	if len(opts) > 0 {
+		infraOption = opts[0]
+	}
+	manager, err := NewSandboxManager(client, nil, infraOption)
 	if err != nil {
 		t.Fatalf("Failed to create manager: %v", err)
 	}
@@ -131,7 +134,7 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 			opts: infra.ClaimSandboxOptions{
 				User:     username,
 				Template: "exist-1",
-				InplaceUpdate: &infra.InplaceUpdateOptions{
+				InplaceUpdate: &config.InplaceUpdateOptions{
 					Image: "new-image",
 				},
 			},
@@ -143,8 +146,6 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 			},
 		},
 	}
-
-	sandboxcr.SetClaimTimeout(100 * time.Millisecond)
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -212,7 +213,7 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 					}
 					CreateSandboxWithStatus(t, client, testSbx)
 					require.Eventually(t, func() bool {
-						sbx, err := manager.GetInfra().GetSandbox(context.Background(), sandboxutils.GetSandboxID(testSbx))
+						sbx, err := manager.GetInfra().GetSandbox(t.Context(), sandboxutils.GetSandboxID(testSbx))
 						if err != nil {
 							return false
 						}
@@ -222,6 +223,7 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 				}
 			}
 
+			tt.opts.ClaimTimeout = 100 * time.Millisecond
 			var claimed infra.Sandbox
 			err := retry.OnError(wait.Backoff{
 				Duration: 100 * time.Millisecond,
@@ -230,7 +232,7 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 			}, func(err error) bool {
 				return strings.Contains(err.Error(), "no stock")
 			}, func() error {
-				got, err := manager.ClaimSandbox(context.Background(), tt.opts)
+				got, err := manager.ClaimSandbox(t.Context(), tt.opts)
 				if err == nil {
 					claimed = got
 				}
@@ -657,7 +659,7 @@ func TestSandboxManager_ResumeSandbox(t *testing.T) {
 
 			// Set initial route in proxy
 			initialRoute := sbx.GetRoute()
-			manager.proxy.SetRoute(initialRoute)
+			manager.proxy.SetRoute(t.Context(), initialRoute)
 
 			// Resume sandbox
 			if !tt.expectError {

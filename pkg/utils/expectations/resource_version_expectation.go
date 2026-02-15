@@ -57,7 +57,7 @@ func (r *realResourceVersionExpectation) Expect(obj metav1.Object) {
 	if expectations == nil {
 		r.objectVersions[obj.GetUID()] = &objectCacheVersions{}
 	}
-	if isResourceVersionNewer(r.objectVersions[obj.GetUID()].version, obj.GetResourceVersion()) {
+	if IsResourceVersionNewer(r.objectVersions[obj.GetUID()].version, obj.GetResourceVersion()) {
 		r.objectVersions[obj.GetUID()].version = obj.GetResourceVersion()
 	}
 }
@@ -70,7 +70,7 @@ func (r *realResourceVersionExpectation) Observe(obj metav1.Object) {
 	if expectations == nil {
 		return
 	}
-	if isResourceVersionNewer(r.objectVersions[obj.GetUID()].version, obj.GetResourceVersion()) {
+	if IsResourceVersionNewer(r.objectVersions[obj.GetUID()].version, obj.GetResourceVersion()) {
 		delete(r.objectVersions, obj.GetUID())
 	}
 }
@@ -84,7 +84,7 @@ func (r *realResourceVersionExpectation) IsSatisfied(obj metav1.Object) (bool, t
 		return true, 0
 	}
 
-	if isResourceVersionNewer(r.objectVersions[obj.GetUID()].version, obj.GetResourceVersion()) {
+	if IsResourceVersionNewer(r.objectVersions[obj.GetUID()].version, obj.GetResourceVersion()) {
 		delete(r.objectVersions, obj.GetUID())
 	}
 	_, existing := r.objectVersions[obj.GetUID()]
@@ -105,7 +105,7 @@ func (r *realResourceVersionExpectation) Delete(obj metav1.Object) {
 	delete(r.objectVersions, obj.GetUID())
 }
 
-func isResourceVersionNewer(old, new string) bool {
+func IsResourceVersionNewer(old, new string) bool {
 	if len(old) == 0 {
 		return true
 	}
@@ -121,4 +121,19 @@ func isResourceVersionNewer(old, new string) bool {
 	}
 
 	return newCount >= oldCount
+}
+
+func GetNewerResourceVersion(obj metav1.Object) string {
+	old := obj.GetResourceVersion()
+	if len(old) == 0 {
+		return "1"
+	}
+
+	oldVersion, err := strconv.ParseUint(old, 10, 64)
+	if err != nil {
+		// 如果解析失败，返回原值（保持原有行为）
+		return old
+	}
+
+	return strconv.FormatUint(oldVersion+1, 10)
 }
