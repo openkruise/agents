@@ -15,7 +15,6 @@ import (
 	"github.com/openkruise/agents/client/clientset/versioned/fake"
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
-	constantUtils "github.com/openkruise/agents/pkg/utils"
 	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
 )
@@ -47,9 +46,13 @@ func createTestSandbox(name, user string, phase v1alpha1.SandboxPhase, ready boo
 }
 
 //goland:noinspection GoDeprecation
-func NewTestInfra(t *testing.T) (*Infra, *fake.Clientset) {
+func NewTestInfra(t *testing.T, opts ...infra.NewInfraOptions) (*Infra, *fake.Clientset) {
 	client := fake.NewSimpleClientset()
-	infraInstance, err := NewInfra(client, k8sfake.NewSimpleClientset(), proxy.NewServer(nil), constantUtils.DefaultSandboxDeployNamespace)
+	options := infra.NewInfraOptions{}
+	if len(opts) > 0 {
+		options = opts[0]
+	}
+	infraInstance, err := NewInfra(client, k8sfake.NewSimpleClientset(), proxy.NewServer(nil), options)
 	assert.NoError(t, err)
 	assert.NoError(t, infraInstance.Run(context.Background()))
 	return infraInstance, client

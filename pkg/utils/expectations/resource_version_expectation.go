@@ -122,3 +122,18 @@ func IsResourceVersionNewer(old, new string) bool {
 
 	return newCount >= oldCount
 }
+
+func GetNewerResourceVersion(obj metav1.Object) string {
+	old := obj.GetResourceVersion()
+	if len(old) == 0 {
+		return "1"
+	}
+
+	oldVersion, err := strconv.ParseUint(old, 10, 64)
+	if err != nil {
+		// 如果解析失败，返回原值（保持原有行为）
+		return old
+	}
+
+	return strconv.FormatUint(oldVersion+1, 10)
+}
