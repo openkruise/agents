@@ -79,6 +79,14 @@ func main() {
 	if peerSelector == "" {
 		klog.Fatalf("env var PEER_SELECTOR is required")
 	}
+
+	maxClaimWorkers := 0 // use default value of sandbox-manager
+	if value, err := strconv.Atoi(os.Getenv("MAX_CLAIM_WORKERS")); err == nil {
+		if value <= 0 {
+			klog.Fatalf("MAX_CLAIM_WORKERS must be greater than 0")
+		}
+		maxClaimWorkers = value
+	}
 	// =========== End Env =============
 
 	// Initialize Kubernetes client and config
@@ -87,7 +95,7 @@ func main() {
 		klog.Fatalf("Failed to initialize Kubernetes client: %v", err)
 	}
 
-	sandboxController := e2b.NewController(domain, e2bAdminKey, sysNs, e2bMaxTimeout, port, e2bEnableAuth, clientSet)
+	sandboxController := e2b.NewController(domain, e2bAdminKey, sysNs, e2bMaxTimeout, maxClaimWorkers, port, e2bEnableAuth, clientSet)
 	if err := sandboxController.Init(); err != nil {
 		klog.Fatalf("Failed to initialize sandbox controller: %v", err)
 	}

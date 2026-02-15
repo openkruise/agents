@@ -30,6 +30,7 @@ type Controller struct {
 	server          *http.Server
 	stop            chan os.Signal
 	systemNamespace string // the namespace where the sandbox manager is running
+	maxClaimWorkers int
 	client          *clients.ClientSet
 	cache           infra.CacheProvider
 	storageRegistry storages.VolumeMountProviderRegistry
@@ -41,7 +42,7 @@ type Controller struct {
 }
 
 // NewController creates a new E2B Controller
-func NewController(domain, adminKey string, sysNs string, maxTimeout int, port int, enableAuth bool, clientSet *clients.ClientSet) *Controller {
+func NewController(domain, adminKey string, sysNs string, maxTimeout, maxClaimWorkers int, port int, enableAuth bool, clientSet *clients.ClientSet) *Controller {
 	sc := &Controller{
 		mux:             http.NewServeMux(),
 		client:          clientSet,
@@ -50,6 +51,7 @@ func NewController(domain, adminKey string, sysNs string, maxTimeout int, port i
 		port:            port,
 		maxTimeout:      maxTimeout,
 		systemNamespace: sysNs, // the namespace where the sandbox manager is running
+		maxClaimWorkers: maxClaimWorkers,
 	}
 
 	sc.server = &http.Server{
@@ -74,7 +76,10 @@ func (sc *Controller) Init() error {
 	log := klog.FromContext(ctx)
 	log.Info("init controller")
 	adapter := adapters.DefaultAdapterFactory(sc.port)
-	sandboxManager, err := sandbox_manager.NewSandboxManager(sc.client, adapter, sc.systemNamespace)
+	sandboxManager, err := sandbox_manager.NewSandboxManager(sc.client, adapter, infra.NewInfraOptions{
+		SystemNamespace: sc.systemNamespace,
+		MaxClaimWorkers: sc.maxClaimWorkers,
+	})
 	if err != nil {
 		return err
 	}

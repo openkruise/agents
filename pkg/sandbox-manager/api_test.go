@@ -20,7 +20,6 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
-	constantUtils "github.com/openkruise/agents/pkg/utils"
 	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	"github.com/openkruise/agents/pkg/utils/sandboxutils"
 )
@@ -37,9 +36,13 @@ func GetSbsOwnerReference() []metav1.OwnerReference {
 	return []metav1.OwnerReference{*metav1.NewControllerRef(sbs, agentsv1alpha1.SandboxSetControllerKind)}
 }
 
-func setupTestManager(t *testing.T) *SandboxManager {
+func setupTestManager(t *testing.T, opts ...infra.NewInfraOptions) *SandboxManager {
 	client := clients.NewFakeClientSet()
-	manager, err := NewSandboxManager(client, nil, constantUtils.DefaultSandboxDeployNamespace)
+	infraOption := infra.NewInfraOptions{}
+	if len(opts) > 0 {
+		infraOption = opts[0]
+	}
+	manager, err := NewSandboxManager(client, nil, infraOption)
 	if err != nil {
 		t.Fatalf("Failed to create manager: %v", err)
 	}
