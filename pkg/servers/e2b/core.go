@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"k8s.io/client-go/rest"
 	"k8s.io/klog/v2"
@@ -25,12 +26,18 @@ import (
 
 // Controller handles sandbox-related operations
 type Controller struct {
-	port            int
+	port       int
+	maxTimeout int
+
+	// manager params
+	systemNamespace       string // the namespace where the sandbox manager is running
+	maxClaimWorkers       int
+	extProcMaxConcurrency uint32
+
+	// fields
 	mux             *http.ServeMux
 	server          *http.Server
 	stop            chan os.Signal
-	systemNamespace string // the namespace where the sandbox manager is running
-	maxClaimWorkers int
 	client          *clients.ClientSet
 	cache           infra.CacheProvider
 	storageRegistry storages.VolumeMountProviderRegistry
@@ -38,20 +45,21 @@ type Controller struct {
 	domain          string
 	manager         *sandbox_manager.SandboxManager
 	keys            *keys.SecretKeyStorage
-	maxTimeout      int
 }
 
 // NewController creates a new E2B Controller
-func NewController(domain, adminKey string, sysNs string, maxTimeout, maxClaimWorkers int, port int, enableAuth bool, clientSet *clients.ClientSet) *Controller {
+func NewController(domain, adminKey string, sysNs string, maxTimeout, maxClaimWorkers int, extProcMaxConcurrency uint32,
+	port int, enableAuth bool, clientSet *clients.ClientSet) *Controller {
 	sc := &Controller{
-		mux:             http.NewServeMux(),
-		client:          clientSet,
-		domain:          domain,
-		clientConfig:    clientSet.Config,
-		port:            port,
-		maxTimeout:      maxTimeout,
-		systemNamespace: sysNs, // the namespace where the sandbox manager is running
-		maxClaimWorkers: maxClaimWorkers,
+		mux:                   http.NewServeMux(),
+		client:                clientSet,
+		domain:                domain,
+		clientConfig:          clientSet.Config,
+		port:                  port,
+		maxTimeout:            maxTimeout,
+		systemNamespace:       sysNs, // the namespace where the sandbox manager is running
+		maxClaimWorkers:       maxClaimWorkers,
+		extProcMaxConcurrency: extProcMaxConcurrency,
 	}
 
 	sc.server = &http.Server{
@@ -76,9 +84,10 @@ func (sc *Controller) Init() error {
 	log := klog.FromContext(ctx)
 	log.Info("init controller")
 	adapter := adapters.DefaultAdapterFactory(sc.port)
-	sandboxManager, err := sandbox_manager.NewSandboxManager(sc.client, adapter, infra.NewInfraOptions{
-		SystemNamespace: sc.systemNamespace,
-		MaxClaimWorkers: sc.maxClaimWorkers,
+	sandboxManager, err := sandbox_manager.NewSandboxManager(sc.client, adapter, config.SandboxManagerOptions{
+		SystemNamespace:       sc.systemNamespace,
+		MaxClaimWorkers:       sc.maxClaimWorkers,
+		ExtProcMaxConcurrency: sc.extProcMaxConcurrency,
 	})
 	if err != nil {
 		return err

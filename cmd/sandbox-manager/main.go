@@ -87,6 +87,14 @@ func main() {
 		}
 		maxClaimWorkers = value
 	}
+
+	extProcMaxConcurrency := uint32(0) // use default value of sandbox-manager
+	if value, err := strconv.ParseUint(os.Getenv("EXT_PROC_MAX_CONCURRENCY"), 10, 32); err == nil {
+		if value <= 0 {
+			klog.Fatalf("EXT_PROC_MAX_CONCURRENCY must be greater than 0")
+		}
+		extProcMaxConcurrency = uint32(value)
+	}
 	// =========== End Env =============
 
 	// Initialize Kubernetes client and config
@@ -95,7 +103,8 @@ func main() {
 		klog.Fatalf("Failed to initialize Kubernetes client: %v", err)
 	}
 
-	sandboxController := e2b.NewController(domain, e2bAdminKey, sysNs, e2bMaxTimeout, maxClaimWorkers, port, e2bEnableAuth, clientSet)
+	sandboxController := e2b.NewController(domain, e2bAdminKey, sysNs, e2bMaxTimeout, maxClaimWorkers, extProcMaxConcurrency,
+		port, e2bEnableAuth, clientSet)
 	if err := sandboxController.Init(); err != nil {
 		klog.Fatalf("Failed to initialize sandbox controller: %v", err)
 	}

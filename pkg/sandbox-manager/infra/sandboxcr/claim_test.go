@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
+	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -85,7 +86,7 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 	tests := []struct {
 		name         string
 		available    int
-		infraOptions infra.NewInfraOptions
+		infraOptions config.SandboxManagerOptions
 		options      infra.ClaimSandboxOptions
 		preProcess   func(t *testing.T, infra *Infra)
 		claimCtx     func(parent context.Context) context.Context
@@ -160,7 +161,7 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 			options: infra.ClaimSandboxOptions{
 				User:     user,
 				Template: existTemplate,
-				InplaceUpdate: &infra.InplaceUpdateOptions{
+				InplaceUpdate: &config.InplaceUpdateOptions{
 					Image: "new-image",
 				},
 			},
@@ -176,8 +177,8 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 			options: infra.ClaimSandboxOptions{
 				User:        user,
 				Template:    existTemplate,
-				InitRuntime: &infra.InitRuntimeOptions{},
-				CSIMount: &infra.CSIMountOptions{
+				InitRuntime: &config.InitRuntimeOptions{},
+				CSIMount: &config.CSIMountOptions{
 					Driver: "",
 				},
 			},
@@ -277,7 +278,7 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 				User:            user,
 				Template:        existTemplate,
 				CreateOnNoStock: true,
-				InplaceUpdate: &infra.InplaceUpdateOptions{
+				InplaceUpdate: &config.InplaceUpdateOptions{
 					Image: "new-image",
 				},
 			},
@@ -300,7 +301,7 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 		},
 		{
 			name: "failed to get worker: timeout",
-			infraOptions: infra.NewInfraOptions{
+			infraOptions: config.SandboxManagerOptions{
 				MaxClaimWorkers: 1,
 			},
 			preProcess: func(t *testing.T, infra *Infra) {
@@ -314,7 +315,7 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 		},
 		{
 			name: "failed to get worker: cancelled",
-			infraOptions: infra.NewInfraOptions{
+			infraOptions: config.SandboxManagerOptions{
 				MaxClaimWorkers: 1,
 			},
 			preProcess: func(t *testing.T, infra *Infra) {
@@ -437,7 +438,7 @@ func TestClaimSandboxFailed(t *testing.T) {
 				User:                 "test-user",
 				Template:             existTemplate,
 				ReserveFailedSandbox: true,
-				InplaceUpdate: &infra.InplaceUpdateOptions{
+				InplaceUpdate: &config.InplaceUpdateOptions{
 					Image: "new-image",
 				},
 			},
@@ -459,7 +460,7 @@ func TestClaimSandboxFailed(t *testing.T) {
 				User:                 "test-user",
 				Template:             existTemplate,
 				ReserveFailedSandbox: false,
-				InplaceUpdate: &infra.InplaceUpdateOptions{
+				InplaceUpdate: &config.InplaceUpdateOptions{
 					Image: "new-image",
 				},
 			},
@@ -481,8 +482,8 @@ func TestClaimSandboxFailed(t *testing.T) {
 				User:                 "test-user",
 				Template:             existTemplate,
 				ReserveFailedSandbox: true,
-				InitRuntime:          &infra.InitRuntimeOptions{},
-				CSIMount: &infra.CSIMountOptions{
+				InitRuntime:          &config.InitRuntimeOptions{},
+				CSIMount: &config.CSIMountOptions{
 					Driver: "",
 				},
 			},
@@ -498,8 +499,8 @@ func TestClaimSandboxFailed(t *testing.T) {
 				User:                 "test-user",
 				Template:             existTemplate,
 				ReserveFailedSandbox: false,
-				InitRuntime:          &infra.InitRuntimeOptions{},
-				CSIMount: &infra.CSIMountOptions{
+				InitRuntime:          &config.InitRuntimeOptions{},
+				CSIMount: &config.CSIMountOptions{
 					Driver: "",
 				},
 			},

@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -46,13 +47,14 @@ func createTestSandbox(name, user string, phase v1alpha1.SandboxPhase, ready boo
 }
 
 //goland:noinspection GoDeprecation
-func NewTestInfra(t *testing.T, opts ...infra.NewInfraOptions) (*Infra, *fake.Clientset) {
+func NewTestInfra(t *testing.T, opts ...config.SandboxManagerOptions) (*Infra, *fake.Clientset) {
 	client := fake.NewSimpleClientset()
-	options := infra.NewInfraOptions{}
+	options := config.SandboxManagerOptions{}
 	if len(opts) > 0 {
 		options = opts[0]
 	}
-	infraInstance, err := NewInfra(client, k8sfake.NewSimpleClientset(), proxy.NewServer(nil), options)
+	options = config.InitOptions(options)
+	infraInstance, err := NewInfra(client, k8sfake.NewSimpleClientset(), proxy.NewServer(nil, options), options)
 	assert.NoError(t, err)
 	assert.NoError(t, infraInstance.Run(context.Background()))
 	return infraInstance, client

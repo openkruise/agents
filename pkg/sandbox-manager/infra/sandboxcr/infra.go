@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -23,7 +24,6 @@ import (
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
-	commonutils "github.com/openkruise/agents/pkg/utils"
 	managerutils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
 )
@@ -46,7 +46,7 @@ type Infra struct {
 	reconcileRouteStopCh chan struct{}
 }
 
-func NewInfra(client sandboxclient.Interface, k8sClient kubernetes.Interface, proxy *proxy.Server, opts infra.NewInfraOptions) (*Infra, error) {
+func NewInfra(client sandboxclient.Interface, k8sClient kubernetes.Interface, proxy *proxy.Server, opts config.SandboxManagerOptions) (*Infra, error) {
 	// Create informer factory for custom Sandbox resources
 	informerFactory := informers.NewSharedInformerFactory(client, time.Minute*10)
 	sandboxInformer := informerFactory.Api().V1alpha1().Sandboxes().Informer()
@@ -56,13 +56,6 @@ func NewInfra(client sandboxclient.Interface, k8sClient kubernetes.Interface, pr
 	coreInformerFactory := k8sinformers.NewSharedInformerFactory(k8sClient, time.Minute*10)
 	persistentVolumeInformer := coreInformerFactory.Core().V1().PersistentVolumes().Informer()
 	// Create informer factory with specified namespace for native Kubernetes resources (Secret)
-	if opts.SystemNamespace == "" {
-		opts.SystemNamespace = commonutils.DefaultSandboxDeployNamespace
-	}
-	if opts.MaxClaimWorkers <= 0 {
-		opts.MaxClaimWorkers = consts.DefaultClaimWorkers
-	}
-	klog.InfoS("sandbox manager infra config", "options", opts, "type", "sandbox-cr")
 	coreInformerFactorySpecifiedNs := k8sinformers.NewSharedInformerFactoryWithOptions(k8sClient, time.Minute*10, k8sinformers.WithNamespace(opts.SystemNamespace))
 	// to generate informers only for the specified namespace to avoid potential security privilege escalation risks.
 	secretInformer := coreInformerFactorySpecifiedNs.Core().V1().Secrets().Informer()

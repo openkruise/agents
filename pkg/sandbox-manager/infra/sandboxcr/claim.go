@@ -14,6 +14,7 @@ import (
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/controller/sandboxset"
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
+	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/utils/expectations"
@@ -170,7 +171,7 @@ func clearFailedSandbox(ctx context.Context, sbx infra.Sandbox, err error, reser
 	}
 }
 
-func csiMount(ctx context.Context, sbx *Sandbox, opts infra.CSIMountOptions) (time.Duration, error) {
+func csiMount(ctx context.Context, sbx *Sandbox, opts config.CSIMountOptions) (time.Duration, error) {
 	start := time.Now()
 	err := sbx.CSIMount(ctx, opts.Driver, opts.RequestRaw)
 	return time.Since(start), err
@@ -304,7 +305,7 @@ func performLockSandbox(ctx context.Context, sbx *Sandbox, lock string, owner st
 	return time.Since(start), err
 }
 
-func initRuntime(ctx context.Context, sbx *Sandbox, opts infra.InitRuntimeOptions) (time.Duration, error) {
+func initRuntime(ctx context.Context, sbx *Sandbox, opts config.InitRuntimeOptions) (time.Duration, error) {
 	log := klog.FromContext(ctx).WithValues("sandboxID", sbx.GetName(), "envVars", opts.EnvVars)
 	start := time.Now()
 	params := map[string]any{

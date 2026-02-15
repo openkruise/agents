@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -36,9 +37,9 @@ func GetSbsOwnerReference() []metav1.OwnerReference {
 	return []metav1.OwnerReference{*metav1.NewControllerRef(sbs, agentsv1alpha1.SandboxSetControllerKind)}
 }
 
-func setupTestManager(t *testing.T, opts ...infra.NewInfraOptions) *SandboxManager {
+func setupTestManager(t *testing.T, opts ...config.SandboxManagerOptions) *SandboxManager {
 	client := clients.NewFakeClientSet()
-	infraOption := infra.NewInfraOptions{}
+	infraOption := config.SandboxManagerOptions{}
 	if len(opts) > 0 {
 		infraOption = opts[0]
 	}
@@ -133,7 +134,7 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 			opts: infra.ClaimSandboxOptions{
 				User:     username,
 				Template: "exist-1",
-				InplaceUpdate: &infra.InplaceUpdateOptions{
+				InplaceUpdate: &config.InplaceUpdateOptions{
 					Image: "new-image",
 				},
 			},
