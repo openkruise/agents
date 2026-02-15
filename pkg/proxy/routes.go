@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/openkruise/agents/pkg/utils/expectations"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
@@ -17,11 +18,12 @@ import (
 
 // Route represents an internal sandbox routing rule
 type Route struct {
-	IP              string `json:"ip"`
-	ID              string `json:"id"`
-	Owner           string `json:"owner"`
-	State           string `json:"state"`
-	ResourceVersion string `json:"resourceVersion"`
+	IP              string    `json:"ip"`
+	ID              string    `json:"id"`
+	UID             types.UID `json:"uid"`
+	Owner           string    `json:"owner"`
+	State           string    `json:"state"`
+	ResourceVersion string    `json:"resourceVersion"`
 }
 
 func (s *Server) SetRoute(ctx context.Context, route Route) {
