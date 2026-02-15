@@ -18,3 +18,8 @@ func NewContextFrom(parent context.Context, keysAndValues ...any) context.Contex
 	logger := klog.LoggerWithValues(klog.Background(), "contextID", uuid.NewString())
 	return klog.NewContext(parent, logger.WithValues(keysAndValues...))
 }
+
+func Extend(ctx context.Context, keysAndValues ...any) context.Context {
+	logger := klog.FromContext(ctx)
+	return klog.NewContext(ctx, logger.WithValues(keysAndValues...))
+}
