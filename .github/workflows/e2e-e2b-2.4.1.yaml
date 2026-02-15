@@ -76,18 +76,21 @@ jobs:
             docker save ${INPLACE_UPDATE_IMG} -o /tmp/docker-images/inplace-update.tar
             echo "Cached inplace-update image"
           fi
-
       - name: Build image
         run: |
           make docker-build-manager
           make docker-build-controller
           make docker-build-runtime
           kind load docker-image --name=${KIND_CLUSTER_NAME} ${CONTROLLER_IMG} || { echo >&2 "kind not installed or error loading image: ${CONTROLLER_IMG}"; exit 1; }
+          docker rmi ${CONTROLLER_IMG}
           kind load docker-image --name=${KIND_CLUSTER_NAME} ${MANAGER_IMG} || { echo >&2 "kind not installed or error loading image: ${MANAGER_IMG}"; exit 1; }
+          docker rmi ${MANAGER_IMG}
           kind load docker-image --name=${KIND_CLUSTER_NAME} ${RUNTIME_IMG} || { echo >&2 "kind not installed or error loading image: ${RUNTIME_IMG}"; exit 1; }
+          docker rmi ${RUNTIME_IMG}
           kind load docker-image --name=${KIND_CLUSTER_NAME} ${CODE_INTERPRETER_IMG} || { echo >&2 "kind not installed or error loading image: ${CODE_INTERPRETER_IMG}"; exit 1; }
+          docker rmi ${CODE_INTERPRETER_IMG}
           kind load docker-image --name=${KIND_CLUSTER_NAME} ${INPLACE_UPDATE_IMG} || { echo >&2 "kind not installed or error loading image: ${INPLACE_UPDATE_IMG}"; exit 1; }
-
+          docker rmi ${INPLACE_UPDATE_IMG}
       - name: Install Kruise Agents
         run: |
           make deploy-agent-sandbox-controller
