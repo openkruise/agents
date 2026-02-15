@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math/rand/v2"
 	"net/http"
 	"sync"
@@ -334,17 +335,12 @@ func initRuntime(ctx context.Context, sbx *Sandbox, opts config.InitRuntimeOptio
 	runtimeURL := sbx.GetRuntimeURL()
 	if runtimeURL == "" {
 		log.Error(nil, "runtimeURL is empty")
-		return 0, err
+		return 0, fmt.Errorf("runtimeURL is empty")
 	}
 	url := runtimeURL + "/init"
 	log.Info("sending request to runtime", "url", url)
-	r, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewBuffer(initBody))
-	if err != nil {
-		log.Error(err, "failed to create request")
-		return 0, err
-	}
 	retries := -1
-	return time.Since(start), retry.OnError(wait.Backoff{
+	err = retry.OnError(wait.Backoff{
 		// about retry 20s
 		Duration: 200 * time.Millisecond,
 		Factor:   2.0,
@@ -365,12 +361,22 @@ func initRuntime(ctx context.Context, sbx *Sandbox, opts config.InitRuntimeOptio
 				log.Error(initErr, "init runtime request failed", "retries", retries)
 			}
 		}()
+		// Create a new request for each retry to avoid Body reuse issue
+		r, initErr := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewBuffer(initBody))
+		if initErr != nil {
+			log.Error(initErr, "failed to create request")
+			return initErr
+		}
 		resp, initErr := proxyutils.ProxyRequest(r)
 		if initErr != nil {
 			return initErr
 		}
-		return resp.Body.Close()
+		// Discard response body to allow connection reuse
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		return nil
 	})
+	return time.Since(start), err
 }
 
 func waitForSandboxReady(ctx context.Context, sbx *Sandbox, opts infra.ClaimSandboxOptions, cache *Cache) (cost time.Duration, err error) {
