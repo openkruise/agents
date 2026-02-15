@@ -49,7 +49,6 @@ type ClaimMetrics struct {
 }
 
 func (m ClaimMetrics) String() string {
-	return fmt.Sprintf(
-		"ClaimMetrics{Retries: %d, Total: %s, Wait: %s, PickAndLock: %s, InplaceUpdate: %s, InitRuntime: %s, CSIMount: %s}",
-		m.Retries, m.Total, m.RetryCost, m.PickAndLock, m.WaitReady, m.InitRuntime, m.CSIMount)
+	return fmt.Sprintf("ClaimMetrics{Retries: %d, Total: %v, Wait: %v, RetryCost: %v, PickAndLock: %v, WaitReady: %v, InitRuntime: %v, CSIMount: %v, LastError: %v}",
+		m.Retries, m.Total, m.Wait, m.RetryCost, m.PickAndLock, m.WaitReady, m.InitRuntime, m.CSIMount, m.LastError)
 }

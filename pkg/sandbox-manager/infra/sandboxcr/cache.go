@@ -166,8 +166,8 @@ func (c *Cache) Refresh() {
 type WaitAction string
 
 const (
-	WaitActionResume        WaitAction = "Resume"
-	WaitActionInplaceUpdate WaitAction = "InplaceUpdate"
+	WaitActionResume    WaitAction = "Resume"
+	WaitActionWaitReady WaitAction = "WaitReady"
 )
 
 type waitEntry struct {
