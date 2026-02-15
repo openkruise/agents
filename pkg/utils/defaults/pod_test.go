@@ -18,6 +18,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 func TestSetDefaultPodVolumes(t *testing.T) {
@@ -226,6 +227,288 @@ func TestSetDefaultPodVolumes(t *testing.T) {
 							assert.Equal(t, expectedItem.FieldRef.APIVersion, tt.input[i].DownwardAPI.Items[j].FieldRef.APIVersion)
 						}
 					}
+				}
+			}
+		})
+	}
+}
+
+func TestSetDefaultPodSpec(t *testing.T) {
+	tests := []struct {
+		name string
+		spec *corev1.PodSpec
+	}{
+		{
+			name: "empty pod spec",
+			spec: &corev1.PodSpec{},
+		},
+		{
+			name: "pod spec with containers",
+			spec: &corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  "test-container",
+						Image: "test-image",
+						Ports: []corev1.ContainerPort{
+							{
+								ContainerPort: 8080,
+								// Protocol will be defaulted
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "pod spec with init containers",
+			spec: &corev1.PodSpec{
+				InitContainers: []corev1.Container{
+					{
+						Name:  "init-container",
+						Image: "init-image",
+						Ports: []corev1.ContainerPort{
+							{
+								ContainerPort: 9090,
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "pod spec with ephemeral containers",
+			spec: &corev1.PodSpec{
+				EphemeralContainers: []corev1.EphemeralContainer{
+					{
+						EphemeralContainerCommon: corev1.EphemeralContainerCommon{
+							Name:  "ephemeral-container",
+							Image: "ephemeral-image",
+							Ports: []corev1.ContainerPort{
+								{
+									ContainerPort: 8080,
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "pod spec with probes",
+			spec: &corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  "test-container",
+						Image: "test-image",
+						LivenessProbe: &corev1.Probe{
+							ProbeHandler: corev1.ProbeHandler{
+								HTTPGet: &corev1.HTTPGetAction{
+									Path: "/health",
+									Port: intstr.FromInt32(8080),
+								},
+							},
+						},
+						ReadinessProbe: &corev1.Probe{
+							ProbeHandler: corev1.ProbeHandler{
+								HTTPGet: &corev1.HTTPGetAction{
+									Path: "/ready",
+									Port: intstr.FromInt32(8080),
+								},
+							},
+						},
+						StartupProbe: &corev1.Probe{
+							ProbeHandler: corev1.ProbeHandler{
+								HTTPGet: &corev1.HTTPGetAction{
+									Path: "/startup",
+									Port: intstr.FromInt32(8080),
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "pod spec with lifecycle hooks",
+			spec: &corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  "test-container",
+						Image: "test-image",
+						Lifecycle: &corev1.Lifecycle{
+							PostStart: &corev1.LifecycleHandler{
+								HTTPGet: &corev1.HTTPGetAction{
+									Path: "/poststart",
+									Port: intstr.FromInt32(8080),
+								},
+							},
+							PreStop: &corev1.LifecycleHandler{
+								HTTPGet: &corev1.HTTPGetAction{
+									Path: "/prestop",
+									Port: intstr.FromInt32(8080),
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "pod spec with env field ref",
+			spec: &corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  "test-container",
+						Image: "test-image",
+						Env: []corev1.EnvVar{
+							{
+								Name: "POD_NAME",
+								ValueFrom: &corev1.EnvVarSource{
+									FieldRef: &corev1.ObjectFieldSelector{
+										FieldPath: "metadata.name",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Make a copy to avoid modifying the original
+			specCopy := tt.spec.DeepCopy()
+			SetDefaultPodSpec(specCopy)
+
+			// Verify that defaults were applied
+			assert.NotNil(t, specCopy)
+
+			// Verify container ports have protocol defaulted
+			for i := range specCopy.Containers {
+				for j := range specCopy.Containers[i].Ports {
+					if specCopy.Containers[i].Ports[j].Protocol == "" {
+						assert.Equal(t, corev1.ProtocolTCP, specCopy.Containers[i].Ports[j].Protocol)
+					}
+				}
+			}
+
+			// Verify init container ports have protocol defaulted
+			for i := range specCopy.InitContainers {
+				for j := range specCopy.InitContainers[i].Ports {
+					if specCopy.InitContainers[i].Ports[j].Protocol == "" {
+						assert.Equal(t, corev1.ProtocolTCP, specCopy.InitContainers[i].Ports[j].Protocol)
+					}
+				}
+			}
+
+			// Verify ephemeral container ports have protocol defaulted
+			for i := range specCopy.EphemeralContainers {
+				for j := range specCopy.EphemeralContainers[i].EphemeralContainerCommon.Ports {
+					if specCopy.EphemeralContainers[i].EphemeralContainerCommon.Ports[j].Protocol == "" {
+						assert.Equal(t, corev1.ProtocolTCP, specCopy.EphemeralContainers[i].EphemeralContainerCommon.Ports[j].Protocol)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestSetDefaultContainerPorts(t *testing.T) {
+	tests := []struct {
+		name      string
+		container *corev1.Container
+	}{
+		{
+			name: "container with port without protocol",
+			container: &corev1.Container{
+				Ports: []corev1.ContainerPort{
+					{
+						ContainerPort: 8080,
+					},
+				},
+			},
+		},
+		{
+			name: "container with port with UDP protocol",
+			container: &corev1.Container{
+				Ports: []corev1.ContainerPort{
+					{
+						ContainerPort: 8080,
+						Protocol:      corev1.ProtocolUDP,
+					},
+				},
+			},
+		},
+		{
+			name: "container with multiple ports",
+			container: &corev1.Container{
+				Ports: []corev1.ContainerPort{
+					{
+						ContainerPort: 8080,
+					},
+					{
+						ContainerPort: 9090,
+						Protocol:      corev1.ProtocolUDP,
+					},
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setDefaultContainerPorts(tt.container)
+
+			for i := range tt.container.Ports {
+				if tt.container.Ports[i].Protocol == "" {
+					assert.Equal(t, corev1.ProtocolTCP, tt.container.Ports[i].Protocol)
+				}
+			}
+		})
+	}
+}
+
+func TestSetDefaultEphemeralContainerPorts(t *testing.T) {
+	tests := []struct {
+		name      string
+		container *corev1.EphemeralContainer
+	}{
+		{
+			name: "ephemeral container with port without protocol",
+			container: &corev1.EphemeralContainer{
+				EphemeralContainerCommon: corev1.EphemeralContainerCommon{
+					Ports: []corev1.ContainerPort{
+						{
+							ContainerPort: 8080,
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "ephemeral container with port with UDP protocol",
+			container: &corev1.EphemeralContainer{
+				EphemeralContainerCommon: corev1.EphemeralContainerCommon{
+					Ports: []corev1.ContainerPort{
+						{
+							ContainerPort: 8080,
+							Protocol:      corev1.ProtocolUDP,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setDefaultEphemeralContainerPorts(tt.container)
+
+			for i := range tt.container.EphemeralContainerCommon.Ports {
+				if tt.container.EphemeralContainerCommon.Ports[i].Protocol == "" {
+					assert.Equal(t, corev1.ProtocolTCP, tt.container.EphemeralContainerCommon.Ports[i].Protocol)
 				}
 			}
 		})
