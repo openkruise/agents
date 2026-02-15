@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
@@ -87,14 +88,14 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 	}
 
 	if !request.Extensions.SkipInitRuntime {
-		opts.InitRuntime = &infra.InitRuntimeOptions{
+		opts.InitRuntime = &config.InitRuntimeOptions{
 			EnvVars:     request.EnvVars,
 			AccessToken: accessToken,
 		}
 	}
 
 	if extension := request.Extensions.InplaceUpdate; extension.Image != "" {
-		opts.InplaceUpdate = &infra.InplaceUpdateOptions{
+		opts.InplaceUpdate = &config.InplaceUpdateOptions{
 			Image: extension.Image,
 		}
 	}
@@ -112,7 +113,7 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 				Message: err.Error(),
 			}
 		}
-		opts.CSIMount = &infra.CSIMountOptions{
+		opts.CSIMount = &config.CSIMountOptions{
 			Driver:     driverName,
 			RequestRaw: csiReqConfigRaw,
 		}

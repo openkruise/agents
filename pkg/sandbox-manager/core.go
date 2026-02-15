@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog/v2"
 
@@ -30,10 +31,12 @@ type SandboxManager struct {
 }
 
 // NewSandboxManager creates a new SandboxManager instance.
-func NewSandboxManager(client *clients.ClientSet, adapter proxy.RequestAdapter, opts infra.NewInfraOptions) (*SandboxManager, error) {
+func NewSandboxManager(client *clients.ClientSet, adapter proxy.RequestAdapter, opts config.SandboxManagerOptions) (*SandboxManager, error) {
+	opts = config.InitOptions(opts)
+	klog.InfoS("sandbox-manager options", "options", opts)
 	m := &SandboxManager{
 		client: client,
-		proxy:  proxy.NewServer(adapter),
+		proxy:  proxy.NewServer(adapter, opts),
 	}
 	var err error
 	m.infra, err = sandboxcr.NewInfra(client.SandboxClient, client.K8sClient, m.proxy, opts)

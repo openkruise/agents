@@ -3,6 +3,8 @@ package infra
 import (
 	"fmt"
 	"time"
+
+	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 )
 
 type ClaimSandboxOptions struct {
@@ -21,11 +23,11 @@ type ClaimSandboxOptions struct {
 	// Set ReserveFailedSandbox to true to reserve failed sandboxes
 	ReserveFailedSandbox bool `json:"reserveFailedSandbox"`
 	// Set InplaceUpdate to non-empty string trigger an inplace-update
-	InplaceUpdate *InplaceUpdateOptions `json:"inplaceUpdate"`
+	InplaceUpdate *config.InplaceUpdateOptions `json:"inplaceUpdate"`
 	// Set InitRuntime to non-nil value to init the agent-runtime
-	InitRuntime *InitRuntimeOptions `json:"initRuntime"`
+	InitRuntime *config.InitRuntimeOptions `json:"initRuntime"`
 	// Set CSIMount to non-nil value to mount a CSI volume
-	CSIMount *CSIMountOptions `json:"CSIMount"`
+	CSIMount *config.CSIMountOptions `json:"CSIMount"`
 	// Max ClaimTimeout duration
 	ClaimTimeout time.Duration `json:"claimTimeout"`
 	// Max WaitReadyTimeout duration
@@ -50,23 +52,4 @@ func (m ClaimMetrics) String() string {
 	return fmt.Sprintf(
 		"ClaimMetrics{Retries: %d, Total: %s, Wait: %s, PickAndLock: %s, InplaceUpdate: %s, InitRuntime: %s, CSIMount: %s}",
 		m.Retries, m.Total, m.RetryCost, m.PickAndLock, m.WaitReady, m.InitRuntime, m.CSIMount)
-}
-
-type InplaceUpdateOptions struct {
-	Image string
-}
-
-type InitRuntimeOptions struct {
-	EnvVars     map[string]string
-	AccessToken string
-}
-
-type CSIMountOptions struct {
-	Driver     string
-	RequestRaw string
-}
-
-type NewInfraOptions struct {
-	SystemNamespace string
-	MaxClaimWorkers int
 }

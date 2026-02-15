@@ -11,10 +11,11 @@ const (
 )
 
 const (
-	ExtProcPort        = 9002
-	RuntimePort        = 49983
-	ShutdownTimeout    = 90 * time.Second
-	RequestPeerTimeout = 100 * time.Millisecond
+	ExtProcPort               = 9002
+	DefaultExtProcConcurrency = 1000
+	RuntimePort               = 49983
+	ShutdownTimeout           = 90 * time.Second
+	RequestPeerTimeout        = 100 * time.Millisecond
 )
 
 const DebugLogLevel = 5
