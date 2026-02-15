@@ -11,6 +11,7 @@ import (
 	"time"
 
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
+	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
 	"github.com/openkruise/agents/pkg/servers/web"
@@ -56,8 +57,12 @@ type Peer struct {
 // Server implements the Envoy external processing server.
 // https://www.envoyproxy.io/docs/envoy/latest/api-v3/service/ext_proc/v3/external_processor.proto
 type Server struct {
-	grpcSrv *grpc.Server
+	// grpc
+	grpcSrv                     *grpc.Server
+	extProcMaxConcurrentStreams uint32
+	// http
 	httpSrv *http.Server
+	// internal
 	routes  sync.Map
 	adapter RequestAdapter
 	LBEntry string // entry of load balancer, usually a service
@@ -68,11 +73,12 @@ type Server struct {
 	heartBeatStopCh chan struct{}
 }
 
-func NewServer(adapter RequestAdapter) *Server {
+func NewServer(adapter RequestAdapter, opts config.SandboxManagerOptions) *Server {
 	s := &Server{
-		adapter:         adapter,
-		peers:           make(map[string]Peer),
-		heartBeatStopCh: make(chan struct{}),
+		adapter:                     adapter,
+		peers:                       make(map[string]Peer),
+		heartBeatStopCh:             make(chan struct{}),
+		extProcMaxConcurrentStreams: opts.ExtProcMaxConcurrency,
 	}
 	if adapter != nil {
 		s.LBEntry = adapter.Entry()
@@ -112,7 +118,7 @@ func (s *Server) Run() error {
 	if err != nil {
 		return err
 	}
-	s.grpcSrv = grpc.NewServer(grpc.MaxConcurrentStreams(1000))
+	s.grpcSrv = grpc.NewServer(grpc.MaxConcurrentStreams(s.extProcMaxConcurrentStreams))
 	extProcPb.RegisterExternalProcessorServer(s.grpcSrv, s)
 	grpc_health_v1.RegisterHealthServer(s.grpcSrv, &healthServer{})
 	klog.InfoS("Starting envoy ext-proc gRPC server", "address", lis.Addr())
