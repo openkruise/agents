@@ -38,6 +38,7 @@ type ClaimMetrics struct {
 	Retries     int
 	Total       time.Duration
 	Wait        time.Duration
+	RetryCost   time.Duration
 	PickAndLock time.Duration
 	WaitReady   time.Duration
 	InitRuntime time.Duration
@@ -48,7 +49,7 @@ type ClaimMetrics struct {
 func (m ClaimMetrics) String() string {
 	return fmt.Sprintf(
 		"ClaimMetrics{Retries: %d, Total: %s, Wait: %s, PickAndLock: %s, InplaceUpdate: %s, InitRuntime: %s, CSIMount: %s}",
-		m.Retries, m.Total, m.Wait, m.PickAndLock, m.WaitReady, m.InitRuntime, m.CSIMount)
+		m.Retries, m.Total, m.RetryCost, m.PickAndLock, m.WaitReady, m.InitRuntime, m.CSIMount)
 }
 
 type InplaceUpdateOptions struct {
@@ -63,4 +64,9 @@ type InitRuntimeOptions struct {
 type CSIMountOptions struct {
 	Driver     string
 	RequestRaw string
+}
+
+type NewInfraOptions struct {
+	SystemNamespace string
+	MaxClaimWorkers int
 }

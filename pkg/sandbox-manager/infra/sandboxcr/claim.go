@@ -16,6 +16,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	"github.com/openkruise/agents/pkg/utils/expectations"
 	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	"github.com/openkruise/agents/pkg/utils/sandbox-manager/proxyutils"
 	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
@@ -97,8 +98,13 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 
 	metrics.PickAndLock, err = performLockSandbox(ctx, sbx, opts.LockString, opts.User, client)
 	if err != nil {
+		// TODO: these lines cannot be covered by tests currently, which will be fixed when the cache is converted to controller-runtime
 		log.Error(err, "failed to lock sandbox")
 		if apierrors.IsConflict(err) {
+			utils.ResourceVersionExpectationExpect(&metav1.ObjectMeta{
+				UID:             sbx.GetUID(),
+				ResourceVersion: expectations.GetNewerResourceVersion(sbx),
+			})
 			err = retriableError{Message: fmt.Sprintf("failed to lock sandbox: %s", err)}
 		}
 		return
@@ -212,7 +218,7 @@ func pickAnAvailableSandbox(ctx context.Context, opts infra.ClaimSandboxOptions,
 	for {
 		obj = candidates[i]
 		if checkErr := preCheckSandbox(obj); checkErr != nil {
-			log.Info("skip invalid sandbox", "sandbox", klog.KObj(obj), "err", checkErr)
+			log.Error(checkErr, "skip invalid sandbox", "sandbox", klog.KObj(obj), "resourceVersion", obj.GetResourceVersion())
 		} else {
 			key := getPickKey(obj)
 			if _, loaded := pickCache.LoadOrStore(key, struct{}{}); !loaded {
@@ -238,6 +244,9 @@ func newSandboxFromTemplate(opts infra.ClaimSandboxOptions, cache *Cache, client
 	}
 	sbx := sandboxset.NewSandboxFromSandboxSet(sbs)
 	sbx.Labels[v1alpha1.LabelSandboxIsClaimed] = "true"
+	for _, anno := range FilteredAnnotationsOnCreation {
+		delete(sbx.Annotations, anno)
+	}
 	return AsSandbox(sbx, cache, client), nil, nil
 }
 

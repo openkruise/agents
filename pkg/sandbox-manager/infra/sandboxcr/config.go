@@ -8,5 +8,5 @@ var (
 	DefaultClaimTimeout = time.Minute
 	RetryInterval       = 10 * time.Millisecond
 	LockBackoffFactor   = 1.0
-	LockJitter          = 0.1
+	LockJitter          = 0.2
 )

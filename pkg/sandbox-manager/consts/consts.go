@@ -7,6 +7,7 @@ const (
 
 	DefaultPoolingCandidateCounts = 100
 	DefaultWaitReadyTimeout       = 30 * time.Second
+	DefaultClaimWorkers           = 500
 )
 
 const (
