@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
+	"github.com/openkruise/agents/pkg/utils/expectations"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
@@ -66,10 +67,11 @@ func (s *Sandbox) InplaceRefresh(ctx context.Context, deepcopy bool) error {
 			return err
 		}
 	}
-	if deepcopy {
-		s.Sandbox = sbx.DeepCopy()
-	} else {
+	if expectations.IsResourceVersionReallyNewer(s.Sandbox.GetResourceVersion(), sbx.GetResourceVersion()) {
 		s.Sandbox = sbx
+	}
+	if deepcopy {
+		s.Sandbox = s.Sandbox.DeepCopy()
 	}
 	return nil
 }

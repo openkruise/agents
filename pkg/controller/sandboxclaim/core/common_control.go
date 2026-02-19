@@ -195,10 +195,11 @@ func (c *commonControl) claimSandboxes(ctx context.Context, claim *agentsv1alpha
 		return 0, fmt.Errorf("failed to build claim options: %w", err)
 	}
 
+	claimLockChannel := make(chan struct{}, batchSize) // set to max batch size, not controlled
 	// Attempt to claim sandboxes concurrently using DoItSlowly
 	claimedCount, err := utils.DoItSlowly(batchSize, InitialClaimBatchSize, func() error {
 		// Pass nil for rand so sandboxcr uses global rand (concurrent-safe).
-		sbx, metrics, claimErr := sandboxcr.TryClaimSandbox(ctx, opts, &c.pickCache, c.cache, c.sandboxClient)
+		sbx, metrics, claimErr := sandboxcr.TryClaimSandbox(ctx, opts, &c.pickCache, c.cache, c.sandboxClient, claimLockChannel)
 		if claimErr != nil {
 			log.Error(claimErr, "Failed to claim sandbox")
 			return claimErr

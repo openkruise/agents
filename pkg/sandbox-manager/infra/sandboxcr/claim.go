@@ -70,9 +70,10 @@ func ValidateAndInitClaimOptions(opts infra.ClaimSandboxOptions) (infra.ClaimSan
 //
 // ValidateAndInitClaimOptions must be called before this function.
 func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCache *sync.Map,
-	cache *Cache, client clients.SandboxClient) (claimed infra.Sandbox, metrics infra.ClaimMetrics, err error) {
+	cache *Cache, client clients.SandboxClient, claimLockChannel chan struct{}) (claimed infra.Sandbox, metrics infra.ClaimMetrics, err error) {
 	ctx = logs.Extend(ctx, "tryClaimId", uuid.NewString()[:8])
 	log := klog.FromContext(ctx)
+
 	select {
 	case <-ctx.Done():
 		err = fmt.Errorf("context canceled while retrying: %v", ctx.Err())
@@ -80,7 +81,23 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 		return
 	default:
 	}
+
+	log.Info("waiting for a free claim worker")
+	startWaiting := time.Now()
+	freeWorkerOnce := sync.OnceFunc(func() {
+		<-claimLockChannel // free the worker
+	})
+	select {
+	case <-ctx.Done():
+		err = fmt.Errorf("context canceled before getting a free claim worker: %v", ctx.Err())
+		log.Error(ctx.Err(), "failed to get a free claim worker")
+		return
+	case claimLockChannel <- struct{}{}:
+		metrics.Wait = time.Since(startWaiting)
+		log.Info("got a free claim worker", "cost", metrics.Wait)
+	}
 	defer func() {
+		freeWorkerOnce()
 		metrics.LastError = err
 		log.Info("try claim sandbox result", "metrics", metrics)
 		clearFailedSandbox(ctx, claimed, err, opts.ReserveFailedSandbox)
@@ -128,6 +145,7 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 	log = log.WithValues("sandbox", klog.KObj(sbx.Sandbox))
 	log.Info("sandbox locked", "cost", metrics.PickAndLock)
 	claimed = sbx
+	freeWorkerOnce() // free worker early
 
 	// Step 3: Built-in post processes. The locked sandbox must be always returned to be cleared properly.
 	if created || opts.InplaceUpdate != nil {
@@ -286,7 +304,10 @@ func preCheckSandbox(sbx *v1alpha1.Sandbox) error {
 }
 
 func modifyPickedSandbox(ctx context.Context, sbx *Sandbox, created bool, opts infra.ClaimSandboxOptions) error {
+	ctx = logs.Extend(ctx, "action", "modifyPickedSandbox", "sandbox", klog.KObj(sbx))
+	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
 	if !created {
+		log.Info("refreshing existing sandbox")
 		// refresh existing sandbox
 		if err := sbx.InplaceRefresh(ctx, true); err != nil {
 			return err
@@ -429,6 +450,6 @@ func checkSandboxReady(ctx context.Context, sbx *v1alpha1.Sandbox) (bool, error)
 	}
 	ip := sbx.Status.PodInfo.PodIP
 	state, reason := stateutils.GetSandboxState(sbx)
-	log.Info("sandbox checked", "state", state, "reason", reason, "ip", ip)
+	log.Info("sandbox ready checked", "state", state, "reason", reason, "ip", ip)
 	return state == v1alpha1.SandboxStateRunning && ip != "", nil
 }

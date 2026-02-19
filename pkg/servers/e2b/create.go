@@ -122,7 +122,8 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 			Message: err.Error(),
 		}
 	}
-	log.Info("sandbox created", "id", sbx.GetSandboxID(), "sbx", klog.KObj(sbx), "totalCost", time.Since(claimStart))
+	log.Info("sandbox created", "id", sbx.GetSandboxID(), "sbx", klog.KObj(sbx),
+		"resourceVersion", sbx.GetResourceVersion(), "totalCost", time.Since(claimStart))
 	return web.ApiResponse[*models.Sandbox]{
 		Code: http.StatusCreated,
 		Body: sc.convertToE2BSandbox(sbx, accessToken),

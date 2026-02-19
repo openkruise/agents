@@ -110,21 +110,6 @@ func (i *Infra) ClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions
 
 	claimCtx, cancel := context.WithTimeout(ctx, opts.ClaimTimeout)
 	defer cancel()
-	log.Info("waiting for a free claim worker")
-	startWaiting := time.Now()
-	select {
-	case <-claimCtx.Done():
-		metrics.Wait = time.Since(startWaiting)
-		err = fmt.Errorf("context cancelled before getting a free claim worker: %s", claimCtx.Err())
-		log.Error(err, "failed to get a free claim worker", "cost", metrics.Wait)
-		return nil, metrics, err
-	case i.claimLockChannel <- struct{}{}:
-		defer func() {
-			<-i.claimLockChannel // free the worker
-		}()
-		metrics.Wait = time.Since(startWaiting)
-		log.Info("got a free claim worker", "cost", metrics.Wait)
-	}
 
 	// Start claiming sandbox
 	log.V(consts.DebugLogLevel).Info("claim sandbox options", "options", opts)
@@ -140,7 +125,7 @@ func (i *Infra) ClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions
 	}, func() error {
 		metrics.Retries++
 		log.Info("try to claim sandbox", "retries", metrics.Retries)
-		claimed, tryMetrics, claimErr := TryClaimSandbox(claimCtx, opts, &i.pickCache, i.Cache, i.Client)
+		claimed, tryMetrics, claimErr := TryClaimSandbox(claimCtx, opts, &i.pickCache, i.Cache, i.Client, i.claimLockChannel)
 		metrics.Total += tryMetrics.Total
 		metrics.Wait += tryMetrics.Wait
 		metrics.PickAndLock += tryMetrics.PickAndLock

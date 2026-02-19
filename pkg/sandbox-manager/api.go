@@ -32,7 +32,8 @@ func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts infra.ClaimSandb
 	// Requirement: Only measure the latency when no error exists
 	SandboxCreationLatency.Observe(float64(metrics.Total.Milliseconds()))
 
-	log.Info("sandbox claimed", "sandbox", klog.KObj(sandbox), "metrics", metrics)
+	state, reason := sandbox.GetState()
+	log.Info("sandbox claimed", "sandbox", klog.KObj(sandbox), "metrics", metrics, "state", state, "reason", reason)
 
 	// Sync route without refresh since sandbox was just claimed and state is already up-to-date
 	if err = m.syncRoute(ctx, sandbox, false); err != nil {
