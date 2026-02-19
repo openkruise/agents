@@ -141,16 +141,19 @@ func (i *Infra) ClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions
 		metrics.Retries++
 		log.Info("try to claim sandbox", "retries", metrics.Retries)
 		claimed, tryMetrics, claimErr := TryClaimSandbox(claimCtx, opts, &i.pickCache, i.Cache, i.Client)
-		if claimErr == nil {
-			tryMetrics.Retries = metrics.Retries
-			tryMetrics.RetryCost = metrics.RetryCost
-			tryMetrics.Total += metrics.RetryCost
-			metrics = tryMetrics
-			claimedSandbox = claimed
-		}
-		metrics.RetryCost += tryMetrics.Total
+		metrics.Total += tryMetrics.Total
+		metrics.Wait += tryMetrics.Wait
+		metrics.PickAndLock += tryMetrics.PickAndLock
+		metrics.WaitReady += tryMetrics.WaitReady
+		metrics.InitRuntime += tryMetrics.InitRuntime
+		metrics.CSIMount += tryMetrics.CSIMount
 		if tryMetrics.LastError != nil {
 			metrics.LastError = tryMetrics.LastError
+		}
+		if claimErr == nil {
+			claimedSandbox = claimed
+		} else {
+			metrics.RetryCost += tryMetrics.Total
 		}
 		return claimErr
 	})

@@ -89,6 +89,7 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 	var sbx *Sandbox
 	var deferFunc func()
 	var created bool
+	pickStart := time.Now()
 	sbx, created, deferFunc, err = pickAnAvailableSandbox(ctx, opts, pickCache, cache, client)
 	if err != nil {
 		log.Error(err, "failed to select available sandbox")
@@ -108,7 +109,7 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 		return
 	}
 
-	metrics.PickAndLock, err = performLockSandbox(ctx, sbx, created, opts.LockString, opts.User, client)
+	err = performLockSandbox(ctx, sbx, created, opts.LockString, opts.User, client)
 	if err != nil {
 		// TODO: these lines cannot be covered by tests currently, which will be fixed when the cache is converted to controller-runtime
 		log.Error(err, "failed to lock sandbox")
@@ -121,6 +122,7 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 		}
 		return
 	}
+	metrics.PickAndLock = time.Since(pickStart)
 	metrics.Total += metrics.PickAndLock
 	utils.ResourceVersionExpectationExpect(sbx)
 	log = log.WithValues("sandbox", klog.KObj(sbx.Sandbox))
@@ -301,10 +303,9 @@ func modifyPickedSandbox(ctx context.Context, sbx *Sandbox, created bool, opts i
 	return nil
 }
 
-func performLockSandbox(ctx context.Context, sbx *Sandbox, created bool, lock string, owner string, client clients.SandboxClient) (time.Duration, error) {
+func performLockSandbox(ctx context.Context, sbx *Sandbox, created bool, lock string, owner string, client clients.SandboxClient) error {
 	ctx = logs.Extend(ctx, "action", "performLockSandbox")
 	log := klog.FromContext(ctx)
-	start := time.Now()
 	utils.LockSandbox(sbx.Sandbox, lock, owner)
 	var updated *v1alpha1.Sandbox
 	var err error
@@ -317,9 +318,9 @@ func performLockSandbox(ctx context.Context, sbx *Sandbox, created bool, lock st
 	}
 	if err == nil {
 		sbx.Sandbox = updated
-		return time.Since(start), nil
+		return nil
 	}
-	return time.Since(start), err
+	return err
 }
 
 func initRuntime(ctx context.Context, sbx *Sandbox, opts config.InitRuntimeOptions) (time.Duration, error) {
