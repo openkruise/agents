@@ -178,7 +178,7 @@ def test_resume_state(sandbox_context):
 
 
 def test_is_running(sandbox_context):
-    sbx = Sandbox.create(template="code-interpreter")
+    sbx: Sandbox = Sandbox.create(template="code-interpreter")
     assert sbx.is_running()  # Returns True
 
     sbx.kill()
