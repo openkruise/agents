@@ -209,6 +209,7 @@ func pickAnAvailableSandbox(ctx context.Context, opts infra.ClaimSandboxOptions,
 	}
 	if len(objects) == 0 {
 		if opts.CreateOnNoStock {
+			log.Info("will create a new sandbox", "reason", "NoStock")
 			return newSandboxFromTemplate(opts, cache, client)
 		}
 		return nil, false, nil, NoAvailableError(template, "no stock")
@@ -228,6 +229,10 @@ func pickAnAvailableSandbox(ctx context.Context, opts infra.ClaimSandboxOptions,
 		}
 	}
 	if len(candidates) == 0 {
+		if opts.CreateOnNoStock {
+			log.Info("will create a new sandbox", "reason", "NoCandidate")
+			return newSandboxFromTemplate(opts, cache, client)
+		}
 		return nil, false, nil, NoAvailableError(template, "no candidate")
 	}
 
@@ -249,6 +254,10 @@ func pickAnAvailableSandbox(ctx context.Context, opts infra.ClaimSandboxOptions,
 		}
 		i = (i + 1) % len(candidates)
 		if i == start {
+			if opts.CreateOnNoStock {
+				log.Info("will create a new sandbox", "reason", "AllCandidatesPicked")
+				return newSandboxFromTemplate(opts, cache, client)
+			}
 			return nil, false, nil, NoAvailableError(template, "all candidates are picked")
 		}
 	}
