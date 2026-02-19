@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/spf13/pflag"
 	"k8s.io/klog/v2"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/servers/e2b"
@@ -30,6 +31,7 @@ func main() {
 	pflag.StringVar(&pprofAddr, "pprof-addr", ":6060", "The address the pprof debug maps to.")
 
 	klog.InitFlags(nil)
+	klog.SetLogger(zap.New(zap.UseDevMode(false)))
 	pflag.CommandLine.AddGoFlagSet(flag.CommandLine)
 	pflag.Parse()
 

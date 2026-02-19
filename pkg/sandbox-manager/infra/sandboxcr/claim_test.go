@@ -517,7 +517,7 @@ func TestClaimSandboxFailed(t *testing.T) {
 			preModifier: func(sbx *v1alpha1.Sandbox) {
 				sbx.Status.PodInfo.PodIP = ""
 			},
-			expectError: "all candidates are picked",
+			expectError: "no candidate",
 		},
 	}
 

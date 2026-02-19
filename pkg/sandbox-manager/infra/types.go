@@ -2,6 +2,7 @@ package infra
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
@@ -49,6 +50,13 @@ type ClaimMetrics struct {
 }
 
 func (m ClaimMetrics) String() string {
+	var lastErrStr string
+	if m.LastError != nil {
+		// Replace newlines and other control characters to ensure single-line output
+		lastErrStr = strings.ReplaceAll(m.LastError.Error(), "\n", " ")
+		lastErrStr = strings.ReplaceAll(lastErrStr, "\r", " ")
+		lastErrStr = strings.ReplaceAll(lastErrStr, "\t", " ")
+	}
 	return fmt.Sprintf("ClaimMetrics{Retries: %d, Total: %v, Wait: %v, RetryCost: %v, PickAndLock: %v, WaitReady: %v, InitRuntime: %v, CSIMount: %v, LastError: %v}",
-		m.Retries, m.Total, m.Wait, m.RetryCost, m.PickAndLock, m.WaitReady, m.InitRuntime, m.CSIMount, m.LastError)
+		m.Retries, m.Total, m.Wait, m.RetryCost, m.PickAndLock, m.WaitReady, m.InitRuntime, m.CSIMount, lastErrStr)
 }
