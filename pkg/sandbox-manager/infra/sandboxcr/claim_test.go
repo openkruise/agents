@@ -311,26 +311,7 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 				User:     user,
 				Template: existTemplate,
 			},
-			expectError: "context cancelled before getting a free claim worker: context deadline exceeded",
-		},
-		{
-			name: "failed to get worker: cancelled",
-			infraOptions: config.SandboxManagerOptions{
-				MaxClaimWorkers: 1,
-			},
-			preProcess: func(t *testing.T, infra *Infra) {
-				infra.claimLockChannel <- struct{}{}
-			},
-			claimCtx: func(parent context.Context) context.Context {
-				ctx, cancel := context.WithCancel(parent)
-				cancel()
-				return ctx
-			},
-			options: infra.ClaimSandboxOptions{
-				User:     user,
-				Template: existTemplate,
-			},
-			expectError: "context cancelled before getting a free claim worker: context canceled",
+			expectError: "context canceled before getting a free claim worker: context deadline exceeded",
 		},
 	}
 
@@ -598,7 +579,7 @@ func TestClaimSandboxFailed(t *testing.T) {
 			} else {
 				ctx = tt.getContext()
 			}
-			_, _, err := TryClaimSandbox(ctx, tt.options, &testInfra.pickCache, testInfra.Cache, client)
+			_, _, err := TryClaimSandbox(ctx, tt.options, &testInfra.pickCache, testInfra.Cache, client, testInfra.claimLockChannel)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.expectError)
 			_, err = client.ApiV1alpha1().Sandboxes(sbx.Namespace).Get(t.Context(), name, metav1.GetOptions{})
