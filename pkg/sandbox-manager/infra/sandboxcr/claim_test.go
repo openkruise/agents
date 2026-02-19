@@ -381,7 +381,7 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
 			done := make(chan struct{})
 			go func() {
-				KeepMakingAllSandboxesReady(ctx, t, client)
+				KeepMakingAllSandboxesReady(ctx, client)
 				close(done)
 			}()
 			defer func() {
@@ -720,19 +720,20 @@ func TestCheckSandboxInplaceUpdate(t *testing.T) {
 	}
 }
 
-func KeepMakingAllSandboxesReady(ctx context.Context, t *testing.T, client clients.SandboxClient) {
+func KeepMakingAllSandboxesReady(ctx context.Context, client clients.SandboxClient) {
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
-	t.Log("start updating sandbox status")
 
 	for {
 		select {
 		case <-ctx.Done():
-			t.Log("stop updating sandbox status")
 			return
 		case <-ticker.C:
 			sandboxList, err := client.ApiV1alpha1().Sandboxes("default").List(context.Background(), metav1.ListOptions{})
-			require.NoError(t, err)
+			if err != nil {
+				// Don't use require.NoError in goroutine - causes data race
+				continue
+			}
 			for _, sbx := range sandboxList.Items {
 				sbx.Status = v1alpha1.SandboxStatus{
 					Phase: v1alpha1.SandboxRunning,
@@ -746,8 +747,7 @@ func KeepMakingAllSandboxesReady(ctx context.Context, t *testing.T, client clien
 						PodIP: "1.2.3.4",
 					},
 				}
-				_, err := client.ApiV1alpha1().Sandboxes(sbx.Namespace).UpdateStatus(context.Background(), &sbx, metav1.UpdateOptions{})
-				require.NoError(t, err)
+				_, _ = client.ApiV1alpha1().Sandboxes(sbx.Namespace).UpdateStatus(context.Background(), &sbx, metav1.UpdateOptions{})
 			}
 		}
 	}
