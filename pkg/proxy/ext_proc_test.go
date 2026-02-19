@@ -269,9 +269,95 @@ func TestServer_Process(t *testing.T) {
 					Response: &extProcPb.ProcessingResponse_ImmediateResponse{
 						ImmediateResponse: &extProcPb.ImmediateResponse{
 							Status: &types.HttpStatus{
-								Code: types.StatusCode(404),
+								Code: types.StatusCode(502),
 							},
 							Body: []byte("sandbox nonexistent not found"),
+						},
+					},
+				},
+			},
+		},
+		{
+			name:        "bad port",
+			setupRoutes: []Route{},
+			adapter: &testRequestAdapter{
+				isSandboxRequest: true,
+				mapResult: mapResult{
+					sandboxID:   "sandbox1",
+					sandboxPort: 99999,
+					user:        "user1",
+					err:         nil,
+				},
+				authorizeResult: true,
+				entry:           "127.0.0.1:8080",
+			},
+			requests: []*extProcPb.ProcessingRequest{
+				{
+					Request: &extProcPb.ProcessingRequest_RequestHeaders{
+						RequestHeaders: &extProcPb.HttpHeaders{
+							Headers: &corev3.HeaderMap{
+								Headers: []*corev3.HeaderValue{
+									{Key: ":scheme", RawValue: []byte("http")},
+									{Key: ":authority", RawValue: []byte("99999-id.example.com")},
+									{Key: ":path", RawValue: []byte("/sandbox")},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectError: false,
+			expectResp: []*extProcPb.ProcessingResponse{
+				{
+					Response: &extProcPb.ProcessingResponse_ImmediateResponse{
+						ImmediateResponse: &extProcPb.ImmediateResponse{
+							Status: &types.HttpStatus{
+								Code: types.StatusCode(400),
+							},
+							Body: []byte("invalid sandbox port: 99999"),
+						},
+					},
+				},
+			},
+		},
+		{
+			name:        "sandbox not healthy",
+			setupRoutes: []Route{{ID: "sandbox1", IP: "192.168.1.10", Owner: "user1", State: agentsv1alpha1.SandboxStateDead}},
+			adapter: &testRequestAdapter{
+				isSandboxRequest: true,
+				mapResult: mapResult{
+					sandboxID:   "sandbox1",
+					sandboxPort: 9999,
+					user:        "user1",
+					err:         nil,
+				},
+				authorizeResult: true,
+				entry:           "127.0.0.1:8080",
+			},
+			requests: []*extProcPb.ProcessingRequest{
+				{
+					Request: &extProcPb.ProcessingRequest_RequestHeaders{
+						RequestHeaders: &extProcPb.HttpHeaders{
+							Headers: &corev3.HeaderMap{
+								Headers: []*corev3.HeaderValue{
+									{Key: ":scheme", RawValue: []byte("http")},
+									{Key: ":authority", RawValue: []byte("99999-id.example.com")},
+									{Key: ":path", RawValue: []byte("/sandbox")},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectError: false,
+			expectResp: []*extProcPb.ProcessingResponse{
+				{
+					Response: &extProcPb.ProcessingResponse_ImmediateResponse{
+						ImmediateResponse: &extProcPb.ImmediateResponse{
+							Status: &types.HttpStatus{
+								Code: types.StatusCode(502),
+							},
+							Body: []byte("healthy sandbox sandbox1 not found"),
 						},
 					},
 				},
@@ -416,7 +502,9 @@ func TestServer_Process(t *testing.T) {
 
 			// Setup routes
 			for _, route := range tt.setupRoutes {
-				route.State = agentsv1alpha1.SandboxStateRunning
+				if route.State == "" {
+					route.State = agentsv1alpha1.SandboxStateRunning
+				}
 				server.SetRoute(t.Context(), route)
 			}
 
