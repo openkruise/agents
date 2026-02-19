@@ -21,7 +21,7 @@ func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts infra.ClaimSandb
 	}
 	sandbox, metrics, err := m.infra.ClaimSandbox(ctx, opts)
 	if err != nil {
-		log.Error(err, "failed to claim sandbox", "metrics", metrics)
+		log.Error(err, "failed to claim sandbox", "metrics", metrics.String())
 		// Requirement: Track failure in API layer
 		SandboxCreationResponses.WithLabelValues("failure").Inc()
 		return nil, errors.NewError(errors.ErrorInternal, fmt.Sprintf("failed to claim sandbox: %v", err))
@@ -33,7 +33,7 @@ func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts infra.ClaimSandb
 	SandboxCreationLatency.Observe(float64(metrics.Total.Milliseconds()))
 
 	state, reason := sandbox.GetState()
-	log.Info("sandbox claimed", "sandbox", klog.KObj(sandbox), "metrics", metrics, "state", state, "reason", reason)
+	log.Info("sandbox claimed", "sandbox", klog.KObj(sandbox), "metrics", metrics.String(), "state", state, "reason", reason)
 
 	// Sync route without refresh since sandbox was just claimed and state is already up-to-date
 	if err = m.syncRoute(ctx, sandbox, false); err != nil {
