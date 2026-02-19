@@ -324,7 +324,7 @@ func performLockSandbox(ctx context.Context, sbx *Sandbox, created bool, lock st
 
 func initRuntime(ctx context.Context, sbx *Sandbox, opts config.InitRuntimeOptions) (time.Duration, error) {
 	ctx = logs.Extend(ctx, "action", "initRuntime")
-	log := klog.FromContext(ctx).WithValues("sandboxID", sbx.GetName(), "envVars", opts.EnvVars)
+	log := klog.FromContext(ctx).WithValues("sandboxID", sbx.GetName(), "envVars", opts.EnvVars, "resourceVersion", sbx.GetResourceVersion())
 	start := time.Now()
 	params := map[string]any{
 		"envVars": opts.EnvVars,
@@ -388,15 +388,25 @@ func waitForSandboxReady(ctx context.Context, sbx *Sandbox, opts infra.ClaimSand
 	ctx = logs.Extend(ctx, "action", "waitForSandboxReady")
 	log := klog.FromContext(ctx).V(consts.DebugLogLevel).WithValues("sandbox", klog.KObj(sbx))
 	start := time.Now()
+	defer func() {
+		cost = time.Since(start)
+	}()
 	log.Info("waiting for sandbox ready", "timeout", opts.WaitReadyTimeout)
-	err = cache.WaitForSandboxSatisfied(ctx, sbx.Sandbox, WaitActionWaitReady, func(sbx *v1alpha1.Sandbox) (bool, error) {
+	if err = cache.WaitForSandboxSatisfied(ctx, sbx.Sandbox, WaitActionWaitReady, func(sbx *v1alpha1.Sandbox) (bool, error) {
 		return checkSandboxReady(ctx, sbx)
-	}, opts.WaitReadyTimeout)
-	return time.Since(start), err
+	}, opts.WaitReadyTimeout); err != nil {
+		log.Error(err, "failed to wait for sandbox ready")
+		return
+	}
+	if err = sbx.InplaceRefresh(ctx, false); err != nil {
+		log.Error(err, "failed to refresh sandbox")
+		return
+	}
+	return
 }
 
 func checkSandboxReady(ctx context.Context, sbx *v1alpha1.Sandbox) (bool, error) {
-	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx)).V(consts.DebugLogLevel)
+	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx), "resourceVersion", sbx.GetResourceVersion()).V(consts.DebugLogLevel)
 	if sbx.Status.ObservedGeneration != sbx.Generation {
 		log.Info("watched sandbox not updated", "generation", sbx.Generation, "observedGeneration", sbx.Status.ObservedGeneration)
 		return false, nil
@@ -407,7 +417,8 @@ func checkSandboxReady(ctx context.Context, sbx *v1alpha1.Sandbox) (bool, error)
 		log.Error(err, "sandbox inplace update failed")
 		return false, err // stop early
 	}
+	ip := sbx.Status.PodInfo.PodIP
 	state, reason := stateutils.GetSandboxState(sbx)
-	log.Info("sandbox checked", "state", state, "reason", reason)
-	return state == v1alpha1.SandboxStateRunning, nil
+	log.Info("sandbox checked", "state", state, "reason", reason, "ip", ip)
+	return state == v1alpha1.SandboxStateRunning && ip != "", nil
 }
