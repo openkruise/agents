@@ -25,11 +25,20 @@ type RunCommandResult struct {
 }
 
 func (s *Sandbox) GetRuntimeURL() string {
+	// firstly, get runtime url from the annotation
 	url := s.GetAnnotations()[v1alpha1.AnnotationRuntimeURL]
 	if url == "" {
 		url = s.GetAnnotations()[v1alpha1.AnnotationEnvdURL] // legacy
 	}
-	return url
+	if url != "" {
+		return url
+	}
+	// secondly, calculate runtime url from the route
+	route := s.GetRoute()
+	if route.IP == "" {
+		return ""
+	}
+	return fmt.Sprintf("http://%s:%d", route.IP, consts.RuntimePort)
 }
 
 func (s *Sandbox) GetAccessToken() string {
