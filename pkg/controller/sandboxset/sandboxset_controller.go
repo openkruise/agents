@@ -119,17 +119,16 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 
 	controllerKey := GetControllerKey(sbs)
-	var requeueAfter time.Duration
-	var scaleUpSatisfied, scaleDownSatisfied bool
-	scaleUpSatisfied, scaleUpTimeoutAfter := scaleExpectationSatisfied(ctx, scaleUpExpectation, controllerKey)
-	scaleDownSatisfied, scaleDownTimeoutAfter := scaleExpectationSatisfied(ctx, scaleDownExpectation, controllerKey)
-	requeueAfter = min(scaleUpTimeoutAfter, scaleDownTimeoutAfter)
 	groups, err := r.groupAllSandboxes(ctx, sbs)
 	if err != nil {
 		log.Error(err, "failed to group sandboxes")
 		return ctrl.Result{}, err
 	}
-	actualReplicas := saveStatusFromGroup(newStatus, groups)
+	var requeueAfter time.Duration
+	scaleUpSatisfied, dirtyScaleUp, scaleUpTimeoutAfter := scaleExpectationSatisfied(ctx, scaleUpExpectation, controllerKey)
+	scaleDownSatisfied, _, scaleDownTimeoutAfter := scaleExpectationSatisfied(ctx, scaleDownExpectation, controllerKey)
+	requeueAfter = min(scaleUpTimeoutAfter, scaleDownTimeoutAfter)
+	actualReplicas := saveStatusFromGroup(ctx, newStatus, groups, dirtyScaleUp)
 
 	// Set selector in status for scale subresource
 	if newStatus.Selector == "" {
@@ -151,12 +150,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// Step 1: perform scale
 	start := time.Now()
 	delta := int(sbs.Spec.Replicas - actualReplicas)
+	log.Info("performing scale", "expect", sbs.Spec.Replicas, "actual", actualReplicas)
 	if delta > 0 {
-		if !scaleUpSatisfied {
-			log.Info("skip scale up for scaleUpExpectation is not satisfied")
-		} else {
-			err = r.scaleUp(ctx, delta, sbs, newStatus.UpdateRevision)
-		}
+		err = r.scaleUp(ctx, delta, sbs, newStatus.UpdateRevision)
 	} else if delta < 0 {
 		if !scaleUpSatisfied || !scaleDownSatisfied {
 			log.Info("skip scale down for scaleUpExpectation or scaleDownExpectation is not satisfied")

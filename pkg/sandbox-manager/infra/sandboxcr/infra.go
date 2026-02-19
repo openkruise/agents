@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
@@ -36,7 +35,6 @@ type Infra struct {
 	// For claiming sandbox
 	pickCache        sync.Map
 	claimLockChannel chan struct{}
-	noStock          atomic.Bool
 
 	// Currently, templates stores the mapping of sandboxset name -> number of namespaces. For example,
 	// if a sandboxset with the same name is created in two different namespaces, the corresponding value would be 2.
