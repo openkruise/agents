@@ -628,6 +628,7 @@ func TestInfra_startRouteReconciler(t *testing.T) {
 			infraInstance, client := NewTestInfra(t)
 
 			// Create sandboxes
+			var createdSandboxes []string
 			for _, sbx := range tt.sandboxes {
 				CreateSandboxWithStatus(t, client, sbx)
 				id := stateutils.GetSandboxID(sbx)
@@ -636,7 +637,18 @@ func TestInfra_startRouteReconciler(t *testing.T) {
 					IP:    sbx.Status.PodInfo.PodIP,
 					State: v1alpha1.SandboxStateRunning,
 				})
+				createdSandboxes = append(createdSandboxes, id)
 			}
+
+			require.Eventually(t, func() bool {
+				for _, id := range createdSandboxes {
+					_, err := infraInstance.Cache.GetSandbox(id)
+					if err != nil {
+						return false
+					}
+				}
+				return true
+			}, time.Second, 10*time.Millisecond)
 
 			// Add orphaned routes
 			for _, route := range tt.orphanedRoutes {

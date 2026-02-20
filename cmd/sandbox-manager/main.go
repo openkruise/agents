@@ -10,6 +10,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/spf13/pflag"
+	zapRaw "go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
@@ -30,10 +32,19 @@ func main() {
 	pflag.BoolVar(&enablePprof, "enable-pprof", false, "Enable pprof profiling")
 	pflag.StringVar(&pprofAddr, "pprof-addr", ":6060", "The address the pprof debug maps to.")
 
+	opts := zap.Options{
+		Development: false,
+	}
+	opts.BindFlags(flag.CommandLine)
 	klog.InitFlags(nil)
-	klog.SetLogger(zap.New(zap.UseDevMode(false)))
 	pflag.CommandLine.AddGoFlagSet(flag.CommandLine)
 	pflag.Parse()
+
+	klog.SetLogger(zap.New(
+		zap.UseFlagOptions(&opts),
+		zap.RawZapOpts(zapRaw.AddCaller()),
+		zap.StacktraceLevel(zapcore.DPanicLevel),
+	))
 
 	// Start pprof server if enabled
 	if enablePprof {

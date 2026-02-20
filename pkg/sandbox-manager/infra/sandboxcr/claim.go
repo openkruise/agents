@@ -280,6 +280,7 @@ func pickAnAvailableSandbox(ctx context.Context, opts infra.ClaimSandboxOptions,
 				log.Info("expectation of picked candidate is out-of-date", "key", key)
 				pickCache.Delete(key)
 			} else {
+				log.Info("candidate picked", "sandbox", klog.KObj(obj))
 				return AsSandbox(obj, cache, client), false, func() {
 					pickCache.Delete(key)
 				}, nil
