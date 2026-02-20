@@ -9,6 +9,7 @@ import (
 
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
+	"golang.org/x/time/rate"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	k8sinformers "k8s.io/client-go/informers"
@@ -35,6 +36,7 @@ type Infra struct {
 	// For claiming sandbox
 	pickCache        sync.Map
 	claimLockChannel chan struct{}
+	createLimiter    *rate.Limiter
 
 	// Currently, templates stores the mapping of sandboxset name -> number of namespaces. For example,
 	// if a sandboxset with the same name is created in two different namespaces, the corresponding value would be 2.
@@ -70,6 +72,7 @@ func NewInfra(client sandboxclient.Interface, k8sClient kubernetes.Interface, pr
 		Proxy:                proxy,
 		reconcileRouteStopCh: make(chan struct{}),
 		claimLockChannel:     make(chan struct{}, opts.MaxClaimWorkers),
+		createLimiter:        rate.NewLimiter(rate.Limit(opts.MaxCreateQPS), opts.MaxCreateQPS),
 	}
 
 	cache.AddSandboxEventHandler(k8scache.ResourceEventHandlerFuncs{
@@ -125,7 +128,7 @@ func (i *Infra) ClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions
 	}, func() error {
 		metrics.Retries++
 		log.Info("try to claim sandbox", "retries", metrics.Retries)
-		claimed, tryMetrics, claimErr := TryClaimSandbox(claimCtx, opts, &i.pickCache, i.Cache, i.Client, i.claimLockChannel)
+		claimed, tryMetrics, claimErr := TryClaimSandbox(claimCtx, opts, &i.pickCache, i.Cache, i.Client, i.claimLockChannel, i.createLimiter)
 		metrics.Total += tryMetrics.Total
 		metrics.Wait += tryMetrics.Wait
 		metrics.PickAndLock += tryMetrics.PickAndLock
