@@ -14,6 +14,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/time/rate"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -580,7 +581,7 @@ func TestClaimSandboxFailed(t *testing.T) {
 			} else {
 				ctx = tt.getContext()
 			}
-			_, _, err := TryClaimSandbox(ctx, tt.options, &testInfra.pickCache, testInfra.Cache, client, testInfra.claimLockChannel)
+			_, _, err := TryClaimSandbox(ctx, tt.options, &testInfra.pickCache, testInfra.Cache, client, testInfra.claimLockChannel, testInfra.createLimiter)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.expectError)
 			_, err = client.ApiV1alpha1().Sandboxes(sbx.Namespace).Get(t.Context(), name, metav1.GetOptions{})
@@ -749,4 +750,66 @@ func KeepMakingAllSandboxesReady(ctx context.Context, client clients.SandboxClie
 			}
 		}
 	}
+}
+
+func TestNewSandboxFromTemplate_RateLimitExceeded(t *testing.T) {
+	utils.InitLogOutput()
+
+	// Create a rate limiter with 0 burst to ensure it's always exhausted
+	limiter := rate.NewLimiter(rate.Limit(1), 0)
+
+	// Create test infrastructure
+	infraInstance, client := NewTestInfra(t)
+	defer infraInstance.Stop()
+
+	template := "test-template"
+
+	// Create SandboxSet
+	sbs := &v1alpha1.SandboxSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      template,
+			Namespace: "default",
+		},
+		Spec: v1alpha1.SandboxSetSpec{
+			EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name:  "main",
+								Image: "test-image",
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	_, err := client.ApiV1alpha1().SandboxSets("default").Create(context.Background(), sbs, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	// Wait for cache to sync
+	require.Eventually(t, func() bool {
+		_, err := infraInstance.Cache.GetSandboxSet(template)
+		return err == nil
+	}, time.Second, 10*time.Millisecond)
+
+	// Test: Call newSandboxFromTemplate when rate limiter is exhausted
+	opts := infra.ClaimSandboxOptions{
+		Template: template,
+		User:     "test-user",
+	}
+
+	// Call the function
+	sbx, created, deferFunc, err := newSandboxFromTemplate(opts, infraInstance.Cache, infraInstance.Client, limiter)
+
+	// Assertions
+	assert.Nil(t, sbx, "sandbox should be nil when rate limited")
+	assert.False(t, created, "created flag should be false")
+	assert.Nil(t, deferFunc, "defer function should be nil")
+	assert.Error(t, err, "should return error when rate limited")
+
+	// Check error message
+	assert.Contains(t, err.Error(), "sandbox creation is not allowed by rate limiter", "error should indicate rate limit")
+	assert.Contains(t, err.Error(), template, "error should contain template name")
 }

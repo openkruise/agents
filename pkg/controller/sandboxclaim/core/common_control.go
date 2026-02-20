@@ -25,6 +25,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/utils"
 	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
+	"golang.org/x/time/rate"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -196,10 +197,11 @@ func (c *commonControl) claimSandboxes(ctx context.Context, claim *agentsv1alpha
 	}
 
 	claimLockChannel := make(chan struct{}, batchSize) // set to max batch size, not controlled
+	limiter := rate.NewLimiter(rate.Inf, batchSize)
 	// Attempt to claim sandboxes concurrently using DoItSlowly
 	claimedCount, err := utils.DoItSlowly(batchSize, InitialClaimBatchSize, func() error {
 		// Pass nil for rand so sandboxcr uses global rand (concurrent-safe).
-		sbx, metrics, claimErr := sandboxcr.TryClaimSandbox(ctx, opts, &c.pickCache, c.cache, c.sandboxClient, claimLockChannel)
+		sbx, metrics, claimErr := sandboxcr.TryClaimSandbox(ctx, opts, &c.pickCache, c.cache, c.sandboxClient, claimLockChannel, limiter)
 		if claimErr != nil {
 			log.Error(claimErr, "Failed to claim sandbox")
 			return claimErr
