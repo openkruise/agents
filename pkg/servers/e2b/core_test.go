@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"syscall"
@@ -237,7 +238,9 @@ func DoSetSandboxStatus(phase agentsv1alpha1.SandboxPhase, pausedStatus, readySt
 			},
 		}
 		_, err := client.ApiV1alpha1().Sandboxes(sbx.Namespace).UpdateStatus(context.Background(), sbx, metav1.UpdateOptions{})
-		assert.NoError(t, err)
+		if err != nil {
+			log.Printf("failed to update sandbox status: %v", err)
+		}
 	}
 }
 

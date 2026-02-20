@@ -481,6 +481,11 @@ func checkSandboxReady(ctx context.Context, sbx *v1alpha1.Sandbox) (bool, error)
 	}
 	ip := sbx.Status.PodInfo.PodIP
 	state, reason := stateutils.GetSandboxState(sbx)
-	log.Info("sandbox ready checked", "state", state, "reason", reason, "ip", ip)
-	return state == v1alpha1.SandboxStateRunning && ip != "", nil
+	isReady := state == v1alpha1.SandboxStateRunning && ip != ""
+	log.Info("sandbox ready checked", "state", state, "reason", reason, "ip", ip, "isReady", isReady, "resourceVersion", sbx.GetResourceVersion())
+	if isReady {
+		// Expect the resourceVersion to ensure InplaceRefresh fetches the latest from API server
+		utils.ResourceVersionExpectationExpect(sbx)
+	}
+	return isReady, nil
 }
