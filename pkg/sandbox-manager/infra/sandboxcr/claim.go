@@ -24,6 +24,7 @@ import (
 	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	"github.com/openkruise/agents/pkg/utils/sandbox-manager/proxyutils"
 	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
+	"golang.org/x/time/rate"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -69,8 +70,8 @@ func ValidateAndInitClaimOptions(opts infra.ClaimSandboxOptions) (infra.ClaimSan
 // the sandbox object should not be used anymore and needs appropriate handling.
 //
 // ValidateAndInitClaimOptions must be called before this function.
-func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCache *sync.Map,
-	cache *Cache, client clients.SandboxClient, claimLockChannel chan struct{}) (claimed infra.Sandbox, metrics infra.ClaimMetrics, err error) {
+func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCache *sync.Map, cache *Cache, client clients.SandboxClient,
+	claimLockChannel chan struct{}, createLimiter *rate.Limiter) (claimed infra.Sandbox, metrics infra.ClaimMetrics, err error) {
 	ctx = logs.Extend(ctx, "tryClaimId", uuid.NewString()[:8])
 	log := klog.FromContext(ctx)
 
@@ -107,7 +108,7 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 	var deferFunc func()
 	var created bool
 	pickStart := time.Now()
-	sbx, created, deferFunc, err = pickAnAvailableSandbox(ctx, opts, pickCache, cache, client)
+	sbx, created, deferFunc, err = pickAnAvailableSandbox(ctx, opts, pickCache, cache, client, createLimiter)
 	if err != nil {
 		log.Error(err, "failed to select available sandbox")
 		return
@@ -224,7 +225,7 @@ func getPickKey(sbx *v1alpha1.Sandbox) string {
 }
 
 func pickAnAvailableSandbox(ctx context.Context, opts infra.ClaimSandboxOptions,
-	pickCache *sync.Map, cache *Cache, client clients.SandboxClient) (*Sandbox, bool, func(), error) {
+	pickCache *sync.Map, cache *Cache, client clients.SandboxClient, limiter *rate.Limiter) (*Sandbox, bool, func(), error) {
 	template, cnt := opts.Template, opts.CandidateCounts
 	ctx = logs.Extend(ctx, "action", "pickAnAvailableSandbox")
 	log := klog.FromContext(ctx).WithValues("template", template).V(consts.DebugLogLevel)
@@ -235,7 +236,7 @@ func pickAnAvailableSandbox(ctx context.Context, opts infra.ClaimSandboxOptions,
 	if len(objects) == 0 {
 		if opts.CreateOnNoStock {
 			log.Info("will create a new sandbox", "reason", "NoStock")
-			return newSandboxFromTemplate(opts, cache, client)
+			return newSandboxFromTemplate(opts, cache, client, limiter)
 		}
 		return nil, false, nil, NoAvailableError(template, "no stock")
 	}
@@ -258,7 +259,7 @@ func pickAnAvailableSandbox(ctx context.Context, opts infra.ClaimSandboxOptions,
 	if len(candidates) == 0 {
 		if opts.CreateOnNoStock {
 			log.Info("will create a new sandbox", "reason", "NoCandidate")
-			return newSandboxFromTemplate(opts, cache, client)
+			return newSandboxFromTemplate(opts, cache, client, limiter)
 		}
 		return nil, false, nil, NoAvailableError(template, "no candidate")
 	}
@@ -297,7 +298,7 @@ func pickAnAvailableSandbox(ctx context.Context, opts infra.ClaimSandboxOptions,
 		if i == start {
 			if opts.CreateOnNoStock {
 				log.Info("will create a new sandbox", "reason", "AllCandidatesPicked")
-				return newSandboxFromTemplate(opts, cache, client)
+				return newSandboxFromTemplate(opts, cache, client, limiter)
 			}
 			return nil, false, nil, NoAvailableError(template, "all candidates are picked")
 		}
@@ -306,7 +307,10 @@ func pickAnAvailableSandbox(ctx context.Context, opts infra.ClaimSandboxOptions,
 
 var FilteredAnnotationsOnCreation []string
 
-func newSandboxFromTemplate(opts infra.ClaimSandboxOptions, cache *Cache, client clients.SandboxClient) (*Sandbox, bool, func(), error) {
+func newSandboxFromTemplate(opts infra.ClaimSandboxOptions, cache *Cache, client clients.SandboxClient, limiter *rate.Limiter) (*Sandbox, bool, func(), error) {
+	if !limiter.Allow() {
+		return nil, false, nil, NoAvailableError(opts.Template, "sandbox creation is not allowed by rate limiter")
+	}
 	sbs, err := cache.GetSandboxSet(opts.Template)
 	if err != nil {
 		return nil, false, nil, NoAvailableError(opts.Template, "cannot create new sandbox: "+err.Error())
