@@ -139,11 +139,16 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 		}
 		return
 	}
+	if created {
+		metrics.LockType = infra.LockTypeCreate
+	} else {
+		metrics.LockType = infra.LockTypeUpdate
+	}
 	metrics.PickAndLock = time.Since(pickStart)
 	metrics.Total += metrics.PickAndLock
 	utils.ResourceVersionExpectationExpect(sbx)
 	log = log.WithValues("sandbox", klog.KObj(sbx.Sandbox))
-	log.Info("sandbox locked", "cost", metrics.PickAndLock)
+	log.Info("sandbox locked", "cost", metrics.PickAndLock, "type", metrics.LockType)
 	claimed = sbx
 	freeWorkerOnce() // free worker early
 
