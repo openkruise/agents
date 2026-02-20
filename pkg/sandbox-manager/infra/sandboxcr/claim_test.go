@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"testing"
 	"time"
 
@@ -716,19 +717,35 @@ func KeepMakingAllSandboxesReady(ctx context.Context, client clients.SandboxClie
 				continue
 			}
 			for _, sbx := range sandboxList.Items {
+				// Skip already ready sandboxes to reduce unnecessary updates
+				currentState, _ := sandboxutils.GetSandboxState(&sbx)
+				if currentState == v1alpha1.SandboxStateRunning {
+					continue
+				}
+
 				sbx.Status = v1alpha1.SandboxStatus{
-					Phase: v1alpha1.SandboxRunning,
+					Phase:              v1alpha1.SandboxRunning,
+					ObservedGeneration: sbx.Generation, // Important: sync generation
 					Conditions: []metav1.Condition{
 						{
 							Type:   string(v1alpha1.SandboxConditionReady),
 							Status: metav1.ConditionTrue,
+							Reason: v1alpha1.SandboxReadyReasonPodReady,
 						},
 					},
 					PodInfo: v1alpha1.PodInfo{
 						PodIP: "1.2.3.4",
 					},
 				}
-				_, _ = client.ApiV1alpha1().Sandboxes(sbx.Namespace).UpdateStatus(context.Background(), &sbx, metav1.UpdateOptions{})
+				updated, err := client.ApiV1alpha1().Sandboxes(sbx.Namespace).UpdateStatus(context.Background(), &sbx, metav1.UpdateOptions{})
+				if err != nil {
+					log.Printf("failed to update sandbox status: %v", err)
+					continue
+				}
+				// Record the expected version to help InplaceRefresh
+				if updated != nil {
+					utils.ResourceVersionExpectationExpect(updated)
+				}
 			}
 		}
 	}

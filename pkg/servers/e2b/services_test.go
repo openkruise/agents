@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -352,9 +353,14 @@ func TestAutoPause(t *testing.T) {
 			assert.Nil(t, apiError)
 			AssertEndAt(t, maxTimeoutTime, describeResp.Body.EndAt)
 			tt.pauseChecker(t, GetSandbox(t, createResp.Body.SandboxID, client.SandboxClient))
-			go UpdateSandboxWhen(t, client.SandboxClient, createResp.Body.SandboxID, func(sbx *v1alpha1.Sandbox) bool {
-				return sbx.Spec.Paused == false
-			}, DoSetSandboxStatus(v1alpha1.SandboxRunning, metav1.ConditionFalse, metav1.ConditionTrue))
+			var wg sync.WaitGroup
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				UpdateSandboxWhen(t, client.SandboxClient, createResp.Body.SandboxID, func(sbx *v1alpha1.Sandbox) bool {
+					return sbx.Spec.Paused == false
+				}, DoSetSandboxStatus(v1alpha1.SandboxRunning, metav1.ConditionFalse, metav1.ConditionTrue))
+			}()
 			connectResp, apiError := controller.ConnectSandbox(NewRequest(t, nil, models.SetTimeoutRequest{
 				TimeoutSeconds: timeout,
 			}, map[string]string{
@@ -363,6 +369,7 @@ func TestAutoPause(t *testing.T) {
 			assert.Nil(t, apiError)
 			AssertEndAt(t, timeoutTime, connectResp.Body.EndAt)
 			tt.resumeChecker(t, GetSandbox(t, createResp.Body.SandboxID, client.SandboxClient))
+			wg.Wait()
 		})
 	}
 }
