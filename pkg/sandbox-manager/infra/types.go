@@ -46,17 +46,24 @@ type ClaimMetrics struct {
 	WaitReady   time.Duration
 	InitRuntime time.Duration
 	CSIMount    time.Duration
+	LockType    string
 	LastError   error
 }
+
+const (
+	LockTypeCreate = "create"
+	LockTypeUpdate = "update"
+)
 
 func (m ClaimMetrics) String() string {
 	var lastErrStr string
 	if m.LastError != nil {
-		// Replace newlines and other control characters to ensure single-line output
-		lastErrStr = strings.ReplaceAll(m.LastError.Error(), "\n", " ")
-		lastErrStr = strings.ReplaceAll(lastErrStr, "\r", " ")
-		lastErrStr = strings.ReplaceAll(lastErrStr, "\t", " ")
+		// Replace newlines and control characters to ensure single-line output
+		errMsg := m.LastError.Error()
+		// Replace common control characters with space
+		replacer := strings.NewReplacer("\n", " ", "\r", " ", "\t", " ")
+		lastErrStr = replacer.Replace(errMsg)
 	}
-	return fmt.Sprintf("ClaimMetrics{Retries: %d, Total: %v, Wait: %v, RetryCost: %v, PickAndLock: %v, WaitReady: %v, InitRuntime: %v, CSIMount: %v, LastError: %v}",
-		m.Retries, m.Total, m.Wait, m.RetryCost, m.PickAndLock, m.WaitReady, m.InitRuntime, m.CSIMount, lastErrStr)
+	return fmt.Sprintf("ClaimMetrics{Retries: %d, Total: %v, Wait: %v, RetryCost: %v, PickAndLock: %v, LockType: %v, WaitReady: %v, InitRuntime: %v, CSIMount: %v, LastError: %v}",
+		m.Retries, m.Total, m.Wait, m.RetryCost, m.PickAndLock, m.LockType, m.WaitReady, m.InitRuntime, m.CSIMount, lastErrStr)
 }
