@@ -35,7 +35,7 @@ type Infrastructure interface {
 	GetCache() CacheProvider // Get the CacheProvider for the infra
 	LoadDebugInfo() map[string]any
 	SelectSandboxes(user string, limit int, filter func(sandbox Sandbox) bool) ([]Sandbox, error) // Select Sandboxes based on the options provided
-	GetSandbox(ctx context.Context, sandboxID string) (Sandbox, error)                            // Get a Sandbox interface by its ID
+	GetClaimedSandbox(ctx context.Context, sandboxID string) (Sandbox, error)                     // Get a Sandbox interface by its ID
 	ClaimSandbox(ctx context.Context, opts ClaimSandboxOptions) (Sandbox, ClaimMetrics, error)
 }
 
@@ -64,7 +64,7 @@ type Sandbox interface {
 type CacheProvider interface {
 	GetPersistentVolume(name string) (*corev1.PersistentVolume, error)
 	GetSecret(namespace, name string) (*corev1.Secret, error)
-	GetSandbox(sandboxID string) (*agentsv1alpha1.Sandbox, error)
+	GetClaimedSandbox(sandboxID string) (*agentsv1alpha1.Sandbox, error)
 	ListSandboxWithUser(user string) ([]*agentsv1alpha1.Sandbox, error)
-	ListAvailableSandboxes(pool string) ([]*agentsv1alpha1.Sandbox, error)
+	ListSandboxesInPool(pool string) ([]*agentsv1alpha1.Sandbox, error)
 }

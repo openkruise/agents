@@ -46,7 +46,7 @@ func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts infra.ClaimSandb
 func (m *SandboxManager) GetClaimedSandbox(ctx context.Context, user, sandboxID string) (infra.Sandbox, error) {
 	log := klog.FromContext(ctx).WithValues("sandboxID", sandboxID)
 	log.Info("try to get claimed sandbox")
-	sbx, err := m.infra.GetSandbox(ctx, sandboxID)
+	sbx, err := m.infra.GetClaimedSandbox(ctx, sandboxID)
 	if err != nil {
 		log.Error(err, "failed to get sandbox from cache")
 		return nil, errors.NewError(errors.ErrorNotFound, fmt.Sprintf("sandbox %s not found", sandboxID))

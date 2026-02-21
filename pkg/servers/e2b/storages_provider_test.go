@@ -394,7 +394,7 @@ func (m *mockCacheProvider) GetSecret(namespace, name string) (*corev1.Secret, e
 	}, nil
 }
 
-func (m *mockCacheProvider) GetSandbox(sandboxID string) (*agentsv1alpha1.Sandbox, error) {
+func (m *mockCacheProvider) GetClaimedSandbox(sandboxID string) (*agentsv1alpha1.Sandbox, error) {
 	return nil, fmt.Errorf("not implemented for PV cache mock")
 }
 
@@ -402,7 +402,7 @@ func (m *mockCacheProvider) ListSandboxWithUser(user string) ([]*agentsv1alpha1.
 	return nil, fmt.Errorf("not implemented for PV cache mock")
 }
 
-func (m *mockCacheProvider) ListAvailableSandboxes(pool string) ([]*agentsv1alpha1.Sandbox, error) {
+func (m *mockCacheProvider) ListSandboxesInPool(pool string) ([]*agentsv1alpha1.Sandbox, error) {
 	return nil, fmt.Errorf("not implemented for PV cache mock")
 }
 

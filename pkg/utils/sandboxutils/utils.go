@@ -32,7 +32,7 @@ func GetSandboxState(sbx *agentsv1alpha1.Sandbox) (state string, reason string) 
 	}
 
 	sandboxReady := IsSandboxReady(sbx)
-	if IsControlledBySandboxCR(sbx) {
+	if IsControlledBySandboxSet(sbx) {
 		if sandboxReady {
 			return agentsv1alpha1.SandboxStateAvailable, "ResourceControlledBySbsAndReady"
 		} else {
@@ -56,7 +56,7 @@ func GetSandboxState(sbx *agentsv1alpha1.Sandbox) (state string, reason string) 
 	}
 }
 
-func IsControlledBySandboxCR(sbx *agentsv1alpha1.Sandbox) bool {
+func IsControlledBySandboxSet(sbx *agentsv1alpha1.Sandbox) bool {
 	controller := metav1.GetControllerOfNoCopy(sbx)
 	if controller == nil {
 		return false

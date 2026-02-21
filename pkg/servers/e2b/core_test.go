@@ -149,17 +149,20 @@ func CreateSandboxPool(t *testing.T, client versioned.Interface, name string, av
 	}
 	_, err := client.ApiV1alpha1().SandboxSets(Namespace).Create(context.Background(), sbs, metav1.CreateOptions{})
 	assert.NoError(t, err)
+	now := metav1.Now()
 	for i := 0; i < available; i++ {
 		sbx := &agentsv1alpha1.Sandbox{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      fmt.Sprintf("%s-%d", name, i),
 				Namespace: Namespace,
 				Labels: map[string]string{
-					agentsv1alpha1.LabelSandboxTemplate: name,
+					agentsv1alpha1.LabelSandboxTemplate:  name,
+					agentsv1alpha1.LabelSandboxIsClaimed: "false",
 				},
-				OwnerReferences: GetSbsOwnerReference(sbs),
-				ResourceVersion: "1",
-				UID:             types.UID(uuid.NewString()),
+				OwnerReferences:   GetSbsOwnerReference(sbs),
+				ResourceVersion:   "1",
+				UID:               types.UID(uuid.NewString()),
+				CreationTimestamp: now,
 			},
 			Spec: agentsv1alpha1.SandboxSpec{
 				EmbeddedSandboxTemplate: tmpl,
