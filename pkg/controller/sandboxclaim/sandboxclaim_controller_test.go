@@ -22,10 +22,11 @@ import (
 	"time"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	clientsetfake "github.com/openkruise/agents/client/clientset/versioned/fake"
 	informers "github.com/openkruise/agents/client/informers/externalversions"
 	"github.com/openkruise/agents/pkg/controller/sandboxclaim/core"
+	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
+	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -145,11 +146,13 @@ func TestReconciler_Reconcile_BasicFlow(t *testing.T) {
 }
 
 func TestReconciler_Reconcile_Claiming(t *testing.T) {
+	utils.InitLogOutput()
 	scheme := runtime.NewScheme()
 	_ = agentsv1alpha1.AddToScheme(scheme)
 
 	// Initialize cache and sandboxClient
-	sandboxClient := clientsetfake.NewSimpleClientset()
+	clientSet := clients.NewFakeClientSet()
+	sandboxClient := clientSet.SandboxClient
 	sandboxInformerFactory := informers.NewSharedInformerFactory(sandboxClient, time.Minute*10)
 	sandboxInformer := sandboxInformerFactory.Api().V1alpha1().Sandboxes().Informer()
 	sandboxSetInformer := sandboxInformerFactory.Api().V1alpha1().SandboxSets().Informer()
@@ -188,6 +191,7 @@ func TestReconciler_Reconcile_Claiming(t *testing.T) {
 	}
 
 	controllerTrue := true
+	now := metav1.Now()
 	sandbox1 := &agentsv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "sandbox-1",
@@ -196,7 +200,8 @@ func TestReconciler_Reconcile_Claiming(t *testing.T) {
 				agentsv1alpha1.LabelSandboxTemplate:  "test-sandboxset",
 				agentsv1alpha1.LabelSandboxIsClaimed: "false",
 			},
-			Annotations: map[string]string{}, // Initialize annotations map
+			CreationTimestamp: now,
+			Annotations:       map[string]string{}, // Initialize annotations map
 			OwnerReferences: []metav1.OwnerReference{
 				{
 					APIVersion: "agents.kruise.io/v1alpha1",
@@ -216,13 +221,15 @@ func TestReconciler_Reconcile_Claiming(t *testing.T) {
 					Reason: "PodReady",
 				},
 			},
+			// no pod ip, should be skipped
 		},
 	}
 
 	sandbox2 := &agentsv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "sandbox-2",
-			Namespace: "default",
+			Name:              "sandbox-2",
+			Namespace:         "default",
+			CreationTimestamp: now,
 			Labels: map[string]string{
 				agentsv1alpha1.LabelSandboxTemplate:  "test-sandboxset",
 				agentsv1alpha1.LabelSandboxIsClaimed: "false",
@@ -246,6 +253,9 @@ func TestReconciler_Reconcile_Claiming(t *testing.T) {
 					Status: metav1.ConditionTrue,
 					Reason: "PodReady",
 				},
+			},
+			PodInfo: agentsv1alpha1.PodInfo{
+				PodIP: "1.2.3.4",
 			},
 		},
 	}
@@ -272,7 +282,7 @@ func TestReconciler_Reconcile_Claiming(t *testing.T) {
 	reconciler := &Reconciler{
 		Client:   fakeClient,
 		Scheme:   scheme,
-		controls: core.NewClaimControl(fakeClient, fakeRecorder, sandboxClient, cache),
+		controls: core.NewClaimControl(fakeClient, fakeRecorder, clientSet, cache),
 		recorder: fakeRecorder,
 	}
 
@@ -336,6 +346,10 @@ func TestReconciler_Reconcile_Claiming(t *testing.T) {
 			if len(sandbox.OwnerReferences) != 0 {
 				t.Errorf("Sandbox %s should have no OwnerReferences after being claimed, got %d",
 					sandbox.Name, len(sandbox.OwnerReferences))
+			}
+
+			if sandbox.Name != sandbox2.Name {
+				t.Errorf("only %s should be claimed, got %s", sandbox2.Name, sandbox.Name)
 			}
 		}
 	}

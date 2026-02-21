@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
+	"github.com/openkruise/agents/pkg/utils/expectations"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
@@ -55,7 +56,7 @@ func (s *Sandbox) GetTemplate() string {
 
 func (s *Sandbox) InplaceRefresh(ctx context.Context, deepcopy bool) error {
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(s.Sandbox)).V(consts.DebugLogLevel)
-	sbx, err := s.Cache.GetSandbox(stateutils.GetSandboxID(s.Sandbox))
+	sbx, err := s.Cache.GetClaimedSandbox(stateutils.GetSandboxID(s.Sandbox))
 	if err != nil {
 		return err
 	}
@@ -66,10 +67,11 @@ func (s *Sandbox) InplaceRefresh(ctx context.Context, deepcopy bool) error {
 			return err
 		}
 	}
-	if deepcopy {
-		s.Sandbox = sbx.DeepCopy()
-	} else {
+	if expectations.IsResourceVersionReallyNewer(s.Sandbox.GetResourceVersion(), sbx.GetResourceVersion()) {
 		s.Sandbox = sbx
+	}
+	if deepcopy {
+		s.Sandbox = s.Sandbox.DeepCopy()
 	}
 	return nil
 }
@@ -78,7 +80,7 @@ func (s *Sandbox) retryUpdate(ctx context.Context, updateFunc UpdateFunc, modifi
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(s.Sandbox))
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		// get the latest sandbox
-		sbx, err := s.Cache.GetSandbox(stateutils.GetSandboxID(s.Sandbox))
+		sbx, err := s.Cache.GetClaimedSandbox(stateutils.GetSandboxID(s.Sandbox))
 		if err != nil {
 			return err
 		}
@@ -153,6 +155,10 @@ func (s *Sandbox) SaveTimeout(ctx context.Context, opts infra.TimeoutOptions) er
 }
 
 func (s *Sandbox) GetTimeout() infra.TimeoutOptions {
+	return getTimeoutFromSandbox(s.Sandbox)
+}
+
+func getTimeoutFromSandbox(s *agentsv1alpha1.Sandbox) infra.TimeoutOptions {
 	opts := infra.TimeoutOptions{}
 	if s.Spec.ShutdownTime != nil {
 		opts.ShutdownTime = s.Spec.ShutdownTime.Time

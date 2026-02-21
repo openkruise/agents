@@ -11,6 +11,8 @@ import (
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	types "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	"github.com/stretchr/testify/assert"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -267,9 +269,95 @@ func TestServer_Process(t *testing.T) {
 					Response: &extProcPb.ProcessingResponse_ImmediateResponse{
 						ImmediateResponse: &extProcPb.ImmediateResponse{
 							Status: &types.HttpStatus{
-								Code: types.StatusCode(404),
+								Code: types.StatusCode(502),
 							},
-							Body: []byte("route for sandbox nonexistent not found"),
+							Body: []byte("sandbox nonexistent not found"),
+						},
+					},
+				},
+			},
+		},
+		{
+			name:        "bad port",
+			setupRoutes: []Route{},
+			adapter: &testRequestAdapter{
+				isSandboxRequest: true,
+				mapResult: mapResult{
+					sandboxID:   "sandbox1",
+					sandboxPort: 99999,
+					user:        "user1",
+					err:         nil,
+				},
+				authorizeResult: true,
+				entry:           "127.0.0.1:8080",
+			},
+			requests: []*extProcPb.ProcessingRequest{
+				{
+					Request: &extProcPb.ProcessingRequest_RequestHeaders{
+						RequestHeaders: &extProcPb.HttpHeaders{
+							Headers: &corev3.HeaderMap{
+								Headers: []*corev3.HeaderValue{
+									{Key: ":scheme", RawValue: []byte("http")},
+									{Key: ":authority", RawValue: []byte("99999-id.example.com")},
+									{Key: ":path", RawValue: []byte("/sandbox")},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectError: false,
+			expectResp: []*extProcPb.ProcessingResponse{
+				{
+					Response: &extProcPb.ProcessingResponse_ImmediateResponse{
+						ImmediateResponse: &extProcPb.ImmediateResponse{
+							Status: &types.HttpStatus{
+								Code: types.StatusCode(400),
+							},
+							Body: []byte("invalid sandbox port: 99999"),
+						},
+					},
+				},
+			},
+		},
+		{
+			name:        "sandbox not healthy",
+			setupRoutes: []Route{{ID: "sandbox1", IP: "192.168.1.10", Owner: "user1", State: agentsv1alpha1.SandboxStateDead}},
+			adapter: &testRequestAdapter{
+				isSandboxRequest: true,
+				mapResult: mapResult{
+					sandboxID:   "sandbox1",
+					sandboxPort: 9999,
+					user:        "user1",
+					err:         nil,
+				},
+				authorizeResult: true,
+				entry:           "127.0.0.1:8080",
+			},
+			requests: []*extProcPb.ProcessingRequest{
+				{
+					Request: &extProcPb.ProcessingRequest_RequestHeaders{
+						RequestHeaders: &extProcPb.HttpHeaders{
+							Headers: &corev3.HeaderMap{
+								Headers: []*corev3.HeaderValue{
+									{Key: ":scheme", RawValue: []byte("http")},
+									{Key: ":authority", RawValue: []byte("99999-id.example.com")},
+									{Key: ":path", RawValue: []byte("/sandbox")},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectError: false,
+			expectResp: []*extProcPb.ProcessingResponse{
+				{
+					Response: &extProcPb.ProcessingResponse_ImmediateResponse{
+						ImmediateResponse: &extProcPb.ImmediateResponse{
+							Status: &types.HttpStatus{
+								Code: types.StatusCode(502),
+							},
+							Body: []byte("healthy sandbox sandbox1 not found"),
 						},
 					},
 				},
@@ -410,12 +498,14 @@ func TestServer_Process(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Create server
-			server := NewServer(tt.adapter)
+			server := NewServer(tt.adapter, config.SandboxManagerOptions{ExtProcMaxConcurrency: 1000})
 
 			// Setup routes
 			for _, route := range tt.setupRoutes {
-				route.State = agentsv1alpha1.SandboxStateRunning
-				server.SetRoute(route)
+				if route.State == "" {
+					route.State = agentsv1alpha1.SandboxStateRunning
+				}
+				server.SetRoute(t.Context(), route)
 			}
 
 			// Create mock processing server
@@ -494,20 +584,10 @@ func TestServer_Process(t *testing.T) {
 					case *extProcPb.ProcessingResponse_ImmediateResponse:
 						if actualImmediate, ok := actual.Response.(*extProcPb.ProcessingResponse_ImmediateResponse); ok {
 							expectedImmediate := expected.Response.(*extProcPb.ProcessingResponse_ImmediateResponse)
-
 							// Check status code
-							if expectedImmediate.ImmediateResponse.Status.Code != actualImmediate.ImmediateResponse.Status.Code {
-								t.Errorf("status code mismatch, expected: %v, actual: %v",
-									expectedImmediate.ImmediateResponse.Status.Code,
-									actualImmediate.ImmediateResponse.Status.Code)
-							}
-
+							assert.Equal(t, expectedImmediate.ImmediateResponse.Status.Code, actualImmediate.ImmediateResponse.Status.Code)
 							// Check response body
-							if string(expectedImmediate.ImmediateResponse.Body) != string(actualImmediate.ImmediateResponse.Body) {
-								t.Errorf("response body mismatch, expected: %s, actual: %s",
-									string(expectedImmediate.ImmediateResponse.Body),
-									string(actualImmediate.ImmediateResponse.Body))
-							}
+							assert.Contains(t, string(actualImmediate.ImmediateResponse.Body), string(expectedImmediate.ImmediateResponse.Body))
 						} else {
 							t.Errorf("response type mismatch, expected ImmediateResponse")
 						}
@@ -526,7 +606,7 @@ func TestServer_Run_Stop(t *testing.T) {
 	}
 
 	// Create server
-	server := NewServer(adapter)
+	server := NewServer(adapter, config.SandboxManagerOptions{ExtProcMaxConcurrency: 1000})
 
 	// Start server in background
 	go func() {

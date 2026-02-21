@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime/pkg/client"
@@ -162,9 +163,11 @@ func TestSandbox_SetPause(t *testing.T) {
 			now := time.Now()
 			sandbox := &v1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:        "test-sandbox",
-					Namespace:   "default",
-					Labels:      map[string]string{},
+					Name:      "test-sandbox",
+					Namespace: "default",
+					Labels: map[string]string{
+						v1alpha1.LabelSandboxIsClaimed: "true",
+					},
 					Annotations: map[string]string{},
 				},
 				Status: v1alpha1.SandboxStatus{
@@ -212,13 +215,13 @@ func TestSandbox_SetPause(t *testing.T) {
 				err = s.Resume(t.Context())
 			}
 			if tt.expectError {
-				assert.Error(t, err)
+				require.Error(t, err)
 				return
 			}
 
-			assert.NoError(t, err)
+			require.NoError(t, err)
 			updatedSbx, err := client.ApiV1alpha1().Sandboxes("default").Get(t.Context(), "test-sandbox", metav1.GetOptions{})
-			assert.NoError(t, err)
+			require.NoError(t, err)
 
 			state, reason := sandboxutils.GetSandboxState(updatedSbx)
 			assert.Equal(t, tt.expectedState, state, reason)
@@ -245,9 +248,11 @@ func TestSandbox_ResumeConcurrent(t *testing.T) {
 	utils.InitLogOutput()
 	sandbox := &v1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:        "test-sandbox",
-			Namespace:   "default",
-			Labels:      map[string]string{},
+			Name:      "test-sandbox",
+			Namespace: "default",
+			Labels: map[string]string{
+				v1alpha1.LabelSandboxIsClaimed: "true",
+			},
 			Annotations: map[string]string{},
 		},
 		Status: v1alpha1.SandboxStatus{

@@ -213,7 +213,8 @@ func TestSandbox_InplaceRefresh(t *testing.T) {
 			Name:      "test-sandbox",
 			Namespace: "default",
 			Labels: map[string]string{
-				"initial": "value",
+				"initial":                      "value",
+				v1alpha1.LabelSandboxIsClaimed: "true",
 			},
 		},
 	}
@@ -378,6 +379,9 @@ func TestSandbox_SaveTimeout(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-sandbox",
 					Namespace: "default",
+					Labels: map[string]string{
+						v1alpha1.LabelSandboxIsClaimed: "true",
+					},
 				},
 				Spec: v1alpha1.SandboxSpec{
 					ShutdownTime: tt.initialTime,

@@ -76,7 +76,7 @@ type ClaimControl interface {
 }
 
 // NewClaimControl creates a map of claim controls
-func NewClaimControl(c client.Client, recorder record.EventRecorder, sandboxClient clients.SandboxClient, cache *sandboxcr.Cache) map[string]ClaimControl {
+func NewClaimControl(c client.Client, recorder record.EventRecorder, sandboxClient *clients.ClientSet, cache *sandboxcr.Cache) map[string]ClaimControl {
 	controls := map[string]ClaimControl{}
 	controls[core.CommonControlName] = NewCommonControl(c, recorder, sandboxClient, cache)
 	return controls

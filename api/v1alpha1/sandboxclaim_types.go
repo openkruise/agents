@@ -69,6 +69,22 @@ type SandboxClaimSpec struct {
 	// Only applicable if the SandboxSet has envd enabled
 	// +optional
 	EnvVars map[string]string `json:"envVars,omitempty"`
+
+	// InplaceUpdate allows to perform inplace update for sandbox while claiming
+	// +optional
+	InplaceUpdate *SandboxClaimInplaceUpdateOptions `json:"inplaceUpdate,omitempty"`
+}
+
+type SandboxClaimInplaceUpdateOptions struct {
+	// Image specifies the new image to update to
+	// +kubebuilder:validation:Required
+	Image string `json:"image"`
+
+	// Timeout specifies the maximum duration for waiting inplace update operation. Default: 15s
+	// Format: duration string (e.g., "3h", "200s", "15m")
+	// +optional
+	// +kubebuilder:default="15s"
+	Timeout *metav1.Duration `json:"timeout,omitempty"`
 }
 
 // SandboxClaimStatus defines the observed state of SandboxClaim

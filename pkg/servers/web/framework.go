@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"runtime"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
@@ -54,7 +55,8 @@ func RegisterRoute[T any](mux *http.ServeMux, method, path string, handler Handl
 			requestID = uuid.NewString()
 		}
 		// Derive context from request context to inherit cancellation when client disconnects
-		ctx := logs.NewContextFrom(r.Context(), "requestID", requestID)
+		ctx := logs.NewContextFrom(r.Context(),
+			"requestID", requestID, "api", fmt.Sprintf("%s %s", method, path))
 		log := klog.FromContext(ctx)
 
 		defer func() {
@@ -81,12 +83,14 @@ func RegisterRoute[T any](mux *http.ServeMux, method, path string, handler Handl
 				return
 			}
 		}
-		log.V(consts.DebugLogLevel+1).Info("start handling request", "pattern", pattern)
+		start := time.Now()
+		log.V(consts.DebugLogLevel).Info("start handling request", "pattern", pattern)
 		resp, err := handler(r.WithContext(ctx))
 		if err != nil {
-			log.Error(err, "API Error", "path", r.URL.Path)
+			log.Error(err, "API Error", "path", r.URL.Path, "cost", time.Since(start))
 			safeWriteJson(ctx, w, err.Code, http.StatusInternalServerError, err, requestID)
 		} else {
+			log.Info("API Success", "path", r.URL.Path, "cost", time.Since(start))
 			safeWriteJson(ctx, w, resp.Code, http.StatusOK, resp.Body, requestID)
 		}
 	}

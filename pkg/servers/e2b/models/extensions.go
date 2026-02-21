@@ -11,14 +11,18 @@ import (
 
 // Extension keys are annotations used by sandbox-manager only.
 // Since they are all delivered through the E2B interface, they uniformly use the e2b.agents.kruise.io prefix
+//
+//goland:noinspection GoSnakeCaseUsage
 const (
+	ExtensionKeyClaimTimeout                 = v1alpha1.E2BPrefix + "claim-timeout-seconds"
+	ExtensionKeyWaitReadyTimeout             = v1alpha1.E2BPrefix + "wait-ready-timeout-seconds"
 	ExtensionKeyClaimWithImage               = v1alpha1.E2BPrefix + "image"
-	ExtensionKeyInplaceUpdateTimeout         = v1alpha1.E2BPrefix + "inplace-update-timeout-seconds"
 	ExtensionKeyClaimWithCSIMount            = v1alpha1.E2BPrefix + "csi"
 	ExtensionKeyClaimWithCSIMount_VolumeName = ExtensionKeyClaimWithCSIMount + "-volume-name"
 	ExtensionKeyClaimWithCSIMount_MountPoint = ExtensionKeyClaimWithCSIMount + "-mount-point"
 	ExtensionKeySkipInitRuntime              = v1alpha1.E2BPrefix + "skip-init-runtime"
 	ExtensionKeyReserveFailedSandbox         = v1alpha1.E2BPrefix + "reserve-failed-sandbox"
+	ExtensionKeyCreateOnNoStock              = v1alpha1.E2BPrefix + "create-on-no-stock"
 )
 
 // Extensions for NewSandboxRequest
@@ -45,8 +49,17 @@ func (r *NewSandboxRequest) ParseExtensions() error {
 func (r *NewSandboxRequest) parseCommonExtensions() error {
 	r.Extensions.SkipInitRuntime = r.Metadata[ExtensionKeySkipInitRuntime] == v1alpha1.True
 	r.Extensions.ReserveFailedSandbox = r.Metadata[ExtensionKeyReserveFailedSandbox] == v1alpha1.True
+	r.Extensions.CreateOnNoStock = r.Metadata[ExtensionKeyCreateOnNoStock] == v1alpha1.True
 	delete(r.Metadata, ExtensionKeySkipInitRuntime)
 	delete(r.Metadata, ExtensionKeyReserveFailedSandbox)
+	delete(r.Metadata, ExtensionKeyCreateOnNoStock)
+	var err error
+	if r.Extensions.TimeoutSeconds, err = r.parseAndRemoveIntExtension(ExtensionKeyClaimTimeout); err != nil {
+		return err
+	}
+	if r.Extensions.WaitReadySeconds, err = r.parseAndRemoveIntExtension(ExtensionKeyWaitReadyTimeout); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -57,18 +70,7 @@ func (r *NewSandboxRequest) parseExtensionImage() error {
 			return fmt.Errorf("invalid image [%s]: %v", image, err)
 		}
 		r.Extensions.InplaceUpdate.Image = image
-		r.Extensions.InplaceUpdate.TimeoutSeconds = DefaultInplaceUpdateTimeoutSeconds
 		delete(r.Metadata, ExtensionKeyClaimWithImage)
-	}
-	if timeoutStr, ok := r.Metadata[ExtensionKeyInplaceUpdateTimeout]; ok {
-		timeoutSeconds, err := strconv.Atoi(timeoutStr)
-		if err != nil {
-			return fmt.Errorf("invalid timeout [%s]: %v", timeoutStr, err)
-		}
-		if timeoutSeconds > 0 {
-			r.Extensions.InplaceUpdate.TimeoutSeconds = timeoutSeconds
-		}
-		delete(r.Metadata, ExtensionKeyInplaceUpdateTimeout)
 	}
 	return nil
 }
@@ -102,4 +104,18 @@ func (r *NewSandboxRequest) parseExtensionCSIMount() error {
 	delete(r.Metadata, ExtensionKeyClaimWithCSIMount_VolumeName)
 	delete(r.Metadata, ExtensionKeyClaimWithCSIMount_MountPoint)
 	return nil
+}
+
+func (r *NewSandboxRequest) parseAndRemoveIntExtension(key string) (int, error) {
+	if numStr, ok := r.Metadata[key]; ok {
+		defer delete(r.Metadata, key)
+		num, err := strconv.Atoi(numStr)
+		if err != nil {
+			return 0, fmt.Errorf("invalid number [%s]: %v", numStr, err)
+		}
+		if num > 0 {
+			return num, nil
+		}
+	}
+	return 0, nil
 }

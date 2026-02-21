@@ -92,6 +92,9 @@ func TestCache_WaitForSandboxSatisfied(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "test-sandbox-1",
 						Namespace: "default",
+						Labels: map[string]string{
+							agentsv1alpha1.LabelSandboxIsClaimed: "true",
+						},
 					},
 					Status: agentsv1alpha1.SandboxStatus{
 						Phase: agentsv1alpha1.SandboxPending,
@@ -114,6 +117,9 @@ func TestCache_WaitForSandboxSatisfied(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "test-sandbox-2",
 						Namespace: "default",
+						Labels: map[string]string{
+							agentsv1alpha1.LabelSandboxIsClaimed: "true",
+						},
 					},
 					Status: agentsv1alpha1.SandboxStatus{
 						Phase: agentsv1alpha1.SandboxPending,
@@ -139,6 +145,9 @@ func TestCache_WaitForSandboxSatisfied(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "test-sandbox-1",
 						Namespace: "default",
+						Labels: map[string]string{
+							agentsv1alpha1.LabelSandboxIsClaimed: "true",
+						},
 					},
 					Status: agentsv1alpha1.SandboxStatus{
 						Phase: agentsv1alpha1.SandboxPending,
@@ -166,6 +175,9 @@ func TestCache_WaitForSandboxSatisfied(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "test-sandbox-2",
 						Namespace: "default",
+						Labels: map[string]string{
+							agentsv1alpha1.LabelSandboxIsClaimed: "true",
+						},
 					},
 					Status: agentsv1alpha1.SandboxStatus{
 						Phase: agentsv1alpha1.SandboxPending,
@@ -188,6 +200,9 @@ func TestCache_WaitForSandboxSatisfied(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "test-sandbox-2",
 						Namespace: "default",
+						Labels: map[string]string{
+							agentsv1alpha1.LabelSandboxIsClaimed: "true",
+						},
 					},
 					Status: agentsv1alpha1.SandboxStatus{
 						Phase: agentsv1alpha1.SandboxPending,
@@ -210,6 +225,9 @@ func TestCache_WaitForSandboxSatisfied(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "test-sandbox-2",
 						Namespace: "default",
+						Labels: map[string]string{
+							agentsv1alpha1.LabelSandboxIsClaimed: "true",
+						},
 					},
 					Status: agentsv1alpha1.SandboxStatus{
 						Phase: agentsv1alpha1.SandboxPending,
@@ -269,6 +287,9 @@ func TestCache_WaitForSandboxSatisfied_Cancel(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-sandbox-1",
 			Namespace: "default",
+			Labels: map[string]string{
+				agentsv1alpha1.LabelSandboxIsClaimed: "true",
+			},
 		},
 		Status: agentsv1alpha1.SandboxStatus{
 			Phase: agentsv1alpha1.SandboxPending,

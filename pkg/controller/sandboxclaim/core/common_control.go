@@ -22,7 +22,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/utils"
+	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
+	"golang.org/x/time/rate"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -36,12 +39,12 @@ import (
 type commonControl struct {
 	client.Client
 	recorder      record.EventRecorder
-	sandboxClient clients.SandboxClient
+	sandboxClient *clients.ClientSet
 	cache         *sandboxcr.Cache
 	pickCache     sync.Map
 }
 
-func NewCommonControl(c client.Client, recorder record.EventRecorder, sandboxClient clients.SandboxClient, cache *sandboxcr.Cache) ClaimControl {
+func NewCommonControl(c client.Client, recorder record.EventRecorder, sandboxClient *clients.ClientSet, cache *sandboxcr.Cache) ClaimControl {
 	// Note: sandboxClient and cache can be nil for unit tests
 	// In production, SetupWithManager always provides these dependencies
 
@@ -193,10 +196,12 @@ func (c *commonControl) claimSandboxes(ctx context.Context, claim *agentsv1alpha
 		return 0, fmt.Errorf("failed to build claim options: %w", err)
 	}
 
+	claimLockChannel := make(chan struct{}, batchSize) // set to max batch size, not controlled
+	limiter := rate.NewLimiter(rate.Inf, batchSize)
 	// Attempt to claim sandboxes concurrently using DoItSlowly
 	claimedCount, err := utils.DoItSlowly(batchSize, InitialClaimBatchSize, func() error {
 		// Pass nil for rand so sandboxcr uses global rand (concurrent-safe).
-		sbx, metrics, claimErr := sandboxcr.TryClaimSandbox(ctx, opts, &c.pickCache, c.cache, c.sandboxClient)
+		sbx, metrics, claimErr := sandboxcr.TryClaimSandbox(ctx, opts, &c.pickCache, c.cache, c.sandboxClient, claimLockChannel, limiter)
 		if claimErr != nil {
 			log.Error(claimErr, "Failed to claim sandbox")
 			return claimErr
@@ -256,6 +261,15 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 		},
 	}
 
+	if claim.Spec.InplaceUpdate != nil {
+		opts.InplaceUpdate = &config.InplaceUpdateOptions{
+			Image: claim.Spec.InplaceUpdate.Image,
+		}
+		if claim.Spec.InplaceUpdate.Timeout != nil {
+			opts.WaitReadyTimeout = claim.Spec.InplaceUpdate.Timeout.Duration
+		}
+	}
+
 	// todo support other options (like envvars, inplace update...)
 
 	// Validate and initialize
@@ -264,17 +278,19 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 
 // countClaimedSandboxes counts sandboxes that are claimed by this claim
 func (c *commonControl) countClaimedSandboxes(ctx context.Context, claim *agentsv1alpha1.SandboxClaim) (int32, error) {
+	log := logf.FromContext(ctx)
 	sandboxes, err := c.cache.ListSandboxWithUser(string(claim.UID))
 	if err != nil {
 		return 0, err
 	}
-
-	return int32(len(sandboxes)), nil
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
+	var cnt int32
+	for _, sbx := range sandboxes {
+		state, reason := stateutils.GetSandboxState(sbx)
+		if state == agentsv1alpha1.SandboxStateDead {
+			log.Info("skip counting dead sandbox", "reason", reason)
+			continue
+		}
+		cnt++
 	}
-	return b
+	return cnt, nil
 }

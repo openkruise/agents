@@ -2,12 +2,14 @@ package sandboxset
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 	apps "k8s.io/api/apps/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -42,9 +44,12 @@ func (r *Reconciler) initNewStatus(ss *agentsv1alpha1.SandboxSet) (*agentsv1alph
 	return newStatus, nil
 }
 
-func saveStatusFromGroup(newStatus *agentsv1alpha1.SandboxSetStatus, groups GroupedSandboxes) (actualReplicas int32) {
+func saveStatusFromGroup(ctx context.Context, newStatus *agentsv1alpha1.SandboxSetStatus, groups GroupedSandboxes, dirtyScaleUp map[expectations.ScaleAction][]string) (actualReplicas int32) {
+	log := logf.FromContext(ctx)
 	newStatus.AvailableReplicas = int32(len(groups.Available))
-	newStatus.Replicas = int32(len(groups.Creating)) + int32(len(groups.Available))
+	newStatus.Replicas = int32(len(groups.Creating)) + int32(len(groups.Available)) + int32(len(dirtyScaleUp[expectations.Create]))
+	log.Info("new status calculated", "replicas", newStatus.Replicas, "available", newStatus.AvailableReplicas,
+		"creating", len(groups.Creating), "dirtyCreating", len(dirtyScaleUp[expectations.Create]))
 	return newStatus.Replicas
 }
 
@@ -94,7 +99,7 @@ func clearAndInitInnerKeys(m map[string]string) map[string]string {
 		return map[string]string{}
 	}
 	for k := range m {
-		if strings.HasPrefix(k, agentsv1alpha1.E2BPrefix) {
+		if strings.HasPrefix(k, agentsv1alpha1.InternalPrefix) {
 			delete(m, k)
 		}
 	}
@@ -131,20 +136,54 @@ func (r *Reconciler) newRevision(set *agentsv1alpha1.SandboxSet, revision int64,
 // scaleExpectationSatisfied logic:
 // 1. if scaleUpExpectation is not satisfied, both scaling up and scaling down are forbidden
 // 2. if scaleDownExpectation is not satisfied, scaling up is allowed and scaling down is forbidden
-func scaleExpectationSatisfied(ctx context.Context, scaleExpectation expectations.ScaleExpectations, key string) (ok bool, requeueAfter time.Duration) {
+func scaleExpectationSatisfied(ctx context.Context, scaleExpectation expectations.ScaleExpectations, key string) (
+	ok bool, dirty map[expectations.ScaleAction][]string, requeueAfter time.Duration) {
 	log := logf.FromContext(ctx)
 	satisfied, unsatisfiedDuration, dirty := scaleExpectation.SatisfiedExpectations(key)
 	if satisfied {
-		return true, 0
+		return true, dirty, 0
 	}
 
 	if unsatisfiedDuration > expectations.ExpectationTimeout {
 		scaleExpectation.DeleteExpectations(key)
 		log.Error(nil, "expectation unsatisfied overtime, force delete the timeout expectation", "requeueAfter", retryAfterForceDeleteExpectation)
-		return false, retryAfterForceDeleteExpectation
+		return false, dirty, retryAfterForceDeleteExpectation
 	}
 
 	requeueAfter = expectations.ExpectationTimeout - unsatisfiedDuration
-	log.Info("expectations not satisfied", "dirty", dirty, "requeueAfter", requeueAfter)
-	return false, requeueAfter
+	log.Info("expectations not satisfied",
+		"createDirty", len(dirty[expectations.Create]), "deleteDirty", len(dirty[expectations.Delete]), "requeueAfter", requeueAfter)
+	return false, dirty, requeueAfter
+}
+
+func NewSandboxFromSandboxSet(sbs *agentsv1alpha1.SandboxSet) *agentsv1alpha1.Sandbox {
+	generateName := fmt.Sprintf("%s-", sbs.Name)
+	template := sbs.Spec.Template.DeepCopy()
+	sbx := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			GenerateName: generateName,
+			Namespace:    sbs.Namespace,
+			Labels:       template.Labels,
+			Annotations:  template.Annotations,
+		},
+		Spec: agentsv1alpha1.SandboxSpec{
+			PersistentContents: sbs.Spec.PersistentContents,
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				TemplateRef:          sbs.Spec.TemplateRef,
+				Template:             template,
+				VolumeClaimTemplates: sbs.Spec.VolumeClaimTemplates,
+			},
+		},
+	}
+	sbx.Annotations = clearAndInitInnerKeys(sbx.Annotations)
+	sbx.Labels = clearAndInitInnerKeys(sbx.Labels)
+	sbx.Labels[agentsv1alpha1.LabelSandboxPool] = sbs.Name
+	sbx.Labels[agentsv1alpha1.LabelSandboxTemplate] = sbs.Name
+	sbx.Labels[agentsv1alpha1.LabelSandboxIsClaimed] = "false"
+	if sbs.Spec.TemplateRef != nil {
+		sbx.Labels[agentsv1alpha1.LabelSandboxTemplate] = sbs.Spec.TemplateRef.Name
+	} else {
+		sbx.Labels[agentsv1alpha1.LabelSandboxTemplate] = sbs.Name
+	}
+	return sbx
 }

@@ -41,11 +41,13 @@ type NewSandboxRequestExtension struct {
 	CSIMount             CSIMountExtension
 	SkipInitRuntime      bool
 	ReserveFailedSandbox bool
+	CreateOnNoStock      bool
+	WaitReadySeconds     int
+	TimeoutSeconds       int
 }
 
 type InplaceUpdateExtension struct {
-	Image          string
-	TimeoutSeconds int
+	Image string
 }
 
 type CSIMountExtension struct {
@@ -64,8 +66,6 @@ type SetTimeoutRequest struct {
 }
 
 const (
-	// EnvdPort is the port used for envd communication
-	EnvdPort = 49983
 	// CDPPort is the port used for CDP (Chrome DevTools Port) communication
 	CDPPort = 9222
 )

@@ -3,10 +3,14 @@ package sandboxcr
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
+	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
+	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
+	"golang.org/x/time/rate"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	k8sinformers "k8s.io/client-go/informers"
@@ -16,32 +20,35 @@ import (
 	"k8s.io/klog/v2"
 
 	"github.com/openkruise/agents/api/v1alpha1"
-	sandboxclient "github.com/openkruise/agents/client/clientset/versioned"
 	informers "github.com/openkruise/agents/client/informers/externalversions"
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
-	commonutils "github.com/openkruise/agents/pkg/utils"
 	managerutils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
 )
 
 type Infra struct {
 	Cache  *Cache
-	Client sandboxclient.Interface
+	Client *clients.ClientSet
 	Proxy  *proxy.Server
 
-	pickCache sync.Map
+	// For claiming sandbox
+	pickCache        sync.Map
+	claimLockChannel chan struct{}
+	createLimiter    *rate.Limiter
 
 	// Currently, templates stores the mapping of sandboxset name -> number of namespaces. For example,
 	// if a sandboxset with the same name is created in two different namespaces, the corresponding value would be 2.
 	// In the future, this will be changed to integrate with Template CR.
 	templates sync.Map
+
+	reconcileRouteStopCh chan struct{}
 }
 
-func NewInfra(client sandboxclient.Interface, k8sClient kubernetes.Interface, proxy *proxy.Server, systemNamespace string) (*Infra, error) {
+func NewInfra(client *clients.ClientSet, k8sClient kubernetes.Interface, proxy *proxy.Server, opts config.SandboxManagerOptions) (*Infra, error) {
 	// Create informer factory for custom Sandbox resources
-	informerFactory := informers.NewSharedInformerFactory(client, time.Minute*10)
+	informerFactory := informers.NewSharedInformerFactory(client.SandboxClient, time.Minute*10)
 	sandboxInformer := informerFactory.Api().V1alpha1().Sandboxes().Informer()
 	sandboxSetInformer := informerFactory.Api().V1alpha1().SandboxSets().Informer()
 
@@ -49,10 +56,7 @@ func NewInfra(client sandboxclient.Interface, k8sClient kubernetes.Interface, pr
 	coreInformerFactory := k8sinformers.NewSharedInformerFactory(k8sClient, time.Minute*10)
 	persistentVolumeInformer := coreInformerFactory.Core().V1().PersistentVolumes().Informer()
 	// Create informer factory with specified namespace for native Kubernetes resources (Secret)
-	if systemNamespace == "" {
-		systemNamespace = commonutils.DefaultSandboxDeployNamespace
-	}
-	coreInformerFactorySpecifiedNs := k8sinformers.NewSharedInformerFactoryWithOptions(k8sClient, time.Minute*10, k8sinformers.WithNamespace(systemNamespace))
+	coreInformerFactorySpecifiedNs := k8sinformers.NewSharedInformerFactoryWithOptions(k8sClient, time.Minute*10, k8sinformers.WithNamespace(opts.SystemNamespace))
 	// to generate informers only for the specified namespace to avoid potential security privilege escalation risks.
 	secretInformer := coreInformerFactorySpecifiedNs.Core().V1().Secrets().Informer()
 
@@ -63,9 +67,12 @@ func NewInfra(client sandboxclient.Interface, k8sClient kubernetes.Interface, pr
 	}
 
 	instance := &Infra{
-		Cache:  cache,
-		Client: client,
-		Proxy:  proxy,
+		Cache:                cache,
+		Client:               client,
+		Proxy:                proxy,
+		reconcileRouteStopCh: make(chan struct{}),
+		claimLockChannel:     make(chan struct{}, opts.MaxClaimWorkers),
+		createLimiter:        rate.NewLimiter(rate.Limit(opts.MaxCreateQPS), opts.MaxCreateQPS),
 	}
 
 	cache.AddSandboxEventHandler(k8scache.ResourceEventHandlerFuncs{
@@ -78,6 +85,10 @@ func NewInfra(client sandboxclient.Interface, k8sClient kubernetes.Interface, pr
 		AddFunc:    instance.onSandboxSetCreate,
 		DeleteFunc: instance.onSandboxSetDelete,
 	})
+
+	// Start route reconciler to handle missed delete events
+	go instance.startRouteReconciler(RouteReconcileInterval)
+
 	return instance, nil
 }
 
@@ -86,6 +97,7 @@ func (i *Infra) Run(ctx context.Context) error {
 }
 
 func (i *Infra) Stop() {
+	close(i.reconcileRouteStopCh)
 	i.Cache.Stop()
 }
 
@@ -99,13 +111,16 @@ func (i *Infra) ClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions
 		return nil, metrics, err
 	}
 
+	claimCtx, cancel := context.WithTimeout(ctx, opts.ClaimTimeout)
+	defer cancel()
+
+	// Start claiming sandbox
 	log.V(consts.DebugLogLevel).Info("claim sandbox options", "options", opts)
 	metrics.Retries = -1 // starts from 0
 	var claimedSandbox infra.Sandbox
-	return claimedSandbox, metrics, retry.OnError(wait.Backoff{
-		Steps:    int(DefaultClaimTimeout / RetryInterval),
+	err = retry.OnError(wait.Backoff{
+		Steps:    int(opts.ClaimTimeout / RetryInterval),
 		Duration: RetryInterval,
-		Cap:      DefaultClaimTimeout,
 		Factor:   LockBackoffFactor,
 		Jitter:   LockJitter,
 	}, func(err error) bool {
@@ -113,17 +128,32 @@ func (i *Infra) ClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions
 	}, func() error {
 		metrics.Retries++
 		log.Info("try to claim sandbox", "retries", metrics.Retries)
-		claimed, tryMetrics, claimErr := TryClaimSandbox(ctx, opts, &i.pickCache, i.Cache, i.Client)
-		if claimErr == nil {
-			tryMetrics.Retries = metrics.Retries
-			tryMetrics.Wait = metrics.Wait
-			tryMetrics.Total += metrics.Wait
-			metrics = tryMetrics
-			claimedSandbox = claimed
+		claimed, tryMetrics, claimErr := TryClaimSandbox(claimCtx, opts, &i.pickCache, i.Cache, i.Client, i.claimLockChannel, i.createLimiter)
+		metrics.Total += tryMetrics.Total
+		metrics.Wait += tryMetrics.Wait
+		metrics.PickAndLock += tryMetrics.PickAndLock
+		metrics.WaitReady += tryMetrics.WaitReady
+		metrics.InitRuntime += tryMetrics.InitRuntime
+		metrics.CSIMount += tryMetrics.CSIMount
+		metrics.LockType = tryMetrics.LockType
+		if tryMetrics.LastError != nil {
+			metrics.LastError = tryMetrics.LastError
 		}
-		metrics.Wait += tryMetrics.Total
+		if claimErr == nil {
+			claimedSandbox = claimed
+		} else {
+			metrics.RetryCost += tryMetrics.Total
+		}
 		return claimErr
 	})
+	return claimedSandbox, metrics, buildClaimError(err, metrics.LastError)
+}
+
+func buildClaimError(err error, lastError error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%v, last error: %v", err, lastError)
 }
 
 func (i *Infra) GetCache() infra.CacheProvider {
@@ -145,7 +175,7 @@ func (i *Infra) SelectSandboxes(user string, limit int, filter func(sandbox infr
 		if !managerutils.ResourceVersionExpectationSatisfied(obj) {
 			continue
 		}
-		sbx := AsSandbox(obj, i.Cache, i.Client)
+		sbx := AsSandbox(obj, i.Cache, i.Client.SandboxClient)
 		if filter == nil || filter(sbx) {
 			sandboxes = append(sandboxes, sbx)
 		}
@@ -156,8 +186,8 @@ func (i *Infra) SelectSandboxes(user string, limit int, filter func(sandbox infr
 	return sandboxes, nil
 }
 
-func (i *Infra) GetSandbox(ctx context.Context, sandboxID string) (infra.Sandbox, error) {
-	sandbox, err := i.Cache.GetSandbox(sandboxID)
+func (i *Infra) GetClaimedSandbox(ctx context.Context, sandboxID string) (infra.Sandbox, error) {
+	sandbox, err := i.Cache.GetClaimedSandbox(sandboxID)
 	if err != nil {
 		return nil, err
 	}
@@ -168,7 +198,7 @@ func (i *Infra) GetSandbox(ctx context.Context, sandboxID string) (infra.Sandbox
 			return nil, err
 		}
 	}
-	return AsSandbox(sandbox, i.Cache, i.Client), nil
+	return AsSandbox(sandbox, i.Cache, i.Client.SandboxClient), nil
 }
 
 func (i *Infra) onSandboxAdd(obj any) {
@@ -179,8 +209,8 @@ func (i *Infra) onSandboxAdd(obj any) {
 	if !i.HasTemplate(GetTemplateFromSandbox(sbx)) {
 		return
 	}
-	route := AsSandbox(sbx, i.Cache, i.Client).GetRoute()
-	i.Proxy.SetRoute(route)
+	route := AsSandbox(sbx, i.Cache, i.Client.SandboxClient).GetRoute()
+	i.Proxy.SetRoute(logs.NewContext(), route)
 	managerutils.ResourceVersionExpectationObserve(sbx)
 }
 
@@ -189,7 +219,9 @@ func (i *Infra) onSandboxDelete(obj any) {
 	if !ok {
 		return
 	}
-	i.Proxy.DeleteRoute(stateutils.GetSandboxID(sbx))
+	sandboxID := stateutils.GetSandboxID(sbx)
+	i.Proxy.DeleteRoute(sandboxID)
+	klog.InfoS("sandbox route deleted", "sandboxID", sandboxID)
 	managerutils.ResourceVersionExpectationDelete(sbx)
 }
 
@@ -201,7 +233,7 @@ func (i *Infra) onSandboxUpdate(_, newObj any) {
 	if !i.HasTemplate(GetTemplateFromSandbox(newSbx)) {
 		return
 	}
-	i.refreshRoute(AsSandbox(newSbx, i.Cache, i.Client))
+	i.refreshRoute(AsSandbox(newSbx, i.Cache, i.Client.SandboxClient))
 	managerutils.ResourceVersionExpectationObserve(newSbx)
 }
 
@@ -209,7 +241,7 @@ func (i *Infra) refreshRoute(sbx infra.Sandbox) {
 	oldRoute, _ := i.Proxy.LoadRoute(sbx.GetName())
 	newRoute := sbx.GetRoute()
 	if newRoute.State != oldRoute.State || newRoute.IP != oldRoute.IP {
-		i.Proxy.SetRoute(newRoute)
+		i.Proxy.SetRoute(logs.NewContext(), newRoute)
 	}
 }
 
@@ -269,4 +301,64 @@ func GetTemplateFromSandbox(sbx metav1.Object) string {
 		tmpl = sbx.GetLabels()[v1alpha1.LabelSandboxPool]
 	}
 	return tmpl
+}
+
+const (
+	// RouteReconcileInterval is the interval for route reconciliation
+	RouteReconcileInterval = 5 * time.Minute
+)
+
+// startRouteReconciler periodically reconciles routes to clean up orphaned entries
+// that might be left due to missed delete events from Kubernetes informer
+func (i *Infra) startRouteReconciler(interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			i.reconcileRoutes()
+		case <-i.reconcileRouteStopCh:
+			klog.Info("route reconciler stopped")
+			return
+		}
+	}
+}
+
+// reconcileRoutes compares routes in Proxy with Sandboxes in Cache
+// and deletes orphaned routes that no longer have corresponding Sandboxes
+func (i *Infra) reconcileRoutes() {
+	ctx := logs.NewContext()
+	log := klog.FromContext(ctx)
+	log.Info("starting route reconciliation")
+	// Build set of existing sandbox IDs from cache
+	existingSandboxIDs := make(map[string]struct{})
+
+	sandboxList := i.Cache.sandboxInformer.GetStore().List()
+	for _, obj := range sandboxList {
+		sbx, ok := obj.(*v1alpha1.Sandbox)
+		if !ok {
+			continue
+		}
+		sandboxID := stateutils.GetSandboxID(sbx)
+		existingSandboxIDs[sandboxID] = struct{}{}
+	}
+
+	// Check all routes and delete orphaned ones
+	routes := i.Proxy.ListRoutes()
+	deletedCount := 0
+	for _, route := range routes {
+		if _, exists := existingSandboxIDs[route.ID]; !exists {
+			i.Proxy.DeleteRoute(route.ID)
+			deletedCount++
+			managerutils.ResourceVersionExpectationDelete(&metav1.ObjectMeta{
+				UID: route.UID,
+			})
+			log.Info("reconciler deleted orphaned route", "sandboxID", route.ID)
+		}
+	}
+
+	if deletedCount > 0 {
+		log.Info("route reconciliation completed", "orphanedRoutesDeleted", deletedCount, "totalRoutes", len(routes))
+	}
 }

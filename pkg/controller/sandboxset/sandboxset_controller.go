@@ -119,17 +119,16 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 
 	controllerKey := GetControllerKey(sbs)
-	var requeueAfter time.Duration
-	var scaleUpSatisfied, scaleDownSatisfied bool
-	scaleUpSatisfied, scaleUpTimeoutAfter := scaleExpectationSatisfied(ctx, scaleUpExpectation, controllerKey)
-	scaleDownSatisfied, scaleDownTimeoutAfter := scaleExpectationSatisfied(ctx, scaleDownExpectation, controllerKey)
-	requeueAfter = min(scaleUpTimeoutAfter, scaleDownTimeoutAfter)
 	groups, err := r.groupAllSandboxes(ctx, sbs)
 	if err != nil {
 		log.Error(err, "failed to group sandboxes")
 		return ctrl.Result{}, err
 	}
-	actualReplicas := saveStatusFromGroup(newStatus, groups)
+	var requeueAfter time.Duration
+	scaleUpSatisfied, dirtyScaleUp, scaleUpTimeoutAfter := scaleExpectationSatisfied(ctx, scaleUpExpectation, controllerKey)
+	scaleDownSatisfied, _, scaleDownTimeoutAfter := scaleExpectationSatisfied(ctx, scaleDownExpectation, controllerKey)
+	requeueAfter = min(scaleUpTimeoutAfter, scaleDownTimeoutAfter)
+	actualReplicas := saveStatusFromGroup(ctx, newStatus, groups, dirtyScaleUp)
 
 	// Set selector in status for scale subresource
 	if newStatus.Selector == "" {
@@ -151,12 +150,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// Step 1: perform scale
 	start := time.Now()
 	delta := int(sbs.Spec.Replicas - actualReplicas)
+	log.Info("performing scale", "expect", sbs.Spec.Replicas, "actual", actualReplicas)
 	if delta > 0 {
-		if !scaleUpSatisfied {
-			log.Info("skip scale up for scaleUpExpectation is not satisfied")
-		} else {
-			err = r.scaleUp(ctx, delta, sbs, newStatus.UpdateRevision)
-		}
+		err = r.scaleUp(ctx, delta, sbs, newStatus.UpdateRevision)
 	} else if delta < 0 {
 		if !scaleUpSatisfied || !scaleDownSatisfied {
 			log.Info("skip scale down for scaleUpExpectation or scaleDownExpectation is not satisfied")
@@ -233,35 +229,8 @@ func (r *Reconciler) scaleDown(ctx context.Context, count int, sbs *agentsv1alph
 }
 
 func (r *Reconciler) createSandbox(ctx context.Context, sbs *agentsv1alpha1.SandboxSet, revision string) (*agentsv1alpha1.Sandbox, error) {
-	generateName := fmt.Sprintf("%s-", sbs.Name)
-	template := sbs.Spec.Template.DeepCopy()
-	sbx := &agentsv1alpha1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{
-			GenerateName: generateName,
-			Namespace:    sbs.Namespace,
-			Labels:       template.Labels,
-			Annotations:  template.Annotations,
-		},
-		Spec: agentsv1alpha1.SandboxSpec{
-			PersistentContents: sbs.Spec.PersistentContents,
-			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
-				TemplateRef:          sbs.Spec.TemplateRef,
-				Template:             template,
-				VolumeClaimTemplates: sbs.Spec.VolumeClaimTemplates,
-			},
-		},
-	}
-	sbx.Annotations = clearAndInitInnerKeys(sbx.Annotations)
-	sbx.Labels = clearAndInitInnerKeys(sbx.Labels)
-	sbx.Labels[agentsv1alpha1.LabelSandboxPool] = sbs.Name
-	sbx.Labels[agentsv1alpha1.LabelSandboxTemplate] = sbs.Name
-	sbx.Labels[agentsv1alpha1.LabelSandboxIsClaimed] = "false"
+	sbx := NewSandboxFromSandboxSet(sbs)
 	sbx.Labels[agentsv1alpha1.LabelTemplateHash] = revision
-	if sbs.Spec.TemplateRef != nil {
-		sbx.Labels[agentsv1alpha1.LabelSandboxTemplate] = sbs.Spec.TemplateRef.Name
-	} else {
-		sbx.Labels[agentsv1alpha1.LabelSandboxTemplate] = sbs.Name
-	}
 	if err := ctrl.SetControllerReference(sbs, sbx, r.Scheme); err != nil {
 		return nil, err
 	}

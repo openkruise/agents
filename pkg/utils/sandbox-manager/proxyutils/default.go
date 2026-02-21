@@ -24,10 +24,12 @@ func getRouteFromSandbox(s *agentsv1alpha1.Sandbox) proxy.Route {
 		state = agentsv1alpha1.SandboxStateCreating
 	}
 	return proxy.Route{
-		IP:    s.Status.PodInfo.PodIP,
-		ID:    stateutils.GetSandboxID(s),
-		Owner: s.GetAnnotations()[agentsv1alpha1.AnnotationOwner],
-		State: state,
+		IP:              s.Status.PodInfo.PodIP,
+		ID:              stateutils.GetSandboxID(s),
+		UID:             s.GetUID(),
+		Owner:           s.GetAnnotations()[agentsv1alpha1.AnnotationOwner],
+		State:           state,
+		ResourceVersion: s.GetResourceVersion(),
 	}
 }
 

@@ -66,3 +66,72 @@ func TestResourceVersionExpectation(t *testing.T) {
 		}
 	}
 }
+
+func TestResourceVersionPlusOne(t *testing.T) {
+	tests := []struct {
+		name            string
+		resourceVersion string
+		expected        string
+	}{
+		{
+			name:            "empty string returns 1",
+			resourceVersion: "",
+			expected:        "1",
+		},
+		{
+			name:            "normal version increment",
+			resourceVersion: "123",
+			expected:        "124",
+		},
+		{
+			name:            "zero version",
+			resourceVersion: "0",
+			expected:        "1",
+		},
+		{
+			name:            "single digit",
+			resourceVersion: "5",
+			expected:        "6",
+		},
+		{
+			name:            "large version number",
+			resourceVersion: "999999",
+			expected:        "1000000",
+		},
+		{
+			name:            "max uint64 minus one",
+			resourceVersion: "18446744073709551614",
+			expected:        "18446744073709551615",
+		},
+		{
+			name:            "invalid format returns original",
+			resourceVersion: "abc",
+			expected:        "abc",
+		},
+		{
+			name:            "mixed alphanumeric returns original",
+			resourceVersion: "123abc",
+			expected:        "123abc",
+		},
+		{
+			name:            "negative number returns original",
+			resourceVersion: "-1",
+			expected:        "-1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pod := &v1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					ResourceVersion: tt.resourceVersion,
+					UID:             "test-uid",
+				},
+			}
+			result := GetNewerResourceVersion(pod)
+			if result != tt.expected {
+				t.Errorf("GetNewerResourceVersion(pod with version %q) = %q, want %q", tt.resourceVersion, result, tt.expected)
+			}
+		})
+	}
+}

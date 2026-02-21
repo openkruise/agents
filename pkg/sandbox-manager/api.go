@@ -21,6 +21,7 @@ func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts infra.ClaimSandb
 	}
 	sandbox, metrics, err := m.infra.ClaimSandbox(ctx, opts)
 	if err != nil {
+		log.Error(err, "failed to claim sandbox", "metrics", metrics.String())
 		// Requirement: Track failure in API layer
 		SandboxCreationResponses.WithLabelValues("failure").Inc()
 		return nil, errors.NewError(errors.ErrorInternal, fmt.Sprintf("failed to claim sandbox: %v", err))
@@ -31,7 +32,8 @@ func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts infra.ClaimSandb
 	// Requirement: Only measure the latency when no error exists
 	SandboxCreationLatency.Observe(float64(metrics.Total.Milliseconds()))
 
-	log.Info("sandbox claimed", "sandbox", klog.KObj(sandbox), "metrics", metrics)
+	state, reason := sandbox.GetState()
+	log.Info("sandbox claimed", "sandbox", klog.KObj(sandbox), "metrics", metrics.String(), "state", state, "reason", reason)
 
 	// Sync route without refresh since sandbox was just claimed and state is already up-to-date
 	if err = m.syncRoute(ctx, sandbox, false); err != nil {
@@ -44,7 +46,7 @@ func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts infra.ClaimSandb
 func (m *SandboxManager) GetClaimedSandbox(ctx context.Context, user, sandboxID string) (infra.Sandbox, error) {
 	log := klog.FromContext(ctx).WithValues("sandboxID", sandboxID)
 	log.Info("try to get claimed sandbox")
-	sbx, err := m.infra.GetSandbox(ctx, sandboxID)
+	sbx, err := m.infra.GetClaimedSandbox(ctx, sandboxID)
 	if err != nil {
 		log.Error(err, "failed to get sandbox from cache")
 		return nil, errors.NewError(errors.ErrorNotFound, fmt.Sprintf("sandbox %s not found", sandboxID))
@@ -96,9 +98,10 @@ func (m *SandboxManager) syncRoute(ctx context.Context, sbx infra.Sandbox, refre
 	}
 	start := time.Now()
 	route := sbx.GetRoute()
-	m.proxy.SetRoute(route)
+	m.proxy.SetRoute(ctx, route)
 	err := m.proxy.SyncRouteWithPeers(route)
 	if err != nil {
+		log.Error(err, "failed to sync route with peers")
 		return err
 	}
 	log.Info("route synced with peers", "cost", time.Since(start), "route", route)

@@ -10,7 +10,10 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/spf13/pflag"
+	zapRaw "go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"k8s.io/klog/v2"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/servers/e2b"
@@ -29,9 +32,19 @@ func main() {
 	pflag.BoolVar(&enablePprof, "enable-pprof", false, "Enable pprof profiling")
 	pflag.StringVar(&pprofAddr, "pprof-addr", ":6060", "The address the pprof debug maps to.")
 
+	opts := zap.Options{
+		Development: false,
+	}
+	opts.BindFlags(flag.CommandLine)
 	klog.InitFlags(nil)
 	pflag.CommandLine.AddGoFlagSet(flag.CommandLine)
 	pflag.Parse()
+
+	klog.SetLogger(zap.New(
+		zap.UseFlagOptions(&opts),
+		zap.RawZapOpts(zapRaw.AddCaller()),
+		zap.StacktraceLevel(zapcore.DPanicLevel),
+	))
 
 	// Start pprof server if enabled
 	if enablePprof {
@@ -79,6 +92,30 @@ func main() {
 	if peerSelector == "" {
 		klog.Fatalf("env var PEER_SELECTOR is required")
 	}
+
+	maxClaimWorkers := 0 // use default value of sandbox-manager
+	if value, err := strconv.Atoi(os.Getenv("MAX_CLAIM_WORKERS")); err == nil {
+		if value <= 0 {
+			klog.Fatalf("MAX_CLAIM_WORKERS must be greater than 0")
+		}
+		maxClaimWorkers = value
+	}
+
+	maxCreateQPS := 0 // use default value of sandbox-manager
+	if value, err := strconv.Atoi(os.Getenv("MAX_CREATE_QPS")); err == nil {
+		if value <= 0 {
+			klog.Fatalf("MAX_CREATE_QPS must be greater than 0")
+		}
+		maxCreateQPS = value
+	}
+
+	extProcMaxConcurrency := uint32(0) // use default value of sandbox-manager
+	if value, err := strconv.ParseUint(os.Getenv("EXT_PROC_MAX_CONCURRENCY"), 10, 32); err == nil {
+		if value <= 0 {
+			klog.Fatalf("EXT_PROC_MAX_CONCURRENCY must be greater than 0")
+		}
+		extProcMaxConcurrency = uint32(value)
+	}
 	// =========== End Env =============
 
 	// Initialize Kubernetes client and config
@@ -87,7 +124,8 @@ func main() {
 		klog.Fatalf("Failed to initialize Kubernetes client: %v", err)
 	}
 
-	sandboxController := e2b.NewController(domain, e2bAdminKey, sysNs, e2bMaxTimeout, port, e2bEnableAuth, clientSet)
+	sandboxController := e2b.NewController(domain, e2bAdminKey, sysNs, e2bMaxTimeout, maxClaimWorkers, maxCreateQPS, extProcMaxConcurrency,
+		port, e2bEnableAuth, clientSet)
 	if err := sandboxController.Init(); err != nil {
 		klog.Fatalf("Failed to initialize sandbox controller: %v", err)
 	}

@@ -7,42 +7,61 @@ import (
 )
 
 var (
-	IndexTemplateAvailable = "templateAvailable"
-	IndexSandboxID         = "sandboxID"
-	IndexUser              = "user"
+	IndexSandboxPool      = "sandboxPool"
+	IndexClaimedSandboxID = "sandboxID"
+	IndexUser             = "user"
+	IndexTemplateID       = "templateID"
 )
 
-// AddLabelSelectorIndexerToInformer add label selector indexer to informer
-func AddLabelSelectorIndexerToInformer(informer cache.SharedIndexInformer) error {
+func AddIndexersToSandboxInformer(informer cache.SharedIndexInformer) error {
 	return informer.AddIndexers(cache.Indexers{
-		IndexTemplateAvailable: func(obj interface{}) ([]string, error) {
-			result, ok := obj.(*agentsv1alpha1.Sandbox)
+		IndexSandboxPool: func(obj interface{}) ([]string, error) {
+			sbx, ok := obj.(*agentsv1alpha1.Sandbox)
 			if !ok {
 				return []string{}, nil
 			}
 			var indices = make([]string, 0, 1)
-			state, _ := stateutils.GetSandboxState(result)
-			if state == agentsv1alpha1.SandboxStateAvailable {
-				tmpl := GetTemplateFromSandbox(result)
+			state, _ := stateutils.GetSandboxState(sbx)
+			if state == agentsv1alpha1.SandboxStateAvailable ||
+				(state == agentsv1alpha1.SandboxStateCreating && stateutils.IsControlledBySandboxSet(sbx)) {
+				tmpl := GetTemplateFromSandbox(sbx)
 				if tmpl != "" {
 					indices = append(indices, tmpl)
 				}
 			}
 			return indices, nil
 		},
-		IndexSandboxID: func(obj interface{}) ([]string, error) {
-			result, ok := obj.(*agentsv1alpha1.Sandbox)
+		IndexClaimedSandboxID: func(obj interface{}) ([]string, error) {
+			sbx, ok := obj.(*agentsv1alpha1.Sandbox)
 			if !ok {
 				return []string{}, nil
 			}
-			return []string{stateutils.GetSandboxID(result)}, nil
+			if sbx.Labels[agentsv1alpha1.LabelSandboxIsClaimed] == "true" {
+				return []string{stateutils.GetSandboxID(sbx)}, nil
+			}
+			return []string{}, nil
 		},
 		IndexUser: func(obj interface{}) ([]string, error) {
 			result, ok := obj.(*agentsv1alpha1.Sandbox)
 			if !ok {
 				return []string{}, nil
 			}
-			return []string{result.GetAnnotations()[agentsv1alpha1.AnnotationOwner]}, nil
+			if user := result.GetAnnotations()[agentsv1alpha1.AnnotationOwner]; user != "" {
+				return []string{user}, nil
+			}
+			return []string{}, nil
+		},
+	})
+}
+
+func AddIndexersToSandboxSetInformer(informer cache.SharedIndexInformer) error {
+	return informer.AddIndexers(cache.Indexers{
+		IndexTemplateID: func(obj interface{}) ([]string, error) {
+			result, ok := obj.(*agentsv1alpha1.SandboxSet)
+			if !ok {
+				return []string{}, nil
+			}
+			return []string{result.Name}, nil
 		},
 	})
 }
