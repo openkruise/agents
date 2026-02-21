@@ -23,8 +23,8 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/client/clientset/versioned"
-	clientsetfake "github.com/openkruise/agents/client/clientset/versioned/fake"
 	informers "github.com/openkruise/agents/client/informers/externalversions"
+	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/stretchr/testify/require"
@@ -147,7 +147,8 @@ func TestCommonControl_EnsureClaimClaiming(t *testing.T) {
 	_ = agentsv1alpha1.AddToScheme(scheme)
 
 	// Initialize cache and sandboxClient
-	sandboxClient := clientsetfake.NewSimpleClientset()
+	clientSet := clients.NewFakeClientSet()
+	sandboxClient := clientSet.SandboxClient
 	sandboxInformerFactory := informers.NewSharedInformerFactory(sandboxClient, time.Minute*10)
 	sandboxInformer := sandboxInformerFactory.Api().V1alpha1().Sandboxes().Informer()
 	sandboxSetInformer := sandboxInformerFactory.Api().V1alpha1().SandboxSets().Informer()
@@ -471,7 +472,7 @@ func TestCommonControl_EnsureClaimClaiming(t *testing.T) {
 
 			fakeRecorder := record.NewFakeRecorder(100)
 
-			control := NewCommonControl(fakeClient, fakeRecorder, sandboxClient, cache)
+			control := NewCommonControl(fakeClient, fakeRecorder, clientSet, cache)
 
 			args := ClaimArgs{
 				Claim:      tt.claim,

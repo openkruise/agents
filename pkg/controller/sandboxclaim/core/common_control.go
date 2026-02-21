@@ -39,12 +39,12 @@ import (
 type commonControl struct {
 	client.Client
 	recorder      record.EventRecorder
-	sandboxClient clients.SandboxClient
+	sandboxClient *clients.ClientSet
 	cache         *sandboxcr.Cache
 	pickCache     sync.Map
 }
 
-func NewCommonControl(c client.Client, recorder record.EventRecorder, sandboxClient clients.SandboxClient, cache *sandboxcr.Cache) ClaimControl {
+func NewCommonControl(c client.Client, recorder record.EventRecorder, sandboxClient *clients.ClientSet, cache *sandboxcr.Cache) ClaimControl {
 	// Note: sandboxClient and cache can be nil for unit tests
 	// In production, SetupWithManager always provides these dependencies
 

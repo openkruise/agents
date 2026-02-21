@@ -39,7 +39,7 @@ func NewSandboxManager(client *clients.ClientSet, adapter proxy.RequestAdapter, 
 		proxy:  proxy.NewServer(adapter, opts),
 	}
 	var err error
-	m.infra, err = sandboxcr.NewInfra(client.SandboxClient, client.K8sClient, m.proxy, opts)
+	m.infra, err = sandboxcr.NewInfra(client, client.K8sClient, m.proxy, opts)
 	return m, err
 }
 

@@ -355,7 +355,7 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 				if tt.preModifier != nil {
 					tt.preModifier(sbx, testInfra)
 				}
-				CreateSandboxWithStatus(t, client, sbx)
+				CreateSandboxWithStatus(t, client.SandboxClient, sbx)
 				require.Eventually(t, func() bool {
 					_, ok, err := testInfra.Cache.sandboxInformer.GetStore().GetByKey(fmt.Sprintf("%s/%s", sbx.Namespace, sbx.Name))
 					return err == nil && ok
@@ -368,7 +368,7 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
 			done := make(chan struct{})
 			go func() {
-				KeepMakingAllSandboxesReady(ctx, client)
+				KeepMakingAllSandboxesReady(ctx, client.SandboxClient)
 				close(done)
 			}()
 			defer func() {
@@ -575,7 +575,7 @@ func TestClaimSandboxFailed(t *testing.T) {
 			}
 			state, reason := sandboxutils.GetSandboxState(sbx)
 			require.Equal(t, v1alpha1.SandboxStateAvailable, state, reason)
-			CreateSandboxWithStatus(t, client, sbx)
+			CreateSandboxWithStatus(t, client.SandboxClient, sbx)
 			require.Eventually(t, func() bool {
 				_, ok, err := testInfra.Cache.sandboxInformer.GetStore().GetByKey(fmt.Sprintf("%s/%s", sbx.Namespace, sbx.Name))
 				return err == nil && ok
@@ -691,7 +691,7 @@ func TestCheckSandboxInplaceUpdate(t *testing.T) {
 					ObservedGeneration: tt.observedGeneration,
 				},
 			}
-			CreateSandboxWithStatus(t, client, sbx)
+			CreateSandboxWithStatus(t, client.SandboxClient, sbx)
 			time.Sleep(10 * time.Millisecond)
 
 			gotSbx, err := testInfra.Cache.GetClaimedSandbox(sandboxutils.GetSandboxID(sbx))
@@ -809,7 +809,7 @@ func TestNewSandboxFromTemplate_RateLimitExceeded(t *testing.T) {
 	}
 
 	// Call the function
-	sbx, _, deferFunc, err := newSandboxFromTemplate(opts, infraInstance.Cache, infraInstance.Client, limiter)
+	sbx, _, deferFunc, err := newSandboxFromTemplate(opts, infraInstance.Cache, infraInstance.Client.SandboxClient, limiter)
 
 	// Assertions
 	assert.Nil(t, sbx, "sandbox should be nil when rate limited")
