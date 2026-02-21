@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"golang.org/x/time/rate"
@@ -19,7 +20,6 @@ import (
 	"k8s.io/klog/v2"
 
 	"github.com/openkruise/agents/api/v1alpha1"
-	sandboxclient "github.com/openkruise/agents/client/clientset/versioned"
 	informers "github.com/openkruise/agents/client/informers/externalversions"
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
@@ -30,7 +30,7 @@ import (
 
 type Infra struct {
 	Cache  *Cache
-	Client sandboxclient.Interface
+	Client *clients.ClientSet
 	Proxy  *proxy.Server
 
 	// For claiming sandbox
@@ -46,9 +46,9 @@ type Infra struct {
 	reconcileRouteStopCh chan struct{}
 }
 
-func NewInfra(client sandboxclient.Interface, k8sClient kubernetes.Interface, proxy *proxy.Server, opts config.SandboxManagerOptions) (*Infra, error) {
+func NewInfra(client *clients.ClientSet, k8sClient kubernetes.Interface, proxy *proxy.Server, opts config.SandboxManagerOptions) (*Infra, error) {
 	// Create informer factory for custom Sandbox resources
-	informerFactory := informers.NewSharedInformerFactory(client, time.Minute*10)
+	informerFactory := informers.NewSharedInformerFactory(client.SandboxClient, time.Minute*10)
 	sandboxInformer := informerFactory.Api().V1alpha1().Sandboxes().Informer()
 	sandboxSetInformer := informerFactory.Api().V1alpha1().SandboxSets().Informer()
 
@@ -175,7 +175,7 @@ func (i *Infra) SelectSandboxes(user string, limit int, filter func(sandbox infr
 		if !managerutils.ResourceVersionExpectationSatisfied(obj) {
 			continue
 		}
-		sbx := AsSandbox(obj, i.Cache, i.Client)
+		sbx := AsSandbox(obj, i.Cache, i.Client.SandboxClient)
 		if filter == nil || filter(sbx) {
 			sandboxes = append(sandboxes, sbx)
 		}
@@ -198,7 +198,7 @@ func (i *Infra) GetClaimedSandbox(ctx context.Context, sandboxID string) (infra.
 			return nil, err
 		}
 	}
-	return AsSandbox(sandbox, i.Cache, i.Client), nil
+	return AsSandbox(sandbox, i.Cache, i.Client.SandboxClient), nil
 }
 
 func (i *Infra) onSandboxAdd(obj any) {
@@ -209,7 +209,7 @@ func (i *Infra) onSandboxAdd(obj any) {
 	if !i.HasTemplate(GetTemplateFromSandbox(sbx)) {
 		return
 	}
-	route := AsSandbox(sbx, i.Cache, i.Client).GetRoute()
+	route := AsSandbox(sbx, i.Cache, i.Client.SandboxClient).GetRoute()
 	i.Proxy.SetRoute(logs.NewContext(), route)
 	managerutils.ResourceVersionExpectationObserve(sbx)
 }
@@ -233,7 +233,7 @@ func (i *Infra) onSandboxUpdate(_, newObj any) {
 	if !i.HasTemplate(GetTemplateFromSandbox(newSbx)) {
 		return
 	}
-	i.refreshRoute(AsSandbox(newSbx, i.Cache, i.Client))
+	i.refreshRoute(AsSandbox(newSbx, i.Cache, i.Client.SandboxClient))
 	managerutils.ResourceVersionExpectationObserve(newSbx)
 }
 

@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -13,7 +14,6 @@ import (
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 
 	"github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/client/clientset/versioned/fake"
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
@@ -50,17 +50,17 @@ func createTestSandbox(name, user string, phase v1alpha1.SandboxPhase, ready boo
 }
 
 //goland:noinspection GoDeprecation
-func NewTestInfra(t *testing.T, opts ...config.SandboxManagerOptions) (*Infra, *fake.Clientset) {
-	client := fake.NewSimpleClientset()
+func NewTestInfra(t *testing.T, opts ...config.SandboxManagerOptions) (*Infra, *clients.ClientSet) {
+	clientSet := clients.NewFakeClientSet()
 	options := config.SandboxManagerOptions{}
 	if len(opts) > 0 {
 		options = opts[0]
 	}
 	options = config.InitOptions(options)
-	infraInstance, err := NewInfra(client, k8sfake.NewSimpleClientset(), proxy.NewServer(nil, options), options)
+	infraInstance, err := NewInfra(clientSet, k8sfake.NewSimpleClientset(), proxy.NewServer(nil, options), options)
 	assert.NoError(t, err)
 	assert.NoError(t, infraInstance.Run(context.Background()))
-	return infraInstance, client
+	return infraInstance, clientSet
 }
 
 func TestInfra_SelectSandboxes(t *testing.T) {
@@ -130,7 +130,7 @@ func TestInfra_SelectSandboxes(t *testing.T) {
 			infraInstance, client := NewTestInfra(t)
 
 			for _, sbx := range tt.sandboxes {
-				CreateSandboxWithStatus(t, client, sbx)
+				CreateSandboxWithStatus(t, client.SandboxClient, sbx)
 			}
 			time.Sleep(50 * time.Millisecond)
 
@@ -184,7 +184,7 @@ func TestInfra_GetSandbox(t *testing.T) {
 
 			// Create sandboxes
 			for _, sbx := range tt.sandboxes {
-				CreateSandboxWithStatus(t, client, sbx)
+				CreateSandboxWithStatus(t, client.SandboxClient, sbx)
 			}
 			time.Sleep(100 * time.Millisecond)
 
@@ -363,7 +363,7 @@ func TestInfra_onSandboxAdd(t *testing.T) {
 			tt.sandbox.Labels = map[string]string{
 				v1alpha1.LabelSandboxTemplate: "test-pool",
 			}
-			CreateSandboxWithStatus(t, client, tt.sandbox)
+			CreateSandboxWithStatus(t, client.SandboxClient, tt.sandbox)
 			time.Sleep(50 * time.Millisecond)
 
 			// Check route
@@ -398,7 +398,7 @@ func TestInfra_onSandboxDelete(t *testing.T) {
 			infraInstance, client := NewTestInfra(t)
 
 			// Create sandbox
-			CreateSandboxWithStatus(t, client, tt.sandbox)
+			CreateSandboxWithStatus(t, client.SandboxClient, tt.sandbox)
 			time.Sleep(50 * time.Millisecond)
 			id := stateutils.GetSandboxID(tt.sandbox)
 
@@ -475,7 +475,7 @@ func TestInfra_onSandboxUpdate(t *testing.T) {
 			}
 
 			// Create sandbox
-			CreateSandboxWithStatus(t, client, tt.oldSandbox)
+			CreateSandboxWithStatus(t, client.SandboxClient, tt.oldSandbox)
 			time.Sleep(10 * time.Millisecond)
 
 			_, err := client.ApiV1alpha1().Sandboxes("default").Update(context.Background(), tt.newSandbox, metav1.UpdateOptions{})
@@ -487,7 +487,7 @@ func TestInfra_onSandboxUpdate(t *testing.T) {
 				route, ok := infraInstance.Proxy.LoadRoute(stateutils.GetSandboxID(tt.newSandbox))
 				if tt.expectRouteUpdate {
 					assert.True(t, ok)
-					newSbx := AsSandbox(tt.newSandbox, infraInstance.Cache, infraInstance.Client)
+					newSbx := AsSandbox(tt.newSandbox, infraInstance.Cache, infraInstance.Client.SandboxClient)
 					expectedRoute := newSbx.GetRoute()
 					assert.Equal(t, expectedRoute.State, route.State)
 				}
@@ -555,7 +555,7 @@ func TestInfra_reconcileRoutes(t *testing.T) {
 
 			// Create sandboxes in cache
 			for _, sbx := range tt.sandboxes {
-				CreateSandboxWithStatus(t, client, sbx)
+				CreateSandboxWithStatus(t, client.SandboxClient, sbx)
 				// Also add their routes to proxy
 				id := stateutils.GetSandboxID(sbx)
 				infraInstance.Proxy.SetRoute(t.Context(), proxy.Route{
@@ -636,7 +636,7 @@ func TestInfra_startRouteReconciler(t *testing.T) {
 			// Create sandboxes
 			var createdSandboxes []string
 			for _, sbx := range tt.sandboxes {
-				CreateSandboxWithStatus(t, client, sbx)
+				CreateSandboxWithStatus(t, client.SandboxClient, sbx)
 				id := stateutils.GetSandboxID(sbx)
 				infraInstance.Proxy.SetRoute(t.Context(), proxy.Route{
 					ID:    id,
