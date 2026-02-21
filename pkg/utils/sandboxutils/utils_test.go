@@ -312,9 +312,9 @@ func TestIsControlledBySandboxCR(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := IsControlledBySandboxCR(tt.sandbox)
+			result := IsControlledBySandboxSet(tt.sandbox)
 			if result != tt.expected {
-				t.Errorf("IsControlledBySandboxCR() = %v, want %v", result, tt.expected)
+				t.Errorf("IsControlledBySandboxSet() = %v, want %v", result, tt.expected)
 			}
 		})
 	}

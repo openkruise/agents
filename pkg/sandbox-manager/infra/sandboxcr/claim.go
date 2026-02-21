@@ -106,9 +106,9 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 	// Step 1: Pick an available sandbox
 	var sbx *Sandbox
 	var deferFunc func()
-	var created bool
+	var lockType infra.LockType
 	pickStart := time.Now()
-	sbx, created, deferFunc, err = pickAnAvailableSandbox(ctx, opts, pickCache, cache, client, createLimiter)
+	sbx, lockType, deferFunc, err = pickAnAvailableSandbox(ctx, opts, pickCache, cache, client, createLimiter)
 	if err != nil {
 		log.Error(err, "failed to select available sandbox")
 		return
@@ -118,16 +118,16 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 			deferFunc()
 		}
 	}()
-	log.Info("sandbox picked", "sandbox", klog.KObj(sbx.Sandbox), "created", created)
+	log.Info("sandbox picked", "sandbox", klog.KObj(sbx.Sandbox), "lockType", lockType)
 
 	// Step 2: Modify and lock sandbox. All modifications to be applied to the Sandbox should be performed here.
-	if err = modifyPickedSandbox(sbx, created, opts); err != nil {
+	if err = modifyPickedSandbox(sbx, lockType, opts); err != nil {
 		log.Error(err, "failed to modify picked sandbox")
 		err = retriableError{Message: fmt.Sprintf("failed to modify picked sandbox: %s", err)}
 		return
 	}
 
-	err = performLockSandbox(ctx, sbx, created, opts.LockString, opts.User, client)
+	err = performLockSandbox(ctx, sbx, lockType, opts, client)
 	if err != nil {
 		// TODO: these lines cannot be covered by tests currently, which will be fixed when the cache is converted to controller-runtime
 		log.Error(err, "failed to lock sandbox")
@@ -140,11 +140,7 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 		}
 		return
 	}
-	if created {
-		metrics.LockType = infra.LockTypeCreate
-	} else {
-		metrics.LockType = infra.LockTypeUpdate
-	}
+	metrics.LockType = lockType
 	metrics.PickAndLock = time.Since(pickStart)
 	metrics.Total += metrics.PickAndLock
 	utils.ResourceVersionExpectationExpect(sbx)
@@ -154,8 +150,8 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 	freeWorkerOnce() // free worker early
 
 	// Step 3: Built-in post processes. The locked sandbox must be always returned to be cleared properly.
-	if created || opts.InplaceUpdate != nil {
-		log.Info("should wait for sandbox ready", "created", created, "inplaceUpdate", opts.InplaceUpdate != nil)
+	if lockType == infra.LockTypeCreate || lockType == infra.LockTypeSpeculate || opts.InplaceUpdate != nil {
+		log.Info("should wait for sandbox ready", "inplaceUpdate", opts.InplaceUpdate != nil)
 		metrics.WaitReady, err = waitForSandboxReady(ctx, sbx, opts, cache)
 		metrics.Total += metrics.WaitReady
 		if err != nil {
@@ -225,57 +221,109 @@ func getPickKey(sbx *v1alpha1.Sandbox) string {
 }
 
 func pickAnAvailableSandbox(ctx context.Context, opts infra.ClaimSandboxOptions,
-	pickCache *sync.Map, cache *Cache, client clients.SandboxClient, limiter *rate.Limiter) (*Sandbox, bool, func(), error) {
+	pickCache *sync.Map, cache *Cache, client clients.SandboxClient, limiter *rate.Limiter) (*Sandbox, infra.LockType, func(), error) {
 	template, cnt := opts.Template, opts.CandidateCounts
 	ctx = logs.Extend(ctx, "action", "pickAnAvailableSandbox")
 	log := klog.FromContext(ctx).WithValues("template", template).V(consts.DebugLogLevel)
-	objects, err := cache.ListAvailableSandboxes(template)
+	objects, err := cache.ListSandboxesInPool(template)
 	if err != nil {
-		return nil, false, nil, err
+		return nil, "", nil, err
 	}
 	if len(objects) == 0 {
 		if opts.CreateOnNoStock {
 			log.Info("will create a new sandbox", "reason", "NoStock")
 			return newSandboxFromTemplate(opts, cache, client, limiter)
 		}
-		return nil, false, nil, NoAvailableError(template, "no stock")
+		return nil, "", nil, NoAvailableError(template, "no stock")
 	}
-	var obj *v1alpha1.Sandbox
-	candidates := make([]*v1alpha1.Sandbox, 0, cnt)
-	for _, obj = range objects {
+
+	// Select available candidates and speculated creating sandboxes
+	availableCandidates := make([]*v1alpha1.Sandbox, 0, cnt)
+	speculatingCandidates := make([]*v1alpha1.Sandbox, 0, cnt)
+	for _, obj := range objects {
+		if len(availableCandidates) >= cnt {
+			if opts.SpeculateCreatingDuration == 0 || len(speculatingCandidates) >= cnt {
+				break
+			}
+		}
 		if !utils.ResourceVersionExpectationSatisfied(obj) {
 			log.Info("skip out-dated sandbox cache", "sandbox", klog.KObj(obj))
 			continue
 		}
-		if checkErr := preCheckCandidate(obj); checkErr != nil {
-			log.Error(checkErr, "skip invalid sandbox", "sandbox", klog.KObj(obj), "resourceVersion", obj.GetResourceVersion())
-			continue
-		}
-		candidates = append(candidates, obj)
-		if len(candidates) >= cnt {
-			break
+		state, _ := stateutils.GetSandboxState(obj)
+		switch state {
+		case v1alpha1.SandboxStateAvailable:
+			if len(availableCandidates) >= cnt {
+				continue
+			}
+			if checkErr := preCheckCandidate(obj); checkErr != nil {
+				log.Error(checkErr, "skip invalid sandbox", "sandbox", klog.KObj(obj), "resourceVersion", obj.GetResourceVersion())
+				continue
+			}
+			availableCandidates = append(availableCandidates, obj)
+		case v1alpha1.SandboxStateCreating:
+			if opts.SpeculateCreatingDuration == 0 || len(speculatingCandidates) >= cnt {
+				continue
+			}
+			if checkErr := preCheckCreating(obj); checkErr != nil {
+				log.Error(checkErr, "skip invalid sandbox", "sandbox", klog.KObj(obj), "resourceVersion", obj.GetResourceVersion())
+				continue
+			}
+			creationDuration := time.Since(obj.CreationTimestamp.Time)
+			if creationDuration >= opts.SpeculateCreatingDuration {
+				log.Info("may speculate creating sandbox if necessary", "sandbox", klog.KObj(obj), "creationDuration", creationDuration)
+				speculatingCandidates = append(speculatingCandidates, obj)
+			}
 		}
 	}
+
+	// Step 1: select from available candidate
+	log.Info("picking from available candidates")
+	sbx, pickErr := pickFromCandidates(ctx, availableCandidates, pickCache)
+	if pickErr == nil {
+		return AsSandbox(sbx, cache, client), infra.LockTypeUpdate, func() {
+			pickCache.Delete(getPickKey(sbx))
+		}, nil
+	}
+	log.Error(pickErr, "failed to pick from available candidates")
+
+	// Step 2: select from speculated candidates
+	if opts.SpeculateCreatingDuration > 0 {
+		log.Info("picking from speculated candidates")
+		sbx, pickErr = pickFromCandidates(ctx, speculatingCandidates, pickCache)
+		if pickErr == nil {
+			log.Info("will speculate creating sandbox", "sandbox", klog.KObj(sbx))
+			return AsSandbox(sbx, cache, client), infra.LockTypeSpeculate, func() {
+				pickCache.Delete(getPickKey(sbx))
+			}, nil
+		}
+	}
+
+	// Step 3: create new sandbox
+	if opts.CreateOnNoStock {
+		log.Info("will create a new sandbox")
+		return newSandboxFromTemplate(opts, cache, client, limiter)
+	}
+	return nil, "", nil, pickErr
+}
+
+func pickFromCandidates(ctx context.Context, candidates []*v1alpha1.Sandbox, pickCache *sync.Map) (*v1alpha1.Sandbox, error) {
+	log := klog.FromContext(ctx).V(consts.DebugLogLevel)
+	// Step 1: select from candidate
 	if len(candidates) == 0 {
-		if opts.CreateOnNoStock {
-			log.Info("will create a new sandbox", "reason", "NoCandidate")
-			return newSandboxFromTemplate(opts, cache, client, limiter)
-		}
-		return nil, false, nil, NoAvailableError(template, "no candidate")
+		return nil, errors.New("no candidate")
 	}
-
 	start := rand.IntN(len(candidates))
-
 	i := start
 	for {
 		// Check if context is canceled
 		select {
 		case <-ctx.Done():
-			return nil, false, nil, fmt.Errorf("context canceled while picking sandbox: %w", ctx.Err())
+			return nil, fmt.Errorf("context canceled while picking sandbox: %w", ctx.Err())
 		default:
 		}
 
-		obj = candidates[i]
+		obj := candidates[i]
 		key := getPickKey(obj)
 		if _, loaded := pickCache.LoadOrStore(key, struct{}{}); !loaded {
 			// The flow of the first-level lock introduced by pickCache is:
@@ -287,59 +335,56 @@ func pickAnAvailableSandbox(ctx context.Context, opts infra.ClaimSandboxOptions,
 				pickCache.Delete(key)
 			} else {
 				log.Info("candidate picked", "sandbox", klog.KObj(obj))
-				return AsSandbox(obj, cache, client), false, func() {
-					pickCache.Delete(key)
-				}, nil
+				return obj, nil
 			}
 		} else {
 			log.Info("candidate picked by another request", "key", key)
 		}
 		i = (i + 1) % len(candidates)
 		if i == start {
-			if opts.CreateOnNoStock {
-				log.Info("will create a new sandbox", "reason", "AllCandidatesPicked")
-				return newSandboxFromTemplate(opts, cache, client, limiter)
-			}
-			return nil, false, nil, NoAvailableError(template, "all candidates are picked")
+			break
 		}
 	}
+	return nil, errors.New("all candidates are picked")
 }
 
 var FilteredAnnotationsOnCreation []string
 
-func newSandboxFromTemplate(opts infra.ClaimSandboxOptions, cache *Cache, client clients.SandboxClient, limiter *rate.Limiter) (*Sandbox, bool, func(), error) {
+func newSandboxFromTemplate(opts infra.ClaimSandboxOptions, cache *Cache, client clients.SandboxClient, limiter *rate.Limiter) (*Sandbox, infra.LockType, func(), error) {
 	if !limiter.Allow() {
-		return nil, false, nil, NoAvailableError(opts.Template, "sandbox creation is not allowed by rate limiter")
+		return nil, "", nil, NoAvailableError(opts.Template, "sandbox creation is not allowed by rate limiter")
 	}
 	sbs, err := cache.GetSandboxSet(opts.Template)
 	if err != nil {
-		return nil, false, nil, NoAvailableError(opts.Template, "cannot create new sandbox: "+err.Error())
+		return nil, "", nil, NoAvailableError(opts.Template, "cannot create new sandbox: "+err.Error())
 	}
 	sbx := sandboxset.NewSandboxFromSandboxSet(sbs)
-	sbx.Labels[v1alpha1.LabelSandboxIsClaimed] = "true"
 	for _, anno := range FilteredAnnotationsOnCreation {
 		delete(sbx.Annotations, anno)
 	}
-	return AsSandbox(sbx, cache, client), true, nil, nil
+	return AsSandbox(sbx, cache, client), infra.LockTypeCreate, nil, nil
 }
 
 func preCheckCandidate(sbx *v1alpha1.Sandbox) error {
 	if sbx.Status.PodInfo.PodIP == "" {
 		return errors.New("podIP is empty")
 	}
-	state, reason := stateutils.GetSandboxState(sbx)
-	if state != v1alpha1.SandboxStateAvailable {
-		return fmt.Errorf("sandbox is not available, reason: %s", reason)
-	}
+	return preCheckCreating(sbx)
+}
+
+func preCheckCreating(sbx *v1alpha1.Sandbox) error {
 	lock := sbx.Annotations[v1alpha1.AnnotationLock]
 	if lock != "" {
 		return fmt.Errorf("sandbox is locked by %s", lock)
 	}
+	if sbx.CreationTimestamp.IsZero() {
+		return errors.New("creation timestamp is zero")
+	}
 	return nil
 }
 
-func modifyPickedSandbox(sbx *Sandbox, created bool, opts infra.ClaimSandboxOptions) error {
-	if !created {
+func modifyPickedSandbox(sbx *Sandbox, lockType infra.LockType, opts infra.ClaimSandboxOptions) error {
+	if lockType != infra.LockTypeCreate {
 		sbx.Sandbox = sbx.Sandbox.DeepCopy()
 	}
 	if opts.Modifier != nil {
@@ -367,18 +412,18 @@ func modifyPickedSandbox(sbx *Sandbox, created bool, opts infra.ClaimSandboxOpti
 	return nil
 }
 
-func performLockSandbox(ctx context.Context, sbx *Sandbox, created bool, lock string, owner string, client clients.SandboxClient) error {
+func performLockSandbox(ctx context.Context, sbx *Sandbox, lockType infra.LockType, opts infra.ClaimSandboxOptions, client clients.SandboxClient) error {
 	ctx = logs.Extend(ctx, "action", "performLockSandbox")
 	log := klog.FromContext(ctx)
-	utils.LockSandbox(sbx.Sandbox, lock, owner)
+	utils.LockSandbox(sbx.Sandbox, opts.LockString, opts.User)
 	var updated *v1alpha1.Sandbox
 	var err error
-	if !created {
-		log.Info("locking existing sandbox via update", "sandbox", klog.KObj(sbx.Sandbox))
-		updated, err = client.ApiV1alpha1().Sandboxes(sbx.Namespace).Update(ctx, sbx.Sandbox, metav1.UpdateOptions{})
-	} else {
+	if lockType == infra.LockTypeCreate {
 		log.Info("locking new sandbox via create", "sandbox", klog.KObj(sbx.Sandbox))
 		updated, err = client.ApiV1alpha1().Sandboxes(sbx.Namespace).Create(ctx, sbx.Sandbox, metav1.CreateOptions{})
+	} else {
+		log.Info("locking existing sandbox via update", "sandbox", klog.KObj(sbx.Sandbox))
+		updated, err = client.ApiV1alpha1().Sandboxes(sbx.Namespace).Update(ctx, sbx.Sandbox, metav1.UpdateOptions{})
 	}
 	if err == nil {
 		sbx.Sandbox = updated

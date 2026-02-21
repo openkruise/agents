@@ -35,6 +35,9 @@ type ClaimSandboxOptions struct {
 	WaitReadyTimeout time.Duration `json:"waitReadyTimeout"`
 	// Create a Sandbox instance from the template if no available ones in SandboxSets
 	CreateOnNoStock bool `json:"createOnNoStock"`
+	// A creating sandbox lasts for SpeculateCreatingDuration may be picked as a candidate when no available ones in SandboxSets.
+	// Set to 0 to disable speculation feature
+	SpeculateCreatingDuration time.Duration `json:"speculateCreatingDuration"`
 }
 
 type ClaimMetrics struct {
@@ -46,13 +49,16 @@ type ClaimMetrics struct {
 	WaitReady   time.Duration
 	InitRuntime time.Duration
 	CSIMount    time.Duration
-	LockType    string
+	LockType    LockType
 	LastError   error
 }
 
+type LockType string
+
 const (
-	LockTypeCreate = "create"
-	LockTypeUpdate = "update"
+	LockTypeCreate    = LockType("create")
+	LockTypeUpdate    = LockType("update")
+	LockTypeSpeculate = LockType("speculate")
 )
 
 func (m ClaimMetrics) String() string {

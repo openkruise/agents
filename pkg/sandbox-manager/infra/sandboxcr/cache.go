@@ -119,12 +119,12 @@ func (c *Cache) ListSandboxWithUser(user string) ([]*agentsv1alpha1.Sandbox, err
 	return managerutils.SelectObjectWithIndex[*agentsv1alpha1.Sandbox](c.sandboxInformer, IndexUser, user)
 }
 
-func (c *Cache) ListAvailableSandboxes(template string) ([]*agentsv1alpha1.Sandbox, error) {
-	return managerutils.SelectObjectWithIndex[*agentsv1alpha1.Sandbox](c.sandboxInformer, IndexTemplateAvailable, template)
+func (c *Cache) ListSandboxesInPool(template string) ([]*agentsv1alpha1.Sandbox, error) {
+	return managerutils.SelectObjectWithIndex[*agentsv1alpha1.Sandbox](c.sandboxInformer, IndexSandboxPool, template)
 }
 
-func (c *Cache) GetSandbox(sandboxID string) (*agentsv1alpha1.Sandbox, error) {
-	list, err := managerutils.SelectObjectWithIndex[*agentsv1alpha1.Sandbox](c.sandboxInformer, IndexSandboxID, sandboxID)
+func (c *Cache) GetClaimedSandbox(sandboxID string) (*agentsv1alpha1.Sandbox, error) {
+	list, err := managerutils.SelectObjectWithIndex[*agentsv1alpha1.Sandbox](c.sandboxInformer, IndexClaimedSandboxID, sandboxID)
 	if err != nil {
 		return nil, err
 	}
@@ -228,7 +228,7 @@ func (c *Cache) WaitForSandboxSatisfied(ctx context.Context, sbx *agentsv1alpha1
 
 func (c *Cache) doubleCheckSandboxSatisfied(ctx context.Context, sbx *agentsv1alpha1.Sandbox, satisfiedFunc checkFunc) error {
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
-	updated, err := c.GetSandbox(sandboxutils.GetSandboxID(sbx))
+	updated, err := c.GetClaimedSandbox(sandboxutils.GetSandboxID(sbx))
 	if err != nil {
 		log.Error(err, "failed to get sandbox while double checking")
 		return err

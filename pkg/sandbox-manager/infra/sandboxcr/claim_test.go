@@ -21,6 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/openkruise/agents/api/v1alpha1"
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/client/clientset/versioned"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
@@ -46,7 +47,7 @@ func CreateSandboxWithStatus(t *testing.T, client versioned.Interface, sbx *v1al
 
 func EnsureSandboxInCache(t *testing.T, cache *Cache, sbx *v1alpha1.Sandbox) {
 	require.Eventually(t, func() bool {
-		_, err := cache.GetSandbox(sandboxutils.GetSandboxID(sbx))
+		_, err := cache.GetClaimedSandbox(sandboxutils.GetSandboxID(sbx))
 		return err == nil
 	}, time.Second, 10*time.Millisecond, "get sandbox from cache timeout")
 }
@@ -321,16 +322,19 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			tt.options.ClaimTimeout = 50 * time.Millisecond
 			testInfra, client := NewTestInfra(t, tt.infraOptions)
+			now := metav1.Now()
 			for i := 0; i < tt.available; i++ {
 				sbx := &v1alpha1.Sandbox{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      fmt.Sprintf("sbx-%d", i),
 						Namespace: "default",
 						Labels: map[string]string{
-							v1alpha1.LabelSandboxTemplate: existTemplate,
+							v1alpha1.LabelSandboxTemplate:        existTemplate,
+							agentsv1alpha1.LabelSandboxIsClaimed: "false",
 						},
-						Annotations:     map[string]string{},
-						OwnerReferences: GetSbsOwnerReference(),
+						CreationTimestamp: now,
+						Annotations:       map[string]string{},
+						OwnerReferences:   GetSbsOwnerReference(),
 					},
 					Spec: v1alpha1.SandboxSpec{
 						EmbeddedSandboxTemplate: tmpl,
@@ -353,8 +357,8 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 				}
 				CreateSandboxWithStatus(t, client, sbx)
 				require.Eventually(t, func() bool {
-					_, err := testInfra.GetSandbox(t.Context(), sandboxutils.GetSandboxID(sbx))
-					return err == nil
+					_, ok, err := testInfra.Cache.sandboxInformer.GetStore().GetByKey(fmt.Sprintf("%s/%s", sbx.Namespace, sbx.Name))
+					return err == nil && ok
 				}, 100*time.Millisecond, 5*time.Millisecond)
 			}
 
@@ -535,8 +539,9 @@ func TestClaimSandboxFailed(t *testing.T) {
 					Labels: map[string]string{
 						v1alpha1.LabelSandboxTemplate: existTemplate,
 					},
-					Annotations:     map[string]string{},
-					OwnerReferences: GetSbsOwnerReference(),
+					Annotations:       map[string]string{},
+					OwnerReferences:   GetSbsOwnerReference(),
+					CreationTimestamp: metav1.Now(),
 				},
 				Spec: v1alpha1.SandboxSpec{
 					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
@@ -572,8 +577,8 @@ func TestClaimSandboxFailed(t *testing.T) {
 			require.Equal(t, v1alpha1.SandboxStateAvailable, state, reason)
 			CreateSandboxWithStatus(t, client, sbx)
 			require.Eventually(t, func() bool {
-				_, err := testInfra.GetSandbox(t.Context(), sandboxutils.GetSandboxID(sbx))
-				return err == nil
+				_, ok, err := testInfra.Cache.sandboxInformer.GetStore().GetByKey(fmt.Sprintf("%s/%s", sbx.Namespace, sbx.Name))
+				return err == nil && ok
 			}, 100*time.Millisecond, 5*time.Millisecond)
 			var ctx context.Context
 			if tt.getContext == nil {
@@ -581,7 +586,9 @@ func TestClaimSandboxFailed(t *testing.T) {
 			} else {
 				ctx = tt.getContext()
 			}
-			_, _, err := TryClaimSandbox(ctx, tt.options, &testInfra.pickCache, testInfra.Cache, client, testInfra.claimLockChannel, testInfra.createLimiter)
+			opts, err := ValidateAndInitClaimOptions(tt.options)
+			require.NoError(t, err)
+			_, _, err = TryClaimSandbox(ctx, opts, &testInfra.pickCache, testInfra.Cache, client, testInfra.claimLockChannel, testInfra.createLimiter)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.expectError)
 			_, err = client.ApiV1alpha1().Sandboxes(sbx.Namespace).Get(t.Context(), name, metav1.GetOptions{})
@@ -662,7 +669,8 @@ func TestCheckSandboxInplaceUpdate(t *testing.T) {
 					Name:      "sbx-1",
 					Namespace: "default",
 					Labels: map[string]string{
-						v1alpha1.LabelSandboxTemplate: template,
+						v1alpha1.LabelSandboxTemplate:  template,
+						v1alpha1.LabelSandboxIsClaimed: "true",
 					},
 					Annotations: map[string]string{},
 					Generation:  tt.generation,
@@ -686,7 +694,7 @@ func TestCheckSandboxInplaceUpdate(t *testing.T) {
 			CreateSandboxWithStatus(t, client, sbx)
 			time.Sleep(10 * time.Millisecond)
 
-			gotSbx, err := testInfra.Cache.GetSandbox(sandboxutils.GetSandboxID(sbx))
+			gotSbx, err := testInfra.Cache.GetClaimedSandbox(sandboxutils.GetSandboxID(sbx))
 			assert.NoError(t, err)
 			if err != nil {
 				return
@@ -801,11 +809,10 @@ func TestNewSandboxFromTemplate_RateLimitExceeded(t *testing.T) {
 	}
 
 	// Call the function
-	sbx, created, deferFunc, err := newSandboxFromTemplate(opts, infraInstance.Cache, infraInstance.Client, limiter)
+	sbx, _, deferFunc, err := newSandboxFromTemplate(opts, infraInstance.Cache, infraInstance.Client, limiter)
 
 	// Assertions
 	assert.Nil(t, sbx, "sandbox should be nil when rate limited")
-	assert.False(t, created, "created flag should be false")
 	assert.Nil(t, deferFunc, "defer function should be nil")
 	assert.Error(t, err, "should return error when rate limited")
 

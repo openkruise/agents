@@ -190,6 +190,7 @@ func TestReconciler_Reconcile_Claiming(t *testing.T) {
 	}
 
 	controllerTrue := true
+	now := metav1.Now()
 	sandbox1 := &agentsv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "sandbox-1",
@@ -198,7 +199,8 @@ func TestReconciler_Reconcile_Claiming(t *testing.T) {
 				agentsv1alpha1.LabelSandboxTemplate:  "test-sandboxset",
 				agentsv1alpha1.LabelSandboxIsClaimed: "false",
 			},
-			Annotations: map[string]string{}, // Initialize annotations map
+			CreationTimestamp: now,
+			Annotations:       map[string]string{}, // Initialize annotations map
 			OwnerReferences: []metav1.OwnerReference{
 				{
 					APIVersion: "agents.kruise.io/v1alpha1",
@@ -224,8 +226,9 @@ func TestReconciler_Reconcile_Claiming(t *testing.T) {
 
 	sandbox2 := &agentsv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "sandbox-2",
-			Namespace: "default",
+			Name:              "sandbox-2",
+			Namespace:         "default",
+			CreationTimestamp: now,
 			Labels: map[string]string{
 				agentsv1alpha1.LabelSandboxTemplate:  "test-sandboxset",
 				agentsv1alpha1.LabelSandboxIsClaimed: "false",
