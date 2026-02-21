@@ -22,9 +22,9 @@ import (
 	"time"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	clientsetfake "github.com/openkruise/agents/client/clientset/versioned/fake"
 	informers "github.com/openkruise/agents/client/informers/externalversions"
 	"github.com/openkruise/agents/pkg/controller/sandboxclaim/core"
+	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -151,7 +151,8 @@ func TestReconciler_Reconcile_Claiming(t *testing.T) {
 	_ = agentsv1alpha1.AddToScheme(scheme)
 
 	// Initialize cache and sandboxClient
-	sandboxClient := clientsetfake.NewSimpleClientset()
+	clientSet := clients.NewFakeClientSet()
+	sandboxClient := clientSet.SandboxClient
 	sandboxInformerFactory := informers.NewSharedInformerFactory(sandboxClient, time.Minute*10)
 	sandboxInformer := sandboxInformerFactory.Api().V1alpha1().Sandboxes().Informer()
 	sandboxSetInformer := sandboxInformerFactory.Api().V1alpha1().SandboxSets().Informer()
@@ -281,7 +282,7 @@ func TestReconciler_Reconcile_Claiming(t *testing.T) {
 	reconciler := &Reconciler{
 		Client:   fakeClient,
 		Scheme:   scheme,
-		controls: core.NewClaimControl(fakeClient, fakeRecorder, sandboxClient, cache),
+		controls: core.NewClaimControl(fakeClient, fakeRecorder, clientSet, cache),
 		recorder: fakeRecorder,
 	}
 

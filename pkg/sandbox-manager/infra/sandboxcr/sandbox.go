@@ -155,6 +155,10 @@ func (s *Sandbox) SaveTimeout(ctx context.Context, opts infra.TimeoutOptions) er
 }
 
 func (s *Sandbox) GetTimeout() infra.TimeoutOptions {
+	return getTimeoutFromSandbox(s.Sandbox)
+}
+
+func getTimeoutFromSandbox(s *agentsv1alpha1.Sandbox) infra.TimeoutOptions {
 	opts := infra.TimeoutOptions{}
 	if s.Spec.ShutdownTime != nil {
 		opts.ShutdownTime = s.Spec.ShutdownTime.Time

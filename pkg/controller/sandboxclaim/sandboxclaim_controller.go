@@ -24,6 +24,7 @@ import (
 	"reflect"
 	"time"
 
+	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -119,7 +120,11 @@ func Add(mgr manager.Manager) error {
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
 		recorder: recorder,
-		controls: core.NewClaimControl(mgr.GetClient(), recorder, sandboxClientset, cache),
+		controls: core.NewClaimControl(mgr.GetClient(), recorder, &clients.ClientSet{
+			K8sClient:     k8sClientset,
+			SandboxClient: sandboxClientset,
+			Config:        config,
+		}, cache),
 	}).SetupWithManager(mgr)
 	if err != nil {
 		return err
