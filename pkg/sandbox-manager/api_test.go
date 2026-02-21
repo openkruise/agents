@@ -152,6 +152,7 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 			manager := setupTestManager(t)
 			client := manager.client.SandboxClient
 			testIP := "1.2.3.4"
+			createAt := metav1.Now()
 			for template, available := range tt.templateSetup {
 				sbs := &agentsv1alpha1.SandboxSet{
 					ObjectMeta: metav1.ObjectMeta{
@@ -170,9 +171,10 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 							Name:      fmt.Sprintf("%s-%d", template, i),
 							Namespace: "default",
 							Labels: map[string]string{
-								agentsv1alpha1.LabelSandboxTemplate: "exist-1",
+								agentsv1alpha1.LabelSandboxTemplate: template,
 							},
-							Annotations: map[string]string{},
+							CreationTimestamp: createAt,
+							Annotations:       map[string]string{},
 							OwnerReferences: []metav1.OwnerReference{
 								{
 									APIVersion:         agentsv1alpha1.SandboxSetControllerKind.GroupVersion().String(),
@@ -212,15 +214,14 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 						},
 					}
 					CreateSandboxWithStatus(t, client, testSbx)
-					require.Eventually(t, func() bool {
-						sbx, err := manager.GetInfra().GetSandbox(t.Context(), sandboxutils.GetSandboxID(testSbx))
-						if err != nil {
-							return false
-						}
-						state, _ := sbx.GetState()
-						return state == agentsv1alpha1.SandboxStateAvailable
-					}, 100*time.Millisecond, 5*time.Millisecond)
 				}
+				require.Eventually(t, func() bool {
+					list, err := manager.GetInfra().GetCache().ListSandboxesInPool(template)
+					if err != nil {
+						return false
+					}
+					return len(list) == available
+				}, 100*time.Millisecond, 5*time.Millisecond)
 			}
 
 			tt.opts.ClaimTimeout = 100 * time.Millisecond
@@ -357,7 +358,10 @@ func TestSandboxManager_GetClaimedSandbox(t *testing.T) {
 	}
 
 	sandboxes := []*agentsv1alpha1.Sandbox{runningSbx, pausedSbx, availableSbx, failedSbx}
+	now := metav1.Now()
 	for _, sbx := range sandboxes {
+		sbx.CreationTimestamp = now
+		sbx.Labels[agentsv1alpha1.LabelSandboxIsClaimed] = "true"
 		_, err := client.ApiV1alpha1().Sandboxes("default").Create(context.Background(), sbx, metav1.CreateOptions{})
 		if err != nil {
 			t.Fatalf("Failed to create test pod %s: %v", sbx.Name, err)
@@ -496,6 +500,10 @@ func TestSandboxManager_PauseSandbox(t *testing.T) {
 					Annotations: map[string]string{
 						agentsv1alpha1.AnnotationOwner: testUser,
 					},
+					Labels: map[string]string{
+						agentsv1alpha1.LabelSandboxIsClaimed: "true",
+					},
+					CreationTimestamp: metav1.Now(),
 				},
 				Status: agentsv1alpha1.SandboxStatus{
 					Phase: agentsv1alpha1.SandboxRunning,
@@ -638,6 +646,10 @@ func TestSandboxManager_ResumeSandbox(t *testing.T) {
 					Annotations: map[string]string{
 						agentsv1alpha1.AnnotationOwner: testUser,
 					},
+					Labels: map[string]string{
+						agentsv1alpha1.LabelSandboxIsClaimed: "true",
+					},
+					CreationTimestamp: metav1.Now(),
 				},
 				Status: agentsv1alpha1.SandboxStatus{
 					Phase: agentsv1alpha1.SandboxPaused,

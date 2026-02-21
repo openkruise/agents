@@ -56,7 +56,7 @@ func (s *Sandbox) GetTemplate() string {
 
 func (s *Sandbox) InplaceRefresh(ctx context.Context, deepcopy bool) error {
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(s.Sandbox)).V(consts.DebugLogLevel)
-	sbx, err := s.Cache.GetSandbox(stateutils.GetSandboxID(s.Sandbox))
+	sbx, err := s.Cache.GetClaimedSandbox(stateutils.GetSandboxID(s.Sandbox))
 	if err != nil {
 		return err
 	}
@@ -80,7 +80,7 @@ func (s *Sandbox) retryUpdate(ctx context.Context, updateFunc UpdateFunc, modifi
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(s.Sandbox))
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		// get the latest sandbox
-		sbx, err := s.Cache.GetSandbox(stateutils.GetSandboxID(s.Sandbox))
+		sbx, err := s.Cache.GetClaimedSandbox(stateutils.GetSandboxID(s.Sandbox))
 		if err != nil {
 			return err
 		}

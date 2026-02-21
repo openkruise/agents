@@ -28,6 +28,9 @@ func createTestSandbox(name, user string, phase v1alpha1.SandboxPhase, ready boo
 			Annotations: map[string]string{
 				v1alpha1.AnnotationOwner: user,
 			},
+			Labels: map[string]string{
+				v1alpha1.LabelSandboxIsClaimed: "true",
+			},
 		},
 		Status: v1alpha1.SandboxStatus{
 			Phase: phase,
@@ -185,8 +188,8 @@ func TestInfra_GetSandbox(t *testing.T) {
 			}
 			time.Sleep(100 * time.Millisecond)
 
-			// Test GetSandbox
-			result, err := infraInstance.GetSandbox(context.Background(), tt.sandboxID)
+			// Test GetClaimedSandbox
+			result, err := infraInstance.GetClaimedSandbox(context.Background(), tt.sandboxID)
 			if tt.expectError {
 				assert.Error(t, err)
 				assert.Nil(t, result)
@@ -308,6 +311,9 @@ func createTestSandboxWithDefaults(name string, namespace string) *v1alpha1.Sand
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: namespace,
+			Labels: map[string]string{
+				v1alpha1.LabelSandboxIsClaimed: "true",
+			},
 		},
 		Status: v1alpha1.SandboxStatus{
 			Phase: v1alpha1.SandboxRunning,
@@ -642,7 +648,7 @@ func TestInfra_startRouteReconciler(t *testing.T) {
 
 			require.Eventually(t, func() bool {
 				for _, id := range createdSandboxes {
-					_, err := infraInstance.Cache.GetSandbox(id)
+					_, err := infraInstance.Cache.GetClaimedSandbox(id)
 					if err != nil {
 						return false
 					}

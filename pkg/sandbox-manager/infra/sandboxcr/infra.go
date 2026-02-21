@@ -186,8 +186,8 @@ func (i *Infra) SelectSandboxes(user string, limit int, filter func(sandbox infr
 	return sandboxes, nil
 }
 
-func (i *Infra) GetSandbox(ctx context.Context, sandboxID string) (infra.Sandbox, error) {
-	sandbox, err := i.Cache.GetSandbox(sandboxID)
+func (i *Infra) GetClaimedSandbox(ctx context.Context, sandboxID string) (infra.Sandbox, error) {
+	sandbox, err := i.Cache.GetClaimedSandbox(sandboxID)
 	if err != nil {
 		return nil, err
 	}
