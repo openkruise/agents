@@ -31,15 +31,12 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
-	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
-	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
@@ -92,10 +89,25 @@ type SandboxReconciler struct {
 // +kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 
 func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	// fetch pod
+	pod := &corev1.Pod{}
+	err := r.Get(ctx, req.NamespacedName, pod)
+	if client.IgnoreNotFound(err) != nil {
+		return reconcile.Result{}, err
+	} else if errors.IsNotFound(err) {
+		pod = nil
+	}
+
 	// Fetch the sandbox instance
 	box := &agentsv1alpha1.Sandbox{}
-	err := r.Get(ctx, req.NamespacedName, box)
+	err = r.Get(ctx, req.NamespacedName, box)
 	if err != nil {
+		if errors.IsNotFound(err) {
+			box.Namespace = req.NamespacedName.Namespace
+			box.Name = req.NamespacedName.Name
+			core.ResourceVersionExpectations.Delete(box)
+			core.ScaleExpectation.DeleteExpectations(utils.GetControllerKey(box))
+		}
 		return reconcile.Result{}, client.IgnoreNotFound(err)
 	}
 	logger := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
@@ -106,6 +118,17 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	logger.Info("Began to process Sandbox for reconcile")
+	if pod != nil {
+		core.ScaleExpectation.ObserveScale(utils.GetControllerKey(box), expectations.Create, pod.Name)
+	}
+	if isSatisfied, unsatisfiedDuration, _ := core.ScaleExpectation.SatisfiedExpectations(utils.GetControllerKey(box)); !isSatisfied {
+		if unsatisfiedDuration < expectations.ExpectationTimeout {
+			logger.Info("Not satisfied ScaleExpectation for Sandbox, wait for cache event")
+			return reconcile.Result{RequeueAfter: expectations.ExpectationTimeout - unsatisfiedDuration}, nil
+		}
+		klog.InfoS("ScaleExpectation unsatisfied overtime for Sandbox, wait for cache event timeout", "timeout", unsatisfiedDuration)
+		core.ScaleExpectation.DeleteExpectations(utils.GetControllerKey(box))
+	}
 	// If resourceVersion expectations have not satisfied yet, just skip this reconcile
 	core.ResourceVersionExpectations.Observe(box)
 	if isSatisfied, unsatisfiedDuration := core.ResourceVersionExpectations.IsSatisfied(box); !isSatisfied {
@@ -113,7 +136,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			logger.Info("Not satisfied resourceVersion for Sandbox, wait for cache event")
 			return reconcile.Result{RequeueAfter: expectations.ExpectationTimeout - unsatisfiedDuration}, nil
 		}
-		klog.InfoS("Expectation unsatisfied overtime for Sandbox, wait for cache event timeout", "timeout", unsatisfiedDuration)
+		klog.InfoS("ResourceVersionExpectations unsatisfied overtime for Sandbox, wait for cache event timeout", "timeout", unsatisfiedDuration)
 		core.ResourceVersionExpectations.Delete(box)
 	}
 
@@ -128,15 +151,6 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return reconcile.Result{}, err
 	}
 
-	// fetch pod
-	pod := &corev1.Pod{}
-	err = r.Get(ctx, client.ObjectKey{Namespace: box.Namespace, Name: box.Name}, pod)
-	if client.IgnoreNotFound(err) != nil {
-		logger.Error(err, "Get Pod failed")
-		return reconcile.Result{}, err
-	} else if errors.IsNotFound(err) {
-		pod = nil
-	}
 	args := core.EnsureFuncArgs{Pod: pod, Box: box, NewStatus: newStatus}
 
 	// ensure sandbox terminating
@@ -150,7 +164,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	// add finalizer
-	if box, err = r.ensureFinalizer(ctx, box); err != nil {
+	if box, err = r.addSandboxFinalizerAndHash(ctx, box); err != nil {
 		return reconcile.Result{}, err
 	}
 
@@ -184,9 +198,6 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	switch newStatus.Phase {
 	case agentsv1alpha1.SandboxPending:
-		if box, err = r.patchSandboxAnnotationHash(ctx, box); err != nil {
-			return ctrl.Result{}, err
-		}
 		err = r.getControl(args.Pod).EnsureSandboxRunning(ctx, args)
 	case agentsv1alpha1.SandboxRunning:
 		err = r.getControl(args.Pod).EnsureSandboxUpdated(ctx, args)
@@ -205,59 +216,39 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 }
 
 func (r *SandboxReconciler) handleTerminating(ctx context.Context, args core.EnsureFuncArgs) (ctrl.Result, error) {
-	pod, box, newStatus := args.Pod, args.Box, args.NewStatus
-	newStatus.Phase = agentsv1alpha1.SandboxTerminating
-	cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionReady))
-	if cond != nil && cond.Status == metav1.ConditionTrue {
-		cond.Status = metav1.ConditionFalse
-		cond.LastTransitionTime = metav1.Now()
-		utils.SetSandboxCondition(newStatus, *cond)
-	}
-	err := r.getControl(pod).EnsureSandboxTerminated(ctx, args)
-	if err != nil {
-		return reconcile.Result{}, err
-	}
-	return ctrl.Result{}, r.updateSandboxStatus(ctx, *newStatus, box)
+	pod, _, _ := args.Pod, args.Box, args.NewStatus
+	return ctrl.Result{}, r.getControl(pod).EnsureSandboxTerminated(ctx, args)
 }
 
 func isSandboxCompletedPhase(phase agentsv1alpha1.SandboxPhase) bool {
 	return phase == agentsv1alpha1.SandboxFailed || phase == agentsv1alpha1.SandboxSucceeded
 }
 
-func (r *SandboxReconciler) ensureFinalizer(ctx context.Context, box *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) {
+func (r *SandboxReconciler) addSandboxFinalizerAndHash(ctx context.Context, box *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) {
 	logger := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
-	if box.DeletionTimestamp.IsZero() && !controllerutil.ContainsFinalizer(box, utils.SandboxFinalizer) {
-		newObj, err := utils.PatchFinalizer(ctx, r.Client, box, utils.AddFinalizerOpType, utils.SandboxFinalizer)
-		if err != nil {
-			logger.Error(err, "patch finalizer failed")
-			return nil, err
-		}
-		box = newObj.(*agentsv1alpha1.Sandbox)
-		logger.Info("add sandbox finalizer success")
-	}
-	return box, nil
-}
-
-func (r *SandboxReconciler) patchSandboxAnnotationHash(ctx context.Context, box *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) {
-	if box.Annotations[agentsv1alpha1.SandboxHashWithoutImageAndResources] != "" {
+	if !box.DeletionTimestamp.IsZero() || controllerutil.ContainsFinalizer(box, utils.SandboxFinalizer) {
 		return box, nil
 	}
 
-	logger := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
-	_, hashWithoutImageAndResource := core.HashSandbox(box)
-	clone := box.DeepCopy()
-	body := fmt.Sprintf(`{"metadata":{"annotations":{"%s":"%s"}}}`, agentsv1alpha1.SandboxHashWithoutImageAndResources, hashWithoutImageAndResource)
-	if err := r.Patch(ctx, clone, client.RawPatch(types.MergePatchType, []byte(body))); err != nil {
-		logger.Error(err, "patch sandbox annotation failed")
-		return nil, err
+	originObj := box.DeepCopy()
+	patch := client.MergeFrom(box)
+	controllerutil.AddFinalizer(originObj, utils.SandboxFinalizer)
+	if originObj.Annotations == nil {
+		originObj.Annotations = make(map[string]string)
 	}
-	logger.Info("patch sandbox annotation success", "annotation", agentsv1alpha1.SandboxHashWithoutImageAndResources)
-	return clone, nil
+	_, hashWithoutImageAndResource := core.HashSandbox(box)
+	originObj.Annotations[agentsv1alpha1.SandboxHashWithoutImageAndResources] = hashWithoutImageAndResource
+	if err := client.IgnoreNotFound(r.Patch(ctx, originObj, patch)); err != nil {
+		logger.Error(err, "failed to patch sandbox finalizer and hash")
+		return nil, fmt.Errorf("failed to patch finalizer: %w", err)
+	}
+	logger.Info("patch sandbox hash annotations and finalizer success")
+	return originObj, nil
 }
 
 func (r *SandboxReconciler) updateSandboxStatus(ctx context.Context, newStatus agentsv1alpha1.SandboxStatus, box *agentsv1alpha1.Sandbox) error {
 	logger := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
-	if reflect.DeepEqual(box.Status, newStatus) {
+	if reflect.DeepEqual(box.Status, newStatus) || newStatus.Phase == agentsv1alpha1.SandboxPending {
 		return nil
 	}
 
@@ -350,17 +341,8 @@ func (r *SandboxReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		WithOptions(controller.Options{MaxConcurrentReconciles: concurrentReconciles}).
 		For(&agentsv1alpha1.Sandbox{}).
-		Named("sandbox").
-		Watches(&agentsv1alpha1.Sandbox{}, &handler.EnqueueRequestForObject{}, builder.WithPredicates(predicate.Funcs{
-			UpdateFunc: func(e event.UpdateEvent) bool {
-				core.ResourceVersionExpectations.Observe(e.ObjectNew)
-				return true
-			},
-			DeleteFunc: func(e event.DeleteEvent) bool {
-				core.ResourceVersionExpectations.Delete(e.Object)
-				return false
-			},
-		})).Watches(&corev1.Pod{}, &SandboxPodEventHandler{}).
+		Named("sandbox-controller").
+		Watches(&agentsv1alpha1.Sandbox{}, &handler.EnqueueRequestForObject{}).Watches(&corev1.Pod{}, &SandboxPodEventHandler{}).
 		Complete(r)
 }
 

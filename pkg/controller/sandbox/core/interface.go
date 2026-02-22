@@ -32,6 +32,7 @@ import (
 var (
 	sandboxControllerKind       = agentsv1alpha1.GroupVersion.WithKind("Sandbox")
 	ResourceVersionExpectations = expectations.NewResourceVersionExpectation()
+	ScaleExpectation            = expectations.NewScaleExpectations()
 )
 
 type EnsureFuncArgs struct {
