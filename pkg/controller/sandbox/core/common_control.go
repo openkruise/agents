@@ -31,6 +31,7 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/utils"
+	"github.com/openkruise/agents/pkg/utils/expectations"
 	"github.com/openkruise/agents/pkg/utils/inplaceupdate"
 )
 
@@ -304,9 +305,10 @@ func (r *commonControl) createPod(ctx context.Context, box *agentsv1alpha1.Sandb
 		})
 	}
 	pod.Spec.Volumes = append(pod.Spec.Volumes, volumes...)
-
+	ScaleExpectation.ExpectScale(GetControllerKey(box), expectations.Create, box.Name)
 	err := r.Create(ctx, pod)
 	if err != nil && !errors.IsAlreadyExists(err) {
+		ScaleExpectation.ObserveScale(GetControllerKey(box), expectations.Create, box.Name)
 		logger.Error(err, "create pod failed")
 		return nil, err
 	}

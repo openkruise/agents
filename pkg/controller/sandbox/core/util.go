@@ -23,6 +23,8 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/utils"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // HashSandbox calculates the hash value using sandbox.spec.template
@@ -57,4 +59,8 @@ func GeneratePVCName(templateName, sandboxName string) (string, error) {
 	name := fmt.Sprintf("%s-%s", templateName, sandboxName)
 
 	return name, nil
+}
+
+func GetControllerKey(obj client.Object) string {
+	return types.NamespacedName{Namespace: obj.GetNamespace(), Name: obj.GetName()}.String()
 }
