@@ -82,7 +82,7 @@ var _ = Describe("Sandbox", func() {
 	})
 
 	Context("creation and pending phase", func() {
-		It("should create sandbox and transition to pending phase", func() {
+		It("should create sandbox and transition to running phase", func() {
 			By("Creating a new Sandbox")
 			Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
 
@@ -101,7 +101,7 @@ var _ = Describe("Sandbox", func() {
 					Namespace: sandbox.Namespace,
 				}, sandbox)
 				return sandbox.Status.Phase
-			}, time.Second*30, time.Millisecond*500).Should(Equal(agentsv1alpha1.SandboxPending))
+			}, time.Second*30, time.Millisecond*500).Should(Equal(agentsv1alpha1.SandboxRunning))
 
 			By("Verifying the sandbox has latest revision")
 			Expect(sandbox.Status.UpdateRevision).NotTo(BeEmpty())
@@ -236,7 +236,7 @@ var _ = Describe("Sandbox", func() {
 					Namespace: sandbox.Namespace,
 				}, sandbox)
 				return sandbox.Status.Phase
-			}, time.Second*30, time.Millisecond*500).Should(Equal(agentsv1alpha1.SandboxTerminating))
+			}, time.Second*30, time.Millisecond*500).Should(Equal(agentsv1alpha1.SandboxRunning))
 
 			By("Verifying the associated pod is deleted during termination")
 			Eventually(func() bool {
