@@ -25,4 +25,7 @@ resources:
 # - sandbox_admin_role.yaml
 # - sandbox_editor_role.yaml
 # - sandbox_viewer_role.yaml
+# - sandboxclaim_admin_role.yaml
+# - sandboxclaim_editor_role.yaml
+# - sandboxclaim_viewer_role.yaml
 

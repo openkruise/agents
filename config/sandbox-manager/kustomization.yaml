@@ -1,0 +1,19 @@
+resources:
+  - deployment.yaml
+  - envoy-config.yaml
+  - ingress.yaml
+  - rbac.yaml
+  - secret.yaml
+  - service.yaml
+  - serviceaccount.yaml
+
+patches:
+  - target:
+      kind: Deployment
+    path: configuration_patch.yaml
+  - target:
+      kind: Deployment
+    path: image_patch.yaml
+  - target:
+      kind: Ingress
+    path: ingress_patch.yaml

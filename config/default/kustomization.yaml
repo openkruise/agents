@@ -40,6 +40,9 @@ patches:
 - path: manager_metrics_patch.yaml
   target:
     kind: Deployment
+- target:
+    kind: Deployment
+  path: image_patch.yaml
 
 # Uncomment the patches line if you enable Metrics and CertManager
 # [METRICS-WITH-CERTS] To enable metrics protected with certManager, uncomment the following line.

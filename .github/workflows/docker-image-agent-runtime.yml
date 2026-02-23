@@ -1,0 +1,29 @@
+name: Build and push agent-runtime
+
+on:
+  workflow_dispatch:
+
+# Declare default permissions as read only.
+permissions: read-all
+
+jobs:
+
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.HUB_KRUISE }}
+      - name: Build the Docker image
+        run: |
+          docker buildx create --use --platform=linux/amd64,linux/arm64,linux/ppc64le --name multi-platform-builder
+          docker buildx ls
+          RUNTIME_IMG=openkruise/agent-runtime:${{ github.ref_name }} make docker-build-runtime
+          docker push openkruise/agent-runtime:${{ github.ref_name }}

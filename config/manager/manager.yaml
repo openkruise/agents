@@ -80,7 +80,7 @@ spec:
           - --health-probe-bind-address=:8081
           - --webhook-cert-path=/home/nonroot/sandbox-controller-webhook-certs
         image: controller:latest
-        imagePullPolicy: Always
+        imagePullPolicy: IfNotPresent
         name: manager
         ports: []
         securityContext:

@@ -1,0 +1,9 @@
+# E2B Domain
+- op: replace
+  path: /spec/template/spec/containers/0/env/4/value
+  value: localhost
+
+# E2B API Key
+- op: replace
+  path: /spec/template/spec/containers/0/env/5/value
+  value: some-api-key

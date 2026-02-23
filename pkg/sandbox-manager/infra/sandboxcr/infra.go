@@ -2,41 +2,70 @@ package sandboxcr
 
 import (
 	"context"
+	"errors"
+	"sync"
 	"time"
+
+	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/wait"
+	k8sinformers "k8s.io/client-go/informers"
+	"k8s.io/client-go/kubernetes"
+	k8scache "k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/util/retry"
+	"k8s.io/klog/v2"
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	sandboxclient "github.com/openkruise/agents/client/clientset/versioned"
 	informers "github.com/openkruise/agents/client/informers/externalversions"
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
-	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	k8scache "k8s.io/client-go/tools/cache"
-	"k8s.io/klog/v2"
+	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
+	commonutils "github.com/openkruise/agents/pkg/utils"
+	managerutils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
+	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
 )
 
 type Infra struct {
-	infra.BaseInfra
-
 	Cache  *Cache
 	Client sandboxclient.Interface
 	Proxy  *proxy.Server
+
+	pickCache sync.Map
+
+	// Currently, templates stores the mapping of sandboxset name -> number of namespaces. For example,
+	// if a sandboxset with the same name is created in two different namespaces, the corresponding value would be 2.
+	// In the future, this will be changed to integrate with Template CR.
+	templates sync.Map
 }
 
-func NewInfra(client sandboxclient.Interface, proxy *proxy.Server) (*Infra, error) {
+func NewInfra(client sandboxclient.Interface, k8sClient kubernetes.Interface, proxy *proxy.Server, systemNamespace string) (*Infra, error) {
+	// Create informer factory for custom Sandbox resources
 	informerFactory := informers.NewSharedInformerFactory(client, time.Minute*10)
 	sandboxInformer := informerFactory.Api().V1alpha1().Sandboxes().Informer()
 	sandboxSetInformer := informerFactory.Api().V1alpha1().SandboxSets().Informer()
-	cache, err := NewCache(informerFactory, sandboxInformer, sandboxSetInformer)
+
+	// Create informer factory for native Kubernetes resources (PersistentVolume)
+	coreInformerFactory := k8sinformers.NewSharedInformerFactory(k8sClient, time.Minute*10)
+	persistentVolumeInformer := coreInformerFactory.Core().V1().PersistentVolumes().Informer()
+	// Create informer factory with specified namespace for native Kubernetes resources (Secret)
+	if systemNamespace == "" {
+		systemNamespace = commonutils.DefaultSandboxDeployNamespace
+	}
+	coreInformerFactorySpecifiedNs := k8sinformers.NewSharedInformerFactoryWithOptions(k8sClient, time.Minute*10, k8sinformers.WithNamespace(systemNamespace))
+	// to generate informers only for the specified namespace to avoid potential security privilege escalation risks.
+	secretInformer := coreInformerFactorySpecifiedNs.Core().V1().Secrets().Informer()
+
+	// Initialize cache with all required informers
+	cache, err := NewCache(informerFactory, sandboxInformer, sandboxSetInformer, coreInformerFactorySpecifiedNs, secretInformer, coreInformerFactory, persistentVolumeInformer)
 	if err != nil {
 		return nil, err
 	}
 
 	instance := &Infra{
-		BaseInfra: infra.BaseInfra{},
-		Cache:     cache,
-		Client:    client,
-		Proxy:     proxy,
+		Cache:  cache,
+		Client: client,
+		Proxy:  proxy,
 	}
 
 	cache.AddSandboxEventHandler(k8scache.ResourceEventHandlerFuncs{
@@ -60,14 +89,50 @@ func (i *Infra) Stop() {
 	i.Cache.Stop()
 }
 
-func (i *Infra) NewPool(name, namespace string, annotations map[string]string) infra.SandboxPool {
-	return &Pool{
-		Name:        name,
-		Namespace:   namespace,
-		Annotations: annotations,
-		client:      i.Client,
-		cache:       i.Cache,
+func (i *Infra) ClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions) (infra.Sandbox, infra.ClaimMetrics, error) {
+	log := klog.FromContext(ctx)
+	metrics := infra.ClaimMetrics{}
+
+	opts, err := ValidateAndInitClaimOptions(opts)
+	if err != nil {
+		log.Error(err, "invalid claim options")
+		return nil, metrics, err
 	}
+
+	log.V(consts.DebugLogLevel).Info("claim sandbox options", "options", opts)
+	metrics.Retries = -1 // starts from 0
+	var claimedSandbox infra.Sandbox
+	return claimedSandbox, metrics, retry.OnError(wait.Backoff{
+		Steps:    int(DefaultClaimTimeout / RetryInterval),
+		Duration: RetryInterval,
+		Cap:      DefaultClaimTimeout,
+		Factor:   LockBackoffFactor,
+		Jitter:   LockJitter,
+	}, func(err error) bool {
+		return errors.As(err, &retriableError{})
+	}, func() error {
+		metrics.Retries++
+		log.Info("try to claim sandbox", "retries", metrics.Retries)
+		claimed, tryMetrics, claimErr := TryClaimSandbox(ctx, opts, &i.pickCache, i.Cache, i.Client)
+		if claimErr == nil {
+			tryMetrics.Retries = metrics.Retries
+			tryMetrics.Wait = metrics.Wait
+			tryMetrics.Total += metrics.Wait
+			metrics = tryMetrics
+			claimedSandbox = claimed
+		}
+		metrics.Wait += tryMetrics.Total
+		return claimErr
+	})
+}
+
+func (i *Infra) GetCache() infra.CacheProvider {
+	return i.Cache
+}
+
+func (i *Infra) HasTemplate(name string) bool {
+	_, exists := i.templates.Load(name)
+	return exists
 }
 
 func (i *Infra) SelectSandboxes(user string, limit int, filter func(sandbox infra.Sandbox) bool) ([]infra.Sandbox, error) {
@@ -77,7 +142,7 @@ func (i *Infra) SelectSandboxes(user string, limit int, filter func(sandbox infr
 	}
 	var sandboxes []infra.Sandbox
 	for _, obj := range objects {
-		if !utils.ResourceVersionExpectationSatisfied(obj) {
+		if !managerutils.ResourceVersionExpectationSatisfied(obj) {
 			continue
 		}
 		sbx := AsSandbox(obj, i.Cache, i.Client)
@@ -96,7 +161,7 @@ func (i *Infra) GetSandbox(ctx context.Context, sandboxID string) (infra.Sandbox
 	if err != nil {
 		return nil, err
 	}
-	if !utils.ResourceVersionExpectationSatisfied(sandbox) {
+	if !managerutils.ResourceVersionExpectationSatisfied(sandbox) {
 		klog.FromContext(ctx).Info("resource version expectation not satisfied, will request APIServer directly")
 		sandbox, err = i.Client.ApiV1alpha1().Sandboxes(sandbox.Namespace).Get(ctx, sandbox.Name, metav1.GetOptions{})
 		if err != nil {
@@ -111,13 +176,12 @@ func (i *Infra) onSandboxAdd(obj any) {
 	if !ok {
 		return
 	}
-	_, ok = i.GetPoolByObject(sbx)
-	if !ok {
+	if !i.HasTemplate(GetTemplateFromSandbox(sbx)) {
 		return
 	}
 	route := AsSandbox(sbx, i.Cache, i.Client).GetRoute()
 	i.Proxy.SetRoute(route)
-	utils.ResourceVersionExpectationObserve(sbx)
+	managerutils.ResourceVersionExpectationObserve(sbx)
 }
 
 func (i *Infra) onSandboxDelete(obj any) {
@@ -125,8 +189,8 @@ func (i *Infra) onSandboxDelete(obj any) {
 	if !ok {
 		return
 	}
-	i.Proxy.DeleteRoute(sbx.Name)
-	utils.ResourceVersionExpectationDelete(sbx)
+	i.Proxy.DeleteRoute(stateutils.GetSandboxID(sbx))
+	managerutils.ResourceVersionExpectationDelete(sbx)
 }
 
 func (i *Infra) onSandboxUpdate(_, newObj any) {
@@ -134,12 +198,11 @@ func (i *Infra) onSandboxUpdate(_, newObj any) {
 	if !ok {
 		return
 	}
-	_, ok = i.GetPoolByObject(newSbx)
-	if !ok {
+	if !i.HasTemplate(GetTemplateFromSandbox(newSbx)) {
 		return
 	}
 	i.refreshRoute(AsSandbox(newSbx, i.Cache, i.Client))
-	utils.ResourceVersionExpectationObserve(newSbx)
+	managerutils.ResourceVersionExpectationObserve(newSbx)
 }
 
 func (i *Infra) refreshRoute(sbx infra.Sandbox) {
@@ -155,10 +218,20 @@ func (i *Infra) onSandboxSetCreate(newObj interface{}) {
 	if !ok {
 		return
 	}
-	_, ok = i.GetPoolByTemplate(newSbs.Name)
-	if !ok {
-		pool := i.NewPool(newSbs.Name, newSbs.Namespace, newSbs.Annotations)
-		i.AddPool(newSbs.Name, pool)
+	ctx := logs.NewContext("sandboxset", klog.KObj(newSbs))
+	log := klog.FromContext(ctx)
+	log.Info("sandboxset creation watched")
+	for {
+		got, loaded := i.templates.LoadOrStore(newSbs.Name, int32(1))
+		if !loaded { // stored, the first one
+			log.Info("template created")
+			return
+		}
+		old := got.(int32)
+		if i.templates.CompareAndSwap(newSbs.Name, old, old+1) {
+			log.Info("template count updated", "cnt", old+1)
+			break
+		}
 	}
 }
 
@@ -167,5 +240,33 @@ func (i *Infra) onSandboxSetDelete(obj interface{}) {
 	if !ok {
 		return
 	}
-	i.Pools.Delete(sbs.Name)
+	ctx := logs.NewContext("sandboxset", klog.KObj(sbs))
+	log := klog.FromContext(ctx)
+	log.Info("sandboxset deletion watched")
+	for {
+		got, loaded := i.templates.Load(sbs.Name)
+		if !loaded { // not exist
+			log.Info("template does not exist")
+			return
+		}
+		if old := got.(int32); old == 1 { // the last one is deleted
+			if i.templates.CompareAndDelete(sbs.Name, old) {
+				log.Info("template deleted")
+				break
+			}
+		} else { // more than one exist
+			if i.templates.CompareAndSwap(sbs.Name, old, old-1) {
+				log.Info("template count decreased", "cnt", old-1)
+				break
+			}
+		}
+	}
+}
+
+func GetTemplateFromSandbox(sbx metav1.Object) string {
+	tmpl := sbx.GetLabels()[v1alpha1.LabelSandboxTemplate]
+	if tmpl == "" {
+		tmpl = sbx.GetLabels()[v1alpha1.LabelSandboxPool]
+	}
+	return tmpl
 }

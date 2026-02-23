@@ -49,7 +49,7 @@ var _ = Describe("SandboxSet", func() {
 			},
 			Spec: agentsv1alpha1.SandboxSetSpec{
 				Replicas: 2,
-				SandboxTemplate: agentsv1alpha1.SandboxTemplate{
+				EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
 					Template: &corev1.PodTemplateSpec{
 						ObjectMeta: metav1.ObjectMeta{
 							Labels: map[string]string{

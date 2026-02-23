@@ -1,17 +1,19 @@
 package sandboxcr
 
 import (
-	"context"
 	"testing"
 	"time"
 
-	"github.com/openkruise/agents/api/v1alpha1"
-	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
-	"github.com/openkruise/agents/pkg/utils/sandboxutils"
 	"github.com/stretchr/testify/assert"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	constantUtils "github.com/openkruise/agents/pkg/utils"
+	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
+	"github.com/openkruise/agents/pkg/utils/sandboxutils"
 )
 
 //goland:noinspection GoDeprecation
@@ -157,6 +159,7 @@ func TestSandbox_SetPause(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			now := time.Now()
 			sandbox := &v1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:        "test-sandbox",
@@ -173,38 +176,40 @@ func TestSandbox_SetPause(t *testing.T) {
 			}
 			tt.initSandbox(sandbox)
 
-			cache, client := NewTestCache(t)
+			cache, _, client := NewTestCache(t, constantUtils.DefaultSandboxDeployNamespace)
 			CreateSandboxWithStatus(t, client, sandbox)
 			time.Sleep(10 * time.Millisecond)
 
-			s := AsSandboxForTest(sandbox, client, cache)
+			s := AsSandbox(sandbox, cache, client)
+			opts := infra.PauseOptions{
+				Timeout: &infra.TimeoutOptions{
+					ShutdownTime: now.Add(time.Hour),
+					PauseTime:    now.Add(time.Minute),
+				},
+			}
 			var err error
 			if tt.operatePause {
-				err = s.Pause(context.Background())
+				err = s.Pause(t.Context(), opts)
 				if err == nil {
 					patch := ctrl.MergeFrom(s.Sandbox.DeepCopy())
 					s.Status.Phase = v1alpha1.SandboxPaused
 					data, err := patch.Data(s.Sandbox)
 					assert.NoError(t, err)
 					_, err = client.ApiV1alpha1().Sandboxes("default").Patch(
-						context.Background(), s.Name, types.MergePatchType, data, metav1.PatchOptions{})
+						t.Context(), s.Name, types.MergePatchType, data, metav1.PatchOptions{})
 					assert.NoError(t, err)
 				}
 			} else {
 				if !tt.expectError {
+					name := s.Name
 					time.AfterFunc(20*time.Millisecond, func() {
-						patch := ctrl.MergeFrom(s.Sandbox)
-						updated := s.Sandbox.DeepCopy()
-						updated.Status.Phase = v1alpha1.SandboxRunning
-						SetSandboxCondition(updated, string(v1alpha1.SandboxConditionReady), metav1.ConditionTrue, "Resume", "")
-						data, err := patch.Data(updated)
-						assert.NoError(t, err)
-						_, err = client.ApiV1alpha1().Sandboxes("default").Patch(
-							context.Background(), s.Name, types.MergePatchType, data, metav1.PatchOptions{})
+						jsonData := `{"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True","reason":"Resume"}]}}`
+						_, err := client.ApiV1alpha1().Sandboxes("default").Patch(
+							t.Context(), name, types.MergePatchType, []byte(jsonData), metav1.PatchOptions{})
 						assert.NoError(t, err)
 					})
 				}
-				err = s.Resume(context.Background())
+				err = s.Resume(t.Context())
 			}
 			if tt.expectError {
 				assert.Error(t, err)
@@ -212,12 +217,25 @@ func TestSandbox_SetPause(t *testing.T) {
 			}
 
 			assert.NoError(t, err)
-			updatedSbx, err := client.ApiV1alpha1().Sandboxes("default").Get(context.Background(), "test-sandbox", metav1.GetOptions{})
+			updatedSbx, err := client.ApiV1alpha1().Sandboxes("default").Get(t.Context(), "test-sandbox", metav1.GetOptions{})
 			assert.NoError(t, err)
 
 			state, reason := sandboxutils.GetSandboxState(updatedSbx)
 			assert.Equal(t, tt.expectedState, state, reason)
 			assert.Equal(t, tt.operatePause, updatedSbx.Spec.Paused)
+
+			if tt.operatePause {
+				if !opts.Timeout.ShutdownTime.IsZero() {
+					// milliseconds will be removed by k8s
+					assert.WithinDuration(t, opts.Timeout.ShutdownTime, updatedSbx.Spec.ShutdownTime.Time, time.Second)
+				}
+				if !opts.Timeout.PauseTime.IsZero() {
+					assert.WithinDuration(t, opts.Timeout.PauseTime, updatedSbx.Spec.PauseTime.Time, time.Second)
+				}
+			} else {
+				assert.Nil(t, updatedSbx.Spec.ShutdownTime)
+				assert.Nil(t, updatedSbx.Spec.PauseTime)
+			}
 		})
 	}
 }
@@ -252,7 +270,7 @@ func TestSandbox_ResumeConcurrent(t *testing.T) {
 	state, reason := sandboxutils.GetSandboxState(sandbox)
 	assert.Equal(t, v1alpha1.SandboxStatePaused, state, reason)
 
-	cache, client := NewTestCache(t)
+	cache, _, client := NewTestCache(t, constantUtils.DefaultSandboxDeployNamespace)
 	CreateSandboxWithStatus(t, client, sandbox)
 	time.Sleep(10 * time.Millisecond)
 
@@ -262,9 +280,9 @@ func TestSandbox_ResumeConcurrent(t *testing.T) {
 	start := time.Now()
 	// Start three goroutines calling Resume
 	for i := 0; i < 3; i++ {
-		s := AsSandboxForTest(sandbox, client, cache)
+		s := AsSandbox(sandbox, cache, client)
 		go func() {
-			err := s.Resume(context.Background())
+			err := s.Resume(t.Context())
 			resultCh <- err
 		}()
 	}
@@ -278,7 +296,7 @@ func TestSandbox_ResumeConcurrent(t *testing.T) {
 		data, err := patch.Data(updated)
 		assert.NoError(t, err)
 		_, err = client.ApiV1alpha1().Sandboxes("default").Patch(
-			context.Background(), updated.Name, types.MergePatchType, data, metav1.PatchOptions{})
+			t.Context(), updated.Name, types.MergePatchType, data, metav1.PatchOptions{})
 		assert.NoError(t, err)
 	})
 
@@ -298,7 +316,7 @@ func TestSandbox_ResumeConcurrent(t *testing.T) {
 	assert.True(t, time.Since(start) >= 500*time.Millisecond)
 
 	// Verify that the sandbox is in Running state
-	updatedSbx, err := client.ApiV1alpha1().Sandboxes("default").Get(context.Background(), "test-sandbox", metav1.GetOptions{})
+	updatedSbx, err := client.ApiV1alpha1().Sandboxes("default").Get(t.Context(), "test-sandbox", metav1.GetOptions{})
 	assert.NoError(t, err)
 	state, reason = sandboxutils.GetSandboxState(updatedSbx)
 	assert.Equal(t, v1alpha1.SandboxStateRunning, state, reason)

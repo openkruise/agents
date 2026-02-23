@@ -5,13 +5,13 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/openkruise/agents/pkg/proxy"
-	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
-	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog/v2"
+
+	"github.com/openkruise/agents/pkg/proxy"
+	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
+	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 )
 
 // means 2 min timeout
@@ -30,19 +30,13 @@ type SandboxManager struct {
 }
 
 // NewSandboxManager creates a new SandboxManager instance.
-func NewSandboxManager(client *clients.ClientSet, adapter proxy.RequestAdapter, infra string) (*SandboxManager, error) {
+func NewSandboxManager(client *clients.ClientSet, adapter proxy.RequestAdapter, systemNamespace string) (*SandboxManager, error) {
 	m := &SandboxManager{
 		client: client,
 		proxy:  proxy.NewServer(adapter),
 	}
 	var err error
-	switch infra {
-	case consts.InfraSandboxCR:
-		m.infra, err = sandboxcr.NewInfra(client.SandboxClient, m.proxy)
-	default:
-		err = fmt.Errorf("infra must be one of: [%s]",
-			consts.InfraSandboxCR)
-	}
+	m.infra, err = sandboxcr.NewInfra(client.SandboxClient, client.K8sClient, m.proxy, systemNamespace)
 	return m, err
 }
 

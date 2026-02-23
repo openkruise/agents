@@ -158,7 +158,7 @@ func TestInPlaceUpdateControl_Update(t *testing.T) {
 			opts: InPlaceUpdateOptions{
 				Box: &agentsapiv1alpha1.Sandbox{
 					Spec: agentsapiv1alpha1.SandboxSpec{
-						SandboxTemplate: agentsapiv1alpha1.SandboxTemplate{
+						EmbeddedSandboxTemplate: agentsapiv1alpha1.EmbeddedSandboxTemplate{
 							Template: &corev1.PodTemplateSpec{
 								Spec: corev1.PodSpec{
 									Containers: []corev1.Container{
@@ -203,7 +203,7 @@ func TestInPlaceUpdateControl_Update(t *testing.T) {
 			opts: InPlaceUpdateOptions{
 				Box: &agentsapiv1alpha1.Sandbox{
 					Spec: agentsapiv1alpha1.SandboxSpec{
-						SandboxTemplate: agentsapiv1alpha1.SandboxTemplate{
+						EmbeddedSandboxTemplate: agentsapiv1alpha1.EmbeddedSandboxTemplate{
 							Template: &corev1.PodTemplateSpec{
 								Spec: corev1.PodSpec{
 									Containers: []corev1.Container{}, // no containers

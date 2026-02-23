@@ -4,6 +4,7 @@
 resources:
 - bases/agents.kruise.io_sandboxes.yaml
 - bases/agents.kruise.io_sandboxsets.yaml
+- bases/agents.kruise.io_sandboxclaims.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

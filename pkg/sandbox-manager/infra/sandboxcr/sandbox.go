@@ -18,10 +18,16 @@ package sandboxcr
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
+
+	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/util/retry"
+	"k8s.io/klog/v2"
+	"k8s.io/utils/ptr"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	sandboxclient "github.com/openkruise/agents/client/clientset/versioned"
@@ -32,57 +38,43 @@ import (
 	"github.com/openkruise/agents/pkg/utils/sandbox-manager/proxyutils"
 	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
 	"github.com/openkruise/agents/proto/envd/process"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/util/retry"
-	"k8s.io/klog/v2"
-	"k8s.io/utils/ptr"
 )
 
-type SandboxCR interface {
+type UpdateFunc func(ctx context.Context, sbx *agentsv1alpha1.Sandbox, opts metav1.UpdateOptions) (*agentsv1alpha1.Sandbox, error)
+type ModifierFunc func(sbx *agentsv1alpha1.Sandbox)
+
+type Sandbox struct {
 	*agentsv1alpha1.Sandbox
-	metav1.Object
+	Cache  *Cache
+	Client clients.SandboxClient
 }
 
-type PatchFunc[T SandboxCR] func(ctx context.Context, name string, pt types.PatchType, data []byte, opts metav1.PatchOptions, subResources ...string) (result T, err error)
-type UpdateFunc[T SandboxCR] func(ctx context.Context, sbx T, opts metav1.UpdateOptions) (T, error)
-type DeleteFunc func(ctx context.Context, name string, opts metav1.DeleteOptions) error
-type ModifierFunc[T SandboxCR] func(sbx T)
-type SetConditionFunc[T SandboxCR] func(sbx T, tp string, status metav1.ConditionStatus, reason, message string)
-type GetConditionsFunc[T SandboxCR] func(sbx T) []metav1.Condition
-type DeepCopyFunc[T any] func(src T) T
-
-type BaseSandbox[T SandboxCR] struct {
-	Sandbox T
-	Cache   *Cache
-
-	PatchSandbox  PatchFunc[T]
-	UpdateStatus  UpdateFunc[T]
-	Update        UpdateFunc[T]
-	DeleteFunc    DeleteFunc
-	SetCondition  SetConditionFunc[T]
-	GetConditions GetConditionsFunc[T]
-	DeepCopy      DeepCopyFunc[T]
+func (s *Sandbox) GetTemplate() string {
+	return GetTemplateFromSandbox(s.Sandbox)
 }
 
-func (s *BaseSandbox[T]) GetTemplate() string {
-	return s.Sandbox.GetLabels()[agentsv1alpha1.LabelSandboxPool]
-}
-
-func (s *BaseSandbox[T]) InplaceRefresh(deepcopy bool) error {
+func (s *Sandbox) InplaceRefresh(ctx context.Context, deepcopy bool) error {
+	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(s.Sandbox)).V(consts.DebugLogLevel)
 	sbx, err := s.Cache.GetSandbox(stateutils.GetSandboxID(s.Sandbox))
 	if err != nil {
 		return err
 	}
+	if !utils.ResourceVersionExpectationSatisfied(sbx) {
+		log.Info("sandbox cache is out-dated, fetch from api-server")
+		sbx, err = s.Client.ApiV1alpha1().Sandboxes(s.Sandbox.GetNamespace()).Get(ctx, s.Sandbox.GetName(), metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+	}
 	if deepcopy {
-		s.Sandbox = s.DeepCopy(sbx)
+		s.Sandbox = sbx.DeepCopy()
 	} else {
 		s.Sandbox = sbx
 	}
 	return nil
 }
 
-func (s *BaseSandbox[T]) retryUpdate(ctx context.Context, updateFunc UpdateFunc[T], modifier func(sbx T)) error {
+func (s *Sandbox) retryUpdate(ctx context.Context, updateFunc UpdateFunc, modifier ModifierFunc) error {
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(s.Sandbox))
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		// get the latest sandbox
@@ -97,6 +89,7 @@ func (s *BaseSandbox[T]) retryUpdate(ctx context.Context, updateFunc UpdateFunc[
 			return err
 		}
 		s.Sandbox = updated
+		utils.ResourceVersionExpectationExpect(updated)
 		return nil
 	})
 	if err != nil {
@@ -107,16 +100,11 @@ func (s *BaseSandbox[T]) retryUpdate(ctx context.Context, updateFunc UpdateFunc[
 	return err
 }
 
-func (s *BaseSandbox[T]) Kill(ctx context.Context) error {
-	if s.Sandbox.GetDeletionTimestamp() != nil {
+func (s *Sandbox) Kill(ctx context.Context) error {
+	if s.GetDeletionTimestamp() != nil {
 		return nil
 	}
-	return s.DeleteFunc(ctx, s.Sandbox.GetName(), metav1.DeleteOptions{})
-}
-
-type Sandbox struct {
-	BaseSandbox[*agentsv1alpha1.Sandbox]
-	*agentsv1alpha1.Sandbox
+	return s.Client.ApiV1alpha1().Sandboxes(s.GetNamespace()).Delete(ctx, s.GetName(), metav1.DeleteOptions{})
 }
 
 func (s *Sandbox) GetSandboxID() string {
@@ -124,17 +112,24 @@ func (s *Sandbox) GetSandboxID() string {
 }
 
 func (s *Sandbox) GetRoute() proxy.Route {
-	state, _ := s.GetState()
-	return proxy.Route{
-		IP:    s.Status.PodInfo.PodIP,
-		ID:    s.GetSandboxID(),
-		Owner: s.GetAnnotations()[agentsv1alpha1.AnnotationOwner],
-		State: state,
+	return proxyutils.DefaultGetRouteFunc(s.Sandbox)
+}
+
+func setTimeout(s *agentsv1alpha1.Sandbox, opts infra.TimeoutOptions) {
+	if !opts.PauseTime.IsZero() {
+		s.Spec.PauseTime = ptr.To(metav1.NewTime(opts.PauseTime))
+	} else {
+		s.Spec.PauseTime = nil
+	}
+	if !opts.ShutdownTime.IsZero() {
+		s.Spec.ShutdownTime = ptr.To(metav1.NewTime(opts.ShutdownTime))
+	} else {
+		s.Spec.ShutdownTime = nil
 	}
 }
 
-func (s *Sandbox) SetTimeout(ttl time.Duration) {
-	s.Spec.ShutdownTime = ptr.To(metav1.NewTime(time.Now().Add(ttl)))
+func (s *Sandbox) SetTimeout(opts infra.TimeoutOptions) {
+	setTimeout(s.Sandbox, opts)
 }
 
 // SetImage sets the image of the first container
@@ -151,17 +146,21 @@ func (s *Sandbox) GetImage() string {
 	return ""
 }
 
-func (s *Sandbox) SaveTimeout(ctx context.Context, ttl time.Duration) error {
-	return s.retryUpdate(ctx, s.Update, func(sbx *agentsv1alpha1.Sandbox) {
-		sbx.Spec.ShutdownTime = ptr.To(metav1.NewTime(time.Now().Add(ttl)))
+func (s *Sandbox) SaveTimeout(ctx context.Context, opts infra.TimeoutOptions) error {
+	return s.retryUpdate(ctx, s.Client.ApiV1alpha1().Sandboxes(s.GetNamespace()).Update, func(sbx *agentsv1alpha1.Sandbox) {
+		setTimeout(sbx, opts)
 	})
 }
 
-func (s *Sandbox) GetTimeout() time.Time {
-	if s.Spec.ShutdownTime == nil {
-		return time.Time{}
+func (s *Sandbox) GetTimeout() infra.TimeoutOptions {
+	opts := infra.TimeoutOptions{}
+	if s.Spec.ShutdownTime != nil {
+		opts.ShutdownTime = s.Spec.ShutdownTime.Time
 	}
-	return s.Spec.ShutdownTime.Time
+	if s.Spec.PauseTime != nil {
+		opts.PauseTime = s.Spec.PauseTime.Time
+	}
+	return opts
 }
 
 func (s *Sandbox) GetResource() infra.SandboxResource {
@@ -171,14 +170,11 @@ func (s *Sandbox) GetResource() infra.SandboxResource {
 	return utils.CalculateResourceFromContainers(s.Spec.Template.Spec.Containers)
 }
 
-func (s *Sandbox) Request(r *http.Request, path string, port int) (*http.Response, error) {
-	if s.Status.Phase != agentsv1alpha1.SandboxRunning {
-		return nil, errors.New("sandbox is not running")
-	}
-	return proxyutils.ProxyRequest(r, path, port, s.Status.PodInfo.PodIP)
+func (s *Sandbox) Request(ctx context.Context, method, path string, port int, body io.Reader) (*http.Response, error) {
+	return proxyutils.DefaultRequestFunc(ctx, s.Sandbox, method, path, port, body)
 }
 
-func (s *Sandbox) Pause(ctx context.Context) error {
+func (s *Sandbox) Pause(ctx context.Context, opts infra.PauseOptions) error {
 	log := klog.FromContext(ctx)
 	if s.Status.Phase != agentsv1alpha1.SandboxRunning {
 		return fmt.Errorf("sandbox is not in running phase")
@@ -189,8 +185,11 @@ func (s *Sandbox) Pause(ctx context.Context) error {
 		log.Error(err, "sandbox is not running", "state", state, "reason", reason)
 		return err
 	}
-	err := s.retryUpdate(ctx, s.Update, func(sbx *agentsv1alpha1.Sandbox) {
+	err := s.retryUpdate(ctx, s.Client.ApiV1alpha1().Sandboxes(s.GetNamespace()).Update, func(sbx *agentsv1alpha1.Sandbox) {
 		sbx.Spec.Paused = true
+		if opts.Timeout != nil {
+			setTimeout(sbx, *opts.Timeout)
+		}
 	})
 	if err != nil {
 		log.Error(err, "failed to update sandbox spec.paused")
@@ -214,8 +213,9 @@ func (s *Sandbox) Resume(ctx context.Context) error {
 		return fmt.Errorf("sandbox is pausing, please wait a moment and try again")
 	}
 	if s.Sandbox.Spec.Paused {
-		if err := s.retryUpdate(ctx, s.Update, func(sbx *agentsv1alpha1.Sandbox) {
+		if err := s.retryUpdate(ctx, s.Client.ApiV1alpha1().Sandboxes(s.GetNamespace()).Update, func(sbx *agentsv1alpha1.Sandbox) {
 			sbx.Spec.Paused = false
+			setTimeout(sbx, infra.TimeoutOptions{}) // remove all timeout options
 		}); err != nil {
 			log.Error(err, "failed to update sandbox spec.paused")
 			return err
@@ -226,7 +226,7 @@ func (s *Sandbox) Resume(ctx context.Context) error {
 	start := time.Now()
 	err := s.Cache.WaitForSandboxSatisfied(ctx, s.Sandbox, WaitActionResume, func(sbx *agentsv1alpha1.Sandbox) (bool, error) {
 		state, reason := stateutils.GetSandboxState(sbx)
-		log.V(consts.DebugLogLevel).Info("sandbox state updated", "state", state, "reason", reason)
+		log.V(consts.DebugLogLevel).Info("checking sandbox state", "state", state, "reason", reason)
 		return state == agentsv1alpha1.SandboxStateRunning, nil
 	}, time.Minute)
 	if err != nil {
@@ -234,16 +234,7 @@ func (s *Sandbox) Resume(ctx context.Context) error {
 		return err
 	}
 	log.Info("sandbox resumed", "cost", time.Since(start))
-	return nil
-}
-
-func (s *Sandbox) InplaceRefresh(deepcopy bool) error {
-	err := s.BaseSandbox.InplaceRefresh(deepcopy)
-	if err != nil {
-		return err
-	}
-	s.Sandbox = s.BaseSandbox.Sandbox
-	return nil
+	return s.InplaceRefresh(ctx, false)
 }
 
 func (s *Sandbox) GetState() (string, string) {
@@ -263,6 +254,7 @@ var MountCommand = "/mnt/envd/sandbox-runtime-storage"
 // `sandbox-runtime`.
 func (s *Sandbox) CSIMount(ctx context.Context, driver string, request string) error {
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(s.Sandbox))
+	startTime := time.Now()
 	processConfig := &process.ProcessConfig{
 		Cmd: MountCommand,
 		Args: []string{
@@ -275,9 +267,9 @@ func (s *Sandbox) CSIMount(ctx context.Context, driver string, request string) e
 			"POD_UID": string(s.Status.PodInfo.PodUID),
 		},
 	}
-	result, err := s.runCommandWithEnvd(ctx, processConfig, 5*time.Second)
+	result, err := s.runCommandWithRuntime(ctx, processConfig, 5*time.Second)
 	if err != nil {
-		log.Error(err, "failed to run command")
+		log.Error(err, "failed to run command", "stdout", result.Stdout, "stderr", result.Stderr)
 		return err
 	}
 	if result.ExitCode != 0 {
@@ -285,28 +277,16 @@ func (s *Sandbox) CSIMount(ctx context.Context, driver string, request string) e
 		log.Error(err, "command failed", "exitCode", result.ExitCode)
 		return err
 	}
+	log.Info("execute csi mount command", "driverName", driver, "mountCost", time.Since(startTime))
 	return nil
-}
-
-func DeepCopy(sbx *agentsv1alpha1.Sandbox) *agentsv1alpha1.Sandbox {
-	return sbx.DeepCopy()
 }
 
 var _ infra.Sandbox = &Sandbox{}
 
 func AsSandbox(sbx *agentsv1alpha1.Sandbox, cache *Cache, client sandboxclient.Interface) *Sandbox {
 	return &Sandbox{
-		BaseSandbox: BaseSandbox[*agentsv1alpha1.Sandbox]{
-			Sandbox:       sbx,
-			Cache:         cache,
-			PatchSandbox:  client.ApiV1alpha1().Sandboxes(sbx.Namespace).Patch,
-			UpdateStatus:  client.ApiV1alpha1().Sandboxes(sbx.Namespace).UpdateStatus,
-			Update:        client.ApiV1alpha1().Sandboxes(sbx.Namespace).Update,
-			DeleteFunc:    client.ApiV1alpha1().Sandboxes(sbx.Namespace).Delete,
-			SetCondition:  SetSandboxCondition,
-			GetConditions: ListSandboxConditions,
-			DeepCopy:      DeepCopy,
-		},
+		Cache:   cache,
+		Client:  client,
 		Sandbox: sbx,
 	}
 }

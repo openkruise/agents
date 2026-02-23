@@ -29,11 +29,15 @@ const (
 
 	// SandboxSetGate enable SandboxSet-controller to create a sandbox pod.
 	SandboxSetGate featuregate.Feature = "SandboxSet"
+
+	// SandboxClaimGate enable SandboxClaim-controller to claim sandboxes from SandboxSet pools.
+	SandboxClaimGate featuregate.Feature = "SandboxClaim"
 )
 
 var defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
-	SandboxGate:    {Default: true, PreRelease: featuregate.Alpha},
-	SandboxSetGate: {Default: true, PreRelease: featuregate.Alpha},
+	SandboxGate:      {Default: true, PreRelease: featuregate.Alpha},
+	SandboxSetGate:   {Default: true, PreRelease: featuregate.Alpha},
+	SandboxClaimGate: {Default: true, PreRelease: featuregate.Alpha},
 }
 
 func init() {

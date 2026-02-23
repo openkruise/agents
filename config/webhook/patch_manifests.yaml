@@ -8,6 +8,11 @@ webhooks:
       service:
         name: sandbox-controller-manager-webhook-service
         namespace: sandbox-system
+  - name: md-sbt.kb.io
+    clientConfig:
+      service:
+        name: sandbox-controller-manager-webhook-service
+        namespace: sandbox-system
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingWebhookConfiguration
@@ -15,6 +20,11 @@ metadata:
   name: validating-webhook-configuration
 webhooks:
   - name: v-sbs.kb.io
+    clientConfig:
+      service:
+        name: sandbox-controller-manager-webhook-service
+        namespace: sandbox-system
+  - name: v-sbt.kb.io
     clientConfig:
       service:
         name: sandbox-controller-manager-webhook-service

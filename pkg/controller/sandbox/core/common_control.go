@@ -31,6 +31,7 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/utils"
+	"github.com/openkruise/agents/pkg/utils/expectations"
 	"github.com/openkruise/agents/pkg/utils/inplaceupdate"
 )
 
@@ -55,10 +56,8 @@ func (r *commonControl) EnsureSandboxRunning(ctx context.Context, args EnsureFun
 	pod, box, newStatus := args.Pod, args.Box, args.NewStatus
 	// If the Pod does not exist, it must first be created.
 	if pod == nil {
-		if _, err := r.createPod(ctx, box, newStatus); err != nil {
-			return err
-		}
-		return nil
+		_, err := r.createPod(ctx, box, newStatus)
+		return err
 	}
 
 	// pod status running
@@ -79,6 +78,21 @@ func (r *commonControl) EnsureSandboxRunning(ctx context.Context, args EnsureFun
 			cond.LastTransitionTime = pCond.LastTransitionTime
 		}
 		utils.SetSandboxCondition(newStatus, *cond)
+		updateCond := metav1.Condition{
+			Type:               string(agentsv1alpha1.SandboxConditionInplaceUpdate),
+			Status:             metav1.ConditionTrue,
+			Reason:             agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded,
+			LastTransitionTime: metav1.Now(),
+		}
+		utils.SetSandboxCondition(newStatus, updateCond)
+		// update sandbox status
+		newStatus.NodeName = pod.Spec.NodeName
+		newStatus.SandboxIp = pod.Status.PodIP
+		newStatus.PodInfo = agentsv1alpha1.PodInfo{
+			PodIP:    pod.Status.PodIP,
+			NodeName: pod.Spec.NodeName,
+			PodUID:   pod.UID,
+		}
 		return nil
 	}
 
@@ -131,7 +145,7 @@ func (r *commonControl) EnsureSandboxUpdated(ctx context.Context, args EnsureFun
 
 func (r *commonControl) EnsureSandboxPaused(ctx context.Context, args EnsureFuncArgs) error {
 	pod, box, newStatus := args.Pod, args.Box, args.NewStatus
-	logger := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(box), "pod", klog.KObj(pod))
+	logger := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(box), "pod", klog.KObj(pod), "phase", "EnsureSandboxPaused")
 	cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
 	if cond == nil {
 		cond = &metav1.Condition{
@@ -141,7 +155,9 @@ func (r *commonControl) EnsureSandboxPaused(ctx context.Context, args EnsureFunc
 			LastTransitionTime: metav1.Now(),
 		}
 		utils.SetSandboxCondition(newStatus, *cond)
+		logger.Info("Paused condition initialized")
 	} else if cond.Status == metav1.ConditionTrue {
+		logger.Info("Paused condition is already true")
 		return nil
 	}
 
@@ -150,6 +166,7 @@ func (r *commonControl) EnsureSandboxPaused(ctx context.Context, args EnsureFunc
 		rCond.Status = metav1.ConditionFalse
 		rCond.LastTransitionTime = metav1.Now()
 		utils.SetSandboxCondition(newStatus, *rCond)
+		logger.Info("The paused phase sets condition ready to false")
 	}
 
 	// Pod deletion completed, paused completed
@@ -158,14 +175,15 @@ func (r *commonControl) EnsureSandboxPaused(ctx context.Context, args EnsureFunc
 		cond.Status = metav1.ConditionTrue
 		cond.LastTransitionTime = metav1.Now()
 		utils.SetSandboxCondition(newStatus, *cond)
+		logger.Info("Pod deletion completed, pause phase completed")
 		return nil
 	}
 	// Pod deletion incomplete, waiting
-	if !pod.DeletionTimestamp.IsZero() {
+	if pod != nil && !pod.DeletionTimestamp.IsZero() {
 		logger.Info("Sandbox wait pod paused")
 		return nil
 	}
-	err := client.IgnoreNotFound(r.Delete(ctx, pod, &client.DeleteOptions{GracePeriodSeconds: ptr.To(int64(30))}))
+	err := client.IgnoreNotFound(r.Delete(ctx, pod, &client.DeleteOptions{GracePeriodSeconds: ptr.To(int64(5))}))
 	if err != nil {
 		logger.Error(err, "Delete pod failed")
 		return err
@@ -180,7 +198,7 @@ func (r *commonControl) EnsureSandboxResumed(ctx context.Context, args EnsureFun
 	// Consider the scenario where a pod is paused and immediately resumed,
 	// pod phase may be Running, but the actual state could be Terminating.
 	if pod != nil && !pod.DeletionTimestamp.IsZero() {
-		return fmt.Errorf("the pods created in the previous stage are still in the terminating state.")
+		return fmt.Errorf("the pods created in the previous stage are still in the terminating state")
 	}
 
 	// first create pod
@@ -197,14 +215,13 @@ func (r *commonControl) EnsureSandboxResumed(ctx context.Context, args EnsureFun
 		utils.SetSandboxCondition(newStatus, *resumedCond)
 	}
 
-	if pod.Status.Phase == corev1.PodRunning {
+	// when pod is ready, sandbox status from resuming to running
+	pCond := utils.GetPodCondition(&pod.Status, corev1.PodReady)
+	if pod.Status.Phase == corev1.PodRunning && pCond != nil && pCond.Status == corev1.ConditionTrue {
 		newStatus.Phase = agentsv1alpha1.SandboxRunning
-		pCond := utils.GetPodCondition(&pod.Status, corev1.PodReady)
 		rCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionReady))
-		if pCond != nil && string(pCond.Status) != string(rCond.Status) {
-			rCond.Status = metav1.ConditionStatus(pCond.Status)
-			rCond.LastTransitionTime = pCond.LastTransitionTime
-		}
+		rCond.Status = metav1.ConditionStatus(pCond.Status)
+		rCond.LastTransitionTime = pCond.LastTransitionTime
 		utils.SetSandboxCondition(newStatus, *rCond)
 	}
 	return nil
@@ -223,7 +240,7 @@ func (r *commonControl) EnsureSandboxTerminated(ctx context.Context, args Ensure
 		logger.Info("remove sandbox finalizer success")
 		return nil
 	} else if !pod.DeletionTimestamp.IsZero() {
-		logger.Info("Pod is in deleting, and wait a moment")
+		logger.Info("Pod is deleting, and wait a moment")
 		return nil
 	}
 
@@ -239,15 +256,26 @@ func (r *commonControl) EnsureSandboxTerminated(ctx context.Context, args Ensure
 func (r *commonControl) createPod(ctx context.Context, box *agentsv1alpha1.Sandbox, newStatus *agentsv1alpha1.SandboxStatus) (*corev1.Pod, error) {
 	logger := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
 
+	podTemplate := box.Spec.Template
+	if box.Spec.TemplateRef != nil {
+		refTemplate := &agentsv1alpha1.SandboxTemplate{}
+		err := r.Get(ctx, client.ObjectKey{Namespace: box.Namespace, Name: box.Spec.TemplateRef.Name}, refTemplate)
+		if err != nil {
+			logger.Error(err, "failed to get sandbox template", "template", box.Spec.TemplateRef.Name, "sandbox", box.Name)
+			return nil, err
+		}
+		podTemplate = refTemplate.Spec.Template
+	}
+
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace:       box.Namespace,
 			Name:            box.Name,
 			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(box, sandboxControllerKind)},
-			Labels:          box.Spec.Template.Labels,
-			Annotations:     box.Spec.Template.Annotations,
+			Labels:          podTemplate.Labels,
+			Annotations:     podTemplate.Annotations,
 		},
-		Spec: box.Spec.Template.Spec,
+		Spec: podTemplate.Spec,
 	}
 	if pod.Annotations == nil {
 		pod.Annotations = map[string]string{}
@@ -277,9 +305,10 @@ func (r *commonControl) createPod(ctx context.Context, box *agentsv1alpha1.Sandb
 		})
 	}
 	pod.Spec.Volumes = append(pod.Spec.Volumes, volumes...)
-
+	ScaleExpectation.ExpectScale(GetControllerKey(box), expectations.Create, box.Name)
 	err := r.Create(ctx, pod)
 	if err != nil && !errors.IsAlreadyExists(err) {
+		ScaleExpectation.ObserveScale(GetControllerKey(box), expectations.Create, box.Name)
 		logger.Error(err, "create pod failed")
 		return nil, err
 	}
@@ -289,74 +318,9 @@ func (r *commonControl) createPod(ctx context.Context, box *agentsv1alpha1.Sandb
 
 func (r *commonControl) handleInplaceUpdateSandbox(ctx context.Context, args EnsureFuncArgs) (bool, error) {
 	pod, box, newStatus := args.Pod, args.Box, args.NewStatus
-	logger := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
-
-	_, hashWithoutImageAndResource := HashSandbox(box)
-	// old Pod do not include Labels[pod-template-hash] and do not support inplace update.
-	if pod.Labels[agentsv1alpha1.PodLabelTemplateHash] == "" {
-		return true, nil
-		// todo, update inplaceupdate condition
-	} else if box.Annotations[agentsv1alpha1.SandboxHashWithoutImageAndResources] != hashWithoutImageAndResource {
-		logger.Info("sandbox hash-without-image-resources changed, and does not permit in-place upgrades", "old hash",
-			box.Annotations[agentsv1alpha1.SandboxHashWithoutImageAndResources], "new hash", hashWithoutImageAndResource)
-		r.recorder.Eventf(box, corev1.EventTypeWarning, "InplaceUpdateForbidden", "InplaceUpdate only support image, resources")
-		return true, nil
+	handler := &CommonInPlaceUpdateHandler{
+		control:  r.inplaceUpdateControl,
+		recorder: r.recorder,
 	}
-	// revision consistent
-	if pod.Labels[agentsv1alpha1.PodLabelTemplateHash] == newStatus.UpdateRevision {
-		// inplace update is incompleted
-		if !inplaceupdate.IsInplaceUpdateCompleted(ctx, pod) {
-			return false, nil
-		}
-		cond := metav1.Condition{
-			Type:               string(agentsv1alpha1.SandboxConditionInplaceUpdate),
-			Status:             metav1.ConditionTrue,
-			Reason:             agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded,
-			LastTransitionTime: metav1.Now(),
-		}
-		utils.SetSandboxCondition(newStatus, cond)
-		return true, nil
-	}
-
-	state, err := inplaceupdate.GetPodInPlaceUpdateState(pod)
-	if err != nil {
-		return false, err
-		// state!=nil indicates that an in-place upgrade has already been performed previously.
-	} else if state != nil {
-		// currently, multiple in-place updates are not supported.
-		logger.Info("currently, multiple in-place updates are not supported")
-		r.recorder.Eventf(box, corev1.EventTypeWarning, "InplaceUpdateForbidden", "currently, multiple in-place updates are not supported")
-		// inplace update is incompleted
-		if !inplaceupdate.IsInplaceUpdateCompleted(ctx, pod) {
-			return false, nil
-		}
-		return true, nil
-	}
-
-	// start inplace update sandbox
-	opts := inplaceupdate.InPlaceUpdateOptions{Pod: pod, Box: box, Revision: newStatus.UpdateRevision}
-	changed, err := r.inplaceUpdateControl.Update(ctx, opts)
-	if err != nil {
-		return false, err
-	} else if !changed {
-		return true, nil
-	}
-
-	// update sandbox inplace-update
-	cond := metav1.Condition{
-		Type:               string(agentsv1alpha1.SandboxConditionInplaceUpdate),
-		Status:             metav1.ConditionFalse,
-		Reason:             agentsv1alpha1.SandboxInplaceUpdateReasonInplaceUpdating,
-		LastTransitionTime: metav1.Now(),
-	}
-	utils.SetSandboxCondition(newStatus, cond)
-	cond = metav1.Condition{
-		Type:               string(agentsv1alpha1.SandboxConditionReady),
-		Status:             metav1.ConditionFalse,
-		LastTransitionTime: metav1.Now(),
-		Reason:             agentsv1alpha1.SandboxReadyReasonInplaceUpdating,
-		Message:            "inplace update is incompleted",
-	}
-	utils.SetSandboxCondition(newStatus, cond)
-	return false, nil
+	return handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
 }

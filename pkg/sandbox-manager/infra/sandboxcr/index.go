@@ -7,15 +7,15 @@ import (
 )
 
 var (
-	IndexPoolAvailable = "poolAvailable"
-	IndexSandboxID     = "sandboxID"
-	IndexUser          = "user"
+	IndexTemplateAvailable = "templateAvailable"
+	IndexSandboxID         = "sandboxID"
+	IndexUser              = "user"
 )
 
 // AddLabelSelectorIndexerToInformer add label selector indexer to informer
 func AddLabelSelectorIndexerToInformer(informer cache.SharedIndexInformer) error {
 	return informer.AddIndexers(cache.Indexers{
-		IndexPoolAvailable: func(obj interface{}) ([]string, error) {
+		IndexTemplateAvailable: func(obj interface{}) ([]string, error) {
 			result, ok := obj.(*agentsv1alpha1.Sandbox)
 			if !ok {
 				return []string{}, nil
@@ -23,7 +23,10 @@ func AddLabelSelectorIndexerToInformer(informer cache.SharedIndexInformer) error
 			var indices = make([]string, 0, 1)
 			state, _ := stateutils.GetSandboxState(result)
 			if state == agentsv1alpha1.SandboxStateAvailable {
-				indices = append(indices, result.GetLabels()[agentsv1alpha1.LabelSandboxPool])
+				tmpl := GetTemplateFromSandbox(result)
+				if tmpl != "" {
+					indices = append(indices, tmpl)
+				}
 			}
 			return indices, nil
 		},

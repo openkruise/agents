@@ -51,7 +51,6 @@ func (h *SandboxSetValidatingHandler) Handle(_ context.Context, req admission.Re
 func validateSandboxSetMetadata(metadata metav1.ObjectMeta, fldPath *field.Path) field.ErrorList {
 	var errList field.ErrorList
 	errList = append(errList, validation.ValidateObjectMeta(&metadata, true, validation.NameIsDNSSubdomain, fldPath)...)
-	errList = append(errList, validateLabelsAndAnnotations(metadata, fldPath)...)
 	return errList
 }
 
@@ -77,14 +76,28 @@ func validateSandboxSetSpec(spec agentsv1alpha1.SandboxSetSpec, fldPath *field.P
 	if spec.Replicas < 0 {
 		errList = append(errList, field.Invalid(fldPath.Child("replicas"), spec.Replicas, "replicas cannot be negative"))
 	}
-	errList = append(errList, validateLabelsAndAnnotations(spec.Template.ObjectMeta, fldPath.Child("template"))...)
-	errList = append(errList, validateSandboxSetPodTemplateSpec(spec, fldPath)...)
+
+	if spec.TemplateRef != nil && spec.EmbeddedSandboxTemplate.Template != nil {
+		errList = append(errList, field.Invalid(fldPath.Child("templateRef"), spec.TemplateRef, "templateRef and podtemplate is mutual exclusive"))
+	}
+
+	if spec.EmbeddedSandboxTemplate.Template != nil {
+		errList = append(errList, validateLabelsAndAnnotations(spec.Template.ObjectMeta, fldPath.Child("template"))...)
+		errList = append(errList, validateSandboxSetPodTemplateSpec(spec, fldPath)...)
+	}
+
 	return errList
 }
 
 func validateSandboxSetPodTemplateSpec(spec agentsv1alpha1.SandboxSetSpec, fldPath *field.Path) field.ErrorList {
 	errList := field.ErrorList{}
 	coreTemplate := &core.PodTemplateSpec{}
+
+	if len(spec.VolumeClaimTemplates) != 0 {
+		//TODO: validate the podtemplate if VolumeClaimTemplates is not empty
+		return errList
+	}
+
 	if err := corev1.Convert_v1_PodTemplateSpec_To_core_PodTemplateSpec(spec.Template.DeepCopy(), coreTemplate, nil); err != nil {
 		errList = append(errList, field.Invalid(fldPath.Child("template"), spec.Template, fmt.Sprintf("Convert_v1_PodTemplateSpec_To_core_PodTemplateSpec failed: %v", err)))
 		return errList

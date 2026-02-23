@@ -23,10 +23,14 @@ import (
 const (
 	InternalPrefix = "agents.kruise.io/"
 
-	// LabelSandboxPool identifies which SandboxSet generated the sandbox
+	// LabelSandboxPool identifies which SandboxSet generated the sandbox, which is deprecated and will be removed in the future
 	LabelSandboxPool = InternalPrefix + "sandbox-pool"
+	// LabelSandboxTemplate identifies which template generated the sandbox
+	LabelSandboxTemplate = InternalPrefix + "sandbox-template"
 	// LabelSandboxIsClaimed indicates whether the sandbox has been claimed by user
 	LabelSandboxIsClaimed = InternalPrefix + "sandbox-claimed"
+	// LabelSandboxClaimName indicates the name of the SandboxClaim that claimed this sandbox
+	LabelSandboxClaimName = InternalPrefix + "claim-name"
 	LabelTemplateHash     = InternalPrefix + "template-hash"
 
 	AnnotationLock      = InternalPrefix + "lock"
@@ -52,7 +56,7 @@ type SandboxSetSpec struct {
 	// PersistentContents indicates resume pod with persistent content, Enum: ip, memory, filesystem
 	PersistentContents []string `json:"persistentContents,omitempty"`
 
-	SandboxTemplate `json:",inline"`
+	EmbeddedSandboxTemplate `json:",inline"`
 }
 
 // SandboxSetStatus defines the observed state of SandboxSet.

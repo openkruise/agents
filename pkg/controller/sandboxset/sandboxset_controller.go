@@ -73,7 +73,7 @@ func Add(mgr manager.Manager) error {
 	if err != nil {
 		return err
 	}
-	klog.Infof("start SandboxSetReconciler success")
+	klog.Infof("Started SandboxSetReconciler successfully")
 	return nil
 }
 
@@ -244,7 +244,7 @@ func (r *Reconciler) createSandbox(ctx context.Context, sbs *agentsv1alpha1.Sand
 		},
 		Spec: agentsv1alpha1.SandboxSpec{
 			PersistentContents: sbs.Spec.PersistentContents,
-			SandboxTemplate: agentsv1alpha1.SandboxTemplate{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
 				TemplateRef:          sbs.Spec.TemplateRef,
 				Template:             template,
 				VolumeClaimTemplates: sbs.Spec.VolumeClaimTemplates,
@@ -254,8 +254,14 @@ func (r *Reconciler) createSandbox(ctx context.Context, sbs *agentsv1alpha1.Sand
 	sbx.Annotations = clearAndInitInnerKeys(sbx.Annotations)
 	sbx.Labels = clearAndInitInnerKeys(sbx.Labels)
 	sbx.Labels[agentsv1alpha1.LabelSandboxPool] = sbs.Name
+	sbx.Labels[agentsv1alpha1.LabelSandboxTemplate] = sbs.Name
 	sbx.Labels[agentsv1alpha1.LabelSandboxIsClaimed] = "false"
 	sbx.Labels[agentsv1alpha1.LabelTemplateHash] = revision
+	if sbs.Spec.TemplateRef != nil {
+		sbx.Labels[agentsv1alpha1.LabelSandboxTemplate] = sbs.Spec.TemplateRef.Name
+	} else {
+		sbx.Labels[agentsv1alpha1.LabelSandboxTemplate] = sbs.Name
+	}
 	if err := ctrl.SetControllerReference(sbs, sbx, r.Scheme); err != nil {
 		return nil, err
 	}

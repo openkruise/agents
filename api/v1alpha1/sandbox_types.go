@@ -52,10 +52,15 @@ type SandboxSpec struct {
 	// +kubebuilder:validation:Format="date-time"
 	ShutdownTime *metav1.Time `json:"shutdownTime,omitempty"`
 
-	SandboxTemplate `json:",inline"`
+	// PauseTime - Absolute time when the sandbox will be paused automatically.
+	// +kubebuilder:validation:Format="date-time"
+	PauseTime *metav1.Time `json:"pauseTime,omitempty"`
+
+	EmbeddedSandboxTemplate `json:",inline"`
 }
 
-type SandboxTemplate struct {
+type EmbeddedSandboxTemplate struct {
+
 	// TemplateRef references a SandboxTemplate, which will be used to create the sandbox.
 	// +optional
 	TemplateRef *SandboxTemplateRef `json:"templateRef,omitempty"`
@@ -68,11 +73,13 @@ type SandboxTemplate struct {
 	Template *v1.PodTemplateSpec `json:"template,omitempty"`
 
 	// VolumeClaimTemplates is a list of PVC templates to create for this Sandbox.
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:Schemaless
 	// +optional
 	VolumeClaimTemplates []v1.PersistentVolumeClaim `json:"volumeClaimTemplates,omitempty"`
 }
 
-// SandboxTemmplateRef references a SandboxTemplate
+// SandboxTemplateRef references a SandboxTemplate
 type SandboxTemplateRef struct {
 	// name of the SandboxTemplate
 	// +kubebuilder:validation:Required
@@ -227,6 +234,7 @@ const (
 // +kubebuilder:printcolumn:name="Status",type="string",JSONPath=".status.phase"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 // +kubebuilder:printcolumn:name="shutdown_time",type="string",JSONPath=".spec.shutdownTime"
+// +kubebuilder:printcolumn:name="pause_time",type="string",JSONPath=".spec.pauseTime"
 // +kubebuilder:printcolumn:name="Message",type="string",JSONPath=".status.message"
 
 // Sandbox is the Schema for the sandboxes API

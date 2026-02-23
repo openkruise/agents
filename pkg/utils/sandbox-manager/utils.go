@@ -4,6 +4,7 @@
 package utils
 
 import (
+	"github.com/google/uuid"
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/utils/expectations"
@@ -69,4 +70,8 @@ func ResourceVersionExpectationSatisfied(obj metav1.Object) bool {
 		return true
 	}
 	return satisfied
+}
+
+func NewLockString() string {
+	return uuid.NewString()
 }

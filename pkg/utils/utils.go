@@ -12,6 +12,7 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/util/retry"
@@ -22,14 +23,16 @@ import (
 func SetSandboxCondition(status *agentsv1alpha1.SandboxStatus, condition metav1.Condition) {
 	currentCond := GetSandboxCondition(status, condition.Type)
 	if currentCond != nil && currentCond.Status == condition.Status && currentCond.Reason == condition.Reason &&
-		currentCond.Message == condition.Message && currentCond.LastTransitionTime == condition.LastTransitionTime {
+		currentCond.Message == condition.Message {
 		return
 	} else if currentCond == nil {
 		status.Conditions = append(status.Conditions, condition)
 		return
 	}
+	if currentCond.Status != condition.Status {
+		currentCond.LastTransitionTime = condition.LastTransitionTime
+	}
 	currentCond.Status = condition.Status
-	currentCond.LastTransitionTime = condition.LastTransitionTime
 	currentCond.Reason = condition.Reason
 	currentCond.Message = condition.Message
 }
@@ -212,4 +215,8 @@ func DecodeBase64Proto[T proto.Message](raw string, into T) error {
 		return err
 	}
 	return proto.Unmarshal(decoded, into)
+}
+
+func GetControllerKey(obj client.Object) string {
+	return types.NamespacedName{Namespace: obj.GetNamespace(), Name: obj.GetName()}.String()
 }

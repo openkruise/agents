@@ -25,8 +25,12 @@ import (
 type Interface interface {
 	// Sandboxes returns a SandboxInformer.
 	Sandboxes() SandboxInformer
+	// SandboxClaims returns a SandboxClaimInformer.
+	SandboxClaims() SandboxClaimInformer
 	// SandboxSets returns a SandboxSetInformer.
 	SandboxSets() SandboxSetInformer
+	// SandboxTemplates returns a SandboxTemplateInformer.
+	SandboxTemplates() SandboxTemplateInformer
 }
 
 type version struct {
@@ -45,7 +49,17 @@ func (v *version) Sandboxes() SandboxInformer {
 	return &sandboxInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
 }
 
+// SandboxClaims returns a SandboxClaimInformer.
+func (v *version) SandboxClaims() SandboxClaimInformer {
+	return &sandboxClaimInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
+}
+
 // SandboxSets returns a SandboxSetInformer.
 func (v *version) SandboxSets() SandboxSetInformer {
 	return &sandboxSetInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
+}
+
+// SandboxTemplates returns a SandboxTemplateInformer.
+func (v *version) SandboxTemplates() SandboxTemplateInformer {
+	return &sandboxTemplateInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
 }

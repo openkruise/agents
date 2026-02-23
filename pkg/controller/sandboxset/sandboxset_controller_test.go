@@ -3,10 +3,11 @@ package sandboxset
 import (
 	"context"
 	"fmt"
-	"k8s.io/apimachinery/pkg/api/resource"
 	"strconv"
 	"strings"
 	"testing"
+
+	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
@@ -47,7 +48,7 @@ func getSandboxSet(replicas int32) *v1alpha1.SandboxSet {
 		},
 		Spec: v1alpha1.SandboxSetSpec{
 			Replicas: replicas,
-			SandboxTemplate: v1alpha1.SandboxTemplate{
+			EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
 				Template: &corev1.PodTemplateSpec{
 					ObjectMeta: metav1.ObjectMeta{
 						Labels: map[string]string{

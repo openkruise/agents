@@ -7,42 +7,25 @@ import (
 	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
-	"github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/client/clientset/versioned/fake"
-	"github.com/openkruise/agents/pkg/proxy"
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
-	utils2 "github.com/openkruise/agents/pkg/utils"
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
-)
 
-func AsSandboxForTest(sbx *v1alpha1.Sandbox, client *fake.Clientset, cache *Cache) *Sandbox {
-	s := &Sandbox{
-		BaseSandbox: BaseSandbox[*v1alpha1.Sandbox]{
-			Sandbox:       sbx,
-			Cache:         cache,
-			SetCondition:  SetSandboxCondition,
-			GetConditions: ListSandboxConditions,
-			DeepCopy:      DeepCopy,
-		},
-		Sandbox: sbx,
-	}
-	if client != nil {
-		s.PatchSandbox = client.ApiV1alpha1().Sandboxes("default").Patch
-		s.Update = client.ApiV1alpha1().Sandboxes("default").Update
-		s.DeleteFunc = client.ApiV1alpha1().Sandboxes("default").Delete
-	}
-	return s
-}
+	"github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/client/clientset/versioned/fake"
+	"github.com/openkruise/agents/pkg/proxy"
+	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	"github.com/openkruise/agents/pkg/utils"
+	constantUtils "github.com/openkruise/agents/pkg/utils"
+)
 
 func ConvertPodToSandboxCR(pod *corev1.Pod) *v1alpha1.Sandbox {
 	sbx := &v1alpha1.Sandbox{
 		ObjectMeta: pod.ObjectMeta,
 		Spec: v1alpha1.SandboxSpec{
-			SandboxTemplate: v1alpha1.SandboxTemplate{
+			EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
 				Template: &corev1.PodTemplateSpec{
 					Spec: pod.Spec,
 				},
@@ -55,7 +38,7 @@ func ConvertPodToSandboxCR(pod *corev1.Pod) *v1alpha1.Sandbox {
 			},
 		},
 	}
-	cond := utils2.GetPodCondition(&pod.Status, corev1.PodReady)
+	cond := utils.GetPodCondition(&pod.Status, corev1.PodReady)
 	if cond != nil {
 		sbx.Status.Conditions = append(sbx.Status.Conditions, metav1.Condition{
 			Type:   string(v1alpha1.SandboxConditionReady),
@@ -79,7 +62,7 @@ func TestSandbox_GetTemplate(t *testing.T) {
 			pod: &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
-						v1alpha1.LabelSandboxPool: "test-template",
+						v1alpha1.LabelSandboxTemplate: "test-template",
 					},
 				},
 			},
@@ -90,7 +73,7 @@ func TestSandbox_GetTemplate(t *testing.T) {
 			pod: &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
-						v1alpha1.LabelSandboxPool: "",
+						v1alpha1.LabelSandboxTemplate: "",
 					},
 				},
 			},
@@ -109,7 +92,7 @@ func TestSandbox_GetTemplate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := AsSandboxForTest(ConvertPodToSandboxCR(tt.pod), nil, nil)
+			s := AsSandbox(ConvertPodToSandboxCR(tt.pod), nil, nil)
 			if got := s.GetTemplate(); got != tt.want {
 				t.Errorf("GetTemplate() = %v, want %v", got, tt.want)
 			}
@@ -212,7 +195,7 @@ func TestSandbox_GetResource(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := AsSandboxForTest(ConvertPodToSandboxCR(tt.pod), nil, nil)
+			s := AsSandbox(ConvertPodToSandboxCR(tt.pod), nil, nil)
 			got := s.GetResource()
 			if got.CPUMilli != tt.want.CPUMilli {
 				t.Errorf("GetResource().CPUMilli = %v, want %v", got.CPUMilli, tt.want.CPUMilli)
@@ -235,7 +218,7 @@ func TestSandbox_InplaceRefresh(t *testing.T) {
 		},
 	}
 
-	cache, client := NewTestCache(t)
+	cache, _, client := NewTestCache(t, constantUtils.DefaultSandboxDeployNamespace)
 	_, err := client.ApiV1alpha1().Sandboxes("default").Create(context.Background(), initialSandbox, metav1.CreateOptions{})
 	assert.NoError(t, err)
 	time.Sleep(10 * time.Millisecond)
@@ -246,23 +229,24 @@ func TestSandbox_InplaceRefresh(t *testing.T) {
 	assert.NoError(t, err)
 	time.Sleep(10 * time.Millisecond)
 
-	s := AsSandboxForTest(initialSandbox, client, cache)
+	s := AsSandbox(initialSandbox, cache, client)
 
 	assert.Equal(t, "value", s.Sandbox.Labels["initial"])
 	assert.Empty(t, s.Sandbox.Labels["updated"])
 
-	err = s.InplaceRefresh(false)
+	err = s.InplaceRefresh(t.Context(), false)
 	assert.NoError(t, err)
 
 	assert.Equal(t, "value", s.Sandbox.Labels["initial"])
 	assert.Equal(t, "new-value", s.Sandbox.Labels["updated"])
 
-	err = s.InplaceRefresh(true)
+	err = s.InplaceRefresh(t.Context(), true)
 	assert.NoError(t, err)
 	assert.Equal(t, "value", s.Sandbox.Labels["initial"])
 	assert.Equal(t, "new-value", s.Sandbox.Labels["updated"])
 }
 
+//goland:noinspection GoDeprecation
 func TestSandbox_Kill(t *testing.T) {
 	tests := []struct {
 		name              string
@@ -299,7 +283,7 @@ func TestSandbox_Kill(t *testing.T) {
 			_, err := client.ApiV1alpha1().Sandboxes("default").Create(context.Background(), sandbox, metav1.CreateOptions{})
 			assert.NoError(t, err)
 
-			s := AsSandboxForTest(sandbox, client, nil)
+			s := AsSandbox(sandbox, nil, client)
 
 			_, err = client.ApiV1alpha1().Sandboxes("default").Get(context.Background(), "test-sandbox", metav1.GetOptions{})
 			assert.NoError(t, err)
@@ -327,16 +311,20 @@ func TestSandbox_GetTimeout(t *testing.T) {
 	tests := []struct {
 		name     string
 		sandbox  *v1alpha1.Sandbox
-		expected time.Time
+		expected infra.TimeoutOptions
 	}{
 		{
-			name: "with shutdown time set",
+			name: "with timeout set",
 			sandbox: &v1alpha1.Sandbox{
 				Spec: v1alpha1.SandboxSpec{
 					ShutdownTime: &future,
+					PauseTime:    &now,
 				},
 			},
-			expected: future.Time,
+			expected: infra.TimeoutOptions{
+				ShutdownTime: future.Time,
+				PauseTime:    now.Time,
+			},
 		},
 		{
 			name: "without shutdown time",
@@ -345,7 +333,7 @@ func TestSandbox_GetTimeout(t *testing.T) {
 					ShutdownTime: nil,
 				},
 			},
-			expected: time.Time{},
+			expected: infra.TimeoutOptions{},
 		},
 	}
 
@@ -361,20 +349,26 @@ func TestSandbox_GetTimeout(t *testing.T) {
 }
 
 func TestSandbox_SaveTimeout(t *testing.T) {
+	now := time.Now()
 	tests := []struct {
 		name        string
 		initialTime *metav1.Time
-		ttl         time.Duration
+		opts        infra.TimeoutOptions
 	}{
 		{
 			name:        "set timeout on sandbox without existing timeout",
 			initialTime: nil,
-			ttl:         30 * time.Minute,
+			opts: infra.TimeoutOptions{
+				ShutdownTime: now.Add(30 * time.Minute),
+				PauseTime:    now.Add(15 * time.Minute),
+			},
 		},
 		{
 			name:        "update timeout on sandbox with existing timeout",
-			initialTime: &metav1.Time{Time: time.Now().Add(1 * time.Hour)},
-			ttl:         45 * time.Minute,
+			initialTime: &metav1.Time{Time: now.Add(1 * time.Hour)},
+			opts: infra.TimeoutOptions{
+				ShutdownTime: now.Add(30 * time.Minute),
+			},
 		},
 	}
 
@@ -390,39 +384,60 @@ func TestSandbox_SaveTimeout(t *testing.T) {
 				},
 			}
 
-			cache, client := NewTestCache(t)
+			cache, _, client := NewTestCache(t, constantUtils.DefaultSandboxDeployNamespace)
 			_, err := client.ApiV1alpha1().Sandboxes("default").Create(context.Background(), sandbox, metav1.CreateOptions{})
 			assert.NoError(t, err)
 			time.Sleep(20 * time.Millisecond)
 
-			s := AsSandboxForTest(sandbox, client, cache)
+			s := AsSandbox(sandbox, cache, client)
 
-			err = s.SaveTimeout(context.Background(), tt.ttl)
+			err = s.SaveTimeout(t.Context(), tt.opts)
 			assert.NoError(t, err)
 
 			updatedSandbox, err := client.ApiV1alpha1().Sandboxes("default").Get(context.Background(), "test-sandbox", metav1.GetOptions{})
 			assert.NoError(t, err)
-			assert.NotNil(t, updatedSandbox.Spec.ShutdownTime)
-			assert.WithinDuration(t, time.Now().Add(tt.ttl), updatedSandbox.Spec.ShutdownTime.Time, time.Second)
+			if !tt.opts.PauseTime.IsZero() {
+				assert.NotNil(t, updatedSandbox.Spec.PauseTime)
+				assert.WithinDuration(t, tt.opts.PauseTime, updatedSandbox.Spec.PauseTime.Time, time.Second)
+			}
+			if !tt.opts.ShutdownTime.IsZero() {
+				assert.NotNil(t, updatedSandbox.Spec.ShutdownTime)
+				assert.WithinDuration(t, tt.opts.ShutdownTime, updatedSandbox.Spec.ShutdownTime.Time, time.Second)
+			}
 		})
 	}
 }
 
 func TestSandbox_SetTimeout(t *testing.T) {
+	now := time.Now()
 	tests := []struct {
 		name        string
-		initialTime *metav1.Time
-		ttl         time.Duration
+		initialTime infra.TimeoutOptions
+		opts        infra.TimeoutOptions
 	}{
 		{
 			name:        "set timeout on sandbox without existing timeout",
-			initialTime: nil,
-			ttl:         1 * time.Hour,
+			initialTime: infra.TimeoutOptions{},
+			opts: infra.TimeoutOptions{
+				ShutdownTime: now,
+				PauseTime:    now,
+			},
 		},
 		{
 			name:        "update timeout on sandbox with existing timeout",
-			initialTime: &metav1.Time{Time: time.Now().Add(1 * time.Hour)},
-			ttl:         2 * time.Hour,
+			initialTime: infra.TimeoutOptions{},
+			opts: infra.TimeoutOptions{
+				ShutdownTime: now.Add(time.Hour),
+				PauseTime:    now.Add(time.Hour),
+			},
+		},
+		{
+			name: "clear existing timeout",
+			initialTime: infra.TimeoutOptions{
+				ShutdownTime: now,
+				PauseTime:    now,
+			},
+			opts: infra.TimeoutOptions{},
 		},
 	}
 
@@ -430,19 +445,27 @@ func TestSandbox_SetTimeout(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			sandbox := &v1alpha1.Sandbox{
 				Spec: v1alpha1.SandboxSpec{
-					ShutdownTime: tt.initialTime,
+					ShutdownTime: ptr.To(metav1.NewTime(tt.initialTime.ShutdownTime)),
+					PauseTime:    ptr.To(metav1.NewTime(tt.initialTime.PauseTime)),
 				},
 			}
 			s := &Sandbox{
 				Sandbox: sandbox,
 			}
 
-			s.SetTimeout(tt.ttl)
+			s.SetTimeout(tt.opts)
 
-			assert.NotNil(t, s.Sandbox.Spec.ShutdownTime)
-			assert.WithinDuration(t, time.Now().Add(tt.ttl), s.Sandbox.Spec.ShutdownTime.Time, time.Second)
+			assert.WithinDuration(t, tt.opts.ShutdownTime, getTimeFromMetaTime(s.Sandbox.Spec.ShutdownTime), time.Millisecond)
+			assert.WithinDuration(t, tt.opts.PauseTime, getTimeFromMetaTime(s.Sandbox.Spec.PauseTime), time.Millisecond)
 		})
 	}
+}
+
+func getTimeFromMetaTime(t *metav1.Time) time.Time {
+	if t == nil {
+		return time.Time{}
+	}
+	return t.Time
 }
 
 func TestSandbox_GetClaimTime(t *testing.T) {
@@ -627,21 +650,21 @@ func TestSandbox_CSIMount(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			server := NewTestEnvdServer(tt.result, true, tt.processError)
+			server := NewTestRuntimeServer(tt.result, true, tt.processError)
 			defer server.Close()
 
-			cache, client := NewTestCache(t)
+			cache, _, client := NewTestCache(t, constantUtils.DefaultSandboxDeployNamespace)
 			sbx := &v1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "test-sandbox",
 					Annotations: map[string]string{
-						v1alpha1.AnnotationEnvdURL:         server.URL,
-						v1alpha1.AnnotationEnvdAccessToken: AccessToken,
+						v1alpha1.AnnotationRuntimeURL:         server.URL,
+						v1alpha1.AnnotationRuntimeAccessToken: AccessToken,
 					},
 				},
 			}
-			sandbox := AsSandboxForTest(sbx, client, cache)
-			request, err := utils2.EncodeBase64Proto(tt.req)
+			sandbox := AsSandbox(sbx, cache, client)
+			request, err := utils.EncodeBase64Proto(tt.req)
 			assert.NoError(t, err)
 			err = sandbox.CSIMount(t.Context(), tt.driver, request)
 			if tt.expectError != "" {

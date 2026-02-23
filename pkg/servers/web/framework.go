@@ -53,7 +53,8 @@ func RegisterRoute[T any](mux *http.ServeMux, method, path string, handler Handl
 		if requestID == "" {
 			requestID = uuid.NewString()
 		}
-		ctx := logs.NewContext("requestID", requestID)
+		// Derive context from request context to inherit cancellation when client disconnects
+		ctx := logs.NewContextFrom(r.Context(), "requestID", requestID)
 		log := klog.FromContext(ctx)
 
 		defer func() {

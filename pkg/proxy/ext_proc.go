@@ -106,8 +106,8 @@ func (s *Server) handleRequestHeaders(requestHeaders *extProcPb.ProcessingReques
 		errorMsg := fmt.Sprintf("route for sandbox %s not found", sandboxID)
 		return s.logAndCreateErrorResponse(http.StatusNotFound, errorMsg, log)
 	}
-	if route.State == agentsv1alpha1.SandboxStatePaused {
-		return s.logAndCreateErrorResponse(http.StatusForbidden, "sandbox is paused", log)
+	if route.State != agentsv1alpha1.SandboxStateRunning {
+		return s.logAndCreateErrorResponse(http.StatusBadGateway, "sandbox is not running", log)
 	}
 	if extraHeaders == nil {
 		extraHeaders = make(map[string]string)
@@ -115,7 +115,11 @@ func (s *Server) handleRequestHeaders(requestHeaders *extProcPb.ProcessingReques
 	for k, v := range route.ExtraHeaders {
 		extraHeaders[k] = v
 	}
-	extraHeaders[OrigDstHeader] = fmt.Sprintf("%s:%d", route.IP, sandboxPort)
+	// An adapter can set "x-envoy-original-dst-host" header to force route the request to a specific destination
+	if _, ok := extraHeaders[OrigDstHeader]; !ok {
+		extraHeaders[OrigDstHeader] = fmt.Sprintf("%s:%d", route.IP, sandboxPort)
+	}
+
 	return s.logAndCreateDstResponse(requestHeaders.RequestHeaders, extraHeaders, log)
 }
 

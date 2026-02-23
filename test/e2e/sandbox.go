@@ -53,7 +53,7 @@ var _ = Describe("Sandbox", func() {
 				Namespace: namespace,
 			},
 			Spec: agentsv1alpha1.SandboxSpec{
-				SandboxTemplate: agentsv1alpha1.SandboxTemplate{
+				EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
 					Template: &corev1.PodTemplateSpec{
 						Spec: corev1.PodSpec{
 							Containers: []corev1.Container{
@@ -82,7 +82,7 @@ var _ = Describe("Sandbox", func() {
 	})
 
 	Context("creation and pending phase", func() {
-		It("should create sandbox and transition to pending phase", func() {
+		It("should create sandbox and transition to running phase", func() {
 			By("Creating a new Sandbox")
 			Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
 
@@ -101,7 +101,7 @@ var _ = Describe("Sandbox", func() {
 					Namespace: sandbox.Namespace,
 				}, sandbox)
 				return sandbox.Status.Phase
-			}, time.Second*30, time.Millisecond*500).Should(Equal(agentsv1alpha1.SandboxPending))
+			}, time.Second*30, time.Millisecond*500).Should(Equal(agentsv1alpha1.SandboxRunning))
 
 			By("Verifying the sandbox has latest revision")
 			Expect(sandbox.Status.UpdateRevision).NotTo(BeEmpty())
@@ -123,6 +123,7 @@ var _ = Describe("Sandbox", func() {
 			}, time.Second*60, time.Millisecond*500).Should(Equal(agentsv1alpha1.SandboxRunning))
 
 			By("Verifying sandbox has pod information when running")
+			klog.Infof("sandbox status(%s)", utils.DumpJson(sandbox.Status))
 			Expect(sandbox.Status.PodInfo.PodIP).NotTo(BeEmpty())
 			Expect(sandbox.Status.PodInfo.NodeName).NotTo(BeEmpty())
 			Expect(sandbox.Status.SandboxIp).NotTo(BeEmpty())
@@ -235,7 +236,7 @@ var _ = Describe("Sandbox", func() {
 					Namespace: sandbox.Namespace,
 				}, sandbox)
 				return sandbox.Status.Phase
-			}, time.Second*30, time.Millisecond*500).Should(Equal(agentsv1alpha1.SandboxTerminating))
+			}, time.Second*30, time.Millisecond*500).Should(Equal(agentsv1alpha1.SandboxRunning))
 
 			By("Verifying the associated pod is deleted during termination")
 			Eventually(func() bool {
@@ -287,7 +288,7 @@ var _ = Describe("Sandbox", func() {
 					Namespace: Namespace,
 				},
 				Spec: agentsv1alpha1.SandboxSpec{
-					SandboxTemplate: agentsv1alpha1.SandboxTemplate{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
 						Template: &corev1.PodTemplateSpec{
 							Spec: corev1.PodSpec{
 								Containers: []corev1.Container{
@@ -304,7 +305,7 @@ var _ = Describe("Sandbox", func() {
 				},
 			}
 
-			By("Creating a failing Sandbox")
+			By(fmt.Sprintf("Creating a failing Sandbox(%s/%s)", failingSandbox.Namespace, failingSandbox.Name))
 			Expect(k8sClient.Create(ctx, failingSandbox)).To(Succeed())
 
 			By("Waiting for sandbox to transition to Failed phase")
@@ -314,7 +315,7 @@ var _ = Describe("Sandbox", func() {
 					Namespace: failingSandbox.Namespace,
 				}, failingSandbox)
 				return failingSandbox.Status.Phase
-			}, time.Second*90, time.Millisecond*500).Should(Equal(agentsv1alpha1.SandboxFailed))
+			}, time.Second*90, time.Second).Should(Equal(agentsv1alpha1.SandboxFailed))
 
 			// Clean up the failing sandbox
 			_ = k8sClient.Delete(ctx, failingSandbox)

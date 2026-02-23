@@ -11,3 +11,10 @@ func NewContext(keysAndValues ...any) context.Context {
 	logger := klog.LoggerWithValues(klog.Background(), "contextID", uuid.NewString())
 	return klog.NewContext(context.Background(), logger.WithValues(keysAndValues...))
 }
+
+// NewContextFrom derives a new context from parent context with additional key-value pairs.
+// The derived context inherits cancellation from the parent context.
+func NewContextFrom(parent context.Context, keysAndValues ...any) context.Context {
+	logger := klog.LoggerWithValues(klog.Background(), "contextID", uuid.NewString())
+	return klog.NewContext(parent, logger.WithValues(keysAndValues...))
+}

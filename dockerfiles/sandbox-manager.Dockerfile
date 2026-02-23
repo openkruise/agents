@@ -6,6 +6,9 @@ WORKDIR /app
 # Copy go mod and sum files
 COPY ../go.mod go.sum ./
 
+# Download dependencies
+RUN go mod download
+
 # Copy the source code
 COPY ../cmd/sandbox-manager ./cmd/sandbox-manager
 COPY ../pkg ./pkg
@@ -16,7 +19,7 @@ COPY ../proto ./proto
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o sandbox-manager ./cmd/sandbox-manager
 
 # Final stage
-FROM alpine:3.20 as runtime
+FROM alpine:3.20 AS runtime
 
 RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories && \
     apk --no-cache add ca-certificates && \

@@ -29,6 +29,10 @@ To interact with the OpenKruise Agents programmatically, you can use the E2B SDK
 - [Running E2B Code Interpreter Sandbox](examples/code_interpreter/README.md)
 - [Running E2B Desktop Sandbox](examples/desktop/README.md)
 
+## Contributing
+
+You are warmly welcome to hack on OpenKruise Agents. We have prepared a detailed guide [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## Community
 Active communication channels:
 

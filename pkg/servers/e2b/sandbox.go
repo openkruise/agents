@@ -2,9 +2,7 @@
 package e2b
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -22,45 +20,25 @@ var (
 )
 
 func (sc *Controller) getSandboxOfUser(ctx context.Context, sandboxID string) (infra.Sandbox, *web.ApiError) {
+	log := klog.FromContext(ctx).WithValues("sandboxID", sandboxID)
+	log.Info("getting sandbox of user")
 	user := GetUserFromContext(ctx)
 	if user == nil {
+		log.Error(nil, "user not found")
 		return nil, &web.ApiError{
 			Message: "User not found",
 		}
 	}
 	sbx, err := sc.manager.GetClaimedSandbox(ctx, user.ID.String(), sandboxID)
 	if err != nil {
+		log.Error(err, "sandbox not found")
 		return nil, &web.ApiError{
 			Code:    http.StatusNotFound,
-			Message: fmt.Sprintf("Sandbox %s not found", sandboxID),
+			Message: fmt.Sprintf("Cannot get sandbox %s: %v", sandboxID, err),
 		}
 	}
+	log.Info("sandbox found", "sandbox", klog.KObj(sbx))
 	return sbx, nil
-}
-
-func (sc *Controller) initEnvd(ctx context.Context, sbx infra.Sandbox, envVars models.EnvVars, accessToken string) error {
-	start := time.Now()
-	log := klog.FromContext(ctx).WithValues("sandboxID", sbx.GetName(), "envVars", envVars)
-	initBody, err := json.Marshal(map[string]any{
-		"envVars":     envVars,
-		"accessToken": accessToken,
-	})
-	if err != nil {
-		log.Error(err, "failed to marshal initBody")
-		return err
-	}
-	request, err := http.NewRequest(http.MethodPost, "/init", bytes.NewBuffer(initBody))
-	if err != nil {
-		log.Error(err, "failed to create init request")
-		return err
-	}
-	_, err = sbx.Request(request, "/init", models.EnvdPort)
-	if err != nil {
-		log.Error(err, "failed to init envd")
-		return err
-	}
-	log.Info("envd inited", "cost", time.Since(start))
-	return nil
 }
 
 func (sc *Controller) convertToE2BSandbox(sbx infra.Sandbox, accessToken string) *models.Sandbox {
@@ -96,7 +74,8 @@ func (sc *Controller) convertToE2BSandbox(sbx infra.Sandbox, accessToken string)
 	} else {
 		sandbox.StartedAt = claimTime.Format(time.RFC3339)
 	}
-	sandbox.EndAt = sbx.GetTimeout().Format(time.RFC3339)
+	_, endAt := ParseTimeout(sbx)
+	sandbox.EndAt = endAt.Format(time.RFC3339)
 	resource := sbx.GetResource()
 	sandbox.CPUCount = resource.CPUMilli / 1000
 	sandbox.MemoryMB = resource.MemoryMB
@@ -111,4 +90,12 @@ func ValidateMetadataKey(key string) bool {
 		}
 	}
 	return true
+}
+
+func ParseTimeout(sbx infra.Sandbox) (autoPause bool, timeoutAt time.Time) {
+	timeout := sbx.GetTimeout()
+	if timeout.PauseTime.IsZero() {
+		return false, timeout.ShutdownTime
+	}
+	return true, timeout.PauseTime
 }

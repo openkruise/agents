@@ -10,38 +10,46 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
+	"k8s.io/client-go/rest"
+	"k8s.io/klog/v2"
+
+	"github.com/openkruise/agents/pkg/agent-runtime/storages"
 	sandbox_manager "github.com/openkruise/agents/pkg/sandbox-manager"
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
+	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
 	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
-	"k8s.io/client-go/rest"
-	"k8s.io/klog/v2"
 )
 
 // Controller handles sandbox-related operations
 type Controller struct {
-	port         int
-	mux          *http.ServeMux
-	server       *http.Server
-	stop         chan os.Signal
-	client       *clients.ClientSet
-	clientConfig *rest.Config
-	domain       string
-	manager      *sandbox_manager.SandboxManager
-	keys         *keys.SecretKeyStorage
-	maxTimeout   int
+	port            int
+	mux             *http.ServeMux
+	server          *http.Server
+	stop            chan os.Signal
+	systemNamespace string // the namespace where the sandbox manager is running
+	client          *clients.ClientSet
+	cache           infra.CacheProvider
+	storageRegistry storages.VolumeMountProviderRegistry
+	clientConfig    *rest.Config
+	domain          string
+	manager         *sandbox_manager.SandboxManager
+	keys            *keys.SecretKeyStorage
+	maxTimeout      int
 }
 
 // NewController creates a new E2B Controller
 func NewController(domain, adminKey string, sysNs string, maxTimeout int, port int, enableAuth bool, clientSet *clients.ClientSet) *Controller {
 	sc := &Controller{
-		mux:          http.NewServeMux(),
-		client:       clientSet,
-		domain:       domain,
-		clientConfig: clientSet.Config,
-		port:         port,
-		maxTimeout:   maxTimeout,
+		mux:             http.NewServeMux(),
+		client:          clientSet,
+		domain:          domain,
+		clientConfig:    clientSet.Config,
+		port:            port,
+		maxTimeout:      maxTimeout,
+		systemNamespace: sysNs, // the namespace where the sandbox manager is running
 	}
 
 	sc.server = &http.Server{
@@ -61,16 +69,22 @@ func NewController(domain, adminKey string, sysNs string, maxTimeout int, port i
 	return sc
 }
 
-func (sc *Controller) Init(infrastructure string) error {
+func (sc *Controller) Init() error {
 	ctx := logs.NewContext()
 	log := klog.FromContext(ctx)
-	log.Info("init controller", "infra", infrastructure)
-	adapter := adapters.NewE2BAdapter(sc.port)
-	sandboxManager, err := sandbox_manager.NewSandboxManager(sc.client, adapter, infrastructure)
+	log.Info("init controller")
+	adapter := adapters.DefaultAdapterFactory(sc.port)
+	sandboxManager, err := sandbox_manager.NewSandboxManager(sc.client, adapter, sc.systemNamespace)
 	if err != nil {
 		return err
 	}
+
+	infraWithCache := sandboxManager.GetInfra()
+	if infraWithCache != nil {
+		sc.cache = infraWithCache.GetCache()
+	}
 	sc.manager = sandboxManager
+	sc.storageRegistry = storages.NewStorageProvider()
 	sc.registerRoutes()
 	if sc.keys == nil {
 		return nil
@@ -106,8 +120,10 @@ func (sc *Controller) Run(sysNs, peerSelector string) (context.Context, error) {
 		klog.InfoS("Shutting down server...")
 		defer cancel()
 		sc.manager.Stop()
-		// Shutdown HTTP server
-		if err := sc.server.Shutdown(ctx); err != nil {
+		// Shutdown HTTP server with timeout
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), consts.ShutdownTimeout)
+		defer shutdownCancel()
+		if err := sc.server.Shutdown(shutdownCtx); err != nil {
 			klog.ErrorS(err, "HTTP server forced to shutdown")
 		}
 		klog.InfoS("Server exited")

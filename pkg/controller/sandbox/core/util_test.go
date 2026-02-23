@@ -34,7 +34,7 @@ func TestHashSandbox(t *testing.T) {
 			name: "basic sandbox with containers",
 			sandbox: &agentsv1alpha1.Sandbox{
 				Spec: agentsv1alpha1.SandboxSpec{
-					SandboxTemplate: agentsv1alpha1.SandboxTemplate{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
 						Template: &corev1.PodTemplateSpec{
 							Spec: corev1.PodSpec{
 								Containers: []corev1.Container{
@@ -60,7 +60,7 @@ func TestHashSandbox(t *testing.T) {
 			name: "sandbox with init containers",
 			sandbox: &agentsv1alpha1.Sandbox{
 				Spec: agentsv1alpha1.SandboxSpec{
-					SandboxTemplate: agentsv1alpha1.SandboxTemplate{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
 						Template: &corev1.PodTemplateSpec{
 							Spec: corev1.PodSpec{
 								InitContainers: []corev1.Container{
@@ -92,7 +92,7 @@ func TestHashSandbox(t *testing.T) {
 			name: "sandbox with multiple containers",
 			sandbox: &agentsv1alpha1.Sandbox{
 				Spec: agentsv1alpha1.SandboxSpec{
-					SandboxTemplate: agentsv1alpha1.SandboxTemplate{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
 						Template: &corev1.PodTemplateSpec{
 							Spec: corev1.PodSpec{
 								InitContainers: []corev1.Container{
@@ -138,7 +138,7 @@ func TestHashSandbox(t *testing.T) {
 			name: "sandbox with empty containers",
 			sandbox: &agentsv1alpha1.Sandbox{
 				Spec: agentsv1alpha1.SandboxSpec{
-					SandboxTemplate: agentsv1alpha1.SandboxTemplate{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
 						Template: &corev1.PodTemplateSpec{
 							Spec: corev1.PodSpec{
 								Containers: []corev1.Container{},
@@ -153,7 +153,7 @@ func TestHashSandbox(t *testing.T) {
 			name: "sandbox with volumes and other fields",
 			sandbox: &agentsv1alpha1.Sandbox{
 				Spec: agentsv1alpha1.SandboxSpec{
-					SandboxTemplate: agentsv1alpha1.SandboxTemplate{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
 						Template: &corev1.PodTemplateSpec{
 							ObjectMeta: metav1.ObjectMeta{
 								Labels: map[string]string{
@@ -231,7 +231,7 @@ func TestHashSandboxWithDifferentImages(t *testing.T) {
 	// Test that changing only image results in different full hash but same hash without image/resources
 	sandbox1 := &agentsv1alpha1.Sandbox{
 		Spec: agentsv1alpha1.SandboxSpec{
-			SandboxTemplate: agentsv1alpha1.SandboxTemplate{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
 				Template: &corev1.PodTemplateSpec{
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{
@@ -248,7 +248,7 @@ func TestHashSandboxWithDifferentImages(t *testing.T) {
 
 	sandbox2 := &agentsv1alpha1.Sandbox{
 		Spec: agentsv1alpha1.SandboxSpec{
-			SandboxTemplate: agentsv1alpha1.SandboxTemplate{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
 				Template: &corev1.PodTemplateSpec{
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{
@@ -282,7 +282,7 @@ func TestHashSandboxWithDifferentResources(t *testing.T) {
 	// Test that changing only resources results in different full hash but same hash without image/resources
 	sandbox1 := &agentsv1alpha1.Sandbox{
 		Spec: agentsv1alpha1.SandboxSpec{
-			SandboxTemplate: agentsv1alpha1.SandboxTemplate{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
 				Template: &corev1.PodTemplateSpec{
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{
@@ -305,7 +305,7 @@ func TestHashSandboxWithDifferentResources(t *testing.T) {
 
 	sandbox2 := &agentsv1alpha1.Sandbox{
 		Spec: agentsv1alpha1.SandboxSpec{
-			SandboxTemplate: agentsv1alpha1.SandboxTemplate{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
 				Template: &corev1.PodTemplateSpec{
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{

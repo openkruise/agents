@@ -28,6 +28,14 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - persistentvolumes
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
   - pods/status
   verbs:
   - get
@@ -47,6 +55,26 @@ rules:
 - apiGroups:
   - agents.kruise.io
   resources:
+  - sandboxclaims
+  verbs:
+  - delete
+  - get
+  - list
+  - patch
+  - watch
+- apiGroups:
+  - agents.kruise.io
+  resources:
+  - sandboxclaims/status
+  - sandboxes/status
+  - sandboxsets/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - agents.kruise.io
+  resources:
   - sandboxes
   - sandboxsets
   verbs:
@@ -63,15 +91,6 @@ rules:
   - sandboxes/finalizers
   - sandboxsets/finalizers
   verbs:
-  - update
-- apiGroups:
-  - agents.kruise.io
-  resources:
-  - sandboxes/status
-  - sandboxsets/status
-  verbs:
-  - get
-  - patch
   - update
 ---
 apiVersion: rbac.authorization.k8s.io/v1

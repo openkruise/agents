@@ -1,0 +1,106 @@
+name: E2E for E2B SDK - sdk v2.4.1 with e2b v2.8.1
+
+on:
+  push:
+    branches:
+      - master
+      - release-*
+  pull_request: { }
+  workflow_dispatch: { }
+
+# Declare default permissions as read only.
+permissions: read-all
+
+
+env:
+  # Common versions
+  GO_VERSION: '1.23'
+  KIND_VERSION: 'v0.22.0'
+  KIND_IMAGE: 'kindest/node:v1.32.0'
+  KIND_CLUSTER_NAME: 'ci-testing'
+  CONTROLLER_IMG: agent-sandbox-controller:latest
+  MANAGER_IMG: sandbox-manager:latest
+  RUNTIME_IMG: agent-runtime:latest
+  CODE_INTERPRETER_IMG: registry-ap-southeast-1.ack.aliyuncs.com/acs/code-interpreter:v1.6
+  INPLACE_UPDATE_IMG: registry-ap-southeast-1.ack.aliyuncs.com/acs/code-interpreter:v1.6-new
+
+jobs:
+  sandbox:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          submodules: true
+      - name: Setup Go
+        uses: actions/setup-go@0aaccfd150d50ccaeb58ebd88d36e91967a5f35b # v5.4.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Setup Kind Cluster
+        uses: helm/kind-action@92086f6be054225fa813e0a4b13787fc9088faab # v1.13.0
+        with:
+          node_image: ${{ env.KIND_IMAGE }}
+          cluster_name: ${{ env.KIND_CLUSTER_NAME }}
+          config: ./test/kind-conf.yaml
+          version: ${{ env.KIND_VERSION }}
+
+      - name: Cache Docker images
+        uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
+        with:
+          path: /tmp/docker-images
+          key: ${{ runner.os }}-docker-${{ env.CODE_INTERPRETER_IMG }}
+          restore-keys: |
+            ${{ runner.os }}-docker-
+
+      - name: Load cached external images
+        run: |
+          if [ -f /tmp/docker-images/code-interpreter.tar ]; then
+            echo "Using cached code-interpreter image"
+            docker load -i /tmp/docker-images/code-interpreter.tar
+          else
+            echo "Pulling code-interpreter image: ${CODE_INTERPRETER_IMG}"
+            docker pull ${CODE_INTERPRETER_IMG}
+            mkdir -p /tmp/docker-images
+            docker save ${CODE_INTERPRETER_IMG} -o /tmp/docker-images/code-interpreter.tar
+            echo "Cached code-interpreter image"
+          fi
+
+      - name: Load cached inplace update images
+        run: |
+          if [ -f /tmp/docker-images/inplace-update.tar ]; then
+            echo "Using cached inplace-update image"
+            docker load -i /tmp/docker-images/inplace-update.tar
+          else
+            echo "Building inplace-update image: ${INPLACE_UPDATE_IMG}"
+            docker build -t ${INPLACE_UPDATE_IMG} -f test/e2b/assets/Dockerfile .
+            mkdir -p /tmp/docker-images
+            docker save ${INPLACE_UPDATE_IMG} -o /tmp/docker-images/inplace-update.tar
+            echo "Cached inplace-update image"
+          fi
+      - name: Build image
+        run: |
+          make docker-build-manager
+          make docker-build-controller
+          make docker-build-runtime
+          kind load docker-image --name=${KIND_CLUSTER_NAME} ${CONTROLLER_IMG} || { echo >&2 "kind not installed or error loading image: ${CONTROLLER_IMG}"; exit 1; }
+          docker rmi ${CONTROLLER_IMG}
+          kind load docker-image --name=${KIND_CLUSTER_NAME} ${MANAGER_IMG} || { echo >&2 "kind not installed or error loading image: ${MANAGER_IMG}"; exit 1; }
+          docker rmi ${MANAGER_IMG}
+          kind load docker-image --name=${KIND_CLUSTER_NAME} ${RUNTIME_IMG} || { echo >&2 "kind not installed or error loading image: ${RUNTIME_IMG}"; exit 1; }
+          docker rmi ${RUNTIME_IMG}
+          kind load docker-image --name=${KIND_CLUSTER_NAME} ${CODE_INTERPRETER_IMG} || { echo >&2 "kind not installed or error loading image: ${CODE_INTERPRETER_IMG}"; exit 1; }
+          docker rmi ${CODE_INTERPRETER_IMG}
+          kind load docker-image --name=${KIND_CLUSTER_NAME} ${INPLACE_UPDATE_IMG} || { echo >&2 "kind not installed or error loading image: ${INPLACE_UPDATE_IMG}"; exit 1; }
+          docker rmi ${INPLACE_UPDATE_IMG}
+      - name: Install Kruise Agents
+        run: |
+          make deploy-agent-sandbox-controller
+          make deploy-sandbox-manager
+          bash hack/wait-agent-sandbox-controller.sh
+      - name: Run E2E Tests
+        run: |
+          export KUBECONFIG=/home/runner/.kube/config
+          export E2B_DOMAIN=localhost
+          export E2B_API_KEY=some-api-key
+          sudo -E kubectl port-forward services/sandbox-manager 80:7788 -n sandbox-system &
+          bash hack/run-e2b-e2e-test.sh --e2b-version 2.8.1 --sdk-version 2.4.1
+
