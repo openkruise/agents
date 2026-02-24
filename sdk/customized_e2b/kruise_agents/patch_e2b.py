@@ -7,11 +7,13 @@ from e2b_code_interpreter.code_interpreter_sync import JUPYTER_PORT
 
 
 def __sandbox_get_host(self, port: int) -> str:
-    return f"{self.sandbox_domain}/kruise/{self.sandbox_id}/{port}"
+    domain = os.environ.get("E2B_DOMAIN") or self.sandbox_domain
+    return f"{domain}/kruise/{self.sandbox_id}/{port}"
 
 
 def __connection_config_get_host(_, sandbox_id: str, sandbox_domain: str, port: int) -> str:
-    return f"{sandbox_domain}/kruise/{sandbox_id}/{port}"
+    domain = os.environ.get("E2B_DOMAIN") or sandbox_domain
+    return f"{domain}/kruise/{sandbox_id}/{port}"
 
 
 def __get_api_url(https: bool):
