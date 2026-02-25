@@ -46,6 +46,7 @@ spec:
   secretName: sandbox-manager-tls
   duration: 2160h # 90 days
   renewBefore: 360h # 15 days
+  commonName: "your.domain.com"
   subject:
     organizations:
       - openkruise

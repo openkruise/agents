@@ -178,11 +178,14 @@ openssl ca -config "$OUTPUT_DIR/signing.conf" \
     -out "$OUTPUT_DIR/server.crt" \
     -batch
 
-# Combine server certificate and CA certificate to fullchain.pem
-cat "$OUTPUT_DIR/server.crt" "$OUTPUT_DIR/ca-fullchain.pem" > "$OUTPUT_DIR/fullchain.pem"
+# Extract only the PEM certificate from server.crt (remove text details)
+openssl x509 -in "$OUTPUT_DIR/server.crt" -out "$OUTPUT_DIR/server-clean.crt"
+
+# Combine clean server certificate and CA certificate to fullchain.pem
+cat "$OUTPUT_DIR/server-clean.crt" "$OUTPUT_DIR/ca-fullchain.pem" > "$OUTPUT_DIR/fullchain.pem"
 
 # Clean up ALL temporary files, keeping only the four main PEM files
-rm -f "$OUTPUT_DIR/server.csr" "$OUTPUT_DIR/server.crt" "$OUTPUT_DIR/cert.conf" "$OUTPUT_DIR/ca.conf" "$OUTPUT_DIR/signing.conf" "$OUTPUT_DIR/index.txt" "$OUTPUT_DIR/serial" "$OUTPUT_DIR/ca.srl" "$OUTPUT_DIR/.rnd"
+rm -f "$OUTPUT_DIR/server.csr" "$OUTPUT_DIR/server.crt" "$OUTPUT_DIR/server-clean.crt" "$OUTPUT_DIR/cert.conf" "$OUTPUT_DIR/ca.conf" "$OUTPUT_DIR/signing.conf" "$OUTPUT_DIR/index.txt" "$OUTPUT_DIR/serial" "$OUTPUT_DIR/ca.srl" "$OUTPUT_DIR/.rnd"
 
 echo ""
 echo "=========================================="
@@ -196,5 +199,5 @@ echo "  CA certificate: $OUTPUT_DIR/ca-fullchain.pem"
 echo ""
 echo "Certificate details:"
 openssl x509 -in "$OUTPUT_DIR/fullchain.pem" -text -noout | head -20
-rm -f "$OUTPUT_DIR/server.csr" "$OUTPUT_DIR/server.crt" "$OUTPUT_DIR/cert.conf" "$OUTPUT_DIR/ca.conf" "$OUTPUT_DIR/signing.conf" "$OUTPUT_DIR/index.txt" "$OUTPUT_DIR/index.txt.attr" "$OUTPUT_DIR/index.txt.old" "$OUTPUT_DIR/serial" "$OUTPUT_DIR/serial.old" "$OUTPUT_DIR/ca.srl" "$OUTPUT_DIR/.rnd" "$OUTPUT_DIR/01.pem"
+rm -f "$OUTPUT_DIR/server.csr" "$OUTPUT_DIR/server.crt" "$OUTPUT_DIR/server-clean.crt" "$OUTPUT_DIR/cert.conf" "$OUTPUT_DIR/ca.conf" "$OUTPUT_DIR/signing.conf" "$OUTPUT_DIR/index.txt" "$OUTPUT_DIR/index.txt.attr" "$OUTPUT_DIR/index.txt.old" "$OUTPUT_DIR/serial" "$OUTPUT_DIR/serial.old" "$OUTPUT_DIR/ca.srl" "$OUTPUT_DIR/.rnd" "$OUTPUT_DIR/01.pem"
 
