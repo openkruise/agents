@@ -26,6 +26,7 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/utils"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/rand"
@@ -432,6 +433,152 @@ var _ = Describe("Sandbox", func() {
 		})
 	})
 
+	Context("with volume claim templates", func() {
+		It("should create sandbox with PVCs successfully", func() {
+			By("Creating a Sandbox with VolumeClaimTemplates")
+			sandboxWithPVC := &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("test-sandbox-pvc-%d", time.Now().UnixNano()),
+					Namespace: namespace,
+				},
+				Spec: agentsv1alpha1.SandboxSpec{
+					SandboxTemplate: agentsv1alpha1.SandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name:  "test-container",
+										Image: "nginx:stable-alpine3.23",
+										VolumeMounts: []corev1.VolumeMount{
+											{
+												Name:      "www",
+												MountPath: "/usr/share/nginx/html",
+											},
+										},
+									},
+								},
+								// 添加 Volumes 定义
+								Volumes: []corev1.Volume{
+									{
+										Name: "www",
+										VolumeSource: corev1.VolumeSource{
+											PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+												ClaimName: "www",
+											},
+										},
+									},
+								},
+							},
+						},
+						VolumeClaimTemplates: []corev1.PersistentVolumeClaim{
+							{
+								ObjectMeta: metav1.ObjectMeta{
+									Name: "www",
+								},
+								Spec: corev1.PersistentVolumeClaimSpec{
+									AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+									Resources: corev1.VolumeResourceRequirements{
+										Requests: corev1.ResourceList{
+											corev1.ResourceStorage: resource.MustParse("1Gi"),
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, sandboxWithPVC)).To(Succeed())
+
+			By("Waiting for sandbox to reach Running phase")
+			Eventually(func() agentsv1alpha1.SandboxPhase {
+				_ = k8sClient.Get(ctx, types.NamespacedName{
+					Name:      sandboxWithPVC.Name,
+					Namespace: sandboxWithPVC.Namespace,
+				}, sandboxWithPVC)
+				return sandboxWithPVC.Status.Phase
+			}, time.Second*90, time.Millisecond*500).Should(Equal(agentsv1alpha1.SandboxRunning))
+
+			By("Verifying PVC is created and bound")
+			pvcName := "www-" + sandboxWithPVC.Name
+			Eventually(func() corev1.PersistentVolumeClaimPhase {
+				pvc := &corev1.PersistentVolumeClaim{}
+				err := k8sClient.Get(ctx, types.NamespacedName{
+					Name:      pvcName,
+					Namespace: sandboxWithPVC.Namespace,
+				}, pvc)
+				if err != nil {
+					return ""
+				}
+				return pvc.Status.Phase
+			}, time.Second*60, time.Millisecond*500).Should(Equal(corev1.ClaimBound))
+
+			By("Verifying pod is running with PVC mounted")
+			pod := &corev1.Pod{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name:      sandboxWithPVC.Name,
+				Namespace: sandboxWithPVC.Namespace,
+			}, pod)).To(Succeed())
+
+			Expect(pod.Spec.Volumes).ToNot(BeEmpty())
+			foundVolume := false
+			for _, volume := range pod.Spec.Volumes {
+				if volume.Name == "www" && volume.PersistentVolumeClaim != nil {
+					foundVolume = true
+					Expect(volume.PersistentVolumeClaim.ClaimName).To(Equal(pvcName))
+					break
+				}
+			}
+			Expect(foundVolume).To(BeTrue())
+
+			Expect(pod.Spec.Containers).ToNot(BeEmpty())
+			container := pod.Spec.Containers[0]
+			foundMount := false
+			for _, mount := range container.VolumeMounts {
+				if mount.Name == "www" && mount.MountPath == "/usr/share/nginx/html" {
+					foundMount = true
+					break
+				}
+			}
+			Expect(foundMount).To(BeTrue())
+
+			By("Pausing and resuming sandbox to verify data persistence")
+			// Pause the Sandbox
+			originalSandbox := &agentsv1alpha1.Sandbox{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name:      sandboxWithPVC.Name,
+				Namespace: sandboxWithPVC.Namespace,
+			}, originalSandbox)).To(Succeed())
+
+			originalSandbox.Spec.Paused = true
+			Expect(updateSandboxSpec(ctx, originalSandbox)).To(Succeed())
+
+			Eventually(func() agentsv1alpha1.SandboxPhase {
+				_ = k8sClient.Get(ctx, types.NamespacedName{
+					Name:      sandboxWithPVC.Name,
+					Namespace: sandboxWithPVC.Namespace,
+				}, sandboxWithPVC)
+				return sandboxWithPVC.Status.Phase
+			}, time.Second*30, time.Millisecond*500).Should(Equal(agentsv1alpha1.SandboxPaused))
+
+			// Resume the Sandbox
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name:      sandboxWithPVC.Name,
+				Namespace: sandboxWithPVC.Namespace,
+			}, originalSandbox)).To(Succeed())
+
+			originalSandbox.Spec.Paused = false
+			Expect(updateSandboxSpec(ctx, originalSandbox)).To(Succeed())
+
+			Eventually(func() agentsv1alpha1.SandboxPhase {
+				_ = k8sClient.Get(ctx, types.NamespacedName{
+					Name:      sandboxWithPVC.Name,
+					Namespace: sandboxWithPVC.Namespace,
+				}, sandboxWithPVC)
+				return sandboxWithPVC.Status.Phase
+			}, time.Second*60, time.Millisecond*500).Should(Equal(agentsv1alpha1.SandboxRunning))
+		})
+	})
 })
 
 func createNamespace(ctx context.Context) string {
