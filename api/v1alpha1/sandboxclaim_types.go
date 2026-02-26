@@ -73,6 +73,14 @@ type SandboxClaimSpec struct {
 	// InplaceUpdate allows to perform inplace update for sandbox while claiming
 	// +optional
 	InplaceUpdate *SandboxClaimInplaceUpdateOptions `json:"inplaceUpdate,omitempty"`
+
+	// Set ReserveFailedSandbox to true to reserve failed sandboxes
+	// +optional
+	ReserveFailedSandbox bool `json:"reserveFailedSandbox,omitempty"`
+
+	// CreateOnNoStock allows to create new sandbox if no stock available
+	// +optional
+	CreateOnNoStock bool `json:"createOnNoStock,omitempty"`
 }
 
 type SandboxClaimInplaceUpdateOptions struct {

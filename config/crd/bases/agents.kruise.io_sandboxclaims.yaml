@@ -71,6 +71,10 @@ spec:
                   If the timeout is reached, the claim will be marked as Completed regardless of
                   whether all replicas were successfully claimed
                 type: string
+              createOnNoStock:
+                description: CreateOnNoStock allows to create new sandbox if no stock
+                  available
+                type: boolean
               envVars:
                 additionalProperties:
                   type: string
@@ -114,6 +118,9 @@ spec:
                 x-kubernetes-validations:
                 - message: replicas is immutable
                   rule: self == oldSelf
+              reserveFailedSandbox:
+                description: Set ReserveFailedSandbox to true to reserve failed sandboxes
+                type: boolean
               shutdownTime:
                 description: |-
                   ShutdownTime specifies the absolute time when the sandbox should be shut down
