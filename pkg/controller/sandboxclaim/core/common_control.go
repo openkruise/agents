@@ -259,6 +259,8 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 				})
 			}
 		},
+		ReserveFailedSandbox: claim.Spec.ReserveFailedSandbox,
+		CreateOnNoStock:      claim.Spec.CreateOnNoStock,
 	}
 
 	if claim.Spec.InplaceUpdate != nil {

@@ -133,6 +133,7 @@ func TestConnectSandbox(t *testing.T) {
 				"sandboxID": createResp.Body.SandboxID,
 			}, user)
 
+			done := make(chan struct{})
 			if tt.paused {
 				pauseResp, err := controller.PauseSandbox(req)
 				assert.Nil(t, err)
@@ -150,9 +151,20 @@ func TestConnectSandbox(t *testing.T) {
 				UpdateSandboxWhen(t, client.SandboxClient, describeResp.Body.SandboxID, func(sbx *agentsv1alpha1.Sandbox) bool {
 					return sbx.Spec.Paused == true
 				}, DoSetSandboxStatus(agentsv1alpha1.SandboxPaused, condStatus, metav1.ConditionFalse))
-				go UpdateSandboxWhen(t, client.SandboxClient, describeResp.Body.SandboxID, func(sbx *agentsv1alpha1.Sandbox) bool {
-					return sbx.Spec.Paused == false
-				}, DoSetSandboxStatus(agentsv1alpha1.SandboxRunning, metav1.ConditionFalse, metav1.ConditionTrue))
+				// Only start goroutine to resume sandbox if it's fully paused (not pausing)
+				// When pausing, the test expects ConnectSandbox to fail, so no need to simulate resume
+				if !tt.pausing {
+					go func() {
+						defer close(done)
+						UpdateSandboxWhen(t, client.SandboxClient, describeResp.Body.SandboxID, func(sbx *agentsv1alpha1.Sandbox) bool {
+							return sbx.Spec.Paused == false
+						}, DoSetSandboxStatus(agentsv1alpha1.SandboxRunning, metav1.ConditionFalse, metav1.ConditionTrue))
+					}()
+				} else {
+					close(done)
+				}
+			} else {
+				close(done)
 			}
 
 			if tt.sandboxID == "" {
@@ -182,6 +194,7 @@ func TestConnectSandbox(t *testing.T) {
 				assert.WithinDuration(t, expectEndAt, endAt, 5*time.Second,
 					fmt.Sprintf("expect end at: %s, but got %s", expectEndAt, endAt))
 			}
+			<-done
 		})
 	}
 }
