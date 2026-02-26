@@ -149,7 +149,6 @@ func GetNewerResourceVersion(obj metav1.Object) string {
 
 	oldVersion, err := strconv.ParseUint(old, 10, 64)
 	if err != nil {
-		// 如果解析失败，返回原值（保持原有行为）
 		return old
 	}
 

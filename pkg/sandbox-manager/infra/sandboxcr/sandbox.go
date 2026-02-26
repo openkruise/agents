@@ -60,7 +60,8 @@ func (s *Sandbox) InplaceRefresh(ctx context.Context, deepcopy bool) error {
 	if err != nil {
 		return err
 	}
-	if !utils.ResourceVersionExpectationSatisfied(sbx) {
+	fetchFromApiServer := !utils.ResourceVersionExpectationSatisfied(sbx)
+	if fetchFromApiServer {
 		log.Info("sandbox cache is out-dated, fetch from api-server")
 		sbx, err = s.Client.ApiV1alpha1().Sandboxes(s.Sandbox.GetNamespace()).Get(ctx, s.Sandbox.GetName(), metav1.GetOptions{})
 		if err != nil {
@@ -69,6 +70,9 @@ func (s *Sandbox) InplaceRefresh(ctx context.Context, deepcopy bool) error {
 	}
 	if expectations.IsResourceVersionReallyNewer(s.Sandbox.GetResourceVersion(), sbx.GetResourceVersion()) {
 		s.Sandbox = sbx
+		if fetchFromApiServer {
+			deepcopy = false // no need to deepcopy again
+		}
 	}
 	if deepcopy {
 		s.Sandbox = s.Sandbox.DeepCopy()

@@ -396,6 +396,8 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 				if tt.postCheck != nil {
 					tt.postCheck(t, sbx)
 				}
+				_, ok := testInfra.pickCache.Load(getPickKey(sbx.(*Sandbox).Sandbox))
+				assert.False(t, ok)
 			}
 		})
 	}
@@ -809,11 +811,10 @@ func TestNewSandboxFromTemplate_RateLimitExceeded(t *testing.T) {
 	}
 
 	// Call the function
-	sbx, _, deferFunc, err := newSandboxFromTemplate(opts, infraInstance.Cache, infraInstance.Client.SandboxClient, limiter)
+	sbx, _, err := newSandboxFromTemplate(opts, infraInstance.Cache, infraInstance.Client.SandboxClient, limiter)
 
 	// Assertions
 	assert.Nil(t, sbx, "sandbox should be nil when rate limited")
-	assert.Nil(t, deferFunc, "defer function should be nil")
 	assert.Error(t, err, "should return error when rate limited")
 
 	// Check error message
