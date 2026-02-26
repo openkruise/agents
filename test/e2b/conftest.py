@@ -23,6 +23,7 @@ print("e2b client patched")
 # This needs to be imported after patch_e2b is applied
 # noinspection PyUnusedImports
 from utils import wait_for_sandbox, kubectl, run_code_sandbox
+import uuid
 
 
 class SandboxContext:
@@ -30,6 +31,7 @@ class SandboxContext:
 
     def __init__(self):
         self.sandboxes: List[Sandbox] = []
+        self.request_id: str = str(uuid.uuid4())
 
     def add(self, sandbox: Sandbox) -> Sandbox:
         """Add a sandbox to the context."""
@@ -45,7 +47,7 @@ class SandboxContext:
             try:
                 kubectl("logs", "-n", "sandbox-system",
                         "-l", "component=sandbox-manager",
-                        "--tail", "100")
+                        "--tail", "10000", "|", "grep", self.request_id)
             except Exception as e:
                 print(f"Failed to get sandbox-manager logs: {e}")
             print("== end sandbox-manager logs ==")
