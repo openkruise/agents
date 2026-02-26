@@ -25,7 +25,7 @@ type ClientSet struct {
 	*rest.Config
 }
 
-func NewClientSet() (*ClientSet, error) {
+func NewClientSetWithOptions(qps float32, burst int) (*ClientSet, error) {
 	client := &ClientSet{}
 	// Try to use in-cluster config first (when running inside a Kubernetes pod)
 	config, err := rest.InClusterConfig()
@@ -57,21 +57,18 @@ func NewClientSet() (*ClientSet, error) {
 	// Burst: Maximum burst requests allowed in a short period
 	// For high-activity applications, increasing these can reduce client-side throttling
 	// Be careful not to set these too high as it might overload the Kubernetes API server
-	// These can be configured via environment variables:
-	// KUBE_CLIENT_QPS (default: 500)
-	// KUBE_CLIENT_BURST (default: 1000)
-	config.QPS = 500    // Default QPS
-	config.Burst = 1000 // Default Burst
+	config.QPS = qps
+	config.Burst = burst
 
-	// Override with environment variables if set
+	// Override with environment variables if set (for backward compatibility)
 	if qpsStr := os.Getenv("KUBE_CLIENT_QPS"); qpsStr != "" {
-		if qps, err := strconv.ParseFloat(qpsStr, 32); err == nil {
-			config.QPS = float32(qps)
+		if qpsEnv, err := strconv.ParseFloat(qpsStr, 32); err == nil {
+			config.QPS = float32(qpsEnv)
 		}
 	}
 	if burstStr := os.Getenv("KUBE_CLIENT_BURST"); burstStr != "" {
-		if burst, err := strconv.Atoi(burstStr); err == nil {
-			config.Burst = burst
+		if burstEnv, err := strconv.Atoi(burstStr); err == nil {
+			config.Burst = burstEnv
 		}
 	}
 	client.Config = config

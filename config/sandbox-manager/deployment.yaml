@@ -31,6 +31,14 @@ spec:
           args:
             - -v=7
             - --zap-log-level=7
+            - --system-namespace=sandbox-system
+            - --peer-selector=component=sandbox-manager
+            - --kube-client-qps=10000
+            - --kube-client-burst=30000
+            - --e2b-domain=replace.with.your.domain
+            - --e2b-admin-key=some-api-key
+            - --e2b-enable-auth=true
+            - --e2b-max-timeout=2592000
           ports:
             - containerPort: 8080
               name: http-manager
@@ -58,24 +66,6 @@ spec:
             failureThreshold: 30
             timeoutSeconds: 5
           env:
-            - name: SYSTEM_NAMESPACE
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.namespace
-            - name: PEER_SELECTOR
-              value: component=sandbox-manager
-            - name: KUBE_CLIENT_QPS
-              value: "10000"
-            - name: KUBE_CLIENT_BURST
-              value: "30000"
-            - name: E2B_DOMAIN
-              value: replace.with.your.domain
-            - name: E2B_ADMIN_KEY
-              value: some-api-key
-            - name: E2B_ENABLE_AUTH
-              value: "true"
-            - name: E2B_MAX_TIMEOUT
-              value: "2592000"
             - name: INFRA
               value: sandbox-cr
           resources:
