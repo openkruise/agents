@@ -302,7 +302,7 @@ func pickAnAvailableSandbox(ctx context.Context, opts infra.ClaimSandboxOptions,
 		log.Info("will create a new sandbox")
 		return newSandboxFromTemplate(opts, cache, client, limiter)
 	}
-	return nil, "", pickErr
+	return nil, "", NoAvailableError(template, pickErr.Error())
 }
 
 func pickFromCandidates(ctx context.Context, candidates []*v1alpha1.Sandbox, pickCache *sync.Map) (*v1alpha1.Sandbox, error) {
