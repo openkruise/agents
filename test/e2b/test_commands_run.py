@@ -38,6 +38,9 @@ def test_commands_run(sandbox_context):
         template="code-interpreter",
         timeout=30,
         metadata={"test_case": "test_commands_run"},
+        headers={
+            "x-request-id": sandbox_context.request_id
+        }
     ))
 
     # Test simple echo command
@@ -66,6 +69,9 @@ def test_commands_run_error_handling(sandbox_context):
         template="code-interpreter",
         timeout=30,
         metadata={"test_case": "test_commands_run_error_handling"},
+        headers={
+            "x-request-id": sandbox_context.request_id
+        }
     ))
 
     # Test non-existent command - should catch CommandExitException
@@ -91,6 +97,9 @@ def test_commands_background_execution(sandbox_context):
         template="code-interpreter",
         timeout=30,
         metadata={"test_case": "test_commands_background_execution"},
+        headers={
+            "x-request-id": sandbox_context.request_id
+        }
     ))
 
     # Start a long-running command in background
@@ -119,6 +128,9 @@ def test_commands_realtime_callbacks(sandbox_context):
         template="code-interpreter",
         timeout=30,
         metadata={"test_case": "test_commands_realtime_callbacks"},
+        headers={
+            "x-request-id": sandbox_context.request_id
+        }
     ))
 
     stdout_lines = []

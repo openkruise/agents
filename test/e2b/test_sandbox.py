@@ -16,6 +16,9 @@ def test_lifecycle(sandbox_context):
         metadata={
             'userId': '123',
         },
+        headers={
+            "x-request-id": sandbox_context.request_id
+        }
     ))
     print(f"sandbox-id: {sandbox.sandbox_id}")
     info = sandbox.get_info()
@@ -34,6 +37,9 @@ def test_list_by_metadata(sandbox_context):
         metadata={
             'userId': random_user_id,
         },
+        headers={
+            "x-request-id": sandbox_context.request_id
+        }
     ))
     print(f"sandbox-id: {sandbox.sandbox_id}")
     info = sandbox.get_info()
@@ -55,6 +61,9 @@ def test_list_by_state(sandbox_context):
         template="code-interpreter",
         timeout=30,
         metadata={"test_case": "test_list_by_state"},
+        headers={
+            "x-request-id": sandbox_context.request_id
+        }
     ))
     print(f"sandbox-id: {sbx.sandbox_id}")
     info = sbx.get_info()
@@ -83,11 +92,17 @@ def test_timeout(sandbox_context):
         template="code-interpreter",
         metadata={"case": "timeout"},
         timeout=30,
+        headers={
+            "x-request-id": sandbox_context.request_id
+        }
     ))
     sandbox2: Sandbox = sandbox_context.add(Sandbox.create(
         template="code-interpreter",
         timeout=1200,
         metadata={"test_case": "test_timeout"},
+        headers={
+            "x-request-id": sandbox_context.request_id
+        }
     ))
     sandbox2.set_timeout(10)
     print(f"wait 10s timeout and check sandbox2 {sandbox2.sandbox_id} deleted")
@@ -107,6 +122,9 @@ def test_pause_connect_kill(sandbox_context):
         template="code-interpreter",
         timeout=6000,
         metadata={"test_case": "test_pause_connect_kill"},
+        headers={
+            "x-request-id": sandbox_context.request_id
+        }
     ))
     sandbox.beta_pause()
     print(f"wait 30s and check sandbox {sandbox.sandbox_id} paused")
@@ -122,6 +140,9 @@ def test_pause_kill(sandbox_context):
         template="code-interpreter",
         timeout=6000,
         metadata={"test_case": "test_pause_kill"},
+        headers={
+            "x-request-id": sandbox_context.request_id
+        }
     ))
     sandbox.beta_pause()
     time.sleep(1)
@@ -132,6 +153,9 @@ def test_pause_state(sandbox_context):
         template="code-interpreter",
         timeout=6000,
         metadata={"test_case": "test_pause_state"},
+        headers={
+            "x-request-id": sandbox_context.request_id
+        }
     ))
     print('Sandbox created', sbx.sandbox_id)
 
@@ -156,6 +180,9 @@ def test_resume_state(sandbox_context):
         template="code-interpreter",
         timeout=6000,
         metadata={"test_case": "test_resume_state"},
+        headers={
+            "x-request-id": sandbox_context.request_id
+        }
     ))
     print('Sandbox created', sbx.sandbox_id)
 
@@ -178,7 +205,12 @@ def test_resume_state(sandbox_context):
 
 
 def test_is_running(sandbox_context):
-    sbx: Sandbox = Sandbox.create(template="code-interpreter")
+    sbx: Sandbox = Sandbox.create(
+        template="code-interpreter",
+        headers={
+            "x-request-id": sandbox_context.request_id
+        }
+    )
     assert sbx.is_running()  # Returns True
 
     sbx.kill()
@@ -194,6 +226,9 @@ def test_inplace_update(sandbox_context):
             "case": "inplace-update",
             "e2b.agents.kruise.io/image": "registry-ap-southeast-1.ack.aliyuncs.com/acs/code-interpreter:v1.6-new"
         },
+        headers={
+            "x-request-id": sandbox_context.request_id
+        }
     ))
     file = sbx.files.read("/root/test-file")
     assert file == "xxxx"

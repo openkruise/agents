@@ -10,6 +10,9 @@ def test_read_write_file(sandbox_context):
         template="code-interpreter",
         timeout=30,
         metadata={"test_case": "test_read_write_file"},
+        headers={
+            "x-request-id": sandbox_context.request_id
+        }
     ))
     with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "joke.txt"), "rb") as file:
         # Upload file to the sandbox to absolute path '/home/user/my-file'
@@ -24,6 +27,9 @@ def test_read_write_multifile(sandbox_context):
         template="code-interpreter",
         timeout=30,
         metadata={"test_case": "test_read_write_multifile"},
+        headers={
+            "x-request-id": sandbox_context.request_id
+        }
     ))
     sbx.files.write_files([
         {"path": "/path/to/a", "data": "file a content"},
@@ -42,6 +48,9 @@ def test_upload_with_signed_url(sandbox_context):
         template="code-interpreter",
         timeout=3000,
         metadata={"test_case": "test_upload_with_signed_url"},
+        headers={
+            "x-request-id": sandbox_context.request_id
+        }
     ))
     signed_url = sbx.upload_url(path="demo.txt", user="user", use_signature_expiration=10_000)
     print(signed_url)
@@ -58,6 +67,9 @@ def test_download_with_signed_url(sandbox_context):
         template="code-interpreter",
         timeout=3000,
         metadata={"test_case": "test_download_with_signed_url"},
+        headers={
+            "x-request-id": sandbox_context.request_id
+        }
     ))
     signed_url = sbx.download_url(path="demo.txt", user="user", use_signature_expiration=10_000)
     print(signed_url)

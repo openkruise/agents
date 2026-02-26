@@ -20,6 +20,9 @@ def test_run_code(sandbox_context):
         template="code-interpreter",
         timeout=30,
         metadata={"test_case": "test_run_code"},
+        headers={
+            "x-request-id": sandbox_context.request_id
+        }
     ))
     execute_python_code(sbx, "print('hello world')", ["hello world\n"])
     execute_python_code(sbx, "a = 1", [])
@@ -57,6 +60,9 @@ def test_static_charts(sandbox_context):
         template="code-interpreter",
         timeout=30,
         metadata={"test_case": "test_static_charts"},
+        headers={
+            "x-request-id": sandbox_context.request_id
+        }
     ))
     # Run the code inside the sandbox
     execution = run_code_sandbox(sandbox, code_to_run)
@@ -101,6 +107,9 @@ def test_code_stream(sandbox_context):
         template="code-interpreter",
         timeout=30,
         metadata={"test_case": "test_code_stream"},
+        headers={
+            "x-request-id": sandbox_context.request_id
+        }
     ))
     run_code_sandbox(
         sandbox,
