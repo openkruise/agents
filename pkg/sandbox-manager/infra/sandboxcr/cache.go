@@ -221,7 +221,7 @@ func (c *Cache) WaitForSandboxSatisfied(ctx context.Context, sbx *agentsv1alpha1
 		log.Info("satisfied signal received")
 		return c.doubleCheckSandboxSatisfied(ctx, sbx, satisfiedFunc)
 	case <-waitCtx.Done():
-		log.Info("stop waiting for sandbox satisfied: context canceled", "reason", ctx.Err())
+		log.Info("stop waiting for sandbox satisfied: context canceled", "reason", waitCtx.Err())
 		return c.doubleCheckSandboxSatisfied(ctx, sbx, satisfiedFunc)
 	}
 }
