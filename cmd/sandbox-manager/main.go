@@ -5,8 +5,6 @@ import (
 	"flag"
 	"net/http"         // Added for pprof server
 	_ "net/http/pprof" // Added to register pprof handlers
-	"os"
-	"strconv"
 
 	"github.com/google/uuid"
 	"github.com/spf13/pflag"
@@ -26,11 +24,39 @@ func main() {
 	var enablePprof bool
 	var pprofAddr string
 
+	// Define variables for server configuration
+	var port int
+	var e2bAdminKey string
+	var e2bEnableAuth bool
+	var domain string
+	var e2bMaxTimeout int
+	var sysNs string
+	var peerSelector string
+	var maxClaimWorkers int
+	var maxCreateQPS int
+	var extProcMaxConcurrency int
+	var kubeClientQPS float64
+	var kubeClientBurst int
+
 	utilfeature.DefaultMutableFeatureGate.AddFlag(pflag.CommandLine)
 
 	// Register the new pprof flags
 	pflag.BoolVar(&enablePprof, "enable-pprof", false, "Enable pprof profiling")
 	pflag.StringVar(&pprofAddr, "pprof-addr", ":6060", "The address the pprof debug maps to.")
+
+	// Register server configuration flags
+	pflag.IntVar(&port, "port", 8080, "The port the server listens on")
+	pflag.StringVar(&e2bAdminKey, "e2b-admin-key", "", "E2B admin API key (if empty, a random UUID will be generated)")
+	pflag.BoolVar(&e2bEnableAuth, "e2b-enable-auth", true, "Enable E2B authentication")
+	pflag.StringVar(&domain, "e2b-domain", "localhost", "E2B domain")
+	pflag.IntVar(&e2bMaxTimeout, "e2b-max-timeout", models.DefaultMaxTimeout, "E2B maximum timeout in seconds")
+	pflag.StringVar(&sysNs, "system-namespace", "", "The namespace where the sandbox manager is running (required)")
+	pflag.StringVar(&peerSelector, "peer-selector", "", "Peer selector for sandbox manager (required)")
+	pflag.IntVar(&maxClaimWorkers, "max-claim-workers", 0, "Maximum number of claim workers (0 uses default)")
+	pflag.IntVar(&maxCreateQPS, "max-create-qps", 0, "Maximum QPS for sandbox creation (0 uses default)")
+	pflag.IntVar(&extProcMaxConcurrency, "ext-proc-max-concurrency", 0, "Maximum concurrency for external processor (0 uses default)")
+	pflag.Float64Var(&kubeClientQPS, "kube-client-qps", 500, "QPS for Kubernetes client")
+	pflag.IntVar(&kubeClientBurst, "kube-client-burst", 1000, "Burst for Kubernetes client")
 
 	opts := zap.Options{
 		Development: false,
@@ -56,75 +82,52 @@ func main() {
 		}()
 	}
 
-	// ============= Env ===============
-	// Get listen address from environment variable or use default value
-	port := 8080
-	if portEnv, err := strconv.Atoi(os.Getenv("PORT")); err == nil {
-		port = portEnv
+	// Validate required flags
+	if sysNs == "" {
+		klog.Fatalf("--system-namespace is required")
 	}
 
-	e2bAdminKey := os.Getenv("E2B_ADMIN_KEY")
+	if peerSelector == "" {
+		klog.Fatalf("--peer-selector is required")
+	}
+
+	// Generate admin key if not provided
 	if e2bAdminKey == "" {
 		e2bAdminKey = uuid.NewString()
 	}
-	e2bEnableAuth := os.Getenv("E2B_ENABLE_AUTH") == "true"
 
-	// Get domain from environment variable or use empty string
-	domain := "localhost"
-	if domainEnv := os.Getenv("E2B_DOMAIN"); domainEnv != "" {
-		domain = domainEnv
+	// Validate positive values
+	if e2bMaxTimeout <= 0 {
+		klog.Fatalf("--e2b-max-timeout must be greater than 0")
 	}
 
-	e2bMaxTimeout := models.DefaultMaxTimeout
-	if value, err := strconv.Atoi(os.Getenv("E2B_MAX_TIMEOUT")); err == nil {
-		if value <= 0 {
-			klog.Fatalf("E2B_MAX_TIMEOUT must be greater than 0")
-		}
-		e2bMaxTimeout = value
+	if maxClaimWorkers < 0 {
+		klog.Fatalf("--max-claim-workers must be non-negative")
 	}
 
-	sysNs := os.Getenv("SYSTEM_NAMESPACE")
-	if sysNs == "" {
-		klog.Fatalf("env var SYSTEM_NAMESPACE is required")
+	if maxCreateQPS < 0 {
+		klog.Fatalf("--max-create-qps must be non-negative")
 	}
 
-	peerSelector := os.Getenv("PEER_SELECTOR")
-	if peerSelector == "" {
-		klog.Fatalf("env var PEER_SELECTOR is required")
+	if extProcMaxConcurrency < 0 {
+		klog.Fatalf("--ext-proc-max-concurrency must be non-negative")
 	}
 
-	maxClaimWorkers := 0 // use default value of sandbox-manager
-	if value, err := strconv.Atoi(os.Getenv("MAX_CLAIM_WORKERS")); err == nil {
-		if value <= 0 {
-			klog.Fatalf("MAX_CLAIM_WORKERS must be greater than 0")
-		}
-		maxClaimWorkers = value
+	if kubeClientQPS <= 0 {
+		klog.Fatalf("--kube-client-qps must be greater than 0")
 	}
 
-	maxCreateQPS := 0 // use default value of sandbox-manager
-	if value, err := strconv.Atoi(os.Getenv("MAX_CREATE_QPS")); err == nil {
-		if value <= 0 {
-			klog.Fatalf("MAX_CREATE_QPS must be greater than 0")
-		}
-		maxCreateQPS = value
+	if kubeClientBurst <= 0 {
+		klog.Fatalf("--kube-client-burst must be greater than 0")
 	}
-
-	extProcMaxConcurrency := uint32(0) // use default value of sandbox-manager
-	if value, err := strconv.ParseUint(os.Getenv("EXT_PROC_MAX_CONCURRENCY"), 10, 32); err == nil {
-		if value <= 0 {
-			klog.Fatalf("EXT_PROC_MAX_CONCURRENCY must be greater than 0")
-		}
-		extProcMaxConcurrency = uint32(value)
-	}
-	// =========== End Env =============
 
 	// Initialize Kubernetes client and config
-	clientSet, err := clients.NewClientSet()
+	clientSet, err := clients.NewClientSetWithOptions(float32(kubeClientQPS), kubeClientBurst)
 	if err != nil {
 		klog.Fatalf("Failed to initialize Kubernetes client: %v", err)
 	}
 
-	sandboxController := e2b.NewController(domain, e2bAdminKey, sysNs, e2bMaxTimeout, maxClaimWorkers, maxCreateQPS, extProcMaxConcurrency,
+	sandboxController := e2b.NewController(domain, e2bAdminKey, sysNs, e2bMaxTimeout, maxClaimWorkers, maxCreateQPS, uint32(extProcMaxConcurrency),
 		port, e2bEnableAuth, clientSet)
 	if err := sandboxController.Init(); err != nil {
 		klog.Fatalf("Failed to initialize sandbox controller: %v", err)
