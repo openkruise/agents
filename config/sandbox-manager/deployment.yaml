@@ -30,6 +30,7 @@ spec:
             - /sandbox-manager
           args:
             - -v=7
+            - --zap-log-level=7
           ports:
             - containerPort: 8080
               name: http-manager
