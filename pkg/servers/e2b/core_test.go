@@ -21,6 +21,7 @@ import (
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -124,7 +125,7 @@ func GetSbsOwnerReference(sbs *agentsv1alpha1.SandboxSet) []metav1.OwnerReferenc
 	return []metav1.OwnerReference{*metav1.NewControllerRef(sbs, agentsv1alpha1.SandboxSetControllerKind)}
 }
 
-func CreateSandboxPool(t *testing.T, client versioned.Interface, name string, available int) func() {
+func CreateSandboxPool(t *testing.T, controller *Controller, name string, available int) func() {
 	tmpl := agentsv1alpha1.EmbeddedSandboxTemplate{
 		Template: &corev1.PodTemplateSpec{
 			Spec: corev1.PodSpec{
@@ -147,8 +148,12 @@ func CreateSandboxPool(t *testing.T, client versioned.Interface, name string, av
 			EmbeddedSandboxTemplate: tmpl,
 		},
 	}
-	_, err := client.ApiV1alpha1().SandboxSets(Namespace).Create(context.Background(), sbs, metav1.CreateOptions{})
-	assert.NoError(t, err)
+	client := controller.client.SandboxClient
+	_, err := client.ApiV1alpha1().SandboxSets(Namespace).Create(t.Context(), sbs, metav1.CreateOptions{})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		return controller.manager.GetInfra().HasTemplate(name)
+	}, time.Second, 10*time.Millisecond)
 	now := metav1.Now()
 	for i := 0; i < available; i++ {
 		sbx := &agentsv1alpha1.Sandbox{
@@ -182,6 +187,10 @@ func CreateSandboxPool(t *testing.T, client versioned.Interface, name string, av
 		}
 		CreateSandboxWithStatus(t, client, sbx)
 	}
+	require.Eventually(t, func() bool {
+		pool, _ := controller.cache.ListSandboxesInPool(name)
+		return len(pool) == available
+	}, time.Second, 10*time.Millisecond)
 	return func() {
 		assert.NoError(t, client.ApiV1alpha1().SandboxSets(Namespace).Delete(context.Background(), name, metav1.DeleteOptions{}))
 		for i := 0; i < available; i++ {

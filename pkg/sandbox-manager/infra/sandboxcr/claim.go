@@ -363,13 +363,6 @@ func newSandboxFromTemplate(opts infra.ClaimSandboxOptions, cache *Cache, client
 	return AsSandbox(sbx, cache, client), infra.LockTypeCreate, nil
 }
 
-//func preCheckCandidate(sbx *v1alpha1.Sandbox) error {
-//	if sbx.Status.PodInfo.PodIP == "" {
-//		return errors.New("podIP is empty")
-//	}
-//	return preCheckCreating(sbx)
-//}
-
 func preCheckCandidate(sbx *v1alpha1.Sandbox) error {
 	lock := sbx.Annotations[v1alpha1.AnnotationLock]
 	if lock != "" {

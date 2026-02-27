@@ -19,7 +19,7 @@ func TestPauseSandbox(t *testing.T) {
 	templateName := "test-template"
 	controller, client, teardown := Setup(t)
 	defer teardown()
-	cleanup := CreateSandboxPool(t, client.SandboxClient, templateName, 10)
+	cleanup := CreateSandboxPool(t, controller, templateName, 10)
 	defer cleanup()
 	user := &models.CreatedTeamAPIKey{
 		ID:   keys.AdminKeyID,
@@ -117,7 +117,7 @@ func TestConnectSandbox(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cleanup := CreateSandboxPool(t, client.SandboxClient, templateName, 1)
+			cleanup := CreateSandboxPool(t, controller, templateName, 1)
 			defer cleanup()
 
 			createResp, err := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
@@ -126,7 +126,7 @@ func TestConnectSandbox(t *testing.T) {
 				},
 				TemplateID: templateName,
 			}, nil, user))
-			assert.Nil(t, err)
+			require.Nil(t, err)
 			assert.Equal(t, models.SandboxStateRunning, createResp.Body.State)
 
 			req := NewRequest(t, nil, nil, map[string]string{
@@ -253,7 +253,7 @@ func TestResumeSandbox(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cleanup := CreateSandboxPool(t, client.SandboxClient, templateName, 1)
+			cleanup := CreateSandboxPool(t, controller, templateName, 1)
 			defer cleanup()
 
 			createResp, err := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
@@ -262,7 +262,7 @@ func TestResumeSandbox(t *testing.T) {
 					models.ExtensionKeySkipInitRuntime: agentsv1alpha1.True,
 				},
 			}, nil, user))
-			assert.Nil(t, err)
+			require.Nil(t, err)
 			assert.Equal(t, models.SandboxStateRunning, createResp.Body.State)
 			AvoidGetFromCache(t, createResp.Body.SandboxID, client.SandboxClient)
 

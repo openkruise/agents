@@ -26,7 +26,7 @@ func imageChecker(image string, controller *Controller) func(t *testing.T, resp 
 }
 
 func TestCreateSandbox(t *testing.T) {
-	controller, client, teardown := Setup(t)
+	controller, _, teardown := Setup(t)
 	defer teardown()
 	templateName := "test-template"
 	tests := []struct {
@@ -200,7 +200,7 @@ func TestCreateSandbox(t *testing.T) {
 					Name: tt.userName,
 				}
 			}
-			cleanup := CreateSandboxPool(t, client.SandboxClient, templateName, tt.available)
+			cleanup := CreateSandboxPool(t, controller, templateName, tt.available)
 			require.Eventually(t, func() bool {
 				list, err := controller.cache.ListSandboxesInPool(templateName)
 				return err == nil && len(list) == tt.available
@@ -328,7 +328,7 @@ func TestAutoPause(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cleanup := CreateSandboxPool(t, client.SandboxClient, templateName, 1)
+			cleanup := CreateSandboxPool(t, controller, templateName, 1)
 			defer cleanup()
 
 			createResp, apiError := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{

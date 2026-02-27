@@ -15,7 +15,7 @@ import (
 
 func TestListSandboxes(t *testing.T) {
 	templateName := "test-template"
-	controller, client, teardown := Setup(t)
+	controller, _, teardown := Setup(t)
 	defer teardown()
 	user := &models.CreatedTeamAPIKey{
 		ID:   keys.AdminKeyID,
@@ -126,7 +126,7 @@ func TestListSandboxes(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cleanup := CreateSandboxPool(t, client.SandboxClient, templateName, 10)
+			cleanup := CreateSandboxPool(t, controller, templateName, 10)
 			defer cleanup()
 
 			var expectedListed []models.Sandbox
@@ -153,15 +153,24 @@ func TestListSandboxes(t *testing.T) {
 				expectStates = append(expectStates, expectState)
 			}
 
-			time.Sleep(100 * time.Millisecond)
+			// Wait for sandboxes to be ready before attempting pause operations
+			time.Sleep(200 * time.Millisecond)
 
 			for i, request := range createdRequests {
-				describe, err := controller.DescribeSandbox(request)
-				assert.Nil(t, err)
-				sandbox := describe.Body
+				// Wait for sandbox to be in expected state
+				var sandbox *models.Sandbox
+				assert.Eventually(t, func() bool {
+					describe, describeErr := controller.DescribeSandbox(request)
+					if describeErr != nil {
+						return false
+					}
+					sandbox = describe.Body
+					return sandbox.State == expectStates[i]
+				}, 2*time.Second, 50*time.Millisecond, "sandbox %s should reach state %s", request.PathValue("sandboxID"), expectStates[i])
+
 				assert.Equal(t, expectStates[i], sandbox.State)
 				sandbox.EnvdAccessToken = "" // token is not listed
-				if err == nil && tt.expectListed != nil && tt.expectListed(sandbox) {
+				if tt.expectListed != nil && tt.expectListed(sandbox) {
 					expectedListed = append(expectedListed, *sandbox)
 				}
 			}

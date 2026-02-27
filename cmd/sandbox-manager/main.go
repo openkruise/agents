@@ -7,6 +7,8 @@ import (
 	_ "net/http/pprof" // Added to register pprof handlers
 
 	"github.com/google/uuid"
+	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
+	"github.com/openkruise/agents/pkg/utils"
 	"github.com/spf13/pflag"
 	zapRaw "go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -50,11 +52,11 @@ func main() {
 	pflag.BoolVar(&e2bEnableAuth, "e2b-enable-auth", true, "Enable E2B authentication")
 	pflag.StringVar(&domain, "e2b-domain", "localhost", "E2B domain")
 	pflag.IntVar(&e2bMaxTimeout, "e2b-max-timeout", models.DefaultMaxTimeout, "E2B maximum timeout in seconds")
-	pflag.StringVar(&sysNs, "system-namespace", "", "The namespace where the sandbox manager is running (required)")
+	pflag.StringVar(&sysNs, "system-namespace", utils.DefaultSandboxDeployNamespace, "The namespace where the sandbox manager is running (required)")
 	pflag.StringVar(&peerSelector, "peer-selector", "", "Peer selector for sandbox manager (required)")
-	pflag.IntVar(&maxClaimWorkers, "max-claim-workers", 0, "Maximum number of claim workers (0 uses default)")
-	pflag.IntVar(&maxCreateQPS, "max-create-qps", 0, "Maximum QPS for sandbox creation (0 uses default)")
-	pflag.IntVar(&extProcMaxConcurrency, "ext-proc-max-concurrency", 0, "Maximum concurrency for external processor (0 uses default)")
+	pflag.IntVar(&maxClaimWorkers, "max-claim-workers", consts.DefaultClaimWorkers, "Maximum number of claim workers (0 uses default)")
+	pflag.IntVar(&maxCreateQPS, "max-create-qps", consts.DefaultCreateQPS, "Maximum QPS for sandbox creation (0 uses default)")
+	pflag.IntVar(&extProcMaxConcurrency, "ext-proc-max-concurrency", consts.DefaultExtProcConcurrency, "Maximum concurrency for external processor (0 uses default)")
 	pflag.Float64Var(&kubeClientQPS, "kube-client-qps", 500, "QPS for Kubernetes client")
 	pflag.IntVar(&kubeClientBurst, "kube-client-burst", 1000, "Burst for Kubernetes client")
 

@@ -73,7 +73,7 @@ func TestSetTimeout(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cleanup := CreateSandboxPool(t, client.SandboxClient, templateName, 1)
+			cleanup := CreateSandboxPool(t, controller, templateName, 1)
 			defer cleanup()
 			initTimeoutSeconds := 30
 			initEndAt := start.Add(time.Duration(initTimeoutSeconds) * time.Second)
