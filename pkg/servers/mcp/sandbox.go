@@ -125,7 +125,7 @@ func CreateSandboxWithOperator(ctx context.Context, operator SandboxOperator, us
 	return &SandboxInfo{
 		SandboxID:   sbx.GetSandboxID(),
 		AccessToken: accessToken,
-		State:       string(state),
+		State:       state,
 	}, nil
 }
 
@@ -145,7 +145,7 @@ func GetSandboxWithOperator(ctx context.Context, operator SandboxOperator, userI
 	return &SandboxInfo{
 		SandboxID:   sbx.GetSandboxID(),
 		AccessToken: sbx.GetAnnotations()[v1alpha1.AnnotationRuntimeAccessToken],
-		State:       string(state),
+		State:       state,
 	}, nil
 }
 

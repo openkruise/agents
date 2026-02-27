@@ -17,18 +17,15 @@ limitations under the License.
 package mcp
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/servers/web"
 	"k8s.io/klog/v2"
 )
@@ -144,7 +141,7 @@ func (sm *SessionManager) heartBeatLoop() {
 
 // HelloPeer sends a heartbeat to a peer
 func (sm *SessionManager) HelloPeer(ip string) error {
-	return sm.requestPeer(http.MethodGet, ip, SessionHelloAPI, nil)
+	return sm.deps.RequestPeer(http.MethodGet, ip, SessionHelloAPI, nil)
 }
 
 // SyncSessionWithPeers syncs a session change to all peers
@@ -179,7 +176,7 @@ func (sm *SessionManager) SyncSessionWithPeers(session *UserSession, deleted boo
 		wg.Add(1)
 		go func(peerIP string) {
 			defer wg.Done()
-			if err := sm.requestPeer(http.MethodPost, peerIP, SessionSyncAPI, body); err != nil {
+			if err := sm.deps.RequestPeer(http.MethodPost, peerIP, SessionSyncAPI, body); err != nil {
 				mu.Lock()
 				errStrings = append(errStrings, err.Error())
 				mu.Unlock()
@@ -244,29 +241,4 @@ func (sm *SessionManager) handleHello(r *http.Request) (web.ApiResponse[struct{}
 	return web.ApiResponse[struct{}]{
 		Code: http.StatusNoContent,
 	}, nil
-}
-
-// requestPeer sends a request to a peer
-func (sm *SessionManager) requestPeer(method, ip, path string, body []byte) error {
-	var buf io.Reader
-	if len(body) > 0 {
-		buf = bytes.NewReader(body)
-	}
-	request, err := http.NewRequest(method, fmt.Sprintf("http://%s:%d%s", ip, sm.config.SessionSyncPort, path), buf)
-	if err != nil {
-		return err
-	}
-
-	client := &http.Client{
-		Timeout: consts.RequestPeerTimeout,
-	}
-	resp, err := client.Do(request)
-	if err != nil {
-		return err
-	}
-	defer func(Body io.ReadCloser) {
-		_ = Body.Close()
-	}(resp.Body)
-
-	return nil
 }

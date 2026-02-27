@@ -22,14 +22,33 @@ import (
 	"testing"
 	"time"
 
-	sandbox_manager "github.com/openkruise/agents/pkg/sandbox-manager"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// mockSandboxCreator creates a mock sandbox creator for testing
-func mockSandboxCreator(sandboxID, accessToken, state string, err error) SandboxCreatorFunc {
-	return func(ctx context.Context, manager *sandbox_manager.SandboxManager, userID, sessionID, templateID string, sandboxTTL time.Duration) (*SandboxInfo, error) {
+// mockSessionDeps implements SessionDependencies interface for testing
+type mockSessionDeps struct {
+	createSandboxFunc func(ctx context.Context, userID, sessionID, templateID string, sandboxTTL time.Duration) (*SandboxInfo, error)
+	requestPeerFunc   func(method, ip, path string, body []byte) error
+}
+
+func (m *mockSessionDeps) CreateSandbox(ctx context.Context, userID, sessionID, templateID string, sandboxTTL time.Duration) (*SandboxInfo, error) {
+	if m.createSandboxFunc != nil {
+		return m.createSandboxFunc(ctx, userID, sessionID, templateID, sandboxTTL)
+	}
+	return nil, errors.New("not implemented")
+}
+
+func (m *mockSessionDeps) RequestPeer(method, ip, path string, body []byte) error {
+	if m.requestPeerFunc != nil {
+		return m.requestPeerFunc(method, ip, path, body)
+	}
+	return nil
+}
+
+// newMockSandboxCreator creates a mock sandbox creator helper
+func newMockSandboxCreator(sandboxID, accessToken, state string, err error) func(ctx context.Context, userID, sessionID, templateID string, sandboxTTL time.Duration) (*SandboxInfo, error) {
+	return func(ctx context.Context, userID, sessionID, templateID string, sandboxTTL time.Duration) (*SandboxInfo, error) {
 		if err != nil {
 			return nil, err
 		}
@@ -41,34 +60,30 @@ func mockSandboxCreator(sandboxID, accessToken, state string, err error) Sandbox
 	}
 }
 
-// createTestSessionManager creates a SessionManager for testing without real dependencies
-func createTestSessionManager() *SessionManager {
+// createTestSessionManager creates a SessionManager for testing
+func createTestSessionManager(deps SessionDependencies) *SessionManager {
 	config := DefaultServerConfig()
-	sm := &SessionManager{
-		manager:         nil, // Not needed when using mock sandbox creator
-		config:          config,
-		sandboxCreator:  nil, // Will be set in tests
-		peers:           make(map[string]Peer),
-		heartBeatStopCh: make(chan struct{}),
-	}
-	return sm
+	return NewSessionManager(deps, config)
 }
 
 func TestNewSessionManager(t *testing.T) {
 	config := DefaultServerConfig()
-	sm := NewSessionManager(nil, config)
+	deps := &mockSessionDeps{}
+	sm := NewSessionManager(deps, config)
 
 	assert.NotNil(t, sm)
 	assert.Equal(t, config, sm.config)
 	assert.NotNil(t, sm.peers)
 	assert.NotNil(t, sm.heartBeatStopCh)
-	assert.NotNil(t, sm.sandboxCreator) // Should default to CreateSandbox
+	assert.NotNil(t, sm.deps)
 }
 
 func TestGetOrCreateSession(t *testing.T) {
 	t.Run("creates new session successfully", func(t *testing.T) {
-		sm := createTestSessionManager()
-		sm.SetSandboxCreator(mockSandboxCreator("sandbox-123", "token-abc", "running", nil))
+		deps := &mockSessionDeps{
+			createSandboxFunc: newMockSandboxCreator("sandbox-123", "token-abc", "running", nil),
+		}
+		sm := createTestSessionManager(deps)
 
 		ctx := context.Background()
 		session, err := sm.GetOrCreateSession(ctx, "session-1", "user-1", "template-1", 5*time.Minute)
@@ -84,7 +99,14 @@ func TestGetOrCreateSession(t *testing.T) {
 	})
 
 	t.Run("reuses existing session for same user", func(t *testing.T) {
-		sm := createTestSessionManager()
+		callCount := 0
+		deps := &mockSessionDeps{
+			createSandboxFunc: func(ctx context.Context, userID, sessionID, templateID string, sandboxTTL time.Duration) (*SandboxInfo, error) {
+				callCount++
+				return &SandboxInfo{SandboxID: "new-sandbox"}, nil
+			},
+		}
+		sm := createTestSessionManager(deps)
 
 		// Pre-store a session
 		existingSession := &UserSession{
@@ -97,13 +119,6 @@ func TestGetOrCreateSession(t *testing.T) {
 		}
 		sm.sessions.Store("session-existing", existingSession)
 
-		// Mock creator should NOT be called since session exists
-		callCount := 0
-		sm.SetSandboxCreator(func(ctx context.Context, manager *sandbox_manager.SandboxManager, userID, sessionID, templateID string, sandboxTTL time.Duration) (*SandboxInfo, error) {
-			callCount++
-			return &SandboxInfo{SandboxID: "new-sandbox"}, nil
-		})
-
 		ctx := context.Background()
 		session, err := sm.GetOrCreateSession(ctx, "session-existing", "user-1", "template-2", 5*time.Minute)
 
@@ -114,7 +129,8 @@ func TestGetOrCreateSession(t *testing.T) {
 	})
 
 	t.Run("rejects session belonging to different user", func(t *testing.T) {
-		sm := createTestSessionManager()
+		deps := &mockSessionDeps{}
+		sm := createTestSessionManager(deps)
 
 		// Pre-store a session for user-1
 		existingSession := &UserSession{
@@ -139,8 +155,10 @@ func TestGetOrCreateSession(t *testing.T) {
 	})
 
 	t.Run("handles sandbox creation failure", func(t *testing.T) {
-		sm := createTestSessionManager()
-		sm.SetSandboxCreator(mockSandboxCreator("", "", "", errors.New("sandbox creation failed")))
+		deps := &mockSessionDeps{
+			createSandboxFunc: newMockSandboxCreator("", "", "", errors.New("sandbox creation failed")),
+		}
+		sm := createTestSessionManager(deps)
 
 		ctx := context.Background()
 		session, err := sm.GetOrCreateSession(ctx, "session-fail", "user-1", "template-1", 5*time.Minute)
@@ -154,7 +172,8 @@ func TestGetOrCreateSession(t *testing.T) {
 
 func TestGetSession(t *testing.T) {
 	t.Run("returns existing session", func(t *testing.T) {
-		sm := createTestSessionManager()
+		deps := &mockSessionDeps{}
+		sm := createTestSessionManager(deps)
 
 		existingSession := &UserSession{
 			SessionID:   "session-get",
@@ -175,7 +194,8 @@ func TestGetSession(t *testing.T) {
 	})
 
 	t.Run("returns false for non-existing session", func(t *testing.T) {
-		sm := createTestSessionManager()
+		deps := &mockSessionDeps{}
+		sm := createTestSessionManager(deps)
 
 		session, ok := sm.GetSession("non-existing")
 
@@ -186,7 +206,8 @@ func TestGetSession(t *testing.T) {
 
 func TestOnSandboxAdd(t *testing.T) {
 	t.Run("adds session from cluster event", func(t *testing.T) {
-		sm := createTestSessionManager()
+		deps := &mockSessionDeps{}
+		sm := createTestSessionManager(deps)
 
 		sm.OnSandboxAdd("session-add", "sandbox-add", "user-add", "token-add", "Running")
 
@@ -201,7 +222,8 @@ func TestOnSandboxAdd(t *testing.T) {
 	})
 
 	t.Run("ignores empty session ID", func(t *testing.T) {
-		sm := createTestSessionManager()
+		deps := &mockSessionDeps{}
+		sm := createTestSessionManager(deps)
 
 		sm.OnSandboxAdd("", "sandbox-1", "user-1", "token-1", "Running")
 
@@ -213,7 +235,8 @@ func TestOnSandboxAdd(t *testing.T) {
 
 func TestOnSandboxDelete(t *testing.T) {
 	t.Run("deletes existing session", func(t *testing.T) {
-		sm := createTestSessionManager()
+		deps := &mockSessionDeps{}
+		sm := createTestSessionManager(deps)
 
 		// Pre-store a session
 		sm.sessions.Store("session-delete", &UserSession{
@@ -228,14 +251,16 @@ func TestOnSandboxDelete(t *testing.T) {
 	})
 
 	t.Run("handles non-existing session gracefully", func(t *testing.T) {
-		sm := createTestSessionManager()
+		deps := &mockSessionDeps{}
+		sm := createTestSessionManager(deps)
 
 		// Should not panic
 		sm.OnSandboxDelete("non-existing")
 	})
 
 	t.Run("ignores empty session ID", func(t *testing.T) {
-		sm := createTestSessionManager()
+		deps := &mockSessionDeps{}
+		sm := createTestSessionManager(deps)
 
 		// Pre-store a session
 		sm.sessions.Store("valid-session", &UserSession{
@@ -252,7 +277,8 @@ func TestOnSandboxDelete(t *testing.T) {
 
 func TestOnSandboxUpdate(t *testing.T) {
 	t.Run("updates existing session", func(t *testing.T) {
-		sm := createTestSessionManager()
+		deps := &mockSessionDeps{}
+		sm := createTestSessionManager(deps)
 
 		// Pre-store a session
 		sm.sessions.Store("session-update", &UserSession{
@@ -274,7 +300,8 @@ func TestOnSandboxUpdate(t *testing.T) {
 	})
 
 	t.Run("creates session if not exists", func(t *testing.T) {
-		sm := createTestSessionManager()
+		deps := &mockSessionDeps{}
+		sm := createTestSessionManager(deps)
 
 		sm.OnSandboxUpdate("new-session", "sandbox-new", "user-new", "token-new", "Running")
 

@@ -66,8 +66,9 @@ func NewMCPServer(
 	// Create auth (always needed, even for anonymous users)
 	s.auth = NewAuth(keyStorage)
 
-	// Create session manager
-	s.sessionManager = NewSessionManager(manager, config)
+	// Create session manager with production dependencies
+	deps := NewDefaultSessionDeps(manager, config.SessionSyncPort)
+	s.sessionManager = NewSessionManager(deps, config)
 
 	// Register session manager as event handler to receive sandbox events
 	// This must be done before Infra.Run() to avoid missing events

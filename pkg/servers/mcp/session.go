@@ -24,25 +24,26 @@ import (
 	"time"
 
 	"k8s.io/klog/v2"
-
-	sandbox_manager "github.com/openkruise/agents/pkg/sandbox-manager"
 )
 
-// SandboxCreatorFunc is a function type for creating sandboxes
-// This abstraction allows for dependency injection and easier testing
-type SandboxCreatorFunc func(ctx context.Context, manager *sandbox_manager.SandboxManager, userID, sessionID, templateID string, sandboxTTL time.Duration) (*SandboxInfo, error)
+// SessionDependencies defines the interface for SessionManager's external dependencies.
+// This abstraction allows for dependency injection and easier testing.
+type SessionDependencies interface {
+	// CreateSandbox creates a new sandbox for the user
+	CreateSandbox(ctx context.Context, userID, sessionID, templateID string, sandboxTTL time.Duration) (*SandboxInfo, error)
+	// RequestPeer sends an HTTP request to a peer node
+	RequestPeer(method, ip, path string, body []byte) error
+}
 
 // SessionManager manages user sessions and their associated sandboxes
 // Similar to proxy.Server, it maintains local session-sandbox mappings
 // and synchronizes changes with peer instances
 type SessionManager struct {
 	sessions sync.Map // map[sessionID]*UserSession
-	manager  *sandbox_manager.SandboxManager
 	config   *ServerConfig
 
-	// sandboxCreator is the function used to create sandboxes
-	// Defaults to CreateSandbox, can be overridden for testing
-	sandboxCreator SandboxCreatorFunc
+	// deps holds all external dependencies
+	deps SessionDependencies
 
 	// Peer synchronization (similar to proxy.Server)
 	peers           map[string]Peer
@@ -52,21 +53,14 @@ type SessionManager struct {
 	httpSrv         *http.Server
 }
 
-// NewSessionManager creates a new session manager
-func NewSessionManager(manager *sandbox_manager.SandboxManager, config *ServerConfig) *SessionManager {
-	sm := &SessionManager{
-		manager:         manager,
+// NewSessionManager creates a new session manager with the given dependencies
+func NewSessionManager(deps SessionDependencies, config *ServerConfig) *SessionManager {
+	return &SessionManager{
+		deps:            deps,
 		config:          config,
-		sandboxCreator:  CreateSandbox,
 		peers:           make(map[string]Peer),
 		heartBeatStopCh: make(chan struct{}),
 	}
-	return sm
-}
-
-// SetSandboxCreator sets a custom sandbox creator function (for testing)
-func (sm *SessionManager) SetSandboxCreator(creator SandboxCreatorFunc) {
-	sm.sandboxCreator = creator
 }
 
 // Start starts the session manager background tasks and peer sync server
@@ -107,7 +101,7 @@ func (sm *SessionManager) GetOrCreateSession(ctx context.Context, sessionID, use
 
 	// Create new sandbox
 	log.Info("creating new sandbox")
-	sandboxInfo, err := sm.sandboxCreator(ctx, sm.manager, userID, sessionID, templateID, sandboxTTL)
+	sandboxInfo, err := sm.deps.CreateSandbox(ctx, userID, sessionID, templateID, sandboxTTL)
 	if err != nil {
 		log.Error(err, "failed to create sandbox")
 		return nil, NewMCPError(ErrorCodeSandboxCreation, fmt.Sprintf("Failed to create sandbox: %v", err), nil)

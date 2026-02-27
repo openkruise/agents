@@ -235,7 +235,7 @@ func (i *Infra) onSandboxAdd(obj any) {
 				stateutils.GetSandboxID(sbx),
 				annotations[v1alpha1.AnnotationOwner],
 				annotations[v1alpha1.AnnotationRuntimeAccessToken],
-				string(state),
+				state,
 			)
 		}
 	}
@@ -282,7 +282,7 @@ func (i *Infra) onSandboxUpdate(_, newObj any) {
 				stateutils.GetSandboxID(newSbx),
 				annotations[v1alpha1.AnnotationOwner],
 				annotations[v1alpha1.AnnotationRuntimeAccessToken],
-				string(state),
+				state,
 			)
 		}
 	}

@@ -33,19 +33,91 @@ import (
 	sandbox_manager "github.com/openkruise/agents/pkg/sandbox-manager"
 )
 
+// CodeExecutorFunc is a function type for executing code in sandbox
+// This abstraction allows for dependency injection and easier testing
+type CodeExecutorFunc func(ctx context.Context, session *UserSession, code string, language string) (*RunCodeResponse, error)
+
+// OneTimeSandboxCreatorFunc is a function type for creating one-time sandboxes
+// This abstraction allows for dependency injection and easier testing
+type OneTimeSandboxCreatorFunc func(ctx context.Context, manager *sandbox_manager.SandboxManager, userID, sessionID, templateID string, sandboxTTL time.Duration) (*SandboxInfo, error)
+
+// SandboxDeleterFunc is a function type for deleting sandboxes
+// This abstraction allows for dependency injection and easier testing
+type SandboxDeleterFunc func(ctx context.Context, manager *sandbox_manager.SandboxManager, userID, sandboxID string) error
+
+// CommandExecutorFunc is a function type for executing commands in sandbox
+// This abstraction allows for dependency injection and easier testing
+type CommandExecutorFunc func(ctx context.Context, manager *sandbox_manager.SandboxManager, userID, sandboxID string, cmd string, envs map[string]string, cwd *string, timeout time.Duration) (*CommandResult, error)
+
+// SandboxRequesterFunc is a function type for sending HTTP requests to sandbox
+// This abstraction allows for dependency injection and easier testing
+type SandboxRequesterFunc func(ctx context.Context, manager *sandbox_manager.SandboxManager, userID, sandboxID string, method, path string, port int, body io.Reader, headers http.Header) (*http.Response, error)
+
 // Handler handles MCP tool calls
 type Handler struct {
 	sessionManager *SessionManager
 	manager        *sandbox_manager.SandboxManager
 	config         *ServerConfig
+
+	// codeExecutor is the function used to execute code in sandbox
+	// Defaults to executeCodeInSandbox, can be overridden for testing
+	codeExecutor CodeExecutorFunc
+
+	// oneTimeSandboxCreator is the function used to create one-time sandboxes
+	// Defaults to CreateSandbox, can be overridden for testing
+	oneTimeSandboxCreator OneTimeSandboxCreatorFunc
+
+	// sandboxDeleter is the function used to delete sandboxes
+	// Defaults to DeleteSandbox, can be overridden for testing
+	sandboxDeleter SandboxDeleterFunc
+
+	// commandExecutor is the function used to execute commands in sandbox
+	// Defaults to ExecuteCommand, can be overridden for testing
+	commandExecutor CommandExecutorFunc
+
+	// sandboxRequester is the function used to send HTTP requests to sandbox
+	// Defaults to RequestToSandboxWithHeaders, can be overridden for testing
+	sandboxRequester SandboxRequesterFunc
 }
 
 func NewHandler(sessionManager *SessionManager, manager *sandbox_manager.SandboxManager, config *ServerConfig) *Handler {
-	return &Handler{
+	h := &Handler{
 		sessionManager: sessionManager,
 		manager:        manager,
 		config:         config,
 	}
+	// Set default functions
+	h.codeExecutor = h.executeCodeInSandbox
+	h.oneTimeSandboxCreator = CreateSandbox
+	h.sandboxDeleter = DeleteSandbox
+	h.commandExecutor = ExecuteCommand
+	h.sandboxRequester = RequestToSandboxWithHeaders
+	return h
+}
+
+// SetCodeExecutor sets a custom code executor function (for testing)
+func (h *Handler) SetCodeExecutor(executor CodeExecutorFunc) {
+	h.codeExecutor = executor
+}
+
+// SetOneTimeSandboxCreator sets a custom one-time sandbox creator function (for testing)
+func (h *Handler) SetOneTimeSandboxCreator(creator OneTimeSandboxCreatorFunc) {
+	h.oneTimeSandboxCreator = creator
+}
+
+// SetSandboxDeleter sets a custom sandbox deleter function (for testing)
+func (h *Handler) SetSandboxDeleter(deleter SandboxDeleterFunc) {
+	h.sandboxDeleter = deleter
+}
+
+// SetCommandExecutor sets a custom command executor function (for testing)
+func (h *Handler) SetCommandExecutor(executor CommandExecutorFunc) {
+	h.commandExecutor = executor
+}
+
+// SetSandboxRequester sets a custom sandbox requester function (for testing)
+func (h *Handler) SetSandboxRequester(requester SandboxRequesterFunc) {
+	h.sandboxRequester = requester
 }
 
 // HandleRunCode handles the run_code tool
@@ -98,7 +170,7 @@ func (h *Handler) HandleRunCode(ctx context.Context, req mcpgo.CallToolRequest, 
 	ctx, cancel := context.WithTimeout(ctx, execTimeout)
 	defer cancel()
 
-	result, err := h.executeCodeInSandbox(ctx, session, args.Code, args.Language)
+	result, err := h.codeExecutor(ctx, session, args.Code, args.Language)
 	if err != nil {
 		log.Error(err, "code execution failed")
 		return RunCodeResponse{}, fmt.Errorf("code execution failed: %w", err)
@@ -142,7 +214,7 @@ func (h *Handler) HandleRunCodeOnce(ctx context.Context, req mcpgo.CallToolReque
 
 	log.Info("creating one-time sandbox for code execution", "codeLength", len(args.Code))
 	// Create a new sandbox for this one-time execution
-	sandboxInfo, err := CreateSandbox(ctx, h.manager, user.ID.String(), sessionID, template, sandboxTTL)
+	sandboxInfo, err := h.oneTimeSandboxCreator(ctx, h.manager, user.ID.String(), sessionID, template, sandboxTTL)
 	if err != nil {
 		log.Error(err, "failed to create one-time sandbox")
 		return RunCodeResponse{}, NewMCPError(ErrorCodeSandboxCreation, fmt.Sprintf("Failed to create sandbox: %v", err), nil)
@@ -156,7 +228,7 @@ func (h *Handler) HandleRunCodeOnce(ctx context.Context, req mcpgo.CallToolReque
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		if cleanupErr := DeleteSandbox(cleanupCtx, h.manager, user.ID.String(), sandboxInfo.SandboxID); cleanupErr != nil {
+		if cleanupErr := h.sandboxDeleter(cleanupCtx, h.manager, user.ID.String(), sandboxInfo.SandboxID); cleanupErr != nil {
 			log.Error(cleanupErr, "failed to cleanup one-time sandbox")
 		} else {
 			log.Info("one-time sandbox cleaned up successfully")
@@ -180,7 +252,7 @@ func (h *Handler) HandleRunCodeOnce(ctx context.Context, req mcpgo.CallToolReque
 	execCtx, cancel := context.WithTimeout(ctx, execTimeout)
 	defer cancel()
 
-	result, err := h.executeCodeInSandbox(execCtx, tempSession, args.Code, args.Language)
+	result, err := h.codeExecutor(execCtx, tempSession, args.Code, args.Language)
 	if err != nil {
 		log.Error(err, "code execution failed in one-time sandbox")
 		return RunCodeResponse{}, fmt.Errorf("code execution failed: %w", err)
@@ -236,7 +308,7 @@ func (h *Handler) HandleRunCommand(ctx context.Context, req mcpgo.CallToolReques
 		execTimeout = *userConfig.ExecutionTimeout
 	}
 
-	result, err := ExecuteCommand(
+	result, err := h.commandExecutor(
 		ctx,
 		h.manager,
 		user.ID.String(),
@@ -309,7 +381,7 @@ func (h *Handler) executeCodeInSandbox(ctx context.Context, session *UserSession
 		headers.Set("X-Access-Token", session.AccessToken)
 	}
 
-	resp, err := RequestToSandboxWithHeaders(ctx, h.manager, session.UserID, session.SandboxID, http.MethodPost, "/execute", 49999, bytes.NewReader(requestBody), headers)
+	resp, err := h.sandboxRequester(ctx, h.manager, session.UserID, session.SandboxID, http.MethodPost, "/execute", 49999, bytes.NewReader(requestBody), headers)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send request to sandbox: %w", err)
 	}
