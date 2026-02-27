@@ -201,6 +201,10 @@ func TestCreateSandbox(t *testing.T) {
 				}
 			}
 			cleanup := CreateSandboxPool(t, client.SandboxClient, templateName, tt.available)
+			require.Eventually(t, func() bool {
+				list, err := controller.cache.ListSandboxesInPool(templateName)
+				return err == nil && len(list) == tt.available
+			}, time.Second, 50*time.Millisecond)
 			defer cleanup()
 			now := time.Now()
 			if tt.request.Metadata == nil {

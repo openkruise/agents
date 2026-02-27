@@ -56,13 +56,16 @@ func (s *Sandbox) GetTemplate() string {
 
 func (s *Sandbox) InplaceRefresh(ctx context.Context, deepcopy bool) error {
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(s.Sandbox)).V(consts.DebugLogLevel)
+	fetchFromApiServer := false
 	sbx, err := s.Cache.GetClaimedSandbox(stateutils.GetSandboxID(s.Sandbox))
 	if err != nil {
-		return err
-	}
-	fetchFromApiServer := !utils.ResourceVersionExpectationSatisfied(sbx)
-	if fetchFromApiServer {
+		log.Info("failed to get claimed sandbox from cache, fetch from api-server", "reason", err.Error())
+		fetchFromApiServer = true
+	} else if !utils.ResourceVersionExpectationSatisfied(sbx) {
 		log.Info("sandbox cache is out-dated, fetch from api-server")
+		fetchFromApiServer = true
+	}
+	if fetchFromApiServer {
 		sbx, err = s.Client.ApiV1alpha1().Sandboxes(s.Sandbox.GetNamespace()).Get(ctx, s.Sandbox.GetName(), metav1.GetOptions{})
 		if err != nil {
 			return err
