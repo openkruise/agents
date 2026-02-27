@@ -81,18 +81,19 @@ type SandboxClaimSpec struct {
 	// CreateOnNoStock allows to create new sandbox if no stock available
 	// +optional
 	CreateOnNoStock bool `json:"createOnNoStock,omitempty"`
+
+	// WaitReadyTimeout specifies the maximum duration for waiting claimed sandbox ready. Default: 30s.
+	// A waiting happens when an inplace update happens, a new sandbox created, etc.
+	// Format: duration string (e.g., "3h", "200s", "15m")
+	// +optional
+	// +kubebuilder:default="30s"
+	WaitReadyTimeout *metav1.Duration `json:"waitReadyTimeout,omitempty"`
 }
 
 type SandboxClaimInplaceUpdateOptions struct {
 	// Image specifies the new image to update to
 	// +kubebuilder:validation:Required
 	Image string `json:"image"`
-
-	// Timeout specifies the maximum duration for waiting inplace update operation. Default: 15s
-	// Format: duration string (e.g., "3h", "200s", "15m")
-	// +optional
-	// +kubebuilder:default="15s"
-	Timeout *metav1.Duration `json:"timeout,omitempty"`
 }
 
 // SandboxClaimStatus defines the observed state of SandboxClaim

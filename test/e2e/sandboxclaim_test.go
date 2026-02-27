@@ -72,8 +72,9 @@ var _ = Describe("SandboxClaim", func() {
 
 	Context("Basic claim flow", func() {
 		var (
-			sandboxSet   *agentsv1alpha1.SandboxSet
-			sandboxClaim *agentsv1alpha1.SandboxClaim
+			sandboxSet      *agentsv1alpha1.SandboxSet
+			sandboxSetEmpty *agentsv1alpha1.SandboxSet
+			sandboxClaim    *agentsv1alpha1.SandboxClaim
 		)
 
 		BeforeEach(func() {
@@ -99,7 +100,11 @@ var _ = Describe("SandboxClaim", func() {
 					},
 				},
 			}
+			sandboxSetEmpty = sandboxSet.DeepCopy()
+			sandboxSetEmpty.Spec.Replicas = 0
+			sandboxSetEmpty.Name = sandboxSet.Name + "-empty"
 			Expect(k8sClient.Create(ctx, sandboxSet)).To(Succeed())
+			Expect(k8sClient.Create(ctx, sandboxSetEmpty)).To(Succeed())
 
 			// Wait for SandboxSet to be ready
 			Eventually(func() int32 {
@@ -117,6 +122,9 @@ var _ = Describe("SandboxClaim", func() {
 			}
 			if sandboxSet != nil {
 				_ = k8sClient.Delete(ctx, sandboxSet)
+			}
+			if sandboxSetEmpty != nil {
+				_ = k8sClient.Delete(ctx, sandboxSetEmpty)
 			}
 		})
 
@@ -233,6 +241,43 @@ var _ = Describe("SandboxClaim", func() {
 
 			By("Verifying the claim eventually reaches Completed phase")
 			Expect(sandboxClaim.Status.Phase).To(Equal(agentsv1alpha1.SandboxClaimPhaseCompleted))
+		})
+
+		It("create on no stock", func() {
+			By("Creating a SandboxClaim with replicas=1")
+			sandboxClaim = &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("test-claim-%d", time.Now().UnixNano()),
+					Namespace: namespace,
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName:     sandboxSetEmpty.Name,
+					Replicas:         ptr.To(int32(1)),
+					WaitReadyTimeout: &metav1.Duration{Duration: time.Minute},
+					CreateOnNoStock:  true,
+				},
+			}
+			Expect(k8sClient.Create(ctx, sandboxClaim)).To(Succeed())
+
+			By("Verifying the claim transitions to Completed phase")
+			Eventually(func() agentsv1alpha1.SandboxClaimPhase {
+				_ = k8sClient.Get(ctx, types.NamespacedName{
+					Name:      sandboxClaim.Name,
+					Namespace: sandboxClaim.Namespace,
+				}, sandboxClaim)
+				return sandboxClaim.Status.Phase
+			}, time.Minute, time.Second).Should(Equal(agentsv1alpha1.SandboxClaimPhaseCompleted))
+
+			By("Verifying claimedReplicas equals 1")
+			Expect(sandboxClaim.Status.ClaimedReplicas).To(Equal(int32(1)))
+
+			By("Verifying completion time is set")
+			Expect(sandboxClaim.Status.CompletionTime).NotTo(BeNil())
+
+			By("Verifying at least one sandbox is claimed by the claim")
+			claimedSandboxes, err := listClaimedSandboxes(ctx, sandboxClaim)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(claimedSandboxes).To(HaveLen(1))
 		})
 	})
 

@@ -847,9 +847,9 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 				Spec: agentsv1alpha1.SandboxClaimSpec{
 					TemplateName: "test-template",
 					InplaceUpdate: &agentsv1alpha1.SandboxClaimInplaceUpdateOptions{
-						Image:   "redis:7.0",
-						Timeout: &timeoutDuration,
+						Image: "redis:7.0",
 					},
+					WaitReadyTimeout: &timeoutDuration,
 				},
 			},
 			sandboxSet: &agentsv1alpha1.SandboxSet{
@@ -889,9 +889,9 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 					},
 					ShutdownTime: &shutdownTime,
 					InplaceUpdate: &agentsv1alpha1.SandboxClaimInplaceUpdateOptions{
-						Image:   "postgres:16",
-						Timeout: &timeoutDuration,
+						Image: "postgres:16",
 					},
+					WaitReadyTimeout: &timeoutDuration,
 				},
 			},
 			sandboxSet: &agentsv1alpha1.SandboxSet{

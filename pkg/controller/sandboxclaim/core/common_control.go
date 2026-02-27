@@ -267,9 +267,10 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 		opts.InplaceUpdate = &config.InplaceUpdateOptions{
 			Image: claim.Spec.InplaceUpdate.Image,
 		}
-		if claim.Spec.InplaceUpdate.Timeout != nil {
-			opts.WaitReadyTimeout = claim.Spec.InplaceUpdate.Timeout.Duration
-		}
+	}
+
+	if claim.Spec.WaitReadyTimeout != nil {
+		opts.WaitReadyTimeout = claim.Spec.WaitReadyTimeout.Duration
 	}
 
 	// todo support other options (like envvars, inplace update...)

@@ -189,7 +189,7 @@ func CreateSandboxPool(t *testing.T, controller *Controller, name string, availa
 	}
 	require.Eventually(t, func() bool {
 		pool, _ := controller.cache.ListSandboxesInPool(name)
-		return len(pool) == available
+		return len(pool) == available && controller.manager.GetInfra().HasTemplate(name)
 	}, time.Second, 10*time.Millisecond)
 	return func() {
 		assert.NoError(t, client.ApiV1alpha1().SandboxSets(Namespace).Delete(context.Background(), name, metav1.DeleteOptions{}))
