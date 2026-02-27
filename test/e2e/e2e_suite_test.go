@@ -67,7 +67,6 @@ func TestE2E(t *testing.T) {
 	customReporterConfig := types.NewDefaultReporterConfig()
 	customSuiteConfig := types.NewDefaultSuiteConfig()
 
-	//customSuiteConfig.FocusStrings = []string{"HardwareFaultHelper - Enabled"}
 	customReporterConfig.Verbose = true
 
 	RunSpecs(t, "e2e suite", customSuiteConfig, customReporterConfig)

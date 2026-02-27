@@ -90,12 +90,6 @@ spec:
                   image:
                     description: Image specifies the new image to update to
                     type: string
-                  timeout:
-                    default: 15s
-                    description: |-
-                      Timeout specifies the maximum duration for waiting inplace update operation. Default: 15s
-                      Format: duration string (e.g., "3h", "200s", "15m")
-                    type: string
                 required:
                 - image
                 type: object
@@ -137,6 +131,13 @@ spec:
                   TTLAfterCompleted specifies the time to live after the claim reaches Completed phase
                   After this duration, the SandboxClaim will be automatically deleted.
                   Note: Only the SandboxClaim resource will be deleted; the claimed sandboxes will NOT be deleted
+                type: string
+              waitReadyTimeout:
+                default: 30s
+                description: |-
+                  WaitReadyTimeout specifies the maximum duration for waiting claimed sandbox ready. Default: 30s.
+                  A waiting happens when an inplace update happens, a new sandbox created, etc.
+                  Format: duration string (e.g., "3h", "200s", "15m")
                 type: string
             required:
             - templateName
