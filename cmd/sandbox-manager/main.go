@@ -6,6 +6,10 @@ import (
 	"net/http"         // Added for pprof server
 	_ "net/http/pprof" // Added to register pprof handlers
 
+	"os"
+	"strconv"
+	"time"
+
 	"github.com/google/uuid"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/utils"
@@ -18,6 +22,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/servers/e2b"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
+	"github.com/openkruise/agents/pkg/servers/mcp"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 )
 
@@ -123,6 +128,22 @@ func main() {
 		klog.Fatalf("--kube-client-burst must be greater than 0")
 	}
 
+	// MCP Server configuration
+	mcpEnabled := os.Getenv("MCP_SERVER_ENABLED") == "true"
+	mcpPort := 8082
+	if v, err := strconv.Atoi(os.Getenv("MCP_SERVER_PORT")); err == nil {
+		mcpPort = v
+	}
+	mcpSandboxTTL := 300
+	if v, err := strconv.Atoi(os.Getenv("MCP_SANDBOX_TTL")); err == nil {
+		mcpSandboxTTL = v
+	}
+	mcpSessionSyncPort := 7790
+	if v, err := strconv.Atoi(os.Getenv("MCP_SESSION_SYNC_PORT")); err == nil {
+		mcpSessionSyncPort = v
+	}
+	// =========== End Env =============
+
 	// Initialize Kubernetes client and config
 	clientSet, err := clients.NewClientSetWithOptions(float32(kubeClientQPS), kubeClientBurst)
 	if err != nil {
@@ -135,11 +156,53 @@ func main() {
 		klog.Fatalf("Failed to initialize sandbox controller: %v", err)
 	}
 
-	// Start HTTP Server
+	// Create MCP Server before Run() to register SessionEventHandler before Informer starts
+	var mcpServer *mcp.MCPServer
+	if mcpEnabled {
+		klog.Info("MCP Server enabled, creating...")
+		mcpConfig := mcp.DefaultServerConfig()
+		mcpConfig.Port = mcpPort
+		mcpConfig.SandboxTTL = time.Second * time.Duration(mcpSandboxTTL)
+		mcpConfig.SessionSyncPort = mcpSessionSyncPort
+
+		mcpServer = mcp.NewMCPServer(
+			mcpConfig,
+			sandboxController.GetManager(),
+			sandboxController.GetKeys(),
+		)
+		klog.Info("MCP Server created, SessionEventHandler registered")
+	}
+
+	// Start HTTP Server (this starts Informer)
 	sandboxCtx, err := sandboxController.Run(sysNs, peerSelector)
 	if err != nil {
 		klog.Fatalf("Failed to start sandbox controller: %v", err)
 	}
+
+	// Start MCP Server HTTP service
+	if mcpServer != nil {
+		// Initialize MCP SessionManager peers from sandbox-manager discovery results
+		peerIPs := sandboxController.GetManager().ListPeers()
+		if len(peerIPs) > 0 {
+			klog.InfoS("Initializing MCP SessionManager peers from sandbox-manager", "peers", peerIPs)
+			mcpServer.InitPeers(peerIPs)
+		}
+
+		if err := mcpServer.Run(sandboxCtx); err != nil {
+			klog.Fatalf("Failed to run MCP server: %v", err)
+		}
+		klog.InfoS("MCP server started successfully", "port", mcpPort, "sandboxTTL", time.Second*time.Duration(mcpSandboxTTL))
+	}
+
 	<-sandboxCtx.Done()
+
+	// Stop MCP Server if running
+	if mcpServer != nil {
+		klog.Info("Stopping MCP server...")
+		if err := mcpServer.Stop(sandboxCtx); err != nil {
+			klog.ErrorS(err, "Failed to stop MCP server gracefully")
+		}
+	}
+
 	klog.Info("Sandbox controller stopped")
 }

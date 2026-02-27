@@ -49,6 +49,12 @@ func (s *Sandbox) GetAccessToken() string {
 	return token
 }
 
+// RunCommandWithRuntime executes a command in the sandbox and returns the result
+// This is a public wrapper for MCP server and other external callers
+func (s *Sandbox) RunCommandWithRuntime(ctx context.Context, processConfig *process.ProcessConfig, timeout time.Duration) (RunCommandResult, error) {
+	return s.runCommandWithRuntime(ctx, processConfig, timeout)
+}
+
 // runCommandWithRuntime is a solution to run command inside the sandbox.
 func (s *Sandbox) runCommandWithRuntime(ctx context.Context, processConfig *process.ProcessConfig, timeout time.Duration) (RunCommandResult, error) {
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(s.Sandbox)).V(consts.DebugLogLevel)
