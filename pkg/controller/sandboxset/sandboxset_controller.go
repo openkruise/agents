@@ -21,6 +21,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"math"
 	"reflect"
 	"time"
 
@@ -30,6 +31,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
+	intstrutil "k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -128,8 +130,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	scaleUpSatisfied, dirtyScaleUp, scaleUpTimeoutAfter := scaleExpectationSatisfied(ctx, scaleUpExpectation, controllerKey)
 	scaleDownSatisfied, _, scaleDownTimeoutAfter := scaleExpectationSatisfied(ctx, scaleDownExpectation, controllerKey)
 	requeueAfter = min(scaleUpTimeoutAfter, scaleDownTimeoutAfter)
-	actualReplicas := saveStatusFromGroup(ctx, newStatus, groups, dirtyScaleUp)
 
+	calculateSandboxSetStatusFromGroup(ctx, newStatus, groups, dirtyScaleUp)
 	// Set selector in status for scale subresource
 	if newStatus.Selector == "" {
 		selector, err := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{
@@ -146,11 +148,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 
 	var allErrors error
-
 	// Step 1: perform scale
 	start := time.Now()
-	delta := int(sbs.Spec.Replicas - actualReplicas)
-	log.Info("performing scale", "expect", sbs.Spec.Replicas, "actual", actualReplicas)
+	delta := calculateScaleDelta(sbs, newStatus)
+	log.Info("performing scale", "expect", sbs.Spec.Replicas, "actual", newStatus.Replicas,
+		"available", newStatus.AvailableReplicas, "delta", delta)
 	if delta > 0 {
 		err = r.scaleUp(ctx, delta, sbs, newStatus.UpdateRevision)
 	} else if delta < 0 {
@@ -226,6 +228,37 @@ func (r *Reconciler) scaleDown(ctx context.Context, count int, sbs *agentsv1alph
 	log.Info("scale down finished", "success", successes, "fails", len(toDelete)-successes)
 	return err
 
+}
+
+// calculateScaleDelta calculates the delta for scaling, considering MaxUnavailable limit.
+// Returns positive value for scale up, negative for scale down, 0 for no scaling needed.
+func calculateScaleDelta(sbs *agentsv1alpha1.SandboxSet, newStatus *agentsv1alpha1.SandboxSetStatus) int {
+	delta := int(sbs.Spec.Replicas - newStatus.Replicas)
+	// scale down
+	if delta <= 0 {
+		return delta
+	}
+
+	// apply maxUnavailable limit only for scale up
+	scaleMaxUnavailable := math.MaxInt
+	if sbs.Spec.ScaleStrategy.MaxUnavailable != nil {
+		scaleMaxUnavailable, _ = intstrutil.GetScaledValueFromIntOrPercent(
+			intstrutil.ValueOrDefault(sbs.Spec.ScaleStrategy.MaxUnavailable, intstrutil.FromInt32(math.MaxInt32)),
+			int(sbs.Spec.Replicas),
+			true)
+		// subtract sandboxes that are currently being creating
+		scaleMaxUnavailable -= int(newStatus.Replicas - newStatus.AvailableReplicas)
+	}
+	// ignore negative values
+	if scaleMaxUnavailable < 0 {
+		scaleMaxUnavailable = 0
+	}
+	// delta cannot exceed scaleMaxUnavailable
+	if delta > scaleMaxUnavailable {
+		delta = scaleMaxUnavailable
+	}
+
+	return delta
 }
 
 func (r *Reconciler) createSandbox(ctx context.Context, sbs *agentsv1alpha1.SandboxSet, revision string) (*agentsv1alpha1.Sandbox, error) {

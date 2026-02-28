@@ -3,6 +3,7 @@ package validating
 import (
 	"context"
 	"fmt"
+	"math"
 	"net/http"
 	"strings"
 
@@ -10,6 +11,7 @@ import (
 	webhookutils "github.com/openkruise/agents/pkg/webhook/utils"
 	"k8s.io/apimachinery/pkg/api/validation"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	intstrutil "k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/kubernetes/pkg/apis/core"
 	corev1 "k8s.io/kubernetes/pkg/apis/core/v1"
@@ -84,6 +86,11 @@ func validateSandboxSetSpec(spec agentsv1alpha1.SandboxSetSpec, fldPath *field.P
 	if spec.EmbeddedSandboxTemplate.Template != nil {
 		errList = append(errList, validateLabelsAndAnnotations(spec.Template.ObjectMeta, fldPath.Child("template"))...)
 		errList = append(errList, validateSandboxSetPodTemplateSpec(spec, fldPath)...)
+	}
+
+	if _, err := intstrutil.GetScaledValueFromIntOrPercent(
+		intstrutil.ValueOrDefault(spec.ScaleStrategy.MaxUnavailable, intstrutil.FromInt32(math.MaxInt32)), int(spec.Replicas), true); err != nil {
+		errList = append(errList, field.Invalid(fldPath.Child("scaleStrategy.maxUnavailable"), spec.ScaleStrategy.MaxUnavailable, "maxUnavailable is invalid"))
 	}
 
 	return errList

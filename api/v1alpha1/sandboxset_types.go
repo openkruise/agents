@@ -18,6 +18,7 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 const (
@@ -57,6 +58,19 @@ type SandboxSetSpec struct {
 	PersistentContents []string `json:"persistentContents,omitempty"`
 
 	EmbeddedSandboxTemplate `json:",inline"`
+
+	// ScaleStrategy indicates the ScaleStrategy that will be employed to
+	// create and delete Sandboxes in the SandboxSet.
+	ScaleStrategy SandboxSetScaleStrategy `json:"scaleStrategy,omitempty"`
+}
+
+// SandboxSetScaleStrategy defines strategies for sandboxes scale.
+type SandboxSetScaleStrategy struct {
+	// The maximum number of sandboxes that can be unavailable for scaled sandboxes.
+	// This field can control the changes rate of replicas for SandboxSet so as to minimize the impact for users' service.
+	// The scale will fail if the number of unavailable sandboxes were greater than this MaxUnavailable at scaling up.
+	// MaxUnavailable works only when scaling up.
+	MaxUnavailable *intstr.IntOrString `json:"maxUnavailable,omitempty"`
 }
 
 // SandboxSetStatus defines the observed state of SandboxSet.
