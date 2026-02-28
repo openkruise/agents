@@ -66,6 +66,22 @@ spec:
                   available and creating ones.
                 format: int32
                 type: integer
+              scaleStrategy:
+                description: |-
+                  ScaleStrategy indicates the ScaleStrategy that will be employed to
+                  create and delete Sandboxes in the SandboxSet.
+                properties:
+                  maxUnavailable:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: |-
+                      The maximum number of sandboxes that can be unavailable for scaled sandboxes.
+                      This field can control the changes rate of replicas for SandboxSet so as to minimize the impact for users' service.
+                      The scale will fail if the number of unavailable sandboxes were greater than this MaxUnavailable at scaling up.
+                      MaxUnavailable works only when scaling up.
+                    x-kubernetes-int-or-string: true
+                type: object
               template:
                 description: |-
                   Template describes the pods that will be created.

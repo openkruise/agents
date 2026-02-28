@@ -44,13 +44,12 @@ func (r *Reconciler) initNewStatus(ss *agentsv1alpha1.SandboxSet) (*agentsv1alph
 	return newStatus, nil
 }
 
-func saveStatusFromGroup(ctx context.Context, newStatus *agentsv1alpha1.SandboxSetStatus, groups GroupedSandboxes, dirtyScaleUp map[expectations.ScaleAction][]string) (actualReplicas int32) {
+func calculateSandboxSetStatusFromGroup(ctx context.Context, newStatus *agentsv1alpha1.SandboxSetStatus, groups GroupedSandboxes, dirtyScaleUp map[expectations.ScaleAction][]string) {
 	log := logf.FromContext(ctx)
 	newStatus.AvailableReplicas = int32(len(groups.Available))
 	newStatus.Replicas = int32(len(groups.Creating)) + int32(len(groups.Available)) + int32(len(dirtyScaleUp[expectations.Create]))
 	log.Info("new status calculated", "replicas", newStatus.Replicas, "available", newStatus.AvailableReplicas,
 		"creating", len(groups.Creating), "dirtyCreating", len(dirtyScaleUp[expectations.Create]))
-	return newStatus.Replicas
 }
 
 /* Just Reserved for SandboxAutoScaler

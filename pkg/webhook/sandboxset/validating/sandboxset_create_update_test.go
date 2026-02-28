@@ -12,6 +12,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -249,7 +250,7 @@ func TestSandboxSetValidatingHandler_Handle(t *testing.T) {
 				Spec: v1alpha1.SandboxSetSpec{
 					Replicas: 3,
 					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
-						TemplateRef: &v1alpha1.SandboxTemplateRef {
+						TemplateRef: &v1alpha1.SandboxTemplateRef{
 							Name: "test-template",
 						},
 						Template: &corev1.PodTemplateSpec{
@@ -265,6 +266,206 @@ func TestSandboxSetValidatingHandler_Handle(t *testing.T) {
 			expectAllow:  false,
 			expectError:  true,
 			errorMessage: "templateRef and podtemplate is mutual exclusive",
+		},
+		{
+			name: "Valid MaxUnavailable - integer value",
+			sandboxSet: &v1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sbs",
+					Namespace: "default",
+				},
+				Spec: v1alpha1.SandboxSetSpec{
+					Replicas: 10,
+					ScaleStrategy: v1alpha1.SandboxSetScaleStrategy{
+						MaxUnavailable: &intstr.IntOrString{Type: intstr.Int, IntVal: 3},
+					},
+					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+						TemplateRef: &v1alpha1.SandboxTemplateRef{
+							Name: "test-template",
+						},
+					},
+				},
+			},
+			expectAllow: true,
+			expectError: false,
+		},
+		{
+			name: "Valid MaxUnavailable - percentage value 50%",
+			sandboxSet: &v1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sbs",
+					Namespace: "default",
+				},
+				Spec: v1alpha1.SandboxSetSpec{
+					Replicas: 10,
+					ScaleStrategy: v1alpha1.SandboxSetScaleStrategy{
+						MaxUnavailable: &intstr.IntOrString{Type: intstr.String, StrVal: "50%"},
+					},
+					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+						TemplateRef: &v1alpha1.SandboxTemplateRef{
+							Name: "test-template",
+						},
+					},
+				},
+			},
+			expectAllow: true,
+			expectError: false,
+		},
+		{
+			name: "Valid MaxUnavailable - 0 value",
+			sandboxSet: &v1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sbs",
+					Namespace: "default",
+				},
+				Spec: v1alpha1.SandboxSetSpec{
+					Replicas: 10,
+					ScaleStrategy: v1alpha1.SandboxSetScaleStrategy{
+						MaxUnavailable: &intstr.IntOrString{Type: intstr.Int, IntVal: 0},
+					},
+					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+						TemplateRef: &v1alpha1.SandboxTemplateRef{
+							Name: "test-template",
+						},
+					},
+				},
+			},
+			expectAllow: true,
+			expectError: false,
+		},
+		{
+			name: "Valid MaxUnavailable - 100% value",
+			sandboxSet: &v1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sbs",
+					Namespace: "default",
+				},
+				Spec: v1alpha1.SandboxSetSpec{
+					Replicas: 10,
+					ScaleStrategy: v1alpha1.SandboxSetScaleStrategy{
+						MaxUnavailable: &intstr.IntOrString{Type: intstr.String, StrVal: "100%"},
+					},
+					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+						TemplateRef: &v1alpha1.SandboxTemplateRef{
+							Name: "test-template",
+						},
+					},
+				},
+			},
+			expectAllow: true,
+			expectError: false,
+		},
+		{
+			name: "Invalid MaxUnavailable - negative integer",
+			sandboxSet: &v1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sbs",
+					Namespace: "default",
+				},
+				Spec: v1alpha1.SandboxSetSpec{
+					Replicas: 10,
+					ScaleStrategy: v1alpha1.SandboxSetScaleStrategy{
+						MaxUnavailable: &intstr.IntOrString{Type: intstr.Int, IntVal: -5},
+					},
+					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+						TemplateRef: &v1alpha1.SandboxTemplateRef{
+							Name: "test-template",
+						},
+					},
+				},
+			},
+			expectAllow: true, // GetScaledValueFromIntOrPercent accepts negative integers (treats as 0)
+			expectError: false,
+		},
+		{
+			name: "Invalid MaxUnavailable - negative percentage",
+			sandboxSet: &v1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sbs",
+					Namespace: "default",
+				},
+				Spec: v1alpha1.SandboxSetSpec{
+					Replicas: 10,
+					ScaleStrategy: v1alpha1.SandboxSetScaleStrategy{
+						MaxUnavailable: &intstr.IntOrString{Type: intstr.String, StrVal: "-10%"},
+					},
+					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+						TemplateRef: &v1alpha1.SandboxTemplateRef{
+							Name: "test-template",
+						},
+					},
+				},
+			},
+			expectAllow: true, // GetScaledValueFromIntOrPercent accepts negative percentages (treats as 0)
+			expectError: false,
+		},
+		{
+			name: "Invalid MaxUnavailable - exceeds 100%",
+			sandboxSet: &v1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sbs",
+					Namespace: "default",
+				},
+				Spec: v1alpha1.SandboxSetSpec{
+					Replicas: 10,
+					ScaleStrategy: v1alpha1.SandboxSetScaleStrategy{
+						MaxUnavailable: &intstr.IntOrString{Type: intstr.String, StrVal: "150%"},
+					},
+					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+						TemplateRef: &v1alpha1.SandboxTemplateRef{
+							Name: "test-template",
+						},
+					},
+				},
+			},
+			expectAllow: true, // GetScaledValueFromIntOrPercent accepts values > 100%
+			expectError: false,
+		},
+		{
+			name: "Invalid MaxUnavailable - invalid format (not a percentage)",
+			sandboxSet: &v1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sbs",
+					Namespace: "default",
+				},
+				Spec: v1alpha1.SandboxSetSpec{
+					Replicas: 10,
+					ScaleStrategy: v1alpha1.SandboxSetScaleStrategy{
+						MaxUnavailable: &intstr.IntOrString{Type: intstr.String, StrVal: "abc"},
+					},
+					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+						TemplateRef: &v1alpha1.SandboxTemplateRef{
+							Name: "test-template",
+						},
+					},
+				},
+			},
+			expectAllow:  false,
+			expectError:  true,
+			errorMessage: "maxUnavailable is invalid",
+		},
+		{
+			name: "Invalid MaxUnavailable - invalid percentage format",
+			sandboxSet: &v1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sbs",
+					Namespace: "default",
+				},
+				Spec: v1alpha1.SandboxSetSpec{
+					Replicas: 10,
+					ScaleStrategy: v1alpha1.SandboxSetScaleStrategy{
+						MaxUnavailable: &intstr.IntOrString{Type: intstr.String, StrVal: "50.5%"},
+					},
+					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+						TemplateRef: &v1alpha1.SandboxTemplateRef{
+							Name: "test-template",
+						},
+					},
+				},
+			},
+			expectAllow:  false,
+			expectError:  true,
+			errorMessage: "maxUnavailable is invalid",
 		},
 	}
 
