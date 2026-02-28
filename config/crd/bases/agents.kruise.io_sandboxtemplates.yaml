@@ -47,16 +47,10 @@ spec:
                   Template describes the pods that will be created.
                   Template is mutual exclusive with TemplateRef
                 x-kubernetes-preserve-unknown-fields: true
-                x-kubernetes-validations:
-                - message: Value is immutable
-                  rule: self == oldSelf
               volumeClaimTemplates:
                 description: VolumeClaimTemplates is a list of PVC templates to create
                   for this Sandbox.
                 x-kubernetes-preserve-unknown-fields: true
-                x-kubernetes-validations:
-                - message: Value is immutable
-                  rule: self == oldSelf
             type: object
         required:
         - spec
