@@ -8,6 +8,9 @@ const (
 
 	// default sandbox deploy namespace
 	DefaultSandboxDeployNamespace = "sandbox-system"
+
+	PodConditionContainersPaused  = "ContainersPaused"
+	PodConditionContainersResumed = "ContainersResumed"
 )
 
 const (
