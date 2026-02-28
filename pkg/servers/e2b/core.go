@@ -151,3 +151,13 @@ func (sc *Controller) Run(sysNs, peerSelector string) (context.Context, error) {
 	}
 	return ctx, nil
 }
+
+// GetManager returns the sandbox manager
+func (sc *Controller) GetManager() *sandbox_manager.SandboxManager {
+	return sc.manager
+}
+
+// GetKeys returns the key storage
+func (sc *Controller) GetKeys() *keys.SecretKeyStorage {
+	return sc.keys
+}

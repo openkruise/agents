@@ -6,6 +6,8 @@ import (
 	"net/http"         // Added for pprof server
 	_ "net/http/pprof" // Added to register pprof handlers
 
+	"time"
+
 	"github.com/google/uuid"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/utils"
@@ -18,6 +20,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/servers/e2b"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
+	"github.com/openkruise/agents/pkg/servers/mcp"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 )
 
@@ -40,6 +43,12 @@ func main() {
 	var kubeClientQPS float64
 	var kubeClientBurst int
 
+	// Define variables for MCP server configuration
+	var mcpEnabled bool
+	var mcpPort int
+	var mcpSandboxTTL int
+	var mcpSessionSyncPort int
+
 	utilfeature.DefaultMutableFeatureGate.AddFlag(pflag.CommandLine)
 
 	// Register the new pprof flags
@@ -59,6 +68,12 @@ func main() {
 	pflag.IntVar(&extProcMaxConcurrency, "ext-proc-max-concurrency", consts.DefaultExtProcConcurrency, "Maximum concurrency for external processor (0 uses default)")
 	pflag.Float64Var(&kubeClientQPS, "kube-client-qps", 500, "QPS for Kubernetes client")
 	pflag.IntVar(&kubeClientBurst, "kube-client-burst", 1000, "Burst for Kubernetes client")
+
+	// Register MCP server configuration flags
+	pflag.BoolVar(&mcpEnabled, "mcp-enabled", false, "Enable MCP server")
+	pflag.IntVar(&mcpPort, "mcp-port", 8082, "MCP server port")
+	pflag.IntVar(&mcpSandboxTTL, "mcp-sandbox-ttl", 300, "MCP sandbox TTL in seconds")
+	pflag.IntVar(&mcpSessionSyncPort, "mcp-session-sync-port", 7790, "MCP session sync port")
 
 	opts := zap.Options{
 		Development: false,
@@ -123,6 +138,19 @@ func main() {
 		klog.Fatalf("--kube-client-burst must be greater than 0")
 	}
 
+	// Validate MCP server configuration
+	if mcpPort <= 0 || mcpPort > 65535 {
+		klog.Fatalf("--mcp-port must be between 1 and 65535")
+	}
+
+	if mcpSandboxTTL <= 0 {
+		klog.Fatalf("--mcp-sandbox-ttl must be greater than 0")
+	}
+
+	if mcpSessionSyncPort <= 0 || mcpSessionSyncPort > 65535 {
+		klog.Fatalf("--mcp-session-sync-port must be between 1 and 65535")
+	}
+
 	// Initialize Kubernetes client and config
 	clientSet, err := clients.NewClientSetWithOptions(float32(kubeClientQPS), kubeClientBurst)
 	if err != nil {
@@ -135,11 +163,53 @@ func main() {
 		klog.Fatalf("Failed to initialize sandbox controller: %v", err)
 	}
 
-	// Start HTTP Server
+	// Create MCP Server before Run() to register SessionEventHandler before Informer starts
+	var mcpServer *mcp.MCPServer
+	if mcpEnabled {
+		klog.Info("MCP Server enabled, creating...")
+		mcpConfig := mcp.DefaultServerConfig()
+		mcpConfig.Port = mcpPort
+		mcpConfig.SandboxTTL = time.Second * time.Duration(mcpSandboxTTL)
+		mcpConfig.SessionSyncPort = mcpSessionSyncPort
+
+		mcpServer = mcp.NewMCPServer(
+			mcpConfig,
+			sandboxController.GetManager(),
+			sandboxController.GetKeys(),
+		)
+		klog.Info("MCP Server created, SessionEventHandler registered")
+	}
+
+	// Start HTTP Server (this starts Informer)
 	sandboxCtx, err := sandboxController.Run(sysNs, peerSelector)
 	if err != nil {
 		klog.Fatalf("Failed to start sandbox controller: %v", err)
 	}
+
+	// Start MCP Server HTTP service
+	if mcpServer != nil {
+		// Initialize MCP SessionManager peers from sandbox-manager discovery results
+		peerIPs := sandboxController.GetManager().ListPeers()
+		if len(peerIPs) > 0 {
+			klog.InfoS("Initializing MCP SessionManager peers from sandbox-manager", "peers", peerIPs)
+			mcpServer.InitPeers(peerIPs)
+		}
+
+		if err := mcpServer.Run(sandboxCtx); err != nil {
+			klog.Fatalf("Failed to run MCP server: %v", err)
+		}
+		klog.InfoS("MCP server started successfully", "port", mcpPort, "sandboxTTL", time.Second*time.Duration(mcpSandboxTTL))
+	}
+
 	<-sandboxCtx.Done()
+
+	// Stop MCP Server if running
+	if mcpServer != nil {
+		klog.Info("Stopping MCP server...")
+		if err := mcpServer.Stop(sandboxCtx); err != nil {
+			klog.ErrorS(err, "Failed to stop MCP server gracefully")
+		}
+	}
+
 	klog.Info("Sandbox controller stopped")
 }

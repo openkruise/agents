@@ -28,6 +28,13 @@ type PauseOptions struct {
 	Timeout *TimeoutOptions
 }
 
+// SandboxEventHandler defines the interface for handling sandbox lifecycle events
+type SandboxEventHandler interface {
+	OnSandboxAdd(sessionID, sandboxID, userID, accessToken, state string)
+	OnSandboxDelete(sessionID string)
+	OnSandboxUpdate(sessionID, sandboxID, userID, accessToken, state string)
+}
+
 type Infrastructure interface {
 	Run(ctx context.Context) error // Starts the infrastructure
 	Stop()                         // Stops the infrastructure
@@ -37,6 +44,7 @@ type Infrastructure interface {
 	SelectSandboxes(user string, limit int, filter func(sandbox Sandbox) bool) ([]Sandbox, error) // Select Sandboxes based on the options provided
 	GetClaimedSandbox(ctx context.Context, sandboxID string) (Sandbox, error)                     // Get a Sandbox interface by its ID
 	ClaimSandbox(ctx context.Context, opts ClaimSandboxOptions) (Sandbox, ClaimMetrics, error)
+	SetSandboxEventHandler(handler SandboxEventHandler)
 }
 
 type Sandbox interface {
