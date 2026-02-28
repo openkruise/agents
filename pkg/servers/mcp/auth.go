@@ -37,9 +37,11 @@ type Auth struct {
 }
 
 func NewAuth(keys *keys.SecretKeyStorage) *Auth {
-	return &Auth{
-		keys: keys,
+	a := &Auth{}
+	if keys != nil {
+		a.keys = keys
 	}
+	return a
 }
 
 // ValidateAPIKey validates the API key and returns user information

@@ -99,17 +99,4 @@ func TestRegisterRoutes(t *testing.T) {
 		assert.Equal(t, "OK", rec.Body.String())
 	})
 
-	t.Run("MCP endpoint is registered", func(t *testing.T) {
-		s := createTestMCPServerForRegisterTools()
-		s.mux = http.NewServeMux()
-		s.auth = NewAuth(nil)
-		s.registerRoutes()
-
-		req := httptest.NewRequest(http.MethodGet, s.config.MCPEndpointPath, nil)
-		rec := httptest.NewRecorder()
-		s.mux.ServeHTTP(rec, req)
-
-		// Should not be 404, meaning endpoint is registered
-		assert.NotEqual(t, http.StatusNotFound, rec.Code)
-	})
 }

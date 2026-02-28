@@ -32,27 +32,25 @@ MCP Server provides a standardized protocol interface for AI agents to execute c
 
 ## Enabling MCP Server
 
-MCP Server is disabled by default. To enable it, set the following environment variables in sandbox-manager:
+MCP Server is disabled by default. To enable it, configure the following flags in sandbox-manager:
 
-| Environment Variable   | Description                              | Default Value |
-|------------------------|------------------------------------------|---------------|
-| `MCP_SERVER_ENABLED`   | Enable MCP Server                        | `false`       |
-| `MCP_SERVER_PORT`      | Port for MCP HTTP endpoint               | `8082`        |
-| `MCP_SANDBOX_TTL`      | Sandbox TTL in seconds                   | `300`         |
-| `MCP_SESSION_SYNC_PORT`| Port for session peer synchronization    | `7790`        |
+| Flag                      | Description                              | Default Value |
+|---------------------------|------------------------------------------|---------------|
+| `--mcp-enabled`           | Enable MCP Server                        | `false`       |
+| `--mcp-port`              | Port for MCP HTTP endpoint               | `8082`        |
+| `--mcp-sandbox-ttl`       | Sandbox TTL in seconds                   | `300`         |
+| `--mcp-session-sync-port` | Port for session peer synchronization    | `7790`        |
 
 ### Configuration Example
 
-1. Add environment variables to sandbox-manager Deployment:
+1. Add flags to sandbox-manager Deployment args:
 
 ```yaml
-env:
-  - name: MCP_SERVER_ENABLED
-    value: "true"
-  - name: MCP_SERVER_PORT
-    value: "8082"
-  - name: MCP_SANDBOX_TTL
-    value: "300"
+args:
+  - --mcp-enabled=true
+  - --mcp-port=8082
+  - --mcp-sandbox-ttl=300
+  - --mcp-session-sync-port=7790
 ```
 
 2. Add container port to sandbox-manager Deployment:
@@ -81,6 +79,27 @@ MCP Server uses HTTP header authentication, sharing the same API key system with
 - **Value**: Same API key used for E2B API (`E2B_API_KEY`)
 
 If `E2B_ENABLE_AUTH` is set to `false`, authentication is disabled and anonymous access is allowed.
+
+## Session Configuration Headers
+
+MCP Server supports optional HTTP headers for per-request session configuration:
+
+| Header                 | Description                                      | Default Value                  |
+|------------------------|--------------------------------------------------|--------------------------------|
+| `X-Template`           | Sandbox template name (SandboxSet name)          | Server default                 |
+| `X-Sandbox-TTL`        | Sandbox TTL in seconds                           | `--mcp-sandbox-ttl` value      |
+| `X-Execution-Timeout`  | Code/command execution timeout in seconds        | 60                             |
+
+### Usage Example
+
+```python
+headers = {
+    "X-API-KEY": "<your-api-key>",
+    "X-Template": "code-interpreter",      # Use specific SandboxSet
+    "X-Sandbox-TTL": "600",                 # 10 minutes TTL
+    "X-Execution-Timeout": "120"            # 2 minutes timeout
+}
+```
 
 ## Endpoint
 
@@ -201,7 +220,7 @@ MCP Server automatically manages sandbox lifecycle:
 
 - **Session Binding**: Each MCP session is bound to a dedicated sandbox
 - **Auto-Provisioning**: Sandbox is claimed from SandboxSet pool on first tool call
-- **TTL Management**: Sandbox is automatically released after `MCP_SANDBOX_TTL` idle time
+- **TTL Management**: Sandbox is automatically released after `--mcp-sandbox-ttl` idle time
 - **Peer Sync**: Sessions are synchronized across sandbox-manager replicas
 
 ## Comparison with E2B API

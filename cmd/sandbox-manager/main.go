@@ -6,8 +6,6 @@ import (
 	"net/http"         // Added for pprof server
 	_ "net/http/pprof" // Added to register pprof handlers
 
-	"os"
-	"strconv"
 	"time"
 
 	"github.com/google/uuid"
@@ -45,6 +43,12 @@ func main() {
 	var kubeClientQPS float64
 	var kubeClientBurst int
 
+	// Define variables for MCP server configuration
+	var mcpEnabled bool
+	var mcpPort int
+	var mcpSandboxTTL int
+	var mcpSessionSyncPort int
+
 	utilfeature.DefaultMutableFeatureGate.AddFlag(pflag.CommandLine)
 
 	// Register the new pprof flags
@@ -64,6 +68,12 @@ func main() {
 	pflag.IntVar(&extProcMaxConcurrency, "ext-proc-max-concurrency", consts.DefaultExtProcConcurrency, "Maximum concurrency for external processor (0 uses default)")
 	pflag.Float64Var(&kubeClientQPS, "kube-client-qps", 500, "QPS for Kubernetes client")
 	pflag.IntVar(&kubeClientBurst, "kube-client-burst", 1000, "Burst for Kubernetes client")
+
+	// Register MCP server configuration flags
+	pflag.BoolVar(&mcpEnabled, "mcp-enabled", false, "Enable MCP server")
+	pflag.IntVar(&mcpPort, "mcp-port", 8082, "MCP server port")
+	pflag.IntVar(&mcpSandboxTTL, "mcp-sandbox-ttl", 300, "MCP sandbox TTL in seconds")
+	pflag.IntVar(&mcpSessionSyncPort, "mcp-session-sync-port", 7790, "MCP session sync port")
 
 	opts := zap.Options{
 		Development: false,
@@ -128,21 +138,18 @@ func main() {
 		klog.Fatalf("--kube-client-burst must be greater than 0")
 	}
 
-	// MCP Server configuration
-	mcpEnabled := os.Getenv("MCP_SERVER_ENABLED") == "true"
-	mcpPort := 8082
-	if v, err := strconv.Atoi(os.Getenv("MCP_SERVER_PORT")); err == nil {
-		mcpPort = v
+	// Validate MCP server configuration
+	if mcpPort <= 0 || mcpPort > 65535 {
+		klog.Fatalf("--mcp-port must be between 1 and 65535")
 	}
-	mcpSandboxTTL := 300
-	if v, err := strconv.Atoi(os.Getenv("MCP_SANDBOX_TTL")); err == nil {
-		mcpSandboxTTL = v
+
+	if mcpSandboxTTL <= 0 {
+		klog.Fatalf("--mcp-sandbox-ttl must be greater than 0")
 	}
-	mcpSessionSyncPort := 7790
-	if v, err := strconv.Atoi(os.Getenv("MCP_SESSION_SYNC_PORT")); err == nil {
-		mcpSessionSyncPort = v
+
+	if mcpSessionSyncPort <= 0 || mcpSessionSyncPort > 65535 {
+		klog.Fatalf("--mcp-session-sync-port must be between 1 and 65535")
 	}
-	// =========== End Env =============
 
 	// Initialize Kubernetes client and config
 	clientSet, err := clients.NewClientSetWithOptions(float32(kubeClientQPS), kubeClientBurst)
