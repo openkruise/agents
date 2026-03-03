@@ -22,8 +22,11 @@ import (
 	"flag"
 	"fmt"
 	"reflect"
+	"strconv"
+	"sync"
 	"time"
 
+	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -49,22 +52,35 @@ import (
 )
 
 func init() {
-	flag.IntVar(&concurrentReconciles, "sandbox-workers", concurrentReconciles, "Max concurrent workers for Sandbox controller.")
+	flag.IntVar(&concurrentReconciles, "sandbox-workers", concurrentReconciles, "Max concurrent reconciles for Sandbox controller.")
+	flag.IntVar(&highCreatingThreshold, "high-creating-threshold", highCreatingThreshold, "Max number of high-priority sandboxes being created before rate limiting normal sandboxes.")
+	flag.IntVar(&sandboxCreatingTimeout, "sandbox-creating-timeout", sandboxCreatingTimeout, "Timeout in seconds for a high-priority sandbox to be considered stuck in creating state.")
 }
 
 var (
-	concurrentReconciles  = 500
-	sandboxControllerKind = agentsv1alpha1.GroupVersion.WithKind("Sandbox")
+	concurrentReconciles   = 500
+	sandboxControllerKind  = agentsv1alpha1.GroupVersion.WithKind("Sandbox")
+	highCreatingThreshold  = 100
+	sandboxCreatingTimeout = 60
+
+	AddSandboxTrackAction    = "add"
+	DeleteSandboxTrackAction = "delete"
 )
+
+type SandboxTrack struct {
+	Namespace string
+	Name      string
+}
 
 func Add(mgr manager.Manager) error {
 	if !utilfeature.DefaultFeatureGate.Enabled(features.SandboxGate) || !discovery.DiscoverGVK(sandboxControllerKind) {
 		return nil
 	}
 	err := (&SandboxReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		controls: core.NewSandboxControl(mgr.GetClient(), mgr.GetEventRecorderFor("sandbox")),
+		Client:              mgr.GetClient(),
+		Scheme:              mgr.GetScheme(),
+		controls:            core.NewSandboxControl(mgr.GetClient(), mgr.GetEventRecorderFor("sandbox")),
+		highCreatingSandbox: map[string]*SandboxTrack{},
 	}).SetupWithManager(mgr)
 	if err != nil {
 		return err
@@ -78,6 +94,10 @@ type SandboxReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
 	controls map[string]core.SandboxControl
+
+	mu                       sync.RWMutex
+	highCreatingSandbox      map[string]*SandboxTrack // key: "namespace/name"
+	highCreatingSandboxCount int
 }
 
 // +kubebuilder:rbac:groups=agents.kruise.io,resources=sandboxes,verbs=get;list;watch;create;update;patch;delete
@@ -88,10 +108,10 @@ type SandboxReconciler struct {
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;update;patch
 // +kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 
-func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (crl ctrl.Result, err error) {
 	// fetch pod
 	pod := &corev1.Pod{}
-	err := r.Get(ctx, req.NamespacedName, pod)
+	err = r.Get(ctx, req.NamespacedName, pod)
 	if client.IgnoreNotFound(err) != nil {
 		return reconcile.Result{}, err
 	} else if errors.IsNotFound(err) {
@@ -138,6 +158,23 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 		klog.InfoS("ResourceVersionExpectations unsatisfied overtime for Sandbox, wait for cache event timeout", "timeout", unsatisfiedDuration)
 		core.ResourceVersionExpectations.Delete(box)
+	}
+
+	defer func() {
+		if !utilfeature.DefaultFeatureGate.Enabled(features.SandboxCreatePodRateLimitGate) ||
+			!isHighPrioritySandbox(ctx, box) {
+			return
+		}
+
+		// At this point, the sandbox status may have changed, so we need to process it
+		if inCreatingTrack := r.updateHighCreatingSandbox(box); inCreatingTrack {
+			requeueDuration := box.CreationTimestamp.Time.Add(time.Duration(sandboxCreatingTimeout) * time.Second).Sub(time.Now())
+			crl = ctrl.Result{RequeueAfter: requeueDuration}
+		}
+	}()
+
+	if requeueAfter, shouldReturn := r.handlerSandboxCreatePodRateLimit(ctx, pod, box, logger); shouldReturn {
+		return ctrl.Result{RequeueAfter: requeueAfter}, nil
 	}
 
 	newStatus := box.Status.DeepCopy()
@@ -224,6 +261,32 @@ func isSandboxCompletedPhase(phase agentsv1alpha1.SandboxPhase) bool {
 	return phase == agentsv1alpha1.SandboxFailed || phase == agentsv1alpha1.SandboxSucceeded
 }
 
+// handlerSandboxCreatePodRateLimit applies rate limiting for normal sandboxes when high-priority sandboxes are being created.
+// Returns (requeueAfter, true) if rate limiting is applied and reconciliation should stop.
+func (r *SandboxReconciler) handlerSandboxCreatePodRateLimit(ctx context.Context, pod *corev1.Pod, box *agentsv1alpha1.Sandbox, logger logr.Logger) (time.Duration, bool) {
+	if !utilfeature.DefaultFeatureGate.Enabled(features.SandboxCreatePodRateLimitGate) {
+		return 0, false
+	}
+
+	// Process the scenario where sandbox enters for the first time
+	if isHighPrioritySandbox(ctx, box) {
+		_ = r.updateHighCreatingSandbox(box)
+		// Only rate-limit normal sandbox Pod creation
+		return 0, false
+	}
+
+	if (box.Status.Phase == "" || box.Status.Phase == agentsv1alpha1.SandboxPending) && pod == nil {
+		count := r.getHighCreatingSandboxCount()
+		if count > highCreatingThreshold {
+			logger.Info("high creating sandbox count exceed threshold, and wait",
+				"current creating count", count, "highCreatingThreshold", highCreatingThreshold)
+			return time.Second * 3, true
+		}
+	}
+
+	return 0, false
+}
+
 func (r *SandboxReconciler) addSandboxFinalizerAndHash(ctx context.Context, box *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) {
 	logger := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
 	if !box.DeletionTimestamp.IsZero() || controllerutil.ContainsFinalizer(box, utils.SandboxFinalizer) {
@@ -262,6 +325,7 @@ func (r *SandboxReconciler) updateSandboxStatus(ctx context.Context, newStatus a
 	}
 	core.ResourceVersionExpectations.Expect(rcvObject)
 	logger.Info("update sandbox status success", "status", utils.DumpJson(newStatus))
+	box.Status = newStatus
 	return nil
 }
 
@@ -404,4 +468,86 @@ func (r *SandboxReconciler) ensureVolumeClaimTemplates(ctx context.Context, box 
 	}
 
 	return nil
+}
+
+func (r *SandboxReconciler) updateHighCreatingSandbox(box *agentsv1alpha1.Sandbox) bool {
+	isCreating := isCreatingSandbox(box)
+	key := fmt.Sprintf("%s/%s", box.Namespace, box.Name)
+	var isCreatingTimeout bool
+	if isCreating {
+		isCreatingTimeout = metav1.Now().Sub(box.CreationTimestamp.Time) > (time.Duration(sandboxCreatingTimeout) * time.Second)
+	}
+
+	action := AddSandboxTrackAction
+	if !isCreating || isCreatingTimeout {
+		action = DeleteSandboxTrackAction
+	}
+
+	r.mu.RLock()
+	_, inCreatingTrack := r.highCreatingSandbox[key]
+	r.mu.RUnlock()
+
+	switch action {
+	case AddSandboxTrackAction:
+		if inCreatingTrack {
+			return true
+		}
+		r.mu.Lock()
+		track := SandboxTrack{
+			Namespace: box.Namespace,
+			Name:      box.Name,
+		}
+		r.highCreatingSandbox[key] = &track
+		r.highCreatingSandboxCount++
+		inCreatingTrack = true
+		r.mu.Unlock()
+		// delete
+	default:
+		if !inCreatingTrack {
+			return false
+		}
+		r.mu.Lock()
+		delete(r.highCreatingSandbox, key)
+		r.highCreatingSandboxCount--
+		inCreatingTrack = false
+		r.mu.Unlock()
+	}
+	return inCreatingTrack
+}
+
+func (r *SandboxReconciler) getHighCreatingSandboxCount() int {
+	r.mu.RLock()
+	count := r.highCreatingSandboxCount
+	r.mu.RUnlock()
+	return count
+}
+
+func isHighPrioritySandbox(ctx context.Context, box *agentsv1alpha1.Sandbox) bool {
+	logger := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
+	value, ok := box.Annotations[agentsv1alpha1.SandboxAnnotationPriority]
+	if !ok || value == "" {
+		return false
+	}
+
+	priority, err := strconv.Atoi(value)
+	if err != nil {
+		logger.Error(err, "parse annotations failed", agentsv1alpha1.SandboxAnnotationPriority, value)
+		return false
+	}
+	return priority > 0
+}
+
+func isCreatingSandbox(box *agentsv1alpha1.Sandbox) bool {
+	if !box.DeletionTimestamp.IsZero() {
+		return false
+	}
+	if box.Status.Phase == agentsv1alpha1.SandboxPaused || box.Status.Phase == agentsv1alpha1.SandboxResuming ||
+		box.Status.Phase == agentsv1alpha1.SandboxSucceeded || box.Status.Phase == agentsv1alpha1.SandboxFailed {
+		return false
+	}
+	cond := utils.GetSandboxCondition(&box.Status, string(agentsv1alpha1.SandboxConditionReady))
+	if box.Status.Phase == agentsv1alpha1.SandboxRunning && cond != nil && cond.Status == metav1.ConditionTrue {
+		return false
+	}
+	return true
 }
