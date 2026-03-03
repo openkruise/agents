@@ -32,12 +32,16 @@ const (
 
 	// SandboxClaimGate enable SandboxClaim-controller to claim sandboxes from SandboxSet pools.
 	SandboxClaimGate featuregate.Feature = "SandboxClaim"
+
+	// SandboxCreatePodRateLimitGate enables rate limiting for sandbox controller creating pod.
+	SandboxCreatePodRateLimitGate featuregate.Feature = "SandboxCreatePodRateLimitGate"
 )
 
 var defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
-	SandboxGate:      {Default: true, PreRelease: featuregate.Alpha},
-	SandboxSetGate:   {Default: true, PreRelease: featuregate.Alpha},
-	SandboxClaimGate: {Default: true, PreRelease: featuregate.Alpha},
+	SandboxGate:                   {Default: true, PreRelease: featuregate.Alpha},
+	SandboxSetGate:                {Default: true, PreRelease: featuregate.Alpha},
+	SandboxClaimGate:              {Default: true, PreRelease: featuregate.Alpha},
+	SandboxCreatePodRateLimitGate: {Default: false, PreRelease: featuregate.Alpha},
 }
 
 func init() {

@@ -19,6 +19,7 @@ package core
 import (
 	"context"
 	"fmt"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -41,23 +42,28 @@ type commonControl struct {
 	client.Client
 	recorder             record.EventRecorder
 	inplaceUpdateControl *inplaceupdate.InPlaceUpdateControl
+	rateLimiter          *RateLimiter
 }
 
-func NewCommonControl(c client.Client, recorder record.EventRecorder) SandboxControl {
+func NewCommonControl(c client.Client, recorder record.EventRecorder, rl *RateLimiter) SandboxControl {
 	control := &commonControl{
 		Client:               c,
 		recorder:             recorder,
 		inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(c, inplaceupdate.DefaultGeneratePatchBodyFunc),
+		rateLimiter:          rl,
 	}
 	return control
 }
 
-func (r *commonControl) EnsureSandboxRunning(ctx context.Context, args EnsureFuncArgs) error {
+func (r *commonControl) EnsureSandboxRunning(ctx context.Context, args EnsureFuncArgs) (time.Duration, error) {
 	pod, box, newStatus := args.Pod, args.Box, args.NewStatus
 	// If the Pod does not exist, it must first be created.
 	if pod == nil {
+		if requeueAfter, shouldReturn := r.rateLimiter.getRateLimitDuration(ctx, pod, box); shouldReturn {
+			return requeueAfter, nil
+		}
 		_, err := r.createPod(ctx, box, newStatus)
-		return err
+		return 0, err
 	}
 
 	// pod status running
@@ -93,10 +99,10 @@ func (r *commonControl) EnsureSandboxRunning(ctx context.Context, args EnsureFun
 			NodeName: pod.Spec.NodeName,
 			PodUID:   pod.UID,
 		}
-		return nil
+		return 0, nil
 	}
 
-	return nil
+	return 0, nil
 }
 
 func (r *commonControl) EnsureSandboxUpdated(ctx context.Context, args EnsureFuncArgs) error {

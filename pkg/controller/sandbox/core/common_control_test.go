@@ -17,10 +17,8 @@ import (
 	"context"
 	"reflect"
 	"testing"
+	"time"
 
-	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/utils"
-	"github.com/openkruise/agents/pkg/utils/inplaceupdate"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -30,6 +28,11 @@ import (
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/utils"
+	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
+	"github.com/openkruise/agents/pkg/utils/inplaceupdate"
 )
 
 func TestCommonControl_EnsureSandboxRunning(t *testing.T) {
@@ -38,10 +41,13 @@ func TestCommonControl_EnsureSandboxRunning(t *testing.T) {
 	_ = agentsv1alpha1.AddToScheme(scheme)
 
 	tests := []struct {
-		name     string
-		args     EnsureFuncArgs
-		podExist bool
-		wantErr  bool
+		name        string
+		args        EnsureFuncArgs
+		podExist    bool
+		wantErr     bool
+		wantRequeue time.Duration
+		setupRL     func(rl *RateLimiter) // optional: pre-populate rate limiter
+		featureGate bool
 	}{
 		{
 			name: "pod does not exist, should create",
@@ -125,27 +131,147 @@ func TestCommonControl_EnsureSandboxRunning(t *testing.T) {
 			podExist: true,
 			wantErr:  false,
 		},
+		{
+			name:        "feature gate enabled, threshold exceeded, normal sandbox rate-limited",
+			featureGate: true,
+			setupRL: func(rl *RateLimiter) {
+				// pre-fill track to exceed threshold
+				oldThreshold := prioritySandboxThreshold
+				prioritySandboxThreshold = 0
+				t.Cleanup(func() { prioritySandboxThreshold = oldThreshold })
+				rl.highPrioritySandboxTrack["ns/hp1"] = &SandboxTrack{Namespace: "ns", Name: "hp1"}
+			},
+			args: EnsureFuncArgs{
+				Pod: nil,
+				Box: &agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              "normal-sandbox",
+						Namespace:         "default",
+						CreationTimestamp: metav1.Now(), // within maxCreateSandboxDelay
+					},
+					Spec: agentsv1alpha1.SandboxSpec{
+						EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+							Template: &corev1.PodTemplateSpec{
+								Spec: corev1.PodSpec{
+									Containers: []corev1.Container{{Name: "c", Image: "nginx"}},
+								},
+							},
+						},
+					},
+					Status: agentsv1alpha1.SandboxStatus{
+						Phase: agentsv1alpha1.SandboxPending,
+					},
+				},
+				NewStatus: &agentsv1alpha1.SandboxStatus{},
+			},
+			podExist:    false,
+			wantErr:     false,
+			wantRequeue: 3 * time.Second,
+		},
+		{
+			name:        "feature gate enabled, high-priority sandbox bypasses rate limit",
+			featureGate: true,
+			setupRL: func(rl *RateLimiter) {
+				oldThreshold := prioritySandboxThreshold
+				prioritySandboxThreshold = 0
+				t.Cleanup(func() { prioritySandboxThreshold = oldThreshold })
+				rl.highPrioritySandboxTrack["ns/hp1"] = &SandboxTrack{Namespace: "ns", Name: "hp1"}
+			},
+			args: EnsureFuncArgs{
+				Pod: nil,
+				Box: &agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "high-sandbox",
+						Namespace: "default",
+						Annotations: map[string]string{
+							agentsv1alpha1.SandboxAnnotationPriority: "1",
+						},
+					},
+					Spec: agentsv1alpha1.SandboxSpec{
+						EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+							Template: &corev1.PodTemplateSpec{
+								Spec: corev1.PodSpec{
+									Containers: []corev1.Container{{Name: "c", Image: "nginx"}},
+								},
+							},
+						},
+					},
+				},
+				NewStatus: &agentsv1alpha1.SandboxStatus{},
+			},
+			podExist:    false,
+			wantErr:     false,
+			wantRequeue: 0,
+		},
+		{
+			name:        "feature gate disabled, no rate limiting even when threshold exceeded",
+			featureGate: false,
+			setupRL: func(rl *RateLimiter) {
+				oldThreshold := prioritySandboxThreshold
+				prioritySandboxThreshold = 0
+				t.Cleanup(func() { prioritySandboxThreshold = oldThreshold })
+				rl.highPrioritySandboxTrack["ns/hp1"] = &SandboxTrack{Namespace: "ns", Name: "hp1"}
+			},
+			args: EnsureFuncArgs{
+				Pod: nil,
+				Box: &agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "normal-sandbox",
+						Namespace: "default",
+					},
+					Spec: agentsv1alpha1.SandboxSpec{
+						EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+							Template: &corev1.PodTemplateSpec{
+								Spec: corev1.PodSpec{
+									Containers: []corev1.Container{{Name: "c", Image: "nginx"}},
+								},
+							},
+						},
+					},
+				},
+				NewStatus: &agentsv1alpha1.SandboxStatus{},
+			},
+			podExist:    false,
+			wantErr:     false,
+			wantRequeue: 0,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			client := fake.NewClientBuilder().WithScheme(scheme).Build()
-			control := &commonControl{
-				Client:               client,
-				recorder:             record.NewFakeRecorder(10),
-				inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(client, inplaceupdate.DefaultGeneratePatchBodyFunc),
+			// feature gate setup
+			if tt.featureGate {
+				_ = utilfeature.DefaultMutableFeatureGate.Set("SandboxCreatePodRateLimitGate=true")
+				t.Cleanup(func() {
+					_ = utilfeature.DefaultMutableFeatureGate.Set("SandboxCreatePodRateLimitGate=false")
+				})
 			}
 
-			err := control.EnsureSandboxRunning(context.TODO(), tt.args)
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+			rl := NewRateLimiter()
+			if tt.setupRL != nil {
+				tt.setupRL(rl)
+			}
+			control := &commonControl{
+				Client:               fakeClient,
+				recorder:             record.NewFakeRecorder(10),
+				inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
+				rateLimiter:          rl,
+			}
+
+			requeue, err := control.EnsureSandboxRunning(context.TODO(), tt.args)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("EnsureSandboxRunning() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
+			if requeue != tt.wantRequeue {
+				t.Errorf("EnsureSandboxRunning() requeue = %v, want %v", requeue, tt.wantRequeue)
+			}
 
-			// Verify that pod was created if it didn't exist
-			if !tt.podExist && tt.args.Pod == nil {
+			// Verify that pod was created if it didn't exist and not rate-limited
+			if !tt.podExist && tt.args.Pod == nil && tt.wantRequeue == 0 {
 				pod := &corev1.Pod{}
-				err := client.Get(context.TODO(), types.NamespacedName{Name: tt.args.Box.Name, Namespace: tt.args.Box.Namespace}, pod)
+				err := fakeClient.Get(context.TODO(), types.NamespacedName{Name: tt.args.Box.Name, Namespace: tt.args.Box.Namespace}, pod)
 				if err != nil {
 					t.Errorf("Expected pod to be created, but it wasn't: %v", err)
 				}

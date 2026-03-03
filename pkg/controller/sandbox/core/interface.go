@@ -18,6 +18,7 @@ package core
 
 import (
 	"context"
+	"time"
 
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
@@ -43,7 +44,7 @@ type EnsureFuncArgs struct {
 
 type SandboxControl interface {
 	// EnsureSandboxRunning handle sandbox with status phase = Pending
-	EnsureSandboxRunning(ctx context.Context, args EnsureFuncArgs) error
+	EnsureSandboxRunning(ctx context.Context, args EnsureFuncArgs) (time.Duration, error)
 
 	// EnsureSandboxUpdated handle sandbox with status phase = Running
 	EnsureSandboxUpdated(ctx context.Context, args EnsureFuncArgs) error
@@ -58,9 +59,9 @@ type SandboxControl interface {
 	EnsureSandboxTerminated(ctx context.Context, args EnsureFuncArgs) error
 }
 
-func NewSandboxControl(c client.Client, recorder record.EventRecorder) map[string]SandboxControl {
+func NewSandboxControl(c client.Client, recorder record.EventRecorder, rl *RateLimiter) map[string]SandboxControl {
 	controls := map[string]SandboxControl{}
-	controls[CommonControlName] = NewCommonControl(c, recorder)
+	controls[CommonControlName] = NewCommonControl(c, recorder, rl)
 	return controls
 }
 

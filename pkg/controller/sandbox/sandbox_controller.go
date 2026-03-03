@@ -49,7 +49,7 @@ import (
 )
 
 func init() {
-	flag.IntVar(&concurrentReconciles, "sandbox-workers", concurrentReconciles, "Max concurrent workers for Sandbox controller.")
+	flag.IntVar(&concurrentReconciles, "sandbox-workers", concurrentReconciles, "Max concurrent reconciles for Sandbox controller.")
 }
 
 var (
@@ -61,10 +61,12 @@ func Add(mgr manager.Manager) error {
 	if !utilfeature.DefaultFeatureGate.Enabled(features.SandboxGate) || !discovery.DiscoverGVK(sandboxControllerKind) {
 		return nil
 	}
+	rateLimiter := core.NewRateLimiter()
 	err := (&SandboxReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		controls: core.NewSandboxControl(mgr.GetClient(), mgr.GetEventRecorderFor("sandbox")),
+		Client:      mgr.GetClient(),
+		Scheme:      mgr.GetScheme(),
+		controls:    core.NewSandboxControl(mgr.GetClient(), mgr.GetEventRecorderFor("sandbox"), rateLimiter),
+		rateLimiter: rateLimiter,
 	}).SetupWithManager(mgr)
 	if err != nil {
 		return err
@@ -76,8 +78,9 @@ func Add(mgr manager.Manager) error {
 // SandboxReconciler reconciles a Sandbox object
 type SandboxReconciler struct {
 	client.Client
-	Scheme   *runtime.Scheme
-	controls map[string]core.SandboxControl
+	Scheme      *runtime.Scheme
+	controls    map[string]core.SandboxControl
+	rateLimiter *core.RateLimiter
 }
 
 // +kubebuilder:rbac:groups=agents.kruise.io,resources=sandboxes,verbs=get;list;watch;create;update;patch;delete
@@ -88,10 +91,10 @@ type SandboxReconciler struct {
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;update;patch
 // +kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 
-func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (crl ctrl.Result, err error) {
 	// fetch pod
 	pod := &corev1.Pod{}
-	err := r.Get(ctx, req.NamespacedName, pod)
+	err = r.Get(ctx, req.NamespacedName, pod)
 	if client.IgnoreNotFound(err) != nil {
 		return reconcile.Result{}, err
 	} else if errors.IsNotFound(err) {
@@ -139,6 +142,19 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		klog.InfoS("ResourceVersionExpectations unsatisfied overtime for Sandbox, wait for cache event timeout", "timeout", unsatisfiedDuration)
 		core.ResourceVersionExpectations.Delete(box)
 	}
+
+	defer func() {
+		if !utilfeature.DefaultFeatureGate.Enabled(features.SandboxCreatePodRateLimitGate) ||
+			!core.IsHighPrioritySandbox(ctx, box) || err != nil {
+			return
+		}
+
+		// At this point, the sandbox status may have changed, so we need to process it
+		if inCreatingTrack := r.rateLimiter.UpdateRateLimiter(box); inCreatingTrack {
+			requeueDuration := box.CreationTimestamp.Time.Add(time.Duration(core.MaxSandboxCreateDelay()) * time.Second).Sub(time.Now())
+			crl = ctrl.Result{RequeueAfter: requeueDuration}
+		}
+	}()
 
 	newStatus := box.Status.DeepCopy()
 	if box.Annotations == nil {
@@ -198,7 +214,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	switch newStatus.Phase {
 	case agentsv1alpha1.SandboxPending:
-		err = r.getControl(args.Pod).EnsureSandboxRunning(ctx, args)
+		requeueAfter, err = r.getControl(args.Pod).EnsureSandboxRunning(ctx, args)
 	case agentsv1alpha1.SandboxRunning:
 		err = r.getControl(args.Pod).EnsureSandboxUpdated(ctx, args)
 	case agentsv1alpha1.SandboxPaused:
@@ -262,6 +278,7 @@ func (r *SandboxReconciler) updateSandboxStatus(ctx context.Context, newStatus a
 	}
 	core.ResourceVersionExpectations.Expect(rcvObject)
 	logger.Info("update sandbox status success", "status", utils.DumpJson(newStatus))
+	box.Status = newStatus
 	return nil
 }
 

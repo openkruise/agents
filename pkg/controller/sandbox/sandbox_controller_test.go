@@ -18,12 +18,14 @@ package sandbox
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/controller/sandbox/core"
 	"github.com/openkruise/agents/pkg/utils"
+	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -448,7 +450,7 @@ func TestSandboxReconciler_Reconcile(t *testing.T) {
 			expectedPhase:      agentsv1alpha1.SandboxPending,
 			wantErr:            false,
 			expectRequeue:      false,
-			expectRequeueAfter: time.Minute,
+			expectRequeueAfter: 0,
 		},
 		{
 			name: "pod not found but sandbox running - should set to failed",
@@ -563,7 +565,7 @@ func TestSandboxReconciler_Reconcile(t *testing.T) {
 			pod:                nil,
 			expectedPhase:      agentsv1alpha1.SandboxPending,
 			wantErr:            false,
-			expectRequeueAfter: time.Minute,
+			expectRequeueAfter: 0,
 		},
 		{
 			name: "sandbox with annotations is nil - should create empty map",
@@ -656,6 +658,34 @@ func TestSandboxReconciler_Reconcile(t *testing.T) {
 			expectedPhase: agentsv1alpha1.SandboxSucceeded,
 			wantErr:       false,
 		},
+		{
+			name: "high priority sandbox - should trigger updateHighCreatingSandbox",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "high-priority-sandbox",
+					Namespace:  "default",
+					Finalizers: []string{utils.SandboxFinalizer},
+					Annotations: map[string]string{
+						agentsv1alpha1.SandboxAnnotationPriority: "1",
+					},
+				},
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "test", Image: "nginx"}},
+							},
+						},
+					},
+				},
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxPending,
+				},
+			},
+			pod:           nil,
+			expectedPhase: agentsv1alpha1.SandboxPending,
+			wantErr:       false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -669,10 +699,12 @@ func TestSandboxReconciler_Reconcile(t *testing.T) {
 			}
 			fakeRecorder := record.NewFakeRecorder(100)
 			client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&agentsv1alpha1.Sandbox{}).WithObjects(objects...).Build()
+			rl := core.NewRateLimiter()
 			reconciler := &SandboxReconciler{
-				Client:   client,
-				Scheme:   scheme,
-				controls: core.NewSandboxControl(client, fakeRecorder),
+				Client:      client,
+				Scheme:      scheme,
+				controls:    core.NewSandboxControl(client, fakeRecorder, rl),
+				rateLimiter: rl,
 			}
 			req := ctrl.Request{
 				NamespacedName: types.NamespacedName{
@@ -866,10 +898,12 @@ func TestSandboxReconciler_ShutdownTime(t *testing.T) {
 	_ = agentsv1alpha1.AddToScheme(scheme)
 	fakeRecorder := record.NewFakeRecorder(100)
 	client := fake.NewClientBuilder().WithScheme(scheme).Build()
+	rl := core.NewRateLimiter()
 	reconciler := &SandboxReconciler{
-		Client:   client,
-		Scheme:   scheme,
-		controls: core.NewSandboxControl(client, fakeRecorder),
+		Client:      client,
+		Scheme:      scheme,
+		controls:    core.NewSandboxControl(client, fakeRecorder, rl),
+		rateLimiter: rl,
 	}
 
 	// Create a sandbox with a shutdown time in the past
@@ -1702,13 +1736,13 @@ func TestSandboxReconciler_AddSandboxFinalizerAndHash(t *testing.T) {
 	_ = agentsv1alpha1.AddToScheme(scheme)
 
 	tests := []struct {
-		name                   string
-		sandbox                *agentsv1alpha1.Sandbox
-		expectErr              bool
-		expectFinalizerAdded   bool
-		expectHashAnnotation   bool
-		expectPatchCalled      bool
-		checkResult            func(t *testing.T, result *agentsv1alpha1.Sandbox, original *agentsv1alpha1.Sandbox)
+		name                 string
+		sandbox              *agentsv1alpha1.Sandbox
+		expectErr            bool
+		expectFinalizerAdded bool
+		expectHashAnnotation bool
+		expectPatchCalled    bool
+		checkResult          func(t *testing.T, result *agentsv1alpha1.Sandbox, original *agentsv1alpha1.Sandbox)
 	}{
 		{
 			name: "sandbox without finalizer and hash - should add both",
@@ -1967,3 +2001,324 @@ func TestSandboxReconciler_AddSandboxFinalizerAndHash(t *testing.T) {
 		})
 	}
 }
+
+func TestIsHighPrioritySandbox(t *testing.T) {
+	tests := []struct {
+		name     string
+		sandbox  *agentsv1alpha1.Sandbox
+		expected bool
+	}{
+		{
+			name: "no priority annotation - should return false",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "empty priority annotation - should return false",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+					Annotations: map[string]string{
+						agentsv1alpha1.SandboxAnnotationPriority: "",
+					},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "priority is 0 - should return false",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+					Annotations: map[string]string{
+						agentsv1alpha1.SandboxAnnotationPriority: "0",
+					},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "priority is negative - should return false",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+					Annotations: map[string]string{
+						agentsv1alpha1.SandboxAnnotationPriority: "-1",
+					},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "priority is 1 - should return true",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+					Annotations: map[string]string{
+						agentsv1alpha1.SandboxAnnotationPriority: "1",
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "priority is positive - should return true",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+					Annotations: map[string]string{
+						agentsv1alpha1.SandboxAnnotationPriority: "100",
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "invalid priority format - should return false",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+					Annotations: map[string]string{
+						agentsv1alpha1.SandboxAnnotationPriority: "abc",
+					},
+				},
+			},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := core.IsHighPrioritySandbox(context.Background(), tt.sandbox)
+			if result != tt.expected {
+				t.Errorf("isHighPrioritySandbox() = %v, want %v", result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestSandboxReconciler_Reconcile_RateLimitFeatureGate(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	now := metav1.Now()
+
+	tests := []struct {
+		name               string
+		sandbox            *agentsv1alpha1.Sandbox
+		pod                *corev1.Pod
+		setupRL            func(rl *core.RateLimiter)
+		expectRequeueAfter bool
+		wantErr            bool
+	}{
+		{
+			name: "normal pending sandbox with count exceeding threshold - should requeue",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "normal-sandbox",
+					Namespace:         "default",
+					Finalizers:        []string{utils.SandboxFinalizer},
+					CreationTimestamp: now,
+				},
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "test", Image: "nginx"}},
+							},
+						},
+					},
+				},
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxPending,
+				},
+			},
+			pod: nil,
+			setupRL: func(rl *core.RateLimiter) {
+				// exceed threshold by adding real high-priority sandboxes to track
+				for i := 0; i <= core.PrioritySandboxThreshold(); i++ {
+					hpBox := &agentsv1alpha1.Sandbox{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:              fmt.Sprintf("hp-%d", i),
+							Namespace:         "ns",
+							CreationTimestamp: metav1.Now(),
+							Annotations: map[string]string{
+								agentsv1alpha1.SandboxAnnotationPriority: "1",
+							},
+						},
+						Status: agentsv1alpha1.SandboxStatus{
+							Phase: agentsv1alpha1.SandboxPending,
+						},
+					}
+					rl.UpdateRateLimiter(hpBox)
+				}
+			},
+			expectRequeueAfter: true,
+			wantErr:            false,
+		},
+		{
+			name: "normal pending sandbox with count below threshold - should proceed",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "normal-sandbox-low",
+					Namespace:  "default",
+					Finalizers: []string{utils.SandboxFinalizer},
+				},
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "test", Image: "nginx"}},
+							},
+						},
+					},
+				},
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxPending,
+				},
+			},
+			pod:                nil,
+			expectRequeueAfter: false,
+			wantErr:            false,
+		},
+		{
+			name: "high priority pending sandbox - should add to track and defer triggers requeue",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "high-priority-sandbox",
+					Namespace:         "default",
+					Finalizers:        []string{utils.SandboxFinalizer},
+					CreationTimestamp: now,
+					Annotations: map[string]string{
+						agentsv1alpha1.SandboxAnnotationPriority: "1",
+					},
+				},
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "test", Image: "nginx"}},
+							},
+						},
+					},
+				},
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxPending,
+				},
+			},
+			pod:                nil,
+			expectRequeueAfter: true,
+			wantErr:            false,
+		},
+		{
+			name: "high priority sandbox already ready - should remove from track, defer no requeue",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "high-priority-ready",
+					Namespace:         "default",
+					Finalizers:        []string{utils.SandboxFinalizer},
+					CreationTimestamp: now,
+					Annotations: map[string]string{
+						agentsv1alpha1.SandboxAnnotationPriority: "1",
+					},
+				},
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "test", Image: "nginx"}},
+							},
+						},
+					},
+				},
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxRunning,
+					Conditions: []metav1.Condition{
+						{
+							Type:   string(agentsv1alpha1.SandboxConditionReady),
+							Status: metav1.ConditionTrue,
+						},
+					},
+				},
+			},
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "high-priority-ready",
+					Namespace: "default",
+				},
+				Status: corev1.PodStatus{Phase: corev1.PodRunning},
+			},
+			// Note: high-priority sandbox will be added to track during Reconcile,
+			// and removed automatically when it becomes Ready
+			expectRequeueAfter: false,
+			wantErr:            false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_ = utilfeature.DefaultMutableFeatureGate.Set("SandboxCreatePodRateLimitGate=true")
+			defer func() {
+				_ = utilfeature.DefaultMutableFeatureGate.Set("SandboxCreatePodRateLimitGate=false")
+			}()
+
+			core.ResourceVersionExpectations.Delete(tt.sandbox)
+			core.ScaleExpectation.DeleteExpectations(utils.GetControllerKey(tt.sandbox))
+
+			objects := []client.Object{tt.sandbox}
+			if tt.pod != nil {
+				objects = append(objects, tt.pod)
+			}
+
+			fakeRecorder := record.NewFakeRecorder(100)
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(&agentsv1alpha1.Sandbox{}).
+				WithObjects(objects...).
+				Build()
+			rl := core.NewRateLimiter()
+			if tt.setupRL != nil {
+				tt.setupRL(rl)
+			}
+			reconciler := &SandboxReconciler{
+				Client:      fakeClient,
+				Scheme:      scheme,
+				controls:    core.NewSandboxControl(fakeClient, fakeRecorder, rl),
+				rateLimiter: rl,
+			}
+
+			req := ctrl.Request{
+				NamespacedName: types.NamespacedName{
+					Name:      tt.sandbox.Name,
+					Namespace: tt.sandbox.Namespace,
+				},
+			}
+
+			result, err := reconciler.Reconcile(context.Background(), req)
+
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Reconcile() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if tt.expectRequeueAfter && result.RequeueAfter == 0 {
+				t.Errorf("expected RequeueAfter > 0, got 0")
+			}
+			if !tt.expectRequeueAfter && result.RequeueAfter > 0 {
+				t.Errorf("expected RequeueAfter == 0, got %v", result.RequeueAfter)
+			}
+		})
+	}
+}
+
