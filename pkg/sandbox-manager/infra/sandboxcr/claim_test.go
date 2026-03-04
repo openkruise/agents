@@ -9,6 +9,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
+	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	"github.com/openkruise/agents/pkg/utils/limiter"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/time/rate"
@@ -18,8 +21,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/rand"
 
-	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
-	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	testutils "github.com/openkruise/agents/test/utils"
 
@@ -349,17 +350,17 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 			infraOptions: config.SandboxManagerOptions{
 				MaxClaimWorkers: 1,
 			},
-			preProcess: func(t *testing.T, infra *Infra) {
-				infra.claimLockChannel <- struct{}{}
-			},
 			options: infra.ClaimSandboxOptions{
-				User:     user,
-				Template: existTemplate,
+				User:               user,
+				Template:           existTemplate,
+				ConcurrencyLimiter: limiter.NewConcurrencyLimiter(0),
 			},
 			expectError: "context canceled before getting a free claim worker: context deadline exceeded",
 		},
 	}
 
+	globalConcurrencyLimiter := limiter.NewConcurrencyLimiter(2)
+	globalCreateRateLimiter := rate.NewLimiter(rate.Inf, 100000)
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			tt.options.ClaimTimeout = 50 * time.Millisecond
@@ -410,6 +411,12 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 			claimCtx := t.Context()
 			if tt.claimCtx != nil {
 				claimCtx = tt.claimCtx(t.Context())
+			}
+			if tt.options.ConcurrencyLimiter == nil {
+				tt.options.ConcurrencyLimiter = globalConcurrencyLimiter
+			}
+			if tt.options.CreateRateLimiter == nil {
+				tt.options.CreateRateLimiter = globalCreateRateLimiter
 			}
 			sbx, metrics, err := testInfra.ClaimSandbox(claimCtx, tt.options)
 			if tt.expectError != "" {
@@ -634,7 +641,7 @@ func TestClaimSandboxFailed(t *testing.T) {
 			}
 			opts, err := ValidateAndInitClaimOptions(tt.options)
 			require.NoError(t, err)
-			_, _, err = TryClaimSandbox(ctx, opts, &testInfra.pickCache, testInfra.Cache, client, testInfra.claimLockChannel, testInfra.createLimiter)
+			_, _, err = TryClaimSandbox(ctx, opts, &testInfra.pickCache, testInfra.Cache, client)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.expectError)
 			_, err = client.ApiV1alpha1().Sandboxes(sbx.Namespace).Get(t.Context(), name, metav1.GetOptions{})
@@ -761,7 +768,7 @@ func TestNewSandboxFromTemplate_RateLimitExceeded(t *testing.T) {
 	utils.InitLogOutput()
 
 	// Create a rate limiter with 0 burst to ensure it's always exhausted
-	limiter := rate.NewLimiter(rate.Limit(1), 0)
+	l := rate.NewLimiter(rate.Limit(1), 0)
 
 	// Create test infrastructure
 	infraInstance, client := NewTestInfra(t)
@@ -806,7 +813,7 @@ func TestNewSandboxFromTemplate_RateLimitExceeded(t *testing.T) {
 	}
 
 	// Call the function
-	sbx, _, err := newSandboxFromSandboxSet(opts, infraInstance.Cache, infraInstance.Client.SandboxClient, limiter)
+	sbx, _, err := newSandboxFromSandboxSet(opts, infraInstance.Cache, infraInstance.Client.SandboxClient, l)
 
 	// Assertions
 	assert.Nil(t, sbx, "sandbox should be nil when rate limited")

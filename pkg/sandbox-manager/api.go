@@ -19,6 +19,8 @@ func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts infra.ClaimSandb
 		SandboxCreationResponses.WithLabelValues("failure").Inc()
 		return nil, errors.NewError(errors.ErrorNotFound, fmt.Sprintf("template %s not found", opts.Template))
 	}
+	opts.CreateRateLimiter = m.createRateLimiter
+	opts.ConcurrencyLimiter = m.claimConcurrencyLimiter
 	sandbox, metrics, err := m.infra.ClaimSandbox(ctx, opts)
 	if err != nil {
 		log.Error(err, "failed to claim sandbox", "metrics", metrics.String())
@@ -44,6 +46,7 @@ func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts infra.ClaimSandb
 
 func (m *SandboxManager) CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions) (infra.Sandbox, error) {
 	log := klog.FromContext(ctx)
+	opts.CreateLimiter = m.createRateLimiter
 	sandbox, metrics, err := m.infra.CloneSandbox(ctx, opts)
 	if err != nil {
 		log.Error(err, "failed to clone sandbox", "metrics", metrics)

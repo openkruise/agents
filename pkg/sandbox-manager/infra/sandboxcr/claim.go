@@ -75,8 +75,7 @@ func ValidateAndInitClaimOptions(opts infra.ClaimSandboxOptions) (infra.ClaimSan
 // the sandbox object should not be used anymore and needs appropriate handling.
 //
 // ValidateAndInitClaimOptions must be called before this function.
-func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCache *sync.Map, cache *Cache, client *clients.ClientSet,
-	claimLockChannel chan struct{}, createLimiter *rate.Limiter) (claimed infra.Sandbox, metrics infra.ClaimMetrics, err error) {
+func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCache *sync.Map, cache *Cache, client *clients.ClientSet) (claimed infra.Sandbox, metrics infra.ClaimMetrics, err error) {
 	ctx = logs.Extend(ctx, "tryClaimId", uuid.NewString()[:8])
 	log := klog.FromContext(ctx)
 
@@ -88,22 +87,23 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 	default:
 	}
 
-	log.Info("waiting for a free claim worker")
-	startWaiting := time.Now()
-	freeWorkerOnce := sync.OnceFunc(func() {
-		<-claimLockChannel // free the worker
-	})
-	select {
-	case <-ctx.Done():
-		err = fmt.Errorf("context canceled before getting a free claim worker: %v", ctx.Err())
-		log.Error(ctx.Err(), "failed to get a free claim worker")
-		return
-	case claimLockChannel <- struct{}{}:
+	var freeWorkerOnce func()
+	if opts.ConcurrencyLimiter != nil {
+		log.Info("waiting for a free claim worker")
+		startWaiting := time.Now()
+		freeWorkerOnce, err = opts.ConcurrencyLimiter.Wait(ctx)
+		if err != nil {
+			err = fmt.Errorf("context canceled before getting a free claim worker: %v", ctx.Err())
+			log.Error(ctx.Err(), "failed to get a free claim worker")
+			return
+		}
 		metrics.Wait = time.Since(startWaiting)
 		log.Info("got a free claim worker", "cost", metrics.Wait)
 	}
 	defer func() {
-		freeWorkerOnce()
+		if freeWorkerOnce != nil {
+			freeWorkerOnce()
+		}
 		metrics.LastError = err
 		log.Info("try claim sandbox result", "metrics", metrics.String())
 		clearFailedSandbox(ctx, claimed, err, opts.ReserveFailedSandbox)
@@ -112,7 +112,7 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 	var sbx *Sandbox
 	var lockType infra.LockType
 	pickStart := time.Now()
-	sbx, lockType, err = pickAnAvailableSandbox(ctx, opts, pickCache, cache, client.SandboxClient, createLimiter)
+	sbx, lockType, err = pickAnAvailableSandbox(ctx, opts, pickCache, cache, client.SandboxClient)
 	if err != nil {
 		log.Error(err, "failed to select available sandbox")
 		return
@@ -154,7 +154,9 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 	log = log.WithValues("sandbox", klog.KObj(sbx.Sandbox))
 	log.Info("sandbox locked", "cost", metrics.PickAndLock, "type", metrics.LockType)
 	claimed = sbx
-	freeWorkerOnce() // free worker early
+	if freeWorkerOnce != nil {
+		freeWorkerOnce() // free worker early
+	}
 
 	// Step 3: Built-in post processes. The locked sandbox must be always returned to be cleared properly.
 	if lockType == infra.LockTypeCreate || lockType == infra.LockTypeSpeculate || opts.InplaceUpdate != nil {
@@ -251,7 +253,7 @@ func getPickKey(sbx *v1alpha1.Sandbox) string {
 }
 
 func pickAnAvailableSandbox(ctx context.Context, opts infra.ClaimSandboxOptions,
-	pickCache *sync.Map, cache *Cache, client clients.SandboxClient, limiter *rate.Limiter) (*Sandbox, infra.LockType, error) {
+	pickCache *sync.Map, cache *Cache, client clients.SandboxClient) (*Sandbox, infra.LockType, error) {
 	template, cnt := opts.Template, opts.CandidateCounts
 	ctx = logs.Extend(ctx, "action", "pickAnAvailableSandbox")
 	log := klog.FromContext(ctx).WithValues("template", template).V(consts.DebugLogLevel)
@@ -262,7 +264,7 @@ func pickAnAvailableSandbox(ctx context.Context, opts infra.ClaimSandboxOptions,
 	if len(objects) == 0 {
 		if opts.CreateOnNoStock {
 			log.Info("will create a new sandbox", "reason", "NoStock")
-			return newSandboxFromSandboxSet(opts, cache, client, limiter)
+			return newSandboxFromSandboxSet(opts, cache, client, opts.CreateRateLimiter)
 		}
 		return nil, "", NoAvailableError(template, "no stock")
 	}
@@ -328,7 +330,7 @@ func pickAnAvailableSandbox(ctx context.Context, opts infra.ClaimSandboxOptions,
 	// Step 3: create new sandbox
 	if opts.CreateOnNoStock {
 		log.Info("will create a new sandbox")
-		return newSandboxFromSandboxSet(opts, cache, client, limiter)
+		return newSandboxFromSandboxSet(opts, cache, client, opts.CreateRateLimiter)
 	}
 	return nil, "", NoAvailableError(template, pickErr.Error())
 }
@@ -377,10 +379,8 @@ func pickFromCandidates(ctx context.Context, candidates []*v1alpha1.Sandbox, pic
 var FilteredAnnotationsOnCreation []string
 
 func newSandboxFromSandboxSet(opts infra.ClaimSandboxOptions, cache *Cache, client clients.SandboxClient, limiter *rate.Limiter) (*Sandbox, infra.LockType, error) {
-	if limiter != nil {
-		if !limiter.Allow() {
-			return nil, "", NoAvailableError(opts.Template, "sandbox creation is not allowed by rate limiter")
-		}
+	if limiter != nil && !limiter.Allow() {
+		return nil, "", NoAvailableError(opts.Template, "sandbox creation is not allowed by rate limiter")
 	}
 	sbs, err := cache.GetSandboxSet(opts.Template)
 	if err != nil {

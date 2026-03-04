@@ -41,6 +41,7 @@ func main() {
 	var extProcMaxConcurrency int
 	var kubeClientQPS float64
 	var kubeClientBurst int
+	var basicQPS int
 
 	utilfeature.DefaultMutableFeatureGate.AddFlag(pflag.CommandLine)
 
@@ -49,6 +50,7 @@ func main() {
 	pflag.StringVar(&pprofAddr, "pprof-addr", ":6060", "The address the pprof debug maps to.")
 
 	// Register server configuration flags
+	pflag.IntVar(&basicQPS, "basic-qps", models.DefaultBasicQPS, "Basic QPS for all APIs")
 	pflag.IntVar(&port, "port", 8080, "The port the server listens on")
 	pflag.StringVar(&e2bAdminKey, "e2b-admin-key", "", "E2B admin API key (if empty, a random UUID will be generated)")
 	pflag.BoolVar(&e2bEnableAuth, "e2b-enable-auth", true, "Enable E2B authentication")
@@ -133,7 +135,7 @@ func main() {
 		klog.Fatalf("Failed to initialize Kubernetes client: %v", err)
 	}
 
-	sandboxController := e2b.NewController(domain, e2bAdminKey, sysNs, sandboxNamespace, sandboxLabelSelector, e2bMaxTimeout, maxClaimWorkers, maxCreateQPS, uint32(extProcMaxConcurrency),
+	sandboxController := e2b.NewController(domain, e2bAdminKey, sysNs, sandboxNamespace, sandboxLabelSelector, basicQPS, e2bMaxTimeout, maxClaimWorkers, maxCreateQPS, uint32(extProcMaxConcurrency),
 		port, e2bEnableAuth, clientSet)
 	if err := sandboxController.Init(); err != nil {
 		klog.Fatalf("Failed to initialize sandbox controller: %v", err)

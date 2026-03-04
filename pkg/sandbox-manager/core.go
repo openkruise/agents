@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	"github.com/openkruise/agents/pkg/utils/limiter"
+	"golang.org/x/time/rate"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog/v2"
 
@@ -22,12 +24,13 @@ const (
 )
 
 type SandboxManager struct {
-	Namespace string
-
 	client *clients.ClientSet
 
 	infra infra.Infrastructure
 	proxy *proxy.Server
+
+	claimConcurrencyLimiter *limiter.ConcurrencyLimiter
+	createRateLimiter       *rate.Limiter
 }
 
 // NewSandboxManager creates a new SandboxManager instance.
@@ -37,6 +40,9 @@ func NewSandboxManager(client *clients.ClientSet, adapter proxy.RequestAdapter, 
 	m := &SandboxManager{
 		client: client,
 		proxy:  proxy.NewServer(adapter, opts),
+		// limiters
+		claimConcurrencyLimiter: limiter.NewConcurrencyLimiter(opts.MaxClaimWorkers),
+		createRateLimiter:       rate.NewLimiter(rate.Limit(opts.MaxCreateQPS), opts.MaxCreateQPS),
 	}
 	var err error
 	m.infra, err = sandboxcr.NewInfra(client, m.proxy, opts)

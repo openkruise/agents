@@ -24,22 +24,20 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"golang.org/x/time/rate"
+	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	"github.com/openkruise/agents/pkg/utils"
+	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/openkruise/agents/pkg/agent-runtime/storages"
-	"github.com/openkruise/agents/pkg/sandbox-manager/config"
-	"github.com/openkruise/agents/pkg/utils"
-	"github.com/openkruise/agents/pkg/utils/csiutils"
-	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
-
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/agent-runtime/storages"
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
+	"github.com/openkruise/agents/pkg/utils/csiutils"
 )
 
 type commonControl struct {
@@ -204,12 +202,10 @@ func (c *commonControl) claimSandboxes(ctx context.Context, claim *agentsv1alpha
 		return 0, fmt.Errorf("failed to build claim options: %w", err)
 	}
 
-	claimLockChannel := make(chan struct{}, batchSize) // set to max batch size, not controlled
-	limiter := rate.NewLimiter(rate.Inf, batchSize)
 	// Attempt to claim sandboxes concurrently using DoItSlowly
 	claimedCount, err := utils.DoItSlowly(batchSize, InitialClaimBatchSize, func() error {
 		// Pass nil for rand so sandboxcr uses global rand (concurrent-safe).
-		sbx, metrics, claimErr := sandboxcr.TryClaimSandbox(ctx, opts, &c.pickCache, c.cache, c.sandboxClient, claimLockChannel, limiter)
+		sbx, metrics, claimErr := sandboxcr.TryClaimSandbox(ctx, opts, &c.pickCache, c.cache, c.sandboxClient)
 		if claimErr != nil {
 			log.Error(claimErr, "Failed to claim sandbox")
 			return claimErr
