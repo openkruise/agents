@@ -61,6 +61,7 @@ type Sandbox interface {
 	GetRuntimeURL() string
 	GetAccessToken() string
 }
+
 type CacheProvider interface {
 	GetPersistentVolume(name string) (*corev1.PersistentVolume, error)
 	GetSecret(namespace, name string) (*corev1.Secret, error)
