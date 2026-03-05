@@ -24,9 +24,11 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	intstrutil "k8s.io/apimachinery/pkg/util/intstr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 )
@@ -325,6 +327,104 @@ var _ = Describe("SandboxSet", func() {
 				}, sandbox)
 				return sandbox.Status.AvailableReplicas
 			}, time.Minute*3, time.Second*2).Should(Equal(int32(8)))
+		})
+	})
+
+	Context("VolumeClaimTemplates tests", func() {
+		It("should create sandbox with volumeClaimTemplates and volumeMounts correctly", func() {
+			By("Creating a SandboxSet with volumeClaimTemplates")
+			volumeName := "data-vol"
+			sandbox.Spec.VolumeClaimTemplates = []corev1.PersistentVolumeClaim{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: volumeName,
+					},
+					Spec: corev1.PersistentVolumeClaimSpec{
+						AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+						Resources: corev1.VolumeResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceStorage: resource.MustParse("1Gi"),
+							},
+						},
+					},
+				},
+			}
+			sandbox.Spec.Template.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{
+				{
+					Name:      volumeName,
+					MountPath: "/usr/share/nginx/html",
+				},
+			}
+
+			Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
+
+			By("Verifying the sandboxset is created")
+			Eventually(func() error {
+				return k8sClient.Get(ctx, types.NamespacedName{
+					Name:      sandbox.Name,
+					Namespace: sandbox.Namespace,
+				}, sandbox)
+			}, time.Minute*10, time.Millisecond*500).Should(Succeed())
+
+			By("Verifying the sandboxset AvailableReplicas")
+			Eventually(func() int32 {
+				_ = k8sClient.Get(ctx, types.NamespacedName{
+					Name:      sandbox.Name,
+					Namespace: sandbox.Namespace,
+				}, sandbox)
+				return sandbox.Status.AvailableReplicas
+			}, time.Second*30, time.Millisecond*500).Should(Equal(int32(2)))
+
+			By("Verifying that PVCs are created for each sandbox")
+			sandboxList := &agentsv1alpha1.SandboxList{}
+			Expect(k8sClient.List(ctx, sandboxList, client.InNamespace(sandbox.Namespace),
+				client.MatchingLabels{agentsv1alpha1.LabelSandboxPool: sandbox.Name})).To(Succeed())
+
+			Expect(len(sandboxList.Items)).To(Equal(2))
+
+			for _, sbx := range sandboxList.Items {
+				pvcName := fmt.Sprintf("%s-%s", volumeName, sbx.Name)
+				pvc := &corev1.PersistentVolumeClaim{}
+				Expect(k8sClient.Get(ctx, types.NamespacedName{
+					Name:      pvcName,
+					Namespace: sandbox.Namespace,
+				}, pvc)).To(Succeed())
+
+				// Verify PVC spec
+				Expect(pvc.Spec.AccessModes).To(ContainElement(corev1.ReadWriteOnce))
+				Expect(pvc.Spec.Resources.Requests[corev1.ResourceStorage]).To(Equal(resource.MustParse("1Gi")))
+			}
+
+			By("Verifying that Pods have correct volumes and volumeMounts")
+			for _, sbx := range sandboxList.Items {
+				pod := &corev1.Pod{}
+				Expect(k8sClient.Get(ctx, types.NamespacedName{
+					Name:      sbx.Name,
+					Namespace: sandbox.Namespace,
+				}, pod)).To(Succeed())
+
+				// Verify volume exists
+				foundVolume := false
+				for _, vol := range pod.Spec.Volumes {
+					if vol.Name == volumeName {
+						foundVolume = true
+						Expect(vol.VolumeSource.PersistentVolumeClaim).NotTo(BeNil())
+						Expect(vol.VolumeSource.PersistentVolumeClaim.ClaimName).To(Equal(fmt.Sprintf("%s-%s", volumeName, sbx.Name)))
+						break
+					}
+				}
+				Expect(foundVolume).To(BeTrue(), "Volume %s not found in pod %s", volumeName, sbx.Name)
+
+				// Verify volumeMount exists
+				foundMount := false
+				for _, mount := range pod.Spec.Containers[0].VolumeMounts {
+					if mount.Name == volumeName && mount.MountPath == "/usr/share/nginx/html" {
+						foundMount = true
+						break
+					}
+				}
+				Expect(foundMount).To(BeTrue(), "VolumeMount %s not found in pod %s", volumeName, sbx.Name)
+			}
 		})
 	})
 
