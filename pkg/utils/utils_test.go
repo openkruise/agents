@@ -15,8 +15,8 @@ package utils
 
 import (
 	"context"
-	"sync"
 	"fmt"
+	"sync"
 	"testing"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"

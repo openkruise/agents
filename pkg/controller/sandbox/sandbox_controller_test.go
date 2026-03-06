@@ -1702,13 +1702,13 @@ func TestSandboxReconciler_AddSandboxFinalizerAndHash(t *testing.T) {
 	_ = agentsv1alpha1.AddToScheme(scheme)
 
 	tests := []struct {
-		name                   string
-		sandbox                *agentsv1alpha1.Sandbox
-		expectErr              bool
-		expectFinalizerAdded   bool
-		expectHashAnnotation   bool
-		expectPatchCalled      bool
-		checkResult            func(t *testing.T, result *agentsv1alpha1.Sandbox, original *agentsv1alpha1.Sandbox)
+		name                 string
+		sandbox              *agentsv1alpha1.Sandbox
+		expectErr            bool
+		expectFinalizerAdded bool
+		expectHashAnnotation bool
+		expectPatchCalled    bool
+		checkResult          func(t *testing.T, result *agentsv1alpha1.Sandbox, original *agentsv1alpha1.Sandbox)
 	}{
 		{
 			name: "sandbox without finalizer and hash - should add both",

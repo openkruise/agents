@@ -44,6 +44,9 @@ type Infra struct {
 	templates sync.Map
 
 	reconcileRouteStopCh chan struct{}
+
+	// SandboxEventHandler handles sandbox lifecycle events
+	SandboxEventHandler infra.SandboxEventHandler
 }
 
 func NewInfra(client *clients.ClientSet, k8sClient kubernetes.Interface, proxy *proxy.Server, opts config.SandboxManagerOptions) (*Infra, error) {
@@ -90,6 +93,14 @@ func NewInfra(client *clients.ClientSet, k8sClient kubernetes.Interface, proxy *
 	go instance.startRouteReconciler(RouteReconcileInterval)
 
 	return instance, nil
+}
+
+// SetSandboxEventHandler sets the sandbox event handler for handling sandbox lifecycle events
+func (i *Infra) SetSandboxEventHandler(handler infra.SandboxEventHandler) {
+	if i.SandboxEventHandler != nil {
+		panic("SandboxEventHandler already set, cannot register twice")
+	}
+	i.SandboxEventHandler = handler
 }
 
 func (i *Infra) Run(ctx context.Context) error {
@@ -212,6 +223,22 @@ func (i *Infra) onSandboxAdd(obj any) {
 	route := AsSandbox(sbx, i.Cache, i.Client.SandboxClient).GetRoute()
 	i.Proxy.SetRoute(logs.NewContext(), route)
 	managerutils.ResourceVersionExpectationObserve(sbx)
+
+	// Handle sandbox event
+	if i.SandboxEventHandler != nil {
+		annotations := sbx.GetAnnotations()
+		sessionID := annotations[v1alpha1.AnnotationMCPSessionID]
+		if sessionID != "" {
+			state, _ := stateutils.GetSandboxState(sbx)
+			i.SandboxEventHandler.OnSandboxAdd(
+				sessionID,
+				stateutils.GetSandboxID(sbx),
+				annotations[v1alpha1.AnnotationOwner],
+				annotations[v1alpha1.AnnotationRuntimeAccessToken],
+				state,
+			)
+		}
+	}
 }
 
 func (i *Infra) onSandboxDelete(obj any) {
@@ -223,6 +250,14 @@ func (i *Infra) onSandboxDelete(obj any) {
 	i.Proxy.DeleteRoute(sandboxID)
 	klog.InfoS("sandbox route deleted", "sandboxID", sandboxID)
 	managerutils.ResourceVersionExpectationDelete(sbx)
+
+	// Handle sandbox event
+	if i.SandboxEventHandler != nil {
+		sessionID := sbx.GetAnnotations()[v1alpha1.AnnotationMCPSessionID]
+		if sessionID != "" {
+			i.SandboxEventHandler.OnSandboxDelete(sessionID)
+		}
+	}
 }
 
 func (i *Infra) onSandboxUpdate(_, newObj any) {
@@ -235,6 +270,22 @@ func (i *Infra) onSandboxUpdate(_, newObj any) {
 	}
 	i.refreshRoute(AsSandbox(newSbx, i.Cache, i.Client.SandboxClient))
 	managerutils.ResourceVersionExpectationObserve(newSbx)
+
+	// Handle sandbox event
+	if i.SandboxEventHandler != nil {
+		annotations := newSbx.GetAnnotations()
+		sessionID := annotations[v1alpha1.AnnotationMCPSessionID]
+		if sessionID != "" {
+			state, _ := stateutils.GetSandboxState(newSbx)
+			i.SandboxEventHandler.OnSandboxUpdate(
+				sessionID,
+				stateutils.GetSandboxID(newSbx),
+				annotations[v1alpha1.AnnotationOwner],
+				annotations[v1alpha1.AnnotationRuntimeAccessToken],
+				state,
+			)
+		}
+	}
 }
 
 func (i *Infra) refreshRoute(sbx infra.Sandbox) {

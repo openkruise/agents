@@ -23,11 +23,11 @@ func TestSandboxTemplateValidatingHandler_Handle(t *testing.T) {
 	require.NoError(t, err)
 
 	tests := []struct {
-		name         string
-		sandboxTemplate   *v1alpha1.SandboxTemplate
-		expectAllow  bool
-		expectError  bool
-		errorMessage string
+		name            string
+		sandboxTemplate *v1alpha1.SandboxTemplate
+		expectAllow     bool
+		expectError     bool
+		errorMessage    string
 	}{
 		{
 			name: "Valid SandboxSet",

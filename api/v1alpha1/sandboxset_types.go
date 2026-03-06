@@ -34,9 +34,10 @@ const (
 	LabelSandboxClaimName = InternalPrefix + "claim-name"
 	LabelTemplateHash     = InternalPrefix + "template-hash"
 
-	AnnotationLock      = InternalPrefix + "lock"
-	AnnotationOwner     = InternalPrefix + "owner"
-	AnnotationClaimTime = InternalPrefix + "claim-timestamp"
+	AnnotationLock         = InternalPrefix + "lock"
+	AnnotationOwner        = InternalPrefix + "owner"
+	AnnotationMCPSessionID = InternalPrefix + "mcp-session-id"
+	AnnotationClaimTime    = InternalPrefix + "claim-timestamp"
 )
 
 const (
