@@ -19,6 +19,8 @@ func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts infra.ClaimSandb
 		SandboxCreationResponses.WithLabelValues("failure").Inc()
 		return nil, errors.NewError(errors.ErrorNotFound, fmt.Sprintf("template %s not found", opts.Template))
 	}
+	opts.CreateRateLimiter = m.createRateLimiter
+	opts.ConcurrencyLimiter = m.claimConcurrencyLimiter
 	sandbox, metrics, err := m.infra.ClaimSandbox(ctx, opts)
 	if err != nil {
 		log.Error(err, "failed to claim sandbox", "metrics", metrics.String())
