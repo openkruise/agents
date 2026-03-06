@@ -44,6 +44,7 @@ type NewSandboxRequestExtension struct {
 	CreateOnNoStock      bool
 	WaitReadySeconds     int
 	TimeoutSeconds       int
+	NeverTimeout         bool
 }
 
 type InplaceUpdateExtension struct {

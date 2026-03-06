@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
@@ -189,6 +190,24 @@ func TestCreateSandbox(t *testing.T) {
 				Message: "Bad extension param: invalid image [bad-@@-image]: invalid reference format",
 			},
 		},
+		{
+			name:      "never timeout",
+			available: 1,
+			userName:  "test-user",
+			request: models.NewSandboxRequest{
+				TemplateID: templateName,
+				Timeout:    300,
+				Metadata: map[string]string{
+					models.ExtensionKeyNeverTimeout: v1alpha1.True,
+				},
+			},
+			postCheck: func(t *testing.T, resp *models.Sandbox) {
+				assert.Empty(t, resp.EndAt)
+				sbx, err := controller.manager.GetClaimedSandbox(t.Context(), keys.AdminKeyID.String(), resp.SandboxID)
+				assert.NoError(t, err)
+				assert.Equal(t, infra.TimeoutOptions{}, sbx.GetTimeout())
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -237,9 +256,11 @@ func TestCreateSandbox(t *testing.T) {
 				if tt.request.Timeout != 0 {
 					timeout = tt.request.Timeout
 				}
-				endAt, err := time.Parse(time.RFC3339, sbx.EndAt)
-				assert.NoError(t, err)
-				assert.WithinDuration(t, startedAt.Add(time.Duration(timeout)*time.Second), endAt, 5*time.Second)
+				if tt.request.Metadata[models.ExtensionKeyNeverTimeout] != v1alpha1.True {
+					endAt, err := time.Parse(time.RFC3339, sbx.EndAt)
+					assert.NoError(t, err)
+					assert.WithinDuration(t, startedAt.Add(time.Duration(timeout)*time.Second), endAt, 5*time.Second)
+				}
 				assert.Equal(t, models.SandboxStateRunning, sbx.State)
 			}
 		})

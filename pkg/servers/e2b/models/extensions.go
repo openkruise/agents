@@ -23,6 +23,7 @@ const (
 	ExtensionKeySkipInitRuntime              = v1alpha1.E2BPrefix + "skip-init-runtime"
 	ExtensionKeyReserveFailedSandbox         = v1alpha1.E2BPrefix + "reserve-failed-sandbox"
 	ExtensionKeyCreateOnNoStock              = v1alpha1.E2BPrefix + "create-on-no-stock"
+	ExtensionKeyNeverTimeout                 = v1alpha1.E2BPrefix + "never-timeout"
 )
 
 // Extensions for NewSandboxRequest
@@ -50,9 +51,11 @@ func (r *NewSandboxRequest) parseCommonExtensions() error {
 	r.Extensions.SkipInitRuntime = r.Metadata[ExtensionKeySkipInitRuntime] == v1alpha1.True
 	r.Extensions.ReserveFailedSandbox = r.Metadata[ExtensionKeyReserveFailedSandbox] == v1alpha1.True
 	r.Extensions.CreateOnNoStock = r.Metadata[ExtensionKeyCreateOnNoStock] == v1alpha1.True
+	r.Extensions.NeverTimeout = r.Metadata[ExtensionKeyNeverTimeout] == v1alpha1.True
 	delete(r.Metadata, ExtensionKeySkipInitRuntime)
 	delete(r.Metadata, ExtensionKeyReserveFailedSandbox)
 	delete(r.Metadata, ExtensionKeyCreateOnNoStock)
+	delete(r.Metadata, ExtensionKeyNeverTimeout)
 	var err error
 	if r.Extensions.TimeoutSeconds, err = r.parseAndRemoveIntExtension(ExtensionKeyClaimTimeout); err != nil {
 		return err
