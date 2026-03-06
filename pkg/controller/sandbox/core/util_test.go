@@ -14,12 +14,17 @@ limitations under the License.
 package core
 
 import (
+	"context"
 	"testing"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/utils"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 func TestHashSandbox(t *testing.T) {
@@ -409,6 +414,230 @@ func TestGeneratePVCName(t *testing.T) {
 				if result != tt.expectName {
 					t.Errorf("Expected name %s, but got %s", tt.expectName, result)
 				}
+			}
+		})
+	}
+}
+
+func TestGeneratePodFromSandbox(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	tests := []struct {
+		name             string
+		sandbox          *agentsv1alpha1.Sandbox
+
+		revision         string
+		wantErr          bool
+		checkPod         func(t *testing.T, pod *corev1.Pod)
+	}{
+		{
+			name: "inline template - basic pod generation",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+				},
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{Name: "app", Image: "nginx:latest"},
+								},
+							},
+						},
+					},
+				},
+			},
+			revision: "rev-001",
+			wantErr:  false,
+			checkPod: func(t *testing.T, pod *corev1.Pod) {
+				if pod.Name != "test-sandbox" {
+					t.Errorf("pod.Name = %s, want test-sandbox", pod.Name)
+				}
+				if pod.Namespace != "default" {
+					t.Errorf("pod.Namespace = %s, want default", pod.Namespace)
+				}
+				if len(pod.OwnerReferences) != 1 {
+					t.Errorf("expected 1 owner reference, got %d", len(pod.OwnerReferences))
+				}
+				if pod.Annotations[utils.PodAnnotationCreatedBy] != utils.CreatedBySandbox {
+					t.Errorf("annotation %s = %s, want %s", utils.PodAnnotationCreatedBy, pod.Annotations[utils.PodAnnotationCreatedBy], utils.CreatedBySandbox)
+				}
+				if pod.Labels[agentsv1alpha1.PodLabelTemplateHash] != "rev-001" {
+					t.Errorf("label PodLabelTemplateHash = %s, want rev-001", pod.Labels[agentsv1alpha1.PodLabelTemplateHash])
+				}
+				if len(pod.Spec.Containers) != 1 || pod.Spec.Containers[0].Image != "nginx:latest" {
+					t.Errorf("unexpected containers: %v", pod.Spec.Containers)
+				}
+			},
+		},
+		{
+			name: "inline template - with labels and annotations from template",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "labeled-sandbox",
+					Namespace: "default",
+				},
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							ObjectMeta: metav1.ObjectMeta{
+								Labels:      map[string]string{"env": "prod"},
+								Annotations: map[string]string{"team": "platform"},
+							},
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{Name: "app", Image: "nginx:latest"},
+								},
+							},
+						},
+					},
+				},
+			},
+			revision: "rev-abc",
+			wantErr:  false,
+			checkPod: func(t *testing.T, pod *corev1.Pod) {
+				if pod.Labels["env"] != "prod" {
+					t.Errorf("label env = %s, want prod", pod.Labels["env"])
+				}
+				if pod.Labels[agentsv1alpha1.PodLabelTemplateHash] != "rev-abc" {
+					t.Errorf("label PodLabelTemplateHash = %s, want rev-abc", pod.Labels[agentsv1alpha1.PodLabelTemplateHash])
+				}
+				if pod.Annotations["team"] != "platform" {
+					t.Errorf("annotation team = %s, want platform", pod.Annotations["team"])
+				}
+				if pod.Annotations[utils.PodAnnotationCreatedBy] != utils.CreatedBySandbox {
+					t.Errorf("annotation CreatedBy missing or wrong: %s", pod.Annotations[utils.PodAnnotationCreatedBy])
+				}
+			},
+		},
+		{
+			name: "inline template - with volumeClaimTemplates",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "pvc-sandbox",
+					Namespace: "default",
+				},
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{Name: "app", Image: "nginx:latest"},
+								},
+							},
+						},
+						VolumeClaimTemplates: []corev1.PersistentVolumeClaim{
+							{
+								ObjectMeta: metav1.ObjectMeta{Name: "data"},
+								Spec: corev1.PersistentVolumeClaimSpec{
+									AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+									Resources: corev1.VolumeResourceRequirements{
+										Requests: corev1.ResourceList{
+											corev1.ResourceStorage: resource.MustParse("1Gi"),
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			revision: "rev-002",
+			wantErr:  false,
+			checkPod: func(t *testing.T, pod *corev1.Pod) {
+				if len(pod.Spec.Volumes) != 1 {
+					t.Errorf("expected 1 volume, got %d", len(pod.Spec.Volumes))
+					return
+				}
+				vol := pod.Spec.Volumes[0]
+				if vol.Name != "data" {
+					t.Errorf("volume name = %s, want data", vol.Name)
+				}
+				if vol.PersistentVolumeClaim == nil {
+					t.Errorf("expected PVC volume source, got nil")
+					return
+				}
+				if vol.PersistentVolumeClaim.ClaimName != "data-pvc-sandbox" {
+					t.Errorf("PVC ClaimName = %s, want data-pvc-sandbox", vol.PersistentVolumeClaim.ClaimName)
+				}
+				if vol.PersistentVolumeClaim.ReadOnly {
+					t.Errorf("expected PVC ReadOnly = false")
+				}
+			},
+		},
+		{
+			name: "inline template - volumeClaimTemplate with empty name returns error",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "bad-pvc-sandbox",
+					Namespace: "default",
+				},
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{Name: "app", Image: "nginx:latest"},
+								},
+							},
+						},
+						VolumeClaimTemplates: []corev1.PersistentVolumeClaim{
+							{
+								ObjectMeta: metav1.ObjectMeta{Name: ""},
+							},
+						},
+					},
+				},
+			},
+			revision: "rev-003",
+			wantErr:  true,
+		},
+
+		{
+			name: "templateRef - SandboxTemplate not found returns error",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "missing-ref-sandbox",
+					Namespace: "default",
+				},
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						TemplateRef: &agentsv1alpha1.SandboxTemplateRef{
+							Name: "nonexistent-template",
+						},
+					},
+				},
+			},
+			revision: "rev-404",
+			wantErr:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cli := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithRuntimeObjects(tt.sandbox).
+				Build()
+
+			pod, err := GeneratePodFromSandbox(context.Background(), cli, tt.sandbox, tt.revision)
+
+			if (err != nil) != tt.wantErr {
+				t.Errorf("GeneratePodFromSandbox() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if tt.wantErr {
+				return
+			}
+			if pod == nil {
+				t.Fatal("expected non-nil pod")
+			}
+			if tt.checkPod != nil {
+				tt.checkPod(t, pod)
 			}
 		})
 	}

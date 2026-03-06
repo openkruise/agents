@@ -255,58 +255,12 @@ func (r *commonControl) EnsureSandboxTerminated(ctx context.Context, args Ensure
 
 func (r *commonControl) createPod(ctx context.Context, box *agentsv1alpha1.Sandbox, newStatus *agentsv1alpha1.SandboxStatus) (*corev1.Pod, error) {
 	logger := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
-
-	podTemplate := box.Spec.Template
-	if box.Spec.TemplateRef != nil {
-		refTemplate := &agentsv1alpha1.SandboxTemplate{}
-		err := r.Get(ctx, client.ObjectKey{Namespace: box.Namespace, Name: box.Spec.TemplateRef.Name}, refTemplate)
-		if err != nil {
-			logger.Error(err, "failed to get sandbox template", "template", box.Spec.TemplateRef.Name, "sandbox", box.Name)
-			return nil, err
-		}
-		podTemplate = refTemplate.Spec.Template
+	pod, err := GeneratePodFromSandbox(ctx, r.Client, box, newStatus.UpdateRevision)
+	if err != nil {
+		return nil, err
 	}
-
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace:       box.Namespace,
-			Name:            box.Name,
-			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(box, sandboxControllerKind)},
-			Labels:          podTemplate.Labels,
-			Annotations:     podTemplate.Annotations,
-		},
-		Spec: podTemplate.Spec,
-	}
-	if pod.Annotations == nil {
-		pod.Annotations = map[string]string{}
-	}
-	pod.Annotations[utils.PodAnnotationCreatedBy] = utils.CreatedBySandbox
-	if pod.Labels == nil {
-		pod.Labels = map[string]string{}
-	}
-	// todo, when resume, create Pod based on the revision from the paused state.
-	pod.Labels[agentsv1alpha1.PodLabelTemplateHash] = newStatus.UpdateRevision
-
-	volumes := make([]corev1.Volume, 0, len(box.Spec.VolumeClaimTemplates))
-	for _, template := range box.Spec.VolumeClaimTemplates {
-		pvcName, err := GeneratePVCName(template.Name, box.Name)
-		if err != nil {
-			logger.Error(err, "failed to generate PVC name", "template", template.Name, "sandbox", box.Name)
-			return nil, err
-		}
-		volumes = append(volumes, corev1.Volume{
-			Name: template.Name,
-			VolumeSource: corev1.VolumeSource{
-				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-					ClaimName: pvcName,
-					ReadOnly:  false,
-				},
-			},
-		})
-	}
-	pod.Spec.Volumes = append(pod.Spec.Volumes, volumes...)
 	ScaleExpectation.ExpectScale(GetControllerKey(box), expectations.Create, box.Name)
-	err := r.Create(ctx, pod)
+	err = r.Create(ctx, pod)
 	if err != nil && !errors.IsAlreadyExists(err) {
 		ScaleExpectation.ObserveScale(GetControllerKey(box), expectations.Create, box.Name)
 		logger.Error(err, "create pod failed")
