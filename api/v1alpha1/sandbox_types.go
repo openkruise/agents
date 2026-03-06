@@ -28,6 +28,13 @@ const (
 
 	// PodLabelTemplateHash is pod template hash
 	PodLabelTemplateHash = "pod-template-hash"
+
+	// SandboxAnnotationPriority is the annotation key for sandbox priority.
+	// If not set, the default value is 0.
+	// Larger values indicate higher priority.
+	// Note: SandboxSet creates sandboxes with priority 0 by default.
+	// Sandbox Manager or Sandbox Claim creates high-priority sandboxes by default.
+	SandboxAnnotationPriority = "agents.kruise.io/sandbox-priority"
 )
 
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!

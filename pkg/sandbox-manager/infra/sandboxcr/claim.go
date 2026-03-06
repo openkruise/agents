@@ -357,6 +357,8 @@ func newSandboxFromTemplate(opts infra.ClaimSandboxOptions, cache *Cache, client
 		return nil, "", NoAvailableError(opts.Template, "cannot create new sandbox: "+err.Error())
 	}
 	sbx := sandboxset.NewSandboxFromSandboxSet(sbs)
+	// sandbox manager creates high-priority sandbox
+	sbx.Annotations[v1alpha1.SandboxAnnotationPriority] = "100"
 	for _, anno := range FilteredAnnotationsOnCreation {
 		delete(sbx.Annotations, anno)
 	}
