@@ -233,7 +233,7 @@ func (k *SecretKeyStorage) ListByOwner(owner uuid.UUID) []*models.TeamAPIKey {
 	var result []*models.TeamAPIKey
 	k.idxByID.Range(func(_, value any) bool {
 		apikey := value.(*models.CreatedTeamAPIKey)
-		if apikey.ID == owner || apikey.CreatedBy.ID == owner {
+		if apikey.ID == owner || (apikey.CreatedBy != nil && apikey.CreatedBy.ID == owner) {
 			result = append(result, &models.TeamAPIKey{
 				CreatedAt: apikey.CreatedAt,
 				ID:        apikey.ID,
