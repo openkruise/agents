@@ -48,7 +48,7 @@ func main() {
 	pflag.StringVar(&pprofAddr, "pprof-addr", ":6060", "The address the pprof debug maps to.")
 
 	// Register server configuration flags
-	pflag.IntVar(&basicQPS, "basic-qps", models.DefaultBasicQPS, "Basic QPS for the apis writing K8S APIServer")
+	pflag.IntVar(&basicQPS, "basic-qps", models.DefaultBasicQPS, "Basic QPS for all APIs")
 	pflag.IntVar(&port, "port", 8080, "The port the server listens on")
 	pflag.StringVar(&e2bAdminKey, "e2b-admin-key", "", "E2B admin API key (if empty, a random UUID will be generated)")
 	pflag.BoolVar(&e2bEnableAuth, "e2b-enable-auth", true, "Enable E2B authentication")
