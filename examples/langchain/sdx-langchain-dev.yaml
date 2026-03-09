@@ -1,0 +1,83 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: langchain-test-secret
+type: Opaque
+stringData:
+  DASHSCOPE_API_KEY: sk-****  # API Key
+  # update
+  DATABASE_URL: postgresql://langchain_test:langchain_test_secret@postgres:5432/langchain_test
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: langchain-test-config
+data:
+  MODEL: dashscope/qwen3.5-plus
+  HOST: "0.0.0.0"
+  PORT: "8000"
+---
+apiVersion: agents.kruise.io/v1alpha1
+kind: Sandbox
+metadata:
+  labels:
+    app: langchain-test
+  name: langchain-test
+  namespace: default
+spec:
+  template:
+    metadata:
+      labels:
+        app: langchain-test
+    spec:
+      containers:
+        - name: aegra
+          # update
+          image: your-registry/agent_app:langchain-v1
+          command: ["aegra", "serve", "--host", "0.0.0.0", "--port", "8000"]
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: langchain-test-config
+            - secretRef:
+                name: langchain-test-secret
+          env:
+            - name: POSTGRES_HOST
+              value: postgres
+            - name: POSTGRES_PORT
+              value: "5432"
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: POSTGRES_DB
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "1Gi"
+              cpu: "500m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: langchain-test
+spec:
+  selector:
+    app: langchain-test
+  ports:
+    - port: 8000
+      targetPort: 8000
+  type: ClusterIP
