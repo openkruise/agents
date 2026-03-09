@@ -248,7 +248,7 @@ func TestCache_WaitForSandboxSatisfied(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cache, _, client := NewTestCache(t, tt.systemNamespace)
-			defer cache.Stop()
+			defer cache.Stop(t.Context())
 
 			// Setup test sandbox
 			sandbox := tt.setupFunc(t, cache, client)
@@ -282,7 +282,7 @@ func TestCache_WaitForSandboxSatisfied(t *testing.T) {
 func TestCache_WaitForSandboxSatisfied_Cancel(t *testing.T) {
 	sandboxManagerUtils.InitLogOutput()
 	cache, _, client := NewTestCache(t, constantUtils.DefaultSandboxDeployNamespace)
-	defer cache.Stop()
+	defer cache.Stop(t.Context())
 	sbx := &agentsv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-sandbox-1",
@@ -382,7 +382,7 @@ func TestCache_GetPersistentVolume(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cache, k8sClient, _ := NewTestCache(t, constantUtils.DefaultSandboxDeployNamespace, true)
-			defer cache.Stop()
+			defer cache.Stop(t.Context())
 
 			if tt.setupPV != nil {
 				testPV := tt.setupPV()
@@ -431,7 +431,7 @@ func TestCache_GetPersistentVolume(t *testing.T) {
 func TestCache_GetPersistentVolume_FromSync(t *testing.T) {
 	utils.InitLogOutput()
 	cache, k8sClient, _ := NewTestCache(t, constantUtils.DefaultSandboxDeployNamespace, true)
-	defer cache.Stop()
+	defer cache.Stop(t.Context())
 
 	testPV := &corev1.PersistentVolume{
 		ObjectMeta: metav1.ObjectMeta{
@@ -468,7 +468,7 @@ func TestCache_GetSecret_FromSync(t *testing.T) {
 	sandboxManagerUtils.InitLogOutput()
 
 	cache, k8sClient, _ := NewTestCache(t, constantUtils.DefaultSandboxDeployNamespace, true)
-	defer cache.Stop()
+	defer cache.Stop(t.Context())
 
 	testSecret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{

@@ -57,7 +57,7 @@ func NewTestInfra(t *testing.T, opts ...config.SandboxManagerOptions) (*Infra, *
 		options = opts[0]
 	}
 	options = config.InitOptions(options)
-	infraInstance, err := NewInfra(clientSet, k8sfake.NewSimpleClientset(), proxy.NewServer(nil, options), options)
+	infraInstance, err := NewInfra(clientSet, k8sfake.NewSimpleClientset(), proxy.NewServer(nil, nil, options), options)
 	assert.NoError(t, err)
 	assert.NoError(t, infraInstance.Run(context.Background()))
 	return infraInstance, clientSet
@@ -669,7 +669,7 @@ func TestInfra_startRouteReconciler(t *testing.T) {
 			time.Sleep(tt.waitTime)
 
 			// Stop the reconciler
-			infraInstance.Stop()
+			infraInstance.Stop(t.Context())
 
 			// Verify orphaned routes are cleaned up (or not)
 			for _, route := range tt.orphanedRoutes {

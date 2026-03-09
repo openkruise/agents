@@ -134,11 +134,12 @@ func (sc *Controller) Run(sysNs, peerSelector string) (context.Context, error) {
 	go func() {
 		<-sc.stop
 		// Shutdown server gracefully
-		klog.InfoS("Shutting down server...")
+		shutdownCtx, shutdownCancel := context.WithTimeout(logs.NewContext("action", "shutdown"), consts.ShutdownTimeout)
+		log := klog.FromContext(shutdownCtx)
+		log.Info("Shutting down server...")
 		defer cancel()
-		sc.manager.Stop()
+		sc.manager.Stop(shutdownCtx)
 		// Shutdown HTTP server with timeout
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), consts.ShutdownTimeout)
 		defer shutdownCancel()
 		if err := sc.server.Shutdown(shutdownCtx); err != nil {
 			klog.ErrorS(err, "HTTP server forced to shutdown")
