@@ -147,7 +147,7 @@ func TestRequestSandbox(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := requestSandbox(t.Context(), tt.sandbox, "GET", "/", port, nil)
+			_, err := requestSandbox(t.Context(), tt.sandbox, "GET", "/", port, nil, nil)
 			if tt.wantErr {
 				assert.Error(t, err)
 			} else {

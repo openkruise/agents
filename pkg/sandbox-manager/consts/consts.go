@@ -15,6 +15,7 @@ const (
 	ExtProcPort               = 9002
 	DefaultExtProcConcurrency = 1000
 	RuntimePort               = 49983
+	RuntimeCodeExecPort       = 49999
 	ShutdownTimeout           = 90 * time.Second
 	RequestPeerTimeout        = 100 * time.Millisecond
 )

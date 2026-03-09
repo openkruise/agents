@@ -24,10 +24,10 @@ func TestDefaulter_Handle(t *testing.T) {
 	require.NoError(t, err)
 
 	tests := []struct {
-		name        string
-		sandboxTemplate  *v1alpha1.SandboxTemplate
-		expectAllow bool
-		expectPatch bool
+		name            string
+		sandboxTemplate *v1alpha1.SandboxTemplate
+		expectAllow     bool
+		expectPatch     bool
 	}{
 		{
 			name: "AutomountServiceAccountToken is nil, should be set to false",
@@ -139,10 +139,10 @@ func TestSandboxTemplateDefaulter_HandleUpdate(t *testing.T) {
 	require.NoError(t, err)
 
 	tests := []struct {
-		name        string
-		sandboxTemplate  *v1alpha1.SandboxTemplate
-		expectAllow bool
-		expectPatch bool
+		name            string
+		sandboxTemplate *v1alpha1.SandboxTemplate
+		expectAllow     bool
+		expectPatch     bool
 	}{
 		{
 			name: "Update with nil AutomountServiceAccountToken, should be set to false",

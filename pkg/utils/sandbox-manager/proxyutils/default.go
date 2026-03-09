@@ -33,7 +33,7 @@ func getRouteFromSandbox(s *agentsv1alpha1.Sandbox) proxy.Route {
 	}
 }
 
-func requestSandbox(ctx context.Context, s *agentsv1alpha1.Sandbox, method, path string, port int, body io.Reader) (*http.Response, error) {
+func requestSandbox(ctx context.Context, s *agentsv1alpha1.Sandbox, method, path string, port int, body io.Reader, headers http.Header) (*http.Response, error) {
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(s))
 	if s.Status.Phase != agentsv1alpha1.SandboxRunning {
 		return nil, errors.New("sandbox is not running")
@@ -42,6 +42,12 @@ func requestSandbox(ctx context.Context, s *agentsv1alpha1.Sandbox, method, path
 	r, err := http.NewRequestWithContext(ctx, method, url, body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %v", err)
+	}
+	// Set custom headers
+	for key, values := range headers {
+		for _, value := range values {
+			r.Header.Add(key, value)
+		}
 	}
 	log.Info("requesting sandbox", "url", url)
 	return ProxyRequest(r)

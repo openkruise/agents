@@ -183,8 +183,8 @@ func (s *Sandbox) GetResource() infra.SandboxResource {
 	return utils.CalculateResourceFromContainers(s.Spec.Template.Spec.Containers)
 }
 
-func (s *Sandbox) Request(ctx context.Context, method, path string, port int, body io.Reader) (*http.Response, error) {
-	return proxyutils.DefaultRequestFunc(ctx, s.Sandbox, method, path, port, body)
+func (s *Sandbox) Request(ctx context.Context, method, path string, port int, body io.Reader, headers http.Header) (*http.Response, error) {
+	return proxyutils.DefaultRequestFunc(ctx, s.Sandbox, method, path, port, body, headers)
 }
 
 func (s *Sandbox) Pause(ctx context.Context, opts infra.PauseOptions) error {

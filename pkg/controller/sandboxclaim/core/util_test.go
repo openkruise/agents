@@ -253,12 +253,12 @@ func TestCalculateClaimStatus(t *testing.T) {
 	pastTime := metav1.NewTime(now.Add(-10 * time.Second))
 
 	tests := []struct {
-		name               string
-		args               ClaimArgs
-		expectedPhase      agentsv1alpha1.SandboxClaimPhase
-		shouldRequeue      bool
-		checkCompletedSet  bool // Whether CompletionTime should be set
-		checkStartTimeSet  bool // Whether ClaimStartTime should be set
+		name              string
+		args              ClaimArgs
+		expectedPhase     agentsv1alpha1.SandboxClaimPhase
+		shouldRequeue     bool
+		checkCompletedSet bool // Whether CompletionTime should be set
+		checkStartTimeSet bool // Whether ClaimStartTime should be set
 	}{
 		{
 			name: "initialize new claim",
@@ -419,7 +419,7 @@ func TestSetClaimCondition(t *testing.T) {
 
 	t.Run("add first condition", func(t *testing.T) {
 		status := &agentsv1alpha1.SandboxClaimStatus{}
-		
+
 		condition := metav1.Condition{
 			Type:               "TestCondition",
 			Status:             metav1.ConditionTrue,
@@ -427,13 +427,13 @@ func TestSetClaimCondition(t *testing.T) {
 			Message:            "Test message",
 			LastTransitionTime: now,
 		}
-		
+
 		SetClaimCondition(status, condition)
-		
+
 		if len(status.Conditions) != 1 {
 			t.Errorf("Expected 1 condition, got %d", len(status.Conditions))
 		}
-		
+
 		if status.Conditions[0].Type != "TestCondition" {
 			t.Errorf("Expected Type TestCondition, got %v", status.Conditions[0].Type)
 		}
@@ -451,7 +451,7 @@ func TestSetClaimCondition(t *testing.T) {
 				},
 			},
 		}
-		
+
 		condition := metav1.Condition{
 			Type:               "SecondCondition",
 			Status:             metav1.ConditionFalse,
@@ -459,9 +459,9 @@ func TestSetClaimCondition(t *testing.T) {
 			Message:            "Second message",
 			LastTransitionTime: now,
 		}
-		
+
 		SetClaimCondition(status, condition)
-		
+
 		if len(status.Conditions) != 2 {
 			t.Errorf("Expected 2 conditions, got %d", len(status.Conditions))
 		}
@@ -479,7 +479,7 @@ func TestSetClaimCondition(t *testing.T) {
 				},
 			},
 		}
-		
+
 		condition := metav1.Condition{
 			Type:               "TestCondition",
 			Status:             metav1.ConditionFalse,
@@ -487,17 +487,17 @@ func TestSetClaimCondition(t *testing.T) {
 			Message:            "New message",
 			LastTransitionTime: now,
 		}
-		
+
 		SetClaimCondition(status, condition)
-		
+
 		if len(status.Conditions) != 1 {
 			t.Errorf("Expected 1 condition, got %d", len(status.Conditions))
 		}
-		
+
 		if status.Conditions[0].Status != metav1.ConditionFalse {
 			t.Errorf("Expected Status False, got %v", status.Conditions[0].Status)
 		}
-		
+
 		if status.Conditions[0].Reason != "NewReason" {
 			t.Errorf("Expected Reason NewReason, got %v", status.Conditions[0].Reason)
 		}
@@ -516,7 +516,7 @@ func TestSetClaimCondition(t *testing.T) {
 				},
 			},
 		}
-		
+
 		// Try to update with same values but different LastTransitionTime
 		condition := metav1.Condition{
 			Type:               "Ready",
@@ -525,9 +525,9 @@ func TestSetClaimCondition(t *testing.T) {
 			Reason:             "AllReady",
 			Message:            "Everything is ready",
 		}
-		
+
 		SetClaimCondition(status, condition)
-		
+
 		// LastTransitionTime should NOT change because Status/Reason/Message are the same
 		if !status.Conditions[0].LastTransitionTime.Equal(&originalTime) {
 			t.Errorf("Expected LastTransitionTime to remain %v, got %v (should not update when nothing changes)",
@@ -548,24 +548,24 @@ func TestSetClaimCondition(t *testing.T) {
 				},
 			},
 		}
-		
+
 		// Update only Reason and Message, Status stays the same
 		condition := metav1.Condition{
 			Type:               "Ready",
 			Status:             metav1.ConditionTrue, // Same Status
 			LastTransitionTime: now,
-			Reason:             "NewReason", // Different Reason
+			Reason:             "NewReason",   // Different Reason
 			Message:            "New message", // Different Message
 		}
-		
+
 		SetClaimCondition(status, condition)
-		
+
 		// LastTransitionTime should NOT change because Status didn't change
 		if !status.Conditions[0].LastTransitionTime.Equal(&originalTime) {
 			t.Errorf("Expected LastTransitionTime to remain %v when Status doesn't change, got %v",
 				originalTime, status.Conditions[0].LastTransitionTime)
 		}
-		
+
 		// But Reason and Message should be updated
 		if status.Conditions[0].Reason != "NewReason" {
 			t.Errorf("Expected Reason to be updated to NewReason, got %v", status.Conditions[0].Reason)
@@ -588,7 +588,7 @@ func TestSetClaimCondition(t *testing.T) {
 				},
 			},
 		}
-		
+
 		// Change Status
 		condition := metav1.Condition{
 			Type:               "Ready",
@@ -597,15 +597,15 @@ func TestSetClaimCondition(t *testing.T) {
 			Reason:             "NotReady",
 			Message:            "Something went wrong",
 		}
-		
+
 		SetClaimCondition(status, condition)
-		
+
 		// LastTransitionTime SHOULD change because Status changed
 		if !status.Conditions[0].LastTransitionTime.Equal(&now) {
 			t.Errorf("Expected LastTransitionTime to be updated to %v when Status changes, got %v",
 				now, status.Conditions[0].LastTransitionTime)
 		}
-		
+
 		// All fields should be updated
 		if status.Conditions[0].Status != metav1.ConditionFalse {
 			t.Errorf("Expected Status to be False, got %v", status.Conditions[0].Status)
@@ -621,7 +621,7 @@ func TestSetClaimCondition(t *testing.T) {
 
 func TestGetClaimCondition(t *testing.T) {
 	now := metav1.Now()
-	
+
 	t.Run("find existing condition", func(t *testing.T) {
 		status := &agentsv1alpha1.SandboxClaimStatus{
 			Conditions: []metav1.Condition{
@@ -641,7 +641,7 @@ func TestGetClaimCondition(t *testing.T) {
 				},
 			},
 		}
-		
+
 		cond := GetClaimCondition(status, "Ready")
 		if cond == nil {
 			t.Error("Expected to find Ready condition, got nil")
@@ -650,7 +650,7 @@ func TestGetClaimCondition(t *testing.T) {
 			t.Errorf("Expected Reason AllReady, got %v", cond.Reason)
 		}
 	})
-	
+
 	t.Run("condition not found", func(t *testing.T) {
 		status := &agentsv1alpha1.SandboxClaimStatus{
 			Conditions: []metav1.Condition{
@@ -663,16 +663,16 @@ func TestGetClaimCondition(t *testing.T) {
 				},
 			},
 		}
-		
+
 		cond := GetClaimCondition(status, "NotExist")
 		if cond != nil {
 			t.Errorf("Expected nil for non-existent condition, got %v", cond)
 		}
 	})
-	
+
 	t.Run("empty conditions", func(t *testing.T) {
 		status := &agentsv1alpha1.SandboxClaimStatus{}
-		
+
 		cond := GetClaimCondition(status, "Ready")
 		if cond != nil {
 			t.Errorf("Expected nil for empty conditions, got %v", cond)
