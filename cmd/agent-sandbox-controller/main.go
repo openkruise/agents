@@ -115,6 +115,7 @@ func main() {
 	opts := zap.Options{
 		Development: true,
 	}
+	opts.BindFlags(flag.CommandLine)
 	utilfeature.DefaultMutableFeatureGate.AddFlag(pflag.CommandLine)
 	klog.InitFlags(nil)
 	pflag.CommandLine.AddGoFlagSet(flag.CommandLine)
