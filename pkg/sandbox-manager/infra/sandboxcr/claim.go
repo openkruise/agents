@@ -69,6 +69,9 @@ func ValidateAndInitClaimOptions(opts infra.ClaimSandboxOptions) (infra.ClaimSan
 // The returned sandbox is valid only when nil error is returned. Once a non-nil sandbox is returned,
 // the sandbox object should not be used anymore and needs appropriate handling.
 //
+// The returned claimed sandbox may not be the latest version for the informer is always updating.
+// Use InplaceRefresh to get the latest state.
+//
 // ValidateAndInitClaimOptions must be called before this function.
 func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCache *sync.Map, cache *Cache, client *clients.ClientSet,
 	claimLockChannel chan struct{}, createLimiter *rate.Limiter) (claimed infra.Sandbox, metrics infra.ClaimMetrics, err error) {
@@ -503,11 +506,6 @@ func waitForSandboxReady(ctx context.Context, sbx *Sandbox, opts infra.ClaimSand
 		return checkSandboxReady(ctx, sbx)
 	}, opts.WaitReadyTimeout); err != nil {
 		log.Error(err, "failed to wait for sandbox ready")
-		return
-	}
-	// Use deepcopy to avoid data race
-	if err = sbx.InplaceRefresh(ctx, true); err != nil {
-		log.Error(err, "failed to refresh sandbox")
 		return
 	}
 	return

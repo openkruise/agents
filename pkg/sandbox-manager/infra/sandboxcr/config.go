@@ -9,4 +9,5 @@ var (
 	RetryInterval       = 25 * time.Millisecond
 	LockBackoffFactor   = 1.0
 	LockJitter          = 0.2
+	WaitCacheTimeout    = 3 * time.Second
 )
