@@ -12,6 +12,8 @@ import (
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"golang.org/x/sync/singleflight"
+
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	informers "github.com/openkruise/agents/client/informers/externalversions"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
@@ -31,6 +33,7 @@ type Cache struct {
 	secretInformer                 cache.SharedIndexInformer
 	stopCh                         chan struct{}
 	waitHooks                      *sync.Map // Key: client.ObjectKey; Value: *waitEntry
+	listSandboxesGroup             singleflight.Group
 }
 
 func NewCache(informerFactory informers.SharedInformerFactory, sandboxInformer, sandboxSetInformer cache.SharedIndexInformer,
@@ -120,7 +123,13 @@ func (c *Cache) ListSandboxWithUser(user string) ([]*agentsv1alpha1.Sandbox, err
 }
 
 func (c *Cache) ListSandboxesInPool(template string) ([]*agentsv1alpha1.Sandbox, error) {
-	return managerutils.SelectObjectWithIndex[*agentsv1alpha1.Sandbox](c.sandboxInformer, IndexSandboxPool, template)
+	result, err, _ := c.listSandboxesGroup.Do(template, func() (any, error) {
+		return managerutils.SelectObjectWithIndex[*agentsv1alpha1.Sandbox](c.sandboxInformer, IndexSandboxPool, template)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result.([]*agentsv1alpha1.Sandbox), nil
 }
 
 func (c *Cache) GetClaimedSandbox(sandboxID string) (*agentsv1alpha1.Sandbox, error) {
