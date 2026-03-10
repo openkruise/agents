@@ -80,7 +80,8 @@ type SandboxClaimSpec struct {
 
 	// CreateOnNoStock allows to create new sandbox if no stock available
 	// +optional
-	CreateOnNoStock bool `json:"createOnNoStock,omitempty"`
+	// +kubebuilder:default=true
+	CreateOnNoStock bool `json:"createOnNoStock"`
 
 	// WaitReadyTimeout specifies the maximum duration for waiting claimed sandbox ready. Default: 30s.
 	// A waiting happens when an inplace update happens, a new sandbox created, etc.

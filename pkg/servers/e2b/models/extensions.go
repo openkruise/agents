@@ -30,7 +30,7 @@ const (
 
 func (r *NewSandboxRequest) ParseExtensions() error {
 	if r.Metadata == nil {
-		return nil
+		r.Metadata = make(map[string]string)
 	}
 	// common extensions
 	if err := r.parseCommonExtensions(); err != nil {
@@ -50,7 +50,7 @@ func (r *NewSandboxRequest) ParseExtensions() error {
 func (r *NewSandboxRequest) parseCommonExtensions() error {
 	r.Extensions.SkipInitRuntime = r.Metadata[ExtensionKeySkipInitRuntime] == v1alpha1.True
 	r.Extensions.ReserveFailedSandbox = r.Metadata[ExtensionKeyReserveFailedSandbox] == v1alpha1.True
-	r.Extensions.CreateOnNoStock = r.Metadata[ExtensionKeyCreateOnNoStock] == v1alpha1.True
+	r.Extensions.CreateOnNoStock = r.Metadata[ExtensionKeyCreateOnNoStock] != v1alpha1.False
 	r.Extensions.NeverTimeout = r.Metadata[ExtensionKeyNeverTimeout] == v1alpha1.True
 	delete(r.Metadata, ExtensionKeySkipInitRuntime)
 	delete(r.Metadata, ExtensionKeyReserveFailedSandbox)

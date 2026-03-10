@@ -18,11 +18,17 @@ func TestParseExtensions(t *testing.T) {
 			name:     "nil metadata",
 			metadata: nil,
 			wantErr:  false,
+			expectExtension: NewSandboxRequestExtension{
+				CreateOnNoStock: true,
+			},
 		},
 		{
 			name:     "empty metadata",
 			metadata: map[string]string{},
 			wantErr:  false,
+			expectExtension: NewSandboxRequestExtension{
+				CreateOnNoStock: true,
+			},
 		},
 		{
 			name: "valid image extension",
@@ -31,6 +37,7 @@ func TestParseExtensions(t *testing.T) {
 			},
 			wantErr: false,
 			expectExtension: NewSandboxRequestExtension{
+				CreateOnNoStock: true,
 				InplaceUpdate: InplaceUpdateExtension{
 					Image: "nginx:latest",
 				},
@@ -74,6 +81,7 @@ func TestParseExtensions(t *testing.T) {
 			},
 			wantErr: false,
 			expectExtension: NewSandboxRequestExtension{
+				CreateOnNoStock:  true,
 				WaitReadySeconds: 1234,
 			},
 		},
@@ -85,6 +93,7 @@ func TestParseExtensions(t *testing.T) {
 			},
 			wantErr: false,
 			expectExtension: NewSandboxRequestExtension{
+				CreateOnNoStock: true,
 				CSIMount: CSIMountExtension{
 					PersistentVolumeName: "test-volume",
 					ContainerMountPoint:  "/valid/path",

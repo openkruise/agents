@@ -157,6 +157,9 @@ func TestCreateSandbox(t *testing.T) {
 			userName:  "test-user",
 			request: models.NewSandboxRequest{
 				TemplateID: templateName,
+				Metadata: map[string]string{
+					models.ExtensionKeyCreateOnNoStock: v1alpha1.False,
+				},
 			},
 			expectError: &web.ApiError{
 				Code:    0,

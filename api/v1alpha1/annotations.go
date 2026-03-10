@@ -17,3 +17,4 @@ const (
 )
 
 const True = "true"
+const False = "false"
