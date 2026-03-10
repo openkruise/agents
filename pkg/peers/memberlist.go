@@ -43,7 +43,7 @@ const (
 	DefaultRetransmitMult = 4
 )
 
-// MemberlistPeers implements Peers using HashiCorp's memberlist library
+// MemberlistPeers implements Peers using memberlist library
 type MemberlistPeers struct {
 	list      *memberlist.Memberlist
 	config    *memberlist.Config
