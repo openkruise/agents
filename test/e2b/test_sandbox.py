@@ -1,8 +1,9 @@
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime
 
 import pytest
+from dateutil.tz import tzutc
 from e2b.exceptions import NotFoundException
 from e2b_code_interpreter import Sandbox, SandboxQuery, SandboxState
 
@@ -234,7 +235,7 @@ def test_inplace_update(sandbox_context):
     file = sbx.files.read("/root/test-file")
     assert file == "xxxx"
 
-zero_time = datetime.fromtimestamp(0, tz=timezone.utc)
+zero_time = datetime(1, 1, 1, 0, 0, tzinfo=tzutc())
 
 def test_never_timeout(sandbox_context):
     sbx: Sandbox = sandbox_context.add(Sandbox.create(
