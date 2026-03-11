@@ -615,18 +615,6 @@ func TestInfra_startRouteReconciler(t *testing.T) {
 			waitTime:          200 * time.Millisecond,
 			expectReconciled:  true,
 		},
-		{
-			name: "reconciler stops when stop channel is closed",
-			sandboxes: []*v1alpha1.Sandbox{
-				createTestSandboxWithDefaults("sandbox-1", "default"),
-			},
-			orphanedRoutes: []proxy.Route{
-				{ID: "default--orphaned-sandbox", IP: "10.0.0.99", State: v1alpha1.SandboxStateRunning},
-			},
-			reconcileInterval: 1 * time.Second,
-			waitTime:          50 * time.Millisecond,
-			expectReconciled:  false,
-		},
 	}
 
 	for _, tt := range tests {

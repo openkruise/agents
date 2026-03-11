@@ -10,6 +10,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
+	"github.com/openkruise/agents/pkg/utils/sandbox-manager/proxyutils"
 	"golang.org/x/time/rate"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -206,10 +207,7 @@ func (i *Infra) onSandboxAdd(obj any) {
 	if !ok {
 		return
 	}
-	if !i.HasTemplate(GetTemplateFromSandbox(sbx)) {
-		return
-	}
-	route := AsSandbox(sbx, i.Cache, i.Client.SandboxClient).GetRoute()
+	route := proxyutils.DefaultGetRouteFunc(sbx)
 	i.Proxy.SetRoute(logs.NewContext(), route)
 	managerutils.ResourceVersionExpectationObserve(sbx)
 }
@@ -230,17 +228,14 @@ func (i *Infra) onSandboxUpdate(_, newObj any) {
 	if !ok {
 		return
 	}
-	if !i.HasTemplate(GetTemplateFromSandbox(newSbx)) {
-		return
-	}
-	i.refreshRoute(AsSandbox(newSbx, i.Cache, i.Client.SandboxClient))
+	i.refreshRoute(newSbx)
 	managerutils.ResourceVersionExpectationObserve(newSbx)
 }
 
-func (i *Infra) refreshRoute(sbx infra.Sandbox) {
-	oldRoute, _ := i.Proxy.LoadRoute(sbx.GetName())
-	newRoute := sbx.GetRoute()
-	if newRoute.State != oldRoute.State || newRoute.IP != oldRoute.IP {
+func (i *Infra) refreshRoute(sbx *v1alpha1.Sandbox) {
+	oldRoute, exists := i.Proxy.LoadRoute(sbx.GetName())
+	newRoute := proxyutils.DefaultGetRouteFunc(sbx)
+	if !exists || newRoute.State != oldRoute.State || newRoute.IP != oldRoute.IP {
 		i.Proxy.SetRoute(logs.NewContext(), newRoute)
 	}
 }
@@ -309,8 +304,12 @@ const (
 )
 
 // startRouteReconciler periodically reconciles routes to clean up orphaned entries
-// that might be left due to missed delete events from Kubernetes informer
+// that might be left due to missed delete events from Kubernetes informer.
+// It also runs reconcileRoutes immediately on startup to ensure all routes are synced.
 func (i *Infra) startRouteReconciler(interval time.Duration) {
+	// Run immediately on startup to ensure routes are synced
+	i.reconcileRoutes()
+
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -326,9 +325,10 @@ func (i *Infra) startRouteReconciler(interval time.Duration) {
 }
 
 // reconcileRoutes compares routes in Proxy with Sandboxes in Cache
-// and deletes orphaned routes that no longer have corresponding Sandboxes
+// and deletes orphaned routes that no longer have corresponding Sandboxes.
+// It also adds missing routes for existing sandboxes that don't have a route yet.
 func (i *Infra) reconcileRoutes() {
-	ctx := logs.NewContext()
+	ctx := logs.NewContext("action", "reconcileRoutes")
 	log := klog.FromContext(ctx)
 	log.Info("starting route reconciliation")
 	// Build set of existing sandbox IDs from cache
@@ -358,7 +358,23 @@ func (i *Infra) reconcileRoutes() {
 		}
 	}
 
-	if deletedCount > 0 {
-		log.Info("route reconciliation completed", "orphanedRoutesDeleted", deletedCount, "totalRoutes", len(routes))
+	// Add missing routes for sandboxes that don't have a route yet
+	addedCount := 0
+	for _, obj := range sandboxList {
+		sbx, ok := obj.(*v1alpha1.Sandbox)
+		if !ok {
+			continue
+		}
+		sandboxID := stateutils.GetSandboxID(sbx)
+		if _, hasRoute := i.Proxy.LoadRoute(sandboxID); !hasRoute {
+			route := proxyutils.DefaultGetRouteFunc(sbx)
+			i.Proxy.SetRoute(ctx, route)
+			addedCount++
+			log.Info("reconciler added missing route", "sandboxID", sandboxID, "route", route)
+		}
+	}
+
+	if deletedCount > 0 || addedCount > 0 {
+		log.Info("route reconciliation completed", "orphanedRoutesDeleted", deletedCount, "missingRoutesAdded", addedCount, "totalRoutes", len(routes)+addedCount-deletedCount)
 	}
 }

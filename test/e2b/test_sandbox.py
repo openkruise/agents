@@ -1,5 +1,6 @@
 import time
 import uuid
+from datetime import datetime, timezone
 
 import pytest
 from e2b.exceptions import NotFoundException
@@ -205,12 +206,12 @@ def test_resume_state(sandbox_context):
 
 
 def test_is_running(sandbox_context):
-    sbx: Sandbox = Sandbox.create(
+    sbx: Sandbox = sandbox_context.add(Sandbox.create(
         template="code-interpreter",
         headers={
             "x-request-id": sandbox_context.request_id
         }
-    )
+    ))
     assert sbx.is_running()  # Returns True
 
     sbx.kill()
@@ -232,3 +233,34 @@ def test_inplace_update(sandbox_context):
     ))
     file = sbx.files.read("/root/test-file")
     assert file == "xxxx"
+
+zero_time = datetime.fromtimestamp(0, tz=timezone.utc)
+
+def test_never_timeout(sandbox_context):
+    sbx: Sandbox = sandbox_context.add(Sandbox.create(
+        template="code-interpreter",
+        timeout=60,
+        headers={
+            "x-request-id": sandbox_context.request_id
+        },
+        metadata={
+            "e2b.agents.kruise.io/never-timeout": "true"
+        }
+    ))
+    assert sbx.is_running()  # Returns True
+    info = sbx.get_info()
+    assert info.end_at == zero_time
+
+    sbx.set_timeout(60)
+    info = sbx.get_info()
+    assert info.end_at == zero_time
+
+    sbx.beta_pause()
+    info = sbx.get_info()
+    assert info.end_at == zero_time
+    assert sbx.is_running() is False
+
+    sbx.connect(timeout=60)
+    info = sbx.get_info()
+    assert info.end_at == zero_time
+    assert sbx.is_running() is True

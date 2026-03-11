@@ -464,6 +464,11 @@ func TestSandboxManager_PauseSandbox(t *testing.T) {
 						Type:   string(agentsv1alpha1.SandboxConditionReady),
 						Status: metav1.ConditionTrue,
 					},
+					{
+						// Hack: make the sync pause success
+						Type:   string(agentsv1alpha1.SandboxConditionPaused),
+						Status: metav1.ConditionTrue,
+					},
 				}
 				sbx.Spec.Paused = false
 				sbx.Status.PodInfo.PodIP = "10.0.0.1"

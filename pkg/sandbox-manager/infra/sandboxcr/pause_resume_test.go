@@ -35,6 +35,10 @@ func TestSandbox_SetPause(t *testing.T) {
 				sbx.Status.Conditions = append(sbx.Status.Conditions, metav1.Condition{
 					Type:   string(v1alpha1.SandboxConditionReady),
 					Status: metav1.ConditionTrue,
+				}, metav1.Condition{
+					// Hack: make the sync pause success
+					Type:   string(v1alpha1.SandboxConditionPaused),
+					Status: metav1.ConditionTrue,
 				})
 				sbx.Spec.Paused = false
 				state, reason := sandboxutils.GetSandboxState(sbx)

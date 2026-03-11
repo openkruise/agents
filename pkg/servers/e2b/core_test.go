@@ -179,6 +179,14 @@ func CreateSandboxPool(t *testing.T, controller *Controller, name string, availa
 						Type:   string(agentsv1alpha1.SandboxConditionReady),
 						Status: metav1.ConditionTrue,
 					},
+					{
+						Type:   string(agentsv1alpha1.SandboxConditionPaused),
+						Status: metav1.ConditionTrue,
+					},
+					{
+						Type:   string(agentsv1alpha1.SandboxConditionResumed),
+						Status: metav1.ConditionTrue,
+					},
 				},
 				PodInfo: agentsv1alpha1.PodInfo{
 					PodIP: "1.2.3.4",
