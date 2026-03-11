@@ -96,9 +96,9 @@ func (i *Infra) Run(ctx context.Context) error {
 	return i.Cache.Run(ctx)
 }
 
-func (i *Infra) Stop() {
+func (i *Infra) Stop(ctx context.Context) {
 	close(i.reconcileRouteStopCh)
-	i.Cache.Stop()
+	i.Cache.Stop(ctx)
 }
 
 func (i *Infra) ClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions) (infra.Sandbox, infra.ClaimMetrics, error) {
@@ -146,7 +146,33 @@ func (i *Infra) ClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions
 		}
 		return claimErr
 	})
-	return claimedSandbox, metrics, buildClaimError(err, metrics.LastError)
+	err = buildClaimError(err, metrics.LastError)
+	if err == nil {
+		log.Info("sandbox claimed from infra, try to wait for cache refresh")
+		refreshStart := time.Now()
+		refreshErr := retry.OnError(wait.Backoff{
+			Steps:    int(WaitCacheTimeout / RetryInterval),
+			Duration: RetryInterval,
+			Factor:   LockBackoffFactor,
+			Jitter:   LockJitter,
+		}, func(err error) bool {
+			return true
+		}, func() error {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+			return claimedSandbox.InplaceRefresh(ctx, true)
+		})
+		metrics.CacheRefresh = time.Since(refreshStart)
+		if refreshErr != nil {
+			log.Error(refreshErr, "cache not refreshed after timeout", "cost", metrics.CacheRefresh)
+		} else {
+			log.Info("cache refreshed successfully", "cost", metrics.CacheRefresh)
+		}
+	}
+	return claimedSandbox, metrics, err
 }
 
 func buildClaimError(err error, lastError error) error {

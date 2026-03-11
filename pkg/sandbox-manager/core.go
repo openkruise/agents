@@ -3,28 +3,30 @@ package sandbox_manager
 import (
 	"context"
 	"fmt"
-	"time"
+	"net"
+	"os"
 
-	"github.com/openkruise/agents/pkg/sandbox-manager/config"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/klog/v2"
-
+	"github.com/google/uuid"
+	"github.com/openkruise/agents/pkg/peers"
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
+	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/klog/v2"
 )
 
-// means 2 min timeout
 const (
-	PeerInitInterval   = 6 * time.Second
-	PeerInitMaxRetries = 20
+	// MemberlistBindPort is the default port for memberlist gossip
+	MemberlistBindPort = 7946
 )
 
 type SandboxManager struct {
 	Namespace string
 
-	client *clients.ClientSet
+	client       *clients.ClientSet
+	peersManager peers.Peers
 
 	infra infra.Infrastructure
 	proxy *proxy.Server
@@ -34,17 +36,45 @@ type SandboxManager struct {
 func NewSandboxManager(client *clients.ClientSet, adapter proxy.RequestAdapter, opts config.SandboxManagerOptions) (*SandboxManager, error) {
 	opts = config.InitOptions(opts)
 	klog.InfoS("sandbox-manager options", "options", opts)
+
+	// Create peers manager with memberlist
+	nodeName := os.Getenv("HOSTNAME")
+	if nodeName == "" {
+		nodeName = os.Getenv("POD_NAME")
+	}
+	if nodeName == "" {
+		nodeName = uuid.NewString()
+	}
+	peersManager := peers.NewMemberlistPeers(nodeName)
+
 	m := &SandboxManager{
-		client: client,
-		proxy:  proxy.NewServer(adapter, opts),
+		client:       client,
+		peersManager: peersManager,
+		proxy:        proxy.NewServer(adapter, peersManager, opts),
 	}
 	var err error
 	m.infra, err = sandboxcr.NewInfra(client, client.K8sClient, m.proxy, opts)
 	return m, err
 }
 
+func getFirstNonLoopbackIP() string {
+	addresses, err := net.InterfaceAddrs()
+	if err != nil {
+		return ""
+	}
+	for _, addr := range addresses {
+		if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+			if ipnet.IP.To4() != nil {
+				return ipnet.IP.String()
+			}
+		}
+	}
+	return ""
+}
+
 func (m *SandboxManager) Run(ctx context.Context, sysNs, peerSelector string) error {
 	log := klog.FromContext(ctx)
+
 	go func() {
 		klog.InfoS("starting proxy")
 		err := m.proxy.Run()
@@ -52,56 +82,58 @@ func (m *SandboxManager) Run(ctx context.Context, sysNs, peerSelector string) er
 			klog.Error(err, "proxy stopped")
 		}
 	}()
-	// TODO peer system is not optimized
-	var peerInited bool
-	log.Info("start to find peers")
-	for i := 0; i < PeerInitMaxRetries; i++ {
-		peerList, err := m.client.CoreV1().Pods(sysNs).List(ctx, metav1.ListOptions{
-			LabelSelector: peerSelector,
-		})
-		if err != nil {
-			return err
-		}
-		log.Info("peer pods listed", "num", len(peerList.Items))
-		var peers []string
-		for _, peer := range peerList.Items {
-			ip := peer.Status.PodIP
-			if ip == "" {
-				log.Info("peer pod has no ip", "peer", peer.Name)
-				continue
-			}
-			log.Info("try to say hello to peer", "peer", peer.Name, "ip", ip)
-			if helloErr := m.proxy.HelloPeer(ip); helloErr == nil {
-				peers = append(peers, ip)
-				log.Info("found peer", "peer", peer.Name, "ip", ip)
-			} else {
-				log.Info("peer is not ready", "peer", peer.Name, "ip", ip, "error", helloErr)
-			}
-		}
-		if len(peers) == len(peerList.Items) {
-			log.Info("all peers are ready")
-			for _, ip := range peers {
-				m.proxy.SetPeer(ip)
-			}
-			peerInited = true
-			break
-		} else {
-			log.Info("waiting for peers to start", "ready", len(peers), "total", len(peerList.Items))
-			time.Sleep(PeerInitInterval)
-		}
+
+	// Get pod IP for memberlist binding
+	podIP := os.Getenv("POD_IP")
+	if podIP == "" {
+		podIP = getFirstNonLoopbackIP()
 	}
-	if !peerInited {
-		return fmt.Errorf("failed to init peers")
+	if podIP == "" {
+		return fmt.Errorf("failed to determine local IP for memberlist")
 	}
+
+	// Get existing peers from Kubernetes API for initial join
+	log.Info("discovering existing peers for memberlist join", "podIP", podIP)
+	peerList, err := m.client.CoreV1().Pods(sysNs).List(ctx, metav1.ListOptions{
+		LabelSelector: peerSelector,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to list peer pods: %w", err)
+	}
+
+	// Build list of existing peer IPs for initial join
+	existingPeers := make([]string, 0)
+	for _, peer := range peerList.Items {
+		ip := peer.Status.PodIP
+		if ip == "" || ip == podIP {
+			continue
+		}
+		// Memberlist uses the bind port for gossip
+		existingPeers = append(existingPeers, fmt.Sprintf("%s:%d", ip, MemberlistBindPort))
+	}
+	log.Info("found existing peers for memberlist join", "count", len(existingPeers))
+
+	// Start memberlist
+	if err := m.peersManager.Start(ctx, podIP, MemberlistBindPort, existingPeers); err != nil {
+		return fmt.Errorf("failed to start memberlist: %w", err)
+	}
+	log.Info("memberlist started successfully")
+
 	if err := m.infra.Run(ctx); err != nil {
 		return err
 	}
 	return nil
 }
 
-func (m *SandboxManager) Stop() {
-	m.proxy.Stop()
-	m.infra.Stop()
+func (m *SandboxManager) Stop(ctx context.Context) {
+	log := klog.FromContext(ctx)
+	m.proxy.Stop(ctx)
+	m.infra.Stop(ctx)
+	if m.peersManager != nil {
+		if err := m.peersManager.Stop(); err != nil {
+			log.Error(err, "failed to stop peers manager")
+		}
+	}
 }
 
 func (m *SandboxManager) GetInfra() infra.Infrastructure {

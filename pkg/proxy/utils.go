@@ -4,9 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
-	"strings"
 
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 )
@@ -34,22 +32,4 @@ func requestPeer(method, ip, path string, body []byte) error {
 	}(resp.Body)
 
 	return nil
-}
-
-func getRealIP(r *http.Request) string {
-	xForwardedFor := r.Header.Get("X-Forwarded-For")
-	if xForwardedFor != "" {
-		ips := strings.Split(xForwardedFor, ",")
-		if len(ips) > 0 {
-			return strings.TrimSpace(ips[0])
-		}
-	}
-
-	xRealIP := r.Header.Get("X-Real-IP")
-	if xRealIP != "" {
-		return xRealIP
-	}
-
-	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
-	return ip
 }
