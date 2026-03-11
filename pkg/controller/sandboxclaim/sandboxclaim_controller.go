@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
+	"github.com/openkruise/agents/pkg/utils/webhookutils"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -92,7 +93,7 @@ func Add(mgr manager.Manager) error {
 
 	coreInformerFactory := k8sinformers.NewSharedInformerFactory(k8sClientset, time.Minute*10)
 	persistentVolumeInformer := coreInformerFactory.Core().V1().PersistentVolumes().Informer()
-	coreInformerFactorySpecifiedNs := k8sinformers.NewSharedInformerFactoryWithOptions(k8sClientset, time.Minute*10, k8sinformers.WithNamespace(utils.DefaultSandboxDeployNamespace))
+	coreInformerFactorySpecifiedNs := k8sinformers.NewSharedInformerFactoryWithOptions(k8sClientset, time.Minute*10, k8sinformers.WithNamespace(webhookutils.GetNamespace()))
 	secretInformer := coreInformerFactorySpecifiedNs.Core().V1().Secrets().Informer()
 
 	// Initialize cache
