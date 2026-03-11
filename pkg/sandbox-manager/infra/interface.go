@@ -19,6 +19,7 @@ type SandboxResource struct {
 	DiskSizeMB int64
 }
 
+// TimeoutOptions is the time when Sandbox will be shut down or paused. Zero means never.
 type TimeoutOptions struct {
 	ShutdownTime time.Time
 	PauseTime    time.Time

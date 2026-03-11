@@ -209,7 +209,18 @@ func (s *Sandbox) Pause(ctx context.Context, opts infra.PauseOptions) error {
 		return err
 	}
 	utils.ResourceVersionExpectationExpect(s.Sandbox)
-	return nil
+	log.Info("waiting sandbox pause")
+	start := time.Now()
+	err = s.Cache.WaitForSandboxSatisfied(ctx, s.Sandbox, WaitActionPause, func(sbx *agentsv1alpha1.Sandbox) (bool, error) {
+		condition := GetSandboxCondition(sbx, agentsv1alpha1.SandboxConditionPaused)
+		return condition.Status == metav1.ConditionTrue, nil
+	}, time.Minute)
+	if err != nil {
+		log.Error(err, "failed to wait sandbox pause")
+		return err
+	}
+	log.Info("sandbox paused", "cost", time.Since(start))
+	return s.InplaceRefresh(ctx, false)
 }
 
 func (s *Sandbox) Resume(ctx context.Context) error {

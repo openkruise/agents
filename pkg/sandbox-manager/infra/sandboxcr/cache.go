@@ -176,6 +176,7 @@ type WaitAction string
 
 const (
 	WaitActionResume    WaitAction = "Resume"
+	WaitActionPause     WaitAction = "Pause"
 	WaitActionWaitReady WaitAction = "WaitReady"
 )
 

@@ -42,11 +42,14 @@ func (sc *Controller) PauseSandbox(r *http.Request) (web.ApiResponse[struct{}], 
 }
 
 func (sc *Controller) buildPauseTimeoutOptions(sbx infra.Sandbox, now time.Time) infra.TimeoutOptions {
-	timeout := TimeAfterSeconds(now, sc.maxTimeout)
 	opts := sbx.GetTimeout()
-	opts.ShutdownTime = timeout
-	if !opts.PauseTime.IsZero() {
-		opts.PauseTime = timeout
+	// Only set timeout if the sandbox has a timeout configured (not never-timeout)
+	if !opts.ShutdownTime.IsZero() {
+		timeout := TimeAfterSeconds(now, sc.maxTimeout)
+		opts.ShutdownTime = timeout
+		if !opts.PauseTime.IsZero() {
+			opts.PauseTime = timeout
+		}
 	}
 	return opts
 }
@@ -66,7 +69,7 @@ func (sc *Controller) ResumeSandbox(r *http.Request) (web.ApiResponse[struct{}],
 	if apiErr != nil {
 		return web.ApiResponse[struct{}]{}, apiErr
 	}
-	autoPause, _ := ParseTimeout(sbx)
+	autoPause, timeout := ParseTimeout(sbx)
 
 	if state, reason := sbx.GetState(); state != v1alpha1.SandboxStatePaused {
 		log.Info("skip resume sandbox: sandbox is not paused", "state", state, "reason", reason)
@@ -82,12 +85,17 @@ func (sc *Controller) ResumeSandbox(r *http.Request) (web.ApiResponse[struct{}],
 		}
 	}
 
-	opts := sc.buildSetTimeoutOptions(autoPause, time.Now(), request.TimeoutSeconds)
-	log.Info("sandbox resumed, resetting sandbox timeout", "timeout", opts)
-	if err := sbx.SaveTimeout(ctx, opts); err != nil {
-		return web.ApiResponse[struct{}]{}, &web.ApiError{
-			Message: fmt.Sprintf("Failed to set sandbox timeout: %v", err),
+	// Only set timeout if the sandbox has a timeout configured (not never-timeout)
+	if !timeout.IsZero() {
+		opts := sc.buildSetTimeoutOptions(autoPause, time.Now(), request.TimeoutSeconds)
+		log.Info("sandbox resumed, resetting sandbox timeout", "timeout", opts)
+		if err := sbx.SaveTimeout(ctx, opts); err != nil {
+			return web.ApiResponse[struct{}]{}, &web.ApiError{
+				Message: fmt.Sprintf("Failed to set sandbox timeout: %v", err),
+			}
 		}
+	} else {
+		log.Info("skip resetting timeout for never-timeout sandbox")
 	}
 	return web.ApiResponse[struct{}]{
 		Code: http.StatusNoContent,
@@ -108,7 +116,7 @@ func (sc *Controller) ConnectSandbox(r *http.Request) (web.ApiResponse[*models.S
 	if apiErr != nil {
 		return web.ApiResponse[*models.Sandbox]{}, apiErr
 	}
-	autoPause, _ := ParseTimeout(sbx)
+	autoPause, timeout := ParseTimeout(sbx)
 
 	var statusCode = http.StatusOK
 	if state, reason := sbx.GetState(); state == v1alpha1.SandboxStatePaused {
@@ -125,12 +133,17 @@ func (sc *Controller) ConnectSandbox(r *http.Request) (web.ApiResponse[*models.S
 		log.Info("sandbox is not paused, skip resuming", "state", state, "reason", reason)
 	}
 
-	opts := sc.buildSetTimeoutOptions(autoPause, time.Now(), request.TimeoutSeconds)
-	log.Info("resetting timeout", "timeout", opts)
-	if err := sbx.SaveTimeout(ctx, opts); err != nil {
-		return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
-			Message: fmt.Sprintf("Failed to set sandbox timeout: %v", err),
+	// Only set timeout if the sandbox has a timeout configured (not never-timeout)
+	if !timeout.IsZero() {
+		opts := sc.buildSetTimeoutOptions(autoPause, time.Now(), request.TimeoutSeconds)
+		log.Info("resetting timeout", "timeout", opts)
+		if err := sbx.SaveTimeout(ctx, opts); err != nil {
+			return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
+				Message: fmt.Sprintf("Failed to set sandbox timeout: %v", err),
+			}
 		}
+	} else {
+		log.Info("skip resetting timeout for never-timeout sandbox")
 	}
 	return web.ApiResponse[*models.Sandbox]{
 		Code: statusCode,
