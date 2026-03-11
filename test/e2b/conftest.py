@@ -81,6 +81,8 @@ class SandboxContext:
                     kubectl("logs", "-n", "sandbox-system",
                             "-l", "control-plane=sandbox-controller-manager",
                             "--tail", "10000", "|", "grep", sandbox_id)
+                    print("=== Sandbox Logs ===")
+                    kubectl("logs", sandbox_id, "--tail", "10000")
                     print(f"=== End logs for sandbox {sandbox_id} ===\n")
 
             except Exception as e:
