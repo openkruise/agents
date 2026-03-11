@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	"github.com/openkruise/agents/pkg/utils/limiter"
+	"golang.org/x/time/rate"
 )
 
 type ClaimSandboxOptions struct {
@@ -17,8 +19,6 @@ type ClaimSandboxOptions struct {
 	CandidateCounts int `json:"candidateCounts"`
 	// Lock string used in optimistic lock
 	LockString string `json:"lockString"`
-	// PreCheck checks the sandbox before modifying it
-	PreCheck func(sandbox Sandbox) error `json:"-"`
 	// Set Modifier to modify the Sandbox before it is updated
 	Modifier func(sandbox Sandbox) `json:"-"`
 	// Set ReserveFailedSandbox to true to reserve failed sandboxes
@@ -38,6 +38,9 @@ type ClaimSandboxOptions struct {
 	// A creating sandbox lasts for SpeculateCreatingDuration may be picked as a candidate when no available ones in SandboxSets.
 	// Set to 0 to disable speculation feature
 	SpeculateCreatingDuration time.Duration `json:"speculateCreatingDuration"`
+	// Limiters
+	CreateRateLimiter  *rate.Limiter               `json:"-"`
+	ConcurrencyLimiter *limiter.ConcurrencyLimiter `json:"-"`
 }
 
 type ClaimMetrics struct {
