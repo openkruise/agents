@@ -39,6 +39,7 @@ func TestHashSandbox(t *testing.T) {
 		expectedHash                      string
 		expectedHashWithoutImageResources string
 		validateDifferentHashes           bool
+		validateDifferentMetadataHashes   bool
 	}{
 		{
 			name: "basic sandbox with containers",
@@ -165,11 +166,6 @@ func TestHashSandbox(t *testing.T) {
 				Spec: agentsv1alpha1.SandboxSpec{
 					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
 						Template: &corev1.PodTemplateSpec{
-							ObjectMeta: metav1.ObjectMeta{
-								Labels: map[string]string{
-									"app": "test",
-								},
-							},
 							Spec: corev1.PodSpec{
 								Containers: []corev1.Container{
 									{
@@ -195,11 +191,37 @@ func TestHashSandbox(t *testing.T) {
 			},
 			validateDifferentHashes: true,
 		},
+		{
+			name: "sandbox with metadata",
+			sandbox: &agentsv1alpha1.Sandbox{
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							ObjectMeta: metav1.ObjectMeta{
+								Labels: map[string]string{
+									"app": "test",
+								},
+							},
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name:  "test-container",
+										Image: "nginx:latest",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			validateDifferentHashes:         true,
+			validateDifferentMetadataHashes: true,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			hash, hashWithoutImageResources := HashSandbox(tt.sandbox)
+			hash, hashWithoutImageResources, hashWithoutImageResourcesMetadata := HashSandbox(tt.sandbox)
 
 			// Verify both hashes are not empty
 			if hash == "" {
@@ -210,12 +232,18 @@ func TestHashSandbox(t *testing.T) {
 			}
 
 			// Verify consistency - same input should always produce same output
-			hash2, hashWithoutImageResources2 := HashSandbox(tt.sandbox)
+			hash2, hashWithoutImageResources2, hashWithoutImageResourcesMetadata2 := HashSandbox(tt.sandbox)
 			if hash != hash2 {
 				t.Errorf("HashSandbox() is not consistent for hash: got %s, want %s", hash, hash2)
 			}
 			if hashWithoutImageResources != hashWithoutImageResources2 {
-				t.Errorf("HashSandbox() is not consistent for hashWithoutImageResources: got %s, want %s", hashWithoutImageResources, hashWithoutImageResources2)
+				t.Errorf("HashSandbox() is not consistent for hashWithoutImageResources: got %s, want %s",
+					hashWithoutImageResources, hashWithoutImageResources2)
+			}
+
+			if hashWithoutImageResourcesMetadata != hashWithoutImageResourcesMetadata2 {
+				t.Errorf("HashSandbox() is not consistent for hashWithoutImageResourcesMetadata: got %s, want %s",
+					hashWithoutImageResourcesMetadata, hashWithoutImageResourcesMetadata2)
 			}
 
 			// Validate that hashes have expected format (from HashData function)
@@ -228,10 +256,16 @@ func TestHashSandbox(t *testing.T) {
 				if hash == hashWithoutImageResources {
 					t.Errorf("Expected different hashes when image/resources are present, but got same: %s", hash)
 				}
-			} else {
-				if hash != hashWithoutImageResources {
-					t.Errorf("Expected same hashes when no image/resources differences, but got different: %s vs %s", hash, hashWithoutImageResources)
+			} else if hash != hashWithoutImageResources {
+				t.Errorf("Expected same hashes when no image/resources differences, but got different: %s vs %s", hash, hashWithoutImageResources)
+			}
+
+			if tt.validateDifferentMetadataHashes {
+				if hashWithoutImageResources == hashWithoutImageResourcesMetadata {
+					t.Errorf("Expected different hashes when sandbox metadata are present, but got same: %s", hashWithoutImageResources)
 				}
+			} else if hashWithoutImageResourcesMetadata != hashWithoutImageResources {
+				t.Errorf("Expected same hashes when no metadata differences, but got different: %s vs %s", hash, hashWithoutImageResources)
 			}
 		})
 	}
@@ -273,8 +307,8 @@ func TestHashSandboxWithDifferentImages(t *testing.T) {
 		},
 	}
 
-	hash1, hashWithoutImageResources1 := HashSandbox(sandbox1)
-	hash2, hashWithoutImageResources2 := HashSandbox(sandbox2)
+	hash1, hashWithoutImageResources1, _ := HashSandbox(sandbox1)
+	hash2, hashWithoutImageResources2, _ := HashSandbox(sandbox2)
 
 	// Full hashes should be different because images are different
 	if hash1 == hash2 {
@@ -285,6 +319,69 @@ func TestHashSandboxWithDifferentImages(t *testing.T) {
 	if hashWithoutImageResources1 != hashWithoutImageResources2 {
 		t.Errorf("Expected same hashes without images/resources, but got different: %s vs %s",
 			hashWithoutImageResources1, hashWithoutImageResources2)
+	}
+}
+
+func TestHashSandboxWithDifferentHash(t *testing.T) {
+	// Test that changing only image results in different full hash but same hash without image/resources
+	sandbox1 := &agentsv1alpha1.Sandbox{
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{
+						Labels: map[string]string{
+							"app": "test",
+						},
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name:  "test-container",
+								Image: "nginx:1.19", // Different image
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	sandbox2 := &agentsv1alpha1.Sandbox{
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name:  "test-container",
+								Image: "nginx:1.20", // Different image
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	hash1, hashWithoutImageResources1, hashWithoutImageResourcesMetadata1 := HashSandbox(sandbox1)
+	hash2, hashWithoutImageResources2, hashWithoutImageResourcesMetadata2 := HashSandbox(sandbox2)
+
+	// Full hashes should be different because images are different
+	if hash1 == hash2 {
+		t.Errorf("Expected different full hashes for different images, but got same: %s", hash1)
+	}
+
+	// Hashes without images/resources should be the different
+	if hashWithoutImageResources1 == hashWithoutImageResources2 {
+		t.Errorf("Expected different hashes without images/resources, but got same: %s",
+			hashWithoutImageResources1)
+	}
+
+	// Hashes without images/resources/metadata should be the same
+	if hashWithoutImageResourcesMetadata1 != hashWithoutImageResourcesMetadata2 {
+		t.Errorf("Expected same hashes without images/resources/metadata, but got different:"+
+			"%s vs %s",
+			hashWithoutImageResourcesMetadata1, hashWithoutImageResourcesMetadata2)
 	}
 }
 
@@ -336,8 +433,8 @@ func TestHashSandboxWithDifferentResources(t *testing.T) {
 		},
 	}
 
-	hash1, hashWithoutImageResources1 := HashSandbox(sandbox1)
-	hash2, hashWithoutImageResources2 := HashSandbox(sandbox2)
+	hash1, hashWithoutImageResources1, _ := HashSandbox(sandbox1)
+	hash2, hashWithoutImageResources2, _ := HashSandbox(sandbox2)
 
 	// Full hashes should be different because resources are different
 	if hash1 == hash2 {
