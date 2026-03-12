@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/distribution/reference"
+	validation "k8s.io/apimachinery/pkg/util/validation"
 
 	"github.com/openkruise/agents/api/v1alpha1"
 )
@@ -65,6 +67,34 @@ func (r *NewSandboxRequest) parseCommonExtensions() error {
 	}
 	if r.Extensions.WaitReadySeconds, err = r.parseAndRemoveIntExtension(ExtensionKeyWaitReadyTimeout); err != nil {
 		return err
+	}
+
+	if err = r.parseExtensionLabels(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (r *NewSandboxRequest) parseExtensionLabels() error {
+	for k, v := range r.Metadata {
+		key := strings.TrimPrefix(k, v1alpha1.E2BLabelPrefix)
+		if key == k {
+			// not a label
+			continue
+		}
+		if r.Extensions.Labels == nil {
+			r.Extensions.Labels = make(map[string]string)
+		}
+		if len(validation.IsQualifiedName(key)) != 0 {
+			return fmt.Errorf("invalid label name [%s]", key)
+		}
+
+		if len(validation.IsValidLabelValue(v)) != 0 {
+			return fmt.Errorf("invalid label value [%s]", v)
+		}
+
+		r.Extensions.Labels[key] = v
+		delete(r.Metadata, k)
 	}
 	return nil
 }
