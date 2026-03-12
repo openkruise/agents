@@ -5,89 +5,30 @@ import (
 	"testing"
 	"time"
 
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
+	constantUtils "github.com/openkruise/agents/pkg/utils"
+	sandboxManagerUtils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
+	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	k8sinformers "k8s.io/client-go/informers"
-	k8sfake "k8s.io/client-go/kubernetes/fake"
-
-	cacheForClientgo "k8s.io/client-go/tools/cache"
-
-	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/client/clientset/versioned/fake"
-	informers "github.com/openkruise/agents/client/informers/externalversions"
-	constantUtils "github.com/openkruise/agents/pkg/utils"
-	sandboxManagerUtils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
-	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 )
-
-//goland:noinspection GoDeprecation
-func NewTestCache(t *testing.T, systemNamespace string, enableCoreResources ...bool) (*Cache, *k8sfake.Clientset, *fake.Clientset) {
-	enableCore := false
-	if len(enableCoreResources) > 0 {
-		enableCore = enableCoreResources[0]
-	}
-	var k8sClient *k8sfake.Clientset
-	var coreInformerFactory k8sinformers.SharedInformerFactory
-	var coreInformerFactorySpecifiedNs k8sinformers.SharedInformerFactory
-	var persistentVolumeInformer, secretInformer cacheForClientgo.SharedIndexInformer
-
-	if enableCore {
-		// to create fake core informer factory
-		k8sClient = k8sfake.NewSimpleClientset()
-		coreInformerFactory = k8sinformers.NewSharedInformerFactory(k8sClient, time.Minute*10)
-		persistentVolumeInformer = coreInformerFactory.Core().V1().PersistentVolumes().Informer()
-
-		// to create fake secret informer factory with the specified namespace
-		coreInformerFactorySpecifiedNs = k8sinformers.NewSharedInformerFactoryWithOptions(k8sClient, time.Minute*10,
-			k8sinformers.WithNamespace(systemNamespace))
-		secretInformer = coreInformerFactorySpecifiedNs.Core().V1().Secrets().Informer()
-	}
-	// Initialize sandbox cache with all required informers
-	sandboxClient := fake.NewSimpleClientset()
-	sandboxInformerFactory := informers.NewSharedInformerFactory(sandboxClient, time.Minute*10)
-	sandboxInformer := sandboxInformerFactory.Api().V1alpha1().Sandboxes().Informer()
-	sandboxSetInformer := sandboxInformerFactory.Api().V1alpha1().SandboxSets().Informer()
-
-	var cache *Cache
-	var err error
-
-	if enableCore {
-		cache, err = NewCache(sandboxInformerFactory, sandboxInformer, sandboxSetInformer,
-			coreInformerFactorySpecifiedNs, secretInformer,
-			coreInformerFactory, persistentVolumeInformer)
-	} else {
-		cache, err = NewCache(sandboxInformerFactory, sandboxInformer, sandboxSetInformer, nil, nil, nil)
-	}
-	assert.NoError(t, err)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	go func() {
-		_ = cache.Run(ctx)
-	}()
-
-	time.Sleep(300 * time.Millisecond)
-
-	return cache, k8sClient, sandboxClient
-}
 
 func TestCache_WaitForSandboxSatisfied(t *testing.T) {
 	sandboxManagerUtils.InitLogOutput()
 	tests := []struct {
-		name            string
-		setupFunc       func(*testing.T, *Cache, *fake.Clientset) *agentsv1alpha1.Sandbox
-		systemNamespace string
-		checkFunc       checkFunc
-		timeout         time.Duration
-		expectError     string
+		name        string
+		setupFunc   func(*testing.T, *Cache, clients.SandboxClient) *agentsv1alpha1.Sandbox
+		checkFunc   checkFunc[*agentsv1alpha1.Sandbox]
+		timeout     time.Duration
+		expectError string
 	}{
 		{
 			name: "unsatisfied condition should timeout",
-			setupFunc: func(t *testing.T, cache *Cache, client *fake.Clientset) *agentsv1alpha1.Sandbox {
+			setupFunc: func(t *testing.T, cache *Cache, client clients.SandboxClient) *agentsv1alpha1.Sandbox {
 				sandbox := &agentsv1alpha1.Sandbox{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "test-sandbox-1",
@@ -103,7 +44,6 @@ func TestCache_WaitForSandboxSatisfied(t *testing.T) {
 				CreateSandboxWithStatus(t, client, sandbox)
 				return sandbox
 			},
-			systemNamespace: constantUtils.DefaultSandboxDeployNamespace,
 			checkFunc: func(sbx *agentsv1alpha1.Sandbox) (bool, error) {
 				return false, nil
 			},
@@ -112,7 +52,7 @@ func TestCache_WaitForSandboxSatisfied(t *testing.T) {
 		},
 		{
 			name: "check function returns error",
-			setupFunc: func(t *testing.T, cache *Cache, client *fake.Clientset) *agentsv1alpha1.Sandbox {
+			setupFunc: func(t *testing.T, cache *Cache, client clients.SandboxClient) *agentsv1alpha1.Sandbox {
 				sandbox := &agentsv1alpha1.Sandbox{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "test-sandbox-2",
@@ -128,7 +68,6 @@ func TestCache_WaitForSandboxSatisfied(t *testing.T) {
 				CreateSandboxWithStatus(t, client, sandbox)
 				return sandbox
 			},
-			systemNamespace: constantUtils.DefaultSandboxDeployNamespace,
 			checkFunc: func(sbx *agentsv1alpha1.Sandbox) (bool, error) {
 				if sbx.ResourceVersion == "101" {
 					return false, assert.AnError
@@ -140,7 +79,7 @@ func TestCache_WaitForSandboxSatisfied(t *testing.T) {
 		},
 		{
 			name: "wait task conflict",
-			setupFunc: func(t *testing.T, cache *Cache, client *fake.Clientset) *agentsv1alpha1.Sandbox {
+			setupFunc: func(t *testing.T, cache *Cache, client clients.SandboxClient) *agentsv1alpha1.Sandbox {
 				sandbox := &agentsv1alpha1.Sandbox{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "test-sandbox-1",
@@ -161,7 +100,6 @@ func TestCache_WaitForSandboxSatisfied(t *testing.T) {
 				}()
 				return sandbox
 			},
-			systemNamespace: constantUtils.DefaultSandboxDeployNamespace,
 			checkFunc: func(sbx *agentsv1alpha1.Sandbox) (bool, error) {
 				return false, nil
 			},
@@ -170,7 +108,7 @@ func TestCache_WaitForSandboxSatisfied(t *testing.T) {
 		},
 		{
 			name: "sandbox satisfied after waiting",
-			setupFunc: func(t *testing.T, cache *Cache, client *fake.Clientset) *agentsv1alpha1.Sandbox {
+			setupFunc: func(t *testing.T, cache *Cache, client clients.SandboxClient) *agentsv1alpha1.Sandbox {
 				sandbox := &agentsv1alpha1.Sandbox{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "test-sandbox-2",
@@ -186,7 +124,6 @@ func TestCache_WaitForSandboxSatisfied(t *testing.T) {
 				CreateSandboxWithStatus(t, client, sandbox)
 				return sandbox
 			},
-			systemNamespace: constantUtils.DefaultSandboxDeployNamespace,
 			checkFunc: func(sbx *agentsv1alpha1.Sandbox) (bool, error) {
 				return sbx.ResourceVersion == "101", nil // this update will always be made
 			},
@@ -195,7 +132,7 @@ func TestCache_WaitForSandboxSatisfied(t *testing.T) {
 		},
 		{
 			name: "sandbox already satisfied",
-			setupFunc: func(t *testing.T, cache *Cache, client *fake.Clientset) *agentsv1alpha1.Sandbox {
+			setupFunc: func(t *testing.T, cache *Cache, client clients.SandboxClient) *agentsv1alpha1.Sandbox {
 				sandbox := &agentsv1alpha1.Sandbox{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "test-sandbox-2",
@@ -211,7 +148,6 @@ func TestCache_WaitForSandboxSatisfied(t *testing.T) {
 				CreateSandboxWithStatus(t, client, sandbox)
 				return sandbox
 			},
-			systemNamespace: constantUtils.DefaultSandboxDeployNamespace,
 			checkFunc: func(sbx *agentsv1alpha1.Sandbox) (bool, error) {
 				return true, nil
 			},
@@ -220,7 +156,7 @@ func TestCache_WaitForSandboxSatisfied(t *testing.T) {
 		},
 		{
 			name: "return error without waiting",
-			setupFunc: func(t *testing.T, cache *Cache, client *fake.Clientset) *agentsv1alpha1.Sandbox {
+			setupFunc: func(t *testing.T, cache *Cache, client clients.SandboxClient) *agentsv1alpha1.Sandbox {
 				sandbox := &agentsv1alpha1.Sandbox{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "test-sandbox-2",
@@ -236,7 +172,6 @@ func TestCache_WaitForSandboxSatisfied(t *testing.T) {
 				CreateSandboxWithStatus(t, client, sandbox)
 				return sandbox
 			},
-			systemNamespace: constantUtils.DefaultSandboxDeployNamespace,
 			checkFunc: func(sbx *agentsv1alpha1.Sandbox) (bool, error) {
 				return false, assert.AnError
 			},
@@ -247,24 +182,25 @@ func TestCache_WaitForSandboxSatisfied(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cache, _, client := NewTestCache(t, tt.systemNamespace)
+			cache, clientSet, err := NewTestCache(t)
 			defer cache.Stop()
+			require.NoError(t, err)
 
 			// Setup test sandbox
-			sandbox := tt.setupFunc(t, cache, client)
+			sandbox := tt.setupFunc(t, cache, clientSet.SandboxClient)
 			time.Sleep(10 * time.Millisecond)
 
 			go func() {
 				time.Sleep(50 * time.Millisecond)
-				gotSbx, err := client.ApiV1alpha1().Sandboxes(sandbox.Namespace).Get(t.Context(), sandbox.Name, metav1.GetOptions{})
+				gotSbx, err := clientSet.ApiV1alpha1().Sandboxes(sandbox.Namespace).Get(t.Context(), sandbox.Name, metav1.GetOptions{})
 				require.NoError(t, err)
 				gotSbx.ResourceVersion = "101"
-				_, err = client.ApiV1alpha1().Sandboxes(sandbox.Namespace).Update(context.Background(), gotSbx, metav1.UpdateOptions{})
+				_, err = clientSet.ApiV1alpha1().Sandboxes(sandbox.Namespace).Update(context.Background(), gotSbx, metav1.UpdateOptions{})
 				assert.NoError(t, err)
 			}()
 
 			// Call WaitForSandboxSatisfied
-			err := cache.WaitForSandboxSatisfied(t.Context(), sandbox, "", tt.checkFunc, tt.timeout)
+			err = cache.WaitForSandboxSatisfied(t.Context(), sandbox, "", tt.checkFunc, tt.timeout)
 
 			// Check results
 			if tt.expectError != "" {
@@ -281,8 +217,10 @@ func TestCache_WaitForSandboxSatisfied(t *testing.T) {
 
 func TestCache_WaitForSandboxSatisfied_Cancel(t *testing.T) {
 	sandboxManagerUtils.InitLogOutput()
-	cache, _, client := NewTestCache(t, constantUtils.DefaultSandboxDeployNamespace)
+	cache, clientSet, err := NewTestCache(t)
+	require.NoError(t, err)
 	defer cache.Stop()
+	sandboxClient := clientSet.SandboxClient
 	sbx := &agentsv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-sandbox-1",
@@ -295,12 +233,12 @@ func TestCache_WaitForSandboxSatisfied_Cancel(t *testing.T) {
 			Phase: agentsv1alpha1.SandboxPending,
 		},
 	}
-	CreateSandboxWithStatus(t, client, sbx)
+	CreateSandboxWithStatus(t, sandboxClient, sbx)
 	EnsureSandboxInCache(t, cache, sbx)
 	ctx1, cancel := context.WithCancel(t.Context())
 	cancel()
 	// never get satisfied or timeout
-	err := cache.WaitForSandboxSatisfied(ctx1, sbx, "", func(sbx *agentsv1alpha1.Sandbox) (bool, error) {
+	err = cache.WaitForSandboxSatisfied(ctx1, sbx, "", func(sbx *agentsv1alpha1.Sandbox) (bool, error) {
 		return false, nil
 	}, time.Hour)
 	require.Error(t, err)
@@ -381,8 +319,10 @@ func TestCache_GetPersistentVolume(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cache, k8sClient, _ := NewTestCache(t, constantUtils.DefaultSandboxDeployNamespace, true)
+			cache, clientSet, err := NewTestCache(t)
+			require.NoError(t, err)
 			defer cache.Stop()
+			k8sClient := clientSet.K8sClient
 
 			if tt.setupPV != nil {
 				testPV := tt.setupPV()
@@ -430,8 +370,10 @@ func TestCache_GetPersistentVolume(t *testing.T) {
 
 func TestCache_GetPersistentVolume_FromSync(t *testing.T) {
 	utils.InitLogOutput()
-	cache, k8sClient, _ := NewTestCache(t, constantUtils.DefaultSandboxDeployNamespace, true)
+	cache, clientSet, err := NewTestCache(t)
+	require.NoError(t, err)
 	defer cache.Stop()
+	k8sClient := clientSet.K8sClient
 
 	testPV := &corev1.PersistentVolume{
 		ObjectMeta: metav1.ObjectMeta{
@@ -451,7 +393,7 @@ func TestCache_GetPersistentVolume_FromSync(t *testing.T) {
 			},
 		},
 	}
-	_, err := k8sClient.CoreV1().PersistentVolumes().Create(context.TODO(), testPV, metav1.CreateOptions{})
+	_, err = k8sClient.CoreV1().PersistentVolumes().Create(context.TODO(), testPV, metav1.CreateOptions{})
 	assert.NoError(t, err)
 	// Wait for cache to be ready
 	time.Sleep(300 * time.Millisecond)
@@ -467,8 +409,10 @@ func TestCache_GetPersistentVolume_FromSync(t *testing.T) {
 func TestCache_GetSecret_FromSync(t *testing.T) {
 	sandboxManagerUtils.InitLogOutput()
 
-	cache, k8sClient, _ := NewTestCache(t, constantUtils.DefaultSandboxDeployNamespace, true)
+	cache, clientSet, err := NewTestCache(t)
+	require.NoError(t, err)
 	defer cache.Stop()
+	k8sClient := clientSet.K8sClient
 
 	testSecret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
@@ -482,7 +426,7 @@ func TestCache_GetSecret_FromSync(t *testing.T) {
 		Type: corev1.SecretTypeOpaque,
 	}
 	// Create the secret in the cluster using the client
-	_, err := k8sClient.CoreV1().Secrets(constantUtils.DefaultSandboxDeployNamespace).Create(context.TODO(), testSecret, metav1.CreateOptions{})
+	_, err = k8sClient.CoreV1().Secrets(constantUtils.DefaultSandboxDeployNamespace).Create(context.TODO(), testSecret, metav1.CreateOptions{})
 	assert.NoError(t, err)
 	// Wait for cache to be ready
 	time.Sleep(300 * time.Millisecond)

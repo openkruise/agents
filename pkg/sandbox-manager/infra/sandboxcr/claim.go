@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	commonutils "github.com/openkruise/agents/pkg/utils"
 	"golang.org/x/time/rate"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -258,7 +259,7 @@ func pickAnAvailableSandbox(ctx context.Context, opts infra.ClaimSandboxOptions,
 	if len(objects) == 0 {
 		if opts.CreateOnNoStock {
 			log.Info("will create a new sandbox", "reason", "NoStock")
-			return newSandboxFromTemplate(opts, cache, client, limiter)
+			return newSandboxFromSandboxSet(opts, cache, client, limiter)
 		}
 		return nil, "", NoAvailableError(template, "no stock")
 	}
@@ -324,7 +325,7 @@ func pickAnAvailableSandbox(ctx context.Context, opts infra.ClaimSandboxOptions,
 	// Step 3: create new sandbox
 	if opts.CreateOnNoStock {
 		log.Info("will create a new sandbox")
-		return newSandboxFromTemplate(opts, cache, client, limiter)
+		return newSandboxFromSandboxSet(opts, cache, client, limiter)
 	}
 	return nil, "", NoAvailableError(template, pickErr.Error())
 }
@@ -372,9 +373,11 @@ func pickFromCandidates(ctx context.Context, candidates []*v1alpha1.Sandbox, pic
 
 var FilteredAnnotationsOnCreation []string
 
-func newSandboxFromTemplate(opts infra.ClaimSandboxOptions, cache *Cache, client clients.SandboxClient, limiter *rate.Limiter) (*Sandbox, infra.LockType, error) {
-	if !limiter.Allow() {
-		return nil, "", NoAvailableError(opts.Template, "sandbox creation is not allowed by rate limiter")
+func newSandboxFromSandboxSet(opts infra.ClaimSandboxOptions, cache *Cache, client clients.SandboxClient, limiter *rate.Limiter) (*Sandbox, infra.LockType, error) {
+	if limiter != nil {
+		if !limiter.Allow() {
+			return nil, "", NoAvailableError(opts.Template, "sandbox creation is not allowed by rate limiter")
+		}
 	}
 	sbs, err := cache.GetSandboxSet(opts.Template)
 	if err != nil {
@@ -417,7 +420,7 @@ func modifyPickedSandbox(sbx *Sandbox, lockType infra.LockType, opts infra.Claim
 	if labels == nil {
 		labels = make(map[string]string, 1)
 	}
-	labels[v1alpha1.LabelSandboxIsClaimed] = "true"
+	labels[v1alpha1.LabelSandboxIsClaimed] = v1alpha1.True
 	sbx.SetLabels(labels)
 
 	annotations := sbx.GetAnnotations()
@@ -425,6 +428,16 @@ func modifyPickedSandbox(sbx *Sandbox, lockType infra.LockType, opts infra.Claim
 		annotations = make(map[string]string, 1)
 	}
 	annotations[v1alpha1.AnnotationClaimTime] = time.Now().Format(time.RFC3339)
+	if opts.InitRuntime != nil {
+		initRuntimeJSON, err := json.Marshal(opts.InitRuntime)
+		if err != nil {
+			return fmt.Errorf("failed to marshal init runtime options: %w", err)
+		}
+		annotations[v1alpha1.AnnotationInitRuntimeRequest] = string(initRuntimeJSON)
+		if opts.InitRuntime.AccessToken != "" {
+			annotations[v1alpha1.AnnotationRuntimeAccessToken] = opts.InitRuntime.AccessToken
+		}
+	}
 	sbx.SetAnnotations(annotations)
 	return nil
 }
@@ -432,6 +445,11 @@ func modifyPickedSandbox(sbx *Sandbox, lockType infra.LockType, opts infra.Claim
 var DefaultCreateSandbox = createSandbox
 
 func createSandbox(ctx context.Context, sbx *v1alpha1.Sandbox, client *clients.ClientSet) (*v1alpha1.Sandbox, error) {
+	select {
+	case <-ctx.Done():
+		return nil, fmt.Errorf("context canceled before creating sandbox: %w", ctx.Err())
+	default:
+	}
 	return client.ApiV1alpha1().Sandboxes(sbx.Namespace).Create(ctx, sbx, metav1.CreateOptions{})
 }
 
@@ -457,26 +475,13 @@ func performLockSandbox(ctx context.Context, sbx *Sandbox, lockType infra.LockTy
 
 func initRuntime(ctx context.Context, sbx *Sandbox, opts config.InitRuntimeOptions) (time.Duration, error) {
 	ctx = logs.Extend(ctx, "action", "initRuntime")
-	log := klog.FromContext(ctx).WithValues("sandboxID", sbx.GetName(), "envVars", opts.EnvVars, "resourceVersion", sbx.GetResourceVersion())
+	log := klog.FromContext(ctx).WithValues("sandboxID", sbx.GetName(), "resourceVersion", sbx.GetResourceVersion())
 	start := time.Now()
-	params := map[string]any{
-		"envVars": opts.EnvVars,
-	}
-	if opts.AccessToken != "" {
-		params["accessToken"] = opts.AccessToken
-	}
-	initBody, err := json.Marshal(params)
+	initBody, err := json.Marshal(opts)
 	if err != nil {
 		log.Error(err, "failed to marshal initBody")
 		return 0, err
 	}
-	runtimeURL := sbx.GetRuntimeURL()
-	if runtimeURL == "" {
-		log.Error(nil, "runtimeURL is empty")
-		return 0, fmt.Errorf("runtimeURL is empty")
-	}
-	url := runtimeURL + "/init"
-	log.Info("sending request to runtime", "url", url, "params", params)
 	retries := -1
 	err = retry.OnError(wait.Backoff{
 		// about retry 20s
@@ -484,34 +489,53 @@ func initRuntime(ctx context.Context, sbx *Sandbox, opts config.InitRuntimeOptio
 		Factor:   2.0,
 		Steps:    5,
 		Cap:      10 * time.Second,
-	}, func(err error) bool {
-		select {
-		case <-ctx.Done():
-			return false
-		default:
-			return true
-		}
-	}, func() error {
+	}, commonutils.RetryIfContextNotCanceled(ctx), func() error {
 		var initErr error
 		retries++
+		requestCtx, cancel := context.WithTimeout(ctx, time.Second)
 		defer func() {
+			cancel()
 			if initErr != nil {
 				log.Error(initErr, "init runtime request failed", "retries", retries)
 			}
 		}()
+
+		initErr = sbx.InplaceRefresh(ctx, false)
+		if initErr != nil {
+			log.Error(initErr, "failed to refresh sandbox")
+			return initErr
+		}
+		runtimeURL := sbx.GetRuntimeURL()
+		if runtimeURL == "" {
+			log.Error(nil, "runtimeURL is empty")
+			return fmt.Errorf("runtimeURL is empty")
+		}
+		url := runtimeURL + "/init"
+		log.Info("sending request to runtime", "resourceVersion", sbx.GetResourceVersion(),
+			"url", url, "params", opts, "retries", retries)
+
 		// Create a new request for each retry to avoid Body reuse issue
-		r, initErr := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewBuffer(initBody))
+		r, initErr := http.NewRequestWithContext(requestCtx, http.MethodPost, url, bytes.NewBuffer(initBody))
 		if initErr != nil {
 			log.Error(initErr, "failed to create request")
 			return initErr
 		}
 		resp, initErr := proxyutils.ProxyRequest(r)
+		defer func() {
+			// Discard response body to allow connection reuse
+			if resp != nil {
+				_, _ = io.Copy(io.Discard, resp.Body)
+				_ = resp.Body.Close()
+			}
+		}()
+		// When ReInit is true, treat 401 as success (sandbox already initialized)
+		if resp != nil && resp.StatusCode == http.StatusUnauthorized && opts.ReInit {
+			log.Info("init runtime returned 401, treated as success because ReInit is true")
+			return nil
+		}
 		if initErr != nil {
 			return initErr
 		}
-		// Discard response body to allow connection reuse
-		_, _ = io.Copy(io.Discard, resp.Body)
-		_ = resp.Body.Close()
 		return nil
 	})
 	return time.Since(start), err

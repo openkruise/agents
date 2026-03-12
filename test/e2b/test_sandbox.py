@@ -264,6 +264,5 @@ def test_never_timeout(sandbox_context):
     sbx.connect(timeout=60)
     info = sbx.get_info()
     assert info.end_at == zero_time
-    # TODO: There's a issue with is_running after connect that the request will timeout
-    # assert sbx.is_running() is True
+    assert sbx.is_running() is True
     assert info.state == "running"

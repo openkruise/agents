@@ -7,7 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -38,7 +40,7 @@ func GetSbsOwnerReference() []metav1.OwnerReference {
 }
 
 func setupTestManager(t *testing.T, opts ...config.SandboxManagerOptions) *SandboxManager {
-	client := clients.NewFakeClientSet()
+	client := clients.NewFakeClientSet(t)
 	infraOption := config.SandboxManagerOptions{}
 	if len(opts) > 0 {
 		infraOption = opts[0]
@@ -416,7 +418,9 @@ func TestSandboxManager_GetClaimedSandbox(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			sbx, err := manager.GetClaimedSandbox(context.Background(), testUser, tt.sandboxID)
+			ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+			defer cancel()
+			sbx, err := manager.GetClaimedSandbox(ctx, testUser, tt.sandboxID)
 
 			if tt.expectError {
 				if err == nil {
@@ -718,6 +722,270 @@ func TestSandboxManager_ResumeSandbox(t *testing.T) {
 			assert.Equal(t, tt.expectedIP, route.IP)
 			assert.Equal(t, testUser, route.Owner)
 			assert.Equal(t, tt.expectedState, route.State)
+		})
+	}
+}
+
+func TestSandboxManager_CloneSandbox(t *testing.T) {
+	utils.InitLogOutput()
+
+	checkpointID := "test-checkpoint-clone"
+	user := "test-user"
+
+	// Define context key types for sandbox override
+	type sbxOverrideKey struct{}
+	type sbxOverride struct {
+		Name       string
+		RuntimeURL string
+	}
+
+	tests := []struct {
+		name              string
+		opts              infra.CloneSandboxOptions
+		sbxOverride       sbxOverride
+		setupResources    bool
+		expectError       bool
+		expectedErrorCode errors.ErrorCode
+	}{
+		{
+			name: "successful clone",
+			opts: infra.CloneSandboxOptions{
+				User:             user,
+				CheckPointID:     checkpointID,
+				WaitReadyTimeout: 30 * time.Second,
+			},
+			sbxOverride:    sbxOverride{Name: "test-sandbox-clone-success"},
+			setupResources: true,
+			expectError:    false,
+		},
+		{
+			name: "clone with non-existent checkpoint",
+			opts: infra.CloneSandboxOptions{
+				User:             user,
+				CheckPointID:     "non-existent-checkpoint",
+				WaitReadyTimeout: 30 * time.Second,
+			},
+			setupResources:    false,
+			expectError:       true,
+			expectedErrorCode: errors.ErrorInternal,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			manager := setupTestManager(t)
+			client := manager.client.SandboxClient
+
+			// Decorator: DefaultCreateSandbox - set sandbox ready after creation
+			origCreateSandbox := sandboxcr.DefaultCreateSandbox
+			sandboxcr.DefaultCreateSandbox = func(ctx context.Context, sbx *agentsv1alpha1.Sandbox, c *clients.ClientSet) (*agentsv1alpha1.Sandbox, error) {
+				if override, ok := ctx.Value(sbxOverrideKey{}).(sbxOverride); ok {
+					if override.Name != "" {
+						sbx.Name = override.Name
+					}
+				}
+				created, err := origCreateSandbox(ctx, sbx, c)
+				if err != nil {
+					return nil, err
+				}
+				// Update Sandbox status to Ready
+				created.Status = agentsv1alpha1.SandboxStatus{
+					Phase:              agentsv1alpha1.SandboxRunning,
+					ObservedGeneration: created.Generation,
+					Conditions: []metav1.Condition{
+						{
+							Type:   string(agentsv1alpha1.SandboxConditionReady),
+							Status: metav1.ConditionTrue,
+							Reason: agentsv1alpha1.SandboxReadyReasonPodReady,
+						},
+					},
+					PodInfo: agentsv1alpha1.PodInfo{
+						PodIP: "1.2.3.4",
+					},
+				}
+				created, err = c.SandboxClient.ApiV1alpha1().Sandboxes(created.Namespace).UpdateStatus(ctx, created, metav1.UpdateOptions{})
+				if err != nil {
+					return nil, err
+				}
+				time.Sleep(50 * time.Millisecond) // Wait for informer sync
+				return created, nil
+			}
+			t.Cleanup(func() { sandboxcr.DefaultCreateSandbox = origCreateSandbox })
+
+			if tt.setupResources {
+				// Create SandboxTemplate with same name as checkpoint
+				sbt := &agentsv1alpha1.SandboxTemplate{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      checkpointID,
+						Namespace: "default",
+					},
+					Spec: agentsv1alpha1.SandboxTemplateSpec{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{Name: "main", Image: "test-image"},
+								},
+							},
+						},
+					},
+				}
+				_, err := client.ApiV1alpha1().SandboxTemplates("default").Create(context.Background(), sbt, metav1.CreateOptions{})
+				require.NoError(t, err)
+
+				// Create Checkpoint with same name as SandboxTemplate
+				cp := &agentsv1alpha1.Checkpoint{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      checkpointID,
+						Namespace: "default",
+						Labels: map[string]string{
+							agentsv1alpha1.LabelSandboxTemplate: checkpointID,
+						},
+					},
+					Status: agentsv1alpha1.CheckpointStatus{
+						CheckpointId: checkpointID,
+					},
+				}
+				_, err = client.ApiV1alpha1().Checkpoints("default").Create(context.Background(), cp, metav1.CreateOptions{})
+				require.NoError(t, err)
+
+				// Wait for informer sync
+				time.Sleep(100 * time.Millisecond)
+			}
+
+			// Build context with sbxOverride if needed
+			ctx := t.Context()
+			if tt.sbxOverride.Name != "" {
+				ctx = context.WithValue(ctx, sbxOverrideKey{}, tt.sbxOverride)
+			}
+
+			tt.opts.CloneTimeout = 100 * time.Millisecond
+			// Call CloneSandbox
+			sbx, err := manager.CloneSandbox(ctx, tt.opts)
+
+			if tt.expectError {
+				require.Error(t, err)
+				assert.Equal(t, tt.expectedErrorCode, errors.GetErrCode(err))
+				assert.Nil(t, sbx)
+			} else {
+				require.NoError(t, err)
+				require.NotNil(t, sbx)
+				assert.Equal(t, user, sbx.GetAnnotations()[agentsv1alpha1.AnnotationOwner])
+				assert.Equal(t, checkpointID, sbx.GetLabels()[agentsv1alpha1.LabelSandboxTemplate])
+				assert.Equal(t, "true", sbx.GetLabels()[agentsv1alpha1.LabelSandboxIsClaimed])
+			}
+		})
+	}
+}
+
+func TestSandboxManager_ListSandboxes(t *testing.T) {
+	tests := []struct {
+		name          string
+		user          string
+		sandboxCount  int
+		expectedCount int
+	}{
+		{
+			name:          "empty list when no sandboxes",
+			user:          testUser,
+			sandboxCount:  0,
+			expectedCount: 0,
+		},
+		{
+			name:          "list claimed sandboxes",
+			user:          testUser,
+			sandboxCount:  3,
+			expectedCount: 3,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			manager := setupTestManager(t)
+			client := manager.client.SandboxClient
+
+			// Create claimed sandboxes
+			for i := 0; i < tt.sandboxCount; i++ {
+				sbx := &agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      fmt.Sprintf("list-test-sandbox-%d", i),
+						Namespace: "default",
+						Labels: map[string]string{
+							agentsv1alpha1.LabelSandboxIsClaimed: "true",
+						},
+						Annotations: map[string]string{
+							agentsv1alpha1.AnnotationOwner: tt.user,
+						},
+						CreationTimestamp: metav1.Now(),
+					},
+					Status: agentsv1alpha1.SandboxStatus{
+						Phase: agentsv1alpha1.SandboxRunning,
+						Conditions: []metav1.Condition{
+							{
+								Type:   string(agentsv1alpha1.SandboxConditionReady),
+								Status: metav1.ConditionTrue,
+							},
+						},
+						PodInfo: agentsv1alpha1.PodInfo{
+							PodIP: fmt.Sprintf("10.0.0.%d", i+1),
+						},
+					},
+				}
+				CreateSandboxWithStatus(t, client, sbx)
+			}
+
+			// Wait for informer sync
+			time.Sleep(100 * time.Millisecond)
+
+			// List sandboxes
+			sandboxes, err := manager.ListSandboxes(tt.user, 100, nil)
+
+			require.NoError(t, err)
+			assert.Len(t, sandboxes, tt.expectedCount)
+		})
+	}
+}
+
+func TestSandboxManager_GetOwnerOfSandbox(t *testing.T) {
+	tests := []struct {
+		name          string
+		sandboxID     string
+		setupRoute    bool
+		expectedOwner string
+		expectedOk    bool
+	}{
+		{
+			name:          "non-existent sandbox returns empty owner and false",
+			sandboxID:     "non-existent-sandbox",
+			setupRoute:    false,
+			expectedOwner: "",
+			expectedOk:    false,
+		},
+		{
+			name:          "existing sandbox returns owner and true",
+			sandboxID:     "default--test-sandbox",
+			setupRoute:    true,
+			expectedOwner: testUser,
+			expectedOk:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			manager := setupTestManager(t)
+
+			if tt.setupRoute {
+				manager.proxy.SetRoute(t.Context(), proxy.Route{
+					ID:    tt.sandboxID,
+					IP:    "10.0.0.1",
+					Owner: testUser,
+					State: agentsv1alpha1.SandboxStateRunning,
+				})
+			}
+
+			owner, ok := manager.GetOwnerOfSandbox(tt.sandboxID)
+
+			assert.Equal(t, tt.expectedOk, ok)
+			assert.Equal(t, tt.expectedOwner, owner)
 		})
 	}
 }

@@ -6,6 +6,7 @@ import (
 
 var (
 	DefaultClaimTimeout = time.Minute
+	DefaultCloneTimeout = time.Minute
 	RetryInterval       = 25 * time.Millisecond
 	LockBackoffFactor   = 1.0
 	LockJitter          = 0.2

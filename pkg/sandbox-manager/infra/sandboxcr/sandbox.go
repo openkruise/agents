@@ -225,6 +225,13 @@ func (s *Sandbox) Pause(ctx context.Context, opts infra.PauseOptions) error {
 
 func (s *Sandbox) Resume(ctx context.Context) error {
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(s.Sandbox))
+
+	initRuntimeOpts, err := getInitRuntimeRequest(s.Sandbox)
+	if err != nil {
+		log.Error(err, "failed to get init runtime request")
+		return fmt.Errorf("failed to get init runtime request: %w", err)
+	}
+
 	state, reason := s.GetState()
 	log.Info("try to resume sandbox", "state", state, "reason", reason)
 	if state != agentsv1alpha1.SandboxStatePaused {
@@ -248,17 +255,36 @@ func (s *Sandbox) Resume(ctx context.Context) error {
 	utils.ResourceVersionExpectationExpect(s.Sandbox) // expect Resuming
 	log.Info("waiting sandbox resume")
 	start := time.Now()
-	err := s.Cache.WaitForSandboxSatisfied(ctx, s.Sandbox, WaitActionResume, func(sbx *agentsv1alpha1.Sandbox) (bool, error) {
+	err = s.Cache.WaitForSandboxSatisfied(ctx, s.Sandbox, WaitActionResume, func(sbx *agentsv1alpha1.Sandbox) (bool, error) {
 		state, reason := stateutils.GetSandboxState(sbx)
-		log.V(consts.DebugLogLevel).Info("checking sandbox state", "state", state, "reason", reason)
-		return state == agentsv1alpha1.SandboxStateRunning, nil
+		log.V(consts.DebugLogLevel).Info("checking sandbox state",
+			"state", state, "reason", reason, "ip", sbx.Status.PodInfo.PodIP, "resourceVersion", sbx.GetResourceVersion())
+		satisfied := state == agentsv1alpha1.SandboxStateRunning
+		if satisfied {
+			utils.ResourceVersionExpectationExpect(sbx) // expect Running
+		}
+		return satisfied, nil
 	}, time.Minute)
 	if err != nil {
 		log.Error(err, "failed to wait sandbox resume")
 		return err
 	}
 	log.Info("sandbox resumed", "cost", time.Since(start))
-	return s.InplaceRefresh(ctx, false)
+
+	// Perform ReInit if initRuntimeOpts is set
+	if initRuntimeOpts != nil {
+		log.Info("will re-init runtime after resume")
+		if _, err := initRuntime(ctx, s, *initRuntimeOpts); err != nil {
+			log.Error(err, "failed to perform ReInit after resume")
+			return fmt.Errorf("failed to perform ReInit after resume: %w", err)
+		}
+		log.Info("ReInit completed after resume")
+	}
+
+	if err := s.InplaceRefresh(ctx, false); err != nil {
+		return fmt.Errorf("failed to refresh sandbox after resume: %w", err)
+	}
+	return nil
 }
 
 func (s *Sandbox) GetState() (string, string) {
@@ -303,6 +329,13 @@ func (s *Sandbox) CSIMount(ctx context.Context, driver string, request string) e
 	}
 	log.Info("execute csi mount command", "driverName", driver, "mountCost", time.Since(startTime))
 	return nil
+}
+
+func (s *Sandbox) CreateCheckpoint(ctx context.Context, opts infra.CreateCheckpointOptions) (string, error) {
+	log := klog.FromContext(ctx)
+	opts = ValidateAndInitCheckpointOptions(opts)
+	log.Info("create checkpoint options", "options", opts)
+	return CreateCheckpoint(ctx, s.Sandbox, s.Client, s.Cache, opts)
 }
 
 var _ infra.Sandbox = &Sandbox{}

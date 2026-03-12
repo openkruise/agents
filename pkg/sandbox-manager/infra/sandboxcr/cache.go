@@ -4,31 +4,38 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"testing"
 	"time"
 
+	"golang.org/x/sync/singleflight"
 	corev1 "k8s.io/api/core/v1"
 	k8sinformers "k8s.io/client-go/informers"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"golang.org/x/sync/singleflight"
-
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	informers "github.com/openkruise/agents/client/informers/externalversions"
+	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
+	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
+	"github.com/openkruise/agents/pkg/utils"
 	managerutils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	"github.com/openkruise/agents/pkg/utils/sandboxutils"
 )
 
-type checkFunc func(sbx *agentsv1alpha1.Sandbox) (bool, error)
+type checkFunc[T client.Object] func(sbx T) (bool, error)
+type updateFunc[T client.Object] func(obj T) (T, error)
 
 type Cache struct {
+	client                         *clients.ClientSet
 	informerFactory                informers.SharedInformerFactory
+	k8sInformerFactory             k8sinformers.SharedInformerFactory
+	k8sInformerFactoryWithSystemNs k8sinformers.SharedInformerFactory
 	sandboxInformer                cache.SharedIndexInformer
 	sandboxSetInformer             cache.SharedIndexInformer
-	coreInformerFactory            k8sinformers.SharedInformerFactory
-	coreInformerFactorySpecifiedNs k8sinformers.SharedInformerFactory
+	checkpointInformer             cache.SharedIndexInformer
+	sandboxTemplateInformer        cache.SharedIndexInformer
 	persistentVolumeInformer       cache.SharedIndexInformer
 	secretInformer                 cache.SharedIndexInformer
 	stopCh                         chan struct{}
@@ -36,71 +43,85 @@ type Cache struct {
 	listSandboxesGroup             singleflight.Group
 }
 
-func NewCache(informerFactory informers.SharedInformerFactory, sandboxInformer, sandboxSetInformer cache.SharedIndexInformer,
-	coreInformerFactorySpecifiedNs k8sinformers.SharedInformerFactory, secretInformer cache.SharedIndexInformer,
-	coreInformerFactory k8sinformers.SharedInformerFactory, informers ...cache.SharedIndexInformer) (*Cache, error) {
+func NewCache(client *clients.ClientSet, opts config.SandboxManagerOptions) (*Cache, error) {
+	// Create informer factory for custom Sandbox resources
+	informerFactory := informers.NewSharedInformerFactory(client.SandboxClient, time.Minute*10)
+	sandboxInformer := informerFactory.Api().V1alpha1().Sandboxes().Informer()
+	sandboxSetInformer := informerFactory.Api().V1alpha1().SandboxSets().Informer()
+	checkpointInformer := informerFactory.Api().V1alpha1().Checkpoints().Informer()
+	sandboxTemplateInformer := informerFactory.Api().V1alpha1().SandboxTemplates().Informer()
+
+	// Create informer factory for native Kubernetes resources (PersistentVolume)
+	k8sInformerFactory := k8sinformers.NewSharedInformerFactory(client.K8sClient, time.Minute*10)
+	persistentVolumeInformer := k8sInformerFactory.Core().V1().PersistentVolumes().Informer()
+
+	// Create informer factory with specified namespace for native Kubernetes resources (Secret)
+	k8sInformerFactoryWithSystemNs := k8sinformers.NewSharedInformerFactoryWithOptions(client.K8sClient, time.Minute*10, k8sinformers.WithNamespace(opts.SystemNamespace))
+	// to generate informers only for the specified namespace to avoid potential security privilege escalation risks.
+	secretInformer := k8sInformerFactoryWithSystemNs.Core().V1().Secrets().Informer()
+
 	if err := AddIndexersToSandboxInformer(sandboxInformer); err != nil {
 		return nil, err
 	}
 	if err := AddIndexersToSandboxSetInformer(sandboxSetInformer); err != nil {
 		return nil, err
 	}
+	if err := AddIndexersToCheckpointInformer(checkpointInformer); err != nil {
+		return nil, err
+	}
 	c := &Cache{
-		informerFactory:    informerFactory,
-		sandboxInformer:    sandboxInformer,
-		sandboxSetInformer: sandboxSetInformer,
-		stopCh:             make(chan struct{}),
-		waitHooks:          &sync.Map{},
-	}
-
-	// import core informers with specified namespace
-	if coreInformerFactorySpecifiedNs != nil {
-		c.coreInformerFactorySpecifiedNs = coreInformerFactorySpecifiedNs
-		c.secretInformer = secretInformer
-	}
-
-	// import core informers with all namespaces
-	if coreInformerFactory != nil {
-		c.coreInformerFactory = coreInformerFactory
-		if len(informers) >= 1 {
-			pvInformer := informers[0]
-			c.persistentVolumeInformer = pvInformer
-		}
+		client:                         client,
+		informerFactory:                informerFactory,
+		k8sInformerFactory:             k8sInformerFactory,
+		k8sInformerFactoryWithSystemNs: k8sInformerFactoryWithSystemNs,
+		secretInformer:                 secretInformer,
+		sandboxInformer:                sandboxInformer,
+		sandboxSetInformer:             sandboxSetInformer,
+		checkpointInformer:             checkpointInformer,
+		sandboxTemplateInformer:        sandboxTemplateInformer,
+		persistentVolumeInformer:       persistentVolumeInformer,
+		stopCh:                         make(chan struct{}),
+		waitHooks:                      &sync.Map{},
 	}
 	return c, nil
 }
 
-func (c *Cache) Run(ctx context.Context) error {
-	log := klog.FromContext(ctx)
-	_, err := c.sandboxInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		UpdateFunc: func(oldObj, newObj interface{}) {
-			c.watchSandboxSatisfied(newObj)
-		},
-		AddFunc: func(obj interface{}) {
-			c.watchSandboxSatisfied(obj)
-		},
-		DeleteFunc: func(obj interface{}) {
-			c.watchSandboxSatisfied(obj)
-		},
+func NewTestCache(t *testing.T) (*Cache, *clients.ClientSet, error) {
+	t.Helper()
+	clientSet := clients.NewFakeClientSet(t)
+	c, err := NewCache(clientSet, config.SandboxManagerOptions{
+		SystemNamespace: utils.DefaultSandboxDeployNamespace,
 	})
 	if err != nil {
-		log.Error(err, "failed to create waiter handler")
+		return nil, nil, err
+	}
+	return c, clientSet, c.Run(t.Context())
+}
+
+func (c *Cache) Run(ctx context.Context) error {
+	log := klog.FromContext(ctx)
+	if err := addWaiterHandler[*agentsv1alpha1.Sandbox](c, c.sandboxInformer); err != nil {
+		log.Error(err, "failed to create sandbox waiter handler")
+		return err
+	}
+	if err := addWaiterHandler[*agentsv1alpha1.Checkpoint](c, c.checkpointInformer); err != nil {
+		log.Error(err, "failed to create checkpoint waiter handler")
 		return err
 	}
 	c.informerFactory.Start(c.stopCh)
-	if c.coreInformerFactory != nil {
-		c.coreInformerFactory.Start(c.stopCh)
-	}
-	if c.coreInformerFactorySpecifiedNs != nil {
-		c.coreInformerFactorySpecifiedNs.Start(c.stopCh)
-	}
+	c.k8sInformerFactory.Start(c.stopCh)
+	c.k8sInformerFactoryWithSystemNs.Start(c.stopCh)
 	log.Info("Cache informer started")
-	c.informerFactory.WaitForCacheSync(c.stopCh)
-	if c.coreInformerFactory != nil {
-		c.coreInformerFactory.WaitForCacheSync(c.stopCh)
-	}
-	if c.coreInformerFactorySpecifiedNs != nil {
-		c.coreInformerFactorySpecifiedNs.WaitForCacheSync(c.stopCh)
+
+	// Wait for all informers to sync
+	if !cache.WaitForCacheSync(c.stopCh,
+		c.sandboxInformer.HasSynced,
+		c.sandboxSetInformer.HasSynced,
+		c.sandboxTemplateInformer.HasSynced,
+		c.persistentVolumeInformer.HasSynced,
+		c.secretInformer.HasSynced,
+		c.checkpointInformer.HasSynced) {
+		return fmt.Errorf("timed out waiting for caches to sync")
 	}
 	log.Info("Cache informer synced")
 	return nil
@@ -175,24 +196,67 @@ func (c *Cache) Refresh() {
 type WaitAction string
 
 const (
-	WaitActionResume    WaitAction = "Resume"
-	WaitActionPause     WaitAction = "Pause"
-	WaitActionWaitReady WaitAction = "WaitReady"
+	WaitActionResume     WaitAction = "Resume"
+	WaitActionPause      WaitAction = "Pause"
+	WaitActionWaitReady  WaitAction = "WaitReady"
+	WaitActionCheckpoint WaitAction = "Checkpoint"
 )
 
-type waitEntry struct {
+type waitEntry[T client.Object] struct {
 	ctx       context.Context
 	done      chan struct{}
 	action    WaitAction
-	checker   checkFunc
+	checker   checkFunc[T]
 	closeOnce sync.Once
 }
 
+func addWaiterHandler[T client.Object](c *Cache, informer cache.SharedIndexInformer) error {
+	_, err := informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		UpdateFunc: func(oldObj, newObj interface{}) {
+			watchObjectSatisfied[T](c, newObj)
+		},
+		AddFunc: func(obj interface{}) {
+			watchObjectSatisfied[T](c, obj)
+		},
+		DeleteFunc: func(obj interface{}) {
+			watchObjectSatisfied[T](c, obj)
+		},
+	})
+	return err
+}
+
 func (c *Cache) WaitForSandboxSatisfied(ctx context.Context, sbx *agentsv1alpha1.Sandbox, action WaitAction,
-	satisfiedFunc checkFunc, timeout time.Duration) error {
-	key := client.ObjectKeyFromObject(sbx)
+	satisfiedFunc checkFunc[*agentsv1alpha1.Sandbox], timeout time.Duration) error {
+	return waitForObjectSatisfied[*agentsv1alpha1.Sandbox](ctx, c, sbx, action, func(sbx *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) {
+		return c.GetClaimedSandbox(sandboxutils.GetSandboxID(sbx))
+	}, satisfiedFunc, timeout)
+}
+
+func (c *Cache) refreshCheckpoint(cp *agentsv1alpha1.Checkpoint) (*agentsv1alpha1.Checkpoint, error) {
+	item, exists, err := c.checkpointInformer.GetStore().Get(cp)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get checkpoint %s from cache: %w", cp.Name, err)
+	}
+	if !exists {
+		return nil, fmt.Errorf("checkpoint %s not found in cache", cp.Name)
+	}
+	return item.(*agentsv1alpha1.Checkpoint), nil
+}
+
+func (c *Cache) WaitForCheckpointSatisfied(ctx context.Context, checkpoint *agentsv1alpha1.Checkpoint, action WaitAction,
+	satisfiedFunc checkFunc[*agentsv1alpha1.Checkpoint], timeout time.Duration) (*agentsv1alpha1.Checkpoint, error) {
+	err := waitForObjectSatisfied[*agentsv1alpha1.Checkpoint](ctx, c, checkpoint, action, c.refreshCheckpoint, satisfiedFunc, timeout)
+	if err != nil {
+		return nil, err
+	}
+	return c.refreshCheckpoint(checkpoint)
+}
+
+func waitForObjectSatisfied[T client.Object](ctx context.Context, c *Cache, obj T, action WaitAction,
+	update updateFunc[T], satisfiedFunc checkFunc[T], timeout time.Duration) error {
+	key := client.ObjectKeyFromObject(obj)
 	log := klog.FromContext(ctx).V(consts.DebugLogLevel).WithValues("key", key)
-	satisfied, err := satisfiedFunc(sbx)
+	satisfied, err := satisfiedFunc(obj)
 	if satisfied || err != nil {
 		log.Info("no need to wait for satisfied", "satisfied", satisfied, "error", err)
 		return err
@@ -201,7 +265,7 @@ func (c *Cache) WaitForSandboxSatisfied(ctx context.Context, sbx *agentsv1alpha1
 		log.Info("waiting is skipped due to zero timeout")
 		return fmt.Errorf("sandbox is not satisfied")
 	}
-	value, exists := c.waitHooks.LoadOrStore(key, &waitEntry{
+	value, exists := c.waitHooks.LoadOrStore(key, &waitEntry[T]{
 		ctx:     ctx,
 		done:    make(chan struct{}),
 		action:  action,
@@ -212,7 +276,7 @@ func (c *Cache) WaitForSandboxSatisfied(ctx context.Context, sbx *agentsv1alpha1
 	} else {
 		log.Info("wait hook created")
 	}
-	entry := value.(*waitEntry)
+	entry := value.(*waitEntry[T])
 	if entry.action != action {
 		err := fmt.Errorf("another action(%s)'s wait task already exists", entry.action)
 		log.Error(err, "wait hook conflict", "existing", entry.action, "new", action)
@@ -229,16 +293,16 @@ func (c *Cache) WaitForSandboxSatisfied(ctx context.Context, sbx *agentsv1alpha1
 	select {
 	case <-entry.done:
 		log.Info("satisfied signal received")
-		return c.doubleCheckSandboxSatisfied(ctx, sbx, satisfiedFunc)
+		return doubleCheckObjectSatisfied(ctx, obj, update, satisfiedFunc)
 	case <-waitCtx.Done():
 		log.Info("stop waiting for sandbox satisfied: context canceled", "reason", waitCtx.Err())
-		return c.doubleCheckSandboxSatisfied(ctx, sbx, satisfiedFunc)
+		return doubleCheckObjectSatisfied(ctx, obj, update, satisfiedFunc)
 	}
 }
 
-func (c *Cache) doubleCheckSandboxSatisfied(ctx context.Context, sbx *agentsv1alpha1.Sandbox, satisfiedFunc checkFunc) error {
-	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
-	updated, err := c.GetClaimedSandbox(sandboxutils.GetSandboxID(sbx))
+func doubleCheckObjectSatisfied[T client.Object](ctx context.Context, obj T, update updateFunc[T], satisfiedFunc checkFunc[T]) error {
+	log := klog.FromContext(ctx).WithValues("object", klog.KObj(obj))
+	updated, err := update(obj)
 	if err != nil {
 		log.Error(err, "failed to get sandbox while double checking")
 		return err
@@ -256,21 +320,24 @@ func (c *Cache) doubleCheckSandboxSatisfied(ctx context.Context, sbx *agentsv1al
 	return nil
 }
 
-func (c *Cache) watchSandboxSatisfied(obj interface{}) {
-	sbx, ok := obj.(*agentsv1alpha1.Sandbox)
+func watchObjectSatisfied[T client.Object](c *Cache, obj interface{}) {
+	typedObj, ok := obj.(T)
 	if !ok {
 		return
 	}
-	key := client.ObjectKeyFromObject(sbx)
+	key := client.ObjectKeyFromObject(typedObj)
 	value, ok := c.waitHooks.Load(key)
 	if !ok {
 		return
 	}
-	entry := value.(*waitEntry)
+	entry, ok := value.(*waitEntry[T])
+	if !ok {
+		return
+	}
 	log := klog.FromContext(entry.ctx).V(consts.DebugLogLevel).WithValues("key", key)
-	satisfied, err := entry.checker(sbx)
+	satisfied, err := entry.checker(typedObj)
 	log.Info("watch sandbox satisfied result",
-		"satisfied", satisfied, "err", err, "resourceVersion", sbx.GetResourceVersion())
+		"satisfied", satisfied, "err", err, "resourceVersion", typedObj.GetResourceVersion())
 	if satisfied || err != nil {
 		entry.closeOnce.Do(func() {
 			close(entry.done)
@@ -308,4 +375,33 @@ func (c *Cache) GetSecret(namespace, name string) (*corev1.Secret, error) {
 		return secret, nil
 	}
 	return nil, fmt.Errorf("object with key %s is not a Secret", key)
+}
+
+func (c *Cache) GetCheckpoint(checkpointID string) (*agentsv1alpha1.Checkpoint, error) {
+	list, err := managerutils.SelectObjectWithIndex[*agentsv1alpha1.Checkpoint](c.checkpointInformer, IndexCheckpointID, checkpointID)
+	if err != nil {
+		return nil, err
+	}
+	if len(list) == 0 {
+		return nil, fmt.Errorf("checkpoint %s not found in cache", checkpointID)
+	}
+	if len(list) > 1 {
+		return nil, fmt.Errorf("multiple checkpoints found with id %s", checkpointID)
+	}
+	return list[0], nil
+}
+
+func (c *Cache) GetSandboxTemplate(namespace, name string) (*agentsv1alpha1.SandboxTemplate, error) {
+	key := fmt.Sprintf("%s/%s", namespace, name)
+	obj, exists, err := c.sandboxTemplateInformer.GetStore().GetByKey(key)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get sandboxtemplate %s/%s from cache: %w", namespace, name, err)
+	}
+	if !exists {
+		return nil, fmt.Errorf("sandboxtemplate %s/%s not found in cache", namespace, name)
+	}
+	if template, ok := obj.(*agentsv1alpha1.SandboxTemplate); ok {
+		return template, nil
+	}
+	return nil, fmt.Errorf("object with key %s is not a SandboxTemplate", key)
 }

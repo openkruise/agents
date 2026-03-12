@@ -82,8 +82,14 @@ class SandboxContext:
                             "-l", "control-plane=sandbox-controller-manager",
                             "--tail", "10000", "|", "grep", sandbox_id)
                     print("=== Sandbox Logs ===")
-                    kubectl("logs", sandbox_id, "--tail", "10000", "-v", "169.254.169.254")
+                    kubectl("logs", sandbox_id, "--tail", "10000", "|", "grep", "-v", "169.254.169.254")
                     print(f"=== End logs for sandbox {sandbox_id} ===\n")
+                    print(f"=== Describe sandbox {sandbox_id} ===\n")
+                    print(f"== Describe pod ==\n")
+                    kubectl("describe", "pod", sandbox_id)
+                    print(f"== Describe sandbox ==\n")
+                    kubectl("describe", "sandbox", sandbox_id)
+                    print(f"=== End describe sandbox {sandbox_id} ===\n")
 
             except Exception as e:
                 print(f"Failed to cleanup sandbox: {e}")

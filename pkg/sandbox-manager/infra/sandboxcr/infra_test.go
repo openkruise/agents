@@ -8,10 +8,11 @@ import (
 
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	testutils "github.com/openkruise/agents/test/utils"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	k8sfake "k8s.io/client-go/kubernetes/fake"
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/proxy"
@@ -51,13 +52,13 @@ func createTestSandbox(name, user string, phase v1alpha1.SandboxPhase, ready boo
 
 //goland:noinspection GoDeprecation
 func NewTestInfra(t *testing.T, opts ...config.SandboxManagerOptions) (*Infra, *clients.ClientSet) {
-	clientSet := clients.NewFakeClientSet()
+	clientSet := clients.NewFakeClientSet(t)
 	options := config.SandboxManagerOptions{}
 	if len(opts) > 0 {
 		options = opts[0]
 	}
 	options = config.InitOptions(options)
-	infraInstance, err := NewInfra(clientSet, k8sfake.NewSimpleClientset(), proxy.NewServer(nil, options), options)
+	infraInstance, err := NewInfra(clientSet, proxy.NewServer(nil, options), options)
 	assert.NoError(t, err)
 	assert.NoError(t, infraInstance.Run(context.Background()))
 	return infraInstance, clientSet
@@ -189,7 +190,9 @@ func TestInfra_GetSandbox(t *testing.T) {
 			time.Sleep(100 * time.Millisecond)
 
 			// Test GetClaimedSandbox
-			result, err := infraInstance.GetClaimedSandbox(context.Background(), tt.sandboxID)
+			ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+			defer cancel()
+			result, err := infraInstance.GetClaimedSandbox(ctx, tt.sandboxID)
 			if tt.expectError {
 				assert.Error(t, err)
 				assert.Nil(t, result)
@@ -592,6 +595,151 @@ func TestInfra_reconcileRoutes(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestInfra_CloneSandbox(t *testing.T) {
+	utils.InitLogOutput()
+	runtimeOpts := testutils.TestRuntimeServerOptions{
+		RunCommandResult: testutils.RunCommandResult{
+			PID:    1,
+			Exited: true,
+		},
+		RunCommandImmediately: true,
+	}
+	server := testutils.NewTestRuntimeServer(runtimeOpts)
+	defer server.Close()
+
+	infraInstance, client := NewTestInfra(t)
+
+	checkpointID := "test-checkpoint-123"
+	user := "test-user"
+
+	// Define context key types for sandbox override
+	type infraSbxOverrideKey struct{}
+	type infraSbxOverride struct {
+		Name       string
+		RuntimeURL string
+	}
+
+	// Decorator: DefaultCreateSandbox - set sandbox ready after creation
+	origCreateSandbox := DefaultCreateSandbox
+	DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, cli *clients.ClientSet) (*v1alpha1.Sandbox, error) {
+		if override, ok := ctx.Value(infraSbxOverrideKey{}).(infraSbxOverride); ok {
+			if override.Name != "" {
+				sbx.Name = override.Name
+			}
+			if override.RuntimeURL != "" {
+				if sbx.Annotations == nil {
+					sbx.Annotations = map[string]string{}
+				}
+				sbx.Annotations[v1alpha1.AnnotationRuntimeURL] = override.RuntimeURL
+			}
+		}
+		created, err := origCreateSandbox(ctx, sbx, cli)
+		if err != nil {
+			return nil, err
+		}
+		// Update Sandbox status to Ready
+		created.Status = v1alpha1.SandboxStatus{
+			Phase:              v1alpha1.SandboxRunning,
+			ObservedGeneration: created.Generation,
+			Conditions: []metav1.Condition{
+				{
+					Type:   string(v1alpha1.SandboxConditionReady),
+					Status: metav1.ConditionTrue,
+					Reason: v1alpha1.SandboxReadyReasonPodReady,
+				},
+			},
+			PodInfo: v1alpha1.PodInfo{
+				PodIP: "1.2.3.4",
+			},
+		}
+		created, err = client.ApiV1alpha1().Sandboxes(created.Namespace).UpdateStatus(ctx, created, metav1.UpdateOptions{})
+		if err != nil {
+			return nil, err
+		}
+		time.Sleep(50 * time.Millisecond) // Wait for informer sync
+		return created, nil
+	}
+	t.Cleanup(func() { DefaultCreateSandbox = origCreateSandbox })
+
+	// Create SandboxTemplate with same name as checkpoint
+	sbt := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      checkpointID, // Same name as checkpoint
+			Namespace: "default",
+		},
+		Spec: v1alpha1.SandboxTemplateSpec{
+			Template: &corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:  "main",
+							Image: "test-image",
+						},
+					},
+				},
+			},
+		},
+	}
+	_, err := client.ApiV1alpha1().SandboxTemplates("default").Create(context.Background(), sbt, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	// Wait for SandboxTemplate to be cached
+	require.Eventually(t, func() bool {
+		_, err := infraInstance.Cache.GetSandboxTemplate("default", checkpointID)
+		return err == nil
+	}, time.Second, 10*time.Millisecond)
+
+	// Create Checkpoint with same name as SandboxTemplate
+	cp := &v1alpha1.Checkpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      checkpointID,
+			Namespace: "default",
+			Labels: map[string]string{
+				v1alpha1.LabelSandboxTemplate: checkpointID,
+			},
+		},
+		Status: v1alpha1.CheckpointStatus{
+			CheckpointId: checkpointID,
+		},
+	}
+	_, err = client.ApiV1alpha1().Checkpoints("default").Create(context.Background(), cp, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	// Wait for checkpoint to be cached
+	require.Eventually(t, func() bool {
+		_, err := infraInstance.Cache.GetCheckpoint(checkpointID)
+		return err == nil
+	}, time.Second, 10*time.Millisecond)
+
+	// Build context with sbxOverride
+	ctx := context.WithValue(context.Background(), infraSbxOverrideKey{}, infraSbxOverride{
+		Name:       "test-sandbox-clone-infra",
+		RuntimeURL: server.URL,
+	})
+
+	// Call CloneSandbox
+	opts := infra.CloneSandboxOptions{
+		User:             user,
+		CheckPointID:     checkpointID,
+		WaitReadyTimeout: 30 * time.Second,
+	}
+	sbx, metrics, err := infraInstance.CloneSandbox(ctx, opts)
+
+	// Verify results
+	require.NoError(t, err)
+	require.NotNil(t, sbx)
+	assert.Equal(t, user, sbx.GetAnnotations()[v1alpha1.AnnotationOwner])
+	assert.Equal(t, checkpointID, sbx.GetLabels()[v1alpha1.LabelSandboxTemplate])
+	assert.Equal(t, "true", sbx.GetLabels()[v1alpha1.LabelSandboxIsClaimed])
+	assert.NotEmpty(t, sbx.GetAnnotations()[v1alpha1.AnnotationClaimTime])
+
+	// Verify metrics are recorded
+	assert.GreaterOrEqual(t, metrics.GetTemplate, time.Duration(0))
+	assert.GreaterOrEqual(t, metrics.CreateSandbox, time.Duration(0))
+	assert.GreaterOrEqual(t, metrics.WaitReady, time.Duration(0))
+	assert.GreaterOrEqual(t, metrics.Total, time.Duration(0))
 }
 
 func TestInfra_startRouteReconciler(t *testing.T) {

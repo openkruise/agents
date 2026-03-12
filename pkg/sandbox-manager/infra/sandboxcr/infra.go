@@ -10,18 +10,16 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
+	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/sandbox-manager/proxyutils"
 	"golang.org/x/time/rate"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
-	k8sinformers "k8s.io/client-go/informers"
-	"k8s.io/client-go/kubernetes"
 	k8scache "k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 
 	"github.com/openkruise/agents/api/v1alpha1"
-	informers "github.com/openkruise/agents/client/informers/externalversions"
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
@@ -47,22 +45,9 @@ type Infra struct {
 	reconcileRouteStopCh chan struct{}
 }
 
-func NewInfra(client *clients.ClientSet, k8sClient kubernetes.Interface, proxy *proxy.Server, opts config.SandboxManagerOptions) (*Infra, error) {
-	// Create informer factory for custom Sandbox resources
-	informerFactory := informers.NewSharedInformerFactory(client.SandboxClient, time.Minute*10)
-	sandboxInformer := informerFactory.Api().V1alpha1().Sandboxes().Informer()
-	sandboxSetInformer := informerFactory.Api().V1alpha1().SandboxSets().Informer()
-
-	// Create informer factory for native Kubernetes resources (PersistentVolume)
-	coreInformerFactory := k8sinformers.NewSharedInformerFactory(k8sClient, time.Minute*10)
-	persistentVolumeInformer := coreInformerFactory.Core().V1().PersistentVolumes().Informer()
-	// Create informer factory with specified namespace for native Kubernetes resources (Secret)
-	coreInformerFactorySpecifiedNs := k8sinformers.NewSharedInformerFactoryWithOptions(k8sClient, time.Minute*10, k8sinformers.WithNamespace(opts.SystemNamespace))
-	// to generate informers only for the specified namespace to avoid potential security privilege escalation risks.
-	secretInformer := coreInformerFactorySpecifiedNs.Core().V1().Secrets().Informer()
-
+func NewInfra(client *clients.ClientSet, proxy *proxy.Server, opts config.SandboxManagerOptions) (*Infra, error) {
 	// Initialize cache with all required informers
-	cache, err := NewCache(informerFactory, sandboxInformer, sandboxSetInformer, coreInformerFactorySpecifiedNs, secretInformer, coreInformerFactory, persistentVolumeInformer)
+	cache, err := NewCache(client, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -157,6 +142,24 @@ func buildClaimError(err error, lastError error) error {
 	return fmt.Errorf("%v, last error: %v", err, lastError)
 }
 
+func (i *Infra) CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions) (infra.Sandbox, infra.CloneMetrics, error) {
+	log := klog.FromContext(ctx)
+	opts, err := ValidateAndInitCloneOptions(opts)
+	if err != nil {
+		log.Error(err, "invalid clone options")
+		return nil, infra.CloneMetrics{}, err
+	}
+	log.Info("clone options", "options", opts)
+	opts.CreateLimiter = i.createLimiter
+	sandbox, metrics, err := CloneSandbox(ctx, opts, i.Cache, i.Client)
+	if err != nil {
+		log.Error(err, "failed to clone sandbox")
+		return nil, metrics, err
+	}
+	log.Info("sandbox cloned", "sandbox", klog.KObj(sandbox))
+	return sandbox, metrics, nil
+}
+
 func (i *Infra) GetCache() infra.CacheProvider {
 	return i.Cache
 }
@@ -164,6 +167,11 @@ func (i *Infra) GetCache() infra.CacheProvider {
 func (i *Infra) HasTemplate(name string) bool {
 	_, exists := i.templates.Load(name)
 	return exists
+}
+
+func (i *Infra) HasCheckpoint(name string) bool {
+	_, err := i.Cache.GetCheckpoint(name)
+	return err == nil
 }
 
 func (i *Infra) SelectSandboxes(user string, limit int, filter func(sandbox infra.Sandbox) bool) ([]infra.Sandbox, error) {
@@ -188,7 +196,15 @@ func (i *Infra) SelectSandboxes(user string, limit int, filter func(sandbox infr
 }
 
 func (i *Infra) GetClaimedSandbox(ctx context.Context, sandboxID string) (infra.Sandbox, error) {
-	sandbox, err := i.Cache.GetClaimedSandbox(sandboxID)
+	var sandbox *v1alpha1.Sandbox
+	err := retry.OnError(utils.CacheBackoff, utils.RetryIfContextNotCanceled(ctx), func() error {
+		got, err := i.Cache.GetClaimedSandbox(sandboxID)
+		if err != nil {
+			return err
+		}
+		sandbox = got
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}

@@ -1,8 +1,9 @@
 package config
 
 type InitRuntimeOptions struct {
-	EnvVars     map[string]string
-	AccessToken string
+	EnvVars     map[string]string `json:"envVars,omitempty"`
+	AccessToken string            `json:"accessToken,omitempty"`
+	ReInit      bool              `json:"-"`
 }
 
 type CSIMountOptions struct {

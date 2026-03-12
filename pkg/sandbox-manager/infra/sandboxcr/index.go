@@ -11,6 +11,7 @@ var (
 	IndexClaimedSandboxID = "sandboxID"
 	IndexUser             = "user"
 	IndexTemplateID       = "templateID"
+	IndexCheckpointID     = "checkpointID"
 )
 
 func AddIndexersToSandboxInformer(informer cache.SharedIndexInformer) error {
@@ -36,7 +37,7 @@ func AddIndexersToSandboxInformer(informer cache.SharedIndexInformer) error {
 			if !ok {
 				return []string{}, nil
 			}
-			if sbx.Labels[agentsv1alpha1.LabelSandboxIsClaimed] == "true" {
+			if sbx.Labels[agentsv1alpha1.LabelSandboxIsClaimed] == agentsv1alpha1.True {
 				return []string{stateutils.GetSandboxID(sbx)}, nil
 			}
 			return []string{}, nil
@@ -62,6 +63,21 @@ func AddIndexersToSandboxSetInformer(informer cache.SharedIndexInformer) error {
 				return []string{}, nil
 			}
 			return []string{result.Name}, nil
+		},
+	})
+}
+
+func AddIndexersToCheckpointInformer(informer cache.SharedIndexInformer) error {
+	return informer.AddIndexers(cache.Indexers{
+		IndexCheckpointID: func(obj interface{}) ([]string, error) {
+			result, ok := obj.(*agentsv1alpha1.Checkpoint)
+			if !ok {
+				return []string{}, nil
+			}
+			if result.Status.CheckpointId != "" {
+				return []string{result.Status.CheckpointId}, nil
+			}
+			return []string{}, nil
 		},
 	})
 }

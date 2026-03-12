@@ -42,6 +42,29 @@ func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts infra.ClaimSandb
 	return sandbox, nil
 }
 
+func (m *SandboxManager) CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions) (infra.Sandbox, error) {
+	log := klog.FromContext(ctx)
+	sandbox, metrics, err := m.infra.CloneSandbox(ctx, opts)
+	if err != nil {
+		log.Error(err, "failed to clone sandbox", "metrics", metrics)
+		SandboxCreationResponses.WithLabelValues("failure").Inc()
+		return nil, errors.NewError(errors.ErrorInternal, fmt.Sprintf("failed to clone sandbox: %v", err))
+	}
+	// Success: Record metrics
+	SandboxCreationResponses.WithLabelValues("success").Inc()
+	// Requirement: Only measure the latency when no error exists
+	SandboxCreationLatency.Observe(float64(metrics.Total.Milliseconds()))
+
+	state, reason := sandbox.GetState()
+	log.Info("sandbox cloned", "sandbox", klog.KObj(sandbox), "metrics", metrics.String(), "state", state, "reason", reason)
+
+	// Sync route without refresh since sandbox was just claimed and state is already up-to-date
+	if err = m.syncRoute(ctx, sandbox, false); err != nil {
+		log.Error(err, "failed to sync route with peers after claim")
+	}
+	return sandbox, nil
+}
+
 // GetClaimedSandbox returns a claimed (running or paused) Pod by its ID
 func (m *SandboxManager) GetClaimedSandbox(ctx context.Context, user, sandboxID string) (infra.Sandbox, error) {
 	log := klog.FromContext(ctx).WithValues("sandboxID", sandboxID)

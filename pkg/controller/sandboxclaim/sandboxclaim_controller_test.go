@@ -22,9 +22,7 @@ import (
 	"time"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	informers "github.com/openkruise/agents/client/informers/externalversions"
 	"github.com/openkruise/agents/pkg/controller/sandboxclaim/core"
-	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -150,17 +148,11 @@ func TestReconciler_Reconcile_Claiming(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = agentsv1alpha1.AddToScheme(scheme)
 
-	// Initialize cache and sandboxClient
-	clientSet := clients.NewFakeClientSet()
-	sandboxClient := clientSet.SandboxClient
-	sandboxInformerFactory := informers.NewSharedInformerFactory(sandboxClient, time.Minute*10)
-	sandboxInformer := sandboxInformerFactory.Api().V1alpha1().Sandboxes().Informer()
-	sandboxSetInformer := sandboxInformerFactory.Api().V1alpha1().SandboxSets().Informer()
-
-	cache, err := sandboxcr.NewCache(sandboxInformerFactory, sandboxInformer, sandboxSetInformer, nil, nil, nil)
+	cache, clientSet, err := sandboxcr.NewTestCache(t)
 	if err != nil {
 		t.Fatalf("Failed to create cache: %v", err)
 	}
+	sandboxClient := clientSet.SandboxClient
 
 	// Start cache
 	ctx, cancel := context.WithCancel(context.Background())

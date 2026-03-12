@@ -2,6 +2,7 @@
 # since it depends on service name and namespace that are out of this kustomize package.
 # It should be run by config/default
 resources:
+- bases/agents.kruise.io_checkpoints.yaml
 - bases/agents.kruise.io_sandboxes.yaml
 - bases/agents.kruise.io_sandboxsets.yaml
 - bases/agents.kruise.io_sandboxclaims.yaml

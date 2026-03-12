@@ -15,7 +15,7 @@ import (
 var adminKey = "admin-key"
 
 func SetUpE2BAdapter(t *testing.T) proxy.RequestAdapter {
-	client := clients.NewFakeClientSet()
+	client := clients.NewFakeClientSet(t)
 	_, err := client.K8sClient.CoreV1().Secrets("default").Create(context.Background(), &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: keys.KeySecretName,

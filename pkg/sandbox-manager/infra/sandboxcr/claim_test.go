@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
+	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	testutils "github.com/openkruise/agents/test/utils"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/time/rate"
@@ -17,9 +19,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-
-	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
-	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	"k8s.io/apimachinery/pkg/util/rand"
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
@@ -65,10 +65,45 @@ func GetMetricsFromSandbox(t *testing.T, sbx infra.Sandbox) infra.ClaimMetrics {
 //goland:noinspection GoDeprecation
 func TestInfra_ClaimSandbox(t *testing.T) {
 	utils.InitLogOutput()
-	server := NewTestRuntimeServer(RunCommandResult{
-		PID:    1,
-		Exited: true,
-	}, true, nil)
+
+	origCreateSandbox := DefaultCreateSandbox
+	DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, client *clients.ClientSet) (*v1alpha1.Sandbox, error) {
+		if sbx.Name == "" && sbx.GenerateName != "" {
+			sbx.Name = sbx.GenerateName + rand.String(5)
+		}
+		created, err := origCreateSandbox(ctx, sbx, client)
+		if err != nil {
+			return nil, err
+		}
+		created.Status = v1alpha1.SandboxStatus{
+			Phase: v1alpha1.SandboxRunning,
+			Conditions: []metav1.Condition{
+				{
+					Type:   string(v1alpha1.SandboxConditionReady),
+					Status: metav1.ConditionTrue,
+				},
+			},
+			PodInfo: v1alpha1.PodInfo{
+				PodIP: "1.2.3.4",
+			},
+		}
+		created, err = client.ApiV1alpha1().Sandboxes(created.Namespace).UpdateStatus(ctx, created, metav1.UpdateOptions{})
+		if err != nil {
+			return nil, err
+		}
+		time.Sleep(50 * time.Millisecond)
+		return created, nil
+	}
+	t.Cleanup(func() { DefaultCreateSandbox = origCreateSandbox })
+
+	opts := testutils.TestRuntimeServerOptions{
+		RunCommandResult: testutils.RunCommandResult{
+			PID:    1,
+			Exited: true,
+		},
+		RunCommandImmediately: true,
+	}
+	server := testutils.NewTestRuntimeServer(opts)
 	defer server.Close()
 	existTemplate := "test-template"
 	user := "test-user"
@@ -192,7 +227,7 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 			},
 			preModifier: func(sbx *v1alpha1.Sandbox, infra *Infra) {
 				sbx.Annotations[v1alpha1.AnnotationRuntimeURL] = server.URL
-				sbx.Annotations[v1alpha1.AnnotationRuntimeAccessToken] = AccessToken
+				sbx.Annotations[v1alpha1.AnnotationRuntimeAccessToken] = testutils.AccessToken
 			},
 			postCheck: func(t *testing.T, sbx infra.Sandbox) {
 				metrics := GetMetricsFromSandbox(t, sbx)
@@ -370,16 +405,6 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 			if tt.preProcess != nil {
 				tt.preProcess(t, testInfra)
 			}
-			ctx, cancel := context.WithCancel(t.Context())
-			done := make(chan struct{})
-			go func() {
-				KeepMakingAllSandboxesReady(ctx, client.SandboxClient)
-				close(done)
-			}()
-			defer func() {
-				cancel()
-				<-done // 等待 goroutine 完全退出
-			}()
 			claimCtx := t.Context()
 			if tt.claimCtx != nil {
 				claimCtx = tt.claimCtx(t.Context())
@@ -410,11 +435,15 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 
 //goland:noinspection GoDeprecation
 func TestClaimSandboxFailed(t *testing.T) {
-	server := NewTestRuntimeServer(RunCommandResult{
-		PID:      1,
-		ExitCode: 1, // returns an error
-		Exited:   true,
-	}, true, nil)
+	opts := testutils.TestRuntimeServerOptions{
+		RunCommandResult: testutils.RunCommandResult{
+			PID:      1,
+			ExitCode: 1, // returns an error
+			Exited:   true,
+		},
+		RunCommandImmediately: true,
+	}
+	server := testutils.NewTestRuntimeServer(opts)
 	defer server.Close()
 	existTemplate := "test-template"
 
@@ -487,7 +516,7 @@ func TestClaimSandboxFailed(t *testing.T) {
 			},
 			preModifier: func(sbx *v1alpha1.Sandbox) {
 				sbx.Annotations[v1alpha1.AnnotationRuntimeURL] = server.URL
-				sbx.Annotations[v1alpha1.AnnotationRuntimeAccessToken] = AccessToken
+				sbx.Annotations[v1alpha1.AnnotationRuntimeAccessToken] = testutils.AccessToken
 			},
 			expectError: "command failed",
 		},
@@ -508,7 +537,7 @@ func TestClaimSandboxFailed(t *testing.T) {
 			},
 			preModifier: func(sbx *v1alpha1.Sandbox) {
 				sbx.Annotations[v1alpha1.AnnotationRuntimeURL] = server.URL
-				sbx.Annotations[v1alpha1.AnnotationRuntimeAccessToken] = AccessToken
+				sbx.Annotations[v1alpha1.AnnotationRuntimeAccessToken] = testutils.AccessToken
 			},
 			expectError: "command failed",
 		},
@@ -726,55 +755,6 @@ func TestCheckSandboxInplaceUpdate(t *testing.T) {
 	}
 }
 
-func KeepMakingAllSandboxesReady(ctx context.Context, client clients.SandboxClient) {
-	ticker := time.NewTicker(10 * time.Millisecond)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			sandboxList, err := client.ApiV1alpha1().Sandboxes("default").List(context.Background(), metav1.ListOptions{})
-			if err != nil {
-				// Don't use require.NoError in goroutine - causes data race
-				continue
-			}
-			for _, sbx := range sandboxList.Items {
-				// Skip already ready sandboxes to reduce unnecessary updates
-				currentState, _ := sandboxutils.GetSandboxState(&sbx)
-				if currentState == v1alpha1.SandboxStateRunning {
-					continue
-				}
-
-				sbx.Status = v1alpha1.SandboxStatus{
-					Phase:              v1alpha1.SandboxRunning,
-					ObservedGeneration: sbx.Generation, // Important: sync generation
-					Conditions: []metav1.Condition{
-						{
-							Type:   string(v1alpha1.SandboxConditionReady),
-							Status: metav1.ConditionTrue,
-							Reason: v1alpha1.SandboxReadyReasonPodReady,
-						},
-					},
-					PodInfo: v1alpha1.PodInfo{
-						PodIP: "1.2.3.4",
-					},
-				}
-				updated, err := client.ApiV1alpha1().Sandboxes(sbx.Namespace).UpdateStatus(context.Background(), &sbx, metav1.UpdateOptions{})
-				if err != nil {
-					log.Printf("failed to update sandbox status: %v", err)
-					continue
-				}
-				// Record the expected version to help InplaceRefresh
-				if updated != nil {
-					utils.ResourceVersionExpectationExpect(updated)
-				}
-			}
-		}
-	}
-}
-
 func TestNewSandboxFromTemplate_RateLimitExceeded(t *testing.T) {
 	utils.InitLogOutput()
 
@@ -817,14 +797,14 @@ func TestNewSandboxFromTemplate_RateLimitExceeded(t *testing.T) {
 		return err == nil
 	}, time.Second, 10*time.Millisecond)
 
-	// Test: Call newSandboxFromTemplate when rate limiter is exhausted
+	// Test: Call newSandboxFromSandboxSet when rate limiter is exhausted
 	opts := infra.ClaimSandboxOptions{
 		Template: template,
 		User:     "test-user",
 	}
 
 	// Call the function
-	sbx, _, err := newSandboxFromTemplate(opts, infraInstance.Cache, infraInstance.Client.SandboxClient, limiter)
+	sbx, _, err := newSandboxFromSandboxSet(opts, infraInstance.Cache, infraInstance.Client.SandboxClient, limiter)
 
 	// Assertions
 	assert.Nil(t, sbx, "sandbox should be nil when rate limited")

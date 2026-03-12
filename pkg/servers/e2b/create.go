@@ -1,6 +1,7 @@
 package e2b
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -11,7 +12,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/klog/v2"
 
-	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
@@ -34,54 +34,32 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 		return web.ApiResponse[*models.Sandbox]{}, parseErr
 	}
 	log.Info("create sandbox request received", "request", request)
+	if sc.manager.GetInfra().HasTemplate(request.TemplateID) {
+		log.Info("infra has template, will create sandbox with claim", "templateID", request.TemplateID)
+		return sc.createSandboxWithClaim(ctx, request, user)
+	} else if sc.manager.GetInfra().HasCheckpoint(request.TemplateID) {
+		log.Info("infra has checkpoint, will create sandbox with clone", "templateID", request.TemplateID)
+		return sc.createSandboxWithClone(ctx, request, user)
+	}
+	return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
+		Code:    http.StatusBadRequest,
+		Message: "Template or Checkpoint not found",
+	}
+}
 
+func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models.NewSandboxRequest, user *models.CreatedTeamAPIKey) (web.ApiResponse[*models.Sandbox], *web.ApiError) {
+	log := klog.FromContext(ctx)
+	claimStart := time.Now()
 	var accessToken string
 	if request.Secure {
 		accessToken = uuid.NewString()
 	}
-	claimStart := time.Now()
 	opts := infra.ClaimSandboxOptions{
 		Template:     request.TemplateID,
 		User:         user.ID.String(),
 		ClaimTimeout: time.Duration(request.Extensions.TimeoutSeconds) * time.Second,
 		Modifier: func(sbx infra.Sandbox) {
-			// The E2B Timeout feature involves three sets of interfaces: create, connect, and pause,
-			// with two behavioral modes based on the `autoPause` parameter during creation:
-			//
-			// - `autoPause = false` (default): Automatically delete Sandbox when timeout
-			// - `autoPause = true`: Pause Sandbox when timeout
-			//
-			// The Timeout feature is implemented through two parameters in the `Sandbox` Infra:
-			//
-			// - During creation (create interface), set the corresponding parameter to `time.Now().Add(timeout)`
-			// - During connection (connect, timeout interfaces), set the corresponding parameter to `time.Now().Add(timeout)` as well
-			// - During pause (pause interface):
-			//   - if autoPause == true: Set `ShutdownTime` to `time.Now().Add(maxTimeout)` and clear `PauseTime`
-			//   - if autoPause == false: Set `ShutdownTime` to `time.Now().Add(maxTimeout)`
-			now := time.Now()
-			timeoutOptions := infra.TimeoutOptions{}
-			if !request.Extensions.NeverTimeout {
-				if request.AutoPause {
-					timeoutOptions.ShutdownTime = TimeAfterSeconds(now, sc.maxTimeout)
-					timeoutOptions.PauseTime = TimeAfterSeconds(now, request.Timeout)
-				} else {
-					timeoutOptions.ShutdownTime = TimeAfterSeconds(now, request.Timeout)
-				}
-			}
-			sbx.SetTimeout(timeoutOptions)
-			log.Info("timeout options calculated", "options", timeoutOptions)
-
-			annotations := sbx.GetAnnotations()
-			if annotations == nil {
-				annotations = make(map[string]string)
-			}
-			for k, v := range request.Metadata {
-				annotations[k] = v
-			}
-			if !request.Extensions.SkipInitRuntime {
-				annotations[v1alpha1.AnnotationRuntimeAccessToken] = accessToken
-			}
-			sbx.SetAnnotations(annotations)
+			sc.basicSandboxCreateModifier(ctx, sbx, request)
 		},
 		ReserveFailedSandbox: request.Extensions.ReserveFailedSandbox,
 		CreateOnNoStock:      request.Extensions.CreateOnNoStock,
@@ -139,6 +117,49 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 	}, nil
 }
 
+func (sc *Controller) createSandboxWithClone(ctx context.Context, request models.NewSandboxRequest, user *models.CreatedTeamAPIKey) (web.ApiResponse[*models.Sandbox], *web.ApiError) {
+	log := klog.FromContext(ctx)
+	start := time.Now()
+	opts := infra.CloneSandboxOptions{
+		User:         user.ID.String(),
+		CheckPointID: request.TemplateID,
+		CloneTimeout: time.Duration(request.Extensions.TimeoutSeconds) * time.Second,
+		Modifier: func(sbx infra.Sandbox) {
+			sc.basicSandboxCreateModifier(ctx, sbx, request)
+		},
+	}
+	if request.Extensions.WaitReadySeconds > 0 {
+		opts.WaitReadyTimeout = time.Duration(request.Extensions.WaitReadySeconds) * time.Second
+	}
+	if request.Extensions.CSIMount.PersistentVolumeName != "" {
+		driverName, csiReqConfigRaw, err := sc.csiMountOptionsConfig(ctx,
+			request.Extensions.CSIMount.ContainerMountPoint, request.Extensions.CSIMount.PersistentVolumeName, request.Extensions.CSIMount.PersistentVolumeSubpath)
+		if err != nil {
+			return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
+				Code:    http.StatusBadRequest,
+				Message: err.Error(),
+			}
+		}
+		opts.CSIMount = &config.CSIMountOptions{
+			Driver:     driverName,
+			RequestRaw: csiReqConfigRaw,
+		}
+	}
+	sbx, err := sc.manager.CloneSandbox(ctx, opts)
+	if err != nil {
+		log.Error(err, "sandbox clone failed")
+		return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
+			Message: err.Error(),
+		}
+	}
+	log.Info("sandbox cloned", "id", sbx.GetSandboxID(), "sbx", klog.KObj(sbx),
+		"resourceVersion", sbx.GetResourceVersion(), "totalCost", time.Since(start))
+	return web.ApiResponse[*models.Sandbox]{
+		Code: http.StatusCreated,
+		Body: sc.convertToE2BSandbox(sbx, sbx.GetAccessToken()),
+	}, nil
+}
+
 func (sc *Controller) parseCreateSandboxRequest(r *http.Request) (models.NewSandboxRequest, *web.ApiError) {
 	var request models.NewSandboxRequest
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
@@ -182,4 +203,42 @@ func (sc *Controller) parseCreateSandboxRequest(r *http.Request) (models.NewSand
 	}
 
 	return request, nil
+}
+
+func (sc *Controller) basicSandboxCreateModifier(ctx context.Context, sbx infra.Sandbox, request models.NewSandboxRequest) {
+	log := klog.FromContext(ctx)
+	// The E2B Timeout feature involves three sets of interfaces: create, connect, and pause,
+	// with two behavioral modes based on the `autoPause` parameter during creation:
+	//
+	// - `autoPause = false` (default): Automatically delete Sandbox when timeout
+	// - `autoPause = true`: Pause Sandbox when timeout
+	//
+	// The Timeout feature is implemented through two parameters in the `Sandbox` Infra:
+	//
+	// - During creation (create interface), set the corresponding parameter to `time.Now().Add(timeout)`
+	// - During connection (connect, timeout interfaces), set the corresponding parameter to `time.Now().Add(timeout)` as well
+	// - During pause (pause interface):
+	//   - if autoPause == true: Set `ShutdownTime` to `time.Now().Add(maxTimeout)` and clear `PauseTime`
+	//   - if autoPause == false: Set `ShutdownTime` to `time.Now().Add(maxTimeout)`
+	now := time.Now()
+	timeoutOptions := infra.TimeoutOptions{}
+	if !request.Extensions.NeverTimeout {
+		if request.AutoPause {
+			timeoutOptions.ShutdownTime = TimeAfterSeconds(now, sc.maxTimeout)
+			timeoutOptions.PauseTime = TimeAfterSeconds(now, request.Timeout)
+		} else {
+			timeoutOptions.ShutdownTime = TimeAfterSeconds(now, request.Timeout)
+		}
+	}
+	sbx.SetTimeout(timeoutOptions)
+	log.Info("timeout options calculated", "options", timeoutOptions)
+
+	annotations := sbx.GetAnnotations()
+	if annotations == nil {
+		annotations = make(map[string]string)
+	}
+	for k, v := range request.Metadata {
+		annotations[k] = v
+	}
+	sbx.SetAnnotations(annotations)
 }

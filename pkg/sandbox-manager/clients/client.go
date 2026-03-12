@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"testing"
 
 	sandboxclient "github.com/openkruise/agents/client/clientset/versioned"
 	sandboxfake "github.com/openkruise/agents/client/clientset/versioned/fake"
@@ -26,7 +27,6 @@ type ClientSet struct {
 }
 
 func NewClientSetWithOptions(qps float32, burst int) (*ClientSet, error) {
-	client := &ClientSet{}
 	// Try to use in-cluster config first (when running inside a Kubernetes pod)
 	config, err := rest.InClusterConfig()
 	if err != nil {
@@ -71,6 +71,12 @@ func NewClientSetWithOptions(qps float32, burst int) (*ClientSet, error) {
 			config.Burst = burstEnv
 		}
 	}
+	return NewClientSetWithConfig(config)
+}
+
+func NewClientSetWithConfig(config *rest.Config) (*ClientSet, error) {
+	var err error
+	client := &ClientSet{}
 	client.Config = config
 	klog.InfoS("client config", "qps", config.QPS, "burst", config.Burst)
 	// Create the client
@@ -88,7 +94,8 @@ func NewClientSetWithOptions(qps float32, burst int) (*ClientSet, error) {
 }
 
 //goland:noinspection GoDeprecation
-func NewFakeClientSet() *ClientSet {
+func NewFakeClientSet(t *testing.T) *ClientSet {
+	t.Helper()
 	client := &ClientSet{}
 	client.K8sClient = k8sfake.NewClientset()
 	client.SandboxClient = sandboxfake.NewSimpleClientset()

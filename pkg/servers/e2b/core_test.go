@@ -29,7 +29,7 @@ import (
 )
 
 var TestServerPort = 9999
-var Namespace = "test"
+var Namespace = "default"
 var InitKey = "admin-987654321"
 
 func CreateSandboxWithStatus(t *testing.T, client versioned.Interface, sbx *agentsv1alpha1.Sandbox) {
@@ -50,7 +50,7 @@ func CreatePodWithStatus(t *testing.T, client kubernetes.Interface, pod *corev1.
 
 func Setup(t *testing.T) (*Controller, *clients.ClientSet, func()) {
 	utils.InitLogOutput()
-	clientSet := clients.NewFakeClientSet()
+	clientSet := clients.NewFakeClientSet(t)
 	namespace := "sandbox-system"
 	// mock self pod
 	pod := &corev1.Pod{
@@ -125,7 +125,17 @@ func GetSbsOwnerReference(sbs *agentsv1alpha1.SandboxSet) []metav1.OwnerReferenc
 	return []metav1.OwnerReference{*metav1.NewControllerRef(sbs, agentsv1alpha1.SandboxSetControllerKind)}
 }
 
-func CreateSandboxPool(t *testing.T, controller *Controller, name string, available int) func() {
+// CreateSandboxPoolOptions contains options for creating a sandbox pool
+type CreateSandboxPoolOptions struct {
+	RuntimeURL  string
+	AccessToken string
+}
+
+func CreateSandboxPool(t *testing.T, controller *Controller, name string, available int, opts ...CreateSandboxPoolOptions) func() {
+	var options CreateSandboxPoolOptions
+	if len(opts) > 0 {
+		options = opts[0]
+	}
 	tmpl := agentsv1alpha1.EmbeddedSandboxTemplate{
 		Template: &corev1.PodTemplateSpec{
 			Spec: corev1.PodSpec{
@@ -156,6 +166,13 @@ func CreateSandboxPool(t *testing.T, controller *Controller, name string, availa
 	}, time.Second, 10*time.Millisecond)
 	now := metav1.Now()
 	for i := 0; i < available; i++ {
+		annotations := map[string]string{}
+		if options.RuntimeURL != "" {
+			annotations[agentsv1alpha1.AnnotationRuntimeURL] = options.RuntimeURL
+		}
+		if options.AccessToken != "" {
+			annotations[agentsv1alpha1.AnnotationRuntimeAccessToken] = options.AccessToken
+		}
 		sbx := &agentsv1alpha1.Sandbox{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      fmt.Sprintf("%s-%d", name, i),
@@ -164,6 +181,7 @@ func CreateSandboxPool(t *testing.T, controller *Controller, name string, availa
 					agentsv1alpha1.LabelSandboxTemplate:  name,
 					agentsv1alpha1.LabelSandboxIsClaimed: "false",
 				},
+				Annotations:       annotations,
 				OwnerReferences:   GetSbsOwnerReference(sbs),
 				ResourceVersion:   "1",
 				UID:               types.UID(uuid.NewString()),

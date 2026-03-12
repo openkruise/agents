@@ -1,7 +1,11 @@
 package sandboxcr
 
 import (
+	"encoding/json"
+	"fmt"
+
 	"github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -36,4 +40,18 @@ func GetSandboxCondition(sbx *v1alpha1.Sandbox, tp v1alpha1.SandboxConditionType
 		}
 	}
 	return metav1.Condition{}
+}
+
+func getInitRuntimeRequest(s metav1.Object) (*config.InitRuntimeOptions, error) {
+	// Build initRuntimeOpts from annotation at the beginning
+	var initRuntimeOpts *config.InitRuntimeOptions
+	if initRuntimeRequest := s.GetAnnotations()[v1alpha1.AnnotationInitRuntimeRequest]; initRuntimeRequest != "" {
+		var opts config.InitRuntimeOptions
+		if err := json.Unmarshal([]byte(initRuntimeRequest), &opts); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal init runtime request: %w", err)
+		}
+		opts.ReInit = true
+		initRuntimeOpts = &opts
+	}
+	return initRuntimeOpts, nil
 }

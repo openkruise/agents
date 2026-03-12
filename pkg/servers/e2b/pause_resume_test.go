@@ -202,8 +202,6 @@ func TestConnectSandbox(t *testing.T) {
 
 func TestResumeSandbox(t *testing.T) {
 	templateName := "test-template"
-	controller, client, teardown := Setup(t)
-	defer teardown()
 	user := &models.CreatedTeamAPIKey{
 		ID:   keys.AdminKeyID,
 		Key:  InitKey,
@@ -254,6 +252,8 @@ func TestResumeSandbox(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			controller, client, teardown := Setup(t)
+			defer teardown()
 			cleanup := CreateSandboxPool(t, controller, templateName, 1)
 			defer cleanup()
 

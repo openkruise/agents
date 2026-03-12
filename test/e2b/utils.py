@@ -110,7 +110,13 @@ def wait_for_sandbox():
 
     # Wait for sandboxes cleanup
     while time.time() - start_time < timeout:
-        sandboxes = list_sandbox()
+        try:
+            sandboxes = list_sandbox()
+        except Exception as e:
+            print(f"list_sandbox() failed: {e}")
+            print("\n=== Sandbox Manager Logs ===")
+            kubectl("logs", "-n", "sandbox-system", "-l", "app.kubernetes.io/name=sandbox-manager", "--tail=100")
+            raise
         if len(sandboxes) == 0:
             print("No sandboxes running, proceeding to check Ready conditions")
             break
