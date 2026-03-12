@@ -120,6 +120,7 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 
 	sbx, err := sc.manager.ClaimSandbox(ctx, opts)
 	if err != nil {
+		log.Error(err, "sandbox creation failed")
 		return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
 			Message: err.Error(),
 		}
