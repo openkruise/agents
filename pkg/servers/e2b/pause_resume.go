@@ -45,7 +45,8 @@ func (sc *Controller) buildPauseTimeoutOptions(sbx infra.Sandbox, now time.Time)
 	opts := sbx.GetTimeout()
 	// Only set timeout if the sandbox has a timeout configured (not never-timeout)
 	if !opts.ShutdownTime.IsZero() {
-		timeout := TimeAfterSeconds(now, sc.maxTimeout)
+		// Paused sandboxes are kept indefinitely — there is no automatic deletion or time-to-live limit
+		timeout := now.AddDate(1000, 0, 0)
 		opts.ShutdownTime = timeout
 		if !opts.PauseTime.IsZero() {
 			opts.PauseTime = timeout
