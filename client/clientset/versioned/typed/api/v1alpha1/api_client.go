@@ -27,6 +27,7 @@ import (
 
 type ApiV1alpha1Interface interface {
 	RESTClient() rest.Interface
+	CheckpointsGetter
 	SandboxesGetter
 	SandboxClaimsGetter
 	SandboxSetsGetter
@@ -36,6 +37,10 @@ type ApiV1alpha1Interface interface {
 // ApiV1alpha1Client is used to interact with features provided by the api group.
 type ApiV1alpha1Client struct {
 	restClient rest.Interface
+}
+
+func (c *ApiV1alpha1Client) Checkpoints(namespace string) CheckpointInterface {
+	return newCheckpoints(c, namespace)
 }
 
 func (c *ApiV1alpha1Client) Sandboxes(namespace string) SandboxInterface {

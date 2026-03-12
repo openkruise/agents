@@ -27,6 +27,10 @@ type FakeApiV1alpha1 struct {
 	*testing.Fake
 }
 
+func (c *FakeApiV1alpha1) Checkpoints(namespace string) v1alpha1.CheckpointInterface {
+	return newFakeCheckpoints(c, namespace)
+}
+
 func (c *FakeApiV1alpha1) Sandboxes(namespace string) v1alpha1.SandboxInterface {
 	return newFakeSandboxes(c, namespace)
 }
