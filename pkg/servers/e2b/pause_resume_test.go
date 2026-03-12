@@ -60,7 +60,7 @@ func TestPauseSandbox(t *testing.T) {
 	assert.Equal(t, models.SandboxStatePaused, describeResp.Body.State)
 	endAt, parseErr := time.Parse(time.RFC3339, describeResp.Body.EndAt)
 	assert.NoError(t, parseErr)
-	expectEndAt := start.Add(time.Duration(controller.maxTimeout) * time.Second)
+	expectEndAt := start.AddDate(1000, 0, 0)
 	assert.WithinDuration(t, expectEndAt, endAt, 5*time.Second, "expect end at: %s, but got %s", expectEndAt, endAt)
 }
 

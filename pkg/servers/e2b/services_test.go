@@ -277,6 +277,7 @@ func TestAutoPause(t *testing.T) {
 	now := time.Now()
 	timeoutTime := now.Add(time.Duration(timeout) * time.Second)
 	maxTimeoutTime := now.Add(time.Duration(models.DefaultMaxTimeout) * time.Second)
+	timeoutAfterPaused := now.AddDate(1000, 0, 0)
 	templateName := "auto-pause"
 	user := &models.CreatedTeamAPIKey{
 		ID:   keys.AdminKeyID,
@@ -304,7 +305,7 @@ func TestAutoPause(t *testing.T) {
 				assert.Nil(t, sbx.Spec.PauseTime)
 				assert.NotNil(t, sbx.Spec.ShutdownTime)
 				if sbx.Spec.ShutdownTime != nil {
-					assert.WithinDuration(t, sbx.Spec.ShutdownTime.Time, maxTimeoutTime, 5*time.Second)
+					assert.WithinDuration(t, sbx.Spec.ShutdownTime.Time, timeoutAfterPaused, 5*time.Second)
 				}
 			},
 			resumeChecker: func(t *testing.T, sbx *v1alpha1.Sandbox) {
@@ -331,11 +332,11 @@ func TestAutoPause(t *testing.T) {
 			pauseChecker: func(t *testing.T, sbx *v1alpha1.Sandbox) {
 				assert.NotNil(t, sbx.Spec.PauseTime)
 				if sbx.Spec.PauseTime != nil {
-					assert.WithinDuration(t, sbx.Spec.PauseTime.Time, maxTimeoutTime, 5*time.Second)
+					assert.WithinDuration(t, sbx.Spec.PauseTime.Time, timeoutAfterPaused, 5*time.Second)
 				}
 				assert.NotNil(t, sbx.Spec.ShutdownTime)
 				if sbx.Spec.ShutdownTime != nil {
-					assert.WithinDuration(t, sbx.Spec.ShutdownTime.Time, maxTimeoutTime, 5*time.Second)
+					assert.WithinDuration(t, sbx.Spec.ShutdownTime.Time, timeoutAfterPaused, 5*time.Second)
 				}
 			},
 			resumeChecker: func(t *testing.T, sbx *v1alpha1.Sandbox) {
@@ -379,7 +380,7 @@ func TestAutoPause(t *testing.T) {
 				"sandboxID": createResp.Body.SandboxID,
 			}, user))
 			assert.Nil(t, apiError)
-			AssertEndAt(t, maxTimeoutTime, describeResp.Body.EndAt)
+			AssertEndAt(t, timeoutAfterPaused, describeResp.Body.EndAt)
 			tt.pauseChecker(t, GetSandbox(t, createResp.Body.SandboxID, client.SandboxClient))
 			var wg sync.WaitGroup
 			wg.Add(1)
