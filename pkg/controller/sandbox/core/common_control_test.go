@@ -1009,6 +1009,9 @@ func TestCommonControl_createPod(t *testing.T) {
 	if pod.Annotations[utils.PodAnnotationCreatedBy] != utils.CreatedBySandbox {
 		t.Errorf("Expected pod annotation %s to be %s, got %s", utils.PodAnnotationCreatedBy, utils.CreatedBySandbox, pod.Annotations[utils.PodAnnotationCreatedBy])
 	}
+	if pod.Labels[utils.PodLabelCreatedBy] != utils.CreatedBySandbox {
+		t.Errorf("Expected pod label %s to be %s, got %s", utils.PodLabelCreatedBy, utils.CreatedBySandbox, pod.Labels[utils.PodLabelCreatedBy])
+	}
 
 	sandboxWithPVC := &agentsv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{

@@ -29,26 +29,24 @@ import (
 )
 
 // SandboxPodEventHandler watches Pods created by the Sandbox controller.
+// The informer cache is already filtered by label selector (agents.kruise.io/created-by),
+// so all events here are guaranteed to be agent-related pods.
 type SandboxPodEventHandler struct{}
 
 func (e *SandboxPodEventHandler) Create(_ context.Context, evt event.TypedCreateEvent[client.Object], w workqueue.TypedRateLimitingInterface[reconcile.Request]) {
-	if evt.Object.GetAnnotations()[utils.PodAnnotationCreatedBy] != "" {
-		w.Add(reconcile.Request{NamespacedName: client.ObjectKeyFromObject(evt.Object)})
-	}
+	w.Add(reconcile.Request{NamespacedName: client.ObjectKeyFromObject(evt.Object)})
 }
 
 func (e *SandboxPodEventHandler) Update(_ context.Context, evt event.TypedUpdateEvent[client.Object], w workqueue.TypedRateLimitingInterface[reconcile.Request]) {
 	oldObj := evt.ObjectOld.(*corev1.Pod)
 	newObj := evt.ObjectNew.(*corev1.Pod)
-	if newObj.Annotations[utils.PodAnnotationCreatedBy] != "" && isActivePodUpdate(oldObj, newObj) {
+	if isActivePodUpdate(oldObj, newObj) {
 		w.Add(reconcile.Request{NamespacedName: client.ObjectKeyFromObject(evt.ObjectNew)})
 	}
 }
 
 func (e *SandboxPodEventHandler) Delete(_ context.Context, evt event.TypedDeleteEvent[client.Object], w workqueue.TypedRateLimitingInterface[reconcile.Request]) {
-	if evt.Object.GetAnnotations()[utils.PodAnnotationCreatedBy] != "" {
-		w.Add(reconcile.Request{NamespacedName: client.ObjectKeyFromObject(evt.Object)})
-	}
+	w.Add(reconcile.Request{NamespacedName: client.ObjectKeyFromObject(evt.Object)})
 }
 
 func (e *SandboxPodEventHandler) Generic(context.Context, event.TypedGenericEvent[client.Object], workqueue.TypedRateLimitingInterface[reconcile.Request]) {

@@ -24,7 +24,10 @@ import (
 	"os"
 
 	"github.com/spf13/pflag"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/selection"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/klog/v2"
@@ -34,6 +37,8 @@ import (
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 	ctrl "sigs.k8s.io/controller-runtime"
+	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
@@ -43,6 +48,7 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/client"
 	"github.com/openkruise/agents/pkg/controller"
+	"github.com/openkruise/agents/pkg/utils"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 	"github.com/openkruise/agents/pkg/utils/fieldindex"
 	customwebhook "github.com/openkruise/agents/pkg/webhook"
@@ -221,7 +227,15 @@ func main() {
 		setupLog.Error(err, "unable to set up client")
 		os.Exit(1)
 	}
+	podLabelReq, err := labels.NewRequirement(utils.PodLabelCreatedBy, selection.Exists, nil)
+	if err != nil {
+		setupLog.Error(err, "unable to create pod label requirement")
+		os.Exit(1)
+	}
+	podLabelSelector := labels.NewSelector().Add(*podLabelReq)
+
 	mgr, err := ctrl.NewManager(config, ctrl.Options{
+
 		Scheme:                  scheme,
 		Metrics:                 metricsServerOptions,
 		WebhookServer:           webhookServer,
@@ -229,6 +243,13 @@ func main() {
 		LeaderElection:          enableLeaderElection,
 		LeaderElectionID:        "f57b9a68.kruise.io",
 		LeaderElectionNamespace: leaderElectionNamespace,
+		Cache: ctrlcache.Options{
+			ByObject: map[ctrlclient.Object]ctrlcache.ByObject{
+				&corev1.Pod{}: {
+					Label: podLabelSelector,
+				},
+			},
+		},
 		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
 		// when the Manager ends. This requires the binary to immediately end when the
 		// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly

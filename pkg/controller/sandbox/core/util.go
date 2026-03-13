@@ -100,6 +100,7 @@ func GeneratePodFromSandbox(ctx context.Context, cli client.Client, box *agentsv
 	if pod.Labels == nil {
 		pod.Labels = map[string]string{}
 	}
+	pod.Labels[utils.PodLabelCreatedBy] = utils.CreatedBySandbox
 	// todo, when resume, create Pod based on the revision from the paused state.
 	pod.Labels[agentsv1alpha1.PodLabelTemplateHash] = revision
 
