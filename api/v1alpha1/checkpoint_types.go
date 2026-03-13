@@ -24,6 +24,9 @@ const (
 	// CheckpointFinalizer is checkpoint finalizer
 	CheckpointFinalizer = "agents.kruise.io/checkpoint"
 
+	// CheckpointLabelSandboxName is checkpointed sandbox name
+	CheckpointLabelSandboxName = InternalPrefix + "sandbox-name"
+
 	CheckpointPersistentContentMemory     = "memory"
 	CheckpointPersistentContentFilesystem = "filesystem"
 )
