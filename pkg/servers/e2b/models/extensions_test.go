@@ -129,6 +129,78 @@ func TestParseExtensions(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			name: "valid csi mount extension",
+			metadata: map[string]string{
+				ExtensionKeyClaimWithCSIMount_VolumeName: "test-volume",
+				ExtensionKeyClaimWithCSIMount_MountPoint: "/valid/path",
+			},
+			wantErr: false,
+			expectExtension: NewSandboxRequestExtension{
+				CreateOnNoStock: true,
+				CSIMount: CSIMountExtension{
+					PersistentVolumeName:    "test-volume",
+					ContainerMountPoint:     "/valid/path",
+					PersistentVolumeSubpath: "",
+				},
+			},
+		},
+		{
+			name: "valid csi mount extension with subpath",
+			metadata: map[string]string{
+				ExtensionKeyClaimWithCSIMount_VolumeName: "test-volume",
+				ExtensionKeyClaimWithCSIMount_MountPoint: "/valid/path",
+				ExtensionKeyClaimWithCSIMount_SubPath:    "subdir/data",
+			},
+			wantErr: false,
+			expectExtension: NewSandboxRequestExtension{
+				CreateOnNoStock: true,
+				CSIMount: CSIMountExtension{
+					PersistentVolumeName:    "test-volume",
+					ContainerMountPoint:     "/valid/path",
+					PersistentVolumeSubpath: "subdir/data",
+				},
+			},
+		},
+		{
+			name: "valid csi mount extension with empty subpath",
+			metadata: map[string]string{
+				ExtensionKeyClaimWithCSIMount_VolumeName: "test-volume",
+				ExtensionKeyClaimWithCSIMount_MountPoint: "/valid/path",
+				ExtensionKeyClaimWithCSIMount_SubPath:    "",
+			},
+			wantErr: false,
+			expectExtension: NewSandboxRequestExtension{
+				CreateOnNoStock: true,
+				CSIMount: CSIMountExtension{
+					PersistentVolumeName:    "test-volume",
+					ContainerMountPoint:     "/valid/path",
+					PersistentVolumeSubpath: "",
+				},
+			},
+		},
+		{
+			name: "invalid csi mount extension - missing volume name",
+			metadata: map[string]string{
+				ExtensionKeyClaimWithCSIMount_MountPoint: "/valid/path",
+			},
+			wantErr: true,
+		},
+		{
+			name: "invalid csi mount extension - missing mount point",
+			metadata: map[string]string{
+				ExtensionKeyClaimWithCSIMount_VolumeName: "test-volume",
+			},
+			wantErr: true,
+		},
+		{
+			name: "invalid csi mount extension - invalid mount point",
+			metadata: map[string]string{
+				ExtensionKeyClaimWithCSIMount_VolumeName: "test-volume",
+				ExtensionKeyClaimWithCSIMount_MountPoint: "/invalid/../path",
+			},
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {

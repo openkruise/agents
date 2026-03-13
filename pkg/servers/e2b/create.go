@@ -8,13 +8,14 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"k8s.io/apimachinery/pkg/util/validation"
+	"k8s.io/klog/v2"
+
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
-	"k8s.io/apimachinery/pkg/util/validation"
-	"k8s.io/klog/v2"
 )
 
 // CreateSandbox allocates a Pod as a new sandbox
@@ -105,7 +106,7 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 
 	if request.Extensions.CSIMount.PersistentVolumeName != "" {
 		driverName, csiReqConfigRaw, err := sc.csiMountOptionsConfig(ctx,
-			request.Extensions.CSIMount.ContainerMountPoint, request.Extensions.CSIMount.PersistentVolumeName)
+			request.Extensions.CSIMount.ContainerMountPoint, request.Extensions.CSIMount.PersistentVolumeName, request.Extensions.CSIMount.PersistentVolumeSubpath)
 		if err != nil {
 			return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
 				Code:    http.StatusBadRequest,

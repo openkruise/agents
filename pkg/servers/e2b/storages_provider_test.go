@@ -22,6 +22,7 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 		name                   string
 		containerMountPoint    string
 		persistentVolumeName   string
+		subPath                string
 		setupCache             func() infra.CacheProvider
 		setupClient            func() *clients.ClientSet
 		setupStorageRegistry   func() storages.VolumeMountProviderRegistry
@@ -339,6 +340,408 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 			expectError:            true,
 			expectedErrorSubstring: "invalid node publish secret ref namespace",
 		},
+		{
+			name:                 "secret ref with invalid namespace should fail",
+			persistentVolumeName: "pv-with-invalid-namespace-secret",
+			containerMountPoint:  "/container/mount/target",
+			subPath:              "",
+			setupCache: func() infra.CacheProvider {
+				pv := &corev1.PersistentVolume{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "pv-with-invalid-namespace-secret",
+					},
+					Spec: corev1.PersistentVolumeSpec{
+						PersistentVolumeSource: corev1.PersistentVolumeSource{
+							CSI: &corev1.CSIPersistentVolumeSource{
+								Driver: "test-driver",
+								NodePublishSecretRef: &corev1.SecretReference{
+									Name:      "test-secret",
+									Namespace: "invalid-namespace", // invalid namespace
+								},
+							},
+						},
+					},
+				}
+				return &mockCacheProvider{pv: pv}
+			},
+			setupClient: func() *clients.ClientSet {
+				return clients.NewFakeClientSet()
+			},
+			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
+				registry := &mockStorageProviderRegistry{
+					supportedDrivers: map[string]bool{
+						"test-driver": true,
+					},
+					providers: map[string]storages.VolumeMountProvider{
+						"test-driver": &mockVolumeMountProvider{},
+					},
+				}
+				return registry
+			},
+			expectDriverName:       "",
+			expectError:            true,
+			expectedErrorSubstring: "invalid node publish secret ref namespace",
+		},
+		{
+			name:                 "access point sub path with valid base path should succeed",
+			persistentVolumeName: "pv-with-access-point",
+			containerMountPoint:  "/container/mount/target",
+			subPath:              "subdir/data",
+			setupCache: func() infra.CacheProvider {
+				pv := &corev1.PersistentVolume{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "pv-with-access-point",
+					},
+					Spec: corev1.PersistentVolumeSpec{
+						PersistentVolumeSource: corev1.PersistentVolumeSource{
+							CSI: &corev1.CSIPersistentVolumeSource{
+								Driver: "nas-driver",
+								VolumeAttributes: map[string]string{
+									"path": "/share",
+								},
+							},
+						},
+					},
+				}
+				return &mockCacheProvider{pv: pv}
+			},
+			setupClient: func() *clients.ClientSet {
+				return clients.NewFakeClientSet()
+			},
+			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
+				registry := &mockStorageProviderRegistry{
+					supportedDrivers: map[string]bool{
+						"nas-driver": true,
+					},
+					providers: map[string]storages.VolumeMountProvider{
+						"nas-driver": &mockVolumeMountProvider{},
+					},
+				}
+				return registry
+			},
+			expectDriverName: "nas-driver",
+			expectError:      false,
+		},
+		{
+			name:                 "access point sub path with trailing slash base path should succeed",
+			persistentVolumeName: "pv-with-access-point-trailing-slash",
+			containerMountPoint:  "/container/mount/target",
+			subPath:              "subdir/data",
+			setupCache: func() infra.CacheProvider {
+				pv := &corev1.PersistentVolume{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "pv-with-access-point-trailing-slash",
+					},
+					Spec: corev1.PersistentVolumeSpec{
+						PersistentVolumeSource: corev1.PersistentVolumeSource{
+							CSI: &corev1.CSIPersistentVolumeSource{
+								Driver: "nas-driver",
+								VolumeAttributes: map[string]string{
+									"path": "/share/",
+								},
+							},
+						},
+					},
+				}
+				return &mockCacheProvider{pv: pv}
+			},
+			setupClient: func() *clients.ClientSet {
+				return clients.NewFakeClientSet()
+			},
+			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
+				registry := &mockStorageProviderRegistry{
+					supportedDrivers: map[string]bool{
+						"nas-driver": true,
+					},
+					providers: map[string]storages.VolumeMountProvider{
+						"nas-driver": &mockVolumeMountProvider{},
+					},
+				}
+				return registry
+			},
+			expectDriverName: "nas-driver",
+			expectError:      false,
+		},
+		{
+			name:                 "access point sub path without base path should use validated sub path",
+			persistentVolumeName: "pv-without-base-path",
+			containerMountPoint:  "/container/mount/target",
+			subPath:              "valid/subpath",
+			setupCache: func() infra.CacheProvider {
+				pv := &corev1.PersistentVolume{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "pv-without-base-path",
+					},
+					Spec: corev1.PersistentVolumeSpec{
+						PersistentVolumeSource: corev1.PersistentVolumeSource{
+							CSI: &corev1.CSIPersistentVolumeSource{
+								Driver: "nas-driver",
+								VolumeAttributes: map[string]string{
+									"other": "value",
+								},
+							},
+						},
+					},
+				}
+				return &mockCacheProvider{pv: pv}
+			},
+			setupClient: func() *clients.ClientSet {
+				return clients.NewFakeClientSet()
+			},
+			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
+				registry := &mockStorageProviderRegistry{
+					supportedDrivers: map[string]bool{
+						"nas-driver": true,
+					},
+					providers: map[string]storages.VolumeMountProvider{
+						"nas-driver": &mockVolumeMountProvider{},
+					},
+				}
+				return registry
+			},
+			expectDriverName: "nas-driver",
+			expectError:      false,
+		},
+		{
+			name:                 "access point sub path with path traversal should fail",
+			persistentVolumeName: "pv-with-malicious-access-point",
+			containerMountPoint:  "/container/mount/target",
+			subPath:              "../etc/passwd",
+			setupCache: func() infra.CacheProvider {
+				pv := &corev1.PersistentVolume{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "pv-with-malicious-access-point",
+					},
+					Spec: corev1.PersistentVolumeSpec{
+						PersistentVolumeSource: corev1.PersistentVolumeSource{
+							CSI: &corev1.CSIPersistentVolumeSource{
+								Driver: "nas-driver",
+								VolumeAttributes: map[string]string{
+									"path": "/share",
+								},
+							},
+						},
+					},
+				}
+				return &mockCacheProvider{pv: pv}
+			},
+			setupClient: func() *clients.ClientSet {
+				return clients.NewFakeClientSet()
+			},
+			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
+				registry := &mockStorageProviderRegistry{
+					supportedDrivers: map[string]bool{
+						"nas-driver": true,
+					},
+					providers: map[string]storages.VolumeMountProvider{
+						"nas-driver": &mockVolumeMountProvider{},
+					},
+				}
+				return registry
+			},
+			expectDriverName:       "",
+			expectError:            true,
+			expectedErrorSubstring: "failed to merge and validate paths",
+		},
+		{
+			name:                 "access point sub path with null byte should fail",
+			persistentVolumeName: "pv-with-null-byte-access-point",
+			containerMountPoint:  "/container/mount/target",
+			subPath:              "subdir\x00file",
+			setupCache: func() infra.CacheProvider {
+				pv := &corev1.PersistentVolume{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "pv-with-null-byte-access-point",
+					},
+					Spec: corev1.PersistentVolumeSpec{
+						PersistentVolumeSource: corev1.PersistentVolumeSource{
+							CSI: &corev1.CSIPersistentVolumeSource{
+								Driver: "nas-driver",
+								VolumeAttributes: map[string]string{
+									"path": "/share",
+								},
+							},
+						},
+					},
+				}
+				return &mockCacheProvider{pv: pv}
+			},
+			setupClient: func() *clients.ClientSet {
+				return clients.NewFakeClientSet()
+			},
+			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
+				registry := &mockStorageProviderRegistry{
+					supportedDrivers: map[string]bool{
+						"nas-driver": true,
+					},
+					providers: map[string]storages.VolumeMountProvider{
+						"nas-driver": &mockVolumeMountProvider{},
+					},
+				}
+				return registry
+			},
+			expectDriverName:       "",
+			expectError:            true,
+			expectedErrorSubstring: "failed to merge and validate paths",
+		},
+		{
+			name:                 "access point sub path only without volume attributes path",
+			persistentVolumeName: "pv-subpath-only",
+			containerMountPoint:  "/container/mount/target",
+			subPath:              "standalone/path",
+			setupCache: func() infra.CacheProvider {
+				pv := &corev1.PersistentVolume{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "pv-subpath-only",
+					},
+					Spec: corev1.PersistentVolumeSpec{
+						PersistentVolumeSource: corev1.PersistentVolumeSource{
+							CSI: &corev1.CSIPersistentVolumeSource{
+								Driver:           "nas-driver",
+								VolumeAttributes: make(map[string]string),
+							},
+						},
+					},
+				}
+				return &mockCacheProvider{pv: pv}
+			},
+			setupClient: func() *clients.ClientSet {
+				return clients.NewFakeClientSet()
+			},
+			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
+				registry := &mockStorageProviderRegistry{
+					supportedDrivers: map[string]bool{
+						"nas-driver": true,
+					},
+					providers: map[string]storages.VolumeMountProvider{
+						"nas-driver": &mockVolumeMountProvider{},
+					},
+				}
+				return registry
+			},
+			expectDriverName: "nas-driver",
+			expectError:      false,
+		},
+		{
+			name:                 "empty access point sub path should not modify path",
+			persistentVolumeName: "pv-empty-subpath",
+			containerMountPoint:  "/container/mount/target",
+			subPath:              "",
+			setupCache: func() infra.CacheProvider {
+				pv := &corev1.PersistentVolume{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "pv-empty-subpath",
+					},
+					Spec: corev1.PersistentVolumeSpec{
+						PersistentVolumeSource: corev1.PersistentVolumeSource{
+							CSI: &corev1.CSIPersistentVolumeSource{
+								Driver: "nas-driver",
+								VolumeAttributes: map[string]string{
+									"path": "/original/path",
+								},
+							},
+						},
+					},
+				}
+				return &mockCacheProvider{pv: pv}
+			},
+			setupClient: func() *clients.ClientSet {
+				return clients.NewFakeClientSet()
+			},
+			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
+				registry := &mockStorageProviderRegistry{
+					supportedDrivers: map[string]bool{
+						"nas-driver": true,
+					},
+					providers: map[string]storages.VolumeMountProvider{
+						"nas-driver": &mockVolumeMountProvider{},
+					},
+				}
+				return registry
+			},
+			expectDriverName: "nas-driver",
+			expectError:      false,
+		},
+		{
+			name:                 "access point sub path with leading slash",
+			persistentVolumeName: "pv-leading-slash-subpath",
+			containerMountPoint:  "/container/mount/target",
+			subPath:              "/data/files",
+			setupCache: func() infra.CacheProvider {
+				pv := &corev1.PersistentVolume{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "pv-leading-slash-subpath",
+					},
+					Spec: corev1.PersistentVolumeSpec{
+						PersistentVolumeSource: corev1.PersistentVolumeSource{
+							CSI: &corev1.CSIPersistentVolumeSource{
+								Driver: "nas-driver",
+								VolumeAttributes: map[string]string{
+									"path": "/share",
+								},
+							},
+						},
+					},
+				}
+				return &mockCacheProvider{pv: pv}
+			},
+			setupClient: func() *clients.ClientSet {
+				return clients.NewFakeClientSet()
+			},
+			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
+				registry := &mockStorageProviderRegistry{
+					supportedDrivers: map[string]bool{
+						"nas-driver": true,
+					},
+					providers: map[string]storages.VolumeMountProvider{
+						"nas-driver": &mockVolumeMountProvider{},
+					},
+				}
+				return registry
+			},
+			expectDriverName: "nas-driver",
+			expectError:      false,
+		},
+		{
+			name:                 "access point sub path with complex nested path",
+			persistentVolumeName: "pv-complex-subpath",
+			containerMountPoint:  "/container/mount/target",
+			subPath:              "user/projects/2024/data",
+			setupCache: func() infra.CacheProvider {
+				pv := &corev1.PersistentVolume{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "pv-complex-subpath",
+					},
+					Spec: corev1.PersistentVolumeSpec{
+						PersistentVolumeSource: corev1.PersistentVolumeSource{
+							CSI: &corev1.CSIPersistentVolumeSource{
+								Driver: "nas-driver",
+								VolumeAttributes: map[string]string{
+									"path": "/storage",
+								},
+							},
+						},
+					},
+				}
+				return &mockCacheProvider{pv: pv}
+			},
+			setupClient: func() *clients.ClientSet {
+				return clients.NewFakeClientSet()
+			},
+			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
+				registry := &mockStorageProviderRegistry{
+					supportedDrivers: map[string]bool{
+						"nas-driver": true,
+					},
+					providers: map[string]storages.VolumeMountProvider{
+						"nas-driver": &mockVolumeMountProvider{},
+					},
+				}
+				return registry
+			},
+			expectDriverName: "nas-driver",
+			expectError:      false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -352,7 +755,7 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 			}
 
 			ctx := context.Background()
-			driverName, csiRequest, err := ctrl.generateNodePublishVolumeRequest(ctx, tt.containerMountPoint, tt.persistentVolumeName)
+			driverName, csiRequest, err := ctrl.generateNodePublishVolumeRequest(ctx, tt.containerMountPoint, tt.persistentVolumeName, tt.subPath)
 
 			if tt.expectError {
 				assert.Error(t, err)
@@ -461,4 +864,281 @@ func (m *mockVolumeMountProvider) GenerateCSINodePublishVolumeRequest(
 		VolumeId:   persistentVolumeObj.Name,
 		TargetPath: containerMountTarget,
 	}, nil
+}
+
+func TestMergeAndValidatePaths(t *testing.T) {
+	tests := []struct {
+		name                   string
+		basePath               string
+		subPath                string
+		expectedMergedPath     string
+		expectError            bool
+		expectedErrorSubstring string
+	}{
+		{
+			name:                   "empty base path should fail",
+			basePath:               "",
+			subPath:                "subdir",
+			expectError:            true,
+			expectedErrorSubstring: "base path cannot be empty",
+		},
+		{
+			name:                   "relative base path should fail",
+			basePath:               "share",
+			subPath:                "subdir",
+			expectError:            true,
+			expectedErrorSubstring: "base path must be an absolute path starting with /",
+		},
+		{
+			name:                   "empty sub path should fail",
+			basePath:               "/share",
+			subPath:                "",
+			expectError:            true,
+			expectedErrorSubstring: "sub path cannot be empty",
+		},
+		{
+			name:                   "sub path with dot only should fail",
+			basePath:               "/share",
+			subPath:                ".",
+			expectError:            true,
+			expectedErrorSubstring: "sub path cannot be . or ..",
+		},
+		{
+			name:                   "sub path with double dots only should fail",
+			basePath:               "/share",
+			subPath:                "..",
+			expectError:            true,
+			expectedErrorSubstring: "sub path cannot be . or ..",
+		},
+		{
+			name:                   "sub path traversing to parent should fail",
+			basePath:               "/share",
+			subPath:                "../etc/passwd",
+			expectError:            true,
+			expectedErrorSubstring: "sub path must not traverse to parent directory",
+		},
+		{
+			name:                   "sub path with deep parent traversal should fail",
+			basePath:               "/share",
+			subPath:                "subdir/../../etc/passwd",
+			expectError:            true,
+			expectedErrorSubstring: "sub path must not traverse to parent directory",
+		},
+		{
+			name:                   "sub path with null byte should fail",
+			basePath:               "/share",
+			subPath:                "subdir\x00file",
+			expectError:            true,
+			expectedErrorSubstring: "sub path contains null byte",
+		},
+		{
+			name:               "simple valid sub path with /share",
+			basePath:           "/share",
+			subPath:            "subdir",
+			expectedMergedPath: "/share/subdir",
+			expectError:        false,
+		},
+		{
+			name:               "simple valid sub path with /share/",
+			basePath:           "/share/",
+			subPath:            "subdir",
+			expectedMergedPath: "/share/subdir",
+			expectError:        false,
+		},
+		{
+			name:               "valid sub path with leading slash",
+			basePath:           "/share",
+			subPath:            "/subdir",
+			expectedMergedPath: "/share/subdir",
+			expectError:        false,
+		},
+		{
+			name:               "valid sub path with multiple leading slashes",
+			basePath:           "/share",
+			subPath:            "//subdir",
+			expectedMergedPath: "/share/subdir",
+			expectError:        false,
+		},
+		{
+			name:               "valid nested sub path",
+			basePath:           "/share",
+			subPath:            "subdir/nested/deep",
+			expectedMergedPath: "/share/subdir/nested/deep",
+			expectError:        false,
+		},
+		{
+			name:               "valid sub path with mixed slashes",
+			basePath:           "/share/",
+			subPath:            "/subdir/nested/",
+			expectedMergedPath: "/share/subdir/nested",
+			expectError:        false,
+		},
+		{
+			name:               "sub path staying within base after clean",
+			basePath:           "/share/data",
+			subPath:            "user/./files/../docs",
+			expectedMergedPath: "/share/data/user/docs",
+			expectError:        false,
+		},
+		{
+			name:               "complex valid path normalization",
+			basePath:           "/share/",
+			subPath:            "a/b/c/./d/../e",
+			expectedMergedPath: "/share/a/b/c/e",
+			expectError:        false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mergedPath, err := mergeAndValidatePaths(tt.basePath, tt.subPath)
+
+			if tt.expectError {
+				assert.Error(t, err)
+				if tt.expectedErrorSubstring != "" {
+					assert.Contains(t, err.Error(), tt.expectedErrorSubstring)
+				}
+				assert.Empty(t, mergedPath)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tt.expectedMergedPath, mergedPath)
+			}
+		})
+	}
+}
+
+func TestValidateRelativePath(t *testing.T) {
+	tests := []struct {
+		name                   string
+		subPath                string
+		expectedValidatedPath  string
+		expectError            bool
+		expectedErrorSubstring string
+	}{
+		{
+			name:                   "empty path should fail",
+			subPath:                "",
+			expectError:            true,
+			expectedErrorSubstring: "sub path cannot be empty",
+		},
+		{
+			name:                   "dot only should fail",
+			subPath:                ".",
+			expectError:            true,
+			expectedErrorSubstring: "sub path cannot be . or ..",
+		},
+		{
+			name:                   "double dots only should fail",
+			subPath:                "..",
+			expectError:            true,
+			expectedErrorSubstring: "sub path cannot be . or ..",
+		},
+		{
+			name:                   "parent traversal should fail",
+			subPath:                "../etc/passwd",
+			expectError:            true,
+			expectedErrorSubstring: "sub path must not traverse to parent directory",
+		},
+		{
+			name:                   "hidden parent traversal should fail",
+			subPath:                "subdir/../../etc/passwd",
+			expectError:            true,
+			expectedErrorSubstring: "sub path must not traverse to parent directory",
+		},
+		{
+			name:                   "multiple parent traversal should fail",
+			subPath:                "../../../etc/passwd",
+			expectError:            true,
+			expectedErrorSubstring: "sub path must not traverse to parent directory",
+		},
+		{
+			name:                   "null byte injection should fail",
+			subPath:                "valid/path\x00injected",
+			expectError:            true,
+			expectedErrorSubstring: "sub path contains null byte",
+		},
+		{
+			name:                   "single slash should become empty and fail",
+			subPath:                "/",
+			expectError:            true,
+			expectedErrorSubstring: "sub path cannot be . or ..",
+		},
+		{
+			name:                   "multiple slashes should become empty and fail",
+			subPath:                "///",
+			expectError:            true,
+			expectedErrorSubstring: "sub path cannot be . or ..",
+		},
+		{
+			name:                  "simple relative path without slashes",
+			subPath:               "data",
+			expectedValidatedPath: "data",
+			expectError:           false,
+		},
+		{
+			name:                  "path with leading slash",
+			subPath:               "/data",
+			expectedValidatedPath: "data",
+			expectError:           false,
+		},
+		{
+			name:                  "path with multiple leading slashes",
+			subPath:               "//data",
+			expectedValidatedPath: "data",
+			expectError:           false,
+		},
+		{
+			name:                  "path with trailing slash",
+			subPath:               "data/",
+			expectedValidatedPath: "data",
+			expectError:           false,
+		},
+		{
+			name:                  "nested relative path",
+			subPath:               "subdir/nested/path",
+			expectedValidatedPath: "subdir/nested/path",
+			expectError:           false,
+		},
+		{
+			name:                  "path with current dir reference in middle",
+			subPath:               "a/./b",
+			expectedValidatedPath: "a/b",
+			expectError:           false,
+		},
+		{
+			name:                  "path with safe parent reference",
+			subPath:               "a/b/../c",
+			expectedValidatedPath: "a/c",
+			expectError:           false,
+		},
+		{
+			name:                  "complex path normalization",
+			subPath:               "a/b/c/./d/../e/f",
+			expectedValidatedPath: "a/b/c/e/f",
+			expectError:           false,
+		},
+		{
+			name:                  "path staying at same level",
+			subPath:               "a/b/c/../../d",
+			expectedValidatedPath: "a/d",
+			expectError:           false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			validatedPath, err := validateRelativePath(tt.subPath)
+
+			if tt.expectError {
+				assert.Error(t, err)
+				if tt.expectedErrorSubstring != "" {
+					assert.Contains(t, err.Error(), tt.expectedErrorSubstring)
+				}
+				assert.Empty(t, validatedPath)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tt.expectedValidatedPath, validatedPath)
+			}
+		})
+	}
 }

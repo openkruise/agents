@@ -19,6 +19,7 @@ const (
 	ExtensionKeyClaimWithImage               = v1alpha1.E2BPrefix + "image"
 	ExtensionKeyClaimWithCSIMount            = v1alpha1.E2BPrefix + "csi"
 	ExtensionKeyClaimWithCSIMount_VolumeName = ExtensionKeyClaimWithCSIMount + "-volume-name"
+	ExtensionKeyClaimWithCSIMount_SubPath    = ExtensionKeyClaimWithCSIMount + "-subpath"
 	ExtensionKeyClaimWithCSIMount_MountPoint = ExtensionKeyClaimWithCSIMount + "-mount-point"
 	ExtensionKeySkipInitRuntime              = v1alpha1.E2BPrefix + "skip-init-runtime"
 	ExtensionKeyReserveFailedSandbox         = v1alpha1.E2BPrefix + "reserve-failed-sandbox"
@@ -82,6 +83,7 @@ func (r *NewSandboxRequest) parseExtensionCSIMount() error {
 	// Both ExtensionKeyClaimWithCSIMount_VolumeName and ExtensionKeyClaimWithCSIMount_MountPoint must exist together or not at all.
 	persistentVolumeName, volumeNameExists := r.Metadata[ExtensionKeyClaimWithCSIMount_VolumeName]
 	containerMountPoint, mountPointExists := r.Metadata[ExtensionKeyClaimWithCSIMount_MountPoint]
+	subpath, _ := r.Metadata[ExtensionKeyClaimWithCSIMount_SubPath]
 
 	// If only one of the required fields exists, return an error
 	if volumeNameExists != mountPointExists {
@@ -101,11 +103,13 @@ func (r *NewSandboxRequest) parseExtensionCSIMount() error {
 	}
 
 	r.Extensions.CSIMount = CSIMountExtension{
-		ContainerMountPoint:  containerMountPoint,
-		PersistentVolumeName: persistentVolumeName,
+		ContainerMountPoint:     containerMountPoint,
+		PersistentVolumeName:    persistentVolumeName,
+		PersistentVolumeSubpath: subpath,
 	}
 	delete(r.Metadata, ExtensionKeyClaimWithCSIMount_VolumeName)
 	delete(r.Metadata, ExtensionKeyClaimWithCSIMount_MountPoint)
+	delete(r.Metadata, ExtensionKeyClaimWithCSIMount_SubPath)
 	return nil
 }
 
