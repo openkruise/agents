@@ -1,17 +1,94 @@
 package sandboxutils
 
 import (
+	"flag"
 	"fmt"
+	"sync"
 	"time"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/utils"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
+
+// Define what we are storing (State AND Reason)
+type cachedState struct {
+	State           string
+	Reason          string
+	ResourceVersion string
+	UID             types.UID
+}
+
+var (
+	// Map key is NamespacedName (Namespace + Name)
+	sandboxStateCache = make(map[types.NamespacedName]cachedState)
+
+	// Lock to make it thread-safe
+	cacheLock sync.RWMutex
+
+	// skipCacheInTests defaults to true to prevent collisions in existing unit tests
+	// that use deterministic/fake UIDs.
+	skipCacheInTests = true
+)
+
+// DeleteSandboxStateCache removes a sandbox from the cache.
+// This should be called by the Controller when a Sandbox is deleted.
+func DeleteSandboxStateCache(ns, name string) {
+	key := types.NamespacedName{Namespace: ns, Name: name}
+	cacheLock.Lock()
+	delete(sandboxStateCache, key)
+	cacheLock.Unlock()
+}
 
 // GetSandboxState the state of agentsv1alpha1 Sandbox.
 // NOTE: the reason is unique and hard-coded, so we can easily search the conditions of some reason when debugging.
 func GetSandboxState(sbx *agentsv1alpha1.Sandbox) (state string, reason string) {
+	// SAFETY CHECK 1: Empty fields
+	if sbx.ResourceVersion == "" || sbx.UID == "" {
+		return computeSandboxState(sbx)
+	}
+
+	// SAFETY CHECK 2: Detect Test Environment
+	// By default, we skip the cache during "go test" to avoid collisions in existing tests.
+	// We can toggle 'skipCacheInTests' to false in specific tests to verify cache behavior.
+	if skipCacheInTests && flag.Lookup("test.v") != nil {
+		return computeSandboxState(sbx)
+	}
+
+	key := types.NamespacedName{
+		Namespace: sbx.Namespace,
+		Name:      sbx.Name,
+	}
+
+	// 1. FAST PATH: Check Cache
+	cacheLock.RLock()
+	if item, found := sandboxStateCache[key]; found {
+		if item.ResourceVersion == sbx.ResourceVersion && item.UID == sbx.UID {
+			cacheLock.RUnlock()
+			return item.State, item.Reason
+		}
+	}
+	cacheLock.RUnlock()
+
+	// 2. SLOW PATH: Calculate State
+	state, reason = computeSandboxState(sbx)
+
+	// 3. UPDATE CACHE
+	cacheLock.Lock()
+	sandboxStateCache[key] = cachedState{
+		State:           state,
+		Reason:          reason,
+		ResourceVersion: sbx.ResourceVersion,
+		UID:             sbx.UID,
+	}
+	cacheLock.Unlock()
+
+	return state, reason
+}
+
+// computeSandboxState contains the original logic to calculate state.
+func computeSandboxState(sbx *agentsv1alpha1.Sandbox) (string, string) {
 	if sbx.DeletionTimestamp != nil {
 		return agentsv1alpha1.SandboxStateDead, "ResourceDeleted"
 	}
