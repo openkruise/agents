@@ -7,11 +7,17 @@ LOCALBIN ?= $(shell pwd)/bin
 $(LOCALBIN):
 	mkdir -p $(LOCALBIN)
 
+# Sandbox Gateway variables
+GATEWAY_PLUGIN_NAME ?= sandbox-gateway
+GATEWAY_SO_FILE ?= $(GATEWAY_PLUGIN_NAME).so
+
+
 # Default target
 # Image URL to use all building/pushing image targets
 CONTROLLER_IMG ?= agent-sandbox-controller:latest
 MANAGER_IMG ?= sandbox-manager:latest
 RUNTIME_IMG ?= agent-runtime:latest
+GATEWAY_IMG ?= $(GATEWAY_PLUGIN_NAME):latest
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -113,16 +119,24 @@ lint-config: golangci-lint ## Verify golangci-lint linter configuration
 	$(GOLANGCI_LINT) config verify
 
 .PHONY: docker-build-controller
-docker-build-controller:
+docker-build-controller: ## Build docker image for agent-sandbox-controller.
 	docker build -f dockerfiles/agent-sandbox-controller.Dockerfile -t ${CONTROLLER_IMG} .
 
 .PHONY: docker-build-manager
-docker-build-manager:
+docker-build-manager: ## Build docker image for sandbox-manager.
 	docker build -f dockerfiles/sandbox-manager.Dockerfile -t ${MANAGER_IMG} .
 
 .PHONY: docker-build-runtime
-docker-build-runtime:
+docker-build-runtime: ## Build docker image for agent-runtime.
 	docker build -f dockerfiles/agent-runtime.Dockerfile -t ${RUNTIME_IMG} .
+
+.PHONY: build-sandbox-gateway
+build-sandbox-gateway: ## Build sandbox-gateway plugin binary.
+	CGO_ENABLED=1 go build -buildmode=c-shared -trimpath -ldflags="-s -w" -o $(GATEWAY_SO_FILE) ./cmd/sandbox-gateway/.
+
+.PHONY: docker-build-sandbox-gateway
+docker-build-sandbox-gateway: ## Build docker image for sandbox-gateway.
+	docker build -f dockerfiles/sandbox-gateway.Dockerfile -t ${GATEWAY_IMG} .
 
 ifndef ignore-not-found
   ignore-not-found = false
