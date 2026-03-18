@@ -198,9 +198,10 @@ func TestSandbox_SetPause(t *testing.T) {
 			if tt.operatePause {
 				err = s.Pause(t.Context(), opts)
 				if err == nil {
-					patch := ctrl.MergeFrom(s.Sandbox.DeepCopy())
-					s.Status.Phase = v1alpha1.SandboxPaused
-					data, err := patch.Data(s.Sandbox)
+					modified := s.Sandbox.DeepCopy()
+					patch := ctrl.MergeFrom(s.Sandbox)
+					modified.Status.Phase = v1alpha1.SandboxPaused
+					data, err := patch.Data(modified)
 					assert.NoError(t, err)
 					_, err = client.ApiV1alpha1().Sandboxes("default").Patch(
 						t.Context(), s.Name, types.MergePatchType, data, metav1.PatchOptions{})
