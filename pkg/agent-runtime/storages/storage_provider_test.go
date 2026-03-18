@@ -23,7 +23,7 @@ func (m *MockVolumeMountProvider) GetDriverName() string {
 func (m *MockVolumeMountProvider) GenerateCSINodePublishVolumeRequest(
 	ctx context.Context,
 	containerMountTarget string,
-	persistentVolumeObj *corev1.PersistentVolume,
+	persistentVolumeObj *corev1.PersistentVolume, readOnly bool,
 	secretObj *corev1.Secret,
 ) (*csiapi.NodePublishVolumeRequest, error) {
 	return &csiapi.NodePublishVolumeRequest{

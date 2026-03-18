@@ -8,7 +8,7 @@ import (
 )
 
 type VolumeMountProvider interface {
-	GenerateCSINodePublishVolumeRequest(ctx context.Context, containerMountTarget string, persistentVolumeObj *corev1.PersistentVolume, secretObj *corev1.Secret) (*csi.NodePublishVolumeRequest, error)
+	GenerateCSINodePublishVolumeRequest(ctx context.Context, containerMountTarget string, persistentVolumeObj *corev1.PersistentVolume, readOnly bool, secretObj *corev1.Secret) (*csi.NodePublishVolumeRequest, error)
 }
 
 type VolumeMountProviderRegistry interface {

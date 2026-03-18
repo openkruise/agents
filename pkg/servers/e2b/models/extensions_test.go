@@ -95,8 +95,12 @@ func TestParseExtensions(t *testing.T) {
 			expectExtension: NewSandboxRequestExtension{
 				CreateOnNoStock: true,
 				CSIMount: CSIMountExtension{
-					PersistentVolumeName: "test-volume",
-					ContainerMountPoint:  "/valid/path",
+					MountConfigs: []CSIMountConfig{
+						{
+							PvName:    "test-volume",
+							MountPath: "/valid/path",
+						},
+					},
 				},
 			},
 		},
@@ -139,9 +143,13 @@ func TestParseExtensions(t *testing.T) {
 			expectExtension: NewSandboxRequestExtension{
 				CreateOnNoStock: true,
 				CSIMount: CSIMountExtension{
-					PersistentVolumeName:    "test-volume",
-					ContainerMountPoint:     "/valid/path",
-					PersistentVolumeSubpath: "",
+					MountConfigs: []CSIMountConfig{
+						{
+							PvName:    "test-volume",
+							MountPath: "/valid/path",
+							SubPath:   "",
+						},
+					},
 				},
 			},
 		},
@@ -156,9 +164,13 @@ func TestParseExtensions(t *testing.T) {
 			expectExtension: NewSandboxRequestExtension{
 				CreateOnNoStock: true,
 				CSIMount: CSIMountExtension{
-					PersistentVolumeName:    "test-volume",
-					ContainerMountPoint:     "/valid/path",
-					PersistentVolumeSubpath: "subdir/data",
+					MountConfigs: []CSIMountConfig{
+						{
+							PvName:    "test-volume",
+							MountPath: "/valid/path",
+							SubPath:   "subdir/data",
+						},
+					},
 				},
 			},
 		},
@@ -173,9 +185,13 @@ func TestParseExtensions(t *testing.T) {
 			expectExtension: NewSandboxRequestExtension{
 				CreateOnNoStock: true,
 				CSIMount: CSIMountExtension{
-					PersistentVolumeName:    "test-volume",
-					ContainerMountPoint:     "/valid/path",
-					PersistentVolumeSubpath: "",
+					MountConfigs: []CSIMountConfig{
+						{
+							PvName:    "test-volume",
+							MountPath: "/valid/path",
+							SubPath:   "",
+						},
+					},
 				},
 			},
 		},
@@ -242,11 +258,11 @@ func TestParseExtensions_WithValidData(t *testing.T) {
 	}
 
 	// to verify that CSI mount extension is parsed correctly
-	if req.Extensions.CSIMount.PersistentVolumeName != "test-volume" {
-		t.Errorf("Expected volume name 'test-volume', got '%s'", req.Extensions.CSIMount.PersistentVolumeName)
+	if req.Extensions.CSIMount.MountConfigs[0].PvName != "test-volume" {
+		t.Errorf("Expected volume name 'test-volume', got '%s'", req.Extensions.CSIMount.MountConfigs[0].PvName)
 	}
-	if req.Extensions.CSIMount.ContainerMountPoint != "/data/mount" {
-		t.Errorf("Expected mount point '/data/mount', got '%s'", req.Extensions.CSIMount.ContainerMountPoint)
+	if req.Extensions.CSIMount.MountConfigs[0].MountPath != "/data/mount" {
+		t.Errorf("Expected mount point '/data/mount', got '%s'", req.Extensions.CSIMount.MountConfigs[0].MountPath)
 	}
 
 	// to verify that metadata has been removed
@@ -341,11 +357,11 @@ func TestParseExtensionCSIMount(t *testing.T) {
 			}
 
 			if !tt.expectError {
-				if tt.expectVolume != "" && req.Extensions.CSIMount.PersistentVolumeName != tt.expectVolume {
-					t.Errorf("Expected volume name '%s', got '%s'", tt.expectVolume, req.Extensions.CSIMount.PersistentVolumeName)
+				if tt.expectVolume != "" && req.Extensions.CSIMount.MountConfigs[0].PvName != tt.expectVolume {
+					t.Errorf("Expected volume name '%s', got '%s'", tt.expectVolume, req.Extensions.CSIMount.MountConfigs[0].PvName)
 				}
-				if tt.expectMount != "" && req.Extensions.CSIMount.ContainerMountPoint != tt.expectMount {
-					t.Errorf("Expected mount point '%s', got '%s'", tt.expectMount, req.Extensions.CSIMount.ContainerMountPoint)
+				if tt.expectMount != "" && req.Extensions.CSIMount.MountConfigs[0].MountPath != tt.expectMount {
+					t.Errorf("Expected mount point '%s', got '%s'", tt.expectMount, req.Extensions.CSIMount.MountConfigs[0].MountPath)
 				}
 			}
 		})
@@ -449,6 +465,440 @@ func TestParseExtensionInplaceUpdate(t *testing.T) {
 			// Check if the image key is removed from metadata when present
 			if _, exists := req.Metadata[ExtensionKeyWaitReadyTimeout]; exists && tt.expectImage != "" {
 				t.Errorf("Expected key to be removed from metadata")
+			}
+		})
+	}
+}
+
+func TestParseExtensionForMultiCSIMount(t *testing.T) {
+	tests := []struct {
+		name               string
+		metadata           map[string]string
+		expectError        bool
+		expectedErrorSub   string
+		expectedMountCount int
+		expectedMounts     []CSIMountConfig
+	}{
+		{
+			name:               "no multi csi mount config",
+			metadata:           map[string]string{},
+			expectError:        false,
+			expectedMountCount: 0,
+		},
+		{
+			name: "valid multi csi mount config with single mount",
+			metadata: map[string]string{
+				ExtensionKeyClaimWithCSIMount_MountConfig: `[{"pvName":"vol1","mountPath":"/data","subPath":"data"}]`,
+			},
+			expectError:        false,
+			expectedMountCount: 1,
+			expectedMounts: []CSIMountConfig{
+				{
+					PvName:    "vol1",
+					MountPath: "/data",
+					SubPath:   "data",
+				},
+			},
+		},
+		{
+			name: "valid multi csi mount config with multiple mounts",
+			metadata: map[string]string{
+				ExtensionKeyClaimWithCSIMount_MountConfig: `[{"pvName":"vol1","mountPath":"/data","subPath":"data"},{"pvName":"vol2","mountPath":"/logs","subPath":"logs"}]`,
+			},
+			expectError:        false,
+			expectedMountCount: 2,
+			expectedMounts: []CSIMountConfig{
+				{
+					PvName:    "vol1",
+					MountPath: "/data",
+					SubPath:   "data",
+				},
+				{
+					PvName:    "vol2",
+					MountPath: "/logs",
+					SubPath:   "logs",
+				},
+			},
+		},
+		{
+			name: "valid multi csi mount config with mountID",
+			metadata: map[string]string{
+				ExtensionKeyClaimWithCSIMount_MountConfig: `[{"mountID":"mount-123","pvName":"vol1","mountPath":"/data"}]`,
+			},
+			expectError:        false,
+			expectedMountCount: 1,
+			expectedMounts: []CSIMountConfig{
+				{
+					MountID:   "mount-123",
+					PvName:    "vol1",
+					MountPath: "/data",
+				},
+			},
+		},
+		{
+			name: "valid multi csi mount with readOnly true",
+			metadata: map[string]string{
+				ExtensionKeyClaimWithCSIMount_MountConfig: `[{"pvName":"vol1","mountPath":"/data","readOnly":true}]`,
+			},
+			expectError:        false,
+			expectedMountCount: 1,
+			expectedMounts: []CSIMountConfig{
+				{
+					PvName:    "vol1",
+					MountPath: "/data",
+					ReadOnly:  true,
+				},
+			},
+		},
+		{
+			name: "valid multi csi mount with readOnly false",
+			metadata: map[string]string{
+				ExtensionKeyClaimWithCSIMount_MountConfig: `[{"pvName":"vol1","mountPath":"/data","readOnly":false}]`,
+			},
+			expectError:        false,
+			expectedMountCount: 1,
+			expectedMounts: []CSIMountConfig{
+				{
+					PvName:    "vol1",
+					MountPath: "/data",
+					ReadOnly:  false,
+				},
+			},
+		},
+		{
+			name: "valid multi csi mount with mixed readOnly settings",
+			metadata: map[string]string{
+				ExtensionKeyClaimWithCSIMount_MountConfig: `[{"pvName":"vol1","mountPath":"/data","readOnly":true},{"pvName":"vol2","mountPath":"/logs","readOnly":false}]`,
+			},
+			expectError:        false,
+			expectedMountCount: 2,
+			expectedMounts: []CSIMountConfig{
+				{
+					PvName:    "vol1",
+					MountPath: "/data",
+					ReadOnly:  true,
+				},
+				{
+					PvName:    "vol2",
+					MountPath: "/logs",
+					ReadOnly:  false,
+				},
+			},
+		},
+		{
+			name: "valid multi csi mount with readOnly and subpath",
+			metadata: map[string]string{
+				ExtensionKeyClaimWithCSIMount_MountConfig: `[{"pvName":"vol1","mountPath":"/data","subPath":"subdir","readOnly":true}]`,
+			},
+			expectError:        false,
+			expectedMountCount: 1,
+			expectedMounts: []CSIMountConfig{
+				{
+					PvName:    "vol1",
+					MountPath: "/data",
+					SubPath:   "subdir",
+					ReadOnly:  true,
+				},
+			},
+		},
+		{
+			name: "valid multi csi mount with all fields including readOnly",
+			metadata: map[string]string{
+				ExtensionKeyClaimWithCSIMount_MountConfig: `[{"mountID":"mount-456","pvName":"vol1","mountPath":"/var/data","subPath":"data/2024","readOnly":true}]`,
+			},
+			expectError:        false,
+			expectedMountCount: 1,
+			expectedMounts: []CSIMountConfig{
+				{
+					MountID:   "mount-456",
+					PvName:    "vol1",
+					MountPath: "/var/data",
+					SubPath:   "data/2024",
+					ReadOnly:  true,
+				},
+			},
+		},
+		{
+			name: "invalid json format",
+			metadata: map[string]string{
+				ExtensionKeyClaimWithCSIMount_MountConfig: `invalid-json`,
+			},
+			expectError:      true,
+			expectedErrorSub: "invalid multiCsiMountConfig",
+		},
+		{
+			name: "invalid mount point - not absolute path",
+			metadata: map[string]string{
+				ExtensionKeyClaimWithCSIMount_MountConfig: `[{"pvName":"vol1","mountPath":"relative/path"}]`,
+			},
+			expectError:      true,
+			expectedErrorSub: "invalid containerMountPoint",
+		},
+		{
+			name: "invalid mount point - path traversal",
+			metadata: map[string]string{
+				ExtensionKeyClaimWithCSIMount_MountConfig: `[{"pvName":"vol1","mountPath":"/data/../etc/passwd"}]`,
+			},
+			expectError:      true,
+			expectedErrorSub: "invalid containerMountPoint",
+		},
+		{
+			name: "invalid mount point - empty path",
+			metadata: map[string]string{
+				ExtensionKeyClaimWithCSIMount_MountConfig: `[{"pvName":"vol1","mountPath":""}]`,
+			},
+			expectError:      true,
+			expectedErrorSub: "invalid containerMountPoint",
+		},
+		{
+			name: "invalid mount point - does not start with slash",
+			metadata: map[string]string{
+				ExtensionKeyClaimWithCSIMount_MountConfig: `[{"pvName":"vol1","mountPath":"data"}]`,
+			},
+			expectError:      true,
+			expectedErrorSub: "invalid containerMountPoint",
+		},
+		{
+			name: "mixed valid and invalid mount points - first invalid",
+			metadata: map[string]string{
+				ExtensionKeyClaimWithCSIMount_MountConfig: `[{"pvName":"vol1","mountPath":"invalid"},{"pvName":"vol2","mountPath":"/valid"}]`,
+			},
+			expectError:      true,
+			expectedErrorSub: "invalid containerMountPoint",
+		},
+		{
+			name: "valid multi csi mount with empty subpath",
+			metadata: map[string]string{
+				ExtensionKeyClaimWithCSIMount_MountConfig: `[{"pvName":"vol1","mountPath":"/data","subPath":""}]`,
+			},
+			expectError:        false,
+			expectedMountCount: 1,
+			expectedMounts: []CSIMountConfig{
+				{
+					PvName:    "vol1",
+					MountPath: "/data",
+					SubPath:   "",
+				},
+			},
+		},
+		{
+			name: "valid multi csi mount with complex nested paths",
+			metadata: map[string]string{
+				ExtensionKeyClaimWithCSIMount_MountConfig: `[{"pvName":"vol1","mountPath":"/var/lib/data","subPath":"user/projects/2024/data"},{"pvName":"vol2","mountPath":"/var/log/app","subPath":"logs/production"}]`,
+			},
+			expectError:        false,
+			expectedMountCount: 2,
+			expectedMounts: []CSIMountConfig{
+				{
+					PvName:    "vol1",
+					MountPath: "/var/lib/data",
+					SubPath:   "user/projects/2024/data",
+				},
+				{
+					PvName:    "vol2",
+					MountPath: "/var/log/app",
+					SubPath:   "logs/production",
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := &NewSandboxRequest{
+				Metadata: tt.metadata,
+			}
+
+			err := req.parseExtensionForMultiCSIMount()
+
+			if tt.expectError {
+				require.Error(t, err)
+				if tt.expectedErrorSub != "" {
+					assert.Contains(t, err.Error(), tt.expectedErrorSub)
+				}
+			} else {
+				require.NoError(t, err)
+
+				// Verify metadata was cleaned up
+				_, exists := req.Metadata[ExtensionKeyClaimWithCSIMount_MountConfig]
+				assert.False(t, exists, "metadata should be deleted after parsing")
+
+				// Verify CSIMount extension
+				if tt.expectedMountCount == 0 {
+					assert.Empty(t, req.Extensions.CSIMount.MountConfigs)
+				} else {
+					require.Len(t, req.Extensions.CSIMount.MountConfigs, tt.expectedMountCount)
+
+					if tt.expectedMounts != nil {
+						for i, expected := range tt.expectedMounts {
+							actual := req.Extensions.CSIMount.MountConfigs[i]
+							assert.Equal(t, expected.PvName, actual.PvName, "PvName mismatch at index %d", i)
+							assert.Equal(t, expected.MountPath, actual.MountPath, "MountPath mismatch at index %d", i)
+							assert.Equal(t, expected.SubPath, actual.SubPath, "SubPath mismatch at index %d", i)
+							assert.Equal(t, expected.MountID, actual.MountID, "MountID mismatch at index %d", i)
+							assert.Equal(t, expected.ReadOnly, actual.ReadOnly, "ReadOnly mismatch at index %d", i)
+						}
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestParseExtensionsForSingleCSIMount(t *testing.T) {
+	tests := []struct {
+		name               string
+		metadata           map[string]string
+		expectError        bool
+		expectedErrorSub   string
+		expectedMountCount int
+		expectedVolume     string
+		expectedMount      string
+		expectedSubpath    string
+	}{
+		{
+			name:               "no csi mount config",
+			metadata:           map[string]string{},
+			expectError:        false,
+			expectedMountCount: 0,
+		},
+		{
+			name: "valid single csi mount - volume name and mount point",
+			metadata: map[string]string{
+				ExtensionKeyClaimWithCSIMount_VolumeName: "test-volume",
+				ExtensionKeyClaimWithCSIMount_MountPoint: "/valid/path",
+			},
+			expectError:        false,
+			expectedMountCount: 1,
+			expectedVolume:     "test-volume",
+			expectedMount:      "/valid/path",
+		},
+		{
+			name: "valid single csi mount with subpath",
+			metadata: map[string]string{
+				ExtensionKeyClaimWithCSIMount_VolumeName: "test-volume",
+				ExtensionKeyClaimWithCSIMount_MountPoint: "/valid/path",
+				ExtensionKeyClaimWithCSIMount_SubPath:    "subdir/data",
+			},
+			expectError:        false,
+			expectedMountCount: 1,
+			expectedVolume:     "test-volume",
+			expectedMount:      "/valid/path",
+			expectedSubpath:    "subdir/data",
+		},
+		{
+			name: "valid single csi mount with empty subpath",
+			metadata: map[string]string{
+				ExtensionKeyClaimWithCSIMount_VolumeName: "test-volume",
+				ExtensionKeyClaimWithCSIMount_MountPoint: "/valid/path",
+				ExtensionKeyClaimWithCSIMount_SubPath:    "",
+			},
+			expectError:        false,
+			expectedMountCount: 1,
+			expectedVolume:     "test-volume",
+			expectedMount:      "/valid/path",
+		},
+		{
+			name: "missing volume name only",
+			metadata: map[string]string{
+				ExtensionKeyClaimWithCSIMount_MountPoint: "/valid/path",
+			},
+			expectError:      true,
+			expectedErrorSub: "must exist together or not at all",
+		},
+		{
+			name: "missing mount point only",
+			metadata: map[string]string{
+				ExtensionKeyClaimWithCSIMount_VolumeName: "test-volume",
+			},
+			expectError:      true,
+			expectedErrorSub: "must exist together or not at all",
+		},
+		{
+			name: "invalid mount point - path traversal",
+			metadata: map[string]string{
+				ExtensionKeyClaimWithCSIMount_VolumeName: "test-volume",
+				ExtensionKeyClaimWithCSIMount_MountPoint: "/invalid/../path",
+			},
+			expectError:      true,
+			expectedErrorSub: "invalid containerMountPoint",
+		},
+		{
+			name: "invalid mount point - not starting with slash",
+			metadata: map[string]string{
+				ExtensionKeyClaimWithCSIMount_VolumeName: "test-volume",
+				ExtensionKeyClaimWithCSIMount_MountPoint: "relative/path",
+			},
+			expectError:      true,
+			expectedErrorSub: "invalid containerMountPoint",
+		},
+		{
+			name: "invalid mount point - empty path",
+			metadata: map[string]string{
+				ExtensionKeyClaimWithCSIMount_VolumeName: "test-volume",
+				ExtensionKeyClaimWithCSIMount_MountPoint: "",
+			},
+			expectError:      true,
+			expectedErrorSub: "invalid containerMountPoint",
+		},
+		{
+			name: "both fields present with complex nested paths",
+			metadata: map[string]string{
+				ExtensionKeyClaimWithCSIMount_VolumeName: "pv-complex-subpath",
+				ExtensionKeyClaimWithCSIMount_MountPoint: "/container/mount/target",
+				ExtensionKeyClaimWithCSIMount_SubPath:    "user/projects/2024/data",
+			},
+			expectError:        false,
+			expectedMountCount: 1,
+			expectedVolume:     "pv-complex-subpath",
+			expectedMount:      "/container/mount/target",
+			expectedSubpath:    "user/projects/2024/data",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := &NewSandboxRequest{
+				Metadata: tt.metadata,
+			}
+
+			err := req.parseExtensionsForSingleCSIMount()
+
+			if tt.expectError {
+				require.Error(t, err)
+				if tt.expectedErrorSub != "" {
+					assert.Contains(t, err.Error(), tt.expectedErrorSub)
+				}
+			} else {
+				require.NoError(t, err)
+
+				// Verify CSIMount extension
+				if tt.expectedMountCount == 0 {
+					assert.Empty(t, req.Extensions.CSIMount.MountConfigs)
+				} else {
+					require.Len(t, req.Extensions.CSIMount.MountConfigs, tt.expectedMountCount)
+
+					firstMount := req.Extensions.CSIMount.MountConfigs[0]
+					if tt.expectedVolume != "" {
+						assert.Equal(t, tt.expectedVolume, firstMount.PvName, "VolumeName mismatch")
+					}
+					if tt.expectedMount != "" {
+						assert.Equal(t, tt.expectedMount, firstMount.MountPath, "MountTarget mismatch")
+					}
+					if tt.expectedSubpath != "" {
+						assert.Equal(t, tt.expectedSubpath, firstMount.SubPath, "Subpath mismatch")
+					}
+				}
+
+				// Verify metadata cleanup
+				_, exists := req.Metadata[ExtensionKeyClaimWithCSIMount_VolumeName]
+				assert.False(t, exists, "VolumeName should be deleted from metadata after parsing")
+
+				_, exists = req.Metadata[ExtensionKeyClaimWithCSIMount_MountPoint]
+				assert.False(t, exists, "MountPoint should be deleted from metadata after parsing")
+
+				_, exists = req.Metadata[ExtensionKeyClaimWithCSIMount_SubPath]
+				assert.False(t, exists, "SubPath should be deleted from metadata after parsing")
 			}
 		})
 	}

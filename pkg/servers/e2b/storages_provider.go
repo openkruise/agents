@@ -17,7 +17,7 @@ import (
 	"github.com/openkruise/agents/pkg/utils"
 )
 
-func (sc *Controller) generateNodePublishVolumeRequest(ctx context.Context, containerMountPoint, persistentVolumeName, accessPointSubPath string) (string, *csi.NodePublishVolumeRequest, error) {
+func (sc *Controller) generateNodePublishVolumeRequest(ctx context.Context, containerMountPoint, persistentVolumeName, accessPointSubPath string, readOnly bool) (string, *csi.NodePublishVolumeRequest, error) {
 	log := klog.FromContext(ctx)
 	if persistentVolumeName == "" {
 		return "", nil, fmt.Errorf("no found persistent volume name")
@@ -88,17 +88,17 @@ func (sc *Controller) generateNodePublishVolumeRequest(ctx context.Context, cont
 	}
 
 	// to generate csi node publish volume request
-	csiRequest, err := storageProvider.GenerateCSINodePublishVolumeRequest(ctx, containerMountPoint, persistentVolumeObj, secretObj)
+	csiRequest, err := storageProvider.GenerateCSINodePublishVolumeRequest(ctx, containerMountPoint, persistentVolumeObj, readOnly, secretObj)
 	if err != nil {
 		return "", csiRequest, err
 	}
 	return persistentVolumeObj.Spec.CSI.Driver, csiRequest, nil
 }
 
-func (sc *Controller) csiMountOptionsConfig(ctx context.Context, containerMountPoint, persistentVolumeName, accessPointSubPath string) (string, string, error) {
+func (sc *Controller) csiMountOptionsConfig(ctx context.Context, containerMountPoint, persistentVolumeName, accessPointSubPath string, readOnly bool) (string, string, error) {
 	log := klog.FromContext(ctx)
 	startTime := time.Now()
-	driverName, csiRequest, err := sc.generateNodePublishVolumeRequest(ctx, containerMountPoint, persistentVolumeName, accessPointSubPath)
+	driverName, csiRequest, err := sc.generateNodePublishVolumeRequest(ctx, containerMountPoint, persistentVolumeName, accessPointSubPath, readOnly)
 	if err != nil {
 		return "", "", fmt.Errorf("failed to convert to node publish volume request, err: %v", err)
 	}
