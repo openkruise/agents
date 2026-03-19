@@ -6,7 +6,8 @@ require (
 	connectrpc.com/connect v1.19.1
 	github.com/container-storage-interface/spec v1.9.0
 	github.com/distribution/reference v0.6.0
-	github.com/envoyproxy/go-control-plane/envoy v1.32.4
+	github.com/envoyproxy/envoy v1.37.1
+	github.com/envoyproxy/go-control-plane/envoy v1.36.0
 	github.com/go-logr/logr v1.4.3
 	github.com/golang/protobuf v1.5.4
 	github.com/google/uuid v1.6.0
@@ -19,7 +20,7 @@ require (
 	golang.org/x/sync v0.17.0
 	golang.org/x/time v0.11.0
 	google.golang.org/grpc v1.75.1
-	google.golang.org/protobuf v1.36.9
+	google.golang.org/protobuf v1.36.11
 	k8s.io/api v0.33.0
 	k8s.io/apimachinery v0.33.0
 	k8s.io/apiserver v0.33.0
@@ -72,7 +73,7 @@ require (
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/planetscale/vtprotobuf v0.6.1-0.20240319094008-0393e58bdf10 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
-	github.com/prometheus/client_model v0.6.1 // indirect
+	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.62.0 // indirect
 	github.com/prometheus/procfs v0.16.0 // indirect
 	github.com/spf13/cobra v1.8.1 // indirect

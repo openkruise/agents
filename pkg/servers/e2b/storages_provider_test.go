@@ -23,6 +23,7 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 		containerMountPoint    string
 		persistentVolumeName   string
 		subPath                string
+		readOnly               bool
 		setupCache             func() infra.CacheProvider
 		setupClient            func() *clients.ClientSet
 		setupStorageRegistry   func() storages.VolumeMountProviderRegistry
@@ -742,6 +743,200 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 			expectDriverName: "nas-driver",
 			expectError:      false,
 		},
+		{
+			name:                 "provider returns error with readOnly false",
+			persistentVolumeName: "error-test-pv",
+			containerMountPoint:  "/container/mount/target",
+			readOnly:             false,
+			setupCache: func() infra.CacheProvider {
+				pv := &corev1.PersistentVolume{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "error-test-pv",
+					},
+					Spec: corev1.PersistentVolumeSpec{
+						PersistentVolumeSource: corev1.PersistentVolumeSource{
+							CSI: &corev1.CSIPersistentVolumeSource{
+								Driver: "error-driver",
+							},
+						},
+					},
+				}
+				return &mockCacheProvider{pv: pv}
+			},
+			setupClient: func() *clients.ClientSet {
+				return clients.NewFakeClientSet()
+			},
+			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
+				registry := &mockStorageProviderRegistry{
+					supportedDrivers: map[string]bool{
+						"error-driver": true,
+					},
+					providers: map[string]storages.VolumeMountProvider{
+						"error-driver": &mockVolumeMountProvider{generateError: fmt.Errorf("some error from provider")},
+					},
+				}
+				return registry
+			},
+			expectDriverName:       "error-driver",
+			expectError:            true,
+			expectedErrorSubstring: "some error from provider",
+		},
+		{
+			name:                 "read only mount with readOnly true",
+			persistentVolumeName: "readonly-test-pv",
+			containerMountPoint:  "/container/mount/target",
+			readOnly:             true,
+			setupCache: func() infra.CacheProvider {
+				pv := &corev1.PersistentVolume{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "readonly-test-pv",
+					},
+					Spec: corev1.PersistentVolumeSpec{
+						PersistentVolumeSource: corev1.PersistentVolumeSource{
+							CSI: &corev1.CSIPersistentVolumeSource{
+								Driver: "nas-driver",
+							},
+						},
+					},
+				}
+				return &mockCacheProvider{pv: pv}
+			},
+			setupClient: func() *clients.ClientSet {
+				return clients.NewFakeClientSet()
+			},
+			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
+				registry := &mockStorageProviderRegistry{
+					supportedDrivers: map[string]bool{
+						"nas-driver": true,
+					},
+					providers: map[string]storages.VolumeMountProvider{
+						"nas-driver": &mockVolumeMountProvider{},
+					},
+				}
+				return registry
+			},
+			expectDriverName: "nas-driver",
+			expectError:      false,
+		},
+		{
+			name:                 "read write mount with readOnly false",
+			persistentVolumeName: "readwrite-test-pv",
+			containerMountPoint:  "/container/mount/target",
+			readOnly:             false,
+			setupCache: func() infra.CacheProvider {
+				pv := &corev1.PersistentVolume{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "readwrite-test-pv",
+					},
+					Spec: corev1.PersistentVolumeSpec{
+						PersistentVolumeSource: corev1.PersistentVolumeSource{
+							CSI: &corev1.CSIPersistentVolumeSource{
+								Driver: "nas-driver",
+							},
+						},
+					},
+				}
+				return &mockCacheProvider{pv: pv}
+			},
+			setupClient: func() *clients.ClientSet {
+				return clients.NewFakeClientSet()
+			},
+			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
+				registry := &mockStorageProviderRegistry{
+					supportedDrivers: map[string]bool{
+						"nas-driver": true,
+					},
+					providers: map[string]storages.VolumeMountProvider{
+						"nas-driver": &mockVolumeMountProvider{},
+					},
+				}
+				return registry
+			},
+			expectDriverName: "nas-driver",
+			expectError:      false,
+		},
+		{
+			name:                 "read only mount with access point sub path",
+			persistentVolumeName: "pv-with-access-point",
+			containerMountPoint:  "/container/mount/target",
+			subPath:              "subdir/data",
+			readOnly:             true,
+			setupCache: func() infra.CacheProvider {
+				pv := &corev1.PersistentVolume{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "pv-with-access-point",
+					},
+					Spec: corev1.PersistentVolumeSpec{
+						PersistentVolumeSource: corev1.PersistentVolumeSource{
+							CSI: &corev1.CSIPersistentVolumeSource{
+								Driver: "nas-driver",
+								VolumeAttributes: map[string]string{
+									"path": "/share",
+								},
+							},
+						},
+					},
+				}
+				return &mockCacheProvider{pv: pv}
+			},
+			setupClient: func() *clients.ClientSet {
+				return clients.NewFakeClientSet()
+			},
+			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
+				registry := &mockStorageProviderRegistry{
+					supportedDrivers: map[string]bool{
+						"nas-driver": true,
+					},
+					providers: map[string]storages.VolumeMountProvider{
+						"nas-driver": &mockVolumeMountProvider{},
+					},
+				}
+				return registry
+			},
+			expectDriverName: "nas-driver",
+			expectError:      false,
+		},
+		{
+			name:                 "read write mount with access point sub path",
+			persistentVolumeName: "pv-with-access-point-rw",
+			containerMountPoint:  "/container/mount/target",
+			subPath:              "subdir/data",
+			readOnly:             false,
+			setupCache: func() infra.CacheProvider {
+				pv := &corev1.PersistentVolume{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "pv-with-access-point-rw",
+					},
+					Spec: corev1.PersistentVolumeSpec{
+						PersistentVolumeSource: corev1.PersistentVolumeSource{
+							CSI: &corev1.CSIPersistentVolumeSource{
+								Driver: "nas-driver",
+								VolumeAttributes: map[string]string{
+									"path": "/share",
+								},
+							},
+						},
+					},
+				}
+				return &mockCacheProvider{pv: pv}
+			},
+			setupClient: func() *clients.ClientSet {
+				return clients.NewFakeClientSet()
+			},
+			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
+				registry := &mockStorageProviderRegistry{
+					supportedDrivers: map[string]bool{
+						"nas-driver": true,
+					},
+					providers: map[string]storages.VolumeMountProvider{
+						"nas-driver": &mockVolumeMountProvider{},
+					},
+				}
+				return registry
+			},
+			expectDriverName: "nas-driver",
+			expectError:      false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -755,7 +950,7 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 			}
 
 			ctx := context.Background()
-			driverName, csiRequest, err := ctrl.generateNodePublishVolumeRequest(ctx, tt.containerMountPoint, tt.persistentVolumeName, tt.subPath)
+			driverName, csiRequest, err := ctrl.generateNodePublishVolumeRequest(ctx, tt.containerMountPoint, tt.persistentVolumeName, tt.subPath, tt.readOnly)
 
 			if tt.expectError {
 				assert.Error(t, err)
@@ -847,7 +1042,7 @@ type mockVolumeMountProvider struct {
 func (m *mockVolumeMountProvider) GenerateCSINodePublishVolumeRequest(
 	ctx context.Context,
 	containerMountTarget string,
-	persistentVolumeObj *corev1.PersistentVolume,
+	persistentVolumeObj *corev1.PersistentVolume, readOnlyExpect bool,
 	secretObj *corev1.Secret,
 ) (*csi.NodePublishVolumeRequest, error) {
 	if m.generateError != nil {

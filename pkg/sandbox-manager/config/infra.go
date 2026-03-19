@@ -6,8 +6,12 @@ type InitRuntimeOptions struct {
 }
 
 type CSIMountOptions struct {
-	Driver     string
-	RequestRaw string
+	MountOptionList []MountConfig `json:"mountOptionList"`
+}
+
+type MountConfig struct {
+	Driver     string `json:"driver"`
+	RequestRaw string `json:"requestRaw"`
 }
 
 type InplaceUpdateOptions struct {

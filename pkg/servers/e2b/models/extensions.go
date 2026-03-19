@@ -1,6 +1,7 @@
 package models
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
 
@@ -14,17 +15,18 @@ import (
 //
 //goland:noinspection GoSnakeCaseUsage
 const (
-	ExtensionKeyClaimTimeout                 = v1alpha1.E2BPrefix + "claim-timeout-seconds"
-	ExtensionKeyWaitReadyTimeout             = v1alpha1.E2BPrefix + "wait-ready-timeout-seconds"
-	ExtensionKeyClaimWithImage               = v1alpha1.E2BPrefix + "image"
-	ExtensionKeyClaimWithCSIMount            = v1alpha1.E2BPrefix + "csi"
-	ExtensionKeyClaimWithCSIMount_VolumeName = ExtensionKeyClaimWithCSIMount + "-volume-name"
-	ExtensionKeyClaimWithCSIMount_SubPath    = ExtensionKeyClaimWithCSIMount + "-subpath"
-	ExtensionKeyClaimWithCSIMount_MountPoint = ExtensionKeyClaimWithCSIMount + "-mount-point"
-	ExtensionKeySkipInitRuntime              = v1alpha1.E2BPrefix + "skip-init-runtime"
-	ExtensionKeyReserveFailedSandbox         = v1alpha1.E2BPrefix + "reserve-failed-sandbox"
-	ExtensionKeyCreateOnNoStock              = v1alpha1.E2BPrefix + "create-on-no-stock"
-	ExtensionKeyNeverTimeout                 = v1alpha1.E2BPrefix + "never-timeout"
+	ExtensionKeyClaimTimeout                  = v1alpha1.E2BPrefix + "claim-timeout-seconds"
+	ExtensionKeyWaitReadyTimeout              = v1alpha1.E2BPrefix + "wait-ready-timeout-seconds"
+	ExtensionKeyClaimWithImage                = v1alpha1.E2BPrefix + "image"
+	ExtensionKeyClaimWithCSIMount             = v1alpha1.E2BPrefix + "csi"
+	ExtensionKeyClaimWithCSIMount_VolumeName  = ExtensionKeyClaimWithCSIMount + "-volume-name"
+	ExtensionKeyClaimWithCSIMount_SubPath     = ExtensionKeyClaimWithCSIMount + "-subpath"
+	ExtensionKeyClaimWithCSIMount_MountPoint  = ExtensionKeyClaimWithCSIMount + "-mount-point"
+	ExtensionKeyClaimWithCSIMount_MountConfig = ExtensionKeyClaimWithCSIMount + "-volume-config"
+	ExtensionKeySkipInitRuntime               = v1alpha1.E2BPrefix + "skip-init-runtime"
+	ExtensionKeyReserveFailedSandbox          = v1alpha1.E2BPrefix + "reserve-failed-sandbox"
+	ExtensionKeyCreateOnNoStock               = v1alpha1.E2BPrefix + "create-on-no-stock"
+	ExtensionKeyNeverTimeout                  = v1alpha1.E2BPrefix + "never-timeout"
 )
 
 // Extensions for NewSandboxRequest
@@ -80,6 +82,43 @@ func (r *NewSandboxRequest) parseExtensionImage() error {
 }
 
 func (r *NewSandboxRequest) parseExtensionCSIMount() error {
+	// parse multi csi mount config
+	if err := r.parseExtensionForMultiCSIMount(); err != nil {
+		return err
+	}
+	// for single csi mount config
+	if err := r.parseExtensionsForSingleCSIMount(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (r *NewSandboxRequest) parseExtensionForMultiCSIMount() error {
+	multiCsiMountConfigRaw, configExist := r.Metadata[ExtensionKeyClaimWithCSIMount_MountConfig]
+	if !configExist {
+		return nil
+	}
+
+	var multiCsiMountConfig []CSIMountConfig
+	if err := json.Unmarshal([]byte(multiCsiMountConfigRaw), &multiCsiMountConfig); err != nil {
+		return fmt.Errorf("invalid multiCsiMountConfig [%s]: %s", ExtensionKeyClaimWithCSIMount_MountConfig, multiCsiMountConfigRaw)
+	}
+	for _, mountConfig := range multiCsiMountConfig {
+		// validate containerMountPoint
+		if err := validateMountPoint(mountConfig.MountPath); err != nil {
+			return fmt.Errorf("invalid containerMountPoint [%s]", mountConfig.MountPath)
+		}
+	}
+	// parse multi csi mount config to r.extensions
+	r.Extensions.CSIMount = CSIMountExtension{
+		MountConfigs: multiCsiMountConfig,
+	}
+	delete(r.Metadata, ExtensionKeyClaimWithCSIMount_MountConfig)
+	return nil
+}
+
+func (r *NewSandboxRequest) parseExtensionsForSingleCSIMount() error {
+	// for single csi mount config
 	// Both ExtensionKeyClaimWithCSIMount_VolumeName and ExtensionKeyClaimWithCSIMount_MountPoint must exist together or not at all.
 	persistentVolumeName, volumeNameExists := r.Metadata[ExtensionKeyClaimWithCSIMount_VolumeName]
 	containerMountPoint, mountPointExists := r.Metadata[ExtensionKeyClaimWithCSIMount_MountPoint]
@@ -103,10 +142,13 @@ func (r *NewSandboxRequest) parseExtensionCSIMount() error {
 	}
 
 	r.Extensions.CSIMount = CSIMountExtension{
-		ContainerMountPoint:     containerMountPoint,
-		PersistentVolumeName:    persistentVolumeName,
-		PersistentVolumeSubpath: subpath,
+		MountConfigs: make([]CSIMountConfig, 0, 1),
 	}
+	r.Extensions.CSIMount.MountConfigs = append(r.Extensions.CSIMount.MountConfigs, CSIMountConfig{
+		PvName:    persistentVolumeName,
+		MountPath: containerMountPoint,
+		SubPath:   subpath,
+	})
 	delete(r.Metadata, ExtensionKeyClaimWithCSIMount_VolumeName)
 	delete(r.Metadata, ExtensionKeyClaimWithCSIMount_MountPoint)
 	delete(r.Metadata, ExtensionKeyClaimWithCSIMount_SubPath)

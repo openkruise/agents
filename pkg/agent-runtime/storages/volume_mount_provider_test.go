@@ -17,6 +17,7 @@ func TestMountProvider_GenerateNodePublishVolumeRequest(t *testing.T) {
 		containerMountTarget string
 		persistentVolumeObj  *corev1.PersistentVolume
 		secretObj            *corev1.Secret
+		readOnly             bool
 		expectError          bool
 		validateResult       func(*testing.T, *csiapi.NodePublishVolumeRequest)
 	}{
@@ -146,7 +147,7 @@ func TestMountProvider_GenerateNodePublishVolumeRequest(t *testing.T) {
 			result, err := m.GenerateCSINodePublishVolumeRequest(
 				context.Background(),
 				tt.containerMountTarget,
-				tt.persistentVolumeObj,
+				tt.persistentVolumeObj, tt.readOnly,
 				tt.secretObj,
 			)
 
@@ -173,7 +174,7 @@ func TestMountProvider_GenerateNodePublishVolumeRequest_EdgeCases(t *testing.T) 
 			context.Background(),
 			"/test/path",
 			nil, // nil PV
-			nil,
+			false, nil,
 		)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "persistent volume object is nil")
@@ -198,7 +199,7 @@ func TestMountProvider_GenerateNodePublishVolumeRequest_EdgeCases(t *testing.T) 
 			context.Background(),
 			"", // empty target path
 			pv,
-			nil,
+			false, nil,
 		)
 
 		require.NoError(t, err)
@@ -228,7 +229,7 @@ func TestMountProvider_GenerateNodePublishVolumeRequest_EdgeCases(t *testing.T) 
 			context.Background(),
 			"/test/nil-secret",
 			pv,
-			nil, // nil secret
+			false, nil, // nil secret
 		)
 
 		require.NoError(t, err)
@@ -266,10 +267,10 @@ func TestMountProvider_GenerateNodePublishVolumeRequest_Idempotency(t *testing.T
 	ctx := context.Background()
 	targetPath := "/test/idempotency"
 
-	firstResult, err := m.GenerateCSINodePublishVolumeRequest(ctx, targetPath, pv, secret)
+	firstResult, err := m.GenerateCSINodePublishVolumeRequest(ctx, targetPath, pv, false, secret)
 	require.NoError(t, err)
 
-	secondResult, err := m.GenerateCSINodePublishVolumeRequest(ctx, targetPath, pv, secret)
+	secondResult, err := m.GenerateCSINodePublishVolumeRequest(ctx, targetPath, pv, false, secret)
 	require.NoError(t, err)
 
 	assert.Equal(t, firstResult.TargetPath, secondResult.TargetPath)
@@ -311,6 +312,6 @@ func BenchmarkMountProvider_GenerateNodePublishVolumeRequest(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, _ = m.GenerateCSINodePublishVolumeRequest(ctx, targetPath, pv, secret)
+		_, _ = m.GenerateCSINodePublishVolumeRequest(ctx, targetPath, pv, false, secret)
 	}
 }

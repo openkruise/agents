@@ -179,7 +179,7 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 
 	if opts.CSIMount != nil {
 		log.Info("starting to perform csi mount")
-		metrics.CSIMount, err = csiMount(ctx, sbx, *opts.CSIMount)
+		metrics.CSIMount, err = processCSIMounts(ctx, sbx, *opts.CSIMount)
 		if err != nil {
 			log.Error(err, "failed to perform csi mount")
 			err = fmt.Errorf("failed to perform csi mount: %s", err)
@@ -212,11 +212,34 @@ func clearFailedSandbox(ctx context.Context, sbx infra.Sandbox, err error, reser
 	}
 }
 
-func csiMount(ctx context.Context, sbx *Sandbox, opts config.CSIMountOptions) (time.Duration, error) {
+func csiMount(ctx context.Context, sbx *Sandbox, opts config.MountConfig) (time.Duration, error) {
 	ctx = logs.Extend(ctx, "action", "csiMount")
 	start := time.Now()
 	err := sbx.CSIMount(ctx, opts.Driver, opts.RequestRaw)
 	return time.Since(start), err
+}
+
+// processCSIMounts performs CSI volume mounting operations for all mount configurations.
+// It iterates through each mount option in the list and attempts to mount them sequentially.
+// If a mount operation fails, it logs the error and continues with the next mount option
+// to ensure that a single failure doesn't block other mounts.
+// Returns the total duration spent on all mount operations and any accumulated errors.
+func processCSIMounts(ctx context.Context, sbx *Sandbox, opts config.CSIMountOptions) (time.Duration, error) {
+	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
+	start := time.Now()
+
+	for _, opt := range opts.MountOptionList {
+		mountDuration, err := csiMount(ctx, sbx, opt)
+		if err != nil {
+			log.Error(err, "failed to perform CSI mount", "mountOptionConfig", opt)
+			return time.Since(start), err
+		}
+		log.Info("CSI mount completed successfully",
+			"mountOptionConfig", opt,
+			"duration", mountDuration)
+	}
+	totalDuration := time.Since(start)
+	return totalDuration, nil
 }
 
 func getPickKey(sbx *v1alpha1.Sandbox) string {

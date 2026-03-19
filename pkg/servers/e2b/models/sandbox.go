@@ -52,9 +52,7 @@ type InplaceUpdateExtension struct {
 }
 
 type CSIMountExtension struct {
-	ContainerMountPoint     string `json:"containerMountPoint"`     // path in container to mount the persistent volume
-	PersistentVolumeSubpath string `json:"persistentVolumeSubpath"` // subpath in persistent volume to mount
-	PersistentVolumeName    string `json:"persistentVolumeName"`    // persistent volume name to mount
+	MountConfigs []CSIMountConfig `json:"mountConfigs"` // list of CSI mount configurations
 }
 
 // SandboxMetadata represents metadata for a sandbox

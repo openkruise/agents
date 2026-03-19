@@ -13,7 +13,7 @@ type MountProvider struct{}
 func (p *MountProvider) GenerateCSINodePublishVolumeRequest(
 	ctx context.Context,
 	containerMountTarget string,
-	persistentVolumeObj *corev1.PersistentVolume,
+	persistentVolumeObj *corev1.PersistentVolume, readOnly bool,
 	secretObj *corev1.Secret,
 ) (*csi.NodePublishVolumeRequest, error) {
 	if persistentVolumeObj == nil {
@@ -34,7 +34,7 @@ func (p *MountProvider) GenerateCSINodePublishVolumeRequest(
 		},
 	}
 	// if the mode is read only, modify the access mode
-	isReadOnly := IsPureReadOnly(persistentVolumeObj.Spec.AccessModes)
+	isReadOnly := IsPureReadOnly(persistentVolumeObj.Spec.AccessModes) || readOnly
 	if isReadOnly {
 		volumeCapability.AccessMode.Mode = csi.VolumeCapability_AccessMode_SINGLE_NODE_READER_ONLY
 	}

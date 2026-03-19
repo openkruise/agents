@@ -10,8 +10,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
-	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/time/rate"
@@ -19,6 +17,9 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+
+	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
+	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
@@ -182,7 +183,11 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 				Template:    existTemplate,
 				InitRuntime: &config.InitRuntimeOptions{},
 				CSIMount: &config.CSIMountOptions{
-					Driver: "",
+					MountOptionList: []config.MountConfig{
+						{
+							Driver: "",
+						},
+					},
 				},
 			},
 			preModifier: func(sbx *v1alpha1.Sandbox, infra *Infra) {
@@ -473,7 +478,11 @@ func TestClaimSandboxFailed(t *testing.T) {
 				ReserveFailedSandbox: true,
 				InitRuntime:          &config.InitRuntimeOptions{},
 				CSIMount: &config.CSIMountOptions{
-					Driver: "",
+					MountOptionList: []config.MountConfig{
+						{
+							Driver: "",
+						},
+					},
 				},
 			},
 			preModifier: func(sbx *v1alpha1.Sandbox) {
@@ -490,7 +499,11 @@ func TestClaimSandboxFailed(t *testing.T) {
 				ReserveFailedSandbox: false,
 				InitRuntime:          &config.InitRuntimeOptions{},
 				CSIMount: &config.CSIMountOptions{
-					Driver: "",
+					MountOptionList: []config.MountConfig{
+						{
+							Driver: "",
+						},
+					},
 				},
 			},
 			preModifier: func(sbx *v1alpha1.Sandbox) {
