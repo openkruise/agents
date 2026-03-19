@@ -131,20 +131,27 @@ func (sc *Controller) createSandboxWithClone(ctx context.Context, request models
 	if request.Extensions.WaitReadySeconds > 0 {
 		opts.WaitReadyTimeout = time.Duration(request.Extensions.WaitReadySeconds) * time.Second
 	}
-	if request.Extensions.CSIMount.PersistentVolumeName != "" {
-		driverName, csiReqConfigRaw, err := sc.csiMountOptionsConfig(ctx,
-			request.Extensions.CSIMount.ContainerMountPoint, request.Extensions.CSIMount.PersistentVolumeName, request.Extensions.CSIMount.PersistentVolumeSubpath)
-		if err != nil {
-			return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
-				Code:    http.StatusBadRequest,
-				Message: err.Error(),
+
+	if len(request.Extensions.CSIMount.MountConfigs) != 0 {
+		csiMountOptions := make([]config.MountConfig, 0, len(request.Extensions.CSIMount.MountConfigs))
+		for _, mountConfig := range request.Extensions.CSIMount.MountConfigs {
+			driverName, csiReqConfigRaw, err := sc.csiMountOptionsConfig(ctx, mountConfig.MountPath, mountConfig.PvName, mountConfig.SubPath, mountConfig.ReadOnly)
+			if err != nil {
+				return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
+					Code:    http.StatusBadRequest,
+					Message: err.Error(),
+				}
+			}
+			csiMountOptions = append(csiMountOptions, config.MountConfig{
+				Driver:     driverName,
+				RequestRaw: csiReqConfigRaw,
+			})
+			opts.CSIMount = &config.CSIMountOptions{
+				MountOptionList: csiMountOptions,
 			}
 		}
-		opts.CSIMount = &config.CSIMountOptions{
-			Driver:     driverName,
-			RequestRaw: csiReqConfigRaw,
-		}
 	}
+
 	sbx, err := sc.manager.CloneSandbox(ctx, opts)
 	if err != nil {
 		log.Error(err, "sandbox clone failed")

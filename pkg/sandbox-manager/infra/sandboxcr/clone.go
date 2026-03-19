@@ -99,11 +99,14 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache *Ca
 	// Step 5: csi mount
 	if opts.CSIMount != nil {
 		log.Info("starting to perform csi mount")
-		metrics.CSIMount, err = csiMount(ctx, sbx, *opts.CSIMount)
-		metrics.Total += metrics.CSIMount
-		if err != nil {
-			log.Error(err, "failed to perform csi mount")
-			return nil, metrics, fmt.Errorf("failed to perform csi mount: %s", err)
+		for _, mountConfig := range opts.CSIMount.MountOptionList {
+			cost, err := csiMount(ctx, sbx, mountConfig)
+			metrics.CSIMount += cost
+			metrics.Total += cost
+			if err != nil {
+				log.Error(err, "failed to perform csi mount")
+				return nil, metrics, fmt.Errorf("failed to perform csi mount: %s", err)
+			}
 		}
 		log.Info("csi mount completed", "cost", metrics.CSIMount)
 	}

@@ -428,8 +428,12 @@ func TestCloneSandbox(t *testing.T) {
 				CheckPointID:     checkpointID,
 				WaitReadyTimeout: 30 * time.Second,
 				CSIMount: &config.CSIMountOptions{
-					Driver:     "test-driver",
-					RequestRaw: "test-request",
+					MountOptionList: []config.MountConfig{
+						{
+							Driver:     "test-driver",
+							RequestRaw: "test-request",
+						},
+					},
 				},
 			},
 			serverOpts: testutils.TestRuntimeServerOptions{
@@ -454,8 +458,12 @@ func TestCloneSandbox(t *testing.T) {
 				CheckPointID:     checkpointID,
 				WaitReadyTimeout: 30 * time.Second,
 				CSIMount: &config.CSIMountOptions{
-					Driver:     "test-driver",
-					RequestRaw: "test-request",
+					MountOptionList: []config.MountConfig{
+						{
+							Driver:     "test-driver",
+							RequestRaw: "test-request",
+						},
+					},
 				},
 			},
 			serverOpts: testutils.TestRuntimeServerOptions{
