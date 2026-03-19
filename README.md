@@ -37,6 +37,10 @@ To interact with the OpenKruise Agents programmatically, you can use the E2B SDK
 
 You are warmly welcome to hack on OpenKruise Agents. We have prepared a detailed guide [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Roadmap
+
+The current Roadmap can be found at [roadmap.md](roadmap.md).
+
 ## Relationship with SIG Agent-Sandbox
 
 OpenKruise Agents offers high-level APIs for sandbox management, enabling efficient resource provisioning, user management, and traffic routing. Under the hood, OpenKruise Agents includes built-in sandbox APIs and implementations, while maintaining compatibility with Sig Agent-Sandbox when available.
