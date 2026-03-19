@@ -17,14 +17,15 @@ import (
 	"context"
 	"testing"
 
-	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/utils"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/utils"
 )
 
 func TestHashSandbox(t *testing.T) {
@@ -463,13 +464,13 @@ func TestGeneratePodFromSandbox(t *testing.T) {
 				if len(pod.OwnerReferences) != 1 {
 					t.Errorf("expected 1 owner reference, got %d", len(pod.OwnerReferences))
 				}
-			if pod.Annotations[utils.PodAnnotationCreatedBy] != utils.CreatedBySandbox {
-				t.Errorf("annotation %s = %s, want %s", utils.PodAnnotationCreatedBy, pod.Annotations[utils.PodAnnotationCreatedBy], utils.CreatedBySandbox)
-			}
-			if pod.Labels[utils.PodLabelCreatedBy] != utils.CreatedBySandbox {
-				t.Errorf("label %s = %s, want %s", utils.PodLabelCreatedBy, pod.Labels[utils.PodLabelCreatedBy], utils.CreatedBySandbox)
-			}
-			if pod.Labels[agentsv1alpha1.PodLabelTemplateHash] != "rev-001" {
+				if pod.Annotations[utils.PodAnnotationCreatedBy] != utils.CreatedBySandbox {
+					t.Errorf("annotation %s = %s, want %s", utils.PodAnnotationCreatedBy, pod.Annotations[utils.PodAnnotationCreatedBy], utils.CreatedBySandbox)
+				}
+				if pod.Labels[utils.PodLabelCreatedBy] != utils.CreatedBySandbox {
+					t.Errorf("label %s = %s, want %s", utils.PodLabelCreatedBy, pod.Labels[utils.PodLabelCreatedBy], utils.CreatedBySandbox)
+				}
+				if pod.Labels[agentsv1alpha1.PodLabelTemplateHash] != "rev-001" {
 					t.Errorf("label PodLabelTemplateHash = %s, want rev-001", pod.Labels[agentsv1alpha1.PodLabelTemplateHash])
 				}
 				if len(pod.Spec.Containers) != 1 || pod.Spec.Containers[0].Image != "nginx:latest" {
@@ -512,12 +513,12 @@ func TestGeneratePodFromSandbox(t *testing.T) {
 				if pod.Annotations["team"] != "platform" {
 					t.Errorf("annotation team = %s, want platform", pod.Annotations["team"])
 				}
-			if pod.Annotations[utils.PodAnnotationCreatedBy] != utils.CreatedBySandbox {
-				t.Errorf("annotation CreatedBy missing or wrong: %s", pod.Annotations[utils.PodAnnotationCreatedBy])
-			}
-			if pod.Labels[utils.PodLabelCreatedBy] != utils.CreatedBySandbox {
-				t.Errorf("label CreatedBy missing or wrong: %s", pod.Labels[utils.PodLabelCreatedBy])
-			}
+				if pod.Annotations[utils.PodAnnotationCreatedBy] != utils.CreatedBySandbox {
+					t.Errorf("annotation CreatedBy missing or wrong: %s", pod.Annotations[utils.PodAnnotationCreatedBy])
+				}
+				if pod.Labels[utils.PodLabelCreatedBy] != utils.CreatedBySandbox {
+					t.Errorf("label CreatedBy missing or wrong: %s", pod.Labels[utils.PodLabelCreatedBy])
+				}
 			},
 		},
 		{

@@ -21,19 +21,21 @@ import (
 	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
-	"github.com/onsi/ginkgo/v2/types"
 	. "github.com/onsi/gomega"
-	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
+
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 )
 
 var (
 	scheme    *runtime.Scheme
 	k8sClient client.Client
+	clientset *kubernetes.Clientset
 )
 
 var (
@@ -48,11 +50,18 @@ func init() {
 	_ = agentsv1alpha1.AddToScheme(scheme)
 	_ = appsv1.AddToScheme(scheme)
 
-	c, err := client.New(config.GetConfigOrDie(), client.Options{Scheme: scheme})
+	cfg := config.GetConfigOrDie()
+	c, err := client.New(cfg, client.Options{Scheme: scheme})
 	if err != nil {
 		panic(fmt.Sprintf("Failed to create client: %v", err))
 	}
 	k8sClient = c
+
+	// Create clientset for eviction API
+	clientset, err = kubernetes.NewForConfig(cfg)
+	if err != nil {
+		panic(fmt.Sprintf("Failed to create clientset: %v", err))
+	}
 }
 
 // +kubebuilder:scaffold:e2e-webhooks-checks
@@ -64,10 +73,9 @@ func init() {
 func TestE2E(t *testing.T) {
 	RegisterFailHandler(Fail)
 	_, _ = fmt.Fprintf(GinkgoWriter, "Starting agent-sandbox integration test suite\n")
-	customReporterConfig := types.NewDefaultReporterConfig()
-	customSuiteConfig := types.NewDefaultSuiteConfig()
 
-	customReporterConfig.Verbose = true
+	// Get configuration from command line flags
+	suiteConfig, reporterConfig := GinkgoConfiguration()
 
-	RunSpecs(t, "e2e suite", customSuiteConfig, customReporterConfig)
+	RunSpecs(t, "e2e suite", suiteConfig, reporterConfig)
 }
