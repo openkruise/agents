@@ -15,6 +15,8 @@ COPY ../pkg ./pkg
 COPY ../api  ./api
 COPY ../client ./client
 COPY ../proto ./proto
+COPY ../test ./test
+
 # Build the binary
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o sandbox-manager ./cmd/sandbox-manager
 
