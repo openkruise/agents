@@ -25,6 +25,7 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/controller/sandbox/core"
 	"github.com/openkruise/agents/pkg/utils"
+	"github.com/openkruise/agents/pkg/utils/expectations"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -2316,6 +2317,186 @@ func TestSandboxReconciler_Reconcile_RateLimitFeatureGate(t *testing.T) {
 				t.Errorf("expected RequeueAfter > 0, got 0")
 			}
 			if !tt.expectRequeueAfter && result.RequeueAfter > 0 {
+				t.Errorf("expected RequeueAfter == 0, got %v", result.RequeueAfter)
+			}
+		})
+	}
+}
+
+func TestSandboxReconciler_checkExpectations(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	tests := []struct {
+		name          string
+		pod           *corev1.Pod
+		sandbox       *agentsv1alpha1.Sandbox
+		setupExpect   func()
+		expectRequeue bool
+	}{
+		{
+			name: "pod nil - expectations satisfied",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+					UID:       "test-uid-1",
+				},
+			},
+			setupExpect: func() {
+				// Clean up all expectations
+			},
+			expectRequeue: false,
+		},
+		{
+			name: "pod exists - resourceVersion not satisfied within timeout",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            "test-sandbox",
+					Namespace:       "default",
+					UID:             "test-uid-2",
+					ResourceVersion: "100",
+				},
+			},
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+					UID:       "test-uid-2",
+				},
+			},
+			setupExpect: func() {
+				core.ResourceVersionExpectations.Expect(&corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            "test-sandbox",
+						Namespace:       "default",
+						UID:             "test-uid-2",
+						ResourceVersion: "200",
+					},
+				})
+			},
+			expectRequeue: true,
+		},
+		{
+			name: "pod exists - resourceVersion satisfied",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            "test-sandbox",
+					Namespace:       "default",
+					UID:             "test-uid-3",
+					ResourceVersion: "100",
+				},
+			},
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+					UID:       "test-uid-3",
+				},
+			},
+			setupExpect: func() {
+				core.ResourceVersionExpectations.Expect(&corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            "test-sandbox",
+						Namespace:       "default",
+						UID:             "test-uid-3",
+						ResourceVersion: "100",
+					},
+				})
+			},
+			expectRequeue: false,
+		},
+		{
+			name: "scale expectation not satisfied within timeout",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+					UID:       "test-uid-4",
+				},
+			},
+			setupExpect: func() {
+				key := utils.GetControllerKey(&agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-sandbox",
+						Namespace: "default",
+						UID:       "test-uid-4",
+					},
+				})
+				core.ScaleExpectation.ExpectScale(key, expectations.Create, "pod-1")
+			},
+			expectRequeue: true,
+		},
+		{
+			name: "sandbox resourceVersion not satisfied within timeout",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            "test-sandbox",
+					Namespace:       "default",
+					UID:             "test-uid-5",
+					ResourceVersion: "100",
+				},
+			},
+			setupExpect: func() {
+				core.ResourceVersionExpectations.Expect(&agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            "test-sandbox",
+						Namespace:       "default",
+						UID:             "test-uid-5",
+						ResourceVersion: "200",
+					},
+				})
+			},
+			expectRequeue: true,
+		},
+		{
+			name: "sandbox resourceVersion satisfied",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            "test-sandbox",
+					Namespace:       "default",
+					UID:             "test-uid-6",
+					ResourceVersion: "100",
+				},
+			},
+			setupExpect: func() {
+				core.ResourceVersionExpectations.Expect(&agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:            "test-sandbox",
+						Namespace:       "default",
+						UID:             "test-uid-6",
+						ResourceVersion: "100",
+					},
+				})
+			},
+			expectRequeue: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Clean up expectations before each test
+			if tt.pod != nil {
+				core.ResourceVersionExpectations.Delete(tt.pod)
+			}
+			core.ResourceVersionExpectations.Delete(tt.sandbox)
+			core.ScaleExpectation.DeleteExpectations(utils.GetControllerKey(tt.sandbox))
+
+			tt.setupExpect()
+
+			reconciler := &SandboxReconciler{}
+			ctx := context.Background()
+
+			requeue, result := reconciler.checkExpectations(ctx, tt.pod, tt.sandbox)
+
+			if requeue != tt.expectRequeue {
+				t.Errorf("checkExpectations() requeue = %v, expectRequeue %v", requeue, tt.expectRequeue)
+			}
+			if tt.expectRequeue && result.RequeueAfter == 0 {
+				t.Errorf("expected RequeueAfter > 0, got 0")
+			}
+			if !tt.expectRequeue && result.RequeueAfter != 0 {
 				t.Errorf("expected RequeueAfter == 0, got %v", result.RequeueAfter)
 			}
 		})
