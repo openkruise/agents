@@ -298,14 +298,19 @@ func CreateCheckpoint(ctx context.Context, sbx *v1alpha1.Sandbox, client clients
 			},
 		},
 		Spec: v1alpha1.CheckpointSpec{
-			PodName:            ptr.To(sbx.Name),
-			KeepRunning:        opts.KeepRunning,
-			TtlAfterFinished:   opts.TTL,
-			PersistentContents: tmpl.Spec.PersistentContents,
+			PodName:          ptr.To(sbx.Name),
+			KeepRunning:      opts.KeepRunning,
+			TtlAfterFinished: opts.TTL,
 		},
 	}
 	if len(opts.PersistentContents) > 0 {
 		cp.Spec.PersistentContents = opts.PersistentContents
+	} else {
+		for _, pc := range tmpl.Spec.PersistentContents {
+			if pc == v1alpha1.CheckpointPersistentContentFilesystem || pc == v1alpha1.CheckpointPersistentContentMemory {
+				cp.Spec.PersistentContents = append(cp.Spec.PersistentContents, pc)
+			}
+		}
 	}
 	cp, err = DefaultCreateCheckpoint(ctx, client, cp)
 	if err != nil {
