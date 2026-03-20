@@ -50,6 +50,12 @@ type Sandbox struct {
 	Client clients.SandboxClient
 }
 
+var DefaultDeleteSandbox = deleteSandbox
+
+func deleteSandbox(ctx context.Context, sbx *agentsv1alpha1.Sandbox, client clients.SandboxClient) error {
+	return client.ApiV1alpha1().Sandboxes(sbx.Namespace).Delete(ctx, sbx.Name, metav1.DeleteOptions{})
+}
+
 func (s *Sandbox) GetTemplate() string {
 	return GetTemplateFromSandbox(s.Sandbox)
 }
@@ -113,7 +119,7 @@ func (s *Sandbox) Kill(ctx context.Context) error {
 	if s.GetDeletionTimestamp() != nil {
 		return nil
 	}
-	return s.Client.ApiV1alpha1().Sandboxes(s.GetNamespace()).Delete(ctx, s.GetName(), metav1.DeleteOptions{})
+	return DefaultDeleteSandbox(ctx, s.Sandbox, s.Client)
 }
 
 func (s *Sandbox) GetSandboxID() string {

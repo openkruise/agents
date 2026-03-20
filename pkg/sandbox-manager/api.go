@@ -156,3 +156,19 @@ func (m *SandboxManager) ResumeSandbox(ctx context.Context, sbx infra.Sandbox) e
 	}
 	return nil
 }
+
+// DeleteSandbox deletes a sandbox and syncs route with peers
+func (m *SandboxManager) DeleteSandbox(ctx context.Context, sbx infra.Sandbox) error {
+	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
+	route := sbx.GetRoute()
+	route.State = v1alpha1.SandboxStateDead
+
+	if err := sbx.Kill(ctx); err != nil {
+		log.Error(err, "failed to delete sandbox")
+		return err
+	}
+	if err := m.proxy.SyncRouteWithPeers(route); err != nil {
+		log.Error(err, "failed to sync route with peers after delete")
+	}
+	return nil
+}

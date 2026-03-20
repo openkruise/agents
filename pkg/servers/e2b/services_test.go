@@ -922,3 +922,81 @@ func TestAutoPause(t *testing.T) {
 		})
 	}
 }
+
+func TestDeleteSandbox(t *testing.T) {
+	templateName := "test-template"
+	user := &models.CreatedTeamAPIKey{
+		ID:   keys.AdminKeyID,
+		Key:  InitKey,
+		Name: "admin",
+	}
+
+	tests := []struct {
+		name          string
+		sandboxID     string // if not set, use the created sandbox ID
+		mockDeleteErr error
+		expectStatus  int
+	}{
+		{
+			name:         "delete running sandbox successfully",
+			expectStatus: http.StatusNoContent,
+		},
+		{
+			name:         "delete non-existent sandbox returns success (idempotent)",
+			sandboxID:    "non-existent-sandbox",
+			expectStatus: http.StatusNoContent,
+		},
+		{
+			name:          "delete sandbox with kill error",
+			mockDeleteErr: fmt.Errorf("mock delete error"),
+			expectStatus:  http.StatusInternalServerError,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			controller, _, teardown := Setup(t)
+			defer teardown()
+			_ = CreateSandboxPool(t, controller, templateName, 1)
+			// Note: do not defer cleanup() because sandbox may be deleted during test
+
+			createResp, err := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
+				TemplateID: templateName,
+				Metadata: map[string]string{
+					models.ExtensionKeySkipInitRuntime: v1alpha1.True,
+				},
+			}, nil, user))
+			require.Nil(t, err)
+			assert.Equal(t, models.SandboxStateRunning, createResp.Body.State)
+
+			// Decorator: DefaultDeleteSandbox - control delete result (set after create)
+			if tt.mockDeleteErr != nil {
+				origDeleteSandbox := sandboxcr.DefaultDeleteSandbox
+				sandboxcr.DefaultDeleteSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, client clients.SandboxClient) error {
+					return tt.mockDeleteErr
+				}
+				t.Cleanup(func() { sandboxcr.DefaultDeleteSandbox = origDeleteSandbox })
+			}
+
+			sandboxID := tt.sandboxID
+			if sandboxID == "" {
+				sandboxID = createResp.Body.SandboxID
+			}
+
+			deleteResp, apiErr := controller.DeleteSandbox(NewRequest(t, nil, nil, map[string]string{
+				"sandboxID": sandboxID,
+			}, user))
+
+			if tt.expectStatus >= 300 {
+				require.NotNil(t, apiErr)
+				if apiErr.Code == 0 {
+					apiErr.Code = http.StatusInternalServerError
+				}
+				assert.Equal(t, tt.expectStatus, apiErr.Code)
+			} else {
+				require.Nil(t, apiErr)
+				assert.Equal(t, tt.expectStatus, deleteResp.Code)
+			}
+		})
+	}
+}

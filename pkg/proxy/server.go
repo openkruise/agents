@@ -11,6 +11,7 @@ import (
 	"time"
 
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
+	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
@@ -226,8 +227,13 @@ func (s *Server) handleRefresh(r *http.Request) (web.ApiResponse[struct{}], *web
 			Message: fmt.Sprintf("failed to unmarshal body: %s", err.Error()),
 		}
 	}
-	s.SetRoute(ctx, route)
-	log.Info("route refreshed", "route", route)
+	if route.State == v1alpha1.SandboxStateDead {
+		s.DeleteRoute(route.ID)
+		log.Info("route deleted")
+	} else {
+		s.SetRoute(ctx, route)
+		log.Info("route refreshed", "route", route)
+	}
 	return web.ApiResponse[struct{}]{
 		Code: http.StatusNoContent,
 	}, nil

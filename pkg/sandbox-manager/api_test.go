@@ -989,3 +989,127 @@ func TestSandboxManager_GetOwnerOfSandbox(t *testing.T) {
 		})
 	}
 }
+
+func TestSandboxManager_DeleteSandbox(t *testing.T) {
+	utils.InitLogOutput()
+	manager := setupTestManager(t)
+	client := manager.client.SandboxClient
+
+	tests := []struct {
+		name          string
+		initSandbox   func(sbx *agentsv1alpha1.Sandbox)
+		mockDeleteErr error
+		expectError   bool
+	}{
+		{
+			name: "delete running sandbox successfully",
+			initSandbox: func(sbx *agentsv1alpha1.Sandbox) {
+				sbx.Status.Phase = agentsv1alpha1.SandboxRunning
+				sbx.Status.Conditions = []metav1.Condition{
+					{
+						Type:   string(agentsv1alpha1.SandboxConditionReady),
+						Status: metav1.ConditionTrue,
+					},
+				}
+				sbx.Status.PodInfo.PodIP = "10.0.0.1"
+			},
+			mockDeleteErr: nil,
+			expectError:   false,
+		},
+		{
+			name: "delete paused sandbox successfully",
+			initSandbox: func(sbx *agentsv1alpha1.Sandbox) {
+				sbx.Status.Phase = agentsv1alpha1.SandboxPaused
+				sbx.Status.Conditions = []metav1.Condition{
+					{
+						Type:   string(agentsv1alpha1.SandboxConditionPaused),
+						Status: metav1.ConditionTrue,
+					},
+				}
+				sbx.Spec.Paused = true
+				sbx.Status.PodInfo.PodIP = "10.0.0.2"
+			},
+			mockDeleteErr: nil,
+			expectError:   false,
+		},
+		{
+			name: "delete sandbox with kill error",
+			initSandbox: func(sbx *agentsv1alpha1.Sandbox) {
+				sbx.Status.Phase = agentsv1alpha1.SandboxRunning
+				sbx.Status.Conditions = []metav1.Condition{
+					{
+						Type:   string(agentsv1alpha1.SandboxConditionReady),
+						Status: metav1.ConditionTrue,
+					},
+				}
+				sbx.Status.PodInfo.PodIP = "10.0.0.3"
+			},
+			mockDeleteErr: fmt.Errorf("mock delete error"),
+			expectError:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sandbox := &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("test-sandbox-delete-%s", tt.name),
+					Namespace: "default",
+					Annotations: map[string]string{
+						agentsv1alpha1.AnnotationOwner: testUser,
+					},
+					Labels: map[string]string{
+						agentsv1alpha1.LabelSandboxIsClaimed: "true",
+					},
+					CreationTimestamp: metav1.Now(),
+				},
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxRunning,
+					PodInfo: agentsv1alpha1.PodInfo{
+						PodIP: "10.0.0.1",
+					},
+				},
+			}
+			tt.initSandbox(sandbox)
+
+			CreateSandboxWithStatus(t, client, sandbox)
+			time.Sleep(100 * time.Millisecond)
+
+			// Get sandbox
+			sbx, err := manager.GetClaimedSandbox(context.Background(), testUser, sandboxutils.GetSandboxID(sandbox))
+			if err != nil {
+				t.Fatalf("Failed to get sandbox: %v", err)
+			}
+
+			// Set initial route
+			initialRoute := sbx.GetRoute()
+			manager.proxy.SetRoute(t.Context(), initialRoute)
+
+			// Decorator: DefaultDeleteSandbox - control delete result (set after getting sandbox)
+			if tt.mockDeleteErr != nil {
+				origDeleteSandbox := sandboxcr.DefaultDeleteSandbox
+				sandboxcr.DefaultDeleteSandbox = func(ctx context.Context, s *agentsv1alpha1.Sandbox, c clients.SandboxClient) error {
+					return tt.mockDeleteErr
+				}
+				t.Cleanup(func() { sandboxcr.DefaultDeleteSandbox = origDeleteSandbox })
+			}
+
+			// Delete sandbox
+			err = manager.DeleteSandbox(context.Background(), sbx)
+
+			if tt.expectError {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), tt.mockDeleteErr.Error())
+			} else {
+				assert.NoError(t, err)
+				// After successful deletion, verify sandbox is not found
+				// Use a short timeout context to avoid long retry in GetClaimedSandbox
+				time.Sleep(100 * time.Millisecond)
+				ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+				defer cancel()
+				_, getErr := manager.GetClaimedSandbox(ctx, testUser, sandboxutils.GetSandboxID(sandbox))
+				assert.Error(t, getErr, "sandbox should not be found after deletion")
+			}
+		})
+	}
+}
