@@ -705,6 +705,20 @@ func TestCloneSandbox(t *testing.T) {
 				require.NoError(t, err)
 			},
 		},
+		{
+			name: "clone fail with inplace update not supported",
+			request: models.NewSandboxRequest{
+				TemplateID: checkpointID,
+				Timeout:    300,
+				Metadata: map[string]string{
+					models.ExtensionKeyClaimWithImage: "new-image:latest",
+				},
+			},
+			expectError: &web.ApiError{
+				Code:    http.StatusBadRequest,
+				Message: "InplaceUpdate is not supported for clone",
+			},
+		},
 	}
 
 	for _, tt := range tests {

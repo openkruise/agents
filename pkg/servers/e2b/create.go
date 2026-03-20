@@ -120,6 +120,14 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 func (sc *Controller) createSandboxWithClone(ctx context.Context, request models.NewSandboxRequest, user *models.CreatedTeamAPIKey) (web.ApiResponse[*models.Sandbox], *web.ApiError) {
 	log := klog.FromContext(ctx)
 	start := time.Now()
+
+	if request.Extensions.InplaceUpdate.Image != "" {
+		return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
+			Code:    http.StatusBadRequest,
+			Message: "InplaceUpdate is not supported for clone",
+		}
+	}
+
 	opts := infra.CloneSandboxOptions{
 		User:         user.ID.String(),
 		CheckPointID: request.TemplateID,
