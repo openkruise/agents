@@ -9,6 +9,7 @@ import (
 	"io"
 	"math/rand/v2"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -419,6 +420,17 @@ func modifyPickedSandbox(sbx *Sandbox, lockType infra.LockType, opts infra.Claim
 	}
 	labels[v1alpha1.LabelSandboxIsClaimed] = "true"
 	sbx.SetLabels(labels)
+
+	// propagate labels to podtemplates
+	for k, v := range labels {
+		if strings.HasPrefix(k, v1alpha1.InternalPrefix) {
+			continue
+		}
+		if sbx.Spec.Template.Labels == nil {
+			sbx.Spec.Template.Labels = make(map[string]string, len(labels))
+		}
+		sbx.Spec.Template.Labels[k] = v
+	}
 
 	annotations := sbx.GetAnnotations()
 	if annotations == nil {

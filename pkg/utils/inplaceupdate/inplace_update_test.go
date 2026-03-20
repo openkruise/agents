@@ -154,12 +154,62 @@ func TestInPlaceUpdateControl_Update(t *testing.T) {
 		expectError bool
 	}{
 		{
-			name: "container changes exist",
+			name: "container image changes",
 			opts: InPlaceUpdateOptions{
 				Box: &agentsapiv1alpha1.Sandbox{
 					Spec: agentsapiv1alpha1.SandboxSpec{
 						EmbeddedSandboxTemplate: agentsapiv1alpha1.EmbeddedSandboxTemplate{
 							Template: &corev1.PodTemplateSpec{
+								Spec: corev1.PodSpec{
+									Containers: []corev1.Container{
+										{
+											Name:  "container1",
+											Image: "nginx:1.20",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+				Pod: &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-pod",
+						Namespace: "default",
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name:  "container1",
+								Image: "nginx:latest", // different image
+							},
+						},
+					},
+					Status: corev1.PodStatus{
+						ContainerStatuses: []corev1.ContainerStatus{
+							{
+								Name:    "container1",
+								ImageID: "docker.io/nginx:latest",
+							},
+						},
+					},
+				},
+				Revision: "abc123",
+			},
+			expectError: false,
+		},
+		{
+			name: "container image and labels changes",
+			opts: InPlaceUpdateOptions{
+				Box: &agentsapiv1alpha1.Sandbox{
+					Spec: agentsapiv1alpha1.SandboxSpec{
+						EmbeddedSandboxTemplate: agentsapiv1alpha1.EmbeddedSandboxTemplate{
+							Template: &corev1.PodTemplateSpec{
+								ObjectMeta: metav1.ObjectMeta{
+									Labels: map[string]string{
+										"app": "test",
+									},
+								},
 								Spec: corev1.PodSpec{
 									Containers: []corev1.Container{
 										{
@@ -283,6 +333,12 @@ func TestInPlaceUpdateControl_Update(t *testing.T) {
 			// Validate state
 			if state.Revision != tt.opts.Revision {
 				t.Errorf("Expected state revision %s, got %s", tt.opts.Revision, state.Revision)
+			}
+
+			for k, v := range tt.opts.Box.Spec.Template.Labels {
+				if updatedPod.Labels[k] != v {
+					t.Errorf("Expected label %s=%s, got %s=%s", k, v, k, updatedPod.Labels[k])
+				}
 			}
 
 			// If there were updates, validate container changes

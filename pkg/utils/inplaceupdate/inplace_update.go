@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	agentsapiv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/utils"
@@ -101,6 +102,9 @@ func DefaultGeneratePatchBodyFunc(opts InPlaceUpdateOptions) string {
 		UpdateTimestamp:       metav1.Now(),
 		LastContainerStatuses: map[string]InPlaceUpdateContainerStatus{},
 	}
+	labels := map[string]string{
+		agentsapiv1alpha1.PodLabelTemplateHash: revision,
+	}
 	// container.name -> container
 	originContainers := map[string]corev1.Container{}
 	for i := range box.Spec.Template.Spec.Containers {
@@ -112,7 +116,14 @@ func DefaultGeneratePatchBodyFunc(opts InPlaceUpdateOptions) string {
 	for _, status := range pod.Status.ContainerStatuses {
 		originStatus[status.Name] = status.ImageID
 	}
-
+	for k, v := range box.Labels {
+		if strings.HasPrefix(k, agentsapiv1alpha1.InternalPrefix) {
+			continue
+		}
+		if pod.Labels[k] != v {
+			labels[k] = v
+		}
+	}
 	patchSpec := corev1.PodSpec{}
 	for i := range pod.Spec.Containers {
 		container := pod.Spec.Containers[i]
@@ -141,9 +152,7 @@ func DefaultGeneratePatchBodyFunc(opts InPlaceUpdateOptions) string {
 	annotations := map[string]string{
 		PodAnnotationInPlaceUpdateStateKey: utils.DumpJson(state),
 	}
-	labels := map[string]string{
-		agentsapiv1alpha1.PodLabelTemplateHash: revision,
-	}
+
 	return fmt.Sprintf(`{"metadata":{"annotations":%s,"labels":%s},"spec":%s}`, utils.DumpJson(annotations), utils.DumpJson(labels), utils.DumpJson(patchSpec))
 }
 

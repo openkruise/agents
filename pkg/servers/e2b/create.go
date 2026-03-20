@@ -82,6 +82,12 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 				annotations[v1alpha1.AnnotationRuntimeAccessToken] = accessToken
 			}
 			sbx.SetAnnotations(annotations)
+
+			labels := sbx.GetLabels()
+			for k, v := range request.Extensions.Labels {
+				labels[k] = v
+			}
+			sbx.SetLabels(labels)
 		},
 		ReserveFailedSandbox: request.Extensions.ReserveFailedSandbox,
 		CreateOnNoStock:      request.Extensions.CreateOnNoStock,
