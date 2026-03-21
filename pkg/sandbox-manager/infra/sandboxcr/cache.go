@@ -9,6 +9,7 @@ import (
 
 	"golang.org/x/sync/singleflight"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sinformers "k8s.io/client-go/informers"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
@@ -45,7 +46,16 @@ type Cache struct {
 
 func NewCache(client *clients.ClientSet, opts config.SandboxManagerOptions) (*Cache, error) {
 	// Create informer factory for custom Sandbox resources
-	informerFactory := informers.NewSharedInformerFactory(client.SandboxClient, time.Minute*10)
+	informerOptions := []informers.SharedInformerOption{}
+	if opts.SandboxNamespace != "" {
+		informerOptions = append(informerOptions, informers.WithNamespace(opts.SandboxNamespace))
+	}
+	if opts.SandboxLabelSelector != "" {
+		informerOptions = append(informerOptions, informers.WithTweakListOptions(func(lo *metav1.ListOptions) {
+			lo.LabelSelector = opts.SandboxLabelSelector
+		}))
+	}
+	informerFactory := informers.NewSharedInformerFactoryWithOptions(client.SandboxClient, time.Minute*10, informerOptions...)
 	sandboxInformer := informerFactory.Api().V1alpha1().Sandboxes().Informer()
 	sandboxSetInformer := informerFactory.Api().V1alpha1().SandboxSets().Informer()
 	checkpointInformer := informerFactory.Api().V1alpha1().Checkpoints().Informer()
@@ -87,11 +97,15 @@ func NewCache(client *clients.ClientSet, opts config.SandboxManagerOptions) (*Ca
 }
 
 func NewTestCache(t *testing.T) (*Cache, *clients.ClientSet, error) {
-	t.Helper()
-	clientSet := clients.NewFakeClientSet(t)
-	c, err := NewCache(clientSet, config.SandboxManagerOptions{
+	return NewTestCacheWithOptions(t, config.SandboxManagerOptions{
 		SystemNamespace: utils.DefaultSandboxDeployNamespace,
 	})
+}
+
+func NewTestCacheWithOptions(t *testing.T, opts config.SandboxManagerOptions) (*Cache, *clients.ClientSet, error) {
+	t.Helper()
+	clientSet := clients.NewFakeClientSet(t)
+	c, err := NewCache(clientSet, opts)
 	if err != nil {
 		return nil, nil, err
 	}
