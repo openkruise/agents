@@ -7,6 +7,7 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
+	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	constantUtils "github.com/openkruise/agents/pkg/utils"
 	sandboxManagerUtils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
@@ -438,4 +439,44 @@ func TestCache_GetSecret_FromSync(t *testing.T) {
 	assert.Equal(t, constantUtils.DefaultSandboxDeployNamespace, result.Namespace)
 	assert.Equal(t, testSecret.Data, result.Data)
 	assert.Equal(t, testSecret.Type, result.Type)
+}
+
+func TestCache_InformerWithFilter_GetSandboxSet(t *testing.T) {
+	sandboxManagerUtils.InitLogOutput()
+	cache, clientSet, err := NewTestCacheWithOptions(t, config.SandboxManagerOptions{
+		SandboxNamespace:     "ns",
+		SandboxLabelSelector: "user=bar",
+	})
+	require.NoError(t, err)
+	defer cache.Stop()
+	sandboxClient := clientSet.SandboxClient
+
+	templateName := "template-1"
+	// SandboxSet with wrong namespace
+	sbs1 := &agentsv1alpha1.SandboxSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      templateName,
+			Namespace: "ns-1",
+		},
+	}
+	_, err = sandboxClient.ApiV1alpha1().SandboxSets(sbs1.Namespace).Create(t.Context(), sbs1, metav1.CreateOptions{})
+	require.NoError(t, err)
+	// Wait for informer sync
+	time.Sleep(300 * time.Millisecond)
+	_, err = cache.GetSandboxSet(templateName)
+	require.Error(t, err)
+
+	// SandboxSet in namespace
+	sbs3 := &agentsv1alpha1.SandboxSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      templateName,
+			Namespace: "ns",
+		},
+	}
+	_, err = sandboxClient.ApiV1alpha1().SandboxSets(sbs3.Namespace).Create(t.Context(), sbs3, metav1.CreateOptions{})
+	require.NoError(t, err)
+	// Wait for informer sync
+	time.Sleep(300 * time.Millisecond)
+	_, err = cache.GetSandboxSet(templateName)
+	require.NoError(t, err)
 }

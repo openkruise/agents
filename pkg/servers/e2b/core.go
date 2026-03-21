@@ -34,6 +34,8 @@ type Controller struct {
 	maxClaimWorkers       int
 	maxCreateQPS          int
 	extProcMaxConcurrency uint32
+	sandboxLabelSelector  string
+	sandboxNamespace      string
 
 	// fields
 	mux             *http.ServeMux
@@ -49,7 +51,7 @@ type Controller struct {
 }
 
 // NewController creates a new E2B Controller
-func NewController(domain, adminKey string, sysNs string, maxTimeout, maxClaimWorkers, maxCreateQPS int, extProcMaxConcurrency uint32,
+func NewController(domain, adminKey string, sysNs, sandboxNamespace, sandboxLabelSelector string, maxTimeout, maxClaimWorkers, maxCreateQPS int, extProcMaxConcurrency uint32,
 	port int, enableAuth bool, clientSet *clients.ClientSet) *Controller {
 	sc := &Controller{
 		mux:                   http.NewServeMux(),
@@ -59,6 +61,8 @@ func NewController(domain, adminKey string, sysNs string, maxTimeout, maxClaimWo
 		port:                  port,
 		maxTimeout:            maxTimeout,
 		systemNamespace:       sysNs, // the namespace where the sandbox manager is running
+		sandboxNamespace:      sandboxNamespace,
+		sandboxLabelSelector:  sandboxLabelSelector,
 		maxClaimWorkers:       maxClaimWorkers,
 		maxCreateQPS:          maxCreateQPS,
 		extProcMaxConcurrency: extProcMaxConcurrency,
@@ -88,6 +92,8 @@ func (sc *Controller) Init() error {
 	adapter := adapters.DefaultAdapterFactory(sc.port)
 	sandboxManager, err := sandbox_manager.NewSandboxManager(sc.client, adapter, config.SandboxManagerOptions{
 		SystemNamespace:       sc.systemNamespace,
+		SandboxNamespace:      sc.sandboxNamespace,
+		SandboxLabelSelector:  sc.sandboxLabelSelector,
 		MaxClaimWorkers:       sc.maxClaimWorkers,
 		ExtProcMaxConcurrency: sc.extProcMaxConcurrency,
 		MaxCreateQPS:          sc.maxCreateQPS,
