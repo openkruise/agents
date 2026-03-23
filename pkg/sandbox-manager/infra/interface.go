@@ -31,7 +31,7 @@ type PauseOptions struct {
 
 type Infrastructure interface {
 	Run(ctx context.Context) error // Starts the infrastructure
-	Stop()                         // Stops the infrastructure
+	Stop(ctx context.Context)      // Stops the infrastructure
 	HasTemplate(name string) bool
 	HasCheckpoint(name string) bool
 	GetCache() CacheProvider // Get the CacheProvider for the infra

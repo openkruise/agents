@@ -82,9 +82,9 @@ func (i *Infra) Run(ctx context.Context) error {
 	return i.Cache.Run(ctx)
 }
 
-func (i *Infra) Stop() {
+func (i *Infra) Stop(ctx context.Context) {
 	close(i.reconcileRouteStopCh)
-	i.Cache.Stop()
+	i.Cache.Stop(ctx)
 }
 
 func (i *Infra) ClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions) (infra.Sandbox, infra.ClaimMetrics, error) {

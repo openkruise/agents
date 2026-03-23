@@ -1,3 +1,19 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package proxy
 
 import (
@@ -12,9 +28,9 @@ import (
 
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	"github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/peers"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
-	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
 	"github.com/openkruise/agents/pkg/servers/web"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -25,11 +41,8 @@ import (
 
 const (
 	RefreshAPI = "/refresh"
-	HelloAPI   = "/hello"
 	SystemPort = 7789
 )
-
-var HeartBeatInterval = 5 * time.Second
 
 type healthServer struct{}
 
@@ -50,10 +63,8 @@ func (s *healthServer) Watch(*grpc_health_v1.HealthCheckRequest, grpc_health_v1.
 	return status.Error(codes.Unimplemented, "Watch is not implemented")
 }
 
-type Peer struct {
-	IP            string
-	LastHeartBeat time.Time
-}
+// Peer is kept for backward compatibility, but now uses peers.Peer from pkg/peers
+type Peer = peers.Peer
 
 // Server implements the Envoy external processing server.
 // https://www.envoyproxy.io/docs/envoy/latest/api-v3/service/ext_proc/v3/external_processor.proto
@@ -67,18 +78,16 @@ type Server struct {
 	routes  sync.Map
 	adapter RequestAdapter
 	LBEntry string // entry of load balancer, usually a service
-	// peers
-	peers           map[string]Peer
-	peerMu          sync.RWMutex
-	heartBeatTicker *time.Ticker
-	heartBeatStopCh chan struct{}
+	// peers - now managed by Peers
+	peersManager peers.Peers
+	// lifecycle
+	mu sync.Mutex
 }
 
-func NewServer(adapter RequestAdapter, opts config.SandboxManagerOptions) *Server {
+func NewServer(adapter RequestAdapter, peersManager peers.Peers, opts config.SandboxManagerOptions) *Server {
 	s := &Server{
 		adapter:                     adapter,
-		peers:                       make(map[string]Peer),
-		heartBeatStopCh:             make(chan struct{}),
+		peersManager:                peersManager,
 		extProcMaxConcurrentStreams: opts.ExtProcMaxConcurrency,
 	}
 	if adapter != nil {
@@ -87,32 +96,18 @@ func NewServer(adapter RequestAdapter, opts config.SandboxManagerOptions) *Serve
 	return s
 }
 
-func (s *Server) SetPeer(ip string) {
-	s.peerMu.Lock()
-	defer s.peerMu.Unlock()
-	s.peers[ip] = Peer{
-		IP:            ip,
-		LastHeartBeat: time.Now(),
-	}
-}
-
 func (s *Server) Run() error {
-	if s.grpcSrv != nil || s.httpSrv != nil {
-		return errors.New("proxy server already started")
-	}
-
-	s.peerMu.Lock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	// HTTP
 	mux := http.NewServeMux()
 	web.RegisterRoute(mux, http.MethodPost, RefreshAPI, s.handleRefresh)
-	web.RegisterRoute(mux, http.MethodGet, HelloAPI, s.handleHello)
 	s.httpSrv = &http.Server{
 		Addr:              fmt.Sprintf(":%d", SystemPort),
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
-	s.heartBeatTicker = time.NewTicker(HeartBeatInterval)
 
 	// GRPC
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", consts.ExtProcPort))
@@ -123,8 +118,6 @@ func (s *Server) Run() error {
 	extProcPb.RegisterExternalProcessorServer(s.grpcSrv, s)
 	grpc_health_v1.RegisterHealthServer(s.grpcSrv, &healthServer{})
 	klog.InfoS("Starting envoy ext-proc gRPC server", "address", lis.Addr())
-
-	s.peerMu.Unlock()
 
 	// Start servers
 	go func() {
@@ -141,79 +134,17 @@ func (s *Server) Run() error {
 		}
 	}()
 
-	go func(ctx context.Context) {
-		log := klog.FromContext(ctx).V(consts.DebugLogLevel)
-		for {
-			select {
-			case <-s.heartBeatTicker.C:
-				s.peerMu.Lock()
-				peersToCheck := make([]Peer, 0, len(s.peers))
-				peersToDelete := make([]string, 0)
-
-				for ip, peer := range s.peers {
-					if time.Since(peer.LastHeartBeat) > 5*HeartBeatInterval {
-						peersToDelete = append(peersToDelete, ip)
-					} else {
-						peersToCheck = append(peersToCheck, peer)
-					}
-				}
-				s.peerMu.Unlock()
-
-				if len(peersToDelete) > 0 {
-					s.peerMu.Lock()
-					for _, ip := range peersToDelete {
-						delete(s.peers, ip)
-						log.Info("peer deleted for heartbeat timeout", "ip", ip)
-					}
-					s.peerMu.Unlock()
-				}
-
-				for _, peer := range peersToCheck {
-					if err := s.HelloPeer(peer.IP); err != nil {
-						log.Error(err, "failed to send heartbeat to peer", "ip", peer.IP)
-					}
-				}
-			case <-s.heartBeatStopCh:
-				return
-			}
-
-		}
-	}(logs.NewContext("component", "PeerHeartBeat"))
-
 	return nil
 }
 
-func (s *Server) HelloPeer(ip string) error {
-	return requestPeer(http.MethodGet, ip, HelloAPI, nil)
-}
-
-func (s *Server) Stop() {
-	s.peerMu.Lock()
-	defer s.peerMu.Unlock()
-	close(s.heartBeatStopCh)
-	s.heartBeatTicker.Stop()
+func (s *Server) Stop(ctx context.Context) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.grpcSrv != nil {
 		s.grpcSrv.Stop()
 	}
 	if s.httpSrv != nil {
-		_ = s.httpSrv.Shutdown(context.Background())
-	}
-}
-
-func (s *Server) handleHello(r *http.Request) (web.ApiResponse[struct{}], *web.ApiError) {
-	log := klog.FromContext(r.Context()).V(LogLevel + 1)
-	ip := getRealIP(r)
-	if ip != "" {
-		log.Info("hello", "ip", ip)
-		s.SetPeer(ip)
-		return web.ApiResponse[struct{}]{
-			Code: http.StatusNoContent,
-		}, nil
-	} else {
-		return web.ApiResponse[struct{}]{}, &web.ApiError{
-			Code:    http.StatusBadRequest,
-			Message: "failed to get your ip",
-		}
+		_ = s.httpSrv.Shutdown(ctx)
 	}
 }
 

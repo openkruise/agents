@@ -183,7 +183,7 @@ func TestCache_WaitForSandboxSatisfied(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cache, clientSet, err := NewTestCache(t)
-			defer cache.Stop()
+			defer cache.Stop(t.Context())
 			require.NoError(t, err)
 
 			// Setup test sandbox
@@ -219,7 +219,7 @@ func TestCache_WaitForSandboxSatisfied_Cancel(t *testing.T) {
 	sandboxManagerUtils.InitLogOutput()
 	cache, clientSet, err := NewTestCache(t)
 	require.NoError(t, err)
-	defer cache.Stop()
+	defer cache.Stop(t.Context())
 	sandboxClient := clientSet.SandboxClient
 	sbx := &agentsv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
@@ -319,10 +319,8 @@ func TestCache_GetPersistentVolume(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cache, clientSet, err := NewTestCache(t)
-			require.NoError(t, err)
-			defer cache.Stop()
-			k8sClient := clientSet.K8sClient
+			cache, k8sClient, _ := NewTestCache(t)
+			defer cache.Stop(t.Context())
 
 			if tt.setupPV != nil {
 				testPV := tt.setupPV()
@@ -370,10 +368,8 @@ func TestCache_GetPersistentVolume(t *testing.T) {
 
 func TestCache_GetPersistentVolume_FromSync(t *testing.T) {
 	utils.InitLogOutput()
-	cache, clientSet, err := NewTestCache(t)
-	require.NoError(t, err)
-	defer cache.Stop()
-	k8sClient := clientSet.K8sClient
+	cache, k8sClient, _ := NewTestCache(t)
+	defer cache.Stop(t.Context())
 
 	testPV := &corev1.PersistentVolume{
 		ObjectMeta: metav1.ObjectMeta{
@@ -393,7 +389,7 @@ func TestCache_GetPersistentVolume_FromSync(t *testing.T) {
 			},
 		},
 	}
-	_, err = k8sClient.CoreV1().PersistentVolumes().Create(context.TODO(), testPV, metav1.CreateOptions{})
+	_, err := k8sClient.CoreV1().PersistentVolumes().Create(context.TODO(), testPV, metav1.CreateOptions{})
 	assert.NoError(t, err)
 	// Wait for cache to be ready
 	time.Sleep(300 * time.Millisecond)
@@ -409,10 +405,8 @@ func TestCache_GetPersistentVolume_FromSync(t *testing.T) {
 func TestCache_GetSecret_FromSync(t *testing.T) {
 	sandboxManagerUtils.InitLogOutput()
 
-	cache, clientSet, err := NewTestCache(t)
-	require.NoError(t, err)
-	defer cache.Stop()
-	k8sClient := clientSet.K8sClient
+	cache, k8sClient, _ := NewTestCache(t)
+	defer cache.Stop(t.Context())
 
 	testSecret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
@@ -426,7 +420,7 @@ func TestCache_GetSecret_FromSync(t *testing.T) {
 		Type: corev1.SecretTypeOpaque,
 	}
 	// Create the secret in the cluster using the client
-	_, err = k8sClient.CoreV1().Secrets(constantUtils.DefaultSandboxDeployNamespace).Create(context.TODO(), testSecret, metav1.CreateOptions{})
+	_, err := k8sClient.CoreV1().Secrets(constantUtils.DefaultSandboxDeployNamespace).Create(context.TODO(), testSecret, metav1.CreateOptions{})
 	assert.NoError(t, err)
 	// Wait for cache to be ready
 	time.Sleep(300 * time.Millisecond)
