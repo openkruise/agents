@@ -45,7 +45,7 @@ func (f *sandboxFilter) DecodeHeaders(header api.RequestHeaderMap, endStream boo
 		logger.Debug("Using default port", zap.String("port", port))
 	}
 
-	podIP, ok := registry.Get(sandboxID)
+	podIP, ok := registry.GetRegistry().Get(sandboxID)
 	if !ok {
 		logger.Warn("Sandbox not found in registry", zap.String("sandboxID", sandboxID))
 		f.callbacks.DecoderFilterCallbacks().SendLocalReply(
@@ -58,7 +58,7 @@ func (f *sandboxFilter) DecodeHeaders(header api.RequestHeaderMap, endStream boo
 		return api.LocalReply
 	}
 
-	upstreamHost := podIP + ":" + port
+	upstreamHost := podIP.IP + ":" + port
 	f.callbacks.StreamInfo().DynamicMetadata().Set("envoy.lb.original_dst", "host", upstreamHost)
 
 	logger.Debug("Upstream override set successfully", zap.String("upstreamHost", upstreamHost))

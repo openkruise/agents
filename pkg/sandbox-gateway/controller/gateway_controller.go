@@ -1,3 +1,17 @@
+// Copyright 2026.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package controller
 
 import (
@@ -14,9 +28,11 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/registry"
 )
 
+// SandboxReconciler reconciles Sandbox objects and updates the local registry
 type SandboxReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
@@ -30,7 +46,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	if err := r.Get(ctx, req.NamespacedName, &sandbox); err != nil {
 		if errors.IsNotFound(err) {
 			logger.Info("sandbox deleted, removing from registry", "key", key)
-			registry.Delete(key)
+			registry.GetRegistry().Delete(key)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
@@ -38,7 +54,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	if sandbox.DeletionTimestamp != nil {
 		logger.Info("sandbox being deleted, removing from registry", "key", key)
-		registry.Delete(key)
+		registry.GetRegistry().Delete(key)
 		return ctrl.Result{}, nil
 	}
 
@@ -48,8 +64,14 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, nil
 	}
 
-	logger.Info("updating registry", "key", key, "podIP", podIP)
-	registry.Update(key, podIP)
+	logger.Info("updating registry", "key", key, "podIP", podIP, "resourceVersion", sandbox.ResourceVersion)
+	registry.GetRegistry().Update(key, proxy.Route{
+		IP:    podIP,
+		ID:    key,
+		UID:   sandbox.UID,
+		Owner: sandbox.GetAnnotations()[agentsv1alpha1.AnnotationOwner],
+
+		ResourceVersion: sandbox.ResourceVersion})
 	return ctrl.Result{}, nil
 }
 
