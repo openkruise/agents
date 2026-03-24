@@ -10,6 +10,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
+	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/sandbox-manager/proxyutils"
 	"golang.org/x/time/rate"
@@ -26,6 +27,18 @@ import (
 	managerutils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
 )
+
+var DefaultDeleteSandboxTemplate = deleteSandboxTemplate
+
+func deleteSandboxTemplate(ctx context.Context, client *clients.ClientSet, namespace, name string) error {
+	return client.SandboxClient.ApiV1alpha1().SandboxTemplates(namespace).Delete(ctx, name, metav1.DeleteOptions{})
+}
+
+var DefaultDeleteCheckpointCR = deleteCheckpointCR
+
+func deleteCheckpointCR(ctx context.Context, client *clients.ClientSet, namespace, name string) error {
+	return client.SandboxClient.ApiV1alpha1().Checkpoints(namespace).Delete(ctx, name, metav1.DeleteOptions{})
+}
 
 type Infra struct {
 	Cache  *Cache
@@ -160,6 +173,57 @@ func (i *Infra) CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions
 	return sandbox, metrics, nil
 }
 
+func (i *Infra) DeleteCheckpoint(ctx context.Context, user string, checkpointID string) error {
+	log := klog.FromContext(ctx).WithValues("checkpointID", checkpointID)
+
+	// Step 1: Find checkpoint and template
+	tmpl, cp, _, err := stepFindCheckpointAndTemplate(ctx, infra.CloneSandboxOptions{
+		CheckPointID: checkpointID, SkipWaitCheckpoint: true,
+	}, i.Cache, i.Client, infra.CloneMetrics{})
+	if err != nil {
+		log.Error(err, "failed to find checkpoint and template")
+		return managererrors.NewError(managererrors.ErrorNotFound, err.Error())
+	}
+
+	// Step 2: Verify ownership
+	owner := cp.Annotations[v1alpha1.AnnotationOwner]
+	if owner != user {
+		log.Error(nil, "checkpoint is not owned by user", "owner", owner, "user", user)
+		return managererrors.NewError(managererrors.ErrorNotAllowed, fmt.Sprintf("checkpoint %s is not owned by user %s", checkpointID, user))
+	}
+
+	// Step 3: Delete the SandboxTemplate
+	log.Info("deleting sandbox template", "template", klog.KObj(tmpl))
+	if err := DefaultDeleteSandboxTemplate(ctx, i.Client, tmpl.Namespace, tmpl.Name); err != nil {
+		log.Error(err, "failed to delete sandbox template")
+		return managererrors.NewError(managererrors.ErrorInternal, err.Error())
+	}
+
+	// Step 4: Check if checkpoint has OwnerReference to the SandboxTemplate
+	// If yes, Kubernetes garbage collection will handle deletion automatically
+	// If no, explicitly delete the checkpoint
+	if !hasOwnerReference(cp, tmpl) {
+		log.Info("checkpoint has no owner reference to template, deleting explicitly", "checkpoint", klog.KObj(cp))
+		if err := DefaultDeleteCheckpointCR(ctx, i.Client, cp.Namespace, cp.Name); err != nil {
+			log.Error(err, "failed to delete checkpoint")
+			return managererrors.NewError(managererrors.ErrorInternal, err.Error())
+		}
+	}
+
+	log.Info("checkpoint deleted successfully")
+	return nil
+}
+
+// hasOwnerReference checks if the checkpoint has an OwnerReference pointing to the given template
+func hasOwnerReference(cp *v1alpha1.Checkpoint, tmpl *v1alpha1.SandboxTemplate) bool {
+	for _, ref := range cp.OwnerReferences {
+		if ref.Kind == v1alpha1.SandboxTemplateControllerKind.Kind && ref.Name == tmpl.Name && ref.UID == tmpl.UID {
+			return true
+		}
+	}
+	return false
+}
+
 func (i *Infra) GetCache() infra.CacheProvider {
 	return i.Cache
 }
@@ -174,25 +238,38 @@ func (i *Infra) HasCheckpoint(name string) bool {
 	return err == nil
 }
 
-func (i *Infra) SelectSandboxes(user string, limit int, filter func(sandbox infra.Sandbox) bool) ([]infra.Sandbox, error) {
+func (i *Infra) SelectSandboxes(user string) ([]infra.Sandbox, error) {
 	objects, err := i.Cache.ListSandboxWithUser(user)
 	if err != nil {
 		return nil, err
 	}
-	var sandboxes []infra.Sandbox
+	var sandboxes = make([]infra.Sandbox, 0, len(objects))
 	for _, obj := range objects {
 		if !managerutils.ResourceVersionExpectationSatisfied(obj) {
 			continue
 		}
-		sbx := AsSandbox(obj, i.Cache, i.Client.SandboxClient)
-		if filter == nil || filter(sbx) {
-			sandboxes = append(sandboxes, sbx)
-		}
-		if len(sandboxes) >= limit {
-			break
-		}
+		sandboxes = append(sandboxes, AsSandbox(obj, i.Cache, i.Client.SandboxClient))
 	}
 	return sandboxes, nil
+}
+
+func (i *Infra) SelectSucceededCheckpoints(user string) ([]infra.CheckpointInfo, error) {
+	checkpoints, err := i.Cache.ListCheckpointsWithUser(user)
+	if err != nil {
+		return nil, err
+	}
+	results := make([]infra.CheckpointInfo, 0, len(checkpoints))
+	for _, checkpoint := range checkpoints {
+		if checkpoint.Status.Phase != v1alpha1.CheckpointSucceeded {
+			continue
+		}
+		if !managerutils.ResourceVersionExpectationSatisfied(checkpoint) {
+			continue
+		}
+		// we assume the CheckpointId of a succeeded checkpoint is not empty
+		results = append(results, AsCheckpointInfo(checkpoint))
+	}
+	return results, nil
 }
 
 func (i *Infra) GetClaimedSandbox(ctx context.Context, sandboxID string) (infra.Sandbox, error) {

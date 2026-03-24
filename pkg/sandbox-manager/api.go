@@ -8,6 +8,7 @@ import (
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	"k8s.io/klog/v2"
 )
 
@@ -94,12 +95,39 @@ func (m *SandboxManager) GetClaimedSandbox(ctx context.Context, user, sandboxID 
 	return sbx, nil
 }
 
-func (m *SandboxManager) ListSandboxes(user string, limit int, filter func(infra.Sandbox) bool) ([]infra.Sandbox, error) {
-	sandboxes, err := m.infra.SelectSandboxes(user, limit, filter)
+func (m *SandboxManager) ListSandboxes(user string, p *utils.Paginator[infra.Sandbox]) ([]infra.Sandbox, string, error) {
+	sandboxes, err := m.infra.SelectSandboxes(user)
 	if err != nil {
-		return nil, errors.NewError(errors.ErrorNotFound, fmt.Sprintf("failed to list sandboxes: %v", err))
+		return nil, "", errors.NewError(errors.ErrorNotFound, fmt.Sprintf("failed to list sandboxes: %v", err))
 	}
-	return sandboxes, nil
+	var nextToken string
+	if p != nil {
+		sandboxes, nextToken = p.Apply(sandboxes)
+	}
+	return sandboxes, nextToken, nil
+}
+
+func (m *SandboxManager) ListCheckpoints(user string, p *utils.Paginator[infra.CheckpointInfo]) ([]infra.CheckpointInfo, string, error) {
+	checkpoints, err := m.infra.SelectSucceededCheckpoints(user)
+	if err != nil {
+		return nil, "", errors.NewError(errors.ErrorNotFound, fmt.Sprintf("failed to list checkpoints: %v", err))
+	}
+	var nextToken string
+	if p != nil {
+		checkpoints, nextToken = p.Apply(checkpoints)
+	}
+	return checkpoints, nextToken, nil
+}
+
+// DeleteCheckpoint deletes a checkpoint and its associated sandbox template
+func (m *SandboxManager) DeleteCheckpoint(ctx context.Context, user string, checkpointID string) error {
+	log := klog.FromContext(ctx).WithValues("checkpointID", checkpointID)
+	if err := m.infra.DeleteCheckpoint(ctx, user, checkpointID); err != nil {
+		log.Error(err, "failed to delete checkpoint")
+		return err
+	}
+	log.Info("checkpoint deleted by infra")
+	return nil
 }
 
 func (m *SandboxManager) GetOwnerOfSandbox(sandboxID string) (string, bool) {

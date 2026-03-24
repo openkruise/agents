@@ -878,74 +878,6 @@ func TestSandboxManager_CloneSandbox(t *testing.T) {
 	}
 }
 
-func TestSandboxManager_ListSandboxes(t *testing.T) {
-	tests := []struct {
-		name          string
-		user          string
-		sandboxCount  int
-		expectedCount int
-	}{
-		{
-			name:          "empty list when no sandboxes",
-			user:          testUser,
-			sandboxCount:  0,
-			expectedCount: 0,
-		},
-		{
-			name:          "list claimed sandboxes",
-			user:          testUser,
-			sandboxCount:  3,
-			expectedCount: 3,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			manager := setupTestManager(t)
-			client := manager.client.SandboxClient
-
-			// Create claimed sandboxes
-			for i := 0; i < tt.sandboxCount; i++ {
-				sbx := &agentsv1alpha1.Sandbox{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      fmt.Sprintf("list-test-sandbox-%d", i),
-						Namespace: "default",
-						Labels: map[string]string{
-							agentsv1alpha1.LabelSandboxIsClaimed: "true",
-						},
-						Annotations: map[string]string{
-							agentsv1alpha1.AnnotationOwner: tt.user,
-						},
-						CreationTimestamp: metav1.Now(),
-					},
-					Status: agentsv1alpha1.SandboxStatus{
-						Phase: agentsv1alpha1.SandboxRunning,
-						Conditions: []metav1.Condition{
-							{
-								Type:   string(agentsv1alpha1.SandboxConditionReady),
-								Status: metav1.ConditionTrue,
-							},
-						},
-						PodInfo: agentsv1alpha1.PodInfo{
-							PodIP: fmt.Sprintf("10.0.0.%d", i+1),
-						},
-					},
-				}
-				CreateSandboxWithStatus(t, client, sbx)
-			}
-
-			// Wait for informer sync
-			time.Sleep(100 * time.Millisecond)
-
-			// List sandboxes
-			sandboxes, err := manager.ListSandboxes(tt.user, 100, nil)
-
-			require.NoError(t, err)
-			assert.Len(t, sandboxes, tt.expectedCount)
-		})
-	}
-}
-
 func TestSandboxManager_GetOwnerOfSandbox(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -989,6 +921,79 @@ func TestSandboxManager_GetOwnerOfSandbox(t *testing.T) {
 			assert.Equal(t, tt.expectedOwner, owner)
 		})
 	}
+}
+
+func TestSandboxManager_ListSandboxes(t *testing.T) {
+	utils.InitLogOutput()
+	manager := setupTestManager(t)
+	client := manager.client.SandboxClient
+
+	// Create 4 sandboxes with names that sort alphabetically
+	sandboxNames := []string{"aaa-sandbox", "bbb-sandbox", "ccc-sandbox", "ddd-sandbox"}
+	for _, name := range sandboxNames {
+		sbx := &agentsv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: "default",
+				Annotations: map[string]string{
+					agentsv1alpha1.AnnotationOwner: testUser,
+				},
+				Labels: map[string]string{
+					agentsv1alpha1.LabelSandboxIsClaimed: "true",
+				},
+				CreationTimestamp: metav1.Now(),
+			},
+			Status: agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxRunning,
+				Conditions: []metav1.Condition{
+					{
+						Type:   string(agentsv1alpha1.SandboxConditionReady),
+						Status: metav1.ConditionTrue,
+					},
+				},
+				PodInfo: agentsv1alpha1.PodInfo{
+					PodIP: "10.0.0.1",
+				},
+			},
+		}
+		CreateSandboxWithStatus(t, client, sbx)
+	}
+
+	// Wait for informer sync
+	time.Sleep(100 * time.Millisecond)
+
+	t.Run("without paginator", func(t *testing.T) {
+		sandboxes, nextToken, err := manager.ListSandboxes(testUser, nil)
+
+		assert.NoError(t, err)
+		assert.Empty(t, nextToken, "nextToken should be empty when paginator is nil")
+		assert.Len(t, sandboxes, len(sandboxNames), "should return all sandboxes")
+	})
+
+	t.Run("with paginator", func(t *testing.T) {
+		paginator := &utils.Paginator[infra.Sandbox]{
+			Limit: 2, // Limit to 2 items per page, so 4 sandboxes will produce nextToken
+			GetKey: func(sbx infra.Sandbox) string {
+				return sbx.GetName()
+			},
+			Filter: func(sbx infra.Sandbox) bool {
+				return true
+			},
+		}
+
+		sandboxes, nextToken, err := manager.ListSandboxes(testUser, paginator)
+
+		assert.NoError(t, err)
+		assert.Len(t, sandboxes, 2, "should return limited number of sandboxes")
+		assert.NotEmpty(t, nextToken, "nextToken should not be empty when there are more items")
+
+		// Verify sandboxes are sorted by name
+		assert.Equal(t, "aaa-sandbox", sandboxes[0].GetName(), "first sandbox should be aaa-sandbox")
+		assert.Equal(t, "bbb-sandbox", sandboxes[1].GetName(), "second sandbox should be bbb-sandbox")
+
+		// Verify nextToken is the key of the last item
+		assert.Equal(t, "bbb-sandbox", nextToken, "nextToken should be the name of the last returned sandbox")
+	})
 }
 
 func TestSandboxManager_DeleteSandbox(t *testing.T) {
@@ -1110,6 +1115,369 @@ func TestSandboxManager_DeleteSandbox(t *testing.T) {
 				defer cancel()
 				_, getErr := manager.GetClaimedSandbox(ctx, testUser, sandboxutils.GetSandboxID(sandbox))
 				assert.Error(t, getErr, "sandbox should not be found after deletion")
+			}
+		})
+	}
+}
+
+func TestSandboxManager_ListCheckpoints(t *testing.T) {
+	utils.InitLogOutput()
+
+	tests := []struct {
+		name                  string
+		user                  string
+		setupCheckpoints      func(client versioned.Interface)
+		paginator             *utils.Paginator[infra.CheckpointInfo]
+		expectError           bool
+		expectedErrorCode     errors.ErrorCode
+		expectedCheckpointIDs []string
+		expectedNextToken     string
+		expectedCount         int
+	}{
+		{
+			name: "list checkpoints without paginator",
+			user: "user1",
+			setupCheckpoints: func(client versioned.Interface) {
+				createCheckpointForTest(t, client, "cp-1", "user1", "sandbox-1", "checkpoint-id-1", agentsv1alpha1.CheckpointSucceeded)
+				createCheckpointForTest(t, client, "cp-2", "user1", "sandbox-2", "checkpoint-id-2", agentsv1alpha1.CheckpointSucceeded)
+				createCheckpointForTest(t, client, "cp-3", "user1", "sandbox-3", "checkpoint-id-3", agentsv1alpha1.CheckpointSucceeded)
+			},
+			paginator:             nil,
+			expectError:           false,
+			expectedCheckpointIDs: []string{"checkpoint-id-1", "checkpoint-id-2", "checkpoint-id-3"},
+			expectedNextToken:     "",
+			expectedCount:         3,
+		},
+		{
+			name: "list checkpoints with paginator",
+			user: "user1",
+			setupCheckpoints: func(client versioned.Interface) {
+				createCheckpointForTest(t, client, "cp-a", "user1", "sandbox-a", "checkpoint-id-a", agentsv1alpha1.CheckpointSucceeded)
+				createCheckpointForTest(t, client, "cp-b", "user1", "sandbox-b", "checkpoint-id-b", agentsv1alpha1.CheckpointSucceeded)
+				createCheckpointForTest(t, client, "cp-c", "user1", "sandbox-c", "checkpoint-id-c", agentsv1alpha1.CheckpointSucceeded)
+				createCheckpointForTest(t, client, "cp-d", "user1", "sandbox-d", "checkpoint-id-d", agentsv1alpha1.CheckpointSucceeded)
+			},
+			paginator: &utils.Paginator[infra.CheckpointInfo]{
+				Limit: 2,
+				GetKey: func(cp infra.CheckpointInfo) string {
+					return cp.Name
+				},
+				Filter: func(cp infra.CheckpointInfo) bool {
+					return true
+				},
+			},
+			expectError:           false,
+			expectedCheckpointIDs: []string{"checkpoint-id-a", "checkpoint-id-b"},
+			expectedNextToken:     "cp-b",
+			expectedCount:         2,
+		},
+		{
+			name: "list checkpoints with paginator and next token",
+			user: "user1",
+			setupCheckpoints: func(client versioned.Interface) {
+				createCheckpointForTest(t, client, "cp-a", "user1", "sandbox-a", "checkpoint-id-a", agentsv1alpha1.CheckpointSucceeded)
+				createCheckpointForTest(t, client, "cp-b", "user1", "sandbox-b", "checkpoint-id-b", agentsv1alpha1.CheckpointSucceeded)
+				createCheckpointForTest(t, client, "cp-c", "user1", "sandbox-c", "checkpoint-id-c", agentsv1alpha1.CheckpointSucceeded)
+				createCheckpointForTest(t, client, "cp-d", "user1", "sandbox-d", "checkpoint-id-d", agentsv1alpha1.CheckpointSucceeded)
+			},
+			paginator: &utils.Paginator[infra.CheckpointInfo]{
+				Limit:     2,
+				NextToken: "cp-b",
+				GetKey: func(cp infra.CheckpointInfo) string {
+					return cp.Name
+				},
+				Filter: func(cp infra.CheckpointInfo) bool {
+					return true
+				},
+			},
+			expectError:           false,
+			expectedCheckpointIDs: []string{"checkpoint-id-c", "checkpoint-id-d"},
+			expectedNextToken:     "",
+			expectedCount:         2,
+		},
+		{
+			name: "filter checkpoints by user",
+			user: "user1",
+			setupCheckpoints: func(client versioned.Interface) {
+				createCheckpointForTest(t, client, "cp-user1", "user1", "sandbox-1", "checkpoint-user1", agentsv1alpha1.CheckpointSucceeded)
+				createCheckpointForTest(t, client, "cp-user2", "user2", "sandbox-2", "checkpoint-user2", agentsv1alpha1.CheckpointSucceeded)
+				createCheckpointForTest(t, client, "cp-user3", "user3", "sandbox-3", "checkpoint-user3", agentsv1alpha1.CheckpointSucceeded)
+			},
+			paginator:             nil,
+			expectError:           false,
+			expectedCheckpointIDs: []string{"checkpoint-user1"},
+			expectedNextToken:     "",
+			expectedCount:         1,
+		},
+		{
+			name: "only return succeeded checkpoints",
+			user: "user1",
+			setupCheckpoints: func(client versioned.Interface) {
+				createCheckpointForTest(t, client, "cp-succeeded", "user1", "sandbox-1", "checkpoint-succeeded", agentsv1alpha1.CheckpointSucceeded)
+				createCheckpointForTest(t, client, "cp-pending", "user1", "sandbox-2", "checkpoint-pending", agentsv1alpha1.CheckpointPending)
+				createCheckpointForTest(t, client, "cp-failed", "user1", "sandbox-3", "checkpoint-failed", agentsv1alpha1.CheckpointFailed)
+				createCheckpointForTest(t, client, "cp-creating", "user1", "sandbox-4", "checkpoint-creating", agentsv1alpha1.CheckpointCreating)
+			},
+			paginator:             nil,
+			expectError:           false,
+			expectedCheckpointIDs: []string{"checkpoint-succeeded"},
+			expectedNextToken:     "",
+			expectedCount:         1,
+		},
+		{
+			name: "return empty list when user has no checkpoints",
+			user: "non-existent-user",
+			setupCheckpoints: func(client versioned.Interface) {
+				createCheckpointForTest(t, client, "cp-1", "user1", "sandbox-1", "checkpoint-id-1", agentsv1alpha1.CheckpointSucceeded)
+				createCheckpointForTest(t, client, "cp-2", "user2", "sandbox-2", "checkpoint-id-2", agentsv1alpha1.CheckpointSucceeded)
+			},
+			paginator:             nil,
+			expectError:           false,
+			expectedCheckpointIDs: []string{},
+			expectedNextToken:     "",
+			expectedCount:         0,
+		},
+		{
+			name: "paginator with filter",
+			user: "user1",
+			setupCheckpoints: func(client versioned.Interface) {
+				createCheckpointForTest(t, client, "cp-a", "user1", "sandbox-a", "checkpoint-a", agentsv1alpha1.CheckpointSucceeded)
+				createCheckpointForTest(t, client, "cp-b", "user1", "sandbox-b", "checkpoint-b", agentsv1alpha1.CheckpointSucceeded)
+				createCheckpointForTest(t, client, "cp-c", "user1", "sandbox-c", "checkpoint-c", agentsv1alpha1.CheckpointSucceeded)
+			},
+			paginator: &utils.Paginator[infra.CheckpointInfo]{
+				Limit: 10,
+				GetKey: func(cp infra.CheckpointInfo) string {
+					return cp.Name
+				},
+				Filter: func(cp infra.CheckpointInfo) bool {
+					// Only return checkpoints with name starting with "cp-a" or "cp-c"
+					return cp.Name == "cp-a" || cp.Name == "cp-c"
+				},
+			},
+			expectError:           false,
+			expectedCheckpointIDs: []string{"checkpoint-a", "checkpoint-c"},
+			expectedNextToken:     "",
+			expectedCount:         2,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			manager := setupTestManager(t)
+			client := manager.client.SandboxClient
+
+			// Setup checkpoints for this test case
+			tt.setupCheckpoints(client)
+
+			// Wait for informer sync
+			time.Sleep(100 * time.Millisecond)
+
+			// Call ListCheckpoints
+			checkpoints, nextToken, err := manager.ListCheckpoints(tt.user, tt.paginator)
+
+			if tt.expectError {
+				require.Error(t, err)
+				assert.Equal(t, tt.expectedErrorCode, errors.GetErrCode(err))
+			} else {
+				require.NoError(t, err)
+				assert.Len(t, checkpoints, tt.expectedCount, "checkpoint count mismatch")
+				assert.Equal(t, tt.expectedNextToken, nextToken, "nextToken mismatch")
+
+				// Verify checkpoint IDs
+				actualIDs := make([]string, len(checkpoints))
+				for i, cp := range checkpoints {
+					actualIDs[i] = cp.CheckpointID
+				}
+				assert.ElementsMatch(t, tt.expectedCheckpointIDs, actualIDs, "checkpoint IDs mismatch")
+			}
+		})
+	}
+}
+
+// Helper function to create a checkpoint for testing
+func createCheckpointForTest(t *testing.T, client versioned.Interface, name, owner, sandboxID, checkpointID string, phase agentsv1alpha1.CheckpointPhase) {
+	cp := &agentsv1alpha1.Checkpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: "default",
+			Annotations: map[string]string{
+				agentsv1alpha1.AnnotationOwner:     owner,
+				agentsv1alpha1.AnnotationSandboxID: sandboxID,
+			},
+		},
+		Status: agentsv1alpha1.CheckpointStatus{
+			Phase:        phase,
+			CheckpointId: checkpointID,
+		},
+	}
+	_, err := client.ApiV1alpha1().Checkpoints("default").Create(context.Background(), cp, metav1.CreateOptions{})
+	require.NoError(t, err)
+	_, err = client.ApiV1alpha1().Checkpoints("default").UpdateStatus(context.Background(), cp, metav1.UpdateOptions{})
+	require.NoError(t, err)
+}
+
+func TestSandboxManager_DeleteCheckpoint(t *testing.T) {
+	utils.InitLogOutput()
+	namespace := "default"
+
+	tests := []struct {
+		name                 string
+		checkpointID         string
+		user                 string // the user requesting deletion
+		setup                bool   // whether to create checkpoint + template
+		withOwnerRef         bool
+		mockDeleteTemplate   error
+		mockDeleteCheckpoint error
+		expectError          string // empty string means no error expected, non-empty means error should contain this text
+	}{
+		{
+			name:         "delete checkpoint with owner reference successfully",
+			checkpointID: "cp-success-ownerref",
+			user:         "test-user",
+			setup:        true,
+			withOwnerRef: true,
+			expectError:  "",
+		},
+		{
+			name:         "delete checkpoint without owner reference successfully",
+			checkpointID: "cp-success-no-ownerref",
+			user:         "test-user",
+			setup:        true,
+			withOwnerRef: false,
+			expectError:  "",
+		},
+		{
+			name:         "checkpoint not found",
+			checkpointID: "non-existent-checkpoint",
+			user:         "test-user",
+			setup:        false,
+			expectError:  "not found in cache",
+		},
+		{
+			name:               "delete template fails",
+			checkpointID:       "cp-tmpl-fail",
+			user:               "test-user",
+			setup:              true,
+			withOwnerRef:       true,
+			mockDeleteTemplate: fmt.Errorf("mock template delete error"),
+			expectError:        "mock template delete error",
+		},
+		{
+			name:                 "explicit delete checkpoint fails",
+			checkpointID:         "cp-explicit-fail",
+			user:                 "test-user",
+			setup:                true,
+			withOwnerRef:         false,
+			mockDeleteCheckpoint: fmt.Errorf("mock checkpoint delete error"),
+			expectError:          "mock checkpoint delete error",
+		},
+		{
+			name:         "owner mismatch",
+			checkpointID: "cp-owner-mismatch",
+			user:         "different-user",
+			setup:        true,
+			withOwnerRef: true,
+			expectError:  "is not owned by user",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			manager := setupTestManager(t)
+			client := manager.client.SandboxClient
+
+			if tt.setup {
+				// Create SandboxTemplate
+				tmpl := &agentsv1alpha1.SandboxTemplate{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      tt.checkpointID,
+						Namespace: namespace,
+					},
+					Spec: agentsv1alpha1.SandboxTemplateSpec{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{Name: "main", Image: "test"},
+								},
+							},
+						},
+					},
+				}
+				_, err := client.ApiV1alpha1().SandboxTemplates(namespace).Create(context.Background(), tmpl, metav1.CreateOptions{})
+				require.NoError(t, err)
+
+				// Re-read to get UID
+				tmpl, err = client.ApiV1alpha1().SandboxTemplates(namespace).Get(context.Background(), tt.checkpointID, metav1.GetOptions{})
+				require.NoError(t, err)
+
+				// Create Checkpoint with owner annotation
+				cp := &agentsv1alpha1.Checkpoint{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      tt.checkpointID,
+						Namespace: namespace,
+						Annotations: map[string]string{
+							agentsv1alpha1.AnnotationOwner: "test-user",
+						},
+					},
+				}
+				if tt.withOwnerRef {
+					cp.OwnerReferences = []metav1.OwnerReference{
+						{
+							APIVersion:         agentsv1alpha1.SandboxTemplateControllerKind.GroupVersion().String(),
+							Kind:               agentsv1alpha1.SandboxTemplateControllerKind.Kind,
+							Name:               tmpl.Name,
+							UID:                tmpl.UID,
+							Controller:         ptr.To(true),
+							BlockOwnerDeletion: ptr.To(true),
+						},
+					}
+				}
+				_, err = client.ApiV1alpha1().Checkpoints(namespace).Create(context.Background(), cp, metav1.CreateOptions{})
+				require.NoError(t, err)
+
+				// Update status with checkpointId
+				cp, err = client.ApiV1alpha1().Checkpoints(namespace).Get(context.Background(), tt.checkpointID, metav1.GetOptions{})
+				require.NoError(t, err)
+				cp.Status.CheckpointId = tt.checkpointID
+				_, err = client.ApiV1alpha1().Checkpoints(namespace).UpdateStatus(context.Background(), cp, metav1.UpdateOptions{})
+				require.NoError(t, err)
+
+				// Wait for informer sync
+				require.Eventually(t, func() bool {
+					return manager.GetInfra().HasCheckpoint(tt.checkpointID)
+				}, time.Second, 10*time.Millisecond)
+
+				// Cleanup
+				t.Cleanup(func() {
+					_ = client.ApiV1alpha1().SandboxTemplates(namespace).Delete(context.Background(), tt.checkpointID, metav1.DeleteOptions{})
+					_ = client.ApiV1alpha1().Checkpoints(namespace).Delete(context.Background(), tt.checkpointID, metav1.DeleteOptions{})
+				})
+			}
+
+			// Set up decorator mocks
+			if tt.mockDeleteTemplate != nil {
+				orig := sandboxcr.DefaultDeleteSandboxTemplate
+				sandboxcr.DefaultDeleteSandboxTemplate = func(ctx context.Context, c *clients.ClientSet, namespace, name string) error {
+					return tt.mockDeleteTemplate
+				}
+				t.Cleanup(func() { sandboxcr.DefaultDeleteSandboxTemplate = orig })
+			}
+			if tt.mockDeleteCheckpoint != nil {
+				orig := sandboxcr.DefaultDeleteCheckpointCR
+				sandboxcr.DefaultDeleteCheckpointCR = func(ctx context.Context, c *clients.ClientSet, namespace, name string) error {
+					return tt.mockDeleteCheckpoint
+				}
+				t.Cleanup(func() { sandboxcr.DefaultDeleteCheckpointCR = orig })
+			}
+
+			err := manager.DeleteCheckpoint(context.Background(), tt.user, tt.checkpointID)
+
+			if tt.expectError != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
+			} else {
+				require.NoError(t, err)
 			}
 		})
 	}

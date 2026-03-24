@@ -42,13 +42,14 @@ type ClaimSandboxOptions struct {
 }
 
 type CloneSandboxOptions struct {
-	User             string                  `json:"user"`
-	CheckPointID     string                  `json:"checkPointID"`
-	WaitReadyTimeout time.Duration           `json:"waitReadyTimeout"`
-	CloneTimeout     time.Duration           `json:"cloneTimeout"`
-	CSIMount         *config.CSIMountOptions `json:"CSIMount"`
-	Modifier         func(sbx Sandbox)       `json:"-"`
-	CreateLimiter    *rate.Limiter           `json:"-"`
+	User               string                  `json:"user"`
+	CheckPointID       string                  `json:"checkPointID"`
+	WaitReadyTimeout   time.Duration           `json:"waitReadyTimeout"`
+	CloneTimeout       time.Duration           `json:"cloneTimeout"`
+	CSIMount           *config.CSIMountOptions `json:"CSIMount"`
+	Modifier           func(sbx Sandbox)       `json:"-"`
+	CreateLimiter      *rate.Limiter           `json:"-"`
+	SkipWaitCheckpoint bool                    `json:"skipWaitCheckpoint"`
 }
 
 type CreateCheckpointOptions struct {

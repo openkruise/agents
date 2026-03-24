@@ -79,5 +79,15 @@ func AddIndexersToCheckpointInformer(informer cache.SharedIndexInformer) error {
 			}
 			return []string{}, nil
 		},
+		IndexUser: func(obj interface{}) ([]string, error) {
+			result, ok := obj.(*agentsv1alpha1.Checkpoint)
+			if !ok {
+				return []string{}, nil
+			}
+			if user := result.GetAnnotations()[agentsv1alpha1.AnnotationOwner]; user != "" {
+				return []string{user}, nil
+			}
+			return []string{}, nil
+		},
 	})
 }

@@ -36,10 +36,12 @@ type Infrastructure interface {
 	HasCheckpoint(name string) bool
 	GetCache() CacheProvider // Get the CacheProvider for the infra
 	LoadDebugInfo() map[string]any
-	SelectSandboxes(user string, limit int, filter func(sandbox Sandbox) bool) ([]Sandbox, error) // Select Sandboxes based on the options provided
-	GetClaimedSandbox(ctx context.Context, sandboxID string) (Sandbox, error)                     // Get a Sandbox interface by its ID
+	SelectSandboxes(user string) ([]Sandbox, error)                           // Select Sandboxes based on the options provided
+	GetClaimedSandbox(ctx context.Context, sandboxID string) (Sandbox, error) // Get a Sandbox interface by its ID
+	SelectSucceededCheckpoints(user string) ([]CheckpointInfo, error)
 	ClaimSandbox(ctx context.Context, opts ClaimSandboxOptions) (Sandbox, ClaimMetrics, error)
 	CloneSandbox(ctx context.Context, opts CloneSandboxOptions) (Sandbox, CloneMetrics, error)
+	DeleteCheckpoint(ctx context.Context, user string, checkpointID string) error
 }
 
 type Sandbox interface {
@@ -73,4 +75,14 @@ type CacheProvider interface {
 	GetClaimedSandbox(sandboxID string) (*agentsv1alpha1.Sandbox, error)
 	ListSandboxWithUser(user string) ([]*agentsv1alpha1.Sandbox, error)
 	ListSandboxesInPool(pool string) ([]*agentsv1alpha1.Sandbox, error)
+	GetCheckpoint(checkpointID string) (*agentsv1alpha1.Checkpoint, error)
+}
+
+type CheckpointInfo struct {
+	Name              string
+	Namespace         string
+	Phase             string
+	SandboxID         string
+	CheckpointID      string
+	CreationTimestamp string
 }

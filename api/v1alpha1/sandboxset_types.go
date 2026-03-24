@@ -39,6 +39,7 @@ const (
 	AnnotationClaimTime          = InternalPrefix + "claim-timestamp"
 	AnnotationRestoreFrom        = InternalPrefix + "restore-from"
 	AnnotationInitRuntimeRequest = InternalPrefix + "init-runtime-request"
+	AnnotationSandboxID          = InternalPrefix + "sandbox-id"
 )
 
 const (

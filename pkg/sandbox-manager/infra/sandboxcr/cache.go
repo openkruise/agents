@@ -452,3 +452,7 @@ func (c *Cache) GetSandboxTemplate(namespace, name string) (*agentsv1alpha1.Sand
 	}
 	return nil, fmt.Errorf("object with key %s is not a SandboxTemplate", key)
 }
+
+func (c *Cache) ListCheckpointsWithUser(user string) ([]*agentsv1alpha1.Checkpoint, error) {
+	return managerutils.SelectObjectWithIndex[*agentsv1alpha1.Checkpoint](c.checkpointInformer, IndexUser, user)
+}

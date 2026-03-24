@@ -19,14 +19,16 @@ type Handler[T any] func(r *http.Request) (response ApiResponse[T], err *ApiErro
 type MiddleWare func(ctx context.Context, r *http.Request) (context.Context, *ApiError)
 
 type ApiResponse[T any] struct {
-	Code int
-	Body T
+	Code    int
+	Headers map[string]string
+	Body    T
 }
 
 type ApiError struct {
-	Code      int    `json:"code"`
-	Message   string `json:"message"`
-	RequestID string `json:"request_id"`
+	Code      int               `json:"code"`
+	Headers   map[string]string `json:"headers"`
+	Message   string            `json:"message"`
+	RequestID string            `json:"request_id"`
 }
 
 func (r *ApiError) Error() string {
@@ -44,10 +46,10 @@ func RegisterRoute[T any](mux *http.ServeMux, method, path string, handler Handl
 	}
 	handleFunc := func(w http.ResponseWriter, r *http.Request) {
 		written := false
-		safeWriteJson := func(ctx context.Context, w http.ResponseWriter, code, defaultCode int, body any, requestID string) {
+		safeWriteJson := func(ctx context.Context, w http.ResponseWriter, code, defaultCode int, body any, headers map[string]string, requestID string) {
 			if !written {
 				written = true
-				writeJson(ctx, w, code, defaultCode, body, requestID)
+				writeJson(ctx, w, code, defaultCode, body, headers, requestID)
 			}
 		}
 		requestID := r.Header.Get("X-Request-ID")
@@ -72,14 +74,14 @@ func RegisterRoute[T any](mux *http.ServeMux, method, path string, handler Handl
 				&ApiError{
 					Code:    http.StatusInternalServerError,
 					Message: "Internal Server Error",
-				}, requestID)
+				}, nil, requestID)
 			return
 		}()
 
 		var err *ApiError
 		for _, m := range middlewares {
 			if ctx, err = m(ctx, r); err != nil {
-				safeWriteJson(ctx, w, err.Code, http.StatusInternalServerError, err, requestID)
+				safeWriteJson(ctx, w, err.Code, http.StatusInternalServerError, err, nil, requestID)
 				return
 			}
 		}
@@ -88,17 +90,17 @@ func RegisterRoute[T any](mux *http.ServeMux, method, path string, handler Handl
 		resp, err := handler(r.WithContext(ctx))
 		if err != nil {
 			log.Error(err, "API Error", "path", r.URL.Path, "cost", time.Since(start))
-			safeWriteJson(ctx, w, err.Code, http.StatusInternalServerError, err, requestID)
+			safeWriteJson(ctx, w, err.Code, http.StatusInternalServerError, err, err.Headers, requestID)
 		} else {
 			log.Info("API Success", "path", r.URL.Path, "cost", time.Since(start))
-			safeWriteJson(ctx, w, resp.Code, http.StatusOK, resp.Body, requestID)
+			safeWriteJson(ctx, w, resp.Code, http.StatusOK, resp.Body, resp.Headers, requestID)
 		}
 	}
 	mux.HandleFunc(pattern, handleFunc)
 	mux.HandleFunc(pattern+"/", handleFunc)
 }
 
-func writeJson(ctx context.Context, w http.ResponseWriter, code, defaultCode int, body any, requestID string) {
+func writeJson(ctx context.Context, w http.ResponseWriter, code, defaultCode int, body any, headers map[string]string, requestID string) {
 	log := klog.FromContext(ctx).V(consts.DebugLogLevel)
 	if code == 0 {
 		code = defaultCode
@@ -110,6 +112,9 @@ func writeJson(ctx context.Context, w http.ResponseWriter, code, defaultCode int
 		w.Header().Set("X-Request-ID", requestID)
 	}
 	w.Header().Set("Content-Type", "application/json")
+	for k, v := range headers {
+		w.Header().Set(k, v)
+	}
 	w.WriteHeader(code)
 	if code == http.StatusNoContent {
 		return

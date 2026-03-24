@@ -6,14 +6,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
+	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	testutils "github.com/openkruise/agents/test/utils"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
-	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
-	"github.com/openkruise/agents/pkg/sandbox-manager/config"
-	testutils "github.com/openkruise/agents/test/utils"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/proxy"
@@ -71,8 +73,6 @@ func TestInfra_SelectSandboxes(t *testing.T) {
 		name        string
 		sandboxes   []*v1alpha1.Sandbox
 		user        string
-		limit       int
-		filter      func(sandbox infra.Sandbox) bool
 		expectNames []string
 		expectCount int
 	}{
@@ -84,32 +84,7 @@ func TestInfra_SelectSandboxes(t *testing.T) {
 				createTestSandbox("sandbox-3", "user2", v1alpha1.SandboxRunning, true),
 			},
 			user:        "user1",
-			limit:       10,
 			expectNames: []string{"sandbox-1", "sandbox-2"},
-		},
-		{
-			name: "select with limit",
-			sandboxes: []*v1alpha1.Sandbox{
-				createTestSandbox("sandbox-1", "user1", v1alpha1.SandboxRunning, true),
-				createTestSandbox("sandbox-2", "user1", v1alpha1.SandboxRunning, true),
-				createTestSandbox("sandbox-3", "user1", v1alpha1.SandboxRunning, true),
-			},
-			user:        "user1",
-			limit:       2,
-			expectCount: 2,
-		},
-		{
-			name: "select with filter",
-			sandboxes: []*v1alpha1.Sandbox{
-				createTestSandbox("sandbox-running-1", "user1", v1alpha1.SandboxRunning, true),
-				createTestSandbox("sandbox-running-2", "user1", v1alpha1.SandboxRunning, true),
-			},
-			user:  "user1",
-			limit: 10,
-			filter: func(sandbox infra.Sandbox) bool {
-				return sandbox.GetName() == "sandbox-running-2"
-			},
-			expectNames: []string{"sandbox-running-2"},
 		},
 		{
 			name: "select with no matching user",
@@ -118,7 +93,6 @@ func TestInfra_SelectSandboxes(t *testing.T) {
 				createTestSandbox("sandbox-2", "user1", v1alpha1.SandboxRunning, true),
 			},
 			user:        "user2",
-			limit:       10,
 			expectNames: []string{},
 		},
 	}
@@ -137,7 +111,7 @@ func TestInfra_SelectSandboxes(t *testing.T) {
 			time.Sleep(50 * time.Millisecond)
 
 			// Test SelectSandboxes
-			result, err := infraInstance.SelectSandboxes(tt.user, tt.limit, tt.filter)
+			result, err := infraInstance.SelectSandboxes(tt.user)
 			assert.NoError(t, err)
 			assert.Len(t, result, tt.expectCount)
 			if len(tt.expectNames) > 0 {
@@ -743,6 +717,171 @@ func TestInfra_CloneSandbox(t *testing.T) {
 	assert.GreaterOrEqual(t, metrics.Total, time.Duration(0))
 }
 
+func createTestCheckpoint(name, user string, namespace string, phase v1alpha1.CheckpointPhase) *v1alpha1.Checkpoint {
+	return &v1alpha1.Checkpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+			UID:       types.UID(uuid.NewString()),
+			Annotations: map[string]string{
+				v1alpha1.AnnotationOwner: user,
+			},
+		},
+		Status: v1alpha1.CheckpointStatus{
+			Phase:        phase,
+			CheckpointId: name + "-id",
+		},
+	}
+}
+
+func CreateCheckpointWithStatus(t *testing.T, client *clients.ClientSet, cp *v1alpha1.Checkpoint) {
+	_, err := client.ApiV1alpha1().Checkpoints(cp.Namespace).Create(t.Context(), cp, metav1.CreateOptions{})
+	require.NoError(t, err)
+	_, err = client.ApiV1alpha1().Checkpoints(cp.Namespace).UpdateStatus(t.Context(), cp, metav1.UpdateOptions{})
+	require.NoError(t, err)
+}
+
+func EnsureCheckpointInCache(t *testing.T, cache *Cache, cp *v1alpha1.Checkpoint) {
+	require.Eventually(t, func() bool {
+		_, err := cache.GetCheckpoint(cp.Status.CheckpointId)
+		return err == nil
+	}, time.Second, 10*time.Millisecond, "get checkpoint from cache timeout")
+}
+
+func TestInfra_SelectSucceededCheckpoints(t *testing.T) {
+	utils.InitLogOutput()
+
+	tests := []struct {
+		name                            string
+		checkpoints                     []*v1alpha1.Checkpoint
+		user                            string
+		expectCheckpointIDs             []string
+		expectResourceVersionExpectFail []string // checkpoint names that should fail ResourceVersionExpectation
+	}{
+		{
+			name: "only return succeeded checkpoints for user",
+			checkpoints: []*v1alpha1.Checkpoint{
+				createTestCheckpoint("cp-succeeded-1", "user1", "default", v1alpha1.CheckpointSucceeded),
+				createTestCheckpoint("cp-succeeded-2", "user1", "default", v1alpha1.CheckpointSucceeded),
+				createTestCheckpoint("cp-pending", "user1", "default", v1alpha1.CheckpointPending),
+				createTestCheckpoint("cp-failed", "user1", "default", v1alpha1.CheckpointFailed),
+				createTestCheckpoint("cp-creating", "user1", "default", v1alpha1.CheckpointCreating),
+			},
+			user:                "user1",
+			expectCheckpointIDs: []string{"cp-succeeded-1-id", "cp-succeeded-2-id"},
+		},
+		{
+			name: "return empty list when user has no succeeded checkpoints",
+			checkpoints: []*v1alpha1.Checkpoint{
+				createTestCheckpoint("cp-pending", "user1", "default", v1alpha1.CheckpointPending),
+				createTestCheckpoint("cp-failed", "user1", "default", v1alpha1.CheckpointFailed),
+				createTestCheckpoint("cp-creating", "user1", "default", v1alpha1.CheckpointCreating),
+			},
+			user:                "user1",
+			expectCheckpointIDs: []string{},
+		},
+		{
+			name:                "return empty list when user has no checkpoints",
+			checkpoints:         []*v1alpha1.Checkpoint{},
+			user:                "user1",
+			expectCheckpointIDs: []string{},
+		},
+		{
+			name: "filter checkpoints by user",
+			checkpoints: []*v1alpha1.Checkpoint{
+				createTestCheckpoint("cp-user1-succeeded", "user1", "default", v1alpha1.CheckpointSucceeded),
+				createTestCheckpoint("cp-user2-succeeded", "user2", "default", v1alpha1.CheckpointSucceeded),
+				createTestCheckpoint("cp-user3-succeeded", "user3", "default", v1alpha1.CheckpointSucceeded),
+			},
+			user:                "user1",
+			expectCheckpointIDs: []string{"cp-user1-succeeded-id"},
+		},
+		{
+			name: "filter out checkpoints with unsatisfied resource version expectation",
+			checkpoints: []*v1alpha1.Checkpoint{
+				createTestCheckpoint("cp-succeeded-satisfied", "user1", "default", v1alpha1.CheckpointSucceeded),
+				createTestCheckpoint("cp-succeeded-unsatisfied", "user1", "default", v1alpha1.CheckpointSucceeded),
+			},
+			user:                            "user1",
+			expectCheckpointIDs:             []string{"cp-succeeded-satisfied-id"},
+			expectResourceVersionExpectFail: []string{"cp-succeeded-unsatisfied"},
+		},
+		{
+			name: "mixed scenario: succeeded, non-succeeded, and unsatisfied resource version",
+			checkpoints: []*v1alpha1.Checkpoint{
+				createTestCheckpoint("cp-succeeded-ok", "user1", "default", v1alpha1.CheckpointSucceeded),
+				createTestCheckpoint("cp-succeeded-unsatisfied", "user1", "default", v1alpha1.CheckpointSucceeded),
+				createTestCheckpoint("cp-pending", "user1", "default", v1alpha1.CheckpointPending),
+				createTestCheckpoint("cp-failed", "user1", "default", v1alpha1.CheckpointFailed),
+				createTestCheckpoint("cp-other-user", "user2", "default", v1alpha1.CheckpointSucceeded),
+			},
+			user:                            "user1",
+			expectCheckpointIDs:             []string{"cp-succeeded-ok-id"},
+			expectResourceVersionExpectFail: []string{"cp-succeeded-unsatisfied"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			infrInstance, client := NewTestInfra(t)
+
+			// Create checkpoints
+			for _, cp := range tt.checkpoints {
+				CreateCheckpointWithStatus(t, client, cp)
+			}
+
+			// Wait for all checkpoints to be cached
+			for _, cp := range tt.checkpoints {
+				if cp.Status.CheckpointId != "" {
+					EnsureCheckpointInCache(t, infrInstance.Cache, cp)
+				}
+			}
+
+			// Set up resource version expectations for checkpoints that should fail
+			// We need to use a higher resource version to make the expectation unsatisfied
+			for _, cpName := range tt.expectResourceVersionExpectFail {
+				for _, cp := range tt.checkpoints {
+					if cp.Name == cpName {
+						// Get the checkpoint from cache to get the actual UID assigned by fake client
+						cachedCp, err := infrInstance.Cache.GetCheckpoint(cp.Status.CheckpointId)
+						require.NoError(t, err)
+						// Create a copy with higher resource version to set expectation
+						expectCp := cachedCp.DeepCopy()
+						expectCp.ResourceVersion = "999999"
+						utils.ResourceVersionExpectationExpect(expectCp)
+						break
+					}
+				}
+			}
+
+			// Test SelectSucceededCheckpoints
+			results, err := infrInstance.SelectSucceededCheckpoints(tt.user)
+			assert.NoError(t, err)
+			assert.Len(t, results, len(tt.expectCheckpointIDs))
+
+			// Verify the returned checkpoint IDs
+			var gotIDs []string
+			for _, result := range results {
+				gotIDs = append(gotIDs, result.CheckpointID)
+			}
+			assert.ElementsMatch(t, tt.expectCheckpointIDs, gotIDs)
+
+			// Clean up resource version expectations
+			for _, cpName := range tt.expectResourceVersionExpectFail {
+				for _, cp := range tt.checkpoints {
+					if cp.Name == cpName {
+						cachedCp, err := infrInstance.Cache.GetCheckpoint(cp.Status.CheckpointId)
+						if err == nil {
+							utils.ResourceVersionExpectationDelete(cachedCp)
+						}
+						break
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestInfra_startRouteReconciler(t *testing.T) {
 	tests := []struct {
 		name              string
@@ -824,6 +963,292 @@ func TestInfra_startRouteReconciler(t *testing.T) {
 				_, ok := infraInstance.Proxy.LoadRoute(id)
 				assert.True(t, ok, "valid route %s should always exist", id)
 			}
+		})
+	}
+}
+
+func TestInfra_DeleteCheckpoint(t *testing.T) {
+	utils.InitLogOutput()
+
+	tests := []struct {
+		name                 string
+		checkpointID         string // the status.checkpointId
+		user                 string // the user requesting deletion
+		setupCheckpoint      bool   // whether to create checkpoint + template
+		withOwnerRef         bool   // whether checkpoint has OwnerRef to template
+		mockDeleteTemplate   error  // mock error for DefaultDeleteSandboxTemplate
+		mockDeleteCheckpoint error  // mock error for DefaultDeleteCheckpointCR
+		expectError          bool
+		expectErrorContains  string
+	}{
+		{
+			name:            "success with owner reference (cascade delete)",
+			checkpointID:    "cp-with-ownerref",
+			user:            "test-user",
+			setupCheckpoint: true,
+			withOwnerRef:    true,
+			expectError:     false,
+		},
+		{
+			name:            "success without owner reference (explicit delete)",
+			checkpointID:    "cp-no-ownerref",
+			user:            "test-user",
+			setupCheckpoint: true,
+			withOwnerRef:    false,
+			expectError:     false,
+		},
+		{
+			name:                "checkpoint not found",
+			checkpointID:        "non-existent",
+			user:                "test-user",
+			setupCheckpoint:     false,
+			expectError:         true,
+			expectErrorContains: "not found",
+		},
+		{
+			name:                "delete template fails",
+			checkpointID:        "cp-tmpl-fail",
+			user:                "test-user",
+			setupCheckpoint:     true,
+			withOwnerRef:        true,
+			mockDeleteTemplate:  fmt.Errorf("mock template delete error"),
+			expectError:         true,
+			expectErrorContains: "mock template delete error",
+		},
+		{
+			name:                 "explicit delete checkpoint fails",
+			checkpointID:         "cp-delete-fail",
+			user:                 "test-user",
+			setupCheckpoint:      true,
+			withOwnerRef:         false,
+			mockDeleteCheckpoint: fmt.Errorf("mock checkpoint delete error"),
+			expectError:          true,
+			expectErrorContains:  "mock checkpoint delete error",
+		},
+		{
+			name:                "owner mismatch",
+			checkpointID:        "cp-wrong-owner",
+			user:                "different-user",
+			setupCheckpoint:     true,
+			withOwnerRef:        true,
+			expectError:         true,
+			expectErrorContains: "not owned by user",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			infraInstance, clientSet := NewTestInfra(t)
+			// Use a context with timeout to prevent retries from hanging
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			namespace := "default"
+
+			if tt.setupCheckpoint {
+				// Create SandboxTemplate
+				tmpl := &v1alpha1.SandboxTemplate{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      tt.checkpointID,
+						Namespace: namespace,
+						UID:       types.UID(uuid.NewString()),
+					},
+					Spec: v1alpha1.SandboxTemplateSpec{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{Name: "main", Image: "test"},
+								},
+							},
+						},
+					},
+				}
+				_, err := clientSet.SandboxClient.ApiV1alpha1().SandboxTemplates(namespace).Create(ctx, tmpl, metav1.CreateOptions{})
+				require.NoError(t, err)
+
+				// Re-read to get server-assigned UID
+				tmpl, err = clientSet.SandboxClient.ApiV1alpha1().SandboxTemplates(namespace).Get(ctx, tt.checkpointID, metav1.GetOptions{})
+				require.NoError(t, err)
+
+				// Create Checkpoint with owner annotation
+				cp := &v1alpha1.Checkpoint{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      tt.checkpointID,
+						Namespace: namespace,
+						Annotations: map[string]string{
+							v1alpha1.AnnotationOwner: "test-user",
+						},
+					},
+				}
+				if tt.withOwnerRef {
+					cp.OwnerReferences = []metav1.OwnerReference{
+						{
+							APIVersion:         v1alpha1.SandboxTemplateControllerKind.GroupVersion().String(),
+							Kind:               v1alpha1.SandboxTemplateControllerKind.Kind,
+							Name:               tmpl.Name,
+							UID:                tmpl.UID,
+							Controller:         ptr.To(true),
+							BlockOwnerDeletion: ptr.To(true),
+						},
+					}
+				}
+				_, err = clientSet.SandboxClient.ApiV1alpha1().Checkpoints(namespace).Create(ctx, cp, metav1.CreateOptions{})
+				require.NoError(t, err)
+
+				// Update checkpoint status with checkpointId
+				cp, err = clientSet.SandboxClient.ApiV1alpha1().Checkpoints(namespace).Get(ctx, tt.checkpointID, metav1.GetOptions{})
+				require.NoError(t, err)
+				cp.Status.CheckpointId = tt.checkpointID
+				_, err = clientSet.SandboxClient.ApiV1alpha1().Checkpoints(namespace).UpdateStatus(ctx, cp, metav1.UpdateOptions{})
+				require.NoError(t, err)
+
+				// Wait for informer sync
+				require.Eventually(t, func() bool {
+					_, err := infraInstance.Cache.GetCheckpoint(tt.checkpointID)
+					return err == nil
+				}, time.Second, 10*time.Millisecond)
+
+				require.Eventually(t, func() bool {
+					_, err := infraInstance.Cache.GetSandboxTemplate(namespace, tt.checkpointID)
+					return err == nil
+				}, time.Second, 10*time.Millisecond)
+			}
+
+			// Set up decorator mocks
+			if tt.mockDeleteTemplate != nil {
+				orig := DefaultDeleteSandboxTemplate
+				DefaultDeleteSandboxTemplate = func(ctx context.Context, client *clients.ClientSet, namespace, name string) error {
+					return tt.mockDeleteTemplate
+				}
+				t.Cleanup(func() { DefaultDeleteSandboxTemplate = orig })
+			}
+			if tt.mockDeleteCheckpoint != nil {
+				orig := DefaultDeleteCheckpointCR
+				DefaultDeleteCheckpointCR = func(ctx context.Context, client *clients.ClientSet, namespace, name string) error {
+					return tt.mockDeleteCheckpoint
+				}
+				t.Cleanup(func() { DefaultDeleteCheckpointCR = orig })
+			}
+
+			err := infraInstance.DeleteCheckpoint(ctx, tt.user, tt.checkpointID)
+
+			if tt.expectError {
+				require.Error(t, err)
+				if tt.expectErrorContains != "" {
+					assert.Contains(t, err.Error(), tt.expectErrorContains)
+				}
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestHasOwnerReference(t *testing.T) {
+	tmpl := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-tmpl",
+			UID:  "test-uid",
+		},
+	}
+
+	tests := []struct {
+		name     string
+		cp       *v1alpha1.Checkpoint
+		expected bool
+	}{
+		{
+			name: "has matching owner reference",
+			cp: &v1alpha1.Checkpoint{
+				ObjectMeta: metav1.ObjectMeta{
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							Kind: v1alpha1.SandboxTemplateControllerKind.Kind,
+							Name: "test-tmpl",
+							UID:  "test-uid",
+						},
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "no owner references",
+			cp: &v1alpha1.Checkpoint{
+				ObjectMeta: metav1.ObjectMeta{},
+			},
+			expected: false,
+		},
+		{
+			name: "wrong kind",
+			cp: &v1alpha1.Checkpoint{
+				ObjectMeta: metav1.ObjectMeta{
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							Kind: "SomeOtherKind",
+							Name: "test-tmpl",
+							UID:  "test-uid",
+						},
+					},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "wrong name",
+			cp: &v1alpha1.Checkpoint{
+				ObjectMeta: metav1.ObjectMeta{
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							Kind: v1alpha1.SandboxTemplateControllerKind.Kind,
+							Name: "other-tmpl",
+							UID:  "test-uid",
+						},
+					},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "wrong UID",
+			cp: &v1alpha1.Checkpoint{
+				ObjectMeta: metav1.ObjectMeta{
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							Kind: v1alpha1.SandboxTemplateControllerKind.Kind,
+							Name: "test-tmpl",
+							UID:  "wrong-uid",
+						},
+					},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "multiple owner references with one matching",
+			cp: &v1alpha1.Checkpoint{
+				ObjectMeta: metav1.ObjectMeta{
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							Kind: "SomeOtherKind",
+							Name: "other-name",
+							UID:  "other-uid",
+						},
+						{
+							Kind: v1alpha1.SandboxTemplateControllerKind.Kind,
+							Name: "test-tmpl",
+							UID:  "test-uid",
+						},
+					},
+				},
+			},
+			expected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := hasOwnerReference(tt.cp, tmpl)
+			assert.Equal(t, tt.expected, result)
 		})
 	}
 }

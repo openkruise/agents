@@ -972,7 +972,7 @@ type mockCacheProvider struct {
 	pv *corev1.PersistentVolume
 }
 
-func (m *mockCacheProvider) GetPersistentVolume(name string) (*corev1.PersistentVolume, error) {
+func (m *mockCacheProvider) GetPersistentVolume(string) (*corev1.PersistentVolume, error) {
 	if m.pv == nil {
 		return nil, fmt.Errorf("not found")
 	}
@@ -1005,16 +1005,20 @@ func (m *mockCacheProvider) GetConfigmap(namespace, name string) (*corev1.Config
 	}, nil
 }
 
-func (m *mockCacheProvider) GetClaimedSandbox(sandboxID string) (*agentsv1alpha1.Sandbox, error) {
+func (m *mockCacheProvider) GetClaimedSandbox(string) (*agentsv1alpha1.Sandbox, error) {
 	return nil, fmt.Errorf("not implemented for PV cache mock")
 }
 
-func (m *mockCacheProvider) ListSandboxWithUser(user string) ([]*agentsv1alpha1.Sandbox, error) {
+func (m *mockCacheProvider) ListSandboxWithUser(string) ([]*agentsv1alpha1.Sandbox, error) {
 	return nil, fmt.Errorf("not implemented for PV cache mock")
 }
 
-func (m *mockCacheProvider) ListSandboxesInPool(pool string) ([]*agentsv1alpha1.Sandbox, error) {
+func (m *mockCacheProvider) ListSandboxesInPool(string) ([]*agentsv1alpha1.Sandbox, error) {
 	return nil, fmt.Errorf("not implemented for PV cache mock")
+}
+
+func (m *mockCacheProvider) GetCheckpoint(_ string) (*agentsv1alpha1.Checkpoint, error) {
+	return nil, fmt.Errorf("not implemented for checkpoint cache mock")
 }
 
 type mockStorageProviderRegistry struct {
@@ -1053,9 +1057,9 @@ type mockVolumeMountProvider struct {
 }
 
 func (m *mockVolumeMountProvider) GenerateCSINodePublishVolumeRequest(
-	ctx context.Context,
+	_ context.Context,
 	containerMountTarget string,
-	persistentVolumeObj *corev1.PersistentVolume, readOnlyExpect bool,
+	persistentVolumeObj *corev1.PersistentVolume, _ bool,
 	secretObj *corev1.Secret,
 ) (*csi.NodePublishVolumeRequest, error) {
 	if m.generateError != nil {

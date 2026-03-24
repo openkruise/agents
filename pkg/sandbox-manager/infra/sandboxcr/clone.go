@@ -16,6 +16,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/utils"
+	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
 )
 
 var (
@@ -122,7 +123,10 @@ func stepFindCheckpointAndTemplate(ctx context.Context, opts infra.CloneSandboxO
 
 	// Try to get checkpoint from cache first
 	var checkpoint *v1alpha1.Checkpoint
-	err := retry.OnError(utils.CacheBackoff, utils.RetryIfContextNotCanceled(ctx), func() error {
+	retryFunc := utils.RetryIfContextNotCanceled(ctx)
+	err := retry.OnError(utils.CacheBackoff, func(err error) bool {
+		return !opts.SkipWaitCheckpoint && retryFunc(err)
+	}, func() error {
 		cp, err := cache.GetCheckpoint(opts.CheckPointID)
 		if err != nil {
 			return err
@@ -286,6 +290,8 @@ func CreateCheckpoint(ctx context.Context, sbx *v1alpha1.Sandbox, client clients
 			Namespace: sbx.Namespace,
 			Annotations: map[string]string{
 				v1alpha1.AnnotationInitRuntimeRequest: sbx.Annotations[v1alpha1.AnnotationInitRuntimeRequest],
+				v1alpha1.AnnotationOwner:              sbx.Annotations[v1alpha1.AnnotationOwner],
+				v1alpha1.AnnotationSandboxID:          stateutils.GetSandboxID(sbx),
 			},
 			OwnerReferences: []metav1.OwnerReference{
 				{
@@ -349,5 +355,16 @@ func checkCheckpointReady(ctx context.Context, cp *v1alpha1.Checkpoint) (bool, e
 		return true, nil
 	default:
 		return false, nil
+	}
+}
+
+func AsCheckpointInfo(cp *v1alpha1.Checkpoint) infra.CheckpointInfo {
+	return infra.CheckpointInfo{
+		Name:              cp.Name,
+		Namespace:         cp.Namespace,
+		Phase:             string(cp.Status.Phase),
+		CheckpointID:      cp.Status.CheckpointId,
+		SandboxID:         cp.Annotations[v1alpha1.AnnotationSandboxID],
+		CreationTimestamp: cp.CreationTimestamp.Format(time.RFC3339),
 	}
 }
