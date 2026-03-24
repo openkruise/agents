@@ -6,7 +6,9 @@ import (
 	"time"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	sandboxfake "github.com/openkruise/agents/client/clientset/versioned/fake"
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
+	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	constantUtils "github.com/openkruise/agents/pkg/utils"
 	sandboxManagerUtils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
@@ -15,6 +17,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime"
+	k8stesting "k8s.io/client-go/testing"
 )
 
 func TestCache_WaitForSandboxSatisfied(t *testing.T) {
@@ -438,4 +443,194 @@ func TestCache_GetSecret_FromSync(t *testing.T) {
 	assert.Equal(t, constantUtils.DefaultSandboxDeployNamespace, result.Namespace)
 	assert.Equal(t, testSecret.Data, result.Data)
 	assert.Equal(t, testSecret.Type, result.Type)
+}
+
+func TestCache_InformerWithFilter_GetSandboxSet(t *testing.T) {
+	sandboxManagerUtils.InitLogOutput()
+
+	tests := []struct {
+		name             string
+		opts             config.SandboxManagerOptions
+		seedSandboxSets  []*agentsv1alpha1.SandboxSet
+		wantCachedNames  []string // expected SandboxSet names visible in cache (namespace/name)
+		queryName        string   // template name to query via GetSandboxSet
+		wantGetErr       bool     // whether GetSandboxSet should return an error
+		wantGetName      string   // expected name of the returned SandboxSet (if no error)
+		wantGetNamespace string   // expected namespace of the returned SandboxSet (if no error)
+	}{
+		{
+			name: "no filter - all SandboxSets visible",
+			opts: config.SandboxManagerOptions{},
+			seedSandboxSets: []*agentsv1alpha1.SandboxSet{
+				{ObjectMeta: metav1.ObjectMeta{Name: "tmpl-1", Namespace: "team-a"}},
+				{ObjectMeta: metav1.ObjectMeta{Name: "tmpl-2", Namespace: "team-a"}},
+				{ObjectMeta: metav1.ObjectMeta{Name: "tmpl-3", Namespace: "team-b"}},
+			},
+			wantCachedNames:  []string{"team-a/tmpl-1", "team-a/tmpl-2", "team-b/tmpl-3"},
+			queryName:        "tmpl-3",
+			wantGetErr:       false,
+			wantGetName:      "tmpl-3",
+			wantGetNamespace: "team-b",
+		},
+		{
+			name: "namespace filter with multiple SandboxSets in same namespace",
+			opts: config.SandboxManagerOptions{
+				SandboxNamespace: "team-a",
+			},
+			seedSandboxSets: []*agentsv1alpha1.SandboxSet{
+				{ObjectMeta: metav1.ObjectMeta{Name: "tmpl-1", Namespace: "team-a"}},
+				{ObjectMeta: metav1.ObjectMeta{Name: "tmpl-2", Namespace: "team-a"}},
+				{ObjectMeta: metav1.ObjectMeta{Name: "tmpl-3", Namespace: "team-b"}},
+			},
+			wantCachedNames:  []string{"team-a/tmpl-1", "team-a/tmpl-2"},
+			queryName:        "tmpl-2",
+			wantGetErr:       false,
+			wantGetName:      "tmpl-2",
+			wantGetNamespace: "team-a",
+		},
+		{
+			name: "label selector filter with multiple SandboxSets",
+			opts: config.SandboxManagerOptions{
+				SandboxLabelSelector: "env=prod",
+			},
+			seedSandboxSets: []*agentsv1alpha1.SandboxSet{
+				{ObjectMeta: metav1.ObjectMeta{Name: "tmpl-match-selector", Namespace: "team-a", Labels: map[string]string{"env": "prod"}}},
+				{ObjectMeta: metav1.ObjectMeta{Name: "tmpl-not-match-selector", Namespace: "team-a", Labels: map[string]string{"env": "staging"}}},
+			},
+			wantCachedNames:  []string{"team-a/tmpl-match-selector"},
+			queryName:        "tmpl-match-selector",
+			wantGetErr:       false,
+			wantGetName:      "tmpl-match-selector",
+			wantGetNamespace: "team-a",
+		},
+		{
+			name: "namespace and label selector filter with multiple SandboxSets",
+			opts: config.SandboxManagerOptions{
+				SandboxNamespace:     "team-a",
+				SandboxLabelSelector: "env=prod",
+			},
+			seedSandboxSets: []*agentsv1alpha1.SandboxSet{
+				{ObjectMeta: metav1.ObjectMeta{Name: "tmpl-match-selector", Namespace: "team-a", Labels: map[string]string{"env": "prod"}}},
+				{ObjectMeta: metav1.ObjectMeta{Name: "tmpl-not-match-selector", Namespace: "team-a", Labels: map[string]string{"env": "staging"}}},
+				{ObjectMeta: metav1.ObjectMeta{Name: "tmpl-match-selector", Namespace: "team-b", Labels: map[string]string{"env": "prod"}}},
+			},
+			wantCachedNames:  []string{"team-a/tmpl-match-selector"},
+			queryName:        "tmpl-match-selector",
+			wantGetErr:       false,
+			wantGetName:      "tmpl-match-selector",
+			wantGetNamespace: "team-a",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var (
+				c         *Cache
+				clientSet *clients.ClientSet
+				err       error
+			)
+
+			if tt.opts.SandboxLabelSelector != "" {
+				// When a label selector is configured, the fake client does not enforce it
+				// natively. We work around this by:
+				//   1. Creating the fake clientSet manually so we can access the underlying
+				//      *sandboxfake.Clientset and inject a PrependReactor.
+				//   2. Writing seed data into the Tracker BEFORE starting the Cache so that
+				//      the Informer's initial List call goes through our reactor and returns
+				//      only the label-matching objects.
+				//   3. The reactor parses the LabelSelector from ListOptions and filters the
+				//      objects returned by the Tracker, giving the Informer an accurate view.
+				clientSet = clients.NewFakeClientSet(t)
+				fakeClient, ok := clientSet.SandboxClient.(*sandboxfake.Clientset)
+				require.True(t, ok, "SandboxClient must be *sandboxfake.Clientset")
+
+				// Write seed data into the Tracker before the Cache starts.
+				for _, sbs := range tt.seedSandboxSets {
+					require.NoError(t,
+						fakeClient.Tracker().Add(sbs),
+						"failed to add SandboxSet %s/%s to tracker", sbs.Namespace, sbs.Name,
+					)
+				}
+
+				// Inject a PrependReactor that enforces label selector filtering on List.
+				fakeClient.PrependReactor("list", "sandboxsets", func(action k8stesting.Action) (bool, runtime.Object, error) {
+					listAction, ok := action.(k8stesting.ListAction)
+					if !ok {
+						return false, nil, nil
+					}
+					// Retrieve all objects from the Tracker for this resource/namespace.
+					objs, err := fakeClient.Tracker().List(
+						agentsv1alpha1.SchemeGroupVersion.WithResource("sandboxsets"),
+						agentsv1alpha1.SchemeGroupVersion.WithKind("SandboxSet"),
+						listAction.GetNamespace(),
+					)
+					if err != nil {
+						return true, nil, err
+					}
+					rawList, ok := objs.(*agentsv1alpha1.SandboxSetList)
+					if !ok {
+						return false, nil, nil
+					}
+
+					// Apply label selector filtering when one is present.
+					restriction := listAction.GetListRestrictions()
+					selector := restriction.Labels
+					if selector == nil || selector.Empty() {
+						return true, rawList, nil
+					}
+					filtered := make([]agentsv1alpha1.SandboxSet, 0, len(rawList.Items))
+					for _, item := range rawList.Items {
+						if selector.Matches(labels.Set(item.Labels)) {
+							filtered = append(filtered, item)
+						}
+					}
+					rawList.Items = filtered
+					return true, rawList, nil
+				})
+
+				// Build and start the Cache with the pre-seeded, reactor-equipped clientSet.
+				c, err = NewCache(clientSet, tt.opts)
+				require.NoError(t, err)
+				require.NoError(t, c.Run(t.Context()))
+			} else {
+				c, clientSet, err = NewTestCacheWithOptions(t, tt.opts)
+				require.NoError(t, err)
+
+				// Seed SandboxSets after the Cache is running (standard path).
+				for _, sbs := range tt.seedSandboxSets {
+					_, err := clientSet.SandboxClient.ApiV1alpha1().SandboxSets(sbs.Namespace).Create(
+						t.Context(), sbs, metav1.CreateOptions{},
+					)
+					require.NoError(t, err, "failed to create SandboxSet %s/%s", sbs.Namespace, sbs.Name)
+				}
+			}
+			defer c.Stop()
+
+			// Wait for informer sync
+			time.Sleep(300 * time.Millisecond)
+
+			// Inspect all SandboxSets in cache
+			allItems := c.sandboxSetInformer.GetStore().List()
+			cachedKeys := make([]string, 0, len(allItems))
+			for _, item := range allItems {
+				sbs, ok := item.(*agentsv1alpha1.SandboxSet)
+				require.True(t, ok, "unexpected type in sandboxSetInformer store: %T", item)
+				cachedKeys = append(cachedKeys, sbs.Namespace+"/"+sbs.Name)
+			}
+			assert.ElementsMatch(t, tt.wantCachedNames, cachedKeys,
+				"cached SandboxSet keys mismatch")
+
+			// Query via GetSandboxSet
+			got, err := c.GetSandboxSet(tt.queryName)
+			if tt.wantGetErr {
+				require.Error(t, err)
+				assert.Nil(t, got)
+			} else {
+				require.NoError(t, err)
+				require.NotNil(t, got)
+				assert.Equal(t, tt.wantGetName, got.Name)
+				assert.Equal(t, tt.wantGetNamespace, got.Namespace)
+			}
+		})
+	}
 }

@@ -7,6 +7,8 @@ import (
 
 type SandboxManagerOptions struct {
 	SystemNamespace       string
+	SandboxNamespace      string
+	SandboxLabelSelector  string
 	MaxClaimWorkers       int
 	MaxCreateQPS          int
 	ExtProcMaxConcurrency uint32
