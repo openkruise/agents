@@ -15,7 +15,7 @@
 
 set -e
 # default value
-FOCUS_DEFAULT='Sandbox'
+FOCUS_DEFAULT=''
 FOCUS=${FOCUS_DEFAULT}
 SKIP=""
 TIMEOUT="60m"

@@ -29,7 +29,9 @@ func (sc *Controller) getSandboxOfUser(ctx context.Context, sandboxID string) (i
 			Message: "User not found",
 		}
 	}
-	sbx, err := sc.manager.GetClaimedSandbox(ctx, user.ID.String(), sandboxID)
+	getCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	sbx, err := sc.manager.GetClaimedSandbox(getCtx, user.ID.String(), sandboxID)
 	if err != nil {
 		log.Error(err, "sandbox not found")
 		return nil, &web.ApiError{

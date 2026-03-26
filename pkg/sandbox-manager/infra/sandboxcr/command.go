@@ -12,17 +12,9 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/proto/envd/process"
 	"github.com/openkruise/agents/proto/envd/process/processconnect"
+	"github.com/openkruise/agents/test/utils"
 	"k8s.io/klog/v2"
 )
-
-type RunCommandResult struct {
-	PID      uint32
-	Stdout   []string
-	Stderr   []string
-	ExitCode int32
-	Exited   bool
-	Error    error
-}
 
 func (s *Sandbox) GetRuntimeURL() string {
 	// firstly, get runtime url from the annotation
@@ -50,11 +42,11 @@ func (s *Sandbox) GetAccessToken() string {
 }
 
 // runCommandWithRuntime is a solution to run command inside the sandbox.
-func (s *Sandbox) runCommandWithRuntime(ctx context.Context, processConfig *process.ProcessConfig, timeout time.Duration) (RunCommandResult, error) {
+func (s *Sandbox) runCommandWithRuntime(ctx context.Context, processConfig *process.ProcessConfig, timeout time.Duration) (utils.RunCommandResult, error) {
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(s.Sandbox)).V(consts.DebugLogLevel)
 	url := s.GetRuntimeURL()
 	if url == "" {
-		return RunCommandResult{}, fmt.Errorf("runtime url not found on sandbox")
+		return utils.RunCommandResult{}, fmt.Errorf("runtime url not found on sandbox")
 	}
 	client := processconnect.NewProcessClient(
 		http.DefaultClient,
@@ -76,7 +68,7 @@ func (s *Sandbox) runCommandWithRuntime(ctx context.Context, processConfig *proc
 	})
 	stream, err := client.Start(clientContext, req)
 	if err != nil {
-		return RunCommandResult{}, err
+		return utils.RunCommandResult{}, err
 	}
 	defer func() {
 		if err := stream.Close(); err != nil {
@@ -86,7 +78,7 @@ func (s *Sandbox) runCommandWithRuntime(ctx context.Context, processConfig *proc
 		}
 	}()
 
-	var result RunCommandResult
+	var result utils.RunCommandResult
 	start := time.Now()
 	log.Info("receiving messages", "timeout", timeout)
 	for stream.Receive() {

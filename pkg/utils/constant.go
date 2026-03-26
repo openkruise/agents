@@ -1,5 +1,12 @@
 package utils
 
+import (
+	"context"
+	"time"
+
+	"k8s.io/apimachinery/pkg/util/wait"
+)
+
 const (
 	// SandboxFinalizer is sandbox finalizer
 	SandboxFinalizer = "agents.kruise.io/sandbox"
@@ -24,4 +31,22 @@ const (
 	CreatedBySandbox  = "sandbox"
 )
 
-const DebugLogLevel = 5
+var (
+	CacheBackoff = wait.Backoff{
+		Duration: 100 * time.Millisecond,
+		Factor:   2.0,
+		Steps:    10,
+		Jitter:   1.1,
+	}
+)
+
+func RetryIfContextNotCanceled(ctx context.Context) func(err error) bool {
+	return func(err error) bool {
+		select {
+		case <-ctx.Done():
+			return false
+		default:
+			return true
+		}
+	}
+}

@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+
+	"github.com/openkruise/agents/api/v1alpha1"
 )
 
 func validateMountPoint(mountPoint string) error {
@@ -28,4 +30,38 @@ func validateMountPoint(mountPoint string) error {
 	}
 
 	return nil
+}
+
+// parseAndValidatePersistentContents parses and validates persistent contents string.
+// Valid values are: "memory", "filesystem", or "memory,filesystem" (order doesn't matter).
+// Duplicates are not allowed.
+func parseAndValidatePersistentContents(contents string) ([]string, error) {
+	if contents == "" {
+		return nil, nil
+	}
+
+	parts := strings.Split(contents, ",")
+	result := make(map[string]struct{})
+
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+
+		// Validate each value
+		if part != v1alpha1.CheckpointPersistentContentMemory && part != v1alpha1.CheckpointPersistentContentFilesystem {
+			return nil, fmt.Errorf("invalid persistent content %q, only %q and %q are allowed",
+				part, v1alpha1.CheckpointPersistentContentMemory, v1alpha1.CheckpointPersistentContentFilesystem)
+		}
+
+		result[part] = struct{}{}
+	}
+
+	// convert result to slice
+	resultSlice := make([]string, 0, len(result))
+	for part := range result {
+		resultSlice = append(resultSlice, part)
+	}
+	return resultSlice, nil
 }

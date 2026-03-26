@@ -2,6 +2,8 @@ apiVersion: admissionregistration.k8s.io/v1
 kind: MutatingWebhookConfiguration
 metadata:
   name: mutating-webhook-configuration
+  annotations:
+    "template": ""
 webhooks:
   - name: md-sbs.kb.io
     clientConfig:
@@ -18,6 +20,8 @@ apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingWebhookConfiguration
 metadata:
   name: validating-webhook-configuration
+  annotations:
+    "template": ""
 webhooks:
   - name: v-sbs.kb.io
     clientConfig:
@@ -25,6 +29,22 @@ webhooks:
         name: sandbox-controller-manager-webhook-service
         namespace: sandbox-system
   - name: v-sbt.kb.io
+    clientConfig:
+      service:
+        name: sandbox-controller-manager-webhook-service
+        namespace: sandbox-system
+  - name: v-pod-delete.kb.io
+    clientConfig:
+      service:
+        name: sandbox-controller-manager-webhook-service
+        namespace: sandbox-system
+    objectSelector:
+      matchExpressions:
+        - key: agents.kruise.io/created-by
+          operator: In
+          values:
+            - sandbox
+  - name: v-pod-eviction.kb.io
     clientConfig:
       service:
         name: sandbox-controller-manager-webhook-service

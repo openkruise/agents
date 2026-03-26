@@ -65,6 +65,18 @@ type SetTimeoutRequest struct {
 	TimeoutSeconds int `json:"timeout"`
 }
 
+type NewSnapshotRequest struct {
+	Name       string                      `json:"name"` // name is not used by the E2B SDK yet, just reserved for future use
+	Extensions NewSnapshotRequestExtension `json:"-"`
+}
+
+type NewSnapshotRequestExtension struct {
+	KeepRunning        *bool
+	TTL                *string
+	PersistentContents []string
+	WaitSuccessSeconds int
+}
+
 const (
 	// CDPPort is the port used for CDP (Chrome DevTools Port) communication
 	CDPPort = 9222

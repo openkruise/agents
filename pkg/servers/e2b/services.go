@@ -39,10 +39,13 @@ func (sc *Controller) DeleteSandbox(r *http.Request) (web.ApiResponse[struct{}],
 	log := klog.FromContext(r.Context())
 	sbx, apiError := sc.getSandboxOfUser(r.Context(), id)
 	if apiError != nil {
-		return web.ApiResponse[struct{}]{}, apiError
+		log.Error(apiError, "failed to get sandbox, just return success", "id", id)
+		return web.ApiResponse[struct{}]{
+			Code: http.StatusNoContent,
+		}, nil
 	}
 
-	if err := sbx.Kill(r.Context()); err != nil {
+	if err := sc.manager.DeleteSandbox(r.Context(), sbx); err != nil {
 		log.Error(err, "failed to delete sandbox", "id", id)
 		return web.ApiResponse[struct{}]{}, &web.ApiError{
 			Message: fmt.Sprintf("Failed to delete sandbox: %v", err),

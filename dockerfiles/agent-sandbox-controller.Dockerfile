@@ -17,6 +17,7 @@ COPY ../api api/
 COPY ../pkg pkg/
 COPY ../client client/
 COPY ../proto proto/
+COPY ../test test/
 
 # Build
 # the GOARCH has not a default value to allow the binary be built according to the host where the command

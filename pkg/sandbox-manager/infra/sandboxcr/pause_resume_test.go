@@ -1,9 +1,12 @@
 package sandboxcr
 
 import (
+	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
+	testutils "github.com/openkruise/agents/test/utils"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -11,8 +14,8 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
-	constantUtils "github.com/openkruise/agents/pkg/utils"
 	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	"github.com/openkruise/agents/pkg/utils/sandboxutils"
 )
@@ -21,12 +24,14 @@ import (
 func TestSandbox_SetPause(t *testing.T) {
 	utils.InitLogOutput()
 	tests := []struct {
-		name          string
-		initSandbox   func(sbx *v1alpha1.Sandbox)
-		operatePause  bool
-		expectPaused  bool
-		expectedState string
-		expectError   bool
+		name            string
+		initSandbox     func(sbx *v1alpha1.Sandbox)
+		operatePause    bool
+		expectPaused    bool
+		expectedState   string
+		expectError     bool
+		initErrCode     int
+		withInitRuntime bool
 	}{
 		{
 			name: "pause running / running sandbox",
@@ -83,6 +88,63 @@ func TestSandbox_SetPause(t *testing.T) {
 			expectPaused:  false,
 			expectedState: v1alpha1.SandboxStateRunning,
 			expectError:   false,
+		},
+		{
+			name: "resume paused / paused sandbox with init runtime success",
+			initSandbox: func(sbx *v1alpha1.Sandbox) {
+				sbx.Status.Phase = v1alpha1.SandboxPaused
+				sbx.Status.Conditions = append(sbx.Status.Conditions, metav1.Condition{
+					Type:   string(v1alpha1.SandboxConditionPaused),
+					Status: metav1.ConditionTrue,
+				})
+				sbx.Spec.Paused = true
+				state, reason := sandboxutils.GetSandboxState(sbx)
+				assert.Equal(t, v1alpha1.SandboxStatePaused, state, reason)
+			},
+			operatePause:    false,
+			expectPaused:    false,
+			expectedState:   v1alpha1.SandboxStateRunning,
+			expectError:     false,
+			initErrCode:     0,
+			withInitRuntime: true,
+		},
+		{
+			name: "resume paused / paused sandbox with init runtime 401 (ReInit success)",
+			initSandbox: func(sbx *v1alpha1.Sandbox) {
+				sbx.Status.Phase = v1alpha1.SandboxPaused
+				sbx.Status.Conditions = append(sbx.Status.Conditions, metav1.Condition{
+					Type:   string(v1alpha1.SandboxConditionPaused),
+					Status: metav1.ConditionTrue,
+				})
+				sbx.Spec.Paused = true
+				state, reason := sandboxutils.GetSandboxState(sbx)
+				assert.Equal(t, v1alpha1.SandboxStatePaused, state, reason)
+			},
+			operatePause:    false,
+			expectPaused:    false,
+			expectedState:   v1alpha1.SandboxStateRunning,
+			expectError:     false,
+			initErrCode:     401,
+			withInitRuntime: true,
+		},
+		{
+			name: "resume paused / paused sandbox with init runtime 500 error",
+			initSandbox: func(sbx *v1alpha1.Sandbox) {
+				sbx.Status.Phase = v1alpha1.SandboxPaused
+				sbx.Status.Conditions = append(sbx.Status.Conditions, metav1.Condition{
+					Type:   string(v1alpha1.SandboxConditionPaused),
+					Status: metav1.ConditionTrue,
+				})
+				sbx.Spec.Paused = true
+				state, reason := sandboxutils.GetSandboxState(sbx)
+				assert.Equal(t, v1alpha1.SandboxStatePaused, state, reason)
+			},
+			operatePause:    false,
+			expectPaused:    false,
+			expectedState:   v1alpha1.SandboxStateRunning,
+			expectError:     true,
+			initErrCode:     500,
+			withInitRuntime: true,
 		},
 		{
 			name: "resume paused / pausing sandbox",
@@ -164,6 +226,17 @@ func TestSandbox_SetPause(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			serverOpts := testutils.TestRuntimeServerOptions{
+				RunCommandResult: testutils.RunCommandResult{
+					PID:    1,
+					Exited: true,
+				},
+				RunCommandImmediately: true,
+				InitErrCode:           tt.initErrCode,
+			}
+			server := testutils.NewTestRuntimeServer(serverOpts)
+			defer server.Close()
+
 			now := time.Now()
 			sandbox := &v1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{
@@ -172,7 +245,9 @@ func TestSandbox_SetPause(t *testing.T) {
 					Labels: map[string]string{
 						v1alpha1.LabelSandboxIsClaimed: "true",
 					},
-					Annotations: map[string]string{},
+					Annotations: map[string]string{
+						v1alpha1.AnnotationRuntimeURL: server.URL,
+					},
 				},
 				Status: v1alpha1.SandboxStatus{
 					Phase: v1alpha1.SandboxRunning,
@@ -181,9 +256,25 @@ func TestSandbox_SetPause(t *testing.T) {
 					},
 				},
 			}
+
+			if tt.withInitRuntime {
+				initRuntimeOpts := config.InitRuntimeOptions{
+					EnvVars: map[string]string{
+						"TEST_VAR": "test_value",
+					},
+					AccessToken: "test-token",
+				}
+				initRuntimeJSON, err := json.Marshal(initRuntimeOpts)
+				require.NoError(t, err)
+				sandbox.Annotations[v1alpha1.AnnotationInitRuntimeRequest] = string(initRuntimeJSON)
+			}
+
 			tt.initSandbox(sandbox)
 
-			cache, _, client := NewTestCache(t, constantUtils.DefaultSandboxDeployNamespace)
+			cache, clientSet, err := NewTestCache(t)
+			require.NoError(t, err)
+			defer cache.Stop()
+			client := clientSet.SandboxClient
 			CreateSandboxWithStatus(t, client, sandbox)
 			time.Sleep(10 * time.Millisecond)
 
@@ -194,7 +285,6 @@ func TestSandbox_SetPause(t *testing.T) {
 					PauseTime:    now.Add(time.Minute),
 				},
 			}
-			var err error
 			if tt.operatePause {
 				err = s.Pause(t.Context(), opts)
 				if err == nil {
@@ -217,7 +307,9 @@ func TestSandbox_SetPause(t *testing.T) {
 						assert.NoError(t, err)
 					})
 				}
-				err = s.Resume(t.Context())
+				ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+				defer cancel()
+				err = s.Resume(ctx)
 			}
 			if tt.expectError {
 				require.Error(t, err)
@@ -280,7 +372,10 @@ func TestSandbox_ResumeConcurrent(t *testing.T) {
 	state, reason := sandboxutils.GetSandboxState(sandbox)
 	assert.Equal(t, v1alpha1.SandboxStatePaused, state, reason)
 
-	cache, _, client := NewTestCache(t, constantUtils.DefaultSandboxDeployNamespace)
+	cache, clientSet, err := NewTestCache(t)
+	require.NoError(t, err)
+	defer cache.Stop()
+	client := clientSet.SandboxClient
 	CreateSandboxWithStatus(t, client, sandbox)
 	time.Sleep(10 * time.Millisecond)
 

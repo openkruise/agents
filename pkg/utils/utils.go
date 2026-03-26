@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"os"
 	"sync"
 
 	"github.com/golang/protobuf/proto"
@@ -219,4 +220,11 @@ func DecodeBase64Proto[T proto.Message](raw string, into T) error {
 
 func GetControllerKey(obj client.Object) string {
 	return types.NamespacedName{Namespace: obj.GetNamespace(), Name: obj.GetName()}.String()
+}
+
+func GetSandboxControllerUsername() string {
+	if ns := os.Getenv("SANDBOX_CONTROLLER_USERNAME"); len(ns) > 0 {
+		return ns
+	}
+	return "system:serviceaccount:sandbox-system:sandbox-controller-manager"
 }

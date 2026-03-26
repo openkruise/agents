@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	"golang.org/x/time/rate"
 )
 
 type ClaimSandboxOptions struct {
@@ -40,6 +41,23 @@ type ClaimSandboxOptions struct {
 	SpeculateCreatingDuration time.Duration `json:"speculateCreatingDuration"`
 }
 
+type CloneSandboxOptions struct {
+	User             string                  `json:"user"`
+	CheckPointID     string                  `json:"checkPointID"`
+	WaitReadyTimeout time.Duration           `json:"waitReadyTimeout"`
+	CloneTimeout     time.Duration           `json:"cloneTimeout"`
+	CSIMount         *config.CSIMountOptions `json:"CSIMount"`
+	Modifier         func(sbx Sandbox)       `json:"-"`
+	CreateLimiter    *rate.Limiter           `json:"-"`
+}
+
+type CreateCheckpointOptions struct {
+	KeepRunning        *bool         `json:"keepRunning,omitempty"`
+	TTL                *string       `json:"TTL,omitempty"`
+	PersistentContents []string      `json:"persistentMemory"`
+	WaitSuccessTimeout time.Duration `json:"waitSuccessTimeout"`
+}
+
 type ClaimMetrics struct {
 	Retries     int
 	Total       time.Duration
@@ -72,4 +90,19 @@ func (m ClaimMetrics) String() string {
 	}
 	return fmt.Sprintf("ClaimMetrics{Retries: %d, Total: %v, Wait: %v, RetryCost: %v, PickAndLock: %v, LockType: %v, WaitReady: %v, InitRuntime: %v, CSIMount: %v, LastError: %v}",
 		m.Retries, m.Total, m.Wait, m.RetryCost, m.PickAndLock, m.LockType, m.WaitReady, m.InitRuntime, m.CSIMount, lastErrStr)
+}
+
+type CloneMetrics struct {
+	Wait          time.Duration
+	GetTemplate   time.Duration
+	CreateSandbox time.Duration
+	WaitReady     time.Duration
+	InitRuntime   time.Duration
+	CSIMount      time.Duration
+	Total         time.Duration
+}
+
+func (m CloneMetrics) String() string {
+	return fmt.Sprintf("CloneMetrics{Wait: %v, GetTemplate: %v, CreateSandbox: %v, WaitReady: %v, InitRuntime: %v, CSIMount: %v, Total: %v}",
+		m.Wait, m.GetTemplate, m.CreateSandbox, m.WaitReady, m.InitRuntime, m.CSIMount, m.Total)
 }

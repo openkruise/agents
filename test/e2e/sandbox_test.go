@@ -23,14 +23,16 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/utils"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
+
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/utils"
 )
 
 var _ = Describe("Sandbox", func() {
@@ -429,6 +431,96 @@ var _ = Describe("Sandbox", func() {
 			By("Verifying sandbox has latest revision after update")
 			Expect(sandbox.Status.UpdateRevision).NotTo(Equal(initialPod.Labels[agentsv1alpha1.PodLabelTemplateHash]))
 			Expect(sandbox.Status.UpdateRevision).NotTo(BeEmpty())
+		})
+	})
+
+	Context("pod delete protection", func() {
+		It("should deny direct pod deletion when sandbox exists", func() {
+			By("Creating a new Sandbox")
+			Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
+
+			By("Waiting for sandbox to reach Running phase")
+			Eventually(func() agentsv1alpha1.SandboxPhase {
+				_ = k8sClient.Get(ctx, types.NamespacedName{
+					Name:      sandbox.Name,
+					Namespace: sandbox.Namespace,
+				}, sandbox)
+				return sandbox.Status.Phase
+			}, time.Second*60, time.Millisecond*500).Should(Equal(agentsv1alpha1.SandboxRunning))
+
+			By("Getting the associated pod")
+			pod := &corev1.Pod{}
+			Eventually(func() error {
+				return k8sClient.Get(ctx, types.NamespacedName{
+					Name:      sandbox.Name,
+					Namespace: sandbox.Namespace,
+				}, pod)
+			}, time.Second*30, time.Millisecond*500).Should(Succeed())
+
+			By("Verifying pod has sandbox owner reference")
+			Expect(pod.Labels[utils.PodLabelCreatedBy]).To(Equal(utils.CreatedBySandbox))
+			hasSandboxOwner := false
+			for _, ownerRef := range pod.OwnerReferences {
+				if ownerRef.Kind == "Sandbox" {
+					hasSandboxOwner = true
+					break
+				}
+			}
+			Expect(hasSandboxOwner).To(BeTrue())
+
+			By("Attempting to delete pod directly - should be denied by webhook")
+			err := k8sClient.Delete(ctx, pod)
+			// The webhook should deny the deletion, so we expect an error
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("cannot delete"))
+			Expect(err.Error()).To(ContainSubstring("corresponding sandbox"))
+
+			By("Verifying pod still exists after failed deletion")
+			podAfterDelete := &corev1.Pod{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name:      sandbox.Name,
+				Namespace: sandbox.Namespace,
+			}, podAfterDelete)).To(Succeed())
+
+			By("Attempting to evict pod directly - should be denied by webhook")
+			eviction := &policyv1.Eviction{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sandbox.Name,
+					Namespace: sandbox.Namespace,
+				},
+			}
+			evictionErr := clientset.CoreV1().Pods(sandbox.Namespace).EvictV1(ctx, eviction)
+			Expect(evictionErr).To(HaveOccurred())
+			Expect(evictionErr.Error()).To(ContainSubstring("cannot delete/evict"))
+			Expect(evictionErr.Error()).To(ContainSubstring("corresponding sandbox exists"))
+
+			By("Verifying pod still exists after failed eviction")
+			podAfterEviction := &corev1.Pod{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name:      sandbox.Name,
+				Namespace: sandbox.Namespace,
+			}, podAfterEviction)).To(Succeed())
+
+			By("Deleting sandbox should succeed and cascade delete pod")
+			Expect(k8sClient.Delete(ctx, sandbox)).To(Succeed())
+
+			By("Verifying sandbox and pod are both deleted")
+			Eventually(func() bool {
+				err := k8sClient.Get(ctx, types.NamespacedName{
+					Name:      sandbox.Name,
+					Namespace: sandbox.Namespace,
+				}, &agentsv1alpha1.Sandbox{})
+				return err != nil
+			}, time.Second*60, time.Millisecond*500).Should(BeTrue())
+
+			By("Verifying pod is also deleted after sandbox deletion")
+			Eventually(func() bool {
+				err := k8sClient.Get(ctx, types.NamespacedName{
+					Name:      sandbox.Name,
+					Namespace: sandbox.Namespace,
+				}, &corev1.Pod{})
+				return err != nil
+			}, time.Second*30, time.Millisecond*500).Should(BeTrue())
 		})
 	})
 

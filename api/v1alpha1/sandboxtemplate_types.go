@@ -35,6 +35,9 @@ type SandboxTemplateSpec struct {
 	// +kubebuilder:validation:Schemaless
 	// +optional
 	VolumeClaimTemplates []v1.PersistentVolumeClaim `json:"volumeClaimTemplates,omitempty"`
+
+	// PersistentContents indicates resume pod with persistent content, Enum: ip, memory, filesystem
+	PersistentContents []string `json:"persistentContents,omitempty"`
 }
 
 // +genclient
@@ -60,4 +63,10 @@ type SandboxTemplateList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []SandboxTemplate `json:"items"`
+}
+
+var SandboxTemplateControllerKind = GroupVersion.WithKind("SandboxTemplate")
+
+func init() {
+	SchemeBuilder.Register(&SandboxTemplate{}, &SandboxTemplateList{})
 }

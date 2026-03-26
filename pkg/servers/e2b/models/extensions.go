@@ -3,16 +3,16 @@ package models
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/distribution/reference"
+	"k8s.io/utils/ptr"
 
 	"github.com/openkruise/agents/api/v1alpha1"
 )
 
-// Extension keys are annotations used by sandbox-manager only.
-// Since they are all delivered through the E2B interface, they uniformly use the e2b.agents.kruise.io prefix
-//
 //goland:noinspection GoSnakeCaseUsage
 const (
 	ExtensionKeyClaimTimeout                  = v1alpha1.E2BPrefix + "claim-timeout-seconds"
@@ -27,6 +27,14 @@ const (
 	ExtensionKeyReserveFailedSandbox          = v1alpha1.E2BPrefix + "reserve-failed-sandbox"
 	ExtensionKeyCreateOnNoStock               = v1alpha1.E2BPrefix + "create-on-no-stock"
 	ExtensionKeyNeverTimeout                  = v1alpha1.E2BPrefix + "never-timeout"
+)
+
+const (
+	ExtensionHeaderPrefix                     = "x-e2b-kruise-"
+	ExtensionHeaderSnapshotKeepRunning        = ExtensionHeaderPrefix + "snapshot-keep-running"
+	ExtensionHeaderSnapshotTTL                = ExtensionHeaderPrefix + "snapshot-ttl"
+	ExtensionHeaderSnapshotPersistentContents = ExtensionHeaderPrefix + "snapshot-persistent-contents"
+	ExtensionHeaderWaitSuccessSeconds         = ExtensionHeaderPrefix + "snapshot-wait-success-seconds"
 )
 
 // Extensions for NewSandboxRequest
@@ -167,4 +175,41 @@ func (r *NewSandboxRequest) parseAndRemoveIntExtension(key string) (int, error) 
 		}
 	}
 	return 0, nil
+}
+
+func (s *NewSnapshotRequest) ParseExtensions(headers http.Header) error {
+	// KeepRunning
+	switch headers.Get(ExtensionHeaderSnapshotKeepRunning) {
+	case v1alpha1.True:
+		s.Extensions.KeepRunning = ptr.To(true)
+	case v1alpha1.False:
+		s.Extensions.KeepRunning = ptr.To(false)
+	}
+	// TTL
+	if ttl := headers.Get(ExtensionHeaderSnapshotTTL); ttl != "" {
+		if _, err := time.ParseDuration(ttl); err != nil {
+			return fmt.Errorf("invalid TTL format %q: %w", ttl, err)
+		}
+		s.Extensions.TTL = ptr.To(ttl)
+	}
+	// PersistentContents
+	if persistentContents := headers.Get(ExtensionHeaderSnapshotPersistentContents); persistentContents != "" {
+		contents, err := parseAndValidatePersistentContents(persistentContents)
+		if err != nil {
+			return err
+		}
+		s.Extensions.PersistentContents = contents
+	}
+	// WaitSuccessSeconds
+	if waitSuccessSeconds := headers.Get(ExtensionHeaderWaitSuccessSeconds); waitSuccessSeconds != "" {
+		seconds, err := strconv.Atoi(waitSuccessSeconds)
+		if err != nil {
+			return fmt.Errorf("invalid WaitSuccessSeconds format %q: %w", waitSuccessSeconds, err)
+		}
+		if seconds < 0 {
+			return fmt.Errorf("WaitSuccessSeconds %s cannot be negative", waitSuccessSeconds)
+		}
+		s.Extensions.WaitSuccessSeconds = seconds
+	}
+	return nil
 }

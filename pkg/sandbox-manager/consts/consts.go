@@ -6,7 +6,8 @@ const (
 	OwnerManagerScaleDown = "__manager_scale_down"
 
 	DefaultPoolingCandidateCounts = 100
-	DefaultWaitReadyTimeout       = 30 * time.Second
+	DefaultWaitReadyTimeout       = 60 * time.Second
+	DefaultWaitCheckpointTimeout  = 60 * time.Second
 	DefaultClaimWorkers           = 500
 	DefaultCreateQPS              = 49
 )

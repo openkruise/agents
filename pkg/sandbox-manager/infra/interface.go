@@ -33,11 +33,13 @@ type Infrastructure interface {
 	Run(ctx context.Context) error // Starts the infrastructure
 	Stop()                         // Stops the infrastructure
 	HasTemplate(name string) bool
+	HasCheckpoint(name string) bool
 	GetCache() CacheProvider // Get the CacheProvider for the infra
 	LoadDebugInfo() map[string]any
 	SelectSandboxes(user string, limit int, filter func(sandbox Sandbox) bool) ([]Sandbox, error) // Select Sandboxes based on the options provided
 	GetClaimedSandbox(ctx context.Context, sandboxID string) (Sandbox, error)                     // Get a Sandbox interface by its ID
 	ClaimSandbox(ctx context.Context, opts ClaimSandboxOptions) (Sandbox, ClaimMetrics, error)
+	CloneSandbox(ctx context.Context, opts CloneSandboxOptions) (Sandbox, CloneMetrics, error)
 }
 
 type Sandbox interface {
@@ -61,7 +63,9 @@ type Sandbox interface {
 	CSIMount(ctx context.Context, driver string, request string) error                                  // request is string config for csi.NodePublishVolumeRequest
 	GetRuntimeURL() string
 	GetAccessToken() string
+	CreateCheckpoint(ctx context.Context, opts CreateCheckpointOptions) (string, error)
 }
+
 type CacheProvider interface {
 	GetPersistentVolume(name string) (*corev1.PersistentVolume, error)
 	GetSecret(namespace, name string) (*corev1.Secret, error)

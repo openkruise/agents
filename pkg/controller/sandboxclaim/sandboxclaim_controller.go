@@ -22,15 +22,14 @@ import (
 	"flag"
 	"fmt"
 	"reflect"
-	"time"
 
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
+	managerconfig "github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/utils/webhookutils"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -45,8 +44,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	sandboxclient "github.com/openkruise/agents/client/clientset/versioned"
-	informers "github.com/openkruise/agents/client/informers/externalversions"
 	"github.com/openkruise/agents/pkg/controller/sandboxclaim/core"
 	"github.com/openkruise/agents/pkg/discovery"
 	"github.com/openkruise/agents/pkg/features"
@@ -54,7 +51,6 @@ import (
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
-	k8sinformers "k8s.io/client-go/informers"
 )
 
 func init() {
@@ -73,31 +69,14 @@ func Add(mgr manager.Manager) error {
 		return nil
 	}
 
-	config := mgr.GetConfig()
-
-	// Create typed clients
-	sandboxClientset, err := sandboxclient.NewForConfig(config)
+	clientSet, err := clients.NewClientSetWithConfig(mgr.GetConfig())
 	if err != nil {
-		return fmt.Errorf("failed to create sandbox clientset: %w", err)
+		return fmt.Errorf("failed to create manager client set: %w", err)
 	}
-
-	k8sClientset, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		return fmt.Errorf("failed to create kubernetes clientset: %w", err)
-	}
-
-	// Create informers for cache
-	informerFactory := informers.NewSharedInformerFactory(sandboxClientset, time.Minute*10)
-	sandboxInformer := informerFactory.Api().V1alpha1().Sandboxes().Informer()
-	sandboxSetInformer := informerFactory.Api().V1alpha1().SandboxSets().Informer()
-
-	coreInformerFactory := k8sinformers.NewSharedInformerFactory(k8sClientset, time.Minute*10)
-	persistentVolumeInformer := coreInformerFactory.Core().V1().PersistentVolumes().Informer()
-	coreInformerFactorySpecifiedNs := k8sinformers.NewSharedInformerFactoryWithOptions(k8sClientset, time.Minute*10, k8sinformers.WithNamespace(webhookutils.GetNamespace()))
-	secretInformer := coreInformerFactorySpecifiedNs.Core().V1().Secrets().Informer()
-
 	// Initialize cache
-	cache, err := sandboxcr.NewCache(informerFactory, sandboxInformer, sandboxSetInformer, coreInformerFactorySpecifiedNs, secretInformer, coreInformerFactory, persistentVolumeInformer)
+	cache, err := sandboxcr.NewCache(clientSet, managerconfig.SandboxManagerOptions{
+		SystemNamespace: webhookutils.GetNamespace(),
+	})
 	if err != nil {
 		return fmt.Errorf("failed to create cache: %w", err)
 	}
@@ -121,11 +100,7 @@ func Add(mgr manager.Manager) error {
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
 		recorder: recorder,
-		controls: core.NewClaimControl(mgr.GetClient(), recorder, &clients.ClientSet{
-			K8sClient:     k8sClientset,
-			SandboxClient: sandboxClientset,
-			Config:        config,
-		}, cache),
+		controls: core.NewClaimControl(mgr.GetClient(), recorder, clientSet, cache),
 	}).SetupWithManager(mgr)
 	if err != nil {
 		return err

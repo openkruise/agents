@@ -1,10 +1,12 @@
 package models
 
 import (
+	"net/http"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"k8s.io/utils/ptr"
 )
 
 func TestParseExtensions(t *testing.T) {
@@ -900,6 +902,213 @@ func TestParseExtensionsForSingleCSIMount(t *testing.T) {
 				_, exists = req.Metadata[ExtensionKeyClaimWithCSIMount_SubPath]
 				assert.False(t, exists, "SubPath should be deleted from metadata after parsing")
 			}
+		})
+	}
+}
+
+func TestNewSnapshotRequest_ParseExtensions(t *testing.T) {
+	tests := []struct {
+		name                     string
+		headers                  map[string]string
+		wantErr                  bool
+		errContains              string
+		expectKeepRunning        *bool
+		expectTTL                *string
+		expectPersistentContents []string
+		expectWaitSuccessSeconds int
+	}{
+		// KeepRunning cases
+		{
+			name: "KeepRunning header set to true",
+			headers: map[string]string{
+				ExtensionHeaderSnapshotKeepRunning: "true",
+			},
+			expectKeepRunning: ptr.To(true),
+		},
+		{
+			name: "KeepRunning header set to false",
+			headers: map[string]string{
+				ExtensionHeaderSnapshotKeepRunning: "false",
+			},
+			expectKeepRunning: ptr.To(false),
+		},
+		{
+			name:              "KeepRunning header not set",
+			headers:           map[string]string{},
+			expectKeepRunning: nil,
+		},
+		{
+			name: "KeepRunning header set to invalid value",
+			headers: map[string]string{
+				ExtensionHeaderSnapshotKeepRunning: "invalid",
+			},
+			expectKeepRunning: nil,
+		},
+
+		// TTL cases
+		{
+			name:      "TTL header not set",
+			headers:   map[string]string{},
+			expectTTL: nil,
+		},
+		{
+			name: "TTL header with valid duration 30m",
+			headers: map[string]string{
+				ExtensionHeaderSnapshotTTL: "30m",
+			},
+			expectTTL: ptr.To("30m"),
+		},
+		{
+			name: "TTL header with valid duration 1h",
+			headers: map[string]string{
+				ExtensionHeaderSnapshotTTL: "1h",
+			},
+			expectTTL: ptr.To("1h"),
+		},
+		{
+			name: "TTL header with invalid format",
+			headers: map[string]string{
+				ExtensionHeaderSnapshotTTL: "invalid",
+			},
+			wantErr:     true,
+			errContains: "invalid TTL format",
+		},
+
+		// PersistentContents cases
+		{
+			name:                     "PersistentContents header not set",
+			headers:                  map[string]string{},
+			expectPersistentContents: nil,
+		},
+		{
+			name: "PersistentContents header with valid value memory",
+			headers: map[string]string{
+				ExtensionHeaderSnapshotPersistentContents: "memory",
+			},
+			expectPersistentContents: []string{"memory"},
+		},
+		{
+			name: "PersistentContents header with valid value filesystem",
+			headers: map[string]string{
+				ExtensionHeaderSnapshotPersistentContents: "filesystem",
+			},
+			expectPersistentContents: []string{"filesystem"},
+		},
+		{
+			name: "PersistentContents header with invalid value",
+			headers: map[string]string{
+				ExtensionHeaderSnapshotPersistentContents: "invalid",
+			},
+			wantErr:     true,
+			errContains: "invalid persistent content",
+		},
+
+		// WaitSuccessSeconds cases
+		{
+			name:                     "WaitSuccessSeconds header not set",
+			headers:                  map[string]string{},
+			expectWaitSuccessSeconds: 0,
+		},
+		{
+			name: "WaitSuccessSeconds header with valid positive integer",
+			headers: map[string]string{
+				ExtensionHeaderWaitSuccessSeconds: "30",
+			},
+			expectWaitSuccessSeconds: 30,
+		},
+		{
+			name: "WaitSuccessSeconds header with zero",
+			headers: map[string]string{
+				ExtensionHeaderWaitSuccessSeconds: "0",
+			},
+			expectWaitSuccessSeconds: 0,
+		},
+		{
+			name: "WaitSuccessSeconds header with invalid format",
+			headers: map[string]string{
+				ExtensionHeaderWaitSuccessSeconds: "abc",
+			},
+			wantErr:     true,
+			errContains: "invalid WaitSuccessSeconds format",
+		},
+		{
+			name: "WaitSuccessSeconds header with negative value",
+			headers: map[string]string{
+				ExtensionHeaderWaitSuccessSeconds: "-1",
+			},
+			wantErr:     true,
+			errContains: "cannot be negative",
+		},
+
+		// Combined scenarios
+		{
+			name: "all headers set with valid values",
+			headers: map[string]string{
+				ExtensionHeaderSnapshotKeepRunning:        "true",
+				ExtensionHeaderSnapshotTTL:                "2h",
+				ExtensionHeaderSnapshotPersistentContents: "memory",
+				ExtensionHeaderWaitSuccessSeconds:         "60",
+			},
+			expectKeepRunning:        ptr.To(true),
+			expectTTL:                ptr.To("2h"),
+			expectPersistentContents: []string{"memory"},
+			expectWaitSuccessSeconds: 60,
+		},
+		{
+			name:                     "no headers set - all defaults",
+			headers:                  map[string]string{},
+			expectKeepRunning:        nil,
+			expectTTL:                nil,
+			expectPersistentContents: nil,
+			expectWaitSuccessSeconds: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := &NewSnapshotRequest{}
+			headers := http.Header{}
+			for key, value := range tt.headers {
+				headers.Set(key, value)
+			}
+
+			err := req.ParseExtensions(headers)
+
+			if tt.wantErr {
+				require.Error(t, err)
+				if tt.errContains != "" {
+					assert.Contains(t, err.Error(), tt.errContains)
+				}
+				return
+			}
+
+			require.NoError(t, err)
+
+			// Verify KeepRunning
+			if tt.expectKeepRunning == nil {
+				assert.Nil(t, req.Extensions.KeepRunning)
+			} else {
+				require.NotNil(t, req.Extensions.KeepRunning)
+				assert.Equal(t, *tt.expectKeepRunning, *req.Extensions.KeepRunning)
+			}
+
+			// Verify TTL
+			if tt.expectTTL == nil {
+				assert.Nil(t, req.Extensions.TTL)
+			} else {
+				require.NotNil(t, req.Extensions.TTL)
+				assert.Equal(t, *tt.expectTTL, *req.Extensions.TTL)
+			}
+
+			// Verify PersistentContents
+			if tt.expectPersistentContents == nil {
+				assert.Nil(t, req.Extensions.PersistentContents)
+			} else {
+				assert.ElementsMatch(t, tt.expectPersistentContents, req.Extensions.PersistentContents)
+			}
+
+			// Verify WaitSuccessSeconds
+			assert.Equal(t, tt.expectWaitSuccessSeconds, req.Extensions.WaitSuccessSeconds)
 		})
 	}
 }

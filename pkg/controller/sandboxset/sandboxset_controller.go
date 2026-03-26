@@ -108,6 +108,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		if apierrors.IsNotFound(err) {
 			scaleUpExpectation.DeleteExpectations(req.String())
 			scaleDownExpectation.DeleteExpectations(req.String())
+			// Remove metrics when sandboxset is deleted
+			SandboxSetReplicas.DeleteLabelValues(req.Namespace, req.Name)
+			SandboxSetAvailableReplicas.DeleteLabelValues(req.Namespace, req.Name)
+			SandboxSetDesiredReplicas.DeleteLabelValues(req.Namespace, req.Name)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
@@ -337,6 +341,10 @@ func (r *Reconciler) updateSandboxSetStatus(ctx context.Context, newStatus agent
 	err := r.Status().Update(ctx, clone)
 	if err == nil {
 		log.Info("update sandboxset status success", "status", utils.DumpJson(newStatus))
+		// Update metrics for availableReplicas and replicas
+		SandboxSetReplicas.WithLabelValues(sbs.Namespace, sbs.Name).Set(float64(newStatus.Replicas))
+		SandboxSetAvailableReplicas.WithLabelValues(sbs.Namespace, sbs.Name).Set(float64(newStatus.AvailableReplicas))
+		SandboxSetDesiredReplicas.WithLabelValues(sbs.Namespace, sbs.Name).Set(float64(sbs.Spec.Replicas))
 	} else {
 		log.Error(err, "update sandboxset status failed")
 	}
