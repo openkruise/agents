@@ -5,9 +5,10 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog/v2"
+
+	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"

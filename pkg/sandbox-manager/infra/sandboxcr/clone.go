@@ -231,7 +231,7 @@ func newSandboxFromTemplate(opts infra.CloneSandboxOptions, tmpl *v1alpha1.Sandb
 				VolumeClaimTemplates: tmpl.Spec.VolumeClaimTemplates,
 			},
 		},
-	}, cache, client.SandboxClient)
+	}, cache, client)
 	if opts.Modifier != nil {
 		opts.Modifier(sbx)
 	}

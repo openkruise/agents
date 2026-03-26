@@ -7,15 +7,16 @@ import (
 	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
-	testutils "github.com/openkruise/agents/test/utils"
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 
+	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
+	testutils "github.com/openkruise/agents/test/utils"
+
 	"github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/client/clientset/versioned/fake"
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/utils"
@@ -233,7 +234,7 @@ func TestSandbox_InplaceRefresh(t *testing.T) {
 	assert.NoError(t, err)
 	time.Sleep(10 * time.Millisecond)
 
-	s := AsSandbox(initialSandbox, cache, client)
+	s := AsSandbox(initialSandbox, cache, clientSet)
 
 	assert.Equal(t, "value", s.Sandbox.Labels["initial"])
 	assert.Empty(t, s.Sandbox.Labels["updated"])
@@ -283,7 +284,7 @@ func TestSandbox_Kill(t *testing.T) {
 				sandbox.DeletionTimestamp = &now
 			}
 
-			client := fake.NewSimpleClientset()
+			client := clients.NewFakeClientSet(t)
 			_, err := client.ApiV1alpha1().Sandboxes("default").Create(context.Background(), sandbox, metav1.CreateOptions{})
 			assert.NoError(t, err)
 
@@ -399,7 +400,7 @@ func TestSandbox_SaveTimeout(t *testing.T) {
 			assert.NoError(t, err)
 			time.Sleep(20 * time.Millisecond)
 
-			s := AsSandbox(sandbox, cache, client)
+			s := AsSandbox(sandbox, cache, clientSet)
 
 			err = s.SaveTimeout(t.Context(), tt.opts)
 			assert.NoError(t, err)
@@ -671,7 +672,6 @@ func TestSandbox_CSIMount(t *testing.T) {
 			cache, clientSet, err := NewTestCache(t)
 			assert.NoError(t, err)
 			defer cache.Stop()
-			client := clientSet.SandboxClient
 			sbx := &v1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "test-sandbox",
@@ -681,7 +681,7 @@ func TestSandbox_CSIMount(t *testing.T) {
 					},
 				},
 			}
-			sandbox := AsSandbox(sbx, cache, client)
+			sandbox := AsSandbox(sbx, cache, clientSet)
 			request, err := utils.EncodeBase64Proto(tt.req)
 			assert.NoError(t, err)
 			err = sandbox.CSIMount(t.Context(), tt.driver, request)
