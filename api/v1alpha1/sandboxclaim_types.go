@@ -74,6 +74,10 @@ type SandboxClaimSpec struct {
 	// +optional
 	InplaceUpdate *SandboxClaimInplaceUpdateOptions `json:"inplaceUpdate,omitempty"`
 
+	// DynamicVolumesMount specifies the dynamic volumes to be mounted into the sandbox
+	// +optional
+	DynamicVolumesMount []CSIMountConfig `json:"dynamicVolumesMount"`
+
 	// Set ReserveFailedSandbox to true to reserve failed sandboxes
 	// +optional
 	ReserveFailedSandbox bool `json:"reserveFailedSandbox,omitempty"`

@@ -1,6 +1,10 @@
 // Package models provides data models for the E2B sandbox API.
 package models
 
+import (
+	"github.com/openkruise/agents/api/v1alpha1"
+)
+
 const (
 	SandboxStateRunning = "running"
 	SandboxStatePaused  = "paused"
@@ -52,7 +56,7 @@ type InplaceUpdateExtension struct {
 }
 
 type CSIMountExtension struct {
-	MountConfigs []CSIMountConfig `json:"mountConfigs"` // list of CSI mount configurations
+	MountConfigs []v1alpha1.CSIMountConfig `json:"mountConfigs"` // list of CSI mount configurations
 }
 
 // SandboxMetadata represents metadata for a sandbox

@@ -107,7 +107,7 @@ func (r *NewSandboxRequest) parseExtensionForMultiCSIMount() error {
 		return nil
 	}
 
-	var multiCsiMountConfig []CSIMountConfig
+	var multiCsiMountConfig []v1alpha1.CSIMountConfig
 	if err := json.Unmarshal([]byte(multiCsiMountConfigRaw), &multiCsiMountConfig); err != nil {
 		return fmt.Errorf("invalid multiCsiMountConfig [%s]: %s", ExtensionKeyClaimWithCSIMount_MountConfig, multiCsiMountConfigRaw)
 	}
@@ -150,9 +150,9 @@ func (r *NewSandboxRequest) parseExtensionsForSingleCSIMount() error {
 	}
 
 	r.Extensions.CSIMount = CSIMountExtension{
-		MountConfigs: make([]CSIMountConfig, 0, 1),
+		MountConfigs: make([]v1alpha1.CSIMountConfig, 0, 1),
 	}
-	r.Extensions.CSIMount.MountConfigs = append(r.Extensions.CSIMount.MountConfigs, CSIMountConfig{
+	r.Extensions.CSIMount.MountConfigs = append(r.Extensions.CSIMount.MountConfigs, v1alpha1.CSIMountConfig{
 		PvName:    persistentVolumeName,
 		MountPath: containerMountPoint,
 		SubPath:   subpath,

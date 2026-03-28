@@ -76,6 +76,26 @@ spec:
                 description: CreateOnNoStock allows to create new sandbox if no stock
                   available
                 type: boolean
+              dynamicVolumesMount:
+                description: DynamicVolumesMount specifies the dynamic volumes to
+                  be mounted into the sandbox
+                items:
+                  properties:
+                    mountID:
+                      type: string
+                    mountPath:
+                      type: string
+                    pvName:
+                      type: string
+                    readOnly:
+                      type: boolean
+                    subPath:
+                      type: string
+                  required:
+                  - mountPath
+                  - pvName
+                  type: object
+                type: array
               envVars:
                 additionalProperties:
                   type: string

@@ -1,4 +1,4 @@
-package models
+package v1alpha1
 
 type CSIMountConfig struct {
 	MountID   string `json:"mountID,omitempty"`  // mount id

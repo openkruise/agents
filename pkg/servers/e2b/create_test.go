@@ -8,6 +8,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"github.com/openkruise/agents/api/v1alpha1"
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
@@ -28,7 +29,7 @@ func TestCsiMountOptionsConfigRecord(t *testing.T) {
 			request: models.NewSandboxRequest{
 				Extensions: models.NewSandboxRequestExtension{
 					CSIMount: models.CSIMountExtension{
-						MountConfigs: []models.CSIMountConfig{},
+						MountConfigs: []v1alpha1.CSIMountConfig{},
 					},
 				},
 			},
@@ -39,7 +40,7 @@ func TestCsiMountOptionsConfigRecord(t *testing.T) {
 			request: models.NewSandboxRequest{
 				Extensions: models.NewSandboxRequestExtension{
 					CSIMount: models.CSIMountExtension{
-						MountConfigs: []models.CSIMountConfig{
+						MountConfigs: []v1alpha1.CSIMountConfig{
 							{
 								MountID:   "mount-123",
 								PvName:    "pv-nas-001",
@@ -64,7 +65,7 @@ func TestCsiMountOptionsConfigRecord(t *testing.T) {
 			request: models.NewSandboxRequest{
 				Extensions: models.NewSandboxRequestExtension{
 					CSIMount: models.CSIMountExtension{
-						MountConfigs: []models.CSIMountConfig{
+						MountConfigs: []v1alpha1.CSIMountConfig{
 							{
 								PvName:    "pv-nas-001",
 								MountPath: "/data",
@@ -88,7 +89,7 @@ func TestCsiMountOptionsConfigRecord(t *testing.T) {
 			request: models.NewSandboxRequest{
 				Extensions: models.NewSandboxRequestExtension{
 					CSIMount: models.CSIMountExtension{
-						MountConfigs: []models.CSIMountConfig{
+						MountConfigs: []v1alpha1.CSIMountConfig{
 							{
 								PvName:    "pv-test",
 								MountPath: "/workspace",
@@ -145,7 +146,7 @@ func TestCsiMountOptionsConfigRecord(t *testing.T) {
 			}
 
 			// Verify the annotation value (parse JSON for comparison to avoid ordering issues)
-			var expectedConfigs, actualConfigs []models.CSIMountConfig
+			var expectedConfigs, actualConfigs []v1alpha1.CSIMountConfig
 			if err := json.Unmarshal([]byte(tt.expectedAnnotationVal), &expectedConfigs); err != nil {
 				t.Fatalf("failed to unmarshal expected value: %v", err)
 			}

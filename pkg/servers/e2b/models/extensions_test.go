@@ -7,6 +7,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/utils/ptr"
+
+	"github.com/openkruise/agents/api/v1alpha1"
 )
 
 func TestParseExtensions(t *testing.T) {
@@ -97,7 +99,7 @@ func TestParseExtensions(t *testing.T) {
 			expectExtension: NewSandboxRequestExtension{
 				CreateOnNoStock: true,
 				CSIMount: CSIMountExtension{
-					MountConfigs: []CSIMountConfig{
+					MountConfigs: []v1alpha1.CSIMountConfig{
 						{
 							PvName:    "test-volume",
 							MountPath: "/valid/path",
@@ -145,7 +147,7 @@ func TestParseExtensions(t *testing.T) {
 			expectExtension: NewSandboxRequestExtension{
 				CreateOnNoStock: true,
 				CSIMount: CSIMountExtension{
-					MountConfigs: []CSIMountConfig{
+					MountConfigs: []v1alpha1.CSIMountConfig{
 						{
 							PvName:    "test-volume",
 							MountPath: "/valid/path",
@@ -166,7 +168,7 @@ func TestParseExtensions(t *testing.T) {
 			expectExtension: NewSandboxRequestExtension{
 				CreateOnNoStock: true,
 				CSIMount: CSIMountExtension{
-					MountConfigs: []CSIMountConfig{
+					MountConfigs: []v1alpha1.CSIMountConfig{
 						{
 							PvName:    "test-volume",
 							MountPath: "/valid/path",
@@ -187,7 +189,7 @@ func TestParseExtensions(t *testing.T) {
 			expectExtension: NewSandboxRequestExtension{
 				CreateOnNoStock: true,
 				CSIMount: CSIMountExtension{
-					MountConfigs: []CSIMountConfig{
+					MountConfigs: []v1alpha1.CSIMountConfig{
 						{
 							PvName:    "test-volume",
 							MountPath: "/valid/path",
@@ -479,7 +481,7 @@ func TestParseExtensionForMultiCSIMount(t *testing.T) {
 		expectError        bool
 		expectedErrorSub   string
 		expectedMountCount int
-		expectedMounts     []CSIMountConfig
+		expectedMounts     []v1alpha1.CSIMountConfig
 	}{
 		{
 			name:               "no multi csi mount config",
@@ -494,7 +496,7 @@ func TestParseExtensionForMultiCSIMount(t *testing.T) {
 			},
 			expectError:        false,
 			expectedMountCount: 1,
-			expectedMounts: []CSIMountConfig{
+			expectedMounts: []v1alpha1.CSIMountConfig{
 				{
 					PvName:    "vol1",
 					MountPath: "/data",
@@ -509,7 +511,7 @@ func TestParseExtensionForMultiCSIMount(t *testing.T) {
 			},
 			expectError:        false,
 			expectedMountCount: 2,
-			expectedMounts: []CSIMountConfig{
+			expectedMounts: []v1alpha1.CSIMountConfig{
 				{
 					PvName:    "vol1",
 					MountPath: "/data",
@@ -529,7 +531,7 @@ func TestParseExtensionForMultiCSIMount(t *testing.T) {
 			},
 			expectError:        false,
 			expectedMountCount: 1,
-			expectedMounts: []CSIMountConfig{
+			expectedMounts: []v1alpha1.CSIMountConfig{
 				{
 					MountID:   "mount-123",
 					PvName:    "vol1",
@@ -544,7 +546,7 @@ func TestParseExtensionForMultiCSIMount(t *testing.T) {
 			},
 			expectError:        false,
 			expectedMountCount: 1,
-			expectedMounts: []CSIMountConfig{
+			expectedMounts: []v1alpha1.CSIMountConfig{
 				{
 					PvName:    "vol1",
 					MountPath: "/data",
@@ -559,7 +561,7 @@ func TestParseExtensionForMultiCSIMount(t *testing.T) {
 			},
 			expectError:        false,
 			expectedMountCount: 1,
-			expectedMounts: []CSIMountConfig{
+			expectedMounts: []v1alpha1.CSIMountConfig{
 				{
 					PvName:    "vol1",
 					MountPath: "/data",
@@ -574,7 +576,7 @@ func TestParseExtensionForMultiCSIMount(t *testing.T) {
 			},
 			expectError:        false,
 			expectedMountCount: 2,
-			expectedMounts: []CSIMountConfig{
+			expectedMounts: []v1alpha1.CSIMountConfig{
 				{
 					PvName:    "vol1",
 					MountPath: "/data",
@@ -594,7 +596,7 @@ func TestParseExtensionForMultiCSIMount(t *testing.T) {
 			},
 			expectError:        false,
 			expectedMountCount: 1,
-			expectedMounts: []CSIMountConfig{
+			expectedMounts: []v1alpha1.CSIMountConfig{
 				{
 					PvName:    "vol1",
 					MountPath: "/data",
@@ -610,7 +612,7 @@ func TestParseExtensionForMultiCSIMount(t *testing.T) {
 			},
 			expectError:        false,
 			expectedMountCount: 1,
-			expectedMounts: []CSIMountConfig{
+			expectedMounts: []v1alpha1.CSIMountConfig{
 				{
 					MountID:   "mount-456",
 					PvName:    "vol1",
@@ -675,7 +677,7 @@ func TestParseExtensionForMultiCSIMount(t *testing.T) {
 			},
 			expectError:        false,
 			expectedMountCount: 1,
-			expectedMounts: []CSIMountConfig{
+			expectedMounts: []v1alpha1.CSIMountConfig{
 				{
 					PvName:    "vol1",
 					MountPath: "/data",
@@ -690,7 +692,7 @@ func TestParseExtensionForMultiCSIMount(t *testing.T) {
 			},
 			expectError:        false,
 			expectedMountCount: 2,
-			expectedMounts: []CSIMountConfig{
+			expectedMounts: []v1alpha1.CSIMountConfig{
 				{
 					PvName:    "vol1",
 					MountPath: "/var/lib/data",
