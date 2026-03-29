@@ -6,10 +6,11 @@ import (
 	"testing"
 	"time"
 
-	testutils "github.com/openkruise/agents/test/utils"
 	"github.com/stretchr/testify/assert"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
+
+	testutils "github.com/openkruise/agents/test/utils"
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
@@ -95,7 +96,6 @@ func TestSandbox_runCommandWithEnvd(t *testing.T) {
 			cache, clientSet, err := NewTestCache(t)
 			assert.NoError(t, err)
 			defer cache.Stop()
-			client := clientSet.SandboxClient
 			sbx := &v1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "test-sandbox",
@@ -105,7 +105,7 @@ func TestSandbox_runCommandWithEnvd(t *testing.T) {
 					},
 				},
 			}
-			sandbox := AsSandbox(sbx, cache, client)
+			sandbox := AsSandbox(sbx, cache, clientSet)
 			result, err := sandbox.runCommandWithRuntime(context.Background(), &process.ProcessConfig{}, tt.timeout)
 
 			if tt.expectError != "" {

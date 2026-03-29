@@ -7,17 +7,18 @@ import (
 	"sync"
 	"time"
 
-	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
-	"github.com/openkruise/agents/pkg/sandbox-manager/config"
-	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
-	"github.com/openkruise/agents/pkg/utils"
-	"github.com/openkruise/agents/pkg/utils/sandbox-manager/proxyutils"
 	"golang.org/x/time/rate"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	k8scache "k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
+
+	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
+	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
+	"github.com/openkruise/agents/pkg/utils"
+	"github.com/openkruise/agents/pkg/utils/sandbox-manager/proxyutils"
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/proxy"
@@ -184,7 +185,7 @@ func (i *Infra) SelectSandboxes(user string, limit int, filter func(sandbox infr
 		if !managerutils.ResourceVersionExpectationSatisfied(obj) {
 			continue
 		}
-		sbx := AsSandbox(obj, i.Cache, i.Client.SandboxClient)
+		sbx := AsSandbox(obj, i.Cache, i.Client)
 		if filter == nil || filter(sbx) {
 			sandboxes = append(sandboxes, sbx)
 		}
@@ -215,7 +216,7 @@ func (i *Infra) GetClaimedSandbox(ctx context.Context, sandboxID string) (infra.
 			return nil, err
 		}
 	}
-	return AsSandbox(sandbox, i.Cache, i.Client.SandboxClient), nil
+	return AsSandbox(sandbox, i.Cache, i.Client), nil
 }
 
 func (i *Infra) onSandboxAdd(obj any) {

@@ -16,6 +16,8 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
+	"github.com/openkruise/agents/pkg/utils"
+	csimountutils "github.com/openkruise/agents/pkg/utils/csiutils"
 )
 
 // CreateSandbox allocates a Pod as a new sandbox
@@ -60,6 +62,7 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 		ClaimTimeout: time.Duration(request.Extensions.TimeoutSeconds) * time.Second,
 		Modifier: func(sbx infra.Sandbox) {
 			sc.basicSandboxCreateModifier(ctx, sbx, request)
+			// record the basic csi mount persistent volume config to sandbox
 			sc.csiMountOptionsConfigRecord(ctx, sbx, request)
 		},
 		ReserveFailedSandbox: request.Extensions.ReserveFailedSandbox,
@@ -85,8 +88,9 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 
 	if len(request.Extensions.CSIMount.MountConfigs) != 0 {
 		csiMountOptions := make([]config.MountConfig, 0, len(request.Extensions.CSIMount.MountConfigs))
-		for _, mountConfig := range request.Extensions.CSIMount.MountConfigs {
-			driverName, csiReqConfigRaw, err := sc.csiMountOptionsConfig(ctx, mountConfig.MountPath, mountConfig.PvName, mountConfig.SubPath, mountConfig.ReadOnly)
+		csiClient := csimountutils.NewCSIMountHandler(sc.client, sc.cache, sc.storageRegistry, utils.DefaultSandboxDeployNamespace)
+		for _, mountConfigRequest := range request.Extensions.CSIMount.MountConfigs {
+			driverName, csiReqConfigRaw, err := csiClient.CSIMountOptionsConfig(ctx, mountConfigRequest)
 			if err != nil {
 				return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
 					Code:    http.StatusBadRequest,
@@ -143,8 +147,9 @@ func (sc *Controller) createSandboxWithClone(ctx context.Context, request models
 
 	if len(request.Extensions.CSIMount.MountConfigs) != 0 {
 		csiMountOptions := make([]config.MountConfig, 0, len(request.Extensions.CSIMount.MountConfigs))
-		for _, mountConfig := range request.Extensions.CSIMount.MountConfigs {
-			driverName, csiReqConfigRaw, err := sc.csiMountOptionsConfig(ctx, mountConfig.MountPath, mountConfig.PvName, mountConfig.SubPath, mountConfig.ReadOnly)
+		csiClient := csimountutils.NewCSIMountHandler(sc.client, sc.cache, sc.storageRegistry, utils.DefaultSandboxDeployNamespace)
+		for _, mountConfigRequest := range request.Extensions.CSIMount.MountConfigs {
+			driverName, csiReqConfigRaw, err := csiClient.CSIMountOptionsConfig(ctx, mountConfigRequest)
 			if err != nil {
 				return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
 					Code:    http.StatusBadRequest,

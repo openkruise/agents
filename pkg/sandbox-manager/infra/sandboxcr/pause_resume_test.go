@@ -6,12 +6,13 @@ import (
 	"testing"
 	"time"
 
-	testutils "github.com/openkruise/agents/test/utils"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime/pkg/client"
+
+	testutils "github.com/openkruise/agents/test/utils"
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
@@ -274,11 +275,10 @@ func TestSandbox_SetPause(t *testing.T) {
 			cache, clientSet, err := NewTestCache(t)
 			require.NoError(t, err)
 			defer cache.Stop()
-			client := clientSet.SandboxClient
-			CreateSandboxWithStatus(t, client, sandbox)
+			CreateSandboxWithStatus(t, clientSet.SandboxClient, sandbox)
 			time.Sleep(10 * time.Millisecond)
 
-			s := AsSandbox(sandbox, cache, client)
+			s := AsSandbox(sandbox, cache, clientSet)
 			opts := infra.PauseOptions{
 				Timeout: &infra.TimeoutOptions{
 					ShutdownTime: now.Add(time.Hour),
@@ -293,7 +293,7 @@ func TestSandbox_SetPause(t *testing.T) {
 					modified.Status.Phase = v1alpha1.SandboxPaused
 					data, err := patch.Data(modified)
 					assert.NoError(t, err)
-					_, err = client.ApiV1alpha1().Sandboxes("default").Patch(
+					_, err = clientSet.ApiV1alpha1().Sandboxes("default").Patch(
 						t.Context(), s.Name, types.MergePatchType, data, metav1.PatchOptions{})
 					assert.NoError(t, err)
 				}
@@ -302,7 +302,7 @@ func TestSandbox_SetPause(t *testing.T) {
 					name := s.Name
 					time.AfterFunc(20*time.Millisecond, func() {
 						jsonData := `{"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True","reason":"Resume"}]}}`
-						_, err := client.ApiV1alpha1().Sandboxes("default").Patch(
+						_, err := clientSet.ApiV1alpha1().Sandboxes("default").Patch(
 							t.Context(), name, types.MergePatchType, []byte(jsonData), metav1.PatchOptions{})
 						assert.NoError(t, err)
 					})
@@ -317,7 +317,7 @@ func TestSandbox_SetPause(t *testing.T) {
 			}
 
 			require.NoError(t, err)
-			updatedSbx, err := client.ApiV1alpha1().Sandboxes("default").Get(t.Context(), "test-sandbox", metav1.GetOptions{})
+			updatedSbx, err := clientSet.ApiV1alpha1().Sandboxes("default").Get(t.Context(), "test-sandbox", metav1.GetOptions{})
 			require.NoError(t, err)
 
 			state, reason := sandboxutils.GetSandboxState(updatedSbx)
@@ -375,8 +375,7 @@ func TestSandbox_ResumeConcurrent(t *testing.T) {
 	cache, clientSet, err := NewTestCache(t)
 	require.NoError(t, err)
 	defer cache.Stop()
-	client := clientSet.SandboxClient
-	CreateSandboxWithStatus(t, client, sandbox)
+	CreateSandboxWithStatus(t, clientSet.SandboxClient, sandbox)
 	time.Sleep(10 * time.Millisecond)
 
 	// Channel to collect results from goroutines
@@ -385,7 +384,7 @@ func TestSandbox_ResumeConcurrent(t *testing.T) {
 	start := time.Now()
 	// Start three goroutines calling Resume
 	for i := 0; i < 3; i++ {
-		s := AsSandbox(sandbox, cache, client)
+		s := AsSandbox(sandbox, cache, clientSet)
 		go func() {
 			err := s.Resume(t.Context())
 			resultCh <- err
@@ -400,7 +399,7 @@ func TestSandbox_ResumeConcurrent(t *testing.T) {
 		SetSandboxCondition(updated, string(v1alpha1.SandboxConditionReady), metav1.ConditionTrue, "Resume", "")
 		data, err := patch.Data(updated)
 		assert.NoError(t, err)
-		_, err = client.ApiV1alpha1().Sandboxes("default").Patch(
+		_, err = clientSet.ApiV1alpha1().Sandboxes("default").Patch(
 			t.Context(), updated.Name, types.MergePatchType, data, metav1.PatchOptions{})
 		assert.NoError(t, err)
 	})
@@ -421,7 +420,7 @@ func TestSandbox_ResumeConcurrent(t *testing.T) {
 	assert.True(t, time.Since(start) >= 500*time.Millisecond)
 
 	// Verify that the sandbox is in Running state
-	updatedSbx, err := client.ApiV1alpha1().Sandboxes("default").Get(t.Context(), "test-sandbox", metav1.GetOptions{})
+	updatedSbx, err := clientSet.ApiV1alpha1().Sandboxes("default").Get(t.Context(), "test-sandbox", metav1.GetOptions{})
 	assert.NoError(t, err)
 	state, reason = sandboxutils.GetSandboxState(updatedSbx)
 	assert.Equal(t, v1alpha1.SandboxStateRunning, state, reason)

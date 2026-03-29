@@ -1,4 +1,4 @@
-package e2b
+package csiutils
 
 import (
 	"context"
@@ -10,6 +10,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"github.com/openkruise/agents/api/v1alpha1"
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
@@ -942,16 +943,15 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Create controller with mocked dependencies
-			ctrl := &Controller{
-				cache:           tt.setupCache(),
-				client:          tt.setupClient(),
-				storageRegistry: tt.setupStorageRegistry(),
-				systemNamespace: utils.DefaultSandboxDeployNamespace,
-			}
-
 			ctx := context.Background()
-			driverName, csiRequest, err := ctrl.generateNodePublishVolumeRequest(ctx, tt.containerMountPoint, tt.persistentVolumeName, tt.subPath, tt.readOnly)
-
+			handler := NewCSIMountHandler(tt.setupClient(), tt.setupCache(), tt.setupStorageRegistry(), utils.DefaultSandboxDeployNamespace)
+			driverName, csiRequest, err := handler.GenerateNodePublishVolumeRequest(ctx,
+				v1alpha1.CSIMountConfig{
+					PvName:    tt.persistentVolumeName,
+					MountPath: tt.containerMountPoint,
+					SubPath:   tt.subPath,
+					ReadOnly:  tt.readOnly,
+				})
 			if tt.expectError {
 				assert.Error(t, err)
 				if tt.expectedErrorSubstring != "" {
