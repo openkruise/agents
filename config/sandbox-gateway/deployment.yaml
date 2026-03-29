@@ -1,0 +1,113 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sandbox-gateway
+  namespace: sandbox-system
+  labels:
+    app.kubernetes.io/name: sandbox-gateway
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sandbox-gateway
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 25%
+      maxSurge: 25%
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: sandbox-gateway
+    spec:
+      serviceAccountName: sandbox-gateway
+      initContainers:
+        - name: init-sysctl
+          image: "registry.cn-hangzhou.aliyuncs.com/acs/busybox:v1.29.2"
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -c
+            - |-
+              if [ "$POD_IP" != "$HOST_IP" ]; then
+              mount -o remount rw /proc/sys
+              sysctl -w net.core.somaxconn=65535
+              sysctl -w net.ipv4.ip_local_port_range="1024 65535"
+              sysctl -w net.ipv4.tcp_tw_reuse=1
+              sysctl -w fs.file-max=1048576
+              fi
+          securityContext:
+            capabilities:
+              drop:
+                - ALL
+              add:
+                - SYS_ADMIN
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: HOST_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+      containers:
+        - name: sandbox-gateway
+          image: "sandbox-gateway:latest"
+          imagePullPolicy: IfNotPresent
+          command:
+            - envoy
+          args:
+            - -c
+            - /etc/envoy/envoy.yaml
+            - -l
+            - warn
+            - --concurrency
+            - "2"
+          env:
+            - name: GOMAXPROCS
+              value: "2"
+          ports:
+            - name: http
+              containerPort: 10000
+              protocol: TCP
+          livenessProbe:
+            tcpSocket:
+              port: 10000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            tcpSocket:
+              port: 10000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            limits:
+              cpu: "2"
+              memory: 4Gi
+            requests:
+              cpu: 500m
+              memory: 1Gi
+          volumeMounts:
+            - name: envoy-config
+              mountPath: /etc/envoy/envoy.yaml
+              subPath: envoy.yaml
+              readOnly: true
+      volumes:
+        - name: envoy-config
+          configMap:
+            name: envoy-config
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: sandbox-gateway
+                topologyKey: kubernetes.io/hostname
