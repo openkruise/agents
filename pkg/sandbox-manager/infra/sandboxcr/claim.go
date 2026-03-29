@@ -21,6 +21,7 @@ import (
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	commonutils "github.com/openkruise/agents/pkg/utils"
 
 	"github.com/openkruise/agents/api/v1alpha1"
@@ -44,6 +45,7 @@ func ValidateAndInitClaimOptions(opts infra.ClaimSandboxOptions) (infra.ClaimSan
 		return infra.ClaimSandboxOptions{}, fmt.Errorf("template is required")
 	}
 	if opts.CSIMount != nil {
+		// for csi mount, init runtime is required
 		if opts.InitRuntime == nil {
 			return infra.ClaimSandboxOptions{}, fmt.Errorf("init runtime is required when csi mount is specified")
 		}
@@ -429,6 +431,8 @@ func modifyPickedSandbox(sbx *Sandbox, lockType infra.LockType, opts infra.Claim
 		annotations = make(map[string]string, 1)
 	}
 	annotations[v1alpha1.AnnotationClaimTime] = time.Now().Format(time.RFC3339)
+
+	// record init config into annotation
 	if opts.InitRuntime != nil {
 		initRuntimeJSON, err := json.Marshal(opts.InitRuntime)
 		if err != nil {
@@ -439,6 +443,15 @@ func modifyPickedSandbox(sbx *Sandbox, lockType infra.LockType, opts infra.Claim
 			annotations[v1alpha1.AnnotationRuntimeAccessToken] = opts.InitRuntime.AccessToken
 		}
 	}
+
+	// record csi mount config into annotation
+	if opts.CSIMount != nil {
+		if opts.CSIMount.MountOptionListRaw != "" {
+			// record the csi mount config to annotation
+			annotations[models.ExtensionKeyClaimWithCSIMount_MountConfig] = opts.CSIMount.MountOptionListRaw
+		}
+	}
+
 	sbx.SetAnnotations(annotations)
 	return nil
 }

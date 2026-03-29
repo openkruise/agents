@@ -7,7 +7,8 @@ type InitRuntimeOptions struct {
 }
 
 type CSIMountOptions struct {
-	MountOptionList []MountConfig `json:"mountOptionList"`
+	MountOptionList    []MountConfig `json:"mountOptionList"`
+	MountOptionListRaw string        `json:"mountOptionListRaw"` // the raw json string for mount options
 }
 
 type MountConfig struct {
