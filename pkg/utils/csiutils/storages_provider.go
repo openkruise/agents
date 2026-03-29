@@ -1,4 +1,4 @@
-package e2b
+package csiutils
 
 import (
 	"context"
@@ -14,37 +14,58 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog/v2"
 
+	"github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/agent-runtime/storages"
+	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
+	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/utils"
 )
 
-func (sc *Controller) generateNodePublishVolumeRequest(ctx context.Context, containerMountPoint, persistentVolumeName, accessPointSubPath string, readOnly bool) (string, *csi.NodePublishVolumeRequest, error) {
+type CSIMountHandler struct {
+	client          *clients.ClientSet
+	cache           infra.CacheProvider
+	storageRegistry storages.VolumeMountProviderRegistry
+	systemNamespace string
+}
+
+func NewCSIMountHandler(client *clients.ClientSet, cache infra.CacheProvider,
+	storageRegistry storages.VolumeMountProviderRegistry, systemNamespace string) *CSIMountHandler {
+	return &CSIMountHandler{
+		client:          client,
+		cache:           cache,
+		storageRegistry: storageRegistry,
+		systemNamespace: systemNamespace,
+	}
+}
+
+func (h *CSIMountHandler) GenerateNodePublishVolumeRequest(ctx context.Context, mountRequest v1alpha1.CSIMountConfig) (string, *csi.NodePublishVolumeRequest, error) {
 	log := klog.FromContext(ctx)
-	if persistentVolumeName == "" {
+	if mountRequest.PvName == "" {
 		return "", nil, fmt.Errorf("no found persistent volume name")
 	}
 	// There are potential scenarios, such as incomplete cache synchronization,
 	// where implementing a resilience or fault-tolerance mechanism can help mitigate spurious errors and improve system robustness.
-	persistentVolumeObj, err := sc.cache.GetPersistentVolume(persistentVolumeName)
+	persistentVolumeObj, err := h.cache.GetPersistentVolume(mountRequest.PvName)
 	if err != nil {
-		log.Error(err, "failed to get persistent volume object by name using cache method", persistentVolumeName)
-		persistentVolumeObj, err = sc.client.CoreV1().PersistentVolumes().Get(ctx, persistentVolumeName, metav1.GetOptions{})
+		log.Error(err, "failed to get persistent volume object by name using cache method", mountRequest.PvName)
+		persistentVolumeObj, err = h.client.CoreV1().PersistentVolumes().Get(ctx, mountRequest.PvName, metav1.GetOptions{})
 		if err != nil {
-			return "", nil, fmt.Errorf("failed to get persistent volume object by name: %s, err: %v", persistentVolumeName, err)
+			return "", nil, fmt.Errorf("failed to get persistent volume object by name: %s, err: %v", mountRequest.PvName, err)
 		}
 	}
 	if persistentVolumeObj == nil {
-		return "", nil, fmt.Errorf("no found persistent volume object by name: %s", persistentVolumeName)
+		return "", nil, fmt.Errorf("no found persistent volume object by name: %s", mountRequest.PvName)
 	}
 	if persistentVolumeObj.Spec.CSI == nil {
-		return "", nil, fmt.Errorf("no found csi object in persistent volume by name: %s", persistentVolumeName)
+		return "", nil, fmt.Errorf("no found csi object in persistent volume by name: %s", mountRequest.PvName)
 	}
 	driverName := persistentVolumeObj.Spec.CSI.Driver
-	if !sc.storageRegistry.IsSupported(driverName) {
+	if !h.storageRegistry.IsSupported(driverName) {
 		return "", nil, fmt.Errorf("driver %s is not supported in current environment", driverName)
 	}
 
 	// to fetch storage provider
-	storageProvider, exists := sc.storageRegistry.GetProvider(driverName)
+	storageProvider, exists := h.storageRegistry.GetProvider(driverName)
 	if !exists {
 		return "", nil, fmt.Errorf("no provider found for driver: %s", driverName)
 	}
@@ -55,13 +76,13 @@ func (sc *Controller) generateNodePublishVolumeRequest(ctx context.Context, cont
 		nodePublishSecretRef := persistentVolumeObj.Spec.CSI.NodePublishSecretRef
 		if nodePublishSecretRef.Namespace == "" {
 			nodePublishSecretRef.Namespace = utils.DefaultSandboxDeployNamespace
-		} else if nodePublishSecretRef.Namespace != sc.systemNamespace {
+		} else if nodePublishSecretRef.Namespace != h.systemNamespace {
 			return "", nil, fmt.Errorf("invalid node publish secret ref namespace: %s, expected: %s", nodePublishSecretRef.Namespace, utils.DefaultSandboxDeployNamespace)
 		}
-		secretObj, err = sc.cache.GetSecret(nodePublishSecretRef.Namespace, nodePublishSecretRef.Name)
+		secretObj, err = h.cache.GetSecret(nodePublishSecretRef.Namespace, nodePublishSecretRef.Name)
 		if err != nil {
 			log.Error(err, "failed to get secret object by name using cache method", nodePublishSecretRef.Namespace, nodePublishSecretRef.Name)
-			secretObj, err = sc.client.CoreV1().Secrets(nodePublishSecretRef.Namespace).Get(ctx, nodePublishSecretRef.Name, metav1.GetOptions{})
+			secretObj, err = h.client.CoreV1().Secrets(nodePublishSecretRef.Namespace).Get(ctx, nodePublishSecretRef.Name, metav1.GetOptions{})
 			if err != nil {
 				return "", nil, fmt.Errorf("failed to get secret object by name:%s/%s, err: %v",
 					nodePublishSecretRef.Namespace, nodePublishSecretRef.Name, err)
@@ -70,7 +91,7 @@ func (sc *Controller) generateNodePublishVolumeRequest(ctx context.Context, cont
 	}
 
 	// to add access point sub path
-	if accessPointSubPath != "" {
+	if mountRequest.SubPath != "" {
 		persistentVolumeObj = persistentVolumeObj.DeepCopy()
 		if persistentVolumeObj.Spec.CSI.VolumeAttributes == nil {
 			persistentVolumeObj.Spec.CSI.VolumeAttributes = make(map[string]string)
@@ -79,26 +100,26 @@ func (sc *Controller) generateNodePublishVolumeRequest(ctx context.Context, cont
 		if !exist {
 			basePath = "/"
 		}
-		mergedPath, err := mergeAndValidatePaths(basePath, accessPointSubPath)
+		mergedPath, err := mergeAndValidatePaths(basePath, mountRequest.SubPath)
 		if err != nil {
-			return "", nil, fmt.Errorf("failed to merge and validate paths: base path=%s, sub path=%s, err: %v", basePath, accessPointSubPath, err)
+			return "", nil, fmt.Errorf("failed to merge and validate paths: base path=%s, sub path=%s, err: %v", basePath, mountRequest.SubPath, err)
 		}
 		// Use a copy to avoid modifying the original PV object
 		persistentVolumeObj.Spec.CSI.VolumeAttributes["path"] = mergedPath
 	}
 
 	// to generate csi node publish volume request
-	csiRequest, err := storageProvider.GenerateCSINodePublishVolumeRequest(ctx, containerMountPoint, persistentVolumeObj, readOnly, secretObj)
+	csiRequest, err := storageProvider.GenerateCSINodePublishVolumeRequest(ctx, mountRequest.MountPath, persistentVolumeObj, mountRequest.ReadOnly, secretObj)
 	if err != nil {
 		return "", csiRequest, err
 	}
 	return persistentVolumeObj.Spec.CSI.Driver, csiRequest, nil
 }
 
-func (sc *Controller) csiMountOptionsConfig(ctx context.Context, containerMountPoint, persistentVolumeName, accessPointSubPath string, readOnly bool) (string, string, error) {
+func (h *CSIMountHandler) CSIMountOptionsConfig(ctx context.Context, mountRequest v1alpha1.CSIMountConfig) (string, string, error) {
 	log := klog.FromContext(ctx)
 	startTime := time.Now()
-	driverName, csiRequest, err := sc.generateNodePublishVolumeRequest(ctx, containerMountPoint, persistentVolumeName, accessPointSubPath, readOnly)
+	driverName, csiRequest, err := h.GenerateNodePublishVolumeRequest(ctx, mountRequest)
 	if err != nil {
 		return "", "", fmt.Errorf("failed to convert to node publish volume request, err: %v", err)
 	}

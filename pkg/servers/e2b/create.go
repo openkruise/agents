@@ -16,6 +16,8 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
+	"github.com/openkruise/agents/pkg/utils"
+	"github.com/openkruise/agents/pkg/utils/csiutils"
 )
 
 // CreateSandbox allocates a Pod as a new sandbox
@@ -85,8 +87,9 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 
 	if len(request.Extensions.CSIMount.MountConfigs) != 0 {
 		csiMountOptions := make([]config.MountConfig, 0, len(request.Extensions.CSIMount.MountConfigs))
+		csiClient := csiutils.NewCSIMountHandler(sc.client, sc.cache, sc.storageRegistry, utils.DefaultSandboxDeployNamespace)
 		for _, mountConfig := range request.Extensions.CSIMount.MountConfigs {
-			driverName, csiReqConfigRaw, err := sc.csiMountOptionsConfig(ctx, mountConfig.MountPath, mountConfig.PvName, mountConfig.SubPath, mountConfig.ReadOnly)
+			driverName, csiReqConfigRaw, err := csiClient.CSIMountOptionsConfig(ctx, mountConfig)
 			if err != nil {
 				return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
 					Code:    http.StatusBadRequest,
@@ -97,9 +100,9 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 				Driver:     driverName,
 				RequestRaw: csiReqConfigRaw,
 			})
-			opts.CSIMount = &config.CSIMountOptions{
-				MountOptionList: csiMountOptions,
-			}
+		}
+		opts.CSIMount = &config.CSIMountOptions{
+			MountOptionList: csiMountOptions,
 		}
 	}
 
@@ -143,8 +146,9 @@ func (sc *Controller) createSandboxWithClone(ctx context.Context, request models
 
 	if len(request.Extensions.CSIMount.MountConfigs) != 0 {
 		csiMountOptions := make([]config.MountConfig, 0, len(request.Extensions.CSIMount.MountConfigs))
-		for _, mountConfig := range request.Extensions.CSIMount.MountConfigs {
-			driverName, csiReqConfigRaw, err := sc.csiMountOptionsConfig(ctx, mountConfig.MountPath, mountConfig.PvName, mountConfig.SubPath, mountConfig.ReadOnly)
+		csiClient := csiutils.NewCSIMountHandler(sc.client, sc.cache, sc.storageRegistry, utils.DefaultSandboxDeployNamespace)
+		for _, mountConfigRequest := range request.Extensions.CSIMount.MountConfigs {
+			driverName, csiReqConfigRaw, err := csiClient.CSIMountOptionsConfig(ctx, mountConfigRequest)
 			if err != nil {
 				return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
 					Code:    http.StatusBadRequest,
