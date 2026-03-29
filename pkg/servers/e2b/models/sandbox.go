@@ -52,7 +52,13 @@ type NewSandboxRequestExtension struct {
 }
 
 type InplaceUpdateExtension struct {
-	Image string
+	Image     string
+	Resources *InplaceUpdateResourcesExtension
+}
+
+type InplaceUpdateResourcesExtension struct {
+	CPUScaleFactor   float64
+	ReturnOnFeasible bool
 }
 
 type CSIMountExtension struct {

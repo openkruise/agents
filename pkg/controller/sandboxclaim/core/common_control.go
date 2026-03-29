@@ -19,6 +19,7 @@ package core
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
@@ -267,12 +268,20 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 		opts.InplaceUpdate = &config.InplaceUpdateOptions{
 			Image: claim.Spec.InplaceUpdate.Image,
 		}
+		if claim.Spec.InplaceUpdate.Resources != nil {
+			scaleFactor, err := strconv.ParseFloat(claim.Spec.InplaceUpdate.Resources.CPUScaleFactor, 64)
+			if err != nil || scaleFactor <= 1 {
+				return infra.ClaimSandboxOptions{}, fmt.Errorf("invalid cpuScaleFactor %q: must be a number greater than 1", claim.Spec.InplaceUpdate.Resources.CPUScaleFactor)
+			}
+			opts.InplaceUpdate.Resources = &config.InplaceUpdateResourcesOptions{
+				ScaleFactor: scaleFactor,
+			}
+		}
 	}
 
 	if claim.Spec.WaitReadyTimeout != nil {
 		opts.WaitReadyTimeout = claim.Spec.WaitReadyTimeout.Duration
 	}
-
 	// todo support other options (like envvars, inplace update...)
 
 	// Validate and initialize

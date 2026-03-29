@@ -119,6 +119,7 @@ func (i *Infra) ClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions
 		metrics.Wait += tryMetrics.Wait
 		metrics.PickAndLock += tryMetrics.PickAndLock
 		metrics.WaitReady += tryMetrics.WaitReady
+		metrics.InplaceUpdate += tryMetrics.InplaceUpdate
 		metrics.InitRuntime += tryMetrics.InitRuntime
 		metrics.CSIMount += tryMetrics.CSIMount
 		metrics.LockType = tryMetrics.LockType

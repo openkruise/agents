@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"math/rand/v2"
 	"net/http"
 	"sync"
@@ -14,7 +15,9 @@ import (
 
 	"github.com/google/uuid"
 	"golang.org/x/time/rate"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/retry"
@@ -48,9 +51,12 @@ func ValidateAndInitClaimOptions(opts infra.ClaimSandboxOptions) (infra.ClaimSan
 			return infra.ClaimSandboxOptions{}, fmt.Errorf("init runtime is required when csi mount is specified")
 		}
 	}
-	if opts.InplaceUpdate != nil {
-		if opts.InplaceUpdate.Image == "" {
-			return infra.ClaimSandboxOptions{}, fmt.Errorf("inplace update image is required")
+	if opts.InplaceUpdate != nil && opts.InplaceUpdate.Image == "" && opts.InplaceUpdate.Resources == nil {
+		return infra.ClaimSandboxOptions{}, fmt.Errorf("inplace update requires either image or resources to be set")
+	}
+	if opts.InplaceUpdate != nil && opts.InplaceUpdate.Resources != nil {
+		if opts.InplaceUpdate.Resources.ScaleFactor <= 1 {
+			return infra.ClaimSandboxOptions{}, fmt.Errorf("cpu scale factor should be greater than 1")
 		}
 	}
 	if opts.CandidateCounts <= 0 {
@@ -155,8 +161,14 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 	freeWorkerOnce() // free worker early
 
 	// Step 3: Built-in post processes. The locked sandbox must be always returned to be cleared properly.
-	if lockType == infra.LockTypeCreate || lockType == infra.LockTypeSpeculate || opts.InplaceUpdate != nil {
-		log.Info("should wait for sandbox ready", "inplaceUpdate", opts.InplaceUpdate != nil)
+	// Wait for sandbox ready when:
+	// 1. Creating/speculating a new sandbox, OR
+	// 2. Any inplace update is requested (image and/or resources)
+	shouldWaitForSandboxReady := lockType == infra.LockTypeCreate ||
+		lockType == infra.LockTypeSpeculate ||
+		(opts.InplaceUpdate != nil && (opts.InplaceUpdate.Image != "" || opts.InplaceUpdate.Resources != nil))
+	if shouldWaitForSandboxReady {
+		log.Info("waiting for sandbox ready", "inplaceUpdate", opts.InplaceUpdate != nil, "hasImageUpdate", opts.InplaceUpdate != nil && opts.InplaceUpdate.Image != "", "hasResourcesUpdate", opts.InplaceUpdate != nil && opts.InplaceUpdate.Resources != nil)
 		metrics.WaitReady, err = waitForSandboxReady(ctx, sbx, opts, cache)
 		metrics.Total += metrics.WaitReady
 		if err != nil {
@@ -165,6 +177,26 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 			return
 		}
 		log.Info("sandbox is ready", "cost", metrics.WaitReady)
+	}
+
+	// Step 4: Wait for inplace update (resources) to complete - only when:
+	// 1. It's a LockTypeUpdate (not create/speculate)
+	// 2. Resources update is requested
+	// Note: Image update is handled in Step 3 by waiting for sandbox ready
+	if lockType == infra.LockTypeUpdate && opts.InplaceUpdate != nil && opts.InplaceUpdate.Resources != nil {
+		log.Info("waiting for sandbox inplace update (resources)", "scaleFactor", opts.InplaceUpdate.Resources.ScaleFactor, "returnOnFeasible", opts.InplaceUpdate.Resources.ReturnOnFeasible)
+		if opts.InplaceUpdate.Resources.ReturnOnFeasible {
+			metrics.InplaceUpdate, err = waitForSandboxInplaceFeasible(ctx, sbx, opts, cache)
+		} else {
+			metrics.InplaceUpdate, err = waitForSandboxReady(ctx, sbx, opts, cache)
+		}
+		metrics.Total += metrics.InplaceUpdate
+		if err != nil {
+			log.Error(err, "failed to wait for sandbox inplace update (resources)")
+			err = retriableError{Message: fmt.Sprintf("failed to wait for sandbox inplace update (resources): %s", err)}
+			return
+		}
+		log.Info("sandbox inplace update (resources) is ready", "cost", metrics.InplaceUpdate)
 	}
 
 	if opts.InitRuntime != nil {
@@ -412,8 +444,14 @@ func modifyPickedSandbox(sbx *Sandbox, lockType infra.LockType, opts infra.Claim
 		opts.Modifier(sbx)
 	}
 	if opts.InplaceUpdate != nil {
-		// should perform an inplace update
-		sbx.SetImage(opts.InplaceUpdate.Image)
+		if opts.InplaceUpdate.Image != "" {
+			sbx.SetImage(opts.InplaceUpdate.Image)
+		}
+		if opts.InplaceUpdate.Resources != nil {
+			if err := applySandboxCPUResize(sbx, opts.InplaceUpdate.Resources.ScaleFactor); err != nil {
+				return err
+			}
+		}
 	}
 	// claim sandbox
 	sbx.SetOwnerReferences([]metav1.OwnerReference{}) // make SandboxSet scale up
@@ -440,6 +478,21 @@ func modifyPickedSandbox(sbx *Sandbox, lockType infra.LockType, opts infra.Claim
 		}
 	}
 	sbx.SetAnnotations(annotations)
+	return nil
+}
+
+func applySandboxCPUResize(sbx *Sandbox, factor float64) error {
+	if sbx.Spec.Template == nil {
+		return nil
+	}
+	pod := &corev1.Pod{
+		Spec: sbx.Spec.Template.Spec,
+	}
+	resizedPod, _, err := buildCPUResizedPod(pod, factor)
+	if err != nil {
+		return err
+	}
+	sbx.Spec.Template.Spec = resizedPod.Spec
 	return nil
 }
 
@@ -542,18 +595,318 @@ func initRuntime(ctx context.Context, sbx *Sandbox, opts config.InitRuntimeOptio
 	return time.Since(start), err
 }
 
+func buildCPUResizedPod(pod *corev1.Pod, factor float64) (*corev1.Pod, bool, error) {
+	clone := pod.DeepCopy()
+	changed := false
+
+	for i := range clone.Spec.Containers {
+		containerChanged := scaleContainerCPU(&clone.Spec.Containers[i], factor)
+		changed = changed || containerChanged
+	}
+	if !changed {
+		return clone, false, nil
+	}
+
+	return clone, true, nil
+}
+
+func scaleContainerCPU(container *corev1.Container, factor float64) bool {
+	req := container.Resources.Requests
+	lim := container.Resources.Limits
+	if req == nil && lim == nil {
+		return false
+	}
+
+	var (
+		cpuReq    resource.Quantity
+		cpuLim    resource.Quantity
+		hasCPUReq bool
+		hasCPULim bool
+	)
+	if req != nil {
+		cpuReq, hasCPUReq = req[corev1.ResourceCPU]
+	}
+	if lim != nil {
+		cpuLim, hasCPULim = lim[corev1.ResourceCPU]
+	}
+	if !hasCPUReq && !hasCPULim {
+		return false
+	}
+
+	if container.Resources.Requests == nil {
+		container.Resources.Requests = corev1.ResourceList{}
+	}
+	if container.Resources.Limits == nil {
+		container.Resources.Limits = corev1.ResourceList{}
+	}
+
+	if hasCPUReq {
+		container.Resources.Requests[corev1.ResourceCPU] = scaleCPUQuantity(cpuReq, factor)
+	}
+	if hasCPULim {
+		container.Resources.Limits[corev1.ResourceCPU] = scaleCPUQuantity(cpuLim, factor)
+	}
+	return true
+}
+
+func scaleCPUQuantity(q resource.Quantity, factor float64) resource.Quantity {
+	scaledMilli := int64(math.Ceil(float64(q.MilliValue()) * factor))
+	// Defensive fallback, should not happen when factor > 1 and q > 0.
+	if scaledMilli <= 0 {
+		scaledMilli = 1
+	}
+	return *resource.NewMilliQuantity(scaledMilli, resource.DecimalSI)
+}
+
+type containerCPUTarget struct {
+	request    resource.Quantity
+	hasRequest bool
+	limit      resource.Quantity
+	hasLimit   bool
+}
+
+// buildContainerCPUTargets extracts expected CPU requests/limits from resized Pod spec.
+// These targets are later compared with pod.status.containerStatuses[].resources.
+func buildContainerCPUTargets(pod *corev1.Pod) map[string]containerCPUTarget {
+	targets := make(map[string]containerCPUTarget, len(pod.Spec.Containers)+len(pod.Spec.InitContainers))
+	for _, c := range pod.Spec.Containers {
+		target := containerCPUTarget{}
+		if c.Resources.Requests != nil {
+			cpuReq, ok := c.Resources.Requests[corev1.ResourceCPU]
+			if ok {
+				target.request = cpuReq
+				target.hasRequest = true
+			}
+		}
+		if c.Resources.Limits != nil {
+			cpuLim, ok := c.Resources.Limits[corev1.ResourceCPU]
+			if ok {
+				target.limit = cpuLim
+				target.hasLimit = true
+			}
+		}
+		if target.hasRequest || target.hasLimit {
+			targets[c.Name] = target
+		}
+	}
+	// Also handle InitContainers
+	for _, c := range pod.Spec.InitContainers {
+		target := containerCPUTarget{}
+		if c.Resources.Requests != nil {
+			cpuReq, ok := c.Resources.Requests[corev1.ResourceCPU]
+			if ok {
+				target.request = cpuReq
+				target.hasRequest = true
+			}
+		}
+		if c.Resources.Limits != nil {
+			cpuLim, ok := c.Resources.Limits[corev1.ResourceCPU]
+			if ok {
+				target.limit = cpuLim
+				target.hasLimit = true
+			}
+		}
+		if target.hasRequest || target.hasLimit {
+			targets[c.Name] = target
+		}
+	}
+	return targets
+}
+
+// isPodCPUResizeApplied checks whether target CPU resources have been enacted
+// on running containers according to pod.status.containerStatuses[].resources.
+func isPodCPUResizeApplied(pod *corev1.Pod, targets map[string]containerCPUTarget) bool {
+	if len(targets) == 0 {
+		return false
+	}
+	// Build status lookup from both regular and init containers
+	statuses := make(map[string]*corev1.ContainerStatus, len(pod.Status.ContainerStatuses)+len(pod.Status.InitContainerStatuses))
+	for i := range pod.Status.ContainerStatuses {
+		statuses[pod.Status.ContainerStatuses[i].Name] = &pod.Status.ContainerStatuses[i]
+	}
+	for i := range pod.Status.InitContainerStatuses {
+		statuses[pod.Status.InitContainerStatuses[i].Name] = &pod.Status.InitContainerStatuses[i]
+	}
+	for name, target := range targets {
+		status, ok := statuses[name]
+		if !ok || status.Resources == nil {
+			return false
+		}
+		if target.hasRequest {
+			actualReq, ok := status.Resources.Requests[corev1.ResourceCPU]
+			if !ok || actualReq.Cmp(target.request) != 0 {
+				return false
+			}
+		}
+		if target.hasLimit {
+			actualLim, ok := status.Resources.Limits[corev1.ResourceCPU]
+			if !ok || actualLim.Cmp(target.limit) != 0 {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+type podResizeStateSnapshot struct {
+	pendingTrue       bool
+	pendingReason     string
+	pendingMessage    string
+	inProgressTrue    bool
+	inProgressReason  string
+	inProgressMessage string
+	resizeStatus      corev1.PodResizeStatus
+	resizeApplied     bool
+}
+
+func inspectPodResizeState(pod *corev1.Pod, targets map[string]containerCPUTarget) podResizeStateSnapshot {
+	pending := getPodCondition(pod, corev1.PodResizePending)
+	inProgress := getPodCondition(pod, corev1.PodResizeInProgress)
+
+	state := podResizeStateSnapshot{
+		resizeStatus:  pod.Status.Resize,
+		resizeApplied: isPodCPUResizeApplied(pod, targets),
+	}
+	if pending != nil && pending.Status == corev1.ConditionTrue {
+		state.pendingTrue = true
+		state.pendingReason = pending.Reason
+		state.pendingMessage = pending.Message
+	}
+	if inProgress != nil && inProgress.Status == corev1.ConditionTrue {
+		state.inProgressTrue = true
+		state.inProgressReason = inProgress.Reason
+		state.inProgressMessage = inProgress.Message
+	}
+	return state
+}
+
+func (s podResizeStateSnapshot) hasResizeSignal() bool {
+	return s.pendingTrue || s.inProgressTrue || s.resizeStatus != ""
+}
+
+func (s podResizeStateSnapshot) terminalError() error {
+	if s.pendingTrue && s.pendingReason == corev1.PodReasonInfeasible {
+		return fmt.Errorf("pod resize is infeasible: %s", s.pendingMessage)
+	}
+	if s.inProgressTrue && s.inProgressReason == corev1.PodReasonError {
+		return fmt.Errorf("pod resize has error: %s", s.inProgressMessage)
+	}
+	if s.resizeStatus == corev1.PodResizeStatusInfeasible {
+		return fmt.Errorf("pod resize is infeasible")
+	}
+	return nil
+}
+
+func (s podResizeStateSnapshot) isSettledWithoutDeferral() bool {
+	return !s.pendingTrue && !s.inProgressTrue && s.resizeStatus != corev1.PodResizeStatusDeferred
+}
+
+func shouldReturnOnFeasible(state podResizeStateSnapshot, sawResizeSignal bool) bool {
+	// returnOnFeasible means caller accepts "resize in progress" as usable.
+	if state.inProgressTrue || state.resizeStatus == corev1.PodResizeStatusInProgress || state.resizeApplied {
+		return true
+	}
+	// If lifecycle signals have appeared and then cleared quickly, treat as done.
+	return sawResizeSignal && state.isSettledWithoutDeferral()
+}
+
+func shouldReturnOnCompleted(state podResizeStateSnapshot, sawResizeSignal bool) bool {
+	// Strict path: only return after target resources are actually enacted on container statuses.
+	if state.resizeApplied {
+		return true
+	}
+	// Compatibility fallback for clusters that do not expose status.containerStatuses[].resources.
+	// We only use this fallback after observing at least one resize lifecycle signal.
+	return sawResizeSignal && state.isSettledWithoutDeferral()
+}
+
+func waitForPodResizeState(ctx context.Context, client *clients.ClientSet, namespace, name string,
+	targetPod *corev1.Pod, timeout time.Duration, returnOnFeasible bool) error {
+	log := klog.FromContext(ctx).WithValues("pod", klog.KRef(namespace, name))
+	if timeout <= 0 {
+		return nil
+	}
+	// Build expected CPU targets from the request payload (targetPod) instead of re-reading Pod spec.
+	// Reason:
+	// 1) targetPod is the exact desired state we just sent via UpdateResize;
+	// 2) polling should validate runtime status against this stable target;
+	// 3) re-reading spec from API can drift (e.g. subsequent updates) and adds an extra API dependency.
+	targets := buildContainerCPUTargets(targetPod)
+
+	sawResizeSignal := false
+	lastPendingReason := ""
+	lastPendingMessage := ""
+	err := wait.PollUntilContextTimeout(ctx, 200*time.Millisecond, timeout, true, func(ctx context.Context) (bool, error) {
+		pod, err := client.K8sClient.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return false, err
+		}
+		state := inspectPodResizeState(pod, targets)
+		if state.hasResizeSignal() {
+			sawResizeSignal = true
+		}
+		if state.pendingTrue {
+			lastPendingReason = state.pendingReason
+			lastPendingMessage = state.pendingMessage
+		}
+		if err := state.terminalError(); err != nil {
+			return false, err
+		}
+
+		decideReady := shouldReturnOnCompleted
+		if returnOnFeasible {
+			decideReady = shouldReturnOnFeasible
+		}
+		return decideReady(state, sawResizeSignal), nil
+	})
+	if err != nil {
+		log.Error(err, "wait for pod resize state timeout")
+		if lastPendingReason != "" {
+			return fmt.Errorf("wait for pod resize state: %w (last pending reason=%s, message=%s)", err, lastPendingReason, lastPendingMessage)
+		}
+		return fmt.Errorf("wait for pod resize state: %w", err)
+	}
+	return nil
+}
+
+func getPodCondition(pod *corev1.Pod, condType corev1.PodConditionType) *corev1.PodCondition {
+	for i := range pod.Status.Conditions {
+		cond := &pod.Status.Conditions[i]
+		if cond.Type == condType {
+			return cond
+		}
+	}
+	return nil
+}
+
+// waitForSandboxReady waits for sandbox to be ready.
+// Returns the time taken on success, or an error on timeout/failure.
 func waitForSandboxReady(ctx context.Context, sbx *Sandbox, opts infra.ClaimSandboxOptions, cache *Cache) (cost time.Duration, err error) {
-	ctx = logs.Extend(ctx, "action", "waitForSandboxReady")
+	return waitForSandboxCondition(ctx, sbx, cache, "waitForSandboxReady", WaitActionWaitReady, opts.WaitReadyTimeout, checkSandboxReady)
+}
+
+// waitForSandboxInplaceFeasible waits for sandbox inplace update to become feasible.
+// Returns the time taken on success, or an error on timeout/failure.
+func waitForSandboxInplaceFeasible(ctx context.Context, sbx *Sandbox, opts infra.ClaimSandboxOptions, cache *Cache) (cost time.Duration, err error) {
+	return waitForSandboxCondition(ctx, sbx, cache, "waitForSandboxInplaceFeasible", WaitActionWaitInplaceFeasible, opts.WaitReadyTimeout, checkSandboxInplaceFeasible)
+}
+
+// sandboxCheckFunc is a function that checks if a sandbox satisfies a condition.
+type sandboxCheckFunc func(ctx context.Context, sbx *v1alpha1.Sandbox) (bool, error)
+
+// waitForSandboxCondition is a generic function that waits for a sandbox to satisfy a condition.
+func waitForSandboxCondition(ctx context.Context, sbx *Sandbox, cache *Cache, actionName string, waitAction WaitAction, timeout time.Duration, checkFunc sandboxCheckFunc) (cost time.Duration, err error) {
+	ctx = logs.Extend(ctx, "action", actionName)
 	log := klog.FromContext(ctx).V(consts.DebugLogLevel).WithValues("sandbox", klog.KObj(sbx))
 	start := time.Now()
 	defer func() {
 		cost = time.Since(start)
 	}()
-	log.Info("waiting for sandbox ready", "timeout", opts.WaitReadyTimeout)
-	if err = cache.WaitForSandboxSatisfied(ctx, sbx.Sandbox, WaitActionWaitReady, func(sbx *v1alpha1.Sandbox) (bool, error) {
-		return checkSandboxReady(ctx, sbx)
-	}, opts.WaitReadyTimeout); err != nil {
-		log.Error(err, "failed to wait for sandbox ready")
+	log.Info("waiting for sandbox condition", "action", actionName, "timeout", timeout)
+	if err = cache.WaitForSandboxSatisfied(ctx, sbx.Sandbox, waitAction, func(sbx *v1alpha1.Sandbox) (bool, error) {
+		return checkFunc(ctx, sbx)
+	}, timeout); err != nil {
+		log.Error(err, "failed to wait for sandbox condition", "action", actionName)
 		return
 	}
 	// Use deepcopy to avoid data race
@@ -562,6 +915,37 @@ func waitForSandboxReady(ctx context.Context, sbx *Sandbox, opts infra.ClaimSand
 		return
 	}
 	return
+}
+
+func checkSandboxInplaceFeasible(ctx context.Context, sbx *v1alpha1.Sandbox) (bool, error) {
+	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx), "resourceVersion", sbx.GetResourceVersion()).V(consts.DebugLogLevel)
+	if sbx.Status.ObservedGeneration != sbx.Generation {
+		log.Info("watched sandbox not updated", "generation", sbx.Generation, "observedGeneration", sbx.Status.ObservedGeneration)
+		return false, nil
+	}
+	readyCond := GetSandboxCondition(sbx, v1alpha1.SandboxConditionReady)
+	if readyCond.Reason == v1alpha1.SandboxReadyReasonStartContainerFailed {
+		err := retriableError{Message: fmt.Sprintf("sandbox inplace update failed: %s", readyCond.Message)}
+		log.Error(err, "sandbox inplace update failed")
+		return false, err // stop early
+	}
+	inplaceCond := GetSandboxCondition(sbx, v1alpha1.SandboxConditionInplaceUpdate)
+	if inplaceCond.Reason == v1alpha1.SandboxInplaceUpdateReasonFailed {
+		err := retriableError{Message: fmt.Sprintf("sandbox inplace update failed: %s", inplaceCond.Message)}
+		log.Error(err, "sandbox inplace update failed")
+		return false, err // stop early
+	}
+	if inplaceCond.Status == metav1.ConditionFalse && inplaceCond.Reason == v1alpha1.SandboxInplaceUpdateReasonInplaceUpdating {
+		utils.ResourceVersionExpectationExpect(sbx)
+		return true, nil
+	}
+	if inplaceCond.Status == metav1.ConditionTrue && inplaceCond.Reason == v1alpha1.SandboxInplaceUpdateReasonSucceeded {
+		utils.ResourceVersionExpectationExpect(sbx)
+		return true, nil
+	}
+	log.Info("sandbox inplace feasible signal not observed yet",
+		"inplaceCondStatus", inplaceCond.Status, "inplaceCondReason", inplaceCond.Reason)
+	return false, nil
 }
 
 func checkSandboxReady(ctx context.Context, sbx *v1alpha1.Sandbox) (bool, error) {

@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 
 	agentsapiv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/utils"
@@ -51,6 +52,9 @@ type InPlaceUpdateState struct {
 
 	// UpdateImages indicates there are images that should be in-place update.
 	UpdateImages bool `json:"updateImages,omitempty"`
+
+	// UpdateResources indicates there are resources that should be in-place update.
+	UpdateResources bool `json:"updateResources,omitempty"`
 }
 
 // InPlaceUpdateContainerStatus records the statuses of the container that are mainly used
@@ -94,6 +98,17 @@ func NewInPlaceUpdateControl(c client.Client, patchFunc GeneratePatchBodyFunc) *
 	return control
 }
 
+func (c *InPlaceUpdateControl) generatePatchBody(opts InPlaceUpdateOptions) string {
+	if c.generatePatchBodyFunc == nil {
+		return DefaultGeneratePatchBodyFunc(opts)
+	}
+	return c.generatePatchBodyFunc(opts)
+}
+
+func (c *InPlaceUpdateControl) generateResizeSubresourceBody(opts InPlaceUpdateOptions) *corev1.Pod {
+	return DefaultGenerateResizeSubresourceBody(opts)
+}
+
 func DefaultGeneratePatchBodyFunc(opts InPlaceUpdateOptions) string {
 	box, pod, revision := opts.Box, opts.Pod, opts.Revision
 	state := &InPlaceUpdateState{
@@ -120,21 +135,28 @@ func DefaultGeneratePatchBodyFunc(opts InPlaceUpdateOptions) string {
 		if !ok {
 			continue
 		}
-		if origin.Image == container.Image {
+		imageChanged := origin.Image != container.Image
+		resourceChanged := !reflect.DeepEqual(origin.Resources, container.Resources)
+		if !imageChanged && !resourceChanged {
 			continue
 		}
 		patchContainer := corev1.Container{
-			Name:  container.Name,
-			Image: origin.Image,
+			Name: container.Name,
 		}
-		patchSpec.Containers = append(patchSpec.Containers, patchContainer)
-		state.UpdateImages = true
-		imageId := originStatus[container.Name]
-		state.LastContainerStatuses[container.Name] = InPlaceUpdateContainerStatus{
-			ImageID: imageId,
+		if imageChanged {
+			patchContainer.Image = origin.Image
+			patchSpec.Containers = append(patchSpec.Containers, patchContainer)
+			state.UpdateImages = true
+			imageId := originStatus[container.Name]
+			state.LastContainerStatuses[container.Name] = InPlaceUpdateContainerStatus{
+				ImageID: imageId,
+			}
+		}
+		if resourceChanged {
+			state.UpdateResources = true
 		}
 	}
-	if len(patchSpec.Containers) == 0 {
+	if !state.UpdateImages && !state.UpdateResources {
 		return ""
 	}
 
@@ -144,24 +166,117 @@ func DefaultGeneratePatchBodyFunc(opts InPlaceUpdateOptions) string {
 	labels := map[string]string{
 		agentsapiv1alpha1.PodLabelTemplateHash: revision,
 	}
+	if len(patchSpec.Containers) == 0 {
+		return fmt.Sprintf(`{"metadata":{"annotations":%s,"labels":%s}}`, utils.DumpJson(annotations), utils.DumpJson(labels))
+	}
 	return fmt.Sprintf(`{"metadata":{"annotations":%s,"labels":%s},"spec":%s}`, utils.DumpJson(annotations), utils.DumpJson(labels), utils.DumpJson(patchSpec))
+}
+
+// buildContainerResourcesMap builds a map from template containers.
+func buildContainerResourcesMap(containers []corev1.Container) map[string]corev1.Container {
+	result := make(map[string]corev1.Container, len(containers))
+	for _, c := range containers {
+		result[c.Name] = c
+	}
+	return result
+}
+
+// DefaultGenerateResizeSubresourceBody generates the Pod body for resize subresource update.
+// It compares the current pod's container resources with the sandbox's container resources,
+// and returns a minimal Pod object containing only the fields required by the resize API:
+//   - metadata.name, metadata.namespace, metadata.resourceVersion
+//   - spec.containers[].resources
+//   - spec.initContainers[].resources
+//
+// Returns nil if no resource changes are detected.
+func DefaultGenerateResizeSubresourceBody(opts InPlaceUpdateOptions) *corev1.Pod {
+	box, pod := opts.Box, opts.Pod
+	if box.Spec.Template == nil {
+		return nil
+	}
+
+	originContainers := buildContainerResourcesMap(box.Spec.Template.Spec.Containers)
+	originInitContainers := buildContainerResourcesMap(box.Spec.Template.Spec.InitContainers)
+
+	resizeBody := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            pod.Name,
+			Namespace:       pod.Namespace,
+			ResourceVersion: pod.ResourceVersion,
+		},
+		Spec: corev1.PodSpec{
+			Containers:     make([]corev1.Container, len(pod.Spec.Containers)),
+			InitContainers: make([]corev1.Container, len(pod.Spec.InitContainers)),
+		},
+	}
+	for i := range pod.Spec.Containers {
+		resizeBody.Spec.Containers[i] = corev1.Container{
+			Name:      pod.Spec.Containers[i].Name,
+			Resources: pod.Spec.Containers[i].Resources,
+		}
+	}
+	for i := range pod.Spec.InitContainers {
+		resizeBody.Spec.InitContainers[i] = corev1.Container{
+			Name:      pod.Spec.InitContainers[i].Name,
+			Resources: pod.Spec.InitContainers[i].Resources,
+		}
+	}
+
+	changed := false
+	for i := range resizeBody.Spec.Containers {
+		container := &resizeBody.Spec.Containers[i]
+		origin, ok := originContainers[container.Name]
+		if !ok {
+			continue
+		}
+		if reflect.DeepEqual(origin.Resources, container.Resources) {
+			continue
+		}
+		container.Resources = origin.Resources
+		changed = true
+	}
+	for i := range resizeBody.Spec.InitContainers {
+		container := &resizeBody.Spec.InitContainers[i]
+		origin, ok := originInitContainers[container.Name]
+		if !ok {
+			continue
+		}
+		if reflect.DeepEqual(origin.Resources, container.Resources) {
+			continue
+		}
+		container.Resources = origin.Resources
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	return resizeBody
 }
 
 func (c *InPlaceUpdateControl) Update(ctx context.Context, opts InPlaceUpdateOptions) (bool, error) {
 	box, pod, revision := opts.Box, opts.Pod, opts.Revision
 	logger := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
 
-	patchBody := c.generatePatchBodyFunc(opts)
-	if patchBody == "" {
+	patchBody := c.generatePatchBody(opts)
+	resizeBody := c.generateResizeSubresourceBody(opts)
+	if patchBody == "" && resizeBody == nil {
 		return false, nil
 	}
 
-	clone := pod.DeepCopy()
-	if err := c.Patch(ctx, clone, client.RawPatch(types.StrategicMergePatchType, []byte(patchBody))); err != nil {
-		logger.Error(err, "inplace update pod failed")
-		return false, err
+	current := pod.DeepCopy()
+	if patchBody != "" {
+		if err := c.Patch(ctx, current, client.RawPatch(types.StrategicMergePatchType, []byte(patchBody))); err != nil {
+			logger.Error(err, "inplace update pod patch failed")
+			return false, err
+		}
 	}
-	logger.Info("inplace update pod success", "revision", revision, "patchBody", patchBody)
+	if resizeBody != nil {
+		if err := c.SubResource("resize").Update(ctx, current, client.WithSubResourceBody(resizeBody)); err != nil {
+			logger.Error(err, "inplace update pod resize failed")
+			return false, err
+		}
+	}
+	logger.Info("inplace update pod success", "revision", revision, "patchBody", patchBody, "hasResizeBody", resizeBody != nil)
 	return true, nil
 }
 
@@ -180,6 +295,47 @@ func IsInplaceUpdateCompleted(ctx context.Context, pod *corev1.Pod) bool {
 	for name, status := range state.LastContainerStatuses {
 		if old, ok := cStatus[name]; !ok || old == status.ImageID {
 			logger.Info("pod container inplace update is incompleted", "container", name, "old imageId", old, "cur imageId", status.ImageID)
+			return false
+		}
+	}
+	if state.UpdateResources {
+		if isPodResourceResizeApplied(pod) {
+			return true
+		}
+		logger.Info("pod resize resources are not applied yet")
+		return false
+	}
+	return true
+}
+
+func isPodResourceResizeApplied(pod *corev1.Pod) bool {
+	if len(pod.Spec.Containers) == 0 {
+		return false
+	}
+	statusMap := make(map[string]*corev1.ContainerStatus, len(pod.Status.ContainerStatuses))
+	for i := range pod.Status.ContainerStatuses {
+		statusMap[pod.Status.ContainerStatuses[i].Name] = &pod.Status.ContainerStatuses[i]
+	}
+	for i := range pod.Spec.Containers {
+		c := &pod.Spec.Containers[i]
+		status, ok := statusMap[c.Name]
+		if !ok || status.Resources == nil {
+			return false
+		}
+		if !isResourceListCovered(status.Resources.Requests, c.Resources.Requests) {
+			return false
+		}
+		if !isResourceListCovered(status.Resources.Limits, c.Resources.Limits) {
+			return false
+		}
+	}
+	return true
+}
+
+func isResourceListCovered(actual, expected corev1.ResourceList) bool {
+	for name, expectedQ := range expected {
+		actualQ, ok := actual[name]
+		if !ok || actualQ.Cmp(expectedQ) != 0 {
 			return false
 		}
 	}

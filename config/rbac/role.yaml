@@ -36,6 +36,7 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - pods/resize
   - pods/status
   verbs:
   - get

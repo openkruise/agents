@@ -14,6 +14,7 @@ import (
 	"golang.org/x/time/rate"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/rand"
@@ -209,6 +210,82 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 				assert.Equal(t, "new-image", sbx.(*Sandbox).Spec.Template.Spec.Containers[0].Image)
 				metrics := GetMetricsFromSandbox(t, sbx)
 				assert.Greater(t, metrics.WaitReady, time.Duration(0))
+			},
+		},
+		{
+			name:      "claim with cpu resize",
+			available: 1,
+			options: infra.ClaimSandboxOptions{
+				User:     user,
+				Template: existTemplate,
+				InplaceUpdate: &config.InplaceUpdateOptions{
+					Resources: &config.InplaceUpdateResourcesOptions{
+						ScaleFactor:      2,
+						ReturnOnFeasible: true,
+					},
+				},
+			},
+			preModifier: func(sbx *v1alpha1.Sandbox, infra *Infra) {
+				reqCPU := resource.MustParse("500m")
+				reqMem := resource.MustParse("512Mi")
+				sbx.Spec.Template.Spec.Containers[0].Resources = corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{
+						corev1.ResourceCPU:    reqCPU,
+						corev1.ResourceMemory: reqMem,
+					},
+					Limits: corev1.ResourceList{
+						corev1.ResourceCPU:    reqCPU,
+						corev1.ResourceMemory: reqMem,
+					},
+				}
+				// Set InplaceUpdate condition so checkSandboxInplaceFeasible returns true
+				sbx.Status.Conditions = append(sbx.Status.Conditions, metav1.Condition{
+					Type:   string(v1alpha1.SandboxConditionInplaceUpdate),
+					Status: metav1.ConditionFalse,
+					Reason: v1alpha1.SandboxInplaceUpdateReasonInplaceUpdating,
+				})
+				pod := &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      sbx.Name,
+						Namespace: sbx.Namespace,
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name: "main",
+								Resources: corev1.ResourceRequirements{
+									Requests: corev1.ResourceList{
+										corev1.ResourceCPU:    reqCPU,
+										corev1.ResourceMemory: reqMem,
+									},
+									Limits: corev1.ResourceList{
+										corev1.ResourceCPU:    reqCPU,
+										corev1.ResourceMemory: reqMem,
+									},
+								},
+							},
+						},
+					},
+					Status: corev1.PodStatus{
+						Phase:    corev1.PodRunning,
+						QOSClass: corev1.PodQOSGuaranteed,
+						Conditions: []corev1.PodCondition{
+							{
+								Type:   corev1.PodResizeInProgress,
+								Status: corev1.ConditionTrue,
+							},
+						},
+					},
+				}
+				createdPod, err := infra.Client.K8sClient.CoreV1().Pods(sbx.Namespace).Create(t.Context(), pod, metav1.CreateOptions{})
+				require.NoError(t, err)
+				createdPod.Status = pod.Status
+				_, err = infra.Client.K8sClient.CoreV1().Pods(sbx.Namespace).UpdateStatus(t.Context(), createdPod, metav1.UpdateOptions{})
+				require.NoError(t, err)
+			},
+			postCheck: func(t *testing.T, sbx infra.Sandbox) {
+				metrics := GetMetricsFromSandbox(t, sbx)
+				assert.Greater(t, metrics.InplaceUpdate, time.Duration(0))
 			},
 		},
 		{
@@ -753,6 +830,882 @@ func TestCheckSandboxInplaceUpdate(t *testing.T) {
 				assert.NoError(t, err)
 			}
 		})
+	}
+}
+
+func TestModifyPickedSandboxCPUResize(t *testing.T) {
+	base := &Sandbox{
+		Sandbox: &v1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "sbx-1",
+				Namespace: "default",
+				Labels: map[string]string{
+					v1alpha1.LabelSandboxTemplate:  "test-template",
+					v1alpha1.LabelSandboxIsClaimed: "false",
+				},
+				Annotations: map[string]string{},
+			},
+			Spec: v1alpha1.SandboxSpec{
+				EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+					Template: &corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{
+									Name:  "main",
+									Image: "img",
+									Resources: corev1.ResourceRequirements{
+										Requests: corev1.ResourceList{
+											corev1.ResourceCPU:    resource.MustParse("250m"),
+											corev1.ResourceMemory: resource.MustParse("256Mi"),
+										},
+										Limits: corev1.ResourceList{
+											corev1.ResourceCPU:    resource.MustParse("250m"),
+											corev1.ResourceMemory: resource.MustParse("256Mi"),
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	err := modifyPickedSandbox(base, infra.LockTypeUpdate, infra.ClaimSandboxOptions{
+		User:     "u1",
+		Template: "test-template",
+		InplaceUpdate: &config.InplaceUpdateOptions{
+			Resources: &config.InplaceUpdateResourcesOptions{
+				ScaleFactor: 2,
+			},
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(500), base.Spec.Template.Spec.Containers[0].Resources.Requests.Cpu().MilliValue())
+	assert.Equal(t, int64(500), base.Spec.Template.Spec.Containers[0].Resources.Limits.Cpu().MilliValue())
+}
+
+func TestModifyPickedSandboxCPUResizeCases(t *testing.T) {
+	tests := []struct {
+		name string
+
+		templateSpec corev1.PodSpec
+		factor       float64
+
+		wantReqCPU     int64
+		wantLimCPU     int64
+		wantSidecarCPU int64
+	}{
+		{
+			name: "requests only - scale up",
+			templateSpec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  "main",
+						Image: "img",
+						Resources: corev1.ResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceCPU: resource.MustParse("100m"),
+							},
+						},
+					},
+				},
+			},
+			factor:     2,
+			wantReqCPU: 200,
+			wantLimCPU: 0,
+		},
+		{
+			name: "limits only - scale up",
+			templateSpec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  "main",
+						Image: "img",
+						Resources: corev1.ResourceRequirements{
+							Limits: corev1.ResourceList{
+								corev1.ResourceCPU: resource.MustParse("500m"),
+							},
+						},
+					},
+				},
+			},
+			factor:     2,
+			wantReqCPU: 0,
+			wantLimCPU: 1000,
+		},
+		{
+			name: "no cpu resources - no change",
+			templateSpec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  "main",
+						Image: "img",
+						Resources: corev1.ResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceMemory: resource.MustParse("256Mi"),
+							},
+							Limits: corev1.ResourceList{
+								corev1.ResourceMemory: resource.MustParse("512Mi"),
+							},
+						},
+					},
+				},
+			},
+			factor:     2,
+			wantReqCPU: 0,
+			wantLimCPU: 0,
+		},
+		{
+			name: "empty resources - no change",
+			templateSpec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:      "main",
+						Image:     "img",
+						Resources: corev1.ResourceRequirements{},
+					},
+				},
+			},
+			factor:     2,
+			wantReqCPU: 0,
+			wantLimCPU: 0,
+		},
+		{
+			name: "scale down",
+			templateSpec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  "main",
+						Image: "img",
+						Resources: corev1.ResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceCPU: resource.MustParse("500m"),
+							},
+							Limits: corev1.ResourceList{
+								corev1.ResourceCPU: resource.MustParse("500m"),
+							},
+						},
+					},
+				},
+			},
+			factor:     0.5,
+			wantReqCPU: 250,
+			wantLimCPU: 250,
+		},
+		{
+			name: "multiple containers mixed",
+			templateSpec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  "main",
+						Image: "img",
+						Resources: corev1.ResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceCPU: resource.MustParse("100m"),
+							},
+						},
+					},
+					{
+						Name:  "sidecar",
+						Image: "img",
+						Resources: corev1.ResourceRequirements{
+							Limits: corev1.ResourceList{
+								corev1.ResourceCPU: resource.MustParse("200m"),
+							},
+						},
+					},
+				},
+			},
+			factor:     2,
+			wantReqCPU: 200, // container[0] requests: 100m * 2 = 200m
+			wantLimCPU: 0,   // container[0] limits: not set
+		},
+		{
+			name: "sidecar container limits scaled",
+			templateSpec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  "main",
+						Image: "img",
+						Resources: corev1.ResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceCPU: resource.MustParse("100m"),
+							},
+						},
+					},
+					{
+						Name:  "sidecar",
+						Image: "img",
+						Resources: corev1.ResourceRequirements{
+							Limits: corev1.ResourceList{
+								corev1.ResourceCPU: resource.MustParse("200m"),
+							},
+						},
+					},
+				},
+			},
+			factor:         2,
+			wantReqCPU:     200, // container[0] requests: 100m * 2 = 200m
+			wantLimCPU:     0,   // container[0] limits: not set
+			wantSidecarCPU: 400, // container[1] limits: 200m * 2 = 400m
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sbx := &Sandbox{
+				Sandbox: &v1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "sbx-1",
+						Namespace: "default",
+						Labels: map[string]string{
+							v1alpha1.LabelSandboxTemplate:  "test-template",
+							v1alpha1.LabelSandboxIsClaimed: "false",
+						},
+						Annotations: map[string]string{},
+					},
+					Spec: v1alpha1.SandboxSpec{
+						EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+							Template: &corev1.PodTemplateSpec{
+								Spec: tt.templateSpec,
+							},
+						},
+					},
+				},
+			}
+
+			err := modifyPickedSandbox(sbx, infra.LockTypeUpdate, infra.ClaimSandboxOptions{
+				User:     "u1",
+				Template: "test-template",
+				InplaceUpdate: &config.InplaceUpdateOptions{
+					Resources: &config.InplaceUpdateResourcesOptions{
+						ScaleFactor: tt.factor,
+					},
+				},
+			})
+			require.NoError(t, err)
+
+			if tt.wantReqCPU > 0 {
+				assert.Equal(t, tt.wantReqCPU, sbx.Spec.Template.Spec.Containers[0].Resources.Requests.Cpu().MilliValue())
+			}
+			if tt.wantLimCPU > 0 {
+				assert.Equal(t, tt.wantLimCPU, sbx.Spec.Template.Spec.Containers[0].Resources.Limits.Cpu().MilliValue())
+			}
+			if tt.wantSidecarCPU > 0 {
+				assert.Equal(t, tt.wantSidecarCPU, sbx.Spec.Template.Spec.Containers[1].Resources.Limits.Cpu().MilliValue())
+			}
+		})
+	}
+}
+
+func TestModifyPickedSandboxCPUNilTemplate(t *testing.T) {
+	sbx := &Sandbox{
+		Sandbox: &v1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        "sbx-1",
+				Namespace:   "default",
+				Labels:      map[string]string{},
+				Annotations: map[string]string{},
+			},
+			Spec: v1alpha1.SandboxSpec{
+				EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+					Template: nil,
+				},
+			},
+		},
+	}
+
+	err := modifyPickedSandbox(sbx, infra.LockTypeUpdate, infra.ClaimSandboxOptions{
+		User:     "u1",
+		Template: "test-template",
+		InplaceUpdate: &config.InplaceUpdateOptions{
+			Resources: &config.InplaceUpdateResourcesOptions{
+				ScaleFactor: 2,
+			},
+		},
+	})
+	require.NoError(t, err)
+	assert.Nil(t, sbx.Spec.Template)
+}
+
+func TestBuildContainerCPUTargets(t *testing.T) {
+	tests := []struct {
+		name       string
+		podSpec    corev1.PodSpec
+		wantNames  []string
+		wantReqCPU map[string]int64
+		wantLimCPU map[string]int64
+	}{
+		{
+			name: "only requests",
+			podSpec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{Name: "c1", Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m")},
+					}},
+				},
+			},
+			wantNames:  []string{"c1"},
+			wantReqCPU: map[string]int64{"c1": 100},
+			wantLimCPU: map[string]int64{},
+		},
+		{
+			name: "only limits",
+			podSpec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{Name: "c1", Resources: corev1.ResourceRequirements{
+						Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("200m")},
+					}},
+				},
+			},
+			wantNames:  []string{"c1"},
+			wantReqCPU: map[string]int64{},
+			wantLimCPU: map[string]int64{"c1": 200},
+		},
+		{
+			name: "no cpu resources",
+			podSpec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{Name: "c1", Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("128Mi")},
+					}},
+				},
+			},
+			wantNames:  []string{},
+			wantReqCPU: map[string]int64{},
+			wantLimCPU: map[string]int64{},
+		},
+		{
+			name: "init container with cpu",
+			podSpec: corev1.PodSpec{
+				InitContainers: []corev1.Container{
+					{Name: "init", Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("50m")},
+						Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m")},
+					}},
+				},
+				Containers: []corev1.Container{
+					{Name: "main", Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("200m")},
+					}},
+				},
+			},
+			wantNames:  []string{"init", "main"},
+			wantReqCPU: map[string]int64{"init": 50, "main": 200},
+			wantLimCPU: map[string]int64{"init": 100},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pod := &corev1.Pod{Spec: tt.podSpec}
+			targets := buildContainerCPUTargets(pod)
+			if len(tt.wantNames) == 0 {
+				assert.Empty(t, targets)
+				return
+			}
+			for _, name := range tt.wantNames {
+				target, ok := targets[name]
+				require.True(t, ok, "expected container %s in targets", name)
+				if req, ok := tt.wantReqCPU[name]; ok {
+					assert.Equal(t, req, target.request.MilliValue())
+				}
+				if lim, ok := tt.wantLimCPU[name]; ok {
+					assert.Equal(t, lim, target.limit.MilliValue())
+				}
+			}
+		})
+	}
+}
+
+func TestIsPodCPUResizeApplied(t *testing.T) {
+	tests := []struct {
+		name                  string
+		targets               map[string]containerCPUTarget
+		containerStatuses     []corev1.ContainerStatus
+		initContainerStatuses []corev1.ContainerStatus
+		want                  bool
+	}{
+		{
+			name:    "empty targets",
+			targets: map[string]containerCPUTarget{},
+			want:    false,
+		},
+		{
+			name:    "container status missing",
+			targets: map[string]containerCPUTarget{"main": {request: resource.MustParse("100m"), hasRequest: true}},
+			containerStatuses: []corev1.ContainerStatus{
+				{Name: "sidecar", Resources: &corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m")},
+				}},
+			},
+			want: false,
+		},
+		{
+			name:    "nil resources in status",
+			targets: map[string]containerCPUTarget{"main": {request: resource.MustParse("100m"), hasRequest: true}},
+			containerStatuses: []corev1.ContainerStatus{
+				{Name: "main", Resources: nil},
+			},
+			want: false,
+		},
+		{
+			name:    "request not matching",
+			targets: map[string]containerCPUTarget{"main": {request: resource.MustParse("200m"), hasRequest: true}},
+			containerStatuses: []corev1.ContainerStatus{
+				{Name: "main", Resources: &corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m")},
+				}},
+			},
+			want: false,
+		},
+		{
+			name:    "limit not matching",
+			targets: map[string]containerCPUTarget{"main": {limit: resource.MustParse("500m"), hasLimit: true}},
+			containerStatuses: []corev1.ContainerStatus{
+				{Name: "main", Resources: &corev1.ResourceRequirements{
+					Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("400m")},
+				}},
+			},
+			want: false,
+		},
+		{
+			name:    "applied",
+			targets: map[string]containerCPUTarget{"main": {request: resource.MustParse("200m"), limit: resource.MustParse("400m"), hasRequest: true, hasLimit: true}},
+			containerStatuses: []corev1.ContainerStatus{
+				{Name: "main", Resources: &corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("200m")},
+					Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("400m")},
+				}},
+			},
+			want: true,
+		},
+		{
+			name:    "init container applied",
+			targets: map[string]containerCPUTarget{"init": {request: resource.MustParse("50m"), hasRequest: true}},
+			containerStatuses: []corev1.ContainerStatus{
+				{Name: "main", Resources: &corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("200m")},
+				}},
+			},
+			initContainerStatuses: []corev1.ContainerStatus{
+				{Name: "init", Resources: &corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("50m")},
+				}},
+			},
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pod := &corev1.Pod{
+				Status: corev1.PodStatus{
+					ContainerStatuses:     tt.containerStatuses,
+					InitContainerStatuses: tt.initContainerStatuses,
+				},
+			}
+			got := isPodCPUResizeApplied(pod, tt.targets)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestScaleCPUQuantity(t *testing.T) {
+	tests := []struct {
+		name   string
+		q      resource.Quantity
+		factor float64
+		want   int64
+	}{
+		{
+			name:   "scale up 250m * 2 = 500m",
+			q:      resource.MustParse("250m"),
+			factor: 2,
+			want:   500,
+		},
+		{
+			name:   "scale down 500m * 0.5 = 250m",
+			q:      resource.MustParse("500m"),
+			factor: 0.5,
+			want:   250,
+		},
+		{
+			name:   "fractional result rounds up",
+			q:      resource.MustParse("100m"),
+			factor: 1.5,
+			want:   150,
+		},
+		{
+			name:   "scale to 1m when result would be 0",
+			q:      resource.MustParse("1m"),
+			factor: 0.1,
+			want:   1, // clamped to minimum 1m
+		},
+		{
+			name:   "integer cpu 1 * 2 = 2000m",
+			q:      resource.MustParse("1"),
+			factor: 2,
+			want:   2000,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := scaleCPUQuantity(tt.q, tt.factor)
+			assert.Equal(t, tt.want, got.MilliValue())
+		})
+	}
+}
+
+func TestCheckSandboxInplaceFeasible(t *testing.T) {
+	tests := []struct {
+		name         string
+		sbx          *v1alpha1.Sandbox
+		expectReady  bool
+		expectErr    bool
+		errorMessage string
+	}{
+		{
+			name: "observed generation not synced",
+			sbx: &v1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "sbx-1",
+					Namespace:  "default",
+					Generation: 2,
+				},
+				Status: v1alpha1.SandboxStatus{
+					ObservedGeneration: 1,
+				},
+			},
+			expectReady: false,
+		},
+		{
+			name: "inplace update in progress is feasible",
+			sbx: &v1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "sbx-2",
+					Namespace:  "default",
+					Generation: 2,
+				},
+				Status: v1alpha1.SandboxStatus{
+					ObservedGeneration: 2,
+					Conditions: []metav1.Condition{
+						{
+							Type:   string(v1alpha1.SandboxConditionInplaceUpdate),
+							Status: metav1.ConditionFalse,
+							Reason: v1alpha1.SandboxInplaceUpdateReasonInplaceUpdating,
+						},
+					},
+				},
+			},
+			expectReady: true,
+		},
+		{
+			name: "ready start container failed should return error",
+			sbx: &v1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "sbx-3",
+					Namespace:  "default",
+					Generation: 2,
+				},
+				Status: v1alpha1.SandboxStatus{
+					ObservedGeneration: 2,
+					Conditions: []metav1.Condition{
+						{
+							Type:    string(v1alpha1.SandboxConditionReady),
+							Status:  metav1.ConditionFalse,
+							Reason:  v1alpha1.SandboxReadyReasonStartContainerFailed,
+							Message: "image pull failed",
+						},
+					},
+				},
+			},
+			expectErr:    true,
+			errorMessage: "image pull failed",
+		},
+		{
+			name: "inplace update succeeded is feasible",
+			sbx: &v1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "sbx-4",
+					Namespace:  "default",
+					Generation: 2,
+				},
+				Status: v1alpha1.SandboxStatus{
+					ObservedGeneration: 2,
+					Conditions: []metav1.Condition{
+						{
+							Type:   string(v1alpha1.SandboxConditionInplaceUpdate),
+							Status: metav1.ConditionTrue,
+							Reason: v1alpha1.SandboxInplaceUpdateReasonSucceeded,
+						},
+					},
+				},
+			},
+			expectReady: true,
+		},
+		{
+			name: "ready-only should not be treated as inplace feasible",
+			sbx: &v1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "sbx-5",
+					Namespace:  "default",
+					Generation: 2,
+				},
+				Status: v1alpha1.SandboxStatus{
+					ObservedGeneration: 2,
+					Phase:              v1alpha1.SandboxRunning,
+					Conditions: []metav1.Condition{
+						{
+							Type:   string(v1alpha1.SandboxConditionReady),
+							Status: metav1.ConditionTrue,
+							Reason: v1alpha1.SandboxReadyReasonPodReady,
+						},
+					},
+					PodInfo: v1alpha1.PodInfo{
+						PodIP: "1.2.3.4",
+					},
+				},
+			},
+			expectReady: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ready, err := checkSandboxInplaceFeasible(t.Context(), tt.sbx)
+			assert.Equal(t, tt.expectReady, ready)
+			if tt.expectErr {
+				require.Error(t, err)
+				if tt.errorMessage != "" {
+					assert.Contains(t, err.Error(), tt.errorMessage)
+				}
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestBuildCPUResizedPod(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-pod",
+			Namespace: "default",
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{
+					Name: "main",
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceCPU:    resource.MustParse("250m"),
+							corev1.ResourceMemory: resource.MustParse("256Mi"),
+						},
+						Limits: corev1.ResourceList{
+							corev1.ResourceCPU:    resource.MustParse("250m"),
+							corev1.ResourceMemory: resource.MustParse("256Mi"),
+						},
+					},
+				},
+			},
+		},
+		Status: corev1.PodStatus{
+			QOSClass: corev1.PodQOSGuaranteed,
+		},
+	}
+
+	got, changed, err := buildCPUResizedPod(pod, 2)
+	require.NoError(t, err)
+	require.True(t, changed)
+	assert.Equal(t, int64(500), got.Spec.Containers[0].Resources.Requests.Cpu().MilliValue())
+	assert.Equal(t, int64(500), got.Spec.Containers[0].Resources.Limits.Cpu().MilliValue())
+}
+
+func TestValidateAndInitClaimOptions_CPUResize(t *testing.T) {
+	_, err := ValidateAndInitClaimOptions(infra.ClaimSandboxOptions{
+		User:     "u",
+		Template: "t",
+		InplaceUpdate: &config.InplaceUpdateOptions{
+			Resources: &config.InplaceUpdateResourcesOptions{
+				ScaleFactor: 1,
+			},
+		},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cpu scale factor should be greater than 1")
+}
+
+func TestWaitForPodResizeState(t *testing.T) {
+	targetPod := &corev1.Pod{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{
+					Name: "main",
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceCPU: resource.MustParse("500m"),
+						},
+						Limits: corev1.ResourceList{
+							corev1.ResourceCPU: resource.MustParse("1000m"),
+						},
+					},
+				},
+			},
+		},
+	}
+	tests := []struct {
+		name             string
+		returnOnFeasible bool
+		conditions       []corev1.PodCondition
+		containerStatus  []corev1.ContainerStatus
+		resizeStatus     corev1.PodResizeStatus
+		expectErr        string
+	}{
+		{
+			name:             "return when feasible",
+			returnOnFeasible: true,
+			conditions: []corev1.PodCondition{
+				{
+					Type:   corev1.PodResizeInProgress,
+					Status: corev1.ConditionTrue,
+				},
+			},
+		},
+		{
+			name:             "infeasible should fail",
+			returnOnFeasible: true,
+			conditions: []corev1.PodCondition{
+				{
+					Type:    corev1.PodResizePending,
+					Status:  corev1.ConditionTrue,
+					Reason:  corev1.PodReasonInfeasible,
+					Message: "insufficient cpu",
+				},
+			},
+			expectErr: "infeasible",
+		},
+		{
+			name:             "completed without feasible return",
+			returnOnFeasible: false,
+			conditions:       nil,
+			containerStatus: []corev1.ContainerStatus{
+				{
+					Name: "main",
+					Resources: &corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceCPU: resource.MustParse("500m"),
+						},
+						Limits: corev1.ResourceList{
+							corev1.ResourceCPU: resource.MustParse("1000m"),
+						},
+					},
+				},
+			},
+			resizeStatus: "",
+		},
+		{
+			name:             "non-feasible path should not succeed without resize signal or applied status",
+			returnOnFeasible: false,
+			conditions:       nil,
+			resizeStatus:     "",
+			expectErr:        "wait for pod resize state",
+		},
+		{
+			name:             "deferred should timeout with pending reason",
+			returnOnFeasible: false,
+			conditions: []corev1.PodCondition{
+				{
+					Type:    corev1.PodResizePending,
+					Status:  corev1.ConditionTrue,
+					Reason:  corev1.PodReasonDeferred,
+					Message: "Node didn't have enough resource: cpu",
+				},
+			},
+			expectErr: "last pending reason=Deferred",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := clients.NewFakeClientSet(t)
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-pod",
+					Namespace: "default",
+				},
+				Status: corev1.PodStatus{
+					Conditions:        tt.conditions,
+					Resize:            tt.resizeStatus,
+					ContainerStatuses: tt.containerStatus,
+				},
+			}
+			createdPod, err := client.K8sClient.CoreV1().Pods("default").Create(t.Context(), pod, metav1.CreateOptions{})
+			require.NoError(t, err)
+			createdPod.Status = pod.Status
+			_, err = client.K8sClient.CoreV1().Pods("default").UpdateStatus(t.Context(), createdPod, metav1.UpdateOptions{})
+			require.NoError(t, err)
+
+			err = waitForPodResizeState(t.Context(), client, "default", "test-pod", targetPod, 500*time.Millisecond, tt.returnOnFeasible)
+			if tt.expectErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectErr)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+func KeepMakingAllSandboxesReady(ctx context.Context, client clients.SandboxClient) {
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			sandboxList, err := client.ApiV1alpha1().Sandboxes("default").List(context.Background(), metav1.ListOptions{})
+			if err != nil {
+				// Don't use require.NoError in goroutine - causes data race
+				continue
+			}
+			for _, sbx := range sandboxList.Items {
+				// Skip already ready sandboxes to reduce unnecessary updates
+				currentState, _ := sandboxutils.GetSandboxState(&sbx)
+				if currentState == v1alpha1.SandboxStateRunning {
+					continue
+				}
+
+				sbx.Status = v1alpha1.SandboxStatus{
+					Phase:              v1alpha1.SandboxRunning,
+					ObservedGeneration: sbx.Generation, // Important: sync generation
+					Conditions: []metav1.Condition{
+						{
+							Type:   string(v1alpha1.SandboxConditionReady),
+							Status: metav1.ConditionTrue,
+							Reason: v1alpha1.SandboxReadyReasonPodReady,
+						},
+					},
+					PodInfo: v1alpha1.PodInfo{
+						PodIP: "1.2.3.4",
+					},
+				}
+				updated, err := client.ApiV1alpha1().Sandboxes(sbx.Namespace).UpdateStatus(context.Background(), &sbx, metav1.UpdateOptions{})
+				if err != nil {
+					fmt.Printf("failed to update sandbox status: %v\n", err)
+					continue
+				}
+				// Record the expected version to help InplaceRefresh
+				if updated != nil {
+					utils.ResourceVersionExpectationExpect(updated)
+				}
+			}
+		}
 	}
 }
 

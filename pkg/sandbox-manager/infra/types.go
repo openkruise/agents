@@ -24,7 +24,7 @@ type ClaimSandboxOptions struct {
 	Modifier func(sandbox Sandbox) `json:"-"`
 	// Set ReserveFailedSandbox to true to reserve failed sandboxes
 	ReserveFailedSandbox bool `json:"reserveFailedSandbox"`
-	// Set InplaceUpdate to non-empty string trigger an inplace-update
+	// Set InplaceUpdate to trigger an inplace-update (image and/or resources)
 	InplaceUpdate *config.InplaceUpdateOptions `json:"inplaceUpdate"`
 	// Set InitRuntime to non-nil value to init the agent-runtime
 	InitRuntime *config.InitRuntimeOptions `json:"initRuntime"`
@@ -59,16 +59,17 @@ type CreateCheckpointOptions struct {
 }
 
 type ClaimMetrics struct {
-	Retries     int
-	Total       time.Duration
-	Wait        time.Duration
-	RetryCost   time.Duration
-	PickAndLock time.Duration
-	WaitReady   time.Duration
-	InitRuntime time.Duration
-	CSIMount    time.Duration
-	LockType    LockType
-	LastError   error
+	Retries       int
+	Total         time.Duration
+	Wait          time.Duration
+	RetryCost     time.Duration
+	PickAndLock   time.Duration
+	WaitReady     time.Duration
+	InplaceUpdate time.Duration
+	InitRuntime   time.Duration
+	CSIMount      time.Duration
+	LockType      LockType
+	LastError     error
 }
 
 type LockType string
@@ -88,8 +89,8 @@ func (m ClaimMetrics) String() string {
 		replacer := strings.NewReplacer("\n", " ", "\r", " ", "\t", " ")
 		lastErrStr = replacer.Replace(errMsg)
 	}
-	return fmt.Sprintf("ClaimMetrics{Retries: %d, Total: %v, Wait: %v, RetryCost: %v, PickAndLock: %v, LockType: %v, WaitReady: %v, InitRuntime: %v, CSIMount: %v, LastError: %v}",
-		m.Retries, m.Total, m.Wait, m.RetryCost, m.PickAndLock, m.LockType, m.WaitReady, m.InitRuntime, m.CSIMount, lastErrStr)
+	return fmt.Sprintf("ClaimMetrics{Retries: %d, Total: %v, Wait: %v, RetryCost: %v, PickAndLock: %v, LockType: %v, WaitReady: %v, InplaceUpdate: %v, InitRuntime: %v, CSIMount: %v, LastError: %v}",
+		m.Retries, m.Total, m.Wait, m.RetryCost, m.PickAndLock, m.LockType, m.WaitReady, m.InplaceUpdate, m.InitRuntime, m.CSIMount, lastErrStr)
 }
 
 type CloneMetrics struct {
