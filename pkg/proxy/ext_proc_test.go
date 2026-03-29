@@ -498,7 +498,7 @@ func TestServer_Process(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Create server
-			server := NewServer(tt.adapter, config.SandboxManagerOptions{ExtProcMaxConcurrency: 1000})
+			server := NewServer(tt.adapter, nil, config.SandboxManagerOptions{ExtProcMaxConcurrency: 1000})
 
 			// Setup routes
 			for _, route := range tt.setupRoutes {
@@ -606,7 +606,7 @@ func TestServer_Run_Stop(t *testing.T) {
 	}
 
 	// Create server
-	server := NewServer(adapter, config.SandboxManagerOptions{ExtProcMaxConcurrency: 1000})
+	server := NewServer(adapter, nil, config.SandboxManagerOptions{ExtProcMaxConcurrency: 1000})
 
 	// Start server in background
 	go func() {
@@ -618,5 +618,5 @@ func TestServer_Run_Stop(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 
 	// Stop server
-	server.Stop()
+	server.Stop(t.Context())
 }

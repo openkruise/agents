@@ -5,6 +5,7 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/registry"
 )
 
@@ -45,7 +46,7 @@ func (f *sandboxFilter) DecodeHeaders(header api.RequestHeaderMap, endStream boo
 		logger.Debug("Using default port", zap.String("port", port))
 	}
 
-	podIP, ok := registry.Get(sandboxID)
+	route, ok := registry.GetRegistry().Get(sandboxID)
 	if !ok {
 		logger.Warn("Sandbox not found in registry", zap.String("sandboxID", sandboxID))
 		f.callbacks.DecoderFilterCallbacks().SendLocalReply(
@@ -58,7 +59,20 @@ func (f *sandboxFilter) DecodeHeaders(header api.RequestHeaderMap, endStream boo
 		return api.LocalReply
 	}
 
-	upstreamHost := podIP + ":" + port
+	// Check if sandbox is running (consistent with proxy ext_proc.go)
+	if route.State != agentsv1alpha1.SandboxStateRunning {
+		logger.Warn("Sandbox is not running", zap.String("sandboxID", sandboxID), zap.String("state", route.State))
+		f.callbacks.DecoderFilterCallbacks().SendLocalReply(
+			502,
+			"healthy sandbox not found: "+sandboxID,
+			nil,
+			-1,
+			"sandbox_not_running",
+		)
+		return api.LocalReply
+	}
+
+	upstreamHost := route.IP + ":" + port
 	f.callbacks.StreamInfo().DynamicMetadata().Set("envoy.lb.original_dst", "host", upstreamHost)
 
 	logger.Debug("Upstream override set successfully", zap.String("upstreamHost", upstreamHost))

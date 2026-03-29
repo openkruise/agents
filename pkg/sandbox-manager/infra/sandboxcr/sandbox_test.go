@@ -221,7 +221,7 @@ func TestSandbox_InplaceRefresh(t *testing.T) {
 
 	cache, clientSet, err := NewTestCache(t)
 	assert.NoError(t, err)
-	defer cache.Stop()
+	defer cache.Stop(t.Context())
 	client := clientSet.SandboxClient
 	_, err = client.ApiV1alpha1().Sandboxes("default").Create(context.Background(), initialSandbox, metav1.CreateOptions{})
 	assert.NoError(t, err)
@@ -393,7 +393,7 @@ func TestSandbox_SaveTimeout(t *testing.T) {
 
 			cache, clientSet, err := NewTestCache(t)
 			assert.NoError(t, err)
-			defer cache.Stop()
+			defer cache.Stop(t.Context())
 			client := clientSet.SandboxClient
 			_, err = client.ApiV1alpha1().Sandboxes("default").Create(context.Background(), sandbox, metav1.CreateOptions{})
 			assert.NoError(t, err)
@@ -670,7 +670,7 @@ func TestSandbox_CSIMount(t *testing.T) {
 
 			cache, clientSet, err := NewTestCache(t)
 			assert.NoError(t, err)
-			defer cache.Stop()
+			defer cache.Stop(t.Context())
 			client := clientSet.SandboxClient
 			sbx := &v1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{

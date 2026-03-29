@@ -30,6 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/registry"
 )
 
@@ -39,7 +40,7 @@ func TestSandboxReconciler_Reconcile_SandboxNotFound(t *testing.T) {
 	_ = agentsv1alpha1.AddToScheme(scheme)
 
 	// Pre-populate registry with an entry that should be removed
-	registry.Update("default--deleted-sandbox", "10.0.0.1")
+	registry.GetRegistry().Update("default--deleted-sandbox", proxy.Route{IP: "10.0.0.1", ResourceVersion: "1"})
 
 	client := fake.NewClientBuilder().WithScheme(scheme).Build()
 	reconciler := &SandboxReconciler{
@@ -63,7 +64,7 @@ func TestSandboxReconciler_Reconcile_SandboxNotFound(t *testing.T) {
 	}
 
 	// Verify registry entry was deleted
-	_, found := registry.Get("default--deleted-sandbox")
+	_, found := registry.GetRegistry().Get("default--deleted-sandbox")
 	if found {
 		t.Error("Expected registry entry to be deleted")
 	}
@@ -90,7 +91,7 @@ func TestSandboxReconciler_Reconcile_SandboxBeingDeleted(t *testing.T) {
 	}
 
 	// Pre-populate registry
-	registry.Update("default--deleting-sandbox", "10.0.0.2")
+	registry.GetRegistry().Update("default--deleting-sandbox", proxy.Route{IP: "10.0.0.2", ResourceVersion: "1"})
 
 	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(sandbox).Build()
 	reconciler := &SandboxReconciler{
@@ -114,7 +115,7 @@ func TestSandboxReconciler_Reconcile_SandboxBeingDeleted(t *testing.T) {
 	}
 
 	// Verify registry entry was deleted
-	_, found := registry.Get("default--deleting-sandbox")
+	_, found := registry.GetRegistry().Get("default--deleting-sandbox")
 	if found {
 		t.Error("Expected registry entry to be deleted when sandbox is being deleted")
 	}
@@ -158,10 +159,16 @@ func TestSandboxReconciler_Reconcile_SandboxNoPodIP(t *testing.T) {
 		t.Error("Expected no requeue")
 	}
 
-	// Verify registry was not updated
-	_, found := registry.Get("default--no-ip-sandbox")
-	if found {
-		t.Error("Expected registry to not be updated when sandbox has no pod IP")
+	// Verify registry was updated with state="creating" (consistent with sandbox-manager behavior)
+	route, found := registry.GetRegistry().Get("default--no-ip-sandbox")
+	if !found {
+		t.Error("Expected registry entry to be created with creating state")
+	}
+	if route.IP != "" {
+		t.Errorf("Expected empty IP, got %s", route.IP)
+	}
+	if route.State != agentsv1alpha1.SandboxStateCreating {
+		t.Errorf("Expected state %s, got %s", agentsv1alpha1.SandboxStateCreating, route.State)
 	}
 }
 
@@ -204,16 +211,16 @@ func TestSandboxReconciler_Reconcile_SandboxWithPodIP(t *testing.T) {
 	}
 
 	// Verify registry was updated
-	ip, found := registry.Get("default--running-sandbox")
+	route, found := registry.GetRegistry().Get("default--running-sandbox")
 	if !found {
 		t.Error("Expected registry entry to be created")
 	}
-	if ip != "10.0.0.5" {
-		t.Errorf("Expected IP 10.0.0.5, got %s", ip)
+	if route.IP != "10.0.0.5" {
+		t.Errorf("Expected IP 10.0.0.5, got %s", route.IP)
 	}
 
 	// Cleanup
-	registry.Delete("default--running-sandbox")
+	registry.GetRegistry().Delete("default--running-sandbox")
 }
 
 func TestSandboxReconciler_Reconcile_UpdateExistingRegistryEntry(t *testing.T) {
@@ -222,7 +229,7 @@ func TestSandboxReconciler_Reconcile_UpdateExistingRegistryEntry(t *testing.T) {
 	_ = agentsv1alpha1.AddToScheme(scheme)
 
 	// Pre-populate registry with old IP
-	registry.Update("default--update-sandbox", "10.0.0.1")
+	registry.GetRegistry().Update("default--update-sandbox", proxy.Route{IP: "10.0.0.1", ResourceVersion: "1"})
 
 	sandbox := &agentsv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
@@ -255,16 +262,16 @@ func TestSandboxReconciler_Reconcile_UpdateExistingRegistryEntry(t *testing.T) {
 	}
 
 	// Verify registry was updated with new IP
-	ip, found := registry.Get("default--update-sandbox")
+	route, found := registry.GetRegistry().Get("default--update-sandbox")
 	if !found {
 		t.Error("Expected registry entry to exist")
 	}
-	if ip != "10.0.0.10" {
-		t.Errorf("Expected IP 10.0.0.10, got %s", ip)
+	if route.IP != "10.0.0.10" {
+		t.Errorf("Expected IP 10.0.0.10, got %s", route.IP)
 	}
 
 	// Cleanup
-	registry.Delete("default--update-sandbox")
+	registry.GetRegistry().Delete("default--update-sandbox")
 }
 
 func TestSandboxReconciler_Reconcile_DifferentNamespaces(t *testing.T) {
@@ -331,16 +338,16 @@ func TestSandboxReconciler_Reconcile_DifferentNamespaces(t *testing.T) {
 			}
 
 			expectedKey := tt.namespace + "--" + tt.sboxName
-			ip, found := registry.Get(expectedKey)
+			route, found := registry.GetRegistry().Get(expectedKey)
 			if !found {
 				t.Errorf("Expected registry entry for key %s", expectedKey)
 			}
-			if ip != tt.podIP {
-				t.Errorf("Expected IP %s, got %s", tt.podIP, ip)
+			if route.IP != tt.podIP {
+				t.Errorf("Expected IP %s, got %s", tt.podIP, route.IP)
 			}
 
 			// Cleanup
-			registry.Delete(expectedKey)
+			registry.GetRegistry().Delete(expectedKey)
 		})
 	}
 }
@@ -418,16 +425,16 @@ func TestSandboxReconciler_Reconcile_ConcurrentUpdates(t *testing.T) {
 	// Verify all entries were added
 	for i, s := range sandboxes {
 		key := "default--" + s.Name
-		ip, found := registry.Get(key)
+		route, found := registry.GetRegistry().Get(key)
 		if !found {
 			t.Errorf("Expected registry entry for %s", key)
 		}
 		expectedIP := "10.0.0." + string(rune('1'+i))
-		if ip != expectedIP {
-			t.Errorf("Expected IP %s, got %s", expectedIP, ip)
+		if route.IP != expectedIP {
+			t.Errorf("Expected IP %s, got %s", expectedIP, route.IP)
 		}
 		// Cleanup
-		registry.Delete(key)
+		registry.GetRegistry().Delete(key)
 	}
 }
 
@@ -531,16 +538,16 @@ func TestSandboxReconciler_Reconcile_SandboxWithIPv6(t *testing.T) {
 	}
 
 	// Verify registry was updated with IPv6 address
-	ip, found := registry.Get("default--ipv6-sandbox")
+	route, found := registry.GetRegistry().Get("default--ipv6-sandbox")
 	if !found {
 		t.Error("Expected registry entry to be created")
 	}
-	if ip != "2001:db8::1" {
-		t.Errorf("Expected IP 2001:db8::1, got %s", ip)
+	if route.IP != "2001:db8::1" {
+		t.Errorf("Expected IP 2001:db8::1, got %s", route.IP)
 	}
 
 	// Cleanup
-	registry.Delete("default--ipv6-sandbox")
+	registry.GetRegistry().Delete("default--ipv6-sandbox")
 }
 
 func TestSandboxReconciler_Reconcile_MultipleReconciles(t *testing.T) {
@@ -584,17 +591,17 @@ func TestSandboxReconciler_Reconcile_MultipleReconciles(t *testing.T) {
 		}
 
 		// Verify registry still has correct IP
-		ip, found := registry.Get("default--multi-reconcile-sandbox")
+		route, found := registry.GetRegistry().Get("default--multi-reconcile-sandbox")
 		if !found {
 			t.Errorf("Iteration %d: Expected registry entry to exist", i)
 		}
-		if ip != "10.0.0.1" {
-			t.Errorf("Iteration %d: Expected IP 10.0.0.1, got %s", i, ip)
+		if route.IP != "10.0.0.1" {
+			t.Errorf("Iteration %d: Expected IP 10.0.0.1, got %s", i, route.IP)
 		}
 	}
 
 	// Cleanup
-	registry.Delete("default--multi-reconcile-sandbox")
+	registry.GetRegistry().Delete("default--multi-reconcile-sandbox")
 }
 
 func TestSandboxReconciler_Reconcile_SandboxNameWithSpecialCharacters(t *testing.T) {
@@ -661,16 +668,16 @@ func TestSandboxReconciler_Reconcile_SandboxNameWithSpecialCharacters(t *testing
 			}
 
 			expectedKey := tt.namespace + "--" + tt.sboxName
-			ip, found := registry.Get(expectedKey)
+			route, found := registry.GetRegistry().Get(expectedKey)
 			if !found {
 				t.Errorf("Expected registry entry for key %s", expectedKey)
 			}
-			if ip != tt.podIP {
-				t.Errorf("Expected IP %s, got %s", tt.podIP, ip)
+			if route.IP != tt.podIP {
+				t.Errorf("Expected IP %s, got %s", tt.podIP, route.IP)
 			}
 
 			// Cleanup
-			registry.Delete(expectedKey)
+			registry.GetRegistry().Delete(expectedKey)
 		})
 	}
 }
@@ -698,7 +705,7 @@ func TestSandboxReconciler_Reconcile_DeletionTimestampWithZeroTime(t *testing.T)
 	}
 
 	// Pre-populate registry
-	registry.Update("default--zero-deletion-sandbox", "10.0.0.77")
+	registry.GetRegistry().Update("default--zero-deletion-sandbox", proxy.Route{IP: "10.0.0.77", ResourceVersion: "1"})
 
 	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(sandbox).Build()
 	reconciler := &SandboxReconciler{
@@ -761,10 +768,16 @@ func TestSandboxReconciler_Reconcile_NilStatus(t *testing.T) {
 		t.Error("Expected no requeue")
 	}
 
-	// Verify registry was not updated (no pod IP)
-	_, found := registry.Get("default--nil-status-sandbox")
-	if found {
-		t.Error("Expected registry to not be updated when sandbox has no status")
+	// Verify registry was updated with state="creating" (consistent with sandbox-manager behavior)
+	route, found := registry.GetRegistry().Get("default--nil-status-sandbox")
+	if !found {
+		t.Error("Expected registry entry to be created with creating state")
+	}
+	if route.IP != "" {
+		t.Errorf("Expected empty IP, got %s", route.IP)
+	}
+	if route.State != agentsv1alpha1.SandboxStateCreating {
+		t.Errorf("Expected state %s, got %s", agentsv1alpha1.SandboxStateCreating, route.State)
 	}
 }
 
