@@ -273,7 +273,7 @@ func TestSandbox_SetPause(t *testing.T) {
 
 			cache, clientSet, err := NewTestCache(t)
 			require.NoError(t, err)
-			defer cache.Stop()
+			defer cache.Stop(t.Context())
 			client := clientSet.SandboxClient
 			CreateSandboxWithStatus(t, client, sandbox)
 			time.Sleep(10 * time.Millisecond)
@@ -374,7 +374,7 @@ func TestSandbox_ResumeConcurrent(t *testing.T) {
 
 	cache, clientSet, err := NewTestCache(t)
 	require.NoError(t, err)
-	defer cache.Stop()
+	defer cache.Stop(t.Context())
 	client := clientSet.SandboxClient
 	CreateSandboxWithStatus(t, client, sandbox)
 	time.Sleep(10 * time.Millisecond)

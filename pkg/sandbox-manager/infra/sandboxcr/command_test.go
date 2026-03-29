@@ -94,7 +94,7 @@ func TestSandbox_runCommandWithEnvd(t *testing.T) {
 
 			cache, clientSet, err := NewTestCache(t)
 			assert.NoError(t, err)
-			defer cache.Stop()
+			defer cache.Stop(t.Context())
 			client := clientSet.SandboxClient
 			sbx := &v1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{

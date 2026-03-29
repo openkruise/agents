@@ -23,6 +23,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
@@ -160,7 +161,9 @@ func CreateSandboxPool(t *testing.T, controller *Controller, name string, availa
 	}
 	client := controller.client.SandboxClient
 	_, err := client.ApiV1alpha1().SandboxSets(Namespace).Create(t.Context(), sbs, metav1.CreateOptions{})
-	require.NoError(t, err)
+	if err != nil && !errors.IsAlreadyExists(err) {
+		require.NoError(t, err)
+	}
 	require.Eventually(t, func() bool {
 		return controller.manager.GetInfra().HasTemplate(name)
 	}, time.Second, 10*time.Millisecond)
@@ -218,7 +221,6 @@ func CreateSandboxPool(t *testing.T, controller *Controller, name string, availa
 		return len(pool) == available && controller.manager.GetInfra().HasTemplate(name)
 	}, time.Second, 10*time.Millisecond)
 	return func() {
-		assert.NoError(t, client.ApiV1alpha1().SandboxSets(Namespace).Delete(context.Background(), name, metav1.DeleteOptions{}))
 		for i := 0; i < available; i++ {
 			assert.NoError(t, client.ApiV1alpha1().Sandboxes(Namespace).Delete(context.Background(), fmt.Sprintf("%s-%d", name, i), metav1.DeleteOptions{}))
 		}

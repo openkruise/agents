@@ -488,7 +488,7 @@ func TestCloneSandbox(t *testing.T) {
 
 			cache, clientSet, err := NewTestCache(t)
 			require.NoError(t, err)
-			defer cache.Stop()
+			defer cache.Stop(t.Context())
 			client := clientSet
 
 			tt.opts.CloneTimeout = 500 * time.Millisecond
@@ -594,7 +594,7 @@ func TestCloneSandbox_WithRateLimiter(t *testing.T) {
 
 	cache, clientSet, err := NewTestCache(t)
 	require.NoError(t, err)
-	defer cache.Stop()
+	defer cache.Stop(t.Context())
 	client := clientSet
 
 	template := "test-template"
@@ -674,7 +674,7 @@ func TestCloneSandbox_ContextCanceled(t *testing.T) {
 
 	cache, clientSet, err := NewTestCache(t)
 	require.NoError(t, err)
-	defer cache.Stop()
+	defer cache.Stop(t.Context())
 	client := clientSet
 
 	template := "test-template"
@@ -1057,7 +1057,7 @@ func TestCreateCheckPoint(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			cache, clientSet, err := NewTestCache(t)
 			require.NoError(t, err)
-			defer cache.Stop()
+			defer cache.Stop(t.Context())
 
 			ctx := t.Context()
 			ctx = context.WithValue(ctx, cpStatusKey{}, tt.cpStatus)
