@@ -11,9 +11,9 @@ spec:
     spec:
       initContainers:
         - name: runtime
-          image: agent-runtime:latest
+          image: ${RUNTIME_IMAGE}
           imagePullPolicy: IfNotPresent
-          command: [ "sh", "/workspace/entrypoint.sh" ]
+          command: [ "sh", "${RUNTIME_ENTRYPOINT}" ]
           volumeMounts:
             - name: envd-volume
               mountPath: /mnt/envd
@@ -23,7 +23,7 @@ spec:
           restartPolicy: Always
       containers:
         - name: sandbox
-          image: registry-ap-southeast-1.ack.aliyuncs.com/acs/code-interpreter:v1.6
+          image: ${CODE_INTERPRETER_IMAGE}
           imagePullPolicy: IfNotPresent
           env:
             - name: ENVD_DIR
