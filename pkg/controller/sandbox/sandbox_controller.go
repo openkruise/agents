@@ -121,26 +121,10 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 	}
 
 	logger.Info("Began to process Sandbox for reconcile")
-	if pod != nil {
-		core.ScaleExpectation.ObserveScale(utils.GetControllerKey(box), expectations.Create, pod.Name)
-	}
-	if isSatisfied, unsatisfiedDuration, _ := core.ScaleExpectation.SatisfiedExpectations(utils.GetControllerKey(box)); !isSatisfied {
-		if unsatisfiedDuration < expectations.ExpectationTimeout {
-			logger.Info("Not satisfied ScaleExpectation for Sandbox, wait for cache event")
-			return reconcile.Result{RequeueAfter: expectations.ExpectationTimeout - unsatisfiedDuration}, nil
-		}
-		klog.InfoS("ScaleExpectation unsatisfied overtime for Sandbox, wait for cache event timeout", "timeout", unsatisfiedDuration)
-		core.ScaleExpectation.DeleteExpectations(utils.GetControllerKey(box))
-	}
-	// If resourceVersion expectations have not satisfied yet, just skip this reconcile
-	core.ResourceVersionExpectations.Observe(box)
-	if isSatisfied, unsatisfiedDuration := core.ResourceVersionExpectations.IsSatisfied(box); !isSatisfied {
-		if unsatisfiedDuration < expectations.ExpectationTimeout {
-			logger.Info("Not satisfied resourceVersion for Sandbox, wait for cache event")
-			return reconcile.Result{RequeueAfter: expectations.ExpectationTimeout - unsatisfiedDuration}, nil
-		}
-		klog.InfoS("ResourceVersionExpectations unsatisfied overtime for Sandbox, wait for cache event timeout", "timeout", unsatisfiedDuration)
-		core.ResourceVersionExpectations.Delete(box)
+
+	// Check expectations
+	if requeue, result := r.checkExpectations(ctx, pod, box); requeue {
+		return result, nil
 	}
 
 	defer func() {
@@ -185,24 +169,9 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 	}
 
 	// Check ShutdownTime and PauseTime
-	now := metav1.Now()
-	var requeueAfter time.Duration
-	if box.Spec.ShutdownTime != nil && box.DeletionTimestamp == nil {
-		if box.Spec.ShutdownTime.Before(&now) {
-			logger.Info("sandbox shutdown time reached, will be deleted", "shutdownTime", box.Spec.ShutdownTime)
-			return ctrl.Result{}, r.Delete(ctx, box)
-		}
-		requeueAfter = box.Spec.ShutdownTime.Sub(now.Time)
-	}
-	if box.Spec.PauseTime != nil && !box.Spec.Paused {
-		if box.Spec.PauseTime.Before(&now) {
-			logger.Info("sandbox pause time reached, will be paused")
-			modified := box.DeepCopy()
-			patch := client.MergeFrom(box)
-			modified.Spec.Paused = true
-			return ctrl.Result{}, r.Patch(ctx, modified, patch)
-		}
-		requeueAfter = min(requeueAfter, box.Spec.PauseTime.Sub(now.Time))
+	requeueAfter, shouldReturn, returnErr := r.checkTimedActions(ctx, box)
+	if shouldReturn {
+		return ctrl.Result{}, returnErr
 	}
 
 	// calculate sandbox status
@@ -212,6 +181,45 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 		return reconcile.Result{RequeueAfter: requeueAfter}, r.updateSandboxStatus(ctx, *newStatus, box)
 	}
 
+	return r.handlePhaseTransition(ctx, args, newStatus, requeueAfter)
+}
+
+func (r *SandboxReconciler) handleTerminating(ctx context.Context, args core.EnsureFuncArgs) (ctrl.Result, error) {
+	pod, _, _ := args.Pod, args.Box, args.NewStatus
+	return ctrl.Result{}, r.getControl(pod).EnsureSandboxTerminated(ctx, args)
+}
+
+// checkTimedActions handles ShutdownTime and PauseTime checks
+func (r *SandboxReconciler) checkTimedActions(ctx context.Context, box *agentsv1alpha1.Sandbox) (time.Duration, bool, error) {
+	logger := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
+	now := metav1.Now()
+	var requeueAfter time.Duration
+
+	if box.Spec.ShutdownTime != nil && box.DeletionTimestamp == nil {
+		if box.Spec.ShutdownTime.Before(&now) {
+			logger.Info("sandbox shutdown time reached, will be deleted", "shutdownTime", box.Spec.ShutdownTime)
+			return 0, true, r.Delete(ctx, box)
+		}
+		requeueAfter = box.Spec.ShutdownTime.Sub(now.Time)
+	}
+	if box.Spec.PauseTime != nil && !box.Spec.Paused {
+		if box.Spec.PauseTime.Before(&now) {
+			logger.Info("sandbox pause time reached, will be paused")
+			modified := box.DeepCopy()
+			patch := client.MergeFrom(box)
+			modified.Spec.Paused = true
+			return 0, true, r.Patch(ctx, modified, patch)
+		}
+		requeueAfter = min(requeueAfter, box.Spec.PauseTime.Sub(now.Time))
+	}
+	return requeueAfter, false, nil
+}
+
+// handlePhaseTransition handles sandbox phase transitions
+func (r *SandboxReconciler) handlePhaseTransition(ctx context.Context, args core.EnsureFuncArgs, newStatus *agentsv1alpha1.SandboxStatus, requeueAfter time.Duration) (ctrl.Result, error) {
+	logger := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(args.Box))
+
+	var err error
 	switch newStatus.Phase {
 	case agentsv1alpha1.SandboxPending:
 		requeueAfter, err = r.getControl(args.Pod).EnsureSandboxRunning(ctx, args)
@@ -222,18 +230,50 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 	case agentsv1alpha1.SandboxResuming:
 		err = r.getControl(args.Pod).EnsureSandboxResumed(ctx, args)
 	default:
-		logger.Info("sandbox status phase is invalid", "phase", box.Status.Phase)
+		logger.Info("sandbox status phase is invalid", "phase", args.Box.Status.Phase)
 		return ctrl.Result{RequeueAfter: requeueAfter}, nil
 	}
 	if err != nil {
 		return reconcile.Result{}, err
 	}
-	return ctrl.Result{RequeueAfter: requeueAfter}, r.updateSandboxStatus(ctx, *newStatus, box)
+	return ctrl.Result{RequeueAfter: requeueAfter}, r.updateSandboxStatus(ctx, *newStatus, args.Box)
 }
 
-func (r *SandboxReconciler) handleTerminating(ctx context.Context, args core.EnsureFuncArgs) (ctrl.Result, error) {
-	pod, _, _ := args.Pod, args.Box, args.NewStatus
-	return ctrl.Result{}, r.getControl(pod).EnsureSandboxTerminated(ctx, args)
+// checkExpectations verifies scale and resource version expectations are satisfied
+func (r *SandboxReconciler) checkExpectations(ctx context.Context, pod *corev1.Pod, box *agentsv1alpha1.Sandbox) (bool, ctrl.Result) {
+	logger := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
+
+	if pod != nil {
+		core.ScaleExpectation.ObserveScale(utils.GetControllerKey(box), expectations.Create, pod.Name)
+		core.ResourceVersionExpectations.Observe(pod)
+		if isSatisfied, unsatisfiedDuration := core.ResourceVersionExpectations.IsSatisfied(pod); !isSatisfied {
+			if unsatisfiedDuration < expectations.ExpectationTimeout {
+				logger.Info("Not satisfied resourceVersion for Pod, wait for cache event")
+				return true, reconcile.Result{RequeueAfter: expectations.ExpectationTimeout - unsatisfiedDuration}
+			}
+			klog.InfoS("ResourceVersionExpectations unsatisfied overtime for Pod, wait for cache event timeout", "timeout", unsatisfiedDuration)
+			core.ResourceVersionExpectations.Delete(pod)
+		}
+	}
+	if isSatisfied, unsatisfiedDuration, _ := core.ScaleExpectation.SatisfiedExpectations(utils.GetControllerKey(box)); !isSatisfied {
+		if unsatisfiedDuration < expectations.ExpectationTimeout {
+			logger.Info("Not satisfied ScaleExpectation for Sandbox, wait for cache event")
+			return true, reconcile.Result{RequeueAfter: expectations.ExpectationTimeout - unsatisfiedDuration}
+		}
+		klog.InfoS("ScaleExpectation unsatisfied overtime for Sandbox, wait for cache event timeout", "timeout", unsatisfiedDuration)
+		core.ScaleExpectation.DeleteExpectations(utils.GetControllerKey(box))
+	}
+	// If resourceVersion expectations have not satisfied yet, just skip this reconcile
+	core.ResourceVersionExpectations.Observe(box)
+	if isSatisfied, unsatisfiedDuration := core.ResourceVersionExpectations.IsSatisfied(box); !isSatisfied {
+		if unsatisfiedDuration < expectations.ExpectationTimeout {
+			logger.Info("Not satisfied resourceVersion for Sandbox, wait for cache event")
+			return true, reconcile.Result{RequeueAfter: expectations.ExpectationTimeout - unsatisfiedDuration}
+		}
+		klog.InfoS("ResourceVersionExpectations unsatisfied overtime for Sandbox, wait for cache event timeout", "timeout", unsatisfiedDuration)
+		core.ResourceVersionExpectations.Delete(box)
+	}
+	return false, ctrl.Result{}
 }
 
 func isSandboxCompletedPhase(phase agentsv1alpha1.SandboxPhase) bool {
