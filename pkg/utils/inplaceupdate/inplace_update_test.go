@@ -16,11 +16,13 @@ package inplaceupdate
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
 	agentsapiv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -430,5 +432,151 @@ func TestIsInplaceUpdateCompleted(t *testing.T) {
 				t.Errorf("Expected completed=%v, got %v", tt.expectedCompleted, completed)
 			}
 		})
+	}
+}
+
+func TestResourceOnlyUpdatePayloads(t *testing.T) {
+	opts := InPlaceUpdateOptions{
+		Box: &agentsapiv1alpha1.Sandbox{
+			Spec: agentsapiv1alpha1.SandboxSpec{
+				EmbeddedSandboxTemplate: agentsapiv1alpha1.EmbeddedSandboxTemplate{
+					Template: &corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{
+									Name:  "main",
+									Image: "busybox:1.36",
+									Resources: corev1.ResourceRequirements{
+										Requests: corev1.ResourceList{
+											corev1.ResourceCPU: resource.MustParse("1000m"),
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		Pod: &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "p1",
+				Namespace: "default",
+			},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  "main",
+						Image: "busybox:1.36",
+						Resources: corev1.ResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceCPU: resource.MustParse("500m"),
+							},
+						},
+					},
+				},
+			},
+		},
+		Revision: "rev-resource-only",
+	}
+
+	patchBody := DefaultGeneratePatchBodyFunc(opts)
+	if patchBody == "" {
+		t.Fatalf("expected patch body for resource-only update")
+	}
+	if strings.Contains(patchBody, `"spec"`) {
+		t.Fatalf("resource-only patch should not contain spec, got: %s", patchBody)
+	}
+
+	resizeBody := DefaultGenerateResizeSubresourceBody(opts)
+	if resizeBody == nil {
+		t.Fatalf("expected resize subresource body")
+	}
+	got := resizeBody.Spec.Containers[0].Resources.Requests[corev1.ResourceCPU]
+	if got.MilliValue() != 1000 {
+		t.Fatalf("expected cpu request=1000m, got=%dm", got.MilliValue())
+	}
+}
+
+func TestIsInplaceUpdateCompletedWithResourceConditions(t *testing.T) {
+	state := &InPlaceUpdateState{
+		Revision:        "rev-1",
+		UpdateTimestamp: metav1.Now(),
+		UpdateResources: true,
+	}
+	raw, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("marshal state failed: %v", err)
+	}
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "p1",
+			Namespace: "default",
+			Annotations: map[string]string{
+				PodAnnotationInPlaceUpdateStateKey: string(raw),
+			},
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{
+					Name: "main",
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceCPU: resource.MustParse("1000m"),
+						},
+					},
+				},
+			},
+		},
+		Status: corev1.PodStatus{
+			Conditions: []corev1.PodCondition{
+				{
+					Type:   corev1.PodResizeInProgress,
+					Status: corev1.ConditionTrue,
+				},
+			},
+		},
+	}
+
+	if IsInplaceUpdateCompleted(context.Background(), pod) {
+		t.Fatalf("expected incomplete while PodResizeInProgress is true")
+	}
+
+	pod.Status.Conditions = nil
+	if IsInplaceUpdateCompleted(context.Background(), pod) {
+		t.Fatalf("expected incomplete when no resize signal and no applied resources")
+	}
+
+	pod.Status.Resize = corev1.PodResizeStatusInProgress
+	if IsInplaceUpdateCompleted(context.Background(), pod) {
+		t.Fatalf("expected incomplete while resize status is in progress")
+	}
+
+	pod.Status.Resize = ""
+	pod.Status.Conditions = []corev1.PodCondition{
+		{
+			Type:   corev1.PodResizeInProgress,
+			Status: corev1.ConditionFalse,
+		},
+	}
+	if IsInplaceUpdateCompleted(context.Background(), pod) {
+		t.Fatalf("expected incomplete when only resize signals exist but resources not applied")
+	}
+
+	pod.Status.Resize = ""
+	pod.Status.Conditions = nil
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{
+		{
+			Name: "main",
+			Resources: &corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("1000m"),
+				},
+			},
+		},
+	}
+	if !IsInplaceUpdateCompleted(context.Background(), pod) {
+		t.Fatalf("expected completed when resources are applied to container status")
 	}
 }

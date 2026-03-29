@@ -15,18 +15,20 @@ import (
 
 //goland:noinspection GoSnakeCaseUsage
 const (
-	ExtensionKeyClaimTimeout                  = v1alpha1.E2BPrefix + "claim-timeout-seconds"
-	ExtensionKeyWaitReadyTimeout              = v1alpha1.E2BPrefix + "wait-ready-timeout-seconds"
-	ExtensionKeyClaimWithImage                = v1alpha1.E2BPrefix + "image"
-	ExtensionKeyClaimWithCSIMount             = v1alpha1.E2BPrefix + "csi"
-	ExtensionKeyClaimWithCSIMount_VolumeName  = ExtensionKeyClaimWithCSIMount + "-volume-name"
-	ExtensionKeyClaimWithCSIMount_SubPath     = ExtensionKeyClaimWithCSIMount + "-subpath"
-	ExtensionKeyClaimWithCSIMount_MountPoint  = ExtensionKeyClaimWithCSIMount + "-mount-point"
-	ExtensionKeyClaimWithCSIMount_MountConfig = ExtensionKeyClaimWithCSIMount + "-volume-config"
-	ExtensionKeySkipInitRuntime               = v1alpha1.E2BPrefix + "skip-init-runtime"
-	ExtensionKeyReserveFailedSandbox          = v1alpha1.E2BPrefix + "reserve-failed-sandbox"
-	ExtensionKeyCreateOnNoStock               = v1alpha1.E2BPrefix + "create-on-no-stock"
-	ExtensionKeyNeverTimeout                  = v1alpha1.E2BPrefix + "never-timeout"
+	ExtensionKeyClaimTimeout                    = v1alpha1.E2BPrefix + "claim-timeout-seconds"
+	ExtensionKeyWaitReadyTimeout                = v1alpha1.E2BPrefix + "wait-ready-timeout-seconds"
+	ExtensionKeyClaimWithCPUScaleFactor         = v1alpha1.E2BPrefix + "claim-with-cpu-scale-factor"
+	ExtensionKeyClaimWithReturnOnResizeFeasible = v1alpha1.E2BPrefix + "claim-with-return-on-resize-feasible"
+	ExtensionKeyClaimWithImage                  = v1alpha1.E2BPrefix + "image"
+	ExtensionKeyClaimWithCSIMount               = v1alpha1.E2BPrefix + "csi"
+	ExtensionKeyClaimWithCSIMount_VolumeName    = ExtensionKeyClaimWithCSIMount + "-volume-name"
+	ExtensionKeyClaimWithCSIMount_SubPath       = ExtensionKeyClaimWithCSIMount + "-subpath"
+	ExtensionKeyClaimWithCSIMount_MountPoint    = ExtensionKeyClaimWithCSIMount + "-mount-point"
+	ExtensionKeyClaimWithCSIMount_MountConfig   = ExtensionKeyClaimWithCSIMount + "-volume-config"
+	ExtensionKeySkipInitRuntime                 = v1alpha1.E2BPrefix + "skip-init-runtime"
+	ExtensionKeyReserveFailedSandbox            = v1alpha1.E2BPrefix + "reserve-failed-sandbox"
+	ExtensionKeyCreateOnNoStock                 = v1alpha1.E2BPrefix + "create-on-no-stock"
+	ExtensionKeyNeverTimeout                    = v1alpha1.E2BPrefix + "never-timeout"
 )
 
 const (
@@ -86,6 +88,31 @@ func (r *NewSandboxRequest) parseExtensionImage() error {
 		r.Extensions.InplaceUpdate.Image = image
 		delete(r.Metadata, ExtensionKeyClaimWithImage)
 	}
+	if err := r.parseExtensionResources(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (r *NewSandboxRequest) parseExtensionResources() error {
+	scaleFactor, err := r.parseAndRemoveCPUScaleFactor(ExtensionKeyClaimWithCPUScaleFactor)
+	if err != nil {
+		return err
+	}
+	_, hasReturnOnFeasible := r.Metadata[ExtensionKeyClaimWithReturnOnResizeFeasible]
+	returnOnFeasible := r.Metadata[ExtensionKeyClaimWithReturnOnResizeFeasible] == v1alpha1.True
+	delete(r.Metadata, ExtensionKeyClaimWithReturnOnResizeFeasible)
+	if scaleFactor <= 0 {
+		if hasReturnOnFeasible {
+			return fmt.Errorf("%s requires %s to be set", ExtensionKeyClaimWithReturnOnResizeFeasible, ExtensionKeyClaimWithCPUScaleFactor)
+		}
+		return nil
+	}
+	if r.Extensions.InplaceUpdate.Resources == nil {
+		r.Extensions.InplaceUpdate.Resources = &InplaceUpdateResourcesExtension{}
+	}
+	r.Extensions.InplaceUpdate.Resources.CPUScaleFactor = scaleFactor
+	r.Extensions.InplaceUpdate.Resources.ReturnOnFeasible = returnOnFeasible
 	return nil
 }
 
@@ -177,6 +204,21 @@ func (r *NewSandboxRequest) parseAndRemoveIntExtension(key string) (int, error) 
 	return 0, nil
 }
 
+func (r *NewSandboxRequest) parseAndRemoveCPUScaleFactor(key string) (float64, error) {
+	if factorStr, ok := r.Metadata[key]; ok {
+		defer delete(r.Metadata, key)
+		factor, err := strconv.ParseFloat(factorStr, 64)
+		if err != nil {
+			return 0, fmt.Errorf("invalid cpu scale factor [%s]: %v", factorStr, err)
+		}
+		// Warm pool workflow expects up-scaling only.
+		if factor <= 1 {
+			return 0, fmt.Errorf("cpu scale factor should be greater than 1")
+		}
+		return factor, nil
+	}
+	return 0, nil
+}
 func (s *NewSnapshotRequest) ParseExtensions(headers http.Header) error {
 	// KeepRunning
 	switch headers.Get(ExtensionHeaderSnapshotKeepRunning) {

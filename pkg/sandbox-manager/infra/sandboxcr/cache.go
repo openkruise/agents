@@ -214,10 +214,11 @@ func (c *Cache) Refresh() {
 type WaitAction string
 
 const (
-	WaitActionResume     WaitAction = "Resume"
-	WaitActionPause      WaitAction = "Pause"
-	WaitActionWaitReady  WaitAction = "WaitReady"
-	WaitActionCheckpoint WaitAction = "Checkpoint"
+	WaitActionResume              WaitAction = "Resume"
+	WaitActionPause               WaitAction = "Pause"
+	WaitActionWaitReady           WaitAction = "WaitReady"
+	WaitActionCheckpoint          WaitAction = "Checkpoint"
+	WaitActionWaitInplaceFeasible WaitAction = "WaitInplaceFeasible"
 )
 
 type waitEntry[T client.Object] struct {

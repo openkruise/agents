@@ -864,6 +864,67 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 			},
 		},
 		{
+			name: "claim with inplaceUpdate resources",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim-cpu-resize",
+					Namespace: "default",
+					UID:       "test-uid-cpu-resize",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "test-template",
+					InplaceUpdate: &agentsv1alpha1.SandboxClaimInplaceUpdateOptions{
+						Resources: &agentsv1alpha1.SandboxClaimInplaceUpdateResourcesOptions{
+							CPUScaleFactor: "2",
+						},
+					},
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template",
+					Namespace: "default",
+				},
+			},
+			expectError: false,
+			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+				if opts.InplaceUpdate == nil || opts.InplaceUpdate.Resources == nil {
+					t.Fatal("InplaceUpdate.Resources should not be nil")
+				}
+				if opts.InplaceUpdate.Resources.ScaleFactor != 2 {
+					t.Errorf("InplaceUpdate.Resources.ScaleFactor = %v, want %v", opts.InplaceUpdate.Resources.ScaleFactor, 2.0)
+				}
+				if opts.InplaceUpdate.Resources.ReturnOnFeasible {
+					t.Errorf("InplaceUpdate.Resources.ReturnOnFeasible = %v, want %v", opts.InplaceUpdate.Resources.ReturnOnFeasible, false)
+				}
+			},
+		},
+		{
+			name: "claim with invalid inplaceUpdate resources cpu scale factor",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim-invalid-cpu-resize",
+					Namespace: "default",
+					UID:       "test-uid-invalid-cpu-resize",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "test-template",
+					InplaceUpdate: &agentsv1alpha1.SandboxClaimInplaceUpdateOptions{
+						Resources: &agentsv1alpha1.SandboxClaimInplaceUpdateResourcesOptions{
+							CPUScaleFactor: "1",
+						},
+					},
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template",
+					Namespace: "default",
+				},
+			},
+			expectError: true,
+		},
+		{
 			name: "claim with all fields",
 			claim: &agentsv1alpha1.SandboxClaim{
 				ObjectMeta: metav1.ObjectMeta{

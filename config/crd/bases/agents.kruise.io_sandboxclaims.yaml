@@ -109,10 +109,21 @@ spec:
                   while claiming
                 properties:
                   image:
-                    description: Image specifies the new image to update to
+                    description: Image specifies the new image to update to.
                     type: string
-                required:
-                - image
+                  resources:
+                    description: Resources specifies in-place resource update options.
+                    properties:
+                      cpuScaleFactor:
+                        description: |-
+                          ScaleFactor scales each container CPU request/limit by this factor.
+                          This is an upscale-only feature for warm-up pools.
+                          Value must be greater than 1.
+                        pattern: ^[1-9]\d*(\.\d+)?$
+                        type: string
+                    required:
+                    - cpuScaleFactor
+                    type: object
                 type: object
               labels:
                 additionalProperties:

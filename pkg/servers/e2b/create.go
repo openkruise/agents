@@ -73,9 +73,15 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 		}
 	}
 
-	if extension := request.Extensions.InplaceUpdate; extension.Image != "" {
+	if extension := request.Extensions.InplaceUpdate; extension.Image != "" || extension.Resources != nil {
 		opts.InplaceUpdate = &config.InplaceUpdateOptions{
 			Image: extension.Image,
+		}
+		if extension.Resources != nil && extension.Resources.CPUScaleFactor > 1 {
+			opts.InplaceUpdate.Resources = &config.InplaceUpdateResourcesOptions{
+				ScaleFactor:      extension.Resources.CPUScaleFactor,
+				ReturnOnFeasible: extension.Resources.ReturnOnFeasible,
+			}
 		}
 	}
 

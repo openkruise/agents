@@ -96,9 +96,21 @@ type SandboxClaimSpec struct {
 }
 
 type SandboxClaimInplaceUpdateOptions struct {
-	// Image specifies the new image to update to
-	// +kubebuilder:validation:Required
-	Image string `json:"image"`
+	// Image specifies the new image to update to.
+	// +optional
+	Image string `json:"image,omitempty"`
+
+	// Resources specifies in-place resource update options.
+	// +optional
+	Resources *SandboxClaimInplaceUpdateResourcesOptions `json:"resources,omitempty"`
+}
+
+type SandboxClaimInplaceUpdateResourcesOptions struct {
+	// ScaleFactor scales each container CPU request/limit by this factor.
+	// This is an upscale-only feature for warm-up pools.
+	// Value must be greater than 1.
+	// +kubebuilder:validation:Pattern=`^[1-9]\d*(\.\d+)?$`
+	CPUScaleFactor string `json:"cpuScaleFactor"`
 }
 
 // SandboxClaimStatus defines the observed state of SandboxClaim

@@ -26,6 +26,7 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
@@ -278,6 +279,236 @@ var _ = Describe("SandboxClaim", func() {
 			claimedSandboxes, err := listClaimedSandboxes(ctx, sandboxClaim)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(claimedSandboxes).To(HaveLen(1))
+		})
+	})
+
+	Context("CPU resize on claim", func() {
+		var (
+			sandboxSet      *agentsv1alpha1.SandboxSet
+			sandboxClaim    *agentsv1alpha1.SandboxClaim
+			warmSandboxName string
+		)
+
+		BeforeEach(func() {
+			sandboxSet = &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("test-pool-cpu-resize-%d", time.Now().UnixNano()),
+					Namespace: namespace,
+				},
+				Spec: agentsv1alpha1.SandboxSetSpec{
+					Replicas: 1,
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name:  "test-container",
+										Image: "nginx:stable-alpine3.23",
+										Resources: corev1.ResourceRequirements{
+											Requests: corev1.ResourceList{
+												corev1.ResourceCPU:    resource.MustParse("250m"),
+												corev1.ResourceMemory: resource.MustParse("128Mi"),
+											},
+											Limits: corev1.ResourceList{
+												corev1.ResourceCPU:    resource.MustParse("500m"),
+												corev1.ResourceMemory: resource.MustParse("256Mi"),
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, sandboxSet)).To(Succeed())
+
+			By("Waiting for SandboxSet warm pool to be ready")
+			Eventually(func() int32 {
+				_ = k8sClient.Get(ctx, types.NamespacedName{
+					Name:      sandboxSet.Name,
+					Namespace: sandboxSet.Namespace,
+				}, sandboxSet)
+				return sandboxSet.Status.AvailableReplicas
+			}, time.Minute*2, time.Second).Should(Equal(int32(1)))
+
+			By("Verifying warm sandbox starts with small CPU resources")
+			Eventually(func() int {
+				sandboxList := &agentsv1alpha1.SandboxList{}
+				if err := k8sClient.List(ctx, sandboxList, client.InNamespace(namespace), client.MatchingLabels{
+					agentsv1alpha1.LabelSandboxPool: sandboxSet.Name,
+				}); err != nil {
+					return -1
+				}
+				if len(sandboxList.Items) == 1 {
+					warmSandboxName = sandboxList.Items[0].Name
+				}
+				return len(sandboxList.Items)
+			}, time.Minute, time.Second).Should(Equal(1))
+
+			Eventually(func() int64 {
+				pod := &corev1.Pod{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{
+					Name:      warmSandboxName,
+					Namespace: namespace,
+				}, pod); err != nil || len(pod.Spec.Containers) == 0 {
+					return -1
+				}
+				cpuReq, ok := pod.Spec.Containers[0].Resources.Requests[corev1.ResourceCPU]
+				if !ok {
+					return -1
+				}
+				return cpuReq.MilliValue()
+			}, time.Minute, time.Second).Should(Equal(int64(250)))
+
+			Eventually(func() corev1.PodQOSClass {
+				pod := &corev1.Pod{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{
+					Name:      warmSandboxName,
+					Namespace: namespace,
+				}, pod); err != nil {
+					return ""
+				}
+				return pod.Status.QOSClass
+			}, time.Minute, time.Second).Should(Equal(corev1.PodQOSBurstable))
+		})
+
+		AfterEach(func() {
+			if sandboxClaim != nil {
+				_ = k8sClient.Delete(ctx, sandboxClaim)
+			}
+			if sandboxSet != nil {
+				_ = k8sClient.Delete(ctx, sandboxSet)
+			}
+		})
+
+		It("should resize cpu with inplaceUpdate.resources option while preserving qos", func() {
+			By("Creating a SandboxClaim with inplaceUpdate.resources.cpuScaleFactor=2")
+			sandboxClaim = &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("test-claim-cpu-resize-%d", time.Now().UnixNano()),
+					Namespace: namespace,
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: sandboxSet.Name,
+					Replicas:     ptr.To(int32(1)),
+					WaitReadyTimeout: &metav1.Duration{
+						Duration: 2 * time.Minute,
+					},
+					InplaceUpdate: &agentsv1alpha1.SandboxClaimInplaceUpdateOptions{
+						Resources: &agentsv1alpha1.SandboxClaimInplaceUpdateResourcesOptions{
+							CPUScaleFactor: "2",
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, sandboxClaim)).To(Succeed())
+
+			By("Verifying the claim transitions to Completed phase")
+			Eventually(func() agentsv1alpha1.SandboxClaimPhase {
+				_ = k8sClient.Get(ctx, types.NamespacedName{
+					Name:      sandboxClaim.Name,
+					Namespace: sandboxClaim.Namespace,
+				}, sandboxClaim)
+				return sandboxClaim.Status.Phase
+			}, time.Minute*3, time.Second).Should(Equal(agentsv1alpha1.SandboxClaimPhaseCompleted))
+			Expect(sandboxClaim.Status.ClaimedReplicas).To(Equal(int32(1)))
+
+			By("Verifying the claimed sandbox comes from warm pool")
+			claimedSandboxes, err := listClaimedSandboxes(ctx, sandboxClaim)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(claimedSandboxes).To(HaveLen(1))
+			Expect(claimedSandboxes[0].Name).To(Equal(warmSandboxName))
+
+			By("Verifying pod CPU request/limit are scaled up")
+			Eventually(func() int64 {
+				pod := &corev1.Pod{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{
+					Name:      warmSandboxName,
+					Namespace: namespace,
+				}, pod); err != nil || len(pod.Spec.Containers) == 0 {
+					return -1
+				}
+				cpuReq, ok := pod.Spec.Containers[0].Resources.Requests[corev1.ResourceCPU]
+				if !ok {
+					return -1
+				}
+				return cpuReq.MilliValue()
+			}, time.Minute*2, time.Second).Should(Equal(int64(500)))
+
+			Eventually(func() int64 {
+				pod := &corev1.Pod{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{
+					Name:      warmSandboxName,
+					Namespace: namespace,
+				}, pod); err != nil || len(pod.Spec.Containers) == 0 {
+					return -1
+				}
+				cpuLim, ok := pod.Spec.Containers[0].Resources.Limits[corev1.ResourceCPU]
+				if !ok {
+					return -1
+				}
+				return cpuLim.MilliValue()
+			}, time.Minute*2, time.Second).Should(Equal(int64(1000)))
+
+			By("Verifying QoS class remains unchanged")
+			Consistently(func() corev1.PodQOSClass {
+				pod := &corev1.Pod{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{
+					Name:      warmSandboxName,
+					Namespace: namespace,
+				}, pod); err != nil {
+					return ""
+				}
+				return pod.Status.QOSClass
+			}, time.Second*5, time.Second).Should(Equal(corev1.PodQOSBurstable))
+		})
+
+		It("should resize cpu with scaleFactor=1 without modification", func() {
+			By("Creating a SandboxClaim with inplaceUpdate.resources.cpuScaleFactor=1")
+			sandboxClaim = &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("test-claim-cpu-scale1-%d", time.Now().UnixNano()),
+					Namespace: namespace,
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: sandboxSet.Name,
+					Replicas:     ptr.To(int32(1)),
+					WaitReadyTimeout: &metav1.Duration{
+						Duration: 2 * time.Minute,
+					},
+					InplaceUpdate: &agentsv1alpha1.SandboxClaimInplaceUpdateOptions{
+						Resources: &agentsv1alpha1.SandboxClaimInplaceUpdateResourcesOptions{
+							CPUScaleFactor: "1",
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, sandboxClaim)).To(Succeed())
+
+			By("Verifying the claim transitions to Completed phase")
+			Eventually(func() agentsv1alpha1.SandboxClaimPhase {
+				_ = k8sClient.Get(ctx, types.NamespacedName{
+					Name:      sandboxClaim.Name,
+					Namespace: sandboxClaim.Namespace,
+				}, sandboxClaim)
+				return sandboxClaim.Status.Phase
+			}, time.Minute*3, time.Second).Should(Equal(agentsv1alpha1.SandboxClaimPhaseCompleted))
+
+			By("Verifying the claimed sandbox comes from warm pool")
+			claimedSandboxes, err := listClaimedSandboxes(ctx, sandboxClaim)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(claimedSandboxes).To(HaveLen(1))
+			Expect(claimedSandboxes[0].Name).To(Equal(warmSandboxName))
+
+			By("Verifying CPU resources are unchanged")
+			pod := &corev1.Pod{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name:      warmSandboxName,
+				Namespace: namespace,
+			}, pod)).To(Succeed())
+		Expect(pod.Spec.Containers[0].Resources.Requests[corev1.ResourceCPU]).To(BeEquivalentTo(resource.MustParse("250m")))
+		Expect(pod.Spec.Containers[0].Resources.Limits[corev1.ResourceCPU]).To(BeEquivalentTo(resource.MustParse("500m")))
 		})
 	})
 

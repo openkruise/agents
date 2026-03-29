@@ -90,6 +90,52 @@ func TestParseExtensions(t *testing.T) {
 			},
 		},
 		{
+			name: "valid cpu scale factor",
+			metadata: map[string]string{
+				ExtensionKeyClaimWithCPUScaleFactor: "2",
+			},
+			wantErr: false,
+			expectExtension: NewSandboxRequestExtension{
+				CreateOnNoStock: true,
+				InplaceUpdate: InplaceUpdateExtension{
+					Resources: &InplaceUpdateResourcesExtension{
+						CPUScaleFactor: 2,
+					},
+				},
+			},
+		},
+		{
+			name: "valid cpu scale factor with feasible return",
+			metadata: map[string]string{
+				ExtensionKeyClaimWithCPUScaleFactor:         "1.5",
+				ExtensionKeyClaimWithReturnOnResizeFeasible: "true",
+			},
+			wantErr: false,
+			expectExtension: NewSandboxRequestExtension{
+				CreateOnNoStock: true,
+				InplaceUpdate: InplaceUpdateExtension{
+					Resources: &InplaceUpdateResourcesExtension{
+						CPUScaleFactor:   1.5,
+						ReturnOnFeasible: true,
+					},
+				},
+			},
+		},
+		{
+			name: "return on feasible without cpu scale factor",
+			metadata: map[string]string{
+				ExtensionKeyClaimWithReturnOnResizeFeasible: "true",
+			},
+			wantErr: true,
+		},
+		{
+			name: "invalid cpu scale factor",
+			metadata: map[string]string{
+				ExtensionKeyClaimWithCPUScaleFactor: "0.9",
+			},
+			wantErr: true,
+		},
+		{
 			name: "valid csi mount extension",
 			metadata: map[string]string{
 				ExtensionKeyClaimWithCSIMount_VolumeName: "test-volume",
