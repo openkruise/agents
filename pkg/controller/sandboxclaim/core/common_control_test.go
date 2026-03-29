@@ -18,19 +18,28 @@ package core
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
-	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/client/clientset/versioned"
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/client/clientset/versioned"
+	sandboxfake "github.com/openkruise/agents/client/clientset/versioned/fake"
+	"github.com/openkruise/agents/pkg/agent-runtime/storages"
+	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
+	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 )
 
 func TestNewCommonControl(t *testing.T) {
@@ -1028,4 +1037,1105 @@ func CreateSandboxWithStatus(t *testing.T, client versioned.Interface, sbx *agen
 	require.NoError(t, err)
 	_, err = client.ApiV1alpha1().Sandboxes(sbx.Namespace).UpdateStatus(t.Context(), sbx, metav1.UpdateOptions{})
 	require.NoError(t, err)
+}
+
+func TestBuildClaimOptions_CSIMount_ConfigValidation(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = agentsv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	// Create test PersistentVolumes for integration tests
+	testPVs := []client.Object{
+		&corev1.PersistentVolume{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "test-pv-nas",
+			},
+			Spec: corev1.PersistentVolumeSpec{
+				PersistentVolumeSource: corev1.PersistentVolumeSource{
+					CSI: &corev1.CSIPersistentVolumeSource{
+						Driver:       "nasplugin.csi.alibabacloud.com",
+						VolumeHandle: "test-pv-nas",
+						VolumeAttributes: map[string]string{
+							"path": "/shares/data",
+						},
+					},
+				},
+				AccessModes: []corev1.PersistentVolumeAccessMode{
+					corev1.ReadWriteMany,
+				},
+			},
+		},
+		&corev1.PersistentVolume{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "test-pv-oss",
+			},
+			Spec: corev1.PersistentVolumeSpec{
+				PersistentVolumeSource: corev1.PersistentVolumeSource{
+					CSI: &corev1.CSIPersistentVolumeSource{
+						Driver:       "ossplugin.csi.alibabacloud.com",
+						VolumeHandle: "test-pv-oss",
+						VolumeAttributes: map[string]string{
+							"bucket": "my-test-bucket",
+						},
+					},
+				},
+				AccessModes: []corev1.PersistentVolumeAccessMode{
+					corev1.ReadOnlyMany,
+				},
+			},
+		},
+	}
+
+	// Use controller-runtime fake client for controller operations
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(testPVs...).
+		Build()
+
+	fakeRecorder := record.NewFakeRecorder(10)
+
+	// Convert client.Object to runtime.Object for kubernetes clientset
+	runtimeObjects := make([]runtime.Object, len(testPVs))
+	for i, obj := range testPVs {
+		runtimeObjects[i] = obj.(runtime.Object)
+	}
+
+	// Use kubernetes fake clientset for K8sClient
+	k8sClientset := k8sfake.NewSimpleClientset(runtimeObjects...)
+
+	// Create sandbox client with both K8s and Sandbox clients
+	sandboxClient := &clients.ClientSet{
+		K8sClient:     k8sClientset,
+		SandboxClient: sandboxfake.NewSimpleClientset(),
+	}
+
+	// Create a minimal cache with PV support
+	cache, err := sandboxcr.NewCache(sandboxClient, config.SandboxManagerOptions{})
+	if err != nil {
+		t.Fatalf("Failed to create cache: %v", err)
+	}
+
+	// Start cache
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		_ = cache.Run(ctx)
+	}()
+	time.Sleep(300 * time.Millisecond) // Wait for cache to sync
+
+	// Create storage registry and manually register supported drivers
+	storageRegistry := storages.NewStorageProvider()
+	storageRegistry.RegisterProvider("nasplugin.csi.alibabacloud.com", &storages.MountProvider{})
+	storageRegistry.RegisterProvider("ossplugin.csi.alibabacloud.com", &storages.MountProvider{})
+
+	control := NewCommonControl(fakeClient, fakeRecorder, sandboxClient, cache)
+	// Inject the storage registry into the control
+	commonControl := control.(*commonControl)
+	commonControl.storageRegistry = storageRegistry
+
+	tests := []struct {
+		name               string
+		claim              *agentsv1alpha1.SandboxClaim
+		sandboxSet         *agentsv1alpha1.SandboxSet
+		expectError        bool
+		errorContains      string
+		expectedMountCount int
+		expectedDriver     string
+		validate           func(t *testing.T, opts infra.ClaimSandboxOptions)
+	}{
+		{
+			name: "claim without CSI mount configs",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim-no-csi",
+					Namespace: "default",
+					UID:       "test-uid-no-csi",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "test-template",
+					EnvVars: map[string]string{
+						"ENV1": "value1",
+					},
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template",
+					Namespace: "default",
+				},
+			},
+			expectError: false,
+			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+				// CSIMount should be nil when no configs specified
+				if opts.CSIMount != nil {
+					t.Error("CSIMount should be nil when no configs specified")
+				}
+				// InitRuntime should not be auto-created without CSI mount
+				if opts.InitRuntime != nil {
+					t.Error("InitRuntime should be nil when CSI mount is not specified")
+				}
+			},
+		},
+		{
+			name: "claim with empty CSI mount configs slice",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim-empty-csi",
+					Namespace: "default",
+					UID:       "test-uid-empty-csi",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName:        "test-template",
+					DynamicVolumesMount: []agentsv1alpha1.CSIMountConfig{},
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template",
+					Namespace: "default",
+				},
+			},
+			expectError: false,
+			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+				// CSIMount should be nil when configs slice is empty
+				if opts.CSIMount != nil {
+					t.Error("CSIMount should be nil when configs slice is empty")
+				}
+			},
+		},
+		{
+			name: "claim with nil DynamicVolumesMount",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim-nil-csi",
+					Namespace: "default",
+					UID:       "test-uid-nil-csi",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName:        "test-template",
+					DynamicVolumesMount: nil,
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template",
+					Namespace: "default",
+				},
+			},
+			expectError: false,
+			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+				// CSIMount should be nil when DynamicVolumesMount is nil
+				if opts.CSIMount != nil {
+					t.Error("CSIMount should be nil when DynamicVolumesMount is nil")
+				}
+			},
+		},
+		{
+			name: "claim with InplaceUpdate but no CSI mount",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim-inplace-no-csi",
+					Namespace: "default",
+					UID:       "test-uid-inplace-no-csi",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "test-template",
+					InplaceUpdate: &agentsv1alpha1.SandboxClaimInplaceUpdateOptions{
+						Image: "nginx:latest",
+					},
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template",
+					Namespace: "default",
+				},
+			},
+			expectError: false,
+			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+				// InplaceUpdate should be set
+				if opts.InplaceUpdate == nil {
+					t.Error("InplaceUpdate should not be nil")
+				} else if opts.InplaceUpdate.Image != "nginx:latest" {
+					t.Errorf("Expected InplaceUpdate.Image=nginx:latest, got %v", opts.InplaceUpdate.Image)
+				}
+				// CSIMount should still be nil
+				if opts.CSIMount != nil {
+					t.Error("CSIMount should be nil when no CSI configs specified")
+				}
+			},
+		},
+		{
+			name: "claim with ShutdownTime but no CSI mount",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim-shutdown-no-csi",
+					Namespace: "default",
+					UID:       "test-uid-shutdown-no-csi",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "test-template",
+					ShutdownTime: &metav1.Time{Time: time.Now()},
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template",
+					Namespace: "default",
+				},
+			},
+			expectError: false,
+			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+				// CSIMount should be nil
+				if opts.CSIMount != nil {
+					t.Error("CSIMount should be nil when no CSI configs specified")
+				}
+			},
+		},
+		{
+			name: "claim with all optional fields except CSI mount",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim-all-no-csi",
+					Namespace: "default",
+					UID:       "test-uid-all-no-csi",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "test-template",
+					Labels: map[string]string{
+						"app": "test",
+					},
+					Annotations: map[string]string{
+						"description": "test",
+					},
+					EnvVars: map[string]string{
+						"KEY1": "val1",
+					},
+					InplaceUpdate: &agentsv1alpha1.SandboxClaimInplaceUpdateOptions{
+						Image: "redis:7.0",
+					},
+					WaitReadyTimeout: &metav1.Duration{Duration: 5 * time.Minute},
+					ShutdownTime:     &metav1.Time{Time: time.Now()},
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template",
+					Namespace: "default",
+				},
+			},
+			expectError: false,
+			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+				// All other fields should be processed normally
+				if opts.InplaceUpdate == nil {
+					t.Error("InplaceUpdate should not be nil")
+				}
+				if opts.WaitReadyTimeout != 5*time.Minute {
+					t.Errorf("Expected WaitReadyTimeout=5m, got %v", opts.WaitReadyTimeout)
+				}
+				// CSIMount should still be nil
+				if opts.CSIMount != nil {
+					t.Error("CSIMount should be nil when no CSI configs specified")
+				}
+			},
+		},
+		{
+			name: "single CSI mount config structure validation",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim-csi-single",
+					Namespace: "default",
+					UID:       "test-uid-csi-single",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "test-template",
+					DynamicVolumesMount: []agentsv1alpha1.CSIMountConfig{
+						{
+							PvName:    "test-pv-nas",
+							MountPath: "/data",
+							SubPath:   "subdir",
+							ReadOnly:  true,
+						},
+					},
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template",
+					Namespace: "default",
+				},
+			},
+			expectError:        false,
+			expectedMountCount: 1,
+			expectedDriver:     "nasplugin.csi.alibabacloud.com",
+			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+				if opts.CSIMount == nil {
+					t.Fatal("CSIMount should not be nil")
+				}
+				if len(opts.CSIMount.MountOptionList) != 1 {
+					t.Errorf("Expected 1 mount config, got %d", len(opts.CSIMount.MountOptionList))
+				}
+			},
+		},
+		{
+			name: "multiple CSI mount configs structure validation",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim-csi-multi",
+					Namespace: "default",
+					UID:       "test-uid-csi-multi",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "test-template",
+					DynamicVolumesMount: []agentsv1alpha1.CSIMountConfig{
+						{
+							PvName:    "test-pv-nas",
+							MountPath: "/workspace",
+						},
+						{
+							PvName:    "test-pv-oss",
+							MountPath: "/models",
+							ReadOnly:  true,
+						},
+						{
+							PvName:    "test-pv-nas",
+							MountPath: "/storage",
+							SubPath:   "data",
+						},
+					},
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template",
+					Namespace: "default",
+				},
+			},
+			expectError:        false,
+			expectedMountCount: 3,
+			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+				if opts.CSIMount == nil {
+					t.Fatal("CSIMount should not be nil")
+				}
+				if len(opts.CSIMount.MountOptionList) != 3 {
+					t.Errorf("Expected 3 mount configs, got %d", len(opts.CSIMount.MountOptionList))
+				}
+			},
+		},
+		{
+			name: "CSI mount with env vars structure validation",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim-csi-env",
+					Namespace: "default",
+					UID:       "test-uid-csi-env",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "test-template",
+					EnvVars: map[string]string{
+						"ENV1": "value1",
+						"ENV2": "value2",
+						"ENV3": "value3",
+					},
+					DynamicVolumesMount: []agentsv1alpha1.CSIMountConfig{
+						{
+							PvName:    "test-pv-nas",
+							MountPath: "/data",
+						},
+					},
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template",
+					Namespace: "default",
+				},
+			},
+			expectError:        false,
+			expectedMountCount: 1,
+			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+				if opts.InitRuntime == nil {
+					t.Error("InitRuntime should not be nil")
+				} else if len(opts.InitRuntime.EnvVars) != 3 {
+					t.Errorf("Expected 3 env vars, got %d", len(opts.InitRuntime.EnvVars))
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts, err := commonControl.buildClaimOptions(ctx, tt.claim, tt.sandboxSet)
+
+			// Check error expectations
+			if tt.expectError {
+				if err == nil {
+					t.Errorf("Expected error containing '%s', but got no error", tt.errorContains)
+					return
+				}
+				if tt.errorContains != "" && !strings.Contains(err.Error(), tt.errorContains) {
+					t.Errorf("Expected error to contain '%s', but got: %v", tt.errorContains, err)
+				}
+				return
+			}
+
+			// For non-error cases, verify no error occurred
+			if err != nil {
+				t.Errorf("Unexpected error: %v", err)
+				return
+			}
+
+			// Verify mount count
+			if tt.expectedMountCount > 0 {
+				if opts.CSIMount == nil {
+					t.Error("CSIMount should not be nil")
+				} else if len(opts.CSIMount.MountOptionList) != tt.expectedMountCount {
+					t.Errorf("Expected %d mount configs, got %d", tt.expectedMountCount, len(opts.CSIMount.MountOptionList))
+				}
+
+				// Verify driver if specified
+				if tt.expectedDriver != "" && len(opts.CSIMount.MountOptionList) > 0 {
+					if opts.CSIMount.MountOptionList[0].Driver != tt.expectedDriver {
+						t.Errorf("Expected driver %s, got %s", tt.expectedDriver, opts.CSIMount.MountOptionList[0].Driver)
+					}
+				}
+			}
+
+			// Run custom validation if provided
+			if tt.validate != nil {
+				tt.validate(t, opts)
+			}
+		})
+	}
+}
+
+func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = agentsv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	// Create test PersistentVolumes
+	testPVs := []client.Object{
+		&corev1.PersistentVolume{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "test-pv-nas",
+			},
+			Spec: corev1.PersistentVolumeSpec{
+				PersistentVolumeSource: corev1.PersistentVolumeSource{
+					CSI: &corev1.CSIPersistentVolumeSource{
+						Driver:       "nasplugin.csi.alibabacloud.com",
+						VolumeHandle: "test-pv-nas",
+						VolumeAttributes: map[string]string{
+							"path": "/shares/data",
+						},
+					},
+				},
+				AccessModes: []corev1.PersistentVolumeAccessMode{
+					corev1.ReadWriteMany,
+				},
+			},
+		},
+		&corev1.PersistentVolume{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "test-pv-oss",
+			},
+			Spec: corev1.PersistentVolumeSpec{
+				PersistentVolumeSource: corev1.PersistentVolumeSource{
+					CSI: &corev1.CSIPersistentVolumeSource{
+						Driver:       "ossplugin.csi.alibabacloud.com",
+						VolumeHandle: "test-pv-oss",
+						VolumeAttributes: map[string]string{
+							"bucket": "my-test-bucket",
+						},
+					},
+				},
+				AccessModes: []corev1.PersistentVolumeAccessMode{
+					corev1.ReadOnlyMany,
+				},
+			},
+		},
+	}
+
+	// Use controller-runtime fake client for controller operations
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(testPVs...).
+		Build()
+
+	fakeRecorder := record.NewFakeRecorder(10)
+
+	// Convert client.Object to runtime.Object for kubernetes clientset
+	runtimeObjects := make([]runtime.Object, len(testPVs))
+	for i, obj := range testPVs {
+		runtimeObjects[i] = obj.(runtime.Object)
+	}
+
+	// Use kubernetes fake clientset for K8sClient
+	k8sClientset := k8sfake.NewSimpleClientset(runtimeObjects...)
+
+	// Create sandbox client with both K8s and Sandbox clients
+	sandboxClient := &clients.ClientSet{
+		K8sClient:     k8sClientset,
+		SandboxClient: sandboxfake.NewSimpleClientset(),
+	}
+
+	// Create a minimal cache with PV support
+	cache, err := sandboxcr.NewCache(sandboxClient, config.SandboxManagerOptions{})
+	if err != nil {
+		t.Fatalf("Failed to create cache: %v", err)
+	}
+
+	// Start cache
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		_ = cache.Run(ctx)
+	}()
+	time.Sleep(300 * time.Millisecond) // Wait for cache to sync
+
+	// Create storage registry and manually register supported drivers
+	storageRegistry := storages.NewStorageProvider()
+	storageRegistry.RegisterProvider("nasplugin.csi.alibabacloud.com", &storages.MountProvider{})
+	storageRegistry.RegisterProvider("ossplugin.csi.alibabacloud.com", &storages.MountProvider{})
+
+	control := NewCommonControl(fakeClient, fakeRecorder, sandboxClient, cache)
+	// Inject the storage registry into the control
+	commonControl := control.(*commonControl)
+	commonControl.storageRegistry = storageRegistry
+
+	tests := []struct {
+		name               string
+		claim              *agentsv1alpha1.SandboxClaim
+		sandboxSet         *agentsv1alpha1.SandboxSet
+		expectError        bool
+		errorContains      string
+		expectedMountCount int
+		expectedDriver     string
+		validate           func(t *testing.T, opts infra.ClaimSandboxOptions)
+	}{
+		{
+			name: "single CSI mount config structure validation",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim-csi-single",
+					Namespace: "default",
+					UID:       "test-uid-csi-single",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "test-template",
+					DynamicVolumesMount: []agentsv1alpha1.CSIMountConfig{
+						{
+							PvName:    "test-pv-nas",
+							MountPath: "/data",
+							SubPath:   "subdir",
+							ReadOnly:  true,
+						},
+					},
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template",
+					Namespace: "default",
+				},
+			},
+			expectError:        false,
+			expectedMountCount: 1,
+			expectedDriver:     "nasplugin.csi.alibabacloud.com",
+			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+				if opts.CSIMount == nil {
+					t.Fatal("CSIMount should not be nil")
+				}
+				if len(opts.CSIMount.MountOptionList) != 1 {
+					t.Errorf("Expected 1 mount config, got %d", len(opts.CSIMount.MountOptionList))
+				}
+			},
+		},
+		{
+			name: "multiple CSI mount configs structure validation",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim-csi-multi",
+					Namespace: "default",
+					UID:       "test-uid-csi-multi",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "test-template",
+					DynamicVolumesMount: []agentsv1alpha1.CSIMountConfig{
+						{
+							PvName:    "test-pv-nas",
+							MountPath: "/workspace",
+						},
+						{
+							PvName:    "test-pv-oss",
+							MountPath: "/models",
+							ReadOnly:  true,
+						},
+						{
+							PvName:    "test-pv-nas",
+							MountPath: "/storage",
+							SubPath:   "data",
+						},
+					},
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template",
+					Namespace: "default",
+				},
+			},
+			expectError:        false,
+			expectedMountCount: 3,
+			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+				if opts.CSIMount == nil {
+					t.Fatal("CSIMount should not be nil")
+				}
+				if len(opts.CSIMount.MountOptionList) != 3 {
+					t.Errorf("Expected 3 mount configs, got %d", len(opts.CSIMount.MountOptionList))
+				}
+			},
+		},
+		{
+			name: "CSI mount with env vars structure validation",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim-csi-env",
+					Namespace: "default",
+					UID:       "test-uid-csi-env",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "test-template",
+					EnvVars: map[string]string{
+						"ENV1": "value1",
+						"ENV2": "value2",
+						"ENV3": "value3",
+					},
+					DynamicVolumesMount: []agentsv1alpha1.CSIMountConfig{
+						{
+							PvName:    "test-pv-nas",
+							MountPath: "/data",
+						},
+					},
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template",
+					Namespace: "default",
+				},
+			},
+			expectError:        false,
+			expectedMountCount: 1,
+			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+				if opts.InitRuntime == nil {
+					t.Error("InitRuntime should not be nil")
+				} else if len(opts.InitRuntime.EnvVars) != 3 {
+					t.Errorf("Expected 3 env vars, got %d", len(opts.InitRuntime.EnvVars))
+				}
+			},
+		},
+		{
+			name: "CSI mount with ReadOnly flag",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim-csi-readonly",
+					Namespace: "default",
+					UID:       "test-uid-readonly",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "test-template",
+					EnvVars: map[string]string{
+						"TEST_ENV": "test_value",
+					},
+					DynamicVolumesMount: []agentsv1alpha1.CSIMountConfig{
+						{
+							PvName:    "test-pv-nas",
+							MountPath: "/data",
+							ReadOnly:  true,
+						},
+					},
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template",
+					Namespace: "default",
+				},
+			},
+			expectError:        false,
+			expectedMountCount: 1,
+			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+				if opts.CSIMount == nil {
+					t.Fatal("CSIMount should not be nil")
+				}
+				if len(opts.CSIMount.MountOptionList) != 1 {
+					t.Errorf("Expected 1 mount config, got %d", len(opts.CSIMount.MountOptionList))
+				}
+				if opts.InitRuntime == nil {
+					t.Error("InitRuntime should be auto-created when CSI mount is specified")
+				} else {
+					if opts.InitRuntime.AccessToken == "" {
+						t.Error("AccessToken should be generated")
+					}
+				}
+			},
+		},
+		{
+			name: "CSI mount with special characters in paths",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim-csi-special-chars",
+					Namespace: "default",
+					UID:       "test-uid-special-chars",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "test-template",
+					EnvVars: map[string]string{
+						"TEST_ENV": "test_value",
+					},
+					DynamicVolumesMount: []agentsv1alpha1.CSIMountConfig{
+						{
+							PvName:    "test-pv-nas",
+							MountPath: "/data/my-folder_2024",
+							SubPath:   "sub.dir-test",
+						},
+					},
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template",
+					Namespace: "default",
+				},
+			},
+			expectError:        false,
+			expectedMountCount: 1,
+			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+				if opts.CSIMount == nil {
+					t.Fatal("CSIMount should not be nil")
+				}
+				if opts.InitRuntime == nil {
+					t.Error("InitRuntime should be auto-created")
+				}
+			},
+		},
+		{
+			name: "CSI mount preserves InitRuntime when already set",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim-csi-preserve-init",
+					Namespace: "default",
+					UID:       "test-uid-preserve-init",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "test-template",
+					EnvVars: map[string]string{
+						"ORIGINAL_VAR": "original_value",
+					},
+					DynamicVolumesMount: []agentsv1alpha1.CSIMountConfig{
+						{
+							PvName:    "test-pv-nas",
+							MountPath: "/data",
+						},
+					},
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template",
+					Namespace: "default",
+				},
+			},
+			expectError:        false,
+			expectedMountCount: 1,
+			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+				if opts.InitRuntime == nil {
+					t.Error("InitRuntime should not be nil")
+				} else {
+					// Verify original env vars are preserved
+					if opts.InitRuntime.EnvVars["ORIGINAL_VAR"] != "original_value" {
+						t.Errorf("Expected ORIGINAL_VAR to be preserved, got %v", opts.InitRuntime.EnvVars)
+					}
+					// AccessToken should be generated
+					if opts.InitRuntime.AccessToken == "" {
+						t.Error("AccessToken should be generated")
+					}
+				}
+			},
+		},
+		{
+			name: "CSI mount JSON marshal verification",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim-csi-json",
+					Namespace: "default",
+					UID:       "test-uid-json",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "test-template",
+					EnvVars: map[string]string{
+						"TEST_ENV": "test_value",
+					},
+					DynamicVolumesMount: []agentsv1alpha1.CSIMountConfig{
+						{
+							PvName:    "test-pv-nas",
+							MountPath: "/data1",
+							ReadOnly:  false,
+						},
+						{
+							PvName:    "test-pv-nas",
+							MountPath: "/data2",
+							ReadOnly:  true,
+							SubPath:   "subdir",
+						},
+					},
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template",
+					Namespace: "default",
+				},
+			},
+			expectError:        false,
+			expectedMountCount: 2,
+			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+				if opts.CSIMount == nil {
+					t.Fatal("CSIMount should not be nil")
+				}
+				if opts.CSIMount.MountOptionListRaw == "" {
+					t.Error("MountOptionListRaw should not be empty")
+				}
+				// Verify it's valid JSON
+				var decoded []agentsv1alpha1.CSIMountConfig
+				if err := json.Unmarshal([]byte(opts.CSIMount.MountOptionListRaw), &decoded); err != nil {
+					t.Errorf("MountOptionListRaw should be valid JSON: %v", err)
+				}
+				if len(decoded) != 2 {
+					t.Errorf("Expected 2 decoded configs, got %d", len(decoded))
+				}
+				// Verify first config
+				if decoded[0].PvName != "test-pv-nas" {
+					t.Errorf("Expected first PvName=test-pv-nas, got %s", decoded[0].PvName)
+				}
+				if decoded[0].ReadOnly != false {
+					t.Errorf("Expected first ReadOnly=false, got %v", decoded[0].ReadOnly)
+				}
+				// Verify second config
+				if decoded[1].PvName != "test-pv-nas" {
+					t.Errorf("Expected second PvName=test-pv-nas, got %s", decoded[1].PvName)
+				}
+				if decoded[1].ReadOnly != true {
+					t.Errorf("Expected second ReadOnly=true, got %v", decoded[1].ReadOnly)
+				}
+				if decoded[1].SubPath != "subdir" {
+					t.Errorf("Expected second SubPath=subdir, got %s", decoded[1].SubPath)
+				}
+			},
+		},
+		{
+			name: "CSI mount with SubPath traversal attempt should fail",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim-csi-traversal",
+					Namespace: "default",
+					UID:       "test-uid-traversal",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "test-template",
+					DynamicVolumesMount: []agentsv1alpha1.CSIMountConfig{
+						{
+							PvName:    "test-pv-nas",
+							MountPath: "/workspace",
+							SubPath:   "../../../etc/passwd",
+						},
+					},
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template",
+					Namespace: "default",
+				},
+			},
+			expectError:   true,
+			errorContains: "sub path must not traverse to parent directory",
+		},
+		{
+			name: "CSI mount with single NAS volume - integration",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim-csi-nas",
+					Namespace: "default",
+					UID:       "test-uid-nas",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "test-template",
+					EnvVars: map[string]string{
+						"TEST_ENV": "test_value",
+					},
+					DynamicVolumesMount: []agentsv1alpha1.CSIMountConfig{
+						{
+							PvName:    "test-pv-nas",
+							MountPath: "/workspace",
+						},
+					},
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template",
+					Namespace: "default",
+				},
+			},
+			expectError:        false,
+			expectedMountCount: 1,
+			expectedDriver:     "nasplugin.csi.alibabacloud.com",
+			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+				if opts.InitRuntime == nil {
+					t.Error("InitRuntime should be auto-created when CSI mount is specified")
+				} else {
+					if opts.InitRuntime.AccessToken == "" {
+						t.Error("AccessToken should be generated")
+					}
+					if opts.InitRuntime.EnvVars == nil || len(opts.InitRuntime.EnvVars) == 0 {
+						t.Error("EnvVars should not be nil or empty")
+					}
+				}
+				if opts.CSIMount == nil {
+					t.Fatal("CSIMount should not be nil")
+				}
+				if len(opts.CSIMount.MountOptionList) != 1 {
+					t.Errorf("Expected 1 mount config, got %d", len(opts.CSIMount.MountOptionList))
+				}
+				if opts.CSIMount.MountOptionListRaw == "" {
+					t.Error("MountOptionListRaw should not be empty")
+				}
+			},
+		},
+		{
+			name: "CSI mount with multiple volumes - integration",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim-csi-multi",
+					Namespace: "default",
+					UID:       "test-uid-multi",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "test-template",
+					DynamicVolumesMount: []agentsv1alpha1.CSIMountConfig{
+						{
+							PvName:    "test-pv-nas",
+							MountPath: "/workspace",
+						},
+						{
+							PvName:    "test-pv-oss",
+							MountPath: "/data",
+							ReadOnly:  true,
+						},
+					},
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template",
+					Namespace: "default",
+				},
+			},
+			expectError:        false,
+			expectedMountCount: 2,
+			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+				if opts.CSIMount == nil {
+					t.Fatal("CSIMount should not be nil")
+				}
+				if len(opts.CSIMount.MountOptionList) != 2 {
+					t.Errorf("Expected 2 mount configs, got %d", len(opts.CSIMount.MountOptionList))
+				}
+				// Verify all drivers are present
+				drivers := make(map[string]bool)
+				for _, c := range opts.CSIMount.MountOptionList {
+					drivers[c.Driver] = true
+				}
+				if !drivers["nasplugin.csi.alibabacloud.com"] {
+					t.Error("Expected nasplugin.csi.alibabacloud.com driver to be present")
+				}
+				if !drivers["ossplugin.csi.alibabacloud.com"] {
+					t.Error("Expected ossplugin.csi.alibabacloud.com driver to be present")
+				}
+			},
+		},
+		{
+			name: "CSI mount with non-existent PV should fail - integration",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim-csi-notfound",
+					Namespace: "default",
+					UID:       "test-uid-notfound",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "test-template",
+					DynamicVolumesMount: []agentsv1alpha1.CSIMountConfig{
+						{
+							PvName:    "non-existent-pv",
+							MountPath: "/data",
+						},
+					},
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template",
+					Namespace: "default",
+				},
+			},
+			expectError:   true,
+			errorContains: "failed to generate csi mount options config",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts, err := commonControl.buildClaimOptions(ctx, tt.claim, tt.sandboxSet)
+
+			// Check error expectations
+			if tt.expectError {
+				if err == nil {
+					t.Errorf("Expected error containing '%s', but got no error", tt.errorContains)
+					return
+				}
+				if tt.errorContains != "" && !strings.Contains(err.Error(), tt.errorContains) {
+					t.Errorf("Expected error to contain '%s', but got: %v", tt.errorContains, err)
+				}
+				return
+			}
+
+			// For non-error cases, verify no error occurred
+			if err != nil {
+				t.Errorf("Unexpected error: %v", err)
+				return
+			}
+
+			// Verify mount count
+			if tt.expectedMountCount > 0 {
+				if opts.CSIMount == nil {
+					t.Error("CSIMount should not be nil")
+				} else if len(opts.CSIMount.MountOptionList) != tt.expectedMountCount {
+					t.Errorf("Expected %d mount configs, got %d", tt.expectedMountCount, len(opts.CSIMount.MountOptionList))
+				}
+
+				// Verify driver if specified
+				if tt.expectedDriver != "" && len(opts.CSIMount.MountOptionList) > 0 {
+					if opts.CSIMount.MountOptionList[0].Driver != tt.expectedDriver {
+						t.Errorf("Expected driver %s, got %s", tt.expectedDriver, opts.CSIMount.MountOptionList[0].Driver)
+					}
+				}
+			}
+
+			// Run custom validation if provided
+			if tt.validate != nil {
+				tt.validate(t, opts)
+			}
+		})
+	}
 }

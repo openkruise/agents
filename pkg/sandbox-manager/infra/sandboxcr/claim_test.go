@@ -20,6 +20,7 @@ import (
 
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	testutils "github.com/openkruise/agents/test/utils"
 
 	"github.com/openkruise/agents/api/v1alpha1"
@@ -814,4 +815,218 @@ func TestNewSandboxFromTemplate_RateLimitExceeded(t *testing.T) {
 	// Check error message
 	assert.Contains(t, err.Error(), "sandbox creation is not allowed by rate limiter", "error should indicate rate limit")
 	assert.Contains(t, err.Error(), template, "error should contain template name")
+}
+
+func TestModifyPickedSandbox_CSIMount(t *testing.T) {
+	tests := []struct {
+		name             string
+		lockType         infra.LockType
+		opts             infra.ClaimSandboxOptions
+		expectedAnnos    map[string]string
+		notExpectedAnnos []string
+	}{
+		{
+			name:     "with csi mount config",
+			lockType: infra.LockTypeUpdate,
+			opts: infra.ClaimSandboxOptions{
+				CSIMount: &config.CSIMountOptions{
+					MountOptionListRaw: `{"mountOptionList":[{"pvName":"test-pv","mountPath":"/data"}]}`,
+				},
+			},
+			expectedAnnos: map[string]string{
+				v1alpha1.AnnotationInitRuntimeRequest:            "", // should not be set
+				models.ExtensionKeyClaimWithCSIMount_MountConfig: `{"mountOptionList":[{"pvName":"test-pv","mountPath":"/data"}]}`,
+			},
+		},
+		{
+			name:     "with empty csi mount config",
+			lockType: infra.LockTypeUpdate,
+			opts: infra.ClaimSandboxOptions{
+				CSIMount: &config.CSIMountOptions{
+					MountOptionListRaw: "",
+				},
+			},
+			notExpectedAnnos: []string{
+				models.ExtensionKeyClaimWithCSIMount_MountConfig,
+			},
+		},
+		{
+			name:     "with nil csi mount config",
+			lockType: infra.LockTypeUpdate,
+			opts: infra.ClaimSandboxOptions{
+				CSIMount: nil,
+			},
+			notExpectedAnnos: []string{
+				models.ExtensionKeyClaimWithCSIMount_MountConfig,
+			},
+		},
+		{
+			name:     "with both init runtime and csi mount",
+			lockType: infra.LockTypeUpdate,
+			opts: infra.ClaimSandboxOptions{
+				InitRuntime: &config.InitRuntimeOptions{
+					EnvVars: map[string]string{
+						"KEY1": "value1",
+						"KEY2": "value2",
+					},
+				},
+				CSIMount: &config.CSIMountOptions{
+					MountOptionListRaw: `{"mountOptionList":[{"pvName":"csi-pv","mountPath":"/mnt/data"}]}`,
+				},
+			},
+			expectedAnnos: map[string]string{
+				v1alpha1.AnnotationInitRuntimeRequest:            `{"envVars":{"KEY1":"value1","KEY2":"value2"}}`,
+				models.ExtensionKeyClaimWithCSIMount_MountConfig: `{"mountOptionList":[{"pvName":"csi-pv","mountPath":"/mnt/data"}]}`,
+			},
+		},
+		{
+			name:     "csi mount with modifier",
+			lockType: infra.LockTypeUpdate,
+			opts: infra.ClaimSandboxOptions{
+				Modifier: func(sbx infra.Sandbox) {
+					sbx.SetAnnotations(map[string]string{
+						"custom-annotation": "custom-value",
+					})
+				},
+				CSIMount: &config.CSIMountOptions{
+					MountOptionListRaw: `{"mountOptionList":[{"pvName":"test-pv","mountPath":"/custom"}]}`,
+				},
+			},
+			expectedAnnos: map[string]string{
+				"custom-annotation": "custom-value",
+				models.ExtensionKeyClaimWithCSIMount_MountConfig: `{"mountOptionList":[{"pvName":"test-pv","mountPath":"/custom"}]}`,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create a test sandbox
+			sbx := &Sandbox{
+				Sandbox: &v1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:        "test-sandbox",
+						Namespace:   "default",
+						Annotations: make(map[string]string),
+					},
+				},
+			}
+
+			// Call modifyPickedSandbox
+			err := modifyPickedSandbox(sbx, tt.lockType, tt.opts)
+			require.NoError(t, err)
+
+			// Check expected annotations
+			annotations := sbx.GetAnnotations()
+
+			// Verify claim time annotation is always set
+			assert.NotEmpty(t, annotations[v1alpha1.AnnotationClaimTime])
+
+			// Verify claimed label is set
+			labels := sbx.GetLabels()
+			assert.Equal(t, v1alpha1.True, labels[v1alpha1.LabelSandboxIsClaimed])
+
+			// Check expected annotations
+			for key, expectedValue := range tt.expectedAnnos {
+				if expectedValue != "" {
+					assert.Equal(t, expectedValue, annotations[key], "annotation %s should match", key)
+				} else {
+					assert.Empty(t, annotations[key], "annotation %s should be empty", key)
+				}
+			}
+
+			// Check not expected annotations
+			for _, key := range tt.notExpectedAnnos {
+				assert.Empty(t, annotations[key], "annotation %s should not be set", key)
+			}
+		})
+	}
+}
+
+func TestModifyPickedSandbox_InitRuntime(t *testing.T) {
+	tests := []struct {
+		name             string
+		opts             infra.ClaimSandboxOptions
+		expectedAnnos    map[string]string
+		notExpectedAnnos []string
+	}{
+		{
+			name: "with init runtime options",
+			opts: infra.ClaimSandboxOptions{
+				InitRuntime: &config.InitRuntimeOptions{
+					EnvVars: map[string]string{
+						"ENV1": "value1",
+						"ENV2": "value2",
+					},
+					AccessToken: "test-token",
+				},
+			},
+			expectedAnnos: map[string]string{
+				v1alpha1.AnnotationInitRuntimeRequest: `{"envVars":{"ENV1":"value1","ENV2":"value2"},"accessToken":"test-token"}`,
+				v1alpha1.AnnotationRuntimeAccessToken: "test-token",
+			},
+		},
+		{
+			name: "with init runtime without access token",
+			opts: infra.ClaimSandboxOptions{
+				InitRuntime: &config.InitRuntimeOptions{
+					EnvVars: map[string]string{
+						"TEST_ENV": "test_value",
+					},
+				},
+			},
+			expectedAnnos: map[string]string{
+				v1alpha1.AnnotationInitRuntimeRequest: `{"envVars":{"TEST_ENV":"test_value"}}`,
+			},
+			notExpectedAnnos: []string{
+				v1alpha1.AnnotationRuntimeAccessToken,
+			},
+		},
+		{
+			name: "without init runtime",
+			opts: infra.ClaimSandboxOptions{
+				InitRuntime: nil,
+			},
+			notExpectedAnnos: []string{
+				v1alpha1.AnnotationInitRuntimeRequest,
+				v1alpha1.AnnotationRuntimeAccessToken,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sbx := &Sandbox{
+				Sandbox: &v1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:        "test-sandbox",
+						Namespace:   "default",
+						Annotations: make(map[string]string),
+					},
+				},
+			}
+
+			err := modifyPickedSandbox(sbx, infra.LockTypeUpdate, tt.opts)
+			require.NoError(t, err)
+
+			annotations := sbx.GetAnnotations()
+
+			// Verify claim time annotation is always set
+			assert.NotEmpty(t, annotations[v1alpha1.AnnotationClaimTime])
+
+			// Check expected annotations
+			for key, expectedValue := range tt.expectedAnnos {
+				if expectedValue != "" {
+					assert.Equal(t, expectedValue, annotations[key], "annotation %s should match", key)
+				} else {
+					assert.Empty(t, annotations[key], "annotation %s should be empty", key)
+				}
+			}
+
+			// Check not expected annotations
+			for _, key := range tt.notExpectedAnnos {
+				assert.Empty(t, annotations[key], "annotation %s should not be set", key)
+			}
+		})
+	}
 }

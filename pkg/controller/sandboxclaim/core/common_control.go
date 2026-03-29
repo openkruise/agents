@@ -18,17 +18,23 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
 
-	"github.com/openkruise/agents/pkg/sandbox-manager/config"
-	"github.com/openkruise/agents/pkg/utils"
-	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
+	"github.com/google/uuid"
 	"golang.org/x/time/rate"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+
+	"github.com/openkruise/agents/pkg/agent-runtime/storages"
+	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	"github.com/openkruise/agents/pkg/utils"
+	"github.com/openkruise/agents/pkg/utils/csiutils"
+	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
@@ -38,10 +44,11 @@ import (
 
 type commonControl struct {
 	client.Client
-	recorder      record.EventRecorder
-	sandboxClient *clients.ClientSet
-	cache         *sandboxcr.Cache
-	pickCache     sync.Map
+	recorder        record.EventRecorder
+	sandboxClient   *clients.ClientSet
+	cache           *sandboxcr.Cache
+	storageRegistry storages.VolumeMountProviderRegistry
+	pickCache       sync.Map
 }
 
 func NewCommonControl(c client.Client, recorder record.EventRecorder, sandboxClient *clients.ClientSet, cache *sandboxcr.Cache) ClaimControl {
@@ -49,11 +56,12 @@ func NewCommonControl(c client.Client, recorder record.EventRecorder, sandboxCli
 	// In production, SetupWithManager always provides these dependencies
 
 	control := &commonControl{
-		Client:        c,
-		recorder:      recorder,
-		sandboxClient: sandboxClient,
-		cache:         cache,
-		pickCache:     sync.Map{},
+		Client:          c,
+		recorder:        recorder,
+		sandboxClient:   sandboxClient,
+		cache:           cache,
+		storageRegistry: storages.NewStorageProvider(),
+		pickCache:       sync.Map{},
 	}
 
 	return control
@@ -224,6 +232,7 @@ func (c *commonControl) claimSandboxes(ctx context.Context, claim *agentsv1alpha
 
 // buildClaimOptions constructs ClaimSandboxOptions for TryClaimSandbox
 func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1alpha1.SandboxClaim, sandboxSet *agentsv1alpha1.SandboxSet) (infra.ClaimSandboxOptions, error) {
+	logger := logf.FromContext(ctx).WithValues("SandboxClaim", klog.KObj(claim))
 	opts := infra.ClaimSandboxOptions{
 		User:     string(claim.UID), // Use UID to ensure uniqueness across claim recreations
 		Template: sandboxSet.Name,
@@ -274,6 +283,41 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 	}
 
 	// todo support other options (like envvars, inplace update...)
+	if len(claim.Spec.DynamicVolumesMount) > 0 {
+		csiMountOptions := make([]config.MountConfig, 0, len(claim.Spec.DynamicVolumesMount))
+		csiClient := csiutils.NewCSIMountHandler(c.sandboxClient, c.cache, c.storageRegistry, utils.DefaultSandboxDeployNamespace)
+		for _, mountConfig := range claim.Spec.DynamicVolumesMount {
+			driverName, csiReqConfigRaw, genErr := csiClient.CSIMountOptionsConfig(ctx, mountConfig)
+			if genErr != nil {
+				errMsg := "failed to generate csi mount options config for sandbox"
+				logger.Error(genErr, errMsg, "mountConfigRequest", mountConfig)
+				return opts, fmt.Errorf("%s, err: %v", errMsg, genErr)
+			}
+			csiMountOptions = append(csiMountOptions, config.MountConfig{
+				Driver:     driverName,
+				RequestRaw: csiReqConfigRaw,
+			})
+		}
+		opts.CSIMount = &config.CSIMountOptions{
+			MountOptionList: csiMountOptions,
+		}
+
+		// json marshal csi mount config to raw string
+		csiMountOptionsRaw, err := json.Marshal(claim.Spec.DynamicVolumesMount)
+		if err != nil {
+			logger.Error(err, "failed to marshal csi mount config")
+			return opts, fmt.Errorf("failed to marshal csi mount config, err: %v", err)
+		}
+		opts.CSIMount.MountOptionListRaw = string(csiMountOptionsRaw)
+
+		// Init runtime is required when CSI mount is specified
+		if opts.InitRuntime == nil {
+			opts.InitRuntime = &config.InitRuntimeOptions{
+				EnvVars:     claim.Spec.EnvVars,
+				AccessToken: uuid.NewString(),
+			}
+		}
+	}
 
 	// Validate and initialize
 	return sandboxcr.ValidateAndInitClaimOptions(opts)

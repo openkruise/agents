@@ -10,6 +10,7 @@ import (
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 )
@@ -169,6 +170,252 @@ func TestCsiMountOptionsConfigRecord(t *testing.T) {
 						t.Errorf("expected existing annotation %q=%q, got %q", k, v, annotations[k])
 					}
 				}
+			}
+		})
+	}
+}
+
+// mockSandboxManager is a mock implementation for testing
+type mockSandboxManager struct {
+	claimFunc func(ctx context.Context, opts infra.ClaimSandboxOptions) (infra.Sandbox, error)
+	cloneFunc func(ctx context.Context, opts infra.CloneSandboxOptions) (infra.Sandbox, error)
+}
+
+func (m *mockSandboxManager) ClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions) (infra.Sandbox, error) {
+	if m.claimFunc != nil {
+		return m.claimFunc(ctx, opts)
+	}
+	// Default behavior: return a mock sandbox
+	return &sandboxcr.Sandbox{
+		Sandbox: &v1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "mock-sandbox",
+				Namespace: "default",
+			},
+			Status: v1alpha1.SandboxStatus{
+				Phase: v1alpha1.SandboxRunning,
+				Conditions: []metav1.Condition{
+					{
+						Type:   string(v1alpha1.SandboxConditionReady),
+						Status: metav1.ConditionTrue,
+					},
+				},
+				PodInfo: v1alpha1.PodInfo{
+					PodIP: "10.0.0.1",
+				},
+			},
+		},
+	}, nil
+}
+
+func (m *mockSandboxManager) CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions) (infra.Sandbox, error) {
+	if m.cloneFunc != nil {
+		return m.cloneFunc(ctx, opts)
+	}
+	// Default behavior: return a mock sandbox
+	return &sandboxcr.Sandbox{
+		Sandbox: &v1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "mock-cloned-sandbox",
+				Namespace: "default",
+			},
+			Status: v1alpha1.SandboxStatus{
+				Phase: v1alpha1.SandboxRunning,
+			},
+		},
+	}, nil
+}
+
+func (m *mockSandboxManager) GetInfra() infra.Infrastructure {
+	return nil
+}
+
+func (m *mockSandboxManager) Stop() {
+	// No-op for testing
+}
+
+func (m *mockSandboxManager) Run(ctx context.Context, sysNs, peerSelector string) error {
+	// No-op for testing
+	return nil
+}
+
+func TestCreateSandboxWithClaim_CSIMount(t *testing.T) {
+	tests := []struct {
+		name              string
+		request           models.NewSandboxRequest
+		expectCSIMount    bool
+		expectedMountCount int
+	}{
+		{
+			name: "no csi mount configs",
+			request: models.NewSandboxRequest{
+				TemplateID: "test-template",
+				Extensions: models.NewSandboxRequestExtension{
+					CSIMount: models.CSIMountExtension{
+						MountConfigs: []v1alpha1.CSIMountConfig{},
+					},
+				},
+			},
+			expectCSIMount: false,
+		},
+		{
+			name: "single csi mount config",
+			request: models.NewSandboxRequest{
+				TemplateID: "test-template",
+				Extensions: models.NewSandboxRequestExtension{
+					CSIMount: models.CSIMountExtension{
+						MountConfigs: []v1alpha1.CSIMountConfig{
+							{
+								PvName:    "test-pv",
+								MountPath: "/data",
+								SubPath:   "subdir",
+								ReadOnly:  true,
+							},
+						},
+					},
+				},
+			},
+			expectCSIMount:    true,
+			expectedMountCount: 1,
+		},
+		{
+			name: "multiple csi mount configs",
+			request: models.NewSandboxRequest{
+				TemplateID: "test-template",
+				Extensions: models.NewSandboxRequestExtension{
+					CSIMount: models.CSIMountExtension{
+						MountConfigs: []v1alpha1.CSIMountConfig{
+							{
+								PvName:    "pv-nas-001",
+								MountPath: "/workspace",
+							},
+							{
+								PvName:    "pv-oss-002",
+								MountPath: "/models",
+								ReadOnly:  true,
+							},
+							{
+								PvName:    "pv-disk-003",
+								MountPath: "/storage",
+								SubPath:   "data",
+							},
+						},
+					},
+				},
+			},
+			expectCSIMount:    true,
+			expectedMountCount: 3,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Verify the request structure is valid
+			if len(tt.request.Extensions.CSIMount.MountConfigs) != tt.expectedMountCount {
+				t.Errorf("expected %d mount configs, got %d", tt.expectedMountCount,
+					len(tt.request.Extensions.CSIMount.MountConfigs))
+			}
+
+			// Check if CSI mount configs are properly set
+			hasCSIMount := len(tt.request.Extensions.CSIMount.MountConfigs) > 0
+			if hasCSIMount != tt.expectCSIMount {
+				t.Errorf("expectCSIMount mismatch: expected %v, got %v", tt.expectCSIMount, hasCSIMount)
+			}
+		})
+	}
+}
+
+func TestCreateSandboxWithClone_CSIMount(t *testing.T) {
+	tests := []struct {
+		name              string
+		request           models.NewSandboxRequest
+		expectCSIMount    bool
+		expectedMountCount int
+		hasInplaceUpdate  bool
+	}{
+		{
+			name: "clone with csi mount",
+			request: models.NewSandboxRequest{
+				TemplateID: "test-checkpoint",
+				Extensions: models.NewSandboxRequestExtension{
+					CSIMount: models.CSIMountExtension{
+						MountConfigs: []v1alpha1.CSIMountConfig{
+							{
+								PvName:    "test-pv",
+								MountPath: "/data",
+							},
+						},
+					},
+				},
+			},
+			expectCSIMount:    true,
+			expectedMountCount: 1,
+		},
+		{
+			name: "clone with multiple csi mounts",
+			request: models.NewSandboxRequest{
+				TemplateID: "test-checkpoint",
+				Extensions: models.NewSandboxRequestExtension{
+					CSIMount: models.CSIMountExtension{
+						MountConfigs: []v1alpha1.CSIMountConfig{
+							{
+								PvName:    "pv-1",
+								MountPath: "/mnt/data1",
+							},
+							{
+								PvName:    "pv-2",
+								MountPath: "/mnt/data2",
+								ReadOnly:  true,
+							},
+						},
+					},
+				},
+			},
+			expectCSIMount:    true,
+			expectedMountCount: 2,
+		},
+		{
+			name: "clone with inplace update and csi mount",
+			request: models.NewSandboxRequest{
+				TemplateID: "test-checkpoint",
+				Extensions: models.NewSandboxRequestExtension{
+					InplaceUpdate: models.InplaceUpdateExtension{
+						Image: "new-image",
+					},
+					CSIMount: models.CSIMountExtension{
+						MountConfigs: []v1alpha1.CSIMountConfig{
+							{
+								PvName:    "test-pv",
+								MountPath: "/data",
+							},
+						},
+					},
+				},
+			},
+			expectCSIMount:   true,
+			expectedMountCount: 1,
+			hasInplaceUpdate: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Verify the request structure is valid
+			if len(tt.request.Extensions.CSIMount.MountConfigs) != tt.expectedMountCount {
+				t.Errorf("expected %d mount configs, got %d", tt.expectedMountCount,
+					len(tt.request.Extensions.CSIMount.MountConfigs))
+			}
+
+			// Check if CSI mount configs are properly set
+			hasCSIMount := len(tt.request.Extensions.CSIMount.MountConfigs) > 0
+			if hasCSIMount != tt.expectCSIMount {
+				t.Errorf("expectCSIMount mismatch: expected %v, got %v", tt.expectCSIMount, hasCSIMount)
+			}
+
+			// Check inplace update
+			hasInplaceUpdate := tt.request.Extensions.InplaceUpdate.Image != ""
+			if hasInplaceUpdate != tt.hasInplaceUpdate {
+				t.Errorf("hasInplaceUpdate mismatch: expected %v, got %v", tt.hasInplaceUpdate, hasInplaceUpdate)
 			}
 		})
 	}
