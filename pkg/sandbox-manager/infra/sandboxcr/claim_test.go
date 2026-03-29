@@ -212,6 +212,22 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 			},
 		},
 		{
+			name:      "claim with inplace update and label updates",
+			available: 1,
+			options: infra.ClaimSandboxOptions{
+				User:     user,
+				Template: existTemplate,
+				InplaceUpdate: &config.InplaceUpdateOptions{
+					Image: "new-image",
+				},
+			},
+			postCheck: func(t *testing.T, sbx infra.Sandbox) {
+				assert.Equal(t, "new-image", sbx.(*Sandbox).Spec.Template.Spec.Containers[0].Image)
+				metrics := GetMetricsFromSandbox(t, sbx)
+				assert.Greater(t, metrics.WaitReady, time.Duration(0))
+			},
+		},
+		{
 			name:      "claim with csi mount",
 			available: 1,
 			options: infra.ClaimSandboxOptions{

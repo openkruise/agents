@@ -36,7 +36,7 @@ import (
 )
 
 // HashSandbox calculates the hash value using sandbox.spec.template
-func HashSandbox(box *agentsv1alpha1.Sandbox) (string, string) {
+func HashSandbox(box *agentsv1alpha1.Sandbox) (string, string, string) {
 	// hash using sandbox.spec.template
 	by, _ := json.Marshal(*box.Spec.Template)
 	hash := utils.HashData(by)
@@ -55,7 +55,13 @@ func HashSandbox(box *agentsv1alpha1.Sandbox) (string, string) {
 	}
 	by, _ = json.Marshal(*tempClone)
 	hashWithoutImageResources := utils.HashData(by)
-	return hash, hashWithoutImageResources
+
+	// hash using sandbox.spec.template without image, resources and metadata
+	tempClone.ObjectMeta.Annotations = map[string]string{}
+	tempClone.ObjectMeta.Labels = map[string]string{}
+	by, _ = json.Marshal(*tempClone)
+	hashWithoutImageResourcesMetadata := utils.HashData(by)
+	return hash, hashWithoutImageResources, hashWithoutImageResourcesMetadata
 }
 
 // GeneratePVCName generates a persistent volume claim name from template name and sandbox name

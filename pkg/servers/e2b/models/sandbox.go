@@ -49,6 +49,7 @@ type NewSandboxRequestExtension struct {
 	WaitReadySeconds     int
 	TimeoutSeconds       int
 	NeverTimeout         bool
+	Labels               map[string]string
 }
 
 type InplaceUpdateExtension struct {

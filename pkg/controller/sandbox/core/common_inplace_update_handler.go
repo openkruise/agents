@@ -43,13 +43,18 @@ func handleInPlaceUpdateCommon(
 ) (bool, error) {
 	logger := handler.GetLogger(ctx, box)
 
-	_, hashWithoutImageAndResource := HashSandbox(box)
+	_, hashWithoutImageResourceMetadata, hashWithoutImageAndResource := HashSandbox(box)
 	// old Pod do not include Labels[pod-template-hash] and do not support inplace update.
 	// Check if inplace update is supported
 	if pod.Labels[agentsv1alpha1.PodLabelTemplateHash] == "" {
 		return true, nil
 		// todo, update inplaceupdate condition
-	} else if box.Annotations[agentsv1alpha1.SandboxHashWithoutImageAndResources] != hashWithoutImageAndResource {
+	} else if box.Annotations[agentsv1alpha1.SandboxHashWithoutImageAndResources] != hashWithoutImageAndResource &&
+		box.Annotations[agentsv1alpha1.SandboxHashWithoutImageAndResources] != hashWithoutImageResourceMetadata {
+		// SandboxHashWithoutImageAndResources computation is switching
+		// from  hashWithoutImageAndResource to hashWithoutImageResourceMetadata
+		//TODO: drop hashWithoutImageAndResource comparison once we're sure no
+		// sandboxes with old hashWithoutImageAndResource exists
 		logger.Info("sandbox hash-without-image-resources changed, and does not permit in-place upgrades",
 			"old hash", box.Annotations[agentsv1alpha1.SandboxHashWithoutImageAndResources],
 			"new hash", hashWithoutImageAndResource)

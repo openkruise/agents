@@ -257,6 +257,12 @@ func (sc *Controller) basicSandboxCreateModifier(ctx context.Context, sbx infra.
 		annotations[k] = v
 	}
 	sbx.SetAnnotations(annotations)
+
+	labels := sbx.GetLabels()
+	for k, v := range request.Extensions.Labels {
+		labels[k] = v
+	}
+	sbx.SetLabels(labels)
 }
 
 func (sc *Controller) csiMountOptionsConfigRecord(ctx context.Context, sbx infra.Sandbox, request models.NewSandboxRequest) {
