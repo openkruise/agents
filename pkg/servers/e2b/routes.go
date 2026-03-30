@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/google/uuid"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
+	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -41,9 +41,9 @@ func (sc *Controller) registerRoutes() {
 
 	// API Keys management endpoints
 	if sc.keys != nil {
-		RegisterE2BRoute(sc.mux, http.MethodGet, "/api-keys", sc.ListAPIKeys, sc.CheckApiKey)
-		RegisterE2BRoute(sc.mux, http.MethodPost, "/api-keys", sc.CreateAPIKey, sc.CheckApiKey)
-		RegisterE2BRoute(sc.mux, http.MethodDelete, "/api-keys/{apiKeyID}", sc.DeleteAPIKey, sc.CheckApiKey)
+		RegisterE2BRoute(sc.mux, http.MethodGet, "/api-keys", sc.ListAPIKeys, sc.CheckApiKey, sc.CheckAdminKey)
+		RegisterE2BRoute(sc.mux, http.MethodPost, "/api-keys", sc.CreateAPIKey, sc.CheckApiKey, sc.CheckAdminKey)
+		RegisterE2BRoute(sc.mux, http.MethodDelete, "/api-keys/{apiKeyID}", sc.DeleteAPIKey, sc.CheckApiKey, sc.CheckAdminKey)
 	}
 }
 
@@ -54,12 +54,14 @@ func RegisterE2BRoute[T any](mux *http.ServeMux, method, path string, handler we
 	web.RegisterRoute(mux, method, adapters.CustomPrefix+"/api"+path, handler, middlewares...)
 }
 
+// AnonymousUser is used only when authentication is disabled. It has the same Key as Admin,
+// allowing for subsequent restrictions on Admin user request interfaces.
 var AnonymousUser = &models.CreatedTeamAPIKey{
-	ID:   uuid.MustParse("550e8400-e29b-41d4-a716-446655440000"), // Meaningless random number, used to represent anonymous users in non-authentication mode
+	ID:   keys.AdminKeyID,
 	Name: "auth-disabled",
 }
 
-// CheckApiKey implements Demo's ApiKey validation
+// CheckApiKey implements common ApiKey validation
 func (sc *Controller) CheckApiKey(ctx context.Context, r *http.Request) (context.Context, *web.ApiError) {
 	logger := klog.FromContext(ctx)
 	middleWareLog := logger.WithValues("middleware", "CheckApiKey").V(consts.DebugLogLevel)
@@ -95,6 +97,28 @@ func (sc *Controller) CheckApiKey(ctx context.Context, r *http.Request) (context
 		}
 	}
 	return context.WithValue(klog.NewContext(ctx, logger.WithValues("user", user.Name)), "user", user), nil
+}
+
+// CheckAdminKey must be called after CheckApiKey. It checks if the user is an admin.
+func (sc *Controller) CheckAdminKey(ctx context.Context, _ *http.Request) (context.Context, *web.ApiError) {
+	logger := klog.FromContext(ctx)
+	middleWareLog := logger.WithValues("middleware", "CheckAdminKey").V(consts.DebugLogLevel)
+	user := GetUserFromContext(ctx)
+	if user == nil {
+		middleWareLog.Info("failed to get user from context")
+		return ctx, &web.ApiError{
+			Code:    http.StatusUnauthorized,
+			Message: "User not found",
+		}
+	}
+	if user.ID != keys.AdminKeyID {
+		middleWareLog.Info("user is not admin")
+		return ctx, &web.ApiError{
+			Code:    http.StatusForbidden,
+			Message: "User is not admin",
+		}
+	}
+	return ctx, nil
 }
 
 func GetUserFromContext(ctx context.Context) *models.CreatedTeamAPIKey {

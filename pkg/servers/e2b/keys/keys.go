@@ -26,11 +26,7 @@ var (
 )
 
 func init() {
-	id, err := uuid.Parse("550e8400-e29b-41d4-a716-446655440000") // no means, just a const
-	if err != nil {
-		panic("cannot parse AdminKeyID as UUID")
-	}
-	AdminKeyID = id
+	AdminKeyID = uuid.MustParse("550e8400-e29b-41d4-a716-446655440000") // no means, just a const
 }
 
 // SecretKeyStorage is a simple implement for api-key storage using k8s secret as storage backend.
