@@ -34,6 +34,7 @@ import (
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 	"github.com/openkruise/agents/pkg/utils/inplaceupdate"
+	"github.com/openkruise/agents/pkg/utils/sidecarutils"
 )
 
 const CommonControlName = "common"
@@ -265,6 +266,16 @@ func (r *commonControl) createPod(ctx context.Context, box *agentsv1alpha1.Sandb
 	if err != nil {
 		return nil, err
 	}
+
+	// to avoid the performance issue, using the controller to inject csi containers
+	// fetch the configmap and parse the configuration based on the controller runtime
+	podTemplate := &pod.Spec
+	injectErr := sidecarutils.InjectPodTemplateCSIAndRuntimeSidecar(ctx, box, podTemplate, r.Client)
+	if injectErr != nil {
+		logger.Error(injectErr, "failed to inject pod template with csi sidecar or runtime sidecar")
+		return nil, injectErr
+	}
+
 	ScaleExpectation.ExpectScale(GetControllerKey(box), expectations.Create, box.Name)
 	err = r.Create(ctx, pod)
 	if err != nil && !errors.IsAlreadyExists(err) {

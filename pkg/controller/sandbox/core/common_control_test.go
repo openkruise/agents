@@ -33,6 +33,7 @@ import (
 	"github.com/openkruise/agents/pkg/utils"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 	"github.com/openkruise/agents/pkg/utils/inplaceupdate"
+	"github.com/openkruise/agents/pkg/utils/sidecarutils"
 )
 
 func TestCommonControl_EnsureSandboxRunning(t *testing.T) {
@@ -1266,6 +1267,8 @@ func TestCommonControl_createPod_WithSidecarInjection(t *testing.T) {
 		expectMainContainerEnvs int
 		expectMainVolumeMounts  int
 		expectVolumes           int
+		expectRuntimeSidecar    bool // expect runtime-sidecar in InitContainers
+		expectCSISidecar        bool // expect csi-sidecar in InitContainers
 	}{
 		{
 			name: "no injection - no annotations",
@@ -1293,6 +1296,8 @@ func TestCommonControl_createPod_WithSidecarInjection(t *testing.T) {
 			expectMainContainerEnvs: 0,
 			expectMainVolumeMounts:  0,
 			expectVolumes:           0,
+			expectRuntimeSidecar:    false,
+			expectCSISidecar:        false,
 		},
 		{
 			name: "runtime injection only",
@@ -1318,11 +1323,11 @@ func TestCommonControl_createPod_WithSidecarInjection(t *testing.T) {
 			},
 			configMap: &corev1.ConfigMap{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      sandboxInjectionConfigName,
+					Name:      sidecarutils.SandboxInjectionConfigName,
 					Namespace: utils.DefaultSandboxDeployNamespace,
 				},
 				Data: map[string]string{
-					KEY_RUNTIME_INJECTION_CONFIG: `{
+					sidecarutils.KEY_RUNTIME_INJECTION_CONFIG: `{
 						"mainContainer": {
 							"name": "",
 							"env": [
@@ -1345,6 +1350,8 @@ func TestCommonControl_createPod_WithSidecarInjection(t *testing.T) {
 			expectMainContainerEnvs: 2,
 			expectMainVolumeMounts:  0,
 			expectVolumes:           0,
+			expectRuntimeSidecar:    true,
+			expectCSISidecar:        false,
 		},
 		{
 			name: "csi injection only",
@@ -1370,11 +1377,11 @@ func TestCommonControl_createPod_WithSidecarInjection(t *testing.T) {
 			},
 			configMap: &corev1.ConfigMap{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      sandboxInjectionConfigName,
+					Name:      sidecarutils.SandboxInjectionConfigName,
 					Namespace: utils.DefaultSandboxDeployNamespace,
 				},
 				Data: map[string]string{
-					KEY_CSI_INJECTION_CONFIG: `{
+					sidecarutils.KEY_CSI_INJECTION_CONFIG: `{
 						"mainContainer": {
 							"name": "",
 							"env": [],
@@ -1395,11 +1402,13 @@ func TestCommonControl_createPod_WithSidecarInjection(t *testing.T) {
 				},
 			},
 			featureGateEnabled:      true,
-			expectInitContainers:    0,
-			expectContainers:        2,
+			expectInitContainers:    1, // CSI sidecar is injected to InitContainers
+			expectContainers:        1, // only main container
 			expectMainContainerEnvs: 0,
 			expectMainVolumeMounts:  2,
 			expectVolumes:           2,
+			expectRuntimeSidecar:    false,
+			expectCSISidecar:        true,
 		},
 		{
 			name: "both runtime and csi injection",
@@ -1426,11 +1435,11 @@ func TestCommonControl_createPod_WithSidecarInjection(t *testing.T) {
 			},
 			configMap: &corev1.ConfigMap{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      sandboxInjectionConfigName,
+					Name:      sidecarutils.SandboxInjectionConfigName,
 					Namespace: utils.DefaultSandboxDeployNamespace,
 				},
 				Data: map[string]string{
-					KEY_RUNTIME_INJECTION_CONFIG: `{
+					sidecarutils.KEY_RUNTIME_INJECTION_CONFIG: `{
 						"mainContainer": {
 							"name": "",
 							"env": [{"name": "RUNTIME", "value": "enabled"}],
@@ -1442,7 +1451,7 @@ func TestCommonControl_createPod_WithSidecarInjection(t *testing.T) {
 						}],
 						"volume": []
 					}`,
-					KEY_CSI_INJECTION_CONFIG: `{
+					sidecarutils.KEY_CSI_INJECTION_CONFIG: `{
 						"mainContainer": {
 							"name": "",
 							"env": [],
@@ -1457,53 +1466,13 @@ func TestCommonControl_createPod_WithSidecarInjection(t *testing.T) {
 				},
 			},
 			featureGateEnabled:      true,
-			expectInitContainers:    1,
-			expectContainers:        2,
+			expectInitContainers:    2, // runtime-sidecar + csi-sidecar both injected to InitContainers
+			expectContainers:        1, // only main container
 			expectMainContainerEnvs: 1,
 			expectMainVolumeMounts:  1,
 			expectVolumes:           1,
-		},
-		{
-			name: "feature gate disabled - no injection",
-			sandbox: &agentsv1alpha1.Sandbox{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-sandbox",
-					Namespace: "default",
-					Annotations: map[string]string{
-						agentsv1alpha1.ShouldInjectAgentRuntime: "true",
-					},
-				},
-				Spec: agentsv1alpha1.SandboxSpec{
-					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
-						Template: &corev1.PodTemplateSpec{
-							Spec: corev1.PodSpec{
-								Containers: []corev1.Container{
-									{Name: "main", Image: "nginx"},
-								},
-							},
-						},
-					},
-				},
-			},
-			configMap: &corev1.ConfigMap{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      sandboxInjectionConfigName,
-					Namespace: utils.DefaultSandboxDeployNamespace,
-				},
-				Data: map[string]string{
-					KEY_RUNTIME_INJECTION_CONFIG: `{
-						"mainContainer": {"name": "", "env": [{"name": "ENV", "value": "val"}], "volumeMounts": []},
-						"csiSidecar": [{"name": "sidecar", "image": "sidecar:v1"}],
-						"volume": []
-					}`,
-				},
-			},
-			featureGateEnabled:      false,
-			expectInitContainers:    0,
-			expectContainers:        1,
-			expectMainContainerEnvs: 0,
-			expectMainVolumeMounts:  0,
-			expectVolumes:           0,
+			expectRuntimeSidecar:    true,
+			expectCSISidecar:        true,
 		},
 	}
 
@@ -1581,7 +1550,7 @@ func TestCommonControl_createPod_WithSidecarInjection(t *testing.T) {
 			}
 
 			// Verify runtime sidecar in InitContainers
-			if tt.expectInitContainers > 0 {
+			if tt.expectRuntimeSidecar {
 				runtimeFound := false
 				for _, ic := range pod.Spec.InitContainers {
 					if ic.Name == "runtime-sidecar" {
@@ -1594,17 +1563,17 @@ func TestCommonControl_createPod_WithSidecarInjection(t *testing.T) {
 				}
 			}
 
-			// Verify csi sidecar in Containers
-			if tt.expectContainers > 1 {
+			// Verify csi sidecar in InitContainers
+			if tt.expectCSISidecar {
 				csiFound := false
-				for _, c := range pod.Spec.Containers {
-					if c.Name == "csi-sidecar" {
+				for _, ic := range pod.Spec.InitContainers {
+					if ic.Name == "csi-sidecar" {
 						csiFound = true
 						break
 					}
 				}
 				if !csiFound {
-					t.Error("csi sidecar not found in Containers")
+					t.Error("csi sidecar not found in InitContainers")
 				}
 			}
 		})

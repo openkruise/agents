@@ -1,4 +1,4 @@
-package core
+package sidecarutils
 
 import (
 	"context"
@@ -7,10 +7,12 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/utils/webhookutils"
 )
 
@@ -22,29 +24,16 @@ func enableInjectAgentRuntimeConfig(sandbox *agentsv1alpha1.Sandbox) bool {
 	return sandbox.Annotations[agentsv1alpha1.ShouldInjectAgentRuntime] == "true"
 }
 
-// fetchInjectionConfiguration retrieves the sidecar injection configuration from the ConfigMap.
-// It attempts to fetch the ConfigMap named sandboxInjectionConfigName from the sandbox-system namespace.
-// If the ConfigMap exists, it returns the data map containing configuration keys like
-// KEY_CSI_INJECTION_CONFIG and KEY_RUNTIME_INJECTION_CONFIG. If the ConfigMap is not found
-// or any error occurs during retrieval, it returns nil data and no error.
-//
-// Parameters:
-//   - ctx: context.Context for the operation
-//   - client: Kubernetes client.Interface used to retrieve the ConfigMap
-//
-// Returns:
-//   - map[string]string: The configuration data from the ConfigMap, or nil if not found or on error
-//   - error: Always returns nil (errors are logged but not propagated)
 func fetchInjectionConfiguration(ctx context.Context, cli client.Client) (map[string]string, error) {
 	logger := logf.FromContext(ctx)
 	config := &corev1.ConfigMap{}
 	err := cli.Get(ctx, types.NamespacedName{
 		Namespace: webhookutils.GetNamespace(), // Todo considering the security concern and rbac issue
-		Name:      sandboxInjectionConfigName,
+		Name:      SandboxInjectionConfigName,
 	}, config)
 	if err != nil {
 		if errors.IsNotFound(err) {
-			logger.Info("injection configuration not found, skip injection")
+			logger.V(consts.DebugLogLevel).Info("injection configuration not found, skip injection")
 			return map[string]string{}, nil
 		}
 		return map[string]string{}, err
@@ -52,27 +41,13 @@ func fetchInjectionConfiguration(ctx context.Context, cli client.Client) (map[st
 	return config.Data, nil
 }
 
-// parseInjectConfig parses the sidecar injection configuration from raw ConfigMap data for a specific config key.
-// It extracts the value associated with the given configKey (e.g., KEY_CSI_INJECTION_CONFIG or KEY_RUNTIME_INJECTION_CONFIG)
-// and unmarshals it into a SidecarInjectConfig struct. If the key is not present in the configRaw map or the value
-// is empty, it returns an empty SidecarInjectConfig without error. The configuration includes the main container
-// settings, sidecar containers list (CSI sidecars or runtime init containers), and volumes to be injected.
-//
-// Parameters:
-//   - ctx: context.Context for the operation, used for logging
-//   - configKey: string representing the configuration key to look up (KEY_CSI_INJECTION_CONFIG or KEY_RUNTIME_INJECTION_CONFIG)
-//   - configRaw: map[string]string containing the raw ConfigMap data with potential injection config
-//
-// Returns:
-//   - SidecarInjectConfig: The parsed configuration containing main container, sidecars, and volumes
-//   - error: An error if JSON unmarshaling fails, nil otherwise or when config key is missing/empty
 func parseInjectConfig(ctx context.Context, configKey string, configRaw map[string]string) (SidecarInjectConfig, error) {
 	log := logf.FromContext(ctx)
 	sidecarConfig := SidecarInjectConfig{}
 
 	configValue, exists := configRaw[configKey]
 	if !exists || configValue == "" {
-		log.Info("config key not found or empty, using default configuration")
+		log.V(5).Info("config key not found or empty, using default configuration")
 		return sidecarConfig, nil
 	}
 
@@ -100,9 +75,12 @@ func setCSIMountContainer(ctx context.Context, podSpec *corev1.PodSpec, config S
 	mainContainer := &podSpec.Containers[0]
 	setMainContainerWhenInjectCSISidecar(mainContainer, config)
 
-	// set csi sidecars
+	// set csi sidecars into init containers
+	if podSpec.InitContainers == nil {
+		podSpec.InitContainers = make([]corev1.Container, 0, 1)
+	}
 	for _, csiSidecar := range config.Sidecars {
-		podSpec.Containers = append(podSpec.Containers, csiSidecar)
+		podSpec.InitContainers = append(podSpec.InitContainers, csiSidecar)
 	}
 
 	// set share volume
@@ -227,6 +205,23 @@ func findVolumeByName(volumes []corev1.Volume, name string) bool {
 func findEnvByName(envs []corev1.EnvVar, name string) bool {
 	for _, env := range envs {
 		if env.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// isContainersExists checks if any container name in injectContainers
+// already exists in podContainers.
+// Returns true if any inject container name already exists in podContainers (conflict),
+// Returns false if no conflict (all inject container names are unique).
+func isContainersExists(podContainers []corev1.Container, injectContainers []corev1.Container) bool {
+	existingNames := sets.NewString()
+	for _, c := range podContainers {
+		existingNames.Insert(c.Name)
+	}
+	for _, c := range injectContainers {
+		if existingNames.Has(c.Name) {
 			return true
 		}
 	}

@@ -403,7 +403,8 @@ func (c *Cache) GetConfigmap(namespace, name string) (*corev1.ConfigMap, error) 
 		return nil, fmt.Errorf("failed to get configmap %s/%s from cache: %v", namespace, name, err)
 	}
 	if !exists {
-		return nil, fmt.Errorf("configmap %s/%s not found in cache", namespace, name)
+		// too many log noise when the configmap is not found
+		return nil, nil
 	}
 	if configmap, ok := obj.(*corev1.ConfigMap); ok {
 		return configmap, nil

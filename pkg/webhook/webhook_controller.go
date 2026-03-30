@@ -6,10 +6,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/openkruise/agents/pkg/utils/webhookutils"
-	"github.com/openkruise/agents/pkg/utils/webhookutils/configuration"
-	"github.com/openkruise/agents/pkg/utils/webhookutils/generator"
-	"github.com/openkruise/agents/pkg/utils/webhookutils/writer"
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -24,6 +20,11 @@ import (
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
+
+	"github.com/openkruise/agents/pkg/utils/webhookutils"
+	"github.com/openkruise/agents/pkg/utils/webhookutils/configuration"
+	"github.com/openkruise/agents/pkg/utils/webhookutils/generator"
+	"github.com/openkruise/agents/pkg/utils/webhookutils/writer"
 )
 
 const (

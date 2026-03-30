@@ -1,4 +1,4 @@
-package core
+package sidecarutils
 
 import (
 	corev1 "k8s.io/api/core/v1"
@@ -7,7 +7,7 @@ import (
 const (
 	KEY_CSI_INJECTION_CONFIG     = "csi-config"
 	KEY_RUNTIME_INJECTION_CONFIG = "agent-runtime-config"
-	sandboxInjectionConfigName   = "sandbox-injection-config"
+	SandboxInjectionConfigName   = "sandbox-injection-config"
 )
 
 type SidecarInjectConfig struct {

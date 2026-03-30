@@ -20,7 +20,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -30,9 +29,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/utils"
-	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 )
 
 // HashSandbox calculates the hash value using sandbox.spec.template
@@ -125,42 +122,5 @@ func GeneratePodFromSandbox(ctx context.Context, cli client.Client, box *agentsv
 		})
 	}
 	pod.Spec.Volumes = append(pod.Spec.Volumes, volumes...)
-
-	// to avoid the performance issue, using the controller to inject csi containers
-	// fetch the configmap and parse the configuration based on the controller runtime
-	if utilfeature.DefaultFeatureGate.Enabled(features.SandboxCreatePodInjectConfigGate) {
-		if enableInjectCsiMountConfig(box) || enableInjectAgentRuntimeConfig(box) {
-			startTime := time.Now()
-			// fetch the custom injection configuration
-			config, err := fetchInjectionConfiguration(ctx, cli)
-			if err != nil {
-				logger.Error(err, "failed to fetch injection configuration")
-				return nil, err
-			}
-			logger.Info("finished to fetch injection configuration", "costTime", time.Since(startTime))
-
-			podSpecTemplate := &pod.Spec
-			// set agent runtime sidecar config
-			if enableInjectAgentRuntimeConfig(box) {
-				runTimeInjectConfig, err := parseInjectConfig(ctx, KEY_RUNTIME_INJECTION_CONFIG, config)
-				if err != nil {
-					logger.Error(err, "failed to parse agent runtime injection configuration")
-					return nil, err
-				}
-				setAgentRuntimeContainer(ctx, podSpecTemplate, runTimeInjectConfig)
-			}
-
-			// set csi sidecar config
-			if enableInjectCsiMountConfig(box) {
-				csiInjectConfig, err := parseInjectConfig(ctx, KEY_CSI_INJECTION_CONFIG, config)
-				if err != nil {
-					logger.Error(err, "failed to parse csi injection configuration")
-					return nil, err
-				}
-				setCSIMountContainer(ctx, podSpecTemplate, csiInjectConfig)
-			}
-		}
-	}
-
 	return pod, nil
 }

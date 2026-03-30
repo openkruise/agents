@@ -1,4 +1,4 @@
-package core
+package sidecarutils
 
 import (
 	"context"
@@ -7,9 +7,6 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 // getTestNamespace returns the namespace used for testing
@@ -22,13 +19,14 @@ func TestSetCSIMountContainer(t *testing.T) {
 	ctx := context.Background()
 
 	tests := []struct {
-		name                string
-		template            *corev1.PodSpec
-		config              SidecarInjectConfig
-		expectedContainers  int
-		expectedVolumes     int
-		expectedEnvCount    int
-		expectedVolumeMount int
+		name                   string
+		template               *corev1.PodSpec
+		config                 SidecarInjectConfig
+		expectedContainers     int // main containers count
+		expectedInitContainers int // CSI sidecars are injected to InitContainers
+		expectedVolumes        int
+		expectedEnvCount       int
+		expectedVolumeMount    int
 	}{
 		{
 			name: "empty template with CSI config",
@@ -67,10 +65,11 @@ func TestSetCSIMountContainer(t *testing.T) {
 					{Name: "oss-plugin-dir", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 				},
 			},
-			expectedContainers:  3, // 1 main + 2 sidecars
-			expectedVolumes:     3,
-			expectedEnvCount:    2,
-			expectedVolumeMount: 2,
+			expectedContainers:     1, // main container only
+			expectedInitContainers: 2, // 2 CSI sidecars injected to InitContainers
+			expectedVolumes:        3,
+			expectedEnvCount:       2,
+			expectedVolumeMount:    2,
 		},
 		{
 			name: "template with existing volumes - no duplicates",
@@ -99,10 +98,11 @@ func TestSetCSIMountContainer(t *testing.T) {
 					{Name: "new-volume", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 				},
 			},
-			expectedContainers:  2, // 1 main + 1 sidecar
-			expectedVolumes:     2, // mount-root (existing) + new-volume
-			expectedEnvCount:    0,
-			expectedVolumeMount: 1,
+			expectedContainers:     1, // main container only
+			expectedInitContainers: 1, // 1 CSI sidecar injected to InitContainers
+			expectedVolumes:        2, // mount-root (existing) + new-volume
+			expectedEnvCount:       0,
+			expectedVolumeMount:    1,
 		},
 		{
 			name: "template with existing envs - no duplicates",
@@ -127,10 +127,11 @@ func TestSetCSIMountContainer(t *testing.T) {
 				Sidecars: []corev1.Container{},
 				Volumes:  []corev1.Volume{},
 			},
-			expectedContainers:  1,
-			expectedVolumes:     0,
-			expectedEnvCount:    2, // ENV1 (existing) + ENV2 (new)
-			expectedVolumeMount: 0,
+			expectedContainers:     1,
+			expectedInitContainers: 0,
+			expectedVolumes:        0,
+			expectedEnvCount:       2, // ENV1 (existing) + ENV2 (new)
+			expectedVolumeMount:    0,
 		},
 		{
 			name: "empty containers list",
@@ -144,10 +145,11 @@ func TestSetCSIMountContainer(t *testing.T) {
 				Sidecars: []corev1.Container{{Name: "sidecar", Image: "sidecar:latest"}},
 				Volumes:  []corev1.Volume{{Name: "vol1", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}},
 			},
-			expectedContainers:  0, // no change when containers list is empty
-			expectedVolumes:     0,
-			expectedEnvCount:    0,
-			expectedVolumeMount: 0,
+			expectedContainers:     0, // no change when containers list is empty
+			expectedInitContainers: 0, // sidecars not injected when no main container
+			expectedVolumes:        0,
+			expectedEnvCount:       0,
+			expectedVolumeMount:    0,
 		},
 	}
 
@@ -155,9 +157,14 @@ func TestSetCSIMountContainer(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			setCSIMountContainer(ctx, tt.template, tt.config)
 
-			// Verify container count
+			// Verify main container count
 			if len(tt.template.Containers) != tt.expectedContainers {
 				t.Errorf("expected %d containers, got %d", tt.expectedContainers, len(tt.template.Containers))
+			}
+
+			// Verify init container count (CSI sidecars are injected here)
+			if len(tt.template.InitContainers) != tt.expectedInitContainers {
+				t.Errorf("expected %d init containers, got %d", tt.expectedInitContainers, len(tt.template.InitContainers))
 			}
 
 			// Verify volume count
@@ -635,122 +642,6 @@ func TestSetMainContainerConfigWhenInjectRuntimeSidecar(t *testing.T) {
 	}
 }
 
-func TestFetchInjectionConfiguration(t *testing.T) {
-	ctx := context.Background()
-
-	tests := []struct {
-		name          string
-		configMap     *corev1.ConfigMap
-		getError      error
-		expectedData  map[string]string
-		expectError   bool
-		errorContains string
-	}{
-		{
-			name: "successful fetch",
-			configMap: &corev1.ConfigMap{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      sandboxInjectionConfigName,
-					Namespace: getTestNamespace(),
-				},
-				Data: map[string]string{
-					KEY_CSI_INJECTION_CONFIG:     `{"mainContainer":{},"csiSidecar":[],"volume":[]}`,
-					KEY_RUNTIME_INJECTION_CONFIG: `{"mainContainer":{},"csiSidecar":[],"volume":[]}`,
-				},
-			},
-			expectedData: map[string]string{
-				KEY_CSI_INJECTION_CONFIG:     `{"mainContainer":{},"csiSidecar":[],"volume":[]}`,
-				KEY_RUNTIME_INJECTION_CONFIG: `{"mainContainer":{},"csiSidecar":[],"volume":[]}`,
-			},
-			expectError: false,
-		},
-		{
-			name:          "configmap not found",
-			configMap:     nil,
-			getError:      nil,
-			expectedData:  nil,
-			expectError:   false,
-			errorContains: "",
-		},
-		{
-			name: "empty configmap data",
-			configMap: &corev1.ConfigMap{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      sandboxInjectionConfigName,
-					Namespace: getTestNamespace(),
-				},
-				Data: map[string]string{},
-			},
-			expectedData: map[string]string{},
-			expectError:  false,
-		},
-		{
-			name: "configmap with partial data",
-			configMap: &corev1.ConfigMap{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      sandboxInjectionConfigName,
-					Namespace: getTestNamespace(),
-				},
-				Data: map[string]string{
-					KEY_CSI_INJECTION_CONFIG: `{"mainContainer":{"env":[{"name":"ENV1","value":"val1"}]},"csiSidecar":[],"volume":[]}`,
-				},
-			},
-			expectedData: map[string]string{
-				KEY_CSI_INJECTION_CONFIG: `{"mainContainer":{"env":[{"name":"ENV1","value":"val1"}]},"csiSidecar":[],"volume":[]}`,
-			},
-			expectError: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Create fake client
-			initObjs := []client.Object{}
-			if tt.configMap != nil {
-				initObjs = append(initObjs, tt.configMap)
-			}
-			fakeClient := fake.NewClientBuilder().
-				WithObjects(initObjs...).
-				Build()
-
-			control := &commonControl{
-				Client: fakeClient,
-			}
-
-			// Call the function
-			data, err := fetchInjectionConfiguration(ctx, control.Client)
-
-			// Verify results
-			if tt.expectError {
-				if err == nil {
-					t.Error("expected error, got nil")
-				} else if tt.errorContains != "" && !strings.Contains(err.Error(), tt.errorContains) {
-					t.Errorf("expected error to contain %q, got %q", tt.errorContains, err.Error())
-				}
-				if data != nil {
-					t.Error("expected nil data on error, got non-nil")
-				}
-			} else {
-				if err != nil {
-					t.Errorf("unexpected error: %v", err)
-				}
-				// Compare map lengths first for better error messages
-				if len(data) != len(tt.expectedData) {
-					t.Errorf("expected data length %d, got %d", len(tt.expectedData), len(data))
-				}
-				// Then compare individual keys and values
-				for key, expectedValue := range tt.expectedData {
-					if actualValue, exists := data[key]; !exists {
-						t.Errorf("expected key %q to exist in data", key)
-					} else if actualValue != expectedValue {
-						t.Errorf("for key %q: expected value %q, got %q", key, expectedValue, actualValue)
-					}
-				}
-			}
-		})
-	}
-}
-
 func TestParseCSIMountConfig(t *testing.T) {
 	ctx := context.Background()
 
@@ -1059,4 +950,106 @@ func compareSidecarInjectConfigs(a, b SidecarInjectConfig) bool {
 	return reflect.DeepEqual(a.MainContainer, b.MainContainer) &&
 		reflect.DeepEqual(a.Sidecars, b.Sidecars) &&
 		reflect.DeepEqual(a.Volumes, b.Volumes)
+}
+
+func TestIsContainersExists(t *testing.T) {
+	tests := []struct {
+		name             string
+		podContainers    []corev1.Container
+		injectContainers []corev1.Container
+		expected         bool
+	}{
+		{
+			name:             "both lists empty",
+			podContainers:    []corev1.Container{},
+			injectContainers: []corev1.Container{},
+			expected:         false,
+		},
+		{
+			name:          "podContainers empty, injectContainers has values",
+			podContainers: []corev1.Container{},
+			injectContainers: []corev1.Container{
+				{Name: "sidecar-1"},
+				{Name: "sidecar-2"},
+			},
+			expected: false,
+		},
+		{
+			name: "podContainers has values, injectContainers empty",
+			podContainers: []corev1.Container{
+				{Name: "main-container"},
+				{Name: "app-container"},
+			},
+			injectContainers: []corev1.Container{},
+			expected:         false,
+		},
+		{
+			name: "no conflict - different names",
+			podContainers: []corev1.Container{
+				{Name: "main-container"},
+				{Name: "app-container"},
+			},
+			injectContainers: []corev1.Container{
+				{Name: "sidecar-1"},
+				{Name: "sidecar-2"},
+			},
+			expected: false,
+		},
+		{
+			name: "conflict - one duplicate name",
+			podContainers: []corev1.Container{
+				{Name: "main-container"},
+				{Name: "app-container"},
+			},
+			injectContainers: []corev1.Container{
+				{Name: "main-container"}, // duplicate
+				{Name: "sidecar-1"},
+			},
+			expected: true,
+		},
+		{
+			name: "conflict - multiple duplicate names",
+			podContainers: []corev1.Container{
+				{Name: "main-container"},
+				{Name: "app-container"},
+				{Name: "helper-container"},
+			},
+			injectContainers: []corev1.Container{
+				{Name: "main-container"},   // duplicate
+				{Name: "helper-container"}, // duplicate
+			},
+			expected: true,
+		},
+		{
+			name: "conflict - last inject container duplicates",
+			podContainers: []corev1.Container{
+				{Name: "main-container"},
+			},
+			injectContainers: []corev1.Container{
+				{Name: "sidecar-1"},
+				{Name: "sidecar-2"},
+				{Name: "main-container"}, // duplicate at the end
+			},
+			expected: true,
+		},
+		{
+			name: "no conflict - single container in each list",
+			podContainers: []corev1.Container{
+				{Name: "main-container"},
+			},
+			injectContainers: []corev1.Container{
+				{Name: "sidecar"},
+			},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := isContainersExists(tt.podContainers, tt.injectContainers)
+			if result != tt.expected {
+				t.Errorf("isContainersExists() = %v, expected %v", result, tt.expected)
+			}
+		})
+	}
 }

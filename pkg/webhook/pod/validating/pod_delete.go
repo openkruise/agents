@@ -17,6 +17,8 @@ import (
 	"github.com/openkruise/agents/pkg/utils"
 )
 
+const subResourceEviction = "eviction"
+
 type PodValidatingHandler struct {
 	Client  client.Client
 	Decoder admission.Decoder
@@ -52,7 +54,7 @@ func (h *PodValidatingHandler) Handle(ctx context.Context, req admission.Request
 	case admissionv1.Create:
 		klog.Infof("req.SubResource %s", req.SubResource)
 		// Only handle eviction subresource
-		if req.SubResource != "eviction" {
+		if req.SubResource != subResourceEviction {
 			return admission.Allowed("")
 		}
 		// Decode eviction request
