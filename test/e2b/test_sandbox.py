@@ -44,7 +44,7 @@ def test_no_stock(sandbox_context):
     print(f"sandbox-id: {sandbox.sandbox_id}")
     info = sandbox.get_info()
     print(info)
-    assert info.template_id == "code-interpreter"
+    assert info.template_id == "code-interpreter-0"
     assert info.state == SandboxState.RUNNING
     assert info.metadata["userId"] == "123"
 
