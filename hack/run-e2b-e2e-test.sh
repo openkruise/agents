@@ -93,6 +93,17 @@ else
     sleep 5
 fi
 
+# Check if code-interpreter-0 sandboxset already exists
+echo "Checking for code-interpreter-0 sandboxset..."
+if kubectl get sandboxset code-interpreter-0 -n default &>/dev/null; then
+    echo "SandboxSet 'code-interpreter-0' already exists, skipping creation"
+else
+    echo "Creating code-interpreter-0 sandboxset..."
+    kubectl apply -f $TEST_DIR/assets/sandboxset-code-interpreter-0.yaml
+    echo "wait 5 seconds before test start"
+    sleep 5
+fi
+
 # Run pytest with serial execution (no parallel flag)
 cd "$PROJECT_ROOT"
 pytest -v -s -x --tb=short "$TEST_DIR"

@@ -30,6 +30,25 @@ def test_lifecycle(sandbox_context):
     assert info.metadata["userId"] == "123"
 
 
+def test_no_stock(sandbox_context):
+    sandbox: Sandbox = sandbox_context.add(Sandbox.create(
+        template="code-interpreter-0",
+        timeout=30,
+        metadata={
+            'userId': '123',
+        },
+        headers={
+            "x-request-id": sandbox_context.request_id
+        }
+    ))
+    print(f"sandbox-id: {sandbox.sandbox_id}")
+    info = sandbox.get_info()
+    print(info)
+    assert info.template_id == "code-interpreter"
+    assert info.state == SandboxState.RUNNING
+    assert info.metadata["userId"] == "123"
+
+
 def test_list_by_metadata(sandbox_context):
     random_user_id = str(uuid.uuid4())
 
@@ -235,7 +254,9 @@ def test_inplace_update(sandbox_context):
     file = sbx.files.read("/root/test-file")
     assert file == "xxxx"
 
+
 zero_time = datetime(1, 1, 1, 0, 0, tzinfo=tzutc())
+
 
 def test_never_timeout(sandbox_context):
     sbx: Sandbox = sandbox_context.add(Sandbox.create(
