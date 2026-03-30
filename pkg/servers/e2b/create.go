@@ -256,4 +256,13 @@ func (sc *Controller) basicSandboxCreateModifier(ctx context.Context, sbx infra.
 		annotations[k] = v
 	}
 	sbx.SetAnnotations(annotations)
+
+	labels := sbx.GetPodLabels()
+	if labels == nil {
+		labels = make(map[string]string)
+	}
+	for k, v := range request.Extensions.Labels {
+		labels[k] = v
+	}
+	sbx.SetPodLabels(labels)
 }

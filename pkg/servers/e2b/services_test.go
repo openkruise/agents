@@ -328,6 +328,94 @@ func TestCreateSandbox(t *testing.T) {
 				require.NoError(t, err)
 			},
 		},
+		{
+			name:      "success with custom labels",
+			available: 2,
+			userName:  "test-user",
+			request: models.NewSandboxRequest{
+				TemplateID: templateName,
+				Timeout:    600,
+				Metadata: map[string]string{
+					v1alpha1.E2BLabelPrefix + "app":         "my-app",
+					v1alpha1.E2BLabelPrefix + "environment": "test",
+					v1alpha1.E2BLabelPrefix + "team":        "backend",
+					"regular-metadata-key":                  "should-remain-in-metadata",
+				},
+			},
+			postCheck: func(t *testing.T, resp *models.Sandbox) {
+				sbx := GetSandbox(t, resp.SandboxID, controller.client.SandboxClient)
+				assert.NotNil(t, sbx.Spec.Template)
+				assert.NotNil(t, sbx.Spec.Template.Labels)
+
+				assert.Equal(t, "my-app", sbx.Spec.Template.Labels["app"])
+				assert.Equal(t, "test", sbx.Spec.Template.Labels["environment"])
+				assert.Equal(t, "backend", sbx.Spec.Template.Labels["team"])
+
+				assert.NotContains(t, sbx.Spec.Template.Labels, "regular-metadata-key")
+
+				sandboxFromManager, err := controller.manager.GetClaimedSandbox(t.Context(), keys.AdminKeyID.String(), resp.SandboxID)
+				assert.NoError(t, err)
+				assert.NotNil(t, sandboxFromManager.GetPodLabels())
+				assert.Equal(t, "my-app", sandboxFromManager.GetPodLabels()["app"])
+				assert.Equal(t, "test", sandboxFromManager.GetPodLabels()["environment"])
+				assert.Equal(t, "backend", sandboxFromManager.GetPodLabels()["team"])
+			},
+		},
+		{
+			name:      "fail with invalid label name",
+			available: 2,
+			userName:  "test-user",
+			request: models.NewSandboxRequest{
+				TemplateID: templateName,
+				Metadata: map[string]string{
+					v1alpha1.E2BLabelPrefix + "invalid@label": "value",
+				},
+			},
+			expectError: &web.ApiError{
+				Code:    http.StatusBadRequest,
+				Message: "invalid label name",
+			},
+		},
+		{
+			name:      "fail with invalid label value",
+			available: 2,
+			userName:  "test-user",
+			request: models.NewSandboxRequest{
+				TemplateID: templateName,
+				Metadata: map[string]string{
+					v1alpha1.E2BLabelPrefix + "valid-label": "invalid value with spaces!",
+				},
+			},
+			expectError: &web.ApiError{
+				Code:    http.StatusBadRequest,
+				Message: "invalid label value",
+			},
+		},
+		{
+			name:      "success with labels and metadata together",
+			available: 2,
+			userName:  "test-user",
+			request: models.NewSandboxRequest{
+				TemplateID: templateName,
+				Timeout:    600,
+				Metadata: map[string]string{
+					v1alpha1.E2BLabelPrefix + "label-key": "label-value",
+					"metadata-key":                        "metadata-value",
+					"another-metadata":                    "another-value",
+				},
+			},
+			postCheck: func(t *testing.T, resp *models.Sandbox) {
+				sbx := GetSandbox(t, resp.SandboxID, controller.client.SandboxClient)
+				assert.NotNil(t, sbx.Spec.Template.Labels)
+				assert.Equal(t, "label-value", sbx.Spec.Template.Labels["label-key"])
+
+				assert.Equal(t, "metadata-value", resp.Metadata["metadata-key"])
+				assert.Equal(t, "another-value", resp.Metadata["another-metadata"])
+
+				assert.NotContains(t, sbx.Spec.Template.Labels, "metadata-key")
+				assert.NotContains(t, sbx.Spec.Template.Labels, "another-metadata")
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -370,6 +458,9 @@ func TestCreateSandbox(t *testing.T) {
 				assert.True(t, strings.HasPrefix(sbx.SandboxID, fmt.Sprintf("%s--%s-", Namespace, templateName)))
 				for k, v := range tt.request.Metadata {
 					if !ValidateMetadataKey(k) {
+						continue
+					}
+					if strings.HasPrefix(k, v1alpha1.E2BLabelPrefix) {
 						continue
 					}
 					assert.Equal(t, v, sbx.Metadata[k], fmt.Sprintf("metadata key: %s", k))

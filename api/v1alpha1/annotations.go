@@ -10,7 +10,8 @@ const (
 // E2B annotations
 
 const (
-	E2BPrefix = "e2b." + InternalPrefix
+	E2BPrefix      = "e2b." + InternalPrefix
+	E2BLabelPrefix = "label:"
 
 	AnnotationEnvdAccessToken = E2BPrefix + "envd-access-token"
 	AnnotationEnvdURL         = E2BPrefix + "envd-url"

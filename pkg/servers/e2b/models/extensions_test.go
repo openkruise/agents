@@ -472,6 +472,110 @@ func TestParseExtensionInplaceUpdate(t *testing.T) {
 	}
 }
 
+func TestParseExtensionLabels(t *testing.T) {
+	tests := []struct {
+		name           string
+		metadata       map[string]string
+		expectError    bool
+		expectedLabels map[string]string
+	}{
+		{
+			name:           "no labels in metadata",
+			metadata:       map[string]string{},
+			expectError:    false,
+			expectedLabels: nil,
+		},
+		{
+			name: "no valid labels in metadata",
+			metadata: map[string]string{
+				"app": "myapp",
+			},
+			expectError:    false,
+			expectedLabels: nil,
+		},
+		{
+			name: "single valid label",
+			metadata: map[string]string{
+				"label:app": "myapp",
+			},
+			expectError:    false,
+			expectedLabels: map[string]string{"app": "myapp"},
+		},
+		{
+			name: "multiple valid labels",
+			metadata: map[string]string{
+				"label:app":  "myapp",
+				"label:env":  "production",
+				"label:tier": "backend",
+			},
+			expectError:    false,
+			expectedLabels: map[string]string{"app": "myapp", "env": "production", "tier": "backend"},
+		},
+		{
+			name: "invalid label name",
+			metadata: map[string]string{
+				"label:invalid-app{}": "myapp",
+			},
+			expectError: true,
+		},
+		{
+			name: "invalid label value",
+			metadata: map[string]string{
+				"label:app": "\ninvalid",
+			},
+			expectError: true,
+		},
+		{
+			name: "label with special characters in value",
+			metadata: map[string]string{
+				"label:app": "my-app_v1.0",
+			},
+			expectError:    false,
+			expectedLabels: map[string]string{"app": "my-app_v1.0"},
+		},
+		{
+			name: "kubernetes style label name",
+			metadata: map[string]string{
+				"label:kubernetes.io/app": "myapp",
+			},
+			expectError:    false,
+			expectedLabels: map[string]string{"kubernetes.io/app": "myapp"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := &NewSandboxRequest{
+				Metadata: tt.metadata,
+			}
+
+			err := req.parseExtensionLabels()
+
+			if (err != nil) != tt.expectError {
+				t.Errorf("parseExtensionLabels() error = %v, expectError %v", err, tt.expectError)
+				return
+			}
+
+			if !tt.expectError {
+				if tt.expectedLabels == nil && req.Extensions.Labels != nil {
+					t.Errorf("Expected nil labels, got %v", req.Extensions.Labels)
+				}
+				if tt.expectedLabels != nil {
+					if req.Extensions.Labels == nil {
+						t.Errorf("Expected labels, got nil")
+					} else {
+						for k, v := range tt.expectedLabels {
+							if req.Extensions.Labels[k] != v {
+								t.Errorf("Expected label %s=%s, got %s=%s", k, v, k, req.Extensions.Labels[k])
+							}
+						}
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestParseExtensionForMultiCSIMount(t *testing.T) {
 	tests := []struct {
 		name               string

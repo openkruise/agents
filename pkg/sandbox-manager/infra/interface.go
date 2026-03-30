@@ -53,6 +53,8 @@ type Sandbox interface {
 	GetResource() SandboxResource // Get the CPU / Memory requirements of the Sandbox
 	SetImage(image string)
 	GetImage() string
+	SetPodLabels(labels map[string]string)
+	GetPodLabels() map[string]string
 	SetTimeout(opts TimeoutOptions)
 	SaveTimeout(ctx context.Context, opts TimeoutOptions) error
 	GetTimeout() TimeoutOptions
