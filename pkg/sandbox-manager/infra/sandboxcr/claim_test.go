@@ -765,7 +765,7 @@ func TestNewSandboxFromTemplate_RateLimitExceeded(t *testing.T) {
 
 	// Create test infrastructure
 	infraInstance, client := NewTestInfra(t)
-	defer infraInstance.Stop()
+	defer infraInstance.Stop(t.Context())
 
 	template := "test-template"
 

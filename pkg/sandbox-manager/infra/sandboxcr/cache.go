@@ -145,9 +145,10 @@ func (c *Cache) Run(ctx context.Context) error {
 	return nil
 }
 
-func (c *Cache) Stop() {
+func (c *Cache) Stop(ctx context.Context) {
+	log := klog.FromContext(ctx)
 	close(c.stopCh)
-	klog.Info("Cache informer stopped")
+	log.Info("Cache informer stopped")
 }
 
 func (c *Cache) AddSandboxEventHandler(handler cache.ResourceEventHandlerFuncs) {

@@ -1,3 +1,19 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package proxy
 
 import (
@@ -9,6 +25,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/openkruise/agents/pkg/peers"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -59,15 +76,13 @@ func (s *Server) SyncRouteWithPeers(route Route) error {
 		return err
 	}
 
-	// Collect peer IPs under read lock to minimize lock hold time
-	s.peerMu.RLock()
-	peerIPs := make([]string, 0, len(s.peers))
-	for ip := range s.peers {
-		peerIPs = append(peerIPs, ip)
+	// Get peers from Peers - no manual locking needed
+	var peerList []peers.Peer
+	if s.peersManager != nil {
+		peerList = s.peersManager.GetPeers()
 	}
-	s.peerMu.RUnlock()
 
-	if len(peerIPs) == 0 {
+	if len(peerList) == 0 {
 		return nil
 	}
 
@@ -77,7 +92,7 @@ func (s *Server) SyncRouteWithPeers(route Route) error {
 		errStrings []string
 	)
 
-	for _, ip := range peerIPs {
+	for _, peer := range peerList {
 		wg.Add(1)
 		go func(peerIP string) {
 			defer wg.Done()
@@ -96,7 +111,7 @@ func (s *Server) SyncRouteWithPeers(route Route) error {
 				errStrings = append(errStrings, requestErr.Error())
 				mu.Unlock()
 			}
-		}(ip)
+		}(peer.IP)
 	}
 	wg.Wait()
 
@@ -123,14 +138,11 @@ func (s *Server) ListRoutes() []Route {
 	return routes
 }
 
-func (s *Server) ListPeers() []Peer {
-	peers := make([]Peer, 0)
-	s.peerMu.RLock()
-	defer s.peerMu.RUnlock()
-	for _, peer := range s.peers {
-		peers = append(peers, peer)
+func (s *Server) ListPeers() []peers.Peer {
+	if s.peersManager != nil {
+		return s.peersManager.GetPeers()
 	}
-	return peers
+	return nil
 }
 
 func (s *Server) DeleteRoute(id string) {
