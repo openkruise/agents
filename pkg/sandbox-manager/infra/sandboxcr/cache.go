@@ -252,14 +252,11 @@ func (c *Cache) WaitForSandboxSatisfied(ctx context.Context, sbx *agentsv1alpha1
 
 	return waitForObjectSatisfied[*agentsv1alpha1.Sandbox](ctx, c, sbx, action,
 		func(_ *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) {
-			log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
-
 			got, err := c.GetClaimedSandbox(sandboxID)
 			if err == nil {
 				return got, nil
 			}
 
-			log.Info("cannot update claimed sandbox from cache, try from api server", "reason", err)
 			return c.client.SandboxClient.ApiV1alpha1().Sandboxes(ns).Get(ctx, sandboxName, metav1.GetOptions{})
 		},
 		satisfiedFunc, timeout)

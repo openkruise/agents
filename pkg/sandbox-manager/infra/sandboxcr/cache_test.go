@@ -5,14 +5,6 @@ import (
 	"testing"
 	"time"
 
-	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	sandboxfake "github.com/openkruise/agents/client/clientset/versioned/fake"
-	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
-	"github.com/openkruise/agents/pkg/sandbox-manager/config"
-	constantUtils "github.com/openkruise/agents/pkg/utils"
-	sandboxManagerUtils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
-	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
-	"github.com/openkruise/agents/pkg/utils/sandboxutils"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -21,6 +13,15 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	k8stesting "k8s.io/client-go/testing"
+
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	sandboxfake "github.com/openkruise/agents/client/clientset/versioned/fake"
+	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
+	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	constantUtils "github.com/openkruise/agents/pkg/utils"
+	sandboxManagerUtils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
+	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
+	"github.com/openkruise/agents/pkg/utils/sandboxutils"
 )
 
 func TestCache_WaitForSandboxSatisfied(t *testing.T) {
