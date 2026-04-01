@@ -15,7 +15,10 @@ import (
 var hostPattern = regexp.MustCompile(`^(\d+)-([a-zA-Z0-9\-]+)\.`)
 
 const (
-	DefaultHostHeaderName = "Host"
+	DefaultHostHeaderName    = "Host"
+	DefaultSandboxHeaderName = "e2b-sandbox-id"
+	DefaultSandboxPortHeader = "e2b-sandbox-port"
+	DefaultSandboxPort       = "49983"
 )
 
 // Config holds the filter configuration
@@ -33,10 +36,10 @@ type Config struct {
 // DefaultConfig returns default configuration
 func DefaultConfig() *Config {
 	return &Config{
-		SandboxHeaderName: "e2b-sandbox-id",
-		SandboxPortHeader: "e2b-sandbox-port",
+		SandboxHeaderName: DefaultSandboxHeaderName,
+		SandboxPortHeader: DefaultSandboxPortHeader,
 		HostHeaderName:    DefaultHostHeaderName,
-		DefaultPort:       "80",
+		DefaultPort:       DefaultSandboxPort,
 	}
 }
 
@@ -50,7 +53,7 @@ func (c *Config) GetSandboxHeaderName() string {
 	if c.SandboxHeaderName != "" {
 		return c.SandboxHeaderName
 	}
-	return "e2b-sandbox-id"
+	return DefaultSandboxHeaderName
 }
 
 // GetHostHeaderName returns the effective host header name

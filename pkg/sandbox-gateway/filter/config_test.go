@@ -123,7 +123,7 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.HostHeaderName != "Host" {
 		t.Errorf("DefaultConfig().HostHeaderName = %q, want %q", cfg.HostHeaderName, "Host")
 	}
-	if cfg.DefaultPort != "80" {
-		t.Errorf("DefaultConfig().DefaultPort = %q, want %q", cfg.DefaultPort, "80")
+	if cfg.DefaultPort != "49983" {
+		t.Errorf("DefaultConfig().DefaultPort = %q, want %q", cfg.DefaultPort, "49983")
 	}
 }
