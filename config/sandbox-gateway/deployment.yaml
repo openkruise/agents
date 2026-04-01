@@ -4,13 +4,15 @@ metadata:
   name: sandbox-gateway
   namespace: sandbox-system
   labels:
+    component: sandbox-manager
     app.kubernetes.io/name: sandbox-gateway
     app.kubernetes.io/managed-by: kustomize
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: sandbox-gateway
+      component: sandbox-manager
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -20,6 +22,7 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: sandbox-gateway
+        component: sandbox-manager
     spec:
       serviceAccountName: sandbox-gateway
       initContainers:
@@ -68,6 +71,10 @@ spec:
           env:
             - name: GOMAXPROCS
               value: "2"
+            - name: PEER_NAMESPACE
+              value: "sandbox-system"
+            - name: PEER_LABEL_SELECTOR
+              value: "component=sandbox-manager"
           ports:
             - name: http
               containerPort: 10000
@@ -110,4 +117,5 @@ spec:
                 labelSelector:
                   matchLabels:
                     app.kubernetes.io/name: sandbox-gateway
+                    app.kubernetes.io/instance: sandbox-manager
                 topologyKey: kubernetes.io/hostname

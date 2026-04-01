@@ -26,6 +26,12 @@ data:
                   typed_config:
                     "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
                     stat_prefix: ingress_http
+                    access_log:
+                      - name: envoy.access_loggers.stdout
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+                          log_format:
+                            text_format: "[%START_TIME%] %REQ(:METHOD)% %REQ(X-ENVOY-ORIGINAL-PATH?:PATH)% %PROTOCOL% %RESPONSE_CODE% %BYTES_SENT% %DURATION%ms req_id=%REQ(X-REQUEST-ID)%\n"
                     route_config:
                       name: local_route
                       virtual_hosts:
@@ -45,6 +51,11 @@ data:
                           plugin_name: sandbox-gateway
                           plugin_config:
                             "@type": type.googleapis.com/xds.type.v3.TypedStruct
+                            value:
+                              host-header-name: "Host"
+                              sandbox-header-name: "e2b-sandbox-id"
+                              sandbox-port-header: "e2b-sandbox-port"
+                              default-port: "49983"
                       - name: envoy.filters.http.router
                         typed_config:
                           "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
