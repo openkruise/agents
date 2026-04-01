@@ -7,7 +7,7 @@ version of tools used in the development environment. Here are some dependencies
 
 For agent-sandbox-controller:
 
-- Golang : v1.24+
+- Golang : v1.25+
 - kubernetes: v1.28+
 
 > You can use `go mod vendor` to avoid the IDE crashes caused by go mod list failures.

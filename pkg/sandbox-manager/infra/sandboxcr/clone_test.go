@@ -330,7 +330,7 @@ func TestCloneSandbox(t *testing.T) {
 				InitErrCode:           500,
 			},
 			sbxOverride: sbxOverride{Name: "test-sandbox-clone-5"},
-			expectError: "failed to proxy request to sandbox",
+			expectError: "failed to init runtime",
 		},
 		{
 			name: "checkpoint not found",
