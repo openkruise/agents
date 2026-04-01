@@ -133,7 +133,7 @@ def wait_for_sandbox():
     while time.time() - ready_start_time < timeout:
         try:
             result = subprocess.run(
-                ["kubectl", "get", "sbx", "-o", "json"],
+                ["kubectl", "get", "sbx", "-n", "default", "-o", "json"],
                 capture_output=True,
                 text=True,
                 check=True
@@ -167,7 +167,7 @@ def wait_for_sandbox():
         # Get final state and describe not-ready sandboxes
         try:
             result = subprocess.run(
-                ["kubectl", "get", "sbx", "-o", "json"],
+                ["kubectl", "get", "sbx", "-n", "default", "-o", "json"],
                 capture_output=True,
                 text=True,
                 check=True
@@ -198,9 +198,9 @@ def wait_for_sandbox():
 
             for sbx_name in not_ready_sandboxes:
                 print(f"\n=== Describing not-ready sandbox: {sbx_name} ===")
-                kubectl("describe", "pod", sbx_name)
-                kubectl("logs", sbx_name, "-c", "runtime")
-                kubectl("logs", sbx_name, "-c", "sandbox")
+                kubectl("describe", "pod", "-n", "default", sbx_name)
+                kubectl("logs", "-n", "default", sbx_name, "-c", "runtime")
+                kubectl("logs", "-n", "default", sbx_name, "-c", "sandbox")
 
             raise TimeoutError(
                 f"Timeout waiting for Ready sandboxes: found {len(ready_sandboxes)}/2 after {timeout}s. "

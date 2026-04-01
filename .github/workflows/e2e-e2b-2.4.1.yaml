@@ -102,5 +102,8 @@ jobs:
           export E2B_DOMAIN=localhost
           export E2B_API_KEY=some-api-key
           sudo -E kubectl port-forward services/sandbox-manager 80:7788 -n sandbox-system &
-          bash hack/run-e2b-e2e-test.sh --e2b-version 2.8.1 --sdk-version 2.4.1
+          bash hack/run-e2b-e2e-test.sh \
+            --e2b-version 2.8.1 --sdk-version 2.4.1 \
+            --runtime-image "${RUNTIME_IMG}" \
+            --code-interpreter-image "${CODE_INTERPRETER_IMG}"
 
