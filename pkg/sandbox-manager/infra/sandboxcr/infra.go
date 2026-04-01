@@ -177,7 +177,7 @@ func (i *Infra) DeleteCheckpoint(ctx context.Context, user string, checkpointID 
 	log := klog.FromContext(ctx).WithValues("checkpointID", checkpointID)
 
 	// Step 1: Find checkpoint and template
-	tmpl, cp, _, err := stepFindCheckpointAndTemplate(ctx, infra.CloneSandboxOptions{
+	tmpl, cp, _, err := findCheckpointAndTemplateById(ctx, infra.CloneSandboxOptions{
 		CheckPointID: checkpointID, SkipWaitCheckpoint: true,
 	}, i.Cache, i.Client, infra.CloneMetrics{})
 	if err != nil {
@@ -202,8 +202,8 @@ func (i *Infra) DeleteCheckpoint(ctx context.Context, user string, checkpointID 
 	// Step 4: Check if checkpoint has OwnerReference to the SandboxTemplate
 	// If yes, Kubernetes garbage collection will handle deletion automatically
 	// If no, explicitly delete the checkpoint
-	if !hasOwnerReference(cp, tmpl) {
-		log.Info("checkpoint has no owner reference to template, deleting explicitly", "checkpoint", klog.KObj(cp))
+	if !metav1.IsControlledBy(cp, tmpl) {
+		log.Info("checkpoint has no controller reference to template, deleting explicitly", "checkpoint", klog.KObj(cp))
 		if err := DefaultDeleteCheckpointCR(ctx, i.Client, cp.Namespace, cp.Name); err != nil {
 			log.Error(err, "failed to delete checkpoint")
 			return managererrors.NewError(managererrors.ErrorInternal, err.Error())
@@ -212,16 +212,6 @@ func (i *Infra) DeleteCheckpoint(ctx context.Context, user string, checkpointID 
 
 	log.Info("checkpoint deleted successfully")
 	return nil
-}
-
-// hasOwnerReference checks if the checkpoint has an OwnerReference pointing to the given template
-func hasOwnerReference(cp *v1alpha1.Checkpoint, tmpl *v1alpha1.SandboxTemplate) bool {
-	for _, ref := range cp.OwnerReferences {
-		if ref.Kind == v1alpha1.SandboxTemplateControllerKind.Kind && ref.Name == tmpl.Name && ref.UID == tmpl.UID {
-			return true
-		}
-	}
-	return false
 }
 
 func (i *Infra) GetCache() infra.CacheProvider {
@@ -261,9 +251,6 @@ func (i *Infra) SelectSucceededCheckpoints(user string) ([]infra.CheckpointInfo,
 	results := make([]infra.CheckpointInfo, 0, len(checkpoints))
 	for _, checkpoint := range checkpoints {
 		if checkpoint.Status.Phase != v1alpha1.CheckpointSucceeded {
-			continue
-		}
-		if !managerutils.ResourceVersionExpectationSatisfied(checkpoint) {
 			continue
 		}
 		// we assume the CheckpointId of a succeeded checkpoint is not empty

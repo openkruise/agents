@@ -37,7 +37,7 @@ func (sc *Controller) ListSandboxes(r *http.Request) (web.ApiResponse[[]*models.
 
 	request := ListSandboxesRequest{
 		Metadata: make(map[string]string),
-		Limit:    1000,
+		Limit:    models.MaxListLimit,
 	}
 	for key, values := range r.URL.Query() {
 		if len(values) == 0 {
@@ -60,10 +60,10 @@ func (sc *Controller) ListSandboxes(r *http.Request) (web.ApiResponse[[]*models.
 			request.NextToken = values[0]
 		case "limit":
 			limit, err := strconv.Atoi(values[0])
-			if err != nil || limit <= 0 {
+			if err != nil || limit < models.MinListLimit || limit > models.MaxListLimit {
 				return web.ApiResponse[[]*models.Sandbox]{}, &web.ApiError{
 					Code:    http.StatusBadRequest,
-					Message: fmt.Sprintf("Invalid limit: %v", values[0]),
+					Message: fmt.Sprintf("Invalid limit: %v, must be between %d and %d", values[0], models.MinListLimit, models.MaxListLimit),
 				}
 			}
 			request.Limit = limit
@@ -190,7 +190,7 @@ func (sc *Controller) ListSnapshots(r *http.Request) (web.ApiResponse[[]*models.
 	}
 
 	// Parse query parameters
-	limit := 100
+	limit := models.MaxListLimit
 	var nextTokenParam, sandboxID string
 	for key, values := range r.URL.Query() {
 		if len(values) == 0 {
@@ -199,10 +199,10 @@ func (sc *Controller) ListSnapshots(r *http.Request) (web.ApiResponse[[]*models.
 		switch key {
 		case "limit":
 			parsedLimit, err := strconv.Atoi(values[0])
-			if err != nil || parsedLimit <= 0 {
+			if err != nil || parsedLimit < models.MinListLimit || parsedLimit > models.MaxListLimit {
 				return web.ApiResponse[[]*models.Snapshot]{}, &web.ApiError{
 					Code:    http.StatusBadRequest,
-					Message: fmt.Sprintf("Invalid limit: %v", values[0]),
+					Message: fmt.Sprintf("Invalid limit: %v, must be between %d and %d", values[0], models.MinListLimit, models.MaxListLimit),
 				}
 			}
 			limit = parsedLimit
@@ -213,7 +213,8 @@ func (sc *Controller) ListSnapshots(r *http.Request) (web.ApiResponse[[]*models.
 		}
 	}
 
-	log.Info("will list snapshots", "user", user.Name, "userID", user.ID, "limit", limit, "sandboxID", sandboxID)
+	log.Info("will list snapshots",
+		"user", user.Name, "userID", user.ID, "limit", limit, "sandboxID", sandboxID, "nextToken", nextTokenParam)
 
 	// Build filter function
 	filter := func(cp infra.CheckpointInfo) bool {

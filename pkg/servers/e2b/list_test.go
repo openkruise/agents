@@ -130,6 +130,39 @@ func TestListSandboxes(t *testing.T) {
 					models.SandboxStateRunning, models.SandboxStatePaused, "foo"),
 			},
 		},
+		{
+			name:           "limit exceeds max limit returns 400 error",
+			createRequests: nil,
+			queryParams: map[string]string{
+				"limit": "101",
+			},
+			expectError: &web.ApiError{
+				Code:    http.StatusBadRequest,
+				Message: fmt.Sprintf("Invalid limit: 101, must be between %d and %d", models.MinListLimit, models.MaxListLimit),
+			},
+		},
+		{
+			name:           "limit is zero returns 400 error",
+			createRequests: nil,
+			queryParams: map[string]string{
+				"limit": "0",
+			},
+			expectError: &web.ApiError{
+				Code:    http.StatusBadRequest,
+				Message: fmt.Sprintf("Invalid limit: 0, must be between %d and %d", models.MinListLimit, models.MaxListLimit),
+			},
+		},
+		{
+			name:           "limit is negative returns 400 error",
+			createRequests: nil,
+			queryParams: map[string]string{
+				"limit": "-1",
+			},
+			expectError: &web.ApiError{
+				Code:    http.StatusBadRequest,
+				Message: fmt.Sprintf("Invalid limit: -1, must be between %d and %d", models.MinListLimit, models.MaxListLimit),
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -638,7 +671,46 @@ func TestListSnapshots(t *testing.T) {
 			},
 			expectError: &web.ApiError{
 				Code:    http.StatusBadRequest,
-				Message: "Invalid limit: abc",
+				Message: fmt.Sprintf("Invalid limit: abc, must be between %d and %d", models.MinListLimit, models.MaxListLimit),
+			},
+		},
+		{
+			name:  "limit exceeds max limit returns 400 error",
+			setup: func() func() { return func() {} },
+			user:  adminUser,
+			query: map[string]string{"limit": "101"},
+			pages: []pageExpectation{
+				{count: -1, minCount: 0, hasNextToken: false},
+			},
+			expectError: &web.ApiError{
+				Code:    http.StatusBadRequest,
+				Message: fmt.Sprintf("Invalid limit: 101, must be between %d and %d", models.MinListLimit, models.MaxListLimit),
+			},
+		},
+		{
+			name:  "limit is zero returns 400 error",
+			setup: func() func() { return func() {} },
+			user:  adminUser,
+			query: map[string]string{"limit": "0"},
+			pages: []pageExpectation{
+				{count: -1, minCount: 0, hasNextToken: false},
+			},
+			expectError: &web.ApiError{
+				Code:    http.StatusBadRequest,
+				Message: fmt.Sprintf("Invalid limit: 0, must be between %d and %d", models.MinListLimit, models.MaxListLimit),
+			},
+		},
+		{
+			name:  "limit is negative returns 400 error",
+			setup: func() func() { return func() {} },
+			user:  adminUser,
+			query: map[string]string{"limit": "-1"},
+			pages: []pageExpectation{
+				{count: -1, minCount: 0, hasNextToken: false},
+			},
+			expectError: &web.ApiError{
+				Code:    http.StatusBadRequest,
+				Message: fmt.Sprintf("Invalid limit: -1, must be between %d and %d", models.MinListLimit, models.MaxListLimit),
 			},
 		},
 	}

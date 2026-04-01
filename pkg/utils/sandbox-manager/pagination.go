@@ -15,22 +15,19 @@ type Paginator[T any] struct {
 }
 
 func (p *Paginator[T]) Apply(objs []T) ([]T, string) {
-	items := p.sortObjects(objs)
-	return p.paginateResults(items)
+	sortable := make([]T, 0, len(objs))
+	for _, obj := range objs {
+		if !p.Filter(obj) || p.GetKey(obj) == "" {
+			continue
+		}
+		sortable = append(sortable, obj)
+	}
+	sorted := p.sortObjects(sortable)
+	return p.paginateResults(sorted)
 }
 
 // sortObjects retrieves objects from informer and sorts them by annotation.
-func (p *Paginator[T]) sortObjects(objs []T) []T {
-	items := make([]T, 0, len(objs))
-	for _, obj := range objs {
-		if !p.Filter(obj) {
-			continue
-		}
-		if sortKey := p.GetKey(obj); sortKey != "" {
-			items = append(items, obj)
-		}
-	}
-
+func (p *Paginator[T]) sortObjects(items []T) []T {
 	// Sort by annotation value (string comparison, RFC3339 format is lexicographically sortable)
 	sort.Slice(items, func(i, j int) bool {
 		iSortKey := p.GetKey(items[i])

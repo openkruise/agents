@@ -752,11 +752,10 @@ func TestInfra_SelectSucceededCheckpoints(t *testing.T) {
 	utils.InitLogOutput()
 
 	tests := []struct {
-		name                            string
-		checkpoints                     []*v1alpha1.Checkpoint
-		user                            string
-		expectCheckpointIDs             []string
-		expectResourceVersionExpectFail []string // checkpoint names that should fail ResourceVersionExpectation
+		name                string
+		checkpoints         []*v1alpha1.Checkpoint
+		user                string
+		expectCheckpointIDs []string
 	}{
 		{
 			name: "only return succeeded checkpoints for user",
@@ -796,34 +795,11 @@ func TestInfra_SelectSucceededCheckpoints(t *testing.T) {
 			user:                "user1",
 			expectCheckpointIDs: []string{"cp-user1-succeeded-id"},
 		},
-		{
-			name: "filter out checkpoints with unsatisfied resource version expectation",
-			checkpoints: []*v1alpha1.Checkpoint{
-				createTestCheckpoint("cp-succeeded-satisfied", "user1", "default", v1alpha1.CheckpointSucceeded),
-				createTestCheckpoint("cp-succeeded-unsatisfied", "user1", "default", v1alpha1.CheckpointSucceeded),
-			},
-			user:                            "user1",
-			expectCheckpointIDs:             []string{"cp-succeeded-satisfied-id"},
-			expectResourceVersionExpectFail: []string{"cp-succeeded-unsatisfied"},
-		},
-		{
-			name: "mixed scenario: succeeded, non-succeeded, and unsatisfied resource version",
-			checkpoints: []*v1alpha1.Checkpoint{
-				createTestCheckpoint("cp-succeeded-ok", "user1", "default", v1alpha1.CheckpointSucceeded),
-				createTestCheckpoint("cp-succeeded-unsatisfied", "user1", "default", v1alpha1.CheckpointSucceeded),
-				createTestCheckpoint("cp-pending", "user1", "default", v1alpha1.CheckpointPending),
-				createTestCheckpoint("cp-failed", "user1", "default", v1alpha1.CheckpointFailed),
-				createTestCheckpoint("cp-other-user", "user2", "default", v1alpha1.CheckpointSucceeded),
-			},
-			user:                            "user1",
-			expectCheckpointIDs:             []string{"cp-succeeded-ok-id"},
-			expectResourceVersionExpectFail: []string{"cp-succeeded-unsatisfied"},
-		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			infrInstance, client := NewTestInfra(t)
+			infraInstance, client := NewTestInfra(t)
 
 			// Create checkpoints
 			for _, cp := range tt.checkpoints {
@@ -833,29 +809,12 @@ func TestInfra_SelectSucceededCheckpoints(t *testing.T) {
 			// Wait for all checkpoints to be cached
 			for _, cp := range tt.checkpoints {
 				if cp.Status.CheckpointId != "" {
-					EnsureCheckpointInCache(t, infrInstance.Cache, cp)
-				}
-			}
-
-			// Set up resource version expectations for checkpoints that should fail
-			// We need to use a higher resource version to make the expectation unsatisfied
-			for _, cpName := range tt.expectResourceVersionExpectFail {
-				for _, cp := range tt.checkpoints {
-					if cp.Name == cpName {
-						// Get the checkpoint from cache to get the actual UID assigned by fake client
-						cachedCp, err := infrInstance.Cache.GetCheckpoint(cp.Status.CheckpointId)
-						require.NoError(t, err)
-						// Create a copy with higher resource version to set expectation
-						expectCp := cachedCp.DeepCopy()
-						expectCp.ResourceVersion = "999999"
-						utils.ResourceVersionExpectationExpect(expectCp)
-						break
-					}
+					EnsureCheckpointInCache(t, infraInstance.Cache, cp)
 				}
 			}
 
 			// Test SelectSucceededCheckpoints
-			results, err := infrInstance.SelectSucceededCheckpoints(tt.user)
+			results, err := infraInstance.SelectSucceededCheckpoints(tt.user)
 			assert.NoError(t, err)
 			assert.Len(t, results, len(tt.expectCheckpointIDs))
 
@@ -865,19 +824,6 @@ func TestInfra_SelectSucceededCheckpoints(t *testing.T) {
 				gotIDs = append(gotIDs, result.CheckpointID)
 			}
 			assert.ElementsMatch(t, tt.expectCheckpointIDs, gotIDs)
-
-			// Clean up resource version expectations
-			for _, cpName := range tt.expectResourceVersionExpectFail {
-				for _, cp := range tt.checkpoints {
-					if cp.Name == cpName {
-						cachedCp, err := infrInstance.Cache.GetCheckpoint(cp.Status.CheckpointId)
-						if err == nil {
-							utils.ResourceVersionExpectationDelete(cachedCp)
-						}
-						break
-					}
-				}
-			}
 		})
 	}
 }
@@ -1139,116 +1085,6 @@ func TestInfra_DeleteCheckpoint(t *testing.T) {
 			} else {
 				require.NoError(t, err)
 			}
-		})
-	}
-}
-
-func TestHasOwnerReference(t *testing.T) {
-	tmpl := &v1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "test-tmpl",
-			UID:  "test-uid",
-		},
-	}
-
-	tests := []struct {
-		name     string
-		cp       *v1alpha1.Checkpoint
-		expected bool
-	}{
-		{
-			name: "has matching owner reference",
-			cp: &v1alpha1.Checkpoint{
-				ObjectMeta: metav1.ObjectMeta{
-					OwnerReferences: []metav1.OwnerReference{
-						{
-							Kind: v1alpha1.SandboxTemplateControllerKind.Kind,
-							Name: "test-tmpl",
-							UID:  "test-uid",
-						},
-					},
-				},
-			},
-			expected: true,
-		},
-		{
-			name: "no owner references",
-			cp: &v1alpha1.Checkpoint{
-				ObjectMeta: metav1.ObjectMeta{},
-			},
-			expected: false,
-		},
-		{
-			name: "wrong kind",
-			cp: &v1alpha1.Checkpoint{
-				ObjectMeta: metav1.ObjectMeta{
-					OwnerReferences: []metav1.OwnerReference{
-						{
-							Kind: "SomeOtherKind",
-							Name: "test-tmpl",
-							UID:  "test-uid",
-						},
-					},
-				},
-			},
-			expected: false,
-		},
-		{
-			name: "wrong name",
-			cp: &v1alpha1.Checkpoint{
-				ObjectMeta: metav1.ObjectMeta{
-					OwnerReferences: []metav1.OwnerReference{
-						{
-							Kind: v1alpha1.SandboxTemplateControllerKind.Kind,
-							Name: "other-tmpl",
-							UID:  "test-uid",
-						},
-					},
-				},
-			},
-			expected: false,
-		},
-		{
-			name: "wrong UID",
-			cp: &v1alpha1.Checkpoint{
-				ObjectMeta: metav1.ObjectMeta{
-					OwnerReferences: []metav1.OwnerReference{
-						{
-							Kind: v1alpha1.SandboxTemplateControllerKind.Kind,
-							Name: "test-tmpl",
-							UID:  "wrong-uid",
-						},
-					},
-				},
-			},
-			expected: false,
-		},
-		{
-			name: "multiple owner references with one matching",
-			cp: &v1alpha1.Checkpoint{
-				ObjectMeta: metav1.ObjectMeta{
-					OwnerReferences: []metav1.OwnerReference{
-						{
-							Kind: "SomeOtherKind",
-							Name: "other-name",
-							UID:  "other-uid",
-						},
-						{
-							Kind: v1alpha1.SandboxTemplateControllerKind.Kind,
-							Name: "test-tmpl",
-							UID:  "test-uid",
-						},
-					},
-				},
-			},
-			expected: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := hasOwnerReference(tt.cp, tmpl)
-			assert.Equal(t, tt.expected, result)
 		})
 	}
 }
