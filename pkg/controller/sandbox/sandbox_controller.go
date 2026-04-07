@@ -111,10 +111,14 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 			box.Name = req.NamespacedName.Name
 			core.ResourceVersionExpectations.Delete(box)
 			core.ScaleExpectation.DeleteExpectations(utils.GetControllerKey(box))
+			deleteSandboxMetrics(req.NamespacedName.Namespace, req.NamespacedName.Name)
 		}
 		return reconcile.Result{}, client.IgnoreNotFound(err)
 	}
 	logger := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
+
+	// Record sandbox lifecycle metrics on every reconcile
+	recordSandboxMetrics(box)
 
 	if box.Spec.Template == nil {
 		logger.Info("sandbox template is nil, and ignore")
@@ -280,6 +284,8 @@ func (r *SandboxReconciler) updateSandboxStatus(ctx context.Context, newStatus a
 	core.ResourceVersionExpectations.Expect(rcvObject)
 	logger.Info("update sandbox status success", "status", utils.DumpJson(newStatus))
 	box.Status = newStatus
+	// Update metrics after status change
+	recordSandboxMetrics(box)
 	return nil
 }
 
