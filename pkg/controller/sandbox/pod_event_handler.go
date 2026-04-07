@@ -20,7 +20,9 @@ import (
 	"context"
 	"reflect"
 
+	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/utils"
+	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/util/workqueue"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -29,15 +31,22 @@ import (
 )
 
 // SandboxPodEventHandler watches Pods created by the Sandbox controller.
-// The informer cache is already filtered by label selector (agents.kruise.io/created-by),
-// so all events here are guaranteed to be agent-related pods.
+// When CachePodLabelSelector feature gate is enabled, the informer cache is already
+// filtered by label selector so all events are guaranteed to be agent-related pods.
+// When disabled, annotation-based filtering is applied to skip unrelated pods.
 type SandboxPodEventHandler struct{}
 
 func (e *SandboxPodEventHandler) Create(_ context.Context, evt event.TypedCreateEvent[client.Object], w workqueue.TypedRateLimitingInterface[reconcile.Request]) {
+	if !isAgentPod(evt.Object) {
+		return
+	}
 	w.Add(reconcile.Request{NamespacedName: client.ObjectKeyFromObject(evt.Object)})
 }
 
 func (e *SandboxPodEventHandler) Update(_ context.Context, evt event.TypedUpdateEvent[client.Object], w workqueue.TypedRateLimitingInterface[reconcile.Request]) {
+	if !isAgentPod(evt.ObjectNew) {
+		return
+	}
 	oldObj := evt.ObjectOld.(*corev1.Pod)
 	newObj := evt.ObjectNew.(*corev1.Pod)
 	if isActivePodUpdate(oldObj, newObj) {
@@ -46,7 +55,20 @@ func (e *SandboxPodEventHandler) Update(_ context.Context, evt event.TypedUpdate
 }
 
 func (e *SandboxPodEventHandler) Delete(_ context.Context, evt event.TypedDeleteEvent[client.Object], w workqueue.TypedRateLimitingInterface[reconcile.Request]) {
+	if !isAgentPod(evt.Object) {
+		return
+	}
 	w.Add(reconcile.Request{NamespacedName: client.ObjectKeyFromObject(evt.Object)})
+}
+
+// isAgentPod returns true if the pod is created by the sandbox controller.
+// When CachePodLabelSelector is enabled, the informer already filters pods by label,
+// so this always returns true. When disabled, it falls back to annotation-based check.
+func isAgentPod(obj client.Object) bool {
+	if utilfeature.DefaultFeatureGate.Enabled(features.CachePodLabelSelectorGate) {
+		return true
+	}
+	return obj.GetAnnotations()[utils.PodAnnotationCreatedBy] != ""
 }
 
 func (e *SandboxPodEventHandler) Generic(context.Context, event.TypedGenericEvent[client.Object], workqueue.TypedRateLimitingInterface[reconcile.Request]) {

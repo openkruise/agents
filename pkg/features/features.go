@@ -38,6 +38,10 @@ const (
 
 	// SandboxCreatePodInjectConfigGate enables injecting sidecar config for sandbox pod
 	SandboxCreatePodInjectConfigGate featuregate.Feature = "SandboxCreatePodInjectConfigGate"
+
+	// CachePodLabelSelectorGate enables label selector filtering on the Pod informer cache
+	// to reduce memory consumption.
+	CachePodLabelSelectorGate featuregate.Feature = "CachePodLabelSelector"
 )
 
 var defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
@@ -46,6 +50,7 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
 	SandboxClaimGate:                 {Default: true, PreRelease: featuregate.Alpha},
 	SandboxCreatePodRateLimitGate:    {Default: false, PreRelease: featuregate.Alpha},
 	SandboxCreatePodInjectConfigGate: {Default: false, PreRelease: featuregate.Alpha},
+	CachePodLabelSelectorGate:        {Default: true, PreRelease: featuregate.Alpha},
 }
 
 func init() {

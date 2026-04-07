@@ -17,12 +17,21 @@ limitations under the License.
 package sandbox
 
 import (
+	"context"
 	"testing"
 
 	"github.com/openkruise/agents/pkg/utils"
+	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/workqueue"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+
+	_ "github.com/openkruise/agents/pkg/features"
 )
 
 // Helper function to create a pointer to a bool
@@ -1060,6 +1069,282 @@ func TestIsPodConditionEqual(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			result := isPodConditionEqual(tt.condA, tt.condB)
 			assert.Equal(t, tt.expected, result, tt.description)
+		})
+	}
+}
+
+func TestIsAgentPod(t *testing.T) {
+	tests := []struct {
+		name               string
+		featureGateEnabled bool
+		pod                *corev1.Pod
+		expected           bool
+	}{
+		{
+			name:               "feature gate enabled - pod without annotation",
+			featureGateEnabled: true,
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-pod"},
+			},
+			expected: true,
+		},
+		{
+			name:               "feature gate enabled - pod with annotation",
+			featureGateEnabled: true,
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "test-pod",
+					Annotations: map[string]string{utils.PodAnnotationCreatedBy: utils.CreatedBySandbox},
+				},
+			},
+			expected: true,
+		},
+		{
+			name:               "feature gate disabled - pod without annotation",
+			featureGateEnabled: false,
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-pod"},
+			},
+			expected: false,
+		},
+		{
+			name:               "feature gate disabled - pod with annotation",
+			featureGateEnabled: false,
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "test-pod",
+					Annotations: map[string]string{utils.PodAnnotationCreatedBy: utils.CreatedBySandbox},
+				},
+			},
+			expected: true,
+		},
+		{
+			name:               "feature gate disabled - pod with empty annotation value",
+			featureGateEnabled: false,
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "test-pod",
+					Annotations: map[string]string{utils.PodAnnotationCreatedBy: ""},
+				},
+			},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.featureGateEnabled {
+				_ = utilfeature.DefaultMutableFeatureGate.Set("CachePodLabelSelector=true")
+			} else {
+				_ = utilfeature.DefaultMutableFeatureGate.Set("CachePodLabelSelector=false")
+			}
+			t.Cleanup(func() {
+				_ = utilfeature.DefaultMutableFeatureGate.Set("CachePodLabelSelector=true")
+			})
+			result := isAgentPod(tt.pod)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func newAgentPod(name, namespace string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+			Annotations: map[string]string{
+				utils.PodAnnotationCreatedBy: utils.CreatedBySandbox,
+			},
+			Labels: map[string]string{
+				utils.PodLabelCreatedBy: utils.CreatedBySandbox,
+			},
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodPending},
+	}
+}
+
+func newNonAgentPod(name, namespace string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+}
+
+func TestSandboxPodEventHandler_Create(t *testing.T) {
+	tests := []struct {
+		name               string
+		featureGateEnabled bool
+		pod                *corev1.Pod
+		expectEnqueue      bool
+	}{
+		{
+			name:               "feature gate enabled - agent pod enqueued",
+			featureGateEnabled: true,
+			pod:                newAgentPod("sbx-1", "default"),
+			expectEnqueue:      true,
+		},
+		{
+			name:               "feature gate disabled - agent pod enqueued",
+			featureGateEnabled: false,
+			pod:                newAgentPod("sbx-1", "default"),
+			expectEnqueue:      true,
+		},
+		{
+			name:               "feature gate disabled - non-agent pod skipped",
+			featureGateEnabled: false,
+			pod:                newNonAgentPod("random-pod", "default"),
+			expectEnqueue:      false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.featureGateEnabled {
+				_ = utilfeature.DefaultMutableFeatureGate.Set("CachePodLabelSelector=true")
+			} else {
+				_ = utilfeature.DefaultMutableFeatureGate.Set("CachePodLabelSelector=false")
+			}
+			t.Cleanup(func() {
+				_ = utilfeature.DefaultMutableFeatureGate.Set("CachePodLabelSelector=true")
+			})
+
+			q := workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[reconcile.Request]())
+			defer q.ShutDown()
+
+			handler := &SandboxPodEventHandler{}
+			handler.Create(context.Background(), event.TypedCreateEvent[client.Object]{Object: tt.pod}, q)
+
+			assert.Equal(t, tt.expectEnqueue, q.Len() > 0)
+			if tt.expectEnqueue {
+				item, _ := q.Get()
+				assert.Equal(t, types.NamespacedName{Namespace: tt.pod.Namespace, Name: tt.pod.Name}, item.NamespacedName)
+				q.Done(item)
+			}
+		})
+	}
+}
+
+func TestSandboxPodEventHandler_Update(t *testing.T) {
+	tests := []struct {
+		name               string
+		featureGateEnabled bool
+		oldPod             *corev1.Pod
+		newPod             *corev1.Pod
+		expectEnqueue      bool
+	}{
+		{
+			name:               "feature gate enabled - active update enqueued",
+			featureGateEnabled: true,
+			oldPod: func() *corev1.Pod {
+				p := newAgentPod("sbx-1", "default")
+				p.Status.Phase = corev1.PodPending
+				return p
+			}(),
+			newPod: func() *corev1.Pod {
+				p := newAgentPod("sbx-1", "default")
+				p.Status.Phase = corev1.PodRunning
+				return p
+			}(),
+			expectEnqueue: true,
+		},
+		{
+			name:               "feature gate enabled - no active update not enqueued",
+			featureGateEnabled: true,
+			oldPod:             newAgentPod("sbx-1", "default"),
+			newPod:             newAgentPod("sbx-1", "default"),
+			expectEnqueue:      false,
+		},
+		{
+			name:               "feature gate disabled - non-agent pod skipped",
+			featureGateEnabled: false,
+			oldPod:             newNonAgentPod("random-pod", "default"),
+			newPod: func() *corev1.Pod {
+				p := newNonAgentPod("random-pod", "default")
+				p.Status.Phase = corev1.PodFailed
+				return p
+			}(),
+			expectEnqueue: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.featureGateEnabled {
+				_ = utilfeature.DefaultMutableFeatureGate.Set("CachePodLabelSelector=true")
+			} else {
+				_ = utilfeature.DefaultMutableFeatureGate.Set("CachePodLabelSelector=false")
+			}
+			t.Cleanup(func() {
+				_ = utilfeature.DefaultMutableFeatureGate.Set("CachePodLabelSelector=true")
+			})
+
+			q := workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[reconcile.Request]())
+			defer q.ShutDown()
+
+			handler := &SandboxPodEventHandler{}
+			handler.Update(context.Background(), event.TypedUpdateEvent[client.Object]{
+				ObjectOld: tt.oldPod,
+				ObjectNew: tt.newPod,
+			}, q)
+
+			assert.Equal(t, tt.expectEnqueue, q.Len() > 0)
+		})
+	}
+}
+
+func TestSandboxPodEventHandler_Delete(t *testing.T) {
+	tests := []struct {
+		name               string
+		featureGateEnabled bool
+		pod                *corev1.Pod
+		expectEnqueue      bool
+	}{
+		{
+			name:               "feature gate enabled - agent pod enqueued",
+			featureGateEnabled: true,
+			pod:                newAgentPod("sbx-1", "default"),
+			expectEnqueue:      true,
+		},
+		{
+			name:               "feature gate disabled - agent pod enqueued",
+			featureGateEnabled: false,
+			pod:                newAgentPod("sbx-1", "default"),
+			expectEnqueue:      true,
+		},
+		{
+			name:               "feature gate disabled - non-agent pod skipped",
+			featureGateEnabled: false,
+			pod:                newNonAgentPod("random-pod", "default"),
+			expectEnqueue:      false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.featureGateEnabled {
+				_ = utilfeature.DefaultMutableFeatureGate.Set("CachePodLabelSelector=true")
+			} else {
+				_ = utilfeature.DefaultMutableFeatureGate.Set("CachePodLabelSelector=false")
+			}
+			t.Cleanup(func() {
+				_ = utilfeature.DefaultMutableFeatureGate.Set("CachePodLabelSelector=true")
+			})
+
+			q := workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[reconcile.Request]())
+			defer q.ShutDown()
+
+			handler := &SandboxPodEventHandler{}
+			handler.Delete(context.Background(), event.TypedDeleteEvent[client.Object]{Object: tt.pod}, q)
+
+			assert.Equal(t, tt.expectEnqueue, q.Len() > 0)
+			if tt.expectEnqueue {
+				item, _ := q.Get()
+				assert.Equal(t, types.NamespacedName{Namespace: tt.pod.Namespace, Name: tt.pod.Name}, item.NamespacedName)
+				q.Done(item)
+			}
 		})
 	}
 }

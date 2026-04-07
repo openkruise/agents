@@ -48,6 +48,7 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/client"
 	"github.com/openkruise/agents/pkg/controller"
+	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/utils"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 	"github.com/openkruise/agents/pkg/utils/fieldindex"
@@ -227,15 +228,25 @@ func main() {
 		setupLog.Error(err, "unable to set up client")
 		os.Exit(1)
 	}
-	podLabelReq, err := labels.NewRequirement(utils.PodLabelCreatedBy, selection.Exists, nil)
-	if err != nil {
-		setupLog.Error(err, "unable to create pod label requirement")
-		os.Exit(1)
+	cacheOptions := ctrlcache.Options{}
+	if utilfeature.DefaultFeatureGate.Enabled(features.CachePodLabelSelectorGate) {
+		podLabelReq, err := labels.NewRequirement(utils.PodLabelCreatedBy, selection.Exists, nil)
+		if err != nil {
+			setupLog.Error(err, "unable to create pod label requirement")
+			os.Exit(1)
+		}
+		podLabelSelector := labels.NewSelector().Add(*podLabelReq)
+		cacheOptions.ByObject = map[ctrlclient.Object]ctrlcache.ByObject{
+			&corev1.Pod{}: {
+				Label: podLabelSelector,
+			},
+		}
+		setupLog.Info("Pod informer cache label selector enabled")
+	} else {
+		setupLog.Info("Pod informer cache label selector disabled, all Pods will be cached")
 	}
-	podLabelSelector := labels.NewSelector().Add(*podLabelReq)
 
 	mgr, err := ctrl.NewManager(config, ctrl.Options{
-
 		Scheme:                  scheme,
 		Metrics:                 metricsServerOptions,
 		WebhookServer:           webhookServer,
@@ -243,13 +254,7 @@ func main() {
 		LeaderElection:          enableLeaderElection,
 		LeaderElectionID:        "f57b9a68.kruise.io",
 		LeaderElectionNamespace: leaderElectionNamespace,
-		Cache: ctrlcache.Options{
-			ByObject: map[ctrlclient.Object]ctrlcache.ByObject{
-				&corev1.Pod{}: {
-					Label: podLabelSelector,
-				},
-			},
-		},
+		Cache:                   cacheOptions,
 		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
 		// when the Manager ends. This requires the binary to immediately end when the
 		// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly
