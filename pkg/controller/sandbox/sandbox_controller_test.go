@@ -27,6 +27,7 @@ import (
 	"github.com/openkruise/agents/pkg/utils"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -2106,6 +2107,160 @@ func TestIsHighPrioritySandbox(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestReconcile_SandboxLifecycle_ClearSpecThenDelete(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	ctx := context.Background()
+	ns := "default"
+	sbxName := "lifecycle-sandbox"
+
+	// Setup fake client and reconciler
+	fakeRecorder := record.NewFakeRecorder(100)
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&agentsv1alpha1.Sandbox{}).
+		Build()
+	rl := core.NewRateLimiter()
+	reconciler := &SandboxReconciler{
+		Client:      fakeClient,
+		Scheme:      scheme,
+		controls:    core.NewSandboxControl(fakeClient, fakeRecorder, rl),
+		rateLimiter: rl,
+	}
+
+	req := ctrl.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      sbxName,
+			Namespace: ns,
+		},
+	}
+
+	// Step 1: Create a Sandbox with Template, trigger reconcile, verify finalizer is added
+	t.Run("step1_create_sandbox_and_add_finalizer", func(t *testing.T) {
+		sandbox := &agentsv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:       sbxName,
+				Namespace:  ns,
+				Generation: 1,
+			},
+			Spec: agentsv1alpha1.SandboxSpec{
+				EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+					Template: &corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: "test", Image: "nginx"}},
+						},
+					},
+				},
+			},
+		}
+
+		if err := fakeClient.Create(ctx, sandbox); err != nil {
+			t.Fatalf("Failed to create sandbox: %v", err)
+		}
+
+		result, err := reconciler.Reconcile(ctx, req)
+		if err != nil {
+			t.Errorf("Reconcile() error = %v", err)
+		}
+		if result.Requeue {
+			t.Errorf("Expected no requeue, got requeue = %v", result.Requeue)
+		}
+
+		// Verify finalizer was added
+		updatedSandbox := &agentsv1alpha1.Sandbox{}
+		if err := fakeClient.Get(ctx, req.NamespacedName, updatedSandbox); err != nil {
+			t.Fatalf("Failed to get sandbox: %v", err)
+		}
+		hasFinalizer := false
+		for _, f := range updatedSandbox.Finalizers {
+			if f == utils.SandboxFinalizer {
+				hasFinalizer = true
+				break
+			}
+		}
+		if !hasFinalizer {
+			t.Errorf("Expected finalizer %s to be added", utils.SandboxFinalizer)
+		}
+	})
+
+	// Step 2: Update Sandbox to clear Spec.Template (set to nil)
+	t.Run("step2_clear_spec_template", func(t *testing.T) {
+		sandbox := &agentsv1alpha1.Sandbox{}
+		if err := fakeClient.Get(ctx, req.NamespacedName, sandbox); err != nil {
+			t.Fatalf("Failed to get sandbox: %v", err)
+		}
+
+		sandbox.Spec.Template = nil
+		if err := fakeClient.Update(ctx, sandbox); err != nil {
+			t.Fatalf("Failed to update sandbox: %v", err)
+		}
+
+		// Verify Template is nil
+		updatedSandbox := &agentsv1alpha1.Sandbox{}
+		if err := fakeClient.Get(ctx, req.NamespacedName, updatedSandbox); err != nil {
+			t.Fatalf("Failed to get sandbox: %v", err)
+		}
+		if updatedSandbox.Spec.Template != nil {
+			t.Errorf("Expected Template to be nil, got non-nil")
+		}
+	})
+
+	// Step 3: Delete Sandbox, verify it is successfully deleted
+	t.Run("step3_delete_sandbox", func(t *testing.T) {
+		sandbox := &agentsv1alpha1.Sandbox{}
+		if err := fakeClient.Get(ctx, req.NamespacedName, sandbox); err != nil {
+			t.Fatalf("Failed to get sandbox: %v", err)
+		}
+
+		// Check if a pod was created during step1 reconcile
+		pod := &corev1.Pod{}
+		err := fakeClient.Get(ctx, req.NamespacedName, pod)
+		if err == nil {
+			// Pod exists, need to delete it first (simulating real cluster behavior)
+			// When sandbox is deleted with nil template, pod should be deleted first
+			if err := fakeClient.Delete(ctx, pod); err != nil {
+				t.Fatalf("Failed to delete pod: %v", err)
+			}
+		}
+
+		// Delete the sandbox using fake client Delete
+		if err := fakeClient.Delete(ctx, sandbox); err != nil {
+			t.Fatalf("Failed to delete sandbox: %v", err)
+		}
+
+		// Trigger reconcile to handle deletion
+		result, err := reconciler.Reconcile(ctx, req)
+		if err != nil {
+			t.Errorf("Reconcile() error = %v", err)
+		}
+		if result.Requeue {
+			t.Errorf("Expected no requeue, got requeue = %v", result.Requeue)
+		}
+
+		// Verify sandbox is deleted (finalizer removed triggers garbage collection)
+		updatedSandbox := &agentsv1alpha1.Sandbox{}
+		err = fakeClient.Get(ctx, req.NamespacedName, updatedSandbox)
+		if err == nil {
+			// Sandbox still exists, check if finalizer was removed
+			if updatedSandbox.DeletionTimestamp.IsZero() {
+				t.Errorf("Expected DeletionTimestamp to be set")
+			}
+			for _, f := range updatedSandbox.Finalizers {
+				if f == utils.SandboxFinalizer {
+					t.Errorf("Expected finalizer to be removed, but it still exists")
+				}
+			}
+		} else {
+			// If sandbox is not found, it means finalizer was removed and sandbox was garbage collected - this is expected behavior
+			if !apierrors.IsNotFound(err) {
+				t.Fatalf("Failed to get sandbox: %v", err)
+			}
+		}
+	})
 }
 
 func TestSandboxReconciler_Reconcile_RateLimitFeatureGate(t *testing.T) {

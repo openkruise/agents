@@ -117,6 +117,11 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 	logger := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
 
 	if box.Spec.Template == nil {
+		if !box.DeletionTimestamp.IsZero() {
+			newStatus := box.Status.DeepCopy()
+			args := core.EnsureFuncArgs{Pod: pod, Box: box, NewStatus: newStatus}
+			return r.handleTerminating(ctx, args)
+		}
 		logger.Info("sandbox template is nil, and ignore")
 		return reconcile.Result{}, nil
 	}
