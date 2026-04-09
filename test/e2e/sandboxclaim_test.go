@@ -136,8 +136,9 @@ var _ = Describe("SandboxClaim", func() {
 					Namespace: namespace,
 				},
 				Spec: agentsv1alpha1.SandboxClaimSpec{
-					TemplateName: sandboxSet.Name,
-					Replicas:     ptr.To(int32(1)),
+					TemplateName:    sandboxSet.Name,
+					Replicas:        ptr.To(int32(1)),
+					SkipInitRuntime: true,
 				},
 			}
 			Expect(k8sClient.Create(ctx, sandboxClaim)).To(Succeed())
@@ -171,8 +172,9 @@ var _ = Describe("SandboxClaim", func() {
 					Namespace: namespace,
 				},
 				Spec: agentsv1alpha1.SandboxClaimSpec{
-					TemplateName: sandboxSet.Name,
-					Replicas:     ptr.To(int32(3)),
+					TemplateName:    sandboxSet.Name,
+					Replicas:        ptr.To(int32(3)),
+					SkipInitRuntime: true,
 				},
 			}
 			Expect(k8sClient.Create(ctx, sandboxClaim)).To(Succeed())
@@ -203,8 +205,9 @@ var _ = Describe("SandboxClaim", func() {
 					Namespace: namespace,
 				},
 				Spec: agentsv1alpha1.SandboxClaimSpec{
-					TemplateName: sandboxSet.Name,
-					Replicas:     ptr.To(int32(3)),
+					TemplateName:    sandboxSet.Name,
+					Replicas:        ptr.To(int32(3)),
+					SkipInitRuntime: true,
 				},
 			}
 			Expect(k8sClient.Create(ctx, sandboxClaim)).To(Succeed())
@@ -255,6 +258,7 @@ var _ = Describe("SandboxClaim", func() {
 					Replicas:         ptr.To(int32(1)),
 					WaitReadyTimeout: &metav1.Duration{Duration: time.Minute},
 					CreateOnNoStock:  true,
+					SkipInitRuntime:  true,
 				},
 			}
 			Expect(k8sClient.Create(ctx, sandboxClaim)).To(Succeed())
@@ -291,8 +295,9 @@ var _ = Describe("SandboxClaim", func() {
 					Namespace: namespace,
 				},
 				Spec: agentsv1alpha1.SandboxClaimSpec{
-					TemplateName: "test-pool",
-					Replicas:     ptr.To(int32(1)),
+					TemplateName:    "test-pool",
+					Replicas:        ptr.To(int32(1)),
+					SkipInitRuntime: true,
 				},
 			}
 		})
@@ -387,9 +392,10 @@ var _ = Describe("SandboxClaim", func() {
 					Namespace: namespace,
 				},
 				Spec: agentsv1alpha1.SandboxClaimSpec{
-					TemplateName: sandboxSet.Name,
-					Replicas:     ptr.To(int32(5)),                            // Request more than initially available (2)
-					ClaimTimeout: &metav1.Duration{Duration: 2 * time.Minute}, // Give enough time
+					TemplateName:    sandboxSet.Name,
+					Replicas:        ptr.To(int32(5)),                            // Request more than initially available (2)
+					ClaimTimeout:    &metav1.Duration{Duration: 2 * time.Minute}, // Give enough time
+					SkipInitRuntime: true,
 				},
 			}
 			Expect(k8sClient.Create(ctx, sandboxClaim)).To(Succeed())
@@ -428,8 +434,9 @@ var _ = Describe("SandboxClaim", func() {
 					Namespace: namespace,
 				},
 				Spec: agentsv1alpha1.SandboxClaimSpec{
-					TemplateName: "non-existent-pool",
-					Replicas:     ptr.To(int32(1)),
+					TemplateName:    "non-existent-pool",
+					Replicas:        ptr.To(int32(1)),
+					SkipInitRuntime: true,
 				},
 			}
 			Expect(k8sClient.Create(ctx, sandboxClaim)).To(Succeed())
@@ -502,8 +509,9 @@ var _ = Describe("SandboxClaim", func() {
 					Namespace: namespace,
 				},
 				Spec: agentsv1alpha1.SandboxClaimSpec{
-					TemplateName: sandboxSet.Name,
-					Replicas:     ptr.To(int32(2)),
+					TemplateName:    sandboxSet.Name,
+					Replicas:        ptr.To(int32(2)),
+					SkipInitRuntime: true,
 				},
 			}
 			Expect(k8sClient.Create(ctx, sandboxClaim1)).To(Succeed())
@@ -556,9 +564,10 @@ var _ = Describe("SandboxClaim", func() {
 					Namespace: namespace,
 				},
 				Spec: agentsv1alpha1.SandboxClaimSpec{
-					TemplateName: sandboxSet.Name,
-					Replicas:     ptr.To(int32(1)),
-					ClaimTimeout: &metav1.Duration{Duration: 10 * time.Second},
+					TemplateName:    sandboxSet.Name,
+					Replicas:        ptr.To(int32(1)),
+					ClaimTimeout:    &metav1.Duration{Duration: 10 * time.Second},
+					SkipInitRuntime: true,
 				},
 			}
 			Expect(k8sClient.Create(ctx, sandboxClaim2)).To(Succeed())
@@ -643,7 +652,8 @@ var _ = Describe("SandboxClaim", func() {
 					Namespace: namespace,
 				},
 				Spec: agentsv1alpha1.SandboxClaimSpec{
-					TemplateName: sandboxSet.Name,
+					TemplateName:    sandboxSet.Name,
+					SkipInitRuntime: true,
 					// Replicas not specified, should default to 1
 				},
 			}
@@ -716,8 +726,9 @@ var _ = Describe("SandboxClaim", func() {
 					Namespace: namespace,
 				},
 				Spec: agentsv1alpha1.SandboxClaimSpec{
-					TemplateName: sandboxSet.Name,
-					Replicas:     ptr.To(int32(2)),
+					TemplateName:    sandboxSet.Name,
+					Replicas:        ptr.To(int32(2)),
+					SkipInitRuntime: true,
 				},
 			}
 			Expect(k8sClient.Create(ctx, sandboxClaim)).To(Succeed())
@@ -829,6 +840,7 @@ var _ = Describe("SandboxClaim", func() {
 					TemplateName:      sandboxSet.Name,
 					Replicas:          ptr.To(int32(2)),
 					TTLAfterCompleted: &metav1.Duration{Duration: 30 * time.Second},
+					SkipInitRuntime:   true,
 				},
 			}
 			Expect(k8sClient.Create(ctx, sandboxClaim)).To(Succeed())
@@ -880,8 +892,9 @@ var _ = Describe("SandboxClaim", func() {
 					Namespace: namespace,
 				},
 				Spec: agentsv1alpha1.SandboxClaimSpec{
-					TemplateName: sandboxSet.Name,
-					Replicas:     ptr.To(int32(1)),
+					TemplateName:    sandboxSet.Name,
+					Replicas:        ptr.To(int32(1)),
+					SkipInitRuntime: true,
 					// No TTLAfterCompleted specified
 				},
 			}
@@ -922,6 +935,7 @@ var _ = Describe("SandboxClaim", func() {
 					TemplateName:      sandboxSet.Name,
 					Replicas:          ptr.To(int32(1)),
 					TTLAfterCompleted: &metav1.Duration{Duration: 5 * time.Second},
+					SkipInitRuntime:   true,
 				},
 			}
 			Expect(k8sClient.Create(ctx, sandboxClaim)).To(Succeed())
@@ -1007,8 +1021,9 @@ var _ = Describe("SandboxClaim", func() {
 					Namespace: namespace,
 				},
 				Spec: agentsv1alpha1.SandboxClaimSpec{
-					TemplateName: sandboxSet.Name,
-					Replicas:     ptr.To(int32(3)),
+					TemplateName:    sandboxSet.Name,
+					Replicas:        ptr.To(int32(3)),
+					SkipInitRuntime: true,
 				},
 			}
 			Expect(k8sClient.Create(ctx, sandboxClaim)).To(Succeed())
@@ -1078,8 +1093,9 @@ var _ = Describe("SandboxClaim", func() {
 					Namespace: namespace,
 				},
 				Spec: agentsv1alpha1.SandboxClaimSpec{
-					TemplateName: sandboxSet.Name,
-					Replicas:     ptr.To(int32(3)),
+					TemplateName:    sandboxSet.Name,
+					Replicas:        ptr.To(int32(3)),
+					SkipInitRuntime: true,
 				},
 			}
 			Expect(k8sClient.Create(ctx, sandboxClaim)).To(Succeed())
@@ -1154,8 +1170,9 @@ var _ = Describe("SandboxClaim", func() {
 					Namespace: namespace,
 				},
 				Spec: agentsv1alpha1.SandboxClaimSpec{
-					TemplateName: sandboxSet.Name,
-					Replicas:     ptr.To(int32(5)),
+					TemplateName:    sandboxSet.Name,
+					Replicas:        ptr.To(int32(5)),
+					SkipInitRuntime: true,
 				},
 			}
 			Expect(k8sClient.Create(ctx, sandboxClaim)).To(Succeed())
@@ -1285,6 +1302,7 @@ var _ = Describe("SandboxClaim", func() {
 							"team":           "platform",
 							"env":            "test",
 						},
+						SkipInitRuntime: true,
 					},
 				}
 				Expect(k8sClient.Create(ctx, sandboxClaim)).To(Succeed())
@@ -1343,6 +1361,7 @@ var _ = Describe("SandboxClaim", func() {
 							"owner":               "platform-team",
 							"description":         "Test sandbox for E2E testing",
 						},
+						SkipInitRuntime: true,
 					},
 				}
 				Expect(k8sClient.Create(ctx, sandboxClaim)).To(Succeed())
@@ -1391,6 +1410,7 @@ var _ = Describe("SandboxClaim", func() {
 							"build-id": "12345",
 							"git-sha":  "abc123",
 						},
+						SkipInitRuntime: true,
 					},
 				}
 				Expect(k8sClient.Create(ctx, sandboxClaim)).To(Succeed())
@@ -1448,6 +1468,7 @@ var _ = Describe("SandboxClaim", func() {
 						Labels: map[string]string{
 							"generation": "first",
 						},
+						SkipInitRuntime: true,
 					},
 				}
 				Expect(k8sClient.Create(ctx, sandboxClaim)).To(Succeed())
@@ -1514,6 +1535,7 @@ var _ = Describe("SandboxClaim", func() {
 						Labels: map[string]string{
 							"generation": "second", // Different label
 						},
+						SkipInitRuntime: true,
 					},
 				}
 				Expect(k8sClient.Create(ctx, sandboxClaim)).To(Succeed())
