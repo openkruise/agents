@@ -170,8 +170,9 @@ func TestReconciler_Reconcile_Claiming(t *testing.T) {
 			Generation: 1,
 		},
 		Spec: agentsv1alpha1.SandboxClaimSpec{
-			TemplateName: "test-sandboxset",
-			Replicas:     int32Ptr(2),
+			TemplateName:    "test-sandboxset",
+			Replicas:        int32Ptr(2),
+			SkipInitRuntime: true,
 		},
 	}
 

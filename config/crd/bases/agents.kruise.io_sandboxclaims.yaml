@@ -152,6 +152,11 @@ spec:
                   This will be set as spec.shutdownTime (absolute time) on the Sandbox
                 format: date-time
                 type: string
+              skipInitRuntime:
+                default: false
+                description: SkipInitRuntime allows to skip init runtime for sandbox
+                  while claiming
+                type: boolean
               templateName:
                 description: TemplateName specifies which SandboxSet pool to claim
                   from

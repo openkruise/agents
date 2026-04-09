@@ -19,10 +19,10 @@ package core
 import (
 	"context"
 	"encoding/json"
-	"strings"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -55,9 +55,7 @@ func TestNewCommonControl(t *testing.T) {
 	// NewCommonControl should handle nil cache/client gracefully
 	control := NewCommonControl(fakeClient, fakeRecorder, nil, nil)
 
-	if control == nil {
-		t.Error("NewCommonControl() returned nil")
-	}
+	require.NotNil(t, control, "NewCommonControl() returned nil")
 
 	// Check it implements the interface
 	var _ ClaimControl = control
@@ -90,12 +88,8 @@ func TestRequeueStrategy_Factories(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := tt.factory()
-			if got.Immediate != tt.expectedStrategy.Immediate {
-				t.Errorf("Immediate = %v, want %v", got.Immediate, tt.expectedStrategy.Immediate)
-			}
-			if got.After != tt.expectedStrategy.After {
-				t.Errorf("After = %v, want %v", got.After, tt.expectedStrategy.After)
-			}
+			assert.Equal(t, tt.expectedStrategy.Immediate, got.Immediate, "Immediate mismatch")
+			assert.Equal(t, tt.expectedStrategy.After, got.After, "After mismatch")
 		})
 	}
 
@@ -109,12 +103,8 @@ func TestRequeueStrategy_Factories(t *testing.T) {
 		for _, d := range durations {
 			t.Run(d.String(), func(t *testing.T) {
 				got := RequeueAfter(d)
-				if got.Immediate != false {
-					t.Errorf("RequeueAfter(%v).Immediate = true, want false", d)
-				}
-				if got.After != d {
-					t.Errorf("RequeueAfter(%v).After = %v, want %v", d, got.After, d)
-				}
+				assert.False(t, got.Immediate, "RequeueAfter(%v).Immediate should be false", d)
+				assert.Equal(t, d, got.After, "RequeueAfter(%v).After mismatch", d)
 			})
 		}
 	})
@@ -132,18 +122,12 @@ func TestNewClaimControl(t *testing.T) {
 
 	controls := NewClaimControl(fakeClient, fakeRecorder, nil, nil)
 
-	if controls == nil {
-		t.Fatal("NewClaimControl() returned nil")
-	}
+	require.NotNil(t, controls, "NewClaimControl() returned nil")
 
 	// Verify the map contains expected control
 	commonControl, exists := controls[CommonControlName]
-	if !exists {
-		t.Errorf("NewClaimControl() missing CommonControlName key")
-	}
-	if commonControl == nil {
-		t.Errorf("NewClaimControl() CommonControl is nil")
-	}
+	require.True(t, exists, "NewClaimControl() missing CommonControlName key")
+	require.NotNil(t, commonControl, "NewClaimControl() CommonControl is nil")
 
 	// Verify it implements the interface
 	var _ ClaimControl = commonControl
@@ -154,9 +138,7 @@ func TestCommonControl_EnsureClaimClaiming(t *testing.T) {
 	_ = agentsv1alpha1.AddToScheme(scheme)
 
 	cache, clientSet, err := sandboxcr.NewTestCache(t)
-	if err != nil {
-		t.Fatalf("Failed to create cache: %v", err)
-	}
+	require.NoError(t, err, "Failed to create cache")
 	sandboxClient := clientSet.SandboxClient
 
 	// Start cache
@@ -207,9 +189,7 @@ func TestCommonControl_EnsureClaimClaiming(t *testing.T) {
 			expectedStrategy: RequeueAfter(ClaimRetryInterval),
 			expectError:      false,
 			checkStatus: func(t *testing.T, status *agentsv1alpha1.SandboxClaimStatus) {
-				if status.ClaimedReplicas != 0 {
-					t.Errorf("Expected ClaimedReplicas=0, got %d", status.ClaimedReplicas)
-				}
+				assert.Equal(t, int32(0), status.ClaimedReplicas, "ClaimedReplicas mismatch")
 			},
 		},
 		{
@@ -273,9 +253,7 @@ func TestCommonControl_EnsureClaimClaiming(t *testing.T) {
 				// Add sandboxes to cache
 				for _, sbx := range sandboxes {
 					_, err := sandboxClient.ApiV1alpha1().Sandboxes(sbx.Namespace).Create(ctx, sbx, metav1.CreateOptions{})
-					if err != nil {
-						t.Fatalf("Failed to create sandbox in sandboxClient: %v", err)
-					}
+					require.NoError(t, err, "Failed to create sandbox in sandboxClient")
 				}
 				time.Sleep(100 * time.Millisecond) // Wait for cache sync
 				return sandboxes
@@ -283,9 +261,7 @@ func TestCommonControl_EnsureClaimClaiming(t *testing.T) {
 			expectedStrategy: RequeueImmediately(), // Should requeue to transition to Completed
 			expectError:      false,
 			checkStatus: func(t *testing.T, status *agentsv1alpha1.SandboxClaimStatus) {
-				if status.ClaimedReplicas != 2 {
-					t.Errorf("Expected ClaimedReplicas=2, got %d", status.ClaimedReplicas)
-				}
+				assert.Equal(t, int32(2), status.ClaimedReplicas, "ClaimedReplicas mismatch")
 			},
 		},
 		{
@@ -350,9 +326,7 @@ func TestCommonControl_EnsureClaimClaiming(t *testing.T) {
 				// Add sandboxes to cache
 				for _, sbx := range sandboxes {
 					_, err := sandboxClient.ApiV1alpha1().Sandboxes(sbx.Namespace).Create(ctx, sbx, metav1.CreateOptions{})
-					if err != nil {
-						t.Fatalf("Failed to create sandbox in sandboxClient: %v", err)
-					}
+					require.NoError(t, err, "Failed to create sandbox in sandboxClient")
 				}
 				time.Sleep(100 * time.Millisecond) // Wait for cache sync
 				return sandboxes
@@ -360,9 +334,7 @@ func TestCommonControl_EnsureClaimClaiming(t *testing.T) {
 			expectedStrategy: RequeueAfter(ClaimRetryInterval), // Should retry to claim remaining 1
 			expectError:      false,
 			checkStatus: func(t *testing.T, status *agentsv1alpha1.SandboxClaimStatus) {
-				if status.ClaimedReplicas != 2 {
-					t.Errorf("Expected ClaimedReplicas to be recovered to 2 (actualCount), got %d", status.ClaimedReplicas)
-				}
+				assert.Equal(t, int32(2), status.ClaimedReplicas, "Expected ClaimedReplicas to be recovered to 2 (actualCount)")
 			},
 		},
 		{
@@ -452,9 +424,7 @@ func TestCommonControl_EnsureClaimClaiming(t *testing.T) {
 			expectedStrategy: RequeueAfter(ClaimRetryInterval), // Should retry to claim remaining 1
 			expectError:      false,
 			checkStatus: func(t *testing.T, status *agentsv1alpha1.SandboxClaimStatus) {
-				if status.ClaimedReplicas != 1 {
-					t.Errorf("Expected ClaimedReplicas to be still 1 (dead sandbox skipped), got %d", status.ClaimedReplicas)
-				}
+				assert.Equal(t, int32(1), status.ClaimedReplicas, "Expected ClaimedReplicas to be still 1 (dead sandbox skipped)")
 			},
 		},
 	}
@@ -485,24 +455,16 @@ func TestCommonControl_EnsureClaimClaiming(t *testing.T) {
 
 			// Check error
 			if tt.expectError {
-				if err == nil {
-					t.Errorf("Expected error, got nil")
-				}
+				assert.Error(t, err, "Expected error but got nil")
 			} else {
-				if err != nil {
-					t.Errorf("Unexpected error: %v", err)
-				}
+				assert.NoError(t, err, "Unexpected error")
 			}
 
 			// Check requeue strategy
 			if !tt.expectError {
-				if strategy.Immediate != tt.expectedStrategy.Immediate {
-					t.Errorf("Expected Immediate=%v, got %v", tt.expectedStrategy.Immediate, strategy.Immediate)
-				}
+				assert.Equal(t, tt.expectedStrategy.Immediate, strategy.Immediate, "Immediate mismatch")
 				if tt.expectedStrategy.After > 0 {
-					if strategy.After != tt.expectedStrategy.After {
-						t.Errorf("Expected After=%v, got %v", tt.expectedStrategy.After, strategy.After)
-					}
+					assert.Equal(t, tt.expectedStrategy.After, strategy.After, "After mismatch")
 				}
 			}
 
@@ -637,46 +599,31 @@ func TestCommonControl_EnsureClaimCompleted(t *testing.T) {
 
 			// Check error
 			if tt.expectError {
-				if err == nil {
-					t.Errorf("Expected error, got nil")
-				}
+				assert.Error(t, err, "Expected error but got nil")
 			} else {
-				if err != nil {
-					t.Errorf("Unexpected error: %v", err)
-				}
+				assert.NoError(t, err, "Unexpected error")
 			}
 
 			// Check if claim was deleted
 			if tt.expectDeleted {
 				deletedClaim := &agentsv1alpha1.SandboxClaim{}
 				err := fakeClient.Get(ctx, client.ObjectKeyFromObject(tt.claim), deletedClaim)
-				if err == nil {
-					t.Errorf("Expected claim to be deleted, but it still exists")
-				}
+				assert.Error(t, err, "Expected claim to be deleted, but it still exists")
 				// For TTL deletion, strategy should be NoRequeue
-				if strategy.Immediate || strategy.After > 0 {
-					t.Errorf("Expected NoRequeue after deletion, got %+v", strategy)
-				}
+				assert.False(t, strategy.Immediate, "Expected NoRequeue after deletion")
+				assert.Equal(t, time.Duration(0), strategy.After, "Expected NoRequeue after deletion")
 			} else {
 				// Claim should still exist
 				existingClaim := &agentsv1alpha1.SandboxClaim{}
 				err := fakeClient.Get(ctx, client.ObjectKeyFromObject(tt.claim), existingClaim)
-				if err != nil {
-					t.Errorf("Expected claim to still exist, got error: %v", err)
-				}
+				assert.NoError(t, err, "Expected claim to still exist")
 			}
 
 			// Check requeue strategy for "TTL not yet expired" case
 			if tt.name == "TTL not yet expired - should requeue after remaining time" {
-				if strategy.Immediate {
-					t.Errorf("Expected delayed requeue, got immediate requeue")
-				}
-				if strategy.After < tt.expectedRequeueMin {
-					t.Errorf("Expected requeue after at least %v, got %v", tt.expectedRequeueMin, strategy.After)
-				}
-				if strategy.After > 10*time.Second {
-					t.Errorf("Expected requeue within 10s, got %v", strategy.After)
-				}
+				assert.False(t, strategy.Immediate, "Expected delayed requeue, got immediate requeue")
+				assert.GreaterOrEqual(t, strategy.After, tt.expectedRequeueMin, "Requeue After too short")
+				assert.LessOrEqual(t, strategy.After, 10*time.Second, "Requeue After too long")
 			}
 		})
 	}
@@ -724,18 +671,28 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 			},
 			expectError: false,
 			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
-				if opts.User != "test-uid-123" {
-					t.Errorf("User = %v, want %v", opts.User, "test-uid-123")
+				assert.Equal(t, "test-uid-123", opts.User, "User mismatch")
+				assert.Equal(t, "test-template", opts.Template, "Template mismatch")
+				require.NotNil(t, opts.Modifier, "Modifier should not be nil")
+				assert.Nil(t, opts.InplaceUpdate, "InplaceUpdate should be nil when not specified")
+
+				// Test modifier by applying it to a mock sandbox
+				mockSandbox := &sandboxcr.Sandbox{
+					Sandbox: &agentsv1alpha1.Sandbox{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "test-sandbox",
+							Namespace: "default",
+							Labels: map[string]string{
+								"existing-label": "existing-value",
+							},
+						},
+					},
 				}
-				if opts.Template != "test-template" {
-					t.Errorf("Template = %v, want %v", opts.Template, "test-template")
-				}
-				if opts.Modifier == nil {
-					t.Error("Modifier should not be nil")
-				}
-				if opts.InplaceUpdate != nil {
-					t.Error("InplaceUpdate should be nil when not specified")
-				}
+				opts.Modifier(mockSandbox)
+
+				// Verify modifier set the claim name label correctly
+				assert.Equal(t, "test-claim", mockSandbox.Labels[agentsv1alpha1.LabelSandboxClaimName], "LabelSandboxClaimName mismatch")
+				assert.Equal(t, "existing-value", mockSandbox.Labels["existing-label"], "existing-label should be preserved")
 			},
 		},
 		{
@@ -765,12 +722,29 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 			},
 			expectError: false,
 			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
-				if opts.User != "test-uid-456" {
-					t.Errorf("User = %v, want %v", opts.User, "test-uid-456")
+				assert.Equal(t, "test-uid-456", opts.User, "User mismatch")
+				require.NotNil(t, opts.Modifier, "Modifier should not be nil")
+
+				// Test modifier by applying it to a mock sandbox
+				mockSandbox := &sandboxcr.Sandbox{
+					Sandbox: &agentsv1alpha1.Sandbox{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "test-sandbox",
+							Namespace: "default",
+							Labels: map[string]string{
+								"existing-label": "existing-value",
+							},
+						},
+					},
 				}
-				if opts.Modifier == nil {
-					t.Error("Modifier should not be nil")
-				}
+				opts.Modifier(mockSandbox)
+
+				// Verify modifier set labels and annotations correctly
+				assert.Equal(t, "test-claim", mockSandbox.Labels[agentsv1alpha1.LabelSandboxClaimName], "LabelSandboxClaimName mismatch")
+				assert.Equal(t, "test", mockSandbox.Labels["env"], "env label mismatch")
+				assert.Equal(t, "platform", mockSandbox.Labels["team"], "team label mismatch")
+				assert.Equal(t, "existing-value", mockSandbox.Labels["existing-label"], "existing-label should be preserved")
+				assert.Equal(t, "test annotation", mockSandbox.Annotations["description"], "description annotation mismatch")
 			},
 		},
 		{
@@ -794,12 +768,23 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 			},
 			expectError: false,
 			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
-				if opts.User != "test-uid-789" {
-					t.Errorf("User = %v, want %v", opts.User, "test-uid-789")
+				assert.Equal(t, "test-uid-789", opts.User, "User mismatch")
+				require.NotNil(t, opts.Modifier, "Modifier should not be nil")
+
+				// Test modifier by applying it to a mock sandbox
+				mockSandbox := &sandboxcr.Sandbox{
+					Sandbox: &agentsv1alpha1.Sandbox{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "test-sandbox",
+							Namespace: "default",
+						},
+					},
 				}
-				if opts.Modifier == nil {
-					t.Error("Modifier should not be nil")
-				}
+				opts.Modifier(mockSandbox)
+
+				// Verify modifier set the claim name label and shutdown annotation
+				assert.Equal(t, "test-claim", mockSandbox.Labels[agentsv1alpha1.LabelSandboxClaimName], "LabelSandboxClaimName mismatch")
+				assert.Equal(t, shutdownTime.Time.Format(time.RFC3339), mockSandbox.Spec.ShutdownTime.Time.Format(time.RFC3339), "ShutdownTime annotation mismatch")
 			},
 		},
 		{
@@ -825,16 +810,9 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 			},
 			expectError: false,
 			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
-				if opts.InplaceUpdate == nil {
-					t.Fatal("InplaceUpdate should not be nil")
-				}
-				if opts.InplaceUpdate.Image != "nginx:latest" {
-					t.Errorf("InplaceUpdate.Image = %v, want %v", opts.InplaceUpdate.Image, "nginx:latest")
-				}
-				// Timeout should be set to default by ValidateAndInitClaimOptions
-				if opts.WaitReadyTimeout == 0 {
-					t.Error("WaitReadyTimeout should be set to default, got 0")
-				}
+				require.NotNil(t, opts.InplaceUpdate, "InplaceUpdate should not be nil")
+				assert.Equal(t, "nginx:latest", opts.InplaceUpdate.Image, "InplaceUpdate.Image mismatch")
+				assert.NotZero(t, opts.WaitReadyTimeout, "WaitReadyTimeout should be set to default, got 0")
 			},
 		},
 		{
@@ -861,66 +839,9 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 			},
 			expectError: false,
 			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
-				if opts.InplaceUpdate == nil {
-					t.Fatal("InplaceUpdate should not be nil")
-				}
-				if opts.InplaceUpdate.Image != "redis:7.0" {
-					t.Errorf("InplaceUpdate.Image = %v, want %v", opts.InplaceUpdate.Image, "redis:7.0")
-				}
-				if opts.WaitReadyTimeout != 3*time.Minute {
-					t.Errorf("WaitReadyTimeout = %v, want %v", opts.WaitReadyTimeout, 3*time.Minute)
-				}
-			},
-		},
-		{
-			name: "claim with all fields",
-			claim: &agentsv1alpha1.SandboxClaim{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-claim-full",
-					Namespace: "default",
-					UID:       "test-uid-full",
-				},
-				Spec: agentsv1alpha1.SandboxClaimSpec{
-					TemplateName: "test-template",
-					Labels: map[string]string{
-						"app": "test",
-					},
-					Annotations: map[string]string{
-						"note": "test",
-					},
-					ShutdownTime: &shutdownTime,
-					InplaceUpdate: &agentsv1alpha1.SandboxClaimInplaceUpdateOptions{
-						Image: "postgres:16",
-					},
-					WaitReadyTimeout: &timeoutDuration,
-				},
-			},
-			sandboxSet: &agentsv1alpha1.SandboxSet{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-template",
-					Namespace: "default",
-				},
-			},
-			expectError: false,
-			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
-				if opts.User != "test-uid-full" {
-					t.Errorf("User = %v, want %v", opts.User, "test-uid-full")
-				}
-				if opts.Template != "test-template" {
-					t.Errorf("Template = %v, want %v", opts.Template, "test-template")
-				}
-				if opts.Modifier == nil {
-					t.Error("Modifier should not be nil")
-				}
-				if opts.InplaceUpdate == nil {
-					t.Fatal("InplaceUpdate should not be nil")
-				}
-				if opts.InplaceUpdate.Image != "postgres:16" {
-					t.Errorf("InplaceUpdate.Image = %v, want %v", opts.InplaceUpdate.Image, "postgres:16")
-				}
-				if opts.WaitReadyTimeout != 3*time.Minute {
-					t.Errorf("WaitReadyTimeout = %v, want %v", opts.WaitReadyTimeout, 3*time.Minute)
-				}
+				require.NotNil(t, opts.InplaceUpdate, "InplaceUpdate should not be nil")
+				assert.Equal(t, "redis:7.0", opts.InplaceUpdate.Image, "InplaceUpdate.Image mismatch")
+				assert.Equal(t, 3*time.Minute, opts.WaitReadyTimeout, "WaitReadyTimeout mismatch")
 			},
 		},
 		{
@@ -947,18 +868,10 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 			},
 			expectError: false,
 			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
-				if opts.User != "test-uid-runtimes" {
-					t.Errorf("User = %v, want %v", opts.User, "test-uid-runtimes")
-				}
-				if len(opts.RuntimeConfig) != 2 {
-					t.Errorf("RuntimeConfig length = %v, want %v", len(opts.RuntimeConfig), 2)
-				}
-				if opts.RuntimeConfig[0].Name != agentsv1alpha1.RuntimeConfigForInjectCsiMount {
-					t.Errorf("RuntimeConfig[0].Name = %v, want %v", opts.RuntimeConfig[0].Name, agentsv1alpha1.RuntimeConfigForInjectCsiMount)
-				}
-				if opts.RuntimeConfig[1].Name != agentsv1alpha1.RuntimeConfigForInjectAgentRuntime {
-					t.Errorf("RuntimeConfig[1].Name = %v, want %v", opts.RuntimeConfig[1].Name, agentsv1alpha1.RuntimeConfigForInjectAgentRuntime)
-				}
+				assert.Equal(t, "test-uid-runtimes", opts.User, "User mismatch")
+				assert.Len(t, opts.RuntimeConfig, 2, "RuntimeConfig length mismatch")
+				assert.Equal(t, agentsv1alpha1.RuntimeConfigForInjectCsiMount, opts.RuntimeConfig[0].Name, "RuntimeConfig[0].Name mismatch")
+				assert.Equal(t, agentsv1alpha1.RuntimeConfigForInjectAgentRuntime, opts.RuntimeConfig[1].Name, "RuntimeConfig[1].Name mismatch")
 			},
 		},
 		{
@@ -984,12 +897,8 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 			},
 			expectError: false,
 			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
-				if len(opts.RuntimeConfig) != 1 {
-					t.Errorf("RuntimeConfig length = %v, want %v", len(opts.RuntimeConfig), 1)
-				}
-				if opts.RuntimeConfig[0].Name != agentsv1alpha1.RuntimeConfigForInjectCsiMount {
-					t.Errorf("RuntimeConfig[0].Name = %v, want %v", opts.RuntimeConfig[0].Name, agentsv1alpha1.RuntimeConfigForInjectCsiMount)
-				}
+				assert.Len(t, opts.RuntimeConfig, 1, "RuntimeConfig length mismatch")
+				assert.Equal(t, agentsv1alpha1.RuntimeConfigForInjectCsiMount, opts.RuntimeConfig[0].Name, "RuntimeConfig[0].Name mismatch")
 			},
 		},
 		{
@@ -1012,9 +921,88 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 			},
 			expectError: false,
 			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
-				if opts.RuntimeConfig != nil {
-					t.Errorf("RuntimeConfig should be nil when Runtimes is not specified, got %v", opts.RuntimeConfig)
-				}
+				assert.Nil(t, opts.RuntimeConfig, "RuntimeConfig should be nil when Runtimes is not specified")
+			},
+		},
+		{
+			name: "SkipInitRuntime=false (default) should set InitRuntime with EnvVars and AccessToken",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim-skip-false",
+					Namespace: "default",
+					UID:       "test-uid-skip-false",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "test-template",
+					EnvVars: map[string]string{
+						"KEY1": "value1",
+						"KEY2": "value2",
+					},
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template",
+					Namespace: "default",
+				},
+			},
+			expectError: false,
+			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+				require.NotNil(t, opts.InitRuntime, "InitRuntime should not be nil when SkipInitRuntime is false")
+				assert.Equal(t, "value1", opts.InitRuntime.EnvVars["KEY1"], "InitRuntime.EnvVars[KEY1] mismatch")
+				assert.Equal(t, "value2", opts.InitRuntime.EnvVars["KEY2"], "InitRuntime.EnvVars[KEY2] mismatch")
+				assert.NotEmpty(t, opts.InitRuntime.AccessToken, "InitRuntime.AccessToken should not be empty")
+			},
+		},
+		{
+			name: "SkipInitRuntime=true should not set InitRuntime",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim-skip-true",
+					Namespace: "default",
+					UID:       "test-uid-skip-true",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName:    "test-template",
+					SkipInitRuntime: true,
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template",
+					Namespace: "default",
+				},
+			},
+			expectError: false,
+			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+				assert.Nil(t, opts.InitRuntime, "InitRuntime should be nil when SkipInitRuntime is true")
+			},
+		},
+		{
+			name: "SkipInitRuntime=true with EnvVars should still not set InitRuntime",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim-skip-true-env",
+					Namespace: "default",
+					UID:       "test-uid-skip-true-env",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName:    "test-template",
+					SkipInitRuntime: true,
+					EnvVars: map[string]string{
+						"KEY1": "value1",
+					},
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template",
+					Namespace: "default",
+				},
+			},
+			expectError: false,
+			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+				assert.Nil(t, opts.InitRuntime, "InitRuntime should be nil when SkipInitRuntime is true, even with EnvVars")
 			},
 		},
 	}
@@ -1022,102 +1010,15 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			opts, err := control.buildClaimOptions(ctx, tt.claim, tt.sandboxSet)
-			if (err != nil) != tt.expectError {
-				t.Errorf("buildClaimOptions() error = %v, expectError %v", err, tt.expectError)
-				return
-			}
-			if !tt.expectError && tt.validate != nil {
-				tt.validate(t, opts)
+			if tt.expectError {
+				assert.Error(t, err, "Expected error but got nil")
+			} else {
+				assert.NoError(t, err, "Unexpected error")
+				if tt.validate != nil {
+					tt.validate(t, opts)
+				}
 			}
 		})
-	}
-}
-
-// TestCommonControl_buildClaimOptions_Modifier tests the modifier function behavior
-func TestCommonControl_buildClaimOptions_Modifier(t *testing.T) {
-	scheme := runtime.NewScheme()
-	_ = agentsv1alpha1.AddToScheme(scheme)
-
-	fakeClient := fake.NewClientBuilder().
-		WithScheme(scheme).
-		Build()
-
-	fakeRecorder := record.NewFakeRecorder(10)
-	control := NewCommonControl(fakeClient, fakeRecorder, nil, nil).(*commonControl)
-
-	ctx := context.Background()
-	shutdownTime := metav1.Now()
-
-	claim := &agentsv1alpha1.SandboxClaim{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-claim",
-			Namespace: "default",
-			UID:       "test-uid",
-		},
-		Spec: agentsv1alpha1.SandboxClaimSpec{
-			TemplateName: "test-template",
-			Labels: map[string]string{
-				"custom-label": "value1",
-			},
-			Annotations: map[string]string{
-				"custom-annotation": "value2",
-			},
-			ShutdownTime: &shutdownTime,
-		},
-	}
-
-	sandboxSet := &agentsv1alpha1.SandboxSet{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-template",
-			Namespace: "default",
-		},
-	}
-
-	opts, err := control.buildClaimOptions(ctx, claim, sandboxSet)
-	if err != nil {
-		t.Fatalf("buildClaimOptions() error = %v", err)
-	}
-
-	if opts.Modifier == nil {
-		t.Fatal("Modifier should not be nil")
-	}
-
-	// Create a mock sandbox to test the modifier
-	mockSandbox := &sandboxcr.Sandbox{
-		Sandbox: &agentsv1alpha1.Sandbox{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "test-sandbox",
-				Namespace: "default",
-				Labels: map[string]string{
-					"existing-label": "existing-value",
-				},
-			},
-		},
-	}
-
-	// Apply the modifier
-	opts.Modifier(mockSandbox)
-
-	// Verify labels were set correctly
-	if mockSandbox.Labels[agentsv1alpha1.LabelSandboxClaimName] != "test-claim" {
-		t.Errorf("Expected LabelSandboxClaimName = %v, got %v",
-			"test-claim", mockSandbox.Labels[agentsv1alpha1.LabelSandboxClaimName])
-	}
-
-	if mockSandbox.Labels["custom-label"] != "value1" {
-		t.Errorf("Expected custom-label = %v, got %v",
-			"value1", mockSandbox.Labels["custom-label"])
-	}
-
-	if mockSandbox.Labels["existing-label"] != "existing-value" {
-		t.Errorf("Expected existing-label to be preserved = %v, got %v",
-			"existing-value", mockSandbox.Labels["existing-label"])
-	}
-
-	// Verify annotations were set correctly
-	if mockSandbox.Annotations["custom-annotation"] != "value2" {
-		t.Errorf("Expected custom-annotation = %v, got %v",
-			"value2", mockSandbox.Annotations["custom-annotation"])
 	}
 }
 
@@ -1205,9 +1106,7 @@ func TestBuildClaimOptions_CSIMount_ConfigValidation(t *testing.T) {
 
 	// Create a minimal cache with PV support
 	cache, err := sandboxcr.NewCache(sandboxClient, config.SandboxManagerOptions{})
-	if err != nil {
-		t.Fatalf("Failed to create cache: %v", err)
-	}
+	require.NoError(t, err, "Failed to create cache")
 
 	// Start cache
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1261,13 +1160,9 @@ func TestBuildClaimOptions_CSIMount_ConfigValidation(t *testing.T) {
 			expectError: false,
 			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
 				// CSIMount should be nil when no configs specified
-				if opts.CSIMount != nil {
-					t.Error("CSIMount should be nil when no configs specified")
-				}
-				// InitRuntime should not be auto-created without CSI mount
-				if opts.InitRuntime != nil {
-					t.Error("InitRuntime should be nil when CSI mount is not specified")
-				}
+				assert.Nil(t, opts.CSIMount, "CSIMount should be nil when no configs specified")
+				// InitRuntime should be set by default (SkipInitRuntime defaults to false)
+				assert.NotNil(t, opts.InitRuntime, "InitRuntime should be set by default when SkipInitRuntime is false")
 			},
 		},
 		{
@@ -1292,9 +1187,7 @@ func TestBuildClaimOptions_CSIMount_ConfigValidation(t *testing.T) {
 			expectError: false,
 			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
 				// CSIMount should be nil when configs slice is empty
-				if opts.CSIMount != nil {
-					t.Error("CSIMount should be nil when configs slice is empty")
-				}
+				assert.Nil(t, opts.CSIMount, "CSIMount should be nil when configs slice is empty")
 			},
 		},
 		{
@@ -1319,9 +1212,7 @@ func TestBuildClaimOptions_CSIMount_ConfigValidation(t *testing.T) {
 			expectError: false,
 			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
 				// CSIMount should be nil when DynamicVolumesMount is nil
-				if opts.CSIMount != nil {
-					t.Error("CSIMount should be nil when DynamicVolumesMount is nil")
-				}
+				assert.Nil(t, opts.CSIMount, "CSIMount should be nil when DynamicVolumesMount is nil")
 			},
 		},
 		{
@@ -1348,15 +1239,12 @@ func TestBuildClaimOptions_CSIMount_ConfigValidation(t *testing.T) {
 			expectError: false,
 			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
 				// InplaceUpdate should be set
-				if opts.InplaceUpdate == nil {
-					t.Error("InplaceUpdate should not be nil")
-				} else if opts.InplaceUpdate.Image != "nginx:latest" {
-					t.Errorf("Expected InplaceUpdate.Image=nginx:latest, got %v", opts.InplaceUpdate.Image)
+				assert.NotNil(t, opts.InplaceUpdate, "InplaceUpdate should not be nil")
+				if opts.InplaceUpdate != nil {
+					assert.Equal(t, "nginx:latest", opts.InplaceUpdate.Image, "InplaceUpdate.Image mismatch")
 				}
 				// CSIMount should still be nil
-				if opts.CSIMount != nil {
-					t.Error("CSIMount should be nil when no CSI configs specified")
-				}
+				assert.Nil(t, opts.CSIMount, "CSIMount should be nil when no CSI configs specified")
 			},
 		},
 		{
@@ -1381,9 +1269,7 @@ func TestBuildClaimOptions_CSIMount_ConfigValidation(t *testing.T) {
 			expectError: false,
 			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
 				// CSIMount should be nil
-				if opts.CSIMount != nil {
-					t.Error("CSIMount should be nil when no CSI configs specified")
-				}
+				assert.Nil(t, opts.CSIMount, "CSIMount should be nil when no CSI configs specified")
 			},
 		},
 		{
@@ -1421,16 +1307,10 @@ func TestBuildClaimOptions_CSIMount_ConfigValidation(t *testing.T) {
 			expectError: false,
 			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
 				// All other fields should be processed normally
-				if opts.InplaceUpdate == nil {
-					t.Error("InplaceUpdate should not be nil")
-				}
-				if opts.WaitReadyTimeout != 5*time.Minute {
-					t.Errorf("Expected WaitReadyTimeout=5m, got %v", opts.WaitReadyTimeout)
-				}
+				assert.NotNil(t, opts.InplaceUpdate, "InplaceUpdate should not be nil")
+				assert.Equal(t, 5*time.Minute, opts.WaitReadyTimeout, "WaitReadyTimeout mismatch")
 				// CSIMount should still be nil
-				if opts.CSIMount != nil {
-					t.Error("CSIMount should be nil when no CSI configs specified")
-				}
+				assert.Nil(t, opts.CSIMount, "CSIMount should be nil when no CSI configs specified")
 			},
 		},
 		{
@@ -1463,12 +1343,8 @@ func TestBuildClaimOptions_CSIMount_ConfigValidation(t *testing.T) {
 			expectedMountCount: 1,
 			expectedDriver:     "nasplugin.csi.alibabacloud.com",
 			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
-				if opts.CSIMount == nil {
-					t.Fatal("CSIMount should not be nil")
-				}
-				if len(opts.CSIMount.MountOptionList) != 1 {
-					t.Errorf("Expected 1 mount config, got %d", len(opts.CSIMount.MountOptionList))
-				}
+				require.NotNil(t, opts.CSIMount, "CSIMount should not be nil")
+				assert.Len(t, opts.CSIMount.MountOptionList, 1, "Expected 1 mount config")
 			},
 		},
 		{
@@ -1508,12 +1384,8 @@ func TestBuildClaimOptions_CSIMount_ConfigValidation(t *testing.T) {
 			expectError:        false,
 			expectedMountCount: 3,
 			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
-				if opts.CSIMount == nil {
-					t.Fatal("CSIMount should not be nil")
-				}
-				if len(opts.CSIMount.MountOptionList) != 3 {
-					t.Errorf("Expected 3 mount configs, got %d", len(opts.CSIMount.MountOptionList))
-				}
+				require.NotNil(t, opts.CSIMount, "CSIMount should not be nil")
+				assert.Len(t, opts.CSIMount.MountOptionList, 3, "Expected 3 mount configs")
 			},
 		},
 		{
@@ -1548,10 +1420,9 @@ func TestBuildClaimOptions_CSIMount_ConfigValidation(t *testing.T) {
 			expectError:        false,
 			expectedMountCount: 1,
 			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
-				if opts.InitRuntime == nil {
-					t.Error("InitRuntime should not be nil")
-				} else if len(opts.InitRuntime.EnvVars) != 3 {
-					t.Errorf("Expected 3 env vars, got %d", len(opts.InitRuntime.EnvVars))
+				assert.NotNil(t, opts.InitRuntime, "InitRuntime should not be nil")
+				if opts.InitRuntime != nil {
+					assert.Len(t, opts.InitRuntime.EnvVars, 3, "Expected 3 env vars")
 				}
 			},
 		},
@@ -1563,35 +1434,24 @@ func TestBuildClaimOptions_CSIMount_ConfigValidation(t *testing.T) {
 
 			// Check error expectations
 			if tt.expectError {
-				if err == nil {
-					t.Errorf("Expected error containing '%s', but got no error", tt.errorContains)
-					return
-				}
-				if tt.errorContains != "" && !strings.Contains(err.Error(), tt.errorContains) {
-					t.Errorf("Expected error to contain '%s', but got: %v", tt.errorContains, err)
+				require.Error(t, err, "Expected error but got nil")
+				if tt.errorContains != "" {
+					assert.Contains(t, err.Error(), tt.errorContains, "Error message mismatch")
 				}
 				return
 			}
 
 			// For non-error cases, verify no error occurred
-			if err != nil {
-				t.Errorf("Unexpected error: %v", err)
-				return
-			}
+			assert.NoError(t, err, "Unexpected error")
 
 			// Verify mount count
 			if tt.expectedMountCount > 0 {
-				if opts.CSIMount == nil {
-					t.Error("CSIMount should not be nil")
-				} else if len(opts.CSIMount.MountOptionList) != tt.expectedMountCount {
-					t.Errorf("Expected %d mount configs, got %d", tt.expectedMountCount, len(opts.CSIMount.MountOptionList))
-				}
+				require.NotNil(t, opts.CSIMount, "CSIMount should not be nil")
+				assert.Len(t, opts.CSIMount.MountOptionList, tt.expectedMountCount, "Mount config count mismatch")
 
 				// Verify driver if specified
 				if tt.expectedDriver != "" && len(opts.CSIMount.MountOptionList) > 0 {
-					if opts.CSIMount.MountOptionList[0].Driver != tt.expectedDriver {
-						t.Errorf("Expected driver %s, got %s", tt.expectedDriver, opts.CSIMount.MountOptionList[0].Driver)
-					}
+					assert.Equal(t, tt.expectedDriver, opts.CSIMount.MountOptionList[0].Driver, "Driver mismatch")
 				}
 			}
 
@@ -1675,9 +1535,7 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 
 	// Create a minimal cache with PV support
 	cache, err := sandboxcr.NewCache(sandboxClient, config.SandboxManagerOptions{})
-	if err != nil {
-		t.Fatalf("Failed to create cache: %v", err)
-	}
+	require.NoError(t, err, "Failed to create cache")
 
 	// Start cache
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1737,12 +1595,8 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 			expectedMountCount: 1,
 			expectedDriver:     "nasplugin.csi.alibabacloud.com",
 			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
-				if opts.CSIMount == nil {
-					t.Fatal("CSIMount should not be nil")
-				}
-				if len(opts.CSIMount.MountOptionList) != 1 {
-					t.Errorf("Expected 1 mount config, got %d", len(opts.CSIMount.MountOptionList))
-				}
+				require.NotNil(t, opts.CSIMount, "CSIMount should not be nil")
+				assert.Len(t, opts.CSIMount.MountOptionList, 1, "Expected 1 mount config")
 			},
 		},
 		{
@@ -1782,12 +1636,8 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 			expectError:        false,
 			expectedMountCount: 3,
 			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
-				if opts.CSIMount == nil {
-					t.Fatal("CSIMount should not be nil")
-				}
-				if len(opts.CSIMount.MountOptionList) != 3 {
-					t.Errorf("Expected 3 mount configs, got %d", len(opts.CSIMount.MountOptionList))
-				}
+				require.NotNil(t, opts.CSIMount, "CSIMount should not be nil")
+				assert.Len(t, opts.CSIMount.MountOptionList, 3, "Expected 3 mount configs")
 			},
 		},
 		{
@@ -1822,10 +1672,9 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 			expectError:        false,
 			expectedMountCount: 1,
 			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
-				if opts.InitRuntime == nil {
-					t.Error("InitRuntime should not be nil")
-				} else if len(opts.InitRuntime.EnvVars) != 3 {
-					t.Errorf("Expected 3 env vars, got %d", len(opts.InitRuntime.EnvVars))
+				assert.NotNil(t, opts.InitRuntime, "InitRuntime should not be nil")
+				if opts.InitRuntime != nil {
+					assert.Len(t, opts.InitRuntime.EnvVars, 3, "Expected 3 env vars")
 				}
 			},
 		},
@@ -1860,18 +1709,11 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 			expectError:        false,
 			expectedMountCount: 1,
 			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
-				if opts.CSIMount == nil {
-					t.Fatal("CSIMount should not be nil")
-				}
-				if len(opts.CSIMount.MountOptionList) != 1 {
-					t.Errorf("Expected 1 mount config, got %d", len(opts.CSIMount.MountOptionList))
-				}
-				if opts.InitRuntime == nil {
-					t.Error("InitRuntime should be auto-created when CSI mount is specified")
-				} else {
-					if opts.InitRuntime.AccessToken == "" {
-						t.Error("AccessToken should be generated")
-					}
+				require.NotNil(t, opts.CSIMount, "CSIMount should not be nil")
+				assert.Len(t, opts.CSIMount.MountOptionList, 1, "Expected 1 mount config")
+				assert.NotNil(t, opts.InitRuntime, "InitRuntime should be auto-created when CSI mount is specified")
+				if opts.InitRuntime != nil {
+					assert.NotEmpty(t, opts.InitRuntime.AccessToken, "AccessToken should be generated")
 				}
 			},
 		},
@@ -1906,12 +1748,8 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 			expectError:        false,
 			expectedMountCount: 1,
 			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
-				if opts.CSIMount == nil {
-					t.Fatal("CSIMount should not be nil")
-				}
-				if opts.InitRuntime == nil {
-					t.Error("InitRuntime should be auto-created")
-				}
+				require.NotNil(t, opts.CSIMount, "CSIMount should not be nil")
+				assert.NotNil(t, opts.InitRuntime, "InitRuntime should be auto-created")
 			},
 		},
 		{
@@ -1944,17 +1782,12 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 			expectError:        false,
 			expectedMountCount: 1,
 			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
-				if opts.InitRuntime == nil {
-					t.Error("InitRuntime should not be nil")
-				} else {
+				assert.NotNil(t, opts.InitRuntime, "InitRuntime should not be nil")
+				if opts.InitRuntime != nil {
 					// Verify original env vars are preserved
-					if opts.InitRuntime.EnvVars["ORIGINAL_VAR"] != "original_value" {
-						t.Errorf("Expected ORIGINAL_VAR to be preserved, got %v", opts.InitRuntime.EnvVars)
-					}
+					assert.Equal(t, "original_value", opts.InitRuntime.EnvVars["ORIGINAL_VAR"], "ORIGINAL_VAR should be preserved")
 					// AccessToken should be generated
-					if opts.InitRuntime.AccessToken == "" {
-						t.Error("AccessToken should be generated")
-					}
+					assert.NotEmpty(t, opts.InitRuntime.AccessToken, "AccessToken should be generated")
 				}
 			},
 		},
@@ -1995,37 +1828,19 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 			expectError:        false,
 			expectedMountCount: 2,
 			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
-				if opts.CSIMount == nil {
-					t.Fatal("CSIMount should not be nil")
-				}
-				if opts.CSIMount.MountOptionListRaw == "" {
-					t.Error("MountOptionListRaw should not be empty")
-				}
+				require.NotNil(t, opts.CSIMount, "CSIMount should not be nil")
+				assert.NotEmpty(t, opts.CSIMount.MountOptionListRaw, "MountOptionListRaw should not be empty")
 				// Verify it's valid JSON
 				var decoded []agentsv1alpha1.CSIMountConfig
-				if err := json.Unmarshal([]byte(opts.CSIMount.MountOptionListRaw), &decoded); err != nil {
-					t.Errorf("MountOptionListRaw should be valid JSON: %v", err)
-				}
-				if len(decoded) != 2 {
-					t.Errorf("Expected 2 decoded configs, got %d", len(decoded))
-				}
+				assert.NoError(t, json.Unmarshal([]byte(opts.CSIMount.MountOptionListRaw), &decoded), "MountOptionListRaw should be valid JSON")
+				assert.Len(t, decoded, 2, "Expected 2 decoded configs")
 				// Verify first config
-				if decoded[0].PvName != "test-pv-nas" {
-					t.Errorf("Expected first PvName=test-pv-nas, got %s", decoded[0].PvName)
-				}
-				if decoded[0].ReadOnly != false {
-					t.Errorf("Expected first ReadOnly=false, got %v", decoded[0].ReadOnly)
-				}
+				assert.Equal(t, "test-pv-nas", decoded[0].PvName, "First PvName mismatch")
+				assert.False(t, decoded[0].ReadOnly, "First ReadOnly should be false")
 				// Verify second config
-				if decoded[1].PvName != "test-pv-nas" {
-					t.Errorf("Expected second PvName=test-pv-nas, got %s", decoded[1].PvName)
-				}
-				if decoded[1].ReadOnly != true {
-					t.Errorf("Expected second ReadOnly=true, got %v", decoded[1].ReadOnly)
-				}
-				if decoded[1].SubPath != "subdir" {
-					t.Errorf("Expected second SubPath=subdir, got %s", decoded[1].SubPath)
-				}
+				assert.Equal(t, "test-pv-nas", decoded[1].PvName, "Second PvName mismatch")
+				assert.True(t, decoded[1].ReadOnly, "Second ReadOnly should be true")
+				assert.Equal(t, "subdir", decoded[1].SubPath, "Second SubPath mismatch")
 			},
 		},
 		{
@@ -2087,25 +1902,15 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 			expectedMountCount: 1,
 			expectedDriver:     "nasplugin.csi.alibabacloud.com",
 			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
-				if opts.InitRuntime == nil {
-					t.Error("InitRuntime should be auto-created when CSI mount is specified")
-				} else {
-					if opts.InitRuntime.AccessToken == "" {
-						t.Error("AccessToken should be generated")
-					}
-					if opts.InitRuntime.EnvVars == nil || len(opts.InitRuntime.EnvVars) == 0 {
-						t.Error("EnvVars should not be nil or empty")
-					}
+				assert.NotNil(t, opts.InitRuntime, "InitRuntime should be auto-created when CSI mount is specified")
+				if opts.InitRuntime != nil {
+					assert.NotEmpty(t, opts.InitRuntime.AccessToken, "AccessToken should be generated")
+					assert.NotNil(t, opts.InitRuntime.EnvVars, "EnvVars should not be nil")
+					assert.NotEmpty(t, opts.InitRuntime.EnvVars, "EnvVars should not be empty")
 				}
-				if opts.CSIMount == nil {
-					t.Fatal("CSIMount should not be nil")
-				}
-				if len(opts.CSIMount.MountOptionList) != 1 {
-					t.Errorf("Expected 1 mount config, got %d", len(opts.CSIMount.MountOptionList))
-				}
-				if opts.CSIMount.MountOptionListRaw == "" {
-					t.Error("MountOptionListRaw should not be empty")
-				}
+				require.NotNil(t, opts.CSIMount, "CSIMount should not be nil")
+				assert.Len(t, opts.CSIMount.MountOptionList, 1, "Expected 1 mount config")
+				assert.NotEmpty(t, opts.CSIMount.MountOptionListRaw, "MountOptionListRaw should not be empty")
 			},
 		},
 		{
@@ -2140,23 +1945,15 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 			expectError:        false,
 			expectedMountCount: 2,
 			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
-				if opts.CSIMount == nil {
-					t.Fatal("CSIMount should not be nil")
-				}
-				if len(opts.CSIMount.MountOptionList) != 2 {
-					t.Errorf("Expected 2 mount configs, got %d", len(opts.CSIMount.MountOptionList))
-				}
+				require.NotNil(t, opts.CSIMount, "CSIMount should not be nil")
+				assert.Len(t, opts.CSIMount.MountOptionList, 2, "Expected 2 mount configs")
 				// Verify all drivers are present
 				drivers := make(map[string]bool)
 				for _, c := range opts.CSIMount.MountOptionList {
 					drivers[c.Driver] = true
 				}
-				if !drivers["nasplugin.csi.alibabacloud.com"] {
-					t.Error("Expected nasplugin.csi.alibabacloud.com driver to be present")
-				}
-				if !drivers["ossplugin.csi.alibabacloud.com"] {
-					t.Error("Expected ossplugin.csi.alibabacloud.com driver to be present")
-				}
+				assert.True(t, drivers["nasplugin.csi.alibabacloud.com"], "Expected nasplugin.csi.alibabacloud.com driver to be present")
+				assert.True(t, drivers["ossplugin.csi.alibabacloud.com"], "Expected ossplugin.csi.alibabacloud.com driver to be present")
 			},
 		},
 		{
@@ -2186,6 +1983,34 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 			expectError:   true,
 			errorContains: "failed to generate csi mount options config",
 		},
+		{
+			name: "SkipInitRuntime=true with CSI mount should fail validation",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim-skip-csi",
+					Namespace: "default",
+					UID:       "test-uid-skip-csi",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName:    "test-template",
+					SkipInitRuntime: true,
+					DynamicVolumesMount: []agentsv1alpha1.CSIMountConfig{
+						{
+							PvName:    "test-pv-nas",
+							MountPath: "/data",
+						},
+					},
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template",
+					Namespace: "default",
+				},
+			},
+			expectError:   true,
+			errorContains: "init runtime is required when csi mount is specified",
+		},
 	}
 
 	for _, tt := range tests {
@@ -2194,35 +2019,24 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 
 			// Check error expectations
 			if tt.expectError {
-				if err == nil {
-					t.Errorf("Expected error containing '%s', but got no error", tt.errorContains)
-					return
-				}
-				if tt.errorContains != "" && !strings.Contains(err.Error(), tt.errorContains) {
-					t.Errorf("Expected error to contain '%s', but got: %v", tt.errorContains, err)
+				require.Error(t, err, "Expected error but got nil")
+				if tt.errorContains != "" {
+					assert.Contains(t, err.Error(), tt.errorContains, "Error message mismatch")
 				}
 				return
 			}
 
 			// For non-error cases, verify no error occurred
-			if err != nil {
-				t.Errorf("Unexpected error: %v", err)
-				return
-			}
+			assert.NoError(t, err, "Unexpected error")
 
 			// Verify mount count
 			if tt.expectedMountCount > 0 {
-				if opts.CSIMount == nil {
-					t.Error("CSIMount should not be nil")
-				} else if len(opts.CSIMount.MountOptionList) != tt.expectedMountCount {
-					t.Errorf("Expected %d mount configs, got %d", tt.expectedMountCount, len(opts.CSIMount.MountOptionList))
-				}
+				require.NotNil(t, opts.CSIMount, "CSIMount should not be nil")
+				assert.Len(t, opts.CSIMount.MountOptionList, tt.expectedMountCount, "Mount config count mismatch")
 
 				// Verify driver if specified
 				if tt.expectedDriver != "" && len(opts.CSIMount.MountOptionList) > 0 {
-					if opts.CSIMount.MountOptionList[0].Driver != tt.expectedDriver {
-						t.Errorf("Expected driver %s, got %s", tt.expectedDriver, opts.CSIMount.MountOptionList[0].Driver)
-					}
+					assert.Equal(t, tt.expectedDriver, opts.CSIMount.MountOptionList[0].Driver, "Driver mismatch")
 				}
 			}
 

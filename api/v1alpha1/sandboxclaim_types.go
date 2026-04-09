@@ -97,6 +97,11 @@ type SandboxClaimSpec struct {
 	// +optional
 	// +kubebuilder:default="30s"
 	WaitReadyTimeout *metav1.Duration `json:"waitReadyTimeout,omitempty"`
+
+	// SkipInitRuntime allows to skip init runtime for sandbox while claiming
+	// +optional
+	// +kubebuilder:default=false
+	SkipInitRuntime bool `json:"skipInitRuntime,omitempty"`
 }
 
 type SandboxClaimInplaceUpdateOptions struct {

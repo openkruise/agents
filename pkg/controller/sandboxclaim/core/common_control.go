@@ -282,7 +282,13 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 		opts.WaitReadyTimeout = claim.Spec.WaitReadyTimeout.Duration
 	}
 
-	// todo support other options (like envvars, inplace update...)
+	if !claim.Spec.SkipInitRuntime {
+		opts.InitRuntime = &config.InitRuntimeOptions{
+			EnvVars:     claim.Spec.EnvVars,
+			AccessToken: uuid.NewString(),
+		}
+	}
+
 	if len(claim.Spec.DynamicVolumesMount) > 0 {
 		csiMountOptions := make([]config.MountConfig, 0, len(claim.Spec.DynamicVolumesMount))
 		csiClient := csiutils.NewCSIMountHandler(c.sandboxClient, c.cache, c.storageRegistry, utils.DefaultSandboxDeployNamespace)
@@ -309,14 +315,6 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 			return opts, fmt.Errorf("failed to marshal csi mount config, err: %v", err)
 		}
 		opts.CSIMount.MountOptionListRaw = string(csiMountOptionsRaw)
-
-		// Init runtime is required when CSI mount is specified
-		if opts.InitRuntime == nil {
-			opts.InitRuntime = &config.InitRuntimeOptions{
-				EnvVars:     claim.Spec.EnvVars,
-				AccessToken: uuid.NewString(),
-			}
-		}
 	}
 
 	if len(claim.Spec.Runtimes) > 0 {
