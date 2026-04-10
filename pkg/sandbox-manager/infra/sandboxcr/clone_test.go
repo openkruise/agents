@@ -1023,6 +1023,80 @@ func TestCreateCheckPoint(t *testing.T) {
 			},
 		},
 		{
+			name: "checkpoint with multiple runtimes",
+			sandbox: func() *v1alpha1.Sandbox {
+				sbx := newTestSandbox("test-sandbox-runtimes-multi")
+				sbx.Spec.Runtimes = []v1alpha1.RuntimeConfig{
+					{Name: v1alpha1.RuntimeConfigForInjectCsiMount},
+					{Name: v1alpha1.RuntimeConfigForInjectAgentRuntime},
+				}
+				return sbx
+			}(),
+			cpStatus: v1alpha1.CheckpointStatus{
+				Phase:        v1alpha1.CheckpointSucceeded,
+				CheckpointId: "cp-id-runtimes-multi",
+			},
+			tmplOverride: tmplOverride{Name: "tmpl-runtimes-multi", UID: "uid-runtimes-multi"},
+			opts: infra.CreateCheckpointOptions{
+				WaitSuccessTimeout: 5 * time.Second,
+			},
+			postCheck: func(t *testing.T, id string, clientSet *clients.ClientSet) {
+				assert.Equal(t, "cp-id-runtimes-multi", id)
+				tmpl, err := clientSet.ApiV1alpha1().SandboxTemplates("default").Get(context.Background(), "tmpl-runtimes-multi", metav1.GetOptions{})
+				require.NoError(t, err)
+				require.Len(t, tmpl.Spec.Runtimes, 2, "template should have 2 runtimes")
+				assert.Equal(t, v1alpha1.RuntimeConfigForInjectCsiMount, tmpl.Spec.Runtimes[0].Name)
+				assert.Equal(t, v1alpha1.RuntimeConfigForInjectAgentRuntime, tmpl.Spec.Runtimes[1].Name)
+			},
+		},
+		{
+			name: "checkpoint with single runtime",
+			sandbox: func() *v1alpha1.Sandbox {
+				sbx := newTestSandbox("test-sandbox-runtimes-single")
+				sbx.Spec.Runtimes = []v1alpha1.RuntimeConfig{
+					{Name: v1alpha1.RuntimeConfigForInjectAgentRuntime},
+				}
+				return sbx
+			}(),
+			cpStatus: v1alpha1.CheckpointStatus{
+				Phase:        v1alpha1.CheckpointSucceeded,
+				CheckpointId: "cp-id-runtimes-single",
+			},
+			tmplOverride: tmplOverride{Name: "tmpl-runtimes-single", UID: "uid-runtimes-single"},
+			opts: infra.CreateCheckpointOptions{
+				WaitSuccessTimeout: 5 * time.Second,
+			},
+			postCheck: func(t *testing.T, id string, clientSet *clients.ClientSet) {
+				assert.Equal(t, "cp-id-runtimes-single", id)
+				tmpl, err := clientSet.ApiV1alpha1().SandboxTemplates("default").Get(context.Background(), "tmpl-runtimes-single", metav1.GetOptions{})
+				require.NoError(t, err)
+				require.Len(t, tmpl.Spec.Runtimes, 1, "template should have 1 runtime")
+				assert.Equal(t, v1alpha1.RuntimeConfigForInjectAgentRuntime, tmpl.Spec.Runtimes[0].Name)
+			},
+		},
+		{
+			name: "checkpoint with no runtimes",
+			sandbox: func() *v1alpha1.Sandbox {
+				sbx := newTestSandbox("test-sandbox-runtimes-none")
+				// No Runtimes set
+				return sbx
+			}(),
+			cpStatus: v1alpha1.CheckpointStatus{
+				Phase:        v1alpha1.CheckpointSucceeded,
+				CheckpointId: "cp-id-runtimes-none",
+			},
+			tmplOverride: tmplOverride{Name: "tmpl-runtimes-none", UID: "uid-runtimes-none"},
+			opts: infra.CreateCheckpointOptions{
+				WaitSuccessTimeout: 5 * time.Second,
+			},
+			postCheck: func(t *testing.T, id string, clientSet *clients.ClientSet) {
+				assert.Equal(t, "cp-id-runtimes-none", id)
+				tmpl, err := clientSet.ApiV1alpha1().SandboxTemplates("default").Get(context.Background(), "tmpl-runtimes-none", metav1.GetOptions{})
+				require.NoError(t, err)
+				assert.Nil(t, tmpl.Spec.Runtimes, "template Runtimes should be nil when sandbox has no Runtimes")
+			},
+		},
+		{
 			name: "checkpoint with sandbox PersistentContents - inherit from template",
 			sandbox: func() *v1alpha1.Sandbox {
 				sbx := newTestSandbox("test-sandbox-inherit")

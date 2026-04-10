@@ -276,6 +276,7 @@ func CreateCheckpoint(ctx context.Context, sbx *v1alpha1.Sandbox, client clients
 			PersistentContents:   sbx.Spec.PersistentContents,
 			Template:             sbx.Spec.Template,
 			VolumeClaimTemplates: sbx.Spec.VolumeClaimTemplates,
+			Runtimes:             sbx.Spec.Runtimes,
 		},
 	}
 	tmpl, err := DefaultCreateSandboxTemplate(ctx, client, tmpl)
