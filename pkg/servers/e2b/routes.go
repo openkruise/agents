@@ -12,6 +12,7 @@ import (
 	"github.com/openkruise/agents/pkg/servers/web"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"k8s.io/klog/v2"
+	"sigs.k8s.io/controller-runtime/pkg/metrics"
 )
 
 func (sc *Controller) registerRoutes() {
@@ -24,7 +25,7 @@ func (sc *Controller) registerRoutes() {
 	})
 
 	// Prometheus metrics endpoint for exporting metrics
-	sc.mux.Handle("GET /metrics", promhttp.Handler())
+	sc.mux.Handle("GET /metrics", promhttp.HandlerFor(metrics.Registry, promhttp.HandlerOpts{}))
 
 	// Sandbox management endpoints
 	RegisterE2BRoute(sc.mux, http.MethodPost, "/sandboxes", sc.CreateSandbox, sc.CheckApiKey)
