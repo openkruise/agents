@@ -27,70 +27,70 @@ import (
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/openkruise/agents/pkg/utils/runtime"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
+	"github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/proxy"
-	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
+	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
+	"github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/utils"
 	csimountutils "github.com/openkruise/agents/pkg/utils/csiutils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
-
-	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	"github.com/openkruise/agents/pkg/utils/runtime"
 	sandboxManagerUtils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
+	"github.com/openkruise/agents/pkg/utils/sandbox-manager/expectationutils"
 	"github.com/openkruise/agents/pkg/utils/sandbox-manager/proxyutils"
 	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
 )
 
-type UpdateFunc func(ctx context.Context, sbx *agentsv1alpha1.Sandbox, opts metav1.UpdateOptions) (*agentsv1alpha1.Sandbox, error)
 type ModifierFunc func(sbx *agentsv1alpha1.Sandbox)
 
 type Sandbox struct {
 	*agentsv1alpha1.Sandbox
-	Cache           *Cache
-	Client          *clients.ClientSet
+	Cache           cache.Provider
 	storageRegistry storages.VolumeMountProviderRegistry
 }
 
 var DefaultDeleteSandbox = deleteSandbox
 
-func deleteSandbox(ctx context.Context, sbx *agentsv1alpha1.Sandbox, client clients.SandboxClient) error {
-	return client.ApiV1alpha1().Sandboxes(sbx.Namespace).Delete(ctx, sbx.Name, metav1.DeleteOptions{})
+func deleteSandbox(ctx context.Context, sbx *agentsv1alpha1.Sandbox, client client.Client) error {
+	return client.Delete(ctx, sbx)
 }
 
 func (s *Sandbox) GetTemplate() string {
-	return GetTemplateFromSandbox(s.Sandbox)
+	return utils.GetTemplateFromSandbox(s.Sandbox)
 }
 
 func (s *Sandbox) InplaceRefresh(ctx context.Context, deepcopy bool) error {
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(s.Sandbox)).V(consts.DebugLogLevel)
 	fetchFromApiServer := false
-	sbx, err := s.Cache.GetClaimedSandbox(stateutils.GetSandboxID(s.Sandbox))
+	objectKey := client.ObjectKeyFromObject(s.Sandbox)
+	newSbx := &agentsv1alpha1.Sandbox{}
+	err := s.Cache.GetClient().Get(ctx, objectKey, newSbx)
 	if err != nil {
 		log.Info("failed to get claimed sandbox from cache, fetch from api-server", "reason", err.Error())
 		fetchFromApiServer = true
-	} else if !sandboxManagerUtils.ResourceVersionExpectationSatisfied(sbx) {
+	} else if !expectationutils.ResourceVersionExpectationSatisfied(newSbx) {
 		log.Info("sandbox cache is out-dated, fetch from api-server")
 		fetchFromApiServer = true
 	}
 	if fetchFromApiServer {
-		sbx, err = s.Client.ApiV1alpha1().Sandboxes(s.Sandbox.GetNamespace()).Get(ctx, s.Sandbox.GetName(), metav1.GetOptions{})
-		if err != nil {
+		if err = s.Cache.GetAPIReader().Get(ctx, objectKey, newSbx); err != nil {
 			return err
 		}
 	}
-	if expectations.IsResourceVersionReallyNewer(s.Sandbox.GetResourceVersion(), sbx.GetResourceVersion()) {
-		s.Sandbox = sbx
-		if fetchFromApiServer {
-			deepcopy = false // no need to deepcopy again
+	if expectations.IsResourceVersionReallyNewer(s.Sandbox.GetResourceVersion(), newSbx.GetResourceVersion()) {
+		if deepcopy {
+			s.Sandbox = newSbx.DeepCopy()
+		} else {
+			s.Sandbox = newSbx
 		}
-	}
-	if deepcopy {
-		s.Sandbox = s.Sandbox.DeepCopy()
 	}
 	return nil
 }
@@ -106,23 +106,22 @@ func (s *Sandbox) refreshFunc() runtime.RefreshFunc {
 	}
 }
 
-func (s *Sandbox) retryUpdate(ctx context.Context, updateFunc UpdateFunc, modifier ModifierFunc) error {
+func (s *Sandbox) retryUpdate(ctx context.Context, modifier ModifierFunc) error {
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(s.Sandbox))
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		// get the latest sandbox from cache
-		sbx, err := s.Cache.GetClaimedSandbox(stateutils.GetSandboxID(s.Sandbox))
+		sbx, err := s.Cache.GetClaimedSandbox(ctx, stateutils.GetSandboxID(s.Sandbox))
 		if err != nil {
 			return err
 		}
 
 		copied := sbx.DeepCopy()
 		modifier(copied)
-		updated, err := updateFunc(ctx, copied, metav1.UpdateOptions{})
-		if err != nil {
+		if err = s.Cache.GetClient().Update(ctx, copied); err != nil {
 			return err
 		}
-		s.Sandbox = updated
-		sandboxManagerUtils.ResourceVersionExpectationExpect(updated)
+		s.Sandbox = copied
+		expectationutils.ResourceVersionExpectationExpect(copied)
 		return nil
 	})
 	if err != nil {
@@ -137,7 +136,7 @@ func (s *Sandbox) Kill(ctx context.Context) error {
 	if s.GetDeletionTimestamp() != nil {
 		return nil
 	}
-	return DefaultDeleteSandbox(ctx, s.Sandbox, s.Client.SandboxClient)
+	return DefaultDeleteSandbox(ctx, s.Sandbox, s.Cache.GetClient())
 }
 
 func (s *Sandbox) GetSandboxID() string {
@@ -193,7 +192,7 @@ func (s *Sandbox) GetImage() string {
 }
 
 func (s *Sandbox) SaveTimeout(ctx context.Context, opts infra.TimeoutOptions) error {
-	return s.retryUpdate(ctx, s.Client.ApiV1alpha1().Sandboxes(s.GetNamespace()).Update, func(sbx *agentsv1alpha1.Sandbox) {
+	return s.retryUpdate(ctx, func(sbx *agentsv1alpha1.Sandbox) {
 		setTimeout(sbx, opts)
 	})
 }
@@ -235,7 +234,7 @@ func (s *Sandbox) Pause(ctx context.Context, opts infra.PauseOptions) error {
 		log.Error(err, "sandbox is not running", "state", state, "reason", reason)
 		return err
 	}
-	err := s.retryUpdate(ctx, s.Client.ApiV1alpha1().Sandboxes(s.GetNamespace()).Update, func(sbx *agentsv1alpha1.Sandbox) {
+	err := s.retryUpdate(ctx, func(sbx *agentsv1alpha1.Sandbox) {
 		sbx.Spec.Paused = true
 		if opts.Timeout != nil {
 			setTimeout(sbx, *opts.Timeout)
@@ -245,20 +244,18 @@ func (s *Sandbox) Pause(ctx context.Context, opts infra.PauseOptions) error {
 		log.Error(err, "failed to update sandbox spec.paused")
 		return err
 	}
-	sandboxManagerUtils.ResourceVersionExpectationExpect(s.Sandbox)
+	expectationutils.ResourceVersionExpectationExpect(s.Sandbox)
 	log.Info("waiting sandbox pause")
 	start := time.Now()
-	err = s.Cache.WaitForSandboxSatisfied(ctx, s.Sandbox, WaitActionPause, func(sbx *agentsv1alpha1.Sandbox) (bool, error) {
-		condition := GetSandboxCondition(sbx, agentsv1alpha1.SandboxConditionPaused)
-		return condition.Status == metav1.ConditionTrue, nil
-	}, time.Minute)
-	if err != nil {
+	if err = s.Cache.NewSandboxPauseTask(ctx, s.Sandbox).Wait(time.Minute); err != nil {
 		log.Error(err, "failed to wait sandbox pause")
 		return err
 	}
 	log.Info("sandbox paused", "cost", time.Since(start))
 	return s.InplaceRefresh(ctx, false)
 }
+
+const postResumeOperationTimeout = 30 * time.Second
 
 func (s *Sandbox) Resume(ctx context.Context) error {
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(s.Sandbox))
@@ -277,11 +274,11 @@ func (s *Sandbox) Resume(ctx context.Context) error {
 		return err
 	}
 	cond := GetSandboxCondition(s.Sandbox, agentsv1alpha1.SandboxConditionPaused)
-	if cond.Status == metav1.ConditionFalse {
-		return fmt.Errorf("sandbox is pausing, please wait a moment and try again")
+	if s.Spec.Paused && cond.Status == metav1.ConditionFalse {
+		return errors.NewError(errors.ErrorBadRequest, "sandbox is pausing, please wait a moment and try again")
 	}
 	if s.Sandbox.Spec.Paused {
-		if err := s.retryUpdate(ctx, s.Client.ApiV1alpha1().Sandboxes(s.GetNamespace()).Update, func(sbx *agentsv1alpha1.Sandbox) {
+		if err := s.retryUpdate(ctx, func(sbx *agentsv1alpha1.Sandbox) {
 			sbx.Spec.Paused = false
 			setTimeout(sbx, infra.TimeoutOptions{}) // remove all timeout options
 		}); err != nil {
@@ -289,24 +286,31 @@ func (s *Sandbox) Resume(ctx context.Context) error {
 			return err
 		}
 	}
-	sandboxManagerUtils.ResourceVersionExpectationExpect(s.Sandbox) // expect Resuming
+	expectationutils.ResourceVersionExpectationExpect(s.Sandbox) // expect Resuming
 	log.Info("waiting sandbox resume")
 	start := time.Now()
-	err = s.Cache.WaitForSandboxSatisfied(ctx, s.Sandbox, WaitActionResume, func(sbx *agentsv1alpha1.Sandbox) (bool, error) {
-		state, reason := stateutils.GetSandboxState(sbx)
-		log.V(consts.DebugLogLevel).Info("checking sandbox state",
-			"state", state, "reason", reason, "ip", sbx.Status.PodInfo.PodIP, "resourceVersion", sbx.GetResourceVersion())
-		satisfied := state == agentsv1alpha1.SandboxStateRunning
-		if satisfied {
-			sandboxManagerUtils.ResourceVersionExpectationExpect(sbx) // expect Running
-		}
-		return satisfied, nil
-	}, time.Minute)
-	if err != nil {
+	if err = s.Cache.NewSandboxResumeTask(ctx, s.Sandbox).Wait(time.Minute); err != nil {
 		log.Error(err, "failed to wait sandbox resume")
 		return err
 	}
 	log.Info("sandbox resumed", "cost", time.Since(start))
+
+	// If the original context deadline was consumed by the wait, create a fresh
+	// context for post-resume operations (ReInit, CSI mount, inplace refresh).
+	// This can happen when the wait succeeds via double-check right at the deadline boundary.
+	postCtx := ctx
+	if ctx.Err() != nil {
+		var postCancel context.CancelFunc
+		postCtx, postCancel = context.WithTimeout(context.Background(), postResumeOperationTimeout)
+		defer postCancel()
+		log.Info("original context expired after wait, using fresh context for post-resume operations")
+	}
+	if err = s.InplaceRefresh(postCtx, false); err != nil {
+		log.Error(err, "failed to refresh sandbox after resume")
+		return err
+	}
+	expectationutils.ResourceVersionExpectationExpect(s.Sandbox) // expect Running
+
 
 	// E2B only handles post-resume initialization for non-claimed sandboxes.
 	// Claimed sandboxes (with claim-name label) are handled by the controller's Initialize function.
@@ -331,13 +335,13 @@ func (s *Sandbox) Resume(ctx context.Context) error {
 		if len(csiMountConfigRequests) != 0 {
 			log.Info("will re-mount csi storage after resume")
 			startTime := time.Now()
-			csiClient := csimountutils.NewCSIMountHandler(s.Client, s.Cache, s.storageRegistry, utils.DefaultSandboxDeployNamespace)
-			mountConfigs, resolveErr := resolveCSIMountConfigs(ctx, csiClient, csiMountConfigRequests)
+			csiClient := csimountutils.NewCSIMountHandler(s.Cache.GetClient(), s.Cache, s.storageRegistry, utils.DefaultSandboxDeployNamespace)
+			mountConfigs, resolveErr := resolveCSIMountConfigs(postCtx, csiClient, csiMountConfigRequests)
 			if resolveErr != nil {
 				return resolveErr
 			}
 			opts := config.CSIMountOptions{MountOptionList: mountConfigs}
-			if _, mountErr := runtime.ProcessCSIMounts(ctx, s.Sandbox, opts); mountErr != nil {
+			if _, mountErr := runtime.ProcessCSIMounts(postCtx, s.Sandbox, opts); mountErr != nil {
 				log.Error(mountErr, "failed to remount csi storage after resume")
 				return fmt.Errorf("failed to remount csi storage after resume: %v", mountErr)
 			}
@@ -348,9 +352,6 @@ func (s *Sandbox) Resume(ctx context.Context) error {
 			"claimName", s.Labels[agentsv1alpha1.LabelSandboxClaimName])
 	}
 
-	if err := s.InplaceRefresh(ctx, false); err != nil {
-		return fmt.Errorf("failed to refresh sandbox after resume: %w", err)
-	}
 	return nil
 }
 
@@ -373,7 +374,7 @@ func (s *Sandbox) CreateCheckpoint(ctx context.Context, opts infra.CreateCheckpo
 	log := klog.FromContext(ctx)
 	opts = ValidateAndInitCheckpointOptions(opts)
 	log.Info("create checkpoint options", "options", opts)
-	return CreateCheckpoint(ctx, s.Sandbox, s.Client.SandboxClient, s.Cache, opts)
+	return CreateCheckpoint(ctx, s.Sandbox, s.Cache, opts)
 }
 
 var _ infra.Sandbox = &Sandbox{}
@@ -394,10 +395,9 @@ func resolveCSIMountConfigs(ctx context.Context, csiClient *csimountutils.CSIMou
 	return results, nil
 }
 
-func AsSandbox(sbx *agentsv1alpha1.Sandbox, cache *Cache, client *clients.ClientSet) *Sandbox {
+func AsSandbox(sbx *agentsv1alpha1.Sandbox, cache cache.Provider) *Sandbox {
 	return &Sandbox{
 		Cache:           cache,
-		Client:          client,
 		Sandbox:         sbx,
 		storageRegistry: storages.NewStorageProvider(),
 	}

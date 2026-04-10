@@ -1,3 +1,19 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package e2b
 
 import (
@@ -9,6 +25,7 @@ import (
 	"k8s.io/klog/v2"
 
 	"github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
@@ -92,7 +109,12 @@ func (sc *Controller) ResumeSandbox(r *http.Request) (web.ApiResponse[struct{}],
 	}
 	log.Info("resuming sandbox")
 	if err := sc.manager.ResumeSandbox(ctx, sbx); err != nil {
+		code := http.StatusInternalServerError
+		if errors.GetErrCode(err) == errors.ErrorBadRequest {
+			code = http.StatusBadRequest
+		}
 		return web.ApiResponse[struct{}]{}, &web.ApiError{
+			Code:    code,
 			Message: fmt.Sprintf("Failed to resume sandbox: %v", err),
 		}
 	}
@@ -142,7 +164,12 @@ func (sc *Controller) ConnectSandbox(r *http.Request) (web.ApiResponse[*models.S
 		log.Info("sandbox is paused, will resume it", "reason", pauseResumeReason)
 		if err := sc.manager.ResumeSandbox(ctx, sbx); err != nil {
 			log.Error(err, "failed to resume sandbox")
+			code := http.StatusInternalServerError
+			if errors.GetErrCode(err) == errors.ErrorBadRequest {
+				code = http.StatusBadRequest
+			}
 			return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
+				Code:    code,
 				Message: fmt.Sprintf("Failed to resume sandbox: %v", err),
 			}
 		}

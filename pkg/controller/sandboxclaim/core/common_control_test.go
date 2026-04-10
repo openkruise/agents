@@ -29,18 +29,14 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/client/clientset/versioned"
-	sandboxfake "github.com/openkruise/agents/client/clientset/versioned/fake"
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
+	"github.com/openkruise/agents/pkg/cache/cachetest"
 	"github.com/openkruise/agents/pkg/features"
-	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
-	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
@@ -57,7 +53,7 @@ func TestNewCommonControl(t *testing.T) {
 	fakeRecorder := record.NewFakeRecorder(10)
 
 	// NewCommonControl should handle nil cache/client gracefully
-	control := NewCommonControl(fakeClient, fakeRecorder, nil, nil)
+	control := NewCommonControl(fakeClient, fakeRecorder, nil)
 
 	require.NotNil(t, control, "NewCommonControl() returned nil")
 
@@ -124,7 +120,7 @@ func TestNewClaimControl(t *testing.T) {
 
 	fakeRecorder := record.NewFakeRecorder(10)
 
-	controls := NewClaimControl(fakeClient, fakeRecorder, nil, nil)
+	controls := NewClaimControl(fakeClient, fakeRecorder, nil)
 
 	require.NotNil(t, controls, "NewClaimControl() returned nil")
 
@@ -140,18 +136,6 @@ func TestNewClaimControl(t *testing.T) {
 func TestCommonControl_EnsureClaimClaiming(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = agentsv1alpha1.AddToScheme(scheme)
-
-	cache, clientSet, err := sandboxcr.NewTestCache(t)
-	require.NoError(t, err, "Failed to create cache")
-	sandboxClient := clientSet.SandboxClient
-
-	// Start cache
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go func() {
-		_ = cache.Run(ctx)
-	}()
-	time.Sleep(200 * time.Millisecond) // Wait for cache to start
 
 	tests := []struct {
 		name             string
@@ -254,12 +238,6 @@ func TestCommonControl_EnsureClaimClaiming(t *testing.T) {
 						},
 					},
 				}
-				// Add sandboxes to cache
-				for _, sbx := range sandboxes {
-					_, err := sandboxClient.ApiV1alpha1().Sandboxes(sbx.Namespace).Create(ctx, sbx, metav1.CreateOptions{})
-					require.NoError(t, err, "Failed to create sandbox in sandboxClient")
-				}
-				time.Sleep(100 * time.Millisecond) // Wait for cache sync
 				return sandboxes
 			},
 			expectedStrategy: RequeueImmediately(), // Should requeue to transition to Completed
@@ -327,12 +305,6 @@ func TestCommonControl_EnsureClaimClaiming(t *testing.T) {
 						},
 					},
 				}
-				// Add sandboxes to cache
-				for _, sbx := range sandboxes {
-					_, err := sandboxClient.ApiV1alpha1().Sandboxes(sbx.Namespace).Create(ctx, sbx, metav1.CreateOptions{})
-					require.NoError(t, err, "Failed to create sandbox in sandboxClient")
-				}
-				time.Sleep(100 * time.Millisecond) // Wait for cache sync
 				return sandboxes
 			},
 			expectedStrategy: RequeueAfter(ClaimRetryInterval), // Should retry to claim remaining 1
@@ -418,11 +390,6 @@ func TestCommonControl_EnsureClaimClaiming(t *testing.T) {
 						},
 					},
 				}
-				// Add sandboxes to cache
-				for _, sbx := range sandboxes {
-					CreateSandboxWithStatus(t, sandboxClient, sbx)
-				}
-				time.Sleep(100 * time.Millisecond) // Wait for cache sync
 				return sandboxes
 			},
 			expectedStrategy: RequeueAfter(ClaimRetryInterval), // Should retry to claim remaining 1
@@ -435,19 +402,22 @@ func TestCommonControl_EnsureClaimClaiming(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			cache, fakeClient, err := cachetest.NewTestCache(t, tt.claim, tt.sandboxSet)
+			require.NoError(t, err, "Failed to create cache")
+
+			// Start cache
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
 			// Setup sandboxes
 			if tt.setupSandboxes != nil {
-				tt.setupSandboxes(t)
+				for _, sbx := range tt.setupSandboxes(t) {
+					require.NoError(t, fakeClient.Create(ctx, sbx))
+				}
 			}
-
-			fakeClient := fake.NewClientBuilder().
-				WithScheme(scheme).
-				WithObjects(tt.claim, tt.sandboxSet).
-				Build()
 
 			fakeRecorder := record.NewFakeRecorder(100)
 
-			control := NewCommonControl(fakeClient, fakeRecorder, clientSet, cache)
+			control := NewCommonControl(fakeClient, fakeRecorder, cache)
 
 			args := ClaimArgs{
 				Claim:      tt.claim,
@@ -484,16 +454,6 @@ func TestCommonControl_EnsureClaimClaiming_CPUResizeFeatureGatePrecondition(t *t
 	scheme := runtime.NewScheme()
 	_ = agentsv1alpha1.AddToScheme(scheme)
 
-	cache, clientSet, err := sandboxcr.NewTestCache(t)
-	require.NoError(t, err)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go func() {
-		_ = cache.Run(ctx)
-	}()
-	time.Sleep(200 * time.Millisecond)
-
 	makeClaim := func(name string) *agentsv1alpha1.SandboxClaim {
 		return &agentsv1alpha1.SandboxClaim{
 			ObjectMeta: metav1.ObjectMeta{
@@ -523,7 +483,10 @@ func TestCommonControl_EnsureClaimClaiming_CPUResizeFeatureGatePrecondition(t *t
 	}
 
 	t.Run("feature gate disabled transitions claim to completed", func(t *testing.T) {
-		err := utilfeature.DefaultMutableFeatureGate.SetFromMap(map[string]bool{
+		cache, fakeClient, err := cachetest.NewTestCache(t)
+		require.NoError(t, err)
+
+		err = utilfeature.DefaultMutableFeatureGate.SetFromMap(map[string]bool{
 			string(features.SandboxInPlaceResourceResizeGate): false,
 		})
 		require.NoError(t, err)
@@ -539,10 +502,9 @@ func TestCommonControl_EnsureClaimClaiming_CPUResizeFeatureGatePrecondition(t *t
 			Phase: agentsv1alpha1.SandboxClaimPhaseClaiming,
 		}
 
-		fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(claim, sbs).Build()
-		control := NewCommonControl(fakeClient, record.NewFakeRecorder(10), clientSet, cache)
+		control := NewCommonControl(fakeClient, record.NewFakeRecorder(10), cache)
 
-		strategy, err := control.EnsureClaimClaiming(ctx, ClaimArgs{
+		strategy, err := control.EnsureClaimClaiming(t.Context(), ClaimArgs{
 			Claim:      claim,
 			SandboxSet: sbs,
 			NewStatus:  newStatus,
@@ -557,7 +519,10 @@ func TestCommonControl_EnsureClaimClaiming_CPUResizeFeatureGatePrecondition(t *t
 	})
 
 	t.Run("feature gate enabled continues claiming flow", func(t *testing.T) {
-		err := utilfeature.DefaultMutableFeatureGate.SetFromMap(map[string]bool{
+		cache, fakeClient, err := cachetest.NewTestCache(t)
+		require.NoError(t, err)
+
+		err = utilfeature.DefaultMutableFeatureGate.SetFromMap(map[string]bool{
 			string(features.SandboxInPlaceResourceResizeGate): true,
 		})
 		require.NoError(t, err)
@@ -568,10 +533,9 @@ func TestCommonControl_EnsureClaimClaiming_CPUResizeFeatureGatePrecondition(t *t
 			Phase: agentsv1alpha1.SandboxClaimPhaseClaiming,
 		}
 
-		fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(claim, sbs).Build()
-		control := NewCommonControl(fakeClient, record.NewFakeRecorder(10), clientSet, cache)
+		control := NewCommonControl(fakeClient, record.NewFakeRecorder(10), cache)
 
-		strategy, err := control.EnsureClaimClaiming(ctx, ClaimArgs{
+		strategy, err := control.EnsureClaimClaiming(t.Context(), ClaimArgs{
 			Claim:      claim,
 			SandboxSet: sbs,
 			NewStatus:  newStatus,
@@ -714,7 +678,7 @@ func TestCommonControl_EnsureClaimCompleted(t *testing.T) {
 
 			fakeRecorder := record.NewFakeRecorder(10)
 
-			control := NewCommonControl(fakeClient, fakeRecorder, nil, nil)
+			control := NewCommonControl(fakeClient, fakeRecorder, nil)
 
 			args := ClaimArgs{
 				Claim:     tt.claim,
@@ -765,7 +729,7 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 		Build()
 
 	fakeRecorder := record.NewFakeRecorder(10)
-	control := NewCommonControl(fakeClient, fakeRecorder, nil, nil).(*commonControl)
+	control := NewCommonControl(fakeClient, fakeRecorder, nil).(*commonControl)
 
 	ctx := context.Background()
 	shutdownTime := metav1.Now()
@@ -1245,64 +1209,23 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 		},
 	}
 
-	_ = utilfeature.DefaultMutableFeatureGate.Set("SandboxInPlaceResourceResize=true")
-	t.Cleanup(func() {
-		_ = utilfeature.DefaultMutableFeatureGate.Set("SandboxInPlaceResourceResize=false")
-	})
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			opts, err := control.buildClaimOptions(ctx, tt.claim, tt.sandboxSet)
-			if tt.expectError {
-				assert.Error(t, err, "Expected error but got nil")
-			} else {
-				assert.NoError(t, err, "Unexpected error")
-				if tt.validate != nil {
-					tt.validate(t, opts)
-				}
+			if (err != nil) != tt.expectError {
+				t.Errorf("buildClaimOptions() error = %v, expectError %v", err, tt.expectError)
+				return
+			}
+			if !tt.expectError && tt.validate != nil {
+				tt.validate(t, opts)
 			}
 		})
 	}
-
-	t.Run("cpu resize builds opts normally when feature gate disabled", func(t *testing.T) {
-		_ = utilfeature.DefaultMutableFeatureGate.Set("SandboxInPlaceResourceResize=false")
-		defer func() {
-			_ = utilfeature.DefaultMutableFeatureGate.Set("SandboxInPlaceResourceResize=true")
-		}()
-
-		claim := &agentsv1alpha1.SandboxClaim{
-			ObjectMeta: metav1.ObjectMeta{Name: "gate-test", Namespace: "default", UID: "gate-uid"},
-			Spec: agentsv1alpha1.SandboxClaimSpec{
-				TemplateName: "test-template",
-				InplaceUpdate: &agentsv1alpha1.SandboxClaimInplaceUpdateOptions{
-					Resources: &agentsv1alpha1.SandboxClaimInplaceUpdateResourcesOptions{
-						Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")},
-						Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")},
-					},
-				},
-			},
-		}
-		ss := &agentsv1alpha1.SandboxSet{
-			ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
-		}
-		// buildClaimOptions no longer checks the feature gate; the check is in EnsureClaimClaiming.
-		opts, err := control.buildClaimOptions(ctx, claim, ss)
-		assert.NoError(t, err)
-		assert.NotNil(t, opts.InplaceUpdate)
-		assert.NotNil(t, opts.InplaceUpdate.Resources)
-	})
 }
 
 // Helper function for tests
 func int32Ptr(i int32) *int32 {
 	return &i
-}
-
-func CreateSandboxWithStatus(t *testing.T, client versioned.Interface, sbx *agentsv1alpha1.Sandbox) {
-	_, err := client.ApiV1alpha1().Sandboxes(sbx.Namespace).Create(t.Context(), sbx, metav1.CreateOptions{})
-	require.NoError(t, err)
-	_, err = client.ApiV1alpha1().Sandboxes(sbx.Namespace).UpdateStatus(t.Context(), sbx, metav1.UpdateOptions{})
-	require.NoError(t, err)
 }
 
 func TestBuildClaimOptions_CSIMount_ConfigValidation(t *testing.T) {
@@ -1352,47 +1275,20 @@ func TestBuildClaimOptions_CSIMount_ConfigValidation(t *testing.T) {
 		},
 	}
 
-	// Use controller-runtime fake client for controller operations
-	fakeClient := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithObjects(testPVs...).
-		Build()
+	cache, fakeClient, err := cachetest.NewTestCache(t, testPVs...)
+	require.NoError(t, err, "Failed to create cache")
 
 	fakeRecorder := record.NewFakeRecorder(10)
 
-	// Convert client.Object to runtime.Object for kubernetes clientset
-	runtimeObjects := make([]runtime.Object, len(testPVs))
-	for i, obj := range testPVs {
-		runtimeObjects[i] = obj.(runtime.Object)
-	}
-
-	// Use kubernetes fake clientset for K8sClient
-	k8sClientset := k8sfake.NewSimpleClientset(runtimeObjects...)
-
-	// Create sandbox client with both K8s and Sandbox clients
-	sandboxClient := &clients.ClientSet{
-		K8sClient:     k8sClientset,
-		SandboxClient: sandboxfake.NewSimpleClientset(),
-	}
-
-	// Create a minimal cache with PV support
-	cache, err := sandboxcr.NewCache(sandboxClient, config.SandboxManagerOptions{})
-	require.NoError(t, err, "Failed to create cache")
-
-	// Start cache
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go func() {
-		_ = cache.Run(ctx)
-	}()
-	time.Sleep(300 * time.Millisecond) // Wait for cache to sync
 
 	// Create storage registry and manually register supported drivers
 	storageRegistry := storages.NewStorageProvider()
 	storageRegistry.RegisterProvider("nasplugin.csi.alibabacloud.com", &storages.MountProvider{})
 	storageRegistry.RegisterProvider("ossplugin.csi.alibabacloud.com", &storages.MountProvider{})
 
-	control := NewCommonControl(fakeClient, fakeRecorder, sandboxClient, cache)
+	control := NewCommonControl(fakeClient, fakeRecorder, cache)
 	// Inject the storage registry into the control
 	commonControl := control.(*commonControl)
 	commonControl.storageRegistry = storageRegistry
@@ -1781,39 +1677,14 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 		},
 	}
 
-	// Use controller-runtime fake client for controller operations
-	fakeClient := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithObjects(testPVs...).
-		Build()
+	cache, fakeClient, err := cachetest.NewTestCache(t, testPVs...)
+	require.NoError(t, err, "Failed to create cache")
 
 	fakeRecorder := record.NewFakeRecorder(10)
-
-	// Convert client.Object to runtime.Object for kubernetes clientset
-	runtimeObjects := make([]runtime.Object, len(testPVs))
-	for i, obj := range testPVs {
-		runtimeObjects[i] = obj.(runtime.Object)
-	}
-
-	// Use kubernetes fake clientset for K8sClient
-	k8sClientset := k8sfake.NewSimpleClientset(runtimeObjects...)
-
-	// Create sandbox client with both K8s and Sandbox clients
-	sandboxClient := &clients.ClientSet{
-		K8sClient:     k8sClientset,
-		SandboxClient: sandboxfake.NewSimpleClientset(),
-	}
-
-	// Create a minimal cache with PV support
-	cache, err := sandboxcr.NewCache(sandboxClient, config.SandboxManagerOptions{})
-	require.NoError(t, err, "Failed to create cache")
 
 	// Start cache
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go func() {
-		_ = cache.Run(ctx)
-	}()
 	time.Sleep(300 * time.Millisecond) // Wait for cache to sync
 
 	// Create storage registry and manually register supported drivers
@@ -1821,7 +1692,7 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 	storageRegistry.RegisterProvider("nasplugin.csi.alibabacloud.com", &storages.MountProvider{})
 	storageRegistry.RegisterProvider("ossplugin.csi.alibabacloud.com", &storages.MountProvider{})
 
-	control := NewCommonControl(fakeClient, fakeRecorder, sandboxClient, cache)
+	control := NewCommonControl(fakeClient, fakeRecorder, cache)
 	// Inject the storage registry into the control
 	commonControl := control.(*commonControl)
 	commonControl.storageRegistry = storageRegistry

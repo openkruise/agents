@@ -1,3 +1,19 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package csiutils
 
 import (
@@ -11,52 +27,40 @@ import (
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/golang/protobuf/proto"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog/v2"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
-	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
-	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/utils"
 )
 
 type CSIMountHandler struct {
-	client          *clients.ClientSet
-	cache           infra.CacheProvider
+	client          ctrlclient.Client
+	apiReader       ctrlclient.Reader
 	storageRegistry storages.VolumeMountProviderRegistry
 	systemNamespace string
 }
 
-func NewCSIMountHandler(client *clients.ClientSet, cache infra.CacheProvider,
-	storageRegistry storages.VolumeMountProviderRegistry, systemNamespace string) *CSIMountHandler {
+func NewCSIMountHandler(client ctrlclient.Client, apiReader ctrlclient.Reader, storageRegistry storages.VolumeMountProviderRegistry, systemNamespace string) *CSIMountHandler {
 	return &CSIMountHandler{
 		client:          client,
-		cache:           cache,
+		apiReader:       apiReader,
 		storageRegistry: storageRegistry,
 		systemNamespace: systemNamespace,
 	}
 }
 
 func (h *CSIMountHandler) GenerateNodePublishVolumeRequest(ctx context.Context, mountRequest v1alpha1.CSIMountConfig) (string, *csi.NodePublishVolumeRequest, error) {
-	log := klog.FromContext(ctx)
 	if mountRequest.PvName == "" {
 		return "", nil, fmt.Errorf("no found persistent volume name")
 	}
 	// There are potential scenarios, such as incomplete cache synchronization,
 	// where implementing a resilience or fault-tolerance mechanism can help mitigate spurious errors and improve system robustness.
-	persistentVolumeObj, err := h.cache.GetPersistentVolume(mountRequest.PvName)
+	persistentVolumeObj := &corev1.PersistentVolume{}
+	err := h.client.Get(ctx, ctrlclient.ObjectKey{Name: mountRequest.PvName}, persistentVolumeObj)
 	if err != nil {
-		log.V(consts.DebugLogLevel).Info("failed to get persistent volume object by name using cache method",
-			"pvName", mountRequest.PvName, "err", err)
-		persistentVolumeObj, err = h.client.CoreV1().PersistentVolumes().Get(ctx, mountRequest.PvName, metav1.GetOptions{})
-		if err != nil {
-			return "", nil, fmt.Errorf("failed to get persistent volume object by name: %s, err: %v", mountRequest.PvName, err)
-		}
-	}
-	if persistentVolumeObj == nil {
-		return "", nil, fmt.Errorf("no found persistent volume object by name: %s", mountRequest.PvName)
+		return "", nil, fmt.Errorf("failed to get persistent volume object by name: %s, err: %v", mountRequest.PvName, err)
 	}
 	if persistentVolumeObj.Spec.CSI == nil {
 		return "", nil, fmt.Errorf("no found csi object in persistent volume by name: %s", mountRequest.PvName)
@@ -76,20 +80,16 @@ func (h *CSIMountHandler) GenerateNodePublishVolumeRequest(ctx context.Context, 
 	var secretObj *corev1.Secret
 	if persistentVolumeObj.Spec.CSI.NodePublishSecretRef != nil {
 		nodePublishSecretRef := persistentVolumeObj.Spec.CSI.NodePublishSecretRef
-		if nodePublishSecretRef.Namespace == "" {
-			nodePublishSecretRef.Namespace = utils.DefaultSandboxDeployNamespace
-		} else if nodePublishSecretRef.Namespace != h.systemNamespace {
-			return "", nil, fmt.Errorf("invalid node publish secret ref namespace: %s, expected: %s", nodePublishSecretRef.Namespace, utils.DefaultSandboxDeployNamespace)
+		secretNamespace := nodePublishSecretRef.Namespace
+		if secretNamespace == "" {
+			secretNamespace = utils.DefaultSandboxDeployNamespace
+		} else if secretNamespace != h.systemNamespace {
+			return "", nil, fmt.Errorf("invalid node publish secret ref namespace: %s, expected: %s", secretNamespace, h.systemNamespace)
 		}
-		secretObj, err = h.cache.GetSecret(nodePublishSecretRef.Namespace, nodePublishSecretRef.Name)
+		secretObj = &corev1.Secret{}
+		err = utils.GetFromInformerOrApiServer(ctx, secretObj, ctrlclient.ObjectKey{Namespace: secretNamespace, Name: nodePublishSecretRef.Name}, h.client, h.apiReader)
 		if err != nil {
-			log.V(consts.DebugLogLevel).Info("failed to get secret object by name using cache method",
-				"namespace", nodePublishSecretRef.Namespace, "name", nodePublishSecretRef.Name, "error", err)
-			secretObj, err = h.client.CoreV1().Secrets(nodePublishSecretRef.Namespace).Get(ctx, nodePublishSecretRef.Name, metav1.GetOptions{})
-			if err != nil {
-				return "", nil, fmt.Errorf("failed to get secret object by name:%s/%s, err: %v",
-					nodePublishSecretRef.Namespace, nodePublishSecretRef.Name, err)
-			}
+			return "", nil, fmt.Errorf("failed to get secret object: %s/%s, err: %v", secretNamespace, nodePublishSecretRef.Name, err)
 		}
 	}
 

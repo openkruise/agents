@@ -32,8 +32,8 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
+	"github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/features"
-	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
@@ -46,20 +46,18 @@ import (
 type commonControl struct {
 	client.Client
 	recorder        record.EventRecorder
-	sandboxClient   *clients.ClientSet
-	cache           *sandboxcr.Cache
+	cache           cache.Provider
 	storageRegistry storages.VolumeMountProviderRegistry
 	pickCache       sync.Map
 }
 
-func NewCommonControl(c client.Client, recorder record.EventRecorder, sandboxClient *clients.ClientSet, cache *sandboxcr.Cache) ClaimControl {
+func NewCommonControl(c client.Client, recorder record.EventRecorder, cache cache.Provider) ClaimControl {
 	// Note: sandboxClient and cache can be nil for unit tests
 	// In production, SetupWithManager always provides these dependencies
 
 	control := &commonControl{
 		Client:          c,
 		recorder:        recorder,
-		sandboxClient:   sandboxClient,
 		cache:           cache,
 		storageRegistry: storages.NewStorageProvider(),
 		pickCache:       sync.Map{},
@@ -228,7 +226,7 @@ func (c *commonControl) claimSandboxes(ctx context.Context, claim *agentsv1alpha
 	// Attempt to claim sandboxes concurrently using DoItSlowly
 	claimedCount, err := utils.DoItSlowly(batchSize, InitialClaimBatchSize, func() error {
 		// Pass nil for rand so sandboxcr uses global rand (concurrent-safe).
-		sbx, metrics, claimErr := sandboxcr.TryClaimSandbox(ctx, opts, &c.pickCache, c.cache, c.sandboxClient, claimLockChannel, limiter)
+		sbx, metrics, claimErr := sandboxcr.TryClaimSandbox(ctx, opts, &c.pickCache, c.cache, claimLockChannel, limiter)
 		if claimErr != nil {
 			log.Error(claimErr, "Failed to claim sandbox")
 			return claimErr
@@ -326,7 +324,7 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 	}
 	if len(claim.Spec.DynamicVolumesMount) > 0 {
 		csiMountOptions := make([]config.MountConfig, 0, len(claim.Spec.DynamicVolumesMount))
-		csiClient := csiutils.NewCSIMountHandler(c.sandboxClient, c.cache, c.storageRegistry, utils.DefaultSandboxDeployNamespace)
+		csiClient := csiutils.NewCSIMountHandler(c.cache.GetClient(), c.cache.GetAPIReader(), c.storageRegistry, utils.DefaultSandboxDeployNamespace)
 		for _, mountConfig := range claim.Spec.DynamicVolumesMount {
 			driverName, csiReqConfigRaw, genErr := csiClient.CSIMountOptionsConfig(ctx, mountConfig)
 			if genErr != nil {
@@ -363,7 +361,7 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 // countClaimedSandboxes counts sandboxes that are claimed by this claim
 func (c *commonControl) countClaimedSandboxes(ctx context.Context, claim *agentsv1alpha1.SandboxClaim) (int32, error) {
 	log := logf.FromContext(ctx)
-	sandboxes, err := c.cache.ListSandboxWithUser(string(claim.UID))
+	sandboxes, err := c.cache.ListSandboxWithUser(ctx, string(claim.UID))
 	if err != nil {
 		return 0, err
 	}

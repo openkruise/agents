@@ -68,6 +68,10 @@ spec:
           env:
             - name: INFRA
               value: sandbox-cr
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
           resources:
             limits:
               cpu: "1"

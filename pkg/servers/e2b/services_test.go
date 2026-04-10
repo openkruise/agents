@@ -1,3 +1,19 @@
+/*
+Copyright 2025.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package e2b
 
 import (
@@ -6,7 +22,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -17,17 +32,19 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/rand"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/openkruise/agents/pkg/utils/runtime"
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
-	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
+	"github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
+	"github.com/openkruise/agents/pkg/utils/runtime"
 	managerutils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	"github.com/openkruise/agents/pkg/utils/sandbox-manager/proxyutils"
 	testutils "github.com/openkruise/agents/test/utils"
@@ -42,7 +59,7 @@ func imageChecker(image string, controller *Controller) func(t *testing.T, resp 
 }
 
 func TestCreateSandbox(t *testing.T) {
-	controller, clientSet, teardown := Setup(t)
+	controller, fc, teardown := Setup(t)
 	defer teardown()
 
 	// Create test runtime server for InitRuntime
@@ -64,7 +81,7 @@ func TestCreateSandbox(t *testing.T) {
 		request     models.NewSandboxRequest
 		expectError *web.ApiError
 		postCheck   func(t *testing.T, resp *models.Sandbox)
-		setup       func(t *testing.T, controller *Controller, clientSet *clients.ClientSet)
+		setup       func(t *testing.T, controller *Controller, fc ctrlclient.Client)
 	}{
 		{
 			name:      "success",
@@ -313,7 +330,7 @@ func TestCreateSandbox(t *testing.T) {
 					models.ExtensionKeyClaimTimeout:                 "10", // CSI mount needs more time
 				},
 			},
-			setup: func(t *testing.T, controller *Controller, clientSet *clients.ClientSet) {
+			setup: func(t *testing.T, controller *Controller, fc ctrlclient.Client) {
 				// Register a test CSI driver in the storage registry
 				controller.storageRegistry.RegisterProvider("test-csi-driver", &storages.MountProvider{})
 
@@ -331,7 +348,7 @@ func TestCreateSandbox(t *testing.T) {
 						},
 					},
 				}
-				_, err := clientSet.CoreV1().PersistentVolumes().Create(context.Background(), pv, metav1.CreateOptions{})
+				err := fc.Create(t.Context(), pv)
 				require.NoError(t, err)
 			},
 		},
@@ -350,7 +367,7 @@ func TestCreateSandbox(t *testing.T) {
 				},
 			},
 			postCheck: func(t *testing.T, resp *models.Sandbox) {
-				sbx := GetSandbox(t, resp.SandboxID, controller.client.SandboxClient)
+				sbx := GetSandbox(t, resp.SandboxID, fc)
 				assert.NotNil(t, sbx.Spec.Template)
 				assert.NotNil(t, sbx.Spec.Template.Labels)
 
@@ -412,7 +429,7 @@ func TestCreateSandbox(t *testing.T) {
 				},
 			},
 			postCheck: func(t *testing.T, resp *models.Sandbox) {
-				sbx := GetSandbox(t, resp.SandboxID, controller.client.SandboxClient)
+				sbx := GetSandbox(t, resp.SandboxID, fc)
 				assert.NotNil(t, sbx.Spec.Template.Labels)
 				assert.Equal(t, "label-value", sbx.Spec.Template.Labels["label-key"])
 
@@ -427,7 +444,7 @@ func TestCreateSandbox(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if tt.setup != nil {
-				tt.setup(t, controller, clientSet)
+				tt.setup(t, controller, fc)
 			}
 			var user *models.CreatedTeamAPIKey
 			if tt.userName != "" {
@@ -442,7 +459,7 @@ func TestCreateSandbox(t *testing.T) {
 				AccessToken: runtime.AccessToken,
 			})
 			require.Eventually(t, func() bool {
-				list, err := controller.cache.ListSandboxesInPool(templateName)
+				list, err := controller.cache.ListSandboxesInPool(t.Context(), templateName)
 				return err == nil && len(list) == tt.available
 			}, time.Second, 50*time.Millisecond)
 			defer cleanup()
@@ -519,13 +536,14 @@ func CreateCheckpointAndTemplate(t *testing.T, controller *Controller, checkpoin
 			Template: tmpl.Template,
 		},
 	}
-	client := controller.client.SandboxClient
-	_, err := client.ApiV1alpha1().SandboxTemplates(Namespace).Create(t.Context(), sbt, metav1.CreateOptions{})
+	// Use the controller-runtime client (CacheV2's fake client) for all CRD operations
+	fc := getTestCRClient(controller)
+	err := fc.Create(t.Context(), sbt)
 	require.NoError(t, err)
-	// Wait for SandboxTemplate to be cached via API Get
+	// Wait for SandboxTemplate to be cached
 	require.Eventually(t, func() bool {
-		_, err := client.ApiV1alpha1().SandboxTemplates(Namespace).Get(t.Context(), checkpointID, metav1.GetOptions{})
-		return err == nil
+		got := &v1alpha1.SandboxTemplate{}
+		return fc.Get(t.Context(), ctrlclient.ObjectKey{Namespace: Namespace, Name: checkpointID}, got) == nil
 	}, time.Second, 10*time.Millisecond)
 
 	// Create Checkpoint with template label
@@ -541,18 +559,18 @@ func CreateCheckpointAndTemplate(t *testing.T, controller *Controller, checkpoin
 			CheckpointId: checkpointID,
 		},
 	}
-	_, err = client.ApiV1alpha1().Checkpoints(Namespace).Create(t.Context(), cp, metav1.CreateOptions{})
+	err = fc.Create(t.Context(), cp)
 	require.NoError(t, err)
 	// UpdateStatus is required because Kubernetes API ignores Status field during Create
-	_, err = client.ApiV1alpha1().Checkpoints(Namespace).UpdateStatus(t.Context(), cp, metav1.UpdateOptions{})
+	err = fc.Status().Update(t.Context(), cp)
 	require.NoError(t, err)
 	require.Eventually(t, func() bool {
-		return controller.manager.GetInfra().HasCheckpoint(checkpointID)
+		return controller.manager.GetInfra().HasCheckpoint(t.Context(), checkpointID)
 	}, time.Second, 10*time.Millisecond)
 
 	return func() {
-		assert.NoError(t, client.ApiV1alpha1().SandboxTemplates(Namespace).Delete(context.Background(), checkpointID, metav1.DeleteOptions{}))
-		assert.NoError(t, client.ApiV1alpha1().Checkpoints(Namespace).Delete(context.Background(), checkpointID, metav1.DeleteOptions{}))
+		_ = fc.Delete(t.Context(), sbt)
+		_ = fc.Delete(t.Context(), cp)
 	}
 }
 
@@ -622,7 +640,7 @@ func CreateCheckpointAndTemplateWithAnnotations(t *testing.T, controller *Contro
 }
 
 func TestCloneSandbox(t *testing.T) {
-	controller, clientSet, teardown := Setup(t)
+	controller, fc, teardown := Setup(t)
 	defer teardown()
 
 	// Create test runtime server for InitRuntime
@@ -639,7 +657,7 @@ func TestCloneSandbox(t *testing.T) {
 	// Decorator: DefaultCreateSandbox - set sandbox ready after creation
 	origCreateSandbox := sandboxcr.DefaultCreateSandbox
 	t.Cleanup(func() { sandboxcr.DefaultCreateSandbox = origCreateSandbox })
-	sandboxcr.DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, client *clients.ClientSet, cache infra.CacheProvider) (*v1alpha1.Sandbox, error) {
+	sandboxcr.DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c ctrlclient.Client) (*v1alpha1.Sandbox, error) {
 		// Set Name (FakeClient does not handle GenerateName)
 		if sbx.Name == "" && sbx.GenerateName != "" {
 			sbx.Name = sbx.GenerateName + rand.String(5)
@@ -652,7 +670,7 @@ func TestCloneSandbox(t *testing.T) {
 		sbx.Annotations[v1alpha1.AnnotationRuntimeAccessToken] = runtime.AccessToken
 
 		// Call original createSandbox
-		created, err := origCreateSandbox(ctx, sbx, client, cache)
+		created, err := origCreateSandbox(ctx, sbx, c)
 		if err != nil {
 			return nil, err
 		}
@@ -673,8 +691,7 @@ func TestCloneSandbox(t *testing.T) {
 				PodIP: "1.2.3.4",
 			},
 		}
-		created, err = client.ApiV1alpha1().Sandboxes(created.Namespace).UpdateStatus(ctx, created, metav1.UpdateOptions{})
-		if err != nil {
+		if err = c.Status().Update(ctx, created); err != nil {
 			return nil, err
 		}
 		time.Sleep(50 * time.Millisecond)
@@ -693,7 +710,7 @@ func TestCloneSandbox(t *testing.T) {
 		request     models.NewSandboxRequest
 		expectError *web.ApiError
 		postCheck   func(t *testing.T, resp *models.Sandbox, controller *Controller)
-		setup       func(t *testing.T, controller *Controller, clientSet *clients.ClientSet)
+		setup       func(t *testing.T, controller *Controller, fc ctrlclient.Client)
 	}{
 		{
 			name: "clone success",
@@ -852,7 +869,7 @@ func TestCloneSandbox(t *testing.T) {
 					models.ExtensionKeyClaimWithCSIMount_MountPoint: "/mnt/data",
 				},
 			},
-			setup: func(t *testing.T, controller *Controller, clientSet *clients.ClientSet) {
+			setup: func(t *testing.T, controller *Controller, fc ctrlclient.Client) {
 				// Register a test CSI driver in the storage registry
 				controller.storageRegistry.RegisterProvider("test-clone-csi-driver", &storages.MountProvider{})
 
@@ -870,7 +887,7 @@ func TestCloneSandbox(t *testing.T) {
 						},
 					},
 				}
-				_, err := clientSet.CoreV1().PersistentVolumes().Create(context.Background(), pv, metav1.CreateOptions{})
+				err := fc.Create(t.Context(), pv)
 				require.NoError(t, err)
 			},
 		},
@@ -893,7 +910,7 @@ func TestCloneSandbox(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if tt.setup != nil {
-				tt.setup(t, controller, clientSet)
+				tt.setup(t, controller, fc)
 			}
 			cleanup := CreateCheckpointAndTemplate(t, controller, checkpointID)
 			defer cleanup()
@@ -1262,30 +1279,31 @@ func TestAutoPause(t *testing.T) {
 			}, nil, user))
 			assert.Nil(t, apiError)
 			AssertEndAt(t, timeoutTime, createResp.Body.EndAt)
-			tt.createChecker(t, GetSandbox(t, createResp.Body.SandboxID, client.SandboxClient))
-			AvoidGetFromCache(t, createResp.Body.SandboxID, client.SandboxClient)
+			tt.createChecker(t, GetSandbox(t, createResp.Body.SandboxID, client))
+
+			// Register sandbox key for wait simulation
+			mockMgr := controller.cache.(*cache.Cache).GetMockManager()
+			sbx := GetSandbox(t, createResp.Body.SandboxID, client)
+			mockMgr.AddWaitReconcileKey(sbx)
+
+			// Schedule async status update BEFORE calling blocking PauseSandbox
+			go UpdateSandboxWhen(t, client, createResp.Body.SandboxID, func(sbx *v1alpha1.Sandbox) bool {
+				return sbx.Spec.Paused == true
+			}, DoSetSandboxStatus(v1alpha1.SandboxPaused, metav1.ConditionTrue, metav1.ConditionFalse))
 
 			_, apiError = controller.PauseSandbox(NewRequest(t, nil, nil, map[string]string{
 				"sandboxID": createResp.Body.SandboxID,
 			}, user))
 			assert.Nil(t, apiError)
-			UpdateSandboxWhen(t, client.SandboxClient, createResp.Body.SandboxID, func(sbx *v1alpha1.Sandbox) bool {
-				return sbx.Spec.Paused == true
-			}, DoSetSandboxStatus(v1alpha1.SandboxPaused, metav1.ConditionTrue, metav1.ConditionFalse))
 			describeResp, apiError := controller.DescribeSandbox(NewRequest(t, nil, nil, map[string]string{
 				"sandboxID": createResp.Body.SandboxID,
 			}, user))
 			assert.Nil(t, apiError)
 			AssertEndAt(t, timeoutAfterPaused, describeResp.Body.EndAt)
-			tt.pauseChecker(t, GetSandbox(t, createResp.Body.SandboxID, client.SandboxClient))
-			var wg sync.WaitGroup
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				UpdateSandboxWhen(t, client.SandboxClient, createResp.Body.SandboxID, func(sbx *v1alpha1.Sandbox) bool {
-					return sbx.Spec.Paused == false
-				}, DoSetSandboxStatus(v1alpha1.SandboxRunning, metav1.ConditionFalse, metav1.ConditionTrue))
-			}()
+			tt.pauseChecker(t, GetSandbox(t, createResp.Body.SandboxID, client))
+			go UpdateSandboxWhen(t, client, createResp.Body.SandboxID, func(sbx *v1alpha1.Sandbox) bool {
+				return sbx.Spec.Paused == false
+			}, DoSetSandboxStatus(v1alpha1.SandboxRunning, metav1.ConditionFalse, metav1.ConditionTrue))
 			connectResp, apiError := controller.ConnectSandbox(NewRequest(t, nil, models.SetTimeoutRequest{
 				TimeoutSeconds: timeout,
 			}, map[string]string{
@@ -1293,8 +1311,7 @@ func TestAutoPause(t *testing.T) {
 			}, user))
 			assert.Nil(t, apiError)
 			AssertEndAt(t, timeoutTime, connectResp.Body.EndAt)
-			tt.resumeChecker(t, GetSandbox(t, createResp.Body.SandboxID, client.SandboxClient))
-			wg.Wait()
+			tt.resumeChecker(t, GetSandbox(t, createResp.Body.SandboxID, client))
 		})
 	}
 }
@@ -1348,7 +1365,7 @@ func TestDeleteSandbox(t *testing.T) {
 			// Decorator: DefaultDeleteSandbox - control delete result (set after create)
 			if tt.mockDeleteErr != nil {
 				origDeleteSandbox := sandboxcr.DefaultDeleteSandbox
-				sandboxcr.DefaultDeleteSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, client clients.SandboxClient) error {
+				sandboxcr.DefaultDeleteSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, client ctrlclient.Client) error {
 					return tt.mockDeleteErr
 				}
 				t.Cleanup(func() { sandboxcr.DefaultDeleteSandbox = origDeleteSandbox })

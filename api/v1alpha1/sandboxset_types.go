@@ -40,6 +40,7 @@ const (
 	AnnotationRestoreFrom        = InternalPrefix + "restore-from"
 	AnnotationInitRuntimeRequest = InternalPrefix + "init-runtime-request"
 	AnnotationSandboxID          = InternalPrefix + "sandbox-id"
+	AnnotationMemberlistURL      = InternalPrefix + "memberlist-url"
 )
 
 const (

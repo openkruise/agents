@@ -1,3 +1,19 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package keys
 
 import (
@@ -17,21 +33,60 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/client-go/kubernetes/fake"
-	k8stesting "k8s.io/client-go/testing"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 )
 
-func newSecretStorageForTest(t *testing.T, data map[string][]byte) (*secretKeyStorage, *fake.Clientset) {
+type updateHookClient struct {
+	client.Client
+	updateHook func(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error
+}
+
+func (c *updateHookClient) Update(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
+	if c.updateHook != nil {
+		if err := c.updateHook(ctx, obj, opts...); err != nil {
+			return err
+		}
+	}
+	return c.Client.Update(ctx, obj, opts...)
+}
+
+func newTestScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
-	client := fake.NewClientset()
-	_, err := client.CoreV1().Secrets("default").Create(context.Background(), &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: KeySecretName},
+	scheme := runtime.NewScheme()
+	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	return scheme
+}
+
+func newSecretStorageForTest(t *testing.T, data map[string][]byte) (*secretKeyStorage, client.Client) {
+	t.Helper()
+	c := fake.NewClientBuilder().WithScheme(newTestScheme(t)).WithObjects(&corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: KeySecretName, Namespace: "default"},
 		Data:       data,
-	}, metav1.CreateOptions{})
+	}).Build()
+	return NewSecretKeyStorage(c, c, "default", "admin-key").(*secretKeyStorage), c
+}
+
+func getSecretForTest(t *testing.T, c client.Client) *corev1.Secret {
+	t.Helper()
+	secret := &corev1.Secret{}
+	err := c.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: KeySecretName}, secret)
 	require.NoError(t, err)
-	return NewSecretKeyStorage(client, "default", "admin-key").(*secretKeyStorage), client
+	return secret
+}
+
+func assertExpectedError(t *testing.T, err error, expectError string) {
+	t.Helper()
+	if expectError == "" {
+		require.NoError(t, err)
+		return
+	}
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), expectError)
 }
 
 func TestSecretKeyStorage_LoadByKeyAndID(t *testing.T) {
@@ -61,57 +116,92 @@ func TestSecretKeyStorage_LoadByKeyAndID(t *testing.T) {
 }
 
 func TestSecretKeyStorage_Init(t *testing.T) {
-	t.Run("secret not found", func(t *testing.T) {
-		client := fake.NewClientset()
-		storage := NewSecretKeyStorage(client, "default", "admin-key")
-		err := storage.Init(context.Background())
-		require.Error(t, err)
-	})
+	tests := []struct {
+		name        string
+		prepare     func(t *testing.T) (*secretKeyStorage, client.Client)
+		assertion   func(t *testing.T, storage *secretKeyStorage, c client.Client)
+		expectError string
+	}{
+		{
+			name: "secret not found",
+			prepare: func(t *testing.T) (*secretKeyStorage, client.Client) {
+				c := fake.NewClientBuilder().WithScheme(newTestScheme(t)).Build()
+				return NewSecretKeyStorage(c, c, "default", "admin-key").(*secretKeyStorage), c
+			},
+			expectError: "not found",
+		},
+		{
+			name: "admin key exists",
+			prepare: func(t *testing.T) (*secretKeyStorage, client.Client) {
+				admin := &models.CreatedTeamAPIKey{ID: AdminKeyID, Key: "admin-key", Name: "admin"}
+				b, err := json.Marshal(admin)
+				require.NoError(t, err)
+				return newSecretStorageForTest(t, map[string][]byte{
+					"admin-key":         b,
+					AdminKeyID.String(): b,
+				})
+			},
+			assertion: func(t *testing.T, storage *secretKeyStorage, _ client.Client) {
+				loaded, found := storage.LoadByID(context.Background(), AdminKeyID.String())
+				require.True(t, found)
+				require.Equal(t, "admin-key", loaded.Key)
+			},
+		},
+		{
+			name: "create admin key",
+			prepare: func(t *testing.T) (*secretKeyStorage, client.Client) {
+				return newSecretStorageForTest(t, map[string][]byte{})
+			},
+			assertion: func(t *testing.T, _ *secretKeyStorage, c client.Client) {
+				secret := getSecretForTest(t, c)
+				_, ok := secret.Data[AdminKeyID.String()]
+				assert.True(t, ok)
+			},
+		},
+		{
+			name: "conflict while creating admin key tolerated",
+			prepare: func(t *testing.T) (*secretKeyStorage, client.Client) {
+				_, c := newSecretStorageForTest(t, map[string][]byte{})
+				var updated int32
+				hookClient := &updateHookClient{
+					Client: c,
+					updateHook: func(_ context.Context, _ client.Object, _ ...client.UpdateOption) error {
+						if atomic.AddInt32(&updated, 1) == 1 {
+							return apierrors.NewConflict(schema.GroupResource{Group: "", Resource: "secrets"}, KeySecretName, errors.New("conflict"))
+						}
+						return nil
+					},
+				}
+				return NewSecretKeyStorage(hookClient, hookClient, "default", "admin-key").(*secretKeyStorage), c
+			},
+		},
+		{
+			name: "non-conflict update error returned",
+			prepare: func(t *testing.T) (*secretKeyStorage, client.Client) {
+				_, c := newSecretStorageForTest(t, map[string][]byte{})
+				hookClient := &updateHookClient{
+					Client: c,
+					updateHook: func(_ context.Context, _ client.Object, _ ...client.UpdateOption) error {
+						return errors.New("update failed")
+					},
+				}
+				return NewSecretKeyStorage(hookClient, hookClient, "default", "admin-key").(*secretKeyStorage), c
+			},
+			expectError: "update failed",
+		},
+	}
 
-	t.Run("admin key exists", func(t *testing.T) {
-		admin := &models.CreatedTeamAPIKey{ID: AdminKeyID, Key: "admin-key", Name: "admin"}
-		b, err := json.Marshal(admin)
-		require.NoError(t, err)
-		storage, _ := newSecretStorageForTest(t, map[string][]byte{
-			"admin-key":         b,
-			AdminKeyID.String(): b,
-		})
-		require.NoError(t, storage.Init(context.Background()))
-		loaded, found := storage.LoadByID(context.Background(), AdminKeyID.String())
-		require.True(t, found)
-		require.Equal(t, "admin-key", loaded.Key)
-	})
-
-	t.Run("create admin key", func(t *testing.T) {
-		storage, client := newSecretStorageForTest(t, map[string][]byte{})
-		require.NoError(t, storage.Init(context.Background()))
-		secret, err := client.CoreV1().Secrets("default").Get(context.Background(), KeySecretName, metav1.GetOptions{})
-		require.NoError(t, err)
-		_, ok := secret.Data[AdminKeyID.String()]
-		assert.True(t, ok)
-	})
-
-	t.Run("conflict while creating admin key tolerated", func(t *testing.T) {
-		storage, client := newSecretStorageForTest(t, map[string][]byte{})
-		var updated int32
-		client.PrependReactor("update", "secrets", func(action k8stesting.Action) (handled bool, ret runtime.Object, err error) {
-			if atomic.AddInt32(&updated, 1) == 1 {
-				return true, nil, apierrors.NewConflict(schema.GroupResource{Group: "", Resource: "secrets"}, KeySecretName, errors.New("conflict"))
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			storage, c := tt.prepare(t)
+			err := storage.Init(context.Background())
+			assertExpectedError(t, err, tt.expectError)
+			if err == nil && tt.assertion != nil {
+				tt.assertion(t, storage, c)
 			}
-			obj := action.(k8stesting.UpdateAction).GetObject().(*corev1.Secret)
-			return true, obj, nil
 		})
-		require.NoError(t, storage.Init(context.Background()))
-	})
-
-	t.Run("non-conflict update error returned", func(t *testing.T) {
-		storage, client := newSecretStorageForTest(t, map[string][]byte{})
-		client.PrependReactor("update", "secrets", func(action k8stesting.Action) (handled bool, ret runtime.Object, err error) {
-			return true, nil, errors.New("update failed")
-		})
-		err := storage.Init(context.Background())
-		require.Error(t, err)
-	})
+	}
 }
 
 func TestSecretKeyStorage_Refresh(t *testing.T) {
@@ -125,118 +215,195 @@ func TestSecretKeyStorage_Refresh(t *testing.T) {
 	}
 	validBytes, err := json.Marshal(valid)
 	require.NoError(t, err)
-	storage, client := newSecretStorageForTest(t, map[string][]byte{
+	storage, c := newSecretStorageForTest(t, map[string][]byte{
 		valid.ID.String(): validBytes,
 		"invalid":         []byte("not-json"),
 	})
 	storage.storeKey(&models.CreatedTeamAPIKey{ID: uuid.New(), Key: "stale"})
 
-	require.NoError(t, storage.refresh(context.Background()))
+	require.NoError(t, storage.refresh(context.Background(), c))
 	_, found := storage.LoadByKey(context.Background(), valid.Key)
 	assert.True(t, found)
 	_, found = storage.LoadByKey(context.Background(), "stale")
 	assert.False(t, found)
 
-	require.NoError(t, client.CoreV1().Secrets("default").Delete(context.Background(), KeySecretName, metav1.DeleteOptions{}))
-	require.Error(t, storage.refresh(context.Background()))
+	require.NoError(t, c.Delete(context.Background(), &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: KeySecretName, Namespace: "default"},
+	}))
+	require.Error(t, storage.refresh(context.Background(), c))
 }
 
 func TestSecretKeyStorage_UpdateAndRetry(t *testing.T) {
-	t.Run("update get error", func(t *testing.T) {
-		client := fake.NewClientset()
-		storage := NewSecretKeyStorage(client, "default", "admin-key").(*secretKeyStorage)
-		err := storage.updateSecret(context.Background(), "id", &models.CreatedTeamAPIKey{ID: uuid.New(), Key: "x"})
-		require.Error(t, err)
-	})
+	tests := []struct {
+		name        string
+		run         func(t *testing.T) error
+		expectError string
+	}{
+		{
+			name: "update get error",
+			run: func(t *testing.T) error {
+				c := fake.NewClientBuilder().WithScheme(newTestScheme(t)).Build()
+				storage := NewSecretKeyStorage(c, c, "default", "admin-key").(*secretKeyStorage)
+				return storage.updateSecret(context.Background(), "id", &models.CreatedTeamAPIKey{ID: uuid.New(), Key: "x"})
+			},
+			expectError: "not found",
+		},
+		{
+			name: "update with nil data map creates map",
+			run: func(t *testing.T) error {
+				storage, c := newSecretStorageForTest(t, nil)
+				k := &models.CreatedTeamAPIKey{ID: uuid.New(), Key: "x", Name: "name"}
+				err := storage.updateSecret(context.Background(), k.ID.String(), k)
+				if err == nil {
+					secret := getSecretForTest(t, c)
+					assert.Contains(t, secret.Data, k.ID.String())
+				}
+				return err
+			},
+		},
+		{
+			name: "update delete branch",
+			run: func(t *testing.T) error {
+				k := &models.CreatedTeamAPIKey{ID: uuid.New(), Key: "x", Name: "name"}
+				b, err := json.Marshal(k)
+				require.NoError(t, err)
+				storage, c := newSecretStorageForTest(t, map[string][]byte{k.ID.String(): b})
+				err = storage.updateSecret(context.Background(), k.ID.String(), nil)
+				if err == nil {
+					secret := getSecretForTest(t, c)
+					assert.NotContains(t, secret.Data, k.ID.String())
+				}
+				return err
+			},
+		},
+		{
+			name: "marshal error",
+			run: func(t *testing.T) error {
+				storage, _ := newSecretStorageForTest(t, map[string][]byte{})
+				oldMarshal := marshalAPIKey
+				marshalAPIKey = func(v any) ([]byte, error) { return nil, fmt.Errorf("boom") }
+				t.Cleanup(func() { marshalAPIKey = oldMarshal })
+				return storage.updateSecret(context.Background(), "id", &models.CreatedTeamAPIKey{ID: uuid.New(), Key: "x"})
+			},
+			expectError: "failed to marshal",
+		},
+		{
+			name: "retry handles conflict",
+			run: func(t *testing.T) error {
+				_, c := newSecretStorageForTest(t, map[string][]byte{})
+				var updated int32
+				hookClient := &updateHookClient{
+					Client: c,
+					updateHook: func(_ context.Context, _ client.Object, _ ...client.UpdateOption) error {
+						if atomic.AddInt32(&updated, 1) == 1 {
+							return apierrors.NewConflict(schema.GroupResource{Resource: "secrets"}, KeySecretName, errors.New("conflict"))
+						}
+						return nil
+					},
+				}
+				storage := NewSecretKeyStorage(hookClient, hookClient, "default", "admin-key").(*secretKeyStorage)
+				err := storage.retryUpdateSecret(context.Background(), uuid.NewString(), &models.CreatedTeamAPIKey{ID: uuid.New(), Key: "x"})
+				if err == nil {
+					assert.GreaterOrEqual(t, atomic.LoadInt32(&updated), int32(2))
+				}
+				return err
+			},
+		},
+	}
 
-	t.Run("update with nil data map creates map", func(t *testing.T) {
-		storage, client := newSecretStorageForTest(t, nil)
-		k := &models.CreatedTeamAPIKey{ID: uuid.New(), Key: "x", Name: "name"}
-		require.NoError(t, storage.updateSecret(context.Background(), k.ID.String(), k))
-		secret, err := client.CoreV1().Secrets("default").Get(context.Background(), KeySecretName, metav1.GetOptions{})
-		require.NoError(t, err)
-		assert.Contains(t, secret.Data, k.ID.String())
-	})
-
-	t.Run("update delete branch", func(t *testing.T) {
-		k := &models.CreatedTeamAPIKey{ID: uuid.New(), Key: "x", Name: "name"}
-		b, err := json.Marshal(k)
-		require.NoError(t, err)
-		storage, client := newSecretStorageForTest(t, map[string][]byte{k.ID.String(): b})
-		require.NoError(t, storage.updateSecret(context.Background(), k.ID.String(), nil))
-		secret, err := client.CoreV1().Secrets("default").Get(context.Background(), KeySecretName, metav1.GetOptions{})
-		require.NoError(t, err)
-		assert.NotContains(t, secret.Data, k.ID.String())
-	})
-
-	t.Run("marshal error", func(t *testing.T) {
-		storage, _ := newSecretStorageForTest(t, map[string][]byte{})
-		oldMarshal := marshalAPIKey
-		marshalAPIKey = func(v any) ([]byte, error) { return nil, fmt.Errorf("boom") }
-		t.Cleanup(func() { marshalAPIKey = oldMarshal })
-		err := storage.updateSecret(context.Background(), "id", &models.CreatedTeamAPIKey{ID: uuid.New(), Key: "x"})
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "failed to marshal")
-	})
-
-	t.Run("retry handles conflict", func(t *testing.T) {
-		storage, client := newSecretStorageForTest(t, map[string][]byte{})
-		var updated int32
-		client.PrependReactor("update", "secrets", func(action k8stesting.Action) (bool, runtime.Object, error) {
-			if atomic.AddInt32(&updated, 1) == 1 {
-				return true, nil, apierrors.NewConflict(schema.GroupResource{Resource: "secrets"}, KeySecretName, errors.New("conflict"))
-			}
-			obj := action.(k8stesting.UpdateAction).GetObject().(*corev1.Secret)
-			return true, obj, nil
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.run(t)
+			assertExpectedError(t, err, tt.expectError)
 		})
-		err := storage.retryUpdateSecret(context.Background(), uuid.NewString(), &models.CreatedTeamAPIKey{ID: uuid.New(), Key: "x"})
-		require.NoError(t, err)
-		assert.GreaterOrEqual(t, atomic.LoadInt32(&updated), int32(2))
-	})
+	}
 }
 
 func TestSecretKeyStorage_CreateKey(t *testing.T) {
-	storage, _ := newSecretStorageForTest(t, map[string][]byte{})
-	user := &models.CreatedTeamAPIKey{ID: uuid.New(), CreatedBy: &models.TeamUser{ID: uuid.New()}}
+	tests := []struct {
+		name        string
+		run         func(t *testing.T) error
+		expectError string
+	}{
+		{
+			name: "validation nil user",
+			run: func(t *testing.T) error {
+				storage, _ := newSecretStorageForTest(t, map[string][]byte{})
+				_, err := storage.CreateKey(context.Background(), nil, "x")
+				return err
+			},
+			expectError: "required",
+		},
+		{
+			name: "validation empty name",
+			run: func(t *testing.T) error {
+				storage, _ := newSecretStorageForTest(t, map[string][]byte{})
+				user := &models.CreatedTeamAPIKey{ID: uuid.New(), CreatedBy: &models.TeamUser{ID: uuid.New()}}
+				_, err := storage.CreateKey(context.Background(), user, "")
+				return err
+			},
+			expectError: "required",
+		},
+		{
+			name: "success",
+			run: func(t *testing.T) error {
+				storage, _ := newSecretStorageForTest(t, map[string][]byte{})
+				user := &models.CreatedTeamAPIKey{ID: uuid.New(), CreatedBy: &models.TeamUser{ID: uuid.New()}}
+				key, err := storage.CreateKey(context.Background(), user, "name")
+				if err == nil {
+					require.NotNil(t, key)
+					_, found := storage.LoadByID(context.Background(), key.ID.String())
+					assert.True(t, found)
+				}
+				return err
+			},
+		},
+		{
+			name: "unique id exhaustion",
+			run: func(t *testing.T) error {
+				storage, _ := newSecretStorageForTest(t, map[string][]byte{})
+				user := &models.CreatedTeamAPIKey{ID: uuid.New(), CreatedBy: &models.TeamUser{ID: uuid.New()}}
+				oldGenerate := generateUUID
+				fixed := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+				generateUUID = func() uuid.UUID { return fixed }
+				t.Cleanup(func() { generateUUID = oldGenerate })
+				storage.storeKey(&models.CreatedTeamAPIKey{ID: fixed, Key: fixed.String()})
+				_, err := storage.CreateKey(context.Background(), user, "name")
+				return err
+			},
+			expectError: "failed to generate unique api-key",
+		},
+		{
+			name: "update error",
+			run: func(t *testing.T) error {
+				user := &models.CreatedTeamAPIKey{ID: uuid.New(), CreatedBy: &models.TeamUser{ID: uuid.New()}}
+				_, c := newSecretStorageForTest(t, map[string][]byte{})
+				hookClient := &updateHookClient{
+					Client: c,
+					updateHook: func(_ context.Context, _ client.Object, _ ...client.UpdateOption) error {
+						return errors.New("update failed")
+					},
+				}
+				storageErr := NewSecretKeyStorage(hookClient, hookClient, "default", "admin-key").(*secretKeyStorage)
+				_, err := storageErr.CreateKey(context.Background(), user, "name")
+				return err
+			},
+			expectError: "update failed",
+		},
+	}
 
-	t.Run("validation", func(t *testing.T) {
-		_, err := storage.CreateKey(context.Background(), nil, "x")
-		require.Error(t, err)
-		_, err = storage.CreateKey(context.Background(), user, "")
-		require.Error(t, err)
-	})
-
-	t.Run("success", func(t *testing.T) {
-		key, err := storage.CreateKey(context.Background(), user, "name")
-		require.NoError(t, err)
-		require.NotNil(t, key)
-		_, found := storage.LoadByID(context.Background(), key.ID.String())
-		assert.True(t, found)
-	})
-
-	t.Run("unique id exhaustion", func(t *testing.T) {
-		oldGenerate := generateUUID
-		fixed := uuid.MustParse("11111111-1111-1111-1111-111111111111")
-		generateUUID = func() uuid.UUID { return fixed }
-		t.Cleanup(func() { generateUUID = oldGenerate })
-		storage.storeKey(&models.CreatedTeamAPIKey{ID: fixed, Key: fixed.String()})
-		_, err := storage.CreateKey(context.Background(), user, "name")
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "failed to generate unique api-key")
-	})
-
-	t.Run("update error", func(t *testing.T) {
-		storageErr, client := newSecretStorageForTest(t, map[string][]byte{})
-		client.PrependReactor("update", "secrets", func(action k8stesting.Action) (bool, runtime.Object, error) {
-			return true, nil, errors.New("update failed")
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.run(t)
+			assertExpectedError(t, err, tt.expectError)
 		})
-		_, err := storageErr.CreateKey(context.Background(), user, "name")
-		require.Error(t, err)
-	})
+	}
 }
 
 func TestSecretKeyStorage_DeleteAndList(t *testing.T) {
-	storage, client := newSecretStorageForTest(t, map[string][]byte{})
+	storage, c := newSecretStorageForTest(t, map[string][]byte{})
 	owner := uuid.New()
 	other := uuid.New()
 	user := &models.CreatedTeamAPIKey{ID: owner, CreatedBy: &models.TeamUser{ID: owner}}
@@ -261,17 +428,20 @@ func TestSecretKeyStorage_DeleteAndList(t *testing.T) {
 	_, found := storage.LoadByID(context.Background(), key.ID.String())
 	assert.False(t, found)
 
-	secret, err := client.CoreV1().Secrets("default").Get(context.Background(), KeySecretName, metav1.GetOptions{})
-	require.NoError(t, err)
+	secret := getSecretForTest(t, c)
 	assert.NotContains(t, secret.Data, key.ID.String())
 
-	storage2, client2 := newSecretStorageForTest(t, map[string][]byte{})
+	storage2, c2 := newSecretStorageForTest(t, map[string][]byte{})
 	key2, err := storage2.CreateKey(context.Background(), user, "name")
 	require.NoError(t, err)
-	client2.PrependReactor("update", "secrets", func(action k8stesting.Action) (bool, runtime.Object, error) {
-		return true, nil, errors.New("delete failed")
-	})
-	require.Error(t, storage2.DeleteKey(context.Background(), key2))
+	hookClient := &updateHookClient{
+		Client: c2,
+		updateHook: func(_ context.Context, _ client.Object, _ ...client.UpdateOption) error {
+			return errors.New("delete failed")
+		},
+	}
+	storageWithDeleteError := NewSecretKeyStorage(hookClient, hookClient, "default", "admin-key").(*secretKeyStorage)
+	require.Error(t, storageWithDeleteError.DeleteKey(context.Background(), key2))
 }
 
 func TestSecretKeyStorage_RunStop(t *testing.T) {
@@ -286,8 +456,10 @@ func TestSecretKeyStorage_RunStop(t *testing.T) {
 }
 
 func TestSecretKeyStorage_RunRefreshErrorBranch(t *testing.T) {
-	storage, client := newSecretStorageForTest(t, map[string][]byte{})
-	require.NoError(t, client.CoreV1().Secrets("default").Delete(context.Background(), KeySecretName, metav1.DeleteOptions{}))
+	storage, c := newSecretStorageForTest(t, map[string][]byte{})
+	require.NoError(t, c.Delete(context.Background(), &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: KeySecretName, Namespace: "default"},
+	}))
 	oldTicker := newRefreshTicker
 	newRefreshTicker = func() *time.Ticker { return time.NewTicker(2 * time.Millisecond) }
 	t.Cleanup(func() { newRefreshTicker = oldTicker })

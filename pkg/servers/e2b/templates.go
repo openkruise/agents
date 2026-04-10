@@ -1,14 +1,32 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package e2b
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 
 	"k8s.io/klog/v2"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	infracache "github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/sandbox-manager/errors"
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
 	managerutils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
@@ -39,8 +57,12 @@ func (sc *Controller) ListTemplates(r *http.Request) (web.ApiResponse[[]*models.
 
 	// Get all SandboxSets from cache using informer
 	// If namespace is not specified, list SandboxSets from all namespace
-	templates, err := cache.ListSandboxSets(namespace)
-	if err != nil {
+	list := &agentsv1alpha1.SandboxSetList{}
+	var opts []ctrlclient.ListOption
+	if namespace != "" {
+		opts = append(opts, ctrlclient.InNamespace(namespace))
+	}
+	if err := cache.GetClient().List(r.Context(), list, opts...); err != nil {
 		return web.ApiResponse[[]*models.TemplateInfo]{}, &web.ApiError{
 			Code:    http.StatusInternalServerError,
 			Message: fmt.Sprintf("Failed to list templates: %v", err),
@@ -48,9 +70,9 @@ func (sc *Controller) ListTemplates(r *http.Request) (web.ApiResponse[[]*models.
 	}
 
 	// Convert to E2B format
-	e2bTemplates := make([]*models.TemplateInfo, 0, len(templates))
-	for _, tmpl := range templates {
-		e2bTemplate := sc.convertToTemplateInfo(tmpl)
+	e2bTemplates := make([]*models.TemplateInfo, 0, len(list.Items))
+	for i := range list.Items {
+		e2bTemplate := sc.convertToTemplateInfo(&list.Items[i])
 		e2bTemplates = append(e2bTemplates, e2bTemplate)
 	}
 	return web.ApiResponse[[]*models.TemplateInfo]{
@@ -83,7 +105,7 @@ func (sc *Controller) GetTemplate(r *http.Request) (web.ApiResponse[*models.Temp
 	}
 
 	// Get SandboxSet from cache using informer
-	template, err := sc.getSandboxSetFromCache(templateID, cache)
+	template, err := sc.getSandboxSetFromCache(r.Context(), templateID, cache)
 	if err != nil {
 		return web.ApiResponse[*models.Template]{}, &web.ApiError{
 			Code:    http.StatusNotFound,
@@ -140,17 +162,17 @@ func (sc *Controller) DeleteTemplate(r *http.Request) (web.ApiResponse[struct{}]
 }
 
 // getSandboxSetFromCache gets a SandboxSet from cache using informer
-func (sc *Controller) getSandboxSetFromCache(templateID string, cache infra.CacheProvider) (*agentsv1alpha1.SandboxSet, error) {
+func (sc *Controller) getSandboxSetFromCache(ctx context.Context, templateID string, cache infracache.Provider) (*agentsv1alpha1.SandboxSet, error) {
 	// Get all SandboxSets from cache
-	templates, err := cache.ListSandboxSets("")
-	if err != nil {
+	list := &agentsv1alpha1.SandboxSetList{}
+	if err := cache.GetClient().List(ctx, list); err != nil {
 		return nil, fmt.Errorf("failed to list sandboxsets: %w", err)
 	}
 
 	// Find the specific SandboxSet by name
-	for _, tmpl := range templates {
-		if tmpl.Name == templateID {
-			return tmpl, nil
+	for i := range list.Items {
+		if list.Items[i].Name == templateID {
+			return &list.Items[i], nil
 		}
 	}
 

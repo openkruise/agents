@@ -1,7 +1,22 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package e2b
 
 import (
-	"context"
 	"fmt"
 	"net/http"
 	"testing"
@@ -14,12 +29,12 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
-	"github.com/openkruise/agents/pkg/utils"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 func TestPauseSandbox(t *testing.T) {
 	templateName := "test-template"
-	controller, client, teardown := Setup(t)
+	controller, fc, teardown := Setup(t)
 	defer teardown()
 	cleanup := CreateSandboxPool(t, controller, templateName, 10)
 	defer cleanup()
@@ -37,13 +52,17 @@ func TestPauseSandbox(t *testing.T) {
 	require.Nil(t, err)
 	assert.Equal(t, models.SandboxStateRunning, createResp.Body.State)
 
+	EnableWaitSim(t, controller, createResp.Body.SandboxID)
+
 	req := NewRequest(t, nil, nil, map[string]string{
 		"sandboxID": createResp.Body.SandboxID,
 	}, user)
 	// pause first time
+	go UpdateSandboxWhen(t, fc, createResp.Body.SandboxID, func(sbx *agentsv1alpha1.Sandbox) bool {
+		return sbx.Spec.Paused == true
+	}, DoSetSandboxStatus(agentsv1alpha1.SandboxPaused, metav1.ConditionTrue, metav1.ConditionFalse))
 	pauseResp, err := controller.PauseSandbox(req)
 	assert.Nil(t, err)
-	AvoidGetFromCache(t, createResp.Body.SandboxID, client.SandboxClient)
 	describeResp, err := controller.DescribeSandbox(req)
 	assert.Nil(t, err)
 	assert.Equal(t, http.StatusNoContent, pauseResp.Code)
@@ -65,12 +84,45 @@ func TestPauseSandbox(t *testing.T) {
 	assert.WithinDuration(t, expectEndAt, endAt, 5*time.Second, "expect end at: %s, but got %s", expectEndAt, endAt)
 }
 
+func pauseSandboxHelper(t *testing.T, controller *Controller, client client.Client, sandboxID string, pausing, resuming bool, user *models.CreatedTeamAPIKey) {
+	req := NewRequest(t, nil, nil, map[string]string{
+		"sandboxID": sandboxID,
+	}, user)
+	// First, make the sandbox paused
+	go UpdateSandboxWhen(t, client, sandboxID, func(sbx *agentsv1alpha1.Sandbox) bool {
+		return sbx.Spec.Paused == true
+	}, DoSetSandboxStatus(agentsv1alpha1.SandboxPaused, metav1.ConditionTrue, metav1.ConditionFalse))
+	pauseResp, err := controller.PauseSandbox(req)
+	require.Nil(t, err)
+	require.Equal(t, http.StatusNoContent, pauseResp.Code)
+	describeResp, err := controller.DescribeSandbox(req)
+	require.Nil(t, err)
+	require.Equal(t, models.SandboxStatePaused, describeResp.Body.State)
+	// If pausing, modify it again
+	if pausing {
+		UpdateSandboxWhen(t, client, sandboxID, func(sbx *agentsv1alpha1.Sandbox) bool {
+			return sbx.Spec.Paused == true
+		}, DoSetSandboxStatus(agentsv1alpha1.SandboxPaused, metav1.ConditionFalse, metav1.ConditionFalse))
+	} else if resuming {
+		// Set resuming state: Spec.Paused=false, Phase=Running, Ready=false
+		// This means sandbox is transitioning from paused to running
+		sbx := GetSandbox(t, sandboxID, client)
+		sbx.Spec.Paused = false
+		require.NoError(t, client.Update(t.Context(), sbx))
+		// Update status to reflect resuming state
+		UpdateSandboxWhen(t, client, sandboxID, func(sbx *agentsv1alpha1.Sandbox) bool {
+			return sbx.Spec.Paused == false
+		}, DoSetSandboxStatus(agentsv1alpha1.SandboxPaused, metav1.ConditionFalse, metav1.ConditionFalse))
+	}
+}
+
 func TestConnectSandbox(t *testing.T) {
 	DefaultTimeoutSeconds := 300
 	tests := []struct {
 		name         string
 		paused       bool   // if sandbox is set paused
-		pausing      bool   // if sandbox is performing pausing
+		pausing      bool   // if sandbox is performing pausing (Paused condition is false)
+		resuming     bool   // if sandbox is performing resuming (Ready condition is false)
 		sandboxID    string // if not set, use the created sandbox ID
 		timeout      int
 		expectStatus int
@@ -96,6 +148,14 @@ func TestConnectSandbox(t *testing.T) {
 			expectStatus: http.StatusInternalServerError,
 		},
 		{
+			name:         "resume sandbox: resuming",
+			paused:       true,
+			pausing:      false,
+			resuming:     true,
+			timeout:      300,
+			expectStatus: http.StatusCreated,
+		},
+		{
 			name:         "not found",
 			paused:       false,
 			sandboxID:    "not-exist",
@@ -112,7 +172,7 @@ func TestConnectSandbox(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			templateName := "test-template"
-			controller, client, teardown := Setup(t)
+			controller, fc, teardown := Setup(t)
 			defer teardown()
 			user := &models.CreatedTeamAPIKey{
 				ID:   keys.AdminKeyID,
@@ -133,48 +193,20 @@ func TestConnectSandbox(t *testing.T) {
 			require.Nil(t, err)
 			assert.Equal(t, models.SandboxStateRunning, createResp.Body.State)
 
-			req := NewRequest(t, nil, nil, map[string]string{
-				"sandboxID": createResp.Body.SandboxID,
-			}, user)
+			EnableWaitSim(t, controller, createResp.Body.SandboxID)
 
-			done := make(chan struct{})
 			if tt.paused {
-				pauseResp, err := controller.PauseSandbox(req)
-				assert.Nil(t, err)
-				AvoidGetFromCache(t, createResp.Body.SandboxID, client.SandboxClient)
-				assert.Equal(t, http.StatusNoContent, pauseResp.Code)
-				describeResp, err := controller.DescribeSandbox(req)
-				assert.Nil(t, err)
-				assert.Equal(t, models.SandboxStatePaused, describeResp.Body.State)
-				var condStatus metav1.ConditionStatus
-				if tt.pausing {
-					condStatus = metav1.ConditionFalse
-				} else {
-					condStatus = metav1.ConditionTrue
-				}
-				UpdateSandboxWhen(t, client.SandboxClient, describeResp.Body.SandboxID, func(sbx *agentsv1alpha1.Sandbox) bool {
-					return sbx.Spec.Paused == true
-				}, DoSetSandboxStatus(agentsv1alpha1.SandboxPaused, condStatus, metav1.ConditionFalse))
-				// Only start goroutine to resume sandbox if it's fully paused (not pausing)
-				// When pausing, the test expects ConnectSandbox to fail, so no need to simulate resume
-				if !tt.pausing {
-					go func() {
-						defer close(done)
-						UpdateSandboxWhen(t, client.SandboxClient, describeResp.Body.SandboxID, func(sbx *agentsv1alpha1.Sandbox) bool {
-							return sbx.Spec.Paused == false
-						}, DoSetSandboxStatus(agentsv1alpha1.SandboxRunning, metav1.ConditionFalse, metav1.ConditionTrue))
-					}()
-				} else {
-					close(done)
-				}
-			} else {
-				close(done)
+				pauseSandboxHelper(t, controller, fc, createResp.Body.SandboxID, tt.pausing, tt.resuming, user)
 			}
 
 			if tt.sandboxID == "" {
 				tt.sandboxID = createResp.Body.SandboxID
 			}
-			time.Sleep(10 * time.Millisecond)
+			if tt.expectStatus < 300 {
+				go UpdateSandboxWhen(t, fc, createResp.Body.SandboxID, func(sbx *agentsv1alpha1.Sandbox) bool {
+					return sbx.Spec.Paused == false
+				}, DoSetSandboxStatus(agentsv1alpha1.SandboxRunning, metav1.ConditionFalse, metav1.ConditionTrue))
+			}
 			now := time.Now()
 			connectResp, err := controller.ConnectSandbox(NewRequest(t, nil, models.SetTimeoutRequest{
 				TimeoutSeconds: tt.timeout,
@@ -198,7 +230,6 @@ func TestConnectSandbox(t *testing.T) {
 				assert.WithinDuration(t, expectEndAt, endAt, 5*time.Second,
 					fmt.Sprintf("expect end at: %s, but got %s", expectEndAt, endAt))
 			}
-			<-done
 		})
 	}
 }
@@ -293,17 +324,11 @@ func TestConnectSandboxRunningTimeoutGuard(t *testing.T) {
 }
 
 func TestResumeSandbox(t *testing.T) {
-	templateName := "test-template"
-	user := &models.CreatedTeamAPIKey{
-		ID:   keys.AdminKeyID,
-		Key:  InitKey,
-		Name: "admin",
-	}
-
 	tests := []struct {
 		name         string
 		paused       bool   // if sandbox is set paused
 		pausing      bool   // if sandbox is performing pausing
+		resuming     bool   // if sandbox is performing resuming (Ready condition is false)
 		sandboxID    string // if not set, use the created sandbox ID
 		timeout      int
 		expectStatus int
@@ -318,6 +343,7 @@ func TestResumeSandbox(t *testing.T) {
 			name:         "resume sandbox: paused",
 			paused:       true,
 			pausing:      false,
+			resuming:     false,
 			timeout:      300,
 			expectStatus: http.StatusNoContent,
 		},
@@ -326,7 +352,15 @@ func TestResumeSandbox(t *testing.T) {
 			paused:       true,
 			pausing:      true,
 			timeout:      300,
-			expectStatus: http.StatusInternalServerError,
+			expectStatus: http.StatusBadRequest,
+		},
+		{
+			name:         "resume sandbox: resuming",
+			paused:       true,
+			pausing:      false,
+			resuming:     true,
+			timeout:      300,
+			expectStatus: http.StatusNoContent,
 		},
 		{
 			name:         "not found",
@@ -339,95 +373,75 @@ func TestResumeSandbox(t *testing.T) {
 			name:         "bad request",
 			paused:       false,
 			timeout:      -1,
-			expectStatus: http.StatusInternalServerError,
+			expectStatus: http.StatusInternalServerError, // E2B returns 500 for bad timeout
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			controller, client, teardown := Setup(t)
+			templateName := "test-template"
+			controller, fc, teardown := Setup(t)
 			defer teardown()
+			user := &models.CreatedTeamAPIKey{
+				ID:   keys.AdminKeyID,
+				Key:  InitKey,
+				Name: "admin",
+			}
+
 			cleanup := CreateSandboxPool(t, controller, templateName, 1)
 			defer cleanup()
 
 			createResp, err := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
-				TemplateID: templateName,
 				Metadata: map[string]string{
 					models.ExtensionKeySkipInitRuntime: agentsv1alpha1.True,
 				},
+				TemplateID: templateName,
 			}, nil, user))
 			require.Nil(t, err)
 			assert.Equal(t, models.SandboxStateRunning, createResp.Body.State)
-			AvoidGetFromCache(t, createResp.Body.SandboxID, client.SandboxClient)
 
-			req := NewRequest(t, nil, nil, map[string]string{
-				"sandboxID": createResp.Body.SandboxID,
-			}, user)
+			EnableWaitSim(t, controller, createResp.Body.SandboxID)
 
-			done := make(chan struct{})
 			if tt.paused {
-				pauseResp, err := controller.PauseSandbox(req)
-				assert.Nil(t, err)
-				assert.Equal(t, http.StatusNoContent, pauseResp.Code)
-				describeResp, err := controller.DescribeSandbox(req)
-				assert.Nil(t, err)
-				assert.Equal(t, models.SandboxStatePaused, describeResp.Body.State)
-				status := metav1.ConditionTrue
-				if tt.pausing {
-					status = metav1.ConditionFalse
-				}
-				sbx := GetSandbox(t, createResp.Body.SandboxID, client.SandboxClient)
-				sbx.Status.Phase = agentsv1alpha1.SandboxPaused
-				utils.SetSandboxCondition(&sbx.Status, metav1.Condition{
-					Type:   string(agentsv1alpha1.SandboxConditionPaused),
-					Status: status,
-				})
-				_, err2 := client.ApiV1alpha1().Sandboxes(sbx.Namespace).UpdateStatus(context.Background(), sbx, metav1.UpdateOptions{})
-				assert.NoError(t, err2)
-				time.AfterFunc(60*time.Millisecond, func() {
-					sbx := GetSandbox(t, createResp.Body.SandboxID, client.SandboxClient)
-					sbx.Status.Phase = agentsv1alpha1.SandboxRunning
-					sbx.Status.Conditions = append(sbx.Status.Conditions, metav1.Condition{
-						Type:   string(agentsv1alpha1.SandboxConditionReady),
-						Status: metav1.ConditionTrue,
-					})
-					_, _ = client.ApiV1alpha1().Sandboxes(sbx.Namespace).UpdateStatus(context.Background(), sbx, metav1.UpdateOptions{})
-					close(done)
-				})
-			} else {
-				close(done)
+				pauseSandboxHelper(t, controller, fc, createResp.Body.SandboxID, tt.pausing, tt.resuming, user)
 			}
 
 			if tt.sandboxID == "" {
 				tt.sandboxID = createResp.Body.SandboxID
 			}
-			time.Sleep(10 * time.Millisecond)
+			if tt.expectStatus < 300 {
+				// Only schedule async update when expecting success
+				go UpdateSandboxWhen(t, fc, createResp.Body.SandboxID, func(sbx *agentsv1alpha1.Sandbox) bool {
+					return sbx.Spec.Paused == false
+				}, DoSetSandboxStatus(agentsv1alpha1.SandboxRunning, metav1.ConditionFalse, metav1.ConditionTrue))
+			}
 			now := time.Now()
-			resumeResp, err := controller.ResumeSandbox(NewRequest(t, nil, models.SetTimeoutRequest{
+			resumeResp, apiErr := controller.ResumeSandbox(NewRequest(t, nil, models.SetTimeoutRequest{
 				TimeoutSeconds: tt.timeout,
 			}, map[string]string{
 				"sandboxID": tt.sandboxID,
 			}, user))
 
 			if tt.expectStatus >= 300 {
-				assert.NotNil(t, err, err.Error())
-				if err != nil {
-					if err.Code == 0 {
-						err.Code = http.StatusInternalServerError
-					}
-					assert.Equal(t, tt.expectStatus, err.Code)
+				require.NotNil(t, apiErr, fmt.Sprintf("%v", apiErr))
+				if apiErr.Code == 0 {
+					apiErr.Code = http.StatusInternalServerError
 				}
+				assert.Equal(t, tt.expectStatus, apiErr.Code)
 			} else {
-				assert.Nil(t, err, fmt.Sprintf("err: %v", err))
+				require.Nil(t, apiErr, fmt.Sprintf("err: %v", apiErr))
 				assert.Equal(t, tt.expectStatus, resumeResp.Code)
-
-				describeResp, err := controller.DescribeSandbox(req)
-				assert.Nil(t, err)
+				// Use DescribeSandbox to verify final state since ResumeSandbox returns empty body
+				describeResp, describeErr := controller.DescribeSandbox(NewRequest(t, nil, nil, map[string]string{
+					"sandboxID": tt.sandboxID,
+				}, user))
+				require.Nil(t, describeErr)
 				assert.Equal(t, models.SandboxStateRunning, describeResp.Body.State)
-				endAt, err2 := time.Parse(time.RFC3339, describeResp.Body.EndAt)
-				assert.NoError(t, err2)
-				assert.WithinDuration(t, now.Add(time.Duration(tt.timeout)*time.Second), endAt, 5*time.Second)
+				endAt, parseErr := time.Parse(time.RFC3339, describeResp.Body.EndAt)
+				require.NoError(t, parseErr)
+				expectEndAt := now.Add(time.Duration(tt.timeout) * time.Second)
+				assert.WithinDuration(t, expectEndAt, endAt, 5*time.Second,
+					fmt.Sprintf("expect end at: %s, but got %s", expectEndAt, endAt))
 			}
-			<-done
 		})
 	}
 }
