@@ -179,7 +179,7 @@ func main() {
 	}
 
 	// Initialize Kubernetes client and config
-	clientSet, err := clients.NewClientSetWithOptions(float32(kubeClientQPS), kubeClientBurst)
+	clientConfig, err := clients.NewRestConfig(float32(kubeClientQPS), kubeClientBurst)
 	if err != nil {
 		klog.Fatalf("Failed to initialize Kubernetes client: %v", err)
 	}
@@ -198,13 +198,13 @@ func main() {
 	}
 
 	sandboxController := e2b.NewController(domain, sysNs, sandboxNamespace, sandboxLabelSelector, e2bMaxTimeout, maxClaimWorkers, maxCreateQPS, uint32(extProcMaxConcurrency),
-		port, memberlistBindPort, keyCfg, clientSet)
+		port, memberlistBindPort, keyCfg, clientConfig)
 	if err := sandboxController.Init(); err != nil {
 		klog.Fatalf("Failed to initialize sandbox controller: %v", err)
 	}
 
 	// Start HTTP Server
-	sandboxCtx, err := sandboxController.Run(sysNs, peerSelector)
+	sandboxCtx, err := sandboxController.Run()
 	if err != nil {
 		klog.Fatalf("Failed to start sandbox controller: %v", err)
 	}

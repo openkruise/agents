@@ -1,61 +1,98 @@
+/*
+Copyright 2025.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package e2b
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"net/url"
+	"os"
+	"os/signal"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/kubernetes"
-
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/client/clientset/versioned"
-	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
+	"github.com/openkruise/agents/pkg/agent-runtime/storages"
+	"github.com/openkruise/agents/pkg/proxy"
+	sandbox_manager "github.com/openkruise/agents/pkg/sandbox-manager"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
+	infracache "github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr/cache"
+	cachetest "github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr/cache/cachetest"
+	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
+	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 var TestServerPort = 9999
 var Namespace = "default"
 var InitKey = "admin-987654321"
 
-func CreateSandboxWithStatus(t *testing.T, client versioned.Interface, sbx *agentsv1alpha1.Sandbox) {
+func CreateSandboxWithStatus(t *testing.T, c ctrlclient.Client, sbx *agentsv1alpha1.Sandbox) {
+	t.Helper()
 	ctx := context.Background()
-	_, err := client.ApiV1alpha1().Sandboxes(sbx.Namespace).Create(ctx, sbx, metav1.CreateOptions{})
+	err := c.Create(ctx, sbx)
 	assert.NoError(t, err)
-	_, err = client.ApiV1alpha1().Sandboxes(sbx.Namespace).UpdateStatus(ctx, sbx, metav1.UpdateOptions{})
+	err = c.Status().Update(ctx, sbx)
 	assert.NoError(t, err)
 }
 
-func CreatePodWithStatus(t *testing.T, client kubernetes.Interface, pod *corev1.Pod) {
-	ctx := context.Background()
-	_, err := client.CoreV1().Pods(pod.Namespace).Create(ctx, pod, metav1.CreateOptions{})
-	assert.NoError(t, err)
-	_, err = client.CoreV1().Pods(pod.Namespace).UpdateStatus(ctx, pod, metav1.UpdateOptions{})
-	assert.NoError(t, err)
-}
-
-func Setup(t *testing.T) (*Controller, *clients.ClientSet, func()) {
+func Setup(t *testing.T) (*Controller, ctrlclient.Client, func()) {
 	utils.InitLogOutput()
-	clientSet := clients.NewFakeClientSet(t)
 	namespace := "sandbox-system"
-	// mock self pod
+
+	controller := NewController("example.com", namespace, "", "", models.DefaultMaxTimeout, 10,
+		0, 0, TestServerPort, config.DefaultMemberlistBindPort,&keys.Config{
+			Mode:      keys.StorageModeSecret,
+			Namespace: namespace,
+			AdminKey:  InitKey,
+		}, nil)
+	// Build infra using the builder pattern (avoids connecting to a real API server).
+	// InitOptions populates defaults (e.g. MaxCreateQPS) that the infra rate limiter
+	// relies on — omitting this previously produced "limiter's burst 0" errors.
+	opts := config.InitOptions(config.SandboxManagerOptions{
+		SystemNamespace:    namespace,
+		MaxClaimWorkers:    10,
+		MemberlistBindPort: config.DefaultMemberlistBindPort,
+	})
+	cache, fc, cacheErr := cachetest.NewTestCacheV2(t)
+	require.NoError(t, cacheErr)
+
+	// Create test resources using the controller-runtime fake client
+	ctx := context.Background()
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "sandbox-manager",
@@ -75,9 +112,10 @@ func Setup(t *testing.T) (*Controller, *clients.ClientSet, func()) {
 			PodIP: "127.0.0.1",
 		},
 	}
-	CreatePodWithStatus(t, clientSet.K8sClient, pod)
+	require.NoError(t, fc.Create(ctx, pod))
+	require.NoError(t, fc.Status().Update(ctx, pod))
 
-	// create key store
+	// create key store secret
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      keys.KeySecretName,
@@ -85,21 +123,52 @@ func Setup(t *testing.T) (*Controller, *clients.ClientSet, func()) {
 		},
 		Data: map[string][]byte{},
 	}
-	_, err := clientSet.CoreV1().Secrets(namespace).Create(t.Context(), secret, metav1.CreateOptions{})
-	assert.NoError(t, err)
+	require.NoError(t, fc.Create(ctx, secret))
 
-	controller := NewController("example.com", namespace, "", "", models.DefaultMaxTimeout, 10,
-		0, 0, TestServerPort, config.DefaultMemberlistBindPort, &keys.Config{
-			Mode:      keys.StorageModeSecret,
-			Namespace: namespace,
-			AdminKey:  InitKey,
-			K8sClient: clientSet.K8sClient,
-		}, clientSet)
-	assert.NoError(t, controller.Init())
-	_, err = controller.Run(namespace, "component=sandbox-manager")
-	assert.NoError(t, err)
-	return controller, clientSet, func() {
+	proxyServer := proxy.NewServer(opts)
+	infraInstance := sandboxcr.NewInfraBuilder(opts).
+		WithCache(cache).
+		WithAPIReader(fc).
+		WithProxy(proxyServer).
+		Build()
+
+	require.NoError(t, infraInstance.Run(t.Context()))
+
+	sandboxManager, err := sandbox_manager.NewSandboxManagerBuilder(opts).
+		WithRequestAdapter(adapters.DefaultAdapterFactory(controller.port)).
+		WithCustomInfra(func() (infra.Builder, error) {
+			return sandboxcr.NewInfraBuilder(opts).
+				WithCache(cache).
+				WithAPIReader(fc).
+				WithProxy(proxyServer), nil
+		}).
+		Build()
+	require.NoError(t, err)
+
+	controller.cache = cache
+	controller.manager = sandboxManager
+	controller.storageRegistry = storages.NewStorageProvider()
+	controller.registerRoutes()
+
+	if controller.keys != nil {
+		controller.keys.Client = fc
+		controller.keys.APIReader = fc
+		require.NoError(t, controller.keys.Init(logs.NewContext()))
+	}
+
+	// Start HTTP server and stop channel directly (skip controller.Run which
+	// would call manager.Run and try to start memberlist/peersManager).
+	controller.stop = make(chan os.Signal, 1)
+	signal.Notify(controller.stop, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		if err := controller.server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			t.Logf("HTTP server error: %v", err)
+		}
+	}()
+
+	return controller, fc, func() {
 		controller.stop <- syscall.SIGTERM
+		_ = controller.server.Close()
 	}
 }
 
@@ -107,20 +176,19 @@ func NewRequest(t *testing.T, query map[string]string, body any, pathValues map[
 	var bodyBuf io.Reader
 	if body != nil {
 		marshal, err := json.Marshal(body)
-		assert.NoError(t, err)
+		require.NoError(t, err)
 		bodyBuf = bytes.NewBuffer(marshal)
 	}
-	url := fmt.Sprintf("http://127.0.0.1:%d", TestServerPort)
+	urlStr := fmt.Sprintf("http://127.0.0.1:%d", TestServerPort)
 	if query != nil {
-		queryStr := "?"
+		q := url.Values{}
 		for k, v := range query {
-			queryStr += fmt.Sprintf("%s=%s&", k, v)
+			q.Set(k, v)
 		}
-		queryStr = queryStr[:len(queryStr)-1]
-		url += queryStr
+		urlStr += "?" + q.Encode()
 	}
-	req, err := http.NewRequest("", url, bodyBuf)
-	assert.NoError(t, err)
+	req, err := http.NewRequest("", urlStr, bodyBuf)
+	require.NoError(t, err)
 	if pathValues != nil {
 		for k, v := range pathValues {
 			req.SetPathValue(k, v)
@@ -135,6 +203,7 @@ func GetSbsOwnerReference(sbs *agentsv1alpha1.SandboxSet) []metav1.OwnerReferenc
 
 // CreateSandboxPoolOptions contains options for creating a sandbox pool
 type CreateSandboxPoolOptions struct {
+	Namespace   string
 	RuntimeURL  string
 	AccessToken string
 }
@@ -143,6 +212,10 @@ func CreateSandboxPool(t *testing.T, controller *Controller, name string, availa
 	var options CreateSandboxPoolOptions
 	if len(opts) > 0 {
 		options = opts[0]
+	}
+	ns := Namespace
+	if options.Namespace != "" {
+		ns = options.Namespace
 	}
 	tmpl := agentsv1alpha1.EmbeddedSandboxTemplate{
 		Template: &corev1.PodTemplateSpec{
@@ -159,21 +232,22 @@ func CreateSandboxPool(t *testing.T, controller *Controller, name string, availa
 	sbs := &agentsv1alpha1.SandboxSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
-			Namespace: Namespace,
+			Namespace: ns,
 			UID:       types.UID(uuid.NewString()),
 		},
 		Spec: agentsv1alpha1.SandboxSetSpec{
 			EmbeddedSandboxTemplate: tmpl,
 		},
 	}
-	client := controller.client.SandboxClient
-	_, err := client.ApiV1alpha1().SandboxSets(Namespace).Create(t.Context(), sbs, metav1.CreateOptions{})
-	if err != nil && !errors.IsAlreadyExists(err) {
+	// Use the controller-runtime client (CacheV2's fake client) for all CRD operations
+	fc := getTestCRClient(controller)
+	err := fc.Create(t.Context(), sbs)
+	if err != nil && !apierrors.IsAlreadyExists(err) {
 		require.NoError(t, err)
 	}
-	require.Eventually(t, func() bool {
-		return controller.manager.GetInfra().HasTemplate(name)
-	}, time.Second, 10*time.Millisecond)
+	// MockManager doesn't run reconcilers, so register template directly
+	infraImpl, _ := controller.manager.GetInfra().(*sandboxcr.Infra)
+	infraImpl.RegisterTemplate(name)
 	now := metav1.Now()
 	for i := 0; i < available; i++ {
 		annotations := map[string]string{}
@@ -186,14 +260,13 @@ func CreateSandboxPool(t *testing.T, controller *Controller, name string, availa
 		sbx := &agentsv1alpha1.Sandbox{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      fmt.Sprintf("%s-%d", name, i),
-				Namespace: Namespace,
+				Namespace: ns,
 				Labels: map[string]string{
 					agentsv1alpha1.LabelSandboxTemplate:  name,
 					agentsv1alpha1.LabelSandboxIsClaimed: "false",
 				},
 				Annotations:       annotations,
 				OwnerReferences:   GetSbsOwnerReference(sbs),
-				ResourceVersion:   "1",
 				UID:               types.UID(uuid.NewString()),
 				CreationTimestamp: now,
 			},
@@ -207,71 +280,73 @@ func CreateSandboxPool(t *testing.T, controller *Controller, name string, availa
 						Type:   string(agentsv1alpha1.SandboxConditionReady),
 						Status: metav1.ConditionTrue,
 					},
-					{
-						Type:   string(agentsv1alpha1.SandboxConditionPaused),
-						Status: metav1.ConditionTrue,
-					},
-					{
-						Type:   string(agentsv1alpha1.SandboxConditionResumed),
-						Status: metav1.ConditionTrue,
-					},
 				},
 				PodInfo: agentsv1alpha1.PodInfo{
 					PodIP: "1.2.3.4",
 				},
 			},
 		}
-		CreateSandboxWithStatus(t, client, sbx)
+		CreateSandboxWithStatus(t, fc, sbx)
 	}
 	require.Eventually(t, func() bool {
 		pool, _ := controller.cache.ListSandboxesInPool(name)
-		return len(pool) == available && controller.manager.GetInfra().HasTemplate(name)
+		return len(pool) == available
 	}, time.Minute, 100*time.Millisecond)
 	return func() {
 		for i := 0; i < available; i++ {
-			assert.NoError(t, client.ApiV1alpha1().Sandboxes(Namespace).Delete(context.Background(), fmt.Sprintf("%s-%d", name, i), metav1.DeleteOptions{}))
+			sbx := &agentsv1alpha1.Sandbox{}
+			sbx.Name = fmt.Sprintf("%s-%d", name, i)
+			sbx.Namespace = ns
+			assert.NoError(t, fc.Delete(context.Background(), sbx))
 		}
+		sbs.Namespace = ns
+		assert.NoError(t, fc.Delete(context.Background(), sbs))
 	}
 }
 
-// AvoidGetFromCache makes the resourceVersionExpectation unsatisfied to avoid getting sandbox from cache,
-// which is useful in unit tests for zero-latency update
-func AvoidGetFromCache(t *testing.T, sandboxID string, client clients.SandboxClient) {
-	sbx := GetSandbox(t, sandboxID, client)
-	sbx.ResourceVersion = "100"
-	utils.ResourceVersionExpectationExpect(sbx)
+// getTestCRClient retrieves the controller-runtime client from the infra.
+// This is the CacheV2's fake client used in tests.
+func getTestCRClient(controller *Controller) ctrlclient.Client {
+	return controller.manager.GetInfra().GetCache().GetClient()
 }
 
-func GetSandbox(t *testing.T, sandboxID string, client clients.SandboxClient) *agentsv1alpha1.Sandbox {
+func GetSandbox(t *testing.T, sandboxID string, c ctrlclient.Client) *agentsv1alpha1.Sandbox {
 	split := strings.Split(sandboxID, "--")
 	namespace, name := split[0], split[1]
-	sbx, err := client.ApiV1alpha1().Sandboxes(namespace).Get(context.Background(), name, metav1.GetOptions{})
-	assert.NoError(t, err)
+	sbx := &agentsv1alpha1.Sandbox{}
+	err := c.Get(t.Context(), ctrlclient.ObjectKey{Namespace: namespace, Name: name}, sbx)
+	require.NoError(t, err)
 	return sbx
 }
 
-type DoFunc func(t *testing.T, client clients.SandboxClient, sbx *agentsv1alpha1.Sandbox)
+func EnableWaitSim(t *testing.T, controller *Controller, sandboxID string) {
+	mgr := controller.manager.GetInfra().GetCache().(*infracache.CacheV2).GetMockManager()
+	mgr.AddWaitReconcileKey(GetSandbox(t, sandboxID, mgr.GetClient()))
+}
+
+type DoFunc func(t *testing.T, c ctrlclient.Client, sbx *agentsv1alpha1.Sandbox)
 type WhenFunc func(sbx *agentsv1alpha1.Sandbox) bool
 
 func Immediately(sbx *agentsv1alpha1.Sandbox) bool {
 	return sbx != nil
 }
 
-func UpdateSandboxWhen(t *testing.T, client clients.SandboxClient, sandboxID string, when WhenFunc, do DoFunc) {
+func UpdateSandboxWhen(t *testing.T, c ctrlclient.Client, sandboxID string, when WhenFunc, do DoFunc) {
+	require.NotNil(t, do)
 	var sbx *agentsv1alpha1.Sandbox
 	if !assert.Eventually(t, func() bool {
-		sbx = GetSandbox(t, sandboxID, client)
+		sbx = GetSandbox(t, sandboxID, c)
 		return when(sbx)
-	}, 5*time.Second, 10*time.Millisecond) {
+	}, 5*time.Second, 100*time.Millisecond) {
 		return
 	}
 	if sbx != nil {
-		do(t, client, sbx.DeepCopy())
+		do(t, c, sbx.DeepCopy())
 	}
 }
 
 func DoSetSandboxStatus(phase agentsv1alpha1.SandboxPhase, pausedStatus, readyStatus metav1.ConditionStatus) DoFunc {
-	return func(t *testing.T, client clients.SandboxClient, sbx *agentsv1alpha1.Sandbox) {
+	return func(t *testing.T, c ctrlclient.Client, sbx *agentsv1alpha1.Sandbox) {
 		sbx.Status.Phase = phase
 		sbx.Status.Conditions = []metav1.Condition{
 			{
@@ -283,7 +358,7 @@ func DoSetSandboxStatus(phase agentsv1alpha1.SandboxPhase, pausedStatus, readySt
 				Status: readyStatus,
 			},
 		}
-		_, err := client.ApiV1alpha1().Sandboxes(sbx.Namespace).UpdateStatus(context.Background(), sbx, metav1.UpdateOptions{})
+		err := c.Status().Update(context.Background(), sbx)
 		if err != nil {
 			log.Printf("failed to update sandbox status: %v", err)
 		}

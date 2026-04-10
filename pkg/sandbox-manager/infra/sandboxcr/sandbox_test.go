@@ -1,3 +1,19 @@
+/*
+Copyright 2025.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package sandboxcr
 
 import (
@@ -11,18 +27,21 @@ import (
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/openkruise/agents/pkg/utils/runtime"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
+
+	testutils "github.com/openkruise/agents/test/utils"
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/proxy"
-	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	cachetest "github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr/cache/cachetest"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/sandbox-manager/proxyutils"
-	testutils "github.com/openkruise/agents/test/utils"
 )
 
 func ConvertPodToSandboxCR(pod *corev1.Pod) *v1alpha1.Sandbox {
@@ -96,7 +115,7 @@ func TestSandbox_GetTemplate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := AsSandbox(ConvertPodToSandboxCR(tt.pod), nil, nil)
+			s := AsSandbox(ConvertPodToSandboxCR(tt.pod), nil)
 			if got := s.GetTemplate(); got != tt.want {
 				t.Errorf("GetTemplate() = %v, want %v", got, tt.want)
 			}
@@ -199,7 +218,7 @@ func TestSandbox_GetResource(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := AsSandbox(ConvertPodToSandboxCR(tt.pod), nil, nil)
+			s := AsSandbox(ConvertPodToSandboxCR(tt.pod), nil)
 			got := s.GetResource()
 			if got.CPUMilli != tt.want.CPUMilli {
 				t.Errorf("GetResource().CPUMilli = %v, want %v", got.CPUMilli, tt.want.CPUMilli)
@@ -223,21 +242,19 @@ func TestSandbox_InplaceRefresh(t *testing.T) {
 		},
 	}
 
-	cache, clientSet, err := NewTestCache(t)
+	cache, fc, err := cachetest.NewTestCacheV2(t)
 	assert.NoError(t, err)
+	require.NoError(t, cache.Run(t.Context()))
 	defer cache.Stop(t.Context())
-	client := clientSet.SandboxClient
-	_, err = client.ApiV1alpha1().Sandboxes("default").Create(context.Background(), initialSandbox, metav1.CreateOptions{})
-	assert.NoError(t, err)
+	require.NoError(t, fc.Create(t.Context(), initialSandbox))
 	time.Sleep(10 * time.Millisecond)
 
 	updatedSandbox := initialSandbox.DeepCopy()
 	updatedSandbox.Labels["updated"] = "new-value"
-	_, err = client.ApiV1alpha1().Sandboxes("default").Update(context.Background(), updatedSandbox, metav1.UpdateOptions{})
-	assert.NoError(t, err)
+	require.NoError(t, fc.Update(t.Context(), updatedSandbox))
 	time.Sleep(10 * time.Millisecond)
 
-	s := AsSandbox(initialSandbox, cache, clientSet)
+	s := AsSandbox(initialSandbox, cache)
 
 	assert.Equal(t, "value", s.Sandbox.Labels["initial"])
 	assert.Empty(t, s.Sandbox.Labels["updated"])
@@ -287,16 +304,19 @@ func TestSandbox_Kill(t *testing.T) {
 				sandbox.DeletionTimestamp = &now
 			}
 
-			client := clients.NewFakeClientSet(t)
-			_, err := client.ApiV1alpha1().Sandboxes("default").Create(context.Background(), sandbox, metav1.CreateOptions{})
+			cache, fc, err := cachetest.NewTestCacheV2(t)
+			require.NoError(t, err)
+			require.NoError(t, cache.Run(t.Context()))
+			defer cache.Stop(t.Context())
+			require.NoError(t, fc.Create(t.Context(), sandbox))
+
+			s := AsSandbox(sandbox, cache)
+
+			var getSbx v1alpha1.Sandbox
+			err = fc.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "test-sandbox"}, &getSbx)
 			assert.NoError(t, err)
 
-			s := AsSandbox(sandbox, nil, client)
-
-			_, err = client.ApiV1alpha1().Sandboxes("default").Get(context.Background(), "test-sandbox", metav1.GetOptions{})
-			assert.NoError(t, err)
-
-			err = s.Kill(context.Background())
+			err = s.Kill(t.Context())
 			if tt.expectDeleteError {
 				assert.Error(t, err)
 			} else {
@@ -304,7 +324,7 @@ func TestSandbox_Kill(t *testing.T) {
 			}
 
 			if !tt.hasDeletionTime {
-				_, err = client.ApiV1alpha1().Sandboxes("default").Get(context.Background(), "test-sandbox", metav1.GetOptions{})
+				err = fc.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "test-sandbox"}, &getSbx)
 				assert.Error(t, err)
 				assert.True(t, strings.Contains(err.Error(), "not found"))
 			}
@@ -480,21 +500,20 @@ func TestSandbox_SaveTimeout(t *testing.T) {
 				},
 			}
 
-			cache, clientSet, err := NewTestCache(t)
+			cache, fc, err := cachetest.NewTestCacheV2(t)
 			assert.NoError(t, err)
+			require.NoError(t, cache.Run(t.Context()))
 			defer cache.Stop(t.Context())
-			client := clientSet.SandboxClient
-			_, err = client.ApiV1alpha1().Sandboxes("default").Create(context.Background(), sandbox, metav1.CreateOptions{})
-			assert.NoError(t, err)
+			require.NoError(t, fc.Create(t.Context(), sandbox))
 			time.Sleep(20 * time.Millisecond)
 
-			s := AsSandbox(sandbox, cache, clientSet)
+			s := AsSandbox(sandbox, cache)
 
 			err = s.SaveTimeout(t.Context(), tt.opts)
 			assert.NoError(t, err)
 
-			updatedSandbox, err := client.ApiV1alpha1().Sandboxes("default").Get(context.Background(), "test-sandbox", metav1.GetOptions{})
-			assert.NoError(t, err)
+			var updatedSandbox v1alpha1.Sandbox
+			require.NoError(t, fc.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "test-sandbox"}, &updatedSandbox))
 			if !tt.opts.PauseTime.IsZero() {
 				assert.NotNil(t, updatedSandbox.Spec.PauseTime)
 				assert.WithinDuration(t, tt.opts.PauseTime, updatedSandbox.Spec.PauseTime.Time, time.Second)
@@ -757,8 +776,9 @@ func TestSandbox_CSIMount(t *testing.T) {
 			server := testutils.NewTestRuntimeServer(runtimeOpts)
 			defer server.Close()
 
-			cache, clientSet, err := NewTestCache(t)
+			cache, _, err := cachetest.NewTestCacheV2(t)
 			assert.NoError(t, err)
+			require.NoError(t, cache.Run(t.Context()))
 			defer cache.Stop(t.Context())
 			sbx := &v1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{
@@ -769,7 +789,7 @@ func TestSandbox_CSIMount(t *testing.T) {
 					},
 				},
 			}
-			sandbox := AsSandbox(sbx, cache, clientSet)
+			sandbox := AsSandbox(sbx, cache)
 			request, err := utils.EncodeBase64Proto(tt.req)
 			assert.NoError(t, err)
 			err = sandbox.CSIMount(t.Context(), tt.driver, request)

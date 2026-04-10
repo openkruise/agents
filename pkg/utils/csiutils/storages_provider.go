@@ -11,28 +11,28 @@ import (
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/golang/protobuf/proto"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
-	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/utils"
 )
 
 type CSIMountHandler struct {
-	client          *clients.ClientSet
+	reader          client.Reader
 	cache           infra.CacheProvider
 	storageRegistry storages.VolumeMountProviderRegistry
 	systemNamespace string
 }
 
-func NewCSIMountHandler(client *clients.ClientSet, cache infra.CacheProvider,
+func NewCSIMountHandler(reader client.Reader, cache infra.CacheProvider,
 	storageRegistry storages.VolumeMountProviderRegistry, systemNamespace string) *CSIMountHandler {
 	return &CSIMountHandler{
-		client:          client,
+		reader:          reader,
 		cache:           cache,
 		storageRegistry: storageRegistry,
 		systemNamespace: systemNamespace,
@@ -50,7 +50,8 @@ func (h *CSIMountHandler) GenerateNodePublishVolumeRequest(ctx context.Context, 
 	if err != nil {
 		log.V(consts.DebugLogLevel).Info("failed to get persistent volume object by name using cache method",
 			"pvName", mountRequest.PvName, "err", err)
-		persistentVolumeObj, err = h.client.CoreV1().PersistentVolumes().Get(ctx, mountRequest.PvName, metav1.GetOptions{})
+		persistentVolumeObj = &corev1.PersistentVolume{}
+		err = h.reader.Get(ctx, types.NamespacedName{Name: mountRequest.PvName}, persistentVolumeObj)
 		if err != nil {
 			return "", nil, fmt.Errorf("failed to get persistent volume object by name: %s, err: %v", mountRequest.PvName, err)
 		}
@@ -85,7 +86,8 @@ func (h *CSIMountHandler) GenerateNodePublishVolumeRequest(ctx context.Context, 
 		if err != nil {
 			log.V(consts.DebugLogLevel).Info("failed to get secret object by name using cache method",
 				"namespace", nodePublishSecretRef.Namespace, "name", nodePublishSecretRef.Name, "error", err)
-			secretObj, err = h.client.CoreV1().Secrets(nodePublishSecretRef.Namespace).Get(ctx, nodePublishSecretRef.Name, metav1.GetOptions{})
+			secretObj = &corev1.Secret{}
+			err = h.reader.Get(ctx, types.NamespacedName{Namespace: nodePublishSecretRef.Namespace, Name: nodePublishSecretRef.Name}, secretObj)
 			if err != nil {
 				return "", nil, fmt.Errorf("failed to get secret object by name:%s/%s, err: %v",
 					nodePublishSecretRef.Namespace, nodePublishSecretRef.Name, err)

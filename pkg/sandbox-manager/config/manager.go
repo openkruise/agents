@@ -3,6 +3,7 @@ package config
 import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/utils"
+	"k8s.io/client-go/rest"
 )
 
 const (
@@ -11,13 +12,16 @@ const (
 )
 
 type SandboxManagerOptions struct {
-	SystemNamespace       string
-	SandboxNamespace      string
-	SandboxLabelSelector  string
-	MaxClaimWorkers       int
-	MaxCreateQPS          int
-	ExtProcMaxConcurrency uint32
-	MemberlistBindPort    int
+	SystemNamespace            string
+	PeerSelector               string
+	SandboxNamespace           string
+	SandboxLabelSelector       string
+	MaxClaimWorkers            int
+	MaxCreateQPS               int
+	ExtProcMaxConcurrency      uint32
+	MemberlistBindPort         int
+	DisableRouteReconciliation bool
+	RestConfig                 *rest.Config
 }
 
 func InitOptions(opts SandboxManagerOptions) SandboxManagerOptions {

@@ -103,7 +103,7 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 
 	if len(request.Extensions.CSIMount.MountConfigs) != 0 {
 		csiMountOptions := make([]config.MountConfig, 0, len(request.Extensions.CSIMount.MountConfigs))
-		csiClient := csiutils.NewCSIMountHandler(sc.client, sc.cache, sc.storageRegistry, utils.DefaultSandboxDeployNamespace)
+		csiClient := csiutils.NewCSIMountHandler(sc.cache.GetAPIReader(), sc.cache, sc.storageRegistry, utils.DefaultSandboxDeployNamespace)
 		for _, mountConfig := range request.Extensions.CSIMount.MountConfigs {
 			driverName, csiReqConfigRaw, err := csiClient.CSIMountOptionsConfig(ctx, mountConfig)
 			if err != nil {
@@ -162,7 +162,7 @@ func (sc *Controller) createSandboxWithClone(ctx context.Context, request models
 
 	if len(request.Extensions.CSIMount.MountConfigs) != 0 {
 		csiMountOptions := make([]config.MountConfig, 0, len(request.Extensions.CSIMount.MountConfigs))
-		csiClient := csiutils.NewCSIMountHandler(sc.client, sc.cache, sc.storageRegistry, utils.DefaultSandboxDeployNamespace)
+		csiClient := csiutils.NewCSIMountHandler(sc.cache.GetAPIReader(), sc.cache, sc.storageRegistry, utils.DefaultSandboxDeployNamespace)
 		for _, mountConfigRequest := range request.Extensions.CSIMount.MountConfigs {
 			driverName, csiReqConfigRaw, err := csiClient.CSIMountOptionsConfig(ctx, mountConfigRequest)
 			if err != nil {

@@ -5,30 +5,18 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"testing"
 
+	sandboxclient "github.com/openkruise/agents/client/clientset/versioned"
 	"k8s.io/client-go/kubernetes"
-	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/homedir"
-	"k8s.io/klog/v2"
-
-	sandboxclient "github.com/openkruise/agents/client/clientset/versioned"
-	sandboxfake "github.com/openkruise/agents/client/clientset/versioned/fake"
 )
 
 type K8sClient kubernetes.Interface
 type SandboxClient sandboxclient.Interface
 
-type ClientSet struct {
-	K8sClient
-	SandboxClient
-	*rest.Config
-}
-
-func NewClientSetWithOptions(qps float32, burst int) (*ClientSet, error) {
-	// Try to use in-cluster config first (when running inside a Kubernetes pod)
+func NewRestConfig(qps float32, burst int) (*rest.Config, error) {
 	config, err := rest.InClusterConfig()
 	if err != nil {
 		// Fall back to kubeconfig file if not running in cluster
@@ -72,33 +60,5 @@ func NewClientSetWithOptions(qps float32, burst int) (*ClientSet, error) {
 			config.Burst = burstEnv
 		}
 	}
-	return NewClientSetWithConfig(config)
-}
-
-func NewClientSetWithConfig(config *rest.Config) (*ClientSet, error) {
-	var err error
-	client := &ClientSet{}
-	client.Config = config
-	klog.InfoS("client config", "qps", config.QPS, "burst", config.Burst)
-	// Create the client
-	client.K8sClient, err = kubernetes.NewForConfig(config)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create client: %w", err)
-	}
-
-	client.SandboxClient, err = sandboxclient.NewForConfig(config)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create sandbox client: %w", err)
-	}
-
-	return client, nil
-}
-
-//goland:noinspection GoDeprecation
-func NewFakeClientSet(t *testing.T) *ClientSet {
-	t.Helper()
-	client := &ClientSet{}
-	client.K8sClient = k8sfake.NewClientset()
-	client.SandboxClient = sandboxfake.NewSimpleClientset()
-	return client
+	return config, nil
 }

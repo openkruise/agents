@@ -9,6 +9,7 @@ import (
 	"k8s.io/klog/v2"
 
 	"github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
@@ -83,7 +84,12 @@ func (sc *Controller) ResumeSandbox(r *http.Request) (web.ApiResponse[struct{}],
 	}
 	log.Info("resuming sandbox")
 	if err := sc.manager.ResumeSandbox(ctx, sbx); err != nil {
+		code := http.StatusInternalServerError
+		if errors.GetErrCode(err) == errors.ErrorBadRequest {
+			code = http.StatusBadRequest
+		}
 		return web.ApiResponse[struct{}]{}, &web.ApiError{
+			Code:    code,
 			Message: fmt.Sprintf("Failed to resume sandbox: %v", err),
 		}
 	}
@@ -126,7 +132,12 @@ func (sc *Controller) ConnectSandbox(r *http.Request) (web.ApiResponse[*models.S
 		log.Info("sandbox is paused, will resume it", "reason", reason)
 		if err := sc.manager.ResumeSandbox(ctx, sbx); err != nil {
 			log.Error(err, "failed to resume sandbox")
+			code := http.StatusInternalServerError
+			if errors.GetErrCode(err) == errors.ErrorBadRequest {
+				code = http.StatusBadRequest
+			}
 			return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
+				Code:    code,
 				Message: fmt.Sprintf("Failed to resume sandbox: %v", err),
 			}
 		}

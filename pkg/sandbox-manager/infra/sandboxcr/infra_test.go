@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/openkruise/agents/pkg/utils/runtime"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -17,12 +16,14 @@ import (
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/proxy"
-	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr/cache/cachetest"
+	"github.com/openkruise/agents/pkg/utils/runtime"
 	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
 	testutils "github.com/openkruise/agents/test/utils"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 func createTestSandbox(name, user string, phase v1alpha1.SandboxPhase, ready bool) *v1alpha1.Sandbox {
@@ -55,17 +56,23 @@ func createTestSandbox(name, user string, phase v1alpha1.SandboxPhase, ready boo
 }
 
 //goland:noinspection GoDeprecation
-func NewTestInfra(t *testing.T, opts ...config.SandboxManagerOptions) (*Infra, *clients.ClientSet) {
-	clientSet := clients.NewFakeClientSet(t)
+func NewTestInfra(t *testing.T, opts ...config.SandboxManagerOptions) (*Infra, client.Client) {
 	options := config.SandboxManagerOptions{}
 	if len(opts) > 0 {
 		options = opts[0]
 	}
 	options = config.InitOptions(options)
-	infraInstance, err := NewInfra(clientSet, proxy.NewServer(nil, nil, options), options)
-	assert.NoError(t, err)
-	assert.NoError(t, infraInstance.Run(context.Background()))
-	return infraInstance, clientSet
+	cache, fc, err := cachetest.NewTestCacheV2(t)
+	require.NoError(t, err)
+	infraInstance := NewInfraBuilder(options).
+		WithCache(cache).
+		WithAPIReader(fc).
+		WithProxy(proxy.NewServer(options)).
+		Build()
+	if err := infraInstance.Run(t.Context()); err != nil {
+		return nil, nil
+	}
+	return infraInstance.(*Infra), fc
 }
 
 func TestInfra_SelectSandboxes(t *testing.T) {
@@ -104,10 +111,10 @@ func TestInfra_SelectSandboxes(t *testing.T) {
 				tt.expectCount = len(tt.expectNames)
 			}
 
-			infraInstance, client := NewTestInfra(t)
+			infraInstance, c := NewTestInfra(t)
 
 			for _, sbx := range tt.sandboxes {
-				CreateSandboxWithStatus(t, client.SandboxClient, sbx)
+				CreateSandboxWithStatus(t, c, sbx)
 			}
 			time.Sleep(50 * time.Millisecond)
 
@@ -157,11 +164,11 @@ func TestInfra_GetSandbox(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			infraInstance, client := NewTestInfra(t)
+			infraInstance, fc := NewTestInfra(t)
 
 			// Create sandboxes
 			for _, sbx := range tt.sandboxes {
-				CreateSandboxWithStatus(t, client.SandboxClient, sbx)
+				CreateSandboxWithStatus(t, fc, sbx)
 			}
 			time.Sleep(100 * time.Millisecond)
 
@@ -190,98 +197,12 @@ func createSandboxSets(t *testing.T, sandboxsets map[string]int32, infraInstance
 					Namespace: namespace,
 				},
 			}
-			_, err := infraInstance.Client.ApiV1alpha1().SandboxSets(namespace).Create(context.Background(), sbs, metav1.CreateOptions{})
+			err := infraInstance.Cache.GetClient().Create(t.Context(), sbs)
+			require.NoError(t, err)
+			// MockManager doesn't run reconcilers, so call reconcileSandboxSet directly
+			_, err = infraInstance.reconcileSandboxSet(t.Context(), sbs, false)
 			require.NoError(t, err)
 		}
-		require.Eventually(t, func() bool {
-			return infraInstance.HasTemplate(name)
-		}, 100*time.Millisecond, 5*time.Millisecond)
-	}
-}
-
-func TestInfra_onSandboxSetCreate(t *testing.T) {
-	tests := []struct {
-		name        string
-		sandboxSets map[string]int32
-	}{
-		{
-			name: "create the first sandboxset",
-			sandboxSets: map[string]int32{
-				"new-sandboxset": 1,
-			},
-		},
-		{
-			name: "create multi sandboxset",
-			sandboxSets: map[string]int32{
-				"new-sandboxset":  1,
-				"new-sandboxset2": 5,
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			infraInstance, _ := NewTestInfra(t)
-
-			createSandboxSets(t, tt.sandboxSets, infraInstance)
-
-			for name, cnt := range tt.sandboxSets {
-				assert.Eventually(t, func() bool {
-					actual, _ := infraInstance.templates.Load(name)
-					return actual.(int32) == cnt
-				}, 100*time.Millisecond, 5*time.Millisecond, fmt.Sprintf("name: %s, expect: %d", name, cnt))
-			}
-		})
-	}
-}
-
-func TestInfra_onSandboxSetDelete(t *testing.T) {
-	tests := []struct {
-		name        string
-		sandboxsets map[string]int32
-		deleted     string
-		expectCnt   int32 // 0 should be deleted
-	}{
-		{
-			name: "delete last sbs",
-			sandboxsets: map[string]int32{
-				"new-sandboxset": 1,
-			},
-			deleted: "new-sandboxset",
-		},
-		{
-			name: "delete non-last sbs",
-			sandboxsets: map[string]int32{
-				"new-sandboxset":   1,
-				"new-sandboxset-2": 3,
-			},
-			deleted:   "new-sandboxset-2",
-			expectCnt: 2,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			infraInstance, _ := NewTestInfra(t)
-
-			createSandboxSets(t, tt.sandboxsets, infraInstance)
-
-			// Call onSandboxSetDelete
-			infraInstance.onSandboxSetDelete(&v1alpha1.SandboxSet{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      tt.deleted,
-					Namespace: "namespace-0",
-				},
-			})
-
-			assert.Eventually(t, func() bool {
-				actual, ok := infraInstance.templates.Load(tt.deleted)
-				if !ok {
-					return tt.expectCnt == 0
-				}
-				return actual.(int32) == tt.expectCnt
-			}, 100*time.Millisecond, 5*time.Millisecond)
-		})
 	}
 }
 
@@ -309,168 +230,243 @@ func createTestSandboxWithDefaults(name string, namespace string) *v1alpha1.Sand
 	}
 }
 
-func TestInfra_onSandboxAdd(t *testing.T) {
+func TestInfra_reconcileSandbox(t *testing.T) {
 	tests := []struct {
-		name             string
-		sandbox          *v1alpha1.Sandbox
-		expectRouteExist bool
+		name               string
+		sandbox            *v1alpha1.Sandbox
+		notFound           bool
+		addRouteFirst      bool
+		initialRoute       *proxy.Route // initial route state for update tests
+		expectRouteExist   bool
+		expectRouteState   string // expected route state
+		expectRouteIP      string // expected route IP
+		expectRouteChanged bool   // whether route should be changed
 	}{
 		{
-			name:             "add sandbox with route",
+			name:          "reconcile sandbox not found - should delete route",
+			sandbox:       createTestSandboxWithDefaults("test-sandbox", "default"),
+			notFound:      true,
+			addRouteFirst: true,
+		},
+		{
+			name:             "reconcile sandbox exists - should create route",
 			sandbox:          createTestSandboxWithDefaults("test-sandbox", "default"),
+			notFound:         false,
 			expectRouteExist: true,
+			expectRouteState: v1alpha1.SandboxStateRunning,
+			expectRouteIP:    "10.0.0.1",
+		},
+		{
+			name: "reconcile sandbox with changed state - should update route",
+			sandbox: func() *v1alpha1.Sandbox {
+				sbx := createTestSandboxWithDefaults("test-sandbox", "default")
+				sbx.Status.Phase = v1alpha1.SandboxPaused
+				return sbx
+			}(),
+			notFound:           false,
+			expectRouteExist:   true,
+			expectRouteState:   v1alpha1.SandboxStatePaused,
+			expectRouteIP:      "10.0.0.1",
+			expectRouteChanged: true,
+			initialRoute: &proxy.Route{
+				ID:    "default--test-sandbox",
+				IP:    "10.0.0.1",
+				State: v1alpha1.SandboxStateRunning,
+			},
+		},
+		{
+			name: "reconcile sandbox with unchanged state - should not update route",
+			sandbox: func() *v1alpha1.Sandbox {
+				sbx := createTestSandboxWithDefaults("test-sandbox", "default")
+				sbx.Status.Phase = v1alpha1.SandboxRunning
+				return sbx
+			}(),
+			notFound:           false,
+			expectRouteExist:   true,
+			expectRouteState:   v1alpha1.SandboxStateRunning,
+			expectRouteIP:      "10.0.0.1",
+			expectRouteChanged: false,
+			initialRoute: &proxy.Route{
+				ID:    "default--test-sandbox",
+				IP:    "10.0.0.1",
+				State: v1alpha1.SandboxStateRunning,
+			},
+		},
+		{
+			name: "reconcile sandbox with changed IP - should update route",
+			sandbox: func() *v1alpha1.Sandbox {
+				sbx := createTestSandboxWithDefaults("test-sandbox", "default")
+				sbx.Status.PodInfo.PodIP = "10.0.0.2"
+				return sbx
+			}(),
+			notFound:           false,
+			expectRouteExist:   true,
+			expectRouteState:   v1alpha1.SandboxStateRunning,
+			expectRouteIP:      "10.0.0.2",
+			expectRouteChanged: true,
+			initialRoute: &proxy.Route{
+				ID:    "default--test-sandbox",
+				IP:    "10.0.0.1",
+				State: v1alpha1.SandboxStateRunning,
+			},
+		},
+		{
+			name: "reconcile sandbox with existing route and no changes - route remains unchanged",
+			sandbox: func() *v1alpha1.Sandbox {
+				sbx := createTestSandboxWithDefaults("test-sandbox", "default")
+				sbx.Status.Phase = v1alpha1.SandboxRunning
+				sbx.Status.PodInfo.PodIP = "10.0.0.1"
+				return sbx
+			}(),
+			notFound:           false,
+			expectRouteExist:   true,
+			expectRouteState:   v1alpha1.SandboxStateRunning,
+			expectRouteIP:      "10.0.0.1",
+			expectRouteChanged: false,
+			initialRoute: &proxy.Route{
+				ID:    "default--test-sandbox",
+				IP:    "10.0.0.1",
+				State: v1alpha1.SandboxStateRunning,
+			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			infraInstance, client := NewTestInfra(t)
+			infraInstance, _ := NewTestInfra(t, config.SandboxManagerOptions{
+				DisableRouteReconciliation: true,
+			})
 
-			// Create SandboxSet object
-			sbs := &v1alpha1.SandboxSet{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-pool",
-					Namespace: "default",
-				},
+			if tt.addRouteFirst {
+				// Add route first for notFound case
+				id := stateutils.GetSandboxID(tt.sandbox)
+				infraInstance.Proxy.SetRoute(t.Context(), proxy.Route{
+					ID:    id,
+					IP:    tt.sandbox.Status.PodInfo.PodIP,
+					State: v1alpha1.SandboxStateRunning,
+				})
 			}
 
-			_, err := client.ApiV1alpha1().SandboxSets("default").Create(context.Background(), sbs, metav1.CreateOptions{})
+			// Set initial route for tests that need pre-existing route state
+			if tt.initialRoute != nil {
+				infraInstance.Proxy.SetRoute(t.Context(), *tt.initialRoute)
+			}
+
+			// Call reconcileSandbox
+			_, err := infraInstance.reconcileSandbox(t.Context(), tt.sandbox, tt.notFound)
 			assert.NoError(t, err)
-			time.Sleep(50 * time.Millisecond)
-
-			// Create sandbox
-			tt.sandbox.Labels = map[string]string{
-				v1alpha1.LabelSandboxTemplate: "test-pool",
-			}
-			CreateSandboxWithStatus(t, client.SandboxClient, tt.sandbox)
-			time.Sleep(50 * time.Millisecond)
 
 			// Check route
 			id := stateutils.GetSandboxID(tt.sandbox)
 			route, ok := infraInstance.Proxy.LoadRoute(id)
-			assert.Equal(t, tt.expectRouteExist, ok)
+			require.Equal(t, tt.expectRouteExist, ok, "expect route exist %v, got %v", tt.expectRouteExist, ok)
 			if tt.expectRouteExist {
-				assert.Equal(t, id, route.ID)
-				assert.Equal(t, tt.sandbox.Status.PodInfo.PodIP, route.IP)
-				assert.Equal(t, v1alpha1.SandboxStateRunning, route.State)
+				assert.Equal(t, id, route.ID, "expect route ID %v, got %v", id, route.ID)
+				if tt.expectRouteIP != "" {
+					assert.Equal(t, tt.expectRouteIP, route.IP, "expect route IP %v, got %v", tt.expectRouteIP, route.IP)
+				} else {
+					assert.Equal(t, tt.sandbox.Status.PodInfo.PodIP, route.IP, "expect route IP %v, got %v", tt.sandbox.Status.PodInfo.PodIP, route.IP)
+				}
+				if tt.expectRouteState != "" {
+					assert.Equal(t, tt.expectRouteState, route.State, "expect route state %v, got %v", tt.expectRouteState, route.State)
+				}
 			}
 		})
 	}
 }
 
-func TestInfra_onSandboxDelete(t *testing.T) {
+func TestInfra_reconcileSandboxSet(t *testing.T) {
 	tests := []struct {
-		name             string
-		sandbox          *v1alpha1.Sandbox
-		addRouteFirst    bool
-		expectRouteExist bool
+		name        string
+		sandboxSets map[string]int32
+		sbs         *v1alpha1.SandboxSet
+		notFound    bool
+		expectCnt   int32 // 0 means should be deleted
 	}{
 		{
-			name:             "delete sandbox with existing route",
-			sandbox:          createTestSandboxWithDefaults("test-sandbox", "default"),
-			expectRouteExist: false,
+			name: "reconcile sandboxset not found - delete last sbs",
+			sandboxSets: map[string]int32{
+				"new-sandboxset": 1,
+			},
+			sbs: &v1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "new-sandboxset",
+					Namespace: "namespace-0",
+				},
+			},
+			notFound: true,
+		},
+		{
+			name: "reconcile sandboxset not found - delete non-last sbs",
+			sandboxSets: map[string]int32{
+				"new-sandboxset":   1,
+				"new-sandboxset-2": 3,
+			},
+			sbs: &v1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "new-sandboxset-2",
+					Namespace: "namespace-0",
+				},
+			},
+			notFound:  true,
+			expectCnt: 2,
+		},
+		{
+			name: "reconcile sandboxset exists - create the first one",
+			sbs: &v1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "new-sandboxset",
+					Namespace: "namespace-0",
+				},
+			},
+			notFound: false,
+		},
+		{
+			name: "reconcile sandboxset exists - increment count",
+			sandboxSets: map[string]int32{
+				"new-sandboxset": 1,
+			},
+			sbs: &v1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "new-sandboxset",
+					Namespace: "namespace-1",
+				},
+			},
+			notFound:  false,
+			expectCnt: 2,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			infraInstance, client := NewTestInfra(t)
+			infraInstance, _ := NewTestInfra(t)
 
-			// Create sandbox
-			CreateSandboxWithStatus(t, client.SandboxClient, tt.sandbox)
-			time.Sleep(50 * time.Millisecond)
-			id := stateutils.GetSandboxID(tt.sandbox)
+			// Create initial sandboxsets if needed
+			createSandboxSets(t, tt.sandboxSets, infraInstance)
 
-			assert.NoError(t, client.ApiV1alpha1().Sandboxes("default").Delete(context.Background(), tt.sandbox.Name, metav1.DeleteOptions{}))
-			time.Sleep(10 * time.Millisecond)
+			// Call reconcileSandboxSet
+			ctx := t.Context()
+			_, err := infraInstance.reconcileSandboxSet(ctx, tt.sbs, tt.notFound)
+			require.NoError(t, err)
 
-			// Check route no longer exists
-			_, ok := infraInstance.Proxy.LoadRoute(id)
-			assert.Equal(t, tt.expectRouteExist, ok)
-		})
-	}
-}
-
-func TestInfra_onSandboxUpdate(t *testing.T) {
-	tests := []struct {
-		name              string
-		oldSandbox        *v1alpha1.Sandbox
-		newSandbox        *v1alpha1.Sandbox
-		addTemplate       bool
-		expectRouteUpdate bool
-	}{
-		{
-			name:       "update sandbox with changed state",
-			oldSandbox: createTestSandboxWithDefaults("test-sandbox", "default"),
-			newSandbox: func() *v1alpha1.Sandbox {
-				sbx := createTestSandboxWithDefaults("test-sandbox", "default")
-				sbx.Status.Phase = v1alpha1.SandboxPaused
-				return sbx
-			}(),
-			addTemplate:       true,
-			expectRouteUpdate: true,
-		},
-		{
-			name:              "update sandbox with unchanged state",
-			oldSandbox:        createTestSandboxWithDefaults("test-sandbox", "default"),
-			newSandbox:        createTestSandboxWithDefaults("test-sandbox", "default"),
-			addTemplate:       true,
-			expectRouteUpdate: false,
-		},
-		{
-			name:       "update sandbox not in pool",
-			oldSandbox: createTestSandboxWithDefaults("test-sandbox", "default"),
-			newSandbox: func() *v1alpha1.Sandbox {
-				sbx := createTestSandboxWithDefaults("test-sandbox", "default")
-				sbx.Status.Phase = v1alpha1.SandboxPaused
-				return sbx
-			}(),
-			addTemplate:       false,
-			expectRouteUpdate: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			infraInstance, client := NewTestInfra(t)
-			// Setup pool if needed
-			if tt.addTemplate {
-				template := "test-pool"
-				sbs := &v1alpha1.SandboxSet{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      template,
-						Namespace: "default",
-					},
-				}
-				_, err := client.ApiV1alpha1().SandboxSets("default").Create(context.Background(), sbs, metav1.CreateOptions{})
-				require.NoError(t, err)
-				require.Eventually(t, func() bool {
-					return infraInstance.HasTemplate(template)
-				}, 100*time.Millisecond, 5*time.Millisecond)
-				// Associate sandbox with pool
-				tt.newSandbox.Labels = map[string]string{
-					v1alpha1.LabelSandboxTemplate: template,
+			// Verify template count
+			expectedCnt := tt.expectCnt
+			if !tt.notFound && expectedCnt == 0 {
+				// For create case without explicit expectCnt, default is 1
+				if tt.sandboxSets[tt.sbs.Name] > 0 {
+					expectedCnt = tt.sandboxSets[tt.sbs.Name] + 1
+				} else {
+					expectedCnt = 1
 				}
 			}
 
-			// Create sandbox
-			CreateSandboxWithStatus(t, client.SandboxClient, tt.oldSandbox)
-			time.Sleep(10 * time.Millisecond)
-
-			_, err := client.ApiV1alpha1().Sandboxes("default").Update(context.Background(), tt.newSandbox, metav1.UpdateOptions{})
-			assert.NoError(t, err)
-			time.Sleep(10 * time.Millisecond)
-
-			// Check if route was updated
-			if tt.addTemplate {
-				route, ok := infraInstance.Proxy.LoadRoute(stateutils.GetSandboxID(tt.newSandbox))
-				if tt.expectRouteUpdate {
-					assert.True(t, ok)
-					newSbx := AsSandbox(tt.newSandbox, infraInstance.Cache, infraInstance.Client)
-					expectedRoute := newSbx.GetRoute()
-					assert.Equal(t, expectedRoute.State, route.State)
+			assert.Eventually(t, func() bool {
+				actual, ok := infraInstance.templates.Load(tt.sbs.Name)
+				if !ok {
+					return expectedCnt == 0
 				}
-			}
+				return actual.(int32) == expectedCnt
+			}, 100*time.Millisecond, 5*time.Millisecond, fmt.Sprintf("name: %s, expect: %d", tt.sbs.Name, expectedCnt))
 		})
 	}
 }
@@ -530,11 +526,11 @@ func TestInfra_reconcileRoutes(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			infraInstance, client := NewTestInfra(t)
+			infraInstance, c := NewTestInfra(t)
 
 			// Create sandboxes in cache
 			for _, sbx := range tt.sandboxes {
-				CreateSandboxWithStatus(t, client.SandboxClient, sbx)
+				CreateSandboxWithStatus(t, c, sbx)
 				// Also add their routes to proxy
 				id := stateutils.GetSandboxID(sbx)
 				infraInstance.Proxy.SetRoute(t.Context(), proxy.Route{
@@ -585,7 +581,7 @@ func TestInfra_CloneSandbox(t *testing.T) {
 	server := testutils.NewTestRuntimeServer(runtimeOpts)
 	defer server.Close()
 
-	infraInstance, client := NewTestInfra(t)
+	infraInstance, fc := NewTestInfra(t)
 
 	checkpointID := "test-checkpoint-123"
 	user := "test-user"
@@ -599,7 +595,7 @@ func TestInfra_CloneSandbox(t *testing.T) {
 
 	// Decorator: DefaultCreateSandbox - set sandbox ready after creation
 	origCreateSandbox := DefaultCreateSandbox
-	DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, cli *clients.ClientSet, cache infra.CacheProvider) (*v1alpha1.Sandbox, error) {
+	DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client, cache infra.CacheProvider) (*v1alpha1.Sandbox, error) {
 		if override, ok := ctx.Value(infraSbxOverrideKey{}).(infraSbxOverride); ok {
 			if override.Name != "" {
 				sbx.Name = override.Name
@@ -611,7 +607,7 @@ func TestInfra_CloneSandbox(t *testing.T) {
 				sbx.Annotations[v1alpha1.AnnotationRuntimeURL] = override.RuntimeURL
 			}
 		}
-		created, err := origCreateSandbox(ctx, sbx, cli, cache)
+		created, err := origCreateSandbox(ctx, sbx, c, cache)
 		if err != nil {
 			return nil, err
 		}
@@ -630,7 +626,7 @@ func TestInfra_CloneSandbox(t *testing.T) {
 				PodIP: "1.2.3.4",
 			},
 		}
-		created, err = client.ApiV1alpha1().Sandboxes(created.Namespace).UpdateStatus(ctx, created, metav1.UpdateOptions{})
+		err = c.Status().Update(ctx, created)
 		if err != nil {
 			return nil, err
 		}
@@ -658,7 +654,7 @@ func TestInfra_CloneSandbox(t *testing.T) {
 			},
 		},
 	}
-	_, err := client.ApiV1alpha1().SandboxTemplates("default").Create(context.Background(), sbt, metav1.CreateOptions{})
+	err := fc.Create(t.Context(), sbt)
 	require.NoError(t, err)
 
 	// Wait for SandboxTemplate to be cached
@@ -680,7 +676,7 @@ func TestInfra_CloneSandbox(t *testing.T) {
 			CheckpointId: checkpointID,
 		},
 	}
-	_, err = client.ApiV1alpha1().Checkpoints("default").Create(context.Background(), cp, metav1.CreateOptions{})
+	err = fc.Create(t.Context(), cp)
 	require.NoError(t, err)
 
 	// Wait for checkpoint to be cached
@@ -690,7 +686,7 @@ func TestInfra_CloneSandbox(t *testing.T) {
 	}, time.Second, 10*time.Millisecond)
 
 	// Build context with sbxOverride
-	ctx := context.WithValue(context.Background(), infraSbxOverrideKey{}, infraSbxOverride{
+	ctx := context.WithValue(t.Context(), infraSbxOverrideKey{}, infraSbxOverride{
 		Name:       "test-sandbox-clone-infra",
 		RuntimeURL: server.URL,
 	})
@@ -735,14 +731,13 @@ func createTestCheckpoint(name, user string, namespace string, phase v1alpha1.Ch
 	}
 }
 
-func CreateCheckpointWithStatus(t *testing.T, client *clients.ClientSet, cp *v1alpha1.Checkpoint) {
-	_, err := client.ApiV1alpha1().Checkpoints(cp.Namespace).Create(t.Context(), cp, metav1.CreateOptions{})
-	require.NoError(t, err)
-	_, err = client.ApiV1alpha1().Checkpoints(cp.Namespace).UpdateStatus(t.Context(), cp, metav1.UpdateOptions{})
-	require.NoError(t, err)
+func CreateCheckpointWithStatus(t *testing.T, c client.Client, cp *v1alpha1.Checkpoint) {
+	require.NoError(t, c.Create(t.Context(), cp))
+	// Update status
+	require.NoError(t, c.Update(t.Context(), cp))
 }
 
-func EnsureCheckpointInCache(t *testing.T, cache *Cache, cp *v1alpha1.Checkpoint) {
+func EnsureCheckpointInCache(t *testing.T, cache infra.CacheProvider, cp *v1alpha1.Checkpoint) {
 	require.Eventually(t, func() bool {
 		_, err := cache.GetCheckpoint(cp.Status.CheckpointId)
 		return err == nil
@@ -800,11 +795,11 @@ func TestInfra_SelectSucceededCheckpoints(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			infraInstance, client := NewTestInfra(t)
+			infraInstance, fc := NewTestInfra(t)
 
 			// Create checkpoints
 			for _, cp := range tt.checkpoints {
-				CreateCheckpointWithStatus(t, client, cp)
+				CreateCheckpointWithStatus(t, fc, cp)
 			}
 
 			// Wait for all checkpoints to be cached
@@ -854,12 +849,12 @@ func TestInfra_startRouteReconciler(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			infraInstance, client := NewTestInfra(t)
+			infraInstance, fc := NewTestInfra(t)
 
 			// Create sandboxes
 			var createdSandboxes []string
 			for _, sbx := range tt.sandboxes {
-				CreateSandboxWithStatus(t, client.SandboxClient, sbx)
+				CreateSandboxWithStatus(t, fc, sbx)
 				id := stateutils.GetSandboxID(sbx)
 				infraInstance.Proxy.SetRoute(t.Context(), proxy.Route{
 					ID:    id,
@@ -985,9 +980,9 @@ func TestInfra_DeleteCheckpoint(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			infraInstance, clientSet := NewTestInfra(t)
+			infraInstance, c := NewTestInfra(t)
 			// Use a context with timeout to prevent retries from hanging
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 			defer cancel()
 			namespace := "default"
 
@@ -1009,12 +1004,7 @@ func TestInfra_DeleteCheckpoint(t *testing.T) {
 						},
 					},
 				}
-				_, err := clientSet.SandboxClient.ApiV1alpha1().SandboxTemplates(namespace).Create(ctx, tmpl, metav1.CreateOptions{})
-				require.NoError(t, err)
-
-				// Re-read to get server-assigned UID
-				tmpl, err = clientSet.SandboxClient.ApiV1alpha1().SandboxTemplates(namespace).Get(ctx, tt.checkpointID, metav1.GetOptions{})
-				require.NoError(t, err)
+				require.NoError(t, c.Create(ctx, tmpl))
 
 				// Create Checkpoint with owner annotation
 				cp := &v1alpha1.Checkpoint{
@@ -1038,15 +1028,12 @@ func TestInfra_DeleteCheckpoint(t *testing.T) {
 						},
 					}
 				}
-				_, err = clientSet.SandboxClient.ApiV1alpha1().Checkpoints(namespace).Create(ctx, cp, metav1.CreateOptions{})
-				require.NoError(t, err)
+				require.NoError(t, c.Create(ctx, cp))
 
-				// Update checkpoint status with checkpointId
-				cp, err = clientSet.SandboxClient.ApiV1alpha1().Checkpoints(namespace).Get(ctx, tt.checkpointID, metav1.GetOptions{})
-				require.NoError(t, err)
+				require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(cp), cp))
 				cp.Status.CheckpointId = tt.checkpointID
-				_, err = clientSet.SandboxClient.ApiV1alpha1().Checkpoints(namespace).UpdateStatus(ctx, cp, metav1.UpdateOptions{})
-				require.NoError(t, err)
+
+				require.NoError(t, c.Status().Update(ctx, cp))
 
 				// Wait for informer sync
 				require.Eventually(t, func() bool {
@@ -1063,14 +1050,14 @@ func TestInfra_DeleteCheckpoint(t *testing.T) {
 			// Set up decorator mocks
 			if tt.mockDeleteTemplate != nil {
 				orig := DefaultDeleteSandboxTemplate
-				DefaultDeleteSandboxTemplate = func(ctx context.Context, client *clients.ClientSet, namespace, name string) error {
+				DefaultDeleteSandboxTemplate = func(ctx context.Context, c client.Client, namespace, name string) error {
 					return tt.mockDeleteTemplate
 				}
 				t.Cleanup(func() { DefaultDeleteSandboxTemplate = orig })
 			}
 			if tt.mockDeleteCheckpoint != nil {
 				orig := DefaultDeleteCheckpointCR
-				DefaultDeleteCheckpointCR = func(ctx context.Context, client *clients.ClientSet, namespace, name string) error {
+				DefaultDeleteCheckpointCR = func(ctx context.Context, c client.Client, namespace, name string) error {
 					return tt.mockDeleteCheckpoint
 				}
 				t.Cleanup(func() { DefaultDeleteCheckpointCR = orig })

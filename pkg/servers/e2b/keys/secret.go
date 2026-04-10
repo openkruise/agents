@@ -9,16 +9,15 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/util/retry"
-	"k8s.io/klog/v2"
-
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/client-go/util/retry"
+	"k8s.io/klog/v2"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 var (
@@ -41,10 +40,11 @@ type secretKeyStorage struct {
 	Namespace string
 	AdminKey  string
 
-	Client kubernetes.Interface
+	Client client.Client
+	// APIReader is used for reading secrets before cache is started (e.g., during Init).
+	APIReader client.Reader
 	stop   chan struct{}
 	done   chan struct{}
-
 	stopOnce sync.Once
 
 	idxByKey sync.Map
@@ -65,8 +65,8 @@ func (k *secretKeyStorage) Init(ctx context.Context) error {
 	log := klog.FromContext(ctx)
 	log.Info("ensuring api-key store secret")
 
-	secret, err := k.Client.CoreV1().Secrets(k.Namespace).Get(ctx, KeySecretName, metav1.GetOptions{})
-	if err != nil {
+	secret := &corev1.Secret{}
+	if err := k.APIReader.Get(ctx, client.ObjectKey{Namespace: k.Namespace, Name: KeySecretName}, secret); err != nil {
 		return err
 	}
 
@@ -79,21 +79,21 @@ func (k *secretKeyStorage) Init(ctx context.Context) error {
 			Key:       k.AdminKey,
 			Name:      "admin",
 		}
-		if err = k.retryUpdateSecret(ctx, AdminKeyID.String(), adminKey); err != nil && !apierrors.IsConflict(err) {
+		if err := k.retryUpdateSecret(ctx, AdminKeyID.String(), adminKey); err != nil && !apierrors.IsConflict(err) {
 			return err
 		} else if err == nil {
 			log.Info("create admin key success", "key", adminKey.Key)
 		}
 	}
 
-	return k.refresh(ctx)
+	return k.refresh(ctx, k.APIReader)
 }
 
-func (k *secretKeyStorage) refresh(ctx context.Context) error {
+func (k *secretKeyStorage) refresh(ctx context.Context, reader client.Reader) error {
 	log := klog.FromContext(ctx)
 	log.Info("refreshing api-key store")
-	secret, err := k.Client.CoreV1().Secrets(k.Namespace).Get(ctx, KeySecretName, metav1.GetOptions{})
-	if err != nil {
+	secret := &corev1.Secret{}
+	if err := reader.Get(ctx, client.ObjectKey{Namespace: k.Namespace, Name: KeySecretName}, secret); err != nil {
 		return err
 	}
 	var ids, keys = sets.NewString(), sets.NewString()
@@ -136,7 +136,7 @@ func (k *secretKeyStorage) Run() {
 		for {
 			select {
 			case <-ticker.C:
-				if err := k.refresh(ctx); err != nil {
+				if err := k.refresh(ctx, k.Client); err != nil {
 					log.Error(err, "failed to refresh key store")
 				}
 			case <-k.stop:
@@ -179,8 +179,8 @@ func (k *secretKeyStorage) retryUpdateSecret(ctx context.Context, id string, api
 }
 
 func (k *secretKeyStorage) updateSecret(ctx context.Context, id string, apiKey *models.CreatedTeamAPIKey) error {
-	secret, err := k.Client.CoreV1().Secrets(k.Namespace).Get(ctx, KeySecretName, metav1.GetOptions{})
-	if err != nil {
+	secret := &corev1.Secret{}
+	if err := k.APIReader.Get(ctx, client.ObjectKey{Namespace: k.Namespace, Name: KeySecretName}, secret); err != nil {
 		return err
 	}
 	if secret.Data == nil {
@@ -195,8 +195,7 @@ func (k *secretKeyStorage) updateSecret(ctx context.Context, id string, apiKey *
 	} else {
 		delete(secret.Data, id)
 	}
-	_, err = k.Client.CoreV1().Secrets(k.Namespace).Update(ctx, secret, metav1.UpdateOptions{})
-	return err
+	return k.Client.Update(ctx, secret)
 }
 
 func (k *secretKeyStorage) storeKey(apiKey *models.CreatedTeamAPIKey) {

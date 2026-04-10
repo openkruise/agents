@@ -16,15 +16,18 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/rand"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/klog/v2"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/client/clientset/versioned"
-	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
@@ -44,18 +47,12 @@ func GetSbsOwnerReference() []metav1.OwnerReference {
 	return []metav1.OwnerReference{*metav1.NewControllerRef(sbs, v1alpha1.SandboxSetControllerKind)}
 }
 
-func CreateSandboxWithStatus(t *testing.T, client versioned.Interface, sbx *v1alpha1.Sandbox) {
-	_, err := client.ApiV1alpha1().Sandboxes(sbx.Namespace).Create(t.Context(), sbx, metav1.CreateOptions{})
+func CreateSandboxWithStatus(t *testing.T, c client.Client, sbx *v1alpha1.Sandbox) {
+	t.Helper()
+	err := c.Create(t.Context(), sbx)
 	require.NoError(t, err)
-	_, err = client.ApiV1alpha1().Sandboxes(sbx.Namespace).UpdateStatus(t.Context(), sbx, metav1.UpdateOptions{})
+	err = c.Status().Update(t.Context(), sbx)
 	require.NoError(t, err)
-}
-
-func EnsureSandboxInCache(t *testing.T, cache *Cache, sbx *v1alpha1.Sandbox) {
-	require.Eventually(t, func() bool {
-		_, err := cache.GetClaimedSandbox(sandboxutils.GetSandboxID(sbx))
-		return err == nil
-	}, time.Second, 10*time.Millisecond, "get sandbox from cache timeout")
 }
 
 var metricsAnnotationKey = v1alpha1.InternalPrefix + "metrics"
@@ -72,11 +69,11 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 	utils.InitLogOutput()
 
 	origCreateSandbox := DefaultCreateSandbox
-	DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, client *clients.ClientSet, cache infra.CacheProvider) (*v1alpha1.Sandbox, error) {
+	DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client, cache infra.CacheProvider) (*v1alpha1.Sandbox, error) {
 		if sbx.Name == "" && sbx.GenerateName != "" {
 			sbx.Name = sbx.GenerateName + rand.String(5)
 		}
-		created, err := origCreateSandbox(ctx, sbx, client, cache)
+		created, err := origCreateSandbox(ctx, sbx, c, cache)
 		if err != nil {
 			return nil, err
 		}
@@ -92,11 +89,10 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 				PodIP: "1.2.3.4",
 			},
 		}
-		created, err = client.ApiV1alpha1().Sandboxes(created.Namespace).UpdateStatus(ctx, created, metav1.UpdateOptions{})
+		err = c.Status().Update(ctx, created)
 		if err != nil {
 			return nil, err
 		}
-		time.Sleep(50 * time.Millisecond)
 		return created, nil
 	}
 	t.Cleanup(func() { DefaultCreateSandbox = origCreateSandbox })
@@ -339,7 +335,7 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 						EmbeddedSandboxTemplate: tmpl,
 					},
 				}
-				_, err := infra.Client.ApiV1alpha1().SandboxSets("default").Create(t.Context(), &sbs, metav1.CreateOptions{})
+				err := infra.Cache.GetClient().Create(t.Context(), &sbs)
 				require.NoError(t, err)
 			},
 			postCheck: func(t *testing.T, sbx infra.Sandbox) {
@@ -377,7 +373,7 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 						EmbeddedSandboxTemplate: tmpl,
 					},
 				}
-				_, err := infra.Client.ApiV1alpha1().SandboxSets("default").Create(t.Context(), &sbs, metav1.CreateOptions{})
+				err := infra.Cache.GetClient().Create(t.Context(), &sbs)
 				require.NoError(t, err)
 			},
 			postCheck: func(t *testing.T, sbx infra.Sandbox) {
@@ -405,7 +401,7 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 			if tt.options.ClaimTimeout <= 0 {
 				tt.options.ClaimTimeout = 50 * time.Millisecond
 			}
-			testInfra, client := NewTestInfra(t, tt.infraOptions)
+			testInfra, fc := NewTestInfra(t, tt.infraOptions)
 			now := metav1.Now()
 			for i := 0; i < tt.available; i++ {
 				sbx := &v1alpha1.Sandbox{
@@ -439,10 +435,10 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 				if tt.preModifier != nil {
 					tt.preModifier(sbx, testInfra)
 				}
-				CreateSandboxWithStatus(t, client.SandboxClient, sbx)
+				CreateSandboxWithStatus(t, fc, sbx)
 				require.Eventually(t, func() bool {
-					_, ok, err := testInfra.Cache.sandboxInformer.GetStore().GetByKey(fmt.Sprintf("%s/%s", sbx.Namespace, sbx.Name))
-					return err == nil && ok
+					var got v1alpha1.Sandbox
+					return fc.Get(t.Context(), types.NamespacedName{Namespace: sbx.Namespace, Name: sbx.Name}, &got) == nil
 				}, 100*time.Millisecond, 5*time.Millisecond)
 			}
 
@@ -616,7 +612,7 @@ func TestClaimSandboxFailed(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			tt.options.ClaimTimeout = 100 * time.Millisecond
-			testInfra, client := NewTestInfra(t)
+			testInfra, fc := NewTestInfra(t)
 			name := "test-sbx"
 			sbx := &v1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{
@@ -661,10 +657,10 @@ func TestClaimSandboxFailed(t *testing.T) {
 			}
 			state, reason := sandboxutils.GetSandboxState(sbx)
 			require.Equal(t, v1alpha1.SandboxStateAvailable, state, reason)
-			CreateSandboxWithStatus(t, client.SandboxClient, sbx)
+			CreateSandboxWithStatus(t, fc, sbx)
 			require.Eventually(t, func() bool {
-				_, ok, err := testInfra.Cache.sandboxInformer.GetStore().GetByKey(fmt.Sprintf("%s/%s", sbx.Namespace, sbx.Name))
-				return err == nil && ok
+				var got v1alpha1.Sandbox
+				return fc.Get(t.Context(), types.NamespacedName{Namespace: sbx.Namespace, Name: sbx.Name}, &got) == nil
 			}, 100*time.Millisecond, 5*time.Millisecond)
 			var ctx context.Context
 			if tt.getContext == nil {
@@ -674,10 +670,10 @@ func TestClaimSandboxFailed(t *testing.T) {
 			}
 			opts, err := ValidateAndInitClaimOptions(tt.options)
 			require.NoError(t, err)
-			_, _, err = TryClaimSandbox(ctx, opts, &testInfra.pickCache, testInfra.Cache, client, testInfra.claimLockChannel, testInfra.createLimiter)
+			_, _, err = TryClaimSandbox(ctx, opts, &testInfra.pickCache, testInfra.Cache, fc, testInfra.claimLockChannel, testInfra.createLimiter)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.expectError)
-			_, err = client.ApiV1alpha1().Sandboxes(sbx.Namespace).Get(t.Context(), name, metav1.GetOptions{})
+			err = fc.Get(t.Context(), types.NamespacedName{Namespace: sbx.Namespace, Name: name}, &v1alpha1.Sandbox{})
 			if tt.options.ReserveFailedSandbox {
 				assert.NoError(t, err)
 			} else {
@@ -783,7 +779,7 @@ func TestCheckSandboxInplaceUpdate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			testInfra, client := NewTestInfra(t)
+			testInfra, fc := NewTestInfra(t)
 			template := "test-template"
 			sbs := &v1alpha1.SandboxSet{
 				ObjectMeta: metav1.ObjectMeta{
@@ -791,11 +787,11 @@ func TestCheckSandboxInplaceUpdate(t *testing.T) {
 					Namespace: "default",
 				},
 			}
-			_, err := client.ApiV1alpha1().SandboxSets("default").Create(context.Background(), sbs, metav1.CreateOptions{})
+			err := fc.Create(context.Background(), sbs)
 			require.NoError(t, err)
-			require.Eventually(t, func() bool {
-				return testInfra.HasTemplate(template)
-			}, 100*time.Millisecond, 5*time.Millisecond)
+			// MockManager doesn't run reconcilers, so register template directly
+			_, err = testInfra.reconcileSandboxSet(context.Background(), sbs, false)
+			require.NoError(t, err)
 			conditions := []metav1.Condition{
 				{
 					Type:    string(v1alpha1.SandboxConditionReady),
@@ -825,8 +821,7 @@ func TestCheckSandboxInplaceUpdate(t *testing.T) {
 					ObservedGeneration: tt.observedGeneration,
 				},
 			}
-			CreateSandboxWithStatus(t, client.SandboxClient, sbx)
-			time.Sleep(10 * time.Millisecond)
+			CreateSandboxWithStatus(t, fc, sbx)
 
 			gotSbx, err := testInfra.Cache.GetClaimedSandbox(sandboxutils.GetSandboxID(sbx))
 			assert.NoError(t, err)
@@ -1591,7 +1586,7 @@ func shouldReturnOnCompleted(state podResizeStateSnapshot, sawResizeSignal bool)
 	return sawResizeSignal && state.isSettledWithoutDeferral()
 }
 
-func waitForPodResizeState(ctx context.Context, client *clients.ClientSet, namespace, name string,
+func waitForPodResizeState(ctx context.Context, c client.Client, namespace, name string,
 	targetPod *corev1.Pod, timeout time.Duration) error {
 	log := klog.FromContext(ctx).WithValues("pod", klog.KRef(namespace, name))
 	if timeout <= 0 {
@@ -1603,11 +1598,11 @@ func waitForPodResizeState(ctx context.Context, client *clients.ClientSet, names
 	lastPendingReason := ""
 	lastPendingMessage := ""
 	err := wait.PollUntilContextTimeout(ctx, 200*time.Millisecond, timeout, true, func(ctx context.Context) (bool, error) {
-		pod, err := client.K8sClient.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
-		if err != nil {
+		var pod corev1.Pod
+		if err := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, &pod); err != nil {
 			return false, err
 		}
-		state := inspectPodResizeState(pod, targets)
+		state := inspectPodResizeState(&pod, targets)
 		if state.hasResizeSignal() {
 			sawResizeSignal = true
 		}
@@ -1632,6 +1627,10 @@ func waitForPodResizeState(ctx context.Context, client *clients.ClientSet, names
 }
 
 func TestWaitForPodResizeState(t *testing.T) {
+	scheme := runtime.NewScheme()
+	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(v1alpha1.AddToScheme(scheme))
+
 	targetPod := &corev1.Pod{
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{
@@ -1708,25 +1707,27 @@ func TestWaitForPodResizeState(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			client := clients.NewFakeClientSet(t)
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(&corev1.Pod{}).
+				Build()
 			pod := &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-pod",
 					Namespace: "default",
 				},
-				Status: corev1.PodStatus{
-					Conditions:        tt.conditions,
-					Resize:            tt.resizeStatus,
-					ContainerStatuses: tt.containerStatus,
-				},
 			}
-			createdPod, err := client.K8sClient.CoreV1().Pods("default").Create(t.Context(), pod, metav1.CreateOptions{})
+			err := fakeClient.Create(t.Context(), pod)
 			require.NoError(t, err)
-			createdPod.Status = pod.Status
-			_, err = client.K8sClient.CoreV1().Pods("default").UpdateStatus(t.Context(), createdPod, metav1.UpdateOptions{})
+			pod.Status = corev1.PodStatus{
+				Conditions:        tt.conditions,
+				Resize:            tt.resizeStatus,
+				ContainerStatuses: tt.containerStatus,
+			}
+			err = fakeClient.Status().Update(t.Context(), pod)
 			require.NoError(t, err)
 
-			err = waitForPodResizeState(t.Context(), client, "default", "test-pod", targetPod, 500*time.Millisecond)
+			err = waitForPodResizeState(t.Context(), fakeClient, "default", "test-pod", targetPod, 500*time.Millisecond)
 			if tt.expectErr != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.expectErr)
@@ -1737,55 +1738,6 @@ func TestWaitForPodResizeState(t *testing.T) {
 	}
 }
 
-func KeepMakingAllSandboxesReady(ctx context.Context, client clients.SandboxClient) {
-	ticker := time.NewTicker(10 * time.Millisecond)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			sandboxList, err := client.ApiV1alpha1().Sandboxes("default").List(context.Background(), metav1.ListOptions{})
-			if err != nil {
-				// Don't use require.NoError in goroutine - causes data race
-				continue
-			}
-			for _, sbx := range sandboxList.Items {
-				// Skip already ready sandboxes to reduce unnecessary updates
-				currentState, _ := sandboxutils.GetSandboxState(&sbx)
-				if currentState == v1alpha1.SandboxStateRunning {
-					continue
-				}
-
-				sbx.Status = v1alpha1.SandboxStatus{
-					Phase:              v1alpha1.SandboxRunning,
-					ObservedGeneration: sbx.Generation, // Important: sync generation
-					Conditions: []metav1.Condition{
-						{
-							Type:   string(v1alpha1.SandboxConditionReady),
-							Status: metav1.ConditionTrue,
-							Reason: v1alpha1.SandboxReadyReasonPodReady,
-						},
-					},
-					PodInfo: v1alpha1.PodInfo{
-						PodIP: "1.2.3.4",
-					},
-				}
-				updated, err := client.ApiV1alpha1().Sandboxes(sbx.Namespace).UpdateStatus(context.Background(), &sbx, metav1.UpdateOptions{})
-				if err != nil {
-					fmt.Printf("failed to update sandbox status: %v\n", err)
-					continue
-				}
-				// Record the expected version to help InplaceRefresh
-				if updated != nil {
-					utils.ResourceVersionExpectationExpect(updated)
-				}
-			}
-		}
-	}
-}
-
 func TestNewSandboxFromTemplate_RateLimitExceeded(t *testing.T) {
 	utils.InitLogOutput()
 
@@ -1793,7 +1745,7 @@ func TestNewSandboxFromTemplate_RateLimitExceeded(t *testing.T) {
 	limiter := rate.NewLimiter(rate.Limit(1), 0)
 
 	// Create test infrastructure
-	infraInstance, client := NewTestInfra(t)
+	infraInstance, fc := NewTestInfra(t)
 	defer infraInstance.Stop(t.Context())
 
 	template := "test-template"
@@ -1819,7 +1771,7 @@ func TestNewSandboxFromTemplate_RateLimitExceeded(t *testing.T) {
 			},
 		},
 	}
-	_, err := client.ApiV1alpha1().SandboxSets("default").Create(context.Background(), sbs, metav1.CreateOptions{})
+	err := fc.Create(t.Context(), sbs)
 	require.NoError(t, err)
 
 	// Wait for cache to sync
@@ -1835,7 +1787,7 @@ func TestNewSandboxFromTemplate_RateLimitExceeded(t *testing.T) {
 	}
 
 	// Call the function
-	sbx, _, err := newSandboxFromSandboxSet(opts, infraInstance.Cache, infraInstance.Client, limiter)
+	sbx, _, err := newSandboxFromSandboxSet(opts, infraInstance.Cache, limiter)
 
 	// Assertions
 	assert.Nil(t, sbx, "sandbox should be nil when rate limited")

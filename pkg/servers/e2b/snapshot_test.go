@@ -6,17 +6,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/rand"
-
 	"github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/rand"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 func TestCreateSnapshot(t *testing.T) {
@@ -40,7 +38,7 @@ func TestCreateSnapshot(t *testing.T) {
 
 	// Decorator 1: DefaultCreateSandboxTemplate - handle FakeClient not supporting GenerateName
 	origCreateSandboxTemplate := sandboxcr.DefaultCreateSandboxTemplate
-	sandboxcr.DefaultCreateSandboxTemplate = func(ctx context.Context, client clients.SandboxClient, tmpl *v1alpha1.SandboxTemplate) (*v1alpha1.SandboxTemplate, error) {
+	sandboxcr.DefaultCreateSandboxTemplate = func(ctx context.Context, c ctrlclient.Client, tmpl *v1alpha1.SandboxTemplate) (*v1alpha1.SandboxTemplate, error) {
 		// Handle GenerateName for FakeClient
 		if tmpl.Name == "" && tmpl.GenerateName != "" {
 			tmpl.Name = tmpl.GenerateName + rand.String(5)
@@ -54,18 +52,18 @@ func TestCreateSnapshot(t *testing.T) {
 				tmpl.UID = override.UID
 			}
 		}
-		return origCreateSandboxTemplate(ctx, client, tmpl)
+		return origCreateSandboxTemplate(ctx, c, tmpl)
 	}
 	t.Cleanup(func() { sandboxcr.DefaultCreateSandboxTemplate = origCreateSandboxTemplate })
 
 	// Decorator 2: DefaultCreateCheckpoint - set checkpoint status to Succeeded with CheckpointId
 	origCreateCheckpoint := sandboxcr.DefaultCreateCheckpoint
-	sandboxcr.DefaultCreateCheckpoint = func(ctx context.Context, client clients.SandboxClient, cp *v1alpha1.Checkpoint) (*v1alpha1.Checkpoint, error) {
+	sandboxcr.DefaultCreateCheckpoint = func(ctx context.Context, c ctrlclient.Client, cp *v1alpha1.Checkpoint) (*v1alpha1.Checkpoint, error) {
 		// Set status from context if present
 		if status, ok := ctx.Value(cpStatusKey{}).(v1alpha1.CheckpointStatus); ok {
 			cp.Status = status
 		}
-		created, err := origCreateCheckpoint(ctx, client, cp)
+		created, err := origCreateCheckpoint(ctx, c, cp)
 		if err != nil {
 			return nil, err
 		}
@@ -232,9 +230,10 @@ func TestCreateSnapshot(t *testing.T) {
 			getSandbox: func(t *testing.T) string {
 				sandboxID := claimSandbox(t)
 				// Update sandbox to paused state
-				sbx := GetSandbox(t, sandboxID, controller.client.SandboxClient)
+				fc := getTestCRClient(controller)
+				sbx := GetSandbox(t, sandboxID, fc)
 				sbx.Spec.Paused = true
-				_, err := controller.client.ApiV1alpha1().Sandboxes(sbx.Namespace).Update(context.Background(), sbx, metav1.UpdateOptions{})
+				err := fc.Update(context.Background(), sbx)
 				require.NoError(t, err)
 				time.Sleep(200 * time.Millisecond) // wait cache sync
 				return sandboxID

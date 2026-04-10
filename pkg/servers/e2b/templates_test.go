@@ -1,3 +1,19 @@
+/*
+Copyright 2025.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package e2b
 
 import (
@@ -5,22 +21,18 @@ import (
 	"fmt"
 	"net/http"
 	"testing"
-	"time"
 
 	"github.com/google/uuid"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
-
 	"github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 func TestDeleteTemplate(t *testing.T) {
@@ -85,27 +97,27 @@ func TestDeleteTemplate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			controller, _, teardown := Setup(t)
+			controller, fc, teardown := Setup(t)
 			defer teardown()
 
 			if tt.setupTemplate {
 				_ = CreateCheckpointAndTemplate(t, controller, tt.templateID)
 				// Set owner annotation on the checkpoint
-				cp, err := controller.client.SandboxClient.ApiV1alpha1().Checkpoints(Namespace).Get(t.Context(), tt.templateID, metav1.GetOptions{})
+				cp := &v1alpha1.Checkpoint{}
+				err := fc.Get(t.Context(), ctrlclient.ObjectKey{Namespace: Namespace, Name: tt.templateID}, cp)
 				require.NoError(t, err)
 				if cp.Annotations == nil {
 					cp.Annotations = map[string]string{}
 				}
 				cp.Annotations[v1alpha1.AnnotationOwner] = user.ID.String()
-				_, err = controller.client.SandboxClient.ApiV1alpha1().Checkpoints(Namespace).Update(t.Context(), cp, metav1.UpdateOptions{})
+				err = fc.Update(t.Context(), cp)
 				require.NoError(t, err)
-				time.Sleep(50 * time.Millisecond) // wait for cache sync
 			}
 
 			// Set up decorator mock for template deletion
 			if tt.mockDeleteTemplate != nil {
 				orig := sandboxcr.DefaultDeleteSandboxTemplate
-				sandboxcr.DefaultDeleteSandboxTemplate = func(ctx context.Context, c *clients.ClientSet, namespace, name string) error {
+				sandboxcr.DefaultDeleteSandboxTemplate = func(ctx context.Context, c ctrlclient.Client, namespace, name string) error {
 					return tt.mockDeleteTemplate
 				}
 				t.Cleanup(func() { sandboxcr.DefaultDeleteSandboxTemplate = orig })
@@ -141,7 +153,7 @@ func TestListTemplates(t *testing.T) {
 
 	tests := []struct {
 		name         string
-		setupPools   func(t *testing.T, controller *Controller) []func()
+		setupPools   func(t *testing.T, controller *Controller, fc ctrlclient.Client) []func()
 		queryTeamID  string
 		user         *models.CreatedTeamAPIKey
 		expectStatus int
@@ -151,10 +163,10 @@ func TestListTemplates(t *testing.T) {
 	}{
 		{
 			name: "list templates successfully",
-			setupPools: func(t *testing.T, controller *Controller) []func() {
+			setupPools: func(t *testing.T, controller *Controller, fc ctrlclient.Client) []func() {
 				// Create pools in sandbox-system namespace (systemNamespace) so they can be found by ListTemplates
-				cleanup1 := CreateSandboxPoolInNamespace(t, controller, "test-pool-1", 2, "sandbox-system")
-				cleanup2 := CreateSandboxPoolInNamespace(t, controller, "test-pool-2", 1, "sandbox-system")
+				cleanup1 := CreateSandboxPool(t, controller, "test-pool-1", 2, CreateSandboxPoolOptions{Namespace: "sandbox-system"})
+				cleanup2 := CreateSandboxPool(t, controller, "test-pool-2", 1, CreateSandboxPoolOptions{Namespace: "sandbox-system"})
 				return []func(){cleanup1, cleanup2}
 			},
 			queryTeamID:  "",
@@ -181,8 +193,8 @@ func TestListTemplates(t *testing.T) {
 		},
 		{
 			name: "list templates with teamID filter",
-			setupPools: func(t *testing.T, controller *Controller) []func() {
-				cleanup1 := CreateSandboxPoolInNamespace(t, controller, "team-a-pool", 1, "team-a")
+			setupPools: func(t *testing.T, controller *Controller, fc ctrlclient.Client) []func() {
+				cleanup1 := CreateSandboxPool(t, controller, "team-a-pool", 1, CreateSandboxPoolOptions{Namespace: "team-a"})
 				return []func(){cleanup1}
 			},
 			queryTeamID:  "team-a",
@@ -197,7 +209,7 @@ func TestListTemplates(t *testing.T) {
 		},
 		{
 			name:         "list templates with no pools",
-			setupPools:   func(t *testing.T, controller *Controller) []func() { return nil },
+			setupPools:   func(t *testing.T, controller *Controller, fc ctrlclient.Client) []func() { return nil },
 			queryTeamID:  "",
 			user:         user,
 			expectStatus: http.StatusOK,
@@ -206,7 +218,7 @@ func TestListTemplates(t *testing.T) {
 		},
 		{
 			name:         "user is nil returns error",
-			setupPools:   func(t *testing.T, controller *Controller) []func() { return nil },
+			setupPools:   func(t *testing.T, controller *Controller, fc ctrlclient.Client) []func() { return nil },
 			queryTeamID:  "",
 			user:         nil,
 			expectStatus: http.StatusInternalServerError,
@@ -216,12 +228,12 @@ func TestListTemplates(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			controller, _, teardown := Setup(t)
+			controller, fc, teardown := Setup(t)
 			defer teardown()
 
 			var cleanups []func()
 			if tt.setupPools != nil {
-				cleanups = tt.setupPools(t, controller)
+				cleanups = tt.setupPools(t, controller, fc)
 			}
 			for _, cleanup := range cleanups {
 				defer cleanup()
@@ -258,7 +270,7 @@ func TestGetTemplate(t *testing.T) {
 
 	tests := []struct {
 		name         string
-		setupPool    func(t *testing.T, controller *Controller) func()
+		setupPool    func(t *testing.T, controller *Controller, fc ctrlclient.Client) func()
 		templateID   string
 		user         *models.CreatedTeamAPIKey
 		expectStatus int
@@ -267,9 +279,9 @@ func TestGetTemplate(t *testing.T) {
 	}{
 		{
 			name: "get template successfully",
-			setupPool: func(t *testing.T, controller *Controller) func() {
+			setupPool: func(t *testing.T, controller *Controller, fc ctrlclient.Client) func() {
 				// Create pool in sandbox-system namespace (systemNamespace) so it can be found by GetTemplate
-				return CreateSandboxPoolInNamespace(t, controller, "test-tmpl-get", 2, "sandbox-system")
+				return CreateSandboxPool(t, controller, "test-tmpl-get", 2, CreateSandboxPoolOptions{Namespace: "sandbox-system"})
 			},
 			templateID:   "test-tmpl-get",
 			user:         user,
@@ -293,7 +305,7 @@ func TestGetTemplate(t *testing.T) {
 		},
 		{
 			name:         "template not found",
-			setupPool:    func(t *testing.T, controller *Controller) func() { return nil },
+			setupPool:    func(t *testing.T, controller *Controller, fc ctrlclient.Client) func() { return nil },
 			templateID:   "non-existent-template",
 			user:         user,
 			expectStatus: http.StatusNotFound,
@@ -301,7 +313,7 @@ func TestGetTemplate(t *testing.T) {
 		},
 		{
 			name:         "user is nil returns error",
-			setupPool:    func(t *testing.T, controller *Controller) func() { return nil },
+			setupPool:    func(t *testing.T, controller *Controller, fc ctrlclient.Client) func() { return nil },
 			templateID:   "test-tmpl",
 			user:         nil,
 			expectStatus: http.StatusInternalServerError,
@@ -311,12 +323,12 @@ func TestGetTemplate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			controller, _, teardown := Setup(t)
+			controller, fc, teardown := Setup(t)
 			defer teardown()
 
 			var cleanup func()
 			if tt.setupPool != nil {
-				cleanup = tt.setupPool(t, controller)
+				cleanup = tt.setupPool(t, controller, fc)
 			}
 			if cleanup != nil {
 				defer cleanup()
@@ -340,92 +352,6 @@ func TestGetTemplate(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-// CreateSandboxPoolInNamespace creates a sandbox pool in a specific namespace
-func CreateSandboxPoolInNamespace(t *testing.T, controller *Controller, name string, available int, namespace string) func() {
-	tmpl := v1alpha1.EmbeddedSandboxTemplate{
-		Template: &corev1.PodTemplateSpec{
-			Spec: corev1.PodSpec{
-				Containers: []corev1.Container{
-					{
-						Name:  "main",
-						Image: "old-image",
-					},
-				},
-			},
-		},
-	}
-	sbs := &v1alpha1.SandboxSet{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
-			UID:       types.UID(uuid.NewString()),
-		},
-		Spec: v1alpha1.SandboxSetSpec{
-			EmbeddedSandboxTemplate: tmpl,
-		},
-	}
-	client := controller.client.SandboxClient
-	_, err := client.ApiV1alpha1().SandboxSets(namespace).Create(t.Context(), sbs, metav1.CreateOptions{})
-	if err != nil && !errors.IsAlreadyExists(err) {
-		require.NoError(t, err)
-	}
-	require.Eventually(t, func() bool {
-		return controller.manager.GetInfra().HasTemplate(name)
-	}, time.Second, 10*time.Millisecond)
-	now := metav1.Now()
-	for i := 0; i < available; i++ {
-		sbx := &v1alpha1.Sandbox{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      fmt.Sprintf("%s-%d", name, i),
-				Namespace: namespace,
-				Labels: map[string]string{
-					v1alpha1.LabelSandboxTemplate:  name,
-					v1alpha1.LabelSandboxIsClaimed: "false",
-				},
-				Annotations:       map[string]string{},
-				OwnerReferences:   GetSbsOwnerReference(sbs),
-				ResourceVersion:   "1",
-				UID:               types.UID(uuid.NewString()),
-				CreationTimestamp: now,
-			},
-			Spec: v1alpha1.SandboxSpec{
-				EmbeddedSandboxTemplate: tmpl,
-			},
-			Status: v1alpha1.SandboxStatus{
-				Phase: v1alpha1.SandboxRunning,
-				Conditions: []metav1.Condition{
-					{
-						Type:   string(v1alpha1.SandboxConditionReady),
-						Status: metav1.ConditionTrue,
-					},
-					{
-						Type:   string(v1alpha1.SandboxConditionPaused),
-						Status: metav1.ConditionTrue,
-					},
-					{
-						Type:   string(v1alpha1.SandboxConditionResumed),
-						Status: metav1.ConditionTrue,
-					},
-				},
-				PodInfo: v1alpha1.PodInfo{
-					PodIP: "1.2.3.4",
-				},
-			},
-		}
-		CreateSandboxWithStatus(t, client, sbx)
-	}
-	require.Eventually(t, func() bool {
-		pool, _ := controller.cache.ListSandboxesInPool(name)
-		return len(pool) == available && controller.manager.GetInfra().HasTemplate(name)
-	}, time.Minute, 100*time.Millisecond)
-	return func() {
-		for i := 0; i < available; i++ {
-			assert.NoError(t, client.ApiV1alpha1().Sandboxes(namespace).Delete(context.Background(), fmt.Sprintf("%s-%d", name, i), metav1.DeleteOptions{}))
-		}
-		assert.NoError(t, client.ApiV1alpha1().SandboxSets(namespace).Delete(context.Background(), name, metav1.DeleteOptions{}))
 	}
 }
 

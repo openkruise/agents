@@ -6,9 +6,13 @@ import (
 
 	"github.com/envoyproxy/envoy/contrib/golang/common/go/api"
 	envoyhttp "github.com/envoyproxy/envoy/contrib/golang/filters/http/source/go/pkg/http"
-	"k8s.io/client-go/kubernetes"
+	"k8s.io/apimachinery/pkg/runtime"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/controller"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/filter"
@@ -39,10 +43,13 @@ func init() {
 			os.Exit(1)
 		}
 
-		// Create Kubernetes client
-		client, err := kubernetes.NewForConfig(cfg)
+		// Create controller-runtime client for peer discovery
+		scheme := runtime.NewScheme()
+		utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+		utilruntime.Must(agentsv1alpha1.AddToScheme(scheme))
+		client, err := ctrlclient.New(cfg, ctrlclient.Options{Scheme: scheme})
 		if err != nil {
-			api.LogErrorf("failed to create kubernetes client: %v", err)
+			api.LogErrorf("failed to create controller-runtime client: %v", err)
 			os.Exit(1)
 		}
 

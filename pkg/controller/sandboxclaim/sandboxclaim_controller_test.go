@@ -21,6 +21,10 @@ import (
 	"testing"
 	"time"
 
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/controller/sandboxclaim/core"
+	cachetest "github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr/cache/cachetest"
+	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -28,11 +32,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-
-	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/controller/sandboxclaim/core"
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
-	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 )
 
 func TestReconciler_Reconcile_BasicFlow(t *testing.T) {
@@ -103,7 +102,7 @@ func TestReconciler_Reconcile_BasicFlow(t *testing.T) {
 			reconciler := &Reconciler{
 				Client:   fakeClient,
 				Scheme:   scheme,
-				controls: core.NewClaimControl(fakeClient, fakeRecorder, nil, nil),
+				controls: core.NewClaimControl(fakeClient, fakeRecorder, nil),
 				recorder: fakeRecorder,
 			}
 
@@ -146,22 +145,6 @@ func TestReconciler_Reconcile_BasicFlow(t *testing.T) {
 
 func TestReconciler_Reconcile_Claiming(t *testing.T) {
 	utils.InitLogOutput()
-	scheme := runtime.NewScheme()
-	_ = agentsv1alpha1.AddToScheme(scheme)
-
-	cache, clientSet, err := sandboxcr.NewTestCache(t)
-	if err != nil {
-		t.Fatalf("Failed to create cache: %v", err)
-	}
-	sandboxClient := clientSet.SandboxClient
-
-	// Start cache
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go func() {
-		_ = cache.Run(ctx)
-	}()
-	time.Sleep(200 * time.Millisecond) // Wait for cache to start
 
 	claim := &agentsv1alpha1.SandboxClaim{
 		ObjectMeta: metav1.ObjectMeta{
@@ -254,29 +237,26 @@ func TestReconciler_Reconcile_Claiming(t *testing.T) {
 		},
 	}
 
-	// Pre-create sandboxes in sandboxClient (for cache)
-	_, err = sandboxClient.ApiV1alpha1().Sandboxes(sandbox1.Namespace).Create(ctx, sandbox1, metav1.CreateOptions{})
+	// Create cache with initial objects
+	cache, testClient, err := cachetest.NewTestCacheV2(t, claim, sandboxSet, sandbox1, sandbox2)
 	if err != nil {
-		t.Fatalf("Failed to create sandbox1 in sandboxClient: %v", err)
+		t.Fatalf("Failed to create cache: %v", err)
 	}
-	_, err = sandboxClient.ApiV1alpha1().Sandboxes(sandbox2.Namespace).Create(ctx, sandbox2, metav1.CreateOptions{})
-	if err != nil {
-		t.Fatalf("Failed to create sandbox2 in sandboxClient: %v", err)
-	}
-	time.Sleep(300 * time.Millisecond) // Wait longer for cache sync
 
-	fakeClient := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithObjects(claim, sandboxSet, sandbox1, sandbox2).
-		WithStatusSubresource(&agentsv1alpha1.SandboxClaim{}).
-		Build()
+	// Start cache
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		_ = cache.Run(ctx)
+	}()
+	time.Sleep(200 * time.Millisecond) // Wait for cache to start
 
 	fakeRecorder := record.NewFakeRecorder(100)
 
 	reconciler := &Reconciler{
-		Client:   fakeClient,
-		Scheme:   scheme,
-		controls: core.NewClaimControl(fakeClient, fakeRecorder, clientSet, cache),
+		Client:   testClient,
+		Scheme:   testClient.Scheme(),
+		controls: core.NewClaimControl(testClient, fakeRecorder, cache),
 		recorder: fakeRecorder,
 	}
 
@@ -298,7 +278,7 @@ func TestReconciler_Reconcile_Claiming(t *testing.T) {
 
 	// Get updated claim
 	updatedClaim := &agentsv1alpha1.SandboxClaim{}
-	err = fakeClient.Get(context.Background(),
+	err = testClient.Get(context.Background(),
 		types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace},
 		updatedClaim)
 
@@ -313,7 +293,8 @@ func TestReconciler_Reconcile_Claiming(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// Verify sandboxes are claimed with proper annotations and labels
-	allSandboxes, err := sandboxClient.ApiV1alpha1().Sandboxes("default").List(context.Background(), metav1.ListOptions{})
+	allSandboxes := &agentsv1alpha1.SandboxList{}
+	err = testClient.List(context.Background(), allSandboxes, client.InNamespace("default"))
 	if err != nil {
 		t.Fatalf("Failed to list sandboxes: %v", err)
 	}
@@ -360,13 +341,13 @@ func TestReconciler_Reconcile_ConditionalRequeue(t *testing.T) {
 	_ = agentsv1alpha1.AddToScheme(scheme)
 
 	t.Run("requeue immediately when sandboxes claimed", func(t *testing.T) {
-		// Skip: This test requires cache and sandboxClient to be initialized,
+		// Skip: This test requires cache to be initialized,
 		// which is only available in e2e/integration tests
 		t.Skip("Requires cache initialization - tested in e2e tests")
 	})
 
 	t.Run("requeue with delay when no sandboxes available", func(t *testing.T) {
-		// Skip: This test requires cache and sandboxClient to be initialized,
+		// Skip: This test requires cache to be initialized,
 		// which is only available in e2e/integration tests
 		t.Skip("Requires cache initialization - tested in e2e tests")
 	})
@@ -414,7 +395,7 @@ func TestReconciler_Reconcile_Timeout(t *testing.T) {
 	reconciler := &Reconciler{
 		Client:   fakeClient,
 		Scheme:   scheme,
-		controls: core.NewClaimControl(fakeClient, fakeRecorder, nil, nil),
+		controls: core.NewClaimControl(fakeClient, fakeRecorder, nil),
 		recorder: fakeRecorder,
 	}
 
@@ -469,7 +450,7 @@ func TestReconciler_GetControl(t *testing.T) {
 	reconciler := &Reconciler{
 		Client:   fakeClient,
 		Scheme:   scheme,
-		controls: core.NewClaimControl(fakeClient, fakeRecorder, nil, nil),
+		controls: core.NewClaimControl(fakeClient, fakeRecorder, nil),
 		recorder: fakeRecorder,
 	}
 

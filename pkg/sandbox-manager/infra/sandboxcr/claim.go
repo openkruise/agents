@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/openkruise/agents/pkg/utils/runtime"
 	"golang.org/x/time/rate"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -26,14 +25,15 @@ import (
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/controller/sandboxset"
-	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	cacheutils "github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr/cache/utils"
 	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	commonutils "github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
+	"github.com/openkruise/agents/pkg/utils/runtime"
 	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	"github.com/openkruise/agents/pkg/utils/sandbox-manager/proxyutils"
 	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
@@ -88,7 +88,8 @@ func ValidateAndInitClaimOptions(opts infra.ClaimSandboxOptions) (infra.ClaimSan
 // the sandbox object should not be used anymore and needs appropriate handling.
 //
 // ValidateAndInitClaimOptions must be called before this function.
-func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCache *sync.Map, cache *Cache, client *clients.ClientSet,
+// TODO Next: 对于同时传入 infra.CacheProvider 和 client.Client 的函数进行重构，去除 client.Client 参数，使用 infra.CacheProvider 中的 GetClient 方法
+func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCache *sync.Map, cache infra.CacheProvider, c client.Client,
 	claimLockChannel chan struct{}, createLimiter *rate.Limiter) (claimed infra.Sandbox, metrics infra.ClaimMetrics, err error) {
 	ctx = logs.Extend(ctx, "tryClaimId", uuid.NewString()[:8])
 	log := klog.FromContext(ctx)
@@ -125,7 +126,7 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 	var sbx *Sandbox
 	var lockType infra.LockType
 	pickStart := time.Now()
-	sbx, lockType, err = pickAnAvailableSandbox(ctx, opts, pickCache, cache, client, createLimiter)
+	sbx, lockType, err = pickAnAvailableSandbox(ctx, opts, pickCache, cache, c, createLimiter)
 	if err != nil {
 		log.Error(err, "failed to select available sandbox")
 		return
@@ -147,7 +148,7 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 		return
 	}
 
-	err = performLockSandbox(ctx, sbx, lockType, opts, client, cache)
+	err = performLockSandbox(ctx, sbx, lockType, opts, c, cache)
 	if err != nil {
 		// TODO: these lines cannot be covered by tests currently, which will be fixed when the cache is converted to controller-runtime
 		log.Error(err, "failed to lock sandbox")
@@ -286,7 +287,7 @@ func getPickKey(sbx *v1alpha1.Sandbox) string {
 }
 
 func pickAnAvailableSandbox(ctx context.Context, opts infra.ClaimSandboxOptions,
-	pickCache *sync.Map, cache *Cache, client *clients.ClientSet, limiter *rate.Limiter) (*Sandbox, infra.LockType, error) {
+	pickCache *sync.Map, cache infra.CacheProvider, c client.Client, limiter *rate.Limiter) (*Sandbox, infra.LockType, error) {
 	template, cnt := opts.Template, opts.CandidateCounts
 	ctx = logs.Extend(ctx, "action", "pickAnAvailableSandbox")
 	log := klog.FromContext(ctx).WithValues("template", template).V(consts.DebugLogLevel)
@@ -297,7 +298,7 @@ func pickAnAvailableSandbox(ctx context.Context, opts infra.ClaimSandboxOptions,
 	if len(objects) == 0 {
 		if opts.CreateOnNoStock {
 			log.Info("will create a new sandbox", "reason", "NoStock")
-			return newSandboxFromSandboxSet(opts, cache, client, limiter)
+			return newSandboxFromSandboxSet(opts, cache, limiter)
 		}
 		return nil, "", NoAvailableError(template, "no stock")
 	}
@@ -375,7 +376,7 @@ func pickAnAvailableSandbox(ctx context.Context, opts infra.ClaimSandboxOptions,
 		sbx, pickErr = pickFromCandidates(ctx, oldCandidates, pickCache)
 	}
 	if pickErr == nil {
-		return AsSandbox(sbx, cache, client), infra.LockTypeUpdate, nil
+		return AsSandbox(sbx, cache), infra.LockTypeUpdate, nil
 	}
 	log.Error(pickErr, "failed to pick from available candidates")
 
@@ -385,14 +386,14 @@ func pickAnAvailableSandbox(ctx context.Context, opts infra.ClaimSandboxOptions,
 		sbx, pickErr = pickFromCandidates(ctx, speculatingCandidates, pickCache)
 		if pickErr == nil {
 			log.Info("will speculate creating sandbox", "sandbox", klog.KObj(sbx))
-			return AsSandbox(sbx, cache, client), infra.LockTypeSpeculate, nil
+			return AsSandbox(sbx, cache), infra.LockTypeSpeculate, nil
 		}
 	}
 
 	// Step 3: create new sandbox
 	if opts.CreateOnNoStock {
 		log.Info("will create a new sandbox")
-		return newSandboxFromSandboxSet(opts, cache, client, limiter)
+		return newSandboxFromSandboxSet(opts, cache, limiter)
 	}
 	return nil, "", NoAvailableError(template, pickErr.Error())
 }
@@ -440,7 +441,7 @@ func pickFromCandidates(ctx context.Context, candidates []*v1alpha1.Sandbox, pic
 
 var FilteredAnnotationsOnCreation []string
 
-func newSandboxFromSandboxSet(opts infra.ClaimSandboxOptions, cache *Cache, client *clients.ClientSet, limiter *rate.Limiter) (*Sandbox, infra.LockType, error) {
+func newSandboxFromSandboxSet(opts infra.ClaimSandboxOptions, cache infra.CacheProvider, limiter *rate.Limiter) (*Sandbox, infra.LockType, error) {
 	if limiter != nil {
 		if !limiter.Allow() {
 			return nil, "", NoAvailableError(opts.Template, "sandbox creation is not allowed by rate limiter")
@@ -456,7 +457,7 @@ func newSandboxFromSandboxSet(opts infra.ClaimSandboxOptions, cache *Cache, clie
 	for _, anno := range FilteredAnnotationsOnCreation {
 		delete(sbx.Annotations, anno)
 	}
-	return AsSandbox(sbx, cache, client), infra.LockTypeCreate, nil
+	return AsSandbox(sbx, cache), infra.LockTypeCreate, nil
 }
 
 func preCheckCandidate(sbx *v1alpha1.Sandbox) error {
@@ -538,16 +539,21 @@ func (s *Sandbox) SetResources(requests, limits corev1.ResourceList) {
 
 var DefaultCreateSandbox = createSandbox
 
-func createSandbox(ctx context.Context, sbx *v1alpha1.Sandbox, client *clients.ClientSet, cache infra.CacheProvider) (*v1alpha1.Sandbox, error) {
+// TODO Next: 删除第三个参数
+func createSandbox(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client, _ infra.CacheProvider) (*v1alpha1.Sandbox, error) {
 	select {
 	case <-ctx.Done():
 		return nil, fmt.Errorf("context canceled before creating sandbox: %w", ctx.Err())
 	default:
 	}
-	return client.ApiV1alpha1().Sandboxes(sbx.Namespace).Create(ctx, sbx, metav1.CreateOptions{})
+	err := c.Create(ctx, sbx)
+	if err != nil {
+		return nil, err
+	}
+	return sbx, nil
 }
 
-func performLockSandbox(ctx context.Context, sbx *Sandbox, lockType infra.LockType, opts infra.ClaimSandboxOptions, client *clients.ClientSet, cache infra.CacheProvider) error {
+func performLockSandbox(ctx context.Context, sbx *Sandbox, lockType infra.LockType, opts infra.ClaimSandboxOptions, c client.Client, cache infra.CacheProvider) error {
 	ctx = logs.Extend(ctx, "action", "performLockSandbox")
 	log := klog.FromContext(ctx)
 	utils.LockSandbox(sbx.Sandbox, opts.LockString, opts.User)
@@ -555,10 +561,13 @@ func performLockSandbox(ctx context.Context, sbx *Sandbox, lockType infra.LockTy
 	var err error
 	if lockType == infra.LockTypeCreate {
 		log.Info("locking new sandbox via create", "sandbox", klog.KObj(sbx.Sandbox))
-		updated, err = DefaultCreateSandbox(ctx, sbx.Sandbox, client, cache)
+		updated, err = DefaultCreateSandbox(ctx, sbx.Sandbox, c, cache)
 	} else {
 		log.Info("locking existing sandbox via update", "sandbox", klog.KObj(sbx.Sandbox))
-		updated, err = client.ApiV1alpha1().Sandboxes(sbx.Namespace).Update(ctx, sbx.Sandbox, metav1.UpdateOptions{})
+		err = c.Update(ctx, sbx.Sandbox)
+		if err == nil {
+			updated = sbx.Sandbox
+		}
 	}
 	if err == nil {
 		sbx.Sandbox = updated
@@ -683,7 +692,7 @@ func setContainerResources(container *corev1.Container, requests, limits corev1.
 	return changed
 }
 
-func waitForSandboxReady(ctx context.Context, sbx *Sandbox, opts infra.ClaimSandboxOptions, cache *Cache) (cost time.Duration, err error) {
+func waitForSandboxReady(ctx context.Context, sbx *Sandbox, opts infra.ClaimSandboxOptions, cache infra.CacheProvider) (cost time.Duration, err error) {
 	ctx = logs.Extend(ctx, "action", "waitForSandboxReady")
 	log := klog.FromContext(ctx).V(consts.DebugLogLevel).WithValues("sandbox", klog.KObj(sbx))
 	start := time.Now()
@@ -691,7 +700,7 @@ func waitForSandboxReady(ctx context.Context, sbx *Sandbox, opts infra.ClaimSand
 		cost = time.Since(start)
 	}()
 	log.Info("waiting for sandbox ready", "timeout", opts.WaitReadyTimeout)
-	if err = cache.WaitForSandboxSatisfied(ctx, sbx.Sandbox, WaitActionWaitReady, func(sbx *v1alpha1.Sandbox) (bool, error) {
+	if err = cache.WaitForSandboxSatisfied(ctx, sbx.Sandbox, cacheutils.WaitActionWaitReady, func(sbx *v1alpha1.Sandbox) (bool, error) {
 		return checkSandboxReady(ctx, sbx)
 	}, opts.WaitReadyTimeout); err != nil {
 		log.Error(err, "failed to wait for sandbox ready")

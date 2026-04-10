@@ -20,7 +20,6 @@ import (
 	"github.com/openkruise/agents/api/v1alpha1"
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/features"
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
@@ -184,70 +183,6 @@ func TestCsiMountOptionsConfigRecord(t *testing.T) {
 			}
 		})
 	}
-}
-
-// mockSandboxManager is a mock implementation for testing
-type mockSandboxManager struct {
-	claimFunc func(ctx context.Context, opts infra.ClaimSandboxOptions) (infra.Sandbox, error)
-	cloneFunc func(ctx context.Context, opts infra.CloneSandboxOptions) (infra.Sandbox, error)
-}
-
-func (m *mockSandboxManager) ClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions) (infra.Sandbox, error) {
-	if m.claimFunc != nil {
-		return m.claimFunc(ctx, opts)
-	}
-	// Default behavior: return a mock sandbox
-	return &sandboxcr.Sandbox{
-		Sandbox: &v1alpha1.Sandbox{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "mock-sandbox",
-				Namespace: "default",
-			},
-			Status: v1alpha1.SandboxStatus{
-				Phase: v1alpha1.SandboxRunning,
-				Conditions: []metav1.Condition{
-					{
-						Type:   string(v1alpha1.SandboxConditionReady),
-						Status: metav1.ConditionTrue,
-					},
-				},
-				PodInfo: v1alpha1.PodInfo{
-					PodIP: "10.0.0.1",
-				},
-			},
-		},
-	}, nil
-}
-
-func (m *mockSandboxManager) CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions) (infra.Sandbox, error) {
-	if m.cloneFunc != nil {
-		return m.cloneFunc(ctx, opts)
-	}
-	// Default behavior: return a mock sandbox
-	return &sandboxcr.Sandbox{
-		Sandbox: &v1alpha1.Sandbox{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "mock-cloned-sandbox",
-				Namespace: "default",
-			},
-			Status: v1alpha1.SandboxStatus{
-				Phase: v1alpha1.SandboxRunning,
-			},
-		},
-	}, nil
-}
-
-func (m *mockSandboxManager) GetInfra() infra.Infrastructure {
-	return nil
-}
-
-func (m *mockSandboxManager) Stop() {
-	// No-op for testing
-}
-
-func (m *mockSandboxManager) Run(ctx context.Context, sysNs, peerSelector string) error {
-	// No-op for testing
-	return nil
 }
 
 func TestCreateSandboxWithClaim_CSIMount(t *testing.T) {

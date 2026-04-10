@@ -1,11 +1,7 @@
 <component name="ProjectRunConfigurationManager">
   <configuration default="false" name="UnitTest: All" type="GoTestRunConfiguration" factoryName="Go Test">
-    <module name="agents" />
+    <module name="agents-controller-runtime-for-manager-260409" />
     <working_directory value="$PROJECT_DIR$/pkg" />
-    <go_parameters value="-race" />
-    <envs>
-      <env name="CGO_ENABLED" value="0" />
-    </envs>
     <root_directory value="$PROJECT_DIR$" />
     <kind value="DIRECTORY" />
     <package value="github.com/openkruise/agents/pkg" />

@@ -10,9 +10,8 @@ import (
 	"strconv"
 	"time"
 
-	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/peers"
@@ -47,11 +46,11 @@ type Server struct {
 	peerManager        *peers.MemberlistPeers
 	port               int
 	memberlistBindPort int
-	client             kubernetes.Interface
+	client             client.Client
 }
 
 // NewServer creates a new peer server
-func NewServer(client kubernetes.Interface, port int) *Server {
+func NewServer(client client.Client, port int) *Server {
 	if port == 0 {
 		port = proxy.SystemPort
 	}
@@ -64,8 +63,6 @@ func NewServer(client kubernetes.Interface, port int) *Server {
 
 // Start starts the HTTP server for handling refresh requests from peers
 func (s *Server) Start(ctx context.Context) error {
-	log := klog.FromContext(ctx)
-
 	mux := http.NewServeMux()
 	mux.HandleFunc(proxy.RefreshAPI, s.handleRefresh)
 
@@ -97,32 +94,9 @@ func (s *Server) Start(ctx context.Context) error {
 	namespace := os.Getenv(EnvNamespace)
 	labelSelector := os.Getenv(EnvLabelSelector)
 
-	// Discover existing peers from Kubernetes API
-	var existingPeers []string
-	if s.client != nil && namespace != "" && labelSelector != "" {
-		log.Info("discovering existing peers for memberlist join", "namespace", namespace, "selector", labelSelector)
-		peerList, err := s.client.CoreV1().Pods(namespace).List(ctx, v1.ListOptions{
-			LabelSelector: labelSelector,
-		})
-		if err != nil {
-			log.Error(err, "failed to list peer pods, continuing without existing peers")
-		} else {
-			for _, peer := range peerList.Items {
-				ip := peer.Status.PodIP
-				if ip == "" || ip == localIP || utils.IsLoopbackIP(ip) {
-					continue
-				}
-				existingPeers = append(existingPeers, fmt.Sprintf("%s:%d", ip, s.memberlistBindPort))
-			}
-			log.Info("found existing peers for memberlist join", "count", len(existingPeers))
-		}
-	} else {
-		log.Info("skipping peer discovery: client not available or namespace/labelSelector not set")
-	}
+	s.peerManager = peers.NewMemberlistPeers(s.client, consts.NodePrefixSandboxGateway+nodeName, namespace, labelSelector)
 
-	s.peerManager = peers.NewMemberlistPeers(nodeName)
-
-	if err := s.peerManager.Start(ctx, localIP, s.memberlistBindPort, existingPeers); err != nil {
+	if err := s.peerManager.Start(ctx, s.memberlistBindPort); err != nil {
 		return err
 	}
 

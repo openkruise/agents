@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"reflect"
 
+	infracache "github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr/cache"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -44,13 +45,9 @@ import (
 	"github.com/openkruise/agents/pkg/controller/sandboxclaim/core"
 	"github.com/openkruise/agents/pkg/discovery"
 	"github.com/openkruise/agents/pkg/features"
-	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
-	managerconfig "github.com/openkruise/agents/pkg/sandbox-manager/config"
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
-	"github.com/openkruise/agents/pkg/utils/webhookutils"
 )
 
 func init() {
@@ -69,14 +66,8 @@ func Add(mgr manager.Manager) error {
 		return nil
 	}
 
-	clientSet, err := clients.NewClientSetWithConfig(mgr.GetConfig())
-	if err != nil {
-		return fmt.Errorf("failed to create manager client set: %w", err)
-	}
 	// Initialize cache
-	cache, err := sandboxcr.NewCache(clientSet, managerconfig.SandboxManagerOptions{
-		SystemNamespace: webhookutils.GetNamespace(),
-	})
+	cache, err := infracache.NewCacheV2(mgr)
 	if err != nil {
 		return fmt.Errorf("failed to create cache: %w", err)
 	}
@@ -100,7 +91,7 @@ func Add(mgr manager.Manager) error {
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
 		recorder: recorder,
-		controls: core.NewClaimControl(mgr.GetClient(), recorder, clientSet, cache),
+		controls: core.NewClaimControl(mgr.GetClient(), recorder, cache),
 	}).SetupWithManager(mgr)
 	if err != nil {
 		return err

@@ -9,21 +9,20 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
-
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
+	"github.com/stretchr/testify/assert"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 func TestListSandboxes(t *testing.T) {
 	templateName := "test-template"
-	controller, _, teardown := Setup(t)
+	controller, fc, teardown := Setup(t)
 	defer teardown()
 	user := &models.CreatedTeamAPIKey{
 		ID:   keys.AdminKeyID,
@@ -187,8 +186,8 @@ func TestListSandboxes(t *testing.T) {
 					"sandboxID": sandbox.SandboxID,
 				}, user)
 				if expectState == "paused" {
-					_, err := controller.PauseSandbox(req)
-					assert.Nil(t, err)
+					EnableWaitSim(t, controller, sandbox.SandboxID)
+					pauseSandboxHelper(t, controller, fc, sandbox.SandboxID, false, false, user)
 				}
 				createdRequests = append(createdRequests, req)
 				expectStates = append(expectStates, expectState)
@@ -238,7 +237,7 @@ func TestListSandboxes(t *testing.T) {
 
 func TestListSandboxes_Pagination(t *testing.T) {
 	templateName := "pagination-template"
-	controller, clientSet, teardown := Setup(t)
+	controller, fc, teardown := Setup(t)
 	defer teardown()
 	user := &models.CreatedTeamAPIKey{
 		ID:   keys.AdminKeyID,
@@ -269,14 +268,13 @@ func TestListSandboxes_Pagination(t *testing.T) {
 			EmbeddedSandboxTemplate: tmpl,
 		},
 	}
-	client := clientSet.SandboxClient
-	_, err := client.ApiV1alpha1().SandboxSets(Namespace).Create(t.Context(), sbs, metav1.CreateOptions{})
+	err := fc.Create(t.Context(), sbs)
 	assert.NoError(t, err)
-	assert.Eventually(t, func() bool {
-		return controller.manager.GetInfra().HasTemplate(templateName)
-	}, time.Second, 10*time.Millisecond)
+	// MockManager doesn't run reconcilers, so register template directly
+	infraImpl, _ := controller.manager.GetInfra().(*sandboxcr.Infra)
+	infraImpl.RegisterTemplate(templateName)
 	defer func() {
-		_ = client.ApiV1alpha1().SandboxSets(Namespace).Delete(context.Background(), templateName, metav1.DeleteOptions{})
+		_ = fc.Delete(context.Background(), sbs)
 	}()
 
 	// Create sandboxes with different claim times
@@ -304,7 +302,7 @@ func TestListSandboxes_Pagination(t *testing.T) {
 					agentsv1alpha1.AnnotationClaimTime: claimTime,
 					agentsv1alpha1.AnnotationOwner:     user.ID.String(),
 				},
-				ResourceVersion:   "1",
+				ResourceVersion:   "",
 				UID:               types.UID(uuid.NewString()),
 				CreationTimestamp: now,
 			},
@@ -332,7 +330,7 @@ func TestListSandboxes_Pagination(t *testing.T) {
 				},
 			},
 		}
-		CreateSandboxWithStatus(t, client, sbx)
+		CreateSandboxWithStatus(t, fc, sbx)
 		createdSandboxIDs = append(createdSandboxIDs, fmt.Sprintf("%s--%s", Namespace, sbxName))
 	}
 
@@ -348,7 +346,10 @@ func TestListSandboxes_Pagination(t *testing.T) {
 	defer func() {
 		for i := range claimTimes {
 			sbxName := fmt.Sprintf("%s-pagination-%d", templateName, i)
-			_ = client.ApiV1alpha1().Sandboxes(Namespace).Delete(context.Background(), sbxName, metav1.DeleteOptions{})
+			sbx := &agentsv1alpha1.Sandbox{}
+			sbx.Name = sbxName
+			sbx.Namespace = Namespace
+			_ = fc.Delete(context.Background(), sbx)
 		}
 	}()
 
@@ -446,7 +447,7 @@ func TestListSandboxes_Pagination(t *testing.T) {
 }
 
 func TestListSnapshots(t *testing.T) {
-	controller, clientSet, teardown := Setup(t)
+	controller, fc, teardown := Setup(t)
 	defer teardown()
 
 	adminUser := &models.CreatedTeamAPIKey{
@@ -461,8 +462,6 @@ func TestListSnapshots(t *testing.T) {
 		Key:  "other-key-123",
 		Name: "other",
 	}
-
-	client := clientSet.SandboxClient
 
 	// Helper to create a checkpoint with given parameters
 	createCheckpoint := func(name, owner, sandboxID, checkpointID, creationTime string) *agentsv1alpha1.Checkpoint {
@@ -484,15 +483,10 @@ func TestListSnapshots(t *testing.T) {
 				CheckpointId: checkpointID,
 			},
 		}
-		_, err := client.ApiV1alpha1().Checkpoints(Namespace).Create(t.Context(), cp, metav1.CreateOptions{})
+		err := fc.Create(t.Context(), cp)
 		assert.NoError(t, err)
-		_, err = client.ApiV1alpha1().Checkpoints(Namespace).UpdateStatus(t.Context(), cp, metav1.UpdateOptions{})
+		err = fc.Status().Update(t.Context(), cp)
 		assert.NoError(t, err)
-		var checkErr error
-		require.Eventually(t, func() bool {
-			_, checkErr = controller.cache.GetCheckpoint(checkpointID)
-			return checkErr == nil
-		}, 10*time.Second, 100*time.Millisecond, "checkpoint %s should be in cache: %v", checkpointID, checkErr)
 		return cp
 	}
 
@@ -527,7 +521,10 @@ func TestListSnapshots(t *testing.T) {
 				}
 				return func() {
 					for i := 0; i < 5; i++ {
-						_ = client.ApiV1alpha1().Checkpoints(Namespace).Delete(context.Background(), fmt.Sprintf("cp-pagination-%d", i), metav1.DeleteOptions{})
+						cp := &agentsv1alpha1.Checkpoint{}
+						cp.Name = fmt.Sprintf("cp-pagination-%d", i)
+						cp.Namespace = Namespace
+						_ = fc.Delete(context.Background(), cp)
 					}
 				}
 			},
@@ -552,7 +549,10 @@ func TestListSnapshots(t *testing.T) {
 				}
 				return func() {
 					for i := 0; i < 5; i++ {
-						_ = client.ApiV1alpha1().Checkpoints(Namespace).Delete(context.Background(), fmt.Sprintf("cp-chain-%d", i), metav1.DeleteOptions{})
+						cp := &agentsv1alpha1.Checkpoint{}
+						cp.Name = fmt.Sprintf("cp-chain-%d", i)
+						cp.Namespace = Namespace
+						_ = fc.Delete(context.Background(), cp)
 					}
 				}
 			},
@@ -579,7 +579,10 @@ func TestListSnapshots(t *testing.T) {
 				}
 				return func() {
 					for i := 0; i < 3; i++ {
-						_ = client.ApiV1alpha1().Checkpoints(Namespace).Delete(context.Background(), fmt.Sprintf("cp-all-%d", i), metav1.DeleteOptions{})
+						cp := &agentsv1alpha1.Checkpoint{}
+						cp.Name = fmt.Sprintf("cp-all-%d", i)
+						cp.Namespace = Namespace
+						_ = fc.Delete(context.Background(), cp)
 					}
 				}
 			},
@@ -597,9 +600,12 @@ func TestListSnapshots(t *testing.T) {
 				createCheckpoint("cp-filter-2", adminUser.ID.String(), "other-sandbox", "filter-cp-2", "2024-04-01T00:00:02Z")
 				createCheckpoint("cp-filter-3", adminUser.ID.String(), "target-sandbox", "filter-cp-3", "2024-04-01T00:00:03Z")
 				return func() {
-					_ = client.ApiV1alpha1().Checkpoints(Namespace).Delete(context.Background(), "cp-filter-1", metav1.DeleteOptions{})
-					_ = client.ApiV1alpha1().Checkpoints(Namespace).Delete(context.Background(), "cp-filter-2", metav1.DeleteOptions{})
-					_ = client.ApiV1alpha1().Checkpoints(Namespace).Delete(context.Background(), "cp-filter-3", metav1.DeleteOptions{})
+					for _, name := range []string{"cp-filter-1", "cp-filter-2", "cp-filter-3"} {
+						cp := &agentsv1alpha1.Checkpoint{}
+						cp.Name = name
+						cp.Namespace = Namespace
+						_ = fc.Delete(context.Background(), cp)
+					}
 				}
 			},
 			user:  adminUser,
@@ -615,8 +621,12 @@ func TestListSnapshots(t *testing.T) {
 				createCheckpoint("cp-nofilter-1", adminUser.ID.String(), "sandbox-a", "nofilter-cp-1", "2024-05-01T00:00:01Z")
 				createCheckpoint("cp-nofilter-2", adminUser.ID.String(), "sandbox-b", "nofilter-cp-2", "2024-05-01T00:00:02Z")
 				return func() {
-					_ = client.ApiV1alpha1().Checkpoints(Namespace).Delete(context.Background(), "cp-nofilter-1", metav1.DeleteOptions{})
-					_ = client.ApiV1alpha1().Checkpoints(Namespace).Delete(context.Background(), "cp-nofilter-2", metav1.DeleteOptions{})
+					for _, name := range []string{"cp-nofilter-1", "cp-nofilter-2"} {
+						cp := &agentsv1alpha1.Checkpoint{}
+						cp.Name = name
+						cp.Namespace = Namespace
+						_ = fc.Delete(context.Background(), cp)
+					}
 				}
 			},
 			user:  adminUser,
@@ -634,9 +644,12 @@ func TestListSnapshots(t *testing.T) {
 				// Create checkpoints for other user
 				createCheckpoint("cp-other-1", otherUser.ID.String(), "other-sandbox", "other-cp-1", "2024-06-01T00:00:03Z")
 				return func() {
-					_ = client.ApiV1alpha1().Checkpoints(Namespace).Delete(context.Background(), "cp-admin-1", metav1.DeleteOptions{})
-					_ = client.ApiV1alpha1().Checkpoints(Namespace).Delete(context.Background(), "cp-admin-2", metav1.DeleteOptions{})
-					_ = client.ApiV1alpha1().Checkpoints(Namespace).Delete(context.Background(), "cp-other-1", metav1.DeleteOptions{})
+					for _, name := range []string{"cp-admin-1", "cp-admin-2", "cp-other-1"} {
+						cp := &agentsv1alpha1.Checkpoint{}
+						cp.Name = name
+						cp.Namespace = Namespace
+						_ = fc.Delete(context.Background(), cp)
+					}
 				}
 			},
 			user:  otherUser,

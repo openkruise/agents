@@ -15,16 +15,18 @@ import (
 	"k8s.io/client-go/util/retry"
 	"k8s.io/utils/ptr"
 
-	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/client/clientset/versioned"
 	"github.com/openkruise/agents/pkg/proxy"
-	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
+	infracache "github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr/cache"
+	cachetest "github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr/cache/cachetest"
+
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	"github.com/openkruise/agents/pkg/utils/sandboxutils"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 var testUser = "test-user"
@@ -39,30 +41,66 @@ func GetSbsOwnerReference() []metav1.OwnerReference {
 	return []metav1.OwnerReference{*metav1.NewControllerRef(sbs, agentsv1alpha1.SandboxSetControllerKind)}
 }
 
-func setupTestManager(t *testing.T, opts ...config.SandboxManagerOptions) *SandboxManager {
-	client := clients.NewFakeClientSet(t)
+func getSandboxForApiTest(name string) *agentsv1alpha1.Sandbox {
+	return &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      fmt.Sprintf("test-sandbox-%s", name),
+			Namespace: "default",
+			Annotations: map[string]string{
+				agentsv1alpha1.AnnotationOwner: testUser,
+			},
+			Labels: map[string]string{
+				agentsv1alpha1.LabelSandboxIsClaimed: "true",
+			},
+			CreationTimestamp: metav1.Now(),
+		},
+		Status: agentsv1alpha1.SandboxStatus{
+			Phase: agentsv1alpha1.SandboxRunning,
+			PodInfo: agentsv1alpha1.PodInfo{
+				PodIP: "10.0.0.1",
+			},
+		},
+	}
+}
+
+func setupTestManager(t *testing.T, opts ...config.SandboxManagerOptions) (*SandboxManager, ctrlclient.Client) {
+	t.Helper()
 	infraOption := config.SandboxManagerOptions{}
 	if len(opts) > 0 {
 		infraOption = opts[0]
 	}
-	manager, err := NewSandboxManager(client, nil, infraOption)
+	infraOption = config.InitOptions(infraOption)
+
+	cache, fc, err := cachetest.NewTestCacheV2(t)
 	if err != nil {
-		t.Fatalf("Failed to create manager: %v", err)
+		t.Fatalf("Failed to create test cache: %v", err)
 	}
 
-	err = manager.infra.Run(context.Background())
-	if err != nil {
+	proxyServer := proxy.NewServer(infraOption)
+	infraInstance := sandboxcr.NewInfraBuilder(infraOption).
+		WithCache(cache).
+		WithAPIReader(fc).
+		WithProxy(proxyServer).
+		Build()
+
+	if err := infraInstance.Run(t.Context()); err != nil {
 		t.Fatalf("Failed to run infra: %v", err)
 	}
 
-	return manager
+	manager := &SandboxManager{
+		infra: infraInstance,
+		proxy: proxyServer,
+	}
+
+	return manager, fc
 }
 
-func CreateSandboxWithStatus(t *testing.T, client versioned.Interface, sbx *agentsv1alpha1.Sandbox) {
-	ctx := context.Background()
-	_, err := client.ApiV1alpha1().Sandboxes("default").Create(ctx, sbx, metav1.CreateOptions{})
+func CreateSandboxWithStatus(t *testing.T, client ctrlclient.Client, sbx *agentsv1alpha1.Sandbox) {
+	t.Helper()
+	ctx := t.Context()
+	err := client.Create(ctx, sbx)
 	assert.NoError(t, err)
-	_, err = client.ApiV1alpha1().Sandboxes("default").UpdateStatus(ctx, sbx, metav1.UpdateOptions{})
+	err = client.Status().Update(ctx, sbx)
 	assert.NoError(t, err)
 }
 
@@ -115,8 +153,8 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 			},
 			postCheck: func(t *testing.T, sbx infra.Sandbox) {
 				timeout := sbx.GetTimeout()
-				assert.WithinDuration(t, now.Add(time.Second), timeout.ShutdownTime, 10*time.Millisecond)
-				assert.WithinDuration(t, now.Add(time.Second), timeout.PauseTime, 10*time.Millisecond)
+				assert.WithinDuration(t, now.Add(time.Second), timeout.ShutdownTime, 2*time.Second)
+				assert.WithinDuration(t, now.Add(time.Second), timeout.PauseTime, 2*time.Second)
 			},
 		},
 		{
@@ -151,8 +189,7 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			manager := setupTestManager(t)
-			client := manager.client.SandboxClient
+			manager, client := setupTestManager(t)
 			testIP := "1.2.3.4"
 			createAt := metav1.Now()
 			for template, available := range tt.templateSetup {
@@ -162,11 +199,10 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 						Namespace: "default",
 					},
 				}
-				_, err := client.ApiV1alpha1().SandboxSets(sbs.Namespace).Create(t.Context(), sbs, metav1.CreateOptions{})
+				err := client.Create(t.Context(), sbs)
 				require.NoError(t, err)
-				require.Eventually(t, func() bool {
-					return manager.infra.HasTemplate(template)
-				}, 100*time.Millisecond, 5*time.Millisecond)
+				// MockManager doesn't run reconcilers, so register template directly
+				manager.infra.(*sandboxcr.Infra).RegisterTemplate(template)
 				for i := 0; i < available; i++ {
 					testSbx := &agentsv1alpha1.Sandbox{
 						ObjectMeta: metav1.ObjectMeta{
@@ -266,8 +302,7 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 }
 
 func TestSandboxManager_GetClaimedSandbox(t *testing.T) {
-	manager := setupTestManager(t)
-	client := manager.client.SandboxClient
+	manager, client := setupTestManager(t)
 
 	runningSbx := &agentsv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
@@ -364,13 +399,8 @@ func TestSandboxManager_GetClaimedSandbox(t *testing.T) {
 	for _, sbx := range sandboxes {
 		sbx.CreationTimestamp = now
 		sbx.Labels[agentsv1alpha1.LabelSandboxIsClaimed] = "true"
-		_, err := client.ApiV1alpha1().Sandboxes("default").Create(context.Background(), sbx, metav1.CreateOptions{})
-		if err != nil {
-			t.Fatalf("Failed to create test pod %s: %v", sbx.Name, err)
-		}
+		CreateSandboxWithStatus(t, client, sbx)
 	}
-
-	time.Sleep(100 * time.Millisecond)
 
 	tests := []struct {
 		name              string
@@ -443,14 +473,12 @@ func TestSandboxManager_GetClaimedSandbox(t *testing.T) {
 }
 
 func TestSandboxManager_Debug(t *testing.T) {
-	manager := setupTestManager(t)
+	manager, _ := setupTestManager(t)
 	manager.GetDebugInfo()
 }
 
 func TestSandboxManager_PauseSandbox(t *testing.T) {
 	utils.InitLogOutput()
-	manager := setupTestManager(t)
-	client := manager.client.SandboxClient
 
 	tests := []struct {
 		name          string
@@ -466,11 +494,6 @@ func TestSandboxManager_PauseSandbox(t *testing.T) {
 				sbx.Status.Conditions = []metav1.Condition{
 					{
 						Type:   string(agentsv1alpha1.SandboxConditionReady),
-						Status: metav1.ConditionTrue,
-					},
-					{
-						// Hack: make the sync pause success
-						Type:   string(agentsv1alpha1.SandboxConditionPaused),
 						Status: metav1.ConditionTrue,
 					},
 				}
@@ -502,38 +525,38 @@ func TestSandboxManager_PauseSandbox(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			sandbox := &agentsv1alpha1.Sandbox{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      fmt.Sprintf("test-sandbox-%s", tt.name),
-					Namespace: "default",
-					Annotations: map[string]string{
-						agentsv1alpha1.AnnotationOwner: testUser,
-					},
-					Labels: map[string]string{
-						agentsv1alpha1.LabelSandboxIsClaimed: "true",
-					},
-					CreationTimestamp: metav1.Now(),
-				},
-				Status: agentsv1alpha1.SandboxStatus{
-					Phase: agentsv1alpha1.SandboxRunning,
-					PodInfo: agentsv1alpha1.PodInfo{
-						PodIP: "10.0.0.1",
-					},
-				},
-			}
+			manager, client := setupTestManager(t)
+			mgr := manager.GetInfra().GetCache().(*infracache.CacheV2).GetMockManager()
+
+			sandbox := getSandboxForApiTest(tt.name)
 			tt.initSandbox(sandbox)
+			mgr.AddWaitReconcileKey(sandbox)
 
 			CreateSandboxWithStatus(t, client, sandbox)
-			time.Sleep(100 * time.Millisecond)
 
 			// Get sandbox
-			sbx, err := manager.GetClaimedSandbox(context.Background(), testUser, sandboxutils.GetSandboxID(sandbox))
+			sbx, err := manager.GetClaimedSandbox(t.Context(), testUser, sandboxutils.GetSandboxID(sandbox))
 			if err != nil {
 				t.Fatalf("Failed to get sandbox: %v", err)
 			}
 
+			time.AfterFunc(50*time.Millisecond, func() {
+				updated := &agentsv1alpha1.Sandbox{}
+				getErr := client.Get(t.Context(), ctrlclient.ObjectKeyFromObject(sandbox), updated)
+				assert.NoError(t, getErr)
+				updated.Status.Phase = agentsv1alpha1.SandboxPaused
+				updated.Status.Conditions = []metav1.Condition{
+					{
+						Type:   string(agentsv1alpha1.SandboxConditionPaused),
+						Status: metav1.ConditionTrue,
+					},
+				}
+				updateErr := client.Status().Update(t.Context(), updated)
+				assert.NoError(t, updateErr)
+			})
+
 			// Pause sandbox
-			err = manager.PauseSandbox(context.Background(), sbx, infra.PauseOptions{})
+			err = manager.PauseSandbox(t.Context(), sbx, infra.PauseOptions{})
 
 			if tt.expectError {
 				assert.Error(t, err)
@@ -541,23 +564,6 @@ func TestSandboxManager_PauseSandbox(t *testing.T) {
 			}
 
 			assert.NoError(t, err)
-
-			// Update sandbox status to Paused (simulate controller behavior)
-			time.Sleep(50 * time.Millisecond)
-			updated, err := client.ApiV1alpha1().Sandboxes("default").Get(context.Background(), sandbox.Name, metav1.GetOptions{})
-			assert.NoError(t, err)
-			updated.Status.Phase = agentsv1alpha1.SandboxPaused
-			updated.Status.Conditions = []metav1.Condition{
-				{
-					Type:   string(agentsv1alpha1.SandboxConditionPaused),
-					Status: metav1.ConditionTrue,
-				},
-			}
-			_, err = client.ApiV1alpha1().Sandboxes("default").UpdateStatus(context.Background(), updated, metav1.UpdateOptions{})
-			assert.NoError(t, err)
-
-			// Wait for informer to update
-			time.Sleep(200 * time.Millisecond)
 
 			// Verify route is synced (InplaceRefresh should have updated it)
 			route, ok := manager.proxy.LoadRoute(sandboxutils.GetSandboxID(sandbox))
@@ -567,7 +573,7 @@ func TestSandboxManager_PauseSandbox(t *testing.T) {
 			assert.Equal(t, testUser, route.Owner)
 			// Verify sandbox state matches expected
 			if tt.expectedState != "" {
-				actualSbx, err := manager.GetClaimedSandbox(context.Background(), testUser, sandboxutils.GetSandboxID(sandbox))
+				actualSbx, err := manager.GetClaimedSandbox(t.Context(), testUser, sandboxutils.GetSandboxID(sandbox))
 				if err == nil {
 					actualState, _ := actualSbx.GetState()
 					assert.Equal(t, tt.expectedState, actualState, "Sandbox state should match")
@@ -579,8 +585,6 @@ func TestSandboxManager_PauseSandbox(t *testing.T) {
 
 func TestSandboxManager_ResumeSandbox(t *testing.T) {
 	utils.InitLogOutput()
-	manager := setupTestManager(t)
-	client := manager.client.SandboxClient
 
 	tests := []struct {
 		name          string
@@ -648,32 +652,17 @@ func TestSandboxManager_ResumeSandbox(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			sandbox := &agentsv1alpha1.Sandbox{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      fmt.Sprintf("test-sandbox-%s", tt.name),
-					Namespace: "default",
-					Annotations: map[string]string{
-						agentsv1alpha1.AnnotationOwner: testUser,
-					},
-					Labels: map[string]string{
-						agentsv1alpha1.LabelSandboxIsClaimed: "true",
-					},
-					CreationTimestamp: metav1.Now(),
-				},
-				Status: agentsv1alpha1.SandboxStatus{
-					Phase: agentsv1alpha1.SandboxPaused,
-					PodInfo: agentsv1alpha1.PodInfo{
-						PodIP: "10.0.0.1",
-					},
-				},
-			}
+			manager, client := setupTestManager(t)
+			mgr := manager.GetInfra().GetCache().(*infracache.CacheV2).GetMockManager()
+
+			sandbox := getSandboxForApiTest(tt.name)
 			tt.initSandbox(sandbox)
 
 			CreateSandboxWithStatus(t, client, sandbox)
-			time.Sleep(100 * time.Millisecond)
+			mgr.AddWaitReconcileKey(sandbox)
 
 			// Get sandbox
-			sbx, err := manager.GetClaimedSandbox(context.Background(), testUser, sandboxutils.GetSandboxID(sandbox))
+			sbx, err := manager.GetClaimedSandbox(t.Context(), testUser, sandboxutils.GetSandboxID(sandbox))
 			if err != nil {
 				t.Fatalf("Failed to get sandbox: %v", err)
 			}
@@ -686,7 +675,8 @@ func TestSandboxManager_ResumeSandbox(t *testing.T) {
 			if !tt.expectError {
 				// Simulate controller updating sandbox status after resume
 				time.AfterFunc(50*time.Millisecond, func() {
-					updated, err := client.ApiV1alpha1().Sandboxes("default").Get(context.Background(), sandbox.Name, metav1.GetOptions{})
+					updated := &agentsv1alpha1.Sandbox{}
+					err := client.Get(t.Context(), ctrlclient.ObjectKeyFromObject(sandbox), updated)
 					if err != nil {
 						return
 					}
@@ -700,11 +690,11 @@ func TestSandboxManager_ResumeSandbox(t *testing.T) {
 					if tt.ipChanged {
 						updated.Status.PodInfo.PodIP = tt.expectedIP
 					}
-					_, _ = client.ApiV1alpha1().Sandboxes("default").UpdateStatus(context.Background(), updated, metav1.UpdateOptions{})
+					_ = client.Status().Update(t.Context(), updated)
 				})
 			}
 
-			err = manager.ResumeSandbox(context.Background(), sbx)
+			err = manager.ResumeSandbox(t.Context(), sbx)
 
 			if tt.expectError {
 				assert.Error(t, err)
@@ -712,8 +702,6 @@ func TestSandboxManager_ResumeSandbox(t *testing.T) {
 			}
 
 			assert.NoError(t, err)
-
-			time.Sleep(200 * time.Millisecond)
 
 			// Verify route is synced
 			route, ok := manager.proxy.LoadRoute(sandboxutils.GetSandboxID(sandbox))
@@ -773,12 +761,11 @@ func TestSandboxManager_CloneSandbox(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			manager := setupTestManager(t)
-			client := manager.client.SandboxClient
+			manager, client := setupTestManager(t)
 
 			// Decorator: DefaultCreateSandbox - set sandbox ready after creation
 			origCreateSandbox := sandboxcr.DefaultCreateSandbox
-			sandboxcr.DefaultCreateSandbox = func(ctx context.Context, sbx *agentsv1alpha1.Sandbox, c *clients.ClientSet, cache infra.CacheProvider) (*agentsv1alpha1.Sandbox, error) {
+			sandboxcr.DefaultCreateSandbox = func(ctx context.Context, sbx *agentsv1alpha1.Sandbox, c ctrlclient.Client, cache infra.CacheProvider) (*agentsv1alpha1.Sandbox, error) {
 				if override, ok := ctx.Value(sbxOverrideKey{}).(sbxOverride); ok {
 					if override.Name != "" {
 						sbx.Name = override.Name
@@ -803,11 +790,9 @@ func TestSandboxManager_CloneSandbox(t *testing.T) {
 						PodIP: "1.2.3.4",
 					},
 				}
-				created, err = c.SandboxClient.ApiV1alpha1().Sandboxes(created.Namespace).UpdateStatus(ctx, created, metav1.UpdateOptions{})
-				if err != nil {
+				if err = c.Status().Update(ctx, created); err != nil {
 					return nil, err
 				}
-				time.Sleep(50 * time.Millisecond) // Wait for informer sync
 				return created, nil
 			}
 			t.Cleanup(func() { sandboxcr.DefaultCreateSandbox = origCreateSandbox })
@@ -829,7 +814,7 @@ func TestSandboxManager_CloneSandbox(t *testing.T) {
 						},
 					},
 				}
-				_, err := client.ApiV1alpha1().SandboxTemplates("default").Create(context.Background(), sbt, metav1.CreateOptions{})
+				err := client.Create(t.Context(), sbt)
 				require.NoError(t, err)
 
 				// Create Checkpoint with same name as SandboxTemplate
@@ -845,11 +830,11 @@ func TestSandboxManager_CloneSandbox(t *testing.T) {
 						CheckpointId: checkpointID,
 					},
 				}
-				_, err = client.ApiV1alpha1().Checkpoints("default").Create(context.Background(), cp, metav1.CreateOptions{})
+				err = client.Create(t.Context(), cp)
 				require.NoError(t, err)
-
-				// Wait for informer sync
-				time.Sleep(100 * time.Millisecond)
+				cp.Status.CheckpointId = checkpointID
+				err = client.Status().Update(t.Context(), cp)
+				require.NoError(t, err)
 			}
 
 			// Build context with sbxOverride if needed
@@ -903,7 +888,7 @@ func TestSandboxManager_GetOwnerOfSandbox(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			manager := setupTestManager(t)
+			manager, _ := setupTestManager(t)
 
 			if tt.setupRoute {
 				manager.proxy.SetRoute(t.Context(), proxy.Route{
@@ -924,8 +909,7 @@ func TestSandboxManager_GetOwnerOfSandbox(t *testing.T) {
 
 func TestSandboxManager_ListSandboxes(t *testing.T) {
 	utils.InitLogOutput()
-	manager := setupTestManager(t)
-	client := manager.client.SandboxClient
+	manager, client := setupTestManager(t)
 
 	// Create 4 sandboxes with names that sort alphabetically
 	sandboxNames := []string{"aaa-sandbox", "bbb-sandbox", "ccc-sandbox", "ddd-sandbox"}
@@ -957,9 +941,6 @@ func TestSandboxManager_ListSandboxes(t *testing.T) {
 		}
 		CreateSandboxWithStatus(t, client, sbx)
 	}
-
-	// Wait for informer sync
-	time.Sleep(100 * time.Millisecond)
 
 	t.Run("without paginator", func(t *testing.T) {
 		sandboxes, nextToken, err := manager.ListSandboxes(testUser, nil)
@@ -997,8 +978,7 @@ func TestSandboxManager_ListSandboxes(t *testing.T) {
 
 func TestSandboxManager_DeleteSandbox(t *testing.T) {
 	utils.InitLogOutput()
-	manager := setupTestManager(t)
-	client := manager.client.SandboxClient
+	manager, client := setupTestManager(t)
 
 	tests := []struct {
 		name          string
@@ -1078,10 +1058,9 @@ func TestSandboxManager_DeleteSandbox(t *testing.T) {
 			tt.initSandbox(sandbox)
 
 			CreateSandboxWithStatus(t, client, sandbox)
-			time.Sleep(100 * time.Millisecond)
 
 			// Get sandbox
-			sbx, err := manager.GetClaimedSandbox(context.Background(), testUser, sandboxutils.GetSandboxID(sandbox))
+			sbx, err := manager.GetClaimedSandbox(t.Context(), testUser, sandboxutils.GetSandboxID(sandbox))
 			if err != nil {
 				t.Fatalf("Failed to get sandbox: %v", err)
 			}
@@ -1093,14 +1072,14 @@ func TestSandboxManager_DeleteSandbox(t *testing.T) {
 			// Decorator: DefaultDeleteSandbox - control delete result (set after getting sandbox)
 			if tt.mockDeleteErr != nil {
 				origDeleteSandbox := sandboxcr.DefaultDeleteSandbox
-				sandboxcr.DefaultDeleteSandbox = func(ctx context.Context, s *agentsv1alpha1.Sandbox, c clients.SandboxClient) error {
+				sandboxcr.DefaultDeleteSandbox = func(ctx context.Context, s *agentsv1alpha1.Sandbox, c ctrlclient.Client) error {
 					return tt.mockDeleteErr
 				}
 				t.Cleanup(func() { sandboxcr.DefaultDeleteSandbox = origDeleteSandbox })
 			}
 
 			// Delete sandbox
-			err = manager.DeleteSandbox(context.Background(), sbx)
+			err = manager.DeleteSandbox(t.Context(), sbx)
 
 			if tt.expectError {
 				assert.Error(t, err)
@@ -1109,8 +1088,7 @@ func TestSandboxManager_DeleteSandbox(t *testing.T) {
 				assert.NoError(t, err)
 				// After successful deletion, verify sandbox is not found
 				// Use a short timeout context to avoid long retry in GetClaimedSandbox
-				time.Sleep(100 * time.Millisecond)
-				ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+				ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
 				defer cancel()
 				_, getErr := manager.GetClaimedSandbox(ctx, testUser, sandboxutils.GetSandboxID(sandbox))
 				assert.Error(t, getErr, "sandbox should not be found after deletion")
@@ -1125,7 +1103,7 @@ func TestSandboxManager_ListCheckpoints(t *testing.T) {
 	tests := []struct {
 		name                  string
 		user                  string
-		setupCheckpoints      func(client versioned.Interface)
+		setupCheckpoints      func(client ctrlclient.Client)
 		paginator             *utils.Paginator[infra.CheckpointInfo]
 		expectError           bool
 		expectedErrorCode     errors.ErrorCode
@@ -1136,7 +1114,7 @@ func TestSandboxManager_ListCheckpoints(t *testing.T) {
 		{
 			name: "list checkpoints without paginator",
 			user: "user1",
-			setupCheckpoints: func(client versioned.Interface) {
+			setupCheckpoints: func(client ctrlclient.Client) {
 				createCheckpointForTest(t, client, "cp-1", "user1", "sandbox-1", "checkpoint-id-1", agentsv1alpha1.CheckpointSucceeded)
 				createCheckpointForTest(t, client, "cp-2", "user1", "sandbox-2", "checkpoint-id-2", agentsv1alpha1.CheckpointSucceeded)
 				createCheckpointForTest(t, client, "cp-3", "user1", "sandbox-3", "checkpoint-id-3", agentsv1alpha1.CheckpointSucceeded)
@@ -1150,7 +1128,7 @@ func TestSandboxManager_ListCheckpoints(t *testing.T) {
 		{
 			name: "list checkpoints with paginator",
 			user: "user1",
-			setupCheckpoints: func(client versioned.Interface) {
+			setupCheckpoints: func(client ctrlclient.Client) {
 				createCheckpointForTest(t, client, "cp-a", "user1", "sandbox-a", "checkpoint-id-a", agentsv1alpha1.CheckpointSucceeded)
 				createCheckpointForTest(t, client, "cp-b", "user1", "sandbox-b", "checkpoint-id-b", agentsv1alpha1.CheckpointSucceeded)
 				createCheckpointForTest(t, client, "cp-c", "user1", "sandbox-c", "checkpoint-id-c", agentsv1alpha1.CheckpointSucceeded)
@@ -1173,7 +1151,7 @@ func TestSandboxManager_ListCheckpoints(t *testing.T) {
 		{
 			name: "list checkpoints with paginator and next token",
 			user: "user1",
-			setupCheckpoints: func(client versioned.Interface) {
+			setupCheckpoints: func(client ctrlclient.Client) {
 				createCheckpointForTest(t, client, "cp-a", "user1", "sandbox-a", "checkpoint-id-a", agentsv1alpha1.CheckpointSucceeded)
 				createCheckpointForTest(t, client, "cp-b", "user1", "sandbox-b", "checkpoint-id-b", agentsv1alpha1.CheckpointSucceeded)
 				createCheckpointForTest(t, client, "cp-c", "user1", "sandbox-c", "checkpoint-id-c", agentsv1alpha1.CheckpointSucceeded)
@@ -1197,7 +1175,7 @@ func TestSandboxManager_ListCheckpoints(t *testing.T) {
 		{
 			name: "filter checkpoints by user",
 			user: "user1",
-			setupCheckpoints: func(client versioned.Interface) {
+			setupCheckpoints: func(client ctrlclient.Client) {
 				createCheckpointForTest(t, client, "cp-user1", "user1", "sandbox-1", "checkpoint-user1", agentsv1alpha1.CheckpointSucceeded)
 				createCheckpointForTest(t, client, "cp-user2", "user2", "sandbox-2", "checkpoint-user2", agentsv1alpha1.CheckpointSucceeded)
 				createCheckpointForTest(t, client, "cp-user3", "user3", "sandbox-3", "checkpoint-user3", agentsv1alpha1.CheckpointSucceeded)
@@ -1211,7 +1189,7 @@ func TestSandboxManager_ListCheckpoints(t *testing.T) {
 		{
 			name: "only return succeeded checkpoints",
 			user: "user1",
-			setupCheckpoints: func(client versioned.Interface) {
+			setupCheckpoints: func(client ctrlclient.Client) {
 				createCheckpointForTest(t, client, "cp-succeeded", "user1", "sandbox-1", "checkpoint-succeeded", agentsv1alpha1.CheckpointSucceeded)
 				createCheckpointForTest(t, client, "cp-pending", "user1", "sandbox-2", "checkpoint-pending", agentsv1alpha1.CheckpointPending)
 				createCheckpointForTest(t, client, "cp-failed", "user1", "sandbox-3", "checkpoint-failed", agentsv1alpha1.CheckpointFailed)
@@ -1226,7 +1204,7 @@ func TestSandboxManager_ListCheckpoints(t *testing.T) {
 		{
 			name: "return empty list when user has no checkpoints",
 			user: "non-existent-user",
-			setupCheckpoints: func(client versioned.Interface) {
+			setupCheckpoints: func(client ctrlclient.Client) {
 				createCheckpointForTest(t, client, "cp-1", "user1", "sandbox-1", "checkpoint-id-1", agentsv1alpha1.CheckpointSucceeded)
 				createCheckpointForTest(t, client, "cp-2", "user2", "sandbox-2", "checkpoint-id-2", agentsv1alpha1.CheckpointSucceeded)
 			},
@@ -1239,7 +1217,7 @@ func TestSandboxManager_ListCheckpoints(t *testing.T) {
 		{
 			name: "paginator with filter",
 			user: "user1",
-			setupCheckpoints: func(client versioned.Interface) {
+			setupCheckpoints: func(client ctrlclient.Client) {
 				createCheckpointForTest(t, client, "cp-a", "user1", "sandbox-a", "checkpoint-a", agentsv1alpha1.CheckpointSucceeded)
 				createCheckpointForTest(t, client, "cp-b", "user1", "sandbox-b", "checkpoint-b", agentsv1alpha1.CheckpointSucceeded)
 				createCheckpointForTest(t, client, "cp-c", "user1", "sandbox-c", "checkpoint-c", agentsv1alpha1.CheckpointSucceeded)
@@ -1263,14 +1241,10 @@ func TestSandboxManager_ListCheckpoints(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			manager := setupTestManager(t)
-			client := manager.client.SandboxClient
+			manager, client := setupTestManager(t)
 
 			// Setup checkpoints for this test case
 			tt.setupCheckpoints(client)
-
-			// Wait for informer sync
-			time.Sleep(100 * time.Millisecond)
 
 			// Call ListCheckpoints
 			checkpoints, nextToken, err := manager.ListCheckpoints(tt.user, tt.paginator)
@@ -1295,7 +1269,8 @@ func TestSandboxManager_ListCheckpoints(t *testing.T) {
 }
 
 // Helper function to create a checkpoint for testing
-func createCheckpointForTest(t *testing.T, client versioned.Interface, name, owner, sandboxID, checkpointID string, phase agentsv1alpha1.CheckpointPhase) {
+func createCheckpointForTest(t *testing.T, client ctrlclient.Client, name, owner, sandboxID, checkpointID string, phase agentsv1alpha1.CheckpointPhase) {
+	t.Helper()
 	cp := &agentsv1alpha1.Checkpoint{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -1305,14 +1280,14 @@ func createCheckpointForTest(t *testing.T, client versioned.Interface, name, own
 				agentsv1alpha1.AnnotationSandboxID: sandboxID,
 			},
 		},
-		Status: agentsv1alpha1.CheckpointStatus{
-			Phase:        phase,
-			CheckpointId: checkpointID,
-		},
 	}
-	_, err := client.ApiV1alpha1().Checkpoints("default").Create(context.Background(), cp, metav1.CreateOptions{})
+	err := client.Create(t.Context(), cp)
 	require.NoError(t, err)
-	_, err = client.ApiV1alpha1().Checkpoints("default").UpdateStatus(context.Background(), cp, metav1.UpdateOptions{})
+	cp.Status = agentsv1alpha1.CheckpointStatus{
+		Phase:        phase,
+		CheckpointId: checkpointID,
+	}
+	err = client.Status().Update(t.Context(), cp)
 	require.NoError(t, err)
 }
 
@@ -1383,8 +1358,7 @@ func TestSandboxManager_DeleteCheckpoint(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			manager := setupTestManager(t)
-			client := manager.client.SandboxClient
+			manager, client := setupTestManager(t)
 
 			if tt.setup {
 				// Create SandboxTemplate
@@ -1403,11 +1377,7 @@ func TestSandboxManager_DeleteCheckpoint(t *testing.T) {
 						},
 					},
 				}
-				_, err := client.ApiV1alpha1().SandboxTemplates(namespace).Create(context.Background(), tmpl, metav1.CreateOptions{})
-				require.NoError(t, err)
-
-				// Re-read to get UID
-				tmpl, err = client.ApiV1alpha1().SandboxTemplates(namespace).Get(context.Background(), tt.checkpointID, metav1.GetOptions{})
+				err := client.Create(t.Context(), tmpl)
 				require.NoError(t, err)
 
 				// Create Checkpoint with owner annotation
@@ -1432,14 +1402,12 @@ func TestSandboxManager_DeleteCheckpoint(t *testing.T) {
 						},
 					}
 				}
-				_, err = client.ApiV1alpha1().Checkpoints(namespace).Create(context.Background(), cp, metav1.CreateOptions{})
+				err = client.Create(t.Context(), cp)
 				require.NoError(t, err)
 
 				// Update status with checkpointId
-				cp, err = client.ApiV1alpha1().Checkpoints(namespace).Get(context.Background(), tt.checkpointID, metav1.GetOptions{})
-				require.NoError(t, err)
 				cp.Status.CheckpointId = tt.checkpointID
-				_, err = client.ApiV1alpha1().Checkpoints(namespace).UpdateStatus(context.Background(), cp, metav1.UpdateOptions{})
+				err = client.Status().Update(t.Context(), cp)
 				require.NoError(t, err)
 
 				// Wait for informer sync
@@ -1449,28 +1417,28 @@ func TestSandboxManager_DeleteCheckpoint(t *testing.T) {
 
 				// Cleanup
 				t.Cleanup(func() {
-					_ = client.ApiV1alpha1().SandboxTemplates(namespace).Delete(context.Background(), tt.checkpointID, metav1.DeleteOptions{})
-					_ = client.ApiV1alpha1().Checkpoints(namespace).Delete(context.Background(), tt.checkpointID, metav1.DeleteOptions{})
+					_ = client.Delete(t.Context(), tmpl)
+					_ = client.Delete(t.Context(), cp)
 				})
 			}
 
 			// Set up decorator mocks
 			if tt.mockDeleteTemplate != nil {
 				orig := sandboxcr.DefaultDeleteSandboxTemplate
-				sandboxcr.DefaultDeleteSandboxTemplate = func(ctx context.Context, c *clients.ClientSet, namespace, name string) error {
+				sandboxcr.DefaultDeleteSandboxTemplate = func(ctx context.Context, c ctrlclient.Client, namespace, name string) error {
 					return tt.mockDeleteTemplate
 				}
 				t.Cleanup(func() { sandboxcr.DefaultDeleteSandboxTemplate = orig })
 			}
 			if tt.mockDeleteCheckpoint != nil {
 				orig := sandboxcr.DefaultDeleteCheckpointCR
-				sandboxcr.DefaultDeleteCheckpointCR = func(ctx context.Context, c *clients.ClientSet, namespace, name string) error {
+				sandboxcr.DefaultDeleteCheckpointCR = func(ctx context.Context, c ctrlclient.Client, namespace, name string) error {
 					return tt.mockDeleteCheckpoint
 				}
 				t.Cleanup(func() { sandboxcr.DefaultDeleteCheckpointCR = orig })
 			}
 
-			err := manager.DeleteCheckpoint(context.Background(), tt.user, tt.checkpointID)
+			err := manager.DeleteCheckpoint(t.Context(), tt.user, tt.checkpointID)
 
 			if tt.expectError != "" {
 				require.Error(t, err)

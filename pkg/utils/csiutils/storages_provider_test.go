@@ -1,22 +1,50 @@
+/*
+Copyright 2025.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package csiutils
 
 import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
+	cacheutils "github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr/cache/utils"
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
-	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/utils"
 )
+
+func newFakeReader(t *testing.T) client.Reader {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+	return fake.NewClientBuilder().WithScheme(scheme).Build()
+}
 
 func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 	tests := []struct {
@@ -26,7 +54,7 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 		subPath                string
 		readOnly               bool
 		setupCache             func() infra.CacheProvider
-		setupClient            func() *clients.ClientSet
+		setupClient            func() client.Reader
 		setupStorageRegistry   func() storages.VolumeMountProviderRegistry
 		expectDriverName       string
 		expectError            bool
@@ -37,7 +65,7 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 			containerMountPoint:    "/container/mount/target",
 			persistentVolumeName:   "",
 			setupCache:             func() infra.CacheProvider { return &mockCacheProvider{} },
-			setupClient:            func() *clients.ClientSet { return clients.NewFakeClientSet(t) },
+			setupClient:            func() client.Reader { return newFakeReader(t) },
 			setupStorageRegistry:   func() storages.VolumeMountProviderRegistry { return &mockStorageProviderRegistry{} },
 			expectDriverName:       "",
 			expectError:            true,
@@ -50,8 +78,8 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 			setupCache: func() infra.CacheProvider {
 				return &mockCacheProvider{pv: nil}
 			},
-			setupClient: func() *clients.ClientSet {
-				return clients.NewFakeClientSet(t)
+			setupClient: func() client.Reader {
+				return newFakeReader(t)
 			},
 			setupStorageRegistry:   func() storages.VolumeMountProviderRegistry { return &mockStorageProviderRegistry{} },
 			expectDriverName:       "",
@@ -73,8 +101,8 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 				}
 				return &mockCacheProvider{pv: pv}
 			},
-			setupClient: func() *clients.ClientSet {
-				return clients.NewFakeClientSet(t)
+			setupClient: func() client.Reader {
+				return newFakeReader(t)
 			},
 			setupStorageRegistry:   func() storages.VolumeMountProviderRegistry { return &mockStorageProviderRegistry{} },
 			expectDriverName:       "",
@@ -100,8 +128,8 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 				}
 				return &mockCacheProvider{pv: pv}
 			},
-			setupClient: func() *clients.ClientSet {
-				return clients.NewFakeClientSet(t)
+			setupClient: func() client.Reader {
+				return newFakeReader(t)
 			},
 			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
 				registry := &mockStorageProviderRegistry{
@@ -132,8 +160,8 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 				}
 				return &mockCacheProvider{pv: pv}
 			},
-			setupClient: func() *clients.ClientSet {
-				return clients.NewFakeClientSet(t)
+			setupClient: func() client.Reader {
+				return newFakeReader(t)
 			},
 			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
 				registry := &mockStorageProviderRegistry{
@@ -167,8 +195,8 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 				}
 				return &mockCacheProvider{pv: pv}
 			},
-			setupClient: func() *clients.ClientSet {
-				return clients.NewFakeClientSet(t)
+			setupClient: func() client.Reader {
+				return newFakeReader(t)
 			},
 			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
 				registry := &mockStorageProviderRegistry{
@@ -204,8 +232,8 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 				}
 				return &mockCacheProvider{pv: pv}
 			},
-			setupClient: func() *clients.ClientSet {
-				return clients.NewFakeClientSet(t)
+			setupClient: func() client.Reader {
+				return newFakeReader(t)
 			},
 			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
 				registry := &mockStorageProviderRegistry{
@@ -241,8 +269,8 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 				}
 				return &mockCacheProvider{pv: pv}
 			},
-			setupClient: func() *clients.ClientSet {
-				return clients.NewFakeClientSet(t)
+			setupClient: func() client.Reader {
+				return newFakeReader(t)
 			},
 			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
 				registry := &mockStorageProviderRegistry{
@@ -283,8 +311,8 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 				}
 				return &mockCacheProvider{pv: pv}
 			},
-			setupClient: func() *clients.ClientSet {
-				return clients.NewFakeClientSet(t)
+			setupClient: func() client.Reader {
+				return newFakeReader(t)
 			},
 			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
 				registry := &mockStorageProviderRegistry{
@@ -324,8 +352,8 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 				}
 				return &mockCacheProvider{pv: pv}
 			},
-			setupClient: func() *clients.ClientSet {
-				return clients.NewFakeClientSet(t)
+			setupClient: func() client.Reader {
+				return newFakeReader(t)
 			},
 			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
 				registry := &mockStorageProviderRegistry{
@@ -366,8 +394,8 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 				}
 				return &mockCacheProvider{pv: pv}
 			},
-			setupClient: func() *clients.ClientSet {
-				return clients.NewFakeClientSet(t)
+			setupClient: func() client.Reader {
+				return newFakeReader(t)
 			},
 			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
 				registry := &mockStorageProviderRegistry{
@@ -407,8 +435,8 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 				}
 				return &mockCacheProvider{pv: pv}
 			},
-			setupClient: func() *clients.ClientSet {
-				return clients.NewFakeClientSet(t)
+			setupClient: func() client.Reader {
+				return newFakeReader(t)
 			},
 			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
 				registry := &mockStorageProviderRegistry{
@@ -447,8 +475,8 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 				}
 				return &mockCacheProvider{pv: pv}
 			},
-			setupClient: func() *clients.ClientSet {
-				return clients.NewFakeClientSet(t)
+			setupClient: func() client.Reader {
+				return newFakeReader(t)
 			},
 			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
 				registry := &mockStorageProviderRegistry{
@@ -487,8 +515,8 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 				}
 				return &mockCacheProvider{pv: pv}
 			},
-			setupClient: func() *clients.ClientSet {
-				return clients.NewFakeClientSet(t)
+			setupClient: func() client.Reader {
+				return newFakeReader(t)
 			},
 			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
 				registry := &mockStorageProviderRegistry{
@@ -527,8 +555,8 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 				}
 				return &mockCacheProvider{pv: pv}
 			},
-			setupClient: func() *clients.ClientSet {
-				return clients.NewFakeClientSet(t)
+			setupClient: func() client.Reader {
+				return newFakeReader(t)
 			},
 			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
 				registry := &mockStorageProviderRegistry{
@@ -568,8 +596,8 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 				}
 				return &mockCacheProvider{pv: pv}
 			},
-			setupClient: func() *clients.ClientSet {
-				return clients.NewFakeClientSet(t)
+			setupClient: func() client.Reader {
+				return newFakeReader(t)
 			},
 			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
 				registry := &mockStorageProviderRegistry{
@@ -607,8 +635,8 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 				}
 				return &mockCacheProvider{pv: pv}
 			},
-			setupClient: func() *clients.ClientSet {
-				return clients.NewFakeClientSet(t)
+			setupClient: func() client.Reader {
+				return newFakeReader(t)
 			},
 			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
 				registry := &mockStorageProviderRegistry{
@@ -647,8 +675,8 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 				}
 				return &mockCacheProvider{pv: pv}
 			},
-			setupClient: func() *clients.ClientSet {
-				return clients.NewFakeClientSet(t)
+			setupClient: func() client.Reader {
+				return newFakeReader(t)
 			},
 			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
 				registry := &mockStorageProviderRegistry{
@@ -687,8 +715,8 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 				}
 				return &mockCacheProvider{pv: pv}
 			},
-			setupClient: func() *clients.ClientSet {
-				return clients.NewFakeClientSet(t)
+			setupClient: func() client.Reader {
+				return newFakeReader(t)
 			},
 			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
 				registry := &mockStorageProviderRegistry{
@@ -727,8 +755,8 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 				}
 				return &mockCacheProvider{pv: pv}
 			},
-			setupClient: func() *clients.ClientSet {
-				return clients.NewFakeClientSet(t)
+			setupClient: func() client.Reader {
+				return newFakeReader(t)
 			},
 			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
 				registry := &mockStorageProviderRegistry{
@@ -764,8 +792,8 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 				}
 				return &mockCacheProvider{pv: pv}
 			},
-			setupClient: func() *clients.ClientSet {
-				return clients.NewFakeClientSet(t)
+			setupClient: func() client.Reader {
+				return newFakeReader(t)
 			},
 			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
 				registry := &mockStorageProviderRegistry{
@@ -802,8 +830,8 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 				}
 				return &mockCacheProvider{pv: pv}
 			},
-			setupClient: func() *clients.ClientSet {
-				return clients.NewFakeClientSet(t)
+			setupClient: func() client.Reader {
+				return newFakeReader(t)
 			},
 			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
 				registry := &mockStorageProviderRegistry{
@@ -839,8 +867,8 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 				}
 				return &mockCacheProvider{pv: pv}
 			},
-			setupClient: func() *clients.ClientSet {
-				return clients.NewFakeClientSet(t)
+			setupClient: func() client.Reader {
+				return newFakeReader(t)
 			},
 			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
 				registry := &mockStorageProviderRegistry{
@@ -880,8 +908,8 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 				}
 				return &mockCacheProvider{pv: pv}
 			},
-			setupClient: func() *clients.ClientSet {
-				return clients.NewFakeClientSet(t)
+			setupClient: func() client.Reader {
+				return newFakeReader(t)
 			},
 			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
 				registry := &mockStorageProviderRegistry{
@@ -921,8 +949,8 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 				}
 				return &mockCacheProvider{pv: pv}
 			},
-			setupClient: func() *clients.ClientSet {
-				return clients.NewFakeClientSet(t)
+			setupClient: func() client.Reader {
+				return newFakeReader(t)
 			},
 			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
 				registry := &mockStorageProviderRegistry{
@@ -970,6 +998,45 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 
 type mockCacheProvider struct {
 	pv *corev1.PersistentVolume
+}
+
+func (m *mockCacheProvider) GetSandboxTemplate(string, string) (*agentsv1alpha1.SandboxTemplate, error) {
+	panic("implement me")
+}
+
+func (m *mockCacheProvider) ListCheckpointsWithUser(string) ([]*agentsv1alpha1.Checkpoint, error) {
+	panic("implement me")
+}
+
+func (m *mockCacheProvider) ListAllSandboxes() []*agentsv1alpha1.Sandbox {
+
+	panic("implement me")
+}
+
+func (m *mockCacheProvider) WaitForSandboxSatisfied(context.Context, *agentsv1alpha1.Sandbox, cacheutils.WaitAction, cacheutils.CheckFunc[*agentsv1alpha1.Sandbox], time.Duration) error {
+	panic("implement me")
+}
+
+func (m *mockCacheProvider) WaitForCheckpointSatisfied(context.Context, *agentsv1alpha1.Checkpoint, cacheutils.WaitAction, cacheutils.CheckFunc[*agentsv1alpha1.Checkpoint], time.Duration) (*agentsv1alpha1.Checkpoint, error) {
+	panic("implement me")
+}
+
+func (m *mockCacheProvider) Run(context.Context) error {
+
+	panic("implement me")
+}
+
+func (m *mockCacheProvider) Stop(context.Context) {
+
+	panic("implement me")
+}
+
+func (m *mockCacheProvider) GetClient() client.Client {
+	panic("implement me")
+}
+
+func (m *mockCacheProvider) GetAPIReader() client.Reader {
+	panic("implement me")
 }
 
 func (m *mockCacheProvider) GetPersistentVolume(string) (*corev1.PersistentVolume, error) {
