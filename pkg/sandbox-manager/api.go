@@ -18,23 +18,36 @@ func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts infra.ClaimSandb
 	if !m.infra.HasTemplate(opts.Template) {
 		// Requirement: Track failure in API layer
 		SandboxCreationResponses.WithLabelValues("failure").Inc()
+		SandboxClaimTotal.WithLabelValues("failure", "").Inc()
 		return nil, errors.NewError(errors.ErrorNotFound, fmt.Sprintf("template %s not found", opts.Template))
 	}
-	sandbox, metrics, err := m.infra.ClaimSandbox(ctx, opts)
+	sandbox, claimMetrics, err := m.infra.ClaimSandbox(ctx, opts)
 	if err != nil {
-		log.Error(err, "failed to claim sandbox", "metrics", metrics.String())
+		log.Error(err, "failed to claim sandbox", "metrics", claimMetrics.String())
 		// Requirement: Track failure in API layer
 		SandboxCreationResponses.WithLabelValues("failure").Inc()
+		SandboxClaimTotal.WithLabelValues("failure", "").Inc()
 		return nil, errors.NewError(errors.ErrorInternal, fmt.Sprintf("failed to claim sandbox: %v", err))
 	}
 
 	// Success: Record metrics
 	SandboxCreationResponses.WithLabelValues("success").Inc()
 	// Requirement: Only measure the latency when no error exists
-	SandboxCreationLatency.Observe(float64(metrics.Total.Milliseconds()))
+	SandboxCreationLatency.Observe(float64(claimMetrics.Total.Milliseconds()))
+
+	// Claim-specific metrics
+	SandboxClaimDuration.Observe(float64(claimMetrics.Total.Milliseconds()))
+	SandboxClaimTotal.WithLabelValues("success", string(claimMetrics.LockType)).Inc()
+	SandboxClaimRetries.Observe(float64(claimMetrics.Retries))
+	SandboxClaimStageDuration.WithLabelValues("wait").Observe(float64(claimMetrics.Wait.Milliseconds()))
+	SandboxClaimStageDuration.WithLabelValues("retry_cost").Observe(float64(claimMetrics.RetryCost.Milliseconds()))
+	SandboxClaimStageDuration.WithLabelValues("pick_and_lock").Observe(float64(claimMetrics.PickAndLock.Milliseconds()))
+	SandboxClaimStageDuration.WithLabelValues("wait_ready").Observe(float64(claimMetrics.WaitReady.Milliseconds()))
+	SandboxClaimStageDuration.WithLabelValues("init_runtime").Observe(float64(claimMetrics.InitRuntime.Milliseconds()))
+	SandboxClaimStageDuration.WithLabelValues("csi_mount").Observe(float64(claimMetrics.CSIMount.Milliseconds()))
 
 	state, reason := sandbox.GetState()
-	log.Info("sandbox claimed", "sandbox", klog.KObj(sandbox), "metrics", metrics.String(), "state", state, "reason", reason)
+	log.Info("sandbox claimed", "sandbox", klog.KObj(sandbox), "metrics", claimMetrics.String(), "state", state, "reason", reason)
 
 	// Sync route without refresh since sandbox was just claimed and state is already up-to-date
 	if err = m.syncRoute(ctx, sandbox, false); err != nil {
@@ -45,19 +58,30 @@ func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts infra.ClaimSandb
 
 func (m *SandboxManager) CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions) (infra.Sandbox, error) {
 	log := klog.FromContext(ctx)
-	sandbox, metrics, err := m.infra.CloneSandbox(ctx, opts)
+	sandbox, cloneMetrics, err := m.infra.CloneSandbox(ctx, opts)
 	if err != nil {
-		log.Error(err, "failed to clone sandbox", "metrics", metrics)
+		log.Error(err, "failed to clone sandbox", "metrics", cloneMetrics)
 		SandboxCreationResponses.WithLabelValues("failure").Inc()
+		SandboxCloneTotal.WithLabelValues("failure").Inc()
 		return nil, errors.NewError(errors.ErrorInternal, fmt.Sprintf("failed to clone sandbox: %v", err))
 	}
 	// Success: Record metrics
 	SandboxCreationResponses.WithLabelValues("success").Inc()
 	// Requirement: Only measure the latency when no error exists
-	SandboxCreationLatency.Observe(float64(metrics.Total.Milliseconds()))
+	SandboxCreationLatency.Observe(float64(cloneMetrics.Total.Milliseconds()))
+
+	// Clone-specific metrics
+	SandboxCloneDuration.Observe(float64(cloneMetrics.Total.Milliseconds()))
+	SandboxCloneTotal.WithLabelValues("success").Inc()
+	SandboxCloneStageDuration.WithLabelValues("wait").Observe(float64(cloneMetrics.Wait.Milliseconds()))
+	SandboxCloneStageDuration.WithLabelValues("get_template").Observe(float64(cloneMetrics.GetTemplate.Milliseconds()))
+	SandboxCloneStageDuration.WithLabelValues("create_sandbox").Observe(float64(cloneMetrics.CreateSandbox.Milliseconds()))
+	SandboxCloneStageDuration.WithLabelValues("wait_ready").Observe(float64(cloneMetrics.WaitReady.Milliseconds()))
+	SandboxCloneStageDuration.WithLabelValues("init_runtime").Observe(float64(cloneMetrics.InitRuntime.Milliseconds()))
+	SandboxCloneStageDuration.WithLabelValues("csi_mount").Observe(float64(cloneMetrics.CSIMount.Milliseconds()))
 
 	state, reason := sandbox.GetState()
-	log.Info("sandbox cloned", "sandbox", klog.KObj(sandbox), "metrics", metrics.String(), "state", state, "reason", reason)
+	log.Info("sandbox cloned", "sandbox", klog.KObj(sandbox), "metrics", cloneMetrics.String(), "state", state, "reason", reason)
 
 	// Sync route without refresh since sandbox was just claimed and state is already up-to-date
 	if err = m.syncRoute(ctx, sandbox, false); err != nil {
@@ -151,10 +175,15 @@ func (m *SandboxManager) syncRoute(ctx context.Context, sbx infra.Sandbox, refre
 	route := sbx.GetRoute()
 	m.proxy.SetRoute(ctx, route)
 	err := m.proxy.SyncRouteWithPeers(route)
+	duration := float64(time.Since(start).Milliseconds())
 	if err != nil {
 		log.Error(err, "failed to sync route with peers")
+		RouteSyncTotal.WithLabelValues("sync_with_peers", "failure").Inc()
 		return err
 	}
+	RouteSyncDuration.WithLabelValues("sync_with_peers").Observe(duration)
+	RouteSyncTotal.WithLabelValues("sync_with_peers", "success").Inc()
+	RouteSyncDelay.Set(duration)
 	log.Info("route synced with peers", "cost", time.Since(start), "route", route)
 	return nil
 }
@@ -162,26 +191,38 @@ func (m *SandboxManager) syncRoute(ctx context.Context, sbx infra.Sandbox, refre
 // PauseSandbox pauses a sandbox and syncs route with peers
 func (m *SandboxManager) PauseSandbox(ctx context.Context, sbx infra.Sandbox, opts infra.PauseOptions) error {
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
+	start := time.Now()
 	if err := sbx.Pause(ctx, opts); err != nil {
 		log.Error(err, "failed to pause sandbox")
+		SandboxPauseTotal.WithLabelValues("failure").Inc()
 		return err
 	}
 	if err := m.syncRoute(ctx, sbx, true); err != nil {
 		log.Error(err, "failed to sync route with peers after pause")
 	}
+	duration := float64(time.Since(start).Milliseconds())
+	SandboxPauseDuration.Observe(duration)
+	SandboxPauseTotal.WithLabelValues("success").Inc()
+	observeMax(SandboxPauseMaxDuration, duration)
 	return nil
 }
 
 // ResumeSandbox resumes a sandbox and syncs route with peers
 func (m *SandboxManager) ResumeSandbox(ctx context.Context, sbx infra.Sandbox) error {
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
+	start := time.Now()
 	if err := sbx.Resume(ctx); err != nil {
 		log.Error(err, "failed to resume sandbox")
+		SandboxResumeTotal.WithLabelValues("failure").Inc()
 		return err
 	}
 	if err := m.syncRoute(ctx, sbx, true); err != nil {
 		log.Error(err, "failed to sync route with peers after resume")
 	}
+	duration := float64(time.Since(start).Milliseconds())
+	SandboxResumeDuration.Observe(duration)
+	SandboxResumeTotal.WithLabelValues("success").Inc()
+	observeMax(SandboxResumeMaxDuration, duration)
 	return nil
 }
 
