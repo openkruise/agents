@@ -349,6 +349,10 @@ func (in *SandboxClaimSpec) DeepCopyInto(out *SandboxClaimSpec) {
 		in, out := &in.ShutdownTime, &out.ShutdownTime
 		*out = (*in).DeepCopy()
 	}
+	if in.PauseTime != nil {
+		in, out := &in.PauseTime, &out.PauseTime
+		*out = (*in).DeepCopy()
+	}
 	if in.ClaimTimeout != nil {
 		in, out := &in.ClaimTimeout, &out.ClaimTimeout
 		*out = new(metav1.Duration)

@@ -261,11 +261,16 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 				sbx.SetAnnotations(annotations)
 			}
 
-			// 3. apply shutdownTime
-			if claim.Spec.ShutdownTime != nil {
-				sbx.SetTimeout(infra.TimeoutOptions{
-					ShutdownTime: claim.Spec.ShutdownTime.Time,
-				})
+			// 3. apply shutdownTime and pauseTime
+			if claim.Spec.ShutdownTime != nil || claim.Spec.PauseTime != nil {
+				opts := infra.TimeoutOptions{}
+				if claim.Spec.ShutdownTime != nil {
+					opts.ShutdownTime = claim.Spec.ShutdownTime.Time
+				}
+				if claim.Spec.PauseTime != nil {
+					opts.PauseTime = claim.Spec.PauseTime.Time
+				}
+				sbx.SetTimeout(opts)
 			}
 		},
 		ReserveFailedSandbox: claim.Spec.ReserveFailedSandbox,
