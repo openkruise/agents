@@ -20,6 +20,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	testutils "github.com/openkruise/agents/test/utils"
 )
@@ -185,14 +186,15 @@ func TestCloneSandbox(t *testing.T) {
 	t.Cleanup(func() { DefaultCreateSandbox = origCreateSandbox })
 
 	tests := []struct {
-		name        string
-		opts        infra.CloneSandboxOptions
-		serverOpts  testutils.TestRuntimeServerOptions
-		initRuntime *config.InitRuntimeOptions
-		sbxOverride sbxOverride
-		preProcess  func(t *testing.T, cache *Cache, client *clients.ClientSet)
-		postCheck   func(t *testing.T, sbx infra.Sandbox, metrics infra.CloneMetrics)
-		expectError string
+		name                string
+		opts                infra.CloneSandboxOptions
+		serverOpts          testutils.TestRuntimeServerOptions
+		initRuntime         *config.InitRuntimeOptions
+		sbxOverride         sbxOverride
+		templateAnnotations map[string]string
+		preProcess          func(t *testing.T, cache *Cache, client *clients.ClientSet)
+		postCheck           func(t *testing.T, sbx infra.Sandbox, metrics infra.CloneMetrics)
+		expectError         string
 	}{
 		{
 			name: "successful clone",
@@ -479,6 +481,70 @@ func TestCloneSandbox(t *testing.T) {
 			sbxOverride: sbxOverride{Name: "test-sandbox-csi-mount-2", AccessToken: testutils.AccessToken},
 			expectError: "failed to perform csi mount",
 		},
+		{
+			name: "annotation fallback - invalid json in template annotation",
+			opts: infra.CloneSandboxOptions{
+				User:             user,
+				CheckPointID:     checkpointID,
+				WaitReadyTimeout: 30 * time.Second,
+			},
+			serverOpts: testutils.TestRuntimeServerOptions{
+				RunCommandResult: testutils.RunCommandResult{
+					PID:    1,
+					Exited: true,
+				},
+				RunCommandImmediately: true,
+			},
+			sbxOverride: sbxOverride{Name: "test-sandbox-anno-invalid-json"},
+			templateAnnotations: map[string]string{
+				models.ExtensionKeyClaimWithCSIMount_MountConfig: "not-valid-json",
+			},
+			expectError: "failed to parse csi mount config from annotation",
+		},
+		{
+			name: "annotation fallback - valid json but pv not found",
+			opts: infra.CloneSandboxOptions{
+				User:             user,
+				CheckPointID:     checkpointID,
+				WaitReadyTimeout: 30 * time.Second,
+			},
+			serverOpts: testutils.TestRuntimeServerOptions{
+				RunCommandResult: testutils.RunCommandResult{
+					PID:    1,
+					Exited: true,
+				},
+				RunCommandImmediately: true,
+			},
+			sbxOverride: sbxOverride{Name: "test-sandbox-anno-pv-missing"},
+			templateAnnotations: map[string]string{
+				models.ExtensionKeyClaimWithCSIMount_MountConfig: `[{"pvName":"non-existent-pv","mountPath":"/data"}]`,
+			},
+			expectError: "failed to generate csi mount options config",
+		},
+		{
+			name: "annotation fallback - no csi annotation in template",
+			opts: infra.CloneSandboxOptions{
+				User:             user,
+				CheckPointID:     checkpointID,
+				WaitReadyTimeout: 30 * time.Second,
+			},
+			serverOpts: testutils.TestRuntimeServerOptions{
+				RunCommandResult: testutils.RunCommandResult{
+					PID:    1,
+					Exited: true,
+				},
+				RunCommandImmediately: true,
+			},
+			sbxOverride: sbxOverride{Name: "test-sandbox-anno-none"},
+			templateAnnotations: map[string]string{
+				"some-other-annotation": "value",
+			},
+			postCheck: func(t *testing.T, sbx infra.Sandbox, metrics infra.CloneMetrics) {
+				assert.NotNil(t, sbx)
+				// No CSI mount should have happened
+				assert.Equal(t, time.Duration(0), metrics.CSIMount)
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -497,8 +563,9 @@ func TestCloneSandbox(t *testing.T) {
 			// CloneSandbox now looks for template by checkpoint.Name, not by label
 			sbt := &v1alpha1.SandboxTemplate{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      checkpointID, // Same name as checkpoint
-					Namespace: "default",
+					Name:        checkpointID, // Same name as checkpoint
+					Namespace:   "default",
+					Annotations: tt.templateAnnotations,
 				},
 				Spec: v1alpha1.SandboxTemplateSpec{
 					Template: &corev1.PodTemplateSpec{
@@ -1094,6 +1161,49 @@ func TestCreateCheckPoint(t *testing.T) {
 				tmpl, err := clientSet.ApiV1alpha1().SandboxTemplates("default").Get(context.Background(), "tmpl-runtimes-none", metav1.GetOptions{})
 				require.NoError(t, err)
 				assert.Nil(t, tmpl.Spec.Runtimes, "template Runtimes should be nil when sandbox has no Runtimes")
+			},
+		},
+		{
+			name: "checkpoint with CSI mount annotation - propagated to template",
+			sandbox: func() *v1alpha1.Sandbox {
+				sbx := newTestSandbox("test-sandbox-csi")
+				sbx.Annotations[models.ExtensionKeyClaimWithCSIMount_MountConfig] = `[{"driver":"nfs","source":"/data"}]`
+				return sbx
+			}(),
+			cpStatus: v1alpha1.CheckpointStatus{
+				Phase:        v1alpha1.CheckpointSucceeded,
+				CheckpointId: "cp-id-csi",
+			},
+			tmplOverride: tmplOverride{Name: "tmpl-csi", UID: "uid-csi"},
+			opts: infra.CreateCheckpointOptions{
+				WaitSuccessTimeout: 5 * time.Second,
+			},
+			postCheck: func(t *testing.T, id string, clientSet *clients.ClientSet) {
+				assert.Equal(t, "cp-id-csi", id)
+				// Verify CSI mount annotation is propagated to template
+				tmpl, err := clientSet.ApiV1alpha1().SandboxTemplates("default").Get(context.Background(), "tmpl-csi", metav1.GetOptions{})
+				require.NoError(t, err)
+				assert.Equal(t, `[{"driver":"nfs","source":"/data"}]`, tmpl.Annotations[models.ExtensionKeyClaimWithCSIMount_MountConfig],
+					"CSI mount annotation should be propagated to template")
+			},
+		},
+		{
+			name: "checkpoint without CSI mount annotation - template has no CSI annotation",
+			sandbox: newTestSandbox("test-sandbox-no-csi"),
+			cpStatus: v1alpha1.CheckpointStatus{
+				Phase:        v1alpha1.CheckpointSucceeded,
+				CheckpointId: "cp-id-no-csi",
+			},
+			tmplOverride: tmplOverride{Name: "tmpl-no-csi", UID: "uid-no-csi"},
+			opts: infra.CreateCheckpointOptions{
+				WaitSuccessTimeout: 5 * time.Second,
+			},
+			postCheck: func(t *testing.T, id string, clientSet *clients.ClientSet) {
+				assert.Equal(t, "cp-id-no-csi", id)
+				tmpl, err := clientSet.ApiV1alpha1().SandboxTemplates("default").Get(context.Background(), "tmpl-no-csi", metav1.GetOptions{})
+				require.NoError(t, err)
+				assert.Empty(t, tmpl.Annotations[models.ExtensionKeyClaimWithCSIMount_MountConfig],
+					"template should not have CSI mount annotation when sandbox doesn't have one")
 			},
 		},
 		{

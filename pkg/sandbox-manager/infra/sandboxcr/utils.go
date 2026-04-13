@@ -11,6 +11,12 @@ import (
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 )
 
+// necessaryAnnotationKeys defines the list of annotation keys that need to be
+// preserved when converting between Sandbox and SandboxTemplate.
+var necessaryAnnotationKeys = []string{
+	models.ExtensionKeyClaimWithCSIMount_MountConfig,
+}
+
 func SetSandboxCondition(sbx *v1alpha1.Sandbox, tp string, status metav1.ConditionStatus, reason, message string) {
 	now := metav1.Now()
 	for i, condition := range sbx.Status.Conditions {
@@ -68,4 +74,21 @@ func getCsiMountExtensionRequest(s metav1.Object) ([]v1alpha1.CSIMountConfig, er
 		return nil, fmt.Errorf("failed to unmarshal csi mount options: %v", err)
 	}
 	return csiMountRequests, nil
+}
+
+func propagateAnnotationsToCheckpoint(sbx *v1alpha1.Sandbox, cp *v1alpha1.Checkpoint) {
+	sbxAnnotations := sbx.GetAnnotations()
+	if sbxAnnotations == nil {
+		return
+	}
+	cpAnnotations := cp.GetAnnotations()
+	if cpAnnotations == nil {
+		cpAnnotations = make(map[string]string, len(necessaryAnnotationKeys))
+	}
+	for _, key := range necessaryAnnotationKeys {
+		if val, ok := sbxAnnotations[key]; ok && val != "" {
+			cpAnnotations[key] = val
+		}
+	}
+	cp.SetAnnotations(cpAnnotations)
 }
