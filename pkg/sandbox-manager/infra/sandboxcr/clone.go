@@ -10,12 +10,15 @@ import (
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
 
+	checkpointUtils "github.com/openkruise/agents/pkg/utils/checkpoint"
+
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/utils"
+	"github.com/openkruise/agents/pkg/utils/runtime"
 	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
 )
 
@@ -99,6 +102,14 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache *Ca
 	}
 
 	// Step 5: csi mount
+	// If opts.CSIMount is not provided from request, try to resolve mount options from sandbox annotation.
+	if opts.CSIMount == nil {
+		var resolveErr error
+		opts.CSIMount, resolveErr = runtime.ResolveCSIMountFromAnnotation(ctx, sbx.Sandbox, sbx.Client, sbx.Cache, sbx.storageRegistry)
+		if resolveErr != nil {
+			return nil, metrics, resolveErr
+		}
+	}
 	if opts.CSIMount != nil {
 		log.Info("starting to perform csi mount")
 		metrics.CSIMount, err = processCSIMounts(ctx, sbx, *opts.CSIMount)
@@ -168,6 +179,8 @@ func createSandboxFromCheckpoint(ctx context.Context, opts infra.CloneSandboxOpt
 		sbx.Annotations[v1alpha1.AnnotationRuntimeAccessToken] = initRuntimeOpts.AccessToken
 		sbx.Annotations[v1alpha1.AnnotationInitRuntimeRequest] = cp.Annotations[v1alpha1.AnnotationInitRuntimeRequest]
 	}
+	// e.g., copy csi mount config from checkpoint to sandbox obj
+	checkpointUtils.RestoreAnnotationsFromCheckpoint(cp, sbx.Sandbox)
 	DefaultPostProcessClonedSandbox(sbx.Sandbox)
 	log.Info("creating new sandbox from checkpoint")
 	sbx.Sandbox, err = DefaultCreateSandbox(ctx, sbx.Sandbox, client, cache)
@@ -318,6 +331,8 @@ func CreateCheckpoint(ctx context.Context, sbx *v1alpha1.Sandbox, client clients
 			}
 		}
 	}
+	// to make sure the sandbox annotations are propagated to the checkpoint
+	checkpointUtils.PropagateAnnotationsToCheckpoint(sbx, cp)
 	cp, err = DefaultCreateCheckpoint(ctx, client, cp)
 	if err != nil {
 		log.Error(err, "failed to create checkpoint")

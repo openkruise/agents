@@ -8,7 +8,6 @@ import (
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
-	"github.com/openkruise/agents/pkg/servers/e2b/models"
 )
 
 func SetSandboxCondition(sbx *v1alpha1.Sandbox, tp string, status metav1.ConditionStatus, reason, message string) {
@@ -56,16 +55,4 @@ func getInitRuntimeRequest(s metav1.Object) (*config.InitRuntimeOptions, error) 
 		initRuntimeOpts = &opts
 	}
 	return initRuntimeOpts, nil
-}
-
-func getCsiMountExtensionRequest(s metav1.Object) ([]v1alpha1.CSIMountConfig, error) {
-	var csiMountRequests []v1alpha1.CSIMountConfig
-	csiMountRequestsRaw := s.GetAnnotations()[models.ExtensionKeyClaimWithCSIMount_MountConfig]
-	if csiMountRequestsRaw == "" {
-		return nil, nil
-	}
-	if err := json.Unmarshal([]byte(csiMountRequestsRaw), &csiMountRequests); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal csi mount options: %v", err)
-	}
-	return csiMountRequests, nil
 }

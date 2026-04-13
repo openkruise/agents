@@ -15,6 +15,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -24,8 +25,16 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog/v2"
 
+	"github.com/openkruise/agents/api/v1alpha1"
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/agent-runtime/storages"
+	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
+	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
+	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	"github.com/openkruise/agents/pkg/servers/e2b/models"
+	"github.com/openkruise/agents/pkg/utils"
+	csimountutils "github.com/openkruise/agents/pkg/utils/csiutils"
 	"github.com/openkruise/agents/pkg/utils/sandboxutils"
 	"github.com/openkruise/agents/proto/envd/process"
 	"github.com/openkruise/agents/proto/envd/process/processconnect"
@@ -141,4 +150,42 @@ func RunCommandWithRuntime(ctx context.Context, args RunCmdFuncArgs) (RunCommand
 	}
 	log.Info("all messages are received", "cost", time.Since(start), "result", result)
 	return result, errors.Join(result.Error, stream.Err())
+}
+
+// ResolveCSIMountFromAnnotation parses CSI mount config from sandbox annotation and resolves it into MountOptionList.
+// Returns nil if no CSI mount annotation is present.
+func ResolveCSIMountFromAnnotation(ctx context.Context, obj metav1.Object, client *clients.ClientSet, cache infra.CacheProvider, storageRegistry storages.VolumeMountProviderRegistry) (*config.CSIMountOptions, error) {
+	log := klog.FromContext(ctx)
+	csiMountConfigs, err := GetCsiMountExtensionRequest(obj)
+	if err != nil {
+		log.Error(err, "failed to parse csi mount config from annotation")
+		return nil, fmt.Errorf("failed to parse csi mount config from annotation: %w", err)
+	}
+	if len(csiMountConfigs) == 0 {
+		return nil, nil
+	}
+	csiClient := csimountutils.NewCSIMountHandler(client, cache, storageRegistry, utils.DefaultSandboxDeployNamespace)
+	mountOptionList := make([]config.MountConfig, 0, len(csiMountConfigs))
+	for _, cfg := range csiMountConfigs {
+		driverName, csiReqConfigRaw, genErr := csiClient.CSIMountOptionsConfig(ctx, cfg)
+		if genErr != nil {
+			log.Error(genErr, "failed to generate csi mount options config", "mountConfig", cfg)
+			return nil, fmt.Errorf("failed to generate csi mount options config: %w", genErr)
+		}
+		mountOptionList = append(mountOptionList, config.MountConfig{Driver: driverName, RequestRaw: csiReqConfigRaw})
+	}
+	return &config.CSIMountOptions{MountOptionList: mountOptionList}, nil
+}
+
+// GetCsiMountExtensionRequest parses CSI mount config from object annotations.
+func GetCsiMountExtensionRequest(s metav1.Object) ([]v1alpha1.CSIMountConfig, error) {
+	var csiMountRequests []v1alpha1.CSIMountConfig
+	csiMountRequestsRaw := s.GetAnnotations()[models.ExtensionKeyClaimWithCSIMount_MountConfig]
+	if csiMountRequestsRaw == "" {
+		return nil, nil
+	}
+	if err := json.Unmarshal([]byte(csiMountRequestsRaw), &csiMountRequests); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal csi mount options: %v", err)
+	}
+	return csiMountRequests, nil
 }
