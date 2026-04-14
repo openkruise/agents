@@ -496,7 +496,7 @@ func TestClaimSandboxFailed(t *testing.T) {
 		getContext  func() context.Context
 	}{
 		{
-			name: "inplace update failed, reserved",
+			name: "start container failed, reserved",
 			options: infra.ClaimSandboxOptions{
 				User:                 "test-user",
 				Template:             existTemplate,
@@ -508,17 +508,16 @@ func TestClaimSandboxFailed(t *testing.T) {
 			preModifier: func(sbx *v1alpha1.Sandbox) {
 				sbx.Status.Conditions = []metav1.Condition{
 					{
-						Type: string(v1alpha1.SandboxConditionReady),
-						// hack: both make sandbox available and inplace update failed
+						Type:   string(v1alpha1.SandboxConditionReady),
 						Status: metav1.ConditionTrue,
 						Reason: v1alpha1.SandboxReadyReasonStartContainerFailed,
 					},
 				}
 			},
-			expectError: "sandbox inplace update failed",
+			expectError: "sandbox start container failed",
 		},
 		{
-			name: "inplace update failed, not reserved",
+			name: "start container failed, not reserved",
 			options: infra.ClaimSandboxOptions{
 				User:                 "test-user",
 				Template:             existTemplate,
@@ -530,14 +529,13 @@ func TestClaimSandboxFailed(t *testing.T) {
 			preModifier: func(sbx *v1alpha1.Sandbox) {
 				sbx.Status.Conditions = []metav1.Condition{
 					{
-						Type: string(v1alpha1.SandboxConditionReady),
-						// hack: both make sandbox available and inplace update failed
+						Type:   string(v1alpha1.SandboxConditionReady),
 						Status: metav1.ConditionTrue,
 						Reason: v1alpha1.SandboxReadyReasonStartContainerFailed,
 					},
 				}
 			},
-			expectError: "sandbox inplace update failed",
+			expectError: "sandbox start container failed",
 		},
 		{
 			name: "csi mount failed, reserved",
@@ -694,6 +692,7 @@ func TestCheckSandboxInplaceUpdate(t *testing.T) {
 		condStatus         metav1.ConditionStatus
 		condReason         string
 		condMessage        string
+		extraConditions    []metav1.Condition
 		expectResult       bool
 		expectError        error
 	}{
@@ -722,6 +721,51 @@ func TestCheckSandboxInplaceUpdate(t *testing.T) {
 			expectResult:       false,
 		},
 		{
+			name:               "not satisfied: inplace update condition in progress",
+			generation:         1,
+			observedGeneration: 1,
+			condStatus:         metav1.ConditionTrue,
+			condReason:         v1alpha1.SandboxReadyReasonPodReady,
+			extraConditions: []metav1.Condition{
+				{
+					Type:   string(v1alpha1.SandboxConditionInplaceUpdate),
+					Status: metav1.ConditionTrue,
+					Reason: v1alpha1.SandboxInplaceUpdateReasonInplaceUpdating,
+				},
+			},
+			expectResult: false,
+		},
+		{
+			name:               "ready after inplace update failed",
+			generation:         1,
+			observedGeneration: 1,
+			condStatus:         metav1.ConditionTrue,
+			condReason:         v1alpha1.SandboxReadyReasonPodReady,
+			extraConditions: []metav1.Condition{
+				{
+					Type:   string(v1alpha1.SandboxConditionInplaceUpdate),
+					Status: metav1.ConditionTrue,
+					Reason: v1alpha1.SandboxInplaceUpdateReasonFailed,
+				},
+			},
+			expectResult: true,
+		},
+		{
+			name:               "ready after inplace update succeeded",
+			generation:         1,
+			observedGeneration: 1,
+			condStatus:         metav1.ConditionTrue,
+			condReason:         v1alpha1.SandboxReadyReasonPodReady,
+			extraConditions: []metav1.Condition{
+				{
+					Type:   string(v1alpha1.SandboxConditionInplaceUpdate),
+					Status: metav1.ConditionTrue,
+					Reason: v1alpha1.SandboxInplaceUpdateReasonSucceeded,
+				},
+			},
+			expectResult: true,
+		},
+		{
 			name:               "not satisfied: start container failed, deleted",
 			generation:         1,
 			observedGeneration: 1,
@@ -729,7 +773,7 @@ func TestCheckSandboxInplaceUpdate(t *testing.T) {
 			condReason:         v1alpha1.SandboxReadyReasonStartContainerFailed,
 			condMessage:        "by test",
 			expectResult:       false,
-			expectError:        retriableError{Message: "sandbox inplace update failed: by test"},
+			expectError:        retriableError{Message: "sandbox start container failed: by test"},
 		},
 	}
 
@@ -748,6 +792,15 @@ func TestCheckSandboxInplaceUpdate(t *testing.T) {
 			require.Eventually(t, func() bool {
 				return testInfra.HasTemplate(template)
 			}, 100*time.Millisecond, 5*time.Millisecond)
+			conditions := []metav1.Condition{
+				{
+					Type:    string(v1alpha1.SandboxConditionReady),
+					Status:  tt.condStatus,
+					Reason:  tt.condReason,
+					Message: tt.condMessage,
+				},
+			}
+			conditions = append(conditions, tt.extraConditions...)
 			sbx := &v1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "sbx-1",
@@ -761,14 +814,7 @@ func TestCheckSandboxInplaceUpdate(t *testing.T) {
 				},
 				Status: v1alpha1.SandboxStatus{
 					Phase: v1alpha1.SandboxRunning,
-					Conditions: []metav1.Condition{
-						{
-							Type:    string(v1alpha1.SandboxConditionReady),
-							Status:  tt.condStatus,
-							Reason:  tt.condReason,
-							Message: tt.condMessage,
-						},
-					},
+					Conditions: conditions,
 					PodInfo: v1alpha1.PodInfo{
 						PodIP: "1.2.3.4",
 					},

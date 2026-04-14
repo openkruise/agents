@@ -23,6 +23,13 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 )
 
+func TruncateConditionMessage(msg string) string {
+	if len(msg) <= MaxConditionMessageLen {
+		return msg
+	}
+	return msg[:MaxConditionMessageLen] + "..."
+}
+
 func SetSandboxCondition(status *agentsv1alpha1.SandboxStatus, condition metav1.Condition) {
 	currentCond := GetSandboxCondition(status, condition.Type)
 	if currentCond != nil && currentCond.Status == condition.Status && currentCond.Reason == condition.Reason &&

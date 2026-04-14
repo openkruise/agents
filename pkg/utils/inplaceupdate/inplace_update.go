@@ -19,9 +19,12 @@ package inplaceupdate
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"reflect"
+	"sync/atomic"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -32,6 +35,23 @@ import (
 	agentsapiv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/utils"
 )
+
+// ResizeNotSupportedError indicates that in-place pod resource resize is not
+// possible on the current cluster. This is returned when both the pods/resize
+// subresource (K8s 1.33+) and the direct spec patch fallback (K8s 1.27-1.32)
+// fail, which typically means the InPlacePodVerticalScaling feature gate is
+// not enabled.
+type ResizeNotSupportedError struct {
+	Err error
+}
+
+func (e *ResizeNotSupportedError) Error() string {
+	return fmt.Sprintf("in-place pod resize not supported: %v", e.Err)
+}
+
+func (e *ResizeNotSupportedError) Unwrap() error {
+	return e.Err
+}
 
 const (
 	// PodAnnotationInPlaceUpdateStateKey records the state of inplace-update.
@@ -89,6 +109,10 @@ type GeneratePatchBodyFunc func(opts InPlaceUpdateOptions) string
 type InPlaceUpdateControl struct {
 	client.Client
 	generatePatchBodyFunc GeneratePatchBodyFunc
+	// useDirectResourcePatch is set to true after the first 404 from the pods/resize
+	// subresource, indicating the cluster is K8s < 1.33 and all subsequent
+	// resource resize calls should go directly through the spec patch path.
+	useDirectResourcePatch atomic.Bool
 }
 
 func NewInPlaceUpdateControl(c client.Client, patchFunc GeneratePatchBodyFunc) *InPlaceUpdateControl {
@@ -258,6 +282,30 @@ func DefaultGenerateResizeSubresourceBody(opts InPlaceUpdateOptions) *corev1.Pod
 	return resizeBody
 }
 
+// buildResourcePatch converts a resize body (as produced by generateResizeSubresourceBody)
+// into a strategic merge patch that can be applied directly to the pod object. This is
+// the fallback path for K8s 1.27-1.32, where InPlacePodVerticalScaling is supported but
+// the pods/resize subresource does not yet exist.
+func buildResourcePatch(resizeBody *corev1.Pod) string {
+	type containerPatch struct {
+		Name      string                      `json:"name"`
+		Resources corev1.ResourceRequirements `json:"resources"`
+	}
+	var containers []containerPatch
+	for _, c := range resizeBody.Spec.Containers {
+		containers = append(containers, containerPatch{
+			Name:      c.Name,
+			Resources: c.Resources,
+		})
+	}
+	patch := map[string]any{
+		"spec": map[string]any{
+			"containers": containers,
+		},
+	}
+	return utils.DumpJson(patch)
+}
+
 // CheckResizeQoSChange checks if applying the sandbox template resources to the pod
 // would change the pod's QoS class. Returns the original and new QoS classes plus
 // a boolean indicating whether a change would occur.
@@ -389,8 +437,7 @@ func (c *InPlaceUpdateControl) Update(ctx context.Context, opts InPlaceUpdateOpt
 		Pod: current,
 	})
 	if resizeBody != nil {
-		if err := c.SubResource("resize").Update(ctx, current, client.WithSubResourceBody(resizeBody)); err != nil {
-			logger.Error(err, "inplace update pod resize failed")
+		if err := c.resizePod(ctx, logger, current, resizeBody); err != nil {
 			return false, err
 		}
 	}
@@ -402,26 +449,68 @@ func (c *InPlaceUpdateControl) Update(ctx context.Context, opts InPlaceUpdateOpt
 	return true, nil
 }
 
-func IsInplaceUpdateCompleted(ctx context.Context, pod *corev1.Pod) bool {
+// resizePod applies a resource resize to the pod. It uses the pods/resize subresource
+// on K8s >= 1.33 (see https://kubernetes.io/blog/2025/05/16/kubernetes-v1-33-in-place-pod-resize-beta/),
+// and falls back to a direct strategic merge patch on older versions (K8s 1.27-1.32).
+// The detection result is cached so the subresource is only probed once per controller lifetime.
+func (c *InPlaceUpdateControl) resizePod(ctx context.Context, logger klog.Logger, pod *corev1.Pod, resizeBody *corev1.Pod) error {
+	if !c.useDirectResourcePatch.Load() {
+		err := c.SubResource("resize").Update(ctx, pod, client.WithSubResourceBody(resizeBody))
+		if err == nil {
+			logger.Info("inplace update pod resize succeeded via resize subresource (K8s >= 1.33)")
+			return nil
+		}
+		if !apierrors.IsNotFound(err) {
+			logger.Error(err, "inplace update pod resize failed via resize subresource")
+			return err
+		}
+		// The pods/resize subresource was introduced in K8s 1.33. On K8s 1.27-1.32,
+		// in-place pod vertical scaling is done by directly patching spec.containers[].resources.
+		logger.Info("resize subresource not found, switching to direct resource patch (K8s < 1.33)")
+		c.useDirectResourcePatch.Store(true)
+	}
+	return c.patchPodResources(ctx, logger, pod, resizeBody)
+}
+
+// patchPodResources applies a strategic merge patch to update pod resources directly.
+func (c *InPlaceUpdateControl) patchPodResources(ctx context.Context, logger klog.Logger, pod *corev1.Pod, resizeBody *corev1.Pod) error {
+	resourcePatch := buildResourcePatch(resizeBody)
+	if err := c.Patch(ctx, pod, client.RawPatch(types.StrategicMergePatchType, []byte(resourcePatch))); err != nil {
+		logger.Error(err, "direct resource patch failed, in-place resize not supported")
+		return &ResizeNotSupportedError{Err: err}
+	}
+	logger.Info("inplace update pod resize succeeded via direct resource patch (K8s < 1.33)")
+	return nil
+}
+
+// IsInplaceUpdateCompleted checks whether an in-place update has finished.
+// Returns (true, nil) when all changes are applied.
+// Returns (false, nil) when the update is still in progress.
+// Returns (false, err) when a terminal failure is detected (e.g., resize infeasible)
+// and the caller should fail fast instead of retrying.
+func IsInplaceUpdateCompleted(ctx context.Context, pod *corev1.Pod) (bool, error) {
 	logger := logf.FromContext(ctx).WithValues("pod", klog.KObj(pod))
 
 	state, err := GetPodInPlaceUpdateState(pod)
 	if state == nil || err != nil {
-		return true
+		return true, nil
 	}
 	if state.UpdateImages {
 		if !isPodImageUpdateCompleted(pod, state) {
 			logger.Info("pod container image inplace update is not completed yet")
-			return false
+			return false, nil
 		}
 	}
 	if state.UpdateResources {
 		if !isPodResourceResizeCompleted(pod) {
+			if terminalErr := checkPodResizeInfeasible(pod); terminalErr != nil {
+				return false, terminalErr
+			}
 			logger.Info("pod resize resources are not applied yet")
-			return false
+			return false, nil
 		}
 	}
-	return true
+	return true, nil
 }
 
 // isPodImageUpdateCompleted checks whether image updates have been applied by comparing
@@ -466,6 +555,45 @@ func isPodResourceResizeCompleted(pod *corev1.Pod) bool {
 		}
 	}
 	return true
+}
+
+// checkPodResizeInfeasible inspects the pod's resize-related conditions and
+// the (deprecated) Resize status field to detect terminal resize failures.
+// It returns a non-nil error describing the failure when:
+//   - PodResizePending condition is True with reason Infeasible or Deferred
+//   - PodResizeInProgress condition is True with reason Error
+//   - pod.Status.Resize is Infeasible or Deferred (deprecated field, kept for compat)
+func checkPodResizeInfeasible(pod *corev1.Pod) error {
+	for _, cond := range pod.Status.Conditions {
+		if cond.Status != corev1.ConditionTrue {
+			continue
+		}
+		switch cond.Type {
+		case corev1.PodResizePending:
+			switch cond.Reason {
+			case corev1.PodReasonInfeasible:
+				return fmt.Errorf("pod resize is infeasible: %s", cond.Message)
+			case corev1.PodReasonDeferred:
+				// Deferred means the resize fits the node in theory but cannot
+				// be granted right now (e.g. other pods are consuming the
+				// resources). For sandbox workloads we treat this as a terminal
+				// failure so the caller can react quickly (reschedule, alert,
+				// etc.) instead of waiting indefinitely for resources to free up.
+				return fmt.Errorf("pod resize is deferred: %s", cond.Message)
+			}
+		case corev1.PodResizeInProgress:
+			if cond.Reason == corev1.PodReasonError {
+				return fmt.Errorf("pod resize error: %s", cond.Message)
+			}
+		}
+	}
+	switch pod.Status.Resize {
+	case corev1.PodResizeStatusInfeasible:
+		return fmt.Errorf("pod resize is infeasible (status.resize)")
+	case corev1.PodResizeStatusDeferred:
+		return fmt.Errorf("pod resize is deferred (status.resize)")
+	}
+	return nil
 }
 
 func isResourceListCovered(actual, expected corev1.ResourceList) bool {

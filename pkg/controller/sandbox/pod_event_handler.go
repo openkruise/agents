@@ -98,6 +98,24 @@ func isActivePodUpdate(oldObj, newObj *corev1.Pod) bool {
 	if !reflect.DeepEqual(oldObj.Status.ContainerStatuses, newObj.Status.ContainerStatuses) {
 		return true
 	}
+	// for in-place resource resize scenarios
+	// K8s 1.33+ uses PodResizePending/PodResizeInProgress conditions.
+	if !isPodConditionEqual(
+		utils.GetPodCondition(&oldObj.Status, corev1.PodResizePending),
+		utils.GetPodCondition(&newObj.Status, corev1.PodResizePending),
+	) {
+		return true
+	}
+	if !isPodConditionEqual(
+		utils.GetPodCondition(&oldObj.Status, corev1.PodResizeInProgress),
+		utils.GetPodCondition(&newObj.Status, corev1.PodResizeInProgress),
+	) {
+		return true
+	}
+	// K8s 1.27-1.32 uses the pod.Status.Resize field (Proposed/InProgress/Infeasible/Deferred).
+	if oldObj.Status.Resize != newObj.Status.Resize {
+		return true
+	}
 	return false
 }
 
