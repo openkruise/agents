@@ -135,9 +135,11 @@ func (r *commonControl) EnsureSandboxUpdated(ctx context.Context, args EnsureFun
 
 	pCond := utils.GetPodCondition(&pod.Status, corev1.PodReady)
 	cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionReady))
-	if pCond != nil && string(pCond.Status) != string(cond.Status) {
+	if pCond != nil {
 		cond.Status = metav1.ConditionStatus(pCond.Status)
 		cond.LastTransitionTime = pCond.LastTransitionTime
+		cond.Reason = agentsv1alpha1.SandboxReadyReasonPodReady
+		cond.Message = ""
 	}
 	for _, cStatus := range pod.Status.ContainerStatuses {
 		// indicating container startup failure

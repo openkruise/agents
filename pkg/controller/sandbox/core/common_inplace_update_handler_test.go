@@ -396,6 +396,211 @@ func TestHandleInPlaceUpdateCommon_QoSChangeRejected(t *testing.T) {
 	}
 }
 
+func TestHandleInPlaceUpdateCommon_ResizeInfeasibleFailFast(t *testing.T) {
+	ctx := context.Background()
+
+	// Simulate a pod where resize has been initiated (revision matches) but
+	// the kubelet reported Infeasible via PodResizePending condition.
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-pod",
+			Namespace: "default",
+			Labels: map[string]string{
+				agentsv1alpha1.PodLabelTemplateHash: "target-revision",
+			},
+			Annotations: map[string]string{
+				inplaceupdate.PodAnnotationInPlaceUpdateStateKey: `{"revision":"target-revision","updateTimestamp":"2024-01-01T00:00:00Z","updateResources":true}`,
+			},
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:  "main",
+				Image: "nginx:latest",
+				Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{
+						corev1.ResourceCPU: resource.MustParse("2000m"),
+					},
+					Limits: corev1.ResourceList{
+						corev1.ResourceCPU: resource.MustParse("2000m"),
+					},
+				},
+			}},
+		},
+		Status: corev1.PodStatus{
+			Conditions: []corev1.PodCondition{
+				{
+					Type:    corev1.PodResizePending,
+					Status:  corev1.ConditionTrue,
+					Reason:  corev1.PodReasonInfeasible,
+					Message: "insufficient cpu on node",
+				},
+			},
+		},
+	}
+
+	_, hashWithoutImageAndResource := HashSandbox(&agentsv1alpha1.Sandbox{
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{Spec: pod.Spec},
+			},
+		},
+	})
+
+	box := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-sandbox",
+			Namespace: "default",
+			Annotations: map[string]string{
+				agentsv1alpha1.SandboxHashWithoutImageAndResources: hashWithoutImageAndResource,
+			},
+		},
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{Spec: pod.Spec},
+			},
+		},
+	}
+
+	newStatus := &agentsv1alpha1.SandboxStatus{
+		UpdateRevision: "target-revision",
+	}
+
+	recorder := createTestRecorder()
+	handler := &MockInPlaceUpdateHandler{
+		control:  inplaceupdate.NewInPlaceUpdateControl(nil, inplaceupdate.DefaultGeneratePatchBodyFunc),
+		recorder: recorder,
+		logger:   logr.Discard(),
+	}
+
+	result, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if !result {
+		t.Fatal("Expected result true (done, fail-fast), got false")
+	}
+
+	var found bool
+	for _, cond := range newStatus.Conditions {
+		if cond.Type == string(agentsv1alpha1.SandboxConditionInplaceUpdate) {
+			found = true
+			if cond.Reason != agentsv1alpha1.SandboxInplaceUpdateReasonFailed {
+				t.Errorf("Expected reason %s, got %s", agentsv1alpha1.SandboxInplaceUpdateReasonFailed, cond.Reason)
+			}
+			if cond.Status != metav1.ConditionTrue {
+				t.Errorf("Expected status ConditionTrue, got %s", cond.Status)
+			}
+			if cond.Message == "" {
+				t.Error("Expected non-empty message about infeasible resize")
+			}
+		}
+	}
+	if !found {
+		t.Error("InplaceUpdate condition not found in status")
+	}
+}
+
+func TestHandleInPlaceUpdateCommon_TerminalFailureNotOverwritten(t *testing.T) {
+	ctx := context.Background()
+
+	// Simulate the race condition: resize subresource failed (pod spec was never
+	// updated), so pod spec == pod status == old values. Without the fix,
+	// isPodResourceResizeCompleted would falsely report completion and overwrite
+	// the Failed condition with Succeeded.
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-pod",
+			Namespace: "default",
+			Labels: map[string]string{
+				agentsv1alpha1.PodLabelTemplateHash: "target-revision",
+			},
+			Annotations: map[string]string{
+				inplaceupdate.PodAnnotationInPlaceUpdateStateKey: `{"revision":"target-revision","updateTimestamp":"2024-01-01T00:00:00Z","updateResources":true}`,
+			},
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:  "main",
+				Image: "nginx:latest",
+				Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("250m")},
+					Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")},
+				},
+			}},
+		},
+		Status: corev1.PodStatus{
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name: "main",
+				Resources: &corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("250m")},
+					Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")},
+				},
+			}},
+		},
+	}
+
+	_, hashWithoutImageAndResource := HashSandbox(&agentsv1alpha1.Sandbox{
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{Spec: pod.Spec},
+			},
+		},
+	})
+
+	box := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-sandbox",
+			Namespace: "default",
+			Annotations: map[string]string{
+				agentsv1alpha1.SandboxHashWithoutImageAndResources: hashWithoutImageAndResource,
+			},
+		},
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{Spec: pod.Spec},
+			},
+		},
+	}
+
+	// newStatus already has InplaceUpdate: Failed from a previous reconcile
+	newStatus := &agentsv1alpha1.SandboxStatus{
+		UpdateRevision: "target-revision",
+		Conditions: []metav1.Condition{
+			{
+				Type:    string(agentsv1alpha1.SandboxConditionInplaceUpdate),
+				Status:  metav1.ConditionTrue,
+				Reason:  agentsv1alpha1.SandboxInplaceUpdateReasonFailed,
+				Message: "in-place pod resize not supported: the server could not find the requested resource",
+			},
+		},
+	}
+
+	recorder := createTestRecorder()
+	handler := &MockInPlaceUpdateHandler{
+		control:  inplaceupdate.NewInPlaceUpdateControl(nil, inplaceupdate.DefaultGeneratePatchBodyFunc),
+		recorder: recorder,
+		logger:   logr.Discard(),
+	}
+
+	result, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if !result {
+		t.Fatal("Expected result true (done), got false")
+	}
+
+	for _, cond := range newStatus.Conditions {
+		if cond.Type == string(agentsv1alpha1.SandboxConditionInplaceUpdate) {
+			if cond.Reason != agentsv1alpha1.SandboxInplaceUpdateReasonFailed {
+				t.Errorf("Expected InplaceUpdate condition to remain Failed, got %s", cond.Reason)
+			}
+			return
+		}
+	}
+	t.Error("InplaceUpdate condition not found")
+}
+
 func TestHandleInPlaceUpdateCommon_InitialState(t *testing.T) {
 	// Test initial state with no ongoing update
 	ctx := context.Background()

@@ -3,16 +3,23 @@ package e2b
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"reflect"
 	"testing"
 
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
+	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 )
 
 // TestCsiMountOptionsConfigRecord tests the csiMountOptionsConfigRecord function
@@ -419,4 +426,70 @@ func TestCreateSandboxWithClone_CSIMount(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCreateSandboxWithClaim_CPUResizeFeatureGate(t *testing.T) {
+	user := &models.CreatedTeamAPIKey{ID: uuid.New(), Name: "test-user"}
+
+	t.Run("feature gate disabled rejects CPU resize with requests", func(t *testing.T) {
+		err := utilfeature.DefaultMutableFeatureGate.SetFromMap(map[string]bool{
+			string(features.SandboxClaimInPlaceCPUResizeGate): false,
+		})
+		assert.NoError(t, err)
+		defer func() {
+			_ = utilfeature.DefaultMutableFeatureGate.SetFromMap(map[string]bool{
+				string(features.SandboxClaimInPlaceCPUResizeGate): true,
+			})
+		}()
+
+		ctrl := &Controller{}
+		request := models.NewSandboxRequest{
+			TemplateID: "test-template",
+			Extensions: models.NewSandboxRequestExtension{
+				SkipInitRuntime: true,
+				InplaceUpdate: models.InplaceUpdateExtension{
+					Resources: &models.InplaceUpdateResourcesExtension{
+						Requests: corev1.ResourceList{
+							corev1.ResourceCPU: resource.MustParse("500m"),
+						},
+					},
+				},
+			},
+		}
+		_, apiErr := ctrl.createSandboxWithClaim(context.Background(), request, user)
+		assert.NotNil(t, apiErr)
+		assert.Equal(t, http.StatusBadRequest, apiErr.Code)
+		assert.Contains(t, apiErr.Message, "feature gate")
+	})
+
+	t.Run("feature gate disabled rejects CPU resize with limits", func(t *testing.T) {
+		err := utilfeature.DefaultMutableFeatureGate.SetFromMap(map[string]bool{
+			string(features.SandboxClaimInPlaceCPUResizeGate): false,
+		})
+		assert.NoError(t, err)
+		defer func() {
+			_ = utilfeature.DefaultMutableFeatureGate.SetFromMap(map[string]bool{
+				string(features.SandboxClaimInPlaceCPUResizeGate): true,
+			})
+		}()
+
+		ctrl := &Controller{}
+		request := models.NewSandboxRequest{
+			TemplateID: "test-template",
+			Extensions: models.NewSandboxRequestExtension{
+				SkipInitRuntime: true,
+				InplaceUpdate: models.InplaceUpdateExtension{
+					Resources: &models.InplaceUpdateResourcesExtension{
+						Limits: corev1.ResourceList{
+							corev1.ResourceCPU: resource.MustParse("1000m"),
+						},
+					},
+				},
+			},
+		}
+		_, apiErr := ctrl.createSandboxWithClaim(context.Background(), request, user)
+		assert.NotNil(t, apiErr)
+		assert.Equal(t, http.StatusBadRequest, apiErr.Code)
+		assert.Contains(t, apiErr.Message, "feature gate")
+	})
 }

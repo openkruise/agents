@@ -21,6 +21,9 @@ const (
 
 	PodConditionContainersPaused  = "ContainersPaused"
 	PodConditionContainersResumed = "ContainersResumed"
+
+	// MaxConditionMessageLen is the max length for a Condition.Message.
+	MaxConditionMessageLen = 256
 )
 
 const (

@@ -466,9 +466,10 @@ var _ = Describe("SandboxClaim", func() {
 					Namespace: namespace,
 				},
 				Spec: agentsv1alpha1.SandboxClaimSpec{
-					TemplateName: qosBreakSet.Name,
-					Replicas:     ptr.To(int32(1)),
-					ClaimTimeout: &metav1.Duration{Duration: 30 * time.Second},
+					TemplateName:    qosBreakSet.Name,
+					Replicas:        ptr.To(int32(1)),
+					SkipInitRuntime: true,
+					ClaimTimeout:    &metav1.Duration{Duration: 30 * time.Second},
 					WaitReadyTimeout: &metav1.Duration{
 						Duration: 30 * time.Second,
 					},
@@ -508,6 +509,11 @@ var _ = Describe("SandboxClaim", func() {
 				Namespace: namespace,
 			}, pod)).To(Succeed())
 			Expect(pod.Status.QOSClass).To(Equal(corev1.PodQOSBurstable))
+
+			By("Verifying spec resources remain at original values (250m req / 500m lim)")
+			specRes := pod.Spec.Containers[0].Resources
+			Expect(specRes.Requests[corev1.ResourceCPU]).To(Equal(resource.MustParse("250m")))
+			Expect(specRes.Limits[corev1.ResourceCPU]).To(Equal(resource.MustParse("500m")))
 		})
 
 		It("should allow CPU resize that preserves QoS class (only requests changed)", func() {
@@ -518,8 +524,9 @@ var _ = Describe("SandboxClaim", func() {
 					Namespace: namespace,
 				},
 				Spec: agentsv1alpha1.SandboxClaimSpec{
-					TemplateName: sandboxSet.Name,
-					Replicas:     ptr.To(int32(1)),
+					TemplateName:    sandboxSet.Name,
+					Replicas:        ptr.To(int32(1)),
+					SkipInitRuntime: true,
 					WaitReadyTimeout: &metav1.Duration{
 						Duration: 2 * time.Minute,
 					},
@@ -553,6 +560,23 @@ var _ = Describe("SandboxClaim", func() {
 				Namespace: namespace,
 			}, pod)).To(Succeed())
 			Expect(pod.Status.QOSClass).To(Equal(corev1.PodQOSBurstable))
+
+			By("Verifying spec resources: CPU request=300m, limit=500m (unchanged)")
+			specRes := pod.Spec.Containers[0].Resources
+			Expect(specRes.Requests[corev1.ResourceCPU]).To(Equal(resource.MustParse("300m")))
+			Expect(specRes.Limits[corev1.ResourceCPU]).To(Equal(resource.MustParse("500m")))
+
+			By("Verifying status resources reflect the actual resize (if populated by kubelet)")
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name:      claimedSandboxes[0].Name,
+				Namespace: namespace,
+			}, pod)).To(Succeed())
+			if len(pod.Status.ContainerStatuses) > 0 && pod.Status.ContainerStatuses[0].Resources != nil {
+				cpuReq, ok := pod.Status.ContainerStatuses[0].Resources.Requests[corev1.ResourceCPU]
+				if ok {
+					Expect(cpuReq.MilliValue()).To(Equal(int64(300)))
+				}
+			}
 		})
 
 		It("should resize CPU and inplace-update image when both are set on claim", func() {
@@ -649,6 +673,69 @@ var _ = Describe("SandboxClaim", func() {
 				Namespace: namespace,
 			}, pod)).To(Succeed())
 			Expect(pod.Status.QOSClass).To(Equal(corev1.PodQOSBurstable))
+
+			By("Verifying status resources reflect the actual resize (if populated by kubelet)")
+			if len(pod.Status.ContainerStatuses) > 0 && pod.Status.ContainerStatuses[0].Resources != nil {
+				cpuReq, ok := pod.Status.ContainerStatuses[0].Resources.Requests[corev1.ResourceCPU]
+				if ok {
+					Expect(cpuReq.MilliValue()).To(Equal(int64(1000)))
+				}
+			}
+		})
+
+		It("should fail fast when CPU resize is infeasible (exceeds node capacity)", func() {
+			By("Creating a SandboxClaim with an absurdly large CPU that no node can satisfy")
+			infeasibleClaim := &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("test-claim-infeasible-%d", time.Now().UnixNano()),
+					Namespace: namespace,
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName:    sandboxSet.Name,
+					Replicas:        ptr.To(int32(1)),
+					SkipInitRuntime: true,
+					ClaimTimeout:    &metav1.Duration{Duration: 30 * time.Second},
+					WaitReadyTimeout: &metav1.Duration{
+						Duration: 2 * time.Minute,
+					},
+					InplaceUpdate: &agentsv1alpha1.SandboxClaimInplaceUpdateOptions{
+						Resources: &agentsv1alpha1.SandboxClaimInplaceUpdateResourcesOptions{
+							Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("999")},
+							Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("999")},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, infeasibleClaim)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, infeasibleClaim) }()
+
+			By("Verifying sandbox InplaceUpdate condition reports infeasible resize failure")
+			Eventually(func() string {
+				sbx := &agentsv1alpha1.Sandbox{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{
+					Name:      warmSandboxName,
+					Namespace: namespace,
+				}, sbx); err != nil {
+					return ""
+				}
+				for _, cond := range sbx.Status.Conditions {
+					if cond.Type == string(agentsv1alpha1.SandboxConditionInplaceUpdate) &&
+						cond.Reason == agentsv1alpha1.SandboxInplaceUpdateReasonFailed {
+						return cond.Message
+					}
+				}
+				return ""
+			}, time.Minute*3, time.Second).Should(ContainSubstring("infeasible"))
+
+			By("Verifying pod CPU remains at original value (resize was not applied)")
+			pod := &corev1.Pod{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name:      warmSandboxName,
+				Namespace: namespace,
+			}, pod)).To(Succeed())
+			cpuReq := pod.Spec.Containers[0].Resources.Requests[corev1.ResourceCPU]
+			Expect(cpuReq.MilliValue()).To(Equal(int64(999000)),
+				"Pod spec should show the requested (infeasible) CPU since the resize API accepted it")
 		})
 
 		It("should only resize the main (first) container, not sidecar containers", func() {
@@ -733,8 +820,9 @@ var _ = Describe("SandboxClaim", func() {
 					Namespace: namespace,
 				},
 				Spec: agentsv1alpha1.SandboxClaimSpec{
-					TemplateName: sidecarSet.Name,
-					Replicas:     ptr.To(int32(1)),
+					TemplateName:    sidecarSet.Name,
+					Replicas:        ptr.To(int32(1)),
+					SkipInitRuntime: true,
 					WaitReadyTimeout: &metav1.Duration{
 						Duration: 2 * time.Minute,
 					},
@@ -758,7 +846,7 @@ var _ = Describe("SandboxClaim", func() {
 				return sidecarClaim.Status.Phase
 			}, time.Minute*3, time.Second).Should(Equal(agentsv1alpha1.SandboxClaimPhaseCompleted))
 
-			By("Verifying main container CPU is resized")
+			By("Verifying main container CPU spec is resized (req=1000m, lim=1000m)")
 			Eventually(func() int64 {
 				pod := &corev1.Pod{}
 				if err := k8sClient.Get(ctx, types.NamespacedName{
@@ -771,12 +859,24 @@ var _ = Describe("SandboxClaim", func() {
 				return cpuReq.MilliValue()
 			}, time.Minute*2, time.Second).Should(Equal(int64(1000)))
 
-			By("Verifying sidecar container CPU remains unchanged")
 			pod := &corev1.Pod{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{
 				Name:      sidecarWarmName,
 				Namespace: namespace,
 			}, pod)).To(Succeed())
+			mainSpec := pod.Spec.Containers[0].Resources
+			cpuLim := mainSpec.Limits[corev1.ResourceCPU]
+			Expect(cpuLim.MilliValue()).To(Equal(int64(1000)))
+
+			By("Verifying main container status resources reflect the resize (if populated by kubelet)")
+			if len(pod.Status.ContainerStatuses) > 0 && pod.Status.ContainerStatuses[0].Resources != nil {
+				cpuReq, ok := pod.Status.ContainerStatuses[0].Resources.Requests[corev1.ResourceCPU]
+				if ok {
+					Expect(cpuReq.MilliValue()).To(Equal(int64(1000)))
+				}
+			}
+
+			By("Verifying sidecar container CPU remains unchanged")
 			Expect(pod.Spec.Containers).To(HaveLen(2))
 			sidecar := pod.Spec.Containers[1]
 			Expect(sidecar.Name).To(Equal("sidecar"))
@@ -792,8 +892,9 @@ var _ = Describe("SandboxClaim", func() {
 					Namespace: namespace,
 				},
 				Spec: agentsv1alpha1.SandboxClaimSpec{
-					TemplateName: sandboxSet.Name,
-					Replicas:     ptr.To(int32(1)),
+					TemplateName:    sandboxSet.Name,
+					Replicas:        ptr.To(int32(1)),
+					SkipInitRuntime: true,
 					WaitReadyTimeout: &metav1.Duration{
 						Duration: 2 * time.Minute,
 					},
@@ -844,6 +945,14 @@ var _ = Describe("SandboxClaim", func() {
 			Expect(memReq.String()).To(Equal("128Mi"))
 			memLim := pod.Spec.Containers[0].Resources.Limits[corev1.ResourceMemory]
 			Expect(memLim.String()).To(Equal("256Mi"))
+
+			By("Verifying status resources reflect the actual CPU resize (if populated by kubelet)")
+			if len(pod.Status.ContainerStatuses) > 0 && pod.Status.ContainerStatuses[0].Resources != nil {
+				cpuReq, ok := pod.Status.ContainerStatuses[0].Resources.Requests[corev1.ResourceCPU]
+				if ok {
+					Expect(cpuReq.MilliValue()).To(Equal(int64(400)))
+				}
+			}
 		})
 
 	})

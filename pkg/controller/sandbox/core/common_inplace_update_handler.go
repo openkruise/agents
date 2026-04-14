@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/go-logr/logr"
@@ -62,8 +63,30 @@ func handleInPlaceUpdateCommon(
 
 	// Check if revision is consistent
 	if pod.Labels[agentsv1alpha1.PodLabelTemplateHash] == newStatus.UpdateRevision {
-		// inplace update is incompleted
-		if !inplaceupdate.IsInplaceUpdateCompleted(ctx, pod) {
+		// If the InplaceUpdate condition is already in a terminal failure state
+		// (e.g., resize subresource not available, infeasible, deferred), skip
+		// re-evaluation. When the resize subresource call fails, the pod spec is
+		// never updated, so spec==status (both old values) would cause
+		// isPodResourceResizeCompleted to falsely report completion.
+		if isInplaceUpdateTerminal(newStatus) {
+			return true, nil
+		}
+
+		completed, terminalErr := inplaceupdate.IsInplaceUpdateCompleted(ctx, pod)
+		if !completed {
+			if terminalErr != nil {
+				msg := fmt.Sprintf("in-place resource resize failed: %v", terminalErr)
+				logger.Info(msg)
+				handler.GetRecorder().Eventf(box, corev1.EventTypeWarning, "InplaceUpdateFailed", msg)
+				utils.SetSandboxCondition(newStatus, metav1.Condition{
+					Type:               string(agentsv1alpha1.SandboxConditionInplaceUpdate),
+					Status:             metav1.ConditionTrue,
+					Reason:             agentsv1alpha1.SandboxInplaceUpdateReasonFailed,
+					Message:            msg,
+					LastTransitionTime: metav1.Now(),
+				})
+				return true, nil
+			}
 			return false, nil
 		}
 		cond := metav1.Condition{
@@ -86,8 +109,11 @@ func handleInPlaceUpdateCommon(
 		logger.Info("currently, multiple in-place updates are not supported")
 		handler.GetRecorder().Eventf(box, corev1.EventTypeWarning, "InplaceUpdateForbidden",
 			"currently, multiple in-place updates are not supported")
-		// inplace update is incompleted
-		if !inplaceupdate.IsInplaceUpdateCompleted(ctx, pod) {
+		completed, terminalErr := inplaceupdate.IsInplaceUpdateCompleted(ctx, pod)
+		if !completed {
+			if terminalErr != nil {
+				logger.Info("previous in-place resize is infeasible, skipping", "error", terminalErr)
+			}
 			return false, nil
 		}
 		return true, nil
@@ -115,6 +141,25 @@ func handleInPlaceUpdateCommon(
 	control := handler.GetInPlaceUpdateControl()
 	changed, err := control.Update(ctx, opts)
 	if err != nil {
+		// ResizeNotSupportedError is returned when both the pods/resize subresource
+		// (K8s 1.33+) and the direct spec patch fallback (K8s 1.27-1.32) fail,
+		// which typically means InPlacePodVerticalScaling is not enabled.
+		// so we need treat this as terminal.
+		var resizeErr *inplaceupdate.ResizeNotSupportedError
+		if errors.As(err, &resizeErr) {
+			msg := resizeErr.Error()
+			logger.Info(msg)
+			handler.GetRecorder().Eventf(box, corev1.EventTypeWarning, "InplaceUpdateFailed", msg)
+			utils.SetSandboxCondition(newStatus, metav1.Condition{
+				Type:   string(agentsv1alpha1.SandboxConditionInplaceUpdate),
+				Status: metav1.ConditionTrue,
+				Reason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed,
+				// We need truncate msg here, K8s API errors can embed full PodSpec diffs that are too verbose for conditions.
+				Message:            utils.TruncateConditionMessage(msg),
+				LastTransitionTime: metav1.Now(),
+			})
+			return true, nil
+		}
 		return false, err
 	} else if !changed {
 		return true, nil
@@ -140,4 +185,19 @@ func handleInPlaceUpdateCommon(
 	utils.SetSandboxCondition(newStatus, readyCond)
 
 	return false, nil
+}
+
+// isInplaceUpdateTerminal returns true if the InplaceUpdate condition has already
+// reached a terminal state that should not be re-evaluated.
+func isInplaceUpdateTerminal(newStatus *agentsv1alpha1.SandboxStatus) bool {
+	cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionInplaceUpdate))
+	if cond == nil {
+		return false
+	}
+	switch cond.Reason {
+	case agentsv1alpha1.SandboxInplaceUpdateReasonFailed,
+		agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded:
+		return true
+	}
+	return false
 }

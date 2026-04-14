@@ -327,6 +327,133 @@ func TestIsActivePodUpdate(t *testing.T) {
 			description: "should return true when ContainersResumed condition reason/message changes",
 		},
 		{
+			name: "PodResizePending condition added",
+			oldPod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					Phase:      corev1.PodRunning,
+					Conditions: []corev1.PodCondition{},
+				},
+			},
+			newPod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					Phase: corev1.PodRunning,
+					Conditions: []corev1.PodCondition{
+						{
+							Type:    corev1.PodResizePending,
+							Status:  corev1.ConditionTrue,
+							Reason:  "Infeasible",
+							Message: "Node didn't have enough capacity",
+						},
+					},
+				},
+			},
+			expected:    true,
+			description: "should return true when PodResizePending condition is added",
+		},
+		{
+			name: "PodResizePending condition reason changed",
+			oldPod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					Phase: corev1.PodRunning,
+					Conditions: []corev1.PodCondition{
+						{
+							Type:   corev1.PodResizePending,
+							Status: corev1.ConditionTrue,
+							Reason: "Deferred",
+						},
+					},
+				},
+			},
+			newPod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					Phase: corev1.PodRunning,
+					Conditions: []corev1.PodCondition{
+						{
+							Type:   corev1.PodResizePending,
+							Status: corev1.ConditionTrue,
+							Reason: "Infeasible",
+						},
+					},
+				},
+			},
+			expected:    true,
+			description: "should return true when PodResizePending reason changes",
+		},
+		{
+			name: "PodResizeInProgress condition added",
+			oldPod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					Phase:      corev1.PodRunning,
+					Conditions: []corev1.PodCondition{},
+				},
+			},
+			newPod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					Phase: corev1.PodRunning,
+					Conditions: []corev1.PodCondition{
+						{
+							Type:    corev1.PodResizeInProgress,
+							Status:  corev1.ConditionTrue,
+							Reason:  "Error",
+							Message: "resize failed",
+						},
+					},
+				},
+			},
+			expected:    true,
+			description: "should return true when PodResizeInProgress condition is added",
+		},
+		{
+			name: "pod.Status.Resize changed from empty to Infeasible (K8s 1.27-1.32)",
+			oldPod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					Phase: corev1.PodRunning,
+				},
+			},
+			newPod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					Phase:  corev1.PodRunning,
+					Resize: corev1.PodResizeStatusInfeasible,
+				},
+			},
+			expected:    true,
+			description: "should return true when pod.Status.Resize changes (K8s < 1.33 resize path)",
+		},
+		{
+			name: "pod.Status.Resize changed from InProgress to Infeasible",
+			oldPod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					Phase:  corev1.PodRunning,
+					Resize: corev1.PodResizeStatusInProgress,
+				},
+			},
+			newPod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					Phase:  corev1.PodRunning,
+					Resize: corev1.PodResizeStatusInfeasible,
+				},
+			},
+			expected:    true,
+			description: "should return true when pod.Status.Resize transitions between states",
+		},
+		{
+			name: "pod.Status.Resize unchanged",
+			oldPod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					Phase:  corev1.PodRunning,
+					Resize: corev1.PodResizeStatusInfeasible,
+				},
+			},
+			newPod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					Phase:  corev1.PodRunning,
+					Resize: corev1.PodResizeStatusInfeasible,
+				},
+			},
+			expected:    false,
+			description: "should return false when pod.Status.Resize is unchanged",
+		},
+		{
 			name: "No changes - identical pods",
 			oldPod: &corev1.Pod{
 				Status: corev1.PodStatus{

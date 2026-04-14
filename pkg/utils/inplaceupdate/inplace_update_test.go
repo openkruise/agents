@@ -313,6 +313,7 @@ func TestIsInplaceUpdateCompleted(t *testing.T) {
 		name              string
 		pod               *corev1.Pod
 		expectedCompleted bool
+		expectTerminalErr bool
 	}{
 		{
 			name: "no state annotation",
@@ -428,9 +429,15 @@ func TestIsInplaceUpdateCompleted(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			completed := IsInplaceUpdateCompleted(context.TODO(), tt.pod)
+			completed, terminalErr := IsInplaceUpdateCompleted(context.TODO(), tt.pod)
 			if completed != tt.expectedCompleted {
 				t.Errorf("Expected completed=%v, got %v", tt.expectedCompleted, completed)
+			}
+			if tt.expectTerminalErr && terminalErr == nil {
+				t.Errorf("Expected terminal error, got nil")
+			}
+			if !tt.expectTerminalErr && terminalErr != nil {
+				t.Errorf("Unexpected terminal error: %v", terminalErr)
 			}
 		})
 	}
@@ -540,18 +547,30 @@ func TestIsInplaceUpdateCompletedWithResourceConditions(t *testing.T) {
 		},
 	}
 
-	if IsInplaceUpdateCompleted(context.Background(), pod) {
+	completed, terminalErr := IsInplaceUpdateCompleted(context.Background(), pod)
+	if completed {
 		t.Fatalf("expected incomplete while PodResizeInProgress is true")
+	}
+	if terminalErr != nil {
+		t.Fatalf("unexpected terminal error: %v", terminalErr)
 	}
 
 	pod.Status.Conditions = nil
-	if IsInplaceUpdateCompleted(context.Background(), pod) {
+	completed, terminalErr = IsInplaceUpdateCompleted(context.Background(), pod)
+	if completed {
 		t.Fatalf("expected incomplete when no resize signal and no applied resources")
+	}
+	if terminalErr != nil {
+		t.Fatalf("unexpected terminal error: %v", terminalErr)
 	}
 
 	pod.Status.Resize = corev1.PodResizeStatusInProgress
-	if IsInplaceUpdateCompleted(context.Background(), pod) {
+	completed, terminalErr = IsInplaceUpdateCompleted(context.Background(), pod)
+	if completed {
 		t.Fatalf("expected incomplete while resize status is in progress")
+	}
+	if terminalErr != nil {
+		t.Fatalf("unexpected terminal error: %v", terminalErr)
 	}
 
 	pod.Status.Resize = ""
@@ -561,8 +580,54 @@ func TestIsInplaceUpdateCompletedWithResourceConditions(t *testing.T) {
 			Status: corev1.ConditionFalse,
 		},
 	}
-	if IsInplaceUpdateCompleted(context.Background(), pod) {
+	completed, terminalErr = IsInplaceUpdateCompleted(context.Background(), pod)
+	if completed {
 		t.Fatalf("expected incomplete when only resize signals exist but resources not applied")
+	}
+	if terminalErr != nil {
+		t.Fatalf("unexpected terminal error: %v", terminalErr)
+	}
+
+	// Infeasible condition should return terminal error
+	pod.Status.Resize = ""
+	pod.Status.Conditions = []corev1.PodCondition{
+		{
+			Type:    corev1.PodResizePending,
+			Status:  corev1.ConditionTrue,
+			Reason:  corev1.PodReasonInfeasible,
+			Message: "insufficient cpu",
+		},
+	}
+	completed, terminalErr = IsInplaceUpdateCompleted(context.Background(), pod)
+	if completed {
+		t.Fatalf("expected incomplete when resize is infeasible")
+	}
+	if terminalErr == nil {
+		t.Fatalf("expected terminal error for infeasible resize")
+	}
+	if !strings.Contains(terminalErr.Error(), "infeasible") {
+		t.Fatalf("expected error containing 'infeasible', got: %v", terminalErr)
+	}
+
+	// Deferred condition should also return terminal error
+	pod.Status.Resize = ""
+	pod.Status.Conditions = []corev1.PodCondition{
+		{
+			Type:    corev1.PodResizePending,
+			Status:  corev1.ConditionTrue,
+			Reason:  corev1.PodReasonDeferred,
+			Message: "node resources temporarily insufficient",
+		},
+	}
+	completed, terminalErr = IsInplaceUpdateCompleted(context.Background(), pod)
+	if completed {
+		t.Fatalf("expected incomplete when resize is deferred")
+	}
+	if terminalErr == nil {
+		t.Fatalf("expected terminal error for deferred resize")
+	}
+	if !strings.Contains(terminalErr.Error(), "deferred") {
+		t.Fatalf("expected error containing 'deferred', got: %v", terminalErr)
 	}
 
 	pod.Status.Resize = ""
@@ -577,8 +642,138 @@ func TestIsInplaceUpdateCompletedWithResourceConditions(t *testing.T) {
 			},
 		},
 	}
-	if !IsInplaceUpdateCompleted(context.Background(), pod) {
+	completed, terminalErr = IsInplaceUpdateCompleted(context.Background(), pod)
+	if !completed {
 		t.Fatalf("expected completed when resources are applied to container status")
+	}
+	if terminalErr != nil {
+		t.Fatalf("unexpected terminal error: %v", terminalErr)
+	}
+}
+
+func Test_checkPodResizeInfeasible(t *testing.T) {
+	tests := []struct {
+		name      string
+		pod       *corev1.Pod
+		wantErr   bool
+		errSubstr string
+	}{
+		{
+			name: "no resize conditions - no error",
+			pod: &corev1.Pod{
+				Status: corev1.PodStatus{},
+			},
+		},
+		{
+			name: "PodResizePending with Infeasible reason",
+			pod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					Conditions: []corev1.PodCondition{
+						{
+							Type:    corev1.PodResizePending,
+							Status:  corev1.ConditionTrue,
+							Reason:  corev1.PodReasonInfeasible,
+							Message: "insufficient cpu",
+						},
+					},
+				},
+			},
+			wantErr:   true,
+			errSubstr: "infeasible",
+		},
+		{
+			name: "PodResizeInProgress with Error reason",
+			pod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					Conditions: []corev1.PodCondition{
+						{
+							Type:    corev1.PodResizeInProgress,
+							Status:  corev1.ConditionTrue,
+							Reason:  corev1.PodReasonError,
+							Message: "cgroup apply failed",
+						},
+					},
+				},
+			},
+			wantErr:   true,
+			errSubstr: "resize error",
+		},
+		{
+			name: "deprecated Resize field is Infeasible",
+			pod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					Resize: corev1.PodResizeStatusInfeasible,
+				},
+			},
+			wantErr:   true,
+			errSubstr: "infeasible",
+		},
+		{
+			name: "PodResizePending with Deferred reason",
+			pod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					Conditions: []corev1.PodCondition{
+						{
+							Type:    corev1.PodResizePending,
+							Status:  corev1.ConditionTrue,
+							Reason:  corev1.PodReasonDeferred,
+							Message: "node resources temporarily insufficient",
+						},
+					},
+				},
+			},
+			wantErr:   true,
+			errSubstr: "deferred",
+		},
+		{
+			name: "deprecated Resize field is Deferred",
+			pod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					Resize: corev1.PodResizeStatusDeferred,
+				},
+			},
+			wantErr:   true,
+			errSubstr: "deferred",
+		},
+		{
+			name: "PodResizePending is False - no error",
+			pod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					Conditions: []corev1.PodCondition{
+						{
+							Type:    corev1.PodResizePending,
+							Status:  corev1.ConditionFalse,
+							Reason:  corev1.PodReasonInfeasible,
+							Message: "stale condition",
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "Resize field is InProgress - no error",
+			pod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					Resize: corev1.PodResizeStatusInProgress,
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := checkPodResizeInfeasible(tt.pod)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error containing %q, got nil", tt.errSubstr)
+				}
+				if !strings.Contains(strings.ToLower(err.Error()), strings.ToLower(tt.errSubstr)) {
+					t.Fatalf("expected error containing %q, got: %v", tt.errSubstr, err)
+				}
+			} else if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
 	}
 }
 
