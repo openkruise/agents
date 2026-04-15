@@ -48,7 +48,7 @@ func (sc *Controller) convertToE2BSandbox(sbx infra.Sandbox, accessToken string)
 		SandboxID:       sbx.GetSandboxID(),
 		TemplateID:      sbx.GetTemplate(),
 		Domain:          sc.domain,
-		EnvdVersion:     "0.1.1",
+		EnvdVersion:     "0.2.10",
 		EnvdAccessToken: accessToken,
 	}
 	sandbox.State, _ = sbx.GetState()
