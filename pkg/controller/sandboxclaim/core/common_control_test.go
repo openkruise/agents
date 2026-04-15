@@ -575,7 +575,7 @@ func TestCommonControl_EnsureClaimCompleted(t *testing.T) {
 			expectedRequeueMin: 8 * time.Second, // allow some tolerance
 		},
 		{
-			name: "TTL is 0s - should never delete",
+			name: "TTL is negative - should never delete",
 			claim: &agentsv1alpha1.SandboxClaim{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-claim",
@@ -583,7 +583,7 @@ func TestCommonControl_EnsureClaimCompleted(t *testing.T) {
 				},
 				Spec: agentsv1alpha1.SandboxClaimSpec{
 					TemplateName:      "test-template",
-					TTLAfterCompleted: &metav1.Duration{Duration: 0}, // 0s means never delete
+					TTLAfterCompleted: &metav1.Duration{Duration: -1 * time.Second}, // negative means never delete
 				},
 			},
 			newStatus: &agentsv1alpha1.SandboxClaimStatus{
