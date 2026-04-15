@@ -149,9 +149,13 @@ func TestConnectSandbox(t *testing.T) {
 				} else {
 					condStatus = metav1.ConditionTrue
 				}
+				pausePhase := agentsv1alpha1.SandboxPaused
+				if tt.pausing {
+					pausePhase = agentsv1alpha1.SandboxPausing
+				}
 				UpdateSandboxWhen(t, client.SandboxClient, describeResp.Body.SandboxID, func(sbx *agentsv1alpha1.Sandbox) bool {
 					return sbx.Spec.Paused == true
-				}, DoSetSandboxStatus(agentsv1alpha1.SandboxPaused, condStatus, metav1.ConditionFalse))
+				}, DoSetSandboxStatus(pausePhase, condStatus, metav1.ConditionFalse))
 				// Only start goroutine to resume sandbox if it's fully paused (not pausing)
 				// When pausing, the test expects ConnectSandbox to fail, so no need to simulate resume
 				if !tt.pausing {
@@ -284,7 +288,11 @@ func TestResumeSandbox(t *testing.T) {
 					status = metav1.ConditionFalse
 				}
 				sbx := GetSandbox(t, createResp.Body.SandboxID, client.SandboxClient)
-				sbx.Status.Phase = agentsv1alpha1.SandboxPaused
+				if tt.pausing {
+					sbx.Status.Phase = agentsv1alpha1.SandboxPausing
+				} else {
+					sbx.Status.Phase = agentsv1alpha1.SandboxPaused
+				}
 				utils.SetSandboxCondition(&sbx.Status, metav1.Condition{
 					Type:   string(agentsv1alpha1.SandboxConditionPaused),
 					Status: status,

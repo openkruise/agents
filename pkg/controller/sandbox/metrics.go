@@ -144,6 +144,7 @@ var (
 	allPhases = []agentsv1alpha1.SandboxPhase{
 		agentsv1alpha1.SandboxPending,
 		agentsv1alpha1.SandboxRunning,
+		agentsv1alpha1.SandboxPausing,
 		agentsv1alpha1.SandboxPaused,
 		agentsv1alpha1.SandboxResuming,
 		agentsv1alpha1.SandboxSucceeded,

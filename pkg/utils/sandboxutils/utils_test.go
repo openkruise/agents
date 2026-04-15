@@ -237,6 +237,16 @@ func TestGetSandboxState(t *testing.T) {
 			expectedState:  agentsv1alpha1.SandboxStatePaused,
 			expectedReason: "NotRunningResourceClaimed",
 		},
+		{
+			name: "Pausing Sandbox claimed",
+			sandbox: &agentsv1alpha1.Sandbox{
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxPausing,
+				},
+			},
+			expectedState:  agentsv1alpha1.SandboxStatePaused,
+			expectedReason: "NotRunningResourceClaimed",
+		},
 	}
 
 	for _, tt := range tests {

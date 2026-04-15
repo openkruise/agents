@@ -49,7 +49,7 @@ type SandboxControl interface {
 	// EnsureSandboxUpdated handle sandbox with status phase = Running
 	EnsureSandboxUpdated(ctx context.Context, args EnsureFuncArgs) error
 
-	// EnsureSandboxPaused handle sandbox with status phase = Paused
+	// EnsureSandboxPaused handle sandbox with status phase = Pausing
 	EnsureSandboxPaused(ctx context.Context, args EnsureFuncArgs) error
 
 	// EnsureSandboxResumed handle sandbox with status phase = Resuming

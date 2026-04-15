@@ -150,7 +150,7 @@ func TestSandbox_SetPause(t *testing.T) {
 		{
 			name: "resume paused / pausing sandbox",
 			initSandbox: func(sbx *v1alpha1.Sandbox) {
-				sbx.Status.Phase = v1alpha1.SandboxPaused
+				sbx.Status.Phase = v1alpha1.SandboxPausing
 				sbx.Status.Conditions = append(sbx.Status.Conditions, metav1.Condition{
 					Type:   string(v1alpha1.SandboxConditionPaused),
 					Status: metav1.ConditionFalse,

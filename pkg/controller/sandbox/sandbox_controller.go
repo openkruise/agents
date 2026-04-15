@@ -227,8 +227,11 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 		requeueAfter, err = r.getControl(args.Pod).EnsureSandboxRunning(ctx, args)
 	case agentsv1alpha1.SandboxRunning:
 		err = r.getControl(args.Pod).EnsureSandboxUpdated(ctx, args)
-	case agentsv1alpha1.SandboxPaused:
+	case agentsv1alpha1.SandboxPausing:
 		err = r.getControl(args.Pod).EnsureSandboxPaused(ctx, args)
+	case agentsv1alpha1.SandboxPaused:
+		// Paused is terminal for the pause flow - nothing to do.
+		// Transition to Resuming happens in calculateStatus when spec.Paused becomes false.
 	case agentsv1alpha1.SandboxResuming:
 		err = r.getControl(args.Pod).EnsureSandboxResumed(ctx, args)
 	default:
@@ -323,18 +326,28 @@ func calculateStatus(args core.EnsureFuncArgs) (*agentsv1alpha1.SandboxStatus, b
 			return newStatus, true
 		}
 
-		// If it is paused, first set the sandbox to the Paused state.
-		// To prevent loss of state information, the state immediately before Paused must currently be Running.
+		// If it is paused, first set the sandbox to the Pausing state.
+		// To prevent loss of state information, the state immediately before Pausing must currently be Running.
 		if box.Spec.Paused {
 			// The paused and resumed condition are exclusive
 			utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionResumed))
+			newStatus.Phase = agentsv1alpha1.SandboxPausing
+		}
+
+	case agentsv1alpha1.SandboxPausing:
+		cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
+		if cond != nil && cond.Status == metav1.ConditionTrue {
+			// Pod deletion completed, transition to fully Paused
 			newStatus.Phase = agentsv1alpha1.SandboxPaused
+		}
+		if !box.Spec.Paused {
+			logger.Info("sandbox pause not completed, cannot enter resume state temporarily")
 		}
 
 	case agentsv1alpha1.SandboxPaused:
 		cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
 		// sandbox will only enter the resuming state after successful paused
-		if cond.Status == metav1.ConditionTrue && !box.Spec.Paused {
+		if cond != nil && cond.Status == metav1.ConditionTrue && !box.Spec.Paused {
 			// delete paused condition
 			utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
 			newStatus.Phase = agentsv1alpha1.SandboxResuming
@@ -345,8 +358,6 @@ func calculateStatus(args core.EnsureFuncArgs) (*agentsv1alpha1.SandboxStatus, b
 				LastTransitionTime: metav1.Now(),
 			}
 			utils.SetSandboxCondition(newStatus, rCond)
-		} else if !box.Spec.Paused && cond.Status == metav1.ConditionFalse {
-			logger.Info("sandbox pause not completed, cannot enter resume state temporarily")
 		}
 	}
 	return newStatus, false

@@ -181,7 +181,9 @@ const (
 	// SandboxRunning means the pod has been bound to a node and all of the containers have been started.
 	// At least one container is still running or is in the process of being restarted.
 	SandboxRunning SandboxPhase = "Running"
-	// SandboxPaused means the sandbox has entered the paused state.
+	// SandboxPausing means the sandbox is transitioning to the paused state (pod being deleted).
+	SandboxPausing SandboxPhase = "Pausing"
+	// SandboxPaused means the sandbox has completed pausing (pod deleted, hibernation finished).
 	SandboxPaused SandboxPhase = "Paused"
 	// SandboxResuming means the sandbox has entered the resume state
 	SandboxResuming SandboxPhase = "Resuming"
