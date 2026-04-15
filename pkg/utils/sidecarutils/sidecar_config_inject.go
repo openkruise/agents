@@ -174,7 +174,6 @@ func setMainContainerConfigWhenInjectRuntimeSidecar(ctx context.Context, mainCon
 			log.V(consts.DebugLogLevel).Info("conflicting postStart hooks detected, main container already has a postStart hook defined",
 				"existingHook", mainContainer.Lifecycle.PostStart,
 				"injectedHook", config.MainContainer.Lifecycle.PostStart)
-			return
 		}
 	} else {
 		// Main container doesn't have valid postStart, apply config if available

@@ -378,10 +378,10 @@ func TestSetAgentRuntimeContainer(t *testing.T) {
 			},
 			expectedInitContainers:   1,
 			expectedContainers:       1,
-			expectedEnvCount:         0, // conflicting postStart, skip env injection
+			expectedEnvCount:         1, // conflicting postStart only skips postStart injection, env still injected
 			hasPostStartLifecycle:    true,
 			hasPostStartCommand:      true, // keeps existing command
-			expectedVolumeMountCount: 0,    // conflicting postStart, skip volumeMounts injection
+			expectedVolumeMountCount: 1,    // conflicting postStart only skips postStart injection, volumeMounts still injected
 		},
 	}
 
@@ -591,8 +591,8 @@ func TestSetMainContainerConfigWhenInjectRuntimeSidecar(t *testing.T) {
 					},
 				},
 			},
-			expectedEnvCount:         0, // conflicting postStart, skip all injection
-			expectedVolumeMountCount: 0, // conflicting postStart, skip all injection
+			expectedEnvCount:         1, // conflicting postStart only skips postStart injection, env still injected
+			expectedVolumeMountCount: 1, // conflicting postStart only skips postStart injection, volumeMounts still injected
 			hasPostStart:             true,
 			postStartCommand:         []string{"echo", "old"}, // keeps existing, NOT overridden
 		},
