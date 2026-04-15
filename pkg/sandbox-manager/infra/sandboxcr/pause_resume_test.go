@@ -55,6 +55,208 @@ type apiReaderOverrideCache struct {
 func (c *apiReaderOverrideCache) GetAPIReader() ctrl.Reader {
 	if c.apiReader == nil {
 		return c.Provider.GetAPIReader()
+//goland:noinspection GoDeprecation
+func TestSandbox_SetPause(t *testing.T) {
+	utils.InitLogOutput()
+	tests := []struct {
+		name            string
+		initSandbox     func(sbx *v1alpha1.Sandbox)
+		operatePause    bool
+		expectPaused    bool
+		expectedState   string
+		expectError     bool
+		initErrCode     int
+		withInitRuntime bool
+	}{
+		{
+			name: "pause running / running sandbox",
+			initSandbox: func(sbx *v1alpha1.Sandbox) {
+				sbx.Status.Phase = v1alpha1.SandboxRunning
+				sbx.Status.Conditions = append(sbx.Status.Conditions, metav1.Condition{
+					Type:   string(v1alpha1.SandboxConditionReady),
+					Status: metav1.ConditionTrue,
+				}, metav1.Condition{
+					// Hack: make the sync pause success
+					Type:   string(v1alpha1.SandboxConditionPaused),
+					Status: metav1.ConditionTrue,
+				})
+				sbx.Spec.Paused = false
+				state, reason := sandboxutils.GetSandboxState(sbx)
+				assert.Equal(t, v1alpha1.SandboxStateRunning, state, reason)
+			},
+			operatePause:  true,
+			expectPaused:  true,
+			expectedState: v1alpha1.SandboxStatePaused,
+			expectError:   false,
+		},
+		{
+			name: "pause running / available sandbox",
+			initSandbox: func(sbx *v1alpha1.Sandbox) {
+				sbx.Status.Phase = v1alpha1.SandboxRunning
+				sbx.Status.Conditions = append(sbx.Status.Conditions, metav1.Condition{
+					Type:   string(v1alpha1.SandboxConditionReady),
+					Status: metav1.ConditionTrue,
+				})
+				sbx.Spec.Paused = false
+				sbx.OwnerReferences = GetSbsOwnerReference()
+				state, reason := sandboxutils.GetSandboxState(sbx)
+				assert.Equal(t, v1alpha1.SandboxStateAvailable, state, reason)
+			},
+			operatePause:  true,
+			expectPaused:  true,
+			expectedState: v1alpha1.SandboxStateAvailable,
+			expectError:   true,
+		},
+		{
+			name: "resume paused / paused sandbox",
+			initSandbox: func(sbx *v1alpha1.Sandbox) {
+				sbx.Status.Phase = v1alpha1.SandboxPaused
+				sbx.Status.Conditions = append(sbx.Status.Conditions, metav1.Condition{
+					Type:   string(v1alpha1.SandboxConditionPaused),
+					Status: metav1.ConditionTrue,
+				})
+				sbx.Spec.Paused = true
+				state, reason := sandboxutils.GetSandboxState(sbx)
+				assert.Equal(t, v1alpha1.SandboxStatePaused, state, reason)
+			},
+			operatePause:  false,
+			expectPaused:  false,
+			expectedState: v1alpha1.SandboxStateRunning,
+			expectError:   false,
+		},
+		{
+			name: "resume paused / paused sandbox with init runtime success",
+			initSandbox: func(sbx *v1alpha1.Sandbox) {
+				sbx.Status.Phase = v1alpha1.SandboxPaused
+				sbx.Status.Conditions = append(sbx.Status.Conditions, metav1.Condition{
+					Type:   string(v1alpha1.SandboxConditionPaused),
+					Status: metav1.ConditionTrue,
+				})
+				sbx.Spec.Paused = true
+				state, reason := sandboxutils.GetSandboxState(sbx)
+				assert.Equal(t, v1alpha1.SandboxStatePaused, state, reason)
+			},
+			operatePause:    false,
+			expectPaused:    false,
+			expectedState:   v1alpha1.SandboxStateRunning,
+			expectError:     false,
+			initErrCode:     0,
+			withInitRuntime: true,
+		},
+		{
+			name: "resume paused / paused sandbox with init runtime 401 (ReInit success)",
+			initSandbox: func(sbx *v1alpha1.Sandbox) {
+				sbx.Status.Phase = v1alpha1.SandboxPaused
+				sbx.Status.Conditions = append(sbx.Status.Conditions, metav1.Condition{
+					Type:   string(v1alpha1.SandboxConditionPaused),
+					Status: metav1.ConditionTrue,
+				})
+				sbx.Spec.Paused = true
+				state, reason := sandboxutils.GetSandboxState(sbx)
+				assert.Equal(t, v1alpha1.SandboxStatePaused, state, reason)
+			},
+			operatePause:    false,
+			expectPaused:    false,
+			expectedState:   v1alpha1.SandboxStateRunning,
+			expectError:     false,
+			initErrCode:     401,
+			withInitRuntime: true,
+		},
+		{
+			name: "resume paused / paused sandbox with init runtime 500 error",
+			initSandbox: func(sbx *v1alpha1.Sandbox) {
+				sbx.Status.Phase = v1alpha1.SandboxPaused
+				sbx.Status.Conditions = append(sbx.Status.Conditions, metav1.Condition{
+					Type:   string(v1alpha1.SandboxConditionPaused),
+					Status: metav1.ConditionTrue,
+				})
+				sbx.Spec.Paused = true
+				state, reason := sandboxutils.GetSandboxState(sbx)
+				assert.Equal(t, v1alpha1.SandboxStatePaused, state, reason)
+			},
+			operatePause:    false,
+			expectPaused:    false,
+			expectedState:   v1alpha1.SandboxStateRunning,
+			expectError:     true,
+			initErrCode:     500,
+			withInitRuntime: true,
+		},
+		{
+			name: "resume paused / pausing sandbox",
+			initSandbox: func(sbx *v1alpha1.Sandbox) {
+				sbx.Status.Phase = v1alpha1.SandboxPausing
+				sbx.Status.Conditions = append(sbx.Status.Conditions, metav1.Condition{
+					Type:   string(v1alpha1.SandboxConditionPaused),
+					Status: metav1.ConditionFalse,
+				})
+				sbx.Spec.Paused = true
+				state, reason := sandboxutils.GetSandboxState(sbx)
+				assert.Equal(t, v1alpha1.SandboxStatePaused, state, reason)
+			},
+			operatePause:  false,
+			expectPaused:  false,
+			expectedState: v1alpha1.SandboxStateRunning,
+			expectError:   true,
+		},
+		{
+			name: "pause already paused sandbox",
+			initSandbox: func(sbx *v1alpha1.Sandbox) {
+				sbx.Status.Phase = v1alpha1.SandboxPaused
+				sbx.Status.Conditions = append(sbx.Status.Conditions, metav1.Condition{
+					Type:   string(v1alpha1.SandboxConditionPaused),
+					Status: metav1.ConditionTrue,
+				})
+				sbx.Spec.Paused = true
+				state, reason := sandboxutils.GetSandboxState(sbx)
+				assert.Equal(t, v1alpha1.SandboxStatePaused, state, reason)
+			},
+			operatePause:  true,
+			expectPaused:  true,
+			expectedState: v1alpha1.SandboxStatePaused,
+			expectError:   true,
+		},
+		{
+			name: "resume already running sandbox",
+			initSandbox: func(sbx *v1alpha1.Sandbox) {
+				sbx.Status.Phase = v1alpha1.SandboxRunning
+				sbx.Status.Conditions = append(sbx.Status.Conditions, metav1.Condition{
+					Type:   string(v1alpha1.SandboxConditionReady),
+					Status: metav1.ConditionTrue,
+				})
+				state, reason := sandboxutils.GetSandboxState(sbx)
+				assert.Equal(t, v1alpha1.SandboxStateRunning, state, reason)
+			},
+			operatePause:  false,
+			expectPaused:  false,
+			expectedState: v1alpha1.SandboxStateRunning,
+			expectError:   true,
+		},
+		{
+			name: "resume killing sandbox",
+			initSandbox: func(sbx *v1alpha1.Sandbox) {
+				sbx.Status.Phase = v1alpha1.SandboxTerminating
+				sbx.Spec.Paused = true
+				state, reason := sandboxutils.GetSandboxState(sbx)
+				assert.Equal(t, v1alpha1.SandboxStateDead, state, reason)
+			},
+			operatePause:  false,
+			expectPaused:  true,
+			expectedState: v1alpha1.SandboxStateDead,
+			expectError:   true,
+		},
+		{
+			name: "pause killing sandbox",
+			initSandbox: func(sbx *v1alpha1.Sandbox) {
+				sbx.Status.Phase = v1alpha1.SandboxTerminating
+				sbx.Spec.Paused = false
+				state, reason := sandboxutils.GetSandboxState(sbx)
+				assert.Equal(t, v1alpha1.SandboxStateDead, state, reason)
+			},
+			operatePause:  true,
+			expectPaused:  true,
+			expectedState: v1alpha1.SandboxStateDead,
+			expectError:   true,
+		},
 	}
 	return c.apiReader
 }

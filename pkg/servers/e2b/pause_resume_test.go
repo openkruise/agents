@@ -198,6 +198,40 @@ func TestConnectSandbox(t *testing.T) {
 
 			if tt.paused {
 				pauseSandboxHelper(t, controller, fc, createResp.Body.SandboxID, tt.pausing, tt.resuming, user)
+				pauseResp, err := controller.PauseSandbox(req)
+				assert.Nil(t, err)
+				AvoidGetFromCache(t, createResp.Body.SandboxID, client.SandboxClient)
+				assert.Equal(t, http.StatusNoContent, pauseResp.Code)
+				describeResp, err := controller.DescribeSandbox(req)
+				assert.Nil(t, err)
+				assert.Equal(t, models.SandboxStatePaused, describeResp.Body.State)
+				var condStatus metav1.ConditionStatus
+				if tt.pausing {
+					condStatus = metav1.ConditionFalse
+				} else {
+					condStatus = metav1.ConditionTrue
+				}
+				pausePhase := agentsv1alpha1.SandboxPaused
+				if tt.pausing {
+					pausePhase = agentsv1alpha1.SandboxPausing
+				}
+				UpdateSandboxWhen(t, client.SandboxClient, describeResp.Body.SandboxID, func(sbx *agentsv1alpha1.Sandbox) bool {
+					return sbx.Spec.Paused == true
+				}, DoSetSandboxStatus(pausePhase, condStatus, metav1.ConditionFalse))
+				// Only start goroutine to resume sandbox if it's fully paused (not pausing)
+				// When pausing, the test expects ConnectSandbox to fail, so no need to simulate resume
+				if !tt.pausing {
+					go func() {
+						defer close(done)
+						UpdateSandboxWhen(t, client.SandboxClient, describeResp.Body.SandboxID, func(sbx *agentsv1alpha1.Sandbox) bool {
+							return sbx.Spec.Paused == false
+						}, DoSetSandboxStatus(agentsv1alpha1.SandboxRunning, metav1.ConditionFalse, metav1.ConditionTrue))
+					}()
+				} else {
+					close(done)
+				}
+			} else {
+				close(done)
 			}
 
 			if tt.sandboxID == "" {
@@ -516,6 +550,40 @@ func TestResumeSandbox(t *testing.T) {
 
 			if tt.paused {
 				pauseSandboxHelper(t, controller, fc, createResp.Body.SandboxID, tt.pausing, tt.resuming, user)
+				pauseResp, err := controller.PauseSandbox(req)
+				assert.Nil(t, err)
+				assert.Equal(t, http.StatusNoContent, pauseResp.Code)
+				describeResp, err := controller.DescribeSandbox(req)
+				assert.Nil(t, err)
+				assert.Equal(t, models.SandboxStatePaused, describeResp.Body.State)
+				status := metav1.ConditionTrue
+				if tt.pausing {
+					status = metav1.ConditionFalse
+				}
+				sbx := GetSandbox(t, createResp.Body.SandboxID, client.SandboxClient)
+				if tt.pausing {
+					sbx.Status.Phase = agentsv1alpha1.SandboxPausing
+				} else {
+					sbx.Status.Phase = agentsv1alpha1.SandboxPaused
+				}
+				utils.SetSandboxCondition(&sbx.Status, metav1.Condition{
+					Type:   string(agentsv1alpha1.SandboxConditionPaused),
+					Status: status,
+				})
+				_, err2 := client.ApiV1alpha1().Sandboxes(sbx.Namespace).UpdateStatus(context.Background(), sbx, metav1.UpdateOptions{})
+				assert.NoError(t, err2)
+				time.AfterFunc(60*time.Millisecond, func() {
+					sbx := GetSandbox(t, createResp.Body.SandboxID, client.SandboxClient)
+					sbx.Status.Phase = agentsv1alpha1.SandboxRunning
+					sbx.Status.Conditions = append(sbx.Status.Conditions, metav1.Condition{
+						Type:   string(agentsv1alpha1.SandboxConditionReady),
+						Status: metav1.ConditionTrue,
+					})
+					_, _ = client.ApiV1alpha1().Sandboxes(sbx.Namespace).UpdateStatus(context.Background(), sbx, metav1.UpdateOptions{})
+					close(done)
+				})
+			} else {
+				close(done)
 			}
 
 			if tt.sandboxID == "" {
