@@ -574,6 +574,26 @@ func TestCommonControl_EnsureClaimCompleted(t *testing.T) {
 			expectDeleted:      false,
 			expectedRequeueMin: 8 * time.Second, // allow some tolerance
 		},
+		{
+			name: "TTL is 0s - should never delete",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim",
+					Namespace: "default",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName:      "test-template",
+					TTLAfterCompleted: &metav1.Duration{Duration: 0}, // 0s means never delete
+				},
+			},
+			newStatus: &agentsv1alpha1.SandboxClaimStatus{
+				Phase:          agentsv1alpha1.SandboxClaimPhaseCompleted,
+				CompletionTime: &metav1.Time{Time: time.Now().Add(-10 * time.Minute)}, // completed 10 min ago
+			},
+			expectedStrategy: NoRequeue(),
+			expectError:      false,
+			expectDeleted:    false,
+		},
 	}
 
 	for _, tt := range tests {

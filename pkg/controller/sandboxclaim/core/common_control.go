@@ -165,6 +165,11 @@ func (c *commonControl) EnsureClaimCompleted(ctx context.Context, args ClaimArgs
 	// Check if TTL cleanup is needed
 	if claim.Spec.TTLAfterCompleted != nil && args.NewStatus.CompletionTime != nil {
 		ttl := claim.Spec.TTLAfterCompleted.Duration
+		// 0s means never delete - skip TTL cleanup
+		if ttl == 0 {
+			log.V(1).Info("TTL is 0, skipping automatic deletion", "ttl", ttl)
+			return NoRequeue(), nil
+		}
 		elapsed := time.Since(args.NewStatus.CompletionTime.Time)
 
 		log.Info("Checking TTL for cleanup", "ttl", ttl, "elapsed", elapsed, "completionTime", args.NewStatus.CompletionTime.Time)
