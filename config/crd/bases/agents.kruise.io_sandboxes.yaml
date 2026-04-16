@@ -23,6 +23,9 @@ spec:
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
+    - jsonPath: .metadata.labels.agents\.kruise\.io/sandbox-claimed
+      name: Claimed
+      type: string
     - jsonPath: .spec.shutdownTime
       name: shutdown_time
       type: string

@@ -255,6 +255,7 @@ const (
 // +kubebuilder:storageversion
 // +kubebuilder:printcolumn:name="Status",type="string",JSONPath=".status.phase"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
+// +kubebuilder:printcolumn:name="Claimed",type="string",JSONPath=".metadata.labels.agents\\.kruise\\.io/sandbox-claimed"
 // +kubebuilder:printcolumn:name="shutdown_time",type="string",JSONPath=".spec.shutdownTime"
 // +kubebuilder:printcolumn:name="pause_time",type="string",JSONPath=".spec.pauseTime"
 // +kubebuilder:printcolumn:name="Message",type="string",JSONPath=".status.message"
