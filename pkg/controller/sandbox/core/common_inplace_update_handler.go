@@ -80,7 +80,7 @@ func handleInPlaceUpdateCommon(
 				handler.GetRecorder().Eventf(box, corev1.EventTypeWarning, "InplaceUpdateFailed", msg)
 				utils.SetSandboxCondition(newStatus, metav1.Condition{
 					Type:               string(agentsv1alpha1.SandboxConditionInplaceUpdate),
-					Status:             metav1.ConditionTrue,
+					Status:             metav1.ConditionFalse,
 					Reason:             agentsv1alpha1.SandboxInplaceUpdateReasonFailed,
 					Message:            msg,
 					LastTransitionTime: metav1.Now(),
@@ -94,6 +94,7 @@ func handleInPlaceUpdateCommon(
 			Status:             metav1.ConditionTrue,
 			Reason:             agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded,
 			LastTransitionTime: metav1.Now(),
+			Message:            "",
 		}
 		utils.SetSandboxCondition(newStatus, cond)
 		return true, nil
@@ -127,7 +128,7 @@ func handleInPlaceUpdateCommon(
 		handler.GetRecorder().Eventf(box, corev1.EventTypeWarning, "InplaceUpdateFailed", msg)
 		cond := metav1.Condition{
 			Type:               string(agentsv1alpha1.SandboxConditionInplaceUpdate),
-			Status:             metav1.ConditionTrue,
+			Status:             metav1.ConditionFalse,
 			Reason:             agentsv1alpha1.SandboxInplaceUpdateReasonFailed,
 			Message:            msg,
 			LastTransitionTime: metav1.Now(),
@@ -152,7 +153,7 @@ func handleInPlaceUpdateCommon(
 			handler.GetRecorder().Eventf(box, corev1.EventTypeWarning, "InplaceUpdateFailed", msg)
 			utils.SetSandboxCondition(newStatus, metav1.Condition{
 				Type:   string(agentsv1alpha1.SandboxConditionInplaceUpdate),
-				Status: metav1.ConditionTrue,
+				Status: metav1.ConditionFalse,
 				Reason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed,
 				// We need truncate msg here, K8s API errors can embed full PodSpec diffs that are too verbose for conditions.
 				Message:            utils.TruncateConditionMessage(msg),

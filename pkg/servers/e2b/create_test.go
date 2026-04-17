@@ -1,14 +1,18 @@
 package e2b
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -491,5 +495,134 @@ func TestCreateSandboxWithClaim_CPUResizeFeatureGate(t *testing.T) {
 		assert.NotNil(t, apiErr)
 		assert.Equal(t, http.StatusBadRequest, apiErr.Code)
 		assert.Contains(t, apiErr.Message, "feature gate")
+	})
+
+	t.Run("feature gate disabled rejects mixed image and cpu resize", func(t *testing.T) {
+		err := utilfeature.DefaultMutableFeatureGate.SetFromMap(map[string]bool{
+			string(features.SandboxClaimInPlaceCPUResizeGate): false,
+		})
+		assert.NoError(t, err)
+		defer func() {
+			_ = utilfeature.DefaultMutableFeatureGate.SetFromMap(map[string]bool{
+				string(features.SandboxClaimInPlaceCPUResizeGate): true,
+			})
+		}()
+
+		ctrl := &Controller{}
+		request := models.NewSandboxRequest{
+			TemplateID: "test-template",
+			Extensions: models.NewSandboxRequestExtension{
+				SkipInitRuntime: true,
+				InplaceUpdate: models.InplaceUpdateExtension{
+					Image: "nginx:latest",
+					Resources: &models.InplaceUpdateResourcesExtension{
+						Requests: corev1.ResourceList{
+							corev1.ResourceCPU: resource.MustParse("500m"),
+						},
+					},
+				},
+			},
+		}
+		_, apiErr := ctrl.createSandboxWithClaim(context.Background(), request, user)
+		assert.NotNil(t, apiErr)
+		assert.Equal(t, http.StatusBadRequest, apiErr.Code)
+		assert.Contains(t, apiErr.Message, "feature gate")
+	})
+}
+
+func TestCreateSandboxWithClone_InplaceUpdateRejected(t *testing.T) {
+	ctrl := &Controller{}
+	request := models.NewSandboxRequest{
+		TemplateID: "test-checkpoint",
+		Extensions: models.NewSandboxRequestExtension{
+			InplaceUpdate: models.InplaceUpdateExtension{
+				Image: "nginx:latest",
+			},
+		},
+	}
+	user := &models.CreatedTeamAPIKey{ID: uuid.New(), Name: "test-user"}
+
+	_, apiErr := ctrl.createSandboxWithClone(context.Background(), request, user)
+	require.NotNil(t, apiErr)
+	assert.Equal(t, http.StatusBadRequest, apiErr.Code)
+	assert.Contains(t, apiErr.Message, "InplaceUpdate is not supported for clone")
+}
+
+func TestParseCreateSandboxRequest(t *testing.T) {
+	ctrl := &Controller{maxTimeout: 3600}
+
+	t.Run("invalid json", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/sandboxes", strings.NewReader("{"))
+		_, apiErr := ctrl.parseCreateSandboxRequest(req)
+		require.NotNil(t, apiErr)
+		assert.Equal(t, 0, apiErr.Code)
+		assert.NotEmpty(t, apiErr.Message)
+	})
+
+	t.Run("invalid extension", func(t *testing.T) {
+		body := `{
+			"templateID":"t1",
+			"metadata":{
+				"` + models.ExtensionKeyClaimWithCPULimit + `":"bad"
+			}
+		}`
+		req := httptest.NewRequest(http.MethodPost, "/sandboxes", strings.NewReader(body))
+		_, apiErr := ctrl.parseCreateSandboxRequest(req)
+		require.NotNil(t, apiErr)
+		assert.Equal(t, http.StatusBadRequest, apiErr.Code)
+		assert.Contains(t, apiErr.Message, "Bad extension param")
+	})
+
+	t.Run("unqualified metadata key", func(t *testing.T) {
+		body := `{
+			"templateID":"t1",
+			"metadata":{"bad/key/":"v"}
+		}`
+		req := httptest.NewRequest(http.MethodPost, "/sandboxes", strings.NewReader(body))
+		_, apiErr := ctrl.parseCreateSandboxRequest(req)
+		require.NotNil(t, apiErr)
+		assert.Equal(t, http.StatusBadRequest, apiErr.Code)
+		assert.Contains(t, apiErr.Message, "Unqualified metadata key")
+	})
+
+	t.Run("forbidden metadata key prefix", func(t *testing.T) {
+		meta := map[string]string{v1alpha1.E2BPrefix + "custom-key": "v"}
+		raw, err := json.Marshal(models.NewSandboxRequest{
+			TemplateID: "t1",
+			Metadata:   meta,
+		})
+		require.NoError(t, err)
+
+		req := httptest.NewRequest(http.MethodPost, "/sandboxes", bytes.NewReader(raw))
+		_, apiErr := ctrl.parseCreateSandboxRequest(req)
+		require.NotNil(t, apiErr)
+		assert.Equal(t, http.StatusBadRequest, apiErr.Code)
+		assert.Contains(t, apiErr.Message, "Forbidden metadata key")
+	})
+
+	t.Run("timeout defaults when omitted", func(t *testing.T) {
+		raw, err := json.Marshal(models.NewSandboxRequest{
+			TemplateID: "t1",
+		})
+		require.NoError(t, err)
+		req := httptest.NewRequest(http.MethodPost, "/sandboxes", bytes.NewReader(raw))
+
+		got, apiErr := ctrl.parseCreateSandboxRequest(req)
+		require.Nil(t, apiErr)
+		assert.Equal(t, models.DefaultTimeoutSeconds, got.Timeout)
+	})
+
+	t.Run("timeout out of range", func(t *testing.T) {
+		raw, err := json.Marshal(models.NewSandboxRequest{
+			TemplateID: "t1",
+			Timeout:    ctrl.maxTimeout + 1,
+		})
+		require.NoError(t, err)
+		req := httptest.NewRequest(http.MethodPost, "/sandboxes", bytes.NewReader(raw))
+
+		_, apiErr := ctrl.parseCreateSandboxRequest(req)
+		require.NotNil(t, apiErr)
+		assert.Equal(t, http.StatusBadRequest, apiErr.Code)
+		assert.Contains(t, apiErr.Message, "timeout should between")
 	})
 }

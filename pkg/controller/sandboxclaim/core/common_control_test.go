@@ -26,6 +26,7 @@ import (
 	"github.com/openkruise/agents/client/clientset/versioned"
 	sandboxfake "github.com/openkruise/agents/client/clientset/versioned/fake"
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
+	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
@@ -37,6 +38,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -475,6 +477,109 @@ func TestCommonControl_EnsureClaimClaiming(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCommonControl_EnsureClaimClaiming_CPUResizeFeatureGatePrecondition(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	cache, clientSet, err := sandboxcr.NewTestCache(t)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		_ = cache.Run(ctx)
+	}()
+	time.Sleep(200 * time.Millisecond)
+
+	makeClaim := func(name string) *agentsv1alpha1.SandboxClaim {
+		return &agentsv1alpha1.SandboxClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: "default",
+				UID:       types.UID(name + "-uid"),
+			},
+			Spec: agentsv1alpha1.SandboxClaimSpec{
+				TemplateName: "test-template",
+				Replicas:     int32Ptr(1),
+				InplaceUpdate: &agentsv1alpha1.SandboxClaimInplaceUpdateOptions{
+					Resources: &agentsv1alpha1.SandboxClaimInplaceUpdateResourcesOptions{
+						Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")},
+					},
+				},
+			},
+		}
+	}
+
+	makeSandboxSet := func() *agentsv1alpha1.SandboxSet {
+		return &agentsv1alpha1.SandboxSet{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-template",
+				Namespace: "default",
+			},
+		}
+	}
+
+	t.Run("feature gate disabled transitions claim to completed", func(t *testing.T) {
+		err := utilfeature.DefaultMutableFeatureGate.SetFromMap(map[string]bool{
+			string(features.SandboxClaimInPlaceCPUResizeGate): false,
+		})
+		require.NoError(t, err)
+		defer func() {
+			_ = utilfeature.DefaultMutableFeatureGate.SetFromMap(map[string]bool{
+				string(features.SandboxClaimInPlaceCPUResizeGate): true,
+			})
+		}()
+
+		claim := makeClaim("gate-disabled")
+		sbs := makeSandboxSet()
+		newStatus := &agentsv1alpha1.SandboxClaimStatus{
+			Phase: agentsv1alpha1.SandboxClaimPhaseClaiming,
+		}
+
+		fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(claim, sbs).Build()
+		control := NewCommonControl(fakeClient, record.NewFakeRecorder(10), clientSet, cache)
+
+		strategy, err := control.EnsureClaimClaiming(ctx, ClaimArgs{
+			Claim:      claim,
+			SandboxSet: sbs,
+			NewStatus:  newStatus,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, NoRequeue(), strategy)
+		assert.Equal(t, agentsv1alpha1.SandboxClaimPhaseCompleted, newStatus.Phase)
+		assert.Contains(t, newStatus.Message, "disabled by feature gate")
+		cond := GetClaimCondition(newStatus, string(agentsv1alpha1.SandboxClaimConditionCompleted))
+		require.NotNil(t, cond)
+		assert.Equal(t, "FeatureGateDisabled", cond.Reason)
+	})
+
+	t.Run("feature gate enabled continues claiming flow", func(t *testing.T) {
+		err := utilfeature.DefaultMutableFeatureGate.SetFromMap(map[string]bool{
+			string(features.SandboxClaimInPlaceCPUResizeGate): true,
+		})
+		require.NoError(t, err)
+
+		claim := makeClaim("gate-enabled")
+		sbs := makeSandboxSet()
+		newStatus := &agentsv1alpha1.SandboxClaimStatus{
+			Phase: agentsv1alpha1.SandboxClaimPhaseClaiming,
+		}
+
+		fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(claim, sbs).Build()
+		control := NewCommonControl(fakeClient, record.NewFakeRecorder(10), clientSet, cache)
+
+		strategy, err := control.EnsureClaimClaiming(ctx, ClaimArgs{
+			Claim:      claim,
+			SandboxSet: sbs,
+			NewStatus:  newStatus,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, RequeueAfter(ClaimRetryInterval), strategy)
+		assert.Equal(t, agentsv1alpha1.SandboxClaimPhaseClaiming, newStatus.Phase)
+		assert.Equal(t, int32(0), newStatus.ClaimedReplicas)
+	})
 }
 
 func TestCommonControl_EnsureClaimCompleted(t *testing.T) {
@@ -1158,7 +1263,7 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 		})
 	}
 
-	t.Run("cpu resize rejected when feature gate disabled", func(t *testing.T) {
+	t.Run("cpu resize builds opts normally when feature gate disabled", func(t *testing.T) {
 		_ = utilfeature.DefaultMutableFeatureGate.Set("SandboxClaimInPlaceCPUResize=false")
 		defer func() {
 			_ = utilfeature.DefaultMutableFeatureGate.Set("SandboxClaimInPlaceCPUResize=true")
@@ -1179,10 +1284,11 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 		ss := &agentsv1alpha1.SandboxSet{
 			ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
 		}
-		_, err := control.buildClaimOptions(ctx, claim, ss)
-		if err == nil {
-			t.Fatal("expected error when feature gate is disabled")
-		}
+		// buildClaimOptions no longer checks the feature gate; the check is in EnsureClaimClaiming.
+		opts, err := control.buildClaimOptions(ctx, claim, ss)
+		assert.NoError(t, err)
+		assert.NotNil(t, opts.InplaceUpdate)
+		assert.NotNil(t, opts.InplaceUpdate.Resources)
 	})
 }
 

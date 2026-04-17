@@ -16,6 +16,7 @@ package utils
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 
@@ -139,6 +140,39 @@ func TestSetSandboxCondition(t *testing.T) {
 				if actualCond.Message != expectedCond.Message {
 					t.Errorf("Condition %d: expected message %s, got %s", i, expectedCond.Message, actualCond.Message)
 				}
+			}
+		})
+	}
+}
+
+func TestTruncateConditionMessage(t *testing.T) {
+	tests := []struct {
+		name     string
+		msg      string
+		expected string
+	}{
+		{
+			name:     "shorter than max length",
+			msg:      "short message",
+			expected: "short message",
+		},
+		{
+			name:     "exactly max length",
+			msg:      strings.Repeat("a", MaxConditionMessageLen),
+			expected: strings.Repeat("a", MaxConditionMessageLen),
+		},
+		{
+			name:     "longer than max length",
+			msg:      strings.Repeat("b", MaxConditionMessageLen+10),
+			expected: strings.Repeat("b", MaxConditionMessageLen) + "...",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := TruncateConditionMessage(tt.msg)
+			if got != tt.expected {
+				t.Fatalf("TruncateConditionMessage() = %q, want %q", got, tt.expected)
 			}
 		})
 	}

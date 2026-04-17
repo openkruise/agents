@@ -383,8 +383,8 @@ func TestHandleInPlaceUpdateCommon_QoSChangeRejected(t *testing.T) {
 			if cond.Reason != agentsv1alpha1.SandboxInplaceUpdateReasonFailed {
 				t.Errorf("Expected reason %s, got %s", agentsv1alpha1.SandboxInplaceUpdateReasonFailed, cond.Reason)
 			}
-			if cond.Status != metav1.ConditionTrue {
-				t.Errorf("Expected status ConditionTrue, got %s", cond.Status)
+			if cond.Status != metav1.ConditionFalse {
+				t.Errorf("Expected status ConditionFalse, got %s", cond.Status)
 			}
 			if cond.Message == "" {
 				t.Error("Expected non-empty message about QoS change")
@@ -487,8 +487,8 @@ func TestHandleInPlaceUpdateCommon_ResizeInfeasibleFailFast(t *testing.T) {
 			if cond.Reason != agentsv1alpha1.SandboxInplaceUpdateReasonFailed {
 				t.Errorf("Expected reason %s, got %s", agentsv1alpha1.SandboxInplaceUpdateReasonFailed, cond.Reason)
 			}
-			if cond.Status != metav1.ConditionTrue {
-				t.Errorf("Expected status ConditionTrue, got %s", cond.Status)
+			if cond.Status != metav1.ConditionFalse {
+				t.Errorf("Expected status ConditionFalse, got %s", cond.Status)
 			}
 			if cond.Message == "" {
 				t.Error("Expected non-empty message about infeasible resize")
@@ -568,7 +568,7 @@ func TestHandleInPlaceUpdateCommon_TerminalFailureNotOverwritten(t *testing.T) {
 		Conditions: []metav1.Condition{
 			{
 				Type:    string(agentsv1alpha1.SandboxConditionInplaceUpdate),
-				Status:  metav1.ConditionTrue,
+				Status:  metav1.ConditionFalse,
 				Reason:  agentsv1alpha1.SandboxInplaceUpdateReasonFailed,
 				Message: "in-place pod resize not supported: the server could not find the requested resource",
 			},

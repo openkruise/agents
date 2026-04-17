@@ -683,6 +683,193 @@ var _ = Describe("SandboxClaim", func() {
 			}
 		})
 
+		It("should timeout claim while preserving sandbox and pod failure evidence on image pull failure", func() {
+			badImage := fmt.Sprintf("nginx:tag-not-exist-%d", time.Now().UnixNano())
+			By("Creating a SandboxClaim with image pull failure target and feasible CPU resize")
+			sandboxClaim = &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("test-claim-image-pull-timeout-%d", time.Now().UnixNano()),
+					Namespace: namespace,
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName:         sandboxSet.Name,
+					Replicas:             ptr.To(int32(1)),
+					SkipInitRuntime:      true,
+					ReserveFailedSandbox: true,
+					ClaimTimeout:         &metav1.Duration{Duration: 45 * time.Second},
+					TTLAfterCompleted:    &metav1.Duration{Duration: 20 * time.Second},
+					WaitReadyTimeout: &metav1.Duration{
+						Duration: 90 * time.Second,
+					},
+					InplaceUpdate: &agentsv1alpha1.SandboxClaimInplaceUpdateOptions{
+						Image: badImage,
+						Resources: &agentsv1alpha1.SandboxClaimInplaceUpdateResourcesOptions{
+							Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("300m")},
+							Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("300m")},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, sandboxClaim)).To(Succeed())
+
+			var failedSandboxName string
+			By("Verifying a sandbox is marked with claim labels during failed attempts")
+			Eventually(func() string {
+				sandboxList := &agentsv1alpha1.SandboxList{}
+				if err := k8sClient.List(ctx, sandboxList, client.InNamespace(namespace), client.MatchingLabels{
+					agentsv1alpha1.LabelSandboxClaimName: sandboxClaim.Name,
+				}); err != nil {
+					return ""
+				}
+				if len(sandboxList.Items) == 0 {
+					return ""
+				}
+				failedSandboxName = sandboxList.Items[0].Name
+				return failedSandboxName
+			}, time.Minute, time.Second).ShouldNot(BeEmpty())
+
+			By("Verifying sandbox keeps InplaceUpdate condition during image pull failure")
+			Eventually(func() string {
+				sbx := &agentsv1alpha1.Sandbox{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{
+					Name:      failedSandboxName,
+					Namespace: namespace,
+				}, sbx); err != nil {
+					return ""
+				}
+				for _, cond := range sbx.Status.Conditions {
+					if cond.Type == string(agentsv1alpha1.SandboxConditionInplaceUpdate) {
+						return cond.Reason
+					}
+				}
+				return ""
+			}, time.Minute*2, time.Second).Should(Or(
+				Equal(agentsv1alpha1.SandboxInplaceUpdateReasonInplaceUpdating),
+				Equal(agentsv1alpha1.SandboxInplaceUpdateReasonFailed),
+			))
+
+			By("Verifying pod shows image pull failure state")
+			Eventually(func() string {
+				pod := &corev1.Pod{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{
+					Name:      failedSandboxName,
+					Namespace: namespace,
+				}, pod); err != nil {
+					return ""
+				}
+				for _, cs := range pod.Status.ContainerStatuses {
+					if cs.State.Waiting != nil {
+						return cs.State.Waiting.Reason
+					}
+				}
+				return ""
+			}, time.Minute*2, time.Second).Should(Or(
+				Equal("ErrImagePull"),
+				Equal("ImagePullBackOff"),
+				Equal("InvalidImageName"),
+			))
+
+			By("Verifying claim completes by timeout with zero claimed replicas")
+			Eventually(func() agentsv1alpha1.SandboxClaimPhase {
+				_ = k8sClient.Get(ctx, types.NamespacedName{
+					Name:      sandboxClaim.Name,
+					Namespace: sandboxClaim.Namespace,
+				}, sandboxClaim)
+				return sandboxClaim.Status.Phase
+			}, time.Minute*3, time.Second).Should(Equal(agentsv1alpha1.SandboxClaimPhaseCompleted))
+			Expect(sandboxClaim.Status.ClaimedReplicas).To(Equal(int32(0)))
+
+			timedOutCondFound := false
+			for _, cond := range sandboxClaim.Status.Conditions {
+				if cond.Type == string(agentsv1alpha1.SandboxClaimConditionTimedOut) && cond.Status == metav1.ConditionTrue {
+					timedOutCondFound = true
+					break
+				}
+			}
+			Expect(timedOutCondFound).To(BeTrue())
+
+			By("Verifying claim is auto-deleted by TTL after completion")
+			Eventually(func() bool {
+				err := k8sClient.Get(ctx, types.NamespacedName{
+					Name:      sandboxClaim.Name,
+					Namespace: sandboxClaim.Namespace,
+				}, &agentsv1alpha1.SandboxClaim{})
+				return apierrors.IsNotFound(err)
+			}, time.Minute, 2*time.Second).Should(BeTrue())
+		})
+
+		It("should still claim sandbox when CPU resize is infeasible but image update succeeds", func() {
+			const targetImage = "nginx:stable-alpine3.20"
+			By("Creating a SandboxClaim with valid image and infeasible CPU resize target")
+			sandboxClaim = &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("test-claim-cpu-fail-image-ok-%d", time.Now().UnixNano()),
+					Namespace: namespace,
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName:    sandboxSet.Name,
+					Replicas:        ptr.To(int32(1)),
+					SkipInitRuntime: true,
+					ClaimTimeout:    &metav1.Duration{Duration: 45 * time.Second},
+					WaitReadyTimeout: &metav1.Duration{
+						Duration: 3 * time.Minute,
+					},
+					InplaceUpdate: &agentsv1alpha1.SandboxClaimInplaceUpdateOptions{
+						Image: targetImage,
+						Resources: &agentsv1alpha1.SandboxClaimInplaceUpdateResourcesOptions{
+							Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("999")},
+							Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("999")},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, sandboxClaim)).To(Succeed())
+
+			By("Verifying claim completes and one sandbox is claimed")
+			Eventually(func() agentsv1alpha1.SandboxClaimPhase {
+				_ = k8sClient.Get(ctx, types.NamespacedName{
+					Name:      sandboxClaim.Name,
+					Namespace: sandboxClaim.Namespace,
+				}, sandboxClaim)
+				return sandboxClaim.Status.Phase
+			}, time.Minute*4, time.Second).Should(Equal(agentsv1alpha1.SandboxClaimPhaseCompleted))
+			Expect(sandboxClaim.Status.ClaimedReplicas).To(Equal(int32(1)))
+
+			By("Verifying Sandbox InplaceUpdate condition reports infeasible CPU resize failure")
+			Eventually(func() string {
+				sbx := &agentsv1alpha1.Sandbox{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{
+					Name:      warmSandboxName,
+					Namespace: namespace,
+				}, sbx); err != nil {
+					return ""
+				}
+				for _, cond := range sbx.Status.Conditions {
+					if cond.Type == string(agentsv1alpha1.SandboxConditionInplaceUpdate) &&
+						cond.Reason == agentsv1alpha1.SandboxInplaceUpdateReasonFailed {
+						return cond.Message
+					}
+				}
+				return ""
+			}, time.Minute*4, time.Second).Should(ContainSubstring("infeasible"))
+
+			By("Verifying image update target is reflected in pod spec")
+			Eventually(func() bool {
+				pod := &corev1.Pod{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{
+					Name:      warmSandboxName,
+					Namespace: namespace,
+				}, pod); err != nil || len(pod.Spec.Containers) == 0 {
+					return false
+				}
+				if pod.Spec.Containers[0].Image != targetImage {
+					return false
+				}
+				req := pod.Spec.Containers[0].Resources.Requests[corev1.ResourceCPU]
+				return req.MilliValue() == int64(999000)
+			}, time.Minute*4, time.Second).Should(BeTrue())
+		})
+
 		It("should fail fast when CPU resize is infeasible (exceeds node capacity)", func() {
 			By("Creating a SandboxClaim with an absurdly large CPU that no node can satisfy")
 			infeasibleClaim := &agentsv1alpha1.SandboxClaim{

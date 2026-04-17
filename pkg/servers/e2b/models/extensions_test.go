@@ -284,6 +284,111 @@ func TestParseExtensions(t *testing.T) {
 	}
 }
 
+func TestParseAndRemoveQuantity(t *testing.T) {
+	tests := []struct {
+		name        string
+		metadata    map[string]string
+		key         string
+		expectOK    bool
+		expectErr   bool
+		errContains string
+		expectQty   resource.Quantity
+	}{
+		{
+			name:     "missing key",
+			metadata: map[string]string{},
+			key:      ExtensionKeyClaimWithCPURequest,
+			expectOK: false,
+		},
+		{
+			name:        "invalid quantity format",
+			metadata:    map[string]string{ExtensionKeyClaimWithCPURequest: "abc"},
+			key:         ExtensionKeyClaimWithCPURequest,
+			expectErr:   true,
+			errContains: "invalid quantity",
+		},
+		{
+			name:        "zero quantity rejected",
+			metadata:    map[string]string{ExtensionKeyClaimWithCPURequest: "0"},
+			key:         ExtensionKeyClaimWithCPURequest,
+			expectErr:   true,
+			errContains: "must be a positive value",
+		},
+		{
+			name:        "negative quantity rejected",
+			metadata:    map[string]string{ExtensionKeyClaimWithCPULimit: "-1"},
+			key:         ExtensionKeyClaimWithCPULimit,
+			expectErr:   true,
+			errContains: "must be a positive value",
+		},
+		{
+			name:      "valid quantity",
+			metadata:  map[string]string{ExtensionKeyClaimWithCPULimit: "1500m"},
+			key:       ExtensionKeyClaimWithCPULimit,
+			expectOK:  true,
+			expectQty: resource.MustParse("1500m"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := &NewSandboxRequest{Metadata: tt.metadata}
+			gotQty, gotOK, err := req.parseAndRemoveQuantity(tt.key)
+			if tt.expectErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.errContains)
+				_, exists := req.Metadata[tt.key]
+				assert.False(t, exists, "key should always be removed after parse attempt")
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.expectOK, gotOK)
+			if tt.expectOK {
+				assert.Equal(t, 0, gotQty.Cmp(tt.expectQty))
+			}
+			_, exists := req.Metadata[tt.key]
+			assert.False(t, exists, "key should be removed after parse")
+		})
+	}
+}
+
+func TestParseExtensions_InvalidLabelErrorPropagates(t *testing.T) {
+	req := &NewSandboxRequest{
+		Metadata: map[string]string{
+			v1alpha1.E2BLabelPrefix + "bad/key/": "value",
+		},
+	}
+
+	err := req.ParseExtensions()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid label name")
+}
+
+func TestParseExtensions_InvalidCPULimitError(t *testing.T) {
+	req := &NewSandboxRequest{
+		Metadata: map[string]string{
+			ExtensionKeyClaimWithCPULimit: "bad-limit",
+		},
+	}
+
+	err := req.ParseExtensions()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid quantity for "+ExtensionKeyClaimWithCPULimit)
+}
+
+func TestParseExtensions_InvalidMultiCSIMountJSON(t *testing.T) {
+	req := &NewSandboxRequest{
+		Metadata: map[string]string{
+			ExtensionKeyClaimWithCSIMount_MountConfig: "not-a-json-array",
+		},
+	}
+
+	err := req.ParseExtensions()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid multiCsiMountConfig")
+}
+
 func TestParseExtensions_WithValidData(t *testing.T) {
 	// Test case with valid image and CSI mount extensions
 	req := &NewSandboxRequest{

@@ -28,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -437,7 +438,29 @@ func (c *InPlaceUpdateControl) Update(ctx context.Context, opts InPlaceUpdateOpt
 		Pod: current,
 	})
 	if resizeBody != nil {
-		if err := c.resizePod(ctx, logger, current, resizeBody); err != nil {
+		if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			err := c.resizePod(ctx, logger, current, resizeBody)
+			if !apierrors.IsConflict(err) {
+				return err
+			}
+
+			latestPod := &corev1.Pod{}
+			if getErr := c.Get(ctx, client.ObjectKeyFromObject(current), latestPod); getErr != nil {
+				return getErr
+			}
+			current = latestPod
+			resizeBody = c.generateResizeSubresourceBody(InPlaceUpdateOptions{
+				Box:      box,
+				Revision: revision,
+				Pod:      current,
+			})
+			if resizeBody == nil {
+				return nil
+			}
+
+			logger.V(5).Info("inplace update pod resize conflict, retrying with latest resourceVersion", "resourceVersion", current.ResourceVersion)
+			return err
+		}); err != nil {
 			return false, err
 		}
 	}
@@ -476,6 +499,10 @@ func (c *InPlaceUpdateControl) resizePod(ctx context.Context, logger klog.Logger
 func (c *InPlaceUpdateControl) patchPodResources(ctx context.Context, logger klog.Logger, pod *corev1.Pod, resizeBody *corev1.Pod) error {
 	resourcePatch := buildResourcePatch(resizeBody)
 	if err := c.Patch(ctx, pod, client.RawPatch(types.StrategicMergePatchType, []byte(resourcePatch))); err != nil {
+		if apierrors.IsConflict(err) {
+			logger.Error(err, "direct resource patch conflicted")
+			return err
+		}
 		logger.Error(err, "direct resource patch failed, in-place resize not supported")
 		return &ResizeNotSupportedError{Err: err}
 	}
@@ -534,9 +561,7 @@ func isPodImageUpdateCompleted(pod *corev1.Pod, state *InPlaceUpdateState) bool 
 // the actual resources reported in status.containerStatuses[].resources, returning
 // true only when all containers' status resources match their spec.
 func isPodResourceResizeCompleted(pod *corev1.Pod) bool {
-	if len(pod.Spec.Containers) == 0 {
-		return false
-	}
+	// container name -> container status
 	statusMap := make(map[string]*corev1.ContainerStatus, len(pod.Status.ContainerStatuses))
 	for i := range pod.Status.ContainerStatuses {
 		statusMap[pod.Status.ContainerStatuses[i].Name] = &pod.Status.ContainerStatuses[i]
@@ -570,10 +595,10 @@ func checkPodResizeInfeasible(pod *corev1.Pod) error {
 		}
 		switch cond.Type {
 		case corev1.PodResizePending:
-			switch cond.Reason {
-			case corev1.PodReasonInfeasible:
+			if cond.Reason == corev1.PodReasonInfeasible {
 				return fmt.Errorf("pod resize is infeasible: %s", cond.Message)
-			case corev1.PodReasonDeferred:
+			}
+			if cond.Reason == corev1.PodReasonDeferred {
 				// Deferred means the resize fits the node in theory but cannot
 				// be granted right now (e.g. other pods are consuming the
 				// resources). For sandbox workloads we treat this as a terminal
@@ -587,10 +612,12 @@ func checkPodResizeInfeasible(pod *corev1.Pod) error {
 			}
 		}
 	}
-	switch pod.Status.Resize {
-	case corev1.PodResizeStatusInfeasible:
+	// Fallback compatibility check for older clusters (K8s 1.27-1.32) that
+	// still rely on the deprecated pod.Status.Resize field.
+	if pod.Status.Resize == corev1.PodResizeStatusInfeasible {
 		return fmt.Errorf("pod resize is infeasible (status.resize)")
-	case corev1.PodResizeStatusDeferred:
+	}
+	if pod.Status.Resize == corev1.PodResizeStatusDeferred {
 		return fmt.Errorf("pod resize is deferred (status.resize)")
 	}
 	return nil

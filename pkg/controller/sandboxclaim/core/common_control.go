@@ -124,7 +124,20 @@ func (c *commonControl) EnsureClaimClaiming(ctx context.Context, args ClaimArgs)
 		return RequeueImmediately(), nil
 	}
 
-	// Step 7: Calculate batch size
+	// Step 7: Precondition
+	if claim.Spec.InplaceUpdate != nil {
+		if res := claim.Spec.InplaceUpdate.Resources; res != nil && (len(res.Requests) > 0 || len(res.Limits) > 0) {
+			if !utilfeature.DefaultFeatureGate.Enabled(features.SandboxClaimInPlaceCPUResizeGate) {
+				msg := fmt.Sprintf("in-place resource resize is disabled by feature gate %s", features.SandboxClaimInPlaceCPUResizeGate)
+				log.Info(msg)
+				c.recorder.Event(claim, "Warning", "FeatureGateDisabled", msg)
+				TransitionToCompleted(args.NewStatus, "FeatureGateDisabled", msg)
+				return NoRequeue(), nil
+			}
+		}
+	}
+
+	// Step 8: Calculate batch size
 	remaining := desiredReplicas - currentCount
 	batchSize := min(int(remaining), MaxClaimBatchSize)
 
@@ -299,9 +312,6 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 			Image: claim.Spec.InplaceUpdate.Image,
 		}
 		if res := claim.Spec.InplaceUpdate.Resources; res != nil && (len(res.Requests) > 0 || len(res.Limits) > 0) {
-			if !utilfeature.DefaultFeatureGate.Enabled(features.SandboxClaimInPlaceCPUResizeGate) {
-				return infra.ClaimSandboxOptions{}, fmt.Errorf("in-place resource resize is disabled by feature gate %s", features.SandboxClaimInPlaceCPUResizeGate)
-			}
 			opts.InplaceUpdate.Resources = &config.InplaceUpdateResourcesOptions{
 				Requests: res.Requests,
 				Limits:   res.Limits,

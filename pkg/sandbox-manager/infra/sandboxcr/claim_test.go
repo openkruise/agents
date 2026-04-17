@@ -729,7 +729,7 @@ func TestCheckSandboxInplaceUpdate(t *testing.T) {
 			extraConditions: []metav1.Condition{
 				{
 					Type:   string(v1alpha1.SandboxConditionInplaceUpdate),
-					Status: metav1.ConditionTrue,
+					Status: metav1.ConditionFalse,
 					Reason: v1alpha1.SandboxInplaceUpdateReasonInplaceUpdating,
 				},
 			},
@@ -1347,6 +1347,88 @@ func TestValidateAndInitClaimOptions_CPUResize(t *testing.T) {
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "target cpu must be a positive value")
+}
+
+func TestValidateAndInitClaimOptions_InplaceUpdateValidation(t *testing.T) {
+	tests := []struct {
+		name        string
+		opts        infra.ClaimSandboxOptions
+		expectErr   bool
+		errContains string
+	}{
+		{
+			name: "inplace update requires image or resources",
+			opts: infra.ClaimSandboxOptions{
+				User:          "u",
+				Template:      "t",
+				InplaceUpdate: &config.InplaceUpdateOptions{},
+			},
+			expectErr:   true,
+			errContains: "requires either image or resources",
+		},
+		{
+			name: "resources require requests or limits",
+			opts: infra.ClaimSandboxOptions{
+				User:     "u",
+				Template: "t",
+				InplaceUpdate: &config.InplaceUpdateOptions{
+					Resources: &config.InplaceUpdateResourcesOptions{},
+				},
+			},
+			expectErr:   true,
+			errContains: "resources must specify at least one of requests or limits",
+		},
+		{
+			name: "negative cpu request rejected",
+			opts: infra.ClaimSandboxOptions{
+				User:     "u",
+				Template: "t",
+				InplaceUpdate: &config.InplaceUpdateOptions{
+					Resources: &config.InplaceUpdateResourcesOptions{
+						Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("-1")},
+					},
+				},
+			},
+			expectErr:   true,
+			errContains: "target cpu must be a positive value",
+		},
+		{
+			name: "cpu limit only is allowed",
+			opts: infra.ClaimSandboxOptions{
+				User:     "u",
+				Template: "t",
+				InplaceUpdate: &config.InplaceUpdateOptions{
+					Resources: &config.InplaceUpdateResourcesOptions{
+						Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
+					},
+				},
+			},
+			expectErr: false,
+		},
+		{
+			name: "image only is allowed",
+			opts: infra.ClaimSandboxOptions{
+				User:     "u",
+				Template: "t",
+				InplaceUpdate: &config.InplaceUpdateOptions{
+					Image: "nginx:stable",
+				},
+			},
+			expectErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := ValidateAndInitClaimOptions(tt.opts)
+			if tt.expectErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.errContains)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
 }
 
 // --- Pod resize state helpers (test-only, used by TestWaitForPodResizeState and related tests) ---
