@@ -242,19 +242,7 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 		User:     string(claim.UID), // Use UID to ensure uniqueness across claim recreations
 		Template: sandboxSet.Name,
 		Modifier: func(sbx infra.Sandbox) {
-			// 1. apply labels
-			labels := sbx.GetLabels()
-			if labels == nil {
-				labels = make(map[string]string)
-			}
-			labels[agentsv1alpha1.LabelSandboxClaimName] = claim.Name
-
-			for k, v := range claim.Spec.Labels {
-				labels[k] = v
-			}
-			sbx.SetLabels(labels)
-
-			// 2. apply annotations
+			// propagate annotations to sandbox
 			if len(claim.Spec.Annotations) > 0 {
 				annotations := sbx.GetAnnotations()
 				if annotations == nil {
@@ -266,7 +254,30 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 				sbx.SetAnnotations(annotations)
 			}
 
-			// 3. apply shutdownTime
+			// propagate labels to sandbox
+			labels := sbx.GetLabels()
+			if labels == nil {
+				labels = make(map[string]string)
+			}
+			labels[agentsv1alpha1.LabelSandboxClaimName] = claim.Name
+
+			for k, v := range claim.Spec.Labels {
+				labels[k] = v
+			}
+			sbx.SetLabels(labels)
+
+			// propagate annotations to podtemplate
+			labels = sbx.GetPodLabels()
+			if labels == nil {
+				labels = make(map[string]string)
+			}
+
+			for k, v := range claim.Spec.Labels {
+				labels[k] = v
+			}
+			sbx.SetPodLabels(labels)
+
+			// apply shutdownTime
 			if claim.Spec.ShutdownTime != nil {
 				sbx.SetTimeout(infra.TimeoutOptions{
 					ShutdownTime: claim.Spec.ShutdownTime.Time,

@@ -156,6 +156,26 @@ func TestHashSandbox(t *testing.T) {
 			validateDifferentHashes: false, // Both hashes should be the same when no containers have images/resources
 		},
 		{
+			name: "sandbox with labels in template but empty containers",
+			sandbox: &agentsv1alpha1.Sandbox{
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							ObjectMeta: metav1.ObjectMeta{
+								Labels: map[string]string{
+									"app": "test",
+								},
+							},
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{},
+							},
+						},
+					},
+				},
+			},
+			validateDifferentHashes: true, // Both hashes should be the same when no containers have images/resources
+		},
+		{
 			name: "sandbox with volumes and other fields",
 			sandbox: &agentsv1alpha1.Sandbox{
 				Spec: agentsv1alpha1.SandboxSpec{

@@ -43,18 +43,19 @@ func handleInPlaceUpdateCommon(
 ) (bool, error) {
 	logger := handler.GetLogger(ctx, box)
 
-	_, hashWithoutImageAndResource := HashSandbox(box)
+	_, hashImmutablePart := HashSandbox(box)
+
 	// old Pod do not include Labels[pod-template-hash] and do not support inplace update.
 	// Check if inplace update is supported
 	if pod.Labels[agentsv1alpha1.PodLabelTemplateHash] == "" {
 		return true, nil
 		// todo, update inplaceupdate condition
-	} else if box.Annotations[agentsv1alpha1.SandboxHashWithoutImageAndResources] != hashWithoutImageAndResource {
-		logger.Info("sandbox hash-without-image-resources changed, and does not permit in-place upgrades",
-			"old hash", box.Annotations[agentsv1alpha1.SandboxHashWithoutImageAndResources],
-			"new hash", hashWithoutImageAndResource)
+	} else if box.Annotations[agentsv1alpha1.SandboxHashImmutablePart] != hashImmutablePart {
+		logger.Info("sandbox hash-immutable-part changed, and does not permit in-place upgrades",
+			"old hash", box.Annotations[agentsv1alpha1.SandboxHashImmutablePart],
+			"new hash", hashImmutablePart)
 		handler.GetRecorder().Eventf(box, corev1.EventTypeWarning, "InplaceUpdateForbidden",
-			"InplaceUpdate only support image, resources")
+			"InplaceUpdate only support image, resources, metadata")
 		return true, nil
 	}
 

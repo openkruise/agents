@@ -254,6 +254,7 @@ func (sc *Controller) basicSandboxCreateModifier(ctx context.Context, sbx infra.
 	sbx.SetTimeout(timeoutOptions)
 	log.Info("timeout options calculated", "options", timeoutOptions)
 
+	// propagate annotations to sandbox
 	annotations := sbx.GetAnnotations()
 	if annotations == nil {
 		annotations = make(map[string]string)
@@ -263,7 +264,18 @@ func (sc *Controller) basicSandboxCreateModifier(ctx context.Context, sbx infra.
 	}
 	sbx.SetAnnotations(annotations)
 
-	labels := sbx.GetPodLabels()
+	// propagate labels to sandbox
+	labels := sbx.GetLabels()
+	if labels == nil {
+		labels = make(map[string]string)
+	}
+	for k, v := range request.Extensions.Labels {
+		labels[k] = v
+	}
+	sbx.SetLabels(labels)
+
+	// propagate annotations to podtemplate
+	labels = sbx.GetPodLabels()
 	if labels == nil {
 		labels = make(map[string]string)
 	}
