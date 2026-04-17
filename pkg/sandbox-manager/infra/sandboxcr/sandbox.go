@@ -151,6 +151,19 @@ func (s *Sandbox) SetTimeout(opts infra.TimeoutOptions) {
 	setTimeout(s.Sandbox, opts)
 }
 
+func (s *Sandbox) GetPodLabels() map[string]string {
+	if s.Spec.Template != nil {
+		return s.Spec.Template.Labels
+	}
+	return nil
+}
+
+func (s *Sandbox) SetPodLabels(labels map[string]string) {
+	if s.Spec.Template != nil {
+		s.Spec.Template.Labels = labels
+	}
+}
+
 // SetImage sets the image of the first container
 func (s *Sandbox) SetImage(image string) {
 	if s.Spec.Template != nil {
