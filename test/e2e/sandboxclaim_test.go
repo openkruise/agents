@@ -38,20 +38,23 @@ var _ = Describe("SandboxClaim", func() {
 		namespace string
 	)
 
-	// Helper function to list sandboxes claimed by a specific SandboxClaim
-	// Uses AnnotationOwner (which stores the claim's UID) for filtering
+	// Helper function to list sandboxes claimed by a specific SandboxClaim.
+	// Match AnnotationOwner (claim UID) and/or LabelSandboxClaimName — the controller sets both,
+	// but listing by label alone stays correct if the UID is not yet visible on a stale client read.
 	listClaimedSandboxes := func(ctx context.Context, claim *agentsv1alpha1.SandboxClaim) ([]agentsv1alpha1.Sandbox, error) {
 		sandboxList := &agentsv1alpha1.SandboxList{}
 		if err := k8sClient.List(ctx, sandboxList, client.InNamespace(claim.Namespace)); err != nil {
 			return nil, err
 		}
 
-		// AnnotationOwner is set to the claim's UID for uniqueness
 		expectedOwner := string(claim.UID)
 		claimed := []agentsv1alpha1.Sandbox{}
 		for _, sandbox := range sandboxList.Items {
-			if sandbox.Annotations != nil &&
-				sandbox.Annotations[agentsv1alpha1.AnnotationOwner] == expectedOwner {
+			byOwner := sandbox.Annotations != nil &&
+				sandbox.Annotations[agentsv1alpha1.AnnotationOwner] == expectedOwner
+			byClaimName := sandbox.Labels != nil &&
+				sandbox.Labels[agentsv1alpha1.LabelSandboxClaimName] == claim.Name
+			if byOwner || byClaimName {
 				claimed = append(claimed, sandbox)
 			}
 		}
@@ -282,6 +285,99 @@ var _ = Describe("SandboxClaim", func() {
 			claimedSandboxes, err := listClaimedSandboxes(ctx, sandboxClaim)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(claimedSandboxes).To(HaveLen(1))
+		})
+	})
+
+	Context("PauseTime propagation from SandboxClaim", func() {
+		var (
+			sandboxSet   *agentsv1alpha1.SandboxSet
+			sandboxClaim *agentsv1alpha1.SandboxClaim
+		)
+
+		BeforeEach(func() {
+			sandboxSet = &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("test-pool-pausetime-%d", time.Now().UnixNano()),
+					Namespace: namespace,
+				},
+				Spec: agentsv1alpha1.SandboxSetSpec{
+					Replicas: 3,
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name:  "test-container",
+										Image: "nginx:stable-alpine3.23",
+									},
+								},
+							},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, sandboxSet)).To(Succeed())
+
+			Eventually(func() int32 {
+				_ = k8sClient.Get(ctx, types.NamespacedName{
+					Name:      sandboxSet.Name,
+					Namespace: sandboxSet.Namespace,
+				}, sandboxSet)
+				return sandboxSet.Status.AvailableReplicas
+			}, time.Minute*2, time.Second).Should(Equal(int32(3)))
+		})
+
+		AfterEach(func() {
+			if sandboxClaim != nil {
+				_ = k8sClient.Delete(ctx, sandboxClaim)
+			}
+			if sandboxSet != nil {
+				_ = k8sClient.Delete(ctx, sandboxSet)
+			}
+		})
+
+		It("should propagate pauseTime from claim spec to the claimed sandbox", func() {
+			pauseAt := metav1.NewTime(time.Date(2099, 7, 1, 12, 0, 0, 0, time.UTC))
+
+			By("Creating a SandboxClaim with pauseTime")
+			sandboxClaim = &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("test-claim-pause-%d", time.Now().UnixNano()),
+					Namespace: namespace,
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: sandboxSet.Name,
+					Replicas:     ptr.To(int32(1)),
+					PauseTime:    &pauseAt,
+					ClaimTimeout: &metav1.Duration{Duration: 5 * time.Minute},
+				},
+			}
+			Expect(k8sClient.Create(ctx, sandboxClaim)).To(Succeed())
+
+			var claimedSandboxes []agentsv1alpha1.Sandbox
+			By("Waiting for successful completion and the claimed sandbox")
+			Eventually(func(g Gomega) {
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{
+					Name:      sandboxClaim.Name,
+					Namespace: sandboxClaim.Namespace,
+				}, sandboxClaim)).To(Succeed())
+				g.Expect(sandboxClaim.Status.Phase).To(Equal(agentsv1alpha1.SandboxClaimPhaseCompleted))
+				g.Expect(sandboxClaim.Status.ClaimedReplicas).To(Equal(int32(1)))
+				g.Expect(sandboxClaim.Status.Message).To(ContainSubstring("Successfully claimed"))
+				list, err := listClaimedSandboxes(ctx, sandboxClaim)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(list).To(HaveLen(1))
+				claimedSandboxes = list
+			}).WithTimeout(3 * time.Minute).WithPolling(2 * time.Second).Should(Succeed())
+
+			fresh := &agentsv1alpha1.Sandbox{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: namespace,
+				Name:      claimedSandboxes[0].Name,
+			}, fresh)).To(Succeed())
+			Expect(fresh.Spec.PauseTime).NotTo(BeNil())
+			Expect(fresh.Spec.PauseTime.Time).To(BeTemporally("~", pauseAt.Time, time.Minute))
+			Expect(fresh.Spec.ShutdownTime).To(BeNil())
 		})
 	})
 

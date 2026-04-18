@@ -40,6 +40,11 @@ type SandboxClaimSpec struct {
 	// +optional
 	ShutdownTime *metav1.Time `json:"shutdownTime,omitempty"`
 
+	// PauseTime specifies the absolute time when the sandbox should be paused automatically
+	// This will be set as spec.pauseTime (absolute time) on the Sandbox
+	// +optional
+	PauseTime *metav1.Time `json:"pauseTime,omitempty"`
+
 	// ClaimTimeout specifies the maximum duration to wait for claiming sandboxes
 	// If the timeout is reached, the claim will be marked as Completed regardless of
 	// whether all replicas were successfully claimed

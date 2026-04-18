@@ -146,6 +146,12 @@ spec:
                   - name
                   type: object
                 type: array
+              pauseTime:
+                description: |-
+                  PauseTime specifies the absolute time when the sandbox should be paused automatically
+                  This will be set as spec.pauseTime (absolute time) on the Sandbox
+                format: date-time
+                type: string
               shutdownTime:
                 description: |-
                   ShutdownTime specifies the absolute time when the sandbox should be shut down
