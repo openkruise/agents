@@ -261,7 +261,7 @@ func TestRecordSandboxMetrics_InplaceUpdateConditionFalse(t *testing.T) {
 			Phase: agentsv1alpha1.SandboxRunning,
 			Conditions: []metav1.Condition{
 				{
-					Type:               string(agentsv1alpha1.SandboxConditionInplaceUpdate),
+					Type:               string(agentsv1alpha1.SandboxConditionUpgrading),
 					Status:             metav1.ConditionFalse,
 					LastTransitionTime: now,
 				},
@@ -294,7 +294,7 @@ func TestRecordSandboxMetrics_InplaceUpdateConditionTrue(t *testing.T) {
 			Phase: agentsv1alpha1.SandboxRunning,
 			Conditions: []metav1.Condition{
 				{
-					Type:               string(agentsv1alpha1.SandboxConditionInplaceUpdate),
+					Type:               string(agentsv1alpha1.SandboxConditionUpgrading),
 					Status:             metav1.ConditionTrue,
 					LastTransitionTime: metav1.NewTime(time.Now()),
 				},
@@ -452,7 +452,7 @@ func TestRecordSandboxMetrics_MultipleConditions(t *testing.T) {
 					LastTransitionTime: now,
 				},
 				{
-					Type:               string(agentsv1alpha1.SandboxConditionInplaceUpdate),
+					Type:               string(agentsv1alpha1.SandboxConditionUpgrading),
 					Status:             metav1.ConditionFalse,
 					LastTransitionTime: now,
 				},

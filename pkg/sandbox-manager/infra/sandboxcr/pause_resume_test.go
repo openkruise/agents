@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/openkruise/agents/pkg/utils/runtime"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -227,7 +228,7 @@ func TestSandbox_SetPause(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			serverOpts := testutils.TestRuntimeServerOptions{
-				RunCommandResult: testutils.RunCommandResult{
+				RunCommandResult: runtime.RunCommandResult{
 					PID:    1,
 					Exited: true,
 				},

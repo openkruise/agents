@@ -24,7 +24,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog/v2"
-	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/features"
@@ -76,7 +75,6 @@ func (r *RateLimiter) getRateLimitDuration(ctx context.Context, pod *corev1.Pod,
 		return 0, false
 	}
 
-	logger := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
 	// Process the scenario where sandbox enters for the first time
 	if IsHighPrioritySandbox(ctx, box) {
 		_ = r.UpdateRateLimiter(box)
@@ -88,7 +86,7 @@ func (r *RateLimiter) getRateLimitDuration(ctx context.Context, pod *corev1.Pod,
 	// Normal sandboxes exceeding maxCreateSandboxDelay are no longer blocked from creation
 	if time.Since(box.CreationTimestamp.Time) < (time.Duration(maxSandboxCreateDelay)*time.Second) &&
 		count > prioritySandboxThreshold {
-		logger.Info("high creating sandbox count exceed threshold, and wait",
+		klog.InfoS("high creating sandbox count exceed threshold, and wait", "sandbox", klog.KObj(box),
 			"current creating count", count, "prioritySandboxThreshold", prioritySandboxThreshold)
 		// TODO: Trigger on-demand instead of periodic requeue
 		return time.Second * 3, true
@@ -150,7 +148,6 @@ func (r *RateLimiter) getPrioritySandboxTrackCount() int {
 }
 
 func IsHighPrioritySandbox(ctx context.Context, box *agentsv1alpha1.Sandbox) bool {
-	logger := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
 	value, ok := box.Annotations[agentsv1alpha1.SandboxAnnotationPriority]
 	if !ok || value == "" {
 		return false
@@ -158,7 +155,7 @@ func IsHighPrioritySandbox(ctx context.Context, box *agentsv1alpha1.Sandbox) boo
 
 	priority, err := strconv.Atoi(value)
 	if err != nil {
-		logger.Error(err, "parse annotations failed", agentsv1alpha1.SandboxAnnotationPriority, value)
+		klog.ErrorS(err, "parse annotations failed", "sandbox", klog.KObj(box), agentsv1alpha1.SandboxAnnotationPriority, value)
 		return false
 	}
 	return priority > 0

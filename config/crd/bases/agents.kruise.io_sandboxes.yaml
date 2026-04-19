@@ -60,6 +60,48 @@ spec:
           spec:
             description: spec defines the desired state of Sandbox
             properties:
+              lifecycle:
+                description: Lifecycle defines lifecycle hooks for sandbox upgrade.
+                properties:
+                  postUpgrade:
+                    description: |-
+                      PostUpgrade is the action executed after the upgrade.
+                      It is typically used to restore workspace data.
+                    properties:
+                      script:
+                        description: |-
+                          Exec specifies a script-based action to execute inside the sandbox via envd.
+                          Script is the shell script content to execute.
+                        type: string
+                      timeoutSeconds:
+                        default: 60
+                        description: TimeoutSeconds is the timeout for the action
+                          execution in seconds.
+                        format: int32
+                        type: integer
+                    required:
+                    - script
+                    type: object
+                  preUpgrade:
+                    description: |-
+                      PreUpgrade is the action executed before the upgrade.
+                      It is typically used to backup workspace data.
+                    properties:
+                      script:
+                        description: |-
+                          Exec specifies a script-based action to execute inside the sandbox via envd.
+                          Script is the shell script content to execute.
+                        type: string
+                      timeoutSeconds:
+                        default: 60
+                        description: TimeoutSeconds is the timeout for the action
+                          execution in seconds.
+                        format: int32
+                        type: integer
+                    required:
+                    - script
+                    type: object
+                type: object
               pauseTime:
                 description: PauseTime - Absolute time when the sandbox will be paused
                   automatically.
@@ -114,6 +156,18 @@ spec:
                     type: string
                 required:
                 - name
+                type: object
+              upgradePolicy:
+                description: UpgradePolicy defines the upgrade strategy for the sandbox.
+                properties:
+                  type:
+                    default: ReCreate
+                    description: |-
+                      Type specifies the update policy type.
+                      Supported values: ReCreate.
+                    enum:
+                    - ReCreate
+                    type: string
                 type: object
               volumeClaimTemplates:
                 description: VolumeClaimTemplates is a list of PVC templates to create

@@ -26,7 +26,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/utils"
@@ -84,14 +83,12 @@ func GetControllerKey(obj client.Object) string {
 }
 
 func GeneratePodFromSandbox(ctx context.Context, cli client.Client, box *agentsv1alpha1.Sandbox, revision string) (*corev1.Pod, error) {
-	logger := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
-
 	podTemplate := box.Spec.Template
 	if box.Spec.TemplateRef != nil {
 		refTemplate := &agentsv1alpha1.SandboxTemplate{}
 		err := cli.Get(ctx, client.ObjectKey{Namespace: box.Namespace, Name: box.Spec.TemplateRef.Name}, refTemplate)
 		if err != nil {
-			logger.Error(err, "failed to get sandbox template", "template", box.Spec.TemplateRef.Name, "sandbox", box.Name)
+			klog.ErrorS(err, "failed to get sandbox template", "sandbox", klog.KObj(box), "template", box.Spec.TemplateRef.Name)
 			return nil, err
 		}
 		podTemplate = refTemplate.Spec.Template
@@ -121,7 +118,7 @@ func GeneratePodFromSandbox(ctx context.Context, cli client.Client, box *agentsv
 	for _, template := range box.Spec.VolumeClaimTemplates {
 		pvcName, err := GeneratePVCName(template.Name, box.Name)
 		if err != nil {
-			logger.Error(err, "failed to generate PVC name", "template", template.Name, "sandbox", box.Name)
+			klog.ErrorS(err, "failed to generate PVC name", "sandbox", klog.KObj(box), "template", template.Name)
 			return nil, err
 		}
 		volumes = append(volumes, corev1.Volume{

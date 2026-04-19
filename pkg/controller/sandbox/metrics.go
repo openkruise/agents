@@ -230,7 +230,7 @@ func recordSandboxMetrics(sandbox *agentsv1alpha1.Sandbox) {
 				sandboxStatusReadyTime.WithLabelValues(namespace, name).Set(float64(condition.LastTransitionTime.Unix()))
 			}
 
-		case agentsv1alpha1.SandboxConditionInplaceUpdate:
+		case agentsv1alpha1.SandboxConditionUpgrading:
 			recordConditionFalseMetric(condition, sandboxStatusInplaceUpdating, sandboxStatusInplaceUpdatingTime, namespace, name)
 
 		case agentsv1alpha1.SandboxConditionPaused:

@@ -28,6 +28,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
+	"github.com/openkruise/agents/pkg/utils/runtime"
 	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	"github.com/openkruise/agents/pkg/utils/sandboxutils"
 	testutils "github.com/openkruise/agents/test/utils"
@@ -101,7 +102,7 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 	t.Cleanup(func() { DefaultCreateSandbox = origCreateSandbox })
 
 	opts := testutils.TestRuntimeServerOptions{
-		RunCommandResult: testutils.RunCommandResult{
+		RunCommandResult: runtime.RunCommandResult{
 			PID:    1,
 			Exited: true,
 		},
@@ -254,10 +255,10 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 			name:      "claim with csi mount",
 			available: 1,
 			options: infra.ClaimSandboxOptions{
-				User:        user,
-				Template:    existTemplate,
+				User:         user,
+				Template:     existTemplate,
 				ClaimTimeout: 500 * time.Millisecond,
-				InitRuntime: &config.InitRuntimeOptions{},
+				InitRuntime:  &config.InitRuntimeOptions{},
 				CSIMount: &config.CSIMountOptions{
 					MountOptionList: []config.MountConfig{
 						{
@@ -268,7 +269,7 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 			},
 			preModifier: func(sbx *v1alpha1.Sandbox, infra *Infra) {
 				sbx.Annotations[v1alpha1.AnnotationRuntimeURL] = server.URL
-				sbx.Annotations[v1alpha1.AnnotationRuntimeAccessToken] = testutils.AccessToken
+				sbx.Annotations[v1alpha1.AnnotationRuntimeAccessToken] = runtime.AccessToken
 			},
 			postCheck: func(t *testing.T, sbx infra.Sandbox) {
 				metrics := GetMetricsFromSandbox(t, sbx)
@@ -479,7 +480,7 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 //goland:noinspection GoDeprecation
 func TestClaimSandboxFailed(t *testing.T) {
 	opts := testutils.TestRuntimeServerOptions{
-		RunCommandResult: testutils.RunCommandResult{
+		RunCommandResult: runtime.RunCommandResult{
 			PID:      1,
 			ExitCode: 1, // returns an error
 			Exited:   true,
@@ -557,7 +558,7 @@ func TestClaimSandboxFailed(t *testing.T) {
 			},
 			preModifier: func(sbx *v1alpha1.Sandbox) {
 				sbx.Annotations[v1alpha1.AnnotationRuntimeURL] = server.URL
-				sbx.Annotations[v1alpha1.AnnotationRuntimeAccessToken] = testutils.AccessToken
+				sbx.Annotations[v1alpha1.AnnotationRuntimeAccessToken] = runtime.AccessToken
 			},
 			expectError: "command failed",
 		},
@@ -578,7 +579,7 @@ func TestClaimSandboxFailed(t *testing.T) {
 			},
 			preModifier: func(sbx *v1alpha1.Sandbox) {
 				sbx.Annotations[v1alpha1.AnnotationRuntimeURL] = server.URL
-				sbx.Annotations[v1alpha1.AnnotationRuntimeAccessToken] = testutils.AccessToken
+				sbx.Annotations[v1alpha1.AnnotationRuntimeAccessToken] = runtime.AccessToken
 			},
 			expectError: "command failed",
 		},
@@ -720,7 +721,7 @@ func TestCheckSandboxInplaceUpdate(t *testing.T) {
 			generation:         1,
 			observedGeneration: 1,
 			condStatus:         metav1.ConditionFalse,
-			condReason:         v1alpha1.SandboxReadyReasonInplaceUpdating,
+			condReason:         v1alpha1.SandboxReadyReasonUpgrading,
 			expectResult:       false,
 		},
 		{

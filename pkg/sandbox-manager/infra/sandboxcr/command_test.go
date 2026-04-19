@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/openkruise/agents/pkg/utils/runtime"
 	"github.com/stretchr/testify/assert"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
@@ -23,7 +24,7 @@ func TestSandbox_runCommandWithEnvd(t *testing.T) {
 		timeout      time.Duration
 		accessToken  string
 		immediately  bool
-		result       testutils.RunCommandResult
+		result       runtime.RunCommandResult
 		processError *string
 		expectError  string
 	}{
@@ -31,8 +32,8 @@ func TestSandbox_runCommandWithEnvd(t *testing.T) {
 			name:        "success",
 			timeout:     100 * time.Second,
 			immediately: true,
-			accessToken: testutils.AccessToken,
-			result: testutils.RunCommandResult{
+			accessToken: runtime.AccessToken,
+			result: runtime.RunCommandResult{
 				PID:      10086,
 				Stdout:   []string{"Hello", "World"},
 				Stderr:   []string{"Some", "Error"},
@@ -44,8 +45,8 @@ func TestSandbox_runCommandWithEnvd(t *testing.T) {
 			name:        "error",
 			timeout:     100 * time.Second,
 			immediately: true,
-			accessToken: testutils.AccessToken,
-			result: testutils.RunCommandResult{
+			accessToken: runtime.AccessToken,
+			result: runtime.RunCommandResult{
 				PID:      10086,
 				Stdout:   []string{"Hello", "World"},
 				Stderr:   []string{"Some", "Error"},
@@ -59,8 +60,8 @@ func TestSandbox_runCommandWithEnvd(t *testing.T) {
 			name:        "timeout",
 			timeout:     100 * time.Millisecond,
 			immediately: false,
-			accessToken: testutils.AccessToken,
-			result: testutils.RunCommandResult{
+			accessToken: runtime.AccessToken,
+			result: runtime.RunCommandResult{
 				PID:    10086,
 				Stdout: []string{"Hello", "World"},
 				Stderr: []string{"Some", "Error"},
@@ -72,7 +73,7 @@ func TestSandbox_runCommandWithEnvd(t *testing.T) {
 			name:        "unauthorized",
 			timeout:     100 * time.Millisecond,
 			immediately: true,
-			result: testutils.RunCommandResult{
+			result: runtime.RunCommandResult{
 				PID:    10086,
 				Stdout: []string{"Hello", "World"},
 				Stderr: []string{"Some", "Error"},

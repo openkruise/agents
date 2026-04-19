@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/openkruise/agents/pkg/utils/runtime"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -42,7 +43,7 @@ func newTestSandboxWithServer(t *testing.T, serverURL string) *Sandbox {
 			Namespace: "default",
 			Annotations: map[string]string{
 				v1alpha1.AnnotationRuntimeURL:         serverURL,
-				v1alpha1.AnnotationRuntimeAccessToken: testutils.AccessToken,
+				v1alpha1.AnnotationRuntimeAccessToken: runtime.AccessToken,
 			},
 		},
 	}
@@ -62,7 +63,7 @@ func TestProcessCSIMounts(t *testing.T) {
 				MountOptionList: []config.MountConfig{},
 			},
 			serverOpts: testutils.TestRuntimeServerOptions{
-				RunCommandResult:      testutils.RunCommandResult{PID: 1, Exited: true},
+				RunCommandResult:      runtime.RunCommandResult{PID: 1, Exited: true},
 				RunCommandImmediately: true,
 			},
 		},
@@ -74,7 +75,7 @@ func TestProcessCSIMounts(t *testing.T) {
 				},
 			},
 			serverOpts: testutils.TestRuntimeServerOptions{
-				RunCommandResult:      testutils.RunCommandResult{PID: 1, Exited: true},
+				RunCommandResult:      runtime.RunCommandResult{PID: 1, Exited: true},
 				RunCommandImmediately: true,
 			},
 		},
@@ -88,7 +89,7 @@ func TestProcessCSIMounts(t *testing.T) {
 				},
 			},
 			serverOpts: testutils.TestRuntimeServerOptions{
-				RunCommandResult:      testutils.RunCommandResult{PID: 1, Exited: true},
+				RunCommandResult:      runtime.RunCommandResult{PID: 1, Exited: true},
 				RunCommandImmediately: true,
 			},
 		},
@@ -100,7 +101,7 @@ func TestProcessCSIMounts(t *testing.T) {
 				},
 			},
 			serverOpts: testutils.TestRuntimeServerOptions{
-				RunCommandResult:      testutils.RunCommandResult{PID: 1, ExitCode: 1, Exited: true},
+				RunCommandResult:      runtime.RunCommandResult{PID: 1, ExitCode: 1, Exited: true},
 				RunCommandImmediately: true,
 			},
 			expectError: "command failed",
@@ -115,7 +116,7 @@ func TestProcessCSIMounts(t *testing.T) {
 				},
 			},
 			serverOpts: testutils.TestRuntimeServerOptions{
-				RunCommandResult:      testutils.RunCommandResult{PID: 1, ExitCode: 1, Exited: true},
+				RunCommandResult:      runtime.RunCommandResult{PID: 1, ExitCode: 1, Exited: true},
 				RunCommandImmediately: true,
 			},
 			expectError: "command failed",
@@ -129,7 +130,7 @@ func TestProcessCSIMounts(t *testing.T) {
 				},
 			},
 			serverOpts: testutils.TestRuntimeServerOptions{
-				RunCommandResult:      testutils.RunCommandResult{PID: 1, Exited: true},
+				RunCommandResult:      runtime.RunCommandResult{PID: 1, Exited: true},
 				RunCommandImmediately: true,
 			},
 		},
@@ -142,7 +143,7 @@ func TestProcessCSIMounts(t *testing.T) {
 				},
 			},
 			serverOpts: testutils.TestRuntimeServerOptions{
-				RunCommandResult:      testutils.RunCommandResult{PID: 1, Exited: true},
+				RunCommandResult:      runtime.RunCommandResult{PID: 1, Exited: true},
 				RunCommandImmediately: true,
 			},
 		},
@@ -158,7 +159,7 @@ func TestProcessCSIMounts(t *testing.T) {
 				},
 			},
 			serverOpts: testutils.TestRuntimeServerOptions{
-				RunCommandResult:      testutils.RunCommandResult{PID: 1, Exited: true},
+				RunCommandResult:      runtime.RunCommandResult{PID: 1, Exited: true},
 				RunCommandImmediately: true,
 			},
 		},
@@ -184,7 +185,7 @@ func TestProcessCSIMounts(t *testing.T) {
 
 func TestProcessCSIMounts_ReturnsDuration(t *testing.T) {
 	server := testutils.NewTestRuntimeServer(testutils.TestRuntimeServerOptions{
-		RunCommandResult:      testutils.RunCommandResult{PID: 1, Exited: true},
+		RunCommandResult:      runtime.RunCommandResult{PID: 1, Exited: true},
 		RunCommandImmediately: true,
 	})
 	defer server.Close()
@@ -209,7 +210,7 @@ func TestProcessCSIMounts_ConcurrencyLimit(t *testing.T) {
 	// Use a server with delay (RunCommandImmediately=false introduces ~500ms delay)
 	// to measure concurrency behavior through timing
 	server := testutils.NewTestRuntimeServer(testutils.TestRuntimeServerOptions{
-		RunCommandResult:      testutils.RunCommandResult{PID: 1, Exited: true},
+		RunCommandResult:      runtime.RunCommandResult{PID: 1, Exited: true},
 		RunCommandImmediately: false,
 	})
 	defer server.Close()
@@ -224,7 +225,7 @@ func TestProcessCSIMounts_ConcurrencyLimit(t *testing.T) {
 			Namespace: "default",
 			Annotations: map[string]string{
 				v1alpha1.AnnotationRuntimeURL:         server.URL,
-				v1alpha1.AnnotationRuntimeAccessToken: testutils.AccessToken,
+				v1alpha1.AnnotationRuntimeAccessToken: runtime.AccessToken,
 			},
 		},
 	}
@@ -268,7 +269,7 @@ func TestProcessCSIMounts_ConcurrencyTracking(t *testing.T) {
 	// and also verify concurrency indirectly via atomic counters in a goroutine-safe way.
 
 	server := testutils.NewTestRuntimeServer(testutils.TestRuntimeServerOptions{
-		RunCommandResult:      testutils.RunCommandResult{PID: 1, Exited: true},
+		RunCommandResult:      runtime.RunCommandResult{PID: 1, Exited: true},
 		RunCommandImmediately: false, // ~500ms delay per mount
 	})
 	defer server.Close()
@@ -283,7 +284,7 @@ func TestProcessCSIMounts_ConcurrencyTracking(t *testing.T) {
 			Namespace: "default",
 			Annotations: map[string]string{
 				v1alpha1.AnnotationRuntimeURL:         server.URL,
-				v1alpha1.AnnotationRuntimeAccessToken: testutils.AccessToken,
+				v1alpha1.AnnotationRuntimeAccessToken: runtime.AccessToken,
 			},
 		},
 	}, cache, clientSet)
@@ -325,7 +326,7 @@ func TestProcessCSIMounts_ConcurrencyTracking(t *testing.T) {
 func TestProcessCSIMounts_ErrorDoesNotBlockOthers(t *testing.T) {
 	// When one mount fails, the function should still complete (not hang)
 	server := testutils.NewTestRuntimeServer(testutils.TestRuntimeServerOptions{
-		RunCommandResult:      testutils.RunCommandResult{PID: 1, ExitCode: 1, Exited: true},
+		RunCommandResult:      runtime.RunCommandResult{PID: 1, ExitCode: 1, Exited: true},
 		RunCommandImmediately: true,
 	})
 	defer server.Close()
@@ -384,7 +385,7 @@ func TestProcessCSIMounts_NoRuntimeURL(t *testing.T) {
 func TestProcessCSIMounts_ContextCanceled(t *testing.T) {
 	// Verify that context cancellation is respected
 	server := testutils.NewTestRuntimeServer(testutils.TestRuntimeServerOptions{
-		RunCommandResult:      testutils.RunCommandResult{PID: 1, Exited: true},
+		RunCommandResult:      runtime.RunCommandResult{PID: 1, Exited: true},
 		RunCommandImmediately: false, // ~500ms delay
 	})
 	defer server.Close()
@@ -421,7 +422,7 @@ func TestProcessCSIMounts_ContextCanceled(t *testing.T) {
 func TestProcessCSIMounts_AllErrorsCollected(t *testing.T) {
 	// When multiple mounts fail, at least the first error should be returned
 	server := testutils.NewTestRuntimeServer(testutils.TestRuntimeServerOptions{
-		RunCommandResult:      testutils.RunCommandResult{PID: 1, ExitCode: 1, Exited: true},
+		RunCommandResult:      runtime.RunCommandResult{PID: 1, ExitCode: 1, Exited: true},
 		RunCommandImmediately: true,
 	})
 	defer server.Close()
@@ -446,7 +447,7 @@ func TestProcessCSIMounts_ConcurrencyOneIsSerial(t *testing.T) {
 	totalMounts := 3
 
 	server := testutils.NewTestRuntimeServer(testutils.TestRuntimeServerOptions{
-		RunCommandResult:      testutils.RunCommandResult{PID: 1, Exited: true},
+		RunCommandResult:      runtime.RunCommandResult{PID: 1, Exited: true},
 		RunCommandImmediately: false, // ~500ms delay
 	})
 	defer server.Close()

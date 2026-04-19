@@ -47,6 +47,10 @@ const (
 	// RuntimeConfigForInjectAgentRuntime is a valid value for RuntimeConfig.Name.
 	// When set, enables agent runtime sidecar injection for the sandbox.
 	RuntimeConfigForInjectAgentRuntime = "agent-runtime"
+
+	// SandboxAnnotationEnableInplaceUpdate 标记是否启用原地升级能力。
+	// 支持场景：sandbox claim 时启用 InplaceUpdate 能力，实现 cpu, memory, image 等资源的原地升级
+	SandboxAnnotationEnableInplaceUpdate = "sandbox.agents.kruise.io/enable-inplace-update"
 )
 
 type RuntimeConfig struct {
@@ -82,6 +86,14 @@ type SandboxSpec struct {
 	// PauseTime - Absolute time when the sandbox will be paused automatically.
 	// +kubebuilder:validation:Format="date-time"
 	PauseTime *metav1.Time `json:"pauseTime,omitempty"`
+
+	// Lifecycle defines lifecycle hooks for sandbox upgrade.
+	// +optional
+	Lifecycle *SandboxLifecycle `json:"lifecycle,omitempty"`
+
+	// UpgradePolicy defines the upgrade strategy for the sandbox.
+	// +optional
+	UpgradePolicy *SandboxUpgradePolicy `json:"upgradePolicy,omitempty"`
 
 	EmbeddedSandboxTemplate `json:",inline"`
 }
@@ -121,6 +133,51 @@ type SandboxTemplateRef struct {
 	// Default to v1
 	// +optional
 	APIVersion *string `json:"apiVersion,omitempty"`
+}
+
+// SandboxUpgradePolicyType is the type of sandbox update policy.
+type SandboxUpgradePolicyType string
+
+const (
+	// SandboxUpgradePolicyReCreate means sandbox will be updated by recreating the pod.
+	SandboxUpgradePolicyReCreate SandboxUpgradePolicyType = "ReCreate"
+)
+
+// SandboxUpdatePolicy defines the update strategy for the sandbox.
+type SandboxUpgradePolicy struct {
+	// Type specifies the update policy type.
+	// Supported values: ReCreate.
+	// +kubebuilder:validation:Enum=ReCreate
+	// +kubebuilder:default=ReCreate
+	// +optional
+	Type SandboxUpgradePolicyType `json:"type,omitempty"`
+}
+
+// SandboxLifecycle defines lifecycle hooks for sandbox upgrade.
+type SandboxLifecycle struct {
+	// PreUpgrade is the action executed before the upgrade.
+	// It is typically used to backup workspace data.
+	// +optional
+	PreUpgrade *UpgradeAction `json:"preUpgrade,omitempty"`
+
+	// PostUpgrade is the action executed after the upgrade.
+	// It is typically used to restore workspace data.
+	// +optional
+	PostUpgrade *UpgradeAction `json:"postUpgrade,omitempty"`
+}
+
+// UpgradeAction defines an action to execute during sandbox upgrade.
+// It supports multiple action types for extensibility.
+type UpgradeAction struct {
+	// Exec specifies a script-based action to execute inside the sandbox via envd.
+	// Script is the shell script content to execute.
+	// +kubebuilder:validation:Required
+	Script string `json:"script"`
+
+	// TimeoutSeconds is the timeout for the action execution in seconds.
+	// +kubebuilder:default=60
+	// +optional
+	TimeoutSeconds int32 `json:"timeoutSeconds,omitempty"`
 }
 
 const (
@@ -190,6 +247,8 @@ const (
 	SandboxPaused SandboxPhase = "Paused"
 	// SandboxResuming means the sandbox has entered the resume state
 	SandboxResuming SandboxPhase = "Resuming"
+	// SandboxUpgrading means the sandbox is being upgraded (recreate or inplace update).
+	SandboxUpgrading SandboxPhase = "Upgrading"
 	// SandboxSucceeded means that all containers in the pod have voluntarily terminated
 	// with a container exit code of 0, and the system is not going to restart any of these containers.
 	SandboxSucceeded SandboxPhase = "Succeeded"
@@ -231,18 +290,34 @@ const (
 
 	// SandboxConditionInplaceUpdate means inplace update state.
 	SandboxConditionInplaceUpdate SandboxConditionType = "InplaceUpdate"
+
+	// SandboxConditionUpgrading means upgrade state.
+	SandboxConditionUpgrading SandboxConditionType = "Upgrading"
+
+	// SandboxConditionUpgradeAction means the pre-upgrade,post-upgrade execution state.
+	SandboxConditionUpgradeAction SandboxConditionType = "UpgradeAction"
 )
 
 const (
 	// SandboxConditionReady Reason
 	SandboxReadyReasonPodReady             = "PodReady"
 	SandboxReadyReasonInplaceUpdating      = "InplaceUpdating"
+	SandboxReadyReasonUpgrading            = "Upgrading"
 	SandboxReadyReasonStartContainerFailed = "StartContainerFailed"
 
 	// SandboxConditionInplaceUpdate Reason
 	SandboxInplaceUpdateReasonInplaceUpdating = "InplaceUpdating"
 	SandboxInplaceUpdateReasonSucceeded       = "Succeeded"
 	SandboxInplaceUpdateReasonFailed          = "Failed"
+
+	// SandboxConditionUpgrading Reason
+	SandboxUpgradingReasonPreUpgrade        = "PreUpgrade"
+	SandboxUpgradingReasonUpgradePod        = "UpgradePod"
+	SandboxUpgradingReasonPostUpgrade       = "PostUpgrade"
+	SandboxUpgradingReasonPreUpgradeFailed  = "PreUpgradeFailed"
+	SandboxUpgradingReasonPostUpgradeFailed = "PostUpgradeFailed"
+	SandboxUpgradingReasonSucceeded         = "Succeeded"
+	SandboxUpgradingReasonUpgradePodFailed  = "UpgradePodFailed"
 
 	// SandboxConditionPaused Reason
 	SandboxPausedReasonSetPause  = "SetPause"
