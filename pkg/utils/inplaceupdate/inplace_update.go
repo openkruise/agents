@@ -106,6 +106,8 @@ type InPlaceUpdateOptions struct {
 	// OnProgress is called after each successful in-place sub-operation
 	// (e.g. metadata/image patch, resource resize).
 	OnProgress func()
+	// for future extensions of pod update behavior
+	ExtensionAnnotations map[string]string
 }
 
 type GeneratePatchBodyFunc func(opts InPlaceUpdateOptions) string
@@ -139,7 +141,7 @@ func (c *InPlaceUpdateControl) generateResizeSubresourceBody(opts InPlaceUpdateO
 }
 
 func DefaultGeneratePatchBodyFunc(opts InPlaceUpdateOptions) string {
-	box, pod, revision := opts.Box, opts.Pod, opts.Revision
+	box, pod, revision, extensionAnnotations := opts.Box, opts.Pod, opts.Revision, opts.ExtensionAnnotations
 	state := &InPlaceUpdateState{
 		Revision:              revision,
 		UpdateTimestamp:       metav1.Now(),
@@ -200,6 +202,9 @@ func DefaultGeneratePatchBodyFunc(opts InPlaceUpdateOptions) string {
 	annotationsPatch := map[string]string{}
 	if state.UpdateImages || state.UpdateResources {
 		annotationsPatch[PodAnnotationInPlaceUpdateStateKey] = utils.DumpJson(state)
+	}
+	for k, v := range extensionAnnotations {
+		annotationsPatch[k] = v
 	}
 
 	if len(labelsPatch) == 0 && len(annotationsPatch) == 0 && len(patchSpec.Containers) == 0 {

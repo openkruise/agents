@@ -1866,6 +1866,101 @@ func Test_checkPodResizeInfeasible(t *testing.T) {
 	}
 }
 
+func TestDefaultGeneratePatchBodyFunc_ExtensionAnnotations(t *testing.T) {
+	opts := InPlaceUpdateOptions{
+		Box: &agentsapiv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-sandbox",
+				Namespace: "default",
+			},
+			Spec: agentsapiv1alpha1.SandboxSpec{
+				EmbeddedSandboxTemplate: agentsapiv1alpha1.EmbeddedSandboxTemplate{
+					Template: &corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{
+									Name:  "container1",
+									Image: "nginx:1.20",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		Pod: &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-pod",
+				Namespace: "default",
+			},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  "container1",
+						Image: "nginx:latest",
+					},
+				},
+			},
+			Status: corev1.PodStatus{
+				ContainerStatuses: []corev1.ContainerStatus{
+					{
+						Name:    "container1",
+						ImageID: "nginx:latest@sha256:old",
+					},
+				},
+			},
+		},
+		Revision: "rev-ext",
+		ExtensionAnnotations: map[string]string{
+			"custom.annotation/key1": "value1",
+			"custom.annotation/key2": "value2",
+		},
+	}
+
+	patchBody := DefaultGeneratePatchBodyFunc(opts)
+	if patchBody == "" {
+		t.Fatalf("expected non-empty patch body for extension annotations")
+	}
+
+	var patch map[string]interface{}
+	if err := json.Unmarshal([]byte(patchBody), &patch); err != nil {
+		t.Fatalf("Failed to unmarshal patch body: %v", err)
+	}
+
+	metadata, ok := patch["metadata"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Patch body should have metadata")
+	}
+
+	annotations, ok := metadata["annotations"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Metadata should have annotations")
+	}
+
+	// Verify extension annotations are present
+	if annotations["custom.annotation/key1"] != "value1" {
+		t.Errorf("Expected extension annotation custom.annotation/key1=value1, got %v", annotations["custom.annotation/key1"])
+	}
+	if annotations["custom.annotation/key2"] != "value2" {
+		t.Errorf("Expected extension annotation custom.annotation/key2=value2, got %v", annotations["custom.annotation/key2"])
+	}
+
+	// Verify inplace update state annotation still exists
+	stateStr, ok := annotations[PodAnnotationInPlaceUpdateStateKey].(string)
+	if !ok {
+		t.Fatalf("Annotations should have inplace update state")
+	}
+
+	var state InPlaceUpdateState
+	if err := json.Unmarshal([]byte(stateStr), &state); err != nil {
+		t.Fatalf("Failed to unmarshal state: %v", err)
+	}
+
+	if state.Revision != "rev-ext" {
+		t.Errorf("Expected revision rev-ext, got %s", state.Revision)
+	}
+}
+
 func TestCheckResizeQoSChange(t *testing.T) {
 	tests := []struct {
 		name        string
