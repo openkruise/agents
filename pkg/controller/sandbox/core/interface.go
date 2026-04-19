@@ -20,7 +20,6 @@ import (
 	"context"
 	"time"
 
-	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -55,6 +54,9 @@ type SandboxControl interface {
 	// EnsureSandboxResumed handle sandbox with status phase = Resuming
 	EnsureSandboxResumed(ctx context.Context, args EnsureFuncArgs) error
 
+	// EnsureSandboxUpgraded handle sandbox with status phase = Upgrading
+	EnsureSandboxUpgraded(ctx context.Context, args EnsureFuncArgs) error
+
 	// EnsureSandboxTerminated handle sandbox with status phase = Terminating
 	EnsureSandboxTerminated(ctx context.Context, args EnsureFuncArgs) error
 }
@@ -69,5 +71,4 @@ func NewSandboxControl(c client.Client, recorder record.EventRecorder, rl *RateL
 type InPlaceUpdateHandler interface {
 	GetInPlaceUpdateControl() *inplaceupdate.InPlaceUpdateControl
 	GetRecorder() record.EventRecorder
-	GetLogger(ctx context.Context, box *agentsv1alpha1.Sandbox) logr.Logger
 }

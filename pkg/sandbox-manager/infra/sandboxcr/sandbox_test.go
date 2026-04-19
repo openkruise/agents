@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
+	"github.com/openkruise/agents/pkg/utils/runtime"
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -704,7 +705,7 @@ func TestSandbox_GetRoute(t *testing.T) {
 func TestSandbox_CSIMount(t *testing.T) {
 	tests := []struct {
 		name         string
-		result       testutils.RunCommandResult
+		result       runtime.RunCommandResult
 		processError *string
 		driver       string
 		req          *csi.NodePublishVolumeRequest
@@ -712,7 +713,7 @@ func TestSandbox_CSIMount(t *testing.T) {
 	}{
 		{
 			name: "successful csi mount",
-			result: testutils.RunCommandResult{
+			result: runtime.RunCommandResult{
 				ExitCode: 0,
 				Exited:   true,
 			},
@@ -723,7 +724,7 @@ func TestSandbox_CSIMount(t *testing.T) {
 		},
 		{
 			name: "exits non-zero",
-			result: testutils.RunCommandResult{
+			result: runtime.RunCommandResult{
 				ExitCode: 1,
 				Exited:   true,
 			},
@@ -735,7 +736,7 @@ func TestSandbox_CSIMount(t *testing.T) {
 		},
 		{
 			name: "with process error",
-			result: testutils.RunCommandResult{
+			result: runtime.RunCommandResult{
 				ExitCode: 0,
 				Exited:   true,
 			},
@@ -764,7 +765,7 @@ func TestSandbox_CSIMount(t *testing.T) {
 					Name: "test-sandbox",
 					Annotations: map[string]string{
 						v1alpha1.AnnotationRuntimeURL:         server.URL,
-						v1alpha1.AnnotationRuntimeAccessToken: testutils.AccessToken,
+						v1alpha1.AnnotationRuntimeAccessToken: runtime.AccessToken,
 					},
 				},
 			}

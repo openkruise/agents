@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/openkruise/agents/pkg/utils/runtime"
 	"k8s.io/klog/v2"
 
 	"github.com/openkruise/agents/pkg/servers/web"
@@ -14,19 +15,8 @@ import (
 	"github.com/openkruise/agents/proto/envd/process/processconnect"
 )
 
-var AccessToken = "access-token"
-
-type RunCommandResult struct {
-	PID      uint32
-	Stdout   []string
-	Stderr   []string
-	ExitCode int32
-	Exited   bool
-	Error    error
-}
-
 type TestRuntimeServerOptions struct {
-	RunCommandResult      RunCommandResult
+	RunCommandResult      runtime.RunCommandResult
 	RunCommandImmediately bool
 	RunCommandError       *string
 	InitErrCode           int
@@ -125,7 +115,7 @@ func (s *TestProcessService) Connect(context.Context, *connect.Request[process.C
 }
 
 func (s *TestProcessService) Start(_ context.Context, req *connect.Request[process.StartRequest], stream *connect.ServerStream[process.StartResponse]) error {
-	if req.Header().Get("X-Access-Token") != AccessToken {
+	if req.Header().Get("X-Access-Token") != runtime.AccessToken {
 		return connect.NewError(connect.CodeUnauthenticated, nil)
 	}
 	start := time.Now()

@@ -1,4 +1,17 @@
-package sandboxcr
+/*
+Copyright 2026.
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+    http://www.apache.org/licenses/LICENSE-2.0
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package runtime
 
 import (
 	"context"
@@ -8,46 +21,64 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
-	"k8s.io/klog/v2"
-
-	"github.com/openkruise/agents/api/v1alpha1"
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
+	"github.com/openkruise/agents/pkg/utils/sandboxutils"
 	"github.com/openkruise/agents/proto/envd/process"
 	"github.com/openkruise/agents/proto/envd/process/processconnect"
-	"github.com/openkruise/agents/test/utils"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/klog/v2"
 )
 
-func (s *Sandbox) GetRuntimeURL() string {
+var AccessToken = "access-token"
+
+func GetRuntimeURL(sbx *agentsv1alpha1.Sandbox) string {
 	// firstly, get runtime url from the annotation
-	url := s.GetAnnotations()[v1alpha1.AnnotationRuntimeURL]
+	url := sbx.GetAnnotations()[agentsv1alpha1.AnnotationRuntimeURL]
 	if url == "" {
-		url = s.GetAnnotations()[v1alpha1.AnnotationEnvdURL] // legacy
+		url = sbx.GetAnnotations()[agentsv1alpha1.AnnotationEnvdURL] // legacy
 	}
 	if url != "" {
 		return url
 	}
 	// secondly, calculate runtime url from the route
-	route := s.GetRoute()
+	route := sandboxutils.GetRouteFromSandbox(sbx)
 	if route.IP == "" {
 		return ""
 	}
 	return fmt.Sprintf("http://%s:%d", route.IP, consts.RuntimePort)
 }
 
-func (s *Sandbox) GetAccessToken() string {
-	token := s.Annotations[v1alpha1.AnnotationRuntimeAccessToken]
+func GetAccessToken(sbx metav1.Object) string {
+	token := sbx.GetAnnotations()[agentsv1alpha1.AnnotationRuntimeAccessToken]
 	if token == "" {
-		token = s.Annotations[v1alpha1.AnnotationEnvdAccessToken] // legacy
+		token = sbx.GetAnnotations()[agentsv1alpha1.AnnotationEnvdAccessToken] // legacy
 	}
 	return token
 }
 
-// runCommandWithRuntime is a solution to run command inside the sandbox.
-func (s *Sandbox) runCommandWithRuntime(ctx context.Context, processConfig *process.ProcessConfig, timeout time.Duration) (utils.RunCommandResult, error) {
-	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(s.Sandbox)).V(consts.DebugLogLevel)
-	url := s.GetRuntimeURL()
+type RunCommandResult struct {
+	PID      uint32
+	Stdout   []string
+	Stderr   []string
+	ExitCode int32
+	Exited   bool
+	Error    error
+}
+
+type RunCmdFuncArgs struct {
+	Sbx           *agentsv1alpha1.Sandbox
+	ProcessConfig *process.ProcessConfig
+	Timeout       time.Duration
+}
+
+// sidecar runtime 提供的 run command 能力
+func RunCommandWithRuntime(ctx context.Context, args RunCmdFuncArgs) (RunCommandResult, error) {
+	sbx, processConfig, timeout := args.Sbx, args.ProcessConfig, args.Timeout
+	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx)).V(consts.DebugLogLevel)
+	url := GetRuntimeURL(sbx)
 	if url == "" {
-		return utils.RunCommandResult{}, fmt.Errorf("runtime url not found on sandbox")
+		return RunCommandResult{}, fmt.Errorf("runtime url not found on sandbox")
 	}
 	client := processconnect.NewProcessClient(
 		http.DefaultClient,
@@ -58,7 +89,7 @@ func (s *Sandbox) runCommandWithRuntime(ctx context.Context, processConfig *proc
 	ctxWithTimeout, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	clientContext, callInfo := connect.NewClientContext(ctxWithTimeout)
-	callInfo.RequestHeader().Set("X-Access-Token", s.GetAccessToken())
+	callInfo.RequestHeader().Set("X-Access-Token", GetAccessToken(sbx))
 	callInfo.RequestHeader().Set("Authorization", "Basic cm9vdDo=") // Basic root:
 
 	req := connect.NewRequest(&process.StartRequest{
@@ -69,7 +100,7 @@ func (s *Sandbox) runCommandWithRuntime(ctx context.Context, processConfig *proc
 	})
 	stream, err := client.Start(clientContext, req)
 	if err != nil {
-		return utils.RunCommandResult{}, err
+		return RunCommandResult{}, err
 	}
 	defer func() {
 		if err := stream.Close(); err != nil {
@@ -79,7 +110,7 @@ func (s *Sandbox) runCommandWithRuntime(ctx context.Context, processConfig *proc
 		}
 	}()
 
-	var result utils.RunCommandResult
+	var result RunCommandResult
 	start := time.Now()
 	log.Info("receiving messages", "timeout", timeout)
 	for stream.Receive() {

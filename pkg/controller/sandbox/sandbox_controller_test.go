@@ -27,16 +27,19 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/controller/sandbox/core"
 	"github.com/openkruise/agents/pkg/utils"
+	"github.com/openkruise/agents/pkg/utils/expectations"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 )
 
@@ -1697,6 +1700,17 @@ func TestCalculateStatus(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// Ensure pod has matching template hash to avoid false upgrade trigger
+			if tt.pod != nil && tt.initStatus != nil && tt.initStatus.Phase == agentsv1alpha1.SandboxRunning {
+				hash, _ := core.HashSandbox(tt.box)
+				if tt.pod.Labels == nil {
+					tt.pod.Labels = map[string]string{}
+				}
+				if _, exists := tt.pod.Labels[agentsv1alpha1.PodLabelTemplateHash]; !exists {
+					tt.pod.Labels[agentsv1alpha1.PodLabelTemplateHash] = hash
+				}
+			}
+
 			args := core.EnsureFuncArgs{
 				Pod:       tt.pod,
 				Box:       tt.box,
@@ -2413,6 +2427,9 @@ func TestSandboxReconciler_Reconcile_RateLimitFeatureGate(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "high-priority-ready",
 					Namespace: "default",
+					Labels: map[string]string{
+						agentsv1alpha1.PodLabelTemplateHash: "d568cdw42",
+					},
 				},
 				Status: corev1.PodStatus{Phase: corev1.PodRunning},
 			},
@@ -2475,5 +2492,677 @@ func TestSandboxReconciler_Reconcile_RateLimitFeatureGate(t *testing.T) {
 				t.Errorf("expected RequeueAfter == 0, got %v", result.RequeueAfter)
 			}
 		})
+	}
+}
+
+// TestReconcile_SandboxNotFoundCleanup tests the path where sandbox does not exist (L109-117).
+func TestReconcile_SandboxNotFoundCleanup(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	fakeRecorder := record.NewFakeRecorder(100)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&agentsv1alpha1.Sandbox{}).Build()
+	rl := core.NewRateLimiter()
+	reconciler := &SandboxReconciler{
+		Client:      fakeClient,
+		Scheme:      scheme,
+		controls:    core.NewSandboxControl(fakeClient, fakeRecorder, rl),
+		rateLimiter: rl,
+	}
+
+	// Set up expectations for a sandbox that will not be found
+	box := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "gone-sandbox",
+			Namespace: "default",
+		},
+	}
+	core.ScaleExpectation.ExpectScale(utils.GetControllerKey(box), expectations.Create, "some-pod")
+
+	req := ctrl.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      "gone-sandbox",
+			Namespace: "default",
+		},
+	}
+
+	// Sandbox does not exist in the fake client
+	result, err := reconciler.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Errorf("Reconcile() unexpected error: %v", err)
+	}
+	if result.Requeue || result.RequeueAfter > 0 {
+		t.Errorf("Expected no requeue, got requeue=%v, requeueAfter=%v", result.Requeue, result.RequeueAfter)
+	}
+
+	// Verify expectations were cleaned up
+	isSatisfied, _, _ := core.ScaleExpectation.SatisfiedExpectations(utils.GetControllerKey(box))
+	if !isSatisfied {
+		t.Errorf("Expected ScaleExpectation to be cleaned up after sandbox not found")
+	}
+}
+
+// TestReconcile_ScaleExpectationUnsatisfied tests the path where ScaleExpectation is not satisfied (L136-142).
+func TestReconcile_ScaleExpectationUnsatisfied(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	sandbox := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "scale-exp-sandbox",
+			Namespace: "default",
+		},
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test", Image: "nginx"}},
+					},
+				},
+			},
+		},
+	}
+
+	fakeRecorder := record.NewFakeRecorder(100)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&agentsv1alpha1.Sandbox{}).WithObjects(sandbox).Build()
+	rl := core.NewRateLimiter()
+	reconciler := &SandboxReconciler{
+		Client:      fakeClient,
+		Scheme:      scheme,
+		controls:    core.NewSandboxControl(fakeClient, fakeRecorder, rl),
+		rateLimiter: rl,
+	}
+
+	// Set up unsatisfied ScaleExpectation (expect a pod that won't be observed)
+	core.ScaleExpectation.ExpectScale(utils.GetControllerKey(sandbox), expectations.Create, "expected-pod-never-seen")
+
+	req := ctrl.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      sandbox.Name,
+			Namespace: sandbox.Namespace,
+		},
+	}
+
+	result, err := reconciler.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Errorf("Reconcile() unexpected error: %v", err)
+	}
+	// Should requeue with a duration because expectation is not satisfied
+	if result.RequeueAfter <= 0 {
+		t.Errorf("Expected RequeueAfter > 0 for unsatisfied ScaleExpectation, got %v", result.RequeueAfter)
+	}
+
+	// Clean up
+	core.ScaleExpectation.DeleteExpectations(utils.GetControllerKey(sandbox))
+}
+
+// TestReconcile_ResourceVersionExpectationUnsatisfied tests the path where ResourceVersionExpectation is not satisfied (L146-152).
+func TestReconcile_ResourceVersionExpectationUnsatisfied(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	sandboxUID := types.UID("rv-exp-uid-12345")
+	sandbox := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "rv-exp-sandbox",
+			Namespace: "default",
+			UID:       sandboxUID,
+		},
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test", Image: "nginx"}},
+					},
+				},
+			},
+		},
+	}
+
+	fakeRecorder := record.NewFakeRecorder(100)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&agentsv1alpha1.Sandbox{}).WithObjects(sandbox).Build()
+	rl := core.NewRateLimiter()
+	reconciler := &SandboxReconciler{
+		Client:      fakeClient,
+		Scheme:      scheme,
+		controls:    core.NewSandboxControl(fakeClient, fakeRecorder, rl),
+		rateLimiter: rl,
+	}
+
+	// Create a fake object with the same UID but a much higher resource version
+	fakeObj := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "rv-exp-sandbox",
+			Namespace:       "default",
+			UID:             sandboxUID,
+			ResourceVersion: "999999",
+		},
+	}
+	core.ResourceVersionExpectations.Expect(fakeObj)
+
+	req := ctrl.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      sandbox.Name,
+			Namespace: sandbox.Namespace,
+		},
+	}
+
+	result, err := reconciler.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Errorf("Reconcile() unexpected error: %v", err)
+	}
+	// Should requeue with a duration because ResourceVersion expectation is not satisfied
+	if result.RequeueAfter <= 0 {
+		t.Errorf("Expected RequeueAfter > 0 for unsatisfied ResourceVersionExpectation, got %v", result.RequeueAfter)
+	}
+
+	// Clean up
+	core.ResourceVersionExpectations.Delete(fakeObj)
+}
+
+// TestReconcile_UpgradingPhase tests the Upgrading phase switch case (L233-234).
+func TestReconcile_UpgradingPhase(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	sandbox := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "upgrading-sandbox",
+			Namespace:  "default",
+			Finalizers: []string{utils.SandboxFinalizer},
+		},
+		Spec: agentsv1alpha1.SandboxSpec{
+			UpgradePolicy: &agentsv1alpha1.SandboxUpgradePolicy{
+				Type: agentsv1alpha1.SandboxUpgradePolicyRecreate,
+			},
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test", Image: "nginx:v2"}},
+					},
+				},
+			},
+		},
+		Status: agentsv1alpha1.SandboxStatus{
+			Phase: agentsv1alpha1.SandboxRunning,
+		},
+	}
+
+	// Pod with mismatched hash to trigger upgrade
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "upgrading-sandbox",
+			Namespace: "default",
+			Labels: map[string]string{
+				agentsv1alpha1.PodLabelTemplateHash: "old-hash",
+			},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+		},
+	}
+
+	fakeRecorder := record.NewFakeRecorder(100)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&agentsv1alpha1.Sandbox{}).WithObjects(sandbox, pod).Build()
+	rl := core.NewRateLimiter()
+	reconciler := &SandboxReconciler{
+		Client:      fakeClient,
+		Scheme:      scheme,
+		controls:    core.NewSandboxControl(fakeClient, fakeRecorder, rl),
+		rateLimiter: rl,
+	}
+
+	req := ctrl.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      sandbox.Name,
+			Namespace: sandbox.Namespace,
+		},
+	}
+
+	_, err := reconciler.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Errorf("Reconcile() unexpected error: %v", err)
+	}
+
+	// Verify the sandbox transitioned to Upgrading
+	updatedSandbox := &agentsv1alpha1.Sandbox{}
+	err = fakeClient.Get(context.Background(), req.NamespacedName, updatedSandbox)
+	if err != nil {
+		t.Fatalf("Failed to get updated sandbox: %v", err)
+	}
+	if updatedSandbox.Status.Phase != agentsv1alpha1.SandboxUpgrading {
+		t.Errorf("Expected phase Upgrading, got %v", updatedSandbox.Status.Phase)
+	}
+}
+
+// TestEnsureVolumeClaimTemplates_SetControllerReferenceError tests the SetControllerReference error path.
+func TestEnsureVolumeClaimTemplates_SetControllerReferenceError(t *testing.T) {
+	// Use a scheme that does NOT include agentsv1alpha1 so SetControllerReference fails
+	incompleteScheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(incompleteScheme)
+
+	// We need to use a full scheme for the fake client to accept the sandbox
+	fullScheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(fullScheme)
+	_ = agentsv1alpha1.AddToScheme(fullScheme)
+
+	sandbox := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "ctrl-ref-sandbox",
+			Namespace: "default",
+		},
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test", Image: "nginx"}},
+					},
+				},
+				VolumeClaimTemplates: []corev1.PersistentVolumeClaim{
+					{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: "data",
+						},
+						Spec: corev1.PersistentVolumeClaimSpec{
+							AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+							Resources: corev1.VolumeResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceStorage: resource.MustParse("1Gi"),
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	// Use full scheme for the fake client but incomplete scheme for the reconciler
+	fakeClient := fake.NewClientBuilder().WithScheme(fullScheme).WithObjects(sandbox).Build()
+
+	reconciler := &SandboxReconciler{
+		Client: fakeClient,
+		Scheme: incompleteScheme, // This will cause SetControllerReference to fail
+	}
+
+	err := reconciler.ensureVolumeClaimTemplates(context.Background(), sandbox)
+	if err == nil {
+		t.Errorf("Expected error from SetControllerReference, got nil")
+	}
+}
+
+func TestEnsureVolumeClaimTemplates_GetPVCError(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	sandbox := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-sandbox",
+			Namespace: "default",
+		},
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test", Image: "nginx"}},
+					},
+				},
+				VolumeClaimTemplates: []corev1.PersistentVolumeClaim{
+					{
+						ObjectMeta: metav1.ObjectMeta{Name: "data"},
+						Spec: corev1.PersistentVolumeClaimSpec{
+							AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+							Resources: corev1.VolumeResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceStorage: resource.MustParse("1Gi"),
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(sandbox).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if _, ok := obj.(*corev1.PersistentVolumeClaim); ok {
+					return fmt.Errorf("simulated get error")
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+		}).
+		Build()
+
+	reconciler := &SandboxReconciler{
+		Client: fakeClient,
+		Scheme: scheme,
+	}
+
+	err := reconciler.ensureVolumeClaimTemplates(context.Background(), sandbox)
+	if err == nil {
+		t.Error("Expected error from Get PVC, got nil")
+	}
+}
+
+func TestEnsureVolumeClaimTemplates_CreatePVCError(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	sandbox := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-sandbox",
+			Namespace: "default",
+		},
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test", Image: "nginx"}},
+					},
+				},
+				VolumeClaimTemplates: []corev1.PersistentVolumeClaim{
+					{
+						ObjectMeta: metav1.ObjectMeta{Name: "data"},
+						Spec: corev1.PersistentVolumeClaimSpec{
+							AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+							Resources: corev1.VolumeResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceStorage: resource.MustParse("1Gi"),
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(sandbox).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				if _, ok := obj.(*corev1.PersistentVolumeClaim); ok {
+					return fmt.Errorf("simulated create error")
+				}
+				return c.Create(ctx, obj, opts...)
+			},
+		}).
+		Build()
+
+	reconciler := &SandboxReconciler{
+		Client: fakeClient,
+		Scheme: scheme,
+	}
+
+	err := reconciler.ensureVolumeClaimTemplates(context.Background(), sandbox)
+	if err == nil {
+		t.Error("Expected error from Create PVC, got nil")
+	}
+}
+
+func TestEnsureVolumeClaimTemplates_CreateAlreadyExists(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	sandbox := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-sandbox",
+			Namespace: "default",
+		},
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test", Image: "nginx"}},
+					},
+				},
+				VolumeClaimTemplates: []corev1.PersistentVolumeClaim{
+					{
+						ObjectMeta: metav1.ObjectMeta{Name: "data"},
+						Spec: corev1.PersistentVolumeClaimSpec{
+							AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+							Resources: corev1.VolumeResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceStorage: resource.MustParse("1Gi"),
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(sandbox).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				if _, ok := obj.(*corev1.PersistentVolumeClaim); ok {
+					return apierrors.NewAlreadyExists(schema.GroupResource{Resource: "persistentvolumeclaims"}, obj.GetName())
+				}
+				return c.Create(ctx, obj, opts...)
+			},
+		}).
+		Build()
+
+	reconciler := &SandboxReconciler{
+		Client: fakeClient,
+		Scheme: scheme,
+	}
+
+	err := reconciler.ensureVolumeClaimTemplates(context.Background(), sandbox)
+	if err != nil {
+		t.Errorf("Expected no error for AlreadyExists on Create, got: %v", err)
+	}
+}
+
+func TestAddSandboxFinalizerAndHash_PatchError(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	sandbox := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-sandbox",
+			Namespace: "default",
+		},
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test", Image: "nginx"}},
+					},
+				},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(sandbox).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				return fmt.Errorf("simulated patch error")
+			},
+		}).
+		Build()
+
+	reconciler := &SandboxReconciler{
+		Client: fakeClient,
+		Scheme: scheme,
+	}
+
+	result, err := reconciler.addSandboxFinalizerAndHash(context.Background(), sandbox)
+	if err == nil {
+		t.Error("Expected error from Patch, got nil")
+	}
+	if result != nil {
+		t.Error("Expected nil result on error")
+	}
+}
+
+func TestUpdateSandboxStatus_PatchError(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	sandbox := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-sandbox",
+			Namespace: "default",
+		},
+		Status: agentsv1alpha1.SandboxStatus{
+			Phase: agentsv1alpha1.SandboxPending,
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(sandbox).
+		WithStatusSubresource(&agentsv1alpha1.Sandbox{}).
+		WithInterceptorFuncs(interceptor.Funcs{
+			SubResourcePatch: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+				return fmt.Errorf("simulated status patch error")
+			},
+		}).
+		Build()
+
+	reconciler := &SandboxReconciler{
+		Client: fakeClient,
+		Scheme: scheme,
+	}
+
+	newStatus := agentsv1alpha1.SandboxStatus{
+		Phase: agentsv1alpha1.SandboxRunning,
+	}
+
+	err := reconciler.updateSandboxStatus(context.Background(), newStatus, sandbox)
+	if err == nil {
+		t.Error("Expected error from Status Patch, got nil")
+	}
+}
+
+func TestUpdateSandboxStatus_Upgrading_RevisionChanged_ResetsToPreUpgrade(t *testing.T) {
+	box := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test-sandbox",
+			Namespace:  "default",
+			Generation: 1,
+		},
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test", Image: "nginx"}},
+					},
+				},
+			},
+		},
+		Status: agentsv1alpha1.SandboxStatus{
+			UpdateRevision: "old-revision",
+		},
+	}
+
+	initStatus := &agentsv1alpha1.SandboxStatus{
+		Phase: agentsv1alpha1.SandboxUpgrading,
+		Conditions: []metav1.Condition{
+			{
+				Type:               string(agentsv1alpha1.SandboxConditionUpgrading),
+				Status:             metav1.ConditionFalse,
+				Reason:             agentsv1alpha1.SandboxUpgradingReasonUpgradePod,
+				Message:            "upgrading pod",
+				LastTransitionTime: metav1.Now(),
+			},
+		},
+	}
+
+	args := core.EnsureFuncArgs{
+		Pod:       nil,
+		Box:       box,
+		NewStatus: initStatus,
+	}
+
+	newStatus, _ := calculateStatus(args)
+
+	// The computed hash from box.Spec should differ from "old-revision",
+	// so the upgrade lifecycle should be reset to PreUpgrade.
+	upgradeCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
+	if upgradeCond == nil {
+		t.Fatal("Expected Upgrading condition to exist")
+	}
+	if upgradeCond.Reason != agentsv1alpha1.SandboxUpgradingReasonPreUpgrade {
+		t.Errorf("Expected Reason %s, got %s", agentsv1alpha1.SandboxUpgradingReasonPreUpgrade, upgradeCond.Reason)
+	}
+	if upgradeCond.Message != "" {
+		t.Errorf("Expected Message to be empty, got %q", upgradeCond.Message)
+	}
+}
+
+func TestUpdateSandboxStatus_Upgrading_RevisionUnchanged_NoReset(t *testing.T) {
+	box := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test-sandbox",
+			Namespace:  "default",
+			Generation: 1,
+		},
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test", Image: "nginx"}},
+					},
+				},
+			},
+		},
+	}
+
+	// Set box.Status.UpdateRevision to the same hash that calculateStatus will compute
+	hash, _ := core.HashSandbox(box)
+	box.Status.UpdateRevision = hash
+
+	initStatus := &agentsv1alpha1.SandboxStatus{
+		Phase: agentsv1alpha1.SandboxUpgrading,
+		Conditions: []metav1.Condition{
+			{
+				Type:               string(agentsv1alpha1.SandboxConditionUpgrading),
+				Status:             metav1.ConditionFalse,
+				Reason:             agentsv1alpha1.SandboxUpgradingReasonUpgradePod,
+				Message:            "upgrading pod",
+				LastTransitionTime: metav1.Now(),
+			},
+		},
+	}
+
+	args := core.EnsureFuncArgs{
+		Pod:       nil,
+		Box:       box,
+		NewStatus: initStatus,
+	}
+
+	newStatus, _ := calculateStatus(args)
+
+	// Revision unchanged, so the condition should NOT be reset
+	upgradeCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
+	if upgradeCond == nil {
+		t.Fatal("Expected Upgrading condition to exist")
+	}
+	if upgradeCond.Reason != agentsv1alpha1.SandboxUpgradingReasonUpgradePod {
+		t.Errorf("Expected Reason %s, got %s", agentsv1alpha1.SandboxUpgradingReasonUpgradePod, upgradeCond.Reason)
+	}
+	if upgradeCond.Message != "upgrading pod" {
+		t.Errorf("Expected Message %q, got %q", "upgrading pod", upgradeCond.Message)
 	}
 }

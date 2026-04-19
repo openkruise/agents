@@ -20,6 +20,8 @@ import (
 	"context"
 	"reflect"
 
+	"github.com/openkruise/agents/pkg/controller/sandbox/core"
+	"github.com/openkruise/agents/pkg/utils/expectations"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/util/workqueue"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -50,6 +52,9 @@ func (e *SandboxPodEventHandler) Update(_ context.Context, evt event.TypedUpdate
 	}
 	oldObj := evt.ObjectOld.(*corev1.Pod)
 	newObj := evt.ObjectNew.(*corev1.Pod)
+	if oldObj.DeletionTimestamp.IsZero() && !newObj.DeletionTimestamp.IsZero() {
+		core.ScaleExpectation.ObserveScale(utils.GetControllerKey(newObj), expectations.Delete, newObj.GetName())
+	}
 	if isActivePodUpdate(oldObj, newObj) {
 		w.Add(reconcile.Request{NamespacedName: client.ObjectKeyFromObject(evt.ObjectNew)})
 	}
@@ -59,6 +64,7 @@ func (e *SandboxPodEventHandler) Delete(_ context.Context, evt event.TypedDelete
 	if !isAgentPod(evt.Object) {
 		return
 	}
+	core.ScaleExpectation.ObserveScale(utils.GetControllerKey(evt.Object), expectations.Delete, evt.Object.GetName())
 	w.Add(reconcile.Request{NamespacedName: client.ObjectKeyFromObject(evt.Object)})
 }
 

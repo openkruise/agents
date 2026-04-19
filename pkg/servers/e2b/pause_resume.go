@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/openkruise/agents/pkg/utils/runtime"
 	"k8s.io/klog/v2"
 
 	"github.com/openkruise/agents/api/v1alpha1"
@@ -149,6 +150,6 @@ func (sc *Controller) ConnectSandbox(r *http.Request) (web.ApiResponse[*models.S
 	}
 	return web.ApiResponse[*models.Sandbox]{
 		Code: statusCode,
-		Body: sc.convertToE2BSandbox(sbx, sbx.GetAccessToken()),
+		Body: sc.convertToE2BSandbox(sbx, runtime.GetAccessToken(sbx)),
 	}, apiErr
 }

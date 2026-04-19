@@ -9,7 +9,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
@@ -52,7 +51,6 @@ func (h *PodValidatingHandler) Handle(ctx context.Context, req admission.Request
 		}
 
 	case admissionv1.Create:
-		klog.Infof("req.SubResource %s", req.SubResource)
 		// Only handle eviction subresource
 		if req.SubResource != subResourceEviction {
 			return admission.Allowed("")
@@ -68,28 +66,23 @@ func (h *PodValidatingHandler) Handle(ctx context.Context, req admission.Request
 			Namespace: req.Namespace,
 			Name:      req.Name,
 		}
-		klog.Infof("req.SubResource %s pod %s", req.SubResource, pod.Name)
 		if err = h.Client.Get(ctx, podKey, pod); err != nil {
 			// If pod not found, allow eviction
 			return admission.Allowed("")
 		}
-		klog.Infof("req.SubResource %s pod %s", req.SubResource, pod.Name)
 	default:
 		// Allow other operations
 		return admission.Allowed("")
 	}
-	klog.Infof("req.SubResource %s pod %s", req.SubResource, pod.Name)
 	// If pod is already being deleted, allow
 	if !pod.DeletionTimestamp.IsZero() {
 		return admission.Allowed("")
 	}
-	klog.Infof("req.SubResource %s pod %s", req.SubResource, pod.Name)
 	// Check if this pod was created by sandbox controller
 	if pod.Labels[utils.PodLabelCreatedBy] != utils.CreatedBySandbox {
 		// Not created by sandbox, allow deletion/eviction
 		return admission.Allowed("")
 	}
-	klog.Infof("req.SubResource %s pod %s", req.SubResource, pod.Name)
 	// Find the owner reference to sandbox
 	var sandboxOwner *types.UID
 	for _, ownerRef := range pod.OwnerReferences {
@@ -98,24 +91,20 @@ func (h *PodValidatingHandler) Handle(ctx context.Context, req admission.Request
 			break
 		}
 	}
-	klog.Infof("req.SubResource %s pod %s", req.SubResource, pod.Name)
 	if sandboxOwner == nil {
 		// No sandbox owner reference found, allow deletion/eviction
 		return admission.Allowed("")
 	}
-	klog.Infof("req.SubResource %s pod %s", req.SubResource, pod.Name)
 	// Check if the sandbox exists and is not being deleted
 	sandbox := &agentsv1alpha1.Sandbox{}
 	sandboxKey := types.NamespacedName{
 		Namespace: pod.Namespace,
 		Name:      pod.Name,
 	}
-	klog.Infof("req.SubResource %s pod %s", req.SubResource, pod.Name)
 	if err = h.Client.Get(ctx, sandboxKey, sandbox); err != nil {
 		// Sandbox not found, allow deletion/eviction
 		return admission.Allowed("")
 	}
-	klog.Infof("req.SubResource %s pod %s", req.SubResource, pod.Name)
 	if sandbox.DeletionTimestamp.IsZero() {
 		// Sandbox exists and is not being deleted, deny pod deletion/eviction
 		return admission.Denied(fmt.Sprintf(
@@ -124,6 +113,5 @@ func (h *PodValidatingHandler) Handle(ctx context.Context, req admission.Request
 			pod.Namespace, pod.Name,
 		))
 	}
-	klog.Infof("req.SubResource %s pod %s", req.SubResource, pod.Name)
 	return admission.Allowed("")
 }

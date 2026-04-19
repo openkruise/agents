@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/openkruise/agents/pkg/utils/runtime"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/time/rate"
@@ -202,7 +203,7 @@ func TestCloneSandbox(t *testing.T) {
 				WaitReadyTimeout: 30 * time.Second,
 			},
 			serverOpts: testutils.TestRuntimeServerOptions{
-				RunCommandResult: testutils.RunCommandResult{
+				RunCommandResult: runtime.RunCommandResult{
 					PID:    1,
 					Exited: true,
 				},
@@ -235,7 +236,7 @@ func TestCloneSandbox(t *testing.T) {
 				},
 			},
 			serverOpts: testutils.TestRuntimeServerOptions{
-				RunCommandResult: testutils.RunCommandResult{
+				RunCommandResult: runtime.RunCommandResult{
 					PID:    1,
 					Exited: true,
 				},
@@ -262,7 +263,7 @@ func TestCloneSandbox(t *testing.T) {
 				},
 			},
 			serverOpts: testutils.TestRuntimeServerOptions{
-				RunCommandResult: testutils.RunCommandResult{
+				RunCommandResult: runtime.RunCommandResult{
 					PID:    1,
 					Exited: true,
 				},
@@ -292,7 +293,7 @@ func TestCloneSandbox(t *testing.T) {
 				},
 			},
 			serverOpts: testutils.TestRuntimeServerOptions{
-				RunCommandResult: testutils.RunCommandResult{
+				RunCommandResult: runtime.RunCommandResult{
 					PID:    1,
 					Exited: true,
 				},
@@ -322,7 +323,7 @@ func TestCloneSandbox(t *testing.T) {
 				},
 			},
 			serverOpts: testutils.TestRuntimeServerOptions{
-				RunCommandResult: testutils.RunCommandResult{
+				RunCommandResult: runtime.RunCommandResult{
 					PID:    1,
 					Exited: true,
 				},
@@ -340,7 +341,7 @@ func TestCloneSandbox(t *testing.T) {
 				WaitReadyTimeout: 30 * time.Second,
 			},
 			serverOpts: testutils.TestRuntimeServerOptions{
-				RunCommandResult: testutils.RunCommandResult{
+				RunCommandResult: runtime.RunCommandResult{
 					PID:    1,
 					Exited: true,
 				},
@@ -356,7 +357,7 @@ func TestCloneSandbox(t *testing.T) {
 				WaitReadyTimeout: 30 * time.Second,
 			},
 			serverOpts: testutils.TestRuntimeServerOptions{
-				RunCommandResult: testutils.RunCommandResult{
+				RunCommandResult: runtime.RunCommandResult{
 					PID:    1,
 					Exited: true,
 				},
@@ -392,7 +393,7 @@ func TestCloneSandbox(t *testing.T) {
 				WaitReadyTimeout: 30 * time.Second,
 			},
 			serverOpts: testutils.TestRuntimeServerOptions{
-				RunCommandResult: testutils.RunCommandResult{
+				RunCommandResult: runtime.RunCommandResult{
 					PID:    1,
 					Exited: true,
 				},
@@ -438,14 +439,14 @@ func TestCloneSandbox(t *testing.T) {
 				},
 			},
 			serverOpts: testutils.TestRuntimeServerOptions{
-				RunCommandResult: testutils.RunCommandResult{
+				RunCommandResult: runtime.RunCommandResult{
 					PID:      1,
 					ExitCode: 0,
 					Exited:   true,
 				},
 				RunCommandImmediately: true,
 			},
-			sbxOverride: sbxOverride{Name: "test-sandbox-csi-mount-1", AccessToken: testutils.AccessToken},
+			sbxOverride: sbxOverride{Name: "test-sandbox-csi-mount-1", AccessToken: runtime.AccessToken},
 			postCheck: func(t *testing.T, sbx infra.Sandbox, metrics infra.CloneMetrics) {
 				assert.NotNil(t, sbx)
 				assert.Greater(t, metrics.CSIMount, time.Duration(0), "CSIMount metric should be greater than 0")
@@ -468,7 +469,7 @@ func TestCloneSandbox(t *testing.T) {
 				},
 			},
 			serverOpts: testutils.TestRuntimeServerOptions{
-				RunCommandResult: testutils.RunCommandResult{
+				RunCommandResult: runtime.RunCommandResult{
 					PID:      1,
 					ExitCode: 1,
 					Stderr:   []string{"mount error"},
@@ -476,7 +477,7 @@ func TestCloneSandbox(t *testing.T) {
 				},
 				RunCommandImmediately: true,
 			},
-			sbxOverride: sbxOverride{Name: "test-sandbox-csi-mount-2", AccessToken: testutils.AccessToken},
+			sbxOverride: sbxOverride{Name: "test-sandbox-csi-mount-2", AccessToken: runtime.AccessToken},
 			expectError: "failed to perform csi mount",
 		},
 	}

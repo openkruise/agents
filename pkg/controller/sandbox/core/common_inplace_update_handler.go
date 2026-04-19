@@ -5,12 +5,10 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
-	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/utils"
@@ -31,10 +29,6 @@ func (h *CommonInPlaceUpdateHandler) GetRecorder() record.EventRecorder {
 	return h.recorder
 }
 
-func (h *CommonInPlaceUpdateHandler) GetLogger(ctx context.Context, box *agentsv1alpha1.Sandbox) logr.Logger {
-	return logf.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
-}
-
 // HandleInPlaceUpdateCommon handles the common inplace update logic
 func handleInPlaceUpdateCommon(
 	ctx context.Context,
@@ -43,17 +37,14 @@ func handleInPlaceUpdateCommon(
 	box *agentsv1alpha1.Sandbox,
 	newStatus *agentsv1alpha1.SandboxStatus,
 ) (bool, error) {
-	logger := handler.GetLogger(ctx, box)
-
 	_, hashImmutablePart := HashSandbox(box)
-
 	// old Pod do not include Labels[pod-template-hash] and do not support inplace update.
 	// Check if inplace update is supported
 	if pod.Labels[agentsv1alpha1.PodLabelTemplateHash] == "" {
 		return true, nil
 		// todo, update inplaceupdate condition
 	} else if box.Annotations[agentsv1alpha1.SandboxHashImmutablePart] != hashImmutablePart {
-		logger.Info("sandbox hash-immutable-part changed, and does not permit in-place upgrades",
+		klog.InfoS("sandbox hash-immutable-part changed, and does not permit in-place upgrades", "sandbox", klog.KObj(box),
 			"old hash", box.Annotations[agentsv1alpha1.SandboxHashImmutablePart],
 			"new hash", hashImmutablePart)
 		handler.GetRecorder().Eventf(box, corev1.EventTypeWarning, "InplaceUpdateForbidden",
@@ -76,7 +67,7 @@ func handleInPlaceUpdateCommon(
 		if !completed {
 			if terminalErr != nil {
 				msg := fmt.Sprintf("in-place resource resize failed: %v", terminalErr)
-				logger.Info(msg)
+				klog.InfoS(msg, "sandbox", klog.KObj(box))
 				handler.GetRecorder().Eventf(box, corev1.EventTypeWarning, "InplaceUpdateFailed", msg)
 				utils.SetSandboxCondition(newStatus, metav1.Condition{
 					Type:               string(agentsv1alpha1.SandboxConditionInplaceUpdate),
@@ -107,13 +98,13 @@ func handleInPlaceUpdateCommon(
 		// state!=nil indicates that an in-place upgrade has already been performed previously.
 	} else if state != nil {
 		// currently, multiple in-place updates are not supported.
-		logger.Info("currently, multiple in-place updates are not supported")
+		klog.InfoS("currently, multiple in-place updates are not supported", "sandbox", klog.KObj(box))
 		handler.GetRecorder().Eventf(box, corev1.EventTypeWarning, "InplaceUpdateForbidden",
 			"currently, multiple in-place updates are not supported")
 		completed, terminalErr := inplaceupdate.IsInplaceUpdateCompleted(ctx, pod)
 		if !completed {
 			if terminalErr != nil {
-				logger.Info("previous in-place resize is infeasible, skipping", "error", terminalErr)
+				klog.InfoS("previous in-place resize is infeasible, skipping", "sandbox", klog.KObj(box), "error", terminalErr)
 			}
 			return false, nil
 		}
@@ -124,7 +115,7 @@ func handleInPlaceUpdateCommon(
 	origQoS, newQoS, qosChanged := inplaceupdate.CheckResizeQoSChange(box, pod)
 	if qosChanged {
 		msg := fmt.Sprintf("resource resize would change QoS class from %s to %s, resize rejected", origQoS, newQoS)
-		logger.Info(msg)
+		klog.InfoS(msg, "sandbox", klog.KObj(box))
 		handler.GetRecorder().Eventf(box, corev1.EventTypeWarning, "InplaceUpdateFailed", msg)
 		cond := metav1.Condition{
 			Type:               string(agentsv1alpha1.SandboxConditionInplaceUpdate),
@@ -174,7 +165,7 @@ func handleInPlaceUpdateCommon(
 		var resizeErr *inplaceupdate.ResizeNotSupportedError
 		if errors.As(err, &resizeErr) {
 			msg := resizeErr.Error()
-			logger.Info(msg)
+			klog.InfoS(msg, "sandbox", klog.KObj(box))
 			handler.GetRecorder().Eventf(box, corev1.EventTypeWarning, "InplaceUpdateFailed", msg)
 			utils.SetSandboxCondition(newStatus, metav1.Condition{
 				Type:   string(agentsv1alpha1.SandboxConditionInplaceUpdate),
