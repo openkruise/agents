@@ -1163,7 +1163,7 @@ func TestCommonControl_handleInplaceUpdateSandbox(t *testing.T) {
 			Name:      "test-sandbox",
 			Namespace: "default",
 			Annotations: map[string]string{
-				agentsv1alpha1.SandboxHashWithoutImageAndResources: "different-hash",
+				agentsv1alpha1.SandboxHashImmutablePart: "different-hash",
 			},
 		},
 		Spec: agentsv1alpha1.SandboxSpec{
@@ -1210,7 +1210,7 @@ func TestCommonControl_handleInplaceUpdateSandbox(t *testing.T) {
 			Name:      "test-sandbox",
 			Namespace: "default",
 			Annotations: map[string]string{
-				agentsv1alpha1.SandboxHashWithoutImageAndResources: "same-hash",
+				agentsv1alpha1.SandboxHashImmutablePart: "same-hash",
 			},
 		},
 		Spec: agentsv1alpha1.SandboxSpec{

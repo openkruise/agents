@@ -1342,6 +1342,43 @@ var _ = Describe("SandboxClaim", func() {
 					Expect(sandbox.Labels).To(HaveKeyWithValue("custom-label-2", "value2"))
 					Expect(sandbox.Labels).To(HaveKeyWithValue("team", "platform"))
 					Expect(sandbox.Labels).To(HaveKeyWithValue("env", "test"))
+
+					Expect(sandbox.Spec.Template.Labels).To(HaveKeyWithValue("custom-label-1", "value1"))
+					Expect(sandbox.Spec.Template.Labels).To(HaveKeyWithValue("custom-label-2", "value2"))
+					Expect(sandbox.Spec.Template.Labels).To(HaveKeyWithValue("team", "platform"))
+					Expect(sandbox.Spec.Template.Labels).To(HaveKeyWithValue("env", "test"))
+
+					// Verify custom labels are also propagated to the backing Pod
+					By(fmt.Sprintf("Verifying pod %s has the same custom labels", sandbox.Name))
+					Eventually(func() error {
+						pod := &corev1.Pod{}
+						err := k8sClient.Get(ctx, types.NamespacedName{
+							Name:      sandbox.Name,
+							Namespace: sandbox.Namespace,
+						}, pod)
+						if err != nil {
+							return err
+						}
+
+						// Verify all custom labels are present on the pod
+						if pod.Labels == nil {
+							return fmt.Errorf("pod labels are nil")
+						}
+						if pod.Labels["custom-label-1"] != "value1" {
+							return fmt.Errorf("pod missing custom-label-1, got: %v", pod.Labels)
+						}
+						if pod.Labels["custom-label-2"] != "value2" {
+							return fmt.Errorf("pod missing custom-label-2, got: %v", pod.Labels)
+						}
+						if pod.Labels["team"] != "platform" {
+							return fmt.Errorf("pod missing team label, got: %v", pod.Labels)
+						}
+						if pod.Labels["env"] != "test" {
+							return fmt.Errorf("pod missing env label, got: %v", pod.Labels)
+						}
+						return nil
+					}, time.Minute, time.Second).Should(Succeed(),
+						"Pod %s should have all custom labels from SandboxClaim within 1 minute", sandbox.Name)
 				}
 			})
 

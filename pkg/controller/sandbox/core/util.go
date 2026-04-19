@@ -51,6 +51,8 @@ func HashSandbox(box *agentsv1alpha1.Sandbox) (string, string) {
 
 	// hash using sandbox.spec.template without image and resources
 	tempClone := box.Spec.Template.DeepCopy()
+	tempClone.Labels = nil
+	tempClone.Annotations = nil
 	for i := range tempClone.Spec.Containers {
 		container := &tempClone.Spec.Containers[i]
 		container.Image = ""
@@ -62,8 +64,8 @@ func HashSandbox(box *agentsv1alpha1.Sandbox) (string, string) {
 		container.Resources = corev1.ResourceRequirements{}
 	}
 	by, _ = json.Marshal(*tempClone)
-	hashWithoutImageResources := utils.HashData(by)
-	return hash, hashWithoutImageResources
+	hashImmutablePart := utils.HashData(by)
+	return hash, hashImmutablePart
 }
 
 // GeneratePVCName generates a persistent volume claim name from template name and sandbox name

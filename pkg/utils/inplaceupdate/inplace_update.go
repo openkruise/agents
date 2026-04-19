@@ -19,7 +19,6 @@ package inplaceupdate
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 
 	agentsapiv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/utils"
@@ -101,6 +100,9 @@ func DefaultGeneratePatchBodyFunc(opts InPlaceUpdateOptions) string {
 		UpdateTimestamp:       metav1.Now(),
 		LastContainerStatuses: map[string]InPlaceUpdateContainerStatus{},
 	}
+	labels := map[string]string{
+		agentsapiv1alpha1.PodLabelTemplateHash: revision,
+	}
 	// container.name -> container
 	originContainers := map[string]corev1.Container{}
 	for i := range box.Spec.Template.Spec.Containers {
@@ -113,7 +115,19 @@ func DefaultGeneratePatchBodyFunc(opts InPlaceUpdateOptions) string {
 		originStatus[status.Name] = status.ImageID
 	}
 
-	patchSpec := corev1.PodSpec{}
+	if box.Spec.Template != nil {
+		for k, v := range box.Spec.Template.Labels {
+			if pod.Labels[k] != v {
+				labels[k] = v
+			}
+		}
+	}
+
+	patch := corev1.Pod{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{},
+		},
+	}
 	for i := range pod.Spec.Containers {
 		container := pod.Spec.Containers[i]
 		origin, ok := originContainers[container.Name]
@@ -127,24 +141,19 @@ func DefaultGeneratePatchBodyFunc(opts InPlaceUpdateOptions) string {
 			Name:  container.Name,
 			Image: origin.Image,
 		}
-		patchSpec.Containers = append(patchSpec.Containers, patchContainer)
+		patch.Spec.Containers = append(patch.Spec.Containers, patchContainer)
 		state.UpdateImages = true
 		imageId := originStatus[container.Name]
 		state.LastContainerStatuses[container.Name] = InPlaceUpdateContainerStatus{
 			ImageID: imageId,
 		}
 	}
-	if len(patchSpec.Containers) == 0 {
-		return ""
-	}
-
 	annotations := map[string]string{
 		PodAnnotationInPlaceUpdateStateKey: utils.DumpJson(state),
 	}
-	labels := map[string]string{
-		agentsapiv1alpha1.PodLabelTemplateHash: revision,
-	}
-	return fmt.Sprintf(`{"metadata":{"annotations":%s,"labels":%s},"spec":%s}`, utils.DumpJson(annotations), utils.DumpJson(labels), utils.DumpJson(patchSpec))
+	patch.Labels = labels
+	patch.Annotations = annotations
+	return utils.DumpJson(patch)
 }
 
 func (c *InPlaceUpdateControl) Update(ctx context.Context, opts InPlaceUpdateOptions) (bool, error) {
@@ -158,7 +167,7 @@ func (c *InPlaceUpdateControl) Update(ctx context.Context, opts InPlaceUpdateOpt
 
 	clone := pod.DeepCopy()
 	if err := c.Patch(ctx, clone, client.RawPatch(types.StrategicMergePatchType, []byte(patchBody))); err != nil {
-		logger.Error(err, "inplace update pod failed")
+		logger.Error(err, "inplace update pod failed", "body", patchBody)
 		return false, err
 	}
 	logger.Info("inplace update pod success", "revision", revision, "patchBody", patchBody)

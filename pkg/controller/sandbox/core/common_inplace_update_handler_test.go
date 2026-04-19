@@ -106,7 +106,7 @@ func TestHandleInPlaceUpdateCommon(t *testing.T) {
 			box: &agentsv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{
 					Annotations: map[string]string{
-						agentsv1alpha1.SandboxHashWithoutImageAndResources: "new-hash", // Mismatch with Pod label
+						agentsv1alpha1.SandboxHashImmutablePart: "new-hash", // Mismatch with Pod label
 					},
 				},
 				Spec: agentsv1alpha1.SandboxSpec{
@@ -151,7 +151,7 @@ func TestHandleInPlaceUpdateCommon(t *testing.T) {
 			box: &agentsv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{
 					Annotations: map[string]string{
-						agentsv1alpha1.SandboxHashWithoutImageAndResources: "test-revision",
+						agentsv1alpha1.SandboxHashImmutablePart: "test-revision",
 					},
 				},
 				Spec: agentsv1alpha1.SandboxSpec{
@@ -237,7 +237,7 @@ func TestHandleInPlaceUpdateCommon_WithUpdateInProgress(t *testing.T) {
 			Name:      "test-sandbox",
 			Namespace: "default",
 			Annotations: map[string]string{
-				agentsv1alpha1.SandboxHashWithoutImageAndResources: "current-hash",
+				agentsv1alpha1.SandboxHashImmutablePart: "current-hash",
 			},
 		},
 		Spec: agentsv1alpha1.SandboxSpec{
@@ -301,7 +301,7 @@ func TestHandleInPlaceUpdateCommon_InitialState(t *testing.T) {
 			Name:      "test-sandbox",
 			Namespace: "default",
 			Annotations: map[string]string{
-				agentsv1alpha1.SandboxHashWithoutImageAndResources: "current-hash",
+				agentsv1alpha1.SandboxHashImmutablePart: "current-hash",
 			},
 		},
 		Spec: agentsv1alpha1.SandboxSpec{

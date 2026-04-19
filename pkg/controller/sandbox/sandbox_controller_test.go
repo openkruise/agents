@@ -1790,7 +1790,7 @@ func TestSandboxReconciler_AddSandboxFinalizerAndHash(t *testing.T) {
 				if result.Annotations == nil {
 					t.Fatalf("Annotations should not be nil")
 				}
-				if result.Annotations[agentsv1alpha1.SandboxHashWithoutImageAndResources] == "" {
+				if result.Annotations[agentsv1alpha1.SandboxHashImmutablePart] == "" {
 					t.Errorf("Hash annotation should be set")
 				}
 			},
@@ -1891,7 +1891,7 @@ func TestSandboxReconciler_AddSandboxFinalizerAndHash(t *testing.T) {
 					t.Errorf("Annotations map should be created")
 				}
 				// Check hash annotation
-				if result.Annotations[agentsv1alpha1.SandboxHashWithoutImageAndResources] == "" {
+				if result.Annotations[agentsv1alpha1.SandboxHashImmutablePart] == "" {
 					t.Errorf("Hash annotation should be set")
 				}
 			},
@@ -1929,7 +1929,7 @@ func TestSandboxReconciler_AddSandboxFinalizerAndHash(t *testing.T) {
 					t.Errorf("Existing annotation should be preserved")
 				}
 				// Check hash annotation is added
-				if result.Annotations[agentsv1alpha1.SandboxHashWithoutImageAndResources] == "" {
+				if result.Annotations[agentsv1alpha1.SandboxHashImmutablePart] == "" {
 					t.Errorf("Hash annotation should be added")
 				}
 			},
@@ -1994,7 +1994,7 @@ func TestSandboxReconciler_AddSandboxFinalizerAndHash(t *testing.T) {
 				if tt.expectHashAnnotation {
 					if updatedSandbox.Annotations == nil {
 						t.Errorf("Annotations should not be nil in persisted sandbox")
-					} else if updatedSandbox.Annotations[agentsv1alpha1.SandboxHashWithoutImageAndResources] == "" {
+					} else if updatedSandbox.Annotations[agentsv1alpha1.SandboxHashImmutablePart] == "" {
 						t.Errorf("Hash annotation should be set in persisted sandbox")
 					}
 				}

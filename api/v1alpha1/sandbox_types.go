@@ -24,7 +24,12 @@ import (
 
 const (
 	// SandboxHashWithoutImageAndResources represents the key of sandbox hash without image and resources.
+	// Deprecated, use SandboxHashImmutablePart instead
 	SandboxHashWithoutImageAndResources = "sandbox.agents.kruise.io/hash-without-image-resources"
+
+	// SandboxHashImmutablePart represents the key of sandbox hash than exclude immutable part of sandbox
+	// e.g. metadata, image and resources
+	SandboxHashImmutablePart = "sandbox.agents.kruise.io/hash-immutable-part"
 
 	// PodLabelTemplateHash is pod template hash
 	PodLabelTemplateHash = "pod-template-hash"

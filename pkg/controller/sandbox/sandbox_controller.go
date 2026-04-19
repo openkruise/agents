@@ -264,8 +264,8 @@ func (r *SandboxReconciler) addSandboxFinalizerAndHash(ctx context.Context, box 
 	if originObj.Annotations == nil {
 		originObj.Annotations = make(map[string]string)
 	}
-	_, hashWithoutImageAndResource := core.HashSandbox(box)
-	originObj.Annotations[agentsv1alpha1.SandboxHashWithoutImageAndResources] = hashWithoutImageAndResource
+	_, hashImmutablePart := core.HashSandbox(box)
+	originObj.Annotations[agentsv1alpha1.SandboxHashImmutablePart] = hashImmutablePart
 	if err := client.IgnoreNotFound(r.Patch(ctx, originObj, patch)); err != nil {
 		logger.Error(err, "failed to patch sandbox finalizer and hash")
 		return nil, fmt.Errorf("failed to patch finalizer: %w", err)
