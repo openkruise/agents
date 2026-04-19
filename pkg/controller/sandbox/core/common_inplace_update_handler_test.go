@@ -329,7 +329,7 @@ func TestHandleInPlaceUpdateCommon_QoSChangeRejected(t *testing.T) {
 			Name:      "test-sandbox",
 			Namespace: "default",
 			Annotations: map[string]string{
-				agentsv1alpha1.SandboxHashWithoutImageAndResources: hashWithoutImageAndResource,
+				agentsv1alpha1.SandboxHashImmutablePart: hashWithoutImageAndResource,
 			},
 		},
 		Spec: agentsv1alpha1.SandboxSpec{
@@ -451,7 +451,7 @@ func TestHandleInPlaceUpdateCommon_ResizeInfeasibleFailFast(t *testing.T) {
 			Name:      "test-sandbox",
 			Namespace: "default",
 			Annotations: map[string]string{
-				agentsv1alpha1.SandboxHashWithoutImageAndResources: hashWithoutImageAndResource,
+				agentsv1alpha1.SandboxHashImmutablePart: hashWithoutImageAndResource,
 			},
 		},
 		Spec: agentsv1alpha1.SandboxSpec{
@@ -552,7 +552,7 @@ func TestHandleInPlaceUpdateCommon_TerminalFailureNotOverwritten(t *testing.T) {
 			Name:      "test-sandbox",
 			Namespace: "default",
 			Annotations: map[string]string{
-				agentsv1alpha1.SandboxHashWithoutImageAndResources: hashWithoutImageAndResource,
+				agentsv1alpha1.SandboxHashImmutablePart: hashWithoutImageAndResource,
 			},
 		},
 		Spec: agentsv1alpha1.SandboxSpec{

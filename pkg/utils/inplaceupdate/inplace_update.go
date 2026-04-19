@@ -103,6 +103,9 @@ type InPlaceUpdateOptions struct {
 	Box      *agentsapiv1alpha1.Sandbox
 	Revision string
 	Pod      *corev1.Pod
+	// OnProgress is called after each successful in-place sub-operation
+	// (e.g. metadata/image patch, resource resize).
+	OnProgress func()
 }
 
 type GeneratePatchBodyFunc func(opts InPlaceUpdateOptions) string
@@ -142,8 +145,9 @@ func DefaultGeneratePatchBodyFunc(opts InPlaceUpdateOptions) string {
 		UpdateTimestamp:       metav1.Now(),
 		LastContainerStatuses: map[string]InPlaceUpdateContainerStatus{},
 	}
-	labels := map[string]string{
-		agentsapiv1alpha1.PodLabelTemplateHash: revision,
+	labelsPatch := map[string]string{}
+	if pod.Labels[agentsapiv1alpha1.PodLabelTemplateHash] != revision {
+		labelsPatch[agentsapiv1alpha1.PodLabelTemplateHash] = revision
 	}
 	// container.name -> container
 	originContainers := map[string]corev1.Container{}
@@ -160,16 +164,12 @@ func DefaultGeneratePatchBodyFunc(opts InPlaceUpdateOptions) string {
 	if box.Spec.Template != nil {
 		for k, v := range box.Spec.Template.Labels {
 			if pod.Labels[k] != v {
-				labels[k] = v
+				labelsPatch[k] = v
 			}
 		}
 	}
 
-	patch := corev1.Pod{
-		Spec: corev1.PodSpec{
-			Containers: []corev1.Container{},
-		},
-	}
+	patchSpec := corev1.PodSpec{}
 	for i := range pod.Spec.Containers {
 		container := pod.Spec.Containers[i]
 		origin, ok := originContainers[container.Name]
@@ -197,22 +197,23 @@ func DefaultGeneratePatchBodyFunc(opts InPlaceUpdateOptions) string {
 			state.UpdateResources = true
 		}
 	}
-	if !state.UpdateImages && !state.UpdateResources {
+	annotationsPatch := map[string]string{}
+	if state.UpdateImages || state.UpdateResources {
+		annotationsPatch[PodAnnotationInPlaceUpdateStateKey] = utils.DumpJson(state)
+	}
+
+	if len(labelsPatch) == 0 && len(annotationsPatch) == 0 && len(patchSpec.Containers) == 0 {
 		return ""
 	}
-
-	annotations := map[string]string{
-		PodAnnotationInPlaceUpdateStateKey: utils.DumpJson(state),
+	metadataPatch := map[string]any{}
+	if len(labelsPatch) > 0 {
+		metadataPatch["labels"] = labelsPatch
 	}
-	labels := map[string]string{
-		agentsapiv1alpha1.PodLabelTemplateHash: revision,
+	if len(annotationsPatch) > 0 {
+		metadataPatch["annotations"] = annotationsPatch
 	}
-
 	patch := map[string]any{
-		"metadata": map[string]any{
-			"annotations": annotations,
-			"labels":      labels,
-		},
+		"metadata": metadataPatch,
 	}
 	if len(patchSpec.Containers) > 0 {
 		patch["spec"] = map[string]any{
@@ -416,6 +417,7 @@ func computeQoSClass(pod *corev1.Pod) corev1.PodQOSClass {
 func (c *InPlaceUpdateControl) Update(ctx context.Context, opts InPlaceUpdateOptions) (bool, error) {
 	box, pod, revision := opts.Box, opts.Pod, opts.Revision
 	logger := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
+	progressed := false
 
 	// perform patch
 	patchBody := c.generatePatchBody(opts)
@@ -424,6 +426,10 @@ func (c *InPlaceUpdateControl) Update(ctx context.Context, opts InPlaceUpdateOpt
 		if err := c.Patch(ctx, current, client.RawPatch(types.StrategicMergePatchType, []byte(patchBody))); err != nil {
 			logger.Error(err, "inplace update pod patch failed")
 			return false, err
+		}
+		progressed = true
+		if opts.OnProgress != nil {
+			opts.OnProgress()
 		}
 	}
 
@@ -461,7 +467,10 @@ func (c *InPlaceUpdateControl) Update(ctx context.Context, opts InPlaceUpdateOpt
 			logger.V(5).Info("inplace update pod resize conflict, retrying with latest resourceVersion", "resourceVersion", current.ResourceVersion)
 			return err
 		}); err != nil {
-			return false, err
+			return progressed, err
+		}
+		if opts.OnProgress != nil {
+			opts.OnProgress()
 		}
 	}
 

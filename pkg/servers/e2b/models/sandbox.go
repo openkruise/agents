@@ -2,8 +2,9 @@
 package models
 
 import (
-	"github.com/openkruise/agents/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
+
+	"github.com/openkruise/agents/api/v1alpha1"
 )
 
 const (

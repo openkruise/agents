@@ -437,12 +437,12 @@ func TestCreateSandboxWithClaim_CPUResizeFeatureGate(t *testing.T) {
 
 	t.Run("feature gate disabled rejects CPU resize with requests", func(t *testing.T) {
 		err := utilfeature.DefaultMutableFeatureGate.SetFromMap(map[string]bool{
-			string(features.SandboxClaimInPlaceCPUResizeGate): false,
+			string(features.SandboxInPlaceResourceResizeGate): false,
 		})
 		assert.NoError(t, err)
 		defer func() {
 			_ = utilfeature.DefaultMutableFeatureGate.SetFromMap(map[string]bool{
-				string(features.SandboxClaimInPlaceCPUResizeGate): true,
+				string(features.SandboxInPlaceResourceResizeGate): true,
 			})
 		}()
 
@@ -468,12 +468,12 @@ func TestCreateSandboxWithClaim_CPUResizeFeatureGate(t *testing.T) {
 
 	t.Run("feature gate disabled rejects CPU resize with limits", func(t *testing.T) {
 		err := utilfeature.DefaultMutableFeatureGate.SetFromMap(map[string]bool{
-			string(features.SandboxClaimInPlaceCPUResizeGate): false,
+			string(features.SandboxInPlaceResourceResizeGate): false,
 		})
 		assert.NoError(t, err)
 		defer func() {
 			_ = utilfeature.DefaultMutableFeatureGate.SetFromMap(map[string]bool{
-				string(features.SandboxClaimInPlaceCPUResizeGate): true,
+				string(features.SandboxInPlaceResourceResizeGate): true,
 			})
 		}()
 
@@ -499,12 +499,12 @@ func TestCreateSandboxWithClaim_CPUResizeFeatureGate(t *testing.T) {
 
 	t.Run("feature gate disabled rejects mixed image and cpu resize", func(t *testing.T) {
 		err := utilfeature.DefaultMutableFeatureGate.SetFromMap(map[string]bool{
-			string(features.SandboxClaimInPlaceCPUResizeGate): false,
+			string(features.SandboxInPlaceResourceResizeGate): false,
 		})
 		assert.NoError(t, err)
 		defer func() {
 			_ = utilfeature.DefaultMutableFeatureGate.SetFromMap(map[string]bool{
-				string(features.SandboxClaimInPlaceCPUResizeGate): true,
+				string(features.SandboxInPlaceResourceResizeGate): true,
 			})
 		}()
 

@@ -83,10 +83,10 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 			Image: extension.Image,
 		}
 		if extension.Resources != nil && (len(extension.Resources.Requests) > 0 || len(extension.Resources.Limits) > 0) {
-			if !utilfeature.DefaultFeatureGate.Enabled(features.SandboxClaimInPlaceCPUResizeGate) {
+			if !utilfeature.DefaultFeatureGate.Enabled(features.SandboxInPlaceResourceResizeGate) {
 				return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
 					Code:    http.StatusBadRequest,
-					Message: fmt.Sprintf("in-place resource resize is disabled by feature gate %s", features.SandboxClaimInPlaceCPUResizeGate),
+					Message: fmt.Sprintf("in-place resource resize is disabled by feature gate %s", features.SandboxInPlaceResourceResizeGate),
 				}
 			}
 			opts.InplaceUpdate.Resources = &config.InplaceUpdateResourcesOptions{

@@ -813,7 +813,7 @@ func TestCheckSandboxInplaceUpdate(t *testing.T) {
 					Generation:  tt.generation,
 				},
 				Status: v1alpha1.SandboxStatus{
-					Phase: v1alpha1.SandboxRunning,
+					Phase:      v1alpha1.SandboxRunning,
 					Conditions: conditions,
 					PodInfo: v1alpha1.PodInfo{
 						PodIP: "1.2.3.4",

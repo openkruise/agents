@@ -22,16 +22,6 @@ import (
 	"testing"
 	"time"
 
-	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/client/clientset/versioned"
-	sandboxfake "github.com/openkruise/agents/client/clientset/versioned/fake"
-	"github.com/openkruise/agents/pkg/agent-runtime/storages"
-	"github.com/openkruise/agents/pkg/features"
-	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
-	"github.com/openkruise/agents/pkg/sandbox-manager/config"
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
-	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -43,6 +33,17 @@ import (
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/client/clientset/versioned"
+	sandboxfake "github.com/openkruise/agents/client/clientset/versioned/fake"
+	"github.com/openkruise/agents/pkg/agent-runtime/storages"
+	"github.com/openkruise/agents/pkg/features"
+	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
+	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
+	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 )
 
 func TestNewCommonControl(t *testing.T) {
@@ -523,12 +524,12 @@ func TestCommonControl_EnsureClaimClaiming_CPUResizeFeatureGatePrecondition(t *t
 
 	t.Run("feature gate disabled transitions claim to completed", func(t *testing.T) {
 		err := utilfeature.DefaultMutableFeatureGate.SetFromMap(map[string]bool{
-			string(features.SandboxClaimInPlaceCPUResizeGate): false,
+			string(features.SandboxInPlaceResourceResizeGate): false,
 		})
 		require.NoError(t, err)
 		defer func() {
 			_ = utilfeature.DefaultMutableFeatureGate.SetFromMap(map[string]bool{
-				string(features.SandboxClaimInPlaceCPUResizeGate): true,
+				string(features.SandboxInPlaceResourceResizeGate): true,
 			})
 		}()
 
@@ -557,7 +558,7 @@ func TestCommonControl_EnsureClaimClaiming_CPUResizeFeatureGatePrecondition(t *t
 
 	t.Run("feature gate enabled continues claiming flow", func(t *testing.T) {
 		err := utilfeature.DefaultMutableFeatureGate.SetFromMap(map[string]bool{
-			string(features.SandboxClaimInPlaceCPUResizeGate): true,
+			string(features.SandboxInPlaceResourceResizeGate): true,
 		})
 		require.NoError(t, err)
 
@@ -1244,9 +1245,9 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 		},
 	}
 
-	_ = utilfeature.DefaultMutableFeatureGate.Set("SandboxClaimInPlaceCPUResize=true")
+	_ = utilfeature.DefaultMutableFeatureGate.Set("SandboxInPlaceResourceResize=true")
 	t.Cleanup(func() {
-		_ = utilfeature.DefaultMutableFeatureGate.Set("SandboxClaimInPlaceCPUResize=false")
+		_ = utilfeature.DefaultMutableFeatureGate.Set("SandboxInPlaceResourceResize=false")
 	})
 
 	for _, tt := range tests {
@@ -1264,9 +1265,9 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 	}
 
 	t.Run("cpu resize builds opts normally when feature gate disabled", func(t *testing.T) {
-		_ = utilfeature.DefaultMutableFeatureGate.Set("SandboxClaimInPlaceCPUResize=false")
+		_ = utilfeature.DefaultMutableFeatureGate.Set("SandboxInPlaceResourceResize=false")
 		defer func() {
-			_ = utilfeature.DefaultMutableFeatureGate.Set("SandboxClaimInPlaceCPUResize=true")
+			_ = utilfeature.DefaultMutableFeatureGate.Set("SandboxInPlaceResourceResize=true")
 		}()
 
 		claim := &agentsv1alpha1.SandboxClaim{

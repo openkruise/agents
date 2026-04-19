@@ -138,7 +138,32 @@ func handleInPlaceUpdateCommon(
 	}
 
 	// Start inplace update sandbox
-	opts := inplaceupdate.InPlaceUpdateOptions{Pod: pod, Box: box, Revision: newStatus.UpdateRevision}
+	markInProgress := func() {
+		// Update sandbox status to in-progress
+		cond := metav1.Condition{
+			Type:               string(agentsv1alpha1.SandboxConditionInplaceUpdate),
+			Status:             metav1.ConditionFalse,
+			Reason:             agentsv1alpha1.SandboxInplaceUpdateReasonInplaceUpdating,
+			LastTransitionTime: metav1.Now(),
+		}
+		utils.SetSandboxCondition(newStatus, cond)
+
+		// Update ready condition to in-progress
+		readyCond := metav1.Condition{
+			Type:               string(agentsv1alpha1.SandboxConditionReady),
+			Status:             metav1.ConditionFalse,
+			LastTransitionTime: metav1.Now(),
+			Reason:             agentsv1alpha1.SandboxReadyReasonInplaceUpdating,
+			Message:            "inplace update is incompleted",
+		}
+		utils.SetSandboxCondition(newStatus, readyCond)
+	}
+	opts := inplaceupdate.InPlaceUpdateOptions{
+		Pod:        pod,
+		Box:        box,
+		Revision:   newStatus.UpdateRevision,
+		OnProgress: markInProgress,
+	}
 	control := handler.GetInPlaceUpdateControl()
 	changed, err := control.Update(ctx, opts)
 	if err != nil {
@@ -165,25 +190,6 @@ func handleInPlaceUpdateCommon(
 	} else if !changed {
 		return true, nil
 	}
-
-	// Update sandbox status to in-progress
-	cond := metav1.Condition{
-		Type:               string(agentsv1alpha1.SandboxConditionInplaceUpdate),
-		Status:             metav1.ConditionFalse,
-		Reason:             agentsv1alpha1.SandboxInplaceUpdateReasonInplaceUpdating,
-		LastTransitionTime: metav1.Now(),
-	}
-	utils.SetSandboxCondition(newStatus, cond)
-
-	// Update ready condition to in-progress
-	readyCond := metav1.Condition{
-		Type:               string(agentsv1alpha1.SandboxConditionReady),
-		Status:             metav1.ConditionFalse,
-		LastTransitionTime: metav1.Now(),
-		Reason:             agentsv1alpha1.SandboxReadyReasonInplaceUpdating,
-		Message:            "inplace update is incompleted",
-	}
-	utils.SetSandboxCondition(newStatus, readyCond)
 
 	return false, nil
 }

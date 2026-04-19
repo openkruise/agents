@@ -32,20 +32,15 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
+	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/csiutils"
-	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
-
-	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/features"
-	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
+	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
 )
 
 type commonControl struct {
@@ -127,8 +122,8 @@ func (c *commonControl) EnsureClaimClaiming(ctx context.Context, args ClaimArgs)
 	// Step 7: Precondition
 	if claim.Spec.InplaceUpdate != nil {
 		if res := claim.Spec.InplaceUpdate.Resources; res != nil && (len(res.Requests) > 0 || len(res.Limits) > 0) {
-			if !utilfeature.DefaultFeatureGate.Enabled(features.SandboxClaimInPlaceCPUResizeGate) {
-				msg := fmt.Sprintf("in-place resource resize is disabled by feature gate %s", features.SandboxClaimInPlaceCPUResizeGate)
+			if !utilfeature.DefaultFeatureGate.Enabled(features.SandboxInPlaceResourceResizeGate) {
+				msg := fmt.Sprintf("in-place resource resize is disabled by feature gate %s", features.SandboxInPlaceResourceResizeGate)
 				log.Info(msg)
 				c.recorder.Event(claim, "Warning", "FeatureGateDisabled", msg)
 				TransitionToCompleted(args.NewStatus, "FeatureGateDisabled", msg)

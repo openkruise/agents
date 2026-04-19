@@ -16,18 +16,40 @@ package inplaceupdate
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/klog/v2"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	agentsapiv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 )
+
+// buildTestScheme builds a runtime scheme containing both the agents/v1alpha1
+// types and corev1 types used by the in-place update tests.
+func buildTestScheme(t *testing.T) *runtime.Scheme {
+	t.Helper()
+	scheme, err := agentsapiv1alpha1.SchemeBuilder.Build()
+	if err != nil {
+		t.Fatalf("Failed to build scheme: %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("Failed to add corev1 to scheme: %v", err)
+	}
+	return scheme
+}
 
 func TestGetPodInPlaceUpdateState(t *testing.T) {
 	tests := []struct {
@@ -142,169 +164,1236 @@ func TestGetPodInPlaceUpdateState(t *testing.T) {
 	}
 }
 
-func TestInPlaceUpdateControl_Update(t *testing.T) {
-	scheme, err := agentsapiv1alpha1.SchemeBuilder.Build()
+func TestInPlaceUpdateControl_Update_ImageChange(t *testing.T) {
+	scheme := buildTestScheme(t)
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-pod",
+			Namespace: "default",
+			Labels:    map[string]string{"app": "old"},
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:  "container1",
+				Image: "nginx:latest",
+			}},
+		},
+		Status: corev1.PodStatus{
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name:    "container1",
+				ImageID: "docker.io/nginx:latest",
+			}},
+		},
+	}
+	box := &agentsapiv1alpha1.Sandbox{
+		Spec: agentsapiv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsapiv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{
+						Labels: map[string]string{"app": "new"},
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{
+							Name:  "container1",
+							Image: "nginx:1.20",
+						}},
+					},
+				},
+			},
+		},
+	}
+
+	progressCount := 0
+	ctrl := NewInPlaceUpdateControl(
+		fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build(),
+		nil,
+	)
+	progressed, err := ctrl.Update(context.Background(), InPlaceUpdateOptions{
+		Box:        box,
+		Pod:        pod,
+		Revision:   "rev-1",
+		OnProgress: func() { progressCount++ },
+	})
 	if err != nil {
-		t.Fatalf("Failed to build scheme: %v", err)
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if err := corev1.AddToScheme(scheme); err != nil {
-		t.Fatalf("Failed to add corev1 to scheme: %v", err)
+	if !progressed {
+		t.Fatalf("expected progressed=true")
+	}
+	if progressCount != 1 {
+		t.Fatalf("expected exactly 1 progress callback (image patch only), got %d", progressCount)
 	}
 
-	tests := []struct {
-		name        string
-		opts        InPlaceUpdateOptions
-		expectError bool
-	}{
-		{
-			name: "container changes exist",
-			opts: InPlaceUpdateOptions{
-				Box: &agentsapiv1alpha1.Sandbox{
-					Spec: agentsapiv1alpha1.SandboxSpec{
-						EmbeddedSandboxTemplate: agentsapiv1alpha1.EmbeddedSandboxTemplate{
-							Template: &corev1.PodTemplateSpec{
-								Spec: corev1.PodSpec{
-									Containers: []corev1.Container{
-										{
-											Name:  "container1",
-											Image: "nginx:1.20",
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-				Pod: &corev1.Pod{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-pod",
-						Namespace: "default",
-					},
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{
-							{
-								Name:  "container1",
-								Image: "nginx:latest", // different image
-							},
-						},
-					},
-					Status: corev1.PodStatus{
-						ContainerStatuses: []corev1.ContainerStatus{
-							{
-								Name:    "container1",
-								ImageID: "docker.io/nginx:latest",
-							},
-						},
-					},
-				},
-				Revision: "abc123",
+	updated := &corev1.Pod{}
+	if err := ctrl.Get(context.Background(),
+		types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace}, updated); err != nil {
+		t.Fatalf("get updated pod: %v", err)
+	}
+	if updated.Spec.Containers[0].Image != "nginx:1.20" {
+		t.Fatalf("expected image patched to nginx:1.20, got %q", updated.Spec.Containers[0].Image)
+	}
+	if updated.Labels[agentsapiv1alpha1.PodLabelTemplateHash] != "rev-1" {
+		t.Fatalf("expected pod-template-hash label=rev-1, got %q",
+			updated.Labels[agentsapiv1alpha1.PodLabelTemplateHash])
+	}
+	if updated.Labels["app"] != "new" {
+		t.Fatalf("expected app label patched to new, got %q", updated.Labels["app"])
+	}
+	stateStr, ok := updated.Annotations[PodAnnotationInPlaceUpdateStateKey]
+	if !ok || stateStr == "" {
+		t.Fatalf("expected in-place update state annotation to be set")
+	}
+	state := &InPlaceUpdateState{}
+	if err := json.Unmarshal([]byte(stateStr), state); err != nil {
+		t.Fatalf("unmarshal state: %v", err)
+	}
+	if state.Revision != "rev-1" || !state.UpdateImages || state.UpdateResources {
+		t.Fatalf("unexpected state: %+v", state)
+	}
+}
+
+func TestInPlaceUpdateControl_Update_NoChange(t *testing.T) {
+	scheme := buildTestScheme(t)
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "p",
+			Namespace: "default",
+			Labels: map[string]string{
+				agentsapiv1alpha1.PodLabelTemplateHash: "rev",
 			},
-			expectError: false,
 		},
-		{
-			name: "container not found in sandbox",
-			opts: InPlaceUpdateOptions{
-				Box: &agentsapiv1alpha1.Sandbox{
-					Spec: agentsapiv1alpha1.SandboxSpec{
-						EmbeddedSandboxTemplate: agentsapiv1alpha1.EmbeddedSandboxTemplate{
-							Template: &corev1.PodTemplateSpec{
-								Spec: corev1.PodSpec{
-									Containers: []corev1.Container{}, // no containers
-								},
-							},
-						},
-					},
-				},
-				Pod: &corev1.Pod{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-pod",
-						Namespace: "default",
-					},
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{
-							{
-								Name:  "container1",
-								Image: "nginx:latest",
-							},
-						},
-					},
-				},
-				Revision: "abc123",
-			},
-			expectError: true,
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "c1", Image: "img:1"}},
 		},
 	}
+	box := &agentsapiv1alpha1.Sandbox{
+		Spec: agentsapiv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsapiv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "c1", Image: "img:1"}},
+					},
+				},
+			},
+		},
+	}
+	ctrl := NewInPlaceUpdateControl(
+		fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build(),
+		nil,
+	)
+	progressed, err := ctrl.Update(context.Background(), InPlaceUpdateOptions{
+		Box:      box,
+		Pod:      pod,
+		Revision: "rev",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if progressed {
+		t.Fatalf("expected progressed=false when no spec changes")
+	}
+}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if tt.name != "no container changes" {
-				return
-			}
-			client := &InPlaceUpdateControl{
-				Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(tt.opts.Pod).Build(),
-			}
+func TestInPlaceUpdateControl_Update_MetadataOnlyLabels(t *testing.T) {
+	scheme := buildTestScheme(t)
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "p-label-only",
+			Namespace: "default",
+			Labels: map[string]string{
+				agentsapiv1alpha1.PodLabelTemplateHash: "old-rev",
+			},
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "c1", Image: "img:1"}},
+		},
+	}
+	box := &agentsapiv1alpha1.Sandbox{
+		Spec: agentsapiv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsapiv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{
+						Labels: map[string]string{"custom-label-1": "value1"},
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "c1", Image: "img:1"}},
+					},
+				},
+			},
+		},
+	}
+	ctrl := NewInPlaceUpdateControl(
+		fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build(),
+		nil,
+	)
+	progressed, err := ctrl.Update(context.Background(), InPlaceUpdateOptions{
+		Box:      box,
+		Pod:      pod,
+		Revision: "new-rev",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !progressed {
+		t.Fatalf("expected progressed=true for metadata-only labels patch")
+	}
 
-			_, err = client.Update(context.TODO(), tt.opts)
-			if tt.expectError {
-				if err == nil {
-					t.Errorf("Expected error but got none")
-				}
-				return
-			}
-			if err != nil {
-				t.Errorf("Unexpected error: %v", err)
-				return
-			}
+	updated := &corev1.Pod{}
+	if err := ctrl.Get(context.Background(), types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace}, updated); err != nil {
+		t.Fatalf("get updated pod: %v", err)
+	}
+	if updated.Labels["custom-label-1"] != "value1" {
+		t.Fatalf("expected custom-label-1=value1 on pod, got labels: %v", updated.Labels)
+	}
+	if updated.Labels[agentsapiv1alpha1.PodLabelTemplateHash] != "new-rev" {
+		t.Fatalf("expected pod-template-hash=new-rev, got %q", updated.Labels[agentsapiv1alpha1.PodLabelTemplateHash])
+	}
+}
 
-			// Verify the pod was updated
-			updatedPod := &corev1.Pod{}
-			err = client.Get(context.TODO(), types.NamespacedName{Name: tt.opts.Pod.Name, Namespace: tt.opts.Pod.Namespace}, updatedPod)
-			if err != nil {
-				t.Errorf("Failed to get updated pod: %v", err)
-				return
-			}
+func TestInPlaceUpdateControl_Update_ResizeViaSubresource(t *testing.T) {
+	scheme := buildTestScheme(t)
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "default"},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:  "c",
+				Image: "img:1",
+				Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m")},
+				},
+			}},
+		},
+	}
+	box := &agentsapiv1alpha1.Sandbox{
+		Spec: agentsapiv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsapiv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{
+							Name:  "c",
+							Image: "img:1",
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")},
+							},
+						}},
+					},
+				},
+			},
+		},
+	}
 
-			// Check if annotations were updated
-			if updatedPod.Annotations[agentsapiv1alpha1.PodLabelTemplateHash] != tt.opts.Revision {
-				t.Errorf("Expected revision annotation %s, got %s", tt.opts.Revision, updatedPod.Annotations[agentsapiv1alpha1.PodLabelTemplateHash])
+	resizeCalls := 0
+	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
+	wrapped := interceptor.NewClient(base, interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object,
+			opts ...client.SubResourceUpdateOption) error {
+			if sub != "resize" {
+				return c.SubResource(sub).Update(ctx, obj, opts...)
 			}
-
-			// Check if the state annotation exists
-			stateStr, exists := updatedPod.Annotations[PodAnnotationInPlaceUpdateStateKey]
-			if !exists {
-				t.Errorf("Expected inplace update state annotation to exist")
-				return
+			resizeCalls++
+			body := obj
+			updateOpts := &client.SubResourceUpdateOptions{}
+			updateOpts.ApplyOptions(opts)
+			if updateOpts.SubResourceBody != nil {
+				body = updateOpts.SubResourceBody
 			}
-
-			// Parse the state annotation
-			var state InPlaceUpdateState
-			if err := json.Unmarshal([]byte(stateStr), &state); err != nil {
-				t.Errorf("Failed to unmarshal state annotation: %v", err)
-				return
+			resizePod, ok := body.(*corev1.Pod)
+			if !ok {
+				return fmt.Errorf("expected *corev1.Pod, got %T", body)
 			}
-
-			// Validate state
-			if state.Revision != tt.opts.Revision {
-				t.Errorf("Expected state revision %s, got %s", tt.opts.Revision, state.Revision)
+			existing := &corev1.Pod{}
+			if err := c.Get(ctx, client.ObjectKeyFromObject(obj), existing); err != nil {
+				return err
 			}
-
-			// If there were updates, validate container changes
-			if len(tt.opts.Box.Spec.Template.Spec.Containers) > 0 {
-				containerFound := false
-				for _, container := range updatedPod.Spec.Containers {
-					if container.Name == tt.opts.Box.Spec.Template.Spec.Containers[0].Name {
-						containerFound = true
-						if container.Image != tt.opts.Box.Spec.Template.Spec.Containers[0].Image {
-							t.Errorf("Expected container image %s, got %s", tt.opts.Box.Spec.Template.Spec.Containers[0].Image, container.Image)
-						}
-						break
+			for i, container := range existing.Spec.Containers {
+				for _, rc := range resizePod.Spec.Containers {
+					if rc.Name == container.Name {
+						existing.Spec.Containers[i].Resources = rc.Resources
 					}
 				}
-				if !containerFound && len(tt.opts.Box.Spec.Template.Spec.Containers) > 0 {
-					t.Errorf("Expected container %s to exist in updated pod", tt.opts.Box.Spec.Template.Spec.Containers[0].Name)
+			}
+			return c.Update(ctx, existing)
+		},
+	})
+
+	progressCount := 0
+	ctrl := NewInPlaceUpdateControl(wrapped, nil)
+	progressed, err := ctrl.Update(context.Background(), InPlaceUpdateOptions{
+		Box:        box,
+		Pod:        pod,
+		Revision:   "rev",
+		OnProgress: func() { progressCount++ },
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !progressed {
+		t.Fatalf("expected progressed=true")
+	}
+	if resizeCalls != 1 {
+		t.Fatalf("expected exactly one resize subresource call, got %d", resizeCalls)
+	}
+	// One callback for the metadata patch (UpdateResources state) + one for the resize call.
+	if progressCount != 2 {
+		t.Fatalf("expected 2 progress callbacks (patch + resize), got %d", progressCount)
+	}
+	if ctrl.useDirectResourcePatch.Load() {
+		t.Fatalf("useDirectResourcePatch should remain false when resize subresource works")
+	}
+
+	updated := &corev1.Pod{}
+	if err := ctrl.Get(context.Background(),
+		types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace}, updated); err != nil {
+		t.Fatalf("get updated pod: %v", err)
+	}
+	cpuReq := updated.Spec.Containers[0].Resources.Requests[corev1.ResourceCPU]
+	if cpuReq.MilliValue() != 500 {
+		t.Fatalf("expected cpu request=500m, got %dm", cpuReq.MilliValue())
+	}
+}
+
+func TestInPlaceUpdateControl_Update_ResizeFallbackToDirectPatch(t *testing.T) {
+	scheme := buildTestScheme(t)
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "default"},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:  "c",
+				Image: "img:1",
+				Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m")},
+				},
+			}},
+		},
+	}
+	box := &agentsapiv1alpha1.Sandbox{
+		Spec: agentsapiv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsapiv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{
+							Name:  "c",
+							Image: "img:1",
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("750m")},
+							},
+						}},
+					},
+				},
+			},
+		},
+	}
+
+	subCalls := 0
+	patchCalls := 0
+	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
+	wrapped := interceptor.NewClient(base, interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object,
+			opts ...client.SubResourceUpdateOption) error {
+			if sub == "resize" {
+				subCalls++
+				return apierrors.NewNotFound(schema.GroupResource{Resource: "pods"}, obj.GetName())
+			}
+			return c.SubResource(sub).Update(ctx, obj, opts...)
+		},
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch,
+			opts ...client.PatchOption) error {
+			patchCalls++
+			return c.Patch(ctx, obj, patch, opts...)
+		},
+	})
+
+	ctrl := NewInPlaceUpdateControl(wrapped, nil)
+	progressed, err := ctrl.Update(context.Background(), InPlaceUpdateOptions{
+		Box:      box,
+		Pod:      pod,
+		Revision: "rev",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !progressed {
+		t.Fatalf("expected progressed=true")
+	}
+	if subCalls != 1 {
+		t.Fatalf("expected exactly one resize subresource probe, got %d", subCalls)
+	}
+	if !ctrl.useDirectResourcePatch.Load() {
+		t.Fatalf("expected useDirectResourcePatch=true after 404 fallback")
+	}
+	// Expect the metadata patch + the direct resource patch fallback to be observed.
+	if patchCalls < 2 {
+		t.Fatalf("expected at least 2 Patch calls (metadata + resource), got %d", patchCalls)
+	}
+
+	// Second invocation: the cached flag should make us skip the subresource probe entirely.
+	subCallsBefore := subCalls
+	pod2 := pod.DeepCopy()
+	pod2.Name = "p2"
+	pod2.ResourceVersion = ""
+	if err := ctrl.Create(context.Background(), pod2); err != nil {
+		t.Fatalf("seed second pod: %v", err)
+	}
+	if _, err := ctrl.Update(context.Background(), InPlaceUpdateOptions{
+		Box:      box,
+		Pod:      pod2,
+		Revision: "rev",
+	}); err != nil {
+		t.Fatalf("second update: %v", err)
+	}
+	if subCalls != subCallsBefore {
+		t.Fatalf("expected subresource probe to be cached (no extra calls), got %d more",
+			subCalls-subCallsBefore)
+	}
+}
+
+func TestInPlaceUpdateControl_Update_ResizeNotSupported(t *testing.T) {
+	scheme := buildTestScheme(t)
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "default"},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:  "c",
+				Image: "img:1",
+				Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m")},
+				},
+			}},
+		},
+	}
+	box := &agentsapiv1alpha1.Sandbox{
+		Spec: agentsapiv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsapiv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{
+							Name:  "c",
+							Image: "img:1",
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("750m")},
+							},
+						}},
+					},
+				},
+			},
+		},
+	}
+
+	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
+	wrapped := interceptor.NewClient(base, interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object,
+			opts ...client.SubResourceUpdateOption) error {
+			if sub == "resize" {
+				return apierrors.NewNotFound(schema.GroupResource{Resource: "pods"}, obj.GetName())
+			}
+			return c.SubResource(sub).Update(ctx, obj, opts...)
+		},
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch,
+			opts ...client.PatchOption) error {
+			// Allow the metadata patch (which contains "metadata") to succeed
+			// but reject the spec-only resource patch fallback so we can
+			// observe the ResizeNotSupportedError path.
+			data, _ := patch.Data(obj)
+			if !strings.Contains(string(data), `"metadata"`) {
+				return apierrors.NewBadRequest("InPlacePodVerticalScaling feature gate disabled")
+			}
+			return c.Patch(ctx, obj, patch, opts...)
+		},
+	})
+
+	ctrl := NewInPlaceUpdateControl(wrapped, nil)
+	_, err := ctrl.Update(context.Background(), InPlaceUpdateOptions{
+		Box:      box,
+		Pod:      pod,
+		Revision: "rev",
+	})
+	if err == nil {
+		t.Fatalf("expected error for unsupported resize")
+	}
+	var resizeErr *ResizeNotSupportedError
+	if !errors.As(err, &resizeErr) {
+		t.Fatalf("expected ResizeNotSupportedError, got %T: %v", err, err)
+	}
+	if resizeErr.Unwrap() == nil {
+		t.Fatalf("expected wrapped error to be non-nil")
+	}
+	if !strings.Contains(resizeErr.Error(), "in-place pod resize not supported") {
+		t.Fatalf("unexpected error message: %v", resizeErr.Error())
+	}
+}
+
+func TestInPlaceUpdateControl_Update_ResizeSubresourceServerError(t *testing.T) {
+	scheme := buildTestScheme(t)
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "default"},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:  "c",
+				Image: "img:1",
+				Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m")},
+				},
+			}},
+		},
+	}
+	box := &agentsapiv1alpha1.Sandbox{
+		Spec: agentsapiv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsapiv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{
+							Name:  "c",
+							Image: "img:1",
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("750m")},
+							},
+						}},
+					},
+				},
+			},
+		},
+	}
+
+	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
+	wrapped := interceptor.NewClient(base, interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object,
+			opts ...client.SubResourceUpdateOption) error {
+			if sub == "resize" {
+				return apierrors.NewInternalError(fmt.Errorf("etcd timeout"))
+			}
+			return c.SubResource(sub).Update(ctx, obj, opts...)
+		},
+	})
+	ctrl := NewInPlaceUpdateControl(wrapped, nil)
+
+	progressed, err := ctrl.Update(context.Background(), InPlaceUpdateOptions{
+		Box:      box,
+		Pod:      pod,
+		Revision: "rev",
+	})
+	if err == nil {
+		t.Fatalf("expected non-nil error from failing resize subresource")
+	}
+	// progressed must be true because the metadata patch already happened.
+	if !progressed {
+		t.Fatalf("expected progressed=true after the metadata patch even when resize fails")
+	}
+	// The non-NotFound error must NOT trigger the fallback flag.
+	if ctrl.useDirectResourcePatch.Load() {
+		t.Fatalf("non-NotFound error should not flip the direct-patch flag")
+	}
+	// And it must NOT be wrapped as ResizeNotSupportedError (that's reserved
+	// for the direct-patch fallback failure).
+	var resizeErr *ResizeNotSupportedError
+	if errors.As(err, &resizeErr) {
+		t.Fatalf("did not expect ResizeNotSupportedError from subresource server error")
+	}
+}
+
+func TestInPlaceUpdateControl_Update_ResizeConflictRetrySucceeds(t *testing.T) {
+	scheme := buildTestScheme(t)
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "default"},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:  "c",
+				Image: "img:1",
+				Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m")},
+				},
+			}},
+		},
+	}
+	box := &agentsapiv1alpha1.Sandbox{
+		Spec: agentsapiv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsapiv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{
+							Name:  "c",
+							Image: "img:1",
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("750m")},
+							},
+						}},
+					},
+				},
+			},
+		},
+	}
+
+	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
+	resizeAttempts := 0
+	wrapped := interceptor.NewClient(base, interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object,
+			opts ...client.SubResourceUpdateOption) error {
+			if sub != "resize" {
+				return c.SubResource(sub).Update(ctx, obj, opts...)
+			}
+			resizeAttempts++
+			if resizeAttempts == 1 {
+				// First attempt: bump the pod's resourceVersion behind our
+				// back so the controller observes a conflict and re-reads
+				// the latest object.
+				latest := &corev1.Pod{}
+				if err := c.Get(ctx, client.ObjectKeyFromObject(obj), latest); err != nil {
+					return err
+				}
+				latest.Annotations = map[string]string{"bumped": "true"}
+				if err := c.Update(ctx, latest); err != nil {
+					return err
+				}
+				return apierrors.NewConflict(
+					schema.GroupResource{Resource: "pods"}, obj.GetName(),
+					fmt.Errorf("the object has been modified"),
+				)
+			}
+			// Subsequent attempts succeed and apply the resize.
+			body := obj
+			updateOpts := &client.SubResourceUpdateOptions{}
+			updateOpts.ApplyOptions(opts)
+			if updateOpts.SubResourceBody != nil {
+				body = updateOpts.SubResourceBody
+			}
+			rp := body.(*corev1.Pod)
+			existing := &corev1.Pod{}
+			if err := c.Get(ctx, client.ObjectKeyFromObject(obj), existing); err != nil {
+				return err
+			}
+			for i, container := range existing.Spec.Containers {
+				for _, rc := range rp.Spec.Containers {
+					if rc.Name == container.Name {
+						existing.Spec.Containers[i].Resources = rc.Resources
+					}
 				}
 			}
-		})
+			return c.Update(ctx, existing)
+		},
+	})
+	ctrl := NewInPlaceUpdateControl(wrapped, nil)
+
+	progressed, err := ctrl.Update(context.Background(), InPlaceUpdateOptions{
+		Box:      box,
+		Pod:      pod,
+		Revision: "rev",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !progressed {
+		t.Fatalf("expected progressed=true")
+	}
+	if resizeAttempts < 2 {
+		t.Fatalf("expected the conflict to trigger at least one retry, got %d attempts", resizeAttempts)
+	}
+
+	updated := &corev1.Pod{}
+	if err := ctrl.Get(context.Background(),
+		types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace}, updated); err != nil {
+		t.Fatalf("get updated pod: %v", err)
+	}
+	cpuReq := updated.Spec.Containers[0].Resources.Requests[corev1.ResourceCPU]
+	if cpuReq.MilliValue() != 750 {
+		t.Fatalf("expected cpu request=750m after retry, got %dm", cpuReq.MilliValue())
+	}
+}
+
+func TestInPlaceUpdateControl_Update_ResizeConflictRetryNoLongerNeeded(t *testing.T) {
+	scheme := buildTestScheme(t)
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "default"},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:  "c",
+				Image: "img:1",
+				Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m")},
+				},
+			}},
+		},
+	}
+	box := &agentsapiv1alpha1.Sandbox{
+		Spec: agentsapiv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsapiv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{
+							Name:  "c",
+							Image: "img:1",
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("750m")},
+							},
+						}},
+					},
+				},
+			},
+		},
+	}
+
+	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
+	resizeAttempts := 0
+	wrapped := interceptor.NewClient(base, interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object,
+			opts ...client.SubResourceUpdateOption) error {
+			if sub != "resize" {
+				return c.SubResource(sub).Update(ctx, obj, opts...)
+			}
+			resizeAttempts++
+			// Simulate that another actor has already applied the resize, so
+			// recomputing resizeBody from the latest pod returns nil and the
+			// retry loop should exit successfully without a re-attempt.
+			latest := &corev1.Pod{}
+			if err := c.Get(ctx, client.ObjectKeyFromObject(obj), latest); err != nil {
+				return err
+			}
+			latest.Spec.Containers[0].Resources.Requests = corev1.ResourceList{
+				corev1.ResourceCPU: resource.MustParse("750m"),
+			}
+			if err := c.Update(ctx, latest); err != nil {
+				return err
+			}
+			return apierrors.NewConflict(
+				schema.GroupResource{Resource: "pods"}, obj.GetName(),
+				fmt.Errorf("the object has been modified"),
+			)
+		},
+	})
+	ctrl := NewInPlaceUpdateControl(wrapped, nil)
+
+	progressed, err := ctrl.Update(context.Background(), InPlaceUpdateOptions{
+		Box:      box,
+		Pod:      pod,
+		Revision: "rev",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !progressed {
+		t.Fatalf("expected progressed=true (metadata patch already applied)")
+	}
+	if resizeAttempts != 1 {
+		t.Fatalf("expected exactly 1 resize attempt (no retry needed when resize is no-op), got %d",
+			resizeAttempts)
+	}
+}
+
+func TestInPlaceUpdateControl_PatchPodResources_Conflict(t *testing.T) {
+	scheme := buildTestScheme(t)
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "default"},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "c"}},
+		},
+	}
+	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
+	wrapped := interceptor.NewClient(base, interceptor.Funcs{
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch,
+			opts ...client.PatchOption) error {
+			return apierrors.NewConflict(
+				schema.GroupResource{Resource: "pods"}, obj.GetName(),
+				fmt.Errorf("the object has been modified"),
+			)
+		},
+	})
+	ctrl := NewInPlaceUpdateControl(wrapped, nil)
+
+	resizeBody := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "default"},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name: "c",
+				Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")},
+				},
+			}},
+		},
+	}
+	err := ctrl.patchPodResources(context.Background(), klog.NewKlogr(), pod, resizeBody)
+	if err == nil {
+		t.Fatalf("expected error from conflicted patch")
+	}
+	if !apierrors.IsConflict(err) {
+		t.Fatalf("expected a Conflict error to be propagated unwrapped, got %T: %v", err, err)
+	}
+	var resizeErr *ResizeNotSupportedError
+	if errors.As(err, &resizeErr) {
+		t.Fatalf("Conflict must NOT be wrapped as ResizeNotSupportedError")
+	}
+}
+
+func TestDefaultGeneratePatchBodyFunc_PodHasContainerNotInTemplate(t *testing.T) {
+	// Ensures the `continue` branch when a pod container is absent from the
+	// template is exercised.
+	body := DefaultGeneratePatchBodyFunc(InPlaceUpdateOptions{
+		Box: &agentsapiv1alpha1.Sandbox{
+			Spec: agentsapiv1alpha1.SandboxSpec{
+				EmbeddedSandboxTemplate: agentsapiv1alpha1.EmbeddedSandboxTemplate{
+					Template: &corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: "main", Image: "img:1"}},
+						},
+					},
+				},
+			},
+		},
+		Pod: &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "p",
+				Namespace: "default",
+				Labels: map[string]string{
+					agentsapiv1alpha1.PodLabelTemplateHash: "rev",
+				},
+			},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{Name: "main", Image: "img:1"},
+					{Name: "sidecar-not-in-template", Image: "side:1"},
+				},
+			},
+		},
+		Revision: "rev",
+	})
+	if body != "" {
+		t.Fatalf("expected empty body when only an off-template sidecar is present, got: %s", body)
+	}
+}
+
+func TestInPlaceUpdateControl_Update_PatchError(t *testing.T) {
+	scheme := buildTestScheme(t)
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "default"},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "c", Image: "img:1"}},
+		},
+	}
+	box := &agentsapiv1alpha1.Sandbox{
+		Spec: agentsapiv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsapiv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "c", Image: "img:2"}},
+					},
+				},
+			},
+		},
+	}
+
+	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
+	wrapped := interceptor.NewClient(base, interceptor.Funcs{
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch,
+			opts ...client.PatchOption) error {
+			return apierrors.NewServiceUnavailable("temporary outage")
+		},
+	})
+	ctrl := NewInPlaceUpdateControl(wrapped, nil)
+	progressed, err := ctrl.Update(context.Background(), InPlaceUpdateOptions{
+		Box:      box,
+		Pod:      pod,
+		Revision: "rev",
+	})
+	if err == nil {
+		t.Fatalf("expected error from failing patch")
+	}
+	if progressed {
+		t.Fatalf("expected progressed=false on initial patch failure")
+	}
+}
+
+func TestInPlaceUpdateControl_Update_CustomPatchFunc(t *testing.T) {
+	scheme := buildTestScheme(t)
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "default"},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "c", Image: "img:1"}},
+		},
+	}
+	box := &agentsapiv1alpha1.Sandbox{
+		Spec: agentsapiv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsapiv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "c", Image: "img:1"}},
+					},
+				},
+			},
+		},
+	}
+
+	called := 0
+	custom := func(opts InPlaceUpdateOptions) string {
+		called++
+		return `{"metadata":{"annotations":{"custom":"yes"}}}`
+	}
+	ctrl := NewInPlaceUpdateControl(
+		fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build(),
+		custom,
+	)
+	progressed, err := ctrl.Update(context.Background(), InPlaceUpdateOptions{
+		Box:      box,
+		Pod:      pod,
+		Revision: "rev",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !progressed {
+		t.Fatalf("expected progressed=true")
+	}
+	if called == 0 {
+		t.Fatalf("expected custom patch func to be invoked")
+	}
+	updated := &corev1.Pod{}
+	if err := ctrl.Get(context.Background(),
+		types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace}, updated); err != nil {
+		t.Fatalf("get pod: %v", err)
+	}
+	if updated.Annotations["custom"] != "yes" {
+		t.Fatalf("expected custom annotation to be applied, got %v", updated.Annotations)
+	}
+}
+
+func TestNewInPlaceUpdateControl(t *testing.T) {
+	scheme := buildTestScheme(t)
+	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	ctrl := NewInPlaceUpdateControl(c, nil)
+	if ctrl == nil {
+		t.Fatalf("expected non-nil control")
+	}
+	if ctrl.Client != c {
+		t.Fatalf("expected client to be wired through")
+	}
+	if ctrl.generatePatchBodyFunc != nil {
+		t.Fatalf("expected nil patch func when none provided")
+	}
+
+	customCalled := false
+	custom := func(opts InPlaceUpdateOptions) string {
+		customCalled = true
+		return ""
+	}
+	ctrl2 := NewInPlaceUpdateControl(c, custom)
+	if ctrl2.generatePatchBody(InPlaceUpdateOptions{}) != "" {
+		t.Fatalf("expected empty body from custom func")
+	}
+	if !customCalled {
+		t.Fatalf("expected custom patch func to be called via generatePatchBody dispatcher")
+	}
+}
+
+func TestResizeNotSupportedError(t *testing.T) {
+	inner := fmt.Errorf("boom")
+	err := &ResizeNotSupportedError{Err: inner}
+	if !strings.Contains(err.Error(), "in-place pod resize not supported") {
+		t.Fatalf("unexpected message: %s", err.Error())
+	}
+	if !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("expected wrapped message to be included: %s", err.Error())
+	}
+	if !errors.Is(err, inner) {
+		t.Fatalf("expected errors.Is to match wrapped error")
+	}
+	if err.Unwrap() != inner {
+		t.Fatalf("Unwrap() returned %v, want %v", err.Unwrap(), inner)
+	}
+}
+
+func TestBuildResourcePatch(t *testing.T) {
+	body := &corev1.Pod{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{
+					Name: "c1",
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceCPU: resource.MustParse("250m"),
+						},
+						Limits: corev1.ResourceList{
+							corev1.ResourceMemory: resource.MustParse("128Mi"),
+						},
+					},
+				},
+				{Name: "c2"},
+			},
+		},
+	}
+	patch := buildResourcePatch(body)
+	if patch == "" {
+		t.Fatalf("expected non-empty patch")
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(patch), &parsed); err != nil {
+		t.Fatalf("unmarshal patch: %v", err)
+	}
+	spec, ok := parsed["spec"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected spec in patch, got %v", parsed)
+	}
+	containers, ok := spec["containers"].([]any)
+	if !ok {
+		t.Fatalf("expected containers slice, got %v", spec)
+	}
+	if len(containers) != 2 {
+		t.Fatalf("expected 2 containers, got %d", len(containers))
+	}
+	if _, exists := parsed["metadata"]; exists {
+		t.Fatalf("resource patch should not include metadata")
+	}
+}
+
+func TestDefaultGenerateResizeSubresourceBody_NilTemplateAndNoChange(t *testing.T) {
+	if got := DefaultGenerateResizeSubresourceBody(InPlaceUpdateOptions{
+		Box: &agentsapiv1alpha1.Sandbox{},
+		Pod: &corev1.Pod{},
+	}); got != nil {
+		t.Fatalf("expected nil body when template is nil, got %+v", got)
+	}
+
+	identical := corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m")},
+	}
+	body := DefaultGenerateResizeSubresourceBody(InPlaceUpdateOptions{
+		Box: &agentsapiv1alpha1.Sandbox{
+			Spec: agentsapiv1alpha1.SandboxSpec{
+				EmbeddedSandboxTemplate: agentsapiv1alpha1.EmbeddedSandboxTemplate{
+					Template: &corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{Name: "c", Resources: identical},
+								{Name: "absent-from-pod", Resources: identical},
+							},
+						},
+					},
+				},
+			},
+		},
+		Pod: &corev1.Pod{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{Name: "c", Resources: identical},
+					{Name: "extra", Resources: corev1.ResourceRequirements{}},
+				},
+			},
+		},
+	})
+	if body != nil {
+		t.Fatalf("expected nil body when no resource changes, got %+v", body)
+	}
+}
+
+func TestDefaultGeneratePatchBodyFunc_NoChange(t *testing.T) {
+	got := DefaultGeneratePatchBodyFunc(InPlaceUpdateOptions{
+		Box: &agentsapiv1alpha1.Sandbox{
+			Spec: agentsapiv1alpha1.SandboxSpec{
+				EmbeddedSandboxTemplate: agentsapiv1alpha1.EmbeddedSandboxTemplate{
+					Template: &corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: "c", Image: "img:1"}},
+						},
+					},
+				},
+			},
+		},
+		Pod: &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "p",
+				Namespace: "default",
+				Labels: map[string]string{
+					agentsapiv1alpha1.PodLabelTemplateHash: "r",
+				},
+			},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "c", Image: "img:1"}},
+			},
+		},
+		Revision: "r",
+	})
+	if got != "" {
+		t.Fatalf("expected empty patch body when nothing changed, got %s", got)
+	}
+}
+
+func TestDefaultGeneratePatchBodyFunc_ImageOnly(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "p",
+			Namespace: "default",
+			Labels: map[string]string{
+				"keep":    "me",
+				"app":     "old",
+				"already": "set",
+			},
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "c", Image: "old"}},
+		},
+		Status: corev1.PodStatus{
+			ContainerStatuses: []corev1.ContainerStatus{
+				{Name: "c", ImageID: "old-id"},
+			},
+		},
+	}
+	box := &agentsapiv1alpha1.Sandbox{
+		Spec: agentsapiv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsapiv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{
+						Labels: map[string]string{
+							"app":     "new",
+							"already": "set",
+						},
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "c", Image: "new"}},
+					},
+				},
+			},
+		},
+	}
+
+	body := DefaultGeneratePatchBodyFunc(InPlaceUpdateOptions{
+		Box:      box,
+		Pod:      pod,
+		Revision: "rev-img",
+	})
+	if body == "" {
+		t.Fatalf("expected non-empty body for image change")
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(body), &decoded); err != nil {
+		t.Fatalf("unmarshal patch: %v", err)
+	}
+	metadata, _ := decoded["metadata"].(map[string]any)
+	labels, _ := metadata["labels"].(map[string]any)
+	if labels["app"] != "new" {
+		t.Fatalf("expected app label updated, got %v", labels)
+	}
+	if _, exists := labels["already"]; exists {
+		t.Fatalf("labels already in sync should not be patched again")
+	}
+	if labels[agentsapiv1alpha1.PodLabelTemplateHash] != "rev-img" {
+		t.Fatalf("expected template hash label, got %v", labels)
+	}
+
+	annotations, _ := metadata["annotations"].(map[string]any)
+	stateRaw, _ := annotations[PodAnnotationInPlaceUpdateStateKey].(string)
+	state := &InPlaceUpdateState{}
+	if err := json.Unmarshal([]byte(stateRaw), state); err != nil {
+		t.Fatalf("decode state: %v", err)
+	}
+	if !state.UpdateImages || state.UpdateResources {
+		t.Fatalf("expected only updateImages=true, got %+v", state)
+	}
+	if state.LastContainerStatuses["c"].ImageID != "old-id" {
+		t.Fatalf("expected previous image id captured, got %+v", state.LastContainerStatuses)
+	}
+}
+
+func TestProcessResourceListAndGetQOSResources(t *testing.T) {
+	// Sum non-zero CPU values across two containers; verify zero/unsupported
+	// resources are skipped and that the second container's CPU is added to
+	// the existing entry rather than overwriting it.
+	list := corev1.ResourceList{}
+	processResourceList(list, corev1.ResourceList{
+		corev1.ResourceCPU:              resource.MustParse("100m"),
+		corev1.ResourceMemory:           resource.MustParse("0"),
+		corev1.ResourceEphemeralStorage: resource.MustParse("1Gi"),
+	})
+	processResourceList(list, corev1.ResourceList{
+		corev1.ResourceCPU:    resource.MustParse("250m"),
+		corev1.ResourceMemory: resource.MustParse("128Mi"),
+	})
+	cpu := list[corev1.ResourceCPU]
+	if cpu.MilliValue() != 350 {
+		t.Fatalf("expected accumulated cpu = 350m, got %dm", cpu.MilliValue())
+	}
+	if _, ok := list[corev1.ResourceEphemeralStorage]; ok {
+		t.Fatalf("unsupported resource should not be tracked")
+	}
+
+	qos := getQOSResources(corev1.ResourceList{
+		corev1.ResourceCPU:              resource.MustParse("100m"),
+		corev1.ResourceMemory:           resource.MustParse("0"),
+		corev1.ResourceEphemeralStorage: resource.MustParse("1Gi"),
+	})
+	if !qos[corev1.ResourceCPU] {
+		t.Fatalf("expected cpu marked")
+	}
+	if qos[corev1.ResourceMemory] {
+		t.Fatalf("zero memory should be skipped")
+	}
+	if qos[corev1.ResourceEphemeralStorage] {
+		t.Fatalf("unsupported resource should be skipped")
+	}
+}
+
+func TestIsResourceListCovered(t *testing.T) {
+	expected := corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m")}
+
+	if !isResourceListCovered(corev1.ResourceList{
+		corev1.ResourceCPU:    resource.MustParse("100m"),
+		corev1.ResourceMemory: resource.MustParse("64Mi"),
+	}, expected) {
+		t.Fatalf("expected actual=expected (with extra) to be covered")
+	}
+	if isResourceListCovered(corev1.ResourceList{}, expected) {
+		t.Fatalf("missing key should not be covered")
+	}
+	if isResourceListCovered(corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("99m")}, expected) {
+		t.Fatalf("smaller value should not be covered")
+	}
+}
+
+func TestIsPodResourceResizeCompleted(t *testing.T) {
+	tmpl := corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")},
+		Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")},
+	}
+	pod := &corev1.Pod{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "c", Resources: tmpl}},
+		},
+	}
+
+	if isPodResourceResizeCompleted(pod) {
+		t.Fatalf("expected not completed when status is empty")
+	}
+
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "c"}}
+	if isPodResourceResizeCompleted(pod) {
+		t.Fatalf("expected not completed when status.resources is nil")
+	}
+
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name: "c",
+		Resources: &corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("250m")},
+			Limits:   tmpl.Limits,
+		},
+	}}
+	if isPodResourceResizeCompleted(pod) {
+		t.Fatalf("expected not completed when requests do not match")
+	}
+
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name: "c",
+		Resources: &corev1.ResourceRequirements{
+			Requests: tmpl.Requests,
+			Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("250m")},
+		},
+	}}
+	if isPodResourceResizeCompleted(pod) {
+		t.Fatalf("expected not completed when limits do not match")
+	}
+
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name:      "c",
+		Resources: &tmpl,
+	}}
+	if !isPodResourceResizeCompleted(pod) {
+		t.Fatalf("expected completed when spec/status resources match")
 	}
 }
 
