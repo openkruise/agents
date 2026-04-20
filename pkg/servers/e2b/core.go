@@ -48,7 +48,7 @@ type Controller struct {
 	clientConfig    *rest.Config
 	domain          string
 	manager         *sandbox_manager.SandboxManager
-	keys            *keys.SecretKeyStorage
+	keys            keys.KeyStorage
 }
 
 // NewController creates a new E2B Controller
@@ -77,12 +77,7 @@ func NewController(domain, adminKey string, sysNs, sandboxNamespace, sandboxLabe
 	}
 
 	if enableAuth {
-		sc.keys = &keys.SecretKeyStorage{
-			Namespace: sysNs,
-			AdminKey:  adminKey,
-			Client:    clientSet.K8sClient,
-			Stop:      make(chan struct{}),
-		}
+		sc.keys = keys.NewSecretKeyStorage(clientSet.K8sClient, sysNs, adminKey)
 	}
 	return sc
 }

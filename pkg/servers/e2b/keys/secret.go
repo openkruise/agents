@@ -43,6 +43,15 @@ type SecretKeyStorage struct {
 	idxByID  sync.Map
 }
 
+func NewSecretKeyStorage(client kubernetes.Interface, namespace, adminKey string) KeyStorage {
+	return &SecretKeyStorage{
+		Namespace: namespace,
+		AdminKey:  adminKey,
+		Client:    client,
+		Stop:      make(chan struct{}),
+	}
+}
+
 func (k *SecretKeyStorage) Init(ctx context.Context) error {
 	log := klog.FromContext(ctx)
 	log.Info("ensuring api-key store secret")

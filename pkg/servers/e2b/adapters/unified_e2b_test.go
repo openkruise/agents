@@ -24,12 +24,7 @@ func SetUpE2BAdapter(t *testing.T) proxy.RequestAdapter {
 		Data: map[string][]byte{},
 	}, metav1.CreateOptions{})
 	assert.NoError(t, err)
-	keyStore := &keys.SecretKeyStorage{
-		Namespace: "default",
-		AdminKey:  adminKey,
-		Client:    client.K8sClient,
-		Stop:      make(chan struct{}),
-	}
+	keyStore := keys.NewSecretKeyStorage(client.K8sClient, "default", adminKey)
 	assert.NoError(t, keyStore.Init(context.Background()))
 	return NewE2BAdapter(8080)
 }
