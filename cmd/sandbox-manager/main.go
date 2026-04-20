@@ -21,6 +21,8 @@ import (
 	"net/http"         // Added for pprof server
 	_ "net/http/pprof" // Added to register pprof handlers
 
+	"os"
+
 	"github.com/google/uuid"
 	"github.com/spf13/pflag"
 	zapRaw "go.uber.org/zap"
@@ -31,6 +33,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/servers/e2b"
+	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/utils"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
@@ -57,6 +60,8 @@ func main() {
 	var kubeClientQPS float64
 	var kubeClientBurst int
 	var memberlistBindPort int
+	var e2bKeyStorage string
+	var e2bKeyStorageDSN string
 
 	utilfeature.DefaultMutableFeatureGate.AddFlag(pflag.CommandLine)
 
@@ -80,6 +85,11 @@ func main() {
 	pflag.Float64Var(&kubeClientQPS, "kube-client-qps", 500, "QPS for Kubernetes client")
 	pflag.IntVar(&kubeClientBurst, "kube-client-burst", 1000, "Burst for Kubernetes client")
 	pflag.IntVar(&memberlistBindPort, "memberlist-bind-port", 7946, "Port for memberlist gossip (default 7946)")
+	pflag.StringVar(&e2bKeyStorage, "e2b-key-storage", "secret",
+		"Storage backend for E2B API keys. Valid values: 'secret' (K8s Secret, default), 'mysql' (MySQL via GORM)")
+	pflag.StringVar(&e2bKeyStorageDSN, "e2b-key-storage-dsn", "",
+		"DSN for MySQL key storage. Required when --e2b-key-storage=mysql. "+
+			"Example: user:pass@tcp(127.0.0.1:3306)/e2b?charset=utf8mb4&parseTime=True&loc=Local")
 
 	opts := zap.Options{
 		Development: false,
@@ -144,14 +154,36 @@ func main() {
 		klog.Fatalf("--kube-client-burst must be greater than 0")
 	}
 
+	switch e2bKeyStorage {
+	case "secret":
+	case "mysql":
+		if e2bEnableAuth && e2bKeyStorageDSN == "" {
+			klog.Fatalf("--e2b-key-storage-dsn is required when --e2b-key-storage=mysql")
+		}
+	default:
+		klog.Fatalf("--e2b-key-storage must be one of: secret, mysql")
+	}
+
 	// Initialize Kubernetes client and config
 	clientSet, err := clients.NewClientSetWithOptions(float32(kubeClientQPS), kubeClientBurst)
 	if err != nil {
 		klog.Fatalf("Failed to initialize Kubernetes client: %v", err)
 	}
 
-	sandboxController := e2b.NewController(domain, e2bAdminKey, sysNs, sandboxNamespace, sandboxLabelSelector, e2bMaxTimeout, maxClaimWorkers, maxCreateQPS, uint32(extProcMaxConcurrency),
-		port, e2bEnableAuth, memberlistBindPort, clientSet)
+	var keyCfg *keys.Config
+	if e2bEnableAuth {
+		keyCfg = &keys.Config{
+			Mode:      keys.StorageMode(e2bKeyStorage),
+			Namespace: sysNs,
+			AdminKey:  e2bAdminKey,
+			DSN:       e2bKeyStorageDSN,
+			Pepper:    os.Getenv("E2B_KEY_HASH_PEPPER"),
+			K8sClient: clientSet.K8sClient,
+		}
+	}
+
+	sandboxController := e2b.NewController(domain, sysNs, sandboxNamespace, sandboxLabelSelector, e2bMaxTimeout, maxClaimWorkers, maxCreateQPS, uint32(extProcMaxConcurrency),
+		port, memberlistBindPort, keyCfg, clientSet)
 	if err := sandboxController.Init(); err != nil {
 		klog.Fatalf("Failed to initialize sandbox controller: %v", err)
 	}

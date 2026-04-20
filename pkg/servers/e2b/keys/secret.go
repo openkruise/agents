@@ -22,37 +22,44 @@ import (
 )
 
 var (
-	KeySecretName = "e2b-key-store"
-	AdminKeyID    uuid.UUID
+	KeySecretName    = "e2b-key-store"
+	AdminKeyID       uuid.UUID
+	generateUUID     = uuid.New
+	marshalAPIKey    = json.Marshal
+	newRefreshTicker = func() *time.Ticker {
+		return time.NewTicker(10 * time.Minute)
+	}
 )
 
 func init() {
 	AdminKeyID = uuid.MustParse("550e8400-e29b-41d4-a716-446655440000") // no means, just a const
 }
 
-// SecretKeyStorage is a simple implement for api-key storage using k8s secret as storage backend.
+// secretKeyStorage is a simple implement for api-key storage using k8s secret as storage backend.
 // It is only for demo purpose.
-type SecretKeyStorage struct {
+type secretKeyStorage struct {
 	Namespace string
 	AdminKey  string
 
 	Client kubernetes.Interface
-	Stop   chan struct{}
+	stop   chan struct{}
+
+	stopOnce sync.Once
 
 	idxByKey sync.Map
 	idxByID  sync.Map
 }
 
 func NewSecretKeyStorage(client kubernetes.Interface, namespace, adminKey string) KeyStorage {
-	return &SecretKeyStorage{
+	return &secretKeyStorage{
 		Namespace: namespace,
 		AdminKey:  adminKey,
 		Client:    client,
-		Stop:      make(chan struct{}),
+		stop:      make(chan struct{}),
 	}
 }
 
-func (k *SecretKeyStorage) Init(ctx context.Context) error {
+func (k *secretKeyStorage) Init(ctx context.Context) error {
 	log := klog.FromContext(ctx)
 	log.Info("ensuring api-key store secret")
 
@@ -80,7 +87,7 @@ func (k *SecretKeyStorage) Init(ctx context.Context) error {
 	return k.refresh(ctx)
 }
 
-func (k *SecretKeyStorage) refresh(ctx context.Context) error {
+func (k *secretKeyStorage) refresh(ctx context.Context) error {
 	log := klog.FromContext(ctx)
 	log.Info("refreshing api-key store")
 	secret, err := k.Client.CoreV1().Secrets(k.Namespace).Get(ctx, KeySecretName, metav1.GetOptions{})
@@ -114,9 +121,9 @@ func (k *SecretKeyStorage) refresh(ctx context.Context) error {
 	return nil
 }
 
-func (k *SecretKeyStorage) Run() {
+func (k *secretKeyStorage) Run() {
 	go func() {
-		ticker := time.NewTicker(10 * time.Minute)
+		ticker := newRefreshTicker()
 		ctx := logs.NewContext()
 		log := klog.FromContext(ctx)
 		for {
@@ -125,7 +132,7 @@ func (k *SecretKeyStorage) Run() {
 				if err := k.refresh(ctx); err != nil {
 					log.Error(err, "failed to refresh key store")
 				}
-			case <-k.Stop:
+			case <-k.stop:
 				ticker.Stop()
 				log.Info("api-key refreshing stopped")
 				return
@@ -134,7 +141,14 @@ func (k *SecretKeyStorage) Run() {
 	}()
 }
 
-func (k *SecretKeyStorage) LoadByKey(key string) (*models.CreatedTeamAPIKey, bool) {
+// Stop signals the background refresh goroutine to exit.
+func (k *secretKeyStorage) Stop() {
+	k.stopOnce.Do(func() {
+		close(k.stop)
+	})
+}
+
+func (k *secretKeyStorage) LoadByKey(_ context.Context, key string) (*models.CreatedTeamAPIKey, bool) {
 	value, ok := k.idxByKey.Load(key)
 	if !ok {
 		return nil, false
@@ -142,7 +156,7 @@ func (k *SecretKeyStorage) LoadByKey(key string) (*models.CreatedTeamAPIKey, boo
 	return value.(*models.CreatedTeamAPIKey), true
 }
 
-func (k *SecretKeyStorage) LoadByID(id string) (*models.CreatedTeamAPIKey, bool) {
+func (k *secretKeyStorage) LoadByID(_ context.Context, id string) (*models.CreatedTeamAPIKey, bool) {
 	value, ok := k.idxByID.Load(id)
 	if !ok {
 		return nil, false
@@ -150,13 +164,13 @@ func (k *SecretKeyStorage) LoadByID(id string) (*models.CreatedTeamAPIKey, bool)
 	return value.(*models.CreatedTeamAPIKey), true
 }
 
-func (k *SecretKeyStorage) retryUpdateSecret(ctx context.Context, id string, apiKey *models.CreatedTeamAPIKey) error {
+func (k *secretKeyStorage) retryUpdateSecret(ctx context.Context, id string, apiKey *models.CreatedTeamAPIKey) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		return k.updateSecret(ctx, id, apiKey)
 	})
 }
 
-func (k *SecretKeyStorage) updateSecret(ctx context.Context, id string, apiKey *models.CreatedTeamAPIKey) error {
+func (k *secretKeyStorage) updateSecret(ctx context.Context, id string, apiKey *models.CreatedTeamAPIKey) error {
 	secret, err := k.Client.CoreV1().Secrets(k.Namespace).Get(ctx, KeySecretName, metav1.GetOptions{})
 	if err != nil {
 		return err
@@ -165,7 +179,7 @@ func (k *SecretKeyStorage) updateSecret(ctx context.Context, id string, apiKey *
 		secret.Data = make(map[string][]byte)
 	}
 	if apiKey != nil {
-		marshaled, err := json.Marshal(apiKey)
+		marshaled, err := marshalAPIKey(apiKey)
 		if err != nil {
 			return fmt.Errorf("failed to marshal api-key: %w", err)
 		}
@@ -177,12 +191,12 @@ func (k *SecretKeyStorage) updateSecret(ctx context.Context, id string, apiKey *
 	return err
 }
 
-func (k *SecretKeyStorage) storeKey(apiKey *models.CreatedTeamAPIKey) {
+func (k *secretKeyStorage) storeKey(apiKey *models.CreatedTeamAPIKey) {
 	k.idxByKey.Store(apiKey.Key, apiKey)
 	k.idxByID.Store(apiKey.ID.String(), apiKey)
 }
 
-func (k *SecretKeyStorage) CreateKey(ctx context.Context, user *models.CreatedTeamAPIKey, name string) (*models.CreatedTeamAPIKey, error) {
+func (k *secretKeyStorage) CreateKey(ctx context.Context, user *models.CreatedTeamAPIKey, name string) (*models.CreatedTeamAPIKey, error) {
 	log := klog.FromContext(ctx).WithValues("name", name).V(consts.DebugLogLevel)
 	if name == "" || user == nil {
 		return nil, errors.New("api-key name and user are required")
@@ -190,10 +204,10 @@ func (k *SecretKeyStorage) CreateKey(ctx context.Context, user *models.CreatedTe
 
 	var newID, newKey uuid.UUID
 	for i := 0; i < 100; i++ {
-		newID = uuid.New()
-		newKey = uuid.New()
-		_, ok1 := k.LoadByID(newID.String())
-		_, ok2 := k.LoadByKey(newKey.String())
+		newID = generateUUID()
+		newKey = generateUUID()
+		_, ok1 := k.LoadByID(ctx, newID.String())
+		_, ok2 := k.LoadByKey(ctx, newKey.String())
 		if !ok1 && !ok2 {
 			break
 		}
@@ -222,7 +236,7 @@ func (k *SecretKeyStorage) CreateKey(ctx context.Context, user *models.CreatedTe
 	return apiKey, nil
 }
 
-func (k *SecretKeyStorage) DeleteKey(ctx context.Context, key *models.CreatedTeamAPIKey) error {
+func (k *secretKeyStorage) DeleteKey(ctx context.Context, key *models.CreatedTeamAPIKey) error {
 	if key == nil {
 		return nil
 	}
@@ -235,7 +249,7 @@ func (k *SecretKeyStorage) DeleteKey(ctx context.Context, key *models.CreatedTea
 	return nil
 }
 
-func (k *SecretKeyStorage) ListByOwner(owner uuid.UUID) []*models.TeamAPIKey {
+func (k *secretKeyStorage) ListByOwner(_ context.Context, owner uuid.UUID) ([]*models.TeamAPIKey, error) {
 	var result []*models.TeamAPIKey
 	k.idxByID.Range(func(_, value any) bool {
 		apikey := value.(*models.CreatedTeamAPIKey)
@@ -251,5 +265,5 @@ func (k *SecretKeyStorage) ListByOwner(owner uuid.UUID) []*models.TeamAPIKey {
 		}
 		return true
 	})
-	return result
+	return result, nil
 }

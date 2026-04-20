@@ -88,8 +88,13 @@ func Setup(t *testing.T) (*Controller, *clients.ClientSet, func()) {
 	_, err := clientSet.CoreV1().Secrets(namespace).Create(t.Context(), secret, metav1.CreateOptions{})
 	assert.NoError(t, err)
 
-	controller := NewController("example.com", InitKey, namespace, "", "", models.DefaultMaxTimeout, 10,
-		0, 0, TestServerPort, true, config.DefaultMemberlistBindPort, clientSet)
+	controller := NewController("example.com", namespace, "", "", models.DefaultMaxTimeout, 10,
+		0, 0, TestServerPort, config.DefaultMemberlistBindPort, &keys.Config{
+			Mode:      keys.StorageModeSecret,
+			Namespace: namespace,
+			AdminKey:  InitKey,
+			K8sClient: clientSet.K8sClient,
+		}, clientSet)
 	assert.NoError(t, controller.Init())
 	_, err = controller.Run(namespace, "component=sandbox-manager")
 	assert.NoError(t, err)

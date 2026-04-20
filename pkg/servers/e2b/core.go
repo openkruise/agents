@@ -51,9 +51,10 @@ type Controller struct {
 	keys            keys.KeyStorage
 }
 
-// NewController creates a new E2B Controller
-func NewController(domain, adminKey string, sysNs, sandboxNamespace, sandboxLabelSelector string, maxTimeout, maxClaimWorkers, maxCreateQPS int, extProcMaxConcurrency uint32,
-	port int, enableAuth bool, memberlistBindPort int, clientSet *clients.ClientSet) *Controller {
+// NewController creates a new E2B Controller.
+// When keyCfg is not nil, authentication is enabled and the provided config is used to initialize key storage.
+func NewController(domain string, sysNs, sandboxNamespace, sandboxLabelSelector string, maxTimeout, maxClaimWorkers, maxCreateQPS int, extProcMaxConcurrency uint32,
+	port, memberlistBindPort int, keyCfg *keys.Config, clientSet *clients.ClientSet) *Controller {
 	sc := &Controller{
 		mux:                   http.NewServeMux(),
 		client:                clientSet,
@@ -76,8 +77,12 @@ func NewController(domain, adminKey string, sysNs, sandboxNamespace, sandboxLabe
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	if enableAuth {
-		sc.keys = keys.NewSecretKeyStorage(clientSet.K8sClient, sysNs, adminKey)
+	if keyCfg != nil {
+		storage, err := keys.NewKeyStorage(*keyCfg)
+		if err != nil {
+			klog.Fatalf("Failed to initialize key storage: %v", err)
+		}
+		sc.keys = storage
 	}
 	return sc
 }
@@ -147,6 +152,9 @@ func (sc *Controller) Run(sysNs, peerSelector string) (context.Context, error) {
 		defer shutdownCancel()
 		if err := sc.server.Shutdown(shutdownCtx); err != nil {
 			klog.ErrorS(err, "HTTP server forced to shutdown")
+		}
+		if sc.keys != nil {
+			sc.keys.Stop()
 		}
 		klog.InfoS("Server exited")
 	}()

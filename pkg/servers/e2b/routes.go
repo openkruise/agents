@@ -77,7 +77,7 @@ func (sc *Controller) CheckApiKey(ctx context.Context, r *http.Request) (context
 	if sc.keys == nil {
 		user = AnonymousUser
 	} else {
-		user, ok = sc.keys.LoadByKey(apiKey)
+		user, ok = sc.keys.LoadByKey(ctx, apiKey)
 		if !ok {
 			middleWareLog.Info("failed to load key by API-KEY")
 			return ctx, &web.ApiError{

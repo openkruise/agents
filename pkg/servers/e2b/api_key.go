@@ -17,7 +17,13 @@ func (sc *Controller) ListAPIKeys(r *http.Request) (web.ApiResponse[[]*models.Te
 			Message: "User not found",
 		}
 	}
-	apiKeys := sc.keys.ListByOwner(user.ID)
+	apiKeys, err := sc.keys.ListByOwner(ctx, user.ID)
+	if err != nil {
+		return web.ApiResponse[[]*models.TeamAPIKey]{}, &web.ApiError{
+			Code:    http.StatusInternalServerError,
+			Message: fmt.Sprintf("Failed to list API keys: %v", err),
+		}
+	}
 
 	return web.ApiResponse[[]*models.TeamAPIKey]{
 		Body: apiKeys,
@@ -65,7 +71,7 @@ func (sc *Controller) DeleteAPIKey(r *http.Request) (web.ApiResponse[struct{}], 
 		}
 	}
 
-	key, ok := sc.keys.LoadByID(apiKeyID)
+	key, ok := sc.keys.LoadByID(ctx, apiKeyID)
 	if !ok {
 		return web.ApiResponse[struct{}]{}, &web.ApiError{
 			Code:    http.StatusNotFound,
