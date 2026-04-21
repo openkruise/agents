@@ -79,7 +79,8 @@ jobs:
             echo "Cached inplace-update image"
           fi
 
-      - name: Build image
+      # Flow: build/load images → MySQL → deploy agents with MySQL key storage (no post-deploy patch) → E2E
+      - name: Build and load container images
         run: |
            make docker-build-manager
            make docker-build-controller
@@ -95,30 +96,33 @@ jobs:
            kind load docker-image --name=${KIND_CLUSTER_NAME} ${INPLACE_UPDATE_IMG} || { echo >&2 "kind not installed or error loading image: ${INPLACE_UPDATE_IMG}"; exit 1; }
            docker rmi ${INPLACE_UPDATE_IMG}
 
-      - name: Install Kruise Agents
-        run: |
-          make deploy-agent-sandbox-controller
-          make deploy-sandbox-manager
-          bash hack/wait-agent-sandbox-controller.sh
-
       - name: Deploy MySQL in Kind cluster
         env:
           MYSQL_DATABASE: ${{ env.MYSQL_DATABASE }}
           MYSQL_ROOT_PASSWORD: ${{ env.MYSQL_ROOT_PASSWORD }}
         run: bash hack/deploy-mysql-kind-ci.sh
 
-      - name: Configure sandbox-manager to use MySQL Key Storage
+      - name: Install Kruise Agents
         env:
           MYSQL_DATABASE: ${{ env.MYSQL_DATABASE }}
           MYSQL_ROOT_PASSWORD: ${{ env.MYSQL_ROOT_PASSWORD }}
         run: |
           MYSQL_DSN="root:${MYSQL_ROOT_PASSWORD}@tcp(mysql.sandbox-system.svc.cluster.local:3306)/${MYSQL_DATABASE}?charset=utf8mb4&parseTime=True&loc=Local"
-          kubectl patch deployment sandbox-manager -n sandbox-system --type='json' \
-            -p="[
-              {\"op\": \"add\", \"path\": \"/spec/template/spec/containers/0/args/-\", \"value\": \"--e2b-key-storage=mysql\"},
-              {\"op\": \"add\", \"path\": \"/spec/template/spec/containers/0/args/-\", \"value\": \"--e2b-key-storage-dsn=${MYSQL_DSN}\"}
-            ]"
-          kubectl rollout status deployment/sandbox-manager -n sandbox-system --timeout=3m
+          {
+            echo ""
+            echo "# E2B MySQL key storage (appended by e2e-e2b-mysql-latest before deploy)"
+            echo "- op: add"
+            echo "  path: /spec/template/spec/containers/0/args/-"
+            echo "  value: --e2b-key-storage=mysql"
+            echo "- op: add"
+            echo "  path: /spec/template/spec/containers/0/args/-"
+            printf '  value: "--e2b-key-storage-dsn=%s"\n' "${MYSQL_DSN}"
+          } >> config/sandbox-manager/configuration_patch.yaml
+          echo "deployment patch:"
+          cat config/sandbox-manager/configuration_patch.yaml
+          make deploy-agent-sandbox-controller
+          make deploy-sandbox-manager
+          bash hack/wait-agent-sandbox-controller.sh
 
       - name: Run E2E Tests
         run: |

@@ -14,7 +14,7 @@
 # limitations under the License.
 
 # Deploy a single-replica MySQL 8 Deployment + Service into sandbox-system (Kind / CI).
-# Requires namespace sandbox-system to exist (created by sandbox-manager deploy).
+# Ensures the target namespace exists (creates it if missing) so MySQL can be deployed before Kruise Agents.
 #
 # Env (optional): MYSQL_DATABASE, MYSQL_ROOT_PASSWORD, MYSQL_NAMESPACE, MYSQL_WAIT_TIMEOUT
 
@@ -63,11 +63,8 @@ cleanup_on_error() {
 trap cleanup_on_error ERR
 
 log "Starting MySQL deploy: namespace=${MYSQL_NAMESPACE} database=${MYSQL_DATABASE} wait_timeout=${MYSQL_WAIT_TIMEOUT}"
-log "Checking namespace exists..."
-kubectl get namespace "${MYSQL_NAMESPACE}" &>/dev/null || {
-  log_fail "Namespace ${MYSQL_NAMESPACE} not found. Deploy sandbox-manager first."
-  exit 1
-}
+log "Ensuring namespace ${MYSQL_NAMESPACE} exists..."
+kubectl create namespace "${MYSQL_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
 
 # The official image runs as OS user 'mysql'; mysqladmin defaults to -u matching that user, so TCP
 # checks must use -uroot. Probes bake the password at apply time from MYSQL_ROOT_PASSWORD.
