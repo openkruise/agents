@@ -62,10 +62,23 @@ set -x
 
 # Step 1: Wait for sandbox-manager pods to be ready
 echo "Waiting for sandbox-manager pods to be ready..."
-kubectl wait --for=condition=ready pod \
-    -l component=sandbox-manager \
-    -n sandbox-system \
-    --timeout=5m
+
+if ! kubectl wait --for=condition=ready pod \
+        -l component=sandbox-manager \
+        -n sandbox-system \
+        --timeout=5m; then
+    echo "Error: Failed to wait for sandbox-manager pods to be ready"
+    echo "\n=== Pod Status ==="
+    kubectl get pod -l component=sandbox-manager -n sandbox-system -o wide
+    echo "\n=== Pod Describe ==="
+    kubectl describe pod -l component=sandbox-manager -n sandbox-system
+    echo "\n=== Pod Logs ==="
+    for pod in $(kubectl get pod -l component=sandbox-manager -n sandbox-system --no-headers -o jsonpath='{.items[*].metadata.name}'); do
+        echo "--- Logs for $pod ---"
+        kubectl logs $pod -n sandbox-system --all-containers --tail=100 2>&1 || echo "Failed to get logs for $pod"
+    done
+    exit 1
+fi
 
 echo "All sandbox-manager pods are ready"
 
