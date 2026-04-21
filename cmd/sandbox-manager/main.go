@@ -20,6 +20,7 @@ import (
 	"flag"
 	"net/http"         // Added for pprof server
 	_ "net/http/pprof" // Added to register pprof handlers
+	"strings"
 
 	"os"
 
@@ -61,7 +62,7 @@ func main() {
 	var kubeClientBurst int
 	var memberlistBindPort int
 	var e2bKeyStorage string
-	var e2bKeyStorageDSN string
+	var e2bKeyStorageDisableAutoMigrate bool
 
 	utilfeature.DefaultMutableFeatureGate.AddFlag(pflag.CommandLine)
 
@@ -86,10 +87,10 @@ func main() {
 	pflag.IntVar(&kubeClientBurst, "kube-client-burst", 1000, "Burst for Kubernetes client")
 	pflag.IntVar(&memberlistBindPort, "memberlist-bind-port", 7946, "Port for memberlist gossip (default 7946)")
 	pflag.StringVar(&e2bKeyStorage, "e2b-key-storage", "secret",
-		"Storage backend for E2B API keys. Valid values: 'secret' (K8s Secret, default), 'mysql' (MySQL via GORM)")
-	pflag.StringVar(&e2bKeyStorageDSN, "e2b-key-storage-dsn", "",
-		"DSN for MySQL key storage. Required when --e2b-key-storage=mysql. "+
-			"Example: user:pass@tcp(127.0.0.1:3306)/e2b?charset=utf8mb4&parseTime=True&loc=Local")
+		"Storage backend for E2B API keys. Valid values: 'secret' (K8s Secret, default), 'mysql' (MySQL via GORM). "+
+			"When --e2b-key-storage=mysql and auth is enabled, set MySQL DSN via environment variable "+utils.E2BKeyStorageDSNEnvVar)
+	pflag.BoolVar(&e2bKeyStorageDisableAutoMigrate, "e2b-key-storage-disable-auto-migrate", false,
+		"Disable GORM schema auto-migration for MySQL key storage; when enabled, schema changes are skipped but admin team/key bootstrap still runs")
 
 	opts := zap.Options{
 		Development: false,
@@ -154,14 +155,22 @@ func main() {
 		klog.Fatalf("--kube-client-burst must be greater than 0")
 	}
 
-	switch e2bKeyStorage {
-	case "secret":
-	case "mysql":
-		if e2bEnableAuth && e2bKeyStorageDSN == "" {
-			klog.Fatalf("--e2b-key-storage-dsn is required when --e2b-key-storage=mysql")
+	e2bKeyStorageDSN := strings.TrimSpace(os.Getenv(utils.E2BKeyStorageDSNEnvVar))
+	e2bKeyStoragePepper := strings.TrimSpace(os.Getenv(utils.E2BKeyHashPepperEnvVar))
+	if e2bEnableAuth {
+		// Validate key storage args
+		switch e2bKeyStorage {
+		case "secret": // No validation needed
+		case "mysql":
+			if e2bKeyStorageDSN == "" {
+				klog.Fatalf("env %s is required when --e2b-key-storage=mysql", utils.E2BKeyStorageDSNEnvVar)
+			}
+			if e2bKeyStoragePepper == "" {
+				klog.Fatalf("env %s is required when --e2b-key-storage=mysql", utils.E2BKeyHashPepperEnvVar)
+			}
+		default:
+			klog.Fatalf("--e2b-key-storage must be 'secret' or 'mysql'")
 		}
-	default:
-		klog.Fatalf("--e2b-key-storage must be one of: secret, mysql")
 	}
 
 	// Initialize Kubernetes client and config
@@ -173,12 +182,13 @@ func main() {
 	var keyCfg *keys.Config
 	if e2bEnableAuth {
 		keyCfg = &keys.Config{
-			Mode:      keys.StorageMode(e2bKeyStorage),
-			Namespace: sysNs,
-			AdminKey:  e2bAdminKey,
-			DSN:       e2bKeyStorageDSN,
-			Pepper:    os.Getenv("E2B_KEY_HASH_PEPPER"),
-			K8sClient: clientSet.K8sClient,
+			Mode:               keys.StorageMode(e2bKeyStorage),
+			Namespace:          sysNs,
+			AdminKey:           e2bAdminKey,
+			DSN:                e2bKeyStorageDSN,
+			DisableAutoMigrate: e2bKeyStorageDisableAutoMigrate,
+			Pepper:             e2bKeyStoragePepper,
+			K8sClient:          clientSet.K8sClient,
 		}
 	}
 

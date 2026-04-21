@@ -53,3 +53,8 @@ func RetryIfContextNotCanceled(ctx context.Context) func(err error) bool {
 		}
 	}
 }
+
+const (
+	E2BKeyStorageDSNEnvVar = "E2B_KEY_STORAGE_DSN"
+	E2BKeyHashPepperEnvVar = "E2B_KEY_HASH_PEPPER"
+)

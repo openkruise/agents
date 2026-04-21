@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	connectrpc.com/connect v1.19.1
+	github.com/DATA-DOG/go-sqlmock v1.5.2
 	github.com/cncf/xds/go v0.0.0-20250501225837-2ac532fd4443
 	github.com/container-storage-interface/spec v1.9.0
 	github.com/distribution/reference v0.6.0
@@ -41,7 +42,6 @@ require (
 require (
 	cel.dev/expr v0.24.0 // indirect
 	filippo.io/edwards25519 v1.1.0 // indirect
-	github.com/DATA-DOG/go-sqlmock v1.5.2 // indirect
 	github.com/Masterminds/semver/v3 v3.4.0 // indirect
 	github.com/antlr4-go/antlr/v4 v4.13.0 // indirect
 	github.com/armon/go-metrics v0.4.1 // indirect

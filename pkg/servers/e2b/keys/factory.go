@@ -33,12 +33,13 @@ const (
 
 // Config describes parameters for constructing a KeyStorage.
 type Config struct {
-	Mode      StorageMode
-	Namespace string // secret mode
-	AdminKey  string // both modes
-	DSN       string // mysql mode
-	Pepper    string // mysql mode (HMAC pepper)
-	K8sClient kubernetes.Interface
+	Mode               StorageMode
+	Namespace          string // secret mode
+	AdminKey           string // both modes
+	DSN                string // mysql mode
+	Pepper             string // mysql mode (HMAC pepper)
+	DisableAutoMigrate bool   // mysql mode
+	K8sClient          kubernetes.Interface
 }
 
 // NewKeyStorage returns a KeyStorage implementation for the given config.
@@ -54,9 +55,10 @@ func NewKeyStorage(cfg Config) (KeyStorage, error) {
 			return nil, errors.New("mysql key storage requires a DSN")
 		}
 		return newMySQLKeyStorage(mysqlConfig{
-			DSN:      cfg.DSN,
-			AdminKey: cfg.AdminKey,
-			Pepper:   cfg.Pepper,
+			DSN:                cfg.DSN,
+			AdminKey:           cfg.AdminKey,
+			Pepper:             cfg.Pepper,
+			DisableAutoMigrate: cfg.DisableAutoMigrate,
 		}), nil
 	default:
 		return nil, fmt.Errorf("unknown key storage mode: %q", cfg.Mode)

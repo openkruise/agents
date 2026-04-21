@@ -115,8 +115,11 @@ jobs:
             echo "  path: /spec/template/spec/containers/0/args/-"
             echo "  value: --e2b-key-storage=mysql"
             echo "- op: add"
-            echo "  path: /spec/template/spec/containers/0/args/-"
-            printf '  value: "--e2b-key-storage-dsn=%s"\n' "${MYSQL_DSN}"
+            echo "  path: /spec/template/spec/containers/0/env/-"
+            printf '  value: {"name":"E2B_KEY_STORAGE_DSN","value":"%s"}\n' "${MYSQL_DSN}"
+            echo "- op: add"
+            echo "  path: /spec/template/spec/containers/0/env/-"
+            printf '  value: {"name":"E2B_KEY_HASH_PEPPER","value":"%s"}\n' "e2e-test-pepper"
           } >> config/sandbox-manager/configuration_patch.yaml
           echo "deployment patch:"
           cat config/sandbox-manager/configuration_patch.yaml

@@ -16,7 +16,7 @@ This directory owns E2B API-key persistence behind the `KeyStorage` interface. K
 ## MySQL Storage Rules
 
 - Never store plaintext API keys in MySQL. Persist only deterministic `HMAC-SHA256(pepper, rawKey)` as `key_hash`.
-- Pepper comes from `E2B_KEY_HASH_PEPPER` via `keys.Config.Pepper`. Empty pepper is currently allowed; do not silently switch hash algorithms.
+- Pepper comes from `E2B_KEY_HASH_PEPPER` via `keys.Config.Pepper`. Pepper is required when using MySQL mode; the application will fail to start if it is empty. Do not silently switch hash algorithms.
 - `CreateKey` may return plaintext once in the response model. Entries reconstructed from DB do not have plaintext `Key`.
 - `LoadByKey` and `LoadByID` must populate both TTL caches on DB hit.
 - Keep cache invalidation conservative: if `DeleteKey` cannot safely determine the cached `key_hash` because of an unexpected DB error, fail the delete rather than risking stale `byKey` authentication.

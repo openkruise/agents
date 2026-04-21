@@ -52,7 +52,8 @@ const (
 
 var openMySQLDB = func(dsn string) (*gorm.DB, error) {
 	return gorm.Open(mysql.Open(dsn), &gorm.Config{
-		Logger: logger.Default.LogMode(logger.Warn),
+		Logger:         logger.Default.LogMode(logger.Warn),
+		TranslateError: true,
 	})
 }
 
@@ -85,9 +86,10 @@ type TeamAPIKeyEntity struct {
 func (TeamAPIKeyEntity) TableName() string { return "team_api_keys" }
 
 type mysqlConfig struct {
-	DSN      string
-	AdminKey string
-	Pepper   string
+	DSN                string
+	AdminKey           string
+	Pepper             string
+	DisableAutoMigrate bool
 }
 
 // mysqlKeyStorage implements KeyStorage using MySQL and GORM.
@@ -115,7 +117,8 @@ func newMySQLKeyStorage(cfg mysqlConfig) *mysqlKeyStorage {
 	}
 }
 
-// Init connects to MySQL, migrates schema, and ensures admin team and admin API key rows exist.
+// Init connects to MySQL and ensures admin team and admin API key rows exist.
+// Schema auto-migration is skipped when explicitly disabled by config.
 func (k *mysqlKeyStorage) Init(ctx context.Context) error {
 	log := klog.FromContext(ctx)
 	log.Info("initializing mysql key storage")
@@ -126,7 +129,9 @@ func (k *mysqlKeyStorage) Init(ctx context.Context) error {
 	}
 	k.db = db
 
-	if err := autoMigrateMySQLModels(ctx, k.db); err != nil {
+	if k.cfg.DisableAutoMigrate {
+		log.Info("skip mysql schema auto-migration for key storage because disable-auto-migrate is enabled")
+	} else if err := autoMigrateMySQLModels(ctx, k.db); err != nil {
 		return fmt.Errorf("automigrate: %w", err)
 	}
 
@@ -264,7 +269,7 @@ func (k *mysqlKeyStorage) CreateKey(ctx context.Context, user *models.CreatedTea
 	}
 
 	var newID, newKey uuid.UUID
-	var hash string
+	var entity TeamAPIKeyEntity
 	if retryErr := retry.OnError(wait.Backoff{
 		Steps:    5,
 		Duration: 0,
@@ -278,15 +283,19 @@ func (k *mysqlKeyStorage) CreateKey(ctx context.Context, user *models.CreatedTea
 		}
 		newID = generateUUID()
 		newKey = generateUUID()
-		hash = k.hashKey(newKey.String())
-		var count int64
-		if err := k.db.WithContext(ctx).Model(&TeamAPIKeyEntity{}).
-			Where("key_hash = ? OR uid = ?", hash, newID.String()).
-			Count(&count).Error; err != nil {
-			return fmt.Errorf("probe uniqueness: %w", err)
+		createdBy := user.ID.String()
+		entity = TeamAPIKeyEntity{
+			UID:          newID.String(),
+			Name:         name,
+			Key:          k.hashKey(newKey.String()),
+			TeamID:       teamID,
+			CreatedByUID: &createdBy,
 		}
-		if count > 0 {
-			return errUUIDCollision
+		if err := k.db.WithContext(ctx).Create(&entity).Error; err != nil {
+			if errors.Is(err, gorm.ErrDuplicatedKey) {
+				return errUUIDCollision
+			}
+			return fmt.Errorf("insert api-key: %w", err)
 		}
 		return nil
 	}); retryErr != nil {
@@ -294,18 +303,6 @@ func (k *mysqlKeyStorage) CreateKey(ctx context.Context, user *models.CreatedTea
 			return nil, errors.New("failed to generate unique api-key")
 		}
 		return nil, retryErr
-	}
-
-	createdBy := user.ID.String()
-	entity := TeamAPIKeyEntity{
-		UID:          newID.String(),
-		Name:         name,
-		Key:          hash,
-		TeamID:       teamID,
-		CreatedByUID: &createdBy,
-	}
-	if err := k.db.WithContext(ctx).Create(&entity).Error; err != nil {
-		return nil, fmt.Errorf("insert api-key: %w", err)
 	}
 
 	apiKey := &models.CreatedTeamAPIKey{
@@ -317,7 +314,7 @@ func (k *mysqlKeyStorage) CreateKey(ctx context.Context, user *models.CreatedTea
 		CreatedBy: &models.TeamUser{ID: user.ID},
 	}
 	log.Info("api-key generated", "id", apiKey.ID)
-	k.cachePut(apiKey, hash)
+	k.cachePut(apiKey, entity.Key)
 	return apiKey, nil
 }
 

@@ -23,7 +23,7 @@ func newMockStorage(t *testing.T) (*mysqlKeyStorage, sqlmock.Sqlmock, func()) {
 	db, err := gorm.Open(mysql.New(mysql.Config{
 		Conn:                      sqlDB,
 		SkipInitializeWithVersion: true,
-	}), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
+	}), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent), TranslateError: true})
 	require.NoError(t, err)
 	st := newMySQLKeyStorage(mysqlConfig{DSN: "dsn", AdminKey: "admin", Pepper: "pepper"})
 	st.db = db
@@ -102,6 +102,31 @@ func TestMySQL_InitBranches(t *testing.T) {
 		mock.ExpectExec("UPDATE `team_api_keys` SET .*").WillReturnResult(sqlmock.NewResult(0, 1))
 		mock.ExpectCommit()
 		require.NoError(t, st.Init(context.Background()))
+	})
+
+	t.Run("skip automigrate when disabled", func(t *testing.T) {
+		st, mock, done := newMockStorage(t)
+		defer done()
+		st.cfg.DisableAutoMigrate = true
+
+		oldOpen, oldMigrate := openMySQLDB, autoMigrateMySQLModels
+		openMySQLDB = func(string) (*gorm.DB, error) { return st.db, nil }
+		autoMigrateCalls := 0
+		autoMigrateMySQLModels = func(context.Context, *gorm.DB) error {
+			autoMigrateCalls++
+			return errors.New("must not call automigrate")
+		}
+		t.Cleanup(func() { openMySQLDB, autoMigrateMySQLModels = oldOpen, oldMigrate })
+
+		h := st.hashKey("admin")
+		mock.ExpectQuery("SELECT .*FROM `teams`.*").WillReturnRows(sqlmock.NewRows([]string{"id", "uid", "name"}).AddRow(1, AdminTeamUID.String(), "admin"))
+		mock.ExpectQuery("SELECT .*FROM `team_api_keys`.*").WillReturnRows(sqlmock.NewRows([]string{"id", "uid", "key_hash", "name", "team_id", "deleted_at"}).AddRow(1, AdminKeyID.String(), h, "admin", 1, nil))
+		mock.ExpectBegin()
+		mock.ExpectExec("UPDATE `team_api_keys` SET .*").WillReturnResult(sqlmock.NewResult(0, 1))
+		mock.ExpectCommit()
+
+		require.NoError(t, st.Init(context.Background()))
+		require.Zero(t, autoMigrateCalls)
 	})
 }
 
@@ -255,31 +280,24 @@ func TestMySQL_CreateKeyBranches(t *testing.T) {
 		require.Error(t, err)
 	})
 
-	t.Run("count and insert branches", func(t *testing.T) {
+	t.Run("insert branches", func(t *testing.T) {
 		st, mock, done := newMockStorage(t)
 		defer done()
 
 		mock.ExpectQuery("SELECT .*FROM `teams`.*").WillReturnRows(sqlmock.NewRows([]string{"id", "uid", "name"}).AddRow(7, AdminTeamUID.String(), "admin"))
-		mock.ExpectQuery("SELECT count\\(\\*\\).*FROM `team_api_keys`.*").WillReturnError(errors.New("count failed"))
+		mock.ExpectBegin()
+		mock.ExpectExec("INSERT INTO `team_api_keys`.*").WillReturnError(errors.New("insert failed"))
+		mock.ExpectRollback()
 		_, err := st.CreateKey(context.Background(), user, "n")
 		require.Error(t, err)
 
 		mock.ExpectQuery("SELECT .*FROM `teams`.*").WillReturnRows(sqlmock.NewRows([]string{"id", "uid", "name"}).AddRow(7, AdminTeamUID.String(), "admin"))
-		mock.ExpectQuery("SELECT count\\(\\*\\).*FROM `team_api_keys`.*").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 		mock.ExpectBegin()
 		mock.ExpectExec("INSERT INTO `team_api_keys`.*").WillReturnResult(sqlmock.NewResult(1, 1))
 		mock.ExpectCommit()
 		key, err := st.CreateKey(context.Background(), user, "n")
 		require.NoError(t, err)
 		require.NotEmpty(t, key.Key)
-
-		mock.ExpectQuery("SELECT .*FROM `teams`.*").WillReturnRows(sqlmock.NewRows([]string{"id", "uid", "name"}).AddRow(7, AdminTeamUID.String(), "admin"))
-		mock.ExpectQuery("SELECT count\\(\\*\\).*FROM `team_api_keys`.*").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
-		mock.ExpectBegin()
-		mock.ExpectExec("INSERT INTO `team_api_keys`.*").WillReturnError(errors.New("insert failed"))
-		mock.ExpectRollback()
-		_, err = st.CreateKey(context.Background(), user, "n")
-		require.Error(t, err)
 	})
 
 	t.Run("uniqueness exhaustion", func(t *testing.T) {
@@ -291,9 +309,11 @@ func TestMySQL_CreateKeyBranches(t *testing.T) {
 		t.Cleanup(func() { generateUUID = oldGen })
 
 		mock.ExpectQuery("SELECT .*FROM `teams`.*").WillReturnRows(sqlmock.NewRows([]string{"id", "uid", "name"}).AddRow(7, AdminTeamUID.String(), "admin"))
-		// MySQL uniqueness probing is intentionally capped to 5 retries because DB checks are remote and costly.
+		// MySQL unique-index collision is intentionally capped to 5 retries.
 		for i := 0; i < 5; i++ {
-			mock.ExpectQuery("SELECT count\\(\\*\\).*FROM `team_api_keys`.*").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+			mock.ExpectBegin()
+			mock.ExpectExec("INSERT INTO `team_api_keys`.*").WillReturnError(gorm.ErrDuplicatedKey)
+			mock.ExpectRollback()
 		}
 		_, err := st.CreateKey(context.Background(), user, "n")
 		require.Error(t, err)
