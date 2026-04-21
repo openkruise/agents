@@ -43,6 +43,7 @@ type secretKeyStorage struct {
 
 	Client kubernetes.Interface
 	stop   chan struct{}
+	done   chan struct{}
 
 	stopOnce sync.Once
 
@@ -56,6 +57,7 @@ func NewSecretKeyStorage(client kubernetes.Interface, namespace, adminKey string
 		AdminKey:  adminKey,
 		Client:    client,
 		stop:      make(chan struct{}),
+		done:      make(chan struct{}),
 	}
 }
 
@@ -122,8 +124,13 @@ func (k *secretKeyStorage) refresh(ctx context.Context) error {
 }
 
 func (k *secretKeyStorage) Run() {
+	// Capture newRefreshTicker synchronously in the calling goroutine to avoid
+	// a data race between the background goroutine reading newRefreshTicker and
+	// test cleanup code writing to it after the test function returns.
+	tickerFactory := newRefreshTicker
 	go func() {
-		ticker := newRefreshTicker()
+		defer close(k.done)
+		ticker := tickerFactory()
 		ctx := logs.NewContext()
 		log := klog.FromContext(ctx)
 		for {
@@ -141,11 +148,12 @@ func (k *secretKeyStorage) Run() {
 	}()
 }
 
-// Stop signals the background refresh goroutine to exit.
+// Stop signals the background refresh goroutine to exit and waits for it to finish.
 func (k *secretKeyStorage) Stop() {
 	k.stopOnce.Do(func() {
 		close(k.stop)
 	})
+	<-k.done
 }
 
 func (k *secretKeyStorage) LoadByKey(_ context.Context, key string) (*models.CreatedTeamAPIKey, bool) {
