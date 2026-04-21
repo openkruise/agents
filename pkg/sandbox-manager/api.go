@@ -196,8 +196,12 @@ func (m *SandboxManager) DeleteSandbox(ctx context.Context, sbx infra.Sandbox) e
 		log.Error(err, "failed to delete sandbox")
 		return err
 	}
+	log.Info("sandbox deleted")
+
+	m.proxy.DeleteRoute(route.ID)
 	if err := m.proxy.SyncRouteWithPeers(route); err != nil {
 		log.Error(err, "failed to sync route with peers after delete")
 	}
+	log.Info("route synced with peers after delete", "route", route)
 	return nil
 }
