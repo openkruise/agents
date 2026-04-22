@@ -1,3 +1,19 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package keys
 
 import (
@@ -9,15 +25,16 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
-	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
-	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
+	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
+	"github.com/openkruise/agents/pkg/servers/e2b/models"
 )
 
 var (
@@ -43,19 +60,20 @@ type secretKeyStorage struct {
 	Client client.Client
 	// APIReader is used for reading secrets before cache is started (e.g., during Init).
 	APIReader client.Reader
-	stop   chan struct{}
-	done   chan struct{}
-	stopOnce sync.Once
+	stop      chan struct{}
+	done      chan struct{}
+	stopOnce  sync.Once
 
 	idxByKey sync.Map
 	idxByID  sync.Map
 }
 
-func NewSecretKeyStorage(client kubernetes.Interface, namespace, adminKey string) KeyStorage {
+func NewSecretKeyStorage(client client.Client, apiReader client.Reader, namespace, adminKey string) KeyStorage {
 	return &secretKeyStorage{
 		Namespace: namespace,
 		AdminKey:  adminKey,
 		Client:    client,
+		APIReader: apiReader,
 		stop:      make(chan struct{}),
 		done:      make(chan struct{}),
 	}

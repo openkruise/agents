@@ -1,3 +1,19 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package sandboxcr
 
 import (
@@ -24,6 +40,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/cache"
+	cacheutils "github.com/openkruise/agents/pkg/cache/utils"
 	"github.com/openkruise/agents/pkg/controller/sandboxset"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
@@ -35,6 +53,7 @@ import (
 	"github.com/openkruise/agents/pkg/utils/expectations"
 	"github.com/openkruise/agents/pkg/utils/runtime"
 	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
+	"github.com/openkruise/agents/pkg/utils/sandbox-manager/expectationutils"
 	"github.com/openkruise/agents/pkg/utils/sandbox-manager/proxyutils"
 	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
 )
@@ -88,8 +107,8 @@ func ValidateAndInitClaimOptions(opts infra.ClaimSandboxOptions) (infra.ClaimSan
 // the sandbox object should not be used anymore and needs appropriate handling.
 //
 // ValidateAndInitClaimOptions must be called before this function.
-// TODO Next: 对于同时传入 infra.CacheProvider 和 client.Client 的函数进行重构，去除 client.Client 参数，使用 infra.CacheProvider 中的 GetClient 方法
-func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCache *sync.Map, cache infra.CacheProvider, c client.Client,
+// TODO Next: 对于同时传入 cache.Provider 和 client.Client 的函数进行重构，去除 client.Client 参数，使用 infra.CacheProvider 中的 GetClient 方法
+func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCache *sync.Map, cache cache.Provider, c client.Client,
 	claimLockChannel chan struct{}, createLimiter *rate.Limiter) (claimed infra.Sandbox, metrics infra.ClaimMetrics, err error) {
 	ctx = logs.Extend(ctx, "tryClaimId", uuid.NewString()[:8])
 	log := klog.FromContext(ctx)
@@ -126,7 +145,7 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 	var sbx *Sandbox
 	var lockType infra.LockType
 	pickStart := time.Now()
-	sbx, lockType, err = pickAnAvailableSandbox(ctx, opts, pickCache, cache, c, createLimiter)
+	sbx, lockType, err = pickAnAvailableSandbox(ctx, opts, pickCache, cache, createLimiter)
 	if err != nil {
 		log.Error(err, "failed to select available sandbox")
 		return
@@ -153,7 +172,7 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 		// TODO: these lines cannot be covered by tests currently, which will be fixed when the cache is converted to controller-runtime
 		log.Error(err, "failed to lock sandbox")
 		if apierrors.IsConflict(err) {
-			utils.ResourceVersionExpectationExpect(&metav1.ObjectMeta{
+			expectationutils.ResourceVersionExpectationExpect(&metav1.ObjectMeta{
 				UID:             sbx.GetUID(),
 				ResourceVersion: expectations.GetNewerResourceVersion(sbx),
 			})
@@ -164,7 +183,7 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 	metrics.LockType = lockType
 	metrics.PickAndLock = time.Since(pickStart)
 	metrics.Total += metrics.PickAndLock
-	utils.ResourceVersionExpectationExpect(sbx)
+	expectationutils.ResourceVersionExpectationExpect(sbx)
 	log = log.WithValues("sandbox", klog.KObj(sbx.Sandbox))
 	log.Info("sandbox locked", "cost", metrics.PickAndLock, "type", metrics.LockType)
 	claimed = sbx
@@ -286,8 +305,7 @@ func getPickKey(sbx *v1alpha1.Sandbox) string {
 	return client.ObjectKeyFromObject(sbx).String()
 }
 
-func pickAnAvailableSandbox(ctx context.Context, opts infra.ClaimSandboxOptions,
-	pickCache *sync.Map, cache infra.CacheProvider, c client.Client, limiter *rate.Limiter) (*Sandbox, infra.LockType, error) {
+func pickAnAvailableSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCache *sync.Map, cache cache.Provider, limiter *rate.Limiter) (*Sandbox, infra.LockType, error) {
 	template, cnt := opts.Template, opts.CandidateCounts
 	ctx = logs.Extend(ctx, "action", "pickAnAvailableSandbox")
 	log := klog.FromContext(ctx).WithValues("template", template).V(consts.DebugLogLevel)
@@ -318,7 +336,7 @@ func pickAnAvailableSandbox(ctx context.Context, opts infra.ClaimSandboxOptions,
 				break
 			}
 		}
-		if !utils.ResourceVersionExpectationSatisfied(obj) {
+		if !expectationutils.ResourceVersionExpectationSatisfied(obj) {
 			log.Info("skip out-dated sandbox cache", "sandbox", klog.KObj(obj))
 			continue
 		}
@@ -421,7 +439,7 @@ func pickFromCandidates(ctx context.Context, candidates []*v1alpha1.Sandbox, pic
 			// Acquire pickCache -> Attempt second-level optimistic lock via k8s update api -> Release pickCache
 			// This ensures that for the same object, acquiring pickCache must happen after another request completes
 			// the expectation, and this check guarantees that the same object will not be selected
-			if !utils.ResourceVersionExpectationSatisfied(obj) {
+			if !expectationutils.ResourceVersionExpectationSatisfied(obj) {
 				log.Info("expectation of picked candidate is out-of-date", "key", key)
 				pickCache.Delete(key)
 			} else {
@@ -441,7 +459,7 @@ func pickFromCandidates(ctx context.Context, candidates []*v1alpha1.Sandbox, pic
 
 var FilteredAnnotationsOnCreation []string
 
-func newSandboxFromSandboxSet(opts infra.ClaimSandboxOptions, cache infra.CacheProvider, limiter *rate.Limiter) (*Sandbox, infra.LockType, error) {
+func newSandboxFromSandboxSet(opts infra.ClaimSandboxOptions, cache cache.Provider, limiter *rate.Limiter) (*Sandbox, infra.LockType, error) {
 	if limiter != nil {
 		if !limiter.Allow() {
 			return nil, "", NoAvailableError(opts.Template, "sandbox creation is not allowed by rate limiter")
@@ -540,7 +558,7 @@ func (s *Sandbox) SetResources(requests, limits corev1.ResourceList) {
 var DefaultCreateSandbox = createSandbox
 
 // TODO Next: 删除第三个参数
-func createSandbox(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client, _ infra.CacheProvider) (*v1alpha1.Sandbox, error) {
+func createSandbox(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client, _ cache.Provider) (*v1alpha1.Sandbox, error) {
 	select {
 	case <-ctx.Done():
 		return nil, fmt.Errorf("context canceled before creating sandbox: %w", ctx.Err())
@@ -553,7 +571,7 @@ func createSandbox(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client, 
 	return sbx, nil
 }
 
-func performLockSandbox(ctx context.Context, sbx *Sandbox, lockType infra.LockType, opts infra.ClaimSandboxOptions, c client.Client, cache infra.CacheProvider) error {
+func performLockSandbox(ctx context.Context, sbx *Sandbox, lockType infra.LockType, opts infra.ClaimSandboxOptions, c client.Client, cache cache.Provider) error {
 	ctx = logs.Extend(ctx, "action", "performLockSandbox")
 	log := klog.FromContext(ctx)
 	utils.LockSandbox(sbx.Sandbox, opts.LockString, opts.User)
@@ -692,7 +710,7 @@ func setContainerResources(container *corev1.Container, requests, limits corev1.
 	return changed
 }
 
-func waitForSandboxReady(ctx context.Context, sbx *Sandbox, opts infra.ClaimSandboxOptions, cache infra.CacheProvider) (cost time.Duration, err error) {
+func waitForSandboxReady(ctx context.Context, sbx *Sandbox, opts infra.ClaimSandboxOptions, cache cache.Provider) (cost time.Duration, err error) {
 	ctx = logs.Extend(ctx, "action", "waitForSandboxReady")
 	log := klog.FromContext(ctx).V(consts.DebugLogLevel).WithValues("sandbox", klog.KObj(sbx))
 	start := time.Now()
@@ -741,7 +759,7 @@ func checkSandboxReady(ctx context.Context, sbx *v1alpha1.Sandbox) (bool, error)
 	log.Info("sandbox ready checked", "state", state, "reason", reason, "ip", ip, "isReady", isReady, "resourceVersion", sbx.GetResourceVersion())
 	if isReady {
 		// Expect the resourceVersion to ensure InplaceRefresh fetches the latest from API server
-		utils.ResourceVersionExpectationExpect(sbx)
+		expectationutils.ResourceVersionExpectationExpect(sbx)
 	}
 	return isReady, nil
 }

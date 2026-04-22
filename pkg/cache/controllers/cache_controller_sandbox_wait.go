@@ -19,9 +19,10 @@ package controllers
 import (
 	"sync"
 
-	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
+
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 )
 
 // CacheSandboxWaitReconciler reconciles Sandbox objects to check wait hooks.

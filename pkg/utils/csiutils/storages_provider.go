@@ -1,3 +1,19 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package csiutils
 
 import (
@@ -17,19 +33,19 @@ import (
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
+	"github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/utils"
 )
 
 type CSIMountHandler struct {
 	reader          client.Reader
-	cache           infra.CacheProvider
+	cache           cache.Provider
 	storageRegistry storages.VolumeMountProviderRegistry
 	systemNamespace string
 }
 
-func NewCSIMountHandler(reader client.Reader, cache infra.CacheProvider,
+func NewCSIMountHandler(reader client.Reader, cache cache.Provider,
 	storageRegistry storages.VolumeMountProviderRegistry, systemNamespace string) *CSIMountHandler {
 	return &CSIMountHandler{
 		reader:          reader,
@@ -77,20 +93,21 @@ func (h *CSIMountHandler) GenerateNodePublishVolumeRequest(ctx context.Context, 
 	var secretObj *corev1.Secret
 	if persistentVolumeObj.Spec.CSI.NodePublishSecretRef != nil {
 		nodePublishSecretRef := persistentVolumeObj.Spec.CSI.NodePublishSecretRef
-		if nodePublishSecretRef.Namespace == "" {
-			nodePublishSecretRef.Namespace = utils.DefaultSandboxDeployNamespace
-		} else if nodePublishSecretRef.Namespace != h.systemNamespace {
-			return "", nil, fmt.Errorf("invalid node publish secret ref namespace: %s, expected: %s", nodePublishSecretRef.Namespace, utils.DefaultSandboxDeployNamespace)
+		secretNamespace := nodePublishSecretRef.Namespace
+		if secretNamespace == "" {
+			secretNamespace = utils.DefaultSandboxDeployNamespace
+		} else if secretNamespace != h.systemNamespace {
+			return "", nil, fmt.Errorf("invalid node publish secret ref namespace: %s, expected: %s", secretNamespace, utils.DefaultSandboxDeployNamespace)
 		}
-		secretObj, err = h.cache.GetSecret(nodePublishSecretRef.Namespace, nodePublishSecretRef.Name)
+		secretObj, err = h.cache.GetSecret(secretNamespace, nodePublishSecretRef.Name)
 		if err != nil {
 			log.V(consts.DebugLogLevel).Info("failed to get secret object by name using cache method",
-				"namespace", nodePublishSecretRef.Namespace, "name", nodePublishSecretRef.Name, "error", err)
+				"namespace", secretNamespace, "name", nodePublishSecretRef.Name, "error", err)
 			secretObj = &corev1.Secret{}
-			err = h.reader.Get(ctx, types.NamespacedName{Namespace: nodePublishSecretRef.Namespace, Name: nodePublishSecretRef.Name}, secretObj)
+			err = h.reader.Get(ctx, types.NamespacedName{Namespace: secretNamespace, Name: nodePublishSecretRef.Name}, secretObj)
 			if err != nil {
 				return "", nil, fmt.Errorf("failed to get secret object by name:%s/%s, err: %v",
-					nodePublishSecretRef.Namespace, nodePublishSecretRef.Name, err)
+					secretNamespace, nodePublishSecretRef.Name, err)
 			}
 		}
 	}

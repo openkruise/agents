@@ -24,8 +24,6 @@ import (
 	"testing"
 	"time"
 
-	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	cacheutils "github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr/cache/utils"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -34,6 +32,9 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	cacheutils "github.com/openkruise/agents/pkg/cache/utils"
 )
 
 func newFakeClientWithScheme(t *testing.T, objs ...client.Object) client.Client {

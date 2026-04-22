@@ -32,6 +32,7 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
+	"github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
@@ -45,12 +46,12 @@ import (
 type commonControl struct {
 	client.Client
 	recorder        record.EventRecorder
-	cache           infra.CacheProvider
+	cache           cache.Provider
 	storageRegistry storages.VolumeMountProviderRegistry
 	pickCache       sync.Map
 }
 
-func NewCommonControl(c client.Client, recorder record.EventRecorder, cache infra.CacheProvider) ClaimControl {
+func NewCommonControl(c client.Client, recorder record.EventRecorder, cache cache.Provider) ClaimControl {
 	// Note: sandboxClient and cache can be nil for unit tests
 	// In production, SetupWithManager always provides these dependencies
 

@@ -26,14 +26,14 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/openkruise/agents/pkg/sandbox-manager/config"
-	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"k8s.io/client-go/rest"
 	"k8s.io/klog/v2"
 
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
+	"github.com/openkruise/agents/pkg/cache"
 	sandboxmanager "github.com/openkruise/agents/pkg/sandbox-manager"
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
 	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
@@ -52,12 +52,13 @@ type Controller struct {
 	sandboxLabelSelector  string
 	sandboxNamespace      string
 	memberlistBindPort    int
+	keyCfg                *keys.Config
 
 	// fields
 	mux             *http.ServeMux
 	server          *http.Server
 	stop            chan os.Signal
-	cache           infra.CacheProvider
+	cache           cache.Provider
 	storageRegistry storages.VolumeMountProviderRegistry
 	clientConfig    *rest.Config
 	domain          string
@@ -66,8 +67,7 @@ type Controller struct {
 }
 
 // NewController creates a new E2B Controller
-func NewController(domain, adminKey string, sysNs, sandboxNamespace, sandboxLabelSelector string, maxTimeout, maxClaimWorkers, maxCreateQPS int, extProcMaxConcurrency uint32,
-	port int, enableAuth bool, memberlistBindPort int, keyCfg *keys.Config, clientConfig *rest.Config) *Controller {
+func NewController(domain, sysNs, sandboxNamespace, sandboxLabelSelector string, maxTimeout, maxClaimWorkers, maxCreateQPS int, extProcMaxConcurrency uint32, port, memberlistBindPort int, keyCfg *keys.Config, clientConfig *rest.Config) *Controller {
 	sc := &Controller{
 		mux:                   http.NewServeMux(),
 		domain:                domain,
@@ -81,20 +81,13 @@ func NewController(domain, adminKey string, sysNs, sandboxNamespace, sandboxLabe
 		maxCreateQPS:          maxCreateQPS,
 		extProcMaxConcurrency: extProcMaxConcurrency,
 		memberlistBindPort:    memberlistBindPort,
+		keyCfg:                keyCfg,
 	}
 
 	sc.server = &http.Server{
 		Addr:              fmt.Sprintf(":%d", port),
 		Handler:           sc.mux,
 		ReadHeaderTimeout: 5 * time.Second,
-	}
-
-	if keyCfg != nil {
-		storage, err := keys.NewKeyStorage(*keyCfg)
-		if err != nil {
-			klog.Fatalf("Failed to initialize key storage: %v", err)
-		}
-		sc.keys = storage
 	}
 	return sc
 }
@@ -128,13 +121,26 @@ func (sc *Controller) Init() error {
 	sc.cache = sandboxManager.GetInfra().GetCache()
 	sc.storageRegistry = storages.NewStorageProvider()
 	sc.registerRoutes()
-	if sc.keys == nil {
-		return nil
-	}
 
-	sc.keys.APIReader = sc.cache.GetAPIReader()
-	sc.keys.Client = sc.cache.GetClient()
-	return sc.keys.Init(ctx)
+	return sc.initKeyStorage(ctx)
+}
+
+func (sc *Controller) initKeyStorage(ctx context.Context) error {
+	// Initialize key storage if key config is provided
+	if sc.keyCfg != nil {
+		var err error
+		if sc.cache != nil {
+			sc.keyCfg.Client = sc.cache.GetClient()
+			sc.keyCfg.APIReader = sc.cache.GetAPIReader()
+		}
+		if sc.keys, err = keys.NewKeyStorage(*sc.keyCfg); err != nil {
+			return err
+		}
+		if err = sc.keys.Init(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (sc *Controller) Run() (context.Context, error) {

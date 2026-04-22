@@ -19,10 +19,11 @@ package cache
 import (
 	"context"
 
-	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
 	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
 )
 
 // Index name constants (consistent with sandboxcr/index.go values)

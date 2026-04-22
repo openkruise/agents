@@ -23,12 +23,6 @@ import (
 	"testing"
 	"time"
 
-	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/sandbox-manager/config"
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr/cache/controllers"
-	cacheutils "github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr/cache/utils"
-	"github.com/openkruise/agents/pkg/utils"
-	"github.com/openkruise/agents/pkg/utils/sandboxutils"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -40,9 +34,16 @@ import (
 	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/cache/controllers"
+	cacheutils "github.com/openkruise/agents/pkg/cache/utils"
+	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	"github.com/openkruise/agents/pkg/utils"
+	"github.com/openkruise/agents/pkg/utils/sandboxutils"
 )
 
-func newTestCacheLocal(t *testing.T, objs ...ctrlclient.Object) (*CacheV2, ctrlclient.Client, error) {
+func newTestCacheLocal(t *testing.T, objs ...ctrlclient.Object) (*Cache, ctrlclient.Client, error) {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
@@ -67,7 +68,7 @@ func newTestCacheLocal(t *testing.T, objs ...ctrlclient.Object) (*CacheV2, ctrlc
 		WithClient(fakeClient).
 		WithWaitSimulation().
 		Build()
-	c, err := NewCacheV2(mgr)
+	c, err := NewCache(mgr)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -987,6 +988,10 @@ func TestBuildCacheConfig(t *testing.T) {
 				} else {
 					assert.Nil(t, cfg.Label, "Label selector should be nil for %T when no SandboxLabelSelector", obj)
 				}
+
+				// UnsafeDisableDeepCopy is handled globally via DefaultUnsafeDisableDeepCopy,
+				// so per-object config should be nil.
+				assert.Nil(t, cfg.UnsafeDisableDeepCopy, "UnsafeDisableDeepCopy should be nil for %T (handled by DefaultUnsafeDisableDeepCopy)", obj)
 			}
 
 			// Verify system namespace resources (Secret, ConfigMap)
@@ -998,6 +1003,7 @@ func TestBuildCacheConfig(t *testing.T) {
 					assert.Len(t, cfg.Namespaces, 1, "Namespaces should have exactly one entry for %T", obj)
 					_, nsOk := cfg.Namespaces[tt.wantSystemNs]
 					assert.True(t, nsOk, "namespace %s should be in Namespaces for %T", tt.wantSystemNs, obj)
+					assert.Nil(t, cfg.UnsafeDisableDeepCopy, "UnsafeDisableDeepCopy should be nil for %T (handled by DefaultUnsafeDisableDeepCopy)", obj)
 				}
 			} else {
 				// When no SystemNamespace, Secret and ConfigMap should not be present
@@ -1013,6 +1019,7 @@ func TestBuildCacheConfig(t *testing.T) {
 			// PersistentVolume is cluster-scoped, should have no namespace filter
 			assert.Nil(t, pvCfg.Namespaces, "PersistentVolume should have no namespace filter")
 			assert.Nil(t, pvCfg.Label, "PersistentVolume should have no label filter")
+			assert.Nil(t, pvCfg.UnsafeDisableDeepCopy, "UnsafeDisableDeepCopy should be nil for PersistentVolume (handled by DefaultUnsafeDisableDeepCopy)")
 		})
 	}
 }

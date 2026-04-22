@@ -1,3 +1,19 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package sandbox_manager
 
 import (
@@ -6,17 +22,15 @@ import (
 	"os"
 
 	"github.com/google/uuid"
-	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
-	"github.com/openkruise/agents/pkg/sandbox-manager/errors"
-	infracache "github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr/cache"
+	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	infracache "github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/peers"
-
-	"k8s.io/klog/v2"
-
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
+	"github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 )
@@ -53,7 +67,7 @@ func (b *SandboxManagerBuilder) WithSandboxInfra() *SandboxManagerBuilder {
 		if err != nil {
 			return nil, err
 		}
-		cache, err := infracache.NewCacheV2(mgr)
+		cache, err := infracache.NewCache(mgr)
 		if err != nil {
 			return nil, err
 		}

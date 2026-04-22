@@ -1,3 +1,19 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package sandboxcr
 
 import (
@@ -24,6 +40,16 @@ import (
 	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
 	testutils "github.com/openkruise/agents/test/utils"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/openkruise/agents/api/v1alpha1"
+	infracache "github.com/openkruise/agents/pkg/cache"
+	"github.com/openkruise/agents/pkg/cache/cachetest"
+	"github.com/openkruise/agents/pkg/proxy"
+	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
+	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
+	testutils "github.com/openkruise/agents/test/utils"
 )
 
 func createTestSandbox(name, user string, phase v1alpha1.SandboxPhase, ready bool) *v1alpha1.Sandbox {
@@ -595,7 +621,7 @@ func TestInfra_CloneSandbox(t *testing.T) {
 
 	// Decorator: DefaultCreateSandbox - set sandbox ready after creation
 	origCreateSandbox := DefaultCreateSandbox
-	DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client, cache infra.CacheProvider) (*v1alpha1.Sandbox, error) {
+	DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client, cache infracache.Provider) (*v1alpha1.Sandbox, error) {
 		if override, ok := ctx.Value(infraSbxOverrideKey{}).(infraSbxOverride); ok {
 			if override.Name != "" {
 				sbx.Name = override.Name
@@ -737,7 +763,7 @@ func CreateCheckpointWithStatus(t *testing.T, c client.Client, cp *v1alpha1.Chec
 	require.NoError(t, c.Update(t.Context(), cp))
 }
 
-func EnsureCheckpointInCache(t *testing.T, cache infra.CacheProvider, cp *v1alpha1.Checkpoint) {
+func EnsureCheckpointInCache(t *testing.T, cache infracache.Provider, cp *v1alpha1.Checkpoint) {
 	require.Eventually(t, func() bool {
 		_, err := cache.GetCheckpoint(cp.Status.CheckpointId)
 		return err == nil

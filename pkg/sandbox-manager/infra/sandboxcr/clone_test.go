@@ -32,15 +32,16 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/openkruise/agents/api/v1alpha1"
+	infracache "github.com/openkruise/agents/pkg/cache"
+	"github.com/openkruise/agents/pkg/cache/cachetest"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
-	cachetest "github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr/cache/cachetest"
 	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	testutils "github.com/openkruise/agents/test/utils"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 func TestValidateAndInitCloneOptions(t *testing.T) {
@@ -139,6 +140,76 @@ func TestValidateAndInitCheckpointOptions(t *testing.T) {
 	}
 }
 
+func TestNewSandboxFromTemplate_DeepCopiesTemplate(t *testing.T) {
+	tests := []struct {
+		name          string
+		mutate        func(*Sandbox)
+		verifyInitial func(*testing.T, *v1alpha1.SandboxTemplate)
+	}{
+		{
+			name: "pod template labels are decoupled from source template",
+			mutate: func(sbx *Sandbox) {
+				sbx.SetPodLabels(map[string]string{"mutated": "true"})
+				sbx.SetImage("nginx:new")
+			},
+			verifyInitial: func(t *testing.T, tmpl *v1alpha1.SandboxTemplate) {
+				require.NotNil(t, tmpl.Spec.Template)
+				assert.Equal(t, map[string]string{"origin": "true"}, tmpl.Spec.Template.Labels)
+				require.Len(t, tmpl.Spec.Template.Spec.Containers, 1)
+				assert.Equal(t, "nginx:old", tmpl.Spec.Template.Spec.Containers[0].Image)
+			},
+		},
+		{
+			name: "volume claim templates are decoupled from source template",
+			mutate: func(sbx *Sandbox) {
+				sbx.Spec.VolumeClaimTemplates[0].Name = "mutated-pvc"
+			},
+			verifyInitial: func(t *testing.T, tmpl *v1alpha1.SandboxTemplate) {
+				require.Len(t, tmpl.Spec.VolumeClaimTemplates, 1)
+				assert.Equal(t, "data", tmpl.Spec.VolumeClaimTemplates[0].Name)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpl := &v1alpha1.SandboxTemplate{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "checkpoint-template",
+					Namespace: "default",
+				},
+				Spec: v1alpha1.SandboxTemplateSpec{
+					Template: &corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{
+							Labels: map[string]string{"origin": "true"},
+						},
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{
+									Name:  "runtime",
+									Image: "nginx:old",
+								},
+							},
+						},
+					},
+					VolumeClaimTemplates: []corev1.PersistentVolumeClaim{
+						{
+							ObjectMeta: metav1.ObjectMeta{Name: "data"},
+						},
+					},
+				},
+			}
+
+			sbx := newSandboxFromTemplate(infra.CloneSandboxOptions{
+				User:         "test-user",
+				CheckPointID: "checkpoint-template",
+			}, tmpl, nil)
+			tt.mutate(sbx)
+			tt.verifyInitial(t, tmpl)
+		})
+	}
+}
+
 func TestCloneSandbox(t *testing.T) {
 	utils.InitLogOutput()
 
@@ -155,7 +226,7 @@ func TestCloneSandbox(t *testing.T) {
 
 	// Decorator: DefaultCreateSandbox - set sandbox ready after creation
 	origCreateSandbox := DefaultCreateSandbox
-	DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client, cache infra.CacheProvider) (*v1alpha1.Sandbox, error) {
+	DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client, cache infracache.Provider) (*v1alpha1.Sandbox, error) {
 		if override, ok := ctx.Value(sbxOverrideKey{}).(sbxOverride); ok {
 			if override.Name != "" {
 				sbx.Name = override.Name
@@ -209,7 +280,7 @@ func TestCloneSandbox(t *testing.T) {
 		serverOpts  testutils.TestRuntimeServerOptions
 		initRuntime *config.InitRuntimeOptions
 		sbxOverride sbxOverride
-		preProcess  func(t *testing.T, cache infra.CacheProvider, c client.Client)
+		preProcess  func(t *testing.T, cache infracache.Provider, c client.Client)
 		postCheck   func(t *testing.T, sbx infra.Sandbox, metrics infra.CloneMetrics)
 		expectError string
 	}{
@@ -381,7 +452,7 @@ func TestCloneSandbox(t *testing.T) {
 				},
 				RunCommandImmediately: true,
 			},
-			preProcess: func(t *testing.T, cache infra.CacheProvider, c client.Client) {
+			preProcess: func(t *testing.T, cache infracache.Provider, c client.Client) {
 				// Create checkpoint without template label
 				cp := &v1alpha1.Checkpoint{
 					ObjectMeta: metav1.ObjectMeta{
@@ -416,7 +487,7 @@ func TestCloneSandbox(t *testing.T) {
 				},
 				RunCommandImmediately: true,
 			},
-			preProcess: func(t *testing.T, cache infra.CacheProvider, c client.Client) {
+			preProcess: func(t *testing.T, cache infracache.Provider, c client.Client) {
 				// Create checkpoint - CloneSandbox now looks for SandboxTemplate with same name as checkpoint
 				cp := &v1alpha1.Checkpoint{
 					ObjectMeta: metav1.ObjectMeta{

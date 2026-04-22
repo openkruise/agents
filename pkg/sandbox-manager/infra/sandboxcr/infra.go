@@ -1,3 +1,19 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package sandboxcr
 
 import (
@@ -7,12 +23,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/openkruise/agents/pkg/sandbox-manager/config"
-	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
-	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
-	infracache "github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr/cache"
-	"github.com/openkruise/agents/pkg/utils"
-	"github.com/openkruise/agents/pkg/utils/sandbox-manager/proxyutils"
 	"golang.org/x/time/rate"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -22,10 +32,16 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/proxy"
+	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
+	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
-	managerutils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
+	"github.com/openkruise/agents/pkg/utils"
+	managerutils "github.com/openkruise/agents/pkg/utils/sandbox-manager/expectationutils"
+	"github.com/openkruise/agents/pkg/utils/sandbox-manager/proxyutils"
 	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
 )
 
@@ -65,7 +81,7 @@ func NewInfraBuilder(opts config.SandboxManagerOptions) *InfraBuilder {
 	}
 }
 
-func (b *InfraBuilder) WithCache(cache infra.CacheProvider) *InfraBuilder {
+func (b *InfraBuilder) WithCache(cache cache.Provider) *InfraBuilder {
 	b.instance.Cache = cache
 	return b
 }
@@ -82,7 +98,7 @@ func (b *InfraBuilder) WithProxy(proxy *proxy.Server) *InfraBuilder {
 
 func (b *InfraBuilder) Build() infra.Infrastructure {
 	i := b.instance
-	if cv2, ok := i.Cache.(*infracache.CacheV2); ok {
+	if cv2, ok := i.Cache.(*cache.Cache); ok {
 		cv2.GetSandboxController().AddReconcileHandlers(i.reconcileSandbox)
 		cv2.GetSandboxSetController().AddReconcileHandlers(i.reconcileSandboxSet)
 	}
@@ -93,7 +109,7 @@ func (b *InfraBuilder) Build() infra.Infrastructure {
 }
 
 type Infra struct {
-	Cache     infra.CacheProvider
+	Cache     cache.Provider
 	APIReader client.Reader
 	Proxy     *proxy.Server
 
@@ -233,7 +249,7 @@ func (i *Infra) DeleteCheckpoint(ctx context.Context, user string, checkpointID 
 	return nil
 }
 
-func (i *Infra) GetCache() infra.CacheProvider {
+func (i *Infra) GetCache() cache.Provider {
 	return i.Cache
 }
 

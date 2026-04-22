@@ -22,21 +22,22 @@ import (
 	"fmt"
 	"testing"
 
-	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	infracache "github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr/cache"
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr/cache/controllers"
-	cacheutils "github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr/cache/utils"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/cache"
+	"github.com/openkruise/agents/pkg/cache/controllers"
+	cacheutils "github.com/openkruise/agents/pkg/cache/utils"
 )
 
 // NewTestCacheV2 creates a CacheV2 with a fake client for testing.
 // It reuses BuildCacheConfig to ensure the fake client has the same informer filtering
 // configuration as production. This allows tests to verify namespace and label selector behavior.
-func NewTestCacheV2(t *testing.T, initObjs ...ctrlclient.Object) (*infracache.CacheV2, ctrlclient.Client, error) {
+func NewTestCacheV2(t *testing.T, initObjs ...ctrlclient.Object) (*cache.Cache, ctrlclient.Client, error) {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
@@ -45,11 +46,16 @@ func NewTestCacheV2(t *testing.T, initObjs ...ctrlclient.Object) (*infracache.Ca
 	builder := fake.NewClientBuilder().WithScheme(scheme)
 
 	// Apply indexes from GetIndexFuncs (single source of truth)
-	for _, idx := range infracache.GetIndexFuncs() {
+	for _, idx := range cache.GetIndexFuncs() {
 		builder = builder.WithIndex(idx.Obj, idx.FieldName, idx.Extract)
 	}
 
-	builder = builder.WithStatusSubresource(&agentsv1alpha1.Sandbox{}, &agentsv1alpha1.Checkpoint{}, &agentsv1alpha1.SandboxClaim{})
+	builder = builder.WithStatusSubresource(
+		&agentsv1alpha1.Sandbox{},
+		&agentsv1alpha1.SandboxSet{},
+		&agentsv1alpha1.Checkpoint{},
+		&agentsv1alpha1.SandboxClaim{},
+	)
 
 	// Add interceptor to handle resourceVersion conflicts in tests
 	builder = builder.WithInterceptorFuncs(cacheutils.ResourceVersionInterceptorFuncs())
@@ -68,7 +74,7 @@ func NewTestCacheV2(t *testing.T, initObjs ...ctrlclient.Object) (*infracache.Ca
 		WithWaitSimulation(). // enable wait simulation by default
 		Build()
 
-	c, err := infracache.NewCacheV2(mgr)
+	c, err := cache.NewCache(mgr)
 	if err != nil {
 		return nil, nil, err
 	}

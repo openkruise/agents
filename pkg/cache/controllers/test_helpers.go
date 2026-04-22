@@ -27,7 +27,6 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
-	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -42,6 +41,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
+
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 )
 
 // MockManager implements manager.Manager for unit testing.

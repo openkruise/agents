@@ -89,7 +89,7 @@ test/              E2E (Go), E2B (Python) tests
 
 ### Testing
 
-- Table-driven tests with descriptive `name` fields
+- Table-driven tests with descriptive `name` fields is a must: **ALWAYS** use table-driven tests for consistency and clarity.
 - Reference test methods in same directory for best practices
 - Use shared test helpers
 - Target ≥80% unit test coverage

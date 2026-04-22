@@ -20,9 +20,8 @@ import (
 	"flag"
 	"net/http"         // Added for pprof server
 	_ "net/http/pprof" // Added to register pprof handlers
-	"strings"
-
 	"os"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/spf13/pflag"
@@ -193,7 +192,6 @@ func main() {
 			DSN:                e2bKeyStorageDSN,
 			DisableAutoMigrate: e2bKeyStorageDisableAutoMigrate,
 			Pepper:             e2bKeyStoragePepper,
-			K8sClient:          clientSet.K8sClient,
 		}
 	}
 

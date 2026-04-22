@@ -34,20 +34,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/agent-runtime/storages"
-	"github.com/openkruise/agents/pkg/proxy"
-	sandbox_manager "github.com/openkruise/agents/pkg/sandbox-manager"
-	"github.com/openkruise/agents/pkg/sandbox-manager/config"
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
-	infracache "github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr/cache"
-	cachetest "github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr/cache/cachetest"
-	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
-	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
-	"github.com/openkruise/agents/pkg/servers/e2b/keys"
-	"github.com/openkruise/agents/pkg/servers/e2b/models"
-	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -55,6 +41,20 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
+
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/agent-runtime/storages"
+	infracache "github.com/openkruise/agents/pkg/cache"
+	"github.com/openkruise/agents/pkg/cache/cachetest"
+	"github.com/openkruise/agents/pkg/proxy"
+	sandboxmanager "github.com/openkruise/agents/pkg/sandbox-manager"
+	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
+	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
+	"github.com/openkruise/agents/pkg/servers/e2b/keys"
+	"github.com/openkruise/agents/pkg/servers/e2b/models"
+	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 )
 
 var TestServerPort = 9999
@@ -74,12 +74,6 @@ func Setup(t *testing.T) (*Controller, ctrlclient.Client, func()) {
 	utils.InitLogOutput()
 	namespace := "sandbox-system"
 
-	controller := NewController("example.com", namespace, "", "", models.DefaultMaxTimeout, 10,
-		0, 0, TestServerPort, config.DefaultMemberlistBindPort,&keys.Config{
-			Mode:      keys.StorageModeSecret,
-			Namespace: namespace,
-			AdminKey:  InitKey,
-		}, nil)
 	// Build infra using the builder pattern (avoids connecting to a real API server).
 	// InitOptions populates defaults (e.g. MaxCreateQPS) that the infra rate limiter
 	// relies on — omitting this previously produced "limiter's burst 0" errors.
@@ -90,6 +84,14 @@ func Setup(t *testing.T) (*Controller, ctrlclient.Client, func()) {
 	})
 	cache, fc, cacheErr := cachetest.NewTestCacheV2(t)
 	require.NoError(t, cacheErr)
+	controller := NewController("example.com", namespace, "", "", models.DefaultMaxTimeout, 10,
+		0, 0, TestServerPort, config.DefaultMemberlistBindPort, &keys.Config{
+			Mode:      keys.StorageModeSecret,
+			Namespace: namespace,
+			AdminKey:  InitKey,
+			Client:    fc,
+			APIReader: fc,
+		}, nil)
 
 	// Create test resources using the controller-runtime fake client
 	ctx := context.Background()
@@ -134,7 +136,7 @@ func Setup(t *testing.T) (*Controller, ctrlclient.Client, func()) {
 
 	require.NoError(t, infraInstance.Run(t.Context()))
 
-	sandboxManager, err := sandbox_manager.NewSandboxManagerBuilder(opts).
+	sandboxManager, err := sandboxmanager.NewSandboxManagerBuilder(opts).
 		WithRequestAdapter(adapters.DefaultAdapterFactory(controller.port)).
 		WithCustomInfra(func() (infra.Builder, error) {
 			return sandboxcr.NewInfraBuilder(opts).
@@ -150,11 +152,7 @@ func Setup(t *testing.T) (*Controller, ctrlclient.Client, func()) {
 	controller.storageRegistry = storages.NewStorageProvider()
 	controller.registerRoutes()
 
-	if controller.keys != nil {
-		controller.keys.Client = fc
-		controller.keys.APIReader = fc
-		require.NoError(t, controller.keys.Init(logs.NewContext()))
-	}
+	require.NoError(t, controller.initKeyStorage(ctx))
 
 	// Start HTTP server and stop channel directly (skip controller.Run which
 	// would call manager.Run and try to start memberlist/peersManager).
@@ -320,7 +318,7 @@ func GetSandbox(t *testing.T, sandboxID string, c ctrlclient.Client) *agentsv1al
 }
 
 func EnableWaitSim(t *testing.T, controller *Controller, sandboxID string) {
-	mgr := controller.manager.GetInfra().GetCache().(*infracache.CacheV2).GetMockManager()
+	mgr := controller.manager.GetInfra().GetCache().(*infracache.Cache).GetMockManager()
 	mgr.AddWaitReconcileKey(GetSandbox(t, sandboxID, mgr.GetClient()))
 }
 

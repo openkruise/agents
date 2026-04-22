@@ -1,3 +1,19 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package sandboxcr
 
 import (
@@ -5,19 +21,20 @@ import (
 	"fmt"
 	"time"
 
-	cacheutils "github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr/cache/utils"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/cache"
+	cacheutils "github.com/openkruise/agents/pkg/cache/utils"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/utils"
 	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 var (
@@ -49,7 +66,7 @@ func ValidateAndInitCheckpointOptions(opts infra.CreateCheckpointOptions) infra.
 	return opts
 }
 
-func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache infra.CacheProvider, c client.Client) (infra.Sandbox, infra.CloneMetrics, error) {
+func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache cache.Provider, c client.Client) (infra.Sandbox, infra.CloneMetrics, error) {
 	if opts.CloneTimeout > 0 {
 		var cancel func()
 		ctx, cancel = context.WithTimeout(ctx, opts.CloneTimeout)
@@ -115,7 +132,7 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 }
 
 // findCheckpointAndTemplateById gets checkpoint and template from cache, fallback to API server if not found
-func findCheckpointAndTemplateById(ctx context.Context, opts infra.CloneSandboxOptions, cache infra.CacheProvider, c client.Client, metrics infra.CloneMetrics) (*v1alpha1.SandboxTemplate, *v1alpha1.Checkpoint, infra.CloneMetrics, error) {
+func findCheckpointAndTemplateById(ctx context.Context, opts infra.CloneSandboxOptions, cache cache.Provider, c client.Client, metrics infra.CloneMetrics) (*v1alpha1.SandboxTemplate, *v1alpha1.Checkpoint, infra.CloneMetrics, error) {
 	log := klog.FromContext(ctx).WithValues("checkpoint", opts.CheckPointID, "step", "1.findCheckpointAndTemplate")
 	start := time.Now()
 
@@ -157,7 +174,7 @@ func findCheckpointAndTemplateById(ctx context.Context, opts infra.CloneSandboxO
 }
 
 // createSandboxFromCheckpoint creates a new sandbox from checkpoint
-func createSandboxFromCheckpoint(ctx context.Context, opts infra.CloneSandboxOptions, tmpl *v1alpha1.SandboxTemplate, cp *v1alpha1.Checkpoint, cache infra.CacheProvider, c client.Client, metrics infra.CloneMetrics) (*Sandbox, *config.InitRuntimeOptions, infra.CloneMetrics, error) {
+func createSandboxFromCheckpoint(ctx context.Context, opts infra.CloneSandboxOptions, tmpl *v1alpha1.SandboxTemplate, cp *v1alpha1.Checkpoint, cache cache.Provider, c client.Client, metrics infra.CloneMetrics) (*Sandbox, *config.InitRuntimeOptions, infra.CloneMetrics, error) {
 	log := klog.FromContext(ctx).WithValues("checkpoint", opts.CheckPointID, "step", "2.createSandboxFromCheckpoint")
 	start := time.Now()
 	initRuntimeOpts, err := getInitRuntimeRequest(cp)
@@ -165,7 +182,7 @@ func createSandboxFromCheckpoint(ctx context.Context, opts infra.CloneSandboxOpt
 		log.Error(err, "failed to get init runtime request")
 		return nil, nil, metrics, err
 	}
-	sbx := newSandboxFromTemplate(opts, tmpl, cache, c)
+	sbx := newSandboxFromTemplate(opts, tmpl, cache)
 	if initRuntimeOpts != nil {
 		sbx.Annotations[v1alpha1.AnnotationRuntimeAccessToken] = initRuntimeOpts.AccessToken
 		sbx.Annotations[v1alpha1.AnnotationInitRuntimeRequest] = cp.Annotations[v1alpha1.AnnotationInitRuntimeRequest]
@@ -185,7 +202,7 @@ func createSandboxFromCheckpoint(ctx context.Context, opts infra.CloneSandboxOpt
 }
 
 // cloneWaitSandboxReady waits for the sandbox to be ready
-func cloneWaitSandboxReady(ctx context.Context, sbx *Sandbox, opts infra.CloneSandboxOptions, cache infra.CacheProvider, metrics infra.CloneMetrics) (infra.CloneMetrics, error) {
+func cloneWaitSandboxReady(ctx context.Context, sbx *Sandbox, opts infra.CloneSandboxOptions, cache cache.Provider, metrics infra.CloneMetrics) (infra.CloneMetrics, error) {
 	log := klog.FromContext(ctx).WithValues("checkpoint", opts.CheckPointID, "step", "3.waitSandboxReady")
 	var err error
 	metrics.WaitReady, err = waitForSandboxReady(ctx, sbx, infra.ClaimSandboxOptions{
@@ -218,21 +235,22 @@ func cloneReInitRuntime(ctx context.Context, sbx *Sandbox, opts infra.CloneSandb
 }
 
 // newSandboxFromTemplate returns a Sandbox object whose annotations / labels are not nil
-func newSandboxFromTemplate(opts infra.CloneSandboxOptions, tmpl *v1alpha1.SandboxTemplate, cache infra.CacheProvider, c client.Client) *Sandbox {
+func newSandboxFromTemplate(opts infra.CloneSandboxOptions, tmpl *v1alpha1.SandboxTemplate, cache cache.Provider) *Sandbox {
+	tmplCopy := tmpl.DeepCopy()
 	sbx := AsSandbox(&v1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			// Use checkpoint id as the prefix to avoid name length explosion caused by repeated checkpoints.
 			GenerateName: opts.CheckPointID + "-",
-			Namespace:    tmpl.Namespace,
+			Namespace:    tmplCopy.Namespace,
 			Labels:       map[string]string{},
 			Annotations:  map[string]string{},
 		},
 		Spec: v1alpha1.SandboxSpec{
-			PersistentContents: tmpl.Spec.PersistentContents,
-			Runtimes:           tmpl.Spec.Runtimes,
+			PersistentContents: tmplCopy.Spec.PersistentContents,
+			Runtimes:           tmplCopy.Spec.Runtimes,
 			EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
-				Template:             tmpl.Spec.Template,
-				VolumeClaimTemplates: tmpl.Spec.VolumeClaimTemplates,
+				Template:             tmplCopy.Spec.Template,
+				VolumeClaimTemplates: tmplCopy.Spec.VolumeClaimTemplates,
 			},
 		},
 	}, cache)
@@ -240,7 +258,7 @@ func newSandboxFromTemplate(opts infra.CloneSandboxOptions, tmpl *v1alpha1.Sandb
 		opts.Modifier(sbx)
 	}
 	labels := sbx.GetLabels()
-	labels[v1alpha1.LabelSandboxTemplate] = tmpl.Name
+	labels[v1alpha1.LabelSandboxTemplate] = tmplCopy.Name
 	labels[v1alpha1.LabelSandboxIsClaimed] = v1alpha1.True
 	sbx.SetLabels(labels)
 
@@ -269,7 +287,7 @@ func createCheckpoint(ctx context.Context, c client.Client, cp *v1alpha1.Checkpo
 	return cp, nil
 }
 
-func CreateCheckpoint(ctx context.Context, sbx *v1alpha1.Sandbox, cache infra.CacheProvider, opts infra.CreateCheckpointOptions) (string, error) {
+func CreateCheckpoint(ctx context.Context, sbx *v1alpha1.Sandbox, cache cache.Provider, opts infra.CreateCheckpointOptions) (string, error) {
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
 	log.Info("creating sandbox template")
 	tmpl := &v1alpha1.SandboxTemplate{

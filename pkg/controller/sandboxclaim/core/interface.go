@@ -24,8 +24,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/controller/sandbox/core"
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 )
 
@@ -76,7 +76,7 @@ type ClaimControl interface {
 }
 
 // NewClaimControl creates a map of claim controls
-func NewClaimControl(c client.Client, recorder record.EventRecorder, cache infra.CacheProvider) map[string]ClaimControl {
+func NewClaimControl(c client.Client, recorder record.EventRecorder, cache cache.Provider) map[string]ClaimControl {
 	controls := map[string]ClaimControl{}
 	controls[core.CommonControlName] = NewCommonControl(c, recorder, cache)
 	return controls

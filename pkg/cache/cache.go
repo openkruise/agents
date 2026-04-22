@@ -22,13 +22,6 @@ import (
 	"sync"
 	"time"
 
-	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/sandbox-manager/config"
-	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr/cache/controllers"
-	cacheutils "github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr/cache/utils"
-	managerutils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
-	"github.com/openkruise/agents/pkg/utils/sandboxutils"
 	"golang.org/x/sync/singleflight"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -39,14 +32,23 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/klog/v2"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/cache/controllers"
+	cacheutils "github.com/openkruise/agents/pkg/cache/utils"
+	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
+	managerutils "github.com/openkruise/agents/pkg/utils/sandbox-manager/expectationutils"
+	"github.com/openkruise/agents/pkg/utils/sandboxutils"
 )
 
-// CacheV2 is a controller-runtime based cache that replaces the legacy informer-based Cache.
-type CacheV2 struct {
+// Cache is a controller-runtime based cache that replaces the legacy informer-based Cache.
+type Cache struct {
 	client             ctrlclient.Client
 	reader             ctrlclient.Reader
 	mgr                ctrl.Manager
@@ -85,10 +87,12 @@ func BuildCacheConfig(opts config.SandboxManagerOptions) (map[ctrlclient.Object]
 		}
 	}
 
-	// Configure per-object informer filtering
+	// Configure per-object informer filtering.
+	// Note: UnsafeDisableDeepCopy is set globally via DefaultUnsafeDisableDeepCopy
+	// in NewControllerManager, so per-object and per-call settings are unnecessary.
 	byObject := map[ctrlclient.Object]ctrlcache.ByObject{}
 
-	// Custom resources: namespace + label filtering
+	// Custom resources: namespace + label filtering.
 	customObjConfig := ctrlcache.ByObject{}
 	if opts.SandboxNamespace != "" {
 		customObjConfig.Namespaces = map[string]ctrlcache.Config{
@@ -122,7 +126,7 @@ func BuildCacheConfig(opts config.SandboxManagerOptions) (map[ctrlclient.Object]
 
 // NewControllerManager creates a controller-runtime manager configured for the sandbox manager cache.
 // It configures informer filtering based on resource scope and returns a manager
-// that must be passed to NewCacheV2.
+// that must be passed to NewCache.
 func NewControllerManager(cfg *rest.Config, opts config.SandboxManagerOptions) (ctrl.Manager, error) {
 	if cfg == nil {
 		return nil, errors.NewBadRequest("rest config cannot be nil")
@@ -141,7 +145,7 @@ func NewControllerManager(cfg *rest.Config, opts config.SandboxManagerOptions) (
 	// Create manager with unnecessary features disabled
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme:                 scheme,
-		Cache:                  ctrlcache.Options{ByObject: byObject},
+		Cache:                  ctrlcache.Options{ByObject: byObject, DefaultUnsafeDisableDeepCopy: ptr.To(true)},
 		Metrics:                metricsserver.Options{BindAddress: "0"},
 		HealthProbeBindAddress: "",
 		LeaderElection:         false,
@@ -153,9 +157,9 @@ func NewControllerManager(cfg *rest.Config, opts config.SandboxManagerOptions) (
 	return mgr, nil
 }
 
-// NewCacheV2 creates a new CacheV2 instance from a pre-configured controller manager.
+// NewCache creates a new Cache instance from a pre-configured controller manager.
 // The metadata must have been returned by NewControllerManager.
-func NewCacheV2(mgr ctrl.Manager) (*CacheV2, error) {
+func NewCache(mgr ctrl.Manager) (*Cache, error) {
 	waitHooks := &sync.Map{}
 	handlers, err := controllers.SetupCacheControllersWithManager(mgr, waitHooks)
 	if err != nil {
@@ -166,7 +170,7 @@ func NewCacheV2(mgr ctrl.Manager) (*CacheV2, error) {
 		return nil, fmt.Errorf("failed to add indexes to cache: %w", err)
 	}
 
-	return &CacheV2{
+	return &Cache{
 		client:      mgr.GetClient(),
 		reader:      mgr.GetAPIReader(),
 		mgr:         mgr,
@@ -176,7 +180,7 @@ func NewCacheV2(mgr ctrl.Manager) (*CacheV2, error) {
 }
 
 // Run starts the controller manager and waits for cache sync.
-func (c *CacheV2) Run(ctx context.Context) error {
+func (c *Cache) Run(ctx context.Context) error {
 	log := klog.FromContext(ctx)
 	mgrCtx, cancel := context.WithCancel(ctx)
 	c.cancelFunc = cancel
@@ -195,7 +199,7 @@ func (c *CacheV2) Run(ctx context.Context) error {
 }
 
 // Stop shuts down the controller manager.
-func (c *CacheV2) Stop(ctx context.Context) {
+func (c *Cache) Stop(ctx context.Context) {
 	log := klog.FromContext(ctx)
 	if c.cancelFunc != nil {
 		c.cancelFunc()
@@ -204,7 +208,7 @@ func (c *CacheV2) Stop(ctx context.Context) {
 }
 
 // GetPersistentVolume looks up a cluster-scoped PersistentVolume by name.
-func (c *CacheV2) GetPersistentVolume(name string) (*corev1.PersistentVolume, error) {
+func (c *Cache) GetPersistentVolume(name string) (*corev1.PersistentVolume, error) {
 	pv := &corev1.PersistentVolume{}
 	err := c.client.Get(context.Background(), types.NamespacedName{Name: name}, pv)
 	if err != nil {
@@ -217,7 +221,7 @@ func (c *CacheV2) GetPersistentVolume(name string) (*corev1.PersistentVolume, er
 }
 
 // GetSecret looks up a namespaced Secret by namespace and name.
-func (c *CacheV2) GetSecret(namespace, name string) (*corev1.Secret, error) {
+func (c *Cache) GetSecret(namespace, name string) (*corev1.Secret, error) {
 	secret := &corev1.Secret{}
 	err := c.client.Get(context.Background(), types.NamespacedName{Namespace: namespace, Name: name}, secret)
 	if err != nil {
@@ -230,7 +234,7 @@ func (c *CacheV2) GetSecret(namespace, name string) (*corev1.Secret, error) {
 }
 
 // GetConfigmap looks up a namespaced ConfigMap. Returns (nil, nil) when not found.
-func (c *CacheV2) GetConfigmap(namespace, name string) (*corev1.ConfigMap, error) {
+func (c *Cache) GetConfigmap(namespace, name string) (*corev1.ConfigMap, error) {
 	cm := &corev1.ConfigMap{}
 	err := c.client.Get(context.Background(), types.NamespacedName{Namespace: namespace, Name: name}, cm)
 	if err != nil {
@@ -243,7 +247,7 @@ func (c *CacheV2) GetConfigmap(namespace, name string) (*corev1.ConfigMap, error
 }
 
 // GetSandboxTemplate retrieves a SandboxTemplate by namespace and name.
-func (c *CacheV2) GetSandboxTemplate(namespace, name string) (*agentsv1alpha1.SandboxTemplate, error) {
+func (c *Cache) GetSandboxTemplate(namespace, name string) (*agentsv1alpha1.SandboxTemplate, error) {
 	tmpl := &agentsv1alpha1.SandboxTemplate{}
 	err := c.client.Get(context.Background(), types.NamespacedName{Namespace: namespace, Name: name}, tmpl)
 	if err != nil {
@@ -256,7 +260,7 @@ func (c *CacheV2) GetSandboxTemplate(namespace, name string) (*agentsv1alpha1.Sa
 }
 
 // GetClaimedSandbox retrieves a sandbox by its logical sandbox ID.
-func (c *CacheV2) GetClaimedSandbox(sandboxID string) (*agentsv1alpha1.Sandbox, error) {
+func (c *Cache) GetClaimedSandbox(sandboxID string) (*agentsv1alpha1.Sandbox, error) {
 	list := &agentsv1alpha1.SandboxList{}
 	err := c.client.List(context.Background(), list, ctrlclient.MatchingFields{IndexClaimedSandboxID: sandboxID})
 	if err != nil {
@@ -273,7 +277,7 @@ func (c *CacheV2) GetClaimedSandbox(sandboxID string) (*agentsv1alpha1.Sandbox, 
 }
 
 // GetCheckpoint retrieves a Checkpoint by its logical checkpoint ID.
-func (c *CacheV2) GetCheckpoint(checkpointID string) (*agentsv1alpha1.Checkpoint, error) {
+func (c *Cache) GetCheckpoint(checkpointID string) (*agentsv1alpha1.Checkpoint, error) {
 	list := &agentsv1alpha1.CheckpointList{}
 	err := c.client.List(context.Background(), list, ctrlclient.MatchingFields{IndexCheckpointID: checkpointID})
 	if err != nil {
@@ -290,7 +294,7 @@ func (c *CacheV2) GetCheckpoint(checkpointID string) (*agentsv1alpha1.Checkpoint
 }
 
 // GetSandboxSet retrieves a SandboxSet by name.
-func (c *CacheV2) GetSandboxSet(name string) (*agentsv1alpha1.SandboxSet, error) {
+func (c *Cache) GetSandboxSet(name string) (*agentsv1alpha1.SandboxSet, error) {
 	list := &agentsv1alpha1.SandboxSetList{}
 	err := c.client.List(context.Background(), list, ctrlclient.MatchingFields{IndexTemplateID: name})
 	if err != nil {
@@ -304,7 +308,7 @@ func (c *CacheV2) GetSandboxSet(name string) (*agentsv1alpha1.SandboxSet, error)
 }
 
 // ListSandboxWithUser returns all sandboxes owned by the given user.
-func (c *CacheV2) ListSandboxWithUser(user string) ([]*agentsv1alpha1.Sandbox, error) {
+func (c *Cache) ListSandboxWithUser(user string) ([]*agentsv1alpha1.Sandbox, error) {
 	list := &agentsv1alpha1.SandboxList{}
 	err := c.client.List(context.Background(), list, ctrlclient.MatchingFields{IndexUser: user})
 	if err != nil {
@@ -319,7 +323,7 @@ func (c *CacheV2) ListSandboxWithUser(user string) ([]*agentsv1alpha1.Sandbox, e
 }
 
 // ListCheckpointsWithUser returns all checkpoints owned by the given user.
-func (c *CacheV2) ListCheckpointsWithUser(user string) ([]*agentsv1alpha1.Checkpoint, error) {
+func (c *Cache) ListCheckpointsWithUser(user string) ([]*agentsv1alpha1.Checkpoint, error) {
 	list := &agentsv1alpha1.CheckpointList{}
 	err := c.client.List(context.Background(), list, ctrlclient.MatchingFields{IndexUser: user})
 	if err != nil {
@@ -333,7 +337,7 @@ func (c *CacheV2) ListCheckpointsWithUser(user string) ([]*agentsv1alpha1.Checkp
 }
 
 // ListSandboxesInPool returns all sandboxes in the pool for the given template.
-func (c *CacheV2) ListSandboxesInPool(pool string) ([]*agentsv1alpha1.Sandbox, error) {
+func (c *Cache) ListSandboxesInPool(pool string) ([]*agentsv1alpha1.Sandbox, error) {
 	resultVal, err, _ := c.listSandboxesGroup.Do(pool, func() (any, error) {
 		list := &agentsv1alpha1.SandboxList{}
 		if err := c.client.List(context.Background(), list, ctrlclient.MatchingFields{IndexSandboxPool: pool}); err != nil {
@@ -353,7 +357,7 @@ func (c *CacheV2) ListSandboxesInPool(pool string) ([]*agentsv1alpha1.Sandbox, e
 }
 
 // ListAllSandboxes returns all sandboxes in the cache.
-func (c *CacheV2) ListAllSandboxes() []*agentsv1alpha1.Sandbox {
+func (c *Cache) ListAllSandboxes() []*agentsv1alpha1.Sandbox {
 	list := &agentsv1alpha1.SandboxList{}
 	if err := c.client.List(context.Background(), list); err != nil {
 		return nil
@@ -365,7 +369,7 @@ func (c *CacheV2) ListAllSandboxes() []*agentsv1alpha1.Sandbox {
 	return result
 }
 
-func (c *CacheV2) ListSandboxSets(namespace string) ([]*agentsv1alpha1.SandboxSet, error) {
+func (c *Cache) ListSandboxSets(namespace string) ([]*agentsv1alpha1.SandboxSet, error) {
 	list := &agentsv1alpha1.SandboxSetList{}
 	var opts []ctrlclient.ListOption
 	if namespace != "" {
@@ -381,10 +385,8 @@ func (c *CacheV2) ListSandboxSets(namespace string) ([]*agentsv1alpha1.SandboxSe
 	return result, nil
 }
 
-// TODO Next: deal with deepcopy
-
 // WaitForSandboxSatisfied blocks until the sandbox satisfies the condition.
-func (c *CacheV2) WaitForSandboxSatisfied(ctx context.Context, sbx *agentsv1alpha1.Sandbox, action cacheutils.WaitAction,
+func (c *Cache) WaitForSandboxSatisfied(ctx context.Context, sbx *agentsv1alpha1.Sandbox, action cacheutils.WaitAction,
 	satisfiedFunc cacheutils.CheckFunc[*agentsv1alpha1.Sandbox], timeout time.Duration) error {
 
 	key := types.NamespacedName{Namespace: sbx.Namespace, Name: sbx.Name}
@@ -404,7 +406,7 @@ func (c *CacheV2) WaitForSandboxSatisfied(ctx context.Context, sbx *agentsv1alph
 }
 
 // refreshCheckpoint retrieves the latest Checkpoint from cache.
-func (c *CacheV2) refreshCheckpoint(ctx context.Context, cp *agentsv1alpha1.Checkpoint) (*agentsv1alpha1.Checkpoint, error) {
+func (c *Cache) refreshCheckpoint(ctx context.Context, cp *agentsv1alpha1.Checkpoint) (*agentsv1alpha1.Checkpoint, error) {
 	fresh := &agentsv1alpha1.Checkpoint{}
 	err := c.client.Get(ctx, types.NamespacedName{Namespace: cp.Namespace, Name: cp.Name}, fresh)
 	if err != nil {
@@ -417,7 +419,7 @@ func (c *CacheV2) refreshCheckpoint(ctx context.Context, cp *agentsv1alpha1.Chec
 }
 
 // WaitForCheckpointSatisfied blocks until the checkpoint satisfies the condition.
-func (c *CacheV2) WaitForCheckpointSatisfied(ctx context.Context, checkpoint *agentsv1alpha1.Checkpoint, action cacheutils.WaitAction,
+func (c *Cache) WaitForCheckpointSatisfied(ctx context.Context, checkpoint *agentsv1alpha1.Checkpoint, action cacheutils.WaitAction,
 	satisfiedFunc cacheutils.CheckFunc[*agentsv1alpha1.Checkpoint], timeout time.Duration) (*agentsv1alpha1.Checkpoint, error) {
 
 	err := cacheutils.WaitForObjectSatisfied[*agentsv1alpha1.Checkpoint](ctx, c.waitHooks, checkpoint, action,
@@ -432,32 +434,32 @@ func (c *CacheV2) WaitForCheckpointSatisfied(ctx context.Context, checkpoint *ag
 }
 
 // GetSandboxController returns the sandbox custom reconciler for external handler registration.
-func (c *CacheV2) GetSandboxController() *controllers.CacheSandboxCustomReconciler {
+func (c *Cache) GetSandboxController() *controllers.CacheSandboxCustomReconciler {
 	return c.controllers.SandboxCustomReconciler
 }
 
 // GetSandboxSetController returns the sandboxset custom reconciler for external handler registration.
-func (c *CacheV2) GetSandboxSetController() *controllers.CacheSandboxSetCustomReconciler {
+func (c *Cache) GetSandboxSetController() *controllers.CacheSandboxSetCustomReconciler {
 	return c.controllers.SandboxSetCustomReconciler
 }
 
-func (c *CacheV2) GetClient() ctrlclient.Client {
+func (c *Cache) GetClient() ctrlclient.Client {
 	return c.client
 }
 
-func (c *CacheV2) GetAPIReader() ctrlclient.Reader {
+func (c *Cache) GetAPIReader() ctrlclient.Reader {
 	return c.reader
 }
 
 // GetWaitHooks returns the internal waitHooks map used for wait simulation.
 // This is only intended for test infrastructure use.
-func (c *CacheV2) GetWaitHooks() *sync.Map {
+func (c *Cache) GetWaitHooks() *sync.Map {
 	return c.waitHooks
 }
 
-// GetMockManager extracts the MockManager from a CacheV2 created by NewTestCacheV2.
+// GetMockManager extracts the MockManager from a Cache created by NewTestCacheV2.
 // This is only intended for test use.
-func (c *CacheV2) GetMockManager() *controllers.MockManager {
+func (c *Cache) GetMockManager() *controllers.MockManager {
 	mgr, ok := c.mgr.(*controllers.MockManager)
 	if !ok {
 		return nil

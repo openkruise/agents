@@ -22,7 +22,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -36,9 +35,10 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
+	"github.com/openkruise/agents/pkg/cache/cachetest"
 	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
-	cachetest "github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr/cache/cachetest"
+	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 )
 

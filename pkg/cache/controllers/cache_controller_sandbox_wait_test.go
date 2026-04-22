@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-   http://www.apache.org/licenses/LICENSE-2.0
+    http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -21,7 +21,6 @@ import (
 	"sync"
 	"testing"
 
-	cacheutils "github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr/cache/utils"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -32,23 +31,24 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	cacheutils "github.com/openkruise/agents/pkg/cache/utils"
 )
 
-func TestCacheCheckpointWaitReconciler_Reconcile(t *testing.T) {
+func TestCacheSandboxWaitReconciler_Reconcile(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, agentsv1alpha1.AddToScheme(scheme))
 
-	nsName := types.NamespacedName{Namespace: "default", Name: "test-checkpoint"}
-	// Use waitHookKey format: *v1alpha1.Checkpoint/namespace/name
-	waitHookKey := "*v1alpha1.Checkpoint/default/test-checkpoint"
+	nsName := types.NamespacedName{Namespace: "default", Name: "test-sandbox"}
+	// Use waitHookKey format: *v1alpha1.Sandbox/namespace/name
+	waitHookKey := "*v1alpha1.Sandbox/default/test-sandbox"
 
 	tests := []struct {
 		name           string
 		objects        []client.Object
-		waitHooks      *sync.Map
+		waitHooks      *sync.Map // nil means waitHooks field is nil
 		setupWaitHooks func(m *sync.Map)
 		expectErr      bool
-		expectDone     bool
+		expectDone     bool // true means done channel should be closed after Reconcile
 	}{
 		{
 			name:      "waitHooks is nil",
@@ -59,8 +59,8 @@ func TestCacheCheckpointWaitReconciler_Reconcile(t *testing.T) {
 		{
 			name: "waitHooks has no matching entry",
 			objects: []client.Object{
-				&agentsv1alpha1.Checkpoint{
-					ObjectMeta: metav1.ObjectMeta{Name: "test-checkpoint", Namespace: "default"},
+				&agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{Name: "test-sandbox", Namespace: "default"},
 				},
 			},
 			waitHooks: &sync.Map{},
@@ -69,16 +69,16 @@ func TestCacheCheckpointWaitReconciler_Reconcile(t *testing.T) {
 		{
 			name: "waitHooks has entry and checker satisfied",
 			objects: []client.Object{
-				&agentsv1alpha1.Checkpoint{
-					ObjectMeta: metav1.ObjectMeta{Name: "test-checkpoint", Namespace: "default"},
+				&agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{Name: "test-sandbox", Namespace: "default"},
 				},
 			},
 			waitHooks: &sync.Map{},
 			setupWaitHooks: func(m *sync.Map) {
-				m.Store(waitHookKey, cacheutils.NewWaitEntry[*agentsv1alpha1.Checkpoint](
+				m.Store(waitHookKey, cacheutils.NewWaitEntry[*agentsv1alpha1.Sandbox](
 					context.Background(),
-					cacheutils.WaitActionCheckpoint,
-					func(cp *agentsv1alpha1.Checkpoint) (bool, error) {
+					cacheutils.WaitActionWaitReady,
+					func(sbx *agentsv1alpha1.Sandbox) (bool, error) {
 						return true, nil
 					},
 				))
@@ -89,16 +89,16 @@ func TestCacheCheckpointWaitReconciler_Reconcile(t *testing.T) {
 		{
 			name: "waitHooks has entry but checker not satisfied",
 			objects: []client.Object{
-				&agentsv1alpha1.Checkpoint{
-					ObjectMeta: metav1.ObjectMeta{Name: "test-checkpoint", Namespace: "default"},
+				&agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{Name: "test-sandbox", Namespace: "default"},
 				},
 			},
 			waitHooks: &sync.Map{},
 			setupWaitHooks: func(m *sync.Map) {
-				m.Store(waitHookKey, cacheutils.NewWaitEntry[*agentsv1alpha1.Checkpoint](
+				m.Store(waitHookKey, cacheutils.NewWaitEntry[*agentsv1alpha1.Sandbox](
 					context.Background(),
-					cacheutils.WaitActionCheckpoint,
-					func(cp *agentsv1alpha1.Checkpoint) (bool, error) {
+					cacheutils.WaitActionWaitReady,
+					func(sbx *agentsv1alpha1.Sandbox) (bool, error) {
 						return false, nil
 					},
 				))
@@ -108,19 +108,19 @@ func TestCacheCheckpointWaitReconciler_Reconcile(t *testing.T) {
 		},
 		{
 			name:      "object not found with waitHook - done channel closed on delete",
-			objects:   nil,
+			objects:   nil, // no sandbox object in fake client
 			waitHooks: &sync.Map{},
 			setupWaitHooks: func(m *sync.Map) {
-				m.Store(waitHookKey, cacheutils.NewWaitEntry[*agentsv1alpha1.Checkpoint](
+				m.Store(waitHookKey, cacheutils.NewWaitEntry[*agentsv1alpha1.Sandbox](
 					context.Background(),
-					cacheutils.WaitActionCheckpoint,
-					func(cp *agentsv1alpha1.Checkpoint) (bool, error) {
+					cacheutils.WaitActionWaitReady,
+					func(sbx *agentsv1alpha1.Sandbox) (bool, error) {
 						return false, nil
 					},
 				))
 			},
 			expectErr:  false,
-			expectDone: true,
+			expectDone: true, // On NotFound, checkWaitHooks with nil closes done
 		},
 	}
 
@@ -140,12 +140,12 @@ func TestCacheCheckpointWaitReconciler_Reconcile(t *testing.T) {
 				}
 			}
 
-			r := &CacheCheckpointWaitReconciler{
-				WaitReconciler: WaitReconciler[*agentsv1alpha1.Checkpoint]{
+			r := &CacheSandboxWaitReconciler{
+				WaitReconciler: WaitReconciler[*agentsv1alpha1.Sandbox]{
 					Client:    fakeClient,
 					Scheme:    scheme,
 					waitHooks: hooks,
-					NewObject: NewCheckpoint,
+					NewObject: NewSandbox,
 				},
 			}
 
@@ -157,10 +157,11 @@ func TestCacheCheckpointWaitReconciler_Reconcile(t *testing.T) {
 			}
 			assert.Equal(t, ctrl.Result{}, result)
 
+			// Check done channel state if we set up a waitHook
 			if hooks != nil {
 				value, ok := hooks.Load(waitHookKey)
 				if ok {
-					entry := value.(*cacheutils.WaitEntry[*agentsv1alpha1.Checkpoint])
+					entry := value.(*cacheutils.WaitEntry[*agentsv1alpha1.Sandbox])
 					select {
 					case <-entry.Done():
 						if !tt.expectDone {
@@ -171,6 +172,8 @@ func TestCacheCheckpointWaitReconciler_Reconcile(t *testing.T) {
 							t.Error("done channel was open but expected closed")
 						}
 					}
+				} else if tt.expectDone {
+					// Entry was not found; for the nil-waitHooks case this is fine
 				}
 			}
 		})

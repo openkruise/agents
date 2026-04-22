@@ -32,9 +32,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/rand"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
+	"github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	infracache "github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr/cache"
@@ -45,7 +47,6 @@ import (
 	managerutils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	"github.com/openkruise/agents/pkg/utils/sandbox-manager/proxyutils"
 	testutils "github.com/openkruise/agents/test/utils"
-	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 func imageChecker(image string, controller *Controller) func(t *testing.T, resp *models.Sandbox) {
@@ -590,7 +591,7 @@ func TestCloneSandbox(t *testing.T) {
 	// Decorator: DefaultCreateSandbox - set sandbox ready after creation
 	origCreateSandbox := sandboxcr.DefaultCreateSandbox
 	t.Cleanup(func() { sandboxcr.DefaultCreateSandbox = origCreateSandbox })
-	sandboxcr.DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c ctrlclient.Client, cache infra.CacheProvider) (*v1alpha1.Sandbox, error) {
+	sandboxcr.DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c ctrlclient.Client, cache cache.Provider) (*v1alpha1.Sandbox, error) {
 		// Set Name (FakeClient does not handle GenerateName)
 		if sbx.Name == "" && sbx.GenerateName != "" {
 			sbx.Name = sbx.GenerateName + rand.String(5)
@@ -1008,7 +1009,7 @@ func TestAutoPause(t *testing.T) {
 			tt.createChecker(t, GetSandbox(t, createResp.Body.SandboxID, client))
 
 			// Register sandbox key for wait simulation
-			mockMgr := controller.cache.(*infracache.CacheV2).GetMockManager()
+			mockMgr := controller.cache.(*cache.Cache).GetMockManager()
 			sbx := GetSandbox(t, createResp.Body.SandboxID, client)
 			mockMgr.AddWaitReconcileKey(sbx)
 

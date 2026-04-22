@@ -31,6 +31,8 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
+	"github.com/openkruise/agents/pkg/cache"
+	cacheutils "github.com/openkruise/agents/pkg/cache/utils"
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
@@ -42,6 +44,7 @@ import (
 	"github.com/openkruise/agents/pkg/utils/expectations"
 	"github.com/openkruise/agents/pkg/utils/runtime"
 	sandboxManagerUtils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
+	"github.com/openkruise/agents/pkg/utils/sandbox-manager/expectationutils"
 	"github.com/openkruise/agents/pkg/utils/sandbox-manager/proxyutils"
 	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
 	"github.com/openkruise/agents/proto/envd/process"
@@ -51,7 +54,7 @@ type ModifierFunc func(sbx *agentsv1alpha1.Sandbox)
 
 type Sandbox struct {
 	*agentsv1alpha1.Sandbox
-	Cache           infra.CacheProvider
+	Cache           cache.Provider
 	storageRegistry storages.VolumeMountProviderRegistry
 }
 
@@ -74,7 +77,7 @@ func (s *Sandbox) InplaceRefresh(ctx context.Context, deepcopy bool) error {
 	if err != nil {
 		log.Info("failed to get claimed sandbox from cache, fetch from api-server", "reason", err.Error())
 		fetchFromApiServer = true
-	} else if !sandboxManagerUtils.ResourceVersionExpectationSatisfied(newSbx) {
+	} else if !expectationutils.ResourceVersionExpectationSatisfied(newSbx) {
 		log.Info("sandbox cache is out-dated, fetch from api-server")
 		fetchFromApiServer = true
 	}
@@ -111,7 +114,7 @@ func (s *Sandbox) retryUpdate(ctx context.Context, modifier ModifierFunc) error 
 			return err
 		}
 		s.Sandbox = copied
-		sandboxManagerUtils.ResourceVersionExpectationExpect(copied)
+		expectationutils.ResourceVersionExpectationExpect(copied)
 		return nil
 	})
 	if err != nil {
@@ -234,7 +237,7 @@ func (s *Sandbox) Pause(ctx context.Context, opts infra.PauseOptions) error {
 		log.Error(err, "failed to update sandbox spec.paused")
 		return err
 	}
-	sandboxManagerUtils.ResourceVersionExpectationExpect(s.Sandbox)
+	expectationutils.ResourceVersionExpectationExpect(s.Sandbox)
 	log.Info("waiting sandbox pause")
 	start := time.Now()
 	err = s.Cache.WaitForSandboxSatisfied(ctx, s.Sandbox, cacheutils.WaitActionPause, func(sbx *agentsv1alpha1.Sandbox) (bool, error) {
@@ -278,7 +281,7 @@ func (s *Sandbox) Resume(ctx context.Context) error {
 			return err
 		}
 	}
-	sandboxManagerUtils.ResourceVersionExpectationExpect(s.Sandbox) // expect Resuming
+	expectationutils.ResourceVersionExpectationExpect(s.Sandbox) // expect Resuming
 	log.Info("waiting sandbox resume")
 	start := time.Now()
 	err = s.Cache.WaitForSandboxSatisfied(ctx, s.Sandbox, cacheutils.WaitActionResume, func(sbx *agentsv1alpha1.Sandbox) (bool, error) {
@@ -287,7 +290,7 @@ func (s *Sandbox) Resume(ctx context.Context) error {
 			"state", state, "reason", reason, "ip", sbx.Status.PodInfo.PodIP, "resourceVersion", sbx.GetResourceVersion())
 		satisfied := state == agentsv1alpha1.SandboxStateRunning
 		if satisfied {
-			sandboxManagerUtils.ResourceVersionExpectationExpect(sbx) // expect Running
+			expectationutils.ResourceVersionExpectationExpect(sbx) // expect Running
 		}
 		return satisfied, nil
 	}, time.Minute)
@@ -420,7 +423,7 @@ func resolveCSIMountConfigs(ctx context.Context, csiClient *csimountutils.CSIMou
 	return results, nil
 }
 
-func AsSandbox(sbx *agentsv1alpha1.Sandbox, cache infra.CacheProvider) *Sandbox {
+func AsSandbox(sbx *agentsv1alpha1.Sandbox, cache cache.Provider) *Sandbox {
 	return &Sandbox{
 		Cache:           cache,
 		Sandbox:         sbx,

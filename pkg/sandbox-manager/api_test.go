@@ -1,3 +1,19 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package sandbox_manager
 
 import (
@@ -14,19 +30,18 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/utils/ptr"
-
-	"github.com/openkruise/agents/pkg/proxy"
-	"github.com/openkruise/agents/pkg/sandbox-manager/config"
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
-	infracache "github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr/cache"
-	cachetest "github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr/cache/cachetest"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	infracache "github.com/openkruise/agents/pkg/cache"
+	"github.com/openkruise/agents/pkg/cache/cachetest"
+	"github.com/openkruise/agents/pkg/proxy"
+	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	"github.com/openkruise/agents/pkg/utils/sandboxutils"
-	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 var testUser = "test-user"
@@ -526,7 +541,7 @@ func TestSandboxManager_PauseSandbox(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			manager, client := setupTestManager(t)
-			mgr := manager.GetInfra().GetCache().(*infracache.CacheV2).GetMockManager()
+			mgr := manager.GetInfra().GetCache().(*infracache.Cache).GetMockManager()
 
 			sandbox := getSandboxForApiTest(tt.name)
 			tt.initSandbox(sandbox)
@@ -653,7 +668,7 @@ func TestSandboxManager_ResumeSandbox(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			manager, client := setupTestManager(t)
-			mgr := manager.GetInfra().GetCache().(*infracache.CacheV2).GetMockManager()
+			mgr := manager.GetInfra().GetCache().(*infracache.Cache).GetMockManager()
 
 			sandbox := getSandboxForApiTest(tt.name)
 			tt.initSandbox(sandbox)
@@ -765,7 +780,7 @@ func TestSandboxManager_CloneSandbox(t *testing.T) {
 
 			// Decorator: DefaultCreateSandbox - set sandbox ready after creation
 			origCreateSandbox := sandboxcr.DefaultCreateSandbox
-			sandboxcr.DefaultCreateSandbox = func(ctx context.Context, sbx *agentsv1alpha1.Sandbox, c ctrlclient.Client, cache infra.CacheProvider) (*agentsv1alpha1.Sandbox, error) {
+			sandboxcr.DefaultCreateSandbox = func(ctx context.Context, sbx *agentsv1alpha1.Sandbox, c ctrlclient.Client, cache infracache.Provider) (*agentsv1alpha1.Sandbox, error) {
 				if override, ok := ctx.Value(sbxOverrideKey{}).(sbxOverride); ok {
 					if override.Name != "" {
 						sbx.Name = override.Name

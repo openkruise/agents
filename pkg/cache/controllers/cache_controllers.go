@@ -20,17 +20,17 @@ import (
 	"context"
 	"sync"
 
-	cacheutils "github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr/cache/utils"
-
-	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
-	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
-	managerutils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
+
+	cacheutils "github.com/openkruise/agents/pkg/cache/utils"
+	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
+	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
+	managerutils "github.com/openkruise/agents/pkg/utils/sandbox-manager/expectationutils"
 )
 
 // CustomReconcileHandler is a custom reconcile handler.

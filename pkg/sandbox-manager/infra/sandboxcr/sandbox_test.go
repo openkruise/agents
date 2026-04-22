@@ -34,14 +34,13 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 
-	testutils "github.com/openkruise/agents/test/utils"
-
 	"github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/cache/cachetest"
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
-	cachetest "github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr/cache/cachetest"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/sandbox-manager/proxyutils"
+	testutils "github.com/openkruise/agents/test/utils"
 )
 
 func ConvertPodToSandboxCR(pod *corev1.Pod) *v1alpha1.Sandbox {

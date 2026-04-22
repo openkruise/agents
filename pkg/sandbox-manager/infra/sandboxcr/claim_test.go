@@ -1,3 +1,19 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package sandboxcr
 
 import (
@@ -28,11 +44,13 @@ import (
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/utils/runtime"
 	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
+	"github.com/openkruise/agents/pkg/utils/sandbox-manager/expectationutils"
 	"github.com/openkruise/agents/pkg/utils/sandboxutils"
 	testutils "github.com/openkruise/agents/test/utils"
 )
@@ -69,7 +87,7 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 	utils.InitLogOutput()
 
 	origCreateSandbox := DefaultCreateSandbox
-	DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client, cache infra.CacheProvider) (*v1alpha1.Sandbox, error) {
+	DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client, cache cache.Provider) (*v1alpha1.Sandbox, error) {
 		if sbx.Name == "" && sbx.GenerateName != "" {
 			sbx.Name = sbx.GenerateName + rand.String(5)
 		}
@@ -284,7 +302,7 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 				sbx.UID = types.UID(uuid.NewString())
 				sbx = sbx.DeepCopy()
 				sbx.ResourceVersion = "100"
-				utils.ResourceVersionExpectationExpect(sbx)
+				expectationutils.ResourceVersionExpectationExpect(sbx)
 			},
 			expectError: "no candidate",
 		},
@@ -1928,11 +1946,11 @@ func TestPickAnAvailableSandbox_PrefersMatchingRevision(t *testing.T) {
 	utils.InitLogOutput()
 
 	origCreateSandbox := DefaultCreateSandbox
-	DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, client *clients.ClientSet, cache infra.CacheProvider) (*v1alpha1.Sandbox, error) {
+	DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client, cache cache.Provider) (*v1alpha1.Sandbox, error) {
 		if sbx.Name == "" && sbx.GenerateName != "" {
 			sbx.Name = sbx.GenerateName + rand.String(5)
 		}
-		created, err := origCreateSandbox(ctx, sbx, client, cache)
+		created, err := origCreateSandbox(ctx, sbx, c, cache)
 		if err != nil {
 			return nil, err
 		}
@@ -1943,7 +1961,7 @@ func TestPickAnAvailableSandbox_PrefersMatchingRevision(t *testing.T) {
 			},
 			PodInfo: v1alpha1.PodInfo{PodIP: "1.2.3.4"},
 		}
-		created, err = client.ApiV1alpha1().Sandboxes(created.Namespace).UpdateStatus(ctx, created, metav1.UpdateOptions{})
+		err = c.Status().Update(ctx, created)
 		if err != nil {
 			return nil, err
 		}
@@ -1982,7 +2000,7 @@ func TestPickAnAvailableSandbox_PrefersMatchingRevision(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			testInfra, clientSet := NewTestInfra(t)
+			testInfra, c := NewTestInfra(t)
 
 			// Create the SandboxSet with UpdateRevision
 			sbs := &v1alpha1.SandboxSet{
@@ -2002,13 +2020,14 @@ func TestPickAnAvailableSandbox_PrefersMatchingRevision(t *testing.T) {
 					UpdateRevision: updateRevision,
 				},
 			}
-			_, err := clientSet.ApiV1alpha1().SandboxSets("default").Create(t.Context(), sbs, metav1.CreateOptions{})
+			err := c.Create(t.Context(), sbs)
 			require.NoError(t, err)
-			_, err = clientSet.ApiV1alpha1().SandboxSets("default").UpdateStatus(t.Context(), sbs, metav1.UpdateOptions{})
+			err = c.Status().Update(t.Context(), sbs)
 			require.NoError(t, err)
-			require.Eventually(t, func() bool {
-				return testInfra.HasTemplate(template)
-			}, 200*time.Millisecond, 5*time.Millisecond)
+			// MockManager doesn't run reconcilers, so call reconcileSandboxSet directly
+			_, err = testInfra.reconcileSandboxSet(t.Context(), sbs, false)
+			require.NoError(t, err)
+			require.True(t, testInfra.HasTemplate(template))
 
 			now := metav1.Now()
 			ownerRefs := []metav1.OwnerReference{*metav1.NewControllerRef(sbs, v1alpha1.SandboxSetControllerKind)}
@@ -2031,7 +2050,7 @@ func TestPickAnAvailableSandbox_PrefersMatchingRevision(t *testing.T) {
 						PodInfo:    v1alpha1.PodInfo{PodIP: "1.2.3.4"},
 					},
 				}
-				CreateSandboxWithStatus(t, clientSet.SandboxClient, sbx)
+				CreateSandboxWithStatus(t, c, sbx)
 			}
 
 			// Create non-matching (old revision) sandboxes
@@ -2052,7 +2071,7 @@ func TestPickAnAvailableSandbox_PrefersMatchingRevision(t *testing.T) {
 						PodInfo:    v1alpha1.PodInfo{PodIP: "1.2.3.4"},
 					},
 				}
-				CreateSandboxWithStatus(t, clientSet.SandboxClient, sbx)
+				CreateSandboxWithStatus(t, c, sbx)
 			}
 
 			// Wait for cache sync

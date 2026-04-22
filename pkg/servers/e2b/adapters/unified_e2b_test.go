@@ -1,12 +1,27 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package adapters
 
 import (
 	"context"
 	"testing"
 
-	"github.com/openkruise/agents/pkg/proxy"
-	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -15,6 +30,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	"github.com/openkruise/agents/pkg/proxy"
+	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 )
 
 var adminKey = "admin-key"
@@ -31,18 +49,18 @@ func SetUpE2BAdapter(t *testing.T) *E2BAdapter {
 		Namespace: "default",
 		},
 		Data: map[string][]byte{},
-		}
-		fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
-		keyStore := &keys.SecretKeyStorage{
+	}
+	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
+	keyStore, err := keys.NewKeyStorage(keys.Config{
 		Namespace: "default",
 		AdminKey:  adminKey,
 		Client:    fc,
 		APIReader: fc,
-		Stop:      make(chan struct{}),
-		}
-		assert.NoError(t, keyStore.Init(context.Background()))
-		return NewE2BAdapter(8080)
-		}
+	})
+	require.NoError(t, err)
+	require.NoError(t, keyStore.Init(context.Background()))
+	return NewE2BAdapter(8080)
+}
 
 		func TestMap(t *testing.T) {
 		tests := []struct {

@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"reflect"
 
-	infracache "github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr/cache"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -42,6 +41,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	infracache "github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/controller/sandboxclaim/core"
 	"github.com/openkruise/agents/pkg/discovery"
 	"github.com/openkruise/agents/pkg/features"
@@ -67,7 +67,7 @@ func Add(mgr manager.Manager) error {
 	}
 
 	// Initialize cache
-	cache, err := infracache.NewCacheV2(mgr)
+	cache, err := infracache.NewCache(mgr)
 	if err != nil {
 		return fmt.Errorf("failed to create cache: %w", err)
 	}
