@@ -17,6 +17,8 @@ limitations under the License.
 package sandboxclaim
 
 import (
+	"sync"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
@@ -87,12 +89,27 @@ var (
 		[]string{"namespace", "name"},
 	)
 
+	// sandboxClaimClaimDuration records the histogram of sandbox claim durations
+	// (from ClaimStartTime to CompletionTime) in seconds.
+	// This is observed exactly once per claim when it first reaches Completed phase.
+	sandboxClaimClaimDuration = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "sandboxclaim_claim_duration_seconds",
+			Help:    "Duration of sandbox claim operations from start to completion in seconds",
+			Buckets: []float64{1, 2, 5, 10, 20, 30, 60, 120, 300, 600},
+		},
+	)
+
 	// allClaimPhases enumerates all possible sandbox claim phases for metric cleanup.
 	allClaimPhases = []agentsv1alpha1.SandboxClaimPhase{
 		agentsv1alpha1.SandboxClaimPhaseClaiming,
 		agentsv1alpha1.SandboxClaimPhaseCompleted,
 	}
 )
+
+// observedClaimDurations tracks which claims have already had their duration
+// observed in the histogram, preventing duplicate observations on re-reconcile.
+var observedClaimDurations sync.Map
 
 func init() {
 	metrics.Registry.MustRegister(
@@ -103,6 +120,7 @@ func init() {
 		sandboxClaimCompletionTime,
 		sandboxClaimClaimedReplicas,
 		sandboxClaimDesiredReplicas,
+		sandboxClaimClaimDuration,
 	)
 }
 
@@ -142,6 +160,16 @@ func recordSandboxClaimMetrics(claim *agentsv1alpha1.SandboxClaim) {
 	if claim.Spec.Replicas != nil {
 		sandboxClaimDesiredReplicas.WithLabelValues(namespace, name).Set(float64(*claim.Spec.Replicas))
 	}
+
+	// sandboxclaim_claim_duration_seconds - observe once when claim completes
+	if claim.Status.Phase == agentsv1alpha1.SandboxClaimPhaseCompleted &&
+		claim.Status.ClaimStartTime != nil && claim.Status.CompletionTime != nil {
+		key := namespace + "/" + name
+		if _, loaded := observedClaimDurations.LoadOrStore(key, true); !loaded {
+			duration := claim.Status.CompletionTime.Sub(claim.Status.ClaimStartTime.Time)
+			sandboxClaimClaimDuration.Observe(duration.Seconds())
+		}
+	}
 }
 
 // deleteSandboxClaimMetrics removes all metrics for a sandbox claim that has been deleted.
@@ -155,6 +183,7 @@ func deleteSandboxClaimMetrics(namespace, name string) {
 	sandboxClaimCompletionTime.DeleteLabelValues(namespace, name)
 	sandboxClaimClaimedReplicas.DeleteLabelValues(namespace, name)
 	sandboxClaimDesiredReplicas.DeleteLabelValues(namespace, name)
+	observedClaimDurations.Delete(namespace + "/" + name)
 }
 
 // boolFloat64 converts a boolean to a float64 value (1.0 for true, 0.0 for false),

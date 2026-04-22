@@ -20,12 +20,23 @@ import (
 	"testing"
 	"time"
 
+	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 )
+
+// histogramSum collects the current sample sum from a Histogram metric.
+func histogramSum(t *testing.T) float64 {
+	t.Helper()
+	m := &dto.Metric{}
+	if err := sandboxClaimClaimDuration.Write(m); err != nil {
+		t.Fatalf("failed to write histogram metric: %v", err)
+	}
+	return m.GetHistogram().GetSampleSum()
+}
 
 func TestBoolFloat64(t *testing.T) {
 	tests := []struct {
@@ -248,4 +259,89 @@ func TestDeleteSandboxClaimMetrics(t *testing.T) {
 	if desiredVal != 0 {
 		t.Errorf("sandboxclaim_desired_replicas after delete = %v, want 0", desiredVal)
 	}
+}
+
+func TestSandboxClaimClaimDuration_ObservedOnce(t *testing.T) {
+	now := time.Now()
+	startTime := metav1.NewTime(now.Add(-30 * time.Second))
+	completionTime := metav1.NewTime(now)
+	claim := &agentsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "duration-test-claim",
+			Namespace:         "default",
+			CreationTimestamp: metav1.NewTime(now.Add(-1 * time.Minute)),
+		},
+		Spec: agentsv1alpha1.SandboxClaimSpec{
+			TemplateName: "my-sandboxset",
+			Replicas:     ptr.To[int32](2),
+		},
+		Status: agentsv1alpha1.SandboxClaimStatus{
+			Phase:           agentsv1alpha1.SandboxClaimPhaseCompleted,
+			ClaimedReplicas: 2,
+			ClaimStartTime:  &startTime,
+			CompletionTime:  &completionTime,
+		},
+	}
+
+	// Get initial sum value from histogram
+	beforeSum := histogramSum(t)
+
+	// First call should observe
+	recordSandboxClaimMetrics(claim)
+
+	afterFirstSum := histogramSum(t)
+	expectedDuration := completionTime.Sub(startTime.Time).Seconds()
+	if afterFirstSum-beforeSum != expectedDuration {
+		t.Errorf("first observation: sum delta = %v, want %v", afterFirstSum-beforeSum, expectedDuration)
+	}
+
+	// Second call should NOT observe (deduplicated)
+	recordSandboxClaimMetrics(claim)
+
+	afterSecondSum := histogramSum(t)
+	if afterSecondSum != afterFirstSum {
+		t.Errorf("second call should not change sum: got %v, want %v", afterSecondSum, afterFirstSum)
+	}
+
+	// Delete metrics and re-record should observe again
+	deleteSandboxClaimMetrics("default", "duration-test-claim")
+	recordSandboxClaimMetrics(claim)
+
+	afterReObserve := histogramSum(t)
+	if afterReObserve-afterSecondSum != expectedDuration {
+		t.Errorf("re-observation after delete: sum delta = %v, want %v", afterReObserve-afterSecondSum, expectedDuration)
+	}
+
+	// Final cleanup
+	deleteSandboxClaimMetrics("default", "duration-test-claim")
+}
+
+func TestSandboxClaimClaimDuration_NotObservedForClaimingPhase(t *testing.T) {
+	now := time.Now()
+	startTime := metav1.NewTime(now.Add(-10 * time.Second))
+	claim := &agentsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "claiming-phase-claim",
+			Namespace:         "default",
+			CreationTimestamp: metav1.NewTime(now),
+		},
+		Spec: agentsv1alpha1.SandboxClaimSpec{
+			TemplateName: "my-sandboxset",
+			Replicas:     ptr.To[int32](1),
+		},
+		Status: agentsv1alpha1.SandboxClaimStatus{
+			Phase:          agentsv1alpha1.SandboxClaimPhaseClaiming,
+			ClaimStartTime: &startTime,
+			// No CompletionTime
+		},
+	}
+
+	beforeSum := histogramSum(t)
+	recordSandboxClaimMetrics(claim)
+	afterSum := histogramSum(t)
+
+	if afterSum != beforeSum {
+		t.Errorf("claiming phase should not observe histogram: sum changed from %v to %v", beforeSum, afterSum)
+	}
+	deleteSandboxClaimMetrics("default", "claiming-phase-claim")
 }
