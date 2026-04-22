@@ -22,6 +22,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
@@ -1049,4 +1050,196 @@ func TestRecordSandboxMetrics_InfoNoOwner(t *testing.T) {
 	if val != 1 {
 		t.Errorf("sandbox_info with no owner = %v, want 1", val)
 	}
+}
+
+// creationToReadyHistogramSum collects the current sample sum from the creation-to-ready Histogram.
+func creationToReadyHistogramSum(t *testing.T) float64 {
+	t.Helper()
+	m := &dto.Metric{}
+	if err := sandboxCreationToReadyDuration.Write(m); err != nil {
+		t.Fatalf("failed to write histogram metric: %v", err)
+	}
+	return m.GetHistogram().GetSampleSum()
+}
+
+// inplaceUpdateHistogramSum collects the current sample sum from the inplace-update Histogram.
+func inplaceUpdateHistogramSum(t *testing.T) float64 {
+	t.Helper()
+	m := &dto.Metric{}
+	if err := sandboxInplaceUpdateDuration.Write(m); err != nil {
+		t.Fatalf("failed to write histogram metric: %v", err)
+	}
+	return m.GetHistogram().GetSampleSum()
+}
+
+func TestSandboxCreationToReadyDuration_ObservedOnce(t *testing.T) {
+	now := time.Now()
+	creationTime := now.Add(-45 * time.Second)
+	readyTime := metav1.NewTime(now)
+	ns, name := "default", "ready-duration-sandbox"
+
+	sandbox := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              name,
+			Namespace:         ns,
+			CreationTimestamp: metav1.NewTime(creationTime),
+		},
+		Status: agentsv1alpha1.SandboxStatus{
+			Phase: agentsv1alpha1.SandboxRunning,
+			Conditions: []metav1.Condition{
+				{
+					Type:               string(agentsv1alpha1.SandboxConditionReady),
+					Status:             metav1.ConditionTrue,
+					LastTransitionTime: readyTime,
+				},
+			},
+		},
+	}
+
+	beforeSum := creationToReadyHistogramSum(t)
+
+	// First call should observe
+	recordSandboxMetrics(sandbox)
+	afterFirstSum := creationToReadyHistogramSum(t)
+	expectedDuration := readyTime.Sub(creationTime).Seconds()
+	if delta := afterFirstSum - beforeSum; delta < expectedDuration-0.01 || delta > expectedDuration+0.01 {
+		t.Errorf("first observation: sum delta = %v, want ~%v", delta, expectedDuration)
+	}
+
+	// Second call should NOT observe (deduplicated)
+	recordSandboxMetrics(sandbox)
+	afterSecondSum := creationToReadyHistogramSum(t)
+	if afterSecondSum != afterFirstSum {
+		t.Errorf("second call should not change sum: got %v, want %v", afterSecondSum, afterFirstSum)
+	}
+
+	// Delete and re-record should observe again
+	deleteSandboxMetrics(ns, name)
+	recordSandboxMetrics(sandbox)
+	afterReObserve := creationToReadyHistogramSum(t)
+	if delta := afterReObserve - afterSecondSum; delta < expectedDuration-0.01 || delta > expectedDuration+0.01 {
+		t.Errorf("re-observation after delete: sum delta = %v, want ~%v", delta, expectedDuration)
+	}
+
+	deleteSandboxMetrics(ns, name)
+}
+
+func TestSandboxCreationToReadyDuration_NotObservedWhenNotReady(t *testing.T) {
+	now := time.Now()
+	ns, name := "default", "notready-duration-sandbox"
+	sandbox := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              name,
+			Namespace:         ns,
+			CreationTimestamp: metav1.NewTime(now.Add(-30 * time.Second)),
+		},
+		Status: agentsv1alpha1.SandboxStatus{
+			Phase: agentsv1alpha1.SandboxPending,
+			Conditions: []metav1.Condition{
+				{
+					Type:               string(agentsv1alpha1.SandboxConditionReady),
+					Status:             metav1.ConditionFalse,
+					LastTransitionTime: metav1.NewTime(now),
+				},
+			},
+		},
+	}
+
+	beforeSum := creationToReadyHistogramSum(t)
+	recordSandboxMetrics(sandbox)
+	afterSum := creationToReadyHistogramSum(t)
+
+	if afterSum != beforeSum {
+		t.Errorf("not-ready should not observe histogram: sum changed from %v to %v", beforeSum, afterSum)
+	}
+	deleteSandboxMetrics(ns, name)
+}
+
+func TestSandboxInplaceUpdateDuration_ObservedOnce(t *testing.T) {
+	now := time.Now()
+	startTime := now.Add(-20 * time.Second)
+	endTime := now
+	ns, name := "default", "inplace-duration-sandbox"
+
+	// Step 1: Record with InplaceUpdate=False (stores start time)
+	sandbox := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              name,
+			Namespace:         ns,
+			CreationTimestamp: metav1.NewTime(now.Add(-1 * time.Minute)),
+		},
+		Status: agentsv1alpha1.SandboxStatus{
+			Phase: agentsv1alpha1.SandboxRunning,
+			Conditions: []metav1.Condition{
+				{
+					Type:               string(agentsv1alpha1.SandboxConditionInplaceUpdate),
+					Status:             metav1.ConditionFalse,
+					LastTransitionTime: metav1.NewTime(startTime),
+				},
+			},
+		},
+	}
+
+	beforeSum := inplaceUpdateHistogramSum(t)
+	recordSandboxMetrics(sandbox)
+
+	// No histogram observation yet (only False recorded)
+	afterFalseSum := inplaceUpdateHistogramSum(t)
+	if afterFalseSum != beforeSum {
+		t.Errorf("InplaceUpdate=False should not observe histogram: sum changed from %v to %v", beforeSum, afterFalseSum)
+	}
+
+	// Step 2: Record with InplaceUpdate=True (should observe duration)
+	sandbox.Status.Conditions[0].Status = metav1.ConditionTrue
+	sandbox.Status.Conditions[0].LastTransitionTime = metav1.NewTime(endTime)
+
+	recordSandboxMetrics(sandbox)
+	afterTrueSum := inplaceUpdateHistogramSum(t)
+	expectedDuration := endTime.Sub(startTime).Seconds()
+	if delta := afterTrueSum - beforeSum; delta < expectedDuration-0.01 || delta > expectedDuration+0.01 {
+		t.Errorf("InplaceUpdate=True observation: sum delta = %v, want ~%v", delta, expectedDuration)
+	}
+
+	// Step 3: Second call should NOT observe (deduplicated)
+	recordSandboxMetrics(sandbox)
+	afterSecondSum := inplaceUpdateHistogramSum(t)
+	if afterSecondSum != afterTrueSum {
+		t.Errorf("second InplaceUpdate=True call should not change sum: got %v, want %v", afterSecondSum, afterTrueSum)
+	}
+
+	// Cleanup
+	deleteSandboxMetrics(ns, name)
+}
+
+func TestSandboxInplaceUpdateDuration_NotObservedWithoutStartTime(t *testing.T) {
+	now := time.Now()
+	ns, name := "default", "inplace-no-start-sandbox"
+
+	// Directly set InplaceUpdate=True without prior False record
+	sandbox := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              name,
+			Namespace:         ns,
+			CreationTimestamp: metav1.NewTime(now.Add(-1 * time.Minute)),
+		},
+		Status: agentsv1alpha1.SandboxStatus{
+			Phase: agentsv1alpha1.SandboxRunning,
+			Conditions: []metav1.Condition{
+				{
+					Type:               string(agentsv1alpha1.SandboxConditionInplaceUpdate),
+					Status:             metav1.ConditionTrue,
+					LastTransitionTime: metav1.NewTime(now),
+				},
+			},
+		},
+	}
+
+	beforeSum := inplaceUpdateHistogramSum(t)
+	recordSandboxMetrics(sandbox)
+	afterSum := inplaceUpdateHistogramSum(t)
+
+	if afterSum != beforeSum {
+		t.Errorf("InplaceUpdate=True without prior False should not observe: sum changed from %v to %v", beforeSum, afterSum)
+	}
+	deleteSandboxMetrics(ns, name)
 }

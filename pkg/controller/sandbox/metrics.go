@@ -17,6 +17,9 @@ limitations under the License.
 package sandbox
 
 import (
+	"sync"
+	"time"
+
 	"github.com/prometheus/client_golang/prometheus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
@@ -216,6 +219,24 @@ var (
 		[]string{"namespace", "name"},
 	)
 
+	// sandbox_creation_to_ready_duration_seconds
+	sandboxCreationToReadyDuration = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "sandbox_creation_to_ready_duration_seconds",
+			Help:    "Duration from sandbox creation to Ready condition in seconds",
+			Buckets: []float64{1, 2, 5, 10, 20, 30, 60, 120, 300, 600},
+		},
+	)
+
+	// sandbox_inplace_update_duration_seconds
+	sandboxInplaceUpdateDuration = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "sandbox_inplace_update_duration_seconds",
+			Help:    "Duration of in-place update operations from start to completion in seconds",
+			Buckets: []float64{1, 2, 5, 10, 20, 30, 60, 120, 300, 600},
+		},
+	)
+
 	// allPhases enumerates all possible sandbox phases for metric cleanup.
 	allPhases = []agentsv1alpha1.SandboxPhase{
 		agentsv1alpha1.SandboxPending,
@@ -227,6 +248,18 @@ var (
 		agentsv1alpha1.SandboxTerminating,
 	}
 )
+
+// observedCreationToReady tracks which sandboxes have had their creation-to-ready
+// duration observed, preventing duplicate histogram observations on re-reconcile.
+var observedCreationToReady sync.Map
+
+// inplaceUpdateStartTimes tracks the start time of in-place update operations
+// (when InplaceUpdate condition transitions to False).
+var inplaceUpdateStartTimes sync.Map
+
+// observedInplaceUpdateDurations tracks which sandboxes have had their in-place update
+// duration observed, preventing duplicate histogram observations.
+var observedInplaceUpdateDurations sync.Map
 
 func init() {
 	metrics.Registry.MustRegister(
@@ -250,6 +283,8 @@ func init() {
 		sandboxStatusInplaceUpdateDone,
 		sandboxStatusInplaceUpdateDoneTime,
 		sandboxInfo,
+		sandboxCreationToReadyDuration,
+		sandboxInplaceUpdateDuration,
 	)
 }
 
@@ -327,9 +362,32 @@ func recordSandboxMetrics(sandbox *agentsv1alpha1.Sandbox) {
 			}
 			recordConditionFalseMetric(condition, sandboxStatusNotReady, sandboxStatusNotReadyTime, namespace, name)
 
+			// Observe creation-to-ready duration histogram (once per sandbox)
+			if isReady {
+				key := namespace + "/" + name
+				if _, loaded := observedCreationToReady.LoadOrStore(key, true); !loaded {
+					duration := condition.LastTransitionTime.Sub(sandbox.CreationTimestamp.Time)
+					sandboxCreationToReadyDuration.Observe(duration.Seconds())
+				}
+			}
+
 		case agentsv1alpha1.SandboxConditionInplaceUpdate:
 			recordConditionFalseMetric(condition, sandboxStatusInplaceUpdating, sandboxStatusInplaceUpdatingTime, namespace, name)
 			recordConditionTrueMetric(condition, sandboxStatusInplaceUpdateDone, sandboxStatusInplaceUpdateDoneTime, namespace, name)
+
+			key := namespace + "/" + name
+			if condition.Status == metav1.ConditionFalse {
+				// Store the start time when in-place update begins
+				inplaceUpdateStartTimes.Store(key, condition.LastTransitionTime.Time)
+			} else if condition.Status == metav1.ConditionTrue {
+				// Observe duration when in-place update completes (once)
+				if startTime, ok := inplaceUpdateStartTimes.Load(key); ok {
+					if _, observed := observedInplaceUpdateDurations.LoadOrStore(key, true); !observed {
+						duration := condition.LastTransitionTime.Sub(startTime.(time.Time))
+						sandboxInplaceUpdateDuration.Observe(duration.Seconds())
+					}
+				}
+			}
 
 		case agentsv1alpha1.SandboxConditionPaused:
 			recordConditionFalseMetric(condition, sandboxStatusUnpaused, sandboxStatusUnpausedTime, namespace, name)
@@ -366,4 +424,9 @@ func deleteSandboxMetrics(namespace, name string) {
 	sandboxStatusResumedTime.DeleteLabelValues(namespace, name)
 	sandboxStatusInplaceUpdateDone.DeleteLabelValues(namespace, name)
 	sandboxStatusInplaceUpdateDoneTime.DeleteLabelValues(namespace, name)
+
+	key := namespace + "/" + name
+	observedCreationToReady.Delete(key)
+	inplaceUpdateStartTimes.Delete(key)
+	observedInplaceUpdateDurations.Delete(key)
 }

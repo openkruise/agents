@@ -35,6 +35,8 @@ see-also:
       - [SandboxSet Controller Metrics](#sandboxset-controller-metrics)
       - [SandboxClaim Controller Metrics](#sandboxclaim-controller-metrics)
       - [Sandbox Manager API Metrics](#sandbox-manager-api-metrics)
+      - [Proxy Metrics](#proxy-metrics)
+      - [E2B Server Metrics](#e2b-server-metrics)
       - [Metric Collection Architecture](#metric-collection-architecture)
       - [Useful PromQL Examples](#useful-promql-examples)
     - [Implementation Details/Notes/Constraints](#implementation-detailsnotesconstraints)
@@ -50,7 +52,9 @@ This proposal introduces comprehensive Prometheus metrics observability for the 
 - **Sandbox Controller** — sandbox instance lifecycle, phase, and condition metrics
 - **SandboxSet Controller** — resource pool replica tracking metrics
 - **SandboxClaim Controller** — claim operation phase and timing metrics
-- **Sandbox Manager** — API operation latency and success/failure counters
+- **Sandbox Manager** — API operation latency and success/failure counters, claim/clone stage-level metrics, route sync metrics
+- **Proxy** — route table and peer topology metrics
+- **E2B Server** — snapshot operation metrics
 
 All metrics are registered through controller-runtime's metrics registry and exposed via the standard `/metrics` HTTP endpoint, ready for Prometheus scraping and Grafana dashboard visualization.
 
@@ -133,6 +137,8 @@ The Sandbox controller exposes the following metrics for each Sandbox resource:
 | `sandbox_status_inplace_update_done_time` | Gauge | `namespace`, `name` | Unix timestamp of the last transition to InplaceUpdate=True. |
 | `sandbox_status_inplace_updating` | Gauge | `namespace`, `name` | Whether the InplaceUpdate condition is False (`1`) or not (`0`). |
 | `sandbox_status_inplace_updating_time` | Gauge | `namespace`, `name` | Unix timestamp of the last transition to InplaceUpdate=False. |
+| `sandbox_creation_to_ready_duration_seconds` | Histogram | — | Duration from sandbox creation to Ready condition in seconds. Buckets: 1, 2, 5, 10, 20, 30, 60, 120, 300, 600. Observed once per sandbox when first reaching Ready. |
+| `sandbox_inplace_update_duration_seconds` | Histogram | — | Duration of in-place update operations from start (InplaceUpdate=False) to completion (InplaceUpdate=True) in seconds. Buckets: 1, 2, 5, 10, 20, 30, 60, 120, 300, 600. Observed once per update cycle. |
 
 **Design Patterns**
 
@@ -213,6 +219,7 @@ The SandboxClaim controller exposes the following metrics for each SandboxClaim 
 | `sandboxclaim_completion_time` | Gauge | `namespace`, `name` | Unix timestamp when the claim reached Completed phase (`status.completionTime`). |
 | `sandboxclaim_claimed_replicas` | Gauge | `namespace`, `name` | Current number of successfully claimed replicas (`status.claimedReplicas`). |
 | `sandboxclaim_desired_replicas` | Gauge | `namespace`, `name` | Desired number of replicas to claim (`spec.replicas`). |
+| `sandboxclaim_claim_duration_seconds` | Histogram | — | Duration of sandbox claim from start to completion in seconds. Buckets: 1, 2, 5, 10, 20, 30, 60, 120, 300, 600. Observed once per claim when reaching Completed phase. |
 
 **SandboxClaim Phase State Machine**
 
@@ -241,6 +248,16 @@ The Sandbox Manager exposes operational metrics for its REST API endpoints:
 | `sandbox_resume_latency_ms` | Histogram | — | Latency of sandbox resume operations in milliseconds. |
 | `sandbox_resume_responses` | Counter | `result` | Total number of sandbox resume responses. |
 | `sandbox_delete_responses` | Counter | `result` | Total number of sandbox delete responses. |
+| `sandbox_delete_latency_ms` | Histogram | — | Latency of sandbox delete operations in milliseconds. |
+| `sandbox_claim_duration_ms` | Histogram | — | Claim operation total latency in milliseconds. |
+| `sandbox_claim_stage_duration_ms` | Histogram | `stage` | Claim per-stage latency in milliseconds. Stages: `wait`, `retry_cost`, `pick_and_lock`, `wait_ready`, `init_runtime`, `csi_mount`. |
+| `sandbox_claim_total` | Counter | `result`, `lock_type` | Total number of claim operations. Label `result` is `"success"` or `"failure"`. Label `lock_type` is `"create"`, `"update"`, `"speculate"`, or `"unknown"`. |
+| `sandbox_claim_retries` | Histogram | — | Distribution of retry counts per claim operation. |
+| `sandbox_clone_duration_ms` | Histogram | — | Clone operation total latency in milliseconds. |
+| `sandbox_clone_stage_duration_ms` | Histogram | `stage` | Clone per-stage latency in milliseconds. Stages: `wait`, `get_template`, `create_sandbox`, `wait_ready`, `init_runtime`, `csi_mount`. |
+| `sandbox_clone_total` | Counter | `result` | Total number of clone operations. Label `result` is `"success"` or `"failure"`. |
+| `sandbox_route_sync_duration_ms` | Histogram | `type` | Route sync operation latency in milliseconds. |
+| `sandbox_route_sync_total` | Counter | `type`, `result` | Total number of route sync operations. |
 
 **Histogram Bucket Configuration**
 
@@ -251,6 +268,30 @@ All latency histograms use `prometheus.ExponentialBuckets(10, 2, 10)`, which gen
 ```
 
 This covers the range from 10ms to ~5.12 seconds with exponential distribution, which is well-suited for API operations that typically complete in hundreds of milliseconds but may occasionally spike to several seconds.
+
+#### Proxy Metrics
+
+Source: `pkg/proxy/metrics.go`
+
+The Proxy component exposes topology metrics for routing and peer discovery:
+
+| Metric Name | Type | Labels | Description |
+|---|---|---|---|
+| `sandbox_routes_total` | Gauge | — | Current number of routes in the routing table. |
+| `sandbox_peers_total` | Gauge | — | Current number of connected peer nodes. |
+
+These gauges provide real-time visibility into the proxy's routing table size and cluster membership, useful for diagnosing routing issues and monitoring cluster health.
+
+#### E2B Server Metrics
+
+Source: `pkg/servers/e2b/metrics.go`
+
+The E2B Server exposes metrics for snapshot operations:
+
+| Metric Name | Type | Labels | Description |
+|---|---|---|---|
+| `sandbox_snapshot_duration_ms` | Histogram | — | Latency of snapshot creation operations in milliseconds. |
+| `sandbox_snapshot_total` | Counter | `result` | Total number of snapshot operations. Label `result` is `"success"` or `"failure"`. |
 
 #### Metric Collection Architecture
 
@@ -281,9 +322,24 @@ This covers the range from 10ms to ~5.12 seconds with exponential distribution, 
 │  ┌──────────────────────────────┐                       │
 │  │       REST API Handlers      │                       │
 │  │  create / pause / resume /   │                       │
-│  │  delete                      │                       │
+│  │  delete / claim / clone      │                       │
 │  │  ├─ Observe(latency)         │                       │
 │  │  └─ Inc(result)              │                       │
+│  └──────────────┬───────────────┘                       │
+│                 ▼                                        │
+│     controller-runtime metrics.Registry                 │
+│                 │                                        │
+│                 ▼                                        │
+│          /metrics endpoint ◄──── Prometheus scrape       │
+└─────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────┐
+│                       proxy                             │
+│                                                         │
+│  ┌──────────────────────────────┐                       │
+│  │   Route Table & Peer Mgmt   │                       │
+│  │  ├─ Set(routes_total)        │                       │
+│  │  └─ Set(peers_total)         │                       │
 │  └──────────────┬───────────────┘                       │
 │                 ▼                                        │
 │     controller-runtime metrics.Registry                 │
@@ -335,9 +391,61 @@ count(sandbox_status_not_ready == 1)
 # SandboxClaim claim fulfillment ratio
 sandboxclaim_claimed_replicas / sandboxclaim_desired_replicas
 
+# SandboxClaim duration P99 (seconds)
+histogram_quantile(0.99, rate(sandboxclaim_claim_duration_seconds_bucket[5m]))
+
+# SandboxClaim average duration (seconds)
+rate(sandboxclaim_claim_duration_seconds_sum[5m]) / rate(sandboxclaim_claim_duration_seconds_count[5m])
+
 # Sandbox resume failure rate (last 5m)
 rate(sandbox_resume_responses{result="failure"}[5m])
   / rate(sandbox_resume_responses[5m])
+
+# Claim wait_ready stage P99 latency (milliseconds)
+histogram_quantile(0.99, rate(sandbox_claim_stage_duration_ms_bucket{stage="wait_ready"}[5m]))
+
+# Claim total duration P99 latency (milliseconds)
+histogram_quantile(0.99, rate(sandbox_claim_duration_ms_bucket[5m]))
+
+# Clone failure rate (last 5m)
+rate(sandbox_clone_total{result="failure"}[5m])
+
+# Clone per-stage P99 latency (milliseconds)
+histogram_quantile(0.99, rate(sandbox_clone_stage_duration_ms_bucket[5m])) by (stage)
+
+# Current routing table size
+sandbox_routes_total
+
+# Current connected peers
+sandbox_peers_total
+
+# Route sync P99 latency (milliseconds)
+histogram_quantile(0.99, rate(sandbox_route_sync_duration_ms_bucket[5m]))
+
+# Route sync failure rate (last 5m)
+rate(sandbox_route_sync_total{result="failure"}[5m])
+
+# Snapshot creation P99 latency (milliseconds)
+histogram_quantile(0.99, rate(sandbox_snapshot_duration_ms_bucket[5m]))
+
+# Snapshot failure rate (last 5m)
+rate(sandbox_snapshot_total{result="failure"}[5m])
+
+# Average claim retry count (last 5m)
+rate(sandbox_claim_retries_sum[5m])
+  / rate(sandbox_claim_retries_count[5m])
+
+# Delete operation P99 latency (milliseconds)
+histogram_quantile(0.99, rate(sandbox_delete_latency_ms_bucket[5m]))
+
+# Sandbox creation-to-ready P99 latency (seconds)
+histogram_quantile(0.99, rate(sandbox_creation_to_ready_duration_seconds_bucket[5m]))
+
+# Sandbox creation-to-ready average latency (seconds)
+rate(sandbox_creation_to_ready_duration_seconds_sum[5m]) / rate(sandbox_creation_to_ready_duration_seconds_count[5m])
+
+# InplaceUpdate P99 duration (seconds)
+histogram_quantile(0.99, rate(sandbox_inplace_update_duration_seconds_bucket[5m]))
 ```
 
 ### Implementation Details/Notes/Constraints
@@ -348,7 +456,7 @@ rate(sandbox_resume_responses{result="failure"}[5m])
 
 3. **Thread safety**: All metric operations use `prometheus.GaugeVec`, `prometheus.CounterVec`, and `prometheus.Histogram` from the Prometheus client library, which are inherently concurrent-safe. The `WithLabelValues().Set()` / `.Inc()` / `.Observe()` operations use internal sync mechanisms (atomic operations and mutexes).
 
-4. **Performance characteristics**: Prometheus metric recording involves an O(1) hash map lookup to find the metric series, followed by an atomic float64 set/increment. This adds sub-microsecond overhead per metric operation. With ~19 metrics per Sandbox and ~7 per SandboxSet/SandboxClaim, the total overhead per Reconcile is negligible (under 1μs).
+4. **Performance characteristics**: Prometheus metric recording involves an O(1) hash map lookup to find the metric series, followed by an atomic float64 set/increment. This adds sub-microsecond overhead per metric operation. With ~21 metrics per Sandbox, ~7 per SandboxSet/SandboxClaim, ~21 for Sandbox Manager API, ~2 for Proxy, and ~2 for E2B Server, the total overhead per Reconcile is negligible (under 1μs).
 
 5. **Condition timestamp semantics**: All condition timestamp metrics use `condition.LastTransitionTime.Unix()`. This timestamp updates only when the condition status changes (not on every Reconcile), which is consistent with Kubernetes API conventions and kube-state-metrics behavior.
 
@@ -368,8 +476,8 @@ rate(sandbox_resume_responses{result="failure"}[5m])
 - **Checkpoint Controller metrics**: Once the Checkpoint controller is fully implemented, add corresponding lifecycle metrics (phase, completion time, duration) following the same design patterns.
 - **Reconcile performance metrics**: Leverage controller-runtime's built-in `controller_runtime_reconcile_total` and `controller_runtime_reconcile_time_seconds` metrics, and consider adding custom sub-step timing.
 - **SandboxSet scale operation metrics**: Track scale-up and scale-down events with counters and latency histograms.
-- **Proxy/Gateway routing metrics**: Expose route sync counts, failure rates, and routing latency in the sandbox-gateway component.
-- **Memberlist cluster metrics**: Track peer node counts, join/leave events, and gossip sync status for the sandbox-manager cluster.
+- ~~**Proxy/Gateway routing metrics**~~: ✅ Implemented — `sandbox_routes_total`, `sandbox_peers_total`, `sandbox_route_sync_duration_ms`, `sandbox_route_sync_total` now expose route table size, peer topology, and route sync performance.
+- ~~**Memberlist cluster metrics**~~: ✅ Partially implemented — `sandbox_peers_total` tracks connected peer node counts. Join/leave events and gossip sync status are deferred.
 - **Webhook admission metrics**: Record admission request counts, rejection rates, and latency for the sandbox validation/mutation webhooks.
 - **Cache hit/miss metrics**: Track sandbox-manager internal cache effectiveness for sandbox lookups.
 - **Grafana dashboard JSON templates**: Provide pre-built, importable Grafana dashboard definitions covering all metrics.
@@ -378,9 +486,12 @@ rate(sandbox_resume_responses{result="failure"}[5m])
 
 Each metrics file has a corresponding comprehensive unit test file:
 
-- `pkg/controller/sandbox/metrics_test.go` — Tests for all 19 Sandbox metrics
+- `pkg/controller/sandbox/metrics_test.go` — Tests for all 21 Sandbox metrics
 - `pkg/controller/sandboxset/metrics_test.go` — Tests for all 7 SandboxSet metrics
 - `pkg/controller/sandboxclaim/metrics_test.go` — Tests for all 7 SandboxClaim metrics
+- `pkg/sandbox-manager/metrics_test.go` — Tests for Sandbox Manager API metrics (claim, clone, delete, route sync)
+- `pkg/proxy/metrics_test.go` — Tests for Proxy route/peer topology metrics
+- `pkg/servers/e2b/metrics_test.go` — Tests for E2B Server snapshot metrics
 
 Testing approach:
 
@@ -403,3 +514,4 @@ Testing approach:
 
 - 04/10/2026: PR [#258](https://github.com/openkruise/agents/pull/258) merged — Initial Sandbox lifecycle metrics with bidirectional condition timestamps
 - 04/22/2026: Extended to full observability coverage including SandboxSet, SandboxClaim, and Sandbox Manager API metrics
+- 04/22/2026: Added claim/clone stage-level metrics, delete latency, route sync metrics, proxy topology metrics, and E2B snapshot metrics
