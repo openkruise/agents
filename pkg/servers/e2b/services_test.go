@@ -591,7 +591,7 @@ func TestCloneSandbox(t *testing.T) {
 	// Decorator: DefaultCreateSandbox - set sandbox ready after creation
 	origCreateSandbox := sandboxcr.DefaultCreateSandbox
 	t.Cleanup(func() { sandboxcr.DefaultCreateSandbox = origCreateSandbox })
-	sandboxcr.DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c ctrlclient.Client, cache cache.Provider) (*v1alpha1.Sandbox, error) {
+	sandboxcr.DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c ctrlclient.Client) (*v1alpha1.Sandbox, error) {
 		// Set Name (FakeClient does not handle GenerateName)
 		if sbx.Name == "" && sbx.GenerateName != "" {
 			sbx.Name = sbx.GenerateName + rand.String(5)
@@ -604,7 +604,7 @@ func TestCloneSandbox(t *testing.T) {
 		sbx.Annotations[v1alpha1.AnnotationRuntimeAccessToken] = runtime.AccessToken
 
 		// Call original createSandbox
-		created, err := origCreateSandbox(ctx, sbx, c, cache)
+		created, err := origCreateSandbox(ctx, sbx, c)
 		if err != nil {
 			return nil, err
 		}

@@ -209,6 +209,7 @@ cython_debug/
 .pearai/
 .trae/
 .agents/
+REVIEW.md
 
 .gomodcache/
 .modcache/

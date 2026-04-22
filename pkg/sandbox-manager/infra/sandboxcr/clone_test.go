@@ -226,7 +226,7 @@ func TestCloneSandbox(t *testing.T) {
 
 	// Decorator: DefaultCreateSandbox - set sandbox ready after creation
 	origCreateSandbox := DefaultCreateSandbox
-	DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client, cache infracache.Provider) (*v1alpha1.Sandbox, error) {
+	DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client) (*v1alpha1.Sandbox, error) {
 		if override, ok := ctx.Value(sbxOverrideKey{}).(sbxOverride); ok {
 			if override.Name != "" {
 				sbx.Name = override.Name
@@ -244,7 +244,7 @@ func TestCloneSandbox(t *testing.T) {
 				sbx.Annotations[v1alpha1.AnnotationRuntimeAccessToken] = override.AccessToken
 			}
 		}
-		created, err := origCreateSandbox(ctx, sbx, c, cache)
+		created, err := origCreateSandbox(ctx, sbx, c)
 		if err != nil {
 			return nil, err
 		}
@@ -656,7 +656,7 @@ func TestCloneSandbox(t *testing.T) {
 			}
 
 			// Call CloneSandbox
-			sbx, metrics, err := CloneSandbox(ctx, tt.opts, cache, fc)
+			sbx, metrics, err := CloneSandbox(ctx, tt.opts, cache)
 
 			if tt.expectError != "" {
 				require.Error(t, err)
@@ -744,7 +744,7 @@ func TestCloneSandbox_WithRateLimiter(t *testing.T) {
 	}
 
 	// Call CloneSandbox - should fail due to rate limit
-	sbx, metrics, err := CloneSandbox(t.Context(), opts, cache, fc)
+	sbx, metrics, err := CloneSandbox(t.Context(), opts, cache)
 
 	assert.Nil(t, sbx, "sandbox should be nil when rate limited")
 	assert.Error(t, err, "should return error when rate limited")
@@ -825,7 +825,7 @@ func TestCloneSandbox_ContextCanceled(t *testing.T) {
 	}
 
 	// Call CloneSandbox with canceled context
-	sbx, _, err := CloneSandbox(ctx, opts, cache, fc)
+	sbx, _, err := CloneSandbox(ctx, opts, cache)
 
 	assert.Nil(t, sbx, "sandbox should be nil when context is canceled")
 	assert.Error(t, err, "should return error when context is canceled")

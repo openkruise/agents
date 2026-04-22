@@ -107,8 +107,7 @@ func ValidateAndInitClaimOptions(opts infra.ClaimSandboxOptions) (infra.ClaimSan
 // the sandbox object should not be used anymore and needs appropriate handling.
 //
 // ValidateAndInitClaimOptions must be called before this function.
-// TODO Next: 对于同时传入 cache.Provider 和 client.Client 的函数进行重构，去除 client.Client 参数，使用 infra.CacheProvider 中的 GetClient 方法
-func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCache *sync.Map, cache cache.Provider, c client.Client,
+func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCache *sync.Map, cache cache.Provider,
 	claimLockChannel chan struct{}, createLimiter *rate.Limiter) (claimed infra.Sandbox, metrics infra.ClaimMetrics, err error) {
 	ctx = logs.Extend(ctx, "tryClaimId", uuid.NewString()[:8])
 	log := klog.FromContext(ctx)
@@ -167,9 +166,8 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 		return
 	}
 
-	err = performLockSandbox(ctx, sbx, lockType, opts, c, cache)
+	err = performLockSandbox(ctx, sbx, lockType, opts, cache)
 	if err != nil {
-		// TODO: these lines cannot be covered by tests currently, which will be fixed when the cache is converted to controller-runtime
 		log.Error(err, "failed to lock sandbox")
 		if apierrors.IsConflict(err) {
 			expectationutils.ResourceVersionExpectationExpect(&metav1.ObjectMeta{
@@ -557,8 +555,7 @@ func (s *Sandbox) SetResources(requests, limits corev1.ResourceList) {
 
 var DefaultCreateSandbox = createSandbox
 
-// TODO Next: 删除第三个参数
-func createSandbox(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client, _ cache.Provider) (*v1alpha1.Sandbox, error) {
+func createSandbox(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client) (*v1alpha1.Sandbox, error) {
 	select {
 	case <-ctx.Done():
 		return nil, fmt.Errorf("context canceled before creating sandbox: %w", ctx.Err())
@@ -571,15 +568,16 @@ func createSandbox(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client, 
 	return sbx, nil
 }
 
-func performLockSandbox(ctx context.Context, sbx *Sandbox, lockType infra.LockType, opts infra.ClaimSandboxOptions, c client.Client, cache cache.Provider) error {
+func performLockSandbox(ctx context.Context, sbx *Sandbox, lockType infra.LockType, opts infra.ClaimSandboxOptions, cache cache.Provider) error {
 	ctx = logs.Extend(ctx, "action", "performLockSandbox")
 	log := klog.FromContext(ctx)
+	c := cache.GetClient()
 	utils.LockSandbox(sbx.Sandbox, opts.LockString, opts.User)
 	var updated *v1alpha1.Sandbox
 	var err error
 	if lockType == infra.LockTypeCreate {
 		log.Info("locking new sandbox via create", "sandbox", klog.KObj(sbx.Sandbox))
-		updated, err = DefaultCreateSandbox(ctx, sbx.Sandbox, c, cache)
+		updated, err = DefaultCreateSandbox(ctx, sbx.Sandbox, c)
 	} else {
 		log.Info("locking existing sandbox via update", "sandbox", klog.KObj(sbx.Sandbox))
 		err = c.Update(ctx, sbx.Sandbox)

@@ -162,7 +162,7 @@ func (i *Infra) ClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions
 	}, func() error {
 		metrics.Retries++
 		log.Info("try to claim sandbox", "retries", metrics.Retries)
-		claimed, tryMetrics, claimErr := TryClaimSandbox(claimCtx, opts, &i.pickCache, i.Cache, i.Cache.GetClient(), i.claimLockChannel, i.createLimiter)
+		claimed, tryMetrics, claimErr := TryClaimSandbox(claimCtx, opts, &i.pickCache, i.Cache, i.claimLockChannel, i.createLimiter)
 		metrics.Total += tryMetrics.Total
 		metrics.Wait += tryMetrics.Wait
 		metrics.PickAndLock += tryMetrics.PickAndLock
@@ -199,7 +199,7 @@ func (i *Infra) CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions
 	}
 	log.Info("clone options", "options", opts)
 	opts.CreateLimiter = i.createLimiter
-	sandbox, metrics, err := CloneSandbox(ctx, opts, i.Cache, i.Cache.GetClient())
+	sandbox, metrics, err := CloneSandbox(ctx, opts, i.Cache)
 	if err != nil {
 		log.Error(err, "failed to clone sandbox")
 		return nil, metrics, err
@@ -214,7 +214,7 @@ func (i *Infra) DeleteCheckpoint(ctx context.Context, user string, checkpointID 
 	// Step 1: Find checkpoint and template
 	tmpl, cp, _, err := findCheckpointAndTemplateById(ctx, infra.CloneSandboxOptions{
 		CheckPointID: checkpointID, SkipWaitCheckpoint: true,
-	}, i.Cache, i.Cache.GetClient(), infra.CloneMetrics{})
+	}, i.Cache, infra.CloneMetrics{})
 	if err != nil {
 		log.Error(err, "failed to find checkpoint and template")
 		return managererrors.NewError(managererrors.ErrorNotFound, err.Error())

@@ -33,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/rand"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -41,10 +42,13 @@ import (
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/cache"
+	infracache "github.com/openkruise/agents/pkg/cache"
+	"github.com/openkruise/agents/pkg/cache/controllers"
+	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
@@ -87,11 +91,11 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 	utils.InitLogOutput()
 
 	origCreateSandbox := DefaultCreateSandbox
-	DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client, cache cache.Provider) (*v1alpha1.Sandbox, error) {
+	DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client) (*v1alpha1.Sandbox, error) {
 		if sbx.Name == "" && sbx.GenerateName != "" {
 			sbx.Name = sbx.GenerateName + rand.String(5)
 		}
-		created, err := origCreateSandbox(ctx, sbx, c, cache)
+		created, err := origCreateSandbox(ctx, sbx, c)
 		if err != nil {
 			return nil, err
 		}
@@ -688,7 +692,7 @@ func TestClaimSandboxFailed(t *testing.T) {
 			}
 			opts, err := ValidateAndInitClaimOptions(tt.options)
 			require.NoError(t, err)
-			_, _, err = TryClaimSandbox(ctx, opts, &testInfra.pickCache, testInfra.Cache, fc, testInfra.claimLockChannel, testInfra.createLimiter)
+			_, _, err = TryClaimSandbox(ctx, opts, &testInfra.pickCache, testInfra.Cache, testInfra.claimLockChannel, testInfra.createLimiter)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.expectError)
 			err = fc.Get(t.Context(), types.NamespacedName{Namespace: sbx.Namespace, Name: name}, &v1alpha1.Sandbox{})
@@ -1942,15 +1946,195 @@ func TestModifyPickedSandbox_CSIMount(t *testing.T) {
 	}
 }
 
+// TestTryClaimSandbox_LockConflict tests the error handling in TryClaimSandbox when
+// performLockSandbox fails (claim.go lines 168-179). It verifies:
+// - Conflict error: ResourceVersionExpectation is set and a retriableError is returned.
+// - Non-conflict error: the original error is returned without modifying expectations.
+//
+//goland:noinspection GoDeprecation
+func TestTryClaimSandbox_LockConflict(t *testing.T) {
+	utils.InitLogOutput()
+	existTemplate := "test-template"
+	user := "test-user"
+
+	tests := []struct {
+		name              string
+		updateError       error
+		expectError       string
+		expectRetriable   bool
+		verifyExpectation bool
+	}{
+		{
+			name: "conflict error sets expectation and returns retriable error",
+			updateError: apierrors.NewConflict(
+				schema.GroupResource{Group: "agents.kruise.io", Resource: "sandboxes"},
+				"test-sbx",
+				fmt.Errorf("the object has been modified"),
+			),
+			expectError:       "failed to lock sandbox",
+			expectRetriable:   true,
+			verifyExpectation: true,
+		},
+		{
+			name:              "non-conflict error returns original error without setting expectation",
+			updateError:       apierrors.NewInternalError(fmt.Errorf("internal server error")),
+			expectError:       "Internal error",
+			expectRetriable:   false,
+			verifyExpectation: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Build scheme
+			scheme := runtime.NewScheme()
+			utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+			utilruntime.Must(agentsv1alpha1.AddToScheme(scheme))
+
+			// Build fake client with custom Update interceptor that returns the specified error for Sandbox updates.
+			// This simulates a conflict (or other error) during the lock step without affecting Create or Status updates.
+			updateErr := tt.updateError
+			builder := fake.NewClientBuilder().WithScheme(scheme)
+			for _, idx := range infracache.GetIndexFuncs() {
+				builder = builder.WithIndex(idx.Obj, idx.FieldName, idx.Extract)
+			}
+			builder = builder.WithStatusSubresource(
+				&agentsv1alpha1.Sandbox{},
+				&agentsv1alpha1.SandboxSet{},
+			)
+			builder = builder.WithInterceptorFuncs(interceptor.Funcs{
+				Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+					if _, ok := obj.(*v1alpha1.Sandbox); ok {
+						return updateErr
+					}
+					return c.Update(ctx, obj, opts...)
+				},
+			})
+			fc := builder.Build()
+
+			// Build cache using MockManager
+			mgrBuilder, err := controllers.NewMockManagerBuilder(t)
+			require.NoError(t, err)
+			mgr := mgrBuilder.
+				WithScheme(scheme).
+				WithClient(fc).
+				WithWaitSimulation().
+				Build()
+			testCache, err := infracache.NewCache(mgr)
+			require.NoError(t, err)
+			mgr.SetWaitHooks(testCache.GetWaitHooks())
+
+			// Build infra with route reconciliation disabled (not needed for this test)
+			options := config.InitOptions(config.SandboxManagerOptions{
+				DisableRouteReconciliation: true,
+			})
+			infraInstance := NewInfraBuilder(options).
+				WithCache(testCache).
+				WithAPIReader(fc).
+				WithProxy(proxy.NewServer(options)).
+				Build()
+			require.NoError(t, infraInstance.Run(t.Context()))
+			infraInst := infraInstance.(*Infra)
+
+			// Create a sandbox in available state
+			sbx := &v1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sbx",
+					Namespace: "default",
+					UID:       types.UID(uuid.NewString()),
+					Labels: map[string]string{
+						v1alpha1.LabelSandboxTemplate:        existTemplate,
+						agentsv1alpha1.LabelSandboxIsClaimed: "false",
+					},
+					CreationTimestamp: metav1.Now(),
+					Annotations:       map[string]string{},
+					OwnerReferences:   GetSbsOwnerReference(),
+				},
+				Spec: v1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name:  "main",
+										Image: "test-image",
+									},
+								},
+							},
+						},
+					},
+				},
+				Status: v1alpha1.SandboxStatus{
+					Phase: v1alpha1.SandboxRunning,
+					Conditions: []metav1.Condition{
+						{
+							Type:   string(v1alpha1.SandboxConditionReady),
+							Status: metav1.ConditionTrue,
+						},
+					},
+					PodInfo: v1alpha1.PodInfo{
+						PodIP: "1.2.3.4",
+					},
+				},
+			}
+			CreateSandboxWithStatus(t, fc, sbx)
+			require.Eventually(t, func() bool {
+				var got v1alpha1.Sandbox
+				return fc.Get(t.Context(), types.NamespacedName{Namespace: sbx.Namespace, Name: sbx.Name}, &got) == nil
+			}, 100*time.Millisecond, 5*time.Millisecond)
+
+			// Clean up expectation state for this sandbox before the test
+			expectationutils.ResourceVersionExpectationDelete(sbx)
+
+			// Prepare claim options
+			claimOpts, err := ValidateAndInitClaimOptions(infra.ClaimSandboxOptions{
+				User:         user,
+				Template:     existTemplate,
+				ClaimTimeout: 100 * time.Millisecond,
+			})
+			require.NoError(t, err)
+
+			// Call TryClaimSandbox — performLockSandbox will fail with the injected error
+			_, _, claimErr := TryClaimSandbox(t.Context(), claimOpts, &infraInst.pickCache, infraInst.Cache, infraInst.claimLockChannel, infraInst.createLimiter)
+
+			// Verify error is returned
+			require.Error(t, claimErr)
+			assert.Contains(t, claimErr.Error(), tt.expectError)
+
+			// Verify error type (retriable or not)
+			var retryErr retriableError
+			if tt.expectRetriable {
+				assert.True(t, errors.As(claimErr, &retryErr), "error should be a retriableError")
+			} else {
+				assert.False(t, errors.As(claimErr, &retryErr), "error should not be a retriableError")
+			}
+
+			// Verify expectation state
+			if tt.verifyExpectation {
+				// After conflict error, expectation should be set (unsatisfied) for the sandbox's UID
+				assert.False(t, expectationutils.ResourceVersionExpectationSatisfied(sbx),
+					"expectation should be unsatisfied after conflict error")
+			} else {
+				// For non-conflict errors, no expectation should be set
+				assert.True(t, expectationutils.ResourceVersionExpectationSatisfied(sbx),
+					"expectation should not be set for non-conflict error")
+			}
+
+			// Clean up expectation state
+			expectationutils.ResourceVersionExpectationDelete(sbx)
+		})
+	}
+}
+
 func TestPickAnAvailableSandbox_PrefersMatchingRevision(t *testing.T) {
 	utils.InitLogOutput()
 
 	origCreateSandbox := DefaultCreateSandbox
-	DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client, cache cache.Provider) (*v1alpha1.Sandbox, error) {
+	DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client) (*v1alpha1.Sandbox, error) {
 		if sbx.Name == "" && sbx.GenerateName != "" {
 			sbx.Name = sbx.GenerateName + rand.String(5)
 		}
-		created, err := origCreateSandbox(ctx, sbx, c, cache)
+		created, err := origCreateSandbox(ctx, sbx, c)
 		if err != nil {
 			return nil, err
 		}

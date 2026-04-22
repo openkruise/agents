@@ -780,13 +780,13 @@ func TestSandboxManager_CloneSandbox(t *testing.T) {
 
 			// Decorator: DefaultCreateSandbox - set sandbox ready after creation
 			origCreateSandbox := sandboxcr.DefaultCreateSandbox
-			sandboxcr.DefaultCreateSandbox = func(ctx context.Context, sbx *agentsv1alpha1.Sandbox, c ctrlclient.Client, cache infracache.Provider) (*agentsv1alpha1.Sandbox, error) {
+			sandboxcr.DefaultCreateSandbox = func(ctx context.Context, sbx *agentsv1alpha1.Sandbox, c ctrlclient.Client) (*agentsv1alpha1.Sandbox, error) {
 				if override, ok := ctx.Value(sbxOverrideKey{}).(sbxOverride); ok {
 					if override.Name != "" {
 						sbx.Name = override.Name
 					}
 				}
-				created, err := origCreateSandbox(ctx, sbx, c, cache)
+				created, err := origCreateSandbox(ctx, sbx, c)
 				if err != nil {
 					return nil, err
 				}

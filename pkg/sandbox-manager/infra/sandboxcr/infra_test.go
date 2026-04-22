@@ -621,7 +621,7 @@ func TestInfra_CloneSandbox(t *testing.T) {
 
 	// Decorator: DefaultCreateSandbox - set sandbox ready after creation
 	origCreateSandbox := DefaultCreateSandbox
-	DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client, cache infracache.Provider) (*v1alpha1.Sandbox, error) {
+	DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client) (*v1alpha1.Sandbox, error) {
 		if override, ok := ctx.Value(infraSbxOverrideKey{}).(infraSbxOverride); ok {
 			if override.Name != "" {
 				sbx.Name = override.Name
@@ -633,7 +633,7 @@ func TestInfra_CloneSandbox(t *testing.T) {
 				sbx.Annotations[v1alpha1.AnnotationRuntimeURL] = override.RuntimeURL
 			}
 		}
-		created, err := origCreateSandbox(ctx, sbx, c, cache)
+		created, err := origCreateSandbox(ctx, sbx, c)
 		if err != nil {
 			return nil, err
 		}

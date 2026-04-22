@@ -226,7 +226,7 @@ func (c *commonControl) claimSandboxes(ctx context.Context, claim *agentsv1alpha
 	// Attempt to claim sandboxes concurrently using DoItSlowly
 	claimedCount, err := utils.DoItSlowly(batchSize, InitialClaimBatchSize, func() error {
 		// Pass nil for rand so sandboxcr uses global rand (concurrent-safe).
-		sbx, metrics, claimErr := sandboxcr.TryClaimSandbox(ctx, opts, &c.pickCache, c.cache, c.Client, claimLockChannel, limiter)
+		sbx, metrics, claimErr := sandboxcr.TryClaimSandbox(ctx, opts, &c.pickCache, c.cache, claimLockChannel, limiter)
 		if claimErr != nil {
 			log.Error(claimErr, "Failed to claim sandbox")
 			return claimErr

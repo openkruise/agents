@@ -46,6 +46,7 @@ type Controller struct {
 
 	// manager params
 	systemNamespace       string // the namespace where the sandbox manager is running
+	peerSelector          string
 	maxClaimWorkers       int
 	maxCreateQPS          int
 	extProcMaxConcurrency uint32
@@ -67,7 +68,7 @@ type Controller struct {
 }
 
 // NewController creates a new E2B Controller
-func NewController(domain, sysNs, sandboxNamespace, sandboxLabelSelector string, maxTimeout, maxClaimWorkers, maxCreateQPS int, extProcMaxConcurrency uint32, port, memberlistBindPort int, keyCfg *keys.Config, clientConfig *rest.Config) *Controller {
+func NewController(domain, sysNs, peerSelector, sandboxNamespace, sandboxLabelSelector string, maxTimeout, maxClaimWorkers, maxCreateQPS int, extProcMaxConcurrency uint32, port, memberlistBindPort int, keyCfg *keys.Config, clientConfig *rest.Config) *Controller {
 	sc := &Controller{
 		mux:                   http.NewServeMux(),
 		domain:                domain,
@@ -75,6 +76,7 @@ func NewController(domain, sysNs, sandboxNamespace, sandboxLabelSelector string,
 		port:                  port,
 		maxTimeout:            maxTimeout,
 		systemNamespace:       sysNs, // the namespace where the sandbox manager is running
+		peerSelector:          peerSelector,
 		sandboxNamespace:      sandboxNamespace,
 		sandboxLabelSelector:  sandboxLabelSelector,
 		maxClaimWorkers:       maxClaimWorkers,
@@ -98,16 +100,7 @@ func (sc *Controller) Init() error {
 	log.Info("init controller")
 	adapter := adapters.DefaultAdapterFactory(sc.port)
 
-	sandboxManager, err := sandboxmanager.NewSandboxManagerBuilder(config.SandboxManagerOptions{
-		SystemNamespace:       sc.systemNamespace,
-		SandboxNamespace:      sc.sandboxNamespace,
-		SandboxLabelSelector:  sc.sandboxLabelSelector,
-		MaxClaimWorkers:       sc.maxClaimWorkers,
-		ExtProcMaxConcurrency: sc.extProcMaxConcurrency,
-		MaxCreateQPS:          sc.maxCreateQPS,
-		MemberlistBindPort:    sc.memberlistBindPort,
-		RestConfig:            sc.clientConfig,
-	}).
+	sandboxManager, err := sandboxmanager.NewSandboxManagerBuilder(sc.sandboxManagerOptions()).
 		WithSandboxInfra().
 		WithMemberlistPeers().
 		WithRequestAdapter(adapter).
@@ -123,6 +116,20 @@ func (sc *Controller) Init() error {
 	sc.registerRoutes()
 
 	return sc.initKeyStorage(ctx)
+}
+
+func (sc *Controller) sandboxManagerOptions() config.SandboxManagerOptions {
+	return config.SandboxManagerOptions{
+		SystemNamespace:       sc.systemNamespace,
+		PeerSelector:          sc.peerSelector,
+		SandboxNamespace:      sc.sandboxNamespace,
+		SandboxLabelSelector:  sc.sandboxLabelSelector,
+		MaxClaimWorkers:       sc.maxClaimWorkers,
+		ExtProcMaxConcurrency: sc.extProcMaxConcurrency,
+		MaxCreateQPS:          sc.maxCreateQPS,
+		MemberlistBindPort:    sc.memberlistBindPort,
+		RestConfig:            sc.clientConfig,
+	}
 }
 
 func (sc *Controller) initKeyStorage(ctx context.Context) error {

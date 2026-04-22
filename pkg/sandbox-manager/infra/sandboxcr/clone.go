@@ -66,7 +66,7 @@ func ValidateAndInitCheckpointOptions(opts infra.CreateCheckpointOptions) infra.
 	return opts
 }
 
-func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache cache.Provider, c client.Client) (infra.Sandbox, infra.CloneMetrics, error) {
+func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache cache.Provider) (infra.Sandbox, infra.CloneMetrics, error) {
 	if opts.CloneTimeout > 0 {
 		var cancel func()
 		ctx, cancel = context.WithTimeout(ctx, opts.CloneTimeout)
@@ -95,13 +95,13 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache cac
 	}
 
 	// Step 1: get checkpoint and template from cache or API server
-	tmpl, cp, metrics, err := findCheckpointAndTemplateById(ctx, opts, cache, c, metrics)
+	tmpl, cp, metrics, err := findCheckpointAndTemplateById(ctx, opts, cache, metrics)
 	if err != nil {
 		return nil, metrics, err
 	}
 
 	// Step 2: create new sandbox from checkpoint
-	sbx, initRuntimeOpts, metrics, err := createSandboxFromCheckpoint(ctx, opts, tmpl, cp, cache, c, metrics)
+	sbx, initRuntimeOpts, metrics, err := createSandboxFromCheckpoint(ctx, opts, tmpl, cp, cache, metrics)
 	if err != nil {
 		return nil, metrics, err
 	}
@@ -132,7 +132,7 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache cac
 }
 
 // findCheckpointAndTemplateById gets checkpoint and template from cache, fallback to API server if not found
-func findCheckpointAndTemplateById(ctx context.Context, opts infra.CloneSandboxOptions, cache cache.Provider, c client.Client, metrics infra.CloneMetrics) (*v1alpha1.SandboxTemplate, *v1alpha1.Checkpoint, infra.CloneMetrics, error) {
+func findCheckpointAndTemplateById(ctx context.Context, opts infra.CloneSandboxOptions, cache cache.Provider, metrics infra.CloneMetrics) (*v1alpha1.SandboxTemplate, *v1alpha1.Checkpoint, infra.CloneMetrics, error) {
 	log := klog.FromContext(ctx).WithValues("checkpoint", opts.CheckPointID, "step", "1.findCheckpointAndTemplate")
 	start := time.Now()
 
@@ -160,6 +160,7 @@ func findCheckpointAndTemplateById(ctx context.Context, opts infra.CloneSandboxO
 		log.Info("template not found in cache, trying API server", "namespace", checkpoint.Namespace, "name", checkpoint.Name, "error", err)
 		// Fallback to API server
 		template = &v1alpha1.SandboxTemplate{}
+		c := cache.GetAPIReader()
 		err = c.Get(ctx, client.ObjectKey{Namespace: checkpoint.Namespace, Name: checkpoint.Name}, template)
 		if err != nil {
 			log.Error(err, "failed to get sandbox template from API server", "namespace", checkpoint.Namespace, "name", checkpoint.Name)
@@ -174,7 +175,7 @@ func findCheckpointAndTemplateById(ctx context.Context, opts infra.CloneSandboxO
 }
 
 // createSandboxFromCheckpoint creates a new sandbox from checkpoint
-func createSandboxFromCheckpoint(ctx context.Context, opts infra.CloneSandboxOptions, tmpl *v1alpha1.SandboxTemplate, cp *v1alpha1.Checkpoint, cache cache.Provider, c client.Client, metrics infra.CloneMetrics) (*Sandbox, *config.InitRuntimeOptions, infra.CloneMetrics, error) {
+func createSandboxFromCheckpoint(ctx context.Context, opts infra.CloneSandboxOptions, tmpl *v1alpha1.SandboxTemplate, cp *v1alpha1.Checkpoint, cache cache.Provider, metrics infra.CloneMetrics) (*Sandbox, *config.InitRuntimeOptions, infra.CloneMetrics, error) {
 	log := klog.FromContext(ctx).WithValues("checkpoint", opts.CheckPointID, "step", "2.createSandboxFromCheckpoint")
 	start := time.Now()
 	initRuntimeOpts, err := getInitRuntimeRequest(cp)
@@ -189,7 +190,7 @@ func createSandboxFromCheckpoint(ctx context.Context, opts infra.CloneSandboxOpt
 	}
 	DefaultPostProcessClonedSandbox(sbx.Sandbox)
 	log.Info("creating new sandbox from checkpoint")
-	sbx.Sandbox, err = DefaultCreateSandbox(ctx, sbx.Sandbox, c, cache)
+	sbx.Sandbox, err = DefaultCreateSandbox(ctx, sbx.Sandbox, cache.GetClient())
 	if err != nil {
 		log.Error(err, "failed to create sandbox")
 		return nil, nil, metrics, err
