@@ -1,10 +1,12 @@
 ---
 title: Sandbox Prometheus Metrics Observability
 authors:
-  - "@openkruise"
+  - "@KeyOfSpectator"
 reviewers:
   - "@zmberg"
   - "@furykerry"
+  - "@liangxiaoping"
+  - "@BH4AWS"
 creation-date: 2026-04-22
 last-updated: 2026-04-22
 status: implemented
