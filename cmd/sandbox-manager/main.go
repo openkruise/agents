@@ -40,6 +40,11 @@ import (
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 )
 
+const (
+	E2BKeyStorageDSNEnvVar = "E2B_KEY_STORAGE_DSN"
+	E2BKeyHashPepperEnvVar = "E2B_KEY_HASH_PEPPER"
+)
+
 func main() {
 	// Define variables for pprof configuration
 	var enablePprof bool
@@ -88,9 +93,9 @@ func main() {
 	pflag.IntVar(&memberlistBindPort, "memberlist-bind-port", 7946, "Port for memberlist gossip (default 7946)")
 	pflag.StringVar(&e2bKeyStorage, "e2b-key-storage", "secret",
 		"Storage backend for E2B API keys. Valid values: 'secret' (K8s Secret, default), 'mysql' (MySQL via GORM). "+
-			"When --e2b-key-storage=mysql and auth is enabled, set MySQL DSN via environment variable "+utils.E2BKeyStorageDSNEnvVar)
-	pflag.BoolVar(&e2bKeyStorageDisableAutoMigrate, "e2b-key-storage-disable-auto-migrate", false,
-		"Disable GORM schema auto-migration for MySQL key storage; when enabled, schema changes are skipped but admin team/key bootstrap still runs")
+			"When --e2b-key-storage=mysql and auth is enabled, set MySQL DSN via environment variable "+E2BKeyStorageDSNEnvVar)
+	pflag.BoolVar(&e2bKeyStorageDisableAutoMigrate, "e2b-key-storage-disable-schema-auto-update", false,
+		"Disable schema auto-migration for DB-Based key storage like mysql; when enabled, schema changes are skipped but admin team/key bootstrap still runs")
 
 	opts := zap.Options{
 		Development: false,
@@ -155,18 +160,18 @@ func main() {
 		klog.Fatalf("--kube-client-burst must be greater than 0")
 	}
 
-	e2bKeyStorageDSN := strings.TrimSpace(os.Getenv(utils.E2BKeyStorageDSNEnvVar))
-	e2bKeyStoragePepper := strings.TrimSpace(os.Getenv(utils.E2BKeyHashPepperEnvVar))
+	e2bKeyStorageDSN := strings.TrimSpace(os.Getenv(E2BKeyStorageDSNEnvVar))
+	e2bKeyStoragePepper := strings.TrimSpace(os.Getenv(E2BKeyHashPepperEnvVar))
 	if e2bEnableAuth {
 		// Validate key storage args
 		switch e2bKeyStorage {
 		case "secret": // No validation needed
 		case "mysql":
 			if e2bKeyStorageDSN == "" {
-				klog.Fatalf("env %s is required when --e2b-key-storage=mysql", utils.E2BKeyStorageDSNEnvVar)
+				klog.Fatalf("env %s is required when --e2b-key-storage=mysql", E2BKeyStorageDSNEnvVar)
 			}
 			if e2bKeyStoragePepper == "" {
-				klog.Fatalf("env %s is required when --e2b-key-storage=mysql", utils.E2BKeyHashPepperEnvVar)
+				klog.Fatalf("env %s is required when --e2b-key-storage=mysql", E2BKeyHashPepperEnvVar)
 			}
 		default:
 			klog.Fatalf("--e2b-key-storage must be 'secret' or 'mysql'")
