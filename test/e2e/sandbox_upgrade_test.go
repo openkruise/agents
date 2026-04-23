@@ -563,4 +563,6 @@ var _ = Describe("Sandbox Upgrade Lifecycle", func() {
 		Expect(volNames).To(HaveKey("volume3"))
 		Expect(volNames).NotTo(HaveKey("volume2"))
 	})
+
+	//todo, 回滚场景。
 })
