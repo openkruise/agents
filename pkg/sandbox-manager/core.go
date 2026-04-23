@@ -29,7 +29,6 @@ import (
 	"github.com/openkruise/agents/pkg/peers"
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
-	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
@@ -99,7 +98,7 @@ func (b *SandboxManagerBuilder) WithMemberlistPeers() *SandboxManagerBuilder {
 		}
 		peersManager := peers.NewMemberlistPeers(
 			args.apiReader,
-			consts.NodePrefixSandboxManager+nodeName,
+			peers.NodePrefixSandboxManager+nodeName,
 			b.opts.SystemNamespace,
 			b.opts.PeerSelector)
 		return peersManager, nil

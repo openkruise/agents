@@ -29,7 +29,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
@@ -39,16 +38,13 @@ import (
 )
 
 type CSIMountHandler struct {
-	reader          client.Reader
 	cache           cache.Provider
 	storageRegistry storages.VolumeMountProviderRegistry
 	systemNamespace string
 }
 
-func NewCSIMountHandler(reader client.Reader, cache cache.Provider,
-	storageRegistry storages.VolumeMountProviderRegistry, systemNamespace string) *CSIMountHandler {
+func NewCSIMountHandler(cache cache.Provider, storageRegistry storages.VolumeMountProviderRegistry, systemNamespace string) *CSIMountHandler {
 	return &CSIMountHandler{
-		reader:          reader,
 		cache:           cache,
 		storageRegistry: storageRegistry,
 		systemNamespace: systemNamespace,
@@ -67,7 +63,7 @@ func (h *CSIMountHandler) GenerateNodePublishVolumeRequest(ctx context.Context, 
 		log.V(consts.DebugLogLevel).Info("failed to get persistent volume object by name using cache method",
 			"pvName", mountRequest.PvName, "err", err)
 		persistentVolumeObj = &corev1.PersistentVolume{}
-		err = h.reader.Get(ctx, types.NamespacedName{Name: mountRequest.PvName}, persistentVolumeObj)
+		err = h.cache.GetAPIReader().Get(ctx, types.NamespacedName{Name: mountRequest.PvName}, persistentVolumeObj)
 		if err != nil {
 			return "", nil, fmt.Errorf("failed to get persistent volume object by name: %s, err: %v", mountRequest.PvName, err)
 		}
@@ -104,7 +100,7 @@ func (h *CSIMountHandler) GenerateNodePublishVolumeRequest(ctx context.Context, 
 			log.V(consts.DebugLogLevel).Info("failed to get secret object by name using cache method",
 				"namespace", secretNamespace, "name", nodePublishSecretRef.Name, "error", err)
 			secretObj = &corev1.Secret{}
-			err = h.reader.Get(ctx, types.NamespacedName{Namespace: secretNamespace, Name: nodePublishSecretRef.Name}, secretObj)
+			err = h.cache.GetAPIReader().Get(ctx, types.NamespacedName{Namespace: secretNamespace, Name: nodePublishSecretRef.Name}, secretObj)
 			if err != nil {
 				return "", nil, fmt.Errorf("failed to get secret object by name:%s/%s, err: %v",
 					secretNamespace, nodePublishSecretRef.Name, err)

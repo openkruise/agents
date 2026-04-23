@@ -78,7 +78,7 @@ func newTestCacheLocal(t *testing.T, objs ...ctrlclient.Object) (*Cache, ctrlcli
 
 // --- Get method tests ---
 
-func TestCacheV2_GetPersistentVolume(t *testing.T) {
+func TestCache_GetPersistentVolume(t *testing.T) {
 	pv := &corev1.PersistentVolume{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-pv"},
 		Spec: corev1.PersistentVolumeSpec{
@@ -112,7 +112,7 @@ func TestCacheV2_GetPersistentVolume(t *testing.T) {
 	})
 }
 
-func TestCacheV2_GetPersistentVolume_FromSync(t *testing.T) {
+func TestCache_GetPersistentVolume_FromSync(t *testing.T) {
 	c, fc, err := newTestCacheLocal(t)
 	require.NoError(t, err)
 
@@ -143,7 +143,7 @@ func TestCacheV2_GetPersistentVolume_FromSync(t *testing.T) {
 	assert.Equal(t, testPV.Spec.Capacity, got.Spec.Capacity)
 }
 
-func TestCacheV2_GetSecret_FromSync(t *testing.T) {
+func TestCache_GetSecret_FromSync(t *testing.T) {
 	c, fc, err := newTestCacheLocal(t)
 	require.NoError(t, err)
 
@@ -171,7 +171,7 @@ func TestCacheV2_GetSecret_FromSync(t *testing.T) {
 	assert.Equal(t, secret.Type, got.Type)
 }
 
-func TestCacheV2_GetConfigmap_FromSync(t *testing.T) {
+func TestCache_GetConfigmap_FromSync(t *testing.T) {
 	c, fc, err := newTestCacheLocal(t)
 	require.NoError(t, err)
 
@@ -196,7 +196,7 @@ func TestCacheV2_GetConfigmap_FromSync(t *testing.T) {
 	assert.Equal(t, cm.Data, got.Data)
 }
 
-func TestCacheV2_GetSandboxTemplate(t *testing.T) {
+func TestCache_GetSandboxTemplate(t *testing.T) {
 	tmpl := &agentsv1alpha1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{Name: "my-tmpl", Namespace: "default"},
 	}
@@ -221,7 +221,7 @@ func TestCacheV2_GetSandboxTemplate(t *testing.T) {
 
 // --- Index query tests ---
 
-func TestCacheV2_GetClaimedSandbox(t *testing.T) {
+func TestCache_GetClaimedSandbox(t *testing.T) {
 	sbx := &agentsv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-sbx",
@@ -252,7 +252,7 @@ func TestCacheV2_GetClaimedSandbox(t *testing.T) {
 	})
 }
 
-func TestCacheV2_GetCheckpoint(t *testing.T) {
+func TestCache_GetCheckpoint(t *testing.T) {
 	cp := &agentsv1alpha1.Checkpoint{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-cp", Namespace: "default"},
 		Status:     agentsv1alpha1.CheckpointStatus{CheckpointId: "cp-id-123"},
@@ -276,7 +276,7 @@ func TestCacheV2_GetCheckpoint(t *testing.T) {
 	})
 }
 
-func TestCacheV2_GetSandboxSet(t *testing.T) {
+func TestCache_GetSandboxSet(t *testing.T) {
 	sbs := &agentsv1alpha1.SandboxSet{
 		ObjectMeta: metav1.ObjectMeta{Name: "tmpl-1", Namespace: "team-a"},
 	}
@@ -300,7 +300,7 @@ func TestCacheV2_GetSandboxSet(t *testing.T) {
 	})
 }
 
-func TestCacheV2_GetSandboxSet_MultipleTemplates(t *testing.T) {
+func TestCache_GetSandboxSet_MultipleTemplates(t *testing.T) {
 	sbs1 := &agentsv1alpha1.SandboxSet{
 		ObjectMeta: metav1.ObjectMeta{Name: "tmpl-1", Namespace: "team-a"},
 	}
@@ -327,7 +327,7 @@ func TestCacheV2_GetSandboxSet_MultipleTemplates(t *testing.T) {
 
 // --- List tests ---
 
-func TestCacheV2_ListSandboxWithUser(t *testing.T) {
+func TestCache_ListSandboxWithUser(t *testing.T) {
 	sbx1 := &agentsv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "sbx-1", Namespace: "default",
@@ -366,7 +366,7 @@ func TestCacheV2_ListSandboxWithUser(t *testing.T) {
 	assert.Len(t, list, 0)
 }
 
-func TestCacheV2_ListCheckpointsWithUser(t *testing.T) {
+func TestCache_ListCheckpointsWithUser(t *testing.T) {
 	cp1 := &agentsv1alpha1.Checkpoint{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "cp-1", Namespace: "default",
@@ -395,7 +395,7 @@ func TestCacheV2_ListCheckpointsWithUser(t *testing.T) {
 	assert.Len(t, list, 0)
 }
 
-func TestCacheV2_ListSandboxesInPool(t *testing.T) {
+func TestCache_ListSandboxesInPool(t *testing.T) {
 	// To get "available" state, sandbox must be controlled by SandboxSet and be ready
 	sbsRef := metav1.OwnerReference{
 		APIVersion: agentsv1alpha1.SandboxSetControllerKind.GroupVersion().String(),
@@ -433,7 +433,7 @@ func TestCacheV2_ListSandboxesInPool(t *testing.T) {
 	assert.Len(t, list, 0)
 }
 
-func TestCacheV2_ListAllSandboxes(t *testing.T) {
+func TestCache_ListAllSandboxes(t *testing.T) {
 	sbx1 := &agentsv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "all-1", Namespace: "default"},
 	}
@@ -450,7 +450,7 @@ func TestCacheV2_ListAllSandboxes(t *testing.T) {
 
 // --- Wait tests ---
 
-func TestCacheV2_WaitForSandboxSatisfied(t *testing.T) {
+func TestCache_WaitForSandboxSatisfied(t *testing.T) {
 	t.Run("already satisfied", func(t *testing.T) {
 		sbx := &agentsv1alpha1.Sandbox{
 			ObjectMeta: metav1.ObjectMeta{
@@ -642,7 +642,7 @@ func TestCacheV2_WaitForSandboxSatisfied(t *testing.T) {
 	})
 }
 
-func TestCacheV2_WaitForSandboxSatisfied_Cancel(t *testing.T) {
+func TestCache_WaitForSandboxSatisfied_Cancel(t *testing.T) {
 	sbx := &agentsv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "wait-cancel-sbx", Namespace: "default",
@@ -676,7 +676,7 @@ func TestCacheV2_WaitForSandboxSatisfied_Cancel(t *testing.T) {
 	})
 }
 
-func TestCacheV2_WaitForCheckpointSatisfied(t *testing.T) {
+func TestCache_WaitForCheckpointSatisfied(t *testing.T) {
 	t.Run("already satisfied", func(t *testing.T) {
 		cp := &agentsv1alpha1.Checkpoint{
 			ObjectMeta: metav1.ObjectMeta{Name: "wait-cp-ok", Namespace: "default"},
@@ -741,20 +741,20 @@ func TestCacheV2_WaitForCheckpointSatisfied(t *testing.T) {
 
 // --- Extension getter tests ---
 
-func TestCacheV2_GetSandboxController(t *testing.T) {
+func TestCache_GetSandboxController(t *testing.T) {
 	c, _, err := newTestCacheLocal(t)
 	require.NoError(t, err)
-	// Controllers are initialized by SetupCacheControllersWithManager in NewCacheV2
+	// Controllers are initialized by SetupCacheControllersWithManager in NewCache
 	sbxCtrl := c.GetSandboxController()
-	assert.NotNil(t, sbxCtrl, "sandbox controller should be initialized in NewCacheV2")
+	assert.NotNil(t, sbxCtrl, "sandbox controller should be initialized in NewCache")
 }
 
-func TestCacheV2_GetSandboxSetController(t *testing.T) {
+func TestCache_GetSandboxSetController(t *testing.T) {
 	c, _, err := newTestCacheLocal(t)
 	require.NoError(t, err)
-	// Controllers are initialized by SetupCacheControllersWithManager in NewCacheV2
+	// Controllers are initialized by SetupCacheControllersWithManager in NewCache
 	sbsCtrl := c.GetSandboxSetController()
-	assert.NotNil(t, sbsCtrl, "sandboxset controller should be initialized in NewCacheV2")
+	assert.NotNil(t, sbsCtrl, "sandboxset controller should be initialized in NewCache")
 }
 
 // --- BuildCacheConfig tests ---

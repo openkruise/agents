@@ -27,7 +27,6 @@ import (
 	"github.com/openkruise/agents/pkg/peers"
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
-	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
@@ -118,7 +117,7 @@ func TestSandboxManagerBuilder_WithCustomInfra(t *testing.T) {
 		builder := NewSandboxManagerBuilder(opts).
 			WithCustomInfra(func() (infra.Builder, error) {
 				customBuilderCalled = true
-				cache, fc, err := cachetest.NewTestCacheV2(t)
+				cache, fc, err := cachetest.NewTestCache(t)
 				if err != nil {
 					return nil, err
 				}
@@ -141,7 +140,7 @@ func TestSandboxManagerBuilder_WithCustomInfra(t *testing.T) {
 
 		builder := NewSandboxManagerBuilder(opts)
 		result := builder.WithCustomInfra(func() (infra.Builder, error) {
-			cache, fc, err := cachetest.NewTestCacheV2(t)
+			cache, fc, err := cachetest.NewTestCache(t)
 			if err != nil {
 				return nil, err
 			}
@@ -179,7 +178,7 @@ func TestSandboxManagerBuilder_WithMemberlistPeers(t *testing.T) {
 			podName:          "test-pod",
 			peerSelector:     "app=sandbox-manager",
 			expectError:      "",
-			expectNodePrefix: consts.NodePrefixSandboxManager + "test-host-123",
+			expectNodePrefix: peers.NodePrefixSandboxManager + "test-host-123",
 		},
 		{
 			name:             "fallback to POD_NAME when HOSTNAME empty",
@@ -187,7 +186,7 @@ func TestSandboxManagerBuilder_WithMemberlistPeers(t *testing.T) {
 			podName:          "test-pod-456",
 			peerSelector:     "app=sandbox-manager",
 			expectError:      "",
-			expectNodePrefix: consts.NodePrefixSandboxManager + "test-pod-456",
+			expectNodePrefix: peers.NodePrefixSandboxManager + "test-pod-456",
 		},
 		{
 			name:             "fallback to uuid when both HOSTNAME and POD_NAME empty",
@@ -195,7 +194,7 @@ func TestSandboxManagerBuilder_WithMemberlistPeers(t *testing.T) {
 			podName:          "",
 			peerSelector:     "app=sandbox-manager",
 			expectError:      "",
-			expectNodePrefix: consts.NodePrefixSandboxManager,
+			expectNodePrefix: peers.NodePrefixSandboxManager,
 		},
 	}
 
@@ -210,7 +209,7 @@ func TestSandboxManagerBuilder_WithMemberlistPeers(t *testing.T) {
 				SystemNamespace: "test-namespace",
 			}
 
-			cache, fc, err := cachetest.NewTestCacheV2(t)
+			cache, fc, err := cachetest.NewTestCache(t)
 			require.NoError(t, err)
 
 			builder := NewSandboxManagerBuilder(opts).
@@ -277,7 +276,7 @@ func TestSandboxManagerBuilder_Build(t *testing.T) {
 			SandboxNamespace: "default",
 		}
 
-		cache, fc, err := cachetest.NewTestCacheV2(t)
+		cache, fc, err := cachetest.NewTestCache(t)
 		require.NoError(t, err)
 
 		mockAdapter := &mockRequestAdapter{entry: "test-entry"}
@@ -310,7 +309,7 @@ func TestSandboxManagerBuilder_Build(t *testing.T) {
 			PeerSelector:     "app=test",
 		}
 
-		cache, fc, err := cachetest.NewTestCacheV2(t)
+		cache, fc, err := cachetest.NewTestCache(t)
 		require.NoError(t, err)
 
 		builder := NewSandboxManagerBuilder(opts).
@@ -336,7 +335,7 @@ func TestSandboxManagerBuilder_Build(t *testing.T) {
 			SystemNamespace: "test-namespace",
 		}
 
-		cache, fc, err := cachetest.NewTestCacheV2(t)
+		cache, fc, err := cachetest.NewTestCache(t)
 		require.NoError(t, err)
 
 		builder := NewSandboxManagerBuilder(opts).
@@ -356,7 +355,7 @@ func TestSandboxManagerBuilder_Build(t *testing.T) {
 	t.Run("should return error when peers func fails", func(t *testing.T) {
 		opts := config.SandboxManagerOptions{}
 
-		cache, fc, err := cachetest.NewTestCacheV2(t)
+		cache, fc, err := cachetest.NewTestCache(t)
 		require.NoError(t, err)
 
 		builder := NewSandboxManagerBuilder(opts).
@@ -387,7 +386,7 @@ func TestSandboxManagerBuilder_Build(t *testing.T) {
 			PeerSelector:     "app=test",
 		}
 
-		cache, fc, err := cachetest.NewTestCacheV2(t)
+		cache, fc, err := cachetest.NewTestCache(t)
 		require.NoError(t, err)
 
 		mockAdapter := &mockRequestAdapter{entry: "test-entry"}
@@ -422,7 +421,7 @@ func TestSandboxManagerBuilder_Chaining(t *testing.T) {
 		t.Setenv("HOSTNAME", "test-host-chain")
 		t.Setenv("POD_NAME", "")
 
-		cache, fc, err := cachetest.NewTestCacheV2(t)
+		cache, fc, err := cachetest.NewTestCache(t)
 		require.NoError(t, err)
 
 		mockAdapter := &mockRequestAdapter{entry: "test-entry"}

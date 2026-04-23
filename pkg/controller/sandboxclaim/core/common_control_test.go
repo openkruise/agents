@@ -402,7 +402,7 @@ func TestCommonControl_EnsureClaimClaiming(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cache, fakeClient, err := cachetest.NewTestCacheV2(t, tt.claim, tt.sandboxSet)
+			cache, fakeClient, err := cachetest.NewTestCache(t, tt.claim, tt.sandboxSet)
 			require.NoError(t, err, "Failed to create cache")
 
 			// Start cache
@@ -483,7 +483,7 @@ func TestCommonControl_EnsureClaimClaiming_CPUResizeFeatureGatePrecondition(t *t
 	}
 
 	t.Run("feature gate disabled transitions claim to completed", func(t *testing.T) {
-		cache, fakeClient, err := cachetest.NewTestCacheV2(t)
+		cache, fakeClient, err := cachetest.NewTestCache(t)
 		require.NoError(t, err)
 
 		err = utilfeature.DefaultMutableFeatureGate.SetFromMap(map[string]bool{
@@ -519,7 +519,7 @@ func TestCommonControl_EnsureClaimClaiming_CPUResizeFeatureGatePrecondition(t *t
 	})
 
 	t.Run("feature gate enabled continues claiming flow", func(t *testing.T) {
-		cache, fakeClient, err := cachetest.NewTestCacheV2(t)
+		cache, fakeClient, err := cachetest.NewTestCache(t)
 		require.NoError(t, err)
 
 		err = utilfeature.DefaultMutableFeatureGate.SetFromMap(map[string]bool{
@@ -1275,7 +1275,7 @@ func TestBuildClaimOptions_CSIMount_ConfigValidation(t *testing.T) {
 		},
 	}
 
-	cache, fakeClient, err := cachetest.NewTestCacheV2(t, testPVs...)
+	cache, fakeClient, err := cachetest.NewTestCache(t, testPVs...)
 	require.NoError(t, err, "Failed to create cache")
 
 	fakeRecorder := record.NewFakeRecorder(10)
@@ -1677,7 +1677,7 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 		},
 	}
 
-	cache, fakeClient, err := cachetest.NewTestCacheV2(t, testPVs...)
+	cache, fakeClient, err := cachetest.NewTestCache(t, testPVs...)
 	require.NoError(t, err, "Failed to create cache")
 
 	fakeRecorder := record.NewFakeRecorder(10)

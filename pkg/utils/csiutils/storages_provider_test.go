@@ -80,17 +80,13 @@ func TestGenerateNodePublishVolumeRequest_DoesNotMutateCachedPersistentVolume(t 
 					},
 				},
 			}
-			handler := NewCSIMountHandler(
-				newFakeReader(t),
-				&mockCacheProvider{pv: pv},
+			handler := NewCSIMountHandler(&mockCacheProvider{pv: pv},
 				&mockStorageProviderRegistry{
 					supportedDrivers: map[string]bool{"test-driver": true},
 					providers: map[string]storages.VolumeMountProvider{
 						"test-driver": &mockVolumeMountProvider{},
 					},
-				},
-				utils.DefaultSandboxDeployNamespace,
-			)
+				}, utils.DefaultSandboxDeployNamespace)
 
 			_, _, err := handler.GenerateNodePublishVolumeRequest(context.Background(), v1alpha1.CSIMountConfig{
 				PvName:    pv.Name,
@@ -1030,7 +1026,7 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			// Create controller with mocked dependencies
 			ctx := context.Background()
-			handler := NewCSIMountHandler(tt.setupClient(), tt.setupCache(), tt.setupStorageRegistry(), utils.DefaultSandboxDeployNamespace)
+			handler := NewCSIMountHandler(tt.setupCache(), tt.setupStorageRegistry(), utils.DefaultSandboxDeployNamespace)
 			driverName, csiRequest, err := handler.GenerateNodePublishVolumeRequest(ctx,
 				v1alpha1.CSIMountConfig{
 					PvName:    tt.persistentVolumeName,

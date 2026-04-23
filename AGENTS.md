@@ -110,3 +110,4 @@ test/              E2E (Go), E2B (Python) tests
 - New APIs/architectural changes need proposal in `docs/proposals/`
 - Ask user when unsure about business logic
 - Always edit the files on your own, never use automation tools or scripts
+- All comments must be in English

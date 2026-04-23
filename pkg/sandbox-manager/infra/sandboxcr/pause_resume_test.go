@@ -71,7 +71,7 @@ func TestSandbox_ResumeConcurrent(t *testing.T) {
 	state, reason := sandboxutils.GetSandboxState(sandbox)
 	assert.Equal(t, v1alpha1.SandboxStatePaused, state, reason)
 
-	cache, fc, err := cachetest.NewTestCacheV2(t)
+	cache, fc, err := cachetest.NewTestCache(t)
 	require.NoError(t, err)
 	require.NoError(t, cache.Run(t.Context()))
 	defer cache.Stop(t.Context())
@@ -177,7 +177,7 @@ func TestSandbox_Resume_ContextExpiredAfterWait(t *testing.T) {
 	state, reason := sandboxutils.GetSandboxState(sandbox)
 	assert.Equal(t, v1alpha1.SandboxStatePaused, state, reason)
 
-	cache, fc, err := cachetest.NewTestCacheV2(t)
+	cache, fc, err := cachetest.NewTestCache(t)
 	require.NoError(t, err)
 	require.NoError(t, cache.Run(t.Context()))
 	defer cache.Stop(t.Context())
@@ -342,7 +342,7 @@ func TestSandbox_Pause(t *testing.T) {
 
 			tt.initSandbox(sandbox)
 
-			cache, fc, err := cachetest.NewTestCacheV2(t)
+			cache, fc, err := cachetest.NewTestCache(t)
 			require.NoError(t, err)
 			require.NoError(t, cache.Run(t.Context()))
 			defer cache.Stop(t.Context())
@@ -589,7 +589,7 @@ func TestSandbox_Resume(t *testing.T) {
 
 			tt.initSandbox(sandbox)
 
-			cache, fc, err := cachetest.NewTestCacheV2(t)
+			cache, fc, err := cachetest.NewTestCache(t)
 			require.NoError(t, err)
 			require.NoError(t, cache.Run(t.Context()))
 			defer cache.Stop(t.Context())

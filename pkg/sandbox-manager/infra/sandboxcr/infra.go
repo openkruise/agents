@@ -98,9 +98,9 @@ func (b *InfraBuilder) WithProxy(proxy *proxy.Server) *InfraBuilder {
 
 func (b *InfraBuilder) Build() infra.Infrastructure {
 	i := b.instance
-	if cv2, ok := i.Cache.(*cache.Cache); ok {
-		cv2.GetSandboxController().AddReconcileHandlers(i.reconcileSandbox)
-		cv2.GetSandboxSetController().AddReconcileHandlers(i.reconcileSandboxSet)
+	if c, ok := i.Cache.(*cache.Cache); ok {
+		c.GetSandboxController().AddReconcileHandlers(i.reconcileSandbox)
+		c.GetSandboxSetController().AddReconcileHandlers(i.reconcileSandboxSet)
 	}
 	if !b.skipRouteReconciler {
 		go i.startRouteReconciler(RouteReconcileInterval)

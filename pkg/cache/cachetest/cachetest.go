@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package cachetest provides test utilities for constructing CacheV2 instances
+// Package cachetest provides test utilities for constructing Cache instances
 // with a fake client. It is intended exclusively for use in test code.
 package cachetest
 
@@ -34,10 +34,10 @@ import (
 	cacheutils "github.com/openkruise/agents/pkg/cache/utils"
 )
 
-// NewTestCacheV2 creates a CacheV2 with a fake client for testing.
+// NewTestCache creates a Cache with a fake client for testing.
 // It reuses BuildCacheConfig to ensure the fake client has the same informer filtering
 // configuration as production. This allows tests to verify namespace and label selector behavior.
-func NewTestCacheV2(t *testing.T, initObjs ...ctrlclient.Object) (*cache.Cache, ctrlclient.Client, error) {
+func NewTestCache(t *testing.T, initObjs ...ctrlclient.Object) (*cache.Cache, ctrlclient.Client, error) {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
@@ -55,6 +55,7 @@ func NewTestCacheV2(t *testing.T, initObjs ...ctrlclient.Object) (*cache.Cache, 
 		&agentsv1alpha1.SandboxSet{},
 		&agentsv1alpha1.Checkpoint{},
 		&agentsv1alpha1.SandboxClaim{},
+		&agentsv1alpha1.SandboxTemplate{},
 	)
 
 	// Add interceptor to handle resourceVersion conflicts in tests

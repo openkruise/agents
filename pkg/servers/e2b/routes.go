@@ -62,7 +62,7 @@ func (sc *Controller) registerRoutes() {
 	RegisterE2BRoute(sc.mux, http.MethodGet, "/debug", sc.Debug, sc.CheckApiKey)
 
 	// API Keys management endpoints
-	if sc.keys != nil {
+	if sc.keyCfg != nil {
 		RegisterE2BRoute(sc.mux, http.MethodGet, "/api-keys", sc.ListAPIKeys, sc.CheckApiKey, sc.CheckAdminKey)
 		RegisterE2BRoute(sc.mux, http.MethodPost, "/api-keys", sc.CreateAPIKey, sc.CheckApiKey, sc.CheckAdminKey)
 		RegisterE2BRoute(sc.mux, http.MethodDelete, "/api-keys/{apiKeyID}", sc.DeleteAPIKey, sc.CheckApiKey, sc.CheckAdminKey)

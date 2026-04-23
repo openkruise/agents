@@ -574,7 +574,7 @@ func TestCloneSandbox(t *testing.T) {
 			server := testutils.NewTestRuntimeServer(tt.serverOpts)
 			defer server.Close()
 
-			cache, fc, err := cachetest.NewTestCacheV2(t)
+			cache, fc, err := cachetest.NewTestCache(t)
 			require.NoError(t, err)
 			require.NoError(t, cache.Run(t.Context()))
 			defer cache.Stop(t.Context())
@@ -678,7 +678,7 @@ func TestCloneSandbox_WithRateLimiter(t *testing.T) {
 	// Create a rate limiter with 0 burst to ensure it's always exhausted
 	limiter := rate.NewLimiter(rate.Limit(1), 0)
 
-	cache, fc, err := cachetest.NewTestCacheV2(t)
+	cache, fc, err := cachetest.NewTestCache(t)
 	require.NoError(t, err)
 	require.NoError(t, cache.Run(t.Context()))
 	defer cache.Stop(t.Context())
@@ -756,7 +756,7 @@ func TestCloneSandbox_WithRateLimiter(t *testing.T) {
 func TestCloneSandbox_ContextCanceled(t *testing.T) {
 	utils.InitLogOutput()
 
-	cache, fc, err := cachetest.NewTestCacheV2(t)
+	cache, fc, err := cachetest.NewTestCache(t)
 	require.NoError(t, err)
 	require.NoError(t, cache.Run(t.Context()))
 	defer cache.Stop(t.Context())
@@ -1211,7 +1211,7 @@ func TestCreateCheckPoint(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cache, fc, err := cachetest.NewTestCacheV2(t)
+			cache, fc, err := cachetest.NewTestCache(t)
 			require.NoError(t, err)
 			require.NoError(t, cache.Run(t.Context()))
 			defer cache.Stop(t.Context())

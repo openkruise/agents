@@ -53,7 +53,6 @@ func newMockManagerBuilderForTest(t *testing.T) *MockManagerBuilder {
 	return b
 }
 
-// TestMockManager_WaitSimulation_Basic 验证基础的 wait simulation 功能
 func TestMockManager_WaitSimulation_Basic(t *testing.T) {
 	sbx := &agentsv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-sandbox", Namespace: "default"},
@@ -91,7 +90,6 @@ func TestMockManager_WaitSimulation_Basic(t *testing.T) {
 	}
 }
 
-// TestMockManager_WaitSimulation_MultiType 验证多类型对象分组
 func TestMockManager_WaitSimulation_MultiType(t *testing.T) {
 	sbx := &agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: "sbx", Namespace: "default"}}
 	cp := &agentsv1alpha1.Checkpoint{ObjectMeta: metav1.ObjectMeta{Name: "cp", Namespace: "default"}}
@@ -141,7 +139,6 @@ func TestMockManager_WaitSimulation_MultiType(t *testing.T) {
 	}
 }
 
-// TestMockManager_WaitSimulation_ContextCancel 验证上下文取消
 func TestMockManager_WaitSimulation_ContextCancel(t *testing.T) {
 	sbx := &agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: "sbx", Namespace: "default"}}
 	fakeClient := newFakeClientWithScheme(t, sbx)
@@ -175,16 +172,14 @@ func TestMockManager_WaitSimulation_ContextCancel(t *testing.T) {
 	assert.LessOrEqual(t, reconcileCount.Load(), countBefore+1)
 }
 
-// TestMockManager_WaitSimulation_ErrorAndSatisfied 验证错误处理和满足条件
 func TestMockManager_WaitSimulation_ErrorAndSatisfied(t *testing.T) {
-	// 创建两个 sandbox 对象
 	sbxErr := &agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: "sbx-error", Namespace: "default"}}
 	sbxOK := &agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: "sbx-ok", Namespace: "default"}}
 	fakeClient := newFakeClientWithScheme(t, sbxErr, sbxOK)
 
 	waitHooks := &sync.Map{}
 
-	// 测试错误导致 entry 关闭
+	// Test error causes entry to close
 	entryErr := cacheutils.NewWaitEntry[*agentsv1alpha1.Sandbox](
 		context.Background(),
 		cacheutils.WaitActionWaitReady,
@@ -194,7 +189,7 @@ func TestMockManager_WaitSimulation_ErrorAndSatisfied(t *testing.T) {
 	)
 	waitHooks.Store(cacheutils.WaitHookKey[*agentsv1alpha1.Sandbox](sbxErr), entryErr)
 
-	// 测试满足条件导致 entry 关闭
+	// Test satisfied condition causes entry to close
 	entryOK := cacheutils.NewWaitEntry[*agentsv1alpha1.Sandbox](
 		context.Background(),
 		cacheutils.WaitActionWaitReady,
@@ -226,10 +221,9 @@ func TestMockManager_WaitSimulation_ErrorAndSatisfied(t *testing.T) {
 	}
 }
 
-// TestMockManager_WaitSimulation_ObjectNotFound 验证对象不存在时的处理
 func TestMockManager_WaitSimulation_ObjectNotFound(t *testing.T) {
 	sbx := &agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: "non-existent", Namespace: "default"}}
-	fakeClient := newFakeClientWithScheme(t) // 不创建对象
+	fakeClient := newFakeClientWithScheme(t) // Do not create the object
 
 	waitHooks := &sync.Map{}
 	entry := cacheutils.NewWaitEntry[*agentsv1alpha1.Sandbox](
@@ -251,13 +245,12 @@ func TestMockManager_WaitSimulation_ObjectNotFound(t *testing.T) {
 
 	select {
 	case <-entry.Done():
-		// NotFound 会关闭 entry
+		// NotFound closes the entry
 	case <-time.After(1 * time.Second):
 		t.Fatal("timeout")
 	}
 }
 
-// TestMockManager_WaitSimulation_Concurrent 验证并发安全
 func TestMockManager_WaitSimulation_Concurrent(t *testing.T) {
 	sbx := &agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: "sbx", Namespace: "default"}}
 	fakeClient := newFakeClientWithScheme(t, sbx)
@@ -293,7 +286,6 @@ func TestMockManager_WaitSimulation_Concurrent(t *testing.T) {
 	<-ctx.Done()
 }
 
-// TestMockManager_AddWaitReconcileKey 验证添加 key 的功能
 func TestMockManager_AddWaitReconcileKey(t *testing.T) {
 	mgr := newMockManagerBuilderForTest(t).Build()
 
@@ -302,7 +294,7 @@ func TestMockManager_AddWaitReconcileKey(t *testing.T) {
 
 	mgr.AddWaitReconcileKey(sbx)
 	mgr.AddWaitReconcileKey(cp)
-	mgr.AddWaitReconcileKey(sbx) // 重复添加
+	mgr.AddWaitReconcileKey(sbx) // Duplicate add
 
 	mgr.waitMu.RLock()
 	defer mgr.waitMu.RUnlock()
@@ -311,7 +303,6 @@ func TestMockManager_AddWaitReconcileKey(t *testing.T) {
 	assert.Len(t, mgr.waitReconcileKeys[reflect.TypeOf(&agentsv1alpha1.Checkpoint{})], 1)
 }
 
-// TestMockManager_InitWaitReconcilers 验证 reconciler 初始化
 func TestMockManager_InitWaitReconcilers(t *testing.T) {
 	mgr := newMockManagerBuilderForTest(t).Build()
 	mgr.SetWaitHooks(&sync.Map{})
@@ -323,7 +314,6 @@ func TestMockManager_InitWaitReconcilers(t *testing.T) {
 	assert.Contains(t, mgr.waitReconcilers, reflect.TypeOf(&agentsv1alpha1.Checkpoint{}))
 }
 
-// TestMockManager_Start_WithoutWaitSimulation 验证未启用 wait simulation 的情况
 func TestMockManager_Start_WithoutWaitSimulation(t *testing.T) {
 	mgr := newMockManagerBuilderForTest(t).Build()
 
@@ -332,7 +322,6 @@ func TestMockManager_Start_WithoutWaitSimulation(t *testing.T) {
 	assert.NoError(t, mgr.Start(ctx))
 }
 
-// TestMockManager_Start_WithWaitSimulationButNilWaitHooks 验证 nil waitHooks 的情况
 func TestMockManager_Start_WithWaitSimulationButNilWaitHooks(t *testing.T) {
 	sbx := &agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: "sbx", Namespace: "default"}}
 	fakeClient := newFakeClientWithScheme(t, sbx)
@@ -341,7 +330,7 @@ func TestMockManager_Start_WithWaitSimulationButNilWaitHooks(t *testing.T) {
 		WithClient(fakeClient).
 		WithWaitSimulation(sbx).
 		Build()
-	// 不设置 waitHooks
+	// Do not set waitHooks
 
 	ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
 	defer cancel()
@@ -349,7 +338,6 @@ func TestMockManager_Start_WithWaitSimulationButNilWaitHooks(t *testing.T) {
 	<-ctx.Done()
 }
 
-// TestMockManager_WaitSimulation_UnknownType 验证未知类型处理
 func TestMockManager_WaitSimulation_UnknownType(t *testing.T) {
 	sbx := &agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: "sbx", Namespace: "default"}}
 	fakeClient := newFakeClientWithScheme(t, sbx)
@@ -360,7 +348,7 @@ func TestMockManager_WaitSimulation_UnknownType(t *testing.T) {
 		Build()
 	mgr.SetWaitHooks(&sync.Map{})
 
-	// 添加未知类型
+	// Add unknown type
 	mgr.waitMu.Lock()
 	mgr.waitReconcileKeys[reflect.TypeOf(&agentsv1alpha1.SandboxSet{})] = []ctrl.Request{
 		{NamespacedName: types.NamespacedName{Name: "unknown"}},
@@ -373,7 +361,6 @@ func TestMockManager_WaitSimulation_UnknownType(t *testing.T) {
 	<-ctx.Done()
 }
 
-// TestMockManagerBuilder_WithWaitSimulation 验证 builder 方法
 func TestMockManagerBuilder_WithWaitSimulation(t *testing.T) {
 	sbx1 := &agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: "s1", Namespace: "default"}}
 	sbx2 := &agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: "s2", Namespace: "default"}}
@@ -388,7 +375,6 @@ func TestMockManagerBuilder_WithWaitSimulation(t *testing.T) {
 	mgr.waitMu.RUnlock()
 }
 
-// TestMockManager_SetWaitHooks 验证 SetWaitHooks
 func TestMockManager_SetWaitHooks(t *testing.T) {
 	mgr := newMockManagerBuilderForTest(t).Build()
 	hooks := &sync.Map{}

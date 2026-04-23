@@ -37,8 +37,3 @@ const (
 )
 
 const DebugLogLevel = 5
-
-const (
-	NodePrefixSandboxManager = "sm-"
-	NodePrefixSandboxGateway = "sg-"
-)

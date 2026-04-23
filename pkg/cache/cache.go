@@ -60,7 +60,7 @@ type Cache struct {
 
 // BuildCacheConfig creates the informer filter configuration for the cache.
 // It returns a byObject map that configures per-object informer filtering based on resource scope.
-// This configuration is shared between NewControllerManager (production) and NewTestCacheV2 (testing)
+// This configuration is shared between NewControllerManager (production) and NewTestCache (testing)
 // to ensure consistent behavior.
 //
 // # Informer Filter Options
@@ -194,7 +194,7 @@ func (c *Cache) Run(ctx context.Context) error {
 		cancel()
 		return fmt.Errorf("timed out waiting for caches to sync")
 	}
-	log.V(consts.DebugLogLevel).Info("CacheV2 started, caches synced")
+	log.V(consts.DebugLogLevel).Info("Cache started, caches synced")
 	return nil
 }
 
@@ -204,7 +204,7 @@ func (c *Cache) Stop(ctx context.Context) {
 	if c.cancelFunc != nil {
 		c.cancelFunc()
 	}
-	log.V(consts.DebugLogLevel).Info("CacheV2 stopped")
+	log.V(consts.DebugLogLevel).Info("Cache stopped")
 }
 
 // GetPersistentVolume looks up a cluster-scoped PersistentVolume by name.
@@ -457,7 +457,7 @@ func (c *Cache) GetWaitHooks() *sync.Map {
 	return c.waitHooks
 }
 
-// GetMockManager extracts the MockManager from a Cache created by NewTestCacheV2.
+// GetMockManager extracts the MockManager from a Cache created by NewTestCache.
 // This is only intended for test use.
 func (c *Cache) GetMockManager() *controllers.MockManager {
 	mgr, ok := c.mgr.(*controllers.MockManager)

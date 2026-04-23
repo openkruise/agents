@@ -88,7 +88,7 @@ func NewTestInfra(t *testing.T, opts ...config.SandboxManagerOptions) (*Infra, c
 		options = opts[0]
 	}
 	options = config.InitOptions(options)
-	cache, fc, err := cachetest.NewTestCacheV2(t)
+	cache, fc, err := cachetest.NewTestCache(t)
 	require.NoError(t, err)
 	infraInstance := NewInfraBuilder(options).
 		WithCache(cache).

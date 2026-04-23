@@ -103,7 +103,7 @@ func WaitForObjectSatisfied[T client.Object](ctx context.Context, waitHooks *syn
 	}
 	if timeout <= 0 {
 		log.Info("waiting is skipped due to zero timeout")
-		return fmt.Errorf("sandbox is not satisfied")
+		return fmt.Errorf("object is not satisfied")
 	}
 	value, exists := waitHooks.LoadOrStore(key, NewWaitEntry(ctx, action, satisfiedFunc))
 	if exists {
@@ -130,7 +130,7 @@ func WaitForObjectSatisfied[T client.Object](ctx context.Context, waitHooks *syn
 		log.Info("satisfied signal received")
 		return DoubleCheckObjectSatisfied(ctx, obj, update, satisfiedFunc)
 	case <-waitCtx.Done():
-		log.Info("stop waiting for sandbox satisfied: context canceled", "reason", waitCtx.Err())
+		log.Info("stop waiting for object satisfied: context canceled", "reason", waitCtx.Err())
 		return DoubleCheckObjectSatisfied(ctx, obj, update, satisfiedFunc)
 	}
 }
@@ -139,17 +139,17 @@ func DoubleCheckObjectSatisfied[T client.Object](ctx context.Context, obj T, upd
 	log := klog.FromContext(ctx).WithValues("object", klog.KObj(obj))
 	updated, err := update(obj)
 	if err != nil {
-		log.Error(err, "failed to get sandbox while double checking")
+		log.Error(err, "failed to get object while double checking")
 		return err
 	}
 	satisfied, err := satisfiedFunc(updated)
 	if err != nil {
-		log.Error(err, "failed to check sandbox satisfied")
+		log.Error(err, "failed to check object satisfied")
 		return err
 	}
 	if !satisfied {
-		err = fmt.Errorf("sandbox is not satisfied during double check")
-		log.Error(err, "sandbox not satisfied")
+		err = fmt.Errorf("object is not satisfied during double check")
+		log.Error(err, "object not satisfied")
 		return err
 	}
 	return nil

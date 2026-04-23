@@ -110,7 +110,7 @@ func (s *Server) Start(ctx context.Context) error {
 	namespace := os.Getenv(EnvNamespace)
 	labelSelector := os.Getenv(EnvLabelSelector)
 
-	s.peerManager = peers.NewMemberlistPeers(s.client, consts.NodePrefixSandboxGateway+nodeName, namespace, labelSelector)
+	s.peerManager = peers.NewMemberlistPeers(s.client, peers.NodePrefixSandboxGateway+nodeName, namespace, labelSelector)
 
 	if err := s.peerManager.Start(ctx, s.memberlistBindPort); err != nil {
 		return err

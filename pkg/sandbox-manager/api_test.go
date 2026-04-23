@@ -86,7 +86,7 @@ func setupTestManager(t *testing.T, opts ...config.SandboxManagerOptions) (*Sand
 	}
 	infraOption = config.InitOptions(infraOption)
 
-	cache, fc, err := cachetest.NewTestCacheV2(t)
+	cache, fc, err := cachetest.NewTestCache(t)
 	if err != nil {
 		t.Fatalf("Failed to create test cache: %v", err)
 	}

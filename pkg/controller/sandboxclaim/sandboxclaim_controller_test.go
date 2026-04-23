@@ -239,7 +239,7 @@ func TestReconciler_Reconcile_Claiming(t *testing.T) {
 	}
 
 	// Create cache with initial objects
-	cache, testClient, err := cachetest.NewTestCacheV2(t, claim, sandboxSet, sandbox1, sandbox2)
+	cache, testClient, err := cachetest.NewTestCache(t, claim, sandboxSet, sandbox1, sandbox2)
 	if err != nil {
 		t.Fatalf("Failed to create cache: %v", err)
 	}

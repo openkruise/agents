@@ -53,7 +53,7 @@ type IndexFunc struct {
 
 // GetIndexFuncs returns all field index functions used by the cache.
 // This is the single source of truth for index definitions, shared between
-// AddIndexesToCache (production) and NewTestCacheV2 (testing).
+// AddIndexesToCache (production) and NewTestCache (testing).
 func GetIndexFuncs() []IndexFunc {
 	return []IndexFunc{
 		{

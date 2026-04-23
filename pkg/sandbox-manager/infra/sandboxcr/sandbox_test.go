@@ -241,7 +241,7 @@ func TestSandbox_InplaceRefresh(t *testing.T) {
 		},
 	}
 
-	cache, fc, err := cachetest.NewTestCacheV2(t)
+	cache, fc, err := cachetest.NewTestCache(t)
 	assert.NoError(t, err)
 	require.NoError(t, cache.Run(t.Context()))
 	defer cache.Stop(t.Context())
@@ -303,7 +303,7 @@ func TestSandbox_Kill(t *testing.T) {
 				sandbox.DeletionTimestamp = &now
 			}
 
-			cache, fc, err := cachetest.NewTestCacheV2(t)
+			cache, fc, err := cachetest.NewTestCache(t)
 			require.NoError(t, err)
 			require.NoError(t, cache.Run(t.Context()))
 			defer cache.Stop(t.Context())
@@ -499,7 +499,7 @@ func TestSandbox_SaveTimeout(t *testing.T) {
 				},
 			}
 
-			cache, fc, err := cachetest.NewTestCacheV2(t)
+			cache, fc, err := cachetest.NewTestCache(t)
 			assert.NoError(t, err)
 			require.NoError(t, cache.Run(t.Context()))
 			defer cache.Stop(t.Context())
@@ -775,7 +775,7 @@ func TestSandbox_CSIMount(t *testing.T) {
 			server := testutils.NewTestRuntimeServer(runtimeOpts)
 			defer server.Close()
 
-			cache, _, err := cachetest.NewTestCacheV2(t)
+			cache, _, err := cachetest.NewTestCache(t)
 			assert.NoError(t, err)
 			require.NoError(t, cache.Run(t.Context()))
 			defer cache.Stop(t.Context())

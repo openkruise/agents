@@ -36,7 +36,7 @@ import (
 )
 
 func newTestSandboxWithServer(t *testing.T, serverURL string) *Sandbox {
-	cache, _, err := cachetest.NewTestCacheV2(t)
+	cache, _, err := cachetest.NewTestCache(t)
 	require.NoError(t, err)
 	t.Cleanup(func() { cache.Stop(t.Context()) })
 	sbx := &v1alpha1.Sandbox{
@@ -217,7 +217,7 @@ func TestProcessCSIMounts_ConcurrencyLimit(t *testing.T) {
 	})
 	defer server.Close()
 
-	cache, _, err := cachetest.NewTestCacheV2(t)
+	cache, _, err := cachetest.NewTestCache(t)
 	require.NoError(t, err)
 	t.Cleanup(func() { cache.Stop(t.Context()) })
 
@@ -276,7 +276,7 @@ func TestProcessCSIMounts_ConcurrencyTracking(t *testing.T) {
 	})
 	defer server.Close()
 
-	cache, _, err := cachetest.NewTestCacheV2(t)
+	cache, _, err := cachetest.NewTestCache(t)
 	require.NoError(t, err)
 	t.Cleanup(func() { cache.Stop(t.Context()) })
 
@@ -361,7 +361,7 @@ func TestProcessCSIMounts_ErrorDoesNotBlockOthers(t *testing.T) {
 
 func TestProcessCSIMounts_NoRuntimeURL(t *testing.T) {
 	// Sandbox without runtime URL should fail
-	cache, _, err := cachetest.NewTestCacheV2(t)
+	cache, _, err := cachetest.NewTestCache(t)
 	require.NoError(t, err)
 	t.Cleanup(func() { cache.Stop(t.Context()) })
 

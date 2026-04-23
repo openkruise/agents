@@ -82,7 +82,7 @@ func Setup(t *testing.T) (*Controller, ctrlclient.Client, func()) {
 		MaxClaimWorkers:    10,
 		MemberlistBindPort: config.DefaultMemberlistBindPort,
 	})
-	cache, fc, cacheErr := cachetest.NewTestCacheV2(t)
+	cache, fc, cacheErr := cachetest.NewTestCache(t)
 	require.NoError(t, cacheErr)
 	controller := NewController("example.com", namespace, "component=sandbox-manager", "", "", models.DefaultMaxTimeout, 10,
 		0, 0, TestServerPort, config.DefaultMemberlistBindPort, &keys.Config{
