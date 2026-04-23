@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"time"
 
 	"k8s.io/klog/v2"
@@ -91,15 +92,19 @@ type browserHandShake struct {
 //	```
 func (sc *Controller) BrowserUse(r *http.Request) (web.ApiResponse[*browserHandShake], *web.ApiError) {
 	sandboxID := r.PathValue("sandboxID")
+	cdpPort, apiErr := parseCDPPort(r)
+	if apiErr != nil {
+		return web.ApiResponse[*browserHandShake]{}, apiErr
+	}
 	sbx, apiErr := sc.getSandboxOfUser(r.Context(), sandboxID)
 	if apiErr != nil {
 		return web.ApiResponse[*browserHandShake]{}, apiErr
 	}
 
-	resp, err := sbx.Request(r.Context(), r.Method, "/json/version", models.CDPPort, r.Body)
+	resp, err := sbx.Request(r.Context(), r.Method, "/json/version", cdpPort, r.Body)
 	if err != nil {
 		return web.ApiResponse[*browserHandShake]{}, &web.ApiError{
-			Message: fmt.Sprintf("Failed to proxy request to sandbox port %d: %v", models.CDPPort, err),
+			Message: fmt.Sprintf("Failed to proxy request to sandbox port %d: %v", cdpPort, err),
 		}
 	}
 	body, err := io.ReadAll(resp.Body)
@@ -116,11 +121,28 @@ func (sc *Controller) BrowserUse(r *http.Request) (web.ApiResponse[*browserHandS
 	}
 
 	h.WebSocketDebuggerURL = browserWebSocketReplacer.ReplaceAllString(h.WebSocketDebuggerURL,
-		fmt.Sprintf("wss://%s", managerutils.GetSandboxAddress(sandboxID, sc.domain, models.CDPPort)))
+		fmt.Sprintf("wss://%s", managerutils.GetSandboxAddress(sandboxID, sc.domain, int32(cdpPort))))
 	return web.ApiResponse[*browserHandShake]{
 		Code: resp.StatusCode,
 		Body: &h,
 	}, nil
+}
+
+func parseCDPPort(r *http.Request) (int, *web.ApiError) {
+	portStr := r.URL.Query().Get("cdpPort")
+	if portStr == "" {
+		return models.CDPPort, nil
+	}
+
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port < 1 || port > 65535 {
+		return 0, &web.ApiError{
+			Code:    http.StatusBadRequest,
+			Message: fmt.Sprintf("Invalid cdpPort: %s, must be an integer between 1 and 65535", portStr),
+		}
+	}
+
+	return port, nil
 }
 
 func (sc *Controller) Debug(_ *http.Request) (web.ApiResponse[sandboxmanager.DebugInfo], *web.ApiError) {
