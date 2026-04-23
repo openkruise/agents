@@ -29,16 +29,25 @@ func NewE2BAdapter(port int) *E2BAdapter {
 	}
 }
 
+// E2BAdapterOptions holds configurable options for creating an E2BAdapter
+// with custom header names and default port settings.
+type E2BAdapterOptions struct {
+	SandboxIDHeader   string
+	SandboxPortHeader string
+	HostHeader        string
+	DefaultPort       int
+}
+
 // NewE2BAdapterWithOptions creates an E2BAdapter with configurable NativeE2BAdapter options.
 // This allows the sandbox-gateway to configure custom header names and default port.
-func NewE2BAdapterWithOptions(port int, sandboxIDHeader, sandboxPortHeader, hostHeader string, defaultPort int) *E2BAdapter {
+func NewE2BAdapterWithOptions(port int, opts E2BAdapterOptions) *E2BAdapter {
 	return &E2BAdapter{
 		Port: port,
 		native: &NativeE2BAdapter{
-			SandboxIDHeader:   sandboxIDHeader,
-			SandboxPortHeader: sandboxPortHeader,
-			HostHeader:        hostHeader,
-			DefaultPort:       defaultPort,
+			SandboxIDHeader:   opts.SandboxIDHeader,
+			SandboxPortHeader: opts.SandboxPortHeader,
+			HostHeader:        opts.HostHeader,
+			DefaultPort:       opts.DefaultPort,
 		},
 		customized: &CustomizedE2BAdapter{},
 	}

@@ -167,7 +167,12 @@ func (m *mockRequestHeaderMapCustom) Range(f func(key, value string) bool) {
 
 // defaultTestAdapter creates an E2BAdapter matching the default filter config
 func defaultTestAdapter() *adapters.E2BAdapter {
-	return adapters.NewE2BAdapterWithOptions(0, DefaultSandboxHeaderName, DefaultSandboxPortHeader, DefaultHostHeaderName, 49983)
+	return adapters.NewE2BAdapterWithOptions(0, adapters.E2BAdapterOptions{
+		SandboxIDHeader:   DefaultSandboxHeaderName,
+		SandboxPortHeader: DefaultSandboxPortHeader,
+		HostHeader:        DefaultHostHeaderName,
+		DefaultPort:       49983,
+	})
 }
 
 // mockDynamicMetadata implements api.DynamicMetadata for testing

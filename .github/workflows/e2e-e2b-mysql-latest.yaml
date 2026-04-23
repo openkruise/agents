@@ -21,6 +21,7 @@ env:
   CONTROLLER_IMG: agent-sandbox-controller:latest
   MANAGER_IMG: sandbox-manager:latest
   RUNTIME_IMG: agent-runtime:latest
+  GATEWAY_IMG: sandbox-gateway:latest
   CODE_INTERPRETER_IMG: registry-ap-southeast-1.ack.aliyuncs.com/acs/code-interpreter:v1.6
   INPLACE_UPDATE_IMG: registry-ap-southeast-1.ack.aliyuncs.com/acs/code-interpreter:v1.6-new
   MYSQL_DATABASE: e2b_keys
@@ -29,6 +30,15 @@ env:
 jobs:
   sandbox:
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: without sandbox-gateway
+            with_gateway: false
+          - name: with sandbox-gateway
+            with_gateway: true
+    name: sandbox (${{ matrix.name }})
     steps:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         with:
@@ -96,6 +106,13 @@ jobs:
            kind load docker-image --name=${KIND_CLUSTER_NAME} ${INPLACE_UPDATE_IMG} || { echo >&2 "kind not installed or error loading image: ${INPLACE_UPDATE_IMG}"; exit 1; }
            docker rmi ${INPLACE_UPDATE_IMG}
 
+      - name: Build sandbox-gateway image
+        if: matrix.with_gateway
+        run: |
+           make docker-build-sandbox-gateway
+           kind load docker-image --name=${KIND_CLUSTER_NAME} ${GATEWAY_IMG} || { echo >&2 "kind not installed or error loading image: ${GATEWAY_IMG}"; exit 1; }
+           docker rmi ${GATEWAY_IMG}
+
       - name: Deploy MySQL in Kind cluster
         env:
           MYSQL_DATABASE: ${{ env.MYSQL_DATABASE }}
@@ -127,9 +144,17 @@ jobs:
           make deploy-sandbox-manager
           bash hack/wait-agent-sandbox-controller.sh
 
+      - name: Deploy sandbox-gateway
+        if: matrix.with_gateway
+        run: make deploy-sandbox-gateway
+
       - name: Run E2E Tests
         run: |
           export KUBECONFIG=/home/runner/.kube/config
           export E2B_DOMAIN=localhost
           export E2B_API_KEY=some-api-key
-          bash hack/run-e2b-e2e-test.sh
+          if [ "${{ matrix.with_gateway }}" = "true" ]; then
+            bash hack/run-e2b-e2e-test.sh --with-gateway
+          else
+            bash hack/run-e2b-e2e-test.sh
+          fi

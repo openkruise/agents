@@ -28,6 +28,15 @@ env:
 jobs:
   sandbox:
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: without sandbox-gateway
+            with_gateway: false
+          - name: with sandbox-gateway
+            with_gateway: true
+    name: sandbox (${{ matrix.name }})
     steps:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         with:
@@ -82,29 +91,41 @@ jobs:
           make docker-build-manager
           make docker-build-controller
           make docker-build-runtime
-          make docker-build-sandbox-gateway
           kind load docker-image --name=${KIND_CLUSTER_NAME} ${CONTROLLER_IMG} || { echo >&2 "kind not installed or error loading image: ${CONTROLLER_IMG}"; exit 1; }
           docker rmi ${CONTROLLER_IMG}
           kind load docker-image --name=${KIND_CLUSTER_NAME} ${MANAGER_IMG} || { echo >&2 "kind not installed or error loading image: ${MANAGER_IMG}"; exit 1; }
           docker rmi ${MANAGER_IMG}
           kind load docker-image --name=${KIND_CLUSTER_NAME} ${RUNTIME_IMG} || { echo >&2 "kind not installed or error loading image: ${RUNTIME_IMG}"; exit 1; }
           docker rmi ${RUNTIME_IMG}
-          kind load docker-image --name=${KIND_CLUSTER_NAME} ${GATEWAY_IMG} || { echo >&2 "kind not installed or error loading image: ${GATEWAY_IMG}"; exit 1; }
-          docker rmi ${GATEWAY_IMG}
           kind load docker-image --name=${KIND_CLUSTER_NAME} ${CODE_INTERPRETER_IMG} || { echo >&2 "kind not installed or error loading image: ${CODE_INTERPRETER_IMG}"; exit 1; }
           docker rmi ${CODE_INTERPRETER_IMG}
           kind load docker-image --name=${KIND_CLUSTER_NAME} ${INPLACE_UPDATE_IMG} || { echo >&2 "kind not installed or error loading image: ${INPLACE_UPDATE_IMG}"; exit 1; }
           docker rmi ${INPLACE_UPDATE_IMG}
+
+      - name: Build sandbox-gateway image
+        if: matrix.with_gateway
+        run: |
+          make docker-build-sandbox-gateway
+          kind load docker-image --name=${KIND_CLUSTER_NAME} ${GATEWAY_IMG} || { echo >&2 "kind not installed or error loading image: ${GATEWAY_IMG}"; exit 1; }
+          docker rmi ${GATEWAY_IMG}
+
       - name: Install Kruise Agents
         run: |
           make deploy-agent-sandbox-controller
           make deploy-sandbox-manager
-          make deploy-sandbox-gateway
           bash hack/wait-agent-sandbox-controller.sh
+
+      - name: Deploy sandbox-gateway
+        if: matrix.with_gateway
+        run: make deploy-sandbox-gateway
+
       - name: Run E2E Tests
         run: |
           export KUBECONFIG=/home/runner/.kube/config
           export E2B_DOMAIN=localhost
           export E2B_API_KEY=some-api-key
-          bash hack/run-e2b-e2e-test.sh --e2b-version 2.8.1 --sdk-version 2.4.1
-
+          if [ "${{ matrix.with_gateway }}" = "true" ]; then
+            bash hack/run-e2b-e2e-test.sh --e2b-version 2.8.1 --sdk-version 2.4.1 --with-gateway
+          else
+            bash hack/run-e2b-e2e-test.sh --e2b-version 2.8.1 --sdk-version 2.4.1
+          fi

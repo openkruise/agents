@@ -91,10 +91,12 @@ type FilterConfig struct {
 func NewFilterConfig(cfg *Config) *FilterConfig {
 	adapter := adapters.NewE2BAdapterWithOptions(
 		0, // port not used by gateway
-		cfg.GetSandboxHeaderName(),
-		cfg.GetSandboxPortHeader(),
-		cfg.GetHostHeaderName(),
-		cfg.GetDefaultPort(),
+		adapters.E2BAdapterOptions{
+			SandboxIDHeader:   cfg.GetSandboxHeaderName(),
+			SandboxPortHeader: cfg.GetSandboxPortHeader(),
+			HostHeader:        cfg.GetHostHeaderName(),
+			DefaultPort:       cfg.GetDefaultPort(),
+		},
 	)
 	return &FilterConfig{
 		Config:  cfg,

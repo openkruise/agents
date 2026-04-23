@@ -17,6 +17,7 @@ set -e
 
 # Default values
 TIMEOUT="60m"
+WITH_GATEWAY="false"
 
 # Get the directory where this script is located
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -42,9 +43,13 @@ while [[ $# -gt 0 ]]; do
             shift # past argument
             shift # past value
             ;;
+        --with-gateway)
+            WITH_GATEWAY="true"
+            shift # past argument
+            ;;
         *)
             echo "Unknown parameter passed: $1"
-            echo "Usage: $0 [--e2b-version VERSION] [--sdk-version VERSION] [--timeout TIMEOUT]"
+            echo "Usage: $0 [--e2b-version VERSION] [--sdk-version VERSION] [--timeout TIMEOUT] [--with-gateway]"
             exit 1
             ;;
     esac
@@ -64,16 +69,21 @@ kubectl wait --for=condition=ready pod \
 
 echo "All sandbox-manager pods are ready"
 
-# Wait for sandbox-gateway pods to be ready
-echo "Waiting for sandbox-gateway pods to be ready..."
-kubectl wait --for=condition=ready pod \
-    -l app.kubernetes.io/name=sandbox-gateway \
-    -n sandbox-system \
-    --timeout=5m
-echo "All sandbox-gateway pods are ready"
+if [ "$WITH_GATEWAY" = "true" ]; then
+    # Wait for sandbox-gateway pods to be ready
+    echo "Waiting for sandbox-gateway pods to be ready..."
+    kubectl wait --for=condition=ready pod \
+        -l app.kubernetes.io/name=sandbox-gateway \
+        -n sandbox-system \
+        --timeout=5m
+    echo "All sandbox-gateway pods are ready"
 
-# Port-forward gateway as unified entry point (80 -> 7788, which targets Envoy :10000)
-sudo -E kubectl port-forward svc/sandbox-gateway 80:7788 -n sandbox-system &
+    # Port-forward gateway as unified entry point (80 -> 7788, which targets Envoy :10000)
+    sudo -E kubectl port-forward svc/sandbox-gateway 80:7788 -n sandbox-system &
+else
+    # Port-forward sandbox-manager directly
+    sudo -E kubectl port-forward svc/sandbox-manager 80:7788 -n sandbox-system &
+fi
 
 # Step 2: Install e2b-code-interpreter
 echo "Installing dependencies..."
@@ -117,7 +127,11 @@ fi
 
 # Run pytest with serial execution (no parallel flag)
 cd "$PROJECT_ROOT"
-pytest -v -s -x --tb=short "$TEST_DIR"
+if [ "$WITH_GATEWAY" = "true" ]; then
+    pytest -v -s -x --tb=short "$TEST_DIR"
+else
+    pytest -v -s -x --tb=short --ignore="$TEST_DIR/test_gateway.py" "$TEST_DIR"
+fi
 retVal=$?
 
 set +x
@@ -143,19 +157,21 @@ else
     exit 1
 fi
 
-# Check if sandbox-gateway pods restarted
-gwRestartCount=$(kubectl get pod -n sandbox-system -l app.kubernetes.io/name=sandbox-gateway --no-headers | awk '{sum+=$4} END {print sum}')
-if [ -z "$gwRestartCount" ]; then
-    gwRestartCount=0
-fi
+# Check if sandbox-gateway pods restarted (only when gateway is enabled)
+if [ "$WITH_GATEWAY" = "true" ]; then
+    gwRestartCount=$(kubectl get pod -n sandbox-system -l app.kubernetes.io/name=sandbox-gateway --no-headers | awk '{sum+=$4} END {print sum}')
+    if [ -z "$gwRestartCount" ]; then
+        gwRestartCount=0
+    fi
 
-if [ "${gwRestartCount}" -eq "0" ]; then
-    echo "sandbox-gateway has not restarted"
-else
-    kubectl get pod -n sandbox-system --no-headers -l app.kubernetes.io/name=sandbox-gateway
-    echo "sandbox-gateway has restarted, abort!!!"
-    kubectl get pod -n sandbox-system -l app.kubernetes.io/name=sandbox-gateway --no-headers | awk '{print $1}' | xargs -I {} kubectl logs -p -n sandbox-system {}
-    exit 1
+    if [ "${gwRestartCount}" -eq "0" ]; then
+        echo "sandbox-gateway has not restarted"
+    else
+        kubectl get pod -n sandbox-system --no-headers -l app.kubernetes.io/name=sandbox-gateway
+        echo "sandbox-gateway has restarted, abort!!!"
+        kubectl get pod -n sandbox-system -l app.kubernetes.io/name=sandbox-gateway --no-headers | awk '{print $1}' | xargs -I {} kubectl logs -p -n sandbox-system {}
+        exit 1
+    fi
 fi
 
 exit $retVal
