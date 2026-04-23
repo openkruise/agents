@@ -11,8 +11,9 @@ type CustomizedE2BAdapter struct{}
 const CustomPrefix = "/kruise"
 
 // Map maps paths like /kruise/sandbox1234/3000/xxx to sandboxID=sandbox1234 and port=3000
-func (a *CustomizedE2BAdapter) Map(_, _, path string, _ int, _ map[string]string) (
+func (a *CustomizedE2BAdapter) Map(req *ParsedRequest) (
 	sandboxID string, sandboxPort int, extraHeaders map[string]string, err error) {
+	path := req.Path
 	if len(path) <= len(CustomPrefix)+1 {
 		err = fmt.Errorf("invalid path: %s", path)
 		return

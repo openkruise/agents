@@ -55,8 +55,10 @@ func (a *NativeE2BAdapter) getHostHeader() string {
 //  2. If sandbox ID header is not found, fall back to hostname parsing from authority or a custom
 //     host header. Parse the hostname format: {port}-{namespace}--{name}.{domain}.
 //  3. If neither yields a result, return error.
-func (a *NativeE2BAdapter) Map(_, authority, _ string, _ int, headers map[string]string) (
+func (a *NativeE2BAdapter) Map(req *ParsedRequest) (
 	sandboxID string, sandboxPort int, extraHeaders map[string]string, err error) {
+	authority := req.Authority
+	headers := req.Headers
 
 	// Step 1: Header-based extraction (primary)
 	if headers != nil {

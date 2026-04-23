@@ -33,28 +33,26 @@ type sandboxFilter struct {
 	api.PassThroughStreamFilter
 	callbacks api.FilterCallbackHandler
 	config    *Config
-	adapter   adapters.E2BMapper
+	adapter   *adapters.E2BAdapter
 }
 
 func (f *sandboxFilter) DecodeHeaders(header api.RequestHeaderMap, endStream bool) api.StatusType {
-	// Extract request info for the adapter
-	authority := header.Host()
-	path := header.Path()
-	scheme := header.Scheme()
-
-	// Build headers map from the request for the adapter
+	// Step 1: Build flat headers map from the request, including pseudo-headers
 	headers := make(map[string]string)
 	header.Range(func(key, value string) bool {
 		headers[key] = value
 		return true
 	})
 
-	// Use the unified adapter to extract sandbox ID and port
-	sandboxID, sandboxPort, extraHeaders, err := f.adapter.Map(scheme, authority, path, 0, headers)
+	// Step 2: Use adapter.ParseRequest to normalize the request
+	parsed := f.adapter.ParseRequest(headers)
+
+	// Step 3: Use the unified adapter to extract sandbox ID and port
+	sandboxID, sandboxPort, extraHeaders, err := f.adapter.Map(parsed)
 	if err != nil {
 		logger.Debug("Adapter could not extract sandbox info, continuing",
-			zap.String("authority", authority),
-			zap.String("path", path),
+			zap.String("authority", parsed.Authority),
+			zap.String("path", parsed.Path),
 			zap.Error(err))
 		return api.Continue
 	}

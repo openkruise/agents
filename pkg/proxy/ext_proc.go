@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strconv"
-	"strings"
 
 	configPb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
@@ -81,15 +79,20 @@ func (s *Server) Process(srv extProcPb.ExternalProcessor_ProcessServer) error {
 var OrigDstHeader = "x-envoy-original-dst-host"
 
 func (s *Server) handleRequestHeaders(requestHeaders *extProcPb.ProcessingRequest_RequestHeaders, log logr.Logger) *extProcPb.ProcessingResponse {
-	scheme, authority, path, port, headers := parseRequest(requestHeaders.RequestHeaders)
+	// Step 1: Convert ext_proc headers to flat map[string]string
+	headers := extProcHeadersToMap(requestHeaders.RequestHeaders)
+	// Step 2: Use adapter.ParseRequest to normalize the request
+	parsed := s.adapter.ParseRequest(headers)
+	scheme, authority, path := parsed.Scheme, parsed.Authority, parsed.Path
+
 	log = log.WithValues("requestID", headers["x-request-id"])
-	log.Info("envoy ext processor parsed request", "scheme", scheme, "authority", authority, "path", path, "port", port, "headers", headers)
-	if !s.adapter.IsSandboxRequest(authority, path, port) {
+	log.Info("envoy ext processor parsed request", "scheme", scheme, "authority", authority, "path", path, "port", parsed.Port, "headers", headers)
+	if !s.adapter.IsSandboxRequest(authority, path, parsed.Port) {
 		return s.logAndCreateDstResponse(requestHeaders.RequestHeaders, map[string]string{
 			OrigDstHeader: s.LBEntry,
 		}, log)
 	}
-	sandboxID, sandboxPort, extraHeaders, err := s.adapter.Map(scheme, authority, path, port, headers)
+	sandboxID, sandboxPort, extraHeaders, err := s.adapter.Map(parsed)
 	if err != nil {
 		// Return error response instead of gRPC error
 		log.Error(err, "failed to map request to sandbox")
@@ -166,51 +169,15 @@ func (s *Server) logAndCreateErrorResponse(statusCode int, message string, log l
 	}
 }
 
-func parseRequest(httpHeaders *extProcPb.HttpHeaders) (scheme, authority, path string, port int, headers map[string]string) {
-	var host string
-	headers = make(map[string]string, len(httpHeaders.Headers.Headers))
+// extProcHeadersToMap converts Envoy ext_proc HttpHeaders into a flat map[string]string,
+// preserving pseudo-headers (:scheme, :authority, :path) so that adapter.ParseRequest
+// can normalize them uniformly.
+func extProcHeadersToMap(httpHeaders *extProcPb.HttpHeaders) map[string]string {
+	headers := make(map[string]string, len(httpHeaders.Headers.Headers))
 	for _, header := range httpHeaders.Headers.Headers {
 		headers[header.Key] = string(header.RawValue)
-		switch header.Key {
-		case ":scheme":
-			scheme = string(header.RawValue)
-		case ":authority":
-			authority = string(header.RawValue)
-		case "host":
-			host = string(header.RawValue)
-		case ":path":
-			path = string(header.RawValue)
-		}
 	}
-	if authority == "" {
-		authority = host
-	}
-
-	// Extract port from authority
-	if authority != "" {
-		// Check if it contains a port number (host:port format)
-		parts := strings.Split(authority, ":")
-		if len(parts) > 1 {
-			// Try to parse the port number
-			if p, err := strconv.Atoi(parts[1]); err == nil {
-				port = p
-			}
-			return scheme, authority, path, port, headers
-		}
-
-		// If no port is explicitly specified in authority, determine the default port based on the protocol
-		switch scheme {
-		case "https":
-			port = 443
-		case "wss":
-			port = 443
-		case "http":
-			port = 80
-		case "ws":
-			port = 80
-		}
-	}
-	return scheme, authority, path, port, headers
+	return headers
 }
 
 func headerModifiers(key string, in *extProcPb.HttpHeaders, log logr.Logger) []*configPb.HeaderValueOption {

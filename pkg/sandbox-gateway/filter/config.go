@@ -84,7 +84,7 @@ func (c *Config) GetDefaultPort() int {
 // FilterConfig wraps Config and holds the adapter created from the config
 type FilterConfig struct {
 	*Config
-	Adapter adapters.E2BMapper
+	Adapter *adapters.E2BAdapter
 }
 
 // NewFilterConfig creates a FilterConfig with an adapter built from the config values

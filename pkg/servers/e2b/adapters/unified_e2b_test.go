@@ -8,14 +8,13 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 )
 
 var adminKey = "admin-key"
 
-func SetUpE2BAdapter(t *testing.T) proxy.RequestAdapter {
+func SetUpE2BAdapter(t *testing.T) *E2BAdapter {
 	client := clients.NewFakeClientSet(t)
 	_, err := client.K8sClient.CoreV1().Secrets("default").Create(context.Background(), &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
@@ -130,7 +129,13 @@ func TestMap(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			adapter := SetUpE2BAdapter(t)
-			sandboxID, sandboxPort, headers, err := adapter.Map("http", tt.authority, tt.path, 8080, tt.headers)
+			sandboxID, sandboxPort, headers, err := adapter.Map(&ParsedRequest{
+				Scheme:    "http",
+				Authority: tt.authority,
+				Path:      tt.path,
+				Port:      8080,
+				Headers:   tt.headers,
+			})
 			if tt.expectErr {
 				assert.Error(t, err)
 				return
@@ -213,6 +218,150 @@ func TestIsSandboxRequest(t *testing.T) {
 			adapter := SetUpE2BAdapter(t)
 			isSandbox := adapter.IsSandboxRequest(tt.authority, tt.path, 8080)
 			assert.Equal(t, tt.expectIsSandboxRequest, isSandbox)
+		})
+	}
+}
+
+func TestParseRequest(t *testing.T) {
+	adapter := NewE2BAdapter(8080)
+
+	tests := []struct {
+		name            string
+		headers         map[string]string
+		expectScheme    string
+		expectAuthority string
+		expectPath      string
+		expectPort      int
+	}{
+		{
+			name: "full pseudo-headers with port in authority",
+			headers: map[string]string{
+				":scheme":    "http",
+				":authority": "localhost:9002",
+				":path":      "/sandbox",
+			},
+			expectScheme:    "http",
+			expectAuthority: "localhost:9002",
+			expectPath:      "/sandbox",
+			expectPort:      9002,
+		},
+		{
+			name: "authority without port - http defaults to 80",
+			headers: map[string]string{
+				":scheme":    "http",
+				":authority": "example.com",
+				":path":      "/",
+			},
+			expectScheme:    "http",
+			expectAuthority: "example.com",
+			expectPath:      "/",
+			expectPort:      80,
+		},
+		{
+			name: "authority without port - https defaults to 443",
+			headers: map[string]string{
+				":scheme":    "https",
+				":authority": "example.com",
+				":path":      "/",
+			},
+			expectScheme:    "https",
+			expectAuthority: "example.com",
+			expectPath:      "/",
+			expectPort:      443,
+		},
+		{
+			name: "wss defaults to 443",
+			headers: map[string]string{
+				":scheme":    "wss",
+				":authority": "example.com",
+				":path":      "/ws",
+			},
+			expectScheme:    "wss",
+			expectAuthority: "example.com",
+			expectPath:      "/ws",
+			expectPort:      443,
+		},
+		{
+			name: "ws defaults to 80",
+			headers: map[string]string{
+				":scheme":    "ws",
+				":authority": "example.com",
+				":path":      "/ws",
+			},
+			expectScheme:    "ws",
+			expectAuthority: "example.com",
+			expectPath:      "/ws",
+			expectPort:      80,
+		},
+		{
+			name: "fallback to host when :authority is absent",
+			headers: map[string]string{
+				":scheme": "http",
+				"host":    "fallback-host.com:3000",
+				":path":   "/test",
+			},
+			expectScheme:    "http",
+			expectAuthority: "fallback-host.com:3000",
+			expectPath:      "/test",
+			expectPort:      3000,
+		},
+		{
+			name:            "empty headers",
+			headers:         map[string]string{},
+			expectScheme:    "",
+			expectAuthority: "",
+			expectPath:      "",
+			expectPort:      0,
+		},
+		{
+			name: ":authority takes precedence over host",
+			headers: map[string]string{
+				":scheme":    "http",
+				":authority": "authority-host.com:8080",
+				"host":       "host-header.com:9090",
+				":path":      "/",
+			},
+			expectScheme:    "http",
+			expectAuthority: "authority-host.com:8080",
+			expectPath:      "/",
+			expectPort:      8080,
+		},
+		{
+			name: "authority with non-numeric port part",
+			headers: map[string]string{
+				":scheme":    "http",
+				":authority": "host:abc",
+				":path":      "/",
+			},
+			expectScheme:    "http",
+			expectAuthority: "host:abc",
+			expectPath:      "/",
+			expectPort:      0,
+		},
+		{
+			name: "headers map is preserved in ParsedRequest",
+			headers: map[string]string{
+				":scheme":        "http",
+				":authority":     "example.com:8080",
+				":path":          "/test",
+				"x-request-id":   "abc-123",
+				"e2b-sandbox-id": "my-sandbox",
+			},
+			expectScheme:    "http",
+			expectAuthority: "example.com:8080",
+			expectPath:      "/test",
+			expectPort:      8080,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parsed := adapter.ParseRequest(tt.headers)
+			assert.Equal(t, tt.expectScheme, parsed.Scheme)
+			assert.Equal(t, tt.expectAuthority, parsed.Authority)
+			assert.Equal(t, tt.expectPath, parsed.Path)
+			assert.Equal(t, tt.expectPort, parsed.Port)
+			assert.Equal(t, tt.headers, parsed.Headers)
 		})
 	}
 }
@@ -315,7 +464,13 @@ func TestNativeE2BAdapterHeaderBasedMap(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			sandboxID, sandboxPort, _, err := tt.adapter.Map("http", tt.authority, "/", 0, tt.headers)
+			sandboxID, sandboxPort, _, err := tt.adapter.Map(&ParsedRequest{
+				Scheme:    "http",
+				Authority: tt.authority,
+				Path:      "/",
+				Port:      0,
+				Headers:   tt.headers,
+			})
 			if tt.expectErr {
 				assert.Error(t, err)
 				return

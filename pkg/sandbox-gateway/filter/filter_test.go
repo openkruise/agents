@@ -51,6 +51,16 @@ func (m *mockRequestHeaderMap) Del(key string) {
 }
 
 func (m *mockRequestHeaderMap) Range(f func(key, value string) bool) {
+	// Include pseudo-headers that a real Envoy filter would provide
+	if !f(":scheme", m.Scheme()) {
+		return
+	}
+	if !f(":authority", m.Host()) {
+		return
+	}
+	if !f(":path", m.Path()) {
+		return
+	}
 	for k, v := range m.headers {
 		if !f(k, v) {
 			break
@@ -92,6 +102,23 @@ func (m *mockRequestHeaderMapWithHost) Host() string {
 	return m.hostValue
 }
 
+func (m *mockRequestHeaderMapWithHost) Range(f func(key, value string) bool) {
+	if !f(":scheme", m.Scheme()) {
+		return
+	}
+	if !f(":authority", m.hostValue) {
+		return
+	}
+	if !f(":path", m.Path()) {
+		return
+	}
+	for k, v := range m.headers {
+		if !f(k, v) {
+			break
+		}
+	}
+}
+
 // mockRequestHeaderMapCustom extends mockRequestHeaderMap to allow custom Host(), Path(), and Scheme() values
 type mockRequestHeaderMapCustom struct {
 	mockRequestHeaderMap
@@ -121,8 +148,25 @@ func (m *mockRequestHeaderMapCustom) Scheme() string {
 	return "http"
 }
 
+func (m *mockRequestHeaderMapCustom) Range(f func(key, value string) bool) {
+	if !f(":scheme", m.Scheme()) {
+		return
+	}
+	if !f(":authority", m.Host()) {
+		return
+	}
+	if !f(":path", m.Path()) {
+		return
+	}
+	for k, v := range m.headers {
+		if !f(k, v) {
+			break
+		}
+	}
+}
+
 // defaultTestAdapter creates an E2BAdapter matching the default filter config
-func defaultTestAdapter() adapters.E2BMapper {
+func defaultTestAdapter() *adapters.E2BAdapter {
 	return adapters.NewE2BAdapterWithOptions(0, DefaultSandboxHeaderName, DefaultSandboxPortHeader, DefaultHostHeaderName, 49983)
 }
 
