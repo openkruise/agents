@@ -135,12 +135,15 @@ func recordSandboxClaimMetrics(claim *agentsv1alpha1.SandboxClaim) {
 	// sandboxclaim_created
 	sandboxClaimCreated.WithLabelValues(namespace, name).Set(float64(claim.CreationTimestamp.Unix()))
 
-	// sandboxclaim_status_phase
+	// sandboxclaim_status_phase: Only emit the current phase (value=1), delete stale phase series to reduce cardinality.
 	currentPhase := claim.Status.Phase
 	if currentPhase != "" {
 		for _, p := range allClaimPhases {
-			sandboxClaimStatusPhase.WithLabelValues(namespace, name, string(p)).Set(boolFloat64(currentPhase == p))
+			if p != currentPhase {
+				sandboxClaimStatusPhase.DeleteLabelValues(namespace, name, string(p))
+			}
 		}
+		sandboxClaimStatusPhase.WithLabelValues(namespace, name, string(currentPhase)).Set(1)
 	}
 
 	// sandboxclaim_claim_start_time

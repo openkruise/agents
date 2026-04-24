@@ -22,6 +22,7 @@ import (
 	"net/http"         // Added for pprof server
 	_ "net/http/pprof" // Added to register pprof handlers
 	"os"
+	"strings"
 
 	"github.com/spf13/pflag"
 	corev1 "k8s.io/api/core/v1"
@@ -45,6 +46,7 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/client"
 	"github.com/openkruise/agents/pkg/controller"
+	sandboxctrl "github.com/openkruise/agents/pkg/controller/sandbox"
 	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/utils"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
@@ -84,6 +86,7 @@ func main() {
 	var enablePprof bool
 	var pprofAddr string
 	var allowPrivileged bool
+	var metricLabelsAllowlist string
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -114,6 +117,8 @@ func main() {
 		"started with --allow-privileged=true.")
 	flag.StringVar(&defaultPersistentContents, "default-persistent-contents", "", "Default persistent state configuration for sandbox, "+
 		"supporting three states: ip, memory, and filesystem. Format: comma-separated, e.g.: memory,filesystem")
+	flag.StringVar(&metricLabelsAllowlist, "metric-labels-allowlist", "",
+		"Comma-separated list of Sandbox label keys to expose as sandbox_labels metric labels (e.g., app,env,version)")
 
 	opts := zap.Options{
 		Development: true,
@@ -125,6 +130,14 @@ func main() {
 	pflag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
+	if metricLabelsAllowlist != "" {
+		keys := strings.Split(metricLabelsAllowlist, ",")
+		for i := range keys {
+			keys[i] = strings.TrimSpace(keys[i])
+		}
+		sandboxctrl.InitSandboxLabelsMetric(keys)
+	}
 
 	err := mutating.SetDefaultPersistentContents(defaultPersistentContents)
 	if err != nil {

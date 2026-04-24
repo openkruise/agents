@@ -6,12 +6,13 @@ import (
 )
 
 var (
-	// SandboxCreationLatency tracks the time from request to return
-	SandboxCreationLatency = prometheus.NewHistogram(
+	// SandboxCreationDuration tracks the time from request to return
+	SandboxCreationDuration = prometheus.NewHistogram(
 		prometheus.HistogramOpts{
-			Name:    "sandbox_creation_latency_ms",
-			Help:    "Latency of sandbox creation in milliseconds",
-			Buckets: prometheus.ExponentialBuckets(10, 2, 10), // 10ms to ~10s
+			Name:        "sandbox_creation_duration_seconds",
+			Help:        "Duration of sandbox creation in seconds",
+			ConstLabels: prometheus.Labels{"source": "e2b"},
+			Buckets:     prometheus.ExponentialBuckets(0.01, 2, 10), // 10ms to ~5.12s
 		},
 	)
 
@@ -24,12 +25,13 @@ var (
 		[]string{"result"}, // "success" or "failure"
 	)
 
-	// SandboxPauseLatency tracks the time of sandbox pause operations
-	SandboxPauseLatency = prometheus.NewHistogram(
+	// SandboxPauseDuration tracks the time of sandbox pause operations
+	SandboxPauseDuration = prometheus.NewHistogram(
 		prometheus.HistogramOpts{
-			Name:    "sandbox_pause_latency_ms",
-			Help:    "Latency of sandbox pause operations in milliseconds",
-			Buckets: prometheus.ExponentialBuckets(10, 2, 10),
+			Name:        "sandbox_pause_duration_seconds",
+			Help:        "Duration of sandbox pause operations in seconds",
+			ConstLabels: prometheus.Labels{"source": "e2b"},
+			Buckets:     prometheus.ExponentialBuckets(0.01, 2, 10),
 		},
 	)
 
@@ -42,12 +44,13 @@ var (
 		[]string{"result"},
 	)
 
-	// SandboxResumeLatency tracks the time of sandbox resume operations
-	SandboxResumeLatency = prometheus.NewHistogram(
+	// SandboxResumeDuration tracks the time of sandbox resume operations
+	SandboxResumeDuration = prometheus.NewHistogram(
 		prometheus.HistogramOpts{
-			Name:    "sandbox_resume_latency_ms",
-			Help:    "Latency of sandbox resume operations in milliseconds",
-			Buckets: prometheus.ExponentialBuckets(10, 2, 10),
+			Name:        "sandbox_resume_duration_seconds",
+			Help:        "Duration of sandbox resume operations in seconds",
+			ConstLabels: prometheus.Labels{"source": "e2b"},
+			Buckets:     prometheus.ExponentialBuckets(0.01, 2, 10),
 		},
 	)
 
@@ -71,21 +74,21 @@ var (
 
 	// --- Claim metrics ---
 
-	// SandboxClaimDuration tracks the total claim operation latency
+	// SandboxClaimDuration tracks the total claim operation duration
 	SandboxClaimDuration = prometheus.NewHistogram(
 		prometheus.HistogramOpts{
-			Name:    "sandbox_claim_duration_ms",
-			Help:    "Total claim operation latency in milliseconds",
-			Buckets: prometheus.ExponentialBuckets(10, 2, 10),
+			Name:    "sandbox_claim_duration_seconds",
+			Help:    "Total claim operation duration in seconds",
+			Buckets: prometheus.ExponentialBuckets(0.01, 2, 10),
 		},
 	)
 
 	// SandboxClaimStageDuration tracks the duration of each claim stage
 	SandboxClaimStageDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Name:    "sandbox_claim_stage_duration_ms",
-			Help:    "Duration of each claim stage in milliseconds",
-			Buckets: prometheus.ExponentialBuckets(1, 2, 12),
+			Name:    "sandbox_claim_stage_duration_seconds",
+			Help:    "Duration of each claim stage in seconds",
+			Buckets: prometheus.ExponentialBuckets(0.001, 2, 12),
 		},
 		[]string{"stage"},
 	)
@@ -110,21 +113,21 @@ var (
 
 	// --- Clone metrics ---
 
-	// SandboxCloneDuration tracks the total clone operation latency
+	// SandboxCloneDuration tracks the total clone operation duration
 	SandboxCloneDuration = prometheus.NewHistogram(
 		prometheus.HistogramOpts{
-			Name:    "sandbox_clone_duration_ms",
-			Help:    "Total clone operation latency in milliseconds",
-			Buckets: prometheus.ExponentialBuckets(10, 2, 10),
+			Name:    "sandbox_clone_duration_seconds",
+			Help:    "Total clone operation duration in seconds",
+			Buckets: prometheus.ExponentialBuckets(0.01, 2, 10),
 		},
 	)
 
 	// SandboxCloneStageDuration tracks the duration of each clone stage
 	SandboxCloneStageDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Name:    "sandbox_clone_stage_duration_ms",
-			Help:    "Duration of each clone stage in milliseconds",
-			Buckets: prometheus.ExponentialBuckets(1, 2, 12),
+			Name:    "sandbox_clone_stage_duration_seconds",
+			Help:    "Duration of each clone stage in seconds",
+			Buckets: prometheus.ExponentialBuckets(0.001, 2, 12),
 		},
 		[]string{"stage"},
 	)
@@ -138,25 +141,26 @@ var (
 		[]string{"result"},
 	)
 
-	// --- Delete latency ---
+	// --- Delete duration ---
 
-	// SandboxDeleteLatency tracks the time of sandbox delete operations
-	SandboxDeleteLatency = prometheus.NewHistogram(
+	// SandboxDeleteDuration tracks the time of sandbox delete operations
+	SandboxDeleteDuration = prometheus.NewHistogram(
 		prometheus.HistogramOpts{
-			Name:    "sandbox_delete_latency_ms",
-			Help:    "Latency of sandbox delete operations in milliseconds",
-			Buckets: prometheus.ExponentialBuckets(10, 2, 10),
+			Name:        "sandbox_delete_duration_seconds",
+			Help:        "Duration of sandbox delete operations in seconds",
+			ConstLabels: prometheus.Labels{"source": "e2b"},
+			Buckets:     prometheus.ExponentialBuckets(0.01, 2, 10),
 		},
 	)
 
 	// --- Route sync metrics ---
 
-	// SandboxRouteSyncDuration tracks route synchronization latency
+	// SandboxRouteSyncDuration tracks route synchronization duration
 	SandboxRouteSyncDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Name:    "sandbox_route_sync_duration_ms",
-			Help:    "Route synchronization latency in milliseconds",
-			Buckets: prometheus.ExponentialBuckets(1, 2, 10),
+			Name:    "sandbox_route_sync_duration_seconds",
+			Help:    "Route synchronization duration in seconds",
+			Buckets: prometheus.ExponentialBuckets(0.001, 2, 10),
 		},
 		[]string{"type"},
 	)
@@ -173,16 +177,16 @@ var (
 
 func init() {
 	// Register custom metrics with the global prometheus registry
-	metrics.Registry.MustRegister(SandboxCreationLatency, SandboxCreationResponses,
-		SandboxPauseLatency, SandboxPauseResponses,
-		SandboxResumeLatency, SandboxResumeResponses,
+	metrics.Registry.MustRegister(SandboxCreationDuration, SandboxCreationResponses,
+		SandboxPauseDuration, SandboxPauseResponses,
+		SandboxResumeDuration, SandboxResumeResponses,
 		SandboxDeleteResponses,
 		// Claim
 		SandboxClaimDuration, SandboxClaimStageDuration, SandboxClaimTotal, SandboxClaimRetries,
 		// Clone
 		SandboxCloneDuration, SandboxCloneStageDuration, SandboxCloneTotal,
-		// Delete latency
-		SandboxDeleteLatency,
+		// Delete duration
+		SandboxDeleteDuration,
 		// Route sync
 		SandboxRouteSyncDuration, SandboxRouteSyncTotal,
 	)

@@ -67,11 +67,6 @@ func TestRecordSandboxSetMetrics(t *testing.T) {
 				t.Errorf("sandboxset_created = %v, want %v", createdVal, expectedCreated)
 			}
 
-			// Verify info metric is set to 1
-			infoVal := testutil.ToFloat64(sandboxSetInfo.WithLabelValues(tt.namespace, tt.sbsName))
-			if infoVal != 1 {
-				t.Errorf("sandboxset_info = %v, want 1", infoVal)
-			}
 		})
 	}
 }
@@ -111,9 +106,6 @@ func TestDeleteSandboxSetMetrics(t *testing.T) {
 			if val := testutil.ToFloat64(sandboxSetCreated.WithLabelValues(tt.namespace, tt.sbsName)); val == 0 {
 				t.Fatal("sandboxset_created should be set before delete")
 			}
-			if val := testutil.ToFloat64(sandboxSetInfo.WithLabelValues(tt.namespace, tt.sbsName)); val != 1 {
-				t.Fatalf("sandboxset_info before delete = %v, want 1", val)
-			}
 			if val := testutil.ToFloat64(SandboxSetReplicas.WithLabelValues(tt.namespace, tt.sbsName)); val != 3 {
 				t.Fatalf("sandboxset_replicas before delete = %v, want 3", val)
 			}
@@ -127,9 +119,6 @@ func TestDeleteSandboxSetMetrics(t *testing.T) {
 			// After deletion, WithLabelValues creates a new zero-value gauge.
 			if val := testutil.ToFloat64(sandboxSetCreated.WithLabelValues(tt.namespace, tt.sbsName)); val != 0 {
 				t.Errorf("sandboxset_created after delete = %v, want 0", val)
-			}
-			if val := testutil.ToFloat64(sandboxSetInfo.WithLabelValues(tt.namespace, tt.sbsName)); val != 0 {
-				t.Errorf("sandboxset_info after delete = %v, want 0", val)
 			}
 			if val := testutil.ToFloat64(SandboxSetReplicas.WithLabelValues(tt.namespace, tt.sbsName)); val != 0 {
 				t.Errorf("sandboxset_replicas after delete = %v, want 0", val)

@@ -34,18 +34,18 @@ func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts infra.ClaimSandb
 	// Success: Record metrics
 	SandboxCreationResponses.WithLabelValues("success").Inc()
 	// Requirement: Only measure the latency when no error exists
-	SandboxCreationLatency.Observe(float64(claimMetrics.Total.Milliseconds()))
+	SandboxCreationDuration.Observe(claimMetrics.Total.Seconds())
 
 	// Claim-specific metrics
-	SandboxClaimDuration.Observe(float64(claimMetrics.Total.Milliseconds()))
+	SandboxClaimDuration.Observe(claimMetrics.Total.Seconds())
 	SandboxClaimTotal.WithLabelValues("success", string(claimMetrics.LockType)).Inc()
 	SandboxClaimRetries.Observe(float64(claimMetrics.Retries))
-	SandboxClaimStageDuration.WithLabelValues("wait").Observe(float64(claimMetrics.Wait.Milliseconds()))
-	SandboxClaimStageDuration.WithLabelValues("retry_cost").Observe(float64(claimMetrics.RetryCost.Milliseconds()))
-	SandboxClaimStageDuration.WithLabelValues("pick_and_lock").Observe(float64(claimMetrics.PickAndLock.Milliseconds()))
-	SandboxClaimStageDuration.WithLabelValues("wait_ready").Observe(float64(claimMetrics.WaitReady.Milliseconds()))
-	SandboxClaimStageDuration.WithLabelValues("init_runtime").Observe(float64(claimMetrics.InitRuntime.Milliseconds()))
-	SandboxClaimStageDuration.WithLabelValues("csi_mount").Observe(float64(claimMetrics.CSIMount.Milliseconds()))
+	SandboxClaimStageDuration.WithLabelValues("wait").Observe(claimMetrics.Wait.Seconds())
+	SandboxClaimStageDuration.WithLabelValues("retry_cost").Observe(claimMetrics.RetryCost.Seconds())
+	SandboxClaimStageDuration.WithLabelValues("pick_and_lock").Observe(claimMetrics.PickAndLock.Seconds())
+	SandboxClaimStageDuration.WithLabelValues("wait_ready").Observe(claimMetrics.WaitReady.Seconds())
+	SandboxClaimStageDuration.WithLabelValues("init_runtime").Observe(claimMetrics.InitRuntime.Seconds())
+	SandboxClaimStageDuration.WithLabelValues("csi_mount").Observe(claimMetrics.CSIMount.Seconds())
 
 	state, reason := sandbox.GetState()
 	log.Info("sandbox claimed", "sandbox", klog.KObj(sandbox), "metrics", claimMetrics.String(), "state", state, "reason", reason)
@@ -69,17 +69,17 @@ func (m *SandboxManager) CloneSandbox(ctx context.Context, opts infra.CloneSandb
 	// Success: Record metrics
 	SandboxCreationResponses.WithLabelValues("success").Inc()
 	// Requirement: Only measure the latency when no error exists
-	SandboxCreationLatency.Observe(float64(cloneMetrics.Total.Milliseconds()))
+	SandboxCreationDuration.Observe(cloneMetrics.Total.Seconds())
 
 	// Clone-specific metrics
-	SandboxCloneDuration.Observe(float64(cloneMetrics.Total.Milliseconds()))
+	SandboxCloneDuration.Observe(cloneMetrics.Total.Seconds())
 	SandboxCloneTotal.WithLabelValues("success").Inc()
-	SandboxCloneStageDuration.WithLabelValues("wait").Observe(float64(cloneMetrics.Wait.Milliseconds()))
-	SandboxCloneStageDuration.WithLabelValues("get_template").Observe(float64(cloneMetrics.GetTemplate.Milliseconds()))
-	SandboxCloneStageDuration.WithLabelValues("create_sandbox").Observe(float64(cloneMetrics.CreateSandbox.Milliseconds()))
-	SandboxCloneStageDuration.WithLabelValues("wait_ready").Observe(float64(cloneMetrics.WaitReady.Milliseconds()))
-	SandboxCloneStageDuration.WithLabelValues("init_runtime").Observe(float64(cloneMetrics.InitRuntime.Milliseconds()))
-	SandboxCloneStageDuration.WithLabelValues("csi_mount").Observe(float64(cloneMetrics.CSIMount.Milliseconds()))
+	SandboxCloneStageDuration.WithLabelValues("wait").Observe(cloneMetrics.Wait.Seconds())
+	SandboxCloneStageDuration.WithLabelValues("get_template").Observe(cloneMetrics.GetTemplate.Seconds())
+	SandboxCloneStageDuration.WithLabelValues("create_sandbox").Observe(cloneMetrics.CreateSandbox.Seconds())
+	SandboxCloneStageDuration.WithLabelValues("wait_ready").Observe(cloneMetrics.WaitReady.Seconds())
+	SandboxCloneStageDuration.WithLabelValues("init_runtime").Observe(cloneMetrics.InitRuntime.Seconds())
+	SandboxCloneStageDuration.WithLabelValues("csi_mount").Observe(cloneMetrics.CSIMount.Seconds())
 
 	state, reason := sandbox.GetState()
 	log.Info("sandbox cloned", "sandbox", klog.KObj(sandbox), "metrics", cloneMetrics.String(), "state", state, "reason", reason)
@@ -176,7 +176,7 @@ func (m *SandboxManager) syncRoute(ctx context.Context, sbx infra.Sandbox, refre
 	route := sbx.GetRoute()
 	m.proxy.SetRoute(ctx, route)
 	err := m.proxy.SyncRouteWithPeers(route)
-	duration := float64(time.Since(start).Milliseconds())
+	duration := time.Since(start).Seconds()
 	if err != nil {
 		log.Error(err, "failed to sync route with peers")
 		SandboxRouteSyncTotal.WithLabelValues("sync_with_peers", "failure").Inc()
@@ -198,7 +198,7 @@ func (m *SandboxManager) PauseSandbox(ctx context.Context, sbx infra.Sandbox, op
 		return err
 	}
 	SandboxPauseResponses.WithLabelValues("success").Inc()
-	SandboxPauseLatency.Observe(float64(time.Since(start).Milliseconds()))
+	SandboxPauseDuration.Observe(time.Since(start).Seconds())
 	if err := m.syncRoute(ctx, sbx, true); err != nil {
 		log.Error(err, "failed to sync route with peers after pause")
 	}
@@ -215,7 +215,7 @@ func (m *SandboxManager) ResumeSandbox(ctx context.Context, sbx infra.Sandbox) e
 		return err
 	}
 	SandboxResumeResponses.WithLabelValues("success").Inc()
-	SandboxResumeLatency.Observe(float64(time.Since(start).Milliseconds()))
+	SandboxResumeDuration.Observe(time.Since(start).Seconds())
 	if err := m.syncRoute(ctx, sbx, true); err != nil {
 		log.Error(err, "failed to sync route with peers after resume")
 	}
@@ -235,7 +235,7 @@ func (m *SandboxManager) DeleteSandbox(ctx context.Context, sbx infra.Sandbox) e
 		return err
 	}
 	SandboxDeleteResponses.WithLabelValues("success").Inc()
-	SandboxDeleteLatency.Observe(float64(time.Since(start).Milliseconds()))
+	SandboxDeleteDuration.Observe(time.Since(start).Seconds())
 	log.Info("sandbox deleted")
 
 	m.proxy.DeleteRoute(route.ID)

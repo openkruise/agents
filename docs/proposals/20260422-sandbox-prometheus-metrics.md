@@ -74,7 +74,7 @@ Prometheus is the de facto standard for Kubernetes observability. By following k
 ### Goals
 
 1. **Full CRD lifecycle coverage**: Expose metrics for every phase and condition of Sandbox, SandboxSet, and SandboxClaim resources.
-2. **kube-state-metrics compatibility**: Follow established naming conventions (`_info`, `_created`, `_status_phase`, bidirectional condition timestamps) so users can apply existing Kubernetes monitoring knowledge.
+2. **kube-state-metrics compatibility**: Follow established naming conventions (`_info`, `_created`, `_status_phase`, single-direction condition timestamps) so users can apply existing Kubernetes monitoring knowledge.
 3. **API operation observability**: Track latency histograms and success/failure counters for all Sandbox Manager REST API operations.
 4. **Grafana-ready**: All metrics are designed to support common Grafana dashboard patterns (heatmaps, gauges, time series, tables).
 5. **Zero performance impact**: Metrics recording uses lightweight O(1) atomic operations within the Reconcile loop, adding negligible overhead.
@@ -120,35 +120,43 @@ The Sandbox controller exposes the following metrics for each Sandbox resource:
 | `sandbox_info` | Gauge | `namespace`, `name`, `created_by_kind`, `created_by_name` | Sandbox metadata info metric (always 1). Includes owner reference labels for identifying which SandboxSet or SandboxClaim created the sandbox. |
 | `sandbox_created` | Gauge | `namespace`, `name` | Unix creation timestamp of the sandbox (`metadata.creationTimestamp`). |
 | `sandbox_deletion_timestamp` | Gauge | `namespace`, `name` | Unix deletion timestamp of the sandbox (`metadata.deletionTimestamp`). Only set when the sandbox is being deleted. |
-| `sandbox_status_phase` | Gauge | `namespace`, `name`, `phase` | Current phase of the sandbox. Following the `kube_pod_status_phase` pattern, one time series per phase is emitted; the active phase has value `1`, all others have value `0`. |
+| `sandbox_status_phase` | Gauge | `namespace`, `name`, `phase` | Current phase of the sandbox. Following the `kube_pod_status_phase` pattern, only the active phase is emitted with value `1`; stale phase series are deleted to reduce cardinality. |
 | `sandbox_status_ready` | Gauge | `namespace`, `name` | Whether the Ready condition is True (`1`) or not (`0`). |
 | `sandbox_status_ready_time` | Gauge | `namespace`, `name` | Unix timestamp of the last transition to Ready=True (`condition.lastTransitionTime`). |
-| `sandbox_status_not_ready` | Gauge | `namespace`, `name` | Whether the Ready condition is False (`1`) or not (`0`). Follows the `kube_pod_status_unschedulable` naming pattern. |
-| `sandbox_status_not_ready_time` | Gauge | `namespace`, `name` | Unix timestamp of the last transition to Ready=False. |
 | `sandbox_status_paused` | Gauge | `namespace`, `name` | Whether the SandboxPaused condition is True (`1`) or not (`0`). |
 | `sandbox_status_paused_time` | Gauge | `namespace`, `name` | Unix timestamp of the last transition to SandboxPaused=True. |
-| `sandbox_status_unpaused` | Gauge | `namespace`, `name` | Whether the SandboxPaused condition is False (`1`) or not (`0`). |
-| `sandbox_status_unpaused_time` | Gauge | `namespace`, `name` | Unix timestamp of the last transition to SandboxPaused=False. |
 | `sandbox_status_resumed` | Gauge | `namespace`, `name` | Whether the SandboxResumed condition is True (`1`) or not (`0`). |
 | `sandbox_status_resumed_time` | Gauge | `namespace`, `name` | Unix timestamp of the last transition to SandboxResumed=True. |
-| `sandbox_status_unresumed` | Gauge | `namespace`, `name` | Whether the SandboxResumed condition is False (`1`) or not (`0`). |
-| `sandbox_status_unresumed_time` | Gauge | `namespace`, `name` | Unix timestamp of the last transition to SandboxResumed=False. |
 | `sandbox_status_inplace_update_done` | Gauge | `namespace`, `name` | Whether the InplaceUpdate condition is True (`1`) or not (`0`). |
 | `sandbox_status_inplace_update_done_time` | Gauge | `namespace`, `name` | Unix timestamp of the last transition to InplaceUpdate=True. |
-| `sandbox_status_inplace_updating` | Gauge | `namespace`, `name` | Whether the InplaceUpdate condition is False (`1`) or not (`0`). |
-| `sandbox_status_inplace_updating_time` | Gauge | `namespace`, `name` | Unix timestamp of the last transition to InplaceUpdate=False. |
-| `sandbox_creation_to_ready_duration_seconds` | Histogram | — | Duration from sandbox creation to Ready condition in seconds. Buckets: 1, 2, 5, 10, 20, 30, 60, 120, 300, 600. Observed once per sandbox when first reaching Ready. |
+| `sandbox_creation_duration_seconds` | Histogram | ConstLabels: `source="k8s"` | Duration from sandbox creation to Ready condition in seconds. Buckets: 1, 2, 5, 10, 20, 30, 60, 120, 300, 600. Observed once per sandbox when first reaching Ready. |
 | `sandbox_inplace_update_duration_seconds` | Histogram | — | Duration of in-place update operations from start (InplaceUpdate=False) to completion (InplaceUpdate=True) in seconds. Buckets: 1, 2, 5, 10, 20, 30, 60, 120, 300, 600. Observed once per update cycle. |
+| `sandbox_labels` | Gauge | `namespace`, `name`, `label_<key>` | Sandbox labels converted to Prometheus labels. Opt-in: disabled by default, enabled via `--metric-labels-allowlist`. |
 
 **Design Patterns**
 
-- **Phase metrics** follow the `kube_pod_status_phase` pattern: each possible phase value is emitted as a separate time series via the `phase` label. The currently active phase has gauge value `1`; all others are `0`. This enables queries like `count by (phase) (sandbox_status_phase == 1)`.
+- **Phase metrics** follow the `kube_pod_status_phase` pattern: only the currently active phase is emitted as a time series with gauge value `1`; stale phase series are deleted to reduce cardinality. This enables queries like `count by (phase) (sandbox_status_phase == 1)`.
 
-- **Condition metrics** use bidirectional recording. For each condition (Ready, Paused, Resumed, InplaceUpdate), we record both the True direction and the False direction:
+- **Condition metrics** use single-direction recording (True-direction only). For each condition (Ready, Paused, Resumed, InplaceUpdate), we record the True direction:
   - **True direction** (e.g., `sandbox_status_ready`, `sandbox_status_paused`): gauge is `1` when the condition status is True, and records the `lastTransitionTime` as a Unix timestamp.
-  - **False direction** (e.g., `sandbox_status_not_ready`, `sandbox_status_unpaused`): gauge is `1` when the condition status is False, following the `kube_pod_status_unschedulable` naming convention from kube-state-metrics.
+  - The False direction can be inferred via `metric == 0` (e.g., `sandbox_status_ready == 0` indicates not-ready), eliminating the need for separate False-direction metrics and reducing per-instance time series by ~56%.
 
-- This bidirectional approach allows computing both "time spent ready" and "time spent not-ready" without gaps, and supports alerting on either direction.
+- This single-direction approach keeps queries simple while significantly reducing metric cardinality. Alerting on the False direction uses `metric == 0` instead of a dedicated gauge.
+
+- **Source label for cross-component CRUD metrics**: CRUD duration metrics that have equivalents across Controller and Manager (e.g., sandbox creation) use `ConstLabels` to add a `source` label for explicit origin differentiation:
+  - Controller metrics use `source="k8s"` to identify the Kubernetes native controller path.
+  - Manager metrics use `source="e2b"` to identify the E2B-compatible API path.
+  - This follows the spirit of kube-state-metrics' job-based differentiation but provides a more explicit source identifier within the metric itself.
+  - Example PromQL: `histogram_quantile(0.99, sum(rate(sandbox_creation_duration_seconds_bucket[5m])) by (le, source))`
+
+- **Opt-in label metrics** follow the [kube-state-metrics](https://github.com/kubernetes/kube-state-metrics) `kube_pod_labels` pattern. The `sandbox_labels` metric is **not enabled by default** to avoid unbounded cardinality. Operators opt in by specifying which label keys to export via the `--metric-labels-allowlist` flag:
+  - Usage: `--metric-labels-allowlist=key1,key2,key3`
+  - Label keys are sanitized: non-alphanumeric characters are replaced with underscores (`_`), and each key is prefixed with `label_`.
+  - Example: `--metric-labels-allowlist=app,env,version` exports:
+    ```
+    sandbox_labels{namespace="ns",name="sbx",label_app="myapp",label_env="prod",label_version="v1"} 1
+    ```
+  - When the allowlist is empty (default), `sandbox_labels` is not registered and produces no time series.
 
 **Sandbox Phase State Machine**
 
@@ -187,7 +195,6 @@ The SandboxSet controller exposes the following metrics for each SandboxSet reso
 
 | Metric Name | Type | Labels | Description |
 |---|---|---|---|
-| `sandboxset_info` | Gauge | `namespace`, `name` | SandboxSet metadata info metric (always 1). |
 | `sandboxset_created` | Gauge | `namespace`, `name` | Unix creation timestamp of the SandboxSet. |
 | `sandboxset_replicas` | Gauge | `namespace`, `name` | Current total number of replicas (`status.replicas`), including creating, available, running, and paused sandboxes. |
 | `sandboxset_available_replicas` | Gauge | `namespace`, `name` | Number of available replicas (`status.availableReplicas`) that are ready to be claimed. |
@@ -214,7 +221,7 @@ The SandboxClaim controller exposes the following metrics for each SandboxClaim 
 |---|---|---|---|
 | `sandboxclaim_info` | Gauge | `namespace`, `name`, `template_name` | SandboxClaim metadata info metric (always 1). Includes `template_name` label identifying which SandboxSet pool is being claimed from. |
 | `sandboxclaim_created` | Gauge | `namespace`, `name` | Unix creation timestamp of the SandboxClaim. |
-| `sandboxclaim_status_phase` | Gauge | `namespace`, `name`, `phase` | Current phase of the claim. Following the same pattern as `sandbox_status_phase`, one time series per phase with gauge `1` for the active phase. |
+| `sandboxclaim_status_phase` | Gauge | `namespace`, `name`, `phase` | Current phase of the claim. Uses the same compact pattern as `sandbox_status_phase`: only the active phase is emitted with value `1`; stale phase series are deleted to reduce cardinality. |
 | `sandboxclaim_claim_start_time` | Gauge | `namespace`, `name` | Unix timestamp when the claiming process started (`status.claimStartTime`). |
 | `sandboxclaim_completion_time` | Gauge | `namespace`, `name` | Unix timestamp when the claim reached Completed phase (`status.completionTime`). |
 | `sandboxclaim_claimed_replicas` | Gauge | `namespace`, `name` | Current number of successfully claimed replicas (`status.claimedReplicas`). |
@@ -241,30 +248,30 @@ The Sandbox Manager exposes operational metrics for its REST API endpoints:
 
 | Metric Name | Type | Labels | Description |
 |---|---|---|---|
-| `sandbox_creation_latency_ms` | Histogram | — | Latency of sandbox creation operations in milliseconds. |
+| `sandbox_creation_duration_seconds` | Histogram | ConstLabels: `source="e2b"` | Duration of sandbox creation operations in seconds. |
 | `sandbox_creation_responses` | Counter | `result` | Total number of sandbox creation responses. Label `result` is `"success"` or `"failure"`. |
-| `sandbox_pause_latency_ms` | Histogram | — | Latency of sandbox pause operations in milliseconds. |
+| `sandbox_pause_duration_seconds` | Histogram | ConstLabels: `source="e2b"` | Duration of sandbox pause operations in seconds. |
 | `sandbox_pause_responses` | Counter | `result` | Total number of sandbox pause responses. |
-| `sandbox_resume_latency_ms` | Histogram | — | Latency of sandbox resume operations in milliseconds. |
+| `sandbox_resume_duration_seconds` | Histogram | ConstLabels: `source="e2b"` | Duration of sandbox resume operations in seconds. |
 | `sandbox_resume_responses` | Counter | `result` | Total number of sandbox resume responses. |
 | `sandbox_delete_responses` | Counter | `result` | Total number of sandbox delete responses. |
-| `sandbox_delete_latency_ms` | Histogram | — | Latency of sandbox delete operations in milliseconds. |
-| `sandbox_claim_duration_ms` | Histogram | — | Claim operation total latency in milliseconds. |
-| `sandbox_claim_stage_duration_ms` | Histogram | `stage` | Claim per-stage latency in milliseconds. Stages: `wait`, `retry_cost`, `pick_and_lock`, `wait_ready`, `init_runtime`, `csi_mount`. |
+| `sandbox_delete_duration_seconds` | Histogram | ConstLabels: `source="e2b"` | Duration of sandbox delete operations in seconds. |
+| `sandbox_claim_duration_seconds` | Histogram | — | Claim operation total duration in seconds. |
+| `sandbox_claim_stage_duration_seconds` | Histogram | `stage` | Claim per-stage duration in seconds. Stages: `wait`, `retry_cost`, `pick_and_lock`, `wait_ready`, `init_runtime`, `csi_mount`. |
 | `sandbox_claim_total` | Counter | `result`, `lock_type` | Total number of claim operations. Label `result` is `"success"` or `"failure"`. Label `lock_type` is `"create"`, `"update"`, `"speculate"`, or `"unknown"`. |
 | `sandbox_claim_retries` | Histogram | — | Distribution of retry counts per claim operation. |
-| `sandbox_clone_duration_ms` | Histogram | — | Clone operation total latency in milliseconds. |
-| `sandbox_clone_stage_duration_ms` | Histogram | `stage` | Clone per-stage latency in milliseconds. Stages: `wait`, `get_template`, `create_sandbox`, `wait_ready`, `init_runtime`, `csi_mount`. |
+| `sandbox_clone_duration_seconds` | Histogram | — | Clone operation total duration in seconds. |
+| `sandbox_clone_stage_duration_seconds` | Histogram | `stage` | Clone per-stage duration in seconds. Stages: `wait`, `get_template`, `create_sandbox`, `wait_ready`, `init_runtime`, `csi_mount`. |
 | `sandbox_clone_total` | Counter | `result` | Total number of clone operations. Label `result` is `"success"` or `"failure"`. |
-| `sandbox_route_sync_duration_ms` | Histogram | `type` | Route sync operation latency in milliseconds. |
+| `sandbox_route_sync_duration_seconds` | Histogram | `type` | Route sync operation duration in seconds. |
 | `sandbox_route_sync_total` | Counter | `type`, `result` | Total number of route sync operations. |
 
 **Histogram Bucket Configuration**
 
-All latency histograms use `prometheus.ExponentialBuckets(10, 2, 10)`, which generates the following bucket boundaries (in milliseconds):
+All duration histograms use `prometheus.ExponentialBuckets(0.01, 2, 10)`, which generates the following bucket boundaries (in seconds):
 
 ```
-10, 20, 40, 80, 160, 320, 640, 1280, 2560, 5120
+0.01, 0.02, 0.04, 0.08, 0.16, 0.32, 0.64, 1.28, 2.56, 5.12
 ```
 
 This covers the range from 10ms to ~5.12 seconds with exponential distribution, which is well-suited for API operations that typically complete in hundreds of milliseconds but may occasionally spike to several seconds.
@@ -290,7 +297,7 @@ The E2B Server exposes metrics for snapshot operations:
 
 | Metric Name | Type | Labels | Description |
 |---|---|---|---|
-| `sandbox_snapshot_duration_ms` | Histogram | — | Latency of snapshot creation operations in milliseconds. |
+| `sandbox_snapshot_duration_seconds` | Histogram | — | Duration of snapshot creation operations in seconds. |
 | `sandbox_snapshot_total` | Counter | `result` | Total number of snapshot operations. Label `result` is `"success"` or `"failure"`. |
 
 #### Metric Collection Architecture
@@ -375,18 +382,18 @@ rate(sandbox_creation_responses{result="success"}[5m])
 # Number of sandboxes in each phase
 count by (phase) (sandbox_status_phase == 1)
 
-# Sandbox pause operation P99 latency (milliseconds)
-histogram_quantile(0.99, rate(sandbox_pause_latency_ms_bucket[5m]))
+# Sandbox pause operation P99 latency (seconds)
+histogram_quantile(0.99, rate(sandbox_pause_duration_seconds_bucket[5m]))
 
-# Average sandbox creation latency (milliseconds, last 5m)
-rate(sandbox_creation_latency_ms_sum[5m])
-  / rate(sandbox_creation_latency_ms_count[5m])
+# Average sandbox creation duration (seconds, last 5m)
+rate(sandbox_creation_duration_seconds_sum{source="e2b"}[5m])
+  / rate(sandbox_creation_duration_seconds_count{source="e2b"}[5m])
 
 # SandboxSet rolling update progress
 sandboxset_updated_replicas / sandboxset_replicas
 
 # Sandboxes currently not ready
-count(sandbox_status_not_ready == 1)
+count(sandbox_status_ready == 0)
 
 # SandboxClaim claim fulfillment ratio
 sandboxclaim_claimed_replicas / sandboxclaim_desired_replicas
@@ -401,17 +408,17 @@ rate(sandboxclaim_claim_duration_seconds_sum[5m]) / rate(sandboxclaim_claim_dura
 rate(sandbox_resume_responses{result="failure"}[5m])
   / rate(sandbox_resume_responses[5m])
 
-# Claim wait_ready stage P99 latency (milliseconds)
-histogram_quantile(0.99, rate(sandbox_claim_stage_duration_ms_bucket{stage="wait_ready"}[5m]))
+# Claim wait_ready stage P99 duration (seconds)
+histogram_quantile(0.99, rate(sandbox_claim_stage_duration_seconds_bucket{stage="wait_ready"}[5m]))
 
-# Claim total duration P99 latency (milliseconds)
-histogram_quantile(0.99, rate(sandbox_claim_duration_ms_bucket[5m]))
+# Claim total duration P99 (seconds)
+histogram_quantile(0.99, rate(sandbox_claim_duration_seconds_bucket[5m]))
 
 # Clone failure rate (last 5m)
 rate(sandbox_clone_total{result="failure"}[5m])
 
-# Clone per-stage P99 latency (milliseconds)
-histogram_quantile(0.99, rate(sandbox_clone_stage_duration_ms_bucket[5m])) by (stage)
+# Clone per-stage P99 duration (seconds)
+histogram_quantile(0.99, rate(sandbox_clone_stage_duration_seconds_bucket[5m])) by (stage)
 
 # Current routing table size
 sandbox_routes_total
@@ -419,14 +426,14 @@ sandbox_routes_total
 # Current connected peers
 sandbox_peers_total
 
-# Route sync P99 latency (milliseconds)
-histogram_quantile(0.99, rate(sandbox_route_sync_duration_ms_bucket[5m]))
+# Route sync P99 duration (seconds)
+histogram_quantile(0.99, rate(sandbox_route_sync_duration_seconds_bucket[5m]))
 
 # Route sync failure rate (last 5m)
 rate(sandbox_route_sync_total{result="failure"}[5m])
 
-# Snapshot creation P99 latency (milliseconds)
-histogram_quantile(0.99, rate(sandbox_snapshot_duration_ms_bucket[5m]))
+# Snapshot creation P99 duration (seconds)
+histogram_quantile(0.99, rate(sandbox_snapshot_duration_seconds_bucket[5m]))
 
 # Snapshot failure rate (last 5m)
 rate(sandbox_snapshot_total{result="failure"}[5m])
@@ -435,14 +442,17 @@ rate(sandbox_snapshot_total{result="failure"}[5m])
 rate(sandbox_claim_retries_sum[5m])
   / rate(sandbox_claim_retries_count[5m])
 
-# Delete operation P99 latency (milliseconds)
-histogram_quantile(0.99, rate(sandbox_delete_latency_ms_bucket[5m]))
+# Delete operation P99 duration (seconds)
+histogram_quantile(0.99, rate(sandbox_delete_duration_seconds_bucket[5m]))
 
-# Sandbox creation-to-ready P99 latency (seconds)
-histogram_quantile(0.99, rate(sandbox_creation_to_ready_duration_seconds_bucket[5m]))
+# Sandbox creation-to-ready P99 latency (seconds, k8s source)
+histogram_quantile(0.99, rate(sandbox_creation_duration_seconds_bucket{source="k8s"}[5m]))
 
-# Sandbox creation-to-ready average latency (seconds)
-rate(sandbox_creation_to_ready_duration_seconds_sum[5m]) / rate(sandbox_creation_to_ready_duration_seconds_count[5m])
+# Sandbox creation-to-ready average latency (seconds, k8s source)
+rate(sandbox_creation_duration_seconds_sum{source="k8s"}[5m]) / rate(sandbox_creation_duration_seconds_count{source="k8s"}[5m])
+
+# Compare creation duration across sources (P99)
+histogram_quantile(0.99, sum(rate(sandbox_creation_duration_seconds_bucket[5m])) by (le, source))
 
 # InplaceUpdate P99 duration (seconds)
 histogram_quantile(0.99, rate(sandbox_inplace_update_duration_seconds_bucket[5m]))
@@ -456,17 +466,17 @@ histogram_quantile(0.99, rate(sandbox_inplace_update_duration_seconds_bucket[5m]
 
 3. **Thread safety**: All metric operations use `prometheus.GaugeVec`, `prometheus.CounterVec`, and `prometheus.Histogram` from the Prometheus client library, which are inherently concurrent-safe. The `WithLabelValues().Set()` / `.Inc()` / `.Observe()` operations use internal sync mechanisms (atomic operations and mutexes).
 
-4. **Performance characteristics**: Prometheus metric recording involves an O(1) hash map lookup to find the metric series, followed by an atomic float64 set/increment. This adds sub-microsecond overhead per metric operation. With ~21 metrics per Sandbox, ~7 per SandboxSet/SandboxClaim, ~21 for Sandbox Manager API, ~2 for Proxy, and ~2 for E2B Server, the total overhead per Reconcile is negligible (under 1μs).
+4. **Performance characteristics**: Prometheus metric recording involves an O(1) hash map lookup to find the metric series, followed by an atomic float64 set/increment. This adds sub-microsecond overhead per metric operation. With ~14 metrics per Sandbox (including opt-in `sandbox_labels`), ~6 per SandboxSet, ~7 per SandboxClaim, ~21 for Sandbox Manager API, ~2 for Proxy, and ~2 for E2B Server, the total overhead per Reconcile is negligible (under 1μs).
 
 5. **Condition timestamp semantics**: All condition timestamp metrics use `condition.LastTransitionTime.Unix()`. This timestamp updates only when the condition status changes (not on every Reconcile), which is consistent with Kubernetes API conventions and kube-state-metrics behavior.
 
-6. **Helper functions**: Two reusable helper functions — `recordConditionTrueMetric()` and `recordConditionFalseMetric()` — encapsulate the bidirectional condition recording pattern, reducing code duplication and ensuring consistent behavior across all conditions.
+6. **Helper functions**: The reusable helper function `recordConditionTrueMetric()` encapsulates the single-direction condition recording pattern, reducing code duplication and ensuring consistent behavior across all conditions.
 
 ### Risks and Mitigations
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| **Time series growth in large clusters**: Total time series count is O(N × M) where N = resource count and M = metrics per resource (~19 for Sandbox). A cluster with 10,000 sandboxes would generate ~190K time series. | Medium — may increase Prometheus memory and storage usage. | `delete*Metrics()` functions actively clean up series for deleted resources. Prometheus `--storage.tsdb.retention` can be tuned. Series count is proportional to *live* resources only. |
+| **Time series growth in large clusters**: Total time series count is O(N × M) where N = resource count and M = metrics per resource (~13 for Sandbox). A cluster with 10,000 sandboxes would generate ~130K time series. | Medium — may increase Prometheus memory and storage usage. | `delete*Metrics()` functions actively clean up series for deleted resources. Prometheus `--storage.tsdb.retention` can be tuned. Series count is proportional to *live* resources only. |
 | **Condition timestamp clock skew**: `LastTransitionTime` is set by the controller using the node's local clock. In multi-node clusters, minor clock drift is possible. | Low — timestamps are used for relative duration computation, not absolute wall-clock correlation. | Use cluster-internal NTP synchronization. This is the same approach used by kube-state-metrics and the Kubernetes API server itself. |
 | **Metric scrape overhead**: If Prometheus scrape interval is very aggressive (e.g., 1s), the `/metrics` endpoint handler may add load. | Low — controller-runtime's metric handler is lightweight. | Use the standard 15–30s scrape interval recommended by Prometheus best practices. |
 | **Label value explosion on `sandbox_info`**: The `created_by_name` label has cardinality equal to the number of distinct SandboxSets/SandboxClaims. | Low — bounded by the number of controller resources. | `DeletePartialMatch` ensures cleanup. This pattern matches `kube_pod_info`'s `created_by_name` label. |
@@ -476,7 +486,7 @@ histogram_quantile(0.99, rate(sandbox_inplace_update_duration_seconds_bucket[5m]
 - **Checkpoint Controller metrics**: Once the Checkpoint controller is fully implemented, add corresponding lifecycle metrics (phase, completion time, duration) following the same design patterns.
 - **Reconcile performance metrics**: Leverage controller-runtime's built-in `controller_runtime_reconcile_total` and `controller_runtime_reconcile_time_seconds` metrics, and consider adding custom sub-step timing.
 - **SandboxSet scale operation metrics**: Track scale-up and scale-down events with counters and latency histograms.
-- ~~**Proxy/Gateway routing metrics**~~: ✅ Implemented — `sandbox_routes_total`, `sandbox_peers_total`, `sandbox_route_sync_duration_ms`, `sandbox_route_sync_total` now expose route table size, peer topology, and route sync performance.
+- ~~**Proxy/Gateway routing metrics**~~: ✅ Implemented — `sandbox_routes_total`, `sandbox_peers_total`, `sandbox_route_sync_duration_seconds`, `sandbox_route_sync_total` now expose route table size, peer topology, and route sync performance.
 - ~~**Memberlist cluster metrics**~~: ✅ Partially implemented — `sandbox_peers_total` tracks connected peer node counts. Join/leave events and gossip sync status are deferred.
 - **Webhook admission metrics**: Record admission request counts, rejection rates, and latency for the sandbox validation/mutation webhooks.
 - **Cache hit/miss metrics**: Track sandbox-manager internal cache effectiveness for sandbox lookups.
@@ -486,8 +496,8 @@ histogram_quantile(0.99, rate(sandbox_inplace_update_duration_seconds_bucket[5m]
 
 Each metrics file has a corresponding comprehensive unit test file:
 
-- `pkg/controller/sandbox/metrics_test.go` — Tests for all 21 Sandbox metrics
-- `pkg/controller/sandboxset/metrics_test.go` — Tests for all 7 SandboxSet metrics
+- `pkg/controller/sandbox/metrics_test.go` — Tests for all 14 Sandbox metrics (including opt-in `sandbox_labels`)
+- `pkg/controller/sandboxset/metrics_test.go` — Tests for all 6 SandboxSet metrics
 - `pkg/controller/sandboxclaim/metrics_test.go` — Tests for all 7 SandboxClaim metrics
 - `pkg/sandbox-manager/metrics_test.go` — Tests for Sandbox Manager API metrics (claim, clone, delete, route sync)
 - `pkg/proxy/metrics_test.go` — Tests for Proxy route/peer topology metrics
@@ -497,9 +507,9 @@ Testing approach:
 
 1. **Exact value validation**: Uses `prometheus/client_golang/prometheus/testutil` to assert exact metric values after recording. Each test creates a resource with specific state, calls `record*Metrics()`, and verifies the expected metric output using `testutil.CollectAndCompare`.
 
-2. **Bidirectional coverage**: For Sandbox condition metrics, tests cover both True and False directions, verifying that:
-   - When condition is True: the True-direction gauge is `1`, the False-direction gauge is `0`, and the True timestamp is set.
-   - When condition is False: the False-direction gauge is `1`, the True-direction gauge is `0`, and the False timestamp is set.
+2. **True-direction coverage**: For Sandbox condition metrics, tests cover the True direction, verifying that:
+   - When condition is True: the True-direction gauge is `1` and the True timestamp is set.
+   - When condition is False: the True-direction gauge is `0`.
 
 3. **Deletion coverage**: Tests verify that `delete*Metrics()` properly removes all time series by checking that `testutil.CollectAndCount` returns `0` after deletion.
 

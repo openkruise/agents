@@ -60,15 +60,6 @@ var (
 		[]string{"namespace", "name"},
 	)
 
-	// sandboxSetInfo records metadata about a SandboxSet.
-	sandboxSetInfo = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "sandboxset_info",
-			Help: "Information about the SandboxSet",
-		},
-		[]string{"namespace", "name"},
-	)
-
 	// SandboxSetUpdatedReplicas tracks the number of updated replicas in each SandboxSet
 	SandboxSetUpdatedReplicas = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
@@ -95,7 +86,6 @@ func init() {
 		SandboxSetAvailableReplicas,
 		SandboxSetDesiredReplicas,
 		sandboxSetCreated,
-		sandboxSetInfo,
 		SandboxSetUpdatedReplicas,
 		SandboxSetUpdatedAvailableReplicas,
 	)
@@ -104,7 +94,6 @@ func init() {
 // recordSandboxSetMetrics records creation timestamp and info metrics for a SandboxSet.
 func recordSandboxSetMetrics(sbs *agentsv1alpha1.SandboxSet) {
 	sandboxSetCreated.WithLabelValues(sbs.Namespace, sbs.Name).Set(float64(sbs.CreationTimestamp.Unix()))
-	sandboxSetInfo.WithLabelValues(sbs.Namespace, sbs.Name).Set(1)
 }
 
 // deleteSandboxSetMetrics removes all metrics for a SandboxSet that has been deleted.
@@ -113,7 +102,6 @@ func deleteSandboxSetMetrics(namespace, name string) {
 	SandboxSetAvailableReplicas.DeleteLabelValues(namespace, name)
 	SandboxSetDesiredReplicas.DeleteLabelValues(namespace, name)
 	sandboxSetCreated.DeleteLabelValues(namespace, name)
-	sandboxSetInfo.DeleteLabelValues(namespace, name)
 	SandboxSetUpdatedReplicas.DeleteLabelValues(namespace, name)
 	SandboxSetUpdatedAvailableReplicas.DeleteLabelValues(namespace, name)
 }

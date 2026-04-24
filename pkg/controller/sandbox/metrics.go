@@ -83,85 +83,6 @@ var (
 		[]string{"namespace", "name"},
 	)
 
-	// sandboxStatusInplaceUpdating indicates whether the sandbox inplace update condition is False
-	// (1 when InplaceUpdate condition status is False, similar to kube_pod_status_unschedulable).
-	sandboxStatusInplaceUpdating = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "sandbox_status_inplace_updating",
-			Help: "Whether the sandbox InplaceUpdate condition is False (1 for False, 0 otherwise)",
-		},
-		[]string{"namespace", "name"},
-	)
-
-	// sandboxStatusInplaceUpdatingTime records the timestamp when InplaceUpdate condition became False,
-	// similar to kube_pod_status_unscheduled_time.
-	sandboxStatusInplaceUpdatingTime = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "sandbox_status_inplace_updating_time",
-			Help: "Unix timestamp when the sandbox InplaceUpdate condition transitioned to False",
-		},
-		[]string{"namespace", "name"},
-	)
-
-	// sandboxStatusUnpaused indicates whether the sandbox paused condition is False
-	// (1 when SandboxPaused condition status is False, similar to kube_pod_status_unschedulable).
-	sandboxStatusUnpaused = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "sandbox_status_unpaused",
-			Help: "Whether the sandbox SandboxPaused condition is False (1 for False, 0 otherwise)",
-		},
-		[]string{"namespace", "name"},
-	)
-
-	// sandboxStatusUnpausedTime records the timestamp when SandboxPaused condition became False,
-	// similar to kube_pod_status_unscheduled_time.
-	sandboxStatusUnpausedTime = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "sandbox_status_unpaused_time",
-			Help: "Unix timestamp when the sandbox SandboxPaused condition transitioned to False",
-		},
-		[]string{"namespace", "name"},
-	)
-
-	// sandboxStatusUnresumed indicates whether the sandbox resumed condition is False
-	// (1 when SandboxResumed condition status is False, similar to kube_pod_status_unschedulable).
-	sandboxStatusUnresumed = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "sandbox_status_unresumed",
-			Help: "Whether the sandbox SandboxResumed condition is False (1 for False, 0 otherwise)",
-		},
-		[]string{"namespace", "name"},
-	)
-
-	// sandboxStatusUnresumedTime records the timestamp when SandboxResumed condition became False,
-	// similar to kube_pod_status_unscheduled_time.
-	sandboxStatusUnresumedTime = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "sandbox_status_unresumed_time",
-			Help: "Unix timestamp when the sandbox SandboxResumed condition transitioned to False",
-		},
-		[]string{"namespace", "name"},
-	)
-
-	// sandboxStatusNotReady indicates whether the sandbox is in NotReady condition
-	// (1 when Ready condition status is False, 0 otherwise).
-	sandboxStatusNotReady = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "sandbox_status_not_ready",
-			Help: "Whether the sandbox Ready condition is False (1 for False, 0 otherwise)",
-		},
-		[]string{"namespace", "name"},
-	)
-
-	// sandboxStatusNotReadyTime records the timestamp when Ready condition became False.
-	sandboxStatusNotReadyTime = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "sandbox_status_not_ready_time",
-			Help: "Unix timestamp when the sandbox Ready condition transitioned to False",
-		},
-		[]string{"namespace", "name"},
-	)
-
 	// sandboxStatusPaused indicates whether the sandbox paused condition is True
 	// (1 when SandboxPaused condition status is True, 0 otherwise).
 	sandboxStatusPaused = prometheus.NewGaugeVec(
@@ -219,12 +140,13 @@ var (
 		[]string{"namespace", "name"},
 	)
 
-	// sandbox_creation_to_ready_duration_seconds
-	sandboxCreationToReadyDuration = prometheus.NewHistogram(
+	// sandbox_creation_duration_seconds tracks creation-to-ready duration with source=k8s label.
+	sandboxCreationDuration = prometheus.NewHistogram(
 		prometheus.HistogramOpts{
-			Name:    "sandbox_creation_to_ready_duration_seconds",
-			Help:    "Duration from sandbox creation to Ready condition in seconds",
-			Buckets: []float64{1, 2, 5, 10, 20, 30, 60, 120, 300, 600},
+			Name:        "sandbox_creation_duration_seconds",
+			Help:        "Duration from sandbox creation to Ready condition in seconds",
+			ConstLabels: prometheus.Labels{"source": "k8s"},
+			Buckets:     []float64{1, 2, 5, 10, 20, 30, 60, 120, 300, 600},
 		},
 	)
 
@@ -250,7 +172,7 @@ var (
 )
 
 // observedCreationToReady tracks which sandboxes have had their creation-to-ready
-// duration observed, preventing duplicate histogram observations on re-reconcile.
+// duration observed via sandboxCreationDuration, preventing duplicate histogram observations on re-reconcile.
 var observedCreationToReady sync.Map
 
 // inplaceUpdateStartTimes tracks the start time of in-place update operations
@@ -261,6 +183,13 @@ var inplaceUpdateStartTimes sync.Map
 // duration observed, preventing duplicate histogram observations.
 var observedInplaceUpdateDurations sync.Map
 
+// sandboxLabels is the opt-in metric that exposes sandbox labels as Prometheus labels,
+// controlled via --metric-labels-allowlist flag, following the kube_pod_labels pattern.
+var sandboxLabels *prometheus.GaugeVec
+
+// labelsAllowlist holds the list of sandbox label keys to expose.
+var labelsAllowlist []string
+
 func init() {
 	metrics.Registry.MustRegister(
 		sandboxCreated,
@@ -268,14 +197,6 @@ func init() {
 		sandboxStatusPhase,
 		sandboxStatusReady,
 		sandboxStatusReadyTime,
-		sandboxStatusInplaceUpdating,
-		sandboxStatusInplaceUpdatingTime,
-		sandboxStatusUnpaused,
-		sandboxStatusUnpausedTime,
-		sandboxStatusUnresumed,
-		sandboxStatusUnresumedTime,
-		sandboxStatusNotReady,
-		sandboxStatusNotReadyTime,
 		sandboxStatusPaused,
 		sandboxStatusPausedTime,
 		sandboxStatusResumed,
@@ -283,9 +204,47 @@ func init() {
 		sandboxStatusInplaceUpdateDone,
 		sandboxStatusInplaceUpdateDoneTime,
 		sandboxInfo,
-		sandboxCreationToReadyDuration,
+		sandboxCreationDuration,
 		sandboxInplaceUpdateDuration,
 	)
+}
+
+// InitSandboxLabelsMetric initializes the sandbox_labels metric with the given
+// label allowlist, following the kube_pod_labels pattern from kube-state-metrics.
+// It must be called before the controller starts if opt-in labels are desired.
+func InitSandboxLabelsMetric(allowlist []string) {
+	if len(allowlist) == 0 {
+		return
+	}
+	labelsAllowlist = allowlist
+	promLabels := []string{"namespace", "name"}
+	for _, key := range allowlist {
+		promLabels = append(promLabels, sanitizeLabelName("label_"+key))
+	}
+	sandboxLabels = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "sandbox_labels",
+			Help: "Sandbox labels converted to Prometheus labels controlled via --metric-labels-allowlist",
+		},
+		promLabels,
+	)
+	metrics.Registry.MustRegister(sandboxLabels)
+}
+
+// sanitizeLabelName converts a Kubernetes label key to a valid Prometheus label name
+// by replacing non-alphanumeric characters (except underscores) with underscores.
+// For example, "app.kubernetes.io/name" becomes "label_app_kubernetes_io_name".
+func sanitizeLabelName(name string) string {
+	result := make([]byte, len(name))
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' {
+			result[i] = c
+		} else {
+			result[i] = '_'
+		}
+	}
+	return string(result)
 }
 
 // boolFloat64 converts a boolean to a float64 value (1.0 for true, 0.0 for false),
@@ -295,18 +254,6 @@ func boolFloat64(b bool) float64 {
 		return 1
 	}
 	return 0
-}
-
-// recordConditionFalseMetric records a pair of condition metrics following the kube-state-metrics pattern:
-// the status gauge is set to 1 when the condition is False, 0 otherwise;
-// the time gauge records the transition timestamp when the condition is False.
-func recordConditionFalseMetric(condition metav1.Condition, statusGauge, timeGauge *prometheus.GaugeVec, namespace, name string) {
-	if condition.Status == metav1.ConditionFalse {
-		statusGauge.WithLabelValues(namespace, name).Set(1)
-		timeGauge.WithLabelValues(namespace, name).Set(float64(condition.LastTransitionTime.Unix()))
-	} else {
-		statusGauge.WithLabelValues(namespace, name).Set(0)
-	}
 }
 
 // recordConditionTrueMetric records a pair of condition metrics following the kube-state-metrics pattern:
@@ -342,13 +289,15 @@ func recordSandboxMetrics(sandbox *agentsv1alpha1.Sandbox) {
 		sandboxDeletionTimestamp.WithLabelValues(namespace, name).Set(float64(sandbox.DeletionTimestamp.Unix()))
 	}
 
-	// sandbox_status_phase: following kube_pod_status_phase pattern,
-	// skip if phase is empty, otherwise set 1 for current phase and 0 for all others.
+	// sandbox_status_phase: Only emit the current phase (value=1), delete stale phase series to reduce cardinality.
 	currentPhase := sandbox.Status.Phase
 	if currentPhase != "" {
 		for _, p := range allPhases {
-			sandboxStatusPhase.WithLabelValues(namespace, name, string(p)).Set(boolFloat64(currentPhase == p))
+			if p != currentPhase {
+				sandboxStatusPhase.DeleteLabelValues(namespace, name, string(p))
+			}
 		}
+		sandboxStatusPhase.WithLabelValues(namespace, name, string(currentPhase)).Set(1)
 	}
 
 	// Process conditions
@@ -360,19 +309,16 @@ func recordSandboxMetrics(sandbox *agentsv1alpha1.Sandbox) {
 			if isReady {
 				sandboxStatusReadyTime.WithLabelValues(namespace, name).Set(float64(condition.LastTransitionTime.Unix()))
 			}
-			recordConditionFalseMetric(condition, sandboxStatusNotReady, sandboxStatusNotReadyTime, namespace, name)
-
 			// Observe creation-to-ready duration histogram (once per sandbox)
 			if isReady {
 				key := namespace + "/" + name
 				if _, loaded := observedCreationToReady.LoadOrStore(key, true); !loaded {
 					duration := condition.LastTransitionTime.Sub(sandbox.CreationTimestamp.Time)
-					sandboxCreationToReadyDuration.Observe(duration.Seconds())
+					sandboxCreationDuration.Observe(duration.Seconds())
 				}
 			}
 
 		case agentsv1alpha1.SandboxConditionInplaceUpdate:
-			recordConditionFalseMetric(condition, sandboxStatusInplaceUpdating, sandboxStatusInplaceUpdatingTime, namespace, name)
 			recordConditionTrueMetric(condition, sandboxStatusInplaceUpdateDone, sandboxStatusInplaceUpdateDoneTime, namespace, name)
 
 			key := namespace + "/" + name
@@ -390,13 +336,20 @@ func recordSandboxMetrics(sandbox *agentsv1alpha1.Sandbox) {
 			}
 
 		case agentsv1alpha1.SandboxConditionPaused:
-			recordConditionFalseMetric(condition, sandboxStatusUnpaused, sandboxStatusUnpausedTime, namespace, name)
 			recordConditionTrueMetric(condition, sandboxStatusPaused, sandboxStatusPausedTime, namespace, name)
 
 		case agentsv1alpha1.SandboxConditionResumed:
-			recordConditionFalseMetric(condition, sandboxStatusUnresumed, sandboxStatusUnresumedTime, namespace, name)
 			recordConditionTrueMetric(condition, sandboxStatusResumed, sandboxStatusResumedTime, namespace, name)
 		}
+	}
+
+	// sandbox_labels: opt-in metric controlled via --metric-labels-allowlist
+	if sandboxLabels != nil {
+		labelValues := []string{namespace, name}
+		for _, key := range labelsAllowlist {
+			labelValues = append(labelValues, sandbox.Labels[key])
+		}
+		sandboxLabels.WithLabelValues(labelValues...).Set(1)
 	}
 }
 
@@ -410,20 +363,16 @@ func deleteSandboxMetrics(namespace, name string) {
 	}
 	sandboxStatusReady.DeleteLabelValues(namespace, name)
 	sandboxStatusReadyTime.DeleteLabelValues(namespace, name)
-	sandboxStatusInplaceUpdating.DeleteLabelValues(namespace, name)
-	sandboxStatusInplaceUpdatingTime.DeleteLabelValues(namespace, name)
-	sandboxStatusUnpaused.DeleteLabelValues(namespace, name)
-	sandboxStatusUnpausedTime.DeleteLabelValues(namespace, name)
-	sandboxStatusUnresumed.DeleteLabelValues(namespace, name)
-	sandboxStatusUnresumedTime.DeleteLabelValues(namespace, name)
-	sandboxStatusNotReady.DeleteLabelValues(namespace, name)
-	sandboxStatusNotReadyTime.DeleteLabelValues(namespace, name)
 	sandboxStatusPaused.DeleteLabelValues(namespace, name)
 	sandboxStatusPausedTime.DeleteLabelValues(namespace, name)
 	sandboxStatusResumed.DeleteLabelValues(namespace, name)
 	sandboxStatusResumedTime.DeleteLabelValues(namespace, name)
 	sandboxStatusInplaceUpdateDone.DeleteLabelValues(namespace, name)
 	sandboxStatusInplaceUpdateDoneTime.DeleteLabelValues(namespace, name)
+
+	if sandboxLabels != nil {
+		sandboxLabels.DeletePartialMatch(prometheus.Labels{"namespace": namespace, "name": name})
+	}
 
 	key := namespace + "/" + name
 	observedCreationToReady.Delete(key)

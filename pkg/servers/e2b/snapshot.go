@@ -48,7 +48,7 @@ func (sc *Controller) CreateSnapshot(r *http.Request) (web.ApiResponse[*models.S
 			Message: err.Error(),
 		}
 	}
-	SnapshotDuration.Observe(float64(time.Since(start).Milliseconds()))
+	SnapshotDuration.Observe(time.Since(start).Seconds())
 	SnapshotTotal.WithLabelValues("success").Inc()
 	return web.ApiResponse[*models.Snapshot]{
 		Code: http.StatusCreated,
