@@ -10,7 +10,7 @@ spec:
   type: ClusterIP
   ports:
     - port: 7788
-      targetPort: 10000
+      targetPort: 7788
       protocol: TCP
       name: http
   selector:

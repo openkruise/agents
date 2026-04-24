@@ -58,18 +58,21 @@ spec:
               value: "component=sandbox-manager"
           ports:
             - name: http
-              containerPort: 10000
+              containerPort: 7788
+              protocol: TCP
+            - name: metrics
+              containerPort: 9090
               protocol: TCP
           livenessProbe:
             tcpSocket:
-              port: 10000
+              port: 7788
             initialDelaySeconds: 10
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 3
           readinessProbe:
             tcpSocket:
-              port: 10000
+              port: 7788
             initialDelaySeconds: 5
             periodSeconds: 5
             timeoutSeconds: 3
