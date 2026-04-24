@@ -324,7 +324,7 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 	}
 	if len(claim.Spec.DynamicVolumesMount) > 0 {
 		csiMountOptions := make([]config.MountConfig, 0, len(claim.Spec.DynamicVolumesMount))
-		csiClient := csiutils.NewCSIMountHandler(c.cache, c.storageRegistry, utils.DefaultSandboxDeployNamespace)
+		csiClient := csiutils.NewCSIMountHandler(c.cache.GetClient(), c.cache.GetAPIReader(), c.storageRegistry, utils.DefaultSandboxDeployNamespace)
 		for _, mountConfig := range claim.Spec.DynamicVolumesMount {
 			driverName, csiReqConfigRaw, genErr := csiClient.CSIMountOptionsConfig(ctx, mountConfig)
 			if genErr != nil {

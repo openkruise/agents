@@ -26,7 +26,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -39,7 +38,6 @@ import (
 	"github.com/openkruise/agents/pkg/cache/controllers"
 	cacheutils "github.com/openkruise/agents/pkg/cache/utils"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
-	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/sandboxutils"
 )
 
@@ -74,149 +72,6 @@ func newTestCacheLocal(t *testing.T, objs ...ctrlclient.Object) (*Cache, ctrlcli
 	}
 	mgr.SetWaitHooks(c.GetWaitHooks())
 	return c, fakeClient, nil
-}
-
-// --- Get method tests ---
-
-func TestCache_GetPersistentVolume(t *testing.T) {
-	pv := &corev1.PersistentVolume{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-pv"},
-		Spec: corev1.PersistentVolumeSpec{
-			Capacity: corev1.ResourceList{
-				corev1.ResourceStorage: resource.MustParse("10Gi"),
-			},
-			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-			PersistentVolumeSource: corev1.PersistentVolumeSource{
-				HostPath: &corev1.HostPathVolumeSource{Path: "/tmp/test-pv"},
-			},
-		},
-	}
-
-	t.Run("existing PV", func(t *testing.T) {
-		c, _, err := newTestCacheLocal(t, pv)
-		require.NoError(t, err)
-		got, err := c.GetPersistentVolume(t.Context(), "test-pv")
-		require.NoError(t, err)
-		require.NotNil(t, got)
-		assert.Equal(t, "test-pv", got.Name)
-		assert.Equal(t, pv.Spec.Capacity, got.Spec.Capacity)
-	})
-
-	t.Run("non-existing PV", func(t *testing.T) {
-		c, _, err := newTestCacheLocal(t, pv)
-		require.NoError(t, err)
-		got, err := c.GetPersistentVolume(t.Context(), "non-existing-pv")
-		require.Error(t, err)
-		assert.Nil(t, got)
-		assert.Contains(t, err.Error(), "not found in cache")
-	})
-}
-
-func TestCache_GetPersistentVolume_FromSync(t *testing.T) {
-	c, fc, err := newTestCacheLocal(t)
-	require.NoError(t, err)
-
-	// PV not there yet
-	_, err = c.GetPersistentVolume(t.Context(), "test-pv-sync")
-	require.Error(t, err)
-
-	// Create PV via fake client
-	testPV := &corev1.PersistentVolume{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-pv-sync"},
-		Spec: corev1.PersistentVolumeSpec{
-			Capacity: corev1.ResourceList{
-				corev1.ResourceStorage: resource.MustParse("10Gi"),
-			},
-			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-			PersistentVolumeSource: corev1.PersistentVolumeSource{
-				HostPath: &corev1.HostPathVolumeSource{Path: "/tmp/test-pv"},
-			},
-		},
-	}
-	require.NoError(t, fc.Create(t.Context(), testPV))
-
-	// Now it should be found
-	got, err := c.GetPersistentVolume(t.Context(), "test-pv-sync")
-	require.NoError(t, err)
-	require.NotNil(t, got)
-	assert.Equal(t, "test-pv-sync", got.Name)
-	assert.Equal(t, testPV.Spec.Capacity, got.Spec.Capacity)
-}
-
-func TestCache_GetSecret_FromSync(t *testing.T) {
-	c, fc, err := newTestCacheLocal(t)
-	require.NoError(t, err)
-
-	ns := utils.DefaultSandboxDeployNamespace
-
-	// Not found initially
-	_, err = c.GetSecret(t.Context(), ns, "test-secret")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "not found in cache")
-
-	// Create secret
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-secret", Namespace: ns},
-		Data:       map[string][]byte{"username": []byte("admin"), "password": []byte("pass123")},
-		Type:       corev1.SecretTypeOpaque,
-	}
-	require.NoError(t, fc.Create(t.Context(), secret))
-
-	got, err := c.GetSecret(t.Context(), ns, "test-secret")
-	require.NoError(t, err)
-	require.NotNil(t, got)
-	assert.Equal(t, "test-secret", got.Name)
-	assert.Equal(t, ns, got.Namespace)
-	assert.Equal(t, secret.Data, got.Data)
-	assert.Equal(t, secret.Type, got.Type)
-}
-
-func TestCache_GetConfigmap_FromSync(t *testing.T) {
-	c, fc, err := newTestCacheLocal(t)
-	require.NoError(t, err)
-
-	ns := utils.DefaultSandboxDeployNamespace
-
-	// Not found returns (nil, nil)
-	got, err := c.GetConfigmap(t.Context(), ns, "test-cm")
-	require.NoError(t, err)
-	assert.Nil(t, got)
-
-	// Create configmap
-	cm := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-cm", Namespace: ns},
-		Data:       map[string]string{"key1": "value1", "key2": "value2"},
-	}
-	require.NoError(t, fc.Create(t.Context(), cm))
-
-	got, err = c.GetConfigmap(t.Context(), ns, "test-cm")
-	require.NoError(t, err)
-	require.NotNil(t, got)
-	assert.Equal(t, "test-cm", got.Name)
-	assert.Equal(t, cm.Data, got.Data)
-}
-
-func TestCache_GetSandboxTemplate(t *testing.T) {
-	tmpl := &agentsv1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "my-tmpl", Namespace: "default"},
-	}
-
-	t.Run("existing template", func(t *testing.T) {
-		c, _, err := newTestCacheLocal(t, tmpl)
-		require.NoError(t, err)
-		got, err := c.GetSandboxTemplate(t.Context(), "default", "my-tmpl")
-		require.NoError(t, err)
-		require.NotNil(t, got)
-		assert.Equal(t, "my-tmpl", got.Name)
-	})
-
-	t.Run("not found", func(t *testing.T) {
-		c, _, err := newTestCacheLocal(t)
-		require.NoError(t, err)
-		_, err = c.GetSandboxTemplate(t.Context(), "default", "no-tmpl")
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "not found in cache")
-	})
 }
 
 // --- Index query tests ---
@@ -431,21 +286,6 @@ func TestCache_ListSandboxesInPool(t *testing.T) {
 	list, err = c.ListSandboxesInPool(t.Context(), "tmpl-nonexistent")
 	require.NoError(t, err)
 	assert.Len(t, list, 0)
-}
-
-func TestCache_ListAllSandboxes(t *testing.T) {
-	sbx1 := &agentsv1alpha1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{Name: "all-1", Namespace: "default"},
-	}
-	sbx2 := &agentsv1alpha1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{Name: "all-2", Namespace: "default"},
-	}
-
-	c, _, err := newTestCacheLocal(t, sbx1, sbx2)
-	require.NoError(t, err)
-
-	list := c.ListAllSandboxes(t.Context())
-	assert.Len(t, list, 2)
 }
 
 // --- Wait tests ---

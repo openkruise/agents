@@ -382,9 +382,13 @@ func (i *Infra) reconcileRoutes(ctx context.Context) {
 	// Build set of existing sandbox IDs from cache
 	existingSandboxIDs := make(map[string]struct{})
 
-	sandboxList := i.Cache.ListAllSandboxes(ctx)
-	for _, sbx := range sandboxList {
-		sandboxID := stateutils.GetSandboxID(sbx)
+	sandboxList := &v1alpha1.SandboxList{}
+	if err := i.Cache.GetClient().List(ctx, sandboxList); err != nil {
+		log.Error(err, "failed to list sandboxes from cache")
+		return
+	}
+	for idx := range sandboxList.Items {
+		sandboxID := stateutils.GetSandboxID(&sandboxList.Items[idx])
 		existingSandboxIDs[sandboxID] = struct{}{}
 	}
 
@@ -404,7 +408,8 @@ func (i *Infra) reconcileRoutes(ctx context.Context) {
 
 	// Add missing routes for sandboxes that don't have a route yet
 	addedCount := 0
-	for _, sbx := range sandboxList {
+	for idx := range sandboxList.Items {
+		sbx := &sandboxList.Items[idx]
 		sandboxID := stateutils.GetSandboxID(sbx)
 		if _, hasRoute := i.Proxy.LoadRoute(sandboxID); !hasRoute {
 			route := proxyutils.DefaultGetRouteFunc(sbx)

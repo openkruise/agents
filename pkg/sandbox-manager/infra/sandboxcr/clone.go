@@ -155,17 +155,13 @@ func findCheckpointAndTemplateById(ctx context.Context, opts infra.CloneSandboxO
 	}
 
 	// Try to get template from cache first
-	template, err := cache.GetSandboxTemplate(ctx, checkpoint.Namespace, checkpoint.Name)
+
+	key := client.ObjectKey{Namespace: checkpoint.Namespace, Name: checkpoint.Name}
+	template := &v1alpha1.SandboxTemplate{}
+	err = utils.GetFromInformerOrApiServer(ctx, template, key, cache.GetClient(), cache.GetAPIReader())
 	if err != nil {
-		log.Info("template not found in cache, trying API server", "namespace", checkpoint.Namespace, "name", checkpoint.Name, "error", err)
-		// Fallback to API server
-		template = &v1alpha1.SandboxTemplate{}
-		c := cache.GetAPIReader()
-		err = c.Get(ctx, client.ObjectKey{Namespace: checkpoint.Namespace, Name: checkpoint.Name}, template)
-		if err != nil {
-			log.Error(err, "failed to get sandbox template from API server", "namespace", checkpoint.Namespace, "name", checkpoint.Name)
-			return nil, nil, metrics, err
-		}
+		log.Error(err, "failed to get sandbox template", "key", key)
+		return nil, nil, metrics, err
 	}
 
 	metrics.GetTemplate = time.Since(start)

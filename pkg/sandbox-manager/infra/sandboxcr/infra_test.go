@@ -568,12 +568,6 @@ func TestInfra_CloneSandbox(t *testing.T) {
 	err := fc.Create(t.Context(), sbt)
 	require.NoError(t, err)
 
-	// Wait for SandboxTemplate to be cached
-	require.Eventually(t, func() bool {
-		_, err := infraInstance.Cache.GetSandboxTemplate(t.Context(), "default", checkpointID)
-		return err == nil
-	}, time.Second, 10*time.Millisecond)
-
 	// Create Checkpoint with same name as SandboxTemplate
 	cp := &v1alpha1.Checkpoint{
 		ObjectMeta: metav1.ObjectMeta{
@@ -945,17 +939,6 @@ func TestInfra_DeleteCheckpoint(t *testing.T) {
 				cp.Status.CheckpointId = tt.checkpointID
 
 				require.NoError(t, c.Status().Update(ctx, cp))
-
-				// Wait for informer sync
-				require.Eventually(t, func() bool {
-					_, err := infraInstance.Cache.GetCheckpoint(t.Context(), tt.checkpointID)
-					return err == nil
-				}, time.Second, 10*time.Millisecond)
-
-				require.Eventually(t, func() bool {
-					_, err := infraInstance.Cache.GetSandboxTemplate(t.Context(), namespace, tt.checkpointID)
-					return err == nil
-				}, time.Second, 10*time.Millisecond)
 			}
 
 			// Set up decorator mocks

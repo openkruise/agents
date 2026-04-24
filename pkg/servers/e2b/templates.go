@@ -22,6 +22,7 @@ import (
 	"net/http"
 
 	"k8s.io/klog/v2"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	infracache "github.com/openkruise/agents/pkg/cache"
@@ -56,8 +57,12 @@ func (sc *Controller) ListTemplates(r *http.Request) (web.ApiResponse[[]*models.
 
 	// Get all SandboxSets from cache using informer
 	// If namespace is not specified, list SandboxSets from all namespace
-	templates, err := cache.ListSandboxSets(r.Context(), namespace)
-	if err != nil {
+	list := &agentsv1alpha1.SandboxSetList{}
+	var opts []ctrlclient.ListOption
+	if namespace != "" {
+		opts = append(opts, ctrlclient.InNamespace(namespace))
+	}
+	if err := cache.GetClient().List(r.Context(), list, opts...); err != nil {
 		return web.ApiResponse[[]*models.TemplateInfo]{}, &web.ApiError{
 			Code:    http.StatusInternalServerError,
 			Message: fmt.Sprintf("Failed to list templates: %v", err),
@@ -65,9 +70,9 @@ func (sc *Controller) ListTemplates(r *http.Request) (web.ApiResponse[[]*models.
 	}
 
 	// Convert to E2B format
-	e2bTemplates := make([]*models.TemplateInfo, 0, len(templates))
-	for _, tmpl := range templates {
-		e2bTemplate := sc.convertToTemplateInfo(tmpl)
+	e2bTemplates := make([]*models.TemplateInfo, 0, len(list.Items))
+	for i := range list.Items {
+		e2bTemplate := sc.convertToTemplateInfo(&list.Items[i])
 		e2bTemplates = append(e2bTemplates, e2bTemplate)
 	}
 	return web.ApiResponse[[]*models.TemplateInfo]{
@@ -159,15 +164,15 @@ func (sc *Controller) DeleteTemplate(r *http.Request) (web.ApiResponse[struct{}]
 // getSandboxSetFromCache gets a SandboxSet from cache using informer
 func (sc *Controller) getSandboxSetFromCache(ctx context.Context, templateID string, cache infracache.Provider) (*agentsv1alpha1.SandboxSet, error) {
 	// Get all SandboxSets from cache
-	templates, err := cache.ListSandboxSets(ctx, "")
-	if err != nil {
+	list := &agentsv1alpha1.SandboxSetList{}
+	if err := cache.GetClient().List(ctx, list); err != nil {
 		return nil, fmt.Errorf("failed to list sandboxsets: %w", err)
 	}
 
 	// Find the specific SandboxSet by name
-	for _, tmpl := range templates {
-		if tmpl.Name == templateID {
-			return tmpl, nil
+	for i := range list.Items {
+		if list.Items[i].Name == templateID {
+			return &list.Items[i], nil
 		}
 	}
 

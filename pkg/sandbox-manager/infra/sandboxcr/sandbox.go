@@ -330,7 +330,7 @@ func (s *Sandbox) Resume(ctx context.Context) error {
 	if len(csiMountConfigRequests) != 0 {
 		log.Info("will re-mount csi storage after resume")
 		startTime := time.Now()
-		csiClient := csimountutils.NewCSIMountHandler(s.Cache, s.storageRegistry, utils.DefaultSandboxDeployNamespace)
+		csiClient := csimountutils.NewCSIMountHandler(s.Cache.GetClient(), s.Cache.GetAPIReader(), s.storageRegistry, utils.DefaultSandboxDeployNamespace)
 		mountConfigs, resolveErr := resolveCSIMountConfigs(postCtx, csiClient, csiMountConfigRequests)
 		if resolveErr != nil {
 			return resolveErr

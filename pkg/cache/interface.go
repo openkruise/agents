@@ -20,7 +20,6 @@ import (
 	"context"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
@@ -36,19 +35,6 @@ import (
 // live API calls. Run must be called once to start the underlying informers and wait for the
 // initial sync before any other method is used.
 type Provider interface {
-	// GetPersistentVolume looks up a cluster-scoped PersistentVolume by its Kubernetes name.
-	// Returns an error if the PV does not exist in the cache or the cache lookup fails.
-	GetPersistentVolume(ctx context.Context, name string) (*corev1.PersistentVolume, error)
-
-	// GetSecret looks up a namespaced Secret by namespace and name.
-	// Returns an error if the Secret does not exist in the cache or the lookup fails.
-	GetSecret(ctx context.Context, namespace, name string) (*corev1.Secret, error)
-
-	// GetConfigmap looks up a namespaced ConfigMap by namespace and name.
-	// Unlike other Get methods, it returns (nil, nil) when the ConfigMap does not exist,
-	// so callers must perform a nil check on the returned object before using it.
-	GetConfigmap(ctx context.Context, namespace, name string) (*corev1.ConfigMap, error)
-
 	// GetClaimedSandbox retrieves the Sandbox CRD object for an already-claimed sandbox,
 	// identified by its logical sandbox ID (the value of the sandbox-id label/annotation),
 	// not the Kubernetes resource name.
@@ -65,12 +51,6 @@ type Provider interface {
 	// A SandboxSet represents a pool of pre-warmed, idle sandboxes backed by a specific template.
 	// Returns an error if no SandboxSet with that name exists in the cache.
 	PickSandboxSet(ctx context.Context, name string) (*agentsv1alpha1.SandboxSet, error)
-
-	// GetSandboxTemplate retrieves the SandboxTemplate CRD object by namespace and name.
-	// A SandboxTemplate holds a reusable pod spec (image, resources, volumes, etc.) referenced
-	// by Sandboxes and SandboxSets via TemplateRef.
-	// Returns an error if the template is not found in the cache.
-	GetSandboxTemplate(ctx context.Context, namespace, name string) (*agentsv1alpha1.SandboxTemplate, error)
 
 	// ListSandboxWithUser returns all Sandbox CRD objects owned by the given user.
 	// Ownership is determined by the AnnotationOwner annotation on the Sandbox resource.
@@ -89,12 +69,6 @@ type Provider interface {
 	// the set of idle, claimable sandboxes for a given template.
 	// Concurrent calls with the same pool name are deduplicated via singleflight.
 	ListSandboxesInPool(ctx context.Context, pool string) ([]*agentsv1alpha1.Sandbox, error)
-
-	// ListAllSandboxes returns every Sandbox CRD object currently held in the informer store,
-	// regardless of state, owner, or template. The returned slice is a snapshot at call time.
-	// Used for global views such as metrics collection, debug endpoints, or bulk reconciliation.
-	ListAllSandboxes(ctx context.Context) []*agentsv1alpha1.Sandbox
-	ListSandboxSets(ctx context.Context, namespace string) ([]*agentsv1alpha1.SandboxSet, error)
 
 	// WaitForSandboxSatisfied blocks until the given Sandbox satisfies the condition defined by
 	// satisfiedFunc, or until the timeout elapses (or ctx is canceled).

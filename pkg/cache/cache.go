@@ -206,58 +206,6 @@ func (c *Cache) Stop(ctx context.Context) {
 	log.V(consts.DebugLogLevel).Info("Cache stopped")
 }
 
-// GetPersistentVolume looks up a cluster-scoped PersistentVolume by name.
-func (c *Cache) GetPersistentVolume(ctx context.Context, name string) (*corev1.PersistentVolume, error) {
-	pv := &corev1.PersistentVolume{}
-	err := c.client.Get(ctx, types.NamespacedName{Name: name}, pv)
-	if err != nil {
-		if errors.IsNotFound(err) {
-			return nil, fmt.Errorf("persistentvolume %s not found in cache", name)
-		}
-		return nil, fmt.Errorf("failed to get persistentvolume %s from cache: %w", name, err)
-	}
-	return pv, nil
-}
-
-// GetSecret looks up a namespaced Secret by namespace and name.
-func (c *Cache) GetSecret(ctx context.Context, namespace, name string) (*corev1.Secret, error) {
-	secret := &corev1.Secret{}
-	err := c.client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, secret)
-	if err != nil {
-		if errors.IsNotFound(err) {
-			return nil, fmt.Errorf("secret %s/%s not found in cache", namespace, name)
-		}
-		return nil, fmt.Errorf("failed to get secret %s/%s from cache: %w", namespace, name, err)
-	}
-	return secret, nil
-}
-
-// GetConfigmap looks up a namespaced ConfigMap. Returns (nil, nil) when not found.
-func (c *Cache) GetConfigmap(ctx context.Context, namespace, name string) (*corev1.ConfigMap, error) {
-	cm := &corev1.ConfigMap{}
-	err := c.client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, cm)
-	if err != nil {
-		if errors.IsNotFound(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("failed to get configmap %s/%s from cache: %v", namespace, name, err)
-	}
-	return cm, nil
-}
-
-// GetSandboxTemplate retrieves a SandboxTemplate by namespace and name.
-func (c *Cache) GetSandboxTemplate(ctx context.Context, namespace, name string) (*agentsv1alpha1.SandboxTemplate, error) {
-	tmpl := &agentsv1alpha1.SandboxTemplate{}
-	err := c.client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, tmpl)
-	if err != nil {
-		if errors.IsNotFound(err) {
-			return nil, fmt.Errorf("sandboxtemplate %s/%s not found in cache", namespace, name)
-		}
-		return nil, fmt.Errorf("failed to get sandboxtemplate %s/%s from cache: %w", namespace, name, err)
-	}
-	return tmpl, nil
-}
-
 // GetClaimedSandbox retrieves a sandbox by its logical sandbox ID.
 func (c *Cache) GetClaimedSandbox(ctx context.Context, sandboxID string) (*agentsv1alpha1.Sandbox, error) {
 	resultVal, err, _ := c.indexGetGroup.Do("claimed-sandbox:"+sandboxID, func() (any, error) {
@@ -366,35 +314,6 @@ func (c *Cache) ListSandboxesInPool(ctx context.Context, pool string) ([]*agents
 		return nil, err
 	}
 	return resultVal.([]*agentsv1alpha1.Sandbox), nil
-}
-
-// ListAllSandboxes returns all sandboxes in the cache.
-func (c *Cache) ListAllSandboxes(ctx context.Context) []*agentsv1alpha1.Sandbox {
-	list := &agentsv1alpha1.SandboxList{}
-	if err := c.client.List(ctx, list); err != nil {
-		return nil
-	}
-	result := make([]*agentsv1alpha1.Sandbox, 0, len(list.Items))
-	for i := range list.Items {
-		result = append(result, &list.Items[i])
-	}
-	return result
-}
-
-func (c *Cache) ListSandboxSets(ctx context.Context, namespace string) ([]*agentsv1alpha1.SandboxSet, error) {
-	list := &agentsv1alpha1.SandboxSetList{}
-	var opts []ctrlclient.ListOption
-	if namespace != "" {
-		opts = append(opts, ctrlclient.InNamespace(namespace))
-	}
-	if err := c.client.List(ctx, list, opts...); err != nil {
-		return nil, err
-	}
-	result := make([]*agentsv1alpha1.SandboxSet, 0, len(list.Items))
-	for i := range list.Items {
-		result = append(result, &list.Items[i])
-	}
-	return result, nil
 }
 
 // WaitForSandboxSatisfied blocks until the sandbox satisfies the condition.

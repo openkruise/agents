@@ -603,12 +603,6 @@ func TestCloneSandbox(t *testing.T) {
 			}
 			require.NoError(t, fc.Create(t.Context(), sbt))
 
-			// Wait for SandboxTemplate to be cached
-			require.Eventually(t, func() bool {
-				_, err := cache.GetSandboxTemplate(t.Context(), "default", checkpointID)
-				return err == nil
-			}, time.Minute, 10*time.Millisecond)
-
 			// Create Checkpoint with same name as SandboxTemplate
 			if tt.opts.CheckPointID != "non-existent-checkpoint" && tt.name != "checkpoint without template label" && tt.name != "template not found" {
 				cp := &v1alpha1.Checkpoint{

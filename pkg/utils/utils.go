@@ -27,12 +27,15 @@ import (
 	"sync"
 
 	"github.com/golang/protobuf/proto"
+	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/util/retry"
+	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
@@ -275,4 +278,15 @@ func IsLoopbackIP(ip string) bool {
 		return false
 	}
 	return ipNet.IsLoopback()
+}
+
+func GetFromInformerOrApiServer[T client.Object](ctx context.Context, target T, key client.ObjectKey,
+	client client.Client, apiReader client.Reader) error {
+	err := client.Get(ctx, key, target)
+	if errors.IsNotFound(err) {
+		klog.FromContext(ctx).V(consts.DebugLogLevel).
+			Info("failed to get object from informer, try to fetch from api server", "key", key)
+		err = apiReader.Get(ctx, key, target)
+	}
+	return err
 }

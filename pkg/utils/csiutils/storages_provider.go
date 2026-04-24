@@ -27,49 +27,40 @@ import (
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/golang/protobuf/proto"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
-	"github.com/openkruise/agents/pkg/cache"
-	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/utils"
 )
 
 type CSIMountHandler struct {
-	cache           cache.Provider
+	client          ctrlclient.Client
+	apiReader       ctrlclient.Reader
 	storageRegistry storages.VolumeMountProviderRegistry
 	systemNamespace string
 }
 
-func NewCSIMountHandler(cache cache.Provider, storageRegistry storages.VolumeMountProviderRegistry, systemNamespace string) *CSIMountHandler {
+func NewCSIMountHandler(client ctrlclient.Client, apiReader ctrlclient.Reader, storageRegistry storages.VolumeMountProviderRegistry, systemNamespace string) *CSIMountHandler {
 	return &CSIMountHandler{
-		cache:           cache,
+		client:          client,
+		apiReader:       apiReader,
 		storageRegistry: storageRegistry,
 		systemNamespace: systemNamespace,
 	}
 }
 
 func (h *CSIMountHandler) GenerateNodePublishVolumeRequest(ctx context.Context, mountRequest v1alpha1.CSIMountConfig) (string, *csi.NodePublishVolumeRequest, error) {
-	log := klog.FromContext(ctx)
 	if mountRequest.PvName == "" {
 		return "", nil, fmt.Errorf("no found persistent volume name")
 	}
 	// There are potential scenarios, such as incomplete cache synchronization,
 	// where implementing a resilience or fault-tolerance mechanism can help mitigate spurious errors and improve system robustness.
-	persistentVolumeObj, err := h.cache.GetPersistentVolume(ctx, mountRequest.PvName)
+	persistentVolumeObj := &corev1.PersistentVolume{}
+	err := utils.GetFromInformerOrApiServer(ctx, persistentVolumeObj, ctrlclient.ObjectKey{Name: mountRequest.PvName}, h.client, h.apiReader)
 	if err != nil {
-		log.V(consts.DebugLogLevel).Info("failed to get persistent volume object by name using cache method",
-			"pvName", mountRequest.PvName, "err", err)
-		persistentVolumeObj = &corev1.PersistentVolume{}
-		err = h.cache.GetAPIReader().Get(ctx, types.NamespacedName{Name: mountRequest.PvName}, persistentVolumeObj)
-		if err != nil {
-			return "", nil, fmt.Errorf("failed to get persistent volume object by name: %s, err: %v", mountRequest.PvName, err)
-		}
-	}
-	if persistentVolumeObj == nil {
-		return "", nil, fmt.Errorf("no found persistent volume object by name: %s", mountRequest.PvName)
+		return "", nil, fmt.Errorf("failed to get persistent volume object by name: %s, err: %v", mountRequest.PvName, err)
 	}
 	if persistentVolumeObj.Spec.CSI == nil {
 		return "", nil, fmt.Errorf("no found csi object in persistent volume by name: %s", mountRequest.PvName)
@@ -93,18 +84,12 @@ func (h *CSIMountHandler) GenerateNodePublishVolumeRequest(ctx context.Context, 
 		if secretNamespace == "" {
 			secretNamespace = utils.DefaultSandboxDeployNamespace
 		} else if secretNamespace != h.systemNamespace {
-			return "", nil, fmt.Errorf("invalid node publish secret ref namespace: %s, expected: %s", secretNamespace, utils.DefaultSandboxDeployNamespace)
+			return "", nil, fmt.Errorf("invalid node publish secret ref namespace: %s, expected: %s", secretNamespace, h.systemNamespace)
 		}
-		secretObj, err = h.cache.GetSecret(ctx, secretNamespace, nodePublishSecretRef.Name)
+		secretObj = &corev1.Secret{}
+		err = utils.GetFromInformerOrApiServer(ctx, secretObj, ctrlclient.ObjectKey{Namespace: secretNamespace, Name: nodePublishSecretRef.Name}, h.client, h.apiReader)
 		if err != nil {
-			log.V(consts.DebugLogLevel).Info("failed to get secret object by name using cache method",
-				"namespace", secretNamespace, "name", nodePublishSecretRef.Name, "error", err)
-			secretObj = &corev1.Secret{}
-			err = h.cache.GetAPIReader().Get(ctx, types.NamespacedName{Namespace: secretNamespace, Name: nodePublishSecretRef.Name}, secretObj)
-			if err != nil {
-				return "", nil, fmt.Errorf("failed to get secret object by name:%s/%s, err: %v",
-					secretNamespace, nodePublishSecretRef.Name, err)
-			}
+			return "", nil, fmt.Errorf("failed to get secret object: %s/%s, err: %v", secretNamespace, nodePublishSecretRef.Name, err)
 		}
 	}
 

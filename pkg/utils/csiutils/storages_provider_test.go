@@ -871,7 +871,7 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 			tt.initObjs = append(tt.initObjs)
 			c, _, err := cachetest.NewTestCache(t, tt.initObjs...)
 			require.NoError(t, err)
-			handler := NewCSIMountHandler(c, tt.setupStorageRegistry(), utils.DefaultSandboxDeployNamespace)
+			handler := NewCSIMountHandler(c.GetClient(), c.GetAPIReader(), tt.setupStorageRegistry(), utils.DefaultSandboxDeployNamespace)
 			driverName, csiRequest, err := handler.GenerateNodePublishVolumeRequest(ctx,
 				v1alpha1.CSIMountConfig{
 					PvName:    tt.persistentVolumeName,
