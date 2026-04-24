@@ -215,3 +215,4 @@ cython_debug/
 
 .gomodcache/
 .modcache/
+.DS_Store

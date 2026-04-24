@@ -138,6 +138,27 @@ def test_timeout(sandbox_context):
         connect_sandbox(sandbox)
 
 
+def test_connect_shorter_timeout(sandbox_context):
+    sandbox: Sandbox = sandbox_context.add(Sandbox.create(
+        template="code-interpreter",
+        timeout=3600,
+        metadata={"test_case": "test_connect_shorter_timeout"},
+        headers={
+            "x-request-id": sandbox_context.request_id
+        }
+    ))
+
+    info_before = sandbox.get_info()
+    assert info_before.state == SandboxState.RUNNING
+
+    connect_sandbox(sandbox, timeout=300)
+    info_after = sandbox.get_info()
+    assert info_after.state == SandboxState.RUNNING
+
+    # For running sandboxes, connect(timeout=<shorter>) must not shorten endAt.
+    assert info_after.end_at == info_before.end_at
+
+
 def test_pause_connect_kill(sandbox_context):
     sandbox: Sandbox = sandbox_context.add(Sandbox.create(
         template="code-interpreter",
