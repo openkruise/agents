@@ -230,3 +230,51 @@ func TestSetTimeout(t *testing.T) {
 		})
 	}
 }
+
+// TestSetSandboxTimeoutStillShortensRunningSandbox locks scope: POST /timeout must still apply a shorter
+// timeout for running sandboxes; the connect-only "do not shorten" guard must not affect this endpoint.
+func TestSetSandboxTimeoutStillShortensRunningSandbox(t *testing.T) {
+	controller, client, teardown := Setup(t)
+	defer teardown()
+	user := &models.CreatedTeamAPIKey{
+		ID:   keys.AdminKeyID,
+		Key:  InitKey,
+		Name: "admin",
+	}
+	templateName := "test-timeout-shorten-scope"
+
+	cleanup := CreateSandboxPool(t, controller, templateName, 1)
+	defer cleanup()
+
+	initialTimeoutSeconds := 600
+	createResp, err := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
+		TemplateID: templateName,
+		Timeout:    initialTimeoutSeconds,
+		Metadata: map[string]string{
+			models.ExtensionKeySkipInitRuntime: v1alpha1.True,
+		},
+	}, nil, user))
+	require.Nil(t, err)
+	assert.Equal(t, models.SandboxStateRunning, createResp.Body.State)
+	AvoidGetFromCache(t, createResp.Body.SandboxID, client.SandboxClient)
+
+	shorterSeconds := 300
+	beforeSet := time.Now()
+	_, apiError := controller.SetSandboxTimeout(NewRequest(t, nil, models.SetTimeoutRequest{
+		TimeoutSeconds: shorterSeconds,
+	}, map[string]string{
+		"sandboxID": createResp.Body.SandboxID,
+	}, user))
+	assert.Nil(t, apiError)
+
+	describeResp, err := controller.DescribeSandbox(NewRequest(t, nil, nil, map[string]string{
+		"sandboxID": createResp.Body.SandboxID,
+	}, user))
+	assert.Nil(t, err)
+	AssertEndAt(t, beforeSet.Add(time.Duration(shorterSeconds)*time.Second), describeResp.Body.EndAt)
+
+	sbx := GetSandbox(t, createResp.Body.SandboxID, client.SandboxClient)
+	require.NotNil(t, sbx.Spec.ShutdownTime)
+	assert.Nil(t, sbx.Spec.PauseTime)
+	assert.WithinDuration(t, beforeSet.Add(time.Duration(shorterSeconds)*time.Second), sbx.Spec.ShutdownTime.Time, 5*time.Second)
+}
