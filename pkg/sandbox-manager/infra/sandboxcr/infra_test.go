@@ -145,7 +145,7 @@ func TestInfra_SelectSandboxes(t *testing.T) {
 			time.Sleep(50 * time.Millisecond)
 
 			// Test SelectSandboxes
-			result, err := infraInstance.SelectSandboxes(tt.user)
+			result, err := infraInstance.SelectSandboxes(t.Context(), tt.user)
 			assert.NoError(t, err)
 			assert.Len(t, result, tt.expectCount)
 			if len(tt.expectNames) > 0 {
@@ -210,25 +210,6 @@ func TestInfra_GetSandbox(t *testing.T) {
 				assert.NotNil(t, result)
 			}
 		})
-	}
-}
-
-func createSandboxSets(t *testing.T, sandboxsets map[string]int32, infraInstance *Infra) {
-	for name, cnt := range sandboxsets {
-		for i := 0; i < int(cnt); i++ {
-			namespace := fmt.Sprintf("namespace-%d", i)
-			sbs := &v1alpha1.SandboxSet{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      name,
-					Namespace: namespace,
-				},
-			}
-			err := infraInstance.Cache.GetClient().Create(t.Context(), sbs)
-			require.NoError(t, err)
-			// MockManager doesn't run reconcilers, so call reconcileSandboxSet directly
-			_, err = infraInstance.reconcileSandboxSet(t.Context(), sbs, false)
-			require.NoError(t, err)
-		}
 	}
 }
 
@@ -401,102 +382,6 @@ func TestInfra_reconcileSandbox(t *testing.T) {
 	}
 }
 
-func TestInfra_reconcileSandboxSet(t *testing.T) {
-	tests := []struct {
-		name        string
-		sandboxSets map[string]int32
-		sbs         *v1alpha1.SandboxSet
-		notFound    bool
-		expectCnt   int32 // 0 means should be deleted
-	}{
-		{
-			name: "reconcile sandboxset not found - delete last sbs",
-			sandboxSets: map[string]int32{
-				"new-sandboxset": 1,
-			},
-			sbs: &v1alpha1.SandboxSet{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "new-sandboxset",
-					Namespace: "namespace-0",
-				},
-			},
-			notFound: true,
-		},
-		{
-			name: "reconcile sandboxset not found - delete non-last sbs",
-			sandboxSets: map[string]int32{
-				"new-sandboxset":   1,
-				"new-sandboxset-2": 3,
-			},
-			sbs: &v1alpha1.SandboxSet{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "new-sandboxset-2",
-					Namespace: "namespace-0",
-				},
-			},
-			notFound:  true,
-			expectCnt: 2,
-		},
-		{
-			name: "reconcile sandboxset exists - create the first one",
-			sbs: &v1alpha1.SandboxSet{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "new-sandboxset",
-					Namespace: "namespace-0",
-				},
-			},
-			notFound: false,
-		},
-		{
-			name: "reconcile sandboxset exists - increment count",
-			sandboxSets: map[string]int32{
-				"new-sandboxset": 1,
-			},
-			sbs: &v1alpha1.SandboxSet{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "new-sandboxset",
-					Namespace: "namespace-1",
-				},
-			},
-			notFound:  false,
-			expectCnt: 2,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			infraInstance, _ := NewTestInfra(t)
-
-			// Create initial sandboxsets if needed
-			createSandboxSets(t, tt.sandboxSets, infraInstance)
-
-			// Call reconcileSandboxSet
-			ctx := t.Context()
-			_, err := infraInstance.reconcileSandboxSet(ctx, tt.sbs, tt.notFound)
-			require.NoError(t, err)
-
-			// Verify template count
-			expectedCnt := tt.expectCnt
-			if !tt.notFound && expectedCnt == 0 {
-				// For create case without explicit expectCnt, default is 1
-				if tt.sandboxSets[tt.sbs.Name] > 0 {
-					expectedCnt = tt.sandboxSets[tt.sbs.Name] + 1
-				} else {
-					expectedCnt = 1
-				}
-			}
-
-			assert.Eventually(t, func() bool {
-				actual, ok := infraInstance.templates.Load(tt.sbs.Name)
-				if !ok {
-					return expectedCnt == 0
-				}
-				return actual.(int32) == expectedCnt
-			}, 100*time.Millisecond, 5*time.Millisecond, fmt.Sprintf("name: %s, expect: %d", tt.sbs.Name, expectedCnt))
-		})
-	}
-}
-
 func TestInfra_reconcileRoutes(t *testing.T) {
 	tests := []struct {
 		name               string
@@ -574,7 +459,7 @@ func TestInfra_reconcileRoutes(t *testing.T) {
 			time.Sleep(50 * time.Millisecond)
 
 			// Run reconciliation
-			infraInstance.reconcileRoutes()
+			infraInstance.reconcileRoutes(t.Context())
 
 			// Verify remaining routes
 			remainingRoutes := infraInstance.Proxy.ListRoutes()
@@ -685,7 +570,7 @@ func TestInfra_CloneSandbox(t *testing.T) {
 
 	// Wait for SandboxTemplate to be cached
 	require.Eventually(t, func() bool {
-		_, err := infraInstance.Cache.GetSandboxTemplate("default", checkpointID)
+		_, err := infraInstance.Cache.GetSandboxTemplate(t.Context(), "default", checkpointID)
 		return err == nil
 	}, time.Second, 10*time.Millisecond)
 
@@ -707,7 +592,7 @@ func TestInfra_CloneSandbox(t *testing.T) {
 
 	// Wait for checkpoint to be cached
 	require.Eventually(t, func() bool {
-		_, err := infraInstance.Cache.GetCheckpoint(checkpointID)
+		_, err := infraInstance.Cache.GetCheckpoint(t.Context(), checkpointID)
 		return err == nil
 	}, time.Second, 10*time.Millisecond)
 
@@ -765,7 +650,7 @@ func CreateCheckpointWithStatus(t *testing.T, c client.Client, cp *v1alpha1.Chec
 
 func EnsureCheckpointInCache(t *testing.T, cache infracache.Provider, cp *v1alpha1.Checkpoint) {
 	require.Eventually(t, func() bool {
-		_, err := cache.GetCheckpoint(cp.Status.CheckpointId)
+		_, err := cache.GetCheckpoint(t.Context(), cp.Status.CheckpointId)
 		return err == nil
 	}, time.Second, 10*time.Millisecond, "get checkpoint from cache timeout")
 }
@@ -836,7 +721,7 @@ func TestInfra_SelectSucceededCheckpoints(t *testing.T) {
 			}
 
 			// Test SelectSucceededCheckpoints
-			results, err := infraInstance.SelectSucceededCheckpoints(tt.user)
+			results, err := infraInstance.SelectSucceededCheckpoints(t.Context(), tt.user)
 			assert.NoError(t, err)
 			assert.Len(t, results, len(tt.expectCheckpointIDs))
 
@@ -892,7 +777,7 @@ func TestInfra_startRouteReconciler(t *testing.T) {
 
 			require.Eventually(t, func() bool {
 				for _, id := range createdSandboxes {
-					_, err := infraInstance.Cache.GetClaimedSandbox(id)
+					_, err := infraInstance.Cache.GetClaimedSandbox(t.Context(), id)
 					if err != nil {
 						return false
 					}
@@ -1063,12 +948,12 @@ func TestInfra_DeleteCheckpoint(t *testing.T) {
 
 				// Wait for informer sync
 				require.Eventually(t, func() bool {
-					_, err := infraInstance.Cache.GetCheckpoint(tt.checkpointID)
+					_, err := infraInstance.Cache.GetCheckpoint(t.Context(), tt.checkpointID)
 					return err == nil
 				}, time.Second, 10*time.Millisecond)
 
 				require.Eventually(t, func() bool {
-					_, err := infraInstance.Cache.GetSandboxTemplate(namespace, tt.checkpointID)
+					_, err := infraInstance.Cache.GetSandboxTemplate(t.Context(), namespace, tt.checkpointID)
 					return err == nil
 				}, time.Second, 10*time.Millisecond)
 			}

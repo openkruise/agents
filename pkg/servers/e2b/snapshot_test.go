@@ -96,7 +96,7 @@ func TestCreateSnapshot(t *testing.T) {
 
 		// Wait for sandbox pool to be ready
 		require.Eventually(t, func() bool {
-			list, err := controller.cache.ListSandboxesInPool(templateName)
+			list, err := controller.cache.ListSandboxesInPool(t.Context(), templateName)
 			return err == nil && len(list) == 1
 		}, time.Second, 50*time.Millisecond)
 

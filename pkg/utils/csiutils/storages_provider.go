@@ -58,7 +58,7 @@ func (h *CSIMountHandler) GenerateNodePublishVolumeRequest(ctx context.Context, 
 	}
 	// There are potential scenarios, such as incomplete cache synchronization,
 	// where implementing a resilience or fault-tolerance mechanism can help mitigate spurious errors and improve system robustness.
-	persistentVolumeObj, err := h.cache.GetPersistentVolume(mountRequest.PvName)
+	persistentVolumeObj, err := h.cache.GetPersistentVolume(ctx, mountRequest.PvName)
 	if err != nil {
 		log.V(consts.DebugLogLevel).Info("failed to get persistent volume object by name using cache method",
 			"pvName", mountRequest.PvName, "err", err)
@@ -95,7 +95,7 @@ func (h *CSIMountHandler) GenerateNodePublishVolumeRequest(ctx context.Context, 
 		} else if secretNamespace != h.systemNamespace {
 			return "", nil, fmt.Errorf("invalid node publish secret ref namespace: %s, expected: %s", secretNamespace, utils.DefaultSandboxDeployNamespace)
 		}
-		secretObj, err = h.cache.GetSecret(secretNamespace, nodePublishSecretRef.Name)
+		secretObj, err = h.cache.GetSecret(ctx, secretNamespace, nodePublishSecretRef.Name)
 		if err != nil {
 			log.V(consts.DebugLogLevel).Info("failed to get secret object by name using cache method",
 				"namespace", secretNamespace, "name", nodePublishSecretRef.Name, "error", err)

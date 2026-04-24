@@ -142,7 +142,7 @@ func findCheckpointAndTemplateById(ctx context.Context, opts infra.CloneSandboxO
 	err := retry.OnError(utils.CacheBackoff, func(err error) bool {
 		return !opts.SkipWaitCheckpoint && retryFunc(err)
 	}, func() error {
-		cp, err := cache.GetCheckpoint(opts.CheckPointID)
+		cp, err := cache.GetCheckpoint(ctx, opts.CheckPointID)
 		if err != nil {
 			return err
 		}
@@ -155,7 +155,7 @@ func findCheckpointAndTemplateById(ctx context.Context, opts infra.CloneSandboxO
 	}
 
 	// Try to get template from cache first
-	template, err := cache.GetSandboxTemplate(checkpoint.Namespace, checkpoint.Name)
+	template, err := cache.GetSandboxTemplate(ctx, checkpoint.Namespace, checkpoint.Name)
 	if err != nil {
 		log.Info("template not found in cache, trying API server", "namespace", checkpoint.Namespace, "name", checkpoint.Name, "error", err)
 		// Fallback to API server

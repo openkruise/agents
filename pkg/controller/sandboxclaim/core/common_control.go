@@ -361,7 +361,7 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 // countClaimedSandboxes counts sandboxes that are claimed by this claim
 func (c *commonControl) countClaimedSandboxes(ctx context.Context, claim *agentsv1alpha1.SandboxClaim) (int32, error) {
 	log := logf.FromContext(ctx)
-	sandboxes, err := c.cache.ListSandboxWithUser(string(claim.UID))
+	sandboxes, err := c.cache.ListSandboxWithUser(ctx, string(claim.UID))
 	if err != nil {
 		return 0, err
 	}

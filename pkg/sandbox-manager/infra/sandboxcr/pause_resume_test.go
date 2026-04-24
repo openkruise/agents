@@ -262,7 +262,7 @@ func TestSandbox_Pause(t *testing.T) {
 				assert.Equal(t, v1alpha1.SandboxStateRunning, state, reason)
 			},
 			expectedState:   "",
-			expectError:     "sandbox is not satisfied during double check",
+			expectError:     "object is not satisfied during double check",
 			useShortTimeout: true,
 		},
 		{
@@ -444,7 +444,7 @@ func TestSandbox_Resume(t *testing.T) {
 				assert.Equal(t, v1alpha1.SandboxStatePaused, state, reason)
 			},
 			expectedState:   "",
-			expectError:     "sandbox is not satisfied during double check",
+			expectError:     "object is not satisfied during double check",
 			useShortTimeout: true,
 		},
 		{

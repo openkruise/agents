@@ -26,7 +26,6 @@ import (
 
 	"github.com/google/uuid"
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
@@ -286,9 +285,6 @@ func TestListSandboxes_Pagination(t *testing.T) {
 	}
 	err := fc.Create(t.Context(), sbs)
 	assert.NoError(t, err)
-	// MockManager doesn't run reconcilers, so register template directly
-	infraImpl, _ := controller.manager.GetInfra().(*sandboxcr.Infra)
-	infraImpl.RegisterTemplate(templateName)
 	defer func() {
 		_ = fc.Delete(context.Background(), sbs)
 	}()

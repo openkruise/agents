@@ -307,21 +307,21 @@ func pickAnAvailableSandbox(ctx context.Context, opts infra.ClaimSandboxOptions,
 	template, cnt := opts.Template, opts.CandidateCounts
 	ctx = logs.Extend(ctx, "action", "pickAnAvailableSandbox")
 	log := klog.FromContext(ctx).WithValues("template", template).V(consts.DebugLogLevel)
-	objects, err := cache.ListSandboxesInPool(template)
+	objects, err := cache.ListSandboxesInPool(ctx, template)
 	if err != nil {
 		return nil, "", err
 	}
 	if len(objects) == 0 {
 		if opts.CreateOnNoStock {
 			log.Info("will create a new sandbox", "reason", "NoStock")
-			return newSandboxFromSandboxSet(opts, cache, limiter)
+			return newSandboxFromSandboxSet(ctx, opts, cache, limiter)
 		}
 		return nil, "", NoAvailableError(template, "no stock")
 	}
 
 	// Get the SandboxSet's current update revision to prefer matching sandboxes.
 	var updateRevision string
-	if sbs, sErr := cache.GetSandboxSet(template); sErr == nil && sbs != nil {
+	if sbs, sErr := cache.PickSandboxSet(ctx, template); sErr == nil && sbs != nil {
 		updateRevision = sbs.Status.UpdateRevision
 	}
 
@@ -409,7 +409,7 @@ func pickAnAvailableSandbox(ctx context.Context, opts infra.ClaimSandboxOptions,
 	// Step 3: create new sandbox
 	if opts.CreateOnNoStock {
 		log.Info("will create a new sandbox")
-		return newSandboxFromSandboxSet(opts, cache, limiter)
+		return newSandboxFromSandboxSet(ctx, opts, cache, limiter)
 	}
 	return nil, "", NoAvailableError(template, pickErr.Error())
 }
@@ -457,13 +457,13 @@ func pickFromCandidates(ctx context.Context, candidates []*v1alpha1.Sandbox, pic
 
 var FilteredAnnotationsOnCreation []string
 
-func newSandboxFromSandboxSet(opts infra.ClaimSandboxOptions, cache cache.Provider, limiter *rate.Limiter) (*Sandbox, infra.LockType, error) {
+func newSandboxFromSandboxSet(ctx context.Context, opts infra.ClaimSandboxOptions, cache cache.Provider, limiter *rate.Limiter) (*Sandbox, infra.LockType, error) {
 	if limiter != nil {
 		if !limiter.Allow() {
 			return nil, "", NoAvailableError(opts.Template, "sandbox creation is not allowed by rate limiter")
 		}
 	}
-	sbs, err := cache.GetSandboxSet(opts.Template)
+	sbs, err := cache.PickSandboxSet(ctx, opts.Template)
 	if err != nil {
 		return nil, "", NoAvailableError(opts.Template, "cannot create new sandbox: "+err.Error())
 	}

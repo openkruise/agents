@@ -347,7 +347,7 @@ func TestCreateSandbox(t *testing.T) {
 						},
 					},
 				}
-				err := fc.Create(context.Background(), pv)
+				err := fc.Create(t.Context(), pv)
 				require.NoError(t, err)
 			},
 		},
@@ -458,7 +458,7 @@ func TestCreateSandbox(t *testing.T) {
 				AccessToken: runtime.AccessToken,
 			})
 			require.Eventually(t, func() bool {
-				list, err := controller.cache.ListSandboxesInPool(templateName)
+				list, err := controller.cache.ListSandboxesInPool(t.Context(), templateName)
 				return err == nil && len(list) == tt.available
 			}, time.Second, 50*time.Millisecond)
 			defer cleanup()
@@ -564,12 +564,12 @@ func CreateCheckpointAndTemplate(t *testing.T, controller *Controller, checkpoin
 	err = fc.Status().Update(t.Context(), cp)
 	require.NoError(t, err)
 	require.Eventually(t, func() bool {
-		return controller.manager.GetInfra().HasCheckpoint(checkpointID)
+		return controller.manager.GetInfra().HasCheckpoint(t.Context(), checkpointID)
 	}, time.Second, 10*time.Millisecond)
 
 	return func() {
-		_ = fc.Delete(context.Background(), sbt)
-		_ = fc.Delete(context.Background(), cp)
+		_ = fc.Delete(t.Context(), sbt)
+		_ = fc.Delete(t.Context(), cp)
 	}
 }
 
@@ -821,7 +821,7 @@ func TestCloneSandbox(t *testing.T) {
 						},
 					},
 				}
-				err := fc.Create(context.Background(), pv)
+				err := fc.Create(t.Context(), pv)
 				require.NoError(t, err)
 			},
 		},

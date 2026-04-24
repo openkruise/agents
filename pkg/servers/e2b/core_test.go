@@ -63,7 +63,7 @@ var InitKey = "admin-987654321"
 
 func CreateSandboxWithStatus(t *testing.T, c ctrlclient.Client, sbx *agentsv1alpha1.Sandbox) {
 	t.Helper()
-	ctx := context.Background()
+	ctx := t.Context()
 	err := c.Create(ctx, sbx)
 	assert.NoError(t, err)
 	err = c.Status().Update(ctx, sbx)
@@ -94,7 +94,6 @@ func Setup(t *testing.T) (*Controller, ctrlclient.Client, func()) {
 		}, nil)
 
 	// Create test resources using the controller-runtime fake client
-	ctx := context.Background()
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "sandbox-manager",
@@ -114,8 +113,8 @@ func Setup(t *testing.T) (*Controller, ctrlclient.Client, func()) {
 			PodIP: "127.0.0.1",
 		},
 	}
-	require.NoError(t, fc.Create(ctx, pod))
-	require.NoError(t, fc.Status().Update(ctx, pod))
+	require.NoError(t, fc.Create(t.Context(), pod))
+	require.NoError(t, fc.Status().Update(t.Context(), pod))
 
 	// create key store secret
 	secret := &corev1.Secret{
@@ -125,7 +124,7 @@ func Setup(t *testing.T) (*Controller, ctrlclient.Client, func()) {
 		},
 		Data: map[string][]byte{},
 	}
-	require.NoError(t, fc.Create(ctx, secret))
+	require.NoError(t, fc.Create(t.Context(), secret))
 
 	proxyServer := proxy.NewServer(opts)
 	infraInstance := sandboxcr.NewInfraBuilder(opts).
@@ -152,7 +151,7 @@ func Setup(t *testing.T) (*Controller, ctrlclient.Client, func()) {
 	controller.storageRegistry = storages.NewStorageProvider()
 	controller.registerRoutes()
 
-	require.NoError(t, controller.initKeyStorage(ctx))
+	require.NoError(t, controller.initKeyStorage(t.Context()))
 
 	// Start HTTP server and stop channel directly (skip controller.Run which
 	// would call manager.Run and try to start memberlist/peersManager).
@@ -243,9 +242,6 @@ func CreateSandboxPool(t *testing.T, controller *Controller, name string, availa
 	if err != nil && !apierrors.IsAlreadyExists(err) {
 		require.NoError(t, err)
 	}
-	// MockManager doesn't run reconcilers, so register template directly
-	infraImpl, _ := controller.manager.GetInfra().(*sandboxcr.Infra)
-	infraImpl.RegisterTemplate(name)
 	now := metav1.Now()
 	for i := 0; i < available; i++ {
 		annotations := map[string]string{}
@@ -287,7 +283,7 @@ func CreateSandboxPool(t *testing.T, controller *Controller, name string, availa
 		CreateSandboxWithStatus(t, fc, sbx)
 	}
 	require.Eventually(t, func() bool {
-		pool, _ := controller.cache.ListSandboxesInPool(name)
+		pool, _ := controller.cache.ListSandboxesInPool(t.Context(), name)
 		return len(pool) == available
 	}, time.Minute, 100*time.Millisecond)
 	return func() {
@@ -295,10 +291,10 @@ func CreateSandboxPool(t *testing.T, controller *Controller, name string, availa
 			sbx := &agentsv1alpha1.Sandbox{}
 			sbx.Name = fmt.Sprintf("%s-%d", name, i)
 			sbx.Namespace = ns
-			assert.NoError(t, fc.Delete(context.Background(), sbx))
+			assert.NoError(t, fc.Delete(t.Context(), sbx))
 		}
 		sbs.Namespace = ns
-		assert.NoError(t, fc.Delete(context.Background(), sbs))
+		assert.NoError(t, fc.Delete(t.Context(), sbs))
 	}
 }
 
@@ -356,7 +352,7 @@ func DoSetSandboxStatus(phase agentsv1alpha1.SandboxPhase, pausedStatus, readySt
 				Status: readyStatus,
 			},
 		}
-		err := c.Status().Update(context.Background(), sbx)
+		err := c.Status().Update(t.Context(), sbx)
 		if err != nil {
 			log.Printf("failed to update sandbox status: %v", err)
 		}

@@ -100,7 +100,6 @@ func (b *InfraBuilder) Build() infra.Infrastructure {
 	i := b.instance
 	if c, ok := i.Cache.(*cache.Cache); ok {
 		c.GetSandboxController().AddReconcileHandlers(i.reconcileSandbox)
-		c.GetSandboxSetController().AddReconcileHandlers(i.reconcileSandboxSet)
 	}
 	if !b.skipRouteReconciler {
 		go i.startRouteReconciler(RouteReconcileInterval)
@@ -117,11 +116,6 @@ type Infra struct {
 	pickCache        sync.Map
 	claimLockChannel chan struct{}
 	createLimiter    *rate.Limiter
-
-	// Currently, templates stores the mapping of sandboxset name -> number of namespaces. For example,
-	// if a sandboxset with the same name is created in two different namespaces, the corresponding value would be 2.
-	// In the future, this will be changed to integrate with Template CR.
-	templates sync.Map
 
 	reconcileRouteStopCh chan struct{}
 }
@@ -253,25 +247,18 @@ func (i *Infra) GetCache() cache.Provider {
 	return i.Cache
 }
 
-func (i *Infra) HasTemplate(name string) bool {
-	_, exists := i.templates.Load(name)
-	return exists
-}
-
-// RegisterTemplate directly registers a template name in the templates map.
-// This is primarily used in tests where the reconciler loop is not running
-// (e.g., with MockManager) and templates cannot be populated via reconcileSandboxSet.
-func (i *Infra) RegisterTemplate(name string) {
-	i.templates.LoadOrStore(name, int32(1))
-}
-
-func (i *Infra) HasCheckpoint(name string) bool {
-	_, err := i.Cache.GetCheckpoint(name)
+func (i *Infra) HasTemplate(ctx context.Context, name string) bool {
+	_, err := i.Cache.PickSandboxSet(ctx, name)
 	return err == nil
 }
 
-func (i *Infra) SelectSandboxes(user string) ([]infra.Sandbox, error) {
-	objects, err := i.Cache.ListSandboxWithUser(user)
+func (i *Infra) HasCheckpoint(ctx context.Context, name string) bool {
+	_, err := i.Cache.GetCheckpoint(ctx, name)
+	return err == nil
+}
+
+func (i *Infra) SelectSandboxes(ctx context.Context, user string) ([]infra.Sandbox, error) {
+	objects, err := i.Cache.ListSandboxWithUser(ctx, user)
 	if err != nil {
 		return nil, err
 	}
@@ -285,8 +272,8 @@ func (i *Infra) SelectSandboxes(user string) ([]infra.Sandbox, error) {
 	return sandboxes, nil
 }
 
-func (i *Infra) SelectSucceededCheckpoints(user string) ([]infra.CheckpointInfo, error) {
-	checkpoints, err := i.Cache.ListCheckpointsWithUser(user)
+func (i *Infra) SelectSucceededCheckpoints(ctx context.Context, user string) ([]infra.CheckpointInfo, error) {
+	checkpoints, err := i.Cache.ListCheckpointsWithUser(ctx, user)
 	if err != nil {
 		return nil, err
 	}
@@ -304,7 +291,7 @@ func (i *Infra) SelectSucceededCheckpoints(user string) ([]infra.CheckpointInfo,
 func (i *Infra) GetClaimedSandbox(ctx context.Context, sandboxID string) (infra.Sandbox, error) {
 	var sandbox *v1alpha1.Sandbox
 	err := retry.OnError(utils.CacheBackoff, utils.RetryIfContextNotCanceled(ctx), func() error {
-		got, err := i.Cache.GetClaimedSandbox(sandboxID)
+		got, err := i.Cache.GetClaimedSandbox(ctx, sandboxID)
 		if err != nil {
 			return err
 		}
@@ -351,46 +338,6 @@ func (i *Infra) refreshRoute(sbx *v1alpha1.Sandbox) {
 	}
 }
 
-func (i *Infra) reconcileSandboxSet(ctx context.Context, sbs *v1alpha1.SandboxSet, notFound bool) (ctrl.Result, error) {
-	log := klog.FromContext(ctx).WithValues("sandboxset", klog.KObj(sbs))
-
-	if notFound {
-		// SandboxSet not found, decrease template count or delete it
-		for {
-			got, loaded := i.templates.Load(sbs.Name)
-			if !loaded {
-				log.Info("template does not exist during reconciliation")
-				return ctrl.Result{}, nil
-			}
-			if old := got.(int32); old == 1 {
-				if i.templates.CompareAndDelete(sbs.Name, old) {
-					log.Info("template deleted during reconciliation")
-					return ctrl.Result{}, nil
-				}
-			} else {
-				if i.templates.CompareAndSwap(sbs.Name, old, old-1) {
-					log.Info("template count decreased during reconciliation", "cnt", old-1)
-					return ctrl.Result{}, nil
-				}
-			}
-		}
-	}
-
-	// SandboxSet exists, create or increment template count
-	for {
-		got, loaded := i.templates.LoadOrStore(sbs.Name, int32(1))
-		if !loaded {
-			log.Info("template created during reconciliation")
-			return ctrl.Result{}, nil
-		}
-		old := got.(int32)
-		if i.templates.CompareAndSwap(sbs.Name, old, old+1) {
-			log.Info("template count updated during reconciliation", "cnt", old+1)
-			return ctrl.Result{}, nil
-		}
-	}
-}
-
 func GetTemplateFromSandbox(sbx metav1.Object) string {
 	tmpl := sbx.GetLabels()[v1alpha1.LabelSandboxTemplate]
 	if tmpl == "" {
@@ -409,7 +356,8 @@ const (
 // It also runs reconcileRoutes immediately on startup to ensure all routes are synced.
 func (i *Infra) startRouteReconciler(interval time.Duration) {
 	// Run immediately on startup to ensure routes are synced
-	i.reconcileRoutes()
+	ctx := logs.NewContext("action", "reconcileRoutes")
+	i.reconcileRoutes(ctx)
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -417,7 +365,7 @@ func (i *Infra) startRouteReconciler(interval time.Duration) {
 	for {
 		select {
 		case <-ticker.C:
-			i.reconcileRoutes()
+			i.reconcileRoutes(ctx)
 		case <-i.reconcileRouteStopCh:
 			klog.Info("route reconciler stopped")
 			return
@@ -428,14 +376,13 @@ func (i *Infra) startRouteReconciler(interval time.Duration) {
 // reconcileRoutes compares routes in Proxy with Sandboxes in Cache
 // and deletes orphaned routes that no longer have corresponding Sandboxes.
 // It also adds missing routes for existing sandboxes that don't have a route yet.
-func (i *Infra) reconcileRoutes() {
-	ctx := logs.NewContext("action", "reconcileRoutes")
+func (i *Infra) reconcileRoutes(ctx context.Context) {
 	log := klog.FromContext(ctx)
 	log.Info("starting route reconciliation")
 	// Build set of existing sandbox IDs from cache
 	existingSandboxIDs := make(map[string]struct{})
 
-	sandboxList := i.Cache.ListAllSandboxes()
+	sandboxList := i.Cache.ListAllSandboxes(ctx)
 	for _, sbx := range sandboxList {
 		sandboxID := stateutils.GetSandboxID(sbx)
 		existingSandboxIDs[sandboxID] = struct{}{}

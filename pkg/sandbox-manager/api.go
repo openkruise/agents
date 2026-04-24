@@ -32,7 +32,7 @@ import (
 // ClaimSandbox attempts to lock a Pod and assign it to the current caller
 func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions) (infra.Sandbox, error) {
 	log := klog.FromContext(ctx)
-	if !m.infra.HasTemplate(opts.Template) {
+	if !m.infra.HasTemplate(ctx, opts.Template) {
 		// Requirement: Track failure in API layer
 		SandboxCreationResponses.WithLabelValues("failure").Inc()
 		return nil, errors.NewError(errors.ErrorNotFound, fmt.Sprintf("template %s not found", opts.Template))
@@ -112,8 +112,8 @@ func (m *SandboxManager) GetClaimedSandbox(ctx context.Context, user, sandboxID 
 	return sbx, nil
 }
 
-func (m *SandboxManager) ListSandboxes(user string, p *utils.Paginator[infra.Sandbox]) ([]infra.Sandbox, string, error) {
-	sandboxes, err := m.infra.SelectSandboxes(user)
+func (m *SandboxManager) ListSandboxes(ctx context.Context, user string, p *utils.Paginator[infra.Sandbox]) ([]infra.Sandbox, string, error) {
+	sandboxes, err := m.infra.SelectSandboxes(ctx, user)
 	if err != nil {
 		return nil, "", errors.NewError(errors.ErrorNotFound, fmt.Sprintf("failed to list sandboxes: %v", err))
 	}
@@ -124,8 +124,8 @@ func (m *SandboxManager) ListSandboxes(user string, p *utils.Paginator[infra.San
 	return sandboxes, nextToken, nil
 }
 
-func (m *SandboxManager) ListCheckpoints(user string, p *utils.Paginator[infra.CheckpointInfo]) ([]infra.CheckpointInfo, string, error) {
-	checkpoints, err := m.infra.SelectSucceededCheckpoints(user)
+func (m *SandboxManager) ListCheckpoints(ctx context.Context, user string, p *utils.Paginator[infra.CheckpointInfo]) ([]infra.CheckpointInfo, string, error) {
+	checkpoints, err := m.infra.SelectSucceededCheckpoints(ctx, user)
 	if err != nil {
 		return nil, "", errors.NewError(errors.ErrorNotFound, fmt.Sprintf("failed to list checkpoints: %v", err))
 	}

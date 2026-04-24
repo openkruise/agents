@@ -17,6 +17,7 @@ limitations under the License.
 package e2b
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 
@@ -55,7 +56,7 @@ func (sc *Controller) ListTemplates(r *http.Request) (web.ApiResponse[[]*models.
 
 	// Get all SandboxSets from cache using informer
 	// If namespace is not specified, list SandboxSets from all namespace
-	templates, err := cache.ListSandboxSets(namespace)
+	templates, err := cache.ListSandboxSets(r.Context(), namespace)
 	if err != nil {
 		return web.ApiResponse[[]*models.TemplateInfo]{}, &web.ApiError{
 			Code:    http.StatusInternalServerError,
@@ -99,7 +100,7 @@ func (sc *Controller) GetTemplate(r *http.Request) (web.ApiResponse[*models.Temp
 	}
 
 	// Get SandboxSet from cache using informer
-	template, err := sc.getSandboxSetFromCache(templateID, cache)
+	template, err := sc.getSandboxSetFromCache(r.Context(), templateID, cache)
 	if err != nil {
 		return web.ApiResponse[*models.Template]{}, &web.ApiError{
 			Code:    http.StatusNotFound,
@@ -156,9 +157,9 @@ func (sc *Controller) DeleteTemplate(r *http.Request) (web.ApiResponse[struct{}]
 }
 
 // getSandboxSetFromCache gets a SandboxSet from cache using informer
-func (sc *Controller) getSandboxSetFromCache(templateID string, cache infracache.Provider) (*agentsv1alpha1.SandboxSet, error) {
+func (sc *Controller) getSandboxSetFromCache(ctx context.Context, templateID string, cache infracache.Provider) (*agentsv1alpha1.SandboxSet, error) {
 	// Get all SandboxSets from cache
-	templates, err := cache.ListSandboxSets("")
+	templates, err := cache.ListSandboxSets(ctx, "")
 	if err != nil {
 		return nil, fmt.Errorf("failed to list sandboxsets: %w", err)
 	}

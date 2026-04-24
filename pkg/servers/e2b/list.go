@@ -132,7 +132,7 @@ func (sc *Controller) ListSandboxes(r *http.Request) (web.ApiResponse[[]*models.
 
 	log.Info("will list sandboxes", "user", user.Name, "userID", user.ID, "request", request)
 
-	sandboxes, nextToken, err := sc.manager.ListSandboxes(user.ID.String(), &utils.Paginator[infra.Sandbox]{
+	sandboxes, nextToken, err := sc.manager.ListSandboxes(r.Context(), user.ID.String(), &utils.Paginator[infra.Sandbox]{
 		Limit:     request.Limit,
 		NextToken: request.NextToken,
 		Filter:    getListFilter(request),
@@ -241,7 +241,7 @@ func (sc *Controller) ListSnapshots(r *http.Request) (web.ApiResponse[[]*models.
 		return true
 	}
 
-	checkpoints, nextToken, err := sc.manager.ListCheckpoints(user.ID.String(), &utils.Paginator[infra.CheckpointInfo]{
+	checkpoints, nextToken, err := sc.manager.ListCheckpoints(r.Context(), user.ID.String(), &utils.Paginator[infra.CheckpointInfo]{
 		Limit:     limit,
 		NextToken: nextTokenParam,
 		GetKey: func(cp infra.CheckpointInfo) string {

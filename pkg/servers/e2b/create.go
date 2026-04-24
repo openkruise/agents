@@ -55,10 +55,10 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 		return web.ApiResponse[*models.Sandbox]{}, parseErr
 	}
 	log.Info("create sandbox request received", "request", request)
-	if sc.manager.GetInfra().HasTemplate(request.TemplateID) {
+	if sc.manager.GetInfra().HasTemplate(ctx, request.TemplateID) {
 		log.Info("infra has template, will create sandbox with claim", "templateID", request.TemplateID)
 		return sc.createSandboxWithClaim(ctx, request, user)
-	} else if sc.manager.GetInfra().HasCheckpoint(request.TemplateID) {
+	} else if sc.manager.GetInfra().HasCheckpoint(ctx, request.TemplateID) {
 		log.Info("infra has checkpoint, will create sandbox with clone", "templateID", request.TemplateID)
 		return sc.createSandboxWithClone(ctx, request, user)
 	}

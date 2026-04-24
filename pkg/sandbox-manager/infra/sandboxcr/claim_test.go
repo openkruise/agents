@@ -809,10 +809,7 @@ func TestCheckSandboxInplaceUpdate(t *testing.T) {
 					Namespace: "default",
 				},
 			}
-			err := fc.Create(context.Background(), sbs)
-			require.NoError(t, err)
-			// MockManager doesn't run reconcilers, so register template directly
-			_, err = testInfra.reconcileSandboxSet(context.Background(), sbs, false)
+			err := fc.Create(t.Context(), sbs)
 			require.NoError(t, err)
 			conditions := []metav1.Condition{
 				{
@@ -845,7 +842,7 @@ func TestCheckSandboxInplaceUpdate(t *testing.T) {
 			}
 			CreateSandboxWithStatus(t, fc, sbx)
 
-			gotSbx, err := testInfra.Cache.GetClaimedSandbox(sandboxutils.GetSandboxID(sbx))
+			gotSbx, err := testInfra.Cache.GetClaimedSandbox(t.Context(), sandboxutils.GetSandboxID(sbx))
 			assert.NoError(t, err)
 			if err != nil {
 				return
@@ -1798,7 +1795,7 @@ func TestNewSandboxFromTemplate_RateLimitExceeded(t *testing.T) {
 
 	// Wait for cache to sync
 	require.Eventually(t, func() bool {
-		_, err := infraInstance.Cache.GetSandboxSet(template)
+		_, err := infraInstance.Cache.PickSandboxSet(t.Context(), template)
 		return err == nil
 	}, time.Second, 10*time.Millisecond)
 
@@ -1809,7 +1806,7 @@ func TestNewSandboxFromTemplate_RateLimitExceeded(t *testing.T) {
 	}
 
 	// Call the function
-	sbx, _, err := newSandboxFromSandboxSet(opts, infraInstance.Cache, limiter)
+	sbx, _, err := newSandboxFromSandboxSet(t.Context(), opts, infraInstance.Cache, limiter)
 
 	// Assertions
 	assert.Nil(t, sbx, "sandbox should be nil when rate limited")
@@ -2208,10 +2205,7 @@ func TestPickAnAvailableSandbox_PrefersMatchingRevision(t *testing.T) {
 			require.NoError(t, err)
 			err = c.Status().Update(t.Context(), sbs)
 			require.NoError(t, err)
-			// MockManager doesn't run reconcilers, so call reconcileSandboxSet directly
-			_, err = testInfra.reconcileSandboxSet(t.Context(), sbs, false)
-			require.NoError(t, err)
-			require.True(t, testInfra.HasTemplate(template))
+			require.True(t, testInfra.HasTemplate(t.Context(), template))
 
 			now := metav1.Now()
 			ownerRefs := []metav1.OwnerReference{*metav1.NewControllerRef(sbs, v1alpha1.SandboxSetControllerKind)}
@@ -2261,7 +2255,7 @@ func TestPickAnAvailableSandbox_PrefersMatchingRevision(t *testing.T) {
 			// Wait for cache sync
 			totalSandboxes := tt.matchingCount + tt.nonMatchingCount
 			require.Eventually(t, func() bool {
-				objs, err := testInfra.Cache.ListSandboxesInPool(template)
+				objs, err := testInfra.Cache.ListSandboxesInPool(t.Context(), template)
 				return err == nil && len(objs) >= totalSandboxes
 			}, 200*time.Millisecond, 5*time.Millisecond)
 

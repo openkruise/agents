@@ -51,13 +51,13 @@ type Builder interface {
 type Infrastructure interface {
 	Run(ctx context.Context) error // Starts the infrastructure
 	Stop(ctx context.Context)      // Stops the infrastructure
-	HasTemplate(name string) bool
-	HasCheckpoint(name string) bool
+	HasTemplate(ctx context.Context, name string) bool
+	HasCheckpoint(ctx context.Context, name string) bool
 	GetCache() cache.Provider // Get the CacheProvider for the infra
 	LoadDebugInfo() map[string]any
-	SelectSandboxes(user string) ([]Sandbox, error)                           // Select Sandboxes based on the options provided
+	SelectSandboxes(ctx context.Context, user string) ([]Sandbox, error)      // Select Sandboxes based on the options provided
 	GetClaimedSandbox(ctx context.Context, sandboxID string) (Sandbox, error) // Get a Sandbox interface by its ID
-	SelectSucceededCheckpoints(user string) ([]CheckpointInfo, error)
+	SelectSucceededCheckpoints(ctx context.Context, user string) ([]CheckpointInfo, error)
 	ClaimSandbox(ctx context.Context, opts ClaimSandboxOptions) (Sandbox, ClaimMetrics, error)
 	CloneSandbox(ctx context.Context, opts CloneSandboxOptions) (Sandbox, CloneMetrics, error)
 	DeleteCheckpoint(ctx context.Context, user string, checkpointID string) error

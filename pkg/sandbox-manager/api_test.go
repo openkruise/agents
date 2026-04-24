@@ -216,8 +216,6 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 				}
 				err := client.Create(t.Context(), sbs)
 				require.NoError(t, err)
-				// MockManager doesn't run reconcilers, so register template directly
-				manager.infra.(*sandboxcr.Infra).RegisterTemplate(template)
 				for i := 0; i < available; i++ {
 					testSbx := &agentsv1alpha1.Sandbox{
 						ObjectMeta: metav1.ObjectMeta{
@@ -269,7 +267,7 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 					CreateSandboxWithStatus(t, client, testSbx)
 				}
 				require.Eventually(t, func() bool {
-					list, err := manager.GetInfra().GetCache().ListSandboxesInPool(template)
+					list, err := manager.GetInfra().GetCache().ListSandboxesInPool(t.Context(), template)
 					if err != nil {
 						return false
 					}
@@ -958,7 +956,7 @@ func TestSandboxManager_ListSandboxes(t *testing.T) {
 	}
 
 	t.Run("without paginator", func(t *testing.T) {
-		sandboxes, nextToken, err := manager.ListSandboxes(testUser, nil)
+		sandboxes, nextToken, err := manager.ListSandboxes(t.Context(), testUser, nil)
 
 		assert.NoError(t, err)
 		assert.Empty(t, nextToken, "nextToken should be empty when paginator is nil")
@@ -976,7 +974,7 @@ func TestSandboxManager_ListSandboxes(t *testing.T) {
 			},
 		}
 
-		sandboxes, nextToken, err := manager.ListSandboxes(testUser, paginator)
+		sandboxes, nextToken, err := manager.ListSandboxes(t.Context(), testUser, paginator)
 
 		assert.NoError(t, err)
 		assert.Len(t, sandboxes, 2, "should return limited number of sandboxes")
@@ -1262,7 +1260,7 @@ func TestSandboxManager_ListCheckpoints(t *testing.T) {
 			tt.setupCheckpoints(client)
 
 			// Call ListCheckpoints
-			checkpoints, nextToken, err := manager.ListCheckpoints(tt.user, tt.paginator)
+			checkpoints, nextToken, err := manager.ListCheckpoints(t.Context(), tt.user, tt.paginator)
 
 			if tt.expectError {
 				require.Error(t, err)
@@ -1427,7 +1425,7 @@ func TestSandboxManager_DeleteCheckpoint(t *testing.T) {
 
 				// Wait for informer sync
 				require.Eventually(t, func() bool {
-					return manager.GetInfra().HasCheckpoint(tt.checkpointID)
+					return manager.GetInfra().HasCheckpoint(t.Context(), tt.checkpointID)
 				}, time.Second, 10*time.Millisecond)
 
 				// Cleanup

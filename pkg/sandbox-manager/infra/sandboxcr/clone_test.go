@@ -464,10 +464,10 @@ func TestCloneSandbox(t *testing.T) {
 						CheckpointId: "checkpoint-no-template",
 					},
 				}
-				require.NoError(t, c.Create(context.Background(), cp))
+				require.NoError(t, c.Create(t.Context(), cp))
 				// Wait for checkpoint to be cached
 				require.Eventually(t, func() bool {
-					_, err := cache.GetCheckpoint("checkpoint-no-template")
+					_, err := cache.GetCheckpoint(t.Context(), "checkpoint-no-template")
 					return err == nil
 				}, time.Second, 10*time.Millisecond)
 			},
@@ -501,10 +501,10 @@ func TestCloneSandbox(t *testing.T) {
 						CheckpointId: "checkpoint-no-sbt",
 					},
 				}
-				require.NoError(t, c.Create(context.Background(), cp))
+				require.NoError(t, c.Create(t.Context(), cp))
 				// Wait for checkpoint to be cached
 				require.Eventually(t, func() bool {
-					_, err := cache.GetCheckpoint("checkpoint-no-sbt")
+					_, err := cache.GetCheckpoint(t.Context(), "checkpoint-no-sbt")
 					return err == nil
 				}, time.Second, 10*time.Millisecond)
 			},
@@ -601,11 +601,11 @@ func TestCloneSandbox(t *testing.T) {
 					},
 				},
 			}
-			require.NoError(t, fc.Create(context.Background(), sbt))
+			require.NoError(t, fc.Create(t.Context(), sbt))
 
 			// Wait for SandboxTemplate to be cached
 			require.Eventually(t, func() bool {
-				_, err := cache.GetSandboxTemplate("default", checkpointID)
+				_, err := cache.GetSandboxTemplate(t.Context(), "default", checkpointID)
 				return err == nil
 			}, time.Minute, 10*time.Millisecond)
 
@@ -630,10 +630,10 @@ func TestCloneSandbox(t *testing.T) {
 						v1alpha1.AnnotationInitRuntimeRequest: string(initRuntimeAnnotation),
 					}
 				}
-				require.NoError(t, fc.Create(context.Background(), cp))
+				require.NoError(t, fc.Create(t.Context(), cp))
 				// Wait for checkpoint to be cached
 				require.Eventually(t, func() bool {
-					_, err := cache.GetCheckpoint(checkpointID)
+					_, err := cache.GetCheckpoint(t.Context(), checkpointID)
 					return err == nil
 				}, time.Second, 10*time.Millisecond)
 			}
@@ -708,11 +708,11 @@ func TestCloneSandbox_WithRateLimiter(t *testing.T) {
 			},
 		},
 	}
-	require.NoError(t, fc.Create(context.Background(), sbs))
+	require.NoError(t, fc.Create(t.Context(), sbs))
 
 	// Wait for SandboxSet to be cached
 	require.Eventually(t, func() bool {
-		_, err := cache.GetSandboxSet(template)
+		_, err := cache.PickSandboxSet(t.Context(), template)
 		return err == nil
 	}, time.Second, 10*time.Millisecond)
 
@@ -729,10 +729,10 @@ func TestCloneSandbox_WithRateLimiter(t *testing.T) {
 			CheckpointId: checkpointID,
 		},
 	}
-	require.NoError(t, fc.Create(context.Background(), cp))
+	require.NoError(t, fc.Create(t.Context(), cp))
 	// Wait for checkpoint to be cached
 	require.Eventually(t, func() bool {
-		_, err := cache.GetCheckpoint(checkpointID)
+		_, err := cache.GetCheckpoint(t.Context(), checkpointID)
 		return err == nil
 	}, time.Second, 10*time.Millisecond)
 
@@ -786,11 +786,11 @@ func TestCloneSandbox_ContextCanceled(t *testing.T) {
 			},
 		},
 	}
-	require.NoError(t, fc.Create(context.Background(), sbs))
+	require.NoError(t, fc.Create(t.Context(), sbs))
 
 	// Wait for SandboxSet to be cached
 	require.Eventually(t, func() bool {
-		_, err := cache.GetSandboxSet(template)
+		_, err := cache.PickSandboxSet(t.Context(), template)
 		return err == nil
 	}, time.Second, 10*time.Millisecond)
 
@@ -810,7 +810,7 @@ func TestCloneSandbox_ContextCanceled(t *testing.T) {
 	require.NoError(t, fc.Create(t.Context(), cp))
 	// Wait for checkpoint to be cached
 	require.Eventually(t, func() bool {
-		_, err := cache.GetCheckpoint(checkpointID)
+		_, err := cache.GetCheckpoint(t.Context(), checkpointID)
 		return err == nil
 	}, time.Second, 10*time.Millisecond)
 
@@ -938,7 +938,7 @@ func TestCreateCheckPoint(t *testing.T) {
 			postCheck: func(t *testing.T, id string, c client.Client) {
 				assert.Equal(t, "cp-id-123", id)
 				var cp v1alpha1.Checkpoint
-				require.NoError(t, c.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "tmpl-1"}, &cp))
+				require.NoError(t, c.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "tmpl-1"}, &cp))
 				assert.Equal(t, "tmpl-1", cp.Name)
 				assert.Equal(t, "test-sandbox-1", *cp.Spec.PodName)
 				require.Len(t, cp.OwnerReferences, 1)
@@ -947,7 +947,7 @@ func TestCreateCheckPoint(t *testing.T) {
 				assert.Equal(t, types.UID("uid-1"), cp.OwnerReferences[0].UID)
 				// Verify PersistentContents: sandbox has no PersistentContents, so both template and checkpoint should be empty
 				var tmpl v1alpha1.SandboxTemplate
-				require.NoError(t, c.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "tmpl-1"}, &tmpl))
+				require.NoError(t, c.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "tmpl-1"}, &tmpl))
 				assert.Empty(t, tmpl.Spec.PersistentContents, "template PersistentContents should be empty when sandbox has no PersistentContents")
 				assert.Empty(t, cp.Spec.PersistentContents, "checkpoint PersistentContents should be empty when sandbox has no PersistentContents")
 			},
@@ -969,7 +969,7 @@ func TestCreateCheckPoint(t *testing.T) {
 			postCheck: func(t *testing.T, id string, c client.Client) {
 				assert.Equal(t, "cp-id-opts", id)
 				var cp v1alpha1.Checkpoint
-				require.NoError(t, c.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "tmpl-2"}, &cp))
+				require.NoError(t, c.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "tmpl-2"}, &cp))
 				assert.Equal(t, "tmpl-2", cp.Name)
 				assert.Equal(t, "test-sandbox-2", *cp.Spec.PodName)
 				require.Len(t, cp.OwnerReferences, 1)
@@ -983,7 +983,7 @@ func TestCreateCheckPoint(t *testing.T) {
 				assert.Equal(t, "30m", *cp.Spec.TtlAfterFinished)
 				// Verify PersistentContents: opts.PersistentContents should override template's PersistentContents
 				var tmpl v1alpha1.SandboxTemplate
-				require.NoError(t, c.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "tmpl-2"}, &tmpl))
+				require.NoError(t, c.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "tmpl-2"}, &tmpl))
 				assert.Empty(t, tmpl.Spec.PersistentContents, "template PersistentContents should be empty when sandbox has no PersistentContents")
 				assert.Equal(t, []string{"memory", "filesystem"}, cp.Spec.PersistentContents, "checkpoint PersistentContents should use opts.PersistentContents")
 			},
@@ -1006,7 +1006,7 @@ func TestCreateCheckPoint(t *testing.T) {
 			postCheck: func(t *testing.T, id string, c client.Client) {
 				assert.Equal(t, "cp-id-rt", id)
 				var cp v1alpha1.Checkpoint
-				require.NoError(t, c.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "tmpl-3"}, &cp))
+				require.NoError(t, c.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "tmpl-3"}, &cp))
 				assert.Equal(t, "tmpl-3", cp.Name)
 				assert.Equal(t, "test-sandbox-3", *cp.Spec.PodName)
 				require.Len(t, cp.OwnerReferences, 1)
@@ -1094,9 +1094,9 @@ func TestCreateCheckPoint(t *testing.T) {
 			postCheck: func(t *testing.T, id string, c client.Client) {
 				assert.Equal(t, "cp-id-pc", id)
 				var cp v1alpha1.Checkpoint
-				require.NoError(t, c.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "tmpl-pc"}, &cp))
+				require.NoError(t, c.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "tmpl-pc"}, &cp))
 				var tmpl v1alpha1.SandboxTemplate
-				require.NoError(t, c.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "tmpl-pc"}, &tmpl))
+				require.NoError(t, c.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "tmpl-pc"}, &tmpl))
 				// Verify PersistentContents logic:
 				// 1. Template should inherit from sandbox.Spec.PersistentContents
 				assert.Equal(t, []string{"memory"}, tmpl.Spec.PersistentContents, "template should inherit sandbox's PersistentContents")
@@ -1125,7 +1125,7 @@ func TestCreateCheckPoint(t *testing.T) {
 			postCheck: func(t *testing.T, id string, c client.Client) {
 				assert.Equal(t, "cp-id-runtimes-multi", id)
 				var tmpl v1alpha1.SandboxTemplate
-				require.NoError(t, c.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "tmpl-runtimes-multi"}, &tmpl))
+				require.NoError(t, c.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "tmpl-runtimes-multi"}, &tmpl))
 				require.Len(t, tmpl.Spec.Runtimes, 2, "template should have 2 runtimes")
 				assert.Equal(t, v1alpha1.RuntimeConfigForInjectCsiMount, tmpl.Spec.Runtimes[0].Name)
 				assert.Equal(t, v1alpha1.RuntimeConfigForInjectAgentRuntime, tmpl.Spec.Runtimes[1].Name)
@@ -1151,7 +1151,7 @@ func TestCreateCheckPoint(t *testing.T) {
 			postCheck: func(t *testing.T, id string, c client.Client) {
 				assert.Equal(t, "cp-id-runtimes-single", id)
 				var tmpl v1alpha1.SandboxTemplate
-				require.NoError(t, c.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "tmpl-runtimes-single"}, &tmpl))
+				require.NoError(t, c.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "tmpl-runtimes-single"}, &tmpl))
 				require.Len(t, tmpl.Spec.Runtimes, 1, "template should have 1 runtime")
 				assert.Equal(t, v1alpha1.RuntimeConfigForInjectAgentRuntime, tmpl.Spec.Runtimes[0].Name)
 			},
@@ -1174,7 +1174,7 @@ func TestCreateCheckPoint(t *testing.T) {
 			postCheck: func(t *testing.T, id string, c client.Client) {
 				assert.Equal(t, "cp-id-runtimes-none", id)
 				var tmpl v1alpha1.SandboxTemplate
-				require.NoError(t, c.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "tmpl-runtimes-none"}, &tmpl))
+				require.NoError(t, c.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "tmpl-runtimes-none"}, &tmpl))
 				assert.Nil(t, tmpl.Spec.Runtimes, "template Runtimes should be nil when sandbox has no Runtimes")
 			},
 		},
@@ -1197,9 +1197,9 @@ func TestCreateCheckPoint(t *testing.T) {
 			postCheck: func(t *testing.T, id string, c client.Client) {
 				assert.Equal(t, "cp-id-inherit", id)
 				var cp v1alpha1.Checkpoint
-				require.NoError(t, c.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "tmpl-inherit"}, &cp))
+				require.NoError(t, c.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "tmpl-inherit"}, &cp))
 				var tmpl v1alpha1.SandboxTemplate
-				require.NoError(t, c.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "tmpl-inherit"}, &tmpl))
+				require.NoError(t, c.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "tmpl-inherit"}, &tmpl))
 				// Verify PersistentContents logic:
 				// 1. Template should inherit from sandbox.Spec.PersistentContents
 				assert.Equal(t, []string{"filesystem"}, tmpl.Spec.PersistentContents, "template should inherit sandbox's PersistentContents")

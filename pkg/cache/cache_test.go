@@ -95,7 +95,7 @@ func TestCache_GetPersistentVolume(t *testing.T) {
 	t.Run("existing PV", func(t *testing.T) {
 		c, _, err := newTestCacheLocal(t, pv)
 		require.NoError(t, err)
-		got, err := c.GetPersistentVolume("test-pv")
+		got, err := c.GetPersistentVolume(t.Context(), "test-pv")
 		require.NoError(t, err)
 		require.NotNil(t, got)
 		assert.Equal(t, "test-pv", got.Name)
@@ -105,7 +105,7 @@ func TestCache_GetPersistentVolume(t *testing.T) {
 	t.Run("non-existing PV", func(t *testing.T) {
 		c, _, err := newTestCacheLocal(t, pv)
 		require.NoError(t, err)
-		got, err := c.GetPersistentVolume("non-existing-pv")
+		got, err := c.GetPersistentVolume(t.Context(), "non-existing-pv")
 		require.Error(t, err)
 		assert.Nil(t, got)
 		assert.Contains(t, err.Error(), "not found in cache")
@@ -117,7 +117,7 @@ func TestCache_GetPersistentVolume_FromSync(t *testing.T) {
 	require.NoError(t, err)
 
 	// PV not there yet
-	_, err = c.GetPersistentVolume("test-pv-sync")
+	_, err = c.GetPersistentVolume(t.Context(), "test-pv-sync")
 	require.Error(t, err)
 
 	// Create PV via fake client
@@ -133,10 +133,10 @@ func TestCache_GetPersistentVolume_FromSync(t *testing.T) {
 			},
 		},
 	}
-	require.NoError(t, fc.Create(context.Background(), testPV))
+	require.NoError(t, fc.Create(t.Context(), testPV))
 
 	// Now it should be found
-	got, err := c.GetPersistentVolume("test-pv-sync")
+	got, err := c.GetPersistentVolume(t.Context(), "test-pv-sync")
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.Equal(t, "test-pv-sync", got.Name)
@@ -150,7 +150,7 @@ func TestCache_GetSecret_FromSync(t *testing.T) {
 	ns := utils.DefaultSandboxDeployNamespace
 
 	// Not found initially
-	_, err = c.GetSecret(ns, "test-secret")
+	_, err = c.GetSecret(t.Context(), ns, "test-secret")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not found in cache")
 
@@ -160,9 +160,9 @@ func TestCache_GetSecret_FromSync(t *testing.T) {
 		Data:       map[string][]byte{"username": []byte("admin"), "password": []byte("pass123")},
 		Type:       corev1.SecretTypeOpaque,
 	}
-	require.NoError(t, fc.Create(context.Background(), secret))
+	require.NoError(t, fc.Create(t.Context(), secret))
 
-	got, err := c.GetSecret(ns, "test-secret")
+	got, err := c.GetSecret(t.Context(), ns, "test-secret")
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.Equal(t, "test-secret", got.Name)
@@ -178,7 +178,7 @@ func TestCache_GetConfigmap_FromSync(t *testing.T) {
 	ns := utils.DefaultSandboxDeployNamespace
 
 	// Not found returns (nil, nil)
-	got, err := c.GetConfigmap(ns, "test-cm")
+	got, err := c.GetConfigmap(t.Context(), ns, "test-cm")
 	require.NoError(t, err)
 	assert.Nil(t, got)
 
@@ -187,9 +187,9 @@ func TestCache_GetConfigmap_FromSync(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "test-cm", Namespace: ns},
 		Data:       map[string]string{"key1": "value1", "key2": "value2"},
 	}
-	require.NoError(t, fc.Create(context.Background(), cm))
+	require.NoError(t, fc.Create(t.Context(), cm))
 
-	got, err = c.GetConfigmap(ns, "test-cm")
+	got, err = c.GetConfigmap(t.Context(), ns, "test-cm")
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.Equal(t, "test-cm", got.Name)
@@ -204,7 +204,7 @@ func TestCache_GetSandboxTemplate(t *testing.T) {
 	t.Run("existing template", func(t *testing.T) {
 		c, _, err := newTestCacheLocal(t, tmpl)
 		require.NoError(t, err)
-		got, err := c.GetSandboxTemplate("default", "my-tmpl")
+		got, err := c.GetSandboxTemplate(t.Context(), "default", "my-tmpl")
 		require.NoError(t, err)
 		require.NotNil(t, got)
 		assert.Equal(t, "my-tmpl", got.Name)
@@ -213,7 +213,7 @@ func TestCache_GetSandboxTemplate(t *testing.T) {
 	t.Run("not found", func(t *testing.T) {
 		c, _, err := newTestCacheLocal(t)
 		require.NoError(t, err)
-		_, err = c.GetSandboxTemplate("default", "no-tmpl")
+		_, err = c.GetSandboxTemplate(t.Context(), "default", "no-tmpl")
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "not found in cache")
 	})
@@ -237,7 +237,7 @@ func TestCache_GetClaimedSandbox(t *testing.T) {
 		c, _, err := newTestCacheLocal(t, sbx)
 		require.NoError(t, err)
 		sandboxID := sandboxutils.GetSandboxID(sbx)
-		got, err := c.GetClaimedSandbox(sandboxID)
+		got, err := c.GetClaimedSandbox(t.Context(), sandboxID)
 		require.NoError(t, err)
 		require.NotNil(t, got)
 		assert.Equal(t, "test-sbx", got.Name)
@@ -246,7 +246,7 @@ func TestCache_GetClaimedSandbox(t *testing.T) {
 	t.Run("not found", func(t *testing.T) {
 		c, _, err := newTestCacheLocal(t)
 		require.NoError(t, err)
-		_, err = c.GetClaimedSandbox("nonexistent-id")
+		_, err = c.GetClaimedSandbox(t.Context(), "nonexistent-id")
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "not found in cache")
 	})
@@ -261,7 +261,7 @@ func TestCache_GetCheckpoint(t *testing.T) {
 	t.Run("found", func(t *testing.T) {
 		c, _, err := newTestCacheLocal(t, cp)
 		require.NoError(t, err)
-		got, err := c.GetCheckpoint("cp-id-123")
+		got, err := c.GetCheckpoint(t.Context(), "cp-id-123")
 		require.NoError(t, err)
 		require.NotNil(t, got)
 		assert.Equal(t, "test-cp", got.Name)
@@ -270,7 +270,7 @@ func TestCache_GetCheckpoint(t *testing.T) {
 	t.Run("not found", func(t *testing.T) {
 		c, _, err := newTestCacheLocal(t)
 		require.NoError(t, err)
-		_, err = c.GetCheckpoint("nonexistent-cp")
+		_, err = c.GetCheckpoint(t.Context(), "nonexistent-cp")
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "not found in cache")
 	})
@@ -284,7 +284,7 @@ func TestCache_GetSandboxSet(t *testing.T) {
 	t.Run("found by name index", func(t *testing.T) {
 		c, _, err := newTestCacheLocal(t, sbs)
 		require.NoError(t, err)
-		got, err := c.GetSandboxSet("tmpl-1")
+		got, err := c.PickSandboxSet(t.Context(), "tmpl-1")
 		require.NoError(t, err)
 		require.NotNil(t, got)
 		assert.Equal(t, "tmpl-1", got.Name)
@@ -294,7 +294,7 @@ func TestCache_GetSandboxSet(t *testing.T) {
 	t.Run("not found", func(t *testing.T) {
 		c, _, err := newTestCacheLocal(t)
 		require.NoError(t, err)
-		_, err = c.GetSandboxSet("nonexistent")
+		_, err = c.PickSandboxSet(t.Context(), "nonexistent")
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "not found in cache")
 	})
@@ -314,13 +314,13 @@ func TestCache_GetSandboxSet_MultipleTemplates(t *testing.T) {
 	c, _, err := newTestCacheLocal(t, sbs1, sbs2, sbs3)
 	require.NoError(t, err)
 
-	got, err := c.GetSandboxSet("tmpl-3")
+	got, err := c.PickSandboxSet(t.Context(), "tmpl-3")
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.Equal(t, "tmpl-3", got.Name)
 	assert.Equal(t, "team-b", got.Namespace)
 
-	_, err = c.GetSandboxSet("nonexistent")
+	_, err = c.PickSandboxSet(t.Context(), "nonexistent")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not found in cache")
 }
@@ -353,15 +353,15 @@ func TestCache_ListSandboxWithUser(t *testing.T) {
 	c, _, err := newTestCacheLocal(t, sbx1, sbx2, sbx3)
 	require.NoError(t, err)
 
-	list, err := c.ListSandboxWithUser("user-1")
+	list, err := c.ListSandboxWithUser(t.Context(), "user-1")
 	require.NoError(t, err)
 	assert.Len(t, list, 2)
 
-	list, err = c.ListSandboxWithUser("user-2")
+	list, err = c.ListSandboxWithUser(t.Context(), "user-2")
 	require.NoError(t, err)
 	assert.Len(t, list, 1)
 
-	list, err = c.ListSandboxWithUser("user-nobody")
+	list, err = c.ListSandboxWithUser(t.Context(), "user-nobody")
 	require.NoError(t, err)
 	assert.Len(t, list, 0)
 }
@@ -385,12 +385,12 @@ func TestCache_ListCheckpointsWithUser(t *testing.T) {
 	c, _, err := newTestCacheLocal(t, cp1, cp2)
 	require.NoError(t, err)
 
-	list, err := c.ListCheckpointsWithUser("user-1")
+	list, err := c.ListCheckpointsWithUser(t.Context(), "user-1")
 	require.NoError(t, err)
 	assert.Len(t, list, 1)
 	assert.Equal(t, "cp-1", list[0].Name)
 
-	list, err = c.ListCheckpointsWithUser("user-nobody")
+	list, err = c.ListCheckpointsWithUser(t.Context(), "user-nobody")
 	require.NoError(t, err)
 	assert.Len(t, list, 0)
 }
@@ -423,12 +423,12 @@ func TestCache_ListSandboxesInPool(t *testing.T) {
 	c, _, err := newTestCacheLocal(t, sbx)
 	require.NoError(t, err)
 
-	list, err := c.ListSandboxesInPool("tmpl-a")
+	list, err := c.ListSandboxesInPool(t.Context(), "tmpl-a")
 	require.NoError(t, err)
 	assert.Len(t, list, 1)
 	assert.Equal(t, "pool-sbx-1", list[0].Name)
 
-	list, err = c.ListSandboxesInPool("tmpl-nonexistent")
+	list, err = c.ListSandboxesInPool(t.Context(), "tmpl-nonexistent")
 	require.NoError(t, err)
 	assert.Len(t, list, 0)
 }
@@ -444,7 +444,7 @@ func TestCache_ListAllSandboxes(t *testing.T) {
 	c, _, err := newTestCacheLocal(t, sbx1, sbx2)
 	require.NoError(t, err)
 
-	list := c.ListAllSandboxes()
+	list := c.ListAllSandboxes(t.Context())
 	assert.Len(t, list, 2)
 }
 
@@ -545,9 +545,9 @@ func TestCache_WaitForSandboxSatisfied(t *testing.T) {
 			time.Sleep(50 * time.Millisecond)
 			// Update the sandbox to Running
 			fresh := &agentsv1alpha1.Sandbox{}
-			_ = fc.Get(context.Background(), ctrlclient.ObjectKeyFromObject(sbx), fresh)
+			_ = fc.Get(t.Context(), ctrlclient.ObjectKeyFromObject(sbx), fresh)
 			fresh.Status.Phase = agentsv1alpha1.SandboxRunning
-			_ = fc.Status().Update(context.Background(), fresh)
+			_ = fc.Status().Update(t.Context(), fresh)
 
 			// Manually trigger waitHook (fake client has no informer)
 			key := cacheutils.WaitHookKey[*agentsv1alpha1.Sandbox](sbx)
@@ -578,9 +578,9 @@ func TestCache_WaitForSandboxSatisfied(t *testing.T) {
 		go func() {
 			time.Sleep(50 * time.Millisecond)
 			fresh := &agentsv1alpha1.Sandbox{}
-			_ = fc.Get(context.Background(), ctrlclient.ObjectKeyFromObject(sbx), fresh)
+			_ = fc.Get(t.Context(), ctrlclient.ObjectKeyFromObject(sbx), fresh)
 			fresh.Status.Phase = agentsv1alpha1.SandboxRunning
-			_ = fc.Status().Update(context.Background(), fresh)
+			_ = fc.Status().Update(t.Context(), fresh)
 
 			key := cacheutils.WaitHookKey[*agentsv1alpha1.Sandbox](sbx)
 			if val, ok := c.waitHooks.Load(key); ok {
@@ -619,12 +619,12 @@ func TestCache_WaitForSandboxSatisfied(t *testing.T) {
 		go func() {
 			time.Sleep(50 * time.Millisecond)
 			fresh := &agentsv1alpha1.Sandbox{}
-			_ = fc.Get(context.Background(), ctrlclient.ObjectKeyFromObject(sbx), fresh)
+			_ = fc.Get(t.Context(), ctrlclient.ObjectKeyFromObject(sbx), fresh)
 			fresh.Status.Phase = agentsv1alpha1.SandboxRunning
 			fresh.Status.Conditions = []metav1.Condition{
 				{Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue},
 			}
-			_ = fc.Status().Update(context.Background(), fresh)
+			_ = fc.Status().Update(t.Context(), fresh)
 
 			// Close waitHook to trigger double-check
 			key := cacheutils.WaitHookKey[*agentsv1alpha1.Sandbox](sbx)
@@ -703,10 +703,10 @@ func TestCache_WaitForCheckpointSatisfied(t *testing.T) {
 		go func() {
 			time.Sleep(50 * time.Millisecond)
 			fresh := &agentsv1alpha1.Checkpoint{}
-			_ = fc.Get(context.Background(), ctrlclient.ObjectKeyFromObject(cp), fresh)
+			_ = fc.Get(t.Context(), ctrlclient.ObjectKeyFromObject(cp), fresh)
 			fresh.Status.Phase = agentsv1alpha1.CheckpointSucceeded
 			fresh.Status.CheckpointId = "cp-ready-id"
-			_ = fc.Status().Update(context.Background(), fresh)
+			_ = fc.Status().Update(t.Context(), fresh)
 
 			key := cacheutils.WaitHookKey[*agentsv1alpha1.Checkpoint](cp)
 			if val, ok := c.waitHooks.Load(key); ok {
