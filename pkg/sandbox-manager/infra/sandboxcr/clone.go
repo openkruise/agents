@@ -112,7 +112,7 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache *Ca
 	}
 	if opts.CSIMount != nil {
 		log.Info("starting to perform csi mount")
-		metrics.CSIMount, err = processCSIMounts(ctx, sbx, *opts.CSIMount)
+		metrics.CSIMount, err = runtime.ProcessCSIMounts(ctx, sbx.Sandbox, *opts.CSIMount)
 		if err != nil {
 			log.Error(err, "failed to perform csi mount")
 			return nil, metrics, fmt.Errorf("failed to perform csi mount: %s", err)
@@ -169,7 +169,7 @@ func findCheckpointAndTemplateById(ctx context.Context, opts infra.CloneSandboxO
 func createSandboxFromCheckpoint(ctx context.Context, opts infra.CloneSandboxOptions, tmpl *v1alpha1.SandboxTemplate, cp *v1alpha1.Checkpoint, cache *Cache, client *clients.ClientSet, metrics infra.CloneMetrics) (*Sandbox, *config.InitRuntimeOptions, infra.CloneMetrics, error) {
 	log := klog.FromContext(ctx).WithValues("checkpoint", opts.CheckPointID, "step", "2.createSandboxFromCheckpoint")
 	start := time.Now()
-	initRuntimeOpts, err := getInitRuntimeRequest(cp)
+	initRuntimeOpts, err := runtime.GetInitRuntimeRequest(cp)
 	if err != nil {
 		log.Error(err, "failed to get init runtime request")
 		return nil, nil, metrics, err
@@ -219,7 +219,7 @@ func cloneReInitRuntime(ctx context.Context, sbx *Sandbox, opts infra.CloneSandb
 	initRuntimeOpts.ReInit = true
 	log.Info("re-init runtime")
 	var err error
-	metrics.InitRuntime, err = initRuntime(ctx, sbx, *initRuntimeOpts)
+	metrics.InitRuntime, err = runtime.InitRuntime(ctx, sbx.Sandbox, *initRuntimeOpts, sbx.refreshFunc())
 	if err != nil {
 		log.Error(err, "failed to init runtime")
 		return metrics, fmt.Errorf("failed to init runtime: %w", err)

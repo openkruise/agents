@@ -1,41 +1,34 @@
 package sandboxcr
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"math/rand/v2"
-	"net/http"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/openkruise/agents/pkg/utils/runtime"
 	"golang.org/x/time/rate"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/openkruise/agents/pkg/utils/runtime"
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/controller/sandboxset"
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
-	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
-	commonutils "github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
-	"github.com/openkruise/agents/pkg/utils/sandbox-manager/proxyutils"
 	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
 )
 
@@ -184,7 +177,7 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 
 	if opts.InitRuntime != nil {
 		log.Info("starting to init runtime", "opts", opts.InitRuntime)
-		metrics.InitRuntime, err = initRuntime(ctx, sbx, *opts.InitRuntime)
+		metrics.InitRuntime, err = runtime.InitRuntime(ctx, sbx.Sandbox, *opts.InitRuntime, sbx.refreshFunc())
 		if err != nil {
 			log.Error(err, "failed to init runtime")
 			err = retriableError{Message: fmt.Sprintf("failed to init runtime: %s", err)}
@@ -196,7 +189,7 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 
 	if opts.CSIMount != nil {
 		log.Info("starting to perform csi mount")
-		metrics.CSIMount, err = processCSIMounts(ctx, sbx, *opts.CSIMount)
+		metrics.CSIMount, err = runtime.ProcessCSIMounts(ctx, sbx.Sandbox, *opts.CSIMount)
 		if err != nil {
 			log.Error(err, "failed to perform csi mount")
 			err = fmt.Errorf("failed to perform csi mount: %s", err)
@@ -227,58 +220,6 @@ func clearFailedSandbox(ctx context.Context, sbx infra.Sandbox, err error, reser
 			log.Info("sandbox deleted")
 		}
 	}
-}
-
-func csiMount(ctx context.Context, sbx *Sandbox, opts config.MountConfig) (time.Duration, error) {
-	ctx = logs.Extend(ctx, "action", "csiMount")
-	start := time.Now()
-	err := sbx.CSIMount(ctx, opts.Driver, opts.RequestRaw)
-	return time.Since(start), err
-}
-
-// processCSIMounts performs CSI volume mounting operations for all mount configurations concurrently.
-// It uses opts.Concurrency to limit the number of concurrent mount goroutines.
-// If Concurrency is 0 or negative, it defaults to config.DefaultCSIMountConcurrency.
-// Returns the total duration spent on all mount operations and the first encountered error.
-func processCSIMounts(ctx context.Context, sbx *Sandbox, opts config.CSIMountOptions) (time.Duration, error) {
-	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
-	start := time.Now()
-
-	var wg sync.WaitGroup
-	errCh := make(chan error, len(opts.MountOptionList))
-
-	// Use a semaphore channel to limit concurrency
-	concurrency := opts.Concurrency
-	if concurrency <= 0 {
-		concurrency = config.DefaultCSIMountConcurrency
-	}
-	sem := make(chan struct{}, concurrency)
-
-	for _, opt := range opts.MountOptionList {
-		wg.Add(1)
-		sem <- struct{}{}
-		go func(opt config.MountConfig) {
-			defer wg.Done()
-			defer func() { <-sem }()
-			mountDuration, err := csiMount(ctx, sbx, opt)
-			if err != nil {
-				log.Error(err, "failed to perform CSI mount", "mountOptionConfig", opt)
-				errCh <- err
-				return
-			}
-			log.Info("CSI mount completed successfully",
-				"mountOptionConfig", opt,
-				"duration", mountDuration)
-		}(opt)
-	}
-
-	wg.Wait()
-	close(errCh)
-
-	if err := <-errCh; err != nil {
-		return time.Since(start), err
-	}
-	return time.Since(start), nil
 }
 
 func getPickKey(sbx *v1alpha1.Sandbox) string {
@@ -565,74 +506,6 @@ func performLockSandbox(ctx context.Context, sbx *Sandbox, lockType infra.LockTy
 		return nil
 	}
 	return err
-}
-
-func initRuntime(ctx context.Context, sbx *Sandbox, opts config.InitRuntimeOptions) (time.Duration, error) {
-	ctx = logs.Extend(ctx, "action", "initRuntime")
-	log := klog.FromContext(ctx).WithValues("sandboxID", sbx.GetName(), "resourceVersion", sbx.GetResourceVersion())
-	start := time.Now()
-	initBody, err := json.Marshal(opts)
-	if err != nil {
-		log.Error(err, "failed to marshal initBody")
-		return 0, err
-	}
-	retries := -1
-	err = retry.OnError(wait.Backoff{
-		// about retry 20s
-		Duration: 200 * time.Millisecond,
-		Factor:   2.0,
-		Steps:    5,
-		Cap:      10 * time.Second,
-	}, commonutils.RetryIfContextNotCanceled(ctx), func() error {
-		var initErr error
-		retries++
-		requestCtx, cancel := context.WithTimeout(ctx, time.Second)
-		defer func() {
-			cancel()
-			if initErr != nil {
-				log.Error(initErr, "init runtime request failed", "retries", retries)
-			}
-		}()
-
-		initErr = sbx.InplaceRefresh(ctx, false)
-		if initErr != nil {
-			log.Error(initErr, "failed to refresh sandbox")
-			return initErr
-		}
-		runtimeURL := runtime.GetRuntimeURL(sbx.Sandbox)
-		if runtimeURL == "" {
-			log.Error(nil, "runtimeURL is empty")
-			return fmt.Errorf("runtimeURL is empty")
-		}
-		url := runtimeURL + "/init"
-		log.Info("sending request to runtime", "resourceVersion", sbx.GetResourceVersion(),
-			"url", url, "params", opts, "retries", retries)
-
-		// Create a new request for each retry to avoid Body reuse issue
-		r, initErr := http.NewRequestWithContext(requestCtx, http.MethodPost, url, bytes.NewBuffer(initBody))
-		if initErr != nil {
-			log.Error(initErr, "failed to create request")
-			return initErr
-		}
-		resp, initErr := proxyutils.ProxyRequest(r)
-		defer func() {
-			// Discard response body to allow connection reuse
-			if resp != nil {
-				_, _ = io.Copy(io.Discard, resp.Body)
-				_ = resp.Body.Close()
-			}
-		}()
-		// When ReInit is true, treat 401 as success (sandbox already initialized)
-		if resp != nil && resp.StatusCode == http.StatusUnauthorized && opts.ReInit {
-			log.Info("init runtime returned 401, treated as success because ReInit is true")
-			return nil
-		}
-		if initErr != nil {
-			return initErr
-		}
-		return nil
-	})
-	return time.Since(start), err
 }
 
 func buildResourceResizedPod(pod *corev1.Pod, requests, limits corev1.ResourceList) (*corev1.Pod, bool) {

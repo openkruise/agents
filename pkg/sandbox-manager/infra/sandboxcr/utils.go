@@ -1,13 +1,9 @@
 package sandboxcr
 
 import (
-	"encoding/json"
-	"fmt"
-
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 )
 
 func SetSandboxCondition(sbx *v1alpha1.Sandbox, tp string, status metav1.ConditionStatus, reason, message string) {
@@ -30,10 +26,6 @@ func SetSandboxCondition(sbx *v1alpha1.Sandbox, tp string, status metav1.Conditi
 	})
 }
 
-func ListSandboxConditions(sbx *v1alpha1.Sandbox) []metav1.Condition {
-	return sbx.Status.Conditions
-}
-
 func GetSandboxCondition(sbx *v1alpha1.Sandbox, tp v1alpha1.SandboxConditionType) metav1.Condition {
 	for _, condition := range sbx.Status.Conditions {
 		if condition.Type == string(tp) {
@@ -41,18 +33,4 @@ func GetSandboxCondition(sbx *v1alpha1.Sandbox, tp v1alpha1.SandboxConditionType
 		}
 	}
 	return metav1.Condition{}
-}
-
-func getInitRuntimeRequest(s metav1.Object) (*config.InitRuntimeOptions, error) {
-	// Build initRuntimeOpts from annotation at the beginning
-	var initRuntimeOpts *config.InitRuntimeOptions
-	if initRuntimeRequest := s.GetAnnotations()[v1alpha1.AnnotationInitRuntimeRequest]; initRuntimeRequest != "" {
-		var opts config.InitRuntimeOptions
-		if err := json.Unmarshal([]byte(initRuntimeRequest), &opts); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal init runtime request: %w", err)
-		}
-		opts.ReInit = true
-		initRuntimeOpts = &opts
-	}
-	return initRuntimeOpts, nil
 }

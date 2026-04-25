@@ -14,19 +14,24 @@ limitations under the License.
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 
 	"connectrpc.com/connect"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
@@ -35,6 +40,10 @@ import (
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/utils"
 	csimountutils "github.com/openkruise/agents/pkg/utils/csiutils"
+
+	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
+	commonutils "github.com/openkruise/agents/pkg/utils"
+	"github.com/openkruise/agents/pkg/utils/sandbox-manager/proxyutils"
 	"github.com/openkruise/agents/pkg/utils/sandboxutils"
 	"github.com/openkruise/agents/proto/envd/process"
 	"github.com/openkruise/agents/proto/envd/process/processconnect"
@@ -82,7 +91,6 @@ type RunCmdFuncArgs struct {
 	Timeout       time.Duration
 }
 
-// sidecar runtime 提供的 run command 能力
 func RunCommandWithRuntime(ctx context.Context, args RunCmdFuncArgs) (RunCommandResult, error) {
 	sbx, processConfig, timeout := args.Sbx, args.ProcessConfig, args.Timeout
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx)).V(consts.DebugLogLevel)
@@ -177,7 +185,102 @@ func ResolveCSIMountFromAnnotation(ctx context.Context, obj metav1.Object, clien
 	return &config.CSIMountOptions{MountOptionList: mountOptionList}, nil
 }
 
-// GetCsiMountExtensionRequest parses CSI mount config from object annotations.
+// GetInitRuntimeRequest parses init runtime configuration from object annotations.
+func GetInitRuntimeRequest(s metav1.Object) (*config.InitRuntimeOptions, error) {
+	// Build initRuntimeOpts from annotation at the beginning
+	var initRuntimeOpts *config.InitRuntimeOptions
+	if initRuntimeRequest := s.GetAnnotations()[agentsv1alpha1.AnnotationInitRuntimeRequest]; initRuntimeRequest != "" {
+		var opts config.InitRuntimeOptions
+		if err := json.Unmarshal([]byte(initRuntimeRequest), &opts); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal init runtime request: %w", err)
+		}
+		opts.ReInit = true
+		initRuntimeOpts = &opts
+	}
+	return initRuntimeOpts, nil
+}
+
+// RefreshFunc is a callback that refreshes the sandbox object to its latest state.
+// It returns the updated sandbox object, allowing InitRuntime to use the latest
+// annotations (e.g., runtime URL) without depending on the sandboxcr package.
+type RefreshFunc func(ctx context.Context) (*agentsv1alpha1.Sandbox, error)
+
+// InitRuntime sends an init request to the sandbox runtime sidecar.
+// The sbx parameter is the raw Sandbox API object. When opts.SkipRefresh is false
+// and refreshFn is provided, it will be called to get the latest sandbox state
+// before each retry attempt.
+func InitRuntime(ctx context.Context, sbx *agentsv1alpha1.Sandbox, opts config.InitRuntimeOptions, refreshFn RefreshFunc) (time.Duration, error) {
+	ctx = logs.Extend(ctx, "action", "initRuntime")
+	log := klog.FromContext(ctx).WithValues("sandboxID", sbx.GetName(), "resourceVersion", sbx.GetResourceVersion())
+	start := time.Now()
+	initBody, err := json.Marshal(opts)
+	if err != nil {
+		log.Error(err, "failed to marshal initBody")
+		return 0, err
+	}
+	retries := -1
+	currentSbx := sbx
+	err = retry.OnError(wait.Backoff{
+		// about retry 20s
+		Duration: 200 * time.Millisecond,
+		Factor:   2.0,
+		Steps:    5,
+		Cap:      10 * time.Second,
+	}, commonutils.RetryIfContextNotCanceled(ctx), func() error {
+		var initErr error
+		retries++
+		requestCtx, cancel := context.WithTimeout(ctx, time.Second)
+		defer func() {
+			cancel()
+			if initErr != nil {
+				log.Error(initErr, "init runtime request failed", "retries", retries)
+			}
+		}()
+		if !opts.SkipRefresh && refreshFn != nil {
+			updated, refreshErr := refreshFn(ctx)
+			if refreshErr != nil {
+				log.Error(refreshErr, "failed to refresh sandbox")
+				initErr = refreshErr
+				return initErr
+			}
+			currentSbx = updated
+		}
+		runtimeURL := GetRuntimeURL(currentSbx)
+		if runtimeURL == "" {
+			log.Error(nil, "runtimeURL is empty")
+			return fmt.Errorf("runtimeURL is empty")
+		}
+		url := runtimeURL + "/init"
+		log.Info("sending request to runtime", "resourceVersion", sbx.GetResourceVersion(),
+			"url", url, "params", opts, "retries", retries)
+
+		// Create a new request for each retry to avoid Body reuse issue
+		r, initErr := http.NewRequestWithContext(requestCtx, http.MethodPost, url, bytes.NewBuffer(initBody))
+		if initErr != nil {
+			log.Error(initErr, "failed to create request")
+			return initErr
+		}
+		resp, initErr := proxyutils.ProxyRequest(r)
+		defer func() {
+			// Discard response body to allow connection reuse
+			if resp != nil {
+				_, _ = io.Copy(io.Discard, resp.Body)
+				_ = resp.Body.Close()
+			}
+		}()
+		// When ReInit is true, treat 401 as success (sandbox already initialized)
+		if resp != nil && resp.StatusCode == http.StatusUnauthorized && opts.ReInit {
+			log.Info("init runtime returned 401, treated as success because ReInit is true")
+			return nil
+		}
+		if initErr != nil {
+			return initErr
+		}
+		return nil
+	})
+	return time.Since(start), err
+}
+
 func GetCsiMountExtensionRequest(s metav1.Object) ([]v1alpha1.CSIMountConfig, error) {
 	var csiMountRequests []v1alpha1.CSIMountConfig
 	csiMountRequestsRaw := s.GetAnnotations()[models.ExtensionKeyClaimWithCSIMount_MountConfig]
