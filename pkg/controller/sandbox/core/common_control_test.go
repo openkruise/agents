@@ -824,6 +824,7 @@ func TestCommonControl_EnsureSandboxResumed(t *testing.T) {
 				Client:               client,
 				recorder:             record.NewFakeRecorder(10),
 				inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(client, inplaceupdate.DefaultGeneratePatchBodyFunc),
+				initializer:          &defaultSandboxInitializer{},
 			}
 
 			err := control.EnsureSandboxResumed(context.TODO(), tt.args)
@@ -1597,7 +1598,11 @@ func TestNewCommonControl(t *testing.T) {
 	recorder := record.NewFakeRecorder(10)
 	rl := NewRateLimiter()
 
-	control := NewCommonControl(fakeClient, recorder, rl)
+	control := NewCommonControl(SandboxControlArgs{
+		Client:      fakeClient,
+		Recorder:    recorder,
+		RateLimiter: rl,
+	})
 	if control == nil {
 		t.Fatal("NewCommonControl returned nil")
 	}

@@ -43,6 +43,35 @@ import (
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 )
 
+func TestAdd_FeatureGateDisabled(t *testing.T) {
+	// When SandboxGate feature gate is disabled, Add should return nil immediately
+	// without touching the manager.
+	_ = utilfeature.DefaultMutableFeatureGate.Set("Sandbox=false")
+	defer func() {
+		_ = utilfeature.DefaultMutableFeatureGate.Set("Sandbox=true")
+	}()
+
+	err := Add(nil) // manager is nil, but should never be accessed
+	if err != nil {
+		t.Errorf("Add() error = %v, expected nil when feature gate is disabled", err)
+	}
+}
+
+func TestAdd_GVKNotDiscovered(t *testing.T) {
+	// When SandboxGate feature gate is enabled but DiscoverGVK returns false
+	// (generic client is nil in test environment), Add should return nil.
+	_ = utilfeature.DefaultMutableFeatureGate.Set("Sandbox=true")
+	defer func() {
+		_ = utilfeature.DefaultMutableFeatureGate.Set("Sandbox=false")
+	}()
+
+	// client.GetGenericClient() returns nil in test, so DiscoverGVK returns false
+	err := Add(nil) // manager is nil, but should never be accessed
+	if err != nil {
+		t.Errorf("Add() error = %v, expected nil when GVK is not discovered", err)
+	}
+}
+
 func TestSandboxReconciler_Reconcile(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)
@@ -706,9 +735,13 @@ func TestSandboxReconciler_Reconcile(t *testing.T) {
 			client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&agentsv1alpha1.Sandbox{}).WithObjects(objects...).Build()
 			rl := core.NewRateLimiter()
 			reconciler := &SandboxReconciler{
-				Client:      client,
-				Scheme:      scheme,
-				controls:    core.NewSandboxControl(client, fakeRecorder, rl),
+				Client: client,
+				Scheme: scheme,
+				controls: core.NewSandboxControl(core.SandboxControlArgs{
+					Client:      client,
+					Recorder:    fakeRecorder,
+					RateLimiter: rl,
+				}),
 				rateLimiter: rl,
 			}
 			req := ctrl.Request{
@@ -905,9 +938,13 @@ func TestSandboxReconciler_ShutdownTime(t *testing.T) {
 	client := fake.NewClientBuilder().WithScheme(scheme).Build()
 	rl := core.NewRateLimiter()
 	reconciler := &SandboxReconciler{
-		Client:      client,
-		Scheme:      scheme,
-		controls:    core.NewSandboxControl(client, fakeRecorder, rl),
+		Client: client,
+		Scheme: scheme,
+		controls: core.NewSandboxControl(core.SandboxControlArgs{
+			Client:      client,
+			Recorder:    fakeRecorder,
+			RateLimiter: rl,
+		}),
 		rateLimiter: rl,
 	}
 
@@ -2141,9 +2178,13 @@ func TestReconcile_SandboxLifecycle_ClearSpecThenDelete(t *testing.T) {
 		Build()
 	rl := core.NewRateLimiter()
 	reconciler := &SandboxReconciler{
-		Client:      fakeClient,
-		Scheme:      scheme,
-		controls:    core.NewSandboxControl(fakeClient, fakeRecorder, rl),
+		Client: fakeClient,
+		Scheme: scheme,
+		controls: core.NewSandboxControl(core.SandboxControlArgs{
+			Client:      fakeClient,
+			Recorder:    fakeRecorder,
+			RateLimiter: rl,
+		}),
 		rateLimiter: rl,
 	}
 
@@ -2466,9 +2507,13 @@ func TestSandboxReconciler_Reconcile_RateLimitFeatureGate(t *testing.T) {
 				tt.setupRL(rl)
 			}
 			reconciler := &SandboxReconciler{
-				Client:      fakeClient,
-				Scheme:      scheme,
-				controls:    core.NewSandboxControl(fakeClient, fakeRecorder, rl),
+				Client: fakeClient,
+				Scheme: scheme,
+				controls: core.NewSandboxControl(core.SandboxControlArgs{
+					Client:      fakeClient,
+					Recorder:    fakeRecorder,
+					RateLimiter: rl,
+				}),
 				rateLimiter: rl,
 			}
 
@@ -2505,9 +2550,13 @@ func TestReconcile_SandboxNotFoundCleanup(t *testing.T) {
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&agentsv1alpha1.Sandbox{}).Build()
 	rl := core.NewRateLimiter()
 	reconciler := &SandboxReconciler{
-		Client:      fakeClient,
-		Scheme:      scheme,
-		controls:    core.NewSandboxControl(fakeClient, fakeRecorder, rl),
+		Client: fakeClient,
+		Scheme: scheme,
+		controls: core.NewSandboxControl(core.SandboxControlArgs{
+			Client:      fakeClient,
+			Recorder:    fakeRecorder,
+			RateLimiter: rl,
+		}),
 		rateLimiter: rl,
 	}
 
@@ -2569,9 +2618,13 @@ func TestReconcile_ScaleExpectationUnsatisfied(t *testing.T) {
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&agentsv1alpha1.Sandbox{}).WithObjects(sandbox).Build()
 	rl := core.NewRateLimiter()
 	reconciler := &SandboxReconciler{
-		Client:      fakeClient,
-		Scheme:      scheme,
-		controls:    core.NewSandboxControl(fakeClient, fakeRecorder, rl),
+		Client: fakeClient,
+		Scheme: scheme,
+		controls: core.NewSandboxControl(core.SandboxControlArgs{
+			Client:      fakeClient,
+			Recorder:    fakeRecorder,
+			RateLimiter: rl,
+		}),
 		rateLimiter: rl,
 	}
 
@@ -2626,9 +2679,13 @@ func TestReconcile_ResourceVersionExpectationUnsatisfied(t *testing.T) {
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&agentsv1alpha1.Sandbox{}).WithObjects(sandbox).Build()
 	rl := core.NewRateLimiter()
 	reconciler := &SandboxReconciler{
-		Client:      fakeClient,
-		Scheme:      scheme,
-		controls:    core.NewSandboxControl(fakeClient, fakeRecorder, rl),
+		Client: fakeClient,
+		Scheme: scheme,
+		controls: core.NewSandboxControl(core.SandboxControlArgs{
+			Client:      fakeClient,
+			Recorder:    fakeRecorder,
+			RateLimiter: rl,
+		}),
 		rateLimiter: rl,
 	}
 
@@ -2710,9 +2767,13 @@ func TestReconcile_UpgradingPhase(t *testing.T) {
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&agentsv1alpha1.Sandbox{}).WithObjects(sandbox, pod).Build()
 	rl := core.NewRateLimiter()
 	reconciler := &SandboxReconciler{
-		Client:      fakeClient,
-		Scheme:      scheme,
-		controls:    core.NewSandboxControl(fakeClient, fakeRecorder, rl),
+		Client: fakeClient,
+		Scheme: scheme,
+		controls: core.NewSandboxControl(core.SandboxControlArgs{
+			Client:      fakeClient,
+			Recorder:    fakeRecorder,
+			RateLimiter: rl,
+		}),
 		rateLimiter: rl,
 	}
 
