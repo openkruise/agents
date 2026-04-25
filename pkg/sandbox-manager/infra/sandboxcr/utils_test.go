@@ -253,7 +253,7 @@ func TestGetCsiMountExtensionRequest(t *testing.T) {
 				},
 			}
 
-			result, err := getCsiMountExtensionRequest(sandbox)
+			result, err := GetCsiMountExtensionRequest(sandbox)
 
 			if tt.expectError {
 				assert.Error(t, err)
@@ -365,7 +365,7 @@ func TestGetCsiMountExtensionRequest_v2(t *testing.T) {
 				},
 			}
 
-			result, err := getCsiMountExtensionRequest(sandbox)
+			result, err := GetCsiMountExtensionRequest(sandbox)
 
 			if tt.expectError {
 				assert.Error(t, err)

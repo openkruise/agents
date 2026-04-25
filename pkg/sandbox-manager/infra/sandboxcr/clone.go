@@ -158,7 +158,7 @@ func findCheckpointAndTemplateById(ctx context.Context, opts infra.CloneSandboxO
 func createSandboxFromCheckpoint(ctx context.Context, opts infra.CloneSandboxOptions, tmpl *v1alpha1.SandboxTemplate, cp *v1alpha1.Checkpoint, cache *Cache, client *clients.ClientSet, metrics infra.CloneMetrics) (*Sandbox, *config.InitRuntimeOptions, infra.CloneMetrics, error) {
 	log := klog.FromContext(ctx).WithValues("checkpoint", opts.CheckPointID, "step", "2.createSandboxFromCheckpoint")
 	start := time.Now()
-	initRuntimeOpts, err := getInitRuntimeRequest(cp)
+	initRuntimeOpts, err := GetInitRuntimeRequest(cp)
 	if err != nil {
 		log.Error(err, "failed to get init runtime request")
 		return nil, nil, metrics, err
@@ -206,7 +206,7 @@ func cloneReInitRuntime(ctx context.Context, sbx *Sandbox, opts infra.CloneSandb
 	initRuntimeOpts.ReInit = true
 	log.Info("re-init runtime")
 	var err error
-	metrics.InitRuntime, err = initRuntime(ctx, sbx, *initRuntimeOpts)
+	metrics.InitRuntime, err = InitRuntime(ctx, sbx, *initRuntimeOpts)
 	if err != nil {
 		log.Error(err, "failed to init runtime")
 		return metrics, fmt.Errorf("failed to init runtime: %w", err)

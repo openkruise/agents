@@ -116,6 +116,7 @@ func newTestCommonControl(hookFunc LifecycleHookFunc, objects ...client.Object) 
 		inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
 		rateLimiter:          NewRateLimiter(),
 		lifecycleHookFunc:    hookFunc,
+		reinitializer:        &defaultSandboxReinitializer{},
 	}
 }
 

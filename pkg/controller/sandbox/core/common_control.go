@@ -53,15 +53,23 @@ type commonControl struct {
 	inplaceUpdateControl *inplaceupdate.InPlaceUpdateControl
 	rateLimiter          *RateLimiter
 	lifecycleHookFunc    LifecycleHookFunc
+	// reinitializer performs re-initialization after sandbox resume or recreate upgrade
+	// (e.g. re-init runtime, re-mount CSI), ensuring the sandbox is fully functional
+	// after waking up from a paused state or being recreated during upgrade.
+	reinitializer SandboxReinitializer
 }
 
-func NewCommonControl(c client.Client, recorder record.EventRecorder, rl *RateLimiter) SandboxControl {
+func NewCommonControl(args SandboxControlArgs) SandboxControl {
 	control := &commonControl{
-		Client:               c,
-		recorder:             recorder,
-		inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(c, inplaceupdate.DefaultGeneratePatchBodyFunc),
-		rateLimiter:          rl,
+		Client:               args.Client,
+		recorder:             args.Recorder,
+		inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(args.Client, inplaceupdate.DefaultGeneratePatchBodyFunc),
+		rateLimiter:          args.RateLimiter,
 		lifecycleHookFunc:    ExecuteLifecycleHook,
+		reinitializer: &defaultSandboxReinitializer{
+			sandboxClient: args.SandboxClient,
+			cache:         args.Cache,
+		},
 	}
 	return control
 }
@@ -223,6 +231,12 @@ func (r *commonControl) EnsureSandboxResumed(ctx context.Context, args EnsureFun
 		rCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionReady))
 		rCond.Status = metav1.ConditionStatus(pCond.Status)
 		rCond.LastTransitionTime = pCond.LastTransitionTime
+
+		// perform post-resume initialization (re-init runtime only for community deployments)
+		if err := r.reinitializer.Reinitialize(ctx, box, newStatus); err != nil {
+			return err
+		}
+
 		utils.SetSandboxCondition(newStatus, *rCond)
 	}
 	return nil
@@ -343,6 +357,14 @@ func (r *commonControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureFu
 		upgradeCond.Message = ""
 		upgradeCond.LastTransitionTime = metav1.Now()
 		utils.SetSandboxCondition(newStatus, *upgradeCond)
+
+		// Perform post-upgrade initialization (re-init runtime, re-mount CSI) for claimed sandboxes.
+		// After a recreate upgrade, the pod is brand new, so runtime and dynamic CSI mounts need
+		// to be re-initialized before marking the sandbox as Ready.
+		if err := r.reinitializer.Reinitialize(ctx, box, newStatus); err != nil {
+			return err
+		}
+
 		newStatus.Phase = agentsv1alpha1.SandboxRunning
 		utils.SetSandboxCondition(newStatus, metav1.Condition{
 			Type:               string(agentsv1alpha1.SandboxConditionReady),

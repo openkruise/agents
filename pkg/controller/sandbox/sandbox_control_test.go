@@ -51,7 +51,11 @@ func TestNewSandboxControl(t *testing.T) {
 			recorder := record.NewFakeRecorder(10)
 			rl := core.NewRateLimiter()
 
-			controls := core.NewSandboxControl(fakeClient, recorder, rl)
+			controls := core.NewSandboxControl(core.SandboxControlArgs{
+				Client:      fakeClient,
+				Recorder:    recorder,
+				RateLimiter: rl,
+			})
 
 			if tt.wantNil && controls != nil {
 				t.Errorf("NewSandboxControl() expected nil, got %v", controls)
