@@ -299,7 +299,7 @@ func (s *Sandbox) Resume(ctx context.Context) error {
 	// Perform ReInit if initRuntimeOpts is set
 	if initRuntimeOpts != nil {
 		log.Info("will re-init runtime after resume")
-		if _, err := initRuntime(ctx, s, *initRuntimeOpts); err != nil {
+		if _, err := InitRuntime(ctx, s, *initRuntimeOpts); err != nil {
 			log.Error(err, "failed to perform ReInit after resume")
 			return fmt.Errorf("failed to perform ReInit after resume: %w", err)
 		}
@@ -307,7 +307,7 @@ func (s *Sandbox) Resume(ctx context.Context) error {
 	}
 
 	// Perform csi mount after resume
-	csiMountConfigRequests, err := getCsiMountExtensionRequest(s.Sandbox)
+	csiMountConfigRequests, err := GetCsiMountExtensionRequest(s.Sandbox)
 	if err != nil {
 		log.Error(err, "failed to get csi mount request")
 		return fmt.Errorf("failed to get csi mount request: %w", err)

@@ -5,11 +5,129 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/openkruise/agents/api/v1alpha1"
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
+	"github.com/openkruise/agents/pkg/utils"
 )
+
+func TestHashSandboxWithDifferentImages(t *testing.T) {
+	// Test that changing only image results in different full hash but same hash without image/resources
+	sandbox1 := &agentsv1alpha1.Sandbox{
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name:  "test-container",
+								Image: "nginx:1.19", // Different image
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	sandbox2 := &agentsv1alpha1.Sandbox{
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name:  "test-container",
+								Image: "nginx:1.20", // Different image
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	hash1, hashWithoutImageResources1 := utils.HashSandbox(sandbox1)
+	hash2, hashWithoutImageResources2 := utils.HashSandbox(sandbox2)
+
+	// Full hashes should be different because images are different
+	if hash1 == hash2 {
+		t.Errorf("Expected different full hashes for different images, but got same: %s", hash1)
+	}
+
+	// Hashes without images/resources should be the same
+	if hashWithoutImageResources1 != hashWithoutImageResources2 {
+		t.Errorf("Expected same hashes without images/resources, but got different: %s vs %s",
+			hashWithoutImageResources1, hashWithoutImageResources2)
+	}
+}
+
+func TestHashSandboxWithDifferentResources(t *testing.T) {
+	// Test that changing only resources results in different full hash but same hash without image/resources
+	sandbox1 := &agentsv1alpha1.Sandbox{
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name:  "test-container",
+								Image: "nginx:latest",
+								Resources: corev1.ResourceRequirements{
+									Requests: corev1.ResourceList{
+										corev1.ResourceCPU:    resource.MustParse("100m"),
+										corev1.ResourceMemory: resource.MustParse("128Mi"),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	sandbox2 := &agentsv1alpha1.Sandbox{
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name:  "test-container",
+								Image: "nginx:latest",
+								Resources: corev1.ResourceRequirements{
+									Requests: corev1.ResourceList{
+										corev1.ResourceCPU:    resource.MustParse("200m"),  // Different resource
+										corev1.ResourceMemory: resource.MustParse("256Mi"), // Different resource
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	hash1, hashWithoutImageResources1 := utils.HashSandbox(sandbox1)
+	hash2, hashWithoutImageResources2 := utils.HashSandbox(sandbox2)
+
+	// Full hashes should be different because resources are different
+	if hash1 == hash2 {
+		t.Errorf("Expected different full hashes for different resources, but got same: %s", hash1)
+	}
+
+	// Hashes without images/resources should be the same
+	if hashWithoutImageResources1 != hashWithoutImageResources2 {
+		t.Errorf("Expected same hashes without images/resources, but got different: %s vs %s",
+			hashWithoutImageResources1, hashWithoutImageResources2)
+	}
+}
 
 func TestSetSandboxCondition(t *testing.T) {
 	tests := []struct {
@@ -253,7 +371,7 @@ func TestGetCsiMountExtensionRequest(t *testing.T) {
 				},
 			}
 
-			result, err := getCsiMountExtensionRequest(sandbox)
+			result, err := GetCsiMountExtensionRequest(sandbox)
 
 			if tt.expectError {
 				assert.Error(t, err)
@@ -365,7 +483,7 @@ func TestGetCsiMountExtensionRequest_v2(t *testing.T) {
 				},
 			}
 
-			result, err := getCsiMountExtensionRequest(sandbox)
+			result, err := GetCsiMountExtensionRequest(sandbox)
 
 			if tt.expectError {
 				assert.Error(t, err)

@@ -12,6 +12,7 @@ import (
 	"k8s.io/client-go/tools/record"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/inplaceupdate"
 )
 
@@ -313,7 +314,7 @@ func TestHandleInPlaceUpdateCommon_QoSChangeRejected(t *testing.T) {
 		},
 	}
 
-	_, hashWithoutImageAndResource := HashSandbox(&agentsv1alpha1.Sandbox{
+	_, hashWithoutImageAndResource := utils.HashSandbox(&agentsv1alpha1.Sandbox{
 		Spec: agentsv1alpha1.SandboxSpec{
 			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
 				Template: &corev1.PodTemplateSpec{
@@ -438,7 +439,7 @@ func TestHandleInPlaceUpdateCommon_ResizeInfeasibleFailFast(t *testing.T) {
 		},
 	}
 
-	_, hashWithoutImageAndResource := HashSandbox(&agentsv1alpha1.Sandbox{
+	_, hashWithoutImageAndResource := utils.HashSandbox(&agentsv1alpha1.Sandbox{
 		Spec: agentsv1alpha1.SandboxSpec{
 			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
 				Template: &corev1.PodTemplateSpec{Spec: pod.Spec},
@@ -539,7 +540,7 @@ func TestHandleInPlaceUpdateCommon_TerminalFailureNotOverwritten(t *testing.T) {
 		},
 	}
 
-	_, hashWithoutImageAndResource := HashSandbox(&agentsv1alpha1.Sandbox{
+	_, hashWithoutImageAndResource := utils.HashSandbox(&agentsv1alpha1.Sandbox{
 		Spec: agentsv1alpha1.SandboxSpec{
 			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
 				Template: &corev1.PodTemplateSpec{Spec: pod.Spec},

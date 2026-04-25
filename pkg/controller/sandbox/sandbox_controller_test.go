@@ -705,7 +705,7 @@ func TestSandboxReconciler_Reconcile(t *testing.T) {
 			reconciler := &SandboxReconciler{
 				Client:      client,
 				Scheme:      scheme,
-				controls:    core.NewSandboxControl(client, fakeRecorder, rl),
+				controls:    core.NewSandboxControl(core.SandboxControlArgs{Client: client, Recorder: fakeRecorder, RateLimiter: rl}),
 				rateLimiter: rl,
 			}
 			req := ctrl.Request{
@@ -904,7 +904,7 @@ func TestSandboxReconciler_ShutdownTime(t *testing.T) {
 	reconciler := &SandboxReconciler{
 		Client:      client,
 		Scheme:      scheme,
-		controls:    core.NewSandboxControl(client, fakeRecorder, rl),
+		controls:    core.NewSandboxControl(core.SandboxControlArgs{Client: client, Recorder: fakeRecorder, RateLimiter: rl}),
 		rateLimiter: rl,
 	}
 
@@ -2127,9 +2127,13 @@ func TestReconcile_SandboxLifecycle_ClearSpecThenDelete(t *testing.T) {
 		Build()
 	rl := core.NewRateLimiter()
 	reconciler := &SandboxReconciler{
-		Client:      fakeClient,
-		Scheme:      scheme,
-		controls:    core.NewSandboxControl(fakeClient, fakeRecorder, rl),
+		Client: fakeClient,
+		Scheme: scheme,
+		controls: core.NewSandboxControl(core.SandboxControlArgs{
+			Client:      fakeClient,
+			Recorder:    fakeRecorder,
+			RateLimiter: rl,
+		}),
 		rateLimiter: rl,
 	}
 
@@ -2451,7 +2455,7 @@ func TestSandboxReconciler_Reconcile_RateLimitFeatureGate(t *testing.T) {
 			reconciler := &SandboxReconciler{
 				Client:      fakeClient,
 				Scheme:      scheme,
-				controls:    core.NewSandboxControl(fakeClient, fakeRecorder, rl),
+				controls:    core.NewSandboxControl(core.SandboxControlArgs{Client: fakeClient, Recorder: fakeRecorder, RateLimiter: rl}),
 				rateLimiter: rl,
 			}
 

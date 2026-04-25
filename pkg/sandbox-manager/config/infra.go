@@ -6,6 +6,7 @@ type InitRuntimeOptions struct {
 	EnvVars     map[string]string `json:"envVars,omitempty"`
 	AccessToken string            `json:"accessToken,omitempty"`
 	ReInit      bool              `json:"-"`
+	SkipRefresh bool              `json:"skipRefresh"`
 }
 
 const DefaultCSIMountConcurrency = 3

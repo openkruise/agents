@@ -58,7 +58,7 @@ func getInitRuntimeRequest(s metav1.Object) (*config.InitRuntimeOptions, error) 
 	return initRuntimeOpts, nil
 }
 
-func getCsiMountExtensionRequest(s metav1.Object) ([]v1alpha1.CSIMountConfig, error) {
+func GetCsiMountExtensionRequest(s metav1.Object) ([]v1alpha1.CSIMountConfig, error) {
 	var csiMountRequests []v1alpha1.CSIMountConfig
 	csiMountRequestsRaw := s.GetAnnotations()[models.ExtensionKeyClaimWithCSIMount_MountConfig]
 	if csiMountRequestsRaw == "" {

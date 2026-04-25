@@ -43,9 +43,13 @@ import (
 	"github.com/openkruise/agents/pkg/controller/sandbox/core"
 	"github.com/openkruise/agents/pkg/discovery"
 	"github.com/openkruise/agents/pkg/features"
+	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
+	managerconfig "github.com/openkruise/agents/pkg/sandbox-manager/config"
+	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
+	"github.com/openkruise/agents/pkg/utils/webhookutils"
 )
 
 func init() {
@@ -61,11 +65,30 @@ func Add(mgr manager.Manager) error {
 	if !utilfeature.DefaultFeatureGate.Enabled(features.SandboxGate) || !discovery.DiscoverGVK(sandboxControllerKind) {
 		return nil
 	}
+
+	clientSet, err := clients.NewClientSetWithConfig(mgr.GetConfig())
+	if err != nil {
+		return fmt.Errorf("failed to create manager client set: %w", err)
+	}
+	// Initialize cache
+	cache, err := sandboxcr.NewCache(clientSet, managerconfig.SandboxManagerOptions{
+		SystemNamespace: webhookutils.GetNamespace(),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create cache: %w", err)
+	}
+
 	rateLimiter := core.NewRateLimiter()
-	err := (&SandboxReconciler{
+	err = (&SandboxReconciler{
 		Client:      mgr.GetClient(),
 		Scheme:      mgr.GetScheme(),
-		controls:    core.NewSandboxControl(mgr.GetClient(), mgr.GetEventRecorderFor("sandbox"), rateLimiter),
+		controls:    core.NewSandboxControl(core.SandboxControlArgs{
+			Client:        mgr.GetClient(),
+			Recorder:      mgr.GetEventRecorderFor("sandbox"),
+			RateLimiter:   rateLimiter,
+			SandboxClient: clientSet,
+			Cache:         cache,
+		}),
 		rateLimiter: rateLimiter,
 	}).SetupWithManager(mgr)
 	if err != nil {
@@ -264,7 +287,7 @@ func (r *SandboxReconciler) addSandboxFinalizerAndHash(ctx context.Context, box 
 	if originObj.Annotations == nil {
 		originObj.Annotations = make(map[string]string)
 	}
-	_, hashImmutablePart := core.HashSandbox(box)
+	_, hashImmutablePart := utils.HashSandbox(box)
 	originObj.Annotations[agentsv1alpha1.SandboxHashImmutablePart] = hashImmutablePart
 	if err := client.IgnoreNotFound(r.Patch(ctx, originObj, patch)); err != nil {
 		logger.Error(err, "failed to patch sandbox finalizer and hash")
@@ -300,7 +323,7 @@ func calculateStatus(args core.EnsureFuncArgs) (*agentsv1alpha1.SandboxStatus, b
 	pod, box, newStatus := args.Pod, args.Box, args.NewStatus
 	logger := logf.FromContext(context.TODO()).WithValues("sandbox", klog.KObj(box))
 
-	hash, _ := core.HashSandbox(box)
+	hash, _ := utils.HashSandbox(box)
 	newStatus.ObservedGeneration = box.Generation
 	newStatus.UpdateRevision = hash
 	if newStatus.Phase == "" {

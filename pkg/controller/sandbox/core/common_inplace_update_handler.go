@@ -45,7 +45,7 @@ func handleInPlaceUpdateCommon(
 ) (bool, error) {
 	logger := handler.GetLogger(ctx, box)
 
-	_, hashImmutablePart := HashSandbox(box)
+	_, hashImmutablePart := utils.HashSandbox(box)
 
 	// old Pod do not include Labels[pod-template-hash] and do not support inplace update.
 	// Check if inplace update is supported

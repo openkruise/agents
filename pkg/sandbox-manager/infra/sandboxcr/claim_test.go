@@ -1903,7 +1903,7 @@ func TestModifyPickedSandbox_CSIMount(t *testing.T) {
 				},
 			},
 			expectedAnnos: map[string]string{
-				v1alpha1.AnnotationInitRuntimeRequest:            `{"envVars":{"KEY1":"value1","KEY2":"value2"}}`,
+				v1alpha1.AnnotationInitRuntimeRequest:            `{"envVars":{"KEY1":"value1","KEY2":"value2"},"skipRefresh":false}`,
 				models.ExtensionKeyClaimWithCSIMount_MountConfig: `{"mountOptionList":[{"pvName":"csi-pv","mountPath":"/mnt/data"}]}`,
 			},
 		},
@@ -2151,7 +2151,7 @@ func TestModifyPickedSandbox_InitRuntime(t *testing.T) {
 				},
 			},
 			expectedAnnos: map[string]string{
-				v1alpha1.AnnotationInitRuntimeRequest: `{"envVars":{"ENV1":"value1","ENV2":"value2"},"accessToken":"test-token"}`,
+				v1alpha1.AnnotationInitRuntimeRequest: `{"envVars":{"ENV1":"value1","ENV2":"value2"},"accessToken":"test-token","skipRefresh":false}`,
 				v1alpha1.AnnotationRuntimeAccessToken: "test-token",
 			},
 		},
@@ -2165,7 +2165,7 @@ func TestModifyPickedSandbox_InitRuntime(t *testing.T) {
 				},
 			},
 			expectedAnnos: map[string]string{
-				v1alpha1.AnnotationInitRuntimeRequest: `{"envVars":{"TEST_ENV":"test_value"}}`,
+				v1alpha1.AnnotationInitRuntimeRequest: `{"envVars":{"TEST_ENV":"test_value"},"skipRefresh":false}`,
 			},
 			notExpectedAnnos: []string{
 				v1alpha1.AnnotationRuntimeAccessToken,

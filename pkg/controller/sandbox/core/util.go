@@ -18,7 +18,6 @@ package core
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
@@ -31,42 +30,6 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/utils"
 )
-
-// HashSandbox calculates the hash value using sandbox.spec.template
-func HashSandbox(box *agentsv1alpha1.Sandbox) (string, string) {
-	if box.Spec.Template == nil {
-		if box.Spec.TemplateRef == nil {
-			return "", ""
-		}
-		// templateRef mode does not carry inline PodTemplate in Sandbox spec.
-		// Use TemplateRef itself as a stable revision key to avoid nil dereference.
-		by, _ := json.Marshal(box.Spec.TemplateRef)
-		hash := utils.HashData(by)
-		return hash, hash
-	}
-
-	// hash using sandbox.spec.template
-	by, _ := json.Marshal(*box.Spec.Template)
-	hash := utils.HashData(by)
-
-	// hash using sandbox.spec.template without image and resources
-	tempClone := box.Spec.Template.DeepCopy()
-	tempClone.Labels = nil
-	tempClone.Annotations = nil
-	for i := range tempClone.Spec.Containers {
-		container := &tempClone.Spec.Containers[i]
-		container.Image = ""
-		container.Resources = corev1.ResourceRequirements{}
-	}
-	for i := range tempClone.Spec.InitContainers {
-		container := &tempClone.Spec.InitContainers[i]
-		container.Image = ""
-		container.Resources = corev1.ResourceRequirements{}
-	}
-	by, _ = json.Marshal(*tempClone)
-	hashImmutablePart := utils.HashData(by)
-	return hash, hashImmutablePart
-}
 
 // GeneratePVCName generates a persistent volume claim name from template name and sandbox name
 func GeneratePVCName(templateName, sandboxName string) (string, error) {

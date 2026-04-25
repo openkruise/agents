@@ -206,7 +206,7 @@ func cloneReInitRuntime(ctx context.Context, sbx *Sandbox, opts infra.CloneSandb
 	initRuntimeOpts.ReInit = true
 	log.Info("re-init runtime")
 	var err error
-	metrics.InitRuntime, err = initRuntime(ctx, sbx, *initRuntimeOpts)
+	metrics.InitRuntime, err = InitRuntime(ctx, sbx, *initRuntimeOpts)
 	if err != nil {
 		log.Error(err, "failed to init runtime")
 		return metrics, fmt.Errorf("failed to init runtime: %w", err)

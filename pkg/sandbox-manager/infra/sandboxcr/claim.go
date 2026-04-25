@@ -183,7 +183,7 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 
 	if opts.InitRuntime != nil {
 		log.Info("starting to init runtime", "opts", opts.InitRuntime)
-		metrics.InitRuntime, err = initRuntime(ctx, sbx, *opts.InitRuntime)
+		metrics.InitRuntime, err = InitRuntime(ctx, sbx, *opts.InitRuntime)
 		if err != nil {
 			log.Error(err, "failed to init runtime")
 			err = retriableError{Message: fmt.Sprintf("failed to init runtime: %s", err)}
@@ -566,7 +566,7 @@ func performLockSandbox(ctx context.Context, sbx *Sandbox, lockType infra.LockTy
 	return err
 }
 
-func initRuntime(ctx context.Context, sbx *Sandbox, opts config.InitRuntimeOptions) (time.Duration, error) {
+func InitRuntime(ctx context.Context, sbx *Sandbox, opts config.InitRuntimeOptions) (time.Duration, error) {
 	ctx = logs.Extend(ctx, "action", "initRuntime")
 	log := klog.FromContext(ctx).WithValues("sandboxID", sbx.GetName(), "resourceVersion", sbx.GetResourceVersion())
 	start := time.Now()
@@ -593,10 +593,12 @@ func initRuntime(ctx context.Context, sbx *Sandbox, opts config.InitRuntimeOptio
 			}
 		}()
 
-		initErr = sbx.InplaceRefresh(ctx, false)
-		if initErr != nil {
-			log.Error(initErr, "failed to refresh sandbox")
-			return initErr
+		if !opts.SkipRefresh {
+			initErr = sbx.InplaceRefresh(ctx, false)
+			if initErr != nil {
+				log.Error(initErr, "failed to refresh sandbox")
+				return initErr
+			}
 		}
 		runtimeURL := sbx.GetRuntimeURL()
 		if runtimeURL == "" {

@@ -46,12 +46,12 @@ type commonControl struct {
 	rateLimiter          *RateLimiter
 }
 
-func NewCommonControl(c client.Client, recorder record.EventRecorder, rl *RateLimiter) SandboxControl {
+func NewCommonControl(args SandboxControlArgs) SandboxControl {
 	control := &commonControl{
-		Client:               c,
-		recorder:             recorder,
-		inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(c, inplaceupdate.DefaultGeneratePatchBodyFunc),
-		rateLimiter:          rl,
+		Client:               args.Client,
+		recorder:             args.Recorder,
+		inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(args.Client, inplaceupdate.DefaultGeneratePatchBodyFunc),
+		rateLimiter:          args.RateLimiter,
 	}
 	return control
 }
