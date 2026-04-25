@@ -51,7 +51,7 @@ func GetSandboxState(sbx *agentsv1alpha1.Sandbox) (state string, reason string) 
 				}
 			}
 		} else {
-			// Paused and Resuming phases are both treated as paused state
+			// Pausing, Paused and Resuming phases are all treated as paused state
 			return agentsv1alpha1.SandboxStatePaused, "NotRunningResourceClaimed"
 		}
 	}
