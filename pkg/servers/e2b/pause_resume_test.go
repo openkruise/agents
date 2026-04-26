@@ -201,6 +201,141 @@ func TestConnectSandbox(t *testing.T) {
 	}
 }
 
+func TestShouldSkipRunningSandboxTimeoutUpdate(t *testing.T) {
+	now := time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC)
+	currentEndAt := now.Add(10 * time.Minute)
+
+	tests := []struct {
+		name                  string
+		currentEndAt          time.Time
+		requestTimeoutSeconds int
+		wantSkip              bool
+	}{
+		{
+			name:                  "shorter_deadline_skips",
+			currentEndAt:          currentEndAt,
+			requestTimeoutSeconds: 60,
+			wantSkip:              true,
+		},
+		{
+			name:                  "equal_deadline_skips",
+			currentEndAt:          currentEndAt,
+			requestTimeoutSeconds: int(currentEndAt.Sub(now) / time.Second),
+			wantSkip:              true,
+		},
+		{
+			name:                  "longer_deadline_does_not_skip",
+			currentEndAt:          currentEndAt,
+			requestTimeoutSeconds: int(currentEndAt.Sub(now)/time.Second) + 120,
+			wantSkip:              false,
+		},
+		{
+			name:                  "zero_current_never_skips",
+			currentEndAt:          time.Time{},
+			requestTimeoutSeconds: 30,
+			wantSkip:              false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			skip, reqEnd := shouldSkipRunningSandboxTimeoutUpdate(tt.currentEndAt, now, tt.requestTimeoutSeconds)
+			assert.Equal(t, tt.wantSkip, skip)
+			assert.Equal(t, TimeAfterSeconds(now, tt.requestTimeoutSeconds), reqEnd)
+		})
+	}
+}
+
+func TestConnectSandboxRunningTimeoutGuard(t *testing.T) {
+	templateName := "test-template-connect-timeout-guard"
+	user := &models.CreatedTeamAPIKey{
+		ID:   keys.AdminKeyID,
+		Key:  InitKey,
+		Name: "admin",
+	}
+	tests := []struct {
+		name            string
+		autoPause       bool
+		initialTimeout  int
+		requestTimeout  int
+		expectUnchanged bool
+	}{
+		{name: "shorter running timeout is ignored", autoPause: false, initialTimeout: 600, requestTimeout: 300, expectUnchanged: true},
+		{name: "longer running timeout extends", autoPause: false, initialTimeout: 300, requestTimeout: 600, expectUnchanged: false},
+		{name: "shorter auto-pause timeout is ignored", autoPause: true, initialTimeout: 600, requestTimeout: 300, expectUnchanged: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			controller, client, teardown := Setup(t)
+			defer teardown()
+			cleanup := CreateSandboxPool(t, controller, templateName, 1)
+			defer cleanup()
+
+			createResp, err := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
+				TemplateID: templateName,
+				AutoPause:  tt.autoPause,
+				Timeout:    tt.initialTimeout,
+				Metadata: map[string]string{
+					models.ExtensionKeySkipInitRuntime: agentsv1alpha1.True,
+				},
+			}, nil, user))
+			require.Nil(t, err)
+			assert.Equal(t, models.SandboxStateRunning, createResp.Body.State)
+			AvoidGetFromCache(t, createResp.Body.SandboxID, client.SandboxClient)
+
+			baselineEndAt := createResp.Body.EndAt
+			baselineParsed, parseErr := time.Parse(time.RFC3339, baselineEndAt)
+			require.NoError(t, parseErr)
+
+			sbxBefore := GetSandbox(t, createResp.Body.SandboxID, client.SandboxClient)
+			var pauseBefore, shutdownBefore time.Time
+			if sbxBefore.Spec.PauseTime != nil {
+				pauseBefore = sbxBefore.Spec.PauseTime.Time
+			}
+			if sbxBefore.Spec.ShutdownTime != nil {
+				shutdownBefore = sbxBefore.Spec.ShutdownTime.Time
+			}
+
+			time.Sleep(20 * time.Millisecond)
+			connectNow := time.Now()
+			connectResp, apiErr := controller.ConnectSandbox(NewRequest(t, nil, models.SetTimeoutRequest{
+				TimeoutSeconds: tt.requestTimeout,
+			}, map[string]string{
+				"sandboxID": createResp.Body.SandboxID,
+			}, user))
+			require.Nil(t, apiErr)
+			assert.Equal(t, http.StatusOK, connectResp.Code)
+			assert.Equal(t, models.SandboxStateRunning, connectResp.Body.State)
+
+			if tt.expectUnchanged {
+				endAtAfter, parseErr2 := time.Parse(time.RFC3339, connectResp.Body.EndAt)
+				require.NoError(t, parseErr2)
+				assert.WithinDuration(t, baselineParsed, endAtAfter, 2*time.Second,
+					"EndAt should match pre-connect baseline when shorter/equal connect timeout is ignored")
+				sbxAfter := GetSandbox(t, createResp.Body.SandboxID, client.SandboxClient)
+				if !pauseBefore.IsZero() {
+					require.NotNil(t, sbxAfter.Spec.PauseTime)
+					assert.WithinDuration(t, pauseBefore, sbxAfter.Spec.PauseTime.Time, time.Second)
+				}
+				if !shutdownBefore.IsZero() {
+					require.NotNil(t, sbxAfter.Spec.ShutdownTime)
+					assert.WithinDuration(t, shutdownBefore, sbxAfter.Spec.ShutdownTime.Time, time.Second)
+				}
+			} else {
+				AssertEndAt(t, connectNow.Add(time.Duration(tt.requestTimeout)*time.Second), connectResp.Body.EndAt)
+				sbxAfter := GetSandbox(t, createResp.Body.SandboxID, client.SandboxClient)
+				if tt.autoPause {
+					require.NotNil(t, sbxAfter.Spec.PauseTime)
+					assert.WithinDuration(t, connectNow.Add(time.Duration(tt.requestTimeout)*time.Second), sbxAfter.Spec.PauseTime.Time, 5*time.Second)
+				} else {
+					require.NotNil(t, sbxAfter.Spec.ShutdownTime)
+					assert.WithinDuration(t, connectNow.Add(time.Duration(tt.requestTimeout)*time.Second), sbxAfter.Spec.ShutdownTime.Time, 5*time.Second)
+				}
+			}
+		})
+	}
+}
+
 func TestResumeSandbox(t *testing.T) {
 	templateName := "test-template"
 	user := &models.CreatedTeamAPIKey{
