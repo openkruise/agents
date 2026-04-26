@@ -1,4 +1,4 @@
-name: E2E-1.32
+name: E2E-Upgrade-1.32
 
 on:
   push:
@@ -19,7 +19,7 @@ env:
   KIND_CLUSTER_NAME: 'ci-testing'
 
 jobs:
-  sandbox:
+  sandbox-upgrade:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -48,5 +48,4 @@ jobs:
       - name: Run E2E Tests
         run: |
           export KUBECONFIG=/home/runner/.kube/config
-          hack/run-agents-e2e-test.sh --print-info --skip 'Sandbox Upgrade Lifecycle|SandboxUpdateOps E2E'
-
+          hack/run-agents-e2e-test.sh --print-info --focus 'Sandbox Upgrade Lifecycle|SandboxUpdateOps E2E'

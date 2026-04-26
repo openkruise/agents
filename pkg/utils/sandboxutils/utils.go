@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/openkruise/agents/pkg/proxy"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/utils"
 )
 

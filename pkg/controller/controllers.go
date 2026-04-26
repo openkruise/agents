@@ -22,6 +22,7 @@ import (
 	"github.com/openkruise/agents/pkg/controller/sandbox"
 	"github.com/openkruise/agents/pkg/controller/sandboxclaim"
 	"github.com/openkruise/agents/pkg/controller/sandboxset"
+	"github.com/openkruise/agents/pkg/controller/sandboxupdateops"
 )
 
 var controllerAddFuncs []func(manager.Manager) error
@@ -30,6 +31,7 @@ func init() {
 	controllerAddFuncs = append(controllerAddFuncs, sandbox.Add)
 	controllerAddFuncs = append(controllerAddFuncs, sandboxset.Add)
 	controllerAddFuncs = append(controllerAddFuncs, sandboxclaim.Add)
+	controllerAddFuncs = append(controllerAddFuncs, sandboxupdateops.Add)
 }
 
 func SetupWithManager(m manager.Manager) error {

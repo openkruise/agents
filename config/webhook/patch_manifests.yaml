@@ -49,3 +49,8 @@ webhooks:
       service:
         name: sandbox-controller-manager-webhook-service
         namespace: sandbox-system
+  - name: v-suo.kb.io
+    clientConfig:
+      service:
+        name: sandbox-controller-manager-webhook-service
+        namespace: sandbox-system
