@@ -16,6 +16,7 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
 )
 
 // testRequestAdapter is a RequestAdapter implementation for testing
@@ -34,7 +35,7 @@ type mapResult struct {
 	err          error
 }
 
-func (t *testRequestAdapter) Map(string, string, string, int, map[string]string) (string, int, map[string]string, error) {
+func (t *testRequestAdapter) Map(*adapters.ParsedRequest) (string, int, map[string]string, error) {
 	return t.mapResult.sandboxID, t.mapResult.sandboxPort, t.mapResult.extraHeaders, t.mapResult.err
 }
 
@@ -44,6 +45,12 @@ func (t *testRequestAdapter) IsSandboxRequest(string, string, int) bool {
 
 func (t *testRequestAdapter) Entry() string {
 	return t.entry
+}
+
+func (t *testRequestAdapter) ParseRequest(headers map[string]string) *adapters.ParsedRequest {
+	// Use a real E2BAdapter to parse, so tests exercise the real parsing logic
+	a := adapters.NewE2BAdapter(0)
+	return a.ParseRequest(headers)
 }
 
 // mockProcessServer is a mock implementation of the ExternalProcessor_ProcessServer interface

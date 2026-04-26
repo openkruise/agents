@@ -3,6 +3,7 @@ package e2b
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -25,6 +26,8 @@ import (
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
+	managerutils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
+	"github.com/openkruise/agents/pkg/utils/sandbox-manager/proxyutils"
 	testutils "github.com/openkruise/agents/test/utils"
 )
 
@@ -1096,6 +1099,108 @@ func TestDeleteSandbox(t *testing.T) {
 				require.Nil(t, apiErr)
 				assert.Equal(t, tt.expectStatus, deleteResp.Code)
 			}
+		})
+	}
+}
+
+func TestBrowserUseCDPPort(t *testing.T) {
+	controller, _, teardown := Setup(t)
+	defer teardown()
+
+	user := &models.CreatedTeamAPIKey{
+		ID:   keys.AdminKeyID,
+		Key:  InitKey,
+		Name: "test-user",
+	}
+
+	templateName := "browseruse-template"
+	cleanup := CreateSandboxPool(t, controller, templateName, 1)
+	defer cleanup()
+
+	createResp, createErr := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
+		TemplateID: templateName,
+		Metadata: map[string]string{
+			models.ExtensionKeySkipInitRuntime: v1alpha1.True,
+		},
+	}, nil, user))
+	require.Nil(t, createErr)
+
+	sandboxID := createResp.Body.SandboxID
+	expectedBody := `{"Browser":"Chrome","Protocol-Version":"1.3","User-Agent":"Test","V8-Version":"12.0","WebKit-Version":"537.36","webSocketDebuggerUrl":"ws://127.0.0.1:9222/devtools/browser/abc"}`
+
+	origRequest := proxyutils.DefaultRequestFunc
+	t.Cleanup(func() {
+		proxyutils.DefaultRequestFunc = origRequest
+	})
+
+	tests := []struct {
+		name           string
+		query          map[string]string
+		expectedPort   int
+		expectedStatus int
+		errorContains  string
+	}{
+		{
+			name:           "uses default port when query missing",
+			query:          nil,
+			expectedPort:   models.CDPPort,
+			expectedStatus: http.StatusOK,
+		},
+		{
+			name:           "uses custom cdp port",
+			query:          map[string]string{"cdpPort": "9333"},
+			expectedPort:   9333,
+			expectedStatus: http.StatusOK,
+		},
+		{
+			name:           "rejects non integer cdp port",
+			query:          map[string]string{"cdpPort": "abc"},
+			expectedStatus: http.StatusBadRequest,
+			errorContains:  "Invalid cdpPort",
+		},
+		{
+			name:           "rejects out of range cdp port",
+			query:          map[string]string{"cdpPort": "65536"},
+			expectedStatus: http.StatusBadRequest,
+			errorContains:  "Invalid cdpPort",
+		},
+		{
+			name:           "rejects zero cdp port",
+			query:          map[string]string{"cdpPort": "0"},
+			expectedStatus: http.StatusBadRequest,
+			errorContains:  "Invalid cdpPort",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			proxyutils.DefaultRequestFunc = func(ctx context.Context, sbx *v1alpha1.Sandbox, method, path string, port int, body io.Reader) (*http.Response, error) {
+				assert.Equal(t, "/json/version", path)
+				assert.Equal(t, tt.expectedPort, port)
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(expectedBody)),
+				}, nil
+			}
+
+			req := NewRequest(t, tt.query, nil, map[string]string{
+				"sandboxID": sandboxID,
+			}, user)
+
+			resp, apiErr := controller.BrowserUse(req)
+			if tt.expectedStatus != http.StatusOK {
+				require.NotNil(t, apiErr)
+				assert.Equal(t, tt.expectedStatus, apiErr.Code)
+				assert.Contains(t, apiErr.Message, tt.errorContains)
+				return
+			}
+
+			require.Nil(t, apiErr)
+			require.NotNil(t, resp.Body)
+			assert.Equal(t, http.StatusOK, resp.Code)
+			assert.Equal(t, "Chrome", resp.Body.Browser)
+			assert.Contains(t, resp.Body.WebSocketDebuggerURL,
+				fmt.Sprintf("wss://%s", managerutils.GetSandboxAddress(sandboxID, controller.domain, int32(tt.expectedPort))))
 		})
 	}
 }

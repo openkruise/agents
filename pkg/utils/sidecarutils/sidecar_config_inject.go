@@ -63,7 +63,7 @@ func parseInjectConfig(ctx context.Context, configKey string, configRaw map[stri
 
 	err := json.Unmarshal([]byte(configRaw[configKey]), &sidecarConfig)
 	if err != nil {
-		log.Error(err, "failed to unmarshal sidecar config for the %v", configKey)
+		log.Error(err, "failed to unmarshal sidecar config", "configKey", configKey)
 		return sidecarConfig, err
 	}
 	return sidecarConfig, nil

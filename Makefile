@@ -162,9 +162,17 @@ deploy-sandbox-manager: kustomize
 deploy-agent-sandbox-controller: kustomize
 	$(KUSTOMIZE) build config/default/ | kubectl apply -f -
 
+.PHONY: deploy-sandbox-gateway
+deploy-sandbox-gateway: kustomize
+	$(KUSTOMIZE) build config/sandbox-gateway/ | kubectl apply -f -
+
 .PHONY: undeploy-sandbox-manager
 undeploy-sandbox-manager: kustomize
 	$(KUSTOMIZE) build config/sandbox-manager/ | kubectl delete -f -
+
+.PHONY: undeploy-sandbox-gateway
+undeploy-sandbox-gateway: kustomize
+	$(KUSTOMIZE) build config/sandbox-gateway/ | kubectl delete -f -
 
 .PHONY: undeploy-agent-sandbox-controller
 undeploy-agent-sandbox-controller: kustomize

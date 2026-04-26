@@ -1,12 +1,15 @@
 package filter
 
 import (
+	"fmt"
+
 	"github.com/envoyproxy/envoy/contrib/golang/common/go/api"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/registry"
+	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
 )
 
 var logger *zap.Logger
@@ -18,10 +21,11 @@ func init() {
 }
 
 func FilterFactory(c interface{}, callbacks api.FilterCallbackHandler) api.StreamFilter {
-	cfg := c.(*Config)
+	cfg := c.(*FilterConfig)
 	return &sandboxFilter{
 		callbacks: callbacks,
-		config:    cfg,
+		config:    cfg.Config,
+		adapter:   cfg.Adapter,
 	}
 }
 
@@ -29,64 +33,41 @@ type sandboxFilter struct {
 	api.PassThroughStreamFilter
 	callbacks api.FilterCallbackHandler
 	config    *Config
+	adapter   *adapters.E2BAdapter
 }
 
 func (f *sandboxFilter) DecodeHeaders(header api.RequestHeaderMap, endStream bool) api.StatusType {
-	// First, try to get sandbox ID from sandbox header
-	sandboxHeaderName := f.config.GetSandboxHeaderName()
-	sandboxID, _ := header.Get(sandboxHeaderName)
-	var port string
+	// Step 1: Build flat headers map from the request, including pseudo-headers
+	headers := make(map[string]string)
+	header.Range(func(key, value string) bool {
+		headers[key] = value
+		return true
+	})
 
-	if sandboxID != "" {
-		// Sandbox header found, get port from port header
-		port, _ = header.Get(f.config.SandboxPortHeader)
-		if port == "" {
-			port = f.config.DefaultPort
-			logger.Debug("Using default port for sandbox header mode", zap.String("port", port))
-		}
-		logger.Debug("DecodeHeaders: using sandbox header",
-			zap.String("sandboxHeaderName", sandboxHeaderName),
-			zap.String("sandboxID", sandboxID),
-			zap.String("port", port))
-	} else {
-		// Sandbox header not found, try host header
-		hostHeaderName := f.config.GetHostHeaderName()
-		var hostValue string
-		if hostHeaderName == DefaultHostHeaderName {
-			hostValue = header.Host()
-		} else {
-			hostValue, _ = header.Get(hostHeaderName)
-		}
+	// Step 2: Use adapter.ParseRequest to normalize the request
+	parsed := f.adapter.ParseRequest(headers)
 
-		if hostValue == "" {
-			logger.Debug("No sandbox header or host header found, continuing")
-			return api.Continue
-		}
-
-		// Extract sandbox ID and port from host format: <port>-<namespace>--<name>.domain
-		sandboxID, port = f.config.ExtractHostInfo(hostValue)
-		if sandboxID == "" {
-			logger.Debug("Host header doesn't match expected format, continuing", zap.String("hostValue", hostValue))
-			// When parsing fails, continue to allow normal routing
-			return api.Continue
-		}
-		if port == "" {
-			port = f.config.DefaultPort
-			logger.Debug("Using default port for host header mode", zap.String("port", port))
-		}
-		logger.Debug("DecodeHeaders: using host header",
-			zap.String("hostHeaderName", hostHeaderName),
-			zap.String("hostValue", hostValue),
-			zap.String("sandboxID", sandboxID),
-			zap.String("port", port))
+	// Step 3: Use the unified adapter to extract sandbox ID and port
+	sandboxID, sandboxPort, extraHeaders, err := f.adapter.Map(parsed)
+	if err != nil {
+		logger.Debug("Adapter could not extract sandbox info, continuing",
+			zap.String("authority", parsed.Authority),
+			zap.String("path", parsed.Path),
+			zap.Error(err))
+		return api.Continue
 	}
+
+	logger.Debug("DecodeHeaders: adapter mapped request",
+		zap.String("sandboxID", sandboxID),
+		zap.Int("sandboxPort", sandboxPort),
+		zap.Any("extraHeaders", extraHeaders))
 
 	// Look up the pod IP from registry
 	route, ok := registry.GetRegistry().Get(sandboxID)
 	if !ok {
 		logger.Warn("Sandbox not found in registry", zap.String("sandboxID", sandboxID))
 		f.callbacks.DecoderFilterCallbacks().SendLocalReply(
-			404,
+			502,
 			"sandbox not found: "+sandboxID,
 			nil,
 			-1,
@@ -107,7 +88,12 @@ func (f *sandboxFilter) DecodeHeaders(header api.RequestHeaderMap, endStream boo
 		return api.LocalReply
 	}
 
-	upstreamHost := route.IP + ":" + port
+	// Apply extra headers from the adapter (e.g., :path rewrite for kruise custom protocol)
+	for k, v := range extraHeaders {
+		header.Set(k, v)
+	}
+
+	upstreamHost := fmt.Sprintf("%s:%d", route.IP, sandboxPort)
 	f.callbacks.StreamInfo().DynamicMetadata().Set("envoy.lb.original_dst", "host", upstreamHost)
 
 	logger.Debug("Upstream override set successfully", zap.String("upstreamHost", upstreamHost))

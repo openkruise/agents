@@ -3,16 +3,14 @@ package filter
 import (
 	"encoding/json"
 	"fmt"
-	"regexp"
+	"strconv"
 
 	v3 "github.com/cncf/xds/go/xds/type/v3"
 	"github.com/envoyproxy/envoy/contrib/golang/common/go/api"
 	"google.golang.org/protobuf/types/known/anypb"
-)
 
-// hostPattern matches the host format: {port}-{namespace}--{name}.{domain}
-// Group 1: port (digits), Group 2: namespace--name (alphanumeric and hyphens)
-var hostPattern = regexp.MustCompile(`^(\d+)-([a-zA-Z0-9\-]+)\.`)
+	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
+)
 
 const (
 	DefaultHostHeaderName    = "Host"
@@ -64,21 +62,46 @@ func (c *Config) GetHostHeaderName() string {
 	return DefaultHostHeaderName
 }
 
-// ExtractHostInfo extracts both host key and port from the header in one regex call
-// Only for host mode: extracts both from the host format (<port>-<namespace>--<name>.domain)
-// Returns (hostKey, port) - both empty if parsing fails
-func (c *Config) ExtractHostInfo(headerValue string) (string, string) {
-	if headerValue == "" {
-		return "", ""
+// GetSandboxPortHeader returns the effective sandbox port header name
+func (c *Config) GetSandboxPortHeader() string {
+	if c.SandboxPortHeader != "" {
+		return c.SandboxPortHeader
 	}
+	return DefaultSandboxPortHeader
+}
 
-	// Use regex to extract both port and namespace--name from host format
-	// e.g., "8080-abc--def.example.com" -> hostKey: "abc--def", port: "8080"
-	matches := hostPattern.FindStringSubmatch(headerValue)
-	if len(matches) < 3 {
-		return "", ""
+// GetDefaultPort returns the default port as an integer
+func (c *Config) GetDefaultPort() int {
+	if c.DefaultPort != "" {
+		if p, err := strconv.Atoi(c.DefaultPort); err == nil {
+			return p
+		}
 	}
-	return matches[2], matches[1]
+	p, _ := strconv.Atoi(DefaultSandboxPort)
+	return p
+}
+
+// FilterConfig wraps Config and holds the adapter created from the config
+type FilterConfig struct {
+	*Config
+	Adapter *adapters.E2BAdapter
+}
+
+// NewFilterConfig creates a FilterConfig with an adapter built from the config values
+func NewFilterConfig(cfg *Config) *FilterConfig {
+	adapter := adapters.NewE2BAdapterWithOptions(
+		0, // port not used by gateway
+		adapters.E2BAdapterOptions{
+			SandboxIDHeader:   cfg.GetSandboxHeaderName(),
+			SandboxPortHeader: cfg.GetSandboxPortHeader(),
+			HostHeader:        cfg.GetHostHeaderName(),
+			DefaultPort:       cfg.GetDefaultPort(),
+		},
+	)
+	return &FilterConfig{
+		Config:  cfg,
+		Adapter: adapter,
+	}
 }
 
 type ConfigParser struct{}
@@ -96,7 +119,7 @@ func (p *ConfigParser) Parse(any *anypb.Any, callbacks api.ConfigCallbackHandler
 	valueStruct := typedStruct.GetValue()
 	if valueStruct == nil {
 		// No value field, use defaults
-		return cfg, nil
+		return NewFilterConfig(cfg), nil
 	}
 
 	// Convert the struct to JSON
@@ -117,16 +140,16 @@ func (p *ConfigParser) Parse(any *anypb.Any, callbacks api.ConfigCallbackHandler
 		return nil, err
 	}
 
-	return cfg, nil
+	return NewFilterConfig(cfg), nil
 }
 
 func (p *ConfigParser) Merge(parent interface{}, child interface{}) interface{} {
-	parentCfg := parent.(*Config)
-	childCfg := child.(*Config)
+	parentCfg := parent.(*FilterConfig)
+	childCfg := child.(*FilterConfig)
 
 	// Child overrides parent for all fields
 	merged := DefaultConfig()
-	*merged = *parentCfg
+	*merged = *parentCfg.Config
 
 	if childCfg.SandboxHeaderName != "" {
 		merged.SandboxHeaderName = childCfg.SandboxHeaderName
@@ -141,5 +164,5 @@ func (p *ConfigParser) Merge(parent interface{}, child interface{}) interface{} 
 		merged.DefaultPort = childCfg.DefaultPort
 	}
 
-	return merged
+	return NewFilterConfig(merged)
 }

@@ -31,6 +31,7 @@ import (
 	"k8s.io/klog/v2"
 
 	"github.com/openkruise/agents/pkg/peers"
+	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 )
 
@@ -157,8 +158,13 @@ func (s *Server) DeleteRoute(id string) {
 
 // RequestAdapter is used to register the mapping from business-side sandbox requests to internal logic
 type RequestAdapter interface {
+	// ParseRequest normalizes raw HTTP headers into a ParsedRequest.
+	// Each data plane should convert its native header format to map[string]string
+	// (using HTTP/2 pseudo-header keys: :scheme, :authority, :path, plus "host"),
+	// then call this method to get normalized request info.
+	ParseRequest(headers map[string]string) *adapters.ParsedRequest
 	// Map extracts sandbox ID, port and other information from the request
-	Map(scheme, authority, path string, port int, headers map[string]string) (
+	Map(req *adapters.ParsedRequest) (
 		sandboxID string, sandboxPort int, extraHeaders map[string]string, err error)
 	// IsSandboxRequest determines whether the request is a sandbox request. If it returns true, it's a sandbox request,
 	// otherwise it's an API Server request. Only sandbox requests are processed by the Adapter.

@@ -25,36 +25,6 @@ spec:
         component: sandbox-manager
     spec:
       serviceAccountName: sandbox-gateway
-      initContainers:
-        - name: init-sysctl
-          image: "registry.cn-hangzhou.aliyuncs.com/acs/busybox:v1.29.2"
-          imagePullPolicy: IfNotPresent
-          command:
-            - /bin/sh
-            - -c
-            - |-
-              if [ "$POD_IP" != "$HOST_IP" ]; then
-              mount -o remount rw /proc/sys
-              sysctl -w net.core.somaxconn=65535
-              sysctl -w net.ipv4.ip_local_port_range="1024 65535"
-              sysctl -w net.ipv4.tcp_tw_reuse=1
-              sysctl -w fs.file-max=1048576
-              fi
-          securityContext:
-            capabilities:
-              drop:
-                - ALL
-              add:
-                - SYS_ADMIN
-          env:
-            - name: POD_IP
-              valueFrom:
-                fieldRef:
-                  fieldPath: status.podIP
-            - name: HOST_IP
-              valueFrom:
-                fieldRef:
-                  fieldPath: status.hostIP
       containers:
         - name: sandbox-gateway
           image: "sandbox-gateway:latest"
@@ -68,6 +38,17 @@ spec:
             - warn
             - --concurrency
             - "2"
+            - --drain-time-s
+            - "30"
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                - sh
+                - -c
+                - |
+                  curl -s -X POST http://localhost:9901/drain_listeners?graceful
+                  sleep 30
           env:
             - name: GOMAXPROCS
               value: "2"
@@ -77,18 +58,21 @@ spec:
               value: "component=sandbox-manager"
           ports:
             - name: http
-              containerPort: 10000
+              containerPort: 7788
+              protocol: TCP
+            - name: metrics
+              containerPort: 9090
               protocol: TCP
           livenessProbe:
             tcpSocket:
-              port: 10000
+              port: 7788
             initialDelaySeconds: 10
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 3
           readinessProbe:
             tcpSocket:
-              port: 10000
+              port: 7788
             initialDelaySeconds: 5
             periodSeconds: 5
             timeoutSeconds: 3
