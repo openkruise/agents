@@ -25,6 +25,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
+	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 	"github.com/openkruise/agents/pkg/utils/inplaceupdate"
 )
@@ -61,9 +63,17 @@ type SandboxControl interface {
 	EnsureSandboxTerminated(ctx context.Context, args EnsureFuncArgs) error
 }
 
-func NewSandboxControl(c client.Client, recorder record.EventRecorder, rl *RateLimiter) map[string]SandboxControl {
+type SandboxControlArgs struct {
+	Client        client.Client
+	Recorder      record.EventRecorder
+	RateLimiter   *RateLimiter
+	SandboxClient *clients.ClientSet
+	Cache         *sandboxcr.Cache
+}
+
+func NewSandboxControl(args SandboxControlArgs) map[string]SandboxControl {
 	controls := map[string]SandboxControl{}
-	controls[CommonControlName] = NewCommonControl(c, recorder, rl)
+	controls[CommonControlName] = NewCommonControl(args)
 	return controls
 }
 
@@ -71,4 +81,13 @@ func NewSandboxControl(c client.Client, recorder record.EventRecorder, rl *RateL
 type InPlaceUpdateHandler interface {
 	GetInPlaceUpdateControl() *inplaceupdate.InPlaceUpdateControl
 	GetRecorder() record.EventRecorder
+}
+
+// SandboxReinitializer handles sandbox re-initialization after pod recreation events
+// (e.g. resume from pause, recreate upgrade). When a sandbox pod becomes available again,
+// runtime and dynamic CSI mounts need to be re-initialized.
+// Different implementations can be provided for internal (with CSI re-mount)
+// and community (runtime re-init only) deployments.
+type SandboxReinitializer interface {
+	Reinitialize(ctx context.Context, box *agentsv1alpha1.Sandbox, newStatus *agentsv1alpha1.SandboxStatus) error
 }

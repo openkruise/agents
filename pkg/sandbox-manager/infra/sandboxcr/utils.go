@@ -44,7 +44,7 @@ func GetSandboxCondition(sbx *v1alpha1.Sandbox, tp v1alpha1.SandboxConditionType
 	return metav1.Condition{}
 }
 
-func getInitRuntimeRequest(s metav1.Object) (*config.InitRuntimeOptions, error) {
+func GetInitRuntimeRequest(s metav1.Object) (*config.InitRuntimeOptions, error) {
 	// Build initRuntimeOpts from annotation at the beginning
 	var initRuntimeOpts *config.InitRuntimeOptions
 	if initRuntimeRequest := s.GetAnnotations()[v1alpha1.AnnotationInitRuntimeRequest]; initRuntimeRequest != "" {
@@ -58,7 +58,7 @@ func getInitRuntimeRequest(s metav1.Object) (*config.InitRuntimeOptions, error) 
 	return initRuntimeOpts, nil
 }
 
-func getCsiMountExtensionRequest(s metav1.Object) ([]v1alpha1.CSIMountConfig, error) {
+func GetCsiMountExtensionRequest(s metav1.Object) ([]v1alpha1.CSIMountConfig, error) {
 	var csiMountRequests []v1alpha1.CSIMountConfig
 	csiMountRequestsRaw := s.GetAnnotations()[models.ExtensionKeyClaimWithCSIMount_MountConfig]
 	if csiMountRequestsRaw == "" {

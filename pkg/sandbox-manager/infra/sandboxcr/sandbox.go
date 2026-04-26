@@ -252,7 +252,7 @@ func (s *Sandbox) Pause(ctx context.Context, opts infra.PauseOptions) error {
 func (s *Sandbox) Resume(ctx context.Context) error {
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(s.Sandbox))
 
-	initRuntimeOpts, err := getInitRuntimeRequest(s.Sandbox)
+	initRuntimeOpts, err := GetInitRuntimeRequest(s.Sandbox)
 	if err != nil {
 		log.Error(err, "failed to get init runtime request")
 		return fmt.Errorf("failed to get init runtime request: %w", err)
@@ -297,36 +297,43 @@ func (s *Sandbox) Resume(ctx context.Context) error {
 	}
 	log.Info("sandbox resumed", "cost", time.Since(start))
 
-	// Perform ReInit if initRuntimeOpts is set
-	if initRuntimeOpts != nil {
-		log.Info("will re-init runtime after resume")
-		if _, err := initRuntime(ctx, s, *initRuntimeOpts); err != nil {
-			log.Error(err, "failed to perform ReInit after resume")
-			return fmt.Errorf("failed to perform ReInit after resume: %w", err)
+	// E2B only handles post-resume initialization for non-claimed sandboxes.
+	// Claimed sandboxes (with claim-name label) are handled by the controller's SandboxReinitializer.
+	if s.Labels[agentsv1alpha1.LabelSandboxClaimName] == "" {
+		// Perform ReInit if initRuntimeOpts is set
+		if initRuntimeOpts != nil {
+			log.Info("will re-init runtime after resume")
+			if _, err := InitRuntime(ctx, s, *initRuntimeOpts); err != nil {
+				log.Error(err, "failed to perform ReInit after resume")
+				return fmt.Errorf("failed to perform ReInit after resume: %w", err)
+			}
+			log.Info("ReInit completed after resume")
 		}
-		log.Info("ReInit completed after resume")
-	}
 
-	// Perform csi mount after resume
-	csiMountConfigRequests, err := getCsiMountExtensionRequest(s.Sandbox)
-	if err != nil {
-		log.Error(err, "failed to get csi mount request")
-		return fmt.Errorf("failed to get csi mount request: %w", err)
-	}
-	if len(csiMountConfigRequests) != 0 {
-		log.Info("will re-mount csi storage after resume")
-		startTime := time.Now()
-		csiClient := csimountutils.NewCSIMountHandler(s.Client, s.Cache, s.storageRegistry, utils.DefaultSandboxDeployNamespace)
-		mountConfigs, resolveErr := resolveCSIMountConfigs(ctx, csiClient, csiMountConfigRequests)
-		if resolveErr != nil {
-			return resolveErr
+		// Perform csi mount after resume
+		csiMountConfigRequests, err := GetCsiMountExtensionRequest(s.Sandbox)
+		if err != nil {
+			log.Error(err, "failed to get csi mount request")
+			return fmt.Errorf("failed to get csi mount request: %w", err)
 		}
-		opts := config.CSIMountOptions{MountOptionList: mountConfigs}
-		if _, mountErr := processCSIMounts(ctx, s, opts); mountErr != nil {
-			log.Error(mountErr, "failed to remount csi storage after resume")
-			return fmt.Errorf("failed to remount csi storage after resume: %v", mountErr)
+		if len(csiMountConfigRequests) != 0 {
+			log.Info("will re-mount csi storage after resume")
+			startTime := time.Now()
+			csiClient := csimountutils.NewCSIMountHandler(s.Client, s.Cache, s.storageRegistry, utils.DefaultSandboxDeployNamespace)
+			mountConfigs, resolveErr := resolveCSIMountConfigs(ctx, csiClient, csiMountConfigRequests)
+			if resolveErr != nil {
+				return resolveErr
+			}
+			opts := config.CSIMountOptions{MountOptionList: mountConfigs}
+			if _, mountErr := processCSIMounts(ctx, s, opts); mountErr != nil {
+				log.Error(mountErr, "failed to remount csi storage after resume")
+				return fmt.Errorf("failed to remount csi storage after resume: %v", mountErr)
+			}
+			log.Info("remount csi storage completed after resume", "costTime", time.Since(startTime))
 		}
-		log.Info("remount csi storage completed after resume", "costTime", time.Since(startTime))
+	} else {
+		log.Info("sandbox is claimed by SandboxClaim, skipping E2B post-resume initialization",
+			"claimName", s.Labels[agentsv1alpha1.LabelSandboxClaimName])
 	}
 
 	if err := s.InplaceRefresh(ctx, false); err != nil {
