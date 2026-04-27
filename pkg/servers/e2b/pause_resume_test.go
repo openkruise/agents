@@ -66,6 +66,7 @@ func TestPauseSandbox(t *testing.T) {
 }
 
 func TestConnectSandbox(t *testing.T) {
+	DefaultTimeoutSeconds := 300
 	tests := []struct {
 		name         string
 		paused       bool   // if sandbox is set paused
@@ -77,28 +78,28 @@ func TestConnectSandbox(t *testing.T) {
 		{
 			name:         "running sandbox",
 			paused:       false,
-			timeout:      300,
+			timeout:      DefaultTimeoutSeconds,
 			expectStatus: http.StatusOK,
 		},
 		{
 			name:         "resume sandbox: paused",
 			paused:       true,
 			pausing:      false,
-			timeout:      300,
+			timeout:      DefaultTimeoutSeconds,
 			expectStatus: http.StatusCreated,
 		},
 		{
 			name:         "resume sandbox: pausing",
 			paused:       true,
 			pausing:      true,
-			timeout:      300,
+			timeout:      DefaultTimeoutSeconds,
 			expectStatus: http.StatusInternalServerError,
 		},
 		{
 			name:         "not found",
 			paused:       false,
 			sandboxID:    "not-exist",
-			timeout:      300,
+			timeout:      DefaultTimeoutSeconds,
 			expectStatus: http.StatusNotFound,
 		},
 		{
@@ -123,6 +124,7 @@ func TestConnectSandbox(t *testing.T) {
 			defer cleanup()
 
 			createResp, err := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
+				Timeout: DefaultTimeoutSeconds,
 				Metadata: map[string]string{
 					models.ExtensionKeySkipInitRuntime: agentsv1alpha1.True,
 				},
@@ -180,7 +182,7 @@ func TestConnectSandbox(t *testing.T) {
 				"sandboxID": tt.sandboxID,
 			}, user))
 
-			if tt.expectStatus >= 300 {
+			if tt.expectStatus >= DefaultTimeoutSeconds {
 				require.NotNil(t, err, fmt.Sprintf("%v", err))
 				if err.Code == 0 {
 					err.Code = http.StatusInternalServerError
@@ -197,51 +199,6 @@ func TestConnectSandbox(t *testing.T) {
 					fmt.Sprintf("expect end at: %s, but got %s", expectEndAt, endAt))
 			}
 			<-done
-		})
-	}
-}
-
-func TestShouldSkipRunningSandboxTimeoutUpdate(t *testing.T) {
-	now := time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC)
-	currentEndAt := now.Add(10 * time.Minute)
-
-	tests := []struct {
-		name                  string
-		currentEndAt          time.Time
-		requestTimeoutSeconds int
-		wantSkip              bool
-	}{
-		{
-			name:                  "shorter_deadline_skips",
-			currentEndAt:          currentEndAt,
-			requestTimeoutSeconds: 60,
-			wantSkip:              true,
-		},
-		{
-			name:                  "equal_deadline_skips",
-			currentEndAt:          currentEndAt,
-			requestTimeoutSeconds: int(currentEndAt.Sub(now) / time.Second),
-			wantSkip:              true,
-		},
-		{
-			name:                  "longer_deadline_does_not_skip",
-			currentEndAt:          currentEndAt,
-			requestTimeoutSeconds: int(currentEndAt.Sub(now)/time.Second) + 120,
-			wantSkip:              false,
-		},
-		{
-			name:                  "zero_current_never_skips",
-			currentEndAt:          time.Time{},
-			requestTimeoutSeconds: 30,
-			wantSkip:              false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			skip, reqEnd := shouldSkipRunningSandboxTimeoutUpdate(tt.currentEndAt, now, tt.requestTimeoutSeconds)
-			assert.Equal(t, tt.wantSkip, skip)
-			assert.Equal(t, TimeAfterSeconds(now, tt.requestTimeoutSeconds), reqEnd)
 		})
 	}
 }
@@ -296,7 +253,6 @@ func TestConnectSandboxRunningTimeoutGuard(t *testing.T) {
 				shutdownBefore = sbxBefore.Spec.ShutdownTime.Time
 			}
 
-			time.Sleep(20 * time.Millisecond)
 			connectNow := time.Now()
 			connectResp, apiErr := controller.ConnectSandbox(NewRequest(t, nil, models.SetTimeoutRequest{
 				TimeoutSeconds: tt.requestTimeout,
@@ -472,6 +428,160 @@ func TestResumeSandbox(t *testing.T) {
 				assert.WithinDuration(t, now.Add(time.Duration(tt.timeout)*time.Second), endAt, 5*time.Second)
 			}
 			<-done
+		})
+	}
+}
+
+func TestUpdateConnectTimeout(t *testing.T) {
+	templateName := "test-update-connect-timeout"
+	user := &models.CreatedTeamAPIKey{
+		ID:   keys.AdminKeyID,
+		Key:  InitKey,
+		Name: "admin",
+	}
+
+	tests := []struct {
+		name            string
+		initialTimeout  int
+		timeoutSeconds  int
+		preConnectState string
+		autoPause       bool
+		neverTimeout    bool // override currentEndAt to zero
+		expectUpdated   bool
+	}{
+		{
+			name:            "never-timeout is skipped",
+			initialTimeout:  300,
+			timeoutSeconds:  300,
+			preConnectState: agentsv1alpha1.SandboxStateRunning,
+			neverTimeout:    true,
+			expectUpdated:   false,
+		},
+		{
+			name:            "running sandbox, shorter timeout is skipped",
+			initialTimeout:  600,
+			timeoutSeconds:  300,
+			preConnectState: agentsv1alpha1.SandboxStateRunning,
+			expectUpdated:   false,
+		},
+		{
+			name:            "running sandbox, longer timeout updates",
+			initialTimeout:  300,
+			timeoutSeconds:  600,
+			preConnectState: agentsv1alpha1.SandboxStateRunning,
+			expectUpdated:   true,
+		},
+		{
+			name:            "running sandbox, equal timeout updates",
+			initialTimeout:  300,
+			timeoutSeconds:  300,
+			preConnectState: agentsv1alpha1.SandboxStateRunning,
+			expectUpdated:   true,
+		},
+		{
+			name:            "resumed sandbox (was paused), shorter timeout updates",
+			initialTimeout:  600,
+			timeoutSeconds:  300,
+			preConnectState: agentsv1alpha1.SandboxStatePaused,
+			expectUpdated:   true,
+		},
+		{
+			name:            "running sandbox with auto-pause, shorter timeout is skipped",
+			initialTimeout:  600,
+			timeoutSeconds:  300,
+			preConnectState: agentsv1alpha1.SandboxStateRunning,
+			autoPause:       true,
+			expectUpdated:   false,
+		},
+		{
+			name:            "running sandbox with auto-pause, longer timeout updates",
+			initialTimeout:  300,
+			timeoutSeconds:  600,
+			preConnectState: agentsv1alpha1.SandboxStateRunning,
+			autoPause:       true,
+			expectUpdated:   true,
+		},
+		{
+			name:            "running sandbox with auto-pause, equal timeout updates",
+			initialTimeout:  300,
+			timeoutSeconds:  300,
+			preConnectState: agentsv1alpha1.SandboxStateRunning,
+			autoPause:       true,
+			expectUpdated:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			controller, client, teardown := Setup(t)
+			defer teardown()
+
+			cleanup := CreateSandboxPool(t, controller, templateName, 1)
+			defer cleanup()
+
+			createResp, err := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
+				TemplateID: templateName,
+				Timeout:    tt.initialTimeout,
+				AutoPause:  tt.autoPause,
+				Metadata: map[string]string{
+					models.ExtensionKeySkipInitRuntime: agentsv1alpha1.True,
+				},
+			}, nil, user))
+			require.Nil(t, err)
+			require.Equal(t, models.SandboxStateRunning, createResp.Body.State)
+			AvoidGetFromCache(t, createResp.Body.SandboxID, client.SandboxClient)
+
+			req := NewRequest(t, nil, nil, map[string]string{
+				"sandboxID": createResp.Body.SandboxID,
+			}, user)
+			sbx, apiErr := controller.getSandboxOfUser(req.Context(), createResp.Body.SandboxID)
+			require.Nil(t, apiErr)
+			require.NotNil(t, sbx)
+
+			_, currentEndAt := ParseTimeout(sbx)
+			if tt.neverTimeout {
+				currentEndAt = time.Time{}
+			}
+
+			beforeCall := time.Now()
+			result := controller.updateConnectTimeout(req.Context(), sbx, tt.timeoutSeconds,
+				tt.preConnectState, tt.autoPause, currentEndAt)
+			require.Nil(t, result)
+
+			updatedSbx := GetSandbox(t, createResp.Body.SandboxID, client.SandboxClient)
+
+			if tt.expectUpdated {
+				expectedEndAt := beforeCall.Add(time.Duration(tt.timeoutSeconds) * time.Second)
+				if tt.autoPause {
+					// For auto-pause: ShutdownTime = now + maxTimeout, PauseTime = now + timeoutSeconds
+					require.NotNil(t, updatedSbx.Spec.ShutdownTime)
+					assert.WithinDuration(t, beforeCall.Add(time.Duration(controller.maxTimeout)*time.Second),
+						updatedSbx.Spec.ShutdownTime.Time, 5*time.Second,
+						"ShutdownTime should be maxTimeout from call time")
+					require.NotNil(t, updatedSbx.Spec.PauseTime)
+					assert.WithinDuration(t, expectedEndAt, updatedSbx.Spec.PauseTime.Time, 5*time.Second,
+						"PauseTime should be updated to requested timeout")
+				} else {
+					require.NotNil(t, updatedSbx.Spec.ShutdownTime)
+					assert.WithinDuration(t, expectedEndAt, updatedSbx.Spec.ShutdownTime.Time, 5*time.Second,
+						"ShutdownTime should be updated to requested timeout")
+					require.Nil(t, updatedSbx.Spec.PauseTime)
+				}
+			} else if !tt.neverTimeout {
+				// For skipped running sandbox cases: ShutdownTime should be unchanged
+				initialEndAt, parseErr := time.Parse(time.RFC3339, createResp.Body.EndAt)
+				require.NoError(t, parseErr)
+				if tt.autoPause {
+					// For auto-pause, EndAt reflects PauseTime
+					require.NotNil(t, updatedSbx.Spec.PauseTime)
+					assert.WithinDuration(t, initialEndAt, updatedSbx.Spec.PauseTime.Time, 5*time.Second,
+						"PauseTime should be unchanged")
+				} else {
+					require.NotNil(t, updatedSbx.Spec.ShutdownTime)
+					assert.WithinDuration(t, initialEndAt, updatedSbx.Spec.ShutdownTime.Time, 5*time.Second,
+						"ShutdownTime should be unchanged")
+				}
+			}
 		})
 	}
 }
