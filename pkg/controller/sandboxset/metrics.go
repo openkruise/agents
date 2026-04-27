@@ -24,8 +24,8 @@ import (
 )
 
 var (
-	// SandboxSetReplicas tracks the total number of replicas in each SandboxSet
-	SandboxSetReplicas = prometheus.NewGaugeVec(
+	// sandboxSetReplicas tracks the total number of replicas in each SandboxSet
+	sandboxSetReplicas = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "sandboxset_replicas",
 			Help: "Current number of replicas in the SandboxSet",
@@ -33,8 +33,8 @@ var (
 		[]string{"namespace", "name"},
 	)
 
-	// SandboxSetAvailableReplicas tracks the number of available replicas in each SandboxSet
-	SandboxSetAvailableReplicas = prometheus.NewGaugeVec(
+	// sandboxSetAvailableReplicas tracks the number of available replicas in each SandboxSet
+	sandboxSetAvailableReplicas = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "sandboxset_available_replicas",
 			Help: "Current number of available replicas in the SandboxSet",
@@ -42,8 +42,8 @@ var (
 		[]string{"namespace", "name"},
 	)
 
-	// SandboxSetDesiredReplicas tracks the desired number of replicas in each SandboxSet
-	SandboxSetDesiredReplicas = prometheus.NewGaugeVec(
+	// sandboxSetDesiredReplicas tracks the desired number of replicas in each SandboxSet
+	sandboxSetDesiredReplicas = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "sandboxset_desired_replicas",
 			Help: "Desired number of replicas in the SandboxSet",
@@ -60,8 +60,8 @@ var (
 		[]string{"namespace", "name"},
 	)
 
-	// SandboxSetUpdatedReplicas tracks the number of updated replicas in each SandboxSet
-	SandboxSetUpdatedReplicas = prometheus.NewGaugeVec(
+	// sandboxSetUpdatedReplicas tracks the number of updated replicas in each SandboxSet
+	sandboxSetUpdatedReplicas = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "sandboxset_updated_replicas",
 			Help: "Number of updated replicas in the SandboxSet",
@@ -69,8 +69,8 @@ var (
 		[]string{"namespace", "name"},
 	)
 
-	// SandboxSetUpdatedAvailableReplicas tracks the number of updated available replicas in each SandboxSet
-	SandboxSetUpdatedAvailableReplicas = prometheus.NewGaugeVec(
+	// sandboxSetUpdatedAvailableReplicas tracks the number of updated available replicas in each SandboxSet
+	sandboxSetUpdatedAvailableReplicas = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "sandboxset_updated_available_replicas",
 			Help: "Number of updated available replicas in the SandboxSet",
@@ -82,12 +82,12 @@ var (
 func init() {
 	// Register custom metrics with the global prometheus registry
 	metrics.Registry.MustRegister(
-		SandboxSetReplicas,
-		SandboxSetAvailableReplicas,
-		SandboxSetDesiredReplicas,
+		sandboxSetReplicas,
+		sandboxSetAvailableReplicas,
+		sandboxSetDesiredReplicas,
 		sandboxSetCreated,
-		SandboxSetUpdatedReplicas,
-		SandboxSetUpdatedAvailableReplicas,
+		sandboxSetUpdatedReplicas,
+		sandboxSetUpdatedAvailableReplicas,
 	)
 }
 
@@ -98,10 +98,10 @@ func recordSandboxSetMetrics(sbs *agentsv1alpha1.SandboxSet) {
 
 // deleteSandboxSetMetrics removes all metrics for a SandboxSet that has been deleted.
 func deleteSandboxSetMetrics(namespace, name string) {
-	SandboxSetReplicas.DeleteLabelValues(namespace, name)
-	SandboxSetAvailableReplicas.DeleteLabelValues(namespace, name)
-	SandboxSetDesiredReplicas.DeleteLabelValues(namespace, name)
+	sandboxSetReplicas.DeleteLabelValues(namespace, name)
+	sandboxSetAvailableReplicas.DeleteLabelValues(namespace, name)
+	sandboxSetDesiredReplicas.DeleteLabelValues(namespace, name)
 	sandboxSetCreated.DeleteLabelValues(namespace, name)
-	SandboxSetUpdatedReplicas.DeleteLabelValues(namespace, name)
-	SandboxSetUpdatedAvailableReplicas.DeleteLabelValues(namespace, name)
+	sandboxSetUpdatedReplicas.DeleteLabelValues(namespace, name)
+	sandboxSetUpdatedAvailableReplicas.DeleteLabelValues(namespace, name)
 }

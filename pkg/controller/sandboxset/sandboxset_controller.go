@@ -399,11 +399,11 @@ func (r *Reconciler) updateSandboxSetStatus(ctx context.Context, newStatus agent
 	if err == nil {
 		log.Info("update sandboxset status success", "status", utils.DumpJson(newStatus))
 		// Update metrics for availableReplicas and replicas
-		SandboxSetReplicas.WithLabelValues(sbs.Namespace, sbs.Name).Set(float64(newStatus.Replicas))
-		SandboxSetAvailableReplicas.WithLabelValues(sbs.Namespace, sbs.Name).Set(float64(newStatus.AvailableReplicas))
-		SandboxSetDesiredReplicas.WithLabelValues(sbs.Namespace, sbs.Name).Set(float64(sbs.Spec.Replicas))
-		SandboxSetUpdatedReplicas.WithLabelValues(sbs.Namespace, sbs.Name).Set(float64(newStatus.UpdatedReplicas))
-		SandboxSetUpdatedAvailableReplicas.WithLabelValues(sbs.Namespace, sbs.Name).Set(float64(newStatus.UpdatedAvailableReplicas))
+		sandboxSetReplicas.WithLabelValues(sbs.Namespace, sbs.Name).Set(float64(newStatus.Replicas))
+		sandboxSetAvailableReplicas.WithLabelValues(sbs.Namespace, sbs.Name).Set(float64(newStatus.AvailableReplicas))
+		sandboxSetDesiredReplicas.WithLabelValues(sbs.Namespace, sbs.Name).Set(float64(sbs.Spec.Replicas))
+		sandboxSetUpdatedReplicas.WithLabelValues(sbs.Namespace, sbs.Name).Set(float64(newStatus.UpdatedReplicas))
+		sandboxSetUpdatedAvailableReplicas.WithLabelValues(sbs.Namespace, sbs.Name).Set(float64(newStatus.UpdatedAvailableReplicas))
 	} else {
 		log.Error(err, "update sandboxset status failed")
 	}

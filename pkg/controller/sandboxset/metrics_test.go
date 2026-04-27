@@ -96,20 +96,20 @@ func TestDeleteSandboxSetMetrics(t *testing.T) {
 
 			// Record all metrics first
 			recordSandboxSetMetrics(sbs)
-			SandboxSetReplicas.WithLabelValues(tt.namespace, tt.sbsName).Set(3)
-			SandboxSetAvailableReplicas.WithLabelValues(tt.namespace, tt.sbsName).Set(2)
-			SandboxSetDesiredReplicas.WithLabelValues(tt.namespace, tt.sbsName).Set(5)
-			SandboxSetUpdatedReplicas.WithLabelValues(tt.namespace, tt.sbsName).Set(1)
-			SandboxSetUpdatedAvailableReplicas.WithLabelValues(tt.namespace, tt.sbsName).Set(1)
+			sandboxSetReplicas.WithLabelValues(tt.namespace, tt.sbsName).Set(3)
+			sandboxSetAvailableReplicas.WithLabelValues(tt.namespace, tt.sbsName).Set(2)
+			sandboxSetDesiredReplicas.WithLabelValues(tt.namespace, tt.sbsName).Set(5)
+			sandboxSetUpdatedReplicas.WithLabelValues(tt.namespace, tt.sbsName).Set(1)
+			sandboxSetUpdatedAvailableReplicas.WithLabelValues(tt.namespace, tt.sbsName).Set(1)
 
 			// Verify metrics are set
 			if val := testutil.ToFloat64(sandboxSetCreated.WithLabelValues(tt.namespace, tt.sbsName)); val == 0 {
 				t.Fatal("sandboxset_created should be set before delete")
 			}
-			if val := testutil.ToFloat64(SandboxSetReplicas.WithLabelValues(tt.namespace, tt.sbsName)); val != 3 {
+			if val := testutil.ToFloat64(sandboxSetReplicas.WithLabelValues(tt.namespace, tt.sbsName)); val != 3 {
 				t.Fatalf("sandboxset_replicas before delete = %v, want 3", val)
 			}
-			if val := testutil.ToFloat64(SandboxSetUpdatedReplicas.WithLabelValues(tt.namespace, tt.sbsName)); val != 1 {
+			if val := testutil.ToFloat64(sandboxSetUpdatedReplicas.WithLabelValues(tt.namespace, tt.sbsName)); val != 1 {
 				t.Fatalf("sandboxset_updated_replicas before delete = %v, want 1", val)
 			}
 
@@ -120,19 +120,19 @@ func TestDeleteSandboxSetMetrics(t *testing.T) {
 			if val := testutil.ToFloat64(sandboxSetCreated.WithLabelValues(tt.namespace, tt.sbsName)); val != 0 {
 				t.Errorf("sandboxset_created after delete = %v, want 0", val)
 			}
-			if val := testutil.ToFloat64(SandboxSetReplicas.WithLabelValues(tt.namespace, tt.sbsName)); val != 0 {
+			if val := testutil.ToFloat64(sandboxSetReplicas.WithLabelValues(tt.namespace, tt.sbsName)); val != 0 {
 				t.Errorf("sandboxset_replicas after delete = %v, want 0", val)
 			}
-			if val := testutil.ToFloat64(SandboxSetAvailableReplicas.WithLabelValues(tt.namespace, tt.sbsName)); val != 0 {
+			if val := testutil.ToFloat64(sandboxSetAvailableReplicas.WithLabelValues(tt.namespace, tt.sbsName)); val != 0 {
 				t.Errorf("sandboxset_available_replicas after delete = %v, want 0", val)
 			}
-			if val := testutil.ToFloat64(SandboxSetDesiredReplicas.WithLabelValues(tt.namespace, tt.sbsName)); val != 0 {
+			if val := testutil.ToFloat64(sandboxSetDesiredReplicas.WithLabelValues(tt.namespace, tt.sbsName)); val != 0 {
 				t.Errorf("sandboxset_desired_replicas after delete = %v, want 0", val)
 			}
-			if val := testutil.ToFloat64(SandboxSetUpdatedReplicas.WithLabelValues(tt.namespace, tt.sbsName)); val != 0 {
+			if val := testutil.ToFloat64(sandboxSetUpdatedReplicas.WithLabelValues(tt.namespace, tt.sbsName)); val != 0 {
 				t.Errorf("sandboxset_updated_replicas after delete = %v, want 0", val)
 			}
-			if val := testutil.ToFloat64(SandboxSetUpdatedAvailableReplicas.WithLabelValues(tt.namespace, tt.sbsName)); val != 0 {
+			if val := testutil.ToFloat64(sandboxSetUpdatedAvailableReplicas.WithLabelValues(tt.namespace, tt.sbsName)); val != 0 {
 				t.Errorf("sandboxset_updated_available_replicas after delete = %v, want 0", val)
 			}
 		})
