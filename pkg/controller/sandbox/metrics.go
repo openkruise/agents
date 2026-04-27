@@ -126,7 +126,7 @@ var (
 			Name:        "sandbox_creation_duration_seconds",
 			Help:        "Duration from sandbox creation to Ready condition in seconds",
 			ConstLabels: prometheus.Labels{"source": "k8s"},
-			Buckets:     prometheus.ExponentialBuckets(0.01, 2, 10), // 10ms -> 40s
+			Buckets:     prometheus.ExponentialBuckets(0.02, 2, 12), // 20ms -> ~41ss
 		},
 	)
 
@@ -135,7 +135,7 @@ var (
 		prometheus.HistogramOpts{
 			Name:    "sandbox_inplace_update_duration_seconds",
 			Help:    "Duration of in-place update operations from start to completion in seconds",
-			Buckets: prometheus.ExponentialBuckets(0.01, 2, 10),
+			Buckets: prometheus.ExponentialBuckets(0.02, 2, 12), // 20ms -> ~41s
 		},
 	)
 
@@ -145,7 +145,7 @@ var (
 			Name:        "sandbox_pause_duration_seconds",
 			Help:        "Duration of sandbox pause operations from start to completion in seconds",
 			ConstLabels: prometheus.Labels{"source": "k8s"},
-			Buckets:     prometheus.ExponentialBuckets(0.01, 2, 10), // 10ms -> 40s
+			Buckets:     prometheus.ExponentialBuckets(0.02, 2, 12), // 20ms -> ~41s
 		},
 	)
 
@@ -155,7 +155,7 @@ var (
 			Name:        "sandbox_resume_duration_seconds",
 			Help:        "Duration of sandbox resume operations from start to completion in seconds",
 			ConstLabels: prometheus.Labels{"source": "k8s"},
-			Buckets:     prometheus.ExponentialBuckets(0.01, 2, 10), // 10ms -> 40s
+			Buckets:     prometheus.ExponentialBuckets(0.02, 2, 12), // 20ms -> ~41s
 		},
 	)
 

@@ -27,7 +27,7 @@ var (
 		prometheus.HistogramOpts{
 			Name:    "sandbox_snapshot_duration_seconds",
 			Help:    "Snapshot creation latency in seconds",
-			Buckets: prometheus.ExponentialBuckets(0.1, 2, 10), // 100ms to ~51.2s
+			Buckets: prometheus.ExponentialBuckets(0.02, 2, 12), // 20ms -> ~41s
 		},
 	)
 

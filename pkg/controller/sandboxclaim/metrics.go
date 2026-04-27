@@ -104,7 +104,7 @@ var (
 			Name:        "sandbox_claim_duration_seconds",
 			Help:        "Duration of sandbox claim operations from start to completion in seconds",
 			ConstLabels: prometheus.Labels{"source": "k8s"},
-			Buckets:     prometheus.ExponentialBuckets(0.01, 2, 10), // 10ms -> 40s
+			Buckets:     prometheus.ExponentialBuckets(0.01, 2, 10), // 10ms -> ~5s
 		},
 	)
 
