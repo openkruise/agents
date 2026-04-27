@@ -30,7 +30,6 @@ import (
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/cache/cachetest"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr/cache/cachetest"
 	"github.com/openkruise/agents/pkg/utils/runtime"
 	testutils "github.com/openkruise/agents/test/utils"
 )

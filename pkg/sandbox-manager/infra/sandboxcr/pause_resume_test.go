@@ -33,7 +33,6 @@ import (
 	"github.com/openkruise/agents/pkg/cache/cachetest"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr/cache/cachetest"
 	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	"github.com/openkruise/agents/pkg/utils/sandboxutils"
 	testutils "github.com/openkruise/agents/test/utils"
@@ -137,7 +136,7 @@ func TestSandbox_Resume_ContextExpiredAfterWait(t *testing.T) {
 	utils.InitLogOutput()
 
 	serverOpts := testutils.TestRuntimeServerOptions{
-		RunCommandResult: testutils.RunCommandResult{
+		RunCommandResult: runtime.RunCommandResult{
 			PID:    1,
 			Exited: true,
 		},
@@ -312,7 +311,7 @@ func TestSandbox_Pause(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			server := testutils.NewTestRuntimeServer(testutils.TestRuntimeServerOptions{
-				RunCommandResult: testutils.RunCommandResult{
+				RunCommandResult: runtime.RunCommandResult{
 					PID:    1,
 					Exited: true,
 				},
