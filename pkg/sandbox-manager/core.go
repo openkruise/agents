@@ -119,6 +119,22 @@ func (m *SandboxManager) Stop(ctx context.Context) {
 	}
 }
 
+// ListPeers returns peer IPs discovered by proxy
+func (m *SandboxManager) ListPeers() []string {
+	peers := m.proxy.ListPeers()
+	ips := make([]string, 0, len(peers))
+	for _, p := range peers {
+		if p.IP != "" {
+			ips = append(ips, p.IP)
+		}
+	}
+	return ips
+}
+
+func (m *SandboxManager) GetPeersManager() peers.Peers {
+	return m.peersManager
+}
+
 func (m *SandboxManager) GetInfra() infra.Infrastructure {
 	return m.infra
 }

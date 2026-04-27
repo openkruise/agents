@@ -17,12 +17,14 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"flag"
 	"net/http"         // Added for pprof server
 	_ "net/http/pprof" // Added to register pprof handlers
 	"strings"
 
 	"os"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/spf13/pflag"
@@ -36,6 +38,7 @@ import (
 	"github.com/openkruise/agents/pkg/servers/e2b"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
+	"github.com/openkruise/agents/pkg/servers/mcp"
 	"github.com/openkruise/agents/pkg/utils"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 )
@@ -69,6 +72,12 @@ func main() {
 	var e2bKeyStorage string
 	var e2bKeyStorageDisableAutoMigrate bool
 
+	// Define variables for MCP server configuration
+	var mcpEnabled bool
+	var mcpPort int
+	var mcpSandboxTTL int
+	var mcpSessionSyncPort int
+
 	utilfeature.DefaultMutableFeatureGate.AddFlag(pflag.CommandLine)
 
 	// Register the new pprof flags
@@ -96,6 +105,12 @@ func main() {
 			"When --e2b-key-storage=mysql and auth is enabled, set MySQL DSN via environment variable "+E2BKeyStorageDSNEnvVar)
 	pflag.BoolVar(&e2bKeyStorageDisableAutoMigrate, "e2b-key-storage-disable-schema-auto-update", false,
 		"Disable schema auto-migration for DB-Based key storage like mysql; when enabled, schema changes are skipped but admin team/key bootstrap still runs")
+
+	// Register MCP server configuration flags
+	pflag.BoolVar(&mcpEnabled, "mcp-enabled", false, "Enable MCP server")
+	pflag.IntVar(&mcpPort, "mcp-port", 8082, "MCP server port")
+	pflag.IntVar(&mcpSandboxTTL, "mcp-sandbox-ttl", 300, "MCP sandbox TTL in seconds")
+	pflag.IntVar(&mcpSessionSyncPort, "mcp-session-sync-port", 7790, "MCP session sync port")
 
 	opts := zap.Options{
 		Development: false,
@@ -177,6 +192,18 @@ func main() {
 			klog.Fatalf("--e2b-key-storage must be 'secret' or 'mysql'")
 		}
 	}
+	// Validate MCP server configuration
+	if mcpPort <= 0 || mcpPort > 65535 {
+		klog.Fatalf("--mcp-port must be between 1 and 65535")
+	}
+
+	if mcpSandboxTTL <= 0 {
+		klog.Fatalf("--mcp-sandbox-ttl must be greater than 0")
+	}
+
+	if mcpSessionSyncPort <= 0 || mcpSessionSyncPort > 65535 {
+		klog.Fatalf("--mcp-session-sync-port must be between 1 and 65535")
+	}
 
 	// Initialize Kubernetes client and config
 	clientSet, err := clients.NewClientSetWithOptions(float32(kubeClientQPS), kubeClientBurst)
@@ -203,11 +230,49 @@ func main() {
 		klog.Fatalf("Failed to initialize sandbox controller: %v", err)
 	}
 
-	// Start HTTP Server
+	// Create MCP Server before Run() to register SessionEventHandler before Informer starts
+	var mcpServer *mcp.MCPServer
+	if mcpEnabled {
+		klog.Info("MCP Server enabled, creating...")
+		mcpConfig := mcp.DefaultServerConfig()
+		mcpConfig.Port = mcpPort
+		mcpConfig.SandboxTTL = time.Second * time.Duration(mcpSandboxTTL)
+		mcpConfig.SessionSyncPort = mcpSessionSyncPort
+
+		mcpServer = mcp.NewMCPServer(
+			mcpConfig,
+			sandboxController.GetManager(),
+			sandboxController.GetKeys(),
+			sandboxController.GetManager().GetPeersManager(),
+		)
+		klog.Info("MCP Server created, SessionEventHandler registered")
+	}
+
+	// Start HTTP Server (this starts Informer)
 	sandboxCtx, err := sandboxController.Run(sysNs, peerSelector)
 	if err != nil {
 		klog.Fatalf("Failed to start sandbox controller: %v", err)
 	}
+
+	// Start MCP Server HTTP service
+	if mcpServer != nil {
+		if err := mcpServer.Run(sandboxCtx); err != nil {
+			klog.Fatalf("Failed to run MCP server: %v", err)
+		}
+		klog.InfoS("MCP server started successfully", "port", mcpPort, "sandboxTTL", time.Second*time.Duration(mcpSandboxTTL))
+	}
+
 	<-sandboxCtx.Done()
+
+	// Stop MCP Server if running
+	if mcpServer != nil {
+		klog.Info("Stopping MCP server...")
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer stopCancel()
+		if err := mcpServer.Stop(stopCtx); err != nil {
+			klog.ErrorS(err, "Failed to stop MCP server gracefully")
+		}
+	}
+
 	klog.Info("Sandbox controller stopped")
 }
