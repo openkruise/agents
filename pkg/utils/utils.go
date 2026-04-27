@@ -290,3 +290,11 @@ func GetFromInformerOrApiServer[T client.Object](ctx context.Context, target T, 
 	}
 	return err
 }
+
+func GetTemplateFromSandbox(sbx metav1.Object) string {
+	tmpl := sbx.GetLabels()[agentsv1alpha1.LabelSandboxTemplate]
+	if tmpl == "" {
+		tmpl = sbx.GetLabels()[agentsv1alpha1.LabelSandboxPool]
+	}
+	return tmpl
+}

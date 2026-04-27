@@ -65,7 +65,7 @@ func deleteSandbox(ctx context.Context, sbx *agentsv1alpha1.Sandbox, client clie
 }
 
 func (s *Sandbox) GetTemplate() string {
-	return GetTemplateFromSandbox(s.Sandbox)
+	return utils.GetTemplateFromSandbox(s.Sandbox)
 }
 
 func (s *Sandbox) InplaceRefresh(ctx context.Context, deepcopy bool) error {

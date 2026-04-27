@@ -25,7 +25,7 @@ import (
 	"time"
 
 	"github.com/hashicorp/memberlist"
-	agentsapiv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
 	"github.com/openkruise/agents/pkg/utils"
 	corev1 "k8s.io/api/core/v1"
@@ -126,7 +126,7 @@ func (m *MemberlistPeers) Start(ctx context.Context, bindPort int) error {
 		// AnnotationMemberlistURL is generally not needed in production when all replicas use the same memberlist port.
 		// In scenarios like unit tests or single-host multi-replica deployments where a fixed port cannot be guaranteed
 		// for all replicas, this annotation can be used as a way to specify a custom address.
-		memberlistURL := peer.Annotations[agentsapiv1alpha1.AnnotationMemberlistURL]
+		memberlistURL := peer.Annotations[agentsv1alpha1.AnnotationMemberlistURL]
 		if memberlistURL == "" {
 			ip := peer.Status.PodIP
 			if ip == "" {

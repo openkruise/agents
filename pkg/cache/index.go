@@ -19,6 +19,7 @@ package cache
 import (
 	"context"
 
+	"github.com/openkruise/agents/pkg/utils"
 	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -34,15 +35,6 @@ var (
 	IndexTemplateID       = "templateID"
 	IndexCheckpointID     = "checkpointID"
 )
-
-// getTemplateFromSandbox replicates sandboxcr.GetTemplateFromSandbox to avoid circular imports.
-func getTemplateFromSandbox(sbx *agentsv1alpha1.Sandbox) string {
-	tmpl := sbx.GetLabels()[agentsv1alpha1.LabelSandboxTemplate]
-	if tmpl == "" {
-		tmpl = sbx.GetLabels()[agentsv1alpha1.LabelSandboxPool]
-	}
-	return tmpl
-}
 
 // IndexFunc defines a field index function for a specific resource type.
 type IndexFunc struct {
@@ -67,7 +59,7 @@ func GetIndexFuncs() []IndexFunc {
 				state, _ := stateutils.GetSandboxState(sbx)
 				if state == agentsv1alpha1.SandboxStateAvailable ||
 					(state == agentsv1alpha1.SandboxStateCreating && stateutils.IsControlledBySandboxSet(sbx)) {
-					tmpl := getTemplateFromSandbox(sbx)
+					tmpl := utils.GetTemplateFromSandbox(sbx)
 					if tmpl != "" {
 						return []string{tmpl}
 					}

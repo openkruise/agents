@@ -48,19 +48,13 @@ import (
 var DefaultDeleteSandboxTemplate = deleteSandboxTemplate
 
 func deleteSandboxTemplate(ctx context.Context, c client.Client, namespace, name string) error {
-	sbt := &v1alpha1.SandboxTemplate{}
-	sbt.SetName(name)
-	sbt.SetNamespace(namespace)
-	return c.Delete(ctx, sbt)
+	return c.Delete(ctx, &v1alpha1.SandboxTemplate{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}})
 }
 
 var DefaultDeleteCheckpointCR = deleteCheckpointCR
 
 func deleteCheckpointCR(ctx context.Context, c client.Client, namespace, name string) error {
-	cp := &v1alpha1.Checkpoint{}
-	cp.SetName(name)
-	cp.SetNamespace(namespace)
-	return c.Delete(ctx, cp)
+	return c.Delete(ctx, &v1alpha1.Checkpoint{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}})
 }
 
 type InfraBuilder struct {
@@ -336,14 +330,6 @@ func (i *Infra) refreshRoute(sbx *v1alpha1.Sandbox) {
 	if !exists || newRoute.State != oldRoute.State || newRoute.IP != oldRoute.IP {
 		i.Proxy.SetRoute(logs.NewContext(), newRoute)
 	}
-}
-
-func GetTemplateFromSandbox(sbx metav1.Object) string {
-	tmpl := sbx.GetLabels()[v1alpha1.LabelSandboxTemplate]
-	if tmpl == "" {
-		tmpl = sbx.GetLabels()[v1alpha1.LabelSandboxPool]
-	}
-	return tmpl
 }
 
 const (

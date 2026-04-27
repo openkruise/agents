@@ -20,6 +20,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -456,11 +457,15 @@ type mockRequestAdapter struct {
 	entry string
 }
 
+func (m *mockRequestAdapter) ParseRequest(map[string]string) *adapters.ParsedRequest {
+	panic("implement me")
+}
+
 func (m *mockRequestAdapter) Entry() string {
 	return m.entry
 }
 
-func (m *mockRequestAdapter) Map(string, string, string, int, map[string]string) (sandboxID string, sandboxPort int, extraHeaders map[string]string, err error) {
+func (m *mockRequestAdapter) Map(*adapters.ParsedRequest) (sandboxID string, sandboxPort int, extraHeaders map[string]string, err error) {
 	return "", 0, nil, nil
 }
 

@@ -14,11 +14,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package cache
+package cache_test
 
 import (
 	"context"
-	"fmt"
 	"reflect"
 	"testing"
 	"time"
@@ -27,52 +26,16 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
-	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/cache/controllers"
+	"github.com/openkruise/agents/pkg/cache"
+	"github.com/openkruise/agents/pkg/cache/cachetest"
 	cacheutils "github.com/openkruise/agents/pkg/cache/utils"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/utils/sandboxutils"
 )
-
-func newTestCacheLocal(t *testing.T, objs ...ctrlclient.Object) (*Cache, ctrlclient.Client, error) {
-	t.Helper()
-	scheme := runtime.NewScheme()
-	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
-	utilruntime.Must(agentsv1alpha1.AddToScheme(scheme))
-
-	builder := fake.NewClientBuilder().WithScheme(scheme)
-	for _, idx := range GetIndexFuncs() {
-		builder = builder.WithIndex(idx.Obj, idx.FieldName, idx.Extract)
-	}
-	builder = builder.WithStatusSubresource(&agentsv1alpha1.Sandbox{}, &agentsv1alpha1.Checkpoint{}, &agentsv1alpha1.SandboxClaim{})
-	builder = builder.WithInterceptorFuncs(cacheutils.ResourceVersionInterceptorFuncs())
-	if len(objs) > 0 {
-		builder = builder.WithObjects(objs...)
-	}
-	fakeClient := builder.Build()
-	mgrBuilder, err := controllers.NewMockManagerBuilder(t)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to create mock manager builder: %w", err)
-	}
-	mgr := mgrBuilder.
-		WithScheme(scheme).
-		WithClient(fakeClient).
-		WithWaitSimulation().
-		Build()
-	c, err := NewCache(mgr)
-	if err != nil {
-		return nil, nil, err
-	}
-	mgr.SetWaitHooks(c.GetWaitHooks())
-	return c, fakeClient, nil
-}
 
 // --- Index query tests ---
 
@@ -89,7 +52,7 @@ func TestCache_GetClaimedSandbox(t *testing.T) {
 	}
 
 	t.Run("found", func(t *testing.T) {
-		c, _, err := newTestCacheLocal(t, sbx)
+		c, _, err := cachetest.NewTestCache(t, sbx)
 		require.NoError(t, err)
 		sandboxID := sandboxutils.GetSandboxID(sbx)
 		got, err := c.GetClaimedSandbox(t.Context(), sandboxID)
@@ -99,7 +62,7 @@ func TestCache_GetClaimedSandbox(t *testing.T) {
 	})
 
 	t.Run("not found", func(t *testing.T) {
-		c, _, err := newTestCacheLocal(t)
+		c, _, err := cachetest.NewTestCache(t)
 		require.NoError(t, err)
 		_, err = c.GetClaimedSandbox(t.Context(), "nonexistent-id")
 		require.Error(t, err)
@@ -114,7 +77,7 @@ func TestCache_GetCheckpoint(t *testing.T) {
 	}
 
 	t.Run("found", func(t *testing.T) {
-		c, _, err := newTestCacheLocal(t, cp)
+		c, _, err := cachetest.NewTestCache(t, cp)
 		require.NoError(t, err)
 		got, err := c.GetCheckpoint(t.Context(), "cp-id-123")
 		require.NoError(t, err)
@@ -123,7 +86,7 @@ func TestCache_GetCheckpoint(t *testing.T) {
 	})
 
 	t.Run("not found", func(t *testing.T) {
-		c, _, err := newTestCacheLocal(t)
+		c, _, err := cachetest.NewTestCache(t)
 		require.NoError(t, err)
 		_, err = c.GetCheckpoint(t.Context(), "nonexistent-cp")
 		require.Error(t, err)
@@ -137,7 +100,7 @@ func TestCache_GetSandboxSet(t *testing.T) {
 	}
 
 	t.Run("found by name index", func(t *testing.T) {
-		c, _, err := newTestCacheLocal(t, sbs)
+		c, _, err := cachetest.NewTestCache(t, sbs)
 		require.NoError(t, err)
 		got, err := c.PickSandboxSet(t.Context(), "tmpl-1")
 		require.NoError(t, err)
@@ -147,7 +110,7 @@ func TestCache_GetSandboxSet(t *testing.T) {
 	})
 
 	t.Run("not found", func(t *testing.T) {
-		c, _, err := newTestCacheLocal(t)
+		c, _, err := cachetest.NewTestCache(t)
 		require.NoError(t, err)
 		_, err = c.PickSandboxSet(t.Context(), "nonexistent")
 		require.Error(t, err)
@@ -166,7 +129,7 @@ func TestCache_GetSandboxSet_MultipleTemplates(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "tmpl-3", Namespace: "team-b"},
 	}
 
-	c, _, err := newTestCacheLocal(t, sbs1, sbs2, sbs3)
+	c, _, err := cachetest.NewTestCache(t, sbs1, sbs2, sbs3)
 	require.NoError(t, err)
 
 	got, err := c.PickSandboxSet(t.Context(), "tmpl-3")
@@ -205,7 +168,7 @@ func TestCache_ListSandboxWithUser(t *testing.T) {
 		},
 	}
 
-	c, _, err := newTestCacheLocal(t, sbx1, sbx2, sbx3)
+	c, _, err := cachetest.NewTestCache(t, sbx1, sbx2, sbx3)
 	require.NoError(t, err)
 
 	list, err := c.ListSandboxWithUser(t.Context(), "user-1")
@@ -237,7 +200,7 @@ func TestCache_ListCheckpointsWithUser(t *testing.T) {
 		Status: agentsv1alpha1.CheckpointStatus{CheckpointId: "cpid-2"},
 	}
 
-	c, _, err := newTestCacheLocal(t, cp1, cp2)
+	c, _, err := cachetest.NewTestCache(t, cp1, cp2)
 	require.NoError(t, err)
 
 	list, err := c.ListCheckpointsWithUser(t.Context(), "user-1")
@@ -275,7 +238,7 @@ func TestCache_ListSandboxesInPool(t *testing.T) {
 		},
 	}
 
-	c, _, err := newTestCacheLocal(t, sbx)
+	c, _, err := cachetest.NewTestCache(t, sbx)
 	require.NoError(t, err)
 
 	list, err := c.ListSandboxesInPool(t.Context(), "tmpl-a")
@@ -299,7 +262,7 @@ func TestCache_WaitForSandboxSatisfied(t *testing.T) {
 			},
 			Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxRunning},
 		}
-		c, _, err := newTestCacheLocal(t, sbx)
+		c, _, err := cachetest.NewTestCache(t, sbx)
 		require.NoError(t, err)
 		err = c.WaitForSandboxSatisfied(t.Context(), sbx, "", func(s *agentsv1alpha1.Sandbox) (bool, error) {
 			return true, nil
@@ -315,7 +278,7 @@ func TestCache_WaitForSandboxSatisfied(t *testing.T) {
 			},
 			Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxPending},
 		}
-		c, _, err := newTestCacheLocal(t, sbx)
+		c, _, err := cachetest.NewTestCache(t, sbx)
 		require.NoError(t, err)
 		err = c.WaitForSandboxSatisfied(t.Context(), sbx, "", func(s *agentsv1alpha1.Sandbox) (bool, error) {
 			return false, assert.AnError
@@ -332,7 +295,7 @@ func TestCache_WaitForSandboxSatisfied(t *testing.T) {
 			},
 			Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxPending},
 		}
-		c, _, err := newTestCacheLocal(t, sbx)
+		c, _, err := cachetest.NewTestCache(t, sbx)
 		require.NoError(t, err)
 		err = c.WaitForSandboxSatisfied(t.Context(), sbx, "", func(s *agentsv1alpha1.Sandbox) (bool, error) {
 			return false, nil
@@ -349,7 +312,7 @@ func TestCache_WaitForSandboxSatisfied(t *testing.T) {
 			},
 			Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxPending},
 		}
-		c, _, err := newTestCacheLocal(t, sbx)
+		c, _, err := cachetest.NewTestCache(t, sbx)
 		require.NoError(t, err)
 
 		// Start a long-running wait with action "another"
@@ -377,7 +340,7 @@ func TestCache_WaitForSandboxSatisfied(t *testing.T) {
 			},
 			Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxPending},
 		}
-		c, fc, err := newTestCacheLocal(t, sbx)
+		c, fc, err := cachetest.NewTestCache(t, sbx)
 		require.NoError(t, err)
 
 		// Update sandbox in background to satisfy condition, and close waitHook
@@ -391,7 +354,7 @@ func TestCache_WaitForSandboxSatisfied(t *testing.T) {
 
 			// Manually trigger waitHook (fake client has no informer)
 			key := cacheutils.WaitHookKey[*agentsv1alpha1.Sandbox](sbx)
-			if val, ok := c.waitHooks.Load(key); ok {
+			if val, ok := c.GetWaitHooks().Load(key); ok {
 				entry := val.(*cacheutils.WaitEntry[*agentsv1alpha1.Sandbox])
 				entry.Close()
 			}
@@ -411,7 +374,7 @@ func TestCache_WaitForSandboxSatisfied(t *testing.T) {
 			},
 			Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxPending},
 		}
-		c, fc, err := newTestCacheLocal(t, sbx)
+		c, fc, err := cachetest.NewTestCache(t, sbx)
 		require.NoError(t, err)
 
 		// Update and close waitHook so double-check runs
@@ -423,7 +386,7 @@ func TestCache_WaitForSandboxSatisfied(t *testing.T) {
 			_ = fc.Status().Update(t.Context(), fresh)
 
 			key := cacheutils.WaitHookKey[*agentsv1alpha1.Sandbox](sbx)
-			if val, ok := c.waitHooks.Load(key); ok {
+			if val, ok := c.GetWaitHooks().Load(key); ok {
 				entry := val.(*cacheutils.WaitEntry[*agentsv1alpha1.Sandbox])
 				entry.Close()
 			}
@@ -452,7 +415,7 @@ func TestCache_WaitForSandboxSatisfied(t *testing.T) {
 			},
 			Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxPending},
 		}
-		c, fc, err := newTestCacheLocal(t, sbx)
+		c, fc, err := cachetest.NewTestCache(t, sbx)
 		require.NoError(t, err)
 
 		// Update sandbox to Running via fake client after a short delay
@@ -468,7 +431,7 @@ func TestCache_WaitForSandboxSatisfied(t *testing.T) {
 
 			// Close waitHook to trigger double-check
 			key := cacheutils.WaitHookKey[*agentsv1alpha1.Sandbox](sbx)
-			if val, ok := c.waitHooks.Load(key); ok {
+			if val, ok := c.GetWaitHooks().Load(key); ok {
 				entry := val.(*cacheutils.WaitEntry[*agentsv1alpha1.Sandbox])
 				entry.Close()
 			}
@@ -492,7 +455,7 @@ func TestCache_WaitForSandboxSatisfied_Cancel(t *testing.T) {
 	}
 
 	t.Run("context already canceled", func(t *testing.T) {
-		c, _, err := newTestCacheLocal(t, sbx)
+		c, _, err := cachetest.NewTestCache(t, sbx)
 		require.NoError(t, err)
 		ctx, cancel := context.WithCancel(t.Context())
 		cancel()
@@ -504,7 +467,7 @@ func TestCache_WaitForSandboxSatisfied_Cancel(t *testing.T) {
 	})
 
 	t.Run("context timeout", func(t *testing.T) {
-		c, _, err := newTestCacheLocal(t, sbx)
+		c, _, err := cachetest.NewTestCache(t, sbx)
 		require.NoError(t, err)
 		ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
 		defer cancel()
@@ -522,7 +485,7 @@ func TestCache_WaitForCheckpointSatisfied(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{Name: "wait-cp-ok", Namespace: "default"},
 			Status:     agentsv1alpha1.CheckpointStatus{CheckpointId: "cp-done"},
 		}
-		c, _, err := newTestCacheLocal(t, cp)
+		c, _, err := cachetest.NewTestCache(t, cp)
 		require.NoError(t, err)
 		got, err := c.WaitForCheckpointSatisfied(t.Context(), cp, "", func(c *agentsv1alpha1.Checkpoint) (bool, error) {
 			return true, nil
@@ -537,7 +500,7 @@ func TestCache_WaitForCheckpointSatisfied(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{Name: "wait-cp-signal", Namespace: "default"},
 			Status:     agentsv1alpha1.CheckpointStatus{Phase: agentsv1alpha1.CheckpointPending},
 		}
-		c, fc, err := newTestCacheLocal(t, cp)
+		c, fc, err := cachetest.NewTestCache(t, cp)
 		require.NoError(t, err)
 
 		go func() {
@@ -549,7 +512,7 @@ func TestCache_WaitForCheckpointSatisfied(t *testing.T) {
 			_ = fc.Status().Update(t.Context(), fresh)
 
 			key := cacheutils.WaitHookKey[*agentsv1alpha1.Checkpoint](cp)
-			if val, ok := c.waitHooks.Load(key); ok {
+			if val, ok := c.GetWaitHooks().Load(key); ok {
 				entry := val.(*cacheutils.WaitEntry[*agentsv1alpha1.Checkpoint])
 				entry.Close()
 			}
@@ -568,7 +531,7 @@ func TestCache_WaitForCheckpointSatisfied(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{Name: "wait-cp-timeout", Namespace: "default"},
 			Status:     agentsv1alpha1.CheckpointStatus{Phase: agentsv1alpha1.CheckpointPending},
 		}
-		c, _, err := newTestCacheLocal(t, cp)
+		c, _, err := cachetest.NewTestCache(t, cp)
 		require.NoError(t, err)
 		got, err := c.WaitForCheckpointSatisfied(t.Context(), cp, "", func(c *agentsv1alpha1.Checkpoint) (bool, error) {
 			return false, nil
@@ -582,7 +545,7 @@ func TestCache_WaitForCheckpointSatisfied(t *testing.T) {
 // --- Extension getter tests ---
 
 func TestCache_GetSandboxController(t *testing.T) {
-	c, _, err := newTestCacheLocal(t)
+	c, _, err := cachetest.NewTestCache(t)
 	require.NoError(t, err)
 	// Controllers are initialized by SetupCacheControllersWithManager in NewCache
 	sbxCtrl := c.GetSandboxController()
@@ -590,7 +553,7 @@ func TestCache_GetSandboxController(t *testing.T) {
 }
 
 func TestCache_GetSandboxSetController(t *testing.T) {
-	c, _, err := newTestCacheLocal(t)
+	c, _, err := cachetest.NewTestCache(t)
 	require.NoError(t, err)
 	// Controllers are initialized by SetupCacheControllersWithManager in NewCache
 	sbsCtrl := c.GetSandboxSetController()
@@ -779,7 +742,7 @@ func TestBuildCacheConfig(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			byObject, err := BuildCacheConfig(tt.opts)
+			byObject, err := cache.BuildCacheConfig(tt.opts)
 
 			if tt.wantErr {
 				require.Error(t, err)

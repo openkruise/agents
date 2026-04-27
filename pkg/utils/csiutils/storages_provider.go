@@ -58,7 +58,7 @@ func (h *CSIMountHandler) GenerateNodePublishVolumeRequest(ctx context.Context, 
 	// There are potential scenarios, such as incomplete cache synchronization,
 	// where implementing a resilience or fault-tolerance mechanism can help mitigate spurious errors and improve system robustness.
 	persistentVolumeObj := &corev1.PersistentVolume{}
-	err := utils.GetFromInformerOrApiServer(ctx, persistentVolumeObj, ctrlclient.ObjectKey{Name: mountRequest.PvName}, h.client, h.apiReader)
+	err := h.client.Get(ctx, ctrlclient.ObjectKey{Name: mountRequest.PvName}, persistentVolumeObj)
 	if err != nil {
 		return "", nil, fmt.Errorf("failed to get persistent volume object by name: %s, err: %v", mountRequest.PvName, err)
 	}
