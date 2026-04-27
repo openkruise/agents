@@ -411,3 +411,132 @@ func TestGetCsiMountExtensionRequest_v2(t *testing.T) {
 		})
 	}
 }
+
+func TestPropagateAnnotationsToCheckpoint(t *testing.T) {
+	csiKey := models.ExtensionKeyClaimWithCSIMount_MountConfig
+
+	tests := []struct {
+		name               string
+		sbx                *v1alpha1.Sandbox
+		cp                 *v1alpha1.Checkpoint
+		expectedAnnotation map[string]string
+	}{
+		{
+			name: "sandbox has necessary annotation - propagated to checkpoint",
+			sbx: &v1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						csiKey: `[{"driver":"nfs"}]`,
+					},
+				},
+			},
+			cp: &v1alpha1.Checkpoint{},
+			expectedAnnotation: map[string]string{
+				csiKey: `[{"driver":"nfs"}]`,
+			},
+		},
+		{
+			name: "sandbox has no annotations - checkpoint annotations unchanged",
+			sbx: &v1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{},
+				},
+			},
+			cp: &v1alpha1.Checkpoint{},
+			expectedAnnotation: map[string]string{},
+		},
+		{
+			name: "sandbox annotation is empty string - not propagated",
+			sbx: &v1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						csiKey: "",
+					},
+				},
+			},
+			cp: &v1alpha1.Checkpoint{},
+			expectedAnnotation: map[string]string{},
+		},
+		{
+			name: "checkpoint already has annotations - necessary keys merged",
+			sbx: &v1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						csiKey: `[{"driver":"oss"}]`,
+					},
+				},
+			},
+			cp: &v1alpha1.Checkpoint{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						"existing-key": "existing-value",
+					},
+				},
+			},
+			expectedAnnotation: map[string]string{
+				"existing-key": "existing-value",
+				csiKey:         `[{"driver":"oss"}]`,
+			},
+		},
+		{
+			name: "sandbox has extra non-necessary annotations - only necessary keys propagated",
+			sbx: &v1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						csiKey:          `[{"driver":"nfs"}]`,
+						"some-other-key": "should-not-propagate",
+					},
+				},
+			},
+			cp: &v1alpha1.Checkpoint{},
+			expectedAnnotation: map[string]string{
+				csiKey: `[{"driver":"nfs"}]`,
+			},
+		},
+		{
+			name: "sandbox with nil annotations - no panic and checkpoint annotations unchanged",
+			sbx: &v1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{},
+			},
+			cp:                 &v1alpha1.Checkpoint{},
+			expectedAnnotation: nil,
+		},
+		{
+			name: "sandbox with nil annotations - checkpoint existing annotations preserved",
+			sbx: &v1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{},
+			},
+			cp: &v1alpha1.Checkpoint{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						"existing-key": "existing-value",
+					},
+				},
+			},
+			expectedAnnotation: map[string]string{
+				"existing-key": "existing-value",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			propagateAnnotationsToCheckpoint(tt.sbx, tt.cp)
+
+			cpAnnotations := tt.cp.GetAnnotations()
+			if tt.expectedAnnotation == nil {
+				assert.Nil(t, cpAnnotations, "checkpoint annotations should remain nil")
+				return
+			}
+			for key, expectedVal := range tt.expectedAnnotation {
+				assert.Equal(t, expectedVal, cpAnnotations[key], "annotation %s mismatch", key)
+			}
+			// Verify no extra necessary keys were added
+			for _, key := range necessaryAnnotationKeys {
+				if _, expected := tt.expectedAnnotation[key]; !expected {
+					assert.Empty(t, cpAnnotations[key], "annotation %s should not be set", key)
+				}
+			}
+		})
+	}
+}

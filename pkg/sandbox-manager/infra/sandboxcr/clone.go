@@ -15,7 +15,9 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/utils"
+	csimountutils "github.com/openkruise/agents/pkg/utils/csiutils"
 	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
 )
 
@@ -99,6 +101,14 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache *Ca
 	}
 
 	// Step 5: csi mount
+	// If opts.CSIMount is not provided from request, try to resolve mount options from sandbox annotation.
+	if opts.CSIMount == nil {
+		var resolveErr error
+		opts.CSIMount, resolveErr = resolveCSIMountFromAnnotation(ctx, sbx)
+		if resolveErr != nil {
+			return nil, metrics, resolveErr
+		}
+	}
 	if opts.CSIMount != nil {
 		log.Info("starting to perform csi mount")
 		metrics.CSIMount, err = processCSIMounts(ctx, sbx, *opts.CSIMount)
@@ -246,12 +256,40 @@ func newSandboxFromTemplate(opts infra.CloneSandboxOptions, tmpl *v1alpha1.Sandb
 	annotations[v1alpha1.AnnotationOwner] = opts.User
 	annotations[v1alpha1.AnnotationClaimTime] = time.Now().Format(time.RFC3339)
 	annotations[v1alpha1.AnnotationRestoreFrom] = opts.CheckPointID
+	if val, ok := tmpl.Annotations[models.ExtensionKeyClaimWithCSIMount_MountConfig]; ok && val != "" {
+		annotations[models.ExtensionKeyClaimWithCSIMount_MountConfig] = val
+	}
 	sbx.SetAnnotations(annotations)
 
 	return sbx
 }
 
 func postProcessClonedSandbox(*v1alpha1.Sandbox) {}
+
+// resolveCSIMountFromAnnotation parses CSI mount config from sandbox annotation and resolves it into MountOptionList.
+// Returns nil if no CSI mount annotation is present.
+func resolveCSIMountFromAnnotation(ctx context.Context, sbx *Sandbox) (*config.CSIMountOptions, error) {
+	log := klog.FromContext(ctx)
+	csiMountConfigs, err := getCsiMountExtensionRequest(sbx.Sandbox)
+	if err != nil {
+		log.Error(err, "failed to parse csi mount config from annotation")
+		return nil, fmt.Errorf("failed to parse csi mount config from annotation: %w", err)
+	}
+	if len(csiMountConfigs) == 0 {
+		return nil, nil
+	}
+	csiClient := csimountutils.NewCSIMountHandler(sbx.Client, sbx.Cache, sbx.storageRegistry, utils.DefaultSandboxDeployNamespace)
+	mountOptionList := make([]config.MountConfig, 0, len(csiMountConfigs))
+	for _, cfg := range csiMountConfigs {
+		driverName, csiReqConfigRaw, genErr := csiClient.CSIMountOptionsConfig(ctx, cfg)
+		if genErr != nil {
+			log.Error(genErr, "failed to generate csi mount options config", "mountConfig", cfg)
+			return nil, fmt.Errorf("failed to generate csi mount options config: %w", genErr)
+		}
+		mountOptionList = append(mountOptionList, config.MountConfig{Driver: driverName, RequestRaw: csiReqConfigRaw})
+	}
+	return &config.CSIMountOptions{MountOptionList: mountOptionList}, nil
+}
 
 func createSandboxTemplate(ctx context.Context, client clients.SandboxClient, tmpl *v1alpha1.SandboxTemplate) (*v1alpha1.SandboxTemplate, error) {
 	return client.ApiV1alpha1().SandboxTemplates(tmpl.Namespace).Create(ctx, tmpl, metav1.CreateOptions{})
@@ -318,6 +356,8 @@ func CreateCheckpoint(ctx context.Context, sbx *v1alpha1.Sandbox, client clients
 			}
 		}
 	}
+	// to make sure the template annotations are propagated to the template
+	propagateAnnotationsToCheckpoint(sbx, cp)
 	cp, err = DefaultCreateCheckpoint(ctx, client, cp)
 	if err != nil {
 		log.Error(err, "failed to create checkpoint")

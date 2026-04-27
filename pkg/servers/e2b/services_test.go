@@ -555,6 +555,70 @@ func CreateCheckpointAndTemplate(t *testing.T, controller *Controller, checkpoin
 	}
 }
 
+// CreateCheckpointAndTemplateWithAnnotations creates a Checkpoint with associated SandboxTemplate.
+// The annotations are applied to the SandboxTemplate (not the Checkpoint),
+// since necessary annotations are now propagated via template.
+func CreateCheckpointAndTemplateWithAnnotations(t *testing.T, controller *Controller, checkpointID string, annotations map[string]string) func() {
+	tmpl := v1alpha1.EmbeddedSandboxTemplate{
+		Template: &corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  "main",
+						Image: "checkpoint-image",
+					},
+				},
+			},
+		},
+	}
+
+	// Create SandboxTemplate with custom annotations
+	sbt := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        checkpointID,
+			Namespace:   Namespace,
+			UID:         types.UID(uuid.NewString()),
+			Annotations: annotations,
+		},
+		Spec: v1alpha1.SandboxTemplateSpec{
+			Template: tmpl.Template,
+		},
+	}
+	client := controller.client.SandboxClient
+	_, err := client.ApiV1alpha1().SandboxTemplates(Namespace).Create(t.Context(), sbt, metav1.CreateOptions{})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		_, err := client.ApiV1alpha1().SandboxTemplates(Namespace).Get(t.Context(), checkpointID, metav1.GetOptions{})
+		return err == nil
+	}, time.Second, 10*time.Millisecond)
+
+	// Create Checkpoint with template label
+	cp := &v1alpha1.Checkpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      checkpointID,
+			Namespace: Namespace,
+			Labels: map[string]string{
+				v1alpha1.LabelSandboxTemplate: checkpointID,
+			},
+		},
+		Status: v1alpha1.CheckpointStatus{
+			CheckpointId: checkpointID,
+		},
+	}
+	_, err = client.ApiV1alpha1().Checkpoints(Namespace).Create(t.Context(), cp, metav1.CreateOptions{})
+	require.NoError(t, err)
+	_, err = client.ApiV1alpha1().Checkpoints(Namespace).UpdateStatus(t.Context(), cp, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		return controller.manager.GetInfra().HasCheckpoint(checkpointID)
+	}, time.Second, 10*time.Millisecond)
+
+	return func() {
+		assert.NoError(t, client.ApiV1alpha1().SandboxTemplates(Namespace).Delete(context.Background(), checkpointID, metav1.DeleteOptions{}))
+		assert.NoError(t, client.ApiV1alpha1().Checkpoints(Namespace).Delete(context.Background(), checkpointID, metav1.DeleteOptions{}))
+	}
+}
+
 func TestCloneSandbox(t *testing.T) {
 	controller, clientSet, teardown := Setup(t)
 	defer teardown()
@@ -885,6 +949,213 @@ func TestCloneSandbox(t *testing.T) {
 				assert.Equal(t, models.SandboxStateRunning, sbx.State)
 
 				// Run post check if defined
+				if tt.postCheck != nil {
+					tt.postCheck(t, sbx, controller)
+				}
+			}
+		})
+	}
+}
+
+func TestCloneSandboxWithCSIMountFromCheckpoint(t *testing.T) {
+	controller, clientSet, teardown := Setup(t)
+	defer teardown()
+
+	// Create test runtime server for InitRuntime
+	runtimeOpts := testutils.TestRuntimeServerOptions{
+		RunCommandResult: testutils.RunCommandResult{
+			PID:    1,
+			Exited: true,
+		},
+		RunCommandImmediately: true,
+	}
+	server := testutils.NewTestRuntimeServer(runtimeOpts)
+	defer server.Close()
+
+	// Decorator: DefaultCreateSandbox - set sandbox ready after creation
+	origCreateSandbox := sandboxcr.DefaultCreateSandbox
+	t.Cleanup(func() { sandboxcr.DefaultCreateSandbox = origCreateSandbox })
+	sandboxcr.DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, client *clients.ClientSet, cache infra.CacheProvider) (*v1alpha1.Sandbox, error) {
+		if sbx.Name == "" && sbx.GenerateName != "" {
+			sbx.Name = sbx.GenerateName + rand.String(5)
+		}
+		if sbx.Annotations == nil {
+			sbx.Annotations = map[string]string{}
+		}
+		sbx.Annotations[v1alpha1.AnnotationRuntimeURL] = server.URL
+		sbx.Annotations[v1alpha1.AnnotationRuntimeAccessToken] = testutils.AccessToken
+
+		created, err := origCreateSandbox(ctx, sbx, client, cache)
+		if err != nil {
+			return nil, err
+		}
+		created.Status = v1alpha1.SandboxStatus{
+			Phase:              v1alpha1.SandboxRunning,
+			ObservedGeneration: created.Generation,
+			Conditions: []metav1.Condition{
+				{
+					Type:               string(v1alpha1.SandboxConditionReady),
+					Status:             metav1.ConditionTrue,
+					LastTransitionTime: metav1.Now(),
+					Reason:             "Ready",
+				},
+			},
+			PodInfo: v1alpha1.PodInfo{
+				PodIP: "1.2.3.4",
+			},
+		}
+		created, err = client.ApiV1alpha1().Sandboxes(created.Namespace).UpdateStatus(ctx, created, metav1.UpdateOptions{})
+		if err != nil {
+			return nil, err
+		}
+		time.Sleep(50 * time.Millisecond)
+		return created, nil
+	}
+
+	user := &models.CreatedTeamAPIKey{
+		ID:   keys.AdminKeyID,
+		Key:  InitKey,
+		Name: "test-user",
+	}
+
+	tests := []struct {
+		name                    string
+		checkpointID            string
+		templateAnnotations     map[string]string
+		request                 models.NewSandboxRequest
+		expectError             *web.ApiError
+		setup                   func(t *testing.T, controller *Controller, clientSet *clients.ClientSet)
+		postCheck               func(t *testing.T, resp *models.Sandbox, controller *Controller)
+	}{
+		{
+			name:         "clone fail with csi mount config from template annotation - driver not supported in sandbox",
+			checkpointID: "cp-with-csi-mount",
+			templateAnnotations: map[string]string{
+				models.ExtensionKeyClaimWithCSIMount_MountConfig: `[{"pvName":"pv-nas-001","mountPath":"/data","subPath":"subdir","readOnly":true}]`,
+			},
+			request: models.NewSandboxRequest{
+				Timeout: 300,
+			},
+			setup: func(t *testing.T, controller *Controller, clientSet *clients.ClientSet) {
+				controller.storageRegistry.RegisterProvider("test-csi-driver-from-cp", &storages.MountProvider{})
+				pv := &corev1.PersistentVolume{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "pv-nas-001",
+					},
+					Spec: corev1.PersistentVolumeSpec{
+						PersistentVolumeSource: corev1.PersistentVolumeSource{
+							CSI: &corev1.CSIPersistentVolumeSource{
+								Driver:       "test-csi-driver-from-cp",
+								VolumeHandle: "test-volume-handle-001",
+							},
+						},
+					},
+				}
+				_, err := clientSet.CoreV1().PersistentVolumes().Create(context.Background(), pv, metav1.CreateOptions{})
+				require.NoError(t, err)
+			},
+			expectError: &web.ApiError{
+				Message: "not supported in current environment",
+			},
+		},
+		{
+			name:         "clone fail with multiple csi mount configs from template annotation - driver not supported in sandbox",
+			checkpointID: "cp-with-multi-csi",
+			templateAnnotations: map[string]string{
+				models.ExtensionKeyClaimWithCSIMount_MountConfig: `[{"pvName":"pv-multi-1","mountPath":"/data1"},{"pvName":"pv-multi-2","mountPath":"/data2","readOnly":true}]`,
+			},
+			request: models.NewSandboxRequest{
+				Timeout: 300,
+			},
+			setup: func(t *testing.T, controller *Controller, clientSet *clients.ClientSet) {
+				controller.storageRegistry.RegisterProvider("test-multi-driver", &storages.MountProvider{})
+				for _, pvName := range []string{"pv-multi-1", "pv-multi-2"} {
+					pv := &corev1.PersistentVolume{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: pvName,
+						},
+						Spec: corev1.PersistentVolumeSpec{
+							PersistentVolumeSource: corev1.PersistentVolumeSource{
+								CSI: &corev1.CSIPersistentVolumeSource{
+									Driver:       "test-multi-driver",
+									VolumeHandle: pvName + "-handle",
+								},
+							},
+						},
+					}
+					_, err := clientSet.CoreV1().PersistentVolumes().Create(context.Background(), pv, metav1.CreateOptions{})
+					require.NoError(t, err)
+				}
+			},
+			expectError: &web.ApiError{
+				Message: "not supported in current environment",
+			},
+		},
+		{
+			name:         "clone fail with invalid csi mount json in template annotation",
+			checkpointID: "cp-invalid-csi-json",
+			templateAnnotations: map[string]string{
+				models.ExtensionKeyClaimWithCSIMount_MountConfig: "not-valid-json",
+			},
+			request: models.NewSandboxRequest{
+				Timeout: 300,
+			},
+			expectError: &web.ApiError{
+				Message: "failed to parse csi mount config from annotation",
+			},
+		},
+		{
+			name:         "clone success with no csi mount annotation in template",
+			checkpointID: "cp-no-csi-annotation",
+			templateAnnotations: map[string]string{
+				"some-other-annotation": "value",
+			},
+			request: models.NewSandboxRequest{
+				Timeout: 300,
+			},
+		},
+		{
+			name:                "clone success with empty template annotations",
+			checkpointID:        "cp-empty-annotations",
+			templateAnnotations: nil,
+			request: models.NewSandboxRequest{
+				Timeout: 300,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.setup != nil {
+				tt.setup(t, controller, clientSet)
+			}
+			tt.request.TemplateID = tt.checkpointID
+			cleanup := CreateCheckpointAndTemplateWithAnnotations(t, controller, tt.checkpointID, tt.templateAnnotations)
+			defer cleanup()
+
+			if tt.request.Metadata == nil {
+				tt.request.Metadata = make(map[string]string)
+			}
+
+			resp, apiError := controller.CreateSandbox(NewRequest(t, nil, tt.request, nil, user))
+			if tt.expectError != nil {
+				require.NotNil(t, apiError)
+				if apiError != nil {
+					assert.Contains(t, apiError.Message, tt.expectError.Message)
+				}
+			} else {
+				require.Nil(t, apiError)
+				defer func() {
+					_, deleteErr := controller.DeleteSandbox(NewRequest(t, nil, nil, map[string]string{
+						"sandboxID": resp.Body.SandboxID,
+					}, user))
+					require.Nil(t, deleteErr)
+				}()
+				sbx := resp.Body
+				assert.NotEmpty(t, sbx.SandboxID)
+				assert.True(t, strings.HasPrefix(sbx.SandboxID, Namespace+"--"))
+				assert.Equal(t, models.SandboxStateRunning, sbx.State)
+
 				if tt.postCheck != nil {
 					tt.postCheck(t, sbx, controller)
 				}
