@@ -23,7 +23,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
 	"golang.org/x/time/rate"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
@@ -340,7 +339,7 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 		if hasAgentRuntime {
 			opts.InitRuntime = &config.InitRuntimeOptions{
 				EnvVars:     claim.Spec.EnvVars,
-				AccessToken: uuid.NewString(),
+				AccessToken: config.NewDefaultAccessToken(),
 			}
 		} else {
 			logger.Error(fmt.Errorf("agent-runtime not configured in SandboxSet"), "SkipInitRuntime is false but no agent-runtime found, skip InitRuntime",

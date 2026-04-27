@@ -24,7 +24,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/klog/v2"
 
@@ -80,7 +79,7 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 	claimStart := time.Now()
 	var accessToken string
 	if request.Secure {
-		accessToken = uuid.NewString()
+		accessToken = config.NewDefaultAccessToken()
 	}
 	opts := infra.ClaimSandboxOptions{
 		Namespace:    sc.getNamespaceOfUser(user),

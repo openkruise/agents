@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"strings"
 	"sync"
 	"time"
 
@@ -37,13 +38,18 @@ import (
 	"github.com/openkruise/agents/api/v1alpha1"
 	infracache "github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/controller/sandboxset"
+	"github.com/openkruise/agents/pkg/features"
+	"github.com/openkruise/agents/pkg/identity"
+	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
+	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
+	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 	"github.com/openkruise/agents/pkg/utils/runtime"
-	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
+	sandboxManagerUtils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	"github.com/openkruise/agents/pkg/utils/sandbox-manager/expectationutils"
 	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
 )
@@ -83,7 +89,7 @@ func ValidateAndInitClaimOptions(opts infra.ClaimSandboxOptions) (infra.ClaimSan
 		opts.CandidateCounts = consts.DefaultPoolingCandidateCounts
 	}
 	if opts.LockString == "" {
-		opts.LockString = utils.NewLockString()
+		opts.LockString = sandboxManagerUtils.NewLockString()
 	}
 	if opts.ClaimTimeout <= 0 {
 		opts.ClaimTimeout = DefaultClaimTimeout
@@ -151,6 +157,24 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 	}()
 	log.Info("sandbox picked", "sandbox", klog.KObj(sbx.Sandbox), "lockType", lockType)
 
+	// Step 1.5: When SecurityIdentityProvider feature gate is enabled and the current token type is UUID,
+	// attempt to upgrade the access token by issuing a security token via the identity provider.
+	// On failure, the original UUID token is preserved (fallback behavior).
+	if opts.SecurityToken != nil && opts.SecurityToken.AccessToken != "" &&
+		utilfeature.DefaultFeatureGate.Enabled(features.SecurityIdentityProviderGate) {
+		opts.SecurityToken = &config.SecurityTokenOptions{}
+		log.Info("starting to issue security token via identity provider")
+		metrics.SecurityToken, err = issueSecurityToken(ctx, sbx, opts.SecurityToken)
+		if err == nil {
+			metrics.Total += metrics.SecurityToken
+			log.Info("security token issued, upgrading access token to identity_provider type",
+				"costTime", metrics.SecurityToken, "tokenLength", len(opts.SecurityToken.AccessToken))
+		} else {
+			log.Error(err, "failed to issue security token, keeping original UUID token as fallback")
+			err = nil // clear error to avoid affecting downstream flow
+		}
+	}
+
 	// Step 2: Modify and lock sandbox. All modifications to be applied to the Sandbox should be performed here.
 	if err = modifyPickedSandbox(sbx, lockType, opts); err != nil {
 		log.Error(err, "failed to modify picked sandbox")
@@ -202,6 +226,18 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 		}
 		metrics.Total += metrics.InitRuntime
 		log.Info("runtime inited", "cost", metrics.InitRuntime)
+	}
+
+	if opts.SecurityToken != nil && opts.SecurityToken.AccessToken != "" &&
+		utilfeature.DefaultFeatureGate.Enabled(features.SecurityIdentityProviderGate) {
+		log.Info("propagating security token to runtime", "propagatorCount", identity.SecurityTokenPropagatorCount())
+		startTime := time.Now()
+		if err = identity.DefaultProvider.PropagateSecurityToken(ctx, sbx.Sandbox, &opts.SecurityToken.TokenResponse); err != nil {
+			log.Error(err, "security token propagation failed")
+			err = retriableError{Message: fmt.Sprintf("security token propagation failed: %s", err)}
+			return
+		}
+		log.Info("security token propagated", "cost", time.Since(startTime))
 	}
 
 	if opts.CSIMount != nil {
@@ -395,6 +431,43 @@ func pickFromCandidates(ctx context.Context, candidates []*v1alpha1.Sandbox, pic
 	return nil, errors.New("all candidates are picked")
 }
 
+// issueSecurityToken issues a security token for the given sandbox using identity.DefaultProvider.
+// The issued access token is written into the sandbox's SecurityToken option for downstream consumption.
+func issueSecurityToken(ctx context.Context, sbx *Sandbox, opts *config.SecurityTokenOptions) (time.Duration, error) {
+	ctx = logs.Extend(ctx, "action", "issueSecurityToken")
+	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx.Sandbox))
+	start := time.Now()
+
+	sbxLabels := sbx.GetLabels()
+	metadata := make(map[string]string)
+	for k, v := range sbxLabels {
+		if strings.HasPrefix(k, utils.SecurityAnnotationPrefix) {
+			metadata[k] = v
+		}
+	}
+
+	tokenResp, err := identity.DefaultProvider.IssueToken(ctx, identity.TokenRequest{
+		TokenType: identity.TokenTypeAgent,
+		Sandbox: &identity.SandboxInfo{
+			PodName:      sbx.Name,
+			PodNamespace: sbx.Namespace,
+			SandboxID:    fmt.Sprintf("%s/%s/%s", sbx.Namespace, sbx.Name, sbx.UID),
+			SandboxName:  sbx.Name,
+			SandboxUID:   string(sbx.UID),
+		},
+		Metadata: metadata,
+	})
+	if err != nil {
+		log.Error(err, "failed to issue security token")
+		return time.Since(start), fmt.Errorf("failed to issue security token: %w", err)
+	}
+
+	// Write the full issued token response back into the options for downstream use
+	opts.TokenResponse = *tokenResp
+	log.Info("security token issued", "costTime", time.Since(start))
+	return time.Since(start), nil
+}
+
 var FilteredAnnotationsOnCreation []string
 
 func newSandboxFromSandboxSet(ctx context.Context, opts infra.ClaimSandboxOptions, cache infracache.Provider, limiter *rate.Limiter) (*Sandbox, infra.LockType, error) {
@@ -477,6 +550,17 @@ func modifyPickedSandbox(sbx *Sandbox, lockType infra.LockType, opts infra.Claim
 		}
 	}
 
+	// record security identity info status into annotation
+	if opts.SecurityToken != nil {
+		tokenRefreshStatusJSON, err := json.Marshal(identity.TokenRefreshStatus{
+			AccessTokenExpiration: opts.SecurityToken.AccessTokenExpiration,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to marshal token refresh expiration status: %w", err)
+		}
+		annotations[utils.AgentKeyTokenRefreshStatus] = string(tokenRefreshStatusJSON)
+	}
+
 	sbx.SetAnnotations(annotations)
 	return nil
 }
@@ -512,7 +596,7 @@ func performLockSandbox(ctx context.Context, sbx *Sandbox, lockType infra.LockTy
 	ctx = logs.Extend(ctx, "action", "performLockSandbox")
 	log := klog.FromContext(ctx)
 	c := cache.GetClient()
-	utils.LockSandbox(sbx.Sandbox, opts.LockString, opts.User)
+	sandboxManagerUtils.LockSandbox(sbx.Sandbox, opts.LockString, opts.User)
 	var updated *v1alpha1.Sandbox
 	var err error
 	if lockType == infra.LockTypeCreate {

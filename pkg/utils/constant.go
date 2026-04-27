@@ -43,6 +43,14 @@ const (
 )
 
 const (
+	// SecurityAnnotationPrefix is the annotation prefix for all security-related annotations.
+	SecurityAnnotationPrefix = "security.agents.kruise.io/"
+	// AgentKeyTokenRefreshStatus is the Sandbox Annotation Key,
+	// used to store the JSON serialized result of TokenRefreshTokenStatus
+	AgentKeyTokenRefreshStatus = SecurityAnnotationPrefix + "token-status"
+)
+
+const (
 	True  = "true"
 	False = "false"
 

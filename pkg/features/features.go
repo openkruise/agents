@@ -45,6 +45,10 @@ const (
 
 	// SandboxInPlaceResourceResizeGate enables in-place resource resize when claiming sandboxes.
 	SandboxInPlaceResourceResizeGate featuregate.Feature = "SandboxInPlaceResourceResize"
+
+	// SecurityIdentityProviderGate enables issuing sandbox access tokens via an external
+	// identity provider service instead of random UUID generation.
+	SecurityIdentityProviderGate featuregate.Feature = "SecurityIdentityProvider"
 )
 
 var defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
@@ -55,6 +59,7 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
 	SandboxCreatePodInjectConfigGate: {Default: false, PreRelease: featuregate.Alpha},
 	CachePodLabelSelectorGate:        {Default: true, PreRelease: featuregate.Alpha},
 	SandboxInPlaceResourceResizeGate: {Default: true, PreRelease: featuregate.Alpha},
+	SecurityIdentityProviderGate:     {Default: false, PreRelease: featuregate.Alpha},
 }
 
 func init() {

@@ -91,6 +91,7 @@ func NewController(domain, sysNs, peerSelector, sandboxNamespace, sandboxLabelSe
 		Handler:           sc.mux,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
+
 	return sc
 }
 

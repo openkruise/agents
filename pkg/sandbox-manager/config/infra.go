@@ -16,7 +16,12 @@ limitations under the License.
 
 package config
 
-import corev1 "k8s.io/api/core/v1"
+import (
+	"github.com/google/uuid"
+	corev1 "k8s.io/api/core/v1"
+
+	"github.com/openkruise/agents/pkg/identity"
+)
 
 type InitRuntimeOptions struct {
 	EnvVars     map[string]string `json:"envVars,omitempty"`
@@ -25,12 +30,21 @@ type InitRuntimeOptions struct {
 	SkipRefresh bool              `json:"skipRefresh,omitempty"`
 }
 
+// NewDefaultAccessToken generates a default access token using UUID.
+func NewDefaultAccessToken() string {
+	return uuid.NewString()
+}
+
 const DefaultCSIMountConcurrency = 3
 
 type CSIMountOptions struct {
 	MountOptionList    []MountConfig `json:"mountOptionList"`
 	MountOptionListRaw string        `json:"mountOptionListRaw"`    // the raw json string for mount options
 	Concurrency        int           `json:"concurrency,omitempty"` // max concurrent CSI mount operations, 0 or negative means unlimited, default is DefaultCSIMountConcurrency
+}
+
+type SecurityTokenOptions struct {
+	identity.TokenResponse
 }
 
 type MountConfig struct {
