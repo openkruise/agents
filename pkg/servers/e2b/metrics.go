@@ -22,8 +22,8 @@ import (
 )
 
 var (
-	// SnapshotDuration tracks snapshot creation latency.
-	SnapshotDuration = prometheus.NewHistogram(
+	// snapshotDuration tracks snapshot creation latency.
+	snapshotDuration = prometheus.NewHistogram(
 		prometheus.HistogramOpts{
 			Name:    "sandbox_snapshot_duration_seconds",
 			Help:    "Snapshot creation latency in seconds",
@@ -31,8 +31,8 @@ var (
 		},
 	)
 
-	// SnapshotTotal tracks total snapshot operations by result.
-	SnapshotTotal = prometheus.NewCounterVec(
+	// snapshotTotal tracks total snapshot operations by result.
+	snapshotTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "sandbox_snapshot_total",
 			Help: "Total number of snapshot operations",
@@ -42,5 +42,5 @@ var (
 )
 
 func init() {
-	metrics.Registry.MustRegister(SnapshotDuration, SnapshotTotal)
+	metrics.Registry.MustRegister(snapshotDuration, snapshotTotal)
 }

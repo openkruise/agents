@@ -29,9 +29,9 @@ import (
 func TestRoutesTotal_IncrementOnNewRoute(t *testing.T) {
 	s := newTestServer(nil)
 
-	before := testutil.ToFloat64(RoutesTotal)
+	before := testutil.ToFloat64(routesTotal)
 	s.SetRoute(context.Background(), Route{ID: "metrics-1", IP: "1.2.3.4", ResourceVersion: "1"})
-	after := testutil.ToFloat64(RoutesTotal)
+	after := testutil.ToFloat64(routesTotal)
 
 	assert.Equal(t, float64(1), after-before)
 }
@@ -41,9 +41,9 @@ func TestRoutesTotal_NoIncrementOnUpdate(t *testing.T) {
 	ctx := context.Background()
 
 	s.SetRoute(ctx, Route{ID: "metrics-2", IP: "1.2.3.4", ResourceVersion: "1"})
-	before := testutil.ToFloat64(RoutesTotal)
+	before := testutil.ToFloat64(routesTotal)
 	s.SetRoute(ctx, Route{ID: "metrics-2", IP: "5.6.7.8", ResourceVersion: "2"})
-	after := testutil.ToFloat64(RoutesTotal)
+	after := testutil.ToFloat64(routesTotal)
 
 	assert.Equal(t, float64(0), after-before)
 }
@@ -52,9 +52,9 @@ func TestRoutesTotal_DecrementOnDelete(t *testing.T) {
 	s := newTestServer(nil)
 	s.SetRoute(context.Background(), Route{ID: "metrics-3", IP: "1.2.3.4", ResourceVersion: "1"})
 
-	before := testutil.ToFloat64(RoutesTotal)
+	before := testutil.ToFloat64(routesTotal)
 	s.DeleteRoute("metrics-3")
-	after := testutil.ToFloat64(RoutesTotal)
+	after := testutil.ToFloat64(routesTotal)
 
 	assert.Equal(t, float64(-1), after-before)
 }
@@ -62,9 +62,9 @@ func TestRoutesTotal_DecrementOnDelete(t *testing.T) {
 func TestRoutesTotal_NoDecrementOnDeleteNonExistent(t *testing.T) {
 	s := newTestServer(nil)
 
-	before := testutil.ToFloat64(RoutesTotal)
+	before := testutil.ToFloat64(routesTotal)
 	s.DeleteRoute("non-existent-route")
-	after := testutil.ToFloat64(RoutesTotal)
+	after := testutil.ToFloat64(routesTotal)
 
 	assert.Equal(t, float64(0), after-before)
 }
@@ -77,8 +77,8 @@ func TestPeersTotal_SetOnSyncRouteWithPeers(t *testing.T) {
 	)
 	s := newTestServer(pm)
 
-	// SyncRouteWithPeers will fail on actual HTTP calls, but PeersTotal should still be set
+	// SyncRouteWithPeers will fail on actual HTTP calls, but peersTotal should still be set
 	_ = s.SyncRouteWithPeers(Route{ID: "metrics-peers", IP: "1.2.3.4", ResourceVersion: "1"})
 
-	assert.Equal(t, float64(3), testutil.ToFloat64(PeersTotal))
+	assert.Equal(t, float64(3), testutil.ToFloat64(peersTotal))
 }

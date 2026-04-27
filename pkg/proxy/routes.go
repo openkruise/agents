@@ -52,7 +52,7 @@ func (s *Server) SetRoute(ctx context.Context, route Route) {
 		old, loaded := s.routes.LoadOrStore(route.ID, route)
 		if !loaded {
 			// First write, success directly
-			RoutesTotal.Inc()
+			routesTotal.Inc()
 			return
 		}
 
@@ -85,7 +85,7 @@ func (s *Server) SyncRouteWithPeers(route Route) error {
 		peerList = s.peersManager.GetPeers()
 	}
 
-	PeersTotal.Set(float64(len(peerList)))
+	peersTotal.Set(float64(len(peerList)))
 
 	if len(peerList) == 0 {
 		return nil
@@ -152,7 +152,7 @@ func (s *Server) ListPeers() []peers.Peer {
 
 func (s *Server) DeleteRoute(id string) {
 	if _, loaded := s.routes.LoadAndDelete(id); loaded {
-		RoutesTotal.Dec()
+		routesTotal.Dec()
 	}
 }
 

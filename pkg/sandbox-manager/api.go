@@ -33,8 +33,6 @@ func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts infra.ClaimSandb
 
 	// Success: Record metrics
 	sandboxClaimCreationResponses.WithLabelValues("success").Inc()
-	// Requirement: Only measure the latency when no error exists
-	sandboxClaimCreationDuration.Observe(claimMetrics.Total.Seconds())
 
 	// Claim-specific metrics
 	sandboxClaimDuration.Observe(claimMetrics.Total.Seconds())
@@ -218,7 +216,7 @@ func (m *SandboxManager) DeleteSandbox(ctx context.Context, sbx infra.Sandbox) e
 		return err
 	}
 	sandboxDeleteResponses.WithLabelValues("success").Inc()
-	SandboxDeleteDuration.Observe(time.Since(start).Seconds())
+	sandboxDeleteDuration.Observe(time.Since(start).Seconds())
 	log.Info("sandbox deleted")
 
 	m.proxy.DeleteRoute(route.ID)

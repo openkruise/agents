@@ -56,8 +56,8 @@ var (
 		[]string{"result"},
 	)
 
-	// SandboxDeleteDuration tracks the time of sandbox delete operations
-	SandboxDeleteDuration = prometheus.NewHistogram(
+	// sandboxDeleteDuration tracks the time of sandbox delete operations
+	sandboxDeleteDuration = prometheus.NewHistogram(
 		prometheus.HistogramOpts{
 			Name:        "sandbox_delete_duration_seconds",
 			Help:        "Duration of sandbox delete operations in seconds",
@@ -67,16 +67,6 @@ var (
 	)
 
 	// --- Claim metrics ---
-
-	// sandboxClaimCreationDuration tracks the time from request to return
-	sandboxClaimCreationDuration = prometheus.NewHistogram(
-		prometheus.HistogramOpts{
-			Name:        "sandbox_claim_creation_duration_seconds",
-			Help:        "Duration of sandbox creation in seconds",
-			ConstLabels: prometheus.Labels{"source": "e2b"},
-			Buckets:     prometheus.ExponentialBuckets(0.02, 2, 12), // 20ms -> ~41s
-		},
-	)
 
 	// sandboxClaimCreationResponses tracks total requests and failures
 	sandboxClaimCreationResponses = prometheus.NewCounterVec(
@@ -166,7 +156,7 @@ var (
 
 func init() {
 	// Register custom metrics with the global prometheus registry
-	metrics.Registry.MustRegister(sandboxClaimCreationDuration, sandboxClaimCreationResponses,
+	metrics.Registry.MustRegister(sandboxClaimCreationResponses,
 		sandboxPauseDuration, sandboxPauseResponses,
 		sandboxResumeDuration, sandboxResumeResponses,
 		sandboxDeleteResponses,
@@ -175,7 +165,7 @@ func init() {
 		// Clone
 		sandboxCloneDuration, sandboxCloneTotal,
 		// Delete duration
-		SandboxDeleteDuration,
+		sandboxDeleteDuration,
 		// Route sync
 		sandboxRouteSyncDuration, sandboxRouteSyncTotal,
 	)
