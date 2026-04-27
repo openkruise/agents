@@ -89,10 +89,13 @@ test/              E2E (Go), E2B (Python) tests
 
 ### Testing
 
-- Table-driven tests with descriptive `name` fields
+- Table-driven tests with descriptive `name` fields is a must: **ALWAYS** use table-driven tests for consistency and clarity.
 - Reference test methods in same directory for best practices
 - Use shared test helpers
 - Target ≥80% unit test coverage
+- Use `expectError string` instead of `expectError bool` to represent expected error state in test cases. An empty
+  string means no error is expected; a non-empty string means an error is expected and the actual error message must
+  contain that string (verified with `assert.Contains(t, err.Error(), tt.expectError)`).
 
 ## Behavioral Rules
 
@@ -106,3 +109,5 @@ test/              E2E (Go), E2B (Python) tests
 - Use `Expectations` (`pkg/utils/expectations/`) for slow informer cache issues
 - New APIs/architectural changes need proposal in `docs/proposals/`
 - Ask user when unsure about business logic
+- Always edit the files on your own, never use automation tools or scripts
+- All comments must be in English

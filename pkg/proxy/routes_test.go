@@ -27,12 +27,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-	"k8s.io/apimachinery/pkg/types"
-
 	"github.com/openkruise/agents/pkg/peers"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 // mockPeers is a simple in-memory Peers implementation for testing
@@ -45,8 +47,8 @@ func newMockPeers(members ...peers.Peer) *mockPeers {
 	return &mockPeers{members: members}
 }
 
-func (m *mockPeers) Start(_ context.Context, _ string, _ int, _ []string) error { return nil }
-func (m *mockPeers) Stop() error                                                { return nil }
+func (m *mockPeers) Start(_ context.Context, _ int) error { return nil }
+func (m *mockPeers) Stop() error                          { return nil }
 func (m *mockPeers) GetPeers() []peers.Peer {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -67,7 +69,9 @@ func (m *mockPeers) SetMembers(members ...peers.Peer) {
 
 // newTestServer creates a Server instance for testing (no HTTP/gRPC started)
 func newTestServer(pm peers.Peers) *Server {
-	return NewServer(nil, pm, config.SandboxManagerOptions{})
+	server := NewServer(config.SandboxManagerOptions{})
+	server.SetPeersManager(pm)
+	return server
 }
 
 // ---- SetRoute tests ----
@@ -210,13 +214,13 @@ func TestListPeers_WithPeers(t *testing.T) {
 // startPeerHTTPServer starts a real HTTP server acting as a peer node.
 // It listens on SystemPort (7789) equivalent but returns the actual port for injection.
 // Since requestPeer uses SystemPort, we override the global client and use a custom peer IP
-// that routes to an httptest server bound to the correct path.
+// that routes to a httptest server bound to the correct path.
 //
 // Strategy: use net.Listen on a free port, serve /refresh there, then inject the peer as
 // "127.0.0.1" with a custom port override via a test-only round-tripper.
 //
 // Simpler approach: start httptest.Server, record received routes, and replace requestPeerClient
-// with a custom transport that rewrites the port.
+// with custom transport that rewrites the port.
 
 type recordingPeer struct {
 	server   *httptest.Server
@@ -282,7 +286,7 @@ func TestSyncRouteWithPeers_TwoNodes_Success(t *testing.T) {
 	_, peer2Port, _ := net.SplitHostPort(peer2.server.Listener.Addr().String())
 
 	// Override the global requestPeerClient to rewrite ports per-request.
-	// We use a custom transport that maps "127.0.0.1:7789" -> actual test port.
+	// We use custom transport that maps "127.0.0.1:7789" -> actual test port.
 	// To support two different peers, we build a mux transport.
 	muxTransport := &muxRoundTripper{
 		routes: map[string]string{
@@ -308,7 +312,7 @@ func TestSyncRouteWithPeers_TwoNodes_Success(t *testing.T) {
 	require.NoError(t, err)
 
 	// Both peers should have received the route
-	assert.Eventually(t, func() bool {
+	require.Eventually(t, func() bool {
 		return len(peer1.getReceived()) == 1 && len(peer2.getReceived()) == 1
 	}, 3*time.Second, 50*time.Millisecond)
 
@@ -392,14 +396,15 @@ func TestSyncRouteWithPeers_TwoNodes_Memberlist(t *testing.T) {
 	defer hs2.Close()
 
 	// Build memberlist for two nodes
-	ml1 := newMemberlistPeerForTest(t, "ml-node-1")
-	ml2 := newMemberlistPeerForTest(t, "ml-node-2")
+	fc := fake.NewClientBuilder().WithStatusSubresource(&corev1.Pod{}).Build()
+	ml1 := newMemberlistPeerForTest(t, fc, "ml-node-1")
+	ml2 := newMemberlistPeerForTest(t, fc, "ml-node-2")
 
 	ctx := context.Background()
 	port1, port2 := ml1.port, ml2.port
 
-	require.NoError(t, ml1.peer.Start(ctx, "127.0.0.1", port1, nil))
-	require.NoError(t, ml2.peer.Start(ctx, "127.0.0.1", port2, []string{fmt.Sprintf("127.0.0.1:%d", port1)}))
+	require.NoError(t, ml1.peer.Start(ctx, port1))
+	require.NoError(t, ml2.peer.Start(ctx, port2))
 
 	defer func() {
 		_ = ml1.peer.Stop()
@@ -407,7 +412,7 @@ func TestSyncRouteWithPeers_TwoNodes_Memberlist(t *testing.T) {
 	}()
 
 	// Wait for mutual discovery
-	assert.Eventually(t, func() bool {
+	require.Eventually(t, func() bool {
 		return len(ml1.peer.GetPeers()) == 1 && len(ml2.peer.GetPeers()) == 1
 	}, 5*time.Second, 100*time.Millisecond, "two nodes should discover each other")
 
@@ -418,9 +423,13 @@ func TestSyncRouteWithPeers_TwoNodes_Memberlist(t *testing.T) {
 	_ = rawPort1
 	_ = rawPort2
 
-	// Build a transport that maps each peer's memberlist IP:7789 -> test server
-	peer1IP := ml1.peer.GetAllMembers()[0].IP
-	peer2IP := ml2.peer.GetPeers()[0].IP
+	// Build transport that maps each peer's memberlist IP:7789 -> test server
+	members1 := ml1.peer.GetAllMembers()
+	members2 := ml2.peer.GetAllMembers()
+	require.NotEmpty(t, members1)
+	require.NotEmpty(t, members2)
+	peer1IP := members1[0].IP
+	peer2IP := members2[0].IP
 
 	muxTransport := &muxRoundTripper{
 		routes: map[string]string{
@@ -440,7 +449,7 @@ func TestSyncRouteWithPeers_TwoNodes_Memberlist(t *testing.T) {
 	require.NoError(t, err)
 
 	// server2 should have received and stored the route
-	assert.Eventually(t, func() bool {
+	require.Eventually(t, func() bool {
 		_, ok := server2.LoadRoute("sb-ml")
 		return ok
 	}, 3*time.Second, 50*time.Millisecond, "server2 should receive the synced route")
@@ -457,15 +466,12 @@ type memberlistPeerHandle struct {
 }
 
 // newMemberlistPeerForTest creates a MemberlistPeers with a free port
-func newMemberlistPeerForTest(t *testing.T, name string) *memberlistPeerHandle {
+func newMemberlistPeerForTest(t *testing.T, c client.Client, name string) *memberlistPeerHandle {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	peer, port, err := peers.CreateTestPeer(t.Context(), c, name)
 	require.NoError(t, err)
-	port := ln.Addr().(*net.TCPAddr).Port
-	_ = ln.Close()
-
 	return &memberlistPeerHandle{
-		peer: peers.NewMemberlistPeers(name),
+		peer: peer,
 		port: port,
 	}
 }

@@ -194,7 +194,7 @@ func TestServer_handleRefresh(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Create server with empty opts
-			s := NewServer(nil, nil, config.SandboxManagerOptions{})
+			s := NewServer(config.SandboxManagerOptions{})
 
 			// Pre-set a route for delete test
 			if tt.expectDeleted {
@@ -252,7 +252,7 @@ func mustMarshal(v interface{}) string {
 }
 
 func TestServer_handleRefresh_EmptyBody(t *testing.T) {
-	s := NewServer(nil, nil, config.SandboxManagerOptions{})
+	s := NewServer(config.SandboxManagerOptions{})
 
 	req := httptest.NewRequest(http.MethodPost, RefreshAPI, bytes.NewReader([]byte{}))
 	resp, apiErr := s.handleRefresh(req)

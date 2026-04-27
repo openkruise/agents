@@ -1,3 +1,19 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package e2b
 
 import (
@@ -39,10 +55,10 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 		return web.ApiResponse[*models.Sandbox]{}, parseErr
 	}
 	log.Info("create sandbox request received", "request", request)
-	if sc.manager.GetInfra().HasTemplate(request.TemplateID) {
+	if sc.manager.GetInfra().HasTemplate(ctx, request.TemplateID) {
 		log.Info("infra has template, will create sandbox with claim", "templateID", request.TemplateID)
 		return sc.createSandboxWithClaim(ctx, request, user)
-	} else if sc.manager.GetInfra().HasCheckpoint(request.TemplateID) {
+	} else if sc.manager.GetInfra().HasCheckpoint(ctx, request.TemplateID) {
 		log.Info("infra has checkpoint, will create sandbox with clone", "templateID", request.TemplateID)
 		return sc.createSandboxWithClone(ctx, request, user)
 	}
@@ -103,7 +119,7 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 
 	if len(request.Extensions.CSIMount.MountConfigs) != 0 {
 		csiMountOptions := make([]config.MountConfig, 0, len(request.Extensions.CSIMount.MountConfigs))
-		csiClient := csiutils.NewCSIMountHandler(sc.client, sc.cache, sc.storageRegistry, utils.DefaultSandboxDeployNamespace)
+		csiClient := csiutils.NewCSIMountHandler(sc.cache.GetClient(), sc.cache.GetAPIReader(), sc.storageRegistry, utils.DefaultSandboxDeployNamespace)
 		for _, mountConfig := range request.Extensions.CSIMount.MountConfigs {
 			driverName, csiReqConfigRaw, err := csiClient.CSIMountOptionsConfig(ctx, mountConfig)
 			if err != nil {
@@ -162,7 +178,7 @@ func (sc *Controller) createSandboxWithClone(ctx context.Context, request models
 
 	if len(request.Extensions.CSIMount.MountConfigs) != 0 {
 		csiMountOptions := make([]config.MountConfig, 0, len(request.Extensions.CSIMount.MountConfigs))
-		csiClient := csiutils.NewCSIMountHandler(sc.client, sc.cache, sc.storageRegistry, utils.DefaultSandboxDeployNamespace)
+		csiClient := csiutils.NewCSIMountHandler(sc.cache.GetClient(), sc.cache.GetAPIReader(), sc.storageRegistry, utils.DefaultSandboxDeployNamespace)
 		for _, mountConfigRequest := range request.Extensions.CSIMount.MountConfigs {
 			driverName, csiReqConfigRaw, err := csiClient.CSIMountOptionsConfig(ctx, mountConfigRequest)
 			if err != nil {

@@ -1,3 +1,19 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package infra
 
 import (
@@ -6,10 +22,9 @@ import (
 	"net/http"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/proxy"
 )
 
@@ -29,16 +44,20 @@ type PauseOptions struct {
 	Timeout *TimeoutOptions
 }
 
+type Builder interface {
+	Build() Infrastructure
+}
+
 type Infrastructure interface {
 	Run(ctx context.Context) error // Starts the infrastructure
 	Stop(ctx context.Context)      // Stops the infrastructure
-	HasTemplate(name string) bool
-	HasCheckpoint(name string) bool
-	GetCache() CacheProvider // Get the CacheProvider for the infra
+	HasTemplate(ctx context.Context, name string) bool
+	HasCheckpoint(ctx context.Context, name string) bool
+	GetCache() cache.Provider // Get the CacheProvider for the infra
 	LoadDebugInfo() map[string]any
-	SelectSandboxes(user string) ([]Sandbox, error)                           // Select Sandboxes based on the options provided
+	SelectSandboxes(ctx context.Context, user string) ([]Sandbox, error)      // Select Sandboxes based on the options provided
 	GetClaimedSandbox(ctx context.Context, sandboxID string) (Sandbox, error) // Get a Sandbox interface by its ID
-	SelectSucceededCheckpoints(user string) ([]CheckpointInfo, error)
+	SelectSucceededCheckpoints(ctx context.Context, user string) ([]CheckpointInfo, error)
 	ClaimSandbox(ctx context.Context, opts ClaimSandboxOptions) (Sandbox, ClaimMetrics, error)
 	CloneSandbox(ctx context.Context, opts CloneSandboxOptions) (Sandbox, CloneMetrics, error)
 	DeleteCheckpoint(ctx context.Context, user string, checkpointID string) error
@@ -66,18 +85,6 @@ type Sandbox interface {
 	Request(ctx context.Context, method, path string, port int, body io.Reader) (*http.Response, error) // Make a request to the Sandbox
 	CSIMount(ctx context.Context, driver string, request string) error                                  // request is string config for csi.NodePublishVolumeRequest
 	CreateCheckpoint(ctx context.Context, opts CreateCheckpointOptions) (string, error)
-}
-
-type CacheProvider interface {
-	GetPersistentVolume(name string) (*corev1.PersistentVolume, error)
-	GetSecret(namespace, name string) (*corev1.Secret, error)
-	GetConfigmap(namespace, name string) (*corev1.ConfigMap, error)
-	GetClaimedSandbox(sandboxID string) (*agentsv1alpha1.Sandbox, error)
-	ListSandboxWithUser(user string) ([]*agentsv1alpha1.Sandbox, error)
-	ListSandboxesInPool(pool string) ([]*agentsv1alpha1.Sandbox, error)
-	GetCheckpoint(checkpointID string) (*agentsv1alpha1.Checkpoint, error)
-	GetSandboxSet(name string) (*agentsv1alpha1.SandboxSet, error)
-	ListSandboxSets(namespace string) ([]*agentsv1alpha1.SandboxSet, error)
 }
 
 type CheckpointInfo struct {

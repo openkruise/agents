@@ -20,9 +20,8 @@ import (
 	"flag"
 	"net/http"         // Added for pprof server
 	_ "net/http/pprof" // Added to register pprof handlers
-	"strings"
-
 	"os"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/spf13/pflag"
@@ -179,7 +178,7 @@ func main() {
 	}
 
 	// Initialize Kubernetes client and config
-	clientSet, err := clients.NewClientSetWithOptions(float32(kubeClientQPS), kubeClientBurst)
+	clientConfig, err := clients.NewRestConfig(float32(kubeClientQPS), kubeClientBurst)
 	if err != nil {
 		klog.Fatalf("Failed to initialize Kubernetes client: %v", err)
 	}
@@ -193,18 +192,17 @@ func main() {
 			DSN:                e2bKeyStorageDSN,
 			DisableAutoMigrate: e2bKeyStorageDisableAutoMigrate,
 			Pepper:             e2bKeyStoragePepper,
-			K8sClient:          clientSet.K8sClient,
 		}
 	}
 
-	sandboxController := e2b.NewController(domain, sysNs, sandboxNamespace, sandboxLabelSelector, e2bMaxTimeout, maxClaimWorkers, maxCreateQPS, uint32(extProcMaxConcurrency),
-		port, memberlistBindPort, keyCfg, clientSet)
+	sandboxController := e2b.NewController(domain, sysNs, peerSelector, sandboxNamespace, sandboxLabelSelector, e2bMaxTimeout, maxClaimWorkers, maxCreateQPS, uint32(extProcMaxConcurrency),
+		port, memberlistBindPort, keyCfg, clientConfig)
 	if err := sandboxController.Init(); err != nil {
 		klog.Fatalf("Failed to initialize sandbox controller: %v", err)
 	}
 
 	// Start HTTP Server
-	sandboxCtx, err := sandboxController.Run(sysNs, peerSelector)
+	sandboxCtx, err := sandboxController.Run()
 	if err != nil {
 		klog.Fatalf("Failed to start sandbox controller: %v", err)
 	}

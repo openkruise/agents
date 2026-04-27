@@ -1,3 +1,19 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package utils
 
 import (
@@ -11,12 +27,15 @@ import (
 	"sync"
 
 	"github.com/golang/protobuf/proto"
+	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/util/retry"
+	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
@@ -259,4 +278,23 @@ func IsLoopbackIP(ip string) bool {
 		return false
 	}
 	return ipNet.IsLoopback()
+}
+
+func GetFromInformerOrApiServer[T client.Object](ctx context.Context, target T, key client.ObjectKey,
+	client client.Client, apiReader client.Reader) error {
+	err := client.Get(ctx, key, target)
+	if errors.IsNotFound(err) {
+		klog.FromContext(ctx).V(consts.DebugLogLevel).
+			Info("failed to get object from informer, try to fetch from api server", "key", key)
+		err = apiReader.Get(ctx, key, target)
+	}
+	return err
+}
+
+func GetTemplateFromSandbox(sbx metav1.Object) string {
+	tmpl := sbx.GetLabels()[agentsv1alpha1.LabelSandboxTemplate]
+	if tmpl == "" {
+		tmpl = sbx.GetLabels()[agentsv1alpha1.LabelSandboxPool]
+	}
+	return tmpl
 }

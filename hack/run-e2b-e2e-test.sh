@@ -23,6 +23,7 @@ WITH_GATEWAY="false"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TEST_DIR="$PROJECT_ROOT/test/e2b"
+MANAGER_SELECTOR="app.kubernetes.io/name=sandbox-manager"
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -62,10 +63,25 @@ set -x
 
 # Step 1: Wait for sandbox-manager pods to be ready
 echo "Waiting for sandbox-manager pods to be ready..."
-kubectl wait --for=condition=ready pod \
-    -l component=sandbox-manager \
-    -n sandbox-system \
-    --timeout=5m
+
+if ! kubectl wait --for=condition=ready pod \
+        -l component=sandbox-manager \
+        -n sandbox-system \
+        --timeout=5m; then
+    echo "Error: Failed to wait for sandbox-manager pods to be ready"
+    echo "\n=== Pod Status ==="
+    kubectl get pod -l component=sandbox-manager -n sandbox-system -o wide
+    echo "\n=== Pod Describe ==="
+    kubectl describe pod -l component=sandbox-manager -n sandbox-system
+    echo "\n=== Pod Logs ==="
+    for pod in $(kubectl get pod -l component=sandbox-manager -n sandbox-system --no-headers -o jsonpath='{.items[*].metadata.name}'); do
+        echo "--- Logs for $pod ---"
+        kubectl logs "$pod" -n sandbox-system -c controller --tail=200 2>&1 || echo "Failed to get current controller logs for $pod"
+        echo "--- Previous controller logs for $pod ---"
+        kubectl logs "$pod" -n sandbox-system -c controller --previous --tail=200 2>&1 || echo "Failed to get previous controller logs for $pod"
+    done
+    exit 1
+fi
 
 echo "All sandbox-manager pods are ready"
 
@@ -143,7 +159,7 @@ else
 fi
 
 # Check if sandbox-manager pods restarted
-restartCount=$(kubectl get pod -n sandbox-system -l component=sandbox-manager --no-headers | awk '{sum+=$4} END {print sum}')
+restartCount=$(kubectl get pod -n sandbox-system -l "${MANAGER_SELECTOR}" --no-headers | awk '{sum+=$4} END {print sum}')
 if [ -z "$restartCount" ]; then
     restartCount=0
 fi
@@ -151,9 +167,9 @@ fi
 if [ "${restartCount}" -eq "0" ]; then
     echo "sandbox-manager has not restarted"
 else
-    kubectl get pod -n sandbox-system --no-headers -l component=sandbox-manager
+    kubectl get pod -n sandbox-system --no-headers -l "${MANAGER_SELECTOR}"
     echo "sandbox-manager has restarted, abort!!!"
-    kubectl get pod -n sandbox-system -l component=sandbox-manager --no-headers | awk '{print $1}' | xargs -I {} kubectl logs -p -n sandbox-system {}
+    kubectl get pod -n sandbox-system -l "${MANAGER_SELECTOR}" --no-headers | awk '{print $1}' | xargs -I {} kubectl logs -p -n sandbox-system -c controller {}
     exit 1
 fi
 

@@ -23,18 +23,19 @@ import (
 	"testing"
 	"time"
 
-	"github.com/openkruise/agents/pkg/utils/runtime"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/cache/cachetest"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	"github.com/openkruise/agents/pkg/utils/runtime"
 	testutils "github.com/openkruise/agents/test/utils"
 )
 
 func newTestSandboxWithServer(t *testing.T, serverURL string) *Sandbox {
-	cache, clientSet, err := NewTestCache(t)
+	cache, _, err := cachetest.NewTestCache(t)
 	require.NoError(t, err)
 	t.Cleanup(func() { cache.Stop(t.Context()) })
 	sbx := &v1alpha1.Sandbox{
@@ -47,7 +48,7 @@ func newTestSandboxWithServer(t *testing.T, serverURL string) *Sandbox {
 			},
 		},
 	}
-	return AsSandbox(sbx, cache, clientSet)
+	return AsSandbox(sbx, cache)
 }
 
 func TestProcessCSIMounts(t *testing.T) {
@@ -215,7 +216,7 @@ func TestProcessCSIMounts_ConcurrencyLimit(t *testing.T) {
 	})
 	defer server.Close()
 
-	cache, clientSet, err := NewTestCache(t)
+	cache, _, err := cachetest.NewTestCache(t)
 	require.NoError(t, err)
 	t.Cleanup(func() { cache.Stop(t.Context()) })
 
@@ -229,7 +230,7 @@ func TestProcessCSIMounts_ConcurrencyLimit(t *testing.T) {
 			},
 		},
 	}
-	sandbox := AsSandbox(sbx, cache, clientSet)
+	sandbox := AsSandbox(sbx, cache)
 
 	mountList := make([]config.MountConfig, totalMounts)
 	for i := 0; i < totalMounts; i++ {
@@ -274,7 +275,7 @@ func TestProcessCSIMounts_ConcurrencyTracking(t *testing.T) {
 	})
 	defer server.Close()
 
-	cache, clientSet, err := NewTestCache(t)
+	cache, _, err := cachetest.NewTestCache(t)
 	require.NoError(t, err)
 	t.Cleanup(func() { cache.Stop(t.Context()) })
 
@@ -287,7 +288,7 @@ func TestProcessCSIMounts_ConcurrencyTracking(t *testing.T) {
 				v1alpha1.AnnotationRuntimeAccessToken: runtime.AccessToken,
 			},
 		},
-	}, cache, clientSet)
+	}, cache)
 
 	mountList := make([]config.MountConfig, totalMounts)
 	for i := 0; i < totalMounts; i++ {
@@ -359,7 +360,7 @@ func TestProcessCSIMounts_ErrorDoesNotBlockOthers(t *testing.T) {
 
 func TestProcessCSIMounts_NoRuntimeURL(t *testing.T) {
 	// Sandbox without runtime URL should fail
-	cache, clientSet, err := NewTestCache(t)
+	cache, _, err := cachetest.NewTestCache(t)
 	require.NoError(t, err)
 	t.Cleanup(func() { cache.Stop(t.Context()) })
 
@@ -369,7 +370,7 @@ func TestProcessCSIMounts_NoRuntimeURL(t *testing.T) {
 			Namespace:   "default",
 			Annotations: map[string]string{},
 		},
-	}, cache, clientSet)
+	}, cache)
 
 	opts := config.CSIMountOptions{
 		MountOptionList: []config.MountConfig{

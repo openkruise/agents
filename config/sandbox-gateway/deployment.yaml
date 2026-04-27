@@ -52,6 +52,10 @@ spec:
           env:
             - name: GOMAXPROCS
               value: "2"
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
             - name: PEER_NAMESPACE
               value: "sandbox-system"
             - name: PEER_LABEL_SELECTOR

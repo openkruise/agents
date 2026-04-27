@@ -31,7 +31,7 @@ type Peer struct {
 // It abstracts the underlying implementation (memberlist) from the consumers
 type Peers interface {
 	// Start initializes and starts the peer discovery mechanism
-	Start(ctx context.Context, bindAddr string, bindPort int, existingPeers []string) error
+	Start(ctx context.Context, bindPort int) error
 
 	// Stop gracefully shuts down the peer discovery
 	Stop() error

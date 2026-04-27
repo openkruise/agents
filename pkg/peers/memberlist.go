@@ -20,13 +20,18 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os"
 	"sync/atomic"
 	"time"
 
 	"github.com/hashicorp/memberlist"
-	"k8s.io/klog/v2"
-
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
+	"github.com/openkruise/agents/pkg/utils"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/klog/v2"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 const (
@@ -45,34 +50,101 @@ const (
 )
 
 type MemberlistPeers struct {
-	list      *memberlist.Memberlist
-	config    *memberlist.Config
-	localName string
-	bindAddr  string
-	bindPort  int
+	apiReader ctrlclient.Reader
+
+	localName    string
+	peerSelector string
+	sysNs        string
+
+	list    *memberlist.Memberlist
+	config  *memberlist.Config
+	localIP string
 
 	started atomic.Bool
 	stopCh  chan struct{}
 }
 
 // NewMemberlistPeers creates a new MemberlistPeers instance
-func NewMemberlistPeers(nodeName string) *MemberlistPeers {
+func NewMemberlistPeers(apiReader ctrlclient.Reader, nodeName string, namespace, peerSelector string) *MemberlistPeers {
 	return &MemberlistPeers{
-		localName: nodeName,
-		stopCh:    make(chan struct{}),
+		apiReader:    apiReader,
+		sysNs:        namespace,
+		peerSelector: peerSelector,
+		localName:    nodeName,
+		stopCh:       make(chan struct{}),
 	}
 }
 
-// Start initializes and starts the memberlist
-func (m *MemberlistPeers) Start(ctx context.Context, bindAddr string, bindPort int, existingPeers []string) error {
-	log := klog.FromContext(ctx)
+func FindPodIP() (string, error) {
+	podIP := os.Getenv("POD_IP")
+	if podIP == "" {
+		podIP = utils.GetFirstNonLoopbackIP()
+	}
+	if podIP == "" {
+		return "", fmt.Errorf("failed to determine local IP for memberlist")
+	}
+	return podIP, nil
+}
 
+// Start initializes and starts the memberlist
+func (m *MemberlistPeers) Start(ctx context.Context, bindPort int) error {
+	log := klog.FromContext(ctx)
+	var err error
 	if m.started.Load() {
 		return fmt.Errorf("memberlist already started")
 	}
 
-	m.bindAddr = bindAddr
-	m.bindPort = bindPort
+	// Get pod IP for memberlist binding
+	localIP := m.localIP
+	if localIP == "" {
+		localIP, err = FindPodIP()
+		if err != nil {
+			return fmt.Errorf("failed to determine local IP for memberlist: %w", err)
+		}
+	}
+	localURL := fmt.Sprintf("%s:%d", localIP, bindPort)
+
+	// Get existing peers from Kubernetes API for initial join
+	log.Info("discovering existing peers for memberlist join", "localURL", localURL)
+	apiReader := m.apiReader
+	selector, err := labels.Parse(m.peerSelector)
+	if err != nil {
+		return fmt.Errorf("failed to parse peer selector: %w", err)
+	}
+	peerList := &corev1.PodList{}
+	if err := apiReader.List(ctx, peerList, &ctrlclient.ListOptions{
+		Namespace:     m.sysNs,
+		LabelSelector: selector,
+	}); err != nil {
+		return fmt.Errorf("failed to list peer pods: %w", err)
+	}
+	log.Info("listed peers for memberlist join", "count", len(peerList.Items))
+
+	// Build list of existing peer IPs for initial join
+	existingPeers := make([]string, 0)
+	for _, peer := range peerList.Items {
+		// AnnotationMemberlistURL is generally not needed in production when all replicas use the same memberlist port.
+		// In scenarios like unit tests or single-host multi-replica deployments where a fixed port cannot be guaranteed
+		// for all replicas, this annotation can be used as a way to specify a custom address.
+		memberlistURL := peer.Annotations[agentsv1alpha1.AnnotationMemberlistURL]
+		if memberlistURL == "" {
+			ip := peer.Status.PodIP
+			if ip == "" {
+				log.Info("ignoring peer with empty IP", "ip", ip, "peer", klog.KObj(&peer))
+				continue
+			}
+			memberlistURL = fmt.Sprintf("%s:%d", ip, bindPort)
+		}
+		if memberlistURL == localURL {
+			continue
+		}
+		// Memberlist uses the bind port for gossip
+		existingPeers = append(existingPeers, memberlistURL)
+		log.Info("adding peer for memberlist join", "memberlistURL", memberlistURL, "pod", klog.KObj(&peer))
+	}
+	log.Info("found existing peers for memberlist join", "count", len(existingPeers))
+
+	bindAddr := localIP
 
 	// Create memberlist config
 	config := memberlist.DefaultLANConfig()
@@ -223,6 +295,11 @@ func (m *MemberlistPeers) LocalPort() int {
 		return 0
 	}
 	return int(m.list.LocalNode().Port)
+}
+
+// LocalName returns the local node's memberlist name.
+func (m *MemberlistPeers) LocalName() string {
+	return m.localName
 }
 
 // eventDelegate handles memberlist membership change events

@@ -1,3 +1,19 @@
+/*
+Copyright 2025.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package e2b
 
 import (
@@ -14,11 +30,10 @@ import (
 	"k8s.io/klog/v2"
 
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
-	sandbox_manager "github.com/openkruise/agents/pkg/sandbox-manager"
-	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
+	"github.com/openkruise/agents/pkg/cache"
+	sandboxmanager "github.com/openkruise/agents/pkg/sandbox-manager"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
 	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
@@ -31,58 +46,50 @@ type Controller struct {
 
 	// manager params
 	systemNamespace       string // the namespace where the sandbox manager is running
+	peerSelector          string
 	maxClaimWorkers       int
 	maxCreateQPS          int
 	extProcMaxConcurrency uint32
 	sandboxLabelSelector  string
 	sandboxNamespace      string
 	memberlistBindPort    int
+	keyCfg                *keys.Config
 
 	// fields
 	mux             *http.ServeMux
 	server          *http.Server
 	stop            chan os.Signal
-	client          *clients.ClientSet
-	cache           infra.CacheProvider
+	cache           cache.Provider
 	storageRegistry storages.VolumeMountProviderRegistry
 	clientConfig    *rest.Config
 	domain          string
-	manager         *sandbox_manager.SandboxManager
+	manager         *sandboxmanager.SandboxManager
 	keys            keys.KeyStorage
 }
 
-// NewController creates a new E2B Controller.
-// When keyCfg is not nil, authentication is enabled and the provided config is used to initialize key storage.
-func NewController(domain string, sysNs, sandboxNamespace, sandboxLabelSelector string, maxTimeout, maxClaimWorkers, maxCreateQPS int, extProcMaxConcurrency uint32,
-	port, memberlistBindPort int, keyCfg *keys.Config, clientSet *clients.ClientSet) *Controller {
+// NewController creates a new E2B Controller
+func NewController(domain, sysNs, peerSelector, sandboxNamespace, sandboxLabelSelector string, maxTimeout, maxClaimWorkers, maxCreateQPS int, extProcMaxConcurrency uint32, port, memberlistBindPort int, keyCfg *keys.Config, clientConfig *rest.Config) *Controller {
 	sc := &Controller{
 		mux:                   http.NewServeMux(),
-		client:                clientSet,
 		domain:                domain,
-		clientConfig:          clientSet.Config,
+		clientConfig:          clientConfig,
 		port:                  port,
 		maxTimeout:            maxTimeout,
 		systemNamespace:       sysNs, // the namespace where the sandbox manager is running
+		peerSelector:          peerSelector,
 		sandboxNamespace:      sandboxNamespace,
 		sandboxLabelSelector:  sandboxLabelSelector,
 		maxClaimWorkers:       maxClaimWorkers,
 		maxCreateQPS:          maxCreateQPS,
 		extProcMaxConcurrency: extProcMaxConcurrency,
 		memberlistBindPort:    memberlistBindPort,
+		keyCfg:                keyCfg,
 	}
 
 	sc.server = &http.Server{
 		Addr:              fmt.Sprintf(":%d", port),
 		Handler:           sc.mux,
 		ReadHeaderTimeout: 5 * time.Second,
-	}
-
-	if keyCfg != nil {
-		storage, err := keys.NewKeyStorage(*keyCfg)
-		if err != nil {
-			klog.Fatalf("Failed to initialize key storage: %v", err)
-		}
-		sc.keys = storage
 	}
 	return sc
 }
@@ -92,34 +99,58 @@ func (sc *Controller) Init() error {
 	log := klog.FromContext(ctx)
 	log.Info("init controller")
 	adapter := adapters.DefaultAdapterFactory(sc.port)
-	sandboxManager, err := sandbox_manager.NewSandboxManager(sc.client, adapter, config.SandboxManagerOptions{
+
+	sandboxManager, err := sandboxmanager.NewSandboxManagerBuilder(sc.sandboxManagerOptions()).
+		WithSandboxInfra().
+		WithMemberlistPeers().
+		WithRequestAdapter(adapter).
+		Build()
+
+	if err != nil {
+		return err
+	}
+
+	sc.manager = sandboxManager
+	sc.cache = sandboxManager.GetInfra().GetCache()
+	sc.storageRegistry = storages.NewStorageProvider()
+	sc.registerRoutes()
+
+	return sc.initKeyStorage(ctx)
+}
+
+func (sc *Controller) sandboxManagerOptions() config.SandboxManagerOptions {
+	return config.SandboxManagerOptions{
 		SystemNamespace:       sc.systemNamespace,
+		PeerSelector:          sc.peerSelector,
 		SandboxNamespace:      sc.sandboxNamespace,
 		SandboxLabelSelector:  sc.sandboxLabelSelector,
 		MaxClaimWorkers:       sc.maxClaimWorkers,
 		ExtProcMaxConcurrency: sc.extProcMaxConcurrency,
 		MaxCreateQPS:          sc.maxCreateQPS,
 		MemberlistBindPort:    sc.memberlistBindPort,
-	})
-	if err != nil {
-		return err
+		RestConfig:            sc.clientConfig,
 	}
-
-	infraWithCache := sandboxManager.GetInfra()
-	if infraWithCache != nil {
-		sc.cache = infraWithCache.GetCache()
-	}
-	sc.manager = sandboxManager
-	sc.storageRegistry = storages.NewStorageProvider()
-	sc.registerRoutes()
-	if sc.keys == nil {
-		return nil
-	}
-
-	return sc.keys.Init(ctx)
 }
 
-func (sc *Controller) Run(sysNs, peerSelector string) (context.Context, error) {
+func (sc *Controller) initKeyStorage(ctx context.Context) error {
+	// Initialize key storage if key config is provided
+	if sc.keyCfg != nil {
+		var err error
+		if sc.cache != nil {
+			sc.keyCfg.Client = sc.cache.GetClient()
+			sc.keyCfg.APIReader = sc.cache.GetAPIReader()
+		}
+		if sc.keys, err = keys.NewKeyStorage(*sc.keyCfg); err != nil {
+			return err
+		}
+		if err = sc.keys.Init(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (sc *Controller) Run() (context.Context, error) {
 	if sc.stop != nil {
 		return nil, errors.New("controller already started")
 	}
@@ -127,7 +158,7 @@ func (sc *Controller) Run(sysNs, peerSelector string) (context.Context, error) {
 	// Channel to listen for interrupt signal
 	sc.stop = make(chan os.Signal, 1)
 	signal.Notify(sc.stop, syscall.SIGINT, syscall.SIGTERM)
-	if err := sc.manager.Run(ctx, sysNs, peerSelector); err != nil {
+	if err := sc.manager.Run(ctx); err != nil {
 		klog.Fatalf("Sandbox manager failed to start: %v", err)
 	}
 

@@ -18,41 +18,23 @@ package peers
 
 import (
 	"context"
-	"fmt"
-	"net"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	v1 "k8s.io/api/core/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
-
-// getFreePort returns an available local port
-func getFreePort() (int, error) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return 0, err
-	}
-	port := ln.Addr().(*net.TCPAddr).Port
-	_ = ln.Close()
-	return port, nil
-}
-
-// createTestPeer creates a test MemberlistPeers instance
-func createTestPeer(t *testing.T, nodeName string) (*MemberlistPeers, int) {
-	port, err := getFreePort()
-	require.NoError(t, err)
-
-	peer := NewMemberlistPeers(nodeName)
-	return peer, port
-}
 
 // TestMemberlistPeers_Start_Stop tests basic start and stop functionality
 func TestMemberlistPeers_Start_Stop(t *testing.T) {
-	peer, port := createTestPeer(t, "test-node-1")
-
+	fc := fake.NewClientBuilder().WithStatusSubresource(&v1.Pod{}).Build()
 	ctx := context.Background()
-	err := peer.Start(ctx, "127.0.0.1", port, nil)
+	peer, port, err := CreateTestPeer(ctx, fc, "test-node-1")
+	require.NoError(t, err)
+
+	err = peer.Start(ctx, port)
 	require.NoError(t, err)
 	assert.True(t, peer.started.Load())
 
@@ -76,13 +58,15 @@ func TestMemberlistPeers_Start_Stop(t *testing.T) {
 
 // TestMemberlistPeers_Start_Twice tests that starting twice should return an error
 func TestMemberlistPeers_Start_Twice(t *testing.T) {
-	peer, port := createTestPeer(t, "test-node-2")
-
+	fc := fake.NewClientBuilder().WithStatusSubresource(&v1.Pod{}).Build()
 	ctx := context.Background()
-	err := peer.Start(ctx, "127.0.0.1", port, nil)
+	peer, port, err := CreateTestPeer(ctx, fc, "test-node-2")
 	require.NoError(t, err)
 
-	err = peer.Start(ctx, "127.0.0.1", port, nil)
+	err = peer.Start(ctx, port)
+	require.NoError(t, err)
+
+	err = peer.Start(ctx, port)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "already started")
 
@@ -91,7 +75,8 @@ func TestMemberlistPeers_Start_Twice(t *testing.T) {
 
 // TestMemberlistPeers_Stop_NotStarted tests that stopping when not started does not return an error
 func TestMemberlistPeers_Stop_NotStarted(t *testing.T) {
-	peer := NewMemberlistPeers("test-node-not-started")
+	fc := fake.NewClientBuilder().WithStatusSubresource(&v1.Pod{}).Build()
+	peer := NewMemberlistPeers(fc, "test-node-not-started", Namespace, LabelSelector)
 
 	err := peer.Stop()
 	assert.NoError(t, err)
@@ -99,28 +84,29 @@ func TestMemberlistPeers_Stop_NotStarted(t *testing.T) {
 
 // TestMemberlistPeers_ThreeNodes_Join tests three-node join and discovery
 func TestMemberlistPeers_ThreeNodes_Join(t *testing.T) {
-	// Create three nodes
-	peer1, port1 := createTestPeer(t, "node-1")
-	peer2, port2 := createTestPeer(t, "node-2")
-	peer3, port3 := createTestPeer(t, "node-3")
+	fc := fake.NewClientBuilder().WithStatusSubresource(&v1.Pod{}).Build()
+	ctx := t.Context()
 
-	ctx := context.Background()
+	// Create three nodes
+	peer1, port1, err := CreateTestPeer(ctx, fc, "node-1")
+	require.NoError(t, err)
+	peer2, port2, err := CreateTestPeer(ctx, fc, "node-2")
+	require.NoError(t, err)
+	peer3, port3, err := CreateTestPeer(ctx, fc, "node-3")
+	require.NoError(t, err)
 
 	// Start first node (seed node)
-	err := peer1.Start(ctx, "127.0.0.1", port1, nil)
+	err = peer1.Start(ctx, port1)
 	require.NoError(t, err)
 	defer func() { _ = peer1.Stop() }()
 
 	// Start second node, join first
-	err = peer2.Start(ctx, "127.0.0.1", port2, []string{fmt.Sprintf("127.0.0.1:%d", port1)})
+	err = peer2.Start(ctx, port2)
 	require.NoError(t, err)
 	defer func() { _ = peer2.Stop() }()
 
 	// Start third node, join first two
-	err = peer3.Start(ctx, "127.0.0.1", port3, []string{
-		fmt.Sprintf("127.0.0.1:%d", port1),
-		fmt.Sprintf("127.0.0.1:%d", port2),
-	})
+	err = peer3.Start(ctx, port3)
 	require.NoError(t, err)
 	defer func() { _ = peer3.Stop() }()
 
@@ -153,20 +139,23 @@ func TestMemberlistPeers_ThreeNodes_Join(t *testing.T) {
 
 // TestMemberlistPeers_WaitForPeers tests waiting for peers functionality
 func TestMemberlistPeers_WaitForPeers(t *testing.T) {
-	peer1, port1 := createTestPeer(t, "wait-node-1")
-	peer2, port2 := createTestPeer(t, "wait-node-2")
+	fc := fake.NewClientBuilder().WithStatusSubresource(&v1.Pod{}).Build()
+	ctx := t.Context()
 
-	ctx := context.Background()
+	peer1, port1, err := CreateTestPeer(ctx, fc, "wait-node-1")
+	require.NoError(t, err)
+	peer2, port2, err := CreateTestPeer(ctx, fc, "wait-node-2")
+	require.NoError(t, err)
 
 	// Start first node
-	err := peer1.Start(ctx, "127.0.0.1", port1, nil)
+	err = peer1.Start(ctx, port1)
 	require.NoError(t, err)
 	defer func() { _ = peer1.Stop() }()
 
 	// Start second node asynchronously (delay 200ms)
 	go func() {
 		time.Sleep(200 * time.Millisecond)
-		_ = peer2.Start(ctx, "127.0.0.1", port2, []string{fmt.Sprintf("127.0.0.1:%d", port1)})
+		_ = peer2.Start(ctx, port2)
 	}()
 	defer func() { _ = peer2.Stop() }()
 
@@ -183,10 +172,12 @@ func TestMemberlistPeers_WaitForPeers(t *testing.T) {
 
 // TestMemberlistPeers_WaitForPeers_Timeout tests waiting timeout
 func TestMemberlistPeers_WaitForPeers_Timeout(t *testing.T) {
-	peer, port := createTestPeer(t, "timeout-node")
+	fc := fake.NewClientBuilder().WithStatusSubresource(&v1.Pod{}).Build()
+	ctx := t.Context()
+	peer, port, err := CreateTestPeer(ctx, fc, "timeout-node")
+	require.NoError(t, err)
 
-	ctx := context.Background()
-	err := peer.Start(ctx, "127.0.0.1", port, nil)
+	err = peer.Start(ctx, port)
 	require.NoError(t, err)
 	defer func() { _ = peer.Stop() }()
 
@@ -202,10 +193,12 @@ func TestMemberlistPeers_WaitForPeers_Timeout(t *testing.T) {
 
 // TestMemberlistPeers_WaitForPeers_Stopped tests that WaitForPeers returns error after stopped
 func TestMemberlistPeers_WaitForPeers_Stopped(t *testing.T) {
-	peer, port := createTestPeer(t, "stopped-node")
+	fc := fake.NewClientBuilder().WithStatusSubresource(&v1.Pod{}).Build()
+	ctx := t.Context()
+	peer, port, err := CreateTestPeer(ctx, fc, "stopped-node")
+	require.NoError(t, err)
 
-	ctx := context.Background()
-	err := peer.Start(ctx, "127.0.0.1", port, nil)
+	err = peer.Start(ctx, port)
 	require.NoError(t, err)
 
 	// Stop asynchronously
@@ -222,17 +215,20 @@ func TestMemberlistPeers_WaitForPeers_Stopped(t *testing.T) {
 
 // TestMemberlistPeers_NodeLeave tests that node is removed from peers list after leaving
 func TestMemberlistPeers_NodeLeave(t *testing.T) {
-	peer1, port1 := createTestPeer(t, "leave-node-1")
-	peer2, port2 := createTestPeer(t, "leave-node-2")
+	fc := fake.NewClientBuilder().WithStatusSubresource(&v1.Pod{}).Build()
+	ctx := t.Context()
 
-	ctx := context.Background()
+	peer1, port1, err := CreateTestPeer(ctx, fc, "leave-node-1")
+	require.NoError(t, err)
+	peer2, port2, err := CreateTestPeer(ctx, fc, "leave-node-2")
+	require.NoError(t, err)
 
 	// Start two nodes
-	err := peer1.Start(ctx, "127.0.0.1", port1, nil)
+	err = peer1.Start(ctx, port1)
 	require.NoError(t, err)
 	defer func() { _ = peer1.Stop() }()
 
-	err = peer2.Start(ctx, "127.0.0.1", port2, []string{fmt.Sprintf("127.0.0.1:%d", port1)})
+	err = peer2.Start(ctx, port2)
 	require.NoError(t, err)
 
 	// Wait for peer2 to be discovered
@@ -252,7 +248,8 @@ func TestMemberlistPeers_NodeLeave(t *testing.T) {
 
 // TestMemberlistPeers_GetPeers_NotStarted tests returning nil when not started
 func TestMemberlistPeers_GetPeers_NotStarted(t *testing.T) {
-	peer := NewMemberlistPeers("not-started")
+	fc := fake.NewClientBuilder().WithStatusSubresource(&v1.Pod{}).Build()
+	peer := NewMemberlistPeers(fc, "not-started", Namespace, LabelSelector)
 
 	assert.Nil(t, peer.GetPeers())
 	assert.Nil(t, peer.GetAllMembers())
@@ -262,14 +259,13 @@ func TestMemberlistPeers_GetPeers_NotStarted(t *testing.T) {
 
 // TestMemberlistPeers_Join_PartialFailure tests that partial join failure does not affect startup
 func TestMemberlistPeers_Join_PartialFailure(t *testing.T) {
-	peer, port := createTestPeer(t, "partial-node")
-
-	ctx := context.Background()
+	fc := fake.NewClientBuilder().WithStatusSubresource(&v1.Pod{}).Build()
+	ctx := t.Context()
+	peer, port, err := CreateTestPeer(ctx, fc, "partial-node")
+	require.NoError(t, err)
 
 	// Try to join a non-existent node and seed node
-	err := peer.Start(ctx, "127.0.0.1", port, []string{
-		"127.0.0.1:9999", // Non-existent node
-	})
+	err = peer.Start(ctx, port)
 	require.NoError(t, err) // Should not fail because single node operation is allowed
 	defer func() { _ = peer.Stop() }()
 
