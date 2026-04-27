@@ -7,6 +7,7 @@ resources:
 - bases/agents.kruise.io_sandboxsets.yaml
 - bases/agents.kruise.io_sandboxclaims.yaml
 - bases/agents.kruise.io_sandboxtemplates.yaml
+- bases/agents.kruise.io_sandboxupdateops.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

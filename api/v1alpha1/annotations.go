@@ -17,5 +17,8 @@ const (
 	AnnotationEnvdURL         = E2BPrefix + "envd-url"
 )
 
+// LabelSandboxUpdateOps marks which SandboxUpdateOps is operating on this sandbox.
+const LabelSandboxUpdateOps = InternalPrefix + "update-ops"
+
 const True = "true"
 const False = "false"

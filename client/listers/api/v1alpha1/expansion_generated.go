@@ -56,3 +56,11 @@ type SandboxTemplateListerExpansion interface{}
 // SandboxTemplateNamespaceListerExpansion allows custom methods to be added to
 // SandboxTemplateNamespaceLister.
 type SandboxTemplateNamespaceListerExpansion interface{}
+
+// SandboxUpdateOpsListerExpansion allows custom methods to be added to
+// SandboxUpdateOpsLister.
+type SandboxUpdateOpsListerExpansion interface{}
+
+// SandboxUpdateOpsNamespaceListerExpansion allows custom methods to be added to
+// SandboxUpdateOpsNamespaceLister.
+type SandboxUpdateOpsNamespaceListerExpansion interface{}

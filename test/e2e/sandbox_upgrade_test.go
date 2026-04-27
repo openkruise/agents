@@ -34,7 +34,7 @@ import (
 	"github.com/openkruise/agents/pkg/utils"
 )
 
-var _ = PDescribe("Sandbox Upgrade Lifecycle", func() {
+var _ = Describe("Sandbox Upgrade Lifecycle", func() {
 	var (
 		ctx          = context.Background()
 		namespace    string
@@ -77,7 +77,7 @@ var _ = PDescribe("Sandbox Upgrade Lifecycle", func() {
 								{
 									Name:    "runtime",
 									Image:   "openkruise/agent-runtime:v0.2.0",
-									Command: []string{"sh", "/workspace/entrypoint_inner.sh"},
+									Command: []string{"sh", "/workspace/entrypoint.sh"},
 									VolumeMounts: []corev1.VolumeMount{
 										{
 											Name:      "envd-volume",

@@ -20,9 +20,10 @@ import (
 	"context"
 	"testing"
 
-	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 )
 
 func newTestSandbox(annotations map[string]string, sandboxIP string) *agentsv1alpha1.Sandbox {
