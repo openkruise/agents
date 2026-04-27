@@ -91,6 +91,15 @@ func NewController(domain, sysNs, peerSelector, sandboxNamespace, sandboxLabelSe
 		Handler:           sc.mux,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
+
+	if keyCfg != nil {
+		storage, err := keys.NewKeyStorage(*keyCfg)
+		if err != nil {
+			klog.Fatalf("Failed to initialize key storage: %v", err)
+		}
+		sc.keys = storage
+	}
+
 	return sc
 }
 

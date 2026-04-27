@@ -48,6 +48,7 @@ import (
 	"github.com/openkruise/agents/pkg/controller"
 	sandboxctrl "github.com/openkruise/agents/pkg/controller/sandbox"
 	"github.com/openkruise/agents/pkg/features"
+	_ "github.com/openkruise/agents/pkg/identityprovider"
 	"github.com/openkruise/agents/pkg/utils"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 	"github.com/openkruise/agents/pkg/utils/fieldindex"
