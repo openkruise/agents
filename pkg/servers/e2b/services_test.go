@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/openkruise/agents/pkg/utils/runtime"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -45,7 +46,7 @@ func TestCreateSandbox(t *testing.T) {
 
 	// Create test runtime server for InitRuntime
 	opts := testutils.TestRuntimeServerOptions{
-		RunCommandResult: testutils.RunCommandResult{
+		RunCommandResult: runtime.RunCommandResult{
 			PID:    1,
 			Exited: true,
 		},
@@ -437,7 +438,7 @@ func TestCreateSandbox(t *testing.T) {
 			}
 			cleanup := CreateSandboxPool(t, controller, templateName, tt.available, CreateSandboxPoolOptions{
 				RuntimeURL:  server.URL,
-				AccessToken: testutils.AccessToken,
+				AccessToken: runtime.AccessToken,
 			})
 			require.Eventually(t, func() bool {
 				list, err := controller.cache.ListSandboxesInPool(templateName)
@@ -560,7 +561,7 @@ func TestCloneSandbox(t *testing.T) {
 
 	// Create test runtime server for InitRuntime
 	runtimeOpts := testutils.TestRuntimeServerOptions{
-		RunCommandResult: testutils.RunCommandResult{
+		RunCommandResult: runtime.RunCommandResult{
 			PID:    1,
 			Exited: true,
 		},
@@ -582,7 +583,7 @@ func TestCloneSandbox(t *testing.T) {
 			sbx.Annotations = map[string]string{}
 		}
 		sbx.Annotations[v1alpha1.AnnotationRuntimeURL] = server.URL
-		sbx.Annotations[v1alpha1.AnnotationRuntimeAccessToken] = testutils.AccessToken
+		sbx.Annotations[v1alpha1.AnnotationRuntimeAccessToken] = runtime.AccessToken
 
 		// Call original createSandbox
 		created, err := origCreateSandbox(ctx, sbx, client, cache)

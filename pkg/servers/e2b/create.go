@@ -20,6 +20,7 @@ import (
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/csiutils"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
+	utilruntime "github.com/openkruise/agents/pkg/utils/runtime"
 )
 
 // CreateSandbox allocates a Pod as a new sandbox
@@ -191,7 +192,7 @@ func (sc *Controller) createSandboxWithClone(ctx context.Context, request models
 		"resourceVersion", sbx.GetResourceVersion(), "totalCost", time.Since(start))
 	return web.ApiResponse[*models.Sandbox]{
 		Code: http.StatusCreated,
-		Body: sc.convertToE2BSandbox(sbx, sbx.GetAccessToken()),
+		Body: sc.convertToE2BSandbox(sbx, utilruntime.GetAccessToken(sbx)),
 	}, nil
 }
 

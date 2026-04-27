@@ -10,29 +10,13 @@ import (
 	"k8s.io/klog/v2"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/proxy"
 	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
 )
 
 var (
-	DefaultGetRouteFunc = getRouteFromSandbox
+	DefaultGetRouteFunc = stateutils.GetRouteFromSandbox
 	DefaultRequestFunc  = requestSandbox
 )
-
-func getRouteFromSandbox(s *agentsv1alpha1.Sandbox) proxy.Route {
-	state, _ := stateutils.GetSandboxState(s)
-	if s.Status.PodInfo.PodIP == "" {
-		state = agentsv1alpha1.SandboxStateCreating
-	}
-	return proxy.Route{
-		IP:              s.Status.PodInfo.PodIP,
-		ID:              stateutils.GetSandboxID(s),
-		UID:             s.GetUID(),
-		Owner:           s.GetAnnotations()[agentsv1alpha1.AnnotationOwner],
-		State:           state,
-		ResourceVersion: s.GetResourceVersion(),
-	}
-}
 
 func requestSandbox(ctx context.Context, s *agentsv1alpha1.Sandbox, method, path string, port int, body io.Reader) (*http.Response, error) {
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(s))

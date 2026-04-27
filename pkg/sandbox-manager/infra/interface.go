@@ -65,8 +65,6 @@ type Sandbox interface {
 	InplaceRefresh(ctx context.Context, deepcopy bool) error                                            // Update the Sandbox resource object to the latest
 	Request(ctx context.Context, method, path string, port int, body io.Reader) (*http.Response, error) // Make a request to the Sandbox
 	CSIMount(ctx context.Context, driver string, request string) error                                  // request is string config for csi.NodePublishVolumeRequest
-	GetRuntimeURL() string
-	GetAccessToken() string
 	CreateCheckpoint(ctx context.Context, opts CreateCheckpointOptions) (string, error)
 }
 

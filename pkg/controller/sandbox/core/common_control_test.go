@@ -1587,3 +1587,452 @@ func TestCommonControl_createPod_WithSidecarInjection(t *testing.T) {
 		})
 	}
 }
+
+func TestNewCommonControl(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	recorder := record.NewFakeRecorder(10)
+	rl := NewRateLimiter()
+
+	control := NewCommonControl(fakeClient, recorder, rl)
+	if control == nil {
+		t.Fatal("NewCommonControl returned nil")
+	}
+
+	// Verify it implements SandboxControl interface
+	var _ SandboxControl = control
+
+	// Verify internal fields by calling methods (smoke test)
+	args := EnsureFuncArgs{
+		Pod: nil,
+		Box: &agentsv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-sandbox",
+				Namespace: "default",
+			},
+			Spec: agentsv1alpha1.SandboxSpec{
+				EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+					Template: &corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{Name: "test", Image: "nginx"},
+							},
+						},
+					},
+				},
+			},
+		},
+		NewStatus: &agentsv1alpha1.SandboxStatus{},
+	}
+
+	// EnsureSandboxUpdated with nil pod should set Failed phase
+	err := control.EnsureSandboxUpdated(context.TODO(), args)
+	if err != nil {
+		t.Errorf("EnsureSandboxUpdated() unexpected error: %v", err)
+	}
+	if args.NewStatus.Phase != agentsv1alpha1.SandboxFailed {
+		t.Errorf("Expected phase Failed, got %s", args.NewStatus.Phase)
+	}
+}
+
+func TestCommonControl_EnsureSandboxUpdated_InplaceNotDone(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	box := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-sandbox",
+			Namespace: "default",
+			Annotations: map[string]string{
+				agentsv1alpha1.SandboxHashImmutablePart: "hash-a",
+			},
+		},
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test", Image: "nginx:v2"}},
+					},
+				},
+			},
+		},
+	}
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-sandbox",
+			Namespace: "default",
+			Labels: map[string]string{
+				agentsv1alpha1.PodLabelTemplateHash: "old-rev",
+			},
+		},
+		Status: corev1.PodStatus{
+			PodIP: "10.0.0.2",
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
+	control := &commonControl{
+		Client:               fakeClient,
+		recorder:             record.NewFakeRecorder(10),
+		inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
+	}
+
+	newStatus := &agentsv1alpha1.SandboxStatus{
+		UpdateRevision: "new-rev",
+	}
+
+	err := control.EnsureSandboxUpdated(context.TODO(), EnsureFuncArgs{Pod: pod, Box: box, NewStatus: newStatus})
+	if err != nil {
+		t.Fatalf("EnsureSandboxUpdated() unexpected error: %v", err)
+	}
+	// handleInplaceUpdateSandbox with hash mismatch returns (true, nil), so status gets synced
+	if newStatus.SandboxIp != "10.0.0.2" {
+		t.Errorf("Expected SandboxIp '10.0.0.2', got %s", newStatus.SandboxIp)
+	}
+}
+
+func TestCommonControl_EnsureSandboxResumed_TerminatingPod(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	now := metav1.Now()
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "test-sandbox",
+			Namespace:         "default",
+			DeletionTimestamp: &metav1.Time{Time: now.Time},
+			Finalizers:        []string{"fake-finalizer"},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+		},
+	}
+
+	box := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-sandbox",
+			Namespace: "default",
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	control := &commonControl{
+		Client:               fakeClient,
+		recorder:             record.NewFakeRecorder(10),
+		inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
+	}
+
+	newStatus := &agentsv1alpha1.SandboxStatus{
+		Phase: agentsv1alpha1.SandboxResuming,
+	}
+
+	err := control.EnsureSandboxResumed(context.TODO(), EnsureFuncArgs{Pod: pod, Box: box, NewStatus: newStatus})
+	if err == nil {
+		t.Error("Expected error for terminating pod, got nil")
+	}
+}
+
+func TestCommonControl_EnsureSandboxResumed_SetResumedCondition(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	now := metav1.Now()
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-sandbox",
+			Namespace: "default",
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodPending,
+		},
+	}
+
+	box := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-sandbox",
+			Namespace: "default",
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	control := &commonControl{
+		Client:               fakeClient,
+		recorder:             record.NewFakeRecorder(10),
+		inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
+	}
+
+	newStatus := &agentsv1alpha1.SandboxStatus{
+		Phase: agentsv1alpha1.SandboxResuming,
+		Conditions: []metav1.Condition{
+			{
+				Type:               string(agentsv1alpha1.SandboxConditionResumed),
+				Status:             metav1.ConditionFalse,
+				LastTransitionTime: now,
+				Reason:             agentsv1alpha1.SandboxResumeReasonCreatePod,
+			},
+			{
+				Type:               string(agentsv1alpha1.SandboxConditionReady),
+				Status:             metav1.ConditionFalse,
+				LastTransitionTime: now,
+				Reason:             agentsv1alpha1.SandboxReadyReasonPodReady,
+			},
+		},
+	}
+
+	err := control.EnsureSandboxResumed(context.TODO(), EnsureFuncArgs{Pod: pod, Box: box, NewStatus: newStatus})
+	if err != nil {
+		t.Fatalf("EnsureSandboxResumed() unexpected error: %v", err)
+	}
+
+	resumedCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionResumed))
+	if resumedCond == nil {
+		t.Fatal("Expected Resumed condition to exist")
+	}
+	if resumedCond.Status != metav1.ConditionTrue {
+		t.Errorf("Expected Resumed condition to be True, got %s", resumedCond.Status)
+	}
+
+	if newStatus.Phase != agentsv1alpha1.SandboxResuming {
+		t.Errorf("Expected phase Resuming, got %s", newStatus.Phase)
+	}
+}
+
+func TestCommonControl_EnsureSandboxTerminated_PodNotExist_NoFinalizer(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	box := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-sandbox",
+			Namespace: "default",
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(box).Build()
+	control := &commonControl{
+		Client:               fakeClient,
+		recorder:             record.NewFakeRecorder(10),
+		inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
+	}
+
+	err := control.EnsureSandboxTerminated(context.TODO(), EnsureFuncArgs{Pod: nil, Box: box, NewStatus: &agentsv1alpha1.SandboxStatus{}})
+	if err != nil {
+		t.Errorf("EnsureSandboxTerminated() unexpected error: %v", err)
+	}
+}
+
+func TestCommonControl_EnsureSandboxPaused_AlreadyPaused(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	now := metav1.Now()
+	box := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-sandbox",
+			Namespace: "default",
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	control := &commonControl{
+		Client:               fakeClient,
+		recorder:             record.NewFakeRecorder(10),
+		inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
+	}
+
+	newStatus := &agentsv1alpha1.SandboxStatus{
+		Phase: agentsv1alpha1.SandboxPaused,
+		Conditions: []metav1.Condition{
+			{
+				Type:               string(agentsv1alpha1.SandboxConditionPaused),
+				Status:             metav1.ConditionTrue,
+				Reason:             agentsv1alpha1.SandboxPausedReasonDeletePod,
+				LastTransitionTime: now,
+			},
+		},
+	}
+
+	err := control.EnsureSandboxPaused(context.TODO(), EnsureFuncArgs{Pod: nil, Box: box, NewStatus: newStatus})
+	if err != nil {
+		t.Errorf("EnsureSandboxPaused() unexpected error: %v", err)
+	}
+
+	cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
+	if cond == nil || cond.Status != metav1.ConditionTrue {
+		t.Error("Expected Paused condition to remain True")
+	}
+}
+
+func TestCommonControl_performRecreateUpgrade_PodTerminating(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	now := metav1.Now()
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "test-sandbox",
+			Namespace:         "default",
+			DeletionTimestamp: &metav1.Time{Time: now.Time},
+			Finalizers:        []string{"fake"},
+			Labels: map[string]string{
+				agentsv1alpha1.PodLabelTemplateHash: "old-rev",
+			},
+		},
+	}
+
+	box := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-sandbox",
+			Namespace: "default",
+		},
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test", Image: "nginx"}},
+					},
+				},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	control := &commonControl{
+		Client:               fakeClient,
+		recorder:             record.NewFakeRecorder(10),
+		inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
+	}
+
+	newStatus := &agentsv1alpha1.SandboxStatus{
+		UpdateRevision: "new-rev",
+	}
+
+	done, err := control.performRecreateUpgrade(context.TODO(), EnsureFuncArgs{Pod: pod, Box: box, NewStatus: newStatus})
+	if err != nil {
+		t.Fatalf("performRecreateUpgrade() unexpected error: %v", err)
+	}
+	if done {
+		t.Error("Expected done=false for terminating pod")
+	}
+}
+
+func TestCommonControl_performRecreateUpgrade_NewPodNotReady(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-sandbox",
+			Namespace: "default",
+			Labels: map[string]string{
+				agentsv1alpha1.PodLabelTemplateHash: "new-rev",
+			},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+		},
+	}
+
+	box := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-sandbox",
+			Namespace: "default",
+		},
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test", Image: "nginx"}},
+					},
+				},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	control := &commonControl{
+		Client:               fakeClient,
+		recorder:             record.NewFakeRecorder(10),
+		inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
+	}
+
+	newStatus := &agentsv1alpha1.SandboxStatus{
+		UpdateRevision: "new-rev",
+	}
+
+	done, err := control.performRecreateUpgrade(context.TODO(), EnsureFuncArgs{Pod: pod, Box: box, NewStatus: newStatus})
+	if err != nil {
+		t.Fatalf("performRecreateUpgrade() unexpected error: %v", err)
+	}
+	if done {
+		t.Error("Expected done=false for pod not ready")
+	}
+}
+
+func TestCommonControl_performRecreateUpgrade_PodReadyFalse(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-sandbox",
+			Namespace: "default",
+			Labels: map[string]string{
+				agentsv1alpha1.PodLabelTemplateHash: "new-rev",
+			},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: corev1.ConditionFalse},
+			},
+		},
+	}
+
+	box := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-sandbox",
+			Namespace: "default",
+		},
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test", Image: "nginx"}},
+					},
+				},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	control := &commonControl{
+		Client:               fakeClient,
+		recorder:             record.NewFakeRecorder(10),
+		inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
+	}
+
+	newStatus := &agentsv1alpha1.SandboxStatus{
+		UpdateRevision: "new-rev",
+	}
+
+	done, err := control.performRecreateUpgrade(context.TODO(), EnsureFuncArgs{Pod: pod, Box: box, NewStatus: newStatus})
+	if err != nil {
+		t.Fatalf("performRecreateUpgrade() unexpected error: %v", err)
+	}
+	if done {
+		t.Error("Expected done=false for pod with Ready=False")
+	}
+}

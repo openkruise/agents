@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/openkruise/agents/pkg/utils/runtime"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -575,7 +576,7 @@ func TestInfra_reconcileRoutes(t *testing.T) {
 func TestInfra_CloneSandbox(t *testing.T) {
 	utils.InitLogOutput()
 	runtimeOpts := testutils.TestRuntimeServerOptions{
-		RunCommandResult: testutils.RunCommandResult{
+		RunCommandResult: runtime.RunCommandResult{
 			PID:    1,
 			Exited: true,
 		},

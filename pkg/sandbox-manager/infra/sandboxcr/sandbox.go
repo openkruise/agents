@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/openkruise/agents/pkg/utils/runtime"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
@@ -364,7 +365,12 @@ func (s *Sandbox) CSIMount(ctx context.Context, driver string, request string) e
 			"POD_UID": string(s.Status.PodInfo.PodUID),
 		},
 	}
-	result, err := s.runCommandWithRuntime(ctx, processConfig, 5*time.Second)
+
+	result, err := runtime.RunCommandWithRuntime(ctx, runtime.RunCmdFuncArgs{
+		Sbx:           s.Sandbox,
+		ProcessConfig: processConfig,
+		Timeout:       5 * time.Second,
+	})
 	if err != nil {
 		log.Error(err, "failed to run command", "stdout", result.Stdout, "stderr", result.Stderr)
 		return err

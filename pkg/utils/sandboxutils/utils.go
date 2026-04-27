@@ -4,11 +4,27 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/openkruise/agents/pkg/proxy"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/utils"
 )
+
+func GetRouteFromSandbox(s *agentsv1alpha1.Sandbox) proxy.Route {
+	state, _ := GetSandboxState(s)
+	if s.Status.PodInfo.PodIP == "" {
+		state = agentsv1alpha1.SandboxStateCreating
+	}
+	return proxy.Route{
+		IP:              s.Status.PodInfo.PodIP,
+		ID:              GetSandboxID(s),
+		UID:             s.GetUID(),
+		Owner:           s.GetAnnotations()[agentsv1alpha1.AnnotationOwner],
+		State:           state,
+		ResourceVersion: s.GetResourceVersion(),
+	}
+}
 
 // GetSandboxState the state of agentsv1alpha1 Sandbox.
 // NOTE: the reason is unique and hard-coded, so we can easily search the conditions of some reason when debugging.

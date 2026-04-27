@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/openkruise/agents/pkg/utils/runtime"
 	"k8s.io/klog/v2"
 
 	sandboxmanager "github.com/openkruise/agents/pkg/sandbox-manager"
@@ -30,7 +31,7 @@ func (sc *Controller) DescribeSandbox(r *http.Request) (web.ApiResponse[*models.
 	}
 
 	return web.ApiResponse[*models.Sandbox]{
-		Body: sc.convertToE2BSandbox(sbx, sbx.GetAccessToken()),
+		Body: sc.convertToE2BSandbox(sbx, runtime.GetAccessToken(sbx)),
 	}, nil
 }
 

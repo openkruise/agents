@@ -35,7 +35,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
-	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -117,8 +116,6 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 		}
 		return reconcile.Result{}, client.IgnoreNotFound(err)
 	}
-	logger := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
-
 	// Record sandbox lifecycle metrics on every reconcile
 	recordSandboxMetrics(box)
 
@@ -128,17 +125,17 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 			args := core.EnsureFuncArgs{Pod: pod, Box: box, NewStatus: newStatus}
 			return r.handleTerminating(ctx, args)
 		}
-		logger.Info("sandbox template is nil, and ignore")
+		klog.InfoS("sandbox template is nil, and ignore", "sandbox", klog.KObj(box))
 		return reconcile.Result{}, nil
 	}
 
-	logger.Info("Began to process Sandbox for reconcile")
+	klog.InfoS("Began to process Sandbox for reconcile", "sandbox", klog.KObj(box))
 	if pod != nil {
 		core.ScaleExpectation.ObserveScale(utils.GetControllerKey(box), expectations.Create, pod.Name)
 	}
 	if isSatisfied, unsatisfiedDuration, _ := core.ScaleExpectation.SatisfiedExpectations(utils.GetControllerKey(box)); !isSatisfied {
 		if unsatisfiedDuration < expectations.ExpectationTimeout {
-			logger.Info("Not satisfied ScaleExpectation for Sandbox, wait for cache event")
+			klog.InfoS("Not satisfied ScaleExpectation for Sandbox, wait for cache event", "sandbox", klog.KObj(box))
 			return reconcile.Result{RequeueAfter: expectations.ExpectationTimeout - unsatisfiedDuration}, nil
 		}
 		klog.InfoS("ScaleExpectation unsatisfied overtime for Sandbox, wait for cache event timeout", "timeout", unsatisfiedDuration)
@@ -148,7 +145,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 	core.ResourceVersionExpectations.Observe(box)
 	if isSatisfied, unsatisfiedDuration := core.ResourceVersionExpectations.IsSatisfied(box); !isSatisfied {
 		if unsatisfiedDuration < expectations.ExpectationTimeout {
-			logger.Info("Not satisfied resourceVersion for Sandbox, wait for cache event")
+			klog.InfoS("Not satisfied resourceVersion for Sandbox, wait for cache event", "sandbox", klog.KObj(box))
 			return reconcile.Result{RequeueAfter: expectations.ExpectationTimeout - unsatisfiedDuration}, nil
 		}
 		klog.InfoS("ResourceVersionExpectations unsatisfied overtime for Sandbox, wait for cache event timeout", "timeout", unsatisfiedDuration)
@@ -175,7 +172,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 
 	// Process VolumeClaimTemplates for persistent data recovery during sleep/wake operations
 	if err := r.ensureVolumeClaimTemplates(ctx, box); err != nil {
-		logger.Error(err, "failed to ensure volume claim templates")
+		klog.ErrorS(err, "failed to ensure volume claim templates", "sandbox", klog.KObj(box))
 		return reconcile.Result{}, err
 	}
 
@@ -201,14 +198,14 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 	var requeueAfter time.Duration
 	if box.Spec.ShutdownTime != nil && box.DeletionTimestamp == nil {
 		if box.Spec.ShutdownTime.Before(&now) {
-			logger.Info("sandbox shutdown time reached, will be deleted", "shutdownTime", box.Spec.ShutdownTime)
+			klog.InfoS("sandbox shutdown time reached, will be deleted", "sandbox", klog.KObj(box), "shutdownTime", box.Spec.ShutdownTime)
 			return ctrl.Result{}, r.Delete(ctx, box)
 		}
 		requeueAfter = box.Spec.ShutdownTime.Sub(now.Time)
 	}
 	if box.Spec.PauseTime != nil && !box.Spec.Paused {
 		if box.Spec.PauseTime.Before(&now) {
-			logger.Info("sandbox pause time reached, will be paused")
+			klog.InfoS("sandbox pause time reached, will be paused", "sandbox", klog.KObj(box))
 			modified := box.DeepCopy()
 			patch := client.MergeFrom(box)
 			modified.Spec.Paused = true
@@ -233,11 +230,19 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 		err = r.getControl(args.Pod).EnsureSandboxPaused(ctx, args)
 	case agentsv1alpha1.SandboxResuming:
 		err = r.getControl(args.Pod).EnsureSandboxResumed(ctx, args)
+	case agentsv1alpha1.SandboxUpgrading:
+		err = r.getControl(args.Pod).EnsureSandboxUpgraded(ctx, args)
 	default:
-		logger.Info("sandbox status phase is invalid", "phase", box.Status.Phase)
+		klog.InfoS("sandbox status phase is invalid", "sandbox", klog.KObj(box), "phase", box.Status.Phase)
 		return ctrl.Result{RequeueAfter: requeueAfter}, nil
 	}
 	if err != nil {
+		//todo, call updateSandboxStatus
+		if newStatus.Phase == agentsv1alpha1.SandboxUpgrading {
+			if retErr := r.updateSandboxStatus(ctx, *newStatus, box); retErr != nil {
+				klog.ErrorS(retErr, "failed to persist upgrade status on error", "sandbox", klog.KObj(box))
+			}
+		}
 		return reconcile.Result{}, err
 	}
 	return ctrl.Result{RequeueAfter: requeueAfter}, r.updateSandboxStatus(ctx, *newStatus, box)
@@ -253,7 +258,6 @@ func isSandboxCompletedPhase(phase agentsv1alpha1.SandboxPhase) bool {
 }
 
 func (r *SandboxReconciler) addSandboxFinalizerAndHash(ctx context.Context, box *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) {
-	logger := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
 	if !box.DeletionTimestamp.IsZero() || controllerutil.ContainsFinalizer(box, utils.SandboxFinalizer) {
 		return box, nil
 	}
@@ -267,15 +271,14 @@ func (r *SandboxReconciler) addSandboxFinalizerAndHash(ctx context.Context, box 
 	_, hashImmutablePart := core.HashSandbox(box)
 	originObj.Annotations[agentsv1alpha1.SandboxHashImmutablePart] = hashImmutablePart
 	if err := client.IgnoreNotFound(r.Patch(ctx, originObj, patch)); err != nil {
-		logger.Error(err, "failed to patch sandbox finalizer and hash")
+		klog.ErrorS(err, "failed to patch sandbox finalizer and hash", "sandbox", klog.KObj(box))
 		return nil, fmt.Errorf("failed to patch finalizer: %w", err)
 	}
-	logger.Info("patch sandbox hash annotations and finalizer success")
+	klog.InfoS("patch sandbox hash annotations and finalizer success", "sandbox", klog.KObj(box))
 	return originObj, nil
 }
 
 func (r *SandboxReconciler) updateSandboxStatus(ctx context.Context, newStatus agentsv1alpha1.SandboxStatus, box *agentsv1alpha1.Sandbox) error {
-	logger := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
 	if reflect.DeepEqual(box.Status, newStatus) || newStatus.Phase == agentsv1alpha1.SandboxPending {
 		return nil
 	}
@@ -285,11 +288,11 @@ func (r *SandboxReconciler) updateSandboxStatus(ctx context.Context, newStatus a
 	rcvObject := &agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Namespace: box.Namespace, Name: box.Name}}
 	err := client.IgnoreNotFound(r.Status().Patch(ctx, rcvObject, client.RawPatch(types.MergePatchType, []byte(patchStatus))))
 	if err != nil {
-		logger.Error(err, "update sandbox status failed", "patchStatus", patchStatus)
+		klog.ErrorS(err, "update sandbox status failed", "sandbox", klog.KObj(box), "patchStatus", patchStatus)
 		return err
 	}
 	core.ResourceVersionExpectations.Expect(rcvObject)
-	logger.Info("update sandbox status success", "status", utils.DumpJson(newStatus))
+	klog.InfoS("update sandbox status success", "sandbox", klog.KObj(box), "status", utils.DumpJson(newStatus))
 	box.Status = newStatus
 	// Update metrics after status change
 	recordSandboxMetrics(box)
@@ -298,7 +301,6 @@ func (r *SandboxReconciler) updateSandboxStatus(ctx context.Context, newStatus a
 
 func calculateStatus(args core.EnsureFuncArgs) (*agentsv1alpha1.SandboxStatus, bool) {
 	pod, box, newStatus := args.Pod, args.Box, args.NewStatus
-	logger := logf.FromContext(context.TODO()).WithValues("sandbox", klog.KObj(box))
 
 	hash, _ := core.HashSandbox(box)
 	newStatus.ObservedGeneration = box.Generation
@@ -331,6 +333,13 @@ func calculateStatus(args core.EnsureFuncArgs) (*agentsv1alpha1.SandboxStatus, b
 			// The paused and resumed condition are exclusive
 			utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionResumed))
 			newStatus.Phase = agentsv1alpha1.SandboxPaused
+			// Check for upgrade: if template has changed (hash mismatch), transition to Upgrading phase
+		} else if pod != nil && pod.Labels[agentsv1alpha1.PodLabelTemplateHash] != newStatus.UpdateRevision &&
+			box.Spec.UpgradePolicy != nil && box.Spec.UpgradePolicy.Type == agentsv1alpha1.SandboxUpgradePolicyRecreate {
+			klog.InfoS("Detected upgrade trigger", "sandbox", klog.KObj(box),
+				"podRevision", pod.Labels[agentsv1alpha1.PodLabelTemplateHash],
+				"sandboxRevision", newStatus.UpdateRevision)
+			newStatus.Phase = agentsv1alpha1.SandboxUpgrading
 		}
 
 	case agentsv1alpha1.SandboxPaused:
@@ -348,7 +357,24 @@ func calculateStatus(args core.EnsureFuncArgs) (*agentsv1alpha1.SandboxStatus, b
 			}
 			utils.SetSandboxCondition(newStatus, rCond)
 		} else if !box.Spec.Paused && cond.Status == metav1.ConditionFalse {
-			logger.Info("sandbox pause not completed, cannot enter resume state temporarily")
+			klog.InfoS("sandbox pause not completed, cannot enter resume state temporarily", "sandbox", klog.KObj(box))
+		}
+
+	case agentsv1alpha1.SandboxUpgrading:
+		// This indicates the podTemplate has changed again during an ongoing upgrade.
+		// Therefore, the Upgrading condition reason must be reset to PreUpgrade to restart the upgrade lifecycle.
+		if newStatus.UpdateRevision != box.Status.UpdateRevision {
+			upgradeCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
+			if upgradeCond != nil {
+				klog.InfoS("podTemplate changed during upgrade, resetting condition Upgrading reason to PreUpgrade",
+					"sandbox", klog.KObj(box),
+					"previousReason", upgradeCond.Reason,
+					"oldRevision", box.Status.UpdateRevision,
+					"newRevision", newStatus.UpdateRevision)
+				upgradeCond.Reason = agentsv1alpha1.SandboxUpgradingReasonPreUpgrade
+				upgradeCond.Message = ""
+				utils.SetSandboxCondition(newStatus, *upgradeCond)
+			}
 		}
 	}
 	return newStatus, false
@@ -379,8 +405,6 @@ func (r *SandboxReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 // ensureVolumeClaimTemplates creates and ensures PVCs exist for persistent data recovery during sleep/wake operations
 func (r *SandboxReconciler) ensureVolumeClaimTemplates(ctx context.Context, box *agentsv1alpha1.Sandbox) error {
-	logger := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
-
 	if len(box.Spec.VolumeClaimTemplates) == 0 {
 		return nil
 	}
@@ -389,7 +413,7 @@ func (r *SandboxReconciler) ensureVolumeClaimTemplates(ctx context.Context, box 
 		// Generate PVC name based on template name and sandbox name
 		pvcName, err := core.GeneratePVCName(template.Name, box.Name)
 		if err != nil {
-			logger.Error(err, "failed to generate PVC name", "template", template.Name, "sandbox", box.Name)
+			klog.ErrorS(err, "failed to generate PVC name", "sandbox", klog.KObj(box), "template", template.Name)
 			return err
 		}
 
@@ -404,7 +428,7 @@ func (r *SandboxReconciler) ensureVolumeClaimTemplates(ctx context.Context, box 
 
 		// Set the sandbox as the owner of the PVC to align their lifecycles
 		if err = ctrl.SetControllerReference(box, pvc, r.Scheme); err != nil {
-			logger.Error(err, "failed to set sandbox as owner of PVC", "pvc", pvcName)
+			klog.ErrorS(err, "failed to set sandbox as owner of PVC", "sandbox", klog.KObj(box), "pvc", pvcName)
 			return err
 		}
 
@@ -413,25 +437,25 @@ func (r *SandboxReconciler) ensureVolumeClaimTemplates(ctx context.Context, box 
 		err = r.Get(ctx, client.ObjectKey{Namespace: box.Namespace, Name: pvcName}, existingPVC)
 
 		if err == nil {
-			logger.Info("PVC already exists for persistent data recovery", "pvc", pvcName)
+			klog.InfoS("PVC already exists for persistent data recovery", "sandbox", klog.KObj(box), "pvc", pvcName)
 			continue
 		}
 
 		if !errors.IsNotFound(err) {
-			logger.Error(err, "failed to get PVC", "pvc", pvcName)
+			klog.ErrorS(err, "failed to get PVC", "sandbox", klog.KObj(box), "pvc", pvcName)
 			return err
 		}
 
 		if err = r.Create(ctx, pvc); err == nil {
-			logger.Info("created PVC for persistent data recovery", "pvc", pvcName)
+			klog.InfoS("created PVC for persistent data recovery", "sandbox", klog.KObj(box), "pvc", pvcName)
 			continue
 		}
 
 		if !errors.IsAlreadyExists(err) {
-			logger.Error(err, "failed to create PVC", "pvc", pvcName)
+			klog.ErrorS(err, "failed to create PVC", "sandbox", klog.KObj(box), "pvc", pvcName)
 			return err
 		}
-		logger.Info("PVC already exists after create attempt", "pvc", pvcName)
+		klog.InfoS("PVC already exists after create attempt", "sandbox", klog.KObj(box), "pvc", pvcName)
 	}
 
 	return nil

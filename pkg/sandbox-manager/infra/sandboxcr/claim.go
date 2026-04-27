@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/openkruise/agents/pkg/utils/runtime"
 	"golang.org/x/time/rate"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -598,7 +599,7 @@ func initRuntime(ctx context.Context, sbx *Sandbox, opts config.InitRuntimeOptio
 			log.Error(initErr, "failed to refresh sandbox")
 			return initErr
 		}
-		runtimeURL := sbx.GetRuntimeURL()
+		runtimeURL := runtime.GetRuntimeURL(sbx.Sandbox)
 		if runtimeURL == "" {
 			log.Error(nil, "runtimeURL is empty")
 			return fmt.Errorf("runtimeURL is empty")
