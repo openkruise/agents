@@ -109,13 +109,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			scaleUpExpectation.DeleteExpectations(req.String())
 			scaleDownExpectation.DeleteExpectations(req.String())
 			// Remove metrics when sandboxset is deleted
-			SandboxSetReplicas.DeleteLabelValues(req.Namespace, req.Name)
-			SandboxSetAvailableReplicas.DeleteLabelValues(req.Namespace, req.Name)
-			SandboxSetDesiredReplicas.DeleteLabelValues(req.Namespace, req.Name)
+			deleteSandboxSetMetrics(req.Namespace, req.Name)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
 	}
+
+	recordSandboxSetMetrics(sbs)
 
 	// Preparation
 	newStatus, err := r.initNewStatus(sbs)
@@ -399,9 +399,11 @@ func (r *Reconciler) updateSandboxSetStatus(ctx context.Context, newStatus agent
 	if err == nil {
 		log.Info("update sandboxset status success", "status", utils.DumpJson(newStatus))
 		// Update metrics for availableReplicas and replicas
-		SandboxSetReplicas.WithLabelValues(sbs.Namespace, sbs.Name).Set(float64(newStatus.Replicas))
-		SandboxSetAvailableReplicas.WithLabelValues(sbs.Namespace, sbs.Name).Set(float64(newStatus.AvailableReplicas))
-		SandboxSetDesiredReplicas.WithLabelValues(sbs.Namespace, sbs.Name).Set(float64(sbs.Spec.Replicas))
+		sandboxSetReplicas.WithLabelValues(sbs.Namespace, sbs.Name).Set(float64(newStatus.Replicas))
+		sandboxSetAvailableReplicas.WithLabelValues(sbs.Namespace, sbs.Name).Set(float64(newStatus.AvailableReplicas))
+		sandboxSetDesiredReplicas.WithLabelValues(sbs.Namespace, sbs.Name).Set(float64(sbs.Spec.Replicas))
+		sandboxSetUpdatedReplicas.WithLabelValues(sbs.Namespace, sbs.Name).Set(float64(newStatus.UpdatedReplicas))
+		sandboxSetUpdatedAvailableReplicas.WithLabelValues(sbs.Namespace, sbs.Name).Set(float64(newStatus.UpdatedAvailableReplicas))
 	} else {
 		log.Error(err, "update sandboxset status failed")
 	}

@@ -129,11 +129,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// Fetch the SandboxClaim instance
 	claim := &agentsv1alpha1.SandboxClaim{}
 	if err := r.Get(ctx, req.NamespacedName, claim); err != nil {
+		if errors.IsNotFound(err) {
+			deleteSandboxClaimMetrics(req.Namespace, req.Name)
+		}
 		return reconcile.Result{}, client.IgnoreNotFound(err)
 	}
 
 	logger := logf.FromContext(ctx).WithValues("sandboxclaim", klog.KObj(claim))
 	logger.Info("Began to process SandboxClaim for reconcile")
+
+	// Record sandbox claim lifecycle metrics on every reconcile
+	recordSandboxClaimMetrics(claim)
 
 	// Check resourceVersion expectations
 	core.ResourceVersionExpectations.Observe(claim)
