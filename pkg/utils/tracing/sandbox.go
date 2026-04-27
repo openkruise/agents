@@ -80,11 +80,8 @@ func RecordClaimMetrics(span trace.Span, metrics infra.ClaimMetrics) {
 		attribute.Int64("claim.total_ms", int64(metrics.Total.Milliseconds())),
 		attribute.Int64("claim.wait_ms", int64(metrics.Wait.Milliseconds())),
 	)
-	if metrics.PickTime > 0 {
-		span.SetAttributes(attribute.Int64("claim.pick_time_ms", int64(metrics.PickTime.Milliseconds())))
-	}
-	if metrics.LockTime > 0 {
-		span.SetAttributes(attribute.Int64("claim.lock_time_ms", int64(metrics.LockTime.Milliseconds())))
+	if metrics.PickAndLock > 0 {
+		span.SetAttributes(attribute.Int64("claim.pick_and_lock_ms", int64(metrics.PickAndLock.Milliseconds())))
 	}
 }
 
