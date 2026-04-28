@@ -275,3 +275,74 @@ func TestMemberlistPeers_Join_PartialFailure(t *testing.T) {
 
 	assert.True(t, peer.started.Load())
 }
+
+// TestMemberlistPeers_ReconcilePeers_JoinsUnknownNode tests that ReconcilePeers joins a node not in the memberlist
+func TestMemberlistPeers_ReconcilePeers_JoinsUnknownNode(t *testing.T) {
+	peer1, port1 := createTestPeer(t, "reconcile-node-1")
+	peer2, port2 := createTestPeer(t, "reconcile-node-2")
+
+	ctx := context.Background()
+
+	// Start both nodes independently (no initial join — simulates split-brain)
+	err := peer1.Start(ctx, "127.0.0.1", port1, nil)
+	require.NoError(t, err)
+	defer func() { _ = peer1.Stop() }()
+
+	err = peer2.Start(ctx, "127.0.0.1", port2, nil)
+	require.NoError(t, err)
+	defer func() { _ = peer2.Stop() }()
+
+	// Verify they don't know each other
+	assert.Empty(t, peer1.GetPeers())
+	assert.Empty(t, peer2.GetPeers())
+
+	// Reconcile peer1 with peer2's address
+	err = peer1.ReconcilePeers(ctx, []string{fmt.Sprintf("127.0.0.1:%d", port2)})
+	require.NoError(t, err)
+
+	// Wait for gossip propagation
+	assert.Eventually(t, func() bool {
+		return len(peer1.GetPeers()) == 1
+	}, 5*time.Second, 100*time.Millisecond, "peer1 should discover peer2 after reconciliation")
+
+	assert.Eventually(t, func() bool {
+		return len(peer2.GetPeers()) == 1
+	}, 5*time.Second, 100*time.Millisecond, "peer2 should discover peer1 after reconciliation")
+}
+
+// TestMemberlistPeers_ReconcilePeers_SkipsKnownNode tests that ReconcilePeers skips already-known nodes
+func TestMemberlistPeers_ReconcilePeers_SkipsKnownNode(t *testing.T) {
+	peer1, port1 := createTestPeer(t, "reconcile-known-1")
+	peer2, port2 := createTestPeer(t, "reconcile-known-2")
+
+	ctx := context.Background()
+
+	err := peer1.Start(ctx, "127.0.0.1", port1, nil)
+	require.NoError(t, err)
+	defer func() { _ = peer1.Stop() }()
+
+	err = peer2.Start(ctx, "127.0.0.1", port2, []string{fmt.Sprintf("127.0.0.1:%d", port1)})
+	require.NoError(t, err)
+	defer func() { _ = peer2.Stop() }()
+
+	// Wait for them to discover each other
+	assert.Eventually(t, func() bool {
+		return len(peer1.GetPeers()) == 1
+	}, 5*time.Second, 100*time.Millisecond)
+
+	// Reconcile with already-known peer — should be a no-op and return nil
+	err = peer1.ReconcilePeers(ctx, []string{fmt.Sprintf("127.0.0.1:%d", port2)})
+	assert.NoError(t, err)
+
+	// Peer count should remain 1
+	assert.Len(t, peer1.GetPeers(), 1)
+}
+
+// TestMemberlistPeers_ReconcilePeers_NotStarted tests that ReconcilePeers returns error when not started
+func TestMemberlistPeers_ReconcilePeers_NotStarted(t *testing.T) {
+	peer := NewMemberlistPeers("not-started-reconcile")
+
+	err := peer.ReconcilePeers(context.Background(), []string{"127.0.0.1:9999"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not started")
+}

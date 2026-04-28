@@ -126,6 +126,8 @@ func (s *Server) Start(ctx context.Context) error {
 		return err
 	}
 
+	go peers.RunPeerReconciliation(ctx, s.client, s.peerManager, namespace, labelSelector, localIP, s.memberlistBindPort)
+
 	go func() {
 		klog.InfoS("Starting sandbox-gateway peer server", "address", s.httpServer.Addr)
 		if err := s.httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
