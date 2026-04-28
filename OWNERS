@@ -1,0 +1,10 @@
+# List of usernames who may use /lgtm
+reviewers:
+  - furykerry
+  - zmberg
+  - AiRanthem
+
+# List of usernames who may use /approve
+approvers:
+  - furykerry
+  - zmberg
