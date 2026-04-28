@@ -88,6 +88,7 @@ func (s *Server) SyncRouteWithPeers(route Route) error {
 	peerCount.Set(float64(len(peerList)))
 
 	if len(peerList) == 0 {
+		klog.Warning("no peers found, skip syncing route")
 		return nil
 	}
 

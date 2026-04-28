@@ -279,7 +279,7 @@ func TestServer_Process(t *testing.T) {
 							Status: &types.HttpStatus{
 								Code: types.StatusCode(502),
 							},
-							Body: []byte("sandbox nonexistent not found"),
+							Body: []byte("sandbox nonexistent route not found"),
 						},
 					},
 				},
@@ -365,7 +365,7 @@ func TestServer_Process(t *testing.T) {
 							Status: &types.HttpStatus{
 								Code: types.StatusCode(502),
 							},
-							Body: []byte("healthy sandbox sandbox1 not found"),
+							Body: []byte("sandbox sandbox1 is not running (state: dead)"),
 						},
 					},
 				},

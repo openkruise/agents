@@ -105,14 +105,15 @@ func (s *Server) handleRequestHeaders(requestHeaders *extProcPb.ProcessingReques
 	}
 	log.Info("request mapped", "sandboxID", sandboxID, "sandboxPort", sandboxPort, "extraHeaders", extraHeaders)
 
-	errorMsg := fmt.Sprintf("healthy sandbox %s not found", sandboxID)
 	route, ok := s.LoadRoute(sandboxID)
 	if !ok {
 		log.Info("route not found", "sandboxID", sandboxID)
+		errorMsg := fmt.Sprintf("sandbox %s route not found", sandboxID)
 		return s.logAndCreateErrorResponse(http.StatusBadGateway, errorMsg, log)
 	}
 	if route.State != agentsv1alpha1.SandboxStateRunning {
 		log.Info("sandbox is not running", "sandboxID", sandboxID, "route", route)
+		errorMsg := fmt.Sprintf("sandbox %s is not running (state: %s)", sandboxID, route.State)
 		return s.logAndCreateErrorResponse(http.StatusBadGateway, errorMsg, log)
 	}
 	if extraHeaders == nil {
