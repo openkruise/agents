@@ -1,10 +1,11 @@
 package v1alpha1
 
-// common SandboxSet annotations
+// common Sandbox annotations
 
 const (
 	AnnotationRuntimeURL         = InternalPrefix + "runtime-url"
 	AnnotationRuntimeAccessToken = InternalPrefix + "runtime-access-token"
+	AnnotationClaimUID           = InternalPrefix + "claim-uid"
 )
 
 // E2B annotations

@@ -253,31 +253,29 @@ func (c *commonControl) claimSandboxes(ctx context.Context, claim *agentsv1alpha
 func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1alpha1.SandboxClaim, sandboxSet *agentsv1alpha1.SandboxSet) (infra.ClaimSandboxOptions, error) {
 	logger := logf.FromContext(ctx).WithValues("SandboxClaim", klog.KObj(claim))
 	opts := infra.ClaimSandboxOptions{
-		User:     string(claim.UID), // Use UID to ensure uniqueness across claim recreations
+		User:     getClaimUser(claim),
 		Template: sandboxSet.Name,
 		Modifier: func(sbx infra.Sandbox) {
-			// propagate annotations to sandbox
-			if len(claim.Spec.Annotations) > 0 {
-				annotations := sbx.GetAnnotations()
-				if annotations == nil {
-					annotations = make(map[string]string)
-				}
-				for k, v := range claim.Spec.Annotations {
-					annotations[k] = v
-				}
-				sbx.SetAnnotations(annotations)
+			annotations := sbx.GetAnnotations()
+			if annotations == nil {
+				annotations = make(map[string]string)
 			}
+			// propagate annotations to sandbox
+			for k, v := range claim.Spec.Annotations {
+				annotations[k] = v
+			}
+			annotations[agentsv1alpha1.AnnotationClaimUID] = string(claim.UID)
+			sbx.SetAnnotations(annotations)
 
 			// propagate labels to sandbox
 			labels := sbx.GetLabels()
 			if labels == nil {
 				labels = make(map[string]string)
 			}
-			labels[agentsv1alpha1.LabelSandboxClaimName] = claim.Name
-
 			for k, v := range claim.Spec.Labels {
 				labels[k] = v
 			}
+			labels[agentsv1alpha1.LabelSandboxClaimName] = claim.Name
 			sbx.SetLabels(labels)
 
 			// propagate annotations to podtemplate
@@ -363,12 +361,26 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 // countClaimedSandboxes counts sandboxes that are claimed by this claim
 func (c *commonControl) countClaimedSandboxes(ctx context.Context, claim *agentsv1alpha1.SandboxClaim) (int32, error) {
 	log := logf.FromContext(ctx)
-	sandboxes, err := c.cache.ListSandboxWithUser(string(claim.UID))
+	// TODO: use LabelClaimName instead of user as filter when controller-runtime is ready
+	sandboxes, err := c.cache.ListSandboxWithUser(getClaimUser(claim))
 	if err != nil {
 		return 0, err
 	}
 	var cnt int32
 	for _, sbx := range sandboxes {
+		// If AnnotationOwner is overridden, multiple claims might share the same User.
+		// We must further filter by the SandboxClaimUID to ensure we only count sandboxes for THIS claim.
+		claimUID := sbx.Annotations[agentsv1alpha1.AnnotationClaimUID]
+		if claimUID != "" && claimUID != string(claim.UID) {
+			continue
+		}
+		if claimUID == "" {
+			// Backward compatibility: old sandboxes do not have AnnotationClaimUID, match by label instead
+			if sbx.Labels[agentsv1alpha1.LabelSandboxClaimName] != claim.Name {
+				continue
+			}
+		}
+
 		state, reason := stateutils.GetSandboxState(sbx)
 		if state == agentsv1alpha1.SandboxStateDead {
 			log.Info("skip counting dead sandbox", "reason", reason)
@@ -377,4 +389,11 @@ func (c *commonControl) countClaimedSandboxes(ctx context.Context, claim *agents
 		cnt++
 	}
 	return cnt, nil
+}
+
+func getClaimUser(claim *agentsv1alpha1.SandboxClaim) string {
+	if annotationUser := claim.Spec.Annotations[agentsv1alpha1.AnnotationOwner]; annotationUser != "" {
+		return annotationUser // If annotation user is manually assigned by user, use it
+	}
+	return string(claim.UID) // Use UID to ensure uniqueness across claim recreations
 }
