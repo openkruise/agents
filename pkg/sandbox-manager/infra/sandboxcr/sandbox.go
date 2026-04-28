@@ -23,11 +23,12 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/openkruise/agents/pkg/utils/runtime"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
+
+	"github.com/openkruise/agents/pkg/utils/runtime"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
@@ -308,7 +309,7 @@ func (s *Sandbox) Resume(ctx context.Context) error {
 	}
 
 	// Perform csi mount after resume
-	csiMountConfigRequests, err := getCsiMountExtensionRequest(s.Sandbox)
+	csiMountConfigRequests, err := runtime.GetCsiMountExtensionRequest(s.Sandbox)
 	if err != nil {
 		log.Error(err, "failed to get csi mount request")
 		return fmt.Errorf("failed to get csi mount request: %w", err)
