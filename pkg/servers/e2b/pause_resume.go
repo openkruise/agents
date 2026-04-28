@@ -134,7 +134,6 @@ func (sc *Controller) ConnectSandbox(r *http.Request) (web.ApiResponse[*models.S
 	// We only enforce the extend-only guard for sandboxes that were already running when Connect was called.
 	// Paused->resume requests should always apply the requested timeout directly.
 	state, pauseResumeReason := sbx.GetState()
-	autoPause, currentEndAt := ParseTimeout(sbx)
 
 	// Step 1: Resuming the sandbox if it is paused
 	statusCode := http.StatusOK
@@ -154,6 +153,7 @@ func (sc *Controller) ConnectSandbox(r *http.Request) (web.ApiResponse[*models.S
 
 	// Step 2: Update the sandbox timeout
 	log.Info("updating sandbox timeout")
+	autoPause, currentEndAt := ParseTimeout(sbx)
 	if err := sc.updateConnectTimeout(ctx, sbx, request.TimeoutSeconds, state, autoPause, currentEndAt); err != nil {
 		log.Error(err, "failed to update sandbox timeout")
 		return web.ApiResponse[*models.Sandbox]{}, err

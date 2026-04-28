@@ -182,7 +182,7 @@ func TestConnectSandbox(t *testing.T) {
 				"sandboxID": tt.sandboxID,
 			}, user))
 
-			if tt.expectStatus >= DefaultTimeoutSeconds {
+			if tt.expectStatus >= 300 {
 				require.NotNil(t, err, fmt.Sprintf("%v", err))
 				if err.Code == 0 {
 					err.Code = http.StatusInternalServerError
