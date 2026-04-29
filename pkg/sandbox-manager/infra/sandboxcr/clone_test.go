@@ -1255,11 +1255,11 @@ func TestCreateCheckPoint(t *testing.T) {
 			opts: infra.CreateCheckpointOptions{
 				WaitSuccessTimeout: 5 * time.Second,
 			},
-			postCheck: func(t *testing.T, id string, clientSet *clients.ClientSet) {
+			postCheck: func(t *testing.T, id string, c client.Client) {
 				assert.Equal(t, "cp-id-csi", id)
 				// Verify CSI mount annotation is propagated to checkpoint
-				cp, err := clientSet.ApiV1alpha1().Checkpoints("default").Get(context.Background(), "tmpl-csi", metav1.GetOptions{})
-				require.NoError(t, err)
+				var cp v1alpha1.Checkpoint
+				require.NoError(t, c.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "tmpl-csi"}, &cp))
 				assert.Equal(t, `[{"driver":"nfs","source":"/data"}]`, cp.Annotations[models.ExtensionKeyClaimWithCSIMount_MountConfig],
 					"CSI mount annotation should be propagated to checkpoint")
 			},
@@ -1275,10 +1275,10 @@ func TestCreateCheckPoint(t *testing.T) {
 			opts: infra.CreateCheckpointOptions{
 				WaitSuccessTimeout: 5 * time.Second,
 			},
-			postCheck: func(t *testing.T, id string, clientSet *clients.ClientSet) {
+			postCheck: func(t *testing.T, id string, c client.Client) {
 				assert.Equal(t, "cp-id-no-csi", id)
-				cp, err := clientSet.ApiV1alpha1().Checkpoints("default").Get(context.Background(), "tmpl-no-csi", metav1.GetOptions{})
-				require.NoError(t, err)
+				var cp v1alpha1.Checkpoint
+				require.NoError(t, c.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "tmpl-no-csi"}, &cp))
 				assert.Empty(t, cp.Annotations[models.ExtensionKeyClaimWithCSIMount_MountConfig],
 					"checkpoint should not have CSI mount annotation when sandbox doesn't have one")
 			},

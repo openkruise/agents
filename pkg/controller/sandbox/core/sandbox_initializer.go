@@ -21,12 +21,11 @@ import (
 	"fmt"
 
 	"k8s.io/klog/v2"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
-	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/utils"
 	csimountutils "github.com/openkruise/agents/pkg/utils/csiutils"
 	utilruntime "github.com/openkruise/agents/pkg/utils/runtime"
@@ -34,13 +33,13 @@ import (
 
 // defaultSandboxInitializer wraps the package-level Initialize function to implement SandboxInitializer.
 type defaultSandboxInitializer struct {
-	sandboxClient   *clients.ClientSet
-	cache           infra.CacheProvider
+	client          client.Client
+	apiReader       client.Reader
 	storageRegistry storages.VolumeMountProviderRegistry
 }
 
 func (d *defaultSandboxInitializer) Initialize(ctx context.Context, box *agentsv1alpha1.Sandbox, newStatus *agentsv1alpha1.SandboxStatus) error {
-	return Initialize(ctx, box, newStatus, d.sandboxClient, d.cache, d.storageRegistry)
+	return Initialize(ctx, box, newStatus, d.client, d.apiReader, d.storageRegistry)
 }
 
 // Initialize performs post-recreation initialization for a sandbox.
@@ -50,15 +49,9 @@ func (d *defaultSandboxInitializer) Initialize(ctx context.Context, box *agentsv
 //
 // The controller only handles initialization for sandboxes claimed by a SandboxClaim
 // (identified by the claim-name label). Non-claimed sandboxes are handled by E2B's Resume flow.
-func Initialize(
-	ctx context.Context,
-	box *agentsv1alpha1.Sandbox,
-	newStatus *agentsv1alpha1.SandboxStatus,
-	sandboxClient *clients.ClientSet,
-	cache infra.CacheProvider,
-	storageRegistry storages.VolumeMountProviderRegistry,
-) error {
-	if sandboxClient == nil || cache == nil {
+func Initialize(ctx context.Context, box *agentsv1alpha1.Sandbox, newStatus *agentsv1alpha1.SandboxStatus,
+	client client.Client, apiReader client.Reader, storageRegistry storages.VolumeMountProviderRegistry) error {
+	if client == nil || apiReader == nil {
 		return nil
 	}
 	logger := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
@@ -92,7 +85,7 @@ func Initialize(
 
 	if len(csiMountConfigRequests) != 0 {
 		logger.Info("will re-mount csi storage after resume or upgrade", "count", len(csiMountConfigRequests))
-		csiMountHandler := csimountutils.NewCSIMountHandler(sandboxClient, cache, storageRegistry, utils.DefaultSandboxDeployNamespace)
+		csiMountHandler := csimountutils.NewCSIMountHandler(client, apiReader, storageRegistry, utils.DefaultSandboxDeployNamespace)
 
 		// Resolve all CSIMountConfig annotations into MountConfig (driver + requestRaw)
 		var mountOptionList []config.MountConfig

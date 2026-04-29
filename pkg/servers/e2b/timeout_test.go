@@ -271,7 +271,6 @@ func TestSetSandboxTimeoutStillShortensRunningSandbox(t *testing.T) {
 	}, nil, user))
 	require.Nil(t, err)
 	assert.Equal(t, models.SandboxStateRunning, createResp.Body.State)
-	AvoidGetFromCache(t, createResp.Body.SandboxID, client.SandboxClient)
 
 	shorterSeconds := 300
 	beforeSet := time.Now()
@@ -288,7 +287,7 @@ func TestSetSandboxTimeoutStillShortensRunningSandbox(t *testing.T) {
 	assert.Nil(t, err)
 	AssertEndAt(t, beforeSet.Add(time.Duration(shorterSeconds)*time.Second), describeResp.Body.EndAt)
 
-	sbx := GetSandbox(t, createResp.Body.SandboxID, client.SandboxClient)
+	sbx := GetSandbox(t, createResp.Body.SandboxID, client)
 	require.NotNil(t, sbx.Spec.ShutdownTime)
 	assert.Nil(t, sbx.Spec.PauseTime)
 	assert.WithinDuration(t, beforeSet.Add(time.Duration(shorterSeconds)*time.Second), sbx.Spec.ShutdownTime.Time, 5*time.Second)

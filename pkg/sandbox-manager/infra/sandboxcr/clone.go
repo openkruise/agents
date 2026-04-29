@@ -122,7 +122,7 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache cac
 	// If opts.CSIMount is not provided from request, try to resolve mount options from sandbox annotation.
 	if opts.CSIMount == nil {
 		var resolveErr error
-		opts.CSIMount, resolveErr = runtime.ResolveCSIMountFromAnnotation(ctx, sbx.Sandbox, sbx.Client, sbx.Cache, sbx.storageRegistry)
+		opts.CSIMount, resolveErr = runtime.ResolveCSIMountFromAnnotation(ctx, sbx.Sandbox, sbx.Cache.GetClient(), sbx.Cache, sbx.storageRegistry)
 		if resolveErr != nil {
 			return nil, metrics, resolveErr
 		}

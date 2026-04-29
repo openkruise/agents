@@ -254,7 +254,7 @@ func TestConnectSandboxRunningTimeoutGuard(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			controller, client, teardown := Setup(t)
+			controller, fc, teardown := Setup(t)
 			defer teardown()
 			cleanup := CreateSandboxPool(t, controller, templateName, 1)
 			defer cleanup()
@@ -269,13 +269,12 @@ func TestConnectSandboxRunningTimeoutGuard(t *testing.T) {
 			}, nil, user))
 			require.Nil(t, err)
 			assert.Equal(t, models.SandboxStateRunning, createResp.Body.State)
-			AvoidGetFromCache(t, createResp.Body.SandboxID, client.SandboxClient)
 
 			baselineEndAt := createResp.Body.EndAt
 			baselineParsed, parseErr := time.Parse(time.RFC3339, baselineEndAt)
 			require.NoError(t, parseErr)
 
-			sbxBefore := GetSandbox(t, createResp.Body.SandboxID, client.SandboxClient)
+			sbxBefore := GetSandbox(t, createResp.Body.SandboxID, fc)
 			var pauseBefore, shutdownBefore time.Time
 			if sbxBefore.Spec.PauseTime != nil {
 				pauseBefore = sbxBefore.Spec.PauseTime.Time
@@ -299,7 +298,7 @@ func TestConnectSandboxRunningTimeoutGuard(t *testing.T) {
 				require.NoError(t, parseErr2)
 				assert.WithinDuration(t, baselineParsed, endAtAfter, 2*time.Second,
 					"EndAt should match pre-connect baseline when shorter/equal connect timeout is ignored")
-				sbxAfter := GetSandbox(t, createResp.Body.SandboxID, client.SandboxClient)
+				sbxAfter := GetSandbox(t, createResp.Body.SandboxID, fc)
 				if !pauseBefore.IsZero() {
 					require.NotNil(t, sbxAfter.Spec.PauseTime)
 					assert.WithinDuration(t, pauseBefore, sbxAfter.Spec.PauseTime.Time, time.Second)
@@ -310,7 +309,7 @@ func TestConnectSandboxRunningTimeoutGuard(t *testing.T) {
 				}
 			} else {
 				AssertEndAt(t, connectNow.Add(time.Duration(tt.requestTimeout)*time.Second), connectResp.Body.EndAt)
-				sbxAfter := GetSandbox(t, createResp.Body.SandboxID, client.SandboxClient)
+				sbxAfter := GetSandbox(t, createResp.Body.SandboxID, fc)
 				if tt.autoPause {
 					require.NotNil(t, sbxAfter.Spec.PauseTime)
 					assert.WithinDuration(t, connectNow.Add(time.Duration(tt.requestTimeout)*time.Second), sbxAfter.Spec.PauseTime.Time, 5*time.Second)
@@ -352,7 +351,7 @@ func TestResumeSandbox(t *testing.T) {
 			paused:       true,
 			pausing:      true,
 			timeout:      300,
-			expectStatus: http.StatusBadRequest,
+			expectStatus: http.StatusInternalServerError,
 		},
 		{
 			name:         "resume sandbox: resuming",
@@ -527,7 +526,7 @@ func TestUpdateConnectTimeout(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			controller, client, teardown := Setup(t)
+			controller, fc, teardown := Setup(t)
 			defer teardown()
 
 			cleanup := CreateSandboxPool(t, controller, templateName, 1)
@@ -543,7 +542,6 @@ func TestUpdateConnectTimeout(t *testing.T) {
 			}, nil, user))
 			require.Nil(t, err)
 			require.Equal(t, models.SandboxStateRunning, createResp.Body.State)
-			AvoidGetFromCache(t, createResp.Body.SandboxID, client.SandboxClient)
 
 			req := NewRequest(t, nil, nil, map[string]string{
 				"sandboxID": createResp.Body.SandboxID,
@@ -562,7 +560,7 @@ func TestUpdateConnectTimeout(t *testing.T) {
 				tt.preConnectState, tt.autoPause, currentEndAt)
 			require.Nil(t, result)
 
-			updatedSbx := GetSandbox(t, createResp.Body.SandboxID, client.SandboxClient)
+			updatedSbx := GetSandbox(t, createResp.Body.SandboxID, fc)
 
 			if tt.expectUpdated {
 				expectedEndAt := beforeCall.Add(time.Duration(tt.timeoutSeconds) * time.Second)

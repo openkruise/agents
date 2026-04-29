@@ -34,8 +34,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/rand"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/openkruise/agents/pkg/utils/runtime"
-
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
 	"github.com/openkruise/agents/pkg/cache"
@@ -603,12 +601,14 @@ func CreateCheckpointAndTemplateWithAnnotations(t *testing.T, controller *Contro
 			Template: tmpl.Template,
 		},
 	}
-	client := controller.client.SandboxClient
-	_, err := client.ApiV1alpha1().SandboxTemplates(Namespace).Create(t.Context(), sbt, metav1.CreateOptions{})
+	// Use the controller-runtime client (CacheV2's fake client) for all CRD operations
+	fc := getTestCRClient(controller)
+	err := fc.Create(t.Context(), sbt)
 	require.NoError(t, err)
+	// Wait for SandboxTemplate to be cached
 	require.Eventually(t, func() bool {
-		_, err := client.ApiV1alpha1().SandboxTemplates(Namespace).Get(t.Context(), checkpointID, metav1.GetOptions{})
-		return err == nil
+		got := &v1alpha1.SandboxTemplate{}
+		return fc.Get(t.Context(), ctrlclient.ObjectKey{Namespace: Namespace, Name: checkpointID}, got) == nil
 	}, time.Second, 10*time.Millisecond)
 
 	// Create Checkpoint with template label and custom annotations
@@ -625,17 +625,18 @@ func CreateCheckpointAndTemplateWithAnnotations(t *testing.T, controller *Contro
 			CheckpointId: checkpointID,
 		},
 	}
-	_, err = client.ApiV1alpha1().Checkpoints(Namespace).Create(t.Context(), cp, metav1.CreateOptions{})
+	err = fc.Create(t.Context(), cp)
 	require.NoError(t, err)
-	_, err = client.ApiV1alpha1().Checkpoints(Namespace).UpdateStatus(t.Context(), cp, metav1.UpdateOptions{})
+	// UpdateStatus is required because Kubernetes API ignores Status field during Create
+	err = fc.Status().Update(t.Context(), cp)
 	require.NoError(t, err)
 	require.Eventually(t, func() bool {
-		return controller.manager.GetInfra().HasCheckpoint(checkpointID)
+		return controller.manager.GetInfra().HasCheckpoint(t.Context(), checkpointID)
 	}, time.Second, 10*time.Millisecond)
 
 	return func() {
-		assert.NoError(t, client.ApiV1alpha1().SandboxTemplates(Namespace).Delete(context.Background(), checkpointID, metav1.DeleteOptions{}))
-		assert.NoError(t, client.ApiV1alpha1().Checkpoints(Namespace).Delete(context.Background(), checkpointID, metav1.DeleteOptions{}))
+		_ = fc.Delete(t.Context(), sbt)
+		_ = fc.Delete(t.Context(), cp)
 	}
 }
 
@@ -977,7 +978,7 @@ func TestCloneSandbox(t *testing.T) {
 }
 
 func TestCloneSandboxWithCSIMountFromCheckpointAnnotation(t *testing.T) {
-	controller, clientSet, teardown := Setup(t)
+	controller, fc, teardown := Setup(t)
 	defer teardown()
 
 	// Create test runtime server for InitRuntime
@@ -994,7 +995,7 @@ func TestCloneSandboxWithCSIMountFromCheckpointAnnotation(t *testing.T) {
 	// Decorator: DefaultCreateSandbox - set sandbox ready after creation
 	origCreateSandbox := sandboxcr.DefaultCreateSandbox
 	t.Cleanup(func() { sandboxcr.DefaultCreateSandbox = origCreateSandbox })
-	sandboxcr.DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, client *clients.ClientSet, cache infra.CacheProvider) (*v1alpha1.Sandbox, error) {
+	sandboxcr.DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, client ctrlclient.Client) (*v1alpha1.Sandbox, error) {
 		if sbx.Name == "" && sbx.GenerateName != "" {
 			sbx.Name = sbx.GenerateName + rand.String(5)
 		}
@@ -1004,7 +1005,7 @@ func TestCloneSandboxWithCSIMountFromCheckpointAnnotation(t *testing.T) {
 		sbx.Annotations[v1alpha1.AnnotationRuntimeURL] = server.URL
 		sbx.Annotations[v1alpha1.AnnotationRuntimeAccessToken] = runtime.AccessToken
 
-		created, err := origCreateSandbox(ctx, sbx, client, cache)
+		created, err := origCreateSandbox(ctx, sbx, client)
 		if err != nil {
 			return nil, err
 		}
@@ -1023,8 +1024,7 @@ func TestCloneSandboxWithCSIMountFromCheckpointAnnotation(t *testing.T) {
 				PodIP: "1.2.3.4",
 			},
 		}
-		created, err = client.ApiV1alpha1().Sandboxes(created.Namespace).UpdateStatus(ctx, created, metav1.UpdateOptions{})
-		if err != nil {
+		if err = client.Status().Update(ctx, created); err != nil {
 			return nil, err
 		}
 		time.Sleep(50 * time.Millisecond)
@@ -1043,7 +1043,7 @@ func TestCloneSandboxWithCSIMountFromCheckpointAnnotation(t *testing.T) {
 		checkpointAnnotations map[string]string
 		request               models.NewSandboxRequest
 		expectError           *web.ApiError
-		setup                 func(t *testing.T, controller *Controller, clientSet *clients.ClientSet)
+		setup                 func(t *testing.T, controller *Controller, c ctrlclient.Client)
 		postCheck             func(t *testing.T, resp *models.Sandbox, controller *Controller)
 	}{
 		{
@@ -1055,7 +1055,7 @@ func TestCloneSandboxWithCSIMountFromCheckpointAnnotation(t *testing.T) {
 			request: models.NewSandboxRequest{
 				Timeout: 300,
 			},
-			setup: func(t *testing.T, controller *Controller, clientSet *clients.ClientSet) {
+			setup: func(t *testing.T, controller *Controller, c ctrlclient.Client) {
 				controller.storageRegistry.RegisterProvider("test-csi-driver-from-cp", &storages.MountProvider{})
 				pv := &corev1.PersistentVolume{
 					ObjectMeta: metav1.ObjectMeta{
@@ -1070,8 +1070,7 @@ func TestCloneSandboxWithCSIMountFromCheckpointAnnotation(t *testing.T) {
 						},
 					},
 				}
-				_, err := clientSet.CoreV1().PersistentVolumes().Create(context.Background(), pv, metav1.CreateOptions{})
-				require.NoError(t, err)
+				require.NoError(t, c.Create(t.Context(), pv))
 			},
 			expectError: &web.ApiError{
 				Message: "not supported in current environment",
@@ -1086,7 +1085,7 @@ func TestCloneSandboxWithCSIMountFromCheckpointAnnotation(t *testing.T) {
 			request: models.NewSandboxRequest{
 				Timeout: 300,
 			},
-			setup: func(t *testing.T, controller *Controller, clientSet *clients.ClientSet) {
+			setup: func(t *testing.T, controller *Controller, c ctrlclient.Client) {
 				controller.storageRegistry.RegisterProvider("test-multi-driver", &storages.MountProvider{})
 				for _, pvName := range []string{"pv-multi-1", "pv-multi-2"} {
 					pv := &corev1.PersistentVolume{
@@ -1102,8 +1101,7 @@ func TestCloneSandboxWithCSIMountFromCheckpointAnnotation(t *testing.T) {
 							},
 						},
 					}
-					_, err := clientSet.CoreV1().PersistentVolumes().Create(context.Background(), pv, metav1.CreateOptions{})
-					require.NoError(t, err)
+					require.NoError(t, c.Create(t.Context(), pv))
 				}
 			},
 			expectError: &web.ApiError{
@@ -1146,7 +1144,7 @@ func TestCloneSandboxWithCSIMountFromCheckpointAnnotation(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if tt.setup != nil {
-				tt.setup(t, controller, clientSet)
+				tt.setup(t, controller, fc)
 			}
 			tt.request.TemplateID = tt.checkpointID
 			cleanup := CreateCheckpointAndTemplateWithAnnotations(t, controller, tt.checkpointID, tt.checkpointAnnotations)

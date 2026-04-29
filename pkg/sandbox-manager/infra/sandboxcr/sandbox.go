@@ -29,8 +29,6 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/openkruise/agents/pkg/utils/runtime"
-
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
 	"github.com/openkruise/agents/pkg/cache"
@@ -275,7 +273,7 @@ func (s *Sandbox) Resume(ctx context.Context) error {
 	}
 	cond := GetSandboxCondition(s.Sandbox, agentsv1alpha1.SandboxConditionPaused)
 	if s.Spec.Paused && cond.Status == metav1.ConditionFalse {
-		return errors.NewError(errors.ErrorBadRequest, "sandbox is pausing, please wait a moment and try again")
+		return errors.NewError(errors.ErrorConflict, "sandbox is pausing, please wait a moment and try again")
 	}
 	if s.Sandbox.Spec.Paused {
 		if err := s.retryUpdate(ctx, func(sbx *agentsv1alpha1.Sandbox) {
@@ -311,7 +309,6 @@ func (s *Sandbox) Resume(ctx context.Context) error {
 	}
 	expectationutils.ResourceVersionExpectationExpect(s.Sandbox) // expect Running
 
-
 	// E2B only handles post-resume initialization for non-claimed sandboxes.
 	// Claimed sandboxes (with claim-name label) are handled by the controller's Initialize function.
 	if s.Labels[agentsv1alpha1.LabelSandboxClaimName] == "" {
@@ -335,7 +332,7 @@ func (s *Sandbox) Resume(ctx context.Context) error {
 		if len(csiMountConfigRequests) != 0 {
 			log.Info("will re-mount csi storage after resume")
 			startTime := time.Now()
-			csiClient := csimountutils.NewCSIMountHandler(s.Cache.GetClient(), s.Cache, s.storageRegistry, utils.DefaultSandboxDeployNamespace)
+			csiClient := csimountutils.NewCSIMountHandler(s.Cache.GetClient(), s.Cache.GetAPIReader(), s.storageRegistry, utils.DefaultSandboxDeployNamespace)
 			mountConfigs, resolveErr := resolveCSIMountConfigs(postCtx, csiClient, csiMountConfigRequests)
 			if resolveErr != nil {
 				return resolveErr

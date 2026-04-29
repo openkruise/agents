@@ -65,8 +65,8 @@ func NewCommonControl(args SandboxControlArgs) SandboxControl {
 		rateLimiter:          args.RateLimiter,
 		lifecycleHookFunc:    ExecuteLifecycleHook,
 		initializer: &defaultSandboxInitializer{
-			sandboxClient:   args.SandboxClient,
-			cache:           args.Cache,
+			client:          args.Client,
+			apiReader:       args.APIReader,
 			storageRegistry: storages.NewStorageProvider(),
 		},
 	}
