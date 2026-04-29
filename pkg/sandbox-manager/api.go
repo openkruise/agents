@@ -10,26 +10,43 @@ import (
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	"github.com/openkruise/agents/pkg/utils/tracing"
 	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 )
 
 // ClaimSandbox attempts to lock a Pod and assign it to the current caller
 func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions) (infra.Sandbox, error) {
 	log := klog.FromContext(ctx)
+
+	spanCtx, span := tracing.StartClaimSandboxSpan(ctx, "", opts.Template, opts.User, opts.ClaimTimeout)
+	defer span.End()
+
 	if !m.infra.HasTemplate(opts.Template) {
 		// Requirement: Track failure in API layer
 		sandboxClaimCreationResponses.WithLabelValues("failure").Inc()
 		sandboxClaimTotal.WithLabelValues("failure", "unknown").Inc()
+		tracing.RecordSpanError(
+			span,
+			errors.NewError(errors.ErrorNotFound, fmt.Sprintf("template %s not found", opts.Template)),
+			"template not found",
+			string(errors.ErrorNotFound),
+		)
 		return nil, errors.NewError(errors.ErrorNotFound, fmt.Sprintf("template %s not found", opts.Template))
 	}
-	sandbox, claimMetrics, err := m.infra.ClaimSandbox(ctx, opts)
+	tracing.RecordSpanEvent(span, tracing.EventTemplateFound)
+
+	sandbox, claimMetrics, err := m.infra.ClaimSandbox(spanCtx, opts)
 	if err != nil {
 		log.Error(err, "failed to claim sandbox", "metrics", claimMetrics.String())
 		// Requirement: Track failure in API layer
 		sandboxClaimCreationResponses.WithLabelValues("failure").Inc()
 		sandboxClaimTotal.WithLabelValues("failure", "unknown").Inc()
+		tracing.RecordSpanError(span, err, "failed to claim sandbox", string(errors.ErrorInternal))
 		return nil, errors.NewError(errors.ErrorInternal, fmt.Sprintf("failed to claim sandbox: %v", err))
 	}
+	tracing.RecordClaimMetrics(span, claimMetrics)
+	tracing.AddSandboxDetails(span, sandbox)
+	tracing.RecordSpanEvent(span, tracing.EventSandboxLocked)
 
 	// Success: Record metrics
 	sandboxClaimCreationResponses.WithLabelValues("success").Inc()
@@ -43,20 +60,31 @@ func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts infra.ClaimSandb
 	log.Info("sandbox claimed", "sandbox", klog.KObj(sandbox), "metrics", claimMetrics.String(), "state", state, "reason", reason)
 
 	// Sync route without refresh since sandbox was just claimed and state is already up-to-date
-	if err = m.syncRoute(ctx, sandbox, false); err != nil {
+	if err = m.syncRoute(spanCtx, sandbox, false); err != nil {
 		log.Error(err, "failed to sync route with peers after claim")
+	} else {
+		tracing.RecordSpanEvent(span, tracing.EventRouteSynced)
 	}
+	tracing.RecordSpanSuccess(span)
 	return sandbox, nil
 }
 
 func (m *SandboxManager) CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions) (infra.Sandbox, error) {
 	log := klog.FromContext(ctx)
-	sandbox, cloneMetrics, err := m.infra.CloneSandbox(ctx, opts)
+
+	spanCtx, span := tracing.StartCloneSandboxSpan(ctx, "", opts.CheckPointID, opts.User, opts.CloneTimeout)
+	defer span.End()
+
+	sandbox, cloneMetrics, err := m.infra.CloneSandbox(spanCtx, opts)
 	if err != nil {
 		log.Error(err, "failed to clone sandbox", "metrics", cloneMetrics)
 		sandboxCloneTotal.WithLabelValues("failure").Inc()
+		tracing.RecordSpanError(span, err, "failed to clone sandbox", string(errors.ErrorInternal))
 		return nil, errors.NewError(errors.ErrorInternal, fmt.Sprintf("failed to clone sandbox: %v", err))
 	}
+	tracing.RecordCloneMetrics(span, cloneMetrics)
+	tracing.AddSandboxDetails(span, sandbox)
+	tracing.RecordSpanEvent(span, tracing.EventSandboxCreated)
 
 	// Clone-specific metrics
 	sandboxCloneDuration.Observe(cloneMetrics.Total.Seconds())
@@ -66,9 +94,12 @@ func (m *SandboxManager) CloneSandbox(ctx context.Context, opts infra.CloneSandb
 	log.Info("sandbox cloned", "sandbox", klog.KObj(sandbox), "metrics", cloneMetrics.String(), "state", state, "reason", reason)
 
 	// Sync route without refresh since sandbox was just claimed and state is already up-to-date
-	if err = m.syncRoute(ctx, sandbox, false); err != nil {
+	if err = m.syncRoute(spanCtx, sandbox, false); err != nil {
 		log.Error(err, "failed to sync route with peers after claim")
+	} else {
+		tracing.RecordSpanEvent(span, tracing.EventRouteSynced)
 	}
+	tracing.RecordSpanSuccess(span)
 	return sandbox, nil
 }
 
@@ -173,16 +204,25 @@ func (m *SandboxManager) syncRoute(ctx context.Context, sbx infra.Sandbox, refre
 func (m *SandboxManager) PauseSandbox(ctx context.Context, sbx infra.Sandbox, opts infra.PauseOptions) error {
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
 	start := time.Now()
-	if err := sbx.Pause(ctx, opts); err != nil {
+
+	spanCtx, span := tracing.StartPauseSandboxSpan(ctx, sbx.GetSandboxID(), sbx.GetRoute().Owner, sbx)
+	defer span.End()
+
+	tracing.RecordSpanEvent(span, tracing.EventPauseRequested)
+	if err := sbx.Pause(spanCtx, opts); err != nil {
 		log.Error(err, "failed to pause sandbox")
 		sandboxPauseResponses.WithLabelValues("failure").Inc()
+		tracing.RecordSpanError(span, err, "failed to pause sandbox", "pause_error")
 		return err
 	}
 	sandboxPauseResponses.WithLabelValues("success").Inc()
 	sandboxPauseDuration.Observe(time.Since(start).Seconds())
-	if err := m.syncRoute(ctx, sbx, true); err != nil {
+	if err := m.syncRoute(spanCtx, sbx, true); err != nil {
 		log.Error(err, "failed to sync route with peers after pause")
+	} else {
+		tracing.RecordSpanEvent(span, tracing.EventRouteSynced)
 	}
+	tracing.RecordSpanSuccess(span)
 	return nil
 }
 
