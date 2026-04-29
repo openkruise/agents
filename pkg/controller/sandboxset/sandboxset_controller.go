@@ -118,7 +118,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	recordSandboxSetMetrics(sbs)
 
 	// Preparation
-	newStatus, err := r.initNewStatus(sbs)
+	newStatus, err := r.initNewStatus(ctx, sbs)
 	if err != nil {
 		log.Error(err, "failed to init new status")
 		return ctrl.Result{}, err
@@ -457,5 +457,6 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		WithOptions(controller.Options{MaxConcurrentReconciles: concurrentReconciles}).
 		Watches(&agentsv1alpha1.SandboxSet{}, &handler.EnqueueRequestForObject{}).
 		Watches(&agentsv1alpha1.Sandbox{}, &SandboxEventHandler{}).
+		Watches(&agentsv1alpha1.SandboxTemplate{}, NewSandboxTemplateEventHandler(mgr.GetClient())).
 		Complete(r)
 }

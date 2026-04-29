@@ -442,7 +442,7 @@ func TestReconcile_RollingUpdate(t *testing.T) {
 			}
 			sbs := getSandboxSet(tt.replicas)
 			assert.NoError(t, k8sClient.Create(ctx, sbs))
-			newStatus, err := reconciler.initNewStatus(sbs)
+			newStatus, err := reconciler.initNewStatus(ctx, sbs)
 			assert.NoError(t, err)
 
 			// Use an old hash to create sandboxes (simulate old revision)
@@ -504,7 +504,7 @@ func TestReconcile_RollingUpdate_SurgeGate(t *testing.T) {
 	// replicas=4, default maxSurge=20% (ceil→1), maxUnavailable=20% (floor→0)
 	sbs := getSandboxSet(4)
 	assert.NoError(t, k8sClient.Create(ctx, sbs))
-	newStatus, err := reconciler.initNewStatus(sbs)
+	newStatus, err := reconciler.initNewStatus(ctx, sbs)
 	assert.NoError(t, err)
 	newHash := newStatus.UpdateRevision
 
