@@ -583,6 +583,299 @@ func TestCommonControl_EnsureClaimClaiming_CPUResizeFeatureGatePrecondition(t *t
 	})
 }
 
+func TestCommonControl_countClaimedSandboxes(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	cache, clientSet, err := sandboxcr.NewTestCache(t)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		_ = cache.Run(ctx)
+	}()
+	time.Sleep(200 * time.Millisecond)
+
+	makeSandbox := func(name, namespace, claimUID, claimName, owner string, opts ...func(*agentsv1alpha1.Sandbox)) *agentsv1alpha1.Sandbox {
+		sbx := &agentsv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: namespace,
+				Annotations: map[string]string{
+					agentsv1alpha1.AnnotationOwner: owner,
+				},
+				Labels: map[string]string{
+					agentsv1alpha1.LabelSandboxClaimName: claimName,
+					agentsv1alpha1.LabelSandboxIsClaimed: agentsv1alpha1.True,
+				},
+			},
+			Status: agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxRunning,
+				Conditions: []metav1.Condition{
+					{Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue},
+				},
+			},
+		}
+		if claimUID != "" {
+			sbx.Annotations[agentsv1alpha1.AnnotationClaimUID] = claimUID
+		}
+		for _, opt := range opts {
+			opt(sbx)
+		}
+		return sbx
+	}
+
+	makeClaim := func(name, namespace string, uid types.UID, owner string) *agentsv1alpha1.SandboxClaim {
+		claim := &agentsv1alpha1.SandboxClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: namespace,
+				UID:       uid,
+			},
+			Spec: agentsv1alpha1.SandboxClaimSpec{
+				TemplateName: "test-template",
+			},
+		}
+		if owner != "" {
+			claim.Spec.Annotations = map[string]string{
+				agentsv1alpha1.AnnotationOwner: owner,
+			}
+		}
+		return claim
+	}
+
+	t.Run("basic count with AnnotationOwner", func(t *testing.T) {
+		const owner = "basic-owner"
+		claim := makeClaim("claim-basic", "default", "uid-basic", owner)
+
+		sbx1 := makeSandbox("s1", "default", string(claim.UID), claim.Name, owner)
+		sbx2 := makeSandbox("s2", "default", string(claim.UID), claim.Name, owner)
+		_, err := clientSet.SandboxClient.ApiV1alpha1().Sandboxes("default").Create(ctx, sbx1, metav1.CreateOptions{})
+		require.NoError(t, err)
+		_, err = clientSet.SandboxClient.ApiV1alpha1().Sandboxes("default").Create(ctx, sbx2, metav1.CreateOptions{})
+		require.NoError(t, err)
+		time.Sleep(100 * time.Millisecond)
+
+		fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(claim).Build()
+		control := NewCommonControl(fakeClient, record.NewFakeRecorder(10), clientSet, cache).(*commonControl)
+
+		count, err := control.countClaimedSandboxes(ctx, claim)
+		require.NoError(t, err)
+		assert.Equal(t, int32(2), count)
+	})
+
+	t.Run("multiple claims share same AnnotationOwner but different UIDs", func(t *testing.T) {
+		const sharedOwner = "shared-owner"
+		claimA := makeClaim("claim-a", "default", "uid-aaa", sharedOwner)
+		claimB := makeClaim("claim-b", "default", "uid-bbb", sharedOwner)
+
+		// Sandboxes for claim A
+		sbxA1 := makeSandbox("sa1", "default", string(claimA.UID), claimA.Name, sharedOwner)
+		sbxA2 := makeSandbox("sa2", "default", string(claimA.UID), claimA.Name, sharedOwner)
+		// Sandboxes for claim B
+		sbxB1 := makeSandbox("sb1", "default", string(claimB.UID), claimB.Name, sharedOwner)
+		sbxB2 := makeSandbox("sb2", "default", string(claimB.UID), claimB.Name, sharedOwner)
+		sbxB3 := makeSandbox("sb3", "default", string(claimB.UID), claimB.Name, sharedOwner)
+
+		for _, sbx := range []*agentsv1alpha1.Sandbox{sbxA1, sbxA2, sbxB1, sbxB2, sbxB3} {
+			_, err := clientSet.SandboxClient.ApiV1alpha1().Sandboxes("default").Create(ctx, sbx, metav1.CreateOptions{})
+			require.NoError(t, err)
+		}
+		time.Sleep(100 * time.Millisecond)
+
+		fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(claimA, claimB).Build()
+		control := NewCommonControl(fakeClient, record.NewFakeRecorder(10), clientSet, cache).(*commonControl)
+
+		countA, err := control.countClaimedSandboxes(ctx, claimA)
+		require.NoError(t, err)
+		assert.Equal(t, int32(2), countA, "claim A should count only its own 2 sandboxes")
+
+		countB, err := control.countClaimedSandboxes(ctx, claimB)
+		require.NoError(t, err)
+		assert.Equal(t, int32(3), countB, "claim B should count only its own 3 sandboxes")
+	})
+
+	t.Run("backward compatibility - sandbox without AnnotationClaimUID", func(t *testing.T) {
+		const owner = "backward-compat-owner"
+		claim := makeClaim("claim-backward", "default", "uid-backward", owner)
+
+		// Sandbox WITHOUT AnnotationClaimUID (old-style), but with matching LabelSandboxClaimName
+		sbx := &agentsv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "sbx-old",
+				Namespace: "default",
+				Annotations: map[string]string{
+					agentsv1alpha1.AnnotationOwner: owner,
+					// No AnnotationClaimUID - backward compatibility
+				},
+				Labels: map[string]string{
+					agentsv1alpha1.LabelSandboxClaimName: claim.Name,
+					agentsv1alpha1.LabelSandboxIsClaimed: agentsv1alpha1.True,
+				},
+			},
+			Status: agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxRunning,
+				Conditions: []metav1.Condition{
+					{Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue},
+				},
+			},
+		}
+
+		_, err := clientSet.SandboxClient.ApiV1alpha1().Sandboxes("default").Create(ctx, sbx, metav1.CreateOptions{})
+		require.NoError(t, err)
+		time.Sleep(100 * time.Millisecond)
+
+		fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(claim).Build()
+		control := NewCommonControl(fakeClient, record.NewFakeRecorder(10), clientSet, cache).(*commonControl)
+
+		count, err := control.countClaimedSandboxes(ctx, claim)
+		require.NoError(t, err)
+		assert.Equal(t, int32(1), count, "should count sandbox matched by LabelSandboxClaimName (backward compat)")
+	})
+
+	t.Run("backward compatibility - sandbox without AnnotationClaimUID but wrong claim name", func(t *testing.T) {
+		const owner = "backward-wrong-name"
+		claim := makeClaim("claim-my", "default", "uid-wrong-name", owner)
+
+		// Sandbox without AnnotationClaimUID, with DIFFERENT LabelSandboxClaimName
+		sbx := &agentsv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "sbx-wrong-name",
+				Namespace: "default",
+				Annotations: map[string]string{
+					agentsv1alpha1.AnnotationOwner: owner,
+				},
+				Labels: map[string]string{
+					agentsv1alpha1.LabelSandboxClaimName: "some-other-claim",
+					agentsv1alpha1.LabelSandboxIsClaimed: agentsv1alpha1.True,
+				},
+			},
+			Status: agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxRunning,
+				Conditions: []metav1.Condition{
+					{Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue},
+				},
+			},
+		}
+
+		_, err := clientSet.SandboxClient.ApiV1alpha1().Sandboxes("default").Create(ctx, sbx, metav1.CreateOptions{})
+		require.NoError(t, err)
+		time.Sleep(100 * time.Millisecond)
+
+		fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(claim).Build()
+		control := NewCommonControl(fakeClient, record.NewFakeRecorder(10), clientSet, cache).(*commonControl)
+
+		count, err := control.countClaimedSandboxes(ctx, claim)
+		require.NoError(t, err)
+		assert.Equal(t, int32(0), count, "should NOT count sandbox with different LabelSandboxClaimName")
+	})
+
+	t.Run("skip dead sandboxes", func(t *testing.T) {
+		const owner = "dead-owner"
+		claim := makeClaim("claim-dead", "default", "uid-dead", owner)
+
+		alive := makeSandbox("alive-sbx", "default", string(claim.UID), claim.Name, owner)
+		dead := makeSandbox("dead-sbx", "default", string(claim.UID), claim.Name, owner, func(sbx *agentsv1alpha1.Sandbox) {
+			sbx.DeletionTimestamp = &metav1.Time{Time: time.Now()}
+		})
+
+		for _, sbx := range []*agentsv1alpha1.Sandbox{alive, dead} {
+			_, err := clientSet.SandboxClient.ApiV1alpha1().Sandboxes("default").Create(ctx, sbx, metav1.CreateOptions{})
+			require.NoError(t, err)
+		}
+		time.Sleep(100 * time.Millisecond)
+
+		fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(claim).Build()
+		control := NewCommonControl(fakeClient, record.NewFakeRecorder(10), clientSet, cache).(*commonControl)
+
+		count, err := control.countClaimedSandboxes(ctx, claim)
+		require.NoError(t, err)
+		assert.Equal(t, int32(1), count, "should count only alive sandboxes, skip dead ones")
+	})
+
+	t.Run("mixed - same owner, some with UID annotation, some without, some dead", func(t *testing.T) {
+		const mixedOwner = "mixed-owner"
+		claim := makeClaim("claim-mixed", "default", "uid-mixed", mixedOwner)
+
+		// 1. Normal sandbox with AnnotationClaimUID
+		sbxNormal := makeSandbox("mixed-normal", "default", string(claim.UID), claim.Name, mixedOwner)
+
+		// 2. Old sandbox without AnnotationClaimUID (backward compat, matches by label)
+		sbxOld := &agentsv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "mixed-old",
+				Namespace: "default",
+				Annotations: map[string]string{
+					agentsv1alpha1.AnnotationOwner: mixedOwner,
+				},
+				Labels: map[string]string{
+					agentsv1alpha1.LabelSandboxClaimName: claim.Name,
+					agentsv1alpha1.LabelSandboxIsClaimed: agentsv1alpha1.True,
+				},
+			},
+			Status: agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxRunning,
+				Conditions: []metav1.Condition{
+					{Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue},
+				},
+			},
+		}
+
+		// 3. Sandbox belonging to a different claim (same owner, different UID)
+		sbxOtherClaim := makeSandbox("mixed-other", "default", "uid-other-claim", "other-claim-name", mixedOwner)
+
+		// 4. Dead sandbox (should be skipped)
+		sbxDead := makeSandbox("mixed-dead", "default", string(claim.UID), claim.Name, mixedOwner, func(sbx *agentsv1alpha1.Sandbox) {
+			sbx.DeletionTimestamp = &metav1.Time{Time: time.Now()}
+		})
+
+		for _, sbx := range []*agentsv1alpha1.Sandbox{sbxNormal, sbxOld, sbxOtherClaim, sbxDead} {
+			_, err := clientSet.SandboxClient.ApiV1alpha1().Sandboxes("default").Create(ctx, sbx, metav1.CreateOptions{})
+			require.NoError(t, err)
+		}
+		time.Sleep(100 * time.Millisecond)
+
+		fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(claim).Build()
+		control := NewCommonControl(fakeClient, record.NewFakeRecorder(10), clientSet, cache).(*commonControl)
+
+		count, err := control.countClaimedSandboxes(ctx, claim)
+		require.NoError(t, err)
+		// Normal (1) + Old backward compat (1) = 2; Other claim skipped, dead skipped
+		assert.Equal(t, int32(2), count)
+	})
+
+	t.Run("claim without AnnotationOwner uses UID fallback", func(t *testing.T) {
+		claimUID := types.UID("uid-fallback")
+		claim := &agentsv1alpha1.SandboxClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "claim-fallback",
+				Namespace: "default",
+				UID:       claimUID,
+			},
+			Spec: agentsv1alpha1.SandboxClaimSpec{
+				TemplateName: "test-template",
+				// No AnnotationOwner in spec
+			},
+		}
+
+		// getClaimUser returns claim.UID as the fallback user.
+		// The sandbox must have AnnotationOwner = string(claimUID) for ListSandboxWithUser to find it.
+		sbx := makeSandbox("fallback-sbx", "default", string(claimUID), claim.Name, string(claimUID))
+
+		_, err := clientSet.SandboxClient.ApiV1alpha1().Sandboxes("default").Create(ctx, sbx, metav1.CreateOptions{})
+		require.NoError(t, err)
+		time.Sleep(100 * time.Millisecond)
+
+		fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(claim).Build()
+		control := NewCommonControl(fakeClient, record.NewFakeRecorder(10), clientSet, cache).(*commonControl)
+
+		count, err := control.countClaimedSandboxes(ctx, claim)
+		require.NoError(t, err)
+		assert.Equal(t, int32(1), count)
+	})
+}
+
 func TestCommonControl_EnsureClaimCompleted(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = agentsv1alpha1.AddToScheme(scheme)
@@ -1160,6 +1453,149 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 			expectError: false,
 			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
 				assert.Nil(t, opts.RuntimeConfig, "RuntimeConfig should be nil when Runtimes is not specified")
+			},
+		},
+		{
+			name: "claim with AnnotationOwner in annotations - should use annotation value as User",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim-owner",
+					Namespace: "default",
+					UID:       "test-uid-owner",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "test-template",
+					Annotations: map[string]string{
+						agentsv1alpha1.AnnotationOwner: "custom-manual-user",
+					},
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template",
+					Namespace: "default",
+				},
+			},
+			expectError: false,
+			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+				assert.Equal(t, "custom-manual-user", opts.User, "User should be the AnnotationOwner value when set")
+				assert.Equal(t, "test-template", opts.Template, "Template mismatch")
+				require.NotNil(t, opts.Modifier, "Modifier should not be nil")
+			},
+		},
+		{
+			name: "claim with AnnotationOwner empty string in annotations - should fallback to UID",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim-empty-owner",
+					Namespace: "default",
+					UID:       "test-uid-empty-owner",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "test-template",
+					Annotations: map[string]string{
+						agentsv1alpha1.AnnotationOwner: "",
+					},
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template",
+					Namespace: "default",
+				},
+			},
+			expectError: false,
+			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+				assert.Equal(t, "test-uid-empty-owner", opts.User, "User should fallback to UID when AnnotationOwner is empty")
+				assert.Equal(t, "test-template", opts.Template, "Template mismatch")
+			},
+		},
+		{
+			name: "spec labels set LabelSandboxClaimName - should be overridden by modifier to claim.Name",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim-label-override",
+					Namespace: "default",
+					UID:       "test-uid-label-override",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "test-template",
+					Labels: map[string]string{
+						"custom-label":                       "custom-value",
+						agentsv1alpha1.LabelSandboxClaimName: "should-be-overridden",
+					},
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template",
+					Namespace: "default",
+				},
+			},
+			expectError: false,
+			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+				require.NotNil(t, opts.Modifier, "Modifier should not be nil")
+
+				mockSandbox := &sandboxcr.Sandbox{
+					Sandbox: &agentsv1alpha1.Sandbox{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "test-sandbox",
+							Namespace: "default",
+						},
+					},
+				}
+				opts.Modifier(mockSandbox)
+
+				// LabelSandboxClaimName should be forced to claim.Name, not the spec value
+				assert.Equal(t, "test-claim-label-override", mockSandbox.Labels[agentsv1alpha1.LabelSandboxClaimName],
+					"LabelSandboxClaimName should be forced to claim.Name")
+				// Custom label from spec should still be propagated
+				assert.Equal(t, "custom-value", mockSandbox.Labels["custom-label"],
+					"custom label should be propagated from spec")
+			},
+		},
+		{
+			name: "spec annotations set AnnotationClaimUID - should be overridden by modifier to claim.UID",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim-uid-override",
+					Namespace: "default",
+					UID:       "test-uid-uid-override",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "test-template",
+					Annotations: map[string]string{
+						"custom-annotation":               "custom-value",
+						agentsv1alpha1.AnnotationClaimUID: "should-be-overridden",
+					},
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template",
+					Namespace: "default",
+				},
+			},
+			expectError: false,
+			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+				require.NotNil(t, opts.Modifier, "Modifier should not be nil")
+
+				mockSandbox := &sandboxcr.Sandbox{
+					Sandbox: &agentsv1alpha1.Sandbox{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "test-sandbox",
+							Namespace: "default",
+						},
+					},
+				}
+				opts.Modifier(mockSandbox)
+
+				// AnnotationClaimUID should be forced to claim.UID, not the spec value
+				assert.Equal(t, "test-uid-uid-override", mockSandbox.Annotations[agentsv1alpha1.AnnotationClaimUID],
+					"AnnotationClaimUID should be forced to claim.UID")
+				// Custom annotation from spec should still be propagated
+				assert.Equal(t, "custom-value", mockSandbox.Annotations["custom-annotation"],
+					"custom annotation should be propagated from spec")
 			},
 		},
 		{
