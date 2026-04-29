@@ -1,3 +1,19 @@
+/*
+Copyright 2025.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package csiutils
 
 import (
@@ -7,26 +23,37 @@ import (
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/openkruise/agents/api/v1alpha1"
-	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
-	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	"github.com/openkruise/agents/pkg/cache/cachetest"
 	"github.com/openkruise/agents/pkg/utils"
 )
 
 func TestController_generateNodePublishVolumeRequest(t *testing.T) {
+	newSecret := func(name, namespace string) *corev1.Secret {
+		return &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: namespace,
+			},
+			Data: map[string][]byte{
+				"akId":     []byte("test-ak-id"),
+				"akSecret": []byte("test-ak-secret"),
+			},
+		}
+	}
 	tests := []struct {
 		name                   string
 		containerMountPoint    string
 		persistentVolumeName   string
 		subPath                string
 		readOnly               bool
-		setupCache             func() infra.CacheProvider
-		setupClient            func() *clients.ClientSet
+		initObjs               []client.Object
 		setupStorageRegistry   func() storages.VolumeMountProviderRegistry
 		expectDriverName       string
 		expectError            bool
@@ -36,23 +63,15 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 			name:                   "empty persistent volume name",
 			containerMountPoint:    "/container/mount/target",
 			persistentVolumeName:   "",
-			setupCache:             func() infra.CacheProvider { return &mockCacheProvider{} },
-			setupClient:            func() *clients.ClientSet { return clients.NewFakeClientSet(t) },
 			setupStorageRegistry:   func() storages.VolumeMountProviderRegistry { return &mockStorageProviderRegistry{} },
 			expectDriverName:       "",
 			expectError:            true,
 			expectedErrorSubstring: "no found persistent volume name",
 		},
 		{
-			name:                 "persistent volume not found in cache or client",
-			persistentVolumeName: "non-existent-pv",
-			containerMountPoint:  "/container/mount/target",
-			setupCache: func() infra.CacheProvider {
-				return &mockCacheProvider{pv: nil}
-			},
-			setupClient: func() *clients.ClientSet {
-				return clients.NewFakeClientSet(t)
-			},
+			name:                   "persistent volume not found in cache or client",
+			persistentVolumeName:   "non-existent-pv",
+			containerMountPoint:    "/container/mount/target",
 			setupStorageRegistry:   func() storages.VolumeMountProviderRegistry { return &mockStorageProviderRegistry{} },
 			expectDriverName:       "",
 			expectError:            true,
@@ -62,20 +81,15 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 			name:                 "persistent volume has no CSI spec",
 			persistentVolumeName: "pv-without-csi",
 			containerMountPoint:  "/container/mount/target",
-			setupCache: func() infra.CacheProvider {
-				pv := &corev1.PersistentVolume{
+			initObjs: []client.Object{
+				&corev1.PersistentVolume{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "pv-without-csi",
 					},
 					Spec: corev1.PersistentVolumeSpec{
 						// No CSI spec
 					},
-				}
-				return &mockCacheProvider{pv: pv}
-			},
-			setupClient: func() *clients.ClientSet {
-				return clients.NewFakeClientSet(t)
-			},
+				}},
 			setupStorageRegistry:   func() storages.VolumeMountProviderRegistry { return &mockStorageProviderRegistry{} },
 			expectDriverName:       "",
 			expectError:            true,
@@ -85,8 +99,8 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 			name:                 "driver not supported",
 			persistentVolumeName: "unsupported-driver-pv",
 			containerMountPoint:  "/container/mount/target",
-			setupCache: func() infra.CacheProvider {
-				pv := &corev1.PersistentVolume{
+			initObjs: []client.Object{
+				&corev1.PersistentVolume{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "unsupported-driver-pv",
 					},
@@ -97,12 +111,7 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 							},
 						},
 					},
-				}
-				return &mockCacheProvider{pv: pv}
-			},
-			setupClient: func() *clients.ClientSet {
-				return clients.NewFakeClientSet(t)
-			},
+				}},
 			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
 				registry := &mockStorageProviderRegistry{
 					supportedDrivers: map[string]bool{},
@@ -117,8 +126,8 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 			name:                 "no provider found for driver",
 			persistentVolumeName: "no-provider-pv",
 			containerMountPoint:  "/container/mount/target",
-			setupCache: func() infra.CacheProvider {
-				pv := &corev1.PersistentVolume{
+			initObjs: []client.Object{
+				&corev1.PersistentVolume{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "no-provider-pv",
 					},
@@ -129,12 +138,7 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 							},
 						},
 					},
-				}
-				return &mockCacheProvider{pv: pv}
-			},
-			setupClient: func() *clients.ClientSet {
-				return clients.NewFakeClientSet(t)
-			},
+				}},
 			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
 				registry := &mockStorageProviderRegistry{
 					supportedDrivers: map[string]bool{
@@ -152,8 +156,8 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 			name:                 "provider returns error",
 			persistentVolumeName: "error-test-pv",
 			containerMountPoint:  "/container/mount/target",
-			setupCache: func() infra.CacheProvider {
-				pv := &corev1.PersistentVolume{
+			initObjs: []client.Object{
+				&corev1.PersistentVolume{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "error-test-pv",
 					},
@@ -164,11 +168,7 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 							},
 						},
 					},
-				}
-				return &mockCacheProvider{pv: pv}
-			},
-			setupClient: func() *clients.ClientSet {
-				return clients.NewFakeClientSet(t)
+				},
 			},
 			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
 				registry := &mockStorageProviderRegistry{
@@ -189,8 +189,8 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 			name:                 "NAS storage type success",
 			persistentVolumeName: "nas-test-pv",
 			containerMountPoint:  "/container/mount/target",
-			setupCache: func() infra.CacheProvider {
-				pv := &corev1.PersistentVolume{
+			initObjs: []client.Object{
+				&corev1.PersistentVolume{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "nas-test-pv",
 					},
@@ -201,11 +201,7 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 							},
 						},
 					},
-				}
-				return &mockCacheProvider{pv: pv}
-			},
-			setupClient: func() *clients.ClientSet {
-				return clients.NewFakeClientSet(t)
+				},
 			},
 			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
 				registry := &mockStorageProviderRegistry{
@@ -225,8 +221,8 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 			name:                 "OSS storage type without secret ref",
 			persistentVolumeName: "oss-no-secret-pv",
 			containerMountPoint:  "/container/mount/target",
-			setupCache: func() infra.CacheProvider {
-				pv := &corev1.PersistentVolume{
+			initObjs: []client.Object{
+				&corev1.PersistentVolume{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "oss-no-secret-pv",
 					},
@@ -238,11 +234,7 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 							},
 						},
 					},
-				}
-				return &mockCacheProvider{pv: pv}
-			},
-			setupClient: func() *clients.ClientSet {
-				return clients.NewFakeClientSet(t)
+				},
 			},
 			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
 				registry := &mockStorageProviderRegistry{
@@ -264,8 +256,8 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 			name:                 "secret ref with empty namespace should use default namespace",
 			persistentVolumeName: "pv-with-empty-namespace-secret",
 			containerMountPoint:  "/container/mount/target",
-			setupCache: func() infra.CacheProvider {
-				pv := &corev1.PersistentVolume{
+			initObjs: []client.Object{
+				&corev1.PersistentVolume{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "pv-with-empty-namespace-secret",
 					},
@@ -280,11 +272,7 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 							},
 						},
 					},
-				}
-				return &mockCacheProvider{pv: pv}
-			},
-			setupClient: func() *clients.ClientSet {
-				return clients.NewFakeClientSet(t)
+				}, newSecret("test-secret", utils.DefaultSandboxDeployNamespace),
 			},
 			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
 				registry := &mockStorageProviderRegistry{
@@ -305,8 +293,8 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 			name:                 "secret ref with invalid namespace should fail",
 			persistentVolumeName: "pv-with-invalid-namespace-secret",
 			containerMountPoint:  "/container/mount/target",
-			setupCache: func() infra.CacheProvider {
-				pv := &corev1.PersistentVolume{
+			initObjs: []client.Object{
+				&corev1.PersistentVolume{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "pv-with-invalid-namespace-secret",
 					},
@@ -321,11 +309,7 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 							},
 						},
 					},
-				}
-				return &mockCacheProvider{pv: pv}
-			},
-			setupClient: func() *clients.ClientSet {
-				return clients.NewFakeClientSet(t)
+				}, newSecret("test-secret", "invalid-namespace"),
 			},
 			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
 				registry := &mockStorageProviderRegistry{
@@ -347,8 +331,8 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 			persistentVolumeName: "pv-with-invalid-namespace-secret",
 			containerMountPoint:  "/container/mount/target",
 			subPath:              "",
-			setupCache: func() infra.CacheProvider {
-				pv := &corev1.PersistentVolume{
+			initObjs: []client.Object{
+				&corev1.PersistentVolume{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "pv-with-invalid-namespace-secret",
 					},
@@ -363,11 +347,7 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 							},
 						},
 					},
-				}
-				return &mockCacheProvider{pv: pv}
-			},
-			setupClient: func() *clients.ClientSet {
-				return clients.NewFakeClientSet(t)
+				}, newSecret("test-secret", "invalid-namespace"),
 			},
 			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
 				registry := &mockStorageProviderRegistry{
@@ -389,8 +369,8 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 			persistentVolumeName: "pv-with-access-point",
 			containerMountPoint:  "/container/mount/target",
 			subPath:              "subdir/data",
-			setupCache: func() infra.CacheProvider {
-				pv := &corev1.PersistentVolume{
+			initObjs: []client.Object{
+				&corev1.PersistentVolume{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "pv-with-access-point",
 					},
@@ -404,11 +384,7 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 							},
 						},
 					},
-				}
-				return &mockCacheProvider{pv: pv}
-			},
-			setupClient: func() *clients.ClientSet {
-				return clients.NewFakeClientSet(t)
+				},
 			},
 			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
 				registry := &mockStorageProviderRegistry{
@@ -429,8 +405,8 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 			persistentVolumeName: "pv-with-access-point-trailing-slash",
 			containerMountPoint:  "/container/mount/target",
 			subPath:              "subdir/data",
-			setupCache: func() infra.CacheProvider {
-				pv := &corev1.PersistentVolume{
+			initObjs: []client.Object{
+				&corev1.PersistentVolume{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "pv-with-access-point-trailing-slash",
 					},
@@ -444,11 +420,7 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 							},
 						},
 					},
-				}
-				return &mockCacheProvider{pv: pv}
-			},
-			setupClient: func() *clients.ClientSet {
-				return clients.NewFakeClientSet(t)
+				},
 			},
 			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
 				registry := &mockStorageProviderRegistry{
@@ -469,8 +441,8 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 			persistentVolumeName: "pv-without-base-path",
 			containerMountPoint:  "/container/mount/target",
 			subPath:              "valid/subpath",
-			setupCache: func() infra.CacheProvider {
-				pv := &corev1.PersistentVolume{
+			initObjs: []client.Object{
+				&corev1.PersistentVolume{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "pv-without-base-path",
 					},
@@ -484,11 +456,7 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 							},
 						},
 					},
-				}
-				return &mockCacheProvider{pv: pv}
-			},
-			setupClient: func() *clients.ClientSet {
-				return clients.NewFakeClientSet(t)
+				},
 			},
 			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
 				registry := &mockStorageProviderRegistry{
@@ -509,8 +477,8 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 			persistentVolumeName: "pv-with-malicious-access-point",
 			containerMountPoint:  "/container/mount/target",
 			subPath:              "../etc/passwd",
-			setupCache: func() infra.CacheProvider {
-				pv := &corev1.PersistentVolume{
+			initObjs: []client.Object{
+				&corev1.PersistentVolume{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "pv-with-malicious-access-point",
 					},
@@ -524,11 +492,7 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 							},
 						},
 					},
-				}
-				return &mockCacheProvider{pv: pv}
-			},
-			setupClient: func() *clients.ClientSet {
-				return clients.NewFakeClientSet(t)
+				},
 			},
 			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
 				registry := &mockStorageProviderRegistry{
@@ -550,8 +514,8 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 			persistentVolumeName: "pv-with-null-byte-access-point",
 			containerMountPoint:  "/container/mount/target",
 			subPath:              "subdir\x00file",
-			setupCache: func() infra.CacheProvider {
-				pv := &corev1.PersistentVolume{
+			initObjs: []client.Object{
+				&corev1.PersistentVolume{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "pv-with-null-byte-access-point",
 					},
@@ -565,11 +529,7 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 							},
 						},
 					},
-				}
-				return &mockCacheProvider{pv: pv}
-			},
-			setupClient: func() *clients.ClientSet {
-				return clients.NewFakeClientSet(t)
+				},
 			},
 			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
 				registry := &mockStorageProviderRegistry{
@@ -591,8 +551,8 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 			persistentVolumeName: "pv-subpath-only",
 			containerMountPoint:  "/container/mount/target",
 			subPath:              "standalone/path",
-			setupCache: func() infra.CacheProvider {
-				pv := &corev1.PersistentVolume{
+			initObjs: []client.Object{
+				&corev1.PersistentVolume{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "pv-subpath-only",
 					},
@@ -604,11 +564,7 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 							},
 						},
 					},
-				}
-				return &mockCacheProvider{pv: pv}
-			},
-			setupClient: func() *clients.ClientSet {
-				return clients.NewFakeClientSet(t)
+				},
 			},
 			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
 				registry := &mockStorageProviderRegistry{
@@ -629,8 +585,8 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 			persistentVolumeName: "pv-empty-subpath",
 			containerMountPoint:  "/container/mount/target",
 			subPath:              "",
-			setupCache: func() infra.CacheProvider {
-				pv := &corev1.PersistentVolume{
+			initObjs: []client.Object{
+				&corev1.PersistentVolume{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "pv-empty-subpath",
 					},
@@ -644,11 +600,7 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 							},
 						},
 					},
-				}
-				return &mockCacheProvider{pv: pv}
-			},
-			setupClient: func() *clients.ClientSet {
-				return clients.NewFakeClientSet(t)
+				},
 			},
 			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
 				registry := &mockStorageProviderRegistry{
@@ -669,8 +621,8 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 			persistentVolumeName: "pv-leading-slash-subpath",
 			containerMountPoint:  "/container/mount/target",
 			subPath:              "/data/files",
-			setupCache: func() infra.CacheProvider {
-				pv := &corev1.PersistentVolume{
+			initObjs: []client.Object{
+				&corev1.PersistentVolume{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "pv-leading-slash-subpath",
 					},
@@ -684,11 +636,7 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 							},
 						},
 					},
-				}
-				return &mockCacheProvider{pv: pv}
-			},
-			setupClient: func() *clients.ClientSet {
-				return clients.NewFakeClientSet(t)
+				},
 			},
 			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
 				registry := &mockStorageProviderRegistry{
@@ -709,8 +657,8 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 			persistentVolumeName: "pv-complex-subpath",
 			containerMountPoint:  "/container/mount/target",
 			subPath:              "user/projects/2024/data",
-			setupCache: func() infra.CacheProvider {
-				pv := &corev1.PersistentVolume{
+			initObjs: []client.Object{
+				&corev1.PersistentVolume{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "pv-complex-subpath",
 					},
@@ -724,11 +672,7 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 							},
 						},
 					},
-				}
-				return &mockCacheProvider{pv: pv}
-			},
-			setupClient: func() *clients.ClientSet {
-				return clients.NewFakeClientSet(t)
+				},
 			},
 			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
 				registry := &mockStorageProviderRegistry{
@@ -749,8 +693,8 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 			persistentVolumeName: "error-test-pv",
 			containerMountPoint:  "/container/mount/target",
 			readOnly:             false,
-			setupCache: func() infra.CacheProvider {
-				pv := &corev1.PersistentVolume{
+			initObjs: []client.Object{
+				&corev1.PersistentVolume{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "error-test-pv",
 					},
@@ -761,11 +705,7 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 							},
 						},
 					},
-				}
-				return &mockCacheProvider{pv: pv}
-			},
-			setupClient: func() *clients.ClientSet {
-				return clients.NewFakeClientSet(t)
+				},
 			},
 			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
 				registry := &mockStorageProviderRegistry{
@@ -787,8 +727,8 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 			persistentVolumeName: "readonly-test-pv",
 			containerMountPoint:  "/container/mount/target",
 			readOnly:             true,
-			setupCache: func() infra.CacheProvider {
-				pv := &corev1.PersistentVolume{
+			initObjs: []client.Object{
+				&corev1.PersistentVolume{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "readonly-test-pv",
 					},
@@ -799,11 +739,7 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 							},
 						},
 					},
-				}
-				return &mockCacheProvider{pv: pv}
-			},
-			setupClient: func() *clients.ClientSet {
-				return clients.NewFakeClientSet(t)
+				},
 			},
 			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
 				registry := &mockStorageProviderRegistry{
@@ -824,8 +760,8 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 			persistentVolumeName: "readwrite-test-pv",
 			containerMountPoint:  "/container/mount/target",
 			readOnly:             false,
-			setupCache: func() infra.CacheProvider {
-				pv := &corev1.PersistentVolume{
+			initObjs: []client.Object{
+				&corev1.PersistentVolume{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "readwrite-test-pv",
 					},
@@ -836,11 +772,7 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 							},
 						},
 					},
-				}
-				return &mockCacheProvider{pv: pv}
-			},
-			setupClient: func() *clients.ClientSet {
-				return clients.NewFakeClientSet(t)
+				},
 			},
 			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
 				registry := &mockStorageProviderRegistry{
@@ -862,8 +794,8 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 			containerMountPoint:  "/container/mount/target",
 			subPath:              "subdir/data",
 			readOnly:             true,
-			setupCache: func() infra.CacheProvider {
-				pv := &corev1.PersistentVolume{
+			initObjs: []client.Object{
+				&corev1.PersistentVolume{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "pv-with-access-point",
 					},
@@ -877,11 +809,7 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 							},
 						},
 					},
-				}
-				return &mockCacheProvider{pv: pv}
-			},
-			setupClient: func() *clients.ClientSet {
-				return clients.NewFakeClientSet(t)
+				},
 			},
 			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
 				registry := &mockStorageProviderRegistry{
@@ -903,8 +831,8 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 			containerMountPoint:  "/container/mount/target",
 			subPath:              "subdir/data",
 			readOnly:             false,
-			setupCache: func() infra.CacheProvider {
-				pv := &corev1.PersistentVolume{
+			initObjs: []client.Object{
+				&corev1.PersistentVolume{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "pv-with-access-point-rw",
 					},
@@ -918,11 +846,7 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 							},
 						},
 					},
-				}
-				return &mockCacheProvider{pv: pv}
-			},
-			setupClient: func() *clients.ClientSet {
-				return clients.NewFakeClientSet(t)
+				},
 			},
 			setupStorageRegistry: func() storages.VolumeMountProviderRegistry {
 				registry := &mockStorageProviderRegistry{
@@ -944,7 +868,10 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			// Create controller with mocked dependencies
 			ctx := context.Background()
-			handler := NewCSIMountHandler(tt.setupClient(), tt.setupCache(), tt.setupStorageRegistry(), utils.DefaultSandboxDeployNamespace)
+			tt.initObjs = append(tt.initObjs)
+			c, _, err := cachetest.NewTestCache(t, tt.initObjs...)
+			require.NoError(t, err)
+			handler := NewCSIMountHandler(c.GetClient(), c.GetAPIReader(), tt.setupStorageRegistry(), utils.DefaultSandboxDeployNamespace)
 			driverName, csiRequest, err := handler.GenerateNodePublishVolumeRequest(ctx,
 				v1alpha1.CSIMountConfig{
 					PvName:    tt.persistentVolumeName,
@@ -953,80 +880,19 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 					ReadOnly:  tt.readOnly,
 				})
 			if tt.expectError {
-				assert.Error(t, err)
+				require.Error(t, err)
 				if tt.expectedErrorSubstring != "" {
 					assert.Contains(t, err.Error(), tt.expectedErrorSubstring)
 				}
 				assert.Empty(t, driverName)
 				assert.Nil(t, csiRequest)
 			} else {
-				assert.NoError(t, err)
+				require.NoError(t, err)
 				assert.Equal(t, tt.expectDriverName, driverName)
 				assert.NotNil(t, csiRequest)
 			}
 		})
 	}
-}
-
-type mockCacheProvider struct {
-	pv *corev1.PersistentVolume
-}
-
-func (m *mockCacheProvider) GetPersistentVolume(string) (*corev1.PersistentVolume, error) {
-	if m.pv == nil {
-		return nil, fmt.Errorf("not found")
-	}
-	return m.pv, nil
-}
-
-func (m *mockCacheProvider) GetSecret(namespace, name string) (*corev1.Secret, error) {
-	return &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
-		},
-		Data: map[string][]byte{
-			"akId":     []byte("test-ak-id"),
-			"akSecret": []byte("test-ak-secret"),
-		},
-	}, nil
-}
-
-func (m *mockCacheProvider) GetConfigmap(namespace, name string) (*corev1.ConfigMap, error) {
-	return &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: namespace,
-			Name:      name,
-		},
-		Data: map[string]string{
-			"key1": "value1",
-			"key2": "value2",
-		},
-	}, nil
-}
-
-func (m *mockCacheProvider) GetClaimedSandbox(string) (*agentsv1alpha1.Sandbox, error) {
-	return nil, fmt.Errorf("not implemented for PV cache mock")
-}
-
-func (m *mockCacheProvider) ListSandboxWithUser(string) ([]*agentsv1alpha1.Sandbox, error) {
-	return nil, fmt.Errorf("not implemented for PV cache mock")
-}
-
-func (m *mockCacheProvider) ListSandboxesInPool(string) ([]*agentsv1alpha1.Sandbox, error) {
-	return nil, fmt.Errorf("not implemented for PV cache mock")
-}
-
-func (m *mockCacheProvider) GetCheckpoint(_ string) (*agentsv1alpha1.Checkpoint, error) {
-	return nil, fmt.Errorf("not implemented for checkpoint cache mock")
-}
-
-func (m *mockCacheProvider) GetSandboxSet(_ string) (*agentsv1alpha1.SandboxSet, error) {
-	return nil, fmt.Errorf("not implemented for sandboxset cache mock")
-}
-
-func (m *mockCacheProvider) ListSandboxSets(_ string) ([]*agentsv1alpha1.SandboxSet, error) {
-	return nil, fmt.Errorf("not implemented for sandboxset cache mock")
 }
 
 type mockStorageProviderRegistry struct {

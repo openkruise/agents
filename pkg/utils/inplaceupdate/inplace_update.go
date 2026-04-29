@@ -33,7 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	agentsapiv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/utils"
 )
 
@@ -100,7 +100,7 @@ func GetPodInPlaceUpdateState(pod *corev1.Pod) (*InPlaceUpdateState, error) {
 }
 
 type InPlaceUpdateOptions struct {
-	Box      *agentsapiv1alpha1.Sandbox
+	Box      *agentsv1alpha1.Sandbox
 	Revision string
 	Pod      *corev1.Pod
 	// OnProgress is called after each successful in-place sub-operation
@@ -148,8 +148,8 @@ func DefaultGeneratePatchBodyFunc(opts InPlaceUpdateOptions) string {
 		LastContainerStatuses: map[string]InPlaceUpdateContainerStatus{},
 	}
 	labelsPatch := map[string]string{}
-	if pod.Labels[agentsapiv1alpha1.PodLabelTemplateHash] != revision {
-		labelsPatch[agentsapiv1alpha1.PodLabelTemplateHash] = revision
+	if pod.Labels[agentsv1alpha1.PodLabelTemplateHash] != revision {
+		labelsPatch[agentsv1alpha1.PodLabelTemplateHash] = revision
 	}
 	// container.name -> container
 	originContainers := map[string]corev1.Container{}
@@ -316,7 +316,7 @@ func buildResourcePatch(resizeBody *corev1.Pod) string {
 // CheckResizeQoSChange checks if applying the sandbox template resources to the pod
 // would change the pod's QoS class. Returns the original and new QoS classes plus
 // a boolean indicating whether a change would occur.
-func CheckResizeQoSChange(box *agentsapiv1alpha1.Sandbox, pod *corev1.Pod) (orig, updated corev1.PodQOSClass, changed bool) {
+func CheckResizeQoSChange(box *agentsv1alpha1.Sandbox, pod *corev1.Pod) (orig, updated corev1.PodQOSClass, changed bool) {
 	if box.Spec.Template == nil {
 		return "", "", false
 	}

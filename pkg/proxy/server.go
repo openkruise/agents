@@ -85,16 +85,20 @@ type Server struct {
 	mu sync.Mutex
 }
 
-func NewServer(adapter RequestAdapter, peersManager peers.Peers, opts config.SandboxManagerOptions) *Server {
+func NewServer(opts config.SandboxManagerOptions) *Server {
 	s := &Server{
-		adapter:                     adapter,
-		peersManager:                peersManager,
 		extProcMaxConcurrentStreams: opts.ExtProcMaxConcurrency,
 	}
-	if adapter != nil {
-		s.LBEntry = adapter.Entry()
-	}
 	return s
+}
+
+func (s *Server) SetRequestAdapter(adapter RequestAdapter) {
+	s.adapter = adapter
+	s.LBEntry = adapter.Entry()
+}
+
+func (s *Server) SetPeersManager(p peers.Peers) {
+	s.peersManager = p
 }
 
 func (s *Server) Run() error {

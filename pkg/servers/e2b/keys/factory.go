@@ -20,7 +20,7 @@ import (
 	"errors"
 	"fmt"
 
-	"k8s.io/client-go/kubernetes"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // StorageMode selects the KeyStorage backend implementation.
@@ -39,17 +39,18 @@ type Config struct {
 	DSN                string // mysql mode
 	Pepper             string // mysql mode (HMAC pepper)
 	DisableAutoMigrate bool   // mysql mode
-	K8sClient          kubernetes.Interface
+	Client             client.Client
+	APIReader          client.Reader
 }
 
 // NewKeyStorage returns a KeyStorage implementation for the given config.
 func NewKeyStorage(cfg Config) (KeyStorage, error) {
 	switch cfg.Mode {
 	case "", StorageModeSecret:
-		if cfg.K8sClient == nil {
-			return nil, errors.New("secret key storage requires a Kubernetes client")
+		if cfg.Client == nil || cfg.APIReader == nil {
+			return nil, errors.New("secret key storage requires controller-runtime client and api-reader")
 		}
-		return NewSecretKeyStorage(cfg.K8sClient, cfg.Namespace, cfg.AdminKey), nil
+		return NewSecretKeyStorage(cfg.Client, cfg.APIReader, cfg.Namespace, cfg.AdminKey), nil
 	case StorageModeMySQL:
 		if cfg.DSN == "" {
 			return nil, errors.New("mysql key storage requires a DSN")

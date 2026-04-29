@@ -25,8 +25,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 	"github.com/openkruise/agents/pkg/utils/inplaceupdate"
 )
@@ -64,11 +62,10 @@ type SandboxControl interface {
 }
 
 type SandboxControlArgs struct {
-	Client        client.Client
-	Recorder      record.EventRecorder
-	RateLimiter   *RateLimiter
-	SandboxClient *clients.ClientSet
-	Cache         infra.CacheProvider
+	Client      client.Client
+	APIReader   client.Reader
+	Recorder    record.EventRecorder
+	RateLimiter *RateLimiter
 }
 
 func NewSandboxControl(args SandboxControlArgs) map[string]SandboxControl {

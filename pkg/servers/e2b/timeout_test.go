@@ -1,3 +1,19 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package e2b
 
 import (
@@ -45,10 +61,9 @@ func TestSetSandboxTimeoutWithNeverTimeout(t *testing.T) {
 	endAtTime, parseErr := time.Parse(time.RFC3339, createResp.Body.EndAt)
 	assert.NoError(t, parseErr)
 	require.True(t, endAtTime.IsZero(), "EndAt should be zero time for never-timeout sandbox")
-	sbx := GetSandbox(t, createResp.Body.SandboxID, client.SandboxClient)
+	sbx := GetSandbox(t, createResp.Body.SandboxID, client)
 	require.Nil(t, sbx.Spec.ShutdownTime)
 	require.Nil(t, sbx.Spec.PauseTime)
-	AvoidGetFromCache(t, createResp.Body.SandboxID, client.SandboxClient)
 
 	// Step 3: Call SetSandboxTimeout
 	_, apiError := controller.SetSandboxTimeout(NewRequest(t, nil, models.SetTimeoutRequest{
@@ -66,27 +81,28 @@ func TestSetSandboxTimeoutWithNeverTimeout(t *testing.T) {
 	endAtTime, parseErr = time.Parse(time.RFC3339, describeResp.Body.EndAt)
 	assert.NoError(t, parseErr)
 	require.True(t, endAtTime.IsZero(), "EndAt should still be zero time after SetSandboxTimeout for never-timeout sandbox")
-	sbx = GetSandbox(t, createResp.Body.SandboxID, client.SandboxClient)
+	sbx = GetSandbox(t, createResp.Body.SandboxID, client)
 	require.Nil(t, sbx.Spec.ShutdownTime)
 	require.Nil(t, sbx.Spec.PauseTime)
 
+	EnableWaitSim(t, controller, createResp.Body.SandboxID)
+
 	// Step 5: Pause the sandbox first (required before ResumeSandbox)
-	_, apiError = controller.PauseSandbox(NewRequest(t, nil, nil, map[string]string{
-		"sandboxID": createResp.Body.SandboxID,
-	}, user))
-	assert.Nil(t, apiError)
-	AvoidGetFromCache(t, createResp.Body.SandboxID, client.SandboxClient)
+	pauseSandboxHelper(t, controller, client, createResp.Body.SandboxID, false, false, user)
 	// Wait for pause to complete by checking state
 	describeResp, err = controller.DescribeSandbox(NewRequest(t, nil, nil, map[string]string{
 		"sandboxID": createResp.Body.SandboxID,
 	}, user))
 	assert.Nil(t, err)
 	assert.Equal(t, models.SandboxStatePaused, describeResp.Body.State)
-	sbx = GetSandbox(t, createResp.Body.SandboxID, client.SandboxClient)
+	sbx = GetSandbox(t, createResp.Body.SandboxID, client)
 	require.Nil(t, sbx.Spec.ShutdownTime)
 	require.Nil(t, sbx.Spec.PauseTime)
 
 	// Step 6: Test ResumeSandbox - should also preserve never-timeout behavior
+	go UpdateSandboxWhen(t, client, createResp.Body.SandboxID, func(sbx *v1alpha1.Sandbox) bool {
+		return sbx.Spec.Paused == false
+	}, DoSetSandboxStatus(v1alpha1.SandboxRunning, metav1.ConditionFalse, metav1.ConditionTrue))
 	_, apiError = controller.ResumeSandbox(NewRequest(t, nil, models.SetTimeoutRequest{
 		TimeoutSeconds: 600,
 	}, map[string]string{
@@ -102,7 +118,7 @@ func TestSetSandboxTimeoutWithNeverTimeout(t *testing.T) {
 	endAtTime, parseErr = time.Parse(time.RFC3339, describeResp.Body.EndAt)
 	assert.NoError(t, parseErr)
 	require.True(t, endAtTime.IsZero(), "EndAt should still be zero time after ResumeSandbox for never-timeout sandbox")
-	sbx = GetSandbox(t, createResp.Body.SandboxID, client.SandboxClient)
+	sbx = GetSandbox(t, createResp.Body.SandboxID, client)
 	require.Nil(t, sbx.Spec.ShutdownTime)
 	require.Nil(t, sbx.Spec.PauseTime)
 
@@ -113,13 +129,13 @@ func TestSetSandboxTimeoutWithNeverTimeout(t *testing.T) {
 	}, map[string]string{
 		"sandboxID": createResp.Body.SandboxID,
 	}, user))
-	assert.Nil(t, apiError)
+	require.Nil(t, apiError)
 	assert.Equal(t, models.SandboxStateRunning, connectResp.Body.State)
 	// Step 9: Check timeout after ConnectSandbox - should still be zero time
 	endAtTime, parseErr = time.Parse(time.RFC3339, connectResp.Body.EndAt)
 	assert.NoError(t, parseErr)
 	require.True(t, endAtTime.IsZero(), fmt.Sprintf("EndAt should still be zero time after ConnectSandbox for never-timeout sandbox, actual: %s", endAtTime))
-	sbx = GetSandbox(t, createResp.Body.SandboxID, client.SandboxClient)
+	sbx = GetSandbox(t, createResp.Body.SandboxID, client)
 	require.Nil(t, sbx.Spec.ShutdownTime)
 	require.Nil(t, sbx.Spec.PauseTime)
 }
@@ -201,9 +217,8 @@ func TestSetTimeout(t *testing.T) {
 			assert.Nil(t, err)
 			assert.Equal(t, models.SandboxStateRunning, createResp.Body.State)
 			AssertEndAt(t, initEndAt, createResp.Body.EndAt)
-			AvoidGetFromCache(t, createResp.Body.SandboxID, client.SandboxClient)
 
-			UpdateSandboxWhen(t, client.SandboxClient, createResp.Body.SandboxID, Immediately,
+			UpdateSandboxWhen(t, client, createResp.Body.SandboxID, Immediately,
 				DoSetSandboxStatus(tt.phase, metav1.ConditionFalse, metav1.ConditionTrue))
 
 			_, apiError := controller.SetSandboxTimeout(NewRequest(t, nil, models.SetTimeoutRequest{
@@ -225,7 +240,7 @@ func TestSetTimeout(t *testing.T) {
 				assert.Nil(t, err)
 				timeoutDuration := time.Duration(tt.timeout) * time.Second
 				AssertEndAt(t, start.Add(timeoutDuration), describeResp.Body.EndAt)
-				tt.checker(t, GetSandbox(t, createResp.Body.SandboxID, client.SandboxClient), timeoutDuration)
+				tt.checker(t, GetSandbox(t, createResp.Body.SandboxID, client), timeoutDuration)
 			}
 		})
 	}
@@ -256,7 +271,6 @@ func TestSetSandboxTimeoutStillShortensRunningSandbox(t *testing.T) {
 	}, nil, user))
 	require.Nil(t, err)
 	assert.Equal(t, models.SandboxStateRunning, createResp.Body.State)
-	AvoidGetFromCache(t, createResp.Body.SandboxID, client.SandboxClient)
 
 	shorterSeconds := 300
 	beforeSet := time.Now()
@@ -273,7 +287,7 @@ func TestSetSandboxTimeoutStillShortensRunningSandbox(t *testing.T) {
 	assert.Nil(t, err)
 	AssertEndAt(t, beforeSet.Add(time.Duration(shorterSeconds)*time.Second), describeResp.Body.EndAt)
 
-	sbx := GetSandbox(t, createResp.Body.SandboxID, client.SandboxClient)
+	sbx := GetSandbox(t, createResp.Body.SandboxID, client)
 	require.NotNil(t, sbx.Spec.ShutdownTime)
 	assert.Nil(t, sbx.Spec.PauseTime)
 	assert.WithinDuration(t, beforeSet.Add(time.Duration(shorterSeconds)*time.Second), sbx.Spec.ShutdownTime.Time, 5*time.Second)

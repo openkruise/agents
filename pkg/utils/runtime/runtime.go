@@ -24,19 +24,19 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/openkruise/agents/pkg/cache"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
-	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/utils"
 	csimountutils "github.com/openkruise/agents/pkg/utils/csiutils"
@@ -162,7 +162,7 @@ func RunCommandWithRuntime(ctx context.Context, args RunCmdFuncArgs) (RunCommand
 
 // ResolveCSIMountFromAnnotation parses CSI mount config from sandbox annotation and resolves it into MountOptionList.
 // Returns nil if no CSI mount annotation is present.
-func ResolveCSIMountFromAnnotation(ctx context.Context, obj metav1.Object, client *clients.ClientSet, cache infra.CacheProvider, storageRegistry storages.VolumeMountProviderRegistry) (*config.CSIMountOptions, error) {
+func ResolveCSIMountFromAnnotation(ctx context.Context, obj metav1.Object, client client.Client, cache cache.Provider, storageRegistry storages.VolumeMountProviderRegistry) (*config.CSIMountOptions, error) {
 	log := klog.FromContext(ctx)
 	csiMountConfigs, err := GetCsiMountExtensionRequest(obj)
 	if err != nil {
@@ -172,7 +172,7 @@ func ResolveCSIMountFromAnnotation(ctx context.Context, obj metav1.Object, clien
 	if len(csiMountConfigs) == 0 {
 		return nil, nil
 	}
-	csiClient := csimountutils.NewCSIMountHandler(client, cache, storageRegistry, utils.DefaultSandboxDeployNamespace)
+	csiClient := csimountutils.NewCSIMountHandler(cache.GetClient(), cache.GetAPIReader(), storageRegistry, utils.DefaultSandboxDeployNamespace)
 	mountOptionList := make([]config.MountConfig, 0, len(csiMountConfigs))
 	for _, cfg := range csiMountConfigs {
 		driverName, csiReqConfigRaw, genErr := csiClient.CSIMountOptionsConfig(ctx, cfg)

@@ -42,13 +42,9 @@ import (
 	"github.com/openkruise/agents/pkg/controller/sandbox/core"
 	"github.com/openkruise/agents/pkg/discovery"
 	"github.com/openkruise/agents/pkg/features"
-	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
-	managerconfig "github.com/openkruise/agents/pkg/sandbox-manager/config"
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
-	"github.com/openkruise/agents/pkg/utils/webhookutils"
 )
 
 func init() {
@@ -65,28 +61,15 @@ func Add(mgr manager.Manager) error {
 		return nil
 	}
 
-	clientSet, err := clients.NewClientSetWithConfig(mgr.GetConfig())
-	if err != nil {
-		return fmt.Errorf("failed to create manager client set: %w", err)
-	}
-	// Initialize cache
-	cache, err := sandboxcr.NewCache(clientSet, managerconfig.SandboxManagerOptions{
-		SystemNamespace: webhookutils.GetNamespace(),
-	})
-	if err != nil {
-		return fmt.Errorf("failed to create cache: %w", err)
-	}
-
 	rateLimiter := core.NewRateLimiter()
-	err = (&SandboxReconciler{
+	err := (&SandboxReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
 		controls: core.NewSandboxControl(core.SandboxControlArgs{
-			Client:        mgr.GetClient(),
-			Recorder:      mgr.GetEventRecorderFor("sandbox"),
-			RateLimiter:   rateLimiter,
-			Cache:         cache,
-			SandboxClient: clientSet,
+			Client:      mgr.GetClient(),
+			APIReader:   mgr.GetAPIReader(),
+			Recorder:    mgr.GetEventRecorderFor("sandbox"),
+			RateLimiter: rateLimiter,
 		}), rateLimiter: rateLimiter,
 	}).SetupWithManager(mgr)
 	if err != nil {

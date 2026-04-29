@@ -1,3 +1,19 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package e2b
 
 import (
@@ -20,7 +36,6 @@ import (
 	"github.com/openkruise/agents/api/v1alpha1"
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/features"
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
@@ -184,70 +199,6 @@ func TestCsiMountOptionsConfigRecord(t *testing.T) {
 			}
 		})
 	}
-}
-
-// mockSandboxManager is a mock implementation for testing
-type mockSandboxManager struct {
-	claimFunc func(ctx context.Context, opts infra.ClaimSandboxOptions) (infra.Sandbox, error)
-	cloneFunc func(ctx context.Context, opts infra.CloneSandboxOptions) (infra.Sandbox, error)
-}
-
-func (m *mockSandboxManager) ClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions) (infra.Sandbox, error) {
-	if m.claimFunc != nil {
-		return m.claimFunc(ctx, opts)
-	}
-	// Default behavior: return a mock sandbox
-	return &sandboxcr.Sandbox{
-		Sandbox: &v1alpha1.Sandbox{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "mock-sandbox",
-				Namespace: "default",
-			},
-			Status: v1alpha1.SandboxStatus{
-				Phase: v1alpha1.SandboxRunning,
-				Conditions: []metav1.Condition{
-					{
-						Type:   string(v1alpha1.SandboxConditionReady),
-						Status: metav1.ConditionTrue,
-					},
-				},
-				PodInfo: v1alpha1.PodInfo{
-					PodIP: "10.0.0.1",
-				},
-			},
-		},
-	}, nil
-}
-
-func (m *mockSandboxManager) CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions) (infra.Sandbox, error) {
-	if m.cloneFunc != nil {
-		return m.cloneFunc(ctx, opts)
-	}
-	// Default behavior: return a mock sandbox
-	return &sandboxcr.Sandbox{
-		Sandbox: &v1alpha1.Sandbox{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "mock-cloned-sandbox",
-				Namespace: "default",
-			},
-			Status: v1alpha1.SandboxStatus{
-				Phase: v1alpha1.SandboxRunning,
-			},
-		},
-	}, nil
-}
-
-func (m *mockSandboxManager) GetInfra() infra.Infrastructure {
-	return nil
-}
-
-func (m *mockSandboxManager) Stop() {
-	// No-op for testing
-}
-
-func (m *mockSandboxManager) Run(ctx context.Context, sysNs, peerSelector string) error {
-	// No-op for testing
-	return nil
 }
 
 func TestCreateSandboxWithClaim_CSIMount(t *testing.T) {

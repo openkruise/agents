@@ -34,14 +34,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	agentsapiv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 )
 
 // buildTestScheme builds a runtime scheme containing both the agents/v1alpha1
 // types and corev1 types used by the in-place update tests.
 func buildTestScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
-	scheme, err := agentsapiv1alpha1.SchemeBuilder.Build()
+	scheme, err := agentsv1alpha1.SchemeBuilder.Build()
 	if err != nil {
 		t.Fatalf("Failed to build scheme: %v", err)
 	}
@@ -186,9 +186,9 @@ func TestInPlaceUpdateControl_Update_ImageChange(t *testing.T) {
 			}},
 		},
 	}
-	box := &agentsapiv1alpha1.Sandbox{
-		Spec: agentsapiv1alpha1.SandboxSpec{
-			EmbeddedSandboxTemplate: agentsapiv1alpha1.EmbeddedSandboxTemplate{
+	box := &agentsv1alpha1.Sandbox{
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
 				Template: &corev1.PodTemplateSpec{
 					ObjectMeta: metav1.ObjectMeta{
 						Labels: map[string]string{"app": "new"},
@@ -233,9 +233,9 @@ func TestInPlaceUpdateControl_Update_ImageChange(t *testing.T) {
 	if updated.Spec.Containers[0].Image != "nginx:1.20" {
 		t.Fatalf("expected image patched to nginx:1.20, got %q", updated.Spec.Containers[0].Image)
 	}
-	if updated.Labels[agentsapiv1alpha1.PodLabelTemplateHash] != "rev-1" {
+	if updated.Labels[agentsv1alpha1.PodLabelTemplateHash] != "rev-1" {
 		t.Fatalf("expected pod-template-hash label=rev-1, got %q",
-			updated.Labels[agentsapiv1alpha1.PodLabelTemplateHash])
+			updated.Labels[agentsv1alpha1.PodLabelTemplateHash])
 	}
 	if updated.Labels["app"] != "new" {
 		t.Fatalf("expected app label patched to new, got %q", updated.Labels["app"])
@@ -260,16 +260,16 @@ func TestInPlaceUpdateControl_Update_NoChange(t *testing.T) {
 			Name:      "p",
 			Namespace: "default",
 			Labels: map[string]string{
-				agentsapiv1alpha1.PodLabelTemplateHash: "rev",
+				agentsv1alpha1.PodLabelTemplateHash: "rev",
 			},
 		},
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{{Name: "c1", Image: "img:1"}},
 		},
 	}
-	box := &agentsapiv1alpha1.Sandbox{
-		Spec: agentsapiv1alpha1.SandboxSpec{
-			EmbeddedSandboxTemplate: agentsapiv1alpha1.EmbeddedSandboxTemplate{
+	box := &agentsv1alpha1.Sandbox{
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
 				Template: &corev1.PodTemplateSpec{
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{{Name: "c1", Image: "img:1"}},
@@ -302,16 +302,16 @@ func TestInPlaceUpdateControl_Update_MetadataOnlyLabels(t *testing.T) {
 			Name:      "p-label-only",
 			Namespace: "default",
 			Labels: map[string]string{
-				agentsapiv1alpha1.PodLabelTemplateHash: "old-rev",
+				agentsv1alpha1.PodLabelTemplateHash: "old-rev",
 			},
 		},
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{{Name: "c1", Image: "img:1"}},
 		},
 	}
-	box := &agentsapiv1alpha1.Sandbox{
-		Spec: agentsapiv1alpha1.SandboxSpec{
-			EmbeddedSandboxTemplate: agentsapiv1alpha1.EmbeddedSandboxTemplate{
+	box := &agentsv1alpha1.Sandbox{
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
 				Template: &corev1.PodTemplateSpec{
 					ObjectMeta: metav1.ObjectMeta{
 						Labels: map[string]string{"custom-label-1": "value1"},
@@ -346,8 +346,8 @@ func TestInPlaceUpdateControl_Update_MetadataOnlyLabels(t *testing.T) {
 	if updated.Labels["custom-label-1"] != "value1" {
 		t.Fatalf("expected custom-label-1=value1 on pod, got labels: %v", updated.Labels)
 	}
-	if updated.Labels[agentsapiv1alpha1.PodLabelTemplateHash] != "new-rev" {
-		t.Fatalf("expected pod-template-hash=new-rev, got %q", updated.Labels[agentsapiv1alpha1.PodLabelTemplateHash])
+	if updated.Labels[agentsv1alpha1.PodLabelTemplateHash] != "new-rev" {
+		t.Fatalf("expected pod-template-hash=new-rev, got %q", updated.Labels[agentsv1alpha1.PodLabelTemplateHash])
 	}
 }
 
@@ -365,9 +365,9 @@ func TestInPlaceUpdateControl_Update_ResizeViaSubresource(t *testing.T) {
 			}},
 		},
 	}
-	box := &agentsapiv1alpha1.Sandbox{
-		Spec: agentsapiv1alpha1.SandboxSpec{
-			EmbeddedSandboxTemplate: agentsapiv1alpha1.EmbeddedSandboxTemplate{
+	box := &agentsv1alpha1.Sandbox{
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
 				Template: &corev1.PodTemplateSpec{
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{{
@@ -467,9 +467,9 @@ func TestInPlaceUpdateControl_Update_ResizeFallbackToDirectPatch(t *testing.T) {
 			}},
 		},
 	}
-	box := &agentsapiv1alpha1.Sandbox{
-		Spec: agentsapiv1alpha1.SandboxSpec{
-			EmbeddedSandboxTemplate: agentsapiv1alpha1.EmbeddedSandboxTemplate{
+	box := &agentsv1alpha1.Sandbox{
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
 				Template: &corev1.PodTemplateSpec{
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{{
@@ -562,9 +562,9 @@ func TestInPlaceUpdateControl_Update_ResizeNotSupported(t *testing.T) {
 			}},
 		},
 	}
-	box := &agentsapiv1alpha1.Sandbox{
-		Spec: agentsapiv1alpha1.SandboxSpec{
-			EmbeddedSandboxTemplate: agentsapiv1alpha1.EmbeddedSandboxTemplate{
+	box := &agentsv1alpha1.Sandbox{
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
 				Template: &corev1.PodTemplateSpec{
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{{
@@ -637,9 +637,9 @@ func TestInPlaceUpdateControl_Update_ResizeSubresourceServerError(t *testing.T) 
 			}},
 		},
 	}
-	box := &agentsapiv1alpha1.Sandbox{
-		Spec: agentsapiv1alpha1.SandboxSpec{
-			EmbeddedSandboxTemplate: agentsapiv1alpha1.EmbeddedSandboxTemplate{
+	box := &agentsv1alpha1.Sandbox{
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
 				Template: &corev1.PodTemplateSpec{
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{{
@@ -705,9 +705,9 @@ func TestInPlaceUpdateControl_Update_ResizeConflictRetrySucceeds(t *testing.T) {
 			}},
 		},
 	}
-	box := &agentsapiv1alpha1.Sandbox{
-		Spec: agentsapiv1alpha1.SandboxSpec{
-			EmbeddedSandboxTemplate: agentsapiv1alpha1.EmbeddedSandboxTemplate{
+	box := &agentsv1alpha1.Sandbox{
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
 				Template: &corev1.PodTemplateSpec{
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{{
@@ -813,9 +813,9 @@ func TestInPlaceUpdateControl_Update_ResizeConflictRetryNoLongerNeeded(t *testin
 			}},
 		},
 	}
-	box := &agentsapiv1alpha1.Sandbox{
-		Spec: agentsapiv1alpha1.SandboxSpec{
-			EmbeddedSandboxTemplate: agentsapiv1alpha1.EmbeddedSandboxTemplate{
+	box := &agentsv1alpha1.Sandbox{
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
 				Template: &corev1.PodTemplateSpec{
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{{
@@ -926,9 +926,9 @@ func TestDefaultGeneratePatchBodyFunc_PodHasContainerNotInTemplate(t *testing.T)
 	// Ensures the `continue` branch when a pod container is absent from the
 	// template is exercised.
 	body := DefaultGeneratePatchBodyFunc(InPlaceUpdateOptions{
-		Box: &agentsapiv1alpha1.Sandbox{
-			Spec: agentsapiv1alpha1.SandboxSpec{
-				EmbeddedSandboxTemplate: agentsapiv1alpha1.EmbeddedSandboxTemplate{
+		Box: &agentsv1alpha1.Sandbox{
+			Spec: agentsv1alpha1.SandboxSpec{
+				EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
 					Template: &corev1.PodTemplateSpec{
 						Spec: corev1.PodSpec{
 							Containers: []corev1.Container{{Name: "main", Image: "img:1"}},
@@ -942,7 +942,7 @@ func TestDefaultGeneratePatchBodyFunc_PodHasContainerNotInTemplate(t *testing.T)
 				Name:      "p",
 				Namespace: "default",
 				Labels: map[string]string{
-					agentsapiv1alpha1.PodLabelTemplateHash: "rev",
+					agentsv1alpha1.PodLabelTemplateHash: "rev",
 				},
 			},
 			Spec: corev1.PodSpec{
@@ -967,9 +967,9 @@ func TestInPlaceUpdateControl_Update_PatchError(t *testing.T) {
 			Containers: []corev1.Container{{Name: "c", Image: "img:1"}},
 		},
 	}
-	box := &agentsapiv1alpha1.Sandbox{
-		Spec: agentsapiv1alpha1.SandboxSpec{
-			EmbeddedSandboxTemplate: agentsapiv1alpha1.EmbeddedSandboxTemplate{
+	box := &agentsv1alpha1.Sandbox{
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
 				Template: &corev1.PodTemplateSpec{
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{{Name: "c", Image: "img:2"}},
@@ -1008,9 +1008,9 @@ func TestInPlaceUpdateControl_Update_CustomPatchFunc(t *testing.T) {
 			Containers: []corev1.Container{{Name: "c", Image: "img:1"}},
 		},
 	}
-	box := &agentsapiv1alpha1.Sandbox{
-		Spec: agentsapiv1alpha1.SandboxSpec{
-			EmbeddedSandboxTemplate: agentsapiv1alpha1.EmbeddedSandboxTemplate{
+	box := &agentsv1alpha1.Sandbox{
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
 				Template: &corev1.PodTemplateSpec{
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{{Name: "c", Image: "img:1"}},
@@ -1144,7 +1144,7 @@ func TestBuildResourcePatch(t *testing.T) {
 
 func TestDefaultGenerateResizeSubresourceBody_NilTemplateAndNoChange(t *testing.T) {
 	if got := DefaultGenerateResizeSubresourceBody(InPlaceUpdateOptions{
-		Box: &agentsapiv1alpha1.Sandbox{},
+		Box: &agentsv1alpha1.Sandbox{},
 		Pod: &corev1.Pod{},
 	}); got != nil {
 		t.Fatalf("expected nil body when template is nil, got %+v", got)
@@ -1154,9 +1154,9 @@ func TestDefaultGenerateResizeSubresourceBody_NilTemplateAndNoChange(t *testing.
 		Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m")},
 	}
 	body := DefaultGenerateResizeSubresourceBody(InPlaceUpdateOptions{
-		Box: &agentsapiv1alpha1.Sandbox{
-			Spec: agentsapiv1alpha1.SandboxSpec{
-				EmbeddedSandboxTemplate: agentsapiv1alpha1.EmbeddedSandboxTemplate{
+		Box: &agentsv1alpha1.Sandbox{
+			Spec: agentsv1alpha1.SandboxSpec{
+				EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
 					Template: &corev1.PodTemplateSpec{
 						Spec: corev1.PodSpec{
 							Containers: []corev1.Container{
@@ -1184,9 +1184,9 @@ func TestDefaultGenerateResizeSubresourceBody_NilTemplateAndNoChange(t *testing.
 
 func TestDefaultGeneratePatchBodyFunc_NoChange(t *testing.T) {
 	got := DefaultGeneratePatchBodyFunc(InPlaceUpdateOptions{
-		Box: &agentsapiv1alpha1.Sandbox{
-			Spec: agentsapiv1alpha1.SandboxSpec{
-				EmbeddedSandboxTemplate: agentsapiv1alpha1.EmbeddedSandboxTemplate{
+		Box: &agentsv1alpha1.Sandbox{
+			Spec: agentsv1alpha1.SandboxSpec{
+				EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
 					Template: &corev1.PodTemplateSpec{
 						Spec: corev1.PodSpec{
 							Containers: []corev1.Container{{Name: "c", Image: "img:1"}},
@@ -1200,7 +1200,7 @@ func TestDefaultGeneratePatchBodyFunc_NoChange(t *testing.T) {
 				Name:      "p",
 				Namespace: "default",
 				Labels: map[string]string{
-					agentsapiv1alpha1.PodLabelTemplateHash: "r",
+					agentsv1alpha1.PodLabelTemplateHash: "r",
 				},
 			},
 			Spec: corev1.PodSpec{
@@ -1234,9 +1234,9 @@ func TestDefaultGeneratePatchBodyFunc_ImageOnly(t *testing.T) {
 			},
 		},
 	}
-	box := &agentsapiv1alpha1.Sandbox{
-		Spec: agentsapiv1alpha1.SandboxSpec{
-			EmbeddedSandboxTemplate: agentsapiv1alpha1.EmbeddedSandboxTemplate{
+	box := &agentsv1alpha1.Sandbox{
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
 				Template: &corev1.PodTemplateSpec{
 					ObjectMeta: metav1.ObjectMeta{
 						Labels: map[string]string{
@@ -1273,7 +1273,7 @@ func TestDefaultGeneratePatchBodyFunc_ImageOnly(t *testing.T) {
 	if _, exists := labels["already"]; exists {
 		t.Fatalf("labels already in sync should not be patched again")
 	}
-	if labels[agentsapiv1alpha1.PodLabelTemplateHash] != "rev-img" {
+	if labels[agentsv1alpha1.PodLabelTemplateHash] != "rev-img" {
 		t.Fatalf("expected template hash label, got %v", labels)
 	}
 
@@ -1534,9 +1534,9 @@ func TestIsInplaceUpdateCompleted(t *testing.T) {
 
 func TestResourceOnlyUpdatePayloads(t *testing.T) {
 	opts := InPlaceUpdateOptions{
-		Box: &agentsapiv1alpha1.Sandbox{
-			Spec: agentsapiv1alpha1.SandboxSpec{
-				EmbeddedSandboxTemplate: agentsapiv1alpha1.EmbeddedSandboxTemplate{
+		Box: &agentsv1alpha1.Sandbox{
+			Spec: agentsv1alpha1.SandboxSpec{
+				EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
 					Template: &corev1.PodTemplateSpec{
 						Spec: corev1.PodSpec{
 							Containers: []corev1.Container{
@@ -1868,13 +1868,13 @@ func Test_checkPodResizeInfeasible(t *testing.T) {
 
 func TestDefaultGeneratePatchBodyFunc_ExtensionAnnotations(t *testing.T) {
 	opts := InPlaceUpdateOptions{
-		Box: &agentsapiv1alpha1.Sandbox{
+		Box: &agentsv1alpha1.Sandbox{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "test-sandbox",
 				Namespace: "default",
 			},
-			Spec: agentsapiv1alpha1.SandboxSpec{
-				EmbeddedSandboxTemplate: agentsapiv1alpha1.EmbeddedSandboxTemplate{
+			Spec: agentsv1alpha1.SandboxSpec{
+				EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
 					Template: &corev1.PodTemplateSpec{
 						Spec: corev1.PodSpec{
 							Containers: []corev1.Container{
@@ -1964,7 +1964,7 @@ func TestDefaultGeneratePatchBodyFunc_ExtensionAnnotations(t *testing.T) {
 func TestCheckResizeQoSChange(t *testing.T) {
 	tests := []struct {
 		name        string
-		box         *agentsapiv1alpha1.Sandbox
+		box         *agentsv1alpha1.Sandbox
 		pod         *corev1.Pod
 		wantOrig    corev1.PodQOSClass
 		wantUpdated corev1.PodQOSClass
@@ -1972,9 +1972,9 @@ func TestCheckResizeQoSChange(t *testing.T) {
 	}{
 		{
 			name: "no QoS change - Burstable stays Burstable",
-			box: &agentsapiv1alpha1.Sandbox{
-				Spec: agentsapiv1alpha1.SandboxSpec{
-					EmbeddedSandboxTemplate: agentsapiv1alpha1.EmbeddedSandboxTemplate{
+			box: &agentsv1alpha1.Sandbox{
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
 						Template: &corev1.PodTemplateSpec{
 							Spec: corev1.PodSpec{
 								Containers: []corev1.Container{{
@@ -2018,9 +2018,9 @@ func TestCheckResizeQoSChange(t *testing.T) {
 		},
 		{
 			name: "QoS changes from Burstable to Guaranteed",
-			box: &agentsapiv1alpha1.Sandbox{
-				Spec: agentsapiv1alpha1.SandboxSpec{
-					EmbeddedSandboxTemplate: agentsapiv1alpha1.EmbeddedSandboxTemplate{
+			box: &agentsv1alpha1.Sandbox{
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
 						Template: &corev1.PodTemplateSpec{
 							Spec: corev1.PodSpec{
 								Containers: []corev1.Container{{
@@ -2064,8 +2064,8 @@ func TestCheckResizeQoSChange(t *testing.T) {
 		},
 		{
 			name: "nil template - no change",
-			box: &agentsapiv1alpha1.Sandbox{
-				Spec: agentsapiv1alpha1.SandboxSpec{},
+			box: &agentsv1alpha1.Sandbox{
+				Spec: agentsv1alpha1.SandboxSpec{},
 			},
 			pod: &corev1.Pod{
 				Spec: corev1.PodSpec{

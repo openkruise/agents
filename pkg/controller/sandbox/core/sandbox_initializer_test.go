@@ -17,7 +17,6 @@ limitations under the License.
 package core
 
 import (
-	"context"
 	"encoding/json"
 	"testing"
 
@@ -25,56 +24,68 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
-	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	utilruntime "github.com/openkruise/agents/pkg/utils/runtime"
 	sandboxManagerUtils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	testutils "github.com/openkruise/agents/test/utils"
 )
 
+var scheme *runtime.Scheme
+
+func init() {
+	scheme = runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+}
+
 func TestInitialize(t *testing.T) {
 	sandboxManagerUtils.InitLogOutput()
-
+	newFakeClient := func(initObj ...client.Object) client.Client {
+		return fake.NewClientBuilder().WithScheme(scheme).WithObjects(initObj...).Build()
+	}
 	tests := []struct {
 		name            string
 		box             *agentsv1alpha1.Sandbox
 		newStatus       *agentsv1alpha1.SandboxStatus
-		sandboxClient   *clients.ClientSet
-		cache           *sandboxcr.Cache
+		setupClients    func() (client.Client, client.Reader)
 		storageRegistry storages.VolumeMountProviderRegistry
 		expectError     string
 		useRuntimeSvr   bool
 		serverOpts      testutils.TestRuntimeServerOptions
-		setupPV         func(t *testing.T, clientSet *clients.ClientSet)
 	}{
 		{
-			name: "nil sandboxClient returns nil",
+			name: "nil client returns nil",
 			box: &agentsv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-sandbox",
 					Namespace: "default",
 				},
 			},
-			newStatus:     &agentsv1alpha1.SandboxStatus{},
-			sandboxClient: nil,
-			cache:         nil,
+			newStatus: &agentsv1alpha1.SandboxStatus{},
+			setupClients: func() (c client.Client, reader client.Reader) {
+				return nil, fake.NewFakeClient()
+			},
 		},
 		{
-			name: "nil cache returns nil",
+			name: "nil apiReader returns nil",
 			box: &agentsv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-sandbox",
 					Namespace: "default",
 				},
 			},
-			newStatus:     &agentsv1alpha1.SandboxStatus{},
-			sandboxClient: clients.NewFakeClientSet(t),
-			cache:         nil,
+			newStatus: &agentsv1alpha1.SandboxStatus{},
+			setupClients: func() (c client.Client, reader client.Reader) {
+				return fake.NewFakeClient(), nil
+			},
 		},
 		{
 			name: "sandbox not claimed by SandboxClaim - skip initialization",
@@ -265,8 +276,8 @@ func TestInitialize(t *testing.T) {
 				reg.RegisterProvider("test-csi-driver", &storages.MountProvider{})
 				return reg
 			}(),
-			setupPV: func(t *testing.T, clientSet *clients.ClientSet) {
-				pv := &corev1.PersistentVolume{
+			setupClients: func() (client.Client, client.Reader) {
+				c := newFakeClient(&corev1.PersistentVolume{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "test-pv-ok",
 					},
@@ -278,9 +289,8 @@ func TestInitialize(t *testing.T) {
 							},
 						},
 					},
-				}
-				_, err := clientSet.CoreV1().PersistentVolumes().Create(context.Background(), pv, metav1.CreateOptions{})
-				require.NoError(t, err)
+				})
+				return c, c
 			},
 		},
 		{
@@ -315,8 +325,8 @@ func TestInitialize(t *testing.T) {
 				reg.RegisterProvider("test-csi-driver-fail", &storages.MountProvider{})
 				return reg
 			}(),
-			setupPV: func(t *testing.T, clientSet *clients.ClientSet) {
-				pv := &corev1.PersistentVolume{
+			setupClients: func() (client.Client, client.Reader) {
+				c := newFakeClient(&corev1.PersistentVolume{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "test-pv-fail",
 					},
@@ -328,9 +338,8 @@ func TestInitialize(t *testing.T) {
 							},
 						},
 					},
-				}
-				_, err := clientSet.CoreV1().PersistentVolumes().Create(context.Background(), pv, metav1.CreateOptions{})
-				require.NoError(t, err)
+				})
+				return c, c
 			},
 			expectError: "failed to perform ReCSIMount after resume",
 		},
@@ -366,7 +375,8 @@ func TestInitialize(t *testing.T) {
 				reg.RegisterProvider("test-multi-driver", &storages.MountProvider{})
 				return reg
 			}(),
-			setupPV: func(t *testing.T, clientSet *clients.ClientSet) {
+			setupClients: func() (client.Client, client.Reader) {
+				var pvs []client.Object
 				for _, pvName := range []string{"test-pv-multi-1", "test-pv-multi-2"} {
 					pv := &corev1.PersistentVolume{
 						ObjectMeta: metav1.ObjectMeta{
@@ -381,9 +391,10 @@ func TestInitialize(t *testing.T) {
 							},
 						},
 					}
-					_, err := clientSet.CoreV1().PersistentVolumes().Create(context.Background(), pv, metav1.CreateOptions{})
-					require.NoError(t, err)
+					pvs = append(pvs, pv)
 				}
+				c := newFakeClient(pvs...)
+				return c, c
 			},
 			expectError: "failed to perform ReCSIMount after resume",
 		},
@@ -391,24 +402,14 @@ func TestInitialize(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var cache *sandboxcr.Cache
-			var clientSet *clients.ClientSet
-
-			if tt.sandboxClient != nil || tt.cache != nil {
-				// Use provided nil values directly for nil-guard tests
-				cache = tt.cache
-				clientSet = &clients.ClientSet{}
-				if tt.sandboxClient != nil {
-					clientSet = tt.sandboxClient
-				}
-			} else if tt.storageRegistry != nil {
-				// Create real cache + client for functional tests
-				var err error
-				cache, clientSet, err = sandboxcr.NewTestCache(t)
-				require.NoError(t, err)
-				defer cache.Stop(t.Context())
+			var c client.Client
+			var r client.Reader
+			if tt.setupClients != nil {
+				c, r = tt.setupClients()
+			} else {
+				f := newFakeClient()
+				c, r = f, f
 			}
-
 			if tt.useRuntimeSvr {
 				server := testutils.NewTestRuntimeServer(tt.serverOpts)
 				defer server.Close()
@@ -420,11 +421,7 @@ func TestInitialize(t *testing.T) {
 				tt.box.Annotations[agentsv1alpha1.AnnotationRuntimeAccessToken] = utilruntime.AccessToken
 			}
 
-			if tt.setupPV != nil {
-				tt.setupPV(t, clientSet)
-			}
-
-			err := Initialize(t.Context(), tt.box, tt.newStatus, clientSet, cache, tt.storageRegistry)
+			err := Initialize(t.Context(), tt.box, tt.newStatus, c, r, tt.storageRegistry)
 
 			if tt.expectError != "" {
 				require.Error(t, err)
@@ -439,13 +436,11 @@ func TestInitialize(t *testing.T) {
 func TestDefaultSandboxInitializer(t *testing.T) {
 	sandboxManagerUtils.InitLogOutput()
 
-	cache, clientSet, err := sandboxcr.NewTestCache(t)
-	require.NoError(t, err)
-	defer cache.Stop(t.Context())
+	fc := fake.NewClientBuilder().WithScheme(scheme).Build()
 
 	initializer := &defaultSandboxInitializer{
-		sandboxClient:   clientSet,
-		cache:           cache,
+		client:          fc,
+		apiReader:       fc,
 		storageRegistry: storages.NewStorageProvider(),
 	}
 
@@ -459,6 +454,6 @@ func TestDefaultSandboxInitializer(t *testing.T) {
 	}
 	newStatus := &agentsv1alpha1.SandboxStatus{}
 
-	err = initializer.Initialize(t.Context(), box, newStatus)
+	err := initializer.Initialize(t.Context(), box, newStatus)
 	assert.NoError(t, err)
 }

@@ -40,9 +40,6 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# C extensions
-*.so
-
 # Distribution / packaging
 .Python
 build/
@@ -159,7 +156,6 @@ celerybeat.pid
 *.sage.py
 
 # Environments
-.env
 .venv
 env/
 venv/
@@ -197,7 +193,7 @@ cython_debug/
 # We recommend using Qoder as the AI coding tool, and we have placed the recommended subagents, skills, and rules in the .qoder directory.
 # To avoid duplication, we have ignored the directories of other AI tools.
 # If you use coding assistants such as Cursor or Claude Code, you can use symbolic links to link them to the .qoder directory.
-# For example: `ln -s .qoder/skills .cursor/skills`
+# For example: `ln -sfn ../.qoder/skills .agents/skills`
 .cursor/
 .claude/
 .windsurf/
@@ -212,6 +208,8 @@ cython_debug/
 .gitbutler/
 .pearai/
 .trae/
+.agents/
+REVIEW.md
 
 .gomodcache/
 .modcache/
