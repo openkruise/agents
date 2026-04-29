@@ -19,45 +19,72 @@ limitations under the License.
 package sandboxset
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"hash"
 	"hash/fnv"
 	"strconv"
 
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	apps "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/dump"
 	"k8s.io/apimachinery/pkg/util/rand"
-
-	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// getPatch returns a strategic merge patch that can be applied to restore a StatefulSet to a
-// previous version. If the returned error is nil the patch is valid. The current state that we save is just the
-// PodSpecTemplate. We can modify this later to encompass more state (or less) and remain compatible with previously
-// recorded patches.
-func (r *Reconciler) getPatch(set *agentsv1alpha1.SandboxSet) ([]byte, error) {
-	str, err := runtime.Encode(r.Codec, set)
-	if err != nil {
-		return nil, err
-	}
-	var raw map[string]interface{}
-	err = json.Unmarshal(str, &raw)
-	if err != nil {
-		return nil, err
-	}
-	objCopy := make(map[string]interface{})
+// getPatch serialises the subset of the SandboxSet spec that determines the
+// template revision hash. Both spec.template (inline) and spec.templateRef are
+// normalised to the same `spec.template` key so that they yield identical
+// hashes whenever they describe the same pod template. This also guarantees
+// that switching between inline template and templateRef (or between two
+// templateRefs) only triggers a rolling update when the underlying pod
+// template actually differs.
+func (r *Reconciler) getPatch(ctx context.Context, set *agentsv1alpha1.SandboxSet) ([]byte, error) {
 	specCopy := make(map[string]interface{})
-	spec := raw["spec"].(map[string]interface{})
-	template := spec["template"].(map[string]interface{})
-	specCopy["template"] = template
-	template["$patch"] = "replace"
-	objCopy["spec"] = specCopy
-	patch, err := json.Marshal(objCopy)
-	return patch, err
+	// spec.template and spec.templateRef are mutually exclusive; prefer
+	// templateRef when set and fall back to the inline template otherwise.
+	if set.Spec.TemplateRef != nil {
+		tpl := &agentsv1alpha1.SandboxTemplate{}
+		if err := r.Get(ctx, client.ObjectKey{
+			Namespace: set.Namespace,
+			Name:      set.Spec.TemplateRef.Name,
+		}, tpl); err != nil {
+			return nil, fmt.Errorf("failed to resolve sandbox template %s/%s: %w",
+				set.Namespace, set.Spec.TemplateRef.Name, err)
+		}
+		if tpl.Spec.Template != nil {
+			templateRaw, err := json.Marshal(tpl.Spec.Template)
+			if err != nil {
+				return nil, err
+			}
+			var templateMap map[string]interface{}
+			if err := json.Unmarshal(templateRaw, &templateMap); err != nil {
+				return nil, err
+			}
+			templateMap["$patch"] = "replace"
+			specCopy["template"] = templateMap
+		}
+	} else if set.Spec.Template != nil {
+		str, err := runtime.Encode(r.Codec, set)
+		if err != nil {
+			return nil, err
+		}
+		var raw map[string]interface{}
+		if err = json.Unmarshal(str, &raw); err != nil {
+			return nil, err
+		}
+		if spec, ok := raw["spec"].(map[string]interface{}); ok {
+			if template, ok := spec["template"].(map[string]interface{}); ok {
+				template["$patch"] = "replace"
+				specCopy["template"] = template
+			}
+		}
+	}
+	return json.Marshal(map[string]interface{}{"spec": specCopy})
 }
 
 // NewControllerRevision returns a ControllerRevision with a ControllerRef pointing to parent and indicating that

@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -313,7 +314,7 @@ func TestReconcile_DeleteDead(t *testing.T) {
 				Codec:    codec,
 			}
 			assert.NoError(t, k8sClient.Create(ctx, sbs))
-			newStatus, err := reconciler.initNewStatus(sbs)
+			newStatus, err := reconciler.initNewStatus(ctx, sbs)
 
 			assert.NoError(t, err)
 			sbs.Status = *newStatus
@@ -575,7 +576,7 @@ func TestReconcile_BasicScale(t *testing.T) {
 				Recorder: eventRecorder,
 				Codec:    codec,
 			}
-			newStatus, err := reconciler.initNewStatus(sbs)
+			newStatus, err := reconciler.initNewStatus(ctx, sbs)
 
 			assert.NoError(t, err)
 			sbs.Status = *newStatus
@@ -786,7 +787,7 @@ func TestSandboxSetReconcile_WithVolumeClaimTemplates(t *testing.T) {
 			}
 
 			assert.NoError(t, k8sClient.Create(ctx, sbs))
-			newStatus, err := reconciler.initNewStatus(sbs)
+			newStatus, err := reconciler.initNewStatus(ctx, sbs)
 			assert.NoError(t, err)
 			sbs.Status = *newStatus
 
@@ -1041,6 +1042,131 @@ func TestCalculateScaleDelta(t *testing.T) {
 				// Scale down case: MaxUnavailable should not affect scale down
 				assert.Equal(t, int(tt.replicas-tt.statusReplicas), delta,
 					"scale down should return the full negative delta")
+			}
+		})
+	}
+}
+
+// TestReconciler_createSandbox covers the SandboxTemplate resolution branch
+// introduced in createSandbox: when spec.templateRef is set, the controller
+// must Get the referenced SandboxTemplate, propagate its labels/annotations
+// to the new Sandbox, or surface the Get error as a Warning event when the
+// template is missing.
+func TestReconciler_createSandbox(t *testing.T) {
+	utils.InitLogOutput()
+
+	mkSBS := func(name string, ref *v1alpha1.SandboxTemplateRef, inline *corev1.PodTemplateSpec) *v1alpha1.SandboxSet {
+		return &v1alpha1.SandboxSet{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: "default",
+				UID:       types.UID("uid-" + name),
+			},
+			Spec: v1alpha1.SandboxSetSpec{
+				Replicas: 1,
+				EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+					TemplateRef: ref,
+					Template:    inline,
+				},
+			},
+		}
+	}
+
+	tests := []struct {
+		name             string
+		sbs              *v1alpha1.SandboxSet
+		existingTemplate *v1alpha1.SandboxTemplate
+		wantErr          string
+		wantWarning      bool
+		checkSandbox     func(t *testing.T, sbx *v1alpha1.Sandbox)
+	}{
+		{
+			name: "inline template creates sandbox successfully",
+			sbs: mkSBS("inline-sbs", nil, &corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "inline"}},
+				Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "img:v1"}}},
+			}),
+			checkSandbox: func(t *testing.T, sbx *v1alpha1.Sandbox) {
+				assert.Equal(t, "inline", sbx.Labels["app"])
+				assert.Equal(t, "inline-sbs", sbx.Labels[v1alpha1.LabelSandboxTemplate])
+			},
+		},
+		{
+			name: "templateRef resolved successfully and labels inherited",
+			sbs:  mkSBS("ref-sbs", &v1alpha1.SandboxTemplateRef{Name: "tpl-ok"}, nil),
+			existingTemplate: &v1alpha1.SandboxTemplate{
+				ObjectMeta: metav1.ObjectMeta{Name: "tpl-ok", Namespace: "default"},
+				Spec: v1alpha1.SandboxTemplateSpec{
+					Template: &corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{
+							Labels:      map[string]string{"app": "from-tpl"},
+							Annotations: map[string]string{"source": "tpl"},
+						},
+						Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "img:v1"}}},
+					},
+				},
+			},
+			checkSandbox: func(t *testing.T, sbx *v1alpha1.Sandbox) {
+				assert.Equal(t, "from-tpl", sbx.Labels["app"])
+				assert.Equal(t, "tpl", sbx.Annotations["source"])
+				assert.Equal(t, "tpl-ok", sbx.Labels[v1alpha1.LabelSandboxTemplate])
+			},
+		},
+		{
+			name:        "templateRef not found returns error and emits warning",
+			sbs:         mkSBS("missing-sbs", &v1alpha1.SandboxTemplateRef{Name: "does-not-exist"}, nil),
+			wantErr:     "failed to resolve sandbox template",
+			wantWarning: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			k8sClient := NewClient()
+			if tt.existingTemplate != nil {
+				assert.NoError(t, k8sClient.Create(ctx, tt.existingTemplate))
+			}
+			eventRecorder := record.NewFakeRecorder(10)
+			reconciler := &Reconciler{
+				Client:   k8sClient,
+				Scheme:   testScheme,
+				Recorder: eventRecorder,
+				Codec:    codec,
+			}
+
+			sbx, err := reconciler.createSandbox(ctx, tt.sbs, "rev-1")
+
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				assert.Nil(t, sbx)
+			} else {
+				require.NoError(t, err)
+				require.NotNil(t, sbx)
+				assert.Equal(t, "rev-1", sbx.Labels[v1alpha1.LabelTemplateHash])
+				assert.Equal(t, tt.sbs.Namespace, sbx.Namespace)
+				// Controller owner ref should be set.
+				var foundOwner bool
+				for _, ref := range sbx.OwnerReferences {
+					if ref.UID == tt.sbs.UID && ref.Controller != nil && *ref.Controller {
+						foundOwner = true
+					}
+				}
+				assert.True(t, foundOwner, "sandbox must have SandboxSet as controller owner")
+				if tt.checkSandbox != nil {
+					tt.checkSandbox(t, sbx)
+				}
+			}
+
+			if tt.wantWarning {
+				select {
+				case evt := <-eventRecorder.Events:
+					assert.Contains(t, evt, "Warning")
+					assert.Contains(t, evt, EventCreateSandboxFailed)
+				default:
+					t.Errorf("expected a warning event but got none")
+				}
 			}
 		})
 	}

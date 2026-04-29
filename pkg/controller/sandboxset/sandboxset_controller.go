@@ -118,7 +118,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	recordSandboxSetMetrics(sbs)
 
 	// Preparation
-	newStatus, err := r.initNewStatus(sbs)
+	newStatus, err := r.initNewStatus(ctx, sbs)
 	if err != nil {
 		log.Error(err, "failed to init new status")
 		return ctrl.Result{}, err
@@ -327,7 +327,19 @@ func calculateScaleDelta(sbs *agentsv1alpha1.SandboxSet, newStatus *agentsv1alph
 }
 
 func (r *Reconciler) createSandbox(ctx context.Context, sbs *agentsv1alpha1.SandboxSet, revision string) (*agentsv1alpha1.Sandbox, error) {
-	sbx := NewSandboxFromSandboxSet(sbs)
+	var refTemplate *agentsv1alpha1.SandboxTemplate
+	if sbs.Spec.TemplateRef != nil {
+		refTemplate = &agentsv1alpha1.SandboxTemplate{}
+		if err := r.Get(ctx, client.ObjectKey{
+			Namespace: sbs.Namespace,
+			Name:      sbs.Spec.TemplateRef.Name,
+		}, refTemplate); err != nil {
+			r.Recorder.Eventf(sbs, corev1.EventTypeWarning, EventCreateSandboxFailed, "Failed to resolve sandbox template: %s", err)
+			return nil, fmt.Errorf("failed to resolve sandbox template %s/%s: %w",
+				sbs.Namespace, sbs.Spec.TemplateRef.Name, err)
+		}
+	}
+	sbx := NewSandboxFromSandboxSet(sbs, refTemplate)
 	sbx.Labels[agentsv1alpha1.LabelTemplateHash] = revision
 	if err := ctrl.SetControllerReference(sbs, sbx, r.Scheme); err != nil {
 		return nil, err
