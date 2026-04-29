@@ -50,4 +50,8 @@ type Peers interface {
 
 	// LocalPort returns the local node's port
 	LocalPort() int
+
+	// ReconcilePeers joins any peers not already known to the memberlist.
+	// It is safe to call periodically to heal split-brain scenarios.
+	ReconcilePeers(ctx context.Context, peers []string) error
 }

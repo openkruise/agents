@@ -42,6 +42,8 @@ const (
 	DefaultSuspicionMult = 4
 	// DefaultRetransmitMult is the multiplier for the number of retransmissions
 	DefaultRetransmitMult = 4
+	// DefaultReconcileInterval is the interval between peer reconciliation checks
+	DefaultReconcileInterval = 60 * time.Second
 )
 
 type MemberlistPeers struct {
@@ -223,6 +225,43 @@ func (m *MemberlistPeers) LocalPort() int {
 		return 0
 	}
 	return int(m.list.LocalNode().Port)
+}
+
+// ReconcilePeers joins any peers not already known to the memberlist.
+// It compares the provided peer addresses with current members and only
+// attempts to join truly unknown nodes, preventing split-brain scenarios.
+func (m *MemberlistPeers) ReconcilePeers(ctx context.Context, peers []string) error {
+	if !m.started.Load() || m.list == nil {
+		return fmt.Errorf("memberlist not started")
+	}
+
+	log := klog.FromContext(ctx)
+
+	knownAddrs := make(map[string]struct{})
+	for _, member := range m.list.Members() {
+		addr := fmt.Sprintf("%s:%d", member.Addr.String(), member.Port)
+		knownAddrs[addr] = struct{}{}
+	}
+
+	var unknownPeers []string
+	for _, p := range peers {
+		if _, known := knownAddrs[p]; !known {
+			unknownPeers = append(unknownPeers, p)
+		}
+	}
+
+	if len(unknownPeers) == 0 {
+		return nil
+	}
+
+	log.Info("reconciling unknown peers", "count", len(unknownPeers), "peers", unknownPeers)
+	joined, err := m.list.Join(unknownPeers)
+	if err != nil {
+		log.Error(err, "failed to join some peers during reconciliation", "joined", joined)
+		return err
+	}
+	log.Info("successfully reconciled peers", "joined", joined)
+	return nil
 }
 
 // eventDelegate handles memberlist membership change events

@@ -278,6 +278,8 @@ func (i *Infra) GetClaimedSandbox(ctx context.Context, sandboxID string) (infra.
 		if err != nil {
 			return nil, err
 		}
+		// Update local route when fetched from APIServer
+		i.Proxy.SetRoute(ctx, proxyutils.DefaultGetRouteFunc(sandbox))
 	}
 	return AsSandbox(sandbox, i.Cache, i.Client), nil
 }
@@ -313,7 +315,7 @@ func (i *Infra) onSandboxUpdate(_, newObj any) {
 }
 
 func (i *Infra) refreshRoute(sbx *v1alpha1.Sandbox) {
-	oldRoute, exists := i.Proxy.LoadRoute(sbx.GetName())
+	oldRoute, exists := i.Proxy.LoadRoute(stateutils.GetSandboxID(sbx))
 	newRoute := proxyutils.DefaultGetRouteFunc(sbx)
 	if !exists || newRoute.State != oldRoute.State || newRoute.IP != oldRoute.IP {
 		i.Proxy.SetRoute(logs.NewContext(), newRoute)

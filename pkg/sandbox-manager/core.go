@@ -102,6 +102,8 @@ func (m *SandboxManager) Run(ctx context.Context, sysNs, peerSelector string) er
 	}
 	log.Info("memberlist started successfully")
 
+	go peers.RunPeerReconciliation(ctx, m.client, m.peersManager, sysNs, peerSelector, podIP, m.memberlistBindPort)
+
 	if err := m.infra.Run(ctx); err != nil {
 		return err
 	}
