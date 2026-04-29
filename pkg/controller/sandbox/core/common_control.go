@@ -356,14 +356,6 @@ func (r *commonControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureFu
 		upgradeCond.Message = ""
 		upgradeCond.LastTransitionTime = metav1.Now()
 		utils.SetSandboxCondition(newStatus, *upgradeCond)
-
-		// Perform post-upgrade initialization (re-init runtime, re-mount CSI) for claimed sandboxes.
-		// After a recreate upgrade, the pod is brand new, so runtime and dynamic CSI mounts need
-		// to be re-initialized before marking the sandbox as Ready.
-		if err := r.initializer.Initialize(ctx, box, newStatus); err != nil {
-			return err
-		}
-
 		newStatus.Phase = agentsv1alpha1.SandboxRunning
 		utils.SetSandboxCondition(newStatus, metav1.Condition{
 			Type:               string(agentsv1alpha1.SandboxConditionReady),
@@ -516,6 +508,13 @@ func (r *commonControl) performRecreateUpgrade(ctx context.Context, args EnsureF
 		}
 		return false, nil
 	}
+
+	// Step 4: Perform post-recreate-upgrade initialization (re-init runtime, re-mount CSI).
+	if err := r.initializer.Initialize(ctx, box, newStatus); err != nil {
+		klog.ErrorS(err, "Failed to perform re-init, re-mount initialization", "sandbox", klog.KObj(box))
+		return false, err
+	}
+
 	return true, nil
 }
 

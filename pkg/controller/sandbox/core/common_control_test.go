@@ -15,6 +15,7 @@ package core
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
@@ -2040,4 +2041,133 @@ func TestCommonControl_performRecreateUpgrade_PodReadyFalse(t *testing.T) {
 	if done {
 		t.Error("Expected done=false for pod with Ready=False")
 	}
+}
+
+// mockSandboxInitializer is a test double for SandboxInitializer.
+type mockSandboxInitializer struct {
+	err error
+}
+
+func (m *mockSandboxInitializer) Initialize(_ context.Context, _ *agentsv1alpha1.Sandbox, _ *agentsv1alpha1.SandboxStatus) error {
+	return m.err
+}
+
+func TestCommonControl_performRecreateUpgrade_InitializerPath(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	// readyPod returns a pod that matches the target revision and has PodReady=True.
+	readyPod := func() *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-sandbox",
+				Namespace: "default",
+				Labels: map[string]string{
+					agentsv1alpha1.PodLabelTemplateHash: "new-rev",
+				},
+			},
+			Status: corev1.PodStatus{
+				Phase:    corev1.PodRunning,
+				PodIP:    "10.0.0.1",
+				Conditions: []corev1.PodCondition{
+					{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+				},
+			},
+			Spec: corev1.PodSpec{
+				NodeName: "node-1",
+			},
+		}
+	}
+
+	baseSandbox := func() *agentsv1alpha1.Sandbox {
+		return &agentsv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-sandbox",
+				Namespace: "default",
+			},
+			Spec: agentsv1alpha1.SandboxSpec{
+				EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+					Template: &corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: "test", Image: "nginx"}},
+						},
+					},
+				},
+			},
+		}
+	}
+
+	tests := []struct {
+		name           string
+		initErr        error
+		expectError    string
+		expectDone     bool
+	}{
+		{
+			name:        "initializer succeeds, upgrade completes",
+			initErr:     nil,
+			expectError: "",
+			expectDone:  true,
+		},
+		{
+			name:        "initializer fails, returns error",
+			initErr:     fmt.Errorf("failed to perform ReCSIMount after resume"),
+			expectError: "failed to perform ReCSIMount after resume",
+			expectDone:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+			control := &commonControl{
+				Client:               fakeClient,
+				recorder:             record.NewFakeRecorder(10),
+				inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
+				initializer:          &mockSandboxInitializer{err: tt.initErr},
+			}
+
+			newStatus := &agentsv1alpha1.SandboxStatus{
+				UpdateRevision: "new-rev",
+			}
+
+			done, err := control.performRecreateUpgrade(context.TODO(), EnsureFuncArgs{
+				Pod:       readyPod(),
+				Box:       baseSandbox(),
+				NewStatus: newStatus,
+			})
+
+			if tt.expectError == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+			} else {
+				if err == nil {
+					t.Fatalf("expected error containing %q, got nil", tt.expectError)
+				}
+				if !contains(err.Error(), tt.expectError) {
+					t.Fatalf("expected error containing %q, got %q", tt.expectError, err.Error())
+				}
+			}
+
+			if done != tt.expectDone {
+				t.Errorf("expected done=%v, got done=%v", tt.expectDone, done)
+			}
+		})
+	}
+}
+
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(substr) == 0 ||
+		(len(s) > 0 && len(substr) > 0 && stringContains(s, substr)))
+}
+
+func stringContains(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
 }
