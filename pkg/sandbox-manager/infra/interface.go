@@ -48,6 +48,13 @@ type Builder interface {
 	Build() Infrastructure
 }
 
+// SandboxEventHandler defines the interface for handling sandbox lifecycle events
+type SandboxEventHandler interface {
+	OnSandboxAdd(sessionID, sandboxID, userID, accessToken, state string)
+	OnSandboxDelete(sessionID string)
+	OnSandboxUpdate(sessionID, sandboxID, userID, accessToken, state string)
+}
+
 type Infrastructure interface {
 	Run(ctx context.Context) error // Starts the infrastructure
 	Stop(ctx context.Context)      // Stops the infrastructure
@@ -61,6 +68,7 @@ type Infrastructure interface {
 	ClaimSandbox(ctx context.Context, opts ClaimSandboxOptions) (Sandbox, ClaimMetrics, error)
 	CloneSandbox(ctx context.Context, opts CloneSandboxOptions) (Sandbox, CloneMetrics, error)
 	DeleteCheckpoint(ctx context.Context, user string, checkpointID string) error
+	SetSandboxEventHandler(handler SandboxEventHandler)
 }
 
 type Sandbox interface {
@@ -80,10 +88,10 @@ type Sandbox interface {
 	SaveTimeout(ctx context.Context, opts TimeoutOptions) error
 	GetTimeout() TimeoutOptions
 	GetClaimTime() (time.Time, error)
-	Kill(ctx context.Context) error                                                                     // Delete the Sandbox resource
-	InplaceRefresh(ctx context.Context, deepcopy bool) error                                            // Update the Sandbox resource object to the latest
-	Request(ctx context.Context, method, path string, port int, body io.Reader) (*http.Response, error) // Make a request to the Sandbox
-	CSIMount(ctx context.Context, driver string, request string) error                                  // request is string config for csi.NodePublishVolumeRequest
+	Kill(ctx context.Context) error                                                                                          // Delete the Sandbox resource
+	InplaceRefresh(ctx context.Context, deepcopy bool) error                                                                 // Update the Sandbox resource object to the latest
+	Request(ctx context.Context, method, path string, port int, body io.Reader, headers http.Header) (*http.Response, error) // Make a request to the Sandbox
+	CSIMount(ctx context.Context, driver string, request string) error                                                       // request is string config for csi.NodePublishVolumeRequest
 	CreateCheckpoint(ctx context.Context, opts CreateCheckpointOptions) (string, error)
 }
 
