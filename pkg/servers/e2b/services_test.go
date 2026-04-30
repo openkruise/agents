@@ -1463,7 +1463,7 @@ func TestBrowserUseCDPPort(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			proxyutils.DefaultRequestFunc = func(ctx context.Context, sbx *v1alpha1.Sandbox, method, path string, port int, body io.Reader) (*http.Response, error) {
+			proxyutils.DefaultRequestFunc = func(ctx context.Context, sbx *v1alpha1.Sandbox, method, path string, port int, body io.Reader, headers http.Header) (*http.Response, error) {
 				assert.Equal(t, "/json/version", path)
 				assert.Equal(t, tt.expectedPort, port)
 				return &http.Response{
