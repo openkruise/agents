@@ -707,7 +707,7 @@ func TestSandboxManager_ResumeSandbox(t *testing.T) {
 				})
 			}
 
-			err = manager.ResumeSandbox(t.Context(), sbx)
+			err = manager.ResumeSandbox(t.Context(), sbx, infra.ResumeOptions{})
 
 			if tt.expectError {
 				assert.Error(t, err)

@@ -35,7 +35,6 @@ import (
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
-	"github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/utils"
 	csimountutils "github.com/openkruise/agents/pkg/utils/csiutils"
@@ -145,6 +144,15 @@ func (s *Sandbox) GetRoute() proxy.Route {
 	return proxyutils.DefaultGetRouteFunc(s.Sandbox)
 }
 
+// setTimeout overwrites Spec.PauseTime / Spec.ShutdownTime from opts.
+//
+// Contract (relied upon by callers such as buildResumeTimeoutOptions and
+// SaveTimeout): a zero time.Time in opts is treated as "clear this field" and
+// will set the corresponding Spec.*Time pointer back to nil. This is the
+// intended way for upper layers to express "this sandbox should be
+// never-timeout"; do not change this to skip-on-zero, otherwise callers that
+// pass infra.TimeoutOptions{} expecting the underlying fields to be cleared
+// will silently retain stale values.
 func setTimeout(s *agentsv1alpha1.Sandbox, opts infra.TimeoutOptions) {
 	if !opts.PauseTime.IsZero() {
 		s.Spec.PauseTime = ptr.To(metav1.NewTime(opts.PauseTime))
@@ -189,6 +197,11 @@ func (s *Sandbox) GetImage() string {
 	return ""
 }
 
+// SaveTimeout persists opts to Spec.PauseTime / Spec.ShutdownTime via the
+// API server. Per setTimeout's contract, a zero time.Time in opts clears the
+// corresponding spec field; callers that want to mark a sandbox as
+// never-timeout should pass infra.TimeoutOptions{} (or a struct with both
+// times zero).
 func (s *Sandbox) SaveTimeout(ctx context.Context, opts infra.TimeoutOptions) error {
 	return s.retryUpdate(ctx, func(sbx *agentsv1alpha1.Sandbox) {
 		setTimeout(sbx, opts)
@@ -253,40 +266,93 @@ func (s *Sandbox) Pause(ctx context.Context, opts infra.PauseOptions) error {
 	return s.InplaceRefresh(ctx, false)
 }
 
+func bumpResumeTimeoutProtection(sbx *agentsv1alpha1.Sandbox, protectUntil time.Time) {
+	if sbx.Spec.PauseTime != nil && sbx.Spec.PauseTime.Time.Before(protectUntil) {
+		sbx.Spec.PauseTime = ptr.To(metav1.NewTime(protectUntil))
+	}
+	if sbx.Spec.ShutdownTime != nil && sbx.Spec.ShutdownTime.Time.Before(protectUntil) {
+		sbx.Spec.ShutdownTime = ptr.To(metav1.NewTime(protectUntil))
+	}
+}
+
+// resumable checks whether the sandbox is in a resumable state.
+// It returns nil if the sandbox can be resumed, or an error describing why it cannot.
+func (s *Sandbox) resumable() error {
+	state, reason := s.GetState()
+
+	// Check 1: Logical state must be "Paused" — the primary indicator.
+	if state != agentsv1alpha1.SandboxStatePaused {
+		return fmt.Errorf("resuming is only available for paused state, current state: %s, reason: %s", state, reason)
+	}
+
+	// Check 2: Defensive fallback — status phase is Paused AND spec.Paused is still set.
+	if s.Sandbox.Status.Phase != agentsv1alpha1.SandboxPaused {
+		return fmt.Errorf("resuming is only available for sandboxes in phase Paused, current phase: %s, state: %s, reason: %s", s.Sandbox.Status.Phase, state, reason)
+	}
+	if !s.Sandbox.Spec.Paused {
+		return fmt.Errorf("resuming is only available for sandboxes with spec.paused == true, current state: %s, reason: %s", state, reason)
+	}
+
+	// Check 3: Ensure the pause operation has fully completed.
+	// A False Paused condition means the sandbox is still in the process of pausing.
+	cond := GetSandboxCondition(s.Sandbox, agentsv1alpha1.SandboxConditionPaused)
+	if cond.Status == metav1.ConditionFalse {
+		return fmt.Errorf("sandbox is pausing, please wait a moment and try again")
+	}
+
+	return nil
+}
+
 const postResumeOperationTimeout = 30 * time.Second
 
-func (s *Sandbox) Resume(ctx context.Context) error {
+func postResumeContext(ctx context.Context) (context.Context, context.CancelFunc, bool) {
+	if ctx.Err() == nil {
+		return ctx, func() {}, false
+	}
+	postCtx, cancel := context.WithTimeout(context.Background(), postResumeOperationTimeout)
+	return postCtx, cancel, true
+}
+
+func (s *Sandbox) Resume(ctx context.Context, opts infra.ResumeOptions) (retErr error) {
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(s.Sandbox))
 
-	initRuntimeOpts, err := runtime.GetInitRuntimeRequest(s.Sandbox)
-	if err != nil {
-		log.Error(err, "failed to get init runtime request")
-		return fmt.Errorf("failed to get init runtime request: %w", err)
-	}
-
-	state, reason := s.GetState()
-	log.Info("try to resume sandbox", "state", state, "reason", reason)
-	if state != agentsv1alpha1.SandboxStatePaused {
-		err := fmt.Errorf("resuming is only available for paused state, current state: %s", state)
-		log.Error(err, "sandbox is not paused", "state", state, "reason", reason)
-		return err
-	}
-	cond := GetSandboxCondition(s.Sandbox, agentsv1alpha1.SandboxConditionPaused)
-	if s.Spec.Paused && cond.Status == metav1.ConditionFalse {
-		return errors.NewError(errors.ErrorConflict, "sandbox is pausing, please wait a moment and try again")
-	}
-	if s.Sandbox.Spec.Paused {
+	var err error
+	if err = s.resumable(); err == nil {
 		if err := s.retryUpdate(ctx, func(sbx *agentsv1alpha1.Sandbox) {
 			sbx.Spec.Paused = false
-			setTimeout(sbx, infra.TimeoutOptions{}) // remove all timeout options
+			bumpResumeTimeoutProtection(sbx, time.Now().Add(time.Hour))
 		}); err != nil {
 			log.Error(err, "failed to update sandbox spec.paused")
 			return err
 		}
+	} else {
+		// TODO: refactor needed
+		return err
 	}
 	expectationutils.ResourceVersionExpectationExpect(s.Sandbox) // expect Resuming
 	log.Info("waiting sandbox resume")
 	start := time.Now()
+	if opts.Timeout != nil {
+		defer func() {
+			if !opts.DisablePushTimeout {
+				infra.PushTimeout(opts.Timeout, time.Since(start))
+			}
+			saveCtx, cancel, freshSaveCtx := postResumeContext(ctx)
+			defer cancel()
+			if freshSaveCtx {
+				log.Info("original context expired after wait, using fresh context for saving final resume timeout")
+			}
+			log.Info("saving final resume timeout", "timeout", *opts.Timeout)
+			if err := s.SaveTimeout(saveCtx, *opts.Timeout); err != nil {
+				if retErr != nil {
+					log.Error(err, "failed to save final resume timeout", "originalError", retErr)
+					return
+				}
+				log.Error(err, "failed to save final resume timeout")
+				retErr = fmt.Errorf("failed to save final resume timeout: %w", err)
+			}
+		}()
+	}
 	if err = s.Cache.NewSandboxResumeTask(ctx, s.Sandbox).Wait(time.Minute); err != nil {
 		log.Error(err, "failed to wait sandbox resume")
 		return err
@@ -296,11 +362,9 @@ func (s *Sandbox) Resume(ctx context.Context) error {
 	// If the original context deadline was consumed by the wait, create a fresh
 	// context for post-resume operations (ReInit, CSI mount, inplace refresh).
 	// This can happen when the wait succeeds via double-check right at the deadline boundary.
-	postCtx := ctx
-	if ctx.Err() != nil {
-		var postCancel context.CancelFunc
-		postCtx, postCancel = context.WithTimeout(context.Background(), postResumeOperationTimeout)
-		defer postCancel()
+	postCtx, postCancel, freshPostCtx := postResumeContext(ctx)
+	defer postCancel()
+	if freshPostCtx {
 		log.Info("original context expired after wait, using fresh context for post-resume operations")
 	}
 	if err = s.InplaceRefresh(postCtx, false); err != nil {
@@ -312,10 +376,15 @@ func (s *Sandbox) Resume(ctx context.Context) error {
 	// E2B only handles post-resume initialization for non-claimed sandboxes.
 	// Claimed sandboxes (with claim-name label) are handled by the controller's Initialize function.
 	if s.Labels[agentsv1alpha1.LabelSandboxClaimName] == "" {
+		initRuntimeOpts, err := runtime.GetInitRuntimeRequest(s.Sandbox)
+		if err != nil {
+			log.Error(err, "failed to get init runtime request")
+			return fmt.Errorf("failed to get init runtime request: %w", err)
+		}
 		// Perform ReInit if initRuntimeOpts is set
 		if initRuntimeOpts != nil {
 			log.Info("will re-init runtime after resume")
-			if _, err := runtime.InitRuntime(ctx, s.Sandbox, *initRuntimeOpts, s.refreshFunc()); err != nil {
+			if _, err := runtime.InitRuntime(postCtx, s.Sandbox, *initRuntimeOpts, s.refreshFunc()); err != nil {
 				log.Error(err, "failed to perform ReInit after resume")
 				return fmt.Errorf("failed to perform ReInit after resume: %w", err)
 			}
