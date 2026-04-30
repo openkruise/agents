@@ -22,6 +22,23 @@ import (
 	"github.com/google/uuid"
 )
 
+const AdminTeamName = "admin"
+
+var AdminTeamID = uuid.MustParse("550e8400-e29b-41d4-a716-446655449999")
+
+// Team represents an E2B team.
+type Team struct {
+	ID   uuid.UUID `json:"id"`
+	Name string    `json:"name"`
+}
+
+func AdminTeam() *Team {
+	return &Team{
+		ID:   AdminTeamID,
+		Name: AdminTeamName,
+	}
+}
+
 // TeamUser represents a user in a team
 type TeamUser struct {
 	Email string    `json:"email"`
@@ -44,6 +61,7 @@ type CreatedTeamAPIKey struct {
 	Mask      IdentifierMaskingDetails `json:"mask"`
 	Name      string                   `json:"name"`
 	CreatedBy *TeamUser                `json:"createdBy"`
+	Team      *Team                    `json:"team,omitempty"`
 	LastUsed  *time.Time               `json:"lastUsed"`
 }
 

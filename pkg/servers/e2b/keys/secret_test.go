@@ -145,6 +145,7 @@ func TestSecretKeyStorage_Init(t *testing.T) {
 				loaded, found := storage.LoadByID(context.Background(), AdminKeyID.String())
 				require.True(t, found)
 				require.Equal(t, "admin-key", loaded.Key)
+				require.Equal(t, models.AdminTeam(), loaded.Team)
 			},
 		},
 		{
@@ -154,8 +155,11 @@ func TestSecretKeyStorage_Init(t *testing.T) {
 			},
 			assertion: func(t *testing.T, _ *secretKeyStorage, c client.Client) {
 				secret := getSecretForTest(t, c)
-				_, ok := secret.Data[AdminKeyID.String()]
+				bytes, ok := secret.Data[AdminKeyID.String()]
 				assert.True(t, ok)
+				var admin models.CreatedTeamAPIKey
+				require.NoError(t, json.Unmarshal(bytes, &admin))
+				require.Equal(t, models.AdminTeam(), admin.Team)
 			},
 		},
 		{
@@ -222,8 +226,9 @@ func TestSecretKeyStorage_Refresh(t *testing.T) {
 	storage.storeKey(&models.CreatedTeamAPIKey{ID: uuid.New(), Key: "stale"})
 
 	require.NoError(t, storage.refresh(context.Background(), c))
-	_, found := storage.LoadByKey(context.Background(), valid.Key)
+	loaded, found := storage.LoadByKey(context.Background(), valid.Key)
 	assert.True(t, found)
+	require.Equal(t, models.AdminTeam(), loaded.Team)
 	_, found = storage.LoadByKey(context.Background(), "stale")
 	assert.False(t, found)
 
@@ -349,10 +354,12 @@ func TestSecretKeyStorage_CreateKey(t *testing.T) {
 			name: "success",
 			run: func(t *testing.T) error {
 				storage, _ := newSecretStorageForTest(t, map[string][]byte{})
-				user := &models.CreatedTeamAPIKey{ID: uuid.New(), CreatedBy: &models.TeamUser{ID: uuid.New()}}
+				userTeam := &models.Team{ID: uuid.New(), Name: "user-team"}
+				user := &models.CreatedTeamAPIKey{ID: uuid.New(), Team: userTeam, CreatedBy: &models.TeamUser{ID: uuid.New()}}
 				key, err := storage.CreateKey(context.Background(), user, "name")
 				if err == nil {
 					require.NotNil(t, key)
+					require.Equal(t, userTeam, key.Team)
 					_, found := storage.LoadByID(context.Background(), key.ID.String())
 					assert.True(t, found)
 				}
@@ -390,6 +397,16 @@ func TestSecretKeyStorage_CreateKey(t *testing.T) {
 				return err
 			},
 			expectError: "update failed",
+		},
+		{
+			name: "success defaults missing user team to admin team",
+			run: func(t *testing.T) error {
+				storage, _ := newSecretStorageForTest(t, map[string][]byte{})
+				key, err := storage.CreateKey(t.Context(), &models.CreatedTeamAPIKey{ID: uuid.New()}, "default-team")
+				require.NoError(t, err)
+				require.Equal(t, models.AdminTeam(), key.Team)
+				return err
+			},
 		},
 	}
 

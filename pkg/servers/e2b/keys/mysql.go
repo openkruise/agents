@@ -40,13 +40,13 @@ import (
 )
 
 // AdminTeamUID is the well-known UUID for the default admin team row.
-var AdminTeamUID = uuid.MustParse("550e8400-e29b-41d4-a716-446655449999")
+var AdminTeamUID = models.AdminTeamID
 
 // errUUIDCollision is returned when a generated UUID conflicts with an existing key_hash or uid.
 var errUUIDCollision = errors.New("uuid collision detected")
 
 const (
-	adminTeamName = "admin"
+	adminTeamName = models.AdminTeamName
 	keyCacheTTL   = 10 * time.Minute
 )
 
@@ -215,16 +215,11 @@ func (k *mysqlKeyStorage) LoadByKey(ctx context.Context, key string) (*models.Cr
 	if item := k.byKey.Get(hash); item != nil {
 		return item.Value(), true
 	}
-	var e TeamAPIKeyEntity
-	if err := k.db.WithContext(ctx).Where(&TeamAPIKeyEntity{Key: hash}).First(&e).Error; err != nil {
+	apiKey, err := k.loadCreatedKeyFromDB(ctx, &TeamAPIKeyEntity{Key: hash})
+	if err != nil {
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
 			klog.FromContext(ctx).Error(err, "load key by hash")
 		}
-		return nil, false
-	}
-	apiKey, err := k.entityToCreated(&e)
-	if err != nil {
-		klog.FromContext(ctx).Error(err, "parse key entity")
 		return nil, false
 	}
 	k.cachePut(apiKey, hash)
@@ -236,19 +231,14 @@ func (k *mysqlKeyStorage) LoadByID(ctx context.Context, id string) (*models.Crea
 	if item := k.byID.Get(id); item != nil {
 		return item.Value(), true
 	}
-	var e TeamAPIKeyEntity
-	if err := k.db.WithContext(ctx).Where(&TeamAPIKeyEntity{UID: id}).First(&e).Error; err != nil {
+	apiKey, err := k.loadCreatedKeyFromDB(ctx, &TeamAPIKeyEntity{UID: id})
+	if err != nil {
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
 			klog.FromContext(ctx).Error(err, "load key by uid")
 		}
 		return nil, false
 	}
-	apiKey, err := k.entityToCreated(&e)
-	if err != nil {
-		klog.FromContext(ctx).Error(err, "parse key entity")
-		return nil, false
-	}
-	k.cachePut(apiKey, e.Key)
+	k.cachePut(apiKey, apiKey.Key)
 	return apiKey, true
 }
 
@@ -263,7 +253,8 @@ func (k *mysqlKeyStorage) CreateKey(ctx context.Context, user *models.CreatedTea
 	if name == "" || user == nil {
 		return nil, errors.New("api-key name and user are required")
 	}
-	teamID, err := k.teamIDByUID(ctx, AdminTeamUID.String())
+	team := teamForKey(user)
+	teamID, err := k.teamIDByUID(ctx, team.ID.String())
 	if err != nil {
 		return nil, err
 	}
@@ -311,6 +302,7 @@ func (k *mysqlKeyStorage) CreateKey(ctx context.Context, user *models.CreatedTea
 		Key:       newKey.String(),
 		Name:      name,
 		Mask:      models.IdentifierMaskingDetails{},
+		Team:      team,
 		CreatedBy: &models.TeamUser{ID: user.ID},
 	}
 	log.Info("api-key generated", "id", apiKey.ID)
@@ -403,7 +395,11 @@ func (k *mysqlKeyStorage) teamIDByUID(ctx context.Context, uid string) (uint, er
 	return team.ID, nil
 }
 
-func (k *mysqlKeyStorage) entityToCreated(e *TeamAPIKeyEntity) (*models.CreatedTeamAPIKey, error) {
+func (k *mysqlKeyStorage) loadCreatedKeyFromDB(ctx context.Context, where *TeamAPIKeyEntity) (*models.CreatedTeamAPIKey, error) {
+	var e TeamAPIKeyEntity
+	if err := k.db.WithContext(ctx).Where(where).First(&e).Error; err != nil {
+		return nil, err
+	}
 	id, err := uuid.Parse(e.UID)
 	if err != nil {
 		return nil, fmt.Errorf("parse entity uid %q: %w", e.UID, err)
@@ -416,11 +412,24 @@ func (k *mysqlKeyStorage) entityToCreated(e *TeamAPIKeyEntity) (*models.CreatedT
 		}
 		createdBy = &models.TeamUser{ID: cbID}
 	}
+
+	var teamEntity TeamEntity
+	if err := k.db.WithContext(ctx).Where(&TeamEntity{Model: gorm.Model{ID: e.TeamID}}).First(&teamEntity).Error; err != nil {
+		return nil, fmt.Errorf("lookup team by id %d: %w", e.TeamID, err)
+	}
+	teamUID, err := uuid.Parse(teamEntity.UID)
+	if err != nil {
+		return nil, fmt.Errorf("parse team uid %q: %w", teamEntity.UID, err)
+	}
+	team := &models.Team{ID: teamUID, Name: teamEntity.Name}
+
 	return &models.CreatedTeamAPIKey{
 		CreatedAt: e.CreatedAt,
 		ID:        id,
+		Key:       e.Key,
 		Name:      e.Name,
 		Mask:      models.IdentifierMaskingDetails{},
 		CreatedBy: createdBy,
+		Team:      team,
 	}, nil
 }

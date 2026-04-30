@@ -96,6 +96,7 @@ func (k *secretKeyStorage) Init(ctx context.Context) error {
 			ID:        AdminKeyID,
 			Key:       k.AdminKey,
 			Name:      "admin",
+			Team:      models.AdminTeam(),
 		}
 		if err := k.retryUpdateSecret(ctx, AdminKeyID.String(), adminKey); err != nil && !apierrors.IsConflict(err) {
 			return err
@@ -217,6 +218,10 @@ func (k *secretKeyStorage) updateSecret(ctx context.Context, id string, apiKey *
 }
 
 func (k *secretKeyStorage) storeKey(apiKey *models.CreatedTeamAPIKey) {
+	// after this, all old keys will be migrated to new keys in admin team
+	if apiKey.Team == nil {
+		apiKey.Team = models.AdminTeam()
+	}
 	k.idxByKey.Store(apiKey.Key, apiKey)
 	k.idxByID.Store(apiKey.ID.String(), apiKey)
 }
@@ -247,6 +252,7 @@ func (k *secretKeyStorage) CreateKey(ctx context.Context, user *models.CreatedTe
 		Key:       newKey.String(),
 		Mask:      models.IdentifierMaskingDetails{},
 		Name:      name,
+		Team:      teamForKey(user),
 		CreatedBy: &models.TeamUser{
 			ID: user.ID,
 		},
@@ -278,7 +284,7 @@ func (k *secretKeyStorage) ListByOwner(_ context.Context, owner uuid.UUID) ([]*m
 	var result []*models.TeamAPIKey
 	k.idxByID.Range(func(_, value any) bool {
 		apikey := value.(*models.CreatedTeamAPIKey)
-		if apikey.ID == owner || apikey.CreatedBy.ID == owner {
+		if apikey.ID == owner || apikey.CreatedBy != nil && apikey.CreatedBy.ID == owner {
 			result = append(result, &models.TeamAPIKey{
 				CreatedAt: apikey.CreatedAt,
 				ID:        apikey.ID,
@@ -291,4 +297,12 @@ func (k *secretKeyStorage) ListByOwner(_ context.Context, owner uuid.UUID) ([]*m
 		return true
 	})
 	return result, nil
+}
+
+func teamForKey(user *models.CreatedTeamAPIKey) *models.Team {
+	if user == nil || user.Team == nil { // user will never be nil, just in case
+		// Compatibility with old keys without team information
+		return models.AdminTeam()
+	}
+	return user.Team
 }
