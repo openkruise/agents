@@ -113,6 +113,7 @@ func NewClient() client.Client {
 		WithStatusSubresource(&v1alpha1.SandboxSet{}, &v1alpha1.Sandbox{}).
 		WithLists(&v1alpha1.SandboxSetList{}, &v1alpha1.SandboxList{}).
 		WithIndex(&v1alpha1.Sandbox{}, fieldindex.IndexNameForOwnerRefUID, fieldindex.OwnerIndexFunc).
+		WithIndex(&v1alpha1.SandboxSet{}, fieldindex.IndexNameForSandboxSetTemplateRef, fieldindex.SandboxSetTemplateRefIndexFunc).
 		Build()
 }
 
@@ -313,7 +314,7 @@ func TestReconcile_DeleteDead(t *testing.T) {
 				Codec:    codec,
 			}
 			assert.NoError(t, k8sClient.Create(ctx, sbs))
-			newStatus, err := reconciler.initNewStatus(sbs)
+			newStatus, err := reconciler.initNewStatus(ctx, sbs)
 
 			assert.NoError(t, err)
 			sbs.Status = *newStatus
@@ -575,7 +576,7 @@ func TestReconcile_BasicScale(t *testing.T) {
 				Recorder: eventRecorder,
 				Codec:    codec,
 			}
-			newStatus, err := reconciler.initNewStatus(sbs)
+			newStatus, err := reconciler.initNewStatus(ctx, sbs)
 
 			assert.NoError(t, err)
 			sbs.Status = *newStatus
@@ -786,7 +787,7 @@ func TestSandboxSetReconcile_WithVolumeClaimTemplates(t *testing.T) {
 			}
 
 			assert.NoError(t, k8sClient.Create(ctx, sbs))
-			newStatus, err := reconciler.initNewStatus(sbs)
+			newStatus, err := reconciler.initNewStatus(ctx, sbs)
 			assert.NoError(t, err)
 			sbs.Status = *newStatus
 

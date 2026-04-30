@@ -29,6 +29,9 @@ import (
 
 const (
 	IndexNameForOwnerRefUID = "ownerRefUID"
+	// IndexNameForSandboxSetTemplateRef indexes SandboxSets by the name of the
+	// SandboxTemplate they reference via spec.templateRef.
+	IndexNameForSandboxSetTemplateRef = "sandboxSetTemplateRef"
 )
 
 var (
@@ -43,11 +46,21 @@ var OwnerIndexFunc = func(obj client.Object) []string {
 	return owners
 }
 
+var SandboxSetTemplateRefIndexFunc = func(obj client.Object) []string {
+	sbs, ok := obj.(*agentsv1alpha1.SandboxSet)
+	if !ok || sbs.Spec.TemplateRef == nil || sbs.Spec.TemplateRef.Name == "" {
+		return nil
+	}
+	return []string{sbs.Spec.TemplateRef.Name}
+}
+
 func RegisterFieldIndexes(c cache.Cache) error {
 	var err error
 	registerOnce.Do(func() {
-		// sandbox ownerReference
 		if err = c.IndexField(context.TODO(), &agentsv1alpha1.Sandbox{}, IndexNameForOwnerRefUID, OwnerIndexFunc); err != nil {
+			return
+		}
+		if err = c.IndexField(context.TODO(), &agentsv1alpha1.SandboxSet{}, IndexNameForSandboxSetTemplateRef, SandboxSetTemplateRefIndexFunc); err != nil {
 			return
 		}
 	})
