@@ -18,6 +18,7 @@ package keys
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -238,6 +239,8 @@ func TestMySQL_LoadByKeyAndID(t *testing.T) {
 	got, ok := st.LoadByKey(context.Background(), "raw")
 	require.True(t, ok)
 	require.Equal(t, id, got.ID)
+	require.Empty(t, got.Key)
+	require.Equal(t, hash, got.KeyHash)
 	require.Equal(t, models.AdminTeam(), got.Team)
 	_, ok = st.LoadByKey(context.Background(), "raw")
 	require.True(t, ok)
@@ -254,13 +257,16 @@ func TestMySQL_LoadByKeyAndID(t *testing.T) {
 
 	// direct DB success for LoadByID path.
 	dbID := uuid.New()
+	dbHash := st.hashKey("id-success")
 	mock.ExpectQuery("SELECT .*FROM `team_api_keys`.*").WillReturnRows(sqlmock.NewRows(
 		[]string{"id", "created_at", "updated_at", "deleted_at", "uid", "name", "key_hash", "team_id", "created_by_uid"},
-	).AddRow(2, now, now, nil, dbID.String(), "id-success", st.hashKey("id-success"), 1, nil))
+	).AddRow(2, now, now, nil, dbID.String(), "id-success", dbHash, 1, nil))
 	mock.ExpectQuery("SELECT .*FROM `teams`.*").WillReturnRows(sqlmock.NewRows([]string{"id", "uid", "name"}).AddRow(1, AdminTeamUID.String(), "admin"))
 	gotByID, ok := st.LoadByID(context.Background(), dbID.String())
 	require.True(t, ok)
 	require.Equal(t, dbID, gotByID.ID)
+	require.Empty(t, gotByID.Key)
+	require.Equal(t, dbHash, gotByID.KeyHash)
 	require.Equal(t, models.AdminTeam(), gotByID.Team)
 
 	mock.ExpectQuery("SELECT .*FROM `team_api_keys`.*").WillReturnError(errors.New("db error"))
@@ -319,6 +325,7 @@ func TestMySQL_CreateKeyBranches(t *testing.T) {
 		key, err := st.CreateKey(context.Background(), user, "n")
 		require.NoError(t, err)
 		require.NotEmpty(t, key.Key)
+		require.NotEmpty(t, key.KeyHash)
 		require.Equal(t, userTeam, key.Team)
 	})
 
@@ -366,6 +373,12 @@ func TestMySQL_DeleteListTeamAndEntityHelpers(t *testing.T) {
 	mock.ExpectExec("UPDATE `team_api_keys` SET `deleted_at`=.*").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 	require.NoError(t, st.DeleteKey(context.Background(), &models.CreatedTeamAPIKey{ID: id, Key: "raw"}))
+
+	idWithHash := uuid.New()
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE `team_api_keys` SET `deleted_at`=.*").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+	require.NoError(t, st.DeleteKey(context.Background(), &models.CreatedTeamAPIKey{ID: idWithHash, KeyHash: "h"}))
 
 	id2 := uuid.New()
 	mock.ExpectQuery("SELECT `key_hash` FROM `team_api_keys`.*").WillReturnRows(sqlmock.NewRows([]string{"key_hash"}).AddRow("h"))
@@ -437,15 +450,62 @@ func TestMySQL_DeleteListTeamAndEntityHelpers(t *testing.T) {
 	out, err := st.loadCreatedKeyFromDB(context.Background(), &TeamAPIKeyEntity{UID: uuid.NewString()})
 	require.NoError(t, err)
 	require.Equal(t, "ok", out.Name)
+	require.Empty(t, out.Key)
 	require.Equal(t, models.AdminTeam(), out.Team)
+}
+
+func TestMySQL_DeleteLoadedKeyInvalidatesByKeyCache(t *testing.T) {
+	st, mock, done := newMockStorage(t)
+	defer done()
+
+	id := uuid.New()
+	hash := st.hashKey("raw")
+	now := time.Now()
+	mock.ExpectQuery("SELECT .*FROM `team_api_keys`.*").WillReturnRows(sqlmock.NewRows(
+		[]string{"id", "created_at", "updated_at", "deleted_at", "uid", "name", "key_hash", "team_id", "created_by_uid"},
+	).AddRow(1, now, now, nil, id.String(), "n", hash, 1, nil))
+	mock.ExpectQuery("SELECT .*FROM `teams`.*").WillReturnRows(sqlmock.NewRows([]string{"id", "uid", "name"}).AddRow(1, AdminTeamUID.String(), "admin"))
+	apiKey, ok := st.LoadByID(context.Background(), id.String())
+	require.True(t, ok)
+	require.Empty(t, apiKey.Key)
+	require.Equal(t, hash, apiKey.KeyHash)
+	require.NotNil(t, st.byKey.Get(hash))
+
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE `team_api_keys` SET `deleted_at`=.*").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+	require.NoError(t, st.DeleteKey(context.Background(), apiKey))
+	require.Nil(t, st.byKey.Get(hash))
+	require.Nil(t, st.byID.Get(id.String()))
+
+	mock.ExpectQuery("SELECT .*FROM `team_api_keys`.*").WillReturnError(gorm.ErrRecordNotFound)
+	_, ok = st.LoadByKey(context.Background(), "raw")
+	require.False(t, ok)
 }
 
 func TestMySQL_RunStopAndCachePut(t *testing.T) {
 	st := newMySQLKeyStorage(mysqlConfig{Pepper: "pepper"})
 	id := uuid.New()
-	st.cachePut(&models.CreatedTeamAPIKey{ID: id, Key: "k"}, st.hashKey("k"))
+	hash := st.hashKey("k")
+	st.cachePut(&models.CreatedTeamAPIKey{ID: id, KeyHash: hash})
+	require.NotNil(t, st.byKey.Get(hash))
 	require.NotNil(t, st.byID.Get(id.String()))
 	st.Run()
 	st.Stop()
 	require.NotPanics(t, func() { st.Stop() })
+}
+
+func TestCreatedTeamAPIKeyKeyHashIsNotSerialized(t *testing.T) {
+	apiKey := &models.CreatedTeamAPIKey{
+		ID:      uuid.New(),
+		Key:     "raw",
+		KeyHash: "hash",
+		Name:    "n",
+	}
+	payload, err := json.Marshal(apiKey)
+	require.NoError(t, err)
+	require.Contains(t, string(payload), `"key":"raw"`)
+	require.NotContains(t, string(payload), "KeyHash")
+	require.NotContains(t, string(payload), "keyHash")
+	require.NotContains(t, string(payload), "hash")
 }

@@ -58,6 +58,7 @@ type CreatedTeamAPIKey struct {
 	CreatedAt time.Time                `json:"createdAt"`
 	ID        uuid.UUID                `json:"id"`
 	Key       string                   `json:"key"`
+	KeyHash   string                   `json:"-"`
 	Mask      IdentifierMaskingDetails `json:"mask"`
 	Name      string                   `json:"name"`
 	CreatedBy *TeamUser                `json:"createdBy"`

@@ -72,12 +72,12 @@ type TeamEntity struct {
 func (TeamEntity) TableName() string { return "teams" }
 
 // TeamAPIKeyEntity corresponds to the team_api_keys table.
-// Key holds HMAC-SHA256(pepper, raw API key) as hex (64 chars), never plaintext.
+// KeyHash holds HMAC-SHA256(pepper, raw API key) as hex (64 chars), never plaintext.
 type TeamAPIKeyEntity struct {
 	gorm.Model
 	UID          string  `gorm:"column:uid;type:varchar(36);uniqueIndex;not null"`
 	Name         string  `gorm:"type:varchar(255);not null"`
-	Key          string  `gorm:"column:key_hash;type:char(64);uniqueIndex;not null"`
+	KeyHash      string  `gorm:"column:key_hash;type:char(64);uniqueIndex;not null"`
 	TeamID       uint    `gorm:"not null;index"`
 	CreatedByUID *string `gorm:"column:created_by_uid;type:varchar(36);index"`
 }
@@ -180,10 +180,10 @@ func (k *mysqlKeyStorage) ensureAdminKey(ctx context.Context, adminTeamID uint) 
 		return fmt.Errorf("lookup admin key by uid: %w", err)
 	}
 	entity := TeamAPIKeyEntity{
-		UID:    AdminKeyID.String(),
-		Name:   adminTeamName,
-		Key:    hash,
-		TeamID: adminTeamID,
+		UID:     AdminKeyID.String(),
+		Name:    adminTeamName,
+		KeyHash: hash,
+		TeamID:  adminTeamID,
 	}
 	if err := k.db.WithContext(ctx).Create(&entity).Error; err != nil {
 		return fmt.Errorf("create admin key: %w", err)
@@ -215,14 +215,14 @@ func (k *mysqlKeyStorage) LoadByKey(ctx context.Context, key string) (*models.Cr
 	if item := k.byKey.Get(hash); item != nil {
 		return item.Value(), true
 	}
-	apiKey, err := k.loadCreatedKeyFromDB(ctx, &TeamAPIKeyEntity{Key: hash})
+	apiKey, err := k.loadCreatedKeyFromDB(ctx, &TeamAPIKeyEntity{KeyHash: hash})
 	if err != nil {
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
 			klog.FromContext(ctx).Error(err, "load key by hash")
 		}
 		return nil, false
 	}
-	k.cachePut(apiKey, hash)
+	k.cachePut(apiKey)
 	return apiKey, true
 }
 
@@ -238,12 +238,14 @@ func (k *mysqlKeyStorage) LoadByID(ctx context.Context, id string) (*models.Crea
 		}
 		return nil, false
 	}
-	k.cachePut(apiKey, apiKey.Key)
+	k.cachePut(apiKey)
 	return apiKey, true
 }
 
-func (k *mysqlKeyStorage) cachePut(apiKey *models.CreatedTeamAPIKey, keyHash string) {
-	k.byKey.Set(keyHash, apiKey, ttlcache.DefaultTTL)
+func (k *mysqlKeyStorage) cachePut(apiKey *models.CreatedTeamAPIKey) {
+	if apiKey.KeyHash != "" {
+		k.byKey.Set(apiKey.KeyHash, apiKey, ttlcache.DefaultTTL)
+	}
 	k.byID.Set(apiKey.ID.String(), apiKey, ttlcache.DefaultTTL)
 }
 
@@ -278,7 +280,7 @@ func (k *mysqlKeyStorage) CreateKey(ctx context.Context, user *models.CreatedTea
 		entity = TeamAPIKeyEntity{
 			UID:          newID.String(),
 			Name:         name,
-			Key:          k.hashKey(newKey.String()),
+			KeyHash:      k.hashKey(newKey.String()),
 			TeamID:       teamID,
 			CreatedByUID: &createdBy,
 		}
@@ -300,25 +302,31 @@ func (k *mysqlKeyStorage) CreateKey(ctx context.Context, user *models.CreatedTea
 		CreatedAt: entity.CreatedAt,
 		ID:        newID,
 		Key:       newKey.String(),
+		KeyHash:   entity.KeyHash,
 		Name:      name,
 		Mask:      models.IdentifierMaskingDetails{},
 		Team:      team,
 		CreatedBy: &models.TeamUser{ID: user.ID},
 	}
 	log.Info("api-key generated", "id", apiKey.ID)
-	k.cachePut(apiKey, entity.Key)
+	k.cachePut(apiKey)
 	return apiKey, nil
 }
 
 // DeleteKey removes an API key from the database and caches.
 func (k *mysqlKeyStorage) DeleteKey(ctx context.Context, key *models.CreatedTeamAPIKey) error {
+	log := klog.FromContext(ctx).V(consts.DebugLogLevel)
 	if key == nil {
 		return nil
 	}
 	var hash string
-	if key.Key != "" {
+	switch {
+	case key.KeyHash != "":
+		hash = key.KeyHash
+	case key.Key != "":
 		hash = k.hashKey(key.Key)
-	} else {
+	default:
+		log.Info("api-key to be deleted has no key-hash, fetching from db", "id", key.ID)
 		var e TeamAPIKeyEntity
 		if err := k.db.WithContext(ctx).Where(&TeamAPIKeyEntity{UID: key.ID.String()}).
 			Select("key_hash").First(&e).Error; err != nil {
@@ -326,17 +334,19 @@ func (k *mysqlKeyStorage) DeleteKey(ctx context.Context, key *models.CreatedTeam
 				return fmt.Errorf("prefetch key hash: %w", err)
 			}
 		} else {
-			hash = e.Key
+			hash = e.KeyHash
 		}
 	}
 	if err := k.db.WithContext(ctx).Where(&TeamAPIKeyEntity{UID: key.ID.String()}).
 		Delete(&TeamAPIKeyEntity{}).Error; err != nil {
 		return fmt.Errorf("delete api-key: %w", err)
 	}
+	log.Info("api-key deleted from db", "id", key.ID, "hash", hash)
 	if hash != "" {
 		k.byKey.Delete(hash)
 	}
 	k.byID.Delete(key.ID.String())
+	log.Info("api-key deleted from cache", "id", key.ID, "hash", hash)
 	return nil
 }
 
@@ -426,7 +436,7 @@ func (k *mysqlKeyStorage) loadCreatedKeyFromDB(ctx context.Context, where *TeamA
 	return &models.CreatedTeamAPIKey{
 		CreatedAt: e.CreatedAt,
 		ID:        id,
-		Key:       e.Key,
+		KeyHash:   e.KeyHash,
 		Name:      e.Name,
 		Mask:      models.IdentifierMaskingDetails{},
 		CreatedBy: createdBy,
