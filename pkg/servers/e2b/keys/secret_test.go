@@ -360,6 +360,8 @@ func TestSecretKeyStorage_CreateKey(t *testing.T) {
 				if err == nil {
 					require.NotNil(t, key)
 					require.Equal(t, userTeam, key.Team)
+					require.NotNil(t, key.CreatedBy)
+					require.Equal(t, user.ID, key.CreatedBy.ID)
 					_, found := storage.LoadByID(context.Background(), key.ID.String())
 					assert.True(t, found)
 				}
@@ -423,18 +425,25 @@ func TestSecretKeyStorage_DeleteAndList(t *testing.T) {
 	storage, c := newSecretStorageForTest(t, map[string][]byte{})
 	owner := uuid.New()
 	other := uuid.New()
-	user := &models.CreatedTeamAPIKey{ID: owner, CreatedBy: &models.TeamUser{ID: owner}}
+	teamA := &models.Team{ID: uuid.New(), Name: "team-a"}
+	teamB := &models.Team{ID: uuid.New(), Name: "team-b"}
+	user := &models.CreatedTeamAPIKey{ID: owner, Team: teamA, CreatedBy: &models.TeamUser{ID: owner}}
+	storage.storeKey(user)
 
 	key, err := storage.CreateKey(context.Background(), user, "name")
 	require.NoError(t, err)
 
-	// force owner match via CreatedBy
-	otherKey := &models.CreatedTeamAPIKey{ID: other, Key: uuid.NewString(), Name: "other", CreatedBy: &models.TeamUser{ID: owner}}
+	// Same-team key should be visible even if CreatedBy does not match.
+	otherKey := &models.CreatedTeamAPIKey{ID: other, Key: uuid.NewString(), Name: "other", Team: teamA, CreatedBy: &models.TeamUser{ID: uuid.New()}}
 	storage.storeKey(otherKey)
+
+	// CreatedBy no longer grants visibility across teams.
+	crossTeamKey := &models.CreatedTeamAPIKey{ID: uuid.New(), Key: uuid.NewString(), Name: "cross", Team: teamB, CreatedBy: &models.TeamUser{ID: owner}}
+	storage.storeKey(crossTeamKey)
 
 	keys, err := storage.ListByOwner(context.Background(), owner)
 	require.NoError(t, err)
-	require.Len(t, keys, 2)
+	require.Len(t, keys, 3)
 
 	keys, err = storage.ListByOwner(context.Background(), uuid.New())
 	require.NoError(t, err)

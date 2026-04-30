@@ -252,7 +252,7 @@ func (k *secretKeyStorage) CreateKey(ctx context.Context, user *models.CreatedTe
 		Key:       newKey.String(),
 		Mask:      models.IdentifierMaskingDetails{},
 		Name:      name,
-		Team:      teamForKey(user),
+		Team:      TeamForKey(user),
 		CreatedBy: &models.TeamUser{
 			ID: user.ID,
 		},
@@ -280,11 +280,16 @@ func (k *secretKeyStorage) DeleteKey(ctx context.Context, key *models.CreatedTea
 	return nil
 }
 
-func (k *secretKeyStorage) ListByOwner(_ context.Context, owner uuid.UUID) ([]*models.TeamAPIKey, error) {
+func (k *secretKeyStorage) ListByOwner(ctx context.Context, owner uuid.UUID) ([]*models.TeamAPIKey, error) {
+	ownerKey, ok := k.LoadByID(ctx, owner.String())
+	if !ok {
+		return nil, nil
+	}
+	ownerTeam := TeamForKey(ownerKey)
 	var result []*models.TeamAPIKey
 	k.idxByID.Range(func(_, value any) bool {
 		apikey := value.(*models.CreatedTeamAPIKey)
-		if apikey.ID == owner || apikey.CreatedBy != nil && apikey.CreatedBy.ID == owner {
+		if TeamForKey(apikey).ID == ownerTeam.ID {
 			result = append(result, &models.TeamAPIKey{
 				CreatedAt: apikey.CreatedAt,
 				ID:        apikey.ID,
@@ -299,7 +304,8 @@ func (k *secretKeyStorage) ListByOwner(_ context.Context, owner uuid.UUID) ([]*m
 	return result, nil
 }
 
-func teamForKey(user *models.CreatedTeamAPIKey) *models.Team {
+// TeamForKey returns the team for an API key, defaulting to AdminTeam for legacy keys without team information.
+func TeamForKey(user *models.CreatedTeamAPIKey) *models.Team {
 	if user == nil || user.Team == nil { // user will never be nil, just in case
 		// Compatibility with old keys without team information
 		return models.AdminTeam()

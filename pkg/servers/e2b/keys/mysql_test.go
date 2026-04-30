@@ -241,6 +241,8 @@ func TestMySQL_LoadByKeyAndID(t *testing.T) {
 	require.Equal(t, id, got.ID)
 	require.Empty(t, got.Key)
 	require.Equal(t, hash, got.KeyHash)
+	require.NotNil(t, got.CreatedBy)
+	require.Equal(t, cb, got.CreatedBy.ID)
 	require.Equal(t, models.AdminTeam(), got.Team)
 	_, ok = st.LoadByKey(context.Background(), "raw")
 	require.True(t, ok)
@@ -326,6 +328,8 @@ func TestMySQL_CreateKeyBranches(t *testing.T) {
 		require.NoError(t, err)
 		require.NotEmpty(t, key.Key)
 		require.NotEmpty(t, key.KeyHash)
+		require.NotNil(t, key.CreatedBy)
+		require.Equal(t, user.ID, key.CreatedBy.ID)
 		require.Equal(t, userTeam, key.Team)
 	})
 
@@ -407,12 +411,15 @@ func TestMySQL_DeleteListTeamAndEntityHelpers(t *testing.T) {
 	owner := uuid.New()
 	now := time.Now()
 	mock.ExpectQuery("SELECT .*FROM `team_api_keys`.*uid.*").WillReturnRows(sqlmock.NewRows([]string{"id", "uid", "team_id"}).AddRow(1, owner.String(), 9))
-	mock.ExpectQuery("SELECT .*FROM `team_api_keys`.*team_id.*").WillReturnRows(sqlmock.NewRows([]string{"id", "created_at", "uid", "name", "team_id"}).
-		AddRow(1, now, uuid.NewString(), "a", 9).
-		AddRow(2, now, "bad", "b", 9))
+	listCreator := uuid.New()
+	mock.ExpectQuery("SELECT .*FROM `team_api_keys`.*team_id.*").WillReturnRows(sqlmock.NewRows([]string{"id", "created_at", "uid", "name", "team_id", "created_by_uid"}).
+		AddRow(1, now, uuid.NewString(), "a", 9, listCreator.String()).
+		AddRow(2, now, "bad", "b", 9, nil))
 	keys, err := st.ListByOwner(context.Background(), owner)
 	require.NoError(t, err)
 	require.Len(t, keys, 1)
+	require.NotNil(t, keys[0].CreatedBy)
+	require.Equal(t, listCreator, keys[0].CreatedBy.ID)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -442,12 +449,17 @@ func TestMySQL_DeleteListTeamAndEntityHelpers(t *testing.T) {
 	_, err = st.loadCreatedKeyFromDB(context.Background(), &TeamAPIKeyEntity{UID: "bad"})
 	require.Error(t, err)
 	badCB := "bad"
-	_, err = st.loadCreatedKeyFromDB(context.Background(), &TeamAPIKeyEntity{UID: uuid.NewString(), CreatedByUID: &badCB})
-	require.Error(t, err)
+	mock.ExpectQuery("SELECT .*FROM `team_api_keys`.*").WillReturnRows(sqlmock.NewRows(
+		[]string{"id", "created_at", "updated_at", "deleted_at", "uid", "name", "key_hash", "team_id", "created_by_uid"},
+	).AddRow(1, now, now, nil, uuid.NewString(), "bad-created-by", st.hashKey("bad-created-by"), 9, badCB))
+	mock.ExpectQuery("SELECT .*FROM `teams`.*").WillReturnRows(sqlmock.NewRows([]string{"id", "uid", "name"}).AddRow(9, AdminTeamUID.String(), "admin"))
+	out, err := st.loadCreatedKeyFromDB(context.Background(), &TeamAPIKeyEntity{UID: uuid.NewString(), CreatedByUID: &badCB})
+	require.NoError(t, err)
+	require.Nil(t, out.CreatedBy)
 
 	mock.ExpectQuery("SELECT .*FROM `team_api_keys`.*").WillReturnRows(sqlmock.NewRows([]string{"id", "uid", "name", "team_id"}).AddRow(1, uuid.NewString(), "ok", 9))
 	mock.ExpectQuery("SELECT .*FROM `teams`.*").WillReturnRows(sqlmock.NewRows([]string{"id", "uid", "name"}).AddRow(9, AdminTeamUID.String(), "admin"))
-	out, err := st.loadCreatedKeyFromDB(context.Background(), &TeamAPIKeyEntity{UID: uuid.NewString()})
+	out, err = st.loadCreatedKeyFromDB(context.Background(), &TeamAPIKeyEntity{UID: uuid.NewString()})
 	require.NoError(t, err)
 	require.Equal(t, "ok", out.Name)
 	require.Empty(t, out.Key)

@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
@@ -123,6 +124,8 @@ func TestCreateAPIKey(t *testing.T) {
 				assert.Equal(t, tt.expectCode, resp.Code)
 				assert.NotEmpty(t, resp.Body.Key)
 				assert.Equal(t, tt.request.Name, resp.Body.Name)
+				require.NotNil(t, resp.Body.CreatedBy)
+				assert.Equal(t, tt.user.ID, resp.Body.CreatedBy.ID)
 			}
 		})
 	}
@@ -138,10 +141,26 @@ func TestDeleteAPIKey(t *testing.T) {
 		Name: "admin",
 	}
 
-	// Create a key to delete later
-	createResp, apiError := controller.CreateAPIKey(NewRequest(t, nil, models.NewTeamAPIKey{Name: "key-to-delete"}, nil, adminUser))
-	require.Nil(t, apiError)
-	createdKeyID := createResp.Body.ID
+	// Create a key with a different CreatedBy but same team to verify team-based auth ignores CreatedBy
+	sameTeamOtherUser := &models.CreatedTeamAPIKey{
+		ID:   uuid.New(),
+		Name: "other-user",
+		Team: models.AdminTeam(),
+	}
+	ctx := logs.NewContext()
+	sameTeamKey, err := controller.keys.CreateKey(ctx, sameTeamOtherUser, "same-team-key")
+	require.NoError(t, err)
+	require.NotNil(t, sameTeamKey)
+
+	// Create a Key of another team
+	differentTeamUser := &models.CreatedTeamAPIKey{
+		ID:   adminUser.ID,
+		Name: "different-team-user",
+		Team: &models.Team{ID: uuid.New(), Name: "target-team"},
+	}
+	differentTeamKey, err := controller.keys.CreateKey(ctx, differentTeamUser, "different-team-key")
+	require.NoError(t, err)
+	require.NotNil(t, differentTeamKey)
 
 	tests := []struct {
 		name        string
@@ -151,9 +170,9 @@ func TestDeleteAPIKey(t *testing.T) {
 		expectCode  int
 	}{
 		{
-			name:       "success - delete api key by creator",
+			name:       "success - delete api key by same team even with different creator",
 			user:       adminUser,
-			pathValues: map[string]string{"apiKeyID": createdKeyID.String()},
+			pathValues: map[string]string{"apiKeyID": sameTeamKey.ID.String()},
 			expectCode: http.StatusNoContent,
 		},
 		{
@@ -175,11 +194,11 @@ func TestDeleteAPIKey(t *testing.T) {
 			},
 		},
 		{
-			name:       "fail with unauthorized user",
-			user:       &models.CreatedTeamAPIKey{ID: uuid.New(), Key: "other-key", Name: "other"},
-			pathValues: map[string]string{"apiKeyID": keys.AdminKeyID.String()},
+			name:       "fail with different team even when created by user",
+			user:       adminUser,
+			pathValues: map[string]string{"apiKeyID": differentTeamKey.ID.String()},
 			expectError: &web.ApiError{
-				Code:    http.StatusUnauthorized,
+				Code:    http.StatusForbidden,
 				Message: "You are not allowed to delete this API key",
 			},
 		},

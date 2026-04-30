@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
 )
@@ -94,9 +95,9 @@ func (sc *Controller) DeleteAPIKey(r *http.Request) (web.ApiResponse[struct{}], 
 			Message: "API key not found",
 		}
 	}
-	if key.CreatedBy == nil || key.CreatedBy.ID != user.ID && key.ID != user.ID {
+	if keys.TeamForKey(user).ID != keys.TeamForKey(key).ID {
 		return web.ApiResponse[struct{}]{}, &web.ApiError{
-			Code:    http.StatusUnauthorized,
+			Code:    http.StatusForbidden,
 			Message: "You are not allowed to delete this API key",
 		}
 	}
@@ -111,3 +112,4 @@ func (sc *Controller) DeleteAPIKey(r *http.Request) (web.ApiResponse[struct{}], 
 		Code: http.StatusNoContent,
 	}, nil
 }
+

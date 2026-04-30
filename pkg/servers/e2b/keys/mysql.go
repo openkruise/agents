@@ -75,10 +75,11 @@ func (TeamEntity) TableName() string { return "teams" }
 // KeyHash holds HMAC-SHA256(pepper, raw API key) as hex (64 chars), never plaintext.
 type TeamAPIKeyEntity struct {
 	gorm.Model
-	UID          string  `gorm:"column:uid;type:varchar(36);uniqueIndex;not null"`
-	Name         string  `gorm:"type:varchar(255);not null"`
-	KeyHash      string  `gorm:"column:key_hash;type:char(64);uniqueIndex;not null"`
-	TeamID       uint    `gorm:"not null;index"`
+	UID     string `gorm:"column:uid;type:varchar(36);uniqueIndex;not null"`
+	Name    string `gorm:"type:varchar(255);not null"`
+	KeyHash string `gorm:"column:key_hash;type:char(64);uniqueIndex;not null"`
+	TeamID  uint   `gorm:"not null;index"`
+	// CreatedByUID is creator metadata only. Do not use it for ownership or authorization.
 	CreatedByUID *string `gorm:"column:created_by_uid;type:varchar(36);index"`
 }
 
@@ -255,7 +256,7 @@ func (k *mysqlKeyStorage) CreateKey(ctx context.Context, user *models.CreatedTea
 	if name == "" || user == nil {
 		return nil, errors.New("api-key name and user are required")
 	}
-	team := teamForKey(user)
+	team := TeamForKey(user)
 	teamID, err := k.teamIDByUID(ctx, team.ID.String())
 	if err != nil {
 		return nil, err
@@ -385,6 +386,7 @@ func (k *mysqlKeyStorage) ListByOwner(ctx context.Context, owner uuid.UUID) ([]*
 			ID:        id,
 			Name:      e.Name,
 			Mask:      models.IdentifierMaskingDetails{},
+			CreatedBy: teamUserFromUID(ctx, e.CreatedByUID),
 		}
 		out = append(out, tk)
 	}
@@ -405,6 +407,18 @@ func (k *mysqlKeyStorage) teamIDByUID(ctx context.Context, uid string) (uint, er
 	return team.ID, nil
 }
 
+func teamUserFromUID(ctx context.Context, uid *string) *models.TeamUser {
+	if uid == nil || *uid == "" {
+		return nil
+	}
+	id, err := uuid.Parse(*uid)
+	if err != nil {
+		klog.FromContext(ctx).Error(err, "invalid created_by_uid in key entity", "created_by_uid", *uid)
+		return nil
+	}
+	return &models.TeamUser{ID: id}
+}
+
 func (k *mysqlKeyStorage) loadCreatedKeyFromDB(ctx context.Context, where *TeamAPIKeyEntity) (*models.CreatedTeamAPIKey, error) {
 	var e TeamAPIKeyEntity
 	if err := k.db.WithContext(ctx).Where(where).First(&e).Error; err != nil {
@@ -414,14 +428,7 @@ func (k *mysqlKeyStorage) loadCreatedKeyFromDB(ctx context.Context, where *TeamA
 	if err != nil {
 		return nil, fmt.Errorf("parse entity uid %q: %w", e.UID, err)
 	}
-	var createdBy *models.TeamUser
-	if e.CreatedByUID != nil && *e.CreatedByUID != "" {
-		cbID, err := uuid.Parse(*e.CreatedByUID)
-		if err != nil {
-			return nil, fmt.Errorf("parse created_by_uid %q: %w", *e.CreatedByUID, err)
-		}
-		createdBy = &models.TeamUser{ID: cbID}
-	}
+	createdBy := teamUserFromUID(ctx, e.CreatedByUID)
 
 	var teamEntity TeamEntity
 	if err := k.db.WithContext(ctx).Where(&TeamEntity{Model: gorm.Model{ID: e.TeamID}}).First(&teamEntity).Error; err != nil {
