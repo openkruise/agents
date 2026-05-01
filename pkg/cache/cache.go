@@ -210,19 +210,19 @@ func (c *Cache) Stop(ctx context.Context) {
 	log.V(consts.DebugLogLevel).Info("Cache stopped")
 }
 
-// GetClaimedSandbox retrieves a sandbox by its logical sandbox ID.
-func (c *Cache) GetClaimedSandbox(ctx context.Context, sandboxID string) (*agentsv1alpha1.Sandbox, error) {
-	resultVal, err, _ := c.indexGetGroup.Do("claimed-sandbox:"+sandboxID, func() (any, error) {
+func (c *Cache) GetClaimedSandbox(ctx context.Context, opts GetClaimedSandboxOptions) (*agentsv1alpha1.Sandbox, error) {
+	resultVal, err, _ := c.indexGetGroup.Do("claimed-sandbox:"+opts.Namespace+":"+opts.SandboxID, func() (any, error) {
 		list := &agentsv1alpha1.SandboxList{}
-		err := c.client.List(ctx, list, ctrlclient.MatchingFields{IndexClaimedSandboxID: sandboxID})
+		listOpts := []ctrlclient.ListOption{ctrlclient.MatchingFields{IndexClaimedSandboxID: opts.SandboxID}, ctrlclient.Limit(1)}
+		if opts.Namespace != "" {
+			listOpts = append(listOpts, ctrlclient.InNamespace(opts.Namespace))
+		}
+		err := c.client.List(ctx, list, listOpts...)
 		if err != nil {
 			return nil, err
 		}
 		if len(list.Items) == 0 {
-			return nil, fmt.Errorf("sandbox %s not found in cache", sandboxID)
-		}
-		if len(list.Items) > 1 {
-			return nil, fmt.Errorf("multiple sandboxes found with id %s", sandboxID)
+			return nil, fmt.Errorf("sandbox %s not found in cache", opts.SandboxID)
 		}
 		return &list.Items[0], nil
 	})
@@ -232,19 +232,19 @@ func (c *Cache) GetClaimedSandbox(ctx context.Context, sandboxID string) (*agent
 	return resultVal.(*agentsv1alpha1.Sandbox), nil
 }
 
-// GetCheckpoint retrieves a Checkpoint by its logical checkpoint ID.
-func (c *Cache) GetCheckpoint(ctx context.Context, checkpointID string) (*agentsv1alpha1.Checkpoint, error) {
-	resultVal, err, _ := c.indexGetGroup.Do("checkpoint-id:"+checkpointID, func() (any, error) {
+func (c *Cache) GetCheckpoint(ctx context.Context, opts GetCheckpointOptions) (*agentsv1alpha1.Checkpoint, error) {
+	resultVal, err, _ := c.indexGetGroup.Do("checkpoint-id:"+opts.Namespace+":"+opts.CheckpointID, func() (any, error) {
 		list := &agentsv1alpha1.CheckpointList{}
-		err := c.client.List(ctx, list, ctrlclient.MatchingFields{IndexCheckpointID: checkpointID})
+		listOpts := []ctrlclient.ListOption{ctrlclient.MatchingFields{IndexCheckpointID: opts.CheckpointID}, ctrlclient.Limit(1)}
+		if opts.Namespace != "" {
+			listOpts = append(listOpts, ctrlclient.InNamespace(opts.Namespace))
+		}
+		err := c.client.List(ctx, list, listOpts...)
 		if err != nil {
 			return nil, err
 		}
 		if len(list.Items) == 0 {
-			return nil, fmt.Errorf("checkpoint %s not found in cache", checkpointID)
-		}
-		if len(list.Items) > 1 {
-			return nil, fmt.Errorf("multiple checkpoints found with id %s", checkpointID)
+			return nil, fmt.Errorf("checkpoint %s not found in cache", opts.CheckpointID)
 		}
 		return &list.Items[0], nil
 	})
@@ -254,16 +254,19 @@ func (c *Cache) GetCheckpoint(ctx context.Context, checkpointID string) (*agents
 	return resultVal.(*agentsv1alpha1.Checkpoint), nil
 }
 
-// PickSandboxSet retrieves a SandboxSet by name.
-func (c *Cache) PickSandboxSet(ctx context.Context, name string) (*agentsv1alpha1.SandboxSet, error) {
-	resultVal, err, _ := c.indexGetGroup.Do("sandboxset-name:"+name, func() (any, error) {
+func (c *Cache) PickSandboxSet(ctx context.Context, opts PickSandboxSetOptions) (*agentsv1alpha1.SandboxSet, error) {
+	resultVal, err, _ := c.indexGetGroup.Do("sandboxset-name:"+opts.Namespace+":"+opts.Name, func() (any, error) {
 		list := &agentsv1alpha1.SandboxSetList{}
-		err := c.client.List(ctx, list, ctrlclient.MatchingFields{IndexTemplateID: name})
+		listOpts := []ctrlclient.ListOption{ctrlclient.MatchingFields{IndexTemplateID: opts.Name}}
+		if opts.Namespace != "" {
+			listOpts = append(listOpts, ctrlclient.InNamespace(opts.Namespace))
+		}
+		err := c.client.List(ctx, list, listOpts...)
 		if err != nil {
-			return nil, fmt.Errorf("failed to get sandboxset %s from cache: %w", name, err)
+			return nil, fmt.Errorf("failed to get sandboxset %s from cache: %w", opts.Name, err)
 		}
 		if len(list.Items) == 0 {
-			return nil, fmt.Errorf("sandboxset %s not found in cache", name)
+			return nil, fmt.Errorf("sandboxset %s not found in cache", opts.Name)
 		}
 		return &list.Items[0], nil
 	})
@@ -273,11 +276,20 @@ func (c *Cache) PickSandboxSet(ctx context.Context, name string) (*agentsv1alpha
 	return resultVal.(*agentsv1alpha1.SandboxSet), nil
 }
 
-// ListSandboxWithUser returns all sandboxes owned by the given user.
-func (c *Cache) ListSandboxWithUser(ctx context.Context, user string) ([]*agentsv1alpha1.Sandbox, error) {
+func listObjectWithUserAndNamespace[T ctrlclient.ObjectList](ctx context.Context, client ctrlclient.Client, list T, user, namespace string) error {
+	var listOpts []ctrlclient.ListOption
+	if namespace != "" {
+		listOpts = append(listOpts, ctrlclient.InNamespace(namespace))
+	}
+	if user != "" {
+		listOpts = append(listOpts, ctrlclient.MatchingFields{IndexUser: user})
+	}
+	return client.List(ctx, list, listOpts...)
+}
+
+func (c *Cache) ListSandboxes(ctx context.Context, opts ListSandboxesOptions) ([]*agentsv1alpha1.Sandbox, error) {
 	list := &agentsv1alpha1.SandboxList{}
-	err := c.client.List(ctx, list, ctrlclient.MatchingFields{IndexUser: user})
-	if err != nil {
+	if err := listObjectWithUserAndNamespace(ctx, c.client, list, opts.User, opts.Namespace); err != nil {
 		return nil, err
 	}
 	result := make([]*agentsv1alpha1.Sandbox, 0, len(list.Items))
@@ -287,11 +299,9 @@ func (c *Cache) ListSandboxWithUser(ctx context.Context, user string) ([]*agents
 	return result, nil
 }
 
-// ListCheckpointsWithUser returns all checkpoints owned by the given user.
-func (c *Cache) ListCheckpointsWithUser(ctx context.Context, user string) ([]*agentsv1alpha1.Checkpoint, error) {
+func (c *Cache) ListCheckpoints(ctx context.Context, opts ListCheckpointsOptions) ([]*agentsv1alpha1.Checkpoint, error) {
 	list := &agentsv1alpha1.CheckpointList{}
-	err := c.client.List(ctx, list, ctrlclient.MatchingFields{IndexUser: user})
-	if err != nil {
+	if err := listObjectWithUserAndNamespace(ctx, c.client, list, opts.User, opts.Namespace); err != nil {
 		return nil, err
 	}
 	result := make([]*agentsv1alpha1.Checkpoint, 0, len(list.Items))
@@ -301,11 +311,14 @@ func (c *Cache) ListCheckpointsWithUser(ctx context.Context, user string) ([]*ag
 	return result, nil
 }
 
-// ListSandboxesInPool returns all sandboxes in the pool for the given template.
-func (c *Cache) ListSandboxesInPool(ctx context.Context, pool string) ([]*agentsv1alpha1.Sandbox, error) {
-	resultVal, err, _ := c.indexGetGroup.Do("sandbox-pool:"+pool, func() (any, error) {
+func (c *Cache) ListSandboxesInPool(ctx context.Context, opts ListSandboxesInPoolOptions) ([]*agentsv1alpha1.Sandbox, error) {
+	resultVal, err, _ := c.indexGetGroup.Do("sandbox-pool:"+opts.Namespace+":"+opts.Pool, func() (any, error) {
 		list := &agentsv1alpha1.SandboxList{}
-		if err := c.client.List(ctx, list, ctrlclient.MatchingFields{IndexSandboxPool: pool}); err != nil {
+		listOpts := []ctrlclient.ListOption{ctrlclient.MatchingFields{IndexSandboxPool: opts.Pool}}
+		if opts.Namespace != "" {
+			listOpts = append(listOpts, ctrlclient.InNamespace(opts.Namespace))
+		}
+		if err := c.client.List(ctx, list, listOpts...); err != nil {
 			return nil, err
 		}
 		result := make([]*agentsv1alpha1.Sandbox, 0, len(list.Items))

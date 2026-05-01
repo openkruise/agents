@@ -28,6 +28,7 @@ import (
 )
 
 type ClaimSandboxOptions struct {
+	Namespace string `json:"namespace,omitempty"`
 	// User specifies the owner of sandbox, Required
 	User string `json:"user"`
 	// Template specifies the pool to claim sandbox from, Required
@@ -62,6 +63,7 @@ type ClaimSandboxOptions struct {
 }
 
 type CloneSandboxOptions struct {
+	Namespace          string                  `json:"namespace,omitempty"`
 	User               string                  `json:"user"`
 	CheckPointID       string                  `json:"checkPointID"`
 	WaitReadyTimeout   time.Duration           `json:"waitReadyTimeout"`

@@ -150,6 +150,16 @@ func TestListTemplates(t *testing.T) {
 		ID:   keys.AdminKeyID,
 		Key:  InitKey,
 		Name: "admin",
+		Team: models.AdminTeam(),
+	}
+	teamAUser := &models.CreatedTeamAPIKey{
+		ID:   uuid.New(),
+		Key:  "team-a-key",
+		Name: "team-a-user",
+		Team: &models.Team{
+			ID:   uuid.New(),
+			Name: "team-a",
+		},
 	}
 
 	tests := []struct {
@@ -163,11 +173,10 @@ func TestListTemplates(t *testing.T) {
 		validateFunc func(t *testing.T, templates []*models.TemplateInfo)
 	}{
 		{
-			name: "list templates successfully",
+			name: "admin lists templates across namespaces",
 			setupPools: func(t *testing.T, controller *Controller, fc ctrlclient.Client) []func() {
-				// Create pools in sandbox-system namespace (systemNamespace) so they can be found by ListTemplates
-				cleanup1 := CreateSandboxPool(t, controller, "test-pool-1", 2, CreateSandboxPoolOptions{Namespace: "sandbox-system"})
-				cleanup2 := CreateSandboxPool(t, controller, "test-pool-2", 1, CreateSandboxPoolOptions{Namespace: "sandbox-system"})
+				cleanup1 := CreateSandboxPool(t, controller, "test-pool-1", 2, CreateSandboxPoolOptions{Namespace: "team-a"})
+				cleanup2 := CreateSandboxPool(t, controller, "test-pool-2", 1, CreateSandboxPoolOptions{Namespace: "team-b"})
 				return []func(){cleanup1, cleanup2}
 			},
 			queryTeamID:  "",
@@ -193,16 +202,17 @@ func TestListTemplates(t *testing.T) {
 			},
 		},
 		{
-			name: "list templates with teamID filter",
+			name: "list templates ignores query teamID and uses caller team namespace",
 			setupPools: func(t *testing.T, controller *Controller, fc ctrlclient.Client) []func() {
 				cleanup1 := CreateSandboxPool(t, controller, "team-a-pool", 1, CreateSandboxPoolOptions{Namespace: "team-a"})
-				return []func(){cleanup1}
+				cleanup2 := CreateSandboxPool(t, controller, "team-b-pool", 1, CreateSandboxPoolOptions{Namespace: "team-b"})
+				return []func(){cleanup1, cleanup2}
 			},
-			queryTeamID:  "team-a",
-			user:         user,
+			queryTeamID:  "team-b",
+			user:         teamAUser,
 			expectStatus: http.StatusOK,
 			expectError:  false,
-			expectCount:  1, // team-a namespace has one pool
+			expectCount:  1,
 			validateFunc: func(t *testing.T, templates []*models.TemplateInfo) {
 				assert.Len(t, templates, 1)
 				assert.Equal(t, "team-a-pool", templates[0].TemplateID)
@@ -267,6 +277,7 @@ func TestGetTemplate(t *testing.T) {
 		ID:   keys.AdminKeyID,
 		Key:  InitKey,
 		Name: "admin",
+		Team: models.AdminTeam(),
 	}
 
 	tests := []struct {
@@ -279,10 +290,9 @@ func TestGetTemplate(t *testing.T) {
 		validateFunc func(t *testing.T, template *models.Template)
 	}{
 		{
-			name: "get template successfully",
+			name: "admin gets template across namespaces",
 			setupPool: func(t *testing.T, controller *Controller, fc ctrlclient.Client) func() {
-				// Create pool in sandbox-system namespace (systemNamespace) so it can be found by GetTemplate
-				return CreateSandboxPool(t, controller, "test-tmpl-get", 2, CreateSandboxPoolOptions{Namespace: "sandbox-system"})
+				return CreateSandboxPool(t, controller, "test-tmpl-get", 2, CreateSandboxPoolOptions{Namespace: "team-a"})
 			},
 			templateID:   "test-tmpl-get",
 			user:         user,

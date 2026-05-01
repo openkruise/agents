@@ -19,6 +19,7 @@ package e2b
 // GET /v2/sandboxes
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -132,7 +133,10 @@ func (sc *Controller) ListSandboxes(r *http.Request) (web.ApiResponse[[]*models.
 
 	log.Info("will list sandboxes", "user", user.Name, "userID", user.ID, "request", request)
 
-	sandboxes, nextToken, err := sc.manager.ListSandboxes(r.Context(), user.ID.String(), &utils.Paginator[infra.Sandbox]{
+	sandboxes, nextToken, err := sc.manager.ListSandboxes(r.Context(), infra.SelectSandboxesOptions{
+		Namespace: sc.getNamespaceOfUser(user),
+		User:      user.ID.String(),
+	}, &utils.Paginator[infra.Sandbox]{
 		Limit:     request.Limit,
 		NextToken: request.NextToken,
 		Filter:    getListFilter(request),
@@ -241,14 +245,7 @@ func (sc *Controller) ListSnapshots(r *http.Request) (web.ApiResponse[[]*models.
 		return true
 	}
 
-	checkpoints, nextToken, err := sc.manager.ListCheckpoints(r.Context(), user.ID.String(), &utils.Paginator[infra.CheckpointInfo]{
-		Limit:     limit,
-		NextToken: nextTokenParam,
-		GetKey: func(cp infra.CheckpointInfo) string {
-			return cp.CreationTimestamp // Sort by creation timestamp
-		},
-		Filter: filter,
-	})
+	checkpoints, nextToken, err := sc.listCheckpointsForUser(r.Context(), user, limit, nextTokenParam, filter)
 	if err != nil {
 		return web.ApiResponse[[]*models.Snapshot]{}, &web.ApiError{
 			Code:    http.StatusNotFound,
@@ -276,4 +273,18 @@ func (sc *Controller) ListSnapshots(r *http.Request) (web.ApiResponse[[]*models.
 		Headers: headers,
 		Body:    snapshots,
 	}, nil
+}
+
+func (sc *Controller) listCheckpointsForUser(ctx context.Context, user *models.CreatedTeamAPIKey, limit int, nextTokenParam string, filter func(cp infra.CheckpointInfo) bool) ([]infra.CheckpointInfo, string, error) {
+	return sc.manager.ListCheckpoints(ctx, infra.SelectSucceededCheckpointsOptions{
+		Namespace: sc.getNamespaceOfUser(user),
+		User:      user.ID.String(),
+	}, &utils.Paginator[infra.CheckpointInfo]{
+		Limit:     limit,
+		NextToken: nextTokenParam,
+		GetKey: func(cp infra.CheckpointInfo) string {
+			return cp.CreationTimestamp // Sort by creation timestamp
+		},
+		Filter: filter,
+	})
 }

@@ -78,7 +78,16 @@ type TeamAPIKey struct {
 
 // NewTeamAPIKey represents a request to create a new team API key
 type NewTeamAPIKey struct {
-	Name string `json:"name"`
+	Name     string `json:"name"`
+	TeamName string `json:"teamName,omitempty"`
+}
+
+// ListedTeam represents a team returned by the upstream-compatible GET /teams API.
+type ListedTeam struct {
+	TeamID    string `json:"teamID"`
+	Name      string `json:"name"`
+	APIKey    string `json:"apiKey"`
+	IsDefault bool   `json:"isDefault"`
 }
 
 // UpdateTeamAPIKey represents a request to update a team API key

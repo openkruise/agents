@@ -50,7 +50,9 @@ import (
 
 func imageChecker(image string, controller *Controller) func(t *testing.T, resp *models.Sandbox) {
 	return func(t *testing.T, resp *models.Sandbox) {
-		sbx, err := controller.manager.GetClaimedSandbox(t.Context(), keys.AdminKeyID.String(), resp.SandboxID)
+		sbx, err := controller.manager.GetClaimedSandbox(t.Context(), keys.AdminKeyID.String(), infra.GetClaimedSandboxOptions{
+			SandboxID: resp.SandboxID,
+		})
 		assert.NoError(t, err)
 		assert.Equal(t, image, sbx.GetImage())
 	}
@@ -249,7 +251,9 @@ func TestCreateSandbox(t *testing.T) {
 			},
 			postCheck: func(t *testing.T, resp *models.Sandbox) {
 				assert.Empty(t, resp.EndAt)
-				sbx, err := controller.manager.GetClaimedSandbox(t.Context(), keys.AdminKeyID.String(), resp.SandboxID)
+				sbx, err := controller.manager.GetClaimedSandbox(t.Context(), keys.AdminKeyID.String(), infra.GetClaimedSandboxOptions{
+					SandboxID: resp.SandboxID,
+				})
 				assert.NoError(t, err)
 				assert.Equal(t, infra.TimeoutOptions{}, sbx.GetTimeout())
 			},
@@ -375,7 +379,9 @@ func TestCreateSandbox(t *testing.T) {
 
 				assert.NotContains(t, sbx.Spec.Template.Labels, "regular-metadata-key")
 
-				sandboxFromManager, err := controller.manager.GetClaimedSandbox(t.Context(), keys.AdminKeyID.String(), resp.SandboxID)
+				sandboxFromManager, err := controller.manager.GetClaimedSandbox(t.Context(), keys.AdminKeyID.String(), infra.GetClaimedSandboxOptions{
+					SandboxID: resp.SandboxID,
+				})
 				assert.NoError(t, err)
 				assert.NotNil(t, sandboxFromManager.GetPodLabels())
 				assert.Equal(t, "my-app", sandboxFromManager.GetPodLabels()["app"])
@@ -457,7 +463,9 @@ func TestCreateSandbox(t *testing.T) {
 				AccessToken: runtime.AccessToken,
 			})
 			require.Eventually(t, func() bool {
-				list, err := controller.cache.ListSandboxesInPool(t.Context(), templateName)
+				list, err := controller.cache.ListSandboxesInPool(t.Context(), cache.ListSandboxesInPoolOptions{
+					Pool: templateName,
+				})
 				return err == nil && len(list) == tt.available
 			}, time.Second, 50*time.Millisecond)
 			defer cleanup()
@@ -563,7 +571,9 @@ func CreateCheckpointAndTemplate(t *testing.T, controller *Controller, checkpoin
 	err = fc.Status().Update(t.Context(), cp)
 	require.NoError(t, err)
 	require.Eventually(t, func() bool {
-		return controller.manager.GetInfra().HasCheckpoint(t.Context(), checkpointID)
+		return controller.manager.GetInfra().HasCheckpoint(t.Context(), infra.HasCheckpointOptions{
+			CheckpointID: checkpointID,
+		})
 	}, time.Second, 10*time.Millisecond)
 
 	return func() {
@@ -631,7 +641,9 @@ func CreateCheckpointAndTemplateWithAnnotations(t *testing.T, controller *Contro
 	err = fc.Status().Update(t.Context(), cp)
 	require.NoError(t, err)
 	require.Eventually(t, func() bool {
-		return controller.manager.GetInfra().HasCheckpoint(t.Context(), checkpointID)
+		return controller.manager.GetInfra().HasCheckpoint(t.Context(), infra.HasCheckpointOptions{
+			CheckpointID: checkpointID,
+		})
 	}, time.Second, 10*time.Millisecond)
 
 	return func() {
@@ -787,7 +799,9 @@ func TestCloneSandbox(t *testing.T) {
 			},
 			postCheck: func(t *testing.T, resp *models.Sandbox, controller *Controller) {
 				assert.Equal(t, "0001-01-01T00:00:00Z", resp.EndAt)
-				sbx, err := controller.manager.GetClaimedSandbox(t.Context(), keys.AdminKeyID.String(), resp.SandboxID)
+				sbx, err := controller.manager.GetClaimedSandbox(t.Context(), keys.AdminKeyID.String(), infra.GetClaimedSandboxOptions{
+					SandboxID: resp.SandboxID,
+				})
 				assert.NoError(t, err)
 				assert.Equal(t, infra.TimeoutOptions{}, sbx.GetTimeout())
 			},
@@ -800,7 +814,9 @@ func TestCloneSandbox(t *testing.T) {
 				AutoPause:  true,
 			},
 			postCheck: func(t *testing.T, resp *models.Sandbox, controller *Controller) {
-				sbx, err := controller.manager.GetClaimedSandbox(t.Context(), keys.AdminKeyID.String(), resp.SandboxID)
+				sbx, err := controller.manager.GetClaimedSandbox(t.Context(), keys.AdminKeyID.String(), infra.GetClaimedSandboxOptions{
+					SandboxID: resp.SandboxID,
+				})
 				assert.NoError(t, err)
 				// When autoPause is true, both ShutdownTime and PauseTime should be set
 				assert.NotNil(t, sbx.GetTimeout().ShutdownTime)

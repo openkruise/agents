@@ -64,8 +64,9 @@ type secretKeyStorage struct {
 	done      chan struct{}
 	stopOnce  sync.Once
 
-	idxByKey sync.Map
-	idxByID  sync.Map
+	idxByKey  sync.Map
+	idxByID   sync.Map
+	idxByTeam sync.Map // teamName -> *models.Team
 }
 
 func NewSecretKeyStorage(client client.Client, apiReader client.Reader, namespace, adminKey string) KeyStorage {
@@ -115,7 +116,7 @@ func (k *secretKeyStorage) refresh(ctx context.Context, reader client.Reader) er
 	if err := reader.Get(ctx, client.ObjectKey{Namespace: k.Namespace, Name: KeySecretName}, secret); err != nil {
 		return err
 	}
-	var ids, keys = sets.NewString(), sets.NewString()
+	var ids, keys, teamNames = sets.NewString(), sets.NewString(), sets.NewString()
 	for id, bytes := range secret.Data {
 		var apiKey models.CreatedTeamAPIKey
 		err := json.Unmarshal(bytes, &apiKey)
@@ -126,7 +127,12 @@ func (k *secretKeyStorage) refresh(ctx context.Context, reader client.Reader) er
 		k.storeKey(&apiKey)
 		keys.Insert(apiKey.Key)
 		ids.Insert(id)
+		if apiKey.Team != nil {
+			teamNames.Insert(apiKey.Team.Name)
+		}
 	}
+
+	// clean up out-dated keys
 	k.idxByKey.Range(func(key, _ any) bool {
 		if !keys.Has(key.(string)) {
 			k.idxByKey.Delete(key)
@@ -136,6 +142,12 @@ func (k *secretKeyStorage) refresh(ctx context.Context, reader client.Reader) er
 	k.idxByID.Range(func(id, _ any) bool {
 		if !ids.Has(id.(string)) {
 			k.idxByID.Delete(id)
+		}
+		return true
+	})
+	k.idxByTeam.Range(func(name, _ any) bool {
+		if !teamNames.Has(name.(string)) {
+			k.idxByTeam.Delete(name)
 		}
 		return true
 	})
@@ -224,12 +236,25 @@ func (k *secretKeyStorage) storeKey(apiKey *models.CreatedTeamAPIKey) {
 	}
 	k.idxByKey.Store(apiKey.Key, apiKey)
 	k.idxByID.Store(apiKey.ID.String(), apiKey)
+	k.idxByTeam.Store(apiKey.Team.Name, cloneTeam(apiKey.Team))
 }
 
-func (k *secretKeyStorage) CreateKey(ctx context.Context, user *models.CreatedTeamAPIKey, name string) (*models.CreatedTeamAPIKey, error) {
-	log := klog.FromContext(ctx).WithValues("name", name).V(consts.DebugLogLevel)
-	if name == "" || user == nil {
-		return nil, errors.New("api-key name and user are required")
+func (k *secretKeyStorage) CreateKey(ctx context.Context, key *models.CreatedTeamAPIKey, opts CreateKeyOptions) (*models.CreatedTeamAPIKey, error) {
+	log := klog.FromContext(ctx).WithValues("name", opts.Name).V(consts.DebugLogLevel)
+	teamName, err := validateCreateKeyOptions(key, opts)
+	if err != nil {
+		return nil, err
+	}
+	var team *models.Team
+	callerTeam := TeamForKey(key)
+	if callerTeam.Name == teamName {
+		team = cloneTeam(callerTeam)
+	} else if foundTeam, found, err := k.FindTeamByName(ctx, teamName); err != nil {
+		return nil, err
+	} else if found {
+		team = foundTeam
+	} else {
+		team = &models.Team{ID: generateUUID(), Name: teamName}
 	}
 
 	var newID, newKey uuid.UUID
@@ -251,10 +276,10 @@ func (k *secretKeyStorage) CreateKey(ctx context.Context, user *models.CreatedTe
 		ID:        newID,
 		Key:       newKey.String(),
 		Mask:      models.IdentifierMaskingDetails{},
-		Name:      name,
-		Team:      TeamForKey(user),
+		Name:      opts.Name,
+		Team:      cloneTeam(team),
 		CreatedBy: &models.TeamUser{
-			ID: user.ID,
+			ID: key.ID,
 		},
 	}
 
@@ -270,6 +295,10 @@ func (k *secretKeyStorage) CreateKey(ctx context.Context, user *models.CreatedTe
 func (k *secretKeyStorage) DeleteKey(ctx context.Context, key *models.CreatedTeamAPIKey) error {
 	if key == nil {
 		return nil
+	}
+	// The last key of admin team cannot be deleted
+	if TeamForKey(key).ID == models.AdminTeamID && k.activeKeyCountForTeam(models.AdminTeamID) <= 1 {
+		return ErrLastAdminKey
 	}
 	err := k.retryUpdateSecret(ctx, key.ID.String(), nil)
 	if err != nil {
@@ -304,11 +333,45 @@ func (k *secretKeyStorage) ListByOwner(ctx context.Context, owner uuid.UUID) ([]
 	return result, nil
 }
 
-// TeamForKey returns the team for an API key, defaulting to AdminTeam for legacy keys without team information.
-func TeamForKey(user *models.CreatedTeamAPIKey) *models.Team {
-	if user == nil || user.Team == nil { // user will never be nil, just in case
-		// Compatibility with old keys without team information
-		return models.AdminTeam()
+func (k *secretKeyStorage) ListTeams(_ context.Context, user *models.CreatedTeamAPIKey) ([]*models.ListedTeam, error) {
+	if user == nil {
+		return nil, nil
 	}
-	return user.Team
+	userTeam := TeamForKey(user)
+	isAdmin := userTeam.ID == models.AdminTeamID
+	teamsByName := map[string]*models.Team{}
+	k.idxByID.Range(func(_, value any) bool {
+		team := TeamForKey(value.(*models.CreatedTeamAPIKey))
+		if !isAdmin && team.ID != userTeam.ID {
+			return true
+		}
+		if _, exists := teamsByName[team.Name]; !exists {
+			teamsByName[team.Name] = cloneTeam(team)
+		}
+		return true
+	})
+	result := make([]*models.ListedTeam, 0, len(teamsByName))
+	for _, team := range teamsByName {
+		result = append(result, listedTeam(team, team.ID == userTeam.ID))
+	}
+	return result, nil
+}
+
+func (k *secretKeyStorage) FindTeamByName(_ context.Context, teamName string) (*models.Team, bool, error) {
+	value, ok := k.idxByTeam.Load(teamName)
+	if !ok {
+		return nil, false, nil
+	}
+	return cloneTeam(value.(*models.Team)), true, nil
+}
+
+func (k *secretKeyStorage) activeKeyCountForTeam(teamID uuid.UUID) int {
+	count := 0
+	k.idxByID.Range(func(_, value any) bool {
+		if TeamForKey(value.(*models.CreatedTeamAPIKey)).ID == teamID {
+			count++
+		}
+		return true
+	})
+	return count
 }

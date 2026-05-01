@@ -58,7 +58,7 @@ import (
 )
 
 var TestServerPort = 9999
-var Namespace = "default"
+var Namespace = models.AdminTeamName
 var InitKey = "admin-987654321"
 
 func CreateSandboxWithStatus(t *testing.T, c ctrlclient.Client, sbx *agentsv1alpha1.Sandbox) {
@@ -283,7 +283,10 @@ func CreateSandboxPool(t *testing.T, controller *Controller, name string, availa
 		CreateSandboxWithStatus(t, fc, sbx)
 	}
 	require.Eventually(t, func() bool {
-		pool, _ := controller.cache.ListSandboxesInPool(t.Context(), name)
+		pool, _ := controller.cache.ListSandboxesInPool(t.Context(), infracache.ListSandboxesInPoolOptions{
+			Namespace: ns,
+			Pool:      name,
+		})
 		return len(pool) == available
 	}, time.Minute, 100*time.Millisecond)
 	return func() {

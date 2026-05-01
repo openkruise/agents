@@ -267,7 +267,9 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 					CreateSandboxWithStatus(t, client, testSbx)
 				}
 				require.Eventually(t, func() bool {
-					list, err := manager.GetInfra().GetCache().ListSandboxesInPool(t.Context(), template)
+					list, err := manager.GetInfra().GetCache().ListSandboxesInPool(t.Context(), infracache.ListSandboxesInPoolOptions{
+						Pool: template,
+					})
 					if err != nil {
 						return false
 					}
@@ -312,6 +314,65 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSandboxManager_NamespaceAwareSandboxOptions(t *testing.T) {
+	manager, client := setupTestManager(t)
+	sandboxes := []*agentsv1alpha1.Sandbox{
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        "sandbox-a",
+				Namespace:   "team-a",
+				Annotations: map[string]string{agentsv1alpha1.AnnotationOwner: testUser},
+				Labels:      map[string]string{agentsv1alpha1.LabelSandboxIsClaimed: agentsv1alpha1.True},
+			},
+			Status: agentsv1alpha1.SandboxStatus{
+				Phase:      agentsv1alpha1.SandboxRunning,
+				Conditions: []metav1.Condition{{Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue}},
+				PodInfo:    agentsv1alpha1.PodInfo{PodIP: "10.0.0.1"},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        "sandbox-b",
+				Namespace:   "team-b",
+				Annotations: map[string]string{agentsv1alpha1.AnnotationOwner: testUser},
+				Labels:      map[string]string{agentsv1alpha1.LabelSandboxIsClaimed: agentsv1alpha1.True},
+			},
+			Status: agentsv1alpha1.SandboxStatus{
+				Phase:      agentsv1alpha1.SandboxRunning,
+				Conditions: []metav1.Condition{{Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue}},
+				PodInfo:    agentsv1alpha1.PodInfo{PodIP: "10.0.0.2"},
+			},
+		},
+	}
+	for _, sbx := range sandboxes {
+		CreateSandboxWithStatus(t, client, sbx)
+	}
+
+	list, _, err := manager.ListSandboxes(t.Context(), infra.SelectSandboxesOptions{
+		Namespace: "team-a",
+		User:      testUser,
+	}, nil)
+	require.NoError(t, err)
+	require.Len(t, list, 1)
+	assert.Equal(t, "team-a", list[0].GetNamespace())
+	assert.Equal(t, "sandbox-a", list[0].GetName())
+
+	got, err := manager.GetClaimedSandbox(t.Context(), testUser, infra.GetClaimedSandboxOptions{
+		Namespace: "team-b",
+		SandboxID: sandboxutils.GetSandboxID(sandboxes[1]),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "team-b", got.GetNamespace())
+	assert.Equal(t, "sandbox-b", got.GetName())
+
+	_, err = manager.GetClaimedSandbox(t.Context(), testUser, infra.GetClaimedSandboxOptions{
+		Namespace: "team-a",
+		SandboxID: sandboxutils.GetSandboxID(sandboxes[1]),
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not found")
 }
 
 func TestSandboxManager_GetClaimedSandbox(t *testing.T) {
@@ -463,7 +524,7 @@ func TestSandboxManager_GetClaimedSandbox(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 			defer cancel()
-			sbx, err := manager.GetClaimedSandbox(ctx, testUser, tt.sandboxID)
+			sbx, err := manager.GetClaimedSandbox(ctx, testUser, infra.GetClaimedSandboxOptions{SandboxID: tt.sandboxID})
 
 			if tt.expectError {
 				if err == nil {
@@ -548,7 +609,9 @@ func TestSandboxManager_PauseSandbox(t *testing.T) {
 			CreateSandboxWithStatus(t, client, sandbox)
 
 			// Get sandbox
-			sbx, err := manager.GetClaimedSandbox(t.Context(), testUser, sandboxutils.GetSandboxID(sandbox))
+			sbx, err := manager.GetClaimedSandbox(t.Context(), testUser, infra.GetClaimedSandboxOptions{
+				SandboxID: sandboxutils.GetSandboxID(sandbox),
+			})
 			if err != nil {
 				t.Fatalf("Failed to get sandbox: %v", err)
 			}
@@ -586,7 +649,9 @@ func TestSandboxManager_PauseSandbox(t *testing.T) {
 			assert.Equal(t, testUser, route.Owner)
 			// Verify sandbox state matches expected
 			if tt.expectedState != "" {
-				actualSbx, err := manager.GetClaimedSandbox(t.Context(), testUser, sandboxutils.GetSandboxID(sandbox))
+				actualSbx, err := manager.GetClaimedSandbox(t.Context(), testUser, infra.GetClaimedSandboxOptions{
+					SandboxID: sandboxutils.GetSandboxID(sandbox),
+				})
 				if err == nil {
 					actualState, _ := actualSbx.GetState()
 					assert.Equal(t, tt.expectedState, actualState, "Sandbox state should match")
@@ -675,7 +740,9 @@ func TestSandboxManager_ResumeSandbox(t *testing.T) {
 			mgr.AddWaitReconcileKey(sandbox)
 
 			// Get sandbox
-			sbx, err := manager.GetClaimedSandbox(t.Context(), testUser, sandboxutils.GetSandboxID(sandbox))
+			sbx, err := manager.GetClaimedSandbox(t.Context(), testUser, infra.GetClaimedSandboxOptions{
+				SandboxID: sandboxutils.GetSandboxID(sandbox),
+			})
 			if err != nil {
 				t.Fatalf("Failed to get sandbox: %v", err)
 			}
@@ -956,7 +1023,7 @@ func TestSandboxManager_ListSandboxes(t *testing.T) {
 	}
 
 	t.Run("without paginator", func(t *testing.T) {
-		sandboxes, nextToken, err := manager.ListSandboxes(t.Context(), testUser, nil)
+		sandboxes, nextToken, err := manager.ListSandboxes(t.Context(), infra.SelectSandboxesOptions{User: testUser}, nil)
 
 		assert.NoError(t, err)
 		assert.Empty(t, nextToken, "nextToken should be empty when paginator is nil")
@@ -974,7 +1041,7 @@ func TestSandboxManager_ListSandboxes(t *testing.T) {
 			},
 		}
 
-		sandboxes, nextToken, err := manager.ListSandboxes(t.Context(), testUser, paginator)
+		sandboxes, nextToken, err := manager.ListSandboxes(t.Context(), infra.SelectSandboxesOptions{User: testUser}, paginator)
 
 		assert.NoError(t, err)
 		assert.Len(t, sandboxes, 2, "should return limited number of sandboxes")
@@ -1073,7 +1140,9 @@ func TestSandboxManager_DeleteSandbox(t *testing.T) {
 			CreateSandboxWithStatus(t, client, sandbox)
 
 			// Get sandbox
-			sbx, err := manager.GetClaimedSandbox(t.Context(), testUser, sandboxutils.GetSandboxID(sandbox))
+			sbx, err := manager.GetClaimedSandbox(t.Context(), testUser, infra.GetClaimedSandboxOptions{
+				SandboxID: sandboxutils.GetSandboxID(sandbox),
+			})
 			if err != nil {
 				t.Fatalf("Failed to get sandbox: %v", err)
 			}
@@ -1103,7 +1172,9 @@ func TestSandboxManager_DeleteSandbox(t *testing.T) {
 				// Use a short timeout context to avoid long retry in GetClaimedSandbox
 				ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
 				defer cancel()
-				_, getErr := manager.GetClaimedSandbox(ctx, testUser, sandboxutils.GetSandboxID(sandbox))
+				_, getErr := manager.GetClaimedSandbox(ctx, testUser, infra.GetClaimedSandboxOptions{
+					SandboxID: sandboxutils.GetSandboxID(sandbox),
+				})
 				assert.Error(t, getErr, "sandbox should not be found after deletion")
 			}
 		})
@@ -1260,7 +1331,9 @@ func TestSandboxManager_ListCheckpoints(t *testing.T) {
 			tt.setupCheckpoints(client)
 
 			// Call ListCheckpoints
-			checkpoints, nextToken, err := manager.ListCheckpoints(t.Context(), tt.user, tt.paginator)
+			checkpoints, nextToken, err := manager.ListCheckpoints(t.Context(), infra.SelectSucceededCheckpointsOptions{
+				User: tt.user,
+			}, tt.paginator)
 
 			if tt.expectError {
 				require.Error(t, err)
@@ -1425,7 +1498,9 @@ func TestSandboxManager_DeleteCheckpoint(t *testing.T) {
 
 				// Wait for informer sync
 				require.Eventually(t, func() bool {
-					return manager.GetInfra().HasCheckpoint(t.Context(), tt.checkpointID)
+					return manager.GetInfra().HasCheckpoint(t.Context(), infra.HasCheckpointOptions{
+						CheckpointID: tt.checkpointID,
+					})
 				}, time.Second, 10*time.Millisecond)
 
 				// Cleanup
@@ -1451,7 +1526,9 @@ func TestSandboxManager_DeleteCheckpoint(t *testing.T) {
 				t.Cleanup(func() { sandboxcr.DefaultDeleteCheckpointCR = orig })
 			}
 
-			err := manager.DeleteCheckpoint(t.Context(), tt.user, tt.checkpointID)
+			err := manager.DeleteCheckpoint(t.Context(), tt.user, infra.DeleteCheckpointOptions{
+				CheckpointID: tt.checkpointID,
+			})
 
 			if tt.expectError != "" {
 				require.Error(t, err)

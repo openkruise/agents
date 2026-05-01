@@ -30,7 +30,7 @@ import (
 	checkpointUtils "github.com/openkruise/agents/pkg/utils/checkpoint"
 
 	"github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/cache"
+	infracache "github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
@@ -68,7 +68,7 @@ func ValidateAndInitCheckpointOptions(opts infra.CreateCheckpointOptions) infra.
 	return opts
 }
 
-func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache cache.Provider) (infra.Sandbox, infra.CloneMetrics, error) {
+func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache infracache.Provider) (infra.Sandbox, infra.CloneMetrics, error) {
 	if opts.CloneTimeout > 0 {
 		var cancel func()
 		ctx, cancel = context.WithTimeout(ctx, opts.CloneTimeout)
@@ -142,7 +142,7 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache cac
 }
 
 // findCheckpointAndTemplateById gets checkpoint and template from cache, fallback to API server if not found
-func findCheckpointAndTemplateById(ctx context.Context, opts infra.CloneSandboxOptions, cache cache.Provider, metrics infra.CloneMetrics) (*v1alpha1.SandboxTemplate, *v1alpha1.Checkpoint, infra.CloneMetrics, error) {
+func findCheckpointAndTemplateById(ctx context.Context, opts infra.CloneSandboxOptions, cache infracache.Provider, metrics infra.CloneMetrics) (*v1alpha1.SandboxTemplate, *v1alpha1.Checkpoint, infra.CloneMetrics, error) {
 	log := klog.FromContext(ctx).WithValues("checkpoint", opts.CheckPointID, "step", "1.findCheckpointAndTemplate")
 	start := time.Now()
 
@@ -152,7 +152,7 @@ func findCheckpointAndTemplateById(ctx context.Context, opts infra.CloneSandboxO
 	err := retry.OnError(utils.CacheBackoff, func(err error) bool {
 		return !opts.SkipWaitCheckpoint && retryFunc(err)
 	}, func() error {
-		cp, err := cache.GetCheckpoint(ctx, opts.CheckPointID)
+		cp, err := cache.GetCheckpoint(ctx, infracache.GetCheckpointOptions{Namespace: opts.Namespace, CheckpointID: opts.CheckPointID})
 		if err != nil {
 			return err
 		}
@@ -181,7 +181,7 @@ func findCheckpointAndTemplateById(ctx context.Context, opts infra.CloneSandboxO
 }
 
 // createSandboxFromCheckpoint creates a new sandbox from checkpoint
-func createSandboxFromCheckpoint(ctx context.Context, opts infra.CloneSandboxOptions, tmpl *v1alpha1.SandboxTemplate, cp *v1alpha1.Checkpoint, cache cache.Provider, metrics infra.CloneMetrics) (*Sandbox, *config.InitRuntimeOptions, infra.CloneMetrics, error) {
+func createSandboxFromCheckpoint(ctx context.Context, opts infra.CloneSandboxOptions, tmpl *v1alpha1.SandboxTemplate, cp *v1alpha1.Checkpoint, cache infracache.Provider, metrics infra.CloneMetrics) (*Sandbox, *config.InitRuntimeOptions, infra.CloneMetrics, error) {
 	log := klog.FromContext(ctx).WithValues("checkpoint", opts.CheckPointID, "step", "2.createSandboxFromCheckpoint")
 	start := time.Now()
 	initRuntimeOpts, err := runtime.GetInitRuntimeRequest(cp)
@@ -211,7 +211,7 @@ func createSandboxFromCheckpoint(ctx context.Context, opts infra.CloneSandboxOpt
 }
 
 // cloneWaitSandboxReady waits for the sandbox to be ready
-func cloneWaitSandboxReady(ctx context.Context, sbx *Sandbox, opts infra.CloneSandboxOptions, cache cache.Provider, metrics infra.CloneMetrics) (infra.CloneMetrics, error) {
+func cloneWaitSandboxReady(ctx context.Context, sbx *Sandbox, opts infra.CloneSandboxOptions, cache infracache.Provider, metrics infra.CloneMetrics) (infra.CloneMetrics, error) {
 	log := klog.FromContext(ctx).WithValues("checkpoint", opts.CheckPointID, "step", "3.waitSandboxReady")
 	var err error
 	metrics.WaitReady, err = waitForSandboxReady(ctx, sbx, infra.ClaimSandboxOptions{
@@ -244,7 +244,7 @@ func cloneReInitRuntime(ctx context.Context, sbx *Sandbox, opts infra.CloneSandb
 }
 
 // newSandboxFromTemplate returns a Sandbox object whose annotations / labels are not nil
-func newSandboxFromTemplate(opts infra.CloneSandboxOptions, tmpl *v1alpha1.SandboxTemplate, cache cache.Provider) *Sandbox {
+func newSandboxFromTemplate(opts infra.CloneSandboxOptions, tmpl *v1alpha1.SandboxTemplate, cache infracache.Provider) *Sandbox {
 	tmplCopy := tmpl.DeepCopy()
 	sbx := AsSandbox(&v1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
@@ -296,7 +296,7 @@ func createCheckpoint(ctx context.Context, c client.Client, cp *v1alpha1.Checkpo
 	return cp, nil
 }
 
-func CreateCheckpoint(ctx context.Context, sbx *v1alpha1.Sandbox, cache cache.Provider, opts infra.CreateCheckpointOptions) (string, error) {
+func CreateCheckpoint(ctx context.Context, sbx *v1alpha1.Sandbox, cache infracache.Provider, opts infra.CreateCheckpointOptions) (string, error) {
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
 	log.Info("creating sandbox template")
 	tmpl := &v1alpha1.SandboxTemplate{

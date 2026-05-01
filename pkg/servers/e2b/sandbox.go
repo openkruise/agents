@@ -28,6 +28,7 @@ import (
 	"k8s.io/klog/v2"
 
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
 )
@@ -48,7 +49,10 @@ func (sc *Controller) getSandboxOfUser(ctx context.Context, sandboxID string) (i
 	}
 	getCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	sbx, err := sc.manager.GetClaimedSandbox(getCtx, user.ID.String(), sandboxID)
+	sbx, err := sc.manager.GetClaimedSandbox(getCtx, user.ID.String(), infra.GetClaimedSandboxOptions{
+		Namespace: sc.getNamespaceOfUser(user),
+		SandboxID: sandboxID,
+	})
 	if err != nil {
 		log.Error(err, "sandbox not found")
 		return nil, &web.ApiError{
@@ -58,6 +62,15 @@ func (sc *Controller) getSandboxOfUser(ctx context.Context, sandboxID string) (i
 	}
 	log.Info("sandbox found", "sandbox", klog.KObj(sbx))
 	return sbx, nil
+}
+
+func (sc *Controller) getNamespaceOfUser(user *models.CreatedTeamAPIKey) string {
+	team := keys.TeamForKey(user)
+	// Keys in the admin team can access resources in cluster scope
+	if team.ID == models.AdminTeamID || team.Name == models.AdminTeamName {
+		return ""
+	}
+	return team.Name
 }
 
 func (sc *Controller) convertToE2BSandbox(sbx infra.Sandbox, accessToken string) *models.Sandbox {

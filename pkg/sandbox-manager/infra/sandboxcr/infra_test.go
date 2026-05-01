@@ -18,7 +18,6 @@ package sandboxcr
 
 import (
 	"context"
-	"fmt"
 	"testing"
 	"time"
 
@@ -28,7 +27,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/openkruise/agents/api/v1alpha1"
@@ -136,7 +134,7 @@ func TestInfra_SelectSandboxes(t *testing.T) {
 			time.Sleep(50 * time.Millisecond)
 
 			// Test SelectSandboxes
-			result, err := infraInstance.SelectSandboxes(t.Context(), tt.user)
+			result, err := infraInstance.SelectSandboxes(t.Context(), infra.SelectSandboxesOptions{User: tt.user})
 			assert.NoError(t, err)
 			assert.Len(t, result, tt.expectCount)
 			if len(tt.expectNames) > 0 {
@@ -148,6 +146,66 @@ func TestInfra_SelectSandboxes(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestInfra_SelectSandboxesWithOptions_NamespaceScoped(t *testing.T) {
+	infraInstance, c := NewTestInfra(t)
+	sandboxes := []*v1alpha1.Sandbox{
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        "sandbox-a",
+				Namespace:   "team-a",
+				Annotations: map[string]string{v1alpha1.AnnotationOwner: "same-user"},
+				Labels:      map[string]string{v1alpha1.LabelSandboxIsClaimed: v1alpha1.True},
+			},
+			Status: v1alpha1.SandboxStatus{
+				Phase:      v1alpha1.SandboxRunning,
+				Conditions: []metav1.Condition{{Type: string(v1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue}},
+				PodInfo:    v1alpha1.PodInfo{PodIP: "10.0.0.1"},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        "sandbox-b",
+				Namespace:   "team-b",
+				Annotations: map[string]string{v1alpha1.AnnotationOwner: "same-user"},
+				Labels:      map[string]string{v1alpha1.LabelSandboxIsClaimed: v1alpha1.True},
+			},
+			Status: v1alpha1.SandboxStatus{
+				Phase:      v1alpha1.SandboxRunning,
+				Conditions: []metav1.Condition{{Type: string(v1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue}},
+				PodInfo:    v1alpha1.PodInfo{PodIP: "10.0.0.2"},
+			},
+		},
+	}
+	for _, sbx := range sandboxes {
+		CreateSandboxWithStatus(t, c, sbx)
+	}
+
+	result, err := infraInstance.SelectSandboxes(t.Context(), infra.SelectSandboxesOptions{
+		Namespace: "team-a",
+		User:      "same-user",
+	})
+	require.NoError(t, err)
+	require.Len(t, result, 1)
+	assert.Equal(t, "sandbox-a", result[0].GetName())
+	assert.Equal(t, "team-a", result[0].GetNamespace())
+}
+
+func TestInfra_SelectSandboxesWithOptions_WithoutUserReturnsNamespaceScopedResults(t *testing.T) {
+	infraInstance, c := NewTestInfra(t)
+	for _, sbx := range []*v1alpha1.Sandbox{
+		createTestSandbox("sandbox-a", "user-a", v1alpha1.SandboxRunning, true),
+		createTestSandbox("sandbox-b", "user-b", v1alpha1.SandboxRunning, true),
+	} {
+		sbx.Namespace = "team-a"
+		CreateSandboxWithStatus(t, c, sbx)
+	}
+	result, err := infraInstance.SelectSandboxes(t.Context(), infra.SelectSandboxesOptions{
+		Namespace: "team-a",
+	})
+	require.NoError(t, err)
+	require.Len(t, result, 2)
 }
 
 func TestInfra_GetSandbox(t *testing.T) {
@@ -192,7 +250,7 @@ func TestInfra_GetSandbox(t *testing.T) {
 			// Test GetClaimedSandbox
 			ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 			defer cancel()
-			result, err := infraInstance.GetClaimedSandbox(ctx, tt.sandboxID)
+			result, err := infraInstance.GetClaimedSandbox(ctx, infra.GetClaimedSandboxOptions{SandboxID: tt.sandboxID})
 			if tt.expectError {
 				assert.Error(t, err)
 				assert.Nil(t, result)
@@ -202,6 +260,74 @@ func TestInfra_GetSandbox(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestInfra_GetClaimedSandboxWithOptions_NamespaceScoped(t *testing.T) {
+	infraInstance, fc := NewTestInfra(t)
+	sbx := &v1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "sandbox-a",
+			Namespace:   "team-a",
+			Annotations: map[string]string{v1alpha1.AnnotationOwner: "same-user"},
+			Labels:      map[string]string{v1alpha1.LabelSandboxIsClaimed: v1alpha1.True},
+		},
+		Status: v1alpha1.SandboxStatus{
+			Phase:      v1alpha1.SandboxRunning,
+			Conditions: []metav1.Condition{{Type: string(v1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue}},
+			PodInfo:    v1alpha1.PodInfo{PodIP: "10.0.0.1"},
+		},
+	}
+	CreateSandboxWithStatus(t, fc, sbx)
+	sandboxID := stateutils.GetSandboxID(sbx)
+
+	got, err := infraInstance.GetClaimedSandbox(t.Context(), infra.GetClaimedSandboxOptions{
+		Namespace: "team-a",
+		SandboxID: sandboxID,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "team-a", got.GetNamespace())
+	assert.Equal(t, "sandbox-a", got.GetName())
+
+	_, err = infraInstance.GetClaimedSandbox(t.Context(), infra.GetClaimedSandboxOptions{
+		Namespace: "team-b",
+		SandboxID: sandboxID,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not found")
+}
+
+func TestInfra_DeleteCheckpointWithOptions_NamespaceScoped(t *testing.T) {
+	infraInstance, fc := NewTestInfra(t)
+	for _, namespace := range []string{"team-a", "team-b"} {
+		tmpl := &v1alpha1.SandboxTemplate{
+			ObjectMeta: metav1.ObjectMeta{Name: "checkpoint-template", Namespace: namespace},
+		}
+		require.NoError(t, fc.Create(t.Context(), tmpl))
+		cp := &v1alpha1.Checkpoint{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        "checkpoint-template",
+				Namespace:   namespace,
+				Annotations: map[string]string{v1alpha1.AnnotationOwner: "test-user"},
+			},
+			Status: v1alpha1.CheckpointStatus{CheckpointId: "shared-checkpoint-id"},
+		}
+		require.NoError(t, fc.Create(t.Context(), cp))
+		require.NoError(t, fc.Status().Update(t.Context(), cp))
+	}
+
+	err := infraInstance.DeleteCheckpoint(t.Context(), infra.DeleteCheckpointOptions{
+		Namespace:    "team-a",
+		CheckpointID: "shared-checkpoint-id",
+	})
+	require.NoError(t, err)
+
+	err = fc.Get(t.Context(), types.NamespacedName{Namespace: "team-a", Name: "checkpoint-template"}, &v1alpha1.SandboxTemplate{})
+	require.Error(t, err)
+	err = fc.Get(t.Context(), types.NamespacedName{Namespace: "team-a", Name: "checkpoint-template"}, &v1alpha1.Checkpoint{})
+	require.Error(t, err)
+
+	require.NoError(t, fc.Get(t.Context(), types.NamespacedName{Namespace: "team-b", Name: "checkpoint-template"}, &v1alpha1.SandboxTemplate{}))
+	require.NoError(t, fc.Get(t.Context(), types.NamespacedName{Namespace: "team-b", Name: "checkpoint-template"}, &v1alpha1.Checkpoint{}))
 }
 
 func createTestSandboxWithDefaults(name string, namespace string) *v1alpha1.Sandbox {
@@ -576,7 +702,7 @@ func TestInfra_CloneSandbox(t *testing.T) {
 
 	// Wait for checkpoint to be cached
 	require.Eventually(t, func() bool {
-		_, err := infraInstance.Cache.GetCheckpoint(t.Context(), checkpointID)
+		_, err := infraInstance.Cache.GetCheckpoint(t.Context(), infracache.GetCheckpointOptions{CheckpointID: checkpointID})
 		return err == nil
 	}, time.Second, 10*time.Millisecond)
 
@@ -634,7 +760,7 @@ func CreateCheckpointWithStatus(t *testing.T, c client.Client, cp *v1alpha1.Chec
 
 func EnsureCheckpointInCache(t *testing.T, cache infracache.Provider, cp *v1alpha1.Checkpoint) {
 	require.Eventually(t, func() bool {
-		_, err := cache.GetCheckpoint(t.Context(), cp.Status.CheckpointId)
+		_, err := cache.GetCheckpoint(t.Context(), infracache.GetCheckpointOptions{CheckpointID: cp.Status.CheckpointId})
 		return err == nil
 	}, time.Second, 10*time.Millisecond, "get checkpoint from cache timeout")
 }
@@ -705,7 +831,7 @@ func TestInfra_SelectSucceededCheckpoints(t *testing.T) {
 			}
 
 			// Test SelectSucceededCheckpoints
-			results, err := infraInstance.SelectSucceededCheckpoints(t.Context(), tt.user)
+			results, err := infraInstance.SelectSucceededCheckpoints(t.Context(), infra.SelectSucceededCheckpointsOptions{User: tt.user})
 			assert.NoError(t, err)
 			assert.Len(t, results, len(tt.expectCheckpointIDs))
 
@@ -761,7 +887,7 @@ func TestInfra_startRouteReconciler(t *testing.T) {
 
 			require.Eventually(t, func() bool {
 				for _, id := range createdSandboxes {
-					_, err := infraInstance.Cache.GetClaimedSandbox(t.Context(), id)
+					_, err := infraInstance.Cache.GetClaimedSandbox(t.Context(), infracache.GetClaimedSandboxOptions{SandboxID: id})
 					if err != nil {
 						return false
 					}
@@ -799,163 +925,6 @@ func TestInfra_startRouteReconciler(t *testing.T) {
 				id := stateutils.GetSandboxID(sbx)
 				_, ok := infraInstance.Proxy.LoadRoute(id)
 				assert.True(t, ok, "valid route %s should always exist", id)
-			}
-		})
-	}
-}
-
-func TestInfra_DeleteCheckpoint(t *testing.T) {
-	utils.InitLogOutput()
-
-	tests := []struct {
-		name                 string
-		checkpointID         string // the status.checkpointId
-		user                 string // the user requesting deletion
-		setupCheckpoint      bool   // whether to create checkpoint + template
-		withOwnerRef         bool   // whether checkpoint has OwnerRef to template
-		mockDeleteTemplate   error  // mock error for DefaultDeleteSandboxTemplate
-		mockDeleteCheckpoint error  // mock error for DefaultDeleteCheckpointCR
-		expectError          bool
-		expectErrorContains  string
-	}{
-		{
-			name:            "success with owner reference (cascade delete)",
-			checkpointID:    "cp-with-ownerref",
-			user:            "test-user",
-			setupCheckpoint: true,
-			withOwnerRef:    true,
-			expectError:     false,
-		},
-		{
-			name:            "success without owner reference (explicit delete)",
-			checkpointID:    "cp-no-ownerref",
-			user:            "test-user",
-			setupCheckpoint: true,
-			withOwnerRef:    false,
-			expectError:     false,
-		},
-		{
-			name:                "checkpoint not found",
-			checkpointID:        "non-existent",
-			user:                "test-user",
-			setupCheckpoint:     false,
-			expectError:         true,
-			expectErrorContains: "not found",
-		},
-		{
-			name:                "delete template fails",
-			checkpointID:        "cp-tmpl-fail",
-			user:                "test-user",
-			setupCheckpoint:     true,
-			withOwnerRef:        true,
-			mockDeleteTemplate:  fmt.Errorf("mock template delete error"),
-			expectError:         true,
-			expectErrorContains: "mock template delete error",
-		},
-		{
-			name:                 "explicit delete checkpoint fails",
-			checkpointID:         "cp-delete-fail",
-			user:                 "test-user",
-			setupCheckpoint:      true,
-			withOwnerRef:         false,
-			mockDeleteCheckpoint: fmt.Errorf("mock checkpoint delete error"),
-			expectError:          true,
-			expectErrorContains:  "mock checkpoint delete error",
-		},
-		{
-			name:                "owner mismatch",
-			checkpointID:        "cp-wrong-owner",
-			user:                "different-user",
-			setupCheckpoint:     true,
-			withOwnerRef:        true,
-			expectError:         true,
-			expectErrorContains: "not owned by user",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			infraInstance, c := NewTestInfra(t)
-			// Use a context with timeout to prevent retries from hanging
-			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-			defer cancel()
-			namespace := "default"
-
-			if tt.setupCheckpoint {
-				// Create SandboxTemplate
-				tmpl := &v1alpha1.SandboxTemplate{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      tt.checkpointID,
-						Namespace: namespace,
-						UID:       types.UID(uuid.NewString()),
-					},
-					Spec: v1alpha1.SandboxTemplateSpec{
-						Template: &corev1.PodTemplateSpec{
-							Spec: corev1.PodSpec{
-								Containers: []corev1.Container{
-									{Name: "main", Image: "test"},
-								},
-							},
-						},
-					},
-				}
-				require.NoError(t, c.Create(ctx, tmpl))
-
-				// Create Checkpoint with owner annotation
-				cp := &v1alpha1.Checkpoint{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      tt.checkpointID,
-						Namespace: namespace,
-						Annotations: map[string]string{
-							v1alpha1.AnnotationOwner: "test-user",
-						},
-					},
-				}
-				if tt.withOwnerRef {
-					cp.OwnerReferences = []metav1.OwnerReference{
-						{
-							APIVersion:         v1alpha1.SandboxTemplateControllerKind.GroupVersion().String(),
-							Kind:               v1alpha1.SandboxTemplateControllerKind.Kind,
-							Name:               tmpl.Name,
-							UID:                tmpl.UID,
-							Controller:         ptr.To(true),
-							BlockOwnerDeletion: ptr.To(true),
-						},
-					}
-				}
-				require.NoError(t, c.Create(ctx, cp))
-
-				require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(cp), cp))
-				cp.Status.CheckpointId = tt.checkpointID
-
-				require.NoError(t, c.Status().Update(ctx, cp))
-			}
-
-			// Set up decorator mocks
-			if tt.mockDeleteTemplate != nil {
-				orig := DefaultDeleteSandboxTemplate
-				DefaultDeleteSandboxTemplate = func(ctx context.Context, c client.Client, namespace, name string) error {
-					return tt.mockDeleteTemplate
-				}
-				t.Cleanup(func() { DefaultDeleteSandboxTemplate = orig })
-			}
-			if tt.mockDeleteCheckpoint != nil {
-				orig := DefaultDeleteCheckpointCR
-				DefaultDeleteCheckpointCR = func(ctx context.Context, c client.Client, namespace, name string) error {
-					return tt.mockDeleteCheckpoint
-				}
-				t.Cleanup(func() { DefaultDeleteCheckpointCR = orig })
-			}
-
-			err := infraInstance.DeleteCheckpoint(ctx, tt.user, tt.checkpointID)
-
-			if tt.expectError {
-				require.Error(t, err)
-				if tt.expectErrorContains != "" {
-					assert.Contains(t, err.Error(), tt.expectErrorContains)
-				}
-			} else {
-				require.NoError(t, err)
 			}
 		})
 	}

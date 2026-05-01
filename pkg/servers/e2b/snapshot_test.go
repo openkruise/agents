@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
@@ -96,7 +97,9 @@ func TestCreateSnapshot(t *testing.T) {
 
 		// Wait for sandbox pool to be ready
 		require.Eventually(t, func() bool {
-			list, err := controller.cache.ListSandboxesInPool(t.Context(), templateName)
+			list, err := controller.cache.ListSandboxesInPool(t.Context(), cache.ListSandboxesInPoolOptions{
+				Pool: templateName,
+			})
 			return err == nil && len(list) == 1
 		}, time.Second, 50*time.Millisecond)
 
@@ -183,11 +186,11 @@ func TestCreateSnapshot(t *testing.T) {
 				return NewRequest(t, nil, models.NewSnapshotRequest{
 					Name: "test-snapshot",
 				}, map[string]string{
-					"sandboxID": "default--non-existent-sandbox",
+					"sandboxID": Namespace + "--non-existent-sandbox",
 				}, user)
 			},
 			getSandbox: func(t *testing.T) string {
-				return "default--non-existent-sandbox"
+				return Namespace + "--non-existent-sandbox"
 			},
 			expectError: true,
 			errorCode:   http.StatusNotFound,

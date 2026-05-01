@@ -17,12 +17,15 @@ limitations under the License.
 package e2b
 
 import (
+	"context"
 	"net/http"
 	"testing"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
@@ -66,6 +69,65 @@ func TestListAPIKeys(t *testing.T) {
 				require.Nil(t, apiError)
 				assert.GreaterOrEqual(t, len(resp.Body), tt.expectCount)
 			}
+		})
+	}
+}
+
+func TestListTeams(t *testing.T) {
+	controller, _, teardown := Setup(t)
+	defer teardown()
+
+	ctx := logs.NewContext()
+	adminUser := &models.CreatedTeamAPIKey{
+		ID:   keys.AdminKeyID,
+		Key:  InitKey,
+		Name: "admin",
+		Team: models.AdminTeam(),
+	}
+	teamAKey, err := controller.keys.CreateKey(ctx, adminUser, keys.CreateKeyOptions{Name: "team-a-key", TeamName: "team-a"})
+	require.NoError(t, err)
+	_, err = controller.keys.CreateKey(ctx, adminUser, keys.CreateKeyOptions{Name: "team-b-key", TeamName: "team-b"})
+	require.NoError(t, err)
+
+	tests := []struct {
+		name        string
+		user        *models.CreatedTeamAPIKey
+		expectNames []string
+		expectError string
+	}{
+		{
+			name:        "normal key returns own team only",
+			user:        teamAKey,
+			expectNames: []string{"team-a"},
+		},
+		{
+			name:        "admin key returns all active teams",
+			user:        adminUser,
+			expectNames: []string{"admin", "team-a", "team-b"},
+		},
+		{
+			name:        "fail without user",
+			expectError: "User not found",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp, apiError := controller.ListTeams(NewRequest(t, nil, nil, nil, tt.user))
+			if tt.expectError != "" {
+				require.NotNil(t, apiError)
+				assert.Contains(t, apiError.Message, tt.expectError)
+				return
+			}
+			require.Nil(t, apiError)
+			require.Len(t, resp.Body, len(tt.expectNames))
+			gotNames := make([]string, 0, len(resp.Body))
+			for _, team := range resp.Body {
+				gotNames = append(gotNames, team.Name)
+				assert.Empty(t, team.APIKey)
+				assert.NotEmpty(t, team.TeamID)
+			}
+			assert.ElementsMatch(t, tt.expectNames, gotNames)
 		})
 	}
 }
@@ -131,90 +193,183 @@ func TestCreateAPIKey(t *testing.T) {
 	}
 }
 
-func TestDeleteAPIKey(t *testing.T) {
-	controller, _, teardown := Setup(t)
+func TestCreateAPIKeyPermissionMiddleware(t *testing.T) {
+	controller, fc, teardown := Setup(t)
 	defer teardown()
 
+	ctx := logs.NewContext()
 	adminUser := &models.CreatedTeamAPIKey{
 		ID:   keys.AdminKeyID,
 		Key:  InitKey,
 		Name: "admin",
-	}
-
-	// Create a key with a different CreatedBy but same team to verify team-based auth ignores CreatedBy
-	sameTeamOtherUser := &models.CreatedTeamAPIKey{
-		ID:   uuid.New(),
-		Name: "other-user",
 		Team: models.AdminTeam(),
 	}
-	ctx := logs.NewContext()
-	sameTeamKey, err := controller.keys.CreateKey(ctx, sameTeamOtherUser, "same-team-key")
+	teamAKey, err := controller.keys.CreateKey(ctx, adminUser, keys.CreateKeyOptions{Name: "team-a-key", TeamName: "team-a"})
 	require.NoError(t, err)
-	require.NotNil(t, sameTeamKey)
-
-	// Create a Key of another team
-	differentTeamUser := &models.CreatedTeamAPIKey{
-		ID:   adminUser.ID,
-		Name: "different-team-user",
-		Team: &models.Team{ID: uuid.New(), Name: "target-team"},
-	}
-	differentTeamKey, err := controller.keys.CreateKey(ctx, differentTeamUser, "different-team-key")
-	require.NoError(t, err)
-	require.NotNil(t, differentTeamKey)
+	require.NoError(t, fc.Create(t.Context(), &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{Name: "team-c"},
+	}))
 
 	tests := []struct {
 		name        string
 		user        *models.CreatedTeamAPIKey
-		pathValues  map[string]string
-		expectError *web.ApiError
+		request     models.NewTeamAPIKey
 		expectCode  int
+		expectTeam  string
+		expectError string
 	}{
 		{
-			name:       "success - delete api key by same team even with different creator",
-			user:       adminUser,
-			pathValues: map[string]string{"apiKeyID": sameTeamKey.ID.String()},
-			expectCode: http.StatusNoContent,
+			name:       "no teamName creates key in caller team",
+			user:       teamAKey,
+			request:    models.NewTeamAPIKey{Name: "same-team-default"},
+			expectCode: http.StatusCreated,
+			expectTeam: "team-a",
 		},
 		{
-			name:       "fail without user",
-			user:       nil,
-			pathValues: map[string]string{"apiKeyID": keys.AdminKeyID.String()},
-			expectError: &web.ApiError{
-				Code:    http.StatusInternalServerError,
-				Message: "User not found",
-			},
+			name:       "own teamName succeeds",
+			user:       teamAKey,
+			request:    models.NewTeamAPIKey{Name: "same-team-explicit", TeamName: "team-a"},
+			expectCode: http.StatusCreated,
+			expectTeam: "team-a",
 		},
 		{
-			name:       "fail with non-existent key",
-			user:       adminUser,
-			pathValues: map[string]string{"apiKeyID": uuid.NewString()},
-			expectError: &web.ApiError{
-				Code:    http.StatusNotFound,
-				Message: "API key not found",
-			},
+			name:        "non-admin cannot target another team",
+			user:        teamAKey,
+			request:     models.NewTeamAPIKey{Name: "other-team", TeamName: "team-b"},
+			expectCode:  http.StatusForbidden,
+			expectError: "not allowed",
 		},
 		{
-			name:       "fail with different team even when created by user",
+			name:       "admin can target new team when namespace exists",
 			user:       adminUser,
-			pathValues: map[string]string{"apiKeyID": differentTeamKey.ID.String()},
-			expectError: &web.ApiError{
-				Code:    http.StatusForbidden,
-				Message: "You are not allowed to delete this API key",
-			},
+			request:    models.NewTeamAPIKey{Name: "new-team", TeamName: "team-c"},
+			expectCode: http.StatusCreated,
+			expectTeam: "team-c",
+		},
+		{
+			name:        "admin targeting missing namespace fails",
+			user:        adminUser,
+			request:     models.NewTeamAPIKey{Name: "missing-team", TeamName: "missing-team"},
+			expectCode:  http.StatusBadRequest,
+			expectError: "namespace",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			resp, apiError := controller.DeleteAPIKey(NewRequest(t, nil, nil, tt.pathValues, tt.user))
-			if tt.expectError != nil {
+			req := NewRequest(t, nil, tt.request, nil, tt.user)
+			ctx := context.WithValue(logs.NewContext(), "user", tt.user)
+			ctx, apiError := controller.CheckCreateAPIKeyPermission(ctx, req)
+			if tt.expectError != "" {
 				require.NotNil(t, apiError)
-				assert.Equal(t, tt.expectError.Code, apiError.Code)
-				assert.Contains(t, apiError.Message, tt.expectError.Message)
-			} else {
-				require.Nil(t, apiError)
-				assert.Equal(t, tt.expectCode, resp.Code)
+				assert.Equal(t, tt.expectCode, apiError.Code)
+				assert.Contains(t, apiError.Message, tt.expectError)
+				return
 			}
+			require.Nil(t, apiError)
+
+			resp, apiError := controller.CreateAPIKey(req.WithContext(ctx))
+			require.Nil(t, apiError)
+			assert.Equal(t, tt.expectCode, resp.Code)
+			require.NotNil(t, resp.Body.Team)
+			assert.Equal(t, tt.expectTeam, resp.Body.Team.Name)
+		})
+	}
+}
+
+func TestDeleteAPIKeyPermissionMiddleware(t *testing.T) {
+	controller, _, teardown := Setup(t)
+	defer teardown()
+
+	ctx := logs.NewContext()
+	adminUser := &models.CreatedTeamAPIKey{
+		ID:   keys.AdminKeyID,
+		Key:  InitKey,
+		Name: "admin",
+		Team: models.AdminTeam(),
+	}
+	teamAKey, err := controller.keys.CreateKey(ctx, adminUser, keys.CreateKeyOptions{Name: "team-a-key", TeamName: "team-a"})
+	require.NoError(t, err)
+	teamASecondKey, err := controller.keys.CreateKey(ctx, teamAKey, keys.CreateKeyOptions{Name: "team-a-second"})
+	require.NoError(t, err)
+	teamBKey, err := controller.keys.CreateKey(ctx, adminUser, keys.CreateKeyOptions{Name: "team-b-key", TeamName: "team-b"})
+	require.NoError(t, err)
+
+	tests := []struct {
+		name                  string
+		user                  *models.CreatedTeamAPIKey
+		targetID              string
+		expectCode            int
+		expectError           string
+		expectMiddlewareError bool
+	}{
+		{
+			name:       "same-team deletion allowed",
+			user:       teamAKey,
+			targetID:   teamASecondKey.ID.String(),
+			expectCode: http.StatusNoContent,
+		},
+		{
+			name:                  "non-admin cross-team deletion denied",
+			user:                  teamAKey,
+			targetID:              teamBKey.ID.String(),
+			expectCode:            http.StatusForbidden,
+			expectError:           "not allowed",
+			expectMiddlewareError: true,
+		},
+		{
+			name:       "admin deleting non-admin team key allowed",
+			user:       adminUser,
+			targetID:   teamBKey.ID.String(),
+			expectCode: http.StatusNoContent,
+		},
+		{
+			name:                  "missing key returns not found",
+			user:                  teamAKey,
+			targetID:              uuid.NewString(),
+			expectCode:            http.StatusNotFound,
+			expectError:           "not found",
+			expectMiddlewareError: true,
+		},
+		{
+			name:                  "fail without user",
+			user:                  nil,
+			targetID:              keys.AdminKeyID.String(),
+			expectCode:            http.StatusUnauthorized,
+			expectError:           "User not found",
+			expectMiddlewareError: true,
+		},
+		{
+			name:        "last admin key deletion is forbidden",
+			user:        adminUser,
+			targetID:    keys.AdminKeyID.String(),
+			expectCode:  http.StatusForbidden,
+			expectError: "last active admin",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := NewRequest(t, nil, nil, map[string]string{"apiKeyID": tt.targetID}, tt.user)
+			ctx := context.WithValue(logs.NewContext(), "user", tt.user)
+			ctx, apiError := controller.CheckDeleteAPIKeyPermission(ctx, req)
+			if tt.expectMiddlewareError {
+				require.NotNil(t, apiError)
+				assert.Equal(t, tt.expectCode, apiError.Code)
+				assert.Contains(t, apiError.Message, tt.expectError)
+				return
+			}
+			require.Nil(t, apiError)
+
+			resp, apiError := controller.DeleteAPIKey(req.WithContext(ctx))
+			if tt.expectError != "" {
+				require.NotNil(t, apiError)
+				assert.Equal(t, tt.expectCode, apiError.Code)
+				assert.Contains(t, apiError.Message, tt.expectError)
+				return
+			}
+			require.Nil(t, apiError)
+			assert.Equal(t, tt.expectCode, resp.Code)
 		})
 	}
 }

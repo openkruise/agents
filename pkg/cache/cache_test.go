@@ -56,7 +56,7 @@ func TestCache_GetClaimedSandbox(t *testing.T) {
 		c, _, err := cachetest.NewTestCache(t, sbx)
 		require.NoError(t, err)
 		sandboxID := sandboxutils.GetSandboxID(sbx)
-		got, err := c.GetClaimedSandbox(t.Context(), sandboxID)
+		got, err := c.GetClaimedSandbox(t.Context(), cache.GetClaimedSandboxOptions{SandboxID: sandboxID})
 		require.NoError(t, err)
 		require.NotNil(t, got)
 		assert.Equal(t, "test-sbx", got.Name)
@@ -65,7 +65,7 @@ func TestCache_GetClaimedSandbox(t *testing.T) {
 	t.Run("not found", func(t *testing.T) {
 		c, _, err := cachetest.NewTestCache(t)
 		require.NoError(t, err)
-		_, err = c.GetClaimedSandbox(t.Context(), "nonexistent-id")
+		_, err = c.GetClaimedSandbox(t.Context(), cache.GetClaimedSandboxOptions{SandboxID: "nonexistent-id"})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "not found in cache")
 	})
@@ -80,7 +80,7 @@ func TestCache_GetCheckpoint(t *testing.T) {
 	t.Run("found", func(t *testing.T) {
 		c, _, err := cachetest.NewTestCache(t, cp)
 		require.NoError(t, err)
-		got, err := c.GetCheckpoint(t.Context(), "cp-id-123")
+		got, err := c.GetCheckpoint(t.Context(), cache.GetCheckpointOptions{CheckpointID: "cp-id-123"})
 		require.NoError(t, err)
 		require.NotNil(t, got)
 		assert.Equal(t, "test-cp", got.Name)
@@ -89,10 +89,73 @@ func TestCache_GetCheckpoint(t *testing.T) {
 	t.Run("not found", func(t *testing.T) {
 		c, _, err := cachetest.NewTestCache(t)
 		require.NoError(t, err)
-		_, err = c.GetCheckpoint(t.Context(), "nonexistent-cp")
+		_, err = c.GetCheckpoint(t.Context(), cache.GetCheckpointOptions{CheckpointID: "nonexistent-cp"})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "not found in cache")
 	})
+}
+
+func TestCache_GetCheckpointWithOptions_NamespaceScoped(t *testing.T) {
+	checkpoints := []ctrlclient.Object{
+		&agentsv1alpha1.Checkpoint{
+			ObjectMeta: metav1.ObjectMeta{Name: "cp-a", Namespace: "team-a"},
+			Status:     agentsv1alpha1.CheckpointStatus{CheckpointId: "shared-cp-id"},
+		},
+		&agentsv1alpha1.Checkpoint{
+			ObjectMeta: metav1.ObjectMeta{Name: "cp-b", Namespace: "team-b"},
+			Status:     agentsv1alpha1.CheckpointStatus{CheckpointId: "shared-cp-id"},
+		},
+	}
+	c, _, err := cachetest.NewTestCache(t, checkpoints...)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name        string
+		namespace   string
+		expectName  string
+		expectError string
+	}{
+		{
+			name:       "team-a resolves team-a checkpoint",
+			namespace:  "team-a",
+			expectName: "cp-a",
+		},
+		{
+			name:       "team-b resolves team-b checkpoint",
+			namespace:  "team-b",
+			expectName: "cp-b",
+		},
+		{
+			name:        "missing namespace returns not found",
+			namespace:   "team-c",
+			expectError: "not found in cache",
+		},
+		{
+			name: "empty namespace returns first match with limit",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := c.GetCheckpoint(t.Context(), cache.GetCheckpointOptions{
+				Namespace:    tt.namespace,
+				CheckpointID: "shared-cp-id",
+			})
+			if tt.expectError != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
+				return
+			}
+			require.NoError(t, err)
+			if tt.expectName != "" {
+				assert.Equal(t, tt.expectName, got.Name)
+				assert.Equal(t, tt.namespace, got.Namespace)
+			} else {
+				assert.NotEmpty(t, got.Name)
+				assert.NotEmpty(t, got.Namespace)
+			}
+		})
+	}
 }
 
 func TestCache_GetSandboxSet(t *testing.T) {
@@ -103,7 +166,7 @@ func TestCache_GetSandboxSet(t *testing.T) {
 	t.Run("found by name index", func(t *testing.T) {
 		c, _, err := cachetest.NewTestCache(t, sbs)
 		require.NoError(t, err)
-		got, err := c.PickSandboxSet(t.Context(), "tmpl-1")
+		got, err := c.PickSandboxSet(t.Context(), cache.PickSandboxSetOptions{Name: "tmpl-1"})
 		require.NoError(t, err)
 		require.NotNil(t, got)
 		assert.Equal(t, "tmpl-1", got.Name)
@@ -113,7 +176,7 @@ func TestCache_GetSandboxSet(t *testing.T) {
 	t.Run("not found", func(t *testing.T) {
 		c, _, err := cachetest.NewTestCache(t)
 		require.NoError(t, err)
-		_, err = c.PickSandboxSet(t.Context(), "nonexistent")
+		_, err = c.PickSandboxSet(t.Context(), cache.PickSandboxSetOptions{Name: "nonexistent"})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "not found in cache")
 	})
@@ -133,20 +196,60 @@ func TestCache_GetSandboxSet_MultipleTemplates(t *testing.T) {
 	c, _, err := cachetest.NewTestCache(t, sbs1, sbs2, sbs3)
 	require.NoError(t, err)
 
-	got, err := c.PickSandboxSet(t.Context(), "tmpl-3")
+	got, err := c.PickSandboxSet(t.Context(), cache.PickSandboxSetOptions{Name: "tmpl-3"})
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.Equal(t, "tmpl-3", got.Name)
 	assert.Equal(t, "team-b", got.Namespace)
 
-	_, err = c.PickSandboxSet(t.Context(), "nonexistent")
+	_, err = c.PickSandboxSet(t.Context(), cache.PickSandboxSetOptions{Name: "nonexistent"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not found in cache")
 }
 
+func TestCache_PickSandboxSetWithOptions_NamespaceScoped(t *testing.T) {
+	sbsA := &agentsv1alpha1.SandboxSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "shared-template", Namespace: "team-a"},
+	}
+	sbsB := &agentsv1alpha1.SandboxSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "shared-template", Namespace: "team-b"},
+	}
+	c, _, err := cachetest.NewTestCache(t, sbsA, sbsB)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name       string
+		namespace  string
+		expectName string
+	}{
+		{
+			name:       "team-a resolves team-a sandboxset",
+			namespace:  "team-a",
+			expectName: "team-a",
+		},
+		{
+			name:       "team-b resolves team-b sandboxset",
+			namespace:  "team-b",
+			expectName: "team-b",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := c.PickSandboxSet(t.Context(), cache.PickSandboxSetOptions{
+				Namespace: tt.namespace,
+				Name:      "shared-template",
+			})
+			require.NoError(t, err)
+			assert.Equal(t, "shared-template", got.Name)
+			assert.Equal(t, tt.expectName, got.Namespace)
+		})
+	}
+}
+
 // --- List tests ---
 
-func TestCache_ListSandboxWithUser(t *testing.T) {
+func TestCache_ListSandboxesWithOptions_UserScoped(t *testing.T) {
 	sbx1 := &agentsv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "sbx-1", Namespace: "default",
@@ -172,20 +275,89 @@ func TestCache_ListSandboxWithUser(t *testing.T) {
 	c, _, err := cachetest.NewTestCache(t, sbx1, sbx2, sbx3)
 	require.NoError(t, err)
 
-	list, err := c.ListSandboxWithUser(t.Context(), "user-1")
+	list, err := c.ListSandboxes(t.Context(), cache.ListSandboxesOptions{User: "user-1"})
 	require.NoError(t, err)
 	assert.Len(t, list, 2)
 
-	list, err = c.ListSandboxWithUser(t.Context(), "user-2")
+	list, err = c.ListSandboxes(t.Context(), cache.ListSandboxesOptions{User: "user-2"})
 	require.NoError(t, err)
 	assert.Len(t, list, 1)
 
-	list, err = c.ListSandboxWithUser(t.Context(), "user-nobody")
+	list, err = c.ListSandboxes(t.Context(), cache.ListSandboxesOptions{User: "user-nobody"})
 	require.NoError(t, err)
 	assert.Len(t, list, 0)
 }
 
-func TestCache_ListCheckpointsWithUser(t *testing.T) {
+func TestCache_ListSandboxesWithOptions_NamespaceAndUserScoped(t *testing.T) {
+	sandboxes := []ctrlclient.Object{
+		&agentsv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        "sbx-a",
+				Namespace:   "team-a",
+				Annotations: map[string]string{agentsv1alpha1.AnnotationOwner: "same-user"},
+				Labels:      map[string]string{agentsv1alpha1.LabelSandboxIsClaimed: agentsv1alpha1.True},
+			},
+		},
+		&agentsv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        "sbx-b",
+				Namespace:   "team-b",
+				Annotations: map[string]string{agentsv1alpha1.AnnotationOwner: "same-user"},
+				Labels:      map[string]string{agentsv1alpha1.LabelSandboxIsClaimed: agentsv1alpha1.True},
+			},
+		},
+	}
+	c, _, err := cachetest.NewTestCache(t, sandboxes...)
+	require.NoError(t, err)
+
+	list, err := c.ListSandboxes(t.Context(), cache.ListSandboxesOptions{
+		Namespace: "team-a",
+		User:      "same-user",
+	})
+	require.NoError(t, err)
+	require.Len(t, list, 1)
+	assert.Equal(t, "sbx-a", list[0].Name)
+	assert.Equal(t, "team-a", list[0].Namespace)
+}
+
+func TestCache_ListSandboxesWithOptions_WithoutUserReturnsNamespaceScopedResults(t *testing.T) {
+	sandboxes := []ctrlclient.Object{
+		&agentsv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        "sbx-a",
+				Namespace:   "team-a",
+				Annotations: map[string]string{agentsv1alpha1.AnnotationOwner: "user-a"},
+				Labels:      map[string]string{agentsv1alpha1.LabelSandboxIsClaimed: agentsv1alpha1.True},
+			},
+		},
+		&agentsv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        "sbx-b",
+				Namespace:   "team-a",
+				Annotations: map[string]string{agentsv1alpha1.AnnotationOwner: "user-b"},
+				Labels:      map[string]string{agentsv1alpha1.LabelSandboxIsClaimed: agentsv1alpha1.True},
+			},
+		},
+		&agentsv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        "sbx-c",
+				Namespace:   "team-b",
+				Annotations: map[string]string{agentsv1alpha1.AnnotationOwner: "user-c"},
+				Labels:      map[string]string{agentsv1alpha1.LabelSandboxIsClaimed: agentsv1alpha1.True},
+			},
+		},
+	}
+	c, _, err := cachetest.NewTestCache(t, sandboxes...)
+	require.NoError(t, err)
+
+	list, err := c.ListSandboxes(t.Context(), cache.ListSandboxesOptions{
+		Namespace: "team-a",
+	})
+	require.NoError(t, err)
+	require.Len(t, list, 2)
+}
+
+func TestCache_ListCheckpointsWithOptions_UserScoped(t *testing.T) {
 	cp1 := &agentsv1alpha1.Checkpoint{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "cp-1", Namespace: "default",
@@ -204,14 +376,83 @@ func TestCache_ListCheckpointsWithUser(t *testing.T) {
 	c, _, err := cachetest.NewTestCache(t, cp1, cp2)
 	require.NoError(t, err)
 
-	list, err := c.ListCheckpointsWithUser(t.Context(), "user-1")
+	list, err := c.ListCheckpoints(t.Context(), cache.ListCheckpointsOptions{User: "user-1"})
 	require.NoError(t, err)
 	assert.Len(t, list, 1)
 	assert.Equal(t, "cp-1", list[0].Name)
 
-	list, err = c.ListCheckpointsWithUser(t.Context(), "user-nobody")
+	list, err = c.ListCheckpoints(t.Context(), cache.ListCheckpointsOptions{User: "user-nobody"})
 	require.NoError(t, err)
 	assert.Len(t, list, 0)
+}
+
+func TestCache_ListCheckpointsWithOptions_NamespaceAndUserScoped(t *testing.T) {
+	checkpoints := []ctrlclient.Object{
+		&agentsv1alpha1.Checkpoint{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        "cp-a",
+				Namespace:   "team-a",
+				Annotations: map[string]string{agentsv1alpha1.AnnotationOwner: "same-user"},
+			},
+			Status: agentsv1alpha1.CheckpointStatus{CheckpointId: "cp-a-id"},
+		},
+		&agentsv1alpha1.Checkpoint{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        "cp-b",
+				Namespace:   "team-b",
+				Annotations: map[string]string{agentsv1alpha1.AnnotationOwner: "same-user"},
+			},
+			Status: agentsv1alpha1.CheckpointStatus{CheckpointId: "cp-b-id"},
+		},
+	}
+	c, _, err := cachetest.NewTestCache(t, checkpoints...)
+	require.NoError(t, err)
+
+	list, err := c.ListCheckpoints(t.Context(), cache.ListCheckpointsOptions{
+		Namespace: "team-b",
+		User:      "same-user",
+	})
+	require.NoError(t, err)
+	require.Len(t, list, 1)
+	assert.Equal(t, "cp-b", list[0].Name)
+	assert.Equal(t, "team-b", list[0].Namespace)
+}
+
+func TestCache_ListCheckpointsWithOptions_WithoutUserReturnsNamespaceScopedResults(t *testing.T) {
+	checkpoints := []ctrlclient.Object{
+		&agentsv1alpha1.Checkpoint{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        "cp-a",
+				Namespace:   "team-a",
+				Annotations: map[string]string{agentsv1alpha1.AnnotationOwner: "user-a"},
+			},
+			Status: agentsv1alpha1.CheckpointStatus{CheckpointId: "cp-a-id"},
+		},
+		&agentsv1alpha1.Checkpoint{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        "cp-b",
+				Namespace:   "team-a",
+				Annotations: map[string]string{agentsv1alpha1.AnnotationOwner: "user-b"},
+			},
+			Status: agentsv1alpha1.CheckpointStatus{CheckpointId: "cp-b-id"},
+		},
+		&agentsv1alpha1.Checkpoint{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        "cp-c",
+				Namespace:   "team-b",
+				Annotations: map[string]string{agentsv1alpha1.AnnotationOwner: "user-c"},
+			},
+			Status: agentsv1alpha1.CheckpointStatus{CheckpointId: "cp-c-id"},
+		},
+	}
+	c, _, err := cachetest.NewTestCache(t, checkpoints...)
+	require.NoError(t, err)
+
+	list, err := c.ListCheckpoints(t.Context(), cache.ListCheckpointsOptions{
+		Namespace: "team-a",
+	})
+	require.NoError(t, err)
+	require.Len(t, list, 2)
 }
 
 func TestCache_ListSandboxesInPool(t *testing.T) {
@@ -242,14 +483,61 @@ func TestCache_ListSandboxesInPool(t *testing.T) {
 	c, _, err := cachetest.NewTestCache(t, sbx)
 	require.NoError(t, err)
 
-	list, err := c.ListSandboxesInPool(t.Context(), "tmpl-a")
+	list, err := c.ListSandboxesInPool(t.Context(), cache.ListSandboxesInPoolOptions{Pool: "tmpl-a"})
 	require.NoError(t, err)
 	assert.Len(t, list, 1)
 	assert.Equal(t, "pool-sbx-1", list[0].Name)
 
-	list, err = c.ListSandboxesInPool(t.Context(), "tmpl-nonexistent")
+	list, err = c.ListSandboxesInPool(t.Context(), cache.ListSandboxesInPoolOptions{Pool: "tmpl-nonexistent"})
 	require.NoError(t, err)
 	assert.Len(t, list, 0)
+}
+
+func TestCache_ListSandboxesInPoolWithOptions_NamespaceScoped(t *testing.T) {
+	sbsRef := metav1.OwnerReference{
+		APIVersion: agentsv1alpha1.SandboxSetControllerKind.GroupVersion().String(),
+		Kind:       agentsv1alpha1.SandboxSetControllerKind.Kind,
+		Name:       "shared-template",
+		UID:        "12345",
+		Controller: boolPtr(true),
+	}
+	sandboxes := []ctrlclient.Object{
+		&agentsv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:            "pool-a",
+				Namespace:       "team-a",
+				Labels:          map[string]string{agentsv1alpha1.LabelSandboxTemplate: "shared-template"},
+				OwnerReferences: []metav1.OwnerReference{sbsRef},
+			},
+			Status: agentsv1alpha1.SandboxStatus{
+				Phase:      agentsv1alpha1.SandboxRunning,
+				Conditions: []metav1.Condition{{Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue}},
+			},
+		},
+		&agentsv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:            "pool-b",
+				Namespace:       "team-b",
+				Labels:          map[string]string{agentsv1alpha1.LabelSandboxTemplate: "shared-template"},
+				OwnerReferences: []metav1.OwnerReference{sbsRef},
+			},
+			Status: agentsv1alpha1.SandboxStatus{
+				Phase:      agentsv1alpha1.SandboxRunning,
+				Conditions: []metav1.Condition{{Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue}},
+			},
+		},
+	}
+	c, _, err := cachetest.NewTestCache(t, sandboxes...)
+	require.NoError(t, err)
+
+	list, err := c.ListSandboxesInPool(t.Context(), cache.ListSandboxesInPoolOptions{
+		Namespace: "team-b",
+		Pool:      "shared-template",
+	})
+	require.NoError(t, err)
+	require.Len(t, list, 1)
+	assert.Equal(t, "pool-b", list[0].Name)
+	assert.Equal(t, "team-b", list[0].Namespace)
 }
 
 // --- Wait tests ---

@@ -44,6 +44,36 @@ type PauseOptions struct {
 	Timeout *TimeoutOptions
 }
 
+type HasTemplateOptions struct {
+	Namespace string
+	Name      string
+}
+
+type HasCheckpointOptions struct {
+	Namespace    string
+	CheckpointID string
+}
+
+type GetClaimedSandboxOptions struct {
+	Namespace string
+	SandboxID string
+}
+
+type SelectSandboxesOptions struct {
+	Namespace string
+	User      string
+}
+
+type SelectSucceededCheckpointsOptions struct {
+	Namespace string
+	User      string
+}
+
+type DeleteCheckpointOptions struct {
+	Namespace    string
+	CheckpointID string
+}
+
 type Builder interface {
 	Build() Infrastructure
 }
@@ -51,16 +81,16 @@ type Builder interface {
 type Infrastructure interface {
 	Run(ctx context.Context) error // Starts the infrastructure
 	Stop(ctx context.Context)      // Stops the infrastructure
-	HasTemplate(ctx context.Context, name string) bool
-	HasCheckpoint(ctx context.Context, name string) bool
+	HasTemplate(ctx context.Context, opts HasTemplateOptions) bool
+	HasCheckpoint(ctx context.Context, opts HasCheckpointOptions) bool
 	GetCache() cache.Provider // Get the CacheProvider for the infra
 	LoadDebugInfo() map[string]any
-	SelectSandboxes(ctx context.Context, user string) ([]Sandbox, error)      // Select Sandboxes based on the options provided
-	GetClaimedSandbox(ctx context.Context, sandboxID string) (Sandbox, error) // Get a Sandbox interface by its ID
-	SelectSucceededCheckpoints(ctx context.Context, user string) ([]CheckpointInfo, error)
+	SelectSandboxes(ctx context.Context, opts SelectSandboxesOptions) ([]Sandbox, error)
+	GetClaimedSandbox(ctx context.Context, opts GetClaimedSandboxOptions) (Sandbox, error)
+	SelectSucceededCheckpoints(ctx context.Context, opts SelectSucceededCheckpointsOptions) ([]CheckpointInfo, error)
 	ClaimSandbox(ctx context.Context, opts ClaimSandboxOptions) (Sandbox, ClaimMetrics, error)
 	CloneSandbox(ctx context.Context, opts CloneSandboxOptions) (Sandbox, CloneMetrics, error)
-	DeleteCheckpoint(ctx context.Context, user string, checkpointID string) error
+	DeleteCheckpoint(ctx context.Context, opts DeleteCheckpointOptions) error
 }
 
 type Sandbox interface {

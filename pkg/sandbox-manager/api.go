@@ -24,6 +24,7 @@ import (
 	"k8s.io/klog/v2"
 
 	"github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
@@ -32,7 +33,7 @@ import (
 // ClaimSandbox attempts to lock a Pod and assign it to the current caller
 func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions) (infra.Sandbox, error) {
 	log := klog.FromContext(ctx)
-	if !m.infra.HasTemplate(ctx, opts.Template) {
+	if !m.infra.HasTemplate(ctx, infra.HasTemplateOptions{Namespace: opts.Namespace, Name: opts.Template}) {
 		// Requirement: Track failure in API layer
 		sandboxClaimCreationResponses.WithLabelValues("failure").Inc()
 		sandboxClaimTotal.WithLabelValues("failure", "unknown").Inc()
@@ -88,37 +89,39 @@ func (m *SandboxManager) CloneSandbox(ctx context.Context, opts infra.CloneSandb
 	return sandbox, nil
 }
 
-// GetClaimedSandbox returns a claimed (running or paused) Pod by its ID
-func (m *SandboxManager) GetClaimedSandbox(ctx context.Context, user, sandboxID string) (infra.Sandbox, error) {
-	log := klog.FromContext(ctx).WithValues("sandboxID", sandboxID)
+func (m *SandboxManager) GetClaimedSandbox(ctx context.Context, user string, opts infra.GetClaimedSandboxOptions) (infra.Sandbox, error) {
+	log := klog.FromContext(ctx).WithValues("sandboxID", opts.SandboxID)
+	if user == "" {
+		return nil, errors.NewError(errors.ErrorBadRequest, "user is required")
+	}
 	log.Info("try to get claimed sandbox")
-	sbx, err := m.infra.GetClaimedSandbox(ctx, sandboxID)
+	sbx, err := m.infra.GetClaimedSandbox(ctx, opts)
 	if err != nil {
 		log.Error(err, "failed to get sandbox from cache")
-		return nil, errors.NewError(errors.ErrorNotFound, fmt.Sprintf("sandbox %s not found", sandboxID))
+		return nil, errors.NewError(errors.ErrorNotFound, fmt.Sprintf("sandbox %s not found", opts.SandboxID))
 	}
 
 	state, reason := sbx.GetState()
 	if state == v1alpha1.SandboxStateAvailable || state == v1alpha1.SandboxStateCreating {
 		// not claimed sandbox should return not found
 		log.Error(nil, "sandbox is not claimed", "state", state, "reason", reason)
-		return nil, errors.NewError(errors.ErrorNotFound, fmt.Sprintf("sandbox %s not found", sandboxID))
+		return nil, errors.NewError(errors.ErrorNotFound, fmt.Sprintf("sandbox %s not found", opts.SandboxID))
 	}
 
 	if sbx.GetRoute().Owner != user {
 		log.Error(nil, "sandbox is not owned by user")
-		return nil, errors.NewError(errors.ErrorNotAllowed, fmt.Sprintf("sandbox %s is not owned", sandboxID))
+		return nil, errors.NewError(errors.ErrorNotAllowed, fmt.Sprintf("sandbox %s is not owned", opts.SandboxID))
 	}
 
 	if state != v1alpha1.SandboxStatePaused && state != v1alpha1.SandboxStateRunning {
 		log.Error(nil, "sandbox is not healthy", "state", state, "reason", reason)
-		return nil, errors.NewError(errors.ErrorBadRequest, fmt.Sprintf("sandbox %s is not healthy (state %s, reason %s)", sandboxID, state, reason))
+		return nil, errors.NewError(errors.ErrorBadRequest, fmt.Sprintf("sandbox %s is not healthy (state %s, reason %s)", opts.SandboxID, state, reason))
 	}
 	return sbx, nil
 }
 
-func (m *SandboxManager) ListSandboxes(ctx context.Context, user string, p *utils.Paginator[infra.Sandbox]) ([]infra.Sandbox, string, error) {
-	sandboxes, err := m.infra.SelectSandboxes(ctx, user)
+func (m *SandboxManager) ListSandboxes(ctx context.Context, opts infra.SelectSandboxesOptions, p *utils.Paginator[infra.Sandbox]) ([]infra.Sandbox, string, error) {
+	sandboxes, err := m.infra.SelectSandboxes(ctx, opts)
 	if err != nil {
 		return nil, "", errors.NewError(errors.ErrorNotFound, fmt.Sprintf("failed to list sandboxes: %v", err))
 	}
@@ -129,8 +132,8 @@ func (m *SandboxManager) ListSandboxes(ctx context.Context, user string, p *util
 	return sandboxes, nextToken, nil
 }
 
-func (m *SandboxManager) ListCheckpoints(ctx context.Context, user string, p *utils.Paginator[infra.CheckpointInfo]) ([]infra.CheckpointInfo, string, error) {
-	checkpoints, err := m.infra.SelectSucceededCheckpoints(ctx, user)
+func (m *SandboxManager) ListCheckpoints(ctx context.Context, opts infra.SelectSucceededCheckpointsOptions, p *utils.Paginator[infra.CheckpointInfo]) ([]infra.CheckpointInfo, string, error) {
+	checkpoints, err := m.infra.SelectSucceededCheckpoints(ctx, opts)
 	if err != nil {
 		return nil, "", errors.NewError(errors.ErrorNotFound, fmt.Sprintf("failed to list checkpoints: %v", err))
 	}
@@ -141,10 +144,20 @@ func (m *SandboxManager) ListCheckpoints(ctx context.Context, user string, p *ut
 	return checkpoints, nextToken, nil
 }
 
-// DeleteCheckpoint deletes a checkpoint and its associated sandbox template
-func (m *SandboxManager) DeleteCheckpoint(ctx context.Context, user string, checkpointID string) error {
-	log := klog.FromContext(ctx).WithValues("checkpointID", checkpointID)
-	if err := m.infra.DeleteCheckpoint(ctx, user, checkpointID); err != nil {
+func (m *SandboxManager) DeleteCheckpoint(ctx context.Context, user string, opts infra.DeleteCheckpointOptions) error {
+	log := klog.FromContext(ctx).WithValues("checkpointID", opts.CheckpointID)
+	cp, err := m.infra.GetCache().GetCheckpoint(ctx, cache.GetCheckpointOptions{
+		Namespace:    opts.Namespace,
+		CheckpointID: opts.CheckpointID,
+	})
+	if err != nil {
+		log.Error(err, "failed to get checkpoint before delete")
+		return errors.NewError(errors.ErrorNotFound, err.Error())
+	}
+	if user != "" && cp.GetAnnotations()[v1alpha1.AnnotationOwner] != user {
+		return errors.NewError(errors.ErrorNotAllowed, fmt.Sprintf("checkpoint %s is not owned by user %s", opts.CheckpointID, user))
+	}
+	if err := m.infra.DeleteCheckpoint(ctx, opts); err != nil {
 		log.Error(err, "failed to delete checkpoint")
 		return err
 	}

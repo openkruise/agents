@@ -211,7 +211,6 @@ cython_debug/
 .agents/
 
 REVIEW.md
-MEMO.md
 
 .gomodcache/
 .modcache/

@@ -31,88 +31,6 @@ import (
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 )
 
-// TestCheckAdminKey tests the CheckAdminKey middleware
-func TestCheckAdminKey(t *testing.T) {
-	tests := []struct {
-		name          string
-		ctxUser       any // value to store in context with "user" key
-		expectError   bool
-		expectedCode  int
-		expectedMsg   string
-		expectCtxUser bool // whether user should be retrievable from context after middleware
-	}{
-		{
-			name:          "valid admin user",
-			ctxUser:       &models.CreatedTeamAPIKey{ID: keys.AdminKeyID, Name: "admin"},
-			expectError:   false,
-			expectCtxUser: true,
-		},
-		{
-			name:         "non-admin user",
-			ctxUser:      &models.CreatedTeamAPIKey{ID: uuid.New(), Name: "regular-user"},
-			expectError:  true,
-			expectedCode: http.StatusForbidden,
-			expectedMsg:  "User is not admin",
-		},
-		{
-			name:         "no user in context",
-			ctxUser:      nil,
-			expectError:  true,
-			expectedCode: http.StatusUnauthorized,
-			expectedMsg:  "User not found",
-		},
-		{
-			name:         "invalid user object type (string)",
-			ctxUser:      "user",
-			expectError:  true,
-			expectedCode: http.StatusUnauthorized,
-			expectedMsg:  "User not found",
-		},
-		{
-			name:         "invalid user object type (int)",
-			ctxUser:      123,
-			expectError:  true,
-			expectedCode: http.StatusUnauthorized,
-			expectedMsg:  "User not found",
-		},
-		{
-			name:         "invalid user object type (map)",
-			ctxUser:      map[string]string{"id": "test"},
-			expectError:  true,
-			expectedCode: http.StatusUnauthorized,
-			expectedMsg:  "User not found",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			controller := &Controller{}
-			ctx := logs.NewContext()
-			if tt.ctxUser != nil {
-				ctx = context.WithValue(ctx, "user", tt.ctxUser)
-			}
-			req, err := http.NewRequest(http.MethodGet, "http://localhost/test", nil)
-			require.NoError(t, err)
-
-			newCtx, apiErr := controller.CheckAdminKey(ctx, req)
-
-			if tt.expectError {
-				assert.NotNil(t, apiErr)
-				if apiErr != nil {
-					assert.Equal(t, tt.expectedCode, apiErr.Code)
-					assert.Equal(t, tt.expectedMsg, apiErr.Message)
-				}
-			} else {
-				assert.Nil(t, apiErr)
-				if tt.expectCtxUser {
-					user := GetUserFromContext(newCtx)
-					assert.NotNil(t, user)
-				}
-			}
-		})
-	}
-}
-
 // TestCheckApiKey_BasicTests tests basic CheckApiKey middleware functionality
 // Note: The "keys nil (auth disabled)" scenario is tested separately
 // to avoid peer initialization timeout issues. See TestCheckApiKey_AnonymousUserWithAdminKeyID
@@ -132,7 +50,7 @@ func TestCheckApiKey_WithRealSetup(t *testing.T) {
 
 	// Create a regular user key using CreateKey API
 	ctx := logs.NewContext()
-	regularUser, err := controller.keys.CreateKey(ctx, adminUser, "regular-user")
+	regularUser, err := controller.keys.CreateKey(ctx, adminUser, keys.CreateKeyOptions{Name: "regular-user", TeamName: "regular-team"})
 	require.NoError(t, err)
 	require.NotNil(t, regularUser)
 
@@ -213,26 +131,30 @@ func TestCheckApiKey_SandboxOwnership(t *testing.T) {
 	defer teardown()
 
 	templateName := "test-template-auth"
-	cleanup := CreateSandboxPool(t, controller, templateName, 2)
-	defer cleanup()
 
 	// Create admin user
 	adminUser := &models.CreatedTeamAPIKey{
 		ID:   keys.AdminKeyID,
 		Key:  InitKey,
 		Name: "admin",
+		Team: models.AdminTeam(),
 	}
 
 	// Create a regular user
 	ctx := logs.NewContext()
-	regularUser, err := controller.keys.CreateKey(ctx, adminUser, "regular-user")
+	regularUser, err := controller.keys.CreateKey(ctx, adminUser, keys.CreateKeyOptions{Name: "regular-user", TeamName: "regular-team"})
 	require.NoError(t, err)
 	require.NotNil(t, regularUser)
 
 	// Create another user for non-owner test
-	anotherUser, err := controller.keys.CreateKey(ctx, adminUser, "another-user")
+	anotherUser, err := controller.keys.CreateKey(ctx, adminUser, keys.CreateKeyOptions{Name: "another-user", TeamName: "another-team"})
 	require.NoError(t, err)
 	require.NotNil(t, anotherUser)
+
+	adminCleanup := CreateSandboxPool(t, controller, templateName, 2)
+	defer adminCleanup()
+	regularCleanup := CreateSandboxPool(t, controller, templateName, 2, CreateSandboxPoolOptions{Namespace: regularUser.Team.Name})
+	defer regularCleanup()
 
 	// Create sandbox owned by regular user
 	createResp, apiErr := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
@@ -340,96 +262,12 @@ func TestCheckApiKey_SandboxOwnership(t *testing.T) {
 	}
 }
 
-// TestCheckAdminKey_MiddlewareChain tests CheckAdminKey after CheckApiKey
-func TestCheckAdminKey_MiddlewareChain(t *testing.T) {
-	controller, _, teardown := Setup(t)
-	defer teardown()
-
-	adminUser := &models.CreatedTeamAPIKey{
-		ID:   keys.AdminKeyID,
-		Key:  InitKey,
-		Name: "admin",
-	}
-
-	// Create a regular user
-	ctx := logs.NewContext()
-	regularUser, err := controller.keys.CreateKey(ctx, adminUser, "regular-user")
-	require.NoError(t, err)
-	require.NotNil(t, regularUser)
-
-	tests := []struct {
-		name         string
-		apiKeyHeader string
-		expectAdmin  bool
-		expectedCode int
-		expectedMsg  string
-	}{
-		{
-			name:         "admin user passes CheckAdminKey",
-			apiKeyHeader: InitKey,
-			expectAdmin:  true,
-		},
-		{
-			name:         "regular user fails CheckAdminKey",
-			apiKeyHeader: regularUser.Key,
-			expectAdmin:  false,
-			expectedCode: http.StatusForbidden,
-			expectedMsg:  "User is not admin",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			req, err := http.NewRequest(http.MethodGet, "http://localhost/test", nil)
-			require.NoError(t, err)
-			req.Header.Set("X-API-KEY", tt.apiKeyHeader)
-
-			ctx := logs.NewContext()
-
-			// First call CheckApiKey
-			ctx, apiErr := controller.CheckApiKey(ctx, req)
-			assert.Nil(t, apiErr, "CheckApiKey should not fail")
-
-			// Then call CheckAdminKey
-			_, apiErr = controller.CheckAdminKey(ctx, req)
-
-			if tt.expectAdmin {
-				assert.Nil(t, apiErr, "CheckAdminKey should pass for admin user")
-			} else {
-				assert.NotNil(t, apiErr, "CheckAdminKey should fail for non-admin user")
-				if apiErr != nil {
-					assert.Equal(t, tt.expectedCode, apiErr.Code)
-					assert.Equal(t, tt.expectedMsg, apiErr.Message)
-				}
-			}
-		})
-	}
-}
-
 // TestCheckApiKey_AnonymousUserWithAdminKeyID tests that AnonymousUser has AdminKeyID
 func TestCheckApiKey_AnonymousUserWithAdminKeyID(t *testing.T) {
 	// Verify AnonymousUser has AdminKeyID - this allows admin to access any sandbox
 	assert.Equal(t, keys.AdminKeyID, AnonymousUser.ID, "AnonymousUser should have AdminKeyID")
 	assert.Equal(t, "auth-disabled", AnonymousUser.Name, "AnonymousUser should have auth-disabled name")
-}
-
-// TestCheckApiKey_NoAPIKeyHeader tests behavior when no X-API-KEY header is provided
-// This test is covered in TestCheckApiKey_WithRealSetup
-
-// TestCheckAdminKey_NilUser tests CheckAdminKey when GetUserFromContext returns nil
-func TestCheckAdminKey_NilUser(t *testing.T) {
-	controller := &Controller{}
-	ctx := logs.NewContext()
-	// Don't set any user in context
-
-	req, err := http.NewRequest(http.MethodGet, "http://localhost/test", nil)
-	require.NoError(t, err)
-
-	_, apiErr := controller.CheckAdminKey(ctx, req)
-
-	assert.NotNil(t, apiErr)
-	assert.Equal(t, http.StatusUnauthorized, apiErr.Code)
-	assert.Equal(t, "User not found", apiErr.Message)
+	assert.Equal(t, models.AdminTeam(), AnonymousUser.Team, "AnonymousUser should carry canonical admin team")
 }
 
 // TestGetUserFromContext tests the GetUserFromContext helper function
