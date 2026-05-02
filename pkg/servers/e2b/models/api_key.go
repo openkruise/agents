@@ -22,6 +22,23 @@ import (
 	"github.com/google/uuid"
 )
 
+const AdminTeamName = "admin"
+
+var AdminTeamID = uuid.MustParse("550e8400-e29b-41d4-a716-446655449999")
+
+// Team represents an E2B team.
+type Team struct {
+	ID   uuid.UUID `json:"id"`
+	Name string    `json:"name"`
+}
+
+func AdminTeam() *Team {
+	return &Team{
+		ID:   AdminTeamID,
+		Name: AdminTeamName,
+	}
+}
+
 // TeamUser represents a user in a team
 type TeamUser struct {
 	Email string    `json:"email"`
@@ -41,9 +58,11 @@ type CreatedTeamAPIKey struct {
 	CreatedAt time.Time                `json:"createdAt"`
 	ID        uuid.UUID                `json:"id"`
 	Key       string                   `json:"key"`
+	KeyHash   string                   `json:"-"`
 	Mask      IdentifierMaskingDetails `json:"mask"`
 	Name      string                   `json:"name"`
 	CreatedBy *TeamUser                `json:"createdBy"`
+	Team      *Team                    `json:"team,omitempty"`
 	LastUsed  *time.Time               `json:"lastUsed"`
 }
 
@@ -59,7 +78,16 @@ type TeamAPIKey struct {
 
 // NewTeamAPIKey represents a request to create a new team API key
 type NewTeamAPIKey struct {
-	Name string `json:"name"`
+	Name     string `json:"name"`
+	TeamName string `json:"teamName,omitempty"`
+}
+
+// ListedTeam represents a team returned by the upstream-compatible GET /teams API.
+type ListedTeam struct {
+	TeamID    string `json:"teamID"`
+	Name      string `json:"name"`
+	APIKey    string `json:"apiKey"`
+	IsDefault bool   `json:"isDefault"`
 }
 
 // UpdateTeamAPIKey represents a request to update a team API key

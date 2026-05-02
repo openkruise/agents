@@ -18,11 +18,15 @@ package e2b
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/klog/v2"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
@@ -63,9 +67,10 @@ func (sc *Controller) registerRoutes() {
 
 	// API Keys management endpoints
 	if sc.keyCfg != nil {
-		RegisterE2BRoute(sc.mux, http.MethodGet, "/api-keys", sc.ListAPIKeys, sc.CheckApiKey, sc.CheckAdminKey)
-		RegisterE2BRoute(sc.mux, http.MethodPost, "/api-keys", sc.CreateAPIKey, sc.CheckApiKey, sc.CheckAdminKey)
-		RegisterE2BRoute(sc.mux, http.MethodDelete, "/api-keys/{apiKeyID}", sc.DeleteAPIKey, sc.CheckApiKey, sc.CheckAdminKey)
+		RegisterE2BRoute(sc.mux, http.MethodGet, "/teams", sc.ListTeams, sc.CheckApiKey)
+		RegisterE2BRoute(sc.mux, http.MethodGet, "/api-keys", sc.ListAPIKeys, sc.CheckApiKey)
+		RegisterE2BRoute(sc.mux, http.MethodPost, "/api-keys", sc.CreateAPIKey, sc.CheckApiKey, sc.CheckCreateAPIKeyPermission)
+		RegisterE2BRoute(sc.mux, http.MethodDelete, "/api-keys/{apiKeyID}", sc.DeleteAPIKey, sc.CheckApiKey, sc.CheckDeleteAPIKeyPermission)
 	}
 }
 
@@ -81,6 +86,7 @@ func RegisterE2BRoute[T any](mux *http.ServeMux, method, path string, handler we
 var AnonymousUser = &models.CreatedTeamAPIKey{
 	ID:   keys.AdminKeyID,
 	Name: "auth-disabled",
+	Team: models.AdminTeam(),
 }
 
 // CheckApiKey implements common ApiKey validation
@@ -121,10 +127,74 @@ func (sc *Controller) CheckApiKey(ctx context.Context, r *http.Request) (context
 	return context.WithValue(klog.NewContext(ctx, logger.WithValues("user", user.Name)), "user", user), nil
 }
 
-// CheckAdminKey must be called after CheckApiKey. It checks if the user is an admin.
-func (sc *Controller) CheckAdminKey(ctx context.Context, _ *http.Request) (context.Context, *web.ApiError) {
+const (
+	newAPIKeyRequestContextKey = "newAPIKeyRequest"
+	targetAPIKeyContextKey     = "targetAPIKey"
+)
+
+func (sc *Controller) CheckCreateAPIKeyPermission(ctx context.Context, r *http.Request) (context.Context, *web.ApiError) {
+	log := klog.FromContext(ctx).WithValues("middleware", "CheckCreateAPIKeyPermission").V(consts.DebugLogLevel)
+	user := GetUserFromContext(ctx)
+	if user == nil {
+		log.Info("failed to get user from context")
+		return ctx, &web.ApiError{
+			Code:    http.StatusUnauthorized,
+			Message: "User not found",
+		}
+	}
+
+	// Parse caller team and target team
+	var request models.NewTeamAPIKey
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		return ctx, &web.ApiError{
+			Code:    http.StatusBadRequest,
+			Message: err.Error(),
+		}
+	}
+
+	callerTeam := keys.TeamForKey(user)
+	targetTeamName := request.TeamName
+	if targetTeamName == "" {
+		targetTeamName = callerTeam.Name
+	}
+	if targetTeamName == "" {
+		return ctx, &web.ApiError{
+			Code:    http.StatusBadRequest,
+			Message: "teamName is required",
+		}
+	}
+
+	// Only admin can create API key for other team
+	isAdmin := callerTeam.ID == models.AdminTeamID
+	if !isAdmin && targetTeamName != callerTeam.Name {
+		return ctx, &web.ApiError{
+			Code:    http.StatusForbidden,
+			Message: "You are not allowed to create an API key for another team",
+		}
+	}
+
+	// Validate namespace of target team exists
+	_, found, err := sc.keys.FindTeamByName(ctx, targetTeamName)
+	if err != nil {
+		return ctx, &web.ApiError{
+			Code:    http.StatusInternalServerError,
+			Message: fmt.Sprintf("Failed to find team: %v", err),
+		}
+	}
+	if !found {
+		if apiErr := sc.validateTeamNamespace(ctx, targetTeamName); apiErr != nil {
+			return ctx, apiErr
+		}
+	}
+
+	request.TeamName = targetTeamName
+	ctx = context.WithValue(ctx, newAPIKeyRequestContextKey, &request)
+	return ctx, nil
+}
+
+func (sc *Controller) CheckDeleteAPIKeyPermission(ctx context.Context, r *http.Request) (context.Context, *web.ApiError) {
 	logger := klog.FromContext(ctx)
-	middleWareLog := logger.WithValues("middleware", "CheckAdminKey").V(consts.DebugLogLevel)
+	middleWareLog := logger.WithValues("middleware", "CheckDeleteAPIKeyPermission").V(consts.DebugLogLevel)
 	user := GetUserFromContext(ctx)
 	if user == nil {
 		middleWareLog.Info("failed to get user from context")
@@ -133,14 +203,42 @@ func (sc *Controller) CheckAdminKey(ctx context.Context, _ *http.Request) (conte
 			Message: "User not found",
 		}
 	}
-	if user.ID != keys.AdminKeyID {
-		middleWareLog.Info("user is not admin")
+	apiKeyID := r.PathValue("apiKeyID")
+	key, ok := sc.keys.LoadByID(ctx, apiKeyID)
+	if !ok {
 		return ctx, &web.ApiError{
-			Code:    http.StatusForbidden,
-			Message: "User is not admin",
+			Code:    http.StatusNotFound,
+			Message: "API key not found",
 		}
 	}
-	return ctx, nil
+
+	userTeam := keys.TeamForKey(user)
+	targetTeam := keys.TeamForKey(key)
+	if userTeam.ID != targetTeam.ID && userTeam.ID != models.AdminTeamID {
+		return ctx, &web.ApiError{
+			Code:    http.StatusForbidden,
+			Message: "You are not allowed to delete this API key",
+		}
+	}
+	return context.WithValue(ctx, targetAPIKeyContextKey, key), nil
+}
+
+func (sc *Controller) validateTeamNamespace(ctx context.Context, teamName string) *web.ApiError {
+	namespace := &corev1.Namespace{}
+	if err := sc.cache.GetClient().Get(ctx, client.ObjectKey{Name: teamName}, namespace); err != nil {
+		if apierrors.IsNotFound(err) || apierrors.IsInvalid(err) || apierrors.IsBadRequest(err) {
+			return &web.ApiError{
+				Code:    http.StatusBadRequest,
+				Message: fmt.Sprintf("Kubernetes namespace %q does not exist", teamName),
+			}
+		}
+		return &web.ApiError{
+			Code:    http.StatusInternalServerError,
+			Message: fmt.Sprintf("Failed to validate Kubernetes namespace %q: %v", teamName, err),
+		}
+	}
+
+	return nil
 }
 
 func GetUserFromContext(ctx context.Context) *models.CreatedTeamAPIKey {
@@ -150,4 +248,19 @@ func GetUserFromContext(ctx context.Context) *models.CreatedTeamAPIKey {
 		return nil
 	}
 	return user
+}
+
+func GetNewAPIKeyRequestFromContext(ctx context.Context) (*models.NewTeamAPIKey, bool) {
+	value := ctx.Value(newAPIKeyRequestContextKey)
+	request, ok := value.(*models.NewTeamAPIKey)
+	return request, ok
+}
+
+func GetTargetAPIKeyFromContext(ctx context.Context) *models.CreatedTeamAPIKey {
+	value := ctx.Value(targetAPIKeyContextKey)
+	apiKey, ok := value.(*models.CreatedTeamAPIKey)
+	if !ok {
+		return nil
+	}
+	return apiKey
 }

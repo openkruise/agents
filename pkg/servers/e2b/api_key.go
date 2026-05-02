@@ -18,9 +18,11 @@ package e2b
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 
+	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
 )
@@ -47,11 +49,15 @@ func (sc *Controller) ListAPIKeys(r *http.Request) (web.ApiResponse[[]*models.Te
 }
 
 func (sc *Controller) CreateAPIKey(r *http.Request) (web.ApiResponse[*models.CreatedTeamAPIKey], *web.ApiError) {
-	var request models.NewTeamAPIKey
-	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-		return web.ApiResponse[*models.CreatedTeamAPIKey]{}, &web.ApiError{
-			Message: err.Error(),
+	request, ok := GetNewAPIKeyRequestFromContext(r.Context())
+	if !ok {
+		var decoded models.NewTeamAPIKey
+		if err := json.NewDecoder(r.Body).Decode(&decoded); err != nil {
+			return web.ApiResponse[*models.CreatedTeamAPIKey]{}, &web.ApiError{
+				Message: err.Error(),
+			}
 		}
+		request = &decoded
 	}
 
 	ctx := r.Context()
@@ -61,7 +67,10 @@ func (sc *Controller) CreateAPIKey(r *http.Request) (web.ApiResponse[*models.Cre
 			Message: "User not found",
 		}
 	}
-	createdAPIKey, err := sc.keys.CreateKey(ctx, user, request.Name)
+	createdAPIKey, err := sc.keys.CreateKey(ctx, user, keys.CreateKeyOptions{
+		Name:     request.Name,
+		TeamName: request.TeamName,
+	})
 	if err != nil {
 		return web.ApiResponse[*models.CreatedTeamAPIKey]{}, &web.ApiError{
 			Code:    http.StatusInternalServerError,
@@ -75,9 +84,25 @@ func (sc *Controller) CreateAPIKey(r *http.Request) (web.ApiResponse[*models.Cre
 	}, nil
 }
 
-func (sc *Controller) DeleteAPIKey(r *http.Request) (web.ApiResponse[struct{}], *web.ApiError) {
-	apiKeyID := r.PathValue("apiKeyID")
+func (sc *Controller) ListTeams(r *http.Request) (web.ApiResponse[[]*models.ListedTeam], *web.ApiError) {
+	ctx := r.Context()
+	user := GetUserFromContext(ctx)
+	if user == nil {
+		return web.ApiResponse[[]*models.ListedTeam]{}, &web.ApiError{
+			Message: "User not found",
+		}
+	}
+	teams, err := sc.keys.ListTeams(ctx, user)
+	if err != nil {
+		return web.ApiResponse[[]*models.ListedTeam]{}, &web.ApiError{
+			Code:    http.StatusInternalServerError,
+			Message: fmt.Sprintf("Failed to list teams: %v", err),
+		}
+	}
+	return web.ApiResponse[[]*models.ListedTeam]{Body: teams}, nil
+}
 
+func (sc *Controller) DeleteAPIKey(r *http.Request) (web.ApiResponse[struct{}], *web.ApiError) {
 	ctx := r.Context()
 	user := GetUserFromContext(ctx)
 	if user == nil {
@@ -87,23 +112,19 @@ func (sc *Controller) DeleteAPIKey(r *http.Request) (web.ApiResponse[struct{}], 
 		}
 	}
 
-	key, ok := sc.keys.LoadByID(ctx, apiKeyID)
-	if !ok {
-		return web.ApiResponse[struct{}]{}, &web.ApiError{
-			Code:    http.StatusNotFound,
-			Message: "API key not found",
-		}
-	}
-	if key.CreatedBy == nil || key.CreatedBy.ID != user.ID && key.ID != user.ID {
-		return web.ApiResponse[struct{}]{}, &web.ApiError{
-			Code:    http.StatusUnauthorized,
-			Message: "You are not allowed to delete this API key",
-		}
-	}
-	if err := sc.keys.DeleteKey(ctx, key); err != nil {
-		return web.ApiResponse[struct{}]{}, &web.ApiError{
-			Code:    http.StatusInternalServerError,
-			Message: fmt.Sprintf("Failed to delete API key: %v", err),
+	key := GetTargetAPIKeyFromContext(ctx)
+	if key != nil {
+		if err := sc.keys.DeleteKey(ctx, key); err != nil {
+			if errors.Is(err, keys.ErrLastAdminKey) {
+				return web.ApiResponse[struct{}]{}, &web.ApiError{
+					Code:    http.StatusForbidden,
+					Message: err.Error(),
+				}
+			}
+			return web.ApiResponse[struct{}]{}, &web.ApiError{
+				Code:    http.StatusInternalServerError,
+				Message: fmt.Sprintf("Failed to delete API key: %v", err),
+			}
 		}
 	}
 

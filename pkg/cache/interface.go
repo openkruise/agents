@@ -34,40 +34,23 @@ import (
 // live API calls. Run must be called once to start the underlying informers and wait for the
 // initial sync before any other method is used.
 type Provider interface {
-	// GetClaimedSandbox retrieves the Sandbox CRD object for an already-claimed sandbox,
-	// identified by its logical sandbox ID (the value of the sandbox-id label/annotation),
-	// not the Kubernetes resource name.
-	// Returns an error if no sandbox with that ID is found, or if multiple sandboxes share
-	// the same ID (which indicates a data inconsistency).
-	GetClaimedSandbox(ctx context.Context, sandboxID string) (*agentsv1alpha1.Sandbox, error)
+	GetClaimedSandbox(ctx context.Context, opts GetClaimedSandboxOptions) (*agentsv1alpha1.Sandbox, error)
 
-	// GetCheckpoint retrieves the Checkpoint CRD object by its logical checkpoint ID
-	// (stored in Status.CheckpointId), not the Kubernetes resource name.
-	// Returns an error if the checkpoint is not found or multiple checkpoints share the same ID.
-	GetCheckpoint(ctx context.Context, checkpointID string) (*agentsv1alpha1.Checkpoint, error)
+	GetCheckpoint(ctx context.Context, opts GetCheckpointOptions) (*agentsv1alpha1.Checkpoint, error)
 
-	// PickSandboxSet retrieves the SandboxSet CRD object by its Kubernetes resource name.
-	// A SandboxSet represents a pool of pre-warmed, idle sandboxes backed by a specific template.
-	// Returns an error if no SandboxSet with that name exists in the cache.
-	PickSandboxSet(ctx context.Context, name string) (*agentsv1alpha1.SandboxSet, error)
+	PickSandboxSet(ctx context.Context, opts PickSandboxSetOptions) (*agentsv1alpha1.SandboxSet, error)
 
-	// ListSandboxWithUser returns all Sandbox CRD objects owned by the given user.
-	// Ownership is determined by the AnnotationOwner annotation on the Sandbox resource.
-	// The returned slice may be empty if the user has no sandboxes.
-	// Used to enumerate a user's active sandbox instances for listing or quota enforcement.
-	ListSandboxWithUser(ctx context.Context, user string) ([]*agentsv1alpha1.Sandbox, error)
+	ListSandboxSets(ctx context.Context, opts ListSandboxSetsOptions) ([]*agentsv1alpha1.SandboxSet, error)
 
-	// ListCheckpointsWithUser returns all Checkpoint CRD objects owned by the given user.
-	// Ownership is determined by the AnnotationOwner annotation on the Checkpoint resource.
-	// The returned slice may be empty if the user has no checkpoints.
-	ListCheckpointsWithUser(ctx context.Context, user string) ([]*agentsv1alpha1.Checkpoint, error)
+	// ListSandboxes returns Sandbox CRD objects filtered by namespace and optional owner.
+	// Ownership is determined by the AnnotationOwner annotation on the Sandbox resource when User is set.
+	ListSandboxes(ctx context.Context, opts ListSandboxesOptions) ([]*agentsv1alpha1.Sandbox, error)
 
-	// ListSandboxesInPool returns all Sandbox CRD objects that belong to the pool identified
-	// by the given template name. Only sandboxes in Available state (or Creating state when
-	// controlled by a SandboxSet) are indexed under a pool, so this method effectively returns
-	// the set of idle, claimable sandboxes for a given template.
-	// Concurrent calls with the same pool name are deduplicated via singleflight.
-	ListSandboxesInPool(ctx context.Context, pool string) ([]*agentsv1alpha1.Sandbox, error)
+	// ListCheckpoints returns Checkpoint CRD objects filtered by namespace and optional owner.
+	// Ownership is determined by the AnnotationOwner annotation on the Checkpoint resource when User is set.
+	ListCheckpoints(ctx context.Context, opts ListCheckpointsOptions) ([]*agentsv1alpha1.Checkpoint, error)
+
+	ListSandboxesInPool(ctx context.Context, opts ListSandboxesInPoolOptions) ([]*agentsv1alpha1.Sandbox, error)
 
 	// NewSandboxPauseTask builds an immutable wait task encapsulating the Pause
 	// readiness check. See pkg/cache/tasks.go for the checker definition.
@@ -107,4 +90,38 @@ type Provider interface {
 	// Prefer GetClient() for most operations; use this only when cache staleness
 	// is unacceptable (e.g., validating critical state transitions).
 	GetAPIReader() client.Reader
+}
+
+type GetClaimedSandboxOptions struct {
+	Namespace string
+	SandboxID string
+}
+
+type GetCheckpointOptions struct {
+	Namespace    string
+	CheckpointID string
+}
+
+type PickSandboxSetOptions struct {
+	Namespace string
+	Name      string
+}
+
+type ListSandboxSetsOptions struct {
+	Namespace string
+}
+
+type ListSandboxesOptions struct {
+	Namespace string
+	User      string
+}
+
+type ListCheckpointsOptions struct {
+	Namespace string
+	User      string
+}
+
+type ListSandboxesInPoolOptions struct {
+	Namespace string
+	Pool      string
 }

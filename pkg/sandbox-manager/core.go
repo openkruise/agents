@@ -143,8 +143,6 @@ func (b *SandboxManagerBuilder) Build() (*SandboxManager, error) {
 }
 
 type SandboxManager struct {
-	Namespace string
-
 	peersManager       peers.Peers
 	memberlistBindPort int
 

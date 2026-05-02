@@ -13,19 +13,19 @@ SandboxTemplate) without hitting the API server on every request.
 
 ```go
 // ✅ CORRECT — DeepCopy before modification
-sbx, err := cacheProvider.GetClaimedSandbox(ctx, sandboxID)
+sbx, err := cacheProvider.GetClaimedSandbox(ctx, cache.GetClaimedSandboxOptions{SandboxID: sandboxID})
 if err != nil { return err }
 sbxCopy := sbx.DeepCopy()
 sbxCopy.Labels["foo"] = "bar"
 err = client.Update(ctx, sbxCopy)
 
 // ❌ WRONG — Directly mutating cache object corrupts shared state
-sbx, err := cacheProvider.GetClaimedSandbox(ctx, sandboxID)
+sbx, err := cacheProvider.GetClaimedSandbox(ctx, cache.GetClaimedSandboxOptions{SandboxID: sandboxID})
 sbx.Labels["foo"] = "bar"  // DATA RACE! Corrupts informer store!
 ```
 
 This applies to ALL methods that return `*agentsv1alpha1.Sandbox`, `*agentsv1alpha1.Checkpoint`,
-`*agentsv1alpha1.SandboxSet`, or slices thereof (`ListSandboxWithUser`, `ListSandboxesInPool`, etc.).
+`*agentsv1alpha1.SandboxSet`, or slices thereof (`ListSandboxes`, `ListSandboxesInPool`, etc.).
 
 ## Architecture
 
@@ -51,7 +51,19 @@ pkg/cache/
 
 The `Provider` interface is the public API. Consumers should depend on `Provider`, not `*Cache` directly.
 
-### 2. Field Indexes (`index.go`)
+### 2. Namespace Semantics
+
+For every cache `*` method that accepts `Namespace`, an empty `opts.Namespace` means
+"do not add an explicit namespace filter". It does **not** mean "cluster scope" by definition.
+
+The effective scope is "all namespaces visible to the current cache/client". In production this is
+often already narrower than the whole cluster, because the cache itself may be pre-filtered by
+`SandboxManagerOptions.SandboxNamespace` in `BuildCacheConfig`.
+
+Callers that require a specific namespace must set `opts.Namespace` explicitly. Do not rely on an
+empty namespace to mean "search the whole cluster".
+
+### 3. Field Indexes (`index.go`)
 
 All indexes are defined in `GetIndexFuncs()` — the single source of truth shared by production (`AddIndexesToCache`)
 and testing (`cachetest.NewTestCache`). Available indexes:
@@ -64,7 +76,7 @@ and testing (`cachetest.NewTestCache`). Available indexes:
 | `templateID`          | SandboxSet  | Lookup SandboxSet by name                |
 | `checkpointID`        | Checkpoint  | Lookup checkpoint by status.checkpointId |
 
-### 3. Wait Mechanism (WaitTask factories)
+### 4. Wait Mechanism (WaitTask factories)
 
 Informer-driven wait that blocks until a resource satisfies a predefined condition. The public API is a
 family of factory methods on `*Cache`: `NewSandboxPauseTask` / `NewSandboxResumeTask` /
@@ -74,12 +86,12 @@ are guaranteed to use the same checker (see `pkg/cache/tasks.go`). Internally ea
 `WaitForObjectSatisfied`, which consults `waitHooks` (a `sync.Map`) on every reconcile event via
 `WaitReconciler[T]`.
 
-### 4. Singleflight Deduplication
+### 5. Singleflight Deduplication
 
 `GetClaimedSandbox`, `GetCheckpoint`, `PickSandboxSet`, and `ListSandboxesInPool` use `singleflight.Group`
 to deduplicate concurrent identical queries.
 
-### 5. Custom Reconcilers
+### 6. Custom Reconcilers
 
 `CacheSandboxCustomReconciler` and `CacheSandboxSetCustomReconciler` allow external callers (e.g., sandbox-manager
 infra layer) to register event handlers via `AddReconcileHandlers()`.
@@ -96,13 +108,13 @@ package is banned in production code; import it **only** from `_test.go` files.
 
 ### Reading from cache (read-only)
 ```go
-sbx, err := cacheProvider.GetClaimedSandbox(ctx, id)
+    sbx, err := cacheProvider.GetClaimedSandbox(ctx, cache.GetClaimedSandboxOptions{SandboxID: id})
 // Use sbx for read-only inspection — no DeepCopy needed if not mutating
 ```
 
 ### Reading from cache then updating
 ```go
-sbx, err := cacheProvider.GetClaimedSandbox(ctx, id)
+sbx, err := cacheProvider.GetClaimedSandbox(ctx, cache.GetClaimedSandboxOptions{SandboxID: id})
 if err != nil { return err }
 sbxCopy := sbx.DeepCopy()  // MUST DeepCopy before mutation
 sbxCopy.Spec.DesiredState = "Paused"

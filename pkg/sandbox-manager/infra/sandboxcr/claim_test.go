@@ -842,7 +842,9 @@ func TestCheckSandboxInplaceUpdate(t *testing.T) {
 			}
 			CreateSandboxWithStatus(t, fc, sbx)
 
-			gotSbx, err := testInfra.Cache.GetClaimedSandbox(t.Context(), sandboxutils.GetSandboxID(sbx))
+			gotSbx, err := testInfra.Cache.GetClaimedSandbox(t.Context(), infracache.GetClaimedSandboxOptions{
+				SandboxID: sandboxutils.GetSandboxID(sbx),
+			})
 			assert.NoError(t, err)
 			if err != nil {
 				return
@@ -1795,7 +1797,7 @@ func TestNewSandboxFromTemplate_RateLimitExceeded(t *testing.T) {
 
 	// Wait for cache to sync
 	require.Eventually(t, func() bool {
-		_, err := infraInstance.Cache.PickSandboxSet(t.Context(), template)
+		_, err := infraInstance.Cache.PickSandboxSet(t.Context(), infracache.PickSandboxSetOptions{Name: template})
 		return err == nil
 	}, time.Second, 10*time.Millisecond)
 
@@ -2123,6 +2125,125 @@ func TestTryClaimSandbox_LockConflict(t *testing.T) {
 	}
 }
 
+func TestInfra_ClaimSandboxWithNamespace(t *testing.T) {
+	tests := []struct {
+		name      string
+		setup     func(t *testing.T, c client.Client)
+		options   infra.ClaimSandboxOptions
+		postCheck func(t *testing.T, sbx infra.Sandbox)
+	}{
+		{
+			name: "claims available sandbox only from requested namespace",
+			setup: func(t *testing.T, c client.Client) {
+				now := metav1.Now()
+				for _, namespace := range []string{"team-a", "team-b"} {
+					sbx := &v1alpha1.Sandbox{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:              namespace + "-sandbox",
+							Namespace:         namespace,
+							CreationTimestamp: now,
+							Labels: map[string]string{
+								v1alpha1.LabelSandboxTemplate:        "shared-template",
+								agentsv1alpha1.LabelSandboxIsClaimed: "false",
+							},
+							Annotations:     map[string]string{},
+							OwnerReferences: GetSbsOwnerReference(),
+						},
+						Spec: v1alpha1.SandboxSpec{
+							EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+								Template: &corev1.PodTemplateSpec{
+									Spec: corev1.PodSpec{
+										Containers: []corev1.Container{{Name: "main", Image: "old-image"}},
+									},
+								},
+							},
+						},
+						Status: v1alpha1.SandboxStatus{
+							Phase:      v1alpha1.SandboxRunning,
+							Conditions: []metav1.Condition{{Type: string(v1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue}},
+							PodInfo:    v1alpha1.PodInfo{PodIP: "1.2.3.4"},
+						},
+					}
+					CreateSandboxWithStatus(t, c, sbx)
+				}
+			},
+			options: infra.ClaimSandboxOptions{
+				Namespace:    "team-a",
+				User:         "test-user",
+				Template:     "shared-template",
+				ClaimTimeout: 100 * time.Millisecond,
+			},
+			postCheck: func(t *testing.T, sbx infra.Sandbox) {
+				assert.Equal(t, "team-a", sbx.GetNamespace())
+				assert.Equal(t, "team-a-sandbox", sbx.GetName())
+			},
+		},
+		{
+			name: "create on no stock creates sandbox in requested namespace",
+			setup: func(t *testing.T, c client.Client) {
+				for _, namespace := range []string{"team-a", "team-b"} {
+					sbs := &v1alpha1.SandboxSet{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "shared-template",
+							Namespace: namespace,
+						},
+						Spec: v1alpha1.SandboxSetSpec{
+							EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+								Template: &corev1.PodTemplateSpec{
+									Spec: corev1.PodSpec{
+										Containers: []corev1.Container{{Name: "main", Image: namespace + "-image"}},
+									},
+								},
+							},
+						},
+					}
+					require.NoError(t, c.Create(t.Context(), sbs))
+				}
+			},
+			options: infra.ClaimSandboxOptions{
+				Namespace:       "team-b",
+				User:            "test-user",
+				Template:        "shared-template",
+				CreateOnNoStock: true,
+				ClaimTimeout:    500 * time.Millisecond,
+			},
+			postCheck: func(t *testing.T, sbx infra.Sandbox) {
+				assert.Equal(t, "team-b", sbx.GetNamespace())
+				assert.Equal(t, "team-b-image", sbx.GetImage())
+			},
+		},
+	}
+
+	origCreateSandbox := DefaultCreateSandbox
+	DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client) (*v1alpha1.Sandbox, error) {
+		if sbx.Name == "" && sbx.GenerateName != "" {
+			sbx.Name = sbx.GenerateName + rand.String(5)
+		}
+		created, err := origCreateSandbox(ctx, sbx, c)
+		if err != nil {
+			return nil, err
+		}
+		created.Status = v1alpha1.SandboxStatus{
+			Phase:      v1alpha1.SandboxRunning,
+			Conditions: []metav1.Condition{{Type: string(v1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue}},
+			PodInfo:    v1alpha1.PodInfo{PodIP: "1.2.3.4"},
+		}
+		require.NoError(t, c.Status().Update(ctx, created))
+		return created, nil
+	}
+	t.Cleanup(func() { DefaultCreateSandbox = origCreateSandbox })
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			testInfra, fc := NewTestInfra(t)
+			tt.setup(t, fc)
+			sbx, _, err := testInfra.ClaimSandbox(t.Context(), tt.options)
+			require.NoError(t, err)
+			tt.postCheck(t, sbx)
+		})
+	}
+}
+
 func TestPickAnAvailableSandbox_PrefersMatchingRevision(t *testing.T) {
 	utils.InitLogOutput()
 
@@ -2205,7 +2326,7 @@ func TestPickAnAvailableSandbox_PrefersMatchingRevision(t *testing.T) {
 			require.NoError(t, err)
 			err = c.Status().Update(t.Context(), sbs)
 			require.NoError(t, err)
-			require.True(t, testInfra.HasTemplate(t.Context(), template))
+			require.True(t, testInfra.HasTemplate(t.Context(), infra.HasTemplateOptions{Name: template}))
 
 			now := metav1.Now()
 			ownerRefs := []metav1.OwnerReference{*metav1.NewControllerRef(sbs, v1alpha1.SandboxSetControllerKind)}
@@ -2255,7 +2376,7 @@ func TestPickAnAvailableSandbox_PrefersMatchingRevision(t *testing.T) {
 			// Wait for cache sync
 			totalSandboxes := tt.matchingCount + tt.nonMatchingCount
 			require.Eventually(t, func() bool {
-				objs, err := testInfra.Cache.ListSandboxesInPool(t.Context(), template)
+				objs, err := testInfra.Cache.ListSandboxesInPool(t.Context(), infracache.ListSandboxesInPoolOptions{Pool: template})
 				return err == nil && len(objs) >= totalSandboxes
 			}, 200*time.Millisecond, 5*time.Millisecond)
 

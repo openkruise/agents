@@ -54,11 +54,18 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 	if parseErr != nil {
 		return web.ApiResponse[*models.Sandbox]{}, parseErr
 	}
+	namespace := sc.getNamespaceOfUser(user)
 	log.Info("create sandbox request received", "request", request)
-	if sc.manager.GetInfra().HasTemplate(ctx, request.TemplateID) {
+	if sc.manager.GetInfra().HasTemplate(ctx, infra.HasTemplateOptions{
+		Namespace: namespace,
+		Name:      request.TemplateID,
+	}) {
 		log.Info("infra has template, will create sandbox with claim", "templateID", request.TemplateID)
 		return sc.createSandboxWithClaim(ctx, request, user)
-	} else if sc.manager.GetInfra().HasCheckpoint(ctx, request.TemplateID) {
+	} else if sc.manager.GetInfra().HasCheckpoint(ctx, infra.HasCheckpointOptions{
+		Namespace:    namespace,
+		CheckpointID: request.TemplateID,
+	}) {
 		log.Info("infra has checkpoint, will create sandbox with clone", "templateID", request.TemplateID)
 		return sc.createSandboxWithClone(ctx, request, user)
 	}
@@ -76,6 +83,7 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 		accessToken = uuid.NewString()
 	}
 	opts := infra.ClaimSandboxOptions{
+		Namespace:    sc.getNamespaceOfUser(user),
 		Template:     request.TemplateID,
 		User:         user.ID.String(),
 		ClaimTimeout: time.Duration(request.Extensions.TimeoutSeconds) * time.Second,
@@ -165,6 +173,7 @@ func (sc *Controller) createSandboxWithClone(ctx context.Context, request models
 	}
 
 	opts := infra.CloneSandboxOptions{
+		Namespace:    sc.getNamespaceOfUser(user),
 		User:         user.ID.String(),
 		CheckPointID: request.TemplateID,
 		CloneTimeout: time.Duration(request.Extensions.TimeoutSeconds) * time.Second,

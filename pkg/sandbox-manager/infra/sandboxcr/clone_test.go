@@ -212,6 +212,38 @@ func TestNewSandboxFromTemplate_DeepCopiesTemplate(t *testing.T) {
 	}
 }
 
+func TestFindCheckpointAndTemplateById_NamespaceScoped(t *testing.T) {
+	objects := []client.Object{
+		&v1alpha1.SandboxTemplate{
+			ObjectMeta: metav1.ObjectMeta{Name: "cp-a", Namespace: "team-a"},
+		},
+		&v1alpha1.SandboxTemplate{
+			ObjectMeta: metav1.ObjectMeta{Name: "cp-b", Namespace: "team-b"},
+		},
+		&v1alpha1.Checkpoint{
+			ObjectMeta: metav1.ObjectMeta{Name: "cp-a", Namespace: "team-a"},
+			Status:     v1alpha1.CheckpointStatus{CheckpointId: "shared-checkpoint-id"},
+		},
+		&v1alpha1.Checkpoint{
+			ObjectMeta: metav1.ObjectMeta{Name: "cp-b", Namespace: "team-b"},
+			Status:     v1alpha1.CheckpointStatus{CheckpointId: "shared-checkpoint-id"},
+		},
+	}
+	cache, _, err := cachetest.NewTestCache(t, objects...)
+	require.NoError(t, err)
+
+	tmpl, cp, _, err := findCheckpointAndTemplateById(t.Context(), infra.CloneSandboxOptions{
+		Namespace:          "team-b",
+		CheckPointID:       "shared-checkpoint-id",
+		SkipWaitCheckpoint: true,
+	}, cache, infra.CloneMetrics{})
+	require.NoError(t, err)
+	assert.Equal(t, "team-b", cp.Namespace)
+	assert.Equal(t, "cp-b", cp.Name)
+	assert.Equal(t, "team-b", tmpl.Namespace)
+	assert.Equal(t, "cp-b", tmpl.Name)
+}
+
 func TestCloneSandbox(t *testing.T) {
 	utils.InitLogOutput()
 
@@ -469,7 +501,7 @@ func TestCloneSandbox(t *testing.T) {
 				require.NoError(t, c.Create(t.Context(), cp))
 				// Wait for checkpoint to be cached
 				require.Eventually(t, func() bool {
-					_, err := cache.GetCheckpoint(t.Context(), "checkpoint-no-template")
+					_, err := cache.GetCheckpoint(t.Context(), infracache.GetCheckpointOptions{CheckpointID: "checkpoint-no-template"})
 					return err == nil
 				}, time.Second, 10*time.Millisecond)
 			},
@@ -506,7 +538,7 @@ func TestCloneSandbox(t *testing.T) {
 				require.NoError(t, c.Create(t.Context(), cp))
 				// Wait for checkpoint to be cached
 				require.Eventually(t, func() bool {
-					_, err := cache.GetCheckpoint(t.Context(), "checkpoint-no-sbt")
+					_, err := cache.GetCheckpoint(t.Context(), infracache.GetCheckpointOptions{CheckpointID: "checkpoint-no-sbt"})
 					return err == nil
 				}, time.Second, 10*time.Millisecond)
 			},
@@ -696,7 +728,7 @@ func TestCloneSandbox(t *testing.T) {
 				require.NoError(t, fc.Create(t.Context(), cp))
 				// Wait for checkpoint to be cached
 				require.Eventually(t, func() bool {
-					_, err := cache.GetCheckpoint(t.Context(), checkpointID)
+					_, err := cache.GetCheckpoint(t.Context(), infracache.GetCheckpointOptions{CheckpointID: checkpointID})
 					return err == nil
 				}, time.Second, 10*time.Millisecond)
 			}
@@ -775,7 +807,7 @@ func TestCloneSandbox_WithRateLimiter(t *testing.T) {
 
 	// Wait for SandboxSet to be cached
 	require.Eventually(t, func() bool {
-		_, err := cache.PickSandboxSet(t.Context(), template)
+		_, err := cache.PickSandboxSet(t.Context(), infracache.PickSandboxSetOptions{Name: template})
 		return err == nil
 	}, time.Second, 10*time.Millisecond)
 
@@ -795,7 +827,7 @@ func TestCloneSandbox_WithRateLimiter(t *testing.T) {
 	require.NoError(t, fc.Create(t.Context(), cp))
 	// Wait for checkpoint to be cached
 	require.Eventually(t, func() bool {
-		_, err := cache.GetCheckpoint(t.Context(), checkpointID)
+		_, err := cache.GetCheckpoint(t.Context(), infracache.GetCheckpointOptions{CheckpointID: checkpointID})
 		return err == nil
 	}, time.Second, 10*time.Millisecond)
 
@@ -853,7 +885,7 @@ func TestCloneSandbox_ContextCanceled(t *testing.T) {
 
 	// Wait for SandboxSet to be cached
 	require.Eventually(t, func() bool {
-		_, err := cache.PickSandboxSet(t.Context(), template)
+		_, err := cache.PickSandboxSet(t.Context(), infracache.PickSandboxSetOptions{Name: template})
 		return err == nil
 	}, time.Second, 10*time.Millisecond)
 
@@ -873,7 +905,7 @@ func TestCloneSandbox_ContextCanceled(t *testing.T) {
 	require.NoError(t, fc.Create(t.Context(), cp))
 	// Wait for checkpoint to be cached
 	require.Eventually(t, func() bool {
-		_, err := cache.GetCheckpoint(t.Context(), checkpointID)
+		_, err := cache.GetCheckpoint(t.Context(), infracache.GetCheckpointOptions{CheckpointID: checkpointID})
 		return err == nil
 	}, time.Second, 10*time.Millisecond)
 

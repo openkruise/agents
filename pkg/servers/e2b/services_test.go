@@ -29,6 +29,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/rand"
@@ -50,7 +51,9 @@ import (
 
 func imageChecker(image string, controller *Controller) func(t *testing.T, resp *models.Sandbox) {
 	return func(t *testing.T, resp *models.Sandbox) {
-		sbx, err := controller.manager.GetClaimedSandbox(t.Context(), keys.AdminKeyID.String(), resp.SandboxID)
+		sbx, err := controller.manager.GetClaimedSandbox(t.Context(), keys.AdminKeyID.String(), infra.GetClaimedSandboxOptions{
+			SandboxID: resp.SandboxID,
+		})
 		assert.NoError(t, err)
 		assert.Equal(t, image, sbx.GetImage())
 	}
@@ -249,7 +252,9 @@ func TestCreateSandbox(t *testing.T) {
 			},
 			postCheck: func(t *testing.T, resp *models.Sandbox) {
 				assert.Empty(t, resp.EndAt)
-				sbx, err := controller.manager.GetClaimedSandbox(t.Context(), keys.AdminKeyID.String(), resp.SandboxID)
+				sbx, err := controller.manager.GetClaimedSandbox(t.Context(), keys.AdminKeyID.String(), infra.GetClaimedSandboxOptions{
+					SandboxID: resp.SandboxID,
+				})
 				assert.NoError(t, err)
 				assert.Equal(t, infra.TimeoutOptions{}, sbx.GetTimeout())
 			},
@@ -375,7 +380,9 @@ func TestCreateSandbox(t *testing.T) {
 
 				assert.NotContains(t, sbx.Spec.Template.Labels, "regular-metadata-key")
 
-				sandboxFromManager, err := controller.manager.GetClaimedSandbox(t.Context(), keys.AdminKeyID.String(), resp.SandboxID)
+				sandboxFromManager, err := controller.manager.GetClaimedSandbox(t.Context(), keys.AdminKeyID.String(), infra.GetClaimedSandboxOptions{
+					SandboxID: resp.SandboxID,
+				})
 				assert.NoError(t, err)
 				assert.NotNil(t, sandboxFromManager.GetPodLabels())
 				assert.Equal(t, "my-app", sandboxFromManager.GetPodLabels()["app"])
@@ -457,7 +464,9 @@ func TestCreateSandbox(t *testing.T) {
 				AccessToken: runtime.AccessToken,
 			})
 			require.Eventually(t, func() bool {
-				list, err := controller.cache.ListSandboxesInPool(t.Context(), templateName)
+				list, err := controller.cache.ListSandboxesInPool(t.Context(), cache.ListSandboxesInPoolOptions{
+					Pool: templateName,
+				})
 				return err == nil && len(list) == tt.available
 			}, time.Second, 50*time.Millisecond)
 			defer cleanup()
@@ -563,7 +572,9 @@ func CreateCheckpointAndTemplate(t *testing.T, controller *Controller, checkpoin
 	err = fc.Status().Update(t.Context(), cp)
 	require.NoError(t, err)
 	require.Eventually(t, func() bool {
-		return controller.manager.GetInfra().HasCheckpoint(t.Context(), checkpointID)
+		return controller.manager.GetInfra().HasCheckpoint(t.Context(), infra.HasCheckpointOptions{
+			CheckpointID: checkpointID,
+		})
 	}, time.Second, 10*time.Millisecond)
 
 	return func() {
@@ -631,7 +642,9 @@ func CreateCheckpointAndTemplateWithAnnotations(t *testing.T, controller *Contro
 	err = fc.Status().Update(t.Context(), cp)
 	require.NoError(t, err)
 	require.Eventually(t, func() bool {
-		return controller.manager.GetInfra().HasCheckpoint(t.Context(), checkpointID)
+		return controller.manager.GetInfra().HasCheckpoint(t.Context(), infra.HasCheckpointOptions{
+			CheckpointID: checkpointID,
+		})
 	}, time.Second, 10*time.Millisecond)
 
 	return func() {
@@ -787,7 +800,9 @@ func TestCloneSandbox(t *testing.T) {
 			},
 			postCheck: func(t *testing.T, resp *models.Sandbox, controller *Controller) {
 				assert.Equal(t, "0001-01-01T00:00:00Z", resp.EndAt)
-				sbx, err := controller.manager.GetClaimedSandbox(t.Context(), keys.AdminKeyID.String(), resp.SandboxID)
+				sbx, err := controller.manager.GetClaimedSandbox(t.Context(), keys.AdminKeyID.String(), infra.GetClaimedSandboxOptions{
+					SandboxID: resp.SandboxID,
+				})
 				assert.NoError(t, err)
 				assert.Equal(t, infra.TimeoutOptions{}, sbx.GetTimeout())
 			},
@@ -800,7 +815,9 @@ func TestCloneSandbox(t *testing.T) {
 				AutoPause:  true,
 			},
 			postCheck: func(t *testing.T, resp *models.Sandbox, controller *Controller) {
-				sbx, err := controller.manager.GetClaimedSandbox(t.Context(), keys.AdminKeyID.String(), resp.SandboxID)
+				sbx, err := controller.manager.GetClaimedSandbox(t.Context(), keys.AdminKeyID.String(), infra.GetClaimedSandboxOptions{
+					SandboxID: resp.SandboxID,
+				})
 				assert.NoError(t, err)
 				// When autoPause is true, both ShutdownTime and PauseTime should be set
 				assert.NotNil(t, sbx.GetTimeout().ShutdownTime)
@@ -1390,6 +1407,94 @@ func TestDeleteSandbox(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSandboxNamespaceIsolationWithSameName(t *testing.T) {
+	controller, fc, teardown := Setup(t)
+	defer teardown()
+
+	ownerID := uuid.New()
+	teamAUser := &models.CreatedTeamAPIKey{
+		ID:   ownerID,
+		Key:  "team-a-key",
+		Name: "team-a-user",
+		Team: &models.Team{
+			ID:   uuid.New(),
+			Name: "team-a",
+		},
+	}
+	adminUser := &models.CreatedTeamAPIKey{
+		ID:   ownerID,
+		Key:  "admin-key",
+		Name: "admin-user",
+		Team: models.AdminTeam(),
+	}
+
+	teamASandbox := CreateClaimedSandboxCR(t, controller, "team-a", "shared-sandbox", "shared-template", ownerID.String(), map[string]string{
+		"scope": "team-a",
+	})
+	teamBSandbox := CreateClaimedSandboxCR(t, controller, "team-b", "shared-sandbox", "shared-template", ownerID.String(), map[string]string{
+		"scope": "team-b",
+	})
+	teamASandboxID := fmt.Sprintf("%s--%s", teamASandbox.Namespace, teamASandbox.Name)
+	teamBSandboxID := fmt.Sprintf("%s--%s", teamBSandbox.Namespace, teamBSandbox.Name)
+
+	t.Run("list is namespace-scoped for normal team and cluster-scoped for admin", func(t *testing.T) {
+		teamAResp, apiErr := controller.ListSandboxes(NewRequest(t, nil, nil, nil, teamAUser))
+		require.Nil(t, apiErr)
+		require.Len(t, teamAResp.Body, 1)
+		assert.Equal(t, teamASandboxID, teamAResp.Body[0].SandboxID)
+		assert.Equal(t, "team-a", teamAResp.Body[0].Metadata["scope"])
+
+		adminResp, apiErr := controller.ListSandboxes(NewRequest(t, nil, nil, nil, adminUser))
+		require.Nil(t, apiErr)
+		gotIDs := make([]string, 0, len(adminResp.Body))
+		for _, sbx := range adminResp.Body {
+			gotIDs = append(gotIDs, sbx.SandboxID)
+		}
+		assert.ElementsMatch(t, []string{teamASandboxID, teamBSandboxID}, gotIDs)
+	})
+
+	t.Run("get is namespace-scoped for normal team and cluster-scoped for admin", func(t *testing.T) {
+		teamAResp, apiErr := controller.DescribeSandbox(NewRequest(t, nil, nil, map[string]string{
+			"sandboxID": teamASandboxID,
+		}, teamAUser))
+		require.Nil(t, apiErr)
+		assert.Equal(t, teamASandboxID, teamAResp.Body.SandboxID)
+
+		_, apiErr = controller.DescribeSandbox(NewRequest(t, nil, nil, map[string]string{
+			"sandboxID": teamBSandboxID,
+		}, teamAUser))
+		require.NotNil(t, apiErr)
+		assert.Equal(t, http.StatusNotFound, apiErr.Code)
+
+		adminResp, apiErr := controller.DescribeSandbox(NewRequest(t, nil, nil, map[string]string{
+			"sandboxID": teamBSandboxID,
+		}, adminUser))
+		require.Nil(t, apiErr)
+		assert.Equal(t, teamBSandboxID, adminResp.Body.SandboxID)
+	})
+
+	t.Run("delete cannot remove same-name sandbox from another namespace", func(t *testing.T) {
+		resp, apiErr := controller.DeleteSandbox(NewRequest(t, nil, nil, map[string]string{
+			"sandboxID": teamBSandboxID,
+		}, teamAUser))
+		require.Nil(t, apiErr)
+		assert.Equal(t, http.StatusNoContent, resp.Code)
+
+		got := &v1alpha1.Sandbox{}
+		require.NoError(t, fc.Get(t.Context(), ctrlclient.ObjectKey{Namespace: "team-b", Name: "shared-sandbox"}, got))
+
+		resp, apiErr = controller.DeleteSandbox(NewRequest(t, nil, nil, map[string]string{
+			"sandboxID": teamBSandboxID,
+		}, adminUser))
+		require.Nil(t, apiErr)
+		assert.Equal(t, http.StatusNoContent, resp.Code)
+		require.Eventually(t, func() bool {
+			err := fc.Get(t.Context(), ctrlclient.ObjectKey{Namespace: "team-b", Name: "shared-sandbox"}, got)
+			return apierrors.IsNotFound(err)
+		}, time.Second, 10*time.Millisecond)
+	})
 }
 
 func TestBrowserUseCDPPort(t *testing.T) {

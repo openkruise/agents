@@ -30,6 +30,7 @@ import (
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -245,6 +246,67 @@ func TestListSandboxes(t *testing.T) {
 					gotListed = append(gotListed, *sandbox)
 				}
 				assert.ElementsMatch(t, expectedListed, gotListed)
+			}
+		})
+	}
+}
+
+func TestListSnapshotsNamespaceIsolationWithSameCheckpointID(t *testing.T) {
+	controller, _, teardown := Setup(t)
+	defer teardown()
+
+	ownerID := uuid.New()
+	teamAUser := &models.CreatedTeamAPIKey{
+		ID:   ownerID,
+		Key:  "team-a-key",
+		Name: "team-a-user",
+		Team: &models.Team{
+			ID:   uuid.New(),
+			Name: "team-a",
+		},
+	}
+	adminUser := &models.CreatedTeamAPIKey{
+		ID:   ownerID,
+		Key:  "admin-key",
+		Name: "admin-user",
+		Team: models.AdminTeam(),
+	}
+	cleanupA := CreateCheckpointAndTemplateInNamespace(t, controller, "team-a", "shared-checkpoint", "shared-checkpoint-id", ownerID.String(), "team-a-sandbox", "2024-07-01T00:00:01Z")
+	defer cleanupA()
+	cleanupB := CreateCheckpointAndTemplateInNamespace(t, controller, "team-b", "shared-checkpoint", "shared-checkpoint-id", ownerID.String(), "team-b-sandbox", "2024-07-01T00:00:02Z")
+	defer cleanupB()
+
+	tests := []struct {
+		name        string
+		user        *models.CreatedTeamAPIKey
+		query       map[string]string
+		expectCount int
+	}{
+		{
+			name:        "team-a sees only team-a snapshot with colliding checkpoint id",
+			user:        teamAUser,
+			expectCount: 1,
+		},
+		{
+			name:        "team-a sandboxID filter cannot see team-b snapshot",
+			user:        teamAUser,
+			query:       map[string]string{"sandboxID": "team-b-sandbox"},
+			expectCount: 0,
+		},
+		{
+			name:        "admin sees same checkpoint id across namespaces",
+			user:        adminUser,
+			expectCount: 2,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp, apiErr := controller.ListSnapshots(NewRequest(t, tt.query, nil, nil, tt.user))
+			require.Nil(t, apiErr)
+			require.Len(t, resp.Body, tt.expectCount)
+			for _, snapshot := range resp.Body {
+				assert.Equal(t, "shared-checkpoint-id", snapshot.SnapshotID)
 			}
 		})
 	}
