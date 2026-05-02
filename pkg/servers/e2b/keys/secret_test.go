@@ -89,6 +89,22 @@ func assertExpectedError(t *testing.T, err error, expectError string) {
 	assert.Contains(t, err.Error(), expectError)
 }
 
+func useGeneratedUUIDsForTest(t *testing.T, ids ...uuid.UUID) {
+	t.Helper()
+	oldGenerate := generateUUID
+	remaining := append([]uuid.UUID(nil), ids...)
+	generateUUID = func() uuid.UUID {
+		if len(remaining) == 0 {
+			t.Fatalf("generateUUID called more times than expected")
+			return uuid.Nil
+		}
+		next := remaining[0]
+		remaining = remaining[1:]
+		return next
+	}
+	t.Cleanup(func() { generateUUID = oldGenerate })
+}
+
 func TestSecretKeyStorage_LoadByKeyAndID(t *testing.T) {
 	storage, _ := newSecretStorageForTest(t, map[string][]byte{})
 	key := &models.CreatedTeamAPIKey{
@@ -408,6 +424,117 @@ func TestSecretKeyStorage_CreateKey(t *testing.T) {
 				require.NoError(t, err)
 				require.Equal(t, models.AdminTeam(), key.Team)
 				return err
+			},
+		},
+		{
+			name: "conflict retry reuses same team from latest secret",
+			run: func(t *testing.T) error {
+				_, c := newSecretStorageForTest(t, map[string][]byte{})
+				teamName := "team-a"
+				existingTeam := &models.Team{ID: uuid.MustParse("11111111-1111-1111-1111-111111111111"), Name: teamName}
+				existingKey := &models.CreatedTeamAPIKey{
+					ID:   uuid.MustParse("22222222-2222-2222-2222-222222222222"),
+					Key:  "existing-key",
+					Name: "existing",
+					Team: existingTeam,
+				}
+				existingBytes, err := json.Marshal(existingKey)
+				require.NoError(t, err)
+
+				var updated int32
+				hookClient := &updateHookClient{
+					Client: c,
+					updateHook: func(ctx context.Context, _ client.Object, _ ...client.UpdateOption) error {
+						if atomic.AddInt32(&updated, 1) != 1 {
+							return nil
+						}
+						secret := getSecretForTest(t, c)
+						if secret.Data == nil {
+							secret.Data = map[string][]byte{}
+						}
+						secret.Data[existingKey.ID.String()] = existingBytes
+						require.NoError(t, c.Update(ctx, secret))
+						return apierrors.NewConflict(schema.GroupResource{Group: "", Resource: "secrets"}, KeySecretName, errors.New("conflict"))
+					},
+				}
+				storage := NewSecretKeyStorage(hookClient, hookClient, "default", "admin-key").(*secretKeyStorage)
+
+				useGeneratedUUIDsForTest(t,
+					uuid.MustParse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+					uuid.MustParse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
+					uuid.MustParse("cccccccc-cccc-cccc-cccc-cccccccccccc"),
+				)
+
+				creator := &models.CreatedTeamAPIKey{ID: uuid.New(), Team: models.AdminTeam()}
+				key, err := storage.CreateKey(context.Background(), creator, CreateKeyOptions{Name: "new", TeamName: teamName})
+				if err != nil {
+					return err
+				}
+				require.Equal(t, existingTeam, key.Team)
+				stored, found := storage.LoadByID(context.Background(), key.ID.String())
+				require.True(t, found)
+				require.Equal(t, existingTeam, stored.Team)
+
+				secret := getSecretForTest(t, c)
+				require.Contains(t, secret.Data, key.ID.String())
+				var storedKey models.CreatedTeamAPIKey
+				require.NoError(t, json.Unmarshal(secret.Data[key.ID.String()], &storedKey))
+				require.Equal(t, existingTeam, storedKey.Team)
+				return nil
+			},
+		},
+		{
+			name: "create reuses team from secret and skips invalid data",
+			run: func(t *testing.T) error {
+				teamName := "team-a"
+				existingTeam := &models.Team{ID: uuid.MustParse("11111111-1111-1111-1111-111111111111"), Name: teamName}
+				existingKey := &models.CreatedTeamAPIKey{
+					ID:   uuid.MustParse("22222222-2222-2222-2222-222222222222"),
+					Key:  "existing-key",
+					Name: "existing",
+					Team: existingTeam,
+				}
+				existingBytes, err := json.Marshal(existingKey)
+				require.NoError(t, err)
+				storage, _ := newSecretStorageForTest(t, map[string][]byte{
+					"invalid":               []byte("not-json"),
+					existingKey.ID.String(): existingBytes,
+				})
+
+				useGeneratedUUIDsForTest(t,
+					uuid.MustParse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+					uuid.MustParse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
+					uuid.MustParse("cccccccc-cccc-cccc-cccc-cccccccccccc"),
+				)
+
+				creator := &models.CreatedTeamAPIKey{ID: uuid.New(), Team: models.AdminTeam()}
+				key, err := storage.CreateKey(context.Background(), creator, CreateKeyOptions{Name: "new", TeamName: teamName})
+				if err != nil {
+					return err
+				}
+				require.Equal(t, existingTeam, key.Team)
+				return nil
+			},
+		},
+		{
+			name: "new target team uses generated team when secret has no match",
+			run: func(t *testing.T) error {
+				storage, _ := newSecretStorageForTest(t, map[string][]byte{})
+				generatedTeam := &models.Team{ID: uuid.MustParse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"), Name: "team-a"}
+
+				useGeneratedUUIDsForTest(t,
+					generatedTeam.ID,
+					uuid.MustParse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
+					uuid.MustParse("cccccccc-cccc-cccc-cccc-cccccccccccc"),
+				)
+
+				creator := &models.CreatedTeamAPIKey{ID: uuid.New(), Team: models.AdminTeam()}
+				key, err := storage.CreateKey(context.Background(), creator, CreateKeyOptions{Name: "new", TeamName: generatedTeam.Name})
+				if err != nil {
+					return err
+				}
+				require.Equal(t, generatedTeam, key.Team)
+				return nil
 			},
 		},
 	}

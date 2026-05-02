@@ -209,6 +209,22 @@ func (k *secretKeyStorage) retryUpdateSecret(ctx context.Context, id string, api
 	})
 }
 
+func (k *secretKeyStorage) retryCreateKey(ctx context.Context, id string, apiKey *models.CreatedTeamAPIKey) (*models.CreatedTeamAPIKey, error) {
+	var createdKey *models.CreatedTeamAPIKey
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		key, err := k.createKeyInSecret(ctx, id, apiKey)
+		if err != nil {
+			return err
+		}
+		createdKey = key
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return createdKey, nil
+}
+
 func (k *secretKeyStorage) updateSecret(ctx context.Context, id string, apiKey *models.CreatedTeamAPIKey) error {
 	secret := &corev1.Secret{}
 	if err := k.APIReader.Get(ctx, client.ObjectKey{Namespace: k.Namespace, Name: KeySecretName}, secret); err != nil {
@@ -227,6 +243,46 @@ func (k *secretKeyStorage) updateSecret(ctx context.Context, id string, apiKey *
 		delete(secret.Data, id)
 	}
 	return k.Client.Update(ctx, secret)
+}
+
+func (k *secretKeyStorage) createKeyInSecret(ctx context.Context, id string, apiKey *models.CreatedTeamAPIKey) (*models.CreatedTeamAPIKey, error) {
+	secret := &corev1.Secret{}
+	if err := k.APIReader.Get(ctx, client.ObjectKey{Namespace: k.Namespace, Name: KeySecretName}, secret); err != nil {
+		return nil, err
+	}
+	if secret.Data == nil {
+		secret.Data = make(map[string][]byte)
+	}
+
+	keyToStore := *apiKey
+	keyToStore.Team = cloneTeam(TeamForKey(apiKey))
+	if existingTeam, ok := findTeamByNameInSecret(secret, keyToStore.Team.Name); ok {
+		keyToStore.Team = existingTeam
+	}
+
+	marshaled, err := marshalAPIKey(&keyToStore)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal api-key: %w", err)
+	}
+	secret.Data[id] = marshaled
+	if err := k.Client.Update(ctx, secret); err != nil {
+		return nil, err
+	}
+	return &keyToStore, nil
+}
+
+func findTeamByNameInSecret(secret *corev1.Secret, teamName string) (*models.Team, bool) {
+	for _, bytes := range secret.Data {
+		var apiKey models.CreatedTeamAPIKey
+		if err := json.Unmarshal(bytes, &apiKey); err != nil {
+			continue
+		}
+		team := TeamForKey(&apiKey)
+		if team.Name == teamName {
+			return cloneTeam(team), true
+		}
+	}
+	return nil, false
 }
 
 func (k *secretKeyStorage) storeKey(apiKey *models.CreatedTeamAPIKey) {
@@ -284,12 +340,13 @@ func (k *secretKeyStorage) CreateKey(ctx context.Context, key *models.CreatedTea
 	}
 
 	log.Info("api-key generated", "key", apiKey)
-	if err := k.retryUpdateSecret(ctx, newID.String(), apiKey); err != nil {
+	createdKey, err := k.retryCreateKey(ctx, newID.String(), apiKey)
+	if err != nil {
 		log.Error(err, "failed to update api-key")
 		return nil, err
 	}
-	k.storeKey(apiKey)
-	return apiKey, nil
+	k.storeKey(createdKey)
+	return createdKey, nil
 }
 
 func (k *secretKeyStorage) DeleteKey(ctx context.Context, key *models.CreatedTeamAPIKey) error {
