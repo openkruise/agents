@@ -213,12 +213,7 @@ func (c *Cache) Stop(ctx context.Context) {
 func (c *Cache) GetClaimedSandbox(ctx context.Context, opts GetClaimedSandboxOptions) (*agentsv1alpha1.Sandbox, error) {
 	resultVal, err, _ := c.indexGetGroup.Do("claimed-sandbox:"+opts.Namespace+":"+opts.SandboxID, func() (any, error) {
 		list := &agentsv1alpha1.SandboxList{}
-		listOpts := []ctrlclient.ListOption{ctrlclient.MatchingFields{IndexClaimedSandboxID: opts.SandboxID}, ctrlclient.Limit(1)}
-		if opts.Namespace != "" {
-			listOpts = append(listOpts, ctrlclient.InNamespace(opts.Namespace))
-		}
-		err := c.client.List(ctx, list, listOpts...)
-		if err != nil {
+		if err := listObjectWithUserAndNamespace(ctx, c.client, list, "", opts.Namespace, ctrlclient.MatchingFields{IndexClaimedSandboxID: opts.SandboxID}, ctrlclient.Limit(1)); err != nil {
 			return nil, err
 		}
 		if len(list.Items) == 0 {
@@ -235,12 +230,7 @@ func (c *Cache) GetClaimedSandbox(ctx context.Context, opts GetClaimedSandboxOpt
 func (c *Cache) GetCheckpoint(ctx context.Context, opts GetCheckpointOptions) (*agentsv1alpha1.Checkpoint, error) {
 	resultVal, err, _ := c.indexGetGroup.Do("checkpoint-id:"+opts.Namespace+":"+opts.CheckpointID, func() (any, error) {
 		list := &agentsv1alpha1.CheckpointList{}
-		listOpts := []ctrlclient.ListOption{ctrlclient.MatchingFields{IndexCheckpointID: opts.CheckpointID}, ctrlclient.Limit(1)}
-		if opts.Namespace != "" {
-			listOpts = append(listOpts, ctrlclient.InNamespace(opts.Namespace))
-		}
-		err := c.client.List(ctx, list, listOpts...)
-		if err != nil {
+		if err := listObjectWithUserAndNamespace(ctx, c.client, list, "", opts.Namespace, ctrlclient.MatchingFields{IndexCheckpointID: opts.CheckpointID}, ctrlclient.Limit(1)); err != nil {
 			return nil, err
 		}
 		if len(list.Items) == 0 {
@@ -257,12 +247,7 @@ func (c *Cache) GetCheckpoint(ctx context.Context, opts GetCheckpointOptions) (*
 func (c *Cache) PickSandboxSet(ctx context.Context, opts PickSandboxSetOptions) (*agentsv1alpha1.SandboxSet, error) {
 	resultVal, err, _ := c.indexGetGroup.Do("sandboxset-name:"+opts.Namespace+":"+opts.Name, func() (any, error) {
 		list := &agentsv1alpha1.SandboxSetList{}
-		listOpts := []ctrlclient.ListOption{ctrlclient.MatchingFields{IndexTemplateID: opts.Name}}
-		if opts.Namespace != "" {
-			listOpts = append(listOpts, ctrlclient.InNamespace(opts.Namespace))
-		}
-		err := c.client.List(ctx, list, listOpts...)
-		if err != nil {
+		if err := listObjectWithUserAndNamespace(ctx, c.client, list, "", opts.Namespace, ctrlclient.MatchingFields{IndexTemplateID: opts.Name}); err != nil {
 			return nil, fmt.Errorf("failed to get sandboxset %s from cache: %w", opts.Name, err)
 		}
 		if len(list.Items) == 0 {

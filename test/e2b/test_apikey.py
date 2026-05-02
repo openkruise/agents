@@ -49,11 +49,28 @@ def test_api_keys_lifecycle(sandbox_context):
     
     # 3. List Teams
     teams_resp = requests.get(f"{api_url}/teams", headers=headers)
-    assert teams_resp.status_code == 200
+    assert teams_resp.status_code == 200, f"Failed to list teams: status={teams_resp.status_code}, body={teams_resp.text}"
     teams_list = teams_resp.json()
-    assert len(teams_list) > 0, "Teams list should not be empty for admin user"
-    # Ensure team IDs and names are present
-    assert all("id" in t and "name" in t for t in teams_list)
+    assert len(teams_list) > 0, f"Teams list is empty for admin user. body={teams_resp.text}"
+
+    invalid_team_items = []
+    for idx, t in enumerate(teams_list):
+        if not isinstance(t, dict):
+            invalid_team_items.append({"index": idx, "type": type(t).__name__, "value": t})
+            continue
+        missing_fields = [field for field in ("id", "name") if field not in t]
+        if missing_fields:
+            invalid_team_items.append({
+                "index": idx,
+                "missing_fields": missing_fields,
+                "value": t,
+            })
+    assert not invalid_team_items, (
+        "Each team item must contain both id and name. "
+        f"Invalid items: {invalid_team_items[:3]} "
+        f"(showing 3 of {len(invalid_team_items)} invalid entries). "
+        f"Raw teams response: {teams_resp.text}"
+    )
     
     # 4. Delete API key
     delete_resp = requests.delete(f"{api_url}/api-keys/{key_id}", headers=headers)
