@@ -48,6 +48,11 @@ type Builder interface {
 	Build() Infrastructure
 }
 
+type ResumeOptions struct {
+	Timeout            *TimeoutOptions // Set timeout after resume.
+	DisablePushTimeout bool            // By default, the configured Timeout is deferred by the time spent on Resume. Enable this option to disable this behavior.
+}
+
 type Infrastructure interface {
 	Run(ctx context.Context) error // Starts the infrastructure
 	Stop(ctx context.Context)      // Stops the infrastructure
@@ -64,9 +69,9 @@ type Infrastructure interface {
 }
 
 type Sandbox interface {
-	metav1.Object                                       // For K8s object metadata access
-	Pause(ctx context.Context, opts PauseOptions) error // Pause a Sandbox
-	Resume(ctx context.Context) error                   // Resume a paused Sandbox
+	metav1.Object                                         // For K8s object metadata access
+	Pause(ctx context.Context, opts PauseOptions) error   // Pause a Sandbox
+	Resume(ctx context.Context, opts ResumeOptions) error // Resume a paused Sandbox
 	GetSandboxID() string
 	GetRoute() proxy.Route
 	GetState() (string, string)   // Get Sandbox State (pending, running, paused, killing, etc.)

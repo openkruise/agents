@@ -398,6 +398,81 @@ func TestSandboxReconciler_Reconcile(t *testing.T) {
 			wantErr:       false,
 		},
 		{
+			name: "sandbox resuming with protected shutdownTime - should not be deleted",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "resuming-protected-shutdown-sandbox",
+					Namespace: "default",
+				},
+				Spec: agentsv1alpha1.SandboxSpec{
+					Paused:       false,
+					ShutdownTime: &metav1.Time{Time: time.Now().Add(time.Hour)},
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "test", Image: "nginx"}},
+							},
+						},
+					},
+				},
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxPaused,
+					Conditions: []metav1.Condition{
+						{
+							Type:   string(agentsv1alpha1.SandboxConditionPaused),
+							Status: metav1.ConditionTrue,
+							Reason: agentsv1alpha1.SandboxPausedReasonDeletePod,
+						},
+					},
+				},
+			},
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "resuming-protected-shutdown-sandbox",
+					Namespace: "default",
+				},
+				Status: corev1.PodStatus{
+					Phase: corev1.PodRunning,
+				},
+			},
+			expectedPhase: agentsv1alpha1.SandboxResuming,
+			wantErr:       false,
+		},
+		{
+			name: "running sandbox with protected pauseTime - should not be paused again",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "running-protected-pause-sandbox",
+					Namespace: "default",
+				},
+				Spec: agentsv1alpha1.SandboxSpec{
+					Paused:    false,
+					PauseTime: &metav1.Time{Time: time.Now().Add(time.Hour)},
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "test", Image: "nginx"}},
+							},
+						},
+					},
+				},
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxRunning,
+				},
+			},
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "running-protected-pause-sandbox",
+					Namespace: "default",
+				},
+				Status: corev1.PodStatus{
+					Phase: corev1.PodRunning,
+				},
+			},
+			expectedPhase: agentsv1alpha1.SandboxRunning,
+			wantErr:       false,
+		},
+		{
 			name: "sandbox with shutdownTime in past - should be deleted",
 			sandbox: &agentsv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{

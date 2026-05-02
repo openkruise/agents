@@ -203,10 +203,10 @@ func (m *SandboxManager) PauseSandbox(ctx context.Context, sbx infra.Sandbox, op
 }
 
 // ResumeSandbox resumes a sandbox and syncs route with peers
-func (m *SandboxManager) ResumeSandbox(ctx context.Context, sbx infra.Sandbox) error {
+func (m *SandboxManager) ResumeSandbox(ctx context.Context, sbx infra.Sandbox, opts infra.ResumeOptions) error {
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
 	start := time.Now()
-	if err := sbx.Resume(ctx); err != nil {
+	if err := sbx.Resume(ctx, opts); err != nil {
 		log.Error(err, "failed to resume sandbox")
 		sandboxResumeResponses.WithLabelValues("failure").Inc()
 		return err

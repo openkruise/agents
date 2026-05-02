@@ -18,6 +18,7 @@ package cache
 
 import (
 	"context"
+	"sync"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -107,4 +108,9 @@ type Provider interface {
 	// Prefer GetClient() for most operations; use this only when cache staleness
 	// is unacceptable (e.g., validating critical state transitions).
 	GetAPIReader() client.Reader
+
+	// GetWaitHooks returns the internal waitHooks sync.Map for single-flight
+	// Wait phase integration. This is used by DistributedSingleFlightDo to
+	// register annotation-based WaitEntries.
+	GetWaitHooks() *sync.Map
 }

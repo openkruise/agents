@@ -17,6 +17,8 @@ limitations under the License.
 package config
 
 import (
+	"time"
+
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/utils"
 	"k8s.io/client-go/rest"
@@ -28,16 +30,17 @@ const (
 )
 
 type SandboxManagerOptions struct {
-	SystemNamespace            string
-	PeerSelector               string
-	SandboxNamespace           string
-	SandboxLabelSelector       string
-	MaxClaimWorkers            int
-	MaxCreateQPS               int
-	ExtProcMaxConcurrency      uint32
-	MemberlistBindPort         int
-	DisableRouteReconciliation bool
-	RestConfig                 *rest.Config
+	SystemNamespace                 string
+	PeerSelector                    string
+	SandboxNamespace                string
+	SandboxLabelSelector            string
+	MaxClaimWorkers                 int
+	MaxCreateQPS                    int
+	ExtProcMaxConcurrency           uint32
+	MemberlistBindPort              int
+	DisableRouteReconciliation      bool
+	SingleflightPreemptionThreshold time.Duration
+	RestConfig                      *rest.Config
 }
 
 func InitOptions(opts SandboxManagerOptions) SandboxManagerOptions {
@@ -55,6 +58,9 @@ func InitOptions(opts SandboxManagerOptions) SandboxManagerOptions {
 	}
 	if opts.MemberlistBindPort <= 0 {
 		opts.MemberlistBindPort = DefaultMemberlistBindPort
+	}
+	if opts.SingleflightPreemptionThreshold <= 0 {
+		opts.SingleflightPreemptionThreshold = 5 * time.Minute
 	}
 	return opts
 }
