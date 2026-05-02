@@ -21,7 +21,6 @@ import (
 	"net/http"
 
 	"k8s.io/klog/v2"
-	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	infracache "github.com/openkruise/agents/pkg/cache"
@@ -53,12 +52,10 @@ func (sc *Controller) ListTemplates(r *http.Request) (web.ApiResponse[[]*models.
 		}
 	}
 
-	list := &agentsv1alpha1.SandboxSetList{}
-	var listOpts []ctrlclient.ListOption
-	if namespace != "" {
-		listOpts = append(listOpts, ctrlclient.InNamespace(namespace))
-	}
-	if err := cache.GetClient().List(r.Context(), list, listOpts...); err != nil {
+	sandboxSets, err := cache.ListSandboxSets(r.Context(), infracache.ListSandboxSetsOptions{
+		Namespace: namespace,
+	})
+	if err != nil {
 		return web.ApiResponse[[]*models.TemplateInfo]{}, &web.ApiError{
 			Code:    http.StatusInternalServerError,
 			Message: fmt.Sprintf("Failed to list templates: %v", err),
@@ -66,9 +63,9 @@ func (sc *Controller) ListTemplates(r *http.Request) (web.ApiResponse[[]*models.
 	}
 
 	// Convert to E2B format
-	e2bTemplates := make([]*models.TemplateInfo, 0, len(list.Items))
-	for i := range list.Items {
-		e2bTemplate := sc.convertToTemplateInfo(&list.Items[i])
+	e2bTemplates := make([]*models.TemplateInfo, 0, len(sandboxSets))
+	for _, sandboxSet := range sandboxSets {
+		e2bTemplate := sc.convertToTemplateInfo(sandboxSet)
 		e2bTemplates = append(e2bTemplates, e2bTemplate)
 	}
 	return web.ApiResponse[[]*models.TemplateInfo]{
@@ -137,8 +134,19 @@ func (sc *Controller) DeleteTemplate(r *http.Request) (web.ApiResponse[struct{}]
 		}
 	}
 
+	namespace := sc.getNamespaceOfUser(user)
+	if sc.manager.GetInfra().HasTemplate(ctx, infra.HasTemplateOptions{
+		Namespace: namespace,
+		Name:      templateID,
+	}) {
+		return web.ApiResponse[struct{}]{}, &web.ApiError{
+			Code:    http.StatusUnauthorized,
+			Message: "Deleting SandboxSet-backed templates through the E2B API is not supported",
+		}
+	}
+
 	if err := sc.manager.DeleteCheckpoint(ctx, user.ID.String(), infra.DeleteCheckpointOptions{
-		Namespace:    sc.getNamespaceOfUser(user),
+		Namespace:    namespace,
 		CheckpointID: templateID,
 	}); err != nil {
 		log.Error(err, "failed to delete template", "templateID", templateID)

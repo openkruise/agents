@@ -247,6 +247,70 @@ func TestCache_PickSandboxSetWithOptions_NamespaceScoped(t *testing.T) {
 	}
 }
 
+func TestCache_ListSandboxSets(t *testing.T) {
+	sbsA := &agentsv1alpha1.SandboxSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "tmpl-a", Namespace: "team-a"},
+	}
+	sbsB := &agentsv1alpha1.SandboxSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "tmpl-b", Namespace: "team-b"},
+	}
+	sbsC := &agentsv1alpha1.SandboxSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "tmpl-c", Namespace: "team-a"},
+	}
+
+	c, _, err := cachetest.NewTestCache(t, sbsA, sbsB, sbsC)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name           string
+		namespace      string
+		expectedNames  []string
+		expectedLen    int
+		unexpectedName string
+	}{
+		{
+			name:           "namespace scoped list returns matching sandboxsets",
+			namespace:      "team-a",
+			expectedNames:  []string{"tmpl-a", "tmpl-c"},
+			expectedLen:    2,
+			unexpectedName: "tmpl-b",
+		},
+		{
+			name:          "empty namespace returns all visible sandboxsets",
+			namespace:     "",
+			expectedNames: []string{"tmpl-a", "tmpl-b", "tmpl-c"},
+			expectedLen:   3,
+		},
+		{
+			name:        "namespace with no sandboxsets returns empty list",
+			namespace:   "team-c",
+			expectedLen: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			list, listErr := c.ListSandboxSets(t.Context(), cache.ListSandboxSetsOptions{
+				Namespace: tt.namespace,
+			})
+			require.NoError(t, listErr)
+			assert.Len(t, list, tt.expectedLen)
+
+			gotNames := make([]string, 0, len(list))
+			for _, item := range list {
+				gotNames = append(gotNames, item.Name)
+			}
+
+			for _, expectedName := range tt.expectedNames {
+				assert.Contains(t, gotNames, expectedName)
+			}
+			if tt.unexpectedName != "" {
+				assert.NotContains(t, gotNames, tt.unexpectedName)
+			}
+		})
+	}
+}
+
 // --- List tests ---
 
 func TestCache_ListSandboxesWithOptions_UserScoped(t *testing.T) {

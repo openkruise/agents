@@ -253,6 +253,13 @@ func TestCreateAPIKeyPermissionMiddleware(t *testing.T) {
 			expectCode:  http.StatusBadRequest,
 			expectError: "namespace",
 		},
+		{
+			name:        "admin targeting invalid namespace fails",
+			user:        adminUser,
+			request:     models.NewTeamAPIKey{Name: "invalid-team", TeamName: "INVALID_TEAM"},
+			expectCode:  http.StatusBadRequest,
+			expectError: "namespace",
+		},
 	}
 
 	for _, tt := range tests {

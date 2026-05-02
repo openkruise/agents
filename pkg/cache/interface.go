@@ -40,6 +40,8 @@ type Provider interface {
 
 	PickSandboxSet(ctx context.Context, opts PickSandboxSetOptions) (*agentsv1alpha1.SandboxSet, error)
 
+	ListSandboxSets(ctx context.Context, opts ListSandboxSetsOptions) ([]*agentsv1alpha1.SandboxSet, error)
+
 	// ListSandboxes returns Sandbox CRD objects filtered by namespace and optional owner.
 	// Ownership is determined by the AnnotationOwner annotation on the Sandbox resource when User is set.
 	ListSandboxes(ctx context.Context, opts ListSandboxesOptions) ([]*agentsv1alpha1.Sandbox, error)
@@ -103,6 +105,10 @@ type GetCheckpointOptions struct {
 type PickSandboxSetOptions struct {
 	Namespace string
 	Name      string
+}
+
+type ListSandboxSetsOptions struct {
+	Namespace string
 }
 
 type ListSandboxesOptions struct {

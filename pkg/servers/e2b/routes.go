@@ -130,7 +130,6 @@ func (sc *Controller) CheckApiKey(ctx context.Context, r *http.Request) (context
 const (
 	newAPIKeyRequestContextKey = "newAPIKeyRequest"
 	targetAPIKeyContextKey     = "targetAPIKey"
-	targetTeamNameContextKey   = "targetTeamName"
 )
 
 func (sc *Controller) CheckCreateAPIKeyPermission(ctx context.Context, r *http.Request) (context.Context, *web.ApiError) {
@@ -183,23 +182,13 @@ func (sc *Controller) CheckCreateAPIKeyPermission(ctx context.Context, r *http.R
 		}
 	}
 	if !found {
-		if err := sc.validateTeamNamespace(ctx, targetTeamName); err != nil {
-			if apierrors.IsNotFound(err) {
-				return ctx, &web.ApiError{
-					Code:    http.StatusBadRequest,
-					Message: fmt.Sprintf("Kubernetes namespace %q does not exist", targetTeamName),
-				}
-			}
-			return ctx, &web.ApiError{
-				Code:    http.StatusInternalServerError,
-				Message: fmt.Sprintf("Failed to validate Kubernetes namespace %q: %v", targetTeamName, err),
-			}
+		if apiErr := sc.validateTeamNamespace(ctx, targetTeamName); apiErr != nil {
+			return ctx, apiErr
 		}
 	}
 
 	request.TeamName = targetTeamName
 	ctx = context.WithValue(ctx, newAPIKeyRequestContextKey, &request)
-	ctx = context.WithValue(ctx, targetTeamNameContextKey, targetTeamName)
 	return ctx, nil
 }
 
@@ -234,18 +223,22 @@ func (sc *Controller) CheckDeleteAPIKeyPermission(ctx context.Context, r *http.R
 	return context.WithValue(ctx, targetAPIKeyContextKey, key), nil
 }
 
-func (sc *Controller) validateTeamNamespace(ctx context.Context, teamName string) error {
+func (sc *Controller) validateTeamNamespace(ctx context.Context, teamName string) *web.ApiError {
 	namespace := &corev1.Namespace{}
-	if sc.cache != nil {
-		return sc.cache.GetAPIReader().Get(ctx, client.ObjectKey{Name: teamName}, namespace)
+	if err := sc.cache.GetClient().Get(ctx, client.ObjectKey{Name: teamName}, namespace); err != nil {
+		if apierrors.IsNotFound(err) || apierrors.IsInvalid(err) || apierrors.IsBadRequest(err) {
+			return &web.ApiError{
+				Code:    http.StatusBadRequest,
+				Message: fmt.Sprintf("Kubernetes namespace %q does not exist", teamName),
+			}
+		}
+		return &web.ApiError{
+			Code:    http.StatusInternalServerError,
+			Message: fmt.Sprintf("Failed to validate Kubernetes namespace %q: %v", teamName, err),
+		}
 	}
-	if sc.keyCfg != nil && sc.keyCfg.APIReader != nil {
-		return sc.keyCfg.APIReader.Get(ctx, client.ObjectKey{Name: teamName}, namespace)
-	}
-	if sc.keyCfg != nil && sc.keyCfg.Client != nil {
-		return sc.keyCfg.Client.Get(ctx, client.ObjectKey{Name: teamName}, namespace)
-	}
-	return fmt.Errorf("kubernetes client is not configured")
+
+	return nil
 }
 
 func GetUserFromContext(ctx context.Context) *models.CreatedTeamAPIKey {

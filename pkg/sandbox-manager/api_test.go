@@ -367,7 +367,9 @@ func TestSandboxManager_NamespaceAwareSandboxOptions(t *testing.T) {
 	assert.Equal(t, "team-b", got.GetNamespace())
 	assert.Equal(t, "sandbox-b", got.GetName())
 
-	_, err = manager.GetClaimedSandbox(t.Context(), testUser, infra.GetClaimedSandboxOptions{
+	getCtx, cancel := context.WithTimeout(t.Context(), 10*time.Millisecond)
+	defer cancel()
+	_, err = manager.GetClaimedSandbox(getCtx, testUser, infra.GetClaimedSandboxOptions{
 		Namespace: "team-a",
 		SandboxID: sandboxutils.GetSandboxID(sandboxes[1]),
 	})

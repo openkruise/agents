@@ -288,7 +288,9 @@ func TestInfra_GetClaimedSandboxWithOptions_NamespaceScoped(t *testing.T) {
 	assert.Equal(t, "team-a", got.GetNamespace())
 	assert.Equal(t, "sandbox-a", got.GetName())
 
-	_, err = infraInstance.GetClaimedSandbox(t.Context(), infra.GetClaimedSandboxOptions{
+	getCtx, cancel := context.WithTimeout(t.Context(), 10*time.Millisecond)
+	defer cancel()
+	_, err = infraInstance.GetClaimedSandbox(getCtx, infra.GetClaimedSandboxOptions{
 		Namespace: "team-b",
 		SandboxID: sandboxID,
 	})

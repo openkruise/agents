@@ -276,8 +276,7 @@ func (c *Cache) PickSandboxSet(ctx context.Context, opts PickSandboxSetOptions) 
 	return resultVal.(*agentsv1alpha1.SandboxSet), nil
 }
 
-func listObjectWithUserAndNamespace[T ctrlclient.ObjectList](ctx context.Context, client ctrlclient.Client, list T, user, namespace string) error {
-	var listOpts []ctrlclient.ListOption
+func listObjectWithUserAndNamespace[T ctrlclient.ObjectList](ctx context.Context, client ctrlclient.Client, list T, user, namespace string, listOpts ...ctrlclient.ListOption) error {
 	if namespace != "" {
 		listOpts = append(listOpts, ctrlclient.InNamespace(namespace))
 	}
@@ -285,6 +284,24 @@ func listObjectWithUserAndNamespace[T ctrlclient.ObjectList](ctx context.Context
 		listOpts = append(listOpts, ctrlclient.MatchingFields{IndexUser: user})
 	}
 	return client.List(ctx, list, listOpts...)
+}
+
+func (c *Cache) ListSandboxSets(ctx context.Context, opts ListSandboxSetsOptions) ([]*agentsv1alpha1.SandboxSet, error) {
+	resultVal, err, _ := c.indexGetGroup.Do("sandboxsets:"+opts.Namespace, func() (any, error) {
+		list := &agentsv1alpha1.SandboxSetList{}
+		if err := listObjectWithUserAndNamespace(ctx, c.client, list, "", opts.Namespace); err != nil {
+			return nil, err
+		}
+		result := make([]*agentsv1alpha1.SandboxSet, 0, len(list.Items))
+		for i := range list.Items {
+			result = append(result, &list.Items[i])
+		}
+		return result, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return resultVal.([]*agentsv1alpha1.SandboxSet), nil
 }
 
 func (c *Cache) ListSandboxes(ctx context.Context, opts ListSandboxesOptions) ([]*agentsv1alpha1.Sandbox, error) {
@@ -314,11 +331,7 @@ func (c *Cache) ListCheckpoints(ctx context.Context, opts ListCheckpointsOptions
 func (c *Cache) ListSandboxesInPool(ctx context.Context, opts ListSandboxesInPoolOptions) ([]*agentsv1alpha1.Sandbox, error) {
 	resultVal, err, _ := c.indexGetGroup.Do("sandbox-pool:"+opts.Namespace+":"+opts.Pool, func() (any, error) {
 		list := &agentsv1alpha1.SandboxList{}
-		listOpts := []ctrlclient.ListOption{ctrlclient.MatchingFields{IndexSandboxPool: opts.Pool}}
-		if opts.Namespace != "" {
-			listOpts = append(listOpts, ctrlclient.InNamespace(opts.Namespace))
-		}
-		if err := c.client.List(ctx, list, listOpts...); err != nil {
+		if err := listObjectWithUserAndNamespace(ctx, c.client, list, "", opts.Namespace, ctrlclient.MatchingFields{IndexSandboxPool: opts.Pool}); err != nil {
 			return nil, err
 		}
 		result := make([]*agentsv1alpha1.Sandbox, 0, len(list.Items))

@@ -56,6 +56,22 @@ Every E2B route is registered twice via `RegisterE2BRoute`: once for the native 
 3. Sandbox ownership is verified per-request: the API key owner must match the sandbox owner.
 4. Admin-only endpoints (API key management) chain `CheckAdminKey` after `CheckApiKey`.
 
+### List And Delete Authorization
+- Any resource returned by a List endpoint should be deletable by the same caller unless deletion is explicitly unsupported
+  or blocked by a documented safety rule.
+- `ListSandboxes` and `DeleteSandbox` are key-owner scoped. Both must use the current `user.ID` as the sandbox owner.
+- `ListSnapshots` returns Checkpoint-backed snapshots scoped to the current `user.ID`. Deleting a snapshot through the
+  E2B-compatible delete path should keep the current idempotent behavior, including silent success for not found or not
+  allowed cases.
+- `ListTemplates` returns SandboxSet-backed templates scoped by the caller's team namespace. Admin-team keys may list
+  SandboxSets across namespaces. SandboxSet-backed templates are not deletable through the E2B delete endpoint; return an
+  explicit unsupported-template-delete error instead of treating the ID as a Checkpoint.
+- The shared E2B delete path must distinguish SandboxSet-backed templates from Checkpoint-backed snapshots before calling
+  checkpoint deletion. For admin callers, this SandboxSet check must cover the same cross-namespace visibility used by
+  `ListTemplates`.
+- `ListAPIKeys` is team-scoped. A caller may delete listed keys in the same team, except for safety rules such as
+  refusing to delete the last admin key.
+
 ### Timeout Semantics
 - **Pause**: sets timeout far into the future (1000 years) so paused sandboxes are kept indefinitely.
 - **Resume**: sets timeout strictly to the requested value (no extend-only merge).

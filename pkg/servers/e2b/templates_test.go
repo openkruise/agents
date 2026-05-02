@@ -31,26 +31,59 @@ import (
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/openkruise/agents/api/v1alpha1"
+	infracache "github.com/openkruise/agents/pkg/cache"
+	"github.com/openkruise/agents/pkg/cache/cachetest"
+	"github.com/openkruise/agents/pkg/proxy"
+	sandboxmanager "github.com/openkruise/agents/pkg/sandbox-manager"
+	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
+	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 )
+
+type listSandboxSetsSpy struct {
+	infracache.Provider
+	result    []*v1alpha1.SandboxSet
+	err       error
+	called    bool
+	namespace string
+}
+
+func (s *listSandboxSetsSpy) ListSandboxSets(_ context.Context, opts infracache.ListSandboxSetsOptions) ([]*v1alpha1.SandboxSet, error) {
+	s.called = true
+	s.namespace = opts.Namespace
+	return s.result, s.err
+}
 
 func TestDeleteTemplate(t *testing.T) {
 	user := &models.CreatedTeamAPIKey{
 		ID:   keys.AdminKeyID,
 		Key:  InitKey,
 		Name: "admin",
+		Team: models.AdminTeam(),
+	}
+	teamAUser := &models.CreatedTeamAPIKey{
+		ID:   uuid.New(),
+		Key:  "team-a-key",
+		Name: "team-a-user",
+		Team: &models.Team{
+			ID:   uuid.New(),
+			Name: "team-a",
+		},
 	}
 
 	tests := []struct {
-		name               string
-		templateID         string
-		setupTemplate      bool                      // whether to create checkpoint + template using CreateCheckpointAndTemplate
-		mockDeleteTemplate error                     // mock error for DefaultDeleteSandboxTemplate
-		user               *models.CreatedTeamAPIKey // user for the request
-		expectStatus       int
-		expectError        bool
+		name                     string
+		templateID               string
+		setupTemplate            bool // whether to create checkpoint + template using CreateCheckpointAndTemplate
+		setupSandboxSetNamespace string
+		mockDeleteTemplate       error                     // mock error for DefaultDeleteSandboxTemplate
+		user                     *models.CreatedTeamAPIKey // user for the request
+		expectStatus             int
+		expectError              bool
+		expectErrorMessage       string
 	}{
 		{
 			name:          "delete template successfully",
@@ -75,6 +108,24 @@ func TestDeleteTemplate(t *testing.T) {
 			user:          nil,
 			expectStatus:  http.StatusUnauthorized,
 			expectError:   true,
+		},
+		{
+			name:                     "sandboxset-backed template delete is unsupported for team user",
+			templateID:               "test-sbs-delete-unsupported",
+			setupSandboxSetNamespace: "team-a",
+			user:                     teamAUser,
+			expectStatus:             http.StatusUnauthorized,
+			expectError:              true,
+			expectErrorMessage:       "SandboxSet-backed templates",
+		},
+		{
+			name:                     "sandboxset-backed template delete is unsupported for admin across namespaces",
+			templateID:               "test-sbs-delete-unsupported-admin",
+			setupSandboxSetNamespace: "team-a",
+			user:                     user,
+			expectStatus:             http.StatusUnauthorized,
+			expectError:              true,
+			expectErrorMessage:       "SandboxSet-backed templates",
 		},
 		{
 			name:          "non-owner user returns 204 (idempotent)",
@@ -114,6 +165,12 @@ func TestDeleteTemplate(t *testing.T) {
 				err = fc.Update(t.Context(), cp)
 				require.NoError(t, err)
 			}
+			if tt.setupSandboxSetNamespace != "" {
+				cleanup := CreateSandboxPool(t, controller, tt.templateID, 0, CreateSandboxPoolOptions{
+					Namespace: tt.setupSandboxSetNamespace,
+				})
+				defer cleanup()
+			}
 
 			// Set up decorator mock for template deletion
 			if tt.mockDeleteTemplate != nil {
@@ -136,6 +193,9 @@ func TestDeleteTemplate(t *testing.T) {
 					apiErr.Code = http.StatusInternalServerError
 				}
 				assert.Equal(t, tt.expectStatus, apiErr.Code)
+				if tt.expectErrorMessage != "" {
+					assert.Contains(t, apiErr.Message, tt.expectErrorMessage)
+				}
 			} else {
 				require.Nil(t, apiErr)
 				assert.Equal(t, tt.expectStatus, resp.Code)
@@ -269,6 +329,61 @@ func TestListTemplates(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestListTemplatesUsesCacheProvider(t *testing.T) {
+	baseCache, _, err := cachetest.NewTestCache(t)
+	require.NoError(t, err)
+
+	spyCache := &listSandboxSetsSpy{
+		Provider: baseCache,
+		result: []*v1alpha1.SandboxSet{
+			{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "spy-template",
+					Namespace: "team-a",
+				},
+			},
+		},
+	}
+
+	opts := config.InitOptions(config.SandboxManagerOptions{
+		SystemNamespace:    "sandbox-system",
+		MemberlistBindPort: config.DefaultMemberlistBindPort,
+	})
+	manager, err := sandboxmanager.NewSandboxManagerBuilder(opts).
+		WithRequestAdapter(adapters.DefaultAdapterFactory(TestServerPort)).
+		WithCustomInfra(func() (infra.Builder, error) {
+			return sandboxcr.NewInfraBuilder(opts).
+				WithCache(spyCache).
+				WithAPIReader(spyCache.GetAPIReader()).
+				WithProxy(proxy.NewServer(opts)), nil
+		}).
+		Build()
+	require.NoError(t, err)
+
+	controller := &Controller{
+		domain:  "example.com",
+		cache:   spyCache,
+		manager: manager,
+	}
+	user := &models.CreatedTeamAPIKey{
+		ID:   uuid.New(),
+		Key:  "team-a-key",
+		Name: "team-a-user",
+		Team: &models.Team{
+			ID:   uuid.New(),
+			Name: "team-a",
+		},
+	}
+
+	resp, apiErr := controller.ListTemplates(NewRequest(t, nil, nil, nil, user))
+	require.Nil(t, apiErr)
+	require.True(t, spyCache.called)
+	assert.Equal(t, "team-a", spyCache.namespace)
+	assert.Equal(t, http.StatusOK, resp.Code)
+	require.Len(t, resp.Body, 1)
+	assert.Equal(t, "spy-template", resp.Body[0].TemplateID)
 }
 
 // TestGetTemplate tests the GetTemplate method
