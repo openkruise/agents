@@ -24,9 +24,23 @@ env:
   AWS_USR: ${{ secrets.AWS_USR }}
 
 jobs:
+  memo-check:
+    name: Check forbidden files
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout Actions Repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Ensure MEMO.md is absent
+        run: |
+          if [ -f "./MEMO.md" ]; then
+            echo "::error::MEMO.md is forbidden at repository root. Please delete MEMO.md before running CI."
+            exit 1
+          fi
+
   typos-check:
     name: Spell Check with Typos
     runs-on: ubuntu-24.04
+    needs: memo-check
     steps:
       - name: Checkout Actions Repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -37,6 +51,7 @@ jobs:
 
   golangci-lint:
     runs-on: ubuntu-24.04
+    needs: memo-check
     permissions:
       security-events: write
     steps:
@@ -79,6 +94,7 @@ jobs:
 
   unit-tests:
     runs-on: ubuntu-24.04
+    needs: memo-check
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
