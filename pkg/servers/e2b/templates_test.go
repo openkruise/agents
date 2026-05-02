@@ -21,11 +21,13 @@ import (
 	"fmt"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -119,6 +121,13 @@ func TestDeleteTemplate(t *testing.T) {
 			expectErrorMessage:       "SandboxSet-backed templates",
 		},
 		{
+			name:                     "team user does not see sandboxset-backed template in another namespace",
+			templateID:               "test-sbs-delete-other-namespace",
+			setupSandboxSetNamespace: "team-b",
+			user:                     teamAUser,
+			expectStatus:             http.StatusNoContent,
+		},
+		{
 			name:                     "sandboxset-backed template delete is unsupported for admin across namespaces",
 			templateID:               "test-sbs-delete-unsupported-admin",
 			setupSandboxSetNamespace: "team-a",
@@ -202,6 +211,57 @@ func TestDeleteTemplate(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDeleteCheckpointNamespaceIsolationWithSameID(t *testing.T) {
+	controller, fc, teardown := Setup(t)
+	defer teardown()
+
+	ownerID := uuid.New()
+	teamAUser := &models.CreatedTeamAPIKey{
+		ID:   ownerID,
+		Key:  "team-a-key",
+		Name: "team-a-user",
+		Team: &models.Team{
+			ID:   uuid.New(),
+			Name: "team-a",
+		},
+	}
+	adminUser := &models.CreatedTeamAPIKey{
+		ID:   ownerID,
+		Key:  "admin-key",
+		Name: "admin-user",
+		Team: models.AdminTeam(),
+	}
+
+	cleanupA := CreateCheckpointAndTemplateInNamespace(t, controller, "team-a", "shared-checkpoint", "shared-checkpoint-id", ownerID.String(), "team-a-sandbox", "2024-07-01T00:00:01Z")
+	defer cleanupA()
+	cleanupB := CreateCheckpointAndTemplateInNamespace(t, controller, "team-b", "shared-checkpoint", "shared-checkpoint-id", ownerID.String(), "team-b-sandbox", "2024-07-01T00:00:02Z")
+	defer cleanupB()
+
+	resp, apiErr := controller.DeleteTemplate(NewRequest(t, nil, nil, map[string]string{
+		"templateID": "shared-checkpoint-id",
+	}, teamAUser))
+	require.Nil(t, apiErr)
+	assert.Equal(t, http.StatusNoContent, resp.Code)
+
+	require.Eventually(t, func() bool {
+		cp := &v1alpha1.Checkpoint{}
+		err := fc.Get(t.Context(), ctrlclient.ObjectKey{Namespace: "team-a", Name: "shared-checkpoint"}, cp)
+		return apierrors.IsNotFound(err)
+	}, time.Second, 10*time.Millisecond)
+
+	teamBCP := &v1alpha1.Checkpoint{}
+	require.NoError(t, fc.Get(t.Context(), ctrlclient.ObjectKey{Namespace: "team-b", Name: "shared-checkpoint"}, teamBCP))
+
+	teamAResp, apiErr := controller.ListSnapshots(NewRequest(t, nil, nil, nil, teamAUser))
+	require.Nil(t, apiErr)
+	assert.Empty(t, teamAResp.Body)
+
+	adminResp, apiErr := controller.ListSnapshots(NewRequest(t, nil, nil, nil, adminUser))
+	require.Nil(t, apiErr)
+	require.Len(t, adminResp.Body, 1)
+	assert.Equal(t, "shared-checkpoint-id", adminResp.Body[0].SnapshotID)
 }
 
 // TestListTemplates tests the ListTemplates method
@@ -329,6 +389,127 @@ func TestListTemplates(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestTemplateNamespaceIsolationWithSameName(t *testing.T) {
+	controller, _, teardown := Setup(t)
+	defer teardown()
+
+	teamAUser := &models.CreatedTeamAPIKey{
+		ID:   uuid.New(),
+		Key:  "team-a-key",
+		Name: "team-a-user",
+		Team: &models.Team{
+			ID:   uuid.New(),
+			Name: "team-a",
+		},
+	}
+	teamBUser := &models.CreatedTeamAPIKey{
+		ID:   uuid.New(),
+		Key:  "team-b-key",
+		Name: "team-b-user",
+		Team: &models.Team{
+			ID:   uuid.New(),
+			Name: "team-b",
+		},
+	}
+	adminUser := &models.CreatedTeamAPIKey{
+		ID:   uuid.New(),
+		Key:  "admin-key",
+		Name: "admin",
+		Team: models.AdminTeam(),
+	}
+
+	cleanupA := CreateSandboxPool(t, controller, "shared-template", 0, CreateSandboxPoolOptions{
+		Namespace:  "team-a",
+		CPURequest: "1000m",
+		Memory:     "128Mi",
+	})
+	defer cleanupA()
+	cleanupB := CreateSandboxPool(t, controller, "shared-template", 0, CreateSandboxPoolOptions{
+		Namespace:  "team-b",
+		CPURequest: "2000m",
+		Memory:     "256Mi",
+	})
+	defer cleanupB()
+
+	tests := []struct {
+		name       string
+		user       *models.CreatedTeamAPIKey
+		expectCPUs []int
+	}{
+		{
+			name:       "team-a sees only team-a template",
+			user:       teamAUser,
+			expectCPUs: []int{1},
+		},
+		{
+			name:       "team-b sees only team-b template",
+			user:       teamBUser,
+			expectCPUs: []int{2},
+		},
+		{
+			name:       "admin lists same-name templates across namespaces",
+			user:       adminUser,
+			expectCPUs: []int{1, 2},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp, apiErr := controller.ListTemplates(NewRequest(t, nil, nil, nil, tt.user))
+			require.Nil(t, apiErr)
+			assert.Equal(t, http.StatusOK, resp.Code)
+			require.Len(t, resp.Body, len(tt.expectCPUs))
+
+			gotCPUs := make([]int, 0, len(resp.Body))
+			for _, tmpl := range resp.Body {
+				assert.Equal(t, "shared-template", tmpl.TemplateID)
+				gotCPUs = append(gotCPUs, tmpl.CPUCount)
+			}
+			assert.ElementsMatch(t, tt.expectCPUs, gotCPUs)
+		})
+	}
+
+	getTests := []struct {
+		name      string
+		user      *models.CreatedTeamAPIKey
+		expectCPU int
+	}{
+		{
+			name:      "team-a gets same-name template from team-a namespace",
+			user:      teamAUser,
+			expectCPU: 1,
+		},
+		{
+			name:      "team-b gets same-name template from team-b namespace",
+			user:      teamBUser,
+			expectCPU: 2,
+		},
+	}
+
+	for _, tt := range getTests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp, apiErr := controller.GetTemplate(NewRequest(t, nil, nil, map[string]string{
+				"templateID": "shared-template",
+			}, tt.user))
+			require.Nil(t, apiErr)
+			require.NotNil(t, resp.Body)
+			require.Len(t, resp.Body.Builds, 1)
+			assert.Equal(t, tt.expectCPU, resp.Body.Builds[0].CPUCount)
+		})
+	}
+
+	t.Run("team-a cannot get template that only exists in team-b", func(t *testing.T) {
+		cleanup := CreateSandboxPool(t, controller, "team-b-only-template", 0, CreateSandboxPoolOptions{Namespace: "team-b"})
+		defer cleanup()
+
+		_, apiErr := controller.GetTemplate(NewRequest(t, nil, nil, map[string]string{
+			"templateID": "team-b-only-template",
+		}, teamAUser))
+		require.NotNil(t, apiErr)
+		assert.Equal(t, http.StatusNotFound, apiErr.Code)
+	})
 }
 
 func TestListTemplatesUsesCacheProvider(t *testing.T) {

@@ -38,6 +38,7 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -203,6 +204,8 @@ type CreateSandboxPoolOptions struct {
 	Namespace   string
 	RuntimeURL  string
 	AccessToken string
+	CPURequest  string
+	Memory      string
 }
 
 func CreateSandboxPool(t *testing.T, controller *Controller, name string, available int, opts ...CreateSandboxPoolOptions) func() {
@@ -214,15 +217,23 @@ func CreateSandboxPool(t *testing.T, controller *Controller, name string, availa
 	if options.Namespace != "" {
 		ns = options.Namespace
 	}
+	container := corev1.Container{
+		Name:  "main",
+		Image: "old-image",
+	}
+	if options.CPURequest != "" || options.Memory != "" {
+		container.Resources.Requests = corev1.ResourceList{}
+		if options.CPURequest != "" {
+			container.Resources.Requests[corev1.ResourceCPU] = resource.MustParse(options.CPURequest)
+		}
+		if options.Memory != "" {
+			container.Resources.Requests[corev1.ResourceMemory] = resource.MustParse(options.Memory)
+		}
+	}
 	tmpl := agentsv1alpha1.EmbeddedSandboxTemplate{
 		Template: &corev1.PodTemplateSpec{
 			Spec: corev1.PodSpec{
-				Containers: []corev1.Container{
-					{
-						Name:  "main",
-						Image: "old-image",
-					},
-				},
+				Containers: []corev1.Container{container},
 			},
 		},
 	}
@@ -298,6 +309,123 @@ func CreateSandboxPool(t *testing.T, controller *Controller, name string, availa
 		}
 		sbs.Namespace = ns
 		assert.NoError(t, fc.Delete(t.Context(), sbs))
+	}
+}
+
+func CreateClaimedSandboxCR(t *testing.T, controller *Controller, namespace, name, template, owner string, annotations map[string]string) *agentsv1alpha1.Sandbox {
+	t.Helper()
+	fc := getTestCRClient(controller)
+	now := metav1.Now()
+	copiedAnnotations := map[string]string{
+		agentsv1alpha1.AnnotationClaimTime: now.Format(time.RFC3339),
+		agentsv1alpha1.AnnotationOwner:     owner,
+	}
+	for key, value := range annotations {
+		copiedAnnotations[key] = value
+	}
+	sbx := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+			Labels: map[string]string{
+				agentsv1alpha1.LabelSandboxTemplate:  template,
+				agentsv1alpha1.LabelSandboxIsClaimed: agentsv1alpha1.True,
+			},
+			Annotations:       copiedAnnotations,
+			UID:               types.UID(uuid.NewString()),
+			CreationTimestamp: now,
+		},
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "main", Image: "test-image"}},
+					},
+				},
+			},
+		},
+		Status: agentsv1alpha1.SandboxStatus{
+			Phase: agentsv1alpha1.SandboxRunning,
+			Conditions: []metav1.Condition{
+				{
+					Type:   string(agentsv1alpha1.SandboxConditionReady),
+					Status: metav1.ConditionTrue,
+				},
+			},
+			PodInfo: agentsv1alpha1.PodInfo{
+				PodIP: "1.2.3.4",
+			},
+		},
+	}
+	CreateSandboxWithStatus(t, fc, sbx)
+	sandboxID := fmt.Sprintf("%s--%s", namespace, name)
+	require.Eventually(t, func() bool {
+		_, err := controller.cache.GetClaimedSandbox(t.Context(), infracache.GetClaimedSandboxOptions{
+			Namespace: namespace,
+			SandboxID: sandboxID,
+		})
+		return err == nil
+	}, time.Second, 10*time.Millisecond)
+	return sbx
+}
+
+func CreateCheckpointAndTemplateInNamespace(t *testing.T, controller *Controller, namespace, name, checkpointID, owner, sandboxID, creationTime string) func() {
+	t.Helper()
+	fc := getTestCRClient(controller)
+	createdAt, err := time.Parse(time.RFC3339, creationTime)
+	require.NoError(t, err)
+
+	tmpl := agentsv1alpha1.EmbeddedSandboxTemplate{
+		Template: &corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "main", Image: "checkpoint-image"}},
+			},
+		},
+	}
+	sbt := &agentsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+			UID:       types.UID(uuid.NewString()),
+		},
+		Spec: agentsv1alpha1.SandboxTemplateSpec{
+			Template: tmpl.Template,
+		},
+	}
+	require.NoError(t, fc.Create(t.Context(), sbt))
+
+	cp := &agentsv1alpha1.Checkpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              name,
+			Namespace:         namespace,
+			UID:               types.UID(uuid.NewString()),
+			CreationTimestamp: metav1.NewTime(createdAt),
+			Labels: map[string]string{
+				agentsv1alpha1.LabelSandboxTemplate: name,
+			},
+			Annotations: map[string]string{
+				agentsv1alpha1.AnnotationOwner:     owner,
+				agentsv1alpha1.AnnotationSandboxID: sandboxID,
+			},
+		},
+		Status: agentsv1alpha1.CheckpointStatus{
+			Phase:        agentsv1alpha1.CheckpointSucceeded,
+			CheckpointId: checkpointID,
+		},
+	}
+	require.NoError(t, fc.Create(t.Context(), cp))
+	require.NoError(t, fc.Status().Update(t.Context(), cp))
+	require.Eventually(t, func() bool {
+		_, err := controller.cache.GetCheckpoint(t.Context(), infracache.GetCheckpointOptions{
+			Namespace:    namespace,
+			CheckpointID: checkpointID,
+		})
+		return err == nil
+	}, time.Second, 10*time.Millisecond)
+
+	return func() {
+		_ = fc.Delete(t.Context(), cp)
+		_ = fc.Delete(t.Context(), sbt)
 	}
 }
 

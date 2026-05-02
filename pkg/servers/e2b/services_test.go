@@ -29,6 +29,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/rand"
@@ -1406,6 +1407,94 @@ func TestDeleteSandbox(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSandboxNamespaceIsolationWithSameName(t *testing.T) {
+	controller, fc, teardown := Setup(t)
+	defer teardown()
+
+	ownerID := uuid.New()
+	teamAUser := &models.CreatedTeamAPIKey{
+		ID:   ownerID,
+		Key:  "team-a-key",
+		Name: "team-a-user",
+		Team: &models.Team{
+			ID:   uuid.New(),
+			Name: "team-a",
+		},
+	}
+	adminUser := &models.CreatedTeamAPIKey{
+		ID:   ownerID,
+		Key:  "admin-key",
+		Name: "admin-user",
+		Team: models.AdminTeam(),
+	}
+
+	teamASandbox := CreateClaimedSandboxCR(t, controller, "team-a", "shared-sandbox", "shared-template", ownerID.String(), map[string]string{
+		"scope": "team-a",
+	})
+	teamBSandbox := CreateClaimedSandboxCR(t, controller, "team-b", "shared-sandbox", "shared-template", ownerID.String(), map[string]string{
+		"scope": "team-b",
+	})
+	teamASandboxID := fmt.Sprintf("%s--%s", teamASandbox.Namespace, teamASandbox.Name)
+	teamBSandboxID := fmt.Sprintf("%s--%s", teamBSandbox.Namespace, teamBSandbox.Name)
+
+	t.Run("list is namespace-scoped for normal team and cluster-scoped for admin", func(t *testing.T) {
+		teamAResp, apiErr := controller.ListSandboxes(NewRequest(t, nil, nil, nil, teamAUser))
+		require.Nil(t, apiErr)
+		require.Len(t, teamAResp.Body, 1)
+		assert.Equal(t, teamASandboxID, teamAResp.Body[0].SandboxID)
+		assert.Equal(t, "team-a", teamAResp.Body[0].Metadata["scope"])
+
+		adminResp, apiErr := controller.ListSandboxes(NewRequest(t, nil, nil, nil, adminUser))
+		require.Nil(t, apiErr)
+		gotIDs := make([]string, 0, len(adminResp.Body))
+		for _, sbx := range adminResp.Body {
+			gotIDs = append(gotIDs, sbx.SandboxID)
+		}
+		assert.ElementsMatch(t, []string{teamASandboxID, teamBSandboxID}, gotIDs)
+	})
+
+	t.Run("get is namespace-scoped for normal team and cluster-scoped for admin", func(t *testing.T) {
+		teamAResp, apiErr := controller.DescribeSandbox(NewRequest(t, nil, nil, map[string]string{
+			"sandboxID": teamASandboxID,
+		}, teamAUser))
+		require.Nil(t, apiErr)
+		assert.Equal(t, teamASandboxID, teamAResp.Body.SandboxID)
+
+		_, apiErr = controller.DescribeSandbox(NewRequest(t, nil, nil, map[string]string{
+			"sandboxID": teamBSandboxID,
+		}, teamAUser))
+		require.NotNil(t, apiErr)
+		assert.Equal(t, http.StatusNotFound, apiErr.Code)
+
+		adminResp, apiErr := controller.DescribeSandbox(NewRequest(t, nil, nil, map[string]string{
+			"sandboxID": teamBSandboxID,
+		}, adminUser))
+		require.Nil(t, apiErr)
+		assert.Equal(t, teamBSandboxID, adminResp.Body.SandboxID)
+	})
+
+	t.Run("delete cannot remove same-name sandbox from another namespace", func(t *testing.T) {
+		resp, apiErr := controller.DeleteSandbox(NewRequest(t, nil, nil, map[string]string{
+			"sandboxID": teamBSandboxID,
+		}, teamAUser))
+		require.Nil(t, apiErr)
+		assert.Equal(t, http.StatusNoContent, resp.Code)
+
+		got := &v1alpha1.Sandbox{}
+		require.NoError(t, fc.Get(t.Context(), ctrlclient.ObjectKey{Namespace: "team-b", Name: "shared-sandbox"}, got))
+
+		resp, apiErr = controller.DeleteSandbox(NewRequest(t, nil, nil, map[string]string{
+			"sandboxID": teamBSandboxID,
+		}, adminUser))
+		require.Nil(t, apiErr)
+		assert.Equal(t, http.StatusNoContent, resp.Code)
+		require.Eventually(t, func() bool {
+			err := fc.Get(t.Context(), ctrlclient.ObjectKey{Namespace: "team-b", Name: "shared-sandbox"}, got)
+			return apierrors.IsNotFound(err)
+		}, time.Second, 10*time.Millisecond)
+	})
 }
 
 func TestBrowserUseCDPPort(t *testing.T) {
