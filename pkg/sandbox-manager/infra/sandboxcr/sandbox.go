@@ -315,7 +315,7 @@ func (s *Sandbox) Resume(ctx context.Context) error {
 		// Perform ReInit if initRuntimeOpts is set
 		if initRuntimeOpts != nil {
 			log.Info("will re-init runtime after resume")
-			if _, err := runtime.InitRuntime(ctx, s.Sandbox, *initRuntimeOpts, s.refreshFunc()); err != nil {
+			if _, err := runtime.InitRuntime(postCtx, s.Sandbox, *initRuntimeOpts, s.refreshFunc()); err != nil {
 				log.Error(err, "failed to perform ReInit after resume")
 				return fmt.Errorf("failed to perform ReInit after resume: %w", err)
 			}
