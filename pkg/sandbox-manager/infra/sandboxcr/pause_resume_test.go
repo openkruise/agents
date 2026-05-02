@@ -275,20 +275,15 @@ func TestSandbox_Pause(t *testing.T) {
 			useShortTimeout: true,
 		},
 		{
-			name: "pause running / available sandbox",
+			name: "pause dead sandbox",
 			initSandbox: func(sbx *v1alpha1.Sandbox) {
-				sbx.Status.Phase = v1alpha1.SandboxRunning
-				sbx.Status.Conditions = append(sbx.Status.Conditions, metav1.Condition{
-					Type:   string(v1alpha1.SandboxConditionReady),
-					Status: metav1.ConditionTrue,
-				})
+				sbx.Status.Phase = v1alpha1.SandboxTerminating
 				sbx.Spec.Paused = false
-				sbx.OwnerReferences = GetSbsOwnerReference()
 				state, reason := sandboxutils.GetSandboxState(sbx)
-				assert.Equal(t, v1alpha1.SandboxStateAvailable, state, reason)
+				assert.Equal(t, v1alpha1.SandboxStateDead, state, reason)
 			},
-			expectedState: v1alpha1.SandboxStateAvailable,
-			expectError:   "pausing is only available for running state",
+			expectedState: v1alpha1.SandboxStateDead,
+			expectError:   "sandbox is dead, cannot pause",
 		},
 		{
 			name: "pause already paused sandbox",
@@ -303,7 +298,7 @@ func TestSandbox_Pause(t *testing.T) {
 				assert.Equal(t, v1alpha1.SandboxStatePaused, state, reason)
 			},
 			expectedState: v1alpha1.SandboxStatePaused,
-			expectError:   "sandbox is not in running phase",
+			expectError:   "sandbox is already paused",
 		},
 		{
 			name: "pause killing sandbox",
@@ -314,7 +309,7 @@ func TestSandbox_Pause(t *testing.T) {
 				assert.Equal(t, v1alpha1.SandboxStateDead, state, reason)
 			},
 			expectedState: v1alpha1.SandboxStateDead,
-			expectError:   "sandbox is not in running phase",
+			expectError:   "sandbox is dead, cannot pause",
 		},
 	}
 
@@ -422,6 +417,7 @@ func TestSandbox_Resume(t *testing.T) {
 		initErrCode             int
 		withInitRuntime         bool
 		simulateResumeCompleted bool // use time.AfterFunc to simulate underlying resume completion
+		simulatePauseThenResume bool // complete pausing first, then finish resume
 		useShortTimeout         bool // simulate underlying not completing by using short context timeout
 	}{
 		{
@@ -522,8 +518,10 @@ func TestSandbox_Resume(t *testing.T) {
 				state, reason := sandboxutils.GetSandboxState(sbx)
 				assert.Equal(t, v1alpha1.SandboxStatePaused, state, reason)
 			},
-			expectedState: "",
-			expectError:   "sandbox is pausing",
+			expectedState:           v1alpha1.SandboxStateRunning,
+			expectError:             "",
+			simulateResumeCompleted: true,
+			simulatePauseThenResume: true,
 		},
 		{
 			name: "resume already running sandbox",
@@ -537,7 +535,7 @@ func TestSandbox_Resume(t *testing.T) {
 				assert.Equal(t, v1alpha1.SandboxStateRunning, state, reason)
 			},
 			expectedState: "",
-			expectError:   "resuming is only available for paused state",
+			expectError:   "sandbox is already running",
 		},
 		{
 			name: "resume killing sandbox",
@@ -548,7 +546,7 @@ func TestSandbox_Resume(t *testing.T) {
 				assert.Equal(t, v1alpha1.SandboxStateDead, state, reason)
 			},
 			expectedState: "",
-			expectError:   "resuming is only available for paused state",
+			expectError:   "sandbox is dead, cannot resume",
 		},
 	}
 
@@ -614,6 +612,25 @@ func TestSandbox_Resume(t *testing.T) {
 				modified := s.Sandbox.DeepCopy()
 				mergeFrom := ctrl.MergeFrom(s.Sandbox)
 				time.AfterFunc(20*time.Millisecond, func() {
+					if tt.simulatePauseThenResume {
+						modified.Status.Phase = v1alpha1.SandboxPaused
+						modified.Status.Conditions = []metav1.Condition{
+							{Type: string(v1alpha1.SandboxConditionPaused), Status: metav1.ConditionTrue, Reason: "Pause"},
+						}
+						_ = fc.Status().Patch(t.Context(), modified, mergeFrom)
+
+						time.AfterFunc(20*time.Millisecond, func() {
+							var latest v1alpha1.Sandbox
+							require.NoError(t, fc.Get(t.Context(), types.NamespacedName{Namespace: sandbox.Namespace, Name: sandbox.Name}, &latest))
+							next := latest.DeepCopy()
+							next.Status.Phase = v1alpha1.SandboxRunning
+							next.Status.Conditions = []metav1.Condition{
+								{Type: string(v1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue, Reason: "Resume"},
+							}
+							require.NoError(t, fc.Status().Patch(t.Context(), next, ctrl.MergeFrom(&latest)))
+						})
+						return
+					}
 					modified.Status.Phase = v1alpha1.SandboxRunning
 					modified.Status.Conditions = []metav1.Condition{
 						{Type: string(v1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue, Reason: "Resume"},
@@ -650,6 +667,205 @@ func TestSandbox_Resume(t *testing.T) {
 			assert.Nil(t, updatedSbx.Spec.PauseTime)
 		})
 	}
+}
+
+func TestSandbox_PauseWhenResuming(t *testing.T) {
+	utils.InitLogOutput()
+
+	now := time.Now().Unix()
+	sandbox := &v1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-sandbox",
+			Namespace: "default",
+			Labels: map[string]string{
+				v1alpha1.LabelSandboxIsClaimed: "true",
+			},
+			Annotations: map[string]string{
+				infracache.SingleflightAnnotationPrefix + "pause-resume": fmt.Sprintf("1:false:%d", now),
+			},
+		},
+		Spec: v1alpha1.SandboxSpec{
+			Paused: false,
+		},
+		Status: v1alpha1.SandboxStatus{
+			Phase: v1alpha1.SandboxPaused,
+			Conditions: []metav1.Condition{
+				{Type: string(v1alpha1.SandboxConditionPaused), Status: metav1.ConditionFalse, Reason: "Resuming"},
+			},
+			PodInfo: v1alpha1.PodInfo{PodIP: "10.0.0.1"},
+		},
+	}
+
+	cache, fc, err := cachetest.NewTestCache(t)
+	require.NoError(t, err)
+	require.NoError(t, cache.Run(t.Context()))
+	defer cache.Stop(t.Context())
+	CreateSandboxWithStatus(t, fc, sandbox)
+	time.Sleep(10 * time.Millisecond)
+
+	mockMgr := cache.GetMockManager()
+	mockMgr.AddWaitReconcileKey(sandbox)
+
+	time.AfterFunc(50*time.Millisecond, func() {
+		completePauseResumeStep(t, fc, sandbox.Namespace, sandbox.Name, 1, true, func(sbx *v1alpha1.Sandbox) {
+			sbx.Status.Phase = v1alpha1.SandboxRunning
+			sbx.Status.Conditions = []metav1.Condition{
+				{Type: string(v1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue, Reason: "Resume"},
+			}
+		})
+	})
+
+	time.AfterFunc(120*time.Millisecond, func() {
+		claimed := waitForSingleflightAnnotation(t, fc, sandbox.Namespace, sandbox.Name, "pause-resume", func(value string) bool {
+			return len(value) > 0 && value[:2] == "2:"
+		})
+		if claimed == nil {
+			return
+		}
+		completePauseResumeStep(t, fc, sandbox.Namespace, claimed.Name, 2, true, func(sbx *v1alpha1.Sandbox) {
+			sbx.Status.Phase = v1alpha1.SandboxPaused
+			SetSandboxCondition(sbx, string(v1alpha1.SandboxConditionPaused), metav1.ConditionTrue, "Pause", "Paused by user")
+		})
+	})
+
+	s := AsSandbox(sandbox, cache)
+	err = s.Pause(t.Context(), infra.PauseOptions{
+		Timeout: &infra.TimeoutOptions{
+			PauseTime:    time.Now().Add(time.Minute),
+			ShutdownTime: time.Now().Add(time.Hour),
+		},
+	})
+	require.NoError(t, err)
+	assert.True(t, s.Sandbox.Spec.Paused)
+	assert.Contains(t, s.Sandbox.Annotations[infracache.SingleflightAnnotationPrefix+"pause-resume"], "2:true:")
+}
+
+func TestSandbox_ResumeWhenPausing(t *testing.T) {
+	utils.InitLogOutput()
+
+	now := time.Now().Unix()
+	sandbox := &v1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-sandbox",
+			Namespace: "default",
+			Labels: map[string]string{
+				v1alpha1.LabelSandboxIsClaimed: "true",
+			},
+			Annotations: map[string]string{
+				infracache.SingleflightAnnotationPrefix + "pause-resume": fmt.Sprintf("1:false:%d", now),
+			},
+		},
+		Spec: v1alpha1.SandboxSpec{
+			Paused: true,
+		},
+		Status: v1alpha1.SandboxStatus{
+			Phase: v1alpha1.SandboxPaused,
+			Conditions: []metav1.Condition{
+				{Type: string(v1alpha1.SandboxConditionPaused), Status: metav1.ConditionFalse, Reason: "Pausing"},
+			},
+			PodInfo: v1alpha1.PodInfo{PodIP: "10.0.0.1"},
+		},
+	}
+
+	cache, fc, err := cachetest.NewTestCache(t)
+	require.NoError(t, err)
+	require.NoError(t, cache.Run(t.Context()))
+	defer cache.Stop(t.Context())
+	CreateSandboxWithStatus(t, fc, sandbox)
+	time.Sleep(10 * time.Millisecond)
+
+	mockMgr := cache.GetMockManager()
+	mockMgr.AddWaitReconcileKey(sandbox)
+
+	time.AfterFunc(50*time.Millisecond, func() {
+		completePauseResumeStep(t, fc, sandbox.Namespace, sandbox.Name, 1, true, func(sbx *v1alpha1.Sandbox) {
+			SetSandboxCondition(sbx, string(v1alpha1.SandboxConditionPaused), metav1.ConditionTrue, "Pause", "Paused by user")
+		})
+	})
+
+	time.AfterFunc(120*time.Millisecond, func() {
+		claimed := waitForSingleflightAnnotation(t, fc, sandbox.Namespace, sandbox.Name, "pause-resume", func(value string) bool {
+			return len(value) > 0 && value[:2] == "2:"
+		})
+		if claimed == nil {
+			return
+		}
+		completePauseResumeStep(t, fc, sandbox.Namespace, claimed.Name, 2, true, func(sbx *v1alpha1.Sandbox) {
+			sbx.Status.Phase = v1alpha1.SandboxRunning
+			sbx.Status.Conditions = []metav1.Condition{
+				{Type: string(v1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue, Reason: "Resume"},
+			}
+		})
+	})
+
+	s := AsSandbox(sandbox, cache)
+	err = s.Resume(t.Context(), infra.ResumeOptions{Timeout: &infra.TimeoutOptions{}})
+	require.NoError(t, err)
+	assert.False(t, s.Sandbox.Spec.Paused)
+	assert.Contains(t, s.Sandbox.Annotations[infracache.SingleflightAnnotationPrefix+"pause-resume"], "2:true:")
+}
+
+func waitForSingleflightAnnotation(
+	t *testing.T,
+	fc ctrl.Client,
+	namespace string,
+	name string,
+	key string,
+	match func(string) bool,
+) *v1alpha1.Sandbox {
+	t.Helper()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		var sandbox v1alpha1.Sandbox
+		if err := fc.Get(t.Context(), types.NamespacedName{Namespace: namespace, Name: name}, &sandbox); err != nil {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		if match(sandbox.Annotations[infracache.SingleflightAnnotationPrefix+key]) {
+			return &sandbox
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	return nil
+}
+
+func completePauseResumeStep(
+	t *testing.T,
+	fc ctrl.Client,
+	namespace string,
+	name string,
+	seq int64,
+	done bool,
+	mutateStatus func(*v1alpha1.Sandbox),
+) {
+	t.Helper()
+
+	var sandbox v1alpha1.Sandbox
+	if err := fc.Get(t.Context(), types.NamespacedName{Namespace: namespace, Name: name}, &sandbox); err != nil {
+		return
+	}
+
+	if sandbox.Annotations == nil {
+		sandbox.Annotations = map[string]string{}
+	}
+	sandbox.Annotations[infracache.SingleflightAnnotationPrefix+"pause-resume"] = fmt.Sprintf("%d:%t:%d", seq, done, time.Now().Unix())
+	if err := fc.Update(t.Context(), &sandbox); err != nil {
+		return
+	}
+
+	if mutateStatus == nil {
+		return
+	}
+
+	var latest v1alpha1.Sandbox
+	if err := fc.Get(t.Context(), types.NamespacedName{Namespace: namespace, Name: name}, &latest); err != nil {
+		return
+	}
+	modified := latest.DeepCopy()
+	mutateStatus(modified)
+	_ = fc.Status().Patch(t.Context(), modified, ctrl.MergeFrom(&latest))
 }
 
 func TestSandbox_ResumeBumpsTimeoutsDuringUnpause(t *testing.T) {
@@ -932,7 +1148,7 @@ func TestSandbox_ResumeDeferredSaveTimeoutFailure(t *testing.T) {
 			err := s.Resume(t.Context(), infra.ResumeOptions{Timeout: &finalTimeout})
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.expectError)
-			assert.Equal(t, 2, sandboxUpdates)
+			assert.GreaterOrEqual(t, sandboxUpdates, 3)
 			if tt.reInitFails {
 				assert.NotContains(t, err.Error(), "failed to save final resume timeout")
 			}

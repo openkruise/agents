@@ -18,6 +18,7 @@ package config
 
 import (
 	"testing"
+	"time"
 
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/utils"
@@ -33,6 +34,7 @@ func TestInitOptions(t *testing.T) {
 		expectExtProcConcurrency uint32
 		expectMaxCreateQPS       int
 		expectMemberlistBindPort int
+		expectSingleflightTTL    time.Duration
 	}{
 		{
 			name:                     "all empty fields should use defaults",
@@ -42,21 +44,24 @@ func TestInitOptions(t *testing.T) {
 			expectExtProcConcurrency: consts.DefaultExtProcConcurrency,
 			expectMaxCreateQPS:       consts.DefaultCreateQPS,
 			expectMemberlistBindPort: DefaultMemberlistBindPort,
+			expectSingleflightTTL:    5 * time.Minute,
 		},
 		{
 			name: "all fields set should preserve values",
 			input: SandboxManagerOptions{
-				SystemNamespace:       "custom-namespace",
-				MaxClaimWorkers:       100,
-				ExtProcMaxConcurrency: 500,
-				MaxCreateQPS:          20,
-				MemberlistBindPort:    9000,
+				SystemNamespace:                 "custom-namespace",
+				MaxClaimWorkers:                 100,
+				ExtProcMaxConcurrency:           500,
+				MaxCreateQPS:                    20,
+				MemberlistBindPort:              9000,
+				SingleflightPreemptionThreshold: 2 * time.Minute,
 			},
 			expectSystemNamespace:    "custom-namespace",
 			expectMaxClaimWorkers:    100,
 			expectExtProcConcurrency: 500,
 			expectMaxCreateQPS:       20,
 			expectMemberlistBindPort: 9000,
+			expectSingleflightTTL:    2 * time.Minute,
 		},
 		{
 			name: "empty SystemNamespace should use default",
@@ -72,6 +77,7 @@ func TestInitOptions(t *testing.T) {
 			expectExtProcConcurrency: 500,
 			expectMaxCreateQPS:       20,
 			expectMemberlistBindPort: 9000,
+			expectSingleflightTTL:    5 * time.Minute,
 		},
 		{
 			name: "zero MaxClaimWorkers should use default",
@@ -87,6 +93,7 @@ func TestInitOptions(t *testing.T) {
 			expectExtProcConcurrency: 500,
 			expectMaxCreateQPS:       20,
 			expectMemberlistBindPort: 9000,
+			expectSingleflightTTL:    5 * time.Minute,
 		},
 		{
 			name: "negative MaxClaimWorkers should use default",
@@ -102,6 +109,7 @@ func TestInitOptions(t *testing.T) {
 			expectExtProcConcurrency: 500,
 			expectMaxCreateQPS:       20,
 			expectMemberlistBindPort: 9000,
+			expectSingleflightTTL:    5 * time.Minute,
 		},
 		{
 			name: "zero ExtProcMaxConcurrency should use default",
@@ -117,6 +125,7 @@ func TestInitOptions(t *testing.T) {
 			expectExtProcConcurrency: consts.DefaultExtProcConcurrency,
 			expectMaxCreateQPS:       20,
 			expectMemberlistBindPort: 9000,
+			expectSingleflightTTL:    5 * time.Minute,
 		},
 		{
 			name: "zero MaxCreateQPS should use default",
@@ -132,6 +141,7 @@ func TestInitOptions(t *testing.T) {
 			expectExtProcConcurrency: 500,
 			expectMaxCreateQPS:       consts.DefaultCreateQPS,
 			expectMemberlistBindPort: 9000,
+			expectSingleflightTTL:    5 * time.Minute,
 		},
 		{
 			name: "negative MaxCreateQPS should use default",
@@ -147,6 +157,7 @@ func TestInitOptions(t *testing.T) {
 			expectExtProcConcurrency: 500,
 			expectMaxCreateQPS:       consts.DefaultCreateQPS,
 			expectMemberlistBindPort: 9000,
+			expectSingleflightTTL:    5 * time.Minute,
 		},
 		{
 			name: "zero MemberlistBindPort should use default",
@@ -162,6 +173,7 @@ func TestInitOptions(t *testing.T) {
 			expectExtProcConcurrency: 500,
 			expectMaxCreateQPS:       20,
 			expectMemberlistBindPort: DefaultMemberlistBindPort,
+			expectSingleflightTTL:    5 * time.Minute,
 		},
 		{
 			name: "negative MemberlistBindPort should use default",
@@ -177,6 +189,7 @@ func TestInitOptions(t *testing.T) {
 			expectExtProcConcurrency: 500,
 			expectMaxCreateQPS:       20,
 			expectMemberlistBindPort: DefaultMemberlistBindPort,
+			expectSingleflightTTL:    5 * time.Minute,
 		},
 		{
 			name: "non-configurable fields should be preserved",
@@ -191,6 +204,7 @@ func TestInitOptions(t *testing.T) {
 			expectExtProcConcurrency: consts.DefaultExtProcConcurrency,
 			expectMaxCreateQPS:       consts.DefaultCreateQPS,
 			expectMemberlistBindPort: DefaultMemberlistBindPort,
+			expectSingleflightTTL:    5 * time.Minute,
 		},
 	}
 
@@ -203,6 +217,7 @@ func TestInitOptions(t *testing.T) {
 			assert.Equal(t, tt.expectExtProcConcurrency, result.ExtProcMaxConcurrency)
 			assert.Equal(t, tt.expectMaxCreateQPS, result.MaxCreateQPS)
 			assert.Equal(t, tt.expectMemberlistBindPort, result.MemberlistBindPort)
+			assert.Equal(t, tt.expectSingleflightTTL, result.SingleflightPreemptionThreshold)
 
 			// Verify non-configurable fields are preserved
 			if tt.input.PeerSelector != "" {

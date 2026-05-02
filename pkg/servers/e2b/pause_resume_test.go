@@ -113,6 +113,13 @@ func pauseSandboxHelper(t *testing.T, controller *Controller, client client.Clie
 		UpdateSandboxWhen(t, client, sandboxID, func(sbx *agentsv1alpha1.Sandbox) bool {
 			return sbx.Spec.Paused == false
 		}, DoSetSandboxStatus(agentsv1alpha1.SandboxPaused, metav1.ConditionFalse, metav1.ConditionFalse))
+	} else if pausing {
+		sbx := GetSandbox(t, sandboxID, client)
+		if sbx.Annotations == nil {
+			sbx.Annotations = map[string]string{}
+		}
+		sbx.Annotations["singleflight."+agentsv1alpha1.InternalPrefix+"pause-resume"] = fmt.Sprintf("1:false:%d", time.Now().Unix())
+		require.NoError(t, client.Update(t.Context(), sbx))
 	}
 }
 
@@ -145,7 +152,7 @@ func TestConnectSandbox(t *testing.T) {
 			paused:       true,
 			pausing:      true,
 			timeout:      DefaultTimeoutSeconds,
-			expectStatus: http.StatusInternalServerError,
+			expectStatus: http.StatusCreated,
 		},
 		{
 			name:         "resume sandbox: resuming",
@@ -201,6 +208,24 @@ func TestConnectSandbox(t *testing.T) {
 
 			if tt.sandboxID == "" {
 				tt.sandboxID = createResp.Body.SandboxID
+			}
+			if tt.pausing && tt.expectStatus < 300 {
+				time.AfterFunc(20*time.Millisecond, func() {
+					var sbx agentsv1alpha1.Sandbox
+					if err := fc.Get(t.Context(), client.ObjectKey{Name: createResp.Body.SandboxID, Namespace: "default"}, &sbx); err != nil {
+						return
+					}
+					if sbx.Annotations == nil {
+						sbx.Annotations = map[string]string{}
+					}
+					sbx.Annotations["singleflight."+agentsv1alpha1.InternalPrefix+"pause-resume"] = fmt.Sprintf("1:true:%d", time.Now().Unix())
+					if err := fc.Update(t.Context(), &sbx); err != nil {
+						return
+					}
+					UpdateSandboxWhen(t, fc, createResp.Body.SandboxID, func(current *agentsv1alpha1.Sandbox) bool {
+						return current.Annotations["singleflight."+agentsv1alpha1.InternalPrefix+"pause-resume"] != ""
+					}, DoSetSandboxStatus(agentsv1alpha1.SandboxPaused, metav1.ConditionTrue, metav1.ConditionFalse))
+				})
 			}
 			if tt.expectStatus < 300 {
 				go UpdateSandboxWhen(t, fc, createResp.Body.SandboxID, func(sbx *agentsv1alpha1.Sandbox) bool {
@@ -351,7 +376,7 @@ func TestResumeSandbox(t *testing.T) {
 			paused:       true,
 			pausing:      true,
 			timeout:      300,
-			expectStatus: http.StatusInternalServerError,
+			expectStatus: http.StatusNoContent,
 		},
 		{
 			name:         "resume sandbox: resuming",
@@ -406,6 +431,24 @@ func TestResumeSandbox(t *testing.T) {
 
 			if tt.sandboxID == "" {
 				tt.sandboxID = createResp.Body.SandboxID
+			}
+			if tt.pausing && tt.expectStatus < 300 {
+				time.AfterFunc(20*time.Millisecond, func() {
+					var sbx agentsv1alpha1.Sandbox
+					if err := fc.Get(t.Context(), client.ObjectKey{Name: createResp.Body.SandboxID, Namespace: "default"}, &sbx); err != nil {
+						return
+					}
+					if sbx.Annotations == nil {
+						sbx.Annotations = map[string]string{}
+					}
+					sbx.Annotations["singleflight."+agentsv1alpha1.InternalPrefix+"pause-resume"] = fmt.Sprintf("1:true:%d", time.Now().Unix())
+					if err := fc.Update(t.Context(), &sbx); err != nil {
+						return
+					}
+					UpdateSandboxWhen(t, fc, createResp.Body.SandboxID, func(current *agentsv1alpha1.Sandbox) bool {
+						return current.Annotations["singleflight."+agentsv1alpha1.InternalPrefix+"pause-resume"] != ""
+					}, DoSetSandboxStatus(agentsv1alpha1.SandboxPaused, metav1.ConditionTrue, metav1.ConditionFalse))
+				})
 			}
 			if tt.expectStatus < 300 {
 				// Only schedule async update when expecting success
