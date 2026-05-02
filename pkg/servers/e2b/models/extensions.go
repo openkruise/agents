@@ -35,20 +35,22 @@ import (
 
 //goland:noinspection GoSnakeCaseUsage
 const (
-	ExtensionKeyClaimTimeout                  = v1alpha1.E2BPrefix + "claim-timeout-seconds"
-	ExtensionKeyWaitReadyTimeout              = v1alpha1.E2BPrefix + "wait-ready-timeout-seconds"
-	ExtensionKeyClaimWithCPURequest           = v1alpha1.E2BPrefix + "cpu-request"
-	ExtensionKeyClaimWithCPULimit             = v1alpha1.E2BPrefix + "cpu-limit"
-	ExtensionKeyClaimWithImage                = v1alpha1.E2BPrefix + "image"
-	ExtensionKeyClaimWithCSIMount             = v1alpha1.E2BPrefix + "csi"
-	ExtensionKeyClaimWithCSIMount_VolumeName  = ExtensionKeyClaimWithCSIMount + "-volume-name"
-	ExtensionKeyClaimWithCSIMount_SubPath     = ExtensionKeyClaimWithCSIMount + "-subpath"
-	ExtensionKeyClaimWithCSIMount_MountPoint  = ExtensionKeyClaimWithCSIMount + "-mount-point"
-	ExtensionKeyClaimWithCSIMount_MountConfig = ExtensionKeyClaimWithCSIMount + "-volume-config"
-	ExtensionKeySkipInitRuntime               = v1alpha1.E2BPrefix + "skip-init-runtime"
-	ExtensionKeyReserveFailedSandbox          = v1alpha1.E2BPrefix + "reserve-failed-sandbox"
-	ExtensionKeyCreateOnNoStock               = v1alpha1.E2BPrefix + "create-on-no-stock"
-	ExtensionKeyNeverTimeout                  = v1alpha1.E2BPrefix + "never-timeout"
+	ExtensionKeyClaimTimeout                      = v1alpha1.E2BPrefix + "claim-timeout-seconds"
+	ExtensionKeyWaitReadyTimeout                  = v1alpha1.E2BPrefix + "wait-ready-timeout-seconds"
+	ExtensionKeyClaimWithCPURequest               = v1alpha1.E2BPrefix + "cpu-request"
+	ExtensionKeyClaimWithCPULimit                 = v1alpha1.E2BPrefix + "cpu-limit"
+	ExtensionKeyClaimWithImage                    = v1alpha1.E2BPrefix + "image"
+	ExtensionKeyClaimWithCSIMount                 = v1alpha1.E2BPrefix + "csi"
+	ExtensionKeyClaimWithSecurityIdentity         = v1alpha1.E2BPrefix + "security-identity"
+	ExtensionKeyClaimWithCSIMount_VolumeName      = ExtensionKeyClaimWithCSIMount + "-volume-name"
+	ExtensionKeyClaimWithCSIMount_SubPath         = ExtensionKeyClaimWithCSIMount + "-subpath"
+	ExtensionKeyClaimWithCSIMount_MountPoint      = ExtensionKeyClaimWithCSIMount + "-mount-point"
+	ExtensionKeyClaimWithCSIMount_MountConfig     = ExtensionKeyClaimWithCSIMount + "-volume-config"
+	ExtensionKeyClaimWithSecurityIdentityProvider = ExtensionKeyClaimWithSecurityIdentity + "-token-config"
+	ExtensionKeySkipInitRuntime                   = v1alpha1.E2BPrefix + "skip-init-runtime"
+	ExtensionKeyReserveFailedSandbox              = v1alpha1.E2BPrefix + "reserve-failed-sandbox"
+	ExtensionKeyCreateOnNoStock                   = v1alpha1.E2BPrefix + "create-on-no-stock"
+	ExtensionKeyNeverTimeout                      = v1alpha1.E2BPrefix + "never-timeout"
 )
 
 const (

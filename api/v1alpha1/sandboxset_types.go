@@ -33,6 +33,8 @@ const (
 	// LabelSandboxClaimName indicates the name of the SandboxClaim that claimed this sandbox
 	LabelSandboxClaimName = InternalPrefix + "claim-name"
 	LabelTemplateHash     = InternalPrefix + "template-hash"
+	// LabelSandboxAgentName identifies the agent name associated with the sandbox.
+	LabelSandboxAgentName = InternalPrefix + "agent-name"
 
 	AnnotationLock               = InternalPrefix + "lock"
 	AnnotationOwner              = InternalPrefix + "owner"

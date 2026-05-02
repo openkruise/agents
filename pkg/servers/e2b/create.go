@@ -24,7 +24,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/klog/v2"
 
@@ -73,7 +72,7 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 	claimStart := time.Now()
 	var accessToken string
 	if request.Secure {
-		accessToken = uuid.NewString()
+		accessToken = config.NewDefaultAccessToken()
 	}
 	opts := infra.ClaimSandboxOptions{
 		Template:     request.TemplateID,
@@ -90,8 +89,9 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 
 	if !request.Extensions.SkipInitRuntime {
 		opts.InitRuntime = &config.InitRuntimeOptions{
-			EnvVars:     request.EnvVars,
-			AccessToken: accessToken,
+			EnvVars:         request.EnvVars,
+			AccessToken:     accessToken,
+			AccessTokenType: config.AccessTokenTypeUUID,
 		}
 	}
 
