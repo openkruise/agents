@@ -35,7 +35,17 @@ import (
 )
 
 // DescribeSandbox returns details of a specific sandbox
-func (sc *Controller) DescribeSandbox(r *http.Request) (web.ApiResponse[*models.Sandbox], *web.ApiError) {
+func (sc *Controller) DescribeSandbox(r *http.Request) (resp web.ApiResponse[*models.Sandbox], apiErr *web.ApiError) {
+	start := time.Now()
+	defer func() {
+		result := "success"
+		if apiErr != nil {
+			result = "error"
+		}
+		apiOperationDuration.WithLabelValues("describe", result).Observe(time.Since(start).Seconds())
+		apiOperationTotal.WithLabelValues("describe", result).Inc()
+	}()
+
 	id := r.PathValue("sandboxID")
 	log := klog.FromContext(r.Context())
 	log.Info("describe sandbox", "id", id)
@@ -52,7 +62,17 @@ func (sc *Controller) DescribeSandbox(r *http.Request) (web.ApiResponse[*models.
 }
 
 // DeleteSandbox deletes a specific sandbox
-func (sc *Controller) DeleteSandbox(r *http.Request) (web.ApiResponse[struct{}], *web.ApiError) {
+func (sc *Controller) DeleteSandbox(r *http.Request) (resp web.ApiResponse[struct{}], apiErr *web.ApiError) {
+	start := time.Now()
+	defer func() {
+		result := "success"
+		if apiErr != nil {
+			result = "error"
+		}
+		apiOperationDuration.WithLabelValues("delete", result).Observe(time.Since(start).Seconds())
+		apiOperationTotal.WithLabelValues("delete", result).Inc()
+	}()
+
 	id := r.PathValue("sandboxID")
 	log := klog.FromContext(r.Context())
 	sbx, apiError := sc.getSandboxOfUser(r.Context(), id)
