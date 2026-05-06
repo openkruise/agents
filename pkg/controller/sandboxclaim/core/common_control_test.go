@@ -450,6 +450,97 @@ func TestCommonControl_EnsureClaimClaiming(t *testing.T) {
 	}
 }
 
+func TestCommonControl_EnsureClaimClaiming_ClaimedGreaterThanZero(t *testing.T) {
+	// This test covers the `if claimed > 0` branch in EnsureClaimClaiming,
+	// ensuring sandboxset.IncSandboxesClaimedTotal is invoked.
+	sbsName := "claimable-template"
+	sbsUID := types.UID("sbs-uid-claimable")
+	claimUID := types.UID("claim-uid-claimable")
+	true_ := true
+
+	sandboxSet := &agentsv1alpha1.SandboxSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sbsName,
+			Namespace: "default",
+			UID:       sbsUID,
+		},
+	}
+
+	// Create an available sandbox in the pool:
+	// - owned by SandboxSet (OwnerReference)
+	// - Phase=Running, Ready=True, PodIP set
+	// - has template label
+	availableSandbox := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "available-sbx-1",
+			Namespace:         "default",
+			CreationTimestamp: metav1.Now(),
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: agentsv1alpha1.GroupVersion.String(),
+					Kind:       "SandboxSet",
+					Name:       sbsName,
+					UID:        sbsUID,
+					Controller: &true_,
+				},
+			},
+			Labels: map[string]string{
+				agentsv1alpha1.LabelSandboxTemplate: sbsName,
+			},
+		},
+		Status: agentsv1alpha1.SandboxStatus{
+			Phase: agentsv1alpha1.SandboxRunning,
+			Conditions: []metav1.Condition{
+				{
+					Type:   string(agentsv1alpha1.SandboxConditionReady),
+					Status: metav1.ConditionTrue,
+				},
+			},
+			PodInfo: agentsv1alpha1.PodInfo{
+				PodIP: "10.0.0.1",
+			},
+		},
+	}
+
+	claim := &agentsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "claimable-claim",
+			Namespace: "default",
+			UID:       claimUID,
+		},
+		Spec: agentsv1alpha1.SandboxClaimSpec{
+			TemplateName:    sbsName,
+			Replicas:        int32Ptr(1),
+			SkipInitRuntime: true, // skip InitRuntime to avoid connecting to pod
+		},
+	}
+
+	cache, fakeClient, err := cachetest.NewTestCache(t, claim, sandboxSet, availableSandbox)
+	require.NoError(t, err, "Failed to create cache")
+
+	ctx := context.Background()
+	fakeRecorder := record.NewFakeRecorder(100)
+	control := NewCommonControl(fakeClient, fakeRecorder, cache)
+
+	newStatus := &agentsv1alpha1.SandboxClaimStatus{
+		Phase:           agentsv1alpha1.SandboxClaimPhaseClaiming,
+		ClaimedReplicas: 0,
+	}
+
+	args := ClaimArgs{
+		Claim:      claim,
+		SandboxSet: sandboxSet,
+		NewStatus:  newStatus,
+	}
+
+	strategy, err := control.EnsureClaimClaiming(ctx, args)
+	assert.NoError(t, err, "Unexpected error")
+
+	// claimed > 0, should requeue immediately to continue
+	assert.True(t, strategy.Immediate, "Expected RequeueImmediately when claimed > 0")
+	assert.Equal(t, int32(1), newStatus.ClaimedReplicas, "ClaimedReplicas should be 1")
+}
+
 func TestCommonControl_EnsureClaimClaiming_CPUResizeFeatureGatePrecondition(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = agentsv1alpha1.AddToScheme(scheme)
