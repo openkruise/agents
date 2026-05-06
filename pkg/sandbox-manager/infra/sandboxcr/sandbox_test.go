@@ -437,7 +437,7 @@ func TestSandbox_Request(t *testing.T) {
 		proxyutils.DefaultRequestFunc = orig
 	})
 
-	proxyutils.DefaultRequestFunc = func(ctx context.Context, sbx *v1alpha1.Sandbox, method, path string, port int, body io.Reader) (*http.Response, error) {
+	proxyutils.DefaultRequestFunc = func(ctx context.Context, sbx *v1alpha1.Sandbox, method, path string, port int, body io.Reader, headers http.Header) (*http.Response, error) {
 		assert.Equal(t, "GET", method)
 		assert.Equal(t, "/healthz", path)
 		assert.Equal(t, 8080, port)
@@ -454,7 +454,7 @@ func TestSandbox_Request(t *testing.T) {
 			},
 		},
 	}
-	resp, err := s.Request(context.Background(), "GET", "/healthz", 8080, nil)
+	resp, err := s.Request(context.Background(), "GET", "/healthz", 8080, nil, nil)
 	assert.NoError(t, err)
 	assert.NotNil(t, resp)
 	assert.Equal(t, http.StatusOK, resp.StatusCode)

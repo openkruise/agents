@@ -36,6 +36,7 @@ const (
 
 	AnnotationLock               = InternalPrefix + "lock"
 	AnnotationOwner              = InternalPrefix + "owner"
+	AnnotationMCPSessionID       = InternalPrefix + "mcp-session-id"
 	AnnotationClaimTime          = InternalPrefix + "claim-timestamp"
 	AnnotationRestoreFrom        = InternalPrefix + "restore-from"
 	AnnotationInitRuntimeRequest = InternalPrefix + "init-runtime-request"

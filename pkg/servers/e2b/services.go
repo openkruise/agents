@@ -118,7 +118,8 @@ func (sc *Controller) BrowserUse(r *http.Request) (web.ApiResponse[*browserHandS
 		return web.ApiResponse[*browserHandShake]{}, apiErr
 	}
 
-	resp, err := sbx.Request(r.Context(), r.Method, "/json/version", cdpPort, r.Body)
+	resp, err := sbx.Request(r.Context(), r.Method, "/json/version", cdpPort, r.Body, nil)
+
 	if err != nil {
 		return web.ApiResponse[*browserHandShake]{}, &web.ApiError{
 			Message: fmt.Sprintf("Failed to proxy request to sandbox port %d: %v", cdpPort, err),

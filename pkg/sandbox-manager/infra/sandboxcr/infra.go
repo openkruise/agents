@@ -112,6 +112,17 @@ type Infra struct {
 	createLimiter    *rate.Limiter
 
 	reconcileRouteStopCh chan struct{}
+
+	// SandboxEventHandler handles sandbox lifecycle events
+	SandboxEventHandler infra.SandboxEventHandler
+}
+
+// SetSandboxEventHandler sets the sandbox event handler for handling sandbox lifecycle events
+func (i *Infra) SetSandboxEventHandler(handler infra.SandboxEventHandler) {
+	if i.SandboxEventHandler != nil {
+		panic("SandboxEventHandler already set, cannot register twice")
+	}
+	i.SandboxEventHandler = handler
 }
 
 func (i *Infra) Run(ctx context.Context) error {
@@ -307,6 +318,9 @@ func (i *Infra) GetClaimedSandbox(ctx context.Context, sandboxID string) (infra.
 	return AsSandbox(sandbox, i.Cache), nil
 }
 
+// reconcileSandbox is a unified reconcile handler registered with the Sandbox
+// CustomReconciler. It refreshes the proxy route for the sandbox and
+// forwards sandbox lifecycle events to the MCP SandboxEventHandler (if set).
 func (i *Infra) reconcileSandbox(ctx context.Context, sbx *v1alpha1.Sandbox, notFound bool) (ctrl.Result, error) {
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
 
@@ -315,12 +329,39 @@ func (i *Infra) reconcileSandbox(ctx context.Context, sbx *v1alpha1.Sandbox, not
 		sandboxID := stateutils.GetSandboxID(sbx)
 		i.Proxy.DeleteRoute(sandboxID)
 		log.Info("sandbox route deleted during reconciliation", "sandboxID", sandboxID)
+
+		// Forward delete event to MCP session handler
+		if i.SandboxEventHandler != nil {
+			sessionID := sbx.GetAnnotations()[v1alpha1.AnnotationMCPSessionID]
+			if sessionID != "" {
+				i.SandboxEventHandler.OnSandboxDelete(sessionID)
+			}
+		}
 		return ctrl.Result{}, nil
 	}
 
-	// Sandbox exists, refresh route
+	// Sandbox exists, refresh route. Use the existence of an old route to
+	// distinguish between a newly observed sandbox (Add) and an update.
+	_, hadRoute := i.Proxy.LoadRoute(sbx.GetName())
 	i.refreshRoute(sbx)
 	log.V(consts.DebugLogLevel).Info("sandbox route refreshed during reconciliation")
+
+	// Forward add/update event to MCP session handler
+	if i.SandboxEventHandler != nil {
+		annotations := sbx.GetAnnotations()
+		sessionID := annotations[v1alpha1.AnnotationMCPSessionID]
+		if sessionID != "" {
+			state, _ := stateutils.GetSandboxState(sbx)
+			sandboxID := stateutils.GetSandboxID(sbx)
+			owner := annotations[v1alpha1.AnnotationOwner]
+			token := annotations[v1alpha1.AnnotationRuntimeAccessToken]
+			if hadRoute {
+				i.SandboxEventHandler.OnSandboxUpdate(sessionID, sandboxID, owner, token, state)
+			} else {
+				i.SandboxEventHandler.OnSandboxAdd(sessionID, sandboxID, owner, token, state)
+			}
+		}
+	}
 	return ctrl.Result{}, nil
 }
 
