@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	dto "github.com/prometheus/client_model/go"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -29,11 +30,11 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 )
 
-// histogramSum collects the current sample sum from a Histogram metric.
-func histogramSum(t *testing.T) float64 {
+// histogramSum collects the current sample sum from a HistogramVec metric for a given namespace/name.
+func histogramSum(t *testing.T, namespace, name string) float64 {
 	t.Helper()
 	m := &dto.Metric{}
-	if err := sandboxClaimClaimDuration.Write(m); err != nil {
+	if err := sandboxClaimClaimDuration.WithLabelValues(namespace, name).(prometheus.Metric).Write(m); err != nil {
 		t.Fatalf("failed to write histogram metric: %v", err)
 	}
 	return m.GetHistogram().GetSampleSum()
@@ -272,12 +273,12 @@ func TestSandboxClaimClaimDuration_ObservedOnce(t *testing.T) {
 	}
 
 	// Get initial sum value from histogram
-	beforeSum := histogramSum(t)
+	beforeSum := histogramSum(t, "default", "duration-test-claim")
 
 	// First call should observe
 	recordSandboxClaimMetrics(claim)
 
-	afterFirstSum := histogramSum(t)
+	afterFirstSum := histogramSum(t, "default", "duration-test-claim")
 	expectedDuration := completionTime.Sub(startTime.Time).Seconds()
 	if afterFirstSum-beforeSum != expectedDuration {
 		t.Errorf("first observation: sum delta = %v, want %v", afterFirstSum-beforeSum, expectedDuration)
@@ -286,18 +287,20 @@ func TestSandboxClaimClaimDuration_ObservedOnce(t *testing.T) {
 	// Second call should NOT observe (deduplicated)
 	recordSandboxClaimMetrics(claim)
 
-	afterSecondSum := histogramSum(t)
+	afterSecondSum := histogramSum(t, "default", "duration-test-claim")
 	if afterSecondSum != afterFirstSum {
 		t.Errorf("second call should not change sum: got %v, want %v", afterSecondSum, afterFirstSum)
 	}
 
 	// Delete metrics and re-record should observe again
 	deleteSandboxClaimMetrics("default", "duration-test-claim")
+	// After DeleteLabelValues, the histogram series is reset; read the new baseline.
+	baselineAfterDelete := histogramSum(t, "default", "duration-test-claim")
 	recordSandboxClaimMetrics(claim)
 
-	afterReObserve := histogramSum(t)
-	if afterReObserve-afterSecondSum != expectedDuration {
-		t.Errorf("re-observation after delete: sum delta = %v, want %v", afterReObserve-afterSecondSum, expectedDuration)
+	afterReObserve := histogramSum(t, "default", "duration-test-claim")
+	if afterReObserve-baselineAfterDelete != expectedDuration {
+		t.Errorf("re-observation after delete: sum delta = %v, want %v", afterReObserve-baselineAfterDelete, expectedDuration)
 	}
 
 	// Final cleanup
@@ -325,9 +328,9 @@ func TestSandboxClaimClaimDuration_NotObservedForClaimingPhase(t *testing.T) {
 		},
 	}
 
-	beforeSum := histogramSum(t)
+	beforeSum := histogramSum(t, "default", "claiming-phase-claim")
 	recordSandboxClaimMetrics(claim)
-	afterSum := histogramSum(t)
+	afterSum := histogramSum(t, "default", "claiming-phase-claim")
 
 	if afterSum != beforeSum {
 		t.Errorf("claiming phase should not observe histogram: sum changed from %v to %v", beforeSum, afterSum)

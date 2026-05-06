@@ -34,6 +34,7 @@ import (
 	"github.com/openkruise/agents/pkg/agent-runtime/common"
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
 	"github.com/openkruise/agents/pkg/cache"
+	"github.com/openkruise/agents/pkg/controller/sandboxset"
 	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
@@ -114,6 +115,7 @@ func (c *commonControl) EnsureClaimClaiming(ctx context.Context, args ClaimArgs)
 		c.recorder.Event(claim, "Normal", "ClaimCompleted",
 			fmt.Sprintf("Successfully claimed %d/%d sandboxes", currentCount, desiredReplicas))
 		args.NewStatus.Message = fmt.Sprintf("Completed: %d/%d claimed", currentCount, desiredReplicas)
+		sandboxSetClaimsTotal.WithLabelValues(claim.Namespace, sandboxSet.Name, "success").Inc()
 		// Requeue immediately to transition to Completed phase
 		return RequeueImmediately(), nil
 	}
@@ -149,6 +151,7 @@ func (c *commonControl) EnsureClaimClaiming(ctx context.Context, args ClaimArgs)
 
 	// Step 10: Record results and determine requeue strategy
 	if claimed > 0 {
+		sandboxset.IncSandboxesClaimedTotal(claim.Namespace, sandboxSet.Name, claimed)
 		log.Info("Claimed sandboxes in this cycle",
 			"claimed", claimed,
 			"total", finalCount,
@@ -164,6 +167,7 @@ func (c *commonControl) EnsureClaimClaiming(ctx context.Context, args ClaimArgs)
 		"retryInterval", ClaimRetryInterval)
 	c.recorder.Event(claim, "Warning", "NoAvailableSandboxes",
 		fmt.Sprintf("No available sandboxes in pool %s", sandboxSet.Name))
+	sandboxSetClaimsTotal.WithLabelValues(claim.Namespace, sandboxSet.Name, "failed").Inc()
 	// Retry after interval to avoid busy loop
 	return RequeueAfter(ClaimRetryInterval), nil
 }
@@ -197,6 +201,7 @@ func (c *commonControl) EnsureClaimCompleted(ctx context.Context, args ClaimArgs
 				return NoRequeue(), err
 			}
 
+			sandboxClaimExpiredTotal.WithLabelValues(claim.Namespace, claim.Name).Inc()
 			log.Info("SandboxClaim deleted successfully due to TTL expiration")
 			return NoRequeue(), nil
 		}

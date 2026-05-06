@@ -23,13 +23,14 @@ import (
 
 var (
 	// sandboxPauseDuration tracks the time of sandbox pause operations
-	sandboxPauseDuration = prometheus.NewHistogram(
+	sandboxPauseDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:        "sandbox_pause_duration_seconds",
 			Help:        "Duration of sandbox pause operations in seconds",
 			ConstLabels: prometheus.Labels{"source": "e2b"},
 			Buckets:     prometheus.ExponentialBuckets(0.02, 2, 12), // 20ms -> ~41s
 		},
+		[]string{"namespace", "name"},
 	)
 
 	// sandboxPauseResponses tracks total pause requests and their results
@@ -39,17 +40,18 @@ var (
 			Help:        "Total number of sandbox pause requests and their results",
 			ConstLabels: prometheus.Labels{"source": "e2b"},
 		},
-		[]string{"result"},
+		[]string{"namespace", "name", "result"},
 	)
 
 	// sandboxResumeDuration tracks the time of sandbox resume operations
-	sandboxResumeDuration = prometheus.NewHistogram(
+	sandboxResumeDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:        "sandbox_resume_duration_seconds",
 			Help:        "Duration of sandbox resume operations in seconds",
 			ConstLabels: prometheus.Labels{"source": "e2b"},
 			Buckets:     prometheus.ExponentialBuckets(0.02, 2, 12), // 20ms -> ~41s
 		},
+		[]string{"namespace", "name"},
 	)
 
 	// sandboxResumeResponses tracks total resume requests and their results
@@ -59,7 +61,7 @@ var (
 			Help:        "Total number of sandbox resume requests and their results",
 			ConstLabels: prometheus.Labels{"source": "e2b"},
 		},
-		[]string{"result"},
+		[]string{"namespace", "name", "result"},
 	)
 
 	// sandboxDeleteResponses tracks total delete requests and their results
@@ -69,17 +71,18 @@ var (
 			Help:        "Total number of sandbox delete requests and their results",
 			ConstLabels: prometheus.Labels{"source": "e2b"},
 		},
-		[]string{"result"},
+		[]string{"namespace", "name", "result"},
 	)
 
 	// sandboxDeleteDuration tracks the time of sandbox delete operations
-	sandboxDeleteDuration = prometheus.NewHistogram(
+	sandboxDeleteDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:        "sandbox_delete_duration_seconds",
 			Help:        "Duration of sandbox delete operations in seconds",
 			ConstLabels: prometheus.Labels{"source": "e2b"},
 			Buckets:     prometheus.ExponentialBuckets(0.02, 2, 12), // 20ms -> ~41s
 		},
+		[]string{"namespace", "name"},
 	)
 
 	// --- Claim metrics ---
@@ -91,17 +94,18 @@ var (
 			Help:        "Total number of sandbox creation requests and their results",
 			ConstLabels: prometheus.Labels{"source": "e2b"},
 		},
-		[]string{"result"}, // "success" or "failure"
+		[]string{"namespace", "name", "result"}, // "success" or "failure"
 	)
 
 	// sandboxClaimDuration tracks the total claim operation duration
-	sandboxClaimDuration = prometheus.NewHistogram(
+	sandboxClaimDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:        "sandbox_claim_duration_seconds",
 			Help:        "Total claim operation duration in seconds",
 			ConstLabels: prometheus.Labels{"source": "e2b"},
 			Buckets:     prometheus.ExponentialBuckets(0.02, 2, 12), // 20ms -> ~41s
 		},
+		[]string{"namespace", "name"},
 	)
 
 	// sandboxClaimTotal tracks total claim operations by result and lock type
@@ -111,29 +115,31 @@ var (
 			Help:        "Total number of claim operations",
 			ConstLabels: prometheus.Labels{"source": "e2b"},
 		},
-		[]string{"result", "lock_type"},
+		[]string{"namespace", "name", "result", "lock_type"},
 	)
 
 	// sandboxClaimRetries tracks the number of retries per claim operation
-	sandboxClaimRetries = prometheus.NewHistogram(
+	sandboxClaimRetries = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:        "sandbox_claim_retries",
 			Help:        "Number of retries per claim operation",
 			ConstLabels: prometheus.Labels{"source": "e2b"},
 			Buckets:     prometheus.LinearBuckets(0, 1, 11), // 0 to 10 bigger step for retries
 		},
+		[]string{"namespace", "name"},
 	)
 
 	// --- Clone metrics ---
 
 	// SandboxCloneDuration tracks the total clone operation duration
-	sandboxCloneDuration = prometheus.NewHistogram(
+	sandboxCloneDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:        "sandbox_clone_duration_seconds",
 			Help:        "Total clone operation duration in seconds",
 			ConstLabels: prometheus.Labels{"source": "e2b"},
 			Buckets:     prometheus.ExponentialBuckets(0.02, 2, 12), // 20ms -> ~41s
 		},
+		[]string{"namespace", "name"},
 	)
 
 	// SandboxCloneTotal tracks total clone operations by result
@@ -143,7 +149,7 @@ var (
 			Help:        "Total number of clone operations",
 			ConstLabels: prometheus.Labels{"source": "e2b"},
 		},
-		[]string{"result"},
+		[]string{"namespace", "name", "result"},
 	)
 
 	// --- Route sync metrics ---
@@ -156,7 +162,7 @@ var (
 			ConstLabels: prometheus.Labels{"source": "e2b"},
 			Buckets:     prometheus.ExponentialBuckets(0.02, 2, 12), // 20ms -> ~41s
 		},
-		[]string{"type"},
+		[]string{"namespace", "name", "type"},
 	)
 
 	// SandboxRouteSyncTotal tracks total route sync operations by type and result
@@ -166,7 +172,7 @@ var (
 			Help:        "Total number of route sync operations",
 			ConstLabels: prometheus.Labels{"source": "e2b"},
 		},
-		[]string{"type", "result"},
+		[]string{"namespace", "name", "type", "result"},
 	)
 )
 

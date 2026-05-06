@@ -23,6 +23,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/controller/sandboxclaim/core"
 )
 
 var (
@@ -99,13 +100,14 @@ var (
 	// sandboxClaimClaimDuration records the histogram of sandbox claim durations
 	// (from ClaimStartTime to CompletionTime) in seconds.
 	// This is observed exactly once per claim when it first reaches Completed phase.
-	sandboxClaimClaimDuration = prometheus.NewHistogram(
+	sandboxClaimClaimDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:        "sandbox_claim_duration_seconds",
 			Help:        "Duration of sandbox claim operations from start to completion in seconds",
 			ConstLabels: prometheus.Labels{"source": "k8s"},
 			Buckets:     prometheus.ExponentialBuckets(0.02, 2, 12), // 20ms -> ~41s
 		},
+		[]string{"namespace", "name"},
 	)
 
 	// allClaimPhases enumerates all possible sandbox claim phases for metric cleanup.
@@ -178,7 +180,7 @@ func recordSandboxClaimMetrics(claim *agentsv1alpha1.SandboxClaim) {
 		key := namespace + "/" + name
 		if _, loaded := observedClaimDurations.LoadOrStore(key, true); !loaded {
 			duration := claim.Status.CompletionTime.Sub(claim.Status.ClaimStartTime.Time)
-			sandboxClaimClaimDuration.Observe(duration.Seconds())
+			sandboxClaimClaimDuration.WithLabelValues(namespace, name).Observe(duration.Seconds())
 		}
 	}
 }
@@ -194,5 +196,7 @@ func deleteSandboxClaimMetrics(namespace, name string) {
 	sandboxClaimCompletionTime.DeleteLabelValues(namespace, name)
 	sandboxClaimClaimedReplicas.DeleteLabelValues(namespace, name)
 	sandboxClaimDesiredReplicas.DeleteLabelValues(namespace, name)
+	sandboxClaimClaimDuration.DeleteLabelValues(namespace, name)
 	observedClaimDurations.Delete(namespace + "/" + name)
+	core.DeleteSandboxClaimCounterMetrics(namespace, name)
 }

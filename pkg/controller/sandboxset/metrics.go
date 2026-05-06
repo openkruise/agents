@@ -77,6 +77,25 @@ var (
 		},
 		[]string{"namespace", "name"},
 	)
+
+	// sandboxSetSandboxesCreatedTotal tracks the cumulative number of Sandboxes successfully created by each SandboxSet
+	sandboxSetSandboxesCreatedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "sandboxset_sandboxes_created_total",
+			Help: "Cumulative number of Sandboxes successfully created by the SandboxSet",
+		},
+		[]string{"namespace", "name"},
+	)
+
+	// sandboxSetSandboxesClaimedTotal tracks the cumulative number of Sandboxes claimed from each SandboxSet.
+	sandboxSetSandboxesClaimedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name:        "sandboxset_sandboxes_claimed_total",
+			Help:        "Cumulative number of Sandboxes claimed from the SandboxSet",
+			ConstLabels: prometheus.Labels{"source": "k8s"},
+		},
+		[]string{"namespace", "name"},
+	)
 )
 
 func init() {
@@ -88,6 +107,8 @@ func init() {
 		sandboxSetCreated,
 		sandboxSetUpdatedReplicas,
 		sandboxSetUpdatedAvailableReplicas,
+		sandboxSetSandboxesCreatedTotal,
+		sandboxSetSandboxesClaimedTotal,
 	)
 }
 
@@ -104,4 +125,11 @@ func deleteSandboxSetMetrics(namespace, name string) {
 	sandboxSetCreated.DeleteLabelValues(namespace, name)
 	sandboxSetUpdatedReplicas.DeleteLabelValues(namespace, name)
 	sandboxSetUpdatedAvailableReplicas.DeleteLabelValues(namespace, name)
+	sandboxSetSandboxesCreatedTotal.DeleteLabelValues(namespace, name)
+	sandboxSetSandboxesClaimedTotal.DeleteLabelValues(namespace, name)
+}
+
+// IncSandboxesClaimedTotal increments the claimed sandboxes counter for the given SandboxSet.
+func IncSandboxesClaimedTotal(namespace, name string, count int) {
+	sandboxSetSandboxesClaimedTotal.WithLabelValues(namespace, name).Add(float64(count))
 }
