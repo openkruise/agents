@@ -33,6 +33,7 @@ To interact with the OpenKruise Agents programmatically, you can use the E2B SDK
 - [Running E2B Code Interpreter Sandbox](examples/code_interpreter/README.md)
 - [Running E2B Desktop Sandbox](examples/desktop/README.md)
 - [Running OpenClaw](examples/openclaw/README.md)
+- [Running Claude Code](examples/claude-code/README.md)
 
 ## Roadmap
 
