@@ -20,6 +20,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 )
+
+const (
+	ResultSuccess = "success"
+	ResultError   = "error"
+)
+
 var (
 	// snapshotDuration tracks snapshot creation latency.
 	snapshotDuration = prometheus.NewHistogramVec(

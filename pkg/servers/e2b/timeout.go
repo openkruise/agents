@@ -34,9 +34,9 @@ import (
 func (sc *Controller) SetSandboxTimeout(r *http.Request) (resp web.ApiResponse[struct{}], apiErr *web.ApiError) {
 	start := time.Now()
 	defer func() {
-		result := "success"
+		result := ResultSuccess
 		if apiErr != nil {
-			result = "error"
+			result = ResultError
 		}
 		apiOperationDuration.WithLabelValues("timeout", result).Observe(time.Since(start).Seconds())
 		apiOperationTotal.WithLabelValues("timeout", result).Inc()

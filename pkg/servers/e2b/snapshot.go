@@ -33,9 +33,9 @@ import (
 func (sc *Controller) CreateSnapshot(r *http.Request) (resp web.ApiResponse[*models.Snapshot], apiErr *web.ApiError) {
 	start := time.Now()
 	defer func() {
-		result := "success"
+		result := ResultSuccess
 		if apiErr != nil {
-			result = "error"
+			result = ResultError
 		}
 		apiOperationDuration.WithLabelValues("snapshot", result).Observe(time.Since(start).Seconds())
 		apiOperationTotal.WithLabelValues("snapshot", result).Inc()

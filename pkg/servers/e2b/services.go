@@ -38,9 +38,9 @@ import (
 func (sc *Controller) DescribeSandbox(r *http.Request) (resp web.ApiResponse[*models.Sandbox], apiErr *web.ApiError) {
 	start := time.Now()
 	defer func() {
-		result := "success"
+		result := ResultSuccess
 		if apiErr != nil {
-			result = "error"
+			result = ResultError
 		}
 		apiOperationDuration.WithLabelValues("describe", result).Observe(time.Since(start).Seconds())
 		apiOperationTotal.WithLabelValues("describe", result).Inc()
