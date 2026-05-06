@@ -110,6 +110,7 @@ func (s *Sandbox) retryUpdate(ctx context.Context, modifier ModifierFunc) error 
 		// get the latest sandbox from cache
 		sbx, err := s.Cache.GetClaimedSandbox(ctx, cache.GetClaimedSandboxOptions{
 			SandboxID: stateutils.GetSandboxID(s.Sandbox),
+			Namespace: s.Namespace,
 		})
 		if err != nil {
 			return err

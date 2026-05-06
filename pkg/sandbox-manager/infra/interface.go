@@ -72,6 +72,9 @@ type SelectSucceededCheckpointsOptions struct {
 type DeleteCheckpointOptions struct {
 	Namespace    string
 	CheckpointID string
+	// User requesting deletion. If non-empty, infra will verify
+	// the checkpoint's AnnotationOwner matches before proceeding with deletion.
+	User string
 }
 
 type Builder interface {

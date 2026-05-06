@@ -208,14 +208,19 @@ func (i *Infra) DeleteCheckpoint(ctx context.Context, opts infra.DeleteCheckpoin
 		return managererrors.NewError(managererrors.ErrorNotFound, err.Error())
 	}
 
-	// Step 2: Delete the SandboxTemplate
+	// Step 2: Verify ownership if Owner is specified
+	if user := opts.User; user != "" && cp.GetAnnotations()[v1alpha1.AnnotationOwner] != user {
+		return managererrors.NewError(managererrors.ErrorNotAllowed, fmt.Sprintf("checkpoint %s is not owned by user %s", opts.CheckpointID, user))
+	}
+
+	// Step 3: Delete the SandboxTemplate
 	log.Info("deleting sandbox template", "template", klog.KObj(tmpl))
 	if err := DefaultDeleteSandboxTemplate(ctx, i.Cache.GetClient(), tmpl.Namespace, tmpl.Name); err != nil {
 		log.Error(err, "failed to delete sandbox template")
 		return managererrors.NewError(managererrors.ErrorInternal, err.Error())
 	}
 
-	// Step 3: Check if checkpoint has OwnerReference to the SandboxTemplate
+	// Step 4: Check if checkpoint has OwnerReference to the SandboxTemplate
 	// If yes, Kubernetes garbage collection will handle deletion automatically
 	// If no, explicitly delete the checkpoint
 	if !metav1.IsControlledBy(cp, tmpl) {

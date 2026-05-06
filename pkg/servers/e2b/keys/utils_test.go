@@ -26,7 +26,6 @@ import (
 )
 
 func TestTeamForKey(t *testing.T) {
-	teamAID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
 	tests := []struct {
 		name       string
 		user       *models.CreatedTeamAPIKey
@@ -49,7 +48,6 @@ func TestTeamForKey(t *testing.T) {
 			user: &models.CreatedTeamAPIKey{
 				ID: uuid.New(),
 				Team: &models.Team{
-					ID:   uuid.New(),
 					Name: models.AdminTeamName,
 				},
 			},
@@ -60,12 +58,12 @@ func TestTeamForKey(t *testing.T) {
 			user: &models.CreatedTeamAPIKey{
 				ID: uuid.New(),
 				Team: &models.Team{
-					ID:   teamAID,
+					ID:   uuid.MustParse("11111111-1111-1111-1111-111111111111"),
 					Name: "team-a",
 				},
 			},
 			expectTeam: &models.Team{
-				ID:   teamAID,
+				ID:   uuid.MustParse("11111111-1111-1111-1111-111111111111"),
 				Name: "team-a",
 			},
 		},

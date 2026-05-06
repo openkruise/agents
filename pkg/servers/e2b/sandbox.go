@@ -67,7 +67,7 @@ func (sc *Controller) getSandboxOfUser(ctx context.Context, sandboxID string) (i
 func (sc *Controller) getNamespaceOfUser(user *models.CreatedTeamAPIKey) string {
 	team := keys.TeamForKey(user)
 	// Keys in the admin team can access resources in cluster scope
-	if team.ID == models.AdminTeamID || team.Name == models.AdminTeamName {
+	if team.Name == models.AdminTeamName {
 		return ""
 	}
 	return team.Name

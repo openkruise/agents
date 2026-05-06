@@ -332,6 +332,79 @@ func TestInfra_DeleteCheckpointWithOptions_NamespaceScoped(t *testing.T) {
 	require.NoError(t, fc.Get(t.Context(), types.NamespacedName{Namespace: "team-b", Name: "checkpoint-template"}, &v1alpha1.Checkpoint{}))
 }
 
+func TestInfra_DeleteCheckpoint_OwnerVerification(t *testing.T) {
+	tests := []struct {
+		name        string
+		owner       string
+		cpOwner     string
+		expectError string
+	}{
+		{
+			name:        "owner matches - deletion succeeds",
+			owner:       "test-user",
+			cpOwner:     "test-user",
+			expectError: "",
+		},
+		{
+			name:        "owner mismatch - deletion denied",
+			owner:       "different-user",
+			cpOwner:     "test-user",
+			expectError: "is not owned by user",
+		},
+		{
+			name:        "empty owner - skip verification, deletion succeeds",
+			owner:       "",
+			cpOwner:     "test-user",
+			expectError: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			infraInstance, fc := NewTestInfra(t)
+
+			namespace := "default"
+			checkpointID := "cp-owner-test"
+
+			tmpl := &v1alpha1.SandboxTemplate{
+				ObjectMeta: metav1.ObjectMeta{Name: checkpointID, Namespace: namespace},
+				Spec: v1alpha1.SandboxTemplateSpec{
+					Template: &corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: "main", Image: "test"}},
+						},
+					},
+				},
+			}
+			require.NoError(t, fc.Create(t.Context(), tmpl))
+
+			cp := &v1alpha1.Checkpoint{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        checkpointID,
+					Namespace:   namespace,
+					Annotations: map[string]string{v1alpha1.AnnotationOwner: tt.cpOwner},
+				},
+				Status: v1alpha1.CheckpointStatus{CheckpointId: checkpointID},
+			}
+			require.NoError(t, fc.Create(t.Context(), cp))
+			require.NoError(t, fc.Status().Update(t.Context(), cp))
+
+			err := infraInstance.DeleteCheckpoint(t.Context(), infra.DeleteCheckpointOptions{
+				Namespace:    namespace,
+				CheckpointID: checkpointID,
+				User:         tt.owner,
+			})
+
+			if tt.expectError != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
 func createTestSandboxWithDefaults(name string, namespace string) *v1alpha1.Sandbox {
 	return &v1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{

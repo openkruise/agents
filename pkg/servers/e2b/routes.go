@@ -165,7 +165,7 @@ func (sc *Controller) CheckCreateAPIKeyPermission(ctx context.Context, r *http.R
 	}
 
 	// Only admin can create API key for other team
-	isAdmin := callerTeam.ID == models.AdminTeamID
+	isAdmin := callerTeam.Name == models.AdminTeamName
 	if !isAdmin && targetTeamName != callerTeam.Name {
 		return ctx, &web.ApiError{
 			Code:    http.StatusForbidden,
@@ -173,15 +173,8 @@ func (sc *Controller) CheckCreateAPIKeyPermission(ctx context.Context, r *http.R
 		}
 	}
 
-	// Validate namespace of target team exists
-	_, found, err := sc.keys.FindTeamByName(ctx, targetTeamName)
-	if err != nil {
-		return ctx, &web.ApiError{
-			Code:    http.StatusInternalServerError,
-			Message: fmt.Sprintf("Failed to find team: %v", err),
-		}
-	}
-	if !found {
+	// Namespace-scoped teams must still have a namespace; admin is cluster-scoped.
+	if targetTeamName != models.AdminTeamName {
 		if apiErr := sc.validateTeamNamespace(ctx, targetTeamName); apiErr != nil {
 			return ctx, apiErr
 		}
@@ -214,7 +207,7 @@ func (sc *Controller) CheckDeleteAPIKeyPermission(ctx context.Context, r *http.R
 
 	userTeam := keys.TeamForKey(user)
 	targetTeam := keys.TeamForKey(key)
-	if userTeam.ID != targetTeam.ID && userTeam.ID != models.AdminTeamID {
+	if userTeam.Name != targetTeam.Name && userTeam.Name != models.AdminTeamName {
 		return ctx, &web.ApiError{
 			Code:    http.StatusForbidden,
 			Message: "You are not allowed to delete this API key",

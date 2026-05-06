@@ -13,6 +13,14 @@ This directory owns E2B API-key persistence behind the `KeyStorage` interface. K
 - `Run()` and `Stop()` are paired lifecycle hooks. If you add background work, make shutdown idempotent and wire controller shutdown through `Stop()`.
 - `LoadByKey`, `LoadByID`, `DeleteKey`, and `ListByOwner` are request-path methods; preserve context propagation for DB work.
 
+## Team Identity
+
+- API-key team identity is the unique team name. The team name maps directly to a Kubernetes namespace, and Kubernetes
+  namespace uniqueness is sufficient for the required isolation boundary.
+- Team UUIDs are display-only compatibility metadata, like creator metadata. MySQL must continue writing `teams.uid`
+  for upgrades from schemas where the column is `NOT NULL`, and Secret storage may preserve existing team IDs.
+- Do not use team UUIDs for API-key team authorization, storage lookup, namespace selection, or `/teams` filtering.
+
 ## MySQL Storage Rules
 
 - Never store plaintext API keys in MySQL. Persist only deterministic `HMAC-SHA256(pepper, rawKey)` as `key_hash`.
@@ -20,6 +28,7 @@ This directory owns E2B API-key persistence behind the `KeyStorage` interface. K
 - `CreateKey` may return plaintext once in the response model. Entries reconstructed from DB do not have plaintext `Key`.
 - `LoadByKey` and `LoadByID` must populate both TTL caches on DB hit.
 - Keep cache invalidation conservative: if `DeleteKey` cannot safely determine the cached `key_hash` because of an unexpected DB error, fail the delete rather than risking stale `byKey` authentication.
+- `DeleteKey` uses hard-delete semantics for MySQL API-key rows. When deleting the last key for a non-admin team, hard-delete that team row too. Never delete the well-known admin key, and never delete the AdminTeam row as part of key cleanup.
 
 ## Current Temporary Business Semantics
 

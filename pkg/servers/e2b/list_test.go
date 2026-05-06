@@ -261,7 +261,6 @@ func TestListSnapshotsNamespaceIsolationWithSameCheckpointID(t *testing.T) {
 		Key:  "team-a-key",
 		Name: "team-a-user",
 		Team: &models.Team{
-			ID:   uuid.New(),
 			Name: "team-a",
 		},
 	}

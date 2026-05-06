@@ -71,7 +71,6 @@ func TestDeleteTemplate(t *testing.T) {
 		Key:  "team-a-key",
 		Name: "team-a-user",
 		Team: &models.Team{
-			ID:   uuid.New(),
 			Name: "team-a",
 		},
 	}
@@ -223,7 +222,6 @@ func TestDeleteCheckpointNamespaceIsolationWithSameID(t *testing.T) {
 		Key:  "team-a-key",
 		Name: "team-a-user",
 		Team: &models.Team{
-			ID:   uuid.New(),
 			Name: "team-a",
 		},
 	}
@@ -277,7 +275,6 @@ func TestListTemplates(t *testing.T) {
 		Key:  "team-a-key",
 		Name: "team-a-user",
 		Team: &models.Team{
-			ID:   uuid.New(),
 			Name: "team-a",
 		},
 	}
@@ -400,7 +397,6 @@ func TestTemplateNamespaceIsolationWithSameName(t *testing.T) {
 		Key:  "team-a-key",
 		Name: "team-a-user",
 		Team: &models.Team{
-			ID:   uuid.New(),
 			Name: "team-a",
 		},
 	}
@@ -409,7 +405,6 @@ func TestTemplateNamespaceIsolationWithSameName(t *testing.T) {
 		Key:  "team-b-key",
 		Name: "team-b-user",
 		Team: &models.Team{
-			ID:   uuid.New(),
 			Name: "team-b",
 		},
 	}
@@ -553,7 +548,6 @@ func TestListTemplatesUsesCacheProvider(t *testing.T) {
 		Key:  "team-a-key",
 		Name: "team-a-user",
 		Team: &models.Team{
-			ID:   uuid.New(),
 			Name: "team-a",
 		},
 	}

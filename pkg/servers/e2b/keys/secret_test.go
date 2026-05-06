@@ -370,7 +370,7 @@ func TestSecretKeyStorage_CreateKey(t *testing.T) {
 			name: "success",
 			run: func(t *testing.T) error {
 				storage, _ := newSecretStorageForTest(t, map[string][]byte{})
-				userTeam := &models.Team{ID: uuid.New(), Name: "user-team"}
+				userTeam := &models.Team{Name: "user-team"}
 				user := &models.CreatedTeamAPIKey{ID: uuid.New(), Team: userTeam, CreatedBy: &models.TeamUser{ID: uuid.New()}}
 				key, err := storage.CreateKey(context.Background(), user, CreateKeyOptions{Name: "name"})
 				if err == nil {
@@ -431,7 +431,7 @@ func TestSecretKeyStorage_CreateKey(t *testing.T) {
 			run: func(t *testing.T) error {
 				_, c := newSecretStorageForTest(t, map[string][]byte{})
 				teamName := "team-a"
-				existingTeam := &models.Team{ID: uuid.MustParse("11111111-1111-1111-1111-111111111111"), Name: teamName}
+				existingTeam := &models.Team{Name: teamName}
 				existingKey := &models.CreatedTeamAPIKey{
 					ID:   uuid.MustParse("22222222-2222-2222-2222-222222222222"),
 					Key:  "existing-key",
@@ -487,7 +487,7 @@ func TestSecretKeyStorage_CreateKey(t *testing.T) {
 			name: "create reuses team from secret and skips invalid data",
 			run: func(t *testing.T) error {
 				teamName := "team-a"
-				existingTeam := &models.Team{ID: uuid.MustParse("11111111-1111-1111-1111-111111111111"), Name: teamName}
+				existingTeam := &models.Team{Name: teamName}
 				existingKey := &models.CreatedTeamAPIKey{
 					ID:   uuid.MustParse("22222222-2222-2222-2222-222222222222"),
 					Key:  "existing-key",
@@ -520,12 +520,15 @@ func TestSecretKeyStorage_CreateKey(t *testing.T) {
 			name: "new target team uses generated team when secret has no match",
 			run: func(t *testing.T) error {
 				storage, _ := newSecretStorageForTest(t, map[string][]byte{})
-				generatedTeam := &models.Team{ID: uuid.MustParse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"), Name: "team-a"}
+				generatedTeam := &models.Team{
+					ID:   uuid.MustParse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
+					Name: "team-a",
+				}
 
 				useGeneratedUUIDsForTest(t,
-					generatedTeam.ID,
 					uuid.MustParse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
 					uuid.MustParse("cccccccc-cccc-cccc-cccc-cccccccccccc"),
+					uuid.MustParse("dddddddd-dddd-dddd-dddd-dddddddddddd"),
 				)
 
 				creator := &models.CreatedTeamAPIKey{ID: uuid.New(), Team: models.AdminTeam()}
@@ -552,8 +555,8 @@ func TestSecretKeyStorage_DeleteAndList(t *testing.T) {
 	storage, c := newSecretStorageForTest(t, map[string][]byte{})
 	owner := uuid.New()
 	other := uuid.New()
-	teamA := &models.Team{ID: uuid.New(), Name: "team-a"}
-	teamB := &models.Team{ID: uuid.New(), Name: "team-b"}
+	teamA := &models.Team{Name: "team-a"}
+	teamB := &models.Team{Name: "team-b"}
 	user := &models.CreatedTeamAPIKey{ID: owner, Team: teamA, CreatedBy: &models.TeamUser{ID: owner}}
 	storage.storeKey(user)
 
@@ -597,6 +600,51 @@ func TestSecretKeyStorage_DeleteAndList(t *testing.T) {
 	require.Error(t, storageWithDeleteError.DeleteKey(context.Background(), key2))
 }
 
+func TestSecretKeyStorage_ListByOwnerMatchesLegacyTeamsByName(t *testing.T) {
+	tests := []struct {
+		name      string
+		teamName  string
+		ownerTeam string
+		otherTeam string
+		wantCount int
+	}{
+		{
+			name:      "same team name with different legacy ids is visible",
+			teamName:  "team-a",
+			ownerTeam: "11111111-1111-1111-1111-111111111111",
+			otherTeam: "22222222-2222-2222-2222-222222222222",
+			wantCount: 2,
+		},
+		{
+			name:      "different team name is hidden even with old id data",
+			teamName:  "team-a",
+			ownerTeam: "11111111-1111-1111-1111-111111111111",
+			otherTeam: "22222222-2222-2222-2222-222222222222",
+			wantCount: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ownerID := uuid.New()
+			otherTeamName := tt.teamName
+			if tt.wantCount == 1 {
+				otherTeamName = "team-b"
+			}
+			otherID := uuid.New()
+			storage, _ := newSecretStorageForTest(t, map[string][]byte{
+				ownerID.String(): []byte(fmt.Sprintf(`{"id":%q,"key":"owner-key","name":"owner","team":{"id":%q,"name":%q}}`, ownerID.String(), tt.ownerTeam, tt.teamName)),
+				otherID.String(): []byte(fmt.Sprintf(`{"id":%q,"key":"other-key","name":"other","team":{"id":%q,"name":%q}}`, otherID.String(), tt.otherTeam, otherTeamName)),
+			})
+			require.NoError(t, storage.refresh(context.Background(), storage.APIReader))
+
+			keys, err := storage.ListByOwner(context.Background(), ownerID)
+			require.NoError(t, err)
+			require.Len(t, keys, tt.wantCount)
+		})
+	}
+}
+
 func TestSecretKeyStorage_TeamLifecycle(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -607,7 +655,7 @@ func TestSecretKeyStorage_TeamLifecycle(t *testing.T) {
 			name: "create key targets existing team by name",
 			run: func(t *testing.T) error {
 				storage, _ := newSecretStorageForTest(t, map[string][]byte{})
-				teamA := &models.Team{ID: uuid.New(), Name: "team-a"}
+				teamA := &models.Team{Name: "team-a"}
 				existing := &models.CreatedTeamAPIKey{ID: uuid.New(), Key: uuid.NewString(), Name: "existing", Team: teamA}
 				storage.storeKey(existing)
 
@@ -626,7 +674,7 @@ func TestSecretKeyStorage_TeamLifecycle(t *testing.T) {
 				storage, _ := newSecretStorageForTest(t, map[string][]byte{})
 				admin := &models.CreatedTeamAPIKey{ID: AdminKeyID, Key: "admin", Name: "admin", Team: models.AdminTeam()}
 				storage.storeKey(admin)
-				teamA := &models.Team{ID: uuid.New(), Name: "team-a"}
+				teamA := &models.Team{Name: "team-a"}
 				storage.storeKey(&models.CreatedTeamAPIKey{ID: uuid.New(), Key: uuid.NewString(), Name: "a1", Team: teamA})
 				storage.storeKey(&models.CreatedTeamAPIKey{ID: uuid.New(), Key: uuid.NewString(), Name: "a2", Team: teamA})
 
@@ -651,8 +699,8 @@ func TestSecretKeyStorage_TeamLifecycle(t *testing.T) {
 			name: "normal caller lists own team only",
 			run: func(t *testing.T) error {
 				storage, _ := newSecretStorageForTest(t, map[string][]byte{})
-				teamA := &models.Team{ID: uuid.New(), Name: "team-a"}
-				teamB := &models.Team{ID: uuid.New(), Name: "team-b"}
+				teamA := &models.Team{Name: "team-a"}
+				teamB := &models.Team{Name: "team-b"}
 				caller := &models.CreatedTeamAPIKey{ID: uuid.New(), Key: uuid.NewString(), Name: "caller", Team: teamA}
 				storage.storeKey(caller)
 				storage.storeKey(&models.CreatedTeamAPIKey{ID: uuid.New(), Key: uuid.NewString(), Name: "other", Team: teamB})
@@ -666,14 +714,14 @@ func TestSecretKeyStorage_TeamLifecycle(t *testing.T) {
 			},
 		},
 		{
-			name: "delete last admin key is forbidden",
+			name: "delete well-known admin key is forbidden",
 			run: func(t *testing.T) error {
 				storage, _ := newSecretStorageForTest(t, map[string][]byte{})
 				admin := &models.CreatedTeamAPIKey{ID: AdminKeyID, Key: "admin", Name: "admin", Team: models.AdminTeam()}
 				storage.storeKey(admin)
 				return storage.DeleteKey(context.Background(), admin)
 			},
-			expectError: "last active admin",
+			expectError: "well-known admin api-key cannot be deleted",
 		},
 	}
 
@@ -695,14 +743,13 @@ func TestSecretKeyStorage_IdxByTeamCache(t *testing.T) {
 			name: "storeKey populates idxByTeam",
 			run: func(t *testing.T) {
 				storage, _ := newSecretStorageForTest(t, map[string][]byte{})
-				teamA := &models.Team{ID: uuid.New(), Name: "team-a"}
+				teamA := &models.Team{Name: "team-a"}
 				storage.storeKey(&models.CreatedTeamAPIKey{ID: uuid.New(), Key: uuid.NewString(), Name: "k1", Team: teamA})
 
 				found, ok, err := storage.FindTeamByName(context.Background(), "team-a")
 				require.NoError(t, err)
 				require.True(t, ok)
-				require.Equal(t, teamA.ID, found.ID)
-				require.Equal(t, teamA.Name, found.Name)
+				require.Equal(t, teamA, found)
 			},
 		},
 		{
@@ -718,7 +765,7 @@ func TestSecretKeyStorage_IdxByTeamCache(t *testing.T) {
 			name: "FindTeamByName returns clone not reference",
 			run: func(t *testing.T) {
 				storage, _ := newSecretStorageForTest(t, map[string][]byte{})
-				teamA := &models.Team{ID: uuid.New(), Name: "team-a"}
+				teamA := &models.Team{Name: "team-a"}
 				storage.storeKey(&models.CreatedTeamAPIKey{ID: uuid.New(), Key: uuid.NewString(), Name: "k1", Team: teamA})
 
 				found1, _, _ := storage.FindTeamByName(context.Background(), "team-a")
@@ -731,7 +778,7 @@ func TestSecretKeyStorage_IdxByTeamCache(t *testing.T) {
 		{
 			name: "refresh cleans stale teams from idxByTeam",
 			run: func(t *testing.T) {
-				teamA := &models.Team{ID: uuid.New(), Name: "team-a"}
+				teamA := &models.Team{Name: "team-a"}
 				key1 := &models.CreatedTeamAPIKey{ID: uuid.New(), Key: uuid.NewString(), Name: "k1", Team: teamA}
 				b, err := json.Marshal(key1)
 				require.NoError(t, err)
@@ -744,7 +791,7 @@ func TestSecretKeyStorage_IdxByTeamCache(t *testing.T) {
 				require.True(t, ok)
 
 				// Manually insert a stale team
-				storage.idxByTeam.Store("stale-team", &models.Team{ID: uuid.New(), Name: "stale-team"})
+				storage.idxByTeam.Store("stale-team", &models.Team{Name: "stale-team"})
 
 				// After refresh, stale team should be cleaned
 				require.NoError(t, storage.refresh(context.Background(), c))
@@ -760,7 +807,7 @@ func TestSecretKeyStorage_IdxByTeamCache(t *testing.T) {
 			name: "delete key does not immediately remove team from cache",
 			run: func(t *testing.T) {
 				storage, _ := newSecretStorageForTest(t, map[string][]byte{})
-				teamA := &models.Team{ID: uuid.New(), Name: "team-a"}
+				teamA := &models.Team{Name: "team-a"}
 				key1 := &models.CreatedTeamAPIKey{ID: uuid.New(), Key: uuid.NewString(), Name: "k1", Team: teamA}
 				storage.storeKey(key1)
 
@@ -776,14 +823,14 @@ func TestSecretKeyStorage_IdxByTeamCache(t *testing.T) {
 			name: "multiple keys same team share one idxByTeam entry",
 			run: func(t *testing.T) {
 				storage, _ := newSecretStorageForTest(t, map[string][]byte{})
-				teamA := &models.Team{ID: uuid.New(), Name: "team-a"}
+				teamA := &models.Team{Name: "team-a"}
 				storage.storeKey(&models.CreatedTeamAPIKey{ID: uuid.New(), Key: uuid.NewString(), Name: "k1", Team: teamA})
 				storage.storeKey(&models.CreatedTeamAPIKey{ID: uuid.New(), Key: uuid.NewString(), Name: "k2", Team: teamA})
 
 				found, ok, err := storage.FindTeamByName(context.Background(), "team-a")
 				require.NoError(t, err)
 				require.True(t, ok)
-				require.Equal(t, teamA.ID, found.ID)
+				require.Equal(t, teamA, found)
 			},
 		},
 	}

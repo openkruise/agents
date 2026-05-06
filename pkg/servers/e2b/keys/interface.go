@@ -25,7 +25,7 @@ import (
 )
 
 var (
-	ErrLastAdminKey = errors.New("cannot delete last active admin team api-key")
+	ErrAdminKeyUndeletable = errors.New("the well-known admin api-key cannot be deleted")
 )
 
 // CreateKeyOptions describes the target key display name and optional target team.

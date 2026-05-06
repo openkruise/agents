@@ -18,6 +18,7 @@ package e2b
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"testing"
 
@@ -125,7 +126,12 @@ func TestListTeams(t *testing.T) {
 			for _, team := range resp.Body {
 				gotNames = append(gotNames, team.Name)
 				assert.Empty(t, team.APIKey)
+				payload, err := json.Marshal(team)
+				require.NoError(t, err)
+				assert.Contains(t, string(payload), `"name":`)
 				assert.NotEmpty(t, team.TeamID)
+				assert.Contains(t, string(payload), `"teamID":`)
+				assert.NotContains(t, string(payload), `"id":`)
 			}
 			assert.ElementsMatch(t, tt.expectNames, gotNames)
 		})
@@ -207,6 +213,9 @@ func TestCreateAPIKeyPermissionMiddleware(t *testing.T) {
 	teamAKey, err := controller.keys.CreateKey(ctx, adminUser, keys.CreateKeyOptions{Name: "team-a-key", TeamName: "team-a"})
 	require.NoError(t, err)
 	require.NoError(t, fc.Create(t.Context(), &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{Name: "team-a"},
+	}))
+	require.NoError(t, fc.Create(t.Context(), &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{Name: "team-c"},
 	}))
 
@@ -245,6 +254,13 @@ func TestCreateAPIKeyPermissionMiddleware(t *testing.T) {
 			request:    models.NewTeamAPIKey{Name: "new-team", TeamName: "team-c"},
 			expectCode: http.StatusCreated,
 			expectTeam: "team-c",
+		},
+		{
+			name:       "admin without teamName creates admin key without namespace",
+			user:       adminUser,
+			request:    models.NewTeamAPIKey{Name: "admin-team-default"},
+			expectCode: http.StatusCreated,
+			expectTeam: models.AdminTeamName,
 		},
 		{
 			name:        "admin targeting missing namespace fails",
@@ -347,11 +363,11 @@ func TestDeleteAPIKeyPermissionMiddleware(t *testing.T) {
 			expectMiddlewareError: true,
 		},
 		{
-			name:        "last admin key deletion is forbidden",
+			name:        "well-known admin key deletion is forbidden",
 			user:        adminUser,
 			targetID:    keys.AdminKeyID.String(),
 			expectCode:  http.StatusForbidden,
-			expectError: "last active admin",
+			expectError: "well-known admin api-key cannot be deleted",
 		},
 	}
 

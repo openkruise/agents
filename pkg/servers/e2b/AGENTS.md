@@ -56,6 +56,12 @@ Every E2B route is registered twice via `RegisterE2BRoute`: once for the native 
 3. Sandbox ownership is verified per-request: the API key owner must match the sandbox owner.
 4. Admin-only endpoints (API key management) chain `CheckAdminKey` after `CheckApiKey`.
 
+### Team Identity
+- API-key teams are identified only by team name. The team name maps to a Kubernetes namespace, whose uniqueness is the
+  isolation boundary.
+- Team UUIDs in API models, MySQL `teams.uid`, Secret payloads, and `/teams` responses are display-only compatibility
+  metadata. They must not be used for storage lookup, authorization, namespace selection, or team equality checks.
+
 ### List And Delete Authorization
 - Any resource returned by a List endpoint should be deletable by the same caller unless deletion is explicitly unsupported
   or blocked by a documented safety rule.
@@ -69,8 +75,8 @@ Every E2B route is registered twice via `RegisterE2BRoute`: once for the native 
 - The shared E2B delete path must distinguish SandboxSet-backed templates from Checkpoint-backed snapshots before calling
   checkpoint deletion. For admin callers, this SandboxSet check must cover the same cross-namespace visibility used by
   `ListTemplates`.
-- `ListAPIKeys` is team-scoped. A caller may delete listed keys in the same team, except for safety rules such as
-  refusing to delete the last admin key.
+- `ListAPIKeys` is team-scoped. A caller may delete listed keys in the same team, except when blocked by storage-level
+  safety rules.
 
 ### Timeout Semantics
 - **Pause**: sets timeout far into the future (1000 years) so paused sandboxes are kept indefinitely.

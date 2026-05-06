@@ -24,7 +24,6 @@ import (
 	"k8s.io/klog/v2"
 
 	"github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
@@ -146,17 +145,7 @@ func (m *SandboxManager) ListCheckpoints(ctx context.Context, opts infra.SelectS
 
 func (m *SandboxManager) DeleteCheckpoint(ctx context.Context, user string, opts infra.DeleteCheckpointOptions) error {
 	log := klog.FromContext(ctx).WithValues("checkpointID", opts.CheckpointID)
-	cp, err := m.infra.GetCache().GetCheckpoint(ctx, cache.GetCheckpointOptions{
-		Namespace:    opts.Namespace,
-		CheckpointID: opts.CheckpointID,
-	})
-	if err != nil {
-		log.Error(err, "failed to get checkpoint before delete")
-		return errors.NewError(errors.ErrorNotFound, err.Error())
-	}
-	if user != "" && cp.GetAnnotations()[v1alpha1.AnnotationOwner] != user {
-		return errors.NewError(errors.ErrorNotAllowed, fmt.Sprintf("checkpoint %s is not owned by user %s", opts.CheckpointID, user))
-	}
+	opts.User = user
 	if err := m.infra.DeleteCheckpoint(ctx, opts); err != nil {
 		log.Error(err, "failed to delete checkpoint")
 		return err

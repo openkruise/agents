@@ -51,6 +51,9 @@ func (sc *Controller) ListAPIKeys(r *http.Request) (web.ApiResponse[[]*models.Te
 func (sc *Controller) CreateAPIKey(r *http.Request) (web.ApiResponse[*models.CreatedTeamAPIKey], *web.ApiError) {
 	request, ok := GetNewAPIKeyRequestFromContext(r.Context())
 	if !ok {
+		// When CheckCreateAPIKeyPermission middleware is configured, it pre-decodes the request body
+		// and stores it in context. If the middleware is not in the chain (e.g. keys storage is nil),
+		// we fall back to decoding the body directly here. (Which is impossible currently, just in defense for future changes)
 		var decoded models.NewTeamAPIKey
 		if err := json.NewDecoder(r.Body).Decode(&decoded); err != nil {
 			return web.ApiResponse[*models.CreatedTeamAPIKey]{}, &web.ApiError{
@@ -115,7 +118,7 @@ func (sc *Controller) DeleteAPIKey(r *http.Request) (web.ApiResponse[struct{}], 
 	key := GetTargetAPIKeyFromContext(ctx)
 	if key != nil {
 		if err := sc.keys.DeleteKey(ctx, key); err != nil {
-			if errors.Is(err, keys.ErrLastAdminKey) {
+			if errors.Is(err, keys.ErrAdminKeyUndeletable) {
 				return web.ApiResponse[struct{}]{}, &web.ApiError{
 					Code:    http.StatusForbidden,
 					Message: err.Error(),

@@ -271,6 +271,10 @@ func (k *secretKeyStorage) createKeyInSecret(ctx context.Context, id string, api
 	return &keyToStore, nil
 }
 
+// findTeamByNameInSecret scans the raw secret data instead of the in-memory cache
+// (idxByTeam) to guarantee consistency with the exact secret revision being updated.
+// During retryCreateKey, each retry re-reads the secret from the API server; using
+// the cache here could miss teams created by other replicas between retries.
 func findTeamByNameInSecret(secret *corev1.Secret, teamName string) (*models.Team, bool) {
 	for _, bytes := range secret.Data {
 		var apiKey models.CreatedTeamAPIKey
@@ -353,9 +357,8 @@ func (k *secretKeyStorage) DeleteKey(ctx context.Context, key *models.CreatedTea
 	if key == nil {
 		return nil
 	}
-	// The last key of admin team cannot be deleted
-	if TeamForKey(key).ID == models.AdminTeamID && k.activeKeyCountForTeam(models.AdminTeamID) <= 1 {
-		return ErrLastAdminKey
+	if key.ID == AdminKeyID {
+		return ErrAdminKeyUndeletable
 	}
 	err := k.retryUpdateSecret(ctx, key.ID.String(), nil)
 	if err != nil {
@@ -375,7 +378,7 @@ func (k *secretKeyStorage) ListByOwner(ctx context.Context, owner uuid.UUID) ([]
 	var result []*models.TeamAPIKey
 	k.idxByID.Range(func(_, value any) bool {
 		apikey := value.(*models.CreatedTeamAPIKey)
-		if TeamForKey(apikey).ID == ownerTeam.ID {
+		if TeamForKey(apikey).Name == ownerTeam.Name {
 			result = append(result, &models.TeamAPIKey{
 				CreatedAt: apikey.CreatedAt,
 				ID:        apikey.ID,
@@ -395,11 +398,11 @@ func (k *secretKeyStorage) ListTeams(_ context.Context, user *models.CreatedTeam
 		return nil, nil
 	}
 	userTeam := TeamForKey(user)
-	isAdmin := userTeam.ID == models.AdminTeamID
+	isAdmin := userTeam.Name == models.AdminTeamName
 	teamsByName := map[string]*models.Team{}
 	k.idxByID.Range(func(_, value any) bool {
 		team := TeamForKey(value.(*models.CreatedTeamAPIKey))
-		if !isAdmin && team.ID != userTeam.ID {
+		if !isAdmin && team.Name != userTeam.Name {
 			return true
 		}
 		if _, exists := teamsByName[team.Name]; !exists {
@@ -409,7 +412,7 @@ func (k *secretKeyStorage) ListTeams(_ context.Context, user *models.CreatedTeam
 	})
 	result := make([]*models.ListedTeam, 0, len(teamsByName))
 	for _, team := range teamsByName {
-		result = append(result, listedTeam(team, team.ID == userTeam.ID))
+		result = append(result, listedTeam(team, team.Name == userTeam.Name))
 	}
 	return result, nil
 }
@@ -420,15 +423,4 @@ func (k *secretKeyStorage) FindTeamByName(_ context.Context, teamName string) (*
 		return nil, false, nil
 	}
 	return cloneTeam(value.(*models.Team)), true, nil
-}
-
-func (k *secretKeyStorage) activeKeyCountForTeam(teamID uuid.UUID) int {
-	count := 0
-	k.idxByID.Range(func(_, value any) bool {
-		if TeamForKey(value.(*models.CreatedTeamAPIKey)).ID == teamID {
-			count++
-		}
-		return true
-	})
-	return count
 }

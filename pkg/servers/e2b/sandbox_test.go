@@ -35,7 +35,6 @@ func TestReplacer(t *testing.T) {
 
 func TestGetNamespaceOfUser(t *testing.T) {
 	controller := &Controller{}
-	normalTeamID := uuid.New()
 
 	tests := []struct {
 		name      string
@@ -63,23 +62,21 @@ func TestGetNamespaceOfUser(t *testing.T) {
 				ID:   uuid.New(),
 				Name: "admin-name-mismatched-id",
 				Team: &models.Team{
-					ID:   uuid.New(),
 					Name: models.AdminTeamName,
 				},
 			},
 			namespace: "",
 		},
 		{
-			name: "admin team id with mismatched name keeps cluster scope",
+			name: "non-admin team name maps to team namespace",
 			user: &models.CreatedTeamAPIKey{
 				ID:   uuid.New(),
-				Name: "admin-id-mismatched-name",
+				Name: "not-admin-user",
 				Team: &models.Team{
-					ID:   models.AdminTeamID,
 					Name: "not-admin",
 				},
 			},
-			namespace: "",
+			namespace: "not-admin",
 		},
 		{
 			name: "normal team maps to team namespace",
@@ -87,7 +84,6 @@ func TestGetNamespaceOfUser(t *testing.T) {
 				ID:   uuid.New(),
 				Name: "team-a-user",
 				Team: &models.Team{
-					ID:   normalTeamID,
 					Name: "team-a",
 				},
 			},

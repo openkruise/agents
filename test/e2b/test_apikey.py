@@ -99,20 +99,26 @@ def test_api_keys_lifecycle(sandbox_context):
             if not isinstance(t, dict):
                 invalid_team_items.append({"index": idx, "type": type(t).__name__, "value": t})
                 continue
-            has_team_id = "teamID" in t or "id" in t
             missing_fields = []
-            if not has_team_id:
-                missing_fields.append("teamID/id")
             if "name" not in t:
                 missing_fields.append("name")
+            if "teamID" not in t:
+                missing_fields.append("teamID")
+            unexpected_fields = [field for field in ("id",) if field in t]
             if missing_fields:
                 invalid_team_items.append({
                     "index": idx,
                     "missing_fields": missing_fields,
                     "value": t,
                 })
+            if unexpected_fields:
+                invalid_team_items.append({
+                    "index": idx,
+                    "unexpected_fields": unexpected_fields,
+                    "value": t,
+                })
         assert not invalid_team_items, (
-            "Each team item must contain both teamID (or id) and name. "
+            "Each team item must contain name/teamID and must not contain id. "
             f"Invalid items: {invalid_team_items[:3]} "
             f"(showing 3 of {len(invalid_team_items)} invalid entries). "
             f"Raw teams response: {teams_resp.text}"
