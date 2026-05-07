@@ -31,6 +31,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/agent-runtime/common"
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
 	"github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/features"
@@ -317,9 +318,33 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 	}
 
 	if !claim.Spec.SkipInitRuntime {
-		opts.InitRuntime = &config.InitRuntimeOptions{
-			EnvVars:     claim.Spec.EnvVars,
-			AccessToken: uuid.NewString(),
+		hasAgentRuntime := false
+		// Check condition A: Runtimes field contains agent-runtime
+		for _, rt := range sandboxSet.Spec.Runtimes {
+			if rt.Name == agentsv1alpha1.RuntimeConfigForInjectAgentRuntime {
+				hasAgentRuntime = true
+				break
+			}
+		}
+		// Check condition B: initContainer named "runtime"
+		// TODO support sandboxTemplateRef
+		if !hasAgentRuntime && sandboxSet.Spec.Template != nil {
+			for _, c := range sandboxSet.Spec.Template.Spec.InitContainers {
+				if c.Name == common.RuntimeInitContainerName {
+					hasAgentRuntime = true
+					break
+				}
+			}
+		}
+
+		if hasAgentRuntime {
+			opts.InitRuntime = &config.InitRuntimeOptions{
+				EnvVars:     claim.Spec.EnvVars,
+				AccessToken: uuid.NewString(),
+			}
+		} else {
+			logger.Error(fmt.Errorf("agent-runtime not configured in SandboxSet"), "SkipInitRuntime is false but no agent-runtime found, skip InitRuntime",
+				"sandboxSet", klog.KObj(sandboxSet), "claim", klog.KObj(claim))
 		}
 	}
 	if len(claim.Spec.DynamicVolumesMount) > 0 {

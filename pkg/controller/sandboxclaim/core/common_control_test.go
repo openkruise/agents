@@ -1147,6 +1147,11 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 					Name:      "test-template",
 					Namespace: "default",
 				},
+				Spec: agentsv1alpha1.SandboxSetSpec{
+					Runtimes: []agentsv1alpha1.RuntimeConfig{
+						{Name: agentsv1alpha1.RuntimeConfigForInjectAgentRuntime},
+					},
+				},
 			},
 			expectError: false,
 			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
@@ -1205,6 +1210,142 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 			expectError: false,
 			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
 				assert.Nil(t, opts.InitRuntime, "InitRuntime should be nil when SkipInitRuntime is true, even with EnvVars")
+			},
+		},
+		{
+			name: "SkipInitRuntime=false with Runtimes agent-runtime should set InitRuntime",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim-runtimes",
+					Namespace: "default",
+					UID:       "test-uid-runtimes",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "test-template",
+					EnvVars: map[string]string{
+						"ENV1": "val1",
+					},
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template",
+					Namespace: "default",
+				},
+				Spec: agentsv1alpha1.SandboxSetSpec{
+					Runtimes: []agentsv1alpha1.RuntimeConfig{
+						{Name: agentsv1alpha1.RuntimeConfigForInjectAgentRuntime},
+					},
+				},
+			},
+			expectError: false,
+			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+				require.NotNil(t, opts.InitRuntime, "InitRuntime should not be nil when Runtimes contains agent-runtime")
+				assert.Equal(t, "val1", opts.InitRuntime.EnvVars["ENV1"], "InitRuntime.EnvVars[ENV1] mismatch")
+				assert.NotEmpty(t, opts.InitRuntime.AccessToken, "InitRuntime.AccessToken should not be empty")
+			},
+		},
+		{
+			name: "SkipInitRuntime=false with runtime initContainer should set InitRuntime",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim-initcontainer",
+					Namespace: "default",
+					UID:       "test-uid-initcontainer",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "test-template",
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template",
+					Namespace: "default",
+				},
+				Spec: agentsv1alpha1.SandboxSetSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								InitContainers: []corev1.Container{
+									{Name: "runtime", Image: "test-image"},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectError: false,
+			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+				require.NotNil(t, opts.InitRuntime, "InitRuntime should not be nil when initContainer named runtime exists")
+				assert.NotEmpty(t, opts.InitRuntime.AccessToken, "InitRuntime.AccessToken should not be empty")
+			},
+		},
+		{
+			name: "SkipInitRuntime=false without runtime config should skip InitRuntime",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim-no-runtime",
+					Namespace: "default",
+					UID:       "test-uid-no-runtime",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "test-template",
+					EnvVars: map[string]string{
+						"KEY1": "value1",
+					},
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template",
+					Namespace: "default",
+				},
+			},
+			expectError: false,
+			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+				assert.Nil(t, opts.InitRuntime, "InitRuntime should be nil when no agent-runtime is configured")
+			},
+		},
+		{
+			name: "SkipInitRuntime=false with both Runtimes and initContainer should set InitRuntime",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim-both",
+					Namespace: "default",
+					UID:       "test-uid-both",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "test-template",
+					EnvVars: map[string]string{
+						"BOTH_KEY": "both_val",
+					},
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template",
+					Namespace: "default",
+				},
+				Spec: agentsv1alpha1.SandboxSetSpec{
+					Runtimes: []agentsv1alpha1.RuntimeConfig{
+						{Name: agentsv1alpha1.RuntimeConfigForInjectAgentRuntime},
+					},
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								InitContainers: []corev1.Container{
+									{Name: "runtime", Image: "test-image"},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectError: false,
+			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+				require.NotNil(t, opts.InitRuntime, "InitRuntime should not be nil when both Runtimes and initContainer are configured")
+				assert.Equal(t, "both_val", opts.InitRuntime.EnvVars["BOTH_KEY"], "InitRuntime.EnvVars[BOTH_KEY] mismatch")
+				assert.NotEmpty(t, opts.InitRuntime.AccessToken, "InitRuntime.AccessToken should not be empty")
 			},
 		},
 	}
@@ -1322,6 +1463,11 @@ func TestBuildClaimOptions_CSIMount_ConfigValidation(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-template",
 					Namespace: "default",
+				},
+				Spec: agentsv1alpha1.SandboxSetSpec{
+					Runtimes: []agentsv1alpha1.RuntimeConfig{
+						{Name: agentsv1alpha1.RuntimeConfigForInjectAgentRuntime},
+					},
 				},
 			},
 			expectError: false,
@@ -1505,6 +1651,11 @@ func TestBuildClaimOptions_CSIMount_ConfigValidation(t *testing.T) {
 					Name:      "test-template",
 					Namespace: "default",
 				},
+				Spec: agentsv1alpha1.SandboxSetSpec{
+					Runtimes: []agentsv1alpha1.RuntimeConfig{
+						{Name: agentsv1alpha1.RuntimeConfigForInjectAgentRuntime},
+					},
+				},
 			},
 			expectError:        false,
 			expectedMountCount: 1,
@@ -1547,6 +1698,11 @@ func TestBuildClaimOptions_CSIMount_ConfigValidation(t *testing.T) {
 					Name:      "test-template",
 					Namespace: "default",
 				},
+				Spec: agentsv1alpha1.SandboxSetSpec{
+					Runtimes: []agentsv1alpha1.RuntimeConfig{
+						{Name: agentsv1alpha1.RuntimeConfigForInjectAgentRuntime},
+					},
+				},
 			},
 			expectError:        false,
 			expectedMountCount: 3,
@@ -1582,6 +1738,11 @@ func TestBuildClaimOptions_CSIMount_ConfigValidation(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-template",
 					Namespace: "default",
+				},
+				Spec: agentsv1alpha1.SandboxSetSpec{
+					Runtimes: []agentsv1alpha1.RuntimeConfig{
+						{Name: agentsv1alpha1.RuntimeConfigForInjectAgentRuntime},
+					},
 				},
 			},
 			expectError:        false,
@@ -1732,6 +1893,11 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 					Name:      "test-template",
 					Namespace: "default",
 				},
+				Spec: agentsv1alpha1.SandboxSetSpec{
+					Runtimes: []agentsv1alpha1.RuntimeConfig{
+						{Name: agentsv1alpha1.RuntimeConfigForInjectAgentRuntime},
+					},
+				},
 			},
 			expectError:        false,
 			expectedMountCount: 1,
@@ -1774,6 +1940,11 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 					Name:      "test-template",
 					Namespace: "default",
 				},
+				Spec: agentsv1alpha1.SandboxSetSpec{
+					Runtimes: []agentsv1alpha1.RuntimeConfig{
+						{Name: agentsv1alpha1.RuntimeConfigForInjectAgentRuntime},
+					},
+				},
 			},
 			expectError:        false,
 			expectedMountCount: 3,
@@ -1809,6 +1980,11 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-template",
 					Namespace: "default",
+				},
+				Spec: agentsv1alpha1.SandboxSetSpec{
+					Runtimes: []agentsv1alpha1.RuntimeConfig{
+						{Name: agentsv1alpha1.RuntimeConfigForInjectAgentRuntime},
+					},
 				},
 			},
 			expectError:        false,
@@ -1846,6 +2022,11 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-template",
 					Namespace: "default",
+				},
+				Spec: agentsv1alpha1.SandboxSetSpec{
+					Runtimes: []agentsv1alpha1.RuntimeConfig{
+						{Name: agentsv1alpha1.RuntimeConfigForInjectAgentRuntime},
+					},
 				},
 			},
 			expectError:        false,
@@ -1886,6 +2067,11 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 					Name:      "test-template",
 					Namespace: "default",
 				},
+				Spec: agentsv1alpha1.SandboxSetSpec{
+					Runtimes: []agentsv1alpha1.RuntimeConfig{
+						{Name: agentsv1alpha1.RuntimeConfigForInjectAgentRuntime},
+					},
+				},
 			},
 			expectError:        false,
 			expectedMountCount: 1,
@@ -1919,6 +2105,11 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-template",
 					Namespace: "default",
+				},
+				Spec: agentsv1alpha1.SandboxSetSpec{
+					Runtimes: []agentsv1alpha1.RuntimeConfig{
+						{Name: agentsv1alpha1.RuntimeConfigForInjectAgentRuntime},
+					},
 				},
 			},
 			expectError:        false,
@@ -1966,6 +2157,11 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 					Name:      "test-template",
 					Namespace: "default",
 				},
+				Spec: agentsv1alpha1.SandboxSetSpec{
+					Runtimes: []agentsv1alpha1.RuntimeConfig{
+						{Name: agentsv1alpha1.RuntimeConfigForInjectAgentRuntime},
+					},
+				},
 			},
 			expectError:        false,
 			expectedMountCount: 2,
@@ -2009,6 +2205,11 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 					Name:      "test-template",
 					Namespace: "default",
 				},
+				Spec: agentsv1alpha1.SandboxSetSpec{
+					Runtimes: []agentsv1alpha1.RuntimeConfig{
+						{Name: agentsv1alpha1.RuntimeConfigForInjectAgentRuntime},
+					},
+				},
 			},
 			expectError:   true,
 			errorContains: "sub path must not traverse to parent directory",
@@ -2038,6 +2239,11 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-template",
 					Namespace: "default",
+				},
+				Spec: agentsv1alpha1.SandboxSetSpec{
+					Runtimes: []agentsv1alpha1.RuntimeConfig{
+						{Name: agentsv1alpha1.RuntimeConfigForInjectAgentRuntime},
+					},
 				},
 			},
 			expectError:        false,
@@ -2083,6 +2289,11 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 					Name:      "test-template",
 					Namespace: "default",
 				},
+				Spec: agentsv1alpha1.SandboxSetSpec{
+					Runtimes: []agentsv1alpha1.RuntimeConfig{
+						{Name: agentsv1alpha1.RuntimeConfigForInjectAgentRuntime},
+					},
+				},
 			},
 			expectError:        false,
 			expectedMountCount: 2,
@@ -2120,6 +2331,11 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-template",
 					Namespace: "default",
+				},
+				Spec: agentsv1alpha1.SandboxSetSpec{
+					Runtimes: []agentsv1alpha1.RuntimeConfig{
+						{Name: agentsv1alpha1.RuntimeConfigForInjectAgentRuntime},
+					},
 				},
 			},
 			expectError:   true,
