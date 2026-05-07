@@ -29,7 +29,7 @@ var (
 			Help:        "Total number of times a SandboxSet has been claimed by SandboxClaims",
 			ConstLabels: prometheus.Labels{"source": "k8s"},
 		},
-		[]string{"namespace", "name", "result"},
+		[]string{"namespace", "result"},
 	)
 
 	// sandboxClaimExpiredTotal tracks the cumulative number of SandboxClaims deleted due to TTL expiration.
@@ -39,7 +39,7 @@ var (
 			Help:        "Total number of SandboxClaims deleted due to TTL expiration",
 			ConstLabels: prometheus.Labels{"source": "k8s"},
 		},
-		[]string{"namespace", "name"},
+		[]string{"namespace"},
 	)
 )
 
@@ -50,7 +50,7 @@ func init() {
 	)
 }
 
-// DeleteSandboxClaimCounterMetrics removes counter metrics associated with a deleted SandboxClaim.
+// DeleteSandboxClaimCounterMetrics is a no-op since counter metrics are at namespace level.
 func DeleteSandboxClaimCounterMetrics(namespace, name string) {
-	sandboxClaimExpiredTotal.DeleteLabelValues(namespace, name)
+	// Counter metrics at namespace level are not deleted per-claim
 }

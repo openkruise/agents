@@ -17,6 +17,7 @@ limitations under the License.
 package sandbox
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -931,21 +932,21 @@ func TestRecordSandboxMetrics_InfoPartialFields(t *testing.T) {
 	}
 }
 
-// creationToReadyHistogramSum collects the current sample sum from the creation-to-ready HistogramVec for a given namespace/name.
-func creationToReadyHistogramSum(t *testing.T, namespace, name string) float64 {
+// creationToReadyHistogramSum collects the current sample sum from the creation-to-ready HistogramVec for a given namespace.
+func creationToReadyHistogramSum(t *testing.T, namespace string) float64 {
 	t.Helper()
 	m := &dto.Metric{}
-	if err := sandboxCreationDuration.WithLabelValues(namespace, name).(prometheus.Metric).Write(m); err != nil {
+	if err := sandboxCreationDuration.WithLabelValues(namespace).(prometheus.Metric).Write(m); err != nil {
 		t.Fatalf("failed to write histogram metric: %v", err)
 	}
 	return m.GetHistogram().GetSampleSum()
 }
 
-// inplaceUpdateHistogramSum collects the current sample sum from the inplace-update HistogramVec for a given namespace/name.
-func inplaceUpdateHistogramSum(t *testing.T, namespace, name string) float64 {
+// inplaceUpdateHistogramSum collects the current sample sum from the inplace-update HistogramVec for a given namespace.
+func inplaceUpdateHistogramSum(t *testing.T, namespace string) float64 {
 	t.Helper()
 	m := &dto.Metric{}
-	if err := sandboxInplaceUpdateDuration.WithLabelValues(namespace, name).(prometheus.Metric).Write(m); err != nil {
+	if err := sandboxInplaceUpdateDuration.WithLabelValues(namespace).(prometheus.Metric).Write(m); err != nil {
 		t.Fatalf("failed to write histogram metric: %v", err)
 	}
 	return m.GetHistogram().GetSampleSum()
@@ -955,7 +956,7 @@ func TestSandboxCreationToReadyDuration_ObservedOnce(t *testing.T) {
 	now := time.Now()
 	creationTime := now.Add(-45 * time.Second)
 	readyTime := metav1.NewTime(now)
-	ns, name := "default", "ready-duration-sandbox"
+	ns, name := "creation-dur-observed", "ready-duration-sandbox"
 
 	sandbox := &agentsv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
@@ -975,11 +976,11 @@ func TestSandboxCreationToReadyDuration_ObservedOnce(t *testing.T) {
 		},
 	}
 
-	beforeSum := creationToReadyHistogramSum(t, ns, name)
+	beforeSum := creationToReadyHistogramSum(t, ns)
 
 	// First call should observe
 	recordSandboxMetrics(sandbox)
-	afterFirstSum := creationToReadyHistogramSum(t, ns, name)
+	afterFirstSum := creationToReadyHistogramSum(t, ns)
 	expectedDuration := readyTime.Sub(creationTime).Seconds()
 	if delta := afterFirstSum - beforeSum; delta < expectedDuration-0.01 || delta > expectedDuration+0.01 {
 		t.Errorf("first observation: sum delta = %v, want ~%v", delta, expectedDuration)
@@ -987,17 +988,17 @@ func TestSandboxCreationToReadyDuration_ObservedOnce(t *testing.T) {
 
 	// Second call should NOT observe (deduplicated)
 	recordSandboxMetrics(sandbox)
-	afterSecondSum := creationToReadyHistogramSum(t, ns, name)
+	afterSecondSum := creationToReadyHistogramSum(t, ns)
 	if afterSecondSum != afterFirstSum {
 		t.Errorf("second call should not change sum: got %v, want %v", afterSecondSum, afterFirstSum)
 	}
 
 	// Delete and re-record should observe again
 	deleteSandboxMetrics(ns, name)
-	// After DeleteLabelValues, the histogram series is reset; read the new baseline.
-	baselineAfterDelete := creationToReadyHistogramSum(t, ns, name)
+	// After delete, the namespace-level histogram still exists; read the new baseline.
+	baselineAfterDelete := creationToReadyHistogramSum(t, ns)
 	recordSandboxMetrics(sandbox)
-	afterReObserve := creationToReadyHistogramSum(t, ns, name)
+	afterReObserve := creationToReadyHistogramSum(t, ns)
 	if delta := afterReObserve - baselineAfterDelete; delta < expectedDuration-0.01 || delta > expectedDuration+0.01 {
 		t.Errorf("re-observation after delete: sum delta = %v, want ~%v", delta, expectedDuration)
 	}
@@ -1007,7 +1008,7 @@ func TestSandboxCreationToReadyDuration_ObservedOnce(t *testing.T) {
 
 func TestSandboxCreationToReadyDuration_NotObservedWhenNotReady(t *testing.T) {
 	now := time.Now()
-	ns, name := "default", "notready-duration-sandbox"
+	ns, name := "creation-dur-notready", "notready-duration-sandbox"
 	sandbox := &agentsv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:              name,
@@ -1026,9 +1027,9 @@ func TestSandboxCreationToReadyDuration_NotObservedWhenNotReady(t *testing.T) {
 		},
 	}
 
-	beforeSum := creationToReadyHistogramSum(t, ns, name)
+	beforeSum := creationToReadyHistogramSum(t, ns)
 	recordSandboxMetrics(sandbox)
-	afterSum := creationToReadyHistogramSum(t, ns, name)
+	afterSum := creationToReadyHistogramSum(t, ns)
 
 	if afterSum != beforeSum {
 		t.Errorf("not-ready should not observe histogram: sum changed from %v to %v", beforeSum, afterSum)
@@ -1040,7 +1041,7 @@ func TestSandboxInplaceUpdateDuration_ObservedOnce(t *testing.T) {
 	now := time.Now()
 	startTime := now.Add(-20 * time.Second)
 	endTime := now
-	ns, name := "default", "inplace-duration-sandbox"
+	ns, name := "inplace-dur-observed", "inplace-duration-sandbox"
 
 	// Step 1: Record with InplaceUpdate=False (stores start time)
 	sandbox := &agentsv1alpha1.Sandbox{
@@ -1061,11 +1062,11 @@ func TestSandboxInplaceUpdateDuration_ObservedOnce(t *testing.T) {
 		},
 	}
 
-	beforeSum := inplaceUpdateHistogramSum(t, ns, name)
+	beforeSum := inplaceUpdateHistogramSum(t, ns)
 	recordSandboxMetrics(sandbox)
 
 	// No histogram observation yet (only False recorded)
-	afterFalseSum := inplaceUpdateHistogramSum(t, ns, name)
+	afterFalseSum := inplaceUpdateHistogramSum(t, ns)
 	if afterFalseSum != beforeSum {
 		t.Errorf("InplaceUpdate=False should not observe histogram: sum changed from %v to %v", beforeSum, afterFalseSum)
 	}
@@ -1075,7 +1076,7 @@ func TestSandboxInplaceUpdateDuration_ObservedOnce(t *testing.T) {
 	sandbox.Status.Conditions[0].LastTransitionTime = metav1.NewTime(endTime)
 
 	recordSandboxMetrics(sandbox)
-	afterTrueSum := inplaceUpdateHistogramSum(t, ns, name)
+	afterTrueSum := inplaceUpdateHistogramSum(t, ns)
 	expectedDuration := endTime.Sub(startTime).Seconds()
 	if delta := afterTrueSum - beforeSum; delta < expectedDuration-0.01 || delta > expectedDuration+0.01 {
 		t.Errorf("InplaceUpdate=True observation: sum delta = %v, want ~%v", delta, expectedDuration)
@@ -1083,7 +1084,7 @@ func TestSandboxInplaceUpdateDuration_ObservedOnce(t *testing.T) {
 
 	// Step 3: Second call should NOT observe (deduplicated)
 	recordSandboxMetrics(sandbox)
-	afterSecondSum := inplaceUpdateHistogramSum(t, ns, name)
+	afterSecondSum := inplaceUpdateHistogramSum(t, ns)
 	if afterSecondSum != afterTrueSum {
 		t.Errorf("second InplaceUpdate=True call should not change sum: got %v, want %v", afterSecondSum, afterTrueSum)
 	}
@@ -1092,11 +1093,11 @@ func TestSandboxInplaceUpdateDuration_ObservedOnce(t *testing.T) {
 	deleteSandboxMetrics(ns, name)
 }
 
-// pauseDurationHistogramSum collects the current sample sum from the pause duration HistogramVec for a given namespace/name.
-func pauseDurationHistogramSum(t *testing.T, namespace, name string) float64 {
+// pauseDurationHistogramSum collects the current sample sum from the pause duration HistogramVec for a given namespace.
+func pauseDurationHistogramSum(t *testing.T, namespace string) float64 {
 	t.Helper()
 	m := &dto.Metric{}
-	if err := sandboxPauseDuration.WithLabelValues(namespace, name).(prometheus.Metric).Write(m); err != nil {
+	if err := sandboxPauseDuration.WithLabelValues(namespace).(prometheus.Metric).Write(m); err != nil {
 		t.Fatalf("failed to write histogram metric: %v", err)
 	}
 	return m.GetHistogram().GetSampleSum()
@@ -1116,7 +1117,7 @@ func TestSandboxPauseDuration(t *testing.T) {
 	now := time.Now()
 	startTime := now.Add(-15 * time.Second)
 	endTime := now
-	ns, name := "default", "pause-duration-sandbox"
+	ns, name := "pause-dur-test", "pause-duration-sandbox"
 
 	// Clean up global state
 	pauseStartTimes.Delete(ns + "/" + name)
@@ -1141,11 +1142,11 @@ func TestSandboxPauseDuration(t *testing.T) {
 		},
 	}
 
-	beforeSum := pauseDurationHistogramSum(t, ns, name)
+	beforeSum := pauseDurationHistogramSum(t, ns)
 	recordSandboxMetrics(sandbox)
 
 	// No histogram observation yet (only False recorded)
-	afterFalseSum := pauseDurationHistogramSum(t, ns, name)
+	afterFalseSum := pauseDurationHistogramSum(t, ns)
 	if afterFalseSum != beforeSum {
 		t.Errorf("Paused=False should not observe histogram: sum changed from %v to %v", beforeSum, afterFalseSum)
 	}
@@ -1155,7 +1156,7 @@ func TestSandboxPauseDuration(t *testing.T) {
 	sandbox.Status.Conditions[0].LastTransitionTime = metav1.NewTime(endTime)
 
 	recordSandboxMetrics(sandbox)
-	afterTrueSum := pauseDurationHistogramSum(t, ns, name)
+	afterTrueSum := pauseDurationHistogramSum(t, ns)
 	expectedDuration := endTime.Sub(startTime).Seconds()
 	if delta := afterTrueSum - beforeSum; delta < expectedDuration-0.01 || delta > expectedDuration+0.01 {
 		t.Errorf("Paused=True observation: sum delta = %v, want ~%v", delta, expectedDuration)
@@ -1163,7 +1164,7 @@ func TestSandboxPauseDuration(t *testing.T) {
 
 	// Step 3: Second call should NOT observe (deduplicated)
 	recordSandboxMetrics(sandbox)
-	afterSecondSum := pauseDurationHistogramSum(t, ns, name)
+	afterSecondSum := pauseDurationHistogramSum(t, ns)
 	if afterSecondSum != afterTrueSum {
 		t.Errorf("second Paused=True call should not change sum: got %v, want %v", afterSecondSum, afterTrueSum)
 	}
@@ -1176,7 +1177,7 @@ func TestSandboxResumeDuration(t *testing.T) {
 	now := time.Now()
 	startTime := now.Add(-10 * time.Second)
 	endTime := now
-	ns, name := "default", "resume-duration-sandbox"
+	ns, name := "resume-dur-test", "resume-duration-sandbox"
 
 	// Clean up global state
 	resumeStartTimes.Delete(ns + "/" + name)
@@ -1234,7 +1235,7 @@ func TestSandboxResumeDuration(t *testing.T) {
 
 func TestSandboxInplaceUpdateDuration_NotObservedWithoutStartTime(t *testing.T) {
 	now := time.Now()
-	ns, name := "default", "inplace-no-start-sandbox"
+	ns, name := "inplace-dur-nostart", "inplace-no-start-sandbox"
 
 	// Directly set InplaceUpdate=True without prior False record
 	sandbox := &agentsv1alpha1.Sandbox{
@@ -1255,9 +1256,9 @@ func TestSandboxInplaceUpdateDuration_NotObservedWithoutStartTime(t *testing.T) 
 		},
 	}
 
-	beforeSum := inplaceUpdateHistogramSum(t, ns, name)
+	beforeSum := inplaceUpdateHistogramSum(t, ns)
 	recordSandboxMetrics(sandbox)
-	afterSum := inplaceUpdateHistogramSum(t, ns, name)
+	afterSum := inplaceUpdateHistogramSum(t, ns)
 
 	if afterSum != beforeSum {
 		t.Errorf("InplaceUpdate=True without prior False should not observe: sum changed from %v to %v", beforeSum, afterSum)
@@ -1384,6 +1385,7 @@ func TestSandboxCreationTotal(t *testing.T) {
 			name: "creation success increments counter on first Ready=True",
 			setup: func(ns, sbName string) {
 				observedCreationToReady.Delete(ns + "/" + sbName)
+				sandboxCreationTotal.Reset()
 			},
 			sandboxFunc: func(ns, sbName string) *agentsv1alpha1.Sandbox {
 				now := time.Now()
@@ -1403,7 +1405,7 @@ func TestSandboxCreationTotal(t *testing.T) {
 				}
 			},
 			verify: func(t *testing.T, ns, sbName string) {
-				val := counterValue(t, sandboxCreationTotal, ns, sbName, "success")
+				val := counterValue(t, sandboxCreationTotal, ns, "success")
 				if val != 1 {
 					t.Errorf("sandbox_creation_total{result=success} = %v, want 1", val)
 				}
@@ -1413,6 +1415,7 @@ func TestSandboxCreationTotal(t *testing.T) {
 			name: "creation failure increments counter on Phase=Failed",
 			setup: func(ns, sbName string) {
 				observedCreationFailure.Delete(ns + "/" + sbName)
+				sandboxCreationTotal.Reset()
 			},
 			sandboxFunc: func(ns, sbName string) *agentsv1alpha1.Sandbox {
 				return &agentsv1alpha1.Sandbox{
@@ -1426,7 +1429,7 @@ func TestSandboxCreationTotal(t *testing.T) {
 				}
 			},
 			verify: func(t *testing.T, ns, sbName string) {
-				val := counterValue(t, sandboxCreationTotal, ns, sbName, "failure")
+				val := counterValue(t, sandboxCreationTotal, ns, "failure")
 				if val != 1 {
 					t.Errorf("sandbox_creation_total{result=failure} = %v, want 1", val)
 				}
@@ -1436,6 +1439,7 @@ func TestSandboxCreationTotal(t *testing.T) {
 			name: "duplicate calls do not re-increment success counter",
 			setup: func(ns, sbName string) {
 				observedCreationToReady.Delete(ns + "/" + sbName)
+				sandboxCreationTotal.Reset()
 			},
 			sandboxFunc: func(ns, sbName string) *agentsv1alpha1.Sandbox {
 				now := time.Now()
@@ -1456,7 +1460,7 @@ func TestSandboxCreationTotal(t *testing.T) {
 			},
 			verify: func(t *testing.T, ns, sbName string) {
 				// Call recordSandboxMetrics a second time and ensure counter doesn't increase
-				before := counterValue(t, sandboxCreationTotal, ns, sbName, "success")
+				before := counterValue(t, sandboxCreationTotal, ns, "success")
 				now := time.Now()
 				sb := &agentsv1alpha1.Sandbox{
 					ObjectMeta: metav1.ObjectMeta{
@@ -1473,16 +1477,17 @@ func TestSandboxCreationTotal(t *testing.T) {
 					},
 				}
 				recordSandboxMetrics(sb)
-				after := counterValue(t, sandboxCreationTotal, ns, sbName, "success")
+				after := counterValue(t, sandboxCreationTotal, ns, "success")
 				if after != before {
 					t.Errorf("duplicate call incremented counter: before=%v, after=%v", before, after)
 				}
 			},
 		},
 		{
-			name: "deleteSandboxMetrics removes creation counter",
+			name: "deleteSandboxMetrics does not remove namespace-level creation counter",
 			setup: func(ns, sbName string) {
 				observedCreationToReady.Delete(ns + "/" + sbName)
+				sandboxCreationTotal.Reset()
 			},
 			sandboxFunc: func(ns, sbName string) *agentsv1alpha1.Sandbox {
 				now := time.Now()
@@ -1503,10 +1508,10 @@ func TestSandboxCreationTotal(t *testing.T) {
 			},
 			verify: func(t *testing.T, ns, sbName string) {
 				deleteSandboxMetrics(ns, sbName)
-				// After deletion, counter should be 0 (new series)
-				val := counterValue(t, sandboxCreationTotal, ns, sbName, "success")
-				if val != 0 {
-					t.Errorf("sandbox_creation_total after delete = %v, want 0", val)
+				// Counter is namespace-level, so it persists after per-sandbox deletion
+				val := counterValue(t, sandboxCreationTotal, ns, "success")
+				if val != 1 {
+					t.Errorf("sandbox_creation_total after delete = %v, want 1 (namespace-level persists)", val)
 				}
 			},
 		},
@@ -1537,6 +1542,7 @@ func TestSandboxPauseTotal(t *testing.T) {
 				key := ns + "/" + sbName
 				pauseStartTimes.Delete(key)
 				observedPauseDurations.Delete(key)
+				sandboxPauseTotal.Reset()
 
 				// Step 1: Paused=False stores start time
 				sb := &agentsv1alpha1.Sandbox{
@@ -1561,7 +1567,7 @@ func TestSandboxPauseTotal(t *testing.T) {
 				sb.Status.Conditions[0].LastTransitionTime = metav1.NewTime(now)
 				recordSandboxMetrics(sb)
 
-				val := counterValue(t, sandboxPauseTotal, ns, sbName, "success")
+				val := counterValue(t, sandboxPauseTotal, ns, "success")
 				if val != 1 {
 					t.Errorf("sandbox_pause_total{result=success} = %v, want 1", val)
 				}
@@ -1574,6 +1580,7 @@ func TestSandboxPauseTotal(t *testing.T) {
 				key := ns + "/" + sbName
 				pauseStartTimes.Delete(key)
 				observedPauseDurations.Delete(key)
+				sandboxPauseTotal.Reset()
 
 				sb := &agentsv1alpha1.Sandbox{
 					ObjectMeta: metav1.ObjectMeta{
@@ -1596,9 +1603,9 @@ func TestSandboxPauseTotal(t *testing.T) {
 				sb.Status.Conditions[0].LastTransitionTime = metav1.NewTime(now)
 				recordSandboxMetrics(sb)
 
-				before := counterValue(t, sandboxPauseTotal, ns, sbName, "success")
+				before := counterValue(t, sandboxPauseTotal, ns, "success")
 				recordSandboxMetrics(sb)
-				after := counterValue(t, sandboxPauseTotal, ns, sbName, "success")
+				after := counterValue(t, sandboxPauseTotal, ns, "success")
 				if after != before {
 					t.Errorf("duplicate pause call incremented: before=%v, after=%v", before, after)
 				}
@@ -1611,6 +1618,7 @@ func TestSandboxPauseTotal(t *testing.T) {
 				key := ns + "/" + sbName
 				pauseStartTimes.Delete(key)
 				observedPauseDurations.Delete(key)
+				sandboxPauseTotal.Reset()
 
 				sb := &agentsv1alpha1.Sandbox{
 					ObjectMeta: metav1.ObjectMeta{
@@ -1643,7 +1651,7 @@ func TestSandboxPauseTotal(t *testing.T) {
 				sb.Status.Conditions[0].LastTransitionTime = metav1.NewTime(now.Add(5 * time.Second))
 				recordSandboxMetrics(sb)
 
-				val := counterValue(t, sandboxPauseTotal, ns, sbName, "success")
+				val := counterValue(t, sandboxPauseTotal, ns, "success")
 				if val != 2 {
 					t.Errorf("sandbox_pause_total after new cycle = %v, want 2", val)
 				}
@@ -1673,6 +1681,7 @@ func TestSandboxResumeTotal(t *testing.T) {
 				key := ns + "/" + sbName
 				resumeStartTimes.Delete(key)
 				observedResumeDurations.Delete(key)
+				sandboxResumeTotal.Reset()
 
 				sb := &agentsv1alpha1.Sandbox{
 					ObjectMeta: metav1.ObjectMeta{
@@ -1696,7 +1705,7 @@ func TestSandboxResumeTotal(t *testing.T) {
 				sb.Status.Conditions[0].LastTransitionTime = metav1.NewTime(now)
 				recordSandboxMetrics(sb)
 
-				val := counterValue(t, sandboxResumeTotal, ns, sbName, "success")
+				val := counterValue(t, sandboxResumeTotal, ns, "success")
 				if val != 1 {
 					t.Errorf("sandbox_resume_total{result=success} = %v, want 1", val)
 				}
@@ -1709,6 +1718,7 @@ func TestSandboxResumeTotal(t *testing.T) {
 				key := ns + "/" + sbName
 				resumeStartTimes.Delete(key)
 				observedResumeDurations.Delete(key)
+				sandboxResumeTotal.Reset()
 
 				sb := &agentsv1alpha1.Sandbox{
 					ObjectMeta: metav1.ObjectMeta{
@@ -1732,9 +1742,9 @@ func TestSandboxResumeTotal(t *testing.T) {
 				sb.Status.Conditions[0].LastTransitionTime = metav1.NewTime(now)
 				recordSandboxMetrics(sb)
 
-				before := counterValue(t, sandboxResumeTotal, ns, sbName, "success")
+				before := counterValue(t, sandboxResumeTotal, ns, "success")
 				recordSandboxMetrics(sb)
-				after := counterValue(t, sandboxResumeTotal, ns, sbName, "success")
+				after := counterValue(t, sandboxResumeTotal, ns, "success")
 				if after != before {
 					t.Errorf("duplicate resume call incremented: before=%v, after=%v", before, after)
 				}
@@ -1789,7 +1799,7 @@ func TestSandboxDeletionDuration(t *testing.T) {
 				}
 
 				// Before delete, histogram should have 0 samples
-				before := histogramSampleCount(t, sandboxDeletionDuration, ns, sbName)
+				before := histogramSampleCount(t, sandboxDeletionDuration, ns)
 				if before != 0 {
 					t.Errorf("deletion duration sample count before delete = %v, want 0", before)
 				}
@@ -1821,9 +1831,9 @@ func TestSandboxDeletionDuration(t *testing.T) {
 				}
 				recordSandboxMetrics(sb)
 
-				before := histogramSampleCount(t, sandboxDeletionDuration, ns, sbName)
+				before := histogramSampleCount(t, sandboxDeletionDuration, ns)
 				deleteSandboxMetrics(ns, sbName)
-				after := histogramSampleCount(t, sandboxDeletionDuration, ns, sbName)
+				after := histogramSampleCount(t, sandboxDeletionDuration, ns)
 				if after != before {
 					t.Errorf("deletion duration should not be observed without DeletionTimestamp: before=%v, after=%v", before, after)
 				}
@@ -1831,9 +1841,9 @@ func TestSandboxDeletionDuration(t *testing.T) {
 		},
 	}
 
-	for _, tt := range tests {
+	for i, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ns := "default"
+			ns := fmt.Sprintf("del-dur-ns-%d", i)
 			sbName := "del-dur-" + tt.name
 			// Clean global state
 			deletionStartTimes.Delete(ns + "/" + sbName)

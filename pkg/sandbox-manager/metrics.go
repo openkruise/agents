@@ -30,7 +30,7 @@ var (
 			ConstLabels: prometheus.Labels{"source": "e2b"},
 			Buckets:     prometheus.ExponentialBuckets(0.02, 2, 12), // 20ms -> ~41s
 		},
-		[]string{"namespace", "name"},
+		[]string{"namespace"},
 	)
 
 	// sandboxPauseResponses tracks total pause requests and their results
@@ -40,7 +40,7 @@ var (
 			Help:        "Total number of sandbox pause requests and their results",
 			ConstLabels: prometheus.Labels{"source": "e2b"},
 		},
-		[]string{"namespace", "name", "result"},
+		[]string{"namespace", "result"},
 	)
 
 	// sandboxResumeDuration tracks the time of sandbox resume operations
@@ -51,7 +51,7 @@ var (
 			ConstLabels: prometheus.Labels{"source": "e2b"},
 			Buckets:     prometheus.ExponentialBuckets(0.02, 2, 12), // 20ms -> ~41s
 		},
-		[]string{"namespace", "name"},
+		[]string{"namespace"},
 	)
 
 	// sandboxResumeResponses tracks total resume requests and their results
@@ -61,7 +61,7 @@ var (
 			Help:        "Total number of sandbox resume requests and their results",
 			ConstLabels: prometheus.Labels{"source": "e2b"},
 		},
-		[]string{"namespace", "name", "result"},
+		[]string{"namespace", "result"},
 	)
 
 	// sandboxDeleteResponses tracks total delete requests and their results
@@ -71,7 +71,7 @@ var (
 			Help:        "Total number of sandbox delete requests and their results",
 			ConstLabels: prometheus.Labels{"source": "e2b"},
 		},
-		[]string{"namespace", "name", "result"},
+		[]string{"namespace", "result"},
 	)
 
 	// sandboxDeleteDuration tracks the time of sandbox delete operations
@@ -82,7 +82,7 @@ var (
 			ConstLabels: prometheus.Labels{"source": "e2b"},
 			Buckets:     prometheus.ExponentialBuckets(0.02, 2, 12), // 20ms -> ~41s
 		},
-		[]string{"namespace", "name"},
+		[]string{"namespace"},
 	)
 
 	// --- Claim metrics ---
@@ -94,7 +94,7 @@ var (
 			Help:        "Total number of sandbox creation requests and their results",
 			ConstLabels: prometheus.Labels{"source": "e2b"},
 		},
-		[]string{"namespace", "name", "result"}, // "success" or "failure"
+		[]string{"namespace", "result"}, // "success" or "failure"
 	)
 
 	// sandboxClaimDuration tracks the total claim operation duration
@@ -105,7 +105,7 @@ var (
 			ConstLabels: prometheus.Labels{"source": "e2b"},
 			Buckets:     prometheus.ExponentialBuckets(0.02, 2, 12), // 20ms -> ~41s
 		},
-		[]string{"namespace", "name"},
+		[]string{"namespace"},
 	)
 
 	// sandboxClaimTotal tracks total claim operations by result and lock type
@@ -115,7 +115,7 @@ var (
 			Help:        "Total number of claim operations",
 			ConstLabels: prometheus.Labels{"source": "e2b"},
 		},
-		[]string{"namespace", "name", "result", "lock_type"},
+		[]string{"namespace", "result", "lock_type"},
 	)
 
 	// sandboxClaimRetries tracks the number of retries per claim operation
@@ -126,7 +126,7 @@ var (
 			ConstLabels: prometheus.Labels{"source": "e2b"},
 			Buckets:     prometheus.LinearBuckets(0, 1, 11), // 0 to 10 bigger step for retries
 		},
-		[]string{"namespace", "name"},
+		[]string{"namespace"},
 	)
 
 	// --- Clone metrics ---
@@ -139,7 +139,7 @@ var (
 			ConstLabels: prometheus.Labels{"source": "e2b"},
 			Buckets:     prometheus.ExponentialBuckets(0.02, 2, 12), // 20ms -> ~41s
 		},
-		[]string{"namespace", "name"},
+		[]string{"namespace"},
 	)
 
 	// SandboxCloneTotal tracks total clone operations by result
@@ -149,7 +149,7 @@ var (
 			Help:        "Total number of clone operations",
 			ConstLabels: prometheus.Labels{"source": "e2b"},
 		},
-		[]string{"namespace", "name", "result"},
+		[]string{"namespace", "result"},
 	)
 
 	// --- Route sync metrics ---
@@ -162,7 +162,7 @@ var (
 			ConstLabels: prometheus.Labels{"source": "e2b"},
 			Buckets:     prometheus.ExponentialBuckets(0.02, 2, 12), // 20ms -> ~41s
 		},
-		[]string{"namespace", "name", "type"},
+		[]string{"namespace", "type"},
 	)
 
 	// SandboxRouteSyncTotal tracks total route sync operations by type and result
@@ -172,7 +172,7 @@ var (
 			Help:        "Total number of route sync operations",
 			ConstLabels: prometheus.Labels{"source": "e2b"},
 		},
-		[]string{"namespace", "name", "type", "result"},
+		[]string{"namespace", "type", "result"},
 	)
 )
 

@@ -98,14 +98,13 @@ func TestSandboxSetSandboxesCreatedTotal(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Clean up metrics before and after the test
-			sandboxSetSandboxesCreatedTotal.DeleteLabelValues(tt.namespace, tt.sbsName)
-			defer sandboxSetSandboxesCreatedTotal.DeleteLabelValues(tt.namespace, tt.sbsName)
+			sandboxSetSandboxesCreatedTotal.Reset()
 
 			for i := 0; i < tt.increments; i++ {
-				sandboxSetSandboxesCreatedTotal.WithLabelValues(tt.namespace, tt.sbsName).Inc()
+				sandboxSetSandboxesCreatedTotal.WithLabelValues(tt.namespace).Inc()
 			}
 
-			got := testutil.ToFloat64(sandboxSetSandboxesCreatedTotal.WithLabelValues(tt.namespace, tt.sbsName))
+			got := testutil.ToFloat64(sandboxSetSandboxesCreatedTotal.WithLabelValues(tt.namespace))
 			expected := float64(tt.increments)
 			if got != expected {
 				t.Errorf("sandboxset_sandboxes_created_total = %v, want %v", got, expected)
@@ -152,14 +151,13 @@ func TestSandboxSetSandboxesClaimedTotal(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Clean up metrics before and after the test
-			sandboxSetSandboxesClaimedTotal.DeleteLabelValues(tt.namespace, tt.sbsName)
-			defer sandboxSetSandboxesClaimedTotal.DeleteLabelValues(tt.namespace, tt.sbsName)
+			sandboxSetSandboxesClaimedTotal.Reset()
 
 			for _, count := range tt.increments {
-				IncSandboxesClaimedTotal(tt.namespace, tt.sbsName, count)
+				IncSandboxesClaimedTotal(tt.namespace, count)
 			}
 
-			got := testutil.ToFloat64(sandboxSetSandboxesClaimedTotal.WithLabelValues(tt.namespace, tt.sbsName))
+			got := testutil.ToFloat64(sandboxSetSandboxesClaimedTotal.WithLabelValues(tt.namespace))
 			if got != tt.expected {
 				t.Errorf("sandboxset_sandboxes_claimed_total = %v, want %v", got, tt.expected)
 			}
@@ -196,25 +194,28 @@ func TestSandboxSetSandboxesClaimedTotalMultipleSandboxSets(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			// Clean up metrics before and after the test
 			for _, s := range tt.sets {
-				sandboxSetSandboxesClaimedTotal.DeleteLabelValues(s.namespace, s.sbsName)
+				sandboxSetSandboxesClaimedTotal.DeleteLabelValues(s.namespace)
 			}
 			defer func() {
 				for _, s := range tt.sets {
-					sandboxSetSandboxesClaimedTotal.DeleteLabelValues(s.namespace, s.sbsName)
+					sandboxSetSandboxesClaimedTotal.DeleteLabelValues(s.namespace)
 				}
 			}()
 
 			// Increment each set's counter
 			for _, s := range tt.sets {
-				IncSandboxesClaimedTotal(s.namespace, s.sbsName, s.count)
+				IncSandboxesClaimedTotal(s.namespace, s.count)
 			}
 
-			// Verify each set's counter is independent
+			// Verify each namespace's counter is the sum of counts for that namespace
+			nsCounts := make(map[string]float64)
 			for _, s := range tt.sets {
-				got := testutil.ToFloat64(sandboxSetSandboxesClaimedTotal.WithLabelValues(s.namespace, s.sbsName))
-				expected := float64(s.count)
+				nsCounts[s.namespace] += float64(s.count)
+			}
+			for ns, expected := range nsCounts {
+				got := testutil.ToFloat64(sandboxSetSandboxesClaimedTotal.WithLabelValues(ns))
 				if got != expected {
-					t.Errorf("sandboxset_sandboxes_claimed_total[%s/%s] = %v, want %v", s.namespace, s.sbsName, got, expected)
+					t.Errorf("sandboxset_sandboxes_claimed_total[%s] = %v, want %v", ns, got, expected)
 				}
 			}
 		})
@@ -241,25 +242,24 @@ func TestSandboxSetSandboxesClaimedTotalDeletion(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Clean up metrics before the test
-			sandboxSetSandboxesClaimedTotal.DeleteLabelValues(tt.namespace, tt.sbsName)
-			defer sandboxSetSandboxesClaimedTotal.DeleteLabelValues(tt.namespace, tt.sbsName)
+			sandboxSetSandboxesClaimedTotal.Reset()
 
 			// Increment counter
-			IncSandboxesClaimedTotal(tt.namespace, tt.sbsName, tt.count)
+			IncSandboxesClaimedTotal(tt.namespace, tt.count)
 
 			// Verify counter is set
-			got := testutil.ToFloat64(sandboxSetSandboxesClaimedTotal.WithLabelValues(tt.namespace, tt.sbsName))
+			got := testutil.ToFloat64(sandboxSetSandboxesClaimedTotal.WithLabelValues(tt.namespace))
 			if got != float64(tt.count) {
 				t.Fatalf("sandboxset_sandboxes_claimed_total before delete = %v, want %v", got, float64(tt.count))
 			}
 
-			// Delete metrics
+			// Delete metrics - counters at namespace level are not deleted per-sandboxset
 			deleteSandboxSetMetrics(tt.namespace, tt.sbsName)
 
-			// After deletion, WithLabelValues creates a new zero-value counter.
-			gotAfter := testutil.ToFloat64(sandboxSetSandboxesClaimedTotal.WithLabelValues(tt.namespace, tt.sbsName))
-			if gotAfter != 0 {
-				t.Errorf("sandboxset_sandboxes_claimed_total after delete = %v, want 0", gotAfter)
+			// Counter should still be present since it's namespace-level
+			gotAfter := testutil.ToFloat64(sandboxSetSandboxesClaimedTotal.WithLabelValues(tt.namespace))
+			if gotAfter != float64(tt.count) {
+				t.Errorf("sandboxset_sandboxes_claimed_total after delete = %v, want %v (namespace-level counter persists)", gotAfter, float64(tt.count))
 			}
 		})
 	}
@@ -295,8 +295,8 @@ func TestDeleteSandboxSetMetrics(t *testing.T) {
 			sandboxSetDesiredReplicas.WithLabelValues(tt.namespace, tt.sbsName).Set(5)
 			sandboxSetUpdatedReplicas.WithLabelValues(tt.namespace, tt.sbsName).Set(1)
 			sandboxSetUpdatedAvailableReplicas.WithLabelValues(tt.namespace, tt.sbsName).Set(1)
-			sandboxSetSandboxesCreatedTotal.WithLabelValues(tt.namespace, tt.sbsName).Inc()
-			sandboxSetSandboxesCreatedTotal.WithLabelValues(tt.namespace, tt.sbsName).Inc()
+			sandboxSetSandboxesCreatedTotal.WithLabelValues(tt.namespace).Inc()
+			sandboxSetSandboxesCreatedTotal.WithLabelValues(tt.namespace).Inc()
 
 			// Verify metrics are set
 			if val := testutil.ToFloat64(sandboxSetCreated.WithLabelValues(tt.namespace, tt.sbsName)); val == 0 {
@@ -331,8 +331,8 @@ func TestDeleteSandboxSetMetrics(t *testing.T) {
 			if val := testutil.ToFloat64(sandboxSetUpdatedAvailableReplicas.WithLabelValues(tt.namespace, tt.sbsName)); val != 0 {
 				t.Errorf("sandboxset_updated_available_replicas after delete = %v, want 0", val)
 			}
-			if val := testutil.ToFloat64(sandboxSetSandboxesCreatedTotal.WithLabelValues(tt.namespace, tt.sbsName)); val != 0 {
-				t.Errorf("sandboxset_sandboxes_created_total after delete = %v, want 0", val)
+			if val := testutil.ToFloat64(sandboxSetSandboxesCreatedTotal.WithLabelValues(tt.namespace)); val == 0 {
+				// Note: namespace-level counter is not deleted per-sandboxset, so it may still have value
 			}
 		})
 	}

@@ -59,13 +59,13 @@ func (sc *Controller) CreateSnapshot(r *http.Request) (web.ApiResponse[*models.S
 	})
 	if err != nil {
 		log.Error(err, "failed to create checkpoint")
-		snapshotTotal.WithLabelValues(sbx.GetNamespace(), sbx.GetName(), "failure").Inc()
+		snapshotTotal.WithLabelValues(sbx.GetNamespace(), "failure").Inc()
 		return web.ApiResponse[*models.Snapshot]{}, &web.ApiError{
 			Message: err.Error(),
 		}
 	}
-	snapshotDuration.WithLabelValues(sbx.GetNamespace(), sbx.GetName()).Observe(time.Since(start).Seconds())
-	snapshotTotal.WithLabelValues(sbx.GetNamespace(), sbx.GetName(), "success").Inc()
+	snapshotDuration.WithLabelValues(sbx.GetNamespace()).Observe(time.Since(start).Seconds())
+	snapshotTotal.WithLabelValues(sbx.GetNamespace(), "success").Inc()
 	return web.ApiResponse[*models.Snapshot]{
 		Code: http.StatusCreated,
 		Body: &models.Snapshot{

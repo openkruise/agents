@@ -29,7 +29,7 @@ var (
 			Help:    "Snapshot creation latency in seconds",
 			Buckets: prometheus.ExponentialBuckets(0.02, 2, 12), // 20ms -> ~41s
 		},
-		[]string{"namespace", "name"},
+		[]string{"namespace"},
 	)
 
 	// snapshotTotal tracks total snapshot operations by result.
@@ -38,7 +38,7 @@ var (
 			Name: "sandbox_snapshot_total",
 			Help: "Total number of snapshot operations",
 		},
-		[]string{"namespace", "name", "result"},
+		[]string{"namespace", "result"},
 	)
 )
 

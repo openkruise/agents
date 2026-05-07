@@ -128,7 +128,7 @@ var (
 			ConstLabels: prometheus.Labels{"source": "k8s"},
 			Buckets:     prometheus.ExponentialBuckets(0.02, 2, 12), // 20ms -> ~41s
 		},
-		[]string{"namespace", "name"},
+		[]string{"namespace"},
 	)
 
 	// sandbox_inplace_update_duration_seconds
@@ -138,7 +138,7 @@ var (
 			Help:    "Duration of in-place update operations from start to completion in seconds",
 			Buckets: prometheus.ExponentialBuckets(0.02, 2, 12), // 20ms -> ~41s
 		},
-		[]string{"namespace", "name"},
+		[]string{"namespace"},
 	)
 
 	// sandbox_pause_duration_seconds tracks pause operation duration with source=k8s label.
@@ -149,7 +149,7 @@ var (
 			ConstLabels: prometheus.Labels{"source": "k8s"},
 			Buckets:     prometheus.ExponentialBuckets(0.02, 2, 12), // 20ms -> ~41s
 		},
-		[]string{"namespace", "name"},
+		[]string{"namespace"},
 	)
 
 	// sandbox_resume_duration_seconds tracks resume operation duration with source=k8s label.
@@ -170,7 +170,7 @@ var (
 			Help:        "Total number of sandbox creation operations",
 			ConstLabels: prometheus.Labels{"source": "k8s"},
 		},
-		[]string{"namespace", "name", "result"},
+		[]string{"namespace", "result"},
 	)
 
 	// sandboxPauseTotal tracks the total number of sandbox pause operations.
@@ -180,7 +180,7 @@ var (
 			Help:        "Total number of sandbox pause operations",
 			ConstLabels: prometheus.Labels{"source": "k8s"},
 		},
-		[]string{"namespace", "name", "result"},
+		[]string{"namespace", "result"},
 	)
 
 	// sandboxResumeTotal tracks the total number of sandbox resume operations.
@@ -190,7 +190,7 @@ var (
 			Help:        "Total number of sandbox resume operations",
 			ConstLabels: prometheus.Labels{"source": "k8s"},
 		},
-		[]string{"namespace", "name", "result"},
+		[]string{"namespace", "result"},
 	)
 
 	// sandboxDeletionDuration tracks the duration from sandbox deletion timestamp to actual removal.
@@ -201,7 +201,7 @@ var (
 			ConstLabels: prometheus.Labels{"source": "k8s"},
 			Buckets:     prometheus.ExponentialBuckets(0.02, 2, 12), // 20ms -> ~41s
 		},
-		[]string{"namespace", "name"},
+		[]string{"namespace"},
 	)
 
 	// sandboxStatusAbnormal indicates whether a sandbox is in an abnormal state
@@ -430,15 +430,15 @@ func recordSandboxMetrics(sandbox *agentsv1alpha1.Sandbox) {
 				key := namespace + "/" + name
 				if _, loaded := observedCreationToReady.LoadOrStore(key, true); !loaded {
 					duration := condition.LastTransitionTime.Sub(sandbox.CreationTimestamp.Time)
-					sandboxCreationDuration.WithLabelValues(namespace, name).Observe(duration.Seconds())
-					sandboxCreationTotal.WithLabelValues(namespace, name, "success").Inc()
+					sandboxCreationDuration.WithLabelValues(namespace).Observe(duration.Seconds())
+					sandboxCreationTotal.WithLabelValues(namespace, "success").Inc()
 				}
 			}
 
 		case agentsv1alpha1.SandboxConditionInplaceUpdate:
 			recordConditionTrueMetric(condition, sandboxStatusInplaceUpdateDone, sandboxStatusInplaceUpdateDoneTime, namespace, name)
 			key := namespace + "/" + name
-			recordConditionDuration(condition, key, &inplaceUpdateStartTimes, &observedInplaceUpdateDurations, sandboxInplaceUpdateDuration.WithLabelValues(namespace, name), nil)
+			recordConditionDuration(condition, key, &inplaceUpdateStartTimes, &observedInplaceUpdateDurations, sandboxInplaceUpdateDuration.WithLabelValues(namespace), nil)
 
 		case agentsv1alpha1.SandboxConditionPaused:
 			// Record paused_time timestamp when condition is True
@@ -446,8 +446,8 @@ func recordSandboxMetrics(sandbox *agentsv1alpha1.Sandbox) {
 				sandboxStatusPausedTime.WithLabelValues(namespace, name).Set(float64(condition.LastTransitionTime.Unix()))
 			}
 			key := namespace + "/" + name
-			recordConditionDuration(condition, key, &pauseStartTimes, &observedPauseDurations, sandboxPauseDuration.WithLabelValues(namespace, name),
-				sandboxPauseTotal.WithLabelValues(namespace, name, "success"))
+			recordConditionDuration(condition, key, &pauseStartTimes, &observedPauseDurations, sandboxPauseDuration.WithLabelValues(namespace),
+				sandboxPauseTotal.WithLabelValues(namespace, "success"))
 
 		case agentsv1alpha1.SandboxConditionResumed:
 			// Record resumed_time timestamp when condition is True
@@ -457,7 +457,7 @@ func recordSandboxMetrics(sandbox *agentsv1alpha1.Sandbox) {
 			key := namespace + "/" + name
 			recordConditionDuration(condition, key, &resumeStartTimes, &observedResumeDurations,
 				sandboxResumeDuration.WithLabelValues(namespace),
-				sandboxResumeTotal.WithLabelValues(namespace, name, "success"))
+				sandboxResumeTotal.WithLabelValues(namespace, "success"))
 		}
 	}
 
@@ -465,7 +465,7 @@ func recordSandboxMetrics(sandbox *agentsv1alpha1.Sandbox) {
 	if currentPhase == agentsv1alpha1.SandboxFailed {
 		key := namespace + "/" + name
 		if _, loaded := observedCreationFailure.LoadOrStore(key, true); !loaded {
-			sandboxCreationTotal.WithLabelValues(namespace, name, "failure").Inc()
+			sandboxCreationTotal.WithLabelValues(namespace, "failure").Inc()
 		}
 	}
 
@@ -505,7 +505,7 @@ func deleteSandboxMetrics(namespace, name string) {
 	key := namespace + "/" + name
 	if startTime, ok := deletionStartTimes.Load(key); ok {
 		duration := time.Since(startTime.(time.Time))
-		sandboxDeletionDuration.WithLabelValues(namespace, name).Observe(duration.Seconds())
+		sandboxDeletionDuration.WithLabelValues(namespace).Observe(duration.Seconds())
 		deletionStartTimes.Delete(key)
 	}
 
@@ -522,14 +522,7 @@ func deleteSandboxMetrics(namespace, name string) {
 	sandboxStatusInplaceUpdateDone.DeleteLabelValues(namespace, name)
 	sandboxStatusInplaceUpdateDoneTime.DeleteLabelValues(namespace, name)
 
-	sandboxCreationDuration.DeleteLabelValues(namespace, name)
-	sandboxInplaceUpdateDuration.DeleteLabelValues(namespace, name)
-	sandboxPauseDuration.DeleteLabelValues(namespace, name)
-	sandboxDeletionDuration.DeleteLabelValues(namespace, name)
-
-	sandboxCreationTotal.DeletePartialMatch(prometheus.Labels{"namespace": namespace, "name": name})
-	sandboxPauseTotal.DeletePartialMatch(prometheus.Labels{"namespace": namespace, "name": name})
-	sandboxResumeTotal.DeletePartialMatch(prometheus.Labels{"namespace": namespace, "name": name})
+	// Counter metrics at namespace level are not deleted per-sandbox
 
 	sandboxStatusAbnormal.DeletePartialMatch(prometheus.Labels{"namespace": namespace, "name": name})
 

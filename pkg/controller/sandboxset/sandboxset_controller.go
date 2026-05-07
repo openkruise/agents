@@ -348,7 +348,7 @@ func (r *Reconciler) createSandbox(ctx context.Context, sbs *agentsv1alpha1.Sand
 		r.Recorder.Eventf(sbs, corev1.EventTypeWarning, EventCreateSandboxFailed, "Failed to create sandbox: %s", err)
 		return nil, err
 	}
-	sandboxSetSandboxesCreatedTotal.WithLabelValues(sbs.Namespace, sbs.Name).Inc()
+	sandboxSetSandboxesCreatedTotal.WithLabelValues(sbs.Namespace).Inc()
 	scaleUpExpectation.ExpectScale(GetControllerKey(sbs), expectations.Create, sbx.Name)
 	r.Recorder.Eventf(sbs, corev1.EventTypeNormal, EventSandboxCreated, "Sandbox %s created", klog.KObj(sbx))
 	return sbx, nil

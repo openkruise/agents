@@ -145,11 +145,11 @@ func TestSandboxSetClaimsTotal_Success(t *testing.T) {
 			}
 
 			// Verify counter incremented with success label
-			val := testutil.ToFloat64(sandboxSetClaimsTotal.WithLabelValues(tt.namespace, tt.sandboxSetName, "success"))
+			val := testutil.ToFloat64(sandboxSetClaimsTotal.WithLabelValues(tt.namespace, "success"))
 			assert.Equal(t, float64(1), val, "sandboxset_claims_total{result=success} should be 1")
 
 			// Verify failed counter was not incremented
-			failedVal := testutil.ToFloat64(sandboxSetClaimsTotal.WithLabelValues(tt.namespace, tt.sandboxSetName, "failed"))
+			failedVal := testutil.ToFloat64(sandboxSetClaimsTotal.WithLabelValues(tt.namespace, "failed"))
 			assert.Equal(t, float64(0), failedVal, "sandboxset_claims_total{result=failed} should be 0")
 		})
 	}
@@ -234,11 +234,11 @@ func TestSandboxSetClaimsTotal_Failed(t *testing.T) {
 			}
 
 			// Verify failed counter incremented
-			val := testutil.ToFloat64(sandboxSetClaimsTotal.WithLabelValues(tt.namespace, tt.sandboxSetName, "failed"))
+			val := testutil.ToFloat64(sandboxSetClaimsTotal.WithLabelValues(tt.namespace, "failed"))
 			assert.Equal(t, float64(1), val, "sandboxset_claims_total{result=failed} should be 1")
 
 			// Verify success counter was not incremented
-			successVal := testutil.ToFloat64(sandboxSetClaimsTotal.WithLabelValues(tt.namespace, tt.sandboxSetName, "success"))
+			successVal := testutil.ToFloat64(sandboxSetClaimsTotal.WithLabelValues(tt.namespace, "success"))
 			assert.Equal(t, float64(0), successVal, "sandboxset_claims_total{result=success} should be 0")
 		})
 	}
@@ -319,7 +319,7 @@ func TestSandboxClaimExpiredTotal(t *testing.T) {
 			}
 
 			// Verify expired counter incremented
-			val := testutil.ToFloat64(sandboxClaimExpiredTotal.WithLabelValues(tt.namespace, tt.claimName))
+			val := testutil.ToFloat64(sandboxClaimExpiredTotal.WithLabelValues(tt.namespace))
 			assert.Equal(t, float64(1), val, "sandboxclaim_expired_total should be 1 after TTL deletion")
 		})
 	}
@@ -343,16 +343,16 @@ func TestDeleteSandboxClaimCounterMetrics(t *testing.T) {
 			sandboxClaimExpiredTotal.Reset()
 
 			// Set a value first
-			sandboxClaimExpiredTotal.WithLabelValues(tt.namespace, tt.claimName).Inc()
-			val := testutil.ToFloat64(sandboxClaimExpiredTotal.WithLabelValues(tt.namespace, tt.claimName))
+			sandboxClaimExpiredTotal.WithLabelValues(tt.namespace).Inc()
+			val := testutil.ToFloat64(sandboxClaimExpiredTotal.WithLabelValues(tt.namespace))
 			assert.Equal(t, float64(1), val, "counter should be 1 before cleanup")
 
-			// Call cleanup
+			// Call cleanup - it's now a no-op for namespace-level counters
 			DeleteSandboxClaimCounterMetrics(tt.namespace, tt.claimName)
 
-			// After deletion, WithLabelValues creates a new zero-value metric
-			val = testutil.ToFloat64(sandboxClaimExpiredTotal.WithLabelValues(tt.namespace, tt.claimName))
-			assert.Equal(t, float64(0), val, "counter should be 0 after cleanup")
+			// Counter should still be present since it's namespace-level
+			val = testutil.ToFloat64(sandboxClaimExpiredTotal.WithLabelValues(tt.namespace))
+			assert.Equal(t, float64(1), val, "counter should still be 1 after cleanup (namespace-level)")
 		})
 	}
 }
