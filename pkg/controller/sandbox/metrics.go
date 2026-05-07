@@ -160,7 +160,7 @@ var (
 			ConstLabels: prometheus.Labels{"source": "k8s"},
 			Buckets:     prometheus.ExponentialBuckets(0.02, 2, 12), // 20ms -> ~41s
 		},
-		[]string{"namespace", "name", "resume_reason"},
+		[]string{"namespace"},
 	)
 
 	// sandboxCreationTotal tracks the total number of sandbox creation operations.
@@ -455,11 +455,8 @@ func recordSandboxMetrics(sandbox *agentsv1alpha1.Sandbox) {
 				sandboxStatusResumedTime.WithLabelValues(namespace, name).Set(float64(condition.LastTransitionTime.Unix()))
 			}
 			key := namespace + "/" + name
-			resumeReason := condition.Reason
-			if resumeReason == "" {
-				resumeReason = "unknown"
-			}
-			recordConditionDuration(condition, key, &resumeStartTimes, &observedResumeDurations, sandboxResumeDuration.WithLabelValues(namespace, name, resumeReason),
+			recordConditionDuration(condition, key, &resumeStartTimes, &observedResumeDurations,
+				sandboxResumeDuration.WithLabelValues(namespace),
 				sandboxResumeTotal.WithLabelValues(namespace, name, "success"))
 		}
 	}
@@ -528,7 +525,6 @@ func deleteSandboxMetrics(namespace, name string) {
 	sandboxCreationDuration.DeleteLabelValues(namespace, name)
 	sandboxInplaceUpdateDuration.DeleteLabelValues(namespace, name)
 	sandboxPauseDuration.DeleteLabelValues(namespace, name)
-	sandboxResumeDuration.DeletePartialMatch(prometheus.Labels{"namespace": namespace, "name": name})
 	sandboxDeletionDuration.DeleteLabelValues(namespace, name)
 
 	sandboxCreationTotal.DeletePartialMatch(prometheus.Labels{"namespace": namespace, "name": name})

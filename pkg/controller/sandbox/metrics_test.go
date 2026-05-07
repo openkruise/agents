@@ -1102,11 +1102,11 @@ func pauseDurationHistogramSum(t *testing.T, namespace, name string) float64 {
 	return m.GetHistogram().GetSampleSum()
 }
 
-// resumeDurationHistogramSum collects the current sample sum from the resume duration HistogramVec for a given namespace/name/reason.
-func resumeDurationHistogramSum(t *testing.T, namespace, name, reason string) float64 {
+// resumeDurationHistogramSum collects the current sample sum from the resume duration HistogramVec for a given namespace.
+func resumeDurationHistogramSum(t *testing.T, namespace string) float64 {
 	t.Helper()
 	m := &dto.Metric{}
-	if err := sandboxResumeDuration.WithLabelValues(namespace, name, reason).(prometheus.Metric).Write(m); err != nil {
+	if err := sandboxResumeDuration.WithLabelValues(namespace).(prometheus.Metric).Write(m); err != nil {
 		t.Fatalf("failed to write histogram metric: %v", err)
 	}
 	return m.GetHistogram().GetSampleSum()
@@ -1201,11 +1201,11 @@ func TestSandboxResumeDuration(t *testing.T) {
 		},
 	}
 
-	beforeSum := resumeDurationHistogramSum(t, ns, name, "unknown")
+	beforeSum := resumeDurationHistogramSum(t, ns)
 	recordSandboxMetrics(sandbox)
 
 	// No histogram observation yet (only False recorded)
-	afterFalseSum := resumeDurationHistogramSum(t, ns, name, "unknown")
+	afterFalseSum := resumeDurationHistogramSum(t, ns)
 	if afterFalseSum != beforeSum {
 		t.Errorf("Resumed=False should not observe histogram: sum changed from %v to %v", beforeSum, afterFalseSum)
 	}
@@ -1215,7 +1215,7 @@ func TestSandboxResumeDuration(t *testing.T) {
 	sandbox.Status.Conditions[0].LastTransitionTime = metav1.NewTime(endTime)
 
 	recordSandboxMetrics(sandbox)
-	afterTrueSum := resumeDurationHistogramSum(t, ns, name, "unknown")
+	afterTrueSum := resumeDurationHistogramSum(t, ns)
 	expectedDuration := endTime.Sub(startTime).Seconds()
 	if delta := afterTrueSum - beforeSum; delta < expectedDuration-0.01 || delta > expectedDuration+0.01 {
 		t.Errorf("Resumed=True observation: sum delta = %v, want ~%v", delta, expectedDuration)
@@ -1223,7 +1223,7 @@ func TestSandboxResumeDuration(t *testing.T) {
 
 	// Step 3: Second call should NOT observe (deduplicated)
 	recordSandboxMetrics(sandbox)
-	afterSecondSum := resumeDurationHistogramSum(t, ns, name, "unknown")
+	afterSecondSum := resumeDurationHistogramSum(t, ns)
 	if afterSecondSum != afterTrueSum {
 		t.Errorf("second Resumed=True call should not change sum: got %v, want %v", afterSecondSum, afterTrueSum)
 	}
@@ -1837,144 +1837,6 @@ func TestSandboxDeletionDuration(t *testing.T) {
 			sbName := "del-dur-" + tt.name
 			// Clean global state
 			deletionStartTimes.Delete(ns + "/" + sbName)
-			tt.verify(t, ns, sbName)
-		})
-	}
-}
-
-func TestSandboxResumeDurationWithReason(t *testing.T) {
-	tests := []struct {
-		name   string
-		verify func(t *testing.T, ns, sbName string)
-	}{
-		{
-			name: "CreatePod reason populates resume_reason label correctly",
-			verify: func(t *testing.T, ns, sbName string) {
-				now := time.Now()
-				key := ns + "/" + sbName
-				resumeStartTimes.Delete(key)
-				observedResumeDurations.Delete(key)
-
-				sb := &agentsv1alpha1.Sandbox{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: sbName, Namespace: ns,
-						CreationTimestamp: metav1.NewTime(now.Add(-1 * time.Minute)),
-					},
-					Status: agentsv1alpha1.SandboxStatus{
-						Phase: agentsv1alpha1.SandboxResuming,
-						Conditions: []metav1.Condition{{
-							Type:               string(agentsv1alpha1.SandboxConditionResumed),
-							Status:             metav1.ConditionFalse,
-							Reason:             "CreatePod",
-							LastTransitionTime: metav1.NewTime(now.Add(-5 * time.Second)),
-						}},
-					},
-				}
-				recordSandboxMetrics(sb)
-
-				sb.Status.Phase = agentsv1alpha1.SandboxRunning
-				sb.Status.Conditions[0].Status = metav1.ConditionTrue
-				sb.Status.Conditions[0].LastTransitionTime = metav1.NewTime(now)
-				recordSandboxMetrics(sb)
-
-				count := histogramSampleCount(t, sandboxResumeDuration, ns, sbName, "CreatePod")
-				if count != 1 {
-					t.Errorf("resume duration with reason=CreatePod sample count = %v, want 1", count)
-				}
-			},
-		},
-		{
-			name: "ResumePod reason creates independent series",
-			verify: func(t *testing.T, ns, sbName string) {
-				now := time.Now()
-				key := ns + "/" + sbName
-				resumeStartTimes.Delete(key)
-				observedResumeDurations.Delete(key)
-
-				sb := &agentsv1alpha1.Sandbox{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: sbName, Namespace: ns,
-						CreationTimestamp: metav1.NewTime(now.Add(-1 * time.Minute)),
-					},
-					Status: agentsv1alpha1.SandboxStatus{
-						Phase: agentsv1alpha1.SandboxResuming,
-						Conditions: []metav1.Condition{{
-							Type:               string(agentsv1alpha1.SandboxConditionResumed),
-							Status:             metav1.ConditionFalse,
-							Reason:             "ResumePod",
-							LastTransitionTime: metav1.NewTime(now.Add(-5 * time.Second)),
-						}},
-					},
-				}
-				recordSandboxMetrics(sb)
-
-				sb.Status.Phase = agentsv1alpha1.SandboxRunning
-				sb.Status.Conditions[0].Status = metav1.ConditionTrue
-				sb.Status.Conditions[0].LastTransitionTime = metav1.NewTime(now)
-				recordSandboxMetrics(sb)
-
-				count := histogramSampleCount(t, sandboxResumeDuration, ns, sbName, "ResumePod")
-				if count != 1 {
-					t.Errorf("resume duration with reason=ResumePod sample count = %v, want 1", count)
-				}
-				// CreatePod series should be independent (0 for this sandbox)
-				countCreate := histogramSampleCount(t, sandboxResumeDuration, ns, sbName, "CreatePod")
-				if countCreate != 0 {
-					t.Errorf("resume duration with reason=CreatePod should be 0, got %v", countCreate)
-				}
-			},
-		},
-		{
-			name: "DeletePartialMatch cleans all resume_reason series",
-			verify: func(t *testing.T, ns, sbName string) {
-				now := time.Now()
-				key := ns + "/" + sbName
-				resumeStartTimes.Delete(key)
-				observedResumeDurations.Delete(key)
-
-				sb := &agentsv1alpha1.Sandbox{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: sbName, Namespace: ns,
-						CreationTimestamp: metav1.NewTime(now.Add(-1 * time.Minute)),
-					},
-					Status: agentsv1alpha1.SandboxStatus{
-						Phase: agentsv1alpha1.SandboxResuming,
-						Conditions: []metav1.Condition{{
-							Type:               string(agentsv1alpha1.SandboxConditionResumed),
-							Status:             metav1.ConditionFalse,
-							Reason:             "CreatePod",
-							LastTransitionTime: metav1.NewTime(now.Add(-5 * time.Second)),
-						}},
-					},
-				}
-				recordSandboxMetrics(sb)
-				sb.Status.Phase = agentsv1alpha1.SandboxRunning
-				sb.Status.Conditions[0].Status = metav1.ConditionTrue
-				sb.Status.Conditions[0].LastTransitionTime = metav1.NewTime(now)
-				recordSandboxMetrics(sb)
-
-				// Verify series exists
-				count := histogramSampleCount(t, sandboxResumeDuration, ns, sbName, "CreatePod")
-				if count != 1 {
-					t.Fatalf("expected sample count 1 before cleanup, got %v", count)
-				}
-
-				// Delete should clean all reason variants
-				deleteSandboxMetrics(ns, sbName)
-
-				countAfter := histogramSampleCount(t, sandboxResumeDuration, ns, sbName, "CreatePod")
-				if countAfter != 0 {
-					t.Errorf("resume duration after cleanup sample count = %v, want 0", countAfter)
-				}
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			ns := "default"
-			sbName := "resume-reason-" + tt.name
-			defer deleteSandboxMetrics(ns, sbName)
 			tt.verify(t, ns, sbName)
 		})
 	}
