@@ -96,6 +96,8 @@ type SandboxReconciler struct {
 // +kubebuilder:rbac:groups=core,resources=pods/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;update;patch
 // +kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
+// TODO: This is a temporary permission for security token propagation. It will be removed once the dedicated token propagation mechanism (e.g., via Security Identity Provider) is fully implemented.
+// +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch
 
 //nolint:gocyclo // This function handles multiple reconciliation scenarios which require branching logic
 func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (crl ctrl.Result, err error) {
