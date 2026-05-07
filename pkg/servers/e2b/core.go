@@ -195,3 +195,13 @@ func (sc *Controller) Run() (context.Context, error) {
 	}
 	return ctx, nil
 }
+
+// GetManager returns the sandbox manager
+func (sc *Controller) GetManager() *sandboxmanager.SandboxManager {
+	return sc.manager
+}
+
+// GetKeys returns the key storage
+func (sc *Controller) GetKeys() keys.KeyStorage {
+	return sc.keys
+}
