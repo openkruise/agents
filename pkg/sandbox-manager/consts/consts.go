@@ -34,6 +34,11 @@ const (
 	RuntimePort               = 49983
 	ShutdownTimeout           = 90 * time.Second
 	RequestPeerTimeout        = 100 * time.Millisecond
+
+	// HTTP server timeout constants to mitigate Slowloris-style DoS attacks.
+	HTTPReadTimeout  = 30 * time.Second
+	HTTPWriteTimeout = 60 * time.Second
+	HTTPIdleTimeout  = 120 * time.Second
 )
 
 const DebugLogLevel = 5

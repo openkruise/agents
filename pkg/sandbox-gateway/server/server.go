@@ -86,6 +86,9 @@ func (s *Server) Start(ctx context.Context) error {
 		Addr:              fmt.Sprintf(":%d", s.port),
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       consts.HTTPReadTimeout,
+		WriteTimeout:      consts.HTTPWriteTimeout,
+		IdleTimeout:       consts.HTTPIdleTimeout,
 	}
 
 	// Get node name from environment variables

@@ -90,6 +90,9 @@ func NewController(domain, sysNs, peerSelector, sandboxNamespace, sandboxLabelSe
 		Addr:              fmt.Sprintf(":%d", port),
 		Handler:           sc.mux,
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       consts.HTTPReadTimeout,
+		WriteTimeout:      consts.HTTPWriteTimeout,
+		IdleTimeout:       consts.HTTPIdleTimeout,
 	}
 	return sc
 }
