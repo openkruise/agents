@@ -787,35 +787,6 @@ func TestReconcile_DeletionTimestamp_CallsHandleDeletion(t *testing.T) {
 	assert.True(t, errors.IsNotFound(err), "ops should be fully deleted after finalizer removal")
 }
 
-func TestReconcile_ConcurrentOpsInNamespace(t *testing.T) {
-	// First ops is actively Updating
-	ops1 := newSandboxUpdateOps("ops-active", "default", agentsv1alpha1.SandboxUpdateOpsUpdating, false, nil)
-	// Second ops is Pending (should be blocked)
-	ops2 := newSandboxUpdateOps("ops-pending", "default", agentsv1alpha1.SandboxUpdateOpsPending, false, nil)
-	sbx := newSandbox("sbx-1", "default", "", agentsv1alpha1.SandboxRunning, nil)
-
-	r := newTestReconciler(ops1, ops2, sbx)
-
-	// Reconcile the second ops
-	result, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "ops-pending", Namespace: "default"},
-	})
-	assert.NoError(t, err)
-	assert.Equal(t, ctrl.Result{}, result)
-
-	// Verify ops-pending was NOT transitioned (still Pending, no status update)
-	updatedOps := &agentsv1alpha1.SandboxUpdateOps{}
-	err = r.Get(context.Background(), types.NamespacedName{Name: "ops-pending", Namespace: "default"}, updatedOps)
-	assert.NoError(t, err)
-	assert.Equal(t, agentsv1alpha1.SandboxUpdateOpsPending, updatedOps.Status.Phase)
-
-	// Verify sandbox was not patched
-	updatedSbx := &agentsv1alpha1.Sandbox{}
-	err = r.Get(context.Background(), types.NamespacedName{Name: "sbx-1", Namespace: "default"}, updatedSbx)
-	assert.NoError(t, err)
-	assert.Empty(t, updatedSbx.Labels[agentsv1alpha1.LabelSandboxUpdateOps])
-}
-
 func TestSandboxUpdateStateString_Unknown(t *testing.T) {
 	unknownState := sandboxUpdateState(99)
 	assert.Equal(t, "Unknown", unknownState.String())

@@ -102,23 +102,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// 2. Check if another SandboxUpdateOps in the same namespace is already Updating
-	// TODO: This is a short-term solution to prevent concurrent ops in the same namespace.
-	//  A more robust approach would be using a webhook to reject creation when an active ops exists,
-	//  or implementing a queue/priority-based scheduling mechanism.
-	opsList := &agentsv1alpha1.SandboxUpdateOpsList{}
-	if err := r.List(ctx, opsList, client.InNamespace(ops.Namespace), client.UnsafeDisableDeepCopy); err != nil {
-		return ctrl.Result{}, err
-	}
-	for i := range opsList.Items {
-		other := &opsList.Items[i]
-		if other.Name != ops.Name && other.Status.Phase == agentsv1alpha1.SandboxUpdateOpsUpdating {
-			klog.InfoS("Another SandboxUpdateOps is already updating, skipping this one",
-				"current", klog.KObj(ops), "active", klog.KObj(other))
-			return ctrl.Result{}, nil
-		}
-	}
-
 	// 3. Handle deletion: clean up sandbox labels
 	if !ops.DeletionTimestamp.IsZero() {
 		return r.handleDeletion(ctx, ops)
