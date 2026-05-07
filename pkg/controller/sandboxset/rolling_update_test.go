@@ -370,11 +370,16 @@ func TestGetMaxUnavailablePods(t *testing.T) {
 		replicas       int
 		expected       int
 	}{
-		{"default 20% of 10", intOrStringPtr(intstr.FromString("20%")), 10, 2},
-		{"default 20% of 5", intOrStringPtr(intstr.FromString("20%")), 5, 1},
-		{"absolute 3", intOrStringPtr(intstr.FromInt(3)), 10, 3},
-		{"50% of 10", intOrStringPtr(intstr.FromString("50%")), 10, 5},
-		{"0", intOrStringPtr(intstr.FromInt(0)), 10, 0},
+		{"percentage normal: 20% of 10 = 2", intOrStringPtr(intstr.FromString("20%")), 10, 2},
+		{"percentage round up: 20% of 3 = ceil(0.6) = 1", intOrStringPtr(intstr.FromString("20%")), 3, 1},
+		{"percentage 100%: 100% of 5 = 5", intOrStringPtr(intstr.FromString("100%")), 5, 5},
+		{"percentage 1%: 1% of 1 = ceil(0.01) = 1", intOrStringPtr(intstr.FromString("1%")), 1, 1},
+		{"integer value: 3", intOrStringPtr(intstr.FromInt(3)), 10, 3},
+		{"integer value 0", intOrStringPtr(intstr.FromInt(0)), 10, 0},
+		{"nil maxUnavailable defaults to 0", nil, 5, 0},
+		{"replicas 0 with percentage", intOrStringPtr(intstr.FromString("20%")), 0, 0},
+		{"replicas 1 with 50%: ceil(0.5) = 1", intOrStringPtr(intstr.FromString("50%")), 1, 1},
+		{"large replicas: 30% of 100 = 30", intOrStringPtr(intstr.FromString("30%")), 100, 30},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

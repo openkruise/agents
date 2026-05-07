@@ -145,10 +145,10 @@ func getMaxUnavailablePods(sbs *agentsv1alpha1.SandboxSet, replicas int) int {
 	// MaxUnavailable should already be set by webhook with default value "20%"
 	maxUnavailable := sbs.Spec.UpdateStrategy.MaxUnavailable
 
-	value, err := intstr.GetScaledValueFromIntOrPercent(intstr.ValueOrDefault(maxUnavailable, intstr.FromInt(0)), replicas, false)
+	value, err := intstr.GetScaledValueFromIntOrPercent(intstr.ValueOrDefault(maxUnavailable, intstr.FromInt(0)), replicas, true)
 	if err != nil {
 		// This should not happen after webhook validation
-		value = replicas * 20 / 100
+		value = 1
 	}
 	return value
 }
