@@ -345,6 +345,7 @@ func calculateStatus(args core.EnsureFuncArgs) (*agentsv1alpha1.SandboxStatus, b
 				"podRevision", pod.Labels[agentsv1alpha1.PodLabelTemplateHash],
 				"sandboxRevision", newStatus.UpdateRevision)
 			newStatus.Phase = agentsv1alpha1.SandboxUpgrading
+			utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
 		}
 
 	case agentsv1alpha1.SandboxPaused:
