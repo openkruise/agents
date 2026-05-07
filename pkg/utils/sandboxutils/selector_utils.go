@@ -45,10 +45,10 @@ func SelectorsOverlap(s1, s2 *metav1.LabelSelector) bool {
 	// Check for conflicting requirements on the same key
 	// If we find a key where both selectors have requirements that cannot both be satisfied,
 	// then they don't overlap.
-	
+
 	// For simplicity and safety in a webhook, if we can't prove they DON'T overlap,
 	// we assume they DO.
-	
+
 	// A simple overlap check: if there's a specific label match (MatchLabels) in both,
 	// and they have different values for the same key, they don't overlap.
 	for k, v1 := range s1.MatchLabels {
