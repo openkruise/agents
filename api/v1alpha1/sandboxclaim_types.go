@@ -57,7 +57,7 @@ type SandboxClaimSpec struct {
 	TTLAfterCompleted *metav1.Duration `json:"ttlAfterCompleted,omitempty"`
 
 	// Labels contains key-value pairs to be added as labels
-	// to claimed Sandbox resources
+	// to claimed Sandbox resources and synced to sandbox template labels.
 	// +optional
 	Labels map[string]string `json:"labels,omitempty"`
 

@@ -279,7 +279,7 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 			}
 			sbx.SetLabels(labels)
 
-			// propagate annotations to podtemplate
+			// propagate labels to podtemplate
 			labels = sbx.GetPodLabels()
 			if labels == nil {
 				labels = make(map[string]string)
