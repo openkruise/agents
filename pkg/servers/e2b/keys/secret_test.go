@@ -571,11 +571,11 @@ func TestSecretKeyStorage_DeleteAndList(t *testing.T) {
 	crossTeamKey := &models.CreatedTeamAPIKey{ID: uuid.New(), Key: uuid.NewString(), Name: "cross", Team: teamB, CreatedBy: &models.TeamUser{ID: owner}}
 	storage.storeKey(crossTeamKey)
 
-	keys, err := storage.ListByOwner(context.Background(), owner)
+	keys, err := storage.ListByOwnerTeam(context.Background(), &models.CreatedTeamAPIKey{ID: owner, Team: teamA})
 	require.NoError(t, err)
 	require.Len(t, keys, 3)
 
-	keys, err = storage.ListByOwner(context.Background(), uuid.New())
+	keys, err = storage.ListByOwnerTeam(context.Background(), &models.CreatedTeamAPIKey{ID: uuid.New(), Team: &models.Team{Name: "nonexistent"}})
 	require.NoError(t, err)
 	require.Len(t, keys, 0)
 
@@ -638,7 +638,8 @@ func TestSecretKeyStorage_ListByOwnerMatchesLegacyTeamsByName(t *testing.T) {
 			})
 			require.NoError(t, storage.refresh(context.Background(), storage.APIReader))
 
-			keys, err := storage.ListByOwner(context.Background(), ownerID)
+			ownerKey := &models.CreatedTeamAPIKey{ID: ownerID, Team: &models.Team{Name: tt.teamName}}
+			keys, err := storage.ListByOwnerTeam(context.Background(), ownerKey)
 			require.NoError(t, err)
 			require.Len(t, keys, tt.wantCount)
 		})

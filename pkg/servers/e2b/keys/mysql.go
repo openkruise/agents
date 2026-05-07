@@ -28,7 +28,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jellydator/ttlcache/v3"
-	"golang.org/x/sync/singleflight"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
@@ -90,6 +89,12 @@ type TeamAPIKeyEntity struct {
 // TableName overrides the table name.
 func (TeamAPIKeyEntity) TableName() string { return "team_api_keys" }
 
+type joinedAPIKeyRow struct {
+	TeamAPIKeyEntity
+	TeamUID  string `gorm:"column:team_uid"`
+	TeamName string `gorm:"column:team_name"`
+}
+
 type mysqlConfig struct {
 	DSN                string
 	AdminKey           string
@@ -106,7 +111,6 @@ type mysqlKeyStorage struct {
 	byID  *ttlcache.Cache[string, *models.CreatedTeamAPIKey] // key: API key uid
 
 	teamCache *ttlcache.Cache[string, *models.Team]
-	teamGroup singleflight.Group
 
 	stop     chan struct{}
 	stopOnce sync.Once
@@ -228,41 +232,95 @@ func (k *mysqlKeyStorage) Stop() {
 // LoadByKey resolves an API key by raw value (HMAC + cache + DB).
 func (k *mysqlKeyStorage) LoadByKey(ctx context.Context, key string) (*models.CreatedTeamAPIKey, bool) {
 	hash := k.hashKey(key)
-	if item := k.byKey.Get(hash); item != nil {
-		return item.Value(), true
+	if apiKey := k.cacheGetByKey(hash); apiKey != nil {
+		return apiKey, true
 	}
-	apiKey, err := k.loadCreatedKeyFromDB(ctx, &TeamAPIKeyEntity{KeyHash: hash})
+	apiKey, err := k.loadCreatedKeyByHashFromDB(ctx, hash)
 	if err != nil {
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
 			klog.FromContext(ctx).Error(err, "load key by hash")
 		}
 		return nil, false
 	}
-	k.cachePut(apiKey)
+	k.cachePutKey(apiKey)
 	return apiKey, true
 }
 
 // LoadByID resolves an API key by uid (cache + DB).
 func (k *mysqlKeyStorage) LoadByID(ctx context.Context, id string) (*models.CreatedTeamAPIKey, bool) {
-	if item := k.byID.Get(id); item != nil {
-		return item.Value(), true
+	if apiKey := k.cacheGetByID(id); apiKey != nil {
+		return apiKey, true
 	}
-	apiKey, err := k.loadCreatedKeyFromDB(ctx, &TeamAPIKeyEntity{UID: id})
+	apiKey, err := k.loadCreatedKeyByUIDFromDB(ctx, id)
 	if err != nil {
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
 			klog.FromContext(ctx).Error(err, "load key by uid")
 		}
 		return nil, false
 	}
-	k.cachePut(apiKey)
+	k.cachePutKey(apiKey)
 	return apiKey, true
 }
 
-func (k *mysqlKeyStorage) cachePut(apiKey *models.CreatedTeamAPIKey) {
-	if apiKey.KeyHash != "" {
-		k.byKey.Set(apiKey.KeyHash, apiKey, ttlcache.DefaultTTL)
+func (k *mysqlKeyStorage) cacheGetByKey(hash string) *models.CreatedTeamAPIKey {
+	if item := k.byKey.Get(hash); item != nil {
+		return cloneCreatedTeamAPIKey(item.Value())
 	}
-	k.byID.Set(apiKey.ID.String(), apiKey, ttlcache.DefaultTTL)
+	return nil
+}
+
+func (k *mysqlKeyStorage) cacheGetByID(id string) *models.CreatedTeamAPIKey {
+	if item := k.byID.Get(id); item != nil {
+		return cloneCreatedTeamAPIKey(item.Value())
+	}
+	return nil
+}
+
+func (k *mysqlKeyStorage) cachePutKey(apiKey *models.CreatedTeamAPIKey) {
+	cached := cloneCreatedTeamAPIKey(apiKey)
+	if cached == nil {
+		return
+	}
+	cached.Key = "" // never store the plaintext key even in cache
+	if cached.KeyHash != "" {
+		k.byKey.Set(cached.KeyHash, cached, ttlcache.DefaultTTL)
+	}
+	k.byID.Set(cached.ID.String(), cached, ttlcache.DefaultTTL)
+}
+
+func (k *mysqlKeyStorage) cachePutTeam(team *models.Team) {
+	if team == nil || team.Name == "" {
+		return
+	}
+	k.teamCache.Set(team.Name, cloneTeam(team), ttlcache.DefaultTTL)
+}
+
+// cloneCreatedTeamAPIKey returns a deep copy safe to hand to callers without
+// risking cache mutation. When adding new pointer or slice fields to
+// `models.CreatedTeamAPIKey`, extend this helper so they stay
+// independent of the cached instance.
+func cloneCreatedTeamAPIKey(apiKey *models.CreatedTeamAPIKey) *models.CreatedTeamAPIKey {
+	if apiKey == nil {
+		return nil
+	}
+	cloned := *apiKey
+	cloned.Team = cloneTeam(apiKey.Team)
+	cloned.CreatedBy = cloneTeamUser(apiKey.CreatedBy)
+	if apiKey.LastUsed != nil {
+		lastUsed := *apiKey.LastUsed
+		cloned.LastUsed = &lastUsed
+	}
+	return &cloned
+}
+
+func cloneTeamUser(user *models.TeamUser) *models.TeamUser {
+	if user == nil {
+		return nil
+	}
+	return &models.TeamUser{
+		Email: user.Email,
+		ID:    user.ID,
+	}
 }
 
 // CreateKey generates a new API key, stores only the HMAC hash, and returns the raw key once.
@@ -332,11 +390,12 @@ func (k *mysqlKeyStorage) CreateKey(ctx context.Context, key *models.CreatedTeam
 		CreatedBy: &models.TeamUser{ID: key.ID},
 	}
 	log.Info("api-key generated", "id", apiKey.ID)
-	k.cachePut(apiKey)
+	k.cachePutTeam(team)
+	k.cachePutKey(apiKey)
 	return apiKey, nil
 }
 
-// DeleteKey removes an API key from the database and caches.
+// DeleteKey removes only an API key from the database and caches. Created teams are reserved even if they have no keys.
 func (k *mysqlKeyStorage) DeleteKey(ctx context.Context, key *models.CreatedTeamAPIKey) error {
 	log := klog.FromContext(ctx).V(consts.DebugLogLevel)
 	if key == nil {
@@ -346,38 +405,42 @@ func (k *mysqlKeyStorage) DeleteKey(ctx context.Context, key *models.CreatedTeam
 		return ErrAdminKeyUndeletable
 	}
 	hash := key.KeyHash
-	err := k.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var entityToBeDeleted TeamAPIKeyEntity
-		if err := tx.Where(&TeamAPIKeyEntity{UID: key.ID.String()}).First(&entityToBeDeleted).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return nil
-			}
-			return fmt.Errorf("load api-key before delete: %w", err)
-		}
-		hash = entityToBeDeleted.KeyHash
-		var team TeamEntity
-		if err := tx.Where(&TeamEntity{Model: gorm.Model{ID: entityToBeDeleted.TeamID}}).First(&team).Error; err != nil {
-			return fmt.Errorf("lookup team before delete: %w", err)
-		}
-		if err := tx.Unscoped().Delete(&TeamAPIKeyEntity{}, entityToBeDeleted.ID).Error; err != nil {
-			return fmt.Errorf("delete api-key: %w", err)
-		}
-		if team.Name != models.AdminTeamName {
-			// If this was the last key of the team, delete the team too.
-			var count int64
-			if err := tx.Model(&TeamAPIKeyEntity{}).Where("team_id = ?", entityToBeDeleted.TeamID).Count(&count).Error; err != nil {
-				return fmt.Errorf("count team api-keys: %w", err)
-			}
-			if count == 0 {
-				if err := tx.Unscoped().Delete(&TeamEntity{}, entityToBeDeleted.TeamID).Error; err != nil {
-					return fmt.Errorf("delete team: %w", err)
+	if hash == "" {
+		if key.Key != "" {
+			hash = k.hashKey(key.Key)
+		} else {
+			var entity TeamAPIKeyEntity
+			// No `Unscoped()` here: this lookup is for cache invalidation, and
+			// invalidating the cache entry of a row that was already
+			// soft-deleted on a different code path would be wrong (its hash
+			// may belong to a stale row that no longer authenticates).
+			if err := k.db.WithContext(ctx).Model(&TeamAPIKeyEntity{}).
+				Select("key_hash").
+				Where("uid = ?", key.ID.String()).
+				Take(&entity).Error; err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					return nil
 				}
+				return fmt.Errorf("load api-key hash before delete: %w", err)
 			}
+			hash = entity.KeyHash
 		}
-		return nil
-	})
+	}
+
+	// Skip the implicit transaction that GORM wraps around every write operation.
+	// A single DELETE statement is already atomic, so the extra BEGIN/COMMIT
+	// round-trip is unnecessary overhead.
+	//
+	// GORM's `Delete` returns `nil` (with `RowsAffected == 0`) when the target
+	// row does not exist, so a missing key naturally falls through to the
+	// "deleted" branch and the cache invalidation below — no special handling
+	// needed.
+	err := k.db.WithContext(ctx).Session(&gorm.Session{SkipDefaultTransaction: true}).
+		Unscoped().
+		Where("uid = ?", key.ID.String()).
+		Delete(&TeamAPIKeyEntity{}).Error
 	if err != nil {
-		return err
+		return fmt.Errorf("delete api-key: %w", err)
 	}
 	log.Info("api-key deleted from db", "id", key.ID, "hash", hash)
 	if hash != "" {
@@ -390,23 +453,30 @@ func (k *mysqlKeyStorage) DeleteKey(ctx context.Context, key *models.CreatedTeam
 
 const defaultListTimeout = 5 * time.Second
 
-// ListByOwner lists API keys for the same team as the owner key (by TeamID), without using cache.
-func (k *mysqlKeyStorage) ListByOwner(ctx context.Context, owner uuid.UUID) ([]*models.TeamAPIKey, error) {
+// ListByOwnerTeam lists API keys belonging to the same team as the owner, without
+// using cache. The owner's team information is resolved from the passed-in
+// CreatedTeamAPIKey (populated at authentication time), avoiding an extra DB
+// round-trip.
+func (k *mysqlKeyStorage) ListByOwnerTeam(ctx context.Context, owner *models.CreatedTeamAPIKey) ([]*models.TeamAPIKey, error) {
+	if owner == nil {
+		return nil, nil
+	}
+	teamName := TeamForKey(owner).Name
+
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, defaultListTimeout)
 		defer cancel()
 	}
-	var ownerEntity TeamAPIKeyEntity
-	if err := k.db.WithContext(ctx).Where(&TeamAPIKeyEntity{UID: owner.String()}).
-		First(&ownerEntity).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("lookup owner key: %w", err)
-	}
 	var entities []TeamAPIKeyEntity
-	if err := k.db.WithContext(ctx).Where(&TeamAPIKeyEntity{TeamID: ownerEntity.TeamID}).
+	// `teams.deleted_at IS NULL` keeps the subquery from picking up a soft-deleted
+	// team that happens to share a name with an active one. Although the current
+	// flow does not soft-delete teams, the predicate keeps this resolver
+	// consistent with `loadCreatedKeyFromDB` and resilient to future changes.
+	if err := k.db.WithContext(ctx).
+		Model(&TeamAPIKeyEntity{}).
+		Select("created_at", "uid", "name", "created_by_uid").
+		Where("team_id = (SELECT id FROM teams WHERE name = ? AND deleted_at IS NULL LIMIT 1)", teamName).
 		Find(&entities).Error; err != nil {
 		return nil, fmt.Errorf("list keys by team: %w", err)
 	}
@@ -435,18 +505,31 @@ func (k *mysqlKeyStorage) ListTeams(ctx context.Context, user *models.CreatedTea
 		return nil, nil
 	}
 	log := klog.FromContext(ctx)
+	userTeam := TeamForKey(user)
+	// Non-admin users can only see their own team.
+	if userTeam.Name != models.AdminTeamName {
+		return []*models.ListedTeam{listedTeam(userTeam, true)}, nil
+	}
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, defaultListTimeout)
 		defer cancel()
 	}
-	userTeam := TeamForKey(user)
 	var entities []TeamEntity
-	query := k.db.WithContext(ctx).Model(&TeamEntity{})
-	if userTeam.Name != models.AdminTeamName {
-		query = query.Where(&TeamEntity{Name: userTeam.Name})
-	}
-	if err := query.Find(&entities).Error; err != nil {
+	// Filter out teams with no API keys via an EXISTS subquery. The teams table
+	// is the driving side; the subquery hits the indexed team_api_keys.team_id
+	// column and short-circuits on the first matching row, so per-team overhead
+	// stays small. The call is admin-only and low-frequency, and any runaway
+	// scan is bounded by the `defaultListTimeout` deadline above.
+	//
+	// `team_api_keys.deleted_at IS NULL` excludes soft-deleted keys so a team
+	// whose only keys have been deleted does not surface as "active".
+	// GORM's auto soft-delete predicate on the outer `teams` query already
+	// hides soft-deleted teams.
+	if err := k.db.WithContext(ctx).Model(&TeamEntity{}).
+		Select("uid", "name").
+		Where("EXISTS (SELECT 1 FROM team_api_keys WHERE team_api_keys.team_id = teams.id AND team_api_keys.deleted_at IS NULL)").
+		Find(&entities).Error; err != nil {
 		return nil, fmt.Errorf("list teams: %w", err)
 	}
 	result := make([]*models.ListedTeam, 0, len(entities))
@@ -456,6 +539,7 @@ func (k *mysqlKeyStorage) ListTeams(ctx context.Context, user *models.CreatedTea
 			log.Error(err, "failed to convert team entity to model, skip", "entity", entities[i])
 			continue
 		}
+		k.cachePutTeam(team)
 		result = append(result, listedTeam(team, entities[i].Name == userTeam.Name))
 	}
 	return result, nil
@@ -467,29 +551,20 @@ func (k *mysqlKeyStorage) FindTeamByName(ctx context.Context, teamName string) (
 		return cloneTeam(team), true, nil
 	}
 
-	result, err, _ := k.teamGroup.Do(teamName, func() (any, error) {
-		var team TeamEntity
-		if err := k.db.WithContext(ctx).Where(&TeamEntity{Name: teamName}).First(&team).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return nil, nil
-			}
-			return nil, fmt.Errorf("lookup team by name: %w", err)
+	var entity TeamEntity
+	// GORM's `Where(&TeamEntity{...}).First` already filters
+	// `deleted_at IS NULL`; soft-deleted teams must not satisfy a name lookup.
+	if err := k.db.WithContext(ctx).Where(&TeamEntity{Name: teamName}).First(&entity).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, false, nil
 		}
-		t, err := teamFromEntity(&team)
-		if err != nil {
-			return nil, err
-		}
-		k.teamCache.Set(teamName, t, ttlcache.DefaultTTL)
-		return t, nil
-	})
-
+		return nil, false, fmt.Errorf("lookup team by name: %w", err)
+	}
+	team, err := teamFromEntity(&entity)
 	if err != nil {
 		return nil, false, err
 	}
-	if result == nil {
-		return nil, false, nil
-	}
-	team := result.(*models.Team)
+	k.cachePutTeam(team)
 	return cloneTeam(team), true, nil
 }
 
@@ -543,31 +618,55 @@ func teamFromEntity(entity *TeamEntity) (*models.Team, error) {
 	return &models.Team{ID: id, Name: entity.Name}, nil
 }
 
-func (k *mysqlKeyStorage) loadCreatedKeyFromDB(ctx context.Context, where *TeamAPIKeyEntity) (*models.CreatedTeamAPIKey, error) {
-	var e TeamAPIKeyEntity
-	if err := k.db.WithContext(ctx).Where(where).First(&e).Error; err != nil {
-		return nil, err
-	}
-	id, err := uuid.Parse(e.UID)
-	if err != nil {
-		return nil, fmt.Errorf("parse entity uid %q: %w", e.UID, err)
-	}
-	createdBy := teamUserFromUID(ctx, e.CreatedByUID)
+func (k *mysqlKeyStorage) loadCreatedKeyByHashFromDB(ctx context.Context, hash string) (*models.CreatedTeamAPIKey, error) {
+	return k.loadCreatedKeyFromDB(ctx, func(query *gorm.DB) *gorm.DB {
+		return query.Where("team_api_keys.key_hash = ?", hash)
+	})
+}
 
-	var teamEntity TeamEntity
-	if err := k.db.WithContext(ctx).Where(&TeamEntity{Model: gorm.Model{ID: e.TeamID}}).First(&teamEntity).Error; err != nil {
-		return nil, fmt.Errorf("lookup team by id %d: %w", e.TeamID, err)
+func (k *mysqlKeyStorage) loadCreatedKeyByUIDFromDB(ctx context.Context, uid string) (*models.CreatedTeamAPIKey, error) {
+	return k.loadCreatedKeyFromDB(ctx, func(query *gorm.DB) *gorm.DB {
+		return query.Where("team_api_keys.uid = ?", uid)
+	})
+}
+
+func (k *mysqlKeyStorage) loadCreatedKeyFromDB(ctx context.Context, applyPredicate func(*gorm.DB) *gorm.DB) (*models.CreatedTeamAPIKey, error) {
+	var row joinedAPIKeyRow
+	// `Table("team_api_keys")` opts out of GORM's auto-managed soft-delete
+	// predicate, so both `deleted_at IS NULL` clauses below must be added by
+	// hand: the JOIN side hides soft-deleted teams (a key whose team has been
+	// removed must not authenticate), and the outer WHERE hides soft-deleted
+	// keys.
+	query := k.db.WithContext(ctx).Table("team_api_keys").
+		Select("team_api_keys.*, teams.uid AS team_uid, teams.name AS team_name").
+		Joins("JOIN teams ON teams.id = team_api_keys.team_id AND teams.deleted_at IS NULL").
+		Where("team_api_keys.deleted_at IS NULL")
+	if applyPredicate != nil {
+		query = applyPredicate(query)
 	}
-	team, err := teamFromEntity(&teamEntity)
-	if err != nil {
+	if err := query.Take(&row).Error; err != nil {
 		return nil, err
 	}
+	id, err := uuid.Parse(row.UID)
+	if err != nil {
+		return nil, fmt.Errorf("parse entity uid %q: %w", row.UID, err)
+	}
+	teamID, err := uuid.Parse(row.TeamUID)
+	if err != nil {
+		return nil, fmt.Errorf("parse team uid %q: %w", row.TeamUID, err)
+	}
+	createdBy := teamUserFromUID(ctx, row.CreatedByUID)
+	team := &models.Team{
+		ID:   teamID,
+		Name: row.TeamName,
+	}
+	k.cachePutTeam(team)
 
 	return &models.CreatedTeamAPIKey{
-		CreatedAt: e.CreatedAt,
+		CreatedAt: row.CreatedAt,
 		ID:        id,
-		KeyHash:   e.KeyHash,
-		Name:      e.Name,
+		KeyHash:   row.KeyHash,
+		Name:      row.Name,
 		Mask:      models.IdentifierMaskingDetails{},
 		CreatedBy: createdBy,
 		Team:      team,

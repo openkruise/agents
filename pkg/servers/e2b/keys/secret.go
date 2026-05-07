@@ -369,12 +369,11 @@ func (k *secretKeyStorage) DeleteKey(ctx context.Context, key *models.CreatedTea
 	return nil
 }
 
-func (k *secretKeyStorage) ListByOwner(ctx context.Context, owner uuid.UUID) ([]*models.TeamAPIKey, error) {
-	ownerKey, ok := k.LoadByID(ctx, owner.String())
-	if !ok {
+func (k *secretKeyStorage) ListByOwnerTeam(_ context.Context, owner *models.CreatedTeamAPIKey) ([]*models.TeamAPIKey, error) {
+	if owner == nil {
 		return nil, nil
 	}
-	ownerTeam := TeamForKey(ownerKey)
+	ownerTeam := TeamForKey(owner)
 	var result []*models.TeamAPIKey
 	k.idxByID.Range(func(_, value any) bool {
 		apikey := value.(*models.CreatedTeamAPIKey)
@@ -407,6 +406,13 @@ func (k *secretKeyStorage) ListTeams(_ context.Context, user *models.CreatedTeam
 		}
 		if _, exists := teamsByName[team.Name]; !exists {
 			teamsByName[team.Name] = cloneTeam(team)
+			// Non-admin users can only see their own team. Once it is
+			// collected, further iteration is unnecessary. Guard with the
+			// name match defensively in case the upstream filter ever stops
+			// excluding other teams from this branch.
+			if !isAdmin && team.Name == userTeam.Name {
+				return false
+			}
 		}
 		return true
 	})

@@ -35,7 +35,7 @@ func (sc *Controller) ListAPIKeys(r *http.Request) (web.ApiResponse[[]*models.Te
 			Message: "User not found",
 		}
 	}
-	apiKeys, err := sc.keys.ListByOwner(ctx, user.ID)
+	apiKeys, err := sc.keys.ListByOwnerTeam(ctx, user)
 	if err != nil {
 		return web.ApiResponse[[]*models.TeamAPIKey]{}, &web.ApiError{
 			Code:    http.StatusInternalServerError,

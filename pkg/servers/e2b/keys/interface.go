@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 
-	"github.com/google/uuid"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 )
 
@@ -43,7 +42,7 @@ type KeyStorage interface {
 	LoadByID(ctx context.Context, id string) (*models.CreatedTeamAPIKey, bool)
 	CreateKey(ctx context.Context, key *models.CreatedTeamAPIKey, opts CreateKeyOptions) (*models.CreatedTeamAPIKey, error)
 	DeleteKey(ctx context.Context, key *models.CreatedTeamAPIKey) error
-	ListByOwner(ctx context.Context, owner uuid.UUID) ([]*models.TeamAPIKey, error)
+	ListByOwnerTeam(ctx context.Context, owner *models.CreatedTeamAPIKey) ([]*models.TeamAPIKey, error)
 	ListTeams(ctx context.Context, user *models.CreatedTeamAPIKey) ([]*models.ListedTeam, error)
 	FindTeamByName(ctx context.Context, teamName string) (*models.Team, bool, error)
 }
