@@ -348,30 +348,29 @@ func (k *mysqlKeyStorage) CreateKey(ctx context.Context, key *models.CreatedTeam
 		newID = generateUUID()
 		newKey = generateUUID()
 		createdBy := key.ID.String()
-		return k.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-			teamEntity, err := k.resolveTeamByName(ctx, tx, teamName)
-			if err != nil {
-				return err
+		db := k.db.WithContext(ctx)
+		teamEntity, err := k.getOrCreateTeamDB(ctx, db, teamName)
+		if err != nil {
+			return err
+		}
+		team, err = teamFromEntity(teamEntity)
+		if err != nil {
+			return err
+		}
+		entity = TeamAPIKeyEntity{
+			UID:          newID.String(),
+			Name:         opts.Name,
+			KeyHash:      k.hashKey(newKey.String()),
+			TeamID:       teamEntity.ID,
+			CreatedByUID: &createdBy,
+		}
+		if err := db.Create(&entity).Error; err != nil {
+			if errors.Is(err, gorm.ErrDuplicatedKey) {
+				return errRetryableDuplicateKey
 			}
-			team, err = teamFromEntity(teamEntity)
-			if err != nil {
-				return err
-			}
-			entity = TeamAPIKeyEntity{
-				UID:          newID.String(),
-				Name:         opts.Name,
-				KeyHash:      k.hashKey(newKey.String()),
-				TeamID:       teamEntity.ID,
-				CreatedByUID: &createdBy,
-			}
-			if err := tx.Create(&entity).Error; err != nil {
-				if errors.Is(err, gorm.ErrDuplicatedKey) {
-					return errRetryableDuplicateKey
-				}
-				return fmt.Errorf("insert api-key: %w", err)
-			}
-			return nil
-		})
+			return fmt.Errorf("insert api-key: %w", err)
+		}
+		return nil
 	}); retryErr != nil {
 		if errors.Is(retryErr, errRetryableDuplicateKey) {
 			return nil, errors.New("failed to generate unique api-key")
@@ -574,7 +573,7 @@ func (k *mysqlKeyStorage) hashKey(raw string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-func (k *mysqlKeyStorage) resolveTeamByName(ctx context.Context, tx *gorm.DB, teamName string) (*TeamEntity, error) {
+func (k *mysqlKeyStorage) getOrCreateTeamDB(ctx context.Context, tx *gorm.DB, teamName string) (*TeamEntity, error) {
 	team := &TeamEntity{}
 	if err := tx.WithContext(ctx).Unscoped().Where(&TeamEntity{Name: teamName}).First(team).Error; err != nil {
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
