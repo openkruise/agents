@@ -34,6 +34,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
+	timeoututils "github.com/openkruise/agents/pkg/utils/timeout"
 	"github.com/openkruise/agents/pkg/utils/sandboxutils"
 	testutils "github.com/openkruise/agents/test/utils"
 )
@@ -89,7 +90,7 @@ func TestSandbox_ResumeConcurrent(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		s := AsSandbox(sandbox, cache)
 		go func() {
-			err := s.Resume(t.Context())
+			err := s.Resume(t.Context(), infra.ResumeOptions{})
 			resultCh <- err
 		}()
 	}
@@ -206,7 +207,7 @@ func TestSandbox_Resume_ContextExpiredAfterWait(t *testing.T) {
 	resumeCtx, resumeCancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
 	defer resumeCancel()
 
-	err = s.Resume(resumeCtx)
+	err = s.Resume(resumeCtx, infra.ResumeOptions{})
 
 	// Should succeed because Resume creates a fresh context for post-resume operations
 	require.NoError(t, err)
@@ -229,6 +230,8 @@ func TestSandbox_Pause(t *testing.T) {
 		initSandbox            func(sbx *v1alpha1.Sandbox)
 		expectedState          string
 		expectError            string
+		captureSnapshot        bool
+		expectSnapshot         bool
 		simulatePauseCompleted bool // use time.AfterFunc to simulate underlying pause completion
 		useShortTimeout        bool // simulate underlying not completing by using short context timeout
 	}{
@@ -246,6 +249,24 @@ func TestSandbox_Pause(t *testing.T) {
 			},
 			expectedState:          v1alpha1.SandboxStatePaused,
 			expectError:            "",
+			expectSnapshot:         false,
+			simulatePauseCompleted: true,
+		},
+		{
+			name: "pause running sandbox - capture timeout snapshot when requested",
+			initSandbox: func(sbx *v1alpha1.Sandbox) {
+				sbx.Status.Phase = v1alpha1.SandboxRunning
+				sbx.Status.Conditions = append(sbx.Status.Conditions, metav1.Condition{
+					Type:   string(v1alpha1.SandboxConditionReady),
+					Status: metav1.ConditionTrue,
+				})
+				sbx.Spec.Paused = false
+				state, reason := sandboxutils.GetSandboxState(sbx)
+				assert.Equal(t, v1alpha1.SandboxStateRunning, state, reason)
+			},
+			expectedState:          v1alpha1.SandboxStatePaused,
+			captureSnapshot:        true,
+			expectSnapshot:         true,
 			simulatePauseCompleted: true,
 		},
 		{
@@ -337,6 +358,10 @@ func TestSandbox_Pause(t *testing.T) {
 						PodIP: "10.0.0.1",
 					},
 				},
+				Spec: v1alpha1.SandboxSpec{
+					ShutdownTime: &metav1.Time{Time: now.Add(2 * time.Hour)},
+					PauseTime:    &metav1.Time{Time: now.Add(time.Hour)},
+				},
 			}
 
 			tt.initSandbox(sandbox)
@@ -354,6 +379,7 @@ func TestSandbox_Pause(t *testing.T) {
 					ShutdownTime: now.Add(time.Hour),
 					PauseTime:    now.Add(time.Minute),
 				},
+				CaptureTimeoutSnapshot: tt.captureSnapshot,
 			}
 
 			if tt.simulatePauseCompleted {
@@ -397,6 +423,8 @@ func TestSandbox_Pause(t *testing.T) {
 			if !opts.Timeout.PauseTime.IsZero() {
 				assert.WithinDuration(t, opts.Timeout.PauseTime, s.Sandbox.Spec.PauseTime.Time, time.Second)
 			}
+			_, hasSnapshot := s.Sandbox.Annotations[v1alpha1.AnnotationPauseTimeoutSnapshot]
+			assert.Equal(t, tt.expectSnapshot, hasSnapshot)
 		})
 	}
 }
@@ -544,6 +572,8 @@ func TestSandbox_Resume(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			shutdownTime := time.Now().Add(2 * time.Hour)
+			pauseTime := time.Now().Add(1 * time.Hour)
 			serverOpts := testutils.TestRuntimeServerOptions{
 				RunCommandResult: runtime.RunCommandResult{
 					PID:    1,
@@ -571,6 +601,10 @@ func TestSandbox_Resume(t *testing.T) {
 					PodInfo: v1alpha1.PodInfo{
 						PodIP: "10.0.0.1",
 					},
+				},
+				Spec: v1alpha1.SandboxSpec{
+					ShutdownTime: &metav1.Time{Time: shutdownTime},
+					PauseTime:    &metav1.Time{Time: pauseTime},
 				},
 			}
 
@@ -621,7 +655,7 @@ func TestSandbox_Resume(t *testing.T) {
 			}
 			defer resumeCancel()
 
-			err = s.Resume(resumeCtx)
+			err = s.Resume(resumeCtx, infra.ResumeOptions{})
 
 			if tt.expectError != "" {
 				require.Error(t, err)
@@ -636,8 +670,177 @@ func TestSandbox_Resume(t *testing.T) {
 			state, reason := sandboxutils.GetSandboxState(&updatedSbx)
 			assert.Equal(t, tt.expectedState, state, reason)
 			assert.False(t, updatedSbx.Spec.Paused)
-			assert.Nil(t, updatedSbx.Spec.ShutdownTime)
-			assert.Nil(t, updatedSbx.Spec.PauseTime)
+			require.NotNil(t, updatedSbx.Spec.ShutdownTime)
+			require.NotNil(t, updatedSbx.Spec.PauseTime)
+			assert.WithinDuration(t, shutdownTime, updatedSbx.Spec.ShutdownTime.Time, time.Second)
+			assert.WithinDuration(t, pauseTime, updatedSbx.Spec.PauseTime.Time, time.Second)
+		})
+	}
+}
+
+func TestSandbox_ResumePreservesTimeoutOnError(t *testing.T) {
+	shutdownTime := time.Now().Add(2 * time.Hour)
+	pauseTime := time.Now().Add(1 * time.Hour)
+	sandbox := &v1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-sandbox",
+			Namespace: "default",
+			Labels: map[string]string{
+				v1alpha1.LabelSandboxIsClaimed: "true",
+			},
+		},
+		Spec: v1alpha1.SandboxSpec{
+			Paused:       true,
+			ShutdownTime: &metav1.Time{Time: shutdownTime},
+			PauseTime:    &metav1.Time{Time: pauseTime},
+		},
+		Status: v1alpha1.SandboxStatus{
+			Phase: v1alpha1.SandboxPaused,
+			Conditions: []metav1.Condition{
+				{
+					Type:   string(v1alpha1.SandboxConditionPaused),
+					Status: metav1.ConditionTrue,
+				},
+			},
+		},
+	}
+
+	cache, fc, err := cachetest.NewTestCache(t)
+	require.NoError(t, err)
+	require.NoError(t, cache.Run(t.Context()))
+	defer cache.Stop(t.Context())
+	CreateSandboxWithStatus(t, fc, sandbox)
+	time.Sleep(10 * time.Millisecond)
+
+	s := AsSandbox(sandbox, cache)
+	resumeCtx, cancel := context.WithTimeout(t.Context(), 150*time.Millisecond)
+	defer cancel()
+
+	err = s.Resume(resumeCtx, infra.ResumeOptions{})
+	require.Error(t, err)
+
+	var updatedSbx v1alpha1.Sandbox
+	require.NoError(t, fc.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "test-sandbox"}, &updatedSbx))
+	assert.False(t, updatedSbx.Spec.Paused)
+	require.NotNil(t, updatedSbx.Spec.ShutdownTime)
+	require.NotNil(t, updatedSbx.Spec.PauseTime)
+	assert.WithinDuration(t, shutdownTime, updatedSbx.Spec.ShutdownTime.Time, time.Second)
+	assert.WithinDuration(t, pauseTime, updatedSbx.Spec.PauseTime.Time, time.Second)
+}
+
+func TestSandbox_ResumeEnsuresTimeoutSnapshotIfMissing(t *testing.T) {
+	tests := []struct {
+		name                  string
+		prepare               func(*v1alpha1.Sandbox)
+		opts                  infra.ResumeOptions
+		expectSnapshot        bool
+		expectSnapshotMatches bool
+	}{
+		{
+			name: "resume without option keeps missing snapshot absent",
+			prepare: func(sbx *v1alpha1.Sandbox) {
+			},
+			opts:           infra.ResumeOptions{},
+			expectSnapshot: false,
+		},
+		{
+			name: "resume with option creates missing snapshot",
+			prepare: func(sbx *v1alpha1.Sandbox) {
+			},
+			opts: infra.ResumeOptions{
+				EnsureTimeoutSnapshotIfMissing: true,
+			},
+			expectSnapshot:        true,
+			expectSnapshotMatches: true,
+		},
+		{
+			name: "resume with option repairs malformed snapshot",
+			prepare: func(sbx *v1alpha1.Sandbox) {
+				sbx.Annotations[v1alpha1.AnnotationPauseTimeoutSnapshot] = "{bad-json"
+			},
+			opts: infra.ResumeOptions{
+				EnsureTimeoutSnapshotIfMissing: true,
+			},
+			expectSnapshot:        true,
+			expectSnapshotMatches: true,
+		},
+		{
+			name: "resume with option preserves valid mismatched snapshot",
+			prepare: func(sbx *v1alpha1.Sandbox) {
+				sbx.Annotations[v1alpha1.AnnotationPauseTimeoutSnapshot] = `{"shutdownTime":"2099-01-01T00:00:00Z"}`
+			},
+			opts: infra.ResumeOptions{
+				EnsureTimeoutSnapshotIfMissing: true,
+			},
+			expectSnapshot:        true,
+			expectSnapshotMatches: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			shutdownTime := time.Now().Add(2 * time.Hour)
+			pauseTime := time.Now().Add(1 * time.Hour)
+			sandbox := &v1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+					Labels: map[string]string{
+						v1alpha1.LabelSandboxIsClaimed: "true",
+					},
+					Annotations: map[string]string{},
+				},
+				Spec: v1alpha1.SandboxSpec{
+					Paused:       true,
+					ShutdownTime: &metav1.Time{Time: shutdownTime},
+					PauseTime:    &metav1.Time{Time: pauseTime},
+				},
+				Status: v1alpha1.SandboxStatus{
+					Phase: v1alpha1.SandboxPaused,
+					Conditions: []metav1.Condition{
+						{
+							Type:   string(v1alpha1.SandboxConditionPaused),
+							Status: metav1.ConditionTrue,
+						},
+					},
+				},
+			}
+			tt.prepare(sandbox)
+
+			cache, fc, err := cachetest.NewTestCache(t)
+			require.NoError(t, err)
+			require.NoError(t, cache.Run(t.Context()))
+			defer cache.Stop(t.Context())
+			CreateSandboxWithStatus(t, fc, sandbox)
+			time.Sleep(10 * time.Millisecond)
+
+			s := AsSandbox(sandbox, cache)
+			mockMgr := cache.GetMockManager()
+			mockMgr.AddWaitReconcileKey(sandbox)
+			modified := s.Sandbox.DeepCopy()
+			mergeFrom := ctrl.MergeFrom(s.Sandbox)
+			time.AfterFunc(20*time.Millisecond, func() {
+				modified.Status.Phase = v1alpha1.SandboxRunning
+				modified.Status.Conditions = []metav1.Condition{
+					{Type: string(v1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue, Reason: "Resume"},
+				}
+				_ = fc.Status().Patch(t.Context(), modified, mergeFrom)
+			})
+
+			resumeCtx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+
+			require.NoError(t, s.Resume(resumeCtx, tt.opts))
+
+			var updatedSbx v1alpha1.Sandbox
+			require.NoError(t, fc.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "test-sandbox"}, &updatedSbx))
+			_, exists := updatedSbx.Annotations[v1alpha1.AnnotationPauseTimeoutSnapshot]
+			assert.Equal(t, tt.expectSnapshot, exists)
+			if tt.expectSnapshot {
+				matched, err := timeoututils.IsTimeoutMatchedSnapshot(&updatedSbx)
+				require.NoError(t, err)
+				assert.Equal(t, tt.expectSnapshotMatches, matched)
+			}
 		})
 	}
 }

@@ -67,6 +67,9 @@ func TestPauseSandbox(t *testing.T) {
 	assert.Nil(t, err)
 	assert.Equal(t, http.StatusNoContent, pauseResp.Code)
 	assert.Equal(t, models.SandboxStatePaused, describeResp.Body.State)
+	pausedSandbox := GetSandbox(t, createResp.Body.SandboxID, fc)
+	_, hasSnapshot := pausedSandbox.Annotations[agentsv1alpha1.AnnotationPauseTimeoutSnapshot]
+	assert.True(t, hasSnapshot)
 
 	// pause again
 	start := time.Now()

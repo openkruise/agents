@@ -21,22 +21,34 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/openkruise/agents/pkg/utils/runtime"
+	"github.com/openkruise/agents/pkg/utils/timeout"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/openkruise/agents/api/v1alpha1"
+	infracache "github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/cache/cachetest"
+	"github.com/openkruise/agents/pkg/cache/controllers"
 	"github.com/openkruise/agents/pkg/proxy"
+	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/sandbox-manager/proxyutils"
@@ -71,6 +83,290 @@ func ConvertPodToSandboxCR(pod *corev1.Pod) *v1alpha1.Sandbox {
 		sbx.Spec.Paused = true
 	}
 	return sbx
+}
+
+func TestSandbox_SaveTimeoutWithPolicy(t *testing.T) {
+	base := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	timeoutPtr := func(opts infra.TimeoutOptions) *infra.TimeoutOptions {
+		return &opts
+	}
+
+	tests := []struct {
+		name          string
+		current       infra.TimeoutOptions
+		snapshot      *infra.TimeoutOptions
+		requested     infra.TimeoutOptions
+		policy        infra.TimeoutUpdatePolicy
+		expectUpdated bool
+		expectTimeout infra.TimeoutOptions
+		expectError   string
+	}{
+		{
+			name: "always updates when requested timeout differs",
+			current: infra.TimeoutOptions{
+				ShutdownTime: base.Add(10 * time.Minute),
+			},
+			requested: infra.TimeoutOptions{
+				ShutdownTime: base.Add(20 * time.Minute),
+			},
+			policy:        infra.TimeoutUpdatePolicyAlways,
+			expectUpdated: true,
+			expectTimeout: infra.TimeoutOptions{ShutdownTime: base.Add(20 * time.Minute)},
+		},
+		{
+			name: "always skips when requested timeout matches current",
+			current: infra.TimeoutOptions{
+				ShutdownTime: base.Add(10 * time.Minute),
+			},
+			requested: infra.TimeoutOptions{
+				ShutdownTime: base.Add(10 * time.Minute),
+			},
+			policy:        infra.TimeoutUpdatePolicyAlways,
+			expectUpdated: false,
+			expectTimeout: infra.TimeoutOptions{ShutdownTime: base.Add(10 * time.Minute)},
+		},
+		{
+			name: "extend only updates when requested timeout extends current timeout",
+			current: infra.TimeoutOptions{
+				ShutdownTime: base.Add(10 * time.Minute),
+			},
+			requested: infra.TimeoutOptions{
+				ShutdownTime: base.Add(25 * time.Minute),
+			},
+			policy:        infra.TimeoutUpdatePolicyExtendOnly,
+			expectUpdated: true,
+			expectTimeout: infra.TimeoutOptions{ShutdownTime: base.Add(25 * time.Minute)},
+		},
+		{
+			name: "extend only skips when requested timeout shortens current timeout",
+			current: infra.TimeoutOptions{
+				ShutdownTime: base.Add(25 * time.Minute),
+			},
+			requested: infra.TimeoutOptions{
+				ShutdownTime: base.Add(10 * time.Minute),
+			},
+			policy:        infra.TimeoutUpdatePolicyExtendOnly,
+			expectUpdated: false,
+			expectTimeout: infra.TimeoutOptions{ShutdownTime: base.Add(25 * time.Minute)},
+		},
+		{
+			name: "snapshot aware without snapshot behaves like always",
+			current: infra.TimeoutOptions{
+				ShutdownTime: base.Add(10 * time.Minute),
+			},
+			requested: infra.TimeoutOptions{
+				ShutdownTime: base.Add(20 * time.Minute),
+			},
+			policy:        infra.TimeoutUpdatePolicySnapshotAware,
+			expectUpdated: true,
+			expectTimeout: infra.TimeoutOptions{ShutdownTime: base.Add(20 * time.Minute)},
+		},
+		{
+			name: "snapshot aware with matching snapshot behaves like always",
+			current: infra.TimeoutOptions{
+				ShutdownTime: base.Add(10 * time.Minute),
+			},
+			snapshot: timeoutPtr(infra.TimeoutOptions{
+				ShutdownTime: base.Add(10 * time.Minute),
+			}),
+			requested: infra.TimeoutOptions{
+				ShutdownTime: base.Add(18 * time.Minute),
+			},
+			policy:        infra.TimeoutUpdatePolicySnapshotAware,
+			expectUpdated: true,
+			expectTimeout: infra.TimeoutOptions{ShutdownTime: base.Add(18 * time.Minute)},
+		},
+		{
+			name: "snapshot aware with drifted snapshot only allows extension",
+			current: infra.TimeoutOptions{
+				ShutdownTime: base.Add(15 * time.Minute),
+			},
+			snapshot: timeoutPtr(infra.TimeoutOptions{
+				ShutdownTime: base.Add(10 * time.Minute),
+			}),
+			requested: infra.TimeoutOptions{
+				ShutdownTime: base.Add(30 * time.Minute),
+			},
+			policy:        infra.TimeoutUpdatePolicySnapshotAware,
+			expectUpdated: true,
+			expectTimeout: infra.TimeoutOptions{ShutdownTime: base.Add(30 * time.Minute)},
+		},
+		{
+			name: "snapshot aware with drifted snapshot rejects non extending timeout",
+			current: infra.TimeoutOptions{
+				ShutdownTime: base.Add(15 * time.Minute),
+			},
+			snapshot: timeoutPtr(infra.TimeoutOptions{
+				ShutdownTime: base.Add(10 * time.Minute),
+			}),
+			requested: infra.TimeoutOptions{
+				ShutdownTime: base.Add(12 * time.Minute),
+			},
+			policy:        infra.TimeoutUpdatePolicySnapshotAware,
+			expectUpdated: false,
+			expectTimeout: infra.TimeoutOptions{ShutdownTime: base.Add(15 * time.Minute)},
+		},
+		{
+			name: "unsupported policy returns error without mutating timeout",
+			current: infra.TimeoutOptions{
+				ShutdownTime: base.Add(10 * time.Minute),
+			},
+			requested: infra.TimeoutOptions{
+				ShutdownTime: base.Add(20 * time.Minute),
+			},
+			policy:      infra.TimeoutUpdatePolicy("Invalid"),
+			expectError: "unsupported timeout update policy",
+			expectTimeout: infra.TimeoutOptions{
+				ShutdownTime: base.Add(10 * time.Minute),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			infraInstance, fc := NewTestInfra(t)
+
+			sbx := createTestSandboxWithDefaults("test-sandbox", "default")
+			if tt.snapshot != nil {
+				setTimeout(sbx, *tt.snapshot)
+				require.NoError(t, timeout.SetTimeoutSnapshot(sbx))
+			}
+			setTimeout(sbx, tt.current)
+			CreateSandboxWithStatus(t, fc, sbx)
+
+			var sandbox infra.Sandbox
+			require.Eventually(t, func() bool {
+				var err error
+				sandbox, err = infraInstance.GetClaimedSandbox(t.Context(), sbx.Namespace+"--"+sbx.Name)
+				return err == nil
+			}, time.Second, 10*time.Millisecond)
+
+			result, err := sandbox.SaveTimeoutWithPolicy(t.Context(), tt.requested, tt.policy)
+			if tt.expectError != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, tt.expectUpdated, result.Updated)
+				assert.True(t, timeout.Equal(tt.expectTimeout, sandbox.GetTimeout()))
+			}
+
+			var updated v1alpha1.Sandbox
+			require.NoError(t, fc.Get(t.Context(), types.NamespacedName{Namespace: sbx.Namespace, Name: sbx.Name}, &updated))
+			assert.True(t, timeout.Equal(tt.expectTimeout, timeout.GetTimeoutFromSandbox(&updated)))
+		})
+	}
+}
+
+//goland:noinspection GoDeprecation
+func TestSandbox_SaveTimeoutWithPolicy_OnConflict(t *testing.T) {
+	scheme := k8sruntime.NewScheme()
+	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(v1alpha1.AddToScheme(scheme))
+
+	var interceptedUpdates atomic.Int32
+	var firstTwoUpdates sync.WaitGroup
+	firstTwoUpdates.Add(2)
+	releaseUpdates := make(chan struct{})
+
+	builder := fake.NewClientBuilder().WithScheme(scheme)
+	for _, idx := range infracache.GetIndexFuncs() {
+		builder = builder.WithIndex(idx.Obj, idx.FieldName, idx.Extract)
+	}
+	builder = builder.WithStatusSubresource(&v1alpha1.Sandbox{})
+	builder = builder.WithInterceptorFuncs(interceptor.Funcs{
+		Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+			if _, ok := obj.(*v1alpha1.Sandbox); ok {
+				if interceptedUpdates.Add(1) <= 2 {
+					firstTwoUpdates.Done()
+					<-releaseUpdates
+				}
+			}
+			return c.Update(ctx, obj, opts...)
+		},
+	})
+	fc := builder.Build()
+
+	mgrBuilder, err := controllers.NewMockManagerBuilder(t)
+	require.NoError(t, err)
+	mgr := mgrBuilder.
+		WithScheme(scheme).
+		WithClient(fc).
+		WithWaitSimulation().
+		Build()
+
+	testCache, err := infracache.NewCache(mgr)
+	require.NoError(t, err)
+	mgr.SetWaitHooks(testCache.GetWaitHooks())
+
+	options := config.InitOptions(config.SandboxManagerOptions{
+		DisableRouteReconciliation: true,
+	})
+	infraInstance := NewInfraBuilder(options).
+		WithCache(testCache).
+		WithAPIReader(fc).
+		WithProxy(proxy.NewServer(options)).
+		Build()
+	require.NoError(t, infraInstance.Run(t.Context()))
+	infraImpl := infraInstance.(*Infra)
+
+	base := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	current := infra.TimeoutOptions{ShutdownTime: base.Add(10 * time.Minute)}
+	requested := infra.TimeoutOptions{ShutdownTime: base.Add(20 * time.Minute)}
+
+	sbx := createTestSandboxWithDefaults("test-sandbox", "default")
+	setTimeout(sbx, current)
+	CreateSandboxWithStatus(t, fc, sbx)
+
+	var sandboxA infra.Sandbox
+	var sandboxB infra.Sandbox
+	require.Eventually(t, func() bool {
+		var getErr error
+		sandboxA, getErr = infraImpl.GetClaimedSandbox(t.Context(), sbx.Namespace+"--"+sbx.Name)
+		if getErr != nil {
+			return false
+		}
+		sandboxB, getErr = infraImpl.GetClaimedSandbox(t.Context(), sbx.Namespace+"--"+sbx.Name)
+		return getErr == nil
+	}, time.Second, 10*time.Millisecond)
+
+	type saveResult struct {
+		result infra.TimeoutUpdateResult
+		err    error
+	}
+
+	results := make(chan saveResult, 2)
+	go func() {
+		result, saveErr := sandboxA.SaveTimeoutWithPolicy(t.Context(), requested, infra.TimeoutUpdatePolicyAlways)
+		results <- saveResult{result: result, err: saveErr}
+	}()
+	go func() {
+		result, saveErr := sandboxB.SaveTimeoutWithPolicy(t.Context(), requested, infra.TimeoutUpdatePolicyAlways)
+		results <- saveResult{result: result, err: saveErr}
+	}()
+
+	firstTwoUpdates.Wait()
+	close(releaseUpdates)
+
+	first := <-results
+	second := <-results
+	require.NoError(t, first.err)
+	require.NoError(t, second.err)
+
+	updatedCount := 0
+	for _, item := range []saveResult{first, second} {
+		if item.result.Updated {
+			updatedCount++
+		}
+	}
+	assert.Equal(t, 1, updatedCount)
+	assert.Equal(t, int32(2), interceptedUpdates.Load())
+	assert.True(t, timeout.Equal(requested, sandboxA.GetTimeout()))
+	assert.True(t, timeout.Equal(requested, sandboxB.GetTimeout()))
+
+	var updated v1alpha1.Sandbox
+	require.NoError(t, fc.Get(t.Context(), types.NamespacedName{Namespace: sbx.Namespace, Name: sbx.Name}, &updated))
+	assert.True(t, timeout.Equal(requested, timeout.GetTimeoutFromSandbox(&updated)))
 }
 
 func TestSandbox_GetTemplate(t *testing.T) {
@@ -370,7 +666,7 @@ func TestSandbox_GetTimeout(t *testing.T) {
 				Sandbox: tt.sandbox,
 			}
 			result := s.GetTimeout()
-			assert.Equal(t, tt.expected, result)
+			assert.True(t, timeout.Equal(tt.expected, result))
 		})
 	}
 }
@@ -460,71 +756,6 @@ func TestSandbox_Request(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 }
 
-func TestSandbox_SaveTimeout(t *testing.T) {
-	now := time.Now()
-	tests := []struct {
-		name        string
-		initialTime *metav1.Time
-		opts        infra.TimeoutOptions
-	}{
-		{
-			name:        "set timeout on sandbox without existing timeout",
-			initialTime: nil,
-			opts: infra.TimeoutOptions{
-				ShutdownTime: now.Add(30 * time.Minute),
-				PauseTime:    now.Add(15 * time.Minute),
-			},
-		},
-		{
-			name:        "update timeout on sandbox with existing timeout",
-			initialTime: &metav1.Time{Time: now.Add(1 * time.Hour)},
-			opts: infra.TimeoutOptions{
-				ShutdownTime: now.Add(30 * time.Minute),
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			sandbox := &v1alpha1.Sandbox{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-sandbox",
-					Namespace: "default",
-					Labels: map[string]string{
-						v1alpha1.LabelSandboxIsClaimed: "true",
-					},
-				},
-				Spec: v1alpha1.SandboxSpec{
-					ShutdownTime: tt.initialTime,
-				},
-			}
-
-			cache, fc, err := cachetest.NewTestCache(t)
-			assert.NoError(t, err)
-			require.NoError(t, cache.Run(t.Context()))
-			defer cache.Stop(t.Context())
-			require.NoError(t, fc.Create(t.Context(), sandbox))
-			time.Sleep(20 * time.Millisecond)
-
-			s := AsSandbox(sandbox, cache)
-
-			err = s.SaveTimeout(t.Context(), tt.opts)
-			assert.NoError(t, err)
-
-			var updatedSandbox v1alpha1.Sandbox
-			require.NoError(t, fc.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "test-sandbox"}, &updatedSandbox))
-			if !tt.opts.PauseTime.IsZero() {
-				assert.NotNil(t, updatedSandbox.Spec.PauseTime)
-				assert.WithinDuration(t, tt.opts.PauseTime, updatedSandbox.Spec.PauseTime.Time, time.Second)
-			}
-			if !tt.opts.ShutdownTime.IsZero() {
-				assert.NotNil(t, updatedSandbox.Spec.ShutdownTime)
-				assert.WithinDuration(t, tt.opts.ShutdownTime, updatedSandbox.Spec.ShutdownTime.Time, time.Second)
-			}
-		})
-	}
-}
-
 func TestSandbox_SetTimeout(t *testing.T) {
 	now := time.Now()
 	tests := []struct {
@@ -572,8 +803,8 @@ func TestSandbox_SetTimeout(t *testing.T) {
 
 			s.SetTimeout(tt.opts)
 
-			assert.WithinDuration(t, tt.opts.ShutdownTime, getTimeFromMetaTime(s.Sandbox.Spec.ShutdownTime), time.Millisecond)
-			assert.WithinDuration(t, tt.opts.PauseTime, getTimeFromMetaTime(s.Sandbox.Spec.PauseTime), time.Millisecond)
+			assert.True(t, timeout.NormalizeTime(tt.opts.ShutdownTime).Equal(timeout.NormalizeTime(getTimeFromMetaTime(s.Sandbox.Spec.ShutdownTime))))
+			assert.True(t, timeout.NormalizeTime(tt.opts.PauseTime).Equal(timeout.NormalizeTime(getTimeFromMetaTime(s.Sandbox.Spec.PauseTime))))
 		})
 	}
 }

@@ -19,6 +19,7 @@ package sandbox
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -41,6 +42,7 @@ import (
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
+	timeoututils "github.com/openkruise/agents/pkg/utils/timeout"
 )
 
 func TestAdd_FeatureGateDisabled(t *testing.T) {
@@ -3225,5 +3227,302 @@ func TestUpdateSandboxStatus_Upgrading_RevisionUnchanged_NoReset(t *testing.T) {
 	}
 	if upgradeCond.Message != "upgrading pod" {
 		t.Errorf("Expected Message %q, got %q", "upgrading pod", upgradeCond.Message)
+	}
+}
+
+func TestEnsurePauseTimeoutSnapshot(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	baseTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name       string
+		sandbox    *agentsv1alpha1.Sandbox
+		prepare    func(*agentsv1alpha1.Sandbox) // mutate sandbox before test
+		getErr     error                         // non-NotFound error for Get
+		patchErr   error                         // non-NotFound error for Patch
+		expectErr  string
+		expectAnno bool // whether AnnotationPauseTimeoutSnapshot should exist after
+	}{
+		{
+			name: "snapshot already matched - fast path no-op",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "fast-path", Namespace: "default"},
+				Spec: agentsv1alpha1.SandboxSpec{
+					Paused:       true,
+					ShutdownTime: &metav1.Time{Time: baseTime.Add(1 * time.Hour)},
+				},
+			},
+			prepare: func(s *agentsv1alpha1.Sandbox) {
+				if err := timeoututils.SetTimeoutSnapshot(s); err != nil {
+					t.Fatalf("failed to set up snapshot: %v", err)
+				}
+			},
+			expectAnno: true,
+		},
+		{
+			name: "no snapshot, paused sandbox with timeout - sets snapshot",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "set-snapshot", Namespace: "default"},
+				Spec: agentsv1alpha1.SandboxSpec{
+					Paused:       true,
+					ShutdownTime: &metav1.Time{Time: baseTime.Add(1 * time.Hour)},
+				},
+			},
+			expectAnno: true,
+		},
+		{
+			name: "no snapshot, paused sandbox without timeout - no snapshot written",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "no-timeout", Namespace: "default"},
+				Spec: agentsv1alpha1.SandboxSpec{
+					Paused: true,
+				},
+			},
+			expectAnno: false,
+		},
+		{
+			name: "latest sandbox not paused - skips snapshot write",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "not-paused-latest", Namespace: "default"},
+				Spec: agentsv1alpha1.SandboxSpec{
+					Paused:       false, // latest in API has Paused=false
+					ShutdownTime: &metav1.Time{Time: baseTime.Add(1 * time.Hour)},
+				},
+			},
+			expectAnno: false,
+		},
+		{
+			name: "snapshot mismatched - overwrites old snapshot",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "overwrite", Namespace: "default", Annotations: map[string]string{}},
+				Spec: agentsv1alpha1.SandboxSpec{
+					Paused:       true,
+					ShutdownTime: &metav1.Time{Time: baseTime.Add(2 * time.Hour)},
+				},
+			},
+			prepare: func(s *agentsv1alpha1.Sandbox) {
+				// Build a stale snapshot with a different timeout value
+				s.Spec.ShutdownTime = &metav1.Time{Time: baseTime.Add(1 * time.Hour)}
+				if err := timeoututils.SetTimeoutSnapshot(s); err != nil {
+					t.Fatalf("failed to set old snapshot: %v", err)
+				}
+				// Restore the new timeout that the reconciler will see
+				s.Spec.ShutdownTime = &metav1.Time{Time: baseTime.Add(2 * time.Hour)}
+			},
+			expectAnno: true,
+		},
+		{
+			name: "get latest fails - returns error",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "get-err", Namespace: "default"},
+				Spec: agentsv1alpha1.SandboxSpec{
+					Paused:       true,
+					ShutdownTime: &metav1.Time{Time: baseTime.Add(1 * time.Hour)},
+				},
+			},
+			getErr:    fmt.Errorf("connection refused"),
+			expectErr: "connection refused",
+		},
+		{
+			name: "patch fails - returns error",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "patch-err", Namespace: "default"},
+				Spec: agentsv1alpha1.SandboxSpec{
+					Paused:       true,
+					ShutdownTime: &metav1.Time{Time: baseTime.Add(1 * time.Hour)},
+				},
+			},
+			patchErr:  fmt.Errorf("api server error"),
+			expectErr: "api server error",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.prepare != nil {
+				tt.prepare(tt.sandbox)
+			}
+
+			builder := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tt.sandbox)
+			if tt.getErr != nil || tt.patchErr != nil {
+				builder = builder.WithInterceptorFuncs(interceptor.Funcs{
+					Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+						if tt.getErr != nil {
+							return tt.getErr
+						}
+						return c.Get(ctx, key, obj, opts...)
+					},
+					Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+						if tt.patchErr != nil {
+							return tt.patchErr
+						}
+						return c.Patch(ctx, obj, patch, opts...)
+					},
+				})
+			}
+			fc := builder.Build()
+
+			r := &SandboxReconciler{
+				Client: fc,
+				Scheme: scheme,
+			}
+
+			err := r.ensurePauseTimeoutSnapshot(context.Background(), tt.sandbox)
+			if tt.expectErr != "" {
+				if err == nil {
+					t.Errorf("expected error containing %q, got nil", tt.expectErr)
+				} else if !strings.Contains(err.Error(), tt.expectErr) {
+					t.Errorf("expected error containing %q, got %v", tt.expectErr, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Errorf("unexpected error: %v", err)
+				return
+			}
+
+			// Verify annotation state on the sandbox stored in the fake client
+			stored := &agentsv1alpha1.Sandbox{}
+			if getErr := fc.Get(context.Background(), client.ObjectKeyFromObject(tt.sandbox), stored); getErr != nil {
+				t.Fatalf("failed to get stored sandbox: %v", getErr)
+			}
+			_, hasAnno := stored.Annotations[agentsv1alpha1.AnnotationPauseTimeoutSnapshot]
+			if hasAnno != tt.expectAnno {
+				t.Errorf("expected annotation presence=%v, got presence=%v", tt.expectAnno, hasAnno)
+			}
+
+			// When annotation is expected, verify it matches the stored sandbox timeout
+			if hasAnno {
+				matched, checkErr := timeoututils.IsTimeoutMatchedSnapshot(stored)
+				if checkErr != nil {
+					t.Errorf("failed to check snapshot match: %v", checkErr)
+				} else if !matched {
+					t.Errorf("expected snapshot annotation to match current timeout")
+				}
+			}
+		})
+	}
+}
+
+func TestEnsureSandboxPaused_SnapshotErrorPropagated(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	sandbox := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "err-propagation", Namespace: "default"},
+		Spec: agentsv1alpha1.SandboxSpec{
+			Paused:       true,
+			ShutdownTime: &metav1.Time{Time: time.Now().Add(1 * time.Hour).Truncate(time.Second)},
+		},
+	}
+
+	patchErr := fmt.Errorf("simulated patch error")
+	fc := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(sandbox).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				return patchErr
+			},
+		}).
+		Build()
+
+	recorder := record.NewFakeRecorder(10)
+	rl := core.NewRateLimiter()
+	r := &SandboxReconciler{
+		Client: fc,
+		Scheme: scheme,
+		controls: core.NewSandboxControl(core.SandboxControlArgs{
+			Client:      fc,
+			Recorder:    recorder,
+			RateLimiter: rl,
+		}),
+		rateLimiter: rl,
+	}
+
+	args := core.EnsureFuncArgs{
+		Pod:       nil,
+		Box:       sandbox,
+		NewStatus: &agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxPaused},
+	}
+
+	err := r.EnsureSandboxPaused(context.Background(), args)
+	if err == nil {
+		t.Error("expected error from snapshot write failure, got nil")
+	} else if !strings.Contains(err.Error(), "simulated patch error") {
+		t.Errorf("expected error containing %q, got %v", "simulated patch error", err)
+	}
+}
+
+func TestEnsureSandboxPaused_DelegatesToControl(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "delegate-sandbox",
+			Namespace: "default",
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "test", Image: "nginx"}},
+		},
+	}
+
+	sandbox := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "delegate-sandbox", Namespace: "default", Annotations: map[string]string{}},
+		Spec: agentsv1alpha1.SandboxSpec{
+			Paused:       true,
+			ShutdownTime: &metav1.Time{Time: time.Now().Add(1 * time.Hour).Truncate(time.Second)},
+		},
+	}
+	// Set up a matching snapshot so the fast path is taken and no snapshot API calls occur
+	if err := timeoututils.SetTimeoutSnapshot(sandbox); err != nil {
+		t.Fatalf("failed to set up snapshot: %v", err)
+	}
+
+	fc := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(sandbox, pod).
+		Build()
+
+	recorder := record.NewFakeRecorder(10)
+	rl := core.NewRateLimiter()
+	r := &SandboxReconciler{
+		Client: fc,
+		Scheme: scheme,
+		controls: core.NewSandboxControl(core.SandboxControlArgs{
+			Client:      fc,
+			Recorder:    recorder,
+			RateLimiter: rl,
+		}),
+		rateLimiter: rl,
+	}
+
+	newStatus := &agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxPaused}
+	args := core.EnsureFuncArgs{
+		Pod:       pod,
+		Box:       sandbox,
+		NewStatus: newStatus,
+	}
+
+	err := r.EnsureSandboxPaused(context.Background(), args)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+
+	// Verify the control side effect: pod should be deleted
+	fetchedPod := &corev1.Pod{}
+	getErr := fc.Get(context.Background(), client.ObjectKeyFromObject(pod), fetchedPod)
+	if getErr == nil && fetchedPod.DeletionTimestamp.IsZero() {
+		t.Error("expected pod to be deleted by control, but it still exists without deletion timestamp")
+	}
+	// Acceptable outcomes: pod is deleted (not found) or pod has deletion timestamp set
+	if getErr != nil && !apierrors.IsNotFound(getErr) {
+		t.Errorf("unexpected error fetching pod: %v", getErr)
 	}
 }

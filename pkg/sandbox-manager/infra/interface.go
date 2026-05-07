@@ -40,8 +40,25 @@ type TimeoutOptions struct {
 	PauseTime    time.Time
 }
 
+type TimeoutUpdatePolicy string
+
+const (
+	TimeoutUpdatePolicyAlways        TimeoutUpdatePolicy = "Always"
+	TimeoutUpdatePolicyExtendOnly    TimeoutUpdatePolicy = "ExtendOnly"
+	TimeoutUpdatePolicySnapshotAware TimeoutUpdatePolicy = "SnapshotAware"
+)
+
+type TimeoutUpdateResult struct {
+	Updated bool
+}
+
 type PauseOptions struct {
-	Timeout *TimeoutOptions
+	Timeout                *TimeoutOptions
+	CaptureTimeoutSnapshot bool
+}
+
+type ResumeOptions struct {
+	EnsureTimeoutSnapshotIfMissing bool
 }
 
 type HasTemplateOptions struct {
@@ -99,7 +116,7 @@ type Infrastructure interface {
 type Sandbox interface {
 	metav1.Object                                       // For K8s object metadata access
 	Pause(ctx context.Context, opts PauseOptions) error // Pause a Sandbox
-	Resume(ctx context.Context) error                   // Resume a paused Sandbox
+	Resume(ctx context.Context, opts ResumeOptions) error // Resume a paused Sandbox
 	GetSandboxID() string
 	GetRoute() proxy.Route
 	GetState() (string, string)   // Get Sandbox State (pending, running, paused, killing, etc.)
@@ -110,7 +127,7 @@ type Sandbox interface {
 	SetPodLabels(labels map[string]string)
 	GetPodLabels() map[string]string
 	SetTimeout(opts TimeoutOptions)
-	SaveTimeout(ctx context.Context, opts TimeoutOptions) error
+	SaveTimeoutWithPolicy(ctx context.Context, opts TimeoutOptions, policy TimeoutUpdatePolicy) (TimeoutUpdateResult, error)
 	GetTimeout() TimeoutOptions
 	GetClaimTime() (time.Time, error)
 	Kill(ctx context.Context) error                                                                     // Delete the Sandbox resource

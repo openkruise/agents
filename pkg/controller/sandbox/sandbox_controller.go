@@ -24,11 +24,13 @@ import (
 	"reflect"
 	"time"
 
+	"github.com/openkruise/agents/pkg/utils/timeout"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -232,7 +234,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 	case agentsv1alpha1.SandboxRunning:
 		err = r.getControl(args.Pod).EnsureSandboxUpdated(ctx, args)
 	case agentsv1alpha1.SandboxPaused:
-		err = r.getControl(args.Pod).EnsureSandboxPaused(ctx, args)
+		err = r.EnsureSandboxPaused(ctx, args)
 	case agentsv1alpha1.SandboxResuming:
 		err = r.getControl(args.Pod).EnsureSandboxResumed(ctx, args)
 	case agentsv1alpha1.SandboxUpgrading:
@@ -251,6 +253,15 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 		return reconcile.Result{}, err
 	}
 	return ctrl.Result{RequeueAfter: requeueAfter}, r.updateSandboxStatus(ctx, *newStatus, box)
+}
+
+func (r *SandboxReconciler) EnsureSandboxPaused(ctx context.Context, args core.EnsureFuncArgs) error {
+	// When in Paused state, always sync timeout state (shutdownTime, pauseTime) to annotations.
+	// This is an isolated operation and does not affect the main logic of the sandbox controller.
+	if err := r.ensurePauseTimeoutSnapshot(ctx, args.Box); err != nil {
+		return err
+	}
+	return r.getControl(args.Pod).EnsureSandboxPaused(ctx, args)
 }
 
 func (r *SandboxReconciler) handleTerminating(ctx context.Context, args core.EnsureFuncArgs) (ctrl.Result, error) {
@@ -396,6 +407,46 @@ func updateStatusIfPodCompleted(pod *corev1.Pod, newStatus *agentsv1alpha1.Sandb
 		newStatus.Phase = agentsv1alpha1.SandboxFailed
 		newStatus.Message = "Pod status phase is Failed"
 	}
+}
+
+// ensurePauseTimeoutSnapshot keeps timeout coordination for paused sandboxes.
+// For Paused sandboxes, it keeps the timeout snapshot annotation synchronized
+// with the latest actual timeout values.
+//
+// The upper-layer sandbox-manager resume (connect api) flow relies on this snapshot when
+// recalculating timeout during timeout setting. In the common case, sandbox-manager has
+// already written a correct snapshot when needed and this function returns quickly when it
+// detects a match.
+//
+// In special cases (for example auto-pause initiated by sandbox-controller),
+// this reconciler provides fallback snapshot maintenance so resume logic still
+// has a reliable baseline.
+//
+// This also helps avoid snapshot drift and supports k8s-driven paused behavior
+// (for example auto-pause and never-timeout cases) with stable timeout handling.
+func (r *SandboxReconciler) ensurePauseTimeoutSnapshot(ctx context.Context, box *agentsv1alpha1.Sandbox) error {
+	// Skip if the pause timeout snapshot is already matched
+	if ok, _ := timeout.IsTimeoutMatchedSnapshot(box); ok {
+		return nil
+	}
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		latest := &agentsv1alpha1.Sandbox{}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(box), latest); err != nil {
+			return client.IgnoreNotFound(err)
+		}
+		if !latest.Spec.Paused {
+			return nil
+		}
+
+		modified := latest.DeepCopy()
+		if err := timeout.SetTimeoutSnapshot(modified); err != nil {
+			return err
+		}
+		if reflect.DeepEqual(latest.Annotations, modified.Annotations) {
+			return nil
+		}
+		return client.IgnoreNotFound(r.Patch(ctx, modified, client.MergeFrom(latest)))
+	})
 }
 
 // SetupWithManager sets up the controller with the Manager.

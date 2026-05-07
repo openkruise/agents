@@ -49,7 +49,8 @@ func (sc *Controller) PauseSandbox(r *http.Request) (web.ApiResponse[struct{}], 
 	}
 	timeoutOptions := sc.buildPauseTimeoutOptions(sbx, time.Now())
 	if err := sc.manager.PauseSandbox(ctx, sbx, infra.PauseOptions{
-		Timeout: &timeoutOptions,
+		Timeout:                &timeoutOptions,
+		CaptureTimeoutSnapshot: true,
 	}); err != nil {
 		return web.ApiResponse[struct{}]{}, &web.ApiError{
 			Message: fmt.Sprintf("Failed to pause sandbox: %v", err),
@@ -108,7 +109,9 @@ func (sc *Controller) ResumeSandbox(r *http.Request) (web.ApiResponse[struct{}],
 		}
 	}
 	log.Info("resuming sandbox")
-	if err := sc.manager.ResumeSandbox(ctx, sbx); err != nil {
+	if err := sc.manager.ResumeSandbox(ctx, sbx, infra.ResumeOptions{
+		EnsureTimeoutSnapshotIfMissing: true,
+	}); err != nil {
 		code := http.StatusInternalServerError
 		if errors.GetErrCode(err) == errors.ErrorBadRequest {
 			code = http.StatusBadRequest
@@ -125,7 +128,7 @@ func (sc *Controller) ResumeSandbox(r *http.Request) (web.ApiResponse[struct{}],
 	if !currentEndAt.IsZero() {
 		opts := sc.buildSetTimeoutOptions(autoPause, now, request.TimeoutSeconds)
 		log.Info("sandbox resumed, resetting sandbox timeout", "timeout", opts)
-		if err := sbx.SaveTimeout(ctx, opts); err != nil {
+		if _, err := sbx.SaveTimeoutWithPolicy(ctx, opts, infra.TimeoutUpdatePolicySnapshotAware); err != nil {
 			return web.ApiResponse[struct{}]{}, &web.ApiError{
 				Message: fmt.Sprintf("Failed to set sandbox timeout: %v", err),
 			}
@@ -163,7 +166,9 @@ func (sc *Controller) ConnectSandbox(r *http.Request) (web.ApiResponse[*models.S
 	statusCode := http.StatusOK
 	if state == v1alpha1.SandboxStatePaused {
 		log.Info("sandbox is paused, will resume it", "reason", pauseResumeReason)
-		if err := sc.manager.ResumeSandbox(ctx, sbx); err != nil {
+		if err := sc.manager.ResumeSandbox(ctx, sbx, infra.ResumeOptions{
+			EnsureTimeoutSnapshotIfMissing: true,
+		}); err != nil {
 			log.Error(err, "failed to resume sandbox")
 			return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
 				Code:    http.StatusInternalServerError,
@@ -200,23 +205,27 @@ func (sc *Controller) updateConnectTimeout(ctx context.Context, sbx infra.Sandbo
 	}
 
 	now := time.Now()
-	requestedEndAt := TimeAfterSeconds(now, timeoutSeconds)
-	// Rule 2: For running sandboxes, the timeout will update only if the new timeout is longer than the existing one.
-	if preConnectState == v1alpha1.SandboxStateRunning && currentEndAt.After(requestedEndAt) {
-		log.Info("skip resetting timeout for running sandbox for shorter timeout",
-			"currentEndAt", currentEndAt,
-			"requestedEndAt", requestedEndAt,
-			"requestedTimeoutSeconds", timeoutSeconds)
-		return nil
+	policy := infra.TimeoutUpdatePolicyExtendOnly
+	if preConnectState == v1alpha1.SandboxStatePaused {
+		policy = infra.TimeoutUpdatePolicySnapshotAware
 	}
 
 	opts := sc.buildSetTimeoutOptions(autoPause, now, timeoutSeconds)
 	log.Info("saving timeout to sandbox", "timeout", opts, "currentEndAt", currentEndAt,
-		"requestedEndAt", requestedEndAt, "requestedTimeoutSeconds", timeoutSeconds)
-	if err := sbx.SaveTimeout(ctx, opts); err != nil {
+		"requestedEndAt", TimeAfterSeconds(now, timeoutSeconds), "requestedTimeoutSeconds", timeoutSeconds, "policy", policy)
+	result, err := sbx.SaveTimeoutWithPolicy(ctx, opts, policy)
+	if err != nil {
 		return &web.ApiError{
 			Message: fmt.Sprintf("Failed to set sandbox timeout: %v", err),
 		}
+	}
+	if !result.Updated {
+		log.Info("skip resetting timeout according to timeout update policy",
+			"currentEndAt", currentEndAt,
+			"requestedTimeoutSeconds", timeoutSeconds,
+			"policy", policy)
+	} else {
+		log.Info("timeout updated", "requestedTimeoutSeconds", timeoutSeconds)
 	}
 	return nil
 }

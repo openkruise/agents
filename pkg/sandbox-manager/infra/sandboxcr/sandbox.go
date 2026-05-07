@@ -45,6 +45,7 @@ import (
 	"github.com/openkruise/agents/pkg/utils/sandbox-manager/expectationutils"
 	"github.com/openkruise/agents/pkg/utils/sandbox-manager/proxyutils"
 	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
+	"github.com/openkruise/agents/pkg/utils/timeout"
 )
 
 type ModifierFunc func(sbx *agentsv1alpha1.Sandbox)
@@ -150,12 +151,12 @@ func (s *Sandbox) GetRoute() proxy.Route {
 
 func setTimeout(s *agentsv1alpha1.Sandbox, opts infra.TimeoutOptions) {
 	if !opts.PauseTime.IsZero() {
-		s.Spec.PauseTime = ptr.To(metav1.NewTime(opts.PauseTime))
+		s.Spec.PauseTime = ptr.To(metav1.NewTime(timeout.NormalizeTime(opts.PauseTime)))
 	} else {
 		s.Spec.PauseTime = nil
 	}
 	if !opts.ShutdownTime.IsZero() {
-		s.Spec.ShutdownTime = ptr.To(metav1.NewTime(opts.ShutdownTime))
+		s.Spec.ShutdownTime = ptr.To(metav1.NewTime(timeout.NormalizeTime(opts.ShutdownTime)))
 	} else {
 		s.Spec.ShutdownTime = nil
 	}
@@ -192,25 +193,83 @@ func (s *Sandbox) GetImage() string {
 	return ""
 }
 
-func (s *Sandbox) SaveTimeout(ctx context.Context, opts infra.TimeoutOptions) error {
-	return s.retryUpdate(ctx, func(sbx *agentsv1alpha1.Sandbox) {
-		setTimeout(sbx, opts)
+// SaveTimeoutWithPolicy updates timeout with given policy. Available timeout update policies:
+//   - Always: overwrite timeout whenever the requested value differs from current.
+//   - ExtendOnly: only extend to a later effective end time.
+//   - SnapshotAware: snapshot stores the timeout data captured at a specific point in time.
+//     When no snapshot exists, or the current timeout matches snapshot, it is treated as
+//     overwrite-allowed; when current timeout differs from an existing snapshot, only
+//     extension is allowed.
+func (s *Sandbox) SaveTimeoutWithPolicy(ctx context.Context, opts infra.TimeoutOptions, policy infra.TimeoutUpdatePolicy) (infra.TimeoutUpdateResult, error) {
+	log := klog.FromContext(ctx).V(consts.DebugLogLevel).WithValues("sandbox", klog.KObj(s.Sandbox), "policy", policy)
+	result := infra.TimeoutUpdateResult{}
+
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		sbx := &agentsv1alpha1.Sandbox{} // Fetch the latest sandbox from informer
+		err := s.Cache.GetClient().Get(ctx, client.ObjectKeyFromObject(s.Sandbox), sbx)
+		if err != nil {
+			return err
+		}
+
+		current := timeout.GetTimeoutFromSandbox(sbx)
+		snapshot, snapshotExists, _ := timeout.GetTimeoutSnapshot(sbx)
+		snapshotMatched := snapshotExists && timeout.Equal(current, snapshot)
+		log.Info("data fetched before saving timeout",
+			"current", current, "snapshot", snapshot, "snapshotExists", snapshotExists, "snapshotMatched", snapshotMatched)
+
+		shouldUpdate := false
+		switch policy {
+		case infra.TimeoutUpdatePolicyAlways:
+			shouldUpdate = !timeout.Equal(current, opts)
+		case infra.TimeoutUpdatePolicyExtendOnly:
+			shouldUpdate = timeout.ShouldExtendTimeout(current, opts)
+		case infra.TimeoutUpdatePolicySnapshotAware:
+			switch {
+			case !snapshotExists:
+				// No snapshot, use Always policy
+				fallthrough
+			case snapshotMatched:
+				// Snapshot exists and matches, use Always policy
+				shouldUpdate = !timeout.Equal(current, opts)
+				log.Info("using Always policy to update timeout", "shouldUpdate", shouldUpdate)
+			default:
+				// Snapshot exists and does not match, use ExtendOnly policy
+				shouldUpdate = timeout.ShouldExtendTimeout(current, opts)
+				log.Info("using ExtendOnly policy to update timeout", "shouldUpdate", shouldUpdate)
+			}
+		default:
+			return fmt.Errorf("unsupported timeout update policy %q", policy)
+		}
+
+		if !shouldUpdate {
+			// not modified, should not deepcopy
+			s.Sandbox = sbx
+			result = infra.TimeoutUpdateResult{Updated: false}
+			return nil
+		}
+
+		// Perform the allowed update
+		copied := sbx.DeepCopy()
+		setTimeout(copied, opts)
+		if err = s.Cache.GetClient().Update(ctx, copied); err != nil {
+			return err
+		}
+		s.Sandbox = copied
+		expectationutils.ResourceVersionExpectationExpect(copied)
+		result = infra.TimeoutUpdateResult{Updated: true}
+		return nil
 	})
+	if err != nil {
+		log.Error(err, "failed to update sandbox timeout after retries")
+		return infra.TimeoutUpdateResult{}, err
+	}
+
+	log.Info("sandbox timeout updated successfully", "updated", result.Updated, "timeout", s.GetTimeout())
+	return result, nil
 }
 
 func (s *Sandbox) GetTimeout() infra.TimeoutOptions {
-	return getTimeoutFromSandbox(s.Sandbox)
-}
-
-func getTimeoutFromSandbox(s *agentsv1alpha1.Sandbox) infra.TimeoutOptions {
-	opts := infra.TimeoutOptions{}
-	if s.Spec.ShutdownTime != nil {
-		opts.ShutdownTime = s.Spec.ShutdownTime.Time
-	}
-	if s.Spec.PauseTime != nil {
-		opts.PauseTime = s.Spec.PauseTime.Time
-	}
-	return opts
+	return timeout.GetTimeoutFromSandbox(s.Sandbox)
 }
 
 func (s *Sandbox) GetResource() infra.SandboxResource {
@@ -239,6 +298,9 @@ func (s *Sandbox) Pause(ctx context.Context, opts infra.PauseOptions) error {
 		sbx.Spec.Paused = true
 		if opts.Timeout != nil {
 			setTimeout(sbx, *opts.Timeout)
+			if opts.CaptureTimeoutSnapshot {
+				_ = timeout.SetTimeoutSnapshot(sbx) // JSON marshal will never fail here, error should be ignored
+			}
 		}
 	})
 	if err != nil {
@@ -258,7 +320,7 @@ func (s *Sandbox) Pause(ctx context.Context, opts infra.PauseOptions) error {
 
 const postResumeOperationTimeout = 30 * time.Second
 
-func (s *Sandbox) Resume(ctx context.Context) error {
+func (s *Sandbox) Resume(ctx context.Context, opts infra.ResumeOptions) error {
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(s.Sandbox))
 
 	initRuntimeOpts, err := runtime.GetInitRuntimeRequest(s.Sandbox)
@@ -280,8 +342,12 @@ func (s *Sandbox) Resume(ctx context.Context) error {
 	}
 	if s.Sandbox.Spec.Paused {
 		if err := s.retryUpdate(ctx, func(sbx *agentsv1alpha1.Sandbox) {
-			sbx.Spec.Paused = false
-			setTimeout(sbx, infra.TimeoutOptions{}) // remove all timeout options
+			sbx.Spec.Paused = false // TODO Next: parallel optimize
+			if opts.EnsureTimeoutSnapshotIfMissing {
+				if _, exists, snapshotErr := timeout.GetTimeoutSnapshot(sbx); snapshotErr != nil || !exists {
+					_ = timeout.SetTimeoutSnapshot(sbx) // JSON marshal will never fail here, error should be ignored
+				}
+			}
 		}); err != nil {
 			log.Error(err, "failed to update sandbox spec.paused")
 			return err
