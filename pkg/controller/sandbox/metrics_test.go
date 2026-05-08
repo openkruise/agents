@@ -25,6 +25,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	dto "github.com/prometheus/client_model/go"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	ctrl "sigs.k8s.io/controller-runtime"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 )
@@ -2053,3 +2054,81 @@ func TestSandboxLabelsMetric_RecordAndDelete(t *testing.T) {
 		}
 	})
 }
+
+func TestReconcileResultLabel(t *testing.T) {
+	tests := []struct {
+		name   string
+		result ctrl.Result
+		err    error
+		want   string
+	}{
+		{
+			name:   "non-nil error wins over everything",
+			result: ctrl.Result{Requeue: true},
+			err:    errReconcileTest,
+			want:   "error",
+		},
+		{
+			name:   "Requeue true → requeue",
+			result: ctrl.Result{Requeue: true},
+			err:    nil,
+			want:   "requeue",
+		},
+		{
+			name:   "RequeueAfter > 0 → requeue",
+			result: ctrl.Result{RequeueAfter: 5 * time.Second},
+			err:    nil,
+			want:   "requeue",
+		},
+		{
+			name:   "zero result + nil err → success",
+			result: ctrl.Result{},
+			err:    nil,
+			want:   "success",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := reconcileResultLabel(tt.result, tt.err); got != tt.want {
+				t.Errorf("reconcileResultLabel(%+v, %v) = %q, want %q",
+					tt.result, tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestObserveReconcileDuration(t *testing.T) {
+	const ns = "test-reconcile-ns"
+
+	// Reset just our partition before exercising it.
+	sandboxReconcileDuration.DeleteLabelValues(ns, "success")
+	sandboxReconcileDuration.DeleteLabelValues(ns, "requeue")
+	sandboxReconcileDuration.DeleteLabelValues(ns, "error")
+
+	observeReconcileDuration(ns, "success", 50*time.Millisecond)
+	observeReconcileDuration(ns, "success", 75*time.Millisecond)
+	observeReconcileDuration(ns, "requeue", 10*time.Millisecond)
+
+	successHist := histogramSampleCount(t, sandboxReconcileDuration, ns, "success")
+	if successHist != 2 {
+		t.Errorf("success histogram sample count = %d, want 2", successHist)
+	}
+
+	requeueHist := histogramSampleCount(t, sandboxReconcileDuration, ns, "requeue")
+	if requeueHist != 1 {
+		t.Errorf("requeue histogram sample count = %d, want 1", requeueHist)
+	}
+
+	errorHist := histogramSampleCount(t, sandboxReconcileDuration, ns, "error")
+	if errorHist != 0 {
+		t.Errorf("error histogram sample count = %d, want 0", errorHist)
+	}
+}
+
+// errReconcileTest is a sentinel used by TestReconcileResultLabel.
+var errReconcileTest = &reconcileTestError{msg: "boom"}
+
+type reconcileTestError struct{ msg string }
+
+func (e *reconcileTestError) Error() string { return e.msg }

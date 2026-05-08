@@ -86,7 +86,7 @@ func Setup(t *testing.T) (*Controller, ctrlclient.Client, func()) {
 	cache, fc, cacheErr := cachetest.NewTestCache(t)
 	require.NoError(t, cacheErr)
 	controller := NewController("example.com", namespace, "component=sandbox-manager", "", "", models.DefaultMaxTimeout, 10,
-		0, 0, TestServerPort, config.DefaultMemberlistBindPort, &keys.Config{
+		0, 0, TestServerPort, config.DefaultMemberlistBindPort, "", &keys.Config{
 			Mode:      keys.StorageModeSecret,
 			Namespace: namespace,
 			AdminKey:  InitKey,

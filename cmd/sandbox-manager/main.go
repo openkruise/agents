@@ -65,6 +65,7 @@ func main() {
 	var kubeClientQPS float64
 	var kubeClientBurst int
 	var memberlistBindPort int
+	var healthProbeBindAddress string
 	var e2bKeyStorage string
 	var e2bKeyStorageDisableAutoMigrate bool
 
@@ -90,6 +91,8 @@ func main() {
 	pflag.Float64Var(&kubeClientQPS, "kube-client-qps", 500, "QPS for Kubernetes client")
 	pflag.IntVar(&kubeClientBurst, "kube-client-burst", 1000, "Burst for Kubernetes client")
 	pflag.IntVar(&memberlistBindPort, "memberlist-bind-port", 7946, "Port for memberlist gossip (default 7946)")
+	pflag.StringVar(&healthProbeBindAddress, "health-probe-bind-address", ":8081",
+		"The address the /healthz and /readyz endpoints bind to. Set to empty string to disable.")
 	pflag.StringVar(&e2bKeyStorage, "e2b-key-storage", "secret",
 		"Storage backend for E2B API keys. Valid values: 'secret' (K8s Secret, default), 'mysql' (MySQL via GORM). "+
 			"When --e2b-key-storage=mysql and auth is enabled, set MySQL DSN via environment variable "+E2BKeyStorageDSNEnvVar)
@@ -196,8 +199,7 @@ func main() {
 	}
 
 	sandboxController := e2b.NewController(domain, sysNs, peerSelector, sandboxNamespace, sandboxLabelSelector, e2bMaxTimeout, maxClaimWorkers, maxCreateQPS, uint32(extProcMaxConcurrency),
-		port, memberlistBindPort, keyCfg, clientConfig)
-
+		port, memberlistBindPort, healthProbeBindAddress, keyCfg, clientConfig)
 	if err := sandboxController.Init(); err != nil {
 		klog.Fatalf("Failed to initialize sandbox controller: %v", err)
 	}
