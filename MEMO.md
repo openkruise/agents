@@ -1,10 +1,10 @@
 # MEMO
 
-Last updated: 2026-05-08T07:28:47Z
+Last updated: 2026-05-08T08:12:58Z
 
 ## Current Topic
 
-Aligned `Pause` / `Resume` in `pkg/sandbox-manager/infra/sandboxcr/sandbox.go` to first-writer-wins semantics for concurrent state transitions.
+Added a temporary guard for non-idempotent Resume post operations in `pkg/sandbox-manager/infra/sandboxcr/sandbox.go`.
 
 ## Compatibility Background (Do Not Delete)
 
@@ -12,11 +12,11 @@ This paragraph is required background information and must not be deleted. The t
 
 ## Latest Progress
 
-- Problem background: User chose first-writer-wins for `Pause` / `Resume`: only the request that successfully flips `spec.paused` may write timeout/snapshot side effects; later idempotent requests must not override those side effects.
-- Code edits: `Pause` keeps `spec.paused` as the concurrent gate and skips timeout/snapshot updates when latest is already paused; comments now document this as first-writer-wins behavior.
-- Code edits: `Resume` refreshes latest state before precondition checks, preserves direct running -> error behavior, treats stale paused wrapper + latest already running/unpaused as idempotent success, and skips snapshot side effects when latest is already unpaused.
-- Code edits: `retryUpdate` remains APIReader-based with no-op skip, conflict retry, modifier error propagation, and no ResourceVersion expectation on skipped updates.
-- Test edits: `pause_resume_test.go` now expects already-paused `Pause` not to overwrite timeout or create snapshot, and already-unpaused `Resume` not to create a missing snapshot.
-- Verification: Passing locally: `go test ./pkg/sandbox-manager/infra/sandboxcr -run 'TestSandbox_(retryUpdate|Resume|Pause)' -count=1` and `go test ./pkg/sandbox-manager/infra/sandboxcr -count=1`.
-- Current changed files: `pkg/sandbox-manager/infra/sandboxcr/sandbox.go`, `pkg/sandbox-manager/infra/sandboxcr/sandbox_test.go`, `pkg/sandbox-manager/infra/sandboxcr/pause_resume_test.go`, `MEMO.md`.
-- Review focus: Ensure first-writer-wins is the intended public behavior for timeout/snapshot options and that no higher-level sandbox-manager tests still assume idempotent side-effect补偿.
+- Problem background: Resume post operations currently run in sandbox-manager and are not idempotent; concurrent Resume calls can duplicate ReInit / CSI re-mount before this logic is moved into agent-runtime.
+- Approach: Reuse `retryUpdate`'s boolean return. The first writer is the request that flips `spec.paused` from true to false; non-winners still wait for resume completion and refresh the sandbox, but skip non-idempotent post operations.
+- Code edits: `Resume` now stores `resumeUpdated` from `retryUpdate`; after `NewSandboxResumeTask(...).Wait`, post-context handling, `InplaceRefresh`, and `ResourceVersionExpectationExpect`, it returns early for non-winners before ReInit / CSI re-mount.
+- Test edits: `pause_resume_test.go` keeps the concurrent Resume success coverage and adds deterministic loser coverage via the already-unpaused latest sandbox path, asserting ReInit is not called when `retryUpdate` skips the update.
+- Verification: Passing locally: `go test ./pkg/sandbox-manager/infra/sandboxcr -run 'TestSandbox_ResumeConcurrent|TestSandbox_Resume' -count=1` and `go test ./pkg/sandbox-manager/infra/sandboxcr -count=1`.
+- Current changed files: `pkg/sandbox-manager/infra/sandboxcr/sandbox.go`, `pkg/sandbox-manager/infra/sandboxcr/pause_resume_test.go`, `MEMO.md`.
+- Review focus: Confirm it is acceptable that non-winners still perform wait + refresh for Resume completion semantics, but skip only ReInit / CSI re-mount.
+- Risk: `cachetest.NewTestCache` uses a ResourceVersion interceptor that can allow multiple fake-client concurrent updates to succeed, so the new ReInit call-count assertion is intentionally placed on a deterministic no-update loser scenario rather than the concurrent fake-client test.

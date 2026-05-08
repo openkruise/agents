@@ -19,6 +19,8 @@ package sandboxcr
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1128,6 +1130,26 @@ func TestSandbox_ResumeSkipsSnapshotWhenLatestAlreadyUnpaused(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			var initCalls atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/init" {
+					http.NotFound(w, r)
+					return
+				}
+				initCalls.Add(1)
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			defer server.Close()
+
+			initRuntimeOpts := config.InitRuntimeOptions{
+				EnvVars: map[string]string{
+					"TEST_VAR": "test_value",
+				},
+				AccessToken: "test-token",
+			}
+			initRuntimeJSON, err := json.Marshal(initRuntimeOpts)
+			require.NoError(t, err)
+
 			shutdownTime := time.Now().Add(2 * time.Hour)
 			pauseTime := time.Now().Add(time.Hour)
 			latest := &v1alpha1.Sandbox{
@@ -1137,7 +1159,10 @@ func TestSandbox_ResumeSkipsSnapshotWhenLatestAlreadyUnpaused(t *testing.T) {
 					Labels: map[string]string{
 						v1alpha1.LabelSandboxIsClaimed: "true",
 					},
-					Annotations: map[string]string{},
+					Annotations: map[string]string{
+						v1alpha1.AnnotationRuntimeURL:         server.URL,
+						v1alpha1.AnnotationInitRuntimeRequest: string(initRuntimeJSON),
+					},
 				},
 				Spec: v1alpha1.SandboxSpec{
 					Paused:       false,
@@ -1196,6 +1221,7 @@ func TestSandbox_ResumeSkipsSnapshotWhenLatestAlreadyUnpaused(t *testing.T) {
 			assert.False(t, updatedSbx.Spec.Paused)
 			_, hasSnapshot := updatedSbx.Annotations[v1alpha1.AnnotationPauseTimeoutSnapshot]
 			assert.False(t, hasSnapshot)
+			assert.Equal(t, int32(0), initCalls.Load())
 		})
 	}
 }

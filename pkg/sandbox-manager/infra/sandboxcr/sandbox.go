@@ -392,7 +392,7 @@ func (s *Sandbox) Resume(ctx context.Context, opts infra.ResumeOptions) error {
 		log.Error(err, "failed to get init runtime request")
 		return fmt.Errorf("failed to get init runtime request: %w", err)
 	}
-	if _, err := s.retryUpdate(ctx, func(sbx *agentsv1alpha1.Sandbox) (bool, error) {
+	resumeUpdated, err := s.retryUpdate(ctx, func(sbx *agentsv1alpha1.Sandbox) (bool, error) {
 		if !sbx.Spec.Paused {
 			// Resume is first-writer-wins: only the request that flips
 			// spec.paused may apply timeout snapshot side effects.
@@ -407,7 +407,8 @@ func (s *Sandbox) Resume(ctx context.Context, opts infra.ResumeOptions) error {
 			}
 		}
 		return true, nil
-	}); err != nil {
+	})
+	if err != nil {
 		log.Error(err, "failed to update sandbox spec.paused")
 		return err
 	}
@@ -434,6 +435,11 @@ func (s *Sandbox) Resume(ctx context.Context, opts infra.ResumeOptions) error {
 		return err
 	}
 	expectationutils.ResourceVersionExpectationExpect(s.Sandbox) // expect Running
+
+	if !resumeUpdated {
+		log.Info("sandbox resume already won by another request, skipping post-resume operations")
+		return nil
+	}
 
 	// E2B only handles post-resume initialization for non-claimed sandboxes.
 	// Claimed sandboxes (with claim-name label) are handled by the controller's Initialize function.
