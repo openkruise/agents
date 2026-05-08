@@ -270,9 +270,7 @@ func setupRegistryAuth(mountPath string) (string, error) {
 
     // 2. K8s dockerconfigjson has outer wrapper: {"auths": {...}}
     //    Docker config.json uses same format — direct passthrough
-    dockerConfigDir := "/tmp/.docker"
-    os.MkdirAll(dockerConfigDir, 0700)
-    
+    dockerConfigDir := "/run/docker-config"  // points to emptyDir{medium: Memory}
     configPath := filepath.Join(dockerConfigDir, "config.json")
     err = os.WriteFile(configPath, data, 0600)
     if err != nil {
@@ -286,29 +284,48 @@ func setupRegistryAuth(mountPath string) (string, error) {
 ```
 
 **Security considerations**:
-- Config file written with `0600` permissions (owner-only read/write)
-- Written to `/tmp/.docker` (ephemeral, dies with Job Pod)
-- Secret mounted as `readOnly: true` volume
+- The converted `config.json` is written to an `emptyDir{medium: Memory}` volume (tmpfs-backed, **never touches disk**), matching kruise daemon's in-memory-only credential handling
+- Secret source volume mounted as `readOnly: true`
+- Config file written with `0600` permissions
+- Both tmpfs volumes disappear immediately when the Pod terminates — no on-disk residue for forensic extraction
 - No secret content is logged at any point
 
 #### Volume Mount Configuration
 
 ```go
 // In Job template generation
-volumes := []v1.Volume{{
-    Name: "registry-auth",
-    VolumeSource: v1.VolumeSource{
-        Secret: &v1.SecretVolumeSource{
-            SecretName:  resolvedSecret.Name,
-            DefaultMode: pointer.Int32(0400),
+volumes := []v1.Volume{
+    {
+        Name: "registry-auth",
+        VolumeSource: v1.VolumeSource{
+            Secret: &v1.SecretVolumeSource{
+                SecretName:  resolvedSecret.Name,
+                DefaultMode: pointer.Int32(0400),
+            },
         },
     },
-}}
-volumeMounts := []v1.VolumeMount{{
-    Name:      "registry-auth",
-    MountPath: "/etc/registry-auth",
-    ReadOnly:  true,
-}}
+    {
+        Name: "docker-config",
+        VolumeSource: v1.VolumeSource{
+            EmptyDir: &v1.EmptyDirVolumeSource{
+                Medium:    v1.StorageMediumMemory, // tmpfs, credentials never hit disk
+                SizeLimit: resource.NewQuantity(1<<20, resource.BinarySI), // 1Mi
+            },
+        },
+    },
+}
+volumeMounts := []v1.VolumeMount{
+    {
+        Name:      "registry-auth",
+        MountPath: "/etc/registry-auth",
+        ReadOnly:  true,
+    },
+    {
+        Name:      "docker-config",
+        MountPath: "/run/docker-config",
+        ReadOnly:  false, // Job writes converted config.json here
+    },
+}
 ```
 
 ### Implementation Plan: Code Changes
