@@ -498,3 +498,67 @@ func AssertEndAt(t *testing.T, expect time.Time, endAt string) {
 	assert.NoError(t, err)
 	assert.WithinDuration(t, expect, endAtTime, 5*time.Second)
 }
+
+// TestNewController_FieldPlumbing exercises the constructor and the option
+// builder so every assignment path — including the newer
+// healthProbeBindAddress field — is covered without requiring a real
+// Kubernetes API server.
+func TestNewController_FieldPlumbing(t *testing.T) {
+	const (
+		domain         = "example.test"
+		sysNs          = "sandbox-system"
+		peerSelector   = "component=sandbox-manager"
+		sandboxNs      = "sandbox-pool"
+		sandboxLabel   = "env=prod"
+		maxTimeout     = 600
+		maxClaim       = 7
+		maxQPS         = 11
+		extProcConcur  = uint32(13)
+		port           = 9100
+		memberlistPort = 7800
+		probeAddr      = ":8081"
+	)
+
+	sc := NewController(domain, sysNs, peerSelector, sandboxNs, sandboxLabel,
+		maxTimeout, maxClaim, maxQPS, extProcConcur, port, memberlistPort, probeAddr,
+		nil, nil)
+	require.NotNil(t, sc)
+
+	// Verify constructor populated every field we plumb today.
+	assert.Equal(t, domain, sc.domain)
+	assert.Equal(t, sysNs, sc.systemNamespace)
+	assert.Equal(t, peerSelector, sc.peerSelector)
+	assert.Equal(t, sandboxNs, sc.sandboxNamespace)
+	assert.Equal(t, sandboxLabel, sc.sandboxLabelSelector)
+	assert.Equal(t, maxTimeout, sc.maxTimeout)
+	assert.Equal(t, maxClaim, sc.maxClaimWorkers)
+	assert.Equal(t, maxQPS, sc.maxCreateQPS)
+	assert.Equal(t, extProcConcur, sc.extProcMaxConcurrency)
+	assert.Equal(t, port, sc.port)
+	assert.Equal(t, memberlistPort, sc.memberlistBindPort)
+	assert.Equal(t, probeAddr, sc.healthProbeBindAddress)
+
+	// Verify the options builder forwards each field — including the new
+	// HealthProbeBindAddress — into the SandboxManagerOptions struct that
+	// flows through to NewControllerManager.
+	opts := sc.sandboxManagerOptions()
+	assert.Equal(t, sysNs, opts.SystemNamespace)
+	assert.Equal(t, peerSelector, opts.PeerSelector)
+	assert.Equal(t, sandboxNs, opts.SandboxNamespace)
+	assert.Equal(t, sandboxLabel, opts.SandboxLabelSelector)
+	assert.Equal(t, maxClaim, opts.MaxClaimWorkers)
+	assert.Equal(t, maxQPS, opts.MaxCreateQPS)
+	assert.Equal(t, extProcConcur, opts.ExtProcMaxConcurrency)
+	assert.Equal(t, memberlistPort, opts.MemberlistBindPort)
+	assert.Equal(t, probeAddr, opts.HealthProbeBindAddress)
+}
+
+// TestNewController_DisabledHealthProbe verifies the empty-string path through
+// NewController and sandboxManagerOptions, which corresponds to the operator
+// opting out of the probe server.
+func TestNewController_DisabledHealthProbe(t *testing.T) {
+	sc := NewController("d", "ns", "ps", "", "", 1, 1, 1, 1, 8080, 7946, "", nil, nil)
+	require.NotNil(t, sc)
+	assert.Equal(t, "", sc.healthProbeBindAddress)
+	assert.Equal(t, "", sc.sandboxManagerOptions().HealthProbeBindAddress)
+}

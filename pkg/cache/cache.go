@@ -151,20 +151,31 @@ func NewControllerManager(cfg *rest.Config, opts config.SandboxManagerOptions) (
 		return nil, fmt.Errorf("failed to create controller manager: %w", err)
 	}
 
-	// Register basic /healthz and /readyz checks when the probe server is enabled.
-	// Empty HealthProbeBindAddress disables the probe server entirely, in which case
-	// AddHealthzCheck / AddReadyzCheck are no-ops semantically — we still register
-	// to fail fast if controller-runtime's contract changes.
-	if opts.HealthProbeBindAddress != "" {
-		if err := mgr.AddHealthzCheck("ping", healthz.Ping); err != nil {
-			return nil, fmt.Errorf("failed to add healthz check: %w", err)
-		}
-		if err := mgr.AddReadyzCheck("ping", healthz.Ping); err != nil {
-			return nil, fmt.Errorf("failed to add readyz check: %w", err)
-		}
+	if err := registerProbeChecks(mgr, opts.HealthProbeBindAddress); err != nil {
+		return nil, err
 	}
 
 	return mgr, nil
+}
+
+// registerProbeChecks registers basic /healthz and /readyz checks on mgr when
+// the probe server is enabled (i.e. addr is non-empty). When addr is empty the
+// probe server is disabled by controller-runtime and registering checks would
+// be wasted work, so this is a no-op.
+//
+// Extracted from NewControllerManager so the registration logic can be unit
+// tested with a mock manager without needing a real *rest.Config.
+func registerProbeChecks(mgr ctrl.Manager, addr string) error {
+	if addr == "" {
+		return nil
+	}
+	if err := mgr.AddHealthzCheck("ping", healthz.Ping); err != nil {
+		return fmt.Errorf("failed to add healthz check: %w", err)
+	}
+	if err := mgr.AddReadyzCheck("ping", healthz.Ping); err != nil {
+		return fmt.Errorf("failed to add readyz check: %w", err)
+	}
+	return nil
 }
 
 // NewCache creates a new Cache instance from a pre-configured controller manager.

@@ -45,13 +45,13 @@ type Controller struct {
 	maxTimeout int
 
 	// manager params
-	systemNamespace       string // the namespace where the sandbox manager is running
-	peerSelector          string
-	maxClaimWorkers       int
-	maxCreateQPS          int
-	extProcMaxConcurrency uint32
-	sandboxLabelSelector  string
-	sandboxNamespace      string
+	systemNamespace        string // the namespace where the sandbox manager is running
+	peerSelector           string
+	maxClaimWorkers        int
+	maxCreateQPS           int
+	extProcMaxConcurrency  uint32
+	sandboxLabelSelector   string
+	sandboxNamespace       string
 	memberlistBindPort     int
 	healthProbeBindAddress string
 	keyCfg                 *keys.Config
