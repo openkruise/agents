@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -62,6 +63,12 @@ type MemberlistPeers struct {
 
 	started atomic.Bool
 	stopCh  chan struct{}
+
+	// startTime records when Start() began binding memberlist; used together
+	// with firstJoinObserved to publish sandbox_peer_join_duration_seconds
+	// exactly once per process.
+	startTime         time.Time
+	firstJoinObserved sync.Once
 }
 
 // NewMemberlistPeers creates a new MemberlistPeers instance
@@ -93,6 +100,7 @@ func (m *MemberlistPeers) Start(ctx context.Context, bindPort int) error {
 	if m.started.Load() {
 		return fmt.Errorf("memberlist already started")
 	}
+	m.startTime = time.Now()
 
 	// Get pod IP for memberlist binding
 	localIP := m.localIP
@@ -313,6 +321,13 @@ func (e *eventDelegate) NotifyJoin(node *memberlist.Node) {
 		return
 	}
 	klog.FromContext(e.logCtx).Info("peer joined", "name", node.Name, "ip", node.Addr.String())
+	recordPeerAlive(node.Name)
+	// Observe the time-to-first-peer histogram exactly once per process.
+	if !e.parent.startTime.IsZero() {
+		e.parent.firstJoinObserved.Do(func() {
+			observePeerJoinDuration(time.Since(e.parent.startTime).Seconds())
+		})
+	}
 }
 
 func (e *eventDelegate) NotifyLeave(node *memberlist.Node) {
@@ -320,6 +335,7 @@ func (e *eventDelegate) NotifyLeave(node *memberlist.Node) {
 		return
 	}
 	klog.FromContext(e.logCtx).Info("peer left", "name", node.Name, "ip", node.Addr.String())
+	recordPeerDead(node.Name)
 }
 
 func (e *eventDelegate) NotifyUpdate(*memberlist.Node) {
