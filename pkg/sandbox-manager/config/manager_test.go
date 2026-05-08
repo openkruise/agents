@@ -185,6 +185,7 @@ func TestInitOptions(t *testing.T) {
 				SandboxNamespace:           "sandbox-ns",
 				SandboxLabelSelector:       "env=prod",
 				DisableRouteReconciliation: true,
+				HealthProbeBindAddress:     ":8081",
 			},
 			expectSystemNamespace:    utils.DefaultSandboxDeployNamespace,
 			expectMaxClaimWorkers:    consts.DefaultClaimWorkers,
@@ -217,6 +218,8 @@ func TestInitOptions(t *testing.T) {
 			if tt.input.DisableRouteReconciliation {
 				assert.True(t, result.DisableRouteReconciliation)
 			}
+			assert.Equal(t, tt.input.HealthProbeBindAddress, result.HealthProbeBindAddress,
+				"HealthProbeBindAddress should be preserved verbatim (no defaulting)")
 		})
 	}
 }

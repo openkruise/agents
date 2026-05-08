@@ -93,7 +93,7 @@ func SetupWithMinResumeTimeout(t *testing.T, minResumeTimeout int) (*Controller,
 	cache, fc, cacheErr := cachetest.NewTestCache(t)
 	require.NoError(t, cacheErr)
 	controller := NewController("example.com", namespace, "component=sandbox-manager", "", "", models.DefaultMaxTimeout, minResumeTimeout, 10,
-		0, 0, TestServerPort, config.DefaultMemberlistBindPort, &keys.Config{
+		0, 0, TestServerPort, config.DefaultMemberlistBindPort, "", &keys.Config{
 			Mode:      keys.StorageModeSecret,
 			Namespace: namespace,
 			AdminKey:  InitKey,

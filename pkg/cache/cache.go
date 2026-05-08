@@ -35,6 +35,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
@@ -143,11 +144,24 @@ func NewControllerManager(cfg *rest.Config, opts config.SandboxManagerOptions) (
 		Scheme:                 scheme,
 		Cache:                  ctrlcache.Options{ByObject: byObject, DefaultUnsafeDisableDeepCopy: ptr.To(true)},
 		Metrics:                metricsserver.Options{BindAddress: "0"},
-		HealthProbeBindAddress: "",
+		HealthProbeBindAddress: opts.HealthProbeBindAddress,
 		LeaderElection:         false,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create controller manager: %w", err)
+	}
+
+	// Register basic /healthz and /readyz checks when the probe server is enabled.
+	// Empty HealthProbeBindAddress disables the probe server entirely, in which case
+	// AddHealthzCheck / AddReadyzCheck are no-ops semantically — we still register
+	// to fail fast if controller-runtime's contract changes.
+	if opts.HealthProbeBindAddress != "" {
+		if err := mgr.AddHealthzCheck("ping", healthz.Ping); err != nil {
+			return nil, fmt.Errorf("failed to add healthz check: %w", err)
+		}
+		if err := mgr.AddReadyzCheck("ping", healthz.Ping); err != nil {
+			return nil, fmt.Errorf("failed to add readyz check: %w", err)
+		}
 	}
 
 	return mgr, nil
