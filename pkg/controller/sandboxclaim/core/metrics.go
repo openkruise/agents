@@ -49,8 +49,3 @@ func init() {
 		sandboxClaimExpiredTotal,
 	)
 }
-
-// DeleteSandboxClaimCounterMetrics is a no-op since counter metrics are at namespace level.
-func DeleteSandboxClaimCounterMetrics(namespace, name string) {
-	// Counter metrics at namespace level are not deleted per-claim
-}

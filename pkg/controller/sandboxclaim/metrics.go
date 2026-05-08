@@ -23,7 +23,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/controller/sandboxclaim/core"
 )
 
 var (
@@ -107,7 +106,7 @@ var (
 			ConstLabels: prometheus.Labels{"source": "k8s"},
 			Buckets:     prometheus.ExponentialBuckets(0.02, 2, 12), // 20ms -> ~41s
 		},
-		[]string{"namespace", "name"},
+		[]string{"namespace"},
 	)
 
 	// allClaimPhases enumerates all possible sandbox claim phases for metric cleanup.
@@ -180,7 +179,7 @@ func recordSandboxClaimMetrics(claim *agentsv1alpha1.SandboxClaim) {
 		key := namespace + "/" + name
 		if _, loaded := observedClaimDurations.LoadOrStore(key, true); !loaded {
 			duration := claim.Status.CompletionTime.Sub(claim.Status.ClaimStartTime.Time)
-			sandboxClaimClaimDuration.WithLabelValues(namespace, name).Observe(duration.Seconds())
+			sandboxClaimClaimDuration.WithLabelValues(namespace).Observe(duration.Seconds())
 		}
 	}
 }
@@ -196,7 +195,5 @@ func deleteSandboxClaimMetrics(namespace, name string) {
 	sandboxClaimCompletionTime.DeleteLabelValues(namespace, name)
 	sandboxClaimClaimedReplicas.DeleteLabelValues(namespace, name)
 	sandboxClaimDesiredReplicas.DeleteLabelValues(namespace, name)
-	sandboxClaimClaimDuration.DeleteLabelValues(namespace, name)
 	observedClaimDurations.Delete(namespace + "/" + name)
-	core.DeleteSandboxClaimCounterMetrics(namespace, name)
 }

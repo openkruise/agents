@@ -324,35 +324,3 @@ func TestSandboxClaimExpiredTotal(t *testing.T) {
 		})
 	}
 }
-
-func TestDeleteSandboxClaimCounterMetrics(t *testing.T) {
-	tests := []struct {
-		name      string
-		namespace string
-		claimName string
-	}{
-		{
-			name:      "cleanup removes expired counter label set",
-			namespace: "default",
-			claimName: "cleanup-claim",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			sandboxClaimExpiredTotal.Reset()
-
-			// Set a value first
-			sandboxClaimExpiredTotal.WithLabelValues(tt.namespace).Inc()
-			val := testutil.ToFloat64(sandboxClaimExpiredTotal.WithLabelValues(tt.namespace))
-			assert.Equal(t, float64(1), val, "counter should be 1 before cleanup")
-
-			// Call cleanup - it's now a no-op for namespace-level counters
-			DeleteSandboxClaimCounterMetrics(tt.namespace, tt.claimName)
-
-			// Counter should still be present since it's namespace-level
-			val = testutil.ToFloat64(sandboxClaimExpiredTotal.WithLabelValues(tt.namespace))
-			assert.Equal(t, float64(1), val, "counter should still be 1 after cleanup (namespace-level)")
-		})
-	}
-}
