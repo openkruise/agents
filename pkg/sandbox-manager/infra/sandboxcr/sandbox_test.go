@@ -29,6 +29,7 @@ import (
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/openkruise/agents/pkg/utils/runtime"
+	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
 	"github.com/openkruise/agents/pkg/utils/timeout"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -240,7 +241,10 @@ func TestSandbox_SaveTimeoutWithPolicy(t *testing.T) {
 			var sandbox infra.Sandbox
 			require.Eventually(t, func() bool {
 				var err error
-				sandbox, err = infraInstance.GetClaimedSandbox(t.Context(), sbx.Namespace+"--"+sbx.Name)
+				sandbox, err = infraInstance.GetClaimedSandbox(t.Context(), infra.GetClaimedSandboxOptions{
+					SandboxID: stateutils.GetSandboxID(sbx),
+					Namespace: sbx.Namespace,
+				})
 				return err == nil
 			}, time.Second, 10*time.Millisecond)
 
@@ -325,11 +329,17 @@ func TestSandbox_SaveTimeoutWithPolicy_OnConflict(t *testing.T) {
 	var sandboxB infra.Sandbox
 	require.Eventually(t, func() bool {
 		var getErr error
-		sandboxA, getErr = infraImpl.GetClaimedSandbox(t.Context(), sbx.Namespace+"--"+sbx.Name)
+		sandboxA, getErr = infraImpl.GetClaimedSandbox(t.Context(), infra.GetClaimedSandboxOptions{
+			SandboxID: stateutils.GetSandboxID(sbx),
+			Namespace: sbx.Namespace,
+		})
 		if getErr != nil {
 			return false
 		}
-		sandboxB, getErr = infraImpl.GetClaimedSandbox(t.Context(), sbx.Namespace+"--"+sbx.Name)
+		sandboxB, getErr = infraImpl.GetClaimedSandbox(t.Context(), infra.GetClaimedSandboxOptions{
+			SandboxID: stateutils.GetSandboxID(sbx),
+			Namespace: sbx.Namespace,
+		})
 		return getErr == nil
 	}, time.Second, 10*time.Millisecond)
 
@@ -395,9 +405,9 @@ type retryUpdateTestProvider struct {
 	claimedSandbox *v1alpha1.Sandbox
 }
 
-func (p *retryUpdateTestProvider) GetClaimedSandbox(_ context.Context, sandboxID string) (*v1alpha1.Sandbox, error) {
-	expectedID := p.claimedSandbox.Namespace + "--" + p.claimedSandbox.Name
-	if sandboxID != expectedID {
+func (p *retryUpdateTestProvider) GetClaimedSandbox(_ context.Context, options infracache.GetClaimedSandboxOptions) (*v1alpha1.Sandbox, error) {
+	expectedID := stateutils.GetSandboxID(p.claimedSandbox)
+	if options.SandboxID != expectedID {
 		return nil, errors.New("unexpected sandbox ID")
 	}
 	return p.claimedSandbox.DeepCopy(), nil
