@@ -18,6 +18,7 @@ package utils
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -26,28 +27,39 @@ import (
 
 // WaitTask packages a WaitAction with its Update and Check funcs so that callers
 // cannot accidentally pair the same (object, action) with different checkers.
-// Instances MUST be created via *cache.Cache factory methods (NewSandboxPauseTask
-// etc.). The zero value is not usable.
+// A task may be lazy, acquiring its wait hook during Wait, or pre-acquired,
+// acquiring the wait hook during construction. Pre-acquired tasks are
+// single-use: call exactly one of Wait or Release, and Wait releases the hook
+// when it returns. The zero value is not usable.
 //
 // Immutability:
-//   - All fields are unexported; once constructed by a factory, callers can only
-//     invoke Wait(timeout).
+//   - All fields are unexported; once constructed by a factory, callers can use
+//     Wait(timeout), and pre-acquired callers may use Release to abandon an
+//     unused task before Wait.
 //   - The caller ctx is captured at construction time because UpdateFunc[T] has
 //     no ctx parameter; passing a different ctx to Wait would leak across the
 //     Update closure.
 type WaitTask[T client.Object] struct {
 	ctx       context.Context
 	waitHooks *sync.Map
+	key       string
 	action    WaitAction
 	object    T
 	update    UpdateFunc[T]
 	check     CheckFunc[T]
+
+	entry       *WaitEntry[T]
+	releaseOnce sync.Once
+
+	lifecycleMu sync.Mutex
+	started     bool
+	released    bool
 }
 
-// NewWaitTask builds a WaitTask. Exported only so that the cache package (which
-// is a sibling package, not utils) can construct instances inside its factory
-// methods; production code outside pkg/cache MUST NOT call this directly — use
-// the *cache.Cache.NewXxxTask factories instead.
+// NewWaitTask builds a lazy WaitTask. Exported only so that the cache package
+// (which is a sibling package, not utils) can construct instances inside its
+// factory methods; production code outside pkg/cache MUST NOT call this
+// directly — use the *cache.Cache.NewXxxTask factories instead.
 func NewWaitTask[T client.Object](
 	ctx context.Context,
 	waitHooks *sync.Map,
@@ -59,11 +71,34 @@ func NewWaitTask[T client.Object](
 	return &WaitTask[T]{
 		ctx:       ctx,
 		waitHooks: waitHooks,
+		key:       WaitHookKey(object),
 		action:    action,
 		object:    object,
 		update:    update,
 		check:     check,
 	}
+}
+
+// NewAcquiredWaitTask builds a single-use WaitTask that acquires its wait hook
+// immediately. Callers must call exactly one of Wait or Release; Wait releases
+// the acquired hook when it returns.
+func NewAcquiredWaitTask[T client.Object](
+	ctx context.Context,
+	waitHooks *sync.Map,
+	action WaitAction,
+	object T,
+	update UpdateFunc[T],
+	check CheckFunc[T],
+) (*WaitTask[T], error) {
+	task := NewWaitTask(ctx, waitHooks, action, object, update, check)
+	entry, err := AcquireEntry[T](waitHooks, task.key, action, func() *WaitEntry[T] {
+		return NewWaitEntry(ctx, action, check)
+	})
+	if err != nil {
+		return nil, err
+	}
+	task.entry = entry
+	return task, nil
 }
 
 // Action returns the underlying wait action (read-only accessor, used by tests).
@@ -72,11 +107,54 @@ func (t *WaitTask[T]) Action() WaitAction { return t.action }
 // Object returns the subject object (read-only accessor, used by tests).
 func (t *WaitTask[T]) Object() T { return t.object }
 
+// Release abandons an unused pre-acquired task and releases its wait hook.
+// Release is idempotent, is a no-op for lazy tasks, and does not release a hook
+// while Wait is actively running.
+func (t *WaitTask[T]) Release() {
+	if t.entry == nil {
+		return
+	}
+	t.lifecycleMu.Lock()
+	if t.started || t.released {
+		t.lifecycleMu.Unlock()
+		return
+	}
+	t.released = true
+	t.lifecycleMu.Unlock()
+	t.releaseEntry()
+}
+
+func (t *WaitTask[T]) releaseEntry() {
+	t.releaseOnce.Do(func() {
+		ReleaseEntry[T](t.waitHooks, t.key, t.entry)
+	})
+}
+
 // Wait blocks until the task's Check func reports satisfied, the task's captured
-// ctx is canceled, or timeout elapses. It is a thin forwarder to
-// WaitForObjectSatisfied and preserves the existing semantics bit-for-bit.
+// ctx is canceled, or timeout elapses. Lazy tasks acquire and release their hook
+// during Wait. Pre-acquired tasks are single-use, reuse their stored hook, and
+// release it when Wait returns.
 func (t *WaitTask[T]) Wait(timeout time.Duration) error {
+	if t.entry != nil {
+		if !t.claimAcquiredWait() {
+			return fmt.Errorf("pre-acquired wait task already used or released")
+		}
+		defer t.releaseEntry()
+		return waitForAcquiredObjectSatisfied[T](
+			t.ctx, t.entry, t.object, t.update, t.check, timeout,
+		)
+	}
 	return WaitForObjectSatisfied[T](
 		t.ctx, t.waitHooks, t.object, t.action, t.update, t.check, timeout,
 	)
+}
+
+func (t *WaitTask[T]) claimAcquiredWait() bool {
+	t.lifecycleMu.Lock()
+	defer t.lifecycleMu.Unlock()
+	if t.started || t.released {
+		return false
+	}
+	t.started = true
+	return true
 }

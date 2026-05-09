@@ -193,10 +193,20 @@ func WaitForObjectSatisfied[T client.Object](ctx context.Context, waitHooks *syn
 		log.Info("wait hook released")
 	}()
 
-	satisfied, err = CheckObjectSatisfied(ctx, obj, update, satisfiedFunc)
+	return waitForAcquiredObjectSatisfied(ctx, entry, obj, update, satisfiedFunc, timeout)
+}
+
+func waitForAcquiredObjectSatisfied[T client.Object](ctx context.Context, entry *WaitEntry[T], obj T,
+	update UpdateFunc[T], satisfiedFunc CheckFunc[T], timeout time.Duration) error {
+	log := klog.FromContext(ctx).V(consts.DebugLogLevel).WithValues("object", client.ObjectKeyFromObject(obj))
+	satisfied, err := CheckObjectSatisfied(ctx, obj, update, satisfiedFunc)
 	if satisfied || err != nil {
 		log.Info("post-acquire satisfaction check completed", "satisfied", satisfied, "error", err)
 		return err
+	}
+	if timeout <= 0 {
+		log.Info("waiting is skipped due to zero timeout")
+		return fmt.Errorf("object is not satisfied")
 	}
 
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
