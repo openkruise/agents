@@ -38,6 +38,8 @@ const (
 	WaitActionCheckpoint WaitAction = "Checkpoint"
 )
 
+var defaultWaitPollInterval = 10 * time.Second
+
 type CheckFunc[T client.Object] func(obj T) (bool, error)
 type UpdateFunc[T client.Object] func(obj T) (T, error)
 
@@ -62,6 +64,9 @@ type WaitEntry[T client.Object] struct {
 	done      chan struct{}
 	checker   CheckFunc[T]
 	closeOnce sync.Once
+
+	mu   sync.Mutex
+	refs int
 }
 
 func NewWaitEntry[T client.Object](ctx context.Context, action WaitAction, checker CheckFunc[T]) *WaitEntry[T] {
@@ -70,6 +75,76 @@ func NewWaitEntry[T client.Object](ctx context.Context, action WaitAction, check
 		Action:  action,
 		checker: checker,
 		done:    make(chan struct{}),
+	}
+}
+
+// AcquireEntry increments the entry refcount only after confirming that the
+// map still points at that entry while holding entry.mu. Together with
+// ReleaseEntry holding the same lock across refs-- and CompareAndDelete, this
+// prevents a waiter from acquiring an orphan entry that was just removed.
+//
+// A same-action late joiner may still acquire an entry whose done channel has
+// already been closed but has not yet been released from the map. That is
+// intentional for the current wait flow: Close is triggered from the same
+// informer/cache object that later post-acquire and double-check reads use, so
+// the late joiner should observe the satisfied state immediately and return.
+func AcquireEntry[T client.Object](waitHooks *sync.Map, key string, action WaitAction, newEntry func() *WaitEntry[T]) (*WaitEntry[T], error) {
+	for {
+		value, _ := waitHooks.LoadOrStore(key, newEntry())
+		entry := value.(*WaitEntry[T])
+
+		entry.mu.Lock()
+		current, ok := waitHooks.Load(key)
+		if !ok || current != entry {
+			entry.mu.Unlock()
+			continue
+		}
+		if entry.Action != action {
+			entry.mu.Unlock()
+			return nil, fmt.Errorf("another action(%s)'s wait task already exists", entry.Action)
+		}
+		entry.refs++
+		entry.mu.Unlock()
+		return entry, nil
+	}
+}
+
+// ReleaseEntry is the counterpart of AcquireEntry. It holds entry.mu while
+// decrementing refs and, when the last waiter exits, while deleting the same
+// entry from the map with CompareAndDelete. A concurrent AcquireEntry that saw
+// this entry before deletion must acquire entry.mu first, then re-check the map
+// before incrementing refs, so it cannot resurrect or retain an orphan entry.
+func ReleaseEntry[T client.Object](waitHooks *sync.Map, key string, entry *WaitEntry[T]) {
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+
+	entry.refs--
+	if entry.refs == 0 {
+		waitHooks.CompareAndDelete(key, entry)
+	}
+}
+
+func CheckEntryActionConflict[T client.Object](waitHooks *sync.Map, obj T, action WaitAction) error {
+	key := WaitHookKey(obj)
+	for {
+		value, ok := waitHooks.Load(key)
+		if !ok {
+			return nil
+		}
+		entry := value.(*WaitEntry[T])
+
+		entry.mu.Lock()
+		current, ok := waitHooks.Load(key)
+		if !ok || current != entry {
+			entry.mu.Unlock()
+			continue
+		}
+		if entry.Action != action {
+			entry.mu.Unlock()
+			return fmt.Errorf("another action(%s)'s wait task already exists", entry.Action)
+		}
+		entry.mu.Unlock()
+		return nil
 	}
 }
 
@@ -105,46 +180,71 @@ func WaitForObjectSatisfied[T client.Object](ctx context.Context, waitHooks *syn
 		log.Info("waiting is skipped due to zero timeout")
 		return &WaitNotSatisfiedError{Object: objKey, Action: action}
 	}
-	value, exists := waitHooks.LoadOrStore(key, NewWaitEntry(ctx, action, satisfiedFunc))
-	if exists {
-		log.Info("reuse existing wait hook")
-	} else {
-		log.Info("wait hook created")
+	entry, err := AcquireEntry[T](waitHooks, key, action, func() *WaitEntry[T] {
+		return NewWaitEntry(ctx, action, satisfiedFunc)
+	})
+	if err != nil {
+		log.Error(err, "wait hook conflict", "new", action)
+		return err
 	}
-	entry := value.(*WaitEntry[T])
-	if entry.Action != action {
-		err := &WaitTaskConflictError{ExistingAction: entry.Action, NewAction: action}
-		log.Error(err, "wait hook conflict", "existing", entry.Action, "new", action)
+	log.Info("wait hook acquired", "action", action)
+	defer func() {
+		ReleaseEntry[T](waitHooks, key, entry)
+		log.Info("wait hook released")
+	}()
+
+	satisfied, err = CheckObjectSatisfied(ctx, obj, update, satisfiedFunc)
+	if satisfied || err != nil {
+		log.Info("post-acquire satisfaction check completed", "satisfied", satisfied, "error", err)
 		return err
 	}
 
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer func() {
-		cancel()
-		waitHooks.Delete(key)
-		log.Info("wait hook deleted")
-	}()
+	defer cancel()
 
-	select {
-	case <-entry.Done():
-		log.Info("satisfied signal received")
-		return DoubleCheckObjectSatisfied(ctx, obj, update, satisfiedFunc)
-	case <-waitCtx.Done():
-		log.Info("stop waiting for object satisfied: context canceled", "reason", waitCtx.Err())
-		return DoubleCheckObjectSatisfied(ctx, obj, update, satisfiedFunc)
+	ticker := time.NewTicker(defaultWaitPollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-entry.Done():
+			log.Info("satisfied signal received")
+			return DoubleCheckObjectSatisfied(ctx, obj, update, satisfiedFunc)
+		case <-ticker.C:
+			satisfied, err := CheckObjectSatisfied(ctx, obj, update, satisfiedFunc)
+			if err != nil {
+				return err
+			}
+			if satisfied {
+				log.Info("object satisfied by polling check")
+				return nil
+			}
+		case <-waitCtx.Done():
+			log.Info("stop waiting for object satisfied: context canceled", "reason", waitCtx.Err())
+			return DoubleCheckObjectSatisfied(ctx, obj, update, satisfiedFunc)
+		}
 	}
 }
 
-func DoubleCheckObjectSatisfied[T client.Object](ctx context.Context, obj T, update UpdateFunc[T], satisfiedFunc CheckFunc[T]) error {
+func CheckObjectSatisfied[T client.Object](ctx context.Context, obj T, update UpdateFunc[T], satisfiedFunc CheckFunc[T]) (bool, error) {
 	log := klog.FromContext(ctx).WithValues("object", klog.KObj(obj))
 	updated, err := update(obj)
 	if err != nil {
-		log.Error(err, "failed to get object while double checking")
-		return err
+		log.Error(err, "failed to get object while checking satisfaction")
+		return false, err
 	}
 	satisfied, err := satisfiedFunc(updated)
 	if err != nil {
 		log.Error(err, "failed to check object satisfied")
+		return false, err
+	}
+	return satisfied, nil
+}
+
+func DoubleCheckObjectSatisfied[T client.Object](ctx context.Context, obj T, update UpdateFunc[T], satisfiedFunc CheckFunc[T]) error {
+	log := klog.FromContext(ctx).WithValues("object", klog.KObj(obj))
+	satisfied, err := CheckObjectSatisfied(ctx, obj, update, satisfiedFunc)
+	if err != nil {
 		return err
 	}
 	if !satisfied {

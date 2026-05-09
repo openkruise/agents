@@ -61,6 +61,10 @@ type Provider interface {
 	// succeeds when the sandbox reaches SandboxStateRunning.
 	NewSandboxResumeTask(ctx context.Context, sbx *agentsv1alpha1.Sandbox) *cacheutils.WaitTask[*agentsv1alpha1.Sandbox]
 
+	// CheckSandboxWaitHookConflict returns an error if the sandbox currently has
+	// an active wait hook for a different action.
+	CheckSandboxWaitHookConflict(sbx *agentsv1alpha1.Sandbox, action cacheutils.WaitAction) error
+
 	// NewSandboxWaitReadyTask builds an immutable wait task for post-claim
 	// readiness (Generation observed + Ready condition not StartContainerFailed
 	// + not InplaceUpdating + Running + PodIP set).

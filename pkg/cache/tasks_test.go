@@ -35,6 +35,7 @@ func makePausedSandbox(name string, paused corev1.ConditionStatus) *agentsv1alph
 	return &agentsv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: name},
 		Status: agentsv1alpha1.SandboxStatus{
+			Phase: agentsv1alpha1.SandboxPaused,
 			Conditions: []metav1.Condition{
 				{
 					Type:   string(agentsv1alpha1.SandboxConditionPaused),

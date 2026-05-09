@@ -35,6 +35,7 @@ import (
 	"github.com/openkruise/agents/api/v1alpha1"
 	cachepkg "github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/cache/cachetest"
+	cacheutils "github.com/openkruise/agents/pkg/cache/utils"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
@@ -260,6 +261,7 @@ func TestSandbox_Pause(t *testing.T) {
 		expectError            string
 		captureSnapshot        bool
 		expectSnapshot         bool
+		expectTimeoutUpdate    bool
 		simulatePauseCompleted bool // use time.AfterFunc to simulate underlying pause completion
 		useShortTimeout        bool // simulate underlying not completing by using short context timeout
 	}{
@@ -278,6 +280,7 @@ func TestSandbox_Pause(t *testing.T) {
 			expectedState:          v1alpha1.SandboxStatePaused,
 			expectError:            "",
 			expectSnapshot:         false,
+			expectTimeoutUpdate:    true,
 			simulatePauseCompleted: true,
 		},
 		{
@@ -295,6 +298,7 @@ func TestSandbox_Pause(t *testing.T) {
 			expectedState:          v1alpha1.SandboxStatePaused,
 			captureSnapshot:        true,
 			expectSnapshot:         true,
+			expectTimeoutUpdate:    true,
 			simulatePauseCompleted: true,
 		},
 		{
@@ -327,7 +331,7 @@ func TestSandbox_Pause(t *testing.T) {
 				assert.Equal(t, v1alpha1.SandboxStateAvailable, state, reason)
 			},
 			expectedState: v1alpha1.SandboxStateAvailable,
-			expectError:   "pausing is only available for running state",
+			expectError:   "sandbox is not pausable, reason: SandboxStateNotAllowed",
 		},
 		{
 			name: "pause already paused sandbox",
@@ -342,7 +346,7 @@ func TestSandbox_Pause(t *testing.T) {
 				assert.Equal(t, v1alpha1.SandboxStatePaused, state, reason)
 			},
 			expectedState: v1alpha1.SandboxStatePaused,
-			expectError:   "sandbox is not in running phase",
+			expectError:   "",
 		},
 		{
 			name: "pause killing sandbox",
@@ -353,7 +357,7 @@ func TestSandbox_Pause(t *testing.T) {
 				assert.Equal(t, v1alpha1.SandboxStateDead, state, reason)
 			},
 			expectedState: v1alpha1.SandboxStateDead,
-			expectError:   "sandbox is not in running phase",
+			expectError:   "sandbox is not pausable, reason: SandboxPhaseNotAllowed",
 		},
 	}
 
@@ -444,11 +448,11 @@ func TestSandbox_Pause(t *testing.T) {
 			state, reason := sandboxutils.GetSandboxState(s.Sandbox)
 			assert.Equal(t, tt.expectedState, state, reason)
 			assert.True(t, s.Sandbox.Spec.Paused)
-			if !opts.Timeout.ShutdownTime.IsZero() {
+			if tt.expectTimeoutUpdate && opts.Timeout != nil && !opts.Timeout.ShutdownTime.IsZero() {
 				// milliseconds will be removed by k8s
 				assert.WithinDuration(t, opts.Timeout.ShutdownTime, s.Sandbox.Spec.ShutdownTime.Time, time.Second)
 			}
-			if !opts.Timeout.PauseTime.IsZero() {
+			if tt.expectTimeoutUpdate && opts.Timeout != nil && !opts.Timeout.PauseTime.IsZero() {
 				assert.WithinDuration(t, opts.Timeout.PauseTime, s.Sandbox.Spec.PauseTime.Time, time.Second)
 			}
 			_, hasSnapshot := s.Sandbox.Annotations[v1alpha1.AnnotationPauseTimeoutSnapshot]
@@ -648,12 +652,10 @@ func TestSandbox_PauseSkipsSideEffectsWhenLatestAlreadyPaused(t *testing.T) {
 
 func TestSandbox_PauseRefreshesBeforePreconditionChecks(t *testing.T) {
 	tests := []struct {
-		name        string
-		expectError string
+		name string
 	}{
 		{
-			name:        "local running wrapper does not pause latest paused sandbox",
-			expectError: "sandbox is not in running phase",
+			name: "local running wrapper treats latest paused sandbox as already paused",
 		},
 	}
 
@@ -700,12 +702,137 @@ func TestSandbox_PauseRefreshesBeforePreconditionChecks(t *testing.T) {
 
 			s := AsSandbox(local, cache)
 			err = s.Pause(t.Context(), infra.PauseOptions{})
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), tt.expectError)
+			require.NoError(t, err)
 
 			var updatedSbx v1alpha1.Sandbox
 			require.NoError(t, fc.Get(t.Context(), types.NamespacedName{Namespace: latest.Namespace, Name: latest.Name}, &updatedSbx))
 			assert.True(t, updatedSbx.Spec.Paused)
+		})
+	}
+}
+
+func TestSandbox_PauseConflictsWithActiveResumeWaitHook(t *testing.T) {
+	sandbox := &v1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-sandbox",
+			Namespace: "default",
+			Labels: map[string]string{
+				v1alpha1.LabelSandboxIsClaimed: "true",
+			},
+			Annotations: map[string]string{},
+		},
+		Spec: v1alpha1.SandboxSpec{
+			Paused: true,
+		},
+		Status: v1alpha1.SandboxStatus{
+			Phase: v1alpha1.SandboxPaused,
+			Conditions: []metav1.Condition{
+				{
+					Type:   string(v1alpha1.SandboxConditionPaused),
+					Status: metav1.ConditionTrue,
+				},
+			},
+		},
+	}
+
+	cache, fc, err := cachetest.NewTestCache(t)
+	require.NoError(t, err)
+	require.NoError(t, cache.Run(t.Context()))
+	defer cache.Stop(t.Context())
+	CreateSandboxWithStatus(t, fc, sandbox)
+	time.Sleep(10 * time.Millisecond)
+
+	waitCtx, waitCancel := context.WithCancel(t.Context())
+	defer waitCancel()
+	waitDone := make(chan error, 1)
+	go func() {
+		waitDone <- cache.NewSandboxResumeTask(waitCtx, sandbox).Wait(time.Hour)
+	}()
+
+	key := cacheutils.WaitHookKey[*v1alpha1.Sandbox](sandbox)
+	require.Eventually(t, func() bool {
+		_, exists := cache.GetWaitHooks().Load(key)
+		return exists
+	}, 2*time.Second, 10*time.Millisecond)
+
+	s := AsSandbox(sandbox, cache)
+	err = s.Pause(t.Context(), infra.PauseOptions{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "another action(Resume)'s wait task already exists")
+
+	if val, ok := cache.GetWaitHooks().Load(key); ok {
+		val.(*cacheutils.WaitEntry[*v1alpha1.Sandbox]).Close()
+	}
+	select {
+	case <-waitDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("resume wait hook did not release")
+	}
+}
+
+func TestSandbox_PauseConflictsWithActiveResumeWaitHookBeforeMutation(t *testing.T) {
+	tests := []struct {
+		name              string
+		initialSpecPaused bool
+		expectError       string
+	}{
+		{
+			name:              "active resume hook rejects pause without mutating spec paused",
+			initialSpecPaused: false,
+			expectError:       "another action(Resume)'s wait task already exists",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sandbox := &v1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+					Labels: map[string]string{
+						v1alpha1.LabelSandboxIsClaimed: "true",
+					},
+					Annotations: map[string]string{},
+				},
+				Spec: v1alpha1.SandboxSpec{
+					Paused: tt.initialSpecPaused,
+				},
+				Status: v1alpha1.SandboxStatus{
+					Phase: v1alpha1.SandboxRunning,
+					Conditions: []metav1.Condition{
+						{
+							Type:   string(v1alpha1.SandboxConditionReady),
+							Status: metav1.ConditionTrue,
+						},
+					},
+				},
+			}
+
+			cache, fc, err := cachetest.NewTestCache(t)
+			require.NoError(t, err)
+			require.NoError(t, cache.Run(t.Context()))
+			defer cache.Stop(t.Context())
+			CreateSandboxWithStatus(t, fc, sandbox)
+			time.Sleep(10 * time.Millisecond)
+
+			key := cacheutils.WaitHookKey[*v1alpha1.Sandbox](sandbox)
+			cache.GetWaitHooks().Store(key, cacheutils.NewWaitEntry[*v1alpha1.Sandbox](
+				t.Context(),
+				cacheutils.WaitActionResume,
+				func(*v1alpha1.Sandbox) (bool, error) {
+					return false, nil
+				},
+			))
+			defer cache.GetWaitHooks().Delete(key)
+
+			s := AsSandbox(sandbox, cache)
+			err = s.Pause(t.Context(), infra.PauseOptions{})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.expectError)
+
+			var updatedSbx v1alpha1.Sandbox
+			require.NoError(t, fc.Get(t.Context(), types.NamespacedName{Namespace: sandbox.Namespace, Name: sandbox.Name}, &updatedSbx))
+			assert.Equal(t, tt.initialSpecPaused, updatedSbx.Spec.Paused)
 		})
 	}
 }
@@ -822,7 +949,7 @@ func TestSandbox_Resume(t *testing.T) {
 				assert.Equal(t, v1alpha1.SandboxStatePaused, state, reason)
 			},
 			expectedState: "",
-			expectError:   "sandbox is pausing",
+			expectError:   "sandbox is not resumable, reason: SandboxIsPausing",
 		},
 		{
 			name: "resume already running sandbox",
@@ -835,8 +962,8 @@ func TestSandbox_Resume(t *testing.T) {
 				state, reason := sandboxutils.GetSandboxState(sbx)
 				assert.Equal(t, v1alpha1.SandboxStateRunning, state, reason)
 			},
-			expectedState: "",
-			expectError:   "resuming is only available for paused state",
+			expectedState: v1alpha1.SandboxStateRunning,
+			expectError:   "",
 		},
 		{
 			name: "resume killing sandbox",
@@ -847,7 +974,7 @@ func TestSandbox_Resume(t *testing.T) {
 				assert.Equal(t, v1alpha1.SandboxStateDead, state, reason)
 			},
 			expectedState: "",
-			expectError:   "resuming is only available for paused state",
+			expectError:   "sandbox is not resumable, reason: SandboxPhaseNotAllowed",
 		},
 	}
 
@@ -955,6 +1082,135 @@ func TestSandbox_Resume(t *testing.T) {
 			require.NotNil(t, updatedSbx.Spec.PauseTime)
 			assert.WithinDuration(t, shutdownTime, updatedSbx.Spec.ShutdownTime.Time, time.Second)
 			assert.WithinDuration(t, pauseTime, updatedSbx.Spec.PauseTime.Time, time.Second)
+		})
+	}
+}
+
+func TestSandbox_ResumeConflictsWithActivePauseWaitHook(t *testing.T) {
+	sandbox := &v1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-sandbox",
+			Namespace: "default",
+			Labels: map[string]string{
+				v1alpha1.LabelSandboxIsClaimed: "true",
+			},
+			Annotations: map[string]string{},
+		},
+		Spec: v1alpha1.SandboxSpec{
+			Paused: false,
+		},
+		Status: v1alpha1.SandboxStatus{
+			Phase: v1alpha1.SandboxRunning,
+			Conditions: []metav1.Condition{
+				{
+					Type:   string(v1alpha1.SandboxConditionReady),
+					Status: metav1.ConditionTrue,
+				},
+			},
+		},
+	}
+
+	cache, fc, err := cachetest.NewTestCache(t)
+	require.NoError(t, err)
+	require.NoError(t, cache.Run(t.Context()))
+	defer cache.Stop(t.Context())
+	CreateSandboxWithStatus(t, fc, sandbox)
+	time.Sleep(10 * time.Millisecond)
+
+	waitCtx, waitCancel := context.WithCancel(t.Context())
+	defer waitCancel()
+	waitDone := make(chan error, 1)
+	go func() {
+		waitDone <- cache.NewSandboxPauseTask(waitCtx, sandbox).Wait(time.Hour)
+	}()
+
+	key := cacheutils.WaitHookKey[*v1alpha1.Sandbox](sandbox)
+	require.Eventually(t, func() bool {
+		_, exists := cache.GetWaitHooks().Load(key)
+		return exists
+	}, 2*time.Second, 10*time.Millisecond)
+
+	s := AsSandbox(sandbox, cache)
+	err = s.Resume(t.Context(), infra.ResumeOptions{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "another action(Pause)'s wait task already exists")
+
+	if val, ok := cache.GetWaitHooks().Load(key); ok {
+		val.(*cacheutils.WaitEntry[*v1alpha1.Sandbox]).Close()
+	}
+	select {
+	case <-waitDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("pause wait hook did not release")
+	}
+}
+
+func TestSandbox_ResumeConflictsWithActivePauseWaitHookBeforeMutation(t *testing.T) {
+	tests := []struct {
+		name              string
+		initialSpecPaused bool
+		expectError       string
+	}{
+		{
+			name:              "active pause hook rejects resume without mutating spec paused",
+			initialSpecPaused: true,
+			expectError:       "another action(Pause)'s wait task already exists",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sandbox := &v1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+					Labels: map[string]string{
+						v1alpha1.LabelSandboxIsClaimed: "true",
+					},
+					Annotations: map[string]string{},
+				},
+				Spec: v1alpha1.SandboxSpec{
+					Paused: tt.initialSpecPaused,
+				},
+				Status: v1alpha1.SandboxStatus{
+					Phase: v1alpha1.SandboxPaused,
+					PodInfo: v1alpha1.PodInfo{
+						PodIP: "10.0.0.1",
+					},
+					Conditions: []metav1.Condition{
+						{
+							Type:   string(v1alpha1.SandboxConditionPaused),
+							Status: metav1.ConditionTrue,
+						},
+					},
+				},
+			}
+
+			cache, fc, err := cachetest.NewTestCache(t)
+			require.NoError(t, err)
+			require.NoError(t, cache.Run(t.Context()))
+			defer cache.Stop(t.Context())
+			CreateSandboxWithStatus(t, fc, sandbox)
+			time.Sleep(10 * time.Millisecond)
+
+			key := cacheutils.WaitHookKey[*v1alpha1.Sandbox](sandbox)
+			cache.GetWaitHooks().Store(key, cacheutils.NewWaitEntry[*v1alpha1.Sandbox](
+				t.Context(),
+				cacheutils.WaitActionPause,
+				func(*v1alpha1.Sandbox) (bool, error) {
+					return false, nil
+				},
+			))
+			defer cache.GetWaitHooks().Delete(key)
+
+			s := AsSandbox(sandbox, cache)
+			err = s.Resume(t.Context(), infra.ResumeOptions{})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.expectError)
+
+			var updatedSbx v1alpha1.Sandbox
+			require.NoError(t, fc.Get(t.Context(), types.NamespacedName{Namespace: sandbox.Namespace, Name: sandbox.Name}, &updatedSbx))
+			assert.Equal(t, tt.initialSpecPaused, updatedSbx.Spec.Paused)
 		})
 	}
 }

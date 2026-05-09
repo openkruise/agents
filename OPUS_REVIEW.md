@@ -65,6 +65,7 @@ if opts.Timeout != nil {
 - `Resume` 在赢家失败时把 `spec.Paused` 翻回 `true`，或写一个标记位让下一次 reconcile 拉起；
 - 或者在前置检查里允许「state 是 Running 但运行时初始化条件未达成」的重入。
 
+> 讨论点：resume 只能进行一次。现阶段 winner 失败后应该直接返回错误，losers 就返回成功，待 post process 完成下沉后，将改为所有 request 都从下层拉取 post process 的结果，这样是否合适（当前只是一个过渡态）
 ---
 
 ## 二、设计层面的隐患（建议明确语义/补单元测试）
@@ -98,6 +99,7 @@ return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 - 或者在 `SaveTimeoutWithPolicySnapshotAware` 的胜出分支同步写新 snapshot（让 snapshot 始终等于上一次成功设定的值），依靠 RV 冲突保证序列化；
 - 在 AGENTS.md 记录上述不变式，便于以后维护者不犯回归。
 
+> 讨论点：必须要覆盖，因为 Resume 不会清理 snapshot，通过 k8s 链路下一次进入到 pause 时需要自动更新 snapshot
 ### 5. Resume 不清理 snapshot，造成长期残留
 **位置**：`sandbox.go:Resume`
 
@@ -108,6 +110,7 @@ return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 
 **建议**：在 `Resume` 的 modifier 末尾，若 `EnsureTimeoutSnapshotIfMissing == false`（即不需要给后续并发兜底），就 `ClearPauseTimeoutSnapshot`；或者在 `Resume` 的 winner 路径完整结束后再清理。
 
+> 讨论点：控制器的 ensurePauseTimeoutSnapshot 会保障 auto-pause 的 snapshot 更新。这个设计属于上层依赖下层功能。
 ### 6. `Pause` 已经 paused 时的语义不一致
 - `s.Status.Phase != SandboxRunning` 直接报错 "sandbox is not in running phase"；
 - 而 race 场景下进入 `retryUpdate` 看到 `latest.Spec.Paused=true` 是「静默跳过、视为成功」。
@@ -119,6 +122,7 @@ return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 
 把 `Spec.ShutdownTime` 设成 3026 年会让 `Reconcile` 里 `requeueAfter = box.Spec.ShutdownTime.Sub(now.Time)` 得到一个超大 `time.Duration`。controller-runtime 通常会做 clamp，但依赖未文档化的行为。语义上更合理的做法是 `time.Time{}`（`setTimeout` 会把对应字段设为 `nil`，符合「never timeout」的约定）。
 
+> 讨论点：“无限”和 never-timeout 不一样：无限的 sandbox 在 resume 后会恢复 timeout，而 never-timeout 永远不会 timeout。这里 controller-runtime 会发生什么问题？
 ---
 
 ## 三、次要问题
@@ -149,12 +153,15 @@ if ok, _ := timeout.IsTimeoutMatchedSnapshot(box); ok { return nil }
 ### 10. `retryUpdate` 跳过更新时不会调用 `ResourceVersionExpectationExpect`
 非赢家路径 `s.Sandbox = latest` 后直接返回，依赖 `Resume` 在外层 `InplaceRefresh` 后再补 `Expect`。逻辑上没问题，但流程依赖比较隐式，建议在 `retryUpdate` 注释里写清楚「skip 路径不影响期望」，避免别人复用时漏调用。
 
+> 讨论点：是否改为 retryUpdate 中 defer ResourceVersionExpectationExpect？InplaceRefresh 里面 expect 的是 wait 后的状态，而不是 update 后的状态，两者不能混用
 ### 11. `TestSandbox_PauseSkipsSideEffectsWhenLatestAlreadyPaused` 依赖 APIReader 调用计数
 该测试通过 `mutatingAPIReader` 的「第二次 Get 时插入 paused」来构造 race。如果将来 `Pause` 增加一次 APIReader 读取（例如多读一次 latest），断言会失效，但行为正确性其实没变。属于脆性测试。
 
+> 讨论点：帮我做一个修改方案
 ### 12. `e2b.ResumeSandbox`（deprecated）和 `ConnectSandbox` 重复使用 `EnsureTimeoutSnapshotIfMissing: true`
 两处行为一致，可抽出常量或 helper，避免一处改了另一处忘改。
 
+> 忽略。
 ---
 
 ## 四、其他扫到的杂项（与本次 pause/resume/timeout 主题无关，但属于本分支）

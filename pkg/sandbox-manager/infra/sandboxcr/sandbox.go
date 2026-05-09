@@ -32,6 +32,7 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
 	"github.com/openkruise/agents/pkg/cache"
+	cacheutils "github.com/openkruise/agents/pkg/cache/utils"
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
@@ -317,19 +318,23 @@ func (s *Sandbox) Pause(ctx context.Context, opts infra.PauseOptions) error {
 	if err := s.refreshFromAPIReader(ctx); err != nil {
 		return err
 	}
-	if s.Status.Phase != agentsv1alpha1.SandboxRunning {
-		return fmt.Errorf("sandbox is not in running phase")
+	if pausable, reason := stateutils.IsSandboxPausable(s.Sandbox); !pausable {
+		return errors.NewError(errors.ErrorConflict, "sandbox is not pausable, reason: %s", reason)
 	}
-	state, reason := s.GetState()
-	if state != agentsv1alpha1.SandboxStateRunning {
-		err := fmt.Errorf("pausing is only available for running state, current state: %s", state)
-		log.Error(err, "sandbox is not running", "state", state, "reason", reason)
+	if err := s.Cache.CheckSandboxWaitHookConflict(s.Sandbox, cacheutils.WaitActionPause); err != nil {
 		return err
+	}
+	cond := GetSandboxCondition(s.Sandbox, agentsv1alpha1.SandboxConditionPaused)
+	if s.Status.Phase == agentsv1alpha1.SandboxPaused {
+		if cond.Status == metav1.ConditionTrue {
+			log.Info("sandbox is already paused")
+			return nil
+		}
 	}
 	updated, err := s.retryUpdate(ctx, func(sbx *agentsv1alpha1.Sandbox) (bool, error) {
 		if sbx.Spec.Paused {
 			// Pause is first-writer-wins: only the request that flips
-			// spec.paused may apply timeout and snapshot side effects.
+			// No need to update if spec.paused is already true.
 			return false, nil
 		}
 		sbx.Spec.Paused = true
@@ -338,10 +343,10 @@ func (s *Sandbox) Pause(ctx context.Context, opts infra.PauseOptions) error {
 			if !timeout.Equal(current, *opts.Timeout) {
 				setTimeout(sbx, *opts.Timeout)
 			}
-			if opts.CaptureTimeoutSnapshot {
-				if err := timeout.SetTimeoutSnapshot(sbx); err != nil {
-					return false, err
-				}
+		}
+		if opts.Timeout != nil && opts.CaptureTimeoutSnapshot {
+			if err := timeout.SetTimeoutSnapshot(sbx); err != nil {
+				return false, err
 			}
 		}
 		return true, nil
@@ -368,25 +373,24 @@ const postResumeOperationTimeout = 30 * time.Second
 func (s *Sandbox) Resume(ctx context.Context, opts infra.ResumeOptions) error {
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(s.Sandbox))
 
-	localState, _ := s.GetState()
 	if err := s.refreshFromAPIReader(ctx); err != nil {
 		return err
 	}
-	state, reason := s.GetState()
-	log.Info("try to resume sandbox", "state", state, "reason", reason)
-	if state != agentsv1alpha1.SandboxStatePaused {
-		if localState == agentsv1alpha1.SandboxStatePaused && state == agentsv1alpha1.SandboxStateRunning && !s.Spec.Paused {
-			log.Info("sandbox already resumed")
-			return nil
-		}
-		err := fmt.Errorf("resuming is only available for paused state, current state: %s", state)
-		log.Error(err, "sandbox is not paused", "state", state, "reason", reason)
+
+	if resumable, reason := stateutils.IsSandboxResumable(s.Sandbox); !resumable {
+		return errors.NewError(errors.ErrorConflict, "sandbox is not resumable, reason: %s", reason)
+	}
+	if err := s.Cache.CheckSandboxWaitHookConflict(s.Sandbox, cacheutils.WaitActionResume); err != nil {
 		return err
 	}
-	cond := GetSandboxCondition(s.Sandbox, agentsv1alpha1.SandboxConditionPaused)
-	if s.Spec.Paused && cond.Status == metav1.ConditionFalse {
-		return errors.NewError(errors.ErrorConflict, "sandbox is pausing, please wait a moment and try again")
+	cond := GetSandboxCondition(s.Sandbox, agentsv1alpha1.SandboxConditionReady)
+	if cond.Status == metav1.ConditionTrue {
+		log.Info("sandbox is already resumed")
+		return nil
 	}
+
+	state, reason := s.GetState()
+	log.Info("try to resume sandbox", "state", state, "reason", reason)
 	initRuntimeOpts, err := runtime.GetInitRuntimeRequest(s.Sandbox)
 	if err != nil {
 		log.Error(err, "failed to get init runtime request")
@@ -395,7 +399,7 @@ func (s *Sandbox) Resume(ctx context.Context, opts infra.ResumeOptions) error {
 	resumeUpdated, err := s.retryUpdate(ctx, func(sbx *agentsv1alpha1.Sandbox) (bool, error) {
 		if !sbx.Spec.Paused {
 			// Resume is first-writer-wins: only the request that flips
-			// spec.paused may apply timeout snapshot side effects.
+			// No need to update if spec.paused is already false.
 			return false, nil
 		}
 		sbx.Spec.Paused = false
@@ -447,7 +451,7 @@ func (s *Sandbox) Resume(ctx context.Context, opts infra.ResumeOptions) error {
 		// Perform ReInit if initRuntimeOpts is set
 		if initRuntimeOpts != nil {
 			log.Info("will re-init runtime after resume")
-			if _, err := runtime.InitRuntime(ctx, s.Sandbox, *initRuntimeOpts, s.refreshFunc()); err != nil {
+			if _, err := runtime.InitRuntime(postCtx, s.Sandbox, *initRuntimeOpts, s.refreshFunc()); err != nil {
 				log.Error(err, "failed to perform ReInit after resume")
 				return fmt.Errorf("failed to perform ReInit after resume: %w", err)
 			}

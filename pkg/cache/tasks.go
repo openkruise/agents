@@ -54,6 +54,9 @@ func (c *Cache) CheckpointUpdateFunc(ctx context.Context) cacheutils.UpdateFunc[
 // status.conditions[type=Paused].status == True.
 func (c *Cache) NewSandboxPauseTask(ctx context.Context, sbx *agentsv1alpha1.Sandbox) *cacheutils.WaitTask[*agentsv1alpha1.Sandbox] {
 	check := func(s *agentsv1alpha1.Sandbox) (bool, error) {
+		if pausable, reason := sandboxutils.IsSandboxPausable(s); !pausable {
+			return false, fmt.Errorf("sandbox %s/%s is not pausable, reason: %s", s.Namespace, s.Name, reason)
+		}
 		cond := utils.GetSandboxCondition(&s.Status, string(agentsv1alpha1.SandboxConditionPaused))
 		if cond == nil {
 			return false, nil
@@ -69,12 +72,29 @@ func (c *Cache) NewSandboxPauseTask(ctx context.Context, sbx *agentsv1alpha1.San
 // SandboxStateRunning.
 func (c *Cache) NewSandboxResumeTask(ctx context.Context, sbx *agentsv1alpha1.Sandbox) *cacheutils.WaitTask[*agentsv1alpha1.Sandbox] {
 	check := func(s *agentsv1alpha1.Sandbox) (bool, error) {
-		state, _ := sandboxutils.GetSandboxState(s)
-		return state == agentsv1alpha1.SandboxStateRunning, nil
+		if resumable, reason := sandboxutils.IsSandboxResumable(s); !resumable {
+			return false, fmt.Errorf("sandbox %s/%s is not resumable, reason: %s", s.Namespace, s.Name, reason)
+		}
+		cond := utils.GetSandboxCondition(&s.Status, string(agentsv1alpha1.SandboxConditionReady))
+		if cond == nil {
+			return false, nil
+		}
+		return cond.Status == metav1.ConditionTrue, nil
 	}
 	return cacheutils.NewWaitTask[*agentsv1alpha1.Sandbox](
 		ctx, c.waitHooks, cacheutils.WaitActionResume, sbx, c.SandboxUpdateFunc(ctx), check,
 	)
+}
+
+// CheckSandboxWaitHookConflict returns an error if the sandbox has an active
+// wait hook owned by a different action.
+//
+// This is a pre-mutation guard for Pause/Resume callers: it lets an opposite
+// in-flight wait reject the request before spec.paused is changed. It is not a
+// transaction with the caller's later update, so a caller must still rely on
+// AcquireEntry during Wait to detect races that appear after this check.
+func (c *Cache) CheckSandboxWaitHookConflict(sbx *agentsv1alpha1.Sandbox, action cacheutils.WaitAction) error {
+	return cacheutils.CheckEntryActionConflict[*agentsv1alpha1.Sandbox](c.waitHooks, sbx, action)
 }
 
 // NewSandboxWaitReadyTask builds a WaitTask that encapsulates the readiness check

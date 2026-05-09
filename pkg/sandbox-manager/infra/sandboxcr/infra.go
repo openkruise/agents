@@ -215,19 +215,19 @@ func (i *Infra) DeleteCheckpoint(ctx context.Context, opts infra.DeleteCheckpoin
 	}, i.Cache, infra.CloneMetrics{})
 	if err != nil {
 		log.Error(err, "failed to find checkpoint and template")
-		return managererrors.NewError(managererrors.ErrorNotFound, err.Error())
+		return managererrors.NewError(managererrors.ErrorNotFound, "%s", err.Error())
 	}
 
 	// Step 2: Verify ownership if Owner is specified
 	if user := opts.User; user != "" && cp.GetAnnotations()[v1alpha1.AnnotationOwner] != user {
-		return managererrors.NewError(managererrors.ErrorNotAllowed, fmt.Sprintf("checkpoint %s is not owned by user %s", opts.CheckpointID, user))
+		return managererrors.NewError(managererrors.ErrorNotAllowed, "checkpoint %s is not owned by user %s", opts.CheckpointID, user)
 	}
 
 	// Step 3: Delete the SandboxTemplate
 	log.Info("deleting sandbox template", "template", klog.KObj(tmpl))
 	if err := DefaultDeleteSandboxTemplate(ctx, i.Cache.GetClient(), tmpl.Namespace, tmpl.Name); err != nil {
 		log.Error(err, "failed to delete sandbox template")
-		return managererrors.NewError(managererrors.ErrorInternal, err.Error())
+		return managererrors.NewError(managererrors.ErrorInternal, "%s", err.Error())
 	}
 
 	// Step 4: Check if checkpoint has OwnerReference to the SandboxTemplate
@@ -237,7 +237,7 @@ func (i *Infra) DeleteCheckpoint(ctx context.Context, opts infra.DeleteCheckpoin
 		log.Info("checkpoint has no controller reference to template, deleting explicitly", "checkpoint", klog.KObj(cp))
 		if err := DefaultDeleteCheckpointCR(ctx, i.Cache.GetClient(), cp.Namespace, cp.Name); err != nil {
 			log.Error(err, "failed to delete checkpoint")
-			return managererrors.NewError(managererrors.ErrorInternal, err.Error())
+			return managererrors.NewError(managererrors.ErrorInternal, "%s", err.Error())
 		}
 	}
 

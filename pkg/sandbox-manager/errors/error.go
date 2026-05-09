@@ -41,10 +41,10 @@ func (t *Error) Error() string {
 	return fmt.Sprintf("%s: %s", t.Code, t.Message)
 }
 
-func NewError(code ErrorCode, message string) *Error {
+func NewError(code ErrorCode, format string, a ...any) *Error {
 	return &Error{
 		Code:    code,
-		Message: message,
+		Message: fmt.Sprintf(format, a...),
 	}
 }
 

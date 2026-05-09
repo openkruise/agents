@@ -3245,6 +3245,8 @@ func TestEnsurePauseTimeoutSnapshot(t *testing.T) {
 		patchErr   error                         // non-NotFound error for Patch
 		expectErr  string
 		expectAnno bool // whether AnnotationPauseTimeoutSnapshot should exist after
+		checkMatch bool // whether to assert snapshot/timeout match status
+		matched    bool // expected snapshot match status
 	}{
 		{
 			name: "snapshot already matched - fast path no-op",
@@ -3261,6 +3263,8 @@ func TestEnsurePauseTimeoutSnapshot(t *testing.T) {
 				}
 			},
 			expectAnno: true,
+			checkMatch: true,
+			matched:    true,
 		},
 		{
 			name: "no snapshot, paused sandbox with timeout - sets snapshot",
@@ -3272,6 +3276,8 @@ func TestEnsurePauseTimeoutSnapshot(t *testing.T) {
 				},
 			},
 			expectAnno: true,
+			checkMatch: true,
+			matched:    true,
 		},
 		{
 			name: "no snapshot, paused sandbox without timeout - no snapshot written",
@@ -3295,7 +3301,7 @@ func TestEnsurePauseTimeoutSnapshot(t *testing.T) {
 			expectAnno: false,
 		},
 		{
-			name: "snapshot mismatched - overwrites old snapshot",
+			name: "snapshot mismatched - keeps existing snapshot unchanged",
 			sandbox: &agentsv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{Name: "overwrite", Namespace: "default", Annotations: map[string]string{}},
 				Spec: agentsv1alpha1.SandboxSpec{
@@ -3313,6 +3319,8 @@ func TestEnsurePauseTimeoutSnapshot(t *testing.T) {
 				s.Spec.ShutdownTime = &metav1.Time{Time: baseTime.Add(2 * time.Hour)}
 			},
 			expectAnno: true,
+			checkMatch: true,
+			matched:    false,
 		},
 		{
 			name: "get latest fails - returns error",
@@ -3394,13 +3402,14 @@ func TestEnsurePauseTimeoutSnapshot(t *testing.T) {
 				t.Errorf("expected annotation presence=%v, got presence=%v", tt.expectAnno, hasAnno)
 			}
 
-			// When annotation is expected, verify it matches the stored sandbox timeout
-			if hasAnno {
+			if hasAnno && tt.checkMatch {
 				matched, checkErr := timeoututils.IsTimeoutMatchedSnapshot(stored)
 				if checkErr != nil {
 					t.Errorf("failed to check snapshot match: %v", checkErr)
-				} else if !matched {
-					t.Errorf("expected snapshot annotation to match current timeout")
+					return
+				}
+				if matched != tt.matched {
+					t.Errorf("expected snapshot matched=%v, got %v", tt.matched, matched)
 				}
 			}
 		})

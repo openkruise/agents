@@ -127,10 +127,6 @@ func (r *WaitReconciler[T]) checkWaitHooks(key string, obj T) {
 	if !ok {
 		return
 	}
-	// If the wait context is already canceled, skip
-	if entry.Context().Err() != nil {
-		return
-	}
 	satisfied, err := entry.Check(obj)
 	if satisfied || err != nil {
 		entry.Close()

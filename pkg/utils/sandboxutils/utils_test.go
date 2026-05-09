@@ -384,3 +384,125 @@ func TestGetSandboxID(t *testing.T) {
 		})
 	}
 }
+
+func TestIsSandboxPausable(t *testing.T) {
+	tests := []struct {
+		name           string
+		sandbox        *agentsv1alpha1.Sandbox
+		expectedResult bool
+		expectedReason string
+	}{
+		{
+			name: "Running sandbox is pausable",
+			sandbox: &agentsv1alpha1.Sandbox{
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxRunning,
+				},
+			},
+			expectedResult: true,
+			expectedReason: "SandboxIsRunningOrPaused",
+		},
+		{
+			name: "Paused sandbox is pausable",
+			sandbox: &agentsv1alpha1.Sandbox{
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxPaused,
+				},
+			},
+			expectedResult: true,
+			expectedReason: "SandboxIsRunningOrPaused",
+		},
+		{
+			name: "Pending sandbox is not pausable",
+			sandbox: &agentsv1alpha1.Sandbox{
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxPending,
+				},
+			},
+			expectedResult: false,
+			expectedReason: "SandboxPhaseNotAllowed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, reason := IsSandboxPausable(tt.sandbox)
+			assert.Equal(t, tt.expectedResult, result)
+			assert.Equal(t, tt.expectedReason, reason)
+		})
+	}
+}
+
+func TestIsSandboxResumable(t *testing.T) {
+	tests := []struct {
+		name           string
+		sandbox        *agentsv1alpha1.Sandbox
+		expectedResult bool
+		expectedReason string
+	}{
+		{
+			name: "Running sandbox is resumable",
+			sandbox: &agentsv1alpha1.Sandbox{
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxRunning,
+				},
+			},
+			expectedResult: true,
+			expectedReason: "SandboxIsRunningOrResuming",
+		},
+		{
+			name: "Resuming sandbox is resumable",
+			sandbox: &agentsv1alpha1.Sandbox{
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxResuming,
+				},
+			},
+			expectedResult: true,
+			expectedReason: "SandboxIsRunningOrResuming",
+		},
+		{
+			name: "Paused sandbox with paused condition is resumable",
+			sandbox: &agentsv1alpha1.Sandbox{
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxPaused,
+					Conditions: []metav1.Condition{
+						{
+							Type:   string(agentsv1alpha1.SandboxConditionPaused),
+							Status: metav1.ConditionTrue,
+						},
+					},
+				},
+			},
+			expectedResult: true,
+			expectedReason: "SandboxIsPaused",
+		},
+		{
+			name: "Paused sandbox without paused condition is not resumable",
+			sandbox: &agentsv1alpha1.Sandbox{
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxPaused,
+				},
+			},
+			expectedResult: false,
+			expectedReason: "SandboxIsPausing",
+		},
+		{
+			name: "Succeeded sandbox is not resumable",
+			sandbox: &agentsv1alpha1.Sandbox{
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxSucceeded,
+				},
+			},
+			expectedResult: false,
+			expectedReason: "SandboxPhaseNotAllowed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, reason := IsSandboxResumable(tt.sandbox)
+			assert.Equal(t, tt.expectedResult, result)
+			assert.Equal(t, tt.expectedReason, reason)
+		})
+	}
+}

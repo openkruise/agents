@@ -87,6 +87,28 @@ func TestCacheSandboxWaitReconciler_Reconcile(t *testing.T) {
 			expectDone: true,
 		},
 		{
+			name: "waitHooks has canceled entry and checker satisfied",
+			objects: []client.Object{
+				&agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{Name: "test-sandbox", Namespace: "default"},
+				},
+			},
+			waitHooks: &sync.Map{},
+			setupWaitHooks: func(m *sync.Map) {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				m.Store(waitHookKey, cacheutils.NewWaitEntry[*agentsv1alpha1.Sandbox](
+					ctx,
+					cacheutils.WaitActionWaitReady,
+					func(sbx *agentsv1alpha1.Sandbox) (bool, error) {
+						return true, nil
+					},
+				))
+			},
+			expectErr:  false,
+			expectDone: true,
+		},
+		{
 			name: "waitHooks has entry but checker not satisfied",
 			objects: []client.Object{
 				&agentsv1alpha1.Sandbox{
