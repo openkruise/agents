@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"time"
 
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -40,7 +41,12 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/discovery"
 	"github.com/openkruise/agents/pkg/utils/expectations"
+	"github.com/openkruise/agents/pkg/utils/sandboxutils"
 )
+
+// concurrencyRequeue is how long we wait before re-checking when a sibling
+// SandboxUpdateOps has won the concurrency tiebreak.
+const concurrencyRequeue = 5 * time.Second
 
 const finalizerName = "agents.kruise.io/sandboxupdateops-protection"
 
@@ -119,6 +125,35 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if ops.Status.Phase == agentsv1alpha1.SandboxUpdateOpsCompleted ||
 		ops.Status.Phase == agentsv1alpha1.SandboxUpdateOpsFailed {
 		return ctrl.Result{}, nil
+	}
+
+	// Concurrency safeguard: the validating webhook lists existing ops via the
+	// informer cache, which can be stale, so two ops with overlapping selectors
+	// can both be admitted. Re-check here before transitioning to Updating.
+	// Note: this still relies on a (separately delayed) cache, so it does not
+	// fully close the race — a sandbox-level lock in the pre-upgrade phase is
+	// the durable fix.
+	if ops.Status.Phase == "" || ops.Status.Phase == agentsv1alpha1.SandboxUpdateOpsPending {
+		conflict, cErr := r.findOverlappingActiveOp(ctx, ops)
+		if cErr != nil {
+			return ctrl.Result{}, cErr
+		}
+		if conflict != nil {
+			klog.InfoS("Deferring SandboxUpdateOps: overlapping active sibling exists",
+				"ops", klog.KObj(ops), "conflict", klog.KObj(conflict),
+				"conflictPhase", conflict.Status.Phase)
+			r.Recorder.Eventf(ops, v1.EventTypeNormal, "WaitingForPeer",
+				"Deferring to overlapping SandboxUpdateOps %s", conflict.Name)
+			if ops.Status.Phase != agentsv1alpha1.SandboxUpdateOpsPending {
+				newStatus := ops.Status.DeepCopy()
+				newStatus.Phase = agentsv1alpha1.SandboxUpdateOpsPending
+				newStatus.ObservedGeneration = ops.Generation
+				if err := r.updateStatus(ctx, ops, newStatus); err != nil {
+					return ctrl.Result{}, err
+				}
+			}
+			return ctrl.Result{RequeueAfter: concurrencyRequeue}, nil
+		}
 	}
 
 	// 3. Convert selector to labels.Selector
@@ -359,6 +394,49 @@ func (r *Reconciler) handleDeletion(ctx context.Context, ops *agentsv1alpha1.San
 	klog.InfoS("Finalizer removed, SandboxUpdateOps can be deleted",
 		"ops", klog.KObj(ops))
 	return ctrl.Result{}, nil
+}
+
+// findOverlappingActiveOp returns a sibling SandboxUpdateOps in the same
+// namespace whose selector overlaps `ops` and that should run before `ops`.
+// It returns nil if no such sibling exists.
+//
+// Tiebreak: a sibling already in Updating wins outright. If both are still
+// pending, the one with the older CreationTimestamp wins (lexicographic name
+// comparison breaks exact-time ties).
+func (r *Reconciler) findOverlappingActiveOp(ctx context.Context, ops *agentsv1alpha1.SandboxUpdateOps) (*agentsv1alpha1.SandboxUpdateOps, error) {
+	list := &agentsv1alpha1.SandboxUpdateOpsList{}
+	if err := r.List(ctx, list, client.InNamespace(ops.Namespace)); err != nil {
+		return nil, err
+	}
+	for i := range list.Items {
+		peer := &list.Items[i]
+		if peer.Name == ops.Name || !peer.DeletionTimestamp.IsZero() {
+			continue
+		}
+		if peer.Status.Phase == agentsv1alpha1.SandboxUpdateOpsCompleted ||
+			peer.Status.Phase == agentsv1alpha1.SandboxUpdateOpsFailed {
+			continue
+		}
+		if !sandboxutils.IsSelectorOverlapping(ops.Spec.Selector, peer.Spec.Selector) {
+			continue
+		}
+		if peer.Status.Phase == agentsv1alpha1.SandboxUpdateOpsUpdating {
+			return peer, nil
+		}
+		if peerWinsTieBreak(peer, ops) {
+			return peer, nil
+		}
+	}
+	return nil, nil
+}
+
+// peerWinsTieBreak returns true when `peer` should run before `ops` given that
+// both are still in a pre-Updating phase.
+func peerWinsTieBreak(peer, ops *agentsv1alpha1.SandboxUpdateOps) bool {
+	if !peer.CreationTimestamp.Equal(&ops.CreationTimestamp) {
+		return peer.CreationTimestamp.Before(&ops.CreationTimestamp)
+	}
+	return peer.Name < ops.Name
 }
 
 func (r *Reconciler) updateStatus(ctx context.Context, ops *agentsv1alpha1.SandboxUpdateOps, newStatus *agentsv1alpha1.SandboxUpdateOpsStatus) error {
