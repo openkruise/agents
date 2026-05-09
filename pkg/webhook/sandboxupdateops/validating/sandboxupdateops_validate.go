@@ -109,7 +109,7 @@ func (h *SandboxUpdateOpsValidatingHandler) handleCreate(ctx context.Context, ob
 		if existing.Status.Phase != agentsv1alpha1.SandboxUpdateOpsCompleted &&
 			existing.Status.Phase != agentsv1alpha1.SandboxUpdateOpsFailed {
 			// Check if selectors overlap
-			if sandboxutils.SelectorsOverlap(obj.Spec.Selector, existing.Spec.Selector) {
+			if sandboxutils.IsSelectorOverlapping(obj.Spec.Selector, existing.Spec.Selector) {
 				errList = append(errList, field.Forbidden(specPath.Child("selector"),
 					"there is an active SandboxUpdateOps ("+existing.Name+") in the same namespace with an overlapping selector"))
 				break

@@ -23,7 +23,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-func TestSelectorsOverlap(t *testing.T) {
+func TestIsSelectorOverlapping(t *testing.T) {
 	tests := []struct {
 		name     string
 		s1       *metav1.LabelSelector
@@ -61,13 +61,27 @@ func TestSelectorsOverlap(t *testing.T) {
 			expected: true,
 		},
 		{
-			name:     "No common keys (assume overlap)",
+			name:     "No common keys",
 			s1:       &metav1.LabelSelector{MatchLabels: map[string]string{"app": "foo"}},
 			s2:       &metav1.LabelSelector{MatchLabels: map[string]string{"env": "prod"}},
 			expected: true,
 		},
 		{
-			name: "With MatchExpressions (hit lines)",
+			name: "MatchExpressions In overlap",
+			s1: &metav1.LabelSelector{
+				MatchExpressions: []metav1.LabelSelectorRequirement{
+					{Key: "app", Operator: metav1.LabelSelectorOpIn, Values: []string{"foo", "bar"}},
+				},
+			},
+			s2: &metav1.LabelSelector{
+				MatchExpressions: []metav1.LabelSelectorRequirement{
+					{Key: "app", Operator: metav1.LabelSelectorOpIn, Values: []string{"bar", "baz"}},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "MatchExpressions In disjoint",
 			s1: &metav1.LabelSelector{
 				MatchExpressions: []metav1.LabelSelectorRequirement{
 					{Key: "app", Operator: metav1.LabelSelectorOpIn, Values: []string{"foo"}},
@@ -75,22 +89,41 @@ func TestSelectorsOverlap(t *testing.T) {
 			},
 			s2: &metav1.LabelSelector{
 				MatchExpressions: []metav1.LabelSelectorRequirement{
-					{Key: "app", Operator: metav1.LabelSelectorOpIn, Values: []string{"foo"}},
+					{Key: "app", Operator: metav1.LabelSelectorOpIn, Values: []string{"bar"}},
 				},
 			},
-			expected: true,
+			expected: false,
+		},
+		{
+			name: "MatchLabel vs NotIn excluding it",
+			s1:   &metav1.LabelSelector{MatchLabels: map[string]string{"env": "prod"}},
+			s2: &metav1.LabelSelector{
+				MatchExpressions: []metav1.LabelSelectorRequirement{
+					{Key: "env", Operator: metav1.LabelSelectorOpNotIn, Values: []string{"prod"}},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "Exists vs DoesNotExist",
+			s1: &metav1.LabelSelector{
+				MatchExpressions: []metav1.LabelSelectorRequirement{
+					{Key: "team", Operator: metav1.LabelSelectorOpExists},
+				},
+			},
+			s2: &metav1.LabelSelector{
+				MatchExpressions: []metav1.LabelSelectorRequirement{
+					{Key: "team", Operator: metav1.LabelSelectorOpDoesNotExist},
+				},
+			},
+			expected: false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := SelectorsOverlap(tt.s1, tt.s2)
+			result := IsSelectorOverlapping(tt.s1, tt.s2)
 			assert.Equal(t, tt.expected, result)
 		})
 	}
-}
-
-func TestIsSelectorSubset(t *testing.T) {
-	// Just hit the coverage for the placeholder
-	assert.True(t, IsSelectorSubset(nil, nil))
 }
