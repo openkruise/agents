@@ -1026,6 +1026,28 @@ func TestReconcile_IgnoresTerminalPeer(t *testing.T) {
 	assert.Equal(t, agentsv1alpha1.SandboxUpdateOpsUpdating, got.Status.Phase)
 }
 
+func TestReconcile_DefersOnEqualTimestampByName(t *testing.T) {
+	// Same CreationTimestamp; tiebreak falls back to lexicographic name comparison.
+	now := metav1.NewTime(time.Now())
+
+	peer := newSandboxUpdateOps("aaa-ops", "default", agentsv1alpha1.SandboxUpdateOpsPending, false, nil)
+	peer.CreationTimestamp = now
+	ours := newSandboxUpdateOps("zzz-ops", "default", agentsv1alpha1.SandboxUpdateOpsPending, false, nil)
+	ours.CreationTimestamp = now
+	r := newTestReconciler(peer, ours)
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "zzz-ops", Namespace: "default"},
+	})
+	assert.NoError(t, err)
+	assert.Equal(t, concurrencyRequeue, result.RequeueAfter)
+
+	got := &agentsv1alpha1.SandboxUpdateOps{}
+	err = r.Get(context.Background(), types.NamespacedName{Name: "zzz-ops", Namespace: "default"}, got)
+	assert.NoError(t, err)
+	assert.Equal(t, agentsv1alpha1.SandboxUpdateOpsPending, got.Status.Phase)
+}
+
 func TestReconcile_IgnoresNonOverlappingPeer(t *testing.T) {
 	peer := newSandboxUpdateOps("peer-ops", "default", agentsv1alpha1.SandboxUpdateOpsUpdating, false, nil)
 	peer.Spec.Selector = &metav1.LabelSelector{MatchLabels: map[string]string{"app": "other"}}

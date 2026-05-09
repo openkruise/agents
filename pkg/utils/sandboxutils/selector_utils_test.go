@@ -127,3 +127,132 @@ func TestIsSelectorOverlapping(t *testing.T) {
 		})
 	}
 }
+
+func TestIsSelectorLooseOverlap(t *testing.T) {
+	tests := []struct {
+		name     string
+		s1       *metav1.LabelSelector
+		s2       *metav1.LabelSelector
+		expected bool
+	}{
+		{
+			name:     "Same key In/In with overlapping values",
+			s1:       &metav1.LabelSelector{MatchLabels: map[string]string{"app": "foo"}},
+			s2:       &metav1.LabelSelector{MatchLabels: map[string]string{"app": "foo"}},
+			expected: true,
+		},
+		{
+			name: "Same key In/In with disjoint values",
+			s1: &metav1.LabelSelector{
+				MatchExpressions: []metav1.LabelSelectorRequirement{
+					{Key: "app", Operator: metav1.LabelSelectorOpIn, Values: []string{"foo"}},
+				},
+			},
+			s2: &metav1.LabelSelector{
+				MatchExpressions: []metav1.LabelSelectorRequirement{
+					{Key: "app", Operator: metav1.LabelSelectorOpIn, Values: []string{"bar"}},
+				},
+			},
+			expected: false,
+		},
+		{
+			name:     "Different keys do not overlap",
+			s1:       &metav1.LabelSelector{MatchLabels: map[string]string{"app": "foo"}},
+			s2:       &metav1.LabelSelector{MatchLabels: map[string]string{"env": "prod"}},
+			expected: false,
+		},
+		{
+			name: "s2 has extra key not in s1",
+			s1:   &metav1.LabelSelector{MatchLabels: map[string]string{"app": "foo"}},
+			s2:   &metav1.LabelSelector{MatchLabels: map[string]string{"app": "foo", "env": "prod"}},
+			expected: false,
+		},
+		{
+			name: "Same key Exists/Exists",
+			s1: &metav1.LabelSelector{
+				MatchExpressions: []metav1.LabelSelectorRequirement{
+					{Key: "app", Operator: metav1.LabelSelectorOpExists},
+				},
+			},
+			s2: &metav1.LabelSelector{
+				MatchExpressions: []metav1.LabelSelectorRequirement{
+					{Key: "app", Operator: metav1.LabelSelectorOpExists},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "Same key Exists/In",
+			s1: &metav1.LabelSelector{
+				MatchExpressions: []metav1.LabelSelectorRequirement{
+					{Key: "app", Operator: metav1.LabelSelectorOpExists},
+				},
+			},
+			s2: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "foo"}},
+			expected: true,
+		},
+		{
+			name: "Same key In/NotIn excluding all In values",
+			s1: &metav1.LabelSelector{
+				MatchExpressions: []metav1.LabelSelectorRequirement{
+					{Key: "app", Operator: metav1.LabelSelectorOpIn, Values: []string{"foo"}},
+				},
+			},
+			s2: &metav1.LabelSelector{
+				MatchExpressions: []metav1.LabelSelectorRequirement{
+					{Key: "app", Operator: metav1.LabelSelectorOpNotIn, Values: []string{"foo", "bar"}},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "Same key NotIn/NotIn always overlap",
+			s1: &metav1.LabelSelector{
+				MatchExpressions: []metav1.LabelSelectorRequirement{
+					{Key: "app", Operator: metav1.LabelSelectorOpNotIn, Values: []string{"foo"}},
+				},
+			},
+			s2: &metav1.LabelSelector{
+				MatchExpressions: []metav1.LabelSelectorRequirement{
+					{Key: "app", Operator: metav1.LabelSelectorOpNotIn, Values: []string{"bar"}},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "Same key Exists/DoesNotExist",
+			s1: &metav1.LabelSelector{
+				MatchExpressions: []metav1.LabelSelectorRequirement{
+					{Key: "app", Operator: metav1.LabelSelectorOpExists},
+				},
+			},
+			s2: &metav1.LabelSelector{
+				MatchExpressions: []metav1.LabelSelectorRequirement{
+					{Key: "app", Operator: metav1.LabelSelectorOpDoesNotExist},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "Same key DoesNotExist/DoesNotExist",
+			s1: &metav1.LabelSelector{
+				MatchExpressions: []metav1.LabelSelectorRequirement{
+					{Key: "app", Operator: metav1.LabelSelectorOpDoesNotExist},
+				},
+			},
+			s2: &metav1.LabelSelector{
+				MatchExpressions: []metav1.LabelSelectorRequirement{
+					{Key: "app", Operator: metav1.LabelSelectorOpDoesNotExist},
+				},
+			},
+			expected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := IsSelectorLooseOverlap(tt.s1, tt.s2)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
