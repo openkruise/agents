@@ -311,3 +311,89 @@ func TestClaimMetrics_String_LongError(t *testing.T) {
 		t.Errorf("ClaimMetrics.String() should contain the error content")
 	}
 }
+
+func TestClaimMetrics_RecordPickSandboxFailure(t *testing.T) {
+	tests := []struct {
+		name     string
+		record   func(metrics *ClaimMetrics)
+		expected []PickSandboxFailure
+	}{
+		{
+			name: "records new failure with count one",
+			record: func(metrics *ClaimMetrics) {
+				metrics.RecordPickSandboxFailure("default/sbx-1", errors.New("failed to lock sandbox"))
+			},
+			expected: []PickSandboxFailure{
+				{Key: "default/sbx-1", Reason: "failed to lock sandbox", Count: 1},
+			},
+		},
+		{
+			name: "aggregates same key and reason",
+			record: func(metrics *ClaimMetrics) {
+				metrics.RecordPickSandboxFailure("default/sbx-1", errors.New("failed to lock sandbox"))
+				metrics.RecordPickSandboxFailure("default/sbx-1", errors.New("failed to lock sandbox"))
+			},
+			expected: []PickSandboxFailure{
+				{Key: "default/sbx-1", Reason: "failed to lock sandbox", Count: 2},
+			},
+		},
+		{
+			name: "keeps different reasons separate and sanitizes control characters",
+			record: func(metrics *ClaimMetrics) {
+				metrics.RecordPickSandboxFailure("", errors.New("no available\nsandboxes"))
+				metrics.RecordPickSandboxFailure("", errors.New("all candidates\tpicked"))
+			},
+			expected: []PickSandboxFailure{
+				{Key: "", Reason: "no available sandboxes", Count: 1},
+				{Key: "", Reason: "all candidates picked", Count: 1},
+			},
+		},
+		{
+			name: "ignores nil error",
+			record: func(metrics *ClaimMetrics) {
+				metrics.RecordPickSandboxFailure("default/sbx-1", nil)
+			},
+			expected: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			metrics := &ClaimMetrics{}
+			tt.record(metrics)
+			if len(metrics.PickSandboxFailures) != len(tt.expected) {
+				t.Fatalf("expected %d failures, got %d: %#v", len(tt.expected), len(metrics.PickSandboxFailures), metrics.PickSandboxFailures)
+			}
+			for i := range tt.expected {
+				if metrics.PickSandboxFailures[i] != tt.expected[i] {
+					t.Fatalf("failure[%d] = %#v, want %#v", i, metrics.PickSandboxFailures[i], tt.expected[i])
+				}
+			}
+		})
+	}
+}
+
+func TestClaimMetrics_MergePickSandboxFailures(t *testing.T) {
+	metrics := &ClaimMetrics{
+		PickSandboxFailures: []PickSandboxFailure{
+			{Key: "default/sbx-1", Reason: "failed to lock sandbox", Count: 2},
+		},
+	}
+	metrics.MergePickSandboxFailures([]PickSandboxFailure{
+		{Key: "default/sbx-1", Reason: "failed to lock sandbox", Count: 3},
+		{Key: "", Reason: "no available sandboxes", Count: 4},
+	})
+
+	expected := []PickSandboxFailure{
+		{Key: "default/sbx-1", Reason: "failed to lock sandbox", Count: 5},
+		{Key: "", Reason: "no available sandboxes", Count: 4},
+	}
+	if len(metrics.PickSandboxFailures) != len(expected) {
+		t.Fatalf("expected %d failures, got %d: %#v", len(expected), len(metrics.PickSandboxFailures), metrics.PickSandboxFailures)
+	}
+	for i := range expected {
+		if metrics.PickSandboxFailures[i] != expected[i] {
+			t.Fatalf("failure[%d] = %#v, want %#v", i, metrics.PickSandboxFailures[i], expected[i])
+		}
+	}
+}

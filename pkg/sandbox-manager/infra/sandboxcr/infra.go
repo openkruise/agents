@@ -18,6 +18,7 @@ package sandboxcr
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -158,6 +159,7 @@ func (i *Infra) ClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions
 		metrics.InitRuntime += tryMetrics.InitRuntime
 		metrics.CSIMount += tryMetrics.CSIMount
 		metrics.LockType = tryMetrics.LockType
+		metrics.MergePickSandboxFailures(tryMetrics.PickSandboxFailures)
 		if tryMetrics.LastError != nil {
 			metrics.LastError = tryMetrics.LastError
 		}
@@ -168,14 +170,22 @@ func (i *Infra) ClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions
 		}
 		return claimErr
 	})
-	return claimedSandbox, metrics, buildClaimError(err, metrics.LastError)
+	return claimedSandbox, metrics, buildClaimError(err, metrics.LastError, metrics.PickSandboxFailures)
 }
 
-func buildClaimError(err error, lastError error) error {
+func buildClaimError(err error, lastError error, failures []infra.PickSandboxFailure) error {
 	if err == nil {
 		return nil
 	}
-	return fmt.Errorf("%v, last error: %v", err, lastError)
+	base := fmt.Sprintf("%v, last error: %v", err, lastError)
+	if len(failures) == 0 {
+		return fmt.Errorf("%s", base)
+	}
+	raw, marshalErr := json.Marshal(failures)
+	if marshalErr != nil {
+		return fmt.Errorf("%s, pick sandbox failures marshal error: %v", base, marshalErr)
+	}
+	return fmt.Errorf("%s, pick sandbox failures: %s", base, string(raw))
 }
 
 func (i *Infra) CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions) (infra.Sandbox, infra.CloneMetrics, error) {

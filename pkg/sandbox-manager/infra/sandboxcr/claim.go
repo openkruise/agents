@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"strings"
 	"sync"
 	"time"
 
@@ -126,8 +127,16 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 		metrics.Wait = time.Since(startWaiting)
 		log.Info("got a free claim worker", "cost", metrics.Wait)
 	}
+	var pickedSandboxKey string
 	defer func() {
 		freeWorkerOnce()
+		if err != nil {
+			key := pickedSandboxKey
+			if claimed == nil {
+				key = "" // no sandbox locked
+			}
+			metrics.RecordPickSandboxFailure(key, err)
+		}
 		metrics.LastError = err
 		log.Info("try claim sandbox result", "metrics", metrics.String())
 		clearFailedSandbox(ctx, claimed, err, opts.ReserveFailedSandbox)
@@ -140,6 +149,9 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 	if err != nil {
 		log.Error(err, "failed to select available sandbox")
 		return
+	}
+	if sbx != nil && sbx.Sandbox != nil {
+		pickedSandboxKey = DefaultGetPickFailureKey(sbx.Sandbox)
 	}
 	// Clean up pickCache based on lockType:
 	// - LockTypeUpdate/LockTypeSpeculate: delete from pickCache (picked from pool)
@@ -169,6 +181,10 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 			err = retriableError{Message: fmt.Sprintf("failed to lock sandbox: %s", err)}
 		}
 		return
+	}
+	// The picked sandbox key may be changed after lock, for example, when lockType is LockTypeCreate
+	if sbx != nil && sbx.Sandbox != nil {
+		pickedSandboxKey = DefaultGetPickFailureKey(sbx.Sandbox)
 	}
 	metrics.LockType = lockType
 	metrics.PickAndLock = time.Since(pickStart)
@@ -241,6 +257,15 @@ func clearFailedSandbox(ctx context.Context, sbx infra.Sandbox, err error, reser
 
 func getPickKey(sbx *v1alpha1.Sandbox) string {
 	return client.ObjectKeyFromObject(sbx).String()
+}
+
+var DefaultGetPickFailureKey = getPickFailureKey
+
+func getPickFailureKey(sbx *v1alpha1.Sandbox) string {
+	if sbx.GetName() == "" {
+		return ""
+	}
+	return getPickKey(sbx)
 }
 
 func pickAnAvailableSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCache *sync.Map, cache infracache.Provider, limiter *rate.Limiter) (*Sandbox, infra.LockType, error) {
@@ -600,6 +625,12 @@ func waitForSandboxReady(ctx context.Context, sbx *Sandbox, opts infra.ClaimSand
 	log.Info("waiting for sandbox ready", "timeout", opts.WaitReadyTimeout)
 	if err = cache.NewSandboxWaitReadyTask(ctx, sbx.Sandbox).Wait(opts.WaitReadyTimeout); err != nil {
 		log.Error(err, "failed to wait for sandbox ready")
+		if strings.Contains(err.Error(), "not satisfied") {
+			if refreshErr := sbx.InplaceRefresh(ctx, true); refreshErr != nil {
+				log.Error(refreshErr, "failed to refresh sandbox for ready failure diagnosis")
+			}
+			err = errors.New(sandboxReadyFailureMessage(sbx.Sandbox))
+		}
 		return
 	}
 	// Use deepcopy to avoid data race
@@ -608,6 +639,56 @@ func waitForSandboxReady(ctx context.Context, sbx *Sandbox, opts infra.ClaimSand
 		return
 	}
 	return
+}
+
+func sandboxReadyFailureMessage(sbx *v1alpha1.Sandbox) string {
+	readyCond := GetSandboxCondition(sbx, v1alpha1.SandboxConditionReady)
+	inplaceCond := GetSandboxCondition(sbx, v1alpha1.SandboxConditionInplaceUpdate)
+	state, _ := stateutils.GetSandboxState(sbx)
+
+	reason := sandboxReadyFailureReason(sbx, state, readyCond, inplaceCond)
+	fields := []string{
+		fmt.Sprintf("reason=%s", reason),
+		fmt.Sprintf("state=%s", state),
+		fmt.Sprintf("ready=%s", readyCond.Reason),
+	}
+	if inplaceCond.Reason != "" {
+		fields = append(fields, fmt.Sprintf("inplaceUpdate=%s", inplaceCond.Reason))
+	}
+	if sbx.Status.ObservedGeneration != sbx.Generation {
+		fields = append(fields, fmt.Sprintf("generation=%d/%d", sbx.Status.ObservedGeneration, sbx.Generation))
+	}
+	return fmt.Sprintf("sandbox %s/%s is not ready before wait timeout: %s", sbx.Namespace, sbx.Name, strings.Join(fields, ", "))
+}
+
+func sandboxReadyFailureReason(sbx *v1alpha1.Sandbox, state string, readyCond, inplaceCond metav1.Condition) string {
+	if sbx.Status.ObservedGeneration != sbx.Generation {
+		return "controller has not observed latest generation"
+	}
+	if inplaceCond.Reason == v1alpha1.SandboxInplaceUpdateReasonInplaceUpdating {
+		return "inplace update is still in progress"
+	}
+	if sbx.Status.PodInfo.PodIP == "" {
+		return "sandbox has no pod IP"
+	}
+	if readyCond.Reason == v1alpha1.SandboxReadyReasonStartContainerFailed {
+		reason := fmt.Sprintf("ready condition reports %s", readyCond.Reason)
+		if readyCond.Message != "" {
+			reason = fmt.Sprintf("%s: %s", reason, readyCond.Message)
+		}
+		return reason
+	}
+	if state != v1alpha1.SandboxStateRunning {
+		return fmt.Sprintf("sandbox state is %s", state)
+	}
+	if readyCond.Reason != "" {
+		reason := fmt.Sprintf("ready condition reports %s", readyCond.Reason)
+		if readyCond.Message != "" {
+			reason = fmt.Sprintf("%s: %s", reason, readyCond.Message)
+		}
+		return reason
+	}
+	return "sandbox ready condition is not satisfied"
 }
 
 func checkSandboxReady(ctx context.Context, sbx *v1alpha1.Sandbox) (bool, error) {

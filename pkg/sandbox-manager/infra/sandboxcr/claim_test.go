@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -857,6 +858,116 @@ func TestCheckSandboxInplaceUpdate(t *testing.T) {
 			} else {
 				assert.NoError(t, err)
 			}
+		})
+	}
+}
+
+func TestSandboxReadyFailureMessage(t *testing.T) {
+	tests := []struct {
+		name string
+		sbx  *v1alpha1.Sandbox
+		want string
+	}{
+		{
+			name: "controller has not observed latest generation",
+			sbx: &v1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "sbx-1",
+					Namespace:  "default",
+					Generation: 4,
+				},
+				Status: v1alpha1.SandboxStatus{
+					Phase:              v1alpha1.SandboxRunning,
+					ObservedGeneration: 3,
+					Conditions: []metav1.Condition{
+						{
+							Type:   string(v1alpha1.SandboxConditionReady),
+							Status: metav1.ConditionTrue,
+							Reason: v1alpha1.SandboxReadyReasonPodReady,
+						},
+					},
+					PodInfo: v1alpha1.PodInfo{PodIP: "1.2.3.4"},
+				},
+			},
+			want: "sandbox default/sbx-1 is not ready before wait timeout: reason=controller has not observed latest generation, state=running, ready=PodReady, generation=3/4",
+		},
+		{
+			name: "inplace update is still in progress",
+			sbx: &v1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "sbx-1",
+					Namespace:  "default",
+					Generation: 1,
+				},
+				Status: v1alpha1.SandboxStatus{
+					Phase:              v1alpha1.SandboxRunning,
+					ObservedGeneration: 1,
+					Conditions: []metav1.Condition{
+						{
+							Type:   string(v1alpha1.SandboxConditionReady),
+							Status: metav1.ConditionTrue,
+							Reason: v1alpha1.SandboxReadyReasonPodReady,
+						},
+						{
+							Type:   string(v1alpha1.SandboxConditionInplaceUpdate),
+							Reason: v1alpha1.SandboxInplaceUpdateReasonInplaceUpdating,
+						},
+					},
+					PodInfo: v1alpha1.PodInfo{PodIP: "1.2.3.4"},
+				},
+			},
+			want: "sandbox default/sbx-1 is not ready before wait timeout: reason=inplace update is still in progress, state=running, ready=PodReady, inplaceUpdate=InplaceUpdating",
+		},
+		{
+			name: "sandbox has no pod ip",
+			sbx: &v1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "sbx-1",
+					Namespace:  "default",
+					Generation: 1,
+				},
+				Status: v1alpha1.SandboxStatus{
+					Phase:              v1alpha1.SandboxRunning,
+					ObservedGeneration: 1,
+					Conditions: []metav1.Condition{
+						{
+							Type:   string(v1alpha1.SandboxConditionReady),
+							Status: metav1.ConditionTrue,
+							Reason: v1alpha1.SandboxReadyReasonPodReady,
+						},
+					},
+				},
+			},
+			want: "sandbox default/sbx-1 is not ready before wait timeout: reason=sandbox has no pod IP, state=running, ready=PodReady",
+		},
+		{
+			name: "ready condition reports failure with message",
+			sbx: &v1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "sbx-1",
+					Namespace:  "default",
+					Generation: 1,
+				},
+				Status: v1alpha1.SandboxStatus{
+					Phase:              v1alpha1.SandboxRunning,
+					ObservedGeneration: 1,
+					Conditions: []metav1.Condition{
+						{
+							Type:    string(v1alpha1.SandboxConditionReady),
+							Reason:  v1alpha1.SandboxReadyReasonStartContainerFailed,
+							Message: "process exited",
+						},
+					},
+					PodInfo: v1alpha1.PodInfo{PodIP: "1.2.3.4"},
+				},
+			},
+			want: "sandbox default/sbx-1 is not ready before wait timeout: reason=ready condition reports StartContainerFailed: process exited, state=dead, ready=StartContainerFailed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, sandboxReadyFailureMessage(tt.sbx))
 		})
 	}
 }
@@ -2121,6 +2232,215 @@ func TestTryClaimSandbox_LockConflict(t *testing.T) {
 
 			// Clean up expectation state
 			expectationutils.ResourceVersionExpectationDelete(sbx)
+		})
+	}
+}
+
+func TestBuildClaimErrorWithPickSandboxFailures(t *testing.T) {
+	tests := []struct {
+		name        string
+		err         error
+		lastError   error
+		failures    []infra.PickSandboxFailure
+		expectError string
+		expectJSON  []infra.PickSandboxFailure
+	}{
+		{
+			name: "nil error returns nil",
+		},
+		{
+			name:        "without failures keeps old message",
+			err:         errors.New("timed out waiting for the condition"),
+			lastError:   errors.New("no available sandboxes"),
+			expectError: "timed out waiting for the condition, last error: no available sandboxes",
+		},
+		{
+			name:      "with failures appends json suffix",
+			err:       errors.New("timed out waiting for the condition"),
+			lastError: errors.New("failed to init runtime"),
+			failures: []infra.PickSandboxFailure{
+				{Key: "default/sbx-1", Reason: "failed to init runtime", Count: 2},
+				{Key: "", Reason: "no available sandboxes", Count: 3},
+			},
+			expectError: "pick sandbox failures: ",
+			expectJSON: []infra.PickSandboxFailure{
+				{Key: "default/sbx-1", Reason: "failed to init runtime", Count: 2},
+				{Key: "", Reason: "no available sandboxes", Count: 3},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := buildClaimError(tt.err, tt.lastError, tt.failures)
+			if tt.err == nil {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.expectError)
+			if tt.expectJSON == nil {
+				assert.NotContains(t, err.Error(), "pick sandbox failures:")
+				return
+			}
+			parts := strings.Split(err.Error(), "pick sandbox failures: ")
+			require.Len(t, parts, 2)
+			var got []infra.PickSandboxFailure
+			require.NoError(t, json.Unmarshal([]byte(parts[1]), &got))
+			assert.Equal(t, tt.expectJSON, got)
+		})
+	}
+}
+
+func TestTryClaimSandboxRecordsPickSandboxFailures(t *testing.T) {
+	utils.InitLogOutput()
+	existTemplate := "test-template"
+
+	tests := []struct {
+		name      string
+		options   infra.ClaimSandboxOptions
+		setup     func(t *testing.T, fc client.Client)
+		want      []infra.PickSandboxFailure
+		wantError string
+	}{
+		{
+			name: "records no pick failure with empty key",
+			options: infra.ClaimSandboxOptions{
+				User:     "test-user",
+				Template: existTemplate,
+			},
+			want: []infra.PickSandboxFailure{
+				{Key: "", Reason: "no available sandboxes for template test-template (no stock)", Count: 1},
+			},
+			wantError: "no stock",
+		},
+		{
+			name: "records picked sandbox key after wait ready failure",
+			options: infra.ClaimSandboxOptions{
+				User:     "test-user",
+				Template: existTemplate,
+				InplaceUpdate: &config.InplaceUpdateOptions{
+					Image: "new-image",
+				},
+			},
+			setup: func(t *testing.T, fc client.Client) {
+				createAvailableSandboxForFailureRecord(t, fc, existTemplate, func(sbx *v1alpha1.Sandbox) {
+					sbx.Status.Conditions = []metav1.Condition{
+						{
+							Type:    string(v1alpha1.SandboxConditionReady),
+							Status:  metav1.ConditionTrue,
+							Reason:  v1alpha1.SandboxReadyReasonStartContainerFailed,
+							Message: "by test",
+						},
+					}
+				})
+			},
+			want: []infra.PickSandboxFailure{
+				{Key: "default/test-sbx", Reason: "failed to wait for sandbox ready: sandbox start container failed: by test", Count: 1},
+			},
+			wantError: "sandbox start container failed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			testInfra, fc := NewTestInfra(t)
+			if tt.setup != nil {
+				tt.setup(t, fc)
+			}
+			opts, err := ValidateAndInitClaimOptions(tt.options)
+			require.NoError(t, err)
+
+			_, metrics, err := TryClaimSandbox(t.Context(), opts, &testInfra.pickCache, testInfra.Cache, testInfra.claimLockChannel, testInfra.createLimiter)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantError)
+			assert.Equal(t, tt.want, metrics.PickSandboxFailures)
+		})
+	}
+}
+
+func createAvailableSandboxForFailureRecord(t *testing.T, fc client.Client, template string, mutate func(sbx *v1alpha1.Sandbox)) {
+	t.Helper()
+	sbx := &v1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-sbx",
+			Namespace: "default",
+			Labels: map[string]string{
+				v1alpha1.LabelSandboxTemplate:        template,
+				agentsv1alpha1.LabelSandboxIsClaimed: "false",
+			},
+			Annotations:       map[string]string{},
+			OwnerReferences:   GetSbsOwnerReference(),
+			CreationTimestamp: metav1.Now(),
+		},
+		Spec: v1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "main", Image: "old-image"}},
+					},
+				},
+			},
+		},
+		Status: v1alpha1.SandboxStatus{
+			Phase: v1alpha1.SandboxRunning,
+			Conditions: []metav1.Condition{
+				{
+					Type:   string(v1alpha1.SandboxConditionReady),
+					Status: metav1.ConditionTrue,
+				},
+			},
+			PodInfo: v1alpha1.PodInfo{
+				PodIP: "1.2.3.4",
+			},
+		},
+	}
+	if mutate != nil {
+		mutate(sbx)
+	}
+	CreateSandboxWithStatus(t, fc, sbx)
+	require.Eventually(t, func() bool {
+		var got v1alpha1.Sandbox
+		return fc.Get(t.Context(), types.NamespacedName{Namespace: sbx.Namespace, Name: sbx.Name}, &got) == nil
+	}, 100*time.Millisecond, 5*time.Millisecond)
+}
+
+func TestInfraClaimSandboxAggregatesPickSandboxFailuresInError(t *testing.T) {
+	utils.InitLogOutput()
+	tests := []struct {
+		name        string
+		options     infra.ClaimSandboxOptions
+		expectKey   string
+		expectError string
+	}{
+		{
+			name: "aggregates repeated no stock retries",
+			options: infra.ClaimSandboxOptions{
+				User:         "test-user",
+				Template:     "test-template",
+				ClaimTimeout: 100 * time.Millisecond,
+			},
+			expectKey:   "",
+			expectError: "no stock",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			testInfra, _ := NewTestInfra(t)
+			_, metrics, err := testInfra.ClaimSandbox(t.Context(), tt.options)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.expectError)
+			assert.Len(t, metrics.PickSandboxFailures, 1)
+			assert.Equal(t, tt.expectKey, metrics.PickSandboxFailures[0].Key)
+			assert.Greater(t, metrics.PickSandboxFailures[0].Count, 1)
+
+			parts := strings.Split(err.Error(), "pick sandbox failures: ")
+			require.Len(t, parts, 2)
+			var got []infra.PickSandboxFailure
+			require.NoError(t, json.Unmarshal([]byte(parts[1]), &got))
+			require.Len(t, got, 1)
+			assert.Equal(t, metrics.PickSandboxFailures[0], got[0])
 		})
 	}
 }
