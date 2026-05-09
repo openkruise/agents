@@ -109,6 +109,12 @@ func TestSandboxSetValidatingHandler_Handle(t *testing.T) {
 										Image:                    "nginx:latest",
 										ImagePullPolicy:          corev1.PullAlways,
 										TerminationMessagePolicy: corev1.TerminationMessageReadFile,
+										VolumeMounts: []corev1.VolumeMount{
+											{
+												Name:      "test-pvc",
+												MountPath: "/data",
+											},
+										},
 									},
 								},
 							},
@@ -130,6 +136,110 @@ func TestSandboxSetValidatingHandler_Handle(t *testing.T) {
 			},
 			expectAllow: true,
 			expectError: false,
+		},
+		{
+			name: "Invalid SandboxSet with unmounted VolumeClaimTemplate",
+			sandboxSet: &v1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sbs",
+					Namespace: "default",
+				},
+				Spec: v1alpha1.SandboxSetSpec{
+					Replicas: 3,
+					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							ObjectMeta: metav1.ObjectMeta{
+								Labels: map[string]string{
+									"app": "test",
+								},
+							},
+							Spec: corev1.PodSpec{
+								RestartPolicy:                 corev1.RestartPolicyAlways,
+								DNSPolicy:                     corev1.DNSClusterFirst,
+								TerminationGracePeriodSeconds: new(int64),
+								Containers: []corev1.Container{
+									{
+										Name:                     "test",
+										Image:                    "nginx:latest",
+										ImagePullPolicy:          corev1.PullAlways,
+										TerminationMessagePolicy: corev1.TerminationMessageReadFile,
+									},
+								},
+							},
+						},
+						VolumeClaimTemplates: []corev1.PersistentVolumeClaim{
+							{
+								ObjectMeta: metav1.ObjectMeta{
+									Name: "test-pvc",
+								},
+								Spec: corev1.PersistentVolumeClaimSpec{
+									AccessModes: []corev1.PersistentVolumeAccessMode{
+										corev1.ReadWriteOnce,
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectAllow:  false,
+			expectError:  true,
+			errorMessage: "must be mounted by at least one container",
+		},
+		{
+			name: "Invalid SandboxSet with VolumeClaimTemplate and mismatched volume mount",
+			sandboxSet: &v1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sbs",
+					Namespace: "default",
+				},
+				Spec: v1alpha1.SandboxSetSpec{
+					Replicas: 3,
+					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							ObjectMeta: metav1.ObjectMeta{
+								Labels: map[string]string{
+									"app": "test",
+								},
+							},
+							Spec: corev1.PodSpec{
+								RestartPolicy:                 corev1.RestartPolicyAlways,
+								DNSPolicy:                     corev1.DNSClusterFirst,
+								TerminationGracePeriodSeconds: new(int64),
+								Containers: []corev1.Container{
+									{
+										Name:                     "test",
+										Image:                    "nginx:latest",
+										ImagePullPolicy:          corev1.PullAlways,
+										TerminationMessagePolicy: corev1.TerminationMessageReadFile,
+										VolumeMounts: []corev1.VolumeMount{
+											{
+												Name:      "other-pvc",
+												MountPath: "/data",
+											},
+										},
+									},
+								},
+							},
+						},
+						VolumeClaimTemplates: []corev1.PersistentVolumeClaim{
+							{
+								ObjectMeta: metav1.ObjectMeta{
+									Name: "test-pvc",
+								},
+								Spec: corev1.PersistentVolumeClaimSpec{
+									AccessModes: []corev1.PersistentVolumeAccessMode{
+										corev1.ReadWriteOnce,
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectAllow:  false,
+			expectError:  true,
+			errorMessage: "must be mounted by at least one container",
 		},
 		{
 			name: "Valid SandboxSet with templateref",
