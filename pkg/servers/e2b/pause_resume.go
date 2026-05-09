@@ -142,6 +142,7 @@ func (sc *Controller) ConnectSandbox(r *http.Request) (web.ApiResponse[*models.S
 	id := r.PathValue("sandboxID")
 	ctx := r.Context()
 	log := klog.FromContext(ctx).WithValues("sandboxID", id)
+	log.Info("connecting sandbox")
 
 	request, apiErr := ParseSetTimeoutRequest(r, sc.maxTimeout)
 	if apiErr != nil {
