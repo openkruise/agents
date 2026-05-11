@@ -815,7 +815,7 @@ func TestSandbox_Resume(t *testing.T) {
 			simulateResumeCompleted: true,
 		},
 		{
-			name: "resume paused sandbox with init runtime 500 error",
+			name: "resume paused sandbox with controller post-resume init failure (runtime 500)",
 			initSandbox: func(sbx *v1alpha1.Sandbox) {
 				sbx.Status.Phase = v1alpha1.SandboxPaused
 				sbx.Status.Conditions = append(sbx.Status.Conditions, metav1.Condition{
@@ -826,11 +826,14 @@ func TestSandbox_Resume(t *testing.T) {
 				state, reason := sandboxutils.GetSandboxState(sbx)
 				assert.Equal(t, v1alpha1.SandboxStatePaused, state, reason)
 			},
-			expectedState:           "",
-			expectError:             "failed to perform ReInit after resume",
-			initErrCode:             500,
-			withInitRuntime:         true,
-			simulateResumeCompleted: true,
+			// When controller's Initialize fails (e.g. runtime returns 500), it sets
+			// PostResumeInit=False and does NOT set Ready=True. E2B Resume times out
+			// because NewSandboxResumeTask gates on Ready=True.
+			expectedState:   "",
+			expectError:     "object is not satisfied during double check",
+			initErrCode:     500,
+			withInitRuntime: true,
+			useShortTimeout: true,
 		},
 		{
 			name: "resume pausing sandbox",

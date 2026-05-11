@@ -295,6 +295,10 @@ const (
 
 	// SandboxConditionUpgrading means upgrade state.
 	SandboxConditionUpgrading SandboxConditionType = "Upgrading"
+
+	// SandboxConditionPostResumeInit indicates the result of post-resume initialization
+	// which includes runtime re-initialization and CSI storage re-mount.
+	SandboxConditionPostResumeInit SandboxConditionType = "PostResumeInit"
 )
 
 const (
@@ -325,6 +329,10 @@ const (
 	// SandboxConditionResume Reason
 	SandboxResumeReasonCreatePod = "CreatePod"
 	SandboxResumeReasonResumePod = "ResumePod"
+
+	// SandboxConditionPostResumeInit Reason
+	SandboxPostResumeInitReasonSucceeded = "Succeeded"
+	SandboxPostResumeInitReasonFailed    = "Failed"
 )
 
 // +genclient

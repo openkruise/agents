@@ -47,22 +47,14 @@ func (d *defaultSandboxInitializer) Initialize(ctx context.Context, box *agentsv
 //  1. Re-init runtime (if initRuntimeRequest annotation is set)
 //  2. Re-mount CSI storage concurrently (if CSI mount annotations are set)
 //
-// The controller only handles initialization for sandboxes claimed by a SandboxClaim
-// (identified by the claim-name label). Non-claimed sandboxes are handled by E2B's Resume flow.
+// This is the unified initialization logic for all sandboxes after resume or recreate upgrade.
+// Both E2B and SandboxClaim paths rely on this to re-initialize runtime and CSI mounts.
 func Initialize(ctx context.Context, box *agentsv1alpha1.Sandbox, newStatus *agentsv1alpha1.SandboxStatus,
 	client client.Client, apiReader client.Reader, storageRegistry storages.VolumeMountProviderRegistry) error {
 	if client == nil || apiReader == nil {
 		return nil
 	}
 	logger := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
-
-	// Only handle initialization for sandboxes claimed by a SandboxClaim.
-	// Non-claimed sandboxes are managed by E2B's Resume flow which handles runtime re-init
-	// and CSI re-mount independently.
-	if box.Labels[agentsv1alpha1.LabelSandboxClaimName] == "" {
-		logger.Info("sandbox is not claimed by SandboxClaim, skipping controller re-initialization")
-		return nil
-	}
 
 	// build a lightweight sandbox object with the latest status for runtime operations
 	sbxForInit := &agentsv1alpha1.Sandbox{

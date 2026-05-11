@@ -33,12 +33,10 @@ import (
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
 	"github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/proxy"
-	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/utils"
-	csimountutils "github.com/openkruise/agents/pkg/utils/csiutils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 	"github.com/openkruise/agents/pkg/utils/runtime"
 	sandboxManagerUtils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
@@ -382,11 +380,6 @@ func (s *Sandbox) Resume(ctx context.Context, _ infra.ResumeOptions) error {
 
 	state, reason := s.GetState()
 	log.Info("try to resume sandbox", "state", state, "reason", reason)
-	initRuntimeOpts, err := runtime.GetInitRuntimeRequest(s.Sandbox)
-	if err != nil {
-		log.Error(err, "failed to get init runtime request")
-		return fmt.Errorf("failed to get init runtime request: %w", err)
-	}
 	resumeUpdated, err := s.retryUpdate(ctx, func(sbx *agentsv1alpha1.Sandbox) (bool, error) {
 		if !sbx.Spec.Paused {
 			// Resume is first-writer-wins: only the request that flips
@@ -409,7 +402,7 @@ func (s *Sandbox) Resume(ctx context.Context, _ infra.ResumeOptions) error {
 	log.Info("sandbox resumed", "cost", time.Since(start))
 
 	// If the original context deadline was consumed by the wait, create a fresh
-	// context for post-resume operations (ReInit, CSI mount, inplace refresh).
+	// context for post-resume operations (inplace refresh).
 	// This can happen when the wait succeeds via double-check right at the deadline boundary.
 	postCtx := ctx
 	if ctx.Err() != nil {
@@ -418,7 +411,7 @@ func (s *Sandbox) Resume(ctx context.Context, _ infra.ResumeOptions) error {
 		defer postCancel()
 		log.Info("original context expired after wait, using fresh context for post-resume operations")
 	}
-	if err = s.InplaceRefresh(postCtx, false); err != nil {
+	if err := s.InplaceRefresh(postCtx, false); err != nil {
 		log.Error(err, "failed to refresh sandbox after resume")
 		return err
 	}
@@ -433,45 +426,9 @@ func (s *Sandbox) Resume(ctx context.Context, _ infra.ResumeOptions) error {
 		return nil
 	}
 
-	// E2B only handles post-resume initialization for non-claimed sandboxes.
-	// Claimed sandboxes (with claim-name label) are handled by the controller's Initialize function.
-	if s.Labels[agentsv1alpha1.LabelSandboxClaimName] == "" {
-		// Perform ReInit if initRuntimeOpts is set
-		if initRuntimeOpts != nil {
-			log.Info("will re-init runtime after resume")
-			if _, err := runtime.InitRuntime(postCtx, s.Sandbox, *initRuntimeOpts, s.refreshFunc()); err != nil {
-				log.Error(err, "failed to perform ReInit after resume")
-				return fmt.Errorf("failed to perform ReInit after resume: %w", err)
-			}
-			log.Info("ReInit completed after resume")
-		}
-
-		// Perform csi mount after resume
-		csiMountConfigRequests, err := runtime.GetCsiMountExtensionRequest(s.Sandbox)
-		if err != nil {
-			log.Error(err, "failed to get csi mount request")
-			return fmt.Errorf("failed to get csi mount request: %w", err)
-		}
-
-		if len(csiMountConfigRequests) != 0 {
-			log.Info("will re-mount csi storage after resume")
-			startTime := time.Now()
-			csiClient := csimountutils.NewCSIMountHandler(s.Cache.GetClient(), s.Cache.GetAPIReader(), s.storageRegistry, utils.DefaultSandboxDeployNamespace)
-			mountConfigs, resolveErr := resolveCSIMountConfigs(postCtx, csiClient, csiMountConfigRequests)
-			if resolveErr != nil {
-				return resolveErr
-			}
-			opts := config.CSIMountOptions{MountOptionList: mountConfigs}
-			if _, mountErr := runtime.ProcessCSIMounts(postCtx, s.Sandbox, opts); mountErr != nil {
-				log.Error(mountErr, "failed to remount csi storage after resume")
-				return fmt.Errorf("failed to remount csi storage after resume: %v", mountErr)
-			}
-			log.Info("remount csi storage completed after resume", "costTime", time.Since(startTime))
-		}
-	} else {
-		log.Info("sandbox is claimed by SandboxClaim, skipping E2B post-resume initialization",
-			"claimName", s.Labels[agentsv1alpha1.LabelSandboxClaimName])
-	}
+	// Post-resume initialization (ReInit + CSI mount) is now handled by the sandbox-controller's
+	// Initialize function. The controller gates the Running state on successful initialization,
+	// so by the time NewSandboxResumeTask completes, all mounts are already done.
 
 	return nil
 }
@@ -499,22 +456,6 @@ func (s *Sandbox) CreateCheckpoint(ctx context.Context, opts infra.CreateCheckpo
 }
 
 var _ infra.Sandbox = &Sandbox{}
-
-// resolveCSIMountConfigs converts CSIMountConfig requests into MountConfig
-// by calling CSIMountOptionsConfig for each request sequentially.
-func resolveCSIMountConfigs(ctx context.Context, csiClient *csimountutils.CSIMountHandler, requests []agentsv1alpha1.CSIMountConfig) ([]config.MountConfig, error) {
-	log := klog.FromContext(ctx)
-	results := make([]config.MountConfig, 0, len(requests))
-	for _, req := range requests {
-		driverName, csiReqConfigRaw, err := csiClient.CSIMountOptionsConfig(ctx, req)
-		if err != nil {
-			log.Error(err, "failed to generate csi mount options config", "mountConfigRequest", req)
-			return nil, fmt.Errorf("failed to generate csi mount options config, err: %v", err)
-		}
-		results = append(results, config.MountConfig{Driver: driverName, RequestRaw: csiReqConfigRaw})
-	}
-	return results, nil
-}
 
 func AsSandbox(sbx *agentsv1alpha1.Sandbox, cache cache.Provider) *Sandbox {
 	return &Sandbox{

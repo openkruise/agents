@@ -618,6 +618,8 @@ func TestCommonControl_EnsureSandboxResumed(t *testing.T) {
 		args           EnsureFuncArgs
 		podExist       bool
 		wantErr        bool
+		expectError    string
+		initializer    SandboxInitializer // nil defaults to &defaultSandboxInitializer{}
 		expectedStatus *agentsv1alpha1.SandboxStatus
 	}{
 		{
@@ -762,6 +764,84 @@ func TestCommonControl_EnsureSandboxResumed(t *testing.T) {
 						LastTransitionTime: now,
 						Reason:             agentsv1alpha1.SandboxReadyReasonPodReady,
 					},
+					{
+						Type:               string(agentsv1alpha1.SandboxConditionPostResumeInit),
+						Status:             metav1.ConditionTrue,
+						LastTransitionTime: now,
+						Reason:             agentsv1alpha1.SandboxPostResumeInitReasonSucceeded,
+						Message:            "Runtime re-init and CSI storage re-mount completed",
+					},
+				},
+			},
+		},
+		{
+			name: "pod is running and ready, but initializer fails",
+			args: EnsureFuncArgs{
+				Pod: &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-sandbox",
+						Namespace: "default",
+						UID:       "pod-uid-123",
+					},
+					Spec: corev1.PodSpec{
+						NodeName: "node-1",
+					},
+					Status: corev1.PodStatus{
+						Phase: corev1.PodRunning,
+						PodIP: "10.0.0.5",
+						Conditions: []corev1.PodCondition{
+							{
+								Type:               corev1.PodReady,
+								Status:             corev1.ConditionTrue,
+								LastTransitionTime: now,
+							},
+						},
+					},
+				},
+				Box: &agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-sandbox",
+						Namespace: "default",
+					},
+				},
+				NewStatus: &agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxResuming,
+					Conditions: []metav1.Condition{
+						{
+							Type:               string(agentsv1alpha1.SandboxConditionReady),
+							Status:             metav1.ConditionFalse,
+							LastTransitionTime: now,
+							Reason:             agentsv1alpha1.SandboxReadyReasonPodReady,
+						},
+					},
+				},
+			},
+			podExist:    true,
+			wantErr:     true,
+			expectError: "runtime re-init failed",
+			initializer: &mockSandboxInitializer{err: fmt.Errorf("runtime re-init failed")},
+			expectedStatus: &agentsv1alpha1.SandboxStatus{
+				Phase:    agentsv1alpha1.SandboxRunning,
+				NodeName: "node-1",
+				SandboxIp: "10.0.0.5",
+				PodInfo: agentsv1alpha1.PodInfo{
+					PodIP:    "10.0.0.5",
+					NodeName: "node-1",
+					PodUID:   "pod-uid-123",
+				},
+				Conditions: []metav1.Condition{
+					{
+						Type:               string(agentsv1alpha1.SandboxConditionReady),
+						Status:             metav1.ConditionFalse,
+						LastTransitionTime: now,
+						Reason:             agentsv1alpha1.SandboxReadyReasonPodReady,
+					},
+					{
+						Type:               string(agentsv1alpha1.SandboxConditionPostResumeInit),
+						Status:             metav1.ConditionFalse,
+						Reason:             agentsv1alpha1.SandboxPostResumeInitReasonFailed,
+						Message:            "Runtime re-init or CSI storage re-mount failed: runtime re-init failed",
+					},
 				},
 			},
 		},
@@ -821,17 +901,26 @@ func TestCommonControl_EnsureSandboxResumed(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fc := fake.NewClientBuilder().WithScheme(scheme).Build()
+			init := tt.initializer
+			if init == nil {
+				init = &defaultSandboxInitializer{}
+			}
 			control := &commonControl{
 				Client:               fc,
 				recorder:             record.NewFakeRecorder(10),
 				inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fc, inplaceupdate.DefaultGeneratePatchBodyFunc),
-				initializer:          &defaultSandboxInitializer{},
+				initializer:          init,
 			}
 
 			err := control.EnsureSandboxResumed(context.TODO(), tt.args)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("EnsureSandboxResumed() error = %v, wantErr %v", err, tt.wantErr)
 				return
+			}
+			if tt.expectError != "" && err != nil {
+				if !contains(err.Error(), tt.expectError) {
+					t.Errorf("EnsureSandboxResumed() error = %v, expectError contains %q", err, tt.expectError)
+				}
 			}
 
 			// Verify that pod was created if it didn't exist
@@ -844,7 +933,18 @@ func TestCommonControl_EnsureSandboxResumed(t *testing.T) {
 			}
 
 			if !reflect.DeepEqual(tt.args.NewStatus, tt.expectedStatus) {
-				t.Errorf("Expected sandbox(%s), got(%s)", utils.DumpJson(tt.expectedStatus), utils.DumpJson(tt.args.NewStatus))
+				// Normalize LastTransitionTime for conditions set via metav1.Now() inside the function
+				// (e.g., PostResumeInit) to avoid nanosecond-level mismatch with test's `now`.
+				for i := range tt.args.NewStatus.Conditions {
+					for j := range tt.expectedStatus.Conditions {
+						if tt.args.NewStatus.Conditions[i].Type == tt.expectedStatus.Conditions[j].Type {
+							tt.expectedStatus.Conditions[j].LastTransitionTime = tt.args.NewStatus.Conditions[i].LastTransitionTime
+						}
+					}
+				}
+				if !reflect.DeepEqual(tt.args.NewStatus, tt.expectedStatus) {
+					t.Errorf("Expected sandbox(%s), got(%s)", utils.DumpJson(tt.expectedStatus), utils.DumpJson(tt.args.NewStatus))
+				}
 			}
 		})
 	}

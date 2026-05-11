@@ -227,15 +227,49 @@ func (r *commonControl) EnsureSandboxResumed(ctx context.Context, args EnsureFun
 	pCond := utils.GetPodCondition(&pod.Status, corev1.PodReady)
 	if pod.Status.Phase == corev1.PodRunning && pCond != nil && pCond.Status == corev1.ConditionTrue {
 		newStatus.Phase = agentsv1alpha1.SandboxRunning
+
+		// Sync PodInfo (IP/NodeName/UID) before Initialize to ensure runtimeURL is resolvable
+		// (pod IP may have changed after resume). Note: we intentionally do NOT set Ready=True
+		// here; Ready is only set after Initialize succeeds, so that sandbox-manager's
+		// NewSandboxResumeTask (which gates on state==Running, requiring Ready==True)
+		// won't observe a premature Running state before init/CSI-mount completes.
+		newStatus.NodeName = pod.Spec.NodeName
+		newStatus.SandboxIp = pod.Status.PodIP
+		newStatus.PodInfo = agentsv1alpha1.PodInfo{
+			PodIP:    pod.Status.PodIP,
+			NodeName: pod.Spec.NodeName,
+			PodUID:   pod.UID,
+		}
+
+		// re-initialize sandbox after resuming or upgrading (includes runtime re-init and CSI storage re-mount)
+		if err := r.initializer.Initialize(ctx, box, newStatus); err != nil {
+			klog.ErrorS(err, "post-resume initialization failed (runtime re-init or CSI re-mount)", "sandbox", klog.KObj(box))
+			r.recorder.Event(box, corev1.EventTypeWarning, "PostResumeInitFailed",
+				fmt.Sprintf("Failed to perform post-resume initialization (runtime re-init + CSI storage re-mount): %v", err))
+			utils.SetSandboxCondition(newStatus, metav1.Condition{
+				Type:               string(agentsv1alpha1.SandboxConditionPostResumeInit),
+				Status:             metav1.ConditionFalse,
+				Reason:             agentsv1alpha1.SandboxPostResumeInitReasonFailed,
+				Message:            utils.TruncateConditionMessage(fmt.Sprintf("Runtime re-init or CSI storage re-mount failed: %v", err)),
+				LastTransitionTime: metav1.Now(),
+			})
+			return err
+		}
+		r.recorder.Event(box, corev1.EventTypeNormal, "PostResumeInitSucceeded",
+			"Post-resume initialization completed successfully (runtime re-init + CSI storage re-mount)")
+		utils.SetSandboxCondition(newStatus, metav1.Condition{
+			Type:               string(agentsv1alpha1.SandboxConditionPostResumeInit),
+			Status:             metav1.ConditionTrue,
+			Reason:             agentsv1alpha1.SandboxPostResumeInitReasonSucceeded,
+			Message:            "Runtime re-init and CSI storage re-mount completed",
+			LastTransitionTime: metav1.Now(),
+		})
+
+		// Initialize succeeded: now set Ready=True to signal sandbox-manager's
+		// NewSandboxResumeTask that all post-resume initialization is done.
 		rCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionReady))
 		rCond.Status = metav1.ConditionStatus(pCond.Status)
 		rCond.LastTransitionTime = pCond.LastTransitionTime
-
-		// re-initialize sandbox after resuming or upgrading
-		if err := r.initializer.Initialize(ctx, box, newStatus); err != nil {
-			return err
-		}
-
 		utils.SetSandboxCondition(newStatus, *rCond)
 	}
 	return nil
