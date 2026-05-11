@@ -43,6 +43,33 @@ import (
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 )
 
+type failingStatusUpdateControl struct{}
+
+func (failingStatusUpdateControl) EnsureSandboxRunning(ctx context.Context, args core.EnsureFuncArgs) (time.Duration, error) {
+	return 0, nil
+}
+
+func (failingStatusUpdateControl) EnsureSandboxUpdated(ctx context.Context, args core.EnsureFuncArgs) error {
+	args.NewStatus.Message = "sandbox update failed"
+	return fmt.Errorf("simulated update error")
+}
+
+func (failingStatusUpdateControl) EnsureSandboxPaused(ctx context.Context, args core.EnsureFuncArgs) error {
+	return nil
+}
+
+func (failingStatusUpdateControl) EnsureSandboxResumed(ctx context.Context, args core.EnsureFuncArgs) error {
+	return nil
+}
+
+func (failingStatusUpdateControl) EnsureSandboxUpgraded(ctx context.Context, args core.EnsureFuncArgs) error {
+	return nil
+}
+
+func (failingStatusUpdateControl) EnsureSandboxTerminated(ctx context.Context, args core.EnsureFuncArgs) error {
+	return nil
+}
+
 func TestAdd_FeatureGateDisabled(t *testing.T) {
 	// When SandboxGate feature gate is disabled, Add should return nil immediately
 	// without touching the manager.
@@ -784,6 +811,81 @@ func TestSandboxReconciler_Reconcile(t *testing.T) {
 				t.Errorf("Expected requeue after %v, but got %v", tt.expectRequeueAfter, result.RequeueAfter)
 			}
 		})
+	}
+}
+
+func TestSandboxReconciler_Reconcile_PersistsStatusOnControlError(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	sandbox := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "error-status-sandbox",
+			Namespace:  "default",
+			Finalizers: []string{utils.SandboxFinalizer},
+		},
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test", Image: "nginx:latest"}},
+					},
+				},
+			},
+		},
+		Status: agentsv1alpha1.SandboxStatus{
+			Phase: agentsv1alpha1.SandboxRunning,
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sandbox.Name,
+			Namespace: sandbox.Namespace,
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+		},
+	}
+
+	core.ResourceVersionExpectations.Delete(sandbox)
+	defer core.ResourceVersionExpectations.Delete(sandbox)
+	core.ScaleExpectation.DeleteExpectations(utils.GetControllerKey(sandbox))
+	defer core.ScaleExpectation.DeleteExpectations(utils.GetControllerKey(sandbox))
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(sandbox, pod).
+		WithStatusSubresource(&agentsv1alpha1.Sandbox{}).
+		Build()
+	reconciler := &SandboxReconciler{
+		Client: fakeClient,
+		Scheme: scheme,
+		controls: map[string]core.SandboxControl{
+			core.CommonControlName: failingStatusUpdateControl{},
+		},
+	}
+
+	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{
+		Namespace: sandbox.Namespace,
+		Name:      sandbox.Name,
+	}})
+	if err == nil {
+		t.Fatal("Expected reconcile to return the control error")
+	}
+	if err.Error() != "simulated update error" {
+		t.Fatalf("Expected simulated update error, got %v", err)
+	}
+
+	updated := &agentsv1alpha1.Sandbox{}
+	if err := fakeClient.Get(context.Background(), types.NamespacedName{Namespace: sandbox.Namespace, Name: sandbox.Name}, updated); err != nil {
+		t.Fatalf("Failed to get updated sandbox: %v", err)
+	}
+	if updated.Status.Message != "sandbox update failed" {
+		t.Fatalf("Expected status message to be persisted, got %q", updated.Status.Message)
+	}
+	if updated.Status.Phase != agentsv1alpha1.SandboxRunning {
+		t.Fatalf("Expected phase %s, got %s", agentsv1alpha1.SandboxRunning, updated.Status.Phase)
 	}
 }
 

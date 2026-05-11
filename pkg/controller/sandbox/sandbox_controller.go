@@ -242,11 +242,8 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 		return ctrl.Result{RequeueAfter: requeueAfter}, nil
 	}
 	if err != nil {
-		//todo, call updateSandboxStatus
-		if newStatus.Phase == agentsv1alpha1.SandboxUpgrading {
-			if retErr := r.updateSandboxStatus(ctx, *newStatus, box); retErr != nil {
-				klog.ErrorS(retErr, "failed to persist upgrade status on error", "sandbox", klog.KObj(box))
-			}
+		if retErr := r.updateSandboxStatus(ctx, *newStatus, box); retErr != nil {
+			klog.ErrorS(retErr, "failed to persist sandbox status on error", "sandbox", klog.KObj(box))
 		}
 		return reconcile.Result{}, err
 	}
