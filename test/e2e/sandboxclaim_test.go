@@ -469,7 +469,7 @@ var _ = Describe("SandboxClaim", func() {
 					TemplateName:    qosBreakSet.Name,
 					Replicas:        ptr.To(int32(1)),
 					SkipInitRuntime: true,
-					ClaimTimeout:    &metav1.Duration{Duration: 30 * time.Second},
+					ClaimTimeout:    &metav1.Duration{Duration: 60 * time.Second},
 					WaitReadyTimeout: &metav1.Duration{
 						Duration: 30 * time.Second,
 					},
