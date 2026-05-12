@@ -30,6 +30,7 @@ import (
 
 	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
@@ -77,6 +78,13 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 }
 
 func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models.NewSandboxRequest, user *models.CreatedTeamAPIKey) (web.ApiResponse[*models.Sandbox], *web.ApiError) {
+	if request.Extensions.Name != "" || request.Extensions.GenerateName != "" {
+		return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
+			Code:    http.StatusBadRequest,
+			Message: "sandbox-name and sandbox-generate-name are only supported for clone",
+		}
+	}
+
 	log := klog.FromContext(ctx)
 	claimStart := time.Now()
 	var accessToken string
@@ -181,6 +189,8 @@ func (sc *Controller) createSandboxWithClone(ctx context.Context, request models
 		Modifier: func(sbx infra.Sandbox) {
 			sc.basicSandboxCreateModifier(ctx, sbx, request)
 		},
+		Name:         request.Extensions.Name,
+		GenerateName: request.Extensions.GenerateName,
 	}
 	if request.Extensions.WaitReadySeconds > 0 {
 		opts.WaitReadyTimeout = time.Duration(request.Extensions.WaitReadySeconds) * time.Second
@@ -210,9 +220,7 @@ func (sc *Controller) createSandboxWithClone(ctx context.Context, request models
 	sbx, err := sc.manager.CloneSandbox(ctx, opts)
 	if err != nil {
 		log.Error(err, "sandbox clone failed")
-		return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
-			Message: err.Error(),
-		}
+		return web.ApiResponse[*models.Sandbox]{}, mapCloneSandboxError(err)
 	}
 	log.Info("sandbox cloned", "id", sbx.GetSandboxID(), "sbx", klog.KObj(sbx),
 		"resourceVersion", sbx.GetResourceVersion(), "totalCost", time.Since(start))
@@ -345,4 +353,16 @@ func (sc *Controller) csiMountOptionsConfigRecord(ctx context.Context, sbx infra
 	// record the csi mount config to annotation
 	annotations[models.ExtensionKeyClaimWithCSIMount_MountConfig] = string(csiMountConfigRaw)
 	sbx.SetAnnotations(annotations)
+}
+
+// mapCloneSandboxError converts a CloneSandbox error into an ApiError. The
+// manager wraps K8s AlreadyExists into ErrorConflict, so a sandbox-name
+// collision surfaces here as the typed conflict code and is mapped to 409
+// Conflict for callers.
+func mapCloneSandboxError(err error) *web.ApiError {
+	apiErr := &web.ApiError{Message: err.Error()}
+	if managererrors.GetErrCode(err) == managererrors.ErrorConflict {
+		apiErr.Code = http.StatusConflict
+	}
+	return apiErr
 }

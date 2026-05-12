@@ -68,6 +68,8 @@ type NewSandboxRequestExtension struct {
 	TimeoutSeconds       int
 	NeverTimeout         bool
 	Labels               map[string]string
+	Name                 string
+	GenerateName         string
 }
 
 type InplaceUpdateExtension struct {
