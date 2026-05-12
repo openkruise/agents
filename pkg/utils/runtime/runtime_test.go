@@ -206,8 +206,7 @@ func TestGetCsiMountExtensionRequest(t *testing.T) {
 		name        string
 		annotations map[string]string
 		expectNil   bool
-		expectError bool
-		errorMsg    string
+		expectError string
 		expectCount int
 	}{
 		{
@@ -241,8 +240,7 @@ func TestGetCsiMountExtensionRequest(t *testing.T) {
 			annotations: map[string]string{
 				models.ExtensionKeyClaimWithCSIMount_MountConfig: `invalid-json`,
 			},
-			expectError: true,
-			errorMsg:    "failed to unmarshal csi mount options",
+			expectError: "failed to unmarshal csi mount options",
 		},
 		{
 			name: "empty array",
@@ -260,11 +258,9 @@ func TestGetCsiMountExtensionRequest(t *testing.T) {
 			}
 			result, err := GetCsiMountExtensionRequest(sandbox)
 
-			if tt.expectError {
+			if tt.expectError != "" {
 				require.Error(t, err)
-				if tt.errorMsg != "" {
-					assert.Contains(t, err.Error(), tt.errorMsg)
-				}
+				assert.Contains(t, err.Error(), tt.expectError)
 				assert.Nil(t, result)
 				return
 			}
@@ -289,7 +285,7 @@ func TestGetInitRuntimeRequest(t *testing.T) {
 		annotations map[string]string
 		wantNil     bool
 		wantReInit  bool
-		wantErr     bool
+		expectError string
 		wantEnvVars map[string]string
 	}{
 		{
@@ -322,7 +318,7 @@ func TestGetInitRuntimeRequest(t *testing.T) {
 			annotations: map[string]string{
 				agentsv1alpha1.AnnotationInitRuntimeRequest: `{invalid-json}`,
 			},
-			wantErr: true,
+			expectError: "failed to unmarshal init runtime request",
 		},
 	}
 
@@ -337,9 +333,9 @@ func TestGetInitRuntimeRequest(t *testing.T) {
 			}
 
 			result, err := GetInitRuntimeRequest(obj)
-			if tt.wantErr {
+			if tt.expectError != "" {
 				require.Error(t, err)
-				assert.Contains(t, err.Error(), "failed to unmarshal init runtime request")
+				assert.Contains(t, err.Error(), tt.expectError)
 				return
 			}
 			require.NoError(t, err)
@@ -377,8 +373,7 @@ func TestInitRuntime(t *testing.T) {
 		opts        config.InitRuntimeOptions
 		refreshFn   RefreshFunc
 		sbxSetup    func(url string) *agentsv1alpha1.Sandbox
-		wantErr     bool
-		errContains string
+		expectError string
 	}{
 		{
 			name: "successful init with 200 response",
@@ -412,8 +407,7 @@ func TestInitRuntime(t *testing.T) {
 			sbxSetup: func(url string) *agentsv1alpha1.Sandbox {
 				return newTestSandboxWithURL(url)
 			},
-			wantErr:     true,
-			errContains: "not 2xx",
+			expectError: "not 2xx",
 		},
 		{
 			name:    "empty runtime URL returns error",
@@ -424,8 +418,7 @@ func TestInitRuntime(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{Name: "test-sandbox", Namespace: "default"},
 				}
 			},
-			wantErr:     true,
-			errContains: "runtimeURL is empty",
+			expectError: "runtimeURL is empty",
 		},
 		{
 			name: "SkipRefresh false with refreshFn updates sandbox",
@@ -453,8 +446,7 @@ func TestInitRuntime(t *testing.T) {
 			refreshFn: func(_ context.Context) (*agentsv1alpha1.Sandbox, error) {
 				return nil, fmt.Errorf("refresh failed")
 			},
-			wantErr:     true,
-			errContains: "refresh failed",
+			expectError: "refresh failed",
 		},
 		{
 			name: "SkipRefresh true does not call refreshFn",
@@ -480,8 +472,7 @@ func TestInitRuntime(t *testing.T) {
 			sbxSetup: func(url string) *agentsv1alpha1.Sandbox {
 				return newTestSandboxWithURL(url)
 			},
-			wantErr:     true,
-			errContains: "not 2xx",
+			expectError: "not 2xx",
 		},
 	}
 
@@ -508,11 +499,9 @@ func TestInitRuntime(t *testing.T) {
 			}
 
 			duration, err := InitRuntime(context.Background(), sbx, tt.opts, refreshFn)
-			if tt.wantErr {
+			if tt.expectError != "" {
 				require.Error(t, err)
-				if tt.errContains != "" {
-					assert.Contains(t, err.Error(), tt.errContains)
-				}
+				assert.Contains(t, err.Error(), tt.expectError)
 				return
 			}
 			require.NoError(t, err)
