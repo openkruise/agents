@@ -71,6 +71,9 @@ spec:
                   If the timeout is reached, the claim will be marked as Completed regardless of
                   whether all replicas were successfully claimed
                 type: string
+                x-kubernetes-validations:
+                - message: claimTimeout must be at least 1 second
+                  rule: duration(self) >= duration('1s')
               createOnNoStock:
                 default: true
                 description: CreateOnNoStock allows to create new sandbox if no stock
@@ -204,6 +207,9 @@ spec:
                   A waiting happens when an inplace update happens, a new sandbox created, etc.
                   Format: duration string (e.g., "3h", "200s", "15m")
                 type: string
+                x-kubernetes-validations:
+                - message: waitReadyTimeout must be at least 1 second
+                  rule: duration(self) >= duration('1s')
             required:
             - templateName
             type: object

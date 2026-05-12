@@ -2490,3 +2490,124 @@ func TestModifyPickedSandbox_InitRuntime(t *testing.T) {
 		})
 	}
 }
+
+// TestNewSandboxFromSandboxSet_TemplateRef covers the SandboxTemplate
+// resolution branch in newSandboxFromSandboxSet: when the SandboxSet uses
+// spec.templateRef, the referenced SandboxTemplate must be fetched from the
+// cache and its pod template labels/annotations propagated to the new
+// Sandbox; if the SandboxTemplate cannot be resolved the function must
+// return a NoAvailable error rather than panicking.
+func TestNewSandboxFromSandboxSet_TemplateRef(t *testing.T) {
+	utils.InitLogOutput()
+
+	const templateName = "ref-sbs"
+	const refName = "my-sbt"
+
+	tests := []struct {
+		name       string
+		createSBT  bool
+		wantErr    string
+		wantLabels map[string]string
+		wantAnnos  map[string]string
+	}{
+		{
+			name:      "templateRef resolved and labels inherited",
+			createSBT: true,
+			wantLabels: map[string]string{
+				"app":                          "from-sbt",
+				v1alpha1.LabelSandboxTemplate:  refName,
+				v1alpha1.LabelSandboxPool:      templateName,
+				v1alpha1.LabelSandboxIsClaimed: "false",
+			},
+			wantAnnos: map[string]string{
+				"source":                           "sbt",
+				v1alpha1.SandboxAnnotationPriority: "100",
+			},
+		},
+		{
+			name:      "templateRef not found returns NoAvailable error",
+			createSBT: false,
+			wantErr:   "cannot resolve sandbox template",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			infraInstance, fc := NewTestInfra(t)
+			defer infraInstance.Stop(t.Context())
+
+			// SandboxSet that references the external SandboxTemplate.
+			sbs := &v1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      templateName,
+					Namespace: "default",
+				},
+				Spec: v1alpha1.SandboxSetSpec{
+					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+						TemplateRef: &v1alpha1.SandboxTemplateRef{Name: refName},
+					},
+				},
+			}
+			require.NoError(t, fc.Create(t.Context(), sbs))
+
+			if tt.createSBT {
+				sbt := &v1alpha1.SandboxTemplate{
+					ObjectMeta: metav1.ObjectMeta{Name: refName, Namespace: "default"},
+					Spec: v1alpha1.SandboxTemplateSpec{
+						Template: &corev1.PodTemplateSpec{
+							ObjectMeta: metav1.ObjectMeta{
+								Labels:      map[string]string{"app": "from-sbt"},
+								Annotations: map[string]string{"source": "sbt"},
+							},
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "main", Image: "img:v1"}},
+							},
+						},
+					},
+				}
+				require.NoError(t, fc.Create(t.Context(), sbt))
+			}
+
+			// Wait for the SandboxSet to be visible through the cache so
+			// PickSandboxSet can find it.
+			require.Eventually(t, func() bool {
+				_, err := infraInstance.Cache.PickSandboxSet(t.Context(), infracache.PickSandboxSetOptions{Name: templateName})
+				return err == nil
+			}, time.Second, 10*time.Millisecond)
+
+			if tt.createSBT {
+				// Also wait for the SandboxTemplate to be visible.
+				require.Eventually(t, func() bool {
+					got := &v1alpha1.SandboxTemplate{}
+					return infraInstance.Cache.GetClient().Get(t.Context(),
+						client.ObjectKey{Namespace: "default", Name: refName}, got) == nil
+				}, time.Second, 10*time.Millisecond)
+			}
+
+			opts := infra.ClaimSandboxOptions{
+				Template: templateName,
+				User:     "test-user",
+			}
+			sbx, _, err := newSandboxFromSandboxSet(t.Context(), opts, infraInstance.Cache, nil)
+
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				assert.Nil(t, sbx)
+				return
+			}
+
+			require.NoError(t, err)
+			require.NotNil(t, sbx)
+			for k, v := range tt.wantLabels {
+				assert.Equal(t, v, sbx.GetLabels()[k], "label %s mismatch", k)
+			}
+			for k, v := range tt.wantAnnos {
+				assert.Equal(t, v, sbx.GetAnnotations()[k], "annotation %s mismatch", k)
+			}
+			// templateRef must be carried over to the Sandbox spec.
+			require.NotNil(t, sbx.Spec.TemplateRef)
+			assert.Equal(t, refName, sbx.Spec.TemplateRef.Name)
+		})
+	}
+}

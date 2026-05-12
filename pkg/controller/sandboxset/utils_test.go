@@ -304,6 +304,7 @@ func TestNewSandboxFromSandboxSet(t *testing.T) {
 	tests := []struct {
 		name                       string
 		sandboxSet                 *agentsv1alpha1.SandboxSet
+		refTemplate                *agentsv1alpha1.SandboxTemplate
 		expectedGenerateName       string
 		expectedNamespace          string
 		expectedLabels             map[string]string
@@ -483,11 +484,87 @@ func TestNewSandboxFromSandboxSet(t *testing.T) {
 			expectedTemplateRef:        nil,
 			expectedPersistentContents: nil,
 		},
+		{
+			name: "templateRef with refTemplate inherits labels and annotations",
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "ref-sbs",
+					Namespace: "ref-ns",
+				},
+				Spec: agentsv1alpha1.SandboxSetSpec{
+					Replicas: 1,
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						TemplateRef: &agentsv1alpha1.SandboxTemplateRef{Name: "my-template"},
+					},
+				},
+			},
+			refTemplate: &agentsv1alpha1.SandboxTemplate{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "my-template",
+					Namespace: "ref-ns",
+				},
+				Spec: agentsv1alpha1.SandboxTemplateSpec{
+					Template: &corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{
+							Labels: map[string]string{
+								"app":  "from-template",
+								"tier": "web",
+							},
+							Annotations: map[string]string{
+								"source": "sandbox-template",
+							},
+						},
+					},
+				},
+			},
+			expectedGenerateName: "ref-sbs-",
+			expectedNamespace:    "ref-ns",
+			expectedLabels: map[string]string{
+				"app":                                "from-template",
+				"tier":                               "web",
+				agentsv1alpha1.LabelSandboxPool:      "ref-sbs",
+				agentsv1alpha1.LabelSandboxTemplate:  "my-template",
+				agentsv1alpha1.LabelSandboxIsClaimed: "false",
+			},
+			expectedAnnotations: map[string]string{
+				"source": "sandbox-template",
+			},
+			expectedRuntimes:           nil,
+			expectedTemplateRef:        &agentsv1alpha1.SandboxTemplateRef{Name: "my-template"},
+			expectedPersistentContents: nil,
+		},
+		{
+			name: "templateRef with nil refTemplate does not panic",
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "nil-ref-sbs",
+					Namespace: "default",
+				},
+				Spec: agentsv1alpha1.SandboxSetSpec{
+					Replicas: 1,
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						TemplateRef: &agentsv1alpha1.SandboxTemplateRef{Name: "missing"},
+					},
+				},
+			},
+			refTemplate:          nil,
+			expectedGenerateName: "nil-ref-sbs-",
+			expectedNamespace:    "default",
+			expectedLabels: map[string]string{
+				agentsv1alpha1.LabelSandboxPool:      "nil-ref-sbs",
+				agentsv1alpha1.LabelSandboxTemplate:  "missing",
+				agentsv1alpha1.LabelSandboxIsClaimed: "false",
+			},
+			expectedAnnotations:        map[string]string{},
+			expectedRuntimes:           nil,
+			expectedTemplateRef:        &agentsv1alpha1.SandboxTemplateRef{Name: "missing"},
+			expectedPersistentContents: nil,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			sandbox := NewSandboxFromSandboxSet(tt.sandboxSet)
+			sandbox := NewSandboxFromSandboxSet(tt.sandboxSet, tt.refTemplate)
 
 			// Verify GenerateName
 			assert.Equal(t, tt.expectedGenerateName, sandbox.GenerateName, "GenerateName mismatch")

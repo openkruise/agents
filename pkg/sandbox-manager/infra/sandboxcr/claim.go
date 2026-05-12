@@ -407,7 +407,17 @@ func newSandboxFromSandboxSet(ctx context.Context, opts infra.ClaimSandboxOption
 	if err != nil {
 		return nil, "", NoAvailableError(opts.Template, "cannot create new sandbox: "+err.Error())
 	}
-	sbx := sandboxset.NewSandboxFromSandboxSet(sbs)
+	var refTemplate *v1alpha1.SandboxTemplate
+	if sbs.Spec.TemplateRef != nil {
+		refTemplate = &v1alpha1.SandboxTemplate{}
+		if err := cache.GetClient().Get(ctx, client.ObjectKey{
+			Namespace: sbs.Namespace,
+			Name:      sbs.Spec.TemplateRef.Name,
+		}, refTemplate); err != nil {
+			return nil, "", NoAvailableError(opts.Template, "cannot resolve sandbox template: "+err.Error())
+		}
+	}
+	sbx := sandboxset.NewSandboxFromSandboxSet(sbs, refTemplate)
 	// sandbox manager creates high-priority sandbox
 	sbx.Annotations[v1alpha1.SandboxAnnotationPriority] = "100"
 	for _, anno := range FilteredAnnotationsOnCreation {

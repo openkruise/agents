@@ -23,6 +23,7 @@ import (
 	"time"
 
 	apps "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -50,9 +51,9 @@ type GroupedSandboxes struct {
 	Dead      []*agentsv1alpha1.Sandbox // Sandboxes should be deleted
 }
 
-func (r *Reconciler) initNewStatus(ss *agentsv1alpha1.SandboxSet) (*agentsv1alpha1.SandboxSetStatus, error) {
+func (r *Reconciler) initNewStatus(ctx context.Context, ss *agentsv1alpha1.SandboxSet) (*agentsv1alpha1.SandboxSetStatus, error) {
 	newStatus := ss.Status.DeepCopy()
-	updateRevision, err := r.newRevision(ss, 0, nil)
+	updateRevision, err := r.newRevision(ctx, ss, 0, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -126,14 +127,22 @@ func clearAndInitInnerKeys(m map[string]string) map[string]string {
 // The Revision of the returned ControllerRevision is set to revision. If the returned error is nil, the returned
 // ControllerRevision is valid. StatefulSet revisions are stored as patches that re-apply the current state of set
 // to a new StatefulSet using a strategic merge patch to replace the saved state of the new StatefulSet.
-func (r *Reconciler) newRevision(set *agentsv1alpha1.SandboxSet, revision int64, collisionCount *int32) (*apps.ControllerRevision, error) {
-	patch, err := r.getPatch(set)
+func (r *Reconciler) newRevision(ctx context.Context, set *agentsv1alpha1.SandboxSet, revision int64, collisionCount *int32) (*apps.ControllerRevision, error) {
+	patch, err := r.getPatch(ctx, set)
 	if err != nil {
 		return nil, err
 	}
+	// When the SandboxSet uses spec.templateRef, spec.template is nil. The
+	// revision labels on ControllerRevision are only informational here
+	// (the hash label is what the controller actually reads), so fall back
+	// to an empty label set to avoid a nil dereference.
+	var templateLabels map[string]string
+	if set.Spec.Template != nil {
+		templateLabels = set.Spec.Template.Labels
+	}
 	cr, err := NewControllerRevision(set,
 		agentsv1alpha1.SandboxSetControllerKind,
-		set.Spec.Template.Labels,
+		templateLabels,
 		runtime.RawExtension{Raw: patch},
 		revision,
 		collisionCount)
@@ -172,15 +181,33 @@ func scaleExpectationSatisfied(ctx context.Context, scaleExpectation expectation
 	return false, dirty, requeueAfter
 }
 
-func NewSandboxFromSandboxSet(sbs *agentsv1alpha1.SandboxSet) *agentsv1alpha1.Sandbox {
+// NewSandboxFromSandboxSet builds a Sandbox object from the SandboxSet. When
+// spec.templateRef is used, refTemplate must be the resolved SandboxTemplate
+// so that its pod template labels/annotations can be inherited; callers pass
+// nil for the inline template case.
+func NewSandboxFromSandboxSet(sbs *agentsv1alpha1.SandboxSet, refTemplate *agentsv1alpha1.SandboxTemplate) *agentsv1alpha1.Sandbox {
 	generateName := fmt.Sprintf("%s-", sbs.Name)
-	template := sbs.Spec.Template.DeepCopy()
+	var template *corev1.PodTemplateSpec
+	var inheritedLabels, inheritedAnnotations map[string]string
+	// spec.template and spec.templateRef are mutually exclusive. Deep copy the
+	// source pod template before reading labels/annotations so subsequent
+	// mutations (clearAndInitInnerKeys, internal label writes) never leak
+	// back into the SandboxSet spec or the cached SandboxTemplate.
+	if sbs.Spec.Template != nil {
+		template = sbs.Spec.Template.DeepCopy()
+		inheritedLabels = template.Labels
+		inheritedAnnotations = template.Annotations
+	} else if refTemplate != nil && refTemplate.Spec.Template != nil {
+		templateCopy := refTemplate.Spec.Template.DeepCopy()
+		inheritedLabels = templateCopy.Labels
+		inheritedAnnotations = templateCopy.Annotations
+	}
 	sbx := &agentsv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: generateName,
 			Namespace:    sbs.Namespace,
-			Labels:       template.Labels,
-			Annotations:  template.Annotations,
+			Labels:       inheritedLabels,
+			Annotations:  inheritedAnnotations,
 		},
 		Spec: agentsv1alpha1.SandboxSpec{
 			PersistentContents: sbs.Spec.PersistentContents,

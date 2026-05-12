@@ -171,9 +171,10 @@ func validateVolumeClaimTemplateMounts(spec agentsv1alpha1.SandboxSetSpec, fldPa
 			continue
 		}
 		if _, mounted := mountedVolumeNames[template.Name]; !mounted {
-			errList = append(errList, field.Required(
-				fldPath.Child("template").Child("spec").Child("containers").Child("volumeMounts"),
-				fmt.Sprintf("volumeClaimTemplates[%d] %q must be mounted by at least one container, init container, or ephemeral container", i, template.Name),
+			errList = append(errList, field.Invalid(
+				fldPath.Child("volumeClaimTemplates").Index(i).Child("metadata").Child("name"),
+				template.Name,
+				"must be mounted by at least one container, init container, or ephemeral container",
 			))
 		}
 	}

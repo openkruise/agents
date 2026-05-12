@@ -109,12 +109,13 @@ func (sc *Controller) CheckApiKey(ctx context.Context, r *http.Request) (context
 		}
 	}
 	if sandboxID := r.PathValue("sandboxID"); sandboxID != "" {
+		middleWareLog = middleWareLog.WithValues("sandboxID", sandboxID)
 		owner, ok := sc.manager.GetOwnerOfSandbox(sandboxID)
 		if !ok {
 			middleWareLog.Info("failed to get owner of sandbox")
 			return ctx, &web.ApiError{
 				Code:    http.StatusNotFound,
-				Message: fmt.Sprintf("Sandbox owner not found: %s", sandboxID),
+				Message: fmt.Sprintf("Sandbox route not found, maybe it is crashed or killed: %s", sandboxID),
 			}
 		}
 		if owner != AnonymousUser.ID.String() && owner != user.ID.String() {
