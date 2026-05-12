@@ -93,6 +93,16 @@ func TestValidateAndInitCloneOptions(t *testing.T) {
 				WaitReadyTimeout: 60 * time.Second,
 			},
 		},
+		{
+			name: "both name and generateName",
+			opts: infra.CloneSandboxOptions{
+				User:         "test-user",
+				CheckPointID: "test-checkpoint",
+				Name:         "a",
+				GenerateName: "b-",
+			},
+			expectError: "mutually exclusive",
+		},
 	}
 
 	for _, tt := range tests {
@@ -269,6 +279,69 @@ func TestNewSandboxFromTemplate_DeepCopiesTemplate(t *testing.T) {
 			}, tmpl, nil)
 			tt.mutate(sbx)
 			tt.verifyInitial(t, tmpl)
+		})
+	}
+}
+
+func TestNewSandboxFromTemplate_Naming(t *testing.T) {
+	tmpl := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "checkpoint-template",
+			Namespace: "default",
+		},
+		Spec: v1alpha1.SandboxTemplateSpec{
+			Template: &corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{Name: "main", Image: "nginx"},
+					},
+				},
+			},
+		},
+	}
+
+	tests := []struct {
+		name               string
+		opts               infra.CloneSandboxOptions
+		expectName         string
+		expectGenerateName string
+	}{
+		{
+			name: "explicit name",
+			opts: infra.CloneSandboxOptions{
+				User:         "test-user",
+				CheckPointID: "checkpoint-template",
+				Name:         "my-sbx",
+			},
+			expectName:         "my-sbx",
+			expectGenerateName: "",
+		},
+		{
+			name: "explicit generateName",
+			opts: infra.CloneSandboxOptions{
+				User:         "test-user",
+				CheckPointID: "checkpoint-template",
+				GenerateName: "pool-",
+			},
+			expectName:         "",
+			expectGenerateName: "pool-",
+		},
+		{
+			name: "default fallback",
+			opts: infra.CloneSandboxOptions{
+				User:         "test-user",
+				CheckPointID: "checkpoint-template",
+			},
+			expectName:         "",
+			expectGenerateName: "checkpoint-template-",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sbx := newSandboxFromTemplate(tt.opts, tmpl, nil)
+			assert.Equal(t, tt.expectName, sbx.GetName())
+			assert.Equal(t, tt.expectGenerateName, sbx.GetGenerateName())
 		})
 	}
 }

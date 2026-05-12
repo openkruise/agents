@@ -56,6 +56,8 @@ func mapInfraErrorToApiError(err error) *web.ApiError {
 	switch managererrors.GetErrCode(err) {
 	case managererrors.ErrorBadRequest, managererrors.ErrorNotFound:
 		return &web.ApiError{Code: http.StatusBadRequest, Message: err.Error()}
+	case managererrors.ErrorConflict:
+		return &web.ApiError{Code: http.StatusConflict, Message: err.Error()}
 	default:
 		// ErrorInternal, ErrorUnknown, or untyped errors (e.g., retry exhausted) → 500
 		return &web.ApiError{Code: http.StatusInternalServerError, Message: err.Error()}
@@ -109,6 +111,13 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 }
 
 func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models.NewSandboxRequest, user *models.CreatedTeamAPIKey) (web.ApiResponse[*models.Sandbox], *web.ApiError) {
+	if request.Extensions.Name != "" || request.Extensions.GenerateName != "" {
+		return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
+			Code:    http.StatusBadRequest,
+			Message: "sandbox-name and sandbox-generate-name are only supported for clone",
+		}
+	}
+
 	log := klog.FromContext(ctx)
 	claimStart := time.Now()
 	var accessToken string
@@ -203,6 +212,8 @@ func (sc *Controller) createSandboxWithClone(ctx context.Context, request models
 			sc.basicSandboxCreateModifier(ctx, sbx, request)
 		},
 		ReserveFailedSandboxFor: request.Extensions.ReserveFailedSandboxFor,
+		Name:                    request.Extensions.Name,
+		GenerateName:            request.Extensions.GenerateName,
 	}
 	opts.WaitReadyTimeout = resolveServerTimeout(request.Extensions.WaitReadySeconds)
 

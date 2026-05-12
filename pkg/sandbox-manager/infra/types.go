@@ -95,6 +95,12 @@ type CloneSandboxOptions struct {
 	SkipWaitCheckpoint bool                    `json:"skipWaitCheckpoint"`
 	// See ReserveFailedSandboxFor on ClaimSandboxOptions.
 	ReserveFailedSandboxFor *time.Duration `json:"reserveFailedSandboxFor"`
+	// Name sets ObjectMeta.Name on the cloned sandbox (exact name).
+	// Mutually exclusive with GenerateName.
+	Name string `json:"name,omitempty"`
+	// GenerateName sets ObjectMeta.GenerateName on the cloned sandbox (prefix).
+	// Mutually exclusive with Name.
+	GenerateName string `json:"generateName,omitempty"`
 }
 
 type CreateCheckpointOptions struct {

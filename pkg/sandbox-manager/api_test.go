@@ -896,12 +896,13 @@ func TestSandboxManager_CloneSandbox(t *testing.T) {
 	}
 
 	tests := []struct {
-		name              string
-		opts              infra.CloneSandboxOptions
-		sbxOverride       sbxOverride
-		setupResources    bool
-		expectError       bool
-		expectedErrorCode errors.ErrorCode
+		name                   string
+		opts                   infra.CloneSandboxOptions
+		sbxOverride            sbxOverride
+		setupResources         bool
+		preexistingSandboxName string
+		expectError            bool
+		expectedErrorCode      errors.ErrorCode
 	}{
 		{
 			name: "successful clone",
@@ -924,6 +925,20 @@ func TestSandboxManager_CloneSandbox(t *testing.T) {
 			setupResources:    false,
 			expectError:       true,
 			expectedErrorCode: errors.ErrorInternal,
+		},
+		{
+			name: "explicit name collision returns conflict",
+			opts: infra.CloneSandboxOptions{
+				Namespace:        "default",
+				User:             user,
+				CheckPointID:     checkpointID,
+				Name:             "existing-sandbox",
+				WaitReadyTimeout: 30 * time.Second,
+			},
+			setupResources:         true,
+			preexistingSandboxName: "existing-sandbox",
+			expectError:            true,
+			expectedErrorCode:      errors.ErrorConflict,
 		},
 	}
 
@@ -1002,6 +1017,17 @@ func TestSandboxManager_CloneSandbox(t *testing.T) {
 				require.NoError(t, err)
 				cp.Status.CheckpointId = checkpointID
 				err = client.Status().Update(t.Context(), cp)
+				require.NoError(t, err)
+			}
+
+			if tt.preexistingSandboxName != "" {
+				existing := &agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      tt.preexistingSandboxName,
+						Namespace: "default",
+					},
+				}
+				err := client.Create(t.Context(), existing)
 				require.NoError(t, err)
 			}
 

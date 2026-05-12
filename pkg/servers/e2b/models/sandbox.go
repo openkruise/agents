@@ -70,6 +70,8 @@ type NewSandboxRequestExtension struct {
 	NeverTimeout            bool
 	ReturnPodIP             bool
 	Labels                  map[string]string
+	Name                    string
+	GenerateName            string
 }
 
 type InplaceUpdateExtension struct {
