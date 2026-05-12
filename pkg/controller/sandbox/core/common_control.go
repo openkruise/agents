@@ -178,12 +178,13 @@ func (r *commonControl) EnsureSandboxPaused(ctx context.Context, args EnsureFunc
 	}
 
 	// Pod deletion completed, paused completed
-	// cond.Status == metav1.ConditionFalse just for sure
-	if pod == nil && cond.Status == metav1.ConditionFalse {
-		cond.Status = metav1.ConditionTrue
-		cond.LastTransitionTime = metav1.Now()
-		utils.SetSandboxCondition(newStatus, *cond)
-		klog.InfoS("Pod deletion completed, pause phase completed", "sandbox", klog.KObj(box))
+	if pod == nil {
+		if cond.Status == metav1.ConditionFalse {
+			cond.Status = metav1.ConditionTrue
+			cond.LastTransitionTime = metav1.Now()
+			utils.SetSandboxCondition(newStatus, *cond)
+			klog.InfoS("Pod deletion completed, pause phase completed", "sandbox", klog.KObj(box))
+		}
 		return nil
 	}
 	// Pod deletion incomplete, waiting
@@ -226,17 +227,12 @@ func (r *commonControl) EnsureSandboxResumed(ctx context.Context, args EnsureFun
 	// when pod is ready, sandbox status from resuming to running
 	pCond := utils.GetPodCondition(&pod.Status, corev1.PodReady)
 	if pod.Status.Phase == corev1.PodRunning && pCond != nil && pCond.Status == corev1.ConditionTrue {
-		newStatus.Phase = agentsv1alpha1.SandboxRunning
-		rCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionReady))
-		rCond.Status = metav1.ConditionStatus(pCond.Status)
-		rCond.LastTransitionTime = pCond.LastTransitionTime
-
 		// re-initialize sandbox after resuming or upgrading
 		if err := r.initializer.Initialize(ctx, box, newStatus); err != nil {
 			return err
 		}
-
-		utils.SetSandboxCondition(newStatus, *rCond)
+		newStatus.Phase = agentsv1alpha1.SandboxRunning
+		syncSandboxStatusFromPod(pod, newStatus)
 	}
 	return nil
 }

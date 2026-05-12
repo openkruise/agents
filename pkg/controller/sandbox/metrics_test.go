@@ -126,6 +126,7 @@ func TestRecordSandboxMetrics_StatusPhase(t *testing.T) {
 	}{
 		{name: "Pending phase", phase: agentsv1alpha1.SandboxPending},
 		{name: "Running phase", phase: agentsv1alpha1.SandboxRunning},
+		{name: "Pausing phase", phase: agentsv1alpha1.SandboxPausing},
 		{name: "Paused phase", phase: agentsv1alpha1.SandboxPaused},
 		{name: "Resuming phase", phase: agentsv1alpha1.SandboxResuming},
 		{name: "Succeeded phase", phase: agentsv1alpha1.SandboxSucceeded},
@@ -534,10 +535,10 @@ func TestRecordSandboxMetrics_Info(t *testing.T) {
 			NodeName: "node-1",
 		},
 	}
-
+	
 	recordSandboxMetrics(sandbox)
 	defer deleteSandboxMetrics("default", "info-sandbox")
-
+	
 	val := testutil.ToFloat64(sandboxInfo.WithLabelValues("default", "info-sandbox",
 		"my-sandboxset", "node-1", "my-template"))
 	if val != 1 {
