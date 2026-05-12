@@ -107,15 +107,16 @@ func ShouldExtendTimeout(current, requested infra.TimeoutOptions) bool {
 }
 
 // NormalizeTime converts timeout values to the precision Kubernetes persists and
-// E2B exposes: wall-clock time at whole-second precision. This removes Go's
-// monotonic clock reading and drops sub-second differences so timeout comparison,
-// snapshot matching, and retry conflict handling stay stable across in-memory
-// values, metav1.Time serialization, API server round trips, and annotation JSON.
+// E2B exposes: wall-clock time at whole-second precision in UTC. This removes Go's
+// monotonic clock reading, drops sub-second differences, and normalizes the
+// Location so timeout comparison, snapshot matching, and retry conflict handling
+// stay stable across in-memory values, metav1.Time serialization, API server
+// round trips, and annotation JSON (where "Z" always unmarshals back to time.UTC).
 func NormalizeTime(t time.Time) time.Time {
 	if t.IsZero() {
 		return time.Time{}
 	}
-	return t.Round(0).Truncate(time.Second)
+	return t.Round(0).Truncate(time.Second).UTC()
 }
 
 func timeoutEndAt(opts infra.TimeoutOptions) time.Time {

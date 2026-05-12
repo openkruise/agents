@@ -52,7 +52,7 @@ func TestGetTimeoutFromSandbox(t *testing.T) {
 				},
 			},
 			expected: infra.TimeoutOptions{
-				ShutdownTime: baseTime.Add(time.Minute).Round(0).Truncate(time.Second),
+				ShutdownTime: NormalizeTime(baseTime.Add(time.Minute)),
 			},
 		},
 		{
@@ -63,7 +63,7 @@ func TestGetTimeoutFromSandbox(t *testing.T) {
 				},
 			},
 			expected: infra.TimeoutOptions{
-				PauseTime: baseTime.Add(2 * time.Minute).Round(0).Truncate(time.Second),
+				PauseTime: NormalizeTime(baseTime.Add(2 * time.Minute)),
 			},
 		},
 		{
@@ -75,8 +75,8 @@ func TestGetTimeoutFromSandbox(t *testing.T) {
 				},
 			},
 			expected: infra.TimeoutOptions{
-				ShutdownTime: baseTime.Add(3 * time.Minute).Round(0).Truncate(time.Second),
-				PauseTime:    baseTime.Add(4 * time.Minute).Round(0).Truncate(time.Second),
+				ShutdownTime: NormalizeTime(baseTime.Add(3 * time.Minute)),
+				PauseTime:    NormalizeTime(baseTime.Add(4 * time.Minute)),
 			},
 		},
 	}
@@ -181,8 +181,8 @@ func TestSetTimeoutSnapshot_MarshalError(t *testing.T) {
 func TestGetTimeoutSnapshot(t *testing.T) {
 	now := time.Now()
 	valid := infra.TimeoutOptions{
-		ShutdownTime: now.Add(time.Minute).Round(0).Truncate(time.Second),
-		PauseTime:    now.Add(2 * time.Minute).Round(0).Truncate(time.Second),
+		ShutdownTime: NormalizeTime(now.Add(time.Minute)),
+		PauseTime:    NormalizeTime(now.Add(2 * time.Minute)),
 	}
 	raw, err := json.Marshal(valid)
 	assert.NoError(t, err)

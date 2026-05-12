@@ -434,17 +434,17 @@ func TestCommonControl_EnsureSandboxUpdated(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			client := fake.NewClientBuilder().WithScheme(scheme).Build()
+			fc := fake.NewClientBuilder().WithScheme(scheme).Build()
 			if tt.args.Pod != nil {
-				err := client.Create(context.TODO(), tt.args.Pod)
+				err := fc.Create(context.TODO(), tt.args.Pod)
 				if err != nil {
 					t.Fatalf("create pod failed: %s", err.Error())
 				}
 			}
 			control := &commonControl{
-				Client:               client,
+				Client:               fc,
 				recorder:             record.NewFakeRecorder(10),
-				inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(client, inplaceupdate.DefaultGeneratePatchBodyFunc),
+				inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fc, inplaceupdate.DefaultGeneratePatchBodyFunc),
 			}
 
 			err := control.EnsureSandboxUpdated(context.TODO(), tt.args)
@@ -582,11 +582,11 @@ func TestCommonControl_EnsureSandboxPaused(t *testing.T) {
 				objects = append(objects, tt.args.Pod)
 			}
 
-			client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
+			fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
 			control := &commonControl{
-				Client:               client,
+				Client:               fc,
 				recorder:             record.NewFakeRecorder(10),
-				inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(client, inplaceupdate.DefaultGeneratePatchBodyFunc),
+				inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fc, inplaceupdate.DefaultGeneratePatchBodyFunc),
 			}
 
 			err := control.EnsureSandboxPaused(context.TODO(), tt.args)
@@ -598,7 +598,7 @@ func TestCommonControl_EnsureSandboxPaused(t *testing.T) {
 			// Verify pod was deleted if it existed initially
 			if tt.podExists && tt.args.Pod != nil && tt.args.Pod.DeletionTimestamp == nil {
 				pod := &corev1.Pod{}
-				err := client.Get(context.TODO(), types.NamespacedName{Name: tt.args.Pod.Name, Namespace: tt.args.Pod.Namespace}, pod)
+				err := fc.Get(context.TODO(), types.NamespacedName{Name: tt.args.Pod.Name, Namespace: tt.args.Pod.Namespace}, pod)
 				if err == nil && pod.DeletionTimestamp.IsZero() {
 					t.Errorf("Expected pod to be deleted, but it still exists")
 				}
@@ -820,11 +820,11 @@ func TestCommonControl_EnsureSandboxResumed(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			client := fake.NewClientBuilder().WithScheme(scheme).Build()
+			fc := fake.NewClientBuilder().WithScheme(scheme).Build()
 			control := &commonControl{
-				Client:               client,
+				Client:               fc,
 				recorder:             record.NewFakeRecorder(10),
-				inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(client, inplaceupdate.DefaultGeneratePatchBodyFunc),
+				inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fc, inplaceupdate.DefaultGeneratePatchBodyFunc),
 				initializer:          &defaultSandboxInitializer{},
 			}
 
@@ -837,7 +837,7 @@ func TestCommonControl_EnsureSandboxResumed(t *testing.T) {
 			// Verify that pod was created if it didn't exist
 			if !tt.podExist && tt.args.Pod == nil {
 				pod := &corev1.Pod{}
-				err := client.Get(context.TODO(), types.NamespacedName{Name: tt.args.Box.Name, Namespace: tt.args.Box.Namespace}, pod)
+				err := fc.Get(context.TODO(), types.NamespacedName{Name: tt.args.Box.Name, Namespace: tt.args.Box.Namespace}, pod)
 				if err != nil {
 					t.Errorf("Expected pod to be created, but it wasn't: %v", err)
 				}
@@ -931,11 +931,11 @@ func TestCommonControl_EnsureSandboxTerminated(t *testing.T) {
 				objects = append(objects, tt.args.Pod)
 			}
 
-			client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
+			fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
 			control := &commonControl{
-				Client:               client,
+				Client:               fc,
 				recorder:             record.NewFakeRecorder(10),
-				inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(client, inplaceupdate.DefaultGeneratePatchBodyFunc),
+				inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fc, inplaceupdate.DefaultGeneratePatchBodyFunc),
 			}
 
 			err := control.EnsureSandboxTerminated(context.TODO(), tt.args)
@@ -947,7 +947,7 @@ func TestCommonControl_EnsureSandboxTerminated(t *testing.T) {
 			// Verify pod was deleted if it existed initially and wasn't already being deleted
 			if tt.podExists && tt.args.Pod != nil && tt.args.Pod.DeletionTimestamp == nil {
 				pod := &corev1.Pod{}
-				err := client.Get(context.TODO(), types.NamespacedName{Name: tt.args.Pod.Name, Namespace: tt.args.Pod.Namespace}, pod)
+				err := fc.Get(context.TODO(), types.NamespacedName{Name: tt.args.Pod.Name, Namespace: tt.args.Pod.Namespace}, pod)
 				if err == nil && pod.DeletionTimestamp.IsZero() {
 					t.Errorf("Expected pod to be deleted, but it still exists")
 				}
@@ -2068,8 +2068,8 @@ func TestCommonControl_performRecreateUpgrade_InitializerPath(t *testing.T) {
 				},
 			},
 			Status: corev1.PodStatus{
-				Phase:    corev1.PodRunning,
-				PodIP:    "10.0.0.1",
+				Phase: corev1.PodRunning,
+				PodIP: "10.0.0.1",
 				Conditions: []corev1.PodCondition{
 					{Type: corev1.PodReady, Status: corev1.ConditionTrue},
 				},
@@ -2099,10 +2099,10 @@ func TestCommonControl_performRecreateUpgrade_InitializerPath(t *testing.T) {
 	}
 
 	tests := []struct {
-		name           string
-		initErr        error
-		expectError    string
-		expectDone     bool
+		name        string
+		initErr     error
+		expectError string
+		expectDone  bool
 	}{
 		{
 			name:        "initializer succeeds, upgrade completes",

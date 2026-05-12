@@ -534,10 +534,10 @@ func TestRecordSandboxMetrics_Info(t *testing.T) {
 			NodeName: "node-1",
 		},
 	}
-	
+
 	recordSandboxMetrics(sandbox)
 	defer deleteSandboxMetrics("default", "info-sandbox")
-	
+
 	val := testutil.ToFloat64(sandboxInfo.WithLabelValues("default", "info-sandbox",
 		"my-sandboxset", "node-1", "my-template"))
 	if val != 1 {

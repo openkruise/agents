@@ -114,8 +114,8 @@ type Infrastructure interface {
 }
 
 type Sandbox interface {
-	metav1.Object                                       // For K8s object metadata access
-	Pause(ctx context.Context, opts PauseOptions) error // Pause a Sandbox
+	metav1.Object                                         // For K8s object metadata access
+	Pause(ctx context.Context, opts PauseOptions) error   // Pause a Sandbox
 	Resume(ctx context.Context, opts ResumeOptions) error // Resume a paused Sandbox
 	GetSandboxID() string
 	GetRoute() proxy.Route
