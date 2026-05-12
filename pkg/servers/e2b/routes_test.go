@@ -223,7 +223,7 @@ func TestCheckApiKey_SandboxOwnership(t *testing.T) {
 			sandboxID:    "non-existent-sandbox",
 			expectError:  true,
 			expectedCode: http.StatusNotFound,
-			expectedMsg:  "Sandbox owner not found: non-existent-sandbox",
+			expectedMsg:  "Sandbox route not found, maybe it is crashed or killed: non-existent-sandbox",
 		},
 		{
 			name:         "no sandboxID in path - success",
