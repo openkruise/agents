@@ -1080,6 +1080,108 @@ func TestDoubleCheckObjectSatisfied_OriginalObjectNotSatisfied_UpdatedSatisfied(
 	require.NoError(t, err)
 }
 
+func TestWaitForObjectSatisfied_FirstCreatorExitsSecondStillWaiting(t *testing.T) {
+	// Verifies that when the first waiter (entry creator) exits due to context cancellation,
+	// the second waiter continues to wait and eventually succeeds.
+	sbx := newTestSandbox("sbx-creator-exits", "default")
+	sbx.Status.Phase = agentsv1alpha1.SandboxPending
+	var hooks sync.Map
+	key := WaitHookKey[*agentsv1alpha1.Sandbox](sbx)
+
+	ctx1, cancel1 := context.WithCancel(context.Background())
+
+	updatedSbx := sbx.DeepCopy()
+	updatedSbx.Status.Phase = agentsv1alpha1.SandboxRunning
+
+	// satisfied tracks whether the simulated object has become ready.
+	var satisfiedMu sync.Mutex
+	satisfied := false
+
+	sharedUpdateFunc := func(obj *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) {
+		satisfiedMu.Lock()
+		defer satisfiedMu.Unlock()
+		if satisfied {
+			return updatedSbx, nil
+		}
+		return sbx, nil
+	}
+	sharedCheckFunc := func(obj *agentsv1alpha1.Sandbox) (bool, error) {
+		return obj.Status.Phase == agentsv1alpha1.SandboxRunning, nil
+	}
+
+	firstDone := make(chan error, 1)
+	secondDone := make(chan error, 1)
+
+	// First waiter (creator) - will be canceled early
+	go func() {
+		firstDone <- WaitForObjectSatisfied[*agentsv1alpha1.Sandbox](
+			ctx1, &hooks, sbx, WaitActionResume,
+			sharedUpdateFunc, sharedCheckFunc, time.Hour,
+		)
+	}()
+
+	// Wait for first waiter to register the hook
+	require.Eventually(t, func() bool {
+		_, exists := hooks.Load(key)
+		return exists
+	}, 2*time.Second, 10*time.Millisecond)
+
+	// Second waiter joins the same entry
+	go func() {
+		secondDone <- WaitForObjectSatisfied[*agentsv1alpha1.Sandbox](
+			context.Background(), &hooks, sbx, WaitActionResume,
+			sharedUpdateFunc, sharedCheckFunc, time.Hour,
+		)
+	}()
+
+	// Wait for the second waiter to have acquired (refs == 2)
+	require.Eventually(t, func() bool {
+		val, ok := hooks.Load(key)
+		if !ok {
+			return false
+		}
+		entry := val.(*WaitEntry[*agentsv1alpha1.Sandbox])
+		entry.mu.Lock()
+		defer entry.mu.Unlock()
+		return entry.refs >= 2
+	}, 2*time.Second, 10*time.Millisecond)
+
+	// Cancel the first waiter (creator exits)
+	cancel1()
+	select {
+	case err := <-firstDone:
+		// First waiter should exit with an error (not satisfied during double check)
+		assert.Error(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("first waiter did not exit after context cancellation")
+	}
+
+	// Hook should still exist because second waiter holds a ref
+	_, exists := hooks.Load(key)
+	assert.True(t, exists, "hook must remain registered while second waiter is still active")
+
+	// Mark the object as satisfied, then signal the entry
+	satisfiedMu.Lock()
+	satisfied = true
+	satisfiedMu.Unlock()
+
+	if val, ok := hooks.Load(key); ok {
+		val.(*WaitEntry[*agentsv1alpha1.Sandbox]).Close()
+	}
+
+	// Second waiter should succeed
+	select {
+	case err := <-secondDone:
+		assert.NoError(t, err, "second waiter must succeed after first creator exits and condition is met")
+	case <-time.After(5 * time.Second):
+		t.Fatal("second waiter did not exit after signal")
+	}
+
+	// Hook should be fully cleaned up
+	_, exists = hooks.Load(key)
+	assert.False(t, exists, "hook should be cleaned up after all waiters exit")
+}
+
 // --- WaitAction constants test ---
 
 func TestWaitActionConstants(t *testing.T) {
