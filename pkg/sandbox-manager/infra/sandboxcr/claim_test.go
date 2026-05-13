@@ -1563,8 +1563,8 @@ func TestModifyPickedSandboxCPUNilTemplate(t *testing.T) {
 			},
 		},
 	})
-	require.NoError(t, err)
-	assert.Nil(t, sbx.Spec.Template)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "template has no containers")
 }
 
 func TestBuildContainerCPUTargets(t *testing.T) {
