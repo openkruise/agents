@@ -110,17 +110,27 @@ func (s *Sandbox) refreshFunc() runtime.RefreshFunc {
 	}
 }
 
-// retryUpdate loads the latest sandbox from APIReader, applies modifier, and retries on conflict.
+// retryUpdate loads the latest sandbox from informer first, applies modifier, and retries on conflict.
+// Conflict retries refresh from APIReader to avoid reusing stale informer data.
 //
 // Returns:
 //   - updated: true if a real Update was issued and the sandbox was written back; false if no update was needed.
 //   - err:     non-nil when either refresh/update failed or modifier/Update returned an error.
 func (s *Sandbox) retryUpdate(ctx context.Context, modifier ModifierFunc) (bool, error) {
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(s.Sandbox))
+	objectKey := client.ObjectKeyFromObject(s.Sandbox)
 	updated := false
+	first := true
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		latest := &agentsv1alpha1.Sandbox{}
-		if err := s.Cache.GetAPIReader().Get(ctx, client.ObjectKeyFromObject(s.Sandbox), latest); err != nil {
+		var err error
+		if first {
+			err = s.Cache.GetClient().Get(ctx, objectKey, latest)
+		} else {
+			err = s.Cache.GetAPIReader().Get(ctx, objectKey, latest)
+		}
+		first = false
+		if err != nil {
 			return err
 		}
 

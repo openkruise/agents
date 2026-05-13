@@ -402,6 +402,7 @@ type retryUpdateTestProvider struct {
 
 	client         client.Client
 	apiReader      *countingReader
+	clientGetCalls atomic.Int32
 	claimedSandbox *v1alpha1.Sandbox
 }
 
@@ -444,12 +445,17 @@ func newRetryUpdateTestCache(
 	}
 
 	fc := builder.Build()
-	apiReader := &countingReader{Reader: fc}
-	return &retryUpdateTestProvider{
-		client:         fc,
-		apiReader:      apiReader,
+	provider := &retryUpdateTestProvider{
+		apiReader:      &countingReader{Reader: fc},
 		claimedSandbox: claimedSandbox,
-	}, fc
+	}
+	provider.client = interceptor.NewClient(fc, interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			provider.clientGetCalls.Add(1)
+			return c.Get(ctx, key, obj, opts...)
+		},
+	})
+	return provider, fc
 }
 
 func TestSandbox_retryUpdate(t *testing.T) {
@@ -461,6 +467,7 @@ func TestSandbox_retryUpdate(t *testing.T) {
 		modifier          func(t *testing.T) ModifierFunc
 		expectUpdated     bool
 		expectUpdateCalls int32
+		expectClientGets  int32
 		expectPaused      bool
 		expectError       string
 	}{
@@ -477,6 +484,7 @@ func TestSandbox_retryUpdate(t *testing.T) {
 			},
 			expectUpdated:     false,
 			expectUpdateCalls: 0,
+			expectClientGets:  1,
 			expectPaused:      false,
 		},
 		{
@@ -490,6 +498,7 @@ func TestSandbox_retryUpdate(t *testing.T) {
 			},
 			expectUpdated:     true,
 			expectUpdateCalls: 1,
+			expectClientGets:  1,
 			expectPaused:      false,
 		},
 		{
@@ -503,6 +512,7 @@ func TestSandbox_retryUpdate(t *testing.T) {
 			},
 			expectUpdated:     false,
 			expectUpdateCalls: 0,
+			expectClientGets:  1,
 			expectPaused:      true,
 			expectError:       "modifier failed",
 		},
@@ -537,7 +547,8 @@ func TestSandbox_retryUpdate(t *testing.T) {
 			}
 			assert.Equal(t, tt.expectUpdated, updated)
 			assert.Equal(t, tt.expectUpdateCalls, updateCalls.Load())
-			assert.GreaterOrEqual(t, testCache.apiReader.Calls(), int32(1))
+			assert.Equal(t, tt.expectClientGets, testCache.clientGetCalls.Load())
+			assert.Equal(t, int32(0), testCache.apiReader.Calls())
 			assert.Equal(t, tt.expectPaused, s.Sandbox.Spec.Paused)
 
 			var stored v1alpha1.Sandbox
@@ -582,7 +593,8 @@ func TestSandbox_retryUpdate_ConflictRefreshesFromAPIReader(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, updated)
 	assert.Equal(t, int32(1), updateAttempts.Load())
-	assert.GreaterOrEqual(t, testCache.apiReader.Calls(), int32(2))
+	assert.Equal(t, int32(1), testCache.clientGetCalls.Load())
+	assert.Equal(t, int32(1), testCache.apiReader.Calls())
 	assert.False(t, s.Sandbox.Spec.Paused)
 
 	var stored v1alpha1.Sandbox

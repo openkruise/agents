@@ -31,6 +31,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	cachepkg "github.com/openkruise/agents/pkg/cache"
@@ -47,25 +48,21 @@ import (
 type apiReaderOverrideCache struct {
 	cachepkg.Provider
 	apiReader ctrl.Reader
+	client    ctrl.Client
 }
 
 func (c *apiReaderOverrideCache) GetAPIReader() ctrl.Reader {
+	if c.apiReader == nil {
+		return c.Provider.GetAPIReader()
+	}
 	return c.apiReader
 }
 
-type mutatingAPIReader struct {
-	ctrl.Reader
-	calls                 atomic.Int32
-	mutateBeforeSecondGet func(context.Context) error
-}
-
-func (r *mutatingAPIReader) Get(ctx context.Context, key ctrl.ObjectKey, obj ctrl.Object, opts ...ctrl.GetOption) error {
-	if r.calls.Add(1) == 2 && r.mutateBeforeSecondGet != nil {
-		if err := r.mutateBeforeSecondGet(ctx); err != nil {
-			return err
-		}
+func (c *apiReaderOverrideCache) GetClient() ctrl.Client {
+	if c.client == nil {
+		return c.Provider.GetClient()
 	}
-	return r.Reader.Get(ctx, key, obj, opts...)
+	return c.client
 }
 
 // TestSandbox_ResumeConcurrent tests concurrent resume operations on the same sandbox
@@ -517,21 +514,29 @@ func TestSandbox_PauseSkipsSideEffectsWhenLatestAlreadyPaused(t *testing.T) {
 			time.Sleep(10 * time.Millisecond)
 
 			key := types.NamespacedName{Namespace: sandbox.Namespace, Name: sandbox.Name}
-			apiReader := &mutatingAPIReader{
-				Reader: fc,
-				mutateBeforeSecondGet: func(ctx context.Context) error {
+			var clientGets atomic.Int32
+			cacheClient, ok := cache.GetClient().(ctrl.WithWatch)
+			require.True(t, ok)
+			client := interceptor.NewClient(cacheClient, interceptor.Funcs{
+				Get: func(ctx context.Context, c ctrl.WithWatch, key ctrl.ObjectKey, obj ctrl.Object, opts ...ctrl.GetOption) error {
+					if clientGets.Add(1) != 1 {
+						return c.Get(ctx, key, obj, opts...)
+					}
 					var current v1alpha1.Sandbox
 					if err := fc.Get(ctx, key, &current); err != nil {
 						return err
 					}
 					modified := current.DeepCopy()
 					modified.Spec.Paused = true
-					return fc.Patch(ctx, modified, ctrl.MergeFrom(&current))
+					if err := fc.Patch(ctx, modified, ctrl.MergeFrom(&current)); err != nil {
+						return err
+					}
+					return c.Get(ctx, key, obj, opts...)
 				},
-			}
+			})
 			s := AsSandbox(sandbox.DeepCopy(), &apiReaderOverrideCache{
-				Provider:  cache,
-				apiReader: apiReader,
+				Provider: cache,
+				client:   client,
 			})
 			mockMgr := cache.GetMockManager()
 			mockMgr.AddWaitReconcileKey(sandbox)
