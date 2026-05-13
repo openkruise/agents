@@ -64,6 +64,7 @@ spec:
                   Annotations contains key-value pairs to be added as annotations
                   to claimed Sandbox resources
                 type: object
+                x-kubernetes-map-type: granular
               claimTimeout:
                 default: 1m
                 description: |-
@@ -99,6 +100,9 @@ spec:
                   - pvName
                   type: object
                 type: array
+                x-kubernetes-list-map-keys:
+                - mountPath
+                x-kubernetes-list-type: map
               envVars:
                 additionalProperties:
                   type: string
@@ -107,6 +111,7 @@ spec:
                   These will be passed to the sandbox's init endpoint (envd) after claiming
                   Only applicable if the SandboxSet has envd enabled
                 type: object
+                x-kubernetes-map-type: granular
               inplaceUpdate:
                 description: InplaceUpdate allows to perform inplace update for sandbox
                   while claiming
@@ -150,8 +155,9 @@ spec:
                   type: string
                 description: |-
                   Labels contains key-value pairs to be added as labels
-                  to claimed Sandbox resources
+                  to claimed Sandbox resources and synced to sandbox template labels.
                 type: object
+                x-kubernetes-map-type: granular
               replicas:
                 default: 1
                 description: |-
@@ -177,6 +183,7 @@ spec:
                   - name
                   type: object
                 type: array
+                x-kubernetes-list-type: atomic
               shutdownTime:
                 description: |-
                   ShutdownTime specifies the absolute time when the sandbox should be shut down

@@ -59,7 +59,7 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
 	SandboxCreatePodInjectConfigGate: {Default: false, PreRelease: featuregate.Alpha},
 	CachePodLabelSelectorGate:        {Default: true, PreRelease: featuregate.Alpha},
 	SandboxInPlaceResourceResizeGate: {Default: true, PreRelease: featuregate.Alpha},
-	SandboxMultiClusterNaming:               {Default: false, PreRelease: featuregate.Alpha},
+	SandboxMultiClusterNaming:        {Default: false, PreRelease: featuregate.Alpha},
 }
 
 func init() {

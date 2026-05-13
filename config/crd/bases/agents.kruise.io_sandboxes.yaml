@@ -138,6 +138,7 @@ spec:
                 items:
                   type: string
                 type: array
+                x-kubernetes-list-type: atomic
               runtimes:
                 description: Runtimes - Runtime configuration for sandbox object
                 items:
@@ -148,6 +149,7 @@ spec:
                   - name
                   type: object
                 type: array
+                x-kubernetes-list-type: atomic
               shutdownTime:
                 description: |-
                   ShutdownTime - Absolute time when the sandbox is deleted.
@@ -283,11 +285,13 @@ spec:
                       type: string
                     description: Annotations contains pod important annotations
                     type: object
+                    x-kubernetes-map-type: granular
                   labels:
                     additionalProperties:
                       type: string
                     description: Labels contains pod important labels
                     type: object
+                    x-kubernetes-map-type: granular
                   nodeName:
                     description: NodeName indicates in which node this pod is scheduled.
                     type: string

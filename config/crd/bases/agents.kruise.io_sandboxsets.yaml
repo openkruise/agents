@@ -67,6 +67,7 @@ spec:
                 items:
                   type: string
                 type: array
+                x-kubernetes-list-type: atomic
               replicas:
                 description: Replicas is the number of unused sandboxes, including
                   available and creating ones.
@@ -82,6 +83,7 @@ spec:
                   - name
                   type: object
                 type: array
+                x-kubernetes-list-type: atomic
               scaleStrategy:
                 description: |-
                   ScaleStrategy indicates the ScaleStrategy that will be employed to

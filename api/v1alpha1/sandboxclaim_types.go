@@ -60,17 +60,20 @@ type SandboxClaimSpec struct {
 	// Labels contains key-value pairs to be added as labels
 	// to claimed Sandbox resources and synced to sandbox template labels.
 	// +optional
+	// +mapType=granular
 	Labels map[string]string `json:"labels,omitempty"`
 
 	// Annotations contains key-value pairs to be added as annotations
 	// to claimed Sandbox resources
 	// +optional
+	// +mapType=granular
 	Annotations map[string]string `json:"annotations,omitempty"`
 
 	// EnvVars contains environment variables to be injected into the sandbox
 	// These will be passed to the sandbox's init endpoint (envd) after claiming
 	// Only applicable if the SandboxSet has envd enabled
 	// +optional
+	// +mapType=granular
 	EnvVars map[string]string `json:"envVars,omitempty"`
 
 	// InplaceUpdate allows to perform inplace update for sandbox while claiming
@@ -79,10 +82,15 @@ type SandboxClaimSpec struct {
 
 	// DynamicVolumesMount specifies the dynamic volumes to be mounted into the sandbox
 	// +optional
-	DynamicVolumesMount []CSIMountConfig `json:"dynamicVolumesMount"`
+	// +patchMergeKey=mountPath
+	// +patchStrategy=merge
+	// +listType=map
+	// +listMapKey=mountPath
+	DynamicVolumesMount []CSIMountConfig `json:"dynamicVolumesMount" patchMergeKey:"mountPath" patchStrategy:"merge"`
 
 	// Runtimes - Runtime configuration for sandbox object
 	// +optional
+	// +listType=atomic
 	Runtimes []RuntimeConfig `json:"runtimes,omitempty"`
 
 	// Set ReserveFailedSandbox to true to reserve failed sandboxes

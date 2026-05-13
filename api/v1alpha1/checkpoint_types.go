@@ -56,6 +56,7 @@ type CheckpointSpec struct {
 
 	// PersistentContents indicates resume pod with persistent content, Enum: memory, filesystem
 	// +kubebuilder:validation:Optional
+	// +listType=atomic
 	PersistentContents []string `json:"persistentContents,omitempty"`
 
 	// +kubebuilder:validation:Optional

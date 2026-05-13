@@ -48,6 +48,7 @@ spec:
                 items:
                   type: string
                 type: array
+                x-kubernetes-list-type: atomic
               runtimes:
                 description: Runtimes - Runtime configuration for sandbox object
                 items:
@@ -58,6 +59,7 @@ spec:
                   - name
                   type: object
                 type: array
+                x-kubernetes-list-type: atomic
               template:
                 description: |-
                   Template describes the pods that will be created.

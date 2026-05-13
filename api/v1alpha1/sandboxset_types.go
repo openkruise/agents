@@ -59,10 +59,12 @@ type SandboxSetSpec struct {
 	Replicas int32 `json:"replicas"`
 
 	// PersistentContents indicates resume pod with persistent content, Enum: ip, memory, filesystem
+	// +listType=atomic
 	PersistentContents []string `json:"persistentContents,omitempty"`
 
 	// Runtimes - Runtime configuration for sandbox object
 	// +optional
+	// +listType=atomic
 	Runtimes []RuntimeConfig `json:"runtimes,omitempty"`
 
 	EmbeddedSandboxTemplate `json:",inline"`
