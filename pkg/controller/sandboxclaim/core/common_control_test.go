@@ -875,7 +875,8 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 
 				// Verify modifier set the claim name label and shutdown annotation
 				assert.Equal(t, "test-claim", mockSandbox.Labels[agentsv1alpha1.LabelSandboxClaimName], "LabelSandboxClaimName mismatch")
-				assert.Equal(t, shutdownTime.Time.Format(time.RFC3339), mockSandbox.Spec.ShutdownTime.Time.Format(time.RFC3339), "ShutdownTime annotation mismatch")
+				expectedShutdownTime := shutdownTime.Time.Round(0).Truncate(time.Second).UTC()
+				assert.Equal(t, expectedShutdownTime, mockSandbox.Spec.ShutdownTime.Time, "ShutdownTime mismatch")
 			},
 		},
 		{

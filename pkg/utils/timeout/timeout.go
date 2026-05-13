@@ -17,14 +17,11 @@ limitations under the License.
 package timeout
 
 import (
-	"encoding/json"
 	"time"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 )
-
-var jsonMarshalTimeoutOptions = json.Marshal
 
 func GetTimeoutFromSandbox(sbx *agentsv1alpha1.Sandbox) infra.TimeoutOptions {
 	opts := infra.TimeoutOptions{}
@@ -35,60 +32,6 @@ func GetTimeoutFromSandbox(sbx *agentsv1alpha1.Sandbox) infra.TimeoutOptions {
 		opts.PauseTime = NormalizeTime(sbx.Spec.PauseTime.Time)
 	}
 	return opts
-}
-
-// SetTimeoutSnapshot stores the current timeout status into the snapshot annotation.
-func SetTimeoutSnapshot(sbx *agentsv1alpha1.Sandbox) error {
-	opts := GetTimeoutFromSandbox(sbx)
-	if opts.ShutdownTime.IsZero() && opts.PauseTime.IsZero() {
-		ClearPauseTimeoutSnapshot(sbx)
-		return nil
-	}
-
-	by, err := jsonMarshalTimeoutOptions(opts)
-	if err != nil {
-		return err
-	}
-	if sbx.Annotations == nil {
-		sbx.Annotations = map[string]string{}
-	}
-	sbx.Annotations[agentsv1alpha1.AnnotationPauseTimeoutSnapshot] = string(by)
-	return nil
-}
-
-// IsTimeoutMatchedSnapshot reports whether the current timeout status matches the snapshot annotation.
-func IsTimeoutMatchedSnapshot(sbx *agentsv1alpha1.Sandbox) (bool, error) {
-	snapshot, exists, err := GetTimeoutSnapshot(sbx)
-	if err != nil || !exists {
-		return false, err
-	}
-	return Equal(GetTimeoutFromSandbox(sbx), snapshot), nil
-}
-
-// ClearPauseTimeoutSnapshot removes the temporary pause-cycle timeout marker.
-func ClearPauseTimeoutSnapshot(sbx *agentsv1alpha1.Sandbox) {
-	delete(sbx.Annotations, agentsv1alpha1.AnnotationPauseTimeoutSnapshot)
-}
-
-// GetTimeoutSnapshot parses the pause timeout snapshot annotation.
-func GetTimeoutSnapshot(sbx *agentsv1alpha1.Sandbox) (infra.TimeoutOptions, bool, error) {
-	if sbx.Annotations == nil {
-		return infra.TimeoutOptions{}, false, nil
-	}
-
-	raw := sbx.Annotations[agentsv1alpha1.AnnotationPauseTimeoutSnapshot]
-	if raw == "" {
-		return infra.TimeoutOptions{}, false, nil
-	}
-
-	var snapshot infra.TimeoutOptions
-	if err := json.Unmarshal([]byte(raw), &snapshot); err != nil {
-		return infra.TimeoutOptions{}, false, err
-	}
-	// NormalizeTime maybe unnecessary, but it's safe to keep it
-	snapshot.ShutdownTime = NormalizeTime(snapshot.ShutdownTime)
-	snapshot.PauseTime = NormalizeTime(snapshot.PauseTime)
-	return snapshot, true, nil
 }
 
 // Equal compares timeout options after normalizing time precision.
@@ -109,9 +52,8 @@ func ShouldExtendTimeout(current, requested infra.TimeoutOptions) bool {
 // NormalizeTime converts timeout values to the precision Kubernetes persists and
 // E2B exposes: wall-clock time at whole-second precision in UTC. This removes Go's
 // monotonic clock reading, drops sub-second differences, and normalizes the
-// Location so timeout comparison, snapshot matching, and retry conflict handling
-// stay stable across in-memory values, metav1.Time serialization, API server
-// round trips, and annotation JSON (where "Z" always unmarshals back to time.UTC).
+// Location so timeout comparison and retry conflict handling stay stable across
+// in-memory values, metav1.Time serialization, and API server round trips.
 func NormalizeTime(t time.Time) time.Time {
 	if t.IsZero() {
 		return time.Time{}

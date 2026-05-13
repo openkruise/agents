@@ -23,13 +23,6 @@ const (
 	AnnotationRuntimeAccessToken = InternalPrefix + "runtime-access-token"
 )
 
-// common annotations
-
-// AnnotationPauseTimeoutSnapshot stores the timeout observed for the current pause cycle.
-// It is a temporary marker that lets concurrent paused->running connect requests detect
-// whether another client has already written a newer timeout.
-const AnnotationPauseTimeoutSnapshot = InternalPrefix + "pause-timeout-snapshot"
-
 // E2B annotations
 
 const (

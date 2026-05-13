@@ -17,14 +17,11 @@ limitations under the License.
 package e2b
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"testing"
 	"time"
 
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
-	"github.com/openkruise/agents/pkg/utils/timeout"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -296,8 +293,8 @@ func TestSetSandboxTimeoutStillShortensRunningSandbox(t *testing.T) {
 	assert.WithinDuration(t, beforeSet.Add(time.Duration(shorterSeconds)*time.Second), sbx.Spec.ShutdownTime.Time, 5*time.Second)
 }
 
-func TestUpdateConnectTimeoutSnapshotPolicy(t *testing.T) {
-	templateName := "test-update-connect-timeout-pause-snapshot"
+func TestUpdateConnectTimeoutBaselinePolicy(t *testing.T) {
+	templateName := "test-update-connect-timeout-pause-baseline"
 	user := &models.CreatedTeamAPIKey{
 		ID:   keys.AdminKeyID,
 		Key:  InitKey,
@@ -305,46 +302,26 @@ func TestUpdateConnectTimeoutSnapshotPolicy(t *testing.T) {
 	}
 
 	tests := []struct {
-		name                string
-		currentTimeout      int
-		requestTimeout      int
-		snapshotMode        string
-		snapshotTimeout     int
-		expectedTimeout     int
-		expectSnapshotExist bool
+		name               string
+		currentTimeout     int
+		requestTimeout     int
+		changeCurrentAfter bool
+		updatedTimeout     int
+		expectedTimeout    int
 	}{
 		{
-			name:                "matching snapshot resets to requested timeout",
-			currentTimeout:      600,
-			requestTimeout:      300,
-			snapshotMode:        "match",
-			expectedTimeout:     300,
-			expectSnapshotExist: true,
+			name:            "matching baseline resets to requested timeout",
+			currentTimeout:  600,
+			requestTimeout:  300,
+			expectedTimeout: 300,
 		},
 		{
-			name:                "mismatched snapshot uses extend only and skips shorter timeout",
-			currentTimeout:      600,
-			requestTimeout:      300,
-			snapshotMode:        "mismatch",
-			snapshotTimeout:     900,
-			expectedTimeout:     600,
-			expectSnapshotExist: true,
-		},
-		{
-			name:                "missing snapshot falls back to always policy",
-			currentTimeout:      600,
-			requestTimeout:      300,
-			snapshotMode:        "missing",
-			expectedTimeout:     300,
-			expectSnapshotExist: false,
-		},
-		{
-			name:                "malformed snapshot falls back to always policy",
-			currentTimeout:      600,
-			requestTimeout:      300,
-			snapshotMode:        "malformed",
-			expectedTimeout:     300,
-			expectSnapshotExist: true,
+			name:               "mismatched baseline uses extend only and skips shorter timeout",
+			currentTimeout:     600,
+			requestTimeout:     300,
+			changeCurrentAfter: true,
+			updatedTimeout:     900,
+			expectedTimeout:    900,
 		},
 	}
 
@@ -365,103 +342,102 @@ func TestUpdateConnectTimeoutSnapshotPolicy(t *testing.T) {
 			}, nil, user))
 			require.Nil(t, err)
 
-			sbx := GetSandbox(t, createResp.Body.SandboxID, fc)
-			switch tt.snapshotMode {
-			case "match":
-				require.NoError(t, timeout.SetTimeoutSnapshot(sbx))
-			case "mismatch":
-				raw, marshalErr := json.Marshal(infra.TimeoutOptions{
-					ShutdownTime: time.Now().Add(time.Duration(tt.snapshotTimeout) * time.Second),
-				})
-				require.NoError(t, marshalErr)
-				if sbx.Annotations == nil {
-					sbx.Annotations = map[string]string{}
-				}
-				sbx.Annotations[v1alpha1.AnnotationPauseTimeoutSnapshot] = string(raw)
-			case "malformed":
-				if sbx.Annotations == nil {
-					sbx.Annotations = map[string]string{}
-				}
-				sbx.Annotations[v1alpha1.AnnotationPauseTimeoutSnapshot] = "{bad-json"
-			}
-			require.NoError(t, fc.Update(t.Context(), sbx))
-
 			req := NewRequest(t, nil, nil, map[string]string{
 				"sandboxID": createResp.Body.SandboxID,
 			}, user)
 			wrapped, apiErr := controller.getSandboxOfUser(req.Context(), createResp.Body.SandboxID)
 			require.Nil(t, apiErr)
+			baseline := wrapped.GetTimeout()
+
+			if tt.changeCurrentAfter {
+				sbx := GetSandbox(t, createResp.Body.SandboxID, fc)
+				sbx.Spec.ShutdownTime = &metav1.Time{Time: time.Now().Add(time.Duration(tt.updatedTimeout) * time.Second)}
+				require.NoError(t, fc.Update(t.Context(), sbx))
+			}
 
 			beforeCall := time.Now()
 			errResp := controller.updateConnectTimeout(req.Context(), wrapped, tt.requestTimeout,
-				v1alpha1.SandboxStatePaused, false, beforeCall.Add(time.Duration(tt.currentTimeout)*time.Second))
+				v1alpha1.SandboxStatePaused, false, beforeCall.Add(time.Duration(tt.currentTimeout)*time.Second), baseline)
 			require.Nil(t, errResp)
 
 			updatedSbx := GetSandbox(t, createResp.Body.SandboxID, fc)
 			require.NotNil(t, updatedSbx.Spec.ShutdownTime)
 			assert.WithinDuration(t, beforeCall.Add(time.Duration(tt.expectedTimeout)*time.Second), updatedSbx.Spec.ShutdownTime.Time, 5*time.Second)
-
-			_, exists := updatedSbx.Annotations[v1alpha1.AnnotationPauseTimeoutSnapshot]
-			assert.Equal(t, tt.expectSnapshotExist, exists)
 		})
 	}
 }
 
-func TestResumeSandboxRepairsMissingSnapshotBeforeApplyingSnapshotAwareTimeout(t *testing.T) {
-	controller, fc, teardown := Setup(t)
-	defer teardown()
-	user := &models.CreatedTeamAPIKey{
-		ID:   keys.AdminKeyID,
-		Key:  InitKey,
-		Name: "admin",
-	}
-	templateName := "test-resume-sandbox-repair-missing-snapshot"
-
-	cleanup := CreateSandboxPool(t, controller, templateName, 1)
-	defer cleanup()
-
-	createResp, err := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
-		TemplateID: templateName,
-		Timeout:    600,
-		Metadata: map[string]string{
-			models.ExtensionKeySkipInitRuntime: v1alpha1.True,
+func TestResumeSandboxBaselinePreventsStaleConnectTimeout(t *testing.T) {
+	tests := []struct {
+		name                  string
+		templateName          string
+		initialTimeoutSeconds int
+		resumeTimeoutSeconds  int
+		connectTimeoutSeconds int
+	}{
+		{
+			name:                  "stale paused connect baseline does not shorten timeout set by resume",
+			templateName:          "test-resume-sandbox-baseline-stale-connect-timeout",
+			initialTimeoutSeconds: 600,
+			resumeTimeoutSeconds:  900,
+			connectTimeoutSeconds: 300,
 		},
-	}, nil, user))
-	require.Nil(t, err)
+	}
 
-	EnableWaitSim(t, controller, createResp.Body.SandboxID)
-	pauseSandboxHelper(t, controller, fc, createResp.Body.SandboxID, false, false, user)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			controller, fc, teardown := Setup(t)
+			defer teardown()
+			user := &models.CreatedTeamAPIKey{
+				ID:   keys.AdminKeyID,
+				Key:  InitKey,
+				Name: "admin",
+			}
 
-	sbx := GetSandbox(t, createResp.Body.SandboxID, fc)
-	delete(sbx.Annotations, v1alpha1.AnnotationPauseTimeoutSnapshot)
-	require.NoError(t, fc.Update(t.Context(), sbx))
+			cleanup := CreateSandboxPool(t, controller, tt.templateName, 1)
+			defer cleanup()
 
-	req := NewRequest(t, nil, models.SetTimeoutRequest{
-		TimeoutSeconds: 900,
-	}, map[string]string{
-		"sandboxID": createResp.Body.SandboxID,
-	}, user)
+			createResp, err := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
+				TemplateID: tt.templateName,
+				Timeout:    tt.initialTimeoutSeconds,
+				Metadata: map[string]string{
+					models.ExtensionKeySkipInitRuntime: v1alpha1.True,
+				},
+			}, nil, user))
+			require.Nil(t, err)
 
-	go UpdateSandboxWhen(t, fc, createResp.Body.SandboxID, func(sbx *v1alpha1.Sandbox) bool {
-		return sbx.Spec.Paused == false
-	}, DoSetSandboxStatus(v1alpha1.SandboxRunning, metav1.ConditionFalse, metav1.ConditionTrue))
-	beforeFirstCall := time.Now()
-	_, apiErr := controller.ResumeSandbox(req)
-	require.Nil(t, apiErr)
+			EnableWaitSim(t, controller, createResp.Body.SandboxID)
+			pauseSandboxHelper(t, controller, fc, createResp.Body.SandboxID, false, false, user)
 
-	afterFirstCall := GetSandbox(t, createResp.Body.SandboxID, fc)
-	require.NotNil(t, afterFirstCall.Spec.ShutdownTime)
-	assert.WithinDuration(t, beforeFirstCall.Add(900*time.Second), afterFirstCall.Spec.ShutdownTime.Time, 5*time.Second)
-	_, exists := afterFirstCall.Annotations[v1alpha1.AnnotationPauseTimeoutSnapshot]
-	assert.True(t, exists)
+			req := NewRequest(t, nil, models.SetTimeoutRequest{
+				TimeoutSeconds: tt.resumeTimeoutSeconds,
+			}, map[string]string{
+				"sandboxID": createResp.Body.SandboxID,
+			}, user)
+			wrappedBeforeResume, getErr := controller.getSandboxOfUser(req.Context(), createResp.Body.SandboxID)
+			require.Nil(t, getErr)
+			baseline := wrappedBeforeResume.GetTimeout()
 
-	wrapped, getErr := controller.getSandboxOfUser(req.Context(), createResp.Body.SandboxID)
-	require.Nil(t, getErr)
-	errResp := controller.updateConnectTimeout(req.Context(), wrapped, 300,
-		v1alpha1.SandboxStatePaused, false, afterFirstCall.Spec.ShutdownTime.Time)
-	require.Nil(t, errResp)
+			go UpdateSandboxWhen(t, fc, createResp.Body.SandboxID, func(sbx *v1alpha1.Sandbox) bool {
+				return sbx.Spec.Paused == false
+			}, DoSetSandboxStatus(v1alpha1.SandboxRunning, metav1.ConditionFalse, metav1.ConditionTrue))
+			beforeFirstCall := time.Now()
+			_, apiErr := controller.ResumeSandbox(req)
+			require.Nil(t, apiErr)
 
-	afterSecondCall := GetSandbox(t, createResp.Body.SandboxID, fc)
-	require.NotNil(t, afterSecondCall.Spec.ShutdownTime)
-	assert.WithinDuration(t, afterFirstCall.Spec.ShutdownTime.Time, afterSecondCall.Spec.ShutdownTime.Time, 5*time.Second)
+			afterFirstCall := GetSandbox(t, createResp.Body.SandboxID, fc)
+			require.NotNil(t, afterFirstCall.Spec.ShutdownTime)
+			assert.WithinDuration(t, beforeFirstCall.Add(time.Duration(tt.resumeTimeoutSeconds)*time.Second), afterFirstCall.Spec.ShutdownTime.Time, 5*time.Second)
+
+			wrapped, getErr := controller.getSandboxOfUser(req.Context(), createResp.Body.SandboxID)
+			require.Nil(t, getErr)
+			errResp := controller.updateConnectTimeout(req.Context(), wrapped, tt.connectTimeoutSeconds,
+				v1alpha1.SandboxStatePaused, false, afterFirstCall.Spec.ShutdownTime.Time, baseline)
+			require.Nil(t, errResp)
+
+			afterSecondCall := GetSandbox(t, createResp.Body.SandboxID, fc)
+			require.NotNil(t, afterSecondCall.Spec.ShutdownTime)
+			assert.WithinDuration(t, afterFirstCall.Spec.ShutdownTime.Time, afterSecondCall.Spec.ShutdownTime.Time, 5*time.Second)
+		})
+	}
 }

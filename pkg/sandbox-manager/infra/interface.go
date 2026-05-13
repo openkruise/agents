@@ -38,6 +38,9 @@ type SandboxResource struct {
 type TimeoutOptions struct {
 	ShutdownTime time.Time
 	PauseTime    time.Time
+	// Baseline is the timeout state the caller observed before issuing this update.
+	// Consulted only when the policy passed to SaveTimeoutWithPolicy is BaselineAware.
+	Baseline *TimeoutOptions `json:"-"`
 }
 
 type TimeoutUpdatePolicy string
@@ -45,7 +48,7 @@ type TimeoutUpdatePolicy string
 const (
 	TimeoutUpdatePolicyAlways        TimeoutUpdatePolicy = "Always"
 	TimeoutUpdatePolicyExtendOnly    TimeoutUpdatePolicy = "ExtendOnly"
-	TimeoutUpdatePolicySnapshotAware TimeoutUpdatePolicy = "SnapshotAware"
+	TimeoutUpdatePolicyBaselineAware TimeoutUpdatePolicy = "BaselineAware"
 )
 
 type TimeoutUpdateResult struct {
@@ -53,13 +56,11 @@ type TimeoutUpdateResult struct {
 }
 
 type PauseOptions struct {
-	Timeout                *TimeoutOptions
-	CaptureTimeoutSnapshot bool
+	Timeout *TimeoutOptions
 }
 
-type ResumeOptions struct {
-	EnsureTimeoutSnapshotIfMissing bool
-}
+// ResumeOptions reserves the type for future extensions.
+type ResumeOptions struct{}
 
 type HasTemplateOptions struct {
 	Namespace string

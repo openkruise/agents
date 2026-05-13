@@ -19,6 +19,7 @@ package e2b
 import (
 	"fmt"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
@@ -67,9 +68,6 @@ func TestPauseSandbox(t *testing.T) {
 	assert.Nil(t, err)
 	assert.Equal(t, http.StatusNoContent, pauseResp.Code)
 	assert.Equal(t, models.SandboxStatePaused, describeResp.Body.State)
-	pausedSandbox := GetSandbox(t, createResp.Body.SandboxID, fc)
-	_, hasSnapshot := pausedSandbox.Annotations[agentsv1alpha1.AnnotationPauseTimeoutSnapshot]
-	assert.True(t, hasSnapshot)
 
 	// pause again
 	start := time.Now()
@@ -325,6 +323,119 @@ func TestConnectSandboxRunningTimeoutGuard(t *testing.T) {
 	}
 }
 
+func TestConnectSandboxConcurrentPausedTimeouts(t *testing.T) {
+	user := &models.CreatedTeamAPIKey{
+		ID:   keys.AdminKeyID,
+		Key:  InitKey,
+		Name: "admin",
+	}
+	tests := []struct {
+		name         string
+		templateName string
+		autoPause    bool
+	}{
+		{
+			name:         "manual pause",
+			templateName: "test-template-concurrent-connect-manual-pause",
+			autoPause:    false,
+		},
+		{
+			name:         "auto pause",
+			templateName: "test-template-concurrent-connect-auto-pause",
+			autoPause:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			controller, fc, teardown := Setup(t)
+			defer teardown()
+			cleanup := CreateSandboxPool(t, controller, tt.templateName, 1)
+			defer cleanup()
+
+			createResp, err := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
+				TemplateID: tt.templateName,
+				AutoPause:  tt.autoPause,
+				Timeout:    600,
+				Metadata: map[string]string{
+					models.ExtensionKeySkipInitRuntime: agentsv1alpha1.True,
+				},
+			}, nil, user))
+			require.Nil(t, err)
+			require.Equal(t, models.SandboxStateRunning, createResp.Body.State)
+
+			EnableWaitSim(t, controller, createResp.Body.SandboxID)
+			if tt.autoPause {
+				sbx := GetSandbox(t, createResp.Body.SandboxID, fc)
+				sbx.Spec.Paused = true
+				require.NoError(t, fc.Update(t.Context(), sbx))
+				UpdateSandboxWhen(t, fc, createResp.Body.SandboxID, Immediately,
+					DoSetSandboxStatus(agentsv1alpha1.SandboxPaused, metav1.ConditionTrue, metav1.ConditionFalse))
+			} else {
+				pauseSandboxHelper(t, controller, fc, createResp.Body.SandboxID, false, false, user)
+			}
+
+			go UpdateSandboxWhen(t, fc, createResp.Body.SandboxID, func(sbx *agentsv1alpha1.Sandbox) bool {
+				return !sbx.Spec.Paused
+			}, DoSetSandboxStatus(agentsv1alpha1.SandboxRunning, metav1.ConditionFalse, metav1.ConditionTrue))
+
+			type connectResult struct {
+				timeoutSeconds int
+				code           int
+				state          string
+				err            string
+			}
+			results := make(chan connectResult, 2)
+			start := make(chan struct{})
+			var wg sync.WaitGroup
+			for _, timeoutSeconds := range []int{900, 300} {
+				timeoutSeconds := timeoutSeconds
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					<-start
+					resp, apiErr := controller.ConnectSandbox(NewRequest(t, nil, models.SetTimeoutRequest{
+						TimeoutSeconds: timeoutSeconds,
+					}, map[string]string{
+						"sandboxID": createResp.Body.SandboxID,
+					}, user))
+					if apiErr != nil {
+						results <- connectResult{timeoutSeconds: timeoutSeconds, err: apiErr.Error()}
+						return
+					}
+					results <- connectResult{
+						timeoutSeconds: timeoutSeconds,
+						code:           resp.Code,
+						state:          resp.Body.State,
+					}
+				}()
+			}
+
+			startedAt := time.Now()
+			close(start)
+			wg.Wait()
+			close(results)
+
+			for result := range results {
+				require.Empty(t, result.err, "ConnectSandbox(%d) failed", result.timeoutSeconds)
+				assert.Less(t, result.code, http.StatusMultipleChoices, "ConnectSandbox(%d) status", result.timeoutSeconds)
+				assert.Equal(t, models.SandboxStateRunning, result.state)
+			}
+
+			updated := GetSandbox(t, createResp.Body.SandboxID, fc)
+			expectedEndAt := startedAt.Add(900 * time.Second)
+			if tt.autoPause {
+				require.NotNil(t, updated.Spec.PauseTime)
+				assert.WithinDuration(t, expectedEndAt, updated.Spec.PauseTime.Time, 5*time.Second)
+			} else {
+				require.NotNil(t, updated.Spec.ShutdownTime)
+				assert.WithinDuration(t, expectedEndAt, updated.Spec.ShutdownTime.Time, 5*time.Second)
+				assert.Nil(t, updated.Spec.PauseTime)
+			}
+		})
+	}
+}
+
 func TestResumeSandbox(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -554,13 +665,14 @@ func TestUpdateConnectTimeout(t *testing.T) {
 			require.NotNil(t, sbx)
 
 			_, currentEndAt := ParseTimeout(sbx)
+			baseline := sbx.GetTimeout()
 			if tt.neverTimeout {
 				currentEndAt = time.Time{}
 			}
 
 			beforeCall := time.Now()
 			result := controller.updateConnectTimeout(req.Context(), sbx, tt.timeoutSeconds,
-				tt.preConnectState, tt.autoPause, currentEndAt)
+				tt.preConnectState, tt.autoPause, currentEndAt, baseline)
 			require.Nil(t, result)
 
 			updatedSbx := GetSandbox(t, createResp.Body.SandboxID, fc)

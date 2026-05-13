@@ -1,5 +1,6 @@
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
 import pytest
@@ -308,3 +309,209 @@ def test_never_timeout(sandbox_context):
     assert info.end_at == zero_time
     assert sbx.is_running() is True
     assert info.state == "running"
+
+
+def test_concurrent_pause_running_sandbox(sandbox_context):
+    """3 concurrent pause requests on a running sandbox should all succeed (idempotent).
+    Final state must be PAUSED."""
+    sbx: Sandbox = sandbox_context.add(Sandbox.create(
+        template="code-interpreter",
+        timeout=6000,
+        metadata={"test_case": "test_concurrent_pause_running_sandbox"},
+        headers={
+            "x-request-id": sandbox_context.request_id
+        }
+    ))
+    print(f"Sandbox created: {sbx.sandbox_id}")
+    assert sbx.get_info().state == SandboxState.RUNNING
+
+    errors = []
+
+    def do_pause():
+        try:
+            sbx.beta_pause()
+        except Exception as e:
+            # 409 Conflict is acceptable for concurrent pause on already-paused sandbox
+            if "409" in str(e) or "conflict" in str(e).lower():
+                print(f"Concurrent pause got expected conflict: {e}")
+            else:
+                return e
+        return None
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = [executor.submit(do_pause) for _ in range(3)]
+        for future in as_completed(futures):
+            result = future.result()
+            if result is not None:
+                errors.append(result)
+
+    assert len(errors) == 0, f"Unexpected errors during concurrent pause: {errors}"
+
+    # Wait for state to stabilize
+    time.sleep(5)
+    info = sbx.get_info()
+    print(f"Final state: {info.state}")
+    assert info.state == SandboxState.PAUSED
+
+
+def test_concurrent_resume_paused_sandbox(sandbox_context):
+    """3 concurrent resume (connect) requests on a paused sandbox should all succeed (idempotent).
+    Final state must be RUNNING."""
+    sbx: Sandbox = sandbox_context.add(Sandbox.create(
+        template="code-interpreter",
+        timeout=6000,
+        metadata={"test_case": "test_concurrent_resume_paused_sandbox"},
+        headers={
+            "x-request-id": sandbox_context.request_id
+        }
+    ))
+    print(f"Sandbox created: {sbx.sandbox_id}")
+
+    # Pause first
+    sbx.beta_pause()
+    time.sleep(5)
+    info = sbx.get_info()
+    assert info.state == SandboxState.PAUSED, f"Expected PAUSED but got {info.state}"
+    print(f"Sandbox paused: {sbx.sandbox_id}")
+
+    errors = []
+
+    def do_resume():
+        try:
+            connect_sandbox(sbx)
+        except Exception as e:
+            # 409 Conflict is acceptable for concurrent resume on already-running sandbox
+            if "409" in str(e) or "conflict" in str(e).lower():
+                print(f"Concurrent resume got expected conflict: {e}")
+            else:
+                return e
+        return None
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = [executor.submit(do_resume) for _ in range(3)]
+        for future in as_completed(futures):
+            result = future.result()
+            if result is not None:
+                errors.append(result)
+
+    assert len(errors) == 0, f"Unexpected errors during concurrent resume: {errors}"
+
+    # Wait for state to stabilize
+    time.sleep(5)
+    info = sbx.get_info()
+    print(f"Final state: {info.state}")
+    assert info.state == SandboxState.RUNNING
+
+
+def test_concurrent_pause_resume_on_paused_sandbox(sandbox_context):
+    """2 concurrent pause + 2 concurrent resume on a paused sandbox.
+    Pause is no-op (already paused), resume wins. Final state must be RUNNING."""
+    sbx: Sandbox = sandbox_context.add(Sandbox.create(
+        template="code-interpreter",
+        timeout=6000,
+        metadata={"test_case": "test_concurrent_pause_resume_on_paused_sandbox"},
+        headers={
+            "x-request-id": sandbox_context.request_id
+        }
+    ))
+    print(f"Sandbox created: {sbx.sandbox_id}")
+
+    # Pause first
+    sbx.beta_pause()
+    time.sleep(5)
+    info = sbx.get_info()
+    assert info.state == SandboxState.PAUSED, f"Expected PAUSED but got {info.state}"
+    print(f"Sandbox paused: {sbx.sandbox_id}")
+
+    errors = []
+
+    def do_pause():
+        try:
+            sbx.beta_pause()
+        except Exception as e:
+            if "409" in str(e) or "conflict" in str(e).lower():
+                print(f"Concurrent pause got expected conflict: {e}")
+            else:
+                return e
+        return None
+
+    def do_resume():
+        try:
+            connect_sandbox(sbx)
+        except Exception as e:
+            if "409" in str(e) or "conflict" in str(e).lower():
+                print(f"Concurrent resume got expected conflict: {e}")
+            else:
+                return e
+        return None
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = []
+        futures.extend([executor.submit(do_pause) for _ in range(2)])
+        futures.extend([executor.submit(do_resume) for _ in range(2)])
+        for future in as_completed(futures):
+            result = future.result()
+            if result is not None:
+                errors.append(result)
+
+    assert len(errors) == 0, f"Unexpected errors during concurrent pause/resume: {errors}"
+
+    # Wait for state to stabilize
+    time.sleep(10)
+    info = sbx.get_info()
+    print(f"Final state: {info.state}")
+    assert info.state == SandboxState.RUNNING
+
+
+def test_concurrent_pause_resume_on_running_sandbox(sandbox_context):
+    """2 concurrent pause + 2 concurrent resume on a running sandbox.
+    Resume is no-op (already running), pause wins. Final state must be PAUSED."""
+    sbx: Sandbox = sandbox_context.add(Sandbox.create(
+        template="code-interpreter",
+        timeout=6000,
+        metadata={"test_case": "test_concurrent_pause_resume_on_running_sandbox"},
+        headers={
+            "x-request-id": sandbox_context.request_id
+        }
+    ))
+    print(f"Sandbox created: {sbx.sandbox_id}")
+    assert sbx.get_info().state == SandboxState.RUNNING
+
+    errors = []
+
+    def do_pause():
+        try:
+            sbx.beta_pause()
+        except Exception as e:
+            if "409" in str(e) or "conflict" in str(e).lower():
+                print(f"Concurrent pause got expected conflict: {e}")
+            else:
+                return e
+        return None
+
+    def do_resume():
+        try:
+            connect_sandbox(sbx)
+        except Exception as e:
+            if "409" in str(e) or "conflict" in str(e).lower():
+                print(f"Concurrent resume got expected conflict: {e}")
+            else:
+                return e
+        return None
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = []
+        futures.extend([executor.submit(do_pause) for _ in range(2)])
+        futures.extend([executor.submit(do_resume) for _ in range(2)])
+        for future in as_completed(futures):
+            result = future.result()
+            if result is not None:
+                errors.append(result)
+
+    assert len(errors) == 0, f"Unexpected errors during concurrent pause/resume: {errors}"
+
+    # Wait for state to stabilize
+    time.sleep(10)
+    info = sbx.get_info()
+    print(f"Final state: {info.state}")
+    assert info.state == SandboxState.PAUSED

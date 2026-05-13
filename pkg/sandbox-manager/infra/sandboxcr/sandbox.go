@@ -235,26 +235,30 @@ func (s *Sandbox) GetImage() string {
 // SaveTimeoutWithPolicy updates timeout with given policy. Available timeout update policies:
 //   - Always: overwrite timeout whenever the requested value differs from current.
 //   - ExtendOnly: only extend to a later effective end time.
-//   - SnapshotAware: snapshot stores the timeout data captured at a specific point in time.
-//     When no snapshot exists, or the current timeout matches snapshot, it is treated as
-//     overwrite-allowed; when current timeout differs from an existing snapshot, only
-//     extension is allowed.
+//   - BaselineAware: the caller provides the timeout data it observed before issuing
+//     this update. When current timeout matches baseline, it is treated as
+//     overwrite-allowed; when current timeout differs from baseline, only extension
+//     is allowed.
 func (s *Sandbox) SaveTimeoutWithPolicy(ctx context.Context, opts infra.TimeoutOptions, policy infra.TimeoutUpdatePolicy) (infra.TimeoutUpdateResult, error) {
 	log := klog.FromContext(ctx).V(consts.DebugLogLevel).WithValues("sandbox", klog.KObj(s.Sandbox), "policy", policy)
 	result := infra.TimeoutUpdateResult{}
 
+	first := true
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		sbx := &agentsv1alpha1.Sandbox{} // Fetch the latest sandbox from informer
-		err := s.Cache.GetClient().Get(ctx, client.ObjectKeyFromObject(s.Sandbox), sbx)
+		sbx := &agentsv1alpha1.Sandbox{}
+		var err error
+		if first {
+			err = s.Cache.GetClient().Get(ctx, client.ObjectKeyFromObject(s.Sandbox), sbx)
+		} else {
+			err = s.Cache.GetAPIReader().Get(ctx, client.ObjectKeyFromObject(s.Sandbox), sbx)
+		}
+		first = false
 		if err != nil {
 			return err
 		}
 
 		current := timeout.GetTimeoutFromSandbox(sbx)
-		snapshot, snapshotExists, _ := timeout.GetTimeoutSnapshot(sbx)
-		snapshotMatched := snapshotExists && timeout.Equal(current, snapshot)
-		log.Info("data fetched before saving timeout",
-			"current", current, "snapshot", snapshot, "snapshotExists", snapshotExists, "snapshotMatched", snapshotMatched)
+		log.Info("data fetched before saving timeout", "current", current)
 
 		shouldUpdate := false
 		switch policy {
@@ -262,19 +266,20 @@ func (s *Sandbox) SaveTimeoutWithPolicy(ctx context.Context, opts infra.TimeoutO
 			shouldUpdate = !timeout.Equal(current, opts)
 		case infra.TimeoutUpdatePolicyExtendOnly:
 			shouldUpdate = timeout.ShouldExtendTimeout(current, opts)
-		case infra.TimeoutUpdatePolicySnapshotAware:
-			switch {
-			case !snapshotExists:
-				// No snapshot, use Always policy
-				fallthrough
-			case snapshotMatched:
-				// Snapshot exists and matches, use Always policy
+		case infra.TimeoutUpdatePolicyBaselineAware:
+			if opts.Baseline == nil {
+				return fmt.Errorf("BaselineAware policy requires opts.Baseline to be set")
+			}
+			if timeout.Equal(current, *opts.Baseline) {
+				// No concurrent writer has changed the timeout since the caller's observation.
+				// Treat as Always: overwrite if different.
 				shouldUpdate = !timeout.Equal(current, opts)
-				log.Info("using Always policy to update timeout", "shouldUpdate", shouldUpdate)
-			default:
-				// Snapshot exists and does not match, use ExtendOnly policy
+				log.Info("baseline matches current, using Always semantics", "shouldUpdate", shouldUpdate)
+			} else {
+				// Some other request has already written a new timeout in this cycle.
+				// Degrade to ExtendOnly so we never shrink an already-extended timeout.
 				shouldUpdate = timeout.ShouldExtendTimeout(current, opts)
-				log.Info("using ExtendOnly policy to update timeout", "shouldUpdate", shouldUpdate)
+				log.Info("baseline differs from current, using ExtendOnly semantics", "shouldUpdate", shouldUpdate)
 			}
 		default:
 			return fmt.Errorf("unsupported timeout update policy %q", policy)
@@ -356,11 +361,6 @@ func (s *Sandbox) Pause(ctx context.Context, opts infra.PauseOptions) error {
 				setTimeout(sbx, *opts.Timeout)
 			}
 		}
-		if opts.CaptureTimeoutSnapshot {
-			if err := timeout.SetTimeoutSnapshot(sbx); err != nil {
-				return false, err
-			}
-		}
 		return true, nil
 	})
 	if err != nil {
@@ -418,13 +418,6 @@ func (s *Sandbox) Resume(ctx context.Context, opts infra.ResumeOptions) error {
 			return false, nil
 		}
 		sbx.Spec.Paused = false
-		if opts.EnsureTimeoutSnapshotIfMissing {
-			if _, exists, snapshotErr := timeout.GetTimeoutSnapshot(sbx); snapshotErr != nil || !exists {
-				if err := timeout.SetTimeoutSnapshot(sbx); err != nil {
-					return false, err
-				}
-			}
-		}
 		return true, nil
 	})
 	if err != nil {
