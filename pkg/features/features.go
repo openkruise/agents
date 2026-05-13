@@ -45,6 +45,10 @@ const (
 
 	// SandboxInPlaceResourceResizeGate enables in-place resource resize when claiming sandboxes.
 	SandboxInPlaceResourceResizeGate featuregate.Feature = "SandboxInPlaceResourceResize"
+
+	// SandboxMultiClusterNaming enables embedding a cluster ID hash in the Sandbox generateName
+	// to prevent naming collisions across multiple clusters.
+	SandboxMultiClusterNaming featuregate.Feature = "SandboxMultiClusterNaming"
 )
 
 var defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
@@ -55,6 +59,7 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
 	SandboxCreatePodInjectConfigGate: {Default: false, PreRelease: featuregate.Alpha},
 	CachePodLabelSelectorGate:        {Default: true, PreRelease: featuregate.Alpha},
 	SandboxInPlaceResourceResizeGate: {Default: true, PreRelease: featuregate.Alpha},
+	SandboxMultiClusterNaming:               {Default: false, PreRelease: featuregate.Alpha},
 }
 
 func init() {

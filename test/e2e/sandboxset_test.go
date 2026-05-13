@@ -19,6 +19,7 @@ package e2e
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -411,6 +412,43 @@ var _ = Describe("SandboxSet", func() {
 			}, sandbox)).To(Succeed())
 			Expect(sandbox.Status.UpdatedAvailableReplicas).To(Equal(int32(10)))
 			Expect(sandbox.Status.AvailableReplicas).To(Equal(int32(10)))
+		})
+	})
+
+	Context("SandboxMultiClusterNaming FeatureGate tests", func() {
+		It("should generate sandbox names with SandboxSet name prefix when SandboxMultiClusterNaming is disabled (default)", func() {
+			By("Creating a SandboxSet with 2 replicas")
+			Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
+
+			By("Waiting for all replicas to be available")
+			Eventually(func() int32 {
+				_ = k8sClient.Get(ctx, types.NamespacedName{
+					Name:      sandbox.Name,
+					Namespace: sandbox.Namespace,
+				}, sandbox)
+				return sandbox.Status.AvailableReplicas
+			}, time.Minute*2, time.Second).Should(Equal(int32(2)))
+
+			By("Listing Sandboxes owned by this SandboxSet")
+			sandboxList := &agentsv1alpha1.SandboxList{}
+			Expect(k8sClient.List(ctx, sandboxList, client.InNamespace(sandbox.Namespace),
+				client.MatchingLabels{agentsv1alpha1.LabelSandboxPool: sandbox.Name})).To(Succeed())
+			Expect(len(sandboxList.Items)).To(Equal(2))
+
+			By("Verifying each Sandbox name starts with '{sbsName}-' and has no extra cluster hash segment")
+			expectedPrefix := sandbox.Name + "-"
+			for _, sbx := range sandboxList.Items {
+				Expect(sbx.Name).To(HavePrefix(expectedPrefix),
+					"Sandbox name %q should start with prefix %q", sbx.Name, expectedPrefix)
+				// With SandboxMultiClusterNaming disabled, the name format is "{sbsName}-{random5}"
+				// (generateName adds 5 random chars). The suffix after the prefix should NOT
+				// contain another '-' segment that looks like a 4-char hex hash.
+				suffix := strings.TrimPrefix(sbx.Name, expectedPrefix)
+				Expect(suffix).NotTo(BeEmpty(), "Sandbox name suffix should not be empty")
+				// The suffix should be a single random string (5 chars) without additional dashes
+				Expect(strings.Contains(suffix, "-")).To(BeFalse(),
+					"Sandbox name %q suffix %q should not contain '-' (no cluster hash embedded)", sbx.Name, suffix)
+			}
 		})
 	})
 

@@ -18,6 +18,7 @@ package utils
 
 import (
 	"context"
+	"crypto/md5"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -40,6 +41,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/features"
+	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 )
 
 func TruncateConditionMessage(msg string) string {
@@ -297,4 +300,33 @@ func GetTemplateFromSandbox(sbx metav1.Object) string {
 		tmpl = sbx.GetLabels()[agentsv1alpha1.LabelSandboxPool]
 	}
 	return tmpl
+}
+
+// GetClusterIDHash returns a 4-character hex hash of the CLUSTER_ID environment variable.
+// Returns empty string if CLUSTER_ID is not set.
+func GetClusterIDHash() string {
+	clusterID := os.Getenv("CLUSTER_ID")
+	if clusterID == "" {
+		return ""
+	}
+	hash := fmt.Sprintf("%x", md5.Sum([]byte(clusterID)))
+	return hash[:4]
+}
+
+// GenerateSandboxName generates a K8s generateName prefix for sandbox objects.
+// When SandboxMultiClusterNaming feature gate is enabled and CLUSTER_ID env is set,
+// the cluster ID hash is embedded in the prefix to prevent cross-cluster naming conflicts.
+// The returned prefix always ends with "-" and is truncated to 58 characters max.
+func GenerateSandboxName(baseName string) string {
+	generateName := fmt.Sprintf("%s-", baseName)
+	if utilfeature.DefaultFeatureGate.Enabled(features.SandboxMultiClusterNaming) {
+		if clusterHash := GetClusterIDHash(); clusterHash != "" {
+			generateName = fmt.Sprintf("%s-%s-", baseName, clusterHash)
+		}
+	}
+	// K8s generateName prefix must not exceed 58 characters
+	if len(generateName) > 58 {
+		generateName = generateName[:58]
+	}
+	return generateName
 }

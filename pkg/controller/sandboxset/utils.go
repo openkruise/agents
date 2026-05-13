@@ -18,7 +18,6 @@ package sandboxset
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"time"
 
@@ -30,6 +29,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 )
 
@@ -186,7 +186,7 @@ func scaleExpectationSatisfied(ctx context.Context, scaleExpectation expectation
 // so that its pod template labels/annotations can be inherited; callers pass
 // nil for the inline template case.
 func NewSandboxFromSandboxSet(sbs *agentsv1alpha1.SandboxSet, refTemplate *agentsv1alpha1.SandboxTemplate) *agentsv1alpha1.Sandbox {
-	generateName := fmt.Sprintf("%s-", sbs.Name)
+	generateName := utils.GenerateSandboxName(sbs.Name)
 	var template *corev1.PodTemplateSpec
 	var inheritedLabels, inheritedAnnotations map[string]string
 	// spec.template and spec.templateRef are mutually exclusive. Deep copy the
