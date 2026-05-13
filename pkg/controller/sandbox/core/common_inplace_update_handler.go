@@ -145,52 +145,46 @@ func handleInPlaceUpdateCommon(
 	}
 
 	// Start inplace update sandbox
-	markInProgress := func() {
-		// Update sandbox status to in-progress
-		cond := metav1.Condition{
-			Type:               string(agentsv1alpha1.SandboxConditionInplaceUpdate),
-			Status:             metav1.ConditionFalse,
-			Reason:             agentsv1alpha1.SandboxInplaceUpdateReasonInplaceUpdating,
-			LastTransitionTime: metav1.Now(),
-		}
-		utils.SetSandboxCondition(newStatus, cond)
-
-		// Update ready condition to in-progress
-		readyCond := metav1.Condition{
-			Type:               string(agentsv1alpha1.SandboxConditionReady),
-			Status:             metav1.ConditionFalse,
-			LastTransitionTime: metav1.Now(),
-			Reason:             agentsv1alpha1.SandboxReadyReasonInplaceUpdating,
-			Message:            "inplace update is incompleted",
-		}
-		utils.SetSandboxCondition(newStatus, readyCond)
+	cond := metav1.Condition{
+		Type:               string(agentsv1alpha1.SandboxConditionInplaceUpdate),
+		Status:             metav1.ConditionFalse,
+		Reason:             agentsv1alpha1.SandboxInplaceUpdateReasonInplaceUpdating,
+		LastTransitionTime: metav1.Now(),
 	}
+	utils.SetSandboxCondition(newStatus, cond)
+	readyCond := metav1.Condition{
+		Type:               string(agentsv1alpha1.SandboxConditionReady),
+		Status:             metav1.ConditionFalse,
+		LastTransitionTime: metav1.Now(),
+		Reason:             agentsv1alpha1.SandboxReadyReasonInplaceUpdating,
+		Message:            "inplace update is incompleted",
+	}
+	utils.SetSandboxCondition(newStatus, readyCond)
+
 	opts := inplaceupdate.InPlaceUpdateOptions{
-		Pod:        pod,
-		Box:        box,
-		Revision:   newStatus.UpdateRevision,
-		OnProgress: markInProgress,
+		Pod:      pod,
+		Box:      box,
+		Revision: newStatus.UpdateRevision,
 	}
 	control := handler.GetInPlaceUpdateControl()
 	changed, err := control.Update(ctx, opts)
 	if err != nil {
+		msg := err.Error()
+		handler.GetRecorder().Eventf(box, corev1.EventTypeWarning, "InplaceUpdateFailed", msg)
+		utils.SetSandboxCondition(newStatus, metav1.Condition{
+			Type:   string(agentsv1alpha1.SandboxConditionInplaceUpdate),
+			Status: metav1.ConditionFalse,
+			Reason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed,
+			// We need truncate msg here, K8s API errors can embed full PodSpec diffs that are too verbose for conditions.
+			Message:            utils.TruncateConditionMessage(msg),
+			LastTransitionTime: metav1.Now(),
+		})
 		// ResizeNotSupportedError is returned when both the pods/resize subresource
 		// (K8s 1.33+) and the direct spec patch fallback (K8s 1.27-1.32) fail,
 		// which typically means InPlacePodVerticalScaling is not enabled.
 		// so we need treat this as terminal.
 		var resizeErr *inplaceupdate.ResizeNotSupportedError
 		if errors.As(err, &resizeErr) {
-			msg := resizeErr.Error()
-			klog.InfoS(msg, "sandbox", klog.KObj(box))
-			handler.GetRecorder().Eventf(box, corev1.EventTypeWarning, "InplaceUpdateFailed", msg)
-			utils.SetSandboxCondition(newStatus, metav1.Condition{
-				Type:   string(agentsv1alpha1.SandboxConditionInplaceUpdate),
-				Status: metav1.ConditionFalse,
-				Reason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed,
-				// We need truncate msg here, K8s API errors can embed full PodSpec diffs that are too verbose for conditions.
-				Message:            utils.TruncateConditionMessage(msg),
-				LastTransitionTime: metav1.Now(),
-			})
 			return true, nil
 		}
 		return false, err

@@ -2720,6 +2720,201 @@ func TestReconcile_ResourceVersionExpectationUnsatisfied(t *testing.T) {
 	core.ResourceVersionExpectations.Delete(fakeObj)
 }
 
+// TestReconcile_ScaleExpectationTimeout tests the path where ScaleExpectation is unsatisfied overtime (L146-147).
+func TestReconcile_ScaleExpectationTimeout(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	sandbox := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "scale-timeout-sandbox",
+			Namespace: "default",
+		},
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test", Image: "nginx"}},
+					},
+				},
+			},
+		},
+	}
+
+	fakeRecorder := record.NewFakeRecorder(100)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&agentsv1alpha1.Sandbox{}).WithObjects(sandbox).Build()
+	rl := core.NewRateLimiter()
+	reconciler := &SandboxReconciler{
+		Client: fakeClient,
+		Scheme: scheme,
+		controls: core.NewSandboxControl(core.SandboxControlArgs{
+			Client:      fakeClient,
+			Recorder:    fakeRecorder,
+			RateLimiter: rl,
+		}),
+		rateLimiter: rl,
+	}
+
+	// Set up unsatisfied ScaleExpectation
+	core.ScaleExpectation.ExpectScale(utils.GetControllerKey(sandbox), expectations.Create, "never-observed-pod")
+
+	// Temporarily set ExpectationTimeout to 0 so any unsatisfied expectation appears timed out
+	origTimeout := expectations.ExpectationTimeout
+	expectations.ExpectationTimeout = 0
+	defer func() {
+		expectations.ExpectationTimeout = origTimeout
+		core.ScaleExpectation.DeleteExpectations(utils.GetControllerKey(sandbox))
+	}()
+
+	// First call sets firstUnsatisfiedTimestamp to now, but since timeout=0, it immediately times out
+	req := ctrl.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      sandbox.Name,
+			Namespace: sandbox.Namespace,
+		},
+	}
+
+	_, err := reconciler.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Errorf("Reconcile() unexpected error: %v", err)
+	}
+}
+
+// TestReconcile_ResourceVersionExpectationTimeout tests the path where ResourceVersionExpectation
+// is unsatisfied overtime (L156-157).
+func TestReconcile_ResourceVersionExpectationTimeout(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	sandboxUID := types.UID("rv-timeout-uid-12345")
+	sandbox := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "rv-timeout-sandbox",
+			Namespace: "default",
+			UID:       sandboxUID,
+		},
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test", Image: "nginx"}},
+					},
+				},
+			},
+		},
+	}
+
+	fakeRecorder := record.NewFakeRecorder(100)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&agentsv1alpha1.Sandbox{}).WithObjects(sandbox).Build()
+	rl := core.NewRateLimiter()
+	reconciler := &SandboxReconciler{
+		Client: fakeClient,
+		Scheme: scheme,
+		controls: core.NewSandboxControl(core.SandboxControlArgs{
+			Client:      fakeClient,
+			Recorder:    fakeRecorder,
+			RateLimiter: rl,
+		}),
+		rateLimiter: rl,
+	}
+
+	// Create expectation with very high resource version
+	fakeObj := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "rv-timeout-sandbox",
+			Namespace:       "default",
+			UID:             sandboxUID,
+			ResourceVersion: "999999",
+		},
+	}
+	core.ResourceVersionExpectations.Expect(fakeObj)
+
+	// Temporarily set ExpectationTimeout to 0 so the expectation immediately times out
+	origTimeout := expectations.ExpectationTimeout
+	expectations.ExpectationTimeout = 0
+	defer func() {
+		expectations.ExpectationTimeout = origTimeout
+		core.ResourceVersionExpectations.Delete(fakeObj)
+	}()
+
+	req := ctrl.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      sandbox.Name,
+			Namespace: sandbox.Namespace,
+		},
+	}
+
+	_, err := reconciler.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Errorf("Reconcile() unexpected error: %v", err)
+	}
+}
+
+// TestReconcile_GetPodNonNotFoundError tests the error path where Get pod returns a non-NotFound error (L105-107).
+func TestReconcile_GetPodNonNotFoundError(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	sandbox := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "get-pod-err-sandbox",
+			Namespace: "default",
+		},
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test", Image: "nginx"}},
+					},
+				},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&agentsv1alpha1.Sandbox{}).
+		WithObjects(sandbox).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				// Fail Get for Pod with a non-NotFound error
+				if _, ok := obj.(*corev1.Pod); ok {
+					return fmt.Errorf("simulated internal server error")
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+		}).
+		Build()
+
+	fakeRecorder := record.NewFakeRecorder(100)
+	rl := core.NewRateLimiter()
+	reconciler := &SandboxReconciler{
+		Client: fakeClient,
+		Scheme: scheme,
+		controls: core.NewSandboxControl(core.SandboxControlArgs{
+			Client:      fakeClient,
+			Recorder:    fakeRecorder,
+			RateLimiter: rl,
+		}),
+		rateLimiter: rl,
+	}
+
+	req := ctrl.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      sandbox.Name,
+			Namespace: sandbox.Namespace,
+		},
+	}
+
+	_, err := reconciler.Reconcile(context.Background(), req)
+	if err == nil {
+		t.Fatal("Expected error from Reconcile when Get pod fails, got nil")
+	}
+}
+
 // TestReconcile_UpgradingPhase tests the Upgrading phase switch case (L233-234).
 func TestReconcile_UpgradingPhase(t *testing.T) {
 	scheme := runtime.NewScheme()
@@ -2797,6 +2992,199 @@ func TestReconcile_UpgradingPhase(t *testing.T) {
 	}
 	if updatedSandbox.Status.Phase != agentsv1alpha1.SandboxUpgrading {
 		t.Errorf("Expected phase Upgrading, got %v", updatedSandbox.Status.Phase)
+	}
+}
+
+// TestReconcile_ErrorPath_UpdatesSandboxStatus tests that when EnsureSandboxUpdated returns an error,
+// the error path persists sandbox status via updateSandboxStatus before returning the error.
+func TestReconcile_ErrorPath_UpdatesSandboxStatus(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	sandbox := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "error-path-sandbox",
+			Namespace:  "default",
+			Finalizers: []string{utils.SandboxFinalizer},
+			Annotations: map[string]string{
+				// Will be filled with the computed hashImmutablePart below
+			},
+		},
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "c", Image: "nginx:v2"}},
+					},
+				},
+			},
+		},
+		Status: agentsv1alpha1.SandboxStatus{
+			Phase: agentsv1alpha1.SandboxRunning,
+		},
+	}
+
+	// Pre-compute hashImmutablePart and set it in the sandbox annotation so inplace update is permitted
+	_, hashImmutablePart := core.HashSandbox(sandbox)
+	sandbox.Annotations[agentsv1alpha1.SandboxHashImmutablePart] = hashImmutablePart
+
+	// Pod with old hash label (different from computed) and old image to trigger inplace update patch
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "error-path-sandbox",
+			Namespace: "default",
+			Labels: map[string]string{
+				agentsv1alpha1.PodLabelTemplateHash: "old-hash",
+			},
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "c", Image: "nginx:v1"}},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+		},
+	}
+
+	patchCallCount := 0
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&agentsv1alpha1.Sandbox{}).
+		WithObjects(sandbox, pod).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				// Allow Sandbox status patches, but fail Pod patches (inplace update)
+				if _, ok := obj.(*corev1.Pod); ok {
+					patchCallCount++
+					return fmt.Errorf("simulated pod patch failure")
+				}
+				return c.Patch(ctx, obj, patch, opts...)
+			},
+		}).
+		Build()
+
+	fakeRecorder := record.NewFakeRecorder(100)
+	rl := core.NewRateLimiter()
+	reconciler := &SandboxReconciler{
+		Client: fakeClient,
+		Scheme: scheme,
+		controls: core.NewSandboxControl(core.SandboxControlArgs{
+			Client:      fakeClient,
+			Recorder:    fakeRecorder,
+			RateLimiter: rl,
+		}),
+		rateLimiter: rl,
+	}
+
+	req := ctrl.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      sandbox.Name,
+			Namespace: sandbox.Namespace,
+		},
+	}
+
+	_, err := reconciler.Reconcile(context.Background(), req)
+	if err == nil {
+		t.Fatal("Expected error from Reconcile, got nil")
+	}
+	if patchCallCount == 0 {
+		t.Error("Expected at least one Pod patch attempt")
+	}
+}
+
+// TestReconcile_ErrorPath_StatusUpdateAlsoFails tests the error path where both the Ensure*
+// function fails AND the subsequent updateSandboxStatus also fails.
+func TestReconcile_ErrorPath_StatusUpdateAlsoFails(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	sandbox := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "error-both-sandbox",
+			Namespace:  "default",
+			Finalizers: []string{utils.SandboxFinalizer},
+			Annotations: map[string]string{},
+		},
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "c", Image: "nginx:v2"}},
+					},
+				},
+			},
+		},
+		Status: agentsv1alpha1.SandboxStatus{
+			Phase: agentsv1alpha1.SandboxRunning,
+		},
+	}
+
+	_, hashImmutablePart := core.HashSandbox(sandbox)
+	sandbox.Annotations[agentsv1alpha1.SandboxHashImmutablePart] = hashImmutablePart
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "error-both-sandbox",
+			Namespace: "default",
+			Labels: map[string]string{
+				agentsv1alpha1.PodLabelTemplateHash: "old-hash",
+			},
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "c", Image: "nginx:v1"}},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&agentsv1alpha1.Sandbox{}).
+		WithObjects(sandbox, pod).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				// Fail ALL patches (both Pod patch for inplace update and Sandbox patch)
+				if _, ok := obj.(*corev1.Pod); ok {
+					return fmt.Errorf("simulated pod patch failure")
+				}
+				return c.Patch(ctx, obj, patch, opts...)
+			},
+			SubResourcePatch: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+				// Fail status patch to trigger the retErr != nil branch
+				return fmt.Errorf("simulated status patch failure")
+			},
+		}).
+		Build()
+
+	fakeRecorder := record.NewFakeRecorder(100)
+	rl := core.NewRateLimiter()
+	reconciler := &SandboxReconciler{
+		Client: fakeClient,
+		Scheme: scheme,
+		controls: core.NewSandboxControl(core.SandboxControlArgs{
+			Client:      fakeClient,
+			Recorder:    fakeRecorder,
+			RateLimiter: rl,
+		}),
+		rateLimiter: rl,
+	}
+
+	req := ctrl.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      sandbox.Name,
+			Namespace: sandbox.Namespace,
+		},
+	}
+
+	_, err := reconciler.Reconcile(context.Background(), req)
+	if err == nil {
+		t.Fatal("Expected error from Reconcile, got nil")
+	}
+	// The original error from inplace update should be returned, not the status update error
+	if err.Error() != "simulated pod patch failure" {
+		t.Errorf("Expected 'simulated pod patch failure', got: %v", err)
 	}
 }
 

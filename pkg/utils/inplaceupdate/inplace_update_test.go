@@ -204,25 +204,20 @@ func TestInPlaceUpdateControl_Update_ImageChange(t *testing.T) {
 		},
 	}
 
-	progressCount := 0
 	ctrl := NewInPlaceUpdateControl(
 		fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build(),
 		nil,
 	)
 	progressed, err := ctrl.Update(context.Background(), InPlaceUpdateOptions{
-		Box:        box,
-		Pod:        pod,
-		Revision:   "rev-1",
-		OnProgress: func() { progressCount++ },
+		Box:      box,
+		Pod:      pod,
+		Revision: "rev-1",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !progressed {
 		t.Fatalf("expected progressed=true")
-	}
-	if progressCount != 1 {
-		t.Fatalf("expected exactly 1 progress callback (image patch only), got %d", progressCount)
 	}
 
 	updated := &corev1.Pod{}
@@ -417,13 +412,11 @@ func TestInPlaceUpdateControl_Update_ResizeViaSubresource(t *testing.T) {
 		},
 	})
 
-	progressCount := 0
 	ctrl := NewInPlaceUpdateControl(wrapped, nil)
 	progressed, err := ctrl.Update(context.Background(), InPlaceUpdateOptions{
-		Box:        box,
-		Pod:        pod,
-		Revision:   "rev",
-		OnProgress: func() { progressCount++ },
+		Box:      box,
+		Pod:      pod,
+		Revision: "rev",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -433,10 +426,6 @@ func TestInPlaceUpdateControl_Update_ResizeViaSubresource(t *testing.T) {
 	}
 	if resizeCalls != 1 {
 		t.Fatalf("expected exactly one resize subresource call, got %d", resizeCalls)
-	}
-	// One callback for the metadata patch (UpdateResources state) + one for the resize call.
-	if progressCount != 2 {
-		t.Fatalf("expected 2 progress callbacks (patch + resize), got %d", progressCount)
 	}
 	if ctrl.useDirectResourcePatch.Load() {
 		t.Fatalf("useDirectResourcePatch should remain false when resize subresource works")
@@ -675,9 +664,10 @@ func TestInPlaceUpdateControl_Update_ResizeSubresourceServerError(t *testing.T) 
 	if err == nil {
 		t.Fatalf("expected non-nil error from failing resize subresource")
 	}
-	// progressed must be true because the metadata patch already happened.
-	if !progressed {
-		t.Fatalf("expected progressed=true after the metadata patch even when resize fails")
+	// In the current implementation resize is attempted before the metadata patch,
+	// so when resize fails the patch has not been applied yet → progressed=false.
+	if progressed {
+		t.Fatalf("expected progressed=false when resize fails before patch")
 	}
 	// The non-NotFound error must NOT trigger the fallback flag.
 	if ctrl.useDirectResourcePatch.Load() {
@@ -875,6 +865,81 @@ func TestInPlaceUpdateControl_Update_ResizeConflictRetryNoLongerNeeded(t *testin
 	if resizeAttempts != 1 {
 		t.Fatalf("expected exactly 1 resize attempt (no retry needed when resize is no-op), got %d",
 			resizeAttempts)
+	}
+}
+
+func TestInPlaceUpdateControl_Update_ResizeConflictGetFails(t *testing.T) {
+	scheme := buildTestScheme(t)
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "default"},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:  "c",
+				Image: "img:1",
+				Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m")},
+				},
+			}},
+		},
+	}
+	box := &agentsv1alpha1.Sandbox{
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{
+							Name:  "c",
+							Image: "img:1",
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("750m")},
+							},
+						}},
+					},
+				},
+			},
+		},
+	}
+
+	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
+	getFailErr := fmt.Errorf("simulated get failure after conflict")
+	wrapped := interceptor.NewClient(base, interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object,
+			opts ...client.SubResourceUpdateOption) error {
+			if sub != "resize" {
+				return c.SubResource(sub).Update(ctx, obj, opts...)
+			}
+			// Always return conflict to trigger the retry path
+			return apierrors.NewConflict(
+				schema.GroupResource{Resource: "pods"}, obj.GetName(),
+				fmt.Errorf("the object has been modified"),
+			)
+		},
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			// Allow the first Get (for the pod object itself before resize),
+			// but fail on subsequent Gets during conflict retry
+			if _, ok := obj.(*corev1.Pod); ok {
+				// Check if this is a retry Get (pod already exists in store)
+				if err := c.Get(ctx, key, obj, opts...); err != nil {
+					return err
+				}
+				// Return error on re-Get during conflict handling
+				return getFailErr
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	})
+	ctrl := NewInPlaceUpdateControl(wrapped, nil)
+
+	_, err := ctrl.Update(context.Background(), InPlaceUpdateOptions{
+		Box:      box,
+		Pod:      pod,
+		Revision: "rev",
+	})
+	if err == nil {
+		t.Fatal("expected error from Get during conflict retry, got nil")
+	}
+	if !strings.Contains(err.Error(), "simulated get failure after conflict") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
@@ -2194,5 +2259,364 @@ func TestComputeQoSClass(t *testing.T) {
 				t.Errorf("computeQoSClass() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestDefaultGenerateResizeSubresourceBody_MinimalFields(t *testing.T) {
+	tests := []struct {
+		name                   string
+		box                    *agentsv1alpha1.Sandbox
+		pod                    *corev1.Pod
+		expectNil              bool
+		expectContainerCount   int
+		expectInitCount        int
+		verifyContainerMinimal bool
+		verifyInitMinimal      bool
+	}{
+		{
+			name: "main containers have no Image field in resizeBody",
+			box: &agentsv1alpha1.Sandbox{
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name:  "main",
+										Image: "nginx:2.0",
+										Resources: corev1.ResourceRequirements{
+											Requests: corev1.ResourceList{
+												corev1.ResourceCPU: resource.MustParse("500m"),
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "default", ResourceVersion: "100"},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:  "main",
+							Image: "nginx:1.0",
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceCPU: resource.MustParse("100m"),
+								},
+							},
+						},
+					},
+				},
+			},
+			expectNil:              false,
+			expectContainerCount:   1,
+			expectInitCount:        0,
+			verifyContainerMinimal: true,
+		},
+		{
+			name: "initContainers only contain Name and Resources",
+			box: &agentsv1alpha1.Sandbox{
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name:  "main",
+										Image: "nginx:2.0",
+										Resources: corev1.ResourceRequirements{
+											Requests: corev1.ResourceList{
+												corev1.ResourceCPU: resource.MustParse("500m"),
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "default", ResourceVersion: "100"},
+				Spec: corev1.PodSpec{
+					InitContainers: []corev1.Container{
+						{
+							Name:  "init-db",
+							Image: "init-img:1.0",
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceCPU: resource.MustParse("50m"),
+								},
+							},
+							VolumeMounts: []corev1.VolumeMount{
+								{Name: "data", MountPath: "/data"},
+							},
+						},
+						{
+							Name:  "init-sidecar",
+							Image: "sidecar-img:1.0",
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceMemory: resource.MustParse("64Mi"),
+								},
+							},
+							Command: []string{"sh", "-c", "echo hello"},
+						},
+					},
+					Containers: []corev1.Container{
+						{
+							Name:  "main",
+							Image: "nginx:1.0",
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceCPU: resource.MustParse("100m"),
+								},
+							},
+						},
+					},
+				},
+			},
+			expectNil:            false,
+			expectContainerCount: 1,
+			expectInitCount:      2,
+			verifyInitMinimal:    true,
+		},
+		{
+			name: "multiple containers all minimal",
+			box: &agentsv1alpha1.Sandbox{
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name:  "web",
+										Image: "web:2.0",
+										Resources: corev1.ResourceRequirements{
+											Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("200m")},
+										},
+									},
+									{
+										Name:  "worker",
+										Image: "worker:2.0",
+										Resources: corev1.ResourceRequirements{
+											Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("400m")},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "default", ResourceVersion: "200"},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:  "web",
+							Image: "web:1.0",
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m")},
+							},
+							VolumeMounts: []corev1.VolumeMount{{Name: "vol", MountPath: "/app"}},
+						},
+						{
+							Name:  "worker",
+							Image: "worker:1.0",
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("200m")},
+							},
+							Command: []string{"/bin/worker"},
+						},
+					},
+				},
+			},
+			expectNil:              false,
+			expectContainerCount:   2,
+			expectInitCount:        0,
+			verifyContainerMinimal: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := DefaultGenerateResizeSubresourceBody(InPlaceUpdateOptions{
+				Box: tt.box,
+				Pod: tt.pod,
+			})
+			if tt.expectNil {
+				if body != nil {
+					t.Fatalf("expected nil body, got %+v", body)
+				}
+				return
+			}
+			if body == nil {
+				t.Fatalf("expected non-nil body")
+			}
+			if len(body.Spec.Containers) != tt.expectContainerCount {
+				t.Fatalf("expected %d containers, got %d", tt.expectContainerCount, len(body.Spec.Containers))
+			}
+			if len(body.Spec.InitContainers) != tt.expectInitCount {
+				t.Fatalf("expected %d initContainers, got %d", tt.expectInitCount, len(body.Spec.InitContainers))
+			}
+
+			if tt.verifyContainerMinimal {
+				for i, c := range body.Spec.Containers {
+					if c.Image != "" {
+						t.Errorf("container[%d] %q should have empty Image, got %q", i, c.Name, c.Image)
+					}
+					if c.Name == "" {
+						t.Errorf("container[%d] should have a Name", i)
+					}
+					if len(c.VolumeMounts) > 0 {
+						t.Errorf("container[%d] %q should have no VolumeMounts", i, c.Name)
+					}
+					if len(c.Command) > 0 {
+						t.Errorf("container[%d] %q should have no Command", i, c.Name)
+					}
+				}
+			}
+
+			if tt.verifyInitMinimal {
+				for i, c := range body.Spec.InitContainers {
+					if c.Image != "" {
+						t.Errorf("initContainer[%d] %q should have empty Image, got %q", i, c.Name, c.Image)
+					}
+					if c.Name == "" {
+						t.Errorf("initContainer[%d] should have a Name", i)
+					}
+					if len(c.VolumeMounts) > 0 {
+						t.Errorf("initContainer[%d] %q should have no VolumeMounts", i, c.Name)
+					}
+					if len(c.Command) > 0 {
+						t.Errorf("initContainer[%d] %q should have no Command", i, c.Name)
+					}
+					// Verify that Resources are preserved
+					podInit := tt.pod.Spec.InitContainers[i]
+					if c.Resources.Requests == nil && podInit.Resources.Requests != nil {
+						t.Errorf("initContainer[%d] %q lost its Resources.Requests", i, c.Name)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestInPlaceUpdateControl_Update_ResizeBeforePatch(t *testing.T) {
+	scheme := buildTestScheme(t)
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "p-order", Namespace: "default"},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:  "c",
+				Image: "img:1",
+				Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m")},
+				},
+			}},
+		},
+		Status: corev1.PodStatus{
+			ContainerStatuses: []corev1.ContainerStatus{
+				{Name: "c", ImageID: "img:1@sha256:abc"},
+			},
+		},
+	}
+	box := &agentsv1alpha1.Sandbox{
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{
+							Name:  "c",
+							Image: "img:2",
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")},
+							},
+						}},
+					},
+				},
+			},
+		},
+	}
+
+	// Track call order: "resize" or "patch"
+	var callOrder []string
+	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
+	wrapped := interceptor.NewClient(base, interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object,
+			opts ...client.SubResourceUpdateOption) error {
+			if sub == "resize" {
+				callOrder = append(callOrder, "resize")
+				// Simulate a successful resize by applying resources
+				body := obj
+				updateOpts := &client.SubResourceUpdateOptions{}
+				updateOpts.ApplyOptions(opts)
+				if updateOpts.SubResourceBody != nil {
+					body = updateOpts.SubResourceBody
+				}
+				rp := body.(*corev1.Pod)
+				existing := &corev1.Pod{}
+				if err := c.Get(ctx, client.ObjectKeyFromObject(obj), existing); err != nil {
+					return err
+				}
+				for i, container := range existing.Spec.Containers {
+					for _, rc := range rp.Spec.Containers {
+						if rc.Name == container.Name {
+							existing.Spec.Containers[i].Resources = rc.Resources
+						}
+					}
+				}
+				return c.Update(ctx, existing)
+			}
+			return c.SubResource(sub).Update(ctx, obj, opts...)
+		},
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch,
+			opts ...client.PatchOption) error {
+			callOrder = append(callOrder, "patch")
+			return c.Patch(ctx, obj, patch, opts...)
+		},
+	})
+
+	ctrl := NewInPlaceUpdateControl(wrapped, nil)
+	progressed, err := ctrl.Update(context.Background(), InPlaceUpdateOptions{
+		Box:      box,
+		Pod:      pod,
+		Revision: "rev-order",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !progressed {
+		t.Fatalf("expected progressed=true")
+	}
+
+	// Verify that resize was called before patch
+	if len(callOrder) < 2 {
+		t.Fatalf("expected at least 2 calls (resize + patch), got %d: %v", len(callOrder), callOrder)
+	}
+	resizeIdx := -1
+	patchIdx := -1
+	for i, op := range callOrder {
+		if op == "resize" && resizeIdx == -1 {
+			resizeIdx = i
+		}
+		if op == "patch" && patchIdx == -1 {
+			patchIdx = i
+		}
+	}
+	if resizeIdx == -1 {
+		t.Fatalf("resize was never called, order: %v", callOrder)
+	}
+	if patchIdx == -1 {
+		t.Fatalf("patch was never called, order: %v", callOrder)
+	}
+	if resizeIdx >= patchIdx {
+		t.Fatalf("expected resize (index %d) to be called before patch (index %d), order: %v",
+			resizeIdx, patchIdx, callOrder)
 	}
 }
