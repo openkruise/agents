@@ -15,7 +15,7 @@ limitations under the License.
 */
 
 // Package identity provides an abstraction for issuing identity-aware access tokens
-// for sandboxes. It supports both a simple UUID-based fallback (community default) and
+// for sandboxes. It supports both a simple UUID-based fallback (default) and
 // an identity provider service that issues tokens via HTTPS (enterprise deployment).
 package identity
 
@@ -89,4 +89,21 @@ type TokenResponse struct {
 type TokenRefreshStatus struct {
 	// AccessTokenExpiration is the expiration time of the refreshed access token in RFC3339 format
 	AccessTokenExpiration string `json:"accessTokenExpiration,omitempty"`
+}
+
+// GetProxyCABundleRequest represents a request to fetch the proxy CA certificate bundle
+// from the identity provider service.
+type GetProxyCABundleRequest struct {
+	// IncludeSystemCA indicates whether to include system-level CA certificates
+	// in addition to the proxy CA certificate.
+	IncludeSystemCA bool `json:"includeSystemCA"`
+}
+
+// GetProxyCABundleResponse represents the response containing the proxy CA certificate bundle.
+type GetProxyCABundleResponse struct {
+	// RequestID is the unique identifier of this request.
+	RequestID string `json:"requestId"`
+
+	// CABundle is the PEM-encoded CA certificate bundle used for proxy TLS verification.
+	CABundle string `json:"caBundle"`
 }

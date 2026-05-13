@@ -60,16 +60,22 @@ func Add(mgr manager.Manager) error {
 	if !utilfeature.DefaultFeatureGate.Enabled(features.SandboxGate) || !discovery.DiscoverGVK(sandboxControllerKind) {
 		return nil
 	}
+	//
+	//var caCertInjector *core.CACertInjector
+	//if utilfeature.DefaultFeatureGate.Enabled(features.SecurityIdentityProviderGate) {
+	//	caCertInjector = core.NewCACertInjector(mgr.GetClient(), identity.DefaultProvider, identity.ControllerIdentityProviderCAPath)
+	//	klog.InfoS("CA certificate injection enabled", "controllerCAPath", identity.ControllerIdentityProviderCAPath)
+	//}
 
 	rateLimiter := core.NewRateLimiter()
 	err := (&SandboxReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
 		controls: core.NewSandboxControl(core.SandboxControlArgs{
-			Client:      mgr.GetClient(),
-			APIReader:   mgr.GetAPIReader(),
-			Recorder:    mgr.GetEventRecorderFor("sandbox"),
-			RateLimiter: rateLimiter,
+			Client:         mgr.GetClient(),
+			APIReader:      mgr.GetAPIReader(),
+			Recorder:       mgr.GetEventRecorderFor("sandbox"),
+			RateLimiter:    rateLimiter,
 		}), rateLimiter: rateLimiter,
 	}).SetupWithManager(mgr)
 	if err != nil {

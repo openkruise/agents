@@ -19,7 +19,7 @@ package identity
 // DefaultProvider is the global IdentityProvider instance used for issuing sandbox access tokens
 // and propagating security tokens to sandbox runtimes.
 //
-// Community default: UUID-based provider with no-op propagation.
+// Default: UUID-based provider with no-op propagation.
 // Enterprise deployment: Overridden by init() in inner_config.go to use secureIdentityProvider
 // with HTTPS token issuance and registered propagators.
 //
@@ -30,4 +30,4 @@ package identity
 //
 //	identity.DefaultProvider.IssueToken(ctx, req)
 //	identity.DefaultProvider.PropagateSecurityToken(ctx, sbx, tokenResp)
-var DefaultProvider IdentityProvider = NewUUIDIdentityProvider()
+var DefaultProvider IdentityProvider = NewDefaultIdentityProvider()

@@ -2586,6 +2586,7 @@ func TestModifyPickedSandbox_InitRuntime(t *testing.T) {
 type mockIdentityProvider struct {
 	issueTokenFunc func(ctx context.Context, req identity.TokenRequest) (*identity.TokenResponse, error)
 	propagateFunc  func(ctx context.Context, sbx *v1alpha1.Sandbox, tokenResp *identity.TokenResponse) error
+	getCABundleFunc func(ctx context.Context, req identity.GetProxyCABundleRequest) (*identity.GetProxyCABundleResponse, error)
 }
 
 func (m *mockIdentityProvider) IssueToken(ctx context.Context, req identity.TokenRequest) (*identity.TokenResponse, error) {
@@ -2600,6 +2601,13 @@ func (m *mockIdentityProvider) PropagateSecurityToken(ctx context.Context, sbx *
 		return m.propagateFunc(ctx, sbx, tokenResp)
 	}
 	return nil
+}
+
+func (m *mockIdentityProvider) GetProxyCABundle(ctx context.Context, req identity.GetProxyCABundleRequest) (*identity.GetProxyCABundleResponse, error) {
+	if m.getCABundleFunc != nil {
+		return m.getCABundleFunc(ctx, req)
+	}
+	return &identity.GetProxyCABundleResponse{}, nil
 }
 
 //goland:noinspection GoDeprecation

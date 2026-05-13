@@ -33,7 +33,7 @@ import (
 //   - sbx: The claimed sandbox Kubernetes object (used to derive runtime URL, access token, etc.).
 //   - tokenResp: The issued token response to be written into the sandbox runtime.
 //
-// Community default: No propagators registered — this is a no-op.
+// Default: No propagators registered — this is a no-op.
 // Enterprise deployment: Register propagators via RegisterSecurityTokenPropagator() to inject
 // tokens into the sandbox runtime (e.g., write credential files via RunCommand).
 type SecurityTokenPropagator func(ctx context.Context, sbx *agentsv1alpha1.Sandbox, tokenResp *TokenResponse) error
@@ -41,7 +41,7 @@ type SecurityTokenPropagator func(ctx context.Context, sbx *agentsv1alpha1.Sandb
 // securityTokenPropagators holds all registered propagator functions.
 // Enterprise packages register handlers here during init() via RegisterSecurityTokenPropagator().
 // These are consumed by initSecureProvider() when creating the secureIdentityProvider.
-// Community code does not register any handlers — the slice stays empty.
+// Default code does not register any handlers — the slice stays empty.
 //
 // IMPORTANT: This slice MUST only be modified during init() phase via RegisterSecurityTokenPropagator().
 // It is NOT safe to modify at runtime due to concurrent reads from multiple goroutines.

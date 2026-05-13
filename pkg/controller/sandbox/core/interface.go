@@ -62,9 +62,9 @@ type SandboxControl interface {
 }
 
 type SandboxControlArgs struct {
-	Client      client.Client
-	APIReader   client.Reader
-	Recorder    record.EventRecorder
+	Client    client.Client
+	APIReader client.Reader
+	Recorder  record.EventRecorder
 	RateLimiter *RateLimiter
 }
 

@@ -25,38 +25,44 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 )
 
-// uuidTokenProvider is the default community implementation that generates
+// defaultIdentityProvider is the default implementation that generates
 // random UUID tokens without contacting any identity provider service.
 // It implements IdentityProvider with no-op propagation.
-type uuidTokenProvider struct{}
+type defaultIdentityProvider struct{}
 
-// NewUUIDTokenProvider creates a TokenProvider that generates random UUID-based tokens.
+// NewDefaultTokenProvider creates a TokenProvider that generates random UUID-based tokens.
 // This is the default fallback used when no identity provider service is configured.
-func NewUUIDTokenProvider() TokenProvider {
-	return &uuidTokenProvider{}
+func NewDefaultTokenProvider() TokenProvider {
+	return &defaultIdentityProvider{}
 }
 
-// NewUUIDIdentityProvider creates an IdentityProvider with UUID-based token issuance
-// and no-op security token propagation. This is the community default.
-func NewUUIDIdentityProvider() IdentityProvider {
-	return &uuidTokenProvider{}
+// NewDefaultIdentityProvider creates an IdentityProvider with UUID-based token issuance
+// and no-op security token propagation. This is the default.
+func NewDefaultIdentityProvider() IdentityProvider {
+	return &defaultIdentityProvider{}
 }
 
-func (u *uuidTokenProvider) IssueToken(_ context.Context, _ TokenRequest) (*TokenResponse, error) {
+func (u *defaultIdentityProvider) IssueToken(_ context.Context, _ TokenRequest) (*TokenResponse, error) {
 	return &TokenResponse{
 		RequestID:   uuid.NewString(),
 		AccessToken: uuid.NewString(),
 	}, nil
 }
 
-// PropagateSecurityToken is a no-op for the UUID provider.
-// Community mode has no propagators registered.
-func (u *uuidTokenProvider) PropagateSecurityToken(_ context.Context, _ *agentsv1alpha1.Sandbox, _ *TokenResponse) error {
+// PropagateSecurityToken is a no-op for the default provider.
+// Default mode has no propagators registered.
+func (u *defaultIdentityProvider) PropagateSecurityToken(_ context.Context, _ *agentsv1alpha1.Sandbox, _ *TokenResponse) error {
 	return nil
 }
 
+// GetProxyCABundle is a no-op for the default provider.
+// Default mode does not have a proxy CA certificate configured.
+func (u *defaultIdentityProvider) GetProxyCABundle(_ context.Context, _ GetProxyCABundleRequest) (*GetProxyCABundleResponse, error) {
+	return &GetProxyCABundleResponse{}, nil
+}
+
 // fallbackTokenProvider wraps a primary TokenProvider and falls back to the
-// UUID-based provider when the primary one returns an error. This ensures that
+// default provider when the primary one returns an error. This ensures that
 // sandbox claim is never blocked by an identity provider service outage.
 type fallbackTokenProvider struct {
 	primary  TokenProvider
@@ -64,11 +70,11 @@ type fallbackTokenProvider struct {
 }
 
 // NewFallbackTokenProvider creates a TokenProvider that delegates to the primary provider
-// and automatically falls back to UUID-based token generation on any error.
+// and automatically falls back to default token generation on any error.
 func NewFallbackTokenProvider(primary TokenProvider) TokenProvider {
 	return &fallbackTokenProvider{
 		primary:  primary,
-		fallback: NewUUIDTokenProvider(),
+		fallback: NewDefaultTokenProvider(),
 	}
 }
 
@@ -76,7 +82,7 @@ func (f *fallbackTokenProvider) IssueToken(ctx context.Context, req TokenRequest
 	logger := klog.FromContext(ctx)
 	resp, err := f.primary.IssueToken(ctx, req)
 	if err != nil {
-		logger.Error(err, "primary token provider failed, falling back to UUID token provider")
+		logger.Error(err, "primary token provider failed, falling back to default token provider")
 		return f.fallback.IssueToken(ctx, req)
 	}
 	return resp, nil

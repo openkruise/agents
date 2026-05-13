@@ -29,25 +29,25 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// uuidTokenProvider
+// defaultIdentityProvider
 // ---------------------------------------------------------------------------
 
-func TestNewUUIDTokenProvider(t *testing.T) {
-	provider := NewUUIDTokenProvider()
+func TestNewDefaultTokenProvider(t *testing.T) {
+	provider := NewDefaultTokenProvider()
 	require.NotNil(t, provider)
-	_, ok := provider.(*uuidTokenProvider)
-	assert.True(t, ok, "should return *uuidTokenProvider")
+	_, ok := provider.(*defaultIdentityProvider)
+	assert.True(t, ok, "should return *defaultIdentityProvider")
 }
 
-func TestNewUUIDIdentityProvider(t *testing.T) {
-	provider := NewUUIDIdentityProvider()
+func TestNewDefaultIdentityProvider(t *testing.T) {
+	provider := NewDefaultIdentityProvider()
 	require.NotNil(t, provider)
-	_, ok := provider.(*uuidTokenProvider)
-	assert.True(t, ok, "should return *uuidTokenProvider implementing IdentityProvider")
+	_, ok := provider.(*defaultIdentityProvider)
+	assert.True(t, ok, "should return *defaultIdentityProvider implementing IdentityProvider")
 }
 
-func TestUUIDTokenProvider_IssueToken(t *testing.T) {
-	provider := NewUUIDTokenProvider()
+func TestDefaultIdentityProvider_IssueToken(t *testing.T) {
+	provider := NewDefaultTokenProvider()
 	ctx := context.Background()
 
 	resp, err := provider.IssueToken(ctx, TokenRequest{TokenType: TokenTypeAgent})
@@ -62,8 +62,8 @@ func TestUUIDTokenProvider_IssueToken(t *testing.T) {
 	assert.NotEqual(t, resp.AccessToken, resp2.AccessToken, "each call should produce a unique token")
 }
 
-func TestUUIDTokenProvider_PropagateSecurityToken(t *testing.T) {
-	provider := NewUUIDIdentityProvider()
+func TestDefaultIdentityProvider_PropagateSecurityToken(t *testing.T) {
+	provider := NewDefaultIdentityProvider()
 	sbx := &agentsv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
 	}

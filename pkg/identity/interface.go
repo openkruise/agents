@@ -25,7 +25,7 @@ import (
 // IdentityProvider is the unified interface for sandbox identity management.
 // It combines token issuance with post-token security propagation.
 //
-// Community default (uuidTokenProvider):
+// Default (defaultIdentityProvider):
 //   - IssueToken: generates random UUID tokens.
 //   - PropagateSecurityToken: no-op (no propagators registered).
 //
@@ -39,6 +39,13 @@ type IdentityProvider interface {
 	// PropagateSecurityToken executes post-token processing after a token is issued,
 	// such as writing credentials into the sandbox runtime.
 	PropagateSecurityToken(ctx context.Context, sbx *agentsv1alpha1.Sandbox, tokenResp *TokenResponse) error
+
+	// GetProxyCABundle fetches the proxy CA certificate bundle from the identity provider.
+	// The returned CA bundle is a PEM-encoded public certificate used for TLS verification.
+	//
+	// Default (defaultIdentityProvider): returns empty CABundle (no proxy CA configured).
+	// Enterprise deployment: calls the identity provider service to retrieve the CA bundle.
+	GetProxyCABundle(ctx context.Context, req GetProxyCABundleRequest) (*GetProxyCABundleResponse, error)
 }
 
 // TokenProvider is the low-level interface for issuing sandbox access tokens.

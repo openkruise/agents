@@ -32,8 +32,10 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
+	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
+	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 	"github.com/openkruise/agents/pkg/utils/inplaceupdate"
 	"github.com/openkruise/agents/pkg/utils/sidecarutils"
 )
@@ -395,9 +397,25 @@ func (r *commonControl) EnsureSandboxTerminated(ctx context.Context, args Ensure
 }
 
 func (r *commonControl) createPod(ctx context.Context, box *agentsv1alpha1.Sandbox, newStatus *agentsv1alpha1.SandboxStatus) (*corev1.Pod, error) {
+	// Ensure gateway certificate Secret exist in the namespace before creating the pod
+	if utilfeature.DefaultFeatureGate.Enabled(features.SecurityIdentityProviderGate) {
+		if err := r.ensureGatewayCACert(ctx, box.Namespace); err != nil {
+			klog.ErrorS(err, "failed to ensure gateway CA certificate secret", "sandbox", klog.KObj(box))
+			return nil, err
+		}
+	}
+
 	pod, err := GeneratePodFromSandbox(ctx, r.Client, box, newStatus.UpdateRevision)
 	if err != nil {
 		return nil, err
+	}
+
+	// Inject Gateway CA certificate volumes and volume mounts into the pod container runtime
+	if utilfeature.DefaultFeatureGate.Enabled(features.SecurityIdentityProviderGate) {
+		// Inject gateway CA volume
+		InjectGatewayCAVolume(pod)
+		// Inject gateway CA volume mount to main container (first container)
+		InjectGatewayCAVolumeMount(pod)
 	}
 
 	// to avoid the performance issue, using the controller to inject csi containers
@@ -420,6 +438,24 @@ func (r *commonControl) createPod(ctx context.Context, box *agentsv1alpha1.Sandb
 	}
 	klog.InfoS("Create pod success", "sandbox", klog.KObj(box), "Body", utils.DumpJson(pod))
 	return pod, nil
+}
+
+// ensureGatewayCACert ensures the gateway CA certificate Secret exists in the given namespace.
+func (r *commonControl) ensureGatewayCACert(ctx context.Context, namespace string) error {
+	injector := NewGatewayCACertInjector(r.Client)
+	return injector.EnsureGatewayCACert(ctx, namespace)
+}
+
+// InjectGatewayCAVolume appends the gateway CA certificate Secret volume to the pod spec.
+func InjectGatewayCAVolume(pod *corev1.Pod) {
+	injector := NewGatewayCACertInjector(nil)
+	injector.InjectGatewayCAVolume(pod)
+}
+
+// InjectGatewayCAVolumeMount appends the gateway CA certificate volume mount to the main container.
+func InjectGatewayCAVolumeMount(pod *corev1.Pod) {
+	injector := NewGatewayCACertInjector(nil)
+	injector.InjectGatewayCAVolumeMount(pod)
 }
 
 func (r *commonControl) handleInplaceUpdateSandbox(ctx context.Context, args EnsureFuncArgs) (bool, error) {
