@@ -562,10 +562,9 @@ func TestWaitForObjectSatisfied_ActionConflict(t *testing.T) {
 		time.Second,
 	)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "already exists")
 	assert.ErrorIs(t, err, ErrWaitTaskConflict)
 	var conflictErr *WaitTaskConflictError
-	assert.True(t, errors.As(err, &conflictErr))
+	require.True(t, errors.As(err, &conflictErr))
 	assert.Equal(t, WaitActionResume, conflictErr.ExistingAction)
 	assert.Equal(t, WaitActionPause, conflictErr.NewAction)
 

@@ -108,7 +108,7 @@ func AcquireEntry[T client.Object](waitHooks *sync.Map, key string, action WaitA
 		}
 		if entry.Action != action {
 			entry.mu.Unlock()
-			return nil, fmt.Errorf("another action(%s)'s wait task already exists", entry.Action)
+			return nil, &WaitTaskConflictError{ExistingAction: entry.Action, NewAction: action}
 		}
 		entry.refs++
 		entry.mu.Unlock()

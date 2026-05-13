@@ -17,6 +17,7 @@ limitations under the License.
 package utils
 
 import (
+	"errors"
 	"fmt"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -47,7 +48,8 @@ func (e *WaitNotSatisfiedError) Error() string {
 }
 
 func (e *WaitNotSatisfiedError) Is(target error) bool {
-	_, ok := target.(*WaitNotSatisfiedError)
+	var waitNotSatisfiedError *WaitNotSatisfiedError
+	ok := errors.As(target, &waitNotSatisfiedError)
 	return ok
 }
 
@@ -66,6 +68,7 @@ func (e *WaitTaskConflictError) Error() string {
 }
 
 func (e *WaitTaskConflictError) Is(target error) bool {
-	_, ok := target.(*WaitTaskConflictError)
+	var waitTaskConflictError *WaitTaskConflictError
+	ok := errors.As(target, &waitTaskConflictError)
 	return ok
 }
