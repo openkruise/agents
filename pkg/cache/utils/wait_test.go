@@ -18,6 +18,7 @@ package utils
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -406,6 +407,67 @@ func TestWaitForObjectSatisfied_ContextTimeout(t *testing.T) {
 	assert.Contains(t, err.Error(), "not satisfied")
 }
 
+func TestWaitForObjectSatisfied_NotSatisfiedErrorIsTyped(t *testing.T) {
+	tests := []struct {
+		name                  string
+		timeout               time.Duration
+		ctx                   func(t *testing.T) context.Context
+		wantAction            WaitAction
+		wantDuringDoubleCheck bool
+	}{
+		{
+			name:       "zero timeout",
+			timeout:    0,
+			wantAction: WaitActionResume,
+			ctx: func(t *testing.T) context.Context {
+				t.Helper()
+				return context.Background()
+			},
+		},
+		{
+			name:                  "wait timeout",
+			timeout:               30 * time.Millisecond,
+			wantDuringDoubleCheck: true,
+			ctx: func(t *testing.T) context.Context {
+				t.Helper()
+				return context.Background()
+			},
+		},
+		{
+			name:                  "context canceled",
+			timeout:               time.Hour,
+			wantDuringDoubleCheck: true,
+			ctx: func(t *testing.T) context.Context {
+				t.Helper()
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				return ctx
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sbx := newTestSandbox("sbx-typed-not-satisfied", "default")
+			var hooks sync.Map
+
+			err := WaitForObjectSatisfied[*agentsv1alpha1.Sandbox](
+				tt.ctx(t), &hooks, sbx, WaitActionResume,
+				identityUpdate,
+				func(obj *agentsv1alpha1.Sandbox) (bool, error) { return false, nil },
+				tt.timeout,
+			)
+
+			require.Error(t, err)
+			assert.ErrorIs(t, err, ErrWaitNotSatisfied)
+			var waitErr *WaitNotSatisfiedError
+			assert.True(t, errors.As(err, &waitErr))
+			assert.Equal(t, tt.wantDuringDoubleCheck, waitErr.DuringDoubleCheck)
+			assert.Equal(t, tt.wantAction, waitErr.Action)
+		})
+	}
+}
+
 func TestWaitForObjectSatisfied_ActionConflict(t *testing.T) {
 	sbx := newTestSandbox("sbx-conflict", "default")
 	var hooks sync.Map
@@ -438,6 +500,11 @@ func TestWaitForObjectSatisfied_ActionConflict(t *testing.T) {
 	)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "already exists")
+	assert.ErrorIs(t, err, ErrWaitTaskConflict)
+	var conflictErr *WaitTaskConflictError
+	assert.True(t, errors.As(err, &conflictErr))
+	assert.Equal(t, WaitActionResume, conflictErr.ExistingAction)
+	assert.Equal(t, WaitActionPause, conflictErr.NewAction)
 
 	// Close the entry so the first goroutine can exit (its internal timeout is 1 hour)
 	key := WaitHookKey[*agentsv1alpha1.Sandbox](sbx)
@@ -676,6 +743,10 @@ func TestDoubleCheckObjectSatisfied_NotSatisfied(t *testing.T) {
 	)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not satisfied")
+	assert.ErrorIs(t, err, ErrWaitNotSatisfied)
+	var waitErr *WaitNotSatisfiedError
+	assert.True(t, errors.As(err, &waitErr))
+	assert.True(t, waitErr.DuringDoubleCheck)
 }
 
 func TestDoubleCheckObjectSatisfied_Satisfied(t *testing.T) {

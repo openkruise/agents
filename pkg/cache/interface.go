@@ -31,8 +31,9 @@ import (
 // reaches a desired state (e.g., sandbox becomes Running after Resume).
 //
 // All Get/List methods read exclusively from the in-process informer store; they never issue
-// live API calls. Run must be called once to start the underlying informers and wait for the
-// initial sync before any other method is used.
+// live API calls. The underlying manager cache must be synced before any other method is used.
+// Call Run for a Cache with an owned manager. When a Cache reuses another operator's manager,
+// do not call Run; the owner manager starts and syncs the cache during manager.Start.
 type Provider interface {
 	GetClaimedSandbox(ctx context.Context, opts GetClaimedSandboxOptions) (*agentsv1alpha1.Sandbox, error)
 
@@ -70,8 +71,8 @@ type Provider interface {
 	// CheckpointId); fails on Terminating/Failed.
 	NewCheckpointTask(ctx context.Context, cp *agentsv1alpha1.Checkpoint) *cacheutils.WaitTask[*agentsv1alpha1.Checkpoint]
 
-	// Run must be called once before any other Provider method is invoked.
-	// Returns an error if any informer fails to start or if the cache sync times out.
+	// Run starts an owned manager and waits for cache sync.
+	// Do not call Run for a cache backed by an externally owned manager.
 	Run(ctx context.Context) error
 
 	// Stop shuts down all underlying informers and releases associated resources.

@@ -19,7 +19,6 @@ package cache
 import (
 	"context"
 	"fmt"
-	"strings"
 	"sync"
 
 	"golang.org/x/sync/singleflight"
@@ -184,12 +183,8 @@ func (c *Cache) Run(ctx context.Context) error {
 	go func() {
 		// It is possible that the mgr is already started in another goroutine
 		if err := c.mgr.Start(mgrCtx); err != nil {
-			if strings.Contains(err.Error(), "already started") {
-				log.Info("controller manager already started")
-			} else {
-				log.Error(err, "controller manager exited with error")
-				panic(fmt.Errorf("failed to start controller manager: %w", err))
-			}
+			log.Error(err, "controller manager exited with error")
+			panic(fmt.Errorf("failed to start controller manager: %w", err))
 		}
 	}()
 	cache := c.mgr.GetCache()

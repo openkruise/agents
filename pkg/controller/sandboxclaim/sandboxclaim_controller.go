@@ -72,20 +72,6 @@ func Add(mgr manager.Manager) error {
 		return fmt.Errorf("failed to create cache: %w", err)
 	}
 
-	// Register cache as a runnable so it starts when manager starts
-	err = mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
-		klog.Info("Starting SandboxClaim cache and waiting for sync...")
-		if err := cache.Run(ctx); err != nil {
-			klog.Errorf("cache run error: %v", err)
-			return err
-		}
-		klog.Info("SandboxClaim cache synced successfully")
-		return nil
-	}))
-	if err != nil {
-		return fmt.Errorf("failed to add cache runnable: %w", err)
-	}
-
 	recorder := mgr.GetEventRecorderFor("sandboxclaim")
 	err = (&Reconciler{
 		Client:   mgr.GetClient(),

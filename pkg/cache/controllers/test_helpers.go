@@ -52,6 +52,7 @@ type MockManager struct {
 	apiReader    client.Reader
 	scheme       *runtime.Scheme
 	addCallCount atomic.Int32
+	startCount   atomic.Int32
 	// failOnNthAdd specifies which (1-based) call to Add() should return addError.
 	// 0 means never fail.
 	failOnNthAdd int
@@ -136,6 +137,7 @@ func (m *MockManager) GetEventRecorderFor(_ string) record.EventRecorder { retur
 
 // Start satisfies both cluster.Cluster and manager.Manager.
 func (m *MockManager) Start(ctx context.Context) error {
+	m.startCount.Add(1)
 	if m.waitSimEnabled && m.waitHooks != nil {
 		m.initWaitReconcilers()
 		go m.runWaitSimulation(ctx)
@@ -251,6 +253,10 @@ func (m *MockManager) GetControllerOptions() ctrlcfg.Controller {
 // addCallsCount returns how many times Add() was invoked.
 func (m *MockManager) addCallsCount() int {
 	return int(m.addCallCount.Load())
+}
+
+func (m *MockManager) StartCallsCount() int {
+	return int(m.startCount.Load())
 }
 
 var _ ctrl.Manager = (*MockManager)(nil)

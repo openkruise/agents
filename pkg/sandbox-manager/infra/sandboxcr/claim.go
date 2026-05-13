@@ -37,6 +37,7 @@ import (
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	infracache "github.com/openkruise/agents/pkg/cache"
+	cacheutils "github.com/openkruise/agents/pkg/cache/utils"
 	"github.com/openkruise/agents/pkg/controller/sandboxset"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
@@ -625,7 +626,7 @@ func waitForSandboxReady(ctx context.Context, sbx *Sandbox, opts infra.ClaimSand
 	log.Info("waiting for sandbox ready", "timeout", opts.WaitReadyTimeout)
 	if err = cache.NewSandboxWaitReadyTask(ctx, sbx.Sandbox).Wait(opts.WaitReadyTimeout); err != nil {
 		log.Error(err, "failed to wait for sandbox ready")
-		if strings.Contains(err.Error(), "not satisfied") {
+		if errors.Is(err, cacheutils.ErrWaitNotSatisfied) {
 			if refreshErr := sbx.InplaceRefresh(ctx, true); refreshErr != nil {
 				log.Error(refreshErr, "failed to refresh sandbox for ready failure diagnosis")
 			}

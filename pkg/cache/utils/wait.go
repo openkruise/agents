@@ -103,7 +103,7 @@ func WaitForObjectSatisfied[T client.Object](ctx context.Context, waitHooks *syn
 	}
 	if timeout <= 0 {
 		log.Info("waiting is skipped due to zero timeout")
-		return fmt.Errorf("object is not satisfied")
+		return &WaitNotSatisfiedError{Object: objKey, Action: action}
 	}
 	value, exists := waitHooks.LoadOrStore(key, NewWaitEntry(ctx, action, satisfiedFunc))
 	if exists {
@@ -113,7 +113,7 @@ func WaitForObjectSatisfied[T client.Object](ctx context.Context, waitHooks *syn
 	}
 	entry := value.(*WaitEntry[T])
 	if entry.Action != action {
-		err := fmt.Errorf("another action(%s)'s wait task already exists", entry.Action)
+		err := &WaitTaskConflictError{ExistingAction: entry.Action, NewAction: action}
 		log.Error(err, "wait hook conflict", "existing", entry.Action, "new", action)
 		return err
 	}
@@ -148,7 +148,7 @@ func DoubleCheckObjectSatisfied[T client.Object](ctx context.Context, obj T, upd
 		return err
 	}
 	if !satisfied {
-		err = fmt.Errorf("object is not satisfied during double check")
+		err = &WaitNotSatisfiedError{Object: client.ObjectKeyFromObject(obj), DuringDoubleCheck: true}
 		log.Error(err, "object not satisfied")
 		return err
 	}
