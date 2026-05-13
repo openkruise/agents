@@ -471,6 +471,13 @@ func modifyPickedSandbox(sbx *Sandbox, lockType infra.LockType, opts infra.Claim
 		opts.Modifier(sbx)
 	}
 	if opts.InplaceUpdate != nil {
+		// Guard: both SetImage and SetResources target Containers[0]; a sandbox
+		// with an empty container list must be rejected early with a clear error
+		// rather than panicking at the point of access.
+		if sbx.Spec.Template == nil || len(sbx.Spec.Template.Spec.Containers) == 0 {
+			return fmt.Errorf("cannot apply inplace update: sandbox %s/%s template has no containers",
+				sbx.GetNamespace(), sbx.GetName())
+		}
 		if opts.InplaceUpdate.Image != "" {
 			sbx.SetImage(opts.InplaceUpdate.Image)
 		}
