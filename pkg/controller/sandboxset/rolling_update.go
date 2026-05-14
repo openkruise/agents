@@ -22,13 +22,14 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/controller/events"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
@@ -154,9 +155,8 @@ func getMaxUnavailablePods(sbs *agentsv1alpha1.SandboxSet, replicas int) int {
 }
 
 // logUpdateInfo logs the update info for debugging.
-func logUpdateInfo(ctx context.Context, info *UpdateInfo) {
-	log := logf.FromContext(ctx)
-	log.Info("update info calculated",
+func logUpdateInfo(_ context.Context, info *UpdateInfo) {
+	klog.InfoS("Update info calculated",
 		"currentUpdated", info.CurrentUpdated,
 		"toUpdate", info.ToUpdate,
 		"allowedUnavailable", info.AllowedUnavailable)
@@ -170,7 +170,6 @@ func (r *Reconciler) performRollingUpdate(
 	updateGroups *UpdateGroupedSandboxes,
 	updateInfo *UpdateInfo,
 ) (int, error) {
-	log := logf.FromContext(ctx)
 	controllerKey := GetControllerKey(sbs)
 	lock := uuid.New().String()
 	logUpdateInfo(ctx, updateInfo)
@@ -194,13 +193,13 @@ func (r *Reconciler) performRollingUpdate(
 		successes, err := utils.DoItSlowlyWithInputs(oldCreating, initialBatchSize, deleteFunc)
 		totalDeleted += successes
 		if err != nil {
-			log.Error(err, "failed to delete some old creating sandboxes", "success", successes, "fails", len(oldCreating)-successes)
+			klog.ErrorS(err, "Failed to delete some old creating sandboxes", "sandboxSet", klog.KObj(sbs), "success", successes, "fails", len(oldCreating)-successes)
 			return totalDeleted, err
 		}
 	}
 
 	if len(updateGroups.OldAvailable) <= 0 {
-		log.Info("no old available sandboxes to delete")
+		klog.InfoS("No old available sandboxes to delete", "sandboxSet", klog.KObj(sbs))
 		return totalDeleted, nil
 	}
 
@@ -208,7 +207,7 @@ func (r *Reconciler) performRollingUpdate(
 	// Delete old available pods based on unavailable budget.
 	// New sandboxes will be created by scaleUp in the next reconcile.
 	deleteCount = min(updateInfo.AllowedUnavailable, len(updateGroups.OldAvailable))
-	log.Info("rolling update plan", "deleteCount", deleteCount)
+	klog.InfoS("Rolling update plan", "sandboxSet", klog.KObj(sbs), "deleteCount", deleteCount)
 
 	// Delete old available sandboxes in batches
 	if deleteCount > 0 {
@@ -218,7 +217,7 @@ func (r *Reconciler) performRollingUpdate(
 		successes, err := utils.DoItSlowlyWithInputs(toDelete, initialBatchSize, deleteFunc)
 		totalDeleted += successes
 		if err != nil {
-			log.Error(err, "failed to delete some old available sandboxes", "success", successes, "fails", deleteCount-successes)
+			klog.ErrorS(err, "Failed to delete some old available sandboxes", "sandboxSet", klog.KObj(sbs), "success", successes, "fails", deleteCount-successes)
 			return totalDeleted, err
 		}
 	}
@@ -228,14 +227,13 @@ func (r *Reconciler) performRollingUpdate(
 
 // deleteSandboxForUpdate deletes a sandbox as part of rolling update.
 func (r *Reconciler) deleteSandboxForUpdate(ctx context.Context, sbs *agentsv1alpha1.SandboxSet, sbx *agentsv1alpha1.Sandbox, lock string) error {
-	log := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
-	log.V(consts.DebugLogLevel).Info("deleting sandbox for rolling update")
+	klog.V(consts.DebugLogLevel).InfoS("Deleting sandbox for rolling update", "sandboxSet", klog.KObj(sbs), "sandbox", klog.KObj(sbx))
 
 	if sbx.DeletionTimestamp != nil {
 		return nil
 	}
 	if sbx.Annotations[agentsv1alpha1.AnnotationLock] != "" && sbx.Annotations[agentsv1alpha1.AnnotationOwner] != consts.OwnerManagerScaleDown {
-		log.Info("sandbox to be deleted claimed before performed, skip")
+		klog.InfoS("Sandbox to be deleted claimed before performed, skip", "sandboxSet", klog.KObj(sbs), "sandbox", klog.KObj(sbx))
 		return errors.New("sandbox to be deleted claimed before performed, skip")
 	}
 
@@ -247,10 +245,10 @@ func (r *Reconciler) deleteSandboxForUpdate(ctx context.Context, sbs *agentsv1al
 		if apierrors.IsNotFound(err) {
 			return nil
 		}
-		log.Error(err, "failed to delete sandbox for rolling update")
+		klog.ErrorS(err, "Failed to delete sandbox for rolling update", "sandboxSet", klog.KObj(sbs), "sandbox", klog.KObj(sbx))
 		return err
 	}
 
-	r.Recorder.Eventf(sbs, "Normal", "RollingUpdate", "Deleted sandbox %s for update", klog.KObj(sbx))
+	r.Recorder.Eventf(sbs, corev1.EventTypeNormal, events.SandboxSetRollingUpdate, "Deleted sandbox %s for update", klog.KObj(sbx))
 	return nil
 }

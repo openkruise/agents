@@ -38,10 +38,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
-	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/controller/events"
 	"github.com/openkruise/agents/pkg/discovery"
 	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
@@ -87,13 +87,6 @@ type Reconciler struct {
 	Codec    runtime.Codec
 }
 
-const (
-	EventSandboxCreated       = "SandboxCreated"
-	EventCreateSandboxFailed  = "CreateSandboxFailed"
-	EventSandboxScaledDown    = "SandboxScaledDown"
-	EventFailedSandboxDeleted = "FailedSandboxDeleted"
-)
-
 // +kubebuilder:rbac:groups=agents.kruise.io,resources=sandboxsets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=agents.kruise.io,resources=sandboxsets/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=agents.kruise.io,resources=sandboxsets/finalizers,verbs=update
@@ -101,8 +94,7 @@ const (
 
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	totalStart := time.Now()
-	log := logf.FromContext(ctx).WithValues("sandboxset", req.NamespacedName)
-	ctx = logf.IntoContext(ctx, log)
+	klog.InfoS("Reconciling SandboxSet", "sandboxSet", req.NamespacedName)
 	sbs := &agentsv1alpha1.SandboxSet{}
 	if err := r.Get(ctx, req.NamespacedName, sbs); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -120,14 +112,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// Preparation
 	newStatus, err := r.initNewStatus(ctx, sbs)
 	if err != nil {
-		log.Error(err, "failed to init new status")
+		klog.ErrorS(err, "Failed to init new status", "sandboxSet", klog.KObj(sbs))
 		return ctrl.Result{}, err
 	}
 
 	controllerKey := GetControllerKey(sbs)
 	groups, err := r.groupAllSandboxes(ctx, sbs)
 	if err != nil {
-		log.Error(err, "failed to group sandboxes")
+		klog.ErrorS(err, "Failed to group sandboxes", "sandboxSet", klog.KObj(sbs))
 		return ctrl.Result{}, err
 	}
 	var requeueAfter time.Duration
@@ -145,7 +137,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			},
 		})
 		if err != nil {
-			log.Error(err, "failed to generate selector")
+			klog.ErrorS(err, "Failed to generate selector", "sandboxSet", klog.KObj(sbs))
 		} else {
 			newStatus.Selector = selector.String()
 		}
@@ -155,31 +147,31 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// Step 1: perform scale
 	start := time.Now()
 	delta := calculateScaleDelta(sbs, newStatus)
-	log.Info("performing scale", "expect", sbs.Spec.Replicas, "actual", newStatus.Replicas,
+	klog.InfoS("Performing scale", "sandboxSet", klog.KObj(sbs), "expect", sbs.Spec.Replicas, "actual", newStatus.Replicas,
 		"available", newStatus.AvailableReplicas, "delta", delta)
 	if delta > 0 {
 		err = r.scaleUp(ctx, delta, sbs, newStatus.UpdateRevision)
 	} else if delta < 0 {
 		if !scaleUpSatisfied || !scaleDownSatisfied {
-			log.Info("skip scale down for scaleUpExpectation or scaleDownExpectation is not satisfied")
+			klog.InfoS("Skip scale down for expectations not satisfied", "sandboxSet", klog.KObj(sbs))
 		} else {
 			err = r.scaleDown(ctx, -delta, sbs, groups, newStatus.UpdateRevision)
 		}
 	}
 	if err != nil {
-		log.Error(err, "failed to perform scale", "cost", time.Since(start))
+		klog.ErrorS(err, "Failed to perform scale", "sandboxSet", klog.KObj(sbs), "cost", time.Since(start))
 		allErrors = errors.Join(allErrors, err)
 	} else {
-		log.Info("scale finished", "cost", time.Since(start))
+		klog.InfoS("Scale finished", "sandboxSet", klog.KObj(sbs), "cost", time.Since(start))
 	}
 
 	// Step 2: delete dead sandboxes
 	start = time.Now()
 	if err = r.deleteDeadSandboxes(ctx, groups.Dead); err != nil {
-		log.Error(err, "failed to perform garbage collection")
+		klog.ErrorS(err, "Failed to perform garbage collection", "sandboxSet", klog.KObj(sbs))
 		allErrors = errors.Join(allErrors, err)
 	} else {
-		log.Info("all dead sandboxes deleted", "cost", time.Since(start))
+		klog.InfoS("All dead sandboxes deleted", "sandboxSet", klog.KObj(sbs), "cost", time.Since(start))
 	}
 
 	// Step 3: perform rolling update if needed
@@ -187,7 +179,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if delta == 0 && scaleUpSatisfied && scaleDownSatisfied {
 		updateGroups := buildUpdateGroups(groups, newStatus.UpdateRevision)
 		if updateGroups == nil {
-			log.Info("skip rolling update: scale expectations not satisfied, waiting for pending operations")
+			klog.InfoS("Skip rolling update: scale expectations not satisfied", "sandboxSet", klog.KObj(sbs))
 		} else if needsUpdate(updateGroups) {
 			start = time.Now()
 			updateInfo := calculateUpdateInfo(sbs, updateGroups)
@@ -196,25 +188,32 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			newStatus.UpdatedAvailableReplicas = int32(len(updateGroups.UpdatedAvailable))
 
 			if !isUpdateComplete(updateInfo) {
-				log.Info("performing rolling update", "toUpdate", updateInfo.ToUpdate)
+				klog.InfoS("Performing rolling update", "sandboxSet", klog.KObj(sbs), "toUpdate", updateInfo.ToUpdate)
+				r.Recorder.Eventf(sbs, corev1.EventTypeNormal, events.SandboxSetRollingUpdate, "Rolling update started, %d sandboxes to update", updateInfo.ToUpdate)
 				deleted, err := r.performRollingUpdate(ctx, sbs, updateGroups, updateInfo)
 				if err != nil {
-					log.Error(err, "failed to perform rolling update")
+					klog.ErrorS(err, "Failed to perform rolling update", "sandboxSet", klog.KObj(sbs))
 					allErrors = errors.Join(allErrors, err)
 				} else {
-					log.Info("rolling update step finished", "deleted", deleted, "cost", time.Since(start))
+					klog.InfoS("Rolling update step finished", "sandboxSet", klog.KObj(sbs), "deleted", deleted, "cost", time.Since(start))
 				}
 			}
 		} else {
 			// All sandboxes are up to date
 			newStatus.UpdatedReplicas = newStatus.Replicas
 			newStatus.UpdatedAvailableReplicas = newStatus.AvailableReplicas
+			// Only emit completion event when transitioning from an in-progress rolling update
+			if sbs.Status.UpdatedReplicas < sbs.Status.Replicas {
+				klog.InfoS("All sandboxes are up to date", "sandboxSet", klog.KObj(sbs))
+				r.Recorder.Eventf(sbs, corev1.EventTypeNormal, events.SandboxSetRollingUpdateCompleted,
+					"Rolling update completed, all sandboxes are up to date")
+			}
 		}
 	}
 
-	log.Info("reconcile done", "totalCost", time.Since(totalStart))
+	klog.InfoS("Reconcile done", "sandboxSet", klog.KObj(sbs), "totalCost", time.Since(totalStart))
 	if err = r.updateSandboxSetStatus(ctx, *newStatus, sbs); err != nil {
-		log.Error(err, "failed to update sandboxset status")
+		klog.ErrorS(err, "Failed to update sandboxset status", "sandboxSet", klog.KObj(sbs))
 		allErrors = errors.Join(allErrors, err)
 	}
 	return ctrl.Result{RequeueAfter: requeueAfter}, allErrors
@@ -222,28 +221,28 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 // scaleUp is allowed when scaleUpExpectation is satisfied
 func (r *Reconciler) scaleUp(ctx context.Context, count int, sbs *agentsv1alpha1.SandboxSet, revision string) error {
-	log := logf.FromContext(ctx)
-	log.Info("scale up", "count", count)
+	klog.InfoS("Scaling up SandboxSet", "sandboxSet", klog.KObj(sbs), "count", count)
+	r.Recorder.Eventf(sbs, corev1.EventTypeNormal, events.SandboxSetScalingUp, "Scaling up SandboxSet from %d to %d replicas", int(sbs.Spec.Replicas)-count, int(sbs.Spec.Replicas))
 	successes, err := utils.DoItSlowly(count, initialBatchSize, func() error {
 		created, err := r.createSandbox(ctx, sbs, revision)
 		if err != nil {
-			log.Error(err, "failed to create sandbox")
+			klog.ErrorS(err, "Failed to create sandbox", "sandboxSet", klog.KObj(sbs))
 			return err
 		}
-		log.V(consts.DebugLogLevel).Info("sandbox created", "sandbox", klog.KObj(created))
+		klog.V(consts.DebugLogLevel).InfoS("Sandbox created", "sandboxSet", klog.KObj(sbs), "sandbox", klog.KObj(created))
 		return nil
 	})
-	log.Info("scale up finished", "successes", successes, "fails", count-successes)
+	klog.InfoS("Scale up finished", "sandboxSet", klog.KObj(sbs), "successes", successes, "fails", count-successes)
 	return err
 }
 
 // scaleDown is allowed when both scaleUpExpectation and scaleDownExpectation are satisfied.
 // It prioritizes deleting old revision sandboxes first, then updated ones.
 func (r *Reconciler) scaleDown(ctx context.Context, count int, sbs *agentsv1alpha1.SandboxSet, groups GroupedSandboxes, updateRevision string) error {
-	log := logf.FromContext(ctx)
 	controllerKey := GetControllerKey(sbs)
 	lock := uuid.New().String()
-	log.Info("scale down", "count", count)
+	klog.InfoS("Scaling down SandboxSet", "sandboxSet", klog.KObj(sbs), "count", count)
+	r.Recorder.Eventf(sbs, corev1.EventTypeNormal, events.SandboxSetScalingDown, "Scaling down SandboxSet from %d to %d replicas", int(sbs.Spec.Replicas)+count, int(sbs.Spec.Replicas))
 
 	// Separate candidates into old revision and updated revision.
 	candidates := append(groups.Creating, groups.Available...)
@@ -261,7 +260,7 @@ func (r *Reconciler) scaleDown(ctx context.Context, count int, sbs *agentsv1alph
 		scaleDownExpectation.ExpectScale(controllerKey, expectations.Delete, key.Name)
 		err := r.scaleDownSandbox(ctx, sbx, lock)
 		if err != nil {
-			log.Error(err, "failed to scale down sandbox")
+			klog.ErrorS(err, "Failed to scale down sandbox", "sandboxSet", klog.KObj(sbs), "sandbox", key.Name)
 			scaleDownExpectation.ObserveScale(controllerKey, expectations.Delete, key.Name)
 		}
 		return err
@@ -273,7 +272,7 @@ func (r *Reconciler) scaleDown(ctx context.Context, count int, sbs *agentsv1alph
 	successes, err := utils.DoItSlowlyWithInputs(oldToDelete, initialBatchSize, deleteFunc)
 	totalSuccesses += successes
 	if err != nil {
-		log.Info("scale down finished", "success", totalSuccesses, "fails", len(oldToDelete)-successes)
+		klog.InfoS("Scale down finished with errors", "sandboxSet", klog.KObj(sbs), "success", totalSuccesses, "fails", len(oldToDelete)-successes)
 		return err
 	}
 
@@ -287,11 +286,11 @@ func (r *Reconciler) scaleDown(ctx context.Context, count int, sbs *agentsv1alph
 	successes, err = utils.DoItSlowlyWithInputs(updatedToDelete, initialBatchSize, deleteFunc)
 	totalSuccesses += successes
 	if err != nil {
-		log.Info("scale down finished", "success", totalSuccesses, "fails", len(updatedToDelete)-successes)
+		klog.InfoS("Scale down finished with errors", "sandboxSet", klog.KObj(sbs), "success", totalSuccesses, "fails", len(updatedToDelete)-successes)
 		return err
 	}
 
-	log.Info("scale down finished", "success", totalSuccesses)
+	klog.InfoS("Scale down finished", "sandboxSet", klog.KObj(sbs), "success", totalSuccesses)
 	return nil
 }
 
@@ -334,7 +333,7 @@ func (r *Reconciler) createSandbox(ctx context.Context, sbs *agentsv1alpha1.Sand
 			Namespace: sbs.Namespace,
 			Name:      sbs.Spec.TemplateRef.Name,
 		}, refTemplate); err != nil {
-			r.Recorder.Eventf(sbs, corev1.EventTypeWarning, EventCreateSandboxFailed, "Failed to resolve sandbox template: %s", err)
+			r.Recorder.Eventf(sbs, corev1.EventTypeWarning, events.CreateSandboxFailed, "Failed to resolve sandbox template: %s", err)
 			return nil, fmt.Errorf("failed to resolve sandbox template %s/%s: %w",
 				sbs.Namespace, sbs.Spec.TemplateRef.Name, err)
 		}
@@ -345,19 +344,18 @@ func (r *Reconciler) createSandbox(ctx context.Context, sbs *agentsv1alpha1.Sand
 		return nil, err
 	}
 	if err := r.Create(ctx, sbx); err != nil {
-		r.Recorder.Eventf(sbs, corev1.EventTypeWarning, EventCreateSandboxFailed, "Failed to create sandbox: %s", err)
+		r.Recorder.Eventf(sbs, corev1.EventTypeWarning, events.CreateSandboxFailed, "Failed to create sandbox: %s", err)
 		return nil, err
 	}
 	scaleUpExpectation.ExpectScale(GetControllerKey(sbs), expectations.Create, sbx.Name)
-	r.Recorder.Eventf(sbs, corev1.EventTypeNormal, EventSandboxCreated, "Sandbox %s created", klog.KObj(sbx))
+	r.Recorder.Eventf(sbs, corev1.EventTypeNormal, events.SandboxCreated, "Sandbox %s created", klog.KObj(sbx))
 	return sbx, nil
 }
 
 func (r *Reconciler) scaleDownSandbox(ctx context.Context, sbx *agentsv1alpha1.Sandbox, lock string) (err error) {
-	log := logf.FromContext(ctx).WithValues("sandbox", client.ObjectKeyFromObject(sbx)).V(consts.DebugLogLevel)
-	log.Info("try to scale down sandbox")
+	klog.V(consts.DebugLogLevel).InfoS("Try to scale down sandbox", "sandbox", klog.KObj(sbx))
 	if sbx.Annotations[agentsv1alpha1.AnnotationLock] != "" && sbx.Annotations[agentsv1alpha1.AnnotationOwner] != consts.OwnerManagerScaleDown {
-		log.Info("sandbox to be scaled down claimed before performed, skip")
+		klog.V(consts.DebugLogLevel).InfoS("Sandbox to be scaled down claimed before performed, skip", "sandbox", klog.KObj(sbx))
 		return errors.New("sandbox to be scaled down claimed before performed, skip")
 	}
 	managerutils.LockSandbox(sbx, lock, consts.OwnerManagerScaleDown)
@@ -365,11 +363,11 @@ func (r *Reconciler) scaleDownSandbox(ctx context.Context, sbx *agentsv1alpha1.S
 		return fmt.Errorf("failed to lock sandbox when scaling down: %s", err)
 	}
 	if err = r.Delete(ctx, sbx); err != nil {
-		log.Error(err, "failed to delete sandbox")
+		klog.ErrorS(err, "Failed to delete sandbox", "sandbox", klog.KObj(sbx))
 		return err
 	}
-	log.Info("sandbox locked and deleted")
-	r.Recorder.Eventf(sbx, corev1.EventTypeNormal, EventSandboxScaledDown, "Sandbox %s locked and deleted", klog.KObj(sbx))
+	klog.V(consts.DebugLogLevel).InfoS("Sandbox locked and deleted", "sandbox", klog.KObj(sbx))
+	r.Recorder.Eventf(sbx, corev1.EventTypeNormal, events.SandboxScaledDown, "Sandbox %s locked and deleted", klog.KObj(sbx))
 	return nil
 }
 
@@ -377,18 +375,17 @@ func (r *Reconciler) scaleDownSandbox(ctx context.Context, sbx *agentsv1alpha1.S
 // require maintaining replica counts (or rather, only needs to maintain the dead group's replica count at 0), so just
 // delete all dead sandboxes.
 func (r *Reconciler) deleteDeadSandboxes(ctx context.Context, dead []*agentsv1alpha1.Sandbox) error {
-	log := logf.FromContext(ctx).V(consts.DebugLogLevel)
 	failNum := 0
 	for _, sbx := range dead {
 		if sbx.DeletionTimestamp != nil {
 			continue
 		}
 		if err := r.Delete(ctx, sbx); err != nil {
-			log.Error(err, "failed to delete sandbox")
+			klog.ErrorS(err, "Failed to delete sandbox", "sandbox", klog.KObj(sbx))
 			failNum++
 		}
-		log.Info("sandbox deleted", "sandbox", klog.KObj(sbx))
-		r.Recorder.Eventf(sbx, corev1.EventTypeNormal, EventFailedSandboxDeleted, "Sandbox %s deleted", klog.KObj(sbx))
+		klog.V(consts.DebugLogLevel).InfoS("Sandbox deleted", "sandbox", klog.KObj(sbx))
+		r.Recorder.Eventf(sbx, corev1.EventTypeNormal, events.FailedSandboxDeleted, "Sandbox %s deleted", klog.KObj(sbx))
 	}
 	if failNum > 0 {
 		return fmt.Errorf("failed to delete %d sandboxes", failNum)
@@ -397,10 +394,9 @@ func (r *Reconciler) deleteDeadSandboxes(ctx context.Context, dead []*agentsv1al
 }
 
 func (r *Reconciler) updateSandboxSetStatus(ctx context.Context, newStatus agentsv1alpha1.SandboxSetStatus, sbs *agentsv1alpha1.SandboxSet) error {
-	log := logf.FromContext(ctx).V(consts.DebugLogLevel)
 	clone := sbs.DeepCopy()
 	if err := r.Get(ctx, client.ObjectKey{Namespace: sbs.Namespace, Name: sbs.Name}, clone); err != nil {
-		log.Error(err, "failed to get updated sandboxset from client")
+		klog.ErrorS(err, "Failed to get updated sandboxset from client", "sandboxSet", klog.KObj(sbs))
 		return client.IgnoreNotFound(err)
 	}
 	if reflect.DeepEqual(clone.Status, newStatus) {
@@ -409,7 +405,7 @@ func (r *Reconciler) updateSandboxSetStatus(ctx context.Context, newStatus agent
 	clone.Status = newStatus
 	err := r.Status().Update(ctx, clone)
 	if err == nil {
-		log.Info("update sandboxset status success", "status", utils.DumpJson(newStatus))
+		klog.V(consts.DebugLogLevel).InfoS("Update sandboxset status success", "sandboxSet", klog.KObj(sbs), "status", utils.DumpJson(newStatus))
 		// Update metrics for availableReplicas and replicas
 		sandboxSetReplicas.WithLabelValues(sbs.Namespace, sbs.Name).Set(float64(newStatus.Replicas))
 		sandboxSetAvailableReplicas.WithLabelValues(sbs.Namespace, sbs.Name).Set(float64(newStatus.AvailableReplicas))
@@ -417,13 +413,12 @@ func (r *Reconciler) updateSandboxSetStatus(ctx context.Context, newStatus agent
 		sandboxSetUpdatedReplicas.WithLabelValues(sbs.Namespace, sbs.Name).Set(float64(newStatus.UpdatedReplicas))
 		sandboxSetUpdatedAvailableReplicas.WithLabelValues(sbs.Namespace, sbs.Name).Set(float64(newStatus.UpdatedAvailableReplicas))
 	} else {
-		log.Error(err, "update sandboxset status failed")
+		klog.ErrorS(err, "Update sandboxset status failed", "sandboxSet", klog.KObj(sbs))
 	}
 	return err
 }
 
 func (r *Reconciler) groupAllSandboxes(ctx context.Context, sbs *agentsv1alpha1.SandboxSet) (GroupedSandboxes, error) {
-	log := logf.FromContext(ctx)
 	sandboxList := &agentsv1alpha1.SandboxList{}
 	if err := r.List(ctx, sandboxList,
 		client.InNamespace(sbs.Namespace),
@@ -436,7 +431,6 @@ func (r *Reconciler) groupAllSandboxes(ctx context.Context, sbs *agentsv1alpha1.
 	for i := range sandboxList.Items {
 		sbx := &sandboxList.Items[i]
 		scaleUpExpectation.ObserveScale(GetControllerKey(sbs), expectations.Create, sbx.Name)
-		debugLog := log.V(consts.DebugLogLevel).WithValues("sandbox", sbx.Name)
 		state, reason := stateutils.GetSandboxState(sbx)
 		switch state {
 		case agentsv1alpha1.SandboxStateCreating:
@@ -452,9 +446,9 @@ func (r *Reconciler) groupAllSandboxes(ctx context.Context, sbs *agentsv1alpha1.
 		default: // unknown, impossible, just in case
 			return GroupedSandboxes{}, fmt.Errorf("cannot find state for sandbox %s", sbx.Name)
 		}
-		debugLog.Info("sandbox is grouped", "state", state, "reason", reason)
+		klog.V(consts.DebugLogLevel).InfoS("Sandbox is grouped", "sandboxSet", klog.KObj(sbs), "sandbox", sbx.Name, "state", state, "reason", reason)
 	}
-	log.Info("sandbox group done", "total", len(sandboxList.Items), "creating", len(groups.Creating),
+	klog.InfoS("Sandbox group done", "sandboxSet", klog.KObj(sbs), "total", len(sandboxList.Items), "creating", len(groups.Creating),
 		"available", len(groups.Available), "used", len(groups.Used), "failed", len(groups.Dead))
 	return groups, nil
 }

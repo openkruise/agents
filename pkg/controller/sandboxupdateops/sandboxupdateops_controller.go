@@ -38,6 +38,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/controller/events"
 	"github.com/openkruise/agents/pkg/discovery"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 )
@@ -177,12 +178,24 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	switch {
 	case ops.Status.Phase == "" || ops.Status.Phase == agentsv1alpha1.SandboxUpdateOpsPending:
 		newStatus.Phase = agentsv1alpha1.SandboxUpdateOpsUpdating
+		klog.InfoS("SandboxUpdateOps transitioning from Pending to Updating",
+			"sandboxUpdateOps", klog.KObj(ops), "totalSandboxes", total)
+		r.Recorder.Eventf(ops, v1.EventTypeNormal, events.UpdateOpsStarted,
+			"SandboxUpdateOps %s started updating %d sandboxes", ops.Name, total)
 
 	case updated+failed == total && len(candidates) == 0:
 		if failed > 0 {
 			newStatus.Phase = agentsv1alpha1.SandboxUpdateOpsFailed
+			klog.InfoS("SandboxUpdateOps transitioning to Failed",
+				"sandboxUpdateOps", klog.KObj(ops), "failed", failed, "updated", updated)
+			r.Recorder.Eventf(ops, v1.EventTypeWarning, events.UpdateOpsFailed,
+				"SandboxUpdateOps %s failed with %d failed sandboxes out of %d total", ops.Name, failed, total)
 		} else {
 			newStatus.Phase = agentsv1alpha1.SandboxUpdateOpsCompleted
+			klog.InfoS("SandboxUpdateOps transitioning to Completed",
+				"sandboxUpdateOps", klog.KObj(ops), "updated", updated)
+			r.Recorder.Eventf(ops, v1.EventTypeNormal, events.UpdateOpsCompleted,
+				"SandboxUpdateOps %s completed successfully, %d sandboxes updated", ops.Name, updated)
 		}
 	}
 
@@ -199,14 +212,16 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 			if err := r.applySandboxPatch(ctx, candidates[i], ops); err != nil {
 				klog.ErrorS(err, "Failed to apply patch to sandbox",
-					"sandbox", klog.KObj(candidates[i]), "ops", klog.KObj(ops))
-				r.Recorder.Eventf(ops, v1.EventTypeWarning, "PatchFailed",
+					"sandbox", klog.KObj(candidates[i]), "sandboxUpdateOps", klog.KObj(ops))
+				r.Recorder.Eventf(ops, v1.EventTypeWarning, events.UpdateOpsFailed,
 					"Failed to patch sandbox %s: %v", candidates[i].Name, err)
 				if patchErr == nil {
 					patchErr = err
 				}
 			} else {
-				r.Recorder.Eventf(ops, v1.EventTypeNormal, "SandboxUpgrading",
+				klog.InfoS("Sandbox upgrade initiated",
+					"sandbox", klog.KObj(candidates[i]), "sandboxUpdateOps", klog.KObj(ops))
+				r.Recorder.Eventf(ops, v1.EventTypeNormal, events.UpdateOpsProgressing,
 					"Upgrading sandbox %s", candidates[i].Name)
 			}
 		}

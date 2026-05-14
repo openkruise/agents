@@ -32,6 +32,7 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
+	"github.com/openkruise/agents/pkg/controller/events"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 	"github.com/openkruise/agents/pkg/utils/inplaceupdate"
@@ -88,6 +89,8 @@ func (r *commonControl) EnsureSandboxRunning(ctx context.Context, args EnsureFun
 	if pod.Status.Phase == corev1.PodRunning {
 		newStatus.Phase = agentsv1alpha1.SandboxRunning
 		syncSandboxStatusFromPod(pod, newStatus)
+		klog.InfoS("Sandbox transitioned to Running", "sandbox", klog.KObj(box))
+		r.recorder.Eventf(box, corev1.EventTypeNormal, events.SandboxReady, "Sandbox is now Ready")
 		return 0, nil
 	}
 
@@ -184,6 +187,7 @@ func (r *commonControl) EnsureSandboxPaused(ctx context.Context, args EnsureFunc
 		cond.LastTransitionTime = metav1.Now()
 		utils.SetSandboxCondition(newStatus, *cond)
 		klog.InfoS("Pod deletion completed, pause phase completed", "sandbox", klog.KObj(box))
+		r.recorder.Eventf(box, corev1.EventTypeNormal, events.SandboxPaused, "Sandbox paused successfully")
 		return nil
 	}
 	// Pod deletion incomplete, waiting
@@ -237,6 +241,8 @@ func (r *commonControl) EnsureSandboxResumed(ctx context.Context, args EnsureFun
 		}
 
 		utils.SetSandboxCondition(newStatus, *rCond)
+		klog.InfoS("Sandbox resumed successfully", "sandbox", klog.KObj(box))
+		r.recorder.Eventf(box, corev1.EventTypeNormal, events.SandboxResumed, "Sandbox resumed successfully and Ready")
 	}
 	return nil
 }
@@ -280,6 +286,7 @@ func (r *commonControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureFu
 			LastTransitionTime: metav1.Now(),
 		}
 		utils.SetSandboxCondition(newStatus, *upgradeCond)
+		klog.InfoS("Sandbox upgrade started", "sandbox", klog.KObj(box))
 	}
 
 	switch upgradeCond.Reason {
@@ -364,6 +371,8 @@ func (r *commonControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureFu
 			Message:            "",
 			LastTransitionTime: metav1.Now(),
 		})
+		klog.InfoS("Sandbox upgraded successfully", "sandbox", klog.KObj(box))
+		r.recorder.Eventf(box, corev1.EventTypeNormal, events.SandboxUpgraded, "Sandbox upgrade completed successfully")
 	}
 
 	return nil
@@ -373,6 +382,8 @@ func (r *commonControl) EnsureSandboxTerminated(ctx context.Context, args Ensure
 	pod, box, _ := args.Pod, args.Box, args.NewStatus
 	var err error
 	if pod == nil {
+		klog.InfoS("Sandbox termination started", "sandbox", klog.KObj(box))
+		r.recorder.Eventf(box, corev1.EventTypeNormal, events.SandboxDeleting, "Sandbox termination/finalizer cleanup started")
 		_, err = utils.PatchFinalizer(ctx, r.Client, box, utils.RemoveFinalizerOpType, utils.SandboxFinalizer)
 		if err != nil {
 			klog.ErrorS(err, "update sandbox finalizer failed", "sandbox", klog.KObj(box))
@@ -385,6 +396,8 @@ func (r *commonControl) EnsureSandboxTerminated(ctx context.Context, args Ensure
 		return nil
 	}
 
+	klog.InfoS("Sandbox termination started", "sandbox", klog.KObj(box))
+	r.recorder.Eventf(box, corev1.EventTypeNormal, events.SandboxDeleting, "Sandbox termination/finalizer cleanup started")
 	err = client.IgnoreNotFound(r.Delete(ctx, pod))
 	if err != nil {
 		klog.ErrorS(err, "delete pod failed", "sandbox", klog.KObj(box))
@@ -415,10 +428,12 @@ func (r *commonControl) createPod(ctx context.Context, box *agentsv1alpha1.Sandb
 		ScaleExpectation.ObserveScale(GetControllerKey(box), expectations.Create, box.Name)
 		if !errors.IsAlreadyExists(err) {
 			klog.ErrorS(err, "create pod failed", "sandbox", klog.KObj(box))
+			r.recorder.Eventf(box, corev1.EventTypeWarning, events.SandboxPodCreateFailed, "Failed to create pod: %v", err)
 			return nil, err
 		}
 	}
-	klog.InfoS("Create pod success", "sandbox", klog.KObj(box), "Body", utils.DumpJson(pod))
+	klog.InfoS("Create pod success", "sandbox", klog.KObj(box), "pod", pod.Name)
+	r.recorder.Eventf(box, corev1.EventTypeNormal, events.SandboxPodCreated, "Pod %s created for sandbox", pod.Name)
 	return pod, nil
 }
 

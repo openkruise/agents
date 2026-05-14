@@ -25,15 +25,16 @@ import (
 
 	"github.com/google/uuid"
 	"golang.org/x/time/rate"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/agent-runtime/common"
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
 	"github.com/openkruise/agents/pkg/cache"
+	"github.com/openkruise/agents/pkg/controller/events"
 	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
@@ -70,8 +71,14 @@ func NewCommonControl(c client.Client, recorder record.EventRecorder, cache cach
 
 // EnsureClaimClaiming handles the logic for claiming sandboxes
 func (c *commonControl) EnsureClaimClaiming(ctx context.Context, args ClaimArgs) (RequeueStrategy, error) {
-	log := logf.FromContext(ctx)
 	claim, sandboxSet := args.Claim, args.SandboxSet
+
+	// Only emit binding event when claim first enters Claiming phase
+	if claim.Status.Phase != agentsv1alpha1.SandboxClaimPhaseClaiming {
+		c.recorder.Eventf(claim, corev1.EventTypeNormal, events.SandboxClaimBinding,
+			"SandboxClaim %s starts binding sandboxes from pool %s", claim.Name, sandboxSet.Name)
+		klog.InfoS("SandboxClaim starts binding sandboxes", "sandboxClaim", klog.KObj(claim), "pool", sandboxSet.Name)
+	}
 
 	// Step 1: Get desired replicas
 	desiredReplicas := getDesiredReplicas(claim)
@@ -98,7 +105,8 @@ func (c *commonControl) EnsureClaimClaiming(ctx context.Context, args ClaimArgs)
 	// Step 4: Use max(statusCount, actualCount) to get current count
 	currentCount := statusCount
 	if actualCount > currentCount {
-		log.Info("Status count mismatch, using actual count",
+		klog.InfoS("Status count mismatch, using actual count",
+			"sandboxClaim", klog.KObj(claim),
 			"statusCount", statusCount,
 			"actualCount", actualCount)
 		currentCount = actualCount
@@ -109,10 +117,11 @@ func (c *commonControl) EnsureClaimClaiming(ctx context.Context, args ClaimArgs)
 
 	// Step 6: Check if already completed
 	if currentCount >= desiredReplicas {
-		log.Info("All replicas claimed",
+		klog.InfoS("All replicas claimed",
+			"sandboxClaim", klog.KObj(claim),
 			"claimed", currentCount,
 			"desired", desiredReplicas)
-		c.recorder.Event(claim, "Normal", "ClaimCompleted",
+		c.recorder.Event(claim, corev1.EventTypeNormal, events.SandboxClaimCompleted,
 			fmt.Sprintf("Successfully claimed %d/%d sandboxes", currentCount, desiredReplicas))
 		args.NewStatus.Message = fmt.Sprintf("Completed: %d/%d claimed", currentCount, desiredReplicas)
 		// Requeue immediately to transition to Completed phase
@@ -124,8 +133,8 @@ func (c *commonControl) EnsureClaimClaiming(ctx context.Context, args ClaimArgs)
 		if res := claim.Spec.InplaceUpdate.Resources; res != nil && (len(res.Requests) > 0 || len(res.Limits) > 0) {
 			if !utilfeature.DefaultFeatureGate.Enabled(features.SandboxInPlaceResourceResizeGate) {
 				msg := fmt.Sprintf("in-place resource resize is disabled by feature gate %s", features.SandboxInPlaceResourceResizeGate)
-				log.Info(msg)
-				c.recorder.Event(claim, "Warning", "FeatureGateDisabled", msg)
+				klog.InfoS("Feature gate disabled for in-place resource resize", "sandboxClaim", klog.KObj(claim), "featureGate", features.SandboxInPlaceResourceResizeGate)
+				c.recorder.Event(claim, corev1.EventTypeWarning, events.FeatureGateDisabled, msg)
 				TransitionToCompleted(args.NewStatus, "FeatureGateDisabled", msg)
 				return NoRequeue(), nil
 			}
@@ -139,7 +148,8 @@ func (c *commonControl) EnsureClaimClaiming(ctx context.Context, args ClaimArgs)
 	// Step 8: Perform claim
 	claimed, err := c.claimSandboxes(ctx, claim, sandboxSet, batchSize)
 	if err != nil {
-		log.Error(err, "Claim attempts completed with errors",
+		klog.ErrorS(err, "Claim attempts completed with errors",
+			"sandboxClaim", klog.KObj(claim),
 			"claimed", claimed, "attempted", batchSize)
 	}
 
@@ -150,20 +160,22 @@ func (c *commonControl) EnsureClaimClaiming(ctx context.Context, args ClaimArgs)
 
 	// Step 10: Record results and determine requeue strategy
 	if claimed > 0 {
-		log.Info("Claimed sandboxes in this cycle",
+		klog.InfoS("Claimed sandboxes in this cycle",
+			"sandboxClaim", klog.KObj(claim),
 			"claimed", claimed,
 			"total", finalCount,
 			"desired", desiredReplicas)
-		c.recorder.Event(claim, "Normal", "SandboxClaimed",
+		c.recorder.Event(claim, corev1.EventTypeNormal, events.SandboxClaimed,
 			fmt.Sprintf("Claimed %d sandbox(es), total: %d/%d", claimed, finalCount, desiredReplicas))
 		// Made progress, requeue immediately to continue claiming
 		return RequeueImmediately(), nil
 	}
 
 	// No progress - no available sandboxes
-	log.Info("No available sandboxes, will retry",
+	klog.InfoS("No available sandboxes, will retry",
+		"sandboxClaim", klog.KObj(claim),
 		"retryInterval", ClaimRetryInterval)
-	c.recorder.Event(claim, "Warning", "NoAvailableSandboxes",
+	c.recorder.Event(claim, corev1.EventTypeWarning, events.NoAvailableSandboxes,
 		fmt.Sprintf("No available sandboxes in pool %s", sandboxSet.Name))
 	// Retry after interval to avoid busy loop
 	return RequeueAfter(ClaimRetryInterval), nil
@@ -171,52 +183,49 @@ func (c *commonControl) EnsureClaimClaiming(ctx context.Context, args ClaimArgs)
 
 // EnsureClaimCompleted handles claim in Completed phase
 func (c *commonControl) EnsureClaimCompleted(ctx context.Context, args ClaimArgs) (RequeueStrategy, error) {
-	log := logf.FromContext(ctx)
 	claim := args.Claim
 
-	log.V(1).Info("EnsureClaimCompleted called", "phase", args.NewStatus.Phase)
+	klog.V(1).InfoS("EnsureClaimCompleted called", "sandboxClaim", klog.KObj(claim), "phase", args.NewStatus.Phase)
 
 	// Check if TTL cleanup is needed
 	if claim.Spec.TTLAfterCompleted != nil && args.NewStatus.CompletionTime != nil {
 		ttl := claim.Spec.TTLAfterCompleted.Duration
 		// Negative TTL means never delete - skip TTL cleanup
 		if ttl < 0 {
-			log.V(1).Info("TTL is negative, skipping automatic deletion (never delete)", "ttl", ttl)
+			klog.V(1).InfoS("TTL is negative, skipping automatic deletion (never delete)", "sandboxClaim", klog.KObj(claim), "ttl", ttl)
 			return NoRequeue(), nil
 		}
 		elapsed := time.Since(args.NewStatus.CompletionTime.Time)
 
-		log.Info("Checking TTL for cleanup", "ttl", ttl, "elapsed", elapsed, "completionTime", args.NewStatus.CompletionTime.Time)
+		klog.InfoS("Checking TTL for cleanup", "sandboxClaim", klog.KObj(claim), "ttl", ttl, "elapsed", elapsed, "completionTime", args.NewStatus.CompletionTime.Time)
 
 		// Check if TTL expired
 		if elapsed >= ttl {
-			log.Info("TTL expired, deleting SandboxClaim", "ttl", ttl, "elapsed", elapsed)
-			c.recorder.Event(claim, "Normal", "SandboxClaimTTLDelete", fmt.Sprintf("Deleting SandboxClaim after TTL of %v", ttl))
+			klog.InfoS("TTL expired, deleting SandboxClaim", "sandboxClaim", klog.KObj(claim), "ttl", ttl, "elapsed", elapsed)
+			c.recorder.Event(claim, corev1.EventTypeNormal, events.SandboxClaimTTLDelete, fmt.Sprintf("Deleting SandboxClaim after TTL of %v", ttl))
 			if err := c.Delete(ctx, claim); err != nil {
-				log.Error(err, "failed to delete SandboxClaim")
+				klog.ErrorS(err, "Failed to delete SandboxClaim", "sandboxClaim", klog.KObj(claim))
 				// Return error to trigger exponential backoff retry
 				return NoRequeue(), err
 			}
 
-			log.Info("SandboxClaim deleted successfully due to TTL expiration")
+			klog.InfoS("SandboxClaim deleted successfully due to TTL expiration", "sandboxClaim", klog.KObj(claim))
 			return NoRequeue(), nil
 		}
 
 		// TTL not yet expired, calculate remaining time
 		remaining := ttl - elapsed
-		log.V(1).Info("TTL not yet expired, will requeue", "remaining", remaining)
+		klog.V(1).InfoS("TTL not yet expired, will requeue", "sandboxClaim", klog.KObj(claim), "remaining", remaining)
 		return RequeueAfter(remaining), nil
 	}
 
 	// No TTL configured, no need to requeue
-	log.V(1).Info("No TTL cleanup configured", "hasTTL", claim.Spec.TTLAfterCompleted != nil, "hasCompletionTime", args.NewStatus.CompletionTime != nil)
+	klog.V(1).InfoS("No TTL cleanup configured", "sandboxClaim", klog.KObj(claim), "hasTTL", claim.Spec.TTLAfterCompleted != nil, "hasCompletionTime", args.NewStatus.CompletionTime != nil)
 	return NoRequeue(), nil
 }
 
 // claimSandboxes attempts to claim up to batchSize sandboxes from the pool
 func (c *commonControl) claimSandboxes(ctx context.Context, claim *agentsv1alpha1.SandboxClaim, sandboxSet *agentsv1alpha1.SandboxSet, batchSize int) (int, error) {
-	log := logf.FromContext(ctx)
-
 	// Validate and build claim options
 	opts, err := c.buildClaimOptions(ctx, claim, sandboxSet)
 	if err != nil {
@@ -230,11 +239,12 @@ func (c *commonControl) claimSandboxes(ctx context.Context, claim *agentsv1alpha
 		// Pass nil for rand so sandboxcr uses global rand (concurrent-safe).
 		sbx, metrics, claimErr := sandboxcr.TryClaimSandbox(ctx, opts, &c.pickCache, c.cache, claimLockChannel, limiter)
 		if claimErr != nil {
-			log.Error(claimErr, "Failed to claim sandbox")
+			klog.ErrorS(claimErr, "Failed to claim sandbox", "sandboxClaim", klog.KObj(claim))
 			return claimErr
 		}
 
-		log.Info("Successfully claimed sandbox",
+		klog.InfoS("Successfully claimed sandbox",
+			"sandboxClaim", klog.KObj(claim),
 			"sandbox", sbx.GetName(),
 			"totalCost", metrics.Total,
 			"pickAndLock", metrics.PickAndLock,
@@ -243,7 +253,7 @@ func (c *commonControl) claimSandboxes(ctx context.Context, claim *agentsv1alpha
 	})
 
 	if claimedCount > 0 {
-		log.Info("Claimed sandboxes successfully", "count", claimedCount, "attempted", batchSize)
+		klog.InfoS("Claimed sandboxes successfully", "sandboxClaim", klog.KObj(claim), "count", claimedCount, "attempted", batchSize)
 	}
 
 	return claimedCount, err
@@ -251,7 +261,6 @@ func (c *commonControl) claimSandboxes(ctx context.Context, claim *agentsv1alpha
 
 // buildClaimOptions constructs ClaimSandboxOptions for TryClaimSandbox
 func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1alpha1.SandboxClaim, sandboxSet *agentsv1alpha1.SandboxSet) (infra.ClaimSandboxOptions, error) {
-	logger := logf.FromContext(ctx).WithValues("SandboxClaim", klog.KObj(claim))
 	opts := infra.ClaimSandboxOptions{
 		User:     string(claim.UID), // Use UID to ensure uniqueness across claim recreations
 		Template: sandboxSet.Name,
@@ -344,8 +353,8 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 				AccessToken: uuid.NewString(),
 			}
 		} else {
-			logger.Error(fmt.Errorf("agent-runtime not configured in SandboxSet"), "SkipInitRuntime is false but no agent-runtime found, skip InitRuntime",
-				"sandboxSet", klog.KObj(sandboxSet), "claim", klog.KObj(claim))
+			klog.ErrorS(fmt.Errorf("agent-runtime not configured in SandboxSet"), "SkipInitRuntime is false but no agent-runtime found, skip InitRuntime",
+				"sandboxSet", klog.KObj(sandboxSet), "sandboxClaim", klog.KObj(claim))
 		}
 	}
 	if len(claim.Spec.DynamicVolumesMount) > 0 {
@@ -355,7 +364,7 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 			driverName, csiReqConfigRaw, genErr := csiClient.CSIMountOptionsConfig(ctx, mountConfig)
 			if genErr != nil {
 				errMsg := "failed to generate csi mount options config for sandbox"
-				logger.Error(genErr, errMsg, "mountConfigRequest", mountConfig)
+				klog.ErrorS(genErr, errMsg, "sandboxClaim", klog.KObj(claim), "mountConfigRequest", mountConfig)
 				return opts, fmt.Errorf("%s, err: %v", errMsg, genErr)
 			}
 			csiMountOptions = append(csiMountOptions, config.MountConfig{
@@ -370,7 +379,7 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 		// json marshal csi mount config to raw string
 		csiMountOptionsRaw, err := json.Marshal(claim.Spec.DynamicVolumesMount)
 		if err != nil {
-			logger.Error(err, "failed to marshal csi mount config")
+			klog.ErrorS(err, "Failed to marshal csi mount config", "sandboxClaim", klog.KObj(claim))
 			return opts, fmt.Errorf("failed to marshal csi mount config, err: %v", err)
 		}
 		opts.CSIMount.MountOptionListRaw = string(csiMountOptionsRaw)
@@ -386,7 +395,6 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 
 // countClaimedSandboxes counts sandboxes that are claimed by this claim
 func (c *commonControl) countClaimedSandboxes(ctx context.Context, claim *agentsv1alpha1.SandboxClaim) (int32, error) {
-	log := logf.FromContext(ctx)
 	sandboxes, err := c.cache.ListSandboxes(ctx, cache.ListSandboxesOptions{
 		User:      string(claim.UID),
 		Namespace: claim.Namespace,
@@ -398,7 +406,7 @@ func (c *commonControl) countClaimedSandboxes(ctx context.Context, claim *agents
 	for _, sbx := range sandboxes {
 		state, reason := stateutils.GetSandboxState(sbx)
 		if state == agentsv1alpha1.SandboxStateDead {
-			log.Info("skip counting dead sandbox", "reason", reason)
+			klog.InfoS("Skip counting dead sandbox", "sandboxClaim", klog.KObj(claim), "reason", reason)
 			continue
 		}
 		cnt++

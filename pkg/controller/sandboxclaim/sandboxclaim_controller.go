@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"reflect"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -35,13 +36,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
-	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	infracache "github.com/openkruise/agents/pkg/cache"
+	"github.com/openkruise/agents/pkg/controller/events"
 	"github.com/openkruise/agents/pkg/controller/sandboxclaim/core"
 	"github.com/openkruise/agents/pkg/discovery"
 	"github.com/openkruise/agents/pkg/features"
@@ -112,8 +113,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return reconcile.Result{}, client.IgnoreNotFound(err)
 	}
 
-	logger := logf.FromContext(ctx).WithValues("sandboxclaim", klog.KObj(claim))
-	logger.Info("Began to process SandboxClaim for reconcile")
+	klog.InfoS("Began to process SandboxClaim for reconcile", "sandboxClaim", klog.KObj(claim))
 
 	// Record sandbox claim lifecycle metrics on every reconcile
 	recordSandboxClaimMetrics(claim)
@@ -122,10 +122,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	core.ResourceVersionExpectations.Observe(claim)
 	if isSatisfied, unsatisfiedDuration := core.ResourceVersionExpectations.IsSatisfied(claim); !isSatisfied {
 		if unsatisfiedDuration < expectations.ExpectationTimeout {
-			logger.Info("Not satisfied resourceVersion for SandboxClaim, wait for cache event")
+			klog.InfoS("Not satisfied resourceVersion for SandboxClaim, wait for cache event", "sandboxClaim", klog.KObj(claim))
 			return reconcile.Result{RequeueAfter: expectations.ExpectationTimeout - unsatisfiedDuration}, nil
 		}
-		logger.Info("Expectation unsatisfied overtime for SandboxClaim, wait for cache event timeout", "timeout", unsatisfiedDuration)
+		klog.InfoS("Expectation unsatisfied overtime for SandboxClaim, wait for cache event timeout", "sandboxClaim", klog.KObj(claim), "timeout", unsatisfiedDuration)
 		core.ResourceVersionExpectations.Delete(claim)
 	}
 
@@ -137,7 +137,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	sandboxSetKey := client.ObjectKey{Namespace: claim.Namespace, Name: claim.Spec.TemplateName}
 	if err := r.Get(ctx, sandboxSetKey, sandboxSet); err != nil {
 		if errors.IsNotFound(err) {
-			logger.Info("SandboxSet not found, marking claim as completed")
+			klog.InfoS("SandboxSet not found, marking claim as completed", "sandboxClaim", klog.KObj(claim), "sandboxSet", claim.Spec.TemplateName)
 			core.TransitionToCompleted(newStatus, "SandboxSetNotFound",
 				fmt.Sprintf("SandboxSet %s not found", claim.Spec.TemplateName))
 			return ctrl.Result{}, r.updateClaimStatus(ctx, *newStatus, claim)
@@ -171,32 +171,32 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		strategy, err = r.getControl().EnsureClaimCompleted(ctx, args)
 
 	default:
-		logger.Info("Unknown phase encountered", "phase", newStatus.Phase)
-		r.recorder.Event(claim, "Warning", "UnknownPhase",
+		klog.InfoS("Unknown phase encountered", "sandboxClaim", klog.KObj(claim), "phase", newStatus.Phase)
+		r.recorder.Event(claim, corev1.EventTypeWarning, events.UnknownPhase,
 			fmt.Sprintf("Unknown phase: %s", newStatus.Phase))
 		return ctrl.Result{}, nil
 	}
 
 	if err != nil {
 		// Return error to controller-runtime for exponential backoff retry
-		logger.Error(err, "Failed to ensure claim, will retry with backoff")
+		klog.ErrorS(err, "Failed to ensure claim, will retry with backoff", "sandboxClaim", klog.KObj(claim))
 		return reconcile.Result{}, err
 	}
 
 	// Update status after successful execution
 	// If update fails, return error to trigger retry (but lose calculated strategy)
 	if err := r.updateClaimStatus(ctx, *newStatus, claim); err != nil {
-		logger.Error(err, "Failed to update status, will retry")
+		klog.ErrorS(err, "Failed to update status, will retry", "sandboxClaim", klog.KObj(claim))
 		return ctrl.Result{}, err
 	}
 
 	// Convert RequeueStrategy to ctrl.Result
 	if strategy.Immediate {
-		logger.V(1).Info("Immediate requeue requested")
+		klog.V(1).InfoS("Immediate requeue requested", "sandboxClaim", klog.KObj(claim))
 		return ctrl.Result{Requeue: true}, nil
 	}
 	if strategy.After > 0 {
-		logger.V(1).Info("Delayed requeue requested", "after", strategy.After)
+		klog.V(1).InfoS("Delayed requeue requested", "sandboxClaim", klog.KObj(claim), "after", strategy.After)
 		return ctrl.Result{RequeueAfter: strategy.After}, nil
 	}
 	// No requeue, wait for Watch events
@@ -208,8 +208,6 @@ func (r *Reconciler) getControl() core.ClaimControl {
 }
 
 func (r *Reconciler) updateClaimStatus(ctx context.Context, newStatus agentsv1alpha1.SandboxClaimStatus, claim *agentsv1alpha1.SandboxClaim) error {
-	logger := logf.FromContext(ctx).WithValues("sandboxclaim", klog.KObj(claim))
-
 	if reflect.DeepEqual(claim.Status, newStatus) {
 		return nil
 	}
@@ -226,14 +224,14 @@ func (r *Reconciler) updateClaimStatus(ctx context.Context, newStatus agentsv1al
 
 	err := client.IgnoreNotFound(r.Status().Patch(ctx, rcvObject, client.RawPatch(types.MergePatchType, []byte(patchStatus))))
 	if err != nil {
-		logger.Error(err, "update sandboxclaim status failed", "patchStatus", patchStatus)
+		klog.ErrorS(err, "Update sandboxclaim status failed", "sandboxClaim", klog.KObj(claim), "patchStatus", patchStatus)
 		return err
 	}
 
 	// Set expectation for resource version
 	core.ResourceVersionExpectations.Expect(rcvObject)
 
-	logger.Info("update sandboxclaim status success", "status", utils.DumpJson(newStatus))
+	klog.InfoS("Update sandboxclaim status success", "sandboxClaim", klog.KObj(claim), "status", utils.DumpJson(newStatus))
 	return nil
 }
 

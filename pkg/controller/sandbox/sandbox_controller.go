@@ -29,6 +29,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -39,6 +40,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/controller/events"
 	"github.com/openkruise/agents/pkg/controller/sandbox/core"
 	"github.com/openkruise/agents/pkg/discovery"
 	"github.com/openkruise/agents/pkg/features"
@@ -62,13 +64,15 @@ func Add(mgr manager.Manager) error {
 	}
 
 	rateLimiter := core.NewRateLimiter()
+	recorder := mgr.GetEventRecorderFor("sandbox")
 	err := (&SandboxReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		recorder: recorder,
 		controls: core.NewSandboxControl(core.SandboxControlArgs{
 			Client:      mgr.GetClient(),
 			APIReader:   mgr.GetAPIReader(),
-			Recorder:    mgr.GetEventRecorderFor("sandbox"),
+			Recorder:    recorder,
 			RateLimiter: rateLimiter,
 		}), rateLimiter: rateLimiter,
 	}).SetupWithManager(mgr)
@@ -83,6 +87,7 @@ func Add(mgr manager.Manager) error {
 type SandboxReconciler struct {
 	client.Client
 	Scheme      *runtime.Scheme
+	recorder    record.EventRecorder
 	controls    map[string]core.SandboxControl
 	rateLimiter *core.RateLimiter
 }
@@ -222,7 +227,23 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 	// calculate sandbox status
 	var shouldRequeue bool
 	newStatus, shouldRequeue = calculateStatus(args)
+	// Emit events on sandbox phase transitions detected by calculateStatus.
+	if box.Status.Phase != newStatus.Phase {
+		switch newStatus.Phase {
+		case agentsv1alpha1.SandboxPaused:
+			r.recorder.Eventf(box, corev1.EventTypeNormal, events.SandboxPausing, "Sandbox is pausing")
+		case agentsv1alpha1.SandboxUpgrading:
+			r.recorder.Eventf(box, corev1.EventTypeNormal, events.SandboxUpgrading, "Sandbox upgrade started")
+		case agentsv1alpha1.SandboxResuming:
+			r.recorder.Eventf(box, corev1.EventTypeNormal, events.SandboxResuming, "Sandbox is resuming")
+		}
+	}
 	if shouldRequeue {
+		// Emit event when sandbox enters Failed state
+		if newStatus.Phase == agentsv1alpha1.SandboxFailed {
+			klog.InfoS("Sandbox entered Failed state", "sandbox", klog.KObj(box), "message", newStatus.Message)
+			r.recorder.Eventf(box, corev1.EventTypeWarning, events.SandboxFailed, "Sandbox failed: %s", newStatus.Message)
+		}
 		return reconcile.Result{RequeueAfter: requeueAfter}, r.updateSandboxStatus(ctx, *newStatus, box)
 	}
 

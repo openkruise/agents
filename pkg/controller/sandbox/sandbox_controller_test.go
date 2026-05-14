@@ -735,8 +735,9 @@ func TestSandboxReconciler_Reconcile(t *testing.T) {
 			client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&agentsv1alpha1.Sandbox{}).WithObjects(objects...).Build()
 			rl := core.NewRateLimiter()
 			reconciler := &SandboxReconciler{
-				Client: client,
-				Scheme: scheme,
+				Client:   client,
+				Scheme:   scheme,
+				recorder: fakeRecorder,
 				controls: core.NewSandboxControl(core.SandboxControlArgs{
 					Client:      client,
 					Recorder:    fakeRecorder,
@@ -3018,8 +3019,9 @@ func TestReconcile_UpgradingPhase(t *testing.T) {
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&agentsv1alpha1.Sandbox{}).WithObjects(sandbox, pod).Build()
 	rl := core.NewRateLimiter()
 	reconciler := &SandboxReconciler{
-		Client: fakeClient,
-		Scheme: scheme,
+		Client:   fakeClient,
+		Scheme:   scheme,
+		recorder: fakeRecorder,
 		controls: core.NewSandboxControl(core.SandboxControlArgs{
 			Client:      fakeClient,
 			Recorder:    fakeRecorder,

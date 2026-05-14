@@ -38,6 +38,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/controller/events"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/utils/fieldindex"
 	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
@@ -284,7 +285,7 @@ func TestReconcile_DeleteDead(t *testing.T) {
 				createAvailableSandboxes: 1,
 			},
 			replicas:     1,
-			expectEvents: []string{EventFailedSandboxDeleted, EventFailedSandboxDeleted},
+			expectEvents: []string{events.FailedSandboxDeleted, events.FailedSandboxDeleted},
 			checkFunc:    checkFunc(1),
 		},
 		{
@@ -295,7 +296,7 @@ func TestReconcile_DeleteDead(t *testing.T) {
 				createAvailableSandboxes: 1,
 			},
 			replicas:     1,
-			expectEvents: []string{EventFailedSandboxDeleted, EventFailedSandboxDeleted},
+			expectEvents: []string{events.FailedSandboxDeleted, events.FailedSandboxDeleted},
 			checkFunc:    checkFunc(1),
 		},
 	}
@@ -369,7 +370,7 @@ func TestReconcile_BasicScale(t *testing.T) {
 			replicas:             2,
 			expectTotalSandboxes: 2,
 			expectNewSandboxes:   2,
-			expectEvents:         []string{EventSandboxCreated, EventSandboxCreated},
+			expectEvents:         []string{events.SandboxSetScalingUp, events.SandboxCreated, events.SandboxCreated},
 		},
 		{
 			name:     "1 claimed, scale up from 1 to 2",
@@ -382,7 +383,7 @@ func TestReconcile_BasicScale(t *testing.T) {
 			expectStatusAvailable: 1,
 			expectNewSandboxes:    1,
 			expectEvents: []string{
-				EventSandboxCreated,
+				events.SandboxSetScalingUp, events.SandboxCreated, events.SandboxSetRollingUpdateCompleted,
 			},
 		},
 		{
@@ -407,7 +408,7 @@ func TestReconcile_BasicScale(t *testing.T) {
 			expectTotalSandboxes: 6,
 			expectNewSandboxes:   2,
 			expectEvents: []string{
-				EventSandboxCreated, EventSandboxCreated,
+				events.SandboxSetScalingUp, events.SandboxCreated, events.SandboxCreated,
 			},
 		},
 		{
@@ -420,7 +421,7 @@ func TestReconcile_BasicScale(t *testing.T) {
 			expectTotalSandboxes:  2,
 			expectStatusAvailable: 1,
 			expectNewSandboxes:    1,
-			expectEvents:          []string{EventSandboxCreated},
+			expectEvents:          []string{events.SandboxSetScalingUp, events.SandboxCreated, events.SandboxSetRollingUpdateCompleted},
 		},
 		{
 			name:     "1 killed, scale up from 1 to 2, 1 gc",
@@ -432,7 +433,7 @@ func TestReconcile_BasicScale(t *testing.T) {
 			expectTotalSandboxes:  2,
 			expectStatusAvailable: 1,
 			expectNewSandboxes:    1,
-			expectEvents:          []string{EventSandboxCreated, EventFailedSandboxDeleted},
+			expectEvents:          []string{events.SandboxSetScalingUp, events.SandboxCreated, events.FailedSandboxDeleted, events.SandboxSetRollingUpdateCompleted},
 		},
 		{
 			name:     "scale down 1 available",
@@ -442,7 +443,7 @@ func TestReconcile_BasicScale(t *testing.T) {
 			},
 			expectTotalSandboxes:  2,
 			expectStatusAvailable: 2,
-			expectEvents:          []string{EventSandboxScaledDown},
+			expectEvents:          []string{events.SandboxSetScalingDown, events.SandboxScaledDown},
 		},
 		{
 			name:     "scale down 1 creating",
@@ -453,7 +454,7 @@ func TestReconcile_BasicScale(t *testing.T) {
 			},
 			expectTotalSandboxes:  2,
 			expectStatusAvailable: 2,
-			expectEvents:          []string{EventSandboxScaledDown},
+			expectEvents:          []string{events.SandboxSetScalingDown, events.SandboxScaledDown},
 		},
 		{
 			name:     "complex",
@@ -467,9 +468,10 @@ func TestReconcile_BasicScale(t *testing.T) {
 				createDeletedSandboxes:     2, // should gc
 			},
 			expectEvents: []string{
-				EventSandboxCreated,
-				EventFailedSandboxDeleted, EventFailedSandboxDeleted,
-				EventFailedSandboxDeleted, EventFailedSandboxDeleted,
+				events.SandboxSetScalingUp, events.SandboxCreated,
+				events.FailedSandboxDeleted, events.FailedSandboxDeleted,
+				events.FailedSandboxDeleted, events.FailedSandboxDeleted,
+				events.SandboxSetRollingUpdateCompleted,
 			},
 			expectTotalSandboxes:  7,
 			expectStatusAvailable: 2,
@@ -485,7 +487,7 @@ func TestReconcile_BasicScale(t *testing.T) {
 			expectTotalSandboxes:  3,
 			expectStatusAvailable: 1,
 			expectNewSandboxes:    1,
-			expectEvents:          []string{EventSandboxCreated},
+			expectEvents:          []string{events.SandboxSetScalingUp, events.SandboxCreated, events.SandboxSetRollingUpdateCompleted},
 		},
 		{
 			name:     "user story 1, step 2: pause it",
@@ -509,7 +511,7 @@ func TestReconcile_BasicScale(t *testing.T) {
 			expectTotalSandboxes:  4,
 			expectStatusAvailable: 1,
 			expectNewSandboxes:    1,
-			expectEvents:          []string{EventSandboxCreated},
+			expectEvents:          []string{events.SandboxSetScalingUp, events.SandboxCreated, events.SandboxSetRollingUpdateCompleted},
 		},
 		{
 			name:     "user story 1, step 4: claim the third",
@@ -522,7 +524,7 @@ func TestReconcile_BasicScale(t *testing.T) {
 			expectTotalSandboxes:  5,
 			expectStatusAvailable: 1,
 			expectNewSandboxes:    1,
-			expectEvents:          []string{EventSandboxCreated},
+			expectEvents:          []string{events.SandboxSetScalingUp, events.SandboxCreated, events.SandboxSetRollingUpdateCompleted},
 		},
 		{
 			name:     "user story 1, step 5: claim the forth",
@@ -535,7 +537,7 @@ func TestReconcile_BasicScale(t *testing.T) {
 			expectTotalSandboxes:  6,
 			expectStatusAvailable: 1,
 			expectNewSandboxes:    1,
-			expectEvents:          []string{EventSandboxCreated},
+			expectEvents:          []string{events.SandboxSetScalingUp, events.SandboxCreated, events.SandboxSetRollingUpdateCompleted},
 		},
 		{
 			name:     "user story 1, step 6: kill the first",
@@ -623,7 +625,7 @@ func TestReconcile_ScaleDown(t *testing.T) {
 			request: createSandboxRequest{
 				createAvailableSandboxes: 1,
 			},
-			expectEvents: []string{EventSandboxScaledDown},
+			expectEvents: []string{events.SandboxSetScalingDown, events.SandboxScaledDown},
 			checkFunc: func(t *testing.T, sandboxes []v1alpha1.Sandbox) {
 				assert.Equal(t, 0, len(sandboxes))
 			},
@@ -634,7 +636,7 @@ func TestReconcile_ScaleDown(t *testing.T) {
 			request: createSandboxRequest{
 				createCreatingSandboxes: 1,
 			},
-			expectEvents: []string{EventSandboxScaledDown},
+			expectEvents: []string{events.SandboxSetScalingDown, events.SandboxScaledDown},
 			checkFunc: func(t *testing.T, sandboxes []v1alpha1.Sandbox) {
 				assert.Equal(t, 0, len(sandboxes))
 			},
@@ -657,7 +659,7 @@ func TestReconcile_ScaleDown(t *testing.T) {
 				createAvailableSandboxes: 2,
 				createCreatingSandboxes:  2,
 			},
-			expectEvents: []string{EventSandboxScaledDown, EventSandboxScaledDown, EventSandboxScaledDown},
+			expectEvents: []string{events.SandboxSetScalingDown, events.SandboxScaledDown, events.SandboxScaledDown, events.SandboxScaledDown},
 			checkFunc: func(t *testing.T, sandboxes []v1alpha1.Sandbox) {
 				assert.Equal(t, 1, len(sandboxes))
 				// available left
@@ -678,7 +680,8 @@ func TestReconcile_ScaleDown(t *testing.T) {
 			checkFunc: func(t *testing.T, sandboxes []v1alpha1.Sandbox) {
 				assert.Equal(t, 1, len(sandboxes))
 			},
-			expectError: true,
+			expectEvents: []string{events.SandboxSetScalingDown},
+			expectError:  true,
 		},
 		{
 			name:     "scale down manager-owned locked sandboxes",
@@ -690,7 +693,7 @@ func TestReconcile_ScaleDown(t *testing.T) {
 			checkFunc: func(t *testing.T, sandboxes []v1alpha1.Sandbox) {
 				assert.Equal(t, 0, len(sandboxes))
 			},
-			expectEvents: []string{EventSandboxScaledDown},
+			expectEvents: []string{events.SandboxSetScalingDown, events.SandboxScaledDown},
 		},
 	}
 
@@ -1163,7 +1166,7 @@ func TestReconciler_createSandbox(t *testing.T) {
 				select {
 				case evt := <-eventRecorder.Events:
 					assert.Contains(t, evt, "Warning")
-					assert.Contains(t, evt, EventCreateSandboxFailed)
+					assert.Contains(t, evt, events.CreateSandboxFailed)
 				default:
 					t.Errorf("expected a warning event but got none")
 				}
