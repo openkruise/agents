@@ -146,11 +146,11 @@ type SandboxManager struct {
 	peersManager       peers.Peers
 	memberlistBindPort int
 
-	infra      infra.Infrastructure
-	proxy      *proxy.Server
+	infra infra.Infrastructure
+	proxy *proxy.Server
 	// cancelRun cancels the context created in Run(); called by Stop() to
 	// terminate all background goroutines that depend on the run context.
-	cancelRun  context.CancelFunc
+	cancelRun context.CancelFunc
 }
 
 func (m *SandboxManager) Run(ctx context.Context) error {
