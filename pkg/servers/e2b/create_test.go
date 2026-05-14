@@ -499,6 +499,74 @@ func TestCreateSandboxWithClone_InplaceUpdateRejected(t *testing.T) {
 	assert.Contains(t, apiErr.Message, "InplaceUpdate is not supported for clone")
 }
 
+func TestBasicSandboxCreateModifierAutoResumeAnnotation(t *testing.T) {
+	tests := []struct {
+		name             string
+		request          models.NewSandboxRequest
+		expectAnnotation string
+		expectPresent    bool
+	}{
+		{
+			name: "auto resume nil does not write annotation",
+			request: models.NewSandboxRequest{
+				Timeout: 600,
+			},
+		},
+		{
+			name: "auto resume disabled does not write annotation",
+			request: models.NewSandboxRequest{
+				Timeout:    600,
+				AutoResume: &models.AutoResumeConfig{Enabled: false},
+			},
+		},
+		{
+			name: "auto resume enabled writes finite timeout annotation",
+			request: models.NewSandboxRequest{
+				Timeout:    600,
+				AutoResume: &models.AutoResumeConfig{Enabled: true},
+			},
+			expectAnnotation: "timeout:600s",
+			expectPresent:    true,
+		},
+		{
+			name: "auto resume enabled with never timeout writes never annotation",
+			request: models.NewSandboxRequest{
+				Timeout:    600,
+				AutoResume: &models.AutoResumeConfig{Enabled: true},
+				Extensions: models.NewSandboxRequestExtension{
+					NeverTimeout: true,
+				},
+			},
+			expectAnnotation: "timeout:never",
+			expectPresent:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockSbx := &sandboxcr.Sandbox{
+				Sandbox: &agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-sandbox",
+						Namespace: "default",
+					},
+				},
+			}
+			ctrl := &Controller{maxTimeout: 3600}
+
+			ctrl.basicSandboxCreateModifier(context.Background(), mockSbx, tt.request)
+
+			got, ok := mockSbx.GetAnnotations()[v1alpha1.AnnotationWakeOnTraffic]
+			if tt.expectPresent {
+				require.True(t, ok)
+				assert.Equal(t, tt.expectAnnotation, got)
+				return
+			}
+			assert.False(t, ok)
+		})
+	}
+}
+
 func TestParseCreateSandboxRequest(t *testing.T) {
 	ctrl := &Controller{maxTimeout: 3600}
 
@@ -541,6 +609,22 @@ func TestParseCreateSandboxRequest(t *testing.T) {
 		raw, err := json.Marshal(models.NewSandboxRequest{
 			TemplateID: "t1",
 			Metadata:   meta,
+		})
+		require.NoError(t, err)
+
+		req := httptest.NewRequest(http.MethodPost, "/sandboxes", bytes.NewReader(raw))
+		_, apiErr := ctrl.parseCreateSandboxRequest(req)
+		require.NotNil(t, apiErr)
+		assert.Equal(t, http.StatusBadRequest, apiErr.Code)
+		assert.Contains(t, apiErr.Message, "Forbidden metadata key")
+	})
+
+	t.Run("forbidden wake on traffic metadata key", func(t *testing.T) {
+		raw, err := json.Marshal(models.NewSandboxRequest{
+			TemplateID: "t1",
+			Metadata: map[string]string{
+				v1alpha1.AnnotationWakeOnTraffic: "timeout:never",
+			},
 		})
 		require.NoError(t, err)
 
