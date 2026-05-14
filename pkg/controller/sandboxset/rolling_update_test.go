@@ -17,6 +17,8 @@ limitations under the License.
 package sandboxset
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -588,6 +590,41 @@ func TestReconcile_RollingUpdate_SurgeGate(t *testing.T) {
 	assert.Equal(t, 3, oldCount, "scaleDown should have deleted 1 old sandbox (delta=-1), leaving 3")
 }
 
+// errorInjectingClient wraps a client.Client and injects errors for testing
+type errorInjectingClient struct {
+	client.Client
+	getError    error
+	updateError error
+	deleteError error
+	getCalls    int
+	updateCalls int
+	deleteCalls int
+}
+
+func (e *errorInjectingClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	e.getCalls++
+	if e.getError != nil {
+		return e.getError
+	}
+	return e.Client.Get(ctx, key, obj, opts...)
+}
+
+func (e *errorInjectingClient) Update(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
+	e.updateCalls++
+	if e.updateError != nil {
+		return e.updateError
+	}
+	return e.Client.Update(ctx, obj, opts...)
+}
+
+func (e *errorInjectingClient) Delete(ctx context.Context, obj client.Object, opts ...client.DeleteOption) error {
+	e.deleteCalls++
+	if e.deleteError != nil {
+		return e.deleteError
+	}
+	return e.Client.Delete(ctx, obj, opts...)
+}
+
 func TestDeleteSandboxForUpdate_RaceConditionPrevention(t *testing.T) {
 	ctx := t.Context()
 	now := time.Now()
@@ -596,6 +633,7 @@ func TestDeleteSandboxForUpdate_RaceConditionPrevention(t *testing.T) {
 	tests := []struct {
 		name          string
 		setupSandbox  func(*v1alpha1.Sandbox)
+		injectError   func(*errorInjectingClient)
 		expectError   string
 		expectDeleted bool
 		expectSkipped bool
@@ -639,13 +677,63 @@ func TestDeleteSandboxForUpdate_RaceConditionPrevention(t *testing.T) {
 			expectSkipped: true,
 		},
 		{
-			name: "sandbox with deletion timestamp is skipped",
+			name: "sandbox not found during re-fetch is handled gracefully",
 			setupSandbox: func(sbx *v1alpha1.Sandbox) {
-				// We can't set deletionTimestamp directly in fake client,
-				// so we'll test this by deleting the sandbox first
-				// The function should handle NotFound gracefully
+				// We'll delete the sandbox before calling the function
 			},
 			expectSkipped: false, // Will be NotFound, which is handled gracefully
+		},
+		{
+			name: "sandbox already has deletion timestamp",
+			setupSandbox: func(sbx *v1alpha1.Sandbox) {
+				// Mark for deletion
+				deletionTime := metav1.Now()
+				sbx.DeletionTimestamp = &deletionTime
+			},
+			expectSkipped: true,
+		},
+		{
+			name: "get error during re-fetch returns error",
+			injectError: func(ec *errorInjectingClient) {
+				// Inject a generic error (not NotFound) on Get
+				ec.getError = apierrors.NewInternalError(errors.New("simulated get error"))
+			},
+			expectError: "failed to re-fetch sandbox before deletion",
+		},
+		{
+			name: "conflict error during update is handled",
+			injectError: func(ec *errorInjectingClient) {
+				// Inject a conflict error on Update
+				ec.updateError = apierrors.NewConflict(v1alpha1.SandboxSetControllerKind.GroupVersion().WithResource("sandboxes").GroupResource(), "test-sbx", errors.New("simulated conflict"))
+			},
+			expectError: "conflict locking sandbox",
+		},
+		{
+			name: "update error during lock returns error",
+			injectError: func(ec *errorInjectingClient) {
+				// Inject a generic error (not Conflict) on Update
+				ec.updateError = apierrors.NewInternalError(errors.New("simulated update error"))
+			},
+			expectError: "failed to lock sandbox when delete",
+		},
+		{
+			name: "delete error returns error",
+			injectError: func(ec *errorInjectingClient) {
+				// Inject a generic error (not NotFound) on Delete
+				ec.deleteError = apierrors.NewInternalError(errors.New("simulated delete error"))
+			},
+			expectError: "simulated delete error",
+		},
+		{
+			name: "delete not found is handled gracefully",
+			setupSandbox: func(sbx *v1alpha1.Sandbox) {
+				// Sandbox will be deleted between lock and delete
+			},
+			injectError: func(ec *errorInjectingClient) {
+				// Inject NotFound error on Delete
+				ec.deleteError = apierrors.NewNotFound(v1alpha1.SandboxSetControllerKind.GroupVersion().WithResource("sandboxes").GroupResource(), "test-sbx")
+			},
+			expectDeleted: false, // NotFound is handled gracefully
 		},
 	}
 
@@ -653,8 +741,18 @@ func TestDeleteSandboxForUpdate_RaceConditionPrevention(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			k8sClient := NewClient()
 			eventRecorder := record.NewFakeRecorder(20)
+
+			// Wrap client with error injection if needed
+			var testClient client.Client = k8sClient
+			var errorClient *errorInjectingClient
+			if tt.injectError != nil {
+				errorClient = &errorInjectingClient{Client: k8sClient}
+				tt.injectError(errorClient)
+				testClient = errorClient
+			}
+
 			reconciler := &Reconciler{
-				Client:   k8sClient,
+				Client:   testClient,
 				Scheme:   testScheme,
 				Recorder: eventRecorder,
 				Codec:    codec,
@@ -681,14 +779,14 @@ func TestDeleteSandboxForUpdate_RaceConditionPrevention(t *testing.T) {
 				tt.setupSandbox(freshSbx)
 
 				// Update in the cluster to simulate concurrent modification
-				// Skip update for deletion timestamp test
-				if tt.name != "sandbox with deletion timestamp is skipped" {
+				// Skip update for deletion timestamp test and not found test
+				if tt.name != "sandbox not found during re-fetch is handled gracefully" && tt.name != "sandbox already has deletion timestamp" {
 					assert.NoError(t, k8sClient.Update(ctx, freshSbx))
 				}
 			}
 
-			// For deletion timestamp test, delete the sandbox before calling the function
-			if tt.name == "sandbox with deletion timestamp is skipped" {
+			// For "not found during re-fetch" test, delete the sandbox before calling the function
+			if tt.name == "sandbox not found during re-fetch is handled gracefully" {
 				assert.NoError(t, k8sClient.Delete(ctx, sbx))
 			}
 
@@ -704,35 +802,42 @@ func TestDeleteSandboxForUpdate_RaceConditionPrevention(t *testing.T) {
 				assert.NoError(t, err)
 			}
 
-			// Check if sandbox was actually deleted
-			checkSbx := &v1alpha1.Sandbox{}
-			getErr := k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), checkSbx)
+			// Check if sandbox was actually deleted (only for non-error-injection tests)
+			if tt.injectError == nil {
+				checkSbx := &v1alpha1.Sandbox{}
+				getErr := k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), checkSbx)
 
-			if tt.expectDeleted {
-				// Sandbox should be deleted or have deletion timestamp
-				if getErr == nil {
-					assert.NotNil(t, checkSbx.DeletionTimestamp, "sandbox should have deletion timestamp")
-				} else {
-					assert.True(t, apierrors.IsNotFound(getErr), "sandbox should be deleted")
-				}
-			}
-
-			if tt.expectSkipped {
-				// Sandbox should still exist without deletion timestamp (or be NotFound for deletion test)
-				if tt.name == "sandbox with deletion timestamp is skipped" {
-					// For this test, NotFound is expected and acceptable
-					if getErr != nil {
-						assert.True(t, apierrors.IsNotFound(getErr), "sandbox should be not found")
+				if tt.expectDeleted {
+					// Sandbox should be deleted or have deletion timestamp
+					if getErr == nil {
+						assert.NotNil(t, checkSbx.DeletionTimestamp, "sandbox should have deletion timestamp")
+					} else {
+						assert.True(t, apierrors.IsNotFound(getErr), "sandbox should be deleted")
 					}
-				} else {
-					// For other skip tests, sandbox should still exist
-					assert.NoError(t, getErr, "sandbox should still exist")
-					if getErr == nil && checkSbx.DeletionTimestamp == nil {
-						// Verify sandbox was not modified (no lock from our operation)
-						if checkSbx.Annotations[v1alpha1.AnnotationOwner] != "" {
-							assert.NotEqual(t, consts.OwnerManagerScaleDown,
-								checkSbx.Annotations[v1alpha1.AnnotationOwner],
-								"sandbox should not be locked by scale down operation")
+				}
+
+				if tt.expectSkipped {
+					// Sandbox should still exist without deletion timestamp (or be NotFound for deletion test)
+					if tt.name == "sandbox not found during re-fetch is handled gracefully" {
+						// For this test, NotFound is expected and acceptable
+						if getErr != nil {
+							assert.True(t, apierrors.IsNotFound(getErr), "sandbox should be not found")
+						}
+					} else if tt.name == "sandbox already has deletion timestamp" {
+						// For this test, the sandbox should still exist with deletion timestamp
+						if getErr == nil {
+							assert.NotNil(t, checkSbx.DeletionTimestamp, "sandbox should have deletion timestamp")
+						}
+					} else {
+						// For other skip tests, sandbox should still exist
+						assert.NoError(t, getErr, "sandbox should still exist")
+						if getErr == nil && checkSbx.DeletionTimestamp == nil {
+							// Verify sandbox was not modified (no lock from our operation)
+							if checkSbx.Annotations[v1alpha1.AnnotationOwner] != "" {
+								assert.NotEqual(t, consts.OwnerManagerScaleDown,
+									checkSbx.Annotations[v1alpha1.AnnotationOwner],
+									"sandbox should not be locked by scale down operation")
+							}
 						}
 					}
 				}
