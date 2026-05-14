@@ -179,8 +179,6 @@ func (b *SandboxManagerBuilder) Build() (*SandboxManager, error) {
 type SandboxManager struct {
 	peersManager       peers.Peers
 	memberlistBindPort int
-
-<<<<<<< HEAD
 	infra infra.Infrastructure
 	proxy *proxy.Server
 
