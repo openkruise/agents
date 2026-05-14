@@ -58,10 +58,11 @@ func TestGetRouteFromSandbox(t *testing.T) {
 				},
 			},
 			expectedRoute: proxy.Route{
-				IP:    "10.0.0.2",
-				ID:    "default--running-sandbox",
-				Owner: "",
-				State: v1alpha1.SandboxStateRunning,
+				IP:       "10.0.0.2",
+				ID:       "default--running-sandbox",
+				Owner:    "",
+				State:    v1alpha1.SandboxStateRunning,
+				Pausable: true,
 			},
 		},
 		{
@@ -83,10 +84,11 @@ func TestGetRouteFromSandbox(t *testing.T) {
 				},
 			},
 			expectedRoute: proxy.Route{
-				IP:    "",
-				ID:    "default--running-sandbox",
-				Owner: "",
-				State: v1alpha1.SandboxStateCreating,
+				IP:       "",
+				ID:       "default--running-sandbox",
+				Owner:    "",
+				State:    v1alpha1.SandboxStateCreating,
+				Pausable: true,
 			},
 		},
 	}

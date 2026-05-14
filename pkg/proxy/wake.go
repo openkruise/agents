@@ -31,7 +31,7 @@ const (
 
 type WakeResult struct {
 	Action          WakeAction `json:"action"`
-	State           string     `json:"state,omitempty"`
-	ResourceVersion string     `json:"resourceVersion,omitempty"`
-	Message         string     `json:"message,omitempty"`
+	State           string     `json:"state"`
+	ResourceVersion string     `json:"resourceVersion"`
+	Message         string     `json:"message"`
 }

@@ -128,6 +128,7 @@ func (b *SandboxManagerBuilder) Build() (*SandboxManager, error) {
 		return nil, errors.NewError(errors.ErrorInternal, "failed to get infra builder: %v", err)
 	}
 	b.instance.infra = builder.Build()
+	b.instance.proxy.SetWakeFunc(b.instance.WakeSandbox)
 	reader := b.instance.infra.GetCache().GetAPIReader()
 
 	// Build peers manager

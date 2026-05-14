@@ -17,13 +17,16 @@ limitations under the License.
 package sandboxutils
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/proxy"
 )
 
 func TestGetSandboxState(t *testing.T) {
@@ -431,6 +434,161 @@ func TestIsSandboxPausable(t *testing.T) {
 			assert.Equal(t, tt.expectedReason, reason)
 		})
 	}
+}
+
+func TestGetRouteFromSandboxWakeOnTraffic(t *testing.T) {
+	tests := []struct {
+		name              string
+		annotations       map[string]string
+		expectWakeTraffic string
+	}{
+		{
+			name: "annotation is copied",
+			annotations: map[string]string{
+				agentsv1alpha1.AnnotationWakeOnTraffic: "timeout:300s",
+			},
+			expectWakeTraffic: "timeout:300s",
+		},
+		{
+			name:              "missing annotation defaults empty",
+			annotations:       nil,
+			expectWakeTraffic: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sandbox := &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace:   "default",
+					Name:        "sandbox",
+					Annotations: tt.annotations,
+				},
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxRunning,
+					Conditions: []metav1.Condition{
+						{
+							Type:   string(agentsv1alpha1.SandboxConditionReady),
+							Status: metav1.ConditionTrue,
+						},
+					},
+					PodInfo: agentsv1alpha1.PodInfo{PodIP: "10.0.0.1"},
+				},
+			}
+
+			route := GetRouteFromSandbox(sandbox)
+
+			assert.Equal(t, tt.expectWakeTraffic, route.WakeOnTraffic)
+		})
+	}
+}
+
+func TestGetRouteFromSandboxPausable(t *testing.T) {
+	tests := []struct {
+		name           string
+		phase          agentsv1alpha1.SandboxPhase
+		paused         bool
+		expectPausable bool
+	}{
+		{
+			name:           "resuming sandbox is not pausable",
+			phase:          agentsv1alpha1.SandboxResuming,
+			expectPausable: false,
+		},
+		{
+			name:           "pending sandbox is not pausable",
+			phase:          agentsv1alpha1.SandboxPending,
+			expectPausable: false,
+		},
+		{
+			name:           "terminating sandbox is not pausable",
+			phase:          agentsv1alpha1.SandboxTerminating,
+			expectPausable: false,
+		},
+		{
+			name:           "running unpaused sandbox is pausable",
+			phase:          agentsv1alpha1.SandboxRunning,
+			paused:         false,
+			expectPausable: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sandbox := &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "default",
+					Name:      "sandbox",
+				},
+				Spec: agentsv1alpha1.SandboxSpec{
+					Paused: tt.paused,
+				},
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: tt.phase,
+					Conditions: []metav1.Condition{
+						{
+							Type:   string(agentsv1alpha1.SandboxConditionReady),
+							Status: metav1.ConditionTrue,
+						},
+					},
+					PodInfo: agentsv1alpha1.PodInfo{PodIP: "10.0.0.1"},
+				},
+			}
+
+			route := GetRouteFromSandbox(sandbox)
+
+			assert.Equal(t, tt.expectPausable, route.Pausable)
+		})
+	}
+}
+
+func TestRouteJSONCompatibility(t *testing.T) {
+	type oldRoute struct {
+		IP              string `json:"ip"`
+		ID              string `json:"id"`
+		Owner           string `json:"owner"`
+		State           string `json:"state"`
+		ResourceVersion string `json:"resourceVersion"`
+	}
+
+	t.Run("new route decodes into old route", func(t *testing.T) {
+		body, err := json.Marshal(proxy.Route{
+			IP:              "10.0.0.1",
+			ID:              "sandbox",
+			Owner:           "owner",
+			State:           agentsv1alpha1.SandboxStateRunning,
+			ResourceVersion: "10",
+			WakeOnTraffic:   "timeout:300s",
+			Pausable:        true,
+		})
+		require.NoError(t, err)
+
+		var got oldRoute
+		err = json.Unmarshal(body, &got)
+
+		require.NoError(t, err)
+		assert.Equal(t, "sandbox", got.ID)
+		assert.Equal(t, agentsv1alpha1.SandboxStateRunning, got.State)
+	})
+
+	t.Run("old route decodes into new route with zero values", func(t *testing.T) {
+		body, err := json.Marshal(oldRoute{
+			IP:              "10.0.0.1",
+			ID:              "sandbox",
+			Owner:           "owner",
+			State:           agentsv1alpha1.SandboxStateRunning,
+			ResourceVersion: "10",
+		})
+		require.NoError(t, err)
+
+		var got proxy.Route
+		err = json.Unmarshal(body, &got)
+
+		require.NoError(t, err)
+		assert.Equal(t, "sandbox", got.ID)
+		assert.Empty(t, got.WakeOnTraffic)
+		assert.False(t, got.Pausable)
+	})
 }
 
 func TestIsSandboxResumable(t *testing.T) {
