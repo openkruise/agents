@@ -153,17 +153,27 @@ type SandboxManager struct {
 func (m *SandboxManager) Run(ctx context.Context) error {
 	log := klog.FromContext(ctx)
 
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	proxyErrCh := make(chan error, 2)
+	klog.InfoS("starting proxy")
+	if err := m.proxy.Run(proxyErrCh); err != nil {
+		return fmt.Errorf("proxy failed to start synchronously: %w", err)
+	}
+
 	go func() {
-		klog.InfoS("starting proxy")
-		err := m.proxy.Run()
-		if err != nil {
-			klog.Error(err, "proxy stopped")
+		select {
+		case <-runCtx.Done():
+		case err := <-proxyErrCh:
+			klog.ErrorS(err, "proxy server stopped unexpectedly, initiating graceful shutdown")
+			cancel()
 		}
 	}()
 
 	// Start peers (optional - only if configured)
 	if m.peersManager != nil {
-		if err := m.peersManager.Start(ctx, m.memberlistBindPort); err != nil {
+		if err := m.peersManager.Start(runCtx, m.memberlistBindPort); err != nil {
 			return fmt.Errorf("failed to start memberlist: %w", err)
 		}
 		log.Info("memberlist started successfully")
@@ -171,7 +181,7 @@ func (m *SandboxManager) Run(ctx context.Context) error {
 		log.Info("peers manager not configured, skip starting memberlist")
 	}
 
-	if err := m.infra.Run(ctx); err != nil {
+	if err := m.infra.Run(runCtx); err != nil {
 		return err
 	}
 	return nil
