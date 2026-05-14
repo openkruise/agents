@@ -1166,7 +1166,7 @@ func TestReconciler_createSandbox(t *testing.T) {
 				select {
 				case evt := <-eventRecorder.Events:
 					assert.Contains(t, evt, "Warning")
-					assert.Contains(t, evt, EventCreateSandboxFailed)
+					assert.Contains(t, evt, events.CreateSandboxFailed)
 				default:
 					t.Errorf("expected a warning event but got none")
 				}
