@@ -246,7 +246,12 @@ func (r *Reconciler) scaleDown(ctx context.Context, count int, sbs *agentsv1alph
 	log.Info("scale down", "count", count)
 
 	// Separate candidates into old revision and updated revision.
-	candidates := append(groups.Creating, groups.Available...)
+	// Allocate a new slice to avoid aliasing the backing arrays of Creating
+	// and Available. Using append(Creating, Available...) would mutate
+	// Creating's backing array when it has spare capacity.
+	candidates := make([]*agentsv1alpha1.Sandbox, 0, len(groups.Creating)+len(groups.Available))
+	candidates = append(candidates, groups.Creating...)
+	candidates = append(candidates, groups.Available...)
 	var oldCandidates, updatedCandidates []*agentsv1alpha1.Sandbox
 	for _, sbx := range candidates {
 		if sbx.Labels[agentsv1alpha1.LabelTemplateHash] != updateRevision {
@@ -425,10 +430,13 @@ func (r *Reconciler) updateSandboxSetStatus(ctx context.Context, newStatus agent
 func (r *Reconciler) groupAllSandboxes(ctx context.Context, sbs *agentsv1alpha1.SandboxSet) (GroupedSandboxes, error) {
 	log := logf.FromContext(ctx)
 	sandboxList := &agentsv1alpha1.SandboxList{}
+	// NOTE: Do NOT use client.UnsafeDisableDeepCopy here. Downstream code
+	// (scaleDownSandbox, deleteSandboxForUpdate) mutates sandbox annotations
+	// (e.g. LockSandbox), so the returned objects must be independent copies
+	// to avoid corrupting the informer cache.
 	if err := r.List(ctx, sandboxList,
 		client.InNamespace(sbs.Namespace),
 		client.MatchingFields{fieldindex.IndexNameForOwnerRefUID: string(sbs.UID)},
-		client.UnsafeDisableDeepCopy,
 	); err != nil {
 		return GroupedSandboxes{}, err
 	}
