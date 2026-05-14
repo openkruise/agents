@@ -22,6 +22,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/record"
@@ -29,6 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	v1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 )
 
 func newSandbox(name, hash string, state string, claimed bool, createdAt time.Time) *v1alpha1.Sandbox {
@@ -584,6 +586,159 @@ func TestReconcile_RollingUpdate_SurgeGate(t *testing.T) {
 	t.Logf("new-revision sandboxes after gate-cleared reconcile: %d, old remaining: %d", newCount, oldCount)
 	assert.Equal(t, 1, newCount, "only pending-sandbox should exist; rolling update must not create when AllowedSurge=0")
 	assert.Equal(t, 3, oldCount, "scaleDown should have deleted 1 old sandbox (delta=-1), leaving 3")
+}
+
+func TestDeleteSandboxForUpdate_RaceConditionPrevention(t *testing.T) {
+	ctx := t.Context()
+	now := time.Now()
+	oldHash := "old-hash"
+
+	tests := []struct {
+		name           string
+		setupSandbox   func(*v1alpha1.Sandbox)
+		expectError    string
+		expectDeleted  bool
+		expectSkipped  bool
+	}{
+		{
+			name: "unclaimed sandbox is deleted successfully",
+			setupSandbox: func(sbx *v1alpha1.Sandbox) {
+				// Sandbox remains unclaimed
+			},
+			expectDeleted: true,
+		},
+		{
+			name: "sandbox claimed after selection is skipped",
+			setupSandbox: func(sbx *v1alpha1.Sandbox) {
+				// Simulate concurrent claim by marking as claimed
+				sbx.Labels[v1alpha1.LabelSandboxIsClaimed] = "true"
+			},
+			expectError:   "sandbox was claimed after selection for deletion",
+			expectSkipped: true,
+		},
+		{
+			name: "sandbox with removed owner reference is skipped",
+			setupSandbox: func(sbx *v1alpha1.Sandbox) {
+				// Simulate claim by removing SandboxSet owner reference
+				sbx.OwnerReferences = nil
+			},
+			expectError:   "sandbox was claimed after selection for deletion",
+			expectSkipped: true,
+		},
+		{
+			name: "sandbox locked by another operation is skipped",
+			setupSandbox: func(sbx *v1alpha1.Sandbox) {
+				// Simulate lock by another operation
+				if sbx.Annotations == nil {
+					sbx.Annotations = make(map[string]string)
+				}
+				sbx.Annotations[v1alpha1.AnnotationLock] = "other-lock"
+				sbx.Annotations[v1alpha1.AnnotationOwner] = "other-owner"
+			},
+			expectError:   "sandbox locked by another operation",
+			expectSkipped: true,
+		},
+		{
+			name: "sandbox with deletion timestamp is skipped",
+			setupSandbox: func(sbx *v1alpha1.Sandbox) {
+				// We can't set deletionTimestamp directly in fake client,
+				// so we'll test this by deleting the sandbox first
+				// The function should handle NotFound gracefully
+			},
+			expectSkipped: false, // Will be NotFound, which is handled gracefully
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			k8sClient := NewClient()
+			eventRecorder := record.NewFakeRecorder(20)
+			reconciler := &Reconciler{
+				Client:   k8sClient,
+				Scheme:   testScheme,
+				Recorder: eventRecorder,
+				Codec:    codec,
+			}
+
+			// Create SandboxSet
+			sbs := getSandboxSet(1)
+			assert.NoError(t, k8sClient.Create(ctx, sbs))
+
+			// Create sandbox
+			sbx := newSandbox("test-sbx", oldHash, v1alpha1.SandboxStateAvailable, false, now)
+			sbx.OwnerReferences = []metav1.OwnerReference{
+				*metav1.NewControllerRef(sbs, v1alpha1.SandboxSetControllerKind),
+			}
+			assert.NoError(t, k8sClient.Create(ctx, sbx))
+
+			// Apply test-specific modifications to simulate race conditions
+			if tt.setupSandbox != nil {
+				// Re-fetch to get latest version
+				freshSbx := &v1alpha1.Sandbox{}
+				assert.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), freshSbx))
+				
+				// Apply modifications
+				tt.setupSandbox(freshSbx)
+				
+				// Update in the cluster to simulate concurrent modification
+				// Skip update for deletion timestamp test
+				if tt.name != "sandbox with deletion timestamp is skipped" {
+					assert.NoError(t, k8sClient.Update(ctx, freshSbx))
+				}
+			}
+
+			// For deletion timestamp test, delete the sandbox before calling the function
+			if tt.name == "sandbox with deletion timestamp is skipped" {
+				assert.NoError(t, k8sClient.Delete(ctx, sbx))
+			}
+
+			// Attempt to delete the sandbox
+			lock := "test-lock"
+			err := reconciler.deleteSandboxForUpdate(ctx, sbs, sbx, lock)
+
+			// Verify expectations
+			if tt.expectError != "" {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
+			} else {
+				assert.NoError(t, err)
+			}
+
+			// Check if sandbox was actually deleted
+			checkSbx := &v1alpha1.Sandbox{}
+			getErr := k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), checkSbx)
+
+			if tt.expectDeleted {
+				// Sandbox should be deleted or have deletion timestamp
+				if getErr == nil {
+					assert.NotNil(t, checkSbx.DeletionTimestamp, "sandbox should have deletion timestamp")
+				} else {
+					assert.True(t, apierrors.IsNotFound(getErr), "sandbox should be deleted")
+				}
+			}
+
+			if tt.expectSkipped {
+				// Sandbox should still exist without deletion timestamp (or be NotFound for deletion test)
+				if tt.name == "sandbox with deletion timestamp is skipped" {
+					// For this test, NotFound is expected and acceptable
+					if getErr != nil {
+						assert.True(t, apierrors.IsNotFound(getErr), "sandbox should be not found")
+					}
+				} else {
+					// For other skip tests, sandbox should still exist
+					assert.NoError(t, getErr, "sandbox should still exist")
+					if getErr == nil && checkSbx.DeletionTimestamp == nil {
+						// Verify sandbox was not modified (no lock from our operation)
+						if checkSbx.Annotations[v1alpha1.AnnotationOwner] != "" {
+							assert.NotEqual(t, consts.OwnerManagerScaleDown, 
+								checkSbx.Annotations[v1alpha1.AnnotationOwner],
+								"sandbox should not be locked by scale down operation")
+						}
+					}
+				}
+			}
+		})
+	}
 }
 
 func TestFindOldestSandboxes(t *testing.T) {
