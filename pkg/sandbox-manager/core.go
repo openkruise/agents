@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/google/uuid"
 	"k8s.io/klog/v2"
@@ -112,6 +113,11 @@ func (b *SandboxManagerBuilder) WithRequestAdapter(adapter proxy.RequestAdapter)
 	return b
 }
 
+func (b *SandboxManagerBuilder) WithMaxTimeout(d time.Duration) *SandboxManagerBuilder {
+	b.instance.maxTimeout = d
+	return b
+}
+
 func (b *SandboxManagerBuilder) Build() (*SandboxManager, error) {
 	// Build infra
 	if b.buildInfraFunc == nil {
@@ -145,6 +151,7 @@ func (b *SandboxManagerBuilder) Build() (*SandboxManager, error) {
 type SandboxManager struct {
 	peersManager       peers.Peers
 	memberlistBindPort int
+	maxTimeout         time.Duration
 
 	infra infra.Infrastructure
 	proxy *proxy.Server

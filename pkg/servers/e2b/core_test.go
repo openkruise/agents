@@ -144,6 +144,7 @@ func Setup(t *testing.T) (*Controller, ctrlclient.Client, func()) {
 				WithAPIReader(fc).
 				WithProxy(proxyServer), nil
 		}).
+		WithMaxTimeout(time.Duration(controller.maxTimeout) * time.Second).
 		Build()
 	require.NoError(t, err)
 

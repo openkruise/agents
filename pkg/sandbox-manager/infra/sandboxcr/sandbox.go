@@ -71,6 +71,10 @@ func (s *Sandbox) GetTemplate() string {
 	return utils.GetTemplateFromSandbox(s.Sandbox)
 }
 
+func (s *Sandbox) GetSandboxCR() *agentsv1alpha1.Sandbox {
+	return s.Sandbox
+}
+
 func (s *Sandbox) InplaceRefresh(ctx context.Context, deepcopy bool) error {
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(s.Sandbox)).V(consts.DebugLogLevel)
 	fetchFromApiServer := false
