@@ -24,7 +24,7 @@
 - Fixed pause/resume operations to be concurrency-safe under parallel requests. ([#358](https://github.com/openkruise/agents/pull/358), [@AiRanthem](https://github.com/AiRanthem))
 - Fixed resize body to include initContainers, preventing in-place VPA failures. ([#368](https://github.com/openkruise/agents/pull/368), [@zmberg](https://github.com/zmberg))
 - Fixed maxUnavailable percentage calculation using ceil rounding to ensure at least 1 pod is updated. ([#348](https://github.com/openkruise/agents/pull/348), [@zmberg](https://github.com/zmberg))
-- Optimized sandbox manager startup logic and introduced proper wait error type handling.
+- Optimized sandbox manager startup logic and introduced proper wait error type handling. ([#356](https://github.com/openkruise/agents/pull/356), [@AiRanthem](https://github.com/AiRanthem))
 - Fixed templateRef sandbox hashing to avoid nil template panic. ([#260](https://github.com/openkruise/agents/pull/260), [@PersistentJZH](https://github.com/PersistentJZH))
 - Fixed volume injection issue when user already specified posthook containers. ([#279](https://github.com/openkruise/agents/pull/279), [@BH4AWS](https://github.com/BH4AWS))
 - Fixed panic when logging sidecar config errors. ([#301](https://github.com/openkruise/agents/pull/301), [@lxs137](https://github.com/lxs137))
@@ -41,16 +41,16 @@
 - Added sandbox lifecycle metrics for kube-state-metrics style monitoring integration. ([#258](https://github.com/openkruise/agents/pull/258), [@liangxiaoping](https://github.com/liangxiaoping))
 - Enhanced Prometheus metrics observability for the entire sandbox ecosystem. ([#292](https://github.com/openkruise/agents/pull/292), [@KeyOfSpectator](https://github.com/KeyOfSpectator))
 - Updated sandbox manager metrics endpoint with improved monitoring capabilities. ([#268](https://github.com/openkruise/agents/pull/268), [@ZhaoQing7892](https://github.com/ZhaoQing7892))
-- Improved connect sandbox logs for better debugging and observability.
+- Improved connect sandbox logs for better debugging and observability. ([#356](https://github.com/openkruise/agents/pull/356), [@AiRanthem](https://github.com/AiRanthem))
 - Improved claim sandbox failure diagnostics to aid troubleshooting. ([#356](https://github.com/openkruise/agents/pull/356), [@AiRanthem](https://github.com/AiRanthem))
 - Improved middleware logs for better request tracing. ([#363](https://github.com/openkruise/agents/pull/363), [@AiRanthem](https://github.com/AiRanthem))
 
 ### Gateway Enhancements
-- Changed sandbox-gateway default port to 7788 and updated Prometheus listener configuration.
-- Added graceful drain configuration to sandbox-gateway for safe shutdown.
-- Updated sandbox-gateway log format for improved readability.
-- Added ParseRequest adapter for handling plugin-specific headers.
-- Integrated sandbox-gateway image build and deployment steps into CI/CD workflows.
+- Changed sandbox-gateway default port to 7788 and updated Prometheus listener configuration. ([#278](https://github.com/openkruise/agents/pull/278), [@chengzhycn](https://github.com/chengzhycn))
+- Added graceful drain configuration to sandbox-gateway for safe shutdown. ([#278](https://github.com/openkruise/agents/pull/278), [@chengzhycn](https://github.com/chengzhycn))
+- Updated sandbox-gateway log format for improved readability. ([#278](https://github.com/openkruise/agents/pull/278), [@chengzhycn](https://github.com/chengzhycn))
+- Added ParseRequest adapter for handling plugin-specific headers. ([#278](https://github.com/openkruise/agents/pull/278), [@chengzhycn](https://github.com/chengzhycn))
+- Integrated sandbox-gateway image build and deployment steps into CI/CD workflows. ([#278](https://github.com/openkruise/agents/pull/278), [@chengzhycn](https://github.com/chengzhycn))
 - Added Docker-based sandbox-gateway workflows for containerized deployment. ([#297](https://github.com/openkruise/agents/pull/297), [@ZhaoQing7892](https://github.com/ZhaoQing7892))
 
 ### Labels & Metadata
@@ -78,7 +78,7 @@
 - Reduced filesystem permissions for certificate and key files for improved security. ([#330](https://github.com/openkruise/agents/pull/330), [@PRAteek-singHWY](https://github.com/PRAteek-singHWY))
 - Refactored sandbox-manager cache layer to controller-runtime architecture. ([#287](https://github.com/openkruise/agents/pull/287), [@AiRanthem](https://github.com/AiRanthem))
 - Upgraded Kubernetes SDK to v0.35 for latest K8s API compatibility. ([#238](https://github.com/openkruise/agents/pull/238), [@zmberg](https://github.com/zmberg))
-- Enhanced E2E testing with support for both with and without sandbox-gateway configurations.
+- Enhanced E2E testing with support for both with and without sandbox-gateway configurations. ([#278](https://github.com/openkruise/agents/pull/278), [@chengzhycn](https://github.com/chengzhycn))
 - Implemented sandboxupdateops controller for sandbox update operations. ([#307](https://github.com/openkruise/agents/pull/307), [@zmberg](https://github.com/zmberg))
 - Added feature gate to cache PodLabelSelector for performance optimization. ([#259](https://github.com/openkruise/agents/pull/259), [@PersistentJZH](https://github.com/PersistentJZH))
 
