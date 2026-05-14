@@ -52,6 +52,9 @@ func ValidateAndInitCloneOptions(opts infra.CloneSandboxOptions) (infra.CloneSan
 	if opts.CheckPointID == "" {
 		return infra.CloneSandboxOptions{}, fmt.Errorf("checkpoint id is required")
 	}
+	if opts.Name != "" && opts.GenerateName != "" {
+		return infra.CloneSandboxOptions{}, fmt.Errorf("name and generateName are mutually exclusive")
+	}
 	if opts.WaitReadyTimeout <= 0 {
 		opts.WaitReadyTimeout = consts.DefaultWaitReadyTimeout
 	}
@@ -246,14 +249,22 @@ func cloneReInitRuntime(ctx context.Context, sbx *Sandbox, opts infra.CloneSandb
 // newSandboxFromTemplate returns a Sandbox object whose annotations / labels are not nil
 func newSandboxFromTemplate(opts infra.CloneSandboxOptions, tmpl *v1alpha1.SandboxTemplate, cache infracache.Provider) *Sandbox {
 	tmplCopy := tmpl.DeepCopy()
+	meta := metav1.ObjectMeta{
+		Namespace:   tmplCopy.Namespace,
+		Labels:      map[string]string{},
+		Annotations: map[string]string{},
+	}
+	switch {
+	case opts.Name != "":
+		meta.Name = opts.Name
+	case opts.GenerateName != "":
+		meta.GenerateName = opts.GenerateName
+	default:
+		// Use checkpoint id as the prefix to avoid name length explosion caused by repeated checkpoints.
+		meta.GenerateName = opts.CheckPointID + "-"
+	}
 	sbx := AsSandbox(&v1alpha1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{
-			// Use checkpoint id as the prefix to avoid name length explosion caused by repeated checkpoints.
-			GenerateName: opts.CheckPointID + "-",
-			Namespace:    tmplCopy.Namespace,
-			Labels:       map[string]string{},
-			Annotations:  map[string]string{},
-		},
+		ObjectMeta: meta,
 		Spec: v1alpha1.SandboxSpec{
 			PersistentContents: tmplCopy.Spec.PersistentContents,
 			Runtimes:           tmplCopy.Spec.Runtimes,
