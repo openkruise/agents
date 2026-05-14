@@ -1,0 +1,41 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    app.kubernetes.io/name: sandbox-manager
+    app.kubernetes.io/managed-by: kustomize
+  name: sandbox-manager-internal
+  namespace: sandbox-system
+spec:
+  podSelector:
+    matchLabels:
+      component: sandbox-manager
+      app.kubernetes.io/name: sandbox-manager
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - port: 7788
+          protocol: TCP
+    - from:
+        - podSelector:
+            matchLabels:
+              component: sandbox-manager
+              app.kubernetes.io/name: sandbox-gateway
+        - podSelector:
+            matchLabels:
+              component: sandbox-manager
+              app.kubernetes.io/name: sandbox-manager
+      ports:
+        - port: 7789
+          protocol: TCP
+    - from:
+        - podSelector:
+            matchLabels:
+              component: sandbox-manager
+              app.kubernetes.io/name: sandbox-manager
+      ports:
+        - port: 7946
+          protocol: TCP
+        - port: 7946
+          protocol: UDP

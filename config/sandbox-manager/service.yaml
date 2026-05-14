@@ -14,6 +14,10 @@ spec:
       targetPort: 7788
       protocol: TCP
       name: http-envoy
+    - port: 7789
+      targetPort: 7789
+      protocol: TCP
+      name: internal
   selector:
     component: sandbox-manager
     app.kubernetes.io/name: sandbox-manager
