@@ -220,10 +220,8 @@ func (b *SandboxManagerBuilder) Build() (*SandboxManager, error) {
 type SandboxManager struct {
 	peersManager       peers.Peers
 	memberlistBindPort int
-
-<<<<<<< HEAD
-	infra infra.Infrastructure
-	proxy *proxy.Server
+	infra              infra.Infrastructure
+	proxy              *proxy.Server
 
 	routeSource infra.SandboxRouteSource
 
@@ -360,12 +358,11 @@ func (m *SandboxManager) Run(ctx context.Context) error {
 	}
 
 	proxyErrCh := make(chan error, 1)
-	go func() {
-		klog.InfoS("starting proxy")
-		if err := m.proxy.Run(); err != nil {
-			proxyErrCh <- err
-		}
-	}()
+	klog.InfoS("starting proxy")
+	if err := m.proxy.Run(proxyErrCh); err != nil {
+		cancel()
+		return fmt.Errorf("proxy failed to start synchronously: %w", err)
+	}
 
 	go func() {
 		select {
