@@ -28,22 +28,32 @@ import (
 	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 )
 
-// ClaimSandbox attempts to lock a Pod and assign it to the current caller
+// ClaimSandbox attempts to lock a Pod and assign it to the current caller.
+//
+// Two counters are recorded on failure paths and they have distinct semantics
+// (so this is NOT double counting):
+//   - sandboxClaimCreationResponses: API-level result counter (success/failure).
+//   - sandboxClaimTotal: claim-operation counter broken down by lock_type.
 func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions) (infra.Sandbox, error) {
 	log := klog.FromContext(ctx)
 	if !m.infra.HasTemplate(ctx, infra.HasTemplateOptions{Namespace: opts.Namespace, Name: opts.Template}) {
-		// Requirement: Track failure in API layer
-		sandboxClaimCreationResponses.WithLabelValues("", "failure").Inc()
-		sandboxClaimTotal.WithLabelValues("", "failure", "unknown").Inc()
-		return nil, errors.NewError(errors.ErrorNotFound, fmt.Sprintf("template %s not found", opts.Template))
+		// Template lookup failed before any sandbox was picked, so lock_type is unknown.
+		sandboxClaimCreationResponses.WithLabelValues(opts.Namespace, "failure").Inc()
+		sandboxClaimTotal.WithLabelValues(opts.Namespace, "failure", "unknown").Inc()
+		return nil, errors.NewError(errors.ErrorNotFound, "template %s not found", opts.Template)
 	}
 	sandbox, claimMetrics, err := m.infra.ClaimSandbox(ctx, opts)
 	if err != nil {
 		log.Error(err, "failed to claim sandbox", "metrics", claimMetrics.String())
-		// Requirement: Track failure in API layer
-		sandboxClaimCreationResponses.WithLabelValues("", "failure").Inc()
-		sandboxClaimTotal.WithLabelValues("", "failure", "unknown").Inc()
-		return nil, errors.NewError(errors.ErrorInternal, fmt.Sprintf("failed to claim sandbox: %v", err))
+		// claimMetrics may carry the actual lock_type even on failure; fall back to
+		// "unknown" only when infra never reached the lock step.
+		lockType := string(claimMetrics.LockType)
+		if lockType == "" {
+			lockType = "unknown"
+		}
+		sandboxClaimCreationResponses.WithLabelValues(opts.Namespace, "failure").Inc()
+		sandboxClaimTotal.WithLabelValues(opts.Namespace, "failure", lockType).Inc()
+		return nil, errors.NewError(errors.ErrorInternal, "failed to claim sandbox: %v", err)
 	}
 
 	// Success: Record metrics
@@ -69,8 +79,8 @@ func (m *SandboxManager) CloneSandbox(ctx context.Context, opts infra.CloneSandb
 	sandbox, cloneMetrics, err := m.infra.CloneSandbox(ctx, opts)
 	if err != nil {
 		log.Error(err, "failed to clone sandbox", "metrics", cloneMetrics)
-		sandboxCloneTotal.WithLabelValues("", "failure").Inc()
-		return nil, errors.NewError(errors.ErrorInternal, fmt.Sprintf("failed to clone sandbox: %v", err))
+		sandboxCloneTotal.WithLabelValues(opts.Namespace, "failure").Inc()
+		return nil, errors.NewError(errors.ErrorInternal, "failed to clone sandbox: %v", err)
 	}
 
 	// Clone-specific metrics
