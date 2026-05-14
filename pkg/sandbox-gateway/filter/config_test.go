@@ -133,6 +133,9 @@ func TestGetHostHeaderName(t *testing.T) {
 }
 
 func TestDefaultConfig(t *testing.T) {
+	t.Setenv(EnvSandboxManagerURL, "")
+	t.Setenv(EnvPeerNamespace, DefaultManagerNamespace)
+
 	cfg := DefaultConfig()
 	if cfg.SandboxHeaderName != "e2b-sandbox-id" {
 		t.Errorf("DefaultConfig().SandboxHeaderName = %q, want %q", cfg.SandboxHeaderName, "e2b-sandbox-id")
@@ -145,6 +148,44 @@ func TestDefaultConfig(t *testing.T) {
 	}
 	if cfg.DefaultPort != "49983" {
 		t.Errorf("DefaultConfig().DefaultPort = %q, want %q", cfg.DefaultPort, "49983")
+	}
+	if cfg.ManagerURL != "http://sandbox-manager.sandbox-system.svc.cluster.local:7789" {
+		t.Errorf("DefaultConfig().ManagerURL = %q, want %q", cfg.ManagerURL, "http://sandbox-manager.sandbox-system.svc.cluster.local:7789")
+	}
+}
+
+func TestDefaultConfigManagerURL(t *testing.T) {
+	tests := []struct {
+		name      string
+		manager   string
+		namespace string
+		want      string
+	}{
+		{
+			name:    "manager url env overrides namespace fallback",
+			manager: "http://manager.internal:7789",
+			want:    "http://manager.internal:7789",
+		},
+		{
+			name:      "namespace fallback",
+			namespace: "custom-system",
+			want:      "http://sandbox-manager.custom-system.svc.cluster.local:7789",
+		},
+		{
+			name: "default namespace fallback",
+			want: "http://sandbox-manager.sandbox-system.svc.cluster.local:7789",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(EnvSandboxManagerURL, tt.manager)
+			t.Setenv(EnvPeerNamespace, tt.namespace)
+
+			if got := DefaultConfig().ManagerURL; got != tt.want {
+				t.Fatalf("ManagerURL = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -167,6 +208,9 @@ func helperTypedStructAny(t *testing.T, fields map[string]interface{}) *anypb.An
 }
 
 func TestConfigParserParse(t *testing.T) {
+	t.Setenv(EnvSandboxManagerURL, "")
+	t.Setenv(EnvPeerNamespace, DefaultManagerNamespace)
+
 	parser := &ConfigParser{}
 
 	tests := []struct {
@@ -177,6 +221,7 @@ func TestConfigParserParse(t *testing.T) {
 		wantHostHeader    string
 		wantPortHeader    string
 		wantDefaultPort   string
+		wantManagerURL    string
 	}{
 		{
 			name:              "nil value in TypedStruct returns defaults",
@@ -185,6 +230,7 @@ func TestConfigParserParse(t *testing.T) {
 			wantHostHeader:    DefaultHostHeaderName,
 			wantPortHeader:    DefaultSandboxPortHeader,
 			wantDefaultPort:   DefaultSandboxPort,
+			wantManagerURL:    "http://sandbox-manager.sandbox-system.svc.cluster.local:7789",
 		},
 		{
 			name:              "empty struct returns defaults",
@@ -193,6 +239,7 @@ func TestConfigParserParse(t *testing.T) {
 			wantHostHeader:    DefaultHostHeaderName,
 			wantPortHeader:    DefaultSandboxPortHeader,
 			wantDefaultPort:   DefaultSandboxPort,
+			wantManagerURL:    "http://sandbox-manager.sandbox-system.svc.cluster.local:7789",
 		},
 		{
 			name:              "custom sandbox header",
@@ -201,6 +248,7 @@ func TestConfigParserParse(t *testing.T) {
 			wantHostHeader:    DefaultHostHeaderName,
 			wantPortHeader:    DefaultSandboxPortHeader,
 			wantDefaultPort:   DefaultSandboxPort,
+			wantManagerURL:    "http://sandbox-manager.sandbox-system.svc.cluster.local:7789",
 		},
 		{
 			name:              "all custom values",
@@ -209,6 +257,7 @@ func TestConfigParserParse(t *testing.T) {
 			wantHostHeader:    "X-Forwarded-Host",
 			wantPortHeader:    "x-port",
 			wantDefaultPort:   "8080",
+			wantManagerURL:    "http://custom-manager:7789",
 		},
 	}
 
@@ -229,6 +278,7 @@ func TestConfigParserParse(t *testing.T) {
 		"host-header-name":    "X-Forwarded-Host",
 		"sandbox-port-header": "x-port",
 		"default-port":        "8080",
+		"manager-url":         "http://custom-manager:7789",
 	})
 
 	for _, tt := range tests {
@@ -256,8 +306,14 @@ func TestConfigParserParse(t *testing.T) {
 			if fc.DefaultPort != tt.wantDefaultPort && tt.wantDefaultPort != "" {
 				t.Errorf("DefaultPort = %q, want %q", fc.DefaultPort, tt.wantDefaultPort)
 			}
+			if got := fc.GetManagerURL(); got != tt.wantManagerURL {
+				t.Errorf("ManagerURL = %q, want %q", got, tt.wantManagerURL)
+			}
 			if fc.Adapter == nil {
 				t.Error("Parse() returned FilterConfig with nil Adapter")
+			}
+			if fc.WakeClient == nil {
+				t.Error("Parse() returned FilterConfig with nil WakeClient")
 			}
 		})
 	}
@@ -279,6 +335,9 @@ func TestConfigParserParseInvalidAny(t *testing.T) {
 }
 
 func TestConfigParserMerge(t *testing.T) {
+	t.Setenv(EnvSandboxManagerURL, "")
+	t.Setenv(EnvPeerNamespace, DefaultManagerNamespace)
+
 	parser := &ConfigParser{}
 
 	tests := []struct {
@@ -289,24 +348,27 @@ func TestConfigParserMerge(t *testing.T) {
 		wantHostHeader    string
 		wantPortHeader    string
 		wantDefaultPort   string
+		wantManagerURL    string
 	}{
 		{
 			name:              "child overrides all parent fields",
 			parent:            DefaultConfig(),
-			child:             &Config{SandboxHeaderName: "child-sbx", HostHeaderName: "child-host", SandboxPortHeader: "child-port", DefaultPort: "9999"},
+			child:             &Config{SandboxHeaderName: "child-sbx", HostHeaderName: "child-host", SandboxPortHeader: "child-port", DefaultPort: "9999", ManagerURL: "http://child-manager:7789"},
 			wantSandboxHeader: "child-sbx",
 			wantHostHeader:    "child-host",
 			wantPortHeader:    "child-port",
 			wantDefaultPort:   "9999",
+			wantManagerURL:    "http://child-manager:7789",
 		},
 		{
 			name:              "empty child preserves parent",
-			parent:            &Config{SandboxHeaderName: "parent-sbx", HostHeaderName: "parent-host", SandboxPortHeader: "parent-port", DefaultPort: "1234"},
+			parent:            &Config{SandboxHeaderName: "parent-sbx", HostHeaderName: "parent-host", SandboxPortHeader: "parent-port", DefaultPort: "1234", ManagerURL: "http://parent-manager:7789"},
 			child:             &Config{},
 			wantSandboxHeader: "parent-sbx",
 			wantHostHeader:    "parent-host",
 			wantPortHeader:    "parent-port",
 			wantDefaultPort:   "1234",
+			wantManagerURL:    "http://parent-manager:7789",
 		},
 		{
 			name:              "partial child override",
@@ -316,6 +378,7 @@ func TestConfigParserMerge(t *testing.T) {
 			wantHostHeader:    DefaultHostHeaderName,
 			wantPortHeader:    DefaultSandboxPortHeader,
 			wantDefaultPort:   DefaultSandboxPort,
+			wantManagerURL:    "http://sandbox-manager.sandbox-system.svc.cluster.local:7789",
 		},
 		{
 			name:              "both defaults",
@@ -325,6 +388,7 @@ func TestConfigParserMerge(t *testing.T) {
 			wantHostHeader:    DefaultHostHeaderName,
 			wantPortHeader:    DefaultSandboxPortHeader,
 			wantDefaultPort:   DefaultSandboxPort,
+			wantManagerURL:    "http://sandbox-manager.sandbox-system.svc.cluster.local:7789",
 		},
 	}
 
@@ -350,8 +414,14 @@ func TestConfigParserMerge(t *testing.T) {
 			if fc.DefaultPort != tt.wantDefaultPort {
 				t.Errorf("DefaultPort = %q, want %q", fc.DefaultPort, tt.wantDefaultPort)
 			}
+			if got := fc.GetManagerURL(); got != tt.wantManagerURL {
+				t.Errorf("ManagerURL = %q, want %q", got, tt.wantManagerURL)
+			}
 			if fc.Adapter == nil {
 				t.Error("Merge() returned FilterConfig with nil Adapter")
+			}
+			if fc.WakeClient == nil {
+				t.Error("Merge() returned FilterConfig with nil WakeClient")
 			}
 		})
 	}

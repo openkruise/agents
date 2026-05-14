@@ -17,14 +17,17 @@ limitations under the License.
 package filter
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strconv"
 
 	v3 "github.com/cncf/xds/go/xds/type/v3"
 	"github.com/envoyproxy/envoy/contrib/golang/common/go/api"
 	"google.golang.org/protobuf/types/known/anypb"
 
+	"github.com/openkruise/agents/pkg/sandbox-gateway/wake"
 	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
 )
 
@@ -33,6 +36,10 @@ const (
 	DefaultSandboxHeaderName = "e2b-sandbox-id"
 	DefaultSandboxPortHeader = "e2b-sandbox-port"
 	DefaultSandboxPort       = "49983"
+	DefaultManagerNamespace  = "sandbox-system"
+	DefaultManagerPort       = "7789"
+	EnvSandboxManagerURL     = "SANDBOX_MANAGER_URL"
+	EnvPeerNamespace         = "PEER_NAMESPACE"
 )
 
 // Config holds the filter configuration
@@ -45,6 +52,8 @@ type Config struct {
 	HostHeaderName string `json:"host-header-name,omitempty"`
 	// DefaultPort is the default port if not specified
 	DefaultPort string `json:"default-port,omitempty"`
+	// ManagerURL is the sandbox-manager internal URL used for wake-on-traffic.
+	ManagerURL string `json:"manager-url,omitempty"`
 }
 
 // DefaultConfig returns default configuration
@@ -54,6 +63,7 @@ func DefaultConfig() *Config {
 		SandboxPortHeader: DefaultSandboxPortHeader,
 		HostHeaderName:    DefaultHostHeaderName,
 		DefaultPort:       DefaultSandboxPort,
+		ManagerURL:        defaultManagerURL(),
 	}
 }
 
@@ -97,14 +107,41 @@ func (c *Config) GetDefaultPort() int {
 	return p
 }
 
+func (c *Config) GetManagerURL() string {
+	if c.ManagerURL != "" {
+		return c.ManagerURL
+	}
+	return defaultManagerURL()
+}
+
+func defaultManagerURL() string {
+	if managerURL := os.Getenv(EnvSandboxManagerURL); managerURL != "" {
+		return managerURL
+	}
+	namespace := os.Getenv(EnvPeerNamespace)
+	if namespace == "" {
+		namespace = DefaultManagerNamespace
+	}
+	return fmt.Sprintf("http://sandbox-manager.%s.svc.cluster.local:%s", namespace, DefaultManagerPort)
+}
+
+type WakeClient interface {
+	WakeAndWait(ctx context.Context, sandboxID string) error
+}
+
 // FilterConfig wraps Config and holds the adapter created from the config
 type FilterConfig struct {
 	*Config
-	Adapter *adapters.E2BAdapter
+	Adapter    *adapters.E2BAdapter
+	WakeClient WakeClient
 }
 
 // NewFilterConfig creates a FilterConfig with an adapter built from the config values
 func NewFilterConfig(cfg *Config) *FilterConfig {
+	return NewFilterConfigWithWakeClient(cfg, wake.NewModule(cfg.GetManagerURL()))
+}
+
+func NewFilterConfigWithWakeClient(cfg *Config, wakeClient WakeClient) *FilterConfig {
 	adapter := adapters.NewE2BAdapterWithOptions(
 		0, // port not used by gateway
 		adapters.E2BAdapterOptions{
@@ -115,12 +152,23 @@ func NewFilterConfig(cfg *Config) *FilterConfig {
 		},
 	)
 	return &FilterConfig{
-		Config:  cfg,
-		Adapter: adapter,
+		Config:     cfg,
+		Adapter:    adapter,
+		WakeClient: wakeClient,
 	}
 }
 
-type ConfigParser struct{}
+type ConfigParser struct {
+	defaultManagerURL string
+	defaultWakeClient WakeClient
+}
+
+func NewConfigParserWithWakeClient(managerURL string, wakeClient WakeClient) *ConfigParser {
+	return &ConfigParser{
+		defaultManagerURL: managerURL,
+		defaultWakeClient: wakeClient,
+	}
+}
 
 func (p *ConfigParser) Parse(any *anypb.Any, callbacks api.ConfigCallbackHandler) (interface{}, error) {
 	cfg := DefaultConfig()
@@ -135,7 +183,7 @@ func (p *ConfigParser) Parse(any *anypb.Any, callbacks api.ConfigCallbackHandler
 	valueStruct := typedStruct.GetValue()
 	if valueStruct == nil {
 		// No value field, use defaults
-		return NewFilterConfig(cfg), nil
+		return p.newFilterConfig(cfg), nil
 	}
 
 	// Convert the struct to JSON
@@ -156,7 +204,7 @@ func (p *ConfigParser) Parse(any *anypb.Any, callbacks api.ConfigCallbackHandler
 		return nil, err
 	}
 
-	return NewFilterConfig(cfg), nil
+	return p.newFilterConfig(cfg), nil
 }
 
 func (p *ConfigParser) Merge(parent interface{}, child interface{}) interface{} {
@@ -179,6 +227,23 @@ func (p *ConfigParser) Merge(parent interface{}, child interface{}) interface{} 
 	if childCfg.DefaultPort != "" {
 		merged.DefaultPort = childCfg.DefaultPort
 	}
+	if childCfg.ManagerURL != "" {
+		merged.ManagerURL = childCfg.ManagerURL
+	}
 
-	return NewFilterConfig(merged)
+	return parentCfg.newRelatedFilterConfig(merged)
+}
+
+func (p *ConfigParser) newFilterConfig(cfg *Config) *FilterConfig {
+	if p != nil && p.defaultWakeClient != nil && cfg.GetManagerURL() == p.defaultManagerURL {
+		return NewFilterConfigWithWakeClient(cfg, p.defaultWakeClient)
+	}
+	return NewFilterConfig(cfg)
+}
+
+func (fc *FilterConfig) newRelatedFilterConfig(cfg *Config) *FilterConfig {
+	if fc != nil && fc.WakeClient != nil && cfg.GetManagerURL() == fc.GetManagerURL() {
+		return NewFilterConfigWithWakeClient(cfg, fc.WakeClient)
+	}
+	return NewFilterConfig(cfg)
 }
