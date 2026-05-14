@@ -415,6 +415,143 @@ var _ = Describe("SandboxSet", func() {
 		})
 	})
 
+	Context("RollingUpdate with SandboxTemplate tests", func() {
+		It("should keep AvailableReplicas>=9 with MaxUnavailable=1 when switching templateRef", func() {
+			By("Creating two SandboxTemplates with different images")
+			sbtV1Name := fmt.Sprintf("test-sbt-v1-%d", time.Now().UnixNano())
+			sbtV2Name := fmt.Sprintf("test-sbt-v2-%d", time.Now().UnixNano())
+			sbtV1Image := "nginx:stable-alpine3.23"
+			sbtV2Image := "nginx:stable-alpine3.20"
+			sbtV1 := &agentsv1alpha1.SandboxTemplate{
+				ObjectMeta: metav1.ObjectMeta{Name: sbtV1Name, Namespace: namespace},
+				Spec: agentsv1alpha1.SandboxTemplateSpec{
+					Template: &corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"sandboxset": "true"}},
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: "test-container", Image: sbtV1Image}},
+						},
+					},
+				},
+			}
+			sbtV2 := &agentsv1alpha1.SandboxTemplate{
+				ObjectMeta: metav1.ObjectMeta{Name: sbtV2Name, Namespace: namespace},
+				Spec: agentsv1alpha1.SandboxTemplateSpec{
+					Template: &corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"sandboxset": "true"}},
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: "test-container", Image: sbtV2Image}},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, sbtV1)).To(Succeed())
+			Expect(k8sClient.Create(ctx, sbtV2)).To(Succeed())
+			defer func() {
+				_ = k8sClient.Delete(ctx, sbtV1)
+				_ = k8sClient.Delete(ctx, sbtV2)
+			}()
+
+			By("Creating a SandboxSet referencing sbt-v1 with 10 replicas and UpdateStrategy.MaxUnavailable=1")
+			maxUnavailable := intstrutil.FromInt(1)
+			sandbox.Spec.Replicas = 10
+			sandbox.Spec.UpdateStrategy = agentsv1alpha1.SandboxSetUpdateStrategy{
+				MaxUnavailable: &maxUnavailable,
+			}
+			// Switch from inline template to templateRef
+			sandbox.Spec.Template = nil
+			sandbox.Spec.TemplateRef = &agentsv1alpha1.SandboxTemplateRef{Name: sbtV1Name}
+			Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
+
+			By("Waiting for all 10 replicas to become available")
+			Eventually(func() int32 {
+				_ = k8sClient.Get(ctx, types.NamespacedName{
+					Name:      sandbox.Name,
+					Namespace: sandbox.Namespace,
+				}, sandbox)
+				return sandbox.Status.AvailableReplicas
+			}, time.Minute*5, time.Second*2).Should(Equal(int32(10)))
+
+			By("Triggering rolling update by switching templateRef to sbt-v2")
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name:      sandbox.Name,
+				Namespace: sandbox.Namespace,
+			}, sandbox)).To(Succeed())
+			sandbox.Spec.TemplateRef = &agentsv1alpha1.SandboxTemplateRef{Name: sbtV2Name}
+			Expect(k8sClient.Update(ctx, sandbox)).To(Succeed())
+
+			By("Starting a monitor goroutine to detect AvailableReplicas<9 violations during rolling update")
+			violationCh := make(chan int32, 1)
+			doneCh := make(chan struct{})
+			go func() {
+				defer GinkgoRecover()
+				ticker := time.NewTicker(500 * time.Millisecond)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-doneCh:
+						return
+					case <-ticker.C:
+						latest := &agentsv1alpha1.SandboxSet{}
+						if err := k8sClient.Get(ctx, types.NamespacedName{
+							Name:      sandbox.Name,
+							Namespace: sandbox.Namespace,
+						}, latest); err == nil {
+							if latest.Status.AvailableReplicas < 9 {
+								select {
+								case violationCh <- latest.Status.AvailableReplicas:
+								default:
+								}
+							}
+						}
+					}
+				}
+			}()
+
+			By("Waiting for rolling update to complete: UpdatedAvailableReplicas=10")
+			Eventually(func() int32 {
+				_ = k8sClient.Get(ctx, types.NamespacedName{
+					Name:      sandbox.Name,
+					Namespace: sandbox.Namespace,
+				}, sandbox)
+				return sandbox.Status.UpdatedAvailableReplicas
+			}, time.Minute*10, time.Second*2).Should(Equal(int32(10)))
+
+			close(doneCh)
+
+			By("Verifying AvailableReplicas never dropped below 9 during the rolling update")
+			select {
+			case v := <-violationCh:
+				Fail(fmt.Sprintf("AvailableReplicas dropped below 9 during rolling update: observed %d", v))
+			default:
+				// No violation detected
+			}
+
+			By("Verifying final state: all 10 replicas are updated and available")
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name:      sandbox.Name,
+				Namespace: sandbox.Namespace,
+			}, sandbox)).To(Succeed())
+			Expect(sandbox.Status.UpdatedAvailableReplicas).To(Equal(int32(10)))
+			Expect(sandbox.Status.AvailableReplicas).To(Equal(int32(10)))
+
+			By("Verifying all sandbox pods use sbt-v2 image")
+			sandboxList := &agentsv1alpha1.SandboxList{}
+			Expect(k8sClient.List(ctx, sandboxList, client.InNamespace(sandbox.Namespace),
+				client.MatchingLabels{agentsv1alpha1.LabelSandboxPool: sandbox.Name})).To(Succeed())
+			Expect(len(sandboxList.Items)).To(Equal(10))
+			for _, sbx := range sandboxList.Items {
+				pod := &corev1.Pod{}
+				Expect(k8sClient.Get(ctx, types.NamespacedName{
+					Name:      sbx.Name,
+					Namespace: sandbox.Namespace,
+				}, pod)).To(Succeed())
+				Expect(pod.Spec.Containers).NotTo(BeEmpty())
+				Expect(pod.Spec.Containers[0].Image).To(Equal(sbtV2Image),
+					"pod %s should use sbt-v2 image after rolling update", sbx.Name)
+			}
+		})
+	})
+
 	Context("SandboxMultiClusterNaming FeatureGate tests", func() {
 		It("should generate sandbox names with SandboxSet name prefix when SandboxMultiClusterNaming is disabled (default)", func() {
 			By("Creating a SandboxSet with 2 replicas")

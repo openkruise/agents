@@ -228,6 +228,12 @@ type SandboxStatus struct {
 	// UpdateRevision is the template-hash calculated from `spec.template`.
 	// +optional
 	UpdateRevision string `json:"updateRevision,omitempty"`
+
+	// CurrentRevision mirrors Labels[agents.kruise.io/template-hash] so that the
+	// bound revision hash is visible via status. Purely informational; it does
+	// not drive any reconcile decision.
+	// +optional
+	CurrentRevision string `json:"currentRevision,omitempty"`
 }
 
 // SandboxPhase is a label for the condition of a pod at the current time.
