@@ -59,6 +59,11 @@ func (r *Reconciler) initNewStatus(ctx context.Context, ss *agentsv1alpha1.Sandb
 	}
 	newStatus.UpdateRevision = updateRevision.Labels[ControllerRevisionHashLabel]
 	newStatus.ObservedGeneration = ss.Generation
+	name, err := r.ensureSandboxTemplate(ctx, ss)
+	if err != nil {
+		return nil, err
+	}
+	newStatus.CurrentTemplate = name
 	return newStatus, nil
 }
 

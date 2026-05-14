@@ -2064,6 +2064,12 @@ func TestCalculateStatus(t *testing.T) {
 				t.Errorf("Expected updateRevision to be set")
 			}
 
+			// CurrentRevision mirrors box.Labels[LabelTemplateHash] verbatim.
+			wantCurrent := tt.box.Labels[agentsv1alpha1.LabelTemplateHash]
+			if newStatus.CurrentRevision != wantCurrent {
+				t.Errorf("Expected currentRevision %q, got %q", wantCurrent, newStatus.CurrentRevision)
+			}
+
 			if tt.checkConditions != nil {
 				tt.checkConditions(t, newStatus)
 			}
