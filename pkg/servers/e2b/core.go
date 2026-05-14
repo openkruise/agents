@@ -189,7 +189,11 @@ func (sc *Controller) Run() (context.Context, error) {
 	go func() {
 		klog.InfoS("Starting Server", "address", sc.server.Addr)
 		if err := sc.server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			klog.Fatalf("HTTP server failed to start: %v", err)
+			klog.ErrorS(err, "HTTP server failed to start, triggering shutdown")
+			select {
+			case sc.stop <- syscall.SIGTERM:
+			default:
+			}
 		}
 	}()
 
