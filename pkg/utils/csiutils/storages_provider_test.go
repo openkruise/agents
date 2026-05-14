@@ -868,7 +868,6 @@ func TestController_generateNodePublishVolumeRequest(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			// Create controller with mocked dependencies
 			ctx := context.Background()
-			tt.initObjs = append(tt.initObjs)
 			c, _, err := cachetest.NewTestCache(t, tt.initObjs...)
 			require.NoError(t, err)
 			handler := NewCSIMountHandler(c.GetClient(), c.GetAPIReader(), tt.setupStorageRegistry(), utils.DefaultSandboxDeployNamespace)
