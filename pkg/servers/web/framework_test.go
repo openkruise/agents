@@ -89,7 +89,7 @@ func TestRegisterRoute(t *testing.T) {
 			path:               "/test",
 			requestMethod:      "GET",
 			requestPath:        "/test//",
-			expectedStatusCode: http.StatusMovedPermanently,
+			expectedStatusCode: http.StatusTemporaryRedirect,
 			handler:            helloHandler,
 		},
 		{

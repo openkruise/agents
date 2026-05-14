@@ -237,6 +237,10 @@ type SandboxManager struct {
 	quota            QuotaEnforcer          // nil until InitQuota or builder injection
 	quotaAntiDrift   *quota.AntiDriftDriver // nil when Redis is not configured
 	quotaRedisClient RedisClient            // nil when Redis is not configured
+
+	// cancelRun cancels the context created in Run(); called by Stop() to
+	// terminate all background goroutines that depend on the run context.
+	cancelRun context.CancelFunc
 }
 
 // InitQuota initializes the quota subsystem. Call after Build() so that m.infra is available.
@@ -320,15 +324,22 @@ func (m *SandboxManager) Run(ctx context.Context) error {
 		}
 	}
 
+	// Derive a cancellable context so the proxy watcher goroutine can trigger
+	// a clean shutdown if a listener crashes mid-run. The cancel function is
+	// stored on the struct so Stop() can also cancel it cleanly.
+	runCtx, cancel := context.WithCancel(ctx)
+	m.cancelRun = cancel
+
 	if m.elector != nil {
-		go m.elector.Run(ctx)
+		go m.elector.Run(runCtx)
 	} else {
 		m.primary.set(true)
 	}
 
 	// Start peers (optional - only if configured)
 	if m.peersManager != nil {
-		if err := m.peersManager.Start(ctx, m.memberlistBindPort); err != nil {
+		if err := m.peersManager.Start(runCtx, m.memberlistBindPort); err != nil {
+			cancel()
 			return fmt.Errorf("failed to start memberlist: %w", err)
 		}
 		log.Info("memberlist started successfully")
@@ -336,24 +347,36 @@ func (m *SandboxManager) Run(ctx context.Context) error {
 		log.Info("peers manager not configured, skip starting memberlist")
 	}
 
-	if err := m.infra.Run(ctx); err != nil {
+	if err := m.infra.Run(runCtx); err != nil {
+		cancel()
 		return err
 	}
 	if m.enableShortID {
 		if err := m.initializeSandboxIDGenerator(ctx); err != nil {
+			cancel()
 			return err
 		}
 	}
 
+	proxyErrCh := make(chan error, 1)
 	go func() {
 		klog.InfoS("starting proxy")
-		err := m.proxy.Run()
-		if err != nil {
-			klog.Error(err, "proxy stopped")
+		if err := m.proxy.Run(); err != nil {
+			proxyErrCh <- err
 		}
 	}()
+
+	go func() {
+		select {
+		case <-runCtx.Done():
+		case err := <-proxyErrCh:
+			klog.ErrorS(err, "proxy server stopped unexpectedly, initiating graceful shutdown")
+			cancel()
+		}
+	}()
+
 	if m.quotaAntiDrift != nil {
-		m.quotaAntiDrift.Run(ctx)
+		m.quotaAntiDrift.Run(runCtx)
 	}
 	return nil
 }
@@ -374,6 +397,10 @@ func (m *SandboxManager) initializeSandboxIDGenerator(ctx context.Context) error
 
 func (m *SandboxManager) Stop(ctx context.Context) {
 	log := klog.FromContext(ctx)
+	// Cancel the run context first so all background goroutines start draining.
+	if m.cancelRun != nil {
+		m.cancelRun()
+	}
 	if m.elector != nil {
 		m.elector.Stop(ctx)
 	}
