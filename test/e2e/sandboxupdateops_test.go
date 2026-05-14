@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -522,6 +523,134 @@ var _ = Describe("SandboxUpdateOps E2E", func() {
 				Expect(pod.Spec.Containers[0].Image).To(Equal(updateImage),
 					"sandbox %s should have updated image after recovery", sbx.Name)
 			}
+		})
+
+		It("should include stderr in Upgrading Condition message when preUpgrade hook fails", func() {
+			labelValue := fmt.Sprintf("batch-stderr-%d", time.Now().UnixNano())
+
+			By("Creating a Sandbox and waiting for Running")
+			sbx := newOpsSandbox(
+				fmt.Sprintf("ops-stderr-%s-0", labelValue[:10]),
+				labelValue, nil, nil,
+			)
+			Expect(k8sClient.Create(ctx, sbx)).To(Succeed())
+			waitSandboxRunning(sbx)
+			klog.InfoS("Sandbox is Running", "name", sbx.Name)
+
+			By("Creating SandboxUpdateOps with preUpgrade hook that outputs to stderr and exits 1")
+			const stderrMessage = "ERROR: something failed in preUpgrade hook"
+			ops := &agentsv1alpha1.SandboxUpdateOps{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("ops-stderr-%s", labelValue[:10]),
+					Namespace: namespace,
+				},
+				Spec: agentsv1alpha1.SandboxUpdateOpsSpec{
+					Selector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{batchLabel: labelValue},
+					},
+					Patch: mustMarshalPatch(corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{Name: "test-container", Image: updateImage},
+							},
+						},
+					}),
+					Lifecycle: &agentsv1alpha1.SandboxLifecycle{
+						PreUpgrade: &agentsv1alpha1.UpgradeAction{
+							Exec:           &corev1.ExecAction{Command: []string{"/bin/bash", "-c", fmt.Sprintf("echo \"%s\" >&2; exit 1", stderrMessage)}},
+							TimeoutSeconds: 30,
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, ops)).To(Succeed())
+			klog.InfoS("Created SandboxUpdateOps with stderr hook", "name", ops.Name)
+
+			By("Verifying Sandbox Upgrading Condition contains stderr message")
+			Eventually(func(g Gomega) {
+				updated := &agentsv1alpha1.Sandbox{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), updated)).To(Succeed())
+				g.Expect(updated.Status.Phase).To(Equal(agentsv1alpha1.SandboxUpgrading),
+					"sandbox should be in Upgrading phase")
+
+				var upgradingCond *metav1.Condition
+				for i := range updated.Status.Conditions {
+					if updated.Status.Conditions[i].Type == string(agentsv1alpha1.SandboxConditionUpgrading) {
+						upgradingCond = &updated.Status.Conditions[i]
+						break
+					}
+				}
+				g.Expect(upgradingCond).NotTo(BeNil(), "should have Upgrading condition")
+				g.Expect(upgradingCond.Reason).To(Equal(agentsv1alpha1.SandboxUpgradingReasonPreUpgradeFailed),
+					"condition reason should be PreUpgradeFailed")
+				g.Expect(upgradingCond.Message).To(ContainSubstring(stderrMessage),
+					"condition message should contain stderr output, got: %s", upgradingCond.Message)
+				klog.InfoS("Verified stderr in condition message",
+					"sandbox", updated.Name, "message", upgradingCond.Message)
+			}, 60*time.Second, time.Second).Should(Succeed())
+
+			By("Verifying message truncation for long stderr output")
+			// Create another sandbox to test truncation with a long stderr message
+			longLabelValue := fmt.Sprintf("batch-long-%d", time.Now().UnixNano())
+			sbxLong := newOpsSandbox(
+				fmt.Sprintf("ops-long-%s-0", longLabelValue[:10]),
+				longLabelValue, nil, nil,
+			)
+			Expect(k8sClient.Create(ctx, sbxLong)).To(Succeed())
+			waitSandboxRunning(sbxLong)
+
+			// Generate a long stderr message (> 1024 chars, the default MaxConditionMessageLen)
+			longMsg := strings.Repeat("X", 1100)
+			opsLong := &agentsv1alpha1.SandboxUpdateOps{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("ops-long-%s", longLabelValue[:10]),
+					Namespace: namespace,
+				},
+				Spec: agentsv1alpha1.SandboxUpdateOpsSpec{
+					Selector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{batchLabel: longLabelValue},
+					},
+					Patch: mustMarshalPatch(corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{Name: "test-container", Image: updateImage},
+							},
+						},
+					}),
+					Lifecycle: &agentsv1alpha1.SandboxLifecycle{
+						PreUpgrade: &agentsv1alpha1.UpgradeAction{
+							Exec:           &corev1.ExecAction{Command: []string{"/bin/bash", "-c", fmt.Sprintf("echo \"%s\" >&2; exit 1", longMsg)}},
+							TimeoutSeconds: 30,
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, opsLong)).To(Succeed())
+			klog.InfoS("Created SandboxUpdateOps with long stderr", "name", opsLong.Name)
+
+			Eventually(func(g Gomega) {
+				updated := &agentsv1alpha1.Sandbox{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(sbxLong), updated)).To(Succeed())
+				g.Expect(updated.Status.Phase).To(Equal(agentsv1alpha1.SandboxUpgrading))
+
+				var upgradingCond *metav1.Condition
+				for i := range updated.Status.Conditions {
+					if updated.Status.Conditions[i].Type == string(agentsv1alpha1.SandboxConditionUpgrading) {
+						upgradingCond = &updated.Status.Conditions[i]
+						break
+					}
+				}
+				g.Expect(upgradingCond).NotTo(BeNil())
+				g.Expect(upgradingCond.Reason).To(Equal(agentsv1alpha1.SandboxUpgradingReasonPreUpgradeFailed))
+				// Verify message is truncated: should end with "..." and be at most 1024+3 chars
+				g.Expect(len(upgradingCond.Message) <= 1027).To(BeTrue(),
+					"condition message should be truncated to at most 1024+3 chars, got %d: %s",
+					len(upgradingCond.Message), upgradingCond.Message)
+				g.Expect(upgradingCond.Message).To(HaveSuffix("..."),
+					"truncated message should end with '...', got: %s", upgradingCond.Message)
+				klog.InfoS("Verified truncated condition message",
+					"sandbox", updated.Name, "messageLen", len(upgradingCond.Message))
+			}, 60*time.Second, time.Second).Should(Succeed())
 		})
 
 		It("should handle bad image failure with MaxUnavailable=1 and recover after delete recreate", func() {

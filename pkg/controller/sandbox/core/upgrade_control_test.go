@@ -19,8 +19,10 @@ package core
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -117,6 +119,58 @@ func newTestCommonControl(hookFunc LifecycleHookFunc, objects ...client.Object) 
 		rateLimiter:          NewRateLimiter(),
 		lifecycleHookFunc:    hookFunc,
 		initializer:          &defaultSandboxInitializer{},
+	}
+}
+
+func TestExecuteUpgradeAction(t *testing.T) {
+	action := &agentsv1alpha1.UpgradeAction{
+		Exec:           &corev1.ExecAction{Command: []string{"/bin/bash", "-c", "echo test"}},
+		TimeoutSeconds: 30,
+	}
+	pod := newRunningPod()
+	box := newUpgradeTestSandbox(&agentsv1alpha1.SandboxLifecycle{PreUpgrade: action}, nil)
+
+	tests := []struct {
+		name           string
+		hookFunc       LifecycleHookFunc
+		expectSuccess  bool
+		expectContains string
+	}{
+		{
+			name:           "error with stderr included in message",
+			hookFunc:       mockLifecycleHookFunc(-1, "", "permission denied", fmt.Errorf("connection refused")),
+			expectSuccess:  false,
+			expectContains: "permission denied",
+		},
+		{
+			name:           "error with stdout when stderr is empty",
+			hookFunc:       mockLifecycleHookFunc(-1, "partial output", "", fmt.Errorf("timeout")),
+			expectSuccess:  false,
+			expectContains: "partial output",
+		},
+		{
+			name:           "non-zero exit code with stderr included",
+			hookFunc:       mockLifecycleHookFunc(1, "", "command not found", nil),
+			expectSuccess:  false,
+			expectContains: "command not found",
+		},
+		{
+			name: "message truncated when exceeding max length",
+			hookFunc: mockLifecycleHookFunc(-1, "", strings.Repeat("x", 1100), fmt.Errorf("exec failed")),
+			expectSuccess:  false,
+			expectContains: "...",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl := newTestCommonControl(tt.hookFunc, box.DeepCopy(), pod.DeepCopy())
+			result := ctrl.executeUpgradeAction(context.Background(), pod, box, action)
+			assert.Equal(t, tt.expectSuccess, result.Succeeded)
+			assert.Contains(t, result.Message, tt.expectContains)
+			// Verify truncation: message must not exceed MaxConditionMessageLen + len("...")
+			assert.LessOrEqual(t, len(result.Message), utils.MaxConditionMessageLen+3)
+		})
 	}
 }
 

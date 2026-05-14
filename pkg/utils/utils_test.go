@@ -150,6 +150,11 @@ func TestSetSandboxCondition(t *testing.T) {
 }
 
 func TestTruncateConditionMessage(t *testing.T) {
+	// Ensure default MaxConditionMessageLen is 1024 (no env override in this test).
+	if MaxConditionMessageLen != 1024 {
+		t.Fatalf("expected default MaxConditionMessageLen=1024, got %d", MaxConditionMessageLen)
+	}
+
 	tests := []struct {
 		name     string
 		msg      string
@@ -177,6 +182,64 @@ func TestTruncateConditionMessage(t *testing.T) {
 			got := TruncateConditionMessage(tt.msg)
 			if got != tt.expected {
 				t.Fatalf("TruncateConditionMessage() = %q, want %q", got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestTruncateConditionMessage_EnvOverride(t *testing.T) {
+	original := MaxConditionMessageLen
+	defer func() { MaxConditionMessageLen = original }()
+
+	tests := []struct {
+		name     string
+		envVal   string
+		wantLen  int
+	}{
+		{
+			name:    "valid env value",
+			envVal:  "512",
+			wantLen: 512,
+		},
+		{
+			name:    "invalid env value falls back to default",
+			envVal:  "not_a_number",
+			wantLen: 1024,
+		},
+		{
+			name:    "zero env value falls back to default",
+			envVal:  "0",
+			wantLen: 1024,
+		},
+		{
+			name:    "negative env value falls back to default",
+			envVal:  "-1",
+			wantLen: 1024,
+		},
+		{
+			name:    "empty env value falls back to default",
+			envVal:  "",
+			wantLen: 1024,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.envVal != "" {
+				t.Setenv("MAX_CONDITION_MESSAGE_LEN", tt.envVal)
+			}
+			MaxConditionMessageLen = getEnvIntOrDefault("MAX_CONDITION_MESSAGE_LEN", 1024)
+
+			if MaxConditionMessageLen != tt.wantLen {
+				t.Fatalf("MaxConditionMessageLen = %d, want %d", MaxConditionMessageLen, tt.wantLen)
+			}
+
+			// Verify truncation works with overridden length
+			longMsg := strings.Repeat("x", tt.wantLen+5)
+			got := TruncateConditionMessage(longMsg)
+			expected := strings.Repeat("x", tt.wantLen) + "..."
+			if got != expected {
+				t.Fatalf("TruncateConditionMessage() len = %d, want %d", len(got), len(expected))
 			}
 		})
 	}

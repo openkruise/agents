@@ -59,7 +59,7 @@ func ExecuteLifecycleHook(ctx context.Context, box *agentsv1alpha1.Sandbox, acti
 		Timeout: timeout,
 	})
 	if err != nil {
-		return -1, "", "", err
+		return -1, strings.Join(result.Stdout, ""), strings.Join(result.Stderr, ""), err
 	}
 
 	return result.ExitCode, strings.Join(result.Stdout, ""), strings.Join(result.Stderr, ""), nil

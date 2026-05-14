@@ -537,10 +537,12 @@ func (r *commonControl) executeUpgradeAction(ctx context.Context, pod *corev1.Po
 
 	exitCode, stdout, stderr, err := r.lifecycleHookFunc(ctx, box, action)
 	if err != nil {
-		return upgradeActionResult{Succeeded: false, Message: fmt.Sprintf("hook execution error: %v", err)}
+		msg := fmt.Sprintf("hook execution error: %v, stderr: %s, stdout: %s", err, stderr, stdout)
+		return upgradeActionResult{Succeeded: false, Message: utils.TruncateConditionMessage(msg)}
 	}
 	if exitCode != 0 {
-		return upgradeActionResult{Succeeded: false, Message: fmt.Sprintf("hook failed with exit code %d, stdout: %s, stderr: %s", exitCode, stdout, stderr)}
+		msg := fmt.Sprintf("hook failed with exit code %d, stderr: %s, stdout: %s", exitCode, stderr, stdout)
+		return upgradeActionResult{Succeeded: false, Message: utils.TruncateConditionMessage(msg)}
 	}
 	return upgradeActionResult{Succeeded: true, Message: fmt.Sprintf("hook succeeded, stdout: %s", stdout)}
 }

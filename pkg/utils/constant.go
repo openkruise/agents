@@ -18,6 +18,8 @@ package utils
 
 import (
 	"context"
+	"os"
+	"strconv"
 	"time"
 
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -38,8 +40,7 @@ const (
 	PodConditionContainersPaused  = "ContainersPaused"
 	PodConditionContainersResumed = "ContainersResumed"
 
-	// MaxConditionMessageLen is the max length for a Condition.Message.
-	MaxConditionMessageLen = 256
+	// MaxConditionMessageLen was moved to a var block below for env-based configuration.
 )
 
 const (
@@ -51,6 +52,10 @@ const (
 )
 
 var (
+	// MaxConditionMessageLen is the max length for a Condition.Message.
+	// Configurable via MAX_CONDITION_MESSAGE_LEN env var, defaults to 1024.
+	MaxConditionMessageLen = getEnvIntOrDefault("MAX_CONDITION_MESSAGE_LEN", 1024)
+
 	CacheBackoff = wait.Backoff{
 		Duration: 100 * time.Millisecond,
 		Factor:   2.0,
@@ -68,4 +73,13 @@ func RetryIfContextNotCanceled(ctx context.Context) func(err error) bool {
 			return true
 		}
 	}
+}
+
+func getEnvIntOrDefault(key string, defaultVal int) int {
+	if v := os.Getenv(key); v != "" {
+		if i, err := strconv.Atoi(v); err == nil && i > 0 {
+			return i
+		}
+	}
+	return defaultVal
 }
