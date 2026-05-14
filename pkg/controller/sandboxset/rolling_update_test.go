@@ -594,11 +594,11 @@ func TestDeleteSandboxForUpdate_RaceConditionPrevention(t *testing.T) {
 	oldHash := "old-hash"
 
 	tests := []struct {
-		name           string
-		setupSandbox   func(*v1alpha1.Sandbox)
-		expectError    string
-		expectDeleted  bool
-		expectSkipped  bool
+		name          string
+		setupSandbox  func(*v1alpha1.Sandbox)
+		expectError   string
+		expectDeleted bool
+		expectSkipped bool
 	}{
 		{
 			name: "unclaimed sandbox is deleted successfully",
@@ -676,10 +676,10 @@ func TestDeleteSandboxForUpdate_RaceConditionPrevention(t *testing.T) {
 				// Re-fetch to get latest version
 				freshSbx := &v1alpha1.Sandbox{}
 				assert.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), freshSbx))
-				
+
 				// Apply modifications
 				tt.setupSandbox(freshSbx)
-				
+
 				// Update in the cluster to simulate concurrent modification
 				// Skip update for deletion timestamp test
 				if tt.name != "sandbox with deletion timestamp is skipped" {
@@ -730,7 +730,7 @@ func TestDeleteSandboxForUpdate_RaceConditionPrevention(t *testing.T) {
 					if getErr == nil && checkSbx.DeletionTimestamp == nil {
 						// Verify sandbox was not modified (no lock from our operation)
 						if checkSbx.Annotations[v1alpha1.AnnotationOwner] != "" {
-							assert.NotEqual(t, consts.OwnerManagerScaleDown, 
+							assert.NotEqual(t, consts.OwnerManagerScaleDown,
 								checkSbx.Annotations[v1alpha1.AnnotationOwner],
 								"sandbox should not be locked by scale down operation")
 						}
