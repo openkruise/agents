@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"sync"
 	"testing"
 	"time"
@@ -29,6 +30,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/peers"
 	"github.com/openkruise/agents/pkg/proxy"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
@@ -46,6 +48,7 @@ func TestSandboxManager_WakeSandbox(t *testing.T) {
 		pausedCondition       metav1.ConditionStatus
 		readyCondition        metav1.ConditionStatus
 		infraErr              error
+		syncPeerIP            string
 		expectAction          proxy.WakeAction
 		expectSaveCalls       int
 		expectResumeCalls     int
@@ -177,6 +180,26 @@ func TestSandboxManager_WakeSandbox(t *testing.T) {
 			infraErr:     managererrors.NewError(managererrors.ErrorNotFound, "missing"),
 			expectAction: proxy.WakeActionNotFound,
 		},
+		{
+			name:         "cache not found maps to not found action",
+			infraErr:     fmt.Errorf("sandbox sandbox not found in cache"),
+			expectAction: proxy.WakeActionNotFound,
+		},
+		{
+			name:               "route sync failure still reports resumed",
+			state:              v1alpha1.SandboxStatePaused,
+			phase:              v1alpha1.SandboxPaused,
+			annotations:        map[string]string{v1alpha1.AnnotationWakeOnTraffic: "timeout:10m"},
+			initialTimeout:     timeout.Options{ShutdownTime: time.Now().Add(time.Hour)},
+			pausedCondition:    metav1.ConditionTrue,
+			syncPeerIP:         "%",
+			expectAction:       proxy.WakeActionResumed,
+			expectSaveCalls:    1,
+			expectResumeCalls:  1,
+			expectShutdownTime: true,
+			expectDuration:     10 * time.Minute,
+			expectAnnotation:   "timeout:10m",
+		},
 	}
 
 	for _, tt := range tests {
@@ -186,6 +209,9 @@ func TestSandboxManager_WakeSandbox(t *testing.T) {
 				infra:      &fakeInfrastructure{sandbox: sbx, err: tt.infraErr},
 				proxy:      proxy.NewServer(testManagerOptions()),
 				maxTimeout: 30 * time.Minute,
+			}
+			if tt.syncPeerIP != "" {
+				manager.proxy.SetPeersManager(&wakeTestPeers{members: []peers.Peer{{IP: tt.syncPeerIP}}})
 			}
 
 			start := time.Now()
@@ -571,6 +597,7 @@ func newWakeFakeSandbox(tt struct {
 	pausedCondition       metav1.ConditionStatus
 	readyCondition        metav1.ConditionStatus
 	infraErr              error
+	syncPeerIP            string
 	expectAction          proxy.WakeAction
 	expectSaveCalls       int
 	expectResumeCalls     int
@@ -744,3 +771,17 @@ func (f *sequenceInfrastructure) GetClaimedSandbox(context.Context, infra.GetCla
 	f.next++
 	return sbx, nil
 }
+
+type wakeTestPeers struct {
+	members []peers.Peer
+}
+
+func (p *wakeTestPeers) Start(context.Context, int) error { return nil }
+func (p *wakeTestPeers) Stop() error                      { return nil }
+func (p *wakeTestPeers) GetPeers() []peers.Peer           { return p.members }
+func (p *wakeTestPeers) GetAllMembers() []peers.Peer      { return p.members }
+func (p *wakeTestPeers) WaitForPeers(context.Context, int) error {
+	return nil
+}
+func (p *wakeTestPeers) LocalAddr() net.IP { return net.ParseIP("127.0.0.1") }
+func (p *wakeTestPeers) LocalPort() int    { return 0 }

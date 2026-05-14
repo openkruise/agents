@@ -19,10 +19,12 @@ package sandbox_manager
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/klog/v2"
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/proxy"
@@ -96,13 +98,15 @@ func (m *SandboxManager) WakeSandbox(ctx context.Context, sandboxID string) (pro
 		return proxy.WakeResult{}, err
 	}
 	if err = m.syncRoute(ctx, sbx, true); err != nil {
-		return proxy.WakeResult{}, err
+		klog.FromContext(ctx).Error(err, "failed to sync route with peers after wake", "sandbox", klog.KObj(sbx))
 	}
 	return wakeResult(sbx, proxy.WakeActionResumed, ""), nil
 }
 
 func isSandboxNotFound(err error) bool {
-	return apierrors.IsNotFound(err) || managererrors.GetErrCode(err) == managererrors.ErrorNotFound
+	return apierrors.IsNotFound(err) ||
+		managererrors.GetErrCode(err) == managererrors.ErrorNotFound ||
+		strings.Contains(err.Error(), "not found in cache")
 }
 
 func classifyPausedWakeSandbox(sbx infra.Sandbox) (proxy.WakeAction, bool) {
