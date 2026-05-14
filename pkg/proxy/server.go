@@ -101,7 +101,7 @@ func (s *Server) SetPeersManager(p peers.Peers) {
 	s.peersManager = p
 }
 
-func (s *Server) Run() error {
+func (s *Server) Run(errCh chan<- error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -128,14 +128,14 @@ func (s *Server) Run() error {
 	go func() {
 		klog.InfoS("Starting proxy system server", "address", s.httpSrv.Addr)
 		if err := s.httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			klog.Fatalf("HTTP server failed to start: %v", err)
+			errCh <- fmt.Errorf("HTTP proxy server failed to start: %w", err)
 		}
 	}()
 
 	go func() {
 		klog.InfoS("Starting proxy gRPC server", "address", lis.Addr())
 		if err := s.grpcSrv.Serve(lis); err != nil && !errors.Is(err, grpc.ErrServerStopped) {
-			klog.Fatalf("gRPC server failed to start: %v", err)
+			errCh <- fmt.Errorf("gRPC proxy server failed to start: %w", err)
 		}
 	}()
 
