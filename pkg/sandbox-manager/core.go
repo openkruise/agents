@@ -146,19 +146,26 @@ type SandboxManager struct {
 	peersManager       peers.Peers
 	memberlistBindPort int
 
-	infra infra.Infrastructure
-	proxy *proxy.Server
+	infra      infra.Infrastructure
+	proxy      *proxy.Server
+	// cancelRun cancels the context created in Run(); called by Stop() to
+	// terminate all background goroutines that depend on the run context.
+	cancelRun  context.CancelFunc
 }
 
 func (m *SandboxManager) Run(ctx context.Context) error {
 	log := klog.FromContext(ctx)
 
+	// Derive a cancellable context so the proxy watcher goroutine can trigger
+	// a clean shutdown if a listener crashes mid-run. The cancel function is
+	// stored on the struct so Stop() can also cancel it cleanly.
 	runCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	m.cancelRun = cancel
 
 	proxyErrCh := make(chan error, 2)
 	klog.InfoS("starting proxy")
 	if err := m.proxy.Run(proxyErrCh); err != nil {
+		cancel()
 		return fmt.Errorf("proxy failed to start synchronously: %w", err)
 	}
 
@@ -189,6 +196,10 @@ func (m *SandboxManager) Run(ctx context.Context) error {
 
 func (m *SandboxManager) Stop(ctx context.Context) {
 	log := klog.FromContext(ctx)
+	// Cancel the run context first so all background goroutines start draining.
+	if m.cancelRun != nil {
+		m.cancelRun()
+	}
 	m.proxy.Stop(ctx)
 	m.infra.Stop(ctx)
 	if m.peersManager != nil {
