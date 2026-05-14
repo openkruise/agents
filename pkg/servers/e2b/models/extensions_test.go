@@ -695,6 +695,16 @@ func TestParseExtensionSandboxNaming(t *testing.T) {
 			expectError: "invalid sandbox-generate-name",
 		},
 		{
+			name:        "gen with invalid char before trailing dash",
+			metadata:    map[string]string{v1alpha1.E2BPrefix + "sandbox-generate-name": "bad_-"},
+			expectError: "invalid sandbox-generate-name",
+		},
+		{
+			name:        "gen with dot before trailing dash",
+			metadata:    map[string]string{v1alpha1.E2BPrefix + "sandbox-generate-name": "a.-"},
+			expectError: "invalid sandbox-generate-name",
+		},
+		{
 			name:               "trailing dash ok",
 			metadata:           map[string]string{v1alpha1.E2BPrefix + "sandbox-generate-name": "good-prefix-"},
 			expectGenerateName: "good-prefix-",
