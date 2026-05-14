@@ -256,9 +256,9 @@ func (r *Reconciler) deleteSandboxForUpdate(ctx context.Context, sbs *agentsv1al
 	}
 
 	// Check if sandbox is locked by another operation
-	if freshSandbox.Annotations[agentsv1alpha1.AnnotationLock] != "" && 
+	if freshSandbox.Annotations[agentsv1alpha1.AnnotationLock] != "" &&
 		freshSandbox.Annotations[agentsv1alpha1.AnnotationOwner] != consts.OwnerManagerScaleDown {
-		log.Info("sandbox locked by another operation, skip", 
+		log.Info("sandbox locked by another operation, skip",
 			"owner", freshSandbox.Annotations[agentsv1alpha1.AnnotationOwner])
 		return errors.New("sandbox locked by another operation, skip")
 	}
