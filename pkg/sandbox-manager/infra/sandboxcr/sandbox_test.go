@@ -96,14 +96,17 @@ func TestSandbox_SaveTimeoutWithPolicy(t *testing.T) {
 	}
 
 	tests := []struct {
-		name          string
-		current       timeout.Options
-		baseline      *timeout.Options
-		requested     timeout.Options
-		policy        timeout.UpdatePolicy
-		expectUpdated bool
-		expectTimeout timeout.Options
-		expectError   string
+		name                  string
+		current               timeout.Options
+		baseline              *timeout.Options
+		requested             timeout.Options
+		policy                timeout.UpdatePolicy
+		expectUpdated         bool
+		expectTimeout         timeout.Options
+		initialAnnotations    map[string]string
+		nilInitialAnnotations bool
+		expectAnnotations     map[string]string
+		expectError           string
 	}{
 		{
 			name: "always updates when requested timeout differs",
@@ -241,6 +244,88 @@ func TestSandbox_SaveTimeoutWithPolicy(t *testing.T) {
 				ShutdownTime: base.Add(10 * time.Minute),
 			},
 		},
+		{
+			name: "always updates timeout and annotations together",
+			current: timeout.Options{
+				ShutdownTime: base.Add(10 * time.Minute),
+			},
+			requested: timeout.Options{
+				ShutdownTime: base.Add(20 * time.Minute),
+				SetAnnotations: map[string]string{
+					v1alpha1.AnnotationWakeOnTraffic: "timeout:300s",
+				},
+			},
+			policy:        timeout.UpdatePolicyAlways,
+			expectUpdated: true,
+			expectTimeout: timeout.Options{ShutdownTime: base.Add(20 * time.Minute)},
+			initialAnnotations: map[string]string{
+				v1alpha1.AnnotationWakeOnTraffic: "timeout:never",
+			},
+			expectAnnotations: map[string]string{
+				v1alpha1.AnnotationWakeOnTraffic: "timeout:300s",
+			},
+		},
+		{
+			name: "empty annotation value deletes existing key",
+			current: timeout.Options{
+				ShutdownTime: base.Add(10 * time.Minute),
+			},
+			requested: timeout.Options{
+				ShutdownTime: base.Add(20 * time.Minute),
+				SetAnnotations: map[string]string{
+					v1alpha1.AnnotationWakeOnTraffic: "",
+				},
+			},
+			policy:        timeout.UpdatePolicyAlways,
+			expectUpdated: true,
+			expectTimeout: timeout.Options{ShutdownTime: base.Add(20 * time.Minute)},
+			initialAnnotations: map[string]string{
+				v1alpha1.AnnotationWakeOnTraffic: "timeout:never",
+			},
+			expectAnnotations: map[string]string{
+				v1alpha1.AnnotationWakeOnTraffic: "",
+			},
+		},
+		{
+			name: "extend only no-op leaves annotations untouched",
+			current: timeout.Options{
+				ShutdownTime: base.Add(25 * time.Minute),
+			},
+			requested: timeout.Options{
+				ShutdownTime: base.Add(10 * time.Minute),
+				SetAnnotations: map[string]string{
+					v1alpha1.AnnotationWakeOnTraffic: "timeout:300s",
+				},
+			},
+			policy:        timeout.UpdatePolicyExtendOnly,
+			expectUpdated: false,
+			expectTimeout: timeout.Options{ShutdownTime: base.Add(25 * time.Minute)},
+			initialAnnotations: map[string]string{
+				v1alpha1.AnnotationWakeOnTraffic: "timeout:never",
+			},
+			expectAnnotations: map[string]string{
+				v1alpha1.AnnotationWakeOnTraffic: "timeout:never",
+			},
+		},
+		{
+			name: "non empty annotation write initializes nil annotations map",
+			current: timeout.Options{
+				ShutdownTime: base.Add(10 * time.Minute),
+			},
+			requested: timeout.Options{
+				ShutdownTime: base.Add(20 * time.Minute),
+				SetAnnotations: map[string]string{
+					"example.com/new": "value",
+				},
+			},
+			policy:                timeout.UpdatePolicyAlways,
+			expectUpdated:         true,
+			expectTimeout:         timeout.Options{ShutdownTime: base.Add(20 * time.Minute)},
+			nilInitialAnnotations: true,
+			expectAnnotations: map[string]string{
+				"example.com/new": "value",
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -249,6 +334,11 @@ func TestSandbox_SaveTimeoutWithPolicy(t *testing.T) {
 
 			sbx := createTestSandboxWithDefaults("test-sandbox", "default")
 			setTimeout(sbx, tt.current)
+			if tt.nilInitialAnnotations {
+				sbx.Annotations = nil
+			} else if tt.initialAnnotations != nil {
+				sbx.Annotations = tt.initialAnnotations
+			}
 			CreateSandboxWithStatus(t, fc, sbx)
 
 			var sandbox infra.Sandbox
@@ -278,6 +368,13 @@ func TestSandbox_SaveTimeoutWithPolicy(t *testing.T) {
 			var updated v1alpha1.Sandbox
 			require.NoError(t, fc.Get(t.Context(), types.NamespacedName{Namespace: sbx.Namespace, Name: sbx.Name}, &updated))
 			assert.True(t, timeout.Equal(tt.expectTimeout, timeout.GetTimeoutFromSandbox(&updated)))
+			for key, value := range tt.expectAnnotations {
+				if value == "" {
+					assert.NotContains(t, updated.Annotations, key)
+					continue
+				}
+				assert.Equal(t, value, updated.Annotations[key])
+			}
 		})
 	}
 }
@@ -470,6 +567,87 @@ func TestSandbox_SaveTimeoutWithPolicy_BaselineAwareUsesAPIReaderAfterConflict(t
 	updated := &v1alpha1.Sandbox{}
 	require.NoError(t, fc.Get(t.Context(), client.ObjectKeyFromObject(initial), updated))
 	assert.True(t, timeout.Equal(winnerTimeout, timeout.GetTimeoutFromSandbox(updated)))
+}
+
+func TestSandbox_SaveTimeoutWithPolicy_SetAnnotationsReappliedAfterConflict(t *testing.T) {
+	scheme := k8sruntime.NewScheme()
+	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(v1alpha1.AddToScheme(scheme))
+
+	base := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	current := timeout.Options{ShutdownTime: base.Add(10 * time.Minute)}
+	requested := timeout.Options{
+		ShutdownTime: base.Add(20 * time.Minute),
+		SetAnnotations: map[string]string{
+			v1alpha1.AnnotationWakeOnTraffic: "timeout:300s",
+		},
+	}
+
+	initial := createTestSandboxWithDefaults("test-sandbox", "default")
+	setTimeout(initial, current)
+	initial.Annotations = map[string]string{
+		v1alpha1.AnnotationWakeOnTraffic: "timeout:never",
+		"example.com/existing":           "keep",
+	}
+	stale := initial.DeepCopy()
+
+	fc := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&v1alpha1.Sandbox{}).
+		WithObjects(initial).
+		Build()
+
+	provider := &retryUpdateTestProvider{
+		apiReader:      &countingReader{Reader: fc},
+		claimedSandbox: initial,
+	}
+	var updateCalls atomic.Int32
+	provider.client = interceptor.NewClient(fc, interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			provider.clientGetCalls.Add(1)
+			if key == client.ObjectKeyFromObject(stale) {
+				stale.DeepCopyInto(obj.(*v1alpha1.Sandbox))
+				return nil
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+		Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+			if updateCalls.Add(1) == 1 {
+				latest := &v1alpha1.Sandbox{}
+				if err := c.Get(ctx, client.ObjectKeyFromObject(stale), latest); err != nil {
+					return err
+				}
+				winner := latest.DeepCopy()
+				setTimeout(winner, timeout.Options{ShutdownTime: base.Add(12 * time.Minute)})
+				winner.Annotations[v1alpha1.AnnotationWakeOnTraffic] = "timeout:120s"
+				if err := c.Update(ctx, winner); err != nil {
+					return err
+				}
+				return apierrors.NewConflict(
+					schema.GroupResource{Group: v1alpha1.GroupVersion.Group, Resource: "sandboxes"},
+					obj.GetName(),
+					errors.New("simulated conflict"),
+				)
+			}
+			return c.Update(ctx, obj, opts...)
+		},
+	})
+
+	sandbox := AsSandbox(stale.DeepCopy(), provider)
+	result, err := sandbox.SaveTimeoutWithPolicy(t.Context(), requested, timeout.UpdatePolicyAlways)
+	require.NoError(t, err)
+	assert.True(t, result.Updated)
+	assert.Equal(t, int32(1), provider.clientGetCalls.Load())
+	assert.Equal(t, int32(1), provider.apiReader.Calls())
+	assert.Equal(t, int32(2), updateCalls.Load())
+	assert.True(t, timeout.Equal(requested, sandbox.GetTimeout()))
+	assert.Equal(t, "timeout:300s", sandbox.GetAnnotations()[v1alpha1.AnnotationWakeOnTraffic])
+
+	updated := &v1alpha1.Sandbox{}
+	require.NoError(t, fc.Get(t.Context(), client.ObjectKeyFromObject(initial), updated))
+	assert.True(t, timeout.Equal(requested, timeout.GetTimeoutFromSandbox(updated)))
+	assert.Equal(t, "timeout:300s", updated.Annotations[v1alpha1.AnnotationWakeOnTraffic])
+	assert.Equal(t, "keep", updated.Annotations["example.com/existing"])
 }
 
 type countingReader struct {

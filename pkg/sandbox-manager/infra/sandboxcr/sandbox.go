@@ -201,6 +201,19 @@ func setTimeout(s *agentsv1alpha1.Sandbox, opts timeout.Options) {
 	}
 }
 
+func setAnnotations(s *agentsv1alpha1.Sandbox, annotations map[string]string) {
+	for key, value := range annotations {
+		if value == "" {
+			delete(s.Annotations, key)
+			continue
+		}
+		if s.Annotations == nil {
+			s.Annotations = map[string]string{}
+		}
+		s.Annotations[key] = value
+	}
+}
+
 func (s *Sandbox) SetTimeout(opts timeout.Options) {
 	setTimeout(s.Sandbox, opts)
 }
@@ -276,6 +289,7 @@ func (s *Sandbox) SaveTimeoutWithPolicy(ctx context.Context, opts timeout.Option
 			return false, nil
 		}
 		setTimeout(sbx, opts)
+		setAnnotations(sbx, opts.SetAnnotations)
 		return true, nil
 	})
 	if err != nil {
