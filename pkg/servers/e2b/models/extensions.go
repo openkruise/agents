@@ -73,6 +73,8 @@ const (
 	ExtensionHeaderWaitSuccessSeconds         = ExtensionHeaderPrefix + "snapshot-wait-success-seconds"
 )
 
+const sandboxGenerateNameValidationSuffix = "abcde"
+
 // Extensions for NewSandboxRequest
 
 func (r *NewSandboxRequest) ParseExtensions() error {
@@ -159,9 +161,9 @@ func (r *NewSandboxRequest) parseExtensionLabels() error {
 //
 // We validate as DNS-1123 label (63 chars, no dots) rather than subdomain:
 // the sandbox name becomes the underlying Pod name and is used as a DNS
-// hostname downstream, where label semantics apply. NameIsDNSLabel with
-// prefix=true is the canonical K8s validator for GenerateName prefixes —
-// it masks the required trailing dash before validating the rest.
+// hostname downstream, where label semantics apply. GenerateName is also
+// checked against a representative generated name so malformed trailing-dash
+// prefixes fail before the request reaches Kubernetes.
 func (r *NewSandboxRequest) parseExtensionSandboxNaming() error {
 	name, hasName := r.Metadata[ExtensionKeySandboxName]
 	gen, hasGen := r.Metadata[ExtensionKeySandboxGenerateName]
@@ -182,13 +184,30 @@ func (r *NewSandboxRequest) parseExtensionSandboxNaming() error {
 		if gen == "" {
 			return fmt.Errorf("sandbox-generate-name must not be empty")
 		}
-		if errs := apivalidation.NameIsDNSLabel(gen, true); len(errs) > 0 {
+		if errs := validateSandboxGenerateName(gen); len(errs) > 0 {
 			return fmt.Errorf("invalid sandbox-generate-name [%s]: %s", gen, strings.Join(errs, ", "))
 		}
 		r.Extensions.GenerateName = gen
 		delete(r.Metadata, ExtensionKeySandboxGenerateName)
 	}
 	return nil
+}
+
+func validateSandboxGenerateName(generateName string) []string {
+	if errs := apivalidation.NameIsDNSLabel(generateName, true); len(errs) > 0 {
+		return errs
+	}
+
+	// Kubernetes validates generateName with a trailing-dash mask, which can
+	// hide an invalid byte immediately before the dash. Validate a representative
+	// generated name so malformed prefixes are rejected before creation.
+	// The truncation mirrors Kubernetes SimpleNameGenerator: it cuts the prefix
+	// to leave room for the generated 5-byte suffix.
+	maxPrefixLength := validation.DNS1123LabelMaxLength - len(sandboxGenerateNameValidationSuffix)
+	if len(generateName) > maxPrefixLength {
+		generateName = generateName[:maxPrefixLength]
+	}
+	return apivalidation.NameIsDNSLabel(generateName+sandboxGenerateNameValidationSuffix, false)
 }
 
 func (r *NewSandboxRequest) parseExtensionImage() error {
