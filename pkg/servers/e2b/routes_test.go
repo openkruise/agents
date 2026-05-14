@@ -82,14 +82,14 @@ func TestCheckApiKey_WithRealSetup(t *testing.T) {
 			apiKeyHeader: "invalid-key",
 			expectError:  true,
 			expectedCode: http.StatusUnauthorized,
-			expectedMsg:  "Invalid API Key: invalid-key",
+			expectedMsg:  "Invalid API Key",
 		},
 		{
 			name:         "empty X-API-KEY header",
 			apiKeyHeader: "",
 			expectError:  true,
 			expectedCode: http.StatusUnauthorized,
-			expectedMsg:  "Invalid API Key: ",
+			expectedMsg:  "Invalid API Key",
 		},
 	}
 

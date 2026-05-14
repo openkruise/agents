@@ -97,14 +97,18 @@ func (sc *Controller) CheckApiKey(ctx context.Context, r *http.Request) (context
 	var user *models.CreatedTeamAPIKey
 	var ok bool
 	if sc.keys == nil {
+		// Authentication is disabled: every request is treated as AnonymousUser.
+		// Log a prominent warning so operators are aware of this insecure state.
+		klog.FromContext(ctx).Error(nil, "[SECURITY] API key storage is not configured — authentication is DISABLED, all requests are granted admin access")
 		user = AnonymousUser
 	} else {
 		user, ok = sc.keys.LoadByKey(ctx, apiKey)
 		if !ok {
 			middleWareLog.Info("failed to load key by API-KEY")
+			// Do NOT echo the submitted key value — it aids brute-force validation.
 			return ctx, &web.ApiError{
 				Code:    http.StatusUnauthorized,
-				Message: fmt.Sprintf("Invalid API Key: %s", apiKey),
+				Message: "Invalid API Key",
 			}
 		}
 	}
