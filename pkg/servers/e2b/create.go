@@ -37,6 +37,7 @@ import (
 	"github.com/openkruise/agents/pkg/utils/csiutils"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 	utilruntime "github.com/openkruise/agents/pkg/utils/runtime"
+	"github.com/openkruise/agents/pkg/utils/timeout"
 )
 
 // CreateSandbox allocates a Pod as a new sandbox
@@ -282,7 +283,7 @@ func (sc *Controller) basicSandboxCreateModifier(ctx context.Context, sbx infra.
 	//   - if autoPause == true: Set `ShutdownTime` to `time.Now().Add(maxTimeout)` and clear `PauseTime`
 	//   - if autoPause == false: Set `ShutdownTime` to `time.Now().Add(maxTimeout)`
 	now := time.Now()
-	timeoutOptions := infra.TimeoutOptions{}
+	timeoutOptions := timeout.Options{}
 	if !request.Extensions.NeverTimeout {
 		if request.AutoPause {
 			timeoutOptions.ShutdownTime = TimeAfterSeconds(now, sc.maxTimeout)

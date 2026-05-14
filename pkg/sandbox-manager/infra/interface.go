@@ -26,6 +26,7 @@ import (
 
 	"github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/proxy"
+	"github.com/openkruise/agents/pkg/utils/timeout"
 )
 
 type SandboxResource struct {
@@ -34,29 +35,12 @@ type SandboxResource struct {
 	DiskSizeMB int64
 }
 
-// TimeoutOptions is the time when Sandbox will be shut down or paused. Zero means never.
-type TimeoutOptions struct {
-	ShutdownTime time.Time
-	PauseTime    time.Time
-	// Baseline is the timeout state the caller observed before issuing this update.
-	// Consulted only when the policy passed to SaveTimeoutWithPolicy is BaselineAware.
-	Baseline *TimeoutOptions `json:"-"`
-}
-
-type TimeoutUpdatePolicy string
-
-const (
-	TimeoutUpdatePolicyAlways        TimeoutUpdatePolicy = "Always"
-	TimeoutUpdatePolicyExtendOnly    TimeoutUpdatePolicy = "ExtendOnly"
-	TimeoutUpdatePolicyBaselineAware TimeoutUpdatePolicy = "BaselineAware"
-)
-
 type TimeoutUpdateResult struct {
 	Updated bool
 }
 
 type PauseOptions struct {
-	Timeout *TimeoutOptions
+	Timeout *timeout.Options
 }
 
 // ResumeOptions reserves the type for future extensions.
@@ -127,9 +111,9 @@ type Sandbox interface {
 	GetImage() string
 	SetPodLabels(labels map[string]string)
 	GetPodLabels() map[string]string
-	SetTimeout(opts TimeoutOptions)
-	SaveTimeoutWithPolicy(ctx context.Context, opts TimeoutOptions, policy TimeoutUpdatePolicy) (TimeoutUpdateResult, error)
-	GetTimeout() TimeoutOptions
+	SetTimeout(opts timeout.Options)
+	SaveTimeoutWithPolicy(ctx context.Context, opts timeout.Options, policy timeout.UpdatePolicy) (TimeoutUpdateResult, error)
+	GetTimeout() timeout.Options
 	GetClaimTime() (time.Time, error)
 	Kill(ctx context.Context) error                                                                     // Delete the Sandbox resource
 	InplaceRefresh(ctx context.Context, deepcopy bool) error                                            // Update the Sandbox resource object to the latest

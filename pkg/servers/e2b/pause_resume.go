@@ -30,6 +30,7 @@ import (
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
 	"github.com/openkruise/agents/pkg/utils/runtime"
+	"github.com/openkruise/agents/pkg/utils/timeout"
 )
 
 func (sc *Controller) PauseSandbox(r *http.Request) (web.ApiResponse[struct{}], *web.ApiError) {
@@ -61,15 +62,15 @@ func (sc *Controller) PauseSandbox(r *http.Request) (web.ApiResponse[struct{}], 
 	}, nil
 }
 
-func (sc *Controller) buildPauseTimeoutOptions(sbx infra.Sandbox, now time.Time) infra.TimeoutOptions {
+func (sc *Controller) buildPauseTimeoutOptions(sbx infra.Sandbox, now time.Time) timeout.Options {
 	opts := sbx.GetTimeout()
 	// Only set timeout if the sandbox has a timeout configured (not never-timeout)
 	if !opts.ShutdownTime.IsZero() {
 		// Paused sandboxes are kept indefinitely — there is no automatic deletion or time-to-live limit
-		timeout := now.AddDate(1000, 0, 0)
-		opts.ShutdownTime = timeout
+		endAt := now.AddDate(1000, 0, 0)
+		opts.ShutdownTime = endAt
 		if !opts.PauseTime.IsZero() {
-			opts.PauseTime = timeout
+			opts.PauseTime = endAt
 		}
 	}
 	return opts
@@ -127,7 +128,7 @@ func (sc *Controller) ResumeSandbox(r *http.Request) (web.ApiResponse[struct{}],
 		opts := sc.buildSetTimeoutOptions(autoPause, now, request.TimeoutSeconds)
 		opts.Baseline = &baseline
 		log.Info("sandbox resumed, resetting sandbox timeout", "timeout", opts)
-		if _, err := sbx.SaveTimeoutWithPolicy(ctx, opts, infra.TimeoutUpdatePolicyBaselineAware); err != nil {
+		if _, err := sbx.SaveTimeoutWithPolicy(ctx, opts, timeout.UpdatePolicyBaselineAware); err != nil {
 			return web.ApiResponse[struct{}]{}, &web.ApiError{
 				Message: fmt.Sprintf("Failed to set sandbox timeout: %v", err),
 			}
@@ -208,7 +209,7 @@ func (sc *Controller) ConnectSandbox(r *http.Request) (web.ApiResponse[*models.S
 //     preserve the longest timeout.
 //   - Otherwise → ExtendOnly: the sandbox was already running, so we only allow extending
 //     the existing timeout, never shrinking it.
-func (sc *Controller) updateConnectTimeout(ctx context.Context, sbx infra.Sandbox, timeoutSeconds int, preConnectState string, autoPause bool, currentEndAt time.Time, baseline infra.TimeoutOptions) *web.ApiError {
+func (sc *Controller) updateConnectTimeout(ctx context.Context, sbx infra.Sandbox, timeoutSeconds int, preConnectState string, autoPause bool, currentEndAt time.Time, baseline timeout.Options) *web.ApiError {
 	log := klog.FromContext(ctx).WithValues("sandboxID", sbx.GetSandboxID())
 
 	// Rule 1: Sandboxes without endAt are never-timeout, should not have their timeout updated
@@ -218,10 +219,10 @@ func (sc *Controller) updateConnectTimeout(ctx context.Context, sbx infra.Sandbo
 	}
 
 	now := time.Now()
-	policy := infra.TimeoutUpdatePolicyExtendOnly
+	policy := timeout.UpdatePolicyExtendOnly
 	opts := sc.buildSetTimeoutOptions(autoPause, now, timeoutSeconds)
 	if preConnectState == v1alpha1.SandboxStatePaused {
-		policy = infra.TimeoutUpdatePolicyBaselineAware
+		policy = timeout.UpdatePolicyBaselineAware
 		opts.Baseline = &baseline
 	}
 

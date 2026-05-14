@@ -188,7 +188,7 @@ func (s *Sandbox) GetRoute() proxy.Route {
 	return proxyutils.DefaultGetRouteFunc(s.Sandbox)
 }
 
-func setTimeout(s *agentsv1alpha1.Sandbox, opts infra.TimeoutOptions) {
+func setTimeout(s *agentsv1alpha1.Sandbox, opts timeout.Options) {
 	if !opts.PauseTime.IsZero() {
 		s.Spec.PauseTime = ptr.To(metav1.NewTime(timeout.NormalizeTime(opts.PauseTime)))
 	} else {
@@ -201,7 +201,7 @@ func setTimeout(s *agentsv1alpha1.Sandbox, opts infra.TimeoutOptions) {
 	}
 }
 
-func (s *Sandbox) SetTimeout(opts infra.TimeoutOptions) {
+func (s *Sandbox) SetTimeout(opts timeout.Options) {
 	setTimeout(s.Sandbox, opts)
 }
 
@@ -239,36 +239,23 @@ func (s *Sandbox) GetImage() string {
 //     this update. When current timeout matches baseline, it is treated as
 //     overwrite-allowed; when current timeout differs from baseline, only extension
 //     is allowed.
-func (s *Sandbox) SaveTimeoutWithPolicy(ctx context.Context, opts infra.TimeoutOptions, policy infra.TimeoutUpdatePolicy) (infra.TimeoutUpdateResult, error) {
+func (s *Sandbox) SaveTimeoutWithPolicy(ctx context.Context, opts timeout.Options, policy timeout.UpdatePolicy) (infra.TimeoutUpdateResult, error) {
 	log := klog.FromContext(ctx).V(consts.DebugLogLevel).WithValues("sandbox", klog.KObj(s.Sandbox), "policy", policy)
 	result := infra.TimeoutUpdateResult{}
 
-	first := true
-	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		sbx := &agentsv1alpha1.Sandbox{}
-		var err error
-		if first {
-			err = s.Cache.GetClient().Get(ctx, client.ObjectKeyFromObject(s.Sandbox), sbx)
-		} else {
-			err = s.Cache.GetAPIReader().Get(ctx, client.ObjectKeyFromObject(s.Sandbox), sbx)
-		}
-		first = false
-		if err != nil {
-			return err
-		}
-
+	updated, err := s.retryUpdate(ctx, func(sbx *agentsv1alpha1.Sandbox) (bool, error) {
 		current := timeout.GetTimeoutFromSandbox(sbx)
 		log.Info("data fetched before saving timeout", "current", current)
 
 		shouldUpdate := false
 		switch policy {
-		case infra.TimeoutUpdatePolicyAlways:
+		case timeout.UpdatePolicyAlways:
 			shouldUpdate = !timeout.Equal(current, opts)
-		case infra.TimeoutUpdatePolicyExtendOnly:
+		case timeout.UpdatePolicyExtendOnly:
 			shouldUpdate = timeout.ShouldExtendTimeout(current, opts)
-		case infra.TimeoutUpdatePolicyBaselineAware:
+		case timeout.UpdatePolicyBaselineAware:
 			if opts.Baseline == nil {
-				return fmt.Errorf("BaselineAware policy requires opts.Baseline to be set")
+				return false, fmt.Errorf("BaselineAware policy requires opts.Baseline to be set")
 			}
 			if timeout.Equal(current, *opts.Baseline) {
 				// No concurrent writer has changed the timeout since the caller's observation.
@@ -282,37 +269,26 @@ func (s *Sandbox) SaveTimeoutWithPolicy(ctx context.Context, opts infra.TimeoutO
 				log.Info("baseline differs from current, using ExtendOnly semantics", "shouldUpdate", shouldUpdate)
 			}
 		default:
-			return fmt.Errorf("unsupported timeout update policy %q", policy)
+			return false, fmt.Errorf("unsupported timeout update policy %q", policy)
 		}
 
 		if !shouldUpdate {
-			// not modified, should not deepcopy
-			s.Sandbox = sbx
-			result = infra.TimeoutUpdateResult{Updated: false}
-			return nil
+			return false, nil
 		}
-
-		// Perform the allowed update
-		copied := sbx.DeepCopy()
-		setTimeout(copied, opts)
-		if err = s.Cache.GetClient().Update(ctx, copied); err != nil {
-			return err
-		}
-		s.Sandbox = copied
-		expectationutils.ResourceVersionExpectationExpect(copied)
-		result = infra.TimeoutUpdateResult{Updated: true}
-		return nil
+		setTimeout(sbx, opts)
+		return true, nil
 	})
 	if err != nil {
 		log.Error(err, "failed to update sandbox timeout after retries")
 		return infra.TimeoutUpdateResult{}, err
 	}
+	result.Updated = updated
 
 	log.Info("sandbox timeout updated successfully", "updated", result.Updated, "timeout", s.GetTimeout())
 	return result, nil
 }
 
-func (s *Sandbox) GetTimeout() infra.TimeoutOptions {
+func (s *Sandbox) GetTimeout() timeout.Options {
 	return timeout.GetTimeoutFromSandbox(s.Sandbox)
 }
 
@@ -382,7 +358,7 @@ func (s *Sandbox) Pause(ctx context.Context, opts infra.PauseOptions) error {
 
 const postResumeOperationTimeout = 30 * time.Second
 
-func (s *Sandbox) Resume(ctx context.Context, opts infra.ResumeOptions) error {
+func (s *Sandbox) Resume(ctx context.Context, _ infra.ResumeOptions) error {
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(s.Sandbox))
 
 	if err := s.refreshFromAPIReader(ctx); err != nil {

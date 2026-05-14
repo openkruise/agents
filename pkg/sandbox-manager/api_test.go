@@ -42,6 +42,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	"github.com/openkruise/agents/pkg/utils/sandboxutils"
+	"github.com/openkruise/agents/pkg/utils/timeout"
 )
 
 var testUser = "test-user"
@@ -157,7 +158,7 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 				User:     username,
 				Template: "exist-1",
 				Modifier: func(sandbox infra.Sandbox) {
-					sandbox.SetTimeout(infra.TimeoutOptions{
+					sandbox.SetTimeout(timeout.Options{
 						ShutdownTime: now.Add(time.Second),
 						PauseTime:    now.Add(time.Second),
 					})
@@ -167,9 +168,9 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 				"exist-1": 1,
 			},
 			postCheck: func(t *testing.T, sbx infra.Sandbox) {
-				timeout := sbx.GetTimeout()
-				assert.WithinDuration(t, now.Add(time.Second), timeout.ShutdownTime, 2*time.Second)
-				assert.WithinDuration(t, now.Add(time.Second), timeout.PauseTime, 2*time.Second)
+				opts := sbx.GetTimeout()
+				assert.WithinDuration(t, now.Add(time.Second), opts.ShutdownTime, 2*time.Second)
+				assert.WithinDuration(t, now.Add(time.Second), opts.PauseTime, 2*time.Second)
 			},
 		},
 		{

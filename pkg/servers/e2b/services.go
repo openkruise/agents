@@ -24,14 +24,14 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/openkruise/agents/pkg/utils/runtime"
 	"k8s.io/klog/v2"
 
 	sandboxmanager "github.com/openkruise/agents/pkg/sandbox-manager"
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
+	"github.com/openkruise/agents/pkg/utils/runtime"
 	managerutils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
+	"github.com/openkruise/agents/pkg/utils/timeout"
 )
 
 // DescribeSandbox returns details of a specific sandbox
@@ -76,14 +76,14 @@ func (sc *Controller) DeleteSandbox(r *http.Request) (web.ApiResponse[struct{}],
 	}, nil
 }
 
-func (sc *Controller) buildSetTimeoutOptions(autoPause bool, now time.Time, timeoutSeconds int) infra.TimeoutOptions {
+func (sc *Controller) buildSetTimeoutOptions(autoPause bool, now time.Time, timeoutSeconds int) timeout.Options {
 	if autoPause {
-		return infra.TimeoutOptions{
+		return timeout.Options{
 			PauseTime:    TimeAfterSeconds(now, timeoutSeconds),
 			ShutdownTime: TimeAfterSeconds(now, sc.maxTimeout),
 		}
 	}
-	return infra.TimeoutOptions{
+	return timeout.Options{
 		ShutdownTime: TimeAfterSeconds(now, timeoutSeconds),
 	}
 }

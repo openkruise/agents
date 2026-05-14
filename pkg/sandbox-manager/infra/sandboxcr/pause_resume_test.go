@@ -25,7 +25,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/openkruise/agents/pkg/utils/runtime"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -39,8 +38,10 @@ import (
 	cacheutils "github.com/openkruise/agents/pkg/cache/utils"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	"github.com/openkruise/agents/pkg/utils/runtime"
 	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	"github.com/openkruise/agents/pkg/utils/sandboxutils"
+	"github.com/openkruise/agents/pkg/utils/timeout"
 	testutils "github.com/openkruise/agents/test/utils"
 )
 
@@ -382,7 +383,7 @@ func TestSandbox_Pause(t *testing.T) {
 
 			s := AsSandbox(sandbox, cache)
 			opts := infra.PauseOptions{
-				Timeout: &infra.TimeoutOptions{
+				Timeout: &timeout.Options{
 					ShutdownTime: now.Add(time.Hour),
 					PauseTime:    now.Add(time.Minute),
 				},
@@ -441,7 +442,7 @@ func TestSandbox_PauseSkipsSideEffectsWhenLatestAlreadyPaused(t *testing.T) {
 		{
 			name: "does not update timeout when latest already paused",
 			opts: infra.PauseOptions{
-				Timeout: &infra.TimeoutOptions{
+				Timeout: &timeout.Options{
 					ShutdownTime: time.Now().Add(3 * time.Hour),
 					PauseTime:    time.Now().Add(90 * time.Minute),
 				},

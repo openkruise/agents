@@ -24,7 +24,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 )
 
 func TestGetTimeoutFromSandbox(t *testing.T) {
@@ -33,14 +32,14 @@ func TestGetTimeoutFromSandbox(t *testing.T) {
 	tests := []struct {
 		name     string
 		sandbox  *agentsv1alpha1.Sandbox
-		expected infra.TimeoutOptions
+		expected Options
 	}{
 		{
 			name: "No timeout configured",
 			sandbox: &agentsv1alpha1.Sandbox{
 				Spec: agentsv1alpha1.SandboxSpec{},
 			},
-			expected: infra.TimeoutOptions{},
+			expected: Options{},
 		},
 		{
 			name: "Has shutdown timeout",
@@ -49,7 +48,7 @@ func TestGetTimeoutFromSandbox(t *testing.T) {
 					ShutdownTime: &metav1.Time{Time: baseTime.Add(time.Minute)},
 				},
 			},
-			expected: infra.TimeoutOptions{
+			expected: Options{
 				ShutdownTime: NormalizeTime(baseTime.Add(time.Minute)),
 			},
 		},
@@ -60,7 +59,7 @@ func TestGetTimeoutFromSandbox(t *testing.T) {
 					PauseTime: &metav1.Time{Time: baseTime.Add(2 * time.Minute)},
 				},
 			},
-			expected: infra.TimeoutOptions{
+			expected: Options{
 				PauseTime: NormalizeTime(baseTime.Add(2 * time.Minute)),
 			},
 		},
@@ -72,7 +71,7 @@ func TestGetTimeoutFromSandbox(t *testing.T) {
 					PauseTime:    &metav1.Time{Time: baseTime.Add(4 * time.Minute)},
 				},
 			},
-			expected: infra.TimeoutOptions{
+			expected: Options{
 				ShutdownTime: NormalizeTime(baseTime.Add(3 * time.Minute)),
 				PauseTime:    NormalizeTime(baseTime.Add(4 * time.Minute)),
 			},
@@ -94,42 +93,42 @@ func TestEqual(t *testing.T) {
 
 	tests := []struct {
 		name string
-		a    infra.TimeoutOptions
-		b    infra.TimeoutOptions
+		a    Options
+		b    Options
 		want bool
 	}{
 		{
 			name: "Both zero",
-			a:    infra.TimeoutOptions{},
-			b:    infra.TimeoutOptions{},
+			a:    Options{},
+			b:    Options{},
 			want: true,
 		},
 		{
 			name: "Shutdown times same after normalization",
-			a: infra.TimeoutOptions{
+			a: Options{
 				ShutdownTime: timeWithNanos,
 			},
-			b: infra.TimeoutOptions{
+			b: Options{
 				ShutdownTime: rounded.Add(500 * time.Millisecond),
 			},
 			want: true,
 		},
 		{
 			name: "Pause time mismatched",
-			a: infra.TimeoutOptions{
+			a: Options{
 				PauseTime: base.Add(time.Minute),
 			},
-			b: infra.TimeoutOptions{
+			b: Options{
 				PauseTime: base.Add(2 * time.Minute),
 			},
 			want: false,
 		},
 		{
 			name: "Shutdown and pause mismatch",
-			a: infra.TimeoutOptions{
+			a: Options{
 				ShutdownTime: base.Add(time.Minute),
 			},
-			b: infra.TimeoutOptions{
+			b: Options{
 				ShutdownTime: base.Add(time.Minute),
 				PauseTime:    base.Add(2 * time.Minute),
 			},
@@ -137,17 +136,17 @@ func TestEqual(t *testing.T) {
 		},
 		{
 			name: "Baseline ignored",
-			a: infra.TimeoutOptions{
+			a: Options{
 				ShutdownTime: base.Add(time.Minute),
 				PauseTime:    base.Add(2 * time.Minute),
-				Baseline: &infra.TimeoutOptions{
+				Baseline: &Options{
 					ShutdownTime: base.Add(3 * time.Minute),
 				},
 			},
-			b: infra.TimeoutOptions{
+			b: Options{
 				ShutdownTime: base.Add(time.Minute),
 				PauseTime:    base.Add(2 * time.Minute),
-				Baseline: &infra.TimeoutOptions{
+				Baseline: &Options{
 					PauseTime: base.Add(4 * time.Minute),
 				},
 			},
@@ -168,55 +167,55 @@ func TestShouldExtendTimeout(t *testing.T) {
 
 	tests := []struct {
 		name      string
-		current   infra.TimeoutOptions
-		requested infra.TimeoutOptions
+		current   Options
+		requested Options
 		want      bool
 	}{
 		{
 			name: "Current timeout zero, cannot extend",
-			current: infra.TimeoutOptions{
+			current: Options{
 				ShutdownTime: time.Time{},
 			},
-			requested: infra.TimeoutOptions{
+			requested: Options{
 				ShutdownTime: now.Add(time.Minute),
 			},
 			want: false,
 		},
 		{
 			name: "Requested timeout zero, cannot extend",
-			current: infra.TimeoutOptions{
+			current: Options{
 				ShutdownTime: now.Add(time.Minute),
 			},
-			requested: infra.TimeoutOptions{},
+			requested: Options{},
 			want:      false,
 		},
 		{
 			name: "Requested later than current",
-			current: infra.TimeoutOptions{
+			current: Options{
 				ShutdownTime: now.Add(time.Minute),
 			},
-			requested: infra.TimeoutOptions{
+			requested: Options{
 				ShutdownTime: now.Add(2 * time.Minute),
 			},
 			want: true,
 		},
 		{
 			name: "Requested earlier than current",
-			current: infra.TimeoutOptions{
+			current: Options{
 				ShutdownTime: now.Add(2 * time.Minute),
 			},
-			requested: infra.TimeoutOptions{
+			requested: Options{
 				ShutdownTime: now.Add(time.Minute),
 			},
 			want: false,
 		},
 		{
 			name: "Pause time has priority",
-			current: infra.TimeoutOptions{
+			current: Options{
 				ShutdownTime: now.Add(10 * time.Minute),
 				PauseTime:    now.Add(time.Minute),
 			},
-			requested: infra.TimeoutOptions{
+			requested: Options{
 				ShutdownTime: now.Add(20 * time.Minute),
 				PauseTime:    now.Add(2 * time.Minute),
 			},
@@ -224,15 +223,15 @@ func TestShouldExtendTimeout(t *testing.T) {
 		},
 		{
 			name: "Same effective end time with different baselines does not extend",
-			current: infra.TimeoutOptions{
+			current: Options{
 				ShutdownTime: now.Add(time.Minute),
-				Baseline: &infra.TimeoutOptions{
+				Baseline: &Options{
 					ShutdownTime: now.Add(3 * time.Minute),
 				},
 			},
-			requested: infra.TimeoutOptions{
+			requested: Options{
 				ShutdownTime: now.Add(time.Minute),
-				Baseline: &infra.TimeoutOptions{
+				Baseline: &Options{
 					ShutdownTime: now.Add(4 * time.Minute),
 				},
 			},
@@ -240,15 +239,15 @@ func TestShouldExtendTimeout(t *testing.T) {
 		},
 		{
 			name: "Later effective end time extends despite different baselines",
-			current: infra.TimeoutOptions{
+			current: Options{
 				ShutdownTime: now.Add(time.Minute),
-				Baseline: &infra.TimeoutOptions{
+				Baseline: &Options{
 					PauseTime: now.Add(3 * time.Minute),
 				},
 			},
-			requested: infra.TimeoutOptions{
+			requested: Options{
 				ShutdownTime: now.Add(2 * time.Minute),
-				Baseline: &infra.TimeoutOptions{
+				Baseline: &Options{
 					PauseTime: now.Add(4 * time.Minute),
 				},
 			},
@@ -295,12 +294,12 @@ func TestTimeoutEndAt(t *testing.T) {
 
 	tests := []struct {
 		name string
-		in   infra.TimeoutOptions
+		in   Options
 		want time.Time
 	}{
 		{
 			name: "Pause time takes precedence",
-			in: infra.TimeoutOptions{
+			in: Options{
 				ShutdownTime: now.Add(time.Minute),
 				PauseTime:    now.Add(2 * time.Minute),
 			},
@@ -308,14 +307,14 @@ func TestTimeoutEndAt(t *testing.T) {
 		},
 		{
 			name: "Fallback to shutdown time",
-			in: infra.TimeoutOptions{
+			in: Options{
 				ShutdownTime: now.Add(time.Minute),
 			},
 			want: now.Add(time.Minute),
 		},
 		{
 			name: "Both zero",
-			in:   infra.TimeoutOptions{},
+			in:   Options{},
 			want: time.Time{},
 		},
 	}

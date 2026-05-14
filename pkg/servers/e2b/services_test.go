@@ -46,6 +46,7 @@ import (
 	"github.com/openkruise/agents/pkg/utils/runtime"
 	managerutils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	"github.com/openkruise/agents/pkg/utils/sandbox-manager/proxyutils"
+	"github.com/openkruise/agents/pkg/utils/timeout"
 	testutils "github.com/openkruise/agents/test/utils"
 )
 
@@ -256,7 +257,7 @@ func TestCreateSandbox(t *testing.T) {
 					SandboxID: resp.SandboxID,
 				})
 				assert.NoError(t, err)
-				assert.Equal(t, infra.TimeoutOptions{}, sbx.GetTimeout())
+				assert.Equal(t, timeout.Options{}, sbx.GetTimeout())
 			},
 		},
 		{
@@ -502,14 +503,14 @@ func TestCreateSandbox(t *testing.T) {
 				startedAt, err := time.Parse(time.RFC3339, sbx.StartedAt)
 				assert.NoError(t, err)
 				assert.WithinDuration(t, now, startedAt, 5*time.Second)
-				timeout := 300
+				timeoutSeconds := 300
 				if tt.request.Timeout != 0 {
-					timeout = tt.request.Timeout
+					timeoutSeconds = tt.request.Timeout
 				}
 				if tt.request.Metadata[models.ExtensionKeyNeverTimeout] != v1alpha1.True {
 					endAt, err := time.Parse(time.RFC3339, sbx.EndAt)
 					assert.NoError(t, err)
-					assert.WithinDuration(t, startedAt.Add(time.Duration(timeout)*time.Second), endAt, 5*time.Second)
+					assert.WithinDuration(t, startedAt.Add(time.Duration(timeoutSeconds)*time.Second), endAt, 5*time.Second)
 				}
 				assert.Equal(t, models.SandboxStateRunning, sbx.State)
 			}
@@ -804,7 +805,7 @@ func TestCloneSandbox(t *testing.T) {
 					SandboxID: resp.SandboxID,
 				})
 				assert.NoError(t, err)
-				assert.Equal(t, infra.TimeoutOptions{}, sbx.GetTimeout())
+				assert.Equal(t, timeout.Options{}, sbx.GetTimeout())
 			},
 		},
 		{
@@ -972,14 +973,14 @@ func TestCloneSandbox(t *testing.T) {
 				assert.WithinDuration(t, now, startedAt, 5*time.Second)
 
 				// Verify timeout/endAt
-				timeout := 300
+				timeoutSeconds := 300
 				if tt.request.Timeout != 0 {
-					timeout = tt.request.Timeout
+					timeoutSeconds = tt.request.Timeout
 				}
 				if tt.request.Metadata[models.ExtensionKeyNeverTimeout] != v1alpha1.True {
 					endAt, err := time.Parse(time.RFC3339, sbx.EndAt)
 					assert.NoError(t, err)
-					assert.WithinDuration(t, startedAt.Add(time.Duration(timeout)*time.Second), endAt, 5*time.Second)
+					assert.WithinDuration(t, startedAt.Add(time.Duration(timeoutSeconds)*time.Second), endAt, 5*time.Second)
 				}
 
 				// Verify state
@@ -1201,9 +1202,9 @@ func TestCloneSandboxWithCSIMountFromCheckpointAnnotation(t *testing.T) {
 func TestAutoPause(t *testing.T) {
 	controller, client, teardown := Setup(t)
 	defer teardown()
-	timeout := 300
+	timeoutSeconds := 300
 	now := time.Now()
-	timeoutTime := now.Add(time.Duration(timeout) * time.Second)
+	timeoutTime := now.Add(time.Duration(timeoutSeconds) * time.Second)
 	maxTimeoutTime := now.Add(time.Duration(models.DefaultMaxTimeout) * time.Second)
 	timeoutAfterPaused := now.AddDate(1000, 0, 0)
 	templateName := "auto-pause"
@@ -1287,7 +1288,7 @@ func TestAutoPause(t *testing.T) {
 			createResp, apiError := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
 				TemplateID: templateName,
 				AutoPause:  tt.autoPause,
-				Timeout:    timeout,
+				Timeout:    timeoutSeconds,
 				Metadata: map[string]string{
 					models.ExtensionKeySkipInitRuntime: v1alpha1.True,
 				},
@@ -1320,7 +1321,7 @@ func TestAutoPause(t *testing.T) {
 				return sbx.Spec.Paused == false
 			}, DoSetSandboxStatus(v1alpha1.SandboxRunning, metav1.ConditionFalse, metav1.ConditionTrue))
 			connectResp, apiError := controller.ConnectSandbox(NewRequest(t, nil, models.SetTimeoutRequest{
-				TimeoutSeconds: timeout,
+				TimeoutSeconds: timeoutSeconds,
 			}, map[string]string{
 				"sandboxID": createResp.Body.SandboxID,
 			}, user))

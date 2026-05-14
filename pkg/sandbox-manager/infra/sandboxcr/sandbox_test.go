@@ -28,9 +28,6 @@ import (
 	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
-	"github.com/openkruise/agents/pkg/utils/runtime"
-	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
-	"github.com/openkruise/agents/pkg/utils/timeout"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -55,7 +52,10 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/utils"
+	"github.com/openkruise/agents/pkg/utils/runtime"
 	"github.com/openkruise/agents/pkg/utils/sandbox-manager/proxyutils"
+	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
+	"github.com/openkruise/agents/pkg/utils/timeout"
 	testutils "github.com/openkruise/agents/test/utils"
 )
 
@@ -91,153 +91,153 @@ func ConvertPodToSandboxCR(pod *corev1.Pod) *v1alpha1.Sandbox {
 
 func TestSandbox_SaveTimeoutWithPolicy(t *testing.T) {
 	base := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
-	timeoutPtr := func(opts infra.TimeoutOptions) *infra.TimeoutOptions {
+	timeoutPtr := func(opts timeout.Options) *timeout.Options {
 		return &opts
 	}
 
 	tests := []struct {
 		name          string
-		current       infra.TimeoutOptions
-		baseline      *infra.TimeoutOptions
-		requested     infra.TimeoutOptions
-		policy        infra.TimeoutUpdatePolicy
+		current       timeout.Options
+		baseline      *timeout.Options
+		requested     timeout.Options
+		policy        timeout.UpdatePolicy
 		expectUpdated bool
-		expectTimeout infra.TimeoutOptions
+		expectTimeout timeout.Options
 		expectError   string
 	}{
 		{
 			name: "always updates when requested timeout differs",
-			current: infra.TimeoutOptions{
+			current: timeout.Options{
 				ShutdownTime: base.Add(10 * time.Minute),
 			},
-			requested: infra.TimeoutOptions{
+			requested: timeout.Options{
 				ShutdownTime: base.Add(20 * time.Minute),
 			},
-			policy:        infra.TimeoutUpdatePolicyAlways,
+			policy:        timeout.UpdatePolicyAlways,
 			expectUpdated: true,
-			expectTimeout: infra.TimeoutOptions{ShutdownTime: base.Add(20 * time.Minute)},
+			expectTimeout: timeout.Options{ShutdownTime: base.Add(20 * time.Minute)},
 		},
 		{
 			name: "always skips when requested timeout matches current",
-			current: infra.TimeoutOptions{
+			current: timeout.Options{
 				ShutdownTime: base.Add(10 * time.Minute),
 			},
-			requested: infra.TimeoutOptions{
+			requested: timeout.Options{
 				ShutdownTime: base.Add(10 * time.Minute),
 			},
-			policy:        infra.TimeoutUpdatePolicyAlways,
+			policy:        timeout.UpdatePolicyAlways,
 			expectUpdated: false,
-			expectTimeout: infra.TimeoutOptions{ShutdownTime: base.Add(10 * time.Minute)},
+			expectTimeout: timeout.Options{ShutdownTime: base.Add(10 * time.Minute)},
 		},
 		{
 			name: "extend only updates when requested timeout extends current timeout",
-			current: infra.TimeoutOptions{
+			current: timeout.Options{
 				ShutdownTime: base.Add(10 * time.Minute),
 			},
-			requested: infra.TimeoutOptions{
+			requested: timeout.Options{
 				ShutdownTime: base.Add(25 * time.Minute),
 			},
-			policy:        infra.TimeoutUpdatePolicyExtendOnly,
+			policy:        timeout.UpdatePolicyExtendOnly,
 			expectUpdated: true,
-			expectTimeout: infra.TimeoutOptions{ShutdownTime: base.Add(25 * time.Minute)},
+			expectTimeout: timeout.Options{ShutdownTime: base.Add(25 * time.Minute)},
 		},
 		{
 			name: "extend only skips when requested timeout shortens current timeout",
-			current: infra.TimeoutOptions{
+			current: timeout.Options{
 				ShutdownTime: base.Add(25 * time.Minute),
 			},
-			requested: infra.TimeoutOptions{
+			requested: timeout.Options{
 				ShutdownTime: base.Add(10 * time.Minute),
 			},
-			policy:        infra.TimeoutUpdatePolicyExtendOnly,
+			policy:        timeout.UpdatePolicyExtendOnly,
 			expectUpdated: false,
-			expectTimeout: infra.TimeoutOptions{ShutdownTime: base.Add(25 * time.Minute)},
+			expectTimeout: timeout.Options{ShutdownTime: base.Add(25 * time.Minute)},
 		},
 		{
 			name: "baseline aware with matching baseline behaves like always (writes)",
-			current: infra.TimeoutOptions{
+			current: timeout.Options{
 				ShutdownTime: base.Add(10 * time.Minute),
 			},
-			baseline: timeoutPtr(infra.TimeoutOptions{
+			baseline: timeoutPtr(timeout.Options{
 				ShutdownTime: base.Add(10 * time.Minute),
 			}),
-			requested: infra.TimeoutOptions{
+			requested: timeout.Options{
 				ShutdownTime: base.Add(18 * time.Minute),
 			},
-			policy:        infra.TimeoutUpdatePolicyBaselineAware,
+			policy:        timeout.UpdatePolicyBaselineAware,
 			expectUpdated: true,
-			expectTimeout: infra.TimeoutOptions{ShutdownTime: base.Add(18 * time.Minute)},
+			expectTimeout: timeout.Options{ShutdownTime: base.Add(18 * time.Minute)},
 		},
 		{
 			name: "baseline aware with matching baseline skips when timeout equals current",
-			current: infra.TimeoutOptions{
+			current: timeout.Options{
 				ShutdownTime: base.Add(10 * time.Minute),
 			},
-			baseline: timeoutPtr(infra.TimeoutOptions{
+			baseline: timeoutPtr(timeout.Options{
 				ShutdownTime: base.Add(10 * time.Minute),
 			}),
-			requested: infra.TimeoutOptions{
+			requested: timeout.Options{
 				ShutdownTime: base.Add(10 * time.Minute),
 			},
-			policy:        infra.TimeoutUpdatePolicyBaselineAware,
+			policy:        timeout.UpdatePolicyBaselineAware,
 			expectUpdated: false,
-			expectTimeout: infra.TimeoutOptions{ShutdownTime: base.Add(10 * time.Minute)},
+			expectTimeout: timeout.Options{ShutdownTime: base.Add(10 * time.Minute)},
 		},
 		{
 			name: "baseline aware with drifted baseline only allows extension",
-			current: infra.TimeoutOptions{
+			current: timeout.Options{
 				ShutdownTime: base.Add(15 * time.Minute),
 			},
-			baseline: timeoutPtr(infra.TimeoutOptions{
+			baseline: timeoutPtr(timeout.Options{
 				ShutdownTime: base.Add(10 * time.Minute),
 			}),
-			requested: infra.TimeoutOptions{
+			requested: timeout.Options{
 				ShutdownTime: base.Add(30 * time.Minute),
 			},
-			policy:        infra.TimeoutUpdatePolicyBaselineAware,
+			policy:        timeout.UpdatePolicyBaselineAware,
 			expectUpdated: true,
-			expectTimeout: infra.TimeoutOptions{ShutdownTime: base.Add(30 * time.Minute)},
+			expectTimeout: timeout.Options{ShutdownTime: base.Add(30 * time.Minute)},
 		},
 		{
 			name: "baseline aware with drifted baseline rejects non extending timeout",
-			current: infra.TimeoutOptions{
+			current: timeout.Options{
 				ShutdownTime: base.Add(15 * time.Minute),
 			},
-			baseline: timeoutPtr(infra.TimeoutOptions{
+			baseline: timeoutPtr(timeout.Options{
 				ShutdownTime: base.Add(10 * time.Minute),
 			}),
-			requested: infra.TimeoutOptions{
+			requested: timeout.Options{
 				ShutdownTime: base.Add(12 * time.Minute),
 			},
-			policy:        infra.TimeoutUpdatePolicyBaselineAware,
+			policy:        timeout.UpdatePolicyBaselineAware,
 			expectUpdated: false,
-			expectTimeout: infra.TimeoutOptions{ShutdownTime: base.Add(15 * time.Minute)},
+			expectTimeout: timeout.Options{ShutdownTime: base.Add(15 * time.Minute)},
 		},
 		{
 			name: "baseline aware without baseline returns error",
-			current: infra.TimeoutOptions{
+			current: timeout.Options{
 				ShutdownTime: base.Add(10 * time.Minute),
 			},
-			requested: infra.TimeoutOptions{
+			requested: timeout.Options{
 				ShutdownTime: base.Add(20 * time.Minute),
 			},
-			policy:      infra.TimeoutUpdatePolicyBaselineAware,
+			policy:      timeout.UpdatePolicyBaselineAware,
 			expectError: "requires opts.Baseline",
-			expectTimeout: infra.TimeoutOptions{
+			expectTimeout: timeout.Options{
 				ShutdownTime: base.Add(10 * time.Minute),
 			},
 		},
 		{
 			name: "unsupported policy returns error without mutating timeout",
-			current: infra.TimeoutOptions{
+			current: timeout.Options{
 				ShutdownTime: base.Add(10 * time.Minute),
 			},
-			requested: infra.TimeoutOptions{
+			requested: timeout.Options{
 				ShutdownTime: base.Add(20 * time.Minute),
 			},
-			policy:      infra.TimeoutUpdatePolicy("Invalid"),
+			policy:      timeout.UpdatePolicy("Invalid"),
 			expectError: "unsupported timeout update policy",
-			expectTimeout: infra.TimeoutOptions{
+			expectTimeout: timeout.Options{
 				ShutdownTime: base.Add(10 * time.Minute),
 			},
 		},
@@ -335,8 +335,8 @@ func TestSandbox_SaveTimeoutWithPolicy_OnConflict(t *testing.T) {
 	infraImpl := infraInstance.(*Infra)
 
 	base := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
-	current := infra.TimeoutOptions{ShutdownTime: base.Add(10 * time.Minute)}
-	requested := infra.TimeoutOptions{ShutdownTime: base.Add(20 * time.Minute)}
+	current := timeout.Options{ShutdownTime: base.Add(10 * time.Minute)}
+	requested := timeout.Options{ShutdownTime: base.Add(20 * time.Minute)}
 
 	sbx := createTestSandboxWithDefaults("test-sandbox", "default")
 	setTimeout(sbx, current)
@@ -367,11 +367,11 @@ func TestSandbox_SaveTimeoutWithPolicy_OnConflict(t *testing.T) {
 
 	results := make(chan saveResult, 2)
 	go func() {
-		result, saveErr := sandboxA.SaveTimeoutWithPolicy(t.Context(), requested, infra.TimeoutUpdatePolicyAlways)
+		result, saveErr := sandboxA.SaveTimeoutWithPolicy(t.Context(), requested, timeout.UpdatePolicyAlways)
 		results <- saveResult{result: result, err: saveErr}
 	}()
 	go func() {
-		result, saveErr := sandboxB.SaveTimeoutWithPolicy(t.Context(), requested, infra.TimeoutUpdatePolicyAlways)
+		result, saveErr := sandboxB.SaveTimeoutWithPolicy(t.Context(), requested, timeout.UpdatePolicyAlways)
 		results <- saveResult{result: result, err: saveErr}
 	}()
 
@@ -405,9 +405,9 @@ func TestSandbox_SaveTimeoutWithPolicy_BaselineAwareUsesAPIReaderAfterConflict(t
 	utilruntime.Must(v1alpha1.AddToScheme(scheme))
 
 	base := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
-	baseline := infra.TimeoutOptions{ShutdownTime: base.Add(10 * time.Minute)}
-	winnerTimeout := infra.TimeoutOptions{ShutdownTime: base.Add(30 * time.Minute)}
-	requested := infra.TimeoutOptions{
+	baseline := timeout.Options{ShutdownTime: base.Add(10 * time.Minute)}
+	winnerTimeout := timeout.Options{ShutdownTime: base.Add(30 * time.Minute)}
+	requested := timeout.Options{
 		ShutdownTime: base.Add(12 * time.Minute),
 		Baseline:     &baseline,
 	}
@@ -459,7 +459,7 @@ func TestSandbox_SaveTimeoutWithPolicy_BaselineAwareUsesAPIReaderAfterConflict(t
 	})
 
 	sandbox := AsSandbox(stale.DeepCopy(), provider)
-	result, err := sandbox.SaveTimeoutWithPolicy(t.Context(), requested, infra.TimeoutUpdatePolicyBaselineAware)
+	result, err := sandbox.SaveTimeoutWithPolicy(t.Context(), requested, timeout.UpdatePolicyBaselineAware)
 	require.NoError(t, err)
 	assert.False(t, result.Updated)
 	assert.Equal(t, int32(1), provider.clientGetCalls.Load())
@@ -957,7 +957,7 @@ func TestSandbox_GetTimeout(t *testing.T) {
 	tests := []struct {
 		name     string
 		sandbox  *v1alpha1.Sandbox
-		expected infra.TimeoutOptions
+		expected timeout.Options
 	}{
 		{
 			name: "with timeout set",
@@ -967,7 +967,7 @@ func TestSandbox_GetTimeout(t *testing.T) {
 					PauseTime:    &now,
 				},
 			},
-			expected: infra.TimeoutOptions{
+			expected: timeout.Options{
 				ShutdownTime: future.Time,
 				PauseTime:    now.Time,
 			},
@@ -979,7 +979,7 @@ func TestSandbox_GetTimeout(t *testing.T) {
 					ShutdownTime: nil,
 				},
 			},
-			expected: infra.TimeoutOptions{},
+			expected: timeout.Options{},
 		},
 	}
 
@@ -1083,32 +1083,32 @@ func TestSandbox_SetTimeout(t *testing.T) {
 	now := time.Now()
 	tests := []struct {
 		name        string
-		initialTime infra.TimeoutOptions
-		opts        infra.TimeoutOptions
+		initialTime timeout.Options
+		opts        timeout.Options
 	}{
 		{
 			name:        "set timeout on sandbox without existing timeout",
-			initialTime: infra.TimeoutOptions{},
-			opts: infra.TimeoutOptions{
+			initialTime: timeout.Options{},
+			opts: timeout.Options{
 				ShutdownTime: now,
 				PauseTime:    now,
 			},
 		},
 		{
 			name:        "update timeout on sandbox with existing timeout",
-			initialTime: infra.TimeoutOptions{},
-			opts: infra.TimeoutOptions{
+			initialTime: timeout.Options{},
+			opts: timeout.Options{
 				ShutdownTime: now.Add(time.Hour),
 				PauseTime:    now.Add(time.Hour),
 			},
 		},
 		{
 			name: "clear existing timeout",
-			initialTime: infra.TimeoutOptions{
+			initialTime: timeout.Options{
 				ShutdownTime: now,
 				PauseTime:    now,
 			},
-			opts: infra.TimeoutOptions{},
+			opts: timeout.Options{},
 		},
 	}
 

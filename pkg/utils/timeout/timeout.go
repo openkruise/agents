@@ -20,11 +20,10 @@ import (
 	"time"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 )
 
-func GetTimeoutFromSandbox(sbx *agentsv1alpha1.Sandbox) infra.TimeoutOptions {
-	opts := infra.TimeoutOptions{}
+func GetTimeoutFromSandbox(sbx *agentsv1alpha1.Sandbox) Options {
+	opts := Options{}
 	if sbx.Spec.ShutdownTime != nil {
 		opts.ShutdownTime = NormalizeTime(sbx.Spec.ShutdownTime.Time)
 	}
@@ -35,12 +34,12 @@ func GetTimeoutFromSandbox(sbx *agentsv1alpha1.Sandbox) infra.TimeoutOptions {
 }
 
 // Equal compares timeout options after normalizing time precision.
-func Equal(a, b infra.TimeoutOptions) bool {
+func Equal(a, b Options) bool {
 	return timeEqual(a.ShutdownTime, b.ShutdownTime) && timeEqual(a.PauseTime, b.PauseTime)
 }
 
 // ShouldExtendTimeout reports whether requested extends the effective end time.
-func ShouldExtendTimeout(current, requested infra.TimeoutOptions) bool {
+func ShouldExtendTimeout(current, requested Options) bool {
 	currentEndAt := timeoutEndAt(current)
 	requestedEndAt := timeoutEndAt(requested)
 	if currentEndAt.IsZero() || requestedEndAt.IsZero() {
@@ -61,7 +60,7 @@ func NormalizeTime(t time.Time) time.Time {
 	return t.Round(0).Truncate(time.Second).UTC()
 }
 
-func timeoutEndAt(opts infra.TimeoutOptions) time.Time {
+func timeoutEndAt(opts Options) time.Time {
 	if !opts.PauseTime.IsZero() {
 		return opts.PauseTime
 	}
