@@ -30,9 +30,16 @@ var (
 )
 
 type Policy struct {
-	Form     string
+	Form     PolicyForm
 	Duration time.Duration
 }
+
+type PolicyForm string
+
+const (
+	PolicyFormNever    PolicyForm = "never"
+	PolicyFormDuration PolicyForm = "duration"
+)
 
 func ParseWakeOnTrafficPolicy(annotations map[string]string) (Policy, error) {
 	value, ok := annotations[agentsv1alpha1.AnnotationWakeOnTraffic]
@@ -40,7 +47,7 @@ func ParseWakeOnTrafficPolicy(annotations map[string]string) (Policy, error) {
 		return Policy{}, ErrAutoResumeDisabled
 	}
 	if value == "timeout:never" {
-		return Policy{Form: "never"}, nil
+		return Policy{Form: PolicyFormNever}, nil
 	}
 
 	kind, payload, ok := strings.Cut(value, ":")
@@ -51,5 +58,5 @@ func ParseWakeOnTrafficPolicy(annotations map[string]string) (Policy, error) {
 	if err != nil || duration < time.Second {
 		return Policy{}, ErrInvalidAutoResumePolicy
 	}
-	return Policy{Form: "duration", Duration: duration}, nil
+	return Policy{Form: PolicyFormDuration, Duration: duration}, nil
 }

@@ -59,7 +59,7 @@ func (m *SandboxManager) ConnectOrWake(ctx context.Context, sbx infra.Sandbox, i
 	}
 
 	policy := timeout.UpdatePolicyExtendOnly
-	if in.PreState == v1alpha1.SandboxStatePaused || in.NewEndAt.IsZero() {
+	if in.PreState == v1alpha1.SandboxStatePaused {
 		policy = timeout.UpdatePolicyBaselineAware
 	}
 	_, err := sbx.SaveTimeoutWithPolicy(ctx, opts, policy)

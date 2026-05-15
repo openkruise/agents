@@ -119,6 +119,9 @@ func (b *SandboxManagerBuilder) WithMaxTimeout(d time.Duration) *SandboxManagerB
 }
 
 func (b *SandboxManagerBuilder) Build() (*SandboxManager, error) {
+	if b.instance.maxTimeout <= 0 {
+		return nil, errors.NewError(errors.ErrorInternal, "max timeout must be greater than zero: call WithMaxTimeout before Build")
+	}
 	// Build infra
 	if b.buildInfraFunc == nil {
 		return nil, errors.NewError(errors.ErrorInternal, "infra builder is not configured: call WithSandboxInfra or WithCustomInfra before Build")

@@ -62,6 +62,26 @@ var (
 		[]string{"result"},
 	)
 
+	// sandboxWakeDuration tracks the total time of wake-on-traffic operations
+	sandboxWakeDuration = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:        "sandbox_wake_duration_seconds",
+			Help:        "Total duration of wake-on-traffic operations in seconds",
+			ConstLabels: prometheus.Labels{"source": "gateway"},
+			Buckets:     prometheus.ExponentialBuckets(0.02, 2, 12), // 20ms -> ~41s
+		},
+	)
+
+	// sandboxWakeResponses tracks wake-on-traffic requests by returned action
+	sandboxWakeResponses = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name:        "sandbox_wake_responses",
+			Help:        "Total number of wake-on-traffic requests by returned action",
+			ConstLabels: prometheus.Labels{"source": "gateway"},
+		},
+		[]string{"action"},
+	)
+
 	// sandboxDeleteResponses tracks total delete requests and their results
 	sandboxDeleteResponses = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
@@ -175,6 +195,7 @@ func init() {
 	metrics.Registry.MustRegister(sandboxClaimCreationResponses,
 		sandboxPauseDuration, sandboxPauseResponses,
 		sandboxResumeDuration, sandboxResumeResponses,
+		sandboxWakeDuration, sandboxWakeResponses,
 		sandboxDeleteResponses,
 		// Claim
 		sandboxClaimDuration, sandboxClaimTotal, sandboxClaimRetries,

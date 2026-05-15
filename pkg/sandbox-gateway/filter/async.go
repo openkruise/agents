@@ -33,8 +33,12 @@ func (f *sandboxFilter) wakeContext() context.Context {
 	return f.context
 }
 
-func (f *sandboxFilter) OnDestroy(reason api.DestroyReason) {
+func (f *sandboxFilter) OnDestroy(api.DestroyReason) {
 	f.completeOnce.Do(func() {})
+	f.cancelWakeContext()
+}
+
+func (f *sandboxFilter) cancelWakeContext() {
 	f.contextMu.Lock()
 	cancel := f.cancel
 	f.contextMu.Unlock()

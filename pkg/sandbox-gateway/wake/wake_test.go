@@ -40,6 +40,7 @@ func TestWakeAndWait(t *testing.T) {
 		action      proxy.WakeAction
 		setup       func(sandboxID string)
 		afterServer func(sandboxID string)
+		rawBody     string
 		expectError error
 	}{
 		{
@@ -73,6 +74,23 @@ func TestWakeAndWait(t *testing.T) {
 			status:      http.StatusUnprocessableEntity,
 			action:      proxy.WakeActionAutoResumeDisabled,
 			expectError: ErrAutoResumeDisabled,
+		},
+		{
+			name:        "manager 422 unknown action is transport",
+			status:      http.StatusUnprocessableEntity,
+			action:      proxy.WakeActionBadState,
+			expectError: ErrTransport,
+		},
+		{
+			name:        "manager 422 invalid json is transport",
+			status:      http.StatusUnprocessableEntity,
+			rawBody:     "{",
+			expectError: ErrTransport,
+		},
+		{
+			name:        "manager 422 empty body is transport",
+			status:      http.StatusUnprocessableEntity,
+			expectError: ErrTransport,
 		},
 		{
 			name:        "manager 409 pausing",
@@ -124,7 +142,9 @@ func TestWakeAndWait(t *testing.T) {
 					t.Errorf("path = %s, want suffix /wake/%s", r.URL.Path, sandboxID)
 				}
 				w.WriteHeader(tt.status)
-				if tt.action != "" {
+				if tt.rawBody != "" {
+					_, _ = w.Write([]byte(tt.rawBody))
+				} else if tt.action != "" {
 					_ = json.NewEncoder(w).Encode(proxy.WakeResult{Action: tt.action})
 				}
 			}))

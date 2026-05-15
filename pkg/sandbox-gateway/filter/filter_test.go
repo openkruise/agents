@@ -281,7 +281,7 @@ func (m *mockDecoderFilterCallbacks) Continue(statusType api.StatusType) {
 	m.continueStatus = statusType
 }
 
-func (m *mockDecoderFilterCallbacks) SendLocalReply(responseCode int, bodyText string, headers map[string][]string, grpcStatus int64, details string) {
+func (m *mockDecoderFilterCallbacks) SendLocalReply(responseCode int, bodyText string, headers map[string][]string, _ int64, details string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.sendLocalReplyCalled = true
@@ -315,11 +315,11 @@ func (m *mockDecoderFilterCallbacks) Snapshot() (bool, int, string, string, map[
 
 func (m *mockDecoderFilterCallbacks) RecoverPanic() {}
 
-func (m *mockDecoderFilterCallbacks) AddData(data []byte, isStreaming bool) {}
+func (m *mockDecoderFilterCallbacks) AddData([]byte, bool) {}
 
-func (m *mockDecoderFilterCallbacks) InjectData(data []byte) {}
+func (m *mockDecoderFilterCallbacks) InjectData([]byte) {}
 
-func (m *mockDecoderFilterCallbacks) SetUpstreamOverrideHost(host string, strict bool) error {
+func (m *mockDecoderFilterCallbacks) SetUpstreamOverrideHost(string, bool) error {
 	return nil
 }
 
@@ -344,11 +344,11 @@ func (m *mockFilterCallbackHandler) ClearRouteCache() {}
 
 func (m *mockFilterCallbackHandler) RefreshRouteCache() {}
 
-func (m *mockFilterCallbackHandler) Log(level api.LogType, msg string) {}
+func (m *mockFilterCallbackHandler) Log(api.LogType, string) {}
 
 func (m *mockFilterCallbackHandler) LogLevel() api.LogType { return api.Info }
 
-func (m *mockFilterCallbackHandler) GetProperty(key string) (string, error) {
+func (m *mockFilterCallbackHandler) GetProperty(string) (string, error) {
 	return "", nil
 }
 
@@ -730,7 +730,7 @@ func TestDecodeHeadersWithIPv6(t *testing.T) {
 	// Verify dynamic metadata was set correctly
 	metadata := mockCallbacks.streamInfo.dynamicMetadata.data["envoy.lb.original_dst"]
 	assert.NotNil(t, metadata)
-	assert.Equal(t, "2001:db8::1:49983", metadata["host"])
+	assert.Equal(t, "[2001:db8::1]:49983", metadata["host"])
 }
 
 // TestDecodeHeadersWithIPv6HostFallback tests IPv6 via host header
@@ -759,7 +759,7 @@ func TestDecodeHeadersWithIPv6HostFallback(t *testing.T) {
 	// Verify dynamic metadata was set correctly
 	metadata := mockCallbacks.streamInfo.dynamicMetadata.data["envoy.lb.original_dst"]
 	assert.NotNil(t, metadata)
-	assert.Equal(t, "2001:db8::1:8080", metadata["host"])
+	assert.Equal(t, "[2001:db8::1]:8080", metadata["host"])
 }
 
 // TestDecodeHeadersEmptySandboxID tests the case when sandbox-id header is empty string
@@ -1259,8 +1259,15 @@ func TestDecodeHeadersWakePanicRecovered(t *testing.T) {
 		WakeOnTraffic:   "timeout:5m",
 	})
 
+	var wakeCtx context.Context
+	wakeClient := &fakeWakeModule{
+		onCall: func(ctx context.Context, sandboxID string) error {
+			wakeCtx = ctx
+			panic("wake panic")
+		},
+	}
 	mockCallbacks := newMockFilterCallbackHandler()
-	filter := &sandboxFilter{callbacks: mockCallbacks, config: DefaultConfig(), adapter: defaultTestAdapter(), wake: &fakeWakeModule{panic: true}}
+	filter := &sandboxFilter{callbacks: mockCallbacks, config: DefaultConfig(), adapter: defaultTestAdapter(), wake: wakeClient}
 	header := newMockRequestHeaderMap()
 	header.Set(DefaultSandboxHeaderName, sandboxID)
 
@@ -1272,6 +1279,44 @@ func TestDecodeHeadersWakePanicRecovered(t *testing.T) {
 	_, replyStatusCode, _, replyDetails, _, _, _ := mockCallbacks.decoderCallbacks.Snapshot()
 	assert.Equal(t, 500, replyStatusCode)
 	assert.Equal(t, "sandbox_wake_panic", replyDetails)
+	require.NotNil(t, wakeCtx)
+	assert.ErrorIs(t, wakeCtx.Err(), context.Canceled)
+}
+
+func TestDecodeHeadersWakeContinuationWithIPv6(t *testing.T) {
+	r := registry.GetRegistry()
+	defer r.Clear()
+	sandboxID := "default--wake-ipv6"
+	r.Update(sandboxID, proxy.Route{
+		IP:              "2001:db8::1",
+		State:           agentsv1alpha1.SandboxStatePaused,
+		ResourceVersion: "1",
+		Pausable:        true,
+		WakeOnTraffic:   "timeout:5m",
+	})
+
+	wakeClient := &fakeWakeModule{
+		onCall: func(ctx context.Context, sandboxID string) error {
+			r.Update(sandboxID, proxy.Route{
+				IP:              "2001:db8::2",
+				State:           agentsv1alpha1.SandboxStateRunning,
+				ResourceVersion: "2",
+			})
+			return nil
+		},
+	}
+	mockCallbacks := newMockFilterCallbackHandler()
+	filter := &sandboxFilter{callbacks: mockCallbacks, config: DefaultConfig(), adapter: defaultTestAdapter(), wake: wakeClient}
+	header := newMockRequestHeaderMap()
+	header.Set(DefaultSandboxHeaderName, sandboxID)
+	header.Set(DefaultSandboxPortHeader, "8080")
+
+	status := filter.DecodeHeaders(header, true)
+	require.Equal(t, api.Running, status)
+	require.Eventually(t, func() bool {
+		return mockCallbacks.decoderCallbacks.HasContinued()
+	}, time.Second, 10*time.Millisecond)
+	assert.Equal(t, "[2001:db8::2]:8080", mockCallbacks.streamInfo.dynamicMetadata.Value("envoy.lb.original_dst", "host"))
 }
 
 func TestDecodeHeadersWakeCustomProtocolAppliesPathRewriteBeforeAsyncWait(t *testing.T) {

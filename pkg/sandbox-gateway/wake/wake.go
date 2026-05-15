@@ -182,17 +182,25 @@ func (m *Module) callManager(ctx context.Context, sandboxID string) error {
 		}
 		return fmt.Errorf("%w: %v", ErrTransport, err)
 	}
-	defer resp.Body.Close()
+	defer func(Body io.ReadCloser) {
+		_ = Body.Close()
+	}(resp.Body)
 
 	result, decodeErr := decodeWakeResult(resp.Body)
 	switch resp.StatusCode {
 	case http.StatusOK:
 		return nil
 	case http.StatusUnprocessableEntity:
-		if decodeErr == nil && result.Action == proxy.WakeActionInvalidAutoResumePolicy {
+		if decodeErr != nil {
+			return fmt.Errorf("%w: decode wake result: %v", ErrTransport, decodeErr)
+		}
+		if result.Action == proxy.WakeActionInvalidAutoResumePolicy {
 			return ErrInvalidPolicy
 		}
-		return ErrAutoResumeDisabled
+		if result.Action == proxy.WakeActionAutoResumeDisabled {
+			return ErrAutoResumeDisabled
+		}
+		return fmt.Errorf("%w: unexpected wake action %q", ErrTransport, result.Action)
 	case http.StatusConflict:
 		if decodeErr == nil && result.Action == proxy.WakeActionPausing {
 			return ErrPausing

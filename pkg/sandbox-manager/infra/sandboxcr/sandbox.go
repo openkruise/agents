@@ -446,7 +446,8 @@ func (s *Sandbox) Resume(ctx context.Context, _ infra.ResumeOptions) error {
 		// Concurrent same-action Resume callers share the Sandbox resume wait.
 		// Once the Sandbox reaches Ready, losing callers return success without
 		// running or waiting for the transitional E2B post-resume initialization
-		// below. ReInit and CSI remount are not part of the loser success contract.
+		// below. This is general Resume behavior, not wake-specific behavior.
+		// ReInit and CSI remount are not part of the loser success contract.
 		log.Info("sandbox resume already won by another request, skipping post-resume operations")
 		return nil
 	}

@@ -25,6 +25,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -245,6 +247,75 @@ func TestSandboxManager_WakeSandbox(t *testing.T) {
 	}
 }
 
+func TestSandboxManager_WakeSandboxMetrics(t *testing.T) {
+	tests := []struct {
+		name         string
+		setup        func() *fakeSandbox
+		expectAction proxy.WakeAction
+	}{
+		{
+			name: "records resumed action and duration",
+			setup: func() *fakeSandbox {
+				return newWakeMetricsSandbox(v1alpha1.SandboxStatePaused, v1alpha1.SandboxPaused,
+					map[string]string{v1alpha1.AnnotationWakeOnTraffic: "timeout:10m"})
+			},
+			expectAction: proxy.WakeActionResumed,
+		},
+		{
+			name: "records disabled action and duration",
+			setup: func() *fakeSandbox {
+				return newWakeMetricsSandbox(v1alpha1.SandboxStatePaused, v1alpha1.SandboxPaused, nil)
+			},
+			expectAction: proxy.WakeActionAutoResumeDisabled,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sbx := tt.setup()
+			manager := &SandboxManager{
+				infra:      &fakeInfrastructure{sandbox: sbx},
+				proxy:      proxy.NewServer(testManagerOptions()),
+				maxTimeout: 30 * time.Minute,
+			}
+			beforeResponses := testutil.ToFloat64(sandboxWakeResponses.WithLabelValues(string(tt.expectAction)))
+			beforeDurationCount := wakeDurationSampleCount(t)
+
+			result, err := manager.WakeSandbox(t.Context(), "sandbox")
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.expectAction, result.Action)
+			assert.Equal(t, float64(1), testutil.ToFloat64(sandboxWakeResponses.WithLabelValues(string(tt.expectAction)))-beforeResponses)
+			assert.Equal(t, uint64(1), wakeDurationSampleCount(t)-beforeDurationCount)
+		})
+	}
+}
+
+func wakeDurationSampleCount(t *testing.T) uint64 {
+	t.Helper()
+	metric := &dto.Metric{}
+	require.NoError(t, sandboxWakeDuration.Write(metric))
+	require.NotNil(t, metric.Histogram)
+	return metric.GetHistogram().GetSampleCount()
+}
+
+func newWakeMetricsSandbox(state string, phase v1alpha1.SandboxPhase, annotations map[string]string) *fakeSandbox {
+	sbx := newFakeSandbox("sandbox")
+	sbx.state = state
+	sbx.timeout = timeout.Options{ShutdownTime: time.Now().Add(time.Hour)}
+	sbx.raw.Annotations = map[string]string{}
+	for key, value := range annotations {
+		sbx.raw.Annotations[key] = value
+	}
+	sbx.SetAnnotations(sbx.raw.Annotations)
+	sbx.raw.Status.Phase = phase
+	sbx.raw.Status.Conditions = append(sbx.raw.Status.Conditions, metav1.Condition{
+		Type:   string(v1alpha1.SandboxConditionPaused),
+		Status: metav1.ConditionTrue,
+	})
+	return sbx
+}
+
 func TestSandboxManager_WakeSandboxRunningPhasePausedSpecResumes(t *testing.T) {
 	tests := []struct {
 		name string
@@ -284,6 +355,7 @@ func TestSandboxManager_WakeSandboxRunningPhasePausedSpecResumes(t *testing.T) {
 func TestWakeActionForConnectErrorReclassifiesSandbox(t *testing.T) {
 	tests := []struct {
 		name         string
+		refreshState string
 		phase        v1alpha1.SandboxPhase
 		pausedStatus metav1.ConditionStatus
 		deleting     bool
@@ -291,18 +363,33 @@ func TestWakeActionForConnectErrorReclassifiesSandbox(t *testing.T) {
 		expectError  string
 	}{
 		{
+			name:         "conflict with refreshed running state is already running",
+			refreshState: v1alpha1.SandboxStateRunning,
+			phase:        v1alpha1.SandboxRunning,
+			expectAction: proxy.WakeActionAlreadyRunning,
+		},
+		{
+			name:         "conflict with refreshed dead state is gone",
+			refreshState: v1alpha1.SandboxStateDead,
+			phase:        v1alpha1.SandboxFailed,
+			expectAction: proxy.WakeActionGone,
+		},
+		{
 			name:         "conflict with paused phase and false paused condition is pausing",
+			refreshState: v1alpha1.SandboxStatePaused,
 			phase:        v1alpha1.SandboxPaused,
 			pausedStatus: metav1.ConditionFalse,
 			expectAction: proxy.WakeActionPausing,
 		},
 		{
 			name:         "conflict with resuming phase is bad state",
+			refreshState: v1alpha1.SandboxStatePaused,
 			phase:        v1alpha1.SandboxResuming,
 			expectAction: proxy.WakeActionBadState,
 		},
 		{
 			name:         "conflict with deleted sandbox is gone",
+			refreshState: v1alpha1.SandboxStatePaused,
 			phase:        v1alpha1.SandboxPaused,
 			pausedStatus: metav1.ConditionTrue,
 			deleting:     true,
@@ -317,17 +404,21 @@ func TestWakeActionForConnectErrorReclassifiesSandbox(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			sbx := newPolicyWakeFakeSandbox("sandbox", "timeout:10m", newPolicyTimeoutState(timeout.Options{}))
-			sbx.raw.Status.Phase = tt.phase
-			sbx.raw.Status.Conditions = nil
-			if tt.pausedStatus != "" {
-				sbx.raw.Status.Conditions = append(sbx.raw.Status.Conditions, metav1.Condition{
-					Type:   string(v1alpha1.SandboxConditionPaused),
-					Status: tt.pausedStatus,
-				})
-			}
-			if tt.deleting {
-				deletionTimestamp := metav1.Now()
-				sbx.raw.DeletionTimestamp = &deletionTimestamp
+			sbx.refreshFn = func(context.Context, bool) error {
+				sbx.state = tt.refreshState
+				sbx.raw.Status.Phase = tt.phase
+				sbx.raw.Status.Conditions = nil
+				if tt.pausedStatus != "" {
+					sbx.raw.Status.Conditions = append(sbx.raw.Status.Conditions, metav1.Condition{
+						Type:   string(v1alpha1.SandboxConditionPaused),
+						Status: tt.pausedStatus,
+					})
+				}
+				if tt.deleting {
+					deletionTimestamp := metav1.Now()
+					sbx.raw.DeletionTimestamp = &deletionTimestamp
+				}
+				return nil
 			}
 			var err error = managererrors.NewError(managererrors.ErrorConflict, "conflict without internal reason string")
 			if tt.expectError != "" {

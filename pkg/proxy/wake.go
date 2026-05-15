@@ -30,8 +30,10 @@ const (
 )
 
 type WakeResult struct {
-	Action          WakeAction `json:"action"`
-	State           string     `json:"state"`
-	ResourceVersion string     `json:"resourceVersion"`
-	Message         string     `json:"message"`
+	Action WakeAction `json:"action"`
+	State  string     `json:"state"`
+	// ResourceVersion is the manager's best-effort observed Sandbox version.
+	// Gateways do not depend on it; wake convergence is based on registry polling.
+	ResourceVersion string `json:"resourceVersion"`
+	Message         string `json:"message"`
 }

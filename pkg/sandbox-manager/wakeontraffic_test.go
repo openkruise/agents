@@ -49,35 +49,35 @@ func TestParseWakeOnTrafficPolicy(t *testing.T) {
 			annotations: map[string]string{
 				agentsv1alpha1.AnnotationWakeOnTraffic: "timeout:never",
 			},
-			expect: Policy{Form: "never"},
+			expect: Policy{Form: PolicyFormNever},
 		},
 		{
 			name: "accepts one second duration",
 			annotations: map[string]string{
 				agentsv1alpha1.AnnotationWakeOnTraffic: "timeout:1s",
 			},
-			expect: Policy{Form: "duration", Duration: time.Second},
+			expect: Policy{Form: PolicyFormDuration, Duration: time.Second},
 		},
 		{
 			name: "accepts thirty second duration",
 			annotations: map[string]string{
 				agentsv1alpha1.AnnotationWakeOnTraffic: "timeout:30s",
 			},
-			expect: Policy{Form: "duration", Duration: 30 * time.Second},
+			expect: Policy{Form: PolicyFormDuration, Duration: 30 * time.Second},
 		},
 		{
 			name: "accepts minute duration",
 			annotations: map[string]string{
 				agentsv1alpha1.AnnotationWakeOnTraffic: "timeout:5m",
 			},
-			expect: Policy{Form: "duration", Duration: 5 * time.Minute},
+			expect: Policy{Form: PolicyFormDuration, Duration: 5 * time.Minute},
 		},
 		{
 			name: "accepts compound hour minute duration",
 			annotations: map[string]string{
 				agentsv1alpha1.AnnotationWakeOnTraffic: "timeout:2h30m",
 			},
-			expect: Policy{Form: "duration", Duration: 2*time.Hour + 30*time.Minute},
+			expect: Policy{Form: PolicyFormDuration, Duration: 2*time.Hour + 30*time.Minute},
 		},
 		{
 			name: "rejects rfc3339 timestamp payload",
@@ -188,6 +188,27 @@ func TestParseWakeOnTrafficPolicy(t *testing.T) {
 			name: "rejects uppercase never",
 			annotations: map[string]string{
 				agentsv1alpha1.AnnotationWakeOnTraffic: "timeout:NEVER",
+			},
+			expectError: ErrInvalidAutoResumePolicy,
+		},
+		{
+			name: "rejects leading space before never",
+			annotations: map[string]string{
+				agentsv1alpha1.AnnotationWakeOnTraffic: " timeout:never",
+			},
+			expectError: ErrInvalidAutoResumePolicy,
+		},
+		{
+			name: "rejects trailing space after never",
+			annotations: map[string]string{
+				agentsv1alpha1.AnnotationWakeOnTraffic: "timeout:never ",
+			},
+			expectError: ErrInvalidAutoResumePolicy,
+		},
+		{
+			name: "rejects trailing newline after never",
+			annotations: map[string]string{
+				agentsv1alpha1.AnnotationWakeOnTraffic: "timeout:never\n",
 			},
 			expectError: ErrInvalidAutoResumePolicy,
 		},

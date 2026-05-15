@@ -18,7 +18,8 @@ package filter
 
 import (
 	"context"
-	"fmt"
+	"net"
+	"strconv"
 	"sync"
 
 	"github.com/envoyproxy/envoy/contrib/golang/common/go/api"
@@ -62,7 +63,7 @@ type sandboxFilter struct {
 	cancel       context.CancelFunc
 }
 
-func (f *sandboxFilter) DecodeHeaders(header api.RequestHeaderMap, endStream bool) api.StatusType {
+func (f *sandboxFilter) DecodeHeaders(header api.RequestHeaderMap, _ bool) api.StatusType {
 	// Step 1: Build flat headers map from the request, including pseudo-headers
 	headers := make(map[string]string)
 	header.Range(func(key, value string) bool {
@@ -144,6 +145,7 @@ func (f *sandboxFilter) DecodeHeaders(header api.RequestHeaderMap, endStream boo
 func (f *sandboxFilter) wakeAndContinue(ctx context.Context, sandboxID string, sandboxPort int) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
+			f.cancelWakeContext()
 			logger.Error("Wake goroutine panicked", zap.String("sandboxID", sandboxID), zap.Any("panic", recovered))
 			f.completeWithReply(500, "wake filter panic", nil, "sandbox_wake_panic")
 		}
@@ -165,7 +167,7 @@ func (f *sandboxFilter) wakeAndContinue(ctx context.Context, sandboxID string, s
 		return
 	}
 
-	upstreamHost := fmt.Sprintf("%s:%d", route.IP, sandboxPort)
+	upstreamHost := upstreamHost(route.IP, sandboxPort)
 	logger.Debug("Upstream override set successfully", zap.String("upstreamHost", upstreamHost))
 	f.completeWithContinue(upstreamHost)
 }
@@ -175,8 +177,12 @@ func (f *sandboxFilter) applyRoute(header api.RequestHeaderMap, extraHeaders map
 		header.Set(k, v)
 	}
 
-	upstreamHost := fmt.Sprintf("%s:%d", route.IP, sandboxPort)
+	upstreamHost := upstreamHost(route.IP, sandboxPort)
 	f.callbacks.StreamInfo().DynamicMetadata().Set("envoy.lb.original_dst", "host", upstreamHost)
 
 	logger.Debug("Upstream override set successfully", zap.String("upstreamHost", upstreamHost))
+}
+
+func upstreamHost(ip string, port int) string {
+	return net.JoinHostPort(ip, strconv.Itoa(port))
 }

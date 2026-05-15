@@ -113,14 +113,14 @@ func TestSandboxManager_ConnectOrWake(t *testing.T) {
 			},
 		},
 		{
-			name: "never timeout with annotation writes",
+			name: "running annotation-only write uses extend only",
 			input: ConnectOrWakeInput{
 				PreState:       v1alpha1.SandboxStateRunning,
 				Baseline:       timeout.Options{},
 				SetAnnotations: annotation,
 			},
 			expectSaveCalls:      1,
-			expectPolicy:         timeout.UpdatePolicyBaselineAware,
+			expectPolicy:         timeout.UpdatePolicyExtendOnly,
 			expectSetAnnotations: annotation,
 		},
 		{
@@ -152,7 +152,7 @@ func TestSandboxManager_ConnectOrWake(t *testing.T) {
 			expectBaseline:     baseline,
 		},
 		{
-			name: "zero new end with annotation clears timeout fields",
+			name: "running zero new end with annotation uses extend only",
 			input: ConnectOrWakeInput{
 				PreState:       v1alpha1.SandboxStateRunning,
 				PreEndAt:       baseline.ShutdownTime,
@@ -160,7 +160,7 @@ func TestSandboxManager_ConnectOrWake(t *testing.T) {
 				SetAnnotations: annotation,
 			},
 			expectSaveCalls:      1,
-			expectPolicy:         timeout.UpdatePolicyBaselineAware,
+			expectPolicy:         timeout.UpdatePolicyExtendOnly,
 			expectBaseline:       baseline,
 			expectSetAnnotations: annotation,
 		},
@@ -235,7 +235,7 @@ func TestSandboxManager_ConnectOrWakeZeroNewEndPolicySemantics(t *testing.T) {
 		expectFinalZero bool
 	}{
 		{
-			name:           "finite running annotation-only write clears timeout with real policy semantics",
+			name:           "finite running annotation-only write does not clear timeout",
 			initialTimeout: timeout.Options{ShutdownTime: now.Add(10 * time.Minute)},
 			input: ConnectOrWakeInput{
 				PreState:       v1alpha1.SandboxStateRunning,
@@ -243,8 +243,8 @@ func TestSandboxManager_ConnectOrWakeZeroNewEndPolicySemantics(t *testing.T) {
 				Baseline:       timeout.Options{ShutdownTime: now.Add(10 * time.Minute)},
 				SetAnnotations: annotation,
 			},
-			expectUpdated:   true,
-			expectFinalZero: true,
+			expectUpdated:   false,
+			expectFinalZero: false,
 		},
 		{
 			name:           "never-timeout annotation-only write calls save but policy skips update",
@@ -281,6 +281,8 @@ func TestSandboxManager_ConnectOrWakeZeroNewEndPolicySemantics(t *testing.T) {
 			if tt.expectFinalZero {
 				assert.True(t, finalTimeout.ShutdownTime.IsZero())
 				assert.True(t, finalTimeout.PauseTime.IsZero())
+			} else {
+				assert.Equal(t, tt.initialTimeout, finalTimeout)
 			}
 		})
 	}
@@ -311,6 +313,7 @@ type fakeSandbox struct {
 	resumeFn     func(context.Context) error
 	saveFn       func(context.Context, timeout.Options, timeout.UpdatePolicy) (infra.TimeoutUpdateResult, error)
 	getTimeoutFn func() timeout.Options
+	refreshFn    func(context.Context, bool) error
 
 	resumeCalls  int
 	saveCalls    int
@@ -435,11 +438,16 @@ func (f *fakeSandbox) Kill(context.Context) error {
 	return nil
 }
 
-func (f *fakeSandbox) InplaceRefresh(context.Context, bool) error {
+func (f *fakeSandbox) InplaceRefresh(ctx context.Context, refreshEndpoints bool) error {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.refreshCalls++
-	return f.refreshErr
+	refreshFn := f.refreshFn
+	refreshErr := f.refreshErr
+	f.mu.Unlock()
+	if refreshFn != nil {
+		return refreshFn(ctx, refreshEndpoints)
+	}
+	return refreshErr
 }
 
 func (f *fakeSandbox) Request(context.Context, string, string, int, io.Reader) (*http.Response, error) {

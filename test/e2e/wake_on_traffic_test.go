@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -35,12 +36,19 @@ import (
 	e2bmodels "github.com/openkruise/agents/pkg/servers/e2b/models"
 )
 
-const (
-	wakeManagerNamespace = "sandbox-system"
-	wakeManagerService   = "sandbox-manager:http-envoy"
-	wakeGatewayService   = "sandbox-gateway:http"
-	wakeE2BAdminKey      = "some-api-key"
+var (
+	wakeManagerNamespace = envWithDefault("WAKE_E2E_MANAGER_NAMESPACE", "sandbox-system")
+	wakeManagerService   = envWithDefault("WAKE_E2E_MANAGER_SERVICE", "sandbox-manager:http-envoy")
+	wakeGatewayService   = envWithDefault("WAKE_E2E_GATEWAY_SERVICE", "sandbox-gateway:http")
+	wakeE2BAdminKey      = envWithDefault("WAKE_E2E_ADMIN_KEY", "some-api-key")
 )
+
+func envWithDefault(key string, fallback string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return fallback
+}
 
 var _ = Describe("WakeOnTraffic", func() {
 	var (

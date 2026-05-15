@@ -19,6 +19,7 @@ package sandbox_manager
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
 	"github.com/stretchr/testify/assert"
@@ -32,6 +33,8 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 )
+
+const testBuilderMaxTimeout = 30 * time.Minute
 
 func TestNewSandboxManagerBuilder(t *testing.T) {
 	tests := []struct {
@@ -90,7 +93,8 @@ func TestSandboxManagerBuilder_WithSandboxInfra(t *testing.T) {
 		opts := config.SandboxManagerOptions{}
 
 		builder := NewSandboxManagerBuilder(opts).
-			WithSandboxInfra()
+			WithSandboxInfra().
+			WithMaxTimeout(testBuilderMaxTimeout)
 
 		assert.NotNil(t, builder.buildInfraFunc, "buildInfraFunc should be set")
 
@@ -127,7 +131,8 @@ func TestSandboxManagerBuilder_WithCustomInfra(t *testing.T) {
 					WithCache(cache).
 					WithAPIReader(fc).
 					WithProxy(proxyServer), nil
-			})
+			}).
+			WithMaxTimeout(testBuilderMaxTimeout)
 
 		manager, err := builder.Build()
 		require.NoError(t, err)
@@ -221,7 +226,8 @@ func TestSandboxManagerBuilder_WithMemberlistPeers(t *testing.T) {
 						WithAPIReader(fc).
 						WithProxy(proxyServer), nil
 				}).
-				WithMemberlistPeers()
+				WithMemberlistPeers().
+				WithMaxTimeout(testBuilderMaxTimeout)
 
 			if tt.expectError != "" {
 				_, err := builder.Build()
@@ -271,6 +277,26 @@ func TestSandboxManagerBuilder_WithRequestAdapter(t *testing.T) {
 }
 
 func TestSandboxManagerBuilder_Build(t *testing.T) {
+	t.Run("should fail when max timeout is not configured", func(t *testing.T) {
+		opts := config.SandboxManagerOptions{}
+		cache, fc, err := cachetest.NewTestCache(t)
+		require.NoError(t, err)
+
+		builder := NewSandboxManagerBuilder(opts).
+			WithCustomInfra(func() (infra.Builder, error) {
+				proxyServer := proxy.NewServer(opts)
+				return sandboxcr.NewInfraBuilder(opts).
+					WithCache(cache).
+					WithAPIReader(fc).
+					WithProxy(proxyServer), nil
+			})
+
+		_, err = builder.Build()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "max timeout")
+		assert.Equal(t, errors.ErrorInternal, errors.GetErrCode(err))
+	})
+
 	t.Run("should build complete SandboxManager with all components", func(t *testing.T) {
 		opts := config.SandboxManagerOptions{
 			SystemNamespace:  "test-namespace",
@@ -290,7 +316,8 @@ func TestSandboxManagerBuilder_Build(t *testing.T) {
 					WithAPIReader(fc).
 					WithProxy(proxyServer), nil
 			}).
-			WithRequestAdapter(mockAdapter)
+			WithRequestAdapter(mockAdapter).
+			WithMaxTimeout(testBuilderMaxTimeout)
 
 		manager, err := builder.Build()
 		require.NoError(t, err)
@@ -321,7 +348,8 @@ func TestSandboxManagerBuilder_Build(t *testing.T) {
 					WithAPIReader(fc).
 					WithProxy(proxyServer), nil
 			}).
-			WithMemberlistPeers()
+			WithMemberlistPeers().
+			WithMaxTimeout(testBuilderMaxTimeout)
 
 		manager, err := builder.Build()
 		require.NoError(t, err)
@@ -346,7 +374,8 @@ func TestSandboxManagerBuilder_Build(t *testing.T) {
 					WithCache(cache).
 					WithAPIReader(fc).
 					WithProxy(proxyServer), nil
-			})
+			}).
+			WithMaxTimeout(testBuilderMaxTimeout)
 
 		_, err = builder.Build()
 		require.NoError(t, err)
@@ -369,7 +398,8 @@ func TestSandboxManagerBuilder_Build(t *testing.T) {
 			}).
 			WithCustomPeers(func(args NewPeerArgs) (peers.Peers, error) {
 				return nil, assert.AnError
-			})
+			}).
+			WithMaxTimeout(testBuilderMaxTimeout)
 
 		_, err = builder.Build()
 		require.Error(t, err)
@@ -401,7 +431,8 @@ func TestSandboxManagerBuilder_Build(t *testing.T) {
 					WithProxy(proxyServer), nil
 			}).
 			WithMemberlistPeers().
-			WithRequestAdapter(mockAdapter)
+			WithRequestAdapter(mockAdapter).
+			WithMaxTimeout(testBuilderMaxTimeout)
 
 		manager, err := builder.Build()
 		require.NoError(t, err)
@@ -444,6 +475,9 @@ func TestSandboxManagerBuilder_Chaining(t *testing.T) {
 
 		result3 := builder.WithRequestAdapter(mockAdapter)
 		assert.Same(t, builder, result3)
+
+		result4 := builder.WithMaxTimeout(testBuilderMaxTimeout)
+		assert.Same(t, builder, result4)
 
 		// Should be able to build
 		manager, err := builder.Build()

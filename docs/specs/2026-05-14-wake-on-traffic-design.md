@@ -235,6 +235,8 @@ A new entry point `WakeSandbox` on `*SandboxManager` consumes the annotation, co
 10. return WakeResult{Action: Resumed, State: running, ResourceVersion: ...}
 ```
 
+`WakeResult.ResourceVersion` is the manager replica's best-effort observed Sandbox version after the wake attempt. The gateway must not use it as a correctness gate; convergence still comes from polling the local registry until the route is observed as `Running`.
+
 The 5-minute floor is a manager package-level constant `wakeMinimumTimeout = 5 * time.Minute`, applied only inside `WakeSandbox` and only on the duration form. The never policy bypasses it (no deadline written). `ConnectSandbox` does not see this constant.
 
 `WakeSandbox` does not write the wake-on-traffic annotation. Annotation maintenance is the create / connect / set-timeout responsibility (per the previous section).
@@ -607,6 +609,6 @@ End-to-end SDK tests (real E2B SDK against a running cluster) are deferred to a 
 
 - **Exact NetworkPolicy label selector** for sandbox-gateway pods. To be confirmed against the gateway Deployment's `metadata.labels` at implementation time. Whether a manager-side NetworkPolicy already exists (and we extend it) or whether a new NetworkPolicy is created is a deployment-shape detail to verify in `config/network-policy/`.
 - **Manager internal Service shape**. Whether `:7789` is exposed by extending the existing `sandbox-manager` Service with a new port, or by creating a new dedicated Service, is a kustomize/Helm preference to be confirmed during implementation.
-- **Wake metrics naming.** Should align with the existing `sandbox{Resume,Pause,Delete}Responses` / `Duration` histograms in `pkg/sandbox-manager/metrics.go`. Final names settled at implementation; the spec commits to having at least: a counter of wake responses by action code, a histogram of wake total duration (manager-side), a counter of singleflight-coalesced calls (gateway-side), and a histogram of gateway-side `wakeAndWait` duration.
+- **Wake metrics naming.** Manager-side wake metrics should align with the existing `sandbox{Resume,Pause,Delete}Responses` / `Duration` histograms in `pkg/sandbox-manager/metrics.go`. V1 includes a counter of wake responses by action code and a histogram of wake total duration. Gateway-side metrics for singleflight-coalesced calls and `wakeAndWait` duration are deferred to a follow-up because the sandbox-gateway currently exposes Envoy admin stats on `:9090`, while controller-runtime Go metrics are disabled to avoid port conflicts.
 - **Future request-level auth on `/wake`.** Out of scope for v1 (network policy is sufficient given the trust model). If hostile co-tenancy or stricter compliance forces this later, the cleanest hook is an SA-token + TokenReview check on the manager handler; placement is at the entry of `pkg/proxy/wake_handler.go`. This spec does not pre-add the hook to keep the path symmetric with `/refresh`.
 - **Future JWT/access-token owner check.** Tracking a separate workstream that maps an envd `X-Access-Token` to the sandbox owner. Not in this scope; no placeholder header is added to the wake path because such a header would only be meaningful once the verification machinery exists.

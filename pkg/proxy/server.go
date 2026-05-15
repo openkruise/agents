@@ -170,7 +170,7 @@ func (s *Server) handleRefresh(r *http.Request) (web.ApiResponse[struct{}], *web
 			Message: fmt.Sprintf("failed to unmarshal body: %s", err.Error()),
 		}
 	}
-	if route.State == v1alpha1.SandboxStateDead {
+	if route.State == "" || route.State == v1alpha1.SandboxStateDead {
 		s.DeleteRoute(route.ID)
 		log.Info("route deleted")
 	} else {

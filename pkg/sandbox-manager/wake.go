@@ -36,7 +36,19 @@ import (
 
 const wakeMinimumTimeout = 5 * time.Minute
 
-func (m *SandboxManager) WakeSandbox(ctx context.Context, sandboxID string) (proxy.WakeResult, error) {
+func (m *SandboxManager) WakeSandbox(ctx context.Context, sandboxID string) (result proxy.WakeResult, err error) {
+	start := time.Now()
+	defer func() {
+		action := string(result.Action)
+		if action == "" {
+			action = "error"
+		}
+		sandboxWakeResponses.WithLabelValues(action).Inc()
+		sandboxWakeDuration.Observe(time.Since(start).Seconds())
+	}()
+
+	// Wake uses only the canonical sandbox ID (`namespace--name`) from the URL.
+	// The request does not carry or trust a separate namespace field.
 	sbx, err := m.infra.GetClaimedSandbox(ctx, infra.GetClaimedSandboxOptions{SandboxID: sandboxID})
 	if err != nil {
 		if isSandboxNotFound(err) {
@@ -133,7 +145,7 @@ func classifyPausedWakeSandbox(sbx infra.Sandbox) (proxy.WakeAction, bool) {
 }
 
 func wakeNewEndAt(policy Policy, currentEndAt time.Time, now time.Time) time.Time {
-	if policy.Form == "never" || currentEndAt.IsZero() {
+	if policy.Form == PolicyFormNever || currentEndAt.IsZero() {
 		return time.Time{}
 	}
 	duration := policy.Duration
@@ -149,6 +161,13 @@ func wakeActionForConnectError(ctx context.Context, err error, sbx infra.Sandbox
 	}
 	if refreshErr := sbx.InplaceRefresh(ctx, false); refreshErr != nil {
 		return "", refreshErr
+	}
+	state, _ := sbx.GetState()
+	if state == v1alpha1.SandboxStateRunning {
+		return proxy.WakeActionAlreadyRunning, nil
+	}
+	if state == v1alpha1.SandboxStateDead || sbx.GetDeletionTimestamp() != nil {
+		return proxy.WakeActionGone, nil
 	}
 	action, ok := classifyPausedWakeSandbox(sbx)
 	if !ok && action != "" {
