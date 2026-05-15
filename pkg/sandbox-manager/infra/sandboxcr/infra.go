@@ -168,6 +168,13 @@ func (i *Infra) ClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions
 		} else {
 			metrics.RetryCost += tryMetrics.Total
 		}
+		// client-go retry.OnError rewrites interrupted errors to the last
+		// retriable error. Context cancellation is interrupted but non-retriable,
+		// so keep its message while intentionally avoiding %w; wrapping would
+		// still let wait.Interrupted identify and rewrite it.
+		if wait.Interrupted(claimErr) {
+			return fmt.Errorf("%v", claimErr)
+		}
 		return claimErr
 	})
 	return claimedSandbox, metrics, buildClaimError(err, metrics.LastError, metrics.PickSandboxFailures)

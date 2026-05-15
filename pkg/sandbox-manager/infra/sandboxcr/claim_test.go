@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -2232,6 +2233,99 @@ func TestTryClaimSandbox_LockConflict(t *testing.T) {
 
 			// Clean up expectation state
 			expectationutils.ResourceVersionExpectationDelete(sbx)
+		})
+	}
+}
+
+//goland:noinspection GoDeprecation
+func TestInfraClaimSandboxReturnsErrorWhenLockContextCanceled(t *testing.T) {
+	utils.InitLogOutput()
+	existTemplate := "test-template"
+	user := "test-user"
+
+	tests := []struct {
+		name        string
+		lockError   error
+		expectError string
+	}{
+		{
+			name: "context canceled during sandbox lock",
+			lockError: &url.Error{
+				Op:  "Put",
+				URL: "https://apiserver.example/apis/agents.kruise.io/v1alpha1/namespaces/default/sandboxes/test-sbx",
+				Err: context.Canceled,
+			},
+			expectError: "context canceled",
+		},
+		{
+			name:        "context canceled returned directly",
+			lockError:   context.Canceled,
+			expectError: "context canceled",
+		},
+		{
+			name: "context deadline exceeded during sandbox lock",
+			lockError: &url.Error{
+				Op:  "Put",
+				URL: "https://apiserver.example/apis/agents.kruise.io/v1alpha1/namespaces/default/sandboxes/test-sbx",
+				Err: context.DeadlineExceeded,
+			},
+			expectError: "context deadline exceeded",
+		},
+		{
+			name:        "context deadline exceeded returned directly",
+			lockError:   context.DeadlineExceeded,
+			expectError: "context deadline exceeded",
+		},
+		{
+			name:        "wait timeout returned directly",
+			lockError:   wait.ErrorInterrupted(fmt.Errorf("wait interrupted by test")),
+			expectError: "wait interrupted by test",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			testInfra, fc := NewTestInfra(t, config.SandboxManagerOptions{
+				DisableRouteReconciliation: true,
+			})
+
+			origCreateSandbox := DefaultCreateSandbox
+			DefaultCreateSandbox = func(context.Context, *v1alpha1.Sandbox, client.Client) (*v1alpha1.Sandbox, error) {
+				return nil, tt.lockError
+			}
+			t.Cleanup(func() {
+				DefaultCreateSandbox = origCreateSandbox
+			})
+
+			sbs := &v1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      existTemplate,
+					Namespace: "default",
+				},
+				Spec: v1alpha1.SandboxSetSpec{
+					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "main", Image: "test-image"}},
+							},
+						},
+					},
+				},
+			}
+			require.NoError(t, fc.Create(t.Context(), sbs))
+
+			got, metrics, err := testInfra.ClaimSandbox(t.Context(), infra.ClaimSandboxOptions{
+				User:            user,
+				Template:        existTemplate,
+				CreateOnNoStock: true,
+				ClaimTimeout:    100 * time.Millisecond,
+			})
+
+			require.Nil(t, got)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.expectError)
+			require.NotNil(t, metrics.LastError)
+			assert.Contains(t, metrics.LastError.Error(), tt.expectError)
 		})
 	}
 }
