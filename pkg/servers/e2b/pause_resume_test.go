@@ -146,7 +146,7 @@ func TestConnectSandbox(t *testing.T) {
 			paused:       true,
 			pausing:      true,
 			timeout:      DefaultTimeoutSeconds,
-			expectStatus: http.StatusInternalServerError,
+			expectStatus: http.StatusBadRequest,
 		},
 		{
 			name:         "resume sandbox: resuming",

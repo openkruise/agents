@@ -448,7 +448,20 @@ func TestIsSandboxResumable(t *testing.T) {
 				},
 			},
 			expectedResult: true,
-			expectedReason: "SandboxIsRunningOrResuming",
+			expectedReason: "SandboxIsRunning",
+		},
+		{
+			name: "Running sandbox with spec.paused=true is not resumable (pausing in progress)",
+			sandbox: &agentsv1alpha1.Sandbox{
+				Spec: agentsv1alpha1.SandboxSpec{
+					Paused: true,
+				},
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxRunning,
+				},
+			},
+			expectedResult: false,
+			expectedReason: "SandboxIsPausing",
 		},
 		{
 			name: "Resuming sandbox is resumable",
@@ -458,7 +471,7 @@ func TestIsSandboxResumable(t *testing.T) {
 				},
 			},
 			expectedResult: true,
-			expectedReason: "SandboxIsRunningOrResuming",
+			expectedReason: "SandboxIsResuming",
 		},
 		{
 			name: "Paused sandbox with paused condition is resumable",

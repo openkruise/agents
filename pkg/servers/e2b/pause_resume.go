@@ -171,8 +171,12 @@ func (sc *Controller) ConnectSandbox(r *http.Request) (web.ApiResponse[*models.S
 		log.Info("sandbox is paused, will resume it", "reason", pauseResumeReason)
 		if err := sc.manager.ResumeSandbox(ctx, sbx, infra.ResumeOptions{}); err != nil {
 			log.Error(err, "failed to resume sandbox")
+			code := http.StatusInternalServerError
+			if errors.GetErrCode(err) == errors.ErrorConflict {
+				code = http.StatusBadRequest
+			}
 			return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
-				Code:    http.StatusInternalServerError,
+				Code:    code,
 				Message: fmt.Sprintf("Failed to resume sandbox: %v", err),
 			}
 		}
