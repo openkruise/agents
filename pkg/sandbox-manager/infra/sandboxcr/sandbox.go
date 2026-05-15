@@ -218,6 +218,19 @@ func (s *Sandbox) SetPodLabels(labels map[string]string) {
 	}
 }
 
+func (s *Sandbox) GetPodAnnotations() map[string]string {
+	if s.Spec.Template != nil {
+		return s.Spec.Template.Annotations
+	}
+	return nil
+}
+
+func (s *Sandbox) SetPodAnnotations(annotations map[string]string) {
+	if s.Spec.Template != nil {
+		s.Spec.Template.Annotations = annotations
+	}
+}
+
 // SetImage sets the image of the first container
 func (s *Sandbox) SetImage(image string) {
 	if s.Spec.Template != nil {

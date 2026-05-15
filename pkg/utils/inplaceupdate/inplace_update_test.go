@@ -2026,6 +2026,233 @@ func TestDefaultGeneratePatchBodyFunc_ExtensionAnnotations(t *testing.T) {
 	}
 }
 
+func TestDefaultGeneratePatchBodyFunc_ReservedInPlaceStateAnnotation(t *testing.T) {
+	tests := []struct {
+		name                 string
+		extensionAnnotations map[string]string
+		templateAnnotations  map[string]string
+		expectAnnotation     map[string]string
+	}{
+		{
+			name: "extension annotation cannot override generated state",
+			extensionAnnotations: map[string]string{
+				PodAnnotationInPlaceUpdateStateKey: "user-state",
+				"custom.annotation/key":            "from-extension",
+			},
+			expectAnnotation: map[string]string{
+				"custom.annotation/key": "from-extension",
+			},
+		},
+		{
+			name: "template annotation cannot override generated state",
+			templateAnnotations: map[string]string{
+				PodAnnotationInPlaceUpdateStateKey: "template-state",
+				"custom.annotation/key":            "from-template",
+			},
+			expectAnnotation: map[string]string{
+				"custom.annotation/key": "from-template",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := InPlaceUpdateOptions{
+				Box: &agentsv1alpha1.Sandbox{
+					Spec: agentsv1alpha1.SandboxSpec{
+						EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+							Template: &corev1.PodTemplateSpec{
+								ObjectMeta: metav1.ObjectMeta{
+									Annotations: tt.templateAnnotations,
+								},
+								Spec: corev1.PodSpec{
+									Containers: []corev1.Container{
+										{
+											Name:  "container1",
+											Image: "nginx:new",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+				Pod: &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:        "test-pod",
+						Namespace:   "default",
+						Annotations: map[string]string{},
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name:  "container1",
+								Image: "nginx:old",
+							},
+						},
+					},
+					Status: corev1.PodStatus{
+						ContainerStatuses: []corev1.ContainerStatus{
+							{
+								Name:    "container1",
+								ImageID: "nginx@sha256:old",
+							},
+						},
+					},
+				},
+				Revision:             "rev-reserved",
+				ExtensionAnnotations: tt.extensionAnnotations,
+			}
+
+			patchBody := DefaultGeneratePatchBodyFunc(opts)
+			if patchBody == "" {
+				t.Fatalf("expected non-empty patch body")
+			}
+
+			var patch map[string]interface{}
+			if err := json.Unmarshal([]byte(patchBody), &patch); err != nil {
+				t.Fatalf("failed to unmarshal patch body: %v", err)
+			}
+
+			metadata, ok := patch["metadata"].(map[string]interface{})
+			if !ok {
+				t.Fatalf("patch body should have metadata")
+			}
+
+			annotations, ok := metadata["annotations"].(map[string]interface{})
+			if !ok {
+				t.Fatalf("metadata should have annotations")
+			}
+
+			stateStr, ok := annotations[PodAnnotationInPlaceUpdateStateKey].(string)
+			if !ok {
+				t.Fatalf("annotations should have generated in-place update state")
+			}
+			var state InPlaceUpdateState
+			if err := json.Unmarshal([]byte(stateStr), &state); err != nil {
+				t.Fatalf("generated in-place update state should be valid json: %v", err)
+			}
+			if state.Revision != "rev-reserved" {
+				t.Errorf("expected revision rev-reserved, got %s", state.Revision)
+			}
+			if !state.UpdateImages {
+				t.Errorf("expected generated state to track image update")
+			}
+			for k, v := range tt.expectAnnotation {
+				if annotations[k] != v {
+					t.Errorf("expected annotation %s=%s in patch, got %v", k, v, annotations[k])
+				}
+			}
+		})
+	}
+}
+
+func TestDefaultGeneratePatchBodyFunc_TemplateAnnotations(t *testing.T) {
+	tests := []struct {
+		name               string
+		templateAnnotation map[string]string
+		podAnnotations     map[string]string
+		expectInPatch      map[string]string
+		expectNotInPatch   []string
+	}{
+		{
+			name:               "new annotations added to pod",
+			templateAnnotation: map[string]string{"app.io/owner": "team-a", "app.io/env": "prod"},
+			podAnnotations:     map[string]string{},
+			expectInPatch:      map[string]string{"app.io/owner": "team-a", "app.io/env": "prod"},
+		},
+		{
+			name:               "already synced annotations not patched",
+			templateAnnotation: map[string]string{"app.io/owner": "team-a"},
+			podAnnotations:     map[string]string{"app.io/owner": "team-a"},
+			expectNotInPatch:   []string{"app.io/owner"},
+		},
+		{
+			name:               "changed annotation value is patched",
+			templateAnnotation: map[string]string{"app.io/owner": "team-b"},
+			podAnnotations:     map[string]string{"app.io/owner": "team-a"},
+			expectInPatch:      map[string]string{"app.io/owner": "team-b"},
+		},
+		{
+			name:               "nil template annotations produce no annotation patch",
+			templateAnnotation: nil,
+			podAnnotations:     map[string]string{"existing": "value"},
+			expectNotInPatch:   []string{"existing"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			box := &agentsv1alpha1.Sandbox{
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							ObjectMeta: metav1.ObjectMeta{
+								Labels:      map[string]string{},
+								Annotations: tt.templateAnnotation,
+							},
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "c", Image: "img:v1"}},
+							},
+						},
+					},
+				},
+			}
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "p",
+					Namespace:   "default",
+					Labels:      map[string]string{},
+					Annotations: tt.podAnnotations,
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "c", Image: "img:v1"}},
+				},
+			}
+
+			body := DefaultGeneratePatchBodyFunc(InPlaceUpdateOptions{
+				Box:      box,
+				Pod:      pod,
+				Revision: "rev-anno",
+			})
+
+			if len(tt.expectInPatch) == 0 && len(tt.expectNotInPatch) > 0 {
+				// Patch may be empty or have no annotation section
+				if body == "" {
+					return
+				}
+				var decoded map[string]any
+				if err := json.Unmarshal([]byte(body), &decoded); err != nil {
+					t.Fatalf("unmarshal patch: %v", err)
+				}
+				metadata, _ := decoded["metadata"].(map[string]any)
+				annotations, _ := metadata["annotations"].(map[string]any)
+				for _, k := range tt.expectNotInPatch {
+					if _, exists := annotations[k]; exists {
+						t.Errorf("annotation %s should not be in patch", k)
+					}
+				}
+				return
+			}
+
+			if body == "" {
+				t.Fatalf("expected non-empty body")
+			}
+			var decoded map[string]any
+			if err := json.Unmarshal([]byte(body), &decoded); err != nil {
+				t.Fatalf("unmarshal patch: %v", err)
+			}
+			metadata, _ := decoded["metadata"].(map[string]any)
+			annotations, _ := metadata["annotations"].(map[string]any)
+			for k, v := range tt.expectInPatch {
+				if annotations[k] != v {
+					t.Errorf("expected annotation %s=%s in patch, got %v", k, v, annotations[k])
+				}
+			}
+		})
+	}
+}
+
 func TestCheckResizeQoSChange(t *testing.T) {
 	tests := []struct {
 		name        string

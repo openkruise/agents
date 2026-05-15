@@ -1037,6 +1037,67 @@ func TestSandbox_SetImageAndGetImage(t *testing.T) {
 	})
 }
 
+func TestSandbox_SetPodAnnotationsAndGetPodAnnotations(t *testing.T) {
+	t.Run("set and get annotations with template", func(t *testing.T) {
+		s := &Sandbox{
+			Sandbox: &v1alpha1.Sandbox{
+				Spec: v1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{},
+					},
+				},
+			},
+		}
+
+		assert.Nil(t, s.GetPodAnnotations())
+
+		annotations := map[string]string{"app.io/owner": "team-a", "app.io/env": "prod"}
+		s.SetPodAnnotations(annotations)
+		assert.Equal(t, annotations, s.GetPodAnnotations())
+	})
+
+	t.Run("overwrite existing annotations", func(t *testing.T) {
+		s := &Sandbox{
+			Sandbox: &v1alpha1.Sandbox{
+				Spec: v1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							ObjectMeta: metav1.ObjectMeta{
+								Annotations: map[string]string{"old-key": "old-value"},
+							},
+						},
+					},
+				},
+			},
+		}
+
+		assert.Equal(t, map[string]string{"old-key": "old-value"}, s.GetPodAnnotations())
+
+		newAnnotations := map[string]string{"new-key": "new-value"}
+		s.SetPodAnnotations(newAnnotations)
+		assert.Equal(t, newAnnotations, s.GetPodAnnotations())
+		assert.NotContains(t, s.GetPodAnnotations(), "old-key")
+	})
+
+	t.Run("set and get annotations with nil template", func(t *testing.T) {
+		s := &Sandbox{
+			Sandbox: &v1alpha1.Sandbox{
+				Spec: v1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+						Template: nil,
+					},
+				},
+			},
+		}
+
+		assert.Nil(t, s.GetPodAnnotations())
+		assert.NotPanics(t, func() {
+			s.SetPodAnnotations(map[string]string{"key": "value"})
+		})
+		assert.Nil(t, s.GetPodAnnotations())
+	})
+}
+
 func TestSandbox_GetSandboxID(t *testing.T) {
 	s := &Sandbox{
 		Sandbox: &v1alpha1.Sandbox{

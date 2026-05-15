@@ -18,6 +18,7 @@ package models
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -738,6 +739,132 @@ func TestParseExtensionLabels(t *testing.T) {
 					}
 				}
 			}
+		})
+	}
+}
+
+func TestParseExtensionAnnotations(t *testing.T) {
+	tests := []struct {
+		name                string
+		metadata            map[string]string
+		expectError         string
+		expectedAnnotations map[string]string
+	}{
+		{
+			name:                "no annotations in metadata",
+			metadata:            map[string]string{},
+			expectedAnnotations: nil,
+		},
+		{
+			name: "no valid annotations in metadata",
+			metadata: map[string]string{
+				"app": "myapp",
+			},
+			expectedAnnotations: nil,
+		},
+		{
+			name: "single valid annotation",
+			metadata: map[string]string{
+				"annotation:app": "myapp",
+			},
+			expectedAnnotations: map[string]string{"app": "myapp"},
+		},
+		{
+			name: "multiple valid annotations",
+			metadata: map[string]string{
+				"annotation:app":  "myapp",
+				"annotation:env":  "production",
+				"annotation:tier": "backend",
+			},
+			expectedAnnotations: map[string]string{"app": "myapp", "env": "production", "tier": "backend"},
+		},
+		{
+			name: "invalid annotation name",
+			metadata: map[string]string{
+				"annotation:invalid-app{}": "myapp",
+			},
+			expectError: "invalid annotation",
+		},
+		{
+			name: "annotation value with spaces is allowed",
+			metadata: map[string]string{
+				"annotation:description": "value with spaces",
+			},
+			expectedAnnotations: map[string]string{"description": "value with spaces"},
+		},
+		{
+			name: "annotation value with json is allowed",
+			metadata: map[string]string{
+				"annotation:config": `{"enabled":true,"mode":"test"}`,
+			},
+			expectedAnnotations: map[string]string{"config": `{"enabled":true,"mode":"test"}`},
+		},
+		{
+			name: "annotation value longer than label value is allowed",
+			metadata: map[string]string{
+				"annotation:description": "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-extra",
+			},
+			expectedAnnotations: map[string]string{"description": "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-extra"},
+		},
+		{
+			name: "annotation value with newline is allowed",
+			metadata: map[string]string{
+				"annotation:description": "line one\nline two",
+			},
+			expectedAnnotations: map[string]string{"description": "line one\nline two"},
+		},
+		{
+			name: "annotation total size above kubernetes limit is rejected",
+			metadata: map[string]string{
+				"annotation:description": strings.Repeat("a", 256*1024),
+			},
+			expectError: "Too long",
+		},
+		{
+			name: "annotation with special characters in value",
+			metadata: map[string]string{
+				"annotation:app": "my-app_v1.0",
+			},
+			expectedAnnotations: map[string]string{"app": "my-app_v1.0"},
+		},
+		{
+			name: "kubernetes style annotation name",
+			metadata: map[string]string{
+				"annotation:kubernetes.io/app": "myapp",
+			},
+			expectedAnnotations: map[string]string{"kubernetes.io/app": "myapp"},
+		},
+		{
+			name: "annotations are removed from metadata after parsing",
+			metadata: map[string]string{
+				"annotation:app":   "myapp",
+				"regular-metadata": "should-remain",
+			},
+			expectedAnnotations: map[string]string{"app": "myapp"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := &NewSandboxRequest{
+				Metadata: tt.metadata,
+			}
+
+			err := req.parseExtensionAnnotations()
+
+			if tt.expectError != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
+				return
+			}
+
+			require.NoError(t, err)
+			if tt.expectedAnnotations == nil {
+				assert.Nil(t, req.Extensions.Annotations)
+				return
+			}
+			require.NotNil(t, req.Extensions.Annotations)
+			assert.Equal(t, tt.expectedAnnotations, req.Extensions.Annotations)
 		})
 	}
 }
