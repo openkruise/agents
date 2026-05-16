@@ -31,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/identity"
 	"github.com/openkruise/agents/pkg/utils"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 	"github.com/openkruise/agents/pkg/utils/inplaceupdate"
@@ -2270,4 +2271,170 @@ func stringContains(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+// ---------------------------------------------------------------------------
+// CA Certificate Injection Tests (driven by identity.CABundleSpec registry)
+// ---------------------------------------------------------------------------
+
+func TestCommonControl_createPod_WithCAInjection(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	tests := []struct {
+		name               string
+		featureGateEnabled bool
+		seedSourceSecret   bool
+		withEgressRuntime  bool
+		expectCAVolume     bool
+		expectCAMount      bool
+		expectError        string
+	}{
+		{
+			name:               "feature gate enabled, egress-control runtime, source secret present - CA injected",
+			featureGateEnabled: true,
+			withEgressRuntime:  true,
+			seedSourceSecret:   true,
+			expectCAVolume:     true,
+			expectCAMount:      true,
+		},
+		{
+			name:               "feature gate disabled - no CA injection regardless of source",
+			featureGateEnabled: false,
+			withEgressRuntime:  true,
+			seedSourceSecret:   false,
+			expectCAVolume:     false,
+			expectCAMount:      false,
+		},
+		{
+			name:               "feature gate enabled but no egress-control runtime - no CA injection",
+			featureGateEnabled: true,
+			withEgressRuntime:  false,
+			seedSourceSecret:   false,
+			expectCAVolume:     false,
+			expectCAMount:      false,
+		},
+		{
+			name:               "feature gate enabled, egress-control runtime, source secret missing - block creation",
+			featureGateEnabled: true,
+			withEgressRuntime:  true,
+			seedSourceSecret:   false,
+			expectError:        "source CA secret",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.featureGateEnabled {
+				_ = utilfeature.DefaultMutableFeatureGate.Set("SecurityIdentityProvider=true")
+				t.Cleanup(func() {
+					_ = utilfeature.DefaultMutableFeatureGate.Set("SecurityIdentityProvider=false")
+				})
+			}
+
+			objs := []client.Object{}
+			if tt.seedSourceSecret {
+				objs = append(objs, &corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      identity.GatewayCASecretName,
+						Namespace: utils.DefaultSandboxDeployNamespace,
+					},
+					Type: corev1.SecretTypeOpaque,
+					Data: map[string][]byte{
+						identity.GatewayCAKey: []byte("test-ca-bundle-content"),
+					},
+				})
+			}
+
+			control := &commonControl{
+				Client:   fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build(),
+				recorder: record.NewFakeRecorder(10),
+			}
+
+			sandbox := &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+				},
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{Name: "main", Image: "nginx:latest"},
+								},
+							},
+						},
+					},
+				},
+			}
+			if tt.withEgressRuntime {
+				sandbox.Spec.Runtimes = []agentsv1alpha1.RuntimeConfig{
+					{Name: agentsv1alpha1.RuntimeConfigForInjectEgressControl},
+				}
+			}
+
+			status := &agentsv1alpha1.SandboxStatus{UpdateRevision: "rev1"}
+			pod, err := control.createPod(context.TODO(), sandbox, status)
+
+			if tt.expectError != "" {
+				if err == nil {
+					t.Fatalf("expected error containing %q, got nil", tt.expectError)
+				}
+				if !contains(err.Error(), tt.expectError) {
+					t.Fatalf("expected error containing %q, got %q", tt.expectError, err.Error())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("createPod() unexpected error: %v", err)
+			}
+
+			foundCAVolume := false
+			for _, v := range pod.Spec.Volumes {
+				if v.Name == "sandbox-gateway-ca" {
+					foundCAVolume = true
+					if v.Secret == nil || v.Secret.SecretName != identity.GatewayCASecretName {
+						t.Errorf("CA volume has wrong secret source")
+					}
+					break
+				}
+			}
+			if foundCAVolume != tt.expectCAVolume {
+				t.Errorf("expected CA volume present=%v, got %v", tt.expectCAVolume, foundCAVolume)
+			}
+
+			foundCAMount := false
+			if len(pod.Spec.Containers) > 0 {
+				for _, vm := range pod.Spec.Containers[0].VolumeMounts {
+					if vm.Name == "sandbox-gateway-ca" {
+						foundCAMount = true
+						if vm.MountPath != "/etc/ssl/certs/agent-identity/gateway-ca.crt" {
+							t.Errorf("expected mount path '/etc/ssl/certs/agent-identity/gateway-ca.crt', got %q", vm.MountPath)
+						}
+						break
+					}
+				}
+			}
+			if foundCAMount != tt.expectCAMount {
+				t.Errorf("expected CA mount present=%v, got %v", tt.expectCAMount, foundCAMount)
+			}
+
+			if tt.featureGateEnabled && tt.seedSourceSecret && tt.withEgressRuntime {
+				var replicated corev1.Secret
+				err = control.Get(context.TODO(), types.NamespacedName{
+					Name:      identity.GatewayCASecretName,
+					Namespace: "default",
+				}, &replicated)
+				if err != nil {
+					t.Fatalf("expected gateway CA secret to be replicated to target ns, got error: %v", err)
+				}
+				if string(replicated.Data[identity.GatewayCAKey]) != "test-ca-bundle-content" {
+					t.Errorf("expected replicated secret data to match source, got %q",
+						string(replicated.Data[identity.GatewayCAKey]))
+				}
+			}
+		})
+	}
 }

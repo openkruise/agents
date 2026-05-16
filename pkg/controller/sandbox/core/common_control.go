@@ -32,8 +32,11 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
+	"github.com/openkruise/agents/pkg/features"
+	"github.com/openkruise/agents/pkg/identity"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
+	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 	"github.com/openkruise/agents/pkg/utils/inplaceupdate"
 	"github.com/openkruise/agents/pkg/utils/sidecarutils"
 )
@@ -430,9 +433,29 @@ func (r *commonControl) EnsureSandboxTerminated(ctx context.Context, args Ensure
 }
 
 func (r *commonControl) createPod(ctx context.Context, box *agentsv1alpha1.Sandbox, newStatus *agentsv1alpha1.SandboxStatus) (*corev1.Pod, error) {
+
+	// Ensure all registered CA bundle Secrets exist in the sandbox namespace
+	// before creating the pod. Each spec is gated by its own EnabledFor predicate
+	// (e.g. the gateway CA spec is bound at controller startup to require
+	// runtime egress-control), so a missing source Secret only blocks creation
+	// when the spec actually applies to this sandbox.
+	caInjector := identity.NewCACertInjector(r.Client)
+	if shouldInjectCABundles(box) {
+		if err := caInjector.EnsureAllCACerts(ctx, box, box.Namespace); err != nil {
+			klog.ErrorS(err, "failed to ensure CA bundle secrets", "sandbox", klog.KObj(box))
+			return nil, err
+		}
+	}
+
 	pod, err := GeneratePodFromSandbox(ctx, r.Client, box, newStatus.UpdateRevision)
 	if err != nil {
 		return nil, err
+	}
+
+	// Inject every enabled CA bundle as Volume + VolumeMount entries.
+	if shouldInjectCABundles(box) {
+		caInjector.InjectAllCAVolumes(ctx, box, pod)
+		caInjector.InjectAllCAVolumeMounts(ctx, box, pod)
 	}
 
 	// to avoid the performance issue, using the controller to inject csi containers
@@ -454,6 +477,26 @@ func (r *commonControl) createPod(ctx context.Context, box *agentsv1alpha1.Sandb
 	}
 	klog.InfoS("Create pod success", "sandbox", klog.KObj(box), "Body", utils.DumpJson(pod))
 	return pod, nil
+}
+
+// shouldInjectCABundles reports whether CA bundle ensure/injection should run
+// for the given sandbox. It combines two switches that must BOTH be on:
+//
+//  1. SecurityIdentityProviderGate feature gate — cluster-level kill switch
+//     that disables the entire CA injection pipeline regardless of per-sandbox
+//     configuration.
+//  2. The egress-control runtime entry on the sandbox — per-sandbox switch
+//     that signals the workload actually needs the gateway CA on disk.
+//
+// Note: per-CA-spec EnabledFor predicates registered via
+// identity.BindCAEnabledFor still apply on top of this gate inside the
+// injector. This caller-side gate keeps a clear, single place for the global
+// "should we even bother" decision.
+func shouldInjectCABundles(box *agentsv1alpha1.Sandbox) bool {
+	if !utilfeature.DefaultFeatureGate.Enabled(features.SecurityIdentityProviderGate) {
+		return false
+	}
+	return sidecarutils.IsRuntimeEnabled(box, agentsv1alpha1.RuntimeConfigForInjectEgressControl)
 }
 
 func (r *commonControl) handleInplaceUpdateSandbox(ctx context.Context, args EnsureFuncArgs) (bool, error) {

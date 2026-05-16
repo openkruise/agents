@@ -55,6 +55,10 @@ func (u *defaultTokenProvider) PropagateSecurityToken(_ context.Context, _ *agen
 	return nil
 }
 
+func (u *defaultTokenProvider) GetProxyCABundle(ctx context.Context, req GetProxyCABundleRequest) (*GetProxyCABundleResponse, error) {
+	return &GetProxyCABundleResponse{}, nil
+}
+
 // fallbackIdentityProvider wraps a primary IdentityProvider and falls back to the
 // community default provider when the primary IssueToken returns an error.
 // This ensures that sandbox claim is never blocked by an external identity provider outage.
@@ -65,6 +69,16 @@ func (u *defaultTokenProvider) PropagateSecurityToken(_ context.Context, _ *agen
 type fallbackIdentityProvider struct {
 	primary  IdentityProvider
 	fallback IdentityProvider
+}
+
+func (f *fallbackIdentityProvider) GetProxyCABundle(ctx context.Context, req GetProxyCABundleRequest) (*GetProxyCABundleResponse, error) {
+	logger := klog.FromContext(ctx)
+	resp, err := f.primary.GetProxyCABundle(ctx, req)
+	if err != nil {
+		logger.Error(err, "primary identity provider failed, falling back to default token provider")
+		return f.fallback.GetProxyCABundle(ctx, req)
+	}
+	return resp, nil
 }
 
 // NewFallbackIdentityProvider creates an IdentityProvider that delegates to the primary provider
@@ -80,7 +94,7 @@ func (f *fallbackIdentityProvider) IssueToken(ctx context.Context, req TokenRequ
 	logger := klog.FromContext(ctx)
 	resp, err := f.primary.IssueToken(ctx, req)
 	if err != nil {
-		logger.Error(err, "primary identity provider failed, falling back to UUID token provider")
+		logger.Error(err, "primary identity provider failed, falling back to default token provider")
 		return f.fallback.IssueToken(ctx, req)
 	}
 	return resp, nil

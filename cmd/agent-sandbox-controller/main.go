@@ -287,6 +287,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Execute all registered CA binding callbacks. Community bindings are
+	// registered in ca_binding.go; enterprise bindings in inner_ca_binding.go.
+	// This keeps main.go free of binding details and avoids merge conflicts
+	// when enterprise adds new CA specs.
+	executeCABindings()
+
 	setupLog.Info("register field index")
 	if err := fieldindex.RegisterFieldIndexes(mgr.GetCache()); err != nil {
 		setupLog.Error(err, "failed to register field index")
