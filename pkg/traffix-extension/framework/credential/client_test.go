@@ -17,16 +17,23 @@ limitations under the License.
 package credential
 
 import (
+	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"io"
 	"math/big"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"testing"
 	"time"
+
+	"github.com/openkruise/agents/pkg/traffix-extension/framework/tokencache"
 )
 
 // generateSelfSignedCert creates a self-signed certificate and private key,
@@ -331,6 +338,137 @@ func TestNewMTLSClient_NonexistentCAFile(t *testing.T) {
 	_, err := newMTLSClient(certFile.Name(), keyFile.Name(), "/nonexistent/ca.pem")
 	if err == nil {
 		t.Fatal("expected error for non-existent CA file")
+	}
+}
+
+// --- GetToken ---------------------------------------------------------------
+
+// fakeProvider returns a credential client wired to a fresh httptest.Server.
+// statusCode and respBody control the upstream response. The handler also
+// writes the request body to gotBody so callers can assert on the request.
+func fakeProvider(t *testing.T, statusCode int, respBody string, gotBody *[]byte) (*Client, func()) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if gotBody != nil {
+			b, _ := io.ReadAll(r.Body)
+			*gotBody = b
+		}
+		w.WriteHeader(statusCode)
+		_, _ = w.Write([]byte(respBody))
+	}))
+	t.Setenv(identityProviderURLEnvVar, srv.URL)
+	t.Setenv(clientCertEnvVar, "/nonexistent")
+	t.Setenv(clientKeyEnvVar, "/nonexistent")
+	t.Setenv(caCertEnvVar, "/nonexistent")
+	return NewClient(), srv.Close
+}
+
+func TestNewClient_DefaultsAndExplicit(t *testing.T) {
+	t.Setenv(identityProviderURLEnvVar, "")
+	c := NewClient()
+	if c == nil || c.providerURL != defaultIdentityProviderURL {
+		t.Errorf("expected default URL, got %q", c.providerURL)
+	}
+
+	t.Setenv(identityProviderURLEnvVar, "http://example.com/")
+	c2 := NewClientWithCache(nil)
+	if c2 == nil || c2.providerURL != "http://example.com/" {
+		t.Errorf("expected explicit URL, got %q", c2.providerURL)
+	}
+}
+
+func TestGetToken_Success(t *testing.T) {
+	var got []byte
+	c, stop := fakeProvider(t, http.StatusOK, `{"apiKey":"k1"}`, &got)
+	defer stop()
+
+	tok, err := c.GetToken(context.Background(), "access", "client", "provider")
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if tok != "k1" {
+		t.Errorf("expected k1, got %q", tok)
+	}
+	if !bytes.Contains(got, []byte(`"resourceId":"client"`)) ||
+		!bytes.Contains(got, []byte(`"credentialProviderName":"provider"`)) {
+		t.Errorf("unexpected request body: %s", got)
+	}
+}
+
+func TestGetToken_NonOKStatus(t *testing.T) {
+	c, stop := fakeProvider(t, http.StatusForbidden, `denied`, nil)
+	defer stop()
+
+	if _, err := c.GetToken(context.Background(), "access", "client", "provider"); err == nil {
+		t.Fatal("expected error for non-OK status")
+	}
+}
+
+func TestGetToken_BadJSON(t *testing.T) {
+	c, stop := fakeProvider(t, http.StatusOK, `not json`, nil)
+	defer stop()
+	if _, err := c.GetToken(context.Background(), "a", "b", "c"); err == nil {
+		t.Fatal("expected unmarshal error")
+	}
+}
+
+func TestGetToken_EmptyApiKey(t *testing.T) {
+	c, stop := fakeProvider(t, http.StatusOK, `{"apiKey":""}`, nil)
+	defer stop()
+	if _, err := c.GetToken(context.Background(), "a", "b", "c"); err == nil {
+		t.Fatal("expected error for empty apiKey")
+	}
+}
+
+// TestGetToken_CacheHit verifies the cache short-circuits the HTTP call.
+func TestGetToken_CacheHit(t *testing.T) {
+	called := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called++
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"apiKey":"fresh"}`))
+	}))
+	defer srv.Close()
+
+	t.Setenv(identityProviderURLEnvVar, srv.URL)
+	t.Setenv(clientCertEnvVar, "/nonexistent")
+	cache := tokencache.NewCache(time.Minute, 10)
+	c := NewClientWithCache(cache)
+
+	for i := 0; i < 3; i++ {
+		tok, err := c.GetToken(context.Background(), "a", "b", "p")
+		if err != nil || tok != "fresh" {
+			t.Fatalf("iter %d: tok=%q err=%v", i, tok, err)
+		}
+	}
+	if called != 1 {
+		t.Errorf("expected upstream to be called once, got %d", called)
+	}
+}
+
+// TestGetToken_NetworkError covers the "request send failed" branch by
+// pointing at a server we've already shut down.
+func TestGetToken_NetworkError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
+	url := srv.URL
+	srv.Close()
+
+	t.Setenv(identityProviderURLEnvVar, url)
+	t.Setenv(clientCertEnvVar, "/nonexistent")
+	c := NewClient()
+
+	if _, err := c.GetToken(context.Background(), "a", "b", "c"); err == nil {
+		t.Fatal("expected network error")
+	}
+}
+
+// TestGetToken_BadURL covers http.NewRequestWithContext failure (invalid URL).
+func TestGetToken_BadURL(t *testing.T) {
+	t.Setenv(identityProviderURLEnvVar, "http://[::1") // malformed
+	t.Setenv(clientCertEnvVar, "/nonexistent")
+	c := NewClient()
+	if _, err := c.GetToken(context.Background(), "a", "b", "c"); err == nil {
+		t.Fatal("expected error for malformed URL")
 	}
 }
 

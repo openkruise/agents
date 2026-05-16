@@ -27,6 +27,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
+	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 
 	v1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 )
@@ -121,7 +122,11 @@ func (s *configStore) FindProfilesForLabels(podNamespace string, podLabels map[s
 
 		selector, err := metav1.LabelSelectorAsSelector(&profile.Spec.Selector)
 		if err != nil {
-			// An invalid selector cannot match any pod; skip this profile.
+			// An invalid selector cannot match any pod; skip this profile
+			// and log the failure so misconfigurations are observable.
+			ctrllog.Log.WithName("configstore").Error(err,
+				"SecurityProfile has invalid selector; skipping",
+				"profile", nn.String())
 			continue
 		}
 		if selector.Matches(labels.Set(podLabels)) {

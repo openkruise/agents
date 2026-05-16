@@ -24,6 +24,7 @@ import (
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	envoyTypeV3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
+	"github.com/go-logr/logr"
 	structpb "google.golang.org/protobuf/types/known/structpb"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -496,6 +497,224 @@ func TestHandleRequestHeaders_BlockBeatsTokenTransformation(t *testing.T) {
 	}
 	if immediate.ImmediateResponse.Status.Code != envoyTypeV3.StatusCode(429) {
 		t.Errorf("status: want 429, got %v", immediate.ImmediateResponse.Status.Code)
+	}
+}
+
+// TestHandleRequestHeaders_NoProfileMatch verifies the passthrough path when
+// no profile selector matches the pod labels.
+func TestHandleRequestHeaders_NoProfileMatch(t *testing.T) {
+	store := configstore.NewStore()
+	store.ProfileSet(newProfile("p1", "default", map[string]string{"app": "other"}, nil))
+
+	srv := newServerWithBlockOnly(t, store)
+	resps, err := srv.HandleRequestHeaders(
+		context.Background(),
+		makeRequestHeaders("api.example.com", "/x", "GET"),
+		makeAttrsWithLabels("default", "pod-x", testLabelsB64),
+	)
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if _, ok := resps[0].Response.(*extProcPb.ProcessingResponse_RequestHeaders); !ok {
+		t.Fatalf("expected pass-through, got %T", resps[0].Response)
+	}
+}
+
+// TestHandleRequestHeaders_RuleWithNilActions covers the rule-skip branch when
+// a rule matches but its Actions are nil.
+func TestHandleRequestHeaders_RuleWithNilActions(t *testing.T) {
+	store := configstore.NewStore()
+	store.ProfileSet(newProfile("p1", "default", map[string]string{"app": "blocked"}, []v1alpha1.SecurityRule{
+		{
+			Name:    "no-actions",
+			Match:   []v1alpha1.RuleMatch{{Domains: []string{"*"}}},
+			Actions: nil,
+		},
+	}))
+	srv := newServerWithBlockOnly(t, store)
+	resps, err := srv.HandleRequestHeaders(
+		context.Background(),
+		makeRequestHeaders("api.example.com", "/x", "GET"),
+		makeAttrsWithLabels("default", "pod-x", testLabelsB64),
+	)
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if _, ok := resps[0].Response.(*extProcPb.ProcessingResponse_RequestHeaders); !ok {
+		t.Fatalf("expected pass-through for nil actions, got %T", resps[0].Response)
+	}
+}
+
+// TestHandleRequestHeaders_MultipleProfiles_AlphabeticalOrder verifies that
+// when multiple profiles match the same pod, profile-name sort order
+// determines which Block fires.
+func TestHandleRequestHeaders_MultipleProfiles_AlphabeticalOrder(t *testing.T) {
+	store := configstore.NewStore()
+	// "alpha" sorts before "beta" — its 401 must win.
+	store.ProfileSet(newProfile("alpha", "default", map[string]string{"app": "blocked"}, []v1alpha1.SecurityRule{
+		{
+			Name:  "block-401",
+			Match: []v1alpha1.RuleMatch{{Domains: []string{"*"}}},
+			Actions: &v1alpha1.SecurityRuleActions{
+				Block: &v1alpha1.BlockAction{StatusCode: 401},
+			},
+		},
+	}))
+	store.ProfileSet(newProfile("beta", "default", map[string]string{"app": "blocked"}, []v1alpha1.SecurityRule{
+		{
+			Name:  "block-403",
+			Match: []v1alpha1.RuleMatch{{Domains: []string{"*"}}},
+			Actions: &v1alpha1.SecurityRuleActions{
+				Block: &v1alpha1.BlockAction{StatusCode: 403},
+			},
+		},
+	}))
+
+	srv := newServerWithBlockOnly(t, store)
+	resps, err := srv.HandleRequestHeaders(
+		context.Background(),
+		makeRequestHeaders("api.example.com", "/x", "GET"),
+		makeAttrsWithLabels("default", "pod-x", testLabelsB64),
+	)
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	immediate := resps[0].Response.(*extProcPb.ProcessingResponse_ImmediateResponse)
+	if immediate.ImmediateResponse.Status.Code != envoyTypeV3.StatusCode(401) {
+		t.Errorf("expected 401 (alphabetically earlier profile), got %v", immediate.ImmediateResponse.Status.Code)
+	}
+}
+
+// TestHandleRequestHeaders_UnimplementedActionWarns verifies the orchestrator
+// passes through and logs (no error) when a rule declares an action that no
+// plugin handles (e.g. Bypass / Forwarding / IdentityInjection).
+func TestHandleRequestHeaders_UnimplementedActionWarns(t *testing.T) {
+	store := configstore.NewStore()
+	store.ProfileSet(newProfile("p1", "default", map[string]string{"app": "blocked"}, []v1alpha1.SecurityRule{
+		{
+			Name:  "bypass-rule",
+			Match: []v1alpha1.RuleMatch{{Domains: []string{"*"}}},
+			Actions: &v1alpha1.SecurityRuleActions{
+				Bypass:            true,
+				Forwarding:        &v1alpha1.ForwardingAction{TargetHost: "x"},
+				IdentityInjection: &v1alpha1.IdentityInjectionAction{},
+				SecurityCheck:     &v1alpha1.SecurityCheckAction{},
+				Mirroring:         &v1alpha1.MirroringAction{},
+				RateLimit:         &v1alpha1.RateLimitAction{},
+			},
+		},
+	}))
+	srv := newServerWithBlockOnly(t, store)
+	resps, err := srv.HandleRequestHeaders(
+		context.Background(),
+		makeRequestHeaders("api.example.com", "/x", "GET"),
+		makeAttrsWithLabels("default", "pod-x", testLabelsB64),
+	)
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if _, ok := resps[0].Response.(*extProcPb.ProcessingResponse_RequestHeaders); !ok {
+		t.Fatalf("expected pass-through, got %T", resps[0].Response)
+	}
+}
+
+// TestWarnUnimplementedActions_CoversAllBranches drives the helper directly
+// to ensure each branch (and the early-return paths) is hit. We use a
+// discard sink so test output stays clean.
+func TestWarnUnimplementedActions_CoversAllBranches(t *testing.T) {
+	logger := logr.Discard()
+	profile := &v1alpha1.SecurityProfile{}
+	profile.Name = "p"
+	profile.Namespace = "ns"
+
+	// nil actions — early return.
+	warnUnimplementedActions(logger, profile, &v1alpha1.SecurityRule{Name: "r"})
+
+	// Empty actions — no unimplemented entries, second early return.
+	warnUnimplementedActions(logger, profile, &v1alpha1.SecurityRule{
+		Name:    "r",
+		Actions: &v1alpha1.SecurityRuleActions{},
+	})
+
+	// All unimplemented set — full enumeration.
+	warnUnimplementedActions(logger, profile, &v1alpha1.SecurityRule{
+		Name: "r",
+		Actions: &v1alpha1.SecurityRuleActions{
+			Bypass:            true,
+			Forwarding:        &v1alpha1.ForwardingAction{},
+			IdentityInjection: &v1alpha1.IdentityInjectionAction{},
+			SecurityCheck:     &v1alpha1.SecurityCheckAction{},
+			Mirroring:         &v1alpha1.MirroringAction{},
+			RateLimit:         &v1alpha1.RateLimitAction{},
+		},
+	})
+}
+
+// TestResolveSandboxToken_AllBranches drives the small helper directly to
+// cover the env-var fallback, sentinel, parse-error, empty-accessToken, and
+// missing-clientId branches in one place.
+func TestResolveSandboxToken_AllBranches(t *testing.T) {
+	t.Setenv(defaultSandboxTokenEnvVar, "")
+
+	if tok := resolveSandboxToken(context.Background(), ""); tok != nil {
+		t.Errorf("expected nil token when neither attrs nor env are set")
+	}
+	if tok := resolveSandboxToken(context.Background(), "-"); tok != nil {
+		t.Errorf("expected nil for sentinel '-'")
+	}
+	if tok := resolveSandboxToken(context.Background(), "not-base64!!"); tok != nil {
+		t.Errorf("expected nil on parse error")
+	}
+
+	// Empty AccessToken — treated as no token.
+	emptyJSON := `{"requestId":"r","accessToken":"","sandboxClientId":"c"}`
+	if tok := resolveSandboxToken(context.Background(), base64.StdEncoding.EncodeToString([]byte(emptyJSON))); tok != nil {
+		t.Errorf("expected nil for empty accessToken")
+	}
+
+	// Missing sandboxClientId — should still return a token.
+	noCID := `{"requestId":"r","accessToken":"a","sandboxClientId":""}`
+	if tok := resolveSandboxToken(context.Background(), base64.StdEncoding.EncodeToString([]byte(noCID))); tok == nil {
+		t.Errorf("expected non-nil token even when sandboxClientId is empty")
+	}
+
+	// Env-var fallback path.
+	good := `{"requestId":"r","accessToken":"a","sandboxClientId":"c"}`
+	t.Setenv(defaultSandboxTokenEnvVar, base64.StdEncoding.EncodeToString([]byte(good)))
+	if tok := resolveSandboxToken(context.Background(), ""); tok == nil || tok.AccessToken != "a" {
+		t.Errorf("expected env fallback to populate token, got %+v", tok)
+	}
+}
+
+// TestPassThroughHandlers covers the trivial body / trailer / response stubs
+// so they show up in coverage and accidental regressions surface immediately.
+func TestPassThroughHandlers(t *testing.T) {
+	srv := newServerWithBlockOnly(t, configstore.NewStore())
+	ctx := context.Background()
+
+	if r, err := srv.HandleRequestBody(ctx, nil); err != nil || len(r) != 1 {
+		t.Errorf("HandleRequestBody: got len=%d err=%v", len(r), err)
+	}
+	if r, err := srv.HandleRequestTrailers(ctx, nil); err != nil || len(r) != 1 {
+		t.Errorf("HandleRequestTrailers: got len=%d err=%v", len(r), err)
+	}
+	if r, err := srv.HandleResponseHeaders(ctx, nil); err != nil || len(r) != 1 {
+		t.Errorf("HandleResponseHeaders: got len=%d err=%v", len(r), err)
+	}
+	if r, err := srv.HandleResponseBody(ctx, nil); err != nil || len(r) != 1 {
+		t.Errorf("HandleResponseBody: got len=%d err=%v", len(r), err)
+	}
+	if r, err := srv.HandleResponseTrailers(ctx, nil); err != nil || len(r) != 1 {
+		t.Errorf("HandleResponseTrailers: got len=%d err=%v", len(r), err)
+	}
+}
+
+// TestGetFallbackToken_EnvSet verifies the env-var fallback for the sandbox
+// token reader.
+func TestGetFallbackToken_EnvSet(t *testing.T) {
+	t.Setenv(defaultSandboxTokenEnvVar, "fallback-value")
+	if got := getFallbackToken(); got != "fallback-value" {
+		t.Errorf("expected fallback-value, got %q", got)
 	}
 }
 

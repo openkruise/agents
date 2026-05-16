@@ -25,10 +25,12 @@ import (
 	"strings"
 
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
+	"github.com/go-logr/logr"
 	structpb "google.golang.org/protobuf/types/known/structpb"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	v1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/traffix-extension/framework/credential"
 	"github.com/openkruise/agents/pkg/traffix-extension/plugins"
 	logutil "github.com/openkruise/agents/pkg/traffix-extension/util/logging"
@@ -139,6 +141,7 @@ func (s *Server) HandleRequestHeaders(ctx context.Context, headers *extProcPb.Ht
 			if !matcher.MatchesRule(reqInfo, *rule) || rule.Actions == nil {
 				continue
 			}
+			warnUnimplementedActions(logger, profile, rule)
 			for _, p := range s.plugins {
 				if mutated[p.Name()] {
 					continue
@@ -322,6 +325,46 @@ func extractHeaderMap(headers *extProcPb.HttpHeaders) map[string]string {
 		}
 	}
 	return result
+}
+
+// warnUnimplementedActions logs a warning for each action type that is
+// declared on a matched rule but does not yet have a corresponding plugin
+// implementation. The request is still passed through; the warning makes
+// it visible that the policy author wrote a rule the data plane cannot
+// honor (Bypass, Forwarding, IdentityInjection, SecurityCheck, Mirroring,
+// RateLimit are reserved for future plugins).
+func warnUnimplementedActions(logger logr.Logger, profile *v1alpha1.SecurityProfile, rule *v1alpha1.SecurityRule) {
+	a := rule.Actions
+	if a == nil {
+		return
+	}
+	var unimplemented []string
+	if a.Bypass {
+		unimplemented = append(unimplemented, "bypass")
+	}
+	if a.Forwarding != nil {
+		unimplemented = append(unimplemented, "forwarding")
+	}
+	if a.IdentityInjection != nil {
+		unimplemented = append(unimplemented, "identityInjection")
+	}
+	if a.SecurityCheck != nil {
+		unimplemented = append(unimplemented, "securityCheck")
+	}
+	if a.Mirroring != nil {
+		unimplemented = append(unimplemented, "mirroring")
+	}
+	if a.RateLimit != nil {
+		unimplemented = append(unimplemented, "rateLimit")
+	}
+	if len(unimplemented) == 0 {
+		return
+	}
+	logger.V(logutil.DEFAULT).Info(
+		"SecurityProfile rule declares actions that are not yet implemented; ignoring",
+		"profile", profile.Namespace+"/"+profile.Name,
+		"rule", rule.Name,
+		"actions", unimplemented)
 }
 
 // passThroughResponse returns a simple passthrough response with no header modifications.

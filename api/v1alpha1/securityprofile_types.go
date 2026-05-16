@@ -30,6 +30,22 @@ const (
 	PathMatchTypeRegex  PathMatchType = "Regex"
 )
 
+// StringMatchType enumerates the matching strategy used by header- and
+// query-parameter value matchers.
+// +kubebuilder:validation:Enum=Exact;Prefix;Regex
+type StringMatchType string
+
+const (
+	// StringMatchTypeExact requires the value to equal Value verbatim.
+	StringMatchTypeExact StringMatchType = "Exact"
+	// StringMatchTypePrefix requires the value to start with Value.
+	StringMatchTypePrefix StringMatchType = "Prefix"
+	// StringMatchTypeRegex evaluates Value as an RE2 regular expression
+	// against the request value. An invalid regex fails closed (the rule
+	// does not fire).
+	StringMatchTypeRegex StringMatchType = "Regex"
+)
+
 // FailStrategy controls behaviour when an external service call fails or
 // when the action encounters an error.
 // +kubebuilder:validation:Enum=Allow;Block;Ignore
@@ -59,6 +75,9 @@ type PathMatch struct {
 
 // HeaderMatch filters a request by a single header's value.
 // Multiple HeaderMatch entries in one RuleMatch are ANDed.
+//
+// Type defaults to Exact. Use Prefix to match a leading substring (common
+// for "Bearer ..." tokens) or Regex for full RE2 power.
 type HeaderMatch struct {
 	// Name is the header name (case-insensitive). Restricted to a safe
 	// subset of RFC 7230 tchar characters.
@@ -66,20 +85,50 @@ type HeaderMatch struct {
 	// +kubebuilder:validation:MaxLength=256
 	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9!#$%&'*+\-.^_|~]+$`
 	Name string `json:"name"`
-	// Pattern is an RE2 regex evaluated against the header value.
+	// Type selects the matching strategy. Defaults to Exact.
+	// +kubebuilder:default:=Exact
+	Type StringMatchType `json:"type,omitempty"`
+	// Value is the match operand. For Exact/Prefix it is compared
+	// verbatim; for Regex it is interpreted as an RE2 expression.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=512
-	Pattern string `json:"pattern"`
+	Value string `json:"value"`
+}
+
+// QueryParamMatch filters a request by a single URL query-parameter value.
+// Multiple QueryParamMatch entries in one RuleMatch are ANDed.
+//
+// When the same key appears multiple times in the URL (e.g.
+// "?tag=a&tag=b"), only the FIRST occurrence is matched. Type defaults
+// to Exact.
+type QueryParamMatch struct {
+	// Name is the query parameter key. Comparison is case-sensitive per
+	// RFC 3986. Restricted to a safe subset of RFC 3986 unreserved /
+	// sub-delims characters; brackets are permitted to support PHP-style
+	// array keys (e.g. "filter[type]").
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9!$&'()*+,\-./:;=?@_~\[\]]+$`
+	Name string `json:"name"`
+	// Type selects the matching strategy. Defaults to Exact.
+	// +kubebuilder:default:=Exact
+	Type StringMatchType `json:"type,omitempty"`
+	// Value is the match operand. For Exact/Prefix it is compared
+	// verbatim against the percent-decoded query value; for Regex it is
+	// interpreted as an RE2 expression.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=512
+	Value string `json:"value"`
 }
 
 // RuleMatch is a conjunctive match condition. Multiple RuleMatch entries
 // inside a rule's match list are ORed; fields inside one RuleMatch are ANDed.
 //
-// Domains is required. Paths/Methods/Headers further restrict the match.
-// Methods MUST appear together with Paths (standalone methods filters have
-// unbounded scope).
+// Domains is required. Paths / Methods / Ports / Headers / QueryParams
+// further restrict the match. Methods MUST appear together with Paths
+// (standalone methods filters have unbounded scope).
 //
-// +kubebuilder:validation:XValidation:rule="size(self.methods) == 0 || size(self.paths) > 0",message="methods requires paths to be set"
+// +kubebuilder:validation:XValidation:rule="!has(self.methods) || size(self.methods) == 0 || (has(self.paths) && size(self.paths) > 0)",message="methods requires paths to be set"
 type RuleMatch struct {
 	// Domains lists target host names. Supports "*" (any domain) and
 	// "*.example.com" wildcard prefixes.
@@ -89,16 +138,33 @@ type RuleMatch struct {
 	// docs/components/traffix-extension.md.
 	// +kubebuilder:validation:MinItems=1
 	Domains []string `json:"domains"`
-	// Paths lists URL path matches; multiple entries are ORed.
+	// Paths lists URL path matches; multiple entries are ORed. The path
+	// is compared without any "?query" suffix — write QueryParams matches
+	// to constrain query parameters.
 	// +optional
 	Paths []PathMatch `json:"paths,omitempty"`
 	// Methods filters by HTTP method. Only valid when Paths is also set.
 	// +optional
 	// +kubebuilder:validation:items:Enum=GET;HEAD;POST;PUT;PATCH;DELETE;OPTIONS;CONNECT;TRACE
 	Methods []string `json:"methods,omitempty"`
+	// Ports filters by the port suffix in the request authority (e.g. the
+	// "8443" in "api.example.com:8443"). Multiple entries are ORed. A
+	// request without an explicit port (such as plain "api.example.com",
+	// where the client relied on the scheme default) does NOT match a
+	// non-empty Ports list — write a separate rule without Ports if you
+	// also want to match the default port.
+	// +optional
+	// +kubebuilder:validation:items:Minimum=1
+	// +kubebuilder:validation:items:Maximum=65535
+	Ports []int32 `json:"ports,omitempty"`
 	// Headers lists header matches; multiple entries are ANDed.
 	// +optional
 	Headers []HeaderMatch `json:"headers,omitempty"`
+	// QueryParams lists URL query-parameter matches; multiple entries are
+	// ANDed. Matched against the percent-decoded value of the FIRST
+	// occurrence of each key.
+	// +optional
+	QueryParams []QueryParamMatch `json:"queryParams,omitempty"`
 }
 
 // BlockAction configures the response returned to the client when a
@@ -368,7 +434,12 @@ type SecurityRule struct {
 // SecurityProfileSpec describes an L7 security profile applied to the egress
 // traffic of the selected Pods.
 type SecurityProfileSpec struct {
-	// Selector chooses the Pods this profile applies to.
+	// Selector chooses the Pods this profile applies to. Standard
+	// LabelSelector semantics: an EMPTY selector (no matchLabels and no
+	// matchExpressions) matches EVERY pod in the same namespace, in line
+	// with NetworkPolicy / Istio AuthorizationPolicy. Use a deliberate
+	// matchExpression (e.g. `key: __none__, operator: DoesNotExist`) to
+	// express "match nothing".
 	Selector metav1.LabelSelector `json:"selector"`
 	// Rules is the ordered rule chain. Semantics are Default Continue:
 	// all matching rules' actions run in order until a terminal action

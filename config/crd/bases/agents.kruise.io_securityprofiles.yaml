@@ -23,7 +23,7 @@ spec:
           SecurityProfile defines the L7 security/compliance profile for Sandbox
           AI Agent egress HTTP/HTTPS traffic.
 
-          See docs/design/sandboxSecurityProfile.md for the full semantic model.
+          See docs/components/traffix-extension.md for the full semantic model.
         properties:
           apiVersion:
             description: |-
@@ -340,9 +340,9 @@ spec:
                           RuleMatch is a conjunctive match condition. Multiple RuleMatch entries
                           inside a rule's match list are ORed; fields inside one RuleMatch are ANDed.
 
-                          Domains is required. Paths/Methods/Headers further restrict the match.
-                          Methods MUST appear together with Paths (standalone methods filters have
-                          unbounded scope).
+                          Domains is required. Paths / Methods / Ports / Headers / QueryParams
+                          further restrict the match. Methods MUST appear together with Paths
+                          (standalone methods filters have unbounded scope).
                         properties:
                           domains:
                             description: |-
@@ -351,7 +351,7 @@ spec:
 
                               CAUTION: wildcard and specific domains can both match the same request
                               under Default Continue semantics, so rule ordering matters. See
-                              docs/design/sandboxSecurityProfile.md §5.3.
+                              docs/components/traffix-extension.md.
                             items:
                               type: string
                             minItems: 1
@@ -363,6 +363,9 @@ spec:
                               description: |-
                                 HeaderMatch filters a request by a single header's value.
                                 Multiple HeaderMatch entries in one RuleMatch are ANDed.
+
+                                Type defaults to Exact. Use Prefix to match a leading substring (common
+                                for "Bearer ..." tokens) or Regex for full RE2 power.
                               properties:
                                 name:
                                   description: |-
@@ -372,15 +375,25 @@ spec:
                                   minLength: 1
                                   pattern: ^[A-Za-z0-9!#$%&'*+\-.^_|~]+$
                                   type: string
-                                pattern:
-                                  description: Pattern is an RE2 regex evaluated against
-                                    the header value.
+                                type:
+                                  default: Exact
+                                  description: Type selects the matching strategy.
+                                    Defaults to Exact.
+                                  enum:
+                                  - Exact
+                                  - Prefix
+                                  - Regex
+                                  type: string
+                                value:
+                                  description: |-
+                                    Value is the match operand. For Exact/Prefix it is compared
+                                    verbatim; for Regex it is interpreted as an RE2 expression.
                                   maxLength: 512
                                   minLength: 1
                                   type: string
                               required:
                               - name
-                              - pattern
+                              - value
                               type: object
                             type: array
                           methods:
@@ -400,8 +413,10 @@ spec:
                               type: string
                             type: array
                           paths:
-                            description: Paths lists URL path matches; multiple entries
-                              are ORed.
+                            description: |-
+                              Paths lists URL path matches; multiple entries are ORed. The path
+                              is compared without any "?query" suffix — write QueryParams matches
+                              to constrain query parameters.
                             items:
                               description: PathMatch specifies how to match the request
                                 URL path.
@@ -427,12 +442,73 @@ spec:
                               - value
                               type: object
                             type: array
+                          ports:
+                            description: |-
+                              Ports filters by the port suffix in the request authority (e.g. the
+                              "8443" in "api.example.com:8443"). Multiple entries are ORed. A
+                              request without an explicit port (such as plain "api.example.com",
+                              where the client relied on the scheme default) does NOT match a
+                              non-empty Ports list — write a separate rule without Ports if you
+                              also want to match the default port.
+                            items:
+                              format: int32
+                              maximum: 65535
+                              minimum: 1
+                              type: integer
+                            type: array
+                          queryParams:
+                            description: |-
+                              QueryParams lists URL query-parameter matches; multiple entries are
+                              ANDed. Matched against the percent-decoded value of the FIRST
+                              occurrence of each key.
+                            items:
+                              description: |-
+                                QueryParamMatch filters a request by a single URL query-parameter value.
+                                Multiple QueryParamMatch entries in one RuleMatch are ANDed.
+
+                                When the same key appears multiple times in the URL (e.g.
+                                "?tag=a&tag=b"), only the FIRST occurrence is matched. Type defaults
+                                to Exact.
+                              properties:
+                                name:
+                                  description: |-
+                                    Name is the query parameter key. Comparison is case-sensitive per
+                                    RFC 3986. Restricted to a safe subset of RFC 3986 unreserved /
+                                    sub-delims characters; brackets are permitted to support PHP-style
+                                    array keys (e.g. "filter[type]").
+                                  maxLength: 256
+                                  minLength: 1
+                                  pattern: ^[A-Za-z0-9!$&'()*+,\-./:;=?@_~\[\]]+$
+                                  type: string
+                                type:
+                                  default: Exact
+                                  description: Type selects the matching strategy.
+                                    Defaults to Exact.
+                                  enum:
+                                  - Exact
+                                  - Prefix
+                                  - Regex
+                                  type: string
+                                value:
+                                  description: |-
+                                    Value is the match operand. For Exact/Prefix it is compared
+                                    verbatim against the percent-decoded query value; for Regex it is
+                                    interpreted as an RE2 expression.
+                                  maxLength: 512
+                                  minLength: 1
+                                  type: string
+                              required:
+                              - name
+                              - value
+                              type: object
+                            type: array
                         required:
                         - domains
                         type: object
                         x-kubernetes-validations:
                         - message: methods requires paths to be set
-                          rule: size(self.methods) == 0 || size(self.paths) > 0
+                          rule: '!has(self.methods) || size(self.methods) == 0 ||
+                            (has(self.paths) && size(self.paths) > 0)'
                       minItems: 1
                       type: array
                     name:
@@ -450,7 +526,13 @@ spec:
                 - name
                 x-kubernetes-list-type: map
               selector:
-                description: Selector chooses the Pods this profile applies to.
+                description: |-
+                  Selector chooses the Pods this profile applies to. Standard
+                  LabelSelector semantics: an EMPTY selector (no matchLabels and no
+                  matchExpressions) matches EVERY pod in the same namespace, in line
+                  with NetworkPolicy / Istio AuthorizationPolicy. Use a deliberate
+                  matchExpression (e.g. `key: __none__, operator: DoesNotExist`) to
+                  express "match nothing".
                 properties:
                   matchExpressions:
                     description: matchExpressions is a list of label selector requirements.

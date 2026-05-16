@@ -242,3 +242,45 @@ func fillAndVerifyCapacity(t *testing.T, c *Cache, maxSize int) {
 		t.Errorf("expected len %d after filling, got %d", expectedLen, c.Len())
 	}
 }
+
+// TestNewCacheFromEnv covers env-driven configuration including invalid
+// values (which should fall back to defaults) and valid overrides.
+func TestNewCacheFromEnv(t *testing.T) {
+	t.Setenv(ttlEnvVar, "")
+	t.Setenv(maxSizeEnvVar, "")
+	c1 := NewCacheFromEnv()
+	if c1.ttl != defaultTTL {
+		t.Errorf("expected default TTL, got %v", c1.ttl)
+	}
+
+	t.Setenv(ttlEnvVar, "10m")
+	t.Setenv(maxSizeEnvVar, "500")
+	c2 := NewCacheFromEnv()
+	if c2.ttl != 10*time.Minute {
+		t.Errorf("expected 10m TTL, got %v", c2.ttl)
+	}
+
+	// Invalid values should be ignored.
+	t.Setenv(ttlEnvVar, "not-a-duration")
+	t.Setenv(maxSizeEnvVar, "abc")
+	c3 := NewCacheFromEnv()
+	if c3.ttl != defaultTTL {
+		t.Errorf("expected default TTL when env is bad, got %v", c3.ttl)
+	}
+}
+
+func TestConfigInfo(t *testing.T) {
+	t.Setenv(ttlEnvVar, "5m")
+	t.Setenv(maxSizeEnvVar, "42")
+	if got := ConfigInfo(); got != "TTL=5m0s, maxSize=42" {
+		t.Errorf("unexpected ConfigInfo: %q", got)
+	}
+
+	t.Setenv(ttlEnvVar, "")
+	t.Setenv(maxSizeEnvVar, "")
+	got := ConfigInfo()
+	// Defaults: TTL=3h, maxSize=10000
+	if got == "" {
+		t.Errorf("expected non-empty ConfigInfo with defaults")
+	}
+}
