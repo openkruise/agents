@@ -289,11 +289,23 @@ func TestMountProvider_GenerateNodePublishVolumeRequest_Idempotency(t *testing.T
 	secondResult, err := m.GenerateCSINodePublishVolumeRequest(ctx, targetPath, pv, false, secret)
 	require.NoError(t, err)
 
+	// The VolumeId must be stable across calls: NodePublishVolume is idempotent
+	// on (volume_id, target_path), so a resume re-mount of an already-published
+	// volume must not look like a brand-new publish to the driver.
+	assert.Equal(t, firstResult.VolumeId, secondResult.VolumeId,
+		"VolumeId must be deterministic for the same pv+target path")
 	assert.Equal(t, firstResult.TargetPath, secondResult.TargetPath)
 	assert.Equal(t, firstResult.Readonly, secondResult.Readonly)
 	assert.Equal(t, firstResult.VolumeContext, secondResult.VolumeContext)
 	assert.Equal(t, firstResult.Secrets, secondResult.Secrets)
 	assert.Equal(t, firstResult.VolumeCapability, secondResult.VolumeCapability)
+
+	// A different target path for the same PV must yield a different VolumeId so
+	// multi-mount configurations do not collide.
+	otherResult, err := m.GenerateCSINodePublishVolumeRequest(ctx, targetPath+"-2", pv, false, secret)
+	require.NoError(t, err)
+	assert.NotEqual(t, firstResult.VolumeId, otherResult.VolumeId,
+		"different target paths must produce different VolumeIds")
 }
 
 func BenchmarkMountProvider_GenerateNodePublishVolumeRequest(b *testing.B) {
