@@ -32,8 +32,8 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	logutil "github.com/openkruise/agents/pkg/traffix-extension/util/logging"
 	"github.com/openkruise/agents/pkg/traffix-extension/framework/tokencache"
+	logutil "github.com/openkruise/agents/pkg/traffix-extension/util/logging"
 )
 
 const (
@@ -88,8 +88,11 @@ func NewClientWithCache(cache *tokencache.Cache) *Client {
 	return c
 }
 
-// buildHTTPClient constructs an HTTP client, preferring mTLS if client
-// certificate and key are available, falling back to plain HTTPS otherwise.
+// buildHTTPClient constructs an HTTP client, preferring mTLS when client
+// certificate and key files are available. When mTLS material is missing
+// or invalid, the client falls back to a default-TLS client that still
+// validates the server certificate against the system trust store — it
+// just does not present a client certificate.
 func buildHTTPClient() *http.Client {
 	certPath := os.Getenv(clientCertEnvVar)
 	if certPath == "" {
@@ -107,8 +110,7 @@ func buildHTTPClient() *http.Client {
 	if client, err := newMTLSClient(certPath, keyPath, caPath); err == nil {
 		return client
 	}
-	// mTLS failed (certs missing or invalid) — fall back to plain HTTPS.
-	return newPlainHTTPSClient()
+	return newDefaultTLSClient()
 }
 
 // newMTLSClient loads a client certificate, key, and CA cert, then returns an
@@ -158,14 +160,15 @@ func loadCACertPool(caCertPath string) (*x509.CertPool, error) {
 	return caCertPool, nil
 }
 
-// newPlainHTTPSClient returns an HTTP client with a basic TLS transport
-// (no client certificate). Used as a fallback when mTLS certs are unavailable.
-func newPlainHTTPSClient() *http.Client {
+// newDefaultTLSClient returns an HTTP client with a default TLS transport
+// (no client certificate). Server certificates are verified against the
+// system trust store; TLS 1.2 is the minimum version. This is the fallback
+// used when mTLS material is unavailable — it does NOT skip verification.
+func newDefaultTLSClient() *http.Client {
 	return &http.Client{
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{
-				// In production, configure proper CA verification.
-				InsecureSkipVerify: true, //nolint:gosec
+				MinVersion: tls.VersionTLS12,
 			},
 		},
 	}

@@ -137,7 +137,7 @@ func generateCACert(t *testing.T) (caCertPEM []byte) {
 	return caCertPEM
 }
 
-func TestBuildHTTPClient_NoCerts_FallsBackToPlainHTTPS(t *testing.T) {
+func TestBuildHTTPClient_NoCerts_FallsBackToDefaultTLS(t *testing.T) {
 	// Ensure env vars are unset so no cert paths are provided.
 	t.Setenv(clientCertEnvVar, "")
 	t.Setenv(clientKeyEnvVar, "")
@@ -152,7 +152,7 @@ func TestBuildHTTPClient_NoCerts_FallsBackToPlainHTTPS(t *testing.T) {
 	}
 }
 
-func TestBuildHTTPClient_MissingCertPath_FallsBackToPlainHTTPS(t *testing.T) {
+func TestBuildHTTPClient_MissingCertPath_FallsBackToDefaultTLS(t *testing.T) {
 	t.Setenv(clientCertEnvVar, "")
 	t.Setenv(clientKeyEnvVar, "/nonexistent/key.pem")
 
@@ -162,7 +162,7 @@ func TestBuildHTTPClient_MissingCertPath_FallsBackToPlainHTTPS(t *testing.T) {
 	}
 }
 
-func TestBuildHTTPClient_MissingKeyPath_FallsBackToPlainHTTPS(t *testing.T) {
+func TestBuildHTTPClient_MissingKeyPath_FallsBackToDefaultTLS(t *testing.T) {
 	t.Setenv(clientCertEnvVar, "/nonexistent/cert.pem")
 	t.Setenv(clientKeyEnvVar, "")
 
@@ -172,7 +172,7 @@ func TestBuildHTTPClient_MissingKeyPath_FallsBackToPlainHTTPS(t *testing.T) {
 	}
 }
 
-func TestBuildHTTPClient_NonexistentPaths_FallsBackToPlainHTTPS(t *testing.T) {
+func TestBuildHTTPClient_NonexistentPaths_FallsBackToDefaultTLS(t *testing.T) {
 	t.Setenv(clientCertEnvVar, "/nonexistent/cert.pem")
 	t.Setenv(clientKeyEnvVar, "/nonexistent/key.pem")
 
@@ -223,7 +223,7 @@ func TestBuildHTTPClient_ValidCerts_ReturnsMTLSClient(t *testing.T) {
 	}
 }
 
-func TestBuildHTTPClient_InvalidCertData_FallsBackToPlainHTTPS(t *testing.T) {
+func TestBuildHTTPClient_InvalidCertData_FallsBackToDefaultTLS(t *testing.T) {
 	certFile, err := os.CreateTemp("", "bad-cert-*.pem")
 	if err != nil {
 		t.Fatalf("failed to create temp cert file: %v", err)
@@ -249,7 +249,7 @@ func TestBuildHTTPClient_InvalidCertData_FallsBackToPlainHTTPS(t *testing.T) {
 	}
 }
 
-func TestBuildHTTPClient_InvalidCAData_FallsBackToPlainHTTPS(t *testing.T) {
+func TestBuildHTTPClient_InvalidCAData_FallsBackToDefaultTLS(t *testing.T) {
 	certPEM, keyPEM := generateSelfSignedCert(t)
 
 	certFile, _ := os.CreateTemp("", "valid-cert.pem")
