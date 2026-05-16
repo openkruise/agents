@@ -188,10 +188,11 @@ func FindContainer(name string, containers []corev1.Container) *corev1.Container
 func LockSandbox(sbx client.Object, lock string, owner string) {
 	annotations := sbx.GetAnnotations()
 	if annotations == nil {
-		annotations = make(map[string]string, 2)
+		annotations = make(map[string]string, 3)
 	}
 	annotations[agentsv1alpha1.AnnotationLock] = lock
 	annotations[agentsv1alpha1.AnnotationOwner] = owner
+	annotations[agentsv1alpha1.AnnotationLockTimestamp] = time.Now().Format(time.RFC3339)
 	sbx.SetAnnotations(annotations)
 }
 
