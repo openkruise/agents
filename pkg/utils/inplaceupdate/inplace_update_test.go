@@ -2620,3 +2620,391 @@ func TestInPlaceUpdateControl_Update_ResizeBeforePatch(t *testing.T) {
 			resizeIdx, patchIdx, callOrder)
 	}
 }
+
+func TestResourceListContains(t *testing.T) {
+	tests := []struct {
+		name    string
+		actual  corev1.ResourceList
+		desired corev1.ResourceList
+		expect  bool
+	}{
+		{
+			name:    "both nil",
+			actual:  nil,
+			desired: nil,
+			expect:  true,
+		},
+		{
+			name: "desired nil actual not nil",
+			actual: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("1"),
+				corev1.ResourceMemory: resource.MustParse("1Gi"),
+			},
+			desired: nil,
+			expect:  true,
+		},
+		{
+			name:   "desired not nil actual nil",
+			actual: nil,
+			desired: corev1.ResourceList{
+				corev1.ResourceCPU: resource.MustParse("1"),
+			},
+			expect: false,
+		},
+		{
+			name: "exact match",
+			actual: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("2"),
+				corev1.ResourceMemory: resource.MustParse("1Gi"),
+			},
+			desired: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("2"),
+				corev1.ResourceMemory: resource.MustParse("1Gi"),
+			},
+			expect: true,
+		},
+		{
+			name: "actual has extra resources",
+			actual: corev1.ResourceList{
+				corev1.ResourceCPU:              resource.MustParse("1"),
+				corev1.ResourceMemory:           resource.MustParse("1Gi"),
+				corev1.ResourceEphemeralStorage: resource.MustParse("30Gi"),
+			},
+			desired: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("1"),
+				corev1.ResourceMemory: resource.MustParse("1Gi"),
+			},
+			expect: true,
+		},
+		{
+			name: "different unit same value cpu",
+			actual: corev1.ResourceList{
+				corev1.ResourceCPU: resource.MustParse("1"),
+			},
+			desired: corev1.ResourceList{
+				corev1.ResourceCPU: resource.MustParse("1000m"),
+			},
+			expect: true,
+		},
+		{
+			name: "different unit same value memory",
+			actual: corev1.ResourceList{
+				corev1.ResourceMemory: resource.MustParse("1Gi"),
+			},
+			desired: corev1.ResourceList{
+				corev1.ResourceMemory: resource.MustParse("1024Mi"),
+			},
+			expect: true,
+		},
+		{
+			name: "different value",
+			actual: corev1.ResourceList{
+				corev1.ResourceCPU: resource.MustParse("1"),
+			},
+			desired: corev1.ResourceList{
+				corev1.ResourceCPU: resource.MustParse("2"),
+			},
+			expect: false,
+		},
+		{
+			name: "desired has resource actual missing",
+			actual: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("1"),
+				corev1.ResourceMemory: resource.MustParse("1Gi"),
+			},
+			desired: corev1.ResourceList{
+				corev1.ResourceCPU:                       resource.MustParse("1"),
+				corev1.ResourceMemory:                    resource.MustParse("1Gi"),
+				corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("1"),
+			},
+			expect: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := resourceListContains(tt.actual, tt.desired)
+			if got != tt.expect {
+				t.Errorf("resourceListContains() = %v, want %v", got, tt.expect)
+			}
+		})
+	}
+}
+
+func TestResourcesEqual(t *testing.T) {
+	tests := []struct {
+		name    string
+		desired corev1.ResourceRequirements
+		actual  corev1.ResourceRequirements
+		expect  bool
+	}{
+		{
+			name: "identical resources",
+			desired: corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("1"),
+					corev1.ResourceMemory: resource.MustParse("1Gi"),
+				},
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("500m"),
+					corev1.ResourceMemory: resource.MustParse("512Mi"),
+				},
+			},
+			actual: corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("1"),
+					corev1.ResourceMemory: resource.MustParse("1Gi"),
+				},
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("500m"),
+					corev1.ResourceMemory: resource.MustParse("512Mi"),
+				},
+			},
+			expect: true,
+		},
+		{
+			name: "pod has extra ephemeral-storage in requests",
+			desired: corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("1"),
+					corev1.ResourceMemory: resource.MustParse("1Gi"),
+				},
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("1"),
+					corev1.ResourceMemory: resource.MustParse("1Gi"),
+				},
+			},
+			actual: corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("1"),
+					corev1.ResourceMemory: resource.MustParse("1Gi"),
+				},
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU:              resource.MustParse("1"),
+					corev1.ResourceMemory:           resource.MustParse("1Gi"),
+					corev1.ResourceEphemeralStorage: resource.MustParse("30Gi"),
+				},
+			},
+			expect: true,
+		},
+		{
+			name: "different cpu unit same value",
+			desired: corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("1000m"),
+				},
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("1000m"),
+				},
+			},
+			actual: corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("1"),
+				},
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("1"),
+				},
+			},
+			expect: true,
+		},
+		{
+			name: "cpu actually different",
+			desired: corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("2"),
+				},
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("2"),
+				},
+			},
+			actual: corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("1"),
+				},
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("1"),
+				},
+			},
+			expect: false,
+		},
+		{
+			name: "limits differ",
+			desired: corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("2"),
+					corev1.ResourceMemory: resource.MustParse("2Gi"),
+				},
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("1"),
+				},
+			},
+			actual: corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("1"),
+					corev1.ResourceMemory: resource.MustParse("1Gi"),
+				},
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("1"),
+				},
+			},
+			expect: false,
+		},
+		{
+			name:    "both empty",
+			desired: corev1.ResourceRequirements{},
+			actual:  corev1.ResourceRequirements{},
+			expect:  true,
+		},
+		{
+			name: "desired has limits actual missing limits",
+			desired: corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("1"),
+				},
+			},
+			actual: corev1.ResourceRequirements{},
+			expect: false,
+		},
+		{
+			name: "pod has extra limits sandbox fewer",
+			desired: corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("1"),
+					corev1.ResourceMemory: resource.MustParse("1Gi"),
+				},
+			},
+			actual: corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU:                       resource.MustParse("1"),
+					corev1.ResourceMemory:                    resource.MustParse("1Gi"),
+					corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("1"),
+				},
+			},
+			expect: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := resourcesEqual(tt.desired, tt.actual)
+			if got != tt.expect {
+				t.Errorf("resourcesEqual() = %v, want %v", got, tt.expect)
+			}
+		})
+	}
+}
+
+func TestDefaultGenerateResizeSubresourceBody_NoResizeWhenExtraOrUnitDiff(t *testing.T) {
+	tests := []struct {
+		name string
+		box  *agentsv1alpha1.Sandbox
+		pod  *corev1.Pod
+	}{
+		{
+			name: "should NOT resize when pod has extra ephemeral-storage",
+			box: &agentsv1alpha1.Sandbox{
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name:  "main",
+										Image: "busybox",
+										Resources: corev1.ResourceRequirements{
+											Limits: corev1.ResourceList{
+												corev1.ResourceCPU:    resource.MustParse("1"),
+												corev1.ResourceMemory: resource.MustParse("1Gi"),
+											},
+											Requests: corev1.ResourceList{
+												corev1.ResourceCPU:    resource.MustParse("1"),
+												corev1.ResourceMemory: resource.MustParse("1Gi"),
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "pod-1", Namespace: "default", ResourceVersion: "1"},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:  "main",
+							Image: "busybox",
+							Resources: corev1.ResourceRequirements{
+								Limits: corev1.ResourceList{
+									corev1.ResourceCPU:    resource.MustParse("1"),
+									corev1.ResourceMemory: resource.MustParse("1Gi"),
+								},
+								Requests: corev1.ResourceList{
+									corev1.ResourceCPU:              resource.MustParse("1"),
+									corev1.ResourceMemory:           resource.MustParse("1Gi"),
+									corev1.ResourceEphemeralStorage: resource.MustParse("30Gi"),
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "should NOT resize when units differ but values equal",
+			box: &agentsv1alpha1.Sandbox{
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name:  "main",
+										Image: "busybox",
+										Resources: corev1.ResourceRequirements{
+											Limits: corev1.ResourceList{
+												corev1.ResourceCPU: resource.MustParse("1000m"),
+											},
+											Requests: corev1.ResourceList{
+												corev1.ResourceCPU: resource.MustParse("1000m"),
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "pod-2", Namespace: "default", ResourceVersion: "1"},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:  "main",
+							Image: "busybox",
+							Resources: corev1.ResourceRequirements{
+								Limits: corev1.ResourceList{
+									corev1.ResourceCPU: resource.MustParse("1"),
+								},
+								Requests: corev1.ResourceList{
+									corev1.ResourceCPU: resource.MustParse("1"),
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := DefaultGenerateResizeSubresourceBody(InPlaceUpdateOptions{
+				Box: tt.box,
+				Pod: tt.pod,
+			})
+			if result != nil {
+				t.Errorf("expected nil (no resize needed), but got a resize body")
+			}
+		})
+	}
+}
