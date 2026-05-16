@@ -51,7 +51,7 @@ func GetSandboxState(sbx *agentsv1alpha1.Sandbox) (state string, reason string) 
 	if sbx.Spec.ShutdownTime != nil && time.Since(sbx.Spec.ShutdownTime.Time) > 0 {
 		return agentsv1alpha1.SandboxStateDead, "ShutdownTimeReached"
 	}
-	if sbx.Status.Phase == agentsv1alpha1.SandboxPending {
+	if sbx.Status.Phase == agentsv1alpha1.SandboxPending || sbx.Status.Phase == "" {
 		return agentsv1alpha1.SandboxStateCreating, "ResourcePending"
 	}
 	if sbx.Status.Phase == agentsv1alpha1.SandboxSucceeded {
@@ -82,9 +82,12 @@ func GetSandboxState(sbx *agentsv1alpha1.Sandbox) (state string, reason string) 
 					return agentsv1alpha1.SandboxStateDead, "RunningResourceClaimedButNotReady"
 				}
 			}
+		} else if sbx.Status.Phase == agentsv1alpha1.SandboxPausing || sbx.Status.Phase == agentsv1alpha1.SandboxPaused || sbx.Status.Phase == agentsv1alpha1.SandboxResuming {
+			return agentsv1alpha1.SandboxStatePaused, "PausedOrResumingResourceClaimed"
+		} else if sbx.Status.Phase == agentsv1alpha1.SandboxUpgrading {
+			return agentsv1alpha1.SandboxStateRunning, "UpgradingResourceClaimed"
 		} else {
-			// Paused and Resuming phases are both treated as paused state
-			return agentsv1alpha1.SandboxStatePaused, "NotRunningResourceClaimed"
+			return agentsv1alpha1.SandboxStateDead, "UnknownPhaseResourceClaimed"
 		}
 	}
 }
@@ -118,8 +121,8 @@ func IsSandboxPausable(sbx *agentsv1alpha1.Sandbox) (bool, string) {
 		}
 	}
 	switch sbx.Status.Phase {
-	case agentsv1alpha1.SandboxRunning, agentsv1alpha1.SandboxPaused:
-		return true, "SandboxIsRunningOrPaused"
+	case agentsv1alpha1.SandboxPending, agentsv1alpha1.SandboxRunning, agentsv1alpha1.SandboxPausing, agentsv1alpha1.SandboxPaused, agentsv1alpha1.SandboxResuming:
+		return true, "SandboxIsPausablePhase"
 	default:
 		return false, "SandboxPhaseNotAllowed"
 	}

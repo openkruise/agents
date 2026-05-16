@@ -165,11 +165,12 @@ func (r *commonControl) EnsureSandboxPaused(ctx context.Context, args EnsureFunc
 		utils.SetSandboxCondition(newStatus, *cond)
 		klog.InfoS("Paused condition initialized", "sandbox", klog.KObj(box))
 	} else if cond.Status == metav1.ConditionTrue {
+		newStatus.Phase = agentsv1alpha1.SandboxPaused
 		klog.InfoS("Paused condition is already true", "sandbox", klog.KObj(box))
 		return nil
 	}
 
-	// The paused phase sets condition ready to false.
+	// The pausing phase sets condition ready to false.
 	if rCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionReady)); rCond != nil && rCond.Status == metav1.ConditionTrue {
 		rCond.Status = metav1.ConditionFalse
 		rCond.LastTransitionTime = metav1.Now()
@@ -183,6 +184,7 @@ func (r *commonControl) EnsureSandboxPaused(ctx context.Context, args EnsureFunc
 		cond.Status = metav1.ConditionTrue
 		cond.LastTransitionTime = metav1.Now()
 		utils.SetSandboxCondition(newStatus, *cond)
+		newStatus.Phase = agentsv1alpha1.SandboxPaused
 		klog.InfoS("Pod deletion completed, pause phase completed", "sandbox", klog.KObj(box))
 		return nil
 	}

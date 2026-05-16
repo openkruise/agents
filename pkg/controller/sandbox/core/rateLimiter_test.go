@@ -147,6 +147,11 @@ func TestIsCreatingSandbox(t *testing.T) {
 			expected: false,
 		},
 		{
+			name:     "phase Pausing is not creating",
+			box:      newSandbox("default", "box1", agentsv1alpha1.SandboxPausing),
+			expected: false,
+		},
+		{
 			name:     "phase Paused is not creating",
 			box:      newSandbox("default", "box1", agentsv1alpha1.SandboxPaused),
 			expected: false,

@@ -165,7 +165,8 @@ func isCreatingSandbox(box *agentsv1alpha1.Sandbox) bool {
 	if !box.DeletionTimestamp.IsZero() {
 		return false
 	}
-	if box.Status.Phase == agentsv1alpha1.SandboxPaused || box.Status.Phase == agentsv1alpha1.SandboxResuming ||
+	if box.Status.Phase == agentsv1alpha1.SandboxPausing || box.Status.Phase == agentsv1alpha1.SandboxPaused ||
+		box.Status.Phase == agentsv1alpha1.SandboxResuming ||
 		box.Status.Phase == agentsv1alpha1.SandboxSucceeded || box.Status.Phase == agentsv1alpha1.SandboxFailed {
 		return false
 	}

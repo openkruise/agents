@@ -231,7 +231,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 		requeueAfter, err = r.getControl(args.Pod).EnsureSandboxRunning(ctx, args)
 	case agentsv1alpha1.SandboxRunning:
 		err = r.getControl(args.Pod).EnsureSandboxUpdated(ctx, args)
-	case agentsv1alpha1.SandboxPaused:
+	case agentsv1alpha1.SandboxPausing, agentsv1alpha1.SandboxPaused:
 		err = r.EnsureSandboxPaused(ctx, args)
 	case agentsv1alpha1.SandboxResuming:
 		err = r.getControl(args.Pod).EnsureSandboxResumed(ctx, args)
@@ -318,6 +318,10 @@ func calculateStatus(args core.EnsureFuncArgs) (*agentsv1alpha1.SandboxStatus, b
 	switch newStatus.Phase {
 	case agentsv1alpha1.SandboxPending:
 		updateStatusIfPodCompleted(pod, newStatus)
+		if box.Spec.Paused {
+			utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionResumed))
+			newStatus.Phase = agentsv1alpha1.SandboxPausing
+		}
 		if isSandboxCompletedPhase(newStatus.Phase) {
 			return newStatus, true
 		}
@@ -333,12 +337,12 @@ func calculateStatus(args core.EnsureFuncArgs) (*agentsv1alpha1.SandboxStatus, b
 			return newStatus, true
 		}
 
-		// If it is paused, first set the sandbox to the Paused state.
-		// To prevent loss of state information, the state immediately before Paused must currently be Running.
+		// If it is paused, first set the sandbox to the Pausing state.
+		// To prevent loss of state information, the state immediately before Pausing must currently be Running.
 		if box.Spec.Paused {
 			// The paused and resumed condition are exclusive
 			utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionResumed))
-			newStatus.Phase = agentsv1alpha1.SandboxPaused
+			newStatus.Phase = agentsv1alpha1.SandboxPausing
 			// Check for upgrade: if template has changed (hash mismatch), transition to Upgrading phase
 		} else if pod != nil && pod.Labels[agentsv1alpha1.PodLabelTemplateHash] != newStatus.UpdateRevision &&
 			box.Spec.UpgradePolicy != nil && box.Spec.UpgradePolicy.Type == agentsv1alpha1.SandboxUpgradePolicyRecreate {
@@ -349,10 +353,18 @@ func calculateStatus(args core.EnsureFuncArgs) (*agentsv1alpha1.SandboxStatus, b
 			utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
 		}
 
+	case agentsv1alpha1.SandboxPausing:
+		cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
+		if cond != nil && cond.Status == metav1.ConditionTrue {
+			newStatus.Phase = agentsv1alpha1.SandboxPaused
+		} else if !box.Spec.Paused {
+			klog.InfoS("sandbox pause not completed, cannot enter resume state temporarily", "sandbox", klog.KObj(box))
+		}
+
 	case agentsv1alpha1.SandboxPaused:
 		cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
 		// sandbox will only enter the resuming state after successful paused
-		if cond.Status == metav1.ConditionTrue && !box.Spec.Paused {
+		if cond != nil && cond.Status == metav1.ConditionTrue && !box.Spec.Paused {
 			// delete paused condition
 			utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
 			newStatus.Phase = agentsv1alpha1.SandboxResuming
@@ -363,7 +375,7 @@ func calculateStatus(args core.EnsureFuncArgs) (*agentsv1alpha1.SandboxStatus, b
 				LastTransitionTime: metav1.Now(),
 			}
 			utils.SetSandboxCondition(newStatus, rCond)
-		} else if !box.Spec.Paused && cond.Status == metav1.ConditionFalse {
+		} else if cond != nil && !box.Spec.Paused && cond.Status == metav1.ConditionFalse {
 			klog.InfoS("sandbox pause not completed, cannot enter resume state temporarily", "sandbox", klog.KObj(box))
 		}
 
