@@ -2042,3 +2042,94 @@ func TestIsLiveForQuota(t *testing.T) {
 		})
 	}
 }
+
+func TestLockSandbox(t *testing.T) {
+	fakeNow := time.Date(2026, 5, 17, 10, 0, 0, 0, time.UTC)
+	defer SetNowFuncForTesting(func() time.Time { return fakeNow })()
+
+	sbx := &agentsv1alpha1.Sandbox{}
+	LockSandbox(sbx, "lock-123", "owner-456")
+
+	assert.Equal(t, "lock-123", sbx.Annotations[agentsv1alpha1.AnnotationLock])
+	assert.Equal(t, "owner-456", sbx.Annotations[agentsv1alpha1.AnnotationOwner])
+	assert.Equal(t, fakeNow.Format(time.RFC3339), sbx.Annotations[agentsv1alpha1.AnnotationLockTimestamp])
+}
+
+func TestIsLockExpired(t *testing.T) {
+	fakeNow := time.Date(2026, 5, 17, 10, 10, 0, 0, time.UTC)
+	defer SetNowFuncForTesting(func() time.Time { return fakeNow })()
+
+	tests := []struct {
+		name string
+		sbx  *agentsv1alpha1.Sandbox
+		want bool
+	}{
+		{
+			name: "no annotations",
+			sbx:  &agentsv1alpha1.Sandbox{},
+			want: false,
+		},
+		{
+			name: "empty lock timestamp",
+			sbx: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						agentsv1alpha1.AnnotationLock: "lock-1",
+					},
+				},
+			},
+			want: false,
+		},
+		{
+			name: "invalid lock timestamp format",
+			sbx: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						agentsv1alpha1.AnnotationLockTimestamp: "not-a-timestamp",
+					},
+				},
+			},
+			want: false,
+		},
+		{
+			name: "recent lock (less than 5 minutes)",
+			sbx: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						agentsv1alpha1.AnnotationLockTimestamp: fakeNow.Add(-2 * time.Minute).Format(time.RFC3339),
+					},
+				},
+			},
+			want: false,
+		},
+		{
+			name: "exact 5 minutes lock",
+			sbx: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						agentsv1alpha1.AnnotationLockTimestamp: fakeNow.Add(-5 * time.Minute).Format(time.RFC3339),
+					},
+				},
+			},
+			want: false,
+		},
+		{
+			name: "expired lock (more than 5 minutes)",
+			sbx: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						agentsv1alpha1.AnnotationLockTimestamp: fakeNow.Add(-6 * time.Minute).Format(time.RFC3339),
+					},
+				},
+			},
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, IsLockExpired(tt.sbx))
+		})
+	}
+}
+
