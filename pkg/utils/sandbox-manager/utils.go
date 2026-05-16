@@ -20,6 +20,8 @@ limitations under the License.
 package utils
 
 import (
+	"time"
+
 	"github.com/google/uuid"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -52,11 +54,28 @@ func CalculateResourceFromContainers(containers []corev1.Container) infra.Sandbo
 func LockSandbox(sbx client.Object, lock string, owner string) {
 	annotations := sbx.GetAnnotations()
 	if annotations == nil {
-		annotations = make(map[string]string, 2)
+		annotations = make(map[string]string, 3)
 	}
 	annotations[v1alpha1.AnnotationLock] = lock
 	annotations[v1alpha1.AnnotationOwner] = owner
+	annotations[v1alpha1.AnnotationLockTimestamp] = time.Now().Format(time.RFC3339)
 	sbx.SetAnnotations(annotations)
+}
+
+func IsLockExpired(sbx client.Object) bool {
+	annotations := sbx.GetAnnotations()
+	if annotations == nil {
+		return false
+	}
+	lockTimeStr := annotations[v1alpha1.AnnotationLockTimestamp]
+	if lockTimeStr == "" {
+		return false
+	}
+	lockTime, err := time.Parse(time.RFC3339, lockTimeStr)
+	if err != nil {
+		return false
+	}
+	return time.Since(lockTime) > 5*time.Minute
 }
 
 func NewLockString() string {
