@@ -31,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/identity"
 	"github.com/openkruise/agents/pkg/utils"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 	"github.com/openkruise/agents/pkg/utils/inplaceupdate"
@@ -2270,4 +2271,281 @@ func stringContains(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+// ---------------------------------------------------------------------------
+// Gateway CA Certificate Injection Tests
+// ---------------------------------------------------------------------------
+
+func TestInjectGatewayCAVolume(t *testing.T) {
+	tests := []struct {
+		name           string
+		pod            *corev1.Pod
+		expectVolumes  int
+		expectError    string
+	}{
+		{
+			name: "injects gateway CA volume into pod with no volumes",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "main", Image: "nginx"}},
+				},
+			},
+			expectVolumes: 1,
+		},
+		{
+			name: "injects gateway CA volume into pod with existing volumes",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "main", Image: "nginx"}},
+					Volumes: []corev1.Volume{
+						{Name: "existing-vol", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+					},
+				},
+			},
+			expectVolumes: 2,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			InjectGatewayCAVolume(tt.pod)
+
+			if len(tt.pod.Spec.Volumes) != tt.expectVolumes {
+				t.Fatalf("expected %d volumes, got %d", tt.expectVolumes, len(tt.pod.Spec.Volumes))
+			}
+
+			// Verify the last volume is the gateway CA volume
+			lastVol := tt.pod.Spec.Volumes[len(tt.pod.Spec.Volumes)-1]
+			if lastVol.Name != "sandbox-gateway-ca" {
+				t.Errorf("expected volume name 'sandbox-gateway-ca', got %q", lastVol.Name)
+			}
+			if lastVol.Secret == nil {
+				t.Fatal("expected Secret volume source, got nil")
+			}
+			if lastVol.Secret.SecretName != "sandbox-gateway-crt" {
+				t.Errorf("expected secret name 'sandbox-gateway-crt', got %q", lastVol.Secret.SecretName)
+			}
+		})
+	}
+}
+
+func TestInjectGatewayCAVolumeMount(t *testing.T) {
+	tests := []struct {
+		name              string
+		pod               *corev1.Pod
+		expectMounts      int
+		expectError       string
+	}{
+		{
+			name: "injects volume mount into main container",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "main", Image: "nginx"}},
+				},
+			},
+			expectMounts: 1,
+		},
+		{
+			name: "injects volume mount preserving existing mounts",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:  "main",
+							Image: "nginx",
+							VolumeMounts: []corev1.VolumeMount{
+								{Name: "data", MountPath: "/data"},
+							},
+						},
+					},
+				},
+			},
+			expectMounts: 2,
+		},
+		{
+			name: "no containers - no panic",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{},
+				},
+			},
+			expectMounts: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			InjectGatewayCAVolumeMount(tt.pod)
+
+			if len(tt.pod.Spec.Containers) == 0 {
+				return
+			}
+
+			mainContainer := tt.pod.Spec.Containers[0]
+			if len(mainContainer.VolumeMounts) != tt.expectMounts {
+				t.Fatalf("expected %d volume mounts, got %d", tt.expectMounts, len(mainContainer.VolumeMounts))
+			}
+
+			if tt.expectMounts > 0 {
+				lastMount := mainContainer.VolumeMounts[len(mainContainer.VolumeMounts)-1]
+				if lastMount.Name != "sandbox-gateway-ca" {
+					t.Errorf("expected mount name 'sandbox-gateway-ca', got %q", lastMount.Name)
+				}
+				if lastMount.MountPath != "/etc/ssl/certs/agent-identity/gateway-ca.crt" {
+					t.Errorf("expected mount path '/etc/ssl/certs/agent-identity/gateway-ca.crt', got %q", lastMount.MountPath)
+				}
+				if !lastMount.ReadOnly {
+					t.Error("expected volume mount to be read-only")
+				}
+			}
+		})
+	}
+}
+
+func TestCommonControl_createPod_WithGatewayCAInjection(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	// Register a mock identity provider that returns a CA bundle
+	originalProvider := identity.NewDefaultIdentityProvider()
+	identity.RegisterProvider(&mockCAProvider{caBundle: "test-ca-bundle-content"})
+	t.Cleanup(func() { identity.RegisterProvider(originalProvider) })
+
+	tests := []struct {
+		name               string
+		featureGateEnabled bool
+		expectCAVolume     bool
+		expectCAMount      bool
+		expectError        string
+	}{
+		{
+			name:               "feature gate enabled - injects CA volume and mount",
+			featureGateEnabled: true,
+			expectCAVolume:     true,
+			expectCAMount:      true,
+		},
+		{
+			name:               "feature gate disabled - no CA injection",
+			featureGateEnabled: false,
+			expectCAVolume:     false,
+			expectCAMount:      false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.featureGateEnabled {
+				_ = utilfeature.DefaultMutableFeatureGate.Set("SecurityIdentityProvider=true")
+				t.Cleanup(func() {
+					_ = utilfeature.DefaultMutableFeatureGate.Set("SecurityIdentityProvider=false")
+				})
+			}
+
+			control := &commonControl{
+				Client:   fake.NewClientBuilder().WithScheme(scheme).Build(),
+				recorder: record.NewFakeRecorder(10),
+			}
+
+			sandbox := &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+				},
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{Name: "main", Image: "nginx:latest"},
+								},
+							},
+						},
+					},
+				},
+			}
+
+			status := &agentsv1alpha1.SandboxStatus{UpdateRevision: "rev1"}
+
+			pod, err := control.createPod(context.TODO(), sandbox, status)
+
+			if tt.expectError != "" {
+				if err == nil {
+					t.Fatalf("expected error containing %q, got nil", tt.expectError)
+				}
+				if !contains(err.Error(), tt.expectError) {
+					t.Fatalf("expected error containing %q, got %q", tt.expectError, err.Error())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("createPod() unexpected error: %v", err)
+			}
+
+			// Check CA volume
+			foundCAVolume := false
+			for _, v := range pod.Spec.Volumes {
+				if v.Name == "sandbox-gateway-ca" {
+					foundCAVolume = true
+					if v.Secret == nil || v.Secret.SecretName != "sandbox-gateway-crt" {
+						t.Errorf("CA volume has wrong secret source")
+					}
+					break
+				}
+			}
+			if foundCAVolume != tt.expectCAVolume {
+				t.Errorf("expected CA volume present=%v, got %v", tt.expectCAVolume, foundCAVolume)
+			}
+
+			// Check CA volume mount on main container
+			foundCAMount := false
+			if len(pod.Spec.Containers) > 0 {
+				for _, vm := range pod.Spec.Containers[0].VolumeMounts {
+					if vm.Name == "sandbox-gateway-ca" {
+						foundCAMount = true
+						if vm.MountPath != "/etc/ssl/certs/agent-identity/gateway-ca.crt" {
+							t.Errorf("expected mount path '/etc/ssl/certs/agent-identity/gateway-ca.crt', got %q", vm.MountPath)
+						}
+						break
+					}
+				}
+			}
+			if foundCAMount != tt.expectCAMount {
+				t.Errorf("expected CA mount present=%v, got %v", tt.expectCAMount, foundCAMount)
+			}
+
+			// When feature gate is enabled, verify the secret was created
+			if tt.featureGateEnabled {
+				var secret corev1.Secret
+				err = control.Get(context.TODO(), types.NamespacedName{
+					Name:      "sandbox-gateway-crt",
+					Namespace: "default",
+				}, &secret)
+				if err != nil {
+					t.Fatalf("expected gateway CA secret to be created, got error: %v", err)
+				}
+				if string(secret.Data[identity.GatewayCAKey]) != "test-ca-bundle-content" {
+					t.Errorf("expected secret data to contain CA bundle, got %q", string(secret.Data[identity.GatewayCAKey]))
+				}
+			}
+		})
+	}
+}
+
+// mockCAProvider implements identity.IdentityProvider for testing CA injection.
+type mockCAProvider struct {
+	caBundle string
+}
+
+func (m *mockCAProvider) IssueToken(_ context.Context, _ identity.TokenRequest) (*identity.TokenResponse, error) {
+	return &identity.TokenResponse{AccessToken: "mock-token"}, nil
+}
+
+func (m *mockCAProvider) PropagateSecurityToken(_ context.Context, _ *agentsv1alpha1.Sandbox, _ *identity.TokenResponse) error {
+	return nil
+}
+
+func (m *mockCAProvider) GetProxyCABundle(_ context.Context, _ identity.GetProxyCABundleRequest) (*identity.GetProxyCABundleResponse, error) {
+	return &identity.GetProxyCABundleResponse{CABundle: m.caBundle}, nil
 }

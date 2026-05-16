@@ -54,3 +54,8 @@ func IssueToken(ctx context.Context, req TokenRequest) (*TokenResponse, error) {
 func PropagateSecurityToken(ctx context.Context, sbx *agentsv1alpha1.Sandbox, tokenResp *TokenResponse) error {
 	return provider.PropagateSecurityToken(ctx, sbx, tokenResp)
 }
+
+// GetProxyCABundle delegates to the registered provider to fetch the proxy CA certificate bundle.
+func GetProxyCABundle(ctx context.Context, req GetProxyCABundleRequest) (*GetProxyCABundleResponse, error) {
+	return provider.GetProxyCABundle(ctx, req)
+}

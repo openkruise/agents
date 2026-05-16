@@ -3215,6 +3215,10 @@ func (m *mockIdentityProvider) PropagateSecurityToken(ctx context.Context, sbx *
 	return nil
 }
 
+func (m *mockIdentityProvider) GetProxyCABundle(_ context.Context, _ identity.GetProxyCABundleRequest) (*identity.GetProxyCABundleResponse, error) {
+	return &identity.GetProxyCABundleResponse{}, nil
+}
+
 //goland:noinspection GoDeprecation
 func TestTryClaimSandbox_SecurityToken(t *testing.T) {
 	utils.InitLogOutput()

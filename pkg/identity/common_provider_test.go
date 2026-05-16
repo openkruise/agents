@@ -77,9 +77,11 @@ func TestDefaultTokenProvider_PropagateSecurityToken(t *testing.T) {
 
 // mockIdentityProvider is a simple mock for IdentityProvider used in fallback tests.
 type mockIdentityProvider struct {
-	issueResp    *TokenResponse
-	issueErr     error
-	propagateErr error
+	issueResp      *TokenResponse
+	issueErr       error
+	propagateErr   error
+	caBundleResp   *GetProxyCABundleResponse
+	caBundleErr    error
 }
 
 func (m *mockIdentityProvider) IssueToken(_ context.Context, _ TokenRequest) (*TokenResponse, error) {
@@ -88,6 +90,13 @@ func (m *mockIdentityProvider) IssueToken(_ context.Context, _ TokenRequest) (*T
 
 func (m *mockIdentityProvider) PropagateSecurityToken(_ context.Context, _ *agentsv1alpha1.Sandbox, _ *TokenResponse) error {
 	return m.propagateErr
+}
+
+func (m *mockIdentityProvider) GetProxyCABundle(_ context.Context, _ GetProxyCABundleRequest) (*GetProxyCABundleResponse, error) {
+	if m.caBundleResp != nil || m.caBundleErr != nil {
+		return m.caBundleResp, m.caBundleErr
+	}
+	return &GetProxyCABundleResponse{}, nil
 }
 
 func TestNewFallbackIdentityProvider(t *testing.T) {
@@ -130,4 +139,93 @@ func TestFallbackIdentityProvider_PropagateSecurityToken_DelegatesToPrimary(t *t
 	err := p.PropagateSecurityToken(context.Background(), sbx, &TokenResponse{AccessToken: "tok"})
 	assert.Error(t, err, "PropagateSecurityToken should return primary's error directly")
 	assert.Contains(t, err.Error(), "propagation failed")
+}
+
+// ---------------------------------------------------------------------------
+// GetProxyCABundle tests
+// ---------------------------------------------------------------------------
+
+func TestDefaultTokenProvider_GetProxyCABundle(t *testing.T) {
+	tests := []struct {
+		name        string
+		req         GetProxyCABundleRequest
+		expectError string
+	}{
+		{
+			name: "returns empty response with default request",
+			req:  GetProxyCABundleRequest{},
+		},
+		{
+			name: "returns empty response with IncludeSystemCA true",
+			req:  GetProxyCABundleRequest{IncludeSystemCA: true},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			provider := NewDefaultIdentityProvider()
+			resp, err := provider.GetProxyCABundle(context.Background(), tt.req)
+
+			if tt.expectError != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
+			} else {
+				require.NoError(t, err)
+				require.NotNil(t, resp)
+				assert.Empty(t, resp.CABundle, "default provider should return empty CABundle")
+				assert.Empty(t, resp.RequestID, "default provider should return empty RequestID")
+			}
+		})
+	}
+}
+
+func TestFallbackIdentityProvider_GetProxyCABundle(t *testing.T) {
+	tests := []struct {
+		name        string
+		primary     *mockIdentityProvider
+		expectError string
+		checkResp   func(t *testing.T, resp *GetProxyCABundleResponse)
+	}{
+		{
+			name: "primary success returns primary response",
+			primary: &mockIdentityProvider{
+				caBundleResp: &GetProxyCABundleResponse{
+					RequestID: "req-ca-1",
+					CABundle:  "-----BEGIN CERTIFICATE-----\nMIIB...\n-----END CERTIFICATE-----",
+				},
+			},
+			checkResp: func(t *testing.T, resp *GetProxyCABundleResponse) {
+				assert.Equal(t, "req-ca-1", resp.RequestID)
+				assert.Contains(t, resp.CABundle, "BEGIN CERTIFICATE")
+			},
+		},
+		{
+			name: "primary failure falls back to default empty response",
+			primary: &mockIdentityProvider{
+				caBundleErr: fmt.Errorf("CA service unavailable"),
+			},
+			checkResp: func(t *testing.T, resp *GetProxyCABundleResponse) {
+				assert.Empty(t, resp.CABundle, "fallback should return empty CABundle")
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := NewFallbackIdentityProvider(tt.primary)
+			resp, err := p.GetProxyCABundle(context.Background(), GetProxyCABundleRequest{})
+
+			if tt.expectError != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
+			} else {
+				require.NoError(t, err)
+				require.NotNil(t, resp)
+			}
+
+			if tt.checkResp != nil {
+				tt.checkResp(t, resp)
+			}
+		})
+	}
 }
