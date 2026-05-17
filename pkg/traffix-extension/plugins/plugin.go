@@ -29,6 +29,7 @@ import (
 
 	v1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/traffix-extension/framework/credential"
+	"github.com/openkruise/agents/pkg/traffix-extension/model"
 	"github.com/openkruise/agents/pkg/traffix-extension/util/matcher"
 )
 
@@ -96,7 +97,7 @@ type RequestContext struct {
 	// PodNN identifies the source pod (for logging).
 	PodNN types.NamespacedName
 	// Profile is the SecurityProfile that owns the rule being evaluated.
-	Profile *v1alpha1.SecurityProfile
+	Profile *model.SecurityProfile
 	// SandboxToken is the parsed filter_state['sandbox.token']. nil when
 	// no sandbox token is available; plugins that require it should
 	// return ActionContinue in that case unless their semantics are

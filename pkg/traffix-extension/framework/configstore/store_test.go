@@ -18,6 +18,7 @@ package configstore
 
 import (
 	"testing"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -51,8 +52,8 @@ func TestProfileSetAndGet(t *testing.T) {
 	if !ok {
 		t.Fatal("expected to find profile, but got not ok")
 	}
-	if got.Name != "test-profile" {
-		t.Errorf("expected profile name 'test-profile', got %q", got.Name)
+	if got.Profile.Name != "test-profile" {
+		t.Errorf("expected profile name 'test-profile', got %q", got.Profile.Name)
 	}
 
 	list := store.ProfileList()
@@ -105,8 +106,11 @@ func TestFindProfilesForLabels(t *testing.T) {
 func TestFindProfilesForLabels_MultipleProfiles(t *testing.T) {
 	store := NewStore()
 
-	profile1 := newTestProfile("alpha-profile", "default", map[string]string{"app": "ai-agent"})
-	profile2 := newTestProfile("beta-profile", "default", map[string]string{"app": "ai-agent"})
+	now := time.Now()
+	profile1 := newTestProfile("beta-profile", "default", map[string]string{"app": "ai-agent"})
+	profile1.CreationTimestamp = metav1.NewTime(now)
+	profile2 := newTestProfile("alpha-profile", "default", map[string]string{"app": "ai-agent"})
+	profile2.CreationTimestamp = metav1.NewTime(now.Add(time.Second))
 	store.ProfileSet(profile1)
 	store.ProfileSet(profile2)
 
@@ -115,8 +119,9 @@ func TestFindProfilesForLabels_MultipleProfiles(t *testing.T) {
 		t.Fatalf("expected 2 profiles, got %d", len(matched))
 	}
 
-	if matched[0].Name != "alpha-profile" || matched[1].Name != "beta-profile" {
-		t.Errorf("expected profiles sorted by name, got [%s, %s]", matched[0].Name, matched[1].Name)
+	// Verify ordering by creation time (earlier first)
+	if matched[0].Profile.Name != "beta-profile" || matched[1].Profile.Name != "alpha-profile" {
+		t.Errorf("expected profiles sorted by creation time, got [%s, %s]", matched[0].Profile.Name, matched[1].Profile.Name)
 	}
 }
 

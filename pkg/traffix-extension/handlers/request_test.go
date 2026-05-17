@@ -36,6 +36,7 @@ import (
 	v1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/traffix-extension/framework/configstore"
 	"github.com/openkruise/agents/pkg/traffix-extension/framework/credential"
+	"github.com/openkruise/agents/pkg/traffix-extension/model"
 	"github.com/openkruise/agents/pkg/traffix-extension/plugins"
 	"github.com/openkruise/agents/pkg/traffix-extension/plugins/block"
 	"github.com/openkruise/agents/pkg/traffix-extension/plugins/bypass"
@@ -640,9 +641,10 @@ func TestHandleRequestHeaders_UnimplementedActionWarns(t *testing.T) {
 // discard sink so test output stays clean.
 func TestWarnUnimplementedActions_CoversAllBranches(t *testing.T) {
 	logger := logr.Discard()
-	profile := &v1alpha1.SecurityProfile{}
-	profile.Name = "p"
-	profile.Namespace = "ns"
+	sp := &v1alpha1.SecurityProfile{}
+	sp.Name = "p"
+	sp.Namespace = "ns"
+	profile := &model.SecurityProfile{Profile: sp}
 
 	// nil actions — early return.
 	warnUnimplementedActions(logger, profile, &v1alpha1.SecurityRule{Name: "r"})

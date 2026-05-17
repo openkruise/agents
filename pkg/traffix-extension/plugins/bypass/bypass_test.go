@@ -24,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	v1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/traffix-extension/model"
 	"github.com/openkruise/agents/pkg/traffix-extension/plugins"
 )
 
@@ -88,7 +89,7 @@ func TestPlugin_OnRequestHeaders(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			rctx := &plugins.RequestContext{
 				PodNN:   types.NamespacedName{Namespace: "ns", Name: "pod-x"},
-				Profile: &v1alpha1.SecurityProfile{},
+				Profile: &model.SecurityProfile{Profile: &v1alpha1.SecurityProfile{}},
 			}
 			res, err := p.OnRequestHeaders(context.Background(), rctx, tt.rule)
 			if err != nil {
@@ -134,7 +135,7 @@ func TestProfileName(t *testing.T) {
 		{
 			name: "named profile",
 			rctx: &plugins.RequestContext{
-				Profile: &v1alpha1.SecurityProfile{},
+				Profile: &model.SecurityProfile{Profile: &v1alpha1.SecurityProfile{}},
 			},
 			want: "",
 		},
@@ -143,7 +144,7 @@ func TestProfileName(t *testing.T) {
 			rctx: func() *plugins.RequestContext {
 				sp := &v1alpha1.SecurityProfile{}
 				sp.Name = "my-profile"
-				return &plugins.RequestContext{Profile: sp}
+				return &plugins.RequestContext{Profile: &model.SecurityProfile{Profile: sp}}
 			}(),
 			want: "my-profile",
 		},

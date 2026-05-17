@@ -18,11 +18,15 @@ limitations under the License.
 // Profile matching is performed dynamically at request time using pod labels
 // extracted from Envoy filter_state, rather than maintaining a pre-computed
 // pod-to-profile index.
+//
+// The store uses a copy-on-write strategy with atomic.Pointer for lock-free
+// reads. Writes (from reconciler) are rare and protected by a mutex.
 package configstore
 
 import (
 	"sort"
 	"sync"
+	"sync/atomic"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -30,6 +34,7 @@ import (
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 
 	v1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/traffix-extension/model"
 )
 
 // Store is a thread-safe in-memory store for SecurityProfiles.
@@ -40,107 +45,149 @@ type Store interface {
 	ProfileSet(profile *v1alpha1.SecurityProfile)
 
 	// ProfileGet retrieves a profile by its NamespacedName.
-	ProfileGet(namespacedName types.NamespacedName) (*v1alpha1.SecurityProfile, bool)
+	ProfileGet(namespacedName types.NamespacedName) (*model.SecurityProfile, bool)
 
 	// ProfileDelete removes a profile from the store.
 	ProfileDelete(namespacedName types.NamespacedName)
 
 	// ProfileList returns all profiles.
-	ProfileList() []*v1alpha1.SecurityProfile
+	ProfileList() []*model.SecurityProfile
 
 	// FindProfilesForLabels dynamically matches profiles against the given labels.
 	// Only profiles in the same namespace as the podLabels namespace are considered.
-	// Returns profiles sorted by name for deterministic ordering.
-	FindProfilesForLabels(podNamespace string, podLabels map[string]string) []*v1alpha1.SecurityProfile
+	// Returns profiles sorted by creation time (earlier first).
+	FindProfilesForLabels(podNamespace string, podLabels map[string]string) []*model.SecurityProfile
+}
+
+// profileSnapshot is an immutable point-in-time view of all profiles.
+// It is replaced atomically on every write operation (copy-on-write).
+type profileSnapshot struct {
+	byKey       map[types.NamespacedName]*model.SecurityProfile
+	byNamespace map[string][]*model.SecurityProfile
+}
+
+func newEmptySnapshot() *profileSnapshot {
+	return &profileSnapshot{
+		byKey:       make(map[types.NamespacedName]*model.SecurityProfile),
+		byNamespace: make(map[string][]*model.SecurityProfile),
+	}
 }
 
 // NewStore creates a new in-memory configuration store.
 func NewStore() Store {
-	return &configStore{
-		profiles: make(map[types.NamespacedName]*v1alpha1.SecurityProfile),
-	}
+	s := &configStore{}
+	s.snapshot.Store(newEmptySnapshot())
+	return s
 }
 
 type configStore struct {
-	mu sync.RWMutex
-
-	// profiles: key = NamespacedName of the SecurityProfile
-	profiles map[types.NamespacedName]*v1alpha1.SecurityProfile
+	snapshot atomic.Pointer[profileSnapshot]
+	mu       sync.Mutex // protects write path only
 }
 
-// --- Profile operations ---
+// --- Read path (lock-free) ---
+
+func (s *configStore) ProfileGet(namespacedName types.NamespacedName) (*model.SecurityProfile, bool) {
+	snap := s.snapshot.Load()
+	p, ok := snap.byKey[namespacedName]
+	return p, ok
+}
+
+func (s *configStore) ProfileList() []*model.SecurityProfile {
+	snap := s.snapshot.Load()
+	result := make([]*model.SecurityProfile, 0, len(snap.byKey))
+	for _, p := range snap.byKey {
+		result = append(result, p)
+	}
+	return result
+}
+
+func (s *configStore) FindProfilesForLabels(podNamespace string, podLabels map[string]string) []*model.SecurityProfile {
+	snap := s.snapshot.Load()
+
+	nsProfiles := snap.byNamespace[podNamespace]
+	if len(nsProfiles) == 0 {
+		return nil
+	}
+
+	var matched []*model.SecurityProfile
+	for _, sp := range nsProfiles {
+		if sp.Selector.Matches(labels.Set(podLabels)) {
+			matched = append(matched, sp)
+		}
+	}
+
+	return matched
+}
+
+// --- Write path (copy-on-write, mutex-protected) ---
 
 func (s *configStore) ProfileSet(profile *v1alpha1.SecurityProfile) {
 	if profile == nil {
 		return
 	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	old := s.snapshot.Load()
 	nn := types.NamespacedName{Name: profile.Name, Namespace: profile.Namespace}
-	s.profiles[nn] = profile
-}
 
-func (s *configStore) ProfileGet(namespacedName types.NamespacedName) (*v1alpha1.SecurityProfile, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	selector, err := metav1.LabelSelectorAsSelector(&profile.Spec.Selector)
+	if err != nil {
+		ctrllog.Log.WithName("configstore").Error(err,
+			"SecurityProfile has invalid selector; skipping",
+			"profile", nn.String())
+		return
+	}
 
-	p, ok := s.profiles[namespacedName]
-	return p, ok
+	newByKey := make(map[types.NamespacedName]*model.SecurityProfile, len(old.byKey)+1)
+	for k, v := range old.byKey {
+		newByKey[k] = v
+	}
+	newByKey[nn] = &model.SecurityProfile{
+		Profile:  profile,
+		Selector: selector,
+	}
+
+	s.snapshot.Store(buildSnapshot(newByKey))
 }
 
 func (s *configStore) ProfileDelete(namespacedName types.NamespacedName) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	delete(s.profiles, namespacedName)
-}
-
-func (s *configStore) ProfileList() []*v1alpha1.SecurityProfile {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	result := make([]*v1alpha1.SecurityProfile, 0, len(s.profiles))
-	for _, p := range s.profiles {
-		result = append(result, p)
+	old := s.snapshot.Load()
+	if _, exists := old.byKey[namespacedName]; !exists {
+		return
 	}
-	return result
-}
 
-// --- Dynamic label matching ---
-
-func (s *configStore) FindProfilesForLabels(podNamespace string, podLabels map[string]string) []*v1alpha1.SecurityProfile {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	var matched []*v1alpha1.SecurityProfile
-	for nn, profile := range s.profiles {
-		// Only consider profiles in the same namespace.
-		if nn.Namespace != podNamespace {
-			continue
-		}
-
-		selector, err := metav1.LabelSelectorAsSelector(&profile.Spec.Selector)
-		if err != nil {
-			// An invalid selector cannot match any pod; skip this profile
-			// and log the failure so misconfigurations are observable.
-			ctrllog.Log.WithName("configstore").Error(err,
-				"SecurityProfile has invalid selector; skipping",
-				"profile", nn.String())
-			continue
-		}
-		if selector.Matches(labels.Set(podLabels)) {
-			matched = append(matched, profile)
+	newByKey := make(map[types.NamespacedName]*model.SecurityProfile, len(old.byKey))
+	for k, v := range old.byKey {
+		if k != namespacedName {
+			newByKey[k] = v
 		}
 	}
 
-	// Sort by namespace+name for deterministic iteration order.
-	sort.Slice(matched, func(i, j int) bool {
-		if matched[i].Namespace != matched[j].Namespace {
-			return matched[i].Namespace < matched[j].Namespace
-		}
-		return matched[i].Name < matched[j].Name
-	})
+	s.snapshot.Store(buildSnapshot(newByKey))
+}
 
-	return matched
+// buildSnapshot constructs a complete profileSnapshot from a byKey map,
+// including the pre-computed byNamespace index sorted by creation time.
+func buildSnapshot(byKey map[types.NamespacedName]*model.SecurityProfile) *profileSnapshot {
+	byNamespace := make(map[string][]*model.SecurityProfile)
+
+	for nn, sp := range byKey {
+		byNamespace[nn.Namespace] = append(byNamespace[nn.Namespace], sp)
+	}
+
+	for _, profiles := range byNamespace {
+		sort.Slice(profiles, func(i, j int) bool {
+			return profiles[i].Profile.CreationTimestamp.Before(&profiles[j].Profile.CreationTimestamp)
+		})
+	}
+	return &profileSnapshot{
+		byKey:       byKey,
+		byNamespace: byNamespace,
+	}
 }

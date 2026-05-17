@@ -82,5 +82,5 @@ func profileName(rctx *plugins.RequestContext) string {
 	if rctx == nil || rctx.Profile == nil {
 		return ""
 	}
-	return rctx.Profile.Name
+	return rctx.Profile.Profile.Name
 }

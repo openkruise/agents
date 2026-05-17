@@ -59,7 +59,7 @@ func TestReconcile_CreateOrUpdate(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("reconcile error: %v", err)
 	}
-	if got, ok := store.ProfileGet(types.NamespacedName{Name: "p", Namespace: "ns"}); !ok || got.Name != "p" {
+	if got, ok := store.ProfileGet(types.NamespacedName{Name: "p", Namespace: "ns"}); !ok || got.Profile.Name != "p" {
 		t.Errorf("expected profile in store, got %v ok=%v", got, ok)
 	}
 }

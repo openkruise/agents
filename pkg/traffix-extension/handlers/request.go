@@ -32,6 +32,7 @@ import (
 
 	v1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/traffix-extension/framework/credential"
+	"github.com/openkruise/agents/pkg/traffix-extension/model"
 	"github.com/openkruise/agents/pkg/traffix-extension/plugins"
 	logutil "github.com/openkruise/agents/pkg/traffix-extension/util/logging"
 	"github.com/openkruise/agents/pkg/traffix-extension/util/matcher"
@@ -147,8 +148,8 @@ func (s *Server) HandleRequestHeaders(ctx context.Context, headers *extProcPb.Ht
 
 	for _, profile := range profiles {
 		rctx.Profile = profile
-		for i := range profile.Spec.Rules {
-			rule := &profile.Spec.Rules[i]
+		for i := range profile.Profile.Spec.Rules {
+			rule := &profile.Profile.Spec.Rules[i]
 			if !matcher.MatchesRule(reqInfo, *rule) || rule.Actions == nil {
 				continue
 			}
@@ -374,7 +375,7 @@ func extractHeaderMap(headers *extProcPb.HttpHeaders) map[string]string {
 // it visible that the policy author wrote a rule the data plane cannot
 // honor (Forwarding, IdentityInjection, SecurityCheck, Mirroring, RateLimit
 // are reserved for future plugins).
-func warnUnimplementedActions(logger logr.Logger, profile *v1alpha1.SecurityProfile, rule *v1alpha1.SecurityRule) {
+func warnUnimplementedActions(logger logr.Logger, profile *model.SecurityProfile, rule *v1alpha1.SecurityRule) {
 	a := rule.Actions
 	if a == nil {
 		return
@@ -400,7 +401,7 @@ func warnUnimplementedActions(logger logr.Logger, profile *v1alpha1.SecurityProf
 	}
 	logger.V(logutil.DEFAULT).Info(
 		"SecurityProfile rule declares actions that are not yet implemented; ignoring",
-		"profile", profile.Namespace+"/"+profile.Name,
+		"profile", profile.Profile.Namespace+"/"+profile.Profile.Name,
 		"rule", rule.Name,
 		"actions", unimplemented)
 }
