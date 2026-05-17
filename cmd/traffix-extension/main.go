@@ -81,8 +81,9 @@ func run() error {
 
 	flags := make(map[string]any)
 	flag.VisitAll(func(f *flag.Flag) {
-		flags[f.Name] = f.Value
+		flags[f.Name] = f.Value.String()
 	})
+	setupLog.Info("Parsed flags", "flags", flags)
 
 	// Init runtime.
 	cfg, err := ctrl.GetConfig()

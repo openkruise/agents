@@ -66,12 +66,18 @@ func getFallbackToken() string {
 // Algorithm:
 //  1. Resolve the source pod from filter_state (with E2E test fallbacks).
 //  2. Look up matching SecurityProfiles via dynamic label matching.
-//  3. For each rule whose match clause succeeds, invoke each plugin in
-//     registration order. A plugin returning ActionImmediate short-circuits
-//     the entire request. A plugin returning ActionMutate has its responses
-//     accumulated; the same plugin is invoked at most once across all rules
-//     (first matching rule wins).
-//  4. Return the accumulated mutation responses, or a passthrough response
+//  3. Scan rules. For each rule whose match clause succeeds, invoke each
+//     plugin in registration order. A plugin returning ActionImmediate
+//     short-circuits the entire request. ActionMutate accumulates the
+//     responses; ActionRecord claims the rule for deferred execution. The
+//     same plugin is invoked at most once across all rules (first matching
+//     rule wins).
+//  4. Finalize phase: for plugins that returned ActionRecord during the
+//     scan and implement Finalizer, call Finalize with the recorded rule.
+//     A finalize result of Immediate still short-circuits; Mutate is
+//     accumulated. This phase only runs after the scan completes without
+//     an Immediate, so terminal Block rules suppress deferred RPCs.
+//  5. Return the accumulated mutation responses, or a passthrough response
 //     when no plugin produced a mutation.
 func (s *Server) HandleRequestHeaders(ctx context.Context, headers *extProcPb.HttpHeaders, attrs map[string]*structpb.Struct) ([]*extProcPb.ProcessingResponse, error) {
 	logger := log.FromContext(ctx)
@@ -132,7 +138,12 @@ func (s *Server) HandleRequestHeaders(ctx context.Context, headers *extProcPb.Ht
 	}
 
 	var accumulated []*extProcPb.ProcessingResponse
-	mutated := make(map[string]bool, len(s.plugins))
+	// claimed serves both the Mutate and Record paths: once a plugin has
+	// produced a mutation OR claimed a rule for deferred finalize, the
+	// same plugin must not be invoked again on later matching rules
+	// (first matching rule wins).
+	claimed := make(map[string]bool, len(s.plugins))
+	recordedRules := make(map[string]*v1alpha1.SecurityRule, len(s.plugins))
 
 	for _, profile := range profiles {
 		rctx.Profile = profile
@@ -143,7 +154,7 @@ func (s *Server) HandleRequestHeaders(ctx context.Context, headers *extProcPb.Ht
 			}
 			warnUnimplementedActions(logger, profile, rule)
 			for _, p := range s.plugins {
-				if mutated[p.Name()] {
+				if claimed[p.Name()] {
 					continue
 				}
 				res, err := p.OnRequestHeaders(ctx, rctx, rule)
@@ -155,10 +166,40 @@ func (s *Server) HandleRequestHeaders(ctx context.Context, headers *extProcPb.Ht
 					return res.Responses, nil
 				case plugins.ActionMutate:
 					accumulated = append(accumulated, res.Responses...)
-					mutated[p.Name()] = true
+					claimed[p.Name()] = true
+				case plugins.ActionRecord:
+					recordedRules[p.Name()] = rule
+					claimed[p.Name()] = true
 				case plugins.ActionContinue:
 				}
 			}
+		}
+	}
+
+	// Finalize phase: plugins that recorded a match now run their deferred
+	// work. We iterate s.plugins (not the map) to preserve registration
+	// order, which matters when multiple deferred plugins coexist.
+	for _, p := range s.plugins {
+		rule, ok := recordedRules[p.Name()]
+		if !ok {
+			continue
+		}
+		f, ok := p.(plugins.Finalizer)
+		if !ok {
+			return nil, fmt.Errorf("plugin %q returned ActionRecord but does not implement Finalizer", p.Name())
+		}
+		res, err := f.Finalize(ctx, rctx, rule)
+		if err != nil {
+			return nil, err
+		}
+		switch res.Action {
+		case plugins.ActionImmediate:
+			return res.Responses, nil
+		case plugins.ActionMutate:
+			accumulated = append(accumulated, res.Responses...)
+		case plugins.ActionContinue:
+		case plugins.ActionRecord:
+			return nil, fmt.Errorf("plugin %q returned ActionRecord from Finalize, which is not permitted", p.Name())
 		}
 	}
 

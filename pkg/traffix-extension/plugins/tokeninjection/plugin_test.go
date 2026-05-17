@@ -149,9 +149,49 @@ func TestOnRequestHeaders_WhenNotMet_Continue(t *testing.T) {
 	}
 }
 
-// TestOnRequestHeaders_Success_Mutate covers the full happy path:
-// valid sandbox token + valid provider ref + 200 OK with apiKey.
-func TestOnRequestHeaders_Success_Mutate(t *testing.T) {
+// TestOnRequestHeaders_Success_Record covers the happy match path:
+// valid sandbox token + when condition satisfied. The plugin claims the
+// rule via ActionRecord without calling the credential provider.
+func TestOnRequestHeaders_Success_Record(t *testing.T) {
+	// Wire a real httptest server but assert it is NEVER called; the
+	// scan-phase Record path must not perform any RPC.
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"apiKey":"real-token"}`))
+	}))
+	defer srv.Close()
+	t.Setenv("IDENTITY_PROVIDER_URL", srv.URL)
+	t.Setenv("CREDENTIAL_PROVIDER_CLIENT_CERT_PATH", "/nonexistent")
+	t.Setenv("CREDENTIAL_PROVIDER_CLIENT_KEY_PATH", "/nonexistent")
+	t.Setenv("CREDENTIAL_PROVIDER_CA_CERT_PATH", "/nonexistent")
+	cli := credential.NewClient()
+
+	p := New(cli)
+	rule := tokenAction(nil, v1alpha1.FailStrategyAllow)
+	rctx := &plugins.RequestContext{
+		SandboxToken: &credential.SandboxToken{AccessToken: "user-token"},
+		PodNN:        types.NamespacedName{Namespace: "ns", Name: "pod"},
+	}
+	res, err := p.OnRequestHeaders(context.Background(), rctx, rule)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Action != plugins.ActionRecord {
+		t.Fatalf("expected Record, got %v", res.Action)
+	}
+	if len(res.Responses) != 0 {
+		t.Errorf("Record result must carry no responses, got %d", len(res.Responses))
+	}
+	if called {
+		t.Error("credential provider must NOT be called during the scan/Record phase")
+	}
+}
+
+// TestFinalize_Success_Mutate covers the deferred happy path: finalize
+// fetches the token, renders the template, and emits a SetHeaders mutation.
+func TestFinalize_Success_Mutate(t *testing.T) {
 	cli, srv := fakeProviderServer(t, http.StatusOK, `{"apiKey":"real-token"}`)
 	defer srv.Close()
 
@@ -161,7 +201,7 @@ func TestOnRequestHeaders_Success_Mutate(t *testing.T) {
 		SandboxToken: &credential.SandboxToken{AccessToken: "user-token"},
 		PodNN:        types.NamespacedName{Namespace: "ns", Name: "pod"},
 	}
-	res, err := p.OnRequestHeaders(context.Background(), rctx, rule)
+	res, err := p.Finalize(context.Background(), rctx, rule)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -180,9 +220,33 @@ func TestOnRequestHeaders_Success_Mutate(t *testing.T) {
 	_ = []*corev3.HeaderValueOption{}
 }
 
-// TestOnRequestHeaders_FailBlock_ReturnsPermissionDenied verifies that any
-// fetch failure with FailStrategyBlock surfaces a gRPC PermissionDenied error.
-func TestOnRequestHeaders_FailBlock_ReturnsPermissionDenied(t *testing.T) {
+// TestFinalize_NilRule_Continue covers the defensive guard — a Finalize
+// invocation without a real rule must not panic.
+func TestFinalize_NilRule_Continue(t *testing.T) {
+	tests := []struct {
+		name string
+		rule *v1alpha1.SecurityRule
+	}{
+		{"nil rule", nil},
+		{"nil actions", &v1alpha1.SecurityRule{Name: "r"}},
+		{"nil token transformation", &v1alpha1.SecurityRule{Name: "r", Actions: &v1alpha1.SecurityRuleActions{}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			res, err := New(nil).Finalize(context.Background(), &plugins.RequestContext{}, tt.rule)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if res.Action != plugins.ActionContinue {
+				t.Errorf("expected Continue, got %v", res.Action)
+			}
+		})
+	}
+}
+
+// TestFinalize_FailBlock_ReturnsPermissionDenied verifies that any fetch
+// failure with FailStrategyBlock surfaces a gRPC PermissionDenied error.
+func TestFinalize_FailBlock_ReturnsPermissionDenied(t *testing.T) {
 	cli, srv := fakeProviderServer(t, http.StatusInternalServerError, `oops`)
 	defer srv.Close()
 
@@ -190,7 +254,7 @@ func TestOnRequestHeaders_FailBlock_ReturnsPermissionDenied(t *testing.T) {
 	rctx := &plugins.RequestContext{
 		SandboxToken: &credential.SandboxToken{AccessToken: "user-token"},
 	}
-	_, err := New(cli).OnRequestHeaders(context.Background(), rctx, rule)
+	_, err := New(cli).Finalize(context.Background(), rctx, rule)
 	if err == nil {
 		t.Fatal("expected error from FailStrategyBlock")
 	}
@@ -199,9 +263,9 @@ func TestOnRequestHeaders_FailBlock_ReturnsPermissionDenied(t *testing.T) {
 	}
 }
 
-// TestOnRequestHeaders_FailAllow_FallsThrough verifies that a fetch failure
-// with FailStrategyAllow returns ActionContinue, letting the request through.
-func TestOnRequestHeaders_FailAllow_FallsThrough(t *testing.T) {
+// TestFinalize_FailAllow_FallsThrough verifies that a fetch failure with
+// FailStrategyAllow returns ActionContinue, letting the request through.
+func TestFinalize_FailAllow_FallsThrough(t *testing.T) {
 	cli, srv := fakeProviderServer(t, http.StatusBadGateway, `bad`)
 	defer srv.Close()
 
@@ -209,7 +273,7 @@ func TestOnRequestHeaders_FailAllow_FallsThrough(t *testing.T) {
 	rctx := &plugins.RequestContext{
 		SandboxToken: &credential.SandboxToken{AccessToken: "user-token"},
 	}
-	res, err := New(cli).OnRequestHeaders(context.Background(), rctx, rule)
+	res, err := New(cli).Finalize(context.Background(), rctx, rule)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -218,9 +282,9 @@ func TestOnRequestHeaders_FailAllow_FallsThrough(t *testing.T) {
 	}
 }
 
-// TestOnRequestHeaders_BadProviderRef triggers the validation error path
-// without hitting the network.
-func TestOnRequestHeaders_BadProviderRef(t *testing.T) {
+// TestFinalize_BadProviderRef triggers the validation error path without
+// hitting the network.
+func TestFinalize_BadProviderRef(t *testing.T) {
 	rule := &v1alpha1.SecurityRule{
 		Name: "bad-ref",
 		Actions: &v1alpha1.SecurityRuleActions{
@@ -235,7 +299,7 @@ func TestOnRequestHeaders_BadProviderRef(t *testing.T) {
 	rctx := &plugins.RequestContext{
 		SandboxToken: &credential.SandboxToken{AccessToken: "user-token"},
 	}
-	res, err := New(nil).OnRequestHeaders(context.Background(), rctx, rule)
+	res, err := New(nil).Finalize(context.Background(), rctx, rule)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -244,21 +308,21 @@ func TestOnRequestHeaders_BadProviderRef(t *testing.T) {
 	}
 }
 
-// TestOnRequestHeaders_NilCredClient_Block surfaces the "client not configured"
+// TestFinalize_NilCredClient_Block surfaces the "client not configured"
 // branch as PermissionDenied when FailStrategy=Block.
-func TestOnRequestHeaders_NilCredClient_Block(t *testing.T) {
+func TestFinalize_NilCredClient_Block(t *testing.T) {
 	rule := tokenAction(nil, v1alpha1.FailStrategyBlock)
 	rctx := &plugins.RequestContext{
 		SandboxToken: &credential.SandboxToken{AccessToken: "user-token"},
 	}
-	_, err := New(nil).OnRequestHeaders(context.Background(), rctx, rule)
+	_, err := New(nil).Finalize(context.Background(), rctx, rule)
 	if err == nil || status.Code(err) != codes.PermissionDenied {
 		t.Errorf("expected PermissionDenied, got %v", err)
 	}
 }
 
-// TestOnRequestHeaders_BadValueTemplate covers the template-rendering failure path.
-func TestOnRequestHeaders_BadValueTemplate(t *testing.T) {
+// TestFinalize_BadValueTemplate covers the template-rendering failure path.
+func TestFinalize_BadValueTemplate(t *testing.T) {
 	cli, srv := fakeProviderServer(t, http.StatusOK, `{"apiKey":"real-token"}`)
 	defer srv.Close()
 
@@ -276,7 +340,7 @@ func TestOnRequestHeaders_BadValueTemplate(t *testing.T) {
 	rctx := &plugins.RequestContext{
 		SandboxToken: &credential.SandboxToken{AccessToken: "user-token"},
 	}
-	res, err := New(cli).OnRequestHeaders(context.Background(), rctx, rule)
+	res, err := New(cli).Finalize(context.Background(), rctx, rule)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

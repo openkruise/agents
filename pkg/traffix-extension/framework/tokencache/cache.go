@@ -56,8 +56,13 @@ func (e cacheEntry) isExpired() bool {
 }
 
 // Cache is a thread-safe LRU cache for tokens with configurable TTL and capacity.
+//
+// A plain Mutex (not RWMutex) is intentional: every cache access — including
+// Get — mutates the LRU recency order, and the underlying lru.Cache already
+// serializes operations on its own internal mutex. RWMutex would only add
+// per-op overhead without unlocking real read parallelism.
 type Cache struct {
-	mu  sync.RWMutex
+	mu  sync.Mutex
 	lru *lru.Cache[cacheKey, cacheEntry]
 	ttl time.Duration
 }
@@ -106,24 +111,23 @@ func NewCacheFromEnv() *Cache {
 // Get retrieves a token from the cache by credentialProviderName and resourceID.
 // Returns the token and true if found and not expired, or ("", false) otherwise.
 // On a successful get, the entry is moved to the front of the LRU list.
+//
+// The whole get / expired-check / remove sequence runs under a single write
+// lock so a concurrent Set cannot have its fresh entry deleted by a stale
+// expired-check from this goroutine.
 func (c *Cache) Get(credentialProviderName, resourceID string) (string, bool) {
-	c.mu.RLock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	key := cacheKey{credentialProviderName: credentialProviderName, resourceID: resourceID}
 	entry, ok := c.lru.Get(key)
-	c.mu.RUnlock()
-
-	if !ok || entry.isExpired() {
-		// Expired or missing — remove from LRU if present.
-		c.mu.Lock()
-		c.lru.Remove(key)
-		c.mu.Unlock()
+	if !ok {
 		return "", false
 	}
-
-	// Access moves the entry to the front (LRU semantics).
-	c.mu.Lock()
-	c.lru.Get(key)
-	c.mu.Unlock()
+	if entry.isExpired() {
+		c.lru.Remove(key)
+		return "", false
+	}
 	return entry.token, true
 }
 
@@ -149,8 +153,8 @@ func (c *Cache) Delete(credentialProviderName, resourceID string) {
 
 // Len returns the current number of entries in the cache.
 func (c *Cache) Len() int {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	return c.lru.Len()
 }
 

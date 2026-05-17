@@ -52,12 +52,18 @@ func New(credClient *credential.Client) *Plugin {
 // Name implements plugins.Plugin.
 func (p *Plugin) Name() string { return PluginName }
 
-// OnRequestHeaders runs the full token-injection flow when the rule has a
-// TokenTransformation action. Returns ActionContinue when the rule is not
-// applicable (no TokenTransformation, disabled, no sandbox token, when
-// condition not met). Returns ActionMutate with a SetHeaders response on
-// success. On failure, FailStrategy = Block surfaces a PermissionDenied
-// gRPC error; other strategies fall back to ActionContinue.
+// OnRequestHeaders performs only the cheap, side-effect-free checks
+// (transformation declared, enabled, sandbox token present, when condition
+// satisfied) and claims the rule for deferred execution by returning
+// ActionRecord. The expensive credential-provider RPC is deferred to
+// Finalize so a later Block rule can short-circuit without paying for it.
+//
+// Returns ActionContinue when the rule is irrelevant or token injection
+// cannot apply (no TokenTransformation, disabled, no sandbox token, or the
+// when condition rejected the request).
+//
+// A failing when-condition check still routes through handleFailure, since
+// it represents a malformed rule rather than a "not applicable" branch.
 func (p *Plugin) OnRequestHeaders(ctx context.Context, rctx *plugins.RequestContext, rule *v1alpha1.SecurityRule) (plugins.Result, error) {
 	if rule.Actions == nil || rule.Actions.TokenTransformation == nil {
 		return plugins.ContinueResult(), nil
@@ -87,6 +93,27 @@ func (p *Plugin) OnRequestHeaders(ctx context.Context, rctx *plugins.RequestCont
 		loggerD.Info("When condition not met, skipping token injection", "rule", rule.Name)
 		return plugins.ContinueResult(), nil
 	}
+
+	loggerD.Info("Token-injection rule recorded; deferring credential-provider call until rule scan completes",
+		"rule", rule.Name, "pod", rctx.PodNN.String())
+	return plugins.RecordResult(), nil
+}
+
+// Finalize executes the deferred token-fetch and produces the header
+// mutation. The orchestrator calls this only after the rule scan completes
+// without an Immediate response, so a later Block rule (which would have
+// produced an Immediate) is guaranteed to short-circuit before any
+// credential-provider RPC fires.
+func (p *Plugin) Finalize(ctx context.Context, rctx *plugins.RequestContext, rule *v1alpha1.SecurityRule) (plugins.Result, error) {
+	if rule == nil || rule.Actions == nil || rule.Actions.TokenTransformation == nil {
+		// Defensive: the orchestrator should never call Finalize without a
+		// recorded rule, but fall through cleanly if it does.
+		return plugins.ContinueResult(), nil
+	}
+
+	logger := log.FromContext(ctx)
+	loggerD := logger.V(logutil.DEBUG)
+	tt := rule.Actions.TokenTransformation
 
 	resp, err := p.fetchAndBuild(ctx, rule, rctx)
 	if err != nil {

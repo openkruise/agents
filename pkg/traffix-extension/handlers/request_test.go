@@ -19,6 +19,10 @@ package handlers
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
@@ -26,6 +30,7 @@ import (
 	envoyTypeV3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"github.com/go-logr/logr"
 	structpb "google.golang.org/protobuf/types/known/structpb"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	v1alpha1 "github.com/openkruise/agents/api/v1alpha1"
@@ -34,6 +39,7 @@ import (
 	"github.com/openkruise/agents/pkg/traffix-extension/plugins"
 	"github.com/openkruise/agents/pkg/traffix-extension/plugins/block"
 	"github.com/openkruise/agents/pkg/traffix-extension/plugins/bypass"
+	"github.com/openkruise/agents/pkg/traffix-extension/plugins/tokeninjection"
 )
 
 func TestExtractExtProcAttrs_NestedStructure(t *testing.T) {
@@ -943,5 +949,219 @@ func TestHandleRequestHeaders_BlockRuleBeatsLaterBypassRule(t *testing.T) {
 	}
 	if immediate.ImmediateResponse.Status.Code != envoyTypeV3.StatusCode(451) {
 		t.Errorf("status: want 451, got %v", immediate.ImmediateResponse.Status.Code)
+	}
+}
+
+// --- Token-injection deferral tests --------------------------------------
+//
+// These tests pin the contract that the orchestrator records token-injection
+// matches during scan and only fetches credentials in a finalize phase. A
+// later Block rule must short-circuit BEFORE the credential-provider RPC
+// fires.
+
+// fakeIdentityProvider returns an httptest.Server that serves a constant
+// successful token response, plus a counter recording how many times the
+// server was called. Callers must Close the server.
+func fakeIdentityProvider(t *testing.T) (*credential.Client, *httptest.Server, *atomic.Int32) {
+	t.Helper()
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"apiKey":"finalize-token"}`))
+	}))
+	t.Setenv("IDENTITY_PROVIDER_URL", srv.URL)
+	t.Setenv("CREDENTIAL_PROVIDER_CLIENT_CERT_PATH", "/nonexistent")
+	t.Setenv("CREDENTIAL_PROVIDER_CLIENT_KEY_PATH", "/nonexistent")
+	t.Setenv("CREDENTIAL_PROVIDER_CA_CERT_PATH", "/nonexistent")
+	return credential.NewClient(), srv, &calls
+}
+
+// newServerWithFullChain wires the production plugin order
+// (bypass → block → tokeninjection) so the orchestrator's deferred
+// finalize phase can be exercised end-to-end.
+func newServerWithFullChain(t *testing.T, store configstore.Store, credClient *credential.Client) *Server {
+	t.Helper()
+	return NewServer(false, ServerDeps{
+		ConfigStore: store,
+		Plugins:     []plugins.Plugin{bypass.New(), block.New(), tokeninjection.New(credClient)},
+	})
+}
+
+// makeAttrsWithSandboxToken bundles a base64-encoded SandboxToken alongside
+// the pod identity attrs the handler reads from filter_state.
+func makeAttrsWithSandboxToken(namespace, name, labelsB64 string, token credential.SandboxToken) map[string]*structpb.Struct {
+	js, _ := json.Marshal(token)
+	tokenB64 := base64.StdEncoding.EncodeToString(js)
+	inner, _ := structpb.NewStruct(map[string]interface{}{
+		filterStateDownstreamPeerNamespace: namespace,
+		filterStateDownstreamPeerName:      name,
+		filterStateSandboxLabels:           labelsB64,
+		filterStateSandboxToken:            tokenB64,
+	})
+	return map[string]*structpb.Struct{
+		extProcAttrsKey: inner,
+	}
+}
+
+func tokenTransformationRule(name, pathPrefix string) v1alpha1.SecurityRule {
+	return v1alpha1.SecurityRule{
+		Name: name,
+		Match: []v1alpha1.RuleMatch{{
+			Domains: []string{"*"},
+			Paths:   []v1alpha1.PathMatch{{Type: v1alpha1.PathMatchTypePrefix, Value: pathPrefix}},
+		}},
+		Actions: &v1alpha1.SecurityRuleActions{
+			TokenTransformation: &v1alpha1.TokenTransformationAction{
+				FailStrategy:  v1alpha1.FailStrategyAllow,
+				TargetHeader:  "Authorization",
+				ValueTemplate: "Bearer {{ .Token }}",
+				TokenProviderRef: &corev1.TypedLocalObjectReference{
+					APIGroup: strPtr("agentidentity.alibabacloud.com"),
+					Kind:     "CredentialProvider",
+					Name:     "llm-api-key",
+				},
+			},
+		},
+	}
+}
+
+// TestHandleRequestHeaders_BlockRuleSuppressesDeferredTokenFetch is the core
+// regression guard for the doc-vs-code alignment fix: when a request matches
+// both a tokenTransformation rule (earlier) and a Block rule (later), the
+// orchestrator must skip the credential-provider RPC entirely and return the
+// Block ImmediateResponse.
+func TestHandleRequestHeaders_BlockRuleSuppressesDeferredTokenFetch(t *testing.T) {
+	cli, srv, calls := fakeIdentityProvider(t)
+	defer srv.Close()
+
+	store := configstore.NewStore()
+	store.ProfileSet(newProfile("p1", "default", map[string]string{"app": "blocked"}, []v1alpha1.SecurityRule{
+		tokenTransformationRule("token-rule", "/v1/chat"),
+		{
+			Name: "block-rule",
+			Match: []v1alpha1.RuleMatch{{
+				Domains: []string{"*"},
+				Paths:   []v1alpha1.PathMatch{{Type: v1alpha1.PathMatchTypePrefix, Value: "/v1/chat"}},
+			}},
+			Actions: &v1alpha1.SecurityRuleActions{
+				Block: &v1alpha1.BlockAction{StatusCode: 429},
+			},
+		},
+	}))
+
+	server := newServerWithFullChain(t, store, cli)
+	resps, err := server.HandleRequestHeaders(
+		context.Background(),
+		makeRequestHeaders("api.example.com", "/v1/chat/completions", "POST"),
+		makeAttrsWithSandboxToken("default", "pod-x", testLabelsB64, credential.SandboxToken{
+			RequestID:       "req-1",
+			AccessToken:     "user-token",
+			SandboxClientID: "client-1",
+		}),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(resps) != 1 {
+		t.Fatalf("expected 1 response, got %d", len(resps))
+	}
+	immediate, ok := resps[0].Response.(*extProcPb.ProcessingResponse_ImmediateResponse)
+	if !ok {
+		t.Fatalf("expected ImmediateResponse from block, got %T", resps[0].Response)
+	}
+	if immediate.ImmediateResponse.Status.Code != envoyTypeV3.StatusCode(429) {
+		t.Errorf("status: want 429, got %v", immediate.ImmediateResponse.Status.Code)
+	}
+	if got := calls.Load(); got != 0 {
+		t.Errorf("credential provider must NOT be called when a later Block matches; got %d calls", got)
+	}
+}
+
+// TestHandleRequestHeaders_TokenRule_FinalizeMutates exercises the happy
+// case where only a tokenTransformation rule matches: the rule is recorded
+// during scan and then the finalize phase performs the credential-provider
+// fetch and emits the SetHeaders mutation.
+func TestHandleRequestHeaders_TokenRule_FinalizeMutates(t *testing.T) {
+	cli, srv, calls := fakeIdentityProvider(t)
+	defer srv.Close()
+
+	store := configstore.NewStore()
+	store.ProfileSet(newProfile("p1", "default", map[string]string{"app": "blocked"}, []v1alpha1.SecurityRule{
+		tokenTransformationRule("token-rule", "/v1/chat"),
+	}))
+
+	server := newServerWithFullChain(t, store, cli)
+	resps, err := server.HandleRequestHeaders(
+		context.Background(),
+		makeRequestHeaders("api.example.com", "/v1/chat/completions", "POST"),
+		makeAttrsWithSandboxToken("default", "pod-x", testLabelsB64, credential.SandboxToken{
+			RequestID:       "req-1",
+			AccessToken:     "user-token",
+			SandboxClientID: "client-1",
+		}),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("expected 1 credential provider call, got %d", got)
+	}
+	if len(resps) != 1 {
+		t.Fatalf("expected 1 response from finalize, got %d", len(resps))
+	}
+	rh, ok := resps[0].Response.(*extProcPb.ProcessingResponse_RequestHeaders)
+	if !ok {
+		t.Fatalf("expected RequestHeaders response from finalize, got %T", resps[0].Response)
+	}
+	set := rh.RequestHeaders.GetResponse().GetHeaderMutation().GetSetHeaders()
+	if len(set) != 1 || string(set[0].Header.RawValue) != "Bearer finalize-token" {
+		t.Errorf("unexpected SetHeaders: %+v", set)
+	}
+}
+
+// TestHandleRequestHeaders_BypassRuleSuppressesDeferredTokenFetch confirms
+// the same deferral guarantee for Bypass: when an earlier Bypass rule
+// matches, a later token rule's credential-provider RPC must NOT fire.
+func TestHandleRequestHeaders_BypassRuleSuppressesDeferredTokenFetch(t *testing.T) {
+	cli, srv, calls := fakeIdentityProvider(t)
+	defer srv.Close()
+
+	store := configstore.NewStore()
+	store.ProfileSet(newProfile("p1", "default", map[string]string{"app": "blocked"}, []v1alpha1.SecurityRule{
+		{
+			Name:    "bypass-everything",
+			Match:   []v1alpha1.RuleMatch{{Domains: []string{"*"}}},
+			Actions: &v1alpha1.SecurityRuleActions{Bypass: true},
+		},
+		tokenTransformationRule("token-rule", "/"),
+	}))
+
+	server := newServerWithFullChain(t, store, cli)
+	resps, err := server.HandleRequestHeaders(
+		context.Background(),
+		makeRequestHeaders("api.example.com", "/anything", "GET"),
+		makeAttrsWithSandboxToken("default", "pod-x", testLabelsB64, credential.SandboxToken{
+			RequestID:       "req-1",
+			AccessToken:     "user-token",
+			SandboxClientID: "client-1",
+		}),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := calls.Load(); got != 0 {
+		t.Errorf("credential provider must NOT be called when an earlier Bypass matches; got %d calls", got)
+	}
+	if len(resps) != 1 {
+		t.Fatalf("expected 1 passthrough response, got %d", len(resps))
+	}
+	rh, ok := resps[0].Response.(*extProcPb.ProcessingResponse_RequestHeaders)
+	if !ok {
+		t.Fatalf("expected RequestHeaders passthrough, got %T", resps[0].Response)
+	}
+	if rh.RequestHeaders.GetResponse().GetHeaderMutation() != nil {
+		t.Errorf("Bypass response should carry no header mutation, got %+v",
+			rh.RequestHeaders.GetResponse().GetHeaderMutation())
 	}
 }

@@ -48,6 +48,15 @@ const (
 	// guarantees the same plugin is invoked at most once per request in
 	// this mode (first matching rule wins).
 	ActionMutate
+	// ActionRecord means the plugin claimed responsibility for the rule
+	// but is deferring its side effect (e.g. an upstream RPC) until the
+	// rule scan confirms no terminal Immediate has fired. The handler
+	// records the matched rule and, after the scan finishes without an
+	// Immediate, calls the plugin's Finalize method to produce the actual
+	// mutation. Plugins that return ActionRecord MUST also implement the
+	// Finalizer interface; the handler treats Record-without-Finalizer as
+	// a programmer error.
+	ActionRecord
 )
 
 // Result is the value returned by a plugin's OnRequestHeaders.
@@ -69,6 +78,12 @@ func ImmediateResult(responses ...*extProcPb.ProcessingResponse) Result {
 // MutateResult builds a header-mutation result with the given responses.
 func MutateResult(responses ...*extProcPb.ProcessingResponse) Result {
 	return Result{Action: ActionMutate, Responses: responses}
+}
+
+// RecordResult is a convenience constructor for "matched but deferred" results.
+// The plugin must also implement Finalizer.
+func RecordResult() Result {
+	return Result{Action: ActionRecord}
 }
 
 // RequestContext is the per-request data the handler hands to every plugin.
@@ -105,4 +120,15 @@ type Plugin interface {
 	// plugin should return ActionContinue if the rule's action is not
 	// relevant to it.
 	OnRequestHeaders(ctx context.Context, rctx *RequestContext, rule *v1alpha1.SecurityRule) (Result, error)
+}
+
+// Finalizer is an optional interface plugins implement when their work
+// requires deferring expensive side effects (e.g. an upstream RPC) until the
+// rule scan completes without an Immediate response. A plugin returns
+// ActionRecord from OnRequestHeaders to claim a rule, then the orchestrator
+// calls Finalize after scanning all rules — only if no terminal Immediate
+// fired in between. Finalize MUST return ActionContinue, ActionMutate, or
+// ActionImmediate; ActionRecord is not valid here.
+type Finalizer interface {
+	Finalize(ctx context.Context, rctx *RequestContext, rule *v1alpha1.SecurityRule) (Result, error)
 }

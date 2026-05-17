@@ -63,15 +63,17 @@ func escapeAndBuildPattern(pattern string) string {
 		}
 
 		var escaped string
-		if strings.HasPrefix(part, "^") {
-			escaped = "^" + regexp.QuoteMeta(strings.TrimPrefix(part, "^"))
-		} else if strings.HasSuffix(part, "$") {
-			escaped = regexp.QuoteMeta(strings.TrimSuffix(part, "$")) + "$"
-		} else if strings.HasPrefix(part, "^") && strings.HasSuffix(part, "$") {
-			trimmed := strings.TrimPrefix(part, "^")
-			trimmed = strings.TrimSuffix(trimmed, "$")
+		hasHead := strings.HasPrefix(part, "^")
+		hasTail := strings.HasSuffix(part, "$")
+		switch {
+		case hasHead && hasTail:
+			trimmed := strings.TrimSuffix(strings.TrimPrefix(part, "^"), "$")
 			escaped = "^" + regexp.QuoteMeta(trimmed) + "$"
-		} else {
+		case hasHead:
+			escaped = "^" + regexp.QuoteMeta(strings.TrimPrefix(part, "^"))
+		case hasTail:
+			escaped = regexp.QuoteMeta(strings.TrimSuffix(part, "$")) + "$"
+		default:
 			escaped = regexp.QuoteMeta(part)
 		}
 		parts[i] = escaped

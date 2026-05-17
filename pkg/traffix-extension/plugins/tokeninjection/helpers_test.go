@@ -80,6 +80,37 @@ func TestCheckWhenCondition_PatternMatch(t *testing.T) {
 	}
 }
 
+// TestCheckWhenCondition_BothAnchorsNoPlaceholder pins the fix for a previously
+// dead branch in escapeAndBuildPattern: when a pattern contains BOTH ^ and $
+// anchors and NO __PLACEHOLDER__, the trailing $ used to be regex-escaped and
+// thus matched a literal "$" rather than acting as an end-of-string anchor.
+func TestCheckWhenCondition_BothAnchorsNoPlaceholder(t *testing.T) {
+	when := &v1alpha1.ActionCondition{Header: "X-Tag", Pattern: "^literal$"}
+
+	tests := []struct {
+		name  string
+		value string
+		match bool
+	}{
+		{"exact value matches", "literal", true},
+		{"trailing junk does NOT match (true end anchor)", "literal-and-more", false},
+		{"trailing literal $ does NOT match", "literal$", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			headers := map[string]string{"x-tag": tt.value}
+			ok, err := CheckWhenCondition(when, headers)
+			if err != nil {
+				t.Errorf("unexpected error: %v", err)
+			}
+			if ok != tt.match {
+				t.Errorf("expected match=%v, got %v for value %q", tt.match, ok, tt.value)
+			}
+		})
+	}
+}
+
 func TestCheckWhenCondition_ComplexPattern(t *testing.T) {
 	when := &v1alpha1.ActionCondition{
 		Header:  "Proxy-Authorization",
