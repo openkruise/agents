@@ -436,8 +436,7 @@ func (r *commonControl) createPod(ctx context.Context, box *agentsv1alpha1.Sandb
 
 	// to avoid the performance issue, using the controller to inject csi containers
 	// fetch the configmap and parse the configuration based on the controller runtime
-	podTemplate := &pod.Spec
-	injectErr := sidecarutils.InjectPodTemplateCSIAndRuntimeSidecar(ctx, box, podTemplate, r.Client)
+	injectErr := sidecarutils.InjectSandboxRuntimes(ctx, box, pod, r.Client)
 	if injectErr != nil {
 		klog.ErrorS(injectErr, "failed to inject pod template with csi sidecar or runtime sidecar", "sandbox", klog.KObj(box))
 		return nil, injectErr

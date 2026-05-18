@@ -330,3 +330,13 @@ func GenerateSandboxName(baseName string) string {
 	}
 	return generateName
 }
+
+// FindContainer returns the pointer to the first container whose name matches.
+func FindContainer(name string, containers []corev1.Container) *corev1.Container {
+	for i := range containers {
+		if containers[i].Name == name {
+			return &containers[i]
+		}
+	}
+	return nil
+}

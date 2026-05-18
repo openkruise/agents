@@ -19,6 +19,7 @@ package sidecarutils
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -29,21 +30,13 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
+	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/webhookutils"
 )
 
-func enableInjectCsiMountConfig(sandbox *agentsv1alpha1.Sandbox) bool {
+func IsRuntimeEnabled(sandbox *agentsv1alpha1.Sandbox, runtimeName string) bool {
 	for _, runtime := range sandbox.Spec.Runtimes {
-		if runtime.Name == agentsv1alpha1.RuntimeConfigForInjectCsiMount {
-			return true
-		}
-	}
-	return false
-}
-
-func enableInjectAgentRuntimeConfig(sandbox *agentsv1alpha1.Sandbox) bool {
-	for _, runtime := range sandbox.Spec.Runtimes {
-		if runtime.Name == agentsv1alpha1.RuntimeConfigForInjectAgentRuntime {
+		if runtime.Name == runtimeName {
 			return true
 		}
 	}
@@ -171,6 +164,51 @@ func setAgentRuntimeContainer(ctx context.Context, podSpec *corev1.PodSpec, conf
 	setMainContainerConfigWhenInjectRuntimeSidecar(ctx, mainContainer, config)
 
 	podSpec.Volumes = append(podSpec.Volumes, config.Volumes...)
+}
+
+func applyInjectionTemplate(ctx context.Context, pod *corev1.Pod, config SidecarInjectConfig) error {
+	for k, v := range config.Labels {
+		if _, exists := pod.Labels[k]; exists {
+			return fmt.Errorf("label already exists: %s", k)
+		}
+		if pod.Labels == nil {
+			pod.Labels = make(map[string]string)
+		}
+		pod.Labels[k] = v
+	}
+
+	for k, v := range config.Annotations {
+		if _, exists := pod.Annotations[k]; exists {
+			return fmt.Errorf("label already exists: %s", k)
+		}
+		if pod.Annotations == nil {
+			pod.Annotations = make(map[string]string)
+		}
+		pod.Annotations[k] = v
+	}
+
+	for _, ic := range config.InitContainers {
+		if utils.FindContainer(ic.Name, pod.Spec.InitContainers) != nil {
+			return fmt.Errorf("init container already exists: %s", ic.Name)
+		}
+		pod.Spec.InitContainers = append(pod.Spec.InitContainers, ic)
+	}
+
+	for _, c := range config.Containers {
+		if utils.FindContainer(c.Name, pod.Spec.Containers) != nil {
+			return fmt.Errorf("container already exists: %s", c.Name)
+		}
+		pod.Spec.Containers = append(pod.Spec.Containers, c)
+	}
+
+	for _, v := range config.Volumes {
+		if findVolumeByName(pod.Spec.Volumes, v.Name) {
+			return fmt.Errorf("volume already exists: %s", v.Name)
+		}
+		pod.Spec.Volumes = append(pod.Spec.Volumes, v)
+	}
+
+	return nil
 }
 
 func setMainContainerConfigWhenInjectRuntimeSidecar(ctx context.Context, mainContainer *corev1.Container, config SidecarInjectConfig) {

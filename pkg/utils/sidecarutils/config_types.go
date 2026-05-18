@@ -21,9 +21,11 @@ import (
 )
 
 const (
-	KEY_CSI_INJECTION_CONFIG     = "csi"
-	KEY_RUNTIME_INJECTION_CONFIG = "agent-runtime"
-	SandboxInjectionConfigName   = "sandbox-injection-config"
+	KEY_CSI_INJECTION_CONFIG            = "csi"
+	KEY_EGRESS_CONTROL_INJECTION_CONFIG = "egress-control"
+	KEY_RUNTIME_INJECTION_CONFIG        = "agent-runtime"
+
+	SandboxInjectionConfigName = "sandbox-injection-config"
 )
 
 type SidecarInjectConfig struct {
@@ -34,4 +36,13 @@ type SidecarInjectConfig struct {
 	Sidecars []corev1.Container `json:"csiSidecar"`
 	// Support injection for volume mount configurations
 	Volumes []corev1.Volume `json:"volume"`
+
+	// Annotations to be added to the pod.
+	Annotations map[string]string `json:"annotations"`
+	// Labels to be added to the pod.
+	Labels map[string]string `json:"labels"`
+	// InitContainers to be appended to the pod spec.
+	InitContainers []corev1.Container `json:"initContainers"`
+	// Containers to be appended to the pod spec.
+	Containers []corev1.Container `json:"containers"`
 }
