@@ -111,3 +111,4 @@ test/              E2E (Go), E2B (Python) tests
 - Ask user when unsure about business logic
 - Always edit the files on your own, never use automation tools or scripts
 - All comments must be in English
+- When creating an `AGENTS.md` for a new submodule, also create a sibling `CLAUDE.md` in the same directory whose sole content is `@./AGENTS.md`
