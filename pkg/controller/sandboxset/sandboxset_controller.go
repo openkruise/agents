@@ -246,7 +246,12 @@ func (r *Reconciler) scaleDown(ctx context.Context, count int, sbs *agentsv1alph
 	log.Info("scale down", "count", count)
 
 	// Separate candidates into old revision and updated revision.
-	candidates := append(groups.Creating, groups.Available...)
+	// Allocate a new slice to avoid aliasing the backing arrays of Creating
+	// and Available. Using append(Creating, Available...) would mutate
+	// Creating's backing array when it has spare capacity.
+	candidates := make([]*agentsv1alpha1.Sandbox, 0, len(groups.Creating)+len(groups.Available))
+	candidates = append(candidates, groups.Creating...)
+	candidates = append(candidates, groups.Available...)
 	var oldCandidates, updatedCandidates []*agentsv1alpha1.Sandbox
 	for _, sbx := range candidates {
 		if sbx.Labels[agentsv1alpha1.LabelTemplateHash] != updateRevision {
@@ -361,6 +366,8 @@ func (r *Reconciler) scaleDownSandbox(ctx context.Context, sbx *agentsv1alpha1.S
 		log.Info("sandbox to be scaled down claimed before performed, skip")
 		return errors.New("sandbox to be scaled down claimed before performed, skip")
 	}
+	// Deep copy the sandbox before mutating it to avoid corrupting the informer cache.
+	sbx = sbx.DeepCopy()
 	managerutils.LockSandbox(sbx, lock, consts.OwnerManagerScaleDown)
 	if err = r.Update(ctx, sbx); err != nil {
 		return fmt.Errorf("failed to lock sandbox when scaling down: %s", err)
