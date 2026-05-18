@@ -311,6 +311,7 @@ func calculateStatus(args core.EnsureFuncArgs) (*agentsv1alpha1.SandboxStatus, b
 	hash, _ := core.HashSandbox(box)
 	newStatus.ObservedGeneration = box.Generation
 	newStatus.UpdateRevision = hash
+	newStatus.CurrentRevision = box.Labels[agentsv1alpha1.LabelTemplateHash]
 	if newStatus.Phase == "" {
 		newStatus.Phase = agentsv1alpha1.SandboxPending
 	}

@@ -122,6 +122,12 @@ type SandboxSetStatus struct {
 	// It represents the latest desired template version.
 	UpdateRevision string `json:"updateRevision,omitempty"`
 
+	// CurrentTemplate is the name of the SandboxTemplate currently materialised
+	// from spec.template, or spec.templateRef.Name when templateRef is used.
+	// Informational only.
+	// +optional
+	CurrentTemplate string `json:"currentTemplate,omitempty"`
+
 	// UpdatedReplicas is the number of sandboxes that have been updated to the UpdateRevision.
 	// +optional
 	UpdatedReplicas int32 `json:"updatedReplicas,omitempty"`

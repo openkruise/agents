@@ -97,6 +97,7 @@ const (
 // +kubebuilder:rbac:groups=agents.kruise.io,resources=sandboxsets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=agents.kruise.io,resources=sandboxsets/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=agents.kruise.io,resources=sandboxsets/finalizers,verbs=update
+// +kubebuilder:rbac:groups=agents.kruise.io,resources=sandboxtemplates,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch
 
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -213,6 +214,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 
 	log.Info("reconcile done", "totalCost", time.Since(totalStart))
+	r.cleanupOldSandboxTemplates(ctx, sbs)
 	if err = r.updateSandboxSetStatus(ctx, *newStatus, sbs); err != nil {
 		log.Error(err, "failed to update sandboxset status")
 		allErrors = errors.Join(allErrors, err)
@@ -470,5 +472,8 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		WithOptions(controller.Options{MaxConcurrentReconciles: concurrentReconciles}).
 		Watches(&agentsv1alpha1.SandboxSet{}, &handler.EnqueueRequestForObject{}).
 		Watches(&agentsv1alpha1.Sandbox{}, &SandboxEventHandler{}).
+		Watches(&agentsv1alpha1.SandboxTemplate{},
+			handler.EnqueueRequestForOwner(mgr.GetScheme(), mgr.GetRESTMapper(),
+				&agentsv1alpha1.SandboxSet{}, handler.OnlyControllerOwner())).
 		Complete(r)
 }
