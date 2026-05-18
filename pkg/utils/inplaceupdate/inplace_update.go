@@ -234,6 +234,35 @@ func buildContainerResourcesMap(containers []corev1.Container) map[string]corev1
 	return result
 }
 
+// resourcesEqual compares two ResourceRequirements semantically.
+// It only checks resources specified in 'desired' (the sandbox spec), ignoring extra resources
+// in 'actual' (the pod) injected by the system (e.g., ephemeral-storage).
+// It uses Quantity.Cmp() to handle different unit representations (e.g., "1" vs "1000m").
+func resourcesEqual(desired, actual corev1.ResourceRequirements) bool {
+	if !resourceListContains(actual.Limits, desired.Limits) {
+		return false
+	}
+	if !resourceListContains(actual.Requests, desired.Requests) {
+		return false
+	}
+	return true
+}
+
+// resourceListContains checks that for every resource in 'desired', the 'actual' list
+// contains the same resource with an equal quantity value.
+func resourceListContains(actual, desired corev1.ResourceList) bool {
+	for resName, desiredQty := range desired {
+		actualQty, exists := actual[resName]
+		if !exists {
+			return false
+		}
+		if desiredQty.Cmp(actualQty) != 0 {
+			return false
+		}
+	}
+	return true
+}
+
 // DefaultGenerateResizeSubresourceBody generates the Pod body for resize subResource update.
 // It compares the current pod's container resources with the sandbox's container resources,
 // and returns a minimal Pod object containing only the fields required by the resize API:
@@ -281,7 +310,7 @@ func DefaultGenerateResizeSubresourceBody(opts InPlaceUpdateOptions) *corev1.Pod
 		if !ok {
 			continue
 		}
-		if reflect.DeepEqual(origin.Resources, container.Resources) {
+		if resourcesEqual(origin.Resources, container.Resources) {
 			continue
 		}
 		container.Resources = origin.Resources
