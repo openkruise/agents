@@ -23,6 +23,12 @@ import (
 	"k8s.io/klog/v2"
 )
 
+type contextKey string
+
+const (
+	RequestIDKey contextKey = "requestID"
+)
+
 func NewContext(keysAndValues ...any) context.Context {
 	logger := klog.LoggerWithValues(klog.Background(), "contextID", uuid.NewString())
 	return klog.NewContext(context.Background(), logger.WithValues(keysAndValues...))
@@ -38,4 +44,17 @@ func NewContextFrom(parent context.Context, keysAndValues ...any) context.Contex
 func Extend(ctx context.Context, keysAndValues ...any) context.Context {
 	logger := klog.FromContext(ctx)
 	return klog.NewContext(ctx, logger.WithValues(keysAndValues...))
+}
+
+// WithRequestID returns a new context with the request ID stored as a value.
+func WithRequestID(ctx context.Context, requestID string) context.Context {
+	return context.WithValue(ctx, RequestIDKey, requestID)
+}
+
+// GetRequestID extracts the request ID from the context.
+func GetRequestID(ctx context.Context) string {
+	if val, ok := ctx.Value(RequestIDKey).(string); ok {
+		return val
+	}
+	return ""
 }

@@ -164,3 +164,25 @@ func TestNewContext_DoesNotInheritCancellation(t *testing.T) {
 		// Expected: context remains active
 	}
 }
+
+func TestRequestID(t *testing.T) {
+	requestID := "test-request-id"
+	ctx := context.Background()
+
+	// Test GetRequestID with empty context
+	if got := GetRequestID(ctx); got != "" {
+		t.Errorf("Expected empty request ID, got %s", got)
+	}
+
+	// Test WithRequestID and GetRequestID
+	ctx = WithRequestID(ctx, requestID)
+	if got := GetRequestID(ctx); got != requestID {
+		t.Errorf("Expected request ID %s, got %s", requestID, got)
+	}
+
+	// Test Extend with RequestID
+	extendedCtx := Extend(ctx, "extra", "value")
+	if got := GetRequestID(extendedCtx); got != requestID {
+		t.Errorf("Expected request ID %s to be preserved in extended context, got %s", requestID, got)
+	}
+}
