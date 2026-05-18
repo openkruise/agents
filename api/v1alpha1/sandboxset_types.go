@@ -35,6 +35,7 @@ const (
 	LabelTemplateHash     = InternalPrefix + "template-hash"
 
 	AnnotationLock               = InternalPrefix + "lock"
+	AnnotationLockTimestamp      = InternalPrefix + "lock-timestamp"
 	AnnotationOwner              = InternalPrefix + "owner"
 	AnnotationClaimTime          = InternalPrefix + "claim-timestamp"
 	AnnotationRestoreFrom        = InternalPrefix + "restore-from"
