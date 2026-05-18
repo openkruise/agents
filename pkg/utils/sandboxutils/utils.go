@@ -128,8 +128,13 @@ func IsSandboxPausable(sbx *agentsv1alpha1.Sandbox) (bool, string) {
 // IsSandboxResumable returns true when the resuming operation will not cause any conflict.
 func IsSandboxResumable(sbx *agentsv1alpha1.Sandbox) (bool, string) {
 	switch sbx.Status.Phase {
-	case agentsv1alpha1.SandboxRunning, agentsv1alpha1.SandboxResuming:
-		return true, "SandboxIsRunningOrResuming"
+	case agentsv1alpha1.SandboxRunning:
+		if sbx.Spec.Paused {
+			return false, "SandboxIsPausing"
+		}
+		return true, "SandboxIsRunning"
+	case agentsv1alpha1.SandboxResuming:
+		return true, "SandboxIsResuming"
 	default:
 	}
 	if sbx.Status.Phase == agentsv1alpha1.SandboxPaused {
