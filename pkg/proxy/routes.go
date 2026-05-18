@@ -31,9 +31,31 @@ import (
 	"k8s.io/klog/v2"
 
 	"github.com/openkruise/agents/pkg/peers"
+	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 )
+
+// peerSyncMaxConcurrency bounds how many peer refresh requests run at once
+// within a single SyncRouteWithPeers fan-out, so a burst of lifecycle events
+// cannot spawn a goroutine/connection storm of routeChanges × peers.
+const peerSyncMaxConcurrency = 64
+
+// peerSyncTotalTimeout caps the whole attempt+retry sequence for one peer so a
+// slow or hung replica cannot add unbounded head-of-line latency to the
+// synchronous lifecycle path. The peer-reconcile loop is the correctness
+// backstop for any peer that misses an update within this budget.
+var peerSyncTotalTimeout = 3 * consts.RequestPeerTimeout
+
+// peerSyncBackoff keeps the total inter-attempt sleep budget (~30ms over two
+// sleeps) strictly below the per-request timeout (consts.RequestPeerTimeout),
+// with a real growth factor instead of the previous flat, oversized budget.
+var peerSyncBackoff = wait.Backoff{
+	Steps:    3,
+	Duration: 10 * time.Millisecond,
+	Factor:   2.0,
+	Jitter:   0.2,
+}
 
 // Route represents an internal sandbox routing rule
 type Route struct {
@@ -91,6 +113,15 @@ func (s *Server) SyncRouteWithPeers(route Route) error {
 		return nil
 	}
 
+	ctx, cancel := context.WithTimeout(context.Background(), peerSyncTotalTimeout)
+	defer cancel()
+
+	concurrency := peerSyncMaxConcurrency
+	if len(peerList) < concurrency {
+		concurrency = len(peerList)
+	}
+	sem := make(chan struct{}, concurrency)
+
 	var (
 		wg         sync.WaitGroup
 		mu         sync.Mutex
@@ -99,17 +130,12 @@ func (s *Server) SyncRouteWithPeers(route Route) error {
 
 	for _, peer := range peerList {
 		wg.Add(1)
+		sem <- struct{}{}
 		go func(peerIP string) {
 			defer wg.Done()
-			requestErr := retry.OnError(wait.Backoff{
-				Steps:    10,
-				Duration: 10 * time.Millisecond,
-				Factor:   1.0,
-				Jitter:   1.2,
-			}, func(err error) bool {
-				return true
-			}, func() error {
-				return requestPeer(http.MethodPost, peerIP, RefreshAPI, body)
+			defer func() { <-sem }()
+			requestErr := retry.OnError(peerSyncBackoff, isRetryablePeerError, func() error {
+				return requestPeer(ctx, http.MethodPost, peerIP, RefreshAPI, body)
 			})
 			if requestErr != nil {
 				mu.Lock()
