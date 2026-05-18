@@ -99,6 +99,13 @@ type SandboxReconciler struct {
 
 //nolint:gocyclo // This function handles multiple reconciliation scenarios which require branching logic
 func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (crl ctrl.Result, err error) {
+	// Record reconcile duration partitioned by namespace and result. Deferred
+	// first so it runs last (LIFO) and captures the final values of crl/err.
+	reconcileStart := time.Now()
+	defer func() {
+		observeReconcileDuration(req.Namespace, reconcileResultLabel(crl, err), time.Since(reconcileStart))
+	}()
+
 	// fetch pod
 	pod := &corev1.Pod{}
 	err = r.Get(ctx, req.NamespacedName, pod)
@@ -298,7 +305,12 @@ func (r *SandboxReconciler) updateSandboxStatus(ctx context.Context, newStatus a
 		return err
 	}
 	core.ResourceVersionExpectations.Expect(rcvObject)
-	klog.InfoS("update sandbox status success", "sandbox", klog.KObj(box), "status", utils.DumpJson(newStatus))
+	// Avoid allocating utils.DumpJson(newStatus) on every successful status update;
+	// callers can correlate via the structured fields below or raise klog verbosity
+	// to log the patched body before the request when debugging.
+	klog.InfoS("update sandbox status success", "sandbox", klog.KObj(box),
+		"phase", newStatus.Phase, "observedGeneration", newStatus.ObservedGeneration,
+		"updateRevision", newStatus.UpdateRevision)
 	box.Status = newStatus
 	// Update metrics after status change
 	recordSandboxMetrics(box)

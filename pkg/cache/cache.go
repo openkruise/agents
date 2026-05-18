@@ -35,6 +35,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
@@ -143,14 +144,38 @@ func NewControllerManager(cfg *rest.Config, opts config.SandboxManagerOptions) (
 		Scheme:                 scheme,
 		Cache:                  ctrlcache.Options{ByObject: byObject, DefaultUnsafeDisableDeepCopy: ptr.To(true)},
 		Metrics:                metricsserver.Options{BindAddress: "0"},
-		HealthProbeBindAddress: "",
+		HealthProbeBindAddress: opts.HealthProbeBindAddress,
 		LeaderElection:         false,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create controller manager: %w", err)
 	}
 
+	if err := registerProbeChecks(mgr, opts.HealthProbeBindAddress); err != nil {
+		return nil, err
+	}
+
 	return mgr, nil
+}
+
+// registerProbeChecks registers basic /healthz and /readyz checks on mgr when
+// the probe server is enabled (i.e. addr is non-empty). When addr is empty the
+// probe server is disabled by controller-runtime and registering checks would
+// be wasted work, so this is a no-op.
+//
+// Extracted from NewControllerManager so the registration logic can be unit
+// tested with a mock manager without needing a real *rest.Config.
+func registerProbeChecks(mgr ctrl.Manager, addr string) error {
+	if addr == "" {
+		return nil
+	}
+	if err := mgr.AddHealthzCheck("ping", healthz.Ping); err != nil {
+		return fmt.Errorf("failed to add healthz check: %w", err)
+	}
+	if err := mgr.AddReadyzCheck("ping", healthz.Ping); err != nil {
+		return fmt.Errorf("failed to add readyz check: %w", err)
+	}
+	return nil
 }
 
 // NewCache creates a new Cache instance from a pre-configured controller manager.
