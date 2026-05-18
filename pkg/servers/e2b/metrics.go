@@ -21,6 +21,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 )
 
+const (
+	ResultSuccess = "success"
+	ResultError   = "error"
+)
+
 var (
 	// snapshotDuration tracks snapshot creation latency.
 	snapshotDuration = prometheus.NewHistogramVec(
@@ -40,8 +45,32 @@ var (
 		},
 		[]string{"namespace", "result"},
 	)
+
+	// apiOperationDuration tracks E2B API operation latency.
+	apiOperationDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "sandbox_api_operation_duration_seconds",
+			Help:    "E2B API operation latency in seconds",
+			Buckets: prometheus.ExponentialBuckets(0.02, 2, 12), // 20ms -> ~41s
+		},
+		[]string{"operation", "result"},
+	)
+
+	// apiOperationTotal tracks total E2B API operations.
+	apiOperationTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "sandbox_api_operation_total",
+			Help: "Total number of E2B API operations",
+		},
+		[]string{"operation", "result"},
+	)
 )
 
 func init() {
-	metrics.Registry.MustRegister(snapshotDuration, snapshotTotal)
+	metrics.Registry.MustRegister(
+		snapshotDuration,
+		snapshotTotal,
+		apiOperationDuration,
+		apiOperationTotal,
+	)
 }
