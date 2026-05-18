@@ -29,6 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/utils/sandboxutils"
 )
 
 // SandboxUpdateOpsValidatingHandler handles validation for SandboxUpdateOps resources.
@@ -95,7 +96,7 @@ func (h *SandboxUpdateOpsValidatingHandler) handleCreate(ctx context.Context, ob
 		}
 	}
 
-	// 4. Check for active (non-terminal) SandboxUpdateOps in the same namespace
+	// 4. Check for active (non-terminal) SandboxUpdateOps in the same namespace with overlapping selectors
 	opsList := &agentsv1alpha1.SandboxUpdateOpsList{}
 	if err := h.Client.List(ctx, opsList, client.InNamespace(obj.Namespace)); err != nil {
 		return admission.Errored(http.StatusInternalServerError, err)
@@ -107,8 +108,12 @@ func (h *SandboxUpdateOpsValidatingHandler) handleCreate(ctx context.Context, ob
 		}
 		if existing.Status.Phase != agentsv1alpha1.SandboxUpdateOpsCompleted &&
 			existing.Status.Phase != agentsv1alpha1.SandboxUpdateOpsFailed {
-			errList = append(errList, field.Forbidden(specPath, "there is an active SandboxUpdateOps in the same namespace: "+existing.Name))
-			break
+			// Check if selectors overlap
+			if sandboxutils.IsSelectorOverlapping(obj.Spec.Selector, existing.Spec.Selector) {
+				errList = append(errList, field.Forbidden(specPath.Child("selector"),
+					"there is an active SandboxUpdateOps ("+existing.Name+") in the same namespace with an overlapping selector"))
+				break
+			}
 		}
 	}
 
