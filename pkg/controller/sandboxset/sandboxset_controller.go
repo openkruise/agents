@@ -365,6 +365,8 @@ func (r *Reconciler) scaleDownSandbox(ctx context.Context, sbx *agentsv1alpha1.S
 		log.Info("sandbox to be scaled down claimed before performed, skip")
 		return errors.New("sandbox to be scaled down claimed before performed, skip")
 	}
+	// Deep copy the sandbox before mutating it to avoid corrupting the informer cache.
+	sbx = sbx.DeepCopy()
 	managerutils.LockSandbox(sbx, lock, consts.OwnerManagerScaleDown)
 	if err = r.Update(ctx, sbx); err != nil {
 		return fmt.Errorf("failed to lock sandbox when scaling down: %s", err)
@@ -430,13 +432,10 @@ func (r *Reconciler) updateSandboxSetStatus(ctx context.Context, newStatus agent
 func (r *Reconciler) groupAllSandboxes(ctx context.Context, sbs *agentsv1alpha1.SandboxSet) (GroupedSandboxes, error) {
 	log := logf.FromContext(ctx)
 	sandboxList := &agentsv1alpha1.SandboxList{}
-	// NOTE: Do NOT use client.UnsafeDisableDeepCopy here. Downstream code
-	// (scaleDownSandbox, deleteSandboxForUpdate) mutates sandbox annotations
-	// (e.g. LockSandbox), so the returned objects must be independent copies
-	// to avoid corrupting the informer cache.
 	if err := r.List(ctx, sandboxList,
 		client.InNamespace(sbs.Namespace),
 		client.MatchingFields{fieldindex.IndexNameForOwnerRefUID: string(sbs.UID)},
+		client.UnsafeDisableDeepCopy,
 	); err != nil {
 		return GroupedSandboxes{}, err
 	}
