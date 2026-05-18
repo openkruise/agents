@@ -21,6 +21,7 @@ package v1alpha1
 const (
 	AnnotationRuntimeURL         = InternalPrefix + "runtime-url"
 	AnnotationRuntimeAccessToken = InternalPrefix + "runtime-access-token"
+	AnnotationWakeOnTraffic      = InternalPrefix + "wake-on-traffic"
 )
 
 // E2B annotations

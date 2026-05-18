@@ -1,0 +1,43 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    app.kubernetes.io/name: sandbox-manager
+    app.kubernetes.io/managed-by: kustomize
+  name: sandbox-manager-internal
+  namespace: sandbox-system
+spec:
+  podSelector:
+    matchLabels:
+      component: sandbox-manager
+      app.kubernetes.io/name: sandbox-manager
+  policyTypes:
+    - Ingress
+  ingress:
+    # 7788 intentionally has no source selector because it serves ingress and
+    # business traffic through the manager proxy. The wake path uses 7789 below.
+    - ports:
+        - port: 7788
+          protocol: TCP
+    - from:
+        - podSelector:
+            matchLabels:
+              component: sandbox-manager
+              app.kubernetes.io/name: sandbox-gateway
+        - podSelector:
+            matchLabels:
+              component: sandbox-manager
+              app.kubernetes.io/name: sandbox-manager
+      ports:
+        - port: 7789
+          protocol: TCP
+    - from:
+        - podSelector:
+            matchLabels:
+              component: sandbox-manager
+              app.kubernetes.io/name: sandbox-manager
+      ports:
+        - port: 7946
+          protocol: TCP
+        - port: 7946
+          protocol: UDP

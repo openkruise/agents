@@ -17,7 +17,6 @@ limitations under the License.
 package e2b
 
 import (
-	"context"
 	"fmt"
 	"net/http"
 	"time"
@@ -25,6 +24,7 @@ import (
 	"k8s.io/klog/v2"
 
 	"github.com/openkruise/agents/api/v1alpha1"
+	sandboxmanager "github.com/openkruise/agents/pkg/sandbox-manager"
 	"github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
@@ -165,82 +165,47 @@ func (sc *Controller) ConnectSandbox(r *http.Request) (web.ApiResponse[*models.S
 	// It is only consumed when preConnectState == Paused (BaselineAware policy).
 	baseline := sbx.GetTimeout()
 
-	// Step 1: Resuming the sandbox if it is paused
+	var requestedEndAt time.Time
+	if !currentEndAt.IsZero() {
+		requestedEndAt = TimeAfterSeconds(time.Now(), request.TimeoutSeconds)
+	}
+	if state == v1alpha1.SandboxStateRunning && !currentEndAt.IsZero() && !requestedEndAt.After(currentEndAt) {
+		log.Info("skip connect timeout update because requested timeout does not extend current timeout",
+			"state", state, "reason", pauseResumeReason, "currentEndAt", currentEndAt, "requestedEndAt", requestedEndAt)
+		return web.ApiResponse[*models.Sandbox]{
+			Code: http.StatusOK,
+			Body: sc.convertToE2BSandbox(sbx, runtime.GetAccessToken(sbx)),
+		}, nil
+	}
+
+	var setAnnotations map[string]string
+	if !currentEndAt.IsZero() && sbx.GetAnnotations()[v1alpha1.AnnotationWakeOnTraffic] != "" {
+		setAnnotations = map[string]string{
+			v1alpha1.AnnotationWakeOnTraffic: fmt.Sprintf("timeout:%ds", request.TimeoutSeconds),
+		}
+	}
+
+	if err := sc.manager.ConnectOrWake(ctx, sbx, sandboxmanager.ConnectOrWakeInput{
+		PreState:       state,
+		AutoPause:      autoPause,
+		PreEndAt:       currentEndAt,
+		Baseline:       baseline,
+		NewEndAt:       requestedEndAt,
+		SetAnnotations: setAnnotations,
+	}); err != nil {
+		log.Error(err, "failed to connect sandbox")
+		return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
+			Code:    http.StatusInternalServerError,
+			Message: fmt.Sprintf("Failed to connect sandbox: %v", err),
+		}
+	}
+
 	statusCode := http.StatusOK
 	if state == v1alpha1.SandboxStatePaused {
-		log.Info("sandbox is paused, will resume it", "reason", pauseResumeReason)
-		if err := sc.manager.ResumeSandbox(ctx, sbx, infra.ResumeOptions{}); err != nil {
-			log.Error(err, "failed to resume sandbox")
-			return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
-				Code:    http.StatusInternalServerError,
-				Message: fmt.Sprintf("Failed to resume sandbox: %v", err),
-			}
-		}
 		statusCode = http.StatusCreated
-		log.Info("sandbox resumed", "timeout", sbx.GetTimeout())
-	} else {
-		log.Info("sandbox is not paused, skip resuming", "state", state, "reason", pauseResumeReason)
 	}
-
-	// Step 2: Update the sandbox timeout
-	log.Info("updating sandbox timeout")
-	if err := sc.updateConnectTimeout(ctx, sbx, request.TimeoutSeconds, state, autoPause, currentEndAt, baseline); err != nil {
-		log.Error(err, "failed to update sandbox timeout")
-		return web.ApiResponse[*models.Sandbox]{}, err
-	}
-	log.Info("sandbox timeout updated")
-
 	return web.ApiResponse[*models.Sandbox]{
 		Code: statusCode,
 		Body: sc.convertToE2BSandbox(sbx, runtime.GetAccessToken(sbx)),
 	}, nil
-}
-
-// updateConnectTimeout updates the sandbox timeout after a Connect or Resume.
-//
-// Policy selection is based on preConnectState:
-//   - Paused  → BaselineAware: the baseline captured at handler entry is guaranteed to be a
-//     pre-resume value because SaveTimeoutWithPolicy is only reachable after Resume() returns,
-//     and Resume() blocks until status.Phase == Running. Therefore any observation of
-//     state ∈ {Paused, Resuming} proves no prior resumer has written a new timeout yet.
-//     BaselineAware compares the current spec timeout against the baseline: if they match,
-//     no concurrent writer has acted and the request may freely overwrite (Always semantics);
-//     if they diverge, a concurrent writer already wrote, so we degrade to ExtendOnly to
-//     preserve the longest timeout.
-//   - Otherwise → ExtendOnly: the sandbox was already running, so we only allow extending
-//     the existing timeout, never shrinking it.
-func (sc *Controller) updateConnectTimeout(ctx context.Context, sbx infra.Sandbox, timeoutSeconds int, preConnectState string, autoPause bool, currentEndAt time.Time, baseline timeout.Options) *web.ApiError {
-	log := klog.FromContext(ctx).WithValues("sandboxID", sbx.GetSandboxID())
-
-	// Rule 1: Sandboxes without endAt are never-timeout, should not have their timeout updated
-	if currentEndAt.IsZero() {
-		log.Info("skip resetting timeout for never-timeout sandbox")
-		return nil
-	}
-
-	now := time.Now()
-	policy := timeout.UpdatePolicyExtendOnly
-	opts := sc.buildSetTimeoutOptions(autoPause, now, timeoutSeconds)
-	if preConnectState == v1alpha1.SandboxStatePaused {
-		policy = timeout.UpdatePolicyBaselineAware
-		opts.Baseline = &baseline
-	}
-
-	log.Info("saving timeout to sandbox", "timeout", opts, "currentEndAt", currentEndAt,
-		"requestedEndAt", TimeAfterSeconds(now, timeoutSeconds), "requestedTimeoutSeconds", timeoutSeconds, "policy", policy)
-	result, err := sbx.SaveTimeoutWithPolicy(ctx, opts, policy)
-	if err != nil {
-		return &web.ApiError{
-			Message: fmt.Sprintf("Failed to set sandbox timeout: %v", err),
-		}
-	}
-	if !result.Updated {
-		log.Info("skip resetting timeout according to timeout update policy",
-			"currentEndAt", currentEndAt,
-			"requestedTimeoutSeconds", timeoutSeconds,
-			"policy", policy)
-	} else {
-		log.Info("timeout updated", "requestedTimeoutSeconds", timeoutSeconds)
-	}
-	return nil
 }

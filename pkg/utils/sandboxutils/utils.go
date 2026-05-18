@@ -32,6 +32,7 @@ func GetRouteFromSandbox(s *agentsv1alpha1.Sandbox) proxy.Route {
 	if s.Status.PodInfo.PodIP == "" {
 		state = agentsv1alpha1.SandboxStateCreating
 	}
+	pausable, _ := IsSandboxPausable(s)
 	return proxy.Route{
 		IP:              s.Status.PodInfo.PodIP,
 		ID:              GetSandboxID(s),
@@ -39,6 +40,8 @@ func GetRouteFromSandbox(s *agentsv1alpha1.Sandbox) proxy.Route {
 		Owner:           s.GetAnnotations()[agentsv1alpha1.AnnotationOwner],
 		State:           state,
 		ResourceVersion: s.GetResourceVersion(),
+		WakeOnTraffic:   s.GetAnnotations()[agentsv1alpha1.AnnotationWakeOnTraffic],
+		Pausable:        pausable,
 	}
 }
 

@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/klog/v2"
 
+	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
@@ -301,6 +302,13 @@ func (sc *Controller) basicSandboxCreateModifier(ctx context.Context, sbx infra.
 	}
 	for k, v := range request.Metadata {
 		annotations[k] = v
+	}
+	if request.AutoResume != nil && request.AutoResume.Enabled {
+		if request.Extensions.NeverTimeout {
+			annotations[v1alpha1.AnnotationWakeOnTraffic] = "timeout:never"
+		} else {
+			annotations[v1alpha1.AnnotationWakeOnTraffic] = fmt.Sprintf("timeout:%ds", request.Timeout)
+		}
 	}
 	sbx.SetAnnotations(annotations)
 

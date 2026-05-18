@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/google/uuid"
 	"k8s.io/klog/v2"
@@ -112,7 +113,15 @@ func (b *SandboxManagerBuilder) WithRequestAdapter(adapter proxy.RequestAdapter)
 	return b
 }
 
+func (b *SandboxManagerBuilder) WithMaxTimeout(d time.Duration) *SandboxManagerBuilder {
+	b.instance.maxTimeout = d
+	return b
+}
+
 func (b *SandboxManagerBuilder) Build() (*SandboxManager, error) {
+	if b.instance.maxTimeout <= 0 {
+		return nil, errors.NewError(errors.ErrorInternal, "max timeout must be greater than zero: call WithMaxTimeout before Build")
+	}
 	// Build infra
 	if b.buildInfraFunc == nil {
 		return nil, errors.NewError(errors.ErrorInternal, "infra builder is not configured: call WithSandboxInfra or WithCustomInfra before Build")
@@ -122,6 +131,7 @@ func (b *SandboxManagerBuilder) Build() (*SandboxManager, error) {
 		return nil, errors.NewError(errors.ErrorInternal, "failed to get infra builder: %v", err)
 	}
 	b.instance.infra = builder.Build()
+	b.instance.proxy.SetWakeFunc(b.instance.WakeSandbox)
 	reader := b.instance.infra.GetCache().GetAPIReader()
 
 	// Build peers manager
@@ -145,6 +155,7 @@ func (b *SandboxManagerBuilder) Build() (*SandboxManager, error) {
 type SandboxManager struct {
 	peersManager       peers.Peers
 	memberlistBindPort int
+	maxTimeout         time.Duration
 
 	infra infra.Infrastructure
 	proxy *proxy.Server

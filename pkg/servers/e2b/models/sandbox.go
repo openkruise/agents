@@ -51,11 +51,16 @@ type NewSandboxRequest struct {
 	TemplateID string            `json:"templateID"`
 	Timeout    int               `json:"timeout,omitempty"`
 	AutoPause  bool              `json:"autoPause,omitempty"`
+	AutoResume *AutoResumeConfig `json:"autoResume,omitempty"`
 	Secure     bool              `json:"secure,omitempty"`
 	Metadata   map[string]string `json:"metadata,omitempty"`
 	EnvVars    EnvVars           `json:"envVars,omitempty"`
 
 	Extensions NewSandboxRequestExtension `json:"-"`
+}
+
+type AutoResumeConfig struct {
+	Enabled bool `json:"enabled"`
 }
 
 type NewSandboxRequestExtension struct {

@@ -66,7 +66,7 @@ func TestHealthServer_Watch(t *testing.T) {
 func TestHandleRefresh_Success(t *testing.T) {
 	s := newTestServer(nil)
 
-	route := Route{ID: "sb-refresh", IP: "10.0.0.1", ResourceVersion: "1", Owner: "user1"}
+	route := Route{ID: "sb-refresh", IP: "10.0.0.1", ResourceVersion: "1", Owner: "user1", State: v1alpha1.SandboxStateRunning}
 	body, err := json.Marshal(route)
 	require.NoError(t, err)
 
@@ -106,7 +106,7 @@ func TestHandleRefresh_EmptyBody(t *testing.T) {
 func TestHandleRefresh_ContextPropagated(t *testing.T) {
 	s := newTestServer(nil)
 
-	route := Route{ID: "sb-ctx", IP: "9.9.9.9", ResourceVersion: "1"}
+	route := Route{ID: "sb-ctx", IP: "9.9.9.9", ResourceVersion: "1", State: v1alpha1.SandboxStateRunning}
 	body, err := json.Marshal(route)
 	require.NoError(t, err)
 
@@ -128,7 +128,7 @@ func TestHandleRefresh_OverwritesExistingRoute(t *testing.T) {
 	s.SetRoute(ctx, Route{ID: "sb-over", IP: "1.1.1.1", ResourceVersion: "1"})
 
 	// Send a newer route via handleRefresh
-	newer := Route{ID: "sb-over", IP: "2.2.2.2", ResourceVersion: "2"}
+	newer := Route{ID: "sb-over", IP: "2.2.2.2", ResourceVersion: "2", State: v1alpha1.SandboxStateRunning}
 	body, _ := json.Marshal(newer)
 	req := httptest.NewRequest(http.MethodPost, RefreshAPI, bytes.NewReader(body))
 	_, apiErr := s.handleRefresh(req)
@@ -160,6 +160,18 @@ func TestServer_handleRefresh(t *testing.T) {
 				IP:              "10.0.0.1",
 				State:           v1alpha1.SandboxStateDead,
 				ResourceVersion: "1",
+			}),
+			expectedCode:  http.StatusNoContent,
+			expectedError: false,
+			expectDeleted: true,
+		},
+		{
+			name: "empty state should delete route",
+			body: mustMarshal(Route{
+				ID:              "sandbox-empty-state",
+				IP:              "10.0.0.4",
+				State:           "",
+				ResourceVersion: "2",
 			}),
 			expectedCode:  http.StatusNoContent,
 			expectedError: false,
@@ -198,8 +210,10 @@ func TestServer_handleRefresh(t *testing.T) {
 
 			// Pre-set a route for delete test
 			if tt.expectDeleted {
+				var incoming Route
+				require.NoError(t, json.Unmarshal([]byte(tt.body), &incoming))
 				route := Route{
-					ID:              "sandbox-1",
+					ID:              incoming.ID,
 					IP:              "10.0.0.1",
 					State:           v1alpha1.SandboxStateRunning,
 					ResourceVersion: "1",
@@ -224,7 +238,9 @@ func TestServer_handleRefresh(t *testing.T) {
 
 			// Verify route deletion
 			if tt.expectDeleted {
-				_, loaded := s.routes.Load("sandbox-1")
+				var incoming Route
+				require.NoError(t, json.Unmarshal([]byte(tt.body), &incoming))
+				_, loaded := s.routes.Load(incoming.ID)
 				assert.False(t, loaded, "route should be deleted")
 			}
 

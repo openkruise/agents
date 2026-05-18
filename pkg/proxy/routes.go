@@ -43,6 +43,8 @@ type Route struct {
 	Owner           string    `json:"owner"`
 	State           string    `json:"state"`
 	ResourceVersion string    `json:"resourceVersion"`
+	WakeOnTraffic   string    `json:"wakeOnTraffic"`
+	Pausable        bool      `json:"pausable"`
 }
 
 func (s *Server) SetRoute(ctx context.Context, route Route) {

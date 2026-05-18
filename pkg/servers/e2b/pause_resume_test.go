@@ -28,6 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	sandboxmanager "github.com/openkruise/agents/pkg/sandbox-manager"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -321,6 +322,141 @@ func TestConnectSandboxRunningTimeoutGuard(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestConnectSandboxWakeOnTrafficAnnotationSync(t *testing.T) {
+	user := &models.CreatedTeamAPIKey{
+		ID:   keys.AdminKeyID,
+		Key:  InitKey,
+		Name: "admin",
+	}
+	tests := []struct {
+		name              string
+		templateName      string
+		initialTimeout    int
+		requestTimeout    int
+		paused            bool
+		neverTimeout      bool
+		initialAnnotation string
+		expectStatus      int
+		expectAnnotation  string
+		expectPause       bool
+	}{
+		{
+			name:             "running no annotation keeps annotation absent",
+			templateName:     "test-connect-annotation-running-absent",
+			initialTimeout:   300,
+			requestTimeout:   600,
+			expectStatus:     http.StatusOK,
+			expectAnnotation: "",
+		},
+		{
+			name:             "paused no annotation keeps annotation absent",
+			templateName:     "test-connect-annotation-paused-absent",
+			initialTimeout:   300,
+			requestTimeout:   600,
+			paused:           true,
+			expectStatus:     http.StatusCreated,
+			expectAnnotation: "",
+		},
+		{
+			name:              "running annotation present rewrites longer timeout",
+			templateName:      "test-connect-annotation-running-longer",
+			initialTimeout:    300,
+			requestTimeout:    600,
+			initialAnnotation: "timeout:300s",
+			expectStatus:      http.StatusOK,
+			expectAnnotation:  "timeout:600s",
+		},
+		{
+			name:              "running annotation present shorter timeout short circuits unchanged",
+			templateName:      "test-connect-annotation-running-shorter",
+			initialTimeout:    600,
+			requestTimeout:    300,
+			initialAnnotation: "timeout:600s",
+			expectStatus:      http.StatusOK,
+			expectAnnotation:  "timeout:600s",
+		},
+		{
+			name:              "paused annotation present writes timeout and annotation together",
+			templateName:      "test-connect-annotation-paused-present",
+			initialTimeout:    300,
+			requestTimeout:    600,
+			paused:            true,
+			initialAnnotation: "timeout:300s",
+			expectStatus:      http.StatusCreated,
+			expectAnnotation:  "timeout:600s",
+		},
+		{
+			name:              "never timeout annotation present is unchanged",
+			templateName:      "test-connect-annotation-never-timeout",
+			initialTimeout:    300,
+			requestTimeout:    600,
+			neverTimeout:      true,
+			initialAnnotation: "timeout:300s",
+			expectStatus:      http.StatusOK,
+			expectAnnotation:  "timeout:300s",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			controller, fc, teardown := Setup(t)
+			defer teardown()
+			cleanup := CreateSandboxPool(t, controller, tt.templateName, 1)
+			defer cleanup()
+
+			metadata := map[string]string{
+				models.ExtensionKeySkipInitRuntime: agentsv1alpha1.True,
+			}
+			if tt.neverTimeout {
+				metadata[models.ExtensionKeyNeverTimeout] = agentsv1alpha1.True
+			}
+			createResp, err := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
+				TemplateID: tt.templateName,
+				Timeout:    tt.initialTimeout,
+				Metadata:   metadata,
+			}, nil, user))
+			require.Nil(t, err)
+			require.Equal(t, models.SandboxStateRunning, createResp.Body.State)
+
+			if tt.initialAnnotation != "" {
+				setWakeOnTrafficAnnotation(t, fc, createResp.Body.SandboxID, tt.initialAnnotation)
+			}
+			EnableWaitSim(t, controller, createResp.Body.SandboxID)
+			if tt.paused {
+				pauseSandboxHelper(t, controller, fc, createResp.Body.SandboxID, false, false, user)
+				go UpdateSandboxWhen(t, fc, createResp.Body.SandboxID, func(sbx *agentsv1alpha1.Sandbox) bool {
+					return !sbx.Spec.Paused
+				}, DoSetSandboxStatus(agentsv1alpha1.SandboxRunning, metav1.ConditionFalse, metav1.ConditionTrue))
+			}
+
+			resp, apiErr := controller.ConnectSandbox(NewRequest(t, nil, models.SetTimeoutRequest{
+				TimeoutSeconds: tt.requestTimeout,
+			}, map[string]string{
+				"sandboxID": createResp.Body.SandboxID,
+			}, user))
+			require.Nil(t, apiErr)
+			assert.Equal(t, tt.expectStatus, resp.Code)
+
+			updated := GetSandbox(t, createResp.Body.SandboxID, fc)
+			assert.Equal(t, tt.expectAnnotation, updated.Annotations[agentsv1alpha1.AnnotationWakeOnTraffic])
+			if tt.neverTimeout {
+				assert.Nil(t, updated.Spec.PauseTime)
+				assert.Nil(t, updated.Spec.ShutdownTime)
+			}
+		})
+	}
+}
+
+func setWakeOnTrafficAnnotation(t *testing.T, c client.Client, sandboxID string, value string) {
+	t.Helper()
+	sbx := GetSandbox(t, sandboxID, c)
+	if sbx.Annotations == nil {
+		sbx.Annotations = map[string]string{}
+	}
+	sbx.Annotations[agentsv1alpha1.AnnotationWakeOnTraffic] = value
+	require.NoError(t, c.Update(t.Context(), sbx))
 }
 
 func TestConnectSandboxConcurrentPausedTimeouts(t *testing.T) {
@@ -671,9 +807,18 @@ func TestUpdateConnectTimeout(t *testing.T) {
 			}
 
 			beforeCall := time.Now()
-			result := controller.updateConnectTimeout(req.Context(), sbx, tt.timeoutSeconds,
-				tt.preConnectState, tt.autoPause, currentEndAt, baseline)
-			require.Nil(t, result)
+			var newEndAt time.Time
+			if !currentEndAt.IsZero() {
+				newEndAt = TimeAfterSeconds(time.Now(), tt.timeoutSeconds)
+			}
+			connectErr := controller.manager.ConnectOrWake(req.Context(), sbx, sandboxmanager.ConnectOrWakeInput{
+				PreState:  tt.preConnectState,
+				AutoPause: tt.autoPause,
+				PreEndAt:  currentEndAt,
+				Baseline:  baseline,
+				NewEndAt:  newEndAt,
+			})
+			require.NoError(t, connectErr)
 
 			updatedSbx := GetSandbox(t, createResp.Body.SandboxID, fc)
 

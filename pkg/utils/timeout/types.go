@@ -25,6 +25,9 @@ type Options struct {
 	// Baseline is the timeout state the caller observed before issuing this update.
 	// Consulted only when the policy passed to SaveTimeoutWithPolicy is BaselineAware.
 	Baseline *Options `json:"-"`
+	// SetAnnotations is applied to metadata.annotations inside the same retryUpdate
+	// modifier that writes ShutdownTime / PauseTime. Empty-string values delete the key.
+	SetAnnotations map[string]string `json:"-"`
 }
 
 type UpdatePolicy string

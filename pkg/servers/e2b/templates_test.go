@@ -535,6 +535,7 @@ func TestListTemplatesUsesCacheProvider(t *testing.T) {
 				WithAPIReader(spyCache.GetAPIReader()).
 				WithProxy(proxy.NewServer(opts)), nil
 		}).
+		WithMaxTimeout(30 * time.Minute).
 		Build()
 	require.NoError(t, err)
 

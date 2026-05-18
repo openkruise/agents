@@ -146,7 +146,10 @@ cd "$PROJECT_ROOT"
 if [ "$WITH_GATEWAY" = "true" ]; then
     pytest -v -s -x --tb=short "$TEST_DIR"
 else
-    pytest -v -s -x --tb=short --ignore="$TEST_DIR/test_gateway.py" "$TEST_DIR"
+    pytest -v -s -x --tb=short \
+        --ignore="$TEST_DIR/test_gateway.py" \
+        --ignore="$TEST_DIR/test_wake_on_traffic.py" \
+        "$TEST_DIR"
 fi
 retVal=$?
 
