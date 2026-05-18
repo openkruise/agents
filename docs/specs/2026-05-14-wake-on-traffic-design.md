@@ -44,7 +44,7 @@ Value grammar:
 | absent | wake-on-traffic disabled; gateway returns existing 502 on paused traffic |
 | `"timeout:never"` | enabled; on wake, do not write any new `ShutdownTime` or `PauseTime` |
 | `"timeout:<duration>"` where duration is a Go duration ≥ 1s, lower-case (`"timeout:300s"`, `"timeout:5m"`, `"timeout:2h30m"`) | enabled; on wake, set the new deadline to `now + duration` |
-| anything else (unknown kind, unparseable payload, etc.) | invalid; manager returns InvalidAutoResumePolicy; gateway falls back to 502 |
+| anything else (unknown kind, unparsable payload, etc.) | invalid; manager returns InvalidAutoResumePolicy; gateway falls back to 502 |
 
 Parsing rules for the `timeout` kind:
 
