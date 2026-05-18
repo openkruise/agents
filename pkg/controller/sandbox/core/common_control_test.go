@@ -765,10 +765,10 @@ func TestCommonControl_EnsureSandboxResumed(t *testing.T) {
 						Reason:             agentsv1alpha1.SandboxReadyReasonPodReady,
 					},
 					{
-						Type:               string(agentsv1alpha1.SandboxConditionPostResumeInit),
+						Type:               string(agentsv1alpha1.SandboxConditionRuntimeInitialization),
 						Status:             metav1.ConditionTrue,
 						LastTransitionTime: now,
-						Reason:             agentsv1alpha1.SandboxPostResumeInitReasonSucceeded,
+						Reason:             agentsv1alpha1.SandboxConditionRuntimeInitReasonSucceeded,
 						Message:            "Runtime re-init and CSI storage re-mount completed",
 					},
 				},
@@ -821,8 +821,8 @@ func TestCommonControl_EnsureSandboxResumed(t *testing.T) {
 			expectError: "runtime re-init failed",
 			initializer: &mockSandboxInitializer{err: fmt.Errorf("runtime re-init failed")},
 			expectedStatus: &agentsv1alpha1.SandboxStatus{
-				Phase:    agentsv1alpha1.SandboxRunning,
-				NodeName: "node-1",
+				Phase:     agentsv1alpha1.SandboxRunning,
+				NodeName:  "node-1",
 				SandboxIp: "10.0.0.5",
 				PodInfo: agentsv1alpha1.PodInfo{
 					PodIP:    "10.0.0.5",
@@ -837,10 +837,10 @@ func TestCommonControl_EnsureSandboxResumed(t *testing.T) {
 						Reason:             agentsv1alpha1.SandboxReadyReasonPodReady,
 					},
 					{
-						Type:               string(agentsv1alpha1.SandboxConditionPostResumeInit),
-						Status:             metav1.ConditionFalse,
-						Reason:             agentsv1alpha1.SandboxPostResumeInitReasonFailed,
-						Message:            "Runtime re-init or CSI storage re-mount failed: runtime re-init failed",
+						Type:    string(agentsv1alpha1.SandboxConditionRuntimeInitialization),
+						Status:  metav1.ConditionFalse,
+						Reason:  agentsv1alpha1.SandboxConditionRuntimeInitReasonFailed,
+						Message: "Runtime re-init or CSI storage re-mount failed: runtime re-init failed",
 					},
 				},
 			},
