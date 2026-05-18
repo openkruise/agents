@@ -244,8 +244,8 @@ func (r *commonControl) EnsureSandboxResumed(ctx context.Context, args EnsureFun
 		// re-initialize sandbox after resuming or upgrading (includes runtime re-init and CSI storage re-mount)
 		if err := r.initializer.Initialize(ctx, box, newStatus); err != nil {
 			klog.ErrorS(err, "post-resume initialization failed (runtime re-init or CSI re-mount)", "sandbox", klog.KObj(box))
-			r.recorder.Event(box, corev1.EventTypeWarning, "PostResumeInitFailed",
-				fmt.Sprintf("Failed to perform post-resume initialization (runtime re-init + CSI storage re-mount): %v", err))
+			r.recorder.Event(box, corev1.EventTypeWarning, string(agentsv1alpha1.SandboxConditionRuntimeInitialization),
+				fmt.Sprintf("Failed to perform post-resume initialization (runtime re-init and CSI storage re-mount): %v", err))
 			utils.SetSandboxCondition(newStatus, metav1.Condition{
 				Type:               string(agentsv1alpha1.SandboxConditionRuntimeInitialization),
 				Status:             metav1.ConditionFalse,
@@ -255,8 +255,8 @@ func (r *commonControl) EnsureSandboxResumed(ctx context.Context, args EnsureFun
 			})
 			return err
 		}
-		r.recorder.Event(box, corev1.EventTypeNormal, "PostResumeInitSucceeded",
-			"Post-resume initialization completed successfully (runtime re-init + CSI storage re-mount)")
+		r.recorder.Event(box, corev1.EventTypeNormal, string(agentsv1alpha1.SandboxConditionRuntimeInitialization),
+			"Post-resume initialization completed successfully (runtime re-init and CSI storage re-mount)")
 		utils.SetSandboxCondition(newStatus, metav1.Condition{
 			Type:               string(agentsv1alpha1.SandboxConditionRuntimeInitialization),
 			Status:             metav1.ConditionTrue,
@@ -545,9 +545,28 @@ func (r *commonControl) performRecreateUpgrade(ctx context.Context, args EnsureF
 
 	// Step 4: Perform post-recreate-upgrade initialization (re-init runtime, re-mount CSI).
 	if err := r.initializer.Initialize(ctx, box, newStatus); err != nil {
-		klog.ErrorS(err, "Failed to perform re-init, re-mount initialization", "sandbox", klog.KObj(box))
+		klog.ErrorS(err, "post-upgrade initialization failed (runtime re-init or CSI re-mount)", "sandbox", klog.KObj(box))
+		r.recorder.Event(box, corev1.EventTypeWarning, string(agentsv1alpha1.SandboxConditionRuntimeInitialization),
+			fmt.Sprintf("Failed to perform post-upgrade initialization (runtime re-init and CSI storage re-mount): %v", err))
+		utils.SetSandboxCondition(newStatus, metav1.Condition{
+			Type:               string(agentsv1alpha1.SandboxConditionRuntimeInitialization),
+			Status:             metav1.ConditionFalse,
+			Reason:             agentsv1alpha1.SandboxConditionRuntimeInitReasonFailed,
+			Message:            utils.TruncateConditionMessage(fmt.Sprintf("Runtime re-init or CSI storage re-mount failed: %v", err)),
+			LastTransitionTime: metav1.Now(),
+		})
 		return false, err
 	}
+
+	r.recorder.Event(box, corev1.EventTypeNormal, string(agentsv1alpha1.SandboxConditionRuntimeInitialization),
+		"Post-upgrade initialization completed successfully (runtime re-init and CSI storage re-mount)")
+	utils.SetSandboxCondition(newStatus, metav1.Condition{
+		Type:               string(agentsv1alpha1.SandboxConditionRuntimeInitialization),
+		Status:             metav1.ConditionTrue,
+		Reason:             agentsv1alpha1.SandboxConditionRuntimeInitReasonSucceeded,
+		Message:            "Runtime re-init and CSI storage re-mount completed",
+		LastTransitionTime: metav1.Now(),
+	})
 
 	return true, nil
 }
