@@ -28,10 +28,15 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	cacheutils "github.com/openkruise/agents/pkg/cache/utils"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
+
+type waitHooksCache interface {
+	GetWaitHooks() *sync.Map
+}
 
 func TestPauseSandbox(t *testing.T) {
 	templateName := "test-template"
@@ -105,7 +110,7 @@ func pauseSandboxHelper(t *testing.T, controller *Controller, client client.Clie
 			return sbx.Spec.Paused == true
 		}, DoSetSandboxStatus(agentsv1alpha1.SandboxPaused, metav1.ConditionFalse, ""))
 	} else if resuming {
-		// Set resuming state: Spec.Paused=false, Phase=Running, Ready=false
+		// Set resuming state: Spec.Paused=false, Phase=Resuming, Ready=false
 		// This means sandbox is transitioning from paused to running
 		sbx := GetSandbox(t, sandboxID, client)
 		sbx.Spec.Paused = false
@@ -114,6 +119,27 @@ func pauseSandboxHelper(t *testing.T, controller *Controller, client client.Clie
 		UpdateSandboxWhen(t, client, sandboxID, func(sbx *agentsv1alpha1.Sandbox) bool {
 			return sbx.Spec.Paused == false
 		}, DoSetSandboxStatus(agentsv1alpha1.SandboxResuming, "", metav1.ConditionFalse))
+	}
+}
+
+func waitForResumeUpdate(controller *Controller, waitForResumeHook bool) WhenFunc {
+	return func(sbx *agentsv1alpha1.Sandbox) bool {
+		if sbx.Spec.Paused {
+			return false
+		}
+		if !waitForResumeHook {
+			return true
+		}
+		cache, ok := controller.cache.(waitHooksCache)
+		if !ok || cache.GetWaitHooks() == nil {
+			return false
+		}
+		value, ok := cache.GetWaitHooks().Load(cacheutils.WaitHookKey[*agentsv1alpha1.Sandbox](sbx))
+		if !ok {
+			return false
+		}
+		entry, ok := value.(*cacheutils.WaitEntry[*agentsv1alpha1.Sandbox])
+		return ok && entry.Action == cacheutils.WaitActionResume
 	}
 }
 
@@ -204,9 +230,9 @@ func TestConnectSandbox(t *testing.T) {
 				tt.sandboxID = createResp.Body.SandboxID
 			}
 			if tt.expectStatus < 300 {
-				go UpdateSandboxWhen(t, fc, createResp.Body.SandboxID, func(sbx *agentsv1alpha1.Sandbox) bool {
-					return sbx.Spec.Paused == false
-				}, DoSetSandboxStatus(agentsv1alpha1.SandboxRunning, "", metav1.ConditionTrue))
+				waitForResumeHook := tt.paused && !tt.pausing
+				go UpdateSandboxWhen(t, fc, createResp.Body.SandboxID, waitForResumeUpdate(controller, waitForResumeHook),
+					DoSetSandboxStatus(agentsv1alpha1.SandboxRunning, "", metav1.ConditionTrue))
 			}
 			now := time.Now()
 			connectResp, err := controller.ConnectSandbox(NewRequest(t, nil, models.SetTimeoutRequest{
@@ -523,9 +549,9 @@ func TestResumeSandbox(t *testing.T) {
 			}
 			if tt.expectStatus < 300 {
 				// Only schedule async update when expecting success
-				go UpdateSandboxWhen(t, fc, createResp.Body.SandboxID, func(sbx *agentsv1alpha1.Sandbox) bool {
-					return sbx.Spec.Paused == false
-				}, DoSetSandboxStatus(agentsv1alpha1.SandboxRunning, "", metav1.ConditionTrue))
+				waitForResumeHook := tt.paused && !tt.pausing
+				go UpdateSandboxWhen(t, fc, createResp.Body.SandboxID, waitForResumeUpdate(controller, waitForResumeHook),
+					DoSetSandboxStatus(agentsv1alpha1.SandboxRunning, "", metav1.ConditionTrue))
 			}
 			now := time.Now()
 			resumeResp, apiErr := controller.ResumeSandbox(NewRequest(t, nil, models.SetTimeoutRequest{
