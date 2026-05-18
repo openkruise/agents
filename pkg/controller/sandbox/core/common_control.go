@@ -247,9 +247,9 @@ func (r *commonControl) EnsureSandboxResumed(ctx context.Context, args EnsureFun
 			r.recorder.Event(box, corev1.EventTypeWarning, "PostResumeInitFailed",
 				fmt.Sprintf("Failed to perform post-resume initialization (runtime re-init + CSI storage re-mount): %v", err))
 			utils.SetSandboxCondition(newStatus, metav1.Condition{
-				Type:               string(agentsv1alpha1.SandboxConditionPostResumeInit),
+				Type:               string(agentsv1alpha1.SandboxConditionRuntimeInitialization),
 				Status:             metav1.ConditionFalse,
-				Reason:             agentsv1alpha1.SandboxPostResumeInitReasonFailed,
+				Reason:             agentsv1alpha1.SandboxConditionRuntimeInitReasonFailed,
 				Message:            utils.TruncateConditionMessage(fmt.Sprintf("Runtime re-init or CSI storage re-mount failed: %v", err)),
 				LastTransitionTime: metav1.Now(),
 			})
@@ -258,9 +258,9 @@ func (r *commonControl) EnsureSandboxResumed(ctx context.Context, args EnsureFun
 		r.recorder.Event(box, corev1.EventTypeNormal, "PostResumeInitSucceeded",
 			"Post-resume initialization completed successfully (runtime re-init + CSI storage re-mount)")
 		utils.SetSandboxCondition(newStatus, metav1.Condition{
-			Type:               string(agentsv1alpha1.SandboxConditionPostResumeInit),
+			Type:               string(agentsv1alpha1.SandboxConditionRuntimeInitialization),
 			Status:             metav1.ConditionTrue,
-			Reason:             agentsv1alpha1.SandboxPostResumeInitReasonSucceeded,
+			Reason:             agentsv1alpha1.SandboxConditionRuntimeInitReasonSucceeded,
 			Message:            "Runtime re-init and CSI storage re-mount completed",
 			LastTransitionTime: metav1.Now(),
 		})
