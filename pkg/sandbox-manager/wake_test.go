@@ -517,9 +517,10 @@ func TestSandboxManager_WakeSandboxConcurrentWakeWake(t *testing.T) {
 			for i, annotation := range tt.annotations {
 				sbx := newPolicyWakeFakeSandbox("sandbox", annotation, sharedTimeout)
 				sbx.getTimeoutFn = func() timeout.Options {
+					snapshot := sharedTimeout.get()
 					timeoutReads <- struct{}{}
 					<-releaseTimeoutReads
-					return sharedTimeout.get()
+					return snapshot
 				}
 				sbx.resumeFn = resumeTracker.resume
 				sandboxes = append(sandboxes, sbx)
