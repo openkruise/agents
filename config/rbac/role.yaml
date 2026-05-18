@@ -29,6 +29,7 @@ rules:
   - ""
   resources:
   - persistentvolumes
+  - secrets
   verbs:
   - get
   - list
