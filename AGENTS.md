@@ -10,12 +10,13 @@ design, and cloud-native systems.
 OpenKruise Agents is a CNCF subproject managing AI agent sandbox workloads on Kubernetes, providing isolated
 environments with resource pooling, hibernation/checkpoint, traffic routing, and E2B-compatible SDK.
 
-Four Components:
+Five Components:
 
 - agent-sandbox-controller (`cmd/agent-sandbox-controller/`): Operator managing CRDs.
 - sandbox-manager (`cmd/sandbox-manager/`): HTTP server with E2B-compatible REST APIs.
 - sandbox-gateway (`cmd/sandbox-gateway/`): Envoy Go HTTP filter for traffic routing.
 - agent-runtime (`cmd/agent-runtime/`): Sidecar running inside sandbox pods with envd-compatible APIs.
+- traffix-extension (`cmd/traffix-extension/`): Envoy ext-proc gRPC server reconciling SecurityProfile CRDs and injecting tokens into egress traffic. See `docs/components/traffix-extension.md`.
 
 ## Tech Stack
 
@@ -36,15 +37,16 @@ cmd/               Entrypoints (controller, manager, gateway, runtime)
 client/            Generated clientset (DO NOT edit)
 config/            CRD, RBAC, manifests (generated)
 pkg/
-  controller/      Controllers (sandbox, set, claim)
-  sandbox-manager/ Manager logic (infra, errors, logs)
-  servers/         E2B API, web framework
-  proxy/           Envoy ext_proc gRPC server
-  sandbox-gateway/ Envoy Go filter, route controller
-  webhook/         Admission webhooks
-  agent-runtime/   Runtime types, CSI providers
-  peers/           Peer discovery (memberlist)
-  utils/           Shared utilities
+  controller/        Controllers (sandbox, set, claim)
+  sandbox-manager/   Manager logic (infra, errors, logs)
+  servers/           E2B API, web framework
+  proxy/             Envoy ext_proc gRPC server
+  sandbox-gateway/   Envoy Go filter, route controller
+  traffix-extension/ Envoy ext-proc server for SecurityProfile (token injection)
+  webhook/           Admission webhooks
+  agent-runtime/     Runtime types, CSI providers
+  peers/             Peer discovery (memberlist)
+  utils/             Shared utilities
 proto/             Generated protobuf (DO NOT edit)
 hack/              Scripts, boilerplate, certs
 test/              E2E (Go), E2B (Python) tests
@@ -57,6 +59,7 @@ test/              E2E (Go), E2B (Python) tests
 - SandboxClaim (`sbc`): Claims sandboxes from SandboxSet (like PVC claiming PV). Supports batch, TTL, CSI mount.
 - SandboxTemplate (`sbt`): Reusable pod spec template, referenced via `TemplateRef`.
 - Checkpoint (`cp`): Checkpoint operation (memory/filesystem snapshot).
+- SecurityProfile (`sp`): L7 egress traffic policy (match + actions like token injection); consumed by `traffix-extension`.
 
 ## Coding Conventions
 

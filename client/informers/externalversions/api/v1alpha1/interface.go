@@ -35,6 +35,8 @@ type Interface interface {
 	SandboxTemplates() SandboxTemplateInformer
 	// SandboxUpdateOpses returns a SandboxUpdateOpsInformer.
 	SandboxUpdateOpses() SandboxUpdateOpsInformer
+	// SecurityProfiles returns a SecurityProfileInformer.
+	SecurityProfiles() SecurityProfileInformer
 }
 
 type version struct {
@@ -76,4 +78,9 @@ func (v *version) SandboxTemplates() SandboxTemplateInformer {
 // SandboxUpdateOpses returns a SandboxUpdateOpsInformer.
 func (v *version) SandboxUpdateOpses() SandboxUpdateOpsInformer {
 	return &sandboxUpdateOpsInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
+}
+
+// SecurityProfiles returns a SecurityProfileInformer.
+func (v *version) SecurityProfiles() SecurityProfileInformer {
+	return &securityProfileInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
 }
