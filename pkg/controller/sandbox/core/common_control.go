@@ -243,25 +243,26 @@ func (r *commonControl) EnsureSandboxResumed(ctx context.Context, args EnsureFun
 
 		// re-initialize sandbox after resuming or upgrading (includes runtime re-init and CSI storage re-mount)
 		if err := r.initializer.Initialize(ctx, box, newStatus); err != nil {
-			klog.ErrorS(err, "post-resume initialization failed (runtime re-init or CSI re-mount)", "sandbox", klog.KObj(box))
-			r.recorder.Event(box, corev1.EventTypeWarning, "PostResumeInitFailed",
-				fmt.Sprintf("Failed to perform post-resume initialization (runtime re-init + CSI storage re-mount): %v", err))
+			klog.ErrorS(err, "post-resume initialization failed", "sandbox", klog.KObj(box))
+			r.recorder.Event(box, corev1.EventTypeWarning, string(agentsv1alpha1.RuntimeInitialized),
+				fmt.Sprintf("Failed to perform post-resume initialization: %v", err))
 			utils.SetSandboxCondition(newStatus, metav1.Condition{
-				Type:               string(agentsv1alpha1.SandboxConditionPostResumeInit),
-				Status:             metav1.ConditionFalse,
-				Reason:             agentsv1alpha1.SandboxPostResumeInitReasonFailed,
-				Message:            utils.TruncateConditionMessage(fmt.Sprintf("Runtime re-init or CSI storage re-mount failed: %v", err)),
+				Type:   string(agentsv1alpha1.RuntimeInitialized),
+				Status: metav1.ConditionFalse,
+				Reason: agentsv1alpha1.SandboxConditionRuntimeInitReasonFailed,
+				// TODO to differentiate init and mount errors
+				Message:            utils.TruncateConditionMessage(fmt.Sprintf("Runtime initialization failed: %v", err)),
 				LastTransitionTime: metav1.Now(),
 			})
 			return err
 		}
-		r.recorder.Event(box, corev1.EventTypeNormal, "PostResumeInitSucceeded",
-			"Post-resume initialization completed successfully (runtime re-init + CSI storage re-mount)")
+		r.recorder.Event(box, corev1.EventTypeNormal, string(agentsv1alpha1.RuntimeInitialized),
+			"Post-resume initialization completed successfully")
 		utils.SetSandboxCondition(newStatus, metav1.Condition{
-			Type:               string(agentsv1alpha1.SandboxConditionPostResumeInit),
+			Type:               string(agentsv1alpha1.RuntimeInitialized),
 			Status:             metav1.ConditionTrue,
-			Reason:             agentsv1alpha1.SandboxPostResumeInitReasonSucceeded,
-			Message:            "Runtime re-init and CSI storage re-mount completed",
+			Reason:             agentsv1alpha1.SandboxConditionRuntimeInitReasonSucceeded,
+			Message:            "Runtime initialization completed",
 			LastTransitionTime: metav1.Now(),
 		})
 
@@ -545,9 +546,29 @@ func (r *commonControl) performRecreateUpgrade(ctx context.Context, args EnsureF
 
 	// Step 4: Perform post-recreate-upgrade initialization (re-init runtime, re-mount CSI).
 	if err := r.initializer.Initialize(ctx, box, newStatus); err != nil {
-		klog.ErrorS(err, "Failed to perform re-init, re-mount initialization", "sandbox", klog.KObj(box))
+		klog.ErrorS(err, "post-upgrade initialization failed", "sandbox", klog.KObj(box))
+		r.recorder.Event(box, corev1.EventTypeWarning, string(agentsv1alpha1.RuntimeInitialized),
+			fmt.Sprintf("Failed to perform post-upgrade initialization: %v", err))
+		utils.SetSandboxCondition(newStatus, metav1.Condition{
+			Type:   string(agentsv1alpha1.RuntimeInitialized),
+			Status: metav1.ConditionFalse,
+			Reason: agentsv1alpha1.SandboxConditionRuntimeInitReasonFailed,
+			// TODO to differentiate init and mount errors
+			Message:            utils.TruncateConditionMessage(fmt.Sprintf("Runtime initialization failed: %v", err)),
+			LastTransitionTime: metav1.Now(),
+		})
 		return false, err
 	}
+
+	r.recorder.Event(box, corev1.EventTypeNormal, string(agentsv1alpha1.RuntimeInitialized),
+		"Post-upgrade initialization completed successfully")
+	utils.SetSandboxCondition(newStatus, metav1.Condition{
+		Type:               string(agentsv1alpha1.RuntimeInitialized),
+		Status:             metav1.ConditionTrue,
+		Reason:             agentsv1alpha1.SandboxConditionRuntimeInitReasonSucceeded,
+		Message:            "Runtime initialization completed",
+		LastTransitionTime: metav1.Now(),
+	})
 
 	return true, nil
 }
