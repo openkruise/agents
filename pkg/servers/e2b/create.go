@@ -252,6 +252,15 @@ func (sc *Controller) parseCreateSandboxRequest(r *http.Request) (models.NewSand
 		}
 	}
 
+	for k := range request.Extensions.Annotations {
+		if !ValidateMetadataKey(k) {
+			return request, &web.ApiError{
+				Code:    http.StatusBadRequest,
+				Message: fmt.Sprintf("Forbidden annotation key [%s]: cannot contain prefixes: %v", k, BlackListPrefix),
+			}
+		}
+	}
+
 	if request.Timeout == 0 {
 		request.Timeout = models.DefaultTimeoutSeconds
 	}
@@ -314,7 +323,7 @@ func (sc *Controller) basicSandboxCreateModifier(ctx context.Context, sbx infra.
 	}
 	sbx.SetLabels(labels)
 
-	// propagate annotations to podtemplate
+	// propagate labels to podtemplate
 	labels = sbx.GetPodLabels()
 	if labels == nil {
 		labels = make(map[string]string)
@@ -323,6 +332,16 @@ func (sc *Controller) basicSandboxCreateModifier(ctx context.Context, sbx infra.
 		labels[k] = v
 	}
 	sbx.SetPodLabels(labels)
+
+	// propagate annotations to podtemplate
+	podAnnotations := sbx.GetPodAnnotations()
+	if podAnnotations == nil {
+		podAnnotations = make(map[string]string)
+	}
+	for k, v := range request.Extensions.Annotations {
+		podAnnotations[k] = v
+	}
+	sbx.SetPodAnnotations(podAnnotations)
 }
 
 func (sc *Controller) csiMountOptionsConfigRecord(ctx context.Context, sbx infra.Sandbox, request models.NewSandboxRequest) {

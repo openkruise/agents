@@ -295,6 +295,18 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 			}
 			sbx.SetPodLabels(labels)
 
+			// propagate annotations to podtemplate
+			if len(claim.Spec.Annotations) > 0 {
+				podAnnotations := sbx.GetPodAnnotations()
+				if podAnnotations == nil {
+					podAnnotations = make(map[string]string)
+				}
+				for k, v := range claim.Spec.Annotations {
+					podAnnotations[k] = v
+				}
+				sbx.SetPodAnnotations(podAnnotations)
+			}
+
 			// apply shutdownTime
 			if claim.Spec.ShutdownTime != nil {
 				sbx.SetTimeout(timeout.Options{

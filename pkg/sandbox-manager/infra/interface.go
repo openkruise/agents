@@ -111,6 +111,8 @@ type Sandbox interface {
 	GetImage() string
 	SetPodLabels(labels map[string]string)
 	GetPodLabels() map[string]string
+	SetPodAnnotations(annotations map[string]string)
+	GetPodAnnotations() map[string]string
 	SetTimeout(opts timeout.Options)
 	SaveTimeoutWithPolicy(ctx context.Context, opts timeout.Options, policy timeout.UpdatePolicy) (TimeoutUpdateResult, error)
 	GetTimeout() timeout.Options

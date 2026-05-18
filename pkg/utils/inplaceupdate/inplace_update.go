@@ -201,7 +201,20 @@ func DefaultGeneratePatchBodyFunc(opts InPlaceUpdateOptions) string {
 		annotationsPatch[PodAnnotationInPlaceUpdateStateKey] = utils.DumpJson(state)
 	}
 	for k, v := range extensionAnnotations {
+		if k == PodAnnotationInPlaceUpdateStateKey {
+			continue
+		}
 		annotationsPatch[k] = v
+	}
+	if box.Spec.Template != nil {
+		for k, v := range box.Spec.Template.Annotations {
+			if k == PodAnnotationInPlaceUpdateStateKey {
+				continue
+			}
+			if pod.Annotations[k] != v {
+				annotationsPatch[k] = v
+			}
+		}
 	}
 
 	if len(labelsPatch) == 0 && len(annotationsPatch) == 0 && len(patchSpec.Containers) == 0 {

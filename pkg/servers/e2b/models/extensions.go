@@ -27,7 +27,9 @@ import (
 	"github.com/distribution/reference"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	"k8s.io/apimachinery/pkg/util/validation"
+	apivalidation "k8s.io/apimachinery/pkg/api/validation"
+	utilvalidation "k8s.io/apimachinery/pkg/util/validation"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/utils/ptr"
 
 	"github.com/openkruise/agents/api/v1alpha1"
@@ -100,6 +102,9 @@ func (r *NewSandboxRequest) parseCommonExtensions() error {
 	if err = r.parseExtensionLabels(); err != nil {
 		return err
 	}
+	if err = r.parseExtensionAnnotations(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -113,15 +118,41 @@ func (r *NewSandboxRequest) parseExtensionLabels() error {
 		if r.Extensions.Labels == nil {
 			r.Extensions.Labels = make(map[string]string)
 		}
-		if len(validation.IsQualifiedName(key)) != 0 {
+		if len(utilvalidation.IsQualifiedName(key)) != 0 {
 			return fmt.Errorf("invalid label name [%s]", key)
 		}
 
-		if len(validation.IsValidLabelValue(v)) != 0 {
+		if len(utilvalidation.IsValidLabelValue(v)) != 0 {
 			return fmt.Errorf("invalid label value [%s]", v)
 		}
 
 		r.Extensions.Labels[key] = v
+		delete(r.Metadata, k)
+	}
+	return nil
+}
+
+func (r *NewSandboxRequest) parseExtensionAnnotations() error {
+	annotationsToDelete := make([]string, 0)
+	for k, v := range r.Metadata {
+		key := strings.TrimPrefix(k, v1alpha1.E2BAnnotationPrefix)
+		if key == k {
+			// not an annotation
+			continue
+		}
+		if r.Extensions.Annotations == nil {
+			r.Extensions.Annotations = make(map[string]string)
+		}
+		r.Extensions.Annotations[key] = v
+		annotationsToDelete = append(annotationsToDelete, k)
+	}
+	if len(r.Extensions.Annotations) == 0 {
+		return nil
+	}
+	if errList := apivalidation.ValidateAnnotations(r.Extensions.Annotations, field.NewPath("metadata").Child("annotations")); len(errList) != 0 {
+		return fmt.Errorf("invalid annotation: %v", errList.ToAggregate())
+	}
+	for _, k := range annotationsToDelete {
 		delete(r.Metadata, k)
 	}
 	return nil

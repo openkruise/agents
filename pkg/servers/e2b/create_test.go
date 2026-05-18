@@ -551,6 +551,66 @@ func TestParseCreateSandboxRequest(t *testing.T) {
 		assert.Contains(t, apiErr.Message, "Forbidden metadata key")
 	})
 
+	t.Run("annotation metadata validation", func(t *testing.T) {
+		tests := []struct {
+			name              string
+			metadata          map[string]string
+			expectError       string
+			expectAnnotations map[string]string
+		}{
+			{
+				name: "annotation value with spaces is allowed",
+				metadata: map[string]string{
+					v1alpha1.E2BAnnotationPrefix + "description": "value with spaces",
+				},
+				expectAnnotations: map[string]string{"description": "value with spaces"},
+			},
+			{
+				name: "annotation value with json is allowed",
+				metadata: map[string]string{
+					v1alpha1.E2BAnnotationPrefix + "config": `{"enabled":true,"mode":"test"}`,
+				},
+				expectAnnotations: map[string]string{"config": `{"enabled":true,"mode":"test"}`},
+			},
+			{
+				name: "forbidden internal annotation key prefix",
+				metadata: map[string]string{
+					v1alpha1.E2BAnnotationPrefix + v1alpha1.InternalPrefix + "inplace-update-state": "user-value",
+				},
+				expectError: "Forbidden annotation key",
+			},
+			{
+				name: "forbidden e2b annotation key prefix",
+				metadata: map[string]string{
+					v1alpha1.E2BAnnotationPrefix + v1alpha1.E2BPrefix + "envd-url": "user-value",
+				},
+				expectError: "Forbidden annotation key",
+			},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				raw, err := json.Marshal(models.NewSandboxRequest{
+					TemplateID: "t1",
+					Metadata:   tt.metadata,
+				})
+				require.NoError(t, err)
+
+				req := httptest.NewRequest(http.MethodPost, "/sandboxes", bytes.NewReader(raw))
+				got, apiErr := ctrl.parseCreateSandboxRequest(req)
+				if tt.expectError != "" {
+					require.NotNil(t, apiErr)
+					assert.Equal(t, http.StatusBadRequest, apiErr.Code)
+					assert.Contains(t, apiErr.Message, tt.expectError)
+					return
+				}
+
+				require.Nil(t, apiErr)
+				assert.Equal(t, tt.expectAnnotations, got.Extensions.Annotations)
+			})
+		}
+	})
+
 	t.Run("timeout defaults when omitted", func(t *testing.T) {
 		raw, err := json.Marshal(models.NewSandboxRequest{
 			TemplateID: "t1",
