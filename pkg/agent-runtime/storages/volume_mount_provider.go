@@ -55,7 +55,7 @@ func (p *MountProvider) GenerateCSINodePublishVolumeRequest(
 		volumeCapability.AccessMode.Mode = csi.VolumeCapability_AccessMode_SINGLE_NODE_READER_ONLY
 	}
 	csiReq := &csi.NodePublishVolumeRequest{
-		VolumeId:         fmt.Sprintf("%v-%s", persistentVolumeObj.Name, generateRandomString(6)),
+		VolumeId:         deterministicVolumeID(persistentVolumeObj.Name, containerMountTarget),
 		TargetPath:       containerMountTarget, // mount target path in container
 		VolumeCapability: volumeCapability,
 		Readonly:         isReadOnly,

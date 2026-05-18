@@ -17,21 +17,24 @@ limitations under the License.
 package storages
 
 import (
-	"math/rand"
-	"time"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
 )
 
-const charset = "abcdefghijklmnopqrstuvwxyz0123456789"
-
-func generateRandomString(length int) string {
-	rand.Seed(time.Now().UnixNano())
-	b := make([]byte, length)
-	for i := range b {
-		b[i] = charset[rand.Intn(len(charset))]
-	}
-	return string(b)
+// deterministicVolumeID returns a stable CSI volume id for a (PV, target path)
+// pair. The CSI spec requires NodePublishVolume to be idempotent keyed on
+// (volume_id, target_path): a previously random id meant every resume re-mount
+// looked like a brand-new publish to the driver, stacking mounts. A stable id
+// lets a spec-compliant driver short-circuit an already-published volume.
+// The target path is hashed (it contains '/'), keeping the id bounded while
+// remaining unique per target so the same PV mounted at different paths does
+// not collide.
+func deterministicVolumeID(pvName, targetPath string) string {
+	sum := sha256.Sum256([]byte(targetPath))
+	return fmt.Sprintf("%s-%s", pvName, hex.EncodeToString(sum[:])[:12])
 }
 
 func IsPureReadOnly(accessModes []corev1.PersistentVolumeAccessMode) bool {
