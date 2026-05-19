@@ -89,6 +89,8 @@ test/              E2E (Go), E2B (Python) tests
 
 ### Testing
 
+- Only run Go tests for packages under `pkg/` via `go test`.
+- Never run any E2E test under the `test/` directory.
 - Table-driven tests with descriptive `name` fields is a must: **ALWAYS** use table-driven tests for consistency and clarity.
 - Reference test methods in same directory for best practices
 - Use shared test helpers

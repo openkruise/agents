@@ -376,6 +376,7 @@ func CreateCheckpoint(ctx context.Context, sbx *v1alpha1.Sandbox, cache infracac
 	log.Info("template created")
 
 	// Step 3: Wait for the Checkpoint to reach Succeeded.
+	// In the future, we can delete the failed Checkpoint and retry like ClaimSandbox
 	if err = cache.NewCheckpointTask(ctx, cp).Wait(opts.WaitSuccessTimeout); err != nil {
 		log.Error(err, "failed to wait checkpoint ready")
 		return "", fmt.Errorf("failed to wait checkpoint ready: %w", err)

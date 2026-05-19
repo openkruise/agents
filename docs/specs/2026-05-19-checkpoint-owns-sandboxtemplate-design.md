@@ -145,7 +145,7 @@ and `SandboxTemplateControllerKind`
 | New replica creates snapshot | Produces shape B; old replicas can List/Clone/Delete | compatible |
 
 Rollback to the old image after the new one ran for some time is safe: shape B
-data continues to be servicable by the old code path; TTL behavior is owned by
+data continues to be serviceable by the old code path; TTL behavior is owned by
 the external controller and is not version-coupled.
 
 ## 6. File-level change list
