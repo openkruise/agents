@@ -281,7 +281,7 @@ func DefaultGenerateResizeSubresourceBody(opts InPlaceUpdateOptions) *corev1.Pod
 		if !ok {
 			continue
 		}
-		if reflect.DeepEqual(origin.Resources, container.Resources) {
+		if resourcesEqual(origin.Resources, container.Resources) {
 			continue
 		}
 		container.Resources = origin.Resources
@@ -593,10 +593,7 @@ func isPodResourceResizeCompleted(pod *corev1.Pod) bool {
 		if !ok || status.Resources == nil {
 			return false
 		}
-		if !isResourceListCovered(status.Resources.Requests, c.Resources.Requests) {
-			return false
-		}
-		if !isResourceListCovered(status.Resources.Limits, c.Resources.Limits) {
+		if !resourcesEqual(c.Resources, *status.Resources) {
 			return false
 		}
 	}
@@ -642,6 +639,20 @@ func checkPodResizeInfeasible(pod *corev1.Pod) error {
 		return fmt.Errorf("pod resize is deferred (status.resize)")
 	}
 	return nil
+}
+
+// resourcesEqual compares two ResourceRequirements semantically.
+// It only checks resources specified in 'desired' (the sandbox spec), ignoring extra resources
+// in 'actual' (the pod) injected by the system (e.g., ephemeral-storage).
+// It uses Quantity.Cmp() to handle different unit representations (e.g., "1" vs "1000m").
+func resourcesEqual(desired, actual corev1.ResourceRequirements) bool {
+	if !isResourceListCovered(actual.Limits, desired.Limits) {
+		return false
+	}
+	if !isResourceListCovered(actual.Requests, desired.Requests) {
+		return false
+	}
+	return true
 }
 
 func isResourceListCovered(actual, expected corev1.ResourceList) bool {
