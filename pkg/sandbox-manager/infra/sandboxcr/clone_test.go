@@ -1352,6 +1352,31 @@ func TestCreateCheckPoint(t *testing.T) {
 				assert.Equal(t, []string{"filesystem"}, cp.Spec.PersistentContents, "checkpoint should inherit template's PersistentContents when opts is empty")
 			},
 		},
+		{
+			name:    "template creation failure leaves checkpoint orphan for TTL drainage",
+			sandbox: newTestSandbox("test-sbx-tmpl-fail-after-cp"),
+			cpStatus: v1alpha1.CheckpointStatus{
+				Phase:        v1alpha1.CheckpointSucceeded,
+				CheckpointId: "cp-id-orphan",
+			},
+			tmplOverride: tmplOverride{Name: "tmpl-orphan", UID: "uid-orphan"},
+			opts: infra.CreateCheckpointOptions{
+				WaitSuccessTimeout: 5 * time.Second,
+			},
+			injectErr:   injectErrTemplate,
+			expectError: "failed to create sandbox template",
+			postCheck: func(t *testing.T, id string, c client.Client) {
+				// Checkpoint was created before the SandboxTemplate failed; it must remain
+				// in the fake store so the external TTL controller can drain it later.
+				var cp v1alpha1.Checkpoint
+				require.NoError(t, c.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "tmpl-orphan"}, &cp),
+					"checkpoint must exist after template create failed")
+				assert.Empty(t, cp.OwnerReferences, "orphan checkpoint must not have owner references")
+				// SandboxTemplate must NOT exist (creation was injected to fail).
+				err := c.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "tmpl-orphan"}, &v1alpha1.SandboxTemplate{})
+				require.Error(t, err, "sandbox template must not exist after injected failure")
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -1375,9 +1400,9 @@ func TestCreateCheckPoint(t *testing.T) {
 				assert.Contains(t, err.Error(), tt.expectError)
 			} else {
 				require.NoError(t, err)
-				if tt.postCheck != nil {
-					tt.postCheck(t, id, fc)
-				}
+			}
+			if tt.postCheck != nil {
+				tt.postCheck(t, id, fc)
 			}
 		})
 	}
