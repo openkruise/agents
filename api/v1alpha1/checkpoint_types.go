@@ -138,6 +138,8 @@ type CheckpointList struct {
 	Items           []Checkpoint `json:"items"`
 }
 
+var CheckpointControllerKind = GroupVersion.WithKind("Checkpoint")
+
 func init() {
 	SchemeBuilder.Register(&Checkpoint{}, &CheckpointList{})
 }
