@@ -25,6 +25,7 @@ source "${CODEGEN_PKG}/kube_codegen.sh"
 echo "gen_client"
 GOPATH=${TMP_DIR} GO111MODULE=off kube::codegen::gen_client \
     --with-watch \
+    --plural-exceptions "SandboxUpdateOps:sandboxupdateops" \
     --output-dir "${SCRIPT_ROOT}/client" \
     --output-pkg "github.com/openkruise/agents/client" \
     --boilerplate "${SCRIPT_ROOT}/hack/boilerplate.go.txt" \

@@ -24,14 +24,14 @@ import (
 	cache "k8s.io/client-go/tools/cache"
 )
 
-// SandboxUpdateOpsLister helps list SandboxUpdateOpses.
+// SandboxUpdateOpsLister helps list Sandboxupdateops.
 // All objects returned here must be treated as read-only.
 type SandboxUpdateOpsLister interface {
-	// List lists all SandboxUpdateOpses in the indexer.
+	// List lists all Sandboxupdateops in the indexer.
 	// Objects returned here must be treated as read-only.
 	List(selector labels.Selector) (ret []*apiv1alpha1.SandboxUpdateOps, err error)
-	// SandboxUpdateOpses returns an object that can list and get SandboxUpdateOpses.
-	SandboxUpdateOpses(namespace string) SandboxUpdateOpsNamespaceLister
+	// Sandboxupdateops returns an object that can list and get Sandboxupdateops.
+	Sandboxupdateops(namespace string) SandboxUpdateOpsNamespaceLister
 	SandboxUpdateOpsListerExpansion
 }
 
@@ -45,15 +45,15 @@ func NewSandboxUpdateOpsLister(indexer cache.Indexer) SandboxUpdateOpsLister {
 	return &sandboxUpdateOpsLister{listers.New[*apiv1alpha1.SandboxUpdateOps](indexer, apiv1alpha1.Resource("sandboxupdateops"))}
 }
 
-// SandboxUpdateOpses returns an object that can list and get SandboxUpdateOpses.
-func (s *sandboxUpdateOpsLister) SandboxUpdateOpses(namespace string) SandboxUpdateOpsNamespaceLister {
+// Sandboxupdateops returns an object that can list and get Sandboxupdateops.
+func (s *sandboxUpdateOpsLister) Sandboxupdateops(namespace string) SandboxUpdateOpsNamespaceLister {
 	return sandboxUpdateOpsNamespaceLister{listers.NewNamespaced[*apiv1alpha1.SandboxUpdateOps](s.ResourceIndexer, namespace)}
 }
 
-// SandboxUpdateOpsNamespaceLister helps list and get SandboxUpdateOpses.
+// SandboxUpdateOpsNamespaceLister helps list and get Sandboxupdateops.
 // All objects returned here must be treated as read-only.
 type SandboxUpdateOpsNamespaceLister interface {
-	// List lists all SandboxUpdateOpses in the indexer for a given namespace.
+	// List lists all Sandboxupdateops in the indexer for a given namespace.
 	// Objects returned here must be treated as read-only.
 	List(selector labels.Selector) (ret []*apiv1alpha1.SandboxUpdateOps, err error)
 	// Get retrieves the SandboxUpdateOps from the indexer for a given namespace and name.
