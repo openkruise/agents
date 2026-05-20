@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 )
@@ -37,6 +38,10 @@ func requestPeer(method, ip, path string, body []byte) error {
 	request, err := http.NewRequest(method, fmt.Sprintf("http://%s:%d%s", ip, SystemPort, path), buf)
 	if err != nil {
 		return err
+	}
+
+	if token := os.Getenv("PEER_AUTH_TOKEN"); token != "" {
+		request.Header.Set("X-Peer-Auth-Token", token)
 	}
 
 	resp, err := requestPeerClient.Do(request)

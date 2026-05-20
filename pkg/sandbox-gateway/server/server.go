@@ -154,6 +154,16 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	log := klog.FromContext(ctx)
 
+	// Authenticate the request if PEER_AUTH_TOKEN is set
+	if expectedToken := os.Getenv("PEER_AUTH_TOKEN"); expectedToken != "" {
+		token := r.Header.Get("X-Peer-Auth-Token")
+		if token != expectedToken {
+			log.Error(nil, "unauthorized route refresh request", "token", token)
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+	}
+
 	var route proxy.Route
 	if err := json.NewDecoder(r.Body).Decode(&route); err != nil {
 		log.Error(err, "Failed to decode refresh request")
