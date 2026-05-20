@@ -946,6 +946,14 @@ func TestSandboxManager_CloneSandbox(t *testing.T) {
 	}
 }
 
+func ParseSandboxID(sandboxID string) (string, string, bool) {
+	namespace, name, ok := strings.Cut(sandboxID, "--")
+	if !ok || namespace == "" || name == "" {
+		return "", "", false
+	}
+	return namespace, name, true
+}
+
 func TestSandboxManager_GetOwnerOfSandbox(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -972,14 +980,46 @@ func TestSandboxManager_GetOwnerOfSandbox(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			manager, _ := setupTestManager(t)
+			manager, client := setupTestManager(t)
 
 			if tt.setupRoute {
+				namespace, name, ok := ParseSandboxID(tt.sandboxID)
+				require.True(t, ok)
+
+				// Keep the route backed by a real Sandbox so the background route
+				// reconciler does not classify this test route as orphaned.
+				sandbox := &agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      name,
+						Namespace: namespace,
+						Annotations: map[string]string{
+							agentsv1alpha1.AnnotationOwner: testUser,
+						},
+						Labels: map[string]string{
+							agentsv1alpha1.LabelSandboxIsClaimed: "true",
+						},
+					},
+					Status: agentsv1alpha1.SandboxStatus{
+						Phase: agentsv1alpha1.SandboxRunning,
+						Conditions: []metav1.Condition{
+							{
+								Type:   string(agentsv1alpha1.SandboxConditionReady),
+								Status: metav1.ConditionTrue,
+							},
+						},
+						PodInfo: agentsv1alpha1.PodInfo{
+							PodIP: "10.0.0.1",
+						},
+					},
+				}
+				CreateSandboxWithStatus(t, client, sandbox)
 				manager.proxy.SetRoute(t.Context(), proxy.Route{
-					ID:    tt.sandboxID,
-					IP:    "10.0.0.1",
-					Owner: testUser,
-					State: agentsv1alpha1.SandboxStateRunning,
+					Namespace:       namespace,
+					ID:              tt.sandboxID,
+					IP:              "10.0.0.1",
+					Owner:           testUser,
+					State:           agentsv1alpha1.SandboxStateRunning,
+					ResourceVersion: sandbox.GetResourceVersion(),
 				})
 			}
 

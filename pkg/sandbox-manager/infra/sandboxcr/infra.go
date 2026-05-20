@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"golang.org/x/time/rate"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/retry"
@@ -40,7 +41,7 @@ import (
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
-	"github.com/openkruise/agents/pkg/utils"
+	"github.com/openkruise/agents/pkg/utils/expectations"
 	managerutils "github.com/openkruise/agents/pkg/utils/sandbox-manager/expectationutils"
 	"github.com/openkruise/agents/pkg/utils/sandbox-manager/proxyutils"
 	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
@@ -346,29 +347,95 @@ func selectSucceededCheckpoints(checkpoints []*v1alpha1.Checkpoint) []infra.Chec
 	return results
 }
 
-func (i *Infra) GetClaimedSandbox(ctx context.Context, opts infra.GetClaimedSandboxOptions) (infra.Sandbox, error) {
-	var sandbox *v1alpha1.Sandbox
-	err := retry.OnError(utils.CacheBackoff, utils.RetryIfContextNotCanceled(ctx), func() error {
+type claimedSandboxLookup struct {
+	sandbox  *v1alpha1.Sandbox
+	route    proxy.Route
+	hasRoute bool
+}
+
+// lookupClaimedSandbox waits until the informer cache returns the claimed Sandbox.
+// Route state is loaded only after a cache hit and is used later as a staleness
+// signal, not as a cache-miss fallback trigger.
+func (i *Infra) lookupClaimedSandbox(ctx context.Context, opts infra.GetClaimedSandboxOptions) (claimedSandboxLookup, error) {
+	var lookup claimedSandboxLookup
+	err := wait.PollUntilContextCancel(ctx, RetryInterval, true, func(ctx context.Context) (bool, error) {
 		got, err := i.Cache.GetClaimedSandbox(ctx, cache.GetClaimedSandboxOptions{Namespace: opts.Namespace, SandboxID: opts.SandboxID})
-		if err != nil {
-			return err
+		if err == nil {
+			lookup.sandbox = got
+			if route, ok := i.Proxy.LoadRoute(opts.SandboxID); ok {
+				lookup.route = route
+				lookup.hasRoute = true
+			}
+			return true, nil
 		}
-		sandbox = got
-		return nil
+		if errors.Is(err, cache.ErrSandboxNotFound) {
+			return false, nil
+		}
+		return false, err
 	})
+	if err != nil {
+		return lookup, err
+	}
+	return lookup, nil
+}
+
+// decideAPIReaderFallback returns the fallback reason, or "" to keep using the cache.
+// It is only called after lookupClaimedSandbox returns a cache-hit Sandbox.
+func decideAPIReaderFallback(lookup claimedSandboxLookup) string {
+	cacheRV := lookup.sandbox.GetResourceVersion()
+
+	switch {
+	case !managerutils.ResourceVersionExpectationSatisfied(lookup.sandbox):
+		return fallbackReasonRVExpectation
+	case lookup.hasRoute &&
+		lookup.route.ResourceVersion != "" &&
+		expectations.IsResourceVersionReallyNewer(cacheRV, lookup.route.ResourceVersion):
+		return fallbackReasonCacheLagging
+	default:
+		return ""
+	}
+}
+
+func (i *Infra) getClaimedSandboxFromAPIReader(ctx context.Context, key client.ObjectKey, sandboxID string) (*v1alpha1.Sandbox, error) {
+	fresh := &v1alpha1.Sandbox{}
+	if err := i.APIReader.Get(ctx, key, fresh); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, fmt.Errorf("%w: %s: %w", cache.ErrSandboxNotFound, sandboxID, err)
+		}
+		return nil, err
+	}
+	if fresh.GetLabels()[v1alpha1.LabelSandboxIsClaimed] != v1alpha1.True {
+		return nil, fmt.Errorf("%w: %s", cache.ErrSandboxNotFound, sandboxID)
+	}
+	return fresh, nil
+}
+
+func (i *Infra) GetClaimedSandbox(ctx context.Context, opts infra.GetClaimedSandboxOptions) (infra.Sandbox, error) {
+	log := klog.FromContext(ctx)
+
+	lookup, err := i.lookupClaimedSandbox(ctx, opts)
 	if err != nil {
 		return nil, err
 	}
-	if !managerutils.ResourceVersionExpectationSatisfied(sandbox) {
-		klog.FromContext(ctx).Info("resource version expectation not satisfied, will request APIServer directly")
-		sbx := &v1alpha1.Sandbox{}
-		err = i.APIReader.Get(ctx, client.ObjectKey{Namespace: sandbox.Namespace, Name: sandbox.Name}, sbx)
-		if err != nil {
-			return nil, err
-		}
-		sandbox = sbx
+
+	fallbackReason := decideAPIReaderFallback(lookup)
+	if fallbackReason == "" {
+		return AsSandbox(lookup.sandbox, i.Cache), nil
 	}
-	return AsSandbox(sandbox, i.Cache), nil
+
+	key := client.ObjectKey{Namespace: lookup.sandbox.Namespace, Name: lookup.sandbox.Name}
+	cacheRV := lookup.sandbox.GetResourceVersion()
+
+	log.V(consts.DebugLogLevel).Info("informer cache result requires APIReader fallback",
+		"sandboxID", opts.SandboxID, "reason", fallbackReason,
+		"routeRV", lookup.route.ResourceVersion, "cacheRV", cacheRV)
+	sandboxFallbackTotal.WithLabelValues(opts.Namespace, fallbackReason).Inc()
+
+	fresh, err := i.getClaimedSandboxFromAPIReader(ctx, key, opts.SandboxID)
+	if err != nil {
+		return nil, err
+	}
+	return AsSandbox(fresh, i.Cache), nil
 }
 
 func (i *Infra) reconcileSandbox(ctx context.Context, sbx *v1alpha1.Sandbox, notFound bool) (ctrl.Result, error) {

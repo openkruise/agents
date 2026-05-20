@@ -18,6 +18,7 @@ package sandboxutils
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -76,6 +77,7 @@ func GetRouteFromSandbox(s *agentsv1alpha1.Sandbox) proxy.Route {
 		state = agentsv1alpha1.SandboxStateCreating
 	}
 	return proxy.Route{
+		Namespace:       s.Namespace,
 		IP:              s.Status.PodInfo.PodIP,
 		ID:              GetSandboxID(s),
 		UID:             s.GetUID(),
@@ -142,8 +144,28 @@ func IsControlledBySandboxSet(sbx *agentsv1alpha1.Sandbox) bool {
 		controller.APIVersion == agentsv1alpha1.SandboxSetControllerKind.GroupVersion().String()
 }
 
+// sandboxIDSeparator joins namespace and name in a sandbox ID. It is the single source
+// of truth for the encoding used by GetSandboxID / NameFromSandboxID / ParseSandboxID.
+const sandboxIDSeparator = "--"
+
+// GetSandboxID encodes a sandbox as "<namespace>--<name>". The encoding requires that
+// the namespace itself does not contain "--"; callers that accept user-supplied
+// namespaces must enforce this with ValidateNamespaceForSandboxID at the boundary.
+// See pkg/servers/e2b/AGENTS.md ("Namespace Naming Constraint") for the rationale.
 func GetSandboxID(sbx *agentsv1alpha1.Sandbox) string {
-	return fmt.Sprintf("%s--%s", sbx.Namespace, sbx.Name)
+	return sbx.Namespace + sandboxIDSeparator + sbx.Name
+}
+
+// ValidateNamespaceForSandboxID rejects namespace names that cannot be safely embedded
+// in a sandbox ID. Containing the sandbox ID separator ("--") makes ParseSandboxID
+// ambiguous and breaks hostname-based routing of the form "{port}-{namespace}--{name}".
+// Callers handling user-supplied namespaces (API key creation, admin team-scoped ops)
+// must reject input early via this check.
+func ValidateNamespaceForSandboxID(namespace string) error {
+	if strings.Contains(namespace, sandboxIDSeparator) {
+		return fmt.Errorf("namespace %q must not contain %q: this sequence is reserved as the sandbox ID separator", namespace, sandboxIDSeparator)
+	}
+	return nil
 }
 
 func IsSandboxReady(sbx *agentsv1alpha1.Sandbox) bool {

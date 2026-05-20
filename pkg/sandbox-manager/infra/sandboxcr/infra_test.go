@@ -19,6 +19,7 @@ package sandboxcr
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -300,7 +301,261 @@ func TestInfra_GetClaimedSandboxWithOptions_NamespaceScoped(t *testing.T) {
 		SandboxID: sandboxID,
 	})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "not found")
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+}
+
+func TestInfra_GetClaimedSandbox_CacheMiss_WaitsUntilCacheHit(t *testing.T) {
+	tests := []struct {
+		name      string
+		withRoute bool
+	}{
+		{
+			name:      "route present does not trigger APIReader fallback",
+			withRoute: true,
+		},
+		{
+			name:      "no route waits for cache hit",
+			withRoute: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			apiSbx := makeClaimedSandbox("team-a", "sbx-cache-hit", "10.0.0.10")
+			apiSbx.ResourceVersion = "20"
+			id := stateutils.GetSandboxID(apiSbx)
+
+			stub := &stubAPIReader{objs: map[client.ObjectKey]*v1alpha1.Sandbox{
+				{Namespace: apiSbx.Namespace, Name: apiSbx.Name}: apiSbx,
+			}}
+			retryCache := &retryingClaimedSandboxCache{
+				sandbox:      apiSbx,
+				succeedAfter: 3,
+			}
+			options := config.InitOptions(config.SandboxManagerOptions{DisableRouteReconciliation: true})
+			infraInstance := NewInfraBuilder(options).
+				WithCache(retryCache).
+				WithAPIReader(stub).
+				WithProxy(proxy.NewServer(options)).
+				Build().(*Infra)
+
+			if tt.withRoute {
+				infraInstance.Proxy.SetRoute(t.Context(), proxy.Route{
+					Namespace:       apiSbx.Namespace,
+					ID:              id,
+					IP:              apiSbx.Status.PodInfo.PodIP,
+					State:           v1alpha1.SandboxStateRunning,
+					ResourceVersion: apiSbx.ResourceVersion,
+				})
+			}
+
+			ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
+			defer cancel()
+			got, err := infraInstance.GetClaimedSandbox(ctx, infra.GetClaimedSandboxOptions{
+				Namespace: "team-a",
+				SandboxID: id,
+			})
+
+			require.NoError(t, err)
+			require.NotNil(t, got)
+			assert.Equal(t, apiSbx.Name, got.GetName())
+			assert.GreaterOrEqual(t, retryCache.getCalls.Load(), int64(3))
+			assert.Equal(t, int64(0), stub.getCalls.Load())
+		})
+	}
+}
+
+func TestInfra_GetClaimedSandbox_CacheMiss_ReturnsContextError(t *testing.T) {
+	tests := []struct {
+		name      string
+		withRoute bool
+	}{
+		{
+			name:      "route present",
+			withRoute: true,
+		},
+		{
+			name:      "no route",
+			withRoute: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			infraInstance, _, stub := newInfraWithStubAPIReader(t)
+			id := "team-a--missing"
+			if tt.withRoute {
+				infraInstance.Proxy.SetRoute(t.Context(), proxy.Route{
+					Namespace:       "team-a",
+					ID:              id,
+					IP:              "10.0.0.11",
+					State:           v1alpha1.SandboxStateRunning,
+					ResourceVersion: "21",
+				})
+			}
+
+			ctx, cancel := context.WithTimeout(t.Context(), 75*time.Millisecond)
+			defer cancel()
+			got, err := infraInstance.GetClaimedSandbox(ctx, infra.GetClaimedSandboxOptions{
+				Namespace: "team-a",
+				SandboxID: id,
+			})
+
+			require.Error(t, err)
+			assert.Nil(t, got)
+			assert.ErrorIs(t, err, context.DeadlineExceeded)
+			assert.Equal(t, int64(0), stub.getCalls.Load())
+		})
+	}
+}
+
+func TestInfra_GetClaimedSandbox_RouteRVNewerThanCache_FallsBackToAPIReader(t *testing.T) {
+	apiSbx := makeClaimedSandbox("team-a", "sbx-fresh", "10.0.0.1")
+	apiSbx.ResourceVersion = "777"
+
+	infraInstance, fc, stub := newInfraWithStubAPIReader(t, apiSbx)
+
+	cacheSbx := apiSbx.DeepCopy()
+	cacheSbx.ResourceVersion = ""
+	CreateSandboxWithStatus(t, fc, cacheSbx)
+	time.Sleep(100 * time.Millisecond)
+
+	id := stateutils.GetSandboxID(apiSbx)
+	infraInstance.Proxy.SetRoute(t.Context(), proxy.Route{
+		Namespace:       apiSbx.Namespace,
+		ID:              id,
+		IP:              apiSbx.Status.PodInfo.PodIP,
+		State:           v1alpha1.SandboxStateRunning,
+		ResourceVersion: "777",
+	})
+
+	got, err := infraInstance.GetClaimedSandbox(t.Context(), infra.GetClaimedSandboxOptions{
+		Namespace: "team-a",
+		SandboxID: id,
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, "777", got.GetResourceVersion())
+	assert.Equal(t, int64(1), stub.getCalls.Load())
+}
+
+func TestInfra_GetClaimedSandbox_CacheRVEqualsRouteRV_NoFallback(t *testing.T) {
+	apiSbx := makeClaimedSandbox("team-a", "sbx-equal", "10.0.0.3")
+
+	infraInstance, fc, stub := newInfraWithStubAPIReader(t, apiSbx)
+
+	cacheSbx := apiSbx.DeepCopy()
+	cacheSbx.ResourceVersion = ""
+	CreateSandboxWithStatus(t, fc, cacheSbx)
+	time.Sleep(100 * time.Millisecond)
+
+	stored := &v1alpha1.Sandbox{}
+	require.NoError(t, fc.Get(t.Context(), client.ObjectKey{Namespace: "team-a", Name: "sbx-equal"}, stored))
+	rv := stored.GetResourceVersion()
+	require.NotEmpty(t, rv)
+
+	id := stateutils.GetSandboxID(apiSbx)
+	infraInstance.Proxy.SetRoute(t.Context(), proxy.Route{
+		Namespace:       apiSbx.Namespace,
+		ID:              id,
+		IP:              apiSbx.Status.PodInfo.PodIP,
+		State:           v1alpha1.SandboxStateRunning,
+		ResourceVersion: rv,
+	})
+
+	got, err := infraInstance.GetClaimedSandbox(t.Context(), infra.GetClaimedSandboxOptions{
+		Namespace: "team-a",
+		SandboxID: id,
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, "sbx-equal", got.GetName())
+	assert.Equal(t, int64(0), stub.getCalls.Load())
+}
+
+func TestInfra_GetClaimedSandbox_StaleCacheFallback_APIReaderRequiresClaimedLabel(t *testing.T) {
+	tests := []struct {
+		name        string
+		labels      map[string]string
+		expectError string
+	}{
+		{
+			name:        "missing claimed label",
+			labels:      nil,
+			expectError: infracache.ErrSandboxNotFound.Error(),
+		},
+		{
+			name:        "claimed label false",
+			labels:      map[string]string{v1alpha1.LabelSandboxIsClaimed: v1alpha1.False},
+			expectError: infracache.ErrSandboxNotFound.Error(),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			apiSbx := makeClaimedSandbox("team-a", "sbx-unclaimed", "10.0.0.4")
+			apiSbx.ResourceVersion = "10"
+			apiSbx.Labels = tt.labels
+
+			infraInstance, fc, stub := newInfraWithStubAPIReader(t, apiSbx)
+			cacheSbx := makeClaimedSandbox("team-a", "sbx-unclaimed", "10.0.0.4")
+			cacheSbx.ResourceVersion = ""
+			CreateSandboxWithStatus(t, fc, cacheSbx)
+			time.Sleep(100 * time.Millisecond)
+
+			id := stateutils.GetSandboxID(apiSbx)
+			infraInstance.Proxy.SetRoute(t.Context(), proxy.Route{
+				Namespace:       apiSbx.Namespace,
+				ID:              id,
+				IP:              apiSbx.Status.PodInfo.PodIP,
+				State:           v1alpha1.SandboxStateRunning,
+				ResourceVersion: "10",
+			})
+
+			ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
+			defer cancel()
+			got, err := infraInstance.GetClaimedSandbox(ctx, infra.GetClaimedSandboxOptions{
+				Namespace: "team-a",
+				SandboxID: id,
+			})
+
+			require.Error(t, err)
+			assert.Nil(t, got)
+			assert.ErrorIs(t, err, infracache.ErrSandboxNotFound)
+			assert.Contains(t, err.Error(), tt.expectError)
+			assert.Equal(t, int64(1), stub.getCalls.Load())
+		})
+	}
+}
+
+func TestInfra_GetClaimedSandbox_StaleCacheFallback_APIReaderNotFound_WrapsCacheNotFound(t *testing.T) {
+	cacheSbx := makeClaimedSandbox("team-a", "missing-api", "10.0.0.5")
+	infraInstance, fc, stub := newInfraWithStubAPIReader(t)
+	CreateSandboxWithStatus(t, fc, cacheSbx)
+	time.Sleep(100 * time.Millisecond)
+
+	id := stateutils.GetSandboxID(cacheSbx)
+	infraInstance.Proxy.SetRoute(t.Context(), proxy.Route{
+		Namespace:       "team-a",
+		ID:              id,
+		IP:              "10.0.0.5",
+		State:           v1alpha1.SandboxStateRunning,
+		ResourceVersion: "999",
+	})
+
+	ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
+	defer cancel()
+	got, err := infraInstance.GetClaimedSandbox(ctx, infra.GetClaimedSandboxOptions{
+		Namespace: "team-a",
+		SandboxID: id,
+	})
+
+	require.Error(t, err)
+	assert.Nil(t, got)
+	assert.ErrorIs(t, err, infracache.ErrSandboxNotFound)
+	assert.Equal(t, int64(1), stub.getCalls.Load())
 }
 
 func TestInfra_DeleteCheckpointWithOptions_NamespaceScoped(t *testing.T) {
@@ -1240,6 +1495,93 @@ func TestInfra_startRouteReconciler(t *testing.T) {
 				assert.True(t, ok, "valid route %s should always exist", id)
 			}
 		})
+	}
+}
+
+type stubAPIReader struct {
+	objs     map[client.ObjectKey]*v1alpha1.Sandbox
+	getCalls atomic.Int64
+}
+
+type retryingClaimedSandboxCache struct {
+	infracache.Provider
+	sandbox      *v1alpha1.Sandbox
+	succeedAfter int64
+	getCalls     atomic.Int64
+}
+
+func (c *retryingClaimedSandboxCache) GetClaimedSandbox(ctx context.Context, _ infracache.GetClaimedSandboxOptions) (*v1alpha1.Sandbox, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+
+	call := c.getCalls.Add(1)
+	if c.sandbox != nil && c.succeedAfter > 0 && call >= c.succeedAfter {
+		return c.sandbox.DeepCopy(), nil
+	}
+	return nil, infracache.ErrSandboxNotFound
+}
+
+func (r *stubAPIReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object, _ ...client.GetOption) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
+	r.getCalls.Add(1)
+	sbx, ok := r.objs[key]
+	if !ok {
+		return apierrors.NewNotFound(v1alpha1.GroupVersion.WithResource("sandboxes").GroupResource(), key.Name)
+	}
+	target, ok := obj.(*v1alpha1.Sandbox)
+	if !ok {
+		return apierrors.NewBadRequest("stubAPIReader: expected *v1alpha1.Sandbox")
+	}
+	*target = *sbx.DeepCopy()
+	return nil
+}
+
+func (r *stubAPIReader) List(_ context.Context, _ client.ObjectList, _ ...client.ListOption) error {
+	panic("stubAPIReader.List: unexpected call from GetClaimedSandbox path")
+}
+
+func newInfraWithStubAPIReader(t *testing.T, apiObjects ...*v1alpha1.Sandbox) (*Infra, client.Client, *stubAPIReader) {
+	t.Helper()
+	options := config.InitOptions(config.SandboxManagerOptions{DisableRouteReconciliation: true})
+	c, fc, err := cachetest.NewTestCache(t)
+	require.NoError(t, err)
+
+	stub := &stubAPIReader{objs: make(map[client.ObjectKey]*v1alpha1.Sandbox, len(apiObjects))}
+	for _, sbx := range apiObjects {
+		stub.objs[client.ObjectKey{Namespace: sbx.Namespace, Name: sbx.Name}] = sbx.DeepCopy()
+	}
+
+	infraInstance := NewInfraBuilder(options).
+		WithCache(c).
+		WithAPIReader(stub).
+		WithProxy(proxy.NewServer(options)).
+		Build().(*Infra)
+	require.NoError(t, infraInstance.Run(t.Context()))
+	return infraInstance, fc, stub
+}
+
+func makeClaimedSandbox(namespace, name, podIP string) *v1alpha1.Sandbox {
+	return &v1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        name,
+			Namespace:   namespace,
+			UID:         types.UID(uuid.NewString()),
+			Annotations: map[string]string{v1alpha1.AnnotationOwner: "user-x"},
+			Labels:      map[string]string{v1alpha1.LabelSandboxIsClaimed: v1alpha1.True},
+		},
+		Status: v1alpha1.SandboxStatus{
+			Phase:      v1alpha1.SandboxRunning,
+			Conditions: []metav1.Condition{{Type: string(v1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue}},
+			PodInfo:    v1alpha1.PodInfo{PodIP: podIP},
+		},
 	}
 }
 

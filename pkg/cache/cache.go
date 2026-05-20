@@ -212,7 +212,7 @@ func (c *Cache) GetClaimedSandbox(ctx context.Context, opts GetClaimedSandboxOpt
 			return nil, err
 		}
 		if len(list.Items) == 0 {
-			return nil, fmt.Errorf("sandbox %s not found in cache", opts.SandboxID)
+			return nil, fmt.Errorf("%w: sandbox %s not found in cache", ErrSandboxNotFound, opts.SandboxID)
 		}
 		return &list.Items[0], nil
 	})
