@@ -18,11 +18,12 @@ package e2b
 
 import (
 	"context"
-	stderrors "errors"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/klog/v2"
 
 	"github.com/openkruise/agents/api/v1alpha1"
@@ -59,8 +60,11 @@ func (sc *Controller) PauseSandbox(r *http.Request) (web.ApiResponse[struct{}], 
 }
 
 func pauseSandboxErrorCode(err error) int {
+	if apierrors.IsNotFound(err) {
+		return http.StatusNotFound
+	}
 	if managererrors.GetErrCode(err) == managererrors.ErrorConflict ||
-		stderrors.Is(err, cacheutils.ErrWaitTaskConflict) {
+		errors.Is(err, cacheutils.ErrWaitTaskConflict) {
 		return http.StatusConflict
 	}
 	return http.StatusInternalServerError

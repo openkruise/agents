@@ -309,11 +309,6 @@ func (s *Sandbox) Pause(ctx context.Context, opts infra.PauseOptions) error {
 	if pausable, reason := stateutils.IsSandboxPausable(s.Sandbox); !pausable {
 		return errors.NewError(errors.ErrorConflict, "sandbox is not pausable, reason: %s", reason)
 	}
-	pauseTask, err := s.Cache.NewSandboxPauseTask(ctx, s.Sandbox)
-	if err != nil {
-		return err
-	}
-	defer pauseTask.Release()
 
 	cond := GetSandboxCondition(s.Sandbox, agentsv1alpha1.SandboxConditionPaused)
 	if s.Status.Phase == agentsv1alpha1.SandboxPaused {
@@ -322,6 +317,12 @@ func (s *Sandbox) Pause(ctx context.Context, opts infra.PauseOptions) error {
 			return nil
 		}
 	}
+
+	pauseTask, err := s.Cache.NewSandboxPauseTask(ctx, s.Sandbox)
+	if err != nil {
+		return err
+	}
+	defer pauseTask.Release()
 	updated, err := s.retryUpdate(ctx, func(sbx *agentsv1alpha1.Sandbox) (bool, error) {
 		if sbx.Spec.Paused {
 			// Pause is first-writer-wins: only the request that flips

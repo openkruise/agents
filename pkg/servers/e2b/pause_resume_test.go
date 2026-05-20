@@ -17,7 +17,7 @@ limitations under the License.
 package e2b
 
 import (
-	stderrors "errors"
+	"errors"
 	"fmt"
 	"net/http"
 	"sync"
@@ -26,7 +26,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	cacheutils "github.com/openkruise/agents/pkg/cache/utils"
@@ -534,8 +536,13 @@ func TestPauseSandboxErrorCode(t *testing.T) {
 			expectStatus: http.StatusConflict,
 		},
 		{
+			name:         "kubernetes not found returns not found",
+			err:          apierrors.NewNotFound(schema.GroupResource{Group: agentsv1alpha1.GroupVersion.Group, Resource: "sandboxes"}, "sandbox-id"),
+			expectStatus: http.StatusNotFound,
+		},
+		{
 			name:         "unknown error returns internal server error",
-			err:          stderrors.New("pause failed"),
+			err:          errors.New("pause failed"),
 			expectStatus: http.StatusInternalServerError,
 		},
 	}
