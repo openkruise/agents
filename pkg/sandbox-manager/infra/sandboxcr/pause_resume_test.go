@@ -608,7 +608,7 @@ func TestSandbox_PauseRefreshesBeforePreconditionChecks(t *testing.T) {
 	}
 }
 
-func TestSandbox_PauseConflictsWithActiveResumeWaitHook(t *testing.T) {
+func TestSandbox_PauseAlreadyPausedShortCircuitsWithActiveResumeWaitHook(t *testing.T) {
 	sandbox := &v1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-sandbox",
@@ -660,12 +660,14 @@ func TestSandbox_PauseConflictsWithActiveResumeWaitHook(t *testing.T) {
 
 	s := AsSandbox(sandbox, cache)
 	err = s.Pause(t.Context(), infra.PauseOptions{})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "another action(Resume)'s wait task already exists")
+	require.NoError(t, err)
 
-	if val, ok := cache.GetWaitHooks().Load(key); ok {
-		val.(*cacheutils.WaitEntry[*v1alpha1.Sandbox]).Close()
-	}
+	// Synthetic guard: production should not keep a Resume hook after the sandbox is already paused.
+	val, ok := cache.GetWaitHooks().Load(key)
+	require.True(t, ok)
+	entry := val.(*cacheutils.WaitEntry[*v1alpha1.Sandbox])
+	assert.Equal(t, cacheutils.WaitActionResume, entry.Action)
+	entry.Close()
 	select {
 	case <-waitDone:
 	case <-time.After(2 * time.Second):
