@@ -380,7 +380,16 @@ func (s *Sandbox) Resume(ctx context.Context, opts infra.ResumeOptions) error {
 	}
 	log.Info("waiting sandbox resume")
 	start := time.Now()
-	if err = resumeTask.Wait(time.Minute); err != nil {
+	if err = resumeTask.Wait(10 * time.Minute); err != nil { // Almost infinity
+		// A canceled request context surfaces here as "client rate limiter Wait
+		// returned an error: context canceled" from client-go, which is misleading:
+		// it is not a throttling failure but a propagation of ctx.Err(). Make the
+		// log message explicit so it is not mistaken for a server-side error.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			log.Error(err, "stop waiting sandbox resume: request canceled by client (disconnected or client-side timeout)",
+				"ctxErr", ctxErr)
+			return err
+		}
 		log.Error(err, "failed to wait sandbox resume")
 		return err
 	}
