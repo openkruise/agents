@@ -184,6 +184,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		} else {
 			newStatus.Phase = agentsv1alpha1.SandboxUpdateOpsCompleted
 		}
+
+	case failed > 0 && updating == 0 && len(candidates) > 0 &&
+		int(calculateMaxUnavailable(ops.Spec.UpdateStrategy.MaxUnavailable, total)) <= int(failed):
+		newStatus.Phase = agentsv1alpha1.SandboxUpdateOpsFailed
 	}
 
 	// Only initiate new upgrades when in Updating phase, not paused, and there are candidates
