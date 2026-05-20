@@ -27,6 +27,7 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/utils/ptr"
@@ -1422,7 +1423,7 @@ func TestSandboxManager_DeleteCheckpoint(t *testing.T) {
 			checkpointID:       "cp-tmpl-fail",
 			user:               "test-user",
 			setup:              true,
-			withOwnerRef:       true,
+			withOwnerRef:       false,
 			mockDeleteTemplate: fmt.Errorf("mock template delete error"),
 			expectError:        "mock template delete error",
 		},
@@ -1450,6 +1451,27 @@ func TestSandboxManager_DeleteCheckpoint(t *testing.T) {
 			manager, client := setupTestManager(t)
 
 			if tt.setup {
+				// Create Checkpoint with owner annotation.
+				cp := &agentsv1alpha1.Checkpoint{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      tt.checkpointID,
+						Namespace: namespace,
+						Annotations: map[string]string{
+							agentsv1alpha1.AnnotationOwner: "test-user",
+						},
+					},
+				}
+				if tt.withOwnerRef {
+					cp.UID = types.UID("uid-" + tt.checkpointID)
+				}
+				err := client.Create(t.Context(), cp)
+				require.NoError(t, err)
+
+				// Update status with checkpointId.
+				cp.Status.CheckpointId = tt.checkpointID
+				err = client.Status().Update(t.Context(), cp)
+				require.NoError(t, err)
+
 				// Create SandboxTemplate
 				tmpl := &agentsv1alpha1.SandboxTemplate{
 					ObjectMeta: metav1.ObjectMeta{
@@ -1466,37 +1488,19 @@ func TestSandboxManager_DeleteCheckpoint(t *testing.T) {
 						},
 					},
 				}
-				err := client.Create(t.Context(), tmpl)
-				require.NoError(t, err)
-
-				// Create Checkpoint with owner annotation
-				cp := &agentsv1alpha1.Checkpoint{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      tt.checkpointID,
-						Namespace: namespace,
-						Annotations: map[string]string{
-							agentsv1alpha1.AnnotationOwner: "test-user",
-						},
-					},
-				}
 				if tt.withOwnerRef {
-					cp.OwnerReferences = []metav1.OwnerReference{
+					tmpl.OwnerReferences = []metav1.OwnerReference{
 						{
-							APIVersion:         agentsv1alpha1.SandboxTemplateControllerKind.GroupVersion().String(),
-							Kind:               agentsv1alpha1.SandboxTemplateControllerKind.Kind,
-							Name:               tmpl.Name,
-							UID:                tmpl.UID,
+							APIVersion:         agentsv1alpha1.CheckpointControllerKind.GroupVersion().String(),
+							Kind:               agentsv1alpha1.CheckpointControllerKind.Kind,
+							Name:               cp.Name,
+							UID:                cp.UID,
 							Controller:         ptr.To(true),
 							BlockOwnerDeletion: ptr.To(true),
 						},
 					}
 				}
-				err = client.Create(t.Context(), cp)
-				require.NoError(t, err)
-
-				// Update status with checkpointId
-				cp.Status.CheckpointId = tt.checkpointID
-				err = client.Status().Update(t.Context(), cp)
+				err = client.Create(t.Context(), tmpl)
 				require.NoError(t, err)
 
 				// Wait for informer sync

@@ -25,7 +25,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -1076,4 +1078,96 @@ func TestInfra_DeleteCheckpoint_NewShape_SkipsExplicitTemplateDelete(t *testing.
 
 	assert.Equal(t, 1, deleteCpCount, "DefaultDeleteCheckpointCR must be called exactly once")
 	assert.Equal(t, 0, deleteTmplCount, "DefaultDeleteSandboxTemplate must not be called for new-shape data; GC handles cascade")
+}
+
+func TestInfra_DeleteCheckpoint_IgnoresNotFoundDuringDeletes(t *testing.T) {
+	tests := []struct {
+		name             string
+		checkpointID     string
+		deleteCheckpoint error
+		deleteTemplate   error
+		expectCheckpoint int
+		expectTemplate   int
+	}{
+		{
+			name:             "checkpoint delete not found is ignored",
+			checkpointID:     "cp-delete-not-found",
+			deleteCheckpoint: apierrors.NewNotFound(schema.GroupResource{Group: v1alpha1.GroupVersion.Group, Resource: "checkpoints"}, "cp-delete-not-found"),
+			expectCheckpoint: 1,
+			expectTemplate:   1,
+		},
+		{
+			name:             "legacy template delete not found is ignored",
+			checkpointID:     "cp-template-not-found",
+			deleteTemplate:   apierrors.NewNotFound(schema.GroupResource{Group: v1alpha1.GroupVersion.Group, Resource: "sandboxtemplates"}, "cp-template-not-found"),
+			expectCheckpoint: 1,
+			expectTemplate:   1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			infraInstance, fc := NewTestInfra(t)
+
+			const namespace = "default"
+			cpName := tt.checkpointID
+			cpUID := types.UID(tt.checkpointID + "-uid")
+
+			cp := &v1alpha1.Checkpoint{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        cpName,
+					Namespace:   namespace,
+					UID:         cpUID,
+					Annotations: map[string]string{v1alpha1.AnnotationOwner: "test-user"},
+				},
+				Status: v1alpha1.CheckpointStatus{CheckpointId: cpName},
+			}
+			require.NoError(t, fc.Create(t.Context(), cp))
+			require.NoError(t, fc.Status().Update(t.Context(), cp))
+
+			tmpl := &v1alpha1.SandboxTemplate{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      cpName,
+					Namespace: namespace,
+				},
+				Spec: v1alpha1.SandboxTemplateSpec{
+					Template: &corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: "main", Image: "test"}},
+						},
+					},
+				},
+			}
+			require.NoError(t, fc.Create(t.Context(), tmpl))
+
+			var deleteCpCount, deleteTmplCount int
+			origDelCp := DefaultDeleteCheckpointCR
+			DefaultDeleteCheckpointCR = func(ctx context.Context, c client.Client, namespace, name string) error {
+				deleteCpCount++
+				if tt.deleteCheckpoint != nil {
+					return tt.deleteCheckpoint
+				}
+				return origDelCp(ctx, c, namespace, name)
+			}
+			t.Cleanup(func() { DefaultDeleteCheckpointCR = origDelCp })
+
+			origDelTmpl := DefaultDeleteSandboxTemplate
+			DefaultDeleteSandboxTemplate = func(ctx context.Context, c client.Client, namespace, name string) error {
+				deleteTmplCount++
+				if tt.deleteTemplate != nil {
+					return tt.deleteTemplate
+				}
+				return origDelTmpl(ctx, c, namespace, name)
+			}
+			t.Cleanup(func() { DefaultDeleteSandboxTemplate = origDelTmpl })
+
+			err := infraInstance.DeleteCheckpoint(t.Context(), infra.DeleteCheckpointOptions{
+				Namespace:    namespace,
+				CheckpointID: cpName,
+			})
+			require.NoError(t, err)
+			assert.Equal(t, tt.expectCheckpoint, deleteCpCount)
+			assert.Equal(t, tt.expectTemplate, deleteTmplCount)
+		})
+	}
 }

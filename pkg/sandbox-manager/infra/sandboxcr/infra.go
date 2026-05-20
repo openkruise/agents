@@ -235,7 +235,7 @@ func (i *Infra) DeleteCheckpoint(ctx context.Context, opts infra.DeleteCheckpoin
 	// SandboxTemplate after the agents.kruise.io/checkpoint finalizer is
 	// processed.
 	log.Info("deleting checkpoint", "checkpoint", klog.KObj(cp))
-	if err := DefaultDeleteCheckpointCR(ctx, i.Cache.GetClient(), cp.Namespace, cp.Name); err != nil {
+	if err := client.IgnoreNotFound(DefaultDeleteCheckpointCR(ctx, i.Cache.GetClient(), cp.Namespace, cp.Name)); err != nil {
 		log.Error(err, "failed to delete checkpoint")
 		return managererrors.NewError(managererrors.ErrorInternal, "%s", err.Error())
 	}
@@ -245,7 +245,7 @@ func (i *Infra) DeleteCheckpoint(ctx context.Context, opts infra.DeleteCheckpoin
 	// SandboxTemplate. Delete it explicitly.
 	if !metav1.IsControlledBy(tmpl, cp) {
 		log.Info("template not controlled by checkpoint, deleting explicitly", "template", klog.KObj(tmpl))
-		if err := DefaultDeleteSandboxTemplate(ctx, i.Cache.GetClient(), tmpl.Namespace, tmpl.Name); err != nil {
+		if err := client.IgnoreNotFound(DefaultDeleteSandboxTemplate(ctx, i.Cache.GetClient(), tmpl.Namespace, tmpl.Name)); err != nil {
 			log.Error(err, "failed to delete sandbox template")
 			return managererrors.NewError(managererrors.ErrorInternal, "%s", err.Error())
 		}
