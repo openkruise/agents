@@ -74,13 +74,11 @@ func TestPauseSandbox(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, pauseResp.Code)
 	assert.Equal(t, models.SandboxStatePaused, describeResp.Body.State)
 
-	// pause again
+	// pause again — should be idempotent (sandbox already paused)
 	start := time.Now()
 	pauseResp, err = controller.PauseSandbox(req)
-	assert.NotNil(t, err)
-	if err != nil {
-		assert.Equal(t, http.StatusConflict, err.Code)
-	}
+	assert.Nil(t, err)
+	assert.Equal(t, http.StatusNoContent, pauseResp.Code)
 	describeResp, err = controller.DescribeSandbox(req)
 	assert.Nil(t, err)
 	assert.Equal(t, models.SandboxStatePaused, describeResp.Body.State)
@@ -88,6 +86,61 @@ func TestPauseSandbox(t *testing.T) {
 	assert.NoError(t, parseErr)
 	expectEndAt := start.AddDate(1000, 0, 0)
 	assert.WithinDuration(t, expectEndAt, endAt, 5*time.Second, "expect end at: %s, but got %s", expectEndAt, endAt)
+}
+
+func TestPauseSandboxConflict(t *testing.T) {
+	tests := []struct {
+		name          string
+		prepare       func(t *testing.T, controller *Controller, sandboxID string) func()
+		expectStatus  int
+		expectMessage string
+	}{
+		{
+			name: "active resume wait returns conflict",
+			prepare: func(t *testing.T, controller *Controller, sandboxID string) func() {
+				sbx := GetSandbox(t, sandboxID, controller.cache.GetClient())
+				task, err := controller.cache.NewSandboxResumeTask(t.Context(), sbx)
+				require.NoError(t, err)
+				return task.Release
+			},
+			expectStatus:  http.StatusConflict,
+			expectMessage: "another action(Resume)'s wait task already exists",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			templateName := "test-template-pause-conflict"
+			controller, _, teardown := Setup(t)
+			defer teardown()
+			cleanup := CreateSandboxPool(t, controller, templateName, 1)
+			defer cleanup()
+			user := &models.CreatedTeamAPIKey{
+				ID:   keys.AdminKeyID,
+				Key:  InitKey,
+				Name: "admin",
+			}
+			createResp, err := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
+				TemplateID: templateName,
+				Metadata: map[string]string{
+					models.ExtensionKeySkipInitRuntime: agentsv1alpha1.True,
+				},
+			}, nil, user))
+			require.Nil(t, err)
+			require.Equal(t, models.SandboxStateRunning, createResp.Body.State)
+
+			release := tt.prepare(t, controller, createResp.Body.SandboxID)
+			if release != nil {
+				defer release()
+			}
+			_, apiErr := controller.PauseSandbox(NewRequest(t, nil, nil, map[string]string{
+				"sandboxID": createResp.Body.SandboxID,
+			}, user))
+			require.NotNil(t, apiErr)
+			assert.Equal(t, tt.expectStatus, apiErr.Code)
+			assert.Contains(t, apiErr.Message, tt.expectMessage)
+		})
+	}
 }
 
 func pauseSandboxHelper(t *testing.T, controller *Controller, client client.Client, sandboxID string, pausing, resuming bool, user *models.CreatedTeamAPIKey) {

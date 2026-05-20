@@ -18,6 +18,7 @@ package e2b
 
 import (
 	"context"
+	stderrors "errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -25,7 +26,8 @@ import (
 	"k8s.io/klog/v2"
 
 	"github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/sandbox-manager/errors"
+	cacheutils "github.com/openkruise/agents/pkg/cache/utils"
+	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
@@ -41,18 +43,12 @@ func (sc *Controller) PauseSandbox(r *http.Request) (web.ApiResponse[struct{}], 
 	if apiErr != nil {
 		return web.ApiResponse[struct{}]{}, apiErr
 	}
-	if state, reason := sbx.GetState(); state != v1alpha1.SandboxStateRunning {
-		log.Info("skip pause sandbox: sandbox is not running", "state", state, "reason", reason)
-		return web.ApiResponse[struct{}]{}, &web.ApiError{
-			Code:    http.StatusConflict,
-			Message: fmt.Sprintf("Sandbox %s is not running", id),
-		}
-	}
 	timeoutOptions := sc.buildPauseTimeoutOptions(sbx, time.Now())
 	if err := sc.manager.PauseSandbox(ctx, sbx, infra.PauseOptions{
 		Timeout: &timeoutOptions,
 	}); err != nil {
 		return web.ApiResponse[struct{}]{}, &web.ApiError{
+			Code:    pauseSandboxErrorCode(err),
 			Message: fmt.Sprintf("Failed to pause sandbox: %v", err),
 		}
 	}
@@ -60,6 +56,14 @@ func (sc *Controller) PauseSandbox(r *http.Request) (web.ApiResponse[struct{}], 
 	return web.ApiResponse[struct{}]{
 		Code: http.StatusNoContent,
 	}, nil
+}
+
+func pauseSandboxErrorCode(err error) int {
+	if managererrors.GetErrCode(err) == managererrors.ErrorConflict ||
+		stderrors.Is(err, cacheutils.ErrWaitTaskConflict) {
+		return http.StatusConflict
+	}
+	return http.StatusInternalServerError
 }
 
 func (sc *Controller) buildPauseTimeoutOptions(sbx infra.Sandbox, now time.Time) timeout.Options {
@@ -112,7 +116,7 @@ func (sc *Controller) ResumeSandbox(r *http.Request) (web.ApiResponse[struct{}],
 	log.Info("resuming sandbox")
 	if err := sc.manager.ResumeSandbox(ctx, sbx, infra.ResumeOptions{}); err != nil {
 		code := http.StatusInternalServerError
-		if errors.GetErrCode(err) == errors.ErrorBadRequest {
+		if managererrors.GetErrCode(err) == managererrors.ErrorBadRequest {
 			code = http.StatusBadRequest
 		}
 		return web.ApiResponse[struct{}]{}, &web.ApiError{
@@ -172,7 +176,7 @@ func (sc *Controller) ConnectSandbox(r *http.Request) (web.ApiResponse[*models.S
 		if err := sc.manager.ResumeSandbox(ctx, sbx, infra.ResumeOptions{}); err != nil {
 			log.Error(err, "failed to resume sandbox")
 			code := http.StatusInternalServerError
-			if errors.GetErrCode(err) == errors.ErrorConflict {
+			if managererrors.GetErrCode(err) == managererrors.ErrorConflict {
 				code = http.StatusBadRequest
 			}
 			return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
