@@ -344,6 +344,8 @@ func (s *Sandbox) Pause(ctx context.Context, opts infra.PauseOptions) error {
 	}
 	if !updated {
 		log.Info("skip update sandbox as it is already set to paused")
+	} else {
+		log.Info("update sandbox spec.paused=true succeeded")
 	}
 	log.Info("waiting sandbox pause")
 	start := time.Now()
@@ -393,6 +395,11 @@ func (s *Sandbox) Resume(ctx context.Context, _ infra.ResumeOptions) error {
 	if err != nil {
 		log.Error(err, "failed to update sandbox spec.paused")
 		return err
+	}
+	if resumeUpdated {
+		log.Info("update sandbox spec.paused=false succeeded")
+	} else {
+		log.Info("sandbox resume already won by another request")
 	}
 	log.Info("waiting sandbox resume")
 	start := time.Now()
