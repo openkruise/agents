@@ -163,17 +163,15 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 
 	log.V(consts.DebugLogLevel).Info("Received route refresh", "route", route)
 
-	// Handle based on state
-	if route.State == v1alpha1.SandboxStateRunning {
-		// Update the route
+	switch route.State {
+	case v1alpha1.SandboxStateDead, "":
+		registry.GetRegistry().Delete(route.ID)
+	default:
 		if registry.GetRegistry().Update(route.ID, route) {
 			log.Info("Route updated via refresh", "id", route.ID, "ip", route.IP)
 		} else {
 			log.V(consts.DebugLogLevel).Info("Route update skipped due to older resourceVersion", "id", route.ID)
 		}
-	} else {
-		// Delete the route if the sandbox is dead
-		registry.GetRegistry().Delete(route.ID)
 	}
 
 	w.WriteHeader(http.StatusNoContent)

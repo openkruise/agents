@@ -42,6 +42,7 @@ import (
 
 const (
 	RefreshAPI = "/refresh"
+	WakeAPI    = "/wake/{sandboxID}"
 	SystemPort = 7789
 )
 
@@ -78,6 +79,7 @@ type Server struct {
 	// internal
 	routes  sync.Map
 	adapter RequestAdapter
+	wake    WakeFunc
 	LBEntry string // entry of load balancer, usually a service
 	// peers - now managed by Peers
 	peersManager peers.Peers
@@ -97,6 +99,10 @@ func (s *Server) SetRequestAdapter(adapter RequestAdapter) {
 	s.LBEntry = adapter.Entry()
 }
 
+func (s *Server) SetWakeFunc(wake WakeFunc) {
+	s.wake = wake
+}
+
 func (s *Server) SetPeersManager(p peers.Peers) {
 	s.peersManager = p
 }
@@ -108,6 +114,7 @@ func (s *Server) Run() error {
 	// HTTP
 	mux := http.NewServeMux()
 	web.RegisterRoute(mux, http.MethodPost, RefreshAPI, s.handleRefresh)
+	web.RegisterRoute(mux, http.MethodPost, WakeAPI, s.handleWake)
 	s.httpSrv = &http.Server{
 		Addr:              fmt.Sprintf(":%d", SystemPort),
 		Handler:           mux,
@@ -163,7 +170,7 @@ func (s *Server) handleRefresh(r *http.Request) (web.ApiResponse[struct{}], *web
 			Message: fmt.Sprintf("failed to unmarshal body: %s", err.Error()),
 		}
 	}
-	if route.State == v1alpha1.SandboxStateDead {
+	if route.State == "" || route.State == v1alpha1.SandboxStateDead {
 		s.DeleteRoute(route.ID)
 		log.Info("route deleted")
 	} else {
