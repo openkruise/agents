@@ -42,6 +42,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/klog/v2"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -91,10 +92,6 @@ func GetMetricsFromSandbox(t *testing.T, sbx infra.Sandbox) infra.ClaimMetrics {
 	return metrics
 }
 
-func durationPtr(d time.Duration) *time.Duration {
-	return &d
-}
-
 func TestValidateAndInitClaimOptions_ReserveFailedSandboxFor(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -115,7 +112,7 @@ func TestValidateAndInitClaimOptions_ReserveFailedSandboxFor(t *testing.T) {
 			opts: infra.ClaimSandboxOptions{
 				User:                    "test-user",
 				Template:                "test-template",
-				ReserveFailedSandboxFor: durationPtr(0),
+				ReserveFailedSandboxFor: ptr.To(time.Duration(0)),
 			},
 			expectFor:  0,
 			expectSame: true,
@@ -125,7 +122,7 @@ func TestValidateAndInitClaimOptions_ReserveFailedSandboxFor(t *testing.T) {
 			opts: infra.ClaimSandboxOptions{
 				User:                    "test-user",
 				Template:                "test-template",
-				ReserveFailedSandboxFor: durationPtr(2 * time.Hour),
+				ReserveFailedSandboxFor: ptr.To(2 * time.Hour),
 			},
 			expectFor:  2 * time.Hour,
 			expectSame: true,
@@ -135,7 +132,7 @@ func TestValidateAndInitClaimOptions_ReserveFailedSandboxFor(t *testing.T) {
 			opts: infra.ClaimSandboxOptions{
 				User:                    "test-user",
 				Template:                "test-template",
-				ReserveFailedSandboxFor: durationPtr(-1),
+				ReserveFailedSandboxFor: ptr.To(time.Duration(-1)),
 			},
 			expectFor:  -1,
 			expectSame: true,
@@ -593,7 +590,7 @@ func TestClaimSandboxFailed(t *testing.T) {
 			options: infra.ClaimSandboxOptions{
 				User:                    "test-user",
 				Template:                existTemplate,
-				ReserveFailedSandboxFor: durationPtr(-1),
+				ReserveFailedSandboxFor: ptr.To(time.Duration(-1)),
 				InplaceUpdate: &config.InplaceUpdateOptions{
 					Image: "new-image",
 				},
@@ -614,7 +611,7 @@ func TestClaimSandboxFailed(t *testing.T) {
 			options: infra.ClaimSandboxOptions{
 				User:                    "test-user",
 				Template:                existTemplate,
-				ReserveFailedSandboxFor: durationPtr(time.Hour),
+				ReserveFailedSandboxFor: ptr.To(time.Hour),
 				InplaceUpdate: &config.InplaceUpdateOptions{
 					Image: "new-image",
 				},
@@ -636,7 +633,7 @@ func TestClaimSandboxFailed(t *testing.T) {
 			options: infra.ClaimSandboxOptions{
 				User:                    "test-user",
 				Template:                existTemplate,
-				ReserveFailedSandboxFor: durationPtr(0),
+				ReserveFailedSandboxFor: ptr.To(time.Duration(0)),
 				InplaceUpdate: &config.InplaceUpdateOptions{
 					Image: "new-image",
 				},
@@ -658,7 +655,7 @@ func TestClaimSandboxFailed(t *testing.T) {
 			options: infra.ClaimSandboxOptions{
 				User:                    "test-user",
 				Template:                existTemplate,
-				ReserveFailedSandboxFor: durationPtr(-1),
+				ReserveFailedSandboxFor: ptr.To(time.Duration(-1)),
 				InitRuntime:             &config.InitRuntimeOptions{},
 				CSIMount: &config.CSIMountOptions{
 					MountOptionList: []config.MountConfig{
@@ -679,7 +676,7 @@ func TestClaimSandboxFailed(t *testing.T) {
 			options: infra.ClaimSandboxOptions{
 				User:                    "test-user",
 				Template:                existTemplate,
-				ReserveFailedSandboxFor: durationPtr(0),
+				ReserveFailedSandboxFor: ptr.To(time.Duration(0)),
 				InitRuntime:             &config.InitRuntimeOptions{},
 				CSIMount: &config.CSIMountOptions{
 					MountOptionList: []config.MountConfig{

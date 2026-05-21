@@ -58,7 +58,9 @@ func ValidateAndInitCloneOptions(opts infra.CloneSandboxOptions) (infra.CloneSan
 	if opts.CloneTimeout <= 0 {
 		opts.CloneTimeout = DefaultCloneTimeout
 	}
-	opts.ReserveFailedSandboxFor = defaultReserveFailedSandboxFor(opts.ReserveFailedSandboxFor)
+	if opts.ReserveFailedSandboxFor == nil {
+		opts.ReserveFailedSandboxFor = ptr.To(DefaultReserveFailedSandboxFor)
+	}
 	return opts, nil
 }
 
@@ -69,32 +71,14 @@ func ValidateAndInitCheckpointOptions(opts infra.CreateCheckpointOptions) infra.
 	return opts
 }
 
-func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache infracache.Provider) (infra.Sandbox, infra.CloneMetrics, error) {
-	if opts.CloneTimeout > 0 {
-		var cancel func()
-		ctx, cancel = context.WithTimeout(ctx, opts.CloneTimeout)
-		defer cancel()
-	}
+func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache infracache.Provider) (cloned infra.Sandbox, metrics infra.CloneMetrics, err error) {
 	log := klog.FromContext(ctx).WithValues("checkpoint", opts.CheckPointID)
-	metrics := infra.CloneMetrics{}
 
 	select {
 	case <-ctx.Done():
-		return nil, metrics, ctx.Err()
+		err = ctx.Err()
+		return
 	default:
-	}
-
-	if opts.CreateLimiter != nil {
-		log.Info("waiting for create sandbox limiter")
-		waitStart := time.Now()
-		err := opts.CreateLimiter.Wait(ctx)
-		if err != nil {
-			log.Error(err, "failed to wait create sandbox limiter")
-			return nil, metrics, err
-		}
-		metrics.Wait = time.Since(waitStart)
-		metrics.Total += metrics.Wait
-		log.Info("create sandbox limiter waited", "cost", metrics.Wait)
 	}
 
 	// Step 1: get checkpoint and template from cache or API server
@@ -108,15 +92,21 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 	if err != nil {
 		return nil, metrics, err
 	}
+	created := sbx
+	defer func() {
+		clearFailedSandbox(ctx, created, err, ptr.Deref(opts.ReserveFailedSandboxFor, DefaultReserveFailedSandboxFor))
+	}()
 
 	// Step 3: wait for sandbox ready
 	if metrics, err = cloneWaitSandboxReady(ctx, sbx, opts, cache, metrics); err != nil {
-		return nil, metrics, err
+		err = retriableError{Message: fmt.Sprintf("failed to wait for sandbox ready: %s", err)}
+		return
 	}
 
 	// Step 4: re-init runtime
 	if metrics, err = cloneReInitRuntime(ctx, sbx, opts, initRuntimeOpts, metrics); err != nil {
-		return nil, metrics, err
+		err = retriableError{Message: fmt.Sprintf("failed to init runtime: %s", err)}
+		return
 	}
 
 	// Step 5: csi mount
@@ -125,21 +115,24 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 		var resolveErr error
 		opts.CSIMount, resolveErr = runtime.ResolveCSIMountFromAnnotation(ctx, sbx.Sandbox, sbx.Cache.GetClient(), sbx.Cache, sbx.storageRegistry)
 		if resolveErr != nil {
-			return nil, metrics, resolveErr
+			err = resolveErr
+			return
 		}
 	}
 	if opts.CSIMount != nil {
 		log.Info("starting to perform csi mount")
 		metrics.CSIMount, err = runtime.ProcessCSIMounts(ctx, sbx.Sandbox, *opts.CSIMount)
+		metrics.Total += metrics.CSIMount
 		if err != nil {
 			log.Error(err, "failed to perform csi mount")
-			return nil, metrics, fmt.Errorf("failed to perform csi mount: %s", err)
+			err = fmt.Errorf("failed to perform csi mount: %s", err)
+			return
 		}
-		metrics.Total += metrics.CSIMount
 		log.Info("csi mount completed", "cost", metrics.CSIMount)
 	}
 
-	return sbx, metrics, nil
+	cloned = sbx
+	return
 }
 
 // findCheckpointAndTemplateById gets checkpoint and template from cache, fallback to API server if not found
@@ -218,11 +211,11 @@ func cloneWaitSandboxReady(ctx context.Context, sbx *Sandbox, opts infra.CloneSa
 	metrics.WaitReady, err = waitForSandboxReady(ctx, sbx, infra.ClaimSandboxOptions{
 		WaitReadyTimeout: opts.WaitReadyTimeout,
 	}, cache)
+	metrics.Total += metrics.WaitReady
 	if err != nil {
 		log.Error(err, "failed to wait sandbox ready", "cost", metrics.WaitReady)
 		return metrics, err
 	}
-	metrics.Total += metrics.WaitReady
 	return metrics, nil
 }
 
@@ -236,11 +229,11 @@ func cloneReInitRuntime(ctx context.Context, sbx *Sandbox, opts infra.CloneSandb
 	log.Info("re-init runtime")
 	var err error
 	metrics.InitRuntime, err = runtime.InitRuntime(ctx, sbx.Sandbox, *initRuntimeOpts, sbx.refreshFunc())
+	metrics.Total += metrics.InitRuntime
 	if err != nil {
 		log.Error(err, "failed to init runtime")
-		return metrics, fmt.Errorf("failed to init runtime: %w", err)
+		return metrics, err
 	}
-	metrics.Total += metrics.InitRuntime
 	return metrics, nil
 }
 

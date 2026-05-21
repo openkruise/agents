@@ -30,10 +30,6 @@ import (
 	"github.com/openkruise/agents/api/v1alpha1"
 )
 
-func durationPtr(d time.Duration) *time.Duration {
-	return &d
-}
-
 func TestParseExtensions(t *testing.T) {
 	tests := []struct {
 		name            string
@@ -95,7 +91,7 @@ func TestParseExtensions(t *testing.T) {
 			wantErr: false,
 			expectExtension: NewSandboxRequestExtension{
 				CreateOnNoStock:         true,
-				ReserveFailedSandboxFor: durationPtr(0),
+				ReserveFailedSandboxFor: ptr.To(time.Duration(0)),
 			},
 		},
 		{
@@ -106,7 +102,7 @@ func TestParseExtensions(t *testing.T) {
 			wantErr: false,
 			expectExtension: NewSandboxRequestExtension{
 				CreateOnNoStock:         true,
-				ReserveFailedSandboxFor: durationPtr(-1),
+				ReserveFailedSandboxFor: ptr.To(time.Duration(-1)),
 			},
 		},
 		{
@@ -117,7 +113,7 @@ func TestParseExtensions(t *testing.T) {
 			wantErr: false,
 			expectExtension: NewSandboxRequestExtension{
 				CreateOnNoStock:         true,
-				ReserveFailedSandboxFor: durationPtr(10 * time.Minute),
+				ReserveFailedSandboxFor: ptr.To(10 * time.Minute),
 			},
 		},
 		{
@@ -128,7 +124,7 @@ func TestParseExtensions(t *testing.T) {
 			wantErr: false,
 			expectExtension: NewSandboxRequestExtension{
 				CreateOnNoStock:         true,
-				ReserveFailedSandboxFor: durationPtr(0),
+				ReserveFailedSandboxFor: ptr.To(time.Duration(0)),
 			},
 		},
 		{
@@ -153,7 +149,7 @@ func TestParseExtensions(t *testing.T) {
 			wantErr: false,
 			expectExtension: NewSandboxRequestExtension{
 				CreateOnNoStock:         true,
-				ReserveFailedSandboxFor: durationPtr(-1),
+				ReserveFailedSandboxFor: ptr.To(time.Duration(-1)),
 			},
 		},
 		{
@@ -165,7 +161,7 @@ func TestParseExtensions(t *testing.T) {
 			wantErr: false,
 			expectExtension: NewSandboxRequestExtension{
 				CreateOnNoStock:         true,
-				ReserveFailedSandboxFor: durationPtr(0),
+				ReserveFailedSandboxFor: ptr.To(time.Duration(0)),
 			},
 		},
 		{

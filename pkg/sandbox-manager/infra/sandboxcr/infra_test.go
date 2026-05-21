@@ -18,6 +18,7 @@ package sandboxcr
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -811,6 +812,153 @@ func TestInfra_CloneSandbox(t *testing.T) {
 	assert.GreaterOrEqual(t, metrics.CreateSandbox, time.Duration(0))
 	assert.GreaterOrEqual(t, metrics.WaitReady, time.Duration(0))
 	assert.GreaterOrEqual(t, metrics.Total, time.Duration(0))
+}
+
+func TestInfra_CloneSandboxRetriesWaitReadyFailure(t *testing.T) {
+	infraInstance, fc := NewTestInfra(t)
+	checkpointID := "clone-retry-wait-ready"
+	createCloneTestCheckpoint(t, fc, infraInstance.Cache, checkpointID)
+
+	origCreateSandbox := DefaultCreateSandbox
+	attempts := 0
+	firstSandboxName := "clone-retry-first"
+	DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client) (*v1alpha1.Sandbox, error) {
+		attempts++
+		sbx.Name = fmt.Sprintf("clone-retry-%d", attempts)
+		created, err := origCreateSandbox(ctx, sbx, c)
+		if err != nil {
+			return nil, err
+		}
+		if attempts == 1 {
+			firstSandboxName = created.Name
+			return created, nil
+		}
+		created.Status = v1alpha1.SandboxStatus{
+			Phase:              v1alpha1.SandboxRunning,
+			ObservedGeneration: created.Generation,
+			Conditions: []metav1.Condition{
+				{
+					Type:   string(v1alpha1.SandboxConditionReady),
+					Status: metav1.ConditionTrue,
+					Reason: v1alpha1.SandboxReadyReasonPodReady,
+				},
+			},
+			PodInfo: v1alpha1.PodInfo{
+				PodIP: "1.2.3.4",
+			},
+		}
+		return created, c.Status().Update(ctx, created)
+	}
+	t.Cleanup(func() { DefaultCreateSandbox = origCreateSandbox })
+
+	opts := infra.CloneSandboxOptions{
+		User:                    "test-user",
+		CheckPointID:            checkpointID,
+		WaitReadyTimeout:        20 * time.Millisecond,
+		CloneTimeout:            300 * time.Millisecond,
+		ReserveFailedSandboxFor: ptr.To(time.Duration(0)),
+	}
+	sbx, metrics, err := infraInstance.CloneSandbox(t.Context(), opts)
+	require.NoError(t, err)
+	require.NotNil(t, sbx)
+	assert.Equal(t, 2, attempts)
+	assertCloneMetricsTotalConsistent(t, metrics)
+
+	got := &v1alpha1.Sandbox{}
+	err = fc.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: firstSandboxName}, got)
+	assert.True(t, apierrors.IsNotFound(err))
+}
+
+func assertCloneMetricsTotalConsistent(t *testing.T, metrics infra.CloneMetrics) {
+	t.Helper()
+	expectedTotal := metrics.Wait + metrics.GetTemplate + metrics.CreateSandbox + metrics.WaitReady + metrics.InitRuntime + metrics.CSIMount
+	assert.Equal(t, expectedTotal, metrics.Total)
+}
+
+func TestInfra_CloneSandboxDoesNotRetryCSIMountFailure(t *testing.T) {
+	server := testutils.NewTestRuntimeServer(testutils.TestRuntimeServerOptions{
+		RunCommandResult: runtime.RunCommandResult{
+			PID:      1,
+			ExitCode: 1,
+			Stderr:   []string{"mount error"},
+			Exited:   true,
+		},
+		RunCommandImmediately: true,
+	})
+	defer server.Close()
+
+	infraInstance, fc := NewTestInfra(t)
+	checkpointID := "clone-csi-no-retry"
+	createCloneTestCheckpoint(t, fc, infraInstance.Cache, checkpointID)
+
+	origCreateSandbox := DefaultCreateSandbox
+	attempts := 0
+	DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client) (*v1alpha1.Sandbox, error) {
+		attempts++
+		sbx.Name = fmt.Sprintf("clone-csi-no-retry-%d", attempts)
+		if sbx.Annotations == nil {
+			sbx.Annotations = map[string]string{}
+		}
+		sbx.Annotations[v1alpha1.AnnotationRuntimeURL] = server.URL
+		sbx.Annotations[v1alpha1.AnnotationRuntimeAccessToken] = runtime.AccessToken
+		created, err := origCreateSandbox(ctx, sbx, c)
+		if err != nil {
+			return nil, err
+		}
+		created.Status = v1alpha1.SandboxStatus{
+			Phase:              v1alpha1.SandboxRunning,
+			ObservedGeneration: created.Generation,
+			Conditions: []metav1.Condition{
+				{
+					Type:   string(v1alpha1.SandboxConditionReady),
+					Status: metav1.ConditionTrue,
+					Reason: v1alpha1.SandboxReadyReasonPodReady,
+				},
+			},
+			PodInfo: v1alpha1.PodInfo{
+				PodIP: "1.2.3.4",
+			},
+		}
+		return created, c.Status().Update(ctx, created)
+	}
+	t.Cleanup(func() { DefaultCreateSandbox = origCreateSandbox })
+
+	opts := infra.CloneSandboxOptions{
+		User:             "test-user",
+		CheckPointID:     checkpointID,
+		WaitReadyTimeout: 30 * time.Second,
+		CloneTimeout:     300 * time.Millisecond,
+		CSIMount: &config.CSIMountOptions{
+			MountOptionList: []config.MountConfig{
+				{
+					Driver:     "test-driver",
+					RequestRaw: "test-request",
+				},
+			},
+		},
+	}
+	sbx, metrics, err := infraInstance.CloneSandbox(t.Context(), opts)
+	require.Error(t, err)
+	assert.Nil(t, sbx)
+	assert.Contains(t, err.Error(), "failed to perform csi mount")
+	assert.Equal(t, 1, attempts)
+	assert.Greater(t, metrics.CSIMount, time.Duration(0))
+	assertCloneMetricsTotalConsistent(t, metrics)
+}
+
+func TestInfra_CloneSandboxTinyTimeoutStillAttempts(t *testing.T) {
+	infraInstance, _ := NewTestInfra(t)
+
+	sbx, _, err := infraInstance.CloneSandbox(t.Context(), infra.CloneSandboxOptions{
+		User:               "test-user",
+		CheckPointID:       "missing-checkpoint",
+		SkipWaitCheckpoint: true,
+		CloneTimeout:       RetryInterval / 2,
+	})
+
+	assert.Nil(t, sbx)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not found")
 }
 
 func createTestCheckpoint(name, user string, namespace string, phase v1alpha1.CheckpointPhase) *v1alpha1.Checkpoint {

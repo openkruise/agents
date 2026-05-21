@@ -226,10 +226,6 @@ func (c *commonControl) claimSandboxes(ctx context.Context, claim *agentsv1alpha
 	if err != nil {
 		return 0, fmt.Errorf("failed to build claim options: %w", err)
 	}
-	opts, err = sandboxcr.ValidateAndInitClaimOptions(opts)
-	if err != nil {
-		return 0, fmt.Errorf("failed to validate claim options: %w", err)
-	}
 
 	claimLockChannel := make(chan struct{}, batchSize) // set to max batch size, not controlled
 	limiter := rate.NewLimiter(rate.Inf, batchSize)

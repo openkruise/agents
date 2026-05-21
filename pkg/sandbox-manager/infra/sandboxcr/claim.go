@@ -33,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog/v2"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/openkruise/agents/api/v1alpha1"
@@ -57,14 +58,6 @@ import (
 )
 
 var DefaultCleanupTimeout = 30 * time.Second
-
-func defaultReserveFailedSandboxFor(opts *time.Duration) *time.Duration {
-	if opts != nil {
-		return opts
-	}
-	reserveFor := DefaultReserveFailedSandboxFor
-	return &reserveFor
-}
 
 func ValidateAndInitClaimOptions(opts infra.ClaimSandboxOptions) (infra.ClaimSandboxOptions, error) {
 	if opts.User == "" {
@@ -107,7 +100,9 @@ func ValidateAndInitClaimOptions(opts infra.ClaimSandboxOptions) (infra.ClaimSan
 	if opts.WaitReadyTimeout <= 0 {
 		opts.WaitReadyTimeout = consts.DefaultWaitReadyTimeout
 	}
-	opts.ReserveFailedSandboxFor = defaultReserveFailedSandboxFor(opts.ReserveFailedSandboxFor)
+	if opts.ReserveFailedSandboxFor == nil {
+		opts.ReserveFailedSandboxFor = ptr.To(DefaultReserveFailedSandboxFor)
+	}
 	return opts, nil
 }
 
@@ -155,7 +150,7 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 		}
 		metrics.LastError = err
 		log.Info("try claim sandbox result", "metrics", metrics.String())
-		clearFailedSandbox(ctx, claimed, err, *defaultReserveFailedSandboxFor(opts.ReserveFailedSandboxFor))
+		clearFailedSandbox(ctx, claimed, err, ptr.Deref(opts.ReserveFailedSandboxFor, DefaultReserveFailedSandboxFor))
 	}()
 	// Step 1: Pick an available sandbox
 	var sbx *Sandbox
@@ -291,7 +286,7 @@ func clearFailedSandbox(ctx context.Context, sbx infra.Sandbox, err error, reser
 	}
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
 	if reserveFor < 0 {
-		log.Info("the locked sandbox is reserved forever for debugging", "reason", err)
+		log.Info("the failed sandbox is reserved forever for debugging", "reason", err)
 		return
 	}
 
@@ -300,18 +295,18 @@ func clearFailedSandbox(ctx context.Context, sbx infra.Sandbox, err error, reser
 
 	if reserveFor > 0 {
 		shutdownTime := time.Now().Add(reserveFor)
-		log.Info("the locked sandbox will be reserved before delayed deletion", "reason", err, "shutdownTime", shutdownTime)
+		log.Info("the failed sandbox will be reserved before delayed deletion", "reason", err, "shutdownTime", shutdownTime)
 		if _, updateErr := sbx.SaveTimeoutWithPolicy(cleanupCtx, timeoututils.Options{
 			ShutdownTime: shutdownTime,
 		}, timeoututils.UpdatePolicyAlways); updateErr != nil {
-			log.Error(updateErr, "failed to set delayed deletion time for locked sandbox")
+			log.Error(updateErr, "failed to set delayed deletion time for failed sandbox")
 		}
 		return
 	}
 
-	log.Info("the locked sandbox will be deleted", "reason", err)
+	log.Info("the failed sandbox will be deleted", "reason", err)
 	if killErr := sbx.Kill(cleanupCtx); killErr != nil {
-		log.Error(killErr, "failed to delete locked sandbox")
+		log.Error(killErr, "failed to delete failed sandbox")
 	} else {
 		log.Info("sandbox deleted")
 	}

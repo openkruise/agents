@@ -197,20 +197,87 @@ func buildClaimError(err error, lastError error, failures []infra.PickSandboxFai
 
 func (i *Infra) CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions) (infra.Sandbox, infra.CloneMetrics, error) {
 	log := klog.FromContext(ctx)
+	metrics := infra.CloneMetrics{}
 	opts, err := ValidateAndInitCloneOptions(opts)
 	if err != nil {
 		log.Error(err, "invalid clone options")
-		return nil, infra.CloneMetrics{}, err
+		return nil, metrics, err
 	}
 	log.Info("clone options", "options", opts)
-	opts.CreateLimiter = i.createLimiter
-	sandbox, metrics, err := CloneSandbox(ctx, opts, i.Cache)
+
+	cloneCtx, cancel := context.WithTimeout(ctx, opts.CloneTimeout)
+	defer cancel()
+
+	var clonedSandbox infra.Sandbox
+	err = retry.OnError(wait.Backoff{
+		Steps:    cloneRetrySteps(opts.CloneTimeout),
+		Duration: RetryInterval,
+		Factor:   LockBackoffFactor,
+		Jitter:   LockJitter,
+	}, func(err error) bool {
+		return errors.As(err, &retriableError{})
+	}, func() error {
+		if i.createLimiter != nil {
+			log.Info("waiting for create sandbox limiter")
+			waitStart := time.Now()
+			if waitErr := i.createLimiter.Wait(cloneCtx); waitErr != nil {
+				waitCost := time.Since(waitStart)
+				metrics.Wait += waitCost
+				metrics.Total += waitCost
+				log.Error(waitErr, "failed to wait create sandbox limiter")
+				if wait.Interrupted(waitErr) {
+					return fmt.Errorf("%v", waitErr)
+				}
+				return waitErr
+			}
+			waitCost := time.Since(waitStart)
+			metrics.Wait += waitCost
+			metrics.Total += waitCost
+			log.Info("create sandbox limiter waited", "cost", waitCost)
+		}
+		attemptOpts := opts
+		attemptOpts.CreateLimiter = nil
+		cloned, tryMetrics, cloneErr := CloneSandbox(cloneCtx, attemptOpts, i.Cache)
+		mergeCloneMetrics(&metrics, tryMetrics)
+		if cloneErr == nil {
+			clonedSandbox = cloned
+		}
+		// client-go retry.OnError rewrites interrupted errors to the last
+		// retriable error. Context cancellation is interrupted but non-retriable,
+		// so keep its message while intentionally avoiding %w; wrapping would
+		// still let wait.Interrupted identify and rewrite it.
+		if wait.Interrupted(cloneErr) {
+			return fmt.Errorf("%v", cloneErr)
+		}
+		return cloneErr
+	})
 	if err != nil {
 		log.Error(err, "failed to clone sandbox")
 		return nil, metrics, err
 	}
-	log.Info("sandbox cloned", "sandbox", klog.KObj(sandbox))
-	return sandbox, metrics, nil
+	if clonedSandbox == nil {
+		return nil, metrics, fmt.Errorf("clone sandbox completed without returning sandbox")
+	}
+	log.Info("sandbox cloned", "sandbox", klog.KObj(clonedSandbox))
+	return clonedSandbox, metrics, nil
+}
+
+func cloneRetrySteps(timeout time.Duration) int {
+	steps := int(timeout / RetryInterval)
+	if steps < 1 {
+		return 1
+	}
+	return steps
+}
+
+func mergeCloneMetrics(dst *infra.CloneMetrics, src infra.CloneMetrics) {
+	dst.Wait += src.Wait
+	dst.GetTemplate += src.GetTemplate
+	dst.CreateSandbox += src.CreateSandbox
+	dst.WaitReady += src.WaitReady
+	dst.InitRuntime += src.InitRuntime
+	dst.CSIMount += src.CSIMount
+	dst.Total += src.Total
 }
 
 func (i *Infra) DeleteCheckpoint(ctx context.Context, opts infra.DeleteCheckpointOptions) error {

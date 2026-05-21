@@ -42,7 +42,10 @@ type ClaimSandboxOptions struct {
 	// Set Modifier to modify the Sandbox before it is updated
 	Modifier func(sandbox Sandbox) `json:"-"`
 	// ReserveFailedSandboxFor controls how long failed sandboxes are kept for debugging.
-	// nil means the backend should use its default.
+	//   nil      — backend default (DefaultReserveFailedSandboxFor)
+	//   0        — delete immediately
+	//   positive — reserve for that duration, then delete
+	//   negative — reserve forever (never delete)
 	ReserveFailedSandboxFor *time.Duration `json:"reserveFailedSandboxFor"`
 	// Set InplaceUpdate to trigger an inplace-update (image and/or resources)
 	InplaceUpdate *config.InplaceUpdateOptions `json:"inplaceUpdate"`
@@ -75,7 +78,12 @@ type CloneSandboxOptions struct {
 	Modifier                func(sbx Sandbox)       `json:"-"`
 	CreateLimiter           *rate.Limiter           `json:"-"`
 	SkipWaitCheckpoint      bool                    `json:"skipWaitCheckpoint"`
-	ReserveFailedSandboxFor *time.Duration          `json:"reserveFailedSandboxFor"`
+	// ReserveFailedSandboxFor controls how long failed sandboxes are kept for debugging.
+	//   nil      — backend default (DefaultReserveFailedSandboxFor)
+	//   0        — delete immediately
+	//   positive — reserve for that duration, then delete
+	//   negative — reserve forever (never delete)
+	ReserveFailedSandboxFor *time.Duration `json:"reserveFailedSandboxFor"`
 }
 
 type CreateCheckpointOptions struct {
