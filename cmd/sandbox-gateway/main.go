@@ -33,13 +33,16 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-gateway/controller"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/filter"
 	peerserver "github.com/openkruise/agents/pkg/sandbox-gateway/server"
+	"github.com/openkruise/agents/pkg/sandbox-gateway/wake"
 )
 
 func init() {
+	gatewayConfig := filter.DefaultConfig()
+	wakeModule := wake.NewModule(gatewayConfig.GetManagerURL())
 	envoyhttp.RegisterHttpFilterFactoryAndConfigParser(
 		"sandbox-gateway",
 		filter.FilterFactory,
-		&filter.ConfigParser{},
+		filter.NewConfigParserWithWakeClient(gatewayConfig.GetManagerURL(), wakeModule),
 	)
 
 	go func() {
