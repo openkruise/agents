@@ -104,6 +104,7 @@ func (sc *Controller) Init() error {
 		WithSandboxInfra().
 		WithMemberlistPeers().
 		WithRequestAdapter(adapter).
+		WithMaxTimeout(time.Duration(sc.maxTimeout) * time.Second).
 		Build()
 
 	if err != nil {
