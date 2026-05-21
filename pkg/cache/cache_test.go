@@ -62,6 +62,24 @@ func TestCache_GetClaimedSandbox(t *testing.T) {
 		assert.Equal(t, "test-sbx", got.Name)
 	})
 
+	t.Run("canonical sandbox id can be queried without namespace and wrong namespace does not match", func(t *testing.T) {
+		c, _, err := cachetest.NewTestCache(t, sbx)
+		require.NoError(t, err)
+		sandboxID := sandboxutils.GetSandboxID(sbx)
+
+		got, err := c.GetClaimedSandbox(t.Context(), cache.GetClaimedSandboxOptions{SandboxID: sandboxID})
+		require.NoError(t, err)
+		assert.Equal(t, "default", got.Namespace)
+		assert.Equal(t, "test-sbx", got.Name)
+
+		_, err = c.GetClaimedSandbox(t.Context(), cache.GetClaimedSandboxOptions{
+			Namespace: "wrong-namespace",
+			SandboxID: sandboxID,
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not found in cache")
+	})
+
 	t.Run("not found", func(t *testing.T) {
 		c, _, err := cachetest.NewTestCache(t)
 		require.NoError(t, err)

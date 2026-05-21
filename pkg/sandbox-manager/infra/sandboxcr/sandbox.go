@@ -71,6 +71,10 @@ func (s *Sandbox) GetTemplate() string {
 	return utils.GetTemplateFromSandbox(s.Sandbox)
 }
 
+func (s *Sandbox) GetSandboxCR() *agentsv1alpha1.Sandbox {
+	return s.Sandbox
+}
+
 func (s *Sandbox) InplaceRefresh(ctx context.Context, deepcopy bool) error {
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(s.Sandbox)).V(consts.DebugLogLevel)
 	fetchFromApiServer := false
@@ -201,6 +205,19 @@ func setTimeout(s *agentsv1alpha1.Sandbox, opts timeout.Options) {
 	}
 }
 
+func setAnnotations(s *agentsv1alpha1.Sandbox, annotations map[string]string) {
+	for key, value := range annotations {
+		if value == "" {
+			delete(s.Annotations, key)
+			continue
+		}
+		if s.Annotations == nil {
+			s.Annotations = map[string]string{}
+		}
+		s.Annotations[key] = value
+	}
+}
+
 func (s *Sandbox) SetTimeout(opts timeout.Options) {
 	setTimeout(s.Sandbox, opts)
 }
@@ -276,6 +293,7 @@ func (s *Sandbox) SaveTimeoutWithPolicy(ctx context.Context, opts timeout.Option
 			return false, nil
 		}
 		setTimeout(sbx, opts)
+		setAnnotations(sbx, opts.SetAnnotations)
 		return true, nil
 	})
 	if err != nil {
@@ -428,7 +446,8 @@ func (s *Sandbox) Resume(ctx context.Context, _ infra.ResumeOptions) error {
 		// Concurrent same-action Resume callers share the Sandbox resume wait.
 		// Once the Sandbox reaches Ready, losing callers return success without
 		// running or waiting for the transitional E2B post-resume initialization
-		// below. ReInit and CSI remount are not part of the loser success contract.
+		// below. This is general Resume behavior, not wake-specific behavior.
+		// ReInit and CSI remount are not part of the loser success contract.
 		log.Info("sandbox resume already won by another request, skipping post-resume operations")
 		return nil
 	}
