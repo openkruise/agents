@@ -18,6 +18,7 @@ package e2b
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"net/http"
 	"sort"
@@ -456,8 +457,15 @@ func TestListSandboxes_Pagination(t *testing.T) {
 			},
 		},
 		{
-			name:  "start with nextToken",
-			query: map[string]string{"limit": "2", "nextToken": "2024-01-01T00:00:02Z"},
+			// The page token is opaque: it encodes the sort key (claim time) plus a
+			// unique tiebreaker (sandbox ID) so equal-timestamp sandboxes are not
+			// skipped at a page boundary. Resuming from the token for sandbox idx 1
+			// must return the following sandboxes (idx 2,3).
+			name: "start with nextToken",
+			query: map[string]string{
+				"limit":     "2",
+				"nextToken": base64.RawURLEncoding.EncodeToString([]byte(claimTimes[1] + "\x00" + createdSandboxIDs[1])),
+			},
 			pages: []pageExpectation{
 				{count: 2, hasNextToken: true, startedAtIdxs: []int{2, 3}},
 			},

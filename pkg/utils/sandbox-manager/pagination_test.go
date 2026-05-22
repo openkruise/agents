@@ -185,3 +185,94 @@ func TestPaginator_Apply(t *testing.T) {
 		})
 	}
 }
+
+// sandboxWithKey builds a sandbox whose name is the unique tiebreaker and whose
+// "key" annotation is the (possibly shared) sort key, mirroring how the e2b list
+// API sorts by a coarse claim/creation timestamp while paging by a unique ID.
+func sandboxWithKey(name, key string) *v1alpha1.Sandbox {
+	return &v1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        name,
+			Annotations: map[string]string{"key": key},
+		},
+	}
+}
+
+// TestPaginator_Apply_DuplicateSortKeys is a regression test for silent item
+// loss: when more than `limit` items share the same sort key at a page boundary,
+// a key-only cursor (resume at first key strictly greater than the last key)
+// skips every shared-key item after the first. With GetUniqueKey set, paging
+// over the whole set must return every item exactly once.
+func TestPaginator_Apply_DuplicateSortKeys(t *testing.T) {
+	getKey := func(sbx *v1alpha1.Sandbox) string { return sbx.GetAnnotations()["key"] }
+	getUnique := func(sbx *v1alpha1.Sandbox) string { return sbx.GetName() }
+	filter := func(*v1alpha1.Sandbox) bool { return true }
+
+	// Five sandboxes, three of them sharing the same one-second timestamp "t1".
+	input := []*v1alpha1.Sandbox{
+		sandboxWithKey("a", "t0"),
+		sandboxWithKey("b", "t1"),
+		sandboxWithKey("c", "t1"),
+		sandboxWithKey("d", "t1"),
+		sandboxWithKey("e", "t2"),
+	}
+
+	var got []string
+	token := ""
+	for i := 0; i < 10; i++ { // bounded to avoid an infinite loop on regression
+		p := &Paginator[*v1alpha1.Sandbox]{
+			Limit:        2,
+			NextToken:    token,
+			GetKey:       getKey,
+			GetUniqueKey: getUnique,
+			Filter:       filter,
+		}
+		page, next := p.Apply(input)
+		for _, sbx := range page {
+			got = append(got, sbx.GetName())
+		}
+		if next == "" {
+			break
+		}
+		token = next
+	}
+
+	// Every item is returned exactly once, in (key, name) order — none skipped.
+	assert.Equal(t, []string{"a", "b", "c", "d", "e"}, got)
+}
+
+// TestPaginator_Apply_UniqueKeyTokenRoundTrips verifies the composite token is a
+// header-safe opaque string that the next page decodes back to the same cursor.
+func TestPaginator_Apply_UniqueKeyTokenRoundTrips(t *testing.T) {
+	getKey := func(sbx *v1alpha1.Sandbox) string { return sbx.GetAnnotations()["key"] }
+	getUnique := func(sbx *v1alpha1.Sandbox) string { return sbx.GetName() }
+	filter := func(*v1alpha1.Sandbox) bool { return true }
+
+	input := []*v1alpha1.Sandbox{
+		sandboxWithKey("b", "t1"),
+		sandboxWithKey("c", "t1"),
+		sandboxWithKey("d", "t2"),
+	}
+
+	p := &Paginator[*v1alpha1.Sandbox]{
+		Limit:        2,
+		GetKey:       getKey,
+		GetUniqueKey: getUnique,
+		Filter:       filter,
+	}
+	page, token := p.Apply(input)
+	assert.Equal(t, []string{"b", "c"}, []string{page[0].GetName(), page[1].GetName()})
+	assert.NotEmpty(t, token)
+	assert.NotContains(t, token, "\x00", "token must be header-safe")
+
+	p2 := &Paginator[*v1alpha1.Sandbox]{
+		Limit:        2,
+		NextToken:    token,
+		GetKey:       getKey,
+		GetUniqueKey: getUnique,
+		Filter:       filter,
+	}
+	page2, token2 := p2.Apply(input)
+	assert.Equal(t, []string{"d"}, []string{page2[0].GetName()})
+	assert.Empty(t, token2)
+}
