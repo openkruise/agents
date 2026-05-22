@@ -99,6 +99,19 @@ test/              E2E (Go), E2B (Python) tests
   string means no error is expected; a non-empty string means an error is expected and the actual error message must
   contain that string (verified with `assert.Contains(t, err.Error(), tt.expectError)`).
 
+### Multi-Agent Development Limits
+
+- Core goal: accelerate development as much as possible while still delivering high-quality code.
+- Sub-agents executing a specific task, including implementer and task reviewer agents, must not run all unit tests
+  such as `go test ./pkg/...`.
+- Implementer agents may run unit tests when necessary, such as during TDD or after implementation, but the test scope
+  must stay focused on the changed behavior and must not include unnecessary packages.
+- Reviewer agents must assume unit tests are already passing. They may run unit tests only when the code has an obvious
+  issue that needs verification.
+- Sub-agents must never run `go build`.
+- The main agent, or the final global review agent, may run full package tests sparingly. `go build` must be reserved
+  for final verification after the implementation is considered fully safe.
+
 ## Behavioral Rules
 
 - Read related files before modifying code
