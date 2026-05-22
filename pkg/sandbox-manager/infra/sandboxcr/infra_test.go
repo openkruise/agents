@@ -856,7 +856,7 @@ func TestInfra_CloneSandboxRetriesWaitReadyFailure(t *testing.T) {
 		CheckPointID:            checkpointID,
 		WaitReadyTimeout:        20 * time.Millisecond,
 		CloneTimeout:            300 * time.Millisecond,
-		ReserveFailedSandboxFor: ptr.To(time.Duration(0)),
+		ReserveFailedSandboxFor: ptr.To(infra.ReserveFailedSandboxNever),
 	}
 	sbx, metrics, err := infraInstance.CloneSandbox(t.Context(), opts)
 	require.NoError(t, err)

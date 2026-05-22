@@ -19,7 +19,21 @@ package sandboxcr
 import (
 	"errors"
 	"fmt"
+
+	"k8s.io/apimachinery/pkg/util/wait"
 )
+
+// preserveInterruptedError keeps the original error message when the outer
+// retry.OnError loop would otherwise rewrite an interrupted error to the last
+// retriable one. Context cancellation is interrupted but non-retriable, so
+// keep its message while intentionally avoiding %w; wrapping would still let
+// wait.Interrupted identify and rewrite it.
+func preserveInterruptedError(err error) error {
+	if wait.Interrupted(err) {
+		return fmt.Errorf("%v", err)
+	}
+	return err
+}
 
 type retriableError struct {
 	Message string

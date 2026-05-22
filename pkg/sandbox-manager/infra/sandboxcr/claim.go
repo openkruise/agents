@@ -150,7 +150,7 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 		}
 		metrics.LastError = err
 		log.Info("try claim sandbox result", "metrics", metrics.String())
-		clearFailedSandbox(ctx, claimed, err, ptr.Deref(opts.ReserveFailedSandboxFor, DefaultReserveFailedSandboxFor))
+		clearFailedSandbox(ctx, claimed, err, opts.ReserveFailedSandboxFor)
 	}()
 	// Step 1: Pick an available sandbox
 	var sbx *Sandbox
@@ -280,12 +280,15 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 	return
 }
 
-func clearFailedSandbox(ctx context.Context, sbx infra.Sandbox, err error, reserveFor time.Duration) {
+// clearFailedSandbox cleans up (or reserves) a failed sandbox according to
+// reserveFor. A nil reserveFor falls back to DefaultReserveFailedSandboxFor.
+func clearFailedSandbox(ctx context.Context, sbx infra.Sandbox, err error, reserveFor *time.Duration) {
 	if err == nil || sbx == nil {
 		return
 	}
+	effective := ptr.Deref(reserveFor, DefaultReserveFailedSandboxFor)
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
-	if reserveFor < 0 {
+	if effective < 0 {
 		log.Info("the failed sandbox is reserved forever for debugging", "reason", err)
 		return
 	}
@@ -293,8 +296,8 @@ func clearFailedSandbox(ctx context.Context, sbx infra.Sandbox, err error, reser
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), DefaultCleanupTimeout)
 	defer cancel()
 
-	if reserveFor > 0 {
-		shutdownTime := time.Now().Add(reserveFor)
+	if effective > 0 {
+		shutdownTime := time.Now().Add(effective)
 		log.Info("the failed sandbox will be reserved before delayed deletion", "reason", err, "shutdownTime", shutdownTime)
 		if _, updateErr := sbx.SaveTimeoutWithPolicy(cleanupCtx, timeoututils.Options{
 			ShutdownTime: shutdownTime,

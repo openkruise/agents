@@ -33,6 +33,23 @@ import (
 	"github.com/openkruise/agents/api/v1alpha1"
 )
 
+// Sentinel string values accepted by the
+// agents.kruise.io/reserve-failed-sandbox-for extension.
+const (
+	ReserveFailedSandboxValueNever   = "never"
+	ReserveFailedSandboxValueForever = "forever"
+)
+
+// Local copies of infra.ReserveFailedSandboxNever / ReserveFailedSandboxForever.
+// They are duplicated to avoid an import cycle: pkg/servers/e2b/adapters tests
+// import pkg/servers/e2b/models, while pkg/sandbox-manager/infra (or a package
+// it transitively depends on) is used by adapters. Keep these values in sync
+// with pkg/sandbox-manager/infra/types.go.
+const (
+	reserveFailedSandboxDurationNever   = time.Duration(0)
+	reserveFailedSandboxDurationForever = time.Duration(-1)
+)
+
 //goland:noinspection GoSnakeCaseUsage
 const (
 	ExtensionKeyClaimTimeout                  = v1alpha1.E2BPrefix + "claim-timeout-seconds"
@@ -90,7 +107,7 @@ func (r *NewSandboxRequest) parseCommonExtensions() error {
 	if reserveForSet {
 		r.Extensions.ReserveFailedSandboxFor = reserveFor
 	} else if r.Metadata[ExtensionKeyReserveFailedSandbox] == v1alpha1.True {
-		r.Extensions.ReserveFailedSandboxFor = ptr.To(time.Duration(-1))
+		r.Extensions.ReserveFailedSandboxFor = ptr.To(reserveFailedSandboxDurationForever)
 	}
 	r.Extensions.CreateOnNoStock = r.Metadata[ExtensionKeyCreateOnNoStock] != v1alpha1.False
 	r.Extensions.NeverTimeout = r.Metadata[ExtensionKeyNeverTimeout] == v1alpha1.True
@@ -276,10 +293,10 @@ func (r *NewSandboxRequest) parseAndRemoveReserveFailedSandboxFor() (*time.Durat
 	defer delete(r.Metadata, ExtensionKeyReserveFailedSandboxFor)
 
 	switch raw {
-	case "never":
-		return ptr.To(time.Duration(0)), true, nil
-	case "forever":
-		return ptr.To(time.Duration(-1)), true, nil
+	case ReserveFailedSandboxValueNever:
+		return ptr.To(reserveFailedSandboxDurationNever), true, nil
+	case ReserveFailedSandboxValueForever:
+		return ptr.To(reserveFailedSandboxDurationForever), true, nil
 	}
 
 	duration, err := time.ParseDuration(raw)
@@ -287,7 +304,7 @@ func (r *NewSandboxRequest) parseAndRemoveReserveFailedSandboxFor() (*time.Durat
 		return nil, true, fmt.Errorf("invalid reserve failed sandbox duration %q: %w", raw, err)
 	}
 	if duration < 0 {
-		return nil, true, fmt.Errorf("reserve failed sandbox duration %q cannot be negative, use forever", raw)
+		return nil, true, fmt.Errorf("reserve failed sandbox duration %q cannot be negative, use %q", raw, ReserveFailedSandboxValueForever)
 	}
 	return &duration, true, nil
 }

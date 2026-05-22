@@ -142,7 +142,7 @@ func (i *Infra) ClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions
 	metrics.Retries = -1 // starts from 0
 	var claimedSandbox infra.Sandbox
 	err = retry.OnError(wait.Backoff{
-		Steps:    int(opts.ClaimTimeout / RetryInterval),
+		Steps:    retrySteps(opts.ClaimTimeout),
 		Duration: RetryInterval,
 		Factor:   LockBackoffFactor,
 		Jitter:   LockJitter,
@@ -168,14 +168,7 @@ func (i *Infra) ClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions
 		} else {
 			metrics.RetryCost += tryMetrics.Total
 		}
-		// client-go retry.OnError rewrites interrupted errors to the last
-		// retriable error. Context cancellation is interrupted but non-retriable,
-		// so keep its message while intentionally avoiding %w; wrapping would
-		// still let wait.Interrupted identify and rewrite it.
-		if wait.Interrupted(claimErr) {
-			return fmt.Errorf("%v", claimErr)
-		}
-		return claimErr
+		return preserveInterruptedError(claimErr)
 	})
 	return claimedSandbox, metrics, buildClaimError(err, metrics.LastError, metrics.PickSandboxFailures)
 }
@@ -203,81 +196,53 @@ func (i *Infra) CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions
 		log.Error(err, "invalid clone options")
 		return nil, metrics, err
 	}
-	log.Info("clone options", "options", opts)
+	log.V(consts.DebugLogLevel).Info("clone sandbox options", "options", opts)
 
 	cloneCtx, cancel := context.WithTimeout(ctx, opts.CloneTimeout)
 	defer cancel()
 
+	// Inject Infra-level limiter so the inner CloneSandbox enforces rate
+	// limiting at the same gate as ClaimSandbox (see newSandboxFromSandboxSet).
+	attemptOpts := opts
+	attemptOpts.CreateLimiter = i.createLimiter
+
+	metrics.Retries = -1 // starts from 0
 	var clonedSandbox infra.Sandbox
 	err = retry.OnError(wait.Backoff{
-		Steps:    cloneRetrySteps(opts.CloneTimeout),
+		Steps:    retrySteps(opts.CloneTimeout),
 		Duration: RetryInterval,
 		Factor:   LockBackoffFactor,
 		Jitter:   LockJitter,
 	}, func(err error) bool {
 		return errors.As(err, &retriableError{})
 	}, func() error {
-		if i.createLimiter != nil {
-			log.Info("waiting for create sandbox limiter")
-			waitStart := time.Now()
-			if waitErr := i.createLimiter.Wait(cloneCtx); waitErr != nil {
-				waitCost := time.Since(waitStart)
-				metrics.Wait += waitCost
-				metrics.Total += waitCost
-				log.Error(waitErr, "failed to wait create sandbox limiter")
-				if wait.Interrupted(waitErr) {
-					return fmt.Errorf("%v", waitErr)
-				}
-				return waitErr
-			}
-			waitCost := time.Since(waitStart)
-			metrics.Wait += waitCost
-			metrics.Total += waitCost
-			log.Info("create sandbox limiter waited", "cost", waitCost)
-		}
-		attemptOpts := opts
-		attemptOpts.CreateLimiter = nil
+		metrics.Retries++
 		cloned, tryMetrics, cloneErr := CloneSandbox(cloneCtx, attemptOpts, i.Cache)
-		mergeCloneMetrics(&metrics, tryMetrics)
+		metrics.Merge(tryMetrics)
 		if cloneErr == nil {
 			clonedSandbox = cloned
+		} else {
+			metrics.LastError = cloneErr
 		}
-		// client-go retry.OnError rewrites interrupted errors to the last
-		// retriable error. Context cancellation is interrupted but non-retriable,
-		// so keep its message while intentionally avoiding %w; wrapping would
-		// still let wait.Interrupted identify and rewrite it.
-		if wait.Interrupted(cloneErr) {
-			return fmt.Errorf("%v", cloneErr)
-		}
-		return cloneErr
+		return preserveInterruptedError(cloneErr)
 	})
 	if err != nil {
-		log.Error(err, "failed to clone sandbox")
+		log.Error(err, "failed to clone sandbox", "metrics", metrics.String())
 		return nil, metrics, err
 	}
-	if clonedSandbox == nil {
-		return nil, metrics, fmt.Errorf("clone sandbox completed without returning sandbox")
-	}
-	log.Info("sandbox cloned", "sandbox", klog.KObj(clonedSandbox))
+	log.Info("sandbox cloned", "sandbox", klog.KObj(clonedSandbox), "metrics", metrics.String())
 	return clonedSandbox, metrics, nil
 }
 
-func cloneRetrySteps(timeout time.Duration) int {
+// retrySteps converts a total timeout into the Steps value for wait.Backoff.
+// It clamps to at least one attempt so a sub-RetryInterval timeout still runs
+// the closure once.
+func retrySteps(timeout time.Duration) int {
 	steps := int(timeout / RetryInterval)
 	if steps < 1 {
 		return 1
 	}
 	return steps
-}
-
-func mergeCloneMetrics(dst *infra.CloneMetrics, src infra.CloneMetrics) {
-	dst.Wait += src.Wait
-	dst.GetTemplate += src.GetTemplate
-	dst.CreateSandbox += src.CreateSandbox
-	dst.WaitReady += src.WaitReady
-	dst.InitRuntime += src.InitRuntime
-	dst.CSIMount += src.CSIMount
-	dst.Total += src.Total
 }
 
 func (i *Infra) DeleteCheckpoint(ctx context.Context, opts infra.DeleteCheckpointOptions) error {

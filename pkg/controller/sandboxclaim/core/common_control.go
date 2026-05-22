@@ -26,6 +26,7 @@ import (
 	"golang.org/x/time/rate"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -258,8 +259,7 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 	logger := logf.FromContext(ctx).WithValues("SandboxClaim", klog.KObj(claim))
 	var reserveFailedSandboxFor *time.Duration
 	if claim.Spec.ReserveFailedSandbox {
-		reserveFor := time.Duration(-1)
-		reserveFailedSandboxFor = &reserveFor
+		reserveFailedSandboxFor = ptr.To(infra.ReserveFailedSandboxForever)
 	}
 
 	opts := infra.ClaimSandboxOptions{
@@ -390,14 +390,7 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 		opts.RuntimeConfig = claim.Spec.Runtimes
 	}
 
-	opts, err := sandboxcr.ValidateAndInitClaimOptions(opts)
-	if err != nil {
-		return infra.ClaimSandboxOptions{}, err
-	}
-	if reserveFailedSandboxFor == nil {
-		opts.ReserveFailedSandboxFor = nil
-	}
-	return opts, nil
+	return sandboxcr.ValidateAndInitClaimOptions(opts)
 }
 
 // countClaimedSandboxes counts sandboxes that are claimed by this claim

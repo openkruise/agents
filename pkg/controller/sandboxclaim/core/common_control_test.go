@@ -1113,7 +1113,7 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 			},
 		},
 		{
-			name: "reserve failed sandbox omitted leaves backend default",
+			name: "reserve failed sandbox omitted defaults to backend default",
 			claim: &agentsv1alpha1.SandboxClaim{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-claim-reserve-failed-default",
@@ -1132,7 +1132,8 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 			},
 			expectError: false,
 			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
-				assert.Nil(t, opts.ReserveFailedSandboxFor)
+				require.NotNil(t, opts.ReserveFailedSandboxFor)
+				assert.Equal(t, sandboxcr.DefaultReserveFailedSandboxFor, *opts.ReserveFailedSandboxFor)
 			},
 		},
 		{

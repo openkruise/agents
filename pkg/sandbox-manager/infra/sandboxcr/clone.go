@@ -22,6 +22,7 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
@@ -87,29 +88,41 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 		return nil, metrics, err
 	}
 
-	// Step 2: create new sandbox from checkpoint
+	// Step 2: gate sandbox creation on the rate limiter, mirroring how
+	// newSandboxFromSandboxSet gates ClaimSandbox creates.
+	if metrics, err = waitCloneCreateLimiter(ctx, opts, metrics); err != nil {
+		return nil, metrics, err
+	}
+
+	// Step 3: create new sandbox from checkpoint
 	sbx, initRuntimeOpts, metrics, err := createSandboxFromCheckpoint(ctx, opts, tmpl, cp, cache, metrics)
 	if err != nil {
 		return nil, metrics, err
 	}
 	created := sbx
 	defer func() {
-		clearFailedSandbox(ctx, created, err, ptr.Deref(opts.ReserveFailedSandboxFor, DefaultReserveFailedSandboxFor))
+		clearFailedSandbox(ctx, created, err, opts.ReserveFailedSandboxFor)
 	}()
 
-	// Step 3: wait for sandbox ready
+	// Step 4: wait for sandbox ready
 	if metrics, err = cloneWaitSandboxReady(ctx, sbx, opts, cache, metrics); err != nil {
-		err = retriableError{Message: fmt.Sprintf("failed to wait for sandbox ready: %s", err)}
+		// Preserve context cancellation / deadline so the outer retry loop can
+		// stop instead of treating it as a retriable wrap.
+		if !wait.Interrupted(err) {
+			err = retriableError{Message: fmt.Sprintf("failed to wait for sandbox ready: %s", err)}
+		}
 		return
 	}
 
-	// Step 4: re-init runtime
+	// Step 5: re-init runtime
 	if metrics, err = cloneReInitRuntime(ctx, sbx, opts, initRuntimeOpts, metrics); err != nil {
-		err = retriableError{Message: fmt.Sprintf("failed to init runtime: %s", err)}
+		if !wait.Interrupted(err) {
+			err = retriableError{Message: fmt.Sprintf("failed to init runtime: %s", err)}
+		}
 		return
 	}
 
-	// Step 5: csi mount
+	// Step 6: csi mount
 	// If opts.CSIMount is not provided from request, try to resolve mount options from sandbox annotation.
 	if opts.CSIMount == nil {
 		var resolveErr error
@@ -174,9 +187,32 @@ func findCheckpointAndTemplateById(ctx context.Context, opts infra.CloneSandboxO
 	return template, checkpoint, metrics, nil
 }
 
+// waitCloneCreateLimiter blocks on opts.CreateLimiter (when set) and records
+// the wait cost in metrics so callers see it under metrics.Wait / metrics.Total.
+// This mirrors how newSandboxFromSandboxSet gates ClaimSandbox creates,
+// keeping a single rate-limit choke point owned by Infra.
+func waitCloneCreateLimiter(ctx context.Context, opts infra.CloneSandboxOptions, metrics infra.CloneMetrics) (infra.CloneMetrics, error) {
+	if opts.CreateLimiter == nil {
+		return metrics, nil
+	}
+	log := klog.FromContext(ctx).WithValues("checkpoint", opts.CheckPointID, "step", "2.waitCreateLimiter")
+	log.Info("waiting for create sandbox limiter")
+	start := time.Now()
+	waitErr := opts.CreateLimiter.Wait(ctx)
+	cost := time.Since(start)
+	metrics.Wait += cost
+	metrics.Total += cost
+	if waitErr != nil {
+		log.Error(waitErr, "failed to wait create sandbox limiter")
+		return metrics, waitErr
+	}
+	log.Info("create sandbox limiter waited", "cost", cost)
+	return metrics, nil
+}
+
 // createSandboxFromCheckpoint creates a new sandbox from checkpoint
 func createSandboxFromCheckpoint(ctx context.Context, opts infra.CloneSandboxOptions, tmpl *v1alpha1.SandboxTemplate, cp *v1alpha1.Checkpoint, cache infracache.Provider, metrics infra.CloneMetrics) (*Sandbox, *config.InitRuntimeOptions, infra.CloneMetrics, error) {
-	log := klog.FromContext(ctx).WithValues("checkpoint", opts.CheckPointID, "step", "2.createSandboxFromCheckpoint")
+	log := klog.FromContext(ctx).WithValues("checkpoint", opts.CheckPointID, "step", "3.createSandboxFromCheckpoint")
 	start := time.Now()
 	initRuntimeOpts, err := runtime.GetInitRuntimeRequest(cp)
 	if err != nil {
@@ -206,7 +242,7 @@ func createSandboxFromCheckpoint(ctx context.Context, opts infra.CloneSandboxOpt
 
 // cloneWaitSandboxReady waits for the sandbox to be ready
 func cloneWaitSandboxReady(ctx context.Context, sbx *Sandbox, opts infra.CloneSandboxOptions, cache infracache.Provider, metrics infra.CloneMetrics) (infra.CloneMetrics, error) {
-	log := klog.FromContext(ctx).WithValues("checkpoint", opts.CheckPointID, "step", "3.waitSandboxReady")
+	log := klog.FromContext(ctx).WithValues("checkpoint", opts.CheckPointID, "step", "4.waitSandboxReady")
 	var err error
 	metrics.WaitReady, err = waitForSandboxReady(ctx, sbx, infra.ClaimSandboxOptions{
 		WaitReadyTimeout: opts.WaitReadyTimeout,
@@ -221,7 +257,7 @@ func cloneWaitSandboxReady(ctx context.Context, sbx *Sandbox, opts infra.CloneSa
 
 // cloneReInitRuntime re-initializes the runtime if needed
 func cloneReInitRuntime(ctx context.Context, sbx *Sandbox, opts infra.CloneSandboxOptions, initRuntimeOpts *config.InitRuntimeOptions, metrics infra.CloneMetrics) (infra.CloneMetrics, error) {
-	log := klog.FromContext(ctx).WithValues("checkpoint", opts.CheckPointID, "step", "4.reInitRuntime")
+	log := klog.FromContext(ctx).WithValues("checkpoint", opts.CheckPointID, "step", "5.reInitRuntime")
 	if initRuntimeOpts == nil {
 		return metrics, nil
 	}

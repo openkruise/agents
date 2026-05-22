@@ -115,13 +115,13 @@ func TestValidateAndInitCloneOptions(t *testing.T) {
 
 func TestValidateAndInitCloneOptions_ReserveFailedSandboxFor(t *testing.T) {
 	tests := []struct {
-		name       string
-		opts       infra.CloneSandboxOptions
-		expectFor  time.Duration
-		expectSame bool
+		name        string
+		opts        infra.CloneSandboxOptions
+		expectFor   time.Duration
+		expectInput bool // expects the returned pointer to be the same instance as input
 	}{
 		{
-			name: "default reserve for 24h",
+			name: "unset defaults to DefaultReserveFailedSandboxFor",
 			opts: infra.CloneSandboxOptions{
 				User:         "test-user",
 				CheckPointID: "test-checkpoint",
@@ -133,10 +133,10 @@ func TestValidateAndInitCloneOptions_ReserveFailedSandboxFor(t *testing.T) {
 			opts: infra.CloneSandboxOptions{
 				User:                    "test-user",
 				CheckPointID:            "test-checkpoint",
-				ReserveFailedSandboxFor: ptr.To(time.Duration(0)),
+				ReserveFailedSandboxFor: ptr.To(infra.ReserveFailedSandboxNever),
 			},
-			expectFor:  0,
-			expectSame: true,
+			expectFor:   infra.ReserveFailedSandboxNever,
+			expectInput: true,
 		},
 		{
 			name: "explicit finite reserve",
@@ -145,18 +145,18 @@ func TestValidateAndInitCloneOptions_ReserveFailedSandboxFor(t *testing.T) {
 				CheckPointID:            "test-checkpoint",
 				ReserveFailedSandboxFor: ptr.To(90 * time.Minute),
 			},
-			expectFor:  90 * time.Minute,
-			expectSame: true,
+			expectFor:   90 * time.Minute,
+			expectInput: true,
 		},
 		{
 			name: "explicit forever reserve",
 			opts: infra.CloneSandboxOptions{
 				User:                    "test-user",
 				CheckPointID:            "test-checkpoint",
-				ReserveFailedSandboxFor: ptr.To(time.Duration(-1)),
+				ReserveFailedSandboxFor: ptr.To(infra.ReserveFailedSandboxForever),
 			},
-			expectFor:  -1,
-			expectSame: true,
+			expectFor:   infra.ReserveFailedSandboxForever,
+			expectInput: true,
 		},
 	}
 
@@ -166,7 +166,7 @@ func TestValidateAndInitCloneOptions_ReserveFailedSandboxFor(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, got.ReserveFailedSandboxFor)
 			assert.Equal(t, tt.expectFor, *got.ReserveFailedSandboxFor)
-			if tt.expectSame {
+			if tt.expectInput {
 				assert.Same(t, tt.opts.ReserveFailedSandboxFor, got.ReserveFailedSandboxFor)
 			}
 		})
@@ -345,7 +345,7 @@ func TestCloneSandbox_CleansFailedCreatedSandbox(t *testing.T) {
 	}{
 		{
 			name:          "reserve for zero deletes failed created sandbox",
-			reserveFor:    0,
+			reserveFor:    infra.ReserveFailedSandboxNever,
 			expectDeleted: true,
 		},
 		{
@@ -355,7 +355,7 @@ func TestCloneSandbox_CleansFailedCreatedSandbox(t *testing.T) {
 		},
 		{
 			name:       "reserve forever keeps sandbox without shutdown time",
-			reserveFor: -1,
+			reserveFor: infra.ReserveFailedSandboxForever,
 		},
 	}
 
@@ -405,25 +405,6 @@ func TestCloneSandbox_CleansFailedCreatedSandbox(t *testing.T) {
 			assert.Nil(t, got.Spec.ShutdownTime)
 		})
 	}
-}
-
-func TestCloneSandbox_IgnoresCreateLimiter(t *testing.T) {
-	cache, _, err := cachetest.NewTestCache(t)
-	require.NoError(t, err)
-	require.NoError(t, cache.Run(t.Context()))
-	defer cache.Stop(t.Context())
-
-	opts := infra.CloneSandboxOptions{
-		User:               "test-user",
-		CheckPointID:       "missing-checkpoint",
-		SkipWaitCheckpoint: true,
-		CreateLimiter:      rate.NewLimiter(rate.Limit(1), 0),
-	}
-	sbx, metrics, err := CloneSandbox(t.Context(), opts, cache)
-	require.Error(t, err)
-	assert.Nil(t, sbx)
-	assert.NotContains(t, err.Error(), "rate:")
-	assert.Equal(t, time.Duration(0), metrics.Wait)
 }
 
 func TestCloneSandbox(t *testing.T) {
@@ -976,7 +957,10 @@ func TestCloneSandbox_WithRateLimiter(t *testing.T) {
 	assert.Error(t, err, "should return error when rate limited")
 	assert.Contains(t, err.Error(), "rate:", "error should indicate rate limit")
 	assert.Greater(t, metrics.Wait, time.Duration(0), "wait metric should include limiter wait cost")
-	assert.Equal(t, metrics.Wait, metrics.Total, "total should include limiter wait cost")
+	// Limiter runs after GetTemplate, so Total covers both stages and is at
+	// least Wait. This mirrors ClaimSandbox where the limiter is gated after
+	// the pick/lock stage.
+	assert.GreaterOrEqual(t, metrics.Total, metrics.Wait, "total should include at least limiter wait cost")
 }
 
 func TestCloneSandbox_ContextCanceled(t *testing.T) {

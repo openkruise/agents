@@ -35,6 +35,7 @@ func TestParseExtensions(t *testing.T) {
 		name            string
 		metadata        map[string]string
 		wantErr         bool
+		errContains     string
 		expectExtension NewSandboxRequestExtension
 	}{
 		{
@@ -91,7 +92,7 @@ func TestParseExtensions(t *testing.T) {
 			wantErr: false,
 			expectExtension: NewSandboxRequestExtension{
 				CreateOnNoStock:         true,
-				ReserveFailedSandboxFor: ptr.To(time.Duration(0)),
+				ReserveFailedSandboxFor: ptr.To(reserveFailedSandboxDurationNever),
 			},
 		},
 		{
@@ -102,7 +103,7 @@ func TestParseExtensions(t *testing.T) {
 			wantErr: false,
 			expectExtension: NewSandboxRequestExtension{
 				CreateOnNoStock:         true,
-				ReserveFailedSandboxFor: ptr.To(time.Duration(-1)),
+				ReserveFailedSandboxFor: ptr.To(reserveFailedSandboxDurationForever),
 			},
 		},
 		{
@@ -124,7 +125,7 @@ func TestParseExtensions(t *testing.T) {
 			wantErr: false,
 			expectExtension: NewSandboxRequestExtension{
 				CreateOnNoStock:         true,
-				ReserveFailedSandboxFor: ptr.To(time.Duration(0)),
+				ReserveFailedSandboxFor: ptr.To(reserveFailedSandboxDurationNever),
 			},
 		},
 		{
@@ -132,14 +133,16 @@ func TestParseExtensions(t *testing.T) {
 			metadata: map[string]string{
 				ExtensionKeyReserveFailedSandboxFor: "-1h",
 			},
-			wantErr: true,
+			wantErr:     true,
+			errContains: "cannot be negative",
 		},
 		{
 			name: "reserve failed sandbox for invalid duration is invalid",
 			metadata: map[string]string{
 				ExtensionKeyReserveFailedSandboxFor: "abc",
 			},
-			wantErr: true,
+			wantErr:     true,
+			errContains: "invalid reserve failed sandbox duration",
 		},
 		{
 			name: "old reserve failed sandbox true maps to forever",
@@ -149,7 +152,7 @@ func TestParseExtensions(t *testing.T) {
 			wantErr: false,
 			expectExtension: NewSandboxRequestExtension{
 				CreateOnNoStock:         true,
-				ReserveFailedSandboxFor: ptr.To(time.Duration(-1)),
+				ReserveFailedSandboxFor: ptr.To(reserveFailedSandboxDurationForever),
 			},
 		},
 		{
@@ -161,7 +164,7 @@ func TestParseExtensions(t *testing.T) {
 			wantErr: false,
 			expectExtension: NewSandboxRequestExtension{
 				CreateOnNoStock:         true,
-				ReserveFailedSandboxFor: ptr.To(time.Duration(0)),
+				ReserveFailedSandboxFor: ptr.To(reserveFailedSandboxDurationNever),
 			},
 		},
 		{
@@ -373,6 +376,9 @@ func TestParseExtensions(t *testing.T) {
 			err := req.ParseExtensions()
 			if tt.wantErr {
 				require.Error(t, err)
+				if tt.errContains != "" {
+					assert.Contains(t, err.Error(), tt.errContains)
+				}
 			} else {
 				require.NoError(t, err)
 				assert.EqualValues(t, tt.expectExtension, req.Extensions)

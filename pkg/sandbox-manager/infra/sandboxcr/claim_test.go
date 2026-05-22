@@ -94,13 +94,13 @@ func GetMetricsFromSandbox(t *testing.T, sbx infra.Sandbox) infra.ClaimMetrics {
 
 func TestValidateAndInitClaimOptions_ReserveFailedSandboxFor(t *testing.T) {
 	tests := []struct {
-		name       string
-		opts       infra.ClaimSandboxOptions
-		expectFor  time.Duration
-		expectSame bool
+		name        string
+		opts        infra.ClaimSandboxOptions
+		expectFor   time.Duration
+		expectInput bool // expects the returned pointer to be the same instance as input
 	}{
 		{
-			name: "default reserve for 24h",
+			name: "unset defaults to DefaultReserveFailedSandboxFor",
 			opts: infra.ClaimSandboxOptions{
 				User:     "test-user",
 				Template: "test-template",
@@ -112,10 +112,10 @@ func TestValidateAndInitClaimOptions_ReserveFailedSandboxFor(t *testing.T) {
 			opts: infra.ClaimSandboxOptions{
 				User:                    "test-user",
 				Template:                "test-template",
-				ReserveFailedSandboxFor: ptr.To(time.Duration(0)),
+				ReserveFailedSandboxFor: ptr.To(infra.ReserveFailedSandboxNever),
 			},
-			expectFor:  0,
-			expectSame: true,
+			expectFor:   infra.ReserveFailedSandboxNever,
+			expectInput: true,
 		},
 		{
 			name: "explicit finite reserve",
@@ -124,18 +124,18 @@ func TestValidateAndInitClaimOptions_ReserveFailedSandboxFor(t *testing.T) {
 				Template:                "test-template",
 				ReserveFailedSandboxFor: ptr.To(2 * time.Hour),
 			},
-			expectFor:  2 * time.Hour,
-			expectSame: true,
+			expectFor:   2 * time.Hour,
+			expectInput: true,
 		},
 		{
 			name: "explicit forever reserve",
 			opts: infra.ClaimSandboxOptions{
 				User:                    "test-user",
 				Template:                "test-template",
-				ReserveFailedSandboxFor: ptr.To(time.Duration(-1)),
+				ReserveFailedSandboxFor: ptr.To(infra.ReserveFailedSandboxForever),
 			},
-			expectFor:  -1,
-			expectSame: true,
+			expectFor:   infra.ReserveFailedSandboxForever,
+			expectInput: true,
 		},
 	}
 
@@ -145,7 +145,7 @@ func TestValidateAndInitClaimOptions_ReserveFailedSandboxFor(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, got.ReserveFailedSandboxFor)
 			assert.Equal(t, tt.expectFor, *got.ReserveFailedSandboxFor)
-			if tt.expectSame {
+			if tt.expectInput {
 				assert.Same(t, tt.opts.ReserveFailedSandboxFor, got.ReserveFailedSandboxFor)
 			}
 		})
@@ -590,7 +590,7 @@ func TestClaimSandboxFailed(t *testing.T) {
 			options: infra.ClaimSandboxOptions{
 				User:                    "test-user",
 				Template:                existTemplate,
-				ReserveFailedSandboxFor: ptr.To(time.Duration(-1)),
+				ReserveFailedSandboxFor: ptr.To(infra.ReserveFailedSandboxForever),
 				InplaceUpdate: &config.InplaceUpdateOptions{
 					Image: "new-image",
 				},
@@ -633,7 +633,7 @@ func TestClaimSandboxFailed(t *testing.T) {
 			options: infra.ClaimSandboxOptions{
 				User:                    "test-user",
 				Template:                existTemplate,
-				ReserveFailedSandboxFor: ptr.To(time.Duration(0)),
+				ReserveFailedSandboxFor: ptr.To(infra.ReserveFailedSandboxNever),
 				InplaceUpdate: &config.InplaceUpdateOptions{
 					Image: "new-image",
 				},
@@ -655,7 +655,7 @@ func TestClaimSandboxFailed(t *testing.T) {
 			options: infra.ClaimSandboxOptions{
 				User:                    "test-user",
 				Template:                existTemplate,
-				ReserveFailedSandboxFor: ptr.To(time.Duration(-1)),
+				ReserveFailedSandboxFor: ptr.To(infra.ReserveFailedSandboxForever),
 				InitRuntime:             &config.InitRuntimeOptions{},
 				CSIMount: &config.CSIMountOptions{
 					MountOptionList: []config.MountConfig{
@@ -676,7 +676,7 @@ func TestClaimSandboxFailed(t *testing.T) {
 			options: infra.ClaimSandboxOptions{
 				User:                    "test-user",
 				Template:                existTemplate,
-				ReserveFailedSandboxFor: ptr.To(time.Duration(0)),
+				ReserveFailedSandboxFor: ptr.To(infra.ReserveFailedSandboxNever),
 				InitRuntime:             &config.InitRuntimeOptions{},
 				CSIMount: &config.CSIMountOptions{
 					MountOptionList: []config.MountConfig{
