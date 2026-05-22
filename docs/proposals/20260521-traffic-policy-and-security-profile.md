@@ -60,6 +60,17 @@ see-also:
   deployment topology is intentionally not fixed by this proposal.
 - **Identity Provider**: the framework introduced by
   `20260427-security-identity-provider.md` that issues per-Sandbox identity tokens.
+- **IPSet** *(optional implementation concept)*: a named set of IP addresses
+  (CIDRs) some data planes use as the compiled form of a non-literal peer
+  (`Service`, `Workload`, `FQDN`). Whether an implementation goes through an
+  IPSet abstraction at all — and what backend it uses (kernel `ipset`, eBPF
+  map, xDS endpoint cluster, etc.) — is a data-plane choice; another
+  implementation may evaluate peers directly without ever materializing them
+  into a set. The CRD does not mandate IPSet usage; it only reserves status
+  fields so that data planes which DO use this abstraction can surface it
+  for diagnosability. When the controller uses IPSet, contents are refreshed
+  whenever the underlying source changes (Service endpoints, Workload pod
+  IPs, FQDN resolution).
 
 ## Summary
 
@@ -300,8 +311,21 @@ Ingress *TrafficPolicyDirection `json:"ingress,omitempty"`
 Egress *TrafficPolicyDirection `json:"egress,omitempty"`
 }
 
-// IPSetBinding records one SelectorIPSet referenced by a rule, along with
-// its direction, action, rule index, and optional port restrictions.
+// IPSetBinding is an OPTIONAL diagnostic record populated only by data
+// planes that compile peers through an IPSet abstraction (see Glossary).
+// Implementations that evaluate peers directly may leave
+// `IPSetBindings` empty without affecting enforcement; in that case
+// operators rely on `Conditions` and metrics for diagnosability.
+//
+// When populated, each entry records one IPSet referenced by a rule, along
+// with its direction, action, rule index, and optional port restrictions.
+// The IPSet is owned by the controller; its contents are refreshed whenever
+// the underlying peer source changes (Service endpoints, Workload pod IPs,
+// FQDN resolution). Sandbox pod IPs participate via Workload peers — when a
+// sandbox is created/deleted or its pod IP changes, every IPSet whose
+// Workload selector matches that pod is updated, and the data plane reloads
+// the affected rule. The Selector side (which sandboxes the policy is
+// attached to) is tracked separately and not represented here.
 type IPSetBinding struct {
 IPSetName string             `json:"ipsetName"`
 IPSetID   string             `json:"ipsetID"`
@@ -509,10 +533,25 @@ FailStrategy FailStrategy     `json:"failStrategy,omitempty"`
 Headers      []IdentityHeader `json:"headers"`
 }
 
+// SecurityCheckAction calls an external security inspection service for each
+// matched request and lets that service decide whether the request may
+// proceed. Typical use cases include prompt-injection / jailbreak detection,
+// PII or secret-leak scanning, and policy-engine evaluation against the
+// agent's pending tool call. The data plane forwards the request (or a
+// summarized form of it — headers, method, path, body excerpt) to the
+// configured inspection service over the project's standard auth check
+// transport; a non-allow response causes the request to fail according to
+// `FailStrategy`. The concrete inspection backend and its address are
+// configured at the data-plane layer, not on this CRD. Non-terminal: a
+// pass verdict lets the rule chain continue with the remaining actions.
 type SecurityCheckAction struct {
 // +optional
 // +kubebuilder:default:=false
 Disabled     bool         `json:"disabled,omitempty"`
+// FailStrategy controls behaviour when the inspection service is
+// unreachable, times out, or returns a non-decision error. `Block`
+// rejects the request; `Allow` lets it through; `Ignore` treats it as
+// a pass for this action only.
 // +kubebuilder:default:=Block
 FailStrategy FailStrategy `json:"failStrategy,omitempty"`
 }
@@ -674,20 +713,29 @@ L4 (`TrafficPolicy` / `GlobalTrafficPolicy`):
 L7 (`SecurityProfile`):
 
 - A pod matched by multiple profiles has its rule chains concatenated in
-  `(creationTimestamp ASC, name ASC)` order. The webhook emits a warning
-  when this happens; operators are encouraged to consolidate.
+  `(creationTimestamp ASC, name ASC)` order. The `SecurityProfile`
+  validating admission webhook is **optional**: when deployed, it emits a
+  warning admission response on overlap so the operator sees the issue at
+  `kubectl apply` time; when not deployed (or the gate is disabled), the
+  controller is still authoritative — it surfaces the same overlap as a
+  warning reason on the `Accepted` condition during reconciliation.
+  Either way, admission of the profile is not blocked; operators are
+  encouraged to consolidate.
 - Within a chain: Default Continue. Terminal action wins, non-terminal
   actions stack.
 
 #### L4 Data Plane
 
 The first phase only declares the CRDs. In the later enforcement phase, the
-controller compiles each rule's peers into named peer sets (surfaced in
-`TrafficPolicyStatus`) and programs the data plane to allow/deny accordingly.
-FQDN peers are resolved by the data plane with TTL-based refresh; peer-set
-contents are refreshed on `Endpoints` / `Pod` IP changes for `Service` /
-`Workload` peers. The concrete data-plane topology (per-pod, per-node, or
-centralized) is intentionally left to implementation.
+controller programs the data plane to allow/deny according to each rule's
+peers. Whether the controller compiles peers into a reusable IPSet
+abstraction (and surfaces them via `TrafficPolicyStatus.ipsetBindings`) or
+hands peers directly to the data plane is **an implementation choice** —
+the API does not mandate IPSet usage. When IPSet is used, FQDN peers are
+resolved with TTL-based refresh; IPSet contents are refreshed on
+`Endpoints` / `Pod` IP changes for `Service` / `Workload` peers. The
+concrete data-plane topology (per-pod, per-node, or centralized) is
+intentionally left to implementation.
 
 #### L7 Data Plane
 
