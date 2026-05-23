@@ -241,7 +241,7 @@ func (r *Reconciler) deleteSandboxForUpdate(ctx context.Context, sbs *agentsv1al
 
 	// Deep copy the sandbox before mutating it to avoid corrupting the informer cache.
 	sbx = sbx.DeepCopy()
-	
+
 	managerutils.LockSandbox(sbx, lock, consts.OwnerManagerScaleDown)
 	if err := r.Update(ctx, sbx); err != nil {
 		return fmt.Errorf("failed to lock sandbox when delete: %s", err)
