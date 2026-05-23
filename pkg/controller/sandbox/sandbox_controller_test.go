@@ -17,6 +17,7 @@ limitations under the License.
 package sandbox
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"testing"
@@ -994,6 +995,214 @@ func TestSandboxReconciler_ShutdownTime(t *testing.T) {
 	err = client.Get(context.TODO(), req.NamespacedName, updatedSandbox)
 	if err == nil && updatedSandbox.DeletionTimestamp.IsZero() {
 		t.Errorf("Expected sandbox to be deleted, but it still exists")
+	}
+}
+
+func TestSandboxReconciler_AutoPauseOCCConflict(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	pauseTime := metav1.NewTime(time.Now().Add(-1 * time.Minute).Truncate(time.Second))
+	shutdownTime := metav1.NewTime(time.Now().Add(1 * time.Hour).Truncate(time.Second))
+	sandbox := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "auto-pause-conflict-sandbox",
+			Namespace:       "default",
+			Finalizers:      []string{utils.SandboxFinalizer},
+			ResourceVersion: "42",
+		},
+		Spec: agentsv1alpha1.SandboxSpec{
+			Paused:       false,
+			PauseTime:    &pauseTime,
+			ShutdownTime: &shutdownTime,
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test", Image: "nginx"}},
+					},
+				},
+			},
+		},
+		Status: agentsv1alpha1.SandboxStatus{
+			Phase: agentsv1alpha1.SandboxRunning,
+			Conditions: []metav1.Condition{
+				{
+					Type:               string(agentsv1alpha1.SandboxConditionReady),
+					Status:             metav1.ConditionTrue,
+					LastTransitionTime: metav1.NewTime(time.Now().Add(-1 * time.Minute)),
+					Reason:             "Test",
+				},
+			},
+		},
+	}
+
+	patchConflicts := 0
+	optimisticLockPatchSeen := false
+	fakeRecorder := record.NewFakeRecorder(100)
+	cli := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&agentsv1alpha1.Sandbox{}).
+		WithObjects(sandbox).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				if _, ok := obj.(*agentsv1alpha1.Sandbox); ok {
+					patchData, err := patch.Data(obj)
+					if err != nil {
+						t.Fatalf("failed to render sandbox patch: %v", err)
+					}
+					if !bytes.Contains(patchData, []byte(`"spec":{"paused":true}`)) {
+						t.Fatalf("expected auto-pause patch to set spec.paused=true, got %s", patchData)
+					}
+					if !bytes.Contains(patchData, []byte(`"resourceVersion"`)) {
+						t.Fatalf("expected auto-pause patch to include optimistic-lock resourceVersion, got %s", patchData)
+					}
+					optimisticLockPatchSeen = true
+					patchConflicts++
+					return apierrors.NewConflict(schema.GroupResource{Group: agentsv1alpha1.GroupVersion.Group, Resource: "sandboxes"}, obj.GetName(), fmt.Errorf("simulated conflict"))
+				}
+				return c.Patch(ctx, obj, patch, opts...)
+			},
+		}).
+		Build()
+	rl := core.NewRateLimiter()
+	reconciler := &SandboxReconciler{
+		Client: cli,
+		Scheme: scheme,
+		controls: core.NewSandboxControl(core.SandboxControlArgs{
+			Client:      cli,
+			Recorder:    fakeRecorder,
+			RateLimiter: rl,
+		}),
+		rateLimiter: rl,
+	}
+
+	req := ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace},
+	}
+	result, err := reconciler.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected reconcile error: %v", err)
+	}
+	if !result.Requeue {
+		t.Fatalf("expected conflict to request requeue, got result=%+v", result)
+	}
+	if patchConflicts != 1 {
+		t.Fatalf("expected one simulated patch conflict, got %d", patchConflicts)
+	}
+	if !optimisticLockPatchSeen {
+		t.Fatalf("expected auto-pause patch to use optimistic locking")
+	}
+
+	updated := &agentsv1alpha1.Sandbox{}
+	if err := cli.Get(context.TODO(), req.NamespacedName, updated); err != nil {
+		t.Fatalf("failed to get sandbox after reconcile: %v", err)
+	}
+	if updated.Spec.Paused {
+		t.Fatalf("expected Spec.Paused to remain false after conflict")
+	}
+	if updated.Spec.PauseTime == nil || !updated.Spec.PauseTime.Time.Equal(pauseTime.Time) {
+		t.Fatalf("expected Spec.PauseTime unchanged at %v, got %v", pauseTime, updated.Spec.PauseTime)
+	}
+	if updated.Spec.ShutdownTime == nil || !updated.Spec.ShutdownTime.Time.Equal(shutdownTime.Time) {
+		t.Fatalf("expected Spec.ShutdownTime unchanged at %v, got %v", shutdownTime, updated.Spec.ShutdownTime)
+	}
+}
+
+func TestSandboxReconciler_PauseTimeOnlyRequeue(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	pauseDelta := 10 * time.Second
+	pauseTime := metav1.NewTime(time.Now().Add(pauseDelta))
+	sandbox := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "pause-time-only-sandbox",
+			Namespace:  "default",
+			Finalizers: []string{utils.SandboxFinalizer},
+		},
+		Spec: agentsv1alpha1.SandboxSpec{
+			Paused:    false,
+			PauseTime: &pauseTime,
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test", Image: "nginx"}},
+					},
+				},
+			},
+		},
+		Status: agentsv1alpha1.SandboxStatus{
+			Phase: agentsv1alpha1.SandboxPhase("NoControlAction"),
+		},
+	}
+
+	fakeRecorder := record.NewFakeRecorder(100)
+	cli := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&agentsv1alpha1.Sandbox{}).
+		WithObjects(sandbox).
+		Build()
+	rl := core.NewRateLimiter()
+	reconciler := &SandboxReconciler{
+		Client: cli,
+		Scheme: scheme,
+		controls: core.NewSandboxControl(core.SandboxControlArgs{
+			Client:      cli,
+			Recorder:    fakeRecorder,
+			RateLimiter: rl,
+		}),
+		rateLimiter: rl,
+	}
+
+	req := ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace},
+	}
+	result, err := reconciler.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected reconcile error: %v", err)
+	}
+	if result.RequeueAfter == 0 {
+		t.Fatalf("expected non-zero RequeueAfter for future PauseTime, got result=%+v", result)
+	}
+	if delta := result.RequeueAfter - pauseDelta; delta < -2*time.Second || delta > 2*time.Second {
+		t.Fatalf("expected RequeueAfter within 2s of %v, got %v", pauseDelta, result.RequeueAfter)
+	}
+}
+
+func TestPauseTimeReached(t *testing.T) {
+	now := metav1.NewTime(time.Now().Truncate(time.Second))
+	cases := []struct {
+		name      string
+		pauseTime metav1.Time
+		now       metav1.Time
+		expectDue bool
+	}{
+		{
+			name:      "past pause time is due",
+			pauseTime: metav1.NewTime(now.Add(-time.Second)),
+			now:       now,
+			expectDue: true,
+		},
+		{
+			name:      "exact pause time is due",
+			pauseTime: now,
+			now:       now,
+			expectDue: true,
+		},
+		{
+			name:      "future pause time is not due",
+			pauseTime: metav1.NewTime(now.Add(time.Second)),
+			now:       now,
+			expectDue: false,
+		},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := pauseTimeReached(&tt.pauseTime, tt.now); got != tt.expectDue {
+				t.Fatalf("pauseTimeReached() = %v, want %v", got, tt.expectDue)
+			}
+		})
 	}
 }
 

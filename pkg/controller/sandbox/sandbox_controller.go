@@ -209,14 +209,25 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 		requeueAfter = box.Spec.ShutdownTime.Sub(now.Time)
 	}
 	if box.Spec.PauseTime != nil && !box.Spec.Paused {
-		if box.Spec.PauseTime.Before(&now) {
-			klog.InfoS("sandbox pause time reached, will be paused", "sandbox", klog.KObj(box))
+		if pauseTimeReached(box.Spec.PauseTime, now) {
+			klog.InfoS("sandbox pause time reached", "sandbox", klog.KObj(box))
 			modified := box.DeepCopy()
-			patch := client.MergeFrom(box)
+			// Optimistic-lock so concurrent writers surface as 409 instead of
+			// silently winning a last-writer race.
+			patch := client.MergeFromWithOptions(box, client.MergeFromWithOptimisticLock{})
 			modified.Spec.Paused = true
-			return ctrl.Result{}, r.Patch(ctx, modified, patch)
+			if err := r.Patch(ctx, modified, patch); err != nil {
+				if errors.IsConflict(err) {
+					return ctrl.Result{Requeue: true}, nil
+				}
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{}, nil
 		}
-		requeueAfter = min(requeueAfter, box.Spec.PauseTime.Sub(now.Time))
+		pauseDelta := box.Spec.PauseTime.Sub(now.Time)
+		if pauseDelta > 0 && (requeueAfter == 0 || pauseDelta < requeueAfter) {
+			requeueAfter = pauseDelta
+		}
 	}
 
 	// calculate sandbox status
@@ -261,6 +272,10 @@ func (r *SandboxReconciler) handleTerminating(ctx context.Context, args core.Ens
 
 func isSandboxCompletedPhase(phase agentsv1alpha1.SandboxPhase) bool {
 	return phase == agentsv1alpha1.SandboxFailed || phase == agentsv1alpha1.SandboxSucceeded
+}
+
+func pauseTimeReached(pauseTime *metav1.Time, now metav1.Time) bool {
+	return pauseTime != nil && !pauseTime.After(now.Time)
 }
 
 func (r *SandboxReconciler) addSandboxFinalizerAndHash(ctx context.Context, box *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) {
