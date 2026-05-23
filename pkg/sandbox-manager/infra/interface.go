@@ -43,8 +43,16 @@ type PauseOptions struct {
 	Timeout *timeout.Options
 }
 
-// ResumeOptions reserves the type for future extensions.
-type ResumeOptions struct{}
+// ResumeOptions configures a Resume operation.
+//
+// Timeout, when non-nil, is written atomically with Spec.Paused=false so
+// the controller's auto-pause action cannot fire on the stale PauseTime
+// between Resume returning and the caller writing the real business
+// timeout. Pass nil to skip the atomic write (the caller accepts that
+// PauseTime may remain stale until the next write).
+type ResumeOptions struct {
+	Timeout *timeout.Options
+}
 
 type HasTemplateOptions struct {
 	Namespace string

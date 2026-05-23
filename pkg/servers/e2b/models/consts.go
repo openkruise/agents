@@ -20,6 +20,11 @@ const (
 	DefaultMaxTimeout        = 2592000 // 30 days
 	DefaultMinTimeoutSeconds = 30
 	DefaultTimeoutSeconds    = 300
-	MaxListLimit             = 100
-	MinListLimit             = 1
+	// DefaultMinResumeTimeoutSeconds floors Connect/Resume requests that
+	// trigger Resume on a Paused sandbox, so the placeholder cannot expire
+	// mid-Resume. Tune via --e2b-min-resume-timeout.
+	DefaultMinResumeTimeoutSeconds = 300
+
+	MaxListLimit = 100
+	MinListLimit = 1
 )

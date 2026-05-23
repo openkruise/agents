@@ -41,8 +41,9 @@ import (
 
 // Controller handles sandbox-related operations
 type Controller struct {
-	port       int
-	maxTimeout int
+	port             int
+	maxTimeout       int
+	minResumeTimeout int
 
 	// manager params
 	systemNamespace       string // the namespace where the sandbox manager is running
@@ -68,13 +69,14 @@ type Controller struct {
 }
 
 // NewController creates a new E2B Controller
-func NewController(domain, sysNs, peerSelector, sandboxNamespace, sandboxLabelSelector string, maxTimeout, maxClaimWorkers, maxCreateQPS int, extProcMaxConcurrency uint32, port, memberlistBindPort int, keyCfg *keys.Config, clientConfig *rest.Config) *Controller {
+func NewController(domain, sysNs, peerSelector, sandboxNamespace, sandboxLabelSelector string, maxTimeout, minResumeTimeout, maxClaimWorkers, maxCreateQPS int, extProcMaxConcurrency uint32, port, memberlistBindPort int, keyCfg *keys.Config, clientConfig *rest.Config) *Controller {
 	sc := &Controller{
 		mux:                   http.NewServeMux(),
 		domain:                domain,
 		clientConfig:          clientConfig,
 		port:                  port,
 		maxTimeout:            maxTimeout,
+		minResumeTimeout:      minResumeTimeout,
 		systemNamespace:       sysNs, // the namespace where the sandbox manager is running
 		peerSelector:          peerSelector,
 		sandboxNamespace:      sandboxNamespace,

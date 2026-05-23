@@ -1,7 +1,9 @@
+import json
+import subprocess
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from dateutil.tz import tzutc
@@ -9,6 +11,24 @@ from e2b.exceptions import NotFoundException
 from e2b_code_interpreter import Sandbox, SandboxQuery, SandboxState
 
 from utils import list_sandbox, connect_sandbox, run_code_sandbox
+
+
+def _get_sandbox_spec(name: str) -> dict:
+    """Fetch the live Spec of a Sandbox CR by name (post `--` portion of sandbox_id)."""
+    result = subprocess.run(
+        ["kubectl", "get", "sbx", name, "-o", "json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return json.loads(result.stdout).get("spec", {})
+
+
+def _parse_rfc3339_utc(s: str) -> datetime:
+    """Parse an RFC3339 timestamp (with or without trailing Z) into a UTC-aware datetime."""
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    return datetime.fromisoformat(s).astimezone(timezone.utc)
 
 
 # Link: https://e2b.dev/docs/sandbox
@@ -158,6 +178,91 @@ def test_connect_shorter_timeout(sandbox_context):
 
     # For running sandboxes, connect(timeout=<shorter>) must not shorten endAt.
     assert info_after.end_at == info_before.end_at
+
+
+def test_auto_pause_resume_no_immediate_repause(sandbox_context):
+    """Connect after auto-pause must leave the sandbox running through the
+    stability window: the Connect path replaces the expired PauseTime with
+    the requested running deadline, and the next reconcile must respect it.
+    """
+    auto_pause_timeout_seconds = 30
+    sbx: Sandbox = sandbox_context.add(Sandbox.create(
+        template="code-interpreter",
+        timeout=auto_pause_timeout_seconds,
+        lifecycle={"on_timeout": "pause"},
+        metadata={"test_case": "test_auto_pause_resume_no_immediate_repause"},
+        headers={
+            "x-request-id": sandbox_context.request_id
+        }
+    ))
+    print(f"sandbox-id: {sbx.sandbox_id}")
+    sandbox_name = sbx.sandbox_id.split("--")[1]
+
+    # Step 1: wait for the controller to auto-pause the sandbox.
+    pause_deadline = time.time() + auto_pause_timeout_seconds + 60
+    paused = False
+    while time.time() < pause_deadline:
+        info = sbx.get_info()
+        if info.state == SandboxState.PAUSED:
+            paused = True
+            print(f"sandbox auto-paused: {sandbox_name} state={info.state}")
+            break
+        time.sleep(2)
+    assert paused, f"sandbox {sandbox_name} did not auto-pause within deadline"
+
+    # Step 2: assert auto-pause took effect.
+    spec = _get_sandbox_spec(sandbox_name)
+    assert spec.get("paused") is True, (
+        f"spec.paused must be true after auto-pause; got spec={spec}"
+    )
+    pause_time_str = spec.get("pauseTime")
+    assert pause_time_str, "spec.pauseTime must remain non-nil after auto-pause"
+
+    # Step 3: resume via E2B Connect with an explicit timeout. Record the
+    # wall-clock window that brackets the server's `now`, so we can bound the
+    # post-Connect Spec.PauseTime (= serverNow + connect_timeout for autoPause).
+    connect_timeout_seconds = 600
+    connect_start = datetime.now(timezone.utc)
+    connect_sandbox(sbx, timeout=connect_timeout_seconds)
+    connect_end = datetime.now(timezone.utc)
+
+    info = sbx.get_info()
+    assert info.state == SandboxState.RUNNING, (
+        f"sandbox should be RUNNING after resume; got {info.state}"
+    )
+
+    # Step 4: stability window — controller must NOT immediately re-pause.
+    stability_seconds = 15
+    poll_interval = 2
+    deadline = time.time() + stability_seconds
+    while time.time() < deadline:
+        info = sbx.get_info()
+        assert info.state == SandboxState.RUNNING, (
+            f"sandbox got re-paused unexpectedly during stability window; "
+            f"state={info.state}"
+        )
+        time.sleep(poll_interval)
+
+    # Step 5: confirm final spec is consistent — paused=false and pauseTime
+    # lands in the narrow [connect_start, connect_end] + connect_timeout window
+    # (a stale 5-min-old pauseTime would also be "in the future" — the bound
+    # below proves it's the freshly-written deadline, not a leftover).
+    spec_after = _get_sandbox_spec(sandbox_name)
+    assert not spec_after.get("paused"), (
+        f"spec.paused should be false after resume; got spec={spec_after}"
+    )
+    pause_time_after_str = spec_after.get("pauseTime")
+    assert pause_time_after_str, "spec.pauseTime must remain non-nil after resume"
+    pause_time_after = _parse_rfc3339_utc(pause_time_after_str)
+
+    skew_tolerance = timedelta(seconds=10)
+    expected_min = connect_start + timedelta(seconds=connect_timeout_seconds) - skew_tolerance
+    expected_max = connect_end + timedelta(seconds=connect_timeout_seconds) + skew_tolerance
+    assert expected_min <= pause_time_after <= expected_max, (
+        f"spec.pauseTime should be ~connect_start + {connect_timeout_seconds}s; "
+        f"got {pause_time_after_str}, expected in [{expected_min.isoformat()}, "
+        f"{expected_max.isoformat()}]"
+    )
 
 
 def test_pause_connect_kill(sandbox_context):

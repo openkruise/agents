@@ -91,14 +91,10 @@ func ConvertPodToSandboxCR(pod *corev1.Pod) *v1alpha1.Sandbox {
 
 func TestSandbox_SaveTimeoutWithPolicy(t *testing.T) {
 	base := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
-	timeoutPtr := func(opts timeout.Options) *timeout.Options {
-		return &opts
-	}
 
 	tests := []struct {
 		name          string
 		current       timeout.Options
-		baseline      *timeout.Options
 		requested     timeout.Options
 		policy        timeout.UpdatePolicy
 		expectUpdated bool
@@ -154,80 +150,6 @@ func TestSandbox_SaveTimeoutWithPolicy(t *testing.T) {
 			expectTimeout: timeout.Options{ShutdownTime: base.Add(25 * time.Minute)},
 		},
 		{
-			name: "baseline aware with matching baseline behaves like always (writes)",
-			current: timeout.Options{
-				ShutdownTime: base.Add(10 * time.Minute),
-			},
-			baseline: timeoutPtr(timeout.Options{
-				ShutdownTime: base.Add(10 * time.Minute),
-			}),
-			requested: timeout.Options{
-				ShutdownTime: base.Add(18 * time.Minute),
-			},
-			policy:        timeout.UpdatePolicyBaselineAware,
-			expectUpdated: true,
-			expectTimeout: timeout.Options{ShutdownTime: base.Add(18 * time.Minute)},
-		},
-		{
-			name: "baseline aware with matching baseline skips when timeout equals current",
-			current: timeout.Options{
-				ShutdownTime: base.Add(10 * time.Minute),
-			},
-			baseline: timeoutPtr(timeout.Options{
-				ShutdownTime: base.Add(10 * time.Minute),
-			}),
-			requested: timeout.Options{
-				ShutdownTime: base.Add(10 * time.Minute),
-			},
-			policy:        timeout.UpdatePolicyBaselineAware,
-			expectUpdated: false,
-			expectTimeout: timeout.Options{ShutdownTime: base.Add(10 * time.Minute)},
-		},
-		{
-			name: "baseline aware with drifted baseline only allows extension",
-			current: timeout.Options{
-				ShutdownTime: base.Add(15 * time.Minute),
-			},
-			baseline: timeoutPtr(timeout.Options{
-				ShutdownTime: base.Add(10 * time.Minute),
-			}),
-			requested: timeout.Options{
-				ShutdownTime: base.Add(30 * time.Minute),
-			},
-			policy:        timeout.UpdatePolicyBaselineAware,
-			expectUpdated: true,
-			expectTimeout: timeout.Options{ShutdownTime: base.Add(30 * time.Minute)},
-		},
-		{
-			name: "baseline aware with drifted baseline rejects non extending timeout",
-			current: timeout.Options{
-				ShutdownTime: base.Add(15 * time.Minute),
-			},
-			baseline: timeoutPtr(timeout.Options{
-				ShutdownTime: base.Add(10 * time.Minute),
-			}),
-			requested: timeout.Options{
-				ShutdownTime: base.Add(12 * time.Minute),
-			},
-			policy:        timeout.UpdatePolicyBaselineAware,
-			expectUpdated: false,
-			expectTimeout: timeout.Options{ShutdownTime: base.Add(15 * time.Minute)},
-		},
-		{
-			name: "baseline aware without baseline returns error",
-			current: timeout.Options{
-				ShutdownTime: base.Add(10 * time.Minute),
-			},
-			requested: timeout.Options{
-				ShutdownTime: base.Add(20 * time.Minute),
-			},
-			policy:      timeout.UpdatePolicyBaselineAware,
-			expectError: "requires opts.Baseline",
-			expectTimeout: timeout.Options{
-				ShutdownTime: base.Add(10 * time.Minute),
-			},
-		},
-		{
 			name: "unsupported policy returns error without mutating timeout",
 			current: timeout.Options{
 				ShutdownTime: base.Add(10 * time.Minute),
@@ -261,11 +183,7 @@ func TestSandbox_SaveTimeoutWithPolicy(t *testing.T) {
 				return err == nil
 			}, time.Second, 10*time.Millisecond)
 
-			requested := tt.requested
-			if tt.baseline != nil {
-				requested.Baseline = tt.baseline
-			}
-			result, err := sandbox.SaveTimeoutWithPolicy(t.Context(), requested, tt.policy)
+			result, err := sandbox.SaveTimeoutWithPolicy(t.Context(), tt.requested, tt.policy)
 			if tt.expectError != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.expectError)
@@ -397,79 +315,6 @@ func TestSandbox_SaveTimeoutWithPolicy_OnConflict(t *testing.T) {
 	var updated v1alpha1.Sandbox
 	require.NoError(t, fc.Get(t.Context(), types.NamespacedName{Namespace: sbx.Namespace, Name: sbx.Name}, &updated))
 	assert.True(t, timeout.Equal(requested, timeout.GetTimeoutFromSandbox(&updated)))
-}
-
-func TestSandbox_SaveTimeoutWithPolicy_BaselineAwareUsesAPIReaderAfterConflict(t *testing.T) {
-	scheme := k8sruntime.NewScheme()
-	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
-	utilruntime.Must(v1alpha1.AddToScheme(scheme))
-
-	base := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
-	baseline := timeout.Options{ShutdownTime: base.Add(10 * time.Minute)}
-	winnerTimeout := timeout.Options{ShutdownTime: base.Add(30 * time.Minute)}
-	requested := timeout.Options{
-		ShutdownTime: base.Add(12 * time.Minute),
-		Baseline:     &baseline,
-	}
-
-	initial := createTestSandboxWithDefaults("test-sandbox", "default")
-	setTimeout(initial, baseline)
-	stale := initial.DeepCopy()
-
-	fc := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithStatusSubresource(&v1alpha1.Sandbox{}).
-		WithObjects(initial).
-		Build()
-
-	provider := &retryUpdateTestProvider{
-		apiReader:      &countingReader{Reader: fc},
-		claimedSandbox: initial,
-	}
-	var updateCalls atomic.Int32
-	provider.client = interceptor.NewClient(fc, interceptor.Funcs{
-		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-			provider.clientGetCalls.Add(1)
-			if key == client.ObjectKeyFromObject(stale) {
-				stale.DeepCopyInto(obj.(*v1alpha1.Sandbox))
-				return nil
-			}
-			return c.Get(ctx, key, obj, opts...)
-		},
-		Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
-			if updateCalls.Add(1) != 1 {
-				return errors.New("unexpected second update")
-			}
-
-			latest := &v1alpha1.Sandbox{}
-			if err := c.Get(ctx, client.ObjectKeyFromObject(stale), latest); err != nil {
-				return err
-			}
-			winner := latest.DeepCopy()
-			setTimeout(winner, winnerTimeout)
-			if err := c.Update(ctx, winner); err != nil {
-				return err
-			}
-			return apierrors.NewConflict(
-				schema.GroupResource{Group: v1alpha1.GroupVersion.Group, Resource: "sandboxes"},
-				obj.GetName(),
-				errors.New("simulated conflict"),
-			)
-		},
-	})
-
-	sandbox := AsSandbox(stale.DeepCopy(), provider)
-	result, err := sandbox.SaveTimeoutWithPolicy(t.Context(), requested, timeout.UpdatePolicyBaselineAware)
-	require.NoError(t, err)
-	assert.False(t, result.Updated)
-	assert.Equal(t, int32(1), provider.clientGetCalls.Load())
-	assert.Equal(t, int32(1), provider.apiReader.Calls())
-	assert.Equal(t, int32(1), updateCalls.Load())
-	assert.True(t, timeout.Equal(winnerTimeout, sandbox.GetTimeout()))
-
-	updated := &v1alpha1.Sandbox{}
-	require.NoError(t, fc.Get(t.Context(), client.ObjectKeyFromObject(initial), updated))
-	assert.True(t, timeout.Equal(winnerTimeout, timeout.GetTimeoutFromSandbox(updated)))
 }
 
 type countingReader struct {

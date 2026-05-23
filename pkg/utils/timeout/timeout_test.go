@@ -134,24 +134,6 @@ func TestEqual(t *testing.T) {
 			},
 			want: false,
 		},
-		{
-			name: "Baseline ignored",
-			a: Options{
-				ShutdownTime: base.Add(time.Minute),
-				PauseTime:    base.Add(2 * time.Minute),
-				Baseline: &Options{
-					ShutdownTime: base.Add(3 * time.Minute),
-				},
-			},
-			b: Options{
-				ShutdownTime: base.Add(time.Minute),
-				PauseTime:    base.Add(2 * time.Minute),
-				Baseline: &Options{
-					PauseTime: base.Add(4 * time.Minute),
-				},
-			},
-			want: true,
-		},
 	}
 
 	for _, tt := range tests {
@@ -222,34 +204,22 @@ func TestShouldExtendTimeout(t *testing.T) {
 			want: true,
 		},
 		{
-			name: "Same effective end time with different baselines does not extend",
+			name: "Same effective end time does not extend",
 			current: Options{
 				ShutdownTime: now.Add(time.Minute),
-				Baseline: &Options{
-					ShutdownTime: now.Add(3 * time.Minute),
-				},
 			},
 			requested: Options{
 				ShutdownTime: now.Add(time.Minute),
-				Baseline: &Options{
-					ShutdownTime: now.Add(4 * time.Minute),
-				},
 			},
 			want: false,
 		},
 		{
-			name: "Later effective end time extends despite different baselines",
+			name: "Later effective end time extends",
 			current: Options{
 				ShutdownTime: now.Add(time.Minute),
-				Baseline: &Options{
-					PauseTime: now.Add(3 * time.Minute),
-				},
 			},
 			requested: Options{
 				ShutdownTime: now.Add(2 * time.Minute),
-				Baseline: &Options{
-					PauseTime: now.Add(4 * time.Minute),
-				},
 			},
 			want: true,
 		},

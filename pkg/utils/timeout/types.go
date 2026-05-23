@@ -22,15 +22,11 @@ import "time"
 type Options struct {
 	ShutdownTime time.Time
 	PauseTime    time.Time
-	// Baseline is the timeout state the caller observed before issuing this update.
-	// Consulted only when the policy passed to SaveTimeoutWithPolicy is BaselineAware.
-	Baseline *Options `json:"-"`
 }
 
 type UpdatePolicy string
 
 const (
-	UpdatePolicyAlways        UpdatePolicy = "Always"
-	UpdatePolicyExtendOnly    UpdatePolicy = "ExtendOnly"
-	UpdatePolicyBaselineAware UpdatePolicy = "BaselineAware"
+	UpdatePolicyAlways     UpdatePolicy = "Always"
+	UpdatePolicyExtendOnly UpdatePolicy = "ExtendOnly"
 )

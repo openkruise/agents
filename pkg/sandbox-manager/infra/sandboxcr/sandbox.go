@@ -233,10 +233,6 @@ func (s *Sandbox) GetImage() string {
 // SaveTimeoutWithPolicy updates timeout with given policy. Available timeout update policies:
 //   - Always: overwrite timeout whenever the requested value differs from current.
 //   - ExtendOnly: only extend to a later effective end time.
-//   - BaselineAware: the caller provides the timeout data it observed before issuing
-//     this update. When current timeout matches baseline, it is treated as
-//     overwrite-allowed; when current timeout differs from baseline, only extension
-//     is allowed.
 func (s *Sandbox) SaveTimeoutWithPolicy(ctx context.Context, opts timeout.Options, policy timeout.UpdatePolicy) (infra.TimeoutUpdateResult, error) {
 	log := klog.FromContext(ctx).V(consts.DebugLogLevel).WithValues("sandbox", klog.KObj(s.Sandbox), "policy", policy)
 	result := infra.TimeoutUpdateResult{}
@@ -251,21 +247,6 @@ func (s *Sandbox) SaveTimeoutWithPolicy(ctx context.Context, opts timeout.Option
 			shouldUpdate = !timeout.Equal(current, opts)
 		case timeout.UpdatePolicyExtendOnly:
 			shouldUpdate = timeout.ShouldExtendTimeout(current, opts)
-		case timeout.UpdatePolicyBaselineAware:
-			if opts.Baseline == nil {
-				return false, fmt.Errorf("BaselineAware policy requires opts.Baseline to be set")
-			}
-			if timeout.Equal(current, *opts.Baseline) {
-				// No concurrent writer has changed the timeout since the caller's observation.
-				// Treat as Always: overwrite if different.
-				shouldUpdate = !timeout.Equal(current, opts)
-				log.Info("baseline matches current, using Always semantics", "shouldUpdate", shouldUpdate)
-			} else {
-				// Some other request has already written a new timeout in this cycle.
-				// Degrade to ExtendOnly so we never shrink an already-extended timeout.
-				shouldUpdate = timeout.ShouldExtendTimeout(current, opts)
-				log.Info("baseline differs from current, using ExtendOnly semantics", "shouldUpdate", shouldUpdate)
-			}
 		default:
 			return false, fmt.Errorf("unsupported timeout update policy %q", policy)
 		}
@@ -357,7 +338,7 @@ func (s *Sandbox) Pause(ctx context.Context, opts infra.PauseOptions) error {
 
 const postResumeOperationTimeout = 30 * time.Second
 
-func (s *Sandbox) Resume(ctx context.Context, _ infra.ResumeOptions) error {
+func (s *Sandbox) Resume(ctx context.Context, opts infra.ResumeOptions) error {
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(s.Sandbox))
 
 	if err := s.refreshFromAPIReader(ctx); err != nil {
@@ -383,11 +364,14 @@ func (s *Sandbox) Resume(ctx context.Context, _ infra.ResumeOptions) error {
 	log.Info("try to resume sandbox", "state", state, "reason", reason)
 	resumeUpdated, err := s.retryUpdate(ctx, func(sbx *agentsv1alpha1.Sandbox) (bool, error) {
 		if !sbx.Spec.Paused {
-			// Resume is first-writer-wins: only the request that flips
-			// No need to update if spec.paused is already false.
+			// First-writer-wins: the loser must not overwrite the winner's
+			// fresh PauseTime, otherwise the controller would auto-pause.
 			return false, nil
 		}
 		sbx.Spec.Paused = false
+		if opts.Timeout != nil {
+			setTimeout(sbx, *opts.Timeout)
+		}
 		return true, nil
 	})
 	if err != nil {

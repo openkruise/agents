@@ -18,6 +18,7 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"net/http"         // Added for pprof server
 	_ "net/http/pprof" // Added to register pprof handlers
 	"os"
@@ -44,6 +45,22 @@ const (
 	E2BKeyHashPepperEnvVar = "E2B_KEY_HASH_PEPPER"
 )
 
+// validateE2BTimeoutFlags rejects misconfigurations that would either
+// (a) make floor enforcement no-op or pathological (min <= 0), or
+// (b) push effectiveTimeout past the user-facing maxTimeout ceiling.
+func validateE2BTimeoutFlags(minResumeTimeout, maxTimeout int) error {
+	if minResumeTimeout <= 0 {
+		return fmt.Errorf("--e2b-min-resume-timeout must be greater than 0, got %d", minResumeTimeout)
+	}
+	if minResumeTimeout > maxTimeout {
+		return fmt.Errorf(
+			"--e2b-min-resume-timeout (%d) must not exceed --e2b-max-timeout (%d); "+
+				"otherwise floor enforcement could bump a valid request past the API ceiling",
+			minResumeTimeout, maxTimeout)
+	}
+	return nil
+}
+
 func main() {
 	// Define variables for pprof configuration
 	var enablePprof bool
@@ -55,6 +72,7 @@ func main() {
 	var e2bEnableAuth bool
 	var domain string
 	var e2bMaxTimeout int
+	var e2bMinResumeTimeout int
 	var sysNs string
 	var peerSelector string
 	var sandboxNamespace string
@@ -80,6 +98,10 @@ func main() {
 	pflag.BoolVar(&e2bEnableAuth, "e2b-enable-auth", true, "Enable E2B authentication")
 	pflag.StringVar(&domain, "e2b-domain", "localhost", "E2B domain")
 	pflag.IntVar(&e2bMaxTimeout, "e2b-max-timeout", models.DefaultMaxTimeout, "E2B maximum timeout in seconds")
+	pflag.IntVar(&e2bMinResumeTimeout, "e2b-min-resume-timeout", models.DefaultMinResumeTimeoutSeconds,
+		"Minimum effective timeout (seconds) applied to Connect / Resume requests that trigger Resume on a Paused sandbox. "+
+			"Requests shorter than this are bumped up so the Resume placeholder cannot expire mid-Resume. "+
+			"Should be set above the production worst-case Resume duration.")
 	pflag.StringVar(&sysNs, "system-namespace", utils.DefaultSandboxDeployNamespace, "The namespace where the sandbox manager is running (required)")
 	pflag.StringVar(&peerSelector, "peer-selector", "", "Peer selector for sandbox manager (required)")
 	pflag.StringVar(&sandboxNamespace, "sandbox-namespace", "", "Namespace to filter sandbox-related custom resources (Sandbox, SandboxSet, Checkpoint, SandboxTemplate). Defaults to all.")
@@ -139,6 +161,10 @@ func main() {
 		klog.Fatalf("--e2b-max-timeout must be greater than 0")
 	}
 
+	if err := validateE2BTimeoutFlags(e2bMinResumeTimeout, e2bMaxTimeout); err != nil {
+		klog.Fatalf("invalid e2b timeout flags: %v", err)
+	}
+
 	if maxClaimWorkers < 0 {
 		klog.Fatalf("--max-claim-workers must be non-negative")
 	}
@@ -195,7 +221,7 @@ func main() {
 		}
 	}
 
-	sandboxController := e2b.NewController(domain, sysNs, peerSelector, sandboxNamespace, sandboxLabelSelector, e2bMaxTimeout, maxClaimWorkers, maxCreateQPS, uint32(extProcMaxConcurrency),
+	sandboxController := e2b.NewController(domain, sysNs, peerSelector, sandboxNamespace, sandboxLabelSelector, e2bMaxTimeout, e2bMinResumeTimeout, maxClaimWorkers, maxCreateQPS, uint32(extProcMaxConcurrency),
 		port, memberlistBindPort, keyCfg, clientConfig)
 
 	if err := sandboxController.Init(); err != nil {

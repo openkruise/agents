@@ -72,6 +72,13 @@ func CreateSandboxWithStatus(t *testing.T, c ctrlclient.Client, sbx *agentsv1alp
 }
 
 func Setup(t *testing.T) (*Controller, ctrlclient.Client, func()) {
+	return SetupWithMinResumeTimeout(t, models.DefaultMinResumeTimeoutSeconds)
+}
+
+// SetupWithMinResumeTimeout mirrors Setup but lets the caller override
+// Controller.minResumeTimeout so floor-enforcement assertions can use a
+// non-default value (e.g., 120s with a 60s request to observe the bump).
+func SetupWithMinResumeTimeout(t *testing.T, minResumeTimeout int) (*Controller, ctrlclient.Client, func()) {
 	utils.InitLogOutput()
 	namespace := "sandbox-system"
 
@@ -85,7 +92,7 @@ func Setup(t *testing.T) (*Controller, ctrlclient.Client, func()) {
 	})
 	cache, fc, cacheErr := cachetest.NewTestCache(t)
 	require.NoError(t, cacheErr)
-	controller := NewController("example.com", namespace, "component=sandbox-manager", "", "", models.DefaultMaxTimeout, 10,
+	controller := NewController("example.com", namespace, "component=sandbox-manager", "", "", models.DefaultMaxTimeout, minResumeTimeout, 10,
 		0, 0, TestServerPort, config.DefaultMemberlistBindPort, &keys.Config{
 			Mode:      keys.StorageModeSecret,
 			Namespace: namespace,
