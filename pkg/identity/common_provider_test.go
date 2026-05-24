@@ -90,6 +90,10 @@ func (m *mockIdentityProvider) PropagateSecurityToken(_ context.Context, _ *agen
 	return m.propagateErr
 }
 
+func (m *mockIdentityProvider) GetProxyCABundle(_ context.Context, _ *GetProxyCABundleRequest) (*GetProxyCABundleResponse, error) {
+	return &GetProxyCABundleResponse{}, nil
+}
+
 func TestNewFallbackIdentityProvider(t *testing.T) {
 	primary := &mockIdentityProvider{}
 	p := NewFallbackIdentityProvider(primary)

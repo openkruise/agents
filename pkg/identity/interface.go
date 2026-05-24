@@ -28,10 +28,12 @@ import (
 // Community default (defaultTokenProvider):
 //   - IssueToken: generates random tokens using the default strategy.
 //   - PropagateSecurityToken: no-op (no propagators registered).
+//   - GetProxyCABundle: no-op, returns an empty bundle.
 //
 // Enterprise deployment (secureIdentityProvider):
 //   - IssueToken: calls HTTPS identity provider service with default fallback.
 //   - PropagateSecurityToken: executes registered propagators (e.g., write credential files).
+//   - GetProxyCABundle: fetches the proxy CA bundle from the identity provider service.
 type IdentityProvider interface {
 	// IssueToken generates an access token for the given token request.
 	IssueToken(ctx context.Context, req TokenRequest) (*TokenResponse, error)
@@ -39,6 +41,11 @@ type IdentityProvider interface {
 	// PropagateSecurityToken executes post-token processing after a token is issued,
 	// such as writing credentials into the sandbox runtime.
 	PropagateSecurityToken(ctx context.Context, sbx *agentsv1alpha1.Sandbox, tokenResp *TokenResponse) error
+
+	// GetProxyCABundle fetches the CA bundle used to verify the proxy server's TLS certificate.
+	// Community default returns an empty bundle (no-op); enterprise implementations call the
+	// identity provider service via the GetProxyCABundle action.
+	GetProxyCABundle(ctx context.Context, req *GetProxyCABundleRequest) (*GetProxyCABundleResponse, error)
 }
 
 // TokenProvider is the low-level interface for issuing sandbox access tokens.

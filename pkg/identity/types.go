@@ -87,3 +87,22 @@ type TokenRefreshStatus struct {
 	// AccessTokenExpiration is the expiration time of the refreshed access token in RFC3339 format
 	AccessTokenExpiration string `json:"accessTokenExpiration,omitempty"`
 }
+
+// GetProxyCABundleRequest is the request payload for fetching the proxy CA bundle
+// from the identity provider service.
+type GetProxyCABundleRequest struct {
+	// IncludeSystemCA indicates whether the response bundle should be merged with the
+	// host's system CA pool. When false, only the proxy-specific CA certificates are returned.
+	IncludeSystemCA bool `json:"includeSystemCA"`
+}
+
+// GetProxyCABundleResponse carries the PEM-encoded CA bundle used to verify the
+// proxy server's TLS certificate.
+type GetProxyCABundleResponse struct {
+	// RequestID is the unique identifier of this CA bundle fetch request.
+	RequestID string `json:"requestId,omitempty"`
+
+	// CABundle is the PEM-encoded CA bundle. May be empty when the community default
+	// (no-op) provider is in effect.
+	CABundle string `json:"caBundle,omitempty"`
+}

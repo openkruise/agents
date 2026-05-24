@@ -55,6 +55,13 @@ func (u *defaultTokenProvider) PropagateSecurityToken(_ context.Context, _ *agen
 	return nil
 }
 
+// GetProxyCABundle is a no-op for the default provider and returns an empty bundle.
+// Community mode does not contact any external identity provider service to fetch CA certs;
+// callers should treat an empty CABundle as "use the host's system CA pool".
+func (u *defaultTokenProvider) GetProxyCABundle(_ context.Context, _ *GetProxyCABundleRequest) (*GetProxyCABundleResponse, error) {
+	return &GetProxyCABundleResponse{}, nil
+}
+
 // fallbackIdentityProvider wraps a primary IdentityProvider and falls back to the
 // community default provider when the primary IssueToken returns an error.
 // This ensures that sandbox claim is never blocked by an external identity provider outage.
@@ -88,4 +95,11 @@ func (f *fallbackIdentityProvider) IssueToken(ctx context.Context, req TokenRequ
 
 func (f *fallbackIdentityProvider) PropagateSecurityToken(ctx context.Context, sbx *agentsv1alpha1.Sandbox, tokenResp *TokenResponse) error {
 	return f.primary.PropagateSecurityToken(ctx, sbx, tokenResp)
+}
+
+// GetProxyCABundle delegates directly to the primary provider without falling back to the
+// community default. The community no-op would silently return an empty bundle, which would
+// mask a real outage of the identity provider service for callers that depend on the bundle.
+func (f *fallbackIdentityProvider) GetProxyCABundle(ctx context.Context, req *GetProxyCABundleRequest) (*GetProxyCABundleResponse, error) {
+	return f.primary.GetProxyCABundle(ctx, req)
 }
