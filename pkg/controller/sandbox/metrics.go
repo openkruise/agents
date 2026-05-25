@@ -410,6 +410,38 @@ func findCondition(conditions []metav1.Condition, condType string) *metav1.Condi
 	return nil
 }
 
+func recordReadyConditionMetrics(namespace, name string, sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod, condition metav1.Condition) {
+	// Per-container ready status is only meaningful when the sandbox is Running
+	if sandbox.Status.Phase != agentsv1alpha1.SandboxRunning || pod == nil {
+		return
+	}
+	isReady := condition.Status == metav1.ConditionTrue
+	containerReady := make(map[string]bool)
+	for _, cs := range pod.Status.ContainerStatuses {
+		containerReady[cs.Name] = cs.Ready
+	}
+	for _, cs := range pod.Status.InitContainerStatuses {
+		containerReady[cs.Name] = cs.Ready
+	}
+	for _, c := range pod.Spec.InitContainers {
+		sandboxStatusReady.WithLabelValues(namespace, name, c.Name).Set(boolFloat64(containerReady[c.Name]))
+	}
+	for _, c := range pod.Spec.Containers {
+		sandboxStatusReady.WithLabelValues(namespace, name, c.Name).Set(boolFloat64(containerReady[c.Name]))
+	}
+	if isReady {
+		sandboxStatusReadyTime.WithLabelValues(namespace, name).Set(float64(condition.LastTransitionTime.Unix()))
+	}
+	if isReady {
+		key := namespace + "/" + name
+		if _, loaded := observedCreationToReady.LoadOrStore(key, true); !loaded {
+			duration := condition.LastTransitionTime.Sub(sandbox.CreationTimestamp.Time)
+			sandboxCreationDuration.WithLabelValues(namespace).Observe(duration.Seconds())
+			sandboxCreationTotal.WithLabelValues(namespace, "success").Inc()
+		}
+	}
+}
+
 // recordSandboxMetrics updates all sandbox lifecycle metrics based on the current sandbox state.
 // pod may be nil; when nil, container-level metrics are skipped.
 func recordSandboxMetrics(sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod) {
@@ -447,36 +479,7 @@ func recordSandboxMetrics(sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod) {
 	for _, condition := range sandbox.Status.Conditions {
 		switch agentsv1alpha1.SandboxConditionType(condition.Type) {
 		case agentsv1alpha1.SandboxConditionReady:
-			// Per-container ready status is only meaningful when the sandbox is Running
-			if sandbox.Status.Phase != agentsv1alpha1.SandboxRunning || pod == nil {
-				continue
-			}
-			isReady := condition.Status == metav1.ConditionTrue
-			containerReady := make(map[string]bool)
-			for _, cs := range pod.Status.ContainerStatuses {
-				containerReady[cs.Name] = cs.Ready
-			}
-			for _, cs := range pod.Status.InitContainerStatuses {
-				containerReady[cs.Name] = cs.Ready
-			}
-			for _, c := range pod.Spec.InitContainers {
-				sandboxStatusReady.WithLabelValues(namespace, name, c.Name).Set(boolFloat64(containerReady[c.Name]))
-			}
-			for _, c := range pod.Spec.Containers {
-				sandboxStatusReady.WithLabelValues(namespace, name, c.Name).Set(boolFloat64(containerReady[c.Name]))
-			}
-			if isReady {
-				sandboxStatusReadyTime.WithLabelValues(namespace, name).Set(float64(condition.LastTransitionTime.Unix()))
-			}
-			// Observe creation-to-ready duration histogram (once per sandbox)
-			if isReady {
-				key := namespace + "/" + name
-				if _, loaded := observedCreationToReady.LoadOrStore(key, true); !loaded {
-					duration := condition.LastTransitionTime.Sub(sandbox.CreationTimestamp.Time)
-					sandboxCreationDuration.WithLabelValues(namespace).Observe(duration.Seconds())
-					sandboxCreationTotal.WithLabelValues(namespace, "success").Inc()
-				}
-			}
+			recordReadyConditionMetrics(namespace, name, sandbox, pod, condition)
 
 		case agentsv1alpha1.SandboxConditionInplaceUpdate:
 			isUpdating := condition.Status == metav1.ConditionFalse
