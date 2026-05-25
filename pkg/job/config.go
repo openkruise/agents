@@ -63,7 +63,6 @@ const (
 
 	// EnvDryRun is the environment variable name for dry run mode.
 	EnvDryRun = "DRY_RUN"
-
 )
 
 // EnvConfig reads configuration from environment variables.
