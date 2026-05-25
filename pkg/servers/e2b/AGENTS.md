@@ -80,10 +80,17 @@ Every E2B route is registered twice via `RegisterE2BRoute`: once for the native 
 
 ### Timeout Semantics
 - **Pause**: sets timeout far into the future (1000 years) so paused sandboxes are kept indefinitely.
-- **Resume**: sets timeout strictly to the requested value (no extend-only merge).
+- **Resume**: for timed sandboxes, writes an effective timeout while flipping `Spec.Paused=false`; the effective timeout is the request value after the resume floor. Never-timeout sandboxes keep nil timeout fields.
 - **Connect (Running)**: extend-only — never shortens the effective deadline. If the requested deadline is earlier than the current one, the update is silently skipped.
-- **Connect (Paused → Resume)**: sets timeout strictly to the requested value (same as Resume).
+- **Connect (Paused → Resume)**: resumes with an effective timeout placeholder, then applies the post-resume timeout with `UpdatePolicyExtendOnly`.
 - **SetTimeout**: only applies to running sandboxes; conflicts return `409`.
+
+### Connect Timeout Race Handling
+Concurrent `ConnectSandbox` calls intentionally converge by deadline rather than trying to strictly serialize all callers.
+
+For a timed paused sandbox, `ConnectSandbox` first applies the resume floor only when the sandbox is paused and has an existing deadline. `Resume` then updates `Spec.Paused=false` and writes the placeholder timeout in the same Sandbox update, so the controller cannot observe an unpaused sandbox with an already-expired pause deadline. If several callers race, only the first update that flips `Spec.Paused` wins; losing resume callers must not overwrite the winner's placeholder.
+
+After resume, every caller runs `updateConnectTimeout` with `UpdatePolicyExtendOnly`. A later deadline extends the sandbox, while an earlier or stale deadline is skipped. This makes concurrent Connect timeout writes monotonic: final state is the longest effective deadline among the racing requests, and a shorter request cannot shrink a longer timeout even if it finishes later. Running-sandbox Connect also uses `ExtendOnly`, but the resume floor must not apply there.
 
 ### Create Sandbox
 - If `templateID` matches a SandboxSet → claim path (`ClaimSandbox`).
@@ -95,7 +102,7 @@ Every E2B route is registered twice via `RegisterE2BRoute`: once for the native 
 1. **Check E2B spec first**: Read https://github.com/e2b-dev/E2B/blob/main/spec/openapi.yml before changing any endpoint behavior, status codes, or request/response shapes.
 2. **Preserve status code compatibility**: Some E2B endpoints use non-standard codes (e.g. `SetTimeout` returns `500` instead of `400` for validation errors). Do not "fix" these without verifying the E2B spec.
 3. **Keep dual-path registration**: New endpoints must use `RegisterE2BRoute`, not raw `mux.HandleFunc`.
-4. **Timeout rules**: Resume and Connect(Paused→Resume) set timeout strictly to the request value. Connect(Running) is extend-only — cannot shorten. Do not change this unless the product contract changes.
+4. **Timeout rules**: Resume and Connect(Paused→Resume) use the effective timeout after the resume floor, and post-resume Connect timeout writes are extend-only. Connect(Running) is also extend-only and must not apply the resume floor. Do not change this unless the product contract changes.
 5. **Middleware ordering**: `CheckAdminKey` must always come after `CheckApiKey`.
 6. **Model changes**: Request/response types live in `models/`. Keep validation logic in `models/validation.go`.
 
