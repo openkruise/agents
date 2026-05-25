@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package egresscontrol
+package trafficproxy
 
 import (
 	"encoding/json"
@@ -89,7 +89,7 @@ func TestFindSidecar(t *testing.T) {
 				Containers: []corev1.Container{{Name: ProxyContainerName}},
 			},
 		}
-		c := findSidecar(pod)
+		c := findSidecar(pod, ProxyContainerName)
 		if c == nil || c.Name != ProxyContainerName {
 			t.Errorf("expected to find %q, got %v", ProxyContainerName, c)
 		}
@@ -101,7 +101,7 @@ func TestFindSidecar(t *testing.T) {
 				InitContainers: []corev1.Container{{Name: ProxyContainerName}},
 			},
 		}
-		c := findSidecar(pod)
+		c := findSidecar(pod, ProxyContainerName)
 		if c == nil || c.Name != ProxyContainerName {
 			t.Errorf("expected to find %q, got %v", ProxyContainerName, c)
 		}
@@ -113,7 +113,7 @@ func TestFindSidecar(t *testing.T) {
 				Containers: []corev1.Container{{Name: "app"}},
 			},
 		}
-		if c := findSidecar(pod); c != nil {
+		if c := findSidecar(pod, ProxyContainerName); c != nil {
 			t.Errorf("expected nil, got %q", c.Name)
 		}
 	})
@@ -321,7 +321,7 @@ func TestDumpAppProbers(t *testing.T) {
 				Containers: []corev1.Container{{Name: "app"}},
 			},
 		}
-		result := dumpAppProbers(pod, 15020)
+		result := dumpAppProbers(pod, 15020, ProxyContainerName)
 		if result != "" {
 			t.Errorf("expected empty string, got %q", result)
 		}
@@ -342,7 +342,7 @@ func TestDumpAppProbers(t *testing.T) {
 				},
 			},
 		}
-		result := dumpAppProbers(pod, 15020)
+		result := dumpAppProbers(pod, 15020, ProxyContainerName)
 		if result == "" {
 			t.Fatal("expected non-empty probers JSON")
 		}
@@ -376,7 +376,7 @@ func TestDumpAppProbers(t *testing.T) {
 				},
 			},
 		}
-		result := dumpAppProbers(pod, 15020)
+		result := dumpAppProbers(pod, 15020, ProxyContainerName)
 		if result == "" {
 			t.Fatal("expected non-empty probers JSON")
 		}
@@ -411,7 +411,7 @@ func TestDumpAppProbers(t *testing.T) {
 				},
 			},
 		}
-		result := dumpAppProbers(pod, 15020)
+		result := dumpAppProbers(pod, 15020, ProxyContainerName)
 		if result != "" {
 			t.Errorf("expected empty string for unresolved named port, got %q", result)
 		}
@@ -432,7 +432,7 @@ func TestDumpAppProbers(t *testing.T) {
 				},
 			},
 		}
-		result := dumpAppProbers(pod, 15020)
+		result := dumpAppProbers(pod, 15020, ProxyContainerName)
 		if result != "" {
 			t.Errorf("expected empty string (proxy container skipped), got %q", result)
 		}
@@ -458,7 +458,7 @@ func TestDumpAppProbers(t *testing.T) {
 				},
 			},
 		}
-		result := dumpAppProbers(pod, 15020)
+		result := dumpAppProbers(pod, 15020, ProxyContainerName)
 		if result == "" {
 			t.Fatal("expected non-empty probers JSON")
 		}
@@ -493,7 +493,7 @@ func TestDumpAppProbers(t *testing.T) {
 				},
 			},
 		}
-		result := dumpAppProbers(pod, 15020)
+		result := dumpAppProbers(pod, 15020, ProxyContainerName)
 		if result == "" {
 			t.Fatal("expected non-empty probers JSON")
 		}
@@ -525,7 +525,7 @@ func TestDumpAppProbers(t *testing.T) {
 				},
 			},
 		}
-		result := dumpAppProbers(pod, 15020)
+		result := dumpAppProbers(pod, 15020, ProxyContainerName)
 		var probers KubeAppProbers
 		if err := json.Unmarshal([]byte(result), &probers); err != nil {
 			t.Fatalf("invalid JSON: %v", err)
@@ -552,7 +552,7 @@ func TestDumpAppProbers(t *testing.T) {
 				},
 			},
 		}
-		result := dumpAppProbers(pod, 15020)
+		result := dumpAppProbers(pod, 15020, ProxyContainerName)
 		var probers KubeAppProbers
 		if err := json.Unmarshal([]byte(result), &probers); err != nil {
 			t.Fatalf("invalid JSON: %v", err)
@@ -579,7 +579,7 @@ func TestDumpAppProbers(t *testing.T) {
 				},
 			},
 		}
-		result := dumpAppProbers(pod, 15020)
+		result := dumpAppProbers(pod, 15020, ProxyContainerName)
 		var probers KubeAppProbers
 		if err := json.Unmarshal([]byte(result), &probers); err != nil {
 			t.Fatalf("invalid JSON: %v", err)
@@ -604,7 +604,7 @@ func TestDumpAppProbers(t *testing.T) {
 				},
 			},
 		}
-		result := dumpAppProbers(pod, 15020)
+		result := dumpAppProbers(pod, 15020, ProxyContainerName)
 		// Port 15020 is the targetPort, so it's considered already rewritten
 		if result != "" {
 			t.Errorf("expected empty string for already-rewritten port, got %q", result)
@@ -634,7 +634,7 @@ func TestPatchRewriteProbe(t *testing.T) {
 			},
 		}
 
-		patchRewriteProbe(pod, 15020)
+		patchRewriteProbe(pod, 15020, ProxyContainerName)
 
 		c := pod.Spec.Containers[0]
 		if c.ReadinessProbe.HTTPGet.Path != "/app-health/app/readyz" {
@@ -667,7 +667,7 @@ func TestPatchRewriteProbe(t *testing.T) {
 			},
 		}
 
-		patchRewriteProbe(pod, 15020)
+		patchRewriteProbe(pod, 15020, ProxyContainerName)
 
 		c := pod.Spec.Containers[0]
 		if c.ReadinessProbe.HTTPGet == nil {
@@ -694,7 +694,7 @@ func TestPatchRewriteProbe(t *testing.T) {
 			},
 		}
 
-		patchRewriteProbe(pod, 15020)
+		patchRewriteProbe(pod, 15020, ProxyContainerName)
 
 		c := pod.Spec.Containers[0]
 		if c.ReadinessProbe.HTTPGet == nil {
@@ -722,7 +722,7 @@ func TestPatchRewriteProbe(t *testing.T) {
 		}
 
 		originalPath := pod.Spec.Containers[0].ReadinessProbe.HTTPGet.Path
-		patchRewriteProbe(pod, 15020)
+		patchRewriteProbe(pod, 15020, ProxyContainerName)
 
 		if pod.Spec.Containers[0].ReadinessProbe.HTTPGet.Path != originalPath {
 			t.Error("proxy container probe should not be rewritten")
@@ -745,7 +745,7 @@ func TestPatchRewriteProbe(t *testing.T) {
 			},
 		}
 
-		patchRewriteProbe(pod, 15020)
+		patchRewriteProbe(pod, 15020, ProxyContainerName)
 
 		c := pod.Spec.InitContainers[0]
 		if c.ReadinessProbe.HTTPGet.Path != "/app-health/init/readyz" {
@@ -772,7 +772,7 @@ func TestPatchRewriteProbe(t *testing.T) {
 			},
 		}
 
-		patchRewriteProbe(pod, 15020)
+		patchRewriteProbe(pod, 15020, ProxyContainerName)
 
 		c := pod.Spec.Containers[0]
 		if c.Lifecycle.PreStop.HTTPGet == nil {

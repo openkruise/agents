@@ -1873,10 +1873,10 @@ func TestSandboxDeletionDuration(t *testing.T) {
 
 func TestSandboxStatusAbnormal(t *testing.T) {
 	tests := []struct {
-		name              string
-		phase             agentsv1alpha1.SandboxPhase
-		conditions        []metav1.Condition
-		wantPauseAbnormal float64
+		name               string
+		phase              agentsv1alpha1.SandboxPhase
+		conditions         []metav1.Condition
+		wantPauseAbnormal  float64
 		wantResumeAbnormal float64
 	}{
 		{
@@ -1933,9 +1933,9 @@ func TestSandboxStatusAbnormal(t *testing.T) {
 			wantResumeAbnormal: 0,
 		},
 		{
-			name:  "Phase=Paused with no Paused condition is abnormal",
-			phase: agentsv1alpha1.SandboxPaused,
-			conditions: nil,
+			name:               "Phase=Paused with no Paused condition is abnormal",
+			phase:              agentsv1alpha1.SandboxPaused,
+			conditions:         nil,
 			wantPauseAbnormal:  1,
 			wantResumeAbnormal: 0,
 		},

@@ -155,8 +155,8 @@ func TestExecuteUpgradeAction(t *testing.T) {
 			expectContains: "command not found",
 		},
 		{
-			name: "message truncated when exceeding max length",
-			hookFunc: mockLifecycleHookFunc(-1, "", strings.Repeat("x", 1100), fmt.Errorf("exec failed")),
+			name:           "message truncated when exceeding max length",
+			hookFunc:       mockLifecycleHookFunc(-1, "", strings.Repeat("x", 1100), fmt.Errorf("exec failed")),
 			expectSuccess:  false,
 			expectContains: "...",
 		},

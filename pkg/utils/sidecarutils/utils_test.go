@@ -223,7 +223,7 @@ func TestInjectPodTemplateCSIAndRuntimeSidecar(t *testing.T) {
 			expectCSIVolumeMounts:  1,
 		},
 		{
-			name: "inject egress control sidecar only",
+			name: "inject traffic proxy sidecar only",
 			sandbox: &agentsv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-sandbox",
@@ -235,7 +235,7 @@ func TestInjectPodTemplateCSIAndRuntimeSidecar(t *testing.T) {
 					},
 					Runtimes: []agentsv1alpha1.RuntimeConfig{
 						{
-							Name: agentsv1alpha1.RuntimeConfigForInjectEgressControl,
+							Name: agentsv1alpha1.RuntimeConfigForInjectTrafficProxy,
 						},
 					},
 				},
@@ -248,14 +248,14 @@ func TestInjectPodTemplateCSIAndRuntimeSidecar(t *testing.T) {
 				},
 			},
 			injectionConfigData: map[string]string{
-				KEY_EGRESS_CONTROL_INJECTION_CONFIG: `{
+				KEY_TRAFFIC_PROXY_INJECTION_CONFIG: `{
 					"mainContainer": {},
 					"csiSidecar": [],
 					"volume": [{"name": "egress-vol", "emptyDir": {}}],
 					"initContainers": [{"name": "egress-init", "image": "egress-init:v1"}],
 					"containers": [{"name": "egress-sidecar", "image": "egress:v1"}],
 					"labels": {"egress": "enabled"},
-					"annotations": {"egress-control": "true"}
+					"annotations": {"traffic-proxy": "true"}
 				}`,
 			},
 			// Note: InjectPodTemplateCSIAndRuntimeSidecar does not return early when only egress is enabled;
@@ -265,7 +265,7 @@ func TestInjectPodTemplateCSIAndRuntimeSidecar(t *testing.T) {
 			expectContainers:      2, // main + egress sidecar
 		},
 		{
-			name: "inject egress control with health probe rewrite - early return without CSI/runtime",
+			name: "inject traffic proxy with health probe rewrite - early return without CSI/runtime",
 			sandbox: &agentsv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-sandbox",
@@ -277,7 +277,7 @@ func TestInjectPodTemplateCSIAndRuntimeSidecar(t *testing.T) {
 					},
 					Runtimes: []agentsv1alpha1.RuntimeConfig{
 						{
-							Name: agentsv1alpha1.RuntimeConfigForInjectEgressControl,
+							Name: agentsv1alpha1.RuntimeConfigForInjectTrafficProxy,
 						},
 					},
 				},
@@ -311,7 +311,7 @@ func TestInjectPodTemplateCSIAndRuntimeSidecar(t *testing.T) {
 				},
 			},
 			injectionConfigData: map[string]string{
-				KEY_EGRESS_CONTROL_INJECTION_CONFIG: `{
+				KEY_TRAFFIC_PROXY_INJECTION_CONFIG: `{
 					"mainContainer": {},
 					"csiSidecar": [],
 					"volume": [],
@@ -327,7 +327,7 @@ func TestInjectPodTemplateCSIAndRuntimeSidecar(t *testing.T) {
 			initialContainerCount: 2, // main + istio-proxy
 		},
 		{
-			name: "inject all three: runtime, csi, and egress",
+			name: "inject all three: runtime, csi, and traffic proxy",
 			sandbox: &agentsv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-sandbox",
@@ -345,7 +345,7 @@ func TestInjectPodTemplateCSIAndRuntimeSidecar(t *testing.T) {
 							Name: agentsv1alpha1.RuntimeConfigForInjectCsiMount,
 						},
 						{
-							Name: agentsv1alpha1.RuntimeConfigForInjectEgressControl,
+							Name: agentsv1alpha1.RuntimeConfigForInjectTrafficProxy,
 						},
 					},
 				},
@@ -368,7 +368,7 @@ func TestInjectPodTemplateCSIAndRuntimeSidecar(t *testing.T) {
 					"csiSidecar": [{"name": "csi-sidecar", "image": "csi:v1"}],
 					"volume": [{"name": "csi-vol", "emptyDir": {}}]
 				}`,
-				KEY_EGRESS_CONTROL_INJECTION_CONFIG: `{
+				KEY_TRAFFIC_PROXY_INJECTION_CONFIG: `{
 					"mainContainer": {},
 					"csiSidecar": [],
 					"volume": [{"name": "egress-vol", "emptyDir": {}}],
@@ -1176,6 +1176,267 @@ func TestDoSidecarInjection(t *testing.T) {
 			}
 			if !mainContainerFound {
 				t.Error("expected main container to still exist")
+			}
+		})
+	}
+}
+
+func TestInjectConflicts(t *testing.T) {
+	tests := []struct {
+		name          string
+		pod           *corev1.Pod
+		config        SidecarInjectConfig
+		expectError   bool
+		errorContains string
+	}{
+		{
+			name: "no conflicts",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers:     []corev1.Container{{Name: "main", Image: "nginx"}},
+					InitContainers: []corev1.Container{{Name: "init-main", Image: "busybox"}},
+					Volumes:        []corev1.Volume{{Name: "data", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}},
+				},
+			},
+			config: SidecarInjectConfig{
+				Containers:     []corev1.Container{{Name: "sidecar", Image: "proxy:v1"}},
+				InitContainers: []corev1.Container{{Name: "init-sidecar", Image: "init:v1"}},
+				Volumes:        []corev1.Volume{{Name: "sidecar-vol", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}},
+			},
+			expectError: false,
+		},
+		{
+			name: "container name conflict",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "main", Image: "nginx"}},
+				},
+			},
+			config: SidecarInjectConfig{
+				Containers: []corev1.Container{{Name: "main", Image: "proxy:v1"}},
+			},
+			expectError:   true,
+			errorContains: "inject conflicting with container: main",
+		},
+		{
+			name: "init container name conflict",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers:     []corev1.Container{{Name: "main", Image: "nginx"}},
+					InitContainers: []corev1.Container{{Name: "init-setup", Image: "busybox"}},
+				},
+			},
+			config: SidecarInjectConfig{
+				InitContainers: []corev1.Container{{Name: "init-setup", Image: "init:v1"}},
+			},
+			expectError:   true,
+			errorContains: "inject conflicting with init container: init-setup",
+		},
+		{
+			name: "volume name conflict",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "main", Image: "nginx"}},
+					Volumes:    []corev1.Volume{{Name: "shared-data", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}},
+				},
+			},
+			config: SidecarInjectConfig{
+				Volumes: []corev1.Volume{{Name: "shared-data", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}},
+			},
+			expectError:   true,
+			errorContains: "inject conflicting with volume: shared-data",
+		},
+		{
+			name: "multiple conflicts - reports first init container conflict",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers:     []corev1.Container{{Name: "app", Image: "nginx"}},
+					InitContainers: []corev1.Container{{Name: "init-app", Image: "busybox"}},
+					Volumes:        []corev1.Volume{{Name: "vol-a", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}},
+				},
+			},
+			config: SidecarInjectConfig{
+				InitContainers: []corev1.Container{{Name: "init-app", Image: "init:v1"}},
+				Containers:     []corev1.Container{{Name: "app", Image: "proxy:v1"}},
+				Volumes:        []corev1.Volume{{Name: "vol-a", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}},
+			},
+			expectError:   true,
+			errorContains: "init container: init-app",
+		},
+		{
+			name: "empty config - no conflicts",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "main", Image: "nginx"}},
+				},
+			},
+			config:      SidecarInjectConfig{},
+			expectError: false,
+		},
+		{
+			name: "empty pod - no conflicts",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{},
+			},
+			config: SidecarInjectConfig{
+				Containers:     []corev1.Container{{Name: "sidecar", Image: "proxy:v1"}},
+				InitContainers: []corev1.Container{{Name: "init-sidecar", Image: "init:v1"}},
+				Volumes:        []corev1.Volume{{Name: "vol", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}},
+			},
+			expectError: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := injectConflicts(tt.pod, tt.config)
+			if tt.expectError {
+				if err == nil {
+					t.Fatalf("expected error but got nil")
+				}
+				if !strings.Contains(err.Error(), tt.errorContains) {
+					t.Errorf("expected error containing %q, got %q", tt.errorContains, err.Error())
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestDoSidecarInjectionConflicts(t *testing.T) {
+	tests := []struct {
+		name            string
+		sandbox         *agentsv1alpha1.Sandbox
+		pod             *corev1.Pod
+		injectConfigMap map[string]string
+		expectError     bool
+		errorContains   string
+	}{
+		{
+			name: "traffic-proxy container conflict returns error",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+				Spec: agentsv1alpha1.SandboxSpec{
+					Runtimes: []agentsv1alpha1.RuntimeConfig{
+						{Name: agentsv1alpha1.RuntimeConfigForInjectTrafficProxy},
+					},
+				},
+			},
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{Name: "main", Image: "nginx"},
+						{Name: "istio-proxy", Image: "existing-proxy:v1"},
+					},
+				},
+			},
+			injectConfigMap: map[string]string{
+				KEY_TRAFFIC_PROXY_INJECTION_CONFIG: `{
+					"mainContainer": {"name": ""},
+					"csiSidecar": [],
+					"volume": [],
+					"containers": [{"name": "istio-proxy", "image": "istio:v1"}]
+				}`,
+			},
+			expectError:   true,
+			errorContains: "istio-proxy",
+		},
+		{
+			name: "traffic-proxy init container conflict returns error",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+				Spec: agentsv1alpha1.SandboxSpec{
+					Runtimes: []agentsv1alpha1.RuntimeConfig{
+						{Name: agentsv1alpha1.RuntimeConfigForInjectTrafficProxy},
+					},
+				},
+			},
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers:     []corev1.Container{{Name: "main", Image: "nginx"}},
+					InitContainers: []corev1.Container{{Name: "istio-init", Image: "existing:v1"}},
+				},
+			},
+			injectConfigMap: map[string]string{
+				KEY_TRAFFIC_PROXY_INJECTION_CONFIG: `{
+					"mainContainer": {"name": ""},
+					"csiSidecar": [],
+					"volume": [],
+					"initContainers": [{"name": "istio-init", "image": "istio-init:v1"}],
+					"containers": [{"name": "istio-proxy", "image": "istio:v1"}]
+				}`,
+			},
+			expectError:   true,
+			errorContains: "istio-init",
+		},
+		{
+			name: "traffic-proxy no conflict succeeds and injects correctly",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+				Spec: agentsv1alpha1.SandboxSpec{
+					Runtimes: []agentsv1alpha1.RuntimeConfig{
+						{Name: agentsv1alpha1.RuntimeConfigForInjectTrafficProxy},
+					},
+				},
+			},
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						"networking.agents.kruise.io/health-probe-rewrite": "false",
+					},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "main", Image: "nginx"}},
+				},
+			},
+			injectConfigMap: map[string]string{
+				KEY_TRAFFIC_PROXY_INJECTION_CONFIG: `{
+					"mainContainer": {"name": ""},
+					"csiSidecar": [],
+					"volume": [],
+					"initContainers": [{"name": "istio-init", "image": "istio-init:v1"}],
+					"containers": [{"name": "istio-proxy", "image": "istio:v1"}],
+					"annotations": {"sidecar.istio.io/status": "injected"},
+					"labels": {"app.mesh": "true"}
+				}`,
+			},
+			expectError: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			err := doSidecarInjection(ctx, tt.sandbox, tt.pod, tt.injectConfigMap)
+			if tt.expectError {
+				if err == nil {
+					t.Fatalf("expected error but got nil")
+				}
+				if !strings.Contains(err.Error(), tt.errorContains) {
+					t.Errorf("expected error containing %q, got %q", tt.errorContains, err.Error())
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				// Verify successful injection applied correctly
+				if tt.name == "traffic-proxy no conflict succeeds and injects correctly" {
+					if utils.FindContainer("istio-proxy", tt.pod.Spec.Containers) == nil {
+						t.Error("expected istio-proxy container to be injected")
+					}
+					if utils.FindContainer("istio-init", tt.pod.Spec.InitContainers) == nil {
+						t.Error("expected istio-init init container to be injected")
+					}
+					if tt.pod.Labels["app.mesh"] != "true" {
+						t.Error("expected label app.mesh=true to be injected")
+					}
+					if tt.pod.Annotations["sidecar.istio.io/status"] != "injected" {
+						t.Error("expected annotation sidecar.istio.io/status=injected to be injected")
+					}
+				}
 			}
 		})
 	}

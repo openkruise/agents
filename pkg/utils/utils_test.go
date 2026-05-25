@@ -192,9 +192,9 @@ func TestTruncateConditionMessage_EnvOverride(t *testing.T) {
 	defer func() { MaxConditionMessageLen = original }()
 
 	tests := []struct {
-		name     string
-		envVal   string
-		wantLen  int
+		name    string
+		envVal  string
+		wantLen int
 	}{
 		{
 			name:    "valid env value",

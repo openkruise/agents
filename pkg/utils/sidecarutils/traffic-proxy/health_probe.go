@@ -1,12 +1,20 @@
-package egresscontrol
+/*
+Copyright 2026.
 
-// Package egresscontrol provides Istio sidecar health probe rewriting.
-//
-// When Istio's envoy proxy intercepts all pod traffic, Kubernetes probes (readiness,
-// liveness, startup) must be redirected through the pilot agent on port 15020.
-// This package converts the original probes into HTTP probes pointing at the
-// pilot agent's /app-health/* endpoints, and serializes the original probe
-// definitions into the ISTIO_KUBE_APP_PROBERS env var on the istio-proxy container.
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package trafficproxy
 
 import (
 	"encoding/json"
@@ -26,11 +34,7 @@ const (
 )
 
 // findSidecar returns the pointer to the first container whose name matches the "istio-proxy".
-func findSidecar(pod *corev1.Pod) *corev1.Container {
-	proxyContainerName := pod.Annotations[SidecarProxyAnnotation]
-	if proxyContainerName == "" {
-		proxyContainerName = ProxyContainerName
-	}
+func findSidecar(pod *corev1.Pod, proxyContainerName string) *corev1.Container {
 	return findContainerFromPod(proxyContainerName, pod)
 }
 
@@ -143,7 +147,7 @@ type Prober struct {
 
 // dumpAppProbers returns a json encoded string as `status.KubeAppProbers`.
 // Also update the probers so that all usages of named port will be resolved to integer.
-func dumpAppProbers(pod *corev1.Pod, targetPort int32) string {
+func dumpAppProbers(pod *corev1.Pod, targetPort int32, proxyContainerName string) string {
 	out := KubeAppProbers{}
 	updateNamedPort := func(p *Prober, portMap map[string]int32) *Prober {
 		if p == nil {
@@ -177,7 +181,7 @@ func dumpAppProbers(pod *corev1.Pod, targetPort int32) string {
 		return p
 	}
 	for _, c := range allContainers(pod) {
-		if c.Name == ProxyContainerName {
+		if c.Name == proxyContainerName {
 			continue
 		}
 		readyz, livez, startupz, prestopz, poststartz := formatProberURL(c.Name)
@@ -221,11 +225,11 @@ func allContainers(pod *corev1.Pod) []corev1.Container {
 }
 
 // patchRewriteProbe generates the patch for webhook.
-func patchRewriteProbe(pod *corev1.Pod, defaultPort int32) {
+func patchRewriteProbe(pod *corev1.Pod, defaultPort int32, proxyContainerName string) {
 	statusPort := int(defaultPort)
 	for i, c := range pod.Spec.Containers {
 		// Skip sidecar container.
-		if c.Name == ProxyContainerName {
+		if c.Name == proxyContainerName {
 			continue
 		}
 		convertProbe(&c, statusPort)
@@ -233,7 +237,7 @@ func patchRewriteProbe(pod *corev1.Pod, defaultPort int32) {
 	}
 	for i, c := range pod.Spec.InitContainers {
 		// Skip sidecar container.
-		if c.Name == ProxyContainerName {
+		if c.Name == proxyContainerName {
 			continue
 		}
 		convertProbe(&c, statusPort)
@@ -325,14 +329,19 @@ func ApplyHealthProbeRewrite(pod *corev1.Pod) error {
 	if pod.Annotations[HealthProbeRewriteAnnotation] != "true" {
 		return nil
 	}
-	sidecar := findSidecar(pod)
+	proxyContainerName := pod.Annotations[SidecarProxyAnnotation]
+	if proxyContainerName == "" {
+		proxyContainerName = ProxyContainerName
+	}
+
+	sidecar := findSidecar(pod, proxyContainerName)
 	if sidecar == nil {
 		return nil
 	}
 
-	if prober := dumpAppProbers(pod, 15020); prober != "" {
+	if prober := dumpAppProbers(pod, 15020, proxyContainerName); prober != "" {
 		sidecar.Env = append(sidecar.Env, corev1.EnvVar{Name: KubeAppProberEnv, Value: prober})
 	}
-	patchRewriteProbe(pod, 15020)
+	patchRewriteProbe(pod, 15020, proxyContainerName)
 	return nil
 }

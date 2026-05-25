@@ -21,9 +21,9 @@ import (
 )
 
 const (
-	KEY_CSI_INJECTION_CONFIG            = "csi"
-	KEY_EGRESS_CONTROL_INJECTION_CONFIG = "egress-control"
-	KEY_RUNTIME_INJECTION_CONFIG        = "agent-runtime"
+	KEY_CSI_INJECTION_CONFIG           = "csi"
+	KEY_TRAFFIC_PROXY_INJECTION_CONFIG = "traffic-proxy"
+	KEY_RUNTIME_INJECTION_CONFIG       = "agent-runtime"
 
 	SandboxInjectionConfigName = "sandbox-injection-config"
 )

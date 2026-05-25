@@ -167,8 +167,8 @@ func TestSandboxSetSandboxesClaimedTotal(t *testing.T) {
 
 func TestSandboxSetSandboxesClaimedTotalMultipleSandboxSets(t *testing.T) {
 	tests := []struct {
-		name        string
-		sets        []struct {
+		name string
+		sets []struct {
 			namespace string
 			sbsName   string
 			count     int

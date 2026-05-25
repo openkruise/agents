@@ -28,20 +28,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/webhookutils"
 )
-
-func IsRuntimeEnabled(sandbox *agentsv1alpha1.Sandbox, runtimeName string) bool {
-	for _, runtime := range sandbox.Spec.Runtimes {
-		if runtime.Name == runtimeName {
-			return true
-		}
-	}
-	return false
-}
 
 func fetchInjectionConfiguration(ctx context.Context, cli client.Client) (map[string]string, error) {
 	logger := logf.FromContext(ctx)
@@ -167,45 +157,63 @@ func setAgentRuntimeContainer(ctx context.Context, podSpec *corev1.PodSpec, conf
 }
 
 func applyInjectionTemplate(ctx context.Context, pod *corev1.Pod, config SidecarInjectConfig) error {
+	if pod.Labels == nil {
+		pod.Labels = make(map[string]string)
+	}
 	for k, v := range config.Labels {
-		if _, exists := pod.Labels[k]; exists {
-			return fmt.Errorf("label already exists: %s", k)
+		// not override user-defined labels
+		if _, exists := pod.Labels[k]; !exists {
+			pod.Labels[k] = v
 		}
-		if pod.Labels == nil {
-			pod.Labels = make(map[string]string)
-		}
-		pod.Labels[k] = v
 	}
 
+	if pod.Annotations == nil {
+		pod.Annotations = make(map[string]string)
+	}
 	for k, v := range config.Annotations {
-		if _, exists := pod.Annotations[k]; exists {
-			return fmt.Errorf("label already exists: %s", k)
+		// not override user-defined annotations
+		if _, exists := pod.Annotations[k]; !exists {
+			pod.Annotations[k] = v
 		}
-		if pod.Annotations == nil {
-			pod.Annotations = make(map[string]string)
-		}
-		pod.Annotations[k] = v
 	}
 
 	for _, ic := range config.InitContainers {
-		if utils.FindContainer(ic.Name, pod.Spec.InitContainers) != nil {
-			return fmt.Errorf("init container already exists: %s", ic.Name)
-		}
 		pod.Spec.InitContainers = append(pod.Spec.InitContainers, ic)
 	}
 
 	for _, c := range config.Containers {
-		if utils.FindContainer(c.Name, pod.Spec.Containers) != nil {
-			return fmt.Errorf("container already exists: %s", c.Name)
-		}
 		pod.Spec.Containers = append(pod.Spec.Containers, c)
 	}
 
 	for _, v := range config.Volumes {
-		if findVolumeByName(pod.Spec.Volumes, v.Name) {
-			return fmt.Errorf("volume already exists: %s", v.Name)
-		}
 		pod.Spec.Volumes = append(pod.Spec.Volumes, v)
+	}
+
+	return nil
+}
+
+// injectConflicts checks if injection config conflicts with the pod. Only configuration below are checked:
+// 1. Containers
+// 2. Init containers
+// 3. Volumes
+// Annotations and Labels are not checked and user-defined values may override the injected values.
+func injectConflicts(pod *corev1.Pod, config SidecarInjectConfig) error {
+	for _, ic := range config.InitContainers {
+		if conflicted := utils.FindContainer(ic.Name, pod.Spec.InitContainers); conflicted != nil {
+			return fmt.Errorf("inject conflicting with init container: %s", ic.Name)
+		}
+	}
+
+	for _, c := range config.Containers {
+		if conflicted := utils.FindContainer(c.Name, pod.Spec.Containers); conflicted != nil {
+			return fmt.Errorf("inject conflicting with container: %s", c.Name)
+		}
+	}
+
+	for _, v := range config.Volumes {
+		if findVolumeByName(pod.Spec.Volumes, v.Name) {
+			return fmt.Errorf("inject conflicting with volume: %s", v.Name)
+		}
 	}
 
 	return nil

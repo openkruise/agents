@@ -21,12 +21,13 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	egresscontrol "github.com/openkruise/agents/pkg/utils/sidecarutils/egress-control"
+	trafficproxy "github.com/openkruise/agents/pkg/utils/sidecarutils/traffic-proxy"
 )
 
 func InjectSandboxRuntimes(ctx context.Context, sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod, cli client.Client) error {
@@ -47,14 +48,20 @@ func InjectSandboxRuntimes(ctx context.Context, sandbox *agentsv1alpha1.Sandbox,
 func doSidecarInjection(ctx context.Context, sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod, injectConfigMap map[string]string) error {
 	logger := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(sandbox))
 
+	runtimes := sets.New[string]()
 	for _, runtime := range sandbox.Spec.Runtimes {
-		// should we return an error when inject config not exists?
-		runtimeInjectConfig, err := parseInjectConfig(ctx, runtime.Name, injectConfigMap)
+		if runtime.Name != "" {
+			runtimes.Insert(runtime.Name)
+		}
+	}
+
+	for runtime := range runtimes {
+		runtimeInjectConfig, err := parseInjectConfig(ctx, runtime, injectConfigMap)
 		if err != nil {
 			logger.Error(err, "failed to parse runtime injection configuration")
 			return err
 		}
-		switch runtime.Name {
+		switch runtime {
 		case agentsv1alpha1.RuntimeConfigForInjectAgentRuntime:
 			if !isContainersExists(pod.Spec.InitContainers, runtimeInjectConfig.Sidecars) && !isContainersExists(pod.Spec.Containers, runtimeInjectConfig.Sidecars) {
 				setAgentRuntimeContainer(ctx, &pod.Spec, runtimeInjectConfig)
@@ -64,24 +71,20 @@ func doSidecarInjection(ctx context.Context, sandbox *agentsv1alpha1.Sandbox, po
 				setCSIMountContainer(ctx, &pod.Spec, runtimeInjectConfig)
 			}
 		default:
-			injectConfig, err := parseInjectConfig(ctx, KEY_EGRESS_CONTROL_INJECTION_CONFIG, injectConfigMap)
-			if err != nil {
-				logger.Error(err, "failed to parse egress control injection configuration")
-				return err
-			}
+			logger.V(5).Info("injecting runtime", "name", runtime)
 			// not mute the conflicts
-			if isContainersExists(pod.Spec.InitContainers, injectConfig.InitContainers) || isContainersExists(pod.Spec.Containers, injectConfig.Containers) {
-				return fmt.Errorf("injected container conflicts")
+			if conflictErr := injectConflicts(pod, runtimeInjectConfig); conflictErr != nil {
+				return fmt.Errorf("failed to inject runtime %s: %v", runtime, conflictErr)
 			}
-			if err := applyInjectionTemplate(ctx, pod, injectConfig); err != nil {
-				return fmt.Errorf("failed to inject runtime %s: %v", runtime.Name, err)
+			if err := applyInjectionTemplate(ctx, pod, runtimeInjectConfig); err != nil {
+				return fmt.Errorf("failed to inject runtime %s: %v", runtime, err)
 			}
 		}
 	}
 
 	// Enable health probes rewrite if needed.
-	if IsRuntimeEnabled(sandbox, agentsv1alpha1.RuntimeConfigForInjectEgressControl) {
-		if err := egresscontrol.ApplyHealthProbeRewrite(pod); err != nil {
+	if runtimes.Has(agentsv1alpha1.RuntimeConfigForInjectTrafficProxy) {
+		if err := trafficproxy.ApplyHealthProbeRewrite(pod); err != nil {
 			logger.Error(err, "failed to apply health probe rewrite")
 			return err
 		}

@@ -47,9 +47,9 @@ const (
 	// RuntimeConfigForInjectAgentRuntime is a valid value for RuntimeConfig.Name.
 	// When set, enables agent runtime sidecar injection for the sandbox.
 	RuntimeConfigForInjectAgentRuntime = "agent-runtime"
-	// RuntimeConfigForInjectEgressControl is a valid value for RuntimeConfig.Name.
-	// When set, enables egress control sidecar injection for the sandbox.
-	RuntimeConfigForInjectEgressControl = "egress-control"
+	// RuntimeConfigForInjectTrafficProxy is a valid value for RuntimeConfig.Name.
+	// When set, enables traffic proxy sidecar injection for the sandbox.
+	RuntimeConfigForInjectTrafficProxy = "traffic-proxy"
 )
 
 type RuntimeConfig struct {
