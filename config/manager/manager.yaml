@@ -82,6 +82,9 @@ spec:
         image: controller:latest
         imagePullPolicy: IfNotPresent
         name: manager
+        env:
+          - name: AGENT_JOB_IMAGE
+            value: busybox:latest
         ports: []
         securityContext:
           readOnlyRootFilesystem: false
