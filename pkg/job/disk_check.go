@@ -114,5 +114,5 @@ func getAvailableBytes(path string) (int64, error) {
 	if err := syscall.Statfs(path, &stat); err != nil {
 		return 0, fmt.Errorf("statfs %s: %w", path, err)
 	}
-	return int64(stat.Bavail) * int64(stat.Bsize), nil
+	return int64(stat.Bavail) * int64(stat.Bsize), nil //nolint:unconvert
 }

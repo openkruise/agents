@@ -40,7 +40,7 @@ const (
 	ConditionTypeCommitContainer    CommitConditionType = "CommitContainer"
 	ConditionTypePullBaseImage      CommitConditionType = "PullBaseImage"
 	ConditionTypePushCommittedImage CommitConditionType = "PushCommittedImage"
-	ConditionTypeNotFound CommitConditionType = "CommitNotFound"
+	ConditionTypeNotFound           CommitConditionType = "CommitNotFound"
 )
 
 // ReferenceObject is a namespace-aware reference to a Kubernetes object.
