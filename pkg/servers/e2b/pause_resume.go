@@ -131,7 +131,7 @@ func (sc *Controller) ResumeSandbox(r *http.Request) (web.ApiResponse[struct{}],
 	autoPause, currentEndAt := ParseTimeout(sbx)
 	state, _ := sbx.GetState()
 
-	effectiveTimeout := sc.applyResumeFloor(log, request.TimeoutSeconds, true, !currentEndAt.IsZero())
+	effectiveTimeout := sc.getEffectivePauseTimeSeconds(log, request.TimeoutSeconds, true, !currentEndAt.IsZero())
 	resumeOpts := sc.buildResumeOpts(autoPause, time.Now(), effectiveTimeout, !currentEndAt.IsZero())
 	log.Info("resuming sandbox")
 	if err := sc.manager.ResumeSandbox(ctx, sbx, resumeOpts); err != nil {
@@ -149,12 +149,12 @@ func (sc *Controller) ResumeSandbox(r *http.Request) (web.ApiResponse[struct{}],
 	}, nil
 }
 
-// applyResumeFloor bumps `requested` up to sc.minResumeTimeout when the
-// request will trigger Resume on a timed Paused sandbox. The floor prevents
-// the placeholder PauseTime from expiring mid-Resume and triggering an
-// auto-pause race. Never-timeout sandboxes have no PauseTime so the floor
-// is skipped (and would only generate misleading log noise).
-func (sc *Controller) applyResumeFloor(log klog.Logger, requested int, paused, hasDeadline bool) int {
+// getEffectivePauseTimeSeconds enforces a minimum timeout floor when the request
+// will Resume a timed Paused sandbox. Without the floor, a very short timeout
+// could expire while the sandbox is still resuming, causing it to be deleted or
+// hibernated mid-Resume. The floor is skipped for never-timeout sandboxes
+// (hasDeadline == false) since they carry no deadline.
+func (sc *Controller) getEffectivePauseTimeSeconds(log klog.Logger, requested int, paused, hasDeadline bool) int {
 	if !paused || !hasDeadline || requested >= sc.minResumeTimeoutValue {
 		return requested
 	}
@@ -200,7 +200,7 @@ func (sc *Controller) ConnectSandbox(r *http.Request) (web.ApiResponse[*models.S
 	autoPause, currentEndAt := ParseTimeout(sbx)
 
 	paused := state == v1alpha1.SandboxStatePaused
-	effectiveTimeout := sc.applyResumeFloor(log, request.TimeoutSeconds, paused, !currentEndAt.IsZero())
+	effectiveTimeout := sc.getEffectivePauseTimeSeconds(log, request.TimeoutSeconds, paused, !currentEndAt.IsZero())
 
 	// Step 1: Resume the sandbox if it is paused, atomically writing the
 	// placeholder timeout for timed sandboxes.

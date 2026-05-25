@@ -99,9 +99,8 @@ func main() {
 	pflag.StringVar(&domain, "e2b-domain", "localhost", "E2B domain")
 	pflag.IntVar(&e2bMaxTimeout, "e2b-max-timeout", models.DefaultMaxTimeout, "E2B maximum timeout in seconds")
 	pflag.IntVar(&e2bMinResumeTimeout, "e2b-min-resume-timeout", models.DefaultMinResumeTimeoutSeconds,
-		"Minimum effective timeout (seconds) applied to Connect / Resume requests that trigger Resume on a Paused sandbox. "+
-			"Requests shorter than this are bumped up so the Resume placeholder cannot expire mid-Resume. "+
-			"Should be set above the production worst-case Resume duration.")
+		"Floor timeout (seconds) for resuming a Paused sandbox; shorter requests are raised to this value "+
+			"to prevent the sandbox from being deleted or hibernated mid-Resume. Set above worst-case Resume latency.")
 	pflag.StringVar(&sysNs, "system-namespace", utils.DefaultSandboxDeployNamespace, "The namespace where the sandbox manager is running (required)")
 	pflag.StringVar(&peerSelector, "peer-selector", "", "Peer selector for sandbox manager (required)")
 	pflag.StringVar(&sandboxNamespace, "sandbox-namespace", "", "Namespace to filter sandbox-related custom resources (Sandbox, SandboxSet, Checkpoint, SandboxTemplate). Defaults to all.")
