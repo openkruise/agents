@@ -152,6 +152,9 @@ func (sc *Controller) CheckCreateAPIKeyPermission(ctx context.Context, r *http.R
 			Message: err.Error(),
 		}
 	}
+	if apiErr := validateCreateAPIKeyRequest(&request); apiErr != nil {
+		return ctx, apiErr
+	}
 
 	callerTeam := keys.TeamForKey(user)
 	targetTeamName := request.TeamName

@@ -70,6 +70,10 @@ func (sc *Controller) CreateAPIKey(r *http.Request) (web.ApiResponse[*models.Cre
 			Message: "User not found",
 		}
 	}
+	if apiErr := validateCreateAPIKeyRequest(request); apiErr != nil {
+		return web.ApiResponse[*models.CreatedTeamAPIKey]{}, apiErr
+	}
+
 	createdAPIKey, err := sc.keys.CreateKey(ctx, user, keys.CreateKeyOptions{
 		Name:     request.Name,
 		TeamName: request.TeamName,
@@ -85,6 +89,16 @@ func (sc *Controller) CreateAPIKey(r *http.Request) (web.ApiResponse[*models.Cre
 		Code: http.StatusCreated,
 		Body: createdAPIKey,
 	}, nil
+}
+
+func validateCreateAPIKeyRequest(request *models.NewTeamAPIKey) *web.ApiError {
+	if request == nil || request.Name == "" {
+		return &web.ApiError{
+			Code:    http.StatusBadRequest,
+			Message: "api-key name is required",
+		}
+	}
+	return nil
 }
 
 func (sc *Controller) ListTeams(r *http.Request) (web.ApiResponse[[]*models.ListedTeam], *web.ApiError) {

@@ -174,8 +174,8 @@ func TestCreateAPIKey(t *testing.T) {
 			},
 			request: models.NewTeamAPIKey{Name: ""},
 			expectError: &web.ApiError{
-				Code:    http.StatusInternalServerError,
-				Message: "Failed to create API key",
+				Code:    http.StatusBadRequest,
+				Message: "api-key name is required",
 			},
 		},
 	}
@@ -261,6 +261,13 @@ func TestCreateAPIKeyPermissionMiddleware(t *testing.T) {
 			request:    models.NewTeamAPIKey{Name: "admin-team-default"},
 			expectCode: http.StatusCreated,
 			expectTeam: models.AdminTeamName,
+		},
+		{
+			name:        "missing name fails",
+			user:        adminUser,
+			request:     models.NewTeamAPIKey{},
+			expectCode:  http.StatusBadRequest,
+			expectError: "name",
 		},
 		{
 			name:        "admin targeting missing namespace fails",
