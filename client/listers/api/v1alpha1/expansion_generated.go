@@ -25,6 +25,14 @@ type CheckpointListerExpansion interface{}
 // CheckpointNamespaceLister.
 type CheckpointNamespaceListerExpansion interface{}
 
+// CommitListerExpansion allows custom methods to be added to
+// CommitLister.
+type CommitListerExpansion interface{}
+
+// CommitNamespaceListerExpansion allows custom methods to be added to
+// CommitNamespaceLister.
+type CommitNamespaceListerExpansion interface{}
+
 // SandboxListerExpansion allows custom methods to be added to
 // SandboxLister.
 type SandboxListerExpansion interface{}

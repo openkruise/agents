@@ -54,6 +54,8 @@ func (f *sharedInformerFactory) ForResource(resource schema.GroupVersionResource
 	// Group=api, Version=v1alpha1
 	case v1alpha1.SchemeGroupVersion.WithResource("checkpoints"):
 		return &genericInformer{resource: resource.GroupResource(), informer: f.Api().V1alpha1().Checkpoints().Informer()}, nil
+	case v1alpha1.SchemeGroupVersion.WithResource("commits"):
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Api().V1alpha1().Commits().Informer()}, nil
 	case v1alpha1.SchemeGroupVersion.WithResource("sandboxes"):
 		return &genericInformer{resource: resource.GroupResource(), informer: f.Api().V1alpha1().Sandboxes().Informer()}, nil
 	case v1alpha1.SchemeGroupVersion.WithResource("sandboxclaims"):

@@ -1,4 +1,4 @@
 # Agent sandbox operator image
 - op: replace
   path: /spec/template/spec/containers/0/image
-  value: agent-sandbox-controller:latest
+  value: jiuyi-test-registry.cn-hangzhou.cr.aliyuncs.com/acs/agent-sandbox-controller:e2e-dev

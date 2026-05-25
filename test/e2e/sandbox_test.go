@@ -46,8 +46,8 @@ var _ = Describe("Sandbox", func() {
 
 	BeforeEach(func() {
 		namespace = createNamespace(ctx)
-		updateImage = "nginx:stable-alpine3.23"
-		initialImage = "nginx:stable-alpine3.20"
+		updateImage = "cr.registry.inter.env148.shuguang.com/openkruise-e2e/nginx:stable-alpine3.23"
+		initialImage = "cr.registry.inter.env148.shuguang.com/openkruise-e2e/nginx:stable-alpine3.20"
 		// Create a basic Sandbox resource
 		sandbox = &agentsv1alpha1.Sandbox{
 			ObjectMeta: metav1.ObjectMeta{
@@ -111,7 +111,7 @@ var _ = Describe("Sandbox", func() {
 
 		It("should create sandbox from templateRef and transition to running phase", func() {
 			templateName := fmt.Sprintf("test-template-%d", time.Now().UnixNano())
-			templateImage := "nginx:stable-alpine3.23"
+			templateImage := "cr.registry.inter.env148.shuguang.com/openkruise-e2e/nginx:stable-alpine3.23"
 			sandboxTemplate := &agentsv1alpha1.SandboxTemplate{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      templateName,
@@ -371,7 +371,7 @@ var _ = Describe("Sandbox", func() {
 								Containers: []corev1.Container{
 									{
 										Name:    "failing-container",
-										Image:   "busybox:latest",
+										Image:   "cr.registry.inter.env148.shuguang.com/openkruise-e2e/busybox:latest",
 										Command: []string{"/bin/sh", "-c", "exit 1"},
 									},
 								},
