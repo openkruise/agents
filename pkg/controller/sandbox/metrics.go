@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
@@ -71,7 +72,7 @@ var (
 			Name: "sandbox_status_ready",
 			Help: "Whether the sandbox is in Ready condition (1 for true, 0 for false)",
 		},
-		[]string{"namespace", "name"},
+		[]string{"namespace", "name", "container"},
 	)
 
 	// sandboxStatusReadyTime records the timestamp when the sandbox became Ready.
@@ -410,7 +411,8 @@ func findCondition(conditions []metav1.Condition, condType string) *metav1.Condi
 }
 
 // recordSandboxMetrics updates all sandbox lifecycle metrics based on the current sandbox state.
-func recordSandboxMetrics(sandbox *agentsv1alpha1.Sandbox) {
+// pod may be nil; when nil, container-level metrics are skipped.
+func recordSandboxMetrics(sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod) {
 	namespace := sandbox.Namespace
 	name := sandbox.Name
 
@@ -445,8 +447,24 @@ func recordSandboxMetrics(sandbox *agentsv1alpha1.Sandbox) {
 	for _, condition := range sandbox.Status.Conditions {
 		switch agentsv1alpha1.SandboxConditionType(condition.Type) {
 		case agentsv1alpha1.SandboxConditionReady:
+			// Per-container ready status is only meaningful when the sandbox is Running
+			if sandbox.Status.Phase != agentsv1alpha1.SandboxRunning || pod == nil {
+				continue
+			}
 			isReady := condition.Status == metav1.ConditionTrue
-			sandboxStatusReady.WithLabelValues(namespace, name).Set(boolFloat64(isReady))
+			containerReady := make(map[string]bool)
+			for _, cs := range pod.Status.ContainerStatuses {
+				containerReady[cs.Name] = cs.Ready
+			}
+			for _, cs := range pod.Status.InitContainerStatuses {
+				containerReady[cs.Name] = cs.Ready
+			}
+			for _, c := range pod.Spec.InitContainers {
+				sandboxStatusReady.WithLabelValues(namespace, name, c.Name).Set(boolFloat64(containerReady[c.Name]))
+			}
+			for _, c := range pod.Spec.Containers {
+				sandboxStatusReady.WithLabelValues(namespace, name, c.Name).Set(boolFloat64(containerReady[c.Name]))
+			}
 			if isReady {
 				sandboxStatusReadyTime.WithLabelValues(namespace, name).Set(float64(condition.LastTransitionTime.Unix()))
 			}
@@ -538,6 +556,7 @@ func recordSandboxMetrics(sandbox *agentsv1alpha1.Sandbox) {
 		}
 		sandboxLabels.WithLabelValues(labelValues...).Set(1)
 	}
+
 }
 
 // deleteSandboxMetrics removes all metrics for a sandbox that has been deleted.
@@ -556,7 +575,7 @@ func deleteSandboxMetrics(namespace, name string) {
 	for _, phase := range allPhases {
 		sandboxStatusPhase.DeleteLabelValues(namespace, name, string(phase))
 	}
-	sandboxStatusReady.DeleteLabelValues(namespace, name)
+	sandboxStatusReady.DeletePartialMatch(prometheus.Labels{"namespace": namespace, "name": name})
 	sandboxStatusReadyTime.DeleteLabelValues(namespace, name)
 	sandboxStatusInplaceUpdating.DeleteLabelValues(namespace, name)
 	sandboxStatusInplaceUpdatingTime.DeleteLabelValues(namespace, name)

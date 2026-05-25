@@ -2271,3 +2271,148 @@ func stringContains(s, substr string) bool {
 	}
 	return false
 }
+
+func TestNativeSidecarsReady(t *testing.T) {
+	always := corev1.ContainerRestartPolicyAlways
+
+	tests := []struct {
+		name string
+		pod  *corev1.Pod
+		want bool
+	}{
+		{
+			name: "no init containers",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "app", Image: "nginx"}},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "init containers without restartPolicy=Always",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					InitContainers: []corev1.Container{
+						{Name: "init-db", Image: "busybox"},
+					},
+					Containers: []corev1.Container{{Name: "app", Image: "nginx"}},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "single native sidecar ready",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					InitContainers: []corev1.Container{
+						{Name: "runtime-agent", Image: "agent:v1", RestartPolicy: &always},
+					},
+					Containers: []corev1.Container{{Name: "app", Image: "nginx"}},
+				},
+				Status: corev1.PodStatus{
+					InitContainerStatuses: []corev1.ContainerStatus{
+						{Name: "runtime-agent", Ready: true},
+					},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "single native sidecar not ready",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					InitContainers: []corev1.Container{
+						{Name: "runtime-agent", Image: "agent:v1", RestartPolicy: &always},
+					},
+					Containers: []corev1.Container{{Name: "app", Image: "nginx"}},
+				},
+				Status: corev1.PodStatus{
+					InitContainerStatuses: []corev1.ContainerStatus{
+						{Name: "runtime-agent", Ready: false},
+					},
+				},
+			},
+			want: false,
+		},
+		{
+			name: "multiple native sidecars all ready",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					InitContainers: []corev1.Container{
+						{Name: "runtime-agent", Image: "agent:v1", RestartPolicy: &always},
+						{Name: "csi-sidecar", Image: "csi:v1", RestartPolicy: &always},
+					},
+					Containers: []corev1.Container{{Name: "app", Image: "nginx"}},
+				},
+				Status: corev1.PodStatus{
+					InitContainerStatuses: []corev1.ContainerStatus{
+						{Name: "runtime-agent", Ready: true},
+						{Name: "csi-sidecar", Ready: true},
+					},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "multiple native sidecars one not ready",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					InitContainers: []corev1.Container{
+						{Name: "runtime-agent", Image: "agent:v1", RestartPolicy: &always},
+						{Name: "csi-sidecar", Image: "csi:v1", RestartPolicy: &always},
+					},
+					Containers: []corev1.Container{{Name: "app", Image: "nginx"}},
+				},
+				Status: corev1.PodStatus{
+					InitContainerStatuses: []corev1.ContainerStatus{
+						{Name: "runtime-agent", Ready: true},
+						{Name: "csi-sidecar", Ready: false},
+					},
+				},
+			},
+			want: false,
+		},
+		{
+			name: "mix of native sidecar and regular init container",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					InitContainers: []corev1.Container{
+						{Name: "init-db", Image: "busybox"},
+						{Name: "runtime-agent", Image: "agent:v1", RestartPolicy: &always},
+					},
+					Containers: []corev1.Container{{Name: "app", Image: "nginx"}},
+				},
+				Status: corev1.PodStatus{
+					InitContainerStatuses: []corev1.ContainerStatus{
+						{Name: "init-db", Ready: false},
+						{Name: "runtime-agent", Ready: true},
+					},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "native sidecar in spec but no status yet",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					InitContainers: []corev1.Container{
+						{Name: "runtime-agent", Image: "agent:v1", RestartPolicy: &always},
+					},
+					Containers: []corev1.Container{{Name: "app", Image: "nginx"}},
+				},
+				Status: corev1.PodStatus{},
+			},
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := nativeSidecarsReady(tt.pod)
+			if got != tt.want {
+				t.Errorf("nativeSidecarsReady() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

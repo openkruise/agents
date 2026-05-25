@@ -84,8 +84,12 @@ func (r *commonControl) EnsureSandboxRunning(ctx context.Context, args EnsureFun
 		return 0, err
 	}
 
-	// pod status running
-	if pod.Status.Phase == corev1.PodRunning {
+	// Pod must be Running AND all native sidecar init containers must be ready
+	// before the sandbox can transition to Running.
+	// When pod.Status.Phase is Running, regular init containers have already
+	// completed successfully. Native sidecars (init containers with
+	// restartPolicy=Always) may still be starting, so we check their ready status.
+	if pod.Status.Phase == corev1.PodRunning && nativeSidecarsReady(pod) {
 		newStatus.Phase = agentsv1alpha1.SandboxRunning
 		syncSandboxStatusFromPod(pod, newStatus)
 		return 0, nil
@@ -150,6 +154,28 @@ func syncSandboxStatusFromPod(pod *corev1.Pod, newStatus *agentsv1alpha1.Sandbox
 		}
 	}
 	utils.SetSandboxCondition(newStatus, *cond)
+}
+
+// nativeSidecarsReady returns true if all native sidecar init containers
+// (those with restartPolicy=Always) are ready.
+func nativeSidecarsReady(pod *corev1.Pod) bool {
+	sidecarNames := make(map[string]bool)
+	for i := range pod.Spec.InitContainers {
+		if pod.Spec.InitContainers[i].RestartPolicy != nil &&
+			*pod.Spec.InitContainers[i].RestartPolicy == corev1.ContainerRestartPolicyAlways {
+			sidecarNames[pod.Spec.InitContainers[i].Name] = true
+		}
+	}
+	if len(sidecarNames) == 0 {
+		return true
+	}
+	for i := range pod.Status.InitContainerStatuses {
+		cs := &pod.Status.InitContainerStatuses[i]
+		if sidecarNames[cs.Name] && !cs.Ready {
+			return false
+		}
+	}
+	return true
 }
 
 func (r *commonControl) EnsureSandboxPaused(ctx context.Context, args EnsureFuncArgs) error {

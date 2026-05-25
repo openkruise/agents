@@ -122,7 +122,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 		return reconcile.Result{}, client.IgnoreNotFound(err)
 	}
 	// Record sandbox lifecycle metrics on every reconcile
-	recordSandboxMetrics(box)
+	recordSandboxMetrics(box, pod)
 
 	if box.Spec.Template == nil && box.Spec.TemplateRef == nil {
 		if !box.DeletionTimestamp.IsZero() {
@@ -315,8 +315,8 @@ func (r *SandboxReconciler) updateSandboxStatus(ctx context.Context, newStatus a
 	core.ResourceVersionExpectations.Expect(rcvObject)
 	klog.InfoS("update sandbox status success", "sandbox", klog.KObj(box), "status", utils.DumpJson(newStatus))
 	box.Status = newStatus
-	// Update metrics after status change
-	recordSandboxMetrics(box)
+	// Update metrics after status change (pod=nil: container metrics already recorded in Reconcile)
+	recordSandboxMetrics(box, nil)
 	return nil
 }
 
