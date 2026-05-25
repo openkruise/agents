@@ -44,7 +44,7 @@ var _ = Describe("SandboxSet", func() {
 
 	BeforeEach(func() {
 		namespace = createNamespace(ctx)
-		initialImage = "cr.registry.inter.env148.shuguang.com/openkruise-e2e/nginx:stable-alpine3.23"
+		initialImage = "nginx:stable-alpine3.23"
 		// Create a basic SandboxSet resource
 		sandbox = &agentsv1alpha1.SandboxSet{
 			ObjectMeta: metav1.ObjectMeta{
@@ -355,7 +355,7 @@ var _ = Describe("SandboxSet", func() {
 				Name:      sandbox.Name,
 				Namespace: sandbox.Namespace,
 			}, sandbox)).To(Succeed())
-			sandbox.Spec.Template.Spec.Containers[0].Image = "cr.registry.inter.env148.shuguang.com/openkruise-e2e/nginx:stable-alpine3.20"
+			sandbox.Spec.Template.Spec.Containers[0].Image = "nginx:stable-alpine3.20"
 			Expect(k8sClient.Update(ctx, sandbox)).To(Succeed())
 
 			By("Starting a monitor goroutine to detect AvailableReplicas<9 violations during rolling update")

@@ -94,7 +94,7 @@ var _ = Describe("SandboxClaim", func() {
 								Containers: []corev1.Container{
 									{
 										Name:  "test-container",
-										Image: "cr.registry.inter.env148.shuguang.com/openkruise-e2e/nginx:stable-alpine3.23",
+										Image: "nginx:stable-alpine3.23",
 									},
 								},
 							},
@@ -308,7 +308,7 @@ var _ = Describe("SandboxClaim", func() {
 								Containers: []corev1.Container{
 									{
 										Name:  "test-container",
-										Image: "cr.registry.inter.env148.shuguang.com/openkruise-e2e/nginx:stable-alpine3.23",
+										Image: "nginx:stable-alpine3.23",
 										Resources: corev1.ResourceRequirements{
 											Requests: corev1.ResourceList{
 												corev1.ResourceCPU:    resource.MustParse("250m"),
@@ -409,7 +409,7 @@ var _ = Describe("SandboxClaim", func() {
 								Containers: []corev1.Container{
 									{
 										Name:  "main",
-										Image: "cr.registry.inter.env148.shuguang.com/openkruise-e2e/nginx:stable-alpine3.23",
+										Image: "nginx:stable-alpine3.23",
 										Resources: corev1.ResourceRequirements{
 											Requests: corev1.ResourceList{
 												corev1.ResourceCPU:    resource.MustParse("250m"),
@@ -580,7 +580,7 @@ var _ = Describe("SandboxClaim", func() {
 		})
 
 		It("should resize CPU and inplace-update image when both are set on claim", func() {
-			const targetImage = "cr.registry.inter.env148.shuguang.com/openkruise-e2e/nginx:stable-alpine3.20"
+			const targetImage = "nginx:stable-alpine3.20"
 			By("Creating a SandboxClaim with cpu requests/limits=1 and inplaceUpdate.image")
 			sandboxClaim = &agentsv1alpha1.SandboxClaim{
 				ObjectMeta: metav1.ObjectMeta{
@@ -684,7 +684,7 @@ var _ = Describe("SandboxClaim", func() {
 		})
 
 		It("should timeout claim while preserving sandbox and pod failure evidence on image pull failure", func() {
-			badImage := fmt.Sprintf("cr.registry.inter.env148.shuguang.com/openkruise-e2e/nginx:tag-not-exist-%d", time.Now().UnixNano())
+			badImage := fmt.Sprintf("nginx:tag-not-exist-%d", time.Now().UnixNano())
 			By("Creating a SandboxClaim with image pull failure target and feasible CPU resize")
 			sandboxClaim = &agentsv1alpha1.SandboxClaim{
 				ObjectMeta: metav1.ObjectMeta{
@@ -799,7 +799,7 @@ var _ = Describe("SandboxClaim", func() {
 		})
 
 		It("should still claim sandbox when CPU resize is infeasible but image update succeeds", func() {
-			const targetImage = "cr.registry.inter.env148.shuguang.com/openkruise-e2e/nginx:stable-alpine3.20"
+			const targetImage = "nginx:stable-alpine3.20"
 			By("Creating a SandboxClaim with valid image and infeasible CPU resize target")
 			sandboxClaim = &agentsv1alpha1.SandboxClaim{
 				ObjectMeta: metav1.ObjectMeta{
@@ -940,7 +940,7 @@ var _ = Describe("SandboxClaim", func() {
 								Containers: []corev1.Container{
 									{
 										Name:  "main",
-										Image: "cr.registry.inter.env148.shuguang.com/openkruise-e2e/nginx:stable-alpine3.23",
+										Image: "nginx:stable-alpine3.23",
 										Resources: corev1.ResourceRequirements{
 											Requests: corev1.ResourceList{
 												corev1.ResourceCPU:    resource.MustParse("250m"),
@@ -954,7 +954,7 @@ var _ = Describe("SandboxClaim", func() {
 									},
 									{
 										Name:    "sidecar",
-										Image:   "cr.registry.inter.env148.shuguang.com/openkruise-e2e/busybox:1.36",
+										Image:   "busybox:1.36",
 										Command: []string{"sleep", "infinity"},
 										Resources: corev1.ResourceRequirements{
 											Requests: corev1.ResourceList{
@@ -1214,7 +1214,7 @@ var _ = Describe("SandboxClaim", func() {
 								Containers: []corev1.Container{
 									{
 										Name:  "test-container",
-										Image: "cr.registry.inter.env148.shuguang.com/openkruise-e2e/nginx:stable-alpine3.23",
+										Image: "nginx:stable-alpine3.23",
 									},
 								},
 							},
@@ -1342,7 +1342,7 @@ var _ = Describe("SandboxClaim", func() {
 								Containers: []corev1.Container{
 									{
 										Name:  "test-container",
-										Image: "cr.registry.inter.env148.shuguang.com/openkruise-e2e/nginx:stable-alpine3.23",
+										Image: "nginx:stable-alpine3.23",
 									},
 								},
 							},
@@ -1475,7 +1475,7 @@ var _ = Describe("SandboxClaim", func() {
 								Containers: []corev1.Container{
 									{
 										Name:  "test-container",
-										Image: "cr.registry.inter.env148.shuguang.com/openkruise-e2e/nginx:stable-alpine3.23",
+										Image: "nginx:stable-alpine3.23",
 									},
 								},
 							},
@@ -1552,7 +1552,7 @@ var _ = Describe("SandboxClaim", func() {
 								Containers: []corev1.Container{
 									{
 										Name:  "test-container",
-										Image: "cr.registry.inter.env148.shuguang.com/openkruise-e2e/nginx:stable-alpine3.23",
+										Image: "nginx:stable-alpine3.23",
 									},
 								},
 							},
@@ -1661,7 +1661,7 @@ var _ = Describe("SandboxClaim", func() {
 								Containers: []corev1.Container{
 									{
 										Name:  "test-container",
-										Image: "cr.registry.inter.env148.shuguang.com/openkruise-e2e/nginx:stable-alpine3.23",
+										Image: "nginx:stable-alpine3.23",
 									},
 								},
 							},
@@ -1843,7 +1843,7 @@ var _ = Describe("SandboxClaim", func() {
 								Containers: []corev1.Container{
 									{
 										Name:  "test-container",
-										Image: "cr.registry.inter.env148.shuguang.com/openkruise-e2e/nginx:stable-alpine3.23",
+										Image: "nginx:stable-alpine3.23",
 									},
 								},
 							},
@@ -2113,7 +2113,7 @@ var _ = Describe("SandboxClaim", func() {
 									Containers: []corev1.Container{
 										{
 											Name:  "test-container",
-											Image: "cr.registry.inter.env148.shuguang.com/openkruise-e2e/nginx:stable-alpine3.23",
+											Image: "nginx:stable-alpine3.23",
 										},
 									},
 								},
@@ -2537,7 +2537,7 @@ var _ = Describe("SandboxClaim", func() {
 								Containers: []corev1.Container{
 									{
 										Name:  "test-container",
-										Image: "cr.registry.inter.env148.shuguang.com/openkruise-e2e/nginx:stable-alpine3.23",
+										Image: "nginx:stable-alpine3.23",
 									},
 								},
 							},
