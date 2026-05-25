@@ -20,7 +20,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
+	"net/url"
+	"path"
+	"strings"
 	"time"
 
 	"connectrpc.com/connect"
@@ -160,6 +164,173 @@ func RunCommandWithRuntime(ctx context.Context, args RunCmdFuncArgs) (RunCommand
 	}
 	log.Info("all messages are received", "cost", time.Since(start), "result", result)
 	return result, errors.Join(result.Error, stream.Err())
+}
+
+// WriteFileArgs are the arguments accepted by WriteFileWithRuntime.
+type WriteFileArgs struct {
+	// Sbx is the target sandbox. Its annotations supply the runtime URL and access token,
+	// resolved via GetRuntimeURL / GetAccessToken.
+	Sbx *agentsv1alpha1.Sandbox
+	// FilePath is the absolute file path inside the sandbox runtime where Content will be
+	// materialized. The parent directory must already exist on the runtime side.
+	FilePath string
+	// Content is the raw file body. It is uploaded as-is via multipart/form-data and is not
+	// interpreted by this function.
+	Content []byte
+	// Username is the OS user the runtime should use when writing the file. Defaults to
+	// defaultRuntimeFilesUsername ("root") when empty.
+	Username string
+	// Timeout bounds the duration of a single HTTP write request. Defaults to
+	// defaultRuntimeWriteTimeout when zero or negative.
+	Timeout time.Duration
+}
+
+// WriteFileResult carries metadata about a write call. The HTTP response body is drained
+// internally so callers do not need to handle it.
+type WriteFileResult struct {
+	StatusCode int
+}
+
+// runtime files API constants. Kept package-private since the public surface is the typed
+// WriteFileArgs struct.
+const (
+	defaultRuntimeWriteTimeout  = 10 * time.Second
+	defaultRuntimeFilesUsername = "root"
+	runtimeFilesFieldName       = "file"
+)
+
+// runtimeFilesHTTPClient is the package-level HTTP client used by WriteFileWithRuntime.
+// It is a variable rather than a constant so tests can substitute their own transport
+// without monkey-patching net/http.DefaultClient.
+//
+// Intentionally no http.Client.Timeout is set: WriteFileWithRuntime always wraps the
+// caller's context with context.WithTimeout(ctx, args.Timeout), which becomes the
+// single source of truth for request deadlines. Setting a client-level timeout here
+// would silently cap any args.Timeout above that value (the effective timeout is
+// min(client.Timeout, ctx deadline)). Mirrors RunCommandWithRuntime above which also
+// relies solely on the per-call context for cancellation.
+var runtimeFilesHTTPClient = &http.Client{}
+
+// WriteFileWithRuntime writes a single file into the sandbox runtime by calling the
+// E2B-compatible files API exposed by the agent-runtime sidecar:
+//
+//	POST <runtimeURL>/files?path=<filePath>&username=<username>
+//	Content-Type: multipart/form-data; boundary=...
+//	form field "file": <args.Content>
+//
+// The behavior is unconditional overwrite: any pre-existing file at the same path is
+// replaced, mirroring the upstream E2B `sbx.files.write(path, content)` semantics.
+//
+// On success the function returns WriteFileResult with the HTTP status code. On HTTP-level
+// failure (transport error or status >= 400) it returns a non-nil error that wraps the
+// underlying cause (or the truncated runtime error body for HTTP errors).
+//
+// This function is intended as the standard counterpart to RunCommandWithRuntime: any
+// caller that needs to push a file into the sandbox runtime should use it instead of
+// rolling its own HTTP client.
+func WriteFileWithRuntime(ctx context.Context, args WriteFileArgs) (WriteFileResult, error) {
+	sbx := args.Sbx
+	if sbx == nil {
+		return WriteFileResult{}, fmt.Errorf("sandbox is nil")
+	}
+	if args.FilePath == "" {
+		return WriteFileResult{}, fmt.Errorf("filePath is required")
+	}
+	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx)).V(consts.DebugLogLevel)
+
+	rtURL := GetRuntimeURL(sbx)
+	if rtURL == "" {
+		return WriteFileResult{}, fmt.Errorf("runtime url not found on sandbox")
+	}
+
+	username := args.Username
+	if username == "" {
+		username = defaultRuntimeFilesUsername
+	}
+	timeout := args.Timeout
+	if timeout <= 0 {
+		timeout = defaultRuntimeWriteTimeout
+	}
+
+	body, contentType, err := buildRuntimeFilesMultipartBody(args.FilePath, args.Content)
+	if err != nil {
+		return WriteFileResult{}, err
+	}
+
+	endpoint := buildRuntimeFilesEndpoint(rtURL, args.FilePath, username)
+	reqCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, endpoint, body)
+	if err != nil {
+		return WriteFileResult{}, fmt.Errorf("failed to build runtime files write request: %w", err)
+	}
+	req.Header.Set("Content-Type", contentType)
+	if accessToken := GetAccessToken(sbx); accessToken != "" {
+		req.Header.Set("X-Access-Token", accessToken)
+	}
+	// Basic auth header mirrors the agent-runtime expectation (root user, empty password)
+	// and matches the value used by RunCommandWithRuntime above.
+	req.Header.Set("Authorization", "Basic cm9vdDo=") // Basic root:
+
+	start := time.Now()
+	log.Info("writing file to runtime via files API",
+		"filePath", args.FilePath,
+		"endpoint", endpoint)
+
+	resp, err := runtimeFilesHTTPClient.Do(req)
+	if err != nil {
+		return WriteFileResult{}, fmt.Errorf("failed to call runtime files API: %w", err)
+	}
+	defer func() {
+		// Drain and close to enable connection reuse.
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
+
+	result := WriteFileResult{StatusCode: resp.StatusCode}
+	if resp.StatusCode >= http.StatusBadRequest {
+		// Read up to 1 KiB of the response body to surface the runtime-side error reason
+		// without unbounded memory usage.
+		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<10))
+		return result, fmt.Errorf("runtime files API returned status %d: %s",
+			resp.StatusCode, strings.TrimSpace(string(bodyBytes)))
+	}
+
+	log.Info("file written to runtime successfully (overwrite)",
+		"filePath", args.FilePath,
+		"statusCode", resp.StatusCode,
+		"cost", time.Since(start))
+	return result, nil
+}
+
+// buildRuntimeFilesMultipartBody assembles a multipart/form-data body whose only field is
+// the file content. The returned contentType already carries the boundary produced by
+// multipart.Writer, so the caller can set it as Content-Type as-is.
+func buildRuntimeFilesMultipartBody(filePath string, content []byte) (*bytes.Buffer, string, error) {
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	part, err := writer.CreateFormFile(runtimeFilesFieldName, path.Base(filePath))
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to create multipart form file: %w", err)
+	}
+	if _, err := part.Write(content); err != nil {
+		return nil, "", fmt.Errorf("failed to write multipart form file content: %w", err)
+	}
+	if err := writer.Close(); err != nil {
+		return nil, "", fmt.Errorf("failed to close multipart writer: %w", err)
+	}
+	return body, writer.FormDataContentType(), nil
+}
+
+// buildRuntimeFilesEndpoint composes the absolute URL of the agent-runtime files API for
+// the given runtime base URL, target file path and runtime username. Trailing slashes on
+// runtimeURL are tolerated.
+func buildRuntimeFilesEndpoint(runtimeURL, filePath, username string) string {
+	base := strings.TrimRight(runtimeURL, "/")
+	q := url.Values{}
+	q.Set("path", filePath)
+	q.Set("username", username)
+	return fmt.Sprintf("%s/files?%s", base, q.Encode())
 }
 
 // ResolveCSIMountFromAnnotation parses CSI mount config from sandbox annotation and resolves it into MountOptionList.

@@ -2108,6 +2108,10 @@ func TestRecordSecurityTokenRefreshStatus(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			scheme := k8sruntime.NewScheme()
+			utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+			utilruntime.Must(v1alpha1.AddToScheme(scheme))
+
 			sbx := &Sandbox{
 				Sandbox: &v1alpha1.Sandbox{
 					ObjectMeta: metav1.ObjectMeta{
@@ -2118,7 +2122,9 @@ func TestRecordSecurityTokenRefreshStatus(t *testing.T) {
 				},
 			}
 
-			err := recordSecurityTokenRefreshStatus(sbx, tt.opts)
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(sbx.Sandbox.DeepCopy()).Build()
+
+			err := recordSecurityTokenRefreshStatus(t.Context(), fakeClient, sbx, tt.opts)
 			require.NoError(t, err)
 
 			annotations := sbx.GetAnnotations()
@@ -2131,6 +2137,16 @@ func TestRecordSecurityTokenRefreshStatus(t *testing.T) {
 			// Check not expected annotations
 			for _, key := range tt.notExpectedAnnos {
 				assert.Empty(t, annotations[key], "annotation %s should not be set", key)
+			}
+
+			// Verify the patch was actually persisted to the apiserver, not just to the in-memory sbx.
+			persisted := &v1alpha1.Sandbox{}
+			require.NoError(t, fakeClient.Get(t.Context(), client.ObjectKeyFromObject(sbx.Sandbox), persisted))
+			for key, expectedValue := range tt.expectedAnnos {
+				assert.Equal(t, expectedValue, persisted.GetAnnotations()[key], "persisted annotation %s should match", key)
+			}
+			for _, key := range tt.notExpectedAnnos {
+				assert.Empty(t, persisted.GetAnnotations()[key], "persisted annotation %s should not be set", key)
 			}
 
 			// For the "with expiration" case, verify JSON round-trip
@@ -2192,6 +2208,10 @@ func TestRecordSecurityTokenRefreshStatus_NilAnnotations(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			scheme := k8sruntime.NewScheme()
+			utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+			utilruntime.Must(v1alpha1.AddToScheme(scheme))
+
 			sbx := &Sandbox{
 				Sandbox: &v1alpha1.Sandbox{
 					ObjectMeta: metav1.ObjectMeta{
@@ -2202,7 +2222,9 @@ func TestRecordSecurityTokenRefreshStatus_NilAnnotations(t *testing.T) {
 				},
 			}
 
-			err := recordSecurityTokenRefreshStatus(sbx, tt.opts)
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(sbx.Sandbox.DeepCopy()).Build()
+
+			err := recordSecurityTokenRefreshStatus(t.Context(), fakeClient, sbx, tt.opts)
 			require.NoError(t, err)
 
 			annotations := sbx.GetAnnotations()
@@ -2222,8 +2244,159 @@ func TestRecordSecurityTokenRefreshStatus_NilAnnotations(t *testing.T) {
 					assert.Equal(t, v, annotations[k], "existing annotation %s should be preserved", k)
 				}
 			}
+
+			// Verify the patch (or no-op) is observable via the apiserver as well.
+			persisted := &v1alpha1.Sandbox{}
+			require.NoError(t, fakeClient.Get(t.Context(), client.ObjectKeyFromObject(sbx.Sandbox), persisted))
+			if tt.expectedValue != "" {
+				assert.Equal(t, tt.expectedValue, persisted.GetAnnotations()[pkgutils.AgentKeyTokenRefreshStatus])
+			}
+			for k, v := range tt.initialAnnos {
+				assert.Equal(t, v, persisted.GetAnnotations()[k], "persisted existing annotation %s should be preserved", k)
+			}
 		})
 	}
+}
+
+// TestRecordSecurityTokenRefreshStatus_PatchErrors covers the failure paths of
+// recordSecurityTokenRefreshStatus that go through the apiserver Patch call:
+//   - the apiserver returns an internal error: the helper should wrap it with the
+//     "failed to patch token refresh status annotation" prefix and must not mutate
+//     the in-memory sbx.Sandbox reference (so the caller can decide what to do).
+//   - the sandbox object does not exist in the apiserver: the patch returns NotFound
+//     and the same wrapping/no-mutation contract applies.
+func TestRecordSecurityTokenRefreshStatus_PatchErrors(t *testing.T) {
+	utils.InitLogOutput()
+
+	tests := []struct {
+		name               string
+		createInAPIServer  bool
+		patchInterceptor   func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error
+		expectErrSubstring string
+	}{
+		{
+			name:              "apiserver returns internal error",
+			createInAPIServer: true,
+			patchInterceptor: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				if _, ok := obj.(*v1alpha1.Sandbox); ok {
+					return apierrors.NewInternalError(fmt.Errorf("boom"))
+				}
+				return c.Patch(ctx, obj, patch, opts...)
+			},
+			expectErrSubstring: "failed to patch token refresh status annotation",
+		},
+		{
+			name:               "sandbox does not exist in apiserver",
+			createInAPIServer:  false,
+			patchInterceptor:   nil,
+			expectErrSubstring: "failed to patch token refresh status annotation",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := k8sruntime.NewScheme()
+			utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+			utilruntime.Must(v1alpha1.AddToScheme(scheme))
+
+			sbx := &Sandbox{
+				Sandbox: &v1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:        "test-sandbox",
+						Namespace:   "default",
+						Annotations: make(map[string]string),
+					},
+				},
+			}
+			originalSbxRef := sbx.Sandbox
+
+			builder := fake.NewClientBuilder().WithScheme(scheme)
+			if tt.createInAPIServer {
+				builder = builder.WithObjects(sbx.Sandbox.DeepCopy())
+			}
+			if tt.patchInterceptor != nil {
+				builder = builder.WithInterceptorFuncs(interceptor.Funcs{Patch: tt.patchInterceptor})
+			}
+			fakeClient := builder.Build()
+
+			opts := infra.ClaimSandboxOptions{
+				SecurityToken: &config.SecurityTokenOptions{
+					TokenResponse: identity.TokenResponse{
+						AccessToken:           "at-err",
+						AccessTokenExpiration: "2027-01-01T00:00:00Z",
+					},
+				},
+			}
+
+			err := recordSecurityTokenRefreshStatus(t.Context(), fakeClient, sbx, opts)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.expectErrSubstring)
+
+			// On failure, sbx.Sandbox must not be replaced by the half-patched object;
+			// the original in-memory reference is preserved so the caller can recover.
+			assert.Same(t, originalSbxRef, sbx.Sandbox, "sbx.Sandbox should not be replaced when patch fails")
+			assert.Empty(t, sbx.GetAnnotations()[pkgutils.AgentKeyTokenRefreshStatus], "in-memory annotation should not be set when patch fails")
+		})
+	}
+}
+
+// TestRecordSecurityTokenRefreshStatus_Overwrite verifies that when the sandbox
+// already carries an older AgentKeyTokenRefreshStatus annotation, the helper
+// overwrites it with the newly issued status, leaves unrelated annotations intact,
+// and replaces sbx.Sandbox with the patched object whose annotation matches the
+// value persisted in the apiserver.
+func TestRecordSecurityTokenRefreshStatus_Overwrite(t *testing.T) {
+	utils.InitLogOutput()
+
+	scheme := k8sruntime.NewScheme()
+	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(v1alpha1.AddToScheme(scheme))
+
+	const unrelatedKey = "unrelated/annotation"
+	const unrelatedVal = "keep-me"
+	oldStatus := `{"accessTokenExpiration":"2025-01-01T00:00:00Z"}`
+
+	sbx := &Sandbox{
+		Sandbox: &v1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-sandbox",
+				Namespace: "default",
+				Annotations: map[string]string{
+					unrelatedKey:                        unrelatedVal,
+					pkgutils.AgentKeyTokenRefreshStatus: oldStatus,
+				},
+			},
+		},
+	}
+	originalSbxRef := sbx.Sandbox
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(sbx.Sandbox.DeepCopy()).Build()
+
+	opts := infra.ClaimSandboxOptions{
+		SecurityToken: &config.SecurityTokenOptions{
+			TokenResponse: identity.TokenResponse{
+				AccessToken:           "at-new",
+				AccessTokenExpiration: "2027-06-01T00:00:00Z",
+			},
+		},
+	}
+
+	err := recordSecurityTokenRefreshStatus(t.Context(), fakeClient, sbx, opts)
+	require.NoError(t, err)
+
+	// Annotation is overwritten with the newly issued status.
+	wantStatus := `{"accessTokenExpiration":"2027-06-01T00:00:00Z"}`
+	assert.Equal(t, wantStatus, sbx.GetAnnotations()[pkgutils.AgentKeyTokenRefreshStatus])
+	// Unrelated annotation must be preserved by MergeFrom semantics.
+	assert.Equal(t, unrelatedVal, sbx.GetAnnotations()[unrelatedKey])
+	// On success, sbx.Sandbox is swapped to the patched copy so subsequent in-memory
+	// reads observe the new annotation; identity check guards against accidental aliasing.
+	assert.NotSame(t, originalSbxRef, sbx.Sandbox, "sbx.Sandbox should be replaced with the patched copy on success")
+
+	// Verify the same state is observable through the apiserver.
+	persisted := &v1alpha1.Sandbox{}
+	require.NoError(t, fakeClient.Get(t.Context(), client.ObjectKeyFromObject(sbx.Sandbox), persisted))
+	assert.Equal(t, wantStatus, persisted.GetAnnotations()[pkgutils.AgentKeyTokenRefreshStatus])
+	assert.Equal(t, unrelatedVal, persisted.GetAnnotations()[unrelatedKey])
 }
 
 // TestTryClaimSandbox_LockConflict tests the error handling in TryClaimSandbox when
