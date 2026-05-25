@@ -91,7 +91,7 @@ func Add(mgr manager.Manager) error {
 // +kubebuilder:rbac:groups=agents.kruise.io,resources=commits/finalizers,verbs=update
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list
-// +kubebuilder:rbac:groups=core,resources=serviceaccounts,verbs=get
+// +kubebuilder:rbac:groups=core,resources=serviceaccounts,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=create;delete;get;watch;list
 

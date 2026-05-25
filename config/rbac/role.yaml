@@ -29,6 +29,7 @@ rules:
   - ""
   resources:
   - persistentvolumes
+  - serviceaccounts
   verbs:
   - get
   - list
@@ -49,12 +50,6 @@ rules:
   verbs:
   - get
   - list
-- apiGroups:
-  - ""
-  resources:
-  - serviceaccounts
-  verbs:
-  - get
 - apiGroups:
   - admissionregistration.k8s.io
   resources:
