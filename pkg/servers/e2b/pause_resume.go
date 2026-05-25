@@ -32,7 +32,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
-	"github.com/openkruise/agents/pkg/utils/runtime"
+	"github.com/openkruise/agents/pkg/utils/sandboxutils"
 	"github.com/openkruise/agents/pkg/utils/timeout"
 )
 
@@ -235,7 +235,7 @@ func (sc *Controller) ConnectSandbox(r *http.Request) (web.ApiResponse[*models.S
 
 	return web.ApiResponse[*models.Sandbox]{
 		Code: statusCode,
-		Body: sc.convertToE2BSandbox(sbx, runtime.GetAccessToken(sbx)),
+		Body: sc.convertToE2BSandbox(sbx, sandboxutils.GetAccessToken(sbx)),
 	}, nil
 }
 

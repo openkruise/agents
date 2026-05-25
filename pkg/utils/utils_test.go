@@ -1285,3 +1285,169 @@ func TestGenerateSandboxName(t *testing.T) {
 		})
 	}
 }
+
+func TestGetRuntimeURLFromAnnotation(t *testing.T) {
+	tests := []struct {
+		name     string
+		obj      metav1.Object
+		expected string
+	}{
+		{
+			name:     "nil object returns empty string",
+			obj:      nil,
+			expected: "",
+		},
+		{
+			name:     "object without annotations returns empty string",
+			obj:      &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "sbx"}},
+			expected: "",
+		},
+		{
+			name: "object with empty annotation map returns empty string",
+			obj: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{},
+			}},
+			expected: "",
+		},
+		{
+			name: "only runtime-url annotation set returns runtime-url",
+			obj: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{
+					agentsv1alpha1.AnnotationRuntimeURL: "http://runtime.example.com",
+				},
+			}},
+			expected: "http://runtime.example.com",
+		},
+		{
+			name: "only legacy envd-url annotation set falls back to legacy",
+			obj: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{
+					agentsv1alpha1.AnnotationEnvdURL: "http://envd.example.com",
+				},
+			}},
+			expected: "http://envd.example.com",
+		},
+		{
+			name: "both annotations set: runtime-url takes precedence over legacy envd-url",
+			obj: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{
+					agentsv1alpha1.AnnotationRuntimeURL: "http://runtime.example.com",
+					agentsv1alpha1.AnnotationEnvdURL:    "http://envd.example.com",
+				},
+			}},
+			expected: "http://runtime.example.com",
+		},
+		{
+			name: "runtime-url empty string falls back to legacy envd-url",
+			obj: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{
+					agentsv1alpha1.AnnotationRuntimeURL: "",
+					agentsv1alpha1.AnnotationEnvdURL:    "http://envd.example.com",
+				},
+			}},
+			expected: "http://envd.example.com",
+		},
+		{
+			name: "both annotations empty returns empty string",
+			obj: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{
+					agentsv1alpha1.AnnotationRuntimeURL: "",
+					agentsv1alpha1.AnnotationEnvdURL:    "",
+				},
+			}},
+			expected: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := GetRuntimeURLFromAnnotation(tt.obj)
+			if got != tt.expected {
+				t.Errorf("GetRuntimeURLFromAnnotation() = %q, want %q", got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestGetAccessTokenFromAnnotation(t *testing.T) {
+	tests := []struct {
+		name     string
+		obj      metav1.Object
+		expected string
+	}{
+		{
+			name:     "nil object returns empty string",
+			obj:      nil,
+			expected: "",
+		},
+		{
+			name:     "object without annotations returns empty string",
+			obj:      &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "sbx"}},
+			expected: "",
+		},
+		{
+			name: "object with empty annotation map returns empty string",
+			obj: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{},
+			}},
+			expected: "",
+		},
+		{
+			name: "only runtime-access-token annotation set returns runtime token",
+			obj: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{
+					agentsv1alpha1.AnnotationRuntimeAccessToken: "runtime-token",
+				},
+			}},
+			expected: "runtime-token",
+		},
+		{
+			name: "only legacy envd-access-token annotation set falls back to legacy",
+			obj: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{
+					agentsv1alpha1.AnnotationEnvdAccessToken: "envd-token",
+				},
+			}},
+			expected: "envd-token",
+		},
+		{
+			name: "both annotations set: runtime token takes precedence over legacy envd token",
+			obj: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{
+					agentsv1alpha1.AnnotationRuntimeAccessToken: "runtime-token",
+					agentsv1alpha1.AnnotationEnvdAccessToken:    "envd-token",
+				},
+			}},
+			expected: "runtime-token",
+		},
+		{
+			name: "runtime token empty string falls back to legacy envd token",
+			obj: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{
+					agentsv1alpha1.AnnotationRuntimeAccessToken: "",
+					agentsv1alpha1.AnnotationEnvdAccessToken:    "envd-token",
+				},
+			}},
+			expected: "envd-token",
+		},
+		{
+			name: "both annotations empty returns empty string",
+			obj: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{
+					agentsv1alpha1.AnnotationRuntimeAccessToken: "",
+					agentsv1alpha1.AnnotationEnvdAccessToken:    "",
+				},
+			}},
+			expected: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := GetAccessTokenFromAnnotation(tt.obj)
+			if got != tt.expected {
+				t.Errorf("GetAccessTokenFromAnnotation() = %q, want %q", got, tt.expected)
+			}
+		})
+	}
+}

@@ -29,8 +29,8 @@ import (
 	sandboxmanager "github.com/openkruise/agents/pkg/sandbox-manager"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
-	"github.com/openkruise/agents/pkg/utils/runtime"
 	managerutils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
+	"github.com/openkruise/agents/pkg/utils/sandboxutils"
 	"github.com/openkruise/agents/pkg/utils/timeout"
 )
 
@@ -47,7 +47,7 @@ func (sc *Controller) DescribeSandbox(r *http.Request) (web.ApiResponse[*models.
 	}
 
 	return web.ApiResponse[*models.Sandbox]{
-		Body: sc.convertToE2BSandbox(sbx, runtime.GetAccessToken(sbx)),
+		Body: sc.convertToE2BSandbox(sbx, sandboxutils.GetAccessToken(sbx)),
 	}, nil
 }
 

@@ -28,7 +28,6 @@ import (
 	"sync"
 
 	"github.com/golang/protobuf/proto"
-	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -39,6 +38,8 @@ import (
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+
+	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/features"
@@ -339,4 +340,36 @@ func FindContainer(name string, containers []corev1.Container) *corev1.Container
 		}
 	}
 	return nil
+}
+
+// GetRuntimeURLFromAnnotation returns the agent-runtime endpoint stored on the object's
+// annotations, falling back to the legacy envd annotation key for backwards compatibility.
+// It returns an empty string if neither annotation is present, leaving the fallback to the
+// caller (e.g. sandboxutils.GetRuntimeURL composes a route-based fallback on top of this).
+//
+// This helper lives in pkg/utils because it is the lowest-level annotation lookup with no
+// extra business logic, so it can be safely depended on by higher-level helpers such as
+// sandboxutils.GetRuntimeURL (which layers a Pod IP fallback on top of it).
+func GetRuntimeURLFromAnnotation(obj metav1.Object) string {
+	if obj == nil {
+		return ""
+	}
+	annotations := obj.GetAnnotations()
+	if u := annotations[agentsv1alpha1.AnnotationRuntimeURL]; u != "" {
+		return u
+	}
+	return annotations[agentsv1alpha1.AnnotationEnvdURL] // legacy
+}
+
+// GetAccessTokenFromAnnotation returns the agent-runtime access token stored on the object's
+// annotations, falling back to the legacy envd annotation key for backwards compatibility.
+func GetAccessTokenFromAnnotation(obj metav1.Object) string {
+	if obj == nil {
+		return ""
+	}
+	annotations := obj.GetAnnotations()
+	if t := annotations[agentsv1alpha1.AnnotationRuntimeAccessToken]; t != "" {
+		return t
+	}
+	return annotations[agentsv1alpha1.AnnotationEnvdAccessToken] // legacy
 }
