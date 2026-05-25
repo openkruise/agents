@@ -34,15 +34,6 @@ const (
 	CommitFailed    CommitPhase = "Failed"
 )
 
-type CommitConditionType string
-
-const (
-	ConditionTypeCommitContainer    CommitConditionType = "CommitContainer"
-	ConditionTypePullBaseImage      CommitConditionType = "PullBaseImage"
-	ConditionTypePushCommittedImage CommitConditionType = "PushCommittedImage"
-	ConditionTypeNotFound           CommitConditionType = "CommitNotFound"
-)
-
 // ReferenceObject is a namespace-aware reference to a Kubernetes object.
 // Aligned with kruise's apis/apps/v1beta1.ReferenceObject pattern.
 type ReferenceObject struct {

@@ -36,8 +36,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
-	"sigs.k8s.io/controller-runtime/pkg/manager"
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/controller/commit/core"
@@ -65,23 +63,23 @@ type CommitReconciler struct {
 	controls map[string]core.CommitControl
 }
 
-func Add(mgr manager.Manager) error {
+func Add(mgr ctrl.Manager) error {
 	if !utilfeature.DefaultFeatureGate.Enabled(features.CommitGate) || !discovery.DiscoverGVK(controllerKind) {
 		return nil
 	}
-	commitController := &CommitReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-	}
-
-	if err := commitController.SetupWithManager(mgr); err != nil {
-		return err
-	}
-	controls, err := core.NewCommitControl(mgr.GetClient(), commitController.Recorder)
+	recorder := mgr.GetEventRecorderFor(controllerName)
+	controls, err := core.NewCommitControl(mgr.GetClient(), recorder)
 	if err != nil {
 		return err
 	}
-	commitController.controls = controls
+	if err = (&CommitReconciler{
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: recorder,
+		controls: controls,
+	}).SetupWithManager(mgr); err != nil {
+		return err
+	}
 	klog.InfoS("Started CommitReconciler successfully")
 	return nil
 }
@@ -115,7 +113,7 @@ func (r *CommitReconciler) Reconcile(ctx context.Context, req ctrl.Request) (res
 	pod := &corev1.Pod{}
 	if err = r.Get(ctx, client.ObjectKey{Namespace: commit.Namespace, Name: commit.Spec.PodName}, pod); err != nil {
 		if !errors.IsNotFound(err) {
-			return reconcile.Result{}, err
+			return ctrl.Result{}, err
 		}
 		pod = nil
 	}
@@ -126,7 +124,7 @@ func (r *CommitReconciler) Reconcile(ctx context.Context, req ctrl.Request) (res
 	control, err := r.getControl(commit)
 	if err != nil {
 		klog.ErrorS(err, "get control failed", "commit", klog.KObj(commit))
-		return reconcile.Result{}, err
+		return ctrl.Result{}, err
 	}
 
 	// Handle deletion
@@ -187,8 +185,10 @@ func (r *CommitReconciler) handleCommitPending(ctx context.Context, args *core.E
 	}
 	requeueAfter, err := control.EnsureCommitRunning(ctx, args)
 	if err != nil {
-		r.Recorder.Eventf(commit, corev1.EventTypeWarning, "Failed", "Failed to start commit: %s", err.Error())
-		return ctrl.Result{}, r.updateCommitStatus(ctx, *args.NewStatus, commit)
+		if retErr := r.updateCommitStatus(ctx, *args.NewStatus, commit); retErr != nil {
+			klog.ErrorS(retErr, "Failed to update commit status on error", "commit", klog.KObj(commit))
+		}
+		return ctrl.Result{}, err
 	}
 	return ctrl.Result{RequeueAfter: requeueAfter}, r.updateCommitStatus(ctx, *args.NewStatus, commit)
 }
@@ -197,8 +197,10 @@ func (r *CommitReconciler) handleCommitRunning(ctx context.Context, args *core.E
 	commit := args.Commit
 	requeueAfter, err := control.EnsureCommitUpdated(ctx, args)
 	if err != nil {
-		r.Recorder.Eventf(commit, corev1.EventTypeWarning, "Failed", "Failed to update commit: %s", err.Error())
-		return ctrl.Result{}, r.updateCommitStatus(ctx, *args.NewStatus, commit)
+		if retErr := r.updateCommitStatus(ctx, *args.NewStatus, commit); retErr != nil {
+			klog.ErrorS(retErr, "Failed to update commit status on error", "commit", klog.KObj(commit))
+		}
+		return ctrl.Result{}, err
 	}
 	return ctrl.Result{RequeueAfter: requeueAfter}, r.updateCommitStatus(ctx, *args.NewStatus, commit)
 }
@@ -208,6 +210,10 @@ func (r *CommitReconciler) handleCommitTTL(ctx context.Context, commit *agentsv1
 		return ctrl.Result{}, nil
 	}
 	ttl := commit.Spec.Ttl.Duration
+	// Negative TTL means never delete
+	if ttl < 0 {
+		return ctrl.Result{}, nil
+	}
 	completionTime := commit.Status.CompletionTime
 	if completionTime == nil {
 		return ctrl.Result{}, nil
@@ -215,29 +221,30 @@ func (r *CommitReconciler) handleCommitTTL(ctx context.Context, commit *agentsv1
 	timeSinceCompletion := time.Since(completionTime.Time)
 	if timeSinceCompletion > ttl {
 		klog.InfoS("TTL expired, deleting commit", "commit", klog.KObj(commit), "ttl", ttl)
-		return ctrl.Result{}, r.Delete(ctx, commit)
+		r.Recorder.Eventf(commit, corev1.EventTypeNormal, "TTLExpired", "Deleting Commit after TTL of %v", ttl)
+		return ctrl.Result{}, client.IgnoreNotFound(r.Delete(ctx, commit))
 	}
 	requeueAfter := ttl - timeSinceCompletion
 	return ctrl.Result{RequeueAfter: requeueAfter}, nil
 }
 
 func (r *CommitReconciler) updateCommitStatus(ctx context.Context, newStatus agentsv1alpha1.CommitStatus, commit *agentsv1alpha1.Commit) error {
-	if reflect.DeepEqual(commit.Status, newStatus) {
+	if reflect.DeepEqual(commit.Status, newStatus) || newStatus.Phase == agentsv1alpha1.CommitPending {
 		return nil
 	}
 	by, _ := json.Marshal(newStatus)
 	patchStatus := fmt.Sprintf(`{"status":%s}`, string(by))
 	rcvObject := &agentsv1alpha1.Commit{ObjectMeta: metav1.ObjectMeta{Namespace: commit.Namespace, Name: commit.Name}}
-	if err := r.Status().Patch(ctx, rcvObject, client.RawPatch(types.MergePatchType, []byte(patchStatus))); err != nil {
+	if err := client.IgnoreNotFound(r.Status().Patch(ctx, rcvObject, client.RawPatch(types.MergePatchType, []byte(patchStatus)))); err != nil {
 		klog.ErrorS(err, "Failed to update commit status", "commit", klog.KObj(commit))
 		return err
 	}
 	klog.InfoS("Updated commit status", "commit", klog.KObj(commit), "phase", newStatus.Phase)
+	commit.Status = newStatus
 	return nil
 }
 
 func (r *CommitReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	r.Recorder = mgr.GetEventRecorderFor(controllerName)
 	return ctrl.NewControllerManagedBy(mgr).
 		WithOptions(controller.Options{MaxConcurrentReconciles: concurrentReconciles}).
 		For(&agentsv1alpha1.Commit{}).

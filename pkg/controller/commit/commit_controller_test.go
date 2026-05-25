@@ -286,15 +286,15 @@ func TestReconcile_CommitRunning_EnsureUpdatedError(t *testing.T) {
 	_, err := r.Reconcile(context.TODO(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "test-commit", Namespace: "default"},
 	})
-	// The error from EnsureCommitUpdated is not returned directly; it triggers status update
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	// Error should be returned to trigger controller-runtime backoff retry
+	if err == nil {
+		t.Fatal("expected error to be returned for retry")
 	}
 	if !mock.updatedCalled {
 		t.Error("expected EnsureCommitUpdated to be called")
 	}
 
-	// Verify status was updated to Failed
+	// Verify status was still updated to Failed despite returning error
 	updated := &agentsv1alpha1.Commit{}
 	_ = r.Get(context.TODO(), client.ObjectKey{Name: "test-commit", Namespace: "default"}, updated)
 	if updated.Status.Phase != agentsv1alpha1.CommitFailed {
@@ -325,6 +325,30 @@ func TestReconcile_CommitRunning_StatusUnchanged(t *testing.T) {
 	// Since status hasn't changed, no patch should happen (no error expected)
 	if result.RequeueAfter != 0 {
 		t.Errorf("expected no requeue, got %v", result.RequeueAfter)
+	}
+}
+
+func TestReconcile_CommitSucceeded_NegativeTTL(t *testing.T) {
+	completionTime := metav1.NewTime(time.Now().Add(-10 * time.Minute))
+	commit := newCommit("test-commit", "default", agentsv1alpha1.CommitSucceeded)
+	commit.Spec.Ttl = &metav1.Duration{Duration: -1 * time.Second}
+	commit.Status.CompletionTime = &completionTime
+	r, _ := newTestReconciler(commit)
+
+	result, err := r.Reconcile(context.TODO(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-commit", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Errorf("expected no requeue for negative TTL, got %v", result.RequeueAfter)
+	}
+
+	// Verify commit was NOT deleted
+	got := &agentsv1alpha1.Commit{}
+	if err := r.Get(context.TODO(), client.ObjectKey{Name: "test-commit", Namespace: "default"}, got); err != nil {
+		t.Error("expected commit to still exist with negative TTL")
 	}
 }
 
