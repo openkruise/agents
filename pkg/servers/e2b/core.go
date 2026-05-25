@@ -41,9 +41,9 @@ import (
 
 // Controller handles sandbox-related operations
 type Controller struct {
-	port             int
-	maxTimeout       int
-	minResumeTimeout int
+	port                  int
+	maxTimeout            int
+	minResumeTimeoutValue int
 
 	// manager params
 	systemNamespace       string // the namespace where the sandbox manager is running
@@ -76,7 +76,7 @@ func NewController(domain, sysNs, peerSelector, sandboxNamespace, sandboxLabelSe
 		clientConfig:          clientConfig,
 		port:                  port,
 		maxTimeout:            maxTimeout,
-		minResumeTimeout:      minResumeTimeout,
+		minResumeTimeoutValue: minResumeTimeout,
 		systemNamespace:       sysNs, // the namespace where the sandbox manager is running
 		peerSelector:          peerSelector,
 		sandboxNamespace:      sandboxNamespace,

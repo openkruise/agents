@@ -70,6 +70,20 @@ func pauseSandboxErrorCode(err error) int {
 	return http.StatusInternalServerError
 }
 
+// resumeSandboxErrorCode mirrors pauseSandboxErrorCode. The E2B /resume spec
+// permits 401 / 404 / 409 / 500 (no 400), so non-pausable / non-resumable
+// state errors from the infra layer surface as 409 rather than 400.
+func resumeSandboxErrorCode(err error) int {
+	if apierrors.IsNotFound(err) {
+		return http.StatusNotFound
+	}
+	if managererrors.GetErrCode(err) == managererrors.ErrorConflict ||
+		errors.Is(err, cacheutils.ErrWaitTaskConflict) {
+		return http.StatusConflict
+	}
+	return http.StatusInternalServerError
+}
+
 func (sc *Controller) buildPauseTimeoutOptions(sbx infra.Sandbox, now time.Time) timeout.Options {
 	opts := sbx.GetTimeout()
 	// Only set timeout if the sandbox has a timeout configured (not never-timeout)
@@ -91,6 +105,12 @@ func (sc *Controller) buildPauseTimeoutOptions(sbx infra.Sandbox, now time.Time)
 // - Old SDK: first calls SetSandboxTimeout; that path returns 500 on this flow, then falls back to ResumeSandbox.
 //
 // The running-sandbox "extend only" guard is intentionally implemented in ConnectSandbox only.
+//
+// No handler-level state guard is enforced — the infra layer (IsSandboxResumable +
+// first-writer-wins retryUpdate + Ready-cond idempotent short-circuit) is
+// authoritative. A handler guard based on a stale Get would falsely 409 the
+// second of two concurrent Resume requests, mirroring the bug fixed for
+// PauseSandbox in PR #422.
 func (sc *Controller) ResumeSandbox(r *http.Request) (web.ApiResponse[struct{}], *web.ApiError) {
 	id := r.PathValue("sandboxID")
 	ctx := r.Context()
@@ -107,26 +127,14 @@ func (sc *Controller) ResumeSandbox(r *http.Request) (web.ApiResponse[struct{}],
 		return web.ApiResponse[struct{}]{}, apiErr
 	}
 	autoPause, currentEndAt := ParseTimeout(sbx)
-
-	state, reason := sbx.GetState()
-	if state != v1alpha1.SandboxStatePaused {
-		log.Info("skip resume sandbox: sandbox is not paused", "state", state, "reason", reason)
-		return web.ApiResponse[struct{}]{}, &web.ApiError{
-			Code:    http.StatusConflict,
-			Message: fmt.Sprintf("Sandbox %s is not paused", id),
-		}
-	}
+	state, _ := sbx.GetState()
 
 	effectiveTimeout := sc.applyResumeFloor(log, request.TimeoutSeconds, true, !currentEndAt.IsZero())
 	resumeOpts := sc.buildResumeOpts(autoPause, time.Now(), effectiveTimeout, !currentEndAt.IsZero())
 	log.Info("resuming sandbox")
 	if err := sc.manager.ResumeSandbox(ctx, sbx, resumeOpts); err != nil {
-		code := http.StatusInternalServerError
-		if managererrors.GetErrCode(err) == managererrors.ErrorBadRequest {
-			code = http.StatusBadRequest
-		}
 		return web.ApiResponse[struct{}]{}, &web.ApiError{
-			Code:    code,
+			Code:    resumeSandboxErrorCode(err),
 			Message: fmt.Sprintf("Failed to resume sandbox: %v", err),
 		}
 	}
@@ -145,14 +153,14 @@ func (sc *Controller) ResumeSandbox(r *http.Request) (web.ApiResponse[struct{}],
 // auto-pause race. Never-timeout sandboxes have no PauseTime so the floor
 // is skipped (and would only generate misleading log noise).
 func (sc *Controller) applyResumeFloor(log klog.Logger, requested int, paused, hasDeadline bool) int {
-	if !paused || !hasDeadline || requested >= sc.minResumeTimeout {
+	if !paused || !hasDeadline || requested >= sc.minResumeTimeoutValue {
 		return requested
 	}
 	log.Info("connect-on-paused timeout floor applied",
 		"requestedSeconds", requested,
-		"effectiveSeconds", sc.minResumeTimeout,
+		"effectiveSeconds", sc.minResumeTimeoutValue,
 		"reason", "request shorter than --e2b-min-resume-timeout")
-	return sc.minResumeTimeout
+	return sc.minResumeTimeoutValue
 }
 
 // buildResumeOpts builds ResumeOptions whose placeholder Timeout is written

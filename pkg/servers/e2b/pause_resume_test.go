@@ -569,6 +569,41 @@ func TestPauseSandboxErrorCode(t *testing.T) {
 	}
 }
 
+func TestResumeSandboxErrorCode(t *testing.T) {
+	tests := []struct {
+		name         string
+		err          error
+		expectStatus int
+	}{
+		{
+			name:         "manager conflict returns conflict",
+			err:          managererrors.NewError(managererrors.ErrorConflict, "resume conflict"),
+			expectStatus: http.StatusConflict,
+		},
+		{
+			name:         "wait task conflict returns conflict",
+			err:          fmt.Errorf("resume failed: %w", cacheutils.ErrWaitTaskConflict),
+			expectStatus: http.StatusConflict,
+		},
+		{
+			name:         "kubernetes not found returns not found",
+			err:          apierrors.NewNotFound(schema.GroupResource{Group: agentsv1alpha1.GroupVersion.Group, Resource: "sandboxes"}, "sandbox-id"),
+			expectStatus: http.StatusNotFound,
+		},
+		{
+			name:         "unknown error returns internal server error",
+			err:          errors.New("resume failed"),
+			expectStatus: http.StatusInternalServerError,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expectStatus, resumeSandboxErrorCode(tt.err))
+		})
+	}
+}
+
 func TestResumeSandbox(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -580,10 +615,13 @@ func TestResumeSandbox(t *testing.T) {
 		expectStatus int
 	}{
 		{
+			// Running sandboxes succeed idempotently: infra Resume short-circuits
+			// on cond.Ready==True and the handler falls through to ExtendOnly
+			// timeout update (mirrors ConnectSandbox's Running path).
 			name:         "running sandbox",
 			paused:       false,
 			timeout:      300,
-			expectStatus: http.StatusConflict,
+			expectStatus: http.StatusNoContent,
 		},
 		{
 			name:         "resume sandbox: paused",
@@ -594,11 +632,13 @@ func TestResumeSandbox(t *testing.T) {
 			expectStatus: http.StatusNoContent,
 		},
 		{
+			// IsSandboxResumable rejects Paused+!Ready ("SandboxIsPausing") with
+			// ErrorConflict, which resumeSandboxErrorCode maps to 409.
 			name:         "resume sandbox: pausing",
 			paused:       true,
 			pausing:      true,
 			timeout:      300,
-			expectStatus: http.StatusInternalServerError,
+			expectStatus: http.StatusConflict,
 		},
 		{
 			name:         "resume sandbox: resuming",
