@@ -1289,7 +1289,7 @@ func TestInjectConflicts(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := injectConflicts(tt.pod, tt.config)
+			err := checkInjectionConflicts(tt.pod, tt.config)
 			if tt.expectError {
 				if err == nil {
 					t.Fatalf("expected error but got nil")
@@ -1436,6 +1436,221 @@ func TestDoSidecarInjectionConflicts(t *testing.T) {
 					if tt.pod.Annotations["sidecar.istio.io/status"] != "injected" {
 						t.Error("expected annotation sidecar.istio.io/status=injected to be injected")
 					}
+				}
+			}
+		})
+	}
+}
+
+func TestDoSidecarInjectionDuplicateRuntimes(t *testing.T) {
+	tests := []struct {
+		name                   string
+		sandbox                *agentsv1alpha1.Sandbox
+		pod                    *corev1.Pod
+		injectConfigMap        map[string]string
+		expectRuntimeContainer bool
+		expectCSIContainer     bool
+		expectEgressContainer  bool
+		expectInitContainers   int
+		expectContainers       int
+	}{
+		{
+			name: "duplicate runtime names - only first runtime processed",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+				Spec: agentsv1alpha1.SandboxSpec{
+					Runtimes: []agentsv1alpha1.RuntimeConfig{
+						{Name: agentsv1alpha1.RuntimeConfigForInjectAgentRuntime},
+						{Name: agentsv1alpha1.RuntimeConfigForInjectAgentRuntime},
+					},
+				},
+			},
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "main", Image: "nginx"}},
+				},
+			},
+			injectConfigMap: map[string]string{
+				KEY_RUNTIME_INJECTION_CONFIG: `{
+					"mainContainer": {"env": [{"name": "RUNTIME_ENV", "value": "test"}], "volumeMounts": []},
+					"csiSidecar": [{"name": "runtime-sidecar", "image": "runtime:v1"}],
+					"volume": []
+				}`,
+			},
+			expectRuntimeContainer: true,
+			expectInitContainers:   1, // only one runtime-sidecar, not duplicated
+		},
+		{
+			name: "duplicate csi runtime names - only first csi processed",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+				Spec: agentsv1alpha1.SandboxSpec{
+					Runtimes: []agentsv1alpha1.RuntimeConfig{
+						{Name: agentsv1alpha1.RuntimeConfigForInjectCsiMount},
+						{Name: agentsv1alpha1.RuntimeConfigForInjectCsiMount},
+						{Name: agentsv1alpha1.RuntimeConfigForInjectCsiMount},
+					},
+				},
+			},
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "main", Image: "nginx"}},
+				},
+			},
+			injectConfigMap: map[string]string{
+				KEY_CSI_INJECTION_CONFIG: `{
+					"mainContainer": {"volumeMounts": [{"name": "csi-vol", "mountPath": "/csi"}]},
+					"csiSidecar": [{"name": "csi-sidecar", "image": "csi:v1"}],
+					"volume": [{"name": "csi-vol", "emptyDir": {}}]
+				}`,
+			},
+			expectCSIContainer:   true,
+			expectInitContainers: 1, // only one csi-sidecar despite 3 runtime entries
+		},
+		{
+			name: "duplicate traffic-proxy runtime names - only first processed",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+				Spec: agentsv1alpha1.SandboxSpec{
+					Runtimes: []agentsv1alpha1.RuntimeConfig{
+						{Name: agentsv1alpha1.RuntimeConfigForInjectTrafficProxy},
+						{Name: agentsv1alpha1.RuntimeConfigForInjectTrafficProxy},
+					},
+				},
+			},
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "main", Image: "nginx"}},
+				},
+			},
+			injectConfigMap: map[string]string{
+				KEY_TRAFFIC_PROXY_INJECTION_CONFIG: `{
+					"mainContainer": {},
+					"csiSidecar": [],
+					"volume": [{"name": "egress-vol", "emptyDir": {}}],
+					"initContainers": [],
+					"containers": [{"name": "egress-sidecar", "image": "egress:v1"}],
+					"labels": {"egress": "enabled"},
+					"annotations": {}
+				}`,
+			},
+			expectEgressContainer: true,
+			expectContainers:       2, // main + egress sidecar
+		},
+		{
+			name: "mixed unique and duplicate runtimes - order preserved, first wins",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+				Spec: agentsv1alpha1.SandboxSpec{
+					Runtimes: []agentsv1alpha1.RuntimeConfig{
+						{Name: agentsv1alpha1.RuntimeConfigForInjectAgentRuntime},
+						{Name: agentsv1alpha1.RuntimeConfigForInjectCsiMount},
+						{Name: agentsv1alpha1.RuntimeConfigForInjectAgentRuntime}, // duplicate, should skip
+						{Name: agentsv1alpha1.RuntimeConfigForInjectTrafficProxy},
+						{Name: agentsv1alpha1.RuntimeConfigForInjectCsiMount}, // duplicate, should skip
+					},
+				},
+			},
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "main", Image: "nginx"}},
+				},
+			},
+			injectConfigMap: map[string]string{
+				KEY_RUNTIME_INJECTION_CONFIG: `{
+					"mainContainer": {"env": [{"name": "RUNTIME", "value": "on"}], "volumeMounts": []},
+					"csiSidecar": [{"name": "runtime-sidecar", "image": "runtime:v1"}],
+					"volume": []
+				}`,
+				KEY_CSI_INJECTION_CONFIG: `{
+					"mainContainer": {"volumeMounts": [{"name": "csi-vol", "mountPath": "/csi"}]},
+					"csiSidecar": [{"name": "csi-sidecar", "image": "csi:v1"}],
+					"volume": [{"name": "csi-vol", "emptyDir": {}}]
+				}`,
+				KEY_TRAFFIC_PROXY_INJECTION_CONFIG: `{
+					"mainContainer": {},
+					"csiSidecar": [],
+					"volume": [{"name": "egress-vol", "emptyDir": {}}],
+					"initContainers": [],
+					"containers": [{"name": "egress-sidecar", "image": "egress:v1"}],
+					"labels": {},
+					"annotations": {}
+				}`,
+			},
+			expectRuntimeContainer: true,
+			expectCSIContainer:     true,
+			expectEgressContainer:  true,
+			expectInitContainers:   2, // runtime-sidecar + csi-sidecar (no duplicates)
+			expectContainers:       2, // main + egress-sidecar
+		},
+		{
+			name: "empty runtime list - no injection",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+				Spec:       agentsv1alpha1.SandboxSpec{},
+			},
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "main", Image: "nginx"}},
+				},
+			},
+			injectConfigMap:  map[string]string{},
+			expectContainers: 1, // unchanged
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			err := doSidecarInjection(ctx, tt.sandbox, tt.pod, tt.injectConfigMap)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			runtimeContainerInjected := false
+			csiContainerInjected := false
+			for _, container := range tt.pod.Spec.InitContainers {
+				if container.Name == "runtime-sidecar" && container.Image == "runtime:v1" {
+					runtimeContainerInjected = true
+				}
+				if container.Name == "csi-sidecar" && container.Image == "csi:v1" {
+					csiContainerInjected = true
+				}
+			}
+			egressContainerInjected := false
+			for _, container := range tt.pod.Spec.Containers {
+				if container.Name == "egress-sidecar" && container.Image == "egress:v1" {
+					egressContainerInjected = true
+				}
+			}
+
+			if tt.expectRuntimeContainer && !runtimeContainerInjected {
+				t.Error("expected runtime sidecar to be injected, but not found")
+			}
+			if !tt.expectRuntimeContainer && runtimeContainerInjected {
+				t.Error("expected NO runtime sidecar injection, but injection occurred")
+			}
+			if tt.expectCSIContainer && !csiContainerInjected {
+				t.Error("expected csi sidecar to be injected, but not found")
+			}
+			if !tt.expectCSIContainer && csiContainerInjected {
+				t.Error("expected NO csi sidecar injection, but injection occurred")
+			}
+			if tt.expectEgressContainer && !egressContainerInjected {
+				t.Error("expected egress sidecar to be injected, but not found")
+			}
+			if !tt.expectEgressContainer && egressContainerInjected {
+				t.Error("expected NO egress sidecar injection, but injection occurred")
+			}
+
+			if tt.expectInitContainers > 0 {
+				if len(tt.pod.Spec.InitContainers) != tt.expectInitContainers {
+					t.Errorf("expected %d InitContainers, got %d", tt.expectInitContainers, len(tt.pod.Spec.InitContainers))
+				}
+			}
+			if tt.expectContainers > 0 {
+				if len(tt.pod.Spec.Containers) != tt.expectContainers {
+					t.Errorf("expected %d Containers, got %d", tt.expectContainers, len(tt.pod.Spec.Containers))
 				}
 			}
 		})

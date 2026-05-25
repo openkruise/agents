@@ -156,7 +156,7 @@ func setAgentRuntimeContainer(ctx context.Context, podSpec *corev1.PodSpec, conf
 	podSpec.Volumes = append(podSpec.Volumes, config.Volumes...)
 }
 
-func applyInjectionTemplate(ctx context.Context, pod *corev1.Pod, config SidecarInjectConfig) error {
+func applyInjectionTemplate(pod *corev1.Pod, config SidecarInjectConfig) {
 	if pod.Labels == nil {
 		pod.Labels = make(map[string]string)
 	}
@@ -188,16 +188,14 @@ func applyInjectionTemplate(ctx context.Context, pod *corev1.Pod, config Sidecar
 	for _, v := range config.Volumes {
 		pod.Spec.Volumes = append(pod.Spec.Volumes, v)
 	}
-
-	return nil
 }
 
-// injectConflicts checks if injection config conflicts with the pod. Only configuration below are checked:
+// checkInjectionConflicts checks if injection config conflicts with the pod. Only configuration below are checked:
 // 1. Containers
 // 2. Init containers
 // 3. Volumes
 // Annotations and Labels are not checked and user-defined values may override the injected values.
-func injectConflicts(pod *corev1.Pod, config SidecarInjectConfig) error {
+func checkInjectionConflicts(pod *corev1.Pod, config SidecarInjectConfig) error {
 	for _, ic := range config.InitContainers {
 		if conflicted := utils.FindContainer(ic.Name, pod.Spec.InitContainers); conflicted != nil {
 			return fmt.Errorf("inject conflicting with init container: %s", ic.Name)

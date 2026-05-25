@@ -48,20 +48,20 @@ func InjectSandboxRuntimes(ctx context.Context, sandbox *agentsv1alpha1.Sandbox,
 func doSidecarInjection(ctx context.Context, sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod, injectConfigMap map[string]string) error {
 	logger := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(sandbox))
 
-	runtimes := sets.New[string]()
+	injectedRuntimes := sets.NewString()
 	for _, runtime := range sandbox.Spec.Runtimes {
-		if runtime.Name != "" {
-			runtimes.Insert(runtime.Name)
+		if injectedRuntimes.Has(runtime.Name) {
+			logger.V(5).Info("skipping duplicate runtime, already processed", "runtime", runtime.Name)
+			continue
 		}
-	}
+		injectedRuntimes.Insert(runtime.Name)
 
-	for runtime := range runtimes {
-		runtimeInjectConfig, err := parseInjectConfig(ctx, runtime, injectConfigMap)
+		runtimeInjectConfig, err := parseInjectConfig(ctx, runtime.Name, injectConfigMap)
 		if err != nil {
 			logger.Error(err, "failed to parse runtime injection configuration")
 			return err
 		}
-		switch runtime {
+		switch runtime.Name {
 		case agentsv1alpha1.RuntimeConfigForInjectAgentRuntime:
 			if !isContainersExists(pod.Spec.InitContainers, runtimeInjectConfig.Sidecars) && !isContainersExists(pod.Spec.Containers, runtimeInjectConfig.Sidecars) {
 				setAgentRuntimeContainer(ctx, &pod.Spec, runtimeInjectConfig)
@@ -73,17 +73,15 @@ func doSidecarInjection(ctx context.Context, sandbox *agentsv1alpha1.Sandbox, po
 		default:
 			logger.V(5).Info("injecting runtime", "name", runtime)
 			// not mute the conflicts
-			if conflictErr := injectConflicts(pod, runtimeInjectConfig); conflictErr != nil {
+			if conflictErr := checkInjectionConflicts(pod, runtimeInjectConfig); conflictErr != nil {
 				return fmt.Errorf("failed to inject runtime %s: %v", runtime, conflictErr)
 			}
-			if err := applyInjectionTemplate(ctx, pod, runtimeInjectConfig); err != nil {
-				return fmt.Errorf("failed to inject runtime %s: %v", runtime, err)
-			}
+			applyInjectionTemplate(pod, runtimeInjectConfig)
 		}
 	}
 
 	// Enable health probes rewrite if needed.
-	if runtimes.Has(agentsv1alpha1.RuntimeConfigForInjectTrafficProxy) {
+	if injectedRuntimes.Has(agentsv1alpha1.RuntimeConfigForInjectTrafficProxy) {
 		if err := trafficproxy.ApplyHealthProbeRewrite(pod); err != nil {
 			logger.Error(err, "failed to apply health probe rewrite")
 			return err
