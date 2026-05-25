@@ -18,7 +18,6 @@ package job
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"k8s.io/klog/v2"
@@ -52,7 +51,7 @@ func DoCommit(ctx context.Context) int {
 	klog.InfoS("Commit succeeded", "elapsed", time.Since(start))
 
 	// 3. nerdctl push
-	klog.InfoS(fmt.Sprintf("Start to push image %s", image))
+	klog.InfoS("Start to push image", "image", image)
 	start = time.Now()
 	if err := NerdctlExec(ctx, WithArgs("push", image)); err != nil {
 		klog.ErrorS(err, "Push failed", "image", image)

@@ -364,8 +364,8 @@ func TestEnsureCommitUpdated_JobNotFound(t *testing.T) {
 	args := &EnsureFuncArgs{Commit: commit, NewStatus: newStatus}
 
 	_, err := ctrl.EnsureCommitUpdated(context.TODO(), args)
-	if err == nil {
-		t.Fatal("expected error for missing job")
+	if err != nil {
+		t.Fatalf("expected nil error for missing job (terminal state set), got %v", err)
 	}
 	if newStatus.Phase != agentsv1alpha1.CommitFailed {
 		t.Errorf("expected CommitFailed, got %s", newStatus.Phase)
@@ -679,6 +679,7 @@ func TestGetLatestJobPodExitCode(t *testing.T) {
 					Status: corev1.PodStatus{
 						ContainerStatuses: []corev1.ContainerStatus{
 							{
+								Name:        "agent-job",
 								ContainerID: "containerd://abc",
 								State: corev1.ContainerState{
 									Terminated: &corev1.ContainerStateTerminated{ExitCode: 0},
@@ -708,6 +709,7 @@ func TestGetLatestJobPodExitCode(t *testing.T) {
 					Status: corev1.PodStatus{
 						ContainerStatuses: []corev1.ContainerStatus{
 							{
+								Name:        "agent-job",
 								ContainerID: "containerd://abc",
 								State: corev1.ContainerState{
 									Terminated: &corev1.ContainerStateTerminated{ExitCode: 1},
@@ -737,6 +739,7 @@ func TestGetLatestJobPodExitCode(t *testing.T) {
 					Status: corev1.PodStatus{
 						ContainerStatuses: []corev1.ContainerStatus{
 							{
+								Name:        "agent-job",
 								ContainerID: "containerd://abc",
 								State: corev1.ContainerState{
 									Terminated: &corev1.ContainerStateTerminated{ExitCode: 2},
@@ -766,6 +769,7 @@ func TestGetLatestJobPodExitCode(t *testing.T) {
 					Status: corev1.PodStatus{
 						ContainerStatuses: []corev1.ContainerStatus{
 							{
+								Name:        "agent-job",
 								ContainerID: "containerd://abc",
 								State: corev1.ContainerState{
 									Terminated: &corev1.ContainerStateTerminated{ExitCode: 6},
@@ -776,9 +780,9 @@ func TestGetLatestJobPodExitCode(t *testing.T) {
 				},
 			},
 			expectNil:    false,
-			expectType:   "",
+			expectType:   "CommitContainer",
 			expectStatus: metav1.ConditionFalse,
-			expectReason: "",
+			expectReason: "UnknownExitCode",
 		},
 		{
 			name: "pod without terminated state",
@@ -795,6 +799,7 @@ func TestGetLatestJobPodExitCode(t *testing.T) {
 					Status: corev1.PodStatus{
 						ContainerStatuses: []corev1.ContainerStatus{
 							{
+								Name:        "agent-job",
 								ContainerID: "containerd://abc",
 								State: corev1.ContainerState{
 									Running: &corev1.ContainerStateRunning{},

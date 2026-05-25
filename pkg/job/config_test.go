@@ -90,57 +90,6 @@ func TestConfig_DryRun(t *testing.T) {
 	}
 }
 
-func TestConfig_DiskSpaceCheckEnabled(t *testing.T) {
-	os.Unsetenv(EnvDiskSpaceCheckEnabled)
-	if Config().DiskSpaceCheckEnabled() {
-		t.Error("expected false when unset")
-	}
-	os.Setenv(EnvDiskSpaceCheckEnabled, "true")
-	defer os.Unsetenv(EnvDiskSpaceCheckEnabled)
-	if !Config().DiskSpaceCheckEnabled() {
-		t.Error("expected true")
-	}
-}
-
-func TestConfig_DiskSpaceSafetyFactor_Default(t *testing.T) {
-	os.Unsetenv(EnvDiskSpaceSafetyFactor)
-	if Config().DiskSpaceSafetyFactor() != 2.0 {
-		t.Errorf("unexpected default: %f", Config().DiskSpaceSafetyFactor())
-	}
-}
-
-func TestConfig_DiskSpaceSafetyFactor_Custom(t *testing.T) {
-	os.Setenv(EnvDiskSpaceSafetyFactor, "3.5")
-	defer os.Unsetenv(EnvDiskSpaceSafetyFactor)
-	if Config().DiskSpaceSafetyFactor() != 3.5 {
-		t.Errorf("unexpected value: %f", Config().DiskSpaceSafetyFactor())
-	}
-}
-
-func TestConfig_DiskSpaceSafetyFactor_Invalid(t *testing.T) {
-	os.Setenv(EnvDiskSpaceSafetyFactor, "notanumber")
-	defer os.Unsetenv(EnvDiskSpaceSafetyFactor)
-	// Should fall back to default
-	if Config().DiskSpaceSafetyFactor() != 2.0 {
-		t.Errorf("expected fallback to 2.0, got %f", Config().DiskSpaceSafetyFactor())
-	}
-}
-
-func TestConfig_ContainerdRootPath_Default(t *testing.T) {
-	os.Unsetenv(EnvContainerdRootPath)
-	if Config().ContainerdRootPath() != "/var/lib/containerd" {
-		t.Errorf("unexpected default: %s", Config().ContainerdRootPath())
-	}
-}
-
-func TestConfig_ContainerdRootPath_Custom(t *testing.T) {
-	os.Setenv(EnvContainerdRootPath, "/data/containerd")
-	defer os.Unsetenv(EnvContainerdRootPath)
-	if Config().ContainerdRootPath() != "/data/containerd" {
-		t.Errorf("unexpected value: %s", Config().ContainerdRootPath())
-	}
-}
-
 func TestConfig_EnvGetters(t *testing.T) {
 	tests := []struct {
 		envKey string

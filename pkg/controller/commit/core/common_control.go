@@ -104,11 +104,11 @@ func (r *commonControl) EnsureCommitUpdated(ctx context.Context, args *EnsureFun
 	jobKey := client.ObjectKey{Namespace: commit.Namespace, Name: jobutil.MakeJobName(string(commit.UID))}
 	if err := r.Client.Get(ctx, jobKey, job); err != nil {
 		if errors.IsNotFound(err) {
-			klog.InfoS("Job not found", "commit", klog.KObj(commit))
+			klog.InfoS("Job not found, marking commit as failed", "commit", klog.KObj(commit))
 			now := metav1.Now()
 			args.NewStatus.Phase = agentsv1alpha1.CommitFailed
 			args.NewStatus.CompletionTime = &now
-			return requeueAfter, err
+			return requeueAfter, nil
 		}
 		return requeueAfter, fmt.Errorf("failed to get job: %w", err)
 	}

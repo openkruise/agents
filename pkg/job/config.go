@@ -18,7 +18,6 @@ package job
 
 import (
 	"os"
-	"strconv"
 
 	corev1 "k8s.io/api/core/v1"
 )
@@ -65,12 +64,6 @@ const (
 	// EnvDryRun is the environment variable name for dry run mode.
 	EnvDryRun = "DRY_RUN"
 
-	// EnvDiskSpaceCheckEnabled is the environment variable name for disk space check toggle.
-	EnvDiskSpaceCheckEnabled = "DISK_SPACE_CHECK_ENABLED"
-	// EnvDiskSpaceSafetyFactor is the environment variable name for disk space safety factor.
-	EnvDiskSpaceSafetyFactor = "DISK_SPACE_SAFETY_FACTOR"
-	// EnvContainerdRootPath is the environment variable name for containerd root path.
-	EnvContainerdRootPath = "CONTAINERD_ROOT_PATH"
 )
 
 // EnvConfig reads configuration from environment variables.
@@ -108,26 +101,6 @@ func (c *EnvConfig) ImagePullPolicy() corev1.PullPolicy {
 		return corev1.PullPolicy(p)
 	}
 	return corev1.PullIfNotPresent
-}
-
-func (c *EnvConfig) DiskSpaceCheckEnabled() bool {
-	return os.Getenv(EnvDiskSpaceCheckEnabled) == "true"
-}
-
-func (c *EnvConfig) DiskSpaceSafetyFactor() float64 {
-	if v := os.Getenv(EnvDiskSpaceSafetyFactor); v != "" {
-		if f, err := strconv.ParseFloat(v, 64); err == nil {
-			return f
-		}
-	}
-	return 2.0
-}
-
-func (c *EnvConfig) ContainerdRootPath() string {
-	if p := os.Getenv(EnvContainerdRootPath); p != "" {
-		return p
-	}
-	return "/var/lib/containerd"
 }
 
 var defaultConfig = &EnvConfig{}

@@ -32,10 +32,9 @@ const (
 )
 
 const (
-	ExitCodeSuccess              = 0
-	ExitCodeCommitFailed         = 1
-	ExitCodePushFailed           = 2
-	ExitCodeDiskSpaceCheckFailed = 6
+	ExitCodeSuccess      = 0
+	ExitCodeCommitFailed = 1
+	ExitCodePushFailed   = 2
 )
 
 func MakeJobName(uid string) string {
@@ -67,11 +66,18 @@ var CommitJobExitCodeMap = map[int32]CommitConditionValue{
 
 func GetCommitCondition(pod *corev1.Pod) *metav1.Condition {
 	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.Name != "agent-job" {
+			continue
+		}
 		if cs.State.Terminated != nil {
-			conditionValue := CommitJobExitCodeMap[cs.State.Terminated.ExitCode]
-			klog.InfoS("Commit job exit", "containerID", cs.ContainerID, "exitCode", cs.State.Terminated.ExitCode)
+			exitCode := cs.State.Terminated.ExitCode
+			conditionValue, ok := CommitJobExitCodeMap[exitCode]
+			if !ok {
+				conditionValue = CommitConditionValue{"CommitContainer", "UnknownExitCode"}
+			}
+			klog.InfoS("Commit job exit", "containerID", cs.ContainerID, "exitCode", exitCode)
 			status := metav1.ConditionTrue
-			if cs.State.Terminated.ExitCode != 0 {
+			if exitCode != 0 {
 				status = metav1.ConditionFalse
 			}
 			return &metav1.Condition{

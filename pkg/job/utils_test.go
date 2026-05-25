@@ -108,6 +108,7 @@ func TestGetCommitCondition(t *testing.T) {
 				Status: corev1.PodStatus{
 					ContainerStatuses: []corev1.ContainerStatus{
 						{
+							Name: "agent-job",
 							State: corev1.ContainerState{
 								Terminated: &corev1.ContainerStateTerminated{ExitCode: 0},
 							},
@@ -125,6 +126,7 @@ func TestGetCommitCondition(t *testing.T) {
 				Status: corev1.PodStatus{
 					ContainerStatuses: []corev1.ContainerStatus{
 						{
+							Name: "agent-job",
 							State: corev1.ContainerState{
 								Terminated: &corev1.ContainerStateTerminated{ExitCode: 1},
 							},
@@ -142,6 +144,7 @@ func TestGetCommitCondition(t *testing.T) {
 				Status: corev1.PodStatus{
 					ContainerStatuses: []corev1.ContainerStatus{
 						{
+							Name: "agent-job",
 							State: corev1.ContainerState{
 								Terminated: &corev1.ContainerStateTerminated{ExitCode: 2},
 							},
@@ -159,6 +162,7 @@ func TestGetCommitCondition(t *testing.T) {
 				Status: corev1.PodStatus{
 					ContainerStatuses: []corev1.ContainerStatus{
 						{
+							Name:  "agent-job",
 							State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
 						},
 					},
