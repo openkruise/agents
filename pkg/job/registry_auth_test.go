@@ -83,23 +83,135 @@ func TestConvertK8sDockerConfig_MultipleServers(t *testing.T) {
 	}
 }
 
-func TestSetupRegistryAuth_NoSecretFile(t *testing.T) {
-	// When the secret file doesn't exist, setupRegistryAuth should succeed silently
+func TestSetupRegistryAuthFrom_NoSecretFile(t *testing.T) {
 	tmpDir := t.TempDir()
-	origRegistryPath := registrySecretPath
-	origDockerDir := dockerConfigDir
+	secretPath := filepath.Join(tmpDir, "nonexistent", "config.json")
+	configDir := filepath.Join(tmpDir, "docker")
 
-	// We can't override package consts, but we can test that setupRegistryAuth
-	// handles missing files by checking it doesn't error when the path doesn't exist
-	// This is a basic smoke test since setupRegistryAuth uses hardcoded paths
-	_ = tmpDir
-	_ = origRegistryPath
-	_ = origDockerDir
-	// The real test is that setupRegistryAuth() doesn't panic when file is missing
-	// It reads from /var/run/secrets/registry/config.json which won't exist in tests
-	err := setupRegistryAuth()
+	err := setupRegistryAuthFrom(secretPath, configDir)
 	if err != nil {
-		t.Errorf("setupRegistryAuth should not error when secret file is missing: %v", err)
+		t.Errorf("should not error when secret file is missing: %v", err)
+	}
+}
+
+func TestSetupRegistryAuthFrom_InvalidJSON(t *testing.T) {
+	tmpDir := t.TempDir()
+	secretPath := filepath.Join(tmpDir, "config.json")
+	os.WriteFile(secretPath, []byte("not-json"), 0600)
+	configDir := filepath.Join(tmpDir, "docker")
+
+	err := setupRegistryAuthFrom(secretPath, configDir)
+	if err == nil {
+		t.Error("expected error for invalid JSON")
+	}
+}
+
+func TestSetupRegistryAuthFrom_EmptyCredentials(t *testing.T) {
+	tmpDir := t.TempDir()
+	secretPath := filepath.Join(tmpDir, "config.json")
+	data, _ := json.Marshal(k8sDockerConfigJSON{Auths: map[string]k8sAuthEntry{"empty.io": {}}})
+	os.WriteFile(secretPath, data, 0600)
+	configDir := filepath.Join(tmpDir, "docker")
+
+	err := setupRegistryAuthFrom(secretPath, configDir)
+	if err != nil {
+		t.Errorf("should not error for empty credentials: %v", err)
+	}
+	// config.json should NOT be written since no valid credentials
+	if _, err := os.Stat(filepath.Join(configDir, "config.json")); !os.IsNotExist(err) {
+		t.Error("config.json should not be created for empty credentials")
+	}
+}
+
+func TestSetupRegistryAuthFrom_WritesConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	secretPath := filepath.Join(tmpDir, "config.json")
+	k8sCfg := k8sDockerConfigJSON{
+		Auths: map[string]k8sAuthEntry{
+			"registry.io": {Username: "user", Password: "pass"},
+		},
+	}
+	data, _ := json.Marshal(k8sCfg)
+	os.WriteFile(secretPath, data, 0600)
+	configDir := filepath.Join(tmpDir, "docker")
+
+	err := setupRegistryAuthFrom(secretPath, configDir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	written, err := os.ReadFile(filepath.Join(configDir, "config.json"))
+	if err != nil {
+		t.Fatalf("config.json not written: %v", err)
+	}
+	var cfg dockerConfigJSON
+	json.Unmarshal(written, &cfg)
+	if _, ok := cfg.Auths["registry.io"]; !ok {
+		t.Error("expected registry.io in written config")
+	}
+}
+
+func TestConvertK8sDockerConfig_TableDriven(t *testing.T) {
+	tests := []struct {
+		name          string
+		input         k8sDockerConfigJSON
+		expectEntries int
+		expectAuth    map[string]string // server -> expected auth value
+	}{
+		{
+			name: "auth field takes priority over username/password",
+			input: k8sDockerConfigJSON{
+				Auths: map[string]k8sAuthEntry{
+					"registry.io": {Auth: "precomputed-auth", Username: "user", Password: "pass"},
+				},
+			},
+			expectEntries: 1,
+			expectAuth:    map[string]string{"registry.io": "precomputed-auth"},
+		},
+		{
+			name: "only username without password is skipped",
+			input: k8sDockerConfigJSON{
+				Auths: map[string]k8sAuthEntry{
+					"partial.io": {Username: "onlyuser"},
+				},
+			},
+			expectEntries: 0,
+		},
+		{
+			name: "only password without username is skipped",
+			input: k8sDockerConfigJSON{
+				Auths: map[string]k8sAuthEntry{
+					"partial.io": {Password: "onlypass"},
+				},
+			},
+			expectEntries: 0,
+		},
+		{
+			name: "empty auths map",
+			input: k8sDockerConfigJSON{
+				Auths: map[string]k8sAuthEntry{},
+			},
+			expectEntries: 0,
+		},
+		{
+			name:          "nil auths map",
+			input:         k8sDockerConfigJSON{},
+			expectEntries: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := convertK8sDockerConfig(tt.input)
+			if len(result.Auths) != tt.expectEntries {
+				t.Errorf("expected %d entries, got %d", tt.expectEntries, len(result.Auths))
+			}
+			for server, expectedAuth := range tt.expectAuth {
+				if result.Auths[server].Auth != expectedAuth {
+					t.Errorf("server %s: auth = %s, want %s", server, result.Auths[server].Auth, expectedAuth)
+				}
+			}
+		})
 	}
 }
 

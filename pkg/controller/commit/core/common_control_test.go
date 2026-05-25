@@ -464,6 +464,68 @@ func TestEnsureCommitRunning_MissingJobImage(t *testing.T) {
 	}
 }
 
+func TestEnsureCommitRunning_JobPodAlreadyExists(t *testing.T) {
+	os.Setenv("AGENT_JOB_IMAGE", "test-image:latest")
+	defer os.Unsetenv("AGENT_JOB_IMAGE")
+
+	scheme := newTestScheme()
+	commit := newTestCommit("test-commit", "default")
+	pod := newTestPod("test-pod", "default", "node-1")
+
+	// Create an existing job pod with matching label
+	existingJobPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "existing-job-pod",
+			Namespace: "default",
+			Labels: map[string]string{
+				jobutil.LabelCommitUID: string(commit.UID),
+			},
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+
+	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(commit, pod, existingJobPod).Build()
+	ctrl := newCommonControlForTest(fc)
+
+	newStatus := commit.Status.DeepCopy()
+	args := &EnsureFuncArgs{Pod: pod, Commit: commit, NewStatus: newStatus}
+
+	_, err := ctrl.EnsureCommitRunning(context.TODO(), args)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Phase should remain pending since job pod already exists (early return)
+	if newStatus.Phase != agentsv1alpha1.CommitPending {
+		t.Errorf("expected phase to remain Pending, got %s", newStatus.Phase)
+	}
+}
+
+func TestApplyCommitJob_AlreadyExists(t *testing.T) {
+	os.Setenv("AGENT_JOB_IMAGE", "test-image:latest")
+	defer os.Unsetenv("AGENT_JOB_IMAGE")
+
+	scheme := newTestScheme()
+	commit := newTestCommit("test-commit", "default")
+	pod := newTestPod("test-pod", "default", "node-1")
+
+	// Pre-create the job so applyCommitJob hits IsAlreadyExists path
+	jobName := jobutil.MakeJobName(string(commit.UID))
+	existingJob := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      jobName,
+			Namespace: "default",
+		},
+	}
+
+	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(commit, pod, existingJob).Build()
+	ctrl := newCommonControlForTest(fc)
+
+	err := ctrl.applyCommitJob(context.TODO(), commit, pod)
+	if err != nil {
+		t.Fatalf("expected no error for already-exists job, got: %v", err)
+	}
+}
+
 func TestEnsureCommitRunning_WithDockerSecret(t *testing.T) {
 	os.Setenv("AGENT_JOB_IMAGE", "test-image:latest")
 	defer os.Unsetenv("AGENT_JOB_IMAGE")
@@ -568,4 +630,270 @@ func TestEnsureCommitDeleted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+}
+
+func TestEnsureCommitDeleted_NoFinalizer(t *testing.T) {
+	// When commit has no finalizer, PatchFinalizer should return early without error
+	scheme := newTestScheme()
+	commit := newTestCommit("test-commit", "default")
+	// No finalizers set
+
+	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(commit).Build()
+	ctrl := newCommonControlForTest(fc)
+
+	args := &EnsureFuncArgs{Commit: commit, NewStatus: commit.Status.DeepCopy()}
+	_, err := ctrl.EnsureCommitDeleted(context.TODO(), args)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// --- getLatestJobPodExitCode tests ---
+
+func TestGetLatestJobPodExitCode(t *testing.T) {
+	tests := []struct {
+		name           string
+		pods           []corev1.Pod
+		expectNil      bool
+		expectType     string
+		expectStatus   metav1.ConditionStatus
+		expectReason   string
+	}{
+		{
+			name:      "no pods",
+			pods:      nil,
+			expectNil: true,
+		},
+		{
+			name: "exit code 0 - success",
+			pods: []corev1.Pod{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "job-pod-1",
+						Namespace: "default",
+						Labels: map[string]string{
+							jobutil.LabelCommitUID: "test-uid-1234",
+						},
+						CreationTimestamp: metav1.Now(),
+					},
+					Status: corev1.PodStatus{
+						ContainerStatuses: []corev1.ContainerStatus{
+							{
+								ContainerID: "containerd://abc",
+								State: corev1.ContainerState{
+									Terminated: &corev1.ContainerStateTerminated{ExitCode: 0},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectNil:    false,
+			expectType:   "PushCommittedImage",
+			expectStatus: metav1.ConditionTrue,
+			expectReason: "PushCommittedImageSuccess",
+		},
+		{
+			name: "exit code 1 - commit failed",
+			pods: []corev1.Pod{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "job-pod-1",
+						Namespace: "default",
+						Labels: map[string]string{
+							jobutil.LabelCommitUID: "test-uid-1234",
+						},
+						CreationTimestamp: metav1.Now(),
+					},
+					Status: corev1.PodStatus{
+						ContainerStatuses: []corev1.ContainerStatus{
+							{
+								ContainerID: "containerd://abc",
+								State: corev1.ContainerState{
+									Terminated: &corev1.ContainerStateTerminated{ExitCode: 1},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectNil:    false,
+			expectType:   "CommitContainer",
+			expectStatus: metav1.ConditionFalse,
+			expectReason: "CommitContainerFailed",
+		},
+		{
+			name: "exit code 2 - push failed",
+			pods: []corev1.Pod{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "job-pod-1",
+						Namespace: "default",
+						Labels: map[string]string{
+							jobutil.LabelCommitUID: "test-uid-1234",
+						},
+						CreationTimestamp: metav1.Now(),
+					},
+					Status: corev1.PodStatus{
+						ContainerStatuses: []corev1.ContainerStatus{
+							{
+								ContainerID: "containerd://abc",
+								State: corev1.ContainerState{
+									Terminated: &corev1.ContainerStateTerminated{ExitCode: 2},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectNil:    false,
+			expectType:   "PushCommittedImage",
+			expectStatus: metav1.ConditionFalse,
+			expectReason: "PushCommittedImageFailed",
+		},
+		{
+			name: "exit code 6 - unknown exit code (not in map)",
+			pods: []corev1.Pod{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "job-pod-1",
+						Namespace: "default",
+						Labels: map[string]string{
+							jobutil.LabelCommitUID: "test-uid-1234",
+						},
+						CreationTimestamp: metav1.Now(),
+					},
+					Status: corev1.PodStatus{
+						ContainerStatuses: []corev1.ContainerStatus{
+							{
+								ContainerID: "containerd://abc",
+								State: corev1.ContainerState{
+									Terminated: &corev1.ContainerStateTerminated{ExitCode: 6},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectNil:    false,
+			expectType:   "",
+			expectStatus: metav1.ConditionFalse,
+			expectReason: "",
+		},
+		{
+			name: "pod without terminated state",
+			pods: []corev1.Pod{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "job-pod-1",
+						Namespace: "default",
+						Labels: map[string]string{
+							jobutil.LabelCommitUID: "test-uid-1234",
+						},
+						CreationTimestamp: metav1.Now(),
+					},
+					Status: corev1.PodStatus{
+						ContainerStatuses: []corev1.ContainerStatus{
+							{
+								ContainerID: "containerd://abc",
+								State: corev1.ContainerState{
+									Running: &corev1.ContainerStateRunning{},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectNil: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := newTestScheme()
+			builder := fake.NewClientBuilder().WithScheme(scheme)
+			for i := range tt.pods {
+				builder = builder.WithObjects(&tt.pods[i])
+			}
+			fc := builder.Build()
+			ctrl := newCommonControlForTest(fc)
+
+			commit := newTestCommit("test-commit", "default")
+			condition := ctrl.getLatestJobPodExitCode(context.TODO(), commit)
+
+			if tt.expectNil {
+				if condition != nil {
+					t.Errorf("expected nil condition, got %+v", condition)
+				}
+				return
+			}
+			if condition == nil {
+				t.Fatal("expected non-nil condition, got nil")
+			}
+			if condition.Type != tt.expectType {
+				t.Errorf("expected type %q, got %q", tt.expectType, condition.Type)
+			}
+			if condition.Status != tt.expectStatus {
+				t.Errorf("expected status %q, got %q", tt.expectStatus, condition.Status)
+			}
+			if condition.Reason != tt.expectReason {
+				t.Errorf("expected reason %q, got %q", tt.expectReason, condition.Reason)
+			}
+		})
+	}
+}
+
+// --- applyCommitJob error tests ---
+
+func TestApplyCommitJob_EmptyContainerID(t *testing.T) {
+	os.Setenv("AGENT_JOB_IMAGE", "test-image:latest")
+	defer os.Unsetenv("AGENT_JOB_IMAGE")
+
+	scheme := newTestScheme()
+	commit := newTestCommit("test-commit", "default")
+	// Pod with empty container ID should cause job generation to fail
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-pod",
+			Namespace: "default",
+			UID:       types.UID("pod-uid-5678"),
+		},
+		Spec: corev1.PodSpec{
+			NodeName:           "node-1",
+			ServiceAccountName: "default",
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			ContainerStatuses: []corev1.ContainerStatus{
+				{
+					Name:        "workspace",
+					ContainerID: "", // empty container ID
+				},
+			},
+		},
+	}
+
+	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(commit, pod).Build()
+	ctrl := newCommonControlForTest(fc)
+
+	err := ctrl.applyCommitJob(context.TODO(), commit, pod)
+	if err == nil {
+		t.Fatal("expected error when container ID is empty")
+	}
+	if !contains(err.Error(), "failed to generate commit job") {
+		t.Errorf("expected error to contain 'failed to generate commit job', got: %v", err)
+	}
+}
+
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsHelper(s, substr))
+}
+
+func containsHelper(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
 }

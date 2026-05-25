@@ -18,6 +18,7 @@ package commit
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -268,6 +269,62 @@ func TestReconcile_CommitSucceeded_TTLExpired(t *testing.T) {
 	err = r.Get(context.TODO(), client.ObjectKey{Name: "test-commit", Namespace: "default"}, got)
 	if err == nil {
 		t.Error("expected commit to be deleted after TTL expiry")
+	}
+}
+
+func TestReconcile_CommitRunning_EnsureUpdatedError(t *testing.T) {
+	commit := newCommit("test-commit", "default", agentsv1alpha1.CommitRunning)
+	commit.Finalizers = []string{agentsv1alpha1.CommitFinalizer}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pod", Namespace: "default"},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	r, mock := newTestReconciler(commit, pod)
+	mock.ensureUpdatedErr = fmt.Errorf("job not found")
+	mock.setPhaseOnUpdated = agentsv1alpha1.CommitFailed
+
+	_, err := r.Reconcile(context.TODO(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-commit", Namespace: "default"},
+	})
+	// The error from EnsureCommitUpdated is not returned directly; it triggers status update
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !mock.updatedCalled {
+		t.Error("expected EnsureCommitUpdated to be called")
+	}
+
+	// Verify status was updated to Failed
+	updated := &agentsv1alpha1.Commit{}
+	_ = r.Get(context.TODO(), client.ObjectKey{Name: "test-commit", Namespace: "default"}, updated)
+	if updated.Status.Phase != agentsv1alpha1.CommitFailed {
+		t.Errorf("expected Failed phase, got %s", updated.Status.Phase)
+	}
+}
+
+func TestReconcile_CommitRunning_StatusUnchanged(t *testing.T) {
+	// When status hasn't changed (DeepEqual returns true), updateCommitStatus should be a no-op
+	commit := newCommit("test-commit", "default", agentsv1alpha1.CommitRunning)
+	commit.Finalizers = []string{agentsv1alpha1.CommitFinalizer}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pod", Namespace: "default"},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	r, mock := newTestReconciler(commit, pod)
+	// Do not set any phase change in mock — status remains CommitRunning (same as commit.Status.Phase)
+
+	result, err := r.Reconcile(context.TODO(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-commit", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !mock.updatedCalled {
+		t.Error("expected EnsureCommitUpdated to be called")
+	}
+	// Since status hasn't changed, no patch should happen (no error expected)
+	if result.RequeueAfter != 0 {
+		t.Errorf("expected no requeue, got %v", result.RequeueAfter)
 	}
 }
 

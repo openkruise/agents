@@ -17,14 +17,19 @@ limitations under the License.
 package validating
 
 import (
+	"context"
+	"encoding/json"
+	"net/http"
 	"testing"
 
+	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 )
@@ -217,4 +222,119 @@ func TestValidateCommit(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPath(t *testing.T) {
+	h := &CommitValidatingHandler{}
+	if got := h.Path(); got != "/validate-commit" {
+		t.Errorf("expected /validate-commit, got %s", got)
+	}
+}
+
+func TestEnabled(t *testing.T) {
+	// Without a discovery client set up, DiscoverGVK will return false
+	h := &CommitValidatingHandler{}
+	// Just verify it doesn't panic and returns a bool
+	_ = h.Enabled()
+}
+
+func TestHandle(t *testing.T) {
+	scheme := newTestScheme()
+
+	runningPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-pod", Namespace: "default"},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "workspace"}},
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+
+	tests := []struct {
+		name       string
+		rawObject  []byte
+		objects    []runtime.Object
+		expectCode int32
+	}{
+		{
+			name:       "decode error - invalid JSON",
+			rawObject:  []byte(`{not valid json`),
+			objects:    nil,
+			expectCode: http.StatusBadRequest,
+		},
+		{
+			name: "valid commit - allowed",
+			rawObject: mustMarshal(&agentsv1alpha1.Commit{
+				TypeMeta:   metav1.TypeMeta{APIVersion: agentsv1alpha1.SchemeGroupVersion.String(), Kind: "Commit"},
+				ObjectMeta: metav1.ObjectMeta{Name: "ok", Namespace: "default"},
+				Spec: agentsv1alpha1.CommitSpec{
+					PodName:       "my-pod",
+					ContainerName: "workspace",
+					Image:         "registry.example.com/env:v1",
+				},
+			}),
+			objects:    []runtime.Object{runningPod},
+			expectCode: 0, // 0 means Allowed (no error code)
+		},
+		{
+			name: "invalid commit - missing pod",
+			rawObject: mustMarshal(&agentsv1alpha1.Commit{
+				TypeMeta:   metav1.TypeMeta{APIVersion: agentsv1alpha1.SchemeGroupVersion.String(), Kind: "Commit"},
+				ObjectMeta: metav1.ObjectMeta{Name: "no-pod", Namespace: "default"},
+				Spec: agentsv1alpha1.CommitSpec{
+					PodName:       "nonexistent",
+					ContainerName: "workspace",
+					Image:         "registry.example.com/env:v1",
+				},
+			}),
+			objects:    nil,
+			expectCode: http.StatusUnprocessableEntity,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			builder := fake.NewClientBuilder().WithScheme(scheme)
+			for _, obj := range tt.objects {
+				builder = builder.WithRuntimeObjects(obj)
+			}
+			fc := builder.Build()
+
+			decoder := admission.NewDecoder(scheme)
+			h := &CommitValidatingHandler{Client: fc, Decoder: decoder}
+
+			req := admission.Request{
+				AdmissionRequest: admissionv1.AdmissionRequest{
+					Object: runtime.RawExtension{Raw: tt.rawObject},
+				},
+			}
+
+			resp := h.Handle(context.TODO(), req)
+
+			if tt.expectCode == 0 {
+				// Expect allowed
+				if !resp.Allowed {
+					t.Errorf("expected allowed, got denied: %v", resp.Result)
+				}
+			} else {
+				// Expect denied with specific code
+				if resp.Allowed {
+					t.Error("expected denied, got allowed")
+				}
+				if resp.Result == nil {
+					t.Fatal("expected Result to be set")
+				}
+				if resp.Result.Code != tt.expectCode {
+					t.Errorf("expected code %d, got %d", tt.expectCode, resp.Result.Code)
+				}
+			}
+		})
+	}
+}
+
+func mustMarshal(obj interface{}) []byte {
+	data, err := json.Marshal(obj)
+	if err != nil {
+		panic(err)
+	}
+	return data
 }

@@ -62,3 +62,95 @@ func TestGetAvailableBytes_InvalidPath(t *testing.T) {
 		t.Error("expected error for invalid path")
 	}
 }
+
+func TestCheckDiskSpace_TableDriven(t *testing.T) {
+	tests := []struct {
+		name        string
+		enabled     string
+		sock        string
+		containerID string
+		expectCode  int
+	}{
+		{
+			name:        "disabled returns success",
+			enabled:     "",
+			containerID: "any-container",
+			expectCode:  ExitCodeSuccess,
+		},
+		{
+			name:        "disabled explicitly false returns success",
+			enabled:     "false",
+			containerID: "any-container",
+			expectCode:  ExitCodeSuccess,
+		},
+		{
+			name:        "enabled with invalid socket returns success (graceful)",
+			enabled:     "true",
+			sock:        "/tmp/nonexistent-disk-check-test.sock",
+			containerID: "abc123",
+			expectCode:  ExitCodeSuccess,
+		},
+		{
+			name:        "enabled with empty container ID still graceful",
+			enabled:     "true",
+			sock:        "/tmp/nonexistent-disk-check-test.sock",
+			containerID: "",
+			expectCode:  ExitCodeSuccess,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.enabled != "" {
+				os.Setenv(EnvDiskSpaceCheckEnabled, tt.enabled)
+			} else {
+				os.Unsetenv(EnvDiskSpaceCheckEnabled)
+			}
+			defer os.Unsetenv(EnvDiskSpaceCheckEnabled)
+
+			if tt.sock != "" {
+				os.Setenv(EnvContainerdSock, tt.sock)
+			} else {
+				os.Unsetenv(EnvContainerdSock)
+			}
+			defer os.Unsetenv(EnvContainerdSock)
+
+			result := CheckDiskSpace(context.TODO(), tt.containerID)
+			if result != tt.expectCode {
+				t.Errorf("expected exit code %d, got %d", tt.expectCode, result)
+			}
+		})
+	}
+}
+
+func TestGetWritableLayerSize_InvalidSocket(t *testing.T) {
+	os.Setenv(EnvContainerdSock, "/tmp/nonexistent-writable-layer-test.sock")
+	defer os.Unsetenv(EnvContainerdSock)
+
+	_, err := getWritableLayerSize(context.TODO(), "test-container-id")
+	if err == nil {
+		t.Fatal("expected error when connecting to non-existent socket")
+	}
+}
+
+func TestGetAvailableBytes_ValidPaths(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+	}{
+		{"tmp dir", "/tmp"},
+		{"root dir", "/"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bytes, err := getAvailableBytes(tt.path)
+			if err != nil {
+				t.Fatalf("unexpected error for path %s: %v", tt.path, err)
+			}
+			if bytes <= 0 {
+				t.Errorf("expected positive available bytes for %s, got %d", tt.path, bytes)
+			}
+		})
+	}
+}

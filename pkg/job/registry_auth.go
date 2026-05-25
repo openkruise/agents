@@ -55,36 +55,36 @@ type dockerAuthEntry struct {
 // converts it to standard Docker config format, and writes to /root/.docker/config.json.
 // It explicitly sets DOCKER_CONFIG env var to ensure nerdctl subprocess can find the config.
 func setupRegistryAuth() error {
-	os.Setenv("DOCKER_CONFIG", dockerConfigDir)
-	klog.InfoS("Set DOCKER_CONFIG env", "value", dockerConfigDir)
+	return setupRegistryAuthFrom(registrySecretPath, dockerConfigDir)
+}
 
-	if _, err := os.Stat(registrySecretPath); os.IsNotExist(err) {
-		klog.InfoS("No registry secret mounted, skipping auth setup", "path", registrySecretPath)
+// setupRegistryAuthFrom is the testable implementation of setupRegistryAuth.
+func setupRegistryAuthFrom(secretPath, configDir string) error {
+	os.Setenv("DOCKER_CONFIG", configDir)
+
+	if _, err := os.Stat(secretPath); os.IsNotExist(err) {
+		klog.InfoS("No registry secret mounted, skipping auth setup", "path", secretPath)
 		return nil
 	}
 
-	data, err := os.ReadFile(registrySecretPath)
+	data, err := os.ReadFile(secretPath)
 	if err != nil {
 		return fmt.Errorf("failed to read registry secret: %w", err)
 	}
-
-	klog.InfoS("Read registry secret", "path", registrySecretPath, "size", len(data))
 
 	var k8sConfig k8sDockerConfigJSON
 	if err := json.Unmarshal(data, &k8sConfig); err != nil {
 		return fmt.Errorf("failed to parse registry secret: %w", err)
 	}
 
-	// Convert Kubernetes format to Docker format (ensure auth base64 field is present)
 	dockerConfig := convertK8sDockerConfig(k8sConfig)
-
 	if len(dockerConfig.Auths) == 0 {
 		klog.InfoS("No registry credentials found in mounted secret")
 		return nil
 	}
 
-	if err := os.MkdirAll(dockerConfigDir, 0700); err != nil {
-		return fmt.Errorf("failed to create docker config dir %s: %w", dockerConfigDir, err)
+	if err := os.MkdirAll(configDir, 0700); err != nil {
+		return fmt.Errorf("failed to create docker config dir %s: %w", configDir, err)
 	}
 
 	configData, err := json.Marshal(dockerConfig)
@@ -92,14 +92,12 @@ func setupRegistryAuth() error {
 		return fmt.Errorf("failed to marshal docker config: %w", err)
 	}
 
-	configPath := filepath.Join(dockerConfigDir, "config.json")
+	configPath := filepath.Join(configDir, "config.json")
 	if err := os.WriteFile(configPath, configData, 0600); err != nil {
 		return fmt.Errorf("failed to write docker config to %s: %w", configPath, err)
 	}
 
-	klog.InfoS("Registry authentication configured",
-		"configPath", configPath,
-		"servers", len(dockerConfig.Auths))
+	klog.InfoS("Registry authentication configured", "configPath", configPath, "servers", len(dockerConfig.Auths))
 	return nil
 }
 

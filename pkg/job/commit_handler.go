@@ -17,9 +17,7 @@ limitations under the License.
 package job
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"time"
 
@@ -53,17 +51,7 @@ func DoCommit(ctx context.Context) int {
 	}
 	klog.InfoS("Commit succeeded", "elapsed", time.Since(start))
 
-	// 3. Get image size info (non-fatal, for logging only)
-	stdoutBuf := &bytes.Buffer{}
-	if err := NerdctlExec(ctx, WithArgs("images", "--format", "json"), WithStdout(stdoutBuf)); err != nil {
-		klog.ErrorS(err, "Get image size failed (non-fatal, continuing to push)")
-	} else if imageInfo, err := getImageSizeInfo(image, stdoutBuf.String()); err != nil {
-		klog.ErrorS(err, "Parse image size failed (non-fatal)")
-	} else {
-		klog.InfoS("Commit image size", "size", imageInfo.Size, "blobSize", imageInfo.BlobSize)
-	}
-
-	// 4. nerdctl push
+	// 3. nerdctl push
 	klog.InfoS(fmt.Sprintf("Start to push image %s", image))
 	start = time.Now()
 	if err := NerdctlExec(ctx, WithArgs("push", image)); err != nil {
@@ -73,28 +61,4 @@ func DoCommit(ctx context.Context) int {
 	klog.InfoS("Push succeeded", "elapsed", time.Since(start))
 
 	return ExitCodeSuccess
-}
-
-type imageInfo struct {
-	Name     string `json:"Name"`
-	Size     string `json:"Size"`
-	BlobSize string `json:"BlobSize"`
-}
-
-func getImageSizeInfo(imageRef string, output string) (*imageInfo, error) {
-	// Simple parsing - nerdctl images --format json outputs one JSON per line
-	lines := bytes.Split([]byte(output), []byte("\n"))
-	for _, line := range lines {
-		if len(bytes.TrimSpace(line)) == 0 {
-			continue
-		}
-		var img imageInfo
-		if err := json.Unmarshal(line, &img); err != nil {
-			continue
-		}
-		if img.Name == imageRef {
-			return &img, nil
-		}
-	}
-	return nil, fmt.Errorf("image not found in output: %s", imageRef)
 }
