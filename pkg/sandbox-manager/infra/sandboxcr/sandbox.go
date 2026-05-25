@@ -338,6 +338,11 @@ func (s *Sandbox) Pause(ctx context.Context, opts infra.PauseOptions) error {
 
 const postResumeOperationTimeout = 30 * time.Second
 
+// resumeWaitMaxTimeout is a defensive upper bound for resumeTask.Wait. The real
+// timeout is expected to come from the request ctx; this value only guards
+// callers that pass a ctx without a deadline so Resume cannot block forever.
+const resumeWaitMaxTimeout = 10 * time.Minute
+
 func (s *Sandbox) Resume(ctx context.Context, opts infra.ResumeOptions) error {
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(s.Sandbox))
 
@@ -380,14 +385,15 @@ func (s *Sandbox) Resume(ctx context.Context, opts infra.ResumeOptions) error {
 	}
 	log.Info("waiting sandbox resume")
 	start := time.Now()
-	if err = resumeTask.Wait(10 * time.Minute); err != nil { // Almost infinity
+	if err = resumeTask.Wait(resumeWaitMaxTimeout); err != nil {
 		// A canceled request context surfaces here as "client rate limiter Wait
 		// returned an error: context canceled" from client-go, which is misleading:
-		// it is not a throttling failure but a propagation of ctx.Err(). Make the
-		// log message explicit so it is not mistaken for a server-side error.
+		// it is not a throttling failure but a propagation of ctx.Err(). Log it at
+		// Info level so it is not mistaken for a server-side error in metrics or
+		// alerting pipelines that watch klog ERROR.
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			log.Error(err, "stop waiting sandbox resume: request canceled by client (disconnected or client-side timeout)",
-				"ctxErr", ctxErr)
+			log.Info("stop waiting sandbox resume: request canceled by client (disconnected or client-side timeout)",
+				"err", err, "ctxErr", ctxErr)
 			return err
 		}
 		log.Error(err, "failed to wait sandbox resume")
