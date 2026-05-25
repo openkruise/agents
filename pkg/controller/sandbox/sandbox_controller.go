@@ -216,7 +216,10 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 			modified.Spec.Paused = true
 			return ctrl.Result{}, r.Patch(ctx, modified, patch)
 		}
-		requeueAfter = min(requeueAfter, box.Spec.PauseTime.Sub(now.Time))
+		pauseDuration := box.Spec.PauseTime.Sub(now.Time)
+		if requeueAfter == 0 || pauseDuration < requeueAfter {
+			requeueAfter = pauseDuration
+		}
 	}
 
 	// calculate sandbox status
