@@ -1,0 +1,337 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package e2e
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	jobutil "github.com/openkruise/agents/pkg/job"
+)
+
+var _ = Describe("Commit", func() {
+	var (
+		ctx       = context.Background()
+		namespace string
+		sandbox   *agentsv1alpha1.Sandbox
+	)
+
+	BeforeEach(func() {
+		namespace = createNamespace(ctx)
+		sandbox = &agentsv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      fmt.Sprintf("commit-e2e-sandbox-%d", time.Now().UnixNano()),
+				Namespace: namespace,
+			},
+			Spec: agentsv1alpha1.SandboxSpec{
+				EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+					Template: &corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{
+									Name:    "workspace",
+									Image:   "nginx:stable-alpine3.23",
+									Command: []string{"sleep", "infinity"},
+								},
+							},
+							RestartPolicy: corev1.RestartPolicyNever,
+						},
+					},
+				},
+			},
+		}
+	})
+
+	AfterEach(func() {
+		// Clean up commit resources
+		commitList := &agentsv1alpha1.CommitList{}
+		_ = k8sClient.List(ctx, commitList, client.InNamespace(namespace))
+		for i := range commitList.Items {
+			_ = k8sClient.Delete(ctx, &commitList.Items[i])
+		}
+		// Clean up sandbox
+		_ = k8sClient.Delete(ctx, sandbox)
+		// Clean up namespace
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespace}}
+		_ = k8sClient.Delete(ctx, ns)
+	})
+
+	Context("Commit lifecycle", func() {
+		It("should transition to Failed when target pod does not exist", func() {
+			commit := &agentsv1alpha1.Commit{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("commit-no-pod-%d", time.Now().UnixNano()),
+					Namespace: namespace,
+				},
+				Spec: agentsv1alpha1.CommitSpec{
+					PodName:       "nonexistent-pod",
+					ContainerName: "workspace",
+					Image:         "localhost:5000/test-commit:e2e-no-pod",
+				},
+			}
+			Expect(k8sClient.Create(ctx, commit)).To(Succeed())
+
+			Eventually(func() agentsv1alpha1.CommitPhase {
+				got := &agentsv1alpha1.Commit{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{
+					Name: commit.Name, Namespace: namespace,
+				}, got); err != nil {
+					return ""
+				}
+				return got.Status.Phase
+			}, 30*time.Second, 2*time.Second).Should(Equal(agentsv1alpha1.CommitFailed))
+		})
+
+		It("should create a Job and transition to Running when pod exists", func() {
+			// Create sandbox and wait for it to be Running
+			Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
+			Eventually(func() agentsv1alpha1.SandboxPhase {
+				got := &agentsv1alpha1.Sandbox{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{
+					Name: sandbox.Name, Namespace: namespace,
+				}, got); err != nil {
+					return ""
+				}
+				return got.Status.Phase
+			}, 120*time.Second, 3*time.Second).Should(Equal(agentsv1alpha1.SandboxRunning))
+
+			// The sandbox controller creates a pod with the same name as the sandbox
+			podName := sandbox.Name
+
+			// Create commit targeting the sandbox pod
+			commit := &agentsv1alpha1.Commit{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("commit-running-%d", time.Now().UnixNano()),
+					Namespace: namespace,
+				},
+				Spec: agentsv1alpha1.CommitSpec{
+					PodName:       podName,
+					ContainerName: "workspace",
+					Image:         "localhost:5000/test-commit:e2e-running",
+				},
+			}
+			Expect(k8sClient.Create(ctx, commit)).To(Succeed())
+
+			// Should transition to Running (Job created)
+			Eventually(func() agentsv1alpha1.CommitPhase {
+				got := &agentsv1alpha1.Commit{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{
+					Name: commit.Name, Namespace: namespace,
+				}, got); err != nil {
+					return ""
+				}
+				return got.Status.Phase
+			}, 60*time.Second, 3*time.Second).Should(Equal(agentsv1alpha1.CommitRunning))
+
+			// Verify Job was created
+			commitGot := &agentsv1alpha1.Commit{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name: commit.Name, Namespace: namespace,
+			}, commitGot)).To(Succeed())
+
+			jobName := jobutil.MakeJobName(string(commitGot.UID))
+			job := &batchv1.Job{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name: jobName, Namespace: namespace,
+			}, job)).To(Succeed())
+
+			// Verify Job has correct labels
+			Expect(job.Labels[jobutil.LabelCommitName]).To(Equal(commit.Name))
+
+			// Verify StartTime is set
+			Expect(commitGot.Status.StartTime).NotTo(BeNil())
+		})
+
+		It("should add finalizer to commit", func() {
+			commit := &agentsv1alpha1.Commit{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("commit-finalizer-%d", time.Now().UnixNano()),
+					Namespace: namespace,
+				},
+				Spec: agentsv1alpha1.CommitSpec{
+					PodName:       "nonexistent-pod",
+					ContainerName: "workspace",
+					Image:         "localhost:5000/test-commit:e2e-finalizer",
+				},
+			}
+			Expect(k8sClient.Create(ctx, commit)).To(Succeed())
+
+			Eventually(func() []string {
+				got := &agentsv1alpha1.Commit{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{
+					Name: commit.Name, Namespace: namespace,
+				}, got); err != nil {
+					return nil
+				}
+				return got.Finalizers
+			}, 30*time.Second, 2*time.Second).Should(ContainElement(agentsv1alpha1.CommitFinalizer))
+		})
+	})
+
+	Context("Commit TTL", func() {
+		It("should delete commit after TTL expires", func() {
+			commit := &agentsv1alpha1.Commit{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("commit-ttl-%d", time.Now().UnixNano()),
+					Namespace: namespace,
+				},
+				Spec: agentsv1alpha1.CommitSpec{
+					PodName:       "nonexistent-pod",
+					ContainerName: "workspace",
+					Image:         "localhost:5000/test-commit:e2e-ttl",
+					Ttl:           &metav1.Duration{Duration: 10 * time.Second},
+				},
+			}
+			Expect(k8sClient.Create(ctx, commit)).To(Succeed())
+
+			// Wait for it to reach Failed (pod not found)
+			Eventually(func() agentsv1alpha1.CommitPhase {
+				got := &agentsv1alpha1.Commit{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{
+					Name: commit.Name, Namespace: namespace,
+				}, got); err != nil {
+					return ""
+				}
+				return got.Status.Phase
+			}, 30*time.Second, 2*time.Second).Should(Equal(agentsv1alpha1.CommitFailed))
+
+			// Wait for TTL to expire and commit to be deleted
+			Eventually(func() bool {
+				got := &agentsv1alpha1.Commit{}
+				err := k8sClient.Get(ctx, types.NamespacedName{
+					Name: commit.Name, Namespace: namespace,
+				}, got)
+				return err != nil // should be NotFound
+			}, 60*time.Second, 3*time.Second).Should(BeTrue())
+		})
+	})
+
+	Context("Commit DryRun", func() {
+		It("should create Job with DRY_RUN=true when dryRun is set", func() {
+			// Create sandbox and wait for Running
+			Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
+			Eventually(func() agentsv1alpha1.SandboxPhase {
+				got := &agentsv1alpha1.Sandbox{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{
+					Name: sandbox.Name, Namespace: namespace,
+				}, got); err != nil {
+					return ""
+				}
+				return got.Status.Phase
+			}, 120*time.Second, 3*time.Second).Should(Equal(agentsv1alpha1.SandboxRunning))
+
+			podName := sandbox.Name
+
+			commit := &agentsv1alpha1.Commit{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("commit-dryrun-%d", time.Now().UnixNano()),
+					Namespace: namespace,
+				},
+				Spec: agentsv1alpha1.CommitSpec{
+					PodName:       podName,
+					ContainerName: "workspace",
+					Image:         "localhost:5000/test-commit:e2e-dryrun",
+					DryRun:        true,
+				},
+			}
+			Expect(k8sClient.Create(ctx, commit)).To(Succeed())
+
+			// Wait for Running
+			Eventually(func() agentsv1alpha1.CommitPhase {
+				got := &agentsv1alpha1.Commit{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{
+					Name: commit.Name, Namespace: namespace,
+				}, got); err != nil {
+					return ""
+				}
+				return got.Status.Phase
+			}, 60*time.Second, 3*time.Second).Should(Equal(agentsv1alpha1.CommitRunning))
+
+			// Verify Job has DRY_RUN=true env
+			commitGot := &agentsv1alpha1.Commit{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name: commit.Name, Namespace: namespace,
+			}, commitGot)).To(Succeed())
+
+			jobName := jobutil.MakeJobName(string(commitGot.UID))
+			job := &batchv1.Job{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name: jobName, Namespace: namespace,
+			}, job)).To(Succeed())
+
+			// Check DRY_RUN env in container
+			found := false
+			for _, env := range job.Spec.Template.Spec.Containers[0].Env {
+				if env.Name == "DRY_RUN" && env.Value == "true" {
+					found = true
+					break
+				}
+			}
+			Expect(found).To(BeTrue(), "expected DRY_RUN=true env in job container")
+		})
+	})
+
+	Context("Commit deletion", func() {
+		It("should clean up resources when commit is deleted", func() {
+			commit := &agentsv1alpha1.Commit{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("commit-delete-%d", time.Now().UnixNano()),
+					Namespace: namespace,
+				},
+				Spec: agentsv1alpha1.CommitSpec{
+					PodName:       "nonexistent-pod",
+					ContainerName: "workspace",
+					Image:         "localhost:5000/test-commit:e2e-delete",
+				},
+			}
+			Expect(k8sClient.Create(ctx, commit)).To(Succeed())
+
+			// Wait for finalizer to be added
+			Eventually(func() []string {
+				got := &agentsv1alpha1.Commit{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{
+					Name: commit.Name, Namespace: namespace,
+				}, got); err != nil {
+					return nil
+				}
+				return got.Finalizers
+			}, 30*time.Second, 2*time.Second).Should(ContainElement(agentsv1alpha1.CommitFinalizer))
+
+			// Delete the commit
+			Expect(k8sClient.Delete(ctx, commit)).To(Succeed())
+
+			// Should be fully deleted (finalizer removed)
+			Eventually(func() bool {
+				got := &agentsv1alpha1.Commit{}
+				err := k8sClient.Get(ctx, types.NamespacedName{
+					Name: commit.Name, Namespace: namespace,
+				}, got)
+				return err != nil
+			}, 30*time.Second, 2*time.Second).Should(BeTrue())
+		})
+	})
+})
