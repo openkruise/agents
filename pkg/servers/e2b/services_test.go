@@ -446,6 +446,86 @@ func TestCreateSandbox(t *testing.T) {
 				assert.NotContains(t, sbx.Spec.Template.Labels, "another-metadata")
 			},
 		},
+		{
+			name:      "success with custom annotations",
+			available: 2,
+			userName:  "test-user",
+			request: models.NewSandboxRequest{
+				TemplateID: templateName,
+				Timeout:    600,
+				Metadata: map[string]string{
+					v1alpha1.E2BAnnotationPrefix + "app.io/owner": "team-a",
+					v1alpha1.E2BAnnotationPrefix + "app.io/env":   "prod",
+					"regular-metadata-key":                        "should-remain-in-metadata",
+				},
+			},
+			postCheck: func(t *testing.T, resp *models.Sandbox) {
+				sbx := GetSandbox(t, resp.SandboxID, fc)
+				assert.NotNil(t, sbx.Spec.Template)
+				assert.NotNil(t, sbx.Spec.Template.Annotations)
+
+				assert.Equal(t, "team-a", sbx.Spec.Template.Annotations["app.io/owner"])
+				assert.Equal(t, "prod", sbx.Spec.Template.Annotations["app.io/env"])
+
+				assert.NotContains(t, sbx.Spec.Template.Annotations, "regular-metadata-key")
+
+				sandboxFromManager, err := controller.manager.GetClaimedSandbox(t.Context(), keys.AdminKeyID.String(), infra.GetClaimedSandboxOptions{
+					SandboxID: resp.SandboxID,
+				})
+				assert.NoError(t, err)
+				assert.NotNil(t, sandboxFromManager.GetPodAnnotations())
+				assert.Equal(t, "team-a", sandboxFromManager.GetPodAnnotations()["app.io/owner"])
+				assert.Equal(t, "prod", sandboxFromManager.GetPodAnnotations()["app.io/env"])
+			},
+		},
+		{
+			name:      "fail with invalid annotation name",
+			available: 2,
+			userName:  "test-user",
+			request: models.NewSandboxRequest{
+				TemplateID: templateName,
+				Metadata: map[string]string{
+					v1alpha1.E2BAnnotationPrefix + "invalid@annotation": "value",
+				},
+			},
+			expectError: &web.ApiError{
+				Code:    http.StatusBadRequest,
+				Message: "invalid annotation",
+			},
+		},
+		{
+			name:      "success with kubernetes annotation value",
+			available: 2,
+			userName:  "test-user",
+			request: models.NewSandboxRequest{
+				TemplateID: templateName,
+				Timeout:    600,
+				Metadata: map[string]string{
+					v1alpha1.E2BAnnotationPrefix + "valid-annotation": "value with spaces!",
+				},
+			},
+			postCheck: func(t *testing.T, resp *models.Sandbox) {
+				sbx := GetSandbox(t, resp.SandboxID, fc)
+				assert.NotNil(t, sbx.Spec.Template)
+				assert.NotNil(t, sbx.Spec.Template.Annotations)
+				assert.Equal(t, "value with spaces!", sbx.Spec.Template.Annotations["valid-annotation"])
+			},
+		},
+		{
+			name:      "fail with forbidden annotation key prefix",
+			available: 2,
+			userName:  "test-user",
+			request: models.NewSandboxRequest{
+				TemplateID: templateName,
+				Metadata: map[string]string{
+					v1alpha1.E2BAnnotationPrefix + v1alpha1.InternalPrefix + "inplace-update-state": "user-value",
+				},
+			},
+			expectError: &web.ApiError{
+				Code:    http.StatusBadRequest,
+				Message: "Forbidden annotation key",
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -496,6 +576,9 @@ func TestCreateSandbox(t *testing.T) {
 						continue
 					}
 					if strings.HasPrefix(k, v1alpha1.E2BLabelPrefix) {
+						continue
+					}
+					if strings.HasPrefix(k, v1alpha1.E2BAnnotationPrefix) {
 						continue
 					}
 					assert.Equal(t, v, sbx.Metadata[k], fmt.Sprintf("metadata key: %s", k))

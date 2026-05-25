@@ -917,6 +917,11 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 								"existing-label": "existing-value",
 							},
 						},
+						Spec: agentsv1alpha1.SandboxSpec{
+							EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+								Template: &corev1.PodTemplateSpec{},
+							},
+						},
 					},
 				}
 				opts.Modifier(mockSandbox)
@@ -927,6 +932,13 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 				assert.Equal(t, "platform", mockSandbox.Labels["team"], "team label mismatch")
 				assert.Equal(t, "existing-value", mockSandbox.Labels["existing-label"], "existing-label should be preserved")
 				assert.Equal(t, "test annotation", mockSandbox.Annotations["description"], "description annotation mismatch")
+
+				// Verify modifier propagated labels to pod template
+				assert.Equal(t, "test", mockSandbox.GetPodLabels()["env"], "pod template env label mismatch")
+				assert.Equal(t, "platform", mockSandbox.GetPodLabels()["team"], "pod template team label mismatch")
+
+				// Verify modifier propagated annotations to pod template
+				assert.Equal(t, "test annotation", mockSandbox.GetPodAnnotations()["description"], "pod template description annotation mismatch")
 			},
 		},
 		{
