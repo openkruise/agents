@@ -23,22 +23,28 @@ import (
 	"github.com/openkruise/agents/pkg/controller/sandboxclaim"
 	"github.com/openkruise/agents/pkg/controller/sandboxset"
 	"github.com/openkruise/agents/pkg/controller/sandboxupdateops"
+	"github.com/openkruise/agents/pkg/utils/metricsasync"
 )
 
-var controllerAddFuncs []func(manager.Manager) error
-
-func init() {
-	controllerAddFuncs = append(controllerAddFuncs, sandbox.Add)
-	controllerAddFuncs = append(controllerAddFuncs, sandboxset.Add)
-	controllerAddFuncs = append(controllerAddFuncs, sandboxclaim.Add)
-	controllerAddFuncs = append(controllerAddFuncs, sandboxupdateops.Add)
+// Deps bundles process-wide dependencies passed to controller Add funcs.
+// New dependencies should be appended here rather than introducing extra
+// AddFunc parameters across all controllers.
+type Deps struct {
+	MetricsCleanup *metricsasync.Pool
 }
 
-func SetupWithManager(m manager.Manager) error {
-	for _, f := range controllerAddFuncs {
-		if err := f(m); err != nil {
-			return err
-		}
+func SetupWithManager(m manager.Manager, deps Deps) error {
+	if err := sandbox.Add(m, deps.MetricsCleanup); err != nil {
+		return err
+	}
+	if err := sandboxset.Add(m); err != nil {
+		return err
+	}
+	if err := sandboxclaim.Add(m); err != nil {
+		return err
+	}
+	if err := sandboxupdateops.Add(m); err != nil {
+		return err
 	}
 	return nil
 }
