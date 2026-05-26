@@ -149,7 +149,9 @@ func (p *Pool) lookup(kind string) (CleanupFunc, bool) {
 func (p *Pool) Enqueue(kind, namespace, name string) {
 	if _, ok := p.lookup(kind); !ok {
 		p.col.dropped.WithLabelValues(kind, "unregistered").Inc()
-		klog.V(4).InfoS("metricsasync: enqueue dropped, unregistered kind", "kind", kind)
+		// klog.V(5) matches consts.DebugLogLevel; we use the literal to
+		// avoid a backwards dependency from pkg/utils on pkg/sandbox-manager.
+		klog.V(5).InfoS("metricsasync: enqueue dropped, unregistered kind", "kind", kind)
 		return
 	}
 	if p.opts.QueueCap > 0 && p.queue.Len() >= p.opts.QueueCap {
