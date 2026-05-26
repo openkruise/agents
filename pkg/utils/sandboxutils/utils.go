@@ -17,10 +17,13 @@ limitations under the License.
 package sandboxutils
 
 import (
+	"context"
 	"fmt"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/proxy"
@@ -189,4 +192,24 @@ func IsSandboxResumable(sbx *agentsv1alpha1.Sandbox) (bool, string) {
 		return false, "SandboxIsPausing"
 	}
 	return false, "SandboxPhaseNotAllowed"
+}
+
+// GetTemplateSpec resolves and returns the PodTemplateSpec from the EmbeddedSandboxTemplate.
+// If TemplateRef is specified, it will fetch the SandboxTemplate using the client.
+func GetTemplateSpec(ctx context.Context, cli client.Client, namespace string, embedded *agentsv1alpha1.EmbeddedSandboxTemplate) (*corev1.PodTemplateSpec, error) {
+	if embedded == nil {
+		return nil, nil
+	}
+	if embedded.Template != nil {
+		return embedded.Template, nil
+	}
+	if embedded.TemplateRef != nil {
+		refTemplate := &agentsv1alpha1.SandboxTemplate{}
+		err := cli.Get(ctx, client.ObjectKey{Namespace: namespace, Name: embedded.TemplateRef.Name}, refTemplate)
+		if err != nil {
+			return nil, err
+		}
+		return refTemplate.Spec.Template, nil
+	}
+	return nil, nil
 }
