@@ -23,7 +23,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"golang.org/x/time/rate"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
@@ -38,6 +37,7 @@ import (
 	"github.com/openkruise/agents/pkg/controller/sandboxset"
 	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/utils"
@@ -347,6 +347,7 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 				} else {
 					logger.Error(err, "failed to get sandbox template for checking agent runtime")
 				}
+				return opts, err
 			}
 
 			if podTemplateSpec != nil {

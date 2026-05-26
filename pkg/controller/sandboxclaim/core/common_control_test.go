@@ -1585,7 +1585,7 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 			},
 		},
 		{
-			name: "SkipInitRuntime=false with templateRef referencing missing template should skip InitRuntime",
+			name: "SkipInitRuntime=false with templateRef referencing missing template should return error",
 			claim: &agentsv1alpha1.SandboxClaim{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-claim-tempref-missing",
@@ -1609,10 +1609,7 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 					},
 				},
 			},
-			expectError: false,
-			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
-				assert.Nil(t, opts.InitRuntime, "InitRuntime should be nil when referenced SandboxTemplate is missing")
-			},
+			expectError: true,
 		},
 	}
 
