@@ -19,6 +19,7 @@ package metricsasync
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -188,6 +189,51 @@ func TestPool_Enqueue(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPool_SameKey_NeverConcurrent(t *testing.T) {
+	p := NewPool(Options{Name: "metrics_async_test_serial", Workers: 4, DrainTimeout: time.Second})
+
+	const distinctKeys = 8
+	const enqueuePerKey = 50
+	var inflight [distinctKeys]int32
+	var maxObserved int32
+	fn := func(_, name string) {
+		idx := int(name[1] - '0')
+		now := atomic.AddInt32(&inflight[idx], 1)
+		// snapshot peak per key
+		for {
+			cur := atomic.LoadInt32(&maxObserved)
+			if now <= cur || atomic.CompareAndSwapInt32(&maxObserved, cur, now) {
+				break
+			}
+		}
+		// Hold long enough that a concurrent processor would race in.
+		time.Sleep(2 * time.Millisecond)
+		atomic.AddInt32(&inflight[idx], -1)
+	}
+	assert.NoError(t, p.RegisterKind("sandbox", fn))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- p.Start(ctx) }()
+
+	for i := 0; i < distinctKeys; i++ {
+		for j := 0; j < enqueuePerKey; j++ {
+			p.Enqueue("sandbox", "ns", fmt.Sprintf("n%d", i))
+		}
+	}
+
+	// Each distinct key should be processed at least once; dedup means total <= distinctKeys * enqueuePerKey.
+	assert.Eventually(t, func() bool {
+		return testCounter(t, p.col.processedTotal, "sandbox", "ok") >= distinctKeys
+	}, 3*time.Second, 5*time.Millisecond)
+
+	cancel()
+	assert.NoError(t, <-done)
+
+	assert.LessOrEqual(t, atomic.LoadInt32(&maxObserved), int32(1),
+		"workqueue must serialize processing of identical keys")
 }
 
 // testCounter reads a CounterVec child value via Write to a dto.Metric.
