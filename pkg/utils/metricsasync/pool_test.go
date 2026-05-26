@@ -20,6 +20,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -118,4 +120,80 @@ func TestPool_RegisterKind(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPool_Enqueue(t *testing.T) {
+	tests := []struct {
+		name       string
+		opts       Options
+		register   bool
+		enqueues   []Key
+		wantQueued int
+		wantDrop   map[string]float64 // reason -> count
+	}{
+		{
+			name:       "single enqueue queues one",
+			opts:       Options{Name: "metrics_async_test_enqueue_single"},
+			register:   true,
+			enqueues:   []Key{{Kind: "sandbox", Namespace: "ns", Name: "a"}},
+			wantQueued: 1,
+		},
+		{
+			name:     "duplicate keys collapse",
+			opts:     Options{Name: "metrics_async_test_enqueue_dedup"},
+			register: true,
+			enqueues: []Key{
+				{Kind: "sandbox", Namespace: "ns", Name: "a"},
+				{Kind: "sandbox", Namespace: "ns", Name: "a"},
+				{Kind: "sandbox", Namespace: "ns", Name: "a"},
+			},
+			wantQueued: 1,
+		},
+		{
+			name:       "unregistered kind dropped",
+			opts:       Options{Name: "metrics_async_test_enqueue_unreg"},
+			register:   false,
+			enqueues:   []Key{{Kind: "sandbox", Namespace: "ns", Name: "a"}},
+			wantQueued: 0,
+			wantDrop:   map[string]float64{"unregistered": 1},
+		},
+		{
+			name:     "queue_full drops past cap",
+			opts:     Options{Name: "metrics_async_test_enqueue_cap", QueueCap: 1},
+			register: true,
+			enqueues: []Key{
+				{Kind: "sandbox", Namespace: "ns", Name: "a"},
+				{Kind: "sandbox", Namespace: "ns", Name: "b"},
+				{Kind: "sandbox", Namespace: "ns", Name: "c"},
+			},
+			wantQueued: 1,
+			wantDrop:   map[string]float64{"queue_full": 2},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := NewPool(tt.opts)
+			if tt.register {
+				assert.NoError(t, p.RegisterKind("sandbox", func(string, string) {}))
+			}
+			for _, k := range tt.enqueues {
+				p.Enqueue(k.Kind, k.Namespace, k.Name)
+			}
+			assert.Equal(t, tt.wantQueued, p.queue.Len())
+			for reason, want := range tt.wantDrop {
+				got := testCounter(t, p.col.dropped, "sandbox", reason)
+				assert.Equal(t, want, got, "drop reason %s", reason)
+			}
+		})
+	}
+}
+
+// testCounter reads a CounterVec child value via Write to a dto.Metric.
+func testCounter(t *testing.T, vec *prometheus.CounterVec, lvs ...string) float64 {
+	t.Helper()
+	m, err := vec.GetMetricWithLabelValues(lvs...)
+	assert.NoError(t, err)
+	var d dto.Metric
+	assert.NoError(t, m.(prometheus.Metric).Write(&d))
+	return d.GetCounter().GetValue()
 }

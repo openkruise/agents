@@ -25,9 +25,11 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"k8s.io/client-go/util/workqueue"
+	"k8s.io/klog/v2"
 )
 
 // CleanupFunc removes all metric series for one object identified by
@@ -98,6 +100,9 @@ type Pool struct {
 
 	mu       sync.RWMutex
 	registry map[string]CleanupFunc
+
+	enqueueAt sync.Map // Key -> int64 (unix nanos) of latest enqueue
+	depth     sync.Map // kind string -> *int64 atomic counter
 }
 
 // NewPool creates a Pool with the given Options. It does not start any
@@ -136,4 +141,42 @@ func (p *Pool) lookup(kind string) (CleanupFunc, bool) {
 	defer p.mu.RUnlock()
 	fn, ok := p.registry[kind]
 	return fn, ok
+}
+
+// Enqueue adds a (kind, namespace, name) tuple to the queue. Safe to
+// call before or after Start. O(1) under contention; no metric vector
+// locks are taken.
+func (p *Pool) Enqueue(kind, namespace, name string) {
+	if _, ok := p.lookup(kind); !ok {
+		p.col.dropped.WithLabelValues(kind, "unregistered").Inc()
+		klog.V(4).InfoS("metricsasync: enqueue dropped, unregistered kind", "kind", kind)
+		return
+	}
+	if p.opts.QueueCap > 0 && p.queue.Len() >= p.opts.QueueCap {
+		p.col.dropped.WithLabelValues(kind, "queue_full").Inc()
+		return
+	}
+	key := Key{Kind: kind, Namespace: namespace, Name: name}
+	p.enqueueAt.Store(key, time.Now().UnixNano())
+	p.incDepth(kind)
+	p.queue.Add(key)
+}
+
+func (p *Pool) incDepth(kind string) {
+	v, ok := p.depth.Load(kind)
+	if !ok {
+		var n int64
+		v, _ = p.depth.LoadOrStore(kind, &n)
+	}
+	atomic.AddInt64(v.(*int64), 1)
+	p.col.queueDepth.WithLabelValues(kind).Set(float64(atomic.LoadInt64(v.(*int64))))
+}
+
+func (p *Pool) decDepth(kind string) {
+	v, ok := p.depth.Load(kind)
+	if !ok {
+		return
+	}
+	atomic.AddInt64(v.(*int64), -1)
+	p.col.queueDepth.WithLabelValues(kind).Set(float64(atomic.LoadInt64(v.(*int64))))
 }
