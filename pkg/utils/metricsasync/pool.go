@@ -29,8 +29,7 @@ import "time"
 type CleanupFunc func(namespace, name string)
 
 // Key is the workqueue payload. Identical Keys collapse via workqueue
-// deduplication; the per-enqueue timestamp is tracked separately so
-// re-enqueuing only refreshes that timestamp.
+// deduplication.
 type Key struct {
 	Kind      string
 	Namespace string
@@ -43,16 +42,16 @@ type Enqueuer interface {
 	Enqueue(kind, namespace, name string)
 }
 
-// Options configures Pool. Zero values fall back to defaults via
-// applyDefaults.
+// Options configures Pool. Zero values are replaced by safe defaults.
 type Options struct {
 	// Workers is the number of goroutines that drain the queue.
-	// Defaults to 8 when <= 0; negative values are clamped to 1.
+	// Defaults to 8 when zero; negative values are clamped to 1.
 	Workers int
 
 	// DrainTimeout caps how long Start blocks after the parent context
-	// is cancelled, waiting for in-flight tasks to finish. Defaults to
-	// 5s when zero. Negative values are normalized to 0 (do not wait).
+	// is cancelled, waiting for in-flight tasks to finish. Values <= 0
+	// mean "do not wait"; the caller (typically the controller cmd) is
+	// responsible for choosing a sensible default such as 5s.
 	DrainTimeout time.Duration
 
 	// QueueCap, when > 0, bounds the queue length. Enqueue calls
@@ -74,9 +73,7 @@ func (o Options) applyDefaults() Options {
 	case out.Workers < 0:
 		out.Workers = 1
 	}
-	if out.DrainTimeout == 0 {
-		out.DrainTimeout = 5 * time.Second
-	} else if out.DrainTimeout < 0 {
+	if out.DrainTimeout <= 0 {
 		out.DrainTimeout = 0
 	}
 	if out.Name == "" {

@@ -34,7 +34,7 @@ func TestOptions_applyDefaults(t *testing.T) {
 			in:   Options{},
 			want: Options{
 				Workers:      8,
-				DrainTimeout: 5 * time.Second,
+				DrainTimeout: 0,
 				QueueCap:     0,
 				Name:         "metrics_async",
 			},
@@ -46,11 +46,11 @@ func TestOptions_applyDefaults(t *testing.T) {
 		},
 		{
 			name: "negative workers clamped to 1",
-			in:   Options{Workers: -3},
-			want: Options{Workers: 1, DrainTimeout: 5 * time.Second, Name: "metrics_async"},
+			in:   Options{Workers: -3, DrainTimeout: 2 * time.Second},
+			want: Options{Workers: 1, DrainTimeout: 2 * time.Second, Name: "metrics_async"},
 		},
 		{
-			name: "negative drain treated as zero (no wait)",
+			name: "negative drain treated as no-wait",
 			in:   Options{Workers: 2, DrainTimeout: -1},
 			want: Options{Workers: 2, DrainTimeout: 0, Name: "metrics_async"},
 		},
