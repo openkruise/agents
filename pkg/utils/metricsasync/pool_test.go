@@ -19,7 +19,6 @@ package metricsasync
 import (
 	"context"
 	"fmt"
-	"sync"
 	"testing"
 	"time"
 
@@ -202,9 +201,6 @@ func testCounter(t *testing.T, vec *prometheus.CounterVec, lvs ...string) float6
 }
 
 func TestPool_Start_processesAndRecovers(t *testing.T) {
-	type result struct {
-		ns, name string
-	}
 	tests := []struct {
 		name      string
 		fn        CleanupFunc
@@ -231,13 +227,7 @@ func TestPool_Start_processesAndRecovers(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			p := NewPool(Options{Name: "metrics_async_test_start_" + tt.name, Workers: 2, DrainTimeout: time.Second})
-			var got sync.Map
-			fn := tt.fn
-			wrapped := func(ns, name string) {
-				got.Store(result{ns, name}, struct{}{})
-				fn(ns, name)
-			}
-			assert.NoError(t, p.RegisterKind("sandbox", wrapped))
+			assert.NoError(t, p.RegisterKind("sandbox", tt.fn))
 
 			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan error, 1)
