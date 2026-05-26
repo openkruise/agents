@@ -23,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"golang.org/x/time/rate"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
@@ -259,7 +260,7 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 	logger := logf.FromContext(ctx).WithValues("SandboxClaim", klog.KObj(claim))
 	var reserveFailedSandboxFor *time.Duration
 	if claim.Spec.ReserveFailedSandbox {
-		reserveFailedSandboxFor = ptr.To(infra.ReserveFailedSandboxForever)
+		reserveFailedSandboxFor = ptr.To(consts.ReserveFailedSandboxForever)
 	}
 
 	opts := infra.ClaimSandboxOptions{

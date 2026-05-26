@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/distribution/reference"
+	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/util/validation"
@@ -38,16 +39,6 @@ import (
 const (
 	ReserveFailedSandboxValueNever   = "never"
 	ReserveFailedSandboxValueForever = "forever"
-)
-
-// Local copies of infra.ReserveFailedSandboxNever / ReserveFailedSandboxForever.
-// They are duplicated to avoid an import cycle: pkg/servers/e2b/adapters tests
-// import pkg/servers/e2b/models, while pkg/sandbox-manager/infra (or a package
-// it transitively depends on) is used by adapters. Keep these values in sync
-// with pkg/sandbox-manager/infra/types.go.
-const (
-	reserveFailedSandboxDurationNever   = time.Duration(0)
-	reserveFailedSandboxDurationForever = time.Duration(-1)
 )
 
 //goland:noinspection GoSnakeCaseUsage
@@ -107,7 +98,7 @@ func (r *NewSandboxRequest) parseCommonExtensions() error {
 	if reserveForSet {
 		r.Extensions.ReserveFailedSandboxFor = reserveFor
 	} else if r.Metadata[ExtensionKeyReserveFailedSandbox] == v1alpha1.True {
-		r.Extensions.ReserveFailedSandboxFor = ptr.To(reserveFailedSandboxDurationForever)
+		r.Extensions.ReserveFailedSandboxFor = ptr.To(consts.ReserveFailedSandboxForever)
 	}
 	r.Extensions.CreateOnNoStock = r.Metadata[ExtensionKeyCreateOnNoStock] != v1alpha1.False
 	r.Extensions.NeverTimeout = r.Metadata[ExtensionKeyNeverTimeout] == v1alpha1.True
@@ -294,9 +285,9 @@ func (r *NewSandboxRequest) parseAndRemoveReserveFailedSandboxFor() (*time.Durat
 
 	switch raw {
 	case ReserveFailedSandboxValueNever:
-		return ptr.To(reserveFailedSandboxDurationNever), true, nil
+		return ptr.To(consts.ReserveFailedSandboxNever), true, nil
 	case ReserveFailedSandboxValueForever:
-		return ptr.To(reserveFailedSandboxDurationForever), true, nil
+		return ptr.To(consts.ReserveFailedSandboxForever), true, nil
 	}
 
 	duration, err := time.ParseDuration(raw)

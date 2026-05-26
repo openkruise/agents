@@ -119,16 +119,6 @@ const (
 	LockTypeSpeculate = LockType("speculate")
 )
 
-// Sentinel values for ReserveFailedSandboxFor.
-const (
-	// ReserveFailedSandboxNever instructs the backend to delete a failed
-	// sandbox immediately instead of keeping it around.
-	ReserveFailedSandboxNever = time.Duration(0)
-	// ReserveFailedSandboxForever instructs the backend to keep a failed
-	// sandbox indefinitely for debugging.
-	ReserveFailedSandboxForever = time.Duration(-1)
-)
-
 func (m *ClaimMetrics) String() string {
 	var lastErrStr string
 	if m.LastError != nil {

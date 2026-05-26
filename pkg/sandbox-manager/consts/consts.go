@@ -37,3 +37,13 @@ const (
 )
 
 const DebugLogLevel = 5
+
+// Sentinel values for ReserveFailedSandboxFor.
+const (
+	// ReserveFailedSandboxNever instructs the backend to delete a failed
+	// sandbox immediately instead of keeping it around.
+	ReserveFailedSandboxNever = time.Duration(0)
+	// ReserveFailedSandboxForever instructs the backend to keep a failed
+	// sandbox indefinitely for debugging.
+	ReserveFailedSandboxForever = time.Duration(-1)
+)

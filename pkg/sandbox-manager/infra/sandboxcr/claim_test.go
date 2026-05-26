@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/time/rate"
@@ -112,9 +113,9 @@ func TestValidateAndInitClaimOptions_ReserveFailedSandboxFor(t *testing.T) {
 			opts: infra.ClaimSandboxOptions{
 				User:                    "test-user",
 				Template:                "test-template",
-				ReserveFailedSandboxFor: ptr.To(infra.ReserveFailedSandboxNever),
+				ReserveFailedSandboxFor: ptr.To(consts.ReserveFailedSandboxNever),
 			},
-			expectFor:   infra.ReserveFailedSandboxNever,
+			expectFor:   consts.ReserveFailedSandboxNever,
 			expectInput: true,
 		},
 		{
@@ -132,9 +133,9 @@ func TestValidateAndInitClaimOptions_ReserveFailedSandboxFor(t *testing.T) {
 			opts: infra.ClaimSandboxOptions{
 				User:                    "test-user",
 				Template:                "test-template",
-				ReserveFailedSandboxFor: ptr.To(infra.ReserveFailedSandboxForever),
+				ReserveFailedSandboxFor: ptr.To(consts.ReserveFailedSandboxForever),
 			},
-			expectFor:   infra.ReserveFailedSandboxForever,
+			expectFor:   consts.ReserveFailedSandboxForever,
 			expectInput: true,
 		},
 	}
@@ -590,7 +591,7 @@ func TestClaimSandboxFailed(t *testing.T) {
 			options: infra.ClaimSandboxOptions{
 				User:                    "test-user",
 				Template:                existTemplate,
-				ReserveFailedSandboxFor: ptr.To(infra.ReserveFailedSandboxForever),
+				ReserveFailedSandboxFor: ptr.To(consts.ReserveFailedSandboxForever),
 				InplaceUpdate: &config.InplaceUpdateOptions{
 					Image: "new-image",
 				},
@@ -633,7 +634,7 @@ func TestClaimSandboxFailed(t *testing.T) {
 			options: infra.ClaimSandboxOptions{
 				User:                    "test-user",
 				Template:                existTemplate,
-				ReserveFailedSandboxFor: ptr.To(infra.ReserveFailedSandboxNever),
+				ReserveFailedSandboxFor: ptr.To(consts.ReserveFailedSandboxNever),
 				InplaceUpdate: &config.InplaceUpdateOptions{
 					Image: "new-image",
 				},
@@ -655,7 +656,7 @@ func TestClaimSandboxFailed(t *testing.T) {
 			options: infra.ClaimSandboxOptions{
 				User:                    "test-user",
 				Template:                existTemplate,
-				ReserveFailedSandboxFor: ptr.To(infra.ReserveFailedSandboxForever),
+				ReserveFailedSandboxFor: ptr.To(consts.ReserveFailedSandboxForever),
 				InitRuntime:             &config.InitRuntimeOptions{},
 				CSIMount: &config.CSIMountOptions{
 					MountOptionList: []config.MountConfig{
@@ -676,7 +677,7 @@ func TestClaimSandboxFailed(t *testing.T) {
 			options: infra.ClaimSandboxOptions{
 				User:                    "test-user",
 				Template:                existTemplate,
-				ReserveFailedSandboxFor: ptr.To(infra.ReserveFailedSandboxNever),
+				ReserveFailedSandboxFor: ptr.To(consts.ReserveFailedSandboxNever),
 				InitRuntime:             &config.InitRuntimeOptions{},
 				CSIMount: &config.CSIMountOptions{
 					MountOptionList: []config.MountConfig{

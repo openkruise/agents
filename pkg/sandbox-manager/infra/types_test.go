@@ -22,6 +22,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 )
 
 // TestClaimMetrics_String tests the String() method of ClaimMetrics
@@ -610,7 +612,7 @@ func TestReserveFailedSandboxFor_JSON(t *testing.T) {
 		{
 			name: "claim reserve forever uses sentinel duration",
 			options: ClaimSandboxOptions{
-				ReserveFailedSandboxFor: durationPtr(ReserveFailedSandboxForever),
+				ReserveFailedSandboxFor: durationPtr(consts.ReserveFailedSandboxForever),
 			},
 			fieldName:  "reserveFailedSandboxFor",
 			expectJSON: `"reserveFailedSandboxFor":-1`,
@@ -626,7 +628,7 @@ func TestReserveFailedSandboxFor_JSON(t *testing.T) {
 		{
 			name: "clone reserve never uses sentinel duration",
 			options: CloneSandboxOptions{
-				ReserveFailedSandboxFor: durationPtr(ReserveFailedSandboxNever),
+				ReserveFailedSandboxFor: durationPtr(consts.ReserveFailedSandboxNever),
 			},
 			fieldName:  "reserveFailedSandboxFor",
 			expectJSON: `"reserveFailedSandboxFor":0`,

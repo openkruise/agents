@@ -133,9 +133,9 @@ func TestValidateAndInitCloneOptions_ReserveFailedSandboxFor(t *testing.T) {
 			opts: infra.CloneSandboxOptions{
 				User:                    "test-user",
 				CheckPointID:            "test-checkpoint",
-				ReserveFailedSandboxFor: ptr.To(infra.ReserveFailedSandboxNever),
+				ReserveFailedSandboxFor: ptr.To(consts.ReserveFailedSandboxNever),
 			},
-			expectFor:   infra.ReserveFailedSandboxNever,
+			expectFor:   consts.ReserveFailedSandboxNever,
 			expectInput: true,
 		},
 		{
@@ -153,9 +153,9 @@ func TestValidateAndInitCloneOptions_ReserveFailedSandboxFor(t *testing.T) {
 			opts: infra.CloneSandboxOptions{
 				User:                    "test-user",
 				CheckPointID:            "test-checkpoint",
-				ReserveFailedSandboxFor: ptr.To(infra.ReserveFailedSandboxForever),
+				ReserveFailedSandboxFor: ptr.To(consts.ReserveFailedSandboxForever),
 			},
-			expectFor:   infra.ReserveFailedSandboxForever,
+			expectFor:   consts.ReserveFailedSandboxForever,
 			expectInput: true,
 		},
 	}
@@ -345,7 +345,7 @@ func TestCloneSandbox_CleansFailedCreatedSandbox(t *testing.T) {
 	}{
 		{
 			name:          "reserve for zero deletes failed created sandbox",
-			reserveFor:    infra.ReserveFailedSandboxNever,
+			reserveFor:    consts.ReserveFailedSandboxNever,
 			expectDeleted: true,
 		},
 		{
@@ -355,7 +355,7 @@ func TestCloneSandbox_CleansFailedCreatedSandbox(t *testing.T) {
 		},
 		{
 			name:       "reserve forever keeps sandbox without shutdown time",
-			reserveFor: infra.ReserveFailedSandboxForever,
+			reserveFor: consts.ReserveFailedSandboxForever,
 		},
 	}
 

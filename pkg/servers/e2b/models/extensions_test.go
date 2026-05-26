@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -92,7 +93,7 @@ func TestParseExtensions(t *testing.T) {
 			wantErr: false,
 			expectExtension: NewSandboxRequestExtension{
 				CreateOnNoStock:         true,
-				ReserveFailedSandboxFor: ptr.To(reserveFailedSandboxDurationNever),
+				ReserveFailedSandboxFor: ptr.To(consts.ReserveFailedSandboxNever),
 			},
 		},
 		{
@@ -103,7 +104,7 @@ func TestParseExtensions(t *testing.T) {
 			wantErr: false,
 			expectExtension: NewSandboxRequestExtension{
 				CreateOnNoStock:         true,
-				ReserveFailedSandboxFor: ptr.To(reserveFailedSandboxDurationForever),
+				ReserveFailedSandboxFor: ptr.To(consts.ReserveFailedSandboxForever),
 			},
 		},
 		{
@@ -125,7 +126,7 @@ func TestParseExtensions(t *testing.T) {
 			wantErr: false,
 			expectExtension: NewSandboxRequestExtension{
 				CreateOnNoStock:         true,
-				ReserveFailedSandboxFor: ptr.To(reserveFailedSandboxDurationNever),
+				ReserveFailedSandboxFor: ptr.To(consts.ReserveFailedSandboxNever),
 			},
 		},
 		{
@@ -152,7 +153,7 @@ func TestParseExtensions(t *testing.T) {
 			wantErr: false,
 			expectExtension: NewSandboxRequestExtension{
 				CreateOnNoStock:         true,
-				ReserveFailedSandboxFor: ptr.To(reserveFailedSandboxDurationForever),
+				ReserveFailedSandboxFor: ptr.To(consts.ReserveFailedSandboxForever),
 			},
 		},
 		{
@@ -164,7 +165,7 @@ func TestParseExtensions(t *testing.T) {
 			wantErr: false,
 			expectExtension: NewSandboxRequestExtension{
 				CreateOnNoStock:         true,
-				ReserveFailedSandboxFor: ptr.To(reserveFailedSandboxDurationNever),
+				ReserveFailedSandboxFor: ptr.To(consts.ReserveFailedSandboxNever),
 			},
 		},
 		{

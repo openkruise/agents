@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -856,7 +857,7 @@ func TestInfra_CloneSandboxRetriesWaitReadyFailure(t *testing.T) {
 		CheckPointID:            checkpointID,
 		WaitReadyTimeout:        20 * time.Millisecond,
 		CloneTimeout:            300 * time.Millisecond,
-		ReserveFailedSandboxFor: ptr.To(infra.ReserveFailedSandboxNever),
+		ReserveFailedSandboxFor: ptr.To(consts.ReserveFailedSandboxNever),
 	}
 	sbx, metrics, err := infraInstance.CloneSandbox(t.Context(), opts)
 	require.NoError(t, err)
@@ -936,7 +937,7 @@ func TestInfra_CloneSandboxRetriesCreateFailure(t *testing.T) {
 				CheckPointID:            checkpointID,
 				WaitReadyTimeout:        30 * time.Second,
 				CloneTimeout:            300 * time.Millisecond,
-				ReserveFailedSandboxFor: ptr.To(infra.ReserveFailedSandboxNever),
+				ReserveFailedSandboxFor: ptr.To(consts.ReserveFailedSandboxNever),
 			}
 			sbx, metrics, err := infraInstance.CloneSandbox(t.Context(), opts)
 			if tt.expectError != "" {
