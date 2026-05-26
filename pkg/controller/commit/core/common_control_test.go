@@ -494,9 +494,12 @@ func TestEnsureCommitRunning_JobPodAlreadyExists(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// Phase should remain pending since job pod already exists (early return)
-	if newStatus.Phase != agentsv1alpha1.CommitPending {
-		t.Errorf("expected phase to remain Pending, got %s", newStatus.Phase)
+	// Phase should transition to Running since job pod already exists
+	if newStatus.Phase != agentsv1alpha1.CommitRunning {
+		t.Errorf("expected phase to be Running, got %s", newStatus.Phase)
+	}
+	if newStatus.StartTime == nil {
+		t.Error("expected StartTime to be set")
 	}
 }
 

@@ -75,7 +75,10 @@ func (r *commonControl) EnsureCommitRunning(ctx context.Context, args *EnsureFun
 		return requeueAfter, fmt.Errorf("failed to list commit job pods: %w", err)
 	}
 	if len(jobPods.Items) > 0 {
-		klog.InfoS("commit job pod already exists, ignore", "commit", klog.KObj(commit))
+		klog.InfoS("commit job pod already exists, transitioning to Running", "commit", klog.KObj(commit))
+		now := metav1.Now()
+		args.NewStatus.StartTime = &now
+		args.NewStatus.Phase = agentsv1alpha1.CommitRunning
 		return requeueAfter, nil
 	}
 
