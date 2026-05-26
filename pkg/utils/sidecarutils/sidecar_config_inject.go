@@ -56,8 +56,7 @@ func parseInjectConfig(ctx context.Context, configKey string, configRaw map[stri
 
 	configValue, exists := configRaw[configKey]
 	if !exists || configValue == "" {
-		log.V(5).Info("config key not found or empty, using default configuration")
-		return sidecarConfig, nil
+		return sidecarConfig, fmt.Errorf("injection template %s not found", configKey)
 	}
 
 	err := json.Unmarshal([]byte(configRaw[configKey]), &sidecarConfig)

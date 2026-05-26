@@ -802,8 +802,8 @@ func TestParseCSIMountConfig(t *testing.T) {
 				"other-key": "some-value",
 			},
 			expectedConfig: SidecarInjectConfig{},
-			expectError:    false,
-			errorContains:  "",
+			expectError:    true,
+			errorContains:  "injection template csi not found",
 		},
 		{
 			name: "invalid JSON format",
@@ -941,13 +941,9 @@ func TestParseAgentRuntimeConfig(t *testing.T) {
 			configRaw: map[string]string{
 				"other-key": "some-value",
 			},
-			expectedConfig: SidecarInjectConfig{
-				MainContainer: corev1.Container{},
-				Sidecars:      nil,
-				Volumes:       nil,
-			},
-			expectError:   false,
-			errorContains: "",
+			expectedConfig: SidecarInjectConfig{},
+			expectError:    true,
+			errorContains:  "injection template agent-runtime not found",
 		},
 		{
 			name: "invalid JSON format",

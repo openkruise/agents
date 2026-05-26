@@ -42,26 +42,35 @@ func InjectSandboxRuntimes(ctx context.Context, sandbox *agentsv1alpha1.Sandbox,
 		logger.Error(err, "failed to fetch injection configuration")
 		return err
 	}
-	return doSidecarInjection(ctx, sandbox, pod, config)
+
+	return doSidecarInjection(ctx, extractRuntimes(sandbox), pod, config)
 }
 
-func doSidecarInjection(ctx context.Context, sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod, injectConfigMap map[string]string) error {
-	logger := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(sandbox))
+func extractRuntimes(sandbox *agentsv1alpha1.Sandbox) []string {
+	runtimes := []string{}
+	for _, runtime := range sandbox.Spec.Runtimes {
+		runtimes = append(runtimes, runtime.Name)
+	}
+	return runtimes
+}
+
+func doSidecarInjection(ctx context.Context, runtimes []string, pod *corev1.Pod, injectConfigMap map[string]string) error {
+	logger := logf.FromContext(ctx)
 
 	injectedRuntimes := sets.NewString()
-	for _, runtime := range sandbox.Spec.Runtimes {
-		if injectedRuntimes.Has(runtime.Name) {
-			logger.V(5).Info("skipping duplicate runtime, already processed", "runtime", runtime.Name)
+	for _, runtime := range runtimes {
+		if injectedRuntimes.Has(runtime) {
+			logger.V(5).Info("skipping duplicate runtime, already processed", "runtime", runtime)
 			continue
 		}
-		injectedRuntimes.Insert(runtime.Name)
+		injectedRuntimes.Insert(runtime)
 
-		runtimeInjectConfig, err := parseInjectConfig(ctx, runtime.Name, injectConfigMap)
+		runtimeInjectConfig, err := parseInjectConfig(ctx, runtime, injectConfigMap)
 		if err != nil {
 			logger.Error(err, "failed to parse runtime injection configuration")
 			return err
 		}
-		switch runtime.Name {
+		switch runtime {
 		case agentsv1alpha1.RuntimeConfigForInjectAgentRuntime:
 			if !isContainersExists(pod.Spec.InitContainers, runtimeInjectConfig.Sidecars) && !isContainersExists(pod.Spec.Containers, runtimeInjectConfig.Sidecars) {
 				setAgentRuntimeContainer(ctx, &pod.Spec, runtimeInjectConfig)
