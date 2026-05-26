@@ -128,7 +128,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 			box.Name = req.NamespacedName.Name
 			core.ResourceVersionExpectations.Delete(box)
 			core.ScaleExpectation.DeleteExpectations(utils.GetControllerKey(box))
-			DeleteSandboxMetrics(req.NamespacedName.Namespace, req.NamespacedName.Name)
+			r.metricsCleanup.Enqueue("sandbox", req.NamespacedName.Namespace, req.NamespacedName.Name)
 		}
 		return reconcile.Result{}, client.IgnoreNotFound(err)
 	}

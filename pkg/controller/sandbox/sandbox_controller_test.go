@@ -20,9 +20,11 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -36,6 +38,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/controller/sandbox/core"
@@ -2842,7 +2845,8 @@ func TestReconcile_SandboxNotFoundCleanup(t *testing.T) {
 			Recorder:    fakeRecorder,
 			RateLimiter: rl,
 		}),
-		rateLimiter: rl,
+		rateLimiter:    rl,
+		metricsCleanup: &fakeEnqueuer{},
 	}
 
 	// Set up expectations for a sandbox that will not be found
@@ -3899,4 +3903,50 @@ func TestUpdateSandboxStatus_Upgrading_RevisionUnchanged_NoReset(t *testing.T) {
 	if upgradeCond.Message != "upgrading pod" {
 		t.Errorf("Expected Message %q, got %q", "upgrading pod", upgradeCond.Message)
 	}
+}
+
+// fakeEnqueuer captures Enqueue invocations for assertion.
+type fakeEnqueuer struct {
+	mu    sync.Mutex
+	calls []struct{ Kind, Namespace, Name string }
+}
+
+func (f *fakeEnqueuer) Enqueue(kind, namespace, name string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, struct{ Kind, Namespace, Name string }{kind, namespace, name})
+}
+
+func (f *fakeEnqueuer) snapshot() []struct{ Kind, Namespace, Name string } {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]struct{ Kind, Namespace, Name string }, len(f.calls))
+	copy(out, f.calls)
+	return out
+}
+
+func TestReconcile_NotFoundEnqueuesAsyncCleanup(t *testing.T) {
+	scheme := runtime.NewScheme()
+	assert.NoError(t, agentsv1alpha1.AddToScheme(scheme))
+	assert.NoError(t, corev1.AddToScheme(scheme))
+
+	cli := fake.NewClientBuilder().WithScheme(scheme).Build()
+	enq := &fakeEnqueuer{}
+	r := &SandboxReconciler{
+		Client:         cli,
+		Scheme:         scheme,
+		metricsCleanup: enq,
+	}
+
+	res, err := r.Reconcile(context.Background(), reconcile.Request{
+		NamespacedName: types.NamespacedName{Namespace: "ns", Name: "missing"},
+	})
+	assert.NoError(t, err)
+	assert.Equal(t, reconcile.Result{}, res)
+
+	calls := enq.snapshot()
+	assert.Len(t, calls, 1)
+	assert.Equal(t, "sandbox", calls[0].Kind)
+	assert.Equal(t, "ns", calls[0].Namespace)
+	assert.Equal(t, "missing", calls[0].Name)
 }
