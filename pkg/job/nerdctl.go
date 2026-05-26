@@ -48,6 +48,10 @@ func NerdctlExec(ctx context.Context, opts ...CmdOpt) error {
 		"--debug",
 		"--namespace=k8s.io",
 		fmt.Sprintf("--host=%s", Config().ContainerdSock()),
+		"--hosts-dir=/etc/containerd/certs.d",
+	}
+	if Config().InsecureRegistry() {
+		presetArgs = append(presetArgs, "--insecure-registry")
 	}
 	cmd := exec.Command("nerdctl", presetArgs...)
 	cmd.Stdout = os.Stdout

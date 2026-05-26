@@ -56,6 +56,11 @@ type CommitSpec struct {
 	// +kubebuilder:validation:Optional
 	PushSecrets []corev1.LocalObjectReference `json:"pushSecrets,omitempty"`
 
+	// Whether to skip TLS verification when pushing the committed image to the registry.
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:default=false
+	InsecureRegistry bool `json:"insecureRegistry,omitempty"`
+
 	// Whether to perform a dry run that only checks prerequisites
 	// without actually committing or pushing the image.
 	// +kubebuilder:validation:Optional

@@ -57,6 +57,9 @@ const (
 	// EnvAgentJobImagePullPolicy is the environment variable name for the agent job image pull policy.
 	EnvAgentJobImagePullPolicy = "AGENT_JOB_IMAGE_PULL_POLICY"
 
+	// EnvInsecureRegistry is the environment variable name for skipping TLS verification on push.
+	EnvInsecureRegistry = "INSECURE_REGISTRY"
+
 	// EnvDryRun is the environment variable name for dry run mode.
 	EnvDryRun = "DRY_RUN"
 )
@@ -64,10 +67,11 @@ const (
 // EnvConfig reads configuration from environment variables.
 type EnvConfig struct{}
 
-func (c *EnvConfig) ContainerID() string   { return os.Getenv(EnvContainerID) }
-func (c *EnvConfig) CommitImage() string   { return os.Getenv(EnvCommitImage) }
-func (c *EnvConfig) AgentJobImage() string { return os.Getenv(EnvAgentJobImage) }
-func (c *EnvConfig) DryRun() bool          { return os.Getenv(EnvDryRun) == "true" }
+func (c *EnvConfig) ContainerID() string    { return os.Getenv(EnvContainerID) }
+func (c *EnvConfig) CommitImage() string    { return os.Getenv(EnvCommitImage) }
+func (c *EnvConfig) AgentJobImage() string  { return os.Getenv(EnvAgentJobImage) }
+func (c *EnvConfig) InsecureRegistry() bool { return os.Getenv(EnvInsecureRegistry) == "true" }
+func (c *EnvConfig) DryRun() bool           { return os.Getenv(EnvDryRun) == "true" }
 
 func (c *EnvConfig) ContainerdSockPath() string {
 	if sock := os.Getenv(EnvContainerdSockPath); sock != "" {

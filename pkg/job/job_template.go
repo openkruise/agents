@@ -76,6 +76,10 @@ func (g *JobGenerator) commitEnvs() []corev1.EnvVar {
 		{Name: EnvCommitPodUID, Value: string(g.Pod.UID)},
 	}
 
+	if g.Commit.Spec.InsecureRegistry {
+		envs = append(envs, corev1.EnvVar{Name: EnvInsecureRegistry, Value: "true"})
+	}
+
 	if g.Commit.Spec.DryRun {
 		envs = append(envs, corev1.EnvVar{Name: EnvDryRun, Value: "true"})
 	}
@@ -96,11 +100,25 @@ func (g *JobGenerator) volumes() ([]corev1.Volume, []corev1.VolumeMount) {
 				},
 			},
 		},
+		{
+			Name: "host-containerd-certs",
+			VolumeSource: corev1.VolumeSource{
+				HostPath: &corev1.HostPathVolumeSource{
+					Path: "/etc/containerd/certs.d",
+					Type: &directoryOrCreate,
+				},
+			},
+		},
 	}
 	volumeMounts := []corev1.VolumeMount{
 		{
 			Name:      "host-containerd-run",
 			MountPath: containerdPath,
+		},
+		{
+			Name:      "host-containerd-certs",
+			MountPath: "/etc/containerd/certs.d",
+			ReadOnly:  true,
 		},
 	}
 	return volumes, volumeMounts
