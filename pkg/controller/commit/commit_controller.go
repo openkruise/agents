@@ -210,10 +210,6 @@ func (r *CommitReconciler) handleCommitTTL(ctx context.Context, commit *agentsv1
 		return ctrl.Result{}, nil
 	}
 	ttl := commit.Spec.Ttl.Duration
-	// Negative TTL means never delete
-	if ttl < 0 {
-		return ctrl.Result{}, nil
-	}
 	completionTime := commit.Status.CompletionTime
 	if completionTime == nil {
 		return ctrl.Result{}, nil
@@ -229,7 +225,7 @@ func (r *CommitReconciler) handleCommitTTL(ctx context.Context, commit *agentsv1
 }
 
 func (r *CommitReconciler) updateCommitStatus(ctx context.Context, newStatus agentsv1alpha1.CommitStatus, commit *agentsv1alpha1.Commit) error {
-	if reflect.DeepEqual(commit.Status, newStatus) || newStatus.Phase == agentsv1alpha1.CommitPending {
+	if reflect.DeepEqual(commit.Status, newStatus) {
 		return nil
 	}
 	by, _ := json.Marshal(newStatus)

@@ -66,6 +66,7 @@ var CommitJobExitCodeMap = map[int32]CommitConditionValue{
 
 func GetCommitCondition(pod *corev1.Pod) *metav1.Condition {
 	for _, cs := range pod.Status.ContainerStatuses {
+		// Only inspect the main commit container, skip sidecars or init containers
 		if cs.Name != "agent-job" {
 			continue
 		}

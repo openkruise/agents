@@ -36,8 +36,10 @@ func init() {
 
 // JobGenerator generates K8s Job specs for commit operations.
 type JobGenerator struct {
-	Commit                 *v1alpha1.Commit
-	Pod                    *corev1.Pod
+	Commit *v1alpha1.Commit
+	Pod    *corev1.Pod
+	// DockerConfigSecretName is the name of an existing Secret (same namespace as Pod)
+	// to mount as registry auth for pushing. Empty means anonymous push.
 	DockerConfigSecretName string
 }
 
@@ -126,7 +128,7 @@ func (g *JobGenerator) GenerateCommitJob() (*batchv1.Job, error) {
 
 	volumes, volumeMounts := g.volumes()
 
-	// Mount docker config secret for registry auth (nerdctl push)
+	// Mount registry auth secret for pushing (nerdctl push)
 	if g.DockerConfigSecretName != "" {
 		volumes = append(volumes, corev1.Volume{
 			Name: "docker-config",

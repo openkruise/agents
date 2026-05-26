@@ -272,6 +272,88 @@ func TestReconcile_CommitSucceeded_TTLExpired(t *testing.T) {
 	}
 }
 
+func TestReconcile_CommitFailed_NoTTL(t *testing.T) {
+	commit := newCommit("test-commit", "default", agentsv1alpha1.CommitFailed)
+	r, mock := newTestReconciler(commit)
+
+	result, err := r.Reconcile(context.TODO(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-commit", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Errorf("expected no requeue for failed without TTL")
+	}
+	if mock.runningCalled || mock.updatedCalled || mock.deletedCalled {
+		t.Error("no control methods should be called for terminal phase")
+	}
+}
+
+func TestReconcile_CommitFailed_TTLExpired(t *testing.T) {
+	ttl := 5 * time.Minute
+	completionTime := metav1.NewTime(time.Now().Add(-10 * time.Minute))
+	commit := newCommit("test-commit", "default", agentsv1alpha1.CommitFailed)
+	commit.Spec.Ttl = &metav1.Duration{Duration: ttl}
+	commit.Status.CompletionTime = &completionTime
+	r, _ := newTestReconciler(commit)
+
+	_, err := r.Reconcile(context.TODO(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-commit", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify commit was deleted
+	got := &agentsv1alpha1.Commit{}
+	err = r.Get(context.TODO(), client.ObjectKey{Name: "test-commit", Namespace: "default"}, got)
+	if err == nil {
+		t.Error("expected commit to be deleted after TTL expiry")
+	}
+}
+
+func TestReconcile_CommitFailed_TTLNotExpired(t *testing.T) {
+	ttl := 10 * time.Minute
+	completionTime := metav1.NewTime(time.Now().Add(-5 * time.Minute))
+	commit := newCommit("test-commit", "default", agentsv1alpha1.CommitFailed)
+	commit.Spec.Ttl = &metav1.Duration{Duration: ttl}
+	commit.Status.CompletionTime = &completionTime
+	r, _ := newTestReconciler(commit)
+
+	result, err := r.Reconcile(context.TODO(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-commit", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter == 0 {
+		t.Error("expected requeue for non-expired TTL")
+	}
+	if result.RequeueAfter > 6*time.Minute {
+		t.Errorf("requeue too long: %v", result.RequeueAfter)
+	}
+}
+
+func TestReconcile_CommitSucceeded_NoCompletionTime(t *testing.T) {
+	// TTL is set but completionTime is nil — should not requeue or delete
+	ttl := 5 * time.Minute
+	commit := newCommit("test-commit", "default", agentsv1alpha1.CommitSucceeded)
+	commit.Spec.Ttl = &metav1.Duration{Duration: ttl}
+	// No CompletionTime set
+	r, _ := newTestReconciler(commit)
+
+	result, err := r.Reconcile(context.TODO(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-commit", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Errorf("expected no requeue when completionTime is nil, got %v", result.RequeueAfter)
+	}
+}
+
 func TestReconcile_CommitRunning_EnsureUpdatedError(t *testing.T) {
 	commit := newCommit("test-commit", "default", agentsv1alpha1.CommitRunning)
 	commit.Finalizers = []string{agentsv1alpha1.CommitFinalizer}
@@ -325,30 +407,6 @@ func TestReconcile_CommitRunning_StatusUnchanged(t *testing.T) {
 	// Since status hasn't changed, no patch should happen (no error expected)
 	if result.RequeueAfter != 0 {
 		t.Errorf("expected no requeue, got %v", result.RequeueAfter)
-	}
-}
-
-func TestReconcile_CommitSucceeded_NegativeTTL(t *testing.T) {
-	completionTime := metav1.NewTime(time.Now().Add(-10 * time.Minute))
-	commit := newCommit("test-commit", "default", agentsv1alpha1.CommitSucceeded)
-	commit.Spec.Ttl = &metav1.Duration{Duration: -1 * time.Second}
-	commit.Status.CompletionTime = &completionTime
-	r, _ := newTestReconciler(commit)
-
-	result, err := r.Reconcile(context.TODO(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "test-commit", Namespace: "default"},
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if result.RequeueAfter != 0 {
-		t.Errorf("expected no requeue for negative TTL, got %v", result.RequeueAfter)
-	}
-
-	// Verify commit was NOT deleted
-	got := &agentsv1alpha1.Commit{}
-	if err := r.Get(context.TODO(), client.ObjectKey{Name: "test-commit", Namespace: "default"}, got); err != nil {
-		t.Error("expected commit to still exist with negative TTL")
 	}
 }
 

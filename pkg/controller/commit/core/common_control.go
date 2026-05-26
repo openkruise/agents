@@ -22,6 +22,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/distribution/reference"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -29,6 +30,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
+	"k8s.io/kubernetes/pkg/credentialprovider"
+	credentialprovidersecrets "k8s.io/kubernetes/pkg/credentialprovider/secrets"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
@@ -57,7 +60,6 @@ func newCommonControl(c client.Client, recorder record.EventRecorder) (CommitCon
 
 func (r *commonControl) EnsureCommitRunning(ctx context.Context, args *EnsureFuncArgs) (time.Duration, error) {
 	pod, commit := args.Pod, args.Commit
-	var requeueAfter time.Duration
 
 	klog.InfoS("EnsureCommitRunning", "name", commit.Name, "namespace", commit.Namespace, "phase", commit.Status.Phase)
 
@@ -66,41 +68,39 @@ func (r *commonControl) EnsureCommitRunning(ctx context.Context, args *EnsureFun
 		rcvObject := &agentsv1alpha1.Commit{ObjectMeta: metav1.ObjectMeta{Namespace: commit.Namespace, Name: commit.Name}}
 		if err := r.Patch(ctx, rcvObject, client.RawPatch(types.MergePatchType, []byte(patch))); err != nil {
 			klog.ErrorS(err, "patch annotations failed", "commit", klog.KObj(commit))
-			return requeueAfter, err
+			return 0, err
 		}
 	}
 
 	jobPods, err := r.listCRJobPods(ctx, commit)
 	if err != nil {
-		return requeueAfter, fmt.Errorf("failed to list commit job pods: %w", err)
+		return 0, fmt.Errorf("failed to list commit job pods: %w", err)
 	}
 	if len(jobPods.Items) > 0 {
 		klog.InfoS("commit job pod already exists, transitioning to Running", "commit", klog.KObj(commit))
 		now := metav1.Now()
 		args.NewStatus.StartTime = &now
 		args.NewStatus.Phase = agentsv1alpha1.CommitRunning
-		return requeueAfter, nil
-	}
-
-	if err = r.applyCommitJob(ctx, commit, pod); err != nil {
-		klog.ErrorS(err, "EnsureCommitRunning failed", "commit", klog.KObj(commit))
-		now := metav1.Now()
-		args.NewStatus.StartTime = &now
-		args.NewStatus.Phase = agentsv1alpha1.CommitFailed
-		args.NewStatus.CompletionTime = &now
-		return requeueAfter, err
+		return 0, nil
 	}
 
 	now := metav1.Now()
+	if err = r.applyCommitJob(ctx, commit, pod); err != nil {
+		klog.ErrorS(err, "EnsureCommitRunning failed", "commit", klog.KObj(commit))
+		args.NewStatus.StartTime = &now
+		args.NewStatus.Phase = agentsv1alpha1.CommitFailed
+		args.NewStatus.CompletionTime = &now
+		return 0, err
+	}
+
 	args.NewStatus.StartTime = &now
 	args.NewStatus.Phase = agentsv1alpha1.CommitRunning
 	args.NewStatus.CommitID = commit.Name
-	return requeueAfter, nil
+	return 0, nil
 }
 
 func (r *commonControl) EnsureCommitUpdated(ctx context.Context, args *EnsureFuncArgs) (time.Duration, error) {
 	commit := args.Commit
-	var requeueAfter time.Duration
 	klog.InfoS("EnsureCommitUpdated", "commit", klog.KObj(commit), "commitID", commit.Status.CommitID)
 
 	job := new(batchv1.Job)
@@ -111,58 +111,48 @@ func (r *commonControl) EnsureCommitUpdated(ctx context.Context, args *EnsureFun
 			now := metav1.Now()
 			args.NewStatus.Phase = agentsv1alpha1.CommitFailed
 			args.NewStatus.CompletionTime = &now
-			return requeueAfter, nil
+			return 0, nil
 		}
-		return requeueAfter, fmt.Errorf("failed to get job: %w", err)
+		return 0, fmt.Errorf("failed to get job: %w", err)
 	}
 
 	done, success := jobutil.IsJobCompleted(job)
-	klog.InfoS("job status", "job", klog.KObj(job), "commit", klog.KObj(commit), "success", success)
-	if done {
-		phase := agentsv1alpha1.CommitSucceeded
-		if !success {
-			phase = agentsv1alpha1.CommitFailed
-		}
-		if condition := r.getLatestJobPodExitCode(ctx, commit); condition != nil {
-			args.NewStatus.Conditions = append(args.NewStatus.Conditions, *condition)
-		}
-		args.NewStatus.Phase = phase
-		now := metav1.NewTime(time.Now())
-		args.NewStatus.CompletionTime = &now
+	if !done {
+		klog.InfoS("Job still running, will requeue", "job", klog.KObj(job), "commit", klog.KObj(commit))
+		return 30 * time.Second, nil
 	}
-	return requeueAfter, nil
+
+	klog.InfoS("Job completed", "job", klog.KObj(job), "commit", klog.KObj(commit), "success", success)
+	phase := agentsv1alpha1.CommitSucceeded
+	if !success {
+		phase = agentsv1alpha1.CommitFailed
+	}
+	if condition := r.getLatestJobPodExitCode(ctx, commit); condition != nil {
+		args.NewStatus.Conditions = append(args.NewStatus.Conditions, *condition)
+	}
+	args.NewStatus.Phase = phase
+	now := metav1.NewTime(time.Now())
+	args.NewStatus.CompletionTime = &now
+	return 0, nil
 }
 
 func (r *commonControl) EnsureCommitDeleted(ctx context.Context, args *EnsureFuncArgs) (time.Duration, error) {
 	commit := args.Commit
-	var requeueAfter time.Duration
 
 	_, err := utils.PatchFinalizer(ctx, r.Client, commit, utils.RemoveFinalizerOpType, agentsv1alpha1.CommitFinalizer)
 	if err != nil {
 		klog.ErrorS(err, "remove commit finalizer failed", "commit", klog.KObj(commit))
-		return requeueAfter, err
+		return 0, err
 	}
 	klog.InfoS("remove commit finalizer success", "commit", klog.KObj(commit))
-	return requeueAfter, nil
+	return 0, nil
 }
 
 func (r *commonControl) applyCommitJob(ctx context.Context, commit *agentsv1alpha1.Commit, pod *corev1.Pod) error {
 	g := &jobutil.JobGenerator{Commit: commit, Pod: pod}
 
-	// Resolve registry auth secret using three-tier fallback
-	resolvedSecret := r.resolveRegistrySecret(ctx, commit, pod)
-	if resolvedSecret != nil {
-		if resolvedSecret.Namespace != pod.Namespace {
-			// Cross-namespace secret: create a mirror in the Job namespace so it can be mounted
-			mirror, err := r.ensureMirrorSecret(ctx, commit, resolvedSecret, pod.Namespace)
-			if err != nil {
-				return fmt.Errorf("failed to create mirror secret for cross-namespace registry auth: %w", err)
-			}
-			g.DockerConfigSecretName = mirror.Name
-		} else {
-			g.DockerConfigSecretName = resolvedSecret.Name
-		}
-	}
+	// Resolve registry auth secret (same namespace, mounted directly by name)
+	g.DockerConfigSecretName = r.resolveRegistrySecretName(ctx, commit, pod)
 
 	job, err := g.GenerateCommitJob()
 	if err != nil {
@@ -179,53 +169,17 @@ func (r *commonControl) applyCommitJob(ctx context.Context, commit *agentsv1alph
 	return nil
 }
 
-// ensureMirrorSecret creates a copy of the source Secret in the target namespace,
-// owned by the Commit CR so that Kubernetes GC cleans it up on Commit deletion.
-func (r *commonControl) ensureMirrorSecret(ctx context.Context, commit *agentsv1alpha1.Commit, source *corev1.Secret, targetNamespace string) (*corev1.Secret, error) {
-	mirrorName := fmt.Sprintf("commit-%s-registry-auth", commit.Name)
-	trueVal := true
-	mirror := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      mirrorName,
-			Namespace: targetNamespace,
-			OwnerReferences: []metav1.OwnerReference{
-				{
-					APIVersion:         agentsv1alpha1.SchemeGroupVersion.String(),
-					Kind:               "Commit",
-					Name:               commit.Name,
-					UID:                commit.UID,
-					BlockOwnerDeletion: &trueVal,
-				},
-			},
-		},
-		Type: source.Type,
-		Data: source.Data,
-	}
-	if err := r.Create(ctx, mirror); err != nil {
-		if errors.IsAlreadyExists(err) {
-			klog.InfoS("Mirror secret already exists", "name", mirrorName, "namespace", targetNamespace)
-			return mirror, nil
-		}
-		return nil, err
-	}
-	klog.InfoS("Created mirror secret for cross-namespace registry auth",
-		"source", fmt.Sprintf("%s/%s", source.Namespace, source.Name),
-		"mirror", fmt.Sprintf("%s/%s", targetNamespace, mirrorName))
-	return mirror, nil
-}
-
-// resolveRegistrySecret implements the three-tier fallback for registry authentication:
+// resolveRegistrySecretName implements the three-tier fallback for registry authentication.
+// All secrets are resolved within the Commit's namespace (same as Pod/Job namespace).
 // Tier 1: spec.pushSecrets — explicitly specified secrets
-// Tier 2: DockerKeyring Lookup across namespace secrets (future enhancement)
+// Tier 2: DockerKeyring lookup across all dockerconfigjson secrets in namespace
 // Tier 3: Pod's ServiceAccount imagePullSecrets (best-effort)
-// Returns the resolved Secret object, or nil if no matching secret is found.
-func (r *commonControl) resolveRegistrySecret(ctx context.Context, commit *agentsv1alpha1.Commit, pod *corev1.Pod) *corev1.Secret {
+// Returns the secret name, or empty string if no matching secret is found.
+func (r *commonControl) resolveRegistrySecretName(ctx context.Context, commit *agentsv1alpha1.Commit, pod *corev1.Pod) string {
+	ns := commit.Namespace
+
 	// Tier 1: Explicit pushSecrets
 	for _, ref := range commit.Spec.PushSecrets {
-		ns := ref.Namespace
-		if ns == "" {
-			ns = commit.Namespace
-		}
 		secret := &corev1.Secret{}
 		if err := r.Get(ctx, client.ObjectKey{Namespace: ns, Name: ref.Name}, secret); err != nil {
 			klog.V(4).InfoS("Failed to get pushSecret, trying next", "namespace", ns, "name", ref.Name, "err", err)
@@ -233,8 +187,13 @@ func (r *commonControl) resolveRegistrySecret(ctx context.Context, commit *agent
 		}
 		if secret.Type == corev1.SecretTypeDockerConfigJson {
 			klog.InfoS("Using pushSecret for registry auth", "namespace", ns, "name", ref.Name)
-			return secret
+			return ref.Name
 		}
+	}
+
+	// Tier 2: DockerKeyring lookup across all dockerconfigjson secrets in namespace
+	if name := r.resolveRegistrySecretByKeyring(ctx, commit); name != "" {
+		return name
 	}
 
 	// Tier 3: ServiceAccount imagePullSecrets (best-effort)
@@ -250,7 +209,7 @@ func (r *commonControl) resolveRegistrySecret(ctx context.Context, commit *agent
 				if err := r.Get(ctx, client.ObjectKey{Namespace: pod.Namespace, Name: ref.Name}, secret); err == nil {
 					if secret.Type == corev1.SecretTypeDockerConfigJson {
 						klog.InfoS("Using SA imagePullSecret for registry auth (best-effort)", "namespace", pod.Namespace, "name", ref.Name)
-						return secret
+						return ref.Name
 					}
 				}
 			}
@@ -258,7 +217,70 @@ func (r *commonControl) resolveRegistrySecret(ctx context.Context, commit *agent
 	}
 
 	klog.InfoS("No registry secret found, commit will attempt anonymous push", "commit", klog.KObj(commit))
-	return nil
+	return ""
+}
+
+// resolveRegistrySecretByKeyring lists all dockerconfigjson secrets in the Commit's namespace,
+// builds a DockerKeyring, and looks up credentials matching the target registry.
+func (r *commonControl) resolveRegistrySecretByKeyring(ctx context.Context, commit *agentsv1alpha1.Commit) string {
+	targetRegistry := extractRegistryHost(commit.Spec.Image)
+	if targetRegistry == "" {
+		return ""
+	}
+
+	secretList := &corev1.SecretList{}
+	if err := r.Client.List(ctx, secretList, client.InNamespace(commit.Namespace)); err != nil {
+		klog.V(4).InfoS("Failed to list secrets in namespace for Tier 2 lookup", "namespace", commit.Namespace, "err", err)
+		return ""
+	}
+
+	// Filter to dockerconfigjson secrets only
+	var dockerSecrets []corev1.Secret
+	for i := range secretList.Items {
+		if secretList.Items[i].Type == corev1.SecretTypeDockerConfigJson || secretList.Items[i].Type == corev1.SecretTypeDockercfg {
+			dockerSecrets = append(dockerSecrets, secretList.Items[i])
+		}
+	}
+	if len(dockerSecrets) == 0 {
+		return ""
+	}
+
+	keyring, err := credentialprovidersecrets.MakeDockerKeyring(dockerSecrets, &credentialprovider.BasicDockerKeyring{})
+	if err != nil {
+		klog.V(4).InfoS("Failed to build DockerKeyring for Tier 2", "err", err)
+		return ""
+	}
+
+	creds, found := keyring.Lookup(targetRegistry)
+	if !found || len(creds) == 0 {
+		return ""
+	}
+
+	// Find the secret that provided the matching credential
+	source := creds[0].Source
+	if source == nil || source.Secret == nil {
+		// Fallback: return first docker secret if credential source is unavailable
+		klog.InfoS("Using namespace secret for registry auth (Tier 2, no source tracking)", "namespace", commit.Namespace)
+		return dockerSecrets[0].Name
+	}
+	for i := range dockerSecrets {
+		if string(dockerSecrets[i].UID) == source.Secret.UID {
+			klog.InfoS("Using namespace secret for registry auth (Tier 2)",
+				"namespace", dockerSecrets[i].Namespace, "name", dockerSecrets[i].Name, "registry", targetRegistry)
+			return dockerSecrets[i].Name
+		}
+	}
+
+	return ""
+}
+
+// extractRegistryHost extracts the registry host from an image reference.
+func extractRegistryHost(image string) string {
+	named, err := reference.ParseNormalizedNamed(image)
+	if err != nil {
+		return ""
+	}
+	return reference.Domain(named)
 }
 
 func (r *commonControl) listCRJobPods(ctx context.Context, commit *agentsv1alpha1.Commit) (*corev1.PodList, error) {

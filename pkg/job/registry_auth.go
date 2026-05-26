@@ -60,7 +60,10 @@ func setupRegistryAuth() error {
 
 // setupRegistryAuthFrom is the testable implementation of setupRegistryAuth.
 func setupRegistryAuthFrom(secretPath, configDir string) error {
-	os.Setenv("DOCKER_CONFIG", configDir)
+	err := os.Setenv("DOCKER_CONFIG", configDir)
+	if err != nil {
+		return err
+	}
 
 	if _, err := os.Stat(secretPath); os.IsNotExist(err) {
 		klog.InfoS("No registry secret mounted, skipping auth setup", "path", secretPath)

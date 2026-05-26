@@ -28,22 +28,22 @@ import (
 	"k8s.io/klog/v2"
 )
 
-type cmdOpt func(cmd *exec.Cmd)
+type CmdOpt func(cmd *exec.Cmd)
 
-func WithArgs(args ...string) cmdOpt {
+func WithArgs(args ...string) CmdOpt {
 	return func(cmd *exec.Cmd) {
 		cmd.Args = append(cmd.Args, args...)
 	}
 }
 
-func WithStdout(o io.Writer) cmdOpt {
+func WithStdout(o io.Writer) CmdOpt {
 	return func(cmd *exec.Cmd) {
 		cmd.Stdout = o
 	}
 }
 
 // NerdctlExec executes a nerdctl command with the given options.
-func NerdctlExec(ctx context.Context, opts ...cmdOpt) error {
+func NerdctlExec(ctx context.Context, opts ...CmdOpt) error {
 	presetArgs := []string{
 		"--debug",
 		"--namespace=k8s.io",

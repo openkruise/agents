@@ -93,21 +93,11 @@ func TestConfig_DryRun(t *testing.T) {
 func TestConfig_EnvGetters(t *testing.T) {
 	tests := []struct {
 		envKey string
-		setter func(string)
 		getter func() string
-		value  string
 	}{
-		{EnvContainerID, func(v string) { os.Setenv(EnvContainerID, v) }, Config().ContainerID, ""},
-		{EnvContainerName, func(v string) { os.Setenv(EnvContainerName, v) }, Config().ContainerName, ""},
-		{EnvCommitImage, func(v string) { os.Setenv(EnvCommitImage, v) }, Config().CommitImage, ""},
-		{EnvCommitNamespace, func(v string) { os.Setenv(EnvCommitNamespace, v) }, Config().CommitNamespace, ""},
-		{EnvCommitName, func(v string) { os.Setenv(EnvCommitName, v) }, Config().CommitName, ""},
-		{EnvControllerNamespace, func(v string) { os.Setenv(EnvControllerNamespace, v) }, Config().ControllerNamespace, ""},
-		{EnvPushSecretName, func(v string) { os.Setenv(EnvPushSecretName, v) }, Config().PushSecretName, ""},
-		{EnvCommitPodName, func(v string) { os.Setenv(EnvCommitPodName, v) }, Config().CommitPodName, ""},
-		{EnvCommitPodNamespace, func(v string) { os.Setenv(EnvCommitPodNamespace, v) }, Config().CommitPodNamespace, ""},
-		{EnvCommitPodUID, func(v string) { os.Setenv(EnvCommitPodUID, v) }, Config().CommitPodUID, ""},
-		{EnvAgentJobImage, func(v string) { os.Setenv(EnvAgentJobImage, v) }, Config().AgentJobImage, ""},
+		{EnvContainerID, Config().ContainerID},
+		{EnvCommitImage, Config().CommitImage},
+		{EnvAgentJobImage, Config().AgentJobImage},
 	}
 
 	for _, tt := range tests {
@@ -117,30 +107,6 @@ func TestConfig_EnvGetters(t *testing.T) {
 			got := tt.getter()
 			if got != "test-value" {
 				t.Errorf("%s getter returned %q, want 'test-value'", tt.envKey, got)
-			}
-		})
-	}
-}
-
-func TestConfig_EnvGetters_Unset(t *testing.T) {
-	tests := []struct {
-		name   string
-		envKey string
-		getter func() string
-	}{
-		{"ControllerNamespace unset", EnvControllerNamespace, Config().ControllerNamespace},
-		{"PushSecretName unset", EnvPushSecretName, Config().PushSecretName},
-		{"CommitPodName unset", EnvCommitPodName, Config().CommitPodName},
-		{"CommitPodNamespace unset", EnvCommitPodNamespace, Config().CommitPodNamespace},
-		{"CommitPodUID unset", EnvCommitPodUID, Config().CommitPodUID},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			os.Unsetenv(tt.envKey)
-			got := tt.getter()
-			if got != "" {
-				t.Errorf("%s getter returned %q when env unset, want empty string", tt.name, got)
 			}
 		})
 	}

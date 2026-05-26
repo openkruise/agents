@@ -17,6 +17,7 @@ limitations under the License.
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -34,15 +35,6 @@ const (
 	CommitFailed    CommitPhase = "Failed"
 )
 
-// ReferenceObject is a namespace-aware reference to a Kubernetes object.
-// Aligned with kruise's apis/apps/v1beta1.ReferenceObject pattern.
-type ReferenceObject struct {
-	// +kubebuilder:validation:Required
-	Name string `json:"name"`
-	// +kubebuilder:validation:Optional
-	Namespace string `json:"namespace,omitempty"`
-}
-
 type CommitSpec struct {
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="podName is immutable"
@@ -59,10 +51,10 @@ type CommitSpec struct {
 	// +kubebuilder:validation:Optional
 	Ttl *metav1.Duration `json:"ttl,omitempty"`
 
-	// PushSecrets is a list of references to secrets containing registry credentials
-	// for pushing the committed image. Supports cross-namespace references.
+	// PushSecrets is a list of references to secrets in the same namespace containing
+	// registry credentials for pushing the committed image.
 	// +kubebuilder:validation:Optional
-	PushSecrets []ReferenceObject `json:"pushSecrets,omitempty"`
+	PushSecrets []corev1.LocalObjectReference `json:"pushSecrets,omitempty"`
 
 	// Whether to perform a dry run that only checks prerequisites
 	// without actually committing or pushing the image.

@@ -23,17 +23,13 @@ import (
 )
 
 const (
-	// EnvAgentJobImage is the environment variable name for the agent job self image.
+	// EnvAgentJobImage is the environment variable name for the agent job self-image.
 	EnvAgentJobImage = "AGENT_JOB_IMAGE"
-	// EnvControllerNamespace is the environment variable name for the controller's namespace.
-	EnvControllerNamespace = "CONTROLLER_NAMESPACE"
-	// EnvPushSecretName is the environment variable name for the push-capable docker config secret.
-	EnvPushSecretName = "PUSH_SECRET_NAME"
 
-	// EnvContainerName is the environment variable name for the commit target container name.
-	EnvContainerName = "COMMIT_CONTAINER_NAME"
 	// EnvContainerID is the environment variable name for the commit target container ID.
 	EnvContainerID = "COMMIT_CONTAINER_ID"
+	// EnvContainerName is the environment variable name for the commit target container name.
+	EnvContainerName = "COMMIT_CONTAINER_NAME"
 	// EnvCommitImage is the environment variable name for the commit target image.
 	EnvCommitImage = "COMMIT_IMAGE"
 	// EnvContainerdSock is the environment variable name for the containerd socket path.
@@ -68,18 +64,10 @@ const (
 // EnvConfig reads configuration from environment variables.
 type EnvConfig struct{}
 
-func (c *EnvConfig) ContainerID() string         { return os.Getenv(EnvContainerID) }
-func (c *EnvConfig) ContainerName() string       { return os.Getenv(EnvContainerName) }
-func (c *EnvConfig) CommitImage() string         { return os.Getenv(EnvCommitImage) }
-func (c *EnvConfig) CommitNamespace() string     { return os.Getenv(EnvCommitNamespace) }
-func (c *EnvConfig) CommitName() string          { return os.Getenv(EnvCommitName) }
-func (c *EnvConfig) AgentJobImage() string       { return os.Getenv(EnvAgentJobImage) }
-func (c *EnvConfig) ControllerNamespace() string { return os.Getenv(EnvControllerNamespace) }
-func (c *EnvConfig) PushSecretName() string      { return os.Getenv(EnvPushSecretName) }
-func (c *EnvConfig) CommitPodName() string       { return os.Getenv(EnvCommitPodName) }
-func (c *EnvConfig) CommitPodNamespace() string  { return os.Getenv(EnvCommitPodNamespace) }
-func (c *EnvConfig) CommitPodUID() string        { return os.Getenv(EnvCommitPodUID) }
-func (c *EnvConfig) DryRun() bool                { return os.Getenv(EnvDryRun) == "true" }
+func (c *EnvConfig) ContainerID() string   { return os.Getenv(EnvContainerID) }
+func (c *EnvConfig) CommitImage() string   { return os.Getenv(EnvCommitImage) }
+func (c *EnvConfig) AgentJobImage() string { return os.Getenv(EnvAgentJobImage) }
+func (c *EnvConfig) DryRun() bool          { return os.Getenv(EnvDryRun) == "true" }
 
 func (c *EnvConfig) ContainerdSockPath() string {
 	if sock := os.Getenv(EnvContainerdSockPath); sock != "" {

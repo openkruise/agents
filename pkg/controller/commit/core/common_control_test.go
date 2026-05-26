@@ -19,6 +19,7 @@ package core
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -109,68 +110,41 @@ func newCommonControlForTest(c client.Client) *commonControl {
 
 // --- resolveRegistrySecret tests ---
 
-func TestResolveRegistrySecret_Tier1_SameNamespace(t *testing.T) {
+func TestResolveRegistrySecretName_Tier1(t *testing.T) {
 	scheme := newTestScheme()
 	secret := newDockerConfigSecret("push-secret", "default")
 	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
 	ctrl := newCommonControlForTest(fc)
 
 	commit := newTestCommit("test-commit", "default")
-	commit.Spec.PushSecrets = []agentsv1alpha1.ReferenceObject{
+	commit.Spec.PushSecrets = []corev1.LocalObjectReference{
 		{Name: "push-secret"},
 	}
 	pod := newTestPod("test-pod", "default", "node-1")
 
-	resolved := ctrl.resolveRegistrySecret(context.TODO(), commit, pod)
-	if resolved == nil {
-		t.Fatal("expected resolved secret, got nil")
-	}
-	if resolved.Name != "push-secret" {
-		t.Errorf("expected secret name 'push-secret', got %s", resolved.Name)
-	}
-	if resolved.Namespace != "default" {
-		t.Errorf("expected namespace 'default', got %s", resolved.Namespace)
+	name := ctrl.resolveRegistrySecretName(context.TODO(), commit, pod)
+	if name != "push-secret" {
+		t.Errorf("expected 'push-secret', got %q", name)
 	}
 }
 
-func TestResolveRegistrySecret_Tier1_CrossNamespace(t *testing.T) {
-	scheme := newTestScheme()
-	secret := newDockerConfigSecret("push-secret", "team-a")
-	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
-	ctrl := newCommonControlForTest(fc)
-
-	commit := newTestCommit("test-commit", "default")
-	commit.Spec.PushSecrets = []agentsv1alpha1.ReferenceObject{
-		{Name: "push-secret", Namespace: "team-a"},
-	}
-	pod := newTestPod("test-pod", "default", "node-1")
-
-	resolved := ctrl.resolveRegistrySecret(context.TODO(), commit, pod)
-	if resolved == nil {
-		t.Fatal("expected resolved secret, got nil")
-	}
-	if resolved.Namespace != "team-a" {
-		t.Errorf("expected namespace 'team-a', got %s", resolved.Namespace)
-	}
-}
-
-func TestResolveRegistrySecret_Tier1_NotFound(t *testing.T) {
+func TestResolveRegistrySecretName_Tier1_NotFound(t *testing.T) {
 	scheme := newTestScheme()
 	fc := fake.NewClientBuilder().WithScheme(scheme).Build()
 	ctrl := newCommonControlForTest(fc)
 
 	commit := newTestCommit("test-commit", "default")
-	commit.Spec.PushSecrets = []agentsv1alpha1.ReferenceObject{
+	commit.Spec.PushSecrets = []corev1.LocalObjectReference{
 		{Name: "nonexistent-secret"},
 	}
 
-	resolved := ctrl.resolveRegistrySecret(context.TODO(), commit, nil)
-	if resolved != nil {
-		t.Errorf("expected nil, got %v", resolved)
+	name := ctrl.resolveRegistrySecretName(context.TODO(), commit, nil)
+	if name != "" {
+		t.Errorf("expected empty, got %q", name)
 	}
 }
 
-func TestResolveRegistrySecret_Tier1_WrongType(t *testing.T) {
+func TestResolveRegistrySecretName_Tier1_WrongType(t *testing.T) {
 	scheme := newTestScheme()
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "opaque-secret", Namespace: "default"},
@@ -180,17 +154,17 @@ func TestResolveRegistrySecret_Tier1_WrongType(t *testing.T) {
 	ctrl := newCommonControlForTest(fc)
 
 	commit := newTestCommit("test-commit", "default")
-	commit.Spec.PushSecrets = []agentsv1alpha1.ReferenceObject{
+	commit.Spec.PushSecrets = []corev1.LocalObjectReference{
 		{Name: "opaque-secret"},
 	}
 
-	resolved := ctrl.resolveRegistrySecret(context.TODO(), commit, nil)
-	if resolved != nil {
-		t.Errorf("expected nil for wrong secret type, got %v", resolved)
+	name := ctrl.resolveRegistrySecretName(context.TODO(), commit, nil)
+	if name != "" {
+		t.Errorf("expected empty for wrong secret type, got %q", name)
 	}
 }
 
-func TestResolveRegistrySecret_Tier3_SAImagePullSecrets(t *testing.T) {
+func TestResolveRegistrySecretName_Tier3_SAImagePullSecrets(t *testing.T) {
 	scheme := newTestScheme()
 	secret := newDockerConfigSecret("sa-pull-secret", "default")
 	sa := &corev1.ServiceAccount{
@@ -205,16 +179,13 @@ func TestResolveRegistrySecret_Tier3_SAImagePullSecrets(t *testing.T) {
 	commit := newTestCommit("test-commit", "default")
 	pod := newTestPod("test-pod", "default", "node-1")
 
-	resolved := ctrl.resolveRegistrySecret(context.TODO(), commit, pod)
-	if resolved == nil {
-		t.Fatal("expected resolved secret from SA, got nil")
-	}
-	if resolved.Name != "sa-pull-secret" {
-		t.Errorf("expected 'sa-pull-secret', got %s", resolved.Name)
+	name := ctrl.resolveRegistrySecretName(context.TODO(), commit, pod)
+	if name != "sa-pull-secret" {
+		t.Errorf("expected 'sa-pull-secret', got %q", name)
 	}
 }
 
-func TestResolveRegistrySecret_NoSecret(t *testing.T) {
+func TestResolveRegistrySecretName_NoSecret(t *testing.T) {
 	scheme := newTestScheme()
 	sa := &corev1.ServiceAccount{
 		ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: "default"},
@@ -225,65 +196,9 @@ func TestResolveRegistrySecret_NoSecret(t *testing.T) {
 	commit := newTestCommit("test-commit", "default")
 	pod := newTestPod("test-pod", "default", "node-1")
 
-	resolved := ctrl.resolveRegistrySecret(context.TODO(), commit, pod)
-	if resolved != nil {
-		t.Errorf("expected nil when no secret matches, got %v", resolved)
-	}
-}
-
-// --- ensureMirrorSecret tests ---
-
-func TestEnsureMirrorSecret_CreatesMirror(t *testing.T) {
-	scheme := newTestScheme()
-	fc := fake.NewClientBuilder().WithScheme(scheme).Build()
-	ctrl := newCommonControlForTest(fc)
-
-	commit := newTestCommit("my-commit", "default")
-	source := newDockerConfigSecret("push-secret", "team-a")
-
-	mirror, err := ctrl.ensureMirrorSecret(context.TODO(), commit, source, "default")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if mirror.Name != "commit-my-commit-registry-auth" {
-		t.Errorf("expected mirror name 'commit-my-commit-registry-auth', got %s", mirror.Name)
-	}
-	if mirror.Namespace != "default" {
-		t.Errorf("expected namespace 'default', got %s", mirror.Namespace)
-	}
-	if len(mirror.OwnerReferences) != 1 || mirror.OwnerReferences[0].Name != "my-commit" {
-		t.Errorf("expected OwnerReference to commit 'my-commit'")
-	}
-
-	// Verify it was actually created
-	got := &corev1.Secret{}
-	err = fc.Get(context.TODO(), client.ObjectKey{Namespace: "default", Name: "commit-my-commit-registry-auth"}, got)
-	if err != nil {
-		t.Fatalf("mirror secret not found in fake client: %v", err)
-	}
-	if got.Type != corev1.SecretTypeDockerConfigJson {
-		t.Errorf("expected dockerconfigjson type, got %s", got.Type)
-	}
-}
-
-func TestEnsureMirrorSecret_AlreadyExists(t *testing.T) {
-	scheme := newTestScheme()
-	existing := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "commit-my-commit-registry-auth", Namespace: "default"},
-		Type:       corev1.SecretTypeDockerConfigJson,
-	}
-	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).Build()
-	ctrl := newCommonControlForTest(fc)
-
-	commit := newTestCommit("my-commit", "default")
-	source := newDockerConfigSecret("push-secret", "team-a")
-
-	mirror, err := ctrl.ensureMirrorSecret(context.TODO(), commit, source, "default")
-	if err != nil {
-		t.Fatalf("unexpected error on already-exists: %v", err)
-	}
-	if mirror.Name != "commit-my-commit-registry-auth" {
-		t.Errorf("expected mirror name, got %s", mirror.Name)
+	name := ctrl.resolveRegistrySecretName(context.TODO(), commit, pod)
+	if name != "" {
+		t.Errorf("expected empty when no secret matches, got %q", name)
 	}
 }
 
@@ -535,7 +450,7 @@ func TestEnsureCommitRunning_WithDockerSecret(t *testing.T) {
 
 	scheme := newTestScheme()
 	commit := newTestCommit("test-commit", "default")
-	commit.Spec.PushSecrets = []agentsv1alpha1.ReferenceObject{
+	commit.Spec.PushSecrets = []corev1.LocalObjectReference{
 		{Name: "push-secret"},
 	}
 	pod := newTestPod("test-pod", "default", "node-1")
@@ -558,6 +473,7 @@ func TestEnsureCommitRunning_WithDockerSecret(t *testing.T) {
 	if err := fc.Get(context.TODO(), client.ObjectKey{Namespace: "default", Name: jobName}, createdJob); err != nil {
 		t.Fatalf("expected Job: %v", err)
 	}
+	// Verify docker-config volume is mounted with the secret name
 	found := false
 	for _, v := range createdJob.Spec.Template.Spec.Volumes {
 		if v.Name == "docker-config" {
@@ -569,52 +485,6 @@ func TestEnsureCommitRunning_WithDockerSecret(t *testing.T) {
 	}
 	if !found {
 		t.Error("expected docker-config volume in Job")
-	}
-}
-
-func TestEnsureCommitRunning_CrossNamespaceSecret(t *testing.T) {
-	os.Setenv("AGENT_JOB_IMAGE", "test-image:latest")
-	defer os.Unsetenv("AGENT_JOB_IMAGE")
-
-	scheme := newTestScheme()
-	commit := newTestCommit("test-commit", "default")
-	commit.Spec.PushSecrets = []agentsv1alpha1.ReferenceObject{
-		{Name: "push-secret", Namespace: "team-a"},
-	}
-	pod := newTestPod("test-pod", "default", "node-1")
-	secret := newDockerConfigSecret("push-secret", "team-a")
-
-	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(commit, pod, secret).Build()
-	ctrl := newCommonControlForTest(fc)
-
-	newStatus := commit.Status.DeepCopy()
-	args := &EnsureFuncArgs{Pod: pod, Commit: commit, NewStatus: newStatus}
-
-	_, err := ctrl.EnsureCommitRunning(context.TODO(), args)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	// Verify mirror secret was created in default namespace
-	mirrorSecret := &corev1.Secret{}
-	err = fc.Get(context.TODO(), client.ObjectKey{Namespace: "default", Name: "commit-test-commit-registry-auth"}, mirrorSecret)
-	if err != nil {
-		t.Fatalf("expected mirror secret to be created: %v", err)
-	}
-	if mirrorSecret.Type != corev1.SecretTypeDockerConfigJson {
-		t.Errorf("expected dockerconfigjson type for mirror, got %s", mirrorSecret.Type)
-	}
-
-	// Verify Job references the mirror secret
-	jobName := jobutil.MakeJobName(string(commit.UID))
-	createdJob := &batchv1.Job{}
-	_ = fc.Get(context.TODO(), client.ObjectKey{Namespace: "default", Name: jobName}, createdJob)
-	for _, v := range createdJob.Spec.Template.Spec.Volumes {
-		if v.Name == "docker-config" {
-			if v.Secret.SecretName != "commit-test-commit-registry-auth" {
-				t.Errorf("expected Job to reference mirror secret, got %s", v.Secret.SecretName)
-			}
-		}
 	}
 }
 
@@ -888,20 +758,62 @@ func TestApplyCommitJob_EmptyContainerID(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when container ID is empty")
 	}
-	if !contains(err.Error(), "failed to generate commit job") {
+	if !strings.Contains(err.Error(), "failed to generate commit job") {
 		t.Errorf("expected error to contain 'failed to generate commit job', got: %v", err)
 	}
 }
 
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsHelper(s, substr))
-}
+// --- extractRegistryHost tests ---
 
-func containsHelper(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
+func TestExtractRegistryHost(t *testing.T) {
+	tests := []struct {
+		name     string
+		image    string
+		expected string
+	}{
+		{
+			name:     "full registry with port",
+			image:    "registry.example.com:5000/team/env:v1",
+			expected: "registry.example.com:5000",
+		},
+		{
+			name:     "standard registry",
+			image:    "registry.example.com/team/env:v1",
+			expected: "registry.example.com",
+		},
+		{
+			name:     "docker.io short form",
+			image:    "library/nginx:latest",
+			expected: "docker.io",
+		},
+		{
+			name:     "docker.io official image",
+			image:    "nginx:latest",
+			expected: "docker.io",
+		},
+		{
+			name:     "gcr.io",
+			image:    "gcr.io/my-project/my-image:v1",
+			expected: "gcr.io",
+		},
+		{
+			name:     "invalid image",
+			image:    "INVALID:::image",
+			expected: "",
+		},
+		{
+			name:     "empty string",
+			image:    "",
+			expected: "",
+		},
 	}
-	return false
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractRegistryHost(tt.image)
+			if got != tt.expected {
+				t.Errorf("extractRegistryHost(%q) = %q, want %q", tt.image, got, tt.expected)
+			}
+		})
+	}
 }

@@ -161,7 +161,6 @@ func TestGenerateCommitJob_WithoutDockerConfigSecret(t *testing.T) {
 	defer os.Unsetenv(EnvAgentJobImage)
 
 	g := newTestGenerator()
-	g.DockerConfigSecretName = ""
 
 	job, err := g.GenerateCommitJob()
 	if err != nil {
