@@ -17,6 +17,9 @@ limitations under the License.
 package metricsasync
 
 import (
+	"context"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -196,4 +199,68 @@ func testCounter(t *testing.T, vec *prometheus.CounterVec, lvs ...string) float6
 	var d dto.Metric
 	assert.NoError(t, m.(prometheus.Metric).Write(&d))
 	return d.GetCounter().GetValue()
+}
+
+func TestPool_Start_processesAndRecovers(t *testing.T) {
+	type result struct {
+		ns, name string
+	}
+	tests := []struct {
+		name      string
+		fn        CleanupFunc
+		enqueues  int
+		distinct  int
+		wantOK    float64
+		wantPanic float64
+	}{
+		{
+			name:     "ok path counts processed",
+			fn:       func(string, string) {},
+			enqueues: 5,
+			distinct: 5,
+			wantOK:   5,
+		},
+		{
+			name:      "panic recorded as panic, worker survives",
+			fn:        func(string, string) { panic("boom") },
+			enqueues:  3,
+			distinct:  3,
+			wantPanic: 3,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := NewPool(Options{Name: "metrics_async_test_start_" + tt.name, Workers: 2, DrainTimeout: time.Second})
+			var got sync.Map
+			fn := tt.fn
+			wrapped := func(ns, name string) {
+				got.Store(result{ns, name}, struct{}{})
+				fn(ns, name)
+			}
+			assert.NoError(t, p.RegisterKind("sandbox", wrapped))
+
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			go func() { done <- p.Start(ctx) }()
+
+			for i := 0; i < tt.enqueues; i++ {
+				p.Enqueue("sandbox", "ns", fmt.Sprintf("n%d", i))
+			}
+			// Wait until processed.
+			assert.Eventually(t, func() bool {
+				return testCounter(t, p.col.processedTotal, "sandbox", "ok")+
+					testCounter(t, p.col.processedTotal, "sandbox", "panic") >= float64(tt.distinct)
+			}, 2*time.Second, 5*time.Millisecond)
+
+			cancel()
+			assert.NoError(t, <-done)
+
+			if tt.wantOK > 0 {
+				assert.Equal(t, tt.wantOK, testCounter(t, p.col.processedTotal, "sandbox", "ok"))
+			}
+			if tt.wantPanic > 0 {
+				assert.Equal(t, tt.wantPanic, testCounter(t, p.col.processedTotal, "sandbox", "panic"))
+			}
+		})
+	}
 }

@@ -22,14 +22,17 @@ limitations under the License.
 package metricsasync
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
+	"sigs.k8s.io/controller-runtime/pkg/metrics"
 )
 
 // CleanupFunc removes all metric series for one object identified by
@@ -92,7 +95,7 @@ func (o Options) applyDefaults() Options {
 }
 
 // Pool is a shared async cleanup pool. It satisfies controller-runtime's
-// manager.Runnable contract via Start (added in a later task).
+// manager.Runnable contract via Start.
 type Pool struct {
 	opts  Options
 	queue workqueue.TypedInterface[Key]
@@ -103,6 +106,8 @@ type Pool struct {
 
 	enqueueAt sync.Map // Key -> int64 (unix nanos) of latest enqueue
 	depth     sync.Map // kind string -> *int64 atomic counter
+
+	started atomic.Bool
 }
 
 // NewPool creates a Pool with the given Options. It does not start any
@@ -181,4 +186,102 @@ func (p *Pool) decDepth(kind string) {
 	}
 	atomic.AddInt64(v.(*int64), -1)
 	p.col.queueDepth.WithLabelValues(kind).Set(float64(atomic.LoadInt64(v.(*int64))))
+}
+
+// Start runs Workers worker goroutines and blocks until ctx is
+// cancelled. After cancellation it shuts the queue down and waits up
+// to DrainTimeout for in-flight tasks. Items still queued at timeout
+// are reported via dropped_total{reason="drain_timeout"}.
+//
+// Implements sigs.k8s.io/controller-runtime/pkg/manager.Runnable.
+func (p *Pool) Start(ctx context.Context) error {
+	if !p.started.CompareAndSwap(false, true) {
+		return errors.New("metricsasync: Start called twice")
+	}
+	// Register self-observability metrics against the controller-runtime
+	// metrics registry. AlreadyRegistered is tolerated so repeated process
+	// starts in unit tests using the same Name do not fail.
+	if err := p.col.register(metrics.Registry); err != nil {
+		var are prometheus.AlreadyRegisteredError
+		if !errors.As(err, &are) {
+			return fmt.Errorf("metricsasync: register collectors: %w", err)
+		}
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < p.opts.Workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			p.runWorker()
+		}()
+	}
+
+	<-ctx.Done()
+	p.queue.ShutDown()
+
+	if p.opts.DrainTimeout <= 0 {
+		// Do not wait; remaining items are dropped.
+		remaining := p.queue.Len()
+		if remaining > 0 {
+			p.col.dropped.WithLabelValues("", "drain_timeout").Add(float64(remaining))
+		}
+		return nil
+	}
+
+	doneCh := make(chan struct{})
+	go func() { wg.Wait(); close(doneCh) }()
+	select {
+	case <-doneCh:
+		return nil
+	case <-time.After(p.opts.DrainTimeout):
+		remaining := p.queue.Len()
+		if remaining > 0 {
+			p.col.dropped.WithLabelValues("", "drain_timeout").Add(float64(remaining))
+			klog.InfoS("metricsasync: drain timeout reached", "remaining", remaining, "timeout", p.opts.DrainTimeout)
+		}
+		return nil
+	}
+}
+
+func (p *Pool) runWorker() {
+	for {
+		key, shutdown := p.queue.Get()
+		if shutdown {
+			return
+		}
+		p.process(key)
+		p.queue.Done(key)
+	}
+}
+
+func (p *Pool) process(key Key) {
+	p.decDepth(key.Kind)
+
+	var enqueueAt int64
+	if v, ok := p.enqueueAt.LoadAndDelete(key); ok {
+		enqueueAt = v.(int64)
+	}
+
+	fn, ok := p.lookup(key.Kind)
+	if !ok {
+		p.col.dropped.WithLabelValues(key.Kind, "unregistered").Inc()
+		return
+	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			p.col.processedTotal.WithLabelValues(key.Kind, "panic").Inc()
+			klog.ErrorS(fmt.Errorf("%v", r), "metricsasync: cleanup panicked",
+				"kind", key.Kind, "namespace", key.Namespace, "name", key.Name)
+		}
+	}()
+
+	if enqueueAt != 0 {
+		p.col.latency.WithLabelValues(key.Kind).Observe(float64(time.Now().UnixNano()-enqueueAt) / 1e9)
+	}
+	start := time.Now()
+	fn(key.Namespace, key.Name)
+	p.col.duration.WithLabelValues(key.Kind).Observe(time.Since(start).Seconds())
+	p.col.processedTotal.WithLabelValues(key.Kind, "ok").Inc()
 }
