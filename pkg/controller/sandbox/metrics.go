@@ -21,10 +21,12 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/utils"
 )
 
 var (
@@ -227,6 +229,19 @@ var (
 		[]string{"namespace"},
 	)
 
+	// sandboxRuntimeContainerAbnormal indicates whether a sandbox runtime container is in an
+	// abnormal state (1=abnormal, 0=healthy). "Runtime container" refers to the set of
+	// platform-managed init containers that form the sandbox runtime infrastructure
+	// (e.g. agent-runtime, csi-sidecar, csi-agent-sidecar), as defined in RuntimeContainerNames.
+	// The "container" label identifies which specific runtime container is affected.
+	sandboxRuntimeContainerAbnormal = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "sandbox_runtime_container_abnormal",
+			Help: "Whether a sandbox runtime container is abnormal (1=abnormal, 0=healthy). Runtime containers are platform-managed containers (e.g. agent-runtime, csi-sidecar, csi-agent-sidecar).",
+		},
+		[]string{"namespace", "name", "container"},
+	)
+
 	// sandboxStatusAbnormal indicates whether a sandbox is in an abnormal state
 	// where phase and condition are inconsistent (1=abnormal, 0=normal).
 	sandboxStatusAbnormal = prometheus.NewGaugeVec(
@@ -308,6 +323,7 @@ func init() {
 		sandboxPauseTotal,
 		sandboxResumeTotal,
 		sandboxDeletionDuration,
+		sandboxRuntimeContainerAbnormal,
 		sandboxStatusAbnormal,
 	)
 }
@@ -410,7 +426,8 @@ func findCondition(conditions []metav1.Condition, condType string) *metav1.Condi
 }
 
 // recordSandboxMetrics updates all sandbox lifecycle metrics based on the current sandbox state.
-func recordSandboxMetrics(sandbox *agentsv1alpha1.Sandbox) {
+// pod may be nil; when nil, container-level metrics are skipped.
+func recordSandboxMetrics(sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod) {
 	namespace := sandbox.Namespace
 	name := sandbox.Name
 
@@ -538,6 +555,8 @@ func recordSandboxMetrics(sandbox *agentsv1alpha1.Sandbox) {
 		}
 		sandboxLabels.WithLabelValues(labelValues...).Set(1)
 	}
+
+	recordRuntimeContainerAbnormal(namespace, name, pod)
 }
 
 // deleteSandboxMetrics removes all metrics for a sandbox that has been deleted.
@@ -568,6 +587,7 @@ func deleteSandboxMetrics(namespace, name string) {
 	// Counter metrics at namespace level are not deleted per-sandbox
 
 	sandboxStatusAbnormal.DeletePartialMatch(prometheus.Labels{"namespace": namespace, "name": name})
+	sandboxRuntimeContainerAbnormal.DeletePartialMatch(prometheus.Labels{"namespace": namespace, "name": name})
 
 	if sandboxLabels != nil {
 		sandboxLabels.DeletePartialMatch(prometheus.Labels{"namespace": namespace, "name": name})
@@ -581,4 +601,21 @@ func deleteSandboxMetrics(namespace, name string) {
 	resumeStartTimes.Delete(key)
 	observedResumeDurations.Delete(key)
 	observedCreationFailure.Delete(key)
+}
+
+func recordRuntimeContainerAbnormal(namespace, name string, pod *corev1.Pod) {
+	if pod == nil {
+		return
+	}
+	for i := range pod.Status.InitContainerStatuses {
+		cs := &pod.Status.InitContainerStatuses[i]
+		if !utils.RuntimeContainerNames.Has(cs.Name) {
+			continue
+		}
+		if cs.RestartCount > 0 && !cs.Ready {
+			sandboxRuntimeContainerAbnormal.WithLabelValues(namespace, name, cs.Name).Set(1)
+		} else {
+			sandboxRuntimeContainerAbnormal.WithLabelValues(namespace, name, cs.Name).Set(0)
+		}
+	}
 }

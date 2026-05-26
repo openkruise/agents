@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"time"
 
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
 )
 
@@ -57,6 +58,18 @@ const (
 
 	CreatedByExternal = "external"
 	CreatedBySandbox  = "sandbox"
+
+	ContainerNameRuntimeAgent    = "agent-runtime"
+	ContainerNameCSISidecar      = "csi-sidecar"
+	ContainerNameCSIAgentSidecar = "csi-agent-sidecar"
+	ContainerNameIstioProxy      = "istio-proxy"
+)
+
+var RuntimeContainerNames = sets.NewString(
+	ContainerNameRuntimeAgent,
+	ContainerNameCSISidecar,
+	ContainerNameCSIAgentSidecar,
+	ContainerNameIstioProxy,
 )
 
 var (
