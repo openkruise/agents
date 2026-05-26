@@ -246,6 +246,55 @@ var _ = Describe("Commit", func() {
 			}
 			Expect(found).To(BeTrue(), "expected DRY_RUN=true env in job container")
 		})
+
+		It("should complete full lifecycle Pending -> Running -> Succeeded with DryRun", func() {
+			// Create sandbox and wait for Running
+			Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
+			Eventually(func() agentsv1alpha1.SandboxPhase {
+				got := &agentsv1alpha1.Sandbox{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{
+					Name: sandbox.Name, Namespace: namespace,
+				}, got); err != nil {
+					return ""
+				}
+				return got.Status.Phase
+			}, 120*time.Second, 3*time.Second).Should(Equal(agentsv1alpha1.SandboxRunning))
+
+			podName := sandbox.Name
+
+			commit := &agentsv1alpha1.Commit{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("commit-dryrun-full-%d", time.Now().UnixNano()),
+					Namespace: namespace,
+				},
+				Spec: agentsv1alpha1.CommitSpec{
+					PodName:       podName,
+					ContainerName: "workspace",
+					Image:         "localhost:5000/test-commit:e2e-dryrun-full",
+					DryRun:        true,
+				},
+			}
+			Expect(k8sClient.Create(ctx, commit)).To(Succeed())
+
+			// DryRun job exits 0 immediately, should reach Succeeded
+			Eventually(func() agentsv1alpha1.CommitPhase {
+				got := &agentsv1alpha1.Commit{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{
+					Name: commit.Name, Namespace: namespace,
+				}, got); err != nil {
+					return ""
+				}
+				return got.Status.Phase
+			}, 180*time.Second, 3*time.Second).Should(Equal(agentsv1alpha1.CommitSucceeded))
+
+			// Verify CompletionTime and StartTime are set
+			final := &agentsv1alpha1.Commit{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name: commit.Name, Namespace: namespace,
+			}, final)).To(Succeed())
+			Expect(final.Status.CompletionTime).NotTo(BeNil())
+			Expect(final.Status.StartTime).NotTo(BeNil())
+		})
 	})
 
 	Context("Commit deletion", func() {
