@@ -22,7 +22,9 @@ import (
 	"net/http"         // Added for pprof server
 	_ "net/http/pprof" // Added to register pprof handlers
 	"os"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/pflag"
 	corev1 "k8s.io/api/core/v1"
@@ -51,6 +53,7 @@ import (
 	"github.com/openkruise/agents/pkg/utils"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 	"github.com/openkruise/agents/pkg/utils/fieldindex"
+	"github.com/openkruise/agents/pkg/utils/metricsasync"
 	customwebhook "github.com/openkruise/agents/pkg/webhook"
 	"github.com/openkruise/agents/pkg/webhook/sandboxset/mutating"
 )
@@ -88,6 +91,24 @@ func main() {
 	var allowPrivileged bool
 	var metricLabelsAllowlist string
 
+	// envInt returns the integer value of envVar, or fallback if unset/invalid.
+	envInt := func(envVar string, fallback int) int {
+		if v := os.Getenv(envVar); v != "" {
+			if n, err := strconv.Atoi(v); err == nil {
+				return n
+			}
+		}
+		return fallback
+	}
+	envDuration := func(envVar string, fallback time.Duration) time.Duration {
+		if v := os.Getenv(envVar); v != "" {
+			if d, err := time.ParseDuration(v); err == nil {
+				return d
+			}
+		}
+		return fallback
+	}
+
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -119,6 +140,19 @@ func main() {
 		"supporting three states: ip, memory, and filesystem. Format: comma-separated, e.g.: memory,filesystem")
 	flag.StringVar(&metricLabelsAllowlist, "metric-labels-allowlist", "",
 		"Comma-separated list of Sandbox label keys to expose as sandbox_labels metric labels (e.g., app,env,version)")
+
+	var metricsAsyncWorkers int
+	var metricsAsyncDrainTimeout time.Duration
+	var metricsAsyncQueueCap int
+	flag.IntVar(&metricsAsyncWorkers, "metrics-async-workers",
+		envInt("METRICS_ASYNC_WORKERS", 8),
+		"Number of goroutines draining the async metric cleanup queue.")
+	flag.DurationVar(&metricsAsyncDrainTimeout, "metrics-async-drain-timeout",
+		envDuration("METRICS_ASYNC_DRAIN_TIMEOUT", 5*time.Second),
+		"Bounded time the manager waits for async metric cleanup to drain at shutdown.")
+	flag.IntVar(&metricsAsyncQueueCap, "metrics-async-queue-cap",
+		envInt("METRICS_ASYNC_QUEUE_CAP", 0),
+		"Optional cap on the async metric cleanup queue. 0 means unbounded.")
 
 	opts := zap.Options{
 		Development: true,
@@ -281,8 +315,25 @@ func main() {
 		os.Exit(1)
 	}
 
-	setupLog.Info("setup controllers")
-	if err = controller.SetupWithManager(mgr); err != nil {
+	metricsCleanupPool := metricsasync.NewPool(metricsasync.Options{
+		Workers:      metricsAsyncWorkers,
+		DrainTimeout: metricsAsyncDrainTimeout,
+		QueueCap:     metricsAsyncQueueCap,
+	})
+	if err := metricsCleanupPool.RegisterKind("sandbox", sandboxctrl.DeleteSandboxMetrics); err != nil {
+		setupLog.Error(err, "unable to register sandbox metric cleanup")
+		os.Exit(1)
+	}
+	if err := mgr.Add(metricsCleanupPool); err != nil {
+		setupLog.Error(err, "unable to add metrics cleanup pool to manager")
+		os.Exit(1)
+	}
+
+	setupLog.Info("setup controllers",
+		"metricsAsyncWorkers", metricsAsyncWorkers,
+		"metricsAsyncDrainTimeout", metricsAsyncDrainTimeout,
+		"metricsAsyncQueueCap", metricsAsyncQueueCap)
+	if err = controller.SetupWithManager(mgr, controller.Deps{MetricsCleanup: metricsCleanupPool}); err != nil {
 		setupLog.Error(err, "unable to setup controllers")
 		os.Exit(1)
 	}
