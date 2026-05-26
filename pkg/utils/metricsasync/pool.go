@@ -21,7 +21,14 @@ limitations under the License.
 // per-key serialization and best-effort shutdown drain.
 package metricsasync
 
-import "time"
+import (
+	"errors"
+	"fmt"
+	"sync"
+	"time"
+
+	"k8s.io/client-go/util/workqueue"
+)
 
 // CleanupFunc removes all metric series for one object identified by
 // namespace/name. It MUST be idempotent and safe to invoke after the
@@ -80,4 +87,53 @@ func (o Options) applyDefaults() Options {
 		out.Name = "metrics_async"
 	}
 	return out
+}
+
+// Pool is a shared async cleanup pool. It satisfies controller-runtime's
+// manager.Runnable contract via Start (added in a later task).
+type Pool struct {
+	opts  Options
+	queue workqueue.TypedInterface[Key]
+	col   *collectors
+
+	mu       sync.RWMutex
+	registry map[string]CleanupFunc
+}
+
+// NewPool creates a Pool with the given Options. It does not start any
+// goroutines; call Start to drive the pool from a manager.
+func NewPool(opts Options) *Pool {
+	o := opts.applyDefaults()
+	return &Pool{
+		opts:     o,
+		queue:    workqueue.NewTyped[Key](),
+		col:      newCollectors(o.Name),
+		registry: make(map[string]CleanupFunc),
+	}
+}
+
+// RegisterKind associates a CleanupFunc with a kind. Must be called
+// before Start. Re-registering the same kind returns an error so
+// configuration mistakes surface loudly.
+func (p *Pool) RegisterKind(kind string, fn CleanupFunc) error {
+	if kind == "" {
+		return errors.New("metricsasync: empty kind")
+	}
+	if fn == nil {
+		return errors.New("metricsasync: nil CleanupFunc")
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if _, dup := p.registry[kind]; dup {
+		return fmt.Errorf("metricsasync: kind %q already registered", kind)
+	}
+	p.registry[kind] = fn
+	return nil
+}
+
+func (p *Pool) lookup(kind string) (CleanupFunc, bool) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	fn, ok := p.registry[kind]
+	return fn, ok
 }

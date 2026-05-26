@@ -72,3 +72,50 @@ func TestNewCollectors_namesAndLabels(t *testing.T) {
 	c.latency.WithLabelValues("sandbox").Observe(0.001)
 	c.dropped.WithLabelValues("sandbox", "queue_full").Inc()
 }
+
+func TestPool_RegisterKind(t *testing.T) {
+	tests := []struct {
+		name        string
+		setup       func(p *Pool) error
+		register    func(p *Pool) error
+		expectError string
+	}{
+		{
+			name:     "register single kind succeeds",
+			register: func(p *Pool) error { return p.RegisterKind("sandbox", func(string, string) {}) },
+		},
+		{
+			name: "register duplicate kind fails",
+			setup: func(p *Pool) error {
+				return p.RegisterKind("sandbox", func(string, string) {})
+			},
+			register:    func(p *Pool) error { return p.RegisterKind("sandbox", func(string, string) {}) },
+			expectError: "already registered",
+		},
+		{
+			name:        "empty kind rejected",
+			register:    func(p *Pool) error { return p.RegisterKind("", func(string, string) {}) },
+			expectError: "empty kind",
+		},
+		{
+			name:        "nil func rejected",
+			register:    func(p *Pool) error { return p.RegisterKind("sandbox", nil) },
+			expectError: "nil CleanupFunc",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := NewPool(Options{Name: "metrics_async_test_register_" + tt.name})
+			if tt.setup != nil {
+				assert.NoError(t, tt.setup(p))
+			}
+			err := tt.register(p)
+			if tt.expectError == "" {
+				assert.NoError(t, err)
+			} else {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
+			}
+		})
+	}
+}
