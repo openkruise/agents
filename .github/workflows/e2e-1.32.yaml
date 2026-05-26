@@ -29,6 +29,9 @@ jobs:
         uses: actions/setup-go@0aaccfd150d50ccaeb58ebd88d36e91967a5f35b # v5.4.0
         with:
           go-version: ${{ env.GO_VERSION }}
+      - name: Setup Local Registry
+        run: |
+          docker run -d --restart=always -p "127.0.0.1:5000:5000" --network bridge --name kind-registry registry:2
       - name: Setup Kind Cluster
         uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
         with:
@@ -36,11 +39,18 @@ jobs:
           cluster_name: ${{ env.KIND_CLUSTER_NAME }}
           config: ./test/kind-conf.yaml
           version: ${{ env.KIND_VERSION }}
-      - name: Build image
+      - name: Connect Registry to Kind Network
+        run: |
+          docker network connect "kind" "kind-registry" || true
+      - name: Build images
         run: |
           export IMAGE="agent-sandbox-controller:latest"
-          docker build -f dockerfiles/agent-sandbox-controller.Dockerfile  --pull --no-cache . -t $IMAGE
+          docker build -f dockerfiles/agent-sandbox-controller.Dockerfile --pull --no-cache . -t $IMAGE
           kind load docker-image --name=${KIND_CLUSTER_NAME} $IMAGE || { echo >&2 "kind not installed or error loading image: $IMAGE"; exit 1; }
+
+          export COMMIT_JOB_IMAGE="commit-job:latest"
+          docker build -f dockerfiles/commit-job.Dockerfile --pull --no-cache . -t $COMMIT_JOB_IMAGE
+          kind load docker-image --name=${KIND_CLUSTER_NAME} $COMMIT_JOB_IMAGE || { echo >&2 "error loading image: $COMMIT_JOB_IMAGE"; exit 1; }
       - name: Install Kruise Agents
         run: |
           CONTROLLER_IMG=agent-sandbox-controller:latest make deploy-agent-sandbox-controller
