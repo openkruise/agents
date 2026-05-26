@@ -31,6 +31,10 @@ func (c *FakeApiV1alpha1) Checkpoints(namespace string) v1alpha1.CheckpointInter
 	return newFakeCheckpoints(c, namespace)
 }
 
+func (c *FakeApiV1alpha1) Commits(namespace string) v1alpha1.CommitInterface {
+	return newFakeCommits(c, namespace)
+}
+
 func (c *FakeApiV1alpha1) Sandboxes(namespace string) v1alpha1.SandboxInterface {
 	return newFakeSandboxes(c, namespace)
 }

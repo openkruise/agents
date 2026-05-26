@@ -42,6 +42,9 @@ const (
 	PodConditionContainersResumed = "ContainersResumed"
 
 	// MaxConditionMessageLen was moved to a var block below for env-based configuration.
+
+	// CommitAnnotationModeKey is the annotation key for commit mode selection.
+	CommitAnnotationModeKey = "agents.kruise.io/commit-mode"
 )
 
 const (

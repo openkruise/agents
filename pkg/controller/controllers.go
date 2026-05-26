@@ -19,6 +19,7 @@ package controller
 import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
+	"github.com/openkruise/agents/pkg/controller/commit"
 	"github.com/openkruise/agents/pkg/controller/sandbox"
 	"github.com/openkruise/agents/pkg/controller/sandboxclaim"
 	"github.com/openkruise/agents/pkg/controller/sandboxset"
@@ -34,6 +35,7 @@ func init() {
 	controllerAddFuncs = append(controllerAddFuncs, sandboxclaim.Add)
 	controllerAddFuncs = append(controllerAddFuncs, sandboxupdateops.Add)
 	controllerAddFuncs = append(controllerAddFuncs, securitytokenrefresh.Add)
+	controllerAddFuncs = append(controllerAddFuncs, commit.Add)
 }
 
 func SetupWithManager(m manager.Manager) error {

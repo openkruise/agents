@@ -53,6 +53,9 @@ const (
 	// SecurityIdentityProviderGate enables issuing sandbox access tokens via an external
 	// identity provider service instead of random UUID generation.
 	SecurityIdentityProviderGate featuregate.Feature = "SecurityIdentityProvider"
+
+	// CommitGate enables the Commit controller to commit container images from Sandbox pods.
+	CommitGate featuregate.Feature = "Commit"
 )
 
 var defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
@@ -65,6 +68,7 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
 	SandboxInPlaceResourceResizeGate: {Default: true, PreRelease: featuregate.Alpha},
 	SandboxMultiClusterNaming:        {Default: false, PreRelease: featuregate.Alpha},
 	SecurityIdentityProviderGate:     {Default: false, PreRelease: featuregate.Alpha},
+	CommitGate:                       {Default: true, PreRelease: featuregate.Alpha},
 }
 
 func init() {
