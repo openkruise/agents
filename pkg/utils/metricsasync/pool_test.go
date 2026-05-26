@@ -62,3 +62,13 @@ func TestOptions_applyDefaults(t *testing.T) {
 		})
 	}
 }
+
+func TestNewCollectors_namesAndLabels(t *testing.T) {
+	c := newCollectors("metrics_async_test1")
+	// Each Vec is non-nil and accepts the documented label set.
+	c.queueDepth.WithLabelValues("sandbox").Set(0)
+	c.processedTotal.WithLabelValues("sandbox", "ok").Inc()
+	c.duration.WithLabelValues("sandbox").Observe(0.001)
+	c.latency.WithLabelValues("sandbox").Observe(0.001)
+	c.dropped.WithLabelValues("sandbox", "queue_full").Inc()
+}
