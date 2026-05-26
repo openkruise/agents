@@ -103,6 +103,19 @@ var _ = Describe("Sandbox", func() {
 					Namespace: sandbox.Namespace,
 				}, sandbox)
 				return sandbox.Status.Phase
+			}, time.Second*30, time.Millisecond*500).Should(Equal(agentsv1alpha1.SandboxPending))
+
+			By("Verifying ObservedGeneration and UpdateRevision are set in Pending")
+			Expect(sandbox.Status.ObservedGeneration).To(BeNumerically(">", 0))
+			Expect(sandbox.Status.UpdateRevision).NotTo(BeEmpty())
+
+			By("Verifying the sandbox phase transitions to Running")
+			Eventually(func() agentsv1alpha1.SandboxPhase {
+				_ = k8sClient.Get(ctx, types.NamespacedName{
+					Name:      sandbox.Name,
+					Namespace: sandbox.Namespace,
+				}, sandbox)
+				return sandbox.Status.Phase
 			}, time.Second*90, time.Millisecond*500).Should(Equal(agentsv1alpha1.SandboxRunning))
 
 			By("Verifying the sandbox has latest revision")

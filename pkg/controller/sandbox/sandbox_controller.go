@@ -300,7 +300,7 @@ func (r *SandboxReconciler) addSandboxFinalizerAndHash(ctx context.Context, box 
 }
 
 func (r *SandboxReconciler) updateSandboxStatus(ctx context.Context, newStatus agentsv1alpha1.SandboxStatus, box *agentsv1alpha1.Sandbox) error {
-	if reflect.DeepEqual(box.Status, newStatus) || newStatus.Phase == agentsv1alpha1.SandboxPending {
+	if reflect.DeepEqual(box.Status, newStatus) {
 		return nil
 	}
 

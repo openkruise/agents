@@ -899,20 +899,17 @@ func TestSandboxReconciler_updateSandboxStatusWithPendingPhase(t *testing.T) {
 			Name:      "test-sandbox",
 			Namespace: "default",
 		},
-		Status: agentsv1alpha1.SandboxStatus{
-			Phase: agentsv1alpha1.SandboxRunning,
-		},
 	}
 
-	// Add the sandbox to the client
 	err := client.Create(context.TODO(), originalSandbox)
 	if err != nil {
 		t.Fatalf("Failed to create sandbox: %v", err)
 	}
 
-	// Try to update with Pending phase (should not update because of early return)
 	pendingStatus := agentsv1alpha1.SandboxStatus{
-		Phase: agentsv1alpha1.SandboxPending,
+		Phase:              agentsv1alpha1.SandboxPending,
+		ObservedGeneration: 1,
+		UpdateRevision:     "abc123",
 	}
 
 	err = reconciler.updateSandboxStatus(context.Background(), pendingStatus, originalSandbox)
@@ -921,13 +918,19 @@ func TestSandboxReconciler_updateSandboxStatusWithPendingPhase(t *testing.T) {
 		return
 	}
 
-	// Status should remain Running because Pending phase updates are skipped
 	updatedSandbox := &agentsv1alpha1.Sandbox{}
 	err = client.Get(context.TODO(), types.NamespacedName{Name: originalSandbox.Name, Namespace: originalSandbox.Namespace}, updatedSandbox)
 	if err != nil {
-		t.Errorf("Failed to get updated sandbox: %v", err)
-	} else if updatedSandbox.Status.Phase != agentsv1alpha1.SandboxRunning {
-		t.Errorf("Expected sandbox phase to remain %v, got %v", agentsv1alpha1.SandboxRunning, updatedSandbox.Status.Phase)
+		t.Fatalf("Failed to get updated sandbox: %v", err)
+	}
+	if updatedSandbox.Status.Phase != agentsv1alpha1.SandboxPending {
+		t.Errorf("Expected sandbox phase %v, got %v", agentsv1alpha1.SandboxPending, updatedSandbox.Status.Phase)
+	}
+	if updatedSandbox.Status.ObservedGeneration != 1 {
+		t.Errorf("Expected ObservedGeneration 1, got %v", updatedSandbox.Status.ObservedGeneration)
+	}
+	if updatedSandbox.Status.UpdateRevision != "abc123" {
+		t.Errorf("Expected UpdateRevision abc123, got %v", updatedSandbox.Status.UpdateRevision)
 	}
 }
 
