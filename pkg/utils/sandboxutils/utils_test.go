@@ -17,12 +17,17 @@ limitations under the License.
 package sandboxutils
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
@@ -669,6 +674,99 @@ func TestGetAccessToken(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.expected, GetAccessToken(tt.obj))
+		})
+	}
+}
+
+func TestGetTemplateSpec(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	inlineTemplate := &corev1.PodTemplateSpec{
+		ObjectMeta: metav1.ObjectMeta{
+			Labels: map[string]string{"foo": "bar"},
+		},
+	}
+
+	referencedTemplate := &corev1.PodTemplateSpec{
+		ObjectMeta: metav1.ObjectMeta{
+			Labels: map[string]string{"ref": "val"},
+		},
+	}
+
+	existingTmpl := &agentsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "my-tmpl",
+		},
+		Spec: agentsv1alpha1.SandboxTemplateSpec{
+			Template: referencedTemplate,
+		},
+	}
+
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existingTmpl).Build()
+
+	tests := []struct {
+		name           string
+		embedded       *agentsv1alpha1.EmbeddedSandboxTemplate
+		expectedLabels map[string]string
+		expectError    string
+	}{
+		{
+			name:        "Nil embedded template",
+			embedded:    nil,
+			expectError: "",
+		},
+		{
+			name: "Inline Template only",
+			embedded: &agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: inlineTemplate,
+			},
+			expectedLabels: map[string]string{"foo": "bar"},
+			expectError:    "",
+		},
+		{
+			name: "TemplateRef referencing existing SandboxTemplate",
+			embedded: &agentsv1alpha1.EmbeddedSandboxTemplate{
+				TemplateRef: &agentsv1alpha1.SandboxTemplateRef{
+					Name: "my-tmpl",
+				},
+			},
+			expectedLabels: map[string]string{"ref": "val"},
+			expectError:    "",
+		},
+		{
+			name: "TemplateRef referencing missing SandboxTemplate",
+			embedded: &agentsv1alpha1.EmbeddedSandboxTemplate{
+				TemplateRef: &agentsv1alpha1.SandboxTemplateRef{
+					Name: "non-existent-tmpl",
+				},
+			},
+			expectError: "sandboxtemplates.agents.kruise.io \"non-existent-tmpl\" not found",
+		},
+		{
+			name:        "Both Template and TemplateRef are nil",
+			embedded:    &agentsv1alpha1.EmbeddedSandboxTemplate{},
+			expectError: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := GetTemplateSpec(context.TODO(), client, "default", tt.embedded)
+			if tt.expectError != "" {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
+			} else {
+				assert.NoError(t, err)
+				if tt.expectedLabels != nil {
+					assert.NotNil(t, got)
+					assert.Equal(t, tt.expectedLabels, got.Labels)
+				} else {
+					assert.Nil(t, got)
+				}
+			}
 		})
 	}
 }
