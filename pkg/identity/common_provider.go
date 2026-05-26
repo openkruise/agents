@@ -18,6 +18,7 @@ package identity
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 	"k8s.io/klog/v2"
@@ -44,8 +45,10 @@ func NewDefaultIdentityProvider() IdentityProvider {
 
 func (u *defaultTokenProvider) IssueToken(_ context.Context, _ TokenRequest) (*TokenResponse, error) {
 	return &TokenResponse{
-		RequestID:   uuid.NewString(),
-		AccessToken: uuid.NewString(),
+		RequestID:             uuid.NewString(),
+		AccessToken:           uuid.NewString(),
+		SandboxClientID:       uuid.NewString(),
+		AccessTokenExpiration: time.Now().UTC().Add(time.Minute).Format(time.RFC3339),
 	}, nil
 }
 
