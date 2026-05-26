@@ -246,6 +246,47 @@ func testCounter(t *testing.T, vec *prometheus.CounterVec, lvs ...string) float6
 	return d.GetCounter().GetValue()
 }
 
+func TestPool_Start_DrainTimeout(t *testing.T) {
+	p := NewPool(Options{Name: "metrics_async_test_drain", Workers: 1, DrainTimeout: 50 * time.Millisecond})
+
+	block := make(chan struct{})
+	released := false
+	defer func() {
+		if !released {
+			close(block)
+		}
+	}()
+	fn := func(string, string) {
+		<-block // never returns until released
+	}
+	assert.NoError(t, p.RegisterKind("sandbox", fn))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- p.Start(ctx) }()
+
+	// Enqueue two items; the first will block the only worker, the
+	// second remains in the queue at shutdown.
+	p.Enqueue("sandbox", "ns", "blocker")
+	p.Enqueue("sandbox", "ns", "queued")
+
+	// Give the worker a moment to pick up the first.
+	time.Sleep(20 * time.Millisecond)
+
+	cancel()
+	startWait := time.Now()
+	assert.NoError(t, <-done)
+	elapsed := time.Since(startWait)
+	assert.GreaterOrEqual(t, elapsed, 50*time.Millisecond)
+	assert.Less(t, elapsed, 500*time.Millisecond, "Start must return shortly after DrainTimeout")
+
+	// The queued item is reported as drained-out.
+	assert.GreaterOrEqual(t, testCounter(t, p.col.dropped, "", "drain_timeout"), float64(1))
+
+	close(block)
+	released = true
+}
+
 func TestPool_Start_processesAndRecovers(t *testing.T) {
 	tests := []struct {
 		name      string
