@@ -172,6 +172,18 @@ func TestPool_Enqueue(t *testing.T) {
 			wantQueued: 1,
 			wantDrop:   map[string]float64{"queue_full": 2},
 		},
+		{
+			name:     "duplicate keys at cap do not count as queue_full",
+			opts:     Options{Name: "metrics_async_test_enqueue_dup_at_cap", QueueCap: 1},
+			register: true,
+			enqueues: []Key{
+				{Kind: "sandbox", Namespace: "ns", Name: "a"},
+				{Kind: "sandbox", Namespace: "ns", Name: "a"},
+				{Kind: "sandbox", Namespace: "ns", Name: "a"},
+			},
+			wantQueued: 1,
+			// no wantDrop entry — dedup must not increment queue_full
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -183,7 +195,8 @@ func TestPool_Enqueue(t *testing.T) {
 				p.Enqueue(k.Kind, k.Namespace, k.Name)
 			}
 			assert.Equal(t, tt.wantQueued, p.queue.Len())
-			for reason, want := range tt.wantDrop {
+			for _, reason := range []string{"unregistered", "queue_full"} {
+				want := tt.wantDrop[reason] // 0 if not set
 				got := testCounter(t, p.col.dropped, "sandbox", reason)
 				assert.Equal(t, want, got, "drop reason %s", reason)
 			}

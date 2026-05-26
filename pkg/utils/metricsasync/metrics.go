@@ -36,7 +36,7 @@ func newCollectors(subsystem string) *collectors {
 		queueDepth: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Subsystem: subsystem,
 			Name:      "queue_depth",
-			Help:      "Current depth of the metric async cleanup queue per kind",
+			Help:      "Approximate aggregate depth of the metric async cleanup queue, sampled every 5s. Label kind=\"aggregate\" because workqueue does not expose per-kind breakdown.",
 		}, []string{"kind"}),
 		processedTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Subsystem: subsystem,

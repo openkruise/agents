@@ -105,7 +105,6 @@ type Pool struct {
 	registry map[string]CleanupFunc
 
 	enqueueAt sync.Map // Key -> int64 (unix nanos) of latest enqueue
-	depth     sync.Map // kind string -> *int64 atomic counter
 
 	started atomic.Bool
 }
@@ -159,33 +158,17 @@ func (p *Pool) Enqueue(kind, namespace, name string) {
 		klog.V(5).InfoS("metricsasync: enqueue dropped, unregistered kind", "kind", kind)
 		return
 	}
-	if p.opts.QueueCap > 0 && p.queue.Len() >= p.opts.QueueCap {
-		p.col.dropped.WithLabelValues(kind, "queue_full").Inc()
-		return
-	}
 	key := Key{Kind: kind, Namespace: namespace, Name: name}
+	// If the key is already queued the workqueue will dedup; skip the
+	// cap check so legitimate dedups are not counted as drops.
+	if _, alreadyQueued := p.enqueueAt.Load(key); !alreadyQueued {
+		if p.opts.QueueCap > 0 && p.queue.Len() >= p.opts.QueueCap {
+			p.col.dropped.WithLabelValues(kind, "queue_full").Inc()
+			return
+		}
+	}
 	p.enqueueAt.Store(key, time.Now().UnixNano())
-	p.incDepth(kind)
 	p.queue.Add(key)
-}
-
-func (p *Pool) incDepth(kind string) {
-	v, ok := p.depth.Load(kind)
-	if !ok {
-		var n int64
-		v, _ = p.depth.LoadOrStore(kind, &n)
-	}
-	atomic.AddInt64(v.(*int64), 1)
-	p.col.queueDepth.WithLabelValues(kind).Set(float64(atomic.LoadInt64(v.(*int64))))
-}
-
-func (p *Pool) decDepth(kind string) {
-	v, ok := p.depth.Load(kind)
-	if !ok {
-		return
-	}
-	atomic.AddInt64(v.(*int64), -1)
-	p.col.queueDepth.WithLabelValues(kind).Set(float64(atomic.LoadInt64(v.(*int64))))
 }
 
 // Start runs Workers worker goroutines and blocks until ctx is
@@ -216,6 +199,21 @@ func (p *Pool) Start(ctx context.Context) error {
 			p.runWorker()
 		}()
 	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		t := time.NewTicker(5 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				p.col.queueDepth.WithLabelValues("aggregate").Set(float64(p.queue.Len()))
+			}
+		}
+	}()
 
 	<-ctx.Done()
 	p.queue.ShutDown()
@@ -256,8 +254,6 @@ func (p *Pool) runWorker() {
 }
 
 func (p *Pool) process(key Key) {
-	p.decDepth(key.Kind)
-
 	var enqueueAt int64
 	if v, ok := p.enqueueAt.LoadAndDelete(key); ok {
 		enqueueAt = v.(int64)
