@@ -22,6 +22,7 @@ import (
 )
 
 const (
+	CommitKind      = "Commit"
 	CommitFinalizer = "agents.kruise.io/commit"
 )
 

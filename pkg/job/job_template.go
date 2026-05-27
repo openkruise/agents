@@ -176,10 +176,11 @@ func (g *JobGenerator) GenerateCommitJob() (*batchv1.Job, error) {
 			Labels:    g.commitLabels(),
 			OwnerReferences: []metav1.OwnerReference{
 				{
-					APIVersion:         g.Commit.APIVersion,
-					Kind:               g.Commit.Kind,
+					APIVersion:         v1alpha1.SchemeGroupVersion.String(),
+					Kind:               v1alpha1.CommitKind,
 					Name:               g.Commit.Name,
 					UID:                g.Commit.UID,
+					Controller:         &trueVal,
 					BlockOwnerDeletion: &trueVal,
 				},
 			},

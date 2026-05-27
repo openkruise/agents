@@ -48,7 +48,7 @@ import (
 var (
 	concurrentReconciles = 30
 	controllerName       = "commit-controller"
-	controllerKind       = agentsv1alpha1.SchemeGroupVersion.WithKind("Commit")
+	controllerKind       = agentsv1alpha1.SchemeGroupVersion.WithKind(agentsv1alpha1.CommitKind)
 )
 
 func init() {
