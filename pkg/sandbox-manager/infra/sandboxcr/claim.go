@@ -42,7 +42,6 @@ import (
 	"github.com/openkruise/agents/pkg/controller/sandboxset"
 	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/identity"
-	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
@@ -238,7 +237,7 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 	// We deliberately do NOT degrade to a UUID token on issuance failure: a UUID carries no identity and would
 	// be propagated to the runtime as a meaningless credential, masking real provider outages.
 	if utilfeature.DefaultFeatureGate.Enabled(features.SecurityIdentityProviderGate) {
-		opts.SecurityToken = &config.SecurityTokenOptions{}
+		opts.SecurityToken = &infra.SecurityTokenOptions{}
 		log.Info("starting to issue security token via identity provider")
 		metrics.SecurityToken, err = issueSecurityToken(ctx, sbx, opts.SecurityToken)
 		if err != nil {
@@ -486,7 +485,7 @@ func pickFromCandidates(ctx context.Context, candidates []*v1alpha1.Sandbox, pic
 
 // issueSecurityToken issues a security token for the given sandbox using the registered identity provider.
 // The issued access token is written into the sandbox's SecurityToken option for downstream consumption.
-func issueSecurityToken(ctx context.Context, sbx *Sandbox, opts *config.SecurityTokenOptions) (time.Duration, error) {
+func issueSecurityToken(ctx context.Context, sbx *Sandbox, opts *infra.SecurityTokenOptions) (time.Duration, error) {
 	ctx = logs.Extend(ctx, "action", "issueSecurityToken")
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx.Sandbox))
 	start := time.Now()

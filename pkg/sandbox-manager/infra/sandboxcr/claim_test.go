@@ -2161,7 +2161,7 @@ func TestRecordSecurityTokenRefreshStatus(t *testing.T) {
 		{
 			name: "with security token and expiration",
 			opts: infra.ClaimSandboxOptions{
-				SecurityToken: &config.SecurityTokenOptions{
+				SecurityToken: &infra.SecurityTokenOptions{
 					TokenResponse: identity.TokenResponse{
 						AccessToken:           "security-access-token",
 						AccessTokenExpiration: "2026-12-31T23:59:59Z",
@@ -2175,7 +2175,7 @@ func TestRecordSecurityTokenRefreshStatus(t *testing.T) {
 		{
 			name: "with security token without expiration",
 			opts: infra.ClaimSandboxOptions{
-				SecurityToken: &config.SecurityTokenOptions{
+				SecurityToken: &infra.SecurityTokenOptions{
 					TokenResponse: identity.TokenResponse{
 						AccessToken: "at-456",
 					},
@@ -2263,7 +2263,7 @@ func TestRecordSecurityTokenRefreshStatus_NilAnnotations(t *testing.T) {
 			name:         "nil annotations map is created",
 			initialAnnos: nil,
 			opts: infra.ClaimSandboxOptions{
-				SecurityToken: &config.SecurityTokenOptions{
+				SecurityToken: &infra.SecurityTokenOptions{
 					TokenResponse: identity.TokenResponse{
 						AccessToken:           "token-1",
 						AccessTokenExpiration: "2026-06-01T00:00:00Z",
@@ -2278,7 +2278,7 @@ func TestRecordSecurityTokenRefreshStatus_NilAnnotations(t *testing.T) {
 				"existing-key": "existing-value",
 			},
 			opts: infra.ClaimSandboxOptions{
-				SecurityToken: &config.SecurityTokenOptions{
+				SecurityToken: &infra.SecurityTokenOptions{
 					TokenResponse: identity.TokenResponse{
 						AccessToken:           "token-2",
 						AccessTokenExpiration: "2026-07-01T00:00:00Z",
@@ -2411,7 +2411,7 @@ func TestRecordSecurityTokenRefreshStatus_PatchErrors(t *testing.T) {
 			fakeClient := builder.Build()
 
 			opts := infra.ClaimSandboxOptions{
-				SecurityToken: &config.SecurityTokenOptions{
+				SecurityToken: &infra.SecurityTokenOptions{
 					TokenResponse: identity.TokenResponse{
 						AccessToken:           "at-err",
 						AccessTokenExpiration: "2027-01-01T00:00:00Z",
@@ -2463,7 +2463,7 @@ func TestRecordSecurityTokenRefreshStatus_Overwrite(t *testing.T) {
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(sbx.Sandbox.DeepCopy()).Build()
 
 	opts := infra.ClaimSandboxOptions{
-		SecurityToken: &config.SecurityTokenOptions{
+		SecurityToken: &infra.SecurityTokenOptions{
 			TokenResponse: identity.TokenResponse{
 				AccessToken:           "at-new",
 				AccessTokenExpiration: "2027-06-01T00:00:00Z",
@@ -3508,7 +3508,7 @@ func TestTryClaimSandbox_SecurityToken(t *testing.T) {
 				InitRuntime: &config.InitRuntimeOptions{
 					AccessToken: "original-uuid-token",
 				},
-				SecurityToken: &config.SecurityTokenOptions{
+				SecurityToken: &infra.SecurityTokenOptions{
 					TokenResponse: identity.TokenResponse{AccessToken: "placeholder"},
 				},
 			},
@@ -3541,7 +3541,7 @@ func TestTryClaimSandbox_SecurityToken(t *testing.T) {
 				InitRuntime: &config.InitRuntimeOptions{
 					AccessToken: "original-uuid-token",
 				},
-				SecurityToken: &config.SecurityTokenOptions{
+				SecurityToken: &infra.SecurityTokenOptions{
 					TokenResponse: identity.TokenResponse{AccessToken: "placeholder"},
 				},
 			},
@@ -3564,7 +3564,7 @@ func TestTryClaimSandbox_SecurityToken(t *testing.T) {
 				InitRuntime: &config.InitRuntimeOptions{
 					AccessToken: "original-uuid-token",
 				},
-				SecurityToken: &config.SecurityTokenOptions{
+				SecurityToken: &infra.SecurityTokenOptions{
 					TokenResponse: identity.TokenResponse{AccessToken: "placeholder"},
 				},
 			},

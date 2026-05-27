@@ -24,8 +24,19 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/identity"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 )
+
+// SecurityTokenOptions wraps the issued security token response for downstream
+// consumers in the claim pipeline. It lives here (rather than in
+// pkg/sandbox-manager/config) to avoid an import cycle:
+// pkg/identity -> pkg/utils/runtime -> pkg/sandbox-manager/config -> pkg/identity.
+// pkg/sandbox-manager/infra is allowed to depend on pkg/identity because it is
+// not transitively imported by pkg/identity.
+type SecurityTokenOptions struct {
+	identity.TokenResponse
+}
 
 type ClaimSandboxOptions struct {
 	Namespace string `json:"namespace,omitempty"`
@@ -56,7 +67,7 @@ type ClaimSandboxOptions struct {
 	// Set CSIMount to non-nil value to mount a CSI volume
 	CSIMount *config.CSIMountOptions `json:"CSIMount"`
 	// Set SecurityToken value in runtime
-	SecurityToken *config.SecurityTokenOptions `json:"securityToken"`
+	SecurityToken *SecurityTokenOptions `json:"securityToken"`
 	// Max ClaimTimeout duration
 	ClaimTimeout time.Duration `json:"claimTimeout"`
 	// Max WaitReadyTimeout duration
