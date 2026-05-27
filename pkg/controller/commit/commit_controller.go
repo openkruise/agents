@@ -46,7 +46,7 @@ import (
 )
 
 var (
-	concurrentReconciles = 30
+	concurrentReconciles = 5
 	controllerName       = "commit-controller"
 	controllerKind       = agentsv1alpha1.SchemeGroupVersion.WithKind(agentsv1alpha1.CommitKind)
 )

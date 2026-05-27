@@ -68,7 +68,7 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
 	SandboxInPlaceResourceResizeGate: {Default: true, PreRelease: featuregate.Alpha},
 	SandboxMultiClusterNaming:        {Default: false, PreRelease: featuregate.Alpha},
 	SecurityIdentityProviderGate:     {Default: false, PreRelease: featuregate.Alpha},
-	CommitGate:                       {Default: true, PreRelease: featuregate.Alpha},
+	CommitGate:                       {Default: false, PreRelease: featuregate.Alpha},
 }
 
 func init() {
