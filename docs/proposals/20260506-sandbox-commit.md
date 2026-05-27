@@ -393,39 +393,6 @@ Below lists the files/packages to be added or modified in this repository.
 |------|--------|-------------|
 | `pkg/utils/constant.go` | **Modify** | Add commit-related constants: `CommitFinalizer`, `CommitJobLabelKey`, annotation keys |
 
-#### 10. E2B API Layer (Modify)
-
-The E2B server (`pkg/servers/e2b/`) exposes a REST API for sandbox operations. A commit endpoint needs to be added.
-
-| Path | Action | Description |
-|------|--------|-------------|
-| `pkg/servers/e2b/routes.go` | **Modify** | Register `POST /sandboxes/{sandboxID}/commit` route |
-| `pkg/servers/e2b/commit.go` | **New** | Handler: parse request (image, pushSecrets, ttl), create Commit CR via K8s client, poll/return status |
-| `pkg/servers/e2b/models/commit.go` | **New** | Request/Response models: `CommitRequest{Image, PushSecrets, Ttl, DryRun}`, `CommitResponse{CommitID, Phase, Image}` |
-
-E2B commit endpoint design:
-
-```
-POST /sandboxes/{sandboxID}/commit
-Request:
-{
-  "image": "registry.example.com/team/my-env:v1",
-  "pushSecrets": [{"namespace": "sandbox-system", "name": "my-push-secret"}],
-  "ttl": "168h",
-  "dryRun": false
-}
-Response:
-{
-  "commitID": "my-snapshot-xyz",
-  "phase": "Pending",
-  "image": "registry.example.com/team/my-env:v1"
-}
-
-GET /sandboxes/{sandboxID}/commits/{commitID}   (optional: query status)
-```
-
-The handler translates the HTTP request to a `Commit` CR creation, following the same pattern as `CreateSnapshot` in `pkg/servers/e2b/snapshot.go`.
-
 ### Risks and Mitigations
 
 | Risk | Mitigation |
