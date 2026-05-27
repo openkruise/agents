@@ -297,9 +297,17 @@ var _ = Describe("Commit", func() {
 		})
 	})
 
+	// These tests target a self-signed HTTPS registry deployed by hack/e2e-tls-registry.sh.
+	// The registry runs at tls-registry.e2e-registry.svc.cluster.local:5443 with a CA cert
+	// installed into each kind node's /etc/containerd/certs.d/ directory.
 	Context("Commit TLS registry", func() {
 		const tlsRegistryHost = "tls-registry.e2e-registry.svc.cluster.local:5443"
 
+		// This test verifies the insecure registry bypass path:
+		// - insecureRegistry=true, so the Job must have INSECURE_REGISTRY=true env
+		// - nerdctl push uses --insecure-registry to skip TLS certificate verification
+		// - Expects Succeeded: skipping verification still allows HTTPS connection,
+		//   so push to the self-signed TLS registry must complete successfully.
 		It("should push to HTTPS self-signed registry with insecureRegistry=true", func() {
 			// Create sandbox and wait for Running
 			Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
@@ -331,15 +339,15 @@ var _ = Describe("Commit", func() {
 			Expect(k8sClient.Create(ctx, commit)).To(Succeed())
 
 			// Should transition to Running (Job created)
-			Eventually(func() agentsv1alpha1.CommitPhase {
+			Eventually(func() bool {
 				got := &agentsv1alpha1.Commit{}
 				if err := k8sClient.Get(ctx, types.NamespacedName{
 					Name: commit.Name, Namespace: namespace,
 				}, got); err != nil {
-					return ""
+					return false
 				}
-				return got.Status.Phase
-			}, 60*time.Second, 3*time.Second).Should(Equal(agentsv1alpha1.CommitRunning))
+				return got.Status.Phase == agentsv1alpha1.CommitRunning || got.Status.Phase == agentsv1alpha1.CommitSucceeded
+			}, 60*time.Second, 3*time.Second).Should(BeTrue())
 
 			// Verify Job was created with INSECURE_REGISTRY=true
 			commitGot := &agentsv1alpha1.Commit{}
@@ -362,9 +370,28 @@ var _ = Describe("Commit", func() {
 				}
 			}
 			Expect(found).To(BeTrue(), "expected INSECURE_REGISTRY=true env in job container")
+
+			// Wait for Succeeded: --insecure-registry skips cert verification but
+			// still connects via HTTPS, so push to the self-signed TLS registry works.
+			Eventually(func() agentsv1alpha1.CommitPhase {
+				got := &agentsv1alpha1.Commit{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{
+					Name: commit.Name, Namespace: namespace,
+				}, got); err != nil {
+					return ""
+				}
+				return got.Status.Phase
+			}, 180*time.Second, 3*time.Second).Should(Equal(agentsv1alpha1.CommitSucceeded))
 		})
 
-		It("should create Job with host-containerd-certs volume when insecureRegistry is false", func() {
+		// This test verifies the full TLS push path:
+		// - insecureRegistry=false, so INSECURE_REGISTRY env must NOT be set
+		// - Job mounts host-containerd-certs volume (ReadOnly) at /etc/containerd/certs.d
+		// - The TLS registry (deployed by hack/e2e-tls-registry.sh) has its CA cert
+		//   configured in the kind node's certs.d directory, so nerdctl can verify
+		//   the server certificate and push successfully.
+		// - Expects Succeeded: the complete chain (commit + TLS push) must work end-to-end.
+		It("should push to HTTPS self-signed registry with certs.d configured on node", func() {
 			// Create sandbox and wait for Running
 			Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
 			Eventually(func() agentsv1alpha1.SandboxPhase {
@@ -394,7 +421,7 @@ var _ = Describe("Commit", func() {
 			}
 			Expect(k8sClient.Create(ctx, commit)).To(Succeed())
 
-			// Wait for Job to be created (phase reaches Running or beyond)
+			// Wait for Job to be created (phase reaches Running)
 			Eventually(func() bool {
 				got := &agentsv1alpha1.Commit{}
 				if err := k8sClient.Get(ctx, types.NamespacedName{
@@ -402,12 +429,10 @@ var _ = Describe("Commit", func() {
 				}, got); err != nil {
 					return false
 				}
-				return got.Status.Phase == agentsv1alpha1.CommitRunning ||
-					got.Status.Phase == agentsv1alpha1.CommitSucceeded ||
-					got.Status.Phase == agentsv1alpha1.CommitFailed
+				return got.Status.Phase == agentsv1alpha1.CommitRunning || got.Status.Phase == agentsv1alpha1.CommitSucceeded
 			}, 60*time.Second, 3*time.Second).Should(BeTrue())
 
-			// Verify Job has host-containerd-certs volume
+			// Verify Job spec
 			commitGot := &agentsv1alpha1.Commit{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{
 				Name: commit.Name, Namespace: namespace,
@@ -443,6 +468,18 @@ var _ = Describe("Commit", func() {
 			for _, env := range job.Spec.Template.Spec.Containers[0].Env {
 				Expect(env.Name).NotTo(Equal("INSECURE_REGISTRY"), "INSECURE_REGISTRY should not be set when insecureRegistry is false")
 			}
+
+			// Wait for Succeeded: TLS registry is deployed with CA cert in certs.d,
+			// so the full commit + push via verified TLS must complete successfully.
+			Eventually(func() agentsv1alpha1.CommitPhase {
+				got := &agentsv1alpha1.Commit{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{
+					Name: commit.Name, Namespace: namespace,
+				}, got); err != nil {
+					return ""
+				}
+				return got.Status.Phase
+			}, 180*time.Second, 3*time.Second).Should(Equal(agentsv1alpha1.CommitSucceeded))
 		})
 	})
 

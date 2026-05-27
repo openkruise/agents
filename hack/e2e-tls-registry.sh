@@ -142,4 +142,13 @@ echo "==> Waiting for TLS registry pod to be ready..."
 kubectl wait --for=condition=available deployment/${REGISTRY_NAME} \
   -n "${REGISTRY_NS}" --timeout=120s
 
+# Job pods use hostNetwork: true, so they use the node's DNS (not CoreDNS)
+# and cannot resolve *.svc.cluster.local names. Add /etc/hosts entries
+# on each kind node so the FQDN resolves to the Service ClusterIP.
+echo "==> Adding /etc/hosts entries on kind nodes for hostNetwork pods..."
+CLUSTER_IP=$(kubectl get svc "${REGISTRY_NAME}" -n "${REGISTRY_NS}" -o jsonpath='{.spec.clusterIP}')
+for node in $(${KIND} get nodes --name "${KIND_CLUSTER}" 2>/dev/null); do
+  docker exec "${node}" bash -c "echo '${CLUSTER_IP} ${REGISTRY_HOST}' >> /etc/hosts"
+done
+
 echo "==> TLS registry is ready at ${REGISTRY_HOST}:${REGISTRY_PORT}"
