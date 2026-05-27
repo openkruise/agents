@@ -156,10 +156,7 @@ func GetSandboxID(sbx *agentsv1alpha1.Sandbox) string {
 }
 
 // ValidateNamespaceForSandboxID rejects namespace names that cannot be safely embedded
-// in a sandbox ID. Containing the sandbox ID separator ("--") makes ParseSandboxID
-// ambiguous and breaks hostname-based routing of the form "{port}-{namespace}--{name}".
-// Callers handling user-supplied namespaces (API key creation, admin team-scoped ops)
-// must reject input early via this check.
+// in a sandbox ID.
 func ValidateNamespaceForSandboxID(namespace string) error {
 	if namespace == "" {
 		return fmt.Errorf("namespace must not be empty")

@@ -28,10 +28,8 @@ Cache misses are handled by waiting for the informer cache until the caller's co
 ## Non-Goals
 
 - Do not change the external Sandbox ID format.
-- Do not redesign `ParseSandboxID`.
 - Do not require a migration for existing routes.
 - Do not change sandbox-gateway request routing or registry key semantics.
-- Do not use `ParseSandboxID` to recover from cache misses in `GetClaimedSandbox`.
 - Do not solve the theoretical full ambiguity of `<namespace>--<name>` when both namespace and name may contain `--`; the fallback path avoids that ambiguity by requiring a cache hit before APIReader fallback.
 
 ## GetClaimedSandbox Refactor
@@ -46,7 +44,7 @@ type claimedSandboxLookup struct {
 }
 
 func (i *Infra) lookupClaimedSandbox(ctx context.Context, opts infra.GetClaimedSandboxOptions) (claimedSandboxLookup, error)
-func decideAPIReaderFallback(lookup claimedSandboxLookup) string
+func isSandboxStale(ctx context.Context, lookup claimedSandboxLookup) bool
 func (i *Infra) getClaimedSandboxFromAPIReader(ctx context.Context, key client.ObjectKey, sandboxID string) (*v1alpha1.Sandbox, error)
 ```
 
@@ -58,8 +56,7 @@ if err != nil {
     return nil, err
 }
 
-fallbackReason := decideAPIReaderFallback(lookup)
-if fallbackReason == "" {
+if !isSandboxStale(ctx, lookup) {
     return AsSandbox(lookup.sandbox, i.Cache), nil
 }
 
@@ -80,11 +77,12 @@ return AsSandbox(fresh, i.Cache), nil
 - stop waiting only when the cache hits, a non-NotFound cache error occurs, or `ctx.Done()` is closed;
 - return `context.Canceled` or `context.DeadlineExceeded` unchanged when the caller's context ends.
 
-`decideAPIReaderFallback` behavior:
+`isSandboxStale` behavior:
 
-- return `fallbackReasonRVExpectation` when `ResourceVersionExpectationSatisfied(lookup.sandbox)` is false;
-- return `fallbackReasonCacheLagging` when a route exists, the route resourceVersion is non-empty, and the route resourceVersion is strictly newer than the cached Sandbox resourceVersion;
-- return an empty reason when the cache-hit object can be served directly.
+- return `true` when `ResourceVersionExpectationSatisfied(lookup.sandbox)` is false;
+- return `true` when a route exists, the route resourceVersion is non-empty, and the route resourceVersion is strictly newer than the cached Sandbox resourceVersion;
+- return `false` when the cache-hit object can be served directly.
+- emit fallback metrics and debug logging internally when returning `true`.
 
 `getClaimedSandboxFromAPIReader` must preserve the cache contract:
 
@@ -139,7 +137,6 @@ go test ./pkg/proxy -count=1
 ## Implementation Notes
 
 - Keep `Route.ID` as the registry and lookup key.
-- Do not use `ParseSandboxID` for `GetClaimedSandbox` APIReader fallback.
 - Do not emit the `cache_not_found_route_present` fallback metric reason from `GetClaimedSandbox`.
 - Do not keep an unsupported fallback path for key derivation failures in `GetClaimedSandbox`; key derivation cannot fail after a cache hit.
 - Use context-bound polling rather than a fixed-step cache retry for cache misses.

@@ -372,10 +372,7 @@ func (i *Infra) lookupClaimedSandbox(ctx context.Context, opts infra.GetClaimedS
 			return false, nil
 		}
 		if isContextError(err) {
-			if ctx.Err() != nil {
-				return false, ctx.Err()
-			}
-			return false, nil
+			return false, ctx.Err()
 		}
 		return false, err
 	})
@@ -389,8 +386,10 @@ func isContextError(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
-// isSandboxStale returns the fallback reason, or "" to keep using the cache.
-// It is only called after lookupClaimedSandbox returns a cache-hit Sandbox.
+// isSandboxStale reports whether the cache-hit Sandbox should be refreshed via
+// the APIReader fallback. It is only called after lookupClaimedSandbox returns
+// a cache-hit Sandbox, and emits fallback metrics and debug logging internally
+// when it returns true.
 func isSandboxStale(ctx context.Context, lookup claimedSandboxLookup) bool {
 	cacheRV := lookup.sandbox.GetResourceVersion()
 	var reason string
@@ -417,7 +416,7 @@ func (i *Infra) getClaimedSandboxFromAPIReader(ctx context.Context, key client.O
 	fresh := &v1alpha1.Sandbox{}
 	if err := i.APIReader.Get(ctx, key, fresh); err != nil {
 		if apierrors.IsNotFound(err) {
-			return nil, fmt.Errorf("%w: %s: %w", cache.ErrSandboxNotFound, sandboxID, err)
+			return nil, fmt.Errorf("%w: %s", cache.ErrSandboxNotFound, sandboxID)
 		}
 		return nil, err
 	}
