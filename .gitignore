@@ -211,6 +211,8 @@ cython_debug/
 .agents/
 
 REVIEW.md
+TEST-REPORT.md
+test/e2e_inner/
 
 .gomodcache/
 .modcache/
