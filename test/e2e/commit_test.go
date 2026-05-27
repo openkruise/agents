@@ -213,16 +213,16 @@ var _ = Describe("Commit", func() {
 			}
 			Expect(k8sClient.Create(ctx, commit)).To(Succeed())
 
-			// Wait for Running
-			Eventually(func() agentsv1alpha1.CommitPhase {
+			// Wait for Running or Succeeded (DryRun job may complete before poll catches Running)
+			Eventually(func() bool {
 				got := &agentsv1alpha1.Commit{}
 				if err := k8sClient.Get(ctx, types.NamespacedName{
 					Name: commit.Name, Namespace: namespace,
 				}, got); err != nil {
-					return ""
+					return false
 				}
-				return got.Status.Phase
-			}, 60*time.Second, 3*time.Second).Should(Equal(agentsv1alpha1.CommitRunning))
+				return got.Status.Phase == agentsv1alpha1.CommitRunning || got.Status.Phase == agentsv1alpha1.CommitSucceeded
+			}, 60*time.Second, 3*time.Second).Should(BeTrue())
 
 			// Verify Job has DRY_RUN=true env
 			commitGot := &agentsv1alpha1.Commit{}
