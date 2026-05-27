@@ -103,8 +103,8 @@ func (sc *Controller) Init() error {
 	ctx := logs.NewContext()
 	log := klog.FromContext(ctx)
 	log.Info("init controller")
-	adapter := adapters.DefaultAdapterFactory(sc.port)
 
+	adapter := adapters.DefaultAdapterFactory(sc.port)
 	sandboxManager, err := sandboxmanager.NewSandboxManagerBuilder(sc.sandboxManagerOptions()).
 		WithSandboxInfra().
 		WithMemberlistPeers().

@@ -164,7 +164,7 @@ func TestConvertToE2BSandboxPodIPMetadata(t *testing.T) {
 				},
 			}
 
-			got := (&Controller{}).convertToE2BSandbox(sbx, "")
+			got := (&Controller{}).convertToE2BSandbox(sbx, "", "")
 			value, exists := got.Metadata[models.MetadataKeyPodIP]
 			assert.Equal(t, tt.expectKey, exists)
 			if tt.expectKey {
@@ -256,7 +256,7 @@ func TestConvertToE2BSandboxUsesLimitResources(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := (&Controller{}).convertToE2BSandbox(tt.sbx, "")
+			got := (&Controller{}).convertToE2BSandbox(tt.sbx, "", "")
 			assert.Equal(t, tt.wantCPU, got.CPUCount)
 			assert.Equal(t, tt.wantMemory, got.MemoryMB)
 			assert.Equal(t, tt.wantDisk, got.DiskSizeMB)

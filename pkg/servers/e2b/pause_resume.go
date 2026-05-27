@@ -269,6 +269,11 @@ func (sc *Controller) ConnectSandbox(r *http.Request) (web.ApiResponse[*models.S
 		return web.ApiResponse[*models.Sandbox]{}, apiErr
 	}
 
+	domain, domainErr := sc.resolveSandboxDomain(r)
+	if domainErr != nil {
+		return web.ApiResponse[*models.Sandbox]{}, domainErr
+	}
+
 	sbx, apiErr := sc.getSandboxOfUser(ctx, id, liveSandboxStates)
 	if apiErr != nil {
 		return web.ApiResponse[*models.Sandbox]{}, apiErr
@@ -316,7 +321,7 @@ func (sc *Controller) ConnectSandbox(r *http.Request) (web.ApiResponse[*models.S
 
 	return web.ApiResponse[*models.Sandbox]{
 		Code: statusCode,
-		Body: sc.convertToE2BSandbox(sbx, utils.GetAccessToken(sbx)),
+		Body: sc.convertToE2BSandbox(sbx, utils.GetAccessToken(sbx), domain),
 	}, nil
 }
 

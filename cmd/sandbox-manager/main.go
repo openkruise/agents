@@ -107,7 +107,10 @@ func main() {
 	pflag.IntVar(&port, "port", 8080, "The port the server listens on")
 	pflag.StringVar(&e2bAdminKey, "e2b-admin-key", "", "E2B admin API key (if empty, a random UUID will be generated)")
 	pflag.BoolVar(&e2bEnableAuth, "e2b-enable-auth", true, "Enable E2B authentication")
-	pflag.StringVar(&domain, "e2b-domain", "localhost", "E2B domain")
+	pflag.StringVar(&domain, "e2b-domain", "",
+		"Static E2B domain. When empty, the domain is resolved per-request from "+
+			"the HTTP Host header (api. prefix stripped for native paths; host "+
+			"preserved for /kruise/* customized paths).")
 	pflag.IntVar(&e2bMaxTimeout, "e2b-max-timeout", models.DefaultMaxTimeout, "E2B maximum timeout in seconds")
 	pflag.IntVar(&e2bMinResumeTimeout, "e2b-min-resume-timeout", models.DefaultMinResumeTimeoutSeconds,
 		"Minimum value (seconds) for the timeout parameter carried by the E2B connect API; "+

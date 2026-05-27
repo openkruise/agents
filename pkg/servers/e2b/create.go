@@ -111,6 +111,10 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 	if validateErr := validateCreateResourceOverride(request); validateErr != nil {
 		return web.ApiResponse[*models.Sandbox]{}, validateErr
 	}
+	domain, apiErr := sc.resolveSandboxDomain(r)
+	if apiErr != nil {
+		return web.ApiResponse[*models.Sandbox]{}, apiErr
+	}
 	namespace := sc.getNamespaceOfUser(user)
 	log.Info("create sandbox request received", "request", request)
 	if sc.manager.GetInfra().HasTemplate(ctx, infra.HasTemplateOptions{
@@ -118,13 +122,13 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 		Name:      request.TemplateID,
 	}) {
 		log.Info("infra has template, will create sandbox with claim", "templateID", request.TemplateID)
-		return sc.createSandboxWithClaim(ctx, request, user)
+		return sc.createSandboxWithClaim(ctx, request, user, domain)
 	} else if sc.manager.GetInfra().HasCheckpoint(ctx, infra.HasCheckpointOptions{
 		Namespace:    namespace,
 		CheckpointID: request.TemplateID,
 	}) {
 		log.Info("infra has checkpoint, will create sandbox with clone", "templateID", request.TemplateID)
-		return sc.createSandboxWithClone(ctx, request, user)
+		return sc.createSandboxWithClone(ctx, request, user, domain)
 	}
 	return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
 		Code:    http.StatusBadRequest,
@@ -132,14 +136,13 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 	}
 }
 
-func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models.NewSandboxRequest, user *models.CreatedTeamAPIKey) (web.ApiResponse[*models.Sandbox], *web.ApiError) {
+func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models.NewSandboxRequest, user *models.CreatedTeamAPIKey, domain string) (web.ApiResponse[*models.Sandbox], *web.ApiError) {
 	if request.Extensions.Name != "" || request.Extensions.GenerateName != "" {
 		return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
 			Code:    http.StatusBadRequest,
 			Message: "sandbox-name and sandbox-generate-name are only supported for clone",
 		}
 	}
-
 	log := klog.FromContext(ctx)
 	claimStart := time.Now()
 	var accessToken string
@@ -220,11 +223,11 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 		"resourceVersion", sbx.GetResourceVersion(), "totalCost", time.Since(claimStart))
 	return web.ApiResponse[*models.Sandbox]{
 		Code: http.StatusCreated,
-		Body: sc.convertToE2BSandbox(sbx, accessToken),
+		Body: sc.convertToE2BSandbox(sbx, accessToken, domain),
 	}, nil
 }
 
-func (sc *Controller) createSandboxWithClone(ctx context.Context, request models.NewSandboxRequest, user *models.CreatedTeamAPIKey) (web.ApiResponse[*models.Sandbox], *web.ApiError) {
+func (sc *Controller) createSandboxWithClone(ctx context.Context, request models.NewSandboxRequest, user *models.CreatedTeamAPIKey, domain string) (web.ApiResponse[*models.Sandbox], *web.ApiError) {
 	log := klog.FromContext(ctx)
 	start := time.Now()
 
@@ -305,7 +308,7 @@ func (sc *Controller) createSandboxWithClone(ctx context.Context, request models
 		"resourceVersion", sbx.GetResourceVersion(), "totalCost", time.Since(start))
 	return web.ApiResponse[*models.Sandbox]{
 		Code: http.StatusCreated,
-		Body: sc.convertToE2BSandbox(sbx, utils.GetAccessToken(sbx)),
+		Body: sc.convertToE2BSandbox(sbx, utils.GetAccessToken(sbx), domain),
 	}, nil
 }
 

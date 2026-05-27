@@ -517,7 +517,7 @@ func TestCreateSandboxWithClaim_NamingExtensionRejected(t *testing.T) {
 
 			var apiErr *web.ApiError
 			require.NotPanics(t, func() {
-				_, apiErr = ctrl.createSandboxWithClaim(context.Background(), request, user)
+				_, apiErr = ctrl.createSandboxWithClaim(context.Background(), request, user, "")
 			})
 			require.NotNil(t, apiErr)
 			assert.Equal(t, http.StatusBadRequest, apiErr.Code)
@@ -538,7 +538,7 @@ func TestCreateSandboxWithClone_InplaceUpdateRejected(t *testing.T) {
 	}
 	user := &models.CreatedTeamAPIKey{ID: uuid.New(), Name: "test-user"}
 
-	_, apiErr := ctrl.createSandboxWithClone(context.Background(), request, user)
+	_, apiErr := ctrl.createSandboxWithClone(context.Background(), request, user, "")
 	require.NotNil(t, apiErr)
 	assert.Equal(t, http.StatusBadRequest, apiErr.Code)
 	assert.Contains(t, apiErr.Message, "InplaceUpdate is not supported for clone")
@@ -630,7 +630,7 @@ func TestCreateSandboxWithClone_Naming(t *testing.T) {
 				Timeout:    600,
 				Extensions: tt.ext,
 			}
-			_, apiErr := controller.createSandboxWithClone(t.Context(), request, user)
+			_, apiErr := controller.createSandboxWithClone(t.Context(), request, user, "")
 			require.Nil(t, apiErr)
 			assert.Equal(t, tt.expectName, capturedName, "ObjectMeta.Name should reflect Extensions.Name")
 			assert.Equal(t, tt.expectGenerateName, capturedGenerateName, "ObjectMeta.GenerateName should reflect Extensions.GenerateName")
