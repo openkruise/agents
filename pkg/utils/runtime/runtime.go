@@ -88,6 +88,9 @@ func RunCommandWithRuntime(ctx context.Context, args RunCmdFuncArgs) (RunCommand
 	ctxWithTimeout, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	clientContext, callInfo := connect.NewClientContext(ctxWithTimeout)
+	if requestID := logs.GetRequestID(ctx); requestID != "" {
+		callInfo.RequestHeader().Set("X-Request-ID", requestID)
+	}
 	callInfo.RequestHeader().Set("X-Access-Token", sandboxutils.GetAccessToken(sbx))
 	callInfo.RequestHeader().Set("Authorization", "Basic cm9vdDo=") // Basic root:
 
@@ -407,6 +410,9 @@ func InitRuntime(ctx context.Context, sbx *agentsv1alpha1.Sandbox, opts config.I
 		if initErr != nil {
 			log.Error(initErr, "failed to create request")
 			return initErr
+		}
+		if requestID := logs.GetRequestID(ctx); requestID != "" {
+			r.Header.Set("X-Request-ID", requestID)
 		}
 		resp, initErr := proxyutils.ProxyRequest(r)
 		defer func() {
