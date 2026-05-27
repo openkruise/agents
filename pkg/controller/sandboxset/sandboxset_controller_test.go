@@ -29,7 +29,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/apimachinery/pkg/types"
 	intstrutil "k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/record"
@@ -45,13 +44,11 @@ import (
 )
 
 var testScheme *runtime.Scheme
-var codec runtime.Codec
 
 func init() {
 	testScheme = runtime.NewScheme()
 	_ = v1alpha1.AddToScheme(testScheme)
 	_ = corev1.AddToScheme(testScheme)
-	codec = serializer.NewCodecFactory(testScheme).LegacyCodec(v1alpha1.SchemeGroupVersion)
 }
 
 var newPodKey = "is-new-pod"
@@ -311,7 +308,6 @@ func TestReconcile_DeleteDead(t *testing.T) {
 				Client:   k8sClient,
 				Scheme:   testScheme,
 				Recorder: eventRecorder,
-				Codec:    codec,
 			}
 			assert.NoError(t, k8sClient.Create(ctx, sbs))
 			newStatus, err := reconciler.initNewStatus(ctx, sbs)
@@ -574,7 +570,6 @@ func TestReconcile_BasicScale(t *testing.T) {
 				Client:   k8sClient,
 				Scheme:   testScheme,
 				Recorder: eventRecorder,
-				Codec:    codec,
 			}
 			newStatus, err := reconciler.initNewStatus(ctx, sbs)
 
@@ -703,7 +698,6 @@ func TestReconcile_ScaleDown(t *testing.T) {
 				Client:   k8sClient,
 				Scheme:   testScheme,
 				Recorder: eventRecorder,
-				Codec:    codec,
 			}
 			sbs := getSandboxSet(tt.replicas)
 			// Run preSetup if provided (e.g., to set UpdateRevision before creating sandboxes)
@@ -783,7 +777,6 @@ func TestSandboxSetReconcile_WithVolumeClaimTemplates(t *testing.T) {
 				Client:   k8sClient,
 				Scheme:   testScheme,
 				Recorder: eventRecorder,
-				Codec:    codec,
 			}
 
 			assert.NoError(t, k8sClient.Create(ctx, sbs))
@@ -1110,6 +1103,11 @@ func TestReconciler_createSandbox(t *testing.T) {
 				assert.Equal(t, "from-tpl", sbx.Labels["app"])
 				assert.Equal(t, "tpl", sbx.Annotations["source"])
 				assert.Equal(t, "tpl-ok", sbx.Labels[v1alpha1.LabelSandboxTemplate])
+				// templateRef mode: Template stays nil, sandbox controller
+				// resolves the pod template from TemplateRef at pod creation time.
+				require.Nil(t, sbx.Spec.Template)
+				require.NotNil(t, sbx.Spec.TemplateRef)
+				assert.Equal(t, "tpl-ok", sbx.Spec.TemplateRef.Name)
 			},
 		},
 		{
@@ -1132,7 +1130,6 @@ func TestReconciler_createSandbox(t *testing.T) {
 				Client:   k8sClient,
 				Scheme:   testScheme,
 				Recorder: eventRecorder,
-				Codec:    codec,
 			}
 
 			sbx, err := reconciler.createSandbox(ctx, tt.sbs, "rev-1")

@@ -18,12 +18,12 @@ package sandboxset
 
 import (
 	"context"
-	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -38,7 +38,6 @@ func newRevisionTestReconciler(objs ...client.Object) *Reconciler {
 	return &Reconciler{
 		Client: c,
 		Scheme: testScheme,
-		Codec:  codec,
 	}
 }
 
@@ -53,39 +52,49 @@ func samplePodTemplate(image string, labels map[string]string) *corev1.PodTempla
 	}
 }
 
-func TestReconciler_getPatch(t *testing.T) {
+func TestReconciler_buildSandboxTemplateSpec(t *testing.T) {
 	tests := []struct {
-		name    string
-		sbs     *v1alpha1.SandboxSet
-		objects []client.Object
-		wantErr bool
-		// errContains is asserted only when wantErr is true.
+		name        string
+		sbs         *v1alpha1.SandboxSet
+		objects     []client.Object
+		wantErr     bool
 		errContains string
-		// verify runs only when wantErr is false and inspects the decoded
-		// `spec` object returned by getPatch.
-		verify func(t *testing.T, spec map[string]interface{})
+		verify      func(t *testing.T, spec *v1alpha1.SandboxTemplateSpec)
 	}{
 		{
-			name: "inline template is normalised to spec.template with $patch=replace",
+			name: "inline template builds spec with all fields",
 			sbs: &v1alpha1.SandboxSet{
 				ObjectMeta: metav1.ObjectMeta{Name: "inline", Namespace: "default"},
 				Spec: v1alpha1.SandboxSetSpec{
 					Replicas: 3,
 					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
 						Template: samplePodTemplate("img:v1", map[string]string{"app": "inline"}),
+						VolumeClaimTemplates: []corev1.PersistentVolumeClaim{{
+							ObjectMeta: metav1.ObjectMeta{Name: "data"},
+							Spec: corev1.PersistentVolumeClaimSpec{
+								AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+								Resources: corev1.VolumeResourceRequirements{
+									Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Gi")},
+								},
+							},
+						}},
 					},
+					PersistentContents: []string{"/data"},
+					Runtimes:           []v1alpha1.RuntimeConfig{{Name: "python"}},
 				},
 			},
-			verify: func(t *testing.T, spec map[string]interface{}) {
-				template, ok := spec["template"].(map[string]interface{})
-				require.True(t, ok, "spec.template must be present for inline template")
-				assert.Equal(t, "replace", template["$patch"])
-				_, refExists := spec["templateRef"]
-				assert.False(t, refExists, "spec.templateRef must not appear in specCopy")
+			verify: func(t *testing.T, spec *v1alpha1.SandboxTemplateSpec) {
+				require.NotNil(t, spec.Template)
+				assert.Equal(t, "img:v1", spec.Template.Spec.Containers[0].Image)
+				assert.Len(t, spec.VolumeClaimTemplates, 1)
+				assert.Equal(t, "data", spec.VolumeClaimTemplates[0].Name)
+				assert.Equal(t, []string{"/data"}, spec.PersistentContents)
+				assert.Len(t, spec.Runtimes, 1)
+				assert.Equal(t, "python", spec.Runtimes[0].Name)
 			},
 		},
 		{
-			name: "templateRef resolves and normalises to spec.template",
+			name: "templateRef resolves template and combines with SandboxSet fields",
 			sbs: &v1alpha1.SandboxSet{
 				ObjectMeta: metav1.ObjectMeta{Name: "ref-sbs", Namespace: "default"},
 				Spec: v1alpha1.SandboxSetSpec{
@@ -93,6 +102,8 @@ func TestReconciler_getPatch(t *testing.T) {
 					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
 						TemplateRef: &v1alpha1.SandboxTemplateRef{Name: "tpl-a"},
 					},
+					PersistentContents: []string{"ip"},
+					Runtimes:           []v1alpha1.RuntimeConfig{{Name: "node"}},
 				},
 			},
 			objects: []client.Object{
@@ -103,14 +114,36 @@ func TestReconciler_getPatch(t *testing.T) {
 					},
 				},
 			},
-			verify: func(t *testing.T, spec map[string]interface{}) {
-				template, ok := spec["template"].(map[string]interface{})
-				require.True(t, ok, "templateRef branch should normalise to spec.template")
-				assert.Equal(t, "replace", template["$patch"])
-				// spec.templateRef must NOT be written: the hash key is normalised
-				// to spec.template regardless of inline vs templateRef.
-				_, refExists := spec["templateRef"]
-				assert.False(t, refExists, "spec.templateRef must not appear in specCopy")
+			verify: func(t *testing.T, spec *v1alpha1.SandboxTemplateSpec) {
+				require.NotNil(t, spec.Template)
+				assert.Equal(t, "img:v1", spec.Template.Spec.Containers[0].Image)
+				assert.Equal(t, []string{"ip"}, spec.PersistentContents)
+				assert.Len(t, spec.Runtimes, 1)
+				assert.Equal(t, "node", spec.Runtimes[0].Name)
+			},
+		},
+		{
+			name: "templateRef with nil Template in referenced SandboxTemplate",
+			sbs: &v1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "ref-nil-tpl", Namespace: "default"},
+				Spec: v1alpha1.SandboxSetSpec{
+					Replicas: 1,
+					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+						TemplateRef: &v1alpha1.SandboxTemplateRef{Name: "tpl-nil"},
+					},
+				},
+			},
+			objects: []client.Object{
+				&v1alpha1.SandboxTemplate{
+					ObjectMeta: metav1.ObjectMeta{Name: "tpl-nil", Namespace: "default"},
+					Spec:       v1alpha1.SandboxTemplateSpec{},
+				},
+			},
+			verify: func(t *testing.T, spec *v1alpha1.SandboxTemplateSpec) {
+				assert.Nil(t, spec.Template)
+				assert.Nil(t, spec.VolumeClaimTemplates)
+				assert.Nil(t, spec.PersistentContents)
+				assert.Nil(t, spec.Runtimes)
 			},
 		},
 		{
@@ -128,21 +161,19 @@ func TestReconciler_getPatch(t *testing.T) {
 			errContains: "failed to resolve sandbox template",
 		},
 		{
-			name: "neither template nor templateRef yields spec without template",
+			name: "neither template nor templateRef returns an error",
 			sbs: &v1alpha1.SandboxSet{
 				ObjectMeta: metav1.ObjectMeta{Name: "empty", Namespace: "default"},
 			},
-			verify: func(t *testing.T, spec map[string]interface{}) {
-				_, tplExists := spec["template"]
-				assert.False(t, tplExists, "spec.template must be absent when neither source is set")
-			},
+			wantErr:     true,
+			errContains: "has neither spec.templateRef nor spec.template",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r := newRevisionTestReconciler(tt.objects...)
-			raw, err := r.getPatch(context.Background(), tt.sbs)
+			spec, err := r.buildSandboxTemplateSpec(context.Background(), tt.sbs)
 			if tt.wantErr {
 				require.Error(t, err)
 				if tt.errContains != "" {
@@ -151,11 +182,7 @@ func TestReconciler_getPatch(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
-
-			var decoded map[string]interface{}
-			require.NoError(t, json.Unmarshal(raw, &decoded))
-			spec, ok := decoded["spec"].(map[string]interface{})
-			require.True(t, ok, "spec must be present")
+			require.NotNil(t, spec)
 			if tt.verify != nil {
 				tt.verify(t, spec)
 			}
@@ -163,133 +190,140 @@ func TestReconciler_getPatch(t *testing.T) {
 	}
 }
 
-// TestReconciler_newRevision covers the hashing behaviour of newRevision across
-// inline / templateRef combinations and the error path when a referenced
-// SandboxTemplate is missing.
-//
-// When compareWith is non-nil, the test computes a revision for both sbs and
-// compareWith using the shared reconciler, and asserts hash equality per
-// expectEqual. When wantErr is true, only sbs is invoked and the error is
-// asserted.
-func TestReconciler_newRevision(t *testing.T) {
+// TestComputeRevisionHash covers the hashing behaviour of computeRevisionHash
+// across different SandboxTemplateSpec inputs.
+func TestComputeRevisionHash(t *testing.T) {
 	samePod := samplePodTemplate("img:v1", map[string]string{"app": "same"})
 
 	tests := []struct {
 		name        string
-		objects     []client.Object
-		sbs         *v1alpha1.SandboxSet
-		compareWith *v1alpha1.SandboxSet
+		specA       *v1alpha1.SandboxTemplateSpec
+		specB       *v1alpha1.SandboxTemplateSpec
 		expectEqual bool
-		wantErr     bool
-		errContains string
 	}{
 		{
-			name: "inline and templateRef describing the same pod produce identical hash",
-			objects: []client.Object{
-				&v1alpha1.SandboxTemplate{
-					ObjectMeta: metav1.ObjectMeta{Name: "tpl-dup", Namespace: "default"},
-					Spec:       v1alpha1.SandboxTemplateSpec{Template: samePod.DeepCopy()},
-				},
+			name: "same template produces identical hash",
+			specA: &v1alpha1.SandboxTemplateSpec{
+				Template: samePod.DeepCopy(),
 			},
-			sbs: &v1alpha1.SandboxSet{
-				ObjectMeta: metav1.ObjectMeta{Name: "dup", Namespace: "default"},
-				Spec: v1alpha1.SandboxSetSpec{
-					Replicas: 1,
-					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
-						Template: samePod.DeepCopy(),
-					},
-				},
-			},
-			compareWith: &v1alpha1.SandboxSet{
-				ObjectMeta: metav1.ObjectMeta{Name: "dup", Namespace: "default"},
-				Spec: v1alpha1.SandboxSetSpec{
-					Replicas: 1,
-					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
-						TemplateRef: &v1alpha1.SandboxTemplateRef{Name: "tpl-dup"},
-					},
-				},
+			specB: &v1alpha1.SandboxTemplateSpec{
+				Template: samePod.DeepCopy(),
 			},
 			expectEqual: true,
 		},
 		{
-			name: "different referenced SandboxTemplates produce different hash",
-			objects: []client.Object{
-				&v1alpha1.SandboxTemplate{
-					ObjectMeta: metav1.ObjectMeta{Name: "tpl-v1", Namespace: "default"},
-					Spec:       v1alpha1.SandboxTemplateSpec{Template: samplePodTemplate("img:v1", nil)},
-				},
-				&v1alpha1.SandboxTemplate{
-					ObjectMeta: metav1.ObjectMeta{Name: "tpl-v2", Namespace: "default"},
-					Spec:       v1alpha1.SandboxTemplateSpec{Template: samplePodTemplate("img:v2", nil)},
-				},
+			name: "different images produce different hash",
+			specA: &v1alpha1.SandboxTemplateSpec{
+				Template: samplePodTemplate("img:v1", nil),
 			},
-			sbs: &v1alpha1.SandboxSet{
-				ObjectMeta: metav1.ObjectMeta{Name: "diff", Namespace: "default"},
-				Spec: v1alpha1.SandboxSetSpec{
-					Replicas: 1,
-					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
-						TemplateRef: &v1alpha1.SandboxTemplateRef{Name: "tpl-v1"},
-					},
-				},
-			},
-			compareWith: &v1alpha1.SandboxSet{
-				ObjectMeta: metav1.ObjectMeta{Name: "diff", Namespace: "default"},
-				Spec: v1alpha1.SandboxSetSpec{
-					Replicas: 1,
-					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
-						TemplateRef: &v1alpha1.SandboxTemplateRef{Name: "tpl-v2"},
-					},
-				},
+			specB: &v1alpha1.SandboxTemplateSpec{
+				Template: samplePodTemplate("img:v2", nil),
 			},
 			expectEqual: false,
 		},
 		{
-			name: "templateRef not found returns resolve error",
-			sbs: &v1alpha1.SandboxSet{
-				ObjectMeta: metav1.ObjectMeta{Name: "missing", Namespace: "default"},
-				Spec: v1alpha1.SandboxSetSpec{
-					Replicas: 1,
-					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
-						TemplateRef: &v1alpha1.SandboxTemplateRef{Name: "no-such-tpl"},
-					},
-				},
+			name: "persistentContents change produces different hash",
+			specA: &v1alpha1.SandboxTemplateSpec{
+				Template:           samplePodTemplate("img:v1", nil),
+				PersistentContents: []string{"/data"},
 			},
-			wantErr:     true,
-			errContains: "failed to resolve sandbox template",
+			specB: &v1alpha1.SandboxTemplateSpec{
+				Template: samplePodTemplate("img:v1", nil),
+			},
+			expectEqual: false,
+		},
+		{
+			name: "runtimes change produces different hash",
+			specA: &v1alpha1.SandboxTemplateSpec{
+				Template: samplePodTemplate("img:v1", nil),
+				Runtimes: []v1alpha1.RuntimeConfig{{Name: "python"}},
+			},
+			specB: &v1alpha1.SandboxTemplateSpec{
+				Template: samplePodTemplate("img:v1", nil),
+			},
+			expectEqual: false,
+		},
+		{
+			name: "VolumeClaimTemplates change produces different hash",
+			specA: &v1alpha1.SandboxTemplateSpec{
+				Template: samplePodTemplate("img:v1", nil),
+				VolumeClaimTemplates: []corev1.PersistentVolumeClaim{{
+					ObjectMeta: metav1.ObjectMeta{Name: "data"},
+				}},
+			},
+			specB: &v1alpha1.SandboxTemplateSpec{
+				Template: samplePodTemplate("img:v1", nil),
+			},
+			expectEqual: false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := newRevisionTestReconciler(tt.objects...)
-
-			crA, err := r.newRevision(context.Background(), tt.sbs, 1, nil)
-			if tt.wantErr {
-				require.Error(t, err)
-				if tt.errContains != "" {
-					assert.Contains(t, err.Error(), tt.errContains)
-				}
-				return
-			}
+			hashA, err := computeRevisionHash(tt.specA)
 			require.NoError(t, err)
-			hashA := crA.Labels[ControllerRevisionHashLabel]
 			require.NotEmpty(t, hashA)
 
-			if tt.compareWith == nil {
-				return
-			}
-			crB, err := r.newRevision(context.Background(), tt.compareWith, 1, nil)
+			hashB, err := computeRevisionHash(tt.specB)
 			require.NoError(t, err)
-			hashB := crB.Labels[ControllerRevisionHashLabel]
 			require.NotEmpty(t, hashB)
 
 			if tt.expectEqual {
 				assert.Equal(t, hashA, hashB,
-					"revisions describing the same pod template must share the same hash")
+					"specs describing the same content must share the same hash")
 			} else {
 				assert.NotEqual(t, hashA, hashB,
-					"revisions describing different pod templates must have different hashes")
+					"specs describing different content must have different hashes")
 			}
 		})
 	}
+}
+
+// TestComputeRevisionHash_InlineAndTemplateRefConsistency verifies that
+// an inline template and a templateRef pointing to identical content produce
+// the same revision hash through the full buildSandboxTemplateSpec flow.
+func TestComputeRevisionHash_InlineAndTemplateRefConsistency(t *testing.T) {
+	samePod := samplePodTemplate("img:v1", map[string]string{"app": "same"})
+
+	inlineSBS := &v1alpha1.SandboxSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "sbs", Namespace: "default"},
+		Spec: v1alpha1.SandboxSetSpec{
+			Replicas: 1,
+			EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+				Template: samePod.DeepCopy(),
+			},
+			PersistentContents: []string{"/data"},
+		},
+	}
+
+	refSBS := &v1alpha1.SandboxSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "sbs", Namespace: "default"},
+		Spec: v1alpha1.SandboxSetSpec{
+			Replicas: 1,
+			EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+				TemplateRef: &v1alpha1.SandboxTemplateRef{Name: "tpl-dup"},
+			},
+			PersistentContents: []string{"/data"},
+		},
+	}
+
+	sbt := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "tpl-dup", Namespace: "default"},
+		Spec:       v1alpha1.SandboxTemplateSpec{Template: samePod.DeepCopy()},
+	}
+
+	r := newRevisionTestReconciler(sbt)
+
+	specInline, err := r.buildSandboxTemplateSpec(context.Background(), inlineSBS)
+	require.NoError(t, err)
+	hashInline, err := computeRevisionHash(specInline)
+	require.NoError(t, err)
+
+	specRef, err := r.buildSandboxTemplateSpec(context.Background(), refSBS)
+	require.NoError(t, err)
+	hashRef, err := computeRevisionHash(specRef)
+	require.NoError(t, err)
+
+	assert.Equal(t, hashInline, hashRef,
+		"inline and templateRef describing the same content must produce identical hash")
 }

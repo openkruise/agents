@@ -262,12 +262,6 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
-              currentRevision:
-                description: |-
-                  CurrentRevision mirrors Labels[agents.kruise.io/template-hash] so that the
-                  bound revision hash is visible via status. Purely informational; it does
-                  not drive any reconcile decision.
-                type: string
               message:
                 description: message
                 type: string

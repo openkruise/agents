@@ -21,6 +21,12 @@ package v1alpha1
 const (
 	AnnotationRuntimeURL         = InternalPrefix + "runtime-url"
 	AnnotationRuntimeAccessToken = InternalPrefix + "runtime-access-token"
+
+	// AnnotationCleanupCandidate marks an auto-materialised SandboxTemplate as a
+	// candidate for garbage collection. A future GC controller will verify that
+	// no Sandbox or Checkpoint still references it before performing the actual
+	// deletion.
+	AnnotationCleanupCandidate = InternalPrefix + "cleanup-candidate"
 )
 
 // E2B annotations

@@ -83,16 +83,16 @@ var _ = Describe("SandboxSet materialises SandboxTemplate automatically", func()
 		Expect(k8sClient.Create(ctx, sbs)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, sbs) })
 
-		By("Waiting for the SandboxSet status.currentTemplate to be populated")
+		By("Waiting for the SandboxSet status.currentRevision to be populated")
 		Eventually(func() string {
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: sbs.Name, Namespace: sbs.Namespace}, sbs)).To(Succeed())
-			return sbs.Status.CurrentTemplate
+			return sbs.Status.CurrentRevision
 		}, time.Minute, time.Second).ShouldNot(BeEmpty())
-		Expect(sbs.Status.CurrentTemplate).To(HavePrefix(sbs.Name + "-"))
+		Expect(sbs.Status.CurrentRevision).To(HavePrefix(sbs.Name + "-"))
 
 		By("Verifying the materialised SandboxTemplate exists with the right owner ref")
 		sbt := &agentsv1alpha1.SandboxTemplate{}
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: sbs.Status.CurrentTemplate, Namespace: namespace}, sbt)).To(Succeed())
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: sbs.Status.CurrentRevision, Namespace: namespace}, sbt)).To(Succeed())
 		ref := metav1.GetControllerOf(sbt)
 		Expect(ref).NotTo(BeNil())
 		Expect(ref.UID).To(Equal(sbs.UID))
@@ -135,7 +135,7 @@ var _ = Describe("SandboxSet materialises SandboxTemplate automatically", func()
 
 		Eventually(func() string {
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: sbs.Name, Namespace: sbs.Namespace}, sbs)).To(Succeed())
-			return sbs.Status.CurrentTemplate
+			return sbs.Status.CurrentRevision
 		}, time.Minute, time.Second).Should(Equal(userSBT.Name))
 
 		Consistently(func() int {
@@ -159,7 +159,7 @@ var _ = Describe("SandboxSet materialises SandboxTemplate automatically", func()
 		var firstName string
 		Eventually(func() string {
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: sbs.Name, Namespace: sbs.Namespace}, sbs)).To(Succeed())
-			firstName = sbs.Status.CurrentTemplate
+			firstName = sbs.Status.CurrentRevision
 			return firstName
 		}, time.Minute, time.Second).ShouldNot(BeEmpty())
 
@@ -170,49 +170,21 @@ var _ = Describe("SandboxSet materialises SandboxTemplate automatically", func()
 
 		Eventually(func() string {
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: sbs.Name, Namespace: sbs.Namespace}, sbs)).To(Succeed())
-			return sbs.Status.CurrentTemplate
+			return sbs.Status.CurrentRevision
 		}, time.Minute, time.Second).ShouldNot(Equal(firstName))
 
 		owned := listOwnedSBT(sbs)
 		Expect(len(owned)).To(BeNumerically(">=", 2))
 	})
 
-	It("Case D - history limit deletes the oldest orphan SBT", func() {
+	It("Case D - deleting the SandboxSet cascades to owned SBTs", func() {
 		sbs := buildInlineSandboxSet(fmt.Sprintf("sbs-mat-d-%d", time.Now().UnixNano()), "nginx:stable-alpine3.23")
-		sbs.Spec.Replicas = 0 // keep no sandbox so every old SBT quickly becomes orphan
-		Expect(k8sClient.Create(ctx, sbs)).To(Succeed())
-		DeferCleanup(func() { _ = k8sClient.Delete(ctx, sbs) })
-
-		// Drive 11 distinct template versions by cycling the image tag.
-		images := []string{
-			"nginx:stable-alpine3.23", "nginx:stable-alpine3.20",
-			"nginx:1.27", "nginx:1.26", "nginx:1.25", "nginx:1.24",
-			"nginx:1.23", "nginx:1.22", "nginx:1.21", "nginx:1.20",
-			"nginx:1.19",
-		}
-		for _, img := range images {
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: sbs.Name, Namespace: sbs.Namespace}, sbs)).To(Succeed())
-			sbs.Spec.Template.Spec.Containers[0].Image = img
-			Expect(k8sClient.Update(ctx, sbs)).To(Succeed())
-			Eventually(func() string {
-				Expect(k8sClient.Get(ctx, types.NamespacedName{Name: sbs.Name, Namespace: sbs.Namespace}, sbs)).To(Succeed())
-				return sbs.Status.CurrentTemplate
-			}, time.Minute, time.Second).ShouldNot(BeEmpty())
-		}
-
-		Eventually(func() int {
-			return len(listOwnedSBT(sbs))
-		}, 2*time.Minute, 2*time.Second).Should(BeNumerically("<=", 10))
-	})
-
-	It("Case E - deleting the SandboxSet cascades to owned SBTs", func() {
-		sbs := buildInlineSandboxSet(fmt.Sprintf("sbs-mat-e-%d", time.Now().UnixNano()), "nginx:stable-alpine3.23")
 		Expect(k8sClient.Create(ctx, sbs)).To(Succeed())
 
 		var sbtName string
 		Eventually(func() string {
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: sbs.Name, Namespace: sbs.Namespace}, sbs)).To(Succeed())
-			sbtName = sbs.Status.CurrentTemplate
+			sbtName = sbs.Status.CurrentRevision
 			return sbtName
 		}, time.Minute, time.Second).ShouldNot(BeEmpty())
 

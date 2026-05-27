@@ -443,7 +443,6 @@ func TestReconcile_RollingUpdate(t *testing.T) {
 				Client:   k8sClient,
 				Scheme:   testScheme,
 				Recorder: eventRecorder,
-				Codec:    codec,
 			}
 			sbs := getSandboxSet(tt.replicas)
 			assert.NoError(t, k8sClient.Create(ctx, sbs))
@@ -503,7 +502,6 @@ func TestReconcile_RollingUpdate_SurgeGate(t *testing.T) {
 		Client:   k8sClient,
 		Scheme:   testScheme,
 		Recorder: eventRecorder,
-		Codec:    codec,
 	}
 
 	// replicas=4, default maxSurge=20% (ceil→1), maxUnavailable=20% (floor→0)

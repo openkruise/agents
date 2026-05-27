@@ -21,10 +21,8 @@ import (
 	"strings"
 	"time"
 
-	apps "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -53,17 +51,13 @@ type GroupedSandboxes struct {
 
 func (r *Reconciler) initNewStatus(ctx context.Context, ss *agentsv1alpha1.SandboxSet) (*agentsv1alpha1.SandboxSetStatus, error) {
 	newStatus := ss.Status.DeepCopy()
-	updateRevision, err := r.newRevision(ctx, ss, 0, nil)
+	hash, name, err := r.ensureTemplateRevision(ctx, ss)
 	if err != nil {
 		return nil, err
 	}
-	newStatus.UpdateRevision = updateRevision.Labels[ControllerRevisionHashLabel]
+	newStatus.UpdateRevision = hash
 	newStatus.ObservedGeneration = ss.Generation
-	name, err := r.ensureSandboxTemplate(ctx, ss)
-	if err != nil {
-		return nil, err
-	}
-	newStatus.CurrentTemplate = name
+	newStatus.CurrentRevision = name
 	return newStatus, nil
 }
 
@@ -126,41 +120,6 @@ func clearAndInitInnerKeys(m map[string]string) map[string]string {
 		}
 	}
 	return m
-}
-
-// newRevision creates a new ControllerRevision containing a patch that reapplies the target state of set.
-// The Revision of the returned ControllerRevision is set to revision. If the returned error is nil, the returned
-// ControllerRevision is valid. StatefulSet revisions are stored as patches that re-apply the current state of set
-// to a new StatefulSet using a strategic merge patch to replace the saved state of the new StatefulSet.
-func (r *Reconciler) newRevision(ctx context.Context, set *agentsv1alpha1.SandboxSet, revision int64, collisionCount *int32) (*apps.ControllerRevision, error) {
-	patch, err := r.getPatch(ctx, set)
-	if err != nil {
-		return nil, err
-	}
-	// When the SandboxSet uses spec.templateRef, spec.template is nil. The
-	// revision labels on ControllerRevision are only informational here
-	// (the hash label is what the controller actually reads), so fall back
-	// to an empty label set to avoid a nil dereference.
-	var templateLabels map[string]string
-	if set.Spec.Template != nil {
-		templateLabels = set.Spec.Template.Labels
-	}
-	cr, err := NewControllerRevision(set,
-		agentsv1alpha1.SandboxSetControllerKind,
-		templateLabels,
-		runtime.RawExtension{Raw: patch},
-		revision,
-		collisionCount)
-	if err != nil {
-		return nil, err
-	}
-	if cr.Annotations == nil {
-		cr.Annotations = make(map[string]string)
-	}
-	for key, value := range set.Annotations {
-		cr.Annotations[key] = value
-	}
-	return cr, nil
 }
 
 // scaleExpectationSatisfied logic:

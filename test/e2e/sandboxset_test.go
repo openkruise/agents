@@ -507,14 +507,40 @@ var _ = Describe("SandboxSet", func() {
 				}
 			}()
 
-			By("Waiting for rolling update to complete: UpdatedAvailableReplicas=10")
-			Eventually(func() int32 {
+			By("Waiting for rolling update to complete: UpdatedAvailableReplicas=10 and all pods use sbt-v2 image")
+			Eventually(func() bool {
 				_ = k8sClient.Get(ctx, types.NamespacedName{
 					Name:      sandbox.Name,
 					Namespace: sandbox.Namespace,
 				}, sandbox)
-				return sandbox.Status.UpdatedAvailableReplicas
-			}, time.Minute*10, time.Second*2).Should(Equal(int32(10)))
+				if sandbox.Status.UpdatedAvailableReplicas != 10 || sandbox.Status.AvailableReplicas != 10 {
+					return false
+				}
+				// Also verify all pods have the new image to guard against
+				// false positives from stale-status reconciles where
+				// UpdatedAvailableReplicas is set to AvailableReplicas before
+				// the controller has processed the actual templateRef change.
+				sandboxList := &agentsv1alpha1.SandboxList{}
+				if err := k8sClient.List(ctx, sandboxList, client.InNamespace(sandbox.Namespace),
+					client.MatchingLabels{agentsv1alpha1.LabelSandboxPool: sandbox.Name}); err != nil {
+					return false
+				}
+				if len(sandboxList.Items) != 10 {
+					return false
+				}
+				for _, sbx := range sandboxList.Items {
+					pod := &corev1.Pod{}
+					if err := k8sClient.Get(ctx, types.NamespacedName{
+						Name: sbx.Name, Namespace: sandbox.Namespace,
+					}, pod); err != nil {
+						return false
+					}
+					if len(pod.Spec.Containers) == 0 || pod.Spec.Containers[0].Image != sbtV2Image {
+						return false
+					}
+				}
+				return true
+			}, time.Minute*10, time.Second*2).Should(BeTrue())
 
 			close(doneCh)
 
@@ -533,22 +559,6 @@ var _ = Describe("SandboxSet", func() {
 			}, sandbox)).To(Succeed())
 			Expect(sandbox.Status.UpdatedAvailableReplicas).To(Equal(int32(10)))
 			Expect(sandbox.Status.AvailableReplicas).To(Equal(int32(10)))
-
-			By("Verifying all sandbox pods use sbt-v2 image")
-			sandboxList := &agentsv1alpha1.SandboxList{}
-			Expect(k8sClient.List(ctx, sandboxList, client.InNamespace(sandbox.Namespace),
-				client.MatchingLabels{agentsv1alpha1.LabelSandboxPool: sandbox.Name})).To(Succeed())
-			Expect(len(sandboxList.Items)).To(Equal(10))
-			for _, sbx := range sandboxList.Items {
-				pod := &corev1.Pod{}
-				Expect(k8sClient.Get(ctx, types.NamespacedName{
-					Name:      sbx.Name,
-					Namespace: sandbox.Namespace,
-				}, pod)).To(Succeed())
-				Expect(pod.Spec.Containers).NotTo(BeEmpty())
-				Expect(pod.Spec.Containers[0].Image).To(Equal(sbtV2Image),
-					"pod %s should use sbt-v2 image after rolling update", sbx.Name)
-			}
 		})
 	})
 
