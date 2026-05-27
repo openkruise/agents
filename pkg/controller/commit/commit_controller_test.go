@@ -86,9 +86,10 @@ func newTestReconciler(objs ...client.Object) (*CommitReconciler, *mockControl) 
 	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).WithStatusSubresource(&agentsv1alpha1.Commit{}).Build()
 	mock := &mockControl{}
 	r := &CommitReconciler{
-		Client:   fc,
-		Scheme:   scheme,
-		Recorder: record.NewFakeRecorder(10),
+		Client:    fc,
+		APIReader: fc,
+		Scheme:    scheme,
+		Recorder:  record.NewFakeRecorder(10),
 		controls: map[string]core.CommitControl{
 			core.CommonControlName: mock,
 		},

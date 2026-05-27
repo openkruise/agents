@@ -58,9 +58,13 @@ func init() {
 // CommitReconciler reconciles a Commit object
 type CommitReconciler struct {
 	client.Client
-	Scheme   *runtime.Scheme
-	Recorder record.EventRecorder
-	controls map[string]core.CommitControl
+	// APIReader bypasses the informer cache and reads directly from the API server.
+	// This is needed because the Pod informer cache may be filtered by label selector
+	// (CachePodLabelSelector feature gate), but Commit can target any Pod.
+	APIReader client.Reader
+	Scheme    *runtime.Scheme
+	Recorder  record.EventRecorder
+	controls  map[string]core.CommitControl
 }
 
 func Add(mgr ctrl.Manager) error {
@@ -73,10 +77,11 @@ func Add(mgr ctrl.Manager) error {
 		return err
 	}
 	if err = (&CommitReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Recorder: recorder,
-		controls: controls,
+		Client:    mgr.GetClient(),
+		APIReader: mgr.GetAPIReader(),
+		Scheme:    mgr.GetScheme(),
+		Recorder:  recorder,
+		controls:  controls,
 	}).SetupWithManager(mgr); err != nil {
 		return err
 	}
@@ -109,9 +114,11 @@ func (r *CommitReconciler) Reconcile(ctx context.Context, req ctrl.Request) (res
 		klog.V(4).InfoS("Reconcile finished", "name", req.Name, "namespace", req.Namespace, "elapsed", time.Since(start), "err", err)
 	}()
 
-	// Fetch target pod
+	// Fetch target pod directly from API server to bypass informer cache filtering.
+	// The Pod informer may be scoped by label selector (CachePodLabelSelector),
+	// but Commit can target any Pod, not just Sandbox-managed ones.
 	pod := &corev1.Pod{}
-	if err = r.Get(ctx, client.ObjectKey{Namespace: commit.Namespace, Name: commit.Spec.PodName}, pod); err != nil {
+	if err = r.APIReader.Get(ctx, client.ObjectKey{Namespace: commit.Namespace, Name: commit.Spec.PodName}, pod); err != nil {
 		if !errors.IsNotFound(err) {
 			return ctrl.Result{}, err
 		}
