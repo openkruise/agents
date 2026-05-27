@@ -3008,3 +3008,174 @@ func TestDefaultGenerateResizeSubresourceBody_NoResizeWhenExtraOrUnitDiff(t *tes
 		})
 	}
 }
+
+func TestMergeResourceList(t *testing.T) {
+	tests := []struct {
+		name     string
+		dst      corev1.ResourceList
+		src      corev1.ResourceList
+		expected corev1.ResourceList
+	}{
+		{
+			name: "merge overwrites existing and preserves extra",
+			dst: corev1.ResourceList{
+				corev1.ResourceCPU:              resource.MustParse("500m"),
+				corev1.ResourceMemory:           resource.MustParse("1Gi"),
+				corev1.ResourceEphemeralStorage: resource.MustParse("30Gi"),
+			},
+			src: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("1"),
+				corev1.ResourceMemory: resource.MustParse("2Gi"),
+			},
+			expected: corev1.ResourceList{
+				corev1.ResourceCPU:              resource.MustParse("1"),
+				corev1.ResourceMemory:           resource.MustParse("2Gi"),
+				corev1.ResourceEphemeralStorage: resource.MustParse("30Gi"),
+			},
+		},
+		{
+			name: "merge into empty dst",
+			dst:  corev1.ResourceList{},
+			src: corev1.ResourceList{
+				corev1.ResourceCPU: resource.MustParse("1"),
+			},
+			expected: corev1.ResourceList{
+				corev1.ResourceCPU: resource.MustParse("1"),
+			},
+		},
+		{
+			name: "merge empty src is no-op",
+			dst: corev1.ResourceList{
+				corev1.ResourceCPU: resource.MustParse("500m"),
+			},
+			src: corev1.ResourceList{},
+			expected: corev1.ResourceList{
+				corev1.ResourceCPU: resource.MustParse("500m"),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mergeResourceList(tt.dst, tt.src)
+			if len(tt.dst) != len(tt.expected) {
+				t.Fatalf("dst length = %d, want %d; dst=%v", len(tt.dst), len(tt.expected), tt.dst)
+			}
+			for name, wantQty := range tt.expected {
+				gotQty, ok := tt.dst[name]
+				if !ok {
+					t.Errorf("missing key %q in dst", name)
+					continue
+				}
+				if gotQty.Cmp(wantQty) != 0 {
+					t.Errorf("dst[%q] = %s, want %s", name, gotQty.String(), wantQty.String())
+				}
+			}
+		})
+	}
+}
+
+func TestDefaultGenerateResizeSubresourceBody_PreservesSystemInjectedFields(t *testing.T) {
+	tests := []struct {
+		name string
+		box  *agentsv1alpha1.Sandbox
+		pod  *corev1.Pod
+	}{
+		{
+			name: "preserve ephemeral-storage while updating cpu/memory",
+			box: &agentsv1alpha1.Sandbox{
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name: "main",
+										Resources: corev1.ResourceRequirements{
+											Requests: corev1.ResourceList{
+												corev1.ResourceCPU:    resource.MustParse("1"),
+												corev1.ResourceMemory: resource.MustParse("2Gi"),
+											},
+											Limits: corev1.ResourceList{
+												corev1.ResourceCPU:    resource.MustParse("1"),
+												corev1.ResourceMemory: resource.MustParse("2Gi"),
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-pod",
+					Namespace: "default",
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name: "main",
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceCPU:              resource.MustParse("500m"),
+									corev1.ResourceMemory:           resource.MustParse("2Gi"),
+									corev1.ResourceEphemeralStorage: resource.MustParse("30Gi"),
+								},
+								Limits: corev1.ResourceList{
+									corev1.ResourceCPU:    resource.MustParse("500m"),
+									corev1.ResourceMemory: resource.MustParse("2Gi"),
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := DefaultGenerateResizeSubresourceBody(InPlaceUpdateOptions{
+				Box: tt.box,
+				Pod: tt.pod,
+			})
+			if result == nil {
+				t.Fatalf("expected non-nil resize body, but got nil")
+			}
+			if len(result.Spec.Containers) == 0 {
+				t.Fatalf("expected at least one container in resize body")
+			}
+			c := result.Spec.Containers[0]
+
+			gotEphemeral, ok := c.Resources.Requests[corev1.ResourceEphemeralStorage]
+			if !ok {
+				t.Errorf("expected ephemeral-storage to be preserved in Requests, but it was missing")
+			} else if gotEphemeral.Cmp(resource.MustParse("30Gi")) != 0 {
+				t.Errorf("ephemeral-storage = %s, want 30Gi", gotEphemeral.String())
+			}
+
+			gotReqCPU, ok := c.Resources.Requests[corev1.ResourceCPU]
+			if !ok {
+				t.Errorf("expected cpu in Requests, but it was missing")
+			} else if gotReqCPU.Cmp(resource.MustParse("1")) != 0 {
+				t.Errorf("Requests cpu = %s, want 1", gotReqCPU.String())
+			}
+
+			gotLimCPU, ok := c.Resources.Limits[corev1.ResourceCPU]
+			if !ok {
+				t.Errorf("expected cpu in Limits, but it was missing")
+			} else if gotLimCPU.Cmp(resource.MustParse("1")) != 0 {
+				t.Errorf("Limits cpu = %s, want 1", gotLimCPU.String())
+			}
+
+			gotLimMem, ok := c.Resources.Limits[corev1.ResourceMemory]
+			if !ok {
+				t.Errorf("expected memory in Limits, but it was missing")
+			} else if gotLimMem.Cmp(resource.MustParse("2Gi")) != 0 {
+				t.Errorf("Limits memory = %s, want 2Gi", gotLimMem.String())
+			}
+		})
+	}
+}
