@@ -297,6 +297,159 @@ var _ = Describe("Commit", func() {
 		})
 	})
 
+	Context("Commit TLS registry", func() {
+		const tlsRegistryHost = "tls-registry.e2e-registry.svc.cluster.local:5443"
+
+		It("should push to HTTPS self-signed registry with insecureRegistry=true", func() {
+			// Create sandbox and wait for Running
+			Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
+			Eventually(func() agentsv1alpha1.SandboxPhase {
+				got := &agentsv1alpha1.Sandbox{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{
+					Name: sandbox.Name, Namespace: namespace,
+				}, got); err != nil {
+					return ""
+				}
+				return got.Status.Phase
+			}, 120*time.Second, 3*time.Second).Should(Equal(agentsv1alpha1.SandboxRunning))
+
+			podName := sandbox.Name
+
+			// Create commit with insecureRegistry=true targeting TLS registry
+			commit := &agentsv1alpha1.Commit{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("commit-tls-insecure-%d", time.Now().UnixNano()),
+					Namespace: namespace,
+				},
+				Spec: agentsv1alpha1.CommitSpec{
+					PodName:          podName,
+					ContainerName:    "workspace",
+					Image:            tlsRegistryHost + "/test:insecure",
+					InsecureRegistry: true,
+				},
+			}
+			Expect(k8sClient.Create(ctx, commit)).To(Succeed())
+
+			// Should transition to Running (Job created)
+			Eventually(func() agentsv1alpha1.CommitPhase {
+				got := &agentsv1alpha1.Commit{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{
+					Name: commit.Name, Namespace: namespace,
+				}, got); err != nil {
+					return ""
+				}
+				return got.Status.Phase
+			}, 60*time.Second, 3*time.Second).Should(Equal(agentsv1alpha1.CommitRunning))
+
+			// Verify Job was created with INSECURE_REGISTRY=true
+			commitGot := &agentsv1alpha1.Commit{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name: commit.Name, Namespace: namespace,
+			}, commitGot)).To(Succeed())
+
+			jobName := jobutil.MakeJobName(string(commitGot.UID))
+			job := &batchv1.Job{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name: jobName, Namespace: namespace,
+			}, job)).To(Succeed())
+
+			// Check INSECURE_REGISTRY env in container
+			found := false
+			for _, env := range job.Spec.Template.Spec.Containers[0].Env {
+				if env.Name == "INSECURE_REGISTRY" && env.Value == "true" {
+					found = true
+					break
+				}
+			}
+			Expect(found).To(BeTrue(), "expected INSECURE_REGISTRY=true env in job container")
+		})
+
+		It("should push to HTTPS self-signed registry with certs.d configured on node", func() {
+			// Create sandbox and wait for Running
+			Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
+			Eventually(func() agentsv1alpha1.SandboxPhase {
+				got := &agentsv1alpha1.Sandbox{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{
+					Name: sandbox.Name, Namespace: namespace,
+				}, got); err != nil {
+					return ""
+				}
+				return got.Status.Phase
+			}, 120*time.Second, 3*time.Second).Should(Equal(agentsv1alpha1.SandboxRunning))
+
+			podName := sandbox.Name
+
+			// Create commit without insecureRegistry (relies on node certs.d)
+			commit := &agentsv1alpha1.Commit{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("commit-tls-certs-%d", time.Now().UnixNano()),
+					Namespace: namespace,
+				},
+				Spec: agentsv1alpha1.CommitSpec{
+					PodName:          podName,
+					ContainerName:    "workspace",
+					Image:            tlsRegistryHost + "/test:tls",
+					InsecureRegistry: false,
+				},
+			}
+			Expect(k8sClient.Create(ctx, commit)).To(Succeed())
+
+			// Should transition to Running (Job created)
+			Eventually(func() bool {
+				got := &agentsv1alpha1.Commit{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{
+					Name: commit.Name, Namespace: namespace,
+				}, got); err != nil {
+					return false
+				}
+				return got.Status.Phase == agentsv1alpha1.CommitRunning || got.Status.Phase == agentsv1alpha1.CommitSucceeded
+			}, 60*time.Second, 3*time.Second).Should(BeTrue())
+
+			// Verify Job has host-containerd-certs volume
+			commitGot := &agentsv1alpha1.Commit{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name: commit.Name, Namespace: namespace,
+			}, commitGot)).To(Succeed())
+
+			jobName := jobutil.MakeJobName(string(commitGot.UID))
+			job := &batchv1.Job{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name: jobName, Namespace: namespace,
+			}, job)).To(Succeed())
+
+			// Check host-containerd-certs volume exists
+			foundVolume := false
+			for _, vol := range job.Spec.Template.Spec.Volumes {
+				if vol.Name == "host-containerd-certs" {
+					foundVolume = true
+					break
+				}
+			}
+			Expect(foundVolume).To(BeTrue(), "expected host-containerd-certs volume in job pod")
+
+			// Check volume mount exists with ReadOnly
+			foundMount := false
+			for _, mount := range job.Spec.Template.Spec.Containers[0].VolumeMounts {
+				if mount.Name == "host-containerd-certs" && mount.MountPath == "/etc/containerd/certs.d" && mount.ReadOnly {
+					foundMount = true
+					break
+				}
+			}
+			Expect(foundMount).To(BeTrue(), "expected host-containerd-certs volume mount at /etc/containerd/certs.d (ReadOnly)")
+
+			// Wait for Succeeded phase (node has certs.d configured, TLS handshake should work)
+			Eventually(func() agentsv1alpha1.CommitPhase {
+				got := &agentsv1alpha1.Commit{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{
+					Name: commit.Name, Namespace: namespace,
+				}, got); err != nil {
+					return ""
+				}
+				return got.Status.Phase
+			}, 180*time.Second, 3*time.Second).Should(Equal(agentsv1alpha1.CommitSucceeded))
+		})
+	})
+
 	Context("Commit deletion", func() {
 		It("should clean up resources when commit is deleted", func() {
 			// Create sandbox and wait for Running
