@@ -101,32 +101,23 @@ func (g *JobGenerator) volumes() ([]corev1.Volume, []corev1.VolumeMount) {
 			},
 		},
 		{
-			// Original node certs — only mounted by initContainer.
 			Name: "host-containerd-certs",
 			VolumeSource: corev1.VolumeSource{
 				HostPath: &corev1.HostPathVolumeSource{
-					Path: containerdCertsDir,
+					Path: "/etc/containerd/certs.d",
 					Type: &directoryOrCreate,
 				},
 			},
 		},
-		{
-			// Writable copy prepared by initContainer, used by main container.
-			Name: "hosts-dir",
-			VolumeSource: corev1.VolumeSource{
-				EmptyDir: &corev1.EmptyDirVolumeSource{},
-			},
-		},
 	}
-	// Main container mounts: emptyDir at /etc/containerd/certs.d (read-only).
 	volumeMounts := []corev1.VolumeMount{
 		{
 			Name:      "host-containerd-run",
 			MountPath: containerdPath,
 		},
 		{
-			Name:      "hosts-dir",
-			MountPath: containerdCertsDir,
+			Name:      "host-containerd-certs",
+			MountPath: "/etc/containerd/certs.d",
 			ReadOnly:  true,
 		},
 	}
@@ -186,22 +177,6 @@ func (g *JobGenerator) GenerateCommitJob() (*batchv1.Job, error) {
 		activeDeadlineSeconds = &deadline
 	}
 
-	// Build the prepare-hosts-dir init container that copies the node's
-	// hosts.toml files and injects the "push" capability for the target registry.
-	registryHost := extractRegistryHost(g.Commit.Spec.Image)
-	initContainer := corev1.Container{
-		Name:         "prepare-hosts-dir",
-		Image:        jobImage,
-		Command:      []string{"sh", "-c", PrepareHostsDirScript()},
-		VolumeMounts: initContainerVolumeMounts(),
-		Env: []corev1.EnvVar{
-			{Name: EnvTargetRegistry, Value: registryHost},
-		},
-		SecurityContext: &corev1.SecurityContext{
-			RunAsUser: &rootUID,
-		},
-	}
-
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      MakeJobName(string(g.Commit.UID)),
@@ -248,8 +223,7 @@ func (g *JobGenerator) GenerateCommitJob() (*batchv1.Job, error) {
 					Tolerations: []corev1.Toleration{
 						{Operator: corev1.TolerationOpExists},
 					},
-					Volumes:        volumes,
-					InitContainers: []corev1.Container{initContainer},
+					Volumes: volumes,
 					Containers: []corev1.Container{
 						{
 							Name:            "agent-job",
