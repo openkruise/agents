@@ -1,6 +1,6 @@
 import os
 os.environ["E2B_DOMAIN"] = "localhost"
-os.environ["E2B_API_KEY"] = "some-api-key"
+os.environ["E2B_API_KEY"] = "e2b_00000000"
 # Import and patch the E2B SDK
 import time
 from e2b_code_interpreter import Sandbox

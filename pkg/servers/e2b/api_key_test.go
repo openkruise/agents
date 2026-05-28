@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/google/uuid"
@@ -180,12 +181,78 @@ func TestCreateAPIKey(t *testing.T) {
 				require.Nil(t, apiError)
 				assert.Equal(t, tt.expectCode, resp.Code)
 				assert.NotEmpty(t, resp.Body.Key)
+				assert.True(t, keys.IsE2BSDKCompatible(resp.Body.Key))
+				rawKey, decoded := keys.DecodeFromE2BSDKCompatible(resp.Body.Key)
+				require.True(t, decoded)
+				assert.NotEqual(t, rawKey, resp.Body.Key)
+				stored, found := controller.keys.LoadByID(t.Context(), resp.Body.ID.String())
+				require.True(t, found)
+				assert.Equal(t, rawKey, stored.Key)
+				_, found = controller.keys.LoadByKey(t.Context(), resp.Body.Key)
+				assert.False(t, found)
+				_, found = controller.keys.LoadByKey(t.Context(), rawKey)
+				assert.True(t, found)
 				assert.Equal(t, tt.request.Name, resp.Body.Name)
 				require.NotNil(t, resp.Body.CreatedBy)
 				assert.Equal(t, tt.user.ID, resp.Body.CreatedBy.ID)
 			}
 		})
 	}
+}
+
+func TestCompatibleAPIKeyEndpoint(t *testing.T) {
+	controller, _, teardown := Setup(t)
+	defer teardown()
+
+	ctx := logs.NewContext()
+	adminUser := &models.CreatedTeamAPIKey{
+		ID:   keys.AdminKeyID,
+		Key:  InitKey,
+		Name: "admin",
+		Team: models.AdminTeam(),
+	}
+	regularUser, err := controller.keys.CreateKey(ctx, adminUser, keys.CreateKeyOptions{Name: "regular-user", TeamName: "regular-team"})
+	require.NoError(t, err)
+	compatibleKey := keys.EncodeForE2BSDK(regularUser.Key)
+
+	tests := []struct {
+		name   string
+		header string
+		want   string
+	}{
+		{name: "raw key returns compatible key", header: regularUser.Key, want: compatibleKey},
+		{name: "compatible key returns same compatible key", header: compatibleKey, want: compatibleKey},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/api-keys/compatible", nil)
+			req.Header.Set(models.HeaderApiKey, tt.header)
+			rec := httptest.NewRecorder()
+
+			controller.mux.ServeHTTP(rec, req)
+
+			require.Equal(t, http.StatusOK, rec.Code)
+			var body map[string]string
+			require.NoError(t, json.NewDecoder(rec.Body).Decode(&body))
+			assert.Equal(t, tt.want, body["key"])
+			assert.NotEqual(t, regularUser.Key, body["key"])
+			assert.True(t, keys.IsE2BSDKCompatible(body["key"]))
+		})
+	}
+
+	t.Run("invalid key does not appear in unauthorized response", func(t *testing.T) {
+		invalidCompatibleKey := keys.EncodeForE2BSDK("missing-key")
+		req := httptest.NewRequest(http.MethodGet, "/api-keys/compatible", nil)
+		req.Header.Set(models.HeaderApiKey, invalidCompatibleKey)
+		rec := httptest.NewRecorder()
+
+		controller.mux.ServeHTTP(rec, req)
+
+		require.Equal(t, http.StatusUnauthorized, rec.Code)
+		assert.NotContains(t, rec.Body.String(), invalidCompatibleKey)
+		assert.NotContains(t, rec.Body.String(), "missing-key")
+	})
 }
 
 func TestCreateAPIKeyPermissionMiddleware(t *testing.T) {

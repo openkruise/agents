@@ -68,6 +68,7 @@ func (sc *Controller) registerRoutes() {
 	// API Keys management endpoints
 	if sc.keyCfg != nil {
 		RegisterE2BRoute(sc.mux, http.MethodGet, "/teams", sc.ListTeams, sc.CheckApiKey)
+		RegisterE2BRoute(sc.mux, http.MethodGet, "/api-keys/compatible", sc.GetCompatibleAPIKey, sc.CheckApiKey)
 		RegisterE2BRoute(sc.mux, http.MethodGet, "/api-keys", sc.ListAPIKeys, sc.CheckApiKey)
 		RegisterE2BRoute(sc.mux, http.MethodPost, "/api-keys", sc.CreateAPIKey, sc.CheckApiKey, sc.CheckCreateAPIKeyPermission)
 		RegisterE2BRoute(sc.mux, http.MethodDelete, "/api-keys/{apiKeyID}", sc.DeleteAPIKey, sc.CheckApiKey, sc.CheckDeleteAPIKeyPermission)
@@ -93,18 +94,21 @@ var AnonymousUser = &models.CreatedTeamAPIKey{
 func (sc *Controller) CheckApiKey(ctx context.Context, r *http.Request) (context.Context, *web.ApiError) {
 	logger := klog.FromContext(ctx)
 	middleWareLog := logger.WithValues("middleware", "CheckApiKey").V(utils.DebugLogLevel)
-	apiKey := r.Header.Get("X-API-KEY")
+	apiKey := r.Header.Get(models.HeaderApiKey)
 	var user *models.CreatedTeamAPIKey
 	var ok bool
 	if sc.keys == nil {
 		user = AnonymousUser
 	} else {
-		user, ok = sc.keys.LoadByKey(ctx, apiKey)
+		// There's no such an existing key that can be decoded in the world,
+		// so it's unnecessary to fallback to the original api-key. Check raw api-key only.
+		rawAPIKey := keys.ToStoredRawAPIKey(apiKey)
+		user, ok = sc.keys.LoadByKey(ctx, rawAPIKey)
 		if !ok {
 			middleWareLog.Info("failed to load key by API-KEY")
 			return ctx, &web.ApiError{
 				Code:    http.StatusUnauthorized,
-				Message: fmt.Sprintf("Invalid API Key: %s", apiKey),
+				Message: "Invalid API Key",
 			}
 		}
 	}
@@ -125,7 +129,9 @@ func (sc *Controller) CheckApiKey(ctx context.Context, r *http.Request) (context
 			}
 		}
 	}
-	return context.WithValue(klog.NewContext(ctx, logger.WithValues("user", user.Name)), "user", user), nil
+	ctx = klog.NewContext(ctx, logger.WithValues("user", user.Name))
+	ctx = context.WithValue(ctx, "user", user)
+	return ctx, nil
 }
 
 const (

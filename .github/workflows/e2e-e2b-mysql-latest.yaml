@@ -154,7 +154,7 @@ jobs:
           export E2B_DOMAIN=localhost
           export E2B_API_KEY=some-api-key
           if [ "${{ matrix.with_gateway }}" = "true" ]; then
-            bash hack/run-e2b-e2e-test.sh --e2b-version 2.24.0 --sdk-version 2.7.0 --with-gateway
+            bash hack/run-e2b-e2e-test.sh --with-gateway
           else
-            bash hack/run-e2b-e2e-test.sh --e2b-version 2.24.0 --sdk-version 2.7.0
+            bash hack/run-e2b-e2e-test.sh
           fi

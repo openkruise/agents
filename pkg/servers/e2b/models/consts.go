@@ -27,4 +27,6 @@ const (
 
 	MaxListLimit = 100
 	MinListLimit = 1
+
+	HeaderApiKey = "X-API-Key"
 )

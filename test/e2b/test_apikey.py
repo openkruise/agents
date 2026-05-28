@@ -14,7 +14,7 @@ def get_api_url():
 
 def get_headers():
     # E2B_API_KEY is used for authentication
-    api_key = os.environ.get("E2B_API_KEY", "some-api-key")
+    api_key = os.environ.get("E2B_API_KEY", "e2b_00000000")
     return {
         "X-API-KEY": api_key,
         "Content-Type": "application/json"

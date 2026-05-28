@@ -82,6 +82,11 @@ type NewTeamAPIKey struct {
 	TeamName string `json:"teamName,omitempty"`
 }
 
+// CompatibleAPIKey represents the SDK-compatible form of an authenticated API key.
+type CompatibleAPIKey struct {
+	Key string `json:"key"`
+}
+
 // ListedTeam represents a team returned by the upstream-compatible GET /teams API.
 type ListedTeam struct {
 	TeamID    string `json:"teamID"`
