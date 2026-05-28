@@ -970,7 +970,7 @@ func TestCommonControl_EnsureSandboxTerminated(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name:       "test-sandbox",
 						Namespace:  "default",
-						Finalizers: []string{utils.SandboxFinalizer},
+						Finalizers: []string{SandboxFinalizer},
 					},
 				},
 				NewStatus: &agentsv1alpha1.SandboxStatus{},

@@ -49,6 +49,11 @@ const (
 	WaitingReasonPodInitializing = "PodInitializing"
 	// WaitingReasonContainerCreating indicates the container is being created (image pull, volume mount, etc.).
 	WaitingReasonContainerCreating = "ContainerCreating"
+
+	SandboxFinalizer = "agents.kruise.io/sandbox"
+
+	PodConditionContainersPaused  = "ContainersPaused"
+	PodConditionContainersResumed = "ContainersResumed"
 )
 
 type commonControl struct {
@@ -411,7 +416,7 @@ func (r *commonControl) EnsureSandboxTerminated(ctx context.Context, args Ensure
 	pod, box, _ := args.Pod, args.Box, args.NewStatus
 	var err error
 	if pod == nil {
-		_, err = utils.PatchFinalizer(ctx, r.Client, box, utils.RemoveFinalizerOpType, utils.SandboxFinalizer)
+		_, err = utils.PatchFinalizer(ctx, r.Client, box, utils.RemoveFinalizerOpType, SandboxFinalizer)
 		if err != nil {
 			klog.ErrorS(err, "update sandbox finalizer failed", "sandbox", klog.KObj(box))
 			return err

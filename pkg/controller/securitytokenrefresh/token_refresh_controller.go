@@ -49,7 +49,6 @@ import (
 	"github.com/openkruise/agents/pkg/discovery"
 	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/identity"
-	"github.com/openkruise/agents/pkg/utils"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 )
 
@@ -224,14 +223,14 @@ func (r *SecurityTokenRefreshReconciler) Reconcile(ctx context.Context, req ctrl
 
 	klog.V(5).InfoS("Began to process Sandbox for security token refresh", "sandbox", klog.KObj(box))
 
-	raw := box.Annotations[utils.AgentKeyTokenRefreshStatus]
+	raw := box.Annotations[identity.AgentKeyTokenRefreshStatus]
 	status, err := decodeTokenRefreshStatus(raw)
 	if err != nil {
 		// A malformed annotation should not put us into a hot retry loop.
 		// Surface it as an event and back off; an operator must clean it up.
 		klog.ErrorS(err, "decode token-status annotation failed", "sandbox", klog.KObj(box), "raw", raw)
 		r.Recorder.Eventf(box, corev1.EventTypeWarning, "TokenStatusDecodeFailed",
-			"failed to decode %s annotation: %v", utils.AgentKeyTokenRefreshStatus, err)
+			"failed to decode %s annotation: %v", identity.AgentKeyTokenRefreshStatus, err)
 		return ctrl.Result{RequeueAfter: refreshRetryAfter}, nil
 	}
 	// Annotation absent or decoded into an empty / partial object: there is

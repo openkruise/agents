@@ -26,7 +26,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
+	"github.com/openkruise/agents/pkg/utils"
 )
 
 type WaitAction string
@@ -153,7 +153,7 @@ func WaitForObjectSatisfied[T client.Object](ctx context.Context, waitHooks *syn
 	update UpdateFunc[T], satisfiedFunc CheckFunc[T], timeout time.Duration) error {
 	key := WaitHookKey(obj)
 	objKey := client.ObjectKeyFromObject(obj)
-	log := klog.FromContext(ctx).V(consts.DebugLogLevel).WithValues("waitHookKey", key, "object", objKey)
+	log := klog.FromContext(ctx).V(utils.DebugLogLevel).WithValues("waitHookKey", key, "object", objKey)
 	satisfied, err := satisfiedFunc(obj)
 	if satisfied || err != nil {
 		log.Info("no need to wait for satisfied", "satisfied", satisfied, "error", err)
@@ -181,7 +181,7 @@ func WaitForObjectSatisfied[T client.Object](ctx context.Context, waitHooks *syn
 
 func waitForAcquiredObjectSatisfied[T client.Object](ctx context.Context, entry *WaitEntry[T], obj T,
 	update UpdateFunc[T], satisfiedFunc CheckFunc[T], timeout time.Duration) error {
-	log := klog.FromContext(ctx).V(consts.DebugLogLevel).WithValues("object", client.ObjectKeyFromObject(obj))
+	log := klog.FromContext(ctx).V(utils.DebugLogLevel).WithValues("object", client.ObjectKeyFromObject(obj))
 	satisfied, err := CheckObjectSatisfied(ctx, obj, update, satisfiedFunc)
 	if satisfied || err != nil {
 		log.Info("post-acquire satisfaction check completed", "satisfied", satisfied, "error", err)

@@ -16,7 +16,9 @@ limitations under the License.
 
 package consts
 
-import "time"
+import (
+	"time"
+)
 
 const (
 	OwnerManagerScaleDown = "__manager_scale_down"
@@ -31,12 +33,8 @@ const (
 const (
 	ExtProcPort               = 9002
 	DefaultExtProcConcurrency = 1000
-	RuntimePort               = 49983
 	ShutdownTimeout           = 90 * time.Second
-	RequestPeerTimeout        = 100 * time.Millisecond
 )
-
-const DebugLogLevel = 5
 
 // Sentinel values for ReserveFailedSandboxFor.
 const (

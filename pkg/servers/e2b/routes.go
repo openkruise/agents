@@ -29,12 +29,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
-	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
-	"github.com/openkruise/agents/pkg/utils/sandboxutils"
+	"github.com/openkruise/agents/pkg/utils"
 )
 
 func (sc *Controller) registerRoutes() {
@@ -93,7 +92,7 @@ var AnonymousUser = &models.CreatedTeamAPIKey{
 // CheckApiKey implements common ApiKey validation
 func (sc *Controller) CheckApiKey(ctx context.Context, r *http.Request) (context.Context, *web.ApiError) {
 	logger := klog.FromContext(ctx)
-	middleWareLog := logger.WithValues("middleware", "CheckApiKey").V(consts.DebugLogLevel)
+	middleWareLog := logger.WithValues("middleware", "CheckApiKey").V(utils.DebugLogLevel)
 	apiKey := r.Header.Get("X-API-KEY")
 	var user *models.CreatedTeamAPIKey
 	var ok bool
@@ -135,7 +134,7 @@ const (
 )
 
 func (sc *Controller) CheckCreateAPIKeyPermission(ctx context.Context, r *http.Request) (context.Context, *web.ApiError) {
-	log := klog.FromContext(ctx).WithValues("middleware", "CheckCreateAPIKeyPermission").V(consts.DebugLogLevel)
+	log := klog.FromContext(ctx).WithValues("middleware", "CheckCreateAPIKeyPermission").V(utils.DebugLogLevel)
 	user := GetUserFromContext(ctx)
 	if user == nil {
 		log.Info("failed to get user from context")
@@ -192,7 +191,7 @@ func (sc *Controller) CheckCreateAPIKeyPermission(ctx context.Context, r *http.R
 
 func (sc *Controller) CheckDeleteAPIKeyPermission(ctx context.Context, r *http.Request) (context.Context, *web.ApiError) {
 	logger := klog.FromContext(ctx)
-	middleWareLog := logger.WithValues("middleware", "CheckDeleteAPIKeyPermission").V(consts.DebugLogLevel)
+	middleWareLog := logger.WithValues("middleware", "CheckDeleteAPIKeyPermission").V(utils.DebugLogLevel)
 	user := GetUserFromContext(ctx)
 	if user == nil {
 		middleWareLog.Info("failed to get user from context")
@@ -222,7 +221,7 @@ func (sc *Controller) CheckDeleteAPIKeyPermission(ctx context.Context, r *http.R
 }
 
 func (sc *Controller) validateTeamNamespace(ctx context.Context, teamName string) *web.ApiError {
-	if err := sandboxutils.ValidateNamespaceForSandboxID(teamName); err != nil {
+	if err := utils.ValidateNamespaceForSandboxID(teamName); err != nil {
 		return &web.ApiError{
 			Code:    http.StatusBadRequest,
 			Message: err.Error(),

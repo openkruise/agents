@@ -26,7 +26,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/utils"
+	"github.com/openkruise/agents/pkg/utils/sidecarutils"
 )
 
 var (
@@ -609,7 +609,7 @@ func recordRuntimeContainerAbnormal(namespace, name string, pod *corev1.Pod) {
 	}
 	for i := range pod.Status.InitContainerStatuses {
 		cs := &pod.Status.InitContainerStatuses[i]
-		if !utils.RuntimeContainerNames.Has(cs.Name) {
+		if !sidecarutils.RuntimeContainerNames.Has(cs.Name) {
 			continue
 		}
 		if cs.RestartCount > 0 && !cs.Ready {

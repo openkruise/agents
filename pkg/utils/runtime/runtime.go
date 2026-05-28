@@ -41,16 +41,12 @@ import (
 
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
 
-	"github.com/openkruise/agents/pkg/sandbox-manager/config"
-	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
-	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/utils"
 	csimountutils "github.com/openkruise/agents/pkg/utils/csiutils"
+	"github.com/openkruise/agents/pkg/utils/runtime/config"
 
-	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
-	commonutils "github.com/openkruise/agents/pkg/utils"
-	"github.com/openkruise/agents/pkg/utils/sandbox-manager/proxyutils"
-	"github.com/openkruise/agents/pkg/utils/sandboxutils"
+	"github.com/openkruise/agents/pkg/utils/logs"
+	"github.com/openkruise/agents/pkg/utils/proxyutils"
 	"github.com/openkruise/agents/proto/envd/process"
 	"github.com/openkruise/agents/proto/envd/process/processconnect"
 )
@@ -74,8 +70,8 @@ type RunCmdFuncArgs struct {
 
 func RunCommandWithRuntime(ctx context.Context, args RunCmdFuncArgs) (RunCommandResult, error) {
 	sbx, processConfig, timeout := args.Sbx, args.ProcessConfig, args.Timeout
-	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx)).V(consts.DebugLogLevel)
-	url := sandboxutils.GetRuntimeURL(sbx)
+	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx)).V(utils.DebugLogLevel)
+	url := GetRuntimeURL(sbx)
 	if url == "" {
 		return RunCommandResult{}, fmt.Errorf("runtime url not found on sandbox")
 	}
@@ -88,7 +84,7 @@ func RunCommandWithRuntime(ctx context.Context, args RunCmdFuncArgs) (RunCommand
 	ctxWithTimeout, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	clientContext, callInfo := connect.NewClientContext(ctxWithTimeout)
-	callInfo.RequestHeader().Set("X-Access-Token", sandboxutils.GetAccessToken(sbx))
+	callInfo.RequestHeader().Set("X-Access-Token", utils.GetAccessToken(sbx))
 	callInfo.RequestHeader().Set("Authorization", "Basic cm9vdDo=") // Basic root:
 
 	req := connect.NewRequest(&process.StartRequest{
@@ -211,9 +207,9 @@ func WriteFileWithRuntime(ctx context.Context, args WriteFileArgs) (WriteFileRes
 	if args.FilePath == "" {
 		return WriteFileResult{}, fmt.Errorf("filePath is required")
 	}
-	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx)).V(consts.DebugLogLevel)
+	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx)).V(utils.DebugLogLevel)
 
-	rtURL := sandboxutils.GetRuntimeURL(sbx)
+	rtURL := GetRuntimeURL(sbx)
 	if rtURL == "" {
 		return WriteFileResult{}, fmt.Errorf("runtime url not found on sandbox")
 	}
@@ -240,7 +236,7 @@ func WriteFileWithRuntime(ctx context.Context, args WriteFileArgs) (WriteFileRes
 		return WriteFileResult{}, fmt.Errorf("failed to build runtime files write request: %w", err)
 	}
 	req.Header.Set("Content-Type", contentType)
-	if accessToken := sandboxutils.GetAccessToken(sbx); accessToken != "" {
+	if accessToken := utils.GetAccessToken(sbx); accessToken != "" {
 		req.Header.Set("X-Access-Token", accessToken)
 	}
 	// Basic auth header mirrors the agent-runtime expectation (root user, empty password)
@@ -374,7 +370,7 @@ func InitRuntime(ctx context.Context, sbx *agentsv1alpha1.Sandbox, opts config.I
 		Factor:   2.0,
 		Steps:    5,
 		Cap:      10 * time.Second,
-	}, commonutils.RetryIfContextNotCanceled(ctx), func() error {
+	}, utils.RetryIfContextNotCanceled(ctx), func() error {
 		var initErr error
 		retries++
 		requestCtx, cancel := context.WithTimeout(ctx, time.Second)
@@ -393,7 +389,7 @@ func InitRuntime(ctx context.Context, sbx *agentsv1alpha1.Sandbox, opts config.I
 			}
 			currentSbx = updated
 		}
-		runtimeURL := sandboxutils.GetRuntimeURL(currentSbx)
+		runtimeURL := GetRuntimeURL(currentSbx)
 		if runtimeURL == "" {
 			log.Error(nil, "runtimeURL is empty")
 			return fmt.Errorf("runtimeURL is empty")
@@ -431,7 +427,7 @@ func InitRuntime(ctx context.Context, sbx *agentsv1alpha1.Sandbox, opts config.I
 
 func GetCsiMountExtensionRequest(s metav1.Object) ([]v1alpha1.CSIMountConfig, error) {
 	var csiMountRequests []v1alpha1.CSIMountConfig
-	csiMountRequestsRaw := s.GetAnnotations()[models.ExtensionKeyClaimWithCSIMount_MountConfig]
+	csiMountRequestsRaw := s.GetAnnotations()[utils.AnnotationKeyClaimWithCSIMount_MountConfig]
 	if csiMountRequestsRaw == "" {
 		return nil, nil
 	}
@@ -439,4 +435,32 @@ func GetCsiMountExtensionRequest(s metav1.Object) ([]v1alpha1.CSIMountConfig, er
 		return nil, fmt.Errorf("failed to unmarshal csi mount options: %v", err)
 	}
 	return csiMountRequests, nil
+}
+
+// GetRuntimeURL resolves the agent-runtime endpoint for a Sandbox.
+//
+// Lookup order:
+//  1. AnnotationRuntimeURL on the Sandbox object.
+//  2. AnnotationEnvdURL on the Sandbox object (legacy key, kept for backwards compatibility).
+//  3. Pod IP from the cached route plus the well-known consts.RuntimePort, used as a fallback
+//     while the controller has not yet stamped the URL annotation.
+//
+// Returns an empty string when none of the sources is usable (e.g. the pod has not been scheduled
+// yet). Callers must treat an empty result as "not ready" and either skip or retry.
+func GetRuntimeURL(sbx *agentsv1alpha1.Sandbox) string {
+	if sbx == nil {
+		return ""
+	}
+	annotations := sbx.GetAnnotations()
+	if u := annotations[agentsv1alpha1.AnnotationRuntimeURL]; u != "" {
+		return u
+	}
+	if u := annotations[agentsv1alpha1.AnnotationEnvdURL]; u != "" { // legacy
+		return u
+	}
+	ip := sbx.Status.PodInfo.PodIP
+	if ip == "" {
+		return ""
+	}
+	return fmt.Sprintf("http://%s:%d", ip, utils.RuntimePort)
 }

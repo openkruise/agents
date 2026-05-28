@@ -280,13 +280,13 @@ func pauseTimeReached(pauseTime *metav1.Time, now metav1.Time) bool {
 }
 
 func (r *SandboxReconciler) addSandboxFinalizerAndHash(ctx context.Context, box *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) {
-	if !box.DeletionTimestamp.IsZero() || controllerutil.ContainsFinalizer(box, utils.SandboxFinalizer) {
+	if !box.DeletionTimestamp.IsZero() || controllerutil.ContainsFinalizer(box, core.SandboxFinalizer) {
 		return box, nil
 	}
 
 	originObj := box.DeepCopy()
 	patch := client.MergeFrom(box)
-	controllerutil.AddFinalizer(originObj, utils.SandboxFinalizer)
+	controllerutil.AddFinalizer(originObj, core.SandboxFinalizer)
 	if originObj.Annotations == nil {
 		originObj.Annotations = make(map[string]string)
 	}

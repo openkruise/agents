@@ -36,16 +36,19 @@ cmd/               Entrypoints (controller, manager, gateway, runtime)
 client/            Generated clientset (DO NOT edit)
 config/            CRD, RBAC, manifests (generated)
 pkg/
-  controller/      Controllers (sandbox, set, claim)
+  controller/      Controllers (sandbox, set, claim, updateops)
   features/        Feature gates for controller (controller-only, MUST NOT be imported by sandbox-manager or servers)
-  sandbox-manager/ Manager logic (infra, errors, logs). MUST NOT import pkg/features.
+  sandbox-manager/ Manager logic (infra, errors, logs, metrics). MUST NOT import pkg/features.
   servers/         E2B API, web framework. MUST NOT import pkg/features.
   proxy/           Envoy ext_proc gRPC server
-  sandbox-gateway/ Envoy Go filter, route controller
+  sandbox-gateway/ Envoy Go filter, route controller, registry
   webhook/         Admission webhooks
-  agent-runtime/   Runtime types, CSI providers
+  agent-runtime/   Runtime types, CSI providers, storages
   peers/           Peer discovery (memberlist)
-  utils/           Shared utilities
+  cache/           Cache layer with index, tasks, and controller-specific caches
+  discovery/       Sandbox discovery service
+  identity/        Identity and token providers (sandbox tokens, security tokens)
+  utils/           Shared utilities (MUST NOT grow into a dumping ground; see Package Naming below)
 proto/             Generated protobuf (DO NOT edit)
 hack/              Scripts, boilerplate, certs
 test/              E2E (Go), E2B (Python) tests
@@ -57,6 +60,7 @@ test/              E2E (Go), E2B (Python) tests
 - SandboxSet (`sbs`): Pool of idle Sandboxes (like ReplicaSet). Supports scale subresource.
 - SandboxClaim (`sbc`): Claims sandboxes from SandboxSet (like PVC claiming PV). Supports batch, TTL, CSI mount.
 - SandboxTemplate (`sbt`): Reusable pod spec template, referenced via `TemplateRef`.
+- SandboxUpdateOps (`suo`): Batch update operations targeting sandboxes by label selector. Supports rolling/partitioned strategies.
 - Checkpoint (`cp`): Checkpoint operation (memory/filesystem snapshot).
 
 ## Coding Conventions
@@ -68,6 +72,21 @@ test/              E2E (Go), E2B (Python) tests
 - Run `gofmt` and `goimports` on all code.
 - Max cyclomatic complexity: 32 (enforced by golangci-lint).
 - Use vendored dependencies (`go mod vendor`).
+
+### Package Style
+
+- Avoid generic package names like `utils`, `common`, `helpers`, `util`, or `base`. These names convey no meaning about
+  what the package provides and tend to become dumping grounds for unrelated code.
+- Every package name should describe its responsibility clearly (e.g., `expectations`, `inplaceupdate`, `timeout` instead
+  of grouping them under a vague `utils` umbrella).
+- When adding new functionality, prefer creating a purpose-specific sub-package under the appropriate domain directory
+  over adding files to an existing generic package. For example, add `pkg/controller/rollback/` instead of
+  `pkg/utils/rollback.go`.
+- The existing `pkg/utils/` directory contains legacy code that should not grow further. New utilities must be placed in
+  domain-specific packages. If a utility is only used by one component, keep it local to that component.
+- If multiple packages share a helper, create a clearly-named package under `pkg/` that reflects its purpose
+  (e.g., `pkg/identity/` for token providers, `pkg/discovery/` for sandbox discovery), not a catch-all `pkg/common/`.
+- Avoid introducing dependency from utility package to domain-specific packages
 
 ### Error Handling
 

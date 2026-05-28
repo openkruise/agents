@@ -50,9 +50,6 @@ import (
 	"github.com/openkruise/agents/pkg/utils/expectations"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 	"github.com/openkruise/agents/pkg/utils/runtime"
-	sandboxManagerUtils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
-	"github.com/openkruise/agents/pkg/utils/sandbox-manager/expectationutils"
-	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
 	timeoututils "github.com/openkruise/agents/pkg/utils/timeout"
 )
 
@@ -91,7 +88,7 @@ func ValidateAndInitClaimOptions(opts infra.ClaimSandboxOptions) (infra.ClaimSan
 		opts.CandidateCounts = consts.DefaultPoolingCandidateCounts
 	}
 	if opts.LockString == "" {
-		opts.LockString = sandboxManagerUtils.NewLockString()
+		opts.LockString = utils.NewLockString()
 	}
 	if opts.ClaimTimeout <= 0 {
 		opts.ClaimTimeout = DefaultClaimTimeout
@@ -184,7 +181,7 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 	if err != nil {
 		log.Error(err, "failed to lock sandbox")
 		if apierrors.IsConflict(err) {
-			expectationutils.ResourceVersionExpectationExpect(&metav1.ObjectMeta{
+			expectations.ResourceVersionExpectationExpect(&metav1.ObjectMeta{
 				UID:             sbx.GetUID(),
 				ResourceVersion: expectations.GetNewerResourceVersion(sbx),
 			})
@@ -199,7 +196,7 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 	metrics.LockType = lockType
 	metrics.PickAndLock = time.Since(pickStart)
 	metrics.Total += metrics.PickAndLock
-	expectationutils.ResourceVersionExpectationExpect(sbx)
+	expectations.ResourceVersionExpectationExpect(sbx)
 	log = log.WithValues("sandbox", klog.KObj(sbx.Sandbox))
 	log.Info("sandbox locked", "cost", metrics.PickAndLock, "type", metrics.LockType)
 	claimed = sbx
@@ -330,7 +327,7 @@ func getPickFailureKey(sbx *v1alpha1.Sandbox) string {
 func pickAnAvailableSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCache *sync.Map, cache infracache.Provider, limiter *rate.Limiter) (*Sandbox, infra.LockType, error) {
 	template, cnt := opts.Template, opts.CandidateCounts
 	ctx = logs.Extend(ctx, "action", "pickAnAvailableSandbox")
-	log := klog.FromContext(ctx).WithValues("template", template).V(consts.DebugLogLevel)
+	log := klog.FromContext(ctx).WithValues("template", template).V(utils.DebugLogLevel)
 	objects, err := cache.ListSandboxesInPool(ctx, infracache.ListSandboxesInPoolOptions{Namespace: opts.Namespace, Pool: template})
 	if err != nil {
 		return nil, "", err
@@ -358,7 +355,7 @@ func pickAnAvailableSandbox(ctx context.Context, opts infra.ClaimSandboxOptions,
 				break
 			}
 		}
-		if !expectationutils.ResourceVersionExpectationSatisfied(obj) {
+		if !expectations.ResourceVersionExpectationSatisfied(obj) {
 			log.Info("skip out-dated sandbox cache", "sandbox", klog.KObj(obj))
 			continue
 		}
@@ -366,7 +363,7 @@ func pickAnAvailableSandbox(ctx context.Context, opts infra.ClaimSandboxOptions,
 			log.Error(checkErr, "skip invalid sandbox", "sandbox", klog.KObj(obj), "resourceVersion", obj.GetResourceVersion())
 			continue
 		}
-		state, _ := stateutils.GetSandboxState(obj)
+		state, _ := utils.GetSandboxState(obj)
 		switch state {
 		case v1alpha1.SandboxStateAvailable:
 			if len(availableCandidates) >= cnt {
@@ -439,7 +436,7 @@ func pickAnAvailableSandbox(ctx context.Context, opts infra.ClaimSandboxOptions,
 }
 
 func pickFromCandidates(ctx context.Context, candidates []*v1alpha1.Sandbox, pickCache *sync.Map) (*v1alpha1.Sandbox, error) {
-	log := klog.FromContext(ctx).V(consts.DebugLogLevel)
+	log := klog.FromContext(ctx).V(utils.DebugLogLevel)
 	// Step 1: select from candidate
 	if len(candidates) == 0 {
 		return nil, errors.New("no candidate")
@@ -461,7 +458,7 @@ func pickFromCandidates(ctx context.Context, candidates []*v1alpha1.Sandbox, pic
 			// Acquire pickCache -> Attempt second-level optimistic lock via k8s update api -> Release pickCache
 			// This ensures that for the same object, acquiring pickCache must happen after another request completes
 			// the expectation, and this check guarantees that the same object will not be selected
-			if !expectationutils.ResourceVersionExpectationSatisfied(obj) {
+			if !expectations.ResourceVersionExpectationSatisfied(obj) {
 				log.Info("expectation of picked candidate is out-of-date", "key", key)
 				pickCache.Delete(key)
 			} else {
@@ -589,7 +586,7 @@ func modifyPickedSandbox(sbx *Sandbox, lockType infra.LockType, opts infra.Claim
 }
 
 // recordSecurityTokenRefreshStatus persists the security token refresh status into the sandbox
-// annotation utils.AgentKeyTokenRefreshStatus via a MergeFrom patch, so that the change does not
+// annotation identity.AgentKeyTokenRefreshStatus via a MergeFrom patch, so that the change does not
 // stomp on concurrent updates to unrelated fields and is not overwritten by later InplaceRefresh
 // calls. The serialization is delegated to identity.EncodeTokenRefreshStatus so the claim flow and
 // the standalone refresh controller share the exact same annotation payload format.
@@ -612,7 +609,7 @@ func recordSecurityTokenRefreshStatus(ctx context.Context, c client.Client, sbx 
 	if updated.Annotations == nil {
 		updated.Annotations = make(map[string]string, 1)
 	}
-	updated.Annotations[utils.AgentKeyTokenRefreshStatus] = raw
+	updated.Annotations[identity.AgentKeyTokenRefreshStatus] = raw
 	if err := c.Patch(ctx, updated, client.MergeFrom(sbx.Sandbox)); err != nil {
 		return fmt.Errorf("failed to patch token refresh status annotation: %w", err)
 	}
@@ -651,7 +648,7 @@ func performLockSandbox(ctx context.Context, sbx *Sandbox, lockType infra.LockTy
 	ctx = logs.Extend(ctx, "action", "performLockSandbox")
 	log := klog.FromContext(ctx)
 	c := cache.GetClient()
-	sandboxManagerUtils.LockSandbox(sbx.Sandbox, opts.LockString, opts.User)
+	utils.LockSandbox(sbx.Sandbox, opts.LockString, opts.User)
 	var updated *v1alpha1.Sandbox
 	var err error
 	if lockType == infra.LockTypeCreate {
@@ -721,7 +718,7 @@ func setContainerResources(container *corev1.Container, requests, limits corev1.
 
 func waitForSandboxReady(ctx context.Context, sbx *Sandbox, opts infra.ClaimSandboxOptions, cache infracache.Provider) (cost time.Duration, err error) {
 	ctx = logs.Extend(ctx, "action", "waitForSandboxReady")
-	log := klog.FromContext(ctx).V(consts.DebugLogLevel).WithValues("sandbox", klog.KObj(sbx))
+	log := klog.FromContext(ctx).V(utils.DebugLogLevel).WithValues("sandbox", klog.KObj(sbx))
 	start := time.Now()
 	defer func() {
 		cost = time.Since(start)
@@ -748,7 +745,7 @@ func waitForSandboxReady(ctx context.Context, sbx *Sandbox, opts infra.ClaimSand
 func sandboxReadyFailureMessage(sbx *v1alpha1.Sandbox) string {
 	readyCond := GetSandboxCondition(sbx, v1alpha1.SandboxConditionReady)
 	inplaceCond := GetSandboxCondition(sbx, v1alpha1.SandboxConditionInplaceUpdate)
-	state, _ := stateutils.GetSandboxState(sbx)
+	state, _ := utils.GetSandboxState(sbx)
 
 	reason := sandboxReadyFailureReason(sbx, state, readyCond, inplaceCond)
 	fields := []string{
@@ -796,7 +793,7 @@ func sandboxReadyFailureReason(sbx *v1alpha1.Sandbox, state string, readyCond, i
 }
 
 func checkSandboxReady(ctx context.Context, sbx *v1alpha1.Sandbox) (bool, error) {
-	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx), "resourceVersion", sbx.GetResourceVersion()).V(consts.DebugLogLevel)
+	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx), "resourceVersion", sbx.GetResourceVersion()).V(utils.DebugLogLevel)
 	if sbx.Status.ObservedGeneration != sbx.Generation {
 		log.Info("watched sandbox not updated", "generation", sbx.Generation, "observedGeneration", sbx.Status.ObservedGeneration)
 		return false, nil
@@ -817,12 +814,12 @@ func checkSandboxReady(ctx context.Context, sbx *v1alpha1.Sandbox) (bool, error)
 	}
 
 	ip := sbx.Status.PodInfo.PodIP
-	state, reason := stateutils.GetSandboxState(sbx)
+	state, reason := utils.GetSandboxState(sbx)
 	isReady := state == v1alpha1.SandboxStateRunning && ip != ""
 	log.Info("sandbox ready checked", "state", state, "reason", reason, "ip", ip, "isReady", isReady, "resourceVersion", sbx.GetResourceVersion())
 	if isReady {
 		// Expect the resourceVersion to ensure InplaceRefresh fetches the latest from API server
-		expectationutils.ResourceVersionExpectationExpect(sbx)
+		expectations.ResourceVersionExpectationExpect(sbx)
 	}
 	return isReady, nil
 }

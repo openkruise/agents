@@ -72,7 +72,7 @@ func calculateSandboxSetStatusFromGroup(ctx context.Context, newStatus *agentsv1
 
 /* Just Reserved for SandboxAutoScaler
 func calculateExpectPoolSize(ctx context.Context, total, unused int32, sbs *agentsv1alpha1.SandboxSet) (int32, error) {
-	log := klog.FromContext(ctx).V(consts.DebugLogLevel)
+	log := klog.FromContext(ctx).V(utils.DebugLogLevel)
 	if sbs.Spec.MaxReplicas == sbs.Spec.MinReplicas {
 		return sbs.Spec.MinReplicas, nil // optimize
 	}

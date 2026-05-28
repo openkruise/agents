@@ -22,7 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/utils"
+	"github.com/openkruise/agents/pkg/identity"
 )
 
 // needsRefreshPredicate filters Sandbox events down to the subset that this controller
@@ -96,5 +96,5 @@ func tokenStatusAnnotation(obj client.Object) string {
 	if obj == nil {
 		return ""
 	}
-	return obj.GetAnnotations()[utils.AgentKeyTokenRefreshStatus]
+	return obj.GetAnnotations()[identity.AgentKeyTokenRefreshStatus]
 }

@@ -24,8 +24,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 
+	"github.com/openkruise/agents/pkg/identity"
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/utils"
 )
 
 // newSandbox builds a *Sandbox with the given knobs. It mirrors the shape of the
@@ -44,7 +44,7 @@ func newSandbox(name string, claimed bool, tokenStatus string, deleted bool) *ag
 		sbx.Labels[agentsv1alpha1.LabelSandboxIsClaimed] = agentsv1alpha1.True
 	}
 	if tokenStatus != "" {
-		sbx.Annotations[utils.AgentKeyTokenRefreshStatus] = tokenStatus
+		sbx.Annotations[identity.AgentKeyTokenRefreshStatus] = tokenStatus
 	}
 	if deleted {
 		now := metav1.Now()
@@ -175,7 +175,7 @@ func TestTokenStatusAnnotation(t *testing.T) {
 			name: "annotation present",
 			obj: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 				Name:        "p",
-				Annotations: map[string]string{utils.AgentKeyTokenRefreshStatus: "raw"},
+				Annotations: map[string]string{identity.AgentKeyTokenRefreshStatus: "raw"},
 			}},
 			want: "raw",
 		},

@@ -2713,8 +2713,8 @@ func TestResourceListContains(t *testing.T) {
 				corev1.ResourceMemory: resource.MustParse("1Gi"),
 			},
 			desired: corev1.ResourceList{
-				corev1.ResourceCPU:                       resource.MustParse("1"),
-				corev1.ResourceMemory:                    resource.MustParse("1Gi"),
+				corev1.ResourceCPU:                    resource.MustParse("1"),
+				corev1.ResourceMemory:                 resource.MustParse("1Gi"),
 				corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("1"),
 			},
 			expect: false,
@@ -2874,8 +2874,8 @@ func TestResourcesEqual(t *testing.T) {
 			},
 			actual: corev1.ResourceRequirements{
 				Limits: corev1.ResourceList{
-					corev1.ResourceCPU:                       resource.MustParse("1"),
-					corev1.ResourceMemory:                    resource.MustParse("1Gi"),
+					corev1.ResourceCPU:                    resource.MustParse("1"),
+					corev1.ResourceMemory:                 resource.MustParse("1Gi"),
 					corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("1"),
 				},
 			},

@@ -26,8 +26,8 @@ import (
 	"k8s.io/klog/v2"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/sandbox-manager/config"
-	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
+	"github.com/openkruise/agents/pkg/utils/logs"
+	"github.com/openkruise/agents/pkg/utils/runtime/config"
 	"github.com/openkruise/agents/proto/envd/process"
 )
 

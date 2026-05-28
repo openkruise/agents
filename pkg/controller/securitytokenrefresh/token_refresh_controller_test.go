@@ -39,7 +39,6 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/identity"
-	"github.com/openkruise/agents/pkg/utils"
 )
 
 func newControllerScheme(t *testing.T) *runtime.Scheme {
@@ -368,7 +367,7 @@ func TestReconcile(t *testing.T) {
 			if tt.expectAnnotationUnchanged && sbx != nil {
 				got := &agentsv1alpha1.Sandbox{}
 				require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: sandboxName, Namespace: sandboxNs}, got))
-				assert.Equal(t, sbx.Annotations[utils.AgentKeyTokenRefreshStatus], got.Annotations[utils.AgentKeyTokenRefreshStatus])
+				assert.Equal(t, sbx.Annotations[identity.AgentKeyTokenRefreshStatus], got.Annotations[identity.AgentKeyTokenRefreshStatus])
 			}
 		})
 	}

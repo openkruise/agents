@@ -379,7 +379,6 @@ func TestCreateSandboxWithClone_CSIMount(t *testing.T) {
 	}
 }
 
-
 func TestCreateSandboxWithClone_InplaceUpdateRejected(t *testing.T) {
 	ctrl := &Controller{}
 	request := models.NewSandboxRequest{

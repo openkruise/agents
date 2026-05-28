@@ -33,6 +33,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
+	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/runtime"
 
 	"github.com/openkruise/agents/api/v1alpha1"
@@ -41,8 +42,7 @@ import (
 	cacheutils "github.com/openkruise/agents/pkg/cache/utils"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
-	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
-	"github.com/openkruise/agents/pkg/utils/sandboxutils"
+	utestutils "github.com/openkruise/agents/pkg/utils/testutils"
 	"github.com/openkruise/agents/pkg/utils/timeout"
 	testutils "github.com/openkruise/agents/test/utils"
 )
@@ -99,7 +99,7 @@ func mutateTimeout(ctx context.Context, c ctrl.Client, key types.NamespacedName,
 
 // TestSandbox_ResumeConcurrent tests concurrent resume operations on the same sandbox
 func TestSandbox_ResumeConcurrent(t *testing.T) {
-	utils.InitLogOutput()
+	utestutils.InitLogOutput()
 	sandbox := &v1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-sandbox",
@@ -126,7 +126,7 @@ func TestSandbox_ResumeConcurrent(t *testing.T) {
 		Type:   string(v1alpha1.SandboxConditionPaused),
 		Status: metav1.ConditionTrue,
 	})
-	state, reason := sandboxutils.GetSandboxState(sandbox)
+	state, reason := utils.GetSandboxState(sandbox)
 	assert.Equal(t, v1alpha1.SandboxStatePaused, state, reason)
 
 	cache, fc, err := cachetest.NewTestCache(t)
@@ -183,7 +183,7 @@ func TestSandbox_ResumeConcurrent(t *testing.T) {
 	// Verify that the sandbox is in Running state
 	var updatedSbx v1alpha1.Sandbox
 	require.NoError(t, fc.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "test-sandbox"}, &updatedSbx))
-	state, reason = sandboxutils.GetSandboxState(&updatedSbx)
+	state, reason = utils.GetSandboxState(&updatedSbx)
 	assert.Equal(t, v1alpha1.SandboxStateRunning, state, reason)
 	assert.False(t, updatedSbx.Spec.Paused)
 }
@@ -192,7 +192,7 @@ func TestSandbox_ResumeConcurrent(t *testing.T) {
 // succeeds right at the deadline boundary, causing the context to expire. The Resume function
 // should create a fresh context for post-resume operations (ReInit, CSI mount, inplace refresh).
 func TestSandbox_Resume_ContextExpiredAfterWait(t *testing.T) {
-	utils.InitLogOutput()
+	utestutils.InitLogOutput()
 
 	serverOpts := testutils.TestRuntimeServerOptions{
 		RunCommandResult: runtime.RunCommandResult{
@@ -232,7 +232,7 @@ func TestSandbox_Resume_ContextExpiredAfterWait(t *testing.T) {
 		Type:   string(v1alpha1.SandboxConditionPaused),
 		Status: metav1.ConditionTrue,
 	})
-	state, reason := sandboxutils.GetSandboxState(sandbox)
+	state, reason := utils.GetSandboxState(sandbox)
 	assert.Equal(t, v1alpha1.SandboxStatePaused, state, reason)
 
 	cache, fc, err := cachetest.NewTestCache(t)
@@ -273,7 +273,7 @@ func TestSandbox_Resume_ContextExpiredAfterWait(t *testing.T) {
 	// Verify sandbox is in Running state
 	var updatedSbx v1alpha1.Sandbox
 	require.NoError(t, fc.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "test-sandbox"}, &updatedSbx))
-	state, reason = sandboxutils.GetSandboxState(&updatedSbx)
+	state, reason = utils.GetSandboxState(&updatedSbx)
 	assert.Equal(t, v1alpha1.SandboxStateRunning, state, reason)
 	assert.False(t, updatedSbx.Spec.Paused)
 	assert.Nil(t, updatedSbx.Spec.ShutdownTime)
@@ -282,7 +282,7 @@ func TestSandbox_Resume_ContextExpiredAfterWait(t *testing.T) {
 
 //goland:noinspection GoDeprecation
 func TestSandbox_Pause(t *testing.T) {
-	utils.InitLogOutput()
+	utestutils.InitLogOutput()
 	tests := []struct {
 		name                   string
 		initSandbox            func(sbx *v1alpha1.Sandbox)
@@ -301,7 +301,7 @@ func TestSandbox_Pause(t *testing.T) {
 					Status: metav1.ConditionTrue,
 				})
 				sbx.Spec.Paused = false
-				state, reason := sandboxutils.GetSandboxState(sbx)
+				state, reason := utils.GetSandboxState(sbx)
 				assert.Equal(t, v1alpha1.SandboxStateRunning, state, reason)
 			},
 			expectedState:          v1alpha1.SandboxStatePaused,
@@ -318,7 +318,7 @@ func TestSandbox_Pause(t *testing.T) {
 					Status: metav1.ConditionTrue,
 				})
 				sbx.Spec.Paused = false
-				state, reason := sandboxutils.GetSandboxState(sbx)
+				state, reason := utils.GetSandboxState(sbx)
 				assert.Equal(t, v1alpha1.SandboxStateRunning, state, reason)
 			},
 			expectedState:   "",
@@ -335,7 +335,7 @@ func TestSandbox_Pause(t *testing.T) {
 				})
 				sbx.Spec.Paused = false
 				sbx.OwnerReferences = GetSbsOwnerReference()
-				state, reason := sandboxutils.GetSandboxState(sbx)
+				state, reason := utils.GetSandboxState(sbx)
 				assert.Equal(t, v1alpha1.SandboxStateAvailable, state, reason)
 			},
 			expectedState: v1alpha1.SandboxStateAvailable,
@@ -350,7 +350,7 @@ func TestSandbox_Pause(t *testing.T) {
 					Status: metav1.ConditionTrue,
 				})
 				sbx.Spec.Paused = true
-				state, reason := sandboxutils.GetSandboxState(sbx)
+				state, reason := utils.GetSandboxState(sbx)
 				assert.Equal(t, v1alpha1.SandboxStatePaused, state, reason)
 			},
 			expectedState: v1alpha1.SandboxStatePaused,
@@ -361,7 +361,7 @@ func TestSandbox_Pause(t *testing.T) {
 			initSandbox: func(sbx *v1alpha1.Sandbox) {
 				sbx.Status.Phase = v1alpha1.SandboxTerminating
 				sbx.Spec.Paused = false
-				state, reason := sandboxutils.GetSandboxState(sbx)
+				state, reason := utils.GetSandboxState(sbx)
 				assert.Equal(t, v1alpha1.SandboxStateDead, state, reason)
 			},
 			expectedState: v1alpha1.SandboxStateDead,
@@ -452,7 +452,7 @@ func TestSandbox_Pause(t *testing.T) {
 
 			require.NoError(t, err)
 
-			state, reason := sandboxutils.GetSandboxState(s.Sandbox)
+			state, reason := utils.GetSandboxState(s.Sandbox)
 			assert.Equal(t, tt.expectedState, state, reason)
 			assert.True(t, s.Sandbox.Spec.Paused)
 			if tt.expectTimeoutUpdate && opts.Timeout != nil && !opts.Timeout.ShutdownTime.IsZero() {
@@ -769,7 +769,7 @@ func TestSandbox_PauseConflictsWithActiveResumeWaitHookBeforeMutation(t *testing
 
 //goland:noinspection GoDeprecation
 func TestSandbox_Resume(t *testing.T) {
-	utils.InitLogOutput()
+	utestutils.InitLogOutput()
 	tests := []struct {
 		name                    string
 		initSandbox             func(sbx *v1alpha1.Sandbox)
@@ -789,7 +789,7 @@ func TestSandbox_Resume(t *testing.T) {
 					Status: metav1.ConditionTrue,
 				})
 				sbx.Spec.Paused = true
-				state, reason := sandboxutils.GetSandboxState(sbx)
+				state, reason := utils.GetSandboxState(sbx)
 				assert.Equal(t, v1alpha1.SandboxStatePaused, state, reason)
 			},
 			expectedState:           v1alpha1.SandboxStateRunning,
@@ -805,7 +805,7 @@ func TestSandbox_Resume(t *testing.T) {
 					Status: metav1.ConditionTrue,
 				})
 				sbx.Spec.Paused = true
-				state, reason := sandboxutils.GetSandboxState(sbx)
+				state, reason := utils.GetSandboxState(sbx)
 				assert.Equal(t, v1alpha1.SandboxStatePaused, state, reason)
 			},
 			expectedState:   "",
@@ -821,7 +821,7 @@ func TestSandbox_Resume(t *testing.T) {
 					Status: metav1.ConditionTrue,
 				})
 				sbx.Spec.Paused = true
-				state, reason := sandboxutils.GetSandboxState(sbx)
+				state, reason := utils.GetSandboxState(sbx)
 				assert.Equal(t, v1alpha1.SandboxStatePaused, state, reason)
 			},
 			expectedState:           v1alpha1.SandboxStateRunning,
@@ -839,7 +839,7 @@ func TestSandbox_Resume(t *testing.T) {
 					Status: metav1.ConditionTrue,
 				})
 				sbx.Spec.Paused = true
-				state, reason := sandboxutils.GetSandboxState(sbx)
+				state, reason := utils.GetSandboxState(sbx)
 				assert.Equal(t, v1alpha1.SandboxStatePaused, state, reason)
 			},
 			expectedState:           v1alpha1.SandboxStateRunning,
@@ -857,7 +857,7 @@ func TestSandbox_Resume(t *testing.T) {
 					Status: metav1.ConditionTrue,
 				})
 				sbx.Spec.Paused = true
-				state, reason := sandboxutils.GetSandboxState(sbx)
+				state, reason := utils.GetSandboxState(sbx)
 				assert.Equal(t, v1alpha1.SandboxStatePaused, state, reason)
 			},
 			// When controller's Initialize fails (e.g. runtime returns 500), it sets
@@ -878,7 +878,7 @@ func TestSandbox_Resume(t *testing.T) {
 					Status: metav1.ConditionFalse,
 				})
 				sbx.Spec.Paused = true
-				state, reason := sandboxutils.GetSandboxState(sbx)
+				state, reason := utils.GetSandboxState(sbx)
 				assert.Equal(t, v1alpha1.SandboxStatePaused, state, reason)
 			},
 			expectedState: "",
@@ -892,7 +892,7 @@ func TestSandbox_Resume(t *testing.T) {
 					Type:   string(v1alpha1.SandboxConditionReady),
 					Status: metav1.ConditionTrue,
 				})
-				state, reason := sandboxutils.GetSandboxState(sbx)
+				state, reason := utils.GetSandboxState(sbx)
 				assert.Equal(t, v1alpha1.SandboxStateRunning, state, reason)
 			},
 			expectedState: v1alpha1.SandboxStateRunning,
@@ -903,7 +903,7 @@ func TestSandbox_Resume(t *testing.T) {
 			initSandbox: func(sbx *v1alpha1.Sandbox) {
 				sbx.Status.Phase = v1alpha1.SandboxTerminating
 				sbx.Spec.Paused = true
-				state, reason := sandboxutils.GetSandboxState(sbx)
+				state, reason := utils.GetSandboxState(sbx)
 				assert.Equal(t, v1alpha1.SandboxStateDead, state, reason)
 			},
 			expectedState: "",
@@ -1008,7 +1008,7 @@ func TestSandbox_Resume(t *testing.T) {
 			var updatedSbx v1alpha1.Sandbox
 			require.NoError(t, fc.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "test-sandbox"}, &updatedSbx))
 
-			state, reason := sandboxutils.GetSandboxState(&updatedSbx)
+			state, reason := utils.GetSandboxState(&updatedSbx)
 			assert.Equal(t, tt.expectedState, state, reason)
 			assert.False(t, updatedSbx.Spec.Paused)
 			require.NotNil(t, updatedSbx.Spec.ShutdownTime)
@@ -1231,7 +1231,7 @@ func TestSandbox_ResumeRefreshesBeforePreconditionChecksAndUpdatesLatest(t *test
 			var updatedSbx v1alpha1.Sandbox
 			require.NoError(t, fc.Get(t.Context(), types.NamespacedName{Namespace: latest.Namespace, Name: latest.Name}, &updatedSbx))
 			assert.False(t, updatedSbx.Spec.Paused)
-			state, reason := sandboxutils.GetSandboxState(&updatedSbx)
+			state, reason := utils.GetSandboxState(&updatedSbx)
 			assert.Equal(t, v1alpha1.SandboxStateRunning, state, reason)
 		})
 	}
@@ -1298,7 +1298,7 @@ func TestSandbox_ResumeAllowsAlreadyResumedLatestForStalePausedWrapper(t *testin
 			var updatedSbx v1alpha1.Sandbox
 			require.NoError(t, fc.Get(t.Context(), types.NamespacedName{Namespace: latest.Namespace, Name: latest.Name}, &updatedSbx))
 			assert.False(t, updatedSbx.Spec.Paused)
-			state, reason := sandboxutils.GetSandboxState(&updatedSbx)
+			state, reason := utils.GetSandboxState(&updatedSbx)
 			assert.Equal(t, v1alpha1.SandboxStateRunning, state, reason)
 		})
 	}
@@ -1466,7 +1466,7 @@ func TestSandbox_ResumePreservesTimeoutOnError(t *testing.T) {
 // shapes (real / nil / never-timeout / pausetime-only) and across the
 // winner/loser branches of the first-writer-wins guard.
 func TestSandbox_ResumeMutatorAtomicity(t *testing.T) {
-	utils.InitLogOutput()
+	utestutils.InitLogOutput()
 
 	now := time.Now().UTC().Truncate(time.Second)
 	realPauseAt := metav1.NewTime(now.Add(10 * time.Minute))
@@ -1636,7 +1636,7 @@ func TestSandbox_ResumeMutatorAtomicity(t *testing.T) {
 }
 
 func TestSandbox_ResumeExtendOnlyConcurrent(t *testing.T) {
-	utils.InitLogOutput()
+	utestutils.InitLogOutput()
 
 	now := time.Date(2026, 5, 22, 10, 0, 0, 0, time.UTC)
 	staleOpts := timeout.Options{
@@ -1790,7 +1790,7 @@ func TestSandbox_ResumeExtendOnlyConcurrent(t *testing.T) {
 }
 
 func TestSandbox_ResumeFailurePathsLeaveRealTimeout(t *testing.T) {
-	utils.InitLogOutput()
+	utestutils.InitLogOutput()
 
 	now := time.Date(2026, 5, 22, 11, 0, 0, 0, time.UTC)
 	realTimeout := timeout.Options{
@@ -1938,7 +1938,7 @@ func TestSandbox_ResumeFailurePathsLeaveRealTimeout(t *testing.T) {
 			assertTimePtrEqual(t, timePtrOrNil(tc.expectTimeout.PauseTime), final.Spec.PauseTime, "final PauseTime must keep expected timeout")
 			assertTimePtrEqual(t, timePtrOrNil(tc.expectTimeout.ShutdownTime), final.Spec.ShutdownTime, "final ShutdownTime must keep expected timeout")
 			if tc.expectReady {
-				state, reason := sandboxutils.GetSandboxState(&final)
+				state, reason := utils.GetSandboxState(&final)
 				assert.Equal(t, v1alpha1.SandboxStateRunning, state, reason)
 			}
 		})

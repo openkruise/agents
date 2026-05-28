@@ -32,9 +32,9 @@ import (
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
+	"github.com/openkruise/agents/pkg/utils"
 )
 
 var (
@@ -300,7 +300,7 @@ func (k *secretKeyStorage) storeKey(apiKey *models.CreatedTeamAPIKey) {
 }
 
 func (k *secretKeyStorage) CreateKey(ctx context.Context, key *models.CreatedTeamAPIKey, opts CreateKeyOptions) (*models.CreatedTeamAPIKey, error) {
-	log := klog.FromContext(ctx).WithValues("name", opts.Name).V(consts.DebugLogLevel)
+	log := klog.FromContext(ctx).WithValues("name", opts.Name).V(utils.DebugLogLevel)
 	teamName, err := validateCreateKeyOptions(key, opts)
 	if err != nil {
 		return nil, err

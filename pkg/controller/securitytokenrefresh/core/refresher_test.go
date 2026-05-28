@@ -31,7 +31,6 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/identity"
-	"github.com/openkruise/agents/pkg/utils"
 )
 
 // stubIdentityProvider is a hand-rolled IdentityProvider that returns the configured
@@ -82,7 +81,7 @@ func newSandbox(name string) *agentsv1alpha1.Sandbox {
 				agentsv1alpha1.LabelSandboxIsClaimed: agentsv1alpha1.True,
 			},
 			Annotations: map[string]string{
-				utils.AgentKeyTokenRefreshStatus: `{"accessTokenExpiration":"2025-01-01T00:00:00Z"}`,
+				identity.AgentKeyTokenRefreshStatus: `{"accessTokenExpiration":"2025-01-01T00:00:00Z"}`,
 			},
 		},
 	}
@@ -151,13 +150,13 @@ func TestDefaultRefresher_Refresh(t *testing.T) {
 			require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: "sbx-1", Namespace: "default"}, got))
 
 			if tt.expectErr != "" {
-				assert.Equal(t, sbx.Annotations[utils.AgentKeyTokenRefreshStatus],
-					got.Annotations[utils.AgentKeyTokenRefreshStatus],
+				assert.Equal(t, sbx.Annotations[identity.AgentKeyTokenRefreshStatus],
+					got.Annotations[identity.AgentKeyTokenRefreshStatus],
 					"annotation must NOT change when an upstream step fails")
 				return
 			}
 			if tt.expectAnnotation != "" {
-				assert.Equal(t, tt.expectAnnotation, got.Annotations[utils.AgentKeyTokenRefreshStatus])
+				assert.Equal(t, tt.expectAnnotation, got.Annotations[identity.AgentKeyTokenRefreshStatus])
 			}
 		})
 	}
@@ -185,5 +184,5 @@ func TestDefaultRefresher_PatchAnnotation_NilAnnotations(t *testing.T) {
 
 	got := &agentsv1alpha1.Sandbox{}
 	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: "sbx-2", Namespace: "default"}, got))
-	assert.Equal(t, `{"accessTokenExpiration":"2099-12-31T23:59:59Z"}`, got.Annotations[utils.AgentKeyTokenRefreshStatus])
+	assert.Equal(t, `{"accessTokenExpiration":"2099-12-31T23:59:59Z"}`, got.Annotations[identity.AgentKeyTokenRefreshStatus])
 }

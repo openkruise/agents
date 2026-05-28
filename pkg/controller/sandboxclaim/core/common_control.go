@@ -43,7 +43,6 @@ import (
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/csiutils"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
-	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
 	"github.com/openkruise/agents/pkg/utils/timeout"
 )
 
@@ -340,7 +339,7 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 		}
 		// Check condition B: initContainer named "runtime"
 		if !hasAgentRuntime {
-			podTemplateSpec, err := stateutils.GetTemplateSpec(ctx, c.Client, sandboxSet.Namespace, &sandboxSet.Spec.EmbeddedSandboxTemplate)
+			podTemplateSpec, err := utils.GetTemplateSpec(ctx, c.Client, sandboxSet.Namespace, &sandboxSet.Spec.EmbeddedSandboxTemplate)
 			if err != nil {
 				if sandboxSet.Spec.TemplateRef != nil {
 					logger.Error(err, "failed to get sandbox template for checking agent runtime", "template", sandboxSet.Spec.TemplateRef.Name)
@@ -417,7 +416,7 @@ func (c *commonControl) countClaimedSandboxes(ctx context.Context, claim *agents
 	}
 	var cnt int32
 	for _, sbx := range sandboxes {
-		state, reason := stateutils.GetSandboxState(sbx)
+		state, reason := utils.GetSandboxState(sbx)
 		if state == agentsv1alpha1.SandboxStateDead {
 			log.Info("skip counting dead sandbox", "reason", reason)
 			continue

@@ -28,9 +28,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	cacheutils "github.com/openkruise/agents/pkg/cache/utils"
-	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
-	managerutils "github.com/openkruise/agents/pkg/utils/sandbox-manager/expectationutils"
+	"github.com/openkruise/agents/pkg/utils"
+	"github.com/openkruise/agents/pkg/utils/expectations"
 )
 
 // CustomReconcileHandler is a custom reconcile handler.
@@ -50,7 +50,7 @@ func (c *CustomReconciler[T]) Reconcile(ctx context.Context, req ctrl.Request) (
 	log := klog.FromContext(ctx)
 
 	if len(c.handlers) == 0 {
-		log.V(consts.DebugLogLevel).Info("reconcile skipped for no handlers")
+		log.V(utils.DebugLogLevel).Info("reconcile skipped for no handlers")
 		return ctrl.Result{}, nil
 	}
 
@@ -62,14 +62,14 @@ func (c *CustomReconciler[T]) Reconcile(ctx context.Context, req ctrl.Request) (
 			notFound = true
 			obj.SetNamespace(req.Namespace)
 			obj.SetName(req.Name)
-			managerutils.ResourceVersionExpectationDelete(obj)
+			expectations.ResourceVersionExpectationDelete(obj)
 		} else {
 			log.Error(err, "failed to get SandboxSet")
 			return ctrl.Result{}, err
 		}
 	}
 	if !notFound {
-		managerutils.ResourceVersionExpectationObserve(obj)
+		expectations.ResourceVersionExpectationObserve(obj)
 	}
 	for _, handler := range c.handlers {
 		result, err := handler(ctx, obj, notFound)
@@ -104,20 +104,20 @@ func (r *WaitReconciler[T]) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	err := r.Get(ctx, req.NamespacedName, obj)
 	if err != nil {
 		if errors.IsNotFound(err) {
-			log.V(consts.DebugLogLevel).Info("object not found, may have been deleted")
+			log.V(utils.DebugLogLevel).Info("object not found, may have been deleted")
 			if entry, ok := r.loadWaitHook(waitKey); ok {
 				entry.Close()
-				log.V(consts.DebugLogLevel).Info("existing wait entry closed")
+				log.V(utils.DebugLogLevel).Info("existing wait entry closed")
 			}
-			managerutils.ResourceVersionExpectationDelete(obj)
+			expectations.ResourceVersionExpectationDelete(obj)
 		} else {
 			log.Error(err, "failed to get object")
 		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	managerutils.ResourceVersionExpectationObserve(obj)
-	log.V(consts.DebugLogLevel).Info("object with wait hook changed", "resourceVersion", obj.GetResourceVersion())
+	expectations.ResourceVersionExpectationObserve(obj)
+	log.V(utils.DebugLogLevel).Info("object with wait hook changed", "resourceVersion", obj.GetResourceVersion())
 	r.checkWaitHooks(waitKey, obj)
 	return ctrl.Result{}, nil
 }

@@ -35,8 +35,8 @@ import (
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 
-	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
+	"github.com/openkruise/agents/pkg/utils"
 )
 
 // AdminTeamUID is the well-known UUID for the default admin team row.
@@ -325,7 +325,7 @@ func cloneTeamUser(user *models.TeamUser) *models.TeamUser {
 
 // CreateKey generates a new API key, stores only the HMAC hash, and returns the raw key once.
 func (k *mysqlKeyStorage) CreateKey(ctx context.Context, key *models.CreatedTeamAPIKey, opts CreateKeyOptions) (*models.CreatedTeamAPIKey, error) {
-	log := klog.FromContext(ctx).WithValues("name", opts.Name).V(consts.DebugLogLevel)
+	log := klog.FromContext(ctx).WithValues("name", opts.Name).V(utils.DebugLogLevel)
 	teamName, err := validateCreateKeyOptions(key, opts)
 	if err != nil {
 		return nil, err
@@ -396,7 +396,7 @@ func (k *mysqlKeyStorage) CreateKey(ctx context.Context, key *models.CreatedTeam
 
 // DeleteKey removes only an API key from the database and caches. Created teams are reserved even if they have no keys.
 func (k *mysqlKeyStorage) DeleteKey(ctx context.Context, key *models.CreatedTeamAPIKey) error {
-	log := klog.FromContext(ctx).V(consts.DebugLogLevel)
+	log := klog.FromContext(ctx).V(utils.DebugLogLevel)
 	if key == nil {
 		return nil
 	}

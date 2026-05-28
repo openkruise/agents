@@ -29,7 +29,6 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/identity"
-	"github.com/openkruise/agents/pkg/utils"
 )
 
 // Refresher performs the actual security-token refresh on a single sandbox.
@@ -101,6 +100,6 @@ func (r *defaultRefresher) patchAnnotation(ctx context.Context, sbx *agentsv1alp
 	if updated.Annotations == nil {
 		updated.Annotations = make(map[string]string, 1)
 	}
-	updated.Annotations[utils.AgentKeyTokenRefreshStatus] = raw
+	updated.Annotations[identity.AgentKeyTokenRefreshStatus] = raw
 	return r.client.Patch(ctx, updated, client.MergeFrom(sbx))
 }

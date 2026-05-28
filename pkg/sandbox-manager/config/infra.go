@@ -17,35 +17,22 @@ limitations under the License.
 package config
 
 import (
-	"github.com/google/uuid"
 	corev1 "k8s.io/api/core/v1"
+
+	runtimeconfig "github.com/openkruise/agents/pkg/utils/runtime/config"
 )
 
-type InitRuntimeOptions struct {
-	EnvVars     map[string]string `json:"envVars,omitempty"`
-	AccessToken string            `json:"accessToken,omitempty"`
-	ReInit      bool              `json:"-"`
-	SkipRefresh bool              `json:"skipRefresh,omitempty"`
-}
+// Re-exported types for backward compatibility.
+// New code should import pkg/utils/runtime/config directly.
+type InitRuntimeOptions = runtimeconfig.InitRuntimeOptions
+type CSIMountOptions = runtimeconfig.CSIMountOptions
+type MountConfig = runtimeconfig.MountConfig
 
-// NewDefaultAccessToken generates a default access token using UUID.
-func NewDefaultAccessToken() string {
-	return uuid.NewString()
-}
+const DefaultCSIMountConcurrency = runtimeconfig.DefaultCSIMountConcurrency
 
-const DefaultCSIMountConcurrency = 3
+func NewDefaultAccessToken() string { return runtimeconfig.NewDefaultAccessToken() }
 
-type CSIMountOptions struct {
-	MountOptionList    []MountConfig `json:"mountOptionList"`
-	MountOptionListRaw string        `json:"mountOptionListRaw"`    // the raw json string for mount options
-	Concurrency        int           `json:"concurrency,omitempty"` // max concurrent CSI mount operations, 0 or negative means unlimited, default is DefaultCSIMountConcurrency
-}
-
-type MountConfig struct {
-	Driver     string `json:"driver"`
-	RequestRaw string `json:"requestRaw"`
-}
-
+// InplaceUpdateOptions stays in pkg/sandbox-manager/config — not used by pkg/utils.
 type InplaceUpdateOptions struct {
 	Image string
 	// Resources specifies in-place resource update options.

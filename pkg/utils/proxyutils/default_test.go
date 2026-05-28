@@ -22,20 +22,18 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/openkruise/agents/pkg/utils/sandboxutils"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/proxy"
 )
 
 func TestGetRouteFromSandbox(t *testing.T) {
 	tests := []struct {
 		name          string
 		sandbox       *v1alpha1.Sandbox
-		expectedRoute proxy.Route
+		expectedRoute Route
 	}{
 		{
 			name: "running sandbox with ip",
@@ -57,7 +55,7 @@ func TestGetRouteFromSandbox(t *testing.T) {
 					},
 				},
 			},
-			expectedRoute: proxy.Route{
+			expectedRoute: Route{
 				IP:    "10.0.0.2",
 				ID:    "default--running-sandbox",
 				Owner: "",
@@ -82,7 +80,7 @@ func TestGetRouteFromSandbox(t *testing.T) {
 					PodInfo: v1alpha1.PodInfo{},
 				},
 			},
-			expectedRoute: proxy.Route{
+			expectedRoute: Route{
 				IP:    "",
 				ID:    "default--running-sandbox",
 				Owner: "",
@@ -93,7 +91,7 @@ func TestGetRouteFromSandbox(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			route := sandboxutils.GetRouteFromSandbox(tt.sandbox)
+			route := GetRouteFromSandbox(tt.sandbox)
 			assert.Equal(t, tt.expectedRoute, route)
 		})
 	}

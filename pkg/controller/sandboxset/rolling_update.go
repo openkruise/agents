@@ -32,8 +32,6 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
-	managerutils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
-	"github.com/openkruise/agents/pkg/utils/sandboxutils"
 )
 
 // UpdateGroupedSandboxes extends GroupedSandboxes with update-specific groupings.
@@ -106,7 +104,7 @@ func isSandboxClaimed(sbx *agentsv1alpha1.Sandbox) bool {
 		return true
 	}
 	// Check if the owner reference is not SandboxSet (claimed sandboxes have ownerRef removed)
-	if !sandboxutils.IsControlledBySandboxSet(sbx) {
+	if !utils.IsControlledBySandboxSet(sbx) {
 		return true
 	}
 	return false
@@ -229,7 +227,7 @@ func (r *Reconciler) performRollingUpdate(
 // deleteSandboxForUpdate deletes a sandbox as part of rolling update.
 func (r *Reconciler) deleteSandboxForUpdate(ctx context.Context, sbs *agentsv1alpha1.SandboxSet, sbx *agentsv1alpha1.Sandbox, lock string) error {
 	log := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
-	log.V(consts.DebugLogLevel).Info("deleting sandbox for rolling update")
+	log.V(utils.DebugLogLevel).Info("deleting sandbox for rolling update")
 
 	if sbx.DeletionTimestamp != nil {
 		return nil
@@ -242,7 +240,7 @@ func (r *Reconciler) deleteSandboxForUpdate(ctx context.Context, sbs *agentsv1al
 	// Deep copy the sandbox before mutating it to avoid corrupting the informer cache.
 	sbx = sbx.DeepCopy()
 
-	managerutils.LockSandbox(sbx, lock, consts.OwnerManagerScaleDown)
+	utils.LockSandbox(sbx, lock, consts.OwnerManagerScaleDown)
 	if err := r.Update(ctx, sbx); err != nil {
 		return fmt.Errorf("failed to lock sandbox when delete: %s", err)
 	}

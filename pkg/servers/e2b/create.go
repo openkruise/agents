@@ -34,7 +34,6 @@ import (
 	"github.com/openkruise/agents/pkg/servers/web"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/csiutils"
-	"github.com/openkruise/agents/pkg/utils/sandboxutils"
 	"github.com/openkruise/agents/pkg/utils/timeout"
 )
 
@@ -211,7 +210,7 @@ func (sc *Controller) createSandboxWithClone(ctx context.Context, request models
 		"resourceVersion", sbx.GetResourceVersion(), "totalCost", time.Since(start))
 	return web.ApiResponse[*models.Sandbox]{
 		Code: http.StatusCreated,
-		Body: sc.convertToE2BSandbox(sbx, sandboxutils.GetAccessToken(sbx)),
+		Body: sc.convertToE2BSandbox(sbx, utils.GetAccessToken(sbx)),
 	}, nil
 }
 
