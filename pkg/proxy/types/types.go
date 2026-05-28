@@ -14,12 +14,19 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package utils
+package types
 
 import (
-	"fmt"
+	"k8s.io/apimachinery/pkg/types"
 )
 
-func GetSandboxAddress(sandboxId, domain string, port int32) string {
-	return fmt.Sprintf("%d-%s.%s", port, sandboxId, domain)
+// Route represents an internal sandbox routing rule.
+// Moved from pkg/proxy to break the pkg/utils → pkg/proxy layer violation.
+type Route struct {
+	IP              string    `json:"ip"`
+	ID              string    `json:"id"`
+	UID             types.UID `json:"uid"`
+	Owner           string    `json:"owner"`
+	State           string    `json:"state"`
+	ResourceVersion string    `json:"resourceVersion"`
 }

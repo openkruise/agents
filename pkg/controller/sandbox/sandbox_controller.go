@@ -51,6 +51,12 @@ func init() {
 	flag.IntVar(&concurrentReconciles, "sandbox-workers", concurrentReconciles, "Max concurrent reconciles for Sandbox controller.")
 }
 
+const (
+
+	PodConditionContainersPaused = "ContainersPaused"
+	PodConditionContainersResumed = "ContainersResumed"
+)
+
 var (
 	concurrentReconciles  = 500
 	sandboxControllerKind = agentsv1alpha1.GroupVersion.WithKind("Sandbox")
@@ -279,13 +285,13 @@ func pauseTimeReached(pauseTime *metav1.Time, now metav1.Time) bool {
 }
 
 func (r *SandboxReconciler) addSandboxFinalizerAndHash(ctx context.Context, box *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) {
-	if !box.DeletionTimestamp.IsZero() || controllerutil.ContainsFinalizer(box, utils.SandboxFinalizer) {
+	if !box.DeletionTimestamp.IsZero() || controllerutil.ContainsFinalizer(box, core.SandboxFinalizer) {
 		return box, nil
 	}
 
 	originObj := box.DeepCopy()
 	patch := client.MergeFrom(box)
-	controllerutil.AddFinalizer(originObj, utils.SandboxFinalizer)
+	controllerutil.AddFinalizer(originObj, core.SandboxFinalizer)
 	if originObj.Annotations == nil {
 		originObj.Annotations = make(map[string]string)
 	}

@@ -14,12 +14,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package expectationutils
+package expectations
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
-	"github.com/openkruise/agents/pkg/utils/expectations"
 )
 
 // resourceVersionExpectation usage:
@@ -27,7 +25,7 @@ import (
 // 2. Expects when sandbox state changes, including claim, pause, resume, delete, etc.
 // 3. Always check satisfied after select.
 // 4. Use functions like ResourceVersionExpectationSatisfied, don't call IsSatisfied directly.
-var resourceVersionExpectation = expectations.NewResourceVersionExpectation()
+var resourceVersionExpectation = NewResourceVersionExpectation()
 
 func ResourceVersionExpectationObserve(obj metav1.Object) {
 	resourceVersionExpectation.Observe(obj)
@@ -43,7 +41,7 @@ func ResourceVersionExpectationDelete(obj metav1.Object) {
 
 func ResourceVersionExpectationSatisfied(obj metav1.Object) bool {
 	satisfied, sinceFirstUnsatisfied := resourceVersionExpectation.IsSatisfied(obj)
-	if sinceFirstUnsatisfied > expectations.ExpectationTimeout {
+	if sinceFirstUnsatisfied > ExpectationTimeout {
 		ResourceVersionExpectationDelete(obj)
 		return true
 	}

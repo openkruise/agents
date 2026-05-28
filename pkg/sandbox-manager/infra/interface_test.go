@@ -14,15 +14,13 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package utils
+package infra
 
 import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 )
 
 func TestCalculateResourceFromContainers(t *testing.T) {
@@ -34,7 +32,7 @@ func TestCalculateResourceFromContainers(t *testing.T) {
 	tests := []struct {
 		name string
 		pod  *corev1.Pod
-		want infra.SandboxResource
+		want SandboxResource
 	}{
 		{
 			name: "single container with resources",
@@ -52,7 +50,7 @@ func TestCalculateResourceFromContainers(t *testing.T) {
 					},
 				},
 			},
-			want: infra.SandboxResource{
+			want: SandboxResource{
 				CPUMilli: 1000,
 				MemoryMB: 1024,
 			},
@@ -81,7 +79,7 @@ func TestCalculateResourceFromContainers(t *testing.T) {
 					},
 				},
 			},
-			want: infra.SandboxResource{
+			want: SandboxResource{
 				CPUMilli: 1500,
 				MemoryMB: 1536,
 			},
@@ -93,7 +91,7 @@ func TestCalculateResourceFromContainers(t *testing.T) {
 					Containers: []corev1.Container{},
 				},
 			},
-			want: infra.SandboxResource{
+			want: SandboxResource{
 				CPUMilli: 0,
 				MemoryMB: 0,
 			},
@@ -111,7 +109,7 @@ func TestCalculateResourceFromContainers(t *testing.T) {
 					},
 				},
 			},
-			want: infra.SandboxResource{
+			want: SandboxResource{
 				CPUMilli: 0,
 				MemoryMB: 0,
 			},

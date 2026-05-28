@@ -43,7 +43,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
-	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
+	utestutils "github.com/openkruise/agents/pkg/utils/testutils"
 	testutils "github.com/openkruise/agents/test/utils"
 )
 
@@ -408,7 +408,7 @@ func TestCloneSandbox_CleansFailedCreatedSandbox(t *testing.T) {
 }
 
 func TestCloneSandbox(t *testing.T) {
-	utils.InitLogOutput()
+	utestutils.InitLogOutput()
 
 	checkpointID := "test-checkpoint-123"
 	user := "test-user"
@@ -936,7 +936,7 @@ func TestCloneSandbox(t *testing.T) {
 }
 
 func TestCloneSandbox_WithRateLimiter(t *testing.T) {
-	utils.InitLogOutput()
+	utestutils.InitLogOutput()
 
 	checkpointID := "test-checkpoint"
 	user := "test-user"
@@ -964,7 +964,7 @@ func TestCloneSandbox_WithRateLimiter(t *testing.T) {
 }
 
 func TestCloneSandbox_ContextCanceled(t *testing.T) {
-	utils.InitLogOutput()
+	utestutils.InitLogOutput()
 
 	cache, fc, err := cachetest.NewTestCache(t)
 	require.NoError(t, err)
@@ -1068,7 +1068,7 @@ func newTestSandbox(name string) *v1alpha1.Sandbox {
 }
 
 func TestCreateCheckPoint(t *testing.T) {
-	utils.InitLogOutput()
+	utestutils.InitLogOutput()
 
 	// Define context key types
 	type cpStatusKey struct{}

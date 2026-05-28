@@ -41,10 +41,9 @@ import (
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
+	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
-	managerutils "github.com/openkruise/agents/pkg/utils/sandbox-manager/expectationutils"
-	"github.com/openkruise/agents/pkg/utils/sandbox-manager/proxyutils"
-	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
+	"github.com/openkruise/agents/pkg/utils/proxyutils"
 )
 
 var DefaultDeleteSandboxTemplate = deleteSandboxTemplate
@@ -316,7 +315,7 @@ func (i *Infra) SelectSandboxes(ctx context.Context, opts infra.SelectSandboxesO
 func (i *Infra) asSandboxes(objects []*v1alpha1.Sandbox) []infra.Sandbox {
 	var sandboxes = make([]infra.Sandbox, 0, len(objects))
 	for _, obj := range objects {
-		if !managerutils.ResourceVersionExpectationSatisfied(obj) {
+		if !expectations.ResourceVersionExpectationSatisfied(obj) {
 			continue
 		}
 		sandboxes = append(sandboxes, AsSandbox(obj, i.Cache))
@@ -394,7 +393,7 @@ func isSandboxStale(ctx context.Context, lookup claimedSandboxLookup) bool {
 	cacheRV := lookup.sandbox.GetResourceVersion()
 	var reason string
 	switch {
-	case !managerutils.ResourceVersionExpectationSatisfied(lookup.sandbox):
+	case !expectations.ResourceVersionExpectationSatisfied(lookup.sandbox):
 		reason = fallbackReasonRVExpectation
 	case lookup.hasRoute &&
 		lookup.route.ResourceVersion != "" &&
@@ -449,7 +448,7 @@ func (i *Infra) reconcileSandbox(ctx context.Context, sbx *v1alpha1.Sandbox, not
 
 	if notFound {
 		// Sandbox not found, clean up route
-		sandboxID := stateutils.GetSandboxID(sbx)
+		sandboxID := utils.GetSandboxID(sbx)
 		i.Proxy.DeleteRoute(sandboxID)
 		log.Info("sandbox route deleted during reconciliation", "sandboxID", sandboxID)
 		return ctrl.Result{}, nil
@@ -511,7 +510,7 @@ func (i *Infra) reconcileRoutes(ctx context.Context) {
 		return
 	}
 	for idx := range sandboxList.Items {
-		sandboxID := stateutils.GetSandboxID(&sandboxList.Items[idx])
+		sandboxID := utils.GetSandboxID(&sandboxList.Items[idx])
 		existingSandboxIDs[sandboxID] = struct{}{}
 	}
 
@@ -522,7 +521,7 @@ func (i *Infra) reconcileRoutes(ctx context.Context) {
 		if _, exists := existingSandboxIDs[route.ID]; !exists {
 			i.Proxy.DeleteRoute(route.ID)
 			deletedCount++
-			managerutils.ResourceVersionExpectationDelete(&metav1.ObjectMeta{
+			expectations.ResourceVersionExpectationDelete(&metav1.ObjectMeta{
 				UID: route.UID,
 			})
 			log.Info("reconciler deleted orphaned route", "sandboxID", route.ID)
@@ -533,7 +532,7 @@ func (i *Infra) reconcileRoutes(ctx context.Context) {
 	addedCount := 0
 	for idx := range sandboxList.Items {
 		sbx := &sandboxList.Items[idx]
-		sandboxID := stateutils.GetSandboxID(sbx)
+		sandboxID := utils.GetSandboxID(sbx)
 		if _, hasRoute := i.Proxy.LoadRoute(sandboxID); !hasRoute {
 			route := proxyutils.DefaultGetRouteFunc(sbx)
 			i.Proxy.SetRoute(ctx, route)

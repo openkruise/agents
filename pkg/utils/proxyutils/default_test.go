@@ -22,7 +22,6 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/openkruise/agents/pkg/utils/sandboxutils"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -93,7 +92,7 @@ func TestGetRouteFromSandbox(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			route := sandboxutils.GetRouteFromSandbox(tt.sandbox)
+			route := GetRouteFromSandbox(tt.sandbox)
 			assert.Equal(t, tt.expectedRoute, route)
 		})
 	}

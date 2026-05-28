@@ -16,7 +16,11 @@ limitations under the License.
 
 package consts
 
-import "time"
+import (
+	"time"
+
+	"github.com/openkruise/agents/pkg/utils"
+)
 
 const (
 	OwnerManagerScaleDown = "__manager_scale_down"
@@ -31,12 +35,16 @@ const (
 const (
 	ExtProcPort               = 9002
 	DefaultExtProcConcurrency = 1000
-	RuntimePort               = 49983
-	ShutdownTimeout           = 90 * time.Second
-	RequestPeerTimeout        = 100 * time.Millisecond
+	// RuntimePort is re-exported from pkg/utils for backward compatibility.
+	// New code should import pkg/utils directly.
+	RuntimePort        = utils.RuntimePort
+	ShutdownTimeout    = 90 * time.Second
+	RequestPeerTimeout = 100 * time.Millisecond
 )
 
-const DebugLogLevel = 5
+// DebugLogLevel is re-exported from pkg/utils for backward compatibility.
+// New code should import pkg/utils directly.
+const DebugLogLevel = utils.DebugLogLevel
 
 // Sentinel values for ReserveFailedSandboxFor.
 const (

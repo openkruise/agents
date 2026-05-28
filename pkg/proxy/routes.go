@@ -25,25 +25,19 @@ import (
 	"sync"
 	"time"
 
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 
 	"github.com/openkruise/agents/pkg/peers"
+	proxytypes "github.com/openkruise/agents/pkg/proxy/types"
 	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 )
 
-// Route represents an internal sandbox routing rule
-type Route struct {
-	IP              string    `json:"ip"`
-	ID              string    `json:"id"`
-	UID             types.UID `json:"uid"`
-	Owner           string    `json:"owner"`
-	State           string    `json:"state"`
-	ResourceVersion string    `json:"resourceVersion"`
-}
+// Route is re-exported from pkg/proxy/types for backward compatibility.
+// New code should import pkg/proxy/types directly.
+type Route = proxytypes.Route
 
 func (s *Server) SetRoute(ctx context.Context, route Route) {
 	log := klog.FromContext(ctx)

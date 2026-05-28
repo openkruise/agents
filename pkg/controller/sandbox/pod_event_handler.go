@@ -90,13 +90,13 @@ func isActivePodUpdate(oldObj, newObj *corev1.Pod) bool {
 	if !isPodConditionEqual(rCond1, rCond2) {
 		return true
 	}
-	pCond1 := utils.GetPodCondition(&oldObj.Status, utils.PodConditionContainersPaused)
-	pCond2 := utils.GetPodCondition(&newObj.Status, utils.PodConditionContainersPaused)
+	pCond1 := utils.GetPodCondition(&oldObj.Status, PodConditionContainersPaused)
+	pCond2 := utils.GetPodCondition(&newObj.Status, PodConditionContainersPaused)
 	if !isPodConditionEqual(pCond1, pCond2) {
 		return true
 	}
-	cCond1 := utils.GetPodCondition(&oldObj.Status, utils.PodConditionContainersResumed)
-	cCond2 := utils.GetPodCondition(&newObj.Status, utils.PodConditionContainersResumed)
+	cCond1 := utils.GetPodCondition(&oldObj.Status, PodConditionContainersResumed)
+	cCond2 := utils.GetPodCondition(&newObj.Status, PodConditionContainersResumed)
 	if !isPodConditionEqual(cCond1, cCond2) {
 		return true
 	}

@@ -33,7 +33,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
-	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
+	"github.com/openkruise/agents/pkg/utils/pagination"
 )
 
 type ListSandboxesRequest struct {
@@ -136,7 +136,7 @@ func (sc *Controller) ListSandboxes(r *http.Request) (web.ApiResponse[[]*models.
 	sandboxes, nextToken, err := sc.manager.ListSandboxes(r.Context(), infra.SelectSandboxesOptions{
 		Namespace: sc.getNamespaceOfUser(user),
 		User:      user.ID.String(),
-	}, &utils.Paginator[infra.Sandbox]{
+	}, &pagination.Paginator[infra.Sandbox]{
 		Limit:     request.Limit,
 		NextToken: request.NextToken,
 		Filter:    getListFilter(request),
@@ -279,7 +279,7 @@ func (sc *Controller) listCheckpointsForUser(ctx context.Context, user *models.C
 	return sc.manager.ListCheckpoints(ctx, infra.SelectSucceededCheckpointsOptions{
 		Namespace: sc.getNamespaceOfUser(user),
 		User:      user.ID.String(),
-	}, &utils.Paginator[infra.CheckpointInfo]{
+	}, &pagination.Paginator[infra.CheckpointInfo]{
 		Limit:     limit,
 		NextToken: nextTokenParam,
 		GetKey: func(cp infra.CheckpointInfo) string {

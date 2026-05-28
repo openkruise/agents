@@ -29,10 +29,14 @@ import (
 	sandboxmanager "github.com/openkruise/agents/pkg/sandbox-manager"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
-	managerutils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
-	"github.com/openkruise/agents/pkg/utils/sandboxutils"
+	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/timeout"
 )
+
+// GetSandboxAddress returns the sandbox address in the format "{port}-{sandboxId}.{domain}".
+func GetSandboxAddress(sandboxID, domain string, port int32) string {
+	return fmt.Sprintf("%d-%s.%s", port, sandboxID, domain)
+}
 
 // DescribeSandbox returns details of a specific sandbox
 func (sc *Controller) DescribeSandbox(r *http.Request) (web.ApiResponse[*models.Sandbox], *web.ApiError) {
@@ -47,7 +51,7 @@ func (sc *Controller) DescribeSandbox(r *http.Request) (web.ApiResponse[*models.
 	}
 
 	return web.ApiResponse[*models.Sandbox]{
-		Body: sc.convertToE2BSandbox(sbx, sandboxutils.GetAccessToken(sbx)),
+		Body: sc.convertToE2BSandbox(sbx, utils.GetAccessToken(sbx)),
 	}, nil
 }
 
@@ -138,7 +142,7 @@ func (sc *Controller) BrowserUse(r *http.Request) (web.ApiResponse[*browserHandS
 	}
 
 	h.WebSocketDebuggerURL = browserWebSocketReplacer.ReplaceAllString(h.WebSocketDebuggerURL,
-		fmt.Sprintf("wss://%s", managerutils.GetSandboxAddress(sandboxID, sc.domain, int32(cdpPort))))
+		fmt.Sprintf("wss://%s", GetSandboxAddress(sandboxID, sc.domain, int32(cdpPort))))
 	return web.ApiResponse[*browserHandShake]{
 		Code: resp.StatusCode,
 		Body: &h,

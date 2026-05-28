@@ -28,7 +28,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/webhookutils"
 )
@@ -42,7 +41,7 @@ func fetchInjectionConfiguration(ctx context.Context, cli client.Client) (map[st
 	}, config)
 	if err != nil {
 		if errors.IsNotFound(err) {
-			logger.V(consts.DebugLogLevel).Info("injection configuration not found, skip injection")
+			logger.V(utils.DebugLogLevel).Info("injection configuration not found, skip injection")
 			return map[string]string{}, nil
 		}
 		return map[string]string{}, err
@@ -230,7 +229,7 @@ func setMainContainerConfigWhenInjectRuntimeSidecar(ctx context.Context, mainCon
 
 	if mainContainerHasValidPostStart {
 		if configHasValidPostStart {
-			log.V(consts.DebugLogLevel).Info("conflicting postStart hooks detected, main container already has a postStart hook defined",
+			log.V(utils.DebugLogLevel).Info("conflicting postStart hooks detected, main container already has a postStart hook defined",
 				"existingHook", mainContainer.Lifecycle.PostStart,
 				"injectedHook", config.MainContainer.Lifecycle.PostStart)
 		}

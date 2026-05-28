@@ -35,7 +35,7 @@ import (
 	"github.com/openkruise/agents/pkg/cache"
 	cacheutils "github.com/openkruise/agents/pkg/cache/utils"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
-	"github.com/openkruise/agents/pkg/utils/sandboxutils"
+	"github.com/openkruise/agents/pkg/utils"
 )
 
 // --- Index query tests ---
@@ -55,7 +55,7 @@ func TestCache_GetClaimedSandbox(t *testing.T) {
 	t.Run("found", func(t *testing.T) {
 		c, _, err := cachetest.NewTestCache(t, sbx)
 		require.NoError(t, err)
-		sandboxID := sandboxutils.GetSandboxID(sbx)
+		sandboxID := utils.GetSandboxID(sbx)
 		got, err := c.GetClaimedSandbox(t.Context(), cache.GetClaimedSandboxOptions{SandboxID: sandboxID})
 		require.NoError(t, err)
 		require.NotNil(t, got)
@@ -819,7 +819,7 @@ func TestCache_WaitForSandbox_AdHoc(t *testing.T) {
 			c.SandboxUpdateFunc(t.Context()),
 			func(s *agentsv1alpha1.Sandbox) (bool, error) {
 				return s.Status.Phase == agentsv1alpha1.SandboxRunning &&
-					sandboxutils.IsSandboxReady(s), nil
+					utils.IsSandboxReady(s), nil
 			},
 		)
 		err = task.Wait(2 * time.Second)

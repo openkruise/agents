@@ -37,6 +37,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
+	"github.com/openkruise/agents/pkg/utils"
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/discovery"
 	"github.com/openkruise/agents/pkg/utils/expectations"
@@ -369,7 +370,7 @@ func (r *Reconciler) handleDeletion(ctx context.Context, ops *agentsv1alpha1.San
 	}
 
 	// Remove finalizer
-	controllerutil.RemoveFinalizer(ops, finalizerName)
+	utils.RemoveFinalizer(ops, finalizerName)
 	if err := r.Update(ctx, ops); err != nil {
 		return ctrl.Result{}, err
 	}

@@ -49,8 +49,6 @@ import (
 	"github.com/openkruise/agents/pkg/utils/expectations"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 	"github.com/openkruise/agents/pkg/utils/fieldindex"
-	managerutils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
-	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
 )
 
 func init() {
@@ -368,7 +366,7 @@ func (r *Reconciler) scaleDownSandbox(ctx context.Context, sbx *agentsv1alpha1.S
 	}
 	// Deep copy the sandbox before mutating it to avoid corrupting the informer cache.
 	sbx = sbx.DeepCopy()
-	managerutils.LockSandbox(sbx, lock, consts.OwnerManagerScaleDown)
+	utils.LockSandbox(sbx, lock, consts.OwnerManagerScaleDown)
 	if err = r.Update(ctx, sbx); err != nil {
 		return fmt.Errorf("failed to lock sandbox when scaling down: %s", err)
 	}
@@ -445,7 +443,7 @@ func (r *Reconciler) groupAllSandboxes(ctx context.Context, sbs *agentsv1alpha1.
 		sbx := &sandboxList.Items[i]
 		scaleUpExpectation.ObserveScale(GetControllerKey(sbs), expectations.Create, sbx.Name)
 		debugLog := log.V(consts.DebugLogLevel).WithValues("sandbox", sbx.Name)
-		state, reason := stateutils.GetSandboxState(sbx)
+		state, reason := utils.GetSandboxState(sbx)
 		switch state {
 		case agentsv1alpha1.SandboxStateCreating:
 			groups.Creating = append(groups.Creating, sbx)

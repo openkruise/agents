@@ -28,8 +28,6 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	checkpointUtils "github.com/openkruise/agents/pkg/utils/checkpoint"
-
 	"github.com/openkruise/agents/api/v1alpha1"
 	infracache "github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
@@ -37,7 +35,6 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/runtime"
-	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
 )
 
 var (
@@ -238,7 +235,7 @@ func createSandboxFromCheckpoint(ctx context.Context, opts infra.CloneSandboxOpt
 		sbx.Annotations[v1alpha1.AnnotationInitRuntimeRequest] = cp.Annotations[v1alpha1.AnnotationInitRuntimeRequest]
 	}
 	// e.g., copy csi mount config from checkpoint to sandbox obj
-	checkpointUtils.RestoreAnnotationsFromCheckpoint(cp, sbx.Sandbox)
+	RestoreAnnotationsFromCheckpoint(cp, sbx.Sandbox)
 	DefaultPostProcessClonedSandbox(sbx.Sandbox)
 	log.Info("creating new sandbox from checkpoint")
 	sbx.Sandbox, err = DefaultCreateSandbox(ctx, sbx.Sandbox, cache.GetClient())
@@ -351,7 +348,7 @@ func CreateCheckpoint(ctx context.Context, sbx *v1alpha1.Sandbox, cache infracac
 			Annotations: map[string]string{
 				v1alpha1.AnnotationInitRuntimeRequest: sbx.Annotations[v1alpha1.AnnotationInitRuntimeRequest],
 				v1alpha1.AnnotationOwner:              sbx.Annotations[v1alpha1.AnnotationOwner],
-				v1alpha1.AnnotationSandboxID:          stateutils.GetSandboxID(sbx),
+				v1alpha1.AnnotationSandboxID:          utils.GetSandboxID(sbx),
 			},
 		},
 		Spec: v1alpha1.CheckpointSpec{
@@ -374,7 +371,7 @@ func CreateCheckpoint(ctx context.Context, sbx *v1alpha1.Sandbox, cache infracac
 	}
 	// Propagate sandbox annotations (e.g., csi mount config) to the Checkpoint
 	// before creation.
-	checkpointUtils.PropagateAnnotationsToCheckpoint(sbx, cp)
+	PropagateAnnotationsToCheckpoint(sbx, cp)
 	log.Info("creating checkpoint")
 	cp, err := DefaultCreateCheckpoint(ctx, cache.GetClient(), cp)
 	if err != nil {

@@ -52,7 +52,7 @@ const (
 	ExtensionKeyClaimWithCSIMount_VolumeName  = ExtensionKeyClaimWithCSIMount + "-volume-name"
 	ExtensionKeyClaimWithCSIMount_SubPath     = ExtensionKeyClaimWithCSIMount + "-subpath"
 	ExtensionKeyClaimWithCSIMount_MountPoint  = ExtensionKeyClaimWithCSIMount + "-mount-point"
-	ExtensionKeyClaimWithCSIMount_MountConfig = ExtensionKeyClaimWithCSIMount + "-volume-config"
+	ExtensionKeyClaimWithCSIMount_MountConfig = ExtensionKeyClaimWithCSIMount + "-mount-config"
 	ExtensionKeySkipInitRuntime               = v1alpha1.E2BPrefix + "skip-init-runtime"
 	ExtensionKeyReserveFailedSandbox          = v1alpha1.E2BPrefix + "reserve-failed-sandbox"
 	ExtensionKeyReserveFailedSandboxFor       = v1alpha1.E2BPrefix + "reserve-failed-sandbox-for"

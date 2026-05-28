@@ -39,10 +39,7 @@ import (
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 	"github.com/openkruise/agents/pkg/utils/runtime"
-	sandboxManagerUtils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
-	"github.com/openkruise/agents/pkg/utils/sandbox-manager/expectationutils"
-	"github.com/openkruise/agents/pkg/utils/sandbox-manager/proxyutils"
-	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
+	"github.com/openkruise/agents/pkg/utils/proxyutils"
 	"github.com/openkruise/agents/pkg/utils/timeout"
 )
 
@@ -78,7 +75,7 @@ func (s *Sandbox) InplaceRefresh(ctx context.Context, deepcopy bool) error {
 	if err != nil {
 		log.Info("failed to get claimed sandbox from cache, fetch from api-server", "reason", err.Error())
 		fetchFromApiServer = true
-	} else if !expectationutils.ResourceVersionExpectationSatisfied(newSbx) {
+	} else if !expectations.ResourceVersionExpectationSatisfied(newSbx) {
 		log.Info("sandbox cache is out-dated, fetch from api-server")
 		fetchFromApiServer = true
 	}
@@ -146,7 +143,7 @@ func (s *Sandbox) retryUpdate(ctx context.Context, modifier ModifierFunc) (bool,
 			return err
 		}
 		s.Sandbox = copied
-		expectationutils.ResourceVersionExpectationExpect(copied)
+		expectations.ResourceVersionExpectationExpect(copied)
 		updated = true
 		return nil
 	})
@@ -179,7 +176,7 @@ func (s *Sandbox) Kill(ctx context.Context) error {
 }
 
 func (s *Sandbox) GetSandboxID() string {
-	return stateutils.GetSandboxID(s.Sandbox)
+	return utils.GetSandboxID(s.Sandbox)
 }
 
 func (s *Sandbox) GetRoute() proxy.Route {
@@ -275,7 +272,7 @@ func (s *Sandbox) GetResource() infra.SandboxResource {
 	if s.Spec.Template == nil {
 		return infra.SandboxResource{}
 	}
-	return sandboxManagerUtils.CalculateResourceFromContainers(s.Spec.Template.Spec.Containers)
+	return infra.CalculateResourceFromContainers(s.Spec.Template.Spec.Containers)
 }
 
 func (s *Sandbox) Request(ctx context.Context, method, path string, port int, body io.Reader) (*http.Response, error) {
@@ -287,7 +284,7 @@ func (s *Sandbox) Pause(ctx context.Context, opts infra.PauseOptions) error {
 	if err := s.refreshFromAPIReader(ctx); err != nil {
 		return err
 	}
-	if pausable, reason := stateutils.IsSandboxPausable(s.Sandbox); !pausable {
+	if pausable, reason := utils.IsSandboxPausable(s.Sandbox); !pausable {
 		return errors.NewError(errors.ErrorConflict, "sandbox is not pausable, reason: %s", reason)
 	}
 
@@ -345,7 +342,7 @@ func (s *Sandbox) Resume(ctx context.Context, opts infra.ResumeOptions) error {
 		return err
 	}
 
-	if resumable, reason := stateutils.IsSandboxResumable(s.Sandbox); !resumable {
+	if resumable, reason := utils.IsSandboxResumable(s.Sandbox); !resumable {
 		return errors.NewError(errors.ErrorConflict, "sandbox is not resumable, reason: %s", reason)
 	}
 	resumeTask, err := s.Cache.NewSandboxResumeTask(ctx, s.Sandbox)
@@ -400,7 +397,7 @@ func (s *Sandbox) Resume(ctx context.Context, opts infra.ResumeOptions) error {
 		log.Error(err, "failed to refresh sandbox after resume")
 		return err
 	}
-	expectationutils.ResourceVersionExpectationExpect(s.Sandbox) // expect Running
+	expectations.ResourceVersionExpectationExpect(s.Sandbox) // expect Running
 
 	if !resumeUpdated {
 		// Concurrent same-action Resume callers share the Sandbox resume wait.
@@ -419,7 +416,7 @@ func (s *Sandbox) Resume(ctx context.Context, opts infra.ResumeOptions) error {
 }
 
 func (s *Sandbox) GetState() (string, string) {
-	return stateutils.GetSandboxState(s.Sandbox)
+	return utils.GetSandboxState(s.Sandbox)
 }
 
 func (s *Sandbox) GetClaimTime() (time.Time, error) {

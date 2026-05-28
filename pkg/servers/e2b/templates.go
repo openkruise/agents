@@ -28,7 +28,6 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
-	managerutils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 )
 
 // ListTemplates returns a list of all templates
@@ -227,7 +226,7 @@ func (sc *Controller) convertToTemplate(tmpl *agentsv1alpha1.SandboxSet) *models
 func BuildResource(tmpl *agentsv1alpha1.SandboxSet) (int, int, int) {
 	cpuCount, memoryMB, diskSizeMB := 0, 0, 0
 	if tmpl.Spec.Template != nil {
-		resource := managerutils.CalculateResourceFromContainers(tmpl.Spec.Template.Spec.Containers)
+		resource := infra.CalculateResourceFromContainers(tmpl.Spec.Template.Spec.Containers)
 		if resource.CPUMilli > 0 {
 			cpuCount = int(resource.CPUMilli / 1000)
 		}

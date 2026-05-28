@@ -29,7 +29,6 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/utils"
-	sandboxutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
 )
 
 // HashSandbox calculates the hash value using sandbox.spec.template
@@ -84,7 +83,7 @@ func GetControllerKey(obj client.Object) string {
 }
 
 func GeneratePodFromSandbox(ctx context.Context, cli client.Client, box *agentsv1alpha1.Sandbox, revision string) (*corev1.Pod, error) {
-	podTemplate, err := sandboxutils.GetTemplateSpec(ctx, cli, box.Namespace, &box.Spec.EmbeddedSandboxTemplate)
+	podTemplate, err := utils.GetTemplateSpec(ctx, cli, box.Namespace, &box.Spec.EmbeddedSandboxTemplate)
 	if err != nil {
 		if box.Spec.TemplateRef != nil {
 			klog.ErrorS(err, "failed to get sandbox template", "sandbox", klog.KObj(box), "template", box.Spec.TemplateRef.Name)

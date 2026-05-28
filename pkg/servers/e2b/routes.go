@@ -34,7 +34,7 @@ import (
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
-	"github.com/openkruise/agents/pkg/utils/sandboxutils"
+	"github.com/openkruise/agents/pkg/utils"
 )
 
 func (sc *Controller) registerRoutes() {
@@ -219,7 +219,7 @@ func (sc *Controller) CheckDeleteAPIKeyPermission(ctx context.Context, r *http.R
 }
 
 func (sc *Controller) validateTeamNamespace(ctx context.Context, teamName string) *web.ApiError {
-	if err := sandboxutils.ValidateNamespaceForSandboxID(teamName); err != nil {
+	if err := utils.ValidateNamespaceForSandboxID(teamName); err != nil {
 		return &web.ApiError{
 			Code:    http.StatusBadRequest,
 			Message: err.Error(),

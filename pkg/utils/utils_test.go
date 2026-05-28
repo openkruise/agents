@@ -19,9 +19,10 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"sync"
 	"testing"
+	"time"
 
+	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -809,176 +810,6 @@ func TestDumpJson(t *testing.T) {
 	}
 }
 
-func TestDoItSlowly(t *testing.T) {
-	tests := []struct {
-		name             string
-		count            int
-		initialBatchSize int
-		failAtCall       int // -1 means no failure
-		wantSuccesses    int
-		wantError        bool
-	}{
-		{
-			name:             "all succeed with count 1",
-			count:            1,
-			initialBatchSize: 1,
-			failAtCall:       -1,
-			wantSuccesses:    1,
-			wantError:        false,
-		},
-		{
-			name:             "all succeed with count 5",
-			count:            5,
-			initialBatchSize: 1,
-			failAtCall:       -1,
-			wantSuccesses:    5,
-			wantError:        false,
-		},
-		{
-			name:             "all succeed with larger batch size",
-			count:            10,
-			initialBatchSize: 5,
-			failAtCall:       -1,
-			wantSuccesses:    10,
-			wantError:        false,
-		},
-		{
-			name:             "zero count",
-			count:            0,
-			initialBatchSize: 1,
-			failAtCall:       -1,
-			wantSuccesses:    0,
-			wantError:        false,
-		},
-		{
-			name:             "failure in first batch",
-			count:            5,
-			initialBatchSize: 2,
-			failAtCall:       1, // fail on first call
-			wantSuccesses:    1, // at least one succeeds before failure is detected
-			wantError:        true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			callCount := 0
-			var mu sync.Mutex
-
-			fn := func() error {
-				mu.Lock()
-				callCount++
-				currentCall := callCount
-				mu.Unlock()
-
-				if tt.failAtCall > 0 && currentCall >= tt.failAtCall {
-					return fmt.Errorf("intentional failure at call %d", currentCall)
-				}
-				return nil
-			}
-
-			successes, err := DoItSlowly(tt.count, tt.initialBatchSize, fn)
-
-			if tt.wantError {
-				if err == nil {
-					t.Errorf("DoItSlowly() expected error but got none")
-				}
-			} else {
-				if err != nil {
-					t.Errorf("DoItSlowly() unexpected error: %v", err)
-				}
-			}
-
-			if !tt.wantError && successes != tt.wantSuccesses {
-				t.Errorf("DoItSlowly() successes = %d, want %d", successes, tt.wantSuccesses)
-			}
-		})
-	}
-}
-
-func TestDoItSlowlyWithInputs(t *testing.T) {
-	tests := []struct {
-		name             string
-		inputs           []int
-		initialBatchSize int
-		failOnInput      int // -1 means no failure
-		wantSuccesses    int
-		wantError        bool
-	}{
-		{
-			name:             "all succeed empty inputs",
-			inputs:           []int{},
-			initialBatchSize: 1,
-			failOnInput:      -1,
-			wantSuccesses:    0,
-			wantError:        false,
-		},
-		{
-			name:             "all succeed single input",
-			inputs:           []int{1},
-			initialBatchSize: 1,
-			failOnInput:      -1,
-			wantSuccesses:    1,
-			wantError:        false,
-		},
-		{
-			name:             "all succeed multiple inputs",
-			inputs:           []int{1, 2, 3, 4, 5},
-			initialBatchSize: 2,
-			failOnInput:      -1,
-			wantSuccesses:    5,
-			wantError:        false,
-		},
-		{
-			name:             "process string inputs",
-			inputs:           []int{10, 20, 30},
-			initialBatchSize: 1,
-			failOnInput:      -1,
-			wantSuccesses:    3,
-			wantError:        false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			processedInputs := make([]int, 0)
-			var mu sync.Mutex
-
-			fn := func(input int) error {
-				mu.Lock()
-				processedInputs = append(processedInputs, input)
-				mu.Unlock()
-
-				if tt.failOnInput > 0 && input == tt.failOnInput {
-					return fmt.Errorf("intentional failure on input %d", input)
-				}
-				return nil
-			}
-
-			successes, err := DoItSlowlyWithInputs(tt.inputs, tt.initialBatchSize, fn)
-
-			if tt.wantError {
-				if err == nil {
-					t.Errorf("DoItSlowlyWithInputs() expected error but got none")
-				}
-			} else {
-				if err != nil {
-					t.Errorf("DoItSlowlyWithInputs() unexpected error: %v", err)
-				}
-			}
-
-			if !tt.wantError && successes != tt.wantSuccesses {
-				t.Errorf("DoItSlowlyWithInputs() successes = %d, want %d", successes, tt.wantSuccesses)
-			}
-
-			// Verify all inputs were processed when no error
-			if !tt.wantError && len(processedInputs) != len(tt.inputs) {
-				t.Errorf("DoItSlowlyWithInputs() processed %d inputs, want %d", len(processedInputs), len(tt.inputs))
-			}
-		})
-	}
-}
-
 func TestHashData(t *testing.T) {
 	tests := []struct {
 		name                string
@@ -1281,6 +1112,682 @@ func TestGenerateSandboxName(t *testing.T) {
 			result := GenerateSandboxName(tt.baseName)
 			if result != tt.expectedGenerateName {
 				t.Errorf("GenerateSandboxName(%q) = %q, want %q", tt.baseName, result, tt.expectedGenerateName)
+			}
+		})
+	}
+}
+
+func TestGetSandboxState(t *testing.T) {
+	now := metav1.Now()
+	pastTime := metav1.NewTime(now.Add(-time.Hour))
+	futureTime := metav1.NewTime(now.Add(time.Hour))
+
+	tests := []struct {
+		name           string
+		sandbox        *agentsv1alpha1.Sandbox
+		expectedState  string
+		expectedReason string
+	}{
+		{
+			name: "Sandbox with DeletionTimestamp",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					DeletionTimestamp: &now,
+				},
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxRunning,
+					PodInfo: agentsv1alpha1.PodInfo{
+						PodIP: "1.2.3.4",
+					},
+				},
+			},
+			expectedState:  agentsv1alpha1.SandboxStateDead,
+			expectedReason: "ResourceDeleted",
+		},
+		{
+			name: "Sandbox with expired ShutdownTime",
+			sandbox: &agentsv1alpha1.Sandbox{
+				Spec: agentsv1alpha1.SandboxSpec{
+					ShutdownTime: &pastTime,
+				},
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxRunning,
+					PodInfo: agentsv1alpha1.PodInfo{
+						PodIP: "1.2.3.4",
+					},
+				},
+			},
+			expectedState:  agentsv1alpha1.SandboxStateDead,
+			expectedReason: "ShutdownTimeReached",
+		},
+		{
+			name: "Sandbox with future ShutdownTime",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{},
+				Spec: agentsv1alpha1.SandboxSpec{
+					ShutdownTime: &futureTime,
+				},
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxRunning,
+					Conditions: []metav1.Condition{
+						{
+							Type:   string(agentsv1alpha1.SandboxConditionReady),
+							Status: metav1.ConditionTrue,
+						},
+					},
+					PodInfo: agentsv1alpha1.PodInfo{
+						PodIP: "1.2.3.4",
+					},
+				},
+			},
+			expectedState:  agentsv1alpha1.SandboxStateRunning,
+			expectedReason: "RunningResourceClaimedAndReady",
+		},
+		{
+			name: "Sandbox in Pending phase",
+			sandbox: &agentsv1alpha1.Sandbox{
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxPending,
+				},
+			},
+			expectedState:  agentsv1alpha1.SandboxStateCreating,
+			expectedReason: "ResourcePending",
+		},
+		{
+			name: "Sandbox in Succeeded phase",
+			sandbox: &agentsv1alpha1.Sandbox{
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxSucceeded,
+				},
+			},
+			expectedState:  agentsv1alpha1.SandboxStateDead,
+			expectedReason: "ResourceSucceeded",
+		},
+		{
+			name: "Sandbox in Failed phase",
+			sandbox: &agentsv1alpha1.Sandbox{
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxFailed,
+				},
+			},
+			expectedState:  agentsv1alpha1.SandboxStateDead,
+			expectedReason: "ResourceFailed",
+		},
+		{
+			name: "Sandbox in Terminating phase",
+			sandbox: &agentsv1alpha1.Sandbox{
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxTerminating,
+				},
+			},
+			expectedState:  agentsv1alpha1.SandboxStateDead,
+			expectedReason: "ResourceTerminating",
+		},
+		{
+			name: "Sandbox controlled by SandboxSet and Ready",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: "agents.kruise.io/v1alpha1",
+							Kind:       "SandboxSet",
+							Controller: &[]bool{true}[0],
+						},
+					},
+				},
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxRunning,
+					Conditions: []metav1.Condition{
+						{
+							Type:   string(agentsv1alpha1.SandboxConditionReady),
+							Status: metav1.ConditionTrue,
+						},
+					},
+					PodInfo: agentsv1alpha1.PodInfo{
+						PodIP: "1.2.3.4",
+					},
+				},
+			},
+			expectedState:  agentsv1alpha1.SandboxStateAvailable,
+			expectedReason: "ResourceControlledBySbsAndReady",
+		},
+		{
+			name: "Sandbox controlled by SandboxSet but not Ready",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: "agents.kruise.io/v1alpha1",
+							Kind:       "SandboxSet",
+							Controller: &[]bool{true}[0],
+						},
+					},
+				},
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxRunning,
+					Conditions: []metav1.Condition{
+						{
+							Type:   string(agentsv1alpha1.SandboxConditionReady),
+							Status: metav1.ConditionFalse,
+						},
+					},
+					PodInfo: agentsv1alpha1.PodInfo{
+						PodIP: "1.2.3.4",
+					},
+				},
+			},
+			expectedState:  agentsv1alpha1.SandboxStateCreating,
+			expectedReason: "ResourceControlledBySbsButNotReady",
+		},
+		{
+			name: "Running Sandbox claimed and Ready",
+			sandbox: &agentsv1alpha1.Sandbox{
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxRunning,
+					Conditions: []metav1.Condition{
+						{
+							Type:   string(agentsv1alpha1.SandboxConditionReady),
+							Status: metav1.ConditionTrue,
+						},
+					},
+					PodInfo: agentsv1alpha1.PodInfo{
+						PodIP: "1.2.3.4",
+					}},
+			},
+			expectedState:  agentsv1alpha1.SandboxStateRunning,
+			expectedReason: "RunningResourceClaimedAndReady",
+		},
+		{
+			name: "Running Sandbox claimed but not Ready and Paused",
+			sandbox: &agentsv1alpha1.Sandbox{
+				Spec: agentsv1alpha1.SandboxSpec{
+					Paused: true,
+				},
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxRunning,
+					Conditions: []metav1.Condition{
+						{
+							Type:   string(agentsv1alpha1.SandboxConditionReady),
+							Status: metav1.ConditionFalse,
+						},
+					},
+				},
+			},
+			expectedState:  agentsv1alpha1.SandboxStatePaused,
+			expectedReason: "RunningResourceClaimedAndPaused",
+		},
+		{
+			name: "Running Sandbox claimed but not Ready and not Paused",
+			sandbox: &agentsv1alpha1.Sandbox{
+				Spec: agentsv1alpha1.SandboxSpec{
+					Paused: false,
+				},
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxRunning,
+					Conditions: []metav1.Condition{
+						{
+							Type:   string(agentsv1alpha1.SandboxConditionReady),
+							Status: metav1.ConditionFalse,
+						},
+					},
+				},
+			},
+			expectedState:  agentsv1alpha1.SandboxStateDead,
+			expectedReason: "RunningResourceClaimedButNotReady",
+		},
+		{
+			name: "Not Running Sandbox claimed",
+			sandbox: &agentsv1alpha1.Sandbox{
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxPaused,
+				},
+			},
+			expectedState:  agentsv1alpha1.SandboxStatePaused,
+			expectedReason: "NotRunningResourceClaimed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			state, reason := GetSandboxState(tt.sandbox)
+			assert.Equal(t, tt.expectedState, state)
+			assert.Equal(t, tt.expectedReason, reason)
+		})
+	}
+}
+
+func TestIsControlledBySandboxCR(t *testing.T) {
+	tests := []struct {
+		name     string
+		sandbox  *agentsv1alpha1.Sandbox
+		expected bool
+	}{
+		{
+			name: "Sandbox controlled by SandboxSet",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: "agents.kruise.io/v1alpha1",
+							Kind:       "SandboxSet",
+							Controller: &[]bool{true}[0],
+						},
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "Sandbox not controlled by anything",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					OwnerReferences: []metav1.OwnerReference{},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "Sandbox controlled by non-SandboxSet resource",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: "apps/v1",
+							Kind:       "Deployment",
+							Controller: &[]bool{true}[0],
+						},
+					},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "Sandbox with nil controller reference",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: "agents.kruise.io/v1alpha1",
+							Kind:       "SandboxSet",
+							Controller: nil,
+						},
+					},
+				},
+			},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := IsControlledBySandboxSet(tt.sandbox)
+			if result != tt.expected {
+				t.Errorf("IsControlledBySandboxSet() = %v, want %v", result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestGetSandboxID(t *testing.T) {
+	tests := []struct {
+		name     string
+		sandbox  *agentsv1alpha1.Sandbox
+		expected string
+	}{
+		{
+			name: "Standard namespace and name",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "test-namespace",
+					Name:      "test-name",
+				},
+			},
+			expected: "test-namespace--test-name",
+		},
+		{
+			name: "Empty namespace",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "",
+					Name:      "test-name",
+				},
+			},
+			expected: "--test-name",
+		},
+		{
+			name: "Empty name",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "test-namespace",
+					Name:      "",
+				},
+			},
+			expected: "test-namespace--",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := GetSandboxID(tt.sandbox)
+			if result != tt.expected {
+				t.Errorf("GetSandboxID() = %v, want %v", result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestValidateNamespaceForSandboxID(t *testing.T) {
+	tests := []struct {
+		name        string
+		namespace   string
+		expectError string
+	}{
+		{name: "standard name", namespace: "team-a", expectError: ""},
+		{name: "single dash", namespace: "team-a-blue", expectError: ""},
+		{name: "empty namespace rejected", namespace: "", expectError: "must not be empty"},
+		{name: "double dash rejected", namespace: "team--blue", expectError: "must not contain"},
+		{name: "double dash at start", namespace: "--team", expectError: "must not contain"},
+		{name: "double dash at end", namespace: "team--", expectError: "must not contain"},
+		{name: "triple dash contains double dash", namespace: "a---b", expectError: "must not contain"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateNamespaceForSandboxID(tt.namespace)
+			if tt.expectError == "" {
+				assert.NoError(t, err, "unexpected error for %q", tt.namespace)
+				return
+			}
+			assert.Error(t, err, "expected error for %q", tt.namespace)
+			if err != nil {
+				assert.Contains(t, err.Error(), tt.expectError)
+			}
+		})
+	}
+}
+
+func TestIsSandboxPausable(t *testing.T) {
+	tests := []struct {
+		name           string
+		sandbox        *agentsv1alpha1.Sandbox
+		expectedResult bool
+		expectedReason string
+	}{
+		{
+			name: "Running sandbox is pausable",
+			sandbox: &agentsv1alpha1.Sandbox{
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxRunning,
+				},
+			},
+			expectedResult: true,
+			expectedReason: "SandboxIsRunningOrPaused",
+		},
+		{
+			name: "Paused sandbox is pausable",
+			sandbox: &agentsv1alpha1.Sandbox{
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxPaused,
+				},
+			},
+			expectedResult: true,
+			expectedReason: "SandboxIsRunningOrPaused",
+		},
+		{
+			name: "Pending sandbox is not pausable",
+			sandbox: &agentsv1alpha1.Sandbox{
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxPending,
+				},
+			},
+			expectedResult: false,
+			expectedReason: "SandboxPhaseNotAllowed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, reason := IsSandboxPausable(tt.sandbox)
+			assert.Equal(t, tt.expectedResult, result)
+			assert.Equal(t, tt.expectedReason, reason)
+		})
+	}
+}
+
+func TestIsSandboxResumable(t *testing.T) {
+	tests := []struct {
+		name           string
+		sandbox        *agentsv1alpha1.Sandbox
+		expectedResult bool
+		expectedReason string
+	}{
+		{
+			name: "Running sandbox is resumable",
+			sandbox: &agentsv1alpha1.Sandbox{
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxRunning,
+				},
+			},
+			expectedResult: true,
+			expectedReason: "SandboxIsRunning",
+		},
+		{
+			name: "Running sandbox with spec.paused=true is not resumable (pausing in progress)",
+			sandbox: &agentsv1alpha1.Sandbox{
+				Spec: agentsv1alpha1.SandboxSpec{
+					Paused: true,
+				},
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxRunning,
+				},
+			},
+			expectedResult: false,
+			expectedReason: "SandboxIsPausing",
+		},
+		{
+			name: "Resuming sandbox is resumable",
+			sandbox: &agentsv1alpha1.Sandbox{
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxResuming,
+				},
+			},
+			expectedResult: true,
+			expectedReason: "SandboxIsResuming",
+		},
+		{
+			name: "Paused sandbox with paused condition is resumable",
+			sandbox: &agentsv1alpha1.Sandbox{
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxPaused,
+					Conditions: []metav1.Condition{
+						{
+							Type:   string(agentsv1alpha1.SandboxConditionPaused),
+							Status: metav1.ConditionTrue,
+						},
+					},
+				},
+			},
+			expectedResult: true,
+			expectedReason: "SandboxIsPaused",
+		},
+		{
+			name: "Paused sandbox without paused condition is not resumable",
+			sandbox: &agentsv1alpha1.Sandbox{
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxPaused,
+				},
+			},
+			expectedResult: false,
+			expectedReason: "SandboxIsPausing",
+		},
+		{
+			name: "Succeeded sandbox is not resumable",
+			sandbox: &agentsv1alpha1.Sandbox{
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxSucceeded,
+				},
+			},
+			expectedResult: false,
+			expectedReason: "SandboxPhaseNotAllowed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, reason := IsSandboxResumable(tt.sandbox)
+			assert.Equal(t, tt.expectedResult, result)
+			assert.Equal(t, tt.expectedReason, reason)
+		})
+	}
+}
+
+func TestGetAccessToken(t *testing.T) {
+	tests := []struct {
+		name     string
+		obj      metav1.Object
+		expected string
+	}{
+		{
+			name:     "nil object returns empty string",
+			obj:      nil,
+			expected: "",
+		},
+		{
+			name: "sandbox with runtime access token annotation returns runtime token",
+			obj: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						agentsv1alpha1.AnnotationRuntimeAccessToken: "runtime-token",
+					},
+				},
+			},
+			expected: "runtime-token",
+		},
+		{
+			name: "sandbox-claim with only legacy envd token falls back to legacy",
+			obj: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						agentsv1alpha1.AnnotationEnvdAccessToken: "envd-token",
+					},
+				},
+			},
+			expected: "envd-token",
+		},
+		{
+			name: "runtime token takes precedence over legacy envd token",
+			obj: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						agentsv1alpha1.AnnotationRuntimeAccessToken: "runtime-token",
+						agentsv1alpha1.AnnotationEnvdAccessToken:    "envd-token",
+					},
+				},
+			},
+			expected: "runtime-token",
+		},
+		{
+			name:     "object without annotations returns empty string",
+			obj:      &agentsv1alpha1.Sandbox{},
+			expected: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, GetAccessToken(tt.obj))
+		})
+	}
+}
+
+func TestGetTemplateSpec(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	inlineTemplate := &corev1.PodTemplateSpec{
+		ObjectMeta: metav1.ObjectMeta{
+			Labels: map[string]string{"foo": "bar"},
+		},
+	}
+
+	referencedTemplate := &corev1.PodTemplateSpec{
+		ObjectMeta: metav1.ObjectMeta{
+			Labels: map[string]string{"ref": "val"},
+		},
+	}
+
+	existingTmpl := &agentsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "my-tmpl",
+		},
+		Spec: agentsv1alpha1.SandboxTemplateSpec{
+			Template: referencedTemplate,
+		},
+	}
+
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existingTmpl).Build()
+
+	tests := []struct {
+		name           string
+		embedded       *agentsv1alpha1.EmbeddedSandboxTemplate
+		expectedLabels map[string]string
+		expectError    string
+	}{
+		{
+			name:        "Nil embedded template",
+			embedded:    nil,
+			expectError: "",
+		},
+		{
+			name: "Inline Template only",
+			embedded: &agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: inlineTemplate,
+			},
+			expectedLabels: map[string]string{"foo": "bar"},
+			expectError:    "",
+		},
+		{
+			name: "TemplateRef referencing existing SandboxTemplate",
+			embedded: &agentsv1alpha1.EmbeddedSandboxTemplate{
+				TemplateRef: &agentsv1alpha1.SandboxTemplateRef{
+					Name: "my-tmpl",
+				},
+			},
+			expectedLabels: map[string]string{"ref": "val"},
+			expectError:    "",
+		},
+		{
+			name: "TemplateRef referencing missing SandboxTemplate",
+			embedded: &agentsv1alpha1.EmbeddedSandboxTemplate{
+				TemplateRef: &agentsv1alpha1.SandboxTemplateRef{
+					Name: "non-existent-tmpl",
+				},
+			},
+			expectError: "sandboxtemplates.agents.kruise.io \"non-existent-tmpl\" not found",
+		},
+		{
+			name:        "Both Template and TemplateRef are nil",
+			embedded:    &agentsv1alpha1.EmbeddedSandboxTemplate{},
+			expectError: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := GetTemplateSpec(context.TODO(), k8sClient, "default", tt.embedded)
+			if tt.expectError != "" {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
+			} else {
+				assert.NoError(t, err)
+				if tt.expectedLabels != nil {
+					assert.NotNil(t, got)
+					assert.Equal(t, tt.expectedLabels, got.Labels)
+				} else {
+					assert.Nil(t, got)
+				}
 			}
 		})
 	}

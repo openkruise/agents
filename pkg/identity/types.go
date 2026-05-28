@@ -29,6 +29,14 @@ const (
 	TokenTypeAgent TokenType = "Agent"
 )
 
+const (
+	// SecurityMetadataPrefix is the prefix for all security-related label/annotations.
+	SecurityMetadataPrefix = "security.agents.kruise.io/"
+	// AgentKeyTokenRefreshStatus is the Sandbox Annotation Key,
+	// used to store the JSON serialized result of TokenRefreshStatus.
+	AgentKeyTokenRefreshStatus = SecurityMetadataPrefix + "token-status"
+)
+
 // TokenRequest represents a request to issue an identity-aware access token.
 type TokenRequest struct {
 	// TokenType indicates the type of token being requested.

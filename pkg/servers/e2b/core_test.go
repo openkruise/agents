@@ -56,7 +56,7 @@ import (
 	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
-	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
+	"github.com/openkruise/agents/pkg/utils/testutils"
 )
 
 var TestServerPort = 9999
@@ -80,7 +80,7 @@ func Setup(t *testing.T) (*Controller, ctrlclient.Client, func()) {
 // Controller.minResumeTimeout so floor-enforcement assertions can use a
 // non-default value (e.g., 120s with a 60s request to observe the bump).
 func SetupWithMinResumeTimeout(t *testing.T, minResumeTimeout int) (*Controller, ctrlclient.Client, func()) {
-	utils.InitLogOutput()
+	testutils.InitLogOutput()
 	namespace := "sandbox-system"
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)

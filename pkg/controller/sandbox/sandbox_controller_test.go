@@ -208,7 +208,7 @@ func TestSandboxReconciler_Reconcile(t *testing.T) {
 					Name:              "terminating-sandbox",
 					Namespace:         "default",
 					DeletionTimestamp: &metav1.Time{Time: time.Now()},
-					Finalizers:        []string{utils.SandboxFinalizer},
+					Finalizers:        []string{core.SandboxFinalizer},
 				},
 				Spec: agentsv1alpha1.SandboxSpec{
 					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
@@ -404,7 +404,7 @@ func TestSandboxReconciler_Reconcile(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:       "shutdown-sandbox",
 					Namespace:  "default",
-					Finalizers: []string{utils.SandboxFinalizer},
+					Finalizers: []string{core.SandboxFinalizer},
 				},
 				Spec: agentsv1alpha1.SandboxSpec{
 					ShutdownTime: &metav1.Time{Time: time.Now().Add(-1 * time.Hour)},
@@ -430,7 +430,7 @@ func TestSandboxReconciler_Reconcile(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:       "pause-time-sandbox",
 					Namespace:  "default",
-					Finalizers: []string{utils.SandboxFinalizer},
+					Finalizers: []string{core.SandboxFinalizer},
 				},
 				Spec: agentsv1alpha1.SandboxSpec{
 					PauseTime: &metav1.Time{Time: time.Now().Add(-1 * time.Hour)},
@@ -465,7 +465,7 @@ func TestSandboxReconciler_Reconcile(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:       "future-shutdown-sandbox",
 					Namespace:  "default",
-					Finalizers: []string{utils.SandboxFinalizer},
+					Finalizers: []string{core.SandboxFinalizer},
 				},
 				Spec: agentsv1alpha1.SandboxSpec{
 					ShutdownTime: &metav1.Time{Time: time.Now().Add(10 * time.Minute)},
@@ -493,7 +493,7 @@ func TestSandboxReconciler_Reconcile(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:       "pod-missing-sandbox",
 					Namespace:  "default",
-					Finalizers: []string{utils.SandboxFinalizer},
+					Finalizers: []string{core.SandboxFinalizer},
 				},
 				Spec: agentsv1alpha1.SandboxSpec{
 					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
@@ -554,7 +554,7 @@ func TestSandboxReconciler_Reconcile(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:       "invalid-phase-sandbox",
 					Namespace:  "default",
-					Finalizers: []string{utils.SandboxFinalizer},
+					Finalizers: []string{core.SandboxFinalizer},
 				},
 				Spec: agentsv1alpha1.SandboxSpec{
 					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
@@ -579,7 +579,7 @@ func TestSandboxReconciler_Reconcile(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:       "both-times-sandbox",
 					Namespace:  "default",
-					Finalizers: []string{utils.SandboxFinalizer},
+					Finalizers: []string{core.SandboxFinalizer},
 				},
 				Spec: agentsv1alpha1.SandboxSpec{
 					ShutdownTime: &metav1.Time{Time: time.Now().Add(10 * time.Minute)},
@@ -666,7 +666,7 @@ func TestSandboxReconciler_Reconcile(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:       "completed-pod-sandbox",
 					Namespace:  "default",
-					Finalizers: []string{utils.SandboxFinalizer},
+					Finalizers: []string{core.SandboxFinalizer},
 				},
 				Spec: agentsv1alpha1.SandboxSpec{
 					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
@@ -699,7 +699,7 @@ func TestSandboxReconciler_Reconcile(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:       "high-priority-sandbox",
 					Namespace:  "default",
-					Finalizers: []string{utils.SandboxFinalizer},
+					Finalizers: []string{core.SandboxFinalizer},
 					Annotations: map[string]string{
 						agentsv1alpha1.SandboxAnnotationPriority: "1",
 					},
@@ -1016,7 +1016,7 @@ func TestSandboxReconciler_AutoPauseBranch(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{
 				Name:            name,
 				Namespace:       "default",
-				Finalizers:      []string{utils.SandboxFinalizer},
+				Finalizers:      []string{core.SandboxFinalizer},
 				ResourceVersion: "42",
 			},
 			Spec: agentsv1alpha1.SandboxSpec{
@@ -1050,7 +1050,7 @@ func TestSandboxReconciler_AutoPauseBranch(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{
 				Name:       name,
 				Namespace:  "default",
-				Finalizers: []string{utils.SandboxFinalizer},
+				Finalizers: []string{core.SandboxFinalizer},
 			},
 			Spec: agentsv1alpha1.SandboxSpec{
 				Paused:    false,
@@ -2118,7 +2118,7 @@ func TestSandboxReconciler_AddSandboxFinalizerAndHash(t *testing.T) {
 				// Check finalizer
 				hasFinalizerInResult := false
 				for _, f := range result.Finalizers {
-					if f == utils.SandboxFinalizer {
+					if f == core.SandboxFinalizer {
 						hasFinalizerInResult = true
 						break
 					}
@@ -2141,7 +2141,7 @@ func TestSandboxReconciler_AddSandboxFinalizerAndHash(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:       "test-sandbox-with-finalizer",
 					Namespace:  "default",
-					Finalizers: []string{utils.SandboxFinalizer},
+					Finalizers: []string{core.SandboxFinalizer},
 				},
 				Spec: agentsv1alpha1.SandboxSpec{
 					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
@@ -2320,7 +2320,7 @@ func TestSandboxReconciler_AddSandboxFinalizerAndHash(t *testing.T) {
 				if tt.expectFinalizerAdded {
 					hasFinalizer := false
 					for _, f := range updatedSandbox.Finalizers {
-						if f == utils.SandboxFinalizer {
+						if f == core.SandboxFinalizer {
 							hasFinalizer = true
 							break
 						}
@@ -2521,13 +2521,13 @@ func TestReconcile_SandboxLifecycle_ClearSpecThenDelete(t *testing.T) {
 		}
 		hasFinalizer := false
 		for _, f := range updatedSandbox.Finalizers {
-			if f == utils.SandboxFinalizer {
+			if f == core.SandboxFinalizer {
 				hasFinalizer = true
 				break
 			}
 		}
 		if !hasFinalizer {
-			t.Errorf("Expected finalizer %s to be added", utils.SandboxFinalizer)
+			t.Errorf("Expected finalizer %s to be added", core.SandboxFinalizer)
 		}
 	})
 
@@ -2594,7 +2594,7 @@ func TestReconcile_SandboxLifecycle_ClearSpecThenDelete(t *testing.T) {
 				t.Errorf("Expected DeletionTimestamp to be set")
 			}
 			for _, f := range updatedSandbox.Finalizers {
-				if f == utils.SandboxFinalizer {
+				if f == core.SandboxFinalizer {
 					t.Errorf("Expected finalizer to be removed, but it still exists")
 				}
 			}
@@ -2628,7 +2628,7 @@ func TestSandboxReconciler_Reconcile_RateLimitFeatureGate(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:              "normal-sandbox",
 					Namespace:         "default",
-					Finalizers:        []string{utils.SandboxFinalizer},
+					Finalizers:        []string{core.SandboxFinalizer},
 					CreationTimestamp: now,
 				},
 				Spec: agentsv1alpha1.SandboxSpec{
@@ -2673,7 +2673,7 @@ func TestSandboxReconciler_Reconcile_RateLimitFeatureGate(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:       "normal-sandbox-low",
 					Namespace:  "default",
-					Finalizers: []string{utils.SandboxFinalizer},
+					Finalizers: []string{core.SandboxFinalizer},
 				},
 				Spec: agentsv1alpha1.SandboxSpec{
 					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
@@ -2698,7 +2698,7 @@ func TestSandboxReconciler_Reconcile_RateLimitFeatureGate(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:              "high-priority-sandbox",
 					Namespace:         "default",
-					Finalizers:        []string{utils.SandboxFinalizer},
+					Finalizers:        []string{core.SandboxFinalizer},
 					CreationTimestamp: now,
 					Annotations: map[string]string{
 						agentsv1alpha1.SandboxAnnotationPriority: "1",
@@ -2727,7 +2727,7 @@ func TestSandboxReconciler_Reconcile_RateLimitFeatureGate(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:              "high-priority-ready",
 					Namespace:         "default",
-					Finalizers:        []string{utils.SandboxFinalizer},
+					Finalizers:        []string{core.SandboxFinalizer},
 					CreationTimestamp: now,
 					Annotations: map[string]string{
 						agentsv1alpha1.SandboxAnnotationPriority: "1",
@@ -3213,7 +3213,7 @@ func TestReconcile_UpgradingPhase(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       "upgrading-sandbox",
 			Namespace:  "default",
-			Finalizers: []string{utils.SandboxFinalizer},
+			Finalizers: []string{core.SandboxFinalizer},
 		},
 		Spec: agentsv1alpha1.SandboxSpec{
 			UpgradePolicy: &agentsv1alpha1.SandboxUpgradePolicy{
@@ -3294,7 +3294,7 @@ func TestReconcile_ErrorPath_UpdatesSandboxStatus(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        "error-path-sandbox",
 			Namespace:   "default",
-			Finalizers:  []string{utils.SandboxFinalizer},
+			Finalizers:  []string{core.SandboxFinalizer},
 			Annotations: map[string]string{
 				// Will be filled with the computed hashImmutablePart below
 			},
@@ -3391,7 +3391,7 @@ func TestReconcile_ErrorPath_StatusUpdateAlsoFails(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        "error-both-sandbox",
 			Namespace:   "default",
-			Finalizers:  []string{utils.SandboxFinalizer},
+			Finalizers:  []string{core.SandboxFinalizer},
 			Annotations: map[string]string{},
 		},
 		Spec: agentsv1alpha1.SandboxSpec{

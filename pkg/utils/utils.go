@@ -25,7 +25,8 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"sync"
+	"strings"
+	"time"
 
 	"github.com/golang/protobuf/proto"
 	corev1 "k8s.io/api/core/v1"
@@ -33,15 +34,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/rand"
-	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
-
+	"github.com/google/uuid"
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+
 	"github.com/openkruise/agents/pkg/features"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 )
@@ -104,125 +102,9 @@ func filterOutCondition(conditions []metav1.Condition, condType string) []metav1
 	}
 	return newConditions
 }
-
-const (
-	AddFinalizerOpType    FinalizerOpType = "Add"
-	RemoveFinalizerOpType FinalizerOpType = "Remove"
-)
-
-type FinalizerOpType string
-
-// UpdateFinalizer add/remove a finalizer from a object
-func UpdateFinalizer(c client.Client, object client.Object, op FinalizerOpType, finalizer string) error {
-	switch op {
-	case AddFinalizerOpType, RemoveFinalizerOpType:
-	default:
-		panic("UpdateFinalizer Func 'op' parameter must be 'Add' or 'Remove'")
-	}
-
-	key := client.ObjectKeyFromObject(object)
-	fetchedObject := object.DeepCopyObject().(client.Object)
-	getErr := c.Get(context.TODO(), key, fetchedObject)
-	if getErr != nil {
-		return getErr
-	}
-	finalizers := fetchedObject.GetFinalizers()
-	switch op {
-	case AddFinalizerOpType:
-		if controllerutil.ContainsFinalizer(fetchedObject, finalizer) {
-			return nil
-		}
-		finalizers = append(finalizers, finalizer)
-	case RemoveFinalizerOpType:
-		finalizerSet := sets.NewString(finalizers...)
-		if !finalizerSet.Has(finalizer) {
-			return nil
-		}
-		finalizers = finalizerSet.Delete(finalizer).List()
-	}
-	fetchedObject.SetFinalizers(finalizers)
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		return c.Update(context.TODO(), fetchedObject)
-	})
-}
-
-func PatchFinalizer(ctx context.Context, c client.Client, object client.Object, op FinalizerOpType, finalizer string) (client.Object, error) {
-	switch op {
-	case AddFinalizerOpType, RemoveFinalizerOpType:
-	default:
-		panic("UpdateFinalizer Func 'op' parameter must be 'Add' or 'Remove'")
-	}
-	originObj := object.DeepCopyObject().(client.Object)
-	patch := client.MergeFrom(object)
-	switch op {
-	case AddFinalizerOpType:
-		if controllerutil.ContainsFinalizer(originObj, finalizer) {
-			return object, nil
-		}
-		controllerutil.AddFinalizer(originObj, finalizer)
-	case RemoveFinalizerOpType:
-		if !controllerutil.ContainsFinalizer(originObj, finalizer) {
-			return object, nil
-		}
-		controllerutil.RemoveFinalizer(originObj, finalizer)
-	}
-	if err := client.IgnoreNotFound(c.Patch(ctx, originObj, patch)); err != nil {
-		return nil, fmt.Errorf("failed to patch finalizer: %w", err)
-	}
-	return originObj, nil
-}
-
 func DumpJson(o interface{}) string {
 	by, _ := json.Marshal(o)
 	return string(by)
-}
-
-// DoItSlowly tries to call the provided function a total of 'count' times,
-// starting slow to check for errors, then speeding up if calls succeed.
-//
-// It groups the calls into batches, starting with a group of initialBatchSize.
-// Within each batch, it may call the function multiple times concurrently.
-//
-// If a whole batch succeeds, the next batch may get exponentially larger.
-// If there are any failures in a batch, all remaining batches are skipped
-// after waiting for the current batch to complete.
-//
-// It returns the number of successful calls to the function.
-func DoItSlowly(count int, initialBatchSize int, fn func() error) (int, error) {
-	remaining := count
-	successes := 0
-	for batchSize := min(remaining, initialBatchSize); batchSize > 0; batchSize = min(2*batchSize, remaining) {
-		errCh := make(chan error, batchSize)
-		var wg sync.WaitGroup
-		wg.Add(batchSize)
-		for i := 0; i < batchSize; i++ {
-			go func() {
-				defer wg.Done()
-				if err := fn(); err != nil {
-					errCh <- err
-				}
-			}()
-		}
-		wg.Wait()
-		curSuccesses := batchSize - len(errCh)
-		successes += curSuccesses
-		if len(errCh) > 0 {
-			return successes, <-errCh
-		}
-		remaining -= batchSize
-	}
-	return successes, nil
-}
-
-func DoItSlowlyWithInputs[T any](inputs []T, initialBatchSize int, fn func(T) error) (int, error) {
-	inputCh := make(chan T, len(inputs))
-	for _, input := range inputs {
-		inputCh <- input
-	}
-	return DoItSlowly(len(inputs), initialBatchSize, func() error {
-		input := <-inputCh
-		return fn(input)
-	})
 }
 
 func HashData(by []byte) string {
@@ -275,7 +157,6 @@ func GetFirstNonLoopbackIP() string {
 	}
 	return ""
 }
-
 func IsLoopbackIP(ip string) bool {
 	ipNet := net.ParseIP(ip)
 	if ipNet == nil {
@@ -288,7 +169,7 @@ func GetFromInformerOrApiServer[T client.Object](ctx context.Context, target T, 
 	client client.Client, apiReader client.Reader) error {
 	err := client.Get(ctx, key, target)
 	if errors.IsNotFound(err) {
-		klog.FromContext(ctx).V(consts.DebugLogLevel).
+		klog.FromContext(ctx).V(DebugLogLevel).
 			Info("failed to get object from informer, try to fetch from api server", "key", key)
 		err = apiReader.Get(ctx, key, target)
 	}
@@ -340,4 +221,179 @@ func FindContainer(name string, containers []corev1.Container) *corev1.Container
 		}
 	}
 	return nil
+}
+
+func LockSandbox(sbx client.Object, lock string, owner string) {
+	annotations := sbx.GetAnnotations()
+	if annotations == nil {
+		annotations = make(map[string]string, 2)
+	}
+	annotations[agentsv1alpha1.AnnotationLock] = lock
+	annotations[agentsv1alpha1.AnnotationOwner] = owner
+	sbx.SetAnnotations(annotations)
+}
+
+func NewLockString() string {
+	return uuid.NewString()
+}
+
+
+// GetSandboxState the state of agentsv1alpha1 Sandbox.
+// NOTE: the reason is unique and hard-coded, so we can easily search the conditions of some reason when debugging.
+func GetSandboxState(sbx *agentsv1alpha1.Sandbox) (state string, reason string) {
+	if sbx.DeletionTimestamp != nil {
+		return agentsv1alpha1.SandboxStateDead, "ResourceDeleted"
+	}
+	if sbx.Spec.ShutdownTime != nil && time.Since(sbx.Spec.ShutdownTime.Time) > 0 {
+		return agentsv1alpha1.SandboxStateDead, "ShutdownTimeReached"
+	}
+	if sbx.Status.Phase == agentsv1alpha1.SandboxPending {
+		return agentsv1alpha1.SandboxStateCreating, "ResourcePending"
+	}
+	if sbx.Status.Phase == agentsv1alpha1.SandboxSucceeded {
+		return agentsv1alpha1.SandboxStateDead, "ResourceSucceeded"
+	}
+	if sbx.Status.Phase == agentsv1alpha1.SandboxFailed {
+		return agentsv1alpha1.SandboxStateDead, "ResourceFailed"
+	}
+	if sbx.Status.Phase == agentsv1alpha1.SandboxTerminating {
+		return agentsv1alpha1.SandboxStateDead, "ResourceTerminating"
+	}
+
+	sandboxReady := IsSandboxReady(sbx)
+	if IsControlledBySandboxSet(sbx) {
+		if sandboxReady {
+			return agentsv1alpha1.SandboxStateAvailable, "ResourceControlledBySbsAndReady"
+		} else {
+			return agentsv1alpha1.SandboxStateCreating, "ResourceControlledBySbsButNotReady"
+		}
+	} else {
+		if sbx.Status.Phase == agentsv1alpha1.SandboxRunning {
+			if sbx.Spec.Paused {
+				return agentsv1alpha1.SandboxStatePaused, "RunningResourceClaimedAndPaused"
+			} else {
+				if sandboxReady {
+					return agentsv1alpha1.SandboxStateRunning, "RunningResourceClaimedAndReady"
+				} else {
+					return agentsv1alpha1.SandboxStateDead, "RunningResourceClaimedButNotReady"
+				}
+			}
+		} else {
+			// Paused and Resuming phases are both treated as paused state
+			return agentsv1alpha1.SandboxStatePaused, "NotRunningResourceClaimed"
+		}
+	}
+}
+
+func IsControlledBySandboxSet(sbx *agentsv1alpha1.Sandbox) bool {
+	controller := metav1.GetControllerOfNoCopy(sbx)
+	if controller == nil {
+		return false
+	}
+	return controller.Kind == agentsv1alpha1.SandboxSetControllerKind.Kind &&
+		// ** REMEMBER TO MODIFY THIS WHEN A NEW API VERSION(LIKE v1beta1) IS ADDED **
+		controller.APIVersion == agentsv1alpha1.SandboxSetControllerKind.GroupVersion().String()
+}
+
+// sandboxIDSeparator joins namespace and name in a sandbox ID. It is the single source
+// of truth for the encoding used by util functions
+const sandboxIDSeparator = "--"
+
+// GetSandboxID encodes a sandbox as "<namespace>--<name>". The encoding requires that
+// the namespace itself does not contain "--"; callers that accept user-supplied
+// namespaces must enforce this with ValidateNamespaceForSandboxID at the boundary.
+// See pkg/servers/e2b/AGENTS.md ("Namespace Naming Constraint") for the rationale.
+func GetSandboxID(sbx *agentsv1alpha1.Sandbox) string {
+	return sbx.Namespace + sandboxIDSeparator + sbx.Name
+}
+
+// ValidateNamespaceForSandboxID rejects namespace names that cannot be safely embedded
+// in a sandbox ID.
+func ValidateNamespaceForSandboxID(namespace string) error {
+	if namespace == "" {
+		return fmt.Errorf("namespace must not be empty")
+	}
+	if strings.Contains(namespace, sandboxIDSeparator) {
+		return fmt.Errorf("namespace %q must not contain %q: this sequence is reserved as the sandbox ID separator", namespace, sandboxIDSeparator)
+	}
+	return nil
+}
+
+// GetAccessToken resolves the agent-runtime access token from object annotations, falling back
+// to the legacy envd annotation key for backwards compatibility. Accepts metav1.Object so that
+// it works for both Sandbox and SandboxClaim objects.
+func GetAccessToken(obj metav1.Object) string {
+	if obj == nil {
+		return ""
+	}
+	annotations := obj.GetAnnotations()
+	if t := annotations[agentsv1alpha1.AnnotationRuntimeAccessToken]; t != "" {
+		return t
+	}
+	return annotations[agentsv1alpha1.AnnotationEnvdAccessToken] // legacy
+}
+
+func IsSandboxReady(sbx *agentsv1alpha1.Sandbox) bool {
+	readyCond := GetSandboxCondition(&sbx.Status, string(agentsv1alpha1.SandboxConditionReady))
+	return readyCond != nil && readyCond.Status == metav1.ConditionTrue
+}
+
+// IsSandboxPausable returns true when the pausing operation will not cause any conflict.
+func IsSandboxPausable(sbx *agentsv1alpha1.Sandbox) (bool, string) {
+	if IsControlledBySandboxSet(sbx) {
+		state, _ := GetSandboxState(sbx)
+		switch state {
+		case agentsv1alpha1.SandboxStateAvailable, agentsv1alpha1.SandboxStateCreating:
+			return false, "SandboxStateNotAllowed"
+		}
+	}
+	switch sbx.Status.Phase {
+	case agentsv1alpha1.SandboxRunning, agentsv1alpha1.SandboxPaused:
+		return true, "SandboxIsRunningOrPaused"
+	default:
+		return false, "SandboxPhaseNotAllowed"
+	}
+}
+
+// IsSandboxResumable returns true when the resuming operation will not cause any conflict.
+func IsSandboxResumable(sbx *agentsv1alpha1.Sandbox) (bool, string) {
+	switch sbx.Status.Phase {
+	case agentsv1alpha1.SandboxRunning:
+		if sbx.Spec.Paused {
+			return false, "SandboxIsPausing"
+		}
+		return true, "SandboxIsRunning"
+	case agentsv1alpha1.SandboxResuming:
+		return true, "SandboxIsResuming"
+	default:
+	}
+	if sbx.Status.Phase == agentsv1alpha1.SandboxPaused {
+		pauseCond := GetSandboxCondition(&sbx.Status, string(agentsv1alpha1.SandboxConditionPaused))
+		paused := pauseCond != nil && pauseCond.Status == metav1.ConditionTrue
+		if paused {
+			return true, "SandboxIsPaused"
+		}
+		return false, "SandboxIsPausing"
+	}
+	return false, "SandboxPhaseNotAllowed"
+}
+
+// GetTemplateSpec resolves and returns the PodTemplateSpec from the EmbeddedSandboxTemplate.
+// If TemplateRef is specified, it will fetch the SandboxTemplate using the client.
+func GetTemplateSpec(ctx context.Context, cli client.Client, namespace string, embedded *agentsv1alpha1.EmbeddedSandboxTemplate) (*corev1.PodTemplateSpec, error) {
+	if embedded == nil {
+		return nil, nil
+	}
+	if embedded.Template != nil {
+		return embedded.Template, nil
+	}
+	if embedded.TemplateRef != nil {
+		refTemplate := &agentsv1alpha1.SandboxTemplate{}
+		err := cli.Get(ctx, client.ObjectKey{Namespace: namespace, Name: embedded.TemplateRef.Name}, refTemplate)
+		if err != nil {
+			return nil, err
+		}
+		return refTemplate.Spec.Template, nil
+	}
+	return nil, nil
 }

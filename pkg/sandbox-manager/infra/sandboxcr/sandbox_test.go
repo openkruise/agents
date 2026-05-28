@@ -53,8 +53,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/runtime"
-	"github.com/openkruise/agents/pkg/utils/sandbox-manager/proxyutils"
-	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
+	"github.com/openkruise/agents/pkg/utils/proxyutils"
 	"github.com/openkruise/agents/pkg/utils/timeout"
 	testutils "github.com/openkruise/agents/test/utils"
 )
@@ -177,7 +176,7 @@ func TestSandbox_SaveTimeoutWithPolicy(t *testing.T) {
 			require.Eventually(t, func() bool {
 				var err error
 				sandbox, err = infraInstance.GetClaimedSandbox(t.Context(), infra.GetClaimedSandboxOptions{
-					SandboxID: stateutils.GetSandboxID(sbx),
+					SandboxID: utils.GetSandboxID(sbx),
 					Namespace: sbx.Namespace,
 				})
 				return err == nil
@@ -265,14 +264,14 @@ func TestSandbox_SaveTimeoutWithPolicy_OnConflict(t *testing.T) {
 	require.Eventually(t, func() bool {
 		var getErr error
 		sandboxA, getErr = infraImpl.GetClaimedSandbox(t.Context(), infra.GetClaimedSandboxOptions{
-			SandboxID: stateutils.GetSandboxID(sbx),
+			SandboxID: utils.GetSandboxID(sbx),
 			Namespace: sbx.Namespace,
 		})
 		if getErr != nil {
 			return false
 		}
 		sandboxB, getErr = infraImpl.GetClaimedSandbox(t.Context(), infra.GetClaimedSandboxOptions{
-			SandboxID: stateutils.GetSandboxID(sbx),
+			SandboxID: utils.GetSandboxID(sbx),
 			Namespace: sbx.Namespace,
 		})
 		return getErr == nil
@@ -342,7 +341,7 @@ type retryUpdateTestProvider struct {
 }
 
 func (p *retryUpdateTestProvider) GetClaimedSandbox(_ context.Context, options infracache.GetClaimedSandboxOptions) (*v1alpha1.Sandbox, error) {
-	expectedID := stateutils.GetSandboxID(p.claimedSandbox)
+	expectedID := utils.GetSandboxID(p.claimedSandbox)
 	if options.SandboxID != expectedID {
 		return nil, errors.New("unexpected sandbox ID")
 	}

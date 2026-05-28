@@ -24,7 +24,7 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	agentsruntime "github.com/openkruise/agents/pkg/utils/runtime"
-	"github.com/openkruise/agents/pkg/utils/sandboxutils"
+	"github.com/openkruise/agents/pkg/utils/proxyutils"
 	"github.com/openkruise/agents/proto/envd/process"
 )
 
@@ -39,7 +39,7 @@ func ExecuteLifecycleHook(ctx context.Context, box *agentsv1alpha1.Sandbox, acti
 	}
 
 	// Check runtime URL availability
-	runtimeURL := sandboxutils.GetRuntimeURL(box)
+	runtimeURL := proxyutils.GetRuntimeURL(box)
 	if runtimeURL == "" {
 		return -1, "", "", fmt.Errorf("runtime URL not found on sandbox %s/%s", box.Namespace, box.Name)
 	}

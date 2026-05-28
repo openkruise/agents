@@ -22,13 +22,22 @@ import (
 	"strconv"
 	"time"
 
-	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
 )
 
 const (
-	// SandboxFinalizer is sandbox finalizer
-	SandboxFinalizer = "agents.kruise.io/sandbox"
+	// DebugLogLevel is the klog V-level used for debug messages throughout the
+	// project.  Previously defined in pkg/sandbox-manager/consts; moved here to
+	// break the utils → business-layer dependency.
+	DebugLogLevel = 5
+	// RuntimePort is the well-known port for the agent-runtime sidecar.
+	// Previously defined in pkg/sandbox-manager/consts; moved here to break the
+	// utils → business-layer dependency.
+	RuntimePort = 49983
+)
+
+const (
+
 	// PodAnnotationCreatedBy is used to identify Pod source: created by Sandbox controller or externally created (bypassing Sandbox syntax sugar)
 	PodAnnotationCreatedBy = "agents.kruise.io/created-by"
 	// PodLabelCreatedBy is a label mirroring PodAnnotationCreatedBy, used as a label selector
@@ -38,38 +47,17 @@ const (
 	// default sandbox deploy namespace
 	DefaultSandboxDeployNamespace = "sandbox-system"
 
-	PodConditionContainersPaused  = "ContainersPaused"
-	PodConditionContainersResumed = "ContainersResumed"
+	// AnnotationKeyClaimWithCSIMount_MountConfig is the annotation key for CSI mount configuration.
+	// Previously defined in pkg/servers/e2b/models; moved here to break the
+	// pkg/utils → pkg/servers layer violation.
+	AnnotationKeyClaimWithCSIMount_MountConfig = "e2b.agents.kruise.io/csi-volume-config"
 
 	// MaxConditionMessageLen was moved to a var block below for env-based configuration.
 )
 
 const (
-	// SecurityMetadataPrefix is the prefix for all security-related label/annotations.
-	SecurityMetadataPrefix = "security.agents.kruise.io/"
-	// AgentKeyTokenRefreshStatus is the Sandbox Annotation Key,
-	// used to store the JSON serialized result of TokenRefreshStatus
-	AgentKeyTokenRefreshStatus = SecurityMetadataPrefix + "token-status"
-)
-
-const (
-	True  = "true"
-	False = "false"
-
 	CreatedByExternal = "external"
 	CreatedBySandbox  = "sandbox"
-
-	ContainerNameRuntimeAgent    = "agent-runtime"
-	ContainerNameCSISidecar      = "csi-sidecar"
-	ContainerNameCSIAgentSidecar = "csi-agent-sidecar"
-	ContainerNameIstioProxy      = "istio-proxy"
-)
-
-var RuntimeContainerNames = sets.NewString(
-	ContainerNameRuntimeAgent,
-	ContainerNameCSISidecar,
-	ContainerNameCSIAgentSidecar,
-	ContainerNameIstioProxy,
 )
 
 var (

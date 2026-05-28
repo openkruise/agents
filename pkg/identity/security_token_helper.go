@@ -34,7 +34,7 @@ func BuildTokenRefreshStatus(resp *TokenResponse) TokenRefreshStatus {
 }
 
 // EncodeTokenRefreshStatus serialises a TokenRefreshStatus into the JSON payload
-// stored on the sandbox annotation utils.AgentKeyTokenRefreshStatus. Keeping the
+// stored on the sandbox annotation AgentKeyTokenRefreshStatus. Keeping the
 // encoding here ensures every writer (claim flow / refresh controller) emits the
 // identical wire format expected by readers.
 func EncodeTokenRefreshStatus(s TokenRefreshStatus) (string, error) {

@@ -29,7 +29,7 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/registry"
-	proxyutils "github.com/openkruise/agents/pkg/utils/sandbox-manager/proxyutils"
+	proxyutils "github.com/openkruise/agents/pkg/utils/proxyutils"
 )
 
 // SandboxReconciler reconciles Sandbox objects and updates the local registry

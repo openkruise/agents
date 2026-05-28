@@ -44,8 +44,7 @@ import (
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
 	"github.com/openkruise/agents/pkg/utils/runtime"
-	managerutils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
-	"github.com/openkruise/agents/pkg/utils/sandbox-manager/proxyutils"
+	"github.com/openkruise/agents/pkg/utils/proxyutils"
 	"github.com/openkruise/agents/pkg/utils/timeout"
 	testutils "github.com/openkruise/agents/test/utils"
 )
@@ -1615,7 +1614,7 @@ func TestBrowserUseCDPPort(t *testing.T) {
 			assert.Equal(t, http.StatusOK, resp.Code)
 			assert.Equal(t, "Chrome", resp.Body.Browser)
 			assert.Contains(t, resp.Body.WebSocketDebuggerURL,
-				fmt.Sprintf("wss://%s", managerutils.GetSandboxAddress(sandboxID, controller.domain, int32(tt.expectedPort))))
+				fmt.Sprintf("wss://%s", GetSandboxAddress(sandboxID, controller.domain, int32(tt.expectedPort))))
 		})
 	}
 }
