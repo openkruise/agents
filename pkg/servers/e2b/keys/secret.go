@@ -190,16 +190,20 @@ func (k *secretKeyStorage) Stop() {
 func (k *secretKeyStorage) LoadByKey(_ context.Context, key string) (*models.CreatedTeamAPIKey, bool) {
 	value, ok := k.idxByKey.Load(key)
 	if !ok {
+		recordCacheMiss(storageLabelSecret, keyTypeByKey)
 		return nil, false
 	}
+	recordCacheHit(storageLabelSecret, keyTypeByKey)
 	return value.(*models.CreatedTeamAPIKey), true
 }
 
 func (k *secretKeyStorage) LoadByID(_ context.Context, id string) (*models.CreatedTeamAPIKey, bool) {
 	value, ok := k.idxByID.Load(id)
 	if !ok {
+		recordCacheMiss(storageLabelSecret, keyTypeByID)
 		return nil, false
 	}
+	recordCacheHit(storageLabelSecret, keyTypeByID)
 	return value.(*models.CreatedTeamAPIKey), true
 }
 
