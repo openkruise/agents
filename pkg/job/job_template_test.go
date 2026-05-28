@@ -83,6 +83,68 @@ func TestGenerateCommitJob_Success(t *testing.T) {
 		t.Errorf("namespace = %s, want default", job.Namespace)
 	}
 
+	// Check initContainer
+	if len(job.Spec.Template.Spec.InitContainers) != 1 {
+		t.Fatalf("expected 1 init container, got %d", len(job.Spec.Template.Spec.InitContainers))
+	}
+	ic := job.Spec.Template.Spec.InitContainers[0]
+	if ic.Name != "prepare-hosts-dir" {
+		t.Errorf("expected init container name 'prepare-hosts-dir', got %q", ic.Name)
+	}
+	// Verify TARGET_REGISTRY env
+	foundTargetReg := false
+	for _, env := range ic.Env {
+		if env.Name == EnvTargetRegistry && env.Value == "registry.example.com" {
+			foundTargetReg = true
+		}
+	}
+	if !foundTargetReg {
+		t.Error("expected TARGET_REGISTRY=registry.example.com in init container env")
+	}
+	// Verify initContainer volume mounts
+	foundOrigCerts, foundHostsDir := false, false
+	for _, m := range ic.VolumeMounts {
+		if m.Name == "host-containerd-certs" && m.MountPath == "/etc/containerd/certs.d.orig" && m.ReadOnly {
+			foundOrigCerts = true
+		}
+		if m.Name == "hosts-dir" && m.MountPath == "/etc/containerd/certs.d" && !m.ReadOnly {
+			foundHostsDir = true
+		}
+	}
+	if !foundOrigCerts {
+		t.Error("expected initContainer to mount host-containerd-certs at /etc/containerd/certs.d.orig (readOnly)")
+	}
+	if !foundHostsDir {
+		t.Error("expected initContainer to mount hosts-dir at /etc/containerd/certs.d (writable)")
+	}
+
+	// Check main container mounts hosts-dir, not host-containerd-certs directly
+	for _, m := range job.Spec.Template.Spec.Containers[0].VolumeMounts {
+		if m.Name == "host-containerd-certs" {
+			t.Error("main container should NOT directly mount host-containerd-certs")
+		}
+	}
+	foundMainHostsDir := false
+	for _, m := range job.Spec.Template.Spec.Containers[0].VolumeMounts {
+		if m.Name == "hosts-dir" && m.MountPath == "/etc/containerd/certs.d" && m.ReadOnly {
+			foundMainHostsDir = true
+		}
+	}
+	if !foundMainHostsDir {
+		t.Error("expected main container to mount hosts-dir at /etc/containerd/certs.d (readOnly)")
+	}
+
+	// Check hosts-dir emptyDir volume exists
+	foundEmptyDir := false
+	for _, v := range job.Spec.Template.Spec.Volumes {
+		if v.Name == "hosts-dir" && v.EmptyDir != nil {
+			foundEmptyDir = true
+		}
+	}
+	if !foundEmptyDir {
+		t.Error("expected hosts-dir emptyDir volume")
+	}
+
 	// Check node affinity
 	terms := job.Spec.Template.Spec.Affinity.NodeAffinity.
 		RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms
