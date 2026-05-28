@@ -30,7 +30,8 @@ import (
 //   - PropagateSecurityToken: no-op (no propagators registered).
 //
 // Enterprise deployment (secureIdentityProvider):
-//   - IssueToken: calls HTTPS identity provider service with default fallback.
+//   - IssueToken: calls HTTPS identity provider service; errors are surfaced
+//     directly (no silent degradation to UUID).
 //   - PropagateSecurityToken: executes registered propagators (e.g., write credential files).
 type IdentityProvider interface {
 	// IssueToken generates an access token for the given token request.

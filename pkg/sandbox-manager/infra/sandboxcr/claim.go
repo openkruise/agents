@@ -483,41 +483,17 @@ func pickFromCandidates(ctx context.Context, candidates []*v1alpha1.Sandbox, pic
 	return nil, errors.New("all candidates are picked")
 }
 
-// issueSecurityToken issues a security token for the given sandbox using the registered identity provider.
-// The issued access token is written into the sandbox's SecurityToken option for downstream consumption.
+// issueSecurityToken issues a security token for the given sandbox via
+// identity.IssueSandboxToken and writes the full issued token response into
+// the sandbox's SecurityToken option for downstream consumption (annotation
+// recording and runtime propagation).
 func issueSecurityToken(ctx context.Context, sbx *Sandbox, opts *infra.SecurityTokenOptions) (time.Duration, error) {
-	ctx = logs.Extend(ctx, "action", "issueSecurityToken")
-	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx.Sandbox))
-	start := time.Now()
-
-	sbxLabels := sbx.GetLabels()
-	metadata := make(map[string]string)
-	for k, v := range sbxLabels {
-		if strings.HasPrefix(k, utils.SecurityMetadataPrefix) {
-			metadata[k] = v
-		}
-	}
-
-	tokenResp, err := identity.IssueToken(ctx, identity.TokenRequest{
-		TokenType: identity.TokenTypeAgent,
-		Sandbox: &identity.SandboxInfo{
-			PodName:      sbx.Name,
-			PodNamespace: sbx.Namespace,
-			SandboxID:    fmt.Sprintf("%s/%s/%s", sbx.Namespace, sbx.Name, sbx.UID),
-			SandboxName:  sbx.Name,
-			SandboxUID:   string(sbx.UID),
-		},
-		Metadata: metadata,
-	})
+	tokenResp, cost, err := identity.IssueSandboxToken(ctx, sbx.Sandbox)
 	if err != nil {
-		log.Error(err, "failed to issue security token")
-		return time.Since(start), fmt.Errorf("failed to issue security token: %w", err)
+		return cost, err
 	}
-
-	// Write the full issued token response back into the options for downstream use
 	opts.TokenResponse = *tokenResp
-	log.Info("security token issued", "costTime", time.Since(start))
-	return time.Since(start), nil
+	return cost, nil
 }
 
 var FilteredAnnotationsOnCreation []string
