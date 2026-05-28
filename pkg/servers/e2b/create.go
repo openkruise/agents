@@ -28,14 +28,12 @@ import (
 	"k8s.io/klog/v2"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/csiutils"
-	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 	"github.com/openkruise/agents/pkg/utils/sandboxutils"
 	"github.com/openkruise/agents/pkg/utils/timeout"
 )
@@ -109,12 +107,6 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 			Image: extension.Image,
 		}
 		if extension.Resources != nil && (len(extension.Resources.Requests) > 0 || len(extension.Resources.Limits) > 0) {
-			if !utilfeature.DefaultFeatureGate.Enabled(features.SandboxInPlaceResourceResizeGate) {
-				return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
-					Code:    http.StatusBadRequest,
-					Message: fmt.Sprintf("in-place resource resize is disabled by feature gate %s", features.SandboxInPlaceResourceResizeGate),
-				}
-			}
 			opts.InplaceUpdate.Resources = &config.InplaceUpdateResourcesOptions{
 				Requests: extension.Resources.Requests,
 				Limits:   extension.Resources.Limits,

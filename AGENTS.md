@@ -37,8 +37,9 @@ client/            Generated clientset (DO NOT edit)
 config/            CRD, RBAC, manifests (generated)
 pkg/
   controller/      Controllers (sandbox, set, claim)
-  sandbox-manager/ Manager logic (infra, errors, logs)
-  servers/         E2B API, web framework
+  features/        Feature gates for controller (controller-only, MUST NOT be imported by sandbox-manager or servers)
+  sandbox-manager/ Manager logic (infra, errors, logs). MUST NOT import pkg/features.
+  servers/         E2B API, web framework. MUST NOT import pkg/features.
   proxy/           Envoy ext_proc gRPC server
   sandbox-gateway/ Envoy Go filter, route controller
   webhook/         Admission webhooks
