@@ -169,6 +169,14 @@ func (g *JobGenerator) GenerateCommitJob() (*batchv1.Job, error) {
 	rootUID := int64(0)
 	trueVal := true
 	backoff := int32(backoffLimit)
+
+	// Map CommitSpec.TimeoutSeconds to Job's ActiveDeadlineSeconds
+	var activeDeadlineSeconds *int64
+	if g.Commit.Spec.TimeoutSeconds > 0 {
+		deadline := int64(g.Commit.Spec.TimeoutSeconds)
+		activeDeadlineSeconds = &deadline
+	}
+
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      MakeJobName(string(g.Commit.UID)),
@@ -177,7 +185,7 @@ func (g *JobGenerator) GenerateCommitJob() (*batchv1.Job, error) {
 			OwnerReferences: []metav1.OwnerReference{
 				{
 					APIVersion:         v1alpha1.SchemeGroupVersion.String(),
-					Kind:               v1alpha1.CommitKind,
+					Kind:               "Commit",
 					Name:               g.Commit.Name,
 					UID:                g.Commit.UID,
 					Controller:         &trueVal,
@@ -186,7 +194,8 @@ func (g *JobGenerator) GenerateCommitJob() (*batchv1.Job, error) {
 			},
 		},
 		Spec: batchv1.JobSpec{
-			BackoffLimit: &backoff,
+			BackoffLimit:          &backoff,
+			ActiveDeadlineSeconds: activeDeadlineSeconds,
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: g.commitLabels(),

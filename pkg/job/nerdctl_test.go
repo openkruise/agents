@@ -68,6 +68,17 @@ func TestWithArgs_Multiple(t *testing.T) {
 	}
 }
 
+func TestWithStderr(t *testing.T) {
+	buf := &bytes.Buffer{}
+	cmd := exec.Command("echo")
+	opt := WithStderr(buf)
+	opt(cmd)
+
+	if cmd.Stderr != buf {
+		t.Error("expected Stderr to be set to buffer")
+	}
+}
+
 func TestNerdctlExec_BinaryNotFound(t *testing.T) {
 	// Override PATH to ensure nerdctl binary cannot be found
 	origPath := os.Getenv("PATH")

@@ -22,7 +22,6 @@ import (
 )
 
 const (
-	CommitKind      = "Commit"
 	CommitFinalizer = "agents.kruise.io/commit"
 )
 
@@ -34,6 +33,15 @@ const (
 	CommitRunning   CommitPhase = "Running"
 	CommitSucceeded CommitPhase = "Succeeded"
 	CommitFailed    CommitPhase = "Failed"
+)
+
+type CommitConditionType string
+
+const (
+	ConditionTypeCommitContainer    CommitConditionType = "CommitContainer"
+	ConditionTypePullBaseImage      CommitConditionType = "PullBaseImage"
+	ConditionTypePushCommittedImage CommitConditionType = "PushCommittedImage"
+	ConditionTypeNotFound           CommitConditionType = "CommitNotFound"
 )
 
 type CommitSpec struct {
@@ -48,6 +56,16 @@ type CommitSpec struct {
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="image is immutable"
 	Image string `json:"image"`
+
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:default=0
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="squashLayer is immutable"
+	SquashLayer int32 `json:"squashLayer,omitempty"`
+
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:default=0
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="timeoutSeconds is immutable"
+	TimeoutSeconds int32 `json:"timeoutSeconds,omitempty"`
 
 	// +kubebuilder:validation:Optional
 	Ttl *metav1.Duration `json:"ttl,omitempty"`

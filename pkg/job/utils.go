@@ -32,9 +32,12 @@ const (
 )
 
 const (
-	ExitCodeSuccess      = 0
-	ExitCodeCommitFailed = 1
-	ExitCodePushFailed   = 2
+	ExitCodeSuccess              = 0
+	ExitCodeCommitFailed         = 1
+	ExitCodeGetImageSizeFailed   = 2
+	ExitCodeParseImageSizeFailed = 3
+	ExitCodePushFailed           = 4
+	ExitCodeGetSandboxIDFailed   = 5
 )
 
 func MakeJobName(uid string) string {
@@ -59,34 +62,34 @@ type CommitConditionValue struct {
 }
 
 var CommitJobExitCodeMap = map[int32]CommitConditionValue{
-	ExitCodeSuccess:      {"PushCommittedImage", "PushCommittedImageSuccess"},
-	ExitCodeCommitFailed: {"CommitContainer", "CommitContainerFailed"},
-	ExitCodePushFailed:   {"PushCommittedImage", "PushCommittedImageFailed"},
+	ExitCodeSuccess:              {"PushCommittedImage", "PushCommittedImageSuccess"},
+	ExitCodeCommitFailed:         {"CommitContainer", "CommitContainerFailed"},
+	ExitCodeGetImageSizeFailed:   {"CommitContainer", "GetImageSizeFailed"},
+	ExitCodeParseImageSizeFailed: {"CommitContainer", "ParseImageSizeFailed"},
+	ExitCodePushFailed:           {"PushCommittedImage", "PushCommittedImageFailed"},
+	ExitCodeGetSandboxIDFailed:   {"CommitContainer", "GetSandboxIDFailed"},
 }
 
 func GetCommitCondition(pod *corev1.Pod) *metav1.Condition {
 	for _, cs := range pod.Status.ContainerStatuses {
-		// Only inspect the main commit container, skip sidecars or init containers
-		if cs.Name != "agent-job" {
-			continue
-		}
 		if cs.State.Terminated != nil {
-			exitCode := cs.State.Terminated.ExitCode
-			conditionValue, ok := CommitJobExitCodeMap[exitCode]
+			conditionValue, ok := CommitJobExitCodeMap[cs.State.Terminated.ExitCode]
 			if !ok {
-				conditionValue = CommitConditionValue{"CommitContainer", "UnknownExitCode"}
+				klog.InfoS("Unknown exit code, skipping condition", "containerID", cs.ContainerID, "exitCode", cs.State.Terminated.ExitCode)
+				return nil
 			}
-			klog.InfoS("Commit job exit", "containerID", cs.ContainerID, "exitCode", exitCode)
+			klog.InfoS("Commit Failed", "containerID", cs.ContainerID, "exitCode", cs.State.Terminated.ExitCode)
 			status := metav1.ConditionTrue
-			if exitCode != 0 {
+			if cs.State.Terminated.ExitCode != 0 {
 				status = metav1.ConditionFalse
 			}
-			return &metav1.Condition{
+			cond := &metav1.Condition{
 				Type:               conditionValue.conditionType,
 				Status:             status,
 				Reason:             conditionValue.conditionReason,
 				LastTransitionTime: metav1.Now(),
 			}
+			return cond
 		}
 	}
 	return nil

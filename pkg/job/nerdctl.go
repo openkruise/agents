@@ -42,6 +42,12 @@ func WithStdout(o io.Writer) CmdOpt {
 	}
 }
 
+func WithStderr(o io.Writer) CmdOpt {
+	return func(cmd *exec.Cmd) {
+		cmd.Stderr = o
+	}
+}
+
 // NerdctlExec executes a nerdctl command with the given options.
 func NerdctlExec(ctx context.Context, opts ...CmdOpt) error {
 	presetArgs := []string{
@@ -63,7 +69,12 @@ func NerdctlExec(ctx context.Context, opts ...CmdOpt) error {
 	stdErrBuf := &bytes.Buffer{}
 	cmd.Stderr = io.MultiWriter(cmd.Stderr, stdErrBuf)
 
-	klog.InfoS("nerdctl CMD", "args", cmd.Args)
+	// Mask credentials for login commands to avoid leaking secrets in logs.
+	if containsLogin(cmd.Args) {
+		klog.InfoS("nerdctl CMD: nerdctl login ***")
+	} else {
+		klog.InfoS("nerdctl CMD", "args", cmd.Args)
+	}
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start cmd failed: %w", err)
 	}
@@ -84,4 +95,14 @@ func NerdctlExec(ctx context.Context, opts ...CmdOpt) error {
 		return fmt.Errorf("nerdctl output: %q (%w)", stdErrBuf.String(), err)
 	}
 	return nil
+}
+
+// containsLogin checks if the command args contain a "login" subcommand.
+func containsLogin(args []string) bool {
+	for _, a := range args {
+		if a == "login" {
+			return true
+		}
+	}
+	return false
 }

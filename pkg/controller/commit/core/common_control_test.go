@@ -598,7 +598,7 @@ func TestGetLatestJobPodExitCode(t *testing.T) {
 			expectReason: "CommitContainerFailed",
 		},
 		{
-			name: "exit code 2 - push failed",
+			name: "exit code 2 - get image size failed",
 			pods: []corev1.Pod{
 				{
 					ObjectMeta: metav1.ObjectMeta{
@@ -623,9 +623,9 @@ func TestGetLatestJobPodExitCode(t *testing.T) {
 				},
 			},
 			expectNil:    false,
-			expectType:   "PushCommittedImage",
+			expectType:   "CommitContainer",
 			expectStatus: metav1.ConditionFalse,
-			expectReason: "PushCommittedImageFailed",
+			expectReason: "GetImageSizeFailed",
 		},
 		{
 			name: "exit code 6 - unknown exit code (not in map)",
@@ -652,10 +652,7 @@ func TestGetLatestJobPodExitCode(t *testing.T) {
 					},
 				},
 			},
-			expectNil:    false,
-			expectType:   "CommitContainer",
-			expectStatus: metav1.ConditionFalse,
-			expectReason: "UnknownExitCode",
+			expectNil: true,
 		},
 		{
 			name: "pod without terminated state",

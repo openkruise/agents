@@ -139,7 +139,7 @@ func TestGetCommitCondition(t *testing.T) {
 			expectReason: "CommitContainerFailed",
 		},
 		{
-			name: "exit code 2 (push failed)",
+			name: "exit code 2 (get image size failed)",
 			pod: &corev1.Pod{
 				Status: corev1.PodStatus{
 					ContainerStatuses: []corev1.ContainerStatus{
@@ -152,9 +152,79 @@ func TestGetCommitCondition(t *testing.T) {
 					},
 				},
 			},
+			expectType:   "CommitContainer",
+			expectStatus: metav1.ConditionFalse,
+			expectReason: "GetImageSizeFailed",
+		},
+		{
+			name: "exit code 3 (parse image size failed)",
+			pod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					ContainerStatuses: []corev1.ContainerStatus{
+						{
+							Name: "agent-job",
+							State: corev1.ContainerState{
+								Terminated: &corev1.ContainerStateTerminated{ExitCode: 3},
+							},
+						},
+					},
+				},
+			},
+			expectType:   "CommitContainer",
+			expectStatus: metav1.ConditionFalse,
+			expectReason: "ParseImageSizeFailed",
+		},
+		{
+			name: "exit code 4 (push failed)",
+			pod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					ContainerStatuses: []corev1.ContainerStatus{
+						{
+							Name: "agent-job",
+							State: corev1.ContainerState{
+								Terminated: &corev1.ContainerStateTerminated{ExitCode: 4},
+							},
+						},
+					},
+				},
+			},
 			expectType:   "PushCommittedImage",
 			expectStatus: metav1.ConditionFalse,
 			expectReason: "PushCommittedImageFailed",
+		},
+		{
+			name: "exit code 5 (get sandbox ID failed)",
+			pod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					ContainerStatuses: []corev1.ContainerStatus{
+						{
+							Name: "agent-job",
+							State: corev1.ContainerState{
+								Terminated: &corev1.ContainerStateTerminated{ExitCode: 5},
+							},
+						},
+					},
+				},
+			},
+			expectType:   "CommitContainer",
+			expectStatus: metav1.ConditionFalse,
+			expectReason: "GetSandboxIDFailed",
+		},
+		{
+			name: "exit code 6 (unknown exit code)",
+			pod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					ContainerStatuses: []corev1.ContainerStatus{
+						{
+							Name: "agent-job",
+							State: corev1.ContainerState{
+								Terminated: &corev1.ContainerStateTerminated{ExitCode: 6},
+							},
+						},
+					},
+				},
+			},
+			expectNil: true,
 		},
 		{
 			name: "no terminated container",
