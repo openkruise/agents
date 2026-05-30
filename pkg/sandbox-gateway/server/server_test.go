@@ -131,6 +131,19 @@ func TestNewServer(t *testing.T) {
 	}
 }
 
+func TestServerTimeouts(t *testing.T) {
+	s := NewServer(nil, 8080)
+	err := s.Start(t.Context())
+	// Start will fail because HOSTNAME is not set, but we only need to check if httpServer was created
+	assert.Error(t, err)
+	assert.NotNil(t, s.httpServer)
+	if s.httpServer != nil {
+		assert.Equal(t, "30s", s.httpServer.ReadTimeout.String())
+		assert.Equal(t, "2m0s", s.httpServer.WriteTimeout.String())
+		assert.Equal(t, "2m0s", s.httpServer.IdleTimeout.String())
+	}
+}
+
 func TestHandleRefresh_MethodNotAllowed(t *testing.T) {
 	s := &Server{}
 
