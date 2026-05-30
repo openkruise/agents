@@ -485,10 +485,11 @@ func TestCommonControl_EnsureSandboxPaused(t *testing.T) {
 	_ = agentsv1alpha1.AddToScheme(scheme)
 
 	tests := []struct {
-		name      string
-		args      EnsureFuncArgs
-		podExists bool
-		wantErr   bool
+		name          string
+		args          EnsureFuncArgs
+		podExists     bool
+		wantErr       bool
+		expectedPhase agentsv1alpha1.SandboxPhase
 	}{
 		{
 			name: "pod does not exist, should mark paused",
@@ -501,6 +502,7 @@ func TestCommonControl_EnsureSandboxPaused(t *testing.T) {
 					},
 				},
 				NewStatus: &agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxPausing,
 					Conditions: []metav1.Condition{
 						{
 							Type:               string(agentsv1alpha1.SandboxConditionReady),
@@ -511,8 +513,9 @@ func TestCommonControl_EnsureSandboxPaused(t *testing.T) {
 					},
 				},
 			},
-			podExists: false,
-			wantErr:   false,
+			podExists:     false,
+			wantErr:       false,
+			expectedPhase: agentsv1alpha1.SandboxPaused,
 		},
 		{
 			name: "pod exists but being deleted, should wait",
@@ -532,6 +535,7 @@ func TestCommonControl_EnsureSandboxPaused(t *testing.T) {
 					},
 				},
 				NewStatus: &agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxPausing,
 					Conditions: []metav1.Condition{
 						{
 							Type:               string(agentsv1alpha1.SandboxConditionReady),
@@ -542,8 +546,9 @@ func TestCommonControl_EnsureSandboxPaused(t *testing.T) {
 					},
 				},
 			},
-			podExists: true,
-			wantErr:   false,
+			podExists:     true,
+			wantErr:       false,
+			expectedPhase: agentsv1alpha1.SandboxPausing,
 		},
 		{
 			name: "pod exists, should delete it",
@@ -561,6 +566,7 @@ func TestCommonControl_EnsureSandboxPaused(t *testing.T) {
 					},
 				},
 				NewStatus: &agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxPausing,
 					Conditions: []metav1.Condition{
 						{
 							Type:               string(agentsv1alpha1.SandboxConditionReady),
@@ -571,8 +577,9 @@ func TestCommonControl_EnsureSandboxPaused(t *testing.T) {
 					},
 				},
 			},
-			podExists: true,
-			wantErr:   false,
+			podExists:     true,
+			wantErr:       false,
+			expectedPhase: agentsv1alpha1.SandboxPausing,
 		},
 	}
 
@@ -594,6 +601,9 @@ func TestCommonControl_EnsureSandboxPaused(t *testing.T) {
 			if (err != nil) != tt.wantErr {
 				t.Errorf("EnsureSandboxPaused() error = %v, wantErr %v", err, tt.wantErr)
 				return
+			}
+			if tt.args.NewStatus.Phase != tt.expectedPhase {
+				t.Errorf("EnsureSandboxPaused() phase = %s, want %s", tt.args.NewStatus.Phase, tt.expectedPhase)
 			}
 
 			// Verify pod was deleted if it existed initially

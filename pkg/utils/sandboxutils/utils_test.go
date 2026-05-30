@@ -252,14 +252,44 @@ func TestGetSandboxState(t *testing.T) {
 			expectedReason: "RunningResourceClaimedButNotReady",
 		},
 		{
-			name: "Not Running Sandbox claimed",
+			name: "Pausing Sandbox claimed",
+			sandbox: &agentsv1alpha1.Sandbox{
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxPausing,
+				},
+			},
+			expectedState:  agentsv1alpha1.SandboxStatePaused,
+			expectedReason: "PausedOrResumingResourceClaimed",
+		},
+		{
+			name: "Paused Sandbox claimed",
 			sandbox: &agentsv1alpha1.Sandbox{
 				Status: agentsv1alpha1.SandboxStatus{
 					Phase: agentsv1alpha1.SandboxPaused,
 				},
 			},
 			expectedState:  agentsv1alpha1.SandboxStatePaused,
-			expectedReason: "NotRunningResourceClaimed",
+			expectedReason: "PausedOrResumingResourceClaimed",
+		},
+		{
+			name: "Resuming Sandbox claimed",
+			sandbox: &agentsv1alpha1.Sandbox{
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxResuming,
+				},
+			},
+			expectedState:  agentsv1alpha1.SandboxStatePaused,
+			expectedReason: "PausedOrResumingResourceClaimed",
+		},
+		{
+			name: "Upgrading Sandbox claimed",
+			sandbox: &agentsv1alpha1.Sandbox{
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxUpgrading,
+				},
+			},
+			expectedState:  agentsv1alpha1.SandboxStateRunning,
+			expectedReason: "UpgradingResourceClaimed",
 		},
 	}
 
@@ -437,7 +467,7 @@ func TestIsSandboxPausable(t *testing.T) {
 				},
 			},
 			expectedResult: true,
-			expectedReason: "SandboxIsRunningOrPaused",
+			expectedReason: "SandboxIsPausablePhase",
 		},
 		{
 			name: "Paused sandbox is pausable",
@@ -447,17 +477,17 @@ func TestIsSandboxPausable(t *testing.T) {
 				},
 			},
 			expectedResult: true,
-			expectedReason: "SandboxIsRunningOrPaused",
+			expectedReason: "SandboxIsPausablePhase",
 		},
 		{
-			name: "Pending sandbox is not pausable",
+			name: "Pending sandbox is pausable",
 			sandbox: &agentsv1alpha1.Sandbox{
 				Status: agentsv1alpha1.SandboxStatus{
 					Phase: agentsv1alpha1.SandboxPending,
 				},
 			},
-			expectedResult: false,
-			expectedReason: "SandboxPhaseNotAllowed",
+			expectedResult: true,
+			expectedReason: "SandboxIsPausablePhase",
 		},
 	}
 

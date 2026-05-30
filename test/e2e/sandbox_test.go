@@ -25,6 +25,7 @@ import (
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/rand"
@@ -250,7 +251,16 @@ var _ = Describe("Sandbox", func() {
 			originalSandbox.Spec.Paused = true
 			Expect(updateSandboxSpec(ctx, originalSandbox)).To(Succeed())
 
-			By("Verifying sandbox transitions to Paused phase")
+			By("Verifying sandbox transitions to Pausing phase")
+			Eventually(func() agentsv1alpha1.SandboxPhase {
+				_ = k8sClient.Get(ctx, types.NamespacedName{
+					Name:      sandbox.Name,
+					Namespace: sandbox.Namespace,
+				}, sandbox)
+				return sandbox.Status.Phase
+			}, time.Second*30, time.Millisecond*500).Should(Equal(agentsv1alpha1.SandboxPausing))
+
+			By("Verifying sandbox transitions to Paused phase after pause completes")
 			Eventually(func() agentsv1alpha1.SandboxPhase {
 				_ = k8sClient.Get(ctx, types.NamespacedName{
 					Name:      sandbox.Name,
@@ -258,6 +268,9 @@ var _ = Describe("Sandbox", func() {
 				}, sandbox)
 				return sandbox.Status.Phase
 			}, time.Second*30, time.Millisecond*500).Should(Equal(agentsv1alpha1.SandboxPaused))
+			pausedCond := meta.FindStatusCondition(sandbox.Status.Conditions, string(agentsv1alpha1.SandboxConditionPaused))
+			Expect(pausedCond).NotTo(BeNil())
+			Expect(pausedCond.Status).To(Equal(metav1.ConditionTrue))
 
 			By("Verifying the associated pod is deleted when paused")
 			Eventually(func() bool {
