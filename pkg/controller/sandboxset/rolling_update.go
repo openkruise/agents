@@ -227,33 +227,63 @@ func (r *Reconciler) performRollingUpdate(
 }
 
 // deleteSandboxForUpdate deletes a sandbox as part of rolling update.
+// It re-fetches the sandbox to prevent TOCTOU race conditions with concurrent claims.
 func (r *Reconciler) deleteSandboxForUpdate(ctx context.Context, sbs *agentsv1alpha1.SandboxSet, sbx *agentsv1alpha1.Sandbox, lock string) error {
 	log := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
 	log.V(consts.DebugLogLevel).Info("deleting sandbox for rolling update")
 
-	if sbx.DeletionTimestamp != nil {
+	// Re-fetch the sandbox to get the latest state and prevent TOCTOU race conditions
+	// This ensures we check the current claim status, not the stale state from buildUpdateGroups
+	freshSandbox := &agentsv1alpha1.Sandbox{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(sbx), freshSandbox); err != nil {
+		if apierrors.IsNotFound(err) {
+			log.Info("sandbox already deleted, skip")
+			return nil
+		}
+		return fmt.Errorf("failed to re-fetch sandbox before deletion: %w", err)
+	}
+
+	// Check if sandbox is already being deleted
+	if freshSandbox.DeletionTimestamp != nil {
+		log.Info("sandbox already has deletion timestamp, skip")
 		return nil
 	}
-	if sbx.Annotations[agentsv1alpha1.AnnotationLock] != "" && sbx.Annotations[agentsv1alpha1.AnnotationOwner] != consts.OwnerManagerScaleDown {
-		log.Info("sandbox to be deleted claimed before performed, skip")
-		return errors.New("sandbox to be deleted claimed before performed, skip")
+
+	// Re-verify that the sandbox is not claimed (critical race condition check)
+	if isSandboxClaimed(freshSandbox) {
+		log.Info("sandbox was claimed after selection for deletion, skip to prevent data loss")
+		return errors.New("sandbox was claimed after selection for deletion, skip")
 	}
 
-	// Deep copy the sandbox before mutating it to avoid corrupting the informer cache.
-	sbx = sbx.DeepCopy()
-
-	managerutils.LockSandbox(sbx, lock, consts.OwnerManagerScaleDown)
-	if err := r.Update(ctx, sbx); err != nil {
-		return fmt.Errorf("failed to lock sandbox when delete: %s", err)
+	// Check if sandbox is locked by another operation
+	if freshSandbox.Annotations[agentsv1alpha1.AnnotationLock] != "" &&
+		freshSandbox.Annotations[agentsv1alpha1.AnnotationOwner] != consts.OwnerManagerScaleDown {
+		log.Info("sandbox locked by another operation, skip",
+			"owner", freshSandbox.Annotations[agentsv1alpha1.AnnotationOwner])
+		return errors.New("sandbox locked by another operation, skip")
 	}
-	if err := r.Delete(ctx, sbx); err != nil {
+
+	// Lock the sandbox for deletion
+	managerutils.LockSandbox(freshSandbox, lock, consts.OwnerManagerScaleDown)
+	if err := r.Update(ctx, freshSandbox); err != nil {
+		if apierrors.IsConflict(err) {
+			log.Info("conflict updating sandbox lock, will retry", "error", err)
+			return fmt.Errorf("conflict locking sandbox (concurrent modification): %w", err)
+		}
+		return fmt.Errorf("failed to lock sandbox when delete: %w", err)
+	}
+
+	// Delete the sandbox
+	if err := r.Delete(ctx, freshSandbox); err != nil {
 		if apierrors.IsNotFound(err) {
+			log.Info("sandbox not found during deletion, already deleted")
 			return nil
 		}
 		log.Error(err, "failed to delete sandbox for rolling update")
 		return err
 	}
 
-	r.Recorder.Eventf(sbs, "Normal", "RollingUpdate", "Deleted sandbox %s for update", klog.KObj(sbx))
+	r.Recorder.Eventf(sbs, "Normal", "RollingUpdate", "Deleted sandbox %s for update", klog.KObj(freshSandbox))
+	log.Info("sandbox successfully deleted for rolling update")
 	return nil
 }
