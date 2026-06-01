@@ -22,7 +22,7 @@ package v1alpha1
 
 import (
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
@@ -224,7 +224,7 @@ func (in *CommitSpec) DeepCopyInto(out *CommitSpec) {
 	*out = *in
 	if in.Ttl != nil {
 		in, out := &in.Ttl, &out.Ttl
-		*out = new(v1.Duration)
+		*out = new(metav1.Duration)
 		**out = **in
 	}
 	if in.PushSecrets != nil {
@@ -249,7 +249,7 @@ func (in *CommitStatus) DeepCopyInto(out *CommitStatus) {
 	*out = *in
 	if in.Conditions != nil {
 		in, out := &in.Conditions, &out.Conditions
-		*out = make([]v1.Condition, len(*in))
+		*out = make([]metav1.Condition, len(*in))
 		for i := range *in {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
@@ -499,12 +499,12 @@ func (in *SandboxClaimSpec) DeepCopyInto(out *SandboxClaimSpec) {
 	}
 	if in.ClaimTimeout != nil {
 		in, out := &in.ClaimTimeout, &out.ClaimTimeout
-		*out = new(v1.Duration)
+		*out = new(metav1.Duration)
 		**out = **in
 	}
 	if in.TTLAfterCompleted != nil {
 		in, out := &in.TTLAfterCompleted, &out.TTLAfterCompleted
-		*out = new(v1.Duration)
+		*out = new(metav1.Duration)
 		**out = **in
 	}
 	if in.Labels != nil {
@@ -545,7 +545,7 @@ func (in *SandboxClaimSpec) DeepCopyInto(out *SandboxClaimSpec) {
 	}
 	if in.WaitReadyTimeout != nil {
 		in, out := &in.WaitReadyTimeout, &out.WaitReadyTimeout
-		*out = new(v1.Duration)
+		*out = new(metav1.Duration)
 		**out = **in
 	}
 }
@@ -573,7 +573,7 @@ func (in *SandboxClaimStatus) DeepCopyInto(out *SandboxClaimStatus) {
 	}
 	if in.Conditions != nil {
 		in, out := &in.Conditions, &out.Conditions
-		*out = make([]v1.Condition, len(*in))
+		*out = make([]metav1.Condition, len(*in))
 		for i := range *in {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
@@ -759,7 +759,7 @@ func (in *SandboxSetStatus) DeepCopyInto(out *SandboxSetStatus) {
 	*out = *in
 	if in.Conditions != nil {
 		in, out := &in.Conditions, &out.Conditions
-		*out = make([]v1.Condition, len(*in))
+		*out = make([]metav1.Condition, len(*in))
 		for i := range *in {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
@@ -845,7 +845,7 @@ func (in *SandboxStatus) DeepCopyInto(out *SandboxStatus) {
 	*out = *in
 	if in.Conditions != nil {
 		in, out := &in.Conditions, &out.Conditions
-		*out = make([]v1.Condition, len(*in))
+		*out = make([]metav1.Condition, len(*in))
 		for i := range *in {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
@@ -1047,7 +1047,7 @@ func (in *SandboxUpdateOpsSpec) DeepCopyInto(out *SandboxUpdateOpsSpec) {
 	*out = *in
 	if in.Selector != nil {
 		in, out := &in.Selector, &out.Selector
-		*out = new(v1.LabelSelector)
+		*out = new(metav1.LabelSelector)
 		(*in).DeepCopyInto(*out)
 	}
 	in.UpdateStrategy.DeepCopyInto(&out.UpdateStrategy)
@@ -1074,7 +1074,7 @@ func (in *SandboxUpdateOpsStatus) DeepCopyInto(out *SandboxUpdateOpsStatus) {
 	*out = *in
 	if in.Conditions != nil {
 		in, out := &in.Conditions, &out.Conditions
-		*out = make([]v1.Condition, len(*in))
+		*out = make([]metav1.Condition, len(*in))
 		for i := range *in {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
