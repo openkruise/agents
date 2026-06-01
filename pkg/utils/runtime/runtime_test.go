@@ -31,12 +31,13 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
-	"github.com/openkruise/agents/pkg/utils"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
+
+	"github.com/openkruise/agents/pkg/utils"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
@@ -1032,6 +1033,93 @@ func TestGetRuntimeURL(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.expected, GetRuntimeURL(tt.sandbox))
+		})
+	}
+}
+
+// TestChmodFileOnRuntime is a table-driven contract test for ChmodFileOnRuntime.
+// It pins three behaviors:
+//  1. The function delegates to RunCommandWithRuntime with cmd="chmod" and
+//     args=[mode, filePath] in that exact order;
+//  2. A non-zero exit code surfaces as an error containing the exit code and stderr,
+//     and the underlying transport error path is wrapped with "chmod command failed";
+//  3. Missing runtime URL on the sandbox short-circuits to a wrapped error,
+//     i.e. it does not panic and does not silently succeed.
+func TestChmodFileOnRuntime(t *testing.T) {
+	tests := []struct {
+		name     string
+		filePath string
+		mode     string
+		// startFn is the mock Process.Start handler. When nil, the test uses a
+		// sandbox without runtime URL to exercise the short-circuit path.
+		startFn      func(ctx context.Context, req *connect.Request[process.StartRequest], stream *connect.ServerStream[process.StartResponse]) error
+		noRuntimeURL bool
+		expectError  string // empty means no error expected; otherwise err.Error() must contain this
+	}{
+		{
+			name:     "success: exit code 0 returns nil and forwards correct cmd/args",
+			filePath: "/var/opt/sandbox/agent-token/access.token",
+			mode:     "0600",
+			startFn: func(_ context.Context, req *connect.Request[process.StartRequest], stream *connect.ServerStream[process.StartResponse]) error {
+				// Contract: cmd is "chmod", args are [mode, filePath] in that order.
+				cfg := req.Msg.GetProcess()
+				if cfg == nil || cfg.Cmd != "chmod" {
+					return fmt.Errorf("expected cmd=chmod, got %+v", cfg)
+				}
+				if len(cfg.Args) != 2 || cfg.Args[0] != "0600" || cfg.Args[1] != "/var/opt/sandbox/agent-token/access.token" {
+					return fmt.Errorf("unexpected args, got %v", cfg.Args)
+				}
+				return stream.Send(&process.StartResponse{Event: &process.ProcessEvent{
+					Event: &process.ProcessEvent_End{End: &process.ProcessEvent_EndEvent{ExitCode: 0, Exited: true}},
+				}})
+			},
+			expectError: "",
+		},
+		{
+			name:     "non-zero exit surfaces stderr and exit code",
+			filePath: "/etc/shadow",
+			mode:     "0644",
+			startFn: func(_ context.Context, _ *connect.Request[process.StartRequest], stream *connect.ServerStream[process.StartResponse]) error {
+				if err := stream.Send(&process.StartResponse{Event: &process.ProcessEvent{
+					Event: &process.ProcessEvent_Data{Data: &process.ProcessEvent_DataEvent{
+						Output: &process.ProcessEvent_DataEvent_Stderr{Stderr: []byte("Operation not permitted")},
+					}},
+				}}); err != nil {
+					return err
+				}
+				return stream.Send(&process.StartResponse{Event: &process.ProcessEvent{
+					Event: &process.ProcessEvent_End{End: &process.ProcessEvent_EndEvent{ExitCode: 1, Exited: true}},
+				}})
+			},
+			expectError: "chmod exited with code 1",
+		},
+		{
+			name:         "missing runtime URL is wrapped as chmod command failed",
+			filePath:     "/tmp/x",
+			mode:         "0600",
+			noRuntimeURL: true,
+			expectError:  "chmod command failed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var sbx *agentsv1alpha1.Sandbox
+			if tt.noRuntimeURL {
+				sbx = &agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{Name: "test-sandbox", Namespace: "default"},
+				}
+			} else {
+				_, sbx = newMockRuntimeServer(t, &mockProcessHandler{startFn: tt.startFn})
+			}
+
+			err := ChmodFileOnRuntime(context.Background(), sbx, tt.filePath, tt.mode)
+			if tt.expectError == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.expectError)
 		})
 	}
 }

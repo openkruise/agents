@@ -23,6 +23,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/url"
+	"os"
 	"path"
 	"strings"
 	"time"
@@ -137,6 +138,27 @@ func RunCommandWithRuntime(ctx context.Context, args RunCmdFuncArgs) (RunCommand
 	return result, errors.Join(result.Error, stream.Err())
 }
 
+// ChmodFileOnRuntime executes `chmod <mode> <filePath>` inside the sandbox runtime
+// via RunCommandWithRuntime. This is a temporary measure to enforce file permissions
+// until the agent-runtime (envd) natively honors the X-File-Mode header.
+func ChmodFileOnRuntime(ctx context.Context, sbx *agentsv1alpha1.Sandbox, filePath, mode string) error {
+	result, err := RunCommandWithRuntime(ctx, RunCmdFuncArgs{
+		Sbx: sbx,
+		ProcessConfig: &process.ProcessConfig{
+			Cmd:  "chmod",
+			Args: []string{mode, filePath},
+		},
+		Timeout: 5 * time.Second,
+	})
+	if err != nil {
+		return fmt.Errorf("chmod command failed: %w", err)
+	}
+	if result.ExitCode != 0 {
+		return fmt.Errorf("chmod exited with code %d: stderr=%v", result.ExitCode, result.Stderr)
+	}
+	return nil
+}
+
 // WriteFileArgs are the arguments accepted by WriteFileWithRuntime.
 type WriteFileArgs struct {
 	// Sbx is the target sandbox. Its annotations supply the runtime URL and access token,
@@ -154,6 +176,11 @@ type WriteFileArgs struct {
 	// Timeout bounds the duration of a single HTTP write request. Defaults to
 	// defaultRuntimeWriteTimeout when zero or negative.
 	Timeout time.Duration
+	// Permissions is the UNIX file mode applied to the written file by the runtime after
+	// creation (e.g. 0600 for credential files, 0644 for non-sensitive files). When zero,
+	// the runtime applies its default permissions (typically 0644 derived from umask).
+	// Transmitted to the agent-runtime via the X-File-Mode HTTP header as an octal string.
+	Permissions os.FileMode
 }
 
 // WriteFileResult carries metadata about a write call. The HTTP response body is drained
