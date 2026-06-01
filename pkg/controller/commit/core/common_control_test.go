@@ -760,6 +760,126 @@ func TestApplyCommitJob_EmptyContainerID(t *testing.T) {
 	}
 }
 
+// --- resolveRegistrySecretByKeyring tests (Tier 2) ---
+
+func TestResolveRegistrySecretByKeyring_NoDockerSecrets(t *testing.T) {
+	scheme := newTestScheme()
+	fc := fake.NewClientBuilder().WithScheme(scheme).Build()
+	ctrl := newCommonControlForTest(fc)
+
+	commit := newTestCommit("test-commit", "default")
+	name := ctrl.resolveRegistrySecretByKeyring(context.TODO(), commit)
+	if name != "" {
+		t.Errorf("expected empty when no docker secrets exist, got %q", name)
+	}
+}
+
+func TestResolveRegistrySecretByKeyring_WithDockerSecret(t *testing.T) {
+	scheme := newTestScheme()
+	secret := newDockerConfigSecret("ns-docker-secret", "default")
+	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
+	ctrl := newCommonControlForTest(fc)
+
+	commit := newTestCommit("test-commit", "default")
+	name := ctrl.resolveRegistrySecretByKeyring(context.TODO(), commit)
+	// Should return the secret name via fallback or source tracking
+	if name != "ns-docker-secret" {
+		t.Errorf("expected 'ns-docker-secret', got %q", name)
+	}
+}
+
+func TestResolveRegistrySecretByKeyring_OpaqueSecretIgnored(t *testing.T) {
+	scheme := newTestScheme()
+	// Only add an Opaque secret — should be filtered out
+	opaqueSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "opaque-secret", Namespace: "default"},
+		Type:       corev1.SecretTypeOpaque,
+		Data:       map[string][]byte{"key": []byte("value")},
+	}
+	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(opaqueSecret).Build()
+	ctrl := newCommonControlForTest(fc)
+
+	commit := newTestCommit("test-commit", "default")
+	name := ctrl.resolveRegistrySecretByKeyring(context.TODO(), commit)
+	if name != "" {
+		t.Errorf("expected empty when only opaque secrets exist, got %q", name)
+	}
+}
+
+func TestResolveRegistrySecretByKeyring_EmptyRegistryHost(t *testing.T) {
+	scheme := newTestScheme()
+	fc := fake.NewClientBuilder().WithScheme(scheme).Build()
+	ctrl := newCommonControlForTest(fc)
+
+	commit := newTestCommit("test-commit", "default")
+	commit.Spec.Image = "INVALID:::image" // unparseable -> empty registry host
+	name := ctrl.resolveRegistrySecretByKeyring(context.TODO(), commit)
+	if name != "" {
+		t.Errorf("expected empty for invalid image, got %q", name)
+	}
+}
+
+// --- resolveRegistrySecretName Tier 3 edge cases ---
+
+func TestResolveRegistrySecretName_Tier3_NilPod(t *testing.T) {
+	scheme := newTestScheme()
+	sa := &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: "default"},
+	}
+	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(sa).Build()
+	ctrl := newCommonControlForTest(fc)
+
+	commit := newTestCommit("test-commit", "default")
+	// pod is nil — Tier 3 should be skipped entirely
+	name := ctrl.resolveRegistrySecretName(context.TODO(), commit, nil)
+	if name != "" {
+		t.Errorf("expected empty when pod is nil and no Tier 1/2 match, got %q", name)
+	}
+}
+
+func TestResolveRegistrySecretName_Tier3_CustomSA(t *testing.T) {
+	scheme := newTestScheme()
+	secret := newDockerConfigSecret("custom-sa-secret", "default")
+	sa := &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{Name: "custom-sa", Namespace: "default"},
+		ImagePullSecrets: []corev1.LocalObjectReference{
+			{Name: "custom-sa-secret"},
+		},
+	}
+	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret, sa).Build()
+	ctrl := newCommonControlForTest(fc)
+
+	commit := newTestCommit("test-commit", "default")
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pod", Namespace: "default"},
+		Spec: corev1.PodSpec{
+			NodeName:           "node-1",
+			ServiceAccountName: "custom-sa",
+		},
+	}
+
+	name := ctrl.resolveRegistrySecretName(context.TODO(), commit, pod)
+	if name != "custom-sa-secret" {
+		t.Errorf("expected 'custom-sa-secret', got %q", name)
+	}
+}
+
+func TestResolveRegistrySecretName_Tier3_DefaultSANotFound(t *testing.T) {
+	scheme := newTestScheme()
+	// No ServiceAccount created — Get will return NotFound, Tier 3 skipped
+	fc := fake.NewClientBuilder().WithScheme(scheme).Build()
+	ctrl := newCommonControlForTest(fc)
+
+	commit := newTestCommit("test-commit", "default")
+	pod := newTestPod("test-pod", "default", "node-1")
+	// pod has ServiceAccountName "default" but SA doesn't exist
+
+	name := ctrl.resolveRegistrySecretName(context.TODO(), commit, pod)
+	if name != "" {
+		t.Errorf("expected empty when default SA not found, got %q", name)
+	}
+}
+
 // --- extractRegistryHost tests ---
 
 func TestExtractRegistryHost(t *testing.T) {

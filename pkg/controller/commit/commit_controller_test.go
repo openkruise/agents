@@ -467,3 +467,135 @@ func TestGetControl_UnknownMode(t *testing.T) {
 		t.Error("expected error for unknown mode")
 	}
 }
+
+func TestGetControl_EmptyDefault(t *testing.T) {
+	r := &CommitReconciler{
+		controls: map[string]core.CommitControl{},
+	}
+	commit := newCommit("test", "default", agentsv1alpha1.CommitPending)
+
+	_, err := r.getControl(commit)
+	if err == nil {
+		t.Error("expected error when default common control is missing")
+	}
+}
+
+// errorReader is a client.Reader that returns a non-NotFound error for Pod Get.
+type errorReader struct {
+	client.Reader
+	err error
+}
+
+func (e *errorReader) Get(_ context.Context, _ client.ObjectKey, obj client.Object, _ ...client.GetOption) error {
+	if _, ok := obj.(*corev1.Pod); ok {
+		return e.err
+	}
+	return e.Reader.Get(context.TODO(), client.ObjectKey{}, obj)
+}
+
+func TestReconcile_PodGetNonNotFoundError(t *testing.T) {
+	commit := newCommit("test-commit", "default", agentsv1alpha1.CommitPending)
+	r, _ := newTestReconciler(commit)
+	r.APIReader = &errorReader{Reader: r.Client, err: fmt.Errorf("connection refused")}
+
+	_, err := r.Reconcile(context.TODO(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-commit", Namespace: "default"},
+	})
+	if err == nil {
+		t.Fatal("expected error for non-NotFound pod fetch failure")
+	}
+}
+
+func TestReconcile_UnknownPhase(t *testing.T) {
+	commit := newCommit("test-commit", "default", agentsv1alpha1.CommitPhase("UnknownPhase"))
+	commit.Finalizers = []string{agentsv1alpha1.CommitFinalizer}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pod", Namespace: "default"},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	r, _ := newTestReconciler(commit, pod)
+
+	result, err := r.Reconcile(context.TODO(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-commit", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error for unknown phase: %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Errorf("expected no requeue for unknown phase, got %v", result.RequeueAfter)
+	}
+}
+
+func TestReconcile_AddFinalizer(t *testing.T) {
+	commit := newCommit("test-commit", "default", agentsv1alpha1.CommitPending)
+	// No finalizer — Reconcile should add it
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pod", Namespace: "default"},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	r, mock := newTestReconciler(commit, pod)
+	mock.setPhaseOnRunning = agentsv1alpha1.CommitRunning
+
+	_, err := r.Reconcile(context.TODO(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-commit", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify finalizer was added
+	updated := &agentsv1alpha1.Commit{}
+	_ = r.Get(context.TODO(), client.ObjectKey{Name: "test-commit", Namespace: "default"}, updated)
+	found := false
+	for _, f := range updated.Finalizers {
+		if f == agentsv1alpha1.CommitFinalizer {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected CommitFinalizer to be added")
+	}
+}
+
+func TestReconcile_HandlePendingError(t *testing.T) {
+	commit := newCommit("test-commit", "default", agentsv1alpha1.CommitPending)
+	commit.Finalizers = []string{agentsv1alpha1.CommitFinalizer}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pod", Namespace: "default"},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	r, mock := newTestReconciler(commit, pod)
+	mock.ensureRunningErr = fmt.Errorf("job creation failed")
+
+	_, err := r.Reconcile(context.TODO(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-commit", Namespace: "default"},
+	})
+	if err == nil {
+		t.Fatal("expected error when EnsureCommitRunning fails")
+	}
+	if !mock.runningCalled {
+		t.Error("expected EnsureCommitRunning to be called")
+	}
+}
+
+func TestGetControl_AnnotationModeEmptyValue(t *testing.T) {
+	mock := &mockControl{}
+	r := &CommitReconciler{
+		controls: map[string]core.CommitControl{
+			core.CommonControlName: mock,
+		},
+	}
+	commit := newCommit("test", "default", agentsv1alpha1.CommitPending)
+	commit.Annotations = map[string]string{
+		utils.CommitAnnotationModeKey: "",
+	}
+
+	ctrl, err := r.getControl(commit)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ctrl != mock {
+		t.Error("expected default common control when annotation value is empty")
+	}
+}
