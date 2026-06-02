@@ -195,6 +195,46 @@ func setTimeout(s *agentsv1alpha1.Sandbox, opts timeout.Options) {
 	}
 }
 
+// annotationsDiffer reports whether applying changes would mutate current.
+// An empty value in changes signals deletion: it differs only if the key exists.
+// A non-empty value differs if the current map lacks the key or holds a different value.
+// A nil/empty changes map never differs.
+func annotationsDiffer(current map[string]string, changes map[string]string) bool {
+	for k, v := range changes {
+		existing, ok := current[k]
+		if v == "" {
+			if ok {
+				return true
+			}
+			continue
+		}
+		if !ok || existing != v {
+			return true
+		}
+	}
+	return false
+}
+
+// applyAnnotations merges changes into sbx.Annotations in place. An empty value
+// deletes the corresponding key. Caller must ensure annotationsDiffer reported
+// true; this function unconditionally mutates the map and is meant to run inside
+// a retryUpdate modifier together with setTimeout.
+func applyAnnotations(sbx *agentsv1alpha1.Sandbox, changes map[string]string) {
+	if len(changes) == 0 {
+		return
+	}
+	if sbx.Annotations == nil {
+		sbx.Annotations = make(map[string]string, len(changes))
+	}
+	for k, v := range changes {
+		if v == "" {
+			delete(sbx.Annotations, k)
+		} else {
+			sbx.Annotations[k] = v
+		}
+	}
+}
+
 func (s *Sandbox) SetTimeout(opts timeout.Options) {
 	setTimeout(s.Sandbox, opts)
 }
@@ -237,20 +277,27 @@ func (s *Sandbox) SaveTimeoutWithPolicy(ctx context.Context, opts timeout.Option
 		current := timeout.GetTimeoutFromSandbox(sbx)
 		log.Info("data fetched before saving timeout", "current", current)
 
-		shouldUpdate := false
+		timeoutChanged := false
 		switch policy {
 		case timeout.UpdatePolicyAlways:
-			shouldUpdate = !timeout.Equal(current, opts)
+			timeoutChanged = !timeout.Equal(current, opts)
 		case timeout.UpdatePolicyExtendOnly:
-			shouldUpdate = timeout.ShouldExtendTimeout(current, opts)
+			timeoutChanged = timeout.ShouldExtendTimeout(current, opts)
 		default:
 			return false, fmt.Errorf("unsupported timeout update policy %q", policy)
 		}
 
-		if !shouldUpdate {
+		annotationsChanged := annotationsDiffer(sbx.Annotations, opts.SetAnnotations)
+
+		if !timeoutChanged && !annotationsChanged {
 			return false, nil
 		}
-		setTimeout(sbx, opts)
+		if timeoutChanged {
+			setTimeout(sbx, opts)
+		}
+		if annotationsChanged {
+			applyAnnotations(sbx, opts.SetAnnotations)
+		}
 		return true, nil
 	})
 	if err != nil {

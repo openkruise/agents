@@ -22,6 +22,13 @@ import "time"
 type Options struct {
 	ShutdownTime time.Time
 	PauseTime    time.Time
+	// SetAnnotations is applied to metadata.annotations in the same retryUpdate round
+	// that writes ShutdownTime / PauseTime. Empty-string values delete the key. Callers
+	// pass it via Sandbox.SaveTimeoutWithPolicy; the modifier writes annotations when
+	// they differ, independently of whether the timeout policy decides to write.
+	// json:"-" because Options has no wire form today and SetAnnotations should never
+	// leak into one if a wire form is added later.
+	SetAnnotations map[string]string `json:"-"`
 }
 
 type UpdatePolicy string

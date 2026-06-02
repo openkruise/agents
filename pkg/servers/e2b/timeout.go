@@ -73,6 +73,11 @@ func (sc *Controller) setSandboxTimeout(r *http.Request) *web.ApiError {
 	autoPause, timeout := ParseTimeout(sbx)
 	if !timeout.IsZero() {
 		opts := sc.buildSetTimeoutOptions(autoPause, now, request.TimeoutSeconds)
+		if existing := sbx.GetAnnotations()[v1alpha1.AnnotationWakeOnTraffic]; existing != "" {
+			opts.SetAnnotations = map[string]string{
+				v1alpha1.AnnotationWakeOnTraffic: fmt.Sprintf("timeout:%d", request.TimeoutSeconds),
+			}
+		}
 		if _, err := sbx.SaveTimeoutWithPolicy(ctx, opts, timeoututils.UpdatePolicyAlways); err != nil {
 			return &web.ApiError{
 				Message: fmt.Sprintf("Failed to set sandbox timeout: %v", err),

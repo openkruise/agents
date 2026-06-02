@@ -269,6 +269,13 @@ func (sc *Controller) parseCreateSandboxRequest(r *http.Request) (models.NewSand
 		}
 	}
 
+	if request.AutoResume != nil && request.AutoResume.Enabled && !request.AutoPause {
+		return request, &web.ApiError{
+			Code:    http.StatusBadRequest,
+			Message: "autoResume requires autoPause to be enabled",
+		}
+	}
+
 	return request, nil
 }
 
@@ -310,6 +317,13 @@ func (sc *Controller) basicSandboxCreateModifier(ctx context.Context, sbx infra.
 	}
 	if request.Extensions.ReturnPodIP {
 		annotations[models.ExtensionKeyReturnPodIP] = agentsv1alpha1.True
+	}
+	if request.AutoResume != nil && request.AutoResume.Enabled {
+		wakeValue := "timeout:never"
+		if !request.Extensions.NeverTimeout {
+			wakeValue = fmt.Sprintf("timeout:%d", request.Timeout)
+		}
+		annotations[agentsv1alpha1.AnnotationWakeOnTraffic] = wakeValue
 	}
 	sbx.SetAnnotations(annotations)
 
