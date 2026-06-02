@@ -812,7 +812,7 @@ func TestResolveRegistrySecretByKeyring_EmptyRegistryHost(t *testing.T) {
 	ctrl := newCommonControlForTest(fc)
 
 	commit := newTestCommit("test-commit", "default")
-	commit.Spec.Image = "INVALID:::image" // unparseable -> empty registry host
+	commit.Spec.Image = "INVALID:::image" // unparsable -> empty registry host
 	name := ctrl.resolveRegistrySecretByKeyring(context.TODO(), commit)
 	if name != "" {
 		t.Errorf("expected empty for invalid image, got %q", name)
