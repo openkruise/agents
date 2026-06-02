@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/retry"
@@ -107,6 +108,13 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 	sbx, initRuntimeOpts, metrics, err := createSandboxFromCheckpoint(ctx, opts, tmpl, cp, cache, metrics)
 	if err != nil {
 		if !wait.Interrupted(err) {
+			// When the user explicitly specified a name and the sandbox already
+			// exists, retrying is pointless — the name collision is deterministic.
+			// Return the raw AlreadyExists error so upper layers (api.go) can map
+			// it to ErrorConflict instead of ErrorInternal.
+			if opts.Name != "" && apierrors.IsAlreadyExists(err) {
+				return nil, metrics, err
+			}
 			err = classifyCreateError(err, "failed to create sandbox from checkpoint")
 		}
 		return nil, metrics, err
