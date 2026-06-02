@@ -315,3 +315,124 @@ func TestPropagateSandboxToken(t *testing.T) {
 		})
 	}
 }
+
+// TestIsIdentityProviderRequested verifies the opt-in predicate that gates the
+// identity provider issuance path. The contract is: a sandbox opts in iff its
+// Labels carry a non-empty value under LabelAgentName; every other shape
+// (nil sandbox, missing Labels map, absent key, empty value, near-miss key)
+// must collapse to false so callers can safely short-circuit.
+func TestIsIdentityProviderRequested(t *testing.T) {
+	tests := []struct {
+		name   string
+		sbx    *agentsv1alpha1.Sandbox
+		want   bool
+		reason string
+	}{
+		{
+			name:   "nil sandbox returns false",
+			sbx:    nil,
+			want:   false,
+			reason: "a nil sandbox must never trigger the provider path",
+		},
+		{
+			name: "sandbox without Labels map returns false",
+			sbx: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "sbx", Namespace: "ns"},
+			},
+			want:   false,
+			reason: "GetLabels() on a sandbox without ObjectMeta.Labels yields a nil map; lookup must be false",
+		},
+		{
+			name: "empty Labels map returns false",
+			sbx: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "sbx",
+					Namespace: "ns",
+					Labels:    map[string]string{},
+				},
+			},
+			want:   false,
+			reason: "an explicitly empty map carries no opt-in signal",
+		},
+		{
+			name: "agent-name label absent returns false",
+			sbx: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "sbx",
+					Namespace: "ns",
+					Labels: map[string]string{
+						"app":                             "demo",
+						SecurityMetadataPrefix + "tenant": "t1",
+					},
+				},
+			},
+			want:   false,
+			reason: "other security-prefixed labels must not opt the sandbox into the provider path",
+		},
+		{
+			name: "agent-name label present but empty returns false",
+			sbx: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "sbx",
+					Namespace: "ns",
+					Labels: map[string]string{
+						LabelAgentName: "",
+					},
+				},
+			},
+			want:   false,
+			reason: "empty value carries no agent identity; opt-in must require a non-empty value",
+		},
+		{
+			name: "near-miss key with same prefix returns false",
+			sbx: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "sbx",
+					Namespace: "ns",
+					Labels: map[string]string{
+						SecurityMetadataPrefix + "agent-name-suffix": "foo",
+						"agent-name": "bar",
+					},
+				},
+			},
+			want:   false,
+			reason: "the predicate matches the FQ key exactly; near-miss keys must not trigger the path",
+		},
+		{
+			name: "agent-name label present with value returns true",
+			sbx: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "sbx",
+					Namespace: "ns",
+					Labels: map[string]string{
+						LabelAgentName: "my-agent",
+					},
+				},
+			},
+			want:   true,
+			reason: "the canonical opt-in: a non-empty agent-name value",
+		},
+		{
+			name: "agent-name label coexisting with unrelated labels returns true",
+			sbx: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "sbx",
+					Namespace: "ns",
+					Labels: map[string]string{
+						LabelAgentName:                     "agent-x",
+						SecurityMetadataPrefix + "tenant": "t1",
+						"app":                             "demo",
+					},
+				},
+			},
+			want:   true,
+			reason: "presence of other labels must not interfere with the opt-in decision",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, IsIdentityProviderRequested(tt.sbx), tt.reason)
+		})
+	}
+}

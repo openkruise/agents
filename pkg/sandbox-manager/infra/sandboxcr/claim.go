@@ -233,7 +233,7 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 	// Any failure in issuance, status recording, or propagation returns a retriable error so callers can retry.
 	// We deliberately do NOT degrade to a UUID token on issuance failure: a UUID carries no identity and would
 	// be propagated to the runtime as a meaningless credential, masking real provider outages.
-	if utilfeature.DefaultFeatureGate.Enabled(features.SecurityIdentityProviderGate) {
+	if utilfeature.DefaultFeatureGate.Enabled(features.SecurityIdentityProviderGate) && identity.IsIdentityProviderRequested(sbx.Sandbox) {
 		opts.SecurityToken = &infra.SecurityTokenOptions{}
 		log.Info("starting to issue security token via identity provider")
 		metrics.SecurityToken, err = issueSecurityToken(ctx, sbx, opts.SecurityToken)
