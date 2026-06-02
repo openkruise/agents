@@ -551,6 +551,88 @@ func TestSandboxManager_GetClaimedSandbox(t *testing.T) {
 	}
 }
 
+func TestSandboxManager_GetClaimedSandbox_AllowAnyOwner(t *testing.T) {
+	tests := []struct {
+		name          string
+		caller        string
+		owner         string
+		allowAnyOwner bool
+		expectError   string
+	}{
+		{
+			name:   "owner match without flag returns sandbox",
+			caller: "user-a",
+			owner:  "user-a",
+		},
+		{
+			name:        "owner mismatch without flag returns ErrorNotAllowed",
+			caller:      "user-b",
+			owner:       "user-a",
+			expectError: "is not owned",
+		},
+		{
+			name:          "owner mismatch with AllowAnyOwner returns sandbox",
+			caller:        "user-b",
+			owner:         "user-a",
+			allowAnyOwner: true,
+		},
+		{
+			name:          "AllowAnyOwner does not bypass health checks",
+			caller:        "user-b",
+			owner:         "user-a",
+			allowAnyOwner: true,
+			expectError:   "is not healthy",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			manager, client := setupTestManager(t)
+			sandbox := &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "allow-any-owner-pod",
+					Namespace: "default",
+					Labels: map[string]string{
+						agentsv1alpha1.LabelSandboxIsClaimed: "true",
+					},
+					Annotations: map[string]string{
+						agentsv1alpha1.AnnotationOwner: tt.owner,
+					},
+					CreationTimestamp: metav1.Now(),
+				},
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxRunning,
+					Conditions: []metav1.Condition{
+						{
+							Type:   string(agentsv1alpha1.SandboxConditionReady),
+							Status: metav1.ConditionTrue,
+						},
+					},
+					PodInfo: agentsv1alpha1.PodInfo{PodIP: "10.0.0.1"},
+				},
+			}
+			if tt.expectError == "is not healthy" {
+				sandbox.Status.Conditions[0].Status = metav1.ConditionFalse
+			}
+			CreateSandboxWithStatus(t, client, sandbox)
+
+			sbx, err := manager.GetClaimedSandbox(t.Context(), tt.caller, infra.GetClaimedSandboxOptions{
+				SandboxID:     utils.GetSandboxID(sandbox),
+				Namespace:     "default",
+				AllowAnyOwner: tt.allowAnyOwner,
+			})
+			if tt.expectError != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
+				assert.Nil(t, sbx)
+				return
+			}
+			require.NoError(t, err)
+			require.NotNil(t, sbx)
+		})
+	}
+}
+
 func TestSandboxManager_Debug(t *testing.T) {
 	manager, _ := setupTestManager(t)
 	manager.GetDebugInfo()

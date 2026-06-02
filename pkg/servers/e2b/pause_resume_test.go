@@ -42,6 +42,29 @@ type waitHooksCache interface {
 	GetWaitHooks() *sync.Map
 }
 
+func TestMapConnectResumeError(t *testing.T) {
+	gvr := schema.GroupResource{Resource: "sandboxes"}
+	tests := []struct {
+		name         string
+		err          error
+		isSystem     bool
+		expectStatus int
+	}{
+		{name: "not found maps to 404", err: apierrors.NewNotFound(gvr, "sbx"), isSystem: false, expectStatus: http.StatusNotFound},
+		{name: "not found maps to 404 for system caller", err: apierrors.NewNotFound(gvr, "sbx"), isSystem: true, expectStatus: http.StatusNotFound},
+		{name: "conflict non-system maps to 400", err: managererrors.NewError(managererrors.ErrorConflict, "conflict"), isSystem: false, expectStatus: http.StatusBadRequest},
+		{name: "conflict system maps to 409", err: managererrors.NewError(managererrors.ErrorConflict, "conflict"), isSystem: true, expectStatus: http.StatusConflict},
+		{name: "other maps to 500", err: errors.New("boom"), isSystem: false, expectStatus: http.StatusInternalServerError},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			apiErr := mapConnectResumeError(tt.err, tt.isSystem)
+			assert.Equal(t, tt.expectStatus, apiErr.Code)
+		})
+	}
+}
+
 func TestPauseSandbox(t *testing.T) {
 	templateName := "test-template"
 	controller, fc, teardown := Setup(t)
@@ -329,6 +352,94 @@ func TestConnectSandbox(t *testing.T) {
 				assert.WithinDuration(t, expectEndAt, endAt, 5*time.Second,
 					fmt.Sprintf("expect end at: %s, but got %s", expectEndAt, endAt))
 			}
+		})
+	}
+}
+
+func TestConnectSandbox_SystemCaller_NoToken(t *testing.T) {
+	const defaultTimeoutSeconds = 300
+	templateName := "test-template-system-connect-token"
+	controller, _, teardown := Setup(t)
+	defer teardown()
+	user := &models.CreatedTeamAPIKey{
+		ID:   keys.AdminKeyID,
+		Key:  InitKey,
+		Name: "admin",
+		Team: models.AdminTeam(),
+	}
+	cleanup := CreateSandboxPool(t, controller, templateName, 1)
+	defer cleanup()
+
+	createResp, err := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
+		Timeout:    defaultTimeoutSeconds,
+		TemplateID: templateName,
+		Metadata: map[string]string{
+			models.ExtensionKeySkipInitRuntime: agentsv1alpha1.True,
+		},
+	}, nil, user))
+	require.Nil(t, err)
+
+	req := NewRequest(t, nil, models.SetTimeoutRequest{TimeoutSeconds: defaultTimeoutSeconds}, map[string]string{
+		"sandboxID": createResp.Body.SandboxID,
+	}, models.NewSystemUser(keys.SystemKeyNameConnect, keys.SystemKeyIDConnect))
+	req = req.WithContext(WithSystemCaller(req.Context(), &SystemCaller{
+		Name:       keys.SystemKeyNameConnect,
+		ID:         keys.SystemKeyIDConnect,
+		Scopes:     []keys.SystemAuth{keys.SystemAuthConnect},
+		CrossOwner: true,
+	}))
+
+	connectResp, apiErr := controller.ConnectSandbox(req)
+	require.Nil(t, apiErr)
+	assert.Equal(t, http.StatusOK, connectResp.Code)
+	assert.Empty(t, connectResp.Body.EnvdAccessToken)
+}
+
+func TestMapConnectResumeError_SystemCaller409NormalCaller400(t *testing.T) {
+	tests := []struct {
+		name           string
+		err            error
+		isSystemCaller bool
+		expectStatus   int
+	}{
+		{
+			name:           "normal caller manager conflict remains bad request",
+			err:            managererrors.NewError(managererrors.ErrorConflict, "resume conflict"),
+			isSystemCaller: false,
+			expectStatus:   http.StatusBadRequest,
+		},
+		{
+			name:           "system caller manager conflict returns conflict",
+			err:            managererrors.NewError(managererrors.ErrorConflict, "resume conflict"),
+			isSystemCaller: true,
+			expectStatus:   http.StatusConflict,
+		},
+		{
+			name:           "normal caller wait task conflict remains internal",
+			err:            fmt.Errorf("resume failed: %w", cacheutils.ErrWaitTaskConflict),
+			isSystemCaller: false,
+			expectStatus:   http.StatusInternalServerError,
+		},
+		{
+			name:           "system caller wait task conflict returns conflict",
+			err:            fmt.Errorf("resume failed: %w", cacheutils.ErrWaitTaskConflict),
+			isSystemCaller: true,
+			expectStatus:   http.StatusConflict,
+		},
+		{
+			name:           "unknown error remains internal",
+			err:            errors.New("resume failed"),
+			isSystemCaller: true,
+			expectStatus:   http.StatusInternalServerError,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			apiErr := mapConnectResumeError(tt.err, tt.isSystemCaller)
+			require.NotNil(t, apiErr)
+			assert.Equal(t, tt.expectStatus, apiErr.Code)
+			assert.Contains(t, apiErr.Message, tt.err.Error())
 		})
 	}
 }

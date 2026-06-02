@@ -66,6 +66,7 @@ type Controller struct {
 	domain          string
 	manager         *sandboxmanager.SandboxManager
 	keys            keys.KeyStorage
+	systemKeys      *keys.SystemKeyStore
 }
 
 // NewController creates a new E2B Controller
@@ -116,6 +117,7 @@ func (sc *Controller) Init() error {
 	sc.manager = sandboxManager
 	sc.cache = sandboxManager.GetInfra().GetCache()
 	sc.storageRegistry = storages.NewStorageProvider()
+	sc.initSystemKey()
 	sc.registerRoutes()
 
 	return sc.initKeyStorage(ctx)
@@ -153,6 +155,14 @@ func (sc *Controller) initKeyStorage(ctx context.Context) error {
 	return nil
 }
 
+func (sc *Controller) initSystemKey() {
+	if sc.cache == nil {
+		sc.systemKeys = nil
+		return
+	}
+	sc.systemKeys = keys.NewSystemKeyStore(sc.cache.GetClient(), sc.cache.GetAPIReader(), sc.systemNamespace)
+}
+
 func (sc *Controller) Run() (context.Context, error) {
 	if sc.stop != nil {
 		return nil, errors.New("controller already started")
@@ -164,14 +174,6 @@ func (sc *Controller) Run() (context.Context, error) {
 	if err := sc.manager.Run(ctx); err != nil {
 		klog.Fatalf("Sandbox manager failed to start: %v", err)
 	}
-
-	// Run HTTP server in a goroutine
-	go func() {
-		klog.InfoS("Starting Server", "address", sc.server.Addr)
-		if err := sc.server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			klog.Fatalf("HTTP server failed to start: %v", err)
-		}
-	}()
 
 	// stopper
 	go func() {
@@ -191,6 +193,22 @@ func (sc *Controller) Run() (context.Context, error) {
 			sc.keys.Stop()
 		}
 		klog.InfoS("Server exited")
+	}()
+
+	if sc.systemKeys != nil {
+		klog.InfoS("ensuring system-key Secrets are populated", "namespace", sc.systemNamespace, "secret", keys.ConnectSystemKeySecretName)
+		if err := sc.systemKeys.EnsureKeys(ctx); err != nil {
+			cancel()
+			return nil, fmt.Errorf("ensure system keys: %w", err)
+		}
+	}
+
+	// Run HTTP server in a goroutine
+	go func() {
+		klog.InfoS("Starting Server", "address", sc.server.Addr)
+		if err := sc.server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			klog.Fatalf("HTTP server failed to start: %v", err)
+		}
 	}()
 
 	if sc.keys != nil {

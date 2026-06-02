@@ -99,3 +99,14 @@ type ListedTeam struct {
 type UpdateTeamAPIKey struct {
 	Name string `json:"name"`
 }
+
+// NewSystemUser returns the synthesized principal used when a system key is
+// presented. It resolves to the admin team so getNamespaceOfUser yields cluster
+// scope, while the per-key name and ID let handlers identify the caller.
+func NewSystemUser(name string, id uuid.UUID) *CreatedTeamAPIKey {
+	return &CreatedTeamAPIKey{
+		ID:   id,
+		Name: name,
+		Team: AdminTeam(),
+	}
+}

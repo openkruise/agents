@@ -51,8 +51,9 @@ func (sc *Controller) getSandboxOfUser(ctx context.Context, sandboxID string) (i
 	getCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	sbx, err := sc.manager.GetClaimedSandbox(getCtx, user.ID.String(), infra.GetClaimedSandboxOptions{
-		Namespace: sc.getNamespaceOfUser(user),
-		SandboxID: sandboxID,
+		Namespace:     sc.getNamespaceOfUser(user),
+		SandboxID:     sandboxID,
+		AllowAnyOwner: AllowAnyOwnerFromContext(ctx),
 	})
 	if err != nil {
 		log.Error(err, "sandbox not found")
