@@ -17,14 +17,20 @@ limitations under the License.
 package filter
 
 import (
+	"context"
+	"errors"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/envoyproxy/envoy/contrib/golang/common/go/api"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/registry"
+	"github.com/openkruise/agents/pkg/sandbox-gateway/wake"
 	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
 )
 
@@ -193,7 +199,8 @@ func defaultTestAdapter() *adapters.E2BAdapter {
 
 // mockDynamicMetadata implements api.DynamicMetadata for testing
 type mockDynamicMetadata struct {
-	data map[string]map[string]interface{}
+	data       map[string]map[string]interface{}
+	panicOnSet interface{}
 }
 
 func newMockDynamicMetadata() *mockDynamicMetadata {
@@ -205,6 +212,9 @@ func (m *mockDynamicMetadata) Get(filterName string) map[string]interface{} {
 }
 
 func (m *mockDynamicMetadata) Set(filterName string, key string, value interface{}) {
+	if m.panicOnSet != nil {
+		panic(m.panicOnSet)
+	}
 	if m.data[filterName] == nil {
 		m.data[filterName] = make(map[string]interface{})
 	}
@@ -241,19 +251,43 @@ func (m *mockStreamInfo) WorkerID() uint32                      { return 0 }
 
 // mockDecoderFilterCallbacks implements api.DecoderFilterCallbacks for testing
 type mockDecoderFilterCallbacks struct {
+	mu                   sync.Mutex
+	continueCalled       bool
+	continueCount        int
 	sendLocalReplyCalled bool
 	replyStatusCode      int
 	replyBody            string
 	replyDetails         string
+	onContinue           func()
+	onLocalReply         func()
+	panicOnContinue      interface{}
 }
 
-func (m *mockDecoderFilterCallbacks) Continue(statusType api.StatusType) {}
+func (m *mockDecoderFilterCallbacks) Continue(statusType api.StatusType) {
+	if m.panicOnContinue != nil {
+		panic(m.panicOnContinue)
+	}
+	m.mu.Lock()
+	m.continueCalled = true
+	m.continueCount++
+	onContinue := m.onContinue
+	m.mu.Unlock()
+	if onContinue != nil {
+		onContinue()
+	}
+}
 
 func (m *mockDecoderFilterCallbacks) SendLocalReply(responseCode int, bodyText string, headers map[string][]string, grpcStatus int64, details string) {
+	m.mu.Lock()
 	m.sendLocalReplyCalled = true
 	m.replyStatusCode = responseCode
 	m.replyBody = bodyText
 	m.replyDetails = details
+	onLocalReply := m.onLocalReply
+	m.mu.Unlock()
+	if onLocalReply != nil {
+		onLocalReply()
+	}
 }
 
 func (m *mockDecoderFilterCallbacks) RecoverPanic() {}
@@ -929,4 +963,378 @@ func TestDecodeHeadersKruiseCustomProtocolInvalidPath(t *testing.T) {
 	// Should pass through since adapter returns error
 	assert.Equal(t, api.Continue, status)
 	assert.False(t, mockCallbacks.decoderCallbacks.sendLocalReplyCalled)
+}
+
+func TestDecodeHeadersWakeGate(t *testing.T) {
+	tests := []struct {
+		name       string
+		state      string
+		wake       string
+		waker      WakeAndWaiter
+		expect     api.StatusType
+		expectWake bool
+	}{
+		{
+			name:       "paused with wake annotation starts async wake",
+			state:      agentsv1alpha1.SandboxStatePaused,
+			wake:       "timeout:300",
+			waker:      &fakeWakeAndWaiter{},
+			expect:     api.Running,
+			expectWake: true,
+		},
+		{
+			name:   "paused without wake annotation keeps existing 502",
+			state:  agentsv1alpha1.SandboxStatePaused,
+			expect: api.LocalReply,
+		},
+		{
+			name:   "paused with annotation but no waker keeps test fallback 502",
+			state:  agentsv1alpha1.SandboxStatePaused,
+			wake:   "timeout:300",
+			expect: api.LocalReply,
+		},
+		{
+			name:   "paused with malformed annotation keeps synchronous 502",
+			state:  agentsv1alpha1.SandboxStatePaused,
+			wake:   "garbage",
+			waker:  &fakeWakeAndWaiter{},
+			expect: api.LocalReply,
+		},
+		{
+			name:   "available with annotation does not wake",
+			state:  agentsv1alpha1.SandboxStateAvailable,
+			wake:   "timeout:300",
+			waker:  &fakeWakeAndWaiter{},
+			expect: api.LocalReply,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := registry.GetRegistry()
+			defer r.Clear()
+			r.Update("default--test-sandbox", proxy.Route{
+				ID:              "default--test-sandbox",
+				IP:              "10.0.0.1",
+				State:           tt.state,
+				ResourceVersion: "1",
+				WakeOnTraffic:   tt.wake,
+			})
+			mockCallbacks := newMockFilterCallbackHandler()
+			if tt.expectWake {
+				tt.waker.(*fakeWakeAndWaiter).release = make(chan struct{})
+				tt.waker.(*fakeWakeAndWaiter).done = make(chan struct{})
+			}
+			filter := &sandboxFilter{callbacks: mockCallbacks, config: DefaultConfig(), adapter: defaultTestAdapter(), waker: tt.waker}
+			header := newMockRequestHeaderMap()
+			header.Set(DefaultSandboxHeaderName, "default--test-sandbox")
+
+			status := filter.DecodeHeaders(header, true)
+
+			assert.Equal(t, tt.expect, status)
+			if tt.expectWake {
+				require.Eventually(t, func() bool {
+					return tt.waker.(*fakeWakeAndWaiter).calls() == 1
+				}, time.Second, time.Millisecond)
+				filter.OnDestroy(api.Terminate)
+				close(tt.waker.(*fakeWakeAndWaiter).release)
+				<-tt.waker.(*fakeWakeAndWaiter).done
+			}
+		})
+	}
+}
+
+func TestDecodeHeadersWakeSuccessContinuesOnce(t *testing.T) {
+	r := registry.GetRegistry()
+	defer r.Clear()
+	r.Update("default--wake", proxy.Route{
+		ID:              "default--wake",
+		IP:              "10.0.0.1",
+		State:           agentsv1alpha1.SandboxStatePaused,
+		ResourceVersion: "1",
+		WakeOnTraffic:   "timeout:300",
+	})
+	waker := &fakeWakeAndWaiter{afterCall: func() {
+		r.Update("default--wake", proxy.Route{
+			ID:              "default--wake",
+			IP:              "10.0.0.2",
+			State:           agentsv1alpha1.SandboxStateRunning,
+			ResourceVersion: "2",
+			WakeOnTraffic:   "timeout:300",
+		})
+	}}
+	mockCallbacks := newMockFilterCallbackHandler()
+	filter := &sandboxFilter{callbacks: mockCallbacks, config: DefaultConfig(), adapter: defaultTestAdapter(), waker: waker}
+	header := newMockRequestHeaderMap()
+	header.Set(DefaultSandboxHeaderName, "default--wake")
+	header.Set(DefaultSandboxPortHeader, "8080")
+
+	status := filter.DecodeHeaders(header, true)
+
+	assert.Equal(t, api.Running, status)
+	require.Eventually(t, func() bool {
+		mockCallbacks.decoderCallbacks.mu.Lock()
+		defer mockCallbacks.decoderCallbacks.mu.Unlock()
+		return mockCallbacks.decoderCallbacks.continueCount == 1
+	}, time.Second, time.Millisecond)
+	assert.False(t, mockCallbacks.decoderCallbacks.sendLocalReplyCalled)
+	metadata := mockCallbacks.streamInfo.dynamicMetadata.data["envoy.lb.original_dst"]
+	assert.Equal(t, "10.0.0.2:8080", metadata["host"])
+}
+
+func TestDecodeHeadersWakeFailureMapsReply(t *testing.T) {
+	tests := []struct {
+		name          string
+		err           error
+		expectDetails string
+	}{
+		{name: "not found", err: wake.ErrSandboxNotFound, expectDetails: "sandbox_not_found"},
+		{name: "terminal", err: errors.New("failed"), expectDetails: "sandbox_not_running"},
+		{name: "detached deadline", err: context.DeadlineExceeded, expectDetails: "sandbox_not_running"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := registry.GetRegistry()
+			defer r.Clear()
+			r.Update("default--wake", proxy.Route{
+				ID:              "default--wake",
+				IP:              "10.0.0.1",
+				State:           agentsv1alpha1.SandboxStatePaused,
+				ResourceVersion: "1",
+				WakeOnTraffic:   "timeout:300",
+			})
+			mockCallbacks := newMockFilterCallbackHandler()
+			filter := &sandboxFilter{
+				callbacks: mockCallbacks,
+				config:    DefaultConfig(),
+				adapter:   defaultTestAdapter(),
+				waker:     &fakeWakeAndWaiter{err: tt.err},
+			}
+			header := newMockRequestHeaderMap()
+			header.Set(DefaultSandboxHeaderName, "default--wake")
+
+			status := filter.DecodeHeaders(header, true)
+
+			assert.Equal(t, api.Running, status)
+			require.Eventually(t, func() bool {
+				mockCallbacks.decoderCallbacks.mu.Lock()
+				defer mockCallbacks.decoderCallbacks.mu.Unlock()
+				return mockCallbacks.decoderCallbacks.sendLocalReplyCalled
+			}, time.Second, time.Millisecond)
+			assert.Equal(t, 502, mockCallbacks.decoderCallbacks.replyStatusCode)
+			assert.Equal(t, tt.expectDetails, mockCallbacks.decoderCallbacks.replyDetails)
+		})
+	}
+}
+
+func TestDecodeHeadersWakeOnDestroySuppressesCallback(t *testing.T) {
+	r := registry.GetRegistry()
+	defer r.Clear()
+	r.Update("default--wake", proxy.Route{
+		ID:              "default--wake",
+		IP:              "10.0.0.1",
+		State:           agentsv1alpha1.SandboxStatePaused,
+		ResourceVersion: "1",
+		WakeOnTraffic:   "timeout:300",
+	})
+	release := make(chan struct{})
+	done := make(chan struct{})
+	mockCallbacks := newMockFilterCallbackHandler()
+	filter := &sandboxFilter{
+		callbacks: mockCallbacks,
+		config:    DefaultConfig(),
+		adapter:   defaultTestAdapter(),
+		waker:     &fakeWakeAndWaiter{release: release, done: done},
+	}
+	header := newMockRequestHeaderMap()
+	header.Set(DefaultSandboxHeaderName, "default--wake")
+
+	status := filter.DecodeHeaders(header, true)
+	filter.OnDestroy(api.Terminate)
+	close(release)
+	<-done
+
+	assert.Equal(t, api.Running, status)
+	mockCallbacks.decoderCallbacks.mu.Lock()
+	defer mockCallbacks.decoderCallbacks.mu.Unlock()
+	assert.False(t, mockCallbacks.decoderCallbacks.continueCalled)
+	assert.False(t, mockCallbacks.decoderCallbacks.sendLocalReplyCalled)
+}
+
+func TestDecodeHeadersWakeContinueAllowsReentrantOnDestroy(t *testing.T) {
+	r := registry.GetRegistry()
+	defer r.Clear()
+	r.Update("default--wake", proxy.Route{
+		ID:              "default--wake",
+		IP:              "10.0.0.1",
+		State:           agentsv1alpha1.SandboxStatePaused,
+		ResourceVersion: "1",
+		WakeOnTraffic:   "timeout:300",
+	})
+	waker := &fakeWakeAndWaiter{afterCall: func() {
+		r.Update("default--wake", proxy.Route{
+			ID:              "default--wake",
+			IP:              "10.0.0.2",
+			State:           agentsv1alpha1.SandboxStateRunning,
+			ResourceVersion: "2",
+			WakeOnTraffic:   "timeout:300",
+		})
+	}}
+	mockCallbacks := newMockFilterCallbackHandler()
+	done := make(chan struct{})
+	filter := &sandboxFilter{callbacks: mockCallbacks, config: DefaultConfig(), adapter: defaultTestAdapter(), waker: waker}
+	mockCallbacks.decoderCallbacks.onContinue = func() {
+		filter.OnDestroy(api.Terminate)
+		close(done)
+	}
+	header := newMockRequestHeaderMap()
+	header.Set(DefaultSandboxHeaderName, "default--wake")
+
+	status := filter.DecodeHeaders(header, true)
+
+	assert.Equal(t, api.Running, status)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for reentrant OnDestroy from Continue")
+	}
+	mockCallbacks.decoderCallbacks.mu.Lock()
+	defer mockCallbacks.decoderCallbacks.mu.Unlock()
+	assert.Equal(t, 1, mockCallbacks.decoderCallbacks.continueCount)
+	assert.False(t, mockCallbacks.decoderCallbacks.sendLocalReplyCalled)
+}
+
+func TestCompleteWithContinueSuppressesEnvoyStreamGonePanic(t *testing.T) {
+	tests := []struct {
+		name       string
+		panicValue interface{}
+	}{
+		{name: "request finished", panicValue: envoyRequestFinishedPanic},
+		{name: "filter destroyed", panicValue: envoyFilterDestroyedPanic},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := registry.GetRegistry()
+			defer r.Clear()
+			r.Update("default--wake", proxy.Route{
+				ID:              "default--wake",
+				IP:              "10.0.0.2",
+				State:           agentsv1alpha1.SandboxStateRunning,
+				ResourceVersion: "2",
+			})
+			mockCallbacks := newMockFilterCallbackHandler()
+			mockCallbacks.decoderCallbacks.panicOnContinue = tt.panicValue
+			filter := &sandboxFilter{
+				callbacks: mockCallbacks,
+				config:    DefaultConfig(),
+				adapter:   defaultTestAdapter(),
+				waker:     &fakeWakeAndWaiter{},
+			}
+
+			filter.wakeAndContinue(context.Background(), "default--wake", 8080, "timeout:300")
+
+			mockCallbacks.decoderCallbacks.mu.Lock()
+			defer mockCallbacks.decoderCallbacks.mu.Unlock()
+			assert.False(t, mockCallbacks.decoderCallbacks.continueCalled)
+			assert.False(t, mockCallbacks.decoderCallbacks.sendLocalReplyCalled)
+		})
+	}
+}
+
+func TestCompleteWithContinueAfterOnDestroySuppressesCallback(t *testing.T) {
+	mockCallbacks := newMockFilterCallbackHandler()
+	filter := &sandboxFilter{callbacks: mockCallbacks, config: DefaultConfig(), adapter: defaultTestAdapter()}
+	filter.OnDestroy(api.Terminate)
+
+	filter.completeWithContinue(proxy.Route{
+		ID:    "default--wake",
+		IP:    "10.0.0.2",
+		State: agentsv1alpha1.SandboxStateRunning,
+	}, 8080)
+
+	mockCallbacks.decoderCallbacks.mu.Lock()
+	defer mockCallbacks.decoderCallbacks.mu.Unlock()
+	assert.False(t, mockCallbacks.decoderCallbacks.continueCalled)
+	assert.False(t, mockCallbacks.decoderCallbacks.sendLocalReplyCalled)
+}
+
+func TestCompleteWithContinueMapsUnexpectedPanic(t *testing.T) {
+	mockCallbacks := newMockFilterCallbackHandler()
+	mockCallbacks.streamInfo.dynamicMetadata.panicOnSet = "unexpected"
+	filter := &sandboxFilter{callbacks: mockCallbacks, config: DefaultConfig(), adapter: defaultTestAdapter()}
+
+	filter.completeWithContinue(proxy.Route{
+		ID:    "default--wake",
+		IP:    "10.0.0.2",
+		State: agentsv1alpha1.SandboxStateRunning,
+	}, 8080)
+
+	mockCallbacks.decoderCallbacks.mu.Lock()
+	defer mockCallbacks.decoderCallbacks.mu.Unlock()
+	assert.False(t, mockCallbacks.decoderCallbacks.continueCalled)
+	assert.True(t, mockCallbacks.decoderCallbacks.sendLocalReplyCalled)
+	assert.Equal(t, 500, mockCallbacks.decoderCallbacks.replyStatusCode)
+	assert.Equal(t, "wake_panic", mockCallbacks.decoderCallbacks.replyDetails)
+}
+
+func TestSendLocalReplyAllowsReentrantOnDestroy(t *testing.T) {
+	mockCallbacks := newMockFilterCallbackHandler()
+	done := make(chan struct{})
+	filter := &sandboxFilter{callbacks: mockCallbacks, config: DefaultConfig(), adapter: defaultTestAdapter()}
+	mockCallbacks.decoderCallbacks.onLocalReply = func() {
+		filter.OnDestroy(api.Terminate)
+		close(done)
+	}
+
+	filter.sendLocalReplyOnce(502, "failed", "sandbox_not_running")
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for reentrant OnDestroy from SendLocalReply")
+	}
+	mockCallbacks.decoderCallbacks.mu.Lock()
+	defer mockCallbacks.decoderCallbacks.mu.Unlock()
+	assert.True(t, mockCallbacks.decoderCallbacks.sendLocalReplyCalled)
+	assert.False(t, mockCallbacks.decoderCallbacks.continueCalled)
+}
+
+type fakeWakeAndWaiter struct {
+	mu        sync.Mutex
+	err       error
+	afterCall func()
+	release   chan struct{}
+	done      chan struct{}
+	count     int
+}
+
+func (f *fakeWakeAndWaiter) WakeAndWait(ctx context.Context, sandboxID string, annotation string) error {
+	if f.done != nil {
+		defer close(f.done)
+	}
+	f.mu.Lock()
+	f.count++
+	f.mu.Unlock()
+	if f.release != nil {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-f.release:
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
+	if f.afterCall != nil {
+		f.afterCall()
+	}
+	return f.err
+}
+
+func (f *fakeWakeAndWaiter) calls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.count
 }

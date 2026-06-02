@@ -17,9 +17,11 @@ limitations under the License.
 package filter
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"sync"
 
 	v3 "github.com/cncf/xds/go/xds/type/v3"
 	"github.com/envoyproxy/envoy/contrib/golang/common/go/api"
@@ -33,7 +35,30 @@ const (
 	DefaultSandboxHeaderName = "e2b-sandbox-id"
 	DefaultSandboxPortHeader = "e2b-sandbox-port"
 	DefaultSandboxPort       = "49983"
+	DefaultSystemNamespace   = "sandbox-system"
+	EnvManagerE2BBaseURL     = "SANDBOX_MANAGER_E2B_BASE_URL"
 )
+
+var globalWaker struct {
+	sync.RWMutex
+	waker WakeAndWaiter
+}
+
+type WakeAndWaiter interface {
+	WakeAndWait(ctx context.Context, sandboxID string, annotation string) error
+}
+
+func RegisterWaker(waker WakeAndWaiter) {
+	globalWaker.Lock()
+	defer globalWaker.Unlock()
+	globalWaker.waker = waker
+}
+
+func registeredWaker() WakeAndWaiter {
+	globalWaker.RLock()
+	defer globalWaker.RUnlock()
+	return globalWaker.waker
+}
 
 // Config holds the filter configuration
 type Config struct {
@@ -101,6 +126,7 @@ func (c *Config) GetDefaultPort() int {
 type FilterConfig struct {
 	*Config
 	Adapter *adapters.E2BAdapter
+	Waker   WakeAndWaiter
 }
 
 // NewFilterConfig creates a FilterConfig with an adapter built from the config values
@@ -117,6 +143,7 @@ func NewFilterConfig(cfg *Config) *FilterConfig {
 	return &FilterConfig{
 		Config:  cfg,
 		Adapter: adapter,
+		Waker:   registeredWaker(),
 	}
 }
 

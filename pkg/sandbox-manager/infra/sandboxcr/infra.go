@@ -460,11 +460,13 @@ func (i *Infra) reconcileSandbox(ctx context.Context, sbx *v1alpha1.Sandbox, not
 }
 
 func (i *Infra) refreshRoute(sbx *v1alpha1.Sandbox) {
-	oldRoute, exists := i.Proxy.LoadRoute(sbx.GetName())
-	newRoute := proxyutils.DefaultGetRouteFunc(sbx)
-	if !exists || newRoute.State != oldRoute.State || newRoute.IP != oldRoute.IP {
-		i.Proxy.SetRoute(logs.NewContext(), newRoute)
-	}
+	// SetRoute is ResourceVersion-gated and idempotent, so an unconditional call
+	// is the correct dedup: it keeps the registry route's RV fresh on every
+	// reconcile (which isSandboxStale's cache-lag fallback relies on) while
+	// skipping stale writes internally. The previous LoadRoute dirty-check keyed
+	// by GetName() always missed (routes are keyed by GetSandboxID) and was dead
+	// code.
+	i.Proxy.SetRoute(logs.NewContext(), proxyutils.DefaultGetRouteFunc(sbx))
 }
 
 const (

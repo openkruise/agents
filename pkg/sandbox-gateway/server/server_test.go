@@ -184,7 +184,7 @@ func TestHandleRefresh_RunningState(t *testing.T) {
 	assert.Equal(t, "test-owner", got.Owner)
 }
 
-func TestHandleRefresh_NonRunningState(t *testing.T) {
+func TestHandleRefresh_DeleteState(t *testing.T) {
 	// Clear registry and add a route first
 	registry.GetRegistry().Clear()
 	registry.GetRegistry().Update("test-sandbox-2", proxy.Route{
@@ -196,25 +196,40 @@ func TestHandleRefresh_NonRunningState(t *testing.T) {
 
 	s := &Server{}
 
-	// Send a dead state route
-	route := proxy.Route{
-		ID:              "test-sandbox-2",
-		IP:              "10.0.0.2",
-		State:           v1alpha1.SandboxStateDead,
-		ResourceVersion: "2",
+	tests := []struct {
+		name  string
+		state string
+	}{
+		{name: "dead state", state: v1alpha1.SandboxStateDead},
+		{name: "empty state", state: ""},
 	}
-	body, _ := json.Marshal(route)
 
-	req := httptest.NewRequest(http.MethodPost, proxy.RefreshAPI, bytes.NewReader(body))
-	rr := httptest.NewRecorder()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			registry.GetRegistry().Update("test-sandbox-2", proxy.Route{
+				ID:              "test-sandbox-2",
+				IP:              "10.0.0.2",
+				State:           v1alpha1.SandboxStateRunning,
+				ResourceVersion: "1",
+			})
+			route := proxy.Route{
+				ID:              "test-sandbox-2",
+				IP:              "10.0.0.2",
+				State:           tt.state,
+				ResourceVersion: "2",
+			}
+			body, _ := json.Marshal(route)
 
-	s.handleRefresh(rr, req)
+			req := httptest.NewRequest(http.MethodPost, proxy.RefreshAPI, bytes.NewReader(body))
+			rr := httptest.NewRecorder()
 
-	assert.Equal(t, http.StatusNoContent, rr.Code)
+			s.handleRefresh(rr, req)
 
-	// Verify route was deleted from registry
-	_, ok := registry.GetRegistry().Get("test-sandbox-2")
-	assert.False(t, ok)
+			assert.Equal(t, http.StatusNoContent, rr.Code)
+			_, ok := registry.GetRegistry().Get("test-sandbox-2")
+			assert.False(t, ok)
+		})
+	}
 }
 
 func TestHandleRefresh_AvailableState(t *testing.T) {
@@ -229,12 +244,12 @@ func TestHandleRefresh_AvailableState(t *testing.T) {
 
 	s := &Server{}
 
-	// Available state is treated as non-running and will delete the route
 	route := proxy.Route{
 		ID:              "test-sandbox-3",
 		IP:              "10.0.0.3",
 		State:           v1alpha1.SandboxStateAvailable,
 		ResourceVersion: "2",
+		WakeOnTraffic:   "timeout:300",
 	}
 	body, _ := json.Marshal(route)
 
@@ -245,9 +260,35 @@ func TestHandleRefresh_AvailableState(t *testing.T) {
 
 	assert.Equal(t, http.StatusNoContent, rr.Code)
 
-	// Verify route was deleted (only Running state keeps routes)
-	_, ok := registry.GetRegistry().Get("test-sandbox-3")
-	assert.False(t, ok)
+	got, ok := registry.GetRegistry().Get("test-sandbox-3")
+	assert.True(t, ok)
+	assert.Equal(t, v1alpha1.SandboxStateAvailable, got.State)
+	assert.Equal(t, "timeout:300", got.WakeOnTraffic)
+}
+
+func TestHandleRefresh_PausedState(t *testing.T) {
+	registry.GetRegistry().Clear()
+	s := &Server{}
+
+	route := proxy.Route{
+		ID:              "test-sandbox-paused",
+		IP:              "10.0.0.4",
+		State:           v1alpha1.SandboxStatePaused,
+		ResourceVersion: "1",
+		WakeOnTraffic:   "timeout:never",
+	}
+	body, _ := json.Marshal(route)
+
+	req := httptest.NewRequest(http.MethodPost, proxy.RefreshAPI, bytes.NewReader(body))
+	rr := httptest.NewRecorder()
+
+	s.handleRefresh(rr, req)
+
+	assert.Equal(t, http.StatusNoContent, rr.Code)
+	got, ok := registry.GetRegistry().Get("test-sandbox-paused")
+	assert.True(t, ok)
+	assert.Equal(t, v1alpha1.SandboxStatePaused, got.State)
+	assert.Equal(t, "timeout:never", got.WakeOnTraffic)
 }
 
 func TestHandleRefresh_UpdateExistingRoute(t *testing.T) {

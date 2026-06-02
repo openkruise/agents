@@ -60,6 +60,8 @@ spec:
               value: "sandbox-system"
             - name: PEER_LABEL_SELECTOR
               value: "component=sandbox-manager"
+            - name: SANDBOX_MANAGER_E2B_BASE_URL
+              value: "http://sandbox-manager.sandbox-system.svc:8080"
           ports:
             - name: http
               containerPort: 7788
