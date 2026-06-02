@@ -27,6 +27,27 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 )
 
+// IsIdentityProviderRequested reports whether the sandbox opts into the
+// identity provider issuance path.
+//
+// The opt-in signal is the presence of a non-empty
+// "security.agents.kruise.io/agent-name" label on the sandbox: setting this
+// label expresses the user's intent to bind the sandbox to a logical agent
+// identity, which is the precondition for the identity provider to mint a
+// security token. A nil sandbox, a sandbox without Labels, or one whose value
+// for that key is empty all collapse to "not requested", letting callers
+// short-circuit the issuance path without paying any provider cost.
+//
+// The check is intentionally label-only and value-presence-only: it does NOT
+// validate the label value against any naming convention, since the identity
+// provider is the authoritative source of truth for agent-name semantics.
+func IsIdentityProviderRequested(sbx *agentsv1alpha1.Sandbox) bool {
+	if sbx == nil {
+		return false
+	}
+	return sbx.GetLabels()[LabelAgentName] != ""
+}
+
 // IssueSandboxToken issues a security token for the given sandbox using the
 // registered identity provider.
 //

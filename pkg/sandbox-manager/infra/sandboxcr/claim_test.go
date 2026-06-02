@@ -3618,6 +3618,44 @@ func TestTryClaimSandbox_SecurityToken(t *testing.T) {
 				assert.Greater(t, metrics.SecurityToken, time.Duration(0))
 			},
 		},
+		{
+			// Verifies the second clause of the gate at claim.go:236 — when the
+			// sandbox does NOT carry the security.agents.kruise.io/agent-name
+			// label, the entire identity provider branch must be skipped: neither
+			// IssueToken nor PropagateSecurityToken may run, no TokenRefreshStatus
+			// annotation may be persisted, and metrics.SecurityToken must remain
+			// zero. This is the dedicated opt-in regression test for the
+			// IsIdentityProviderRequested predicate.
+			name: "skips security token issuance when agent-name label is absent",
+			options: infra.ClaimSandboxOptions{
+				User:     user,
+				Template: existTemplate,
+				InitRuntime: &config.InitRuntimeOptions{
+					AccessToken: "original-uuid-token",
+				},
+			},
+			preModifier: func(sbx *v1alpha1.Sandbox) {
+				// Strip the opt-in label so IsIdentityProviderRequested returns false.
+				delete(sbx.Labels, identity.LabelAgentName)
+			},
+			mockProvider: &mockIdentityProvider{
+				issueTokenFunc: func(ctx context.Context, req identity.TokenRequest) (*identity.TokenResponse, error) {
+					t.Fatalf("IssueToken must not be called when agent-name label is absent")
+					return nil, nil
+				},
+				propagateFunc: func(ctx context.Context, sbx *v1alpha1.Sandbox, tokenResp *identity.TokenResponse) error {
+					t.Fatalf("PropagateSecurityToken must not be called when agent-name label is absent")
+					return nil
+				},
+			},
+			postCheck: func(t *testing.T, sbx infra.Sandbox, metrics infra.ClaimMetrics) {
+				annotations := sbx.GetAnnotations()
+				assert.Empty(t, annotations[identity.AgentKeyTokenRefreshStatus],
+					"TokenRefreshStatus annotation must NOT be written when the provider branch is skipped")
+				assert.Equal(t, time.Duration(0), metrics.SecurityToken,
+					"SecurityToken metric must remain zero when the provider branch is skipped")
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -3644,6 +3682,9 @@ func TestTryClaimSandbox_SecurityToken(t *testing.T) {
 					Labels: map[string]string{
 						v1alpha1.LabelSandboxTemplate:        existTemplate,
 						agentsv1alpha1.LabelSandboxIsClaimed: "false",
+						// Opt the sandbox into the identity provider issuance path;
+						// the dedicated "absent" sub-test strips this label via preModifier.
+						identity.LabelAgentName: "test-agent",
 					},
 					CreationTimestamp: metav1.Now(),
 					Annotations: map[string]string{

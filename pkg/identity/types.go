@@ -35,6 +35,10 @@ const (
 	// AgentKeyTokenRefreshStatus is the Sandbox Annotation Key,
 	// used to store the JSON serialized result of TokenRefreshStatus.
 	AgentKeyTokenRefreshStatus = SecurityMetadataPrefix + "token-status"
+	// LabelAgentName is the sandbox Label Key whose presence opts the sandbox
+	// into the identity provider issuance path. Its value carries the logical
+	// agent name that the identity provider uses to mint the security token.
+	LabelAgentName = SecurityMetadataPrefix + "agent-name"
 )
 
 // TokenRequest represents a request to issue an identity-aware access token.

@@ -39,8 +39,8 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/discovery"
+	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
-	"github.com/openkruise/agents/pkg/utils/sandboxutils"
 )
 
 const finalizerName = "agents.kruise.io/sandboxupdateops-protection"
@@ -231,7 +231,7 @@ func (r *Reconciler) classifySandboxes(sandboxList *agentsv1alpha1.SandboxList, 
 		}
 
 		// Skip sandboxes controlled by SandboxSet (pool sandboxes, not intended for update)
-		if sandboxutils.IsControlledBySandboxSet(sbx) {
+		if utils.IsControlledBySandboxSet(sbx) {
 			continue
 		}
 
