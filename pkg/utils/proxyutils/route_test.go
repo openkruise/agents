@@ -73,3 +73,23 @@ func TestRouteString(t *testing.T) {
 		})
 	}
 }
+
+func TestShouldDeleteRoute(t *testing.T) {
+	tests := []struct {
+		name  string
+		state string
+		want  bool
+	}{
+		{name: "dead is deleted", state: v1alpha1.SandboxStateDead, want: true},
+		{name: "running is kept", state: v1alpha1.SandboxStateRunning, want: false},
+		{name: "paused is kept", state: v1alpha1.SandboxStatePaused, want: false},
+		{name: "creating is kept", state: v1alpha1.SandboxStateCreating, want: false},
+		{name: "available is kept", state: v1alpha1.SandboxStateAvailable, want: false},
+		{name: "empty state is kept", state: "", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, ShouldDeleteRoute(tt.state))
+		})
+	}
+}

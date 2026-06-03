@@ -33,11 +33,12 @@ import (
 	"google.golang.org/grpc/status"
 	"k8s.io/klog/v2"
 
-	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/peers"
+	"github.com/openkruise/agents/pkg/proxy/routestore"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/utils"
+	"github.com/openkruise/agents/pkg/utils/proxyutils"
 )
 
 const (
@@ -76,7 +77,7 @@ type Server struct {
 	// http
 	httpSrv *http.Server
 	// internal
-	routes  sync.Map
+	routes  *routestore.Store
 	adapter RequestAdapter
 	LBEntry string // entry of load balancer, usually a service
 	// peers - now managed by Peers
@@ -88,6 +89,7 @@ type Server struct {
 func NewServer(opts config.SandboxManagerOptions) *Server {
 	s := &Server{
 		extProcMaxConcurrentStreams: opts.ExtProcMaxConcurrency,
+		routes:                      routestore.New(),
 	}
 	return s
 }
@@ -162,8 +164,8 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("failed to unmarshal body: %s", err.Error()), http.StatusBadRequest)
 		return
 	}
-	if route.State == v1alpha1.SandboxStateDead {
-		s.DeleteRoute(route.ID)
+	if proxyutils.ShouldDeleteRoute(route.State) {
+		s.DeleteRoute(route.ID, route.ResourceVersion)
 		log.V(utils.DebugLogLevel + 1).Info("route deleted")
 	} else {
 		s.SetRoute(ctx, route)

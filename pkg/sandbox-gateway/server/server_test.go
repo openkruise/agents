@@ -223,37 +223,83 @@ func TestHandleRefresh_NonRunningState(t *testing.T) {
 	assert.False(t, ok)
 }
 
-func TestHandleRefresh_AvailableState(t *testing.T) {
-	// Clear registry and add a route first
+// TestHandleRefresh_NonDeadStatesKept verifies that the gateway keeps a route for
+// every non-dead state — including paused and available — rather than dropping it.
+// This is the consistency fix: only "dead" deletes, matching the manager handler,
+// so an identical push produces an identical table on both data planes. The filter
+// still refuses to route to a non-running entry, so keeping it is harmless.
+func TestHandleRefresh_NonDeadStatesKept(t *testing.T) {
+	tests := []struct {
+		name  string
+		state string
+	}{
+		{name: "paused is kept", state: v1alpha1.SandboxStatePaused},
+		{name: "available is kept", state: v1alpha1.SandboxStateAvailable},
+		{name: "creating is kept", state: v1alpha1.SandboxStateCreating},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			registry.GetRegistry().Clear()
+			registry.GetRegistry().Update("test-sandbox-3", proxy.Route{
+				ID:              "test-sandbox-3",
+				IP:              "10.0.0.3",
+				State:           v1alpha1.SandboxStateRunning,
+				ResourceVersion: "1",
+			})
+
+			s := &Server{}
+			route := proxy.Route{
+				ID:              "test-sandbox-3",
+				IP:              "10.0.0.3",
+				State:           tt.state,
+				ResourceVersion: "2",
+			}
+			body, _ := json.Marshal(route)
+			req := httptest.NewRequest(http.MethodPost, proxy.RefreshAPI, bytes.NewReader(body))
+			rr := httptest.NewRecorder()
+
+			s.handleRefresh(rr, req)
+
+			assert.Equal(t, http.StatusNoContent, rr.Code)
+
+			// Route is kept, with its new state recorded.
+			got, ok := registry.GetRegistry().Get("test-sandbox-3")
+			assert.True(t, ok)
+			assert.Equal(t, tt.state, got.State)
+		})
+	}
+}
+
+// TestHandleRefresh_StaleWriteCannotResurrect verifies that once a dead push has
+// removed a route, a stale (older-resourceVersion) running push cannot bring it back.
+func TestHandleRefresh_StaleWriteCannotResurrect(t *testing.T) {
 	registry.GetRegistry().Clear()
-	registry.GetRegistry().Update("test-sandbox-3", proxy.Route{
-		ID:              "test-sandbox-3",
-		IP:              "10.0.0.3",
+	registry.GetRegistry().Update("test-sandbox-5", proxy.Route{
+		ID:              "test-sandbox-5",
+		IP:              "10.0.0.5",
 		State:           v1alpha1.SandboxStateRunning,
-		ResourceVersion: "1",
+		ResourceVersion: "10",
 	})
 
 	s := &Server{}
-
-	// Available state is treated as non-running and will delete the route
-	route := proxy.Route{
-		ID:              "test-sandbox-3",
-		IP:              "10.0.0.3",
-		State:           v1alpha1.SandboxStateAvailable,
-		ResourceVersion: "2",
+	post := func(route proxy.Route) {
+		body, _ := json.Marshal(route)
+		req := httptest.NewRequest(http.MethodPost, proxy.RefreshAPI, bytes.NewReader(body))
+		rr := httptest.NewRecorder()
+		s.handleRefresh(rr, req)
+		assert.Equal(t, http.StatusNoContent, rr.Code)
 	}
-	body, _ := json.Marshal(route)
 
-	req := httptest.NewRequest(http.MethodPost, proxy.RefreshAPI, bytes.NewReader(body))
-	rr := httptest.NewRecorder()
+	// Dead push removes it.
+	post(proxy.Route{ID: "test-sandbox-5", IP: "10.0.0.5", State: v1alpha1.SandboxStateDead, ResourceVersion: "11"})
+	if _, ok := registry.GetRegistry().Get("test-sandbox-5"); ok {
+		t.Fatal("expected route deleted after dead push")
+	}
 
-	s.handleRefresh(rr, req)
-
-	assert.Equal(t, http.StatusNoContent, rr.Code)
-
-	// Verify route was deleted (only Running state keeps routes)
-	_, ok := registry.GetRegistry().Get("test-sandbox-3")
-	assert.False(t, ok)
+	// A stale running push (older resourceVersion) must not resurrect it.
+	post(proxy.Route{ID: "test-sandbox-5", IP: "10.0.0.5", State: v1alpha1.SandboxStateRunning, ResourceVersion: "10"})
+	_, ok := registry.GetRegistry().Get("test-sandbox-5")
+	assert.False(t, ok, "stale running push must not resurrect a deleted route")
 }
 
 func TestHandleRefresh_UpdateExistingRoute(t *testing.T) {

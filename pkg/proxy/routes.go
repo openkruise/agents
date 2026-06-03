@@ -31,7 +31,6 @@ import (
 
 	"github.com/openkruise/agents/pkg/peers"
 	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
-	"github.com/openkruise/agents/pkg/utils/expectations"
 	"github.com/openkruise/agents/pkg/utils/proxyutils"
 )
 
@@ -41,30 +40,15 @@ type Route = proxyutils.Route
 
 func (s *Server) SetRoute(ctx context.Context, route Route) {
 	log := klog.FromContext(ctx)
-	log.Info("try to set route", "new", route)
-	for {
-		old, loaded := s.routes.LoadOrStore(route.ID, route)
-		if !loaded {
-			// First write, success directly
-			routeCount.Inc()
-			return
-		}
-
-		oldRoute := old.(Route)
-		if !expectations.IsResourceVersionNewer(oldRoute.ResourceVersion, route.ResourceVersion) {
-			// New version is not newer than old version, skip write
-			log.Info("received route is not newer than the existing one, skip write", "old", oldRoute)
-			return
-		}
-
-		// Attempt CAS update
-		if s.routes.CompareAndSwap(route.ID, old, route) {
-			// Successfully replaced
-			log.Info("successfully set route", "route", route)
-			return
-		}
-		// CAS failed, modified by another goroutine, retry
+	applied, becameLive := s.routes.Set(route.ID, route)
+	if !applied {
+		log.Info("received route is not newer than the existing one, skip write", "route", route)
+		return
 	}
+	if becameLive {
+		routeCount.Inc()
+	}
+	log.Info("successfully set route", "route", route)
 }
 
 func (s *Server) SyncRouteWithPeers(route Route) error {
@@ -121,20 +105,21 @@ func (s *Server) SyncRouteWithPeers(route Route) error {
 }
 
 func (s *Server) LoadRoute(id string) (Route, bool) {
-	raw, ok := s.routes.Load(id)
-	if !ok {
-		return Route{}, false
-	}
-	return raw.(Route), true
+	return s.routes.Get(id)
 }
 
 func (s *Server) ListRoutes() []Route {
-	routes := make([]Route, 0)
-	s.routes.Range(func(key, value any) bool {
-		routes = append(routes, value.(Route))
-		return true
-	})
+	m := s.routes.List()
+	routes := make([]Route, 0, len(m))
+	for _, route := range m {
+		routes = append(routes, route)
+	}
 	return routes
+}
+
+// GC reclaims expired route tombstones. The periodic route reconciler calls it.
+func (s *Server) GC() {
+	s.routes.GC()
 }
 
 func (s *Server) ListPeers() []peers.Peer {
@@ -144,8 +129,11 @@ func (s *Server) ListPeers() []peers.Peer {
 	return nil
 }
 
-func (s *Server) DeleteRoute(id string) {
-	if _, loaded := s.routes.LoadAndDelete(id); loaded {
+// DeleteRoute removes a route, leaving a versioned tombstone so a stale write
+// cannot resurrect it. resourceVersion is the version of the deleting event; an
+// empty value falls back to the resourceVersion currently recorded for the route.
+func (s *Server) DeleteRoute(id string, resourceVersion string) {
+	if s.routes.Delete(id, resourceVersion) {
 		routeCount.Dec()
 	}
 }

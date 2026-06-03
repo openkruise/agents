@@ -220,7 +220,7 @@ func TestSandboxReconciler_Reconcile_SandboxWithPodIP(t *testing.T) {
 	}
 
 	// Cleanup
-	registry.GetRegistry().Delete("default--running-sandbox")
+	registry.GetRegistry().Delete("default--running-sandbox", "")
 }
 
 func TestSandboxReconciler_Reconcile_UpdateExistingRegistryEntry(t *testing.T) {
@@ -271,7 +271,7 @@ func TestSandboxReconciler_Reconcile_UpdateExistingRegistryEntry(t *testing.T) {
 	}
 
 	// Cleanup
-	registry.GetRegistry().Delete("default--update-sandbox")
+	registry.GetRegistry().Delete("default--update-sandbox", "")
 }
 
 func TestSandboxReconciler_Reconcile_DifferentNamespaces(t *testing.T) {
@@ -347,7 +347,7 @@ func TestSandboxReconciler_Reconcile_DifferentNamespaces(t *testing.T) {
 			}
 
 			// Cleanup
-			registry.GetRegistry().Delete(expectedKey)
+			registry.GetRegistry().Delete(expectedKey, "")
 		})
 	}
 }
@@ -434,7 +434,7 @@ func TestSandboxReconciler_Reconcile_ConcurrentUpdates(t *testing.T) {
 			t.Errorf("Expected IP %s, got %s", expectedIP, route.IP)
 		}
 		// Cleanup
-		registry.GetRegistry().Delete(key)
+		registry.GetRegistry().Delete(key, "")
 	}
 }
 
@@ -547,7 +547,7 @@ func TestSandboxReconciler_Reconcile_SandboxWithIPv6(t *testing.T) {
 	}
 
 	// Cleanup
-	registry.GetRegistry().Delete("default--ipv6-sandbox")
+	registry.GetRegistry().Delete("default--ipv6-sandbox", "")
 }
 
 func TestSandboxReconciler_Reconcile_MultipleReconciles(t *testing.T) {
@@ -601,7 +601,7 @@ func TestSandboxReconciler_Reconcile_MultipleReconciles(t *testing.T) {
 	}
 
 	// Cleanup
-	registry.GetRegistry().Delete("default--multi-reconcile-sandbox")
+	registry.GetRegistry().Delete("default--multi-reconcile-sandbox", "")
 }
 
 func TestSandboxReconciler_Reconcile_SandboxNameWithSpecialCharacters(t *testing.T) {
@@ -677,7 +677,7 @@ func TestSandboxReconciler_Reconcile_SandboxNameWithSpecialCharacters(t *testing
 			}
 
 			// Cleanup
-			registry.GetRegistry().Delete(expectedKey)
+			registry.GetRegistry().Delete(expectedKey, "")
 		})
 	}
 }
@@ -813,5 +813,62 @@ func TestSandboxReconciler_Reconcile_UnexpectedGetError(t *testing.T) {
 	}
 	if result.Requeue {
 		t.Error("Expected no requeue on error")
+	}
+}
+
+// TestSandboxReconciler_Reconcile_DeleteIsVersioned verifies the controller's
+// delete leaves a versioned tombstone, so a stale write from the other writer
+// (a lagging-cache /refresh push) cannot resurrect the route. This is the
+// dual-writer resurrection guard at the controller boundary.
+func TestSandboxReconciler_Reconcile_DeleteIsVersioned(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	registry.GetRegistry().Clear()
+	defer registry.GetRegistry().Delete("default--race-sandbox", "")
+
+	// The route is currently live at resourceVersion 100.
+	registry.GetRegistry().Update("default--race-sandbox", proxy.Route{
+		ID:              "default--race-sandbox",
+		IP:              "10.0.0.1",
+		State:           agentsv1alpha1.SandboxStateRunning,
+		ResourceVersion: "100",
+	})
+
+	// The Sandbox is being deleted; the controller observes the deletion-timestamped
+	// object and removes the route (with the object's newer resourceVersion).
+	now := metav1.Now()
+	sandbox := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "race-sandbox",
+			Namespace:         "default",
+			DeletionTimestamp: &now,
+			Finalizers:        []string{"test-finalizer"},
+		},
+	}
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(sandbox).Build()
+	reconciler := &SandboxReconciler{Client: client, Scheme: scheme}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "race-sandbox", Namespace: "default"}}
+	if _, err := reconciler.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, ok := registry.GetRegistry().Get("default--race-sandbox"); ok {
+		t.Fatal("expected route deleted after controller observed deletion")
+	}
+
+	// A stale running push at the old resourceVersion must not resurrect the route.
+	resurrected := registry.GetRegistry().Update("default--race-sandbox", proxy.Route{
+		ID:              "default--race-sandbox",
+		IP:              "10.0.0.1",
+		State:           agentsv1alpha1.SandboxStateRunning,
+		ResourceVersion: "100",
+	})
+	if resurrected {
+		t.Fatal("stale write should have been rejected by the tombstone")
+	}
+	if _, ok := registry.GetRegistry().Get("default--race-sandbox"); ok {
+		t.Fatal("route must stay deleted after a stale write")
 	}
 }
