@@ -491,7 +491,7 @@ func TestCommonControl_EnsureSandboxPaused(t *testing.T) {
 		wantErr   bool
 	}{
 		{
-			name: "pod does not exist, should mark paused",
+			name: "pod does not exist, should mark paused and set phase",
 			args: EnsureFuncArgs{
 				Pod: nil,
 				Box: &agentsv1alpha1.Sandbox{
@@ -501,6 +501,7 @@ func TestCommonControl_EnsureSandboxPaused(t *testing.T) {
 					},
 				},
 				NewStatus: &agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxPausing,
 					Conditions: []metav1.Condition{
 						{
 							Type:               string(agentsv1alpha1.SandboxConditionReady),
@@ -602,6 +603,13 @@ func TestCommonControl_EnsureSandboxPaused(t *testing.T) {
 				err := fc.Get(context.TODO(), types.NamespacedName{Name: tt.args.Pod.Name, Namespace: tt.args.Pod.Namespace}, pod)
 				if err == nil && pod.DeletionTimestamp.IsZero() {
 					t.Errorf("Expected pod to be deleted, but it still exists")
+				}
+			}
+
+			// Verify Phase=Paused is set when pod does not exist (pause completed)
+			if !tt.podExists && tt.args.Pod == nil {
+				if tt.args.NewStatus.Phase != agentsv1alpha1.SandboxPaused {
+					t.Errorf("Expected Phase=Paused after pause completed, got %v", tt.args.NewStatus.Phase)
 				}
 			}
 		})

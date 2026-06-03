@@ -315,7 +315,7 @@ func TestSandboxReconciler_Reconcile(t *testing.T) {
 			wantErr:       false,
 		},
 		{
-			name: "sandbox paused - should set to paused",
+			name: "sandbox paused - should set to pausing",
 			sandbox: &agentsv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "paused-sandbox",
@@ -349,6 +349,44 @@ func TestSandboxReconciler_Reconcile(t *testing.T) {
 					Phase: corev1.PodRunning,
 				},
 			},
+			expectedPhase: agentsv1alpha1.SandboxPausing,
+			wantErr:       false,
+		},
+		{
+			name: "sandbox pausing with condition true - should set to paused",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "pausing-sandbox",
+					Namespace: "default",
+				},
+				Spec: agentsv1alpha1.SandboxSpec{
+					Paused: true,
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name:  "test-container",
+										Image: "nginx:latest",
+									},
+								},
+							},
+						},
+					},
+				},
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxPausing,
+					Conditions: []metav1.Condition{
+						{
+							Type:               string(agentsv1alpha1.SandboxConditionPaused),
+							Status:             metav1.ConditionTrue,
+							Reason:             agentsv1alpha1.SandboxPausedReasonDeletePod,
+							LastTransitionTime: metav1.Now(),
+						},
+					},
+				},
+			},
+			pod: nil,
 			expectedPhase: agentsv1alpha1.SandboxPaused,
 			wantErr:       false,
 		},
@@ -1714,7 +1752,7 @@ func TestCalculateStatus(t *testing.T) {
 			expectedShouldReq: true,
 		},
 		{
-			name: "running phase with paused spec should set to paused",
+			name: "running phase with paused spec should set to pausing",
 			pod: &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-sandbox",
@@ -1750,7 +1788,7 @@ func TestCalculateStatus(t *testing.T) {
 					},
 				},
 			},
-			expectedPhase:     agentsv1alpha1.SandboxPaused,
+			expectedPhase:     agentsv1alpha1.SandboxPausing,
 			expectedShouldReq: false,
 			checkConditions: func(t *testing.T, status *agentsv1alpha1.SandboxStatus) {
 				// Should remove resumed condition
@@ -1826,7 +1864,7 @@ func TestCalculateStatus(t *testing.T) {
 			},
 		},
 		{
-			name: "paused phase with paused condition false and not paused spec should stay paused",
+			name: "paused phase with paused condition false and not paused spec should set to resuming",
 			pod: &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-sandbox",
@@ -1862,7 +1900,7 @@ func TestCalculateStatus(t *testing.T) {
 					},
 				},
 			},
-			expectedPhase:     agentsv1alpha1.SandboxPaused,
+			expectedPhase:     agentsv1alpha1.SandboxResuming,
 			expectedShouldReq: false,
 		},
 		{

@@ -242,12 +242,12 @@ var (
 		[]string{"namespace", "name", "container"},
 	)
 
-	// sandboxStatusAbnormal indicates whether a sandbox is in an abnormal state
-	// where phase and condition are inconsistent (1=abnormal, 0=normal).
+	// sandboxStatusAbnormal indicates whether a sandbox is stuck in a transitional phase
+	// (Pausing/Resuming) for longer than the expected threshold (1=stuck, 0=normal).
 	sandboxStatusAbnormal = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "sandbox_status_abnormal",
-			Help: "Whether the sandbox is in an abnormal state where phase and condition are inconsistent (1=abnormal, 0=normal)",
+			Help: "Whether the sandbox is stuck in a transitional phase (Pausing/Resuming) beyond the expected threshold (1=stuck, 0=normal)",
 		},
 		[]string{"namespace", "name", "type"},
 	)
@@ -256,6 +256,7 @@ var (
 	allPhases = []agentsv1alpha1.SandboxPhase{
 		agentsv1alpha1.SandboxPending,
 		agentsv1alpha1.SandboxRunning,
+		agentsv1alpha1.SandboxPausing,
 		agentsv1alpha1.SandboxPaused,
 		agentsv1alpha1.SandboxResuming,
 		agentsv1alpha1.SandboxSucceeded,
@@ -300,6 +301,10 @@ var sandboxLabels *prometheus.GaugeVec
 
 // labelsAllowlist holds the list of sandbox label keys to expose.
 var labelsAllowlist []string
+
+// stuckPhaseThreshold is the duration after which a sandbox stuck in Pausing/Resuming
+// phase is considered abnormal. Configurable via --stuck-phase-threshold flag.
+var stuckPhaseThreshold time.Duration
 
 func init() {
 	metrics.Registry.MustRegister(
@@ -348,6 +353,12 @@ func InitSandboxLabelsMetric(allowlist []string) {
 		promLabels,
 	)
 	metrics.Registry.MustRegister(sandboxLabels)
+}
+
+// SetStuckPhaseThreshold overrides the default stuck phase threshold.
+// It should be called before the controller starts.
+func SetStuckPhaseThreshold(d time.Duration) {
+	stuckPhaseThreshold = d
 }
 
 // sanitizeLabelName converts a Kubernetes label key to a valid Prometheus label name
@@ -517,22 +528,28 @@ func recordSandboxMetrics(sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod) {
 		}
 	}
 
-	// Detect phase/condition mismatches (abnormal states).
-	// Only emit a series when the sandbox is in an abnormal state; delete the series
-	// once the sandbox becomes healthy again to keep only abnormal samples in Prometheus.
+	// Detect stuck states: Pausing/Resuming phase held too long indicates the operation
+	// is stuck (e.g., pod cannot be deleted or created). Only emit the abnormal series
+	// when the sandbox exceeds the threshold; delete it once the sandbox recovers.
 	pauseAbnormal := false
 	resumeAbnormal := false
 
-	if currentPhase == agentsv1alpha1.SandboxPaused {
+	if currentPhase == agentsv1alpha1.SandboxPausing {
+		// Pausing + condition=False for too long means pod deletion is stuck
 		pausedCond := findCondition(sandbox.Status.Conditions, string(agentsv1alpha1.SandboxConditionPaused))
-		if pausedCond == nil || pausedCond.Status != metav1.ConditionTrue {
-			pauseAbnormal = true
+		if pausedCond != nil && pausedCond.Status == metav1.ConditionFalse {
+			if time.Since(pausedCond.LastTransitionTime.Time) > stuckPhaseThreshold {
+				pauseAbnormal = true
+			}
 		}
 	}
 	if currentPhase == agentsv1alpha1.SandboxResuming {
+		// Resuming + condition=False for too long means pod creation is stuck
 		resumedCond := findCondition(sandbox.Status.Conditions, string(agentsv1alpha1.SandboxConditionResumed))
-		if resumedCond == nil || resumedCond.Status != metav1.ConditionTrue {
-			resumeAbnormal = true
+		if resumedCond != nil && resumedCond.Status == metav1.ConditionFalse {
+			if time.Since(resumedCond.LastTransitionTime.Time) > stuckPhaseThreshold {
+				resumeAbnormal = true
+			}
 		}
 	}
 

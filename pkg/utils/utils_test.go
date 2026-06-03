@@ -1534,6 +1534,16 @@ func TestIsSandboxPausable(t *testing.T) {
 			expectedReason: "SandboxIsRunningOrPaused",
 		},
 		{
+			name: "Pausing sandbox is pausable",
+			sandbox: &agentsv1alpha1.Sandbox{
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxPausing,
+				},
+			},
+			expectedResult: true,
+			expectedReason: "SandboxIsRunningOrPaused",
+		},
+		{
 			name: "Pending sandbox is not pausable",
 			sandbox: &agentsv1alpha1.Sandbox{
 				Status: agentsv1alpha1.SandboxStatus{
@@ -1595,30 +1605,24 @@ func TestIsSandboxResumable(t *testing.T) {
 			expectedReason: "SandboxIsResuming",
 		},
 		{
-			name: "Paused sandbox with paused condition is resumable",
+			name: "Pausing sandbox is not resumable",
 			sandbox: &agentsv1alpha1.Sandbox{
 				Status: agentsv1alpha1.SandboxStatus{
-					Phase: agentsv1alpha1.SandboxPaused,
-					Conditions: []metav1.Condition{
-						{
-							Type:   string(agentsv1alpha1.SandboxConditionPaused),
-							Status: metav1.ConditionTrue,
-						},
-					},
-				},
-			},
-			expectedResult: true,
-			expectedReason: "SandboxIsPaused",
-		},
-		{
-			name: "Paused sandbox without paused condition is not resumable",
-			sandbox: &agentsv1alpha1.Sandbox{
-				Status: agentsv1alpha1.SandboxStatus{
-					Phase: agentsv1alpha1.SandboxPaused,
+					Phase: agentsv1alpha1.SandboxPausing,
 				},
 			},
 			expectedResult: false,
 			expectedReason: "SandboxIsPausing",
+		},
+		{
+			name: "Paused sandbox is resumable",
+			sandbox: &agentsv1alpha1.Sandbox{
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxPaused,
+				},
+			},
+			expectedResult: true,
+			expectedReason: "SandboxIsPaused",
 		},
 		{
 			name: "Succeeded sandbox is not resumable",
