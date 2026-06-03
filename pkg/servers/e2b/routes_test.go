@@ -29,10 +29,12 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
-	"github.com/openkruise/agents/pkg/servers/e2b/keys/keystest"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
 )
@@ -104,6 +106,24 @@ func (s *lookupKeyStorage) ListTeams(context.Context, *models.CreatedTeamAPIKey)
 
 func (s *lookupKeyStorage) FindTeamByName(context.Context, string) (*models.Team, bool, error) {
 	return nil, false, nil
+}
+
+func newConnectSystemKeyStore(t testing.TB, value string) *keys.SystemKeyStore {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	require.NoError(t, clientgoscheme.AddToScheme(scheme))
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "sandbox-system",
+			Name:      keys.ConnectSystemKeySecretName,
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{keys.SystemKeyDataKey: []byte(value)},
+	}
+	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
+	store := keys.NewSystemKeyStore(fc, fc, "sandbox-system")
+	require.NoError(t, store.EnsureKeys(context.Background()))
+	return store
 }
 
 // TestCheckApiKey_BasicTests tests basic CheckApiKey middleware functionality
@@ -447,7 +467,7 @@ func TestCheckApiKey_AuthDisabled_PreservesAnonymousWithoutRequiredHeader(t *tes
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			sc := &Controller{keys: nil, systemKeys: keystest.NewConnectStore(t, systemKey)}
+			sc := &Controller{keys: nil, systemKeys: newConnectSystemKeyStore(t, systemKey)}
 			req := httptest.NewRequest(http.MethodGet, "/v2/sandboxes", nil)
 			if tt.header != "" {
 				req.Header.Set("X-API-KEY", tt.header)
@@ -513,7 +533,7 @@ func TestCheckApiKey_SystemKey_Behavior(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			sc := &Controller{systemKeys: keystest.NewConnectStore(t, presented), keys: rejectingKeyStorage{}}
+			sc := &Controller{systemKeys: newConnectSystemKeyStore(t, presented), keys: rejectingKeyStorage{}}
 			req := httptest.NewRequest(http.MethodPost, "/sandboxes/abc/connect", nil)
 			req.Header.Set("X-API-KEY", tt.header)
 			ctx := context.Background()
@@ -542,7 +562,7 @@ func TestSystemKey_RouteWhitelist_Connect(t *testing.T) {
 	const presented = "system-key-secret-value"
 	controller, _, teardown := Setup(t)
 	defer teardown()
-	controller.systemKeys = keystest.NewConnectStore(t, presented)
+	controller.systemKeys = newConnectSystemKeyStore(t, presented)
 
 	tests := []struct {
 		name         string

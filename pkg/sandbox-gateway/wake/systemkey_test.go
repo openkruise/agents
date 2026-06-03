@@ -115,6 +115,29 @@ func TestSystemKeyReader_WaitForKeyHonorsDeadline(t *testing.T) {
 	assert.ErrorIs(t, err, context.DeadlineExceeded)
 }
 
+func TestSystemKeyReader_WaitForKeyUsesDefaultBackoff(t *testing.T) {
+	reader := &SystemKeyReader{
+		Reader:    readOnlyMissingClient{},
+		Namespace: testNamespace,
+		Backoff:   0,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+
+	_, err := reader.WaitForKey(ctx)
+
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+}
+
+func TestSystemKeyReader_ReadKeyNilReader(t *testing.T) {
+	reader := &SystemKeyReader{Namespace: testNamespace}
+
+	_, err := reader.readKey(context.Background())
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "system-key reader is nil")
+}
+
 type readOnlyMissingClient struct{}
 
 func (readOnlyMissingClient) Get(context.Context, client.ObjectKey, client.Object, ...client.GetOption) error {

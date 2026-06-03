@@ -255,6 +255,7 @@ type mockDecoderFilterCallbacks struct {
 	continueCalled       bool
 	continueCount        int
 	sendLocalReplyCalled bool
+	localReplyCount      int
 	replyStatusCode      int
 	replyBody            string
 	replyDetails         string
@@ -280,6 +281,7 @@ func (m *mockDecoderFilterCallbacks) Continue(statusType api.StatusType) {
 func (m *mockDecoderFilterCallbacks) SendLocalReply(responseCode int, bodyText string, headers map[string][]string, grpcStatus int64, details string) {
 	m.mu.Lock()
 	m.sendLocalReplyCalled = true
+	m.localReplyCount++
 	m.replyStatusCode = responseCode
 	m.replyBody = bodyText
 	m.replyDetails = details
@@ -1082,6 +1084,118 @@ func TestDecodeHeadersWakeSuccessContinuesOnce(t *testing.T) {
 	assert.Equal(t, "10.0.0.2:8080", metadata["host"])
 }
 
+func TestDecodeHeadersWakeCustomProtocolRewritesPathBeforeWake(t *testing.T) {
+	r := registry.GetRegistry()
+	defer r.Clear()
+	r.Update("ns--wake", proxy.Route{
+		ID:              "ns--wake",
+		IP:              "10.0.0.1",
+		State:           agentsv1alpha1.SandboxStatePaused,
+		ResourceVersion: "1",
+		WakeOnTraffic:   "timeout:300",
+	})
+	release := make(chan struct{})
+	done := make(chan struct{})
+	waker := &fakeWakeAndWaiter{release: release, done: done}
+	mockCallbacks := newMockFilterCallbackHandler()
+	filter := &sandboxFilter{callbacks: mockCallbacks, config: DefaultConfig(), adapter: defaultTestAdapter(), waker: waker}
+	header := &mockRequestHeaderMapCustom{
+		mockRequestHeaderMap: *newMockRequestHeaderMap(),
+		pathValue:            "/kruise/ns--wake/3000/api/v1/data",
+	}
+
+	status := filter.DecodeHeaders(header, true)
+
+	assert.Equal(t, api.Running, status)
+	assert.Equal(t, "/api/v1/data", header.headers[":path"])
+	require.Eventually(t, func() bool {
+		return waker.calls() == 1
+	}, time.Second, time.Millisecond)
+	filter.OnDestroy(api.Terminate)
+	close(release)
+	<-done
+}
+
+func TestWakeAndContinueRechecksRouteAfterWake(t *testing.T) {
+	tests := []struct {
+		name          string
+		afterCall     func(*registry.Registry)
+		expectDetails string
+		expectBody    string
+	}{
+		{
+			name:          "route removed after wake",
+			afterCall:     func(r *registry.Registry) { r.Delete("default--wake") },
+			expectDetails: "sandbox_not_found",
+			expectBody:    "sandbox not found",
+		},
+		{
+			name: "route still not running after wake",
+			afterCall: func(r *registry.Registry) {
+				r.Update("default--wake", proxy.Route{
+					ID:              "default--wake",
+					IP:              "10.0.0.2",
+					State:           agentsv1alpha1.SandboxStatePaused,
+					ResourceVersion: "2",
+					WakeOnTraffic:   "timeout:300",
+				})
+			},
+			expectDetails: "sandbox_not_running",
+			expectBody:    "healthy sandbox not found",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := registry.GetRegistry()
+			defer r.Clear()
+			r.Update("default--wake", proxy.Route{
+				ID:              "default--wake",
+				IP:              "10.0.0.1",
+				State:           agentsv1alpha1.SandboxStatePaused,
+				ResourceVersion: "1",
+				WakeOnTraffic:   "timeout:300",
+			})
+			mockCallbacks := newMockFilterCallbackHandler()
+			filter := &sandboxFilter{
+				callbacks: mockCallbacks,
+				config:    DefaultConfig(),
+				adapter:   defaultTestAdapter(),
+				waker: &fakeWakeAndWaiter{afterCall: func() {
+					tt.afterCall(r)
+				}},
+			}
+
+			filter.wakeAndContinue(context.Background(), "default--wake", 8080, "timeout:300")
+
+			mockCallbacks.decoderCallbacks.mu.Lock()
+			defer mockCallbacks.decoderCallbacks.mu.Unlock()
+			assert.True(t, mockCallbacks.decoderCallbacks.sendLocalReplyCalled)
+			assert.Equal(t, 502, mockCallbacks.decoderCallbacks.replyStatusCode)
+			assert.Contains(t, mockCallbacks.decoderCallbacks.replyBody, tt.expectBody)
+			assert.Equal(t, tt.expectDetails, mockCallbacks.decoderCallbacks.replyDetails)
+		})
+	}
+}
+
+func TestWakeAndContinueMapsWakerPanic(t *testing.T) {
+	mockCallbacks := newMockFilterCallbackHandler()
+	filter := &sandboxFilter{
+		callbacks: mockCallbacks,
+		config:    DefaultConfig(),
+		adapter:   defaultTestAdapter(),
+		waker:     &fakeWakeAndWaiter{panicValue: "wake boom"},
+	}
+
+	filter.wakeAndContinue(context.Background(), "default--wake", 8080, "timeout:300")
+
+	mockCallbacks.decoderCallbacks.mu.Lock()
+	defer mockCallbacks.decoderCallbacks.mu.Unlock()
+	assert.True(t, mockCallbacks.decoderCallbacks.sendLocalReplyCalled)
+	assert.Equal(t, 500, mockCallbacks.decoderCallbacks.replyStatusCode)
+	assert.Equal(t, "wake_panic", mockCallbacks.decoderCallbacks.replyDetails)
+}
+
 func TestDecodeHeadersWakeFailureMapsReply(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -1301,18 +1415,36 @@ func TestSendLocalReplyAllowsReentrantOnDestroy(t *testing.T) {
 	assert.False(t, mockCallbacks.decoderCallbacks.continueCalled)
 }
 
+func TestSendLocalReplyOnceSuppressesDuplicateCompletion(t *testing.T) {
+	mockCallbacks := newMockFilterCallbackHandler()
+	filter := &sandboxFilter{callbacks: mockCallbacks, config: DefaultConfig(), adapter: defaultTestAdapter()}
+
+	filter.sendLocalReplyOnce(502, "first", "sandbox_not_running")
+	filter.sendLocalReplyOnce(500, "second", "wake_panic")
+
+	mockCallbacks.decoderCallbacks.mu.Lock()
+	defer mockCallbacks.decoderCallbacks.mu.Unlock()
+	assert.Equal(t, 1, mockCallbacks.decoderCallbacks.localReplyCount)
+	assert.Equal(t, 502, mockCallbacks.decoderCallbacks.replyStatusCode)
+	assert.Equal(t, "sandbox_not_running", mockCallbacks.decoderCallbacks.replyDetails)
+}
+
 type fakeWakeAndWaiter struct {
-	mu        sync.Mutex
-	err       error
-	afterCall func()
-	release   chan struct{}
-	done      chan struct{}
-	count     int
+	mu         sync.Mutex
+	err        error
+	panicValue interface{}
+	afterCall  func()
+	release    chan struct{}
+	done       chan struct{}
+	count      int
 }
 
 func (f *fakeWakeAndWaiter) WakeAndWait(ctx context.Context, sandboxID string, annotation string) error {
 	if f.done != nil {
 		defer close(f.done)
+	}
+	if f.panicValue != nil {
+		panic(f.panicValue)
 	}
 	f.mu.Lock()
 	f.count++

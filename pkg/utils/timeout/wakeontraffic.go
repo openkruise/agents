@@ -60,6 +60,9 @@ func ParseWakeOnTraffic(value string) (WakeOnTrafficConfig, bool) {
 	if raw == "" || strings.TrimSpace(raw) != raw {
 		return WakeOnTrafficConfig{}, false
 	}
+	if strings.HasPrefix(raw, "+") || strings.HasPrefix(raw, "-") {
+		return WakeOnTrafficConfig{}, false
+	}
 	timeoutSeconds, err := strconv.Atoi(raw)
 	if err != nil || timeoutSeconds <= 0 {
 		return WakeOnTrafficConfig{}, false

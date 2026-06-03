@@ -140,6 +140,19 @@ func TestSystemKeyStore_EnsureOne_FailsAfterRetryCap(t *testing.T) {
 	assert.Contains(t, err.Error(), "ensure system key")
 }
 
+func TestSystemKeyStore_EnsureOne_HonorsContextCancelDuringRetry(t *testing.T) {
+	fc := fake.NewClientBuilder().WithScheme(newStoreSchemeForTest(t)).Build()
+	s := NewSystemKeyStore(fc, fc, testSystemNamespace)
+	s.retryInterval = time.Hour
+	s.retryTimeout = time.Hour
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := s.ensureOne(ctx, &systemKeyCatalog[0])
+
+	assert.ErrorIs(t, err, context.Canceled)
+}
+
 func TestSystemKeyStore_EnsureOne_RetriesOnConflictThenConverges(t *testing.T) {
 	gvr := schema.GroupResource{Resource: "secrets"}
 	var updates atomic.Int32
@@ -166,6 +179,28 @@ func TestSystemKeyStore_EnsureOne_RetriesOnConflictThenConverges(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "winner-system-key", value)
 	assert.Equal(t, int32(1), updates.Load())
+}
+
+func TestSystemKeyStore_EnsureKeys_ReturnsEnsureOneError(t *testing.T) {
+	freshID := uuid.MustParse("00000000-0000-0000-0000-0000000000bb")
+	withCatalog(t, []SystemKeyDef{
+		{Name: "ready", ID: SystemKeyIDConnect, SecretName: "ready-secret", Scopes: []SystemAuth{SystemAuthConnect}, CrossOwner: true},
+		{Name: "missing", ID: freshID, SecretName: "missing-secret", Scopes: []SystemAuth{SystemAuthConnect}, CrossOwner: true},
+	})
+	fc := fake.NewClientBuilder().WithScheme(newStoreSchemeForTest(t)).
+		WithObjects(&corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "ready-secret", Namespace: testSystemNamespace},
+			Data:       map[string][]byte{SystemKeyDataKey: []byte("ready-system-key")},
+		}).Build()
+	s := NewSystemKeyStore(fc, fc, testSystemNamespace)
+	s.retryInterval = time.Millisecond
+	s.retryTimeout = 5 * time.Millisecond
+
+	err := s.EnsureKeys(context.Background())
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ensure system key")
+	assert.Contains(t, err.Error(), "missing")
 }
 
 func TestSystemKeyStore_EnsureKeys_BuildsMap(t *testing.T) {

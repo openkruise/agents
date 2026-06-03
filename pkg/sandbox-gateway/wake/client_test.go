@@ -95,6 +95,7 @@ func TestNewConnectClient_InvalidManagerURL(t *testing.T) {
 	}{
 		{name: "missing host", managerURL: "http://"},
 		{name: "relative", managerURL: "/manager"},
+		{name: "malformed escape", managerURL: "http://%zz"},
 	}
 
 	for _, tt := range tests {
@@ -103,4 +104,16 @@ func TestNewConnectClient_InvalidManagerURL(t *testing.T) {
 			assert.Error(t, err)
 		})
 	}
+}
+
+func TestConnectClient_BuildRequestError(t *testing.T) {
+	client, err := NewConnectClient("http://example.com", "key")
+	require.NoError(t, err)
+	client.baseURL.Scheme = ":"
+
+	status, err := client.Connect(context.Background(), "sandbox", 1)
+
+	assert.Zero(t, status)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "build connect request")
 }

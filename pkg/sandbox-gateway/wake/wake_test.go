@@ -60,6 +60,96 @@ func TestWaker_WakeAndWait_StatusMapping(t *testing.T) {
 	}
 }
 
+func TestNewWaker_Defaults(t *testing.T) {
+	connector := &fakeConnector{}
+
+	w := NewWaker(connector)
+
+	assert.Same(t, connector, w.Connector)
+	assert.NotNil(t, w.Registry)
+	assert.Equal(t, DetachedContextTimeout, w.DetachedTimeout)
+	assert.Equal(t, 500*time.Millisecond, w.RetryBackoff)
+	assert.Equal(t, 500*time.Millisecond, w.PollInterval)
+}
+
+func TestWaker_WakeAndWait_NeverTimeoutUsesConnectPlaceholder(t *testing.T) {
+	reg := registry.GetRegistry()
+	reg.Clear()
+	reg.Update("sandbox", proxy.Route{ID: "sandbox", State: agentsv1alpha1.SandboxStateRunning, ResourceVersion: "1"})
+	connector := &fakeConnector{statuses: []int{http.StatusOK}}
+	w := testWaker(connector, reg)
+
+	err := w.WakeAndWait(context.Background(), "sandbox", "timeout:never")
+
+	require.NoError(t, err)
+	assert.Equal(t, []int{neverWakeConnectTimeoutSeconds}, connector.timeouts())
+}
+
+func TestWaker_WakeAndWait_NilConnector(t *testing.T) {
+	reg := registry.GetRegistry()
+	reg.Clear()
+	reg.Update("sandbox", proxy.Route{ID: "sandbox", State: agentsv1alpha1.SandboxStatePaused, ResourceVersion: "1"})
+	w := testWaker(nil, reg)
+
+	err := w.WakeAndWait(context.Background(), "sandbox", "timeout:300")
+
+	assert.ErrorIs(t, err, ErrWakeFailed)
+	assert.Contains(t, err.Error(), "connector is nil")
+}
+
+func TestWaker_WakeAndWait_CanceledBeforeConnect(t *testing.T) {
+	reg := registry.GetRegistry()
+	reg.Clear()
+	reg.Update("sandbox", proxy.Route{ID: "sandbox", State: agentsv1alpha1.SandboxStatePaused, ResourceVersion: "1"})
+	connector := &fakeConnector{statuses: []int{http.StatusOK}}
+	w := testWaker(connector, reg)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := w.WakeAndWait(ctx, "sandbox", "timeout:300")
+
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.Zero(t, connector.calls())
+}
+
+func TestWaker_WakeAndWait_UsesDefaultTimeoutsAndRegistry(t *testing.T) {
+	reg := registry.GetRegistry()
+	reg.Clear()
+	reg.Update("sandbox", proxy.Route{ID: "sandbox", State: agentsv1alpha1.SandboxStateRunning, ResourceVersion: "1"})
+	connector := &fakeConnector{statuses: []int{http.StatusOK}}
+	w := &Waker{
+		Connector:       connector,
+		Registry:        nil,
+		DetachedTimeout: 0,
+		RetryBackoff:    time.Millisecond,
+		PollInterval:    0,
+	}
+
+	err := w.WakeAndWait(context.Background(), "sandbox", "timeout:300")
+
+	require.NoError(t, err)
+	assert.Equal(t, []int{300}, connector.timeouts())
+}
+
+func TestWaker_WakeAndWait_DefaultRetryBackoffHonorsCancellation(t *testing.T) {
+	reg := registry.GetRegistry()
+	reg.Clear()
+	reg.Update("sandbox", proxy.Route{ID: "sandbox", State: agentsv1alpha1.SandboxStatePaused, ResourceVersion: "1"})
+	w := &Waker{
+		Connector:       &fakeConnector{statuses: []int{http.StatusConflict}},
+		Registry:        reg,
+		DetachedTimeout: time.Second,
+		RetryBackoff:    0,
+		PollInterval:    time.Millisecond,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+	defer cancel()
+
+	err := w.WakeAndWait(ctx, "sandbox", "timeout:300")
+
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+}
+
 func TestWaker_WakeAndWait_RetriesConflictThenPollsRunning(t *testing.T) {
 	reg := registry.GetRegistry()
 	reg.Clear()
@@ -177,7 +267,7 @@ func TestWaker_WakeAndWait_DisabledAndTransport(t *testing.T) {
 	}
 }
 
-func testWaker(connector *fakeConnector, reg RouteRegistry) *Waker {
+func testWaker(connector E2BConnector, reg RouteRegistry) *Waker {
 	return &Waker{
 		Connector:       connector,
 		Registry:        reg,
@@ -188,16 +278,18 @@ func testWaker(connector *fakeConnector, reg RouteRegistry) *Waker {
 }
 
 type fakeConnector struct {
-	mu       sync.Mutex
-	statuses []int
-	err      error
-	block    chan struct{}
-	count    int
+	mu           sync.Mutex
+	statuses     []int
+	err          error
+	block        chan struct{}
+	count        int
+	timeoutCalls []int
 }
 
 func (f *fakeConnector) Connect(ctx context.Context, sandboxID string, timeoutSeconds int) (int, error) {
 	f.mu.Lock()
 	f.count++
+	f.timeoutCalls = append(f.timeoutCalls, timeoutSeconds)
 	idx := f.count - 1
 	f.mu.Unlock()
 	if f.block != nil {
@@ -222,4 +314,10 @@ func (f *fakeConnector) calls() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.count
+}
+
+func (f *fakeConnector) timeouts() []int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]int(nil), f.timeoutCalls...)
 }

@@ -36,7 +36,7 @@ func TestParseWakeOnTraffic(t *testing.T) {
 		{name: "missing value", value: "timeout:", expectEnabled: false},
 		{name: "zero", value: "timeout:0", expectEnabled: false},
 		{name: "negative", value: "timeout:-1", expectEnabled: false},
-		{name: "plus sign", value: "timeout:+1", expectEnabled: true, expectConfig: WakeOnTrafficConfig{TimeoutSeconds: 1}},
+		{name: "plus sign", value: "timeout:+1", expectEnabled: false},
 		{name: "float", value: "timeout:1.5", expectEnabled: false},
 		{name: "space before", value: " timeout:300", expectEnabled: false},
 		{name: "space after", value: "timeout:300 ", expectEnabled: false},

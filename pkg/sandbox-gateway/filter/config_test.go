@@ -17,12 +17,19 @@ limitations under the License.
 package filter
 
 import (
+	"context"
 	"testing"
 
 	v3 "github.com/cncf/xds/go/xds/type/v3"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/structpb"
 )
+
+type noopWakeAndWaiter struct{}
+
+func (noopWakeAndWaiter) WakeAndWait(context.Context, string, string) error {
+	return nil
+}
 
 func TestConfigValidate(t *testing.T) {
 	tests := []struct {
@@ -145,6 +152,18 @@ func TestDefaultConfig(t *testing.T) {
 	}
 	if cfg.DefaultPort != "49983" {
 		t.Errorf("DefaultConfig().DefaultPort = %q, want %q", cfg.DefaultPort, "49983")
+	}
+}
+
+func TestRegisterWakerIsUsedByNewFilterConfig(t *testing.T) {
+	t.Cleanup(func() { RegisterWaker(nil) })
+	waker := noopWakeAndWaiter{}
+
+	RegisterWaker(waker)
+	cfg := NewFilterConfig(DefaultConfig())
+
+	if cfg.Waker != waker {
+		t.Fatalf("NewFilterConfig().Waker = %T, want registered waker", cfg.Waker)
 	}
 }
 
