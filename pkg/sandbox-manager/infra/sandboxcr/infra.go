@@ -446,9 +446,11 @@ func (i *Infra) reconcileSandbox(ctx context.Context, sbx *v1alpha1.Sandbox, not
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
 
 	if notFound {
-		// Sandbox not found, clean up route
+		// Sandbox not found, clean up route. The resourceVersion (empty for a
+		// not-found object) lets DeleteRoute fall back to the recorded one so the
+		// delete is versioned and a stale write cannot resurrect the route.
 		sandboxID := utils.GetSandboxID(sbx)
-		i.Proxy.DeleteRoute(sandboxID)
+		i.Proxy.DeleteRoute(sandboxID, sbx.GetResourceVersion())
 		log.Info("sandbox route deleted during reconciliation", "sandboxID", sandboxID)
 		return ctrl.Result{}, nil
 	}
@@ -460,7 +462,9 @@ func (i *Infra) reconcileSandbox(ctx context.Context, sbx *v1alpha1.Sandbox, not
 }
 
 func (i *Infra) refreshRoute(sbx *v1alpha1.Sandbox) {
-	oldRoute, exists := i.Proxy.LoadRoute(sbx.GetName())
+	// Routes are keyed by the full sandbox ID (namespace--name); look up by the
+	// same key so the "skip if unchanged" comparison below is meaningful.
+	oldRoute, exists := i.Proxy.LoadRoute(utils.GetSandboxID(sbx))
 	newRoute := proxyutils.DefaultGetRouteFunc(sbx)
 	if !exists || newRoute.State != oldRoute.State || newRoute.IP != oldRoute.IP {
 		i.Proxy.SetRoute(logs.NewContext(), newRoute)
@@ -518,7 +522,7 @@ func (i *Infra) reconcileRoutes(ctx context.Context) {
 	deletedCount := 0
 	for _, route := range routes {
 		if _, exists := existingSandboxIDs[route.ID]; !exists {
-			i.Proxy.DeleteRoute(route.ID)
+			i.Proxy.DeleteRoute(route.ID, route.ResourceVersion)
 			deletedCount++
 			expectations.ResourceVersionExpectationDelete(&metav1.ObjectMeta{
 				UID: route.UID,
@@ -543,4 +547,8 @@ func (i *Infra) reconcileRoutes(ctx context.Context) {
 	if deletedCount > 0 || addedCount > 0 {
 		log.Info("route reconciliation completed", "orphanedRoutesDeleted", deletedCount, "missingRoutesAdded", addedCount, "totalRoutes", len(routes)+addedCount-deletedCount)
 	}
+
+	// Reclaim expired delete tombstones now that the table has been reconciled
+	// against the cache; this is the route store's only GC trigger on this plane.
+	i.Proxy.GC()
 }

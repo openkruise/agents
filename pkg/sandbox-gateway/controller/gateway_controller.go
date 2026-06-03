@@ -45,8 +45,10 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	var sandbox agentsv1alpha1.Sandbox
 	if err := r.Get(ctx, req.NamespacedName, &sandbox); err != nil {
 		if errors.IsNotFound(err) {
+			// No object to read a resourceVersion from; the registry falls back to
+			// the resourceVersion already recorded for this route.
 			logger.Info("sandbox deleted, removing from registry", "key", key)
-			registry.GetRegistry().Delete(key)
+			registry.GetRegistry().Delete(key, "")
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
@@ -54,7 +56,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	if sandbox.DeletionTimestamp != nil {
 		logger.Info("sandbox being deleted, removing from registry", "key", key)
-		registry.GetRegistry().Delete(key)
+		registry.GetRegistry().Delete(key, sandbox.GetResourceVersion())
 		return ctrl.Result{}, nil
 	}
 
