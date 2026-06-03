@@ -39,8 +39,8 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/discovery"
+	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
-	"github.com/openkruise/agents/pkg/utils/sandboxutils"
 )
 
 const finalizerName = "agents.kruise.io/sandboxupdateops-protection"
@@ -189,7 +189,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// Only initiate new upgrades when in Updating phase, not paused, and there are candidates
 	if newStatus.Phase == agentsv1alpha1.SandboxUpdateOpsUpdating && !ops.Spec.Paused && len(candidates) > 0 {
 		maxConcurrent := calculateMaxUnavailable(ops.Spec.UpdateStrategy.MaxUnavailable, total)
-		toUpgrade := int(maxConcurrent) - int(updating) - int(failed)
+		// Only subtract in-flight (updating) sandboxes from the budget.
+		// Failed sandboxes are terminal and no longer occupy an in-flight slot;
+		// including them would permanently exhaust the budget after the first failure,
+		// stalling all remaining candidates indefinitely.
+		toUpgrade := int(maxConcurrent) - int(updating)
 		if toUpgrade > len(candidates) {
 			toUpgrade = len(candidates)
 		}
@@ -231,7 +235,7 @@ func (r *Reconciler) classifySandboxes(sandboxList *agentsv1alpha1.SandboxList, 
 		}
 
 		// Skip sandboxes controlled by SandboxSet (pool sandboxes, not intended for update)
-		if sandboxutils.IsControlledBySandboxSet(sbx) {
+		if utils.IsControlledBySandboxSet(sbx) {
 			continue
 		}
 

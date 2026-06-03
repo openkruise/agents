@@ -575,6 +575,84 @@ func TestClassifySandbox_FailedReasons(t *testing.T) {
 	}
 }
 
+// TestReconcile_FailedSandboxDoesNotBlockRemainingCandidates is the regression test for the
+// bug where failed sandboxes permanently consumed maxUnavailable budget slots, causing the
+// upgrade loop to stall when failed >= maxUnavailable even with candidates remaining.
+func TestReconcile_FailedSandboxDoesNotBlockRemainingCandidates(t *testing.T) {
+	maxUnavail := intstrutil.FromInt32(1)
+	ops := newSandboxUpdateOps("test-ops", "default", agentsv1alpha1.SandboxUpdateOpsUpdating, false, &maxUnavail)
+	ops.Spec.Patch = mustMarshalPatch(corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{Name: "main", Image: "busybox:2.0"},
+			},
+		},
+	})
+
+	// 1 already-failed sandbox (terminal) — previously this would consume the entire budget
+	sbxFailed := newSandbox("sbx-failed", "default", "test-ops", agentsv1alpha1.SandboxRunning, []metav1.Condition{
+		{
+			Type:   string(agentsv1alpha1.SandboxConditionUpgrading),
+			Reason: agentsv1alpha1.SandboxUpgradingReasonPostUpgradeFailed,
+			Status: metav1.ConditionFalse,
+		},
+	})
+	// 1 remaining candidate not yet started
+	sbxCandidate := newSandbox("sbx-candidate", "default", "", agentsv1alpha1.SandboxRunning, nil)
+
+	r := newTestReconciler(ops, sbxFailed, sbxCandidate)
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-ops", Namespace: "default"},
+	})
+	assert.NoError(t, err)
+
+	// The candidate MUST be patched: failed sandboxes must not consume the maxUnavailable budget.
+	updatedCandidate := &agentsv1alpha1.Sandbox{}
+	err = r.Get(context.Background(), types.NamespacedName{Name: "sbx-candidate", Namespace: "default"}, updatedCandidate)
+	assert.NoError(t, err)
+	assert.Equal(t, "test-ops", updatedCandidate.Labels[agentsv1alpha1.LabelSandboxUpdateOps],
+		"candidate should be patched: failed sandboxes must not consume the maxUnavailable budget")
+}
+
+// TestReconcile_AllCandidatesDrainedAfterPartialFailure verifies that once all candidates are
+// processed (some succeeded, some failed) the operation transitions to Failed, not stuck in Updating.
+func TestReconcile_AllCandidatesDrainedAfterPartialFailure(t *testing.T) {
+	maxUnavail := intstrutil.FromInt32(1)
+	ops := newSandboxUpdateOps("test-ops", "default", agentsv1alpha1.SandboxUpdateOpsUpdating, false, &maxUnavail)
+
+	// 1 succeeded, 1 failed — all candidates are drained, no remaining candidates
+	sbxSucceeded := newSandbox("sbx-succeeded", "default", "test-ops", agentsv1alpha1.SandboxRunning, []metav1.Condition{
+		{
+			Type:   string(agentsv1alpha1.SandboxConditionUpgrading),
+			Reason: agentsv1alpha1.SandboxUpgradingReasonSucceeded,
+			Status: metav1.ConditionTrue,
+		},
+	})
+	sbxFailed := newSandbox("sbx-failed", "default", "test-ops", agentsv1alpha1.SandboxRunning, []metav1.Condition{
+		{
+			Type:   string(agentsv1alpha1.SandboxConditionUpgrading),
+			Reason: agentsv1alpha1.SandboxUpgradingReasonPreUpgradeFailed,
+			Status: metav1.ConditionFalse,
+		},
+	})
+
+	r := newTestReconciler(ops, sbxSucceeded, sbxFailed)
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-ops", Namespace: "default"},
+	})
+	assert.NoError(t, err)
+
+	updatedOps := &agentsv1alpha1.SandboxUpdateOps{}
+	err = r.Get(context.Background(), types.NamespacedName{Name: "test-ops", Namespace: "default"}, updatedOps)
+	assert.NoError(t, err)
+	assert.Equal(t, agentsv1alpha1.SandboxUpdateOpsFailed, updatedOps.Status.Phase,
+		"ops should transition to Failed when all candidates are drained but some failed")
+	assert.Equal(t, int32(1), updatedOps.Status.FailedReplicas)
+	assert.Equal(t, int32(1), updatedOps.Status.UpdatedReplicas)
+}
+
 func intOrStringPtr(v intstrutil.IntOrString) *intstrutil.IntOrString {
 	return &v
 }
