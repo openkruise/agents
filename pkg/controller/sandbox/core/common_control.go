@@ -19,6 +19,7 @@ package core
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -49,12 +50,9 @@ const (
 	WaitingReasonPodInitializing = "PodInitializing"
 	// WaitingReasonContainerCreating indicates the container is being created (image pull, volume mount, etc.).
 	WaitingReasonContainerCreating = "ContainerCreating"
-
-	SandboxFinalizer = "agents.kruise.io/sandbox"
-
-	PodConditionContainersPaused  = "ContainersPaused"
-	PodConditionContainersResumed = "ContainersResumed"
 )
+
+const SandboxPodNotFoundMsg = "Sandbox Pod Not Found"
 
 type commonControl struct {
 	client.Client
@@ -102,26 +100,35 @@ func (r *commonControl) EnsureSandboxRunning(ctx context.Context, args EnsureFun
 	return 0, nil
 }
 
-func (r *commonControl) EnsureSandboxUpdated(ctx context.Context, args EnsureFuncArgs) error {
+// ensureSandboxUpdatedCommon is the minimal shared logic for EnsureSandboxUpdated:
+// pod not found → mark Failed; non-Recreate policy → inplace update; then sync status.
+// Returns synced=true when syncSandboxStatusFromPod has been called, so the caller can append extra logic (e.g. syncAcsInfoFromPod).
+func ensureSandboxUpdatedCommon(ctx context.Context, args EnsureFuncArgs, handler InPlaceUpdateHandler) (synced bool, err error) {
 	pod, box, newStatus := args.Pod, args.Box, args.NewStatus
 	// If a Pod is no longer present in the Running state, it should be considered an abnormal situation.
 	if pod == nil {
 		newStatus.Phase = agentsv1alpha1.SandboxFailed
-		newStatus.Message = "Sandbox Pod Not Found"
-		return nil
+		newStatus.Message = SandboxPodNotFoundMsg
+		return false, nil
 	}
 	// For non-Recreate upgrade policy (e.g., sandbox-manager triggered inplace update via annotation),
 	// perform inplace update directly without entering the full upgrade lifecycle (PreUpgrade -> UpgradePod -> PostUpgrade).
 	if box.Spec.UpgradePolicy == nil || box.Spec.UpgradePolicy.Type != agentsv1alpha1.SandboxUpgradePolicyRecreate {
-		done, err := r.handleInplaceUpdateSandbox(ctx, args)
+		done, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
 		if err != nil {
-			return err
+			return false, err
 		} else if !done {
-			return nil
+			return false, nil
 		}
 	}
 	syncSandboxStatusFromPod(pod, newStatus)
-	return nil
+	return true, nil
+}
+
+func (r *commonControl) EnsureSandboxUpdated(ctx context.Context, args EnsureFuncArgs) error {
+	handler := &CommonInPlaceUpdateHandler{control: r.inplaceUpdateControl, recorder: r.recorder}
+	_, err := ensureSandboxUpdatedCommon(ctx, args, handler)
+	return err
 }
 
 // syncSandboxStatusFromPod updates sandbox status from pod info and syncs the Ready condition
@@ -150,14 +157,65 @@ func syncSandboxStatusFromPod(pod *corev1.Pod, newStatus *agentsv1alpha1.Sandbox
 		cond.Reason = agentsv1alpha1.SandboxReadyReasonPodReady
 		cond.Message = ""
 	}
+	var failedMessages []string
 	for _, cStatus := range pod.Status.ContainerStatuses {
 		// indicating container startup failure
 		if cond.Status == metav1.ConditionFalse && cStatus.State.Waiting != nil {
 			cond.Reason = agentsv1alpha1.SandboxReadyReasonStartContainerFailed
-			cond.Message = cStatus.State.Waiting.Message
+			failedMessages = append(failedMessages, fmt.Sprintf("%s: %s", cStatus.Name, cStatus.State.Waiting.Message))
 		}
 	}
+	if len(failedMessages) > 0 {
+		cond.Message = utils.TruncateConditionMessage(fmt.Sprintf("container startup failed: %s", strings.Join(failedMessages, "; ")))
+	}
 	utils.SetSandboxCondition(newStatus, *cond)
+}
+
+// setReadyConditionFalseForPause sets the Ready condition to False when pausing.
+// All pause flows (common and ACS) must mark the sandbox as not ready, so this logic is extracted as a shared function.
+func setReadyConditionFalseForPause(newStatus *agentsv1alpha1.SandboxStatus) {
+	if rCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionReady)); rCond != nil && rCond.Status == metav1.ConditionTrue {
+		rCond.Status = metav1.ConditionFalse
+		rCond.LastTransitionTime = metav1.Now()
+		utils.SetSandboxCondition(newStatus, *rCond)
+	}
+}
+
+// performPostResumeInit is the shared helper for post-resume initialization, handling runtime re-init and CSI storage re-mount.
+// initFunc allows the caller to wrap trace or other decorating logic; failEventReason/successEventReason allow
+// the caller to customize Event Reason strings.
+func performPostResumeInit(
+	ctx context.Context,
+	box *agentsv1alpha1.Sandbox,
+	newStatus *agentsv1alpha1.SandboxStatus,
+	initFunc func() error,
+	recorder record.EventRecorder,
+	failEventReason string,
+	successEventReason string,
+) error {
+	if err := initFunc(); err != nil {
+		klog.ErrorS(err, "post-resume initialization failed (runtime re-init or CSI re-mount)", "sandbox", klog.KObj(box))
+		recorder.Event(box, corev1.EventTypeWarning, failEventReason,
+			fmt.Sprintf("Failed to perform post-resume initialization: %v", err))
+		utils.SetSandboxCondition(newStatus, metav1.Condition{
+			Type:               string(agentsv1alpha1.RuntimeInitialized),
+			Status:             metav1.ConditionFalse,
+			Reason:             agentsv1alpha1.SandboxConditionRuntimeInitReasonFailed,
+			Message:            utils.TruncateConditionMessage(fmt.Sprintf("Runtime initialization failed: %v", err)),
+			LastTransitionTime: metav1.Now(),
+		})
+		return err
+	}
+	recorder.Event(box, corev1.EventTypeNormal, successEventReason,
+		"Post-resume initialization completed successfully")
+	utils.SetSandboxCondition(newStatus, metav1.Condition{
+		Type:               string(agentsv1alpha1.RuntimeInitialized),
+		Status:             metav1.ConditionTrue,
+		Reason:             agentsv1alpha1.SandboxConditionRuntimeInitReasonSucceeded,
+		Message:            "Runtime initialization completed",
+		LastTransitionTime: metav1.Now(),
+	})
+	return nil
 }
 
 func (r *commonControl) EnsureSandboxPaused(ctx context.Context, args EnsureFuncArgs) error {
@@ -178,12 +236,7 @@ func (r *commonControl) EnsureSandboxPaused(ctx context.Context, args EnsureFunc
 	}
 
 	// The paused phase sets condition ready to false.
-	if rCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionReady)); rCond != nil && rCond.Status == metav1.ConditionTrue {
-		rCond.Status = metav1.ConditionFalse
-		rCond.LastTransitionTime = metav1.Now()
-		utils.SetSandboxCondition(newStatus, *rCond)
-		klog.InfoS("The paused phase sets condition ready to false", "sandbox", klog.KObj(box))
-	}
+	setReadyConditionFalseForPause(newStatus)
 
 	// Pod deletion completed, paused completed
 	// cond.Status == metav1.ConditionFalse just for sure
@@ -250,33 +303,24 @@ func (r *commonControl) EnsureSandboxResumed(ctx context.Context, args EnsureFun
 		}
 
 		// re-initialize sandbox after resuming or upgrading (includes runtime re-init and CSI storage re-mount)
-		if err := r.initializer.Initialize(ctx, box, newStatus); err != nil {
-			klog.ErrorS(err, "post-resume initialization failed", "sandbox", klog.KObj(box))
-			r.recorder.Event(box, corev1.EventTypeWarning, string(agentsv1alpha1.RuntimeInitialized),
-				fmt.Sprintf("Failed to perform post-resume initialization: %v", err))
-			utils.SetSandboxCondition(newStatus, metav1.Condition{
-				Type:   string(agentsv1alpha1.RuntimeInitialized),
-				Status: metav1.ConditionFalse,
-				Reason: agentsv1alpha1.SandboxConditionRuntimeInitReasonFailed,
-				// TODO to differentiate init and mount errors
-				Message:            utils.TruncateConditionMessage(fmt.Sprintf("Runtime initialization failed: %v", err)),
-				LastTransitionTime: metav1.Now(),
-			})
+		if err := performPostResumeInit(ctx, box, newStatus,
+			func() error { return r.initializer.Initialize(ctx, box, newStatus) },
+			r.recorder,
+			string(agentsv1alpha1.RuntimeInitialized),
+			string(agentsv1alpha1.RuntimeInitialized),
+		); err != nil {
 			return err
 		}
-		r.recorder.Event(box, corev1.EventTypeNormal, string(agentsv1alpha1.RuntimeInitialized),
-			"Post-resume initialization completed successfully")
-		utils.SetSandboxCondition(newStatus, metav1.Condition{
-			Type:               string(agentsv1alpha1.RuntimeInitialized),
-			Status:             metav1.ConditionTrue,
-			Reason:             agentsv1alpha1.SandboxConditionRuntimeInitReasonSucceeded,
-			Message:            "Runtime initialization completed",
-			LastTransitionTime: metav1.Now(),
-		})
 
 		// Initialize succeeded: now set Ready=True to signal sandbox-manager's
 		// NewSandboxResumeTask that all post-resume initialization is done.
 		rCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionReady))
+		if rCond == nil {
+			rCond = &metav1.Condition{
+				Type:   string(agentsv1alpha1.SandboxConditionReady),
+				Reason: agentsv1alpha1.SandboxReadyReasonPodReady,
+			}
+		}
 		rCond.Status = metav1.ConditionStatus(pCond.Status)
 		rCond.LastTransitionTime = pCond.LastTransitionTime
 		utils.SetSandboxCondition(newStatus, *rCond)
@@ -302,7 +346,13 @@ func hasUpgradeAction(box *agentsv1alpha1.Sandbox, pre bool) bool {
 	return true
 }
 
-func (r *commonControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureFuncArgs) (retErr error) {
+// ensureSandboxUpgradedCommon is the shared implementation of EnsureSandboxUpgraded,
+// driving the three-phase upgrade state machine: PreUpgrade → UpgradePod → PostUpgrade.
+func ensureSandboxUpgradedCommon(
+	ctx context.Context,
+	args EnsureFuncArgs,
+	orchestratorArgs UpgradeOrchestratorArgs,
+) error {
 	pod, box, newStatus := args.Pod, args.Box, args.NewStatus
 
 	// Set Ready=False during upgrade
@@ -333,7 +383,7 @@ func (r *commonControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureFu
 			if box.Spec.Lifecycle != nil {
 				action = box.Spec.Lifecycle.PreUpgrade
 			}
-			result := r.executeUpgradeAction(ctx, pod, box, action)
+			result := orchestratorArgs.ExecuteUpgradeActionFunc(ctx, pod, box, action)
 			klog.InfoS("preUpgrade result", "sandbox", klog.KObj(box), "succeeded", result.Succeeded, "message", result.Message)
 			if !result.Succeeded {
 				// Record preUpgrade action failed
@@ -351,7 +401,7 @@ func (r *commonControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureFu
 		utils.SetSandboxCondition(newStatus, *upgradeCond)
 		fallthrough
 	case agentsv1alpha1.SandboxUpgradingReasonUpgradePod, agentsv1alpha1.SandboxUpgradingReasonUpgradePodFailed:
-		done, err := r.performRecreateUpgrade(ctx, args)
+		done, err := orchestratorArgs.PerformRecreateUpgradeFunc(ctx, args)
 		if err != nil {
 			klog.ErrorS(err, "UpgradePod step failed", "sandbox", klog.KObj(box))
 			return err
@@ -364,7 +414,7 @@ func (r *commonControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureFu
 
 		// Re-fetch the Pod after recreate upgrade, since the old pod object is stale (deleted and replaced).
 		var freshPod corev1.Pod
-		if err := r.Get(ctx, types.NamespacedName{Namespace: box.Namespace, Name: box.Name}, &freshPod); err != nil {
+		if err := orchestratorArgs.Client.Get(ctx, types.NamespacedName{Namespace: box.Namespace, Name: box.Name}, &freshPod); err != nil {
 			klog.ErrorS(err, "Failed to re-fetch pod after recreate upgrade", "sandbox", klog.KObj(box))
 			return err
 		}
@@ -382,7 +432,7 @@ func (r *commonControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureFu
 			if box.Spec.Lifecycle != nil {
 				action = box.Spec.Lifecycle.PostUpgrade
 			}
-			result := r.executeUpgradeAction(ctx, pod, box, action)
+			result := orchestratorArgs.ExecuteUpgradeActionFunc(ctx, pod, box, action)
 			klog.InfoS("postUpgrade result", "sandbox", klog.KObj(box), "succeeded", result.Succeeded, "message", result.Message)
 			if !result.Succeeded {
 				// Record postUpgrade action failed
@@ -412,11 +462,28 @@ func (r *commonControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureFu
 	return nil
 }
 
-func (r *commonControl) EnsureSandboxTerminated(ctx context.Context, args EnsureFuncArgs) error {
+// EnsureSandboxUpgraded delegates to ensureSandboxUpgradedCommon shared implementation.
+func (r *commonControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureFuncArgs) (retErr error) {
+	orchestratorArgs := UpgradeOrchestratorArgs{
+		Client:                     r.Client,
+		PerformRecreateUpgradeFunc: r.performRecreateUpgrade,
+		ExecuteUpgradeActionFunc:   r.executeUpgradeAction,
+	}
+	return ensureSandboxUpgradedCommon(ctx, args, orchestratorArgs)
+}
+
+// ensureSandboxTerminatedCommon is the minimal shared set for EnsureSandboxTerminated:
+// delete Pod, remove Finalizer after Pod is gone.
+func ensureSandboxTerminatedCommon(
+	ctx context.Context,
+	args EnsureFuncArgs,
+	cli client.Client,
+) error {
 	pod, box, _ := args.Pod, args.Box, args.NewStatus
+
 	var err error
 	if pod == nil {
-		_, err = utils.PatchFinalizer(ctx, r.Client, box, utils.RemoveFinalizerOpType, SandboxFinalizer)
+		_, err = utils.PatchFinalizer(ctx, cli, box, utils.RemoveFinalizerOpType, utils.SandboxFinalizer)
 		if err != nil {
 			klog.ErrorS(err, "update sandbox finalizer failed", "sandbox", klog.KObj(box))
 			return err
@@ -428,7 +495,7 @@ func (r *commonControl) EnsureSandboxTerminated(ctx context.Context, args Ensure
 		return nil
 	}
 
-	err = client.IgnoreNotFound(r.Delete(ctx, pod))
+	err = client.IgnoreNotFound(cli.Delete(ctx, pod))
 	if err != nil {
 		klog.ErrorS(err, "delete pod failed", "sandbox", klog.KObj(box))
 		return err
@@ -437,44 +504,9 @@ func (r *commonControl) EnsureSandboxTerminated(ctx context.Context, args Ensure
 	return nil
 }
 
-func (r *commonControl) createPod(ctx context.Context, box *agentsv1alpha1.Sandbox, newStatus *agentsv1alpha1.SandboxStatus) (*corev1.Pod, error) {
-
-	// Ensure all registered CA bundle Secrets exist in the sandbox namespace
-	// before creating the pod. Whether a given spec is actually copied is
-	// decided by its CABundleSpec.EnabledFor predicate (e.g. the gateway CA
-	// spec is bound at controller startup to require the traffic-proxy runtime),
-	// so a missing source Secret only blocks creation when the spec applies.
-	if shouldInjectCABundles() {
-		if err := identity.EnsureAllCACerts(ctx, r.Client, box, box.Namespace); err != nil {
-			klog.ErrorS(err, "failed to ensure CA bundle secrets", "sandbox", klog.KObj(box))
-			return nil, err
-		}
-	}
-
-	pod, err := GeneratePodFromSandbox(ctx, r.Client, box, newStatus.UpdateRevision)
-	if err != nil {
-		return nil, err
-	}
-
-	// to avoid the performance issue, using the controller to inject csi containers
-	// fetch the configmap and parse the configuration based on the controller runtime
-	injectErr := sidecarutils.InjectSandboxRuntimes(ctx, box, pod, r.Client)
-	if injectErr != nil {
-		klog.ErrorS(injectErr, "failed to inject pod template with csi sidecar or runtime sidecar", "sandbox", klog.KObj(box))
-		return nil, injectErr
-	}
-
-	ScaleExpectation.ExpectScale(GetControllerKey(box), expectations.Create, box.Name)
-	err = r.Create(ctx, pod)
-	if err != nil {
-		ScaleExpectation.ObserveScale(GetControllerKey(box), expectations.Create, box.Name)
-		if !errors.IsAlreadyExists(err) {
-			klog.ErrorS(err, "create pod failed", "sandbox", klog.KObj(box))
-			return nil, err
-		}
-	}
-	klog.InfoS("Create pod success", "sandbox", klog.KObj(box), "Body", utils.DumpJson(pod))
-	return pod, nil
+// EnsureSandboxTerminated common version with no extra pre-processing, delegates directly to the minimal shared set.
+func (r *commonControl) EnsureSandboxTerminated(ctx context.Context, args EnsureFuncArgs) error {
+	return ensureSandboxTerminatedCommon(ctx, args, r.Client)
 }
 
 // shouldInjectCABundles is the cluster-level kill switch for the CA bundle
@@ -487,17 +519,73 @@ func shouldInjectCABundles() bool {
 	return utilfeature.DefaultFeatureGate.Enabled(features.SecurityIdentityProviderGate)
 }
 
-func (r *commonControl) handleInplaceUpdateSandbox(ctx context.Context, args EnsureFuncArgs) (bool, error) {
-	pod, box, newStatus := args.Pod, args.Box, args.NewStatus
-	handler := &CommonInPlaceUpdateHandler{
-		control:  r.inplaceUpdateControl,
-		recorder: r.recorder,
+// createPodCommon is the shared skeleton for createPod, responsible for:
+// 1) CA Bundle injection 2) delegating to generatePodFunc for Pod generation 3) ScaleExpectation + creation + error handling.
+// generatePodFunc is injected by the caller with differentiated Pod generation logic (including sidecar injection).
+// tolerateAlreadyExists when true means AlreadyExists is not treated as an error (common tolerates, ACS does not).
+func createPodCommon(
+	ctx context.Context,
+	cli client.Client,
+	box *agentsv1alpha1.Sandbox,
+	generatePodFunc func() (*corev1.Pod, error),
+	tolerateAlreadyExists bool,
+) (*corev1.Pod, error) {
+	// Step 1: CA Bundle injection
+	if shouldInjectCABundles() {
+		if err := identity.EnsureAllCACerts(ctx, cli, box, box.Namespace); err != nil {
+			klog.ErrorS(err, "failed to ensure CA bundle secrets", "sandbox", klog.KObj(box))
+			return nil, err
+		}
 	}
-	return handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+
+	// Step 2: Generate pod
+	pod, err := generatePodFunc()
+	if err != nil {
+		return nil, err
+	}
+
+	// Step 3: Create pod with scale expectation tracking
+	ScaleExpectation.ExpectScale(GetControllerKey(box), expectations.Create, box.Name)
+	err = cli.Create(ctx, pod)
+	if err != nil {
+		ScaleExpectation.ObserveScale(GetControllerKey(box), expectations.Create, box.Name)
+		if tolerateAlreadyExists && errors.IsAlreadyExists(err) {
+			return pod, nil
+		}
+		klog.ErrorS(err, "create pod failed", "sandbox", klog.KObj(box))
+		return nil, err
+	}
+	klog.InfoS("create pod success", "sandbox", klog.KObj(box), "Body", utils.DumpJson(pod))
+	return pod, nil
 }
 
-// performRecreateUpgrade handles the Recreate upgrade step (delete old pod + create new pod).
-func (r *commonControl) performRecreateUpgrade(ctx context.Context, args EnsureFuncArgs) (bool, error) {
+func (r *commonControl) createPod(ctx context.Context, box *agentsv1alpha1.Sandbox, newStatus *agentsv1alpha1.SandboxStatus) (*corev1.Pod, error) {
+	return createPodCommon(ctx, r.Client, box,
+		func() (*corev1.Pod, error) {
+			pod, err := GeneratePodFromSandbox(ctx, r.Client, box, newStatus.UpdateRevision)
+			if err != nil {
+				return nil, err
+			}
+			// to avoid the performance issue, using the controller to inject csi containers
+			// fetch the configmap and parse the configuration based on the controller runtime
+			injectErr := sidecarutils.InjectSandboxRuntimes(ctx, box, pod, r.Client)
+			if injectErr != nil {
+				klog.ErrorS(injectErr, "failed to inject pod template with csi sidecar or runtime sidecar", "sandbox", klog.KObj(box))
+				return nil, injectErr
+			}
+			return pod, nil
+		},
+		true, // common tolerates AlreadyExists
+	)
+}
+
+// performRecreateUpgradeCommon is the shared implementation for the Recreate upgrade step, responsible for deleting the old Pod and creating a new one.
+// Core flow: 1) Delete old Pod → 2) Create new Pod → 3) Wait for new Pod Ready → 4) Run initialization.
+func performRecreateUpgradeCommon(
+	ctx context.Context,
+	args EnsureFuncArgs,
+	upgradeArgs RecreateUpgradeArgs,
+) (bool, error) {
 	pod, box, newStatus := args.Pod, args.Box, args.NewStatus
 
 	// Step 1: Delete old Pod (has old template hash)
@@ -508,7 +596,7 @@ func (r *commonControl) performRecreateUpgrade(ctx context.Context, args EnsureF
 		}
 		// Delete pod
 		ScaleExpectation.ExpectScale(GetControllerKey(box), expectations.Delete, box.Name)
-		if err := r.Delete(ctx, pod); err != nil {
+		if err := upgradeArgs.Client.Delete(ctx, pod); err != nil {
 			ScaleExpectation.ObserveScale(GetControllerKey(box), expectations.Delete, box.Name)
 			if !errors.IsNotFound(err) {
 				klog.ErrorS(err, "Failed to delete pod for upgrade", "sandbox", klog.KObj(box))
@@ -522,7 +610,7 @@ func (r *commonControl) performRecreateUpgrade(ctx context.Context, args EnsureF
 	// Step 2: Create new Pod (old pod deleted)
 	if pod == nil {
 		klog.InfoS("Creating new pod for upgrade", "sandbox", klog.KObj(box))
-		newPod, err := r.createPod(ctx, box, newStatus)
+		newPod, err := upgradeArgs.CreatePodFunc(ctx, box, newStatus)
 		if err != nil {
 			klog.ErrorS(err, "Failed to create new pod for upgrade", "sandbox", klog.KObj(box))
 			return false, err
@@ -575,23 +663,26 @@ func (r *commonControl) performRecreateUpgrade(ctx context.Context, args EnsureF
 	}
 
 	// Step 4: Perform post-recreate-upgrade initialization (re-init runtime, re-mount CSI).
-	if err := r.initializer.Initialize(ctx, box, newStatus); err != nil {
+	if err := upgradeArgs.Initializer.Initialize(ctx, box, newStatus); err != nil {
 		klog.ErrorS(err, "post-upgrade initialization failed", "sandbox", klog.KObj(box))
-		r.recorder.Event(box, corev1.EventTypeWarning, string(agentsv1alpha1.RuntimeInitialized),
-			fmt.Sprintf("Failed to perform post-upgrade initialization: %v", err))
+		if upgradeArgs.Recorder != nil {
+			upgradeArgs.Recorder.Event(box, corev1.EventTypeWarning, string(agentsv1alpha1.RuntimeInitialized),
+				fmt.Sprintf("Failed to perform post-upgrade initialization: %v", err))
+		}
 		utils.SetSandboxCondition(newStatus, metav1.Condition{
-			Type:   string(agentsv1alpha1.RuntimeInitialized),
-			Status: metav1.ConditionFalse,
-			Reason: agentsv1alpha1.SandboxConditionRuntimeInitReasonFailed,
-			// TODO to differentiate init and mount errors
+			Type:               string(agentsv1alpha1.RuntimeInitialized),
+			Status:             metav1.ConditionFalse,
+			Reason:             agentsv1alpha1.SandboxConditionRuntimeInitReasonFailed,
 			Message:            utils.TruncateConditionMessage(fmt.Sprintf("Runtime initialization failed: %v", err)),
 			LastTransitionTime: metav1.Now(),
 		})
 		return false, err
 	}
 
-	r.recorder.Event(box, corev1.EventTypeNormal, string(agentsv1alpha1.RuntimeInitialized),
-		"Post-upgrade initialization completed successfully")
+	if upgradeArgs.Recorder != nil {
+		upgradeArgs.Recorder.Event(box, corev1.EventTypeNormal, string(agentsv1alpha1.RuntimeInitialized),
+			"Post-upgrade initialization completed successfully")
+	}
 	utils.SetSandboxCondition(newStatus, metav1.Condition{
 		Type:               string(agentsv1alpha1.RuntimeInitialized),
 		Status:             metav1.ConditionTrue,
@@ -603,16 +694,26 @@ func (r *commonControl) performRecreateUpgrade(ctx context.Context, args EnsureF
 	return true, nil
 }
 
+// performRecreateUpgrade delegates to performRecreateUpgradeCommon shared implementation.
+func (r *commonControl) performRecreateUpgrade(ctx context.Context, args EnsureFuncArgs) (bool, error) {
+	upgradeArgs := RecreateUpgradeArgs{
+		Client:        r.Client,
+		Recorder:      r.recorder,
+		Initializer:   r.initializer,
+		CreatePodFunc: r.createPod,
+	}
+	return performRecreateUpgradeCommon(ctx, args, upgradeArgs)
+}
+
 // upgradeActionResult represents the result of executing an upgrade hook.
 type upgradeActionResult struct {
 	Succeeded bool
 	Message   string
 }
 
-// executeUpgradeAction executes an upgrade action and returns the result.
-// If action is nil (not configured), it returns success directly.
-// If pod is nil and action is configured, it returns failure.
-func (r *commonControl) executeUpgradeAction(ctx context.Context, pod *corev1.Pod, box *agentsv1alpha1.Sandbox, action *agentsv1alpha1.UpgradeAction) upgradeActionResult {
+// executeUpgradeActionCommon is the shared implementation for executing upgrade hook actions.
+func executeUpgradeActionCommon(ctx context.Context, pod *corev1.Pod, box *agentsv1alpha1.Sandbox, actionArgs UpgradeActionArgs) upgradeActionResult {
+	action := actionArgs.Action
 	if action == nil {
 		return upgradeActionResult{Succeeded: true, Message: "no hook configured, skipped"}
 	}
@@ -620,7 +721,7 @@ func (r *commonControl) executeUpgradeAction(ctx context.Context, pod *corev1.Po
 		return upgradeActionResult{Succeeded: false, Message: "pod not found, cannot execute hook"}
 	}
 
-	exitCode, stdout, stderr, err := r.lifecycleHookFunc(ctx, box, action)
+	exitCode, stdout, stderr, err := actionArgs.LifecycleHookFunc(ctx, box, action)
 	if err != nil {
 		msg := fmt.Sprintf("hook execution error: %v, stderr: %s, stdout: %s", err, stderr, stdout)
 		return upgradeActionResult{Succeeded: false, Message: utils.TruncateConditionMessage(msg)}
@@ -630,4 +731,13 @@ func (r *commonControl) executeUpgradeAction(ctx context.Context, pod *corev1.Po
 		return upgradeActionResult{Succeeded: false, Message: utils.TruncateConditionMessage(msg)}
 	}
 	return upgradeActionResult{Succeeded: true, Message: fmt.Sprintf("hook succeeded, stdout: %s", stdout)}
+}
+
+// executeUpgradeAction delegates to executeUpgradeActionCommon shared implementation.
+func (r *commonControl) executeUpgradeAction(ctx context.Context, pod *corev1.Pod, box *agentsv1alpha1.Sandbox, action *agentsv1alpha1.UpgradeAction) upgradeActionResult {
+	actionArgs := UpgradeActionArgs{
+		Action:            action,
+		LifecycleHookFunc: r.lifecycleHookFunc,
+	}
+	return executeUpgradeActionCommon(ctx, pod, box, actionArgs)
 }

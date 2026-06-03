@@ -29,7 +29,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	"github.com/openkruise/agents/pkg/controller/sandbox/core"
 	_ "github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/utils"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
@@ -226,7 +225,7 @@ func TestIsActivePodUpdate(t *testing.T) {
 					Phase: corev1.PodRunning,
 					Conditions: []corev1.PodCondition{
 						{
-							Type:   core.PodConditionContainersPaused,
+							Type:   utils.PodConditionContainersPaused,
 							Status: corev1.ConditionFalse,
 						},
 					},
@@ -237,7 +236,7 @@ func TestIsActivePodUpdate(t *testing.T) {
 					Phase: corev1.PodRunning,
 					Conditions: []corev1.PodCondition{
 						{
-							Type:   core.PodConditionContainersPaused,
+							Type:   utils.PodConditionContainersPaused,
 							Status: corev1.ConditionTrue,
 						},
 					},
@@ -259,7 +258,7 @@ func TestIsActivePodUpdate(t *testing.T) {
 					Phase: corev1.PodRunning,
 					Conditions: []corev1.PodCondition{
 						{
-							Type:   core.PodConditionContainersPaused,
+							Type:   utils.PodConditionContainersPaused,
 							Status: corev1.ConditionTrue,
 							Reason: "ContainersPaused",
 						},
@@ -276,7 +275,7 @@ func TestIsActivePodUpdate(t *testing.T) {
 					Phase: corev1.PodRunning,
 					Conditions: []corev1.PodCondition{
 						{
-							Type:   core.PodConditionContainersResumed,
+							Type:   utils.PodConditionContainersResumed,
 							Status: corev1.ConditionFalse,
 						},
 					},
@@ -287,7 +286,7 @@ func TestIsActivePodUpdate(t *testing.T) {
 					Phase: corev1.PodRunning,
 					Conditions: []corev1.PodCondition{
 						{
-							Type:   core.PodConditionContainersResumed,
+							Type:   utils.PodConditionContainersResumed,
 							Status: corev1.ConditionTrue,
 						},
 					},
@@ -303,7 +302,7 @@ func TestIsActivePodUpdate(t *testing.T) {
 					Phase: corev1.PodRunning,
 					Conditions: []corev1.PodCondition{
 						{
-							Type:    core.PodConditionContainersResumed,
+							Type:    utils.PodConditionContainersResumed,
 							Status:  corev1.ConditionTrue,
 							Reason:  "ResumeStarted",
 							Message: "Resume in progress",
@@ -316,7 +315,7 @@ func TestIsActivePodUpdate(t *testing.T) {
 					Phase: corev1.PodRunning,
 					Conditions: []corev1.PodCondition{
 						{
-							Type:    core.PodConditionContainersResumed,
+							Type:    utils.PodConditionContainersResumed,
 							Status:  corev1.ConditionTrue,
 							Reason:  "ResumeCompleted",
 							Message: "Resume completed successfully",
@@ -501,13 +500,13 @@ func TestIsActivePodUpdate(t *testing.T) {
 							Message: "Ready",
 						},
 						{
-							Type:    core.PodConditionContainersPaused,
+							Type:    utils.PodConditionContainersPaused,
 							Status:  corev1.ConditionFalse,
 							Reason:  "NotPaused",
 							Message: "Containers not paused",
 						},
 						{
-							Type:    core.PodConditionContainersResumed,
+							Type:    utils.PodConditionContainersResumed,
 							Status:  corev1.ConditionTrue,
 							Reason:  "Resumed",
 							Message: "Containers resumed",
@@ -527,13 +526,13 @@ func TestIsActivePodUpdate(t *testing.T) {
 							Message: "Ready",
 						},
 						{
-							Type:    core.PodConditionContainersPaused,
+							Type:    utils.PodConditionContainersPaused,
 							Status:  corev1.ConditionFalse,
 							Reason:  "NotPaused",
 							Message: "Containers not paused",
 						},
 						{
-							Type:    core.PodConditionContainersResumed,
+							Type:    utils.PodConditionContainersResumed,
 							Status:  corev1.ConditionTrue,
 							Reason:  "Resumed",
 							Message: "Containers resumed",
