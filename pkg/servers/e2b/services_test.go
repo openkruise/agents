@@ -538,6 +538,125 @@ func TestCreateSandbox(t *testing.T) {
 	}
 }
 
+func TestCreateSandboxAlwaysCreatesAccessToken(t *testing.T) {
+	controller, fc, teardown := Setup(t)
+	defer teardown()
+
+	server := testutils.NewTestRuntimeServer(testutils.TestRuntimeServerOptions{
+		RunCommandResult: runtime.RunCommandResult{
+			PID:    1,
+			Exited: true,
+		},
+		RunCommandImmediately: true,
+	})
+	defer server.Close()
+
+	user := &models.CreatedTeamAPIKey{
+		ID:   keys.AdminKeyID,
+		Key:  InitKey,
+		Name: "test-user",
+	}
+
+	tests := []struct {
+		name string
+		body map[string]any
+	}{
+		{
+			name: "secure omitted",
+			body: map[string]any{},
+		},
+		{
+			name: "secure false ignored",
+			body: map[string]any{
+				"secure": false,
+			},
+		},
+		{
+			name: "secure true ignored",
+			body: map[string]any{
+				"secure": true,
+			},
+		},
+	}
+
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			templateName := fmt.Sprintf("access-token-template-%d", i)
+			cleanup := CreateSandboxPool(t, controller, templateName, 1, CreateSandboxPoolOptions{
+				RuntimeURL: server.URL,
+			})
+			defer cleanup()
+
+			body := map[string]any{
+				"templateID": templateName,
+				"metadata": map[string]string{
+					models.ExtensionKeyClaimTimeout: "1",
+				},
+			}
+			for k, v := range tt.body {
+				body[k] = v
+			}
+
+			resp, apiError := controller.CreateSandbox(NewRequest(t, nil, body, nil, user))
+			require.Nil(t, apiError)
+			require.NotNil(t, resp.Body)
+			assert.NotEmpty(t, resp.Body.EnvdAccessToken)
+
+			sbx := GetSandbox(t, resp.Body.SandboxID, fc)
+			assert.Equal(t, resp.Body.EnvdAccessToken, sbx.Annotations[v1alpha1.AnnotationRuntimeAccessToken])
+		})
+	}
+}
+
+func TestCreateSandboxSkipsAccessTokenWhenInitRuntimeIsSkipped(t *testing.T) {
+	controller, fc, teardown := Setup(t)
+	defer teardown()
+
+	user := &models.CreatedTeamAPIKey{
+		ID:   keys.AdminKeyID,
+		Key:  InitKey,
+		Name: "test-user",
+	}
+
+	tests := []struct {
+		name string
+		body map[string]any
+	}{
+		{
+			name: "skip init runtime extension",
+			body: map[string]any{
+				"metadata": map[string]string{
+					models.ExtensionKeyClaimTimeout:    "1",
+					models.ExtensionKeySkipInitRuntime: v1alpha1.True,
+				},
+			},
+		},
+	}
+
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			templateName := fmt.Sprintf("skip-init-access-token-template-%d", i)
+			cleanup := CreateSandboxPool(t, controller, templateName, 1)
+			defer cleanup()
+
+			body := map[string]any{
+				"templateID": templateName,
+			}
+			for k, v := range tt.body {
+				body[k] = v
+			}
+
+			resp, apiError := controller.CreateSandbox(NewRequest(t, nil, body, nil, user))
+			require.Nil(t, apiError)
+			require.NotNil(t, resp.Body)
+			assert.Empty(t, resp.Body.EnvdAccessToken)
+
+			sbx := GetSandbox(t, resp.Body.SandboxID, fc)
+			assert.NotContains(t, sbx.Annotations, v1alpha1.AnnotationRuntimeAccessToken)
+		})
+	}
+}
+
 // CreateCheckpointAndTemplate creates a Checkpoint with associated SandboxTemplate for clone tests
 func CreateCheckpointAndTemplate(t *testing.T, controller *Controller, checkpointID string) func() {
 	tmpl := v1alpha1.EmbeddedSandboxTemplate{
@@ -796,18 +915,6 @@ func TestCloneSandbox(t *testing.T) {
 			expectError: &web.ApiError{
 				Code:    400,
 				Message: "Template or Checkpoint not found",
-			},
-		},
-		{
-			name: "clone success with secure mode",
-			request: models.NewSandboxRequest{
-				TemplateID: checkpointID,
-				Timeout:    300,
-				Secure:     true,
-			},
-			postCheck: func(t *testing.T, resp *models.Sandbox, controller *Controller) {
-				// In secure mode, access token should be generated
-				assert.NotEmpty(t, resp.SandboxID)
 			},
 		},
 		{

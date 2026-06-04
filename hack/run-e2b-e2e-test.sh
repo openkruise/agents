@@ -24,6 +24,101 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TEST_DIR="$PROJECT_ROOT/test/e2b"
 MANAGER_SELECTOR="app.kubernetes.io/name=sandbox-manager"
+E2B_SDK_COMPAT_MIN_VERSION="2.25.0"
+
+version_part_to_number() {
+    local value="$1"
+    value="${value#v}"
+    value="${value%%[!0-9]*}"
+    if [ -z "$value" ]; then
+        value=0
+    fi
+    echo "$value"
+}
+
+version_ge() {
+    local version="$1"
+    local minimum="$2"
+    local major minor patch min_major min_minor min_patch
+
+    version="${version#v}"
+    minimum="${minimum#v}"
+    IFS=. read -r major minor patch _ <<<"$version"
+    IFS=. read -r min_major min_minor min_patch _ <<<"$minimum"
+
+    major="$(version_part_to_number "$major")"
+    minor="$(version_part_to_number "$minor")"
+    patch="$(version_part_to_number "$patch")"
+    min_major="$(version_part_to_number "$min_major")"
+    min_minor="$(version_part_to_number "$min_minor")"
+    min_patch="$(version_part_to_number "$min_patch")"
+
+    if ((10#$major > 10#$min_major)); then
+        return 0
+    fi
+    if ((10#$major < 10#$min_major)); then
+        return 1
+    fi
+    if ((10#$minor > 10#$min_minor)); then
+        return 0
+    fi
+    if ((10#$minor < 10#$min_minor)); then
+        return 1
+    fi
+    ((10#$patch >= 10#$min_patch))
+}
+
+get_installed_e2b_version() {
+    pip show e2b 2>/dev/null | awk '/^Version:/ {print $2; exit}'
+}
+
+convert_e2b_api_key_for_sdk_if_needed() {
+    local installed_e2b_version="$1"
+    local api_url response compatible_api_key xtrace_enabled
+
+    if ! version_ge "$installed_e2b_version" "$E2B_SDK_COMPAT_MIN_VERSION"; then
+        echo "Installed e2b version $installed_e2b_version does not require SDK-compatible API key conversion"
+        return
+    fi
+
+    echo "Converting E2B_API_KEY for e2b $installed_e2b_version SDK validation..."
+    if [[ $- == *x* ]]; then
+        xtrace_enabled="true"
+        set +x
+    else
+        xtrace_enabled="false"
+    fi
+
+    if [ -z "${E2B_API_KEY:-}" ]; then
+        echo "Error: E2B_API_KEY must be set for e2b >= $E2B_SDK_COMPAT_MIN_VERSION"
+        exit 1
+    fi
+
+    api_url="${E2B_API_URL:-http://${E2B_DOMAIN:-localhost}/kruise/api}"
+    api_url="${api_url%/}"
+
+    response="$(
+        curl --fail --silent --show-error \
+            --retry 30 --retry-delay 1 --retry-connrefused \
+            --connect-timeout 5 --max-time 10 \
+            --header "X-API-Key: ${E2B_API_KEY}" \
+            "${api_url}/api-keys/compatible"
+    )"
+    compatible_api_key="$(
+        printf '%s' "$response" | python3 -c 'import json, sys
+data = json.load(sys.stdin)
+key = data.get("key")
+if not isinstance(key, str) or not key:
+    raise SystemExit("compatible API key response does not contain a non-empty key")
+print(key)'
+    )"
+    export E2B_API_KEY="$compatible_api_key"
+
+    if [ "$xtrace_enabled" = "true" ]; then
+        set -x
+    fi
+    echo "E2B_API_KEY converted to SDK-compatible form"
+}
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -115,7 +210,15 @@ fi
 
 echo "dependencies installed successfully"
 
-# Step 3: Run pytest tests serially
+installed_e2b_version="$(get_installed_e2b_version)"
+if [ -z "$installed_e2b_version" ]; then
+    echo "Error: failed to determine installed e2b version"
+    exit 1
+fi
+convert_e2b_api_key_for_sdk_if_needed "$installed_e2b_version"
+
+# Step 3: Run pytest tests serially (print the key for debug, it's safe to print it in a ci pipeline)
+echo "Using E2B_API_KEY: ${E2B_API_KEY:-}"
 echo "Running E2B pytest tests..."
 set +e
 

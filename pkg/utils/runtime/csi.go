@@ -57,7 +57,7 @@ func CSIMount(ctx context.Context, sbx *agentsv1alpha1.Sandbox, driver string, r
 	result, err := RunCommandWithRuntime(ctx, RunCmdFuncArgs{
 		Sbx:           sbx,
 		ProcessConfig: processConfig,
-		Timeout:       5 * time.Second,
+		Timeout:       30 * time.Second,
 	})
 	if err != nil {
 		log.Error(err, "failed to run command", "stdout", result.Stdout, "stderr", result.Stderr)

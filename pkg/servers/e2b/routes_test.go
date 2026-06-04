@@ -33,6 +33,50 @@ import (
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 )
 
+type lookupKeyStorage struct {
+	byKey map[string]*models.CreatedTeamAPIKey
+	calls []string
+}
+
+func (s *lookupKeyStorage) Init(context.Context) error { return nil }
+func (s *lookupKeyStorage) Run()                       {}
+func (s *lookupKeyStorage) Stop()                      {}
+
+func (s *lookupKeyStorage) LoadByKey(_ context.Context, key string) (*models.CreatedTeamAPIKey, bool) {
+	s.calls = append(s.calls, key)
+	user, ok := s.byKey[key]
+	return user, ok
+}
+
+func (s *lookupKeyStorage) LoadByID(_ context.Context, id string) (*models.CreatedTeamAPIKey, bool) {
+	for _, user := range s.byKey {
+		if user.ID.String() == id {
+			return user, true
+		}
+	}
+	return nil, false
+}
+
+func (s *lookupKeyStorage) CreateKey(context.Context, *models.CreatedTeamAPIKey, keys.CreateKeyOptions) (*models.CreatedTeamAPIKey, error) {
+	return nil, nil
+}
+
+func (s *lookupKeyStorage) DeleteKey(context.Context, *models.CreatedTeamAPIKey) error {
+	return nil
+}
+
+func (s *lookupKeyStorage) ListByOwnerTeam(context.Context, *models.CreatedTeamAPIKey) ([]*models.TeamAPIKey, error) {
+	return nil, nil
+}
+
+func (s *lookupKeyStorage) ListTeams(context.Context, *models.CreatedTeamAPIKey) ([]*models.ListedTeam, error) {
+	return nil, nil
+}
+
+func (s *lookupKeyStorage) FindTeamByName(context.Context, string) (*models.Team, bool, error) {
+	return nil, false, nil
+}
+
 // TestCheckApiKey_BasicTests tests basic CheckApiKey middleware functionality
 // Note: The "keys nil (auth disabled)" scenario is tested separately
 // to avoid peer initialization timeout issues. See TestCheckApiKey_AnonymousUserWithAdminKeyID
@@ -80,18 +124,25 @@ func TestCheckApiKey_WithRealSetup(t *testing.T) {
 			expectedUser:  regularUser,
 		},
 		{
+			name:          "valid E2B SDK compatible regular user API key",
+			apiKeyHeader:  keys.EncodeForE2BSDK(regularUser.Key),
+			expectError:   false,
+			expectCtxUser: true,
+			expectedUser:  regularUser,
+		},
+		{
 			name:         "invalid API key",
 			apiKeyHeader: "invalid-key",
 			expectError:  true,
 			expectedCode: http.StatusUnauthorized,
-			expectedMsg:  "Invalid API Key: invalid-key",
+			expectedMsg:  "Invalid API Key",
 		},
 		{
 			name:         "empty X-API-KEY header",
 			apiKeyHeader: "",
 			expectError:  true,
 			expectedCode: http.StatusUnauthorized,
-			expectedMsg:  "Invalid API Key: ",
+			expectedMsg:  "Invalid API Key",
 		},
 	}
 
@@ -101,7 +152,7 @@ func TestCheckApiKey_WithRealSetup(t *testing.T) {
 			require.NoError(t, err)
 
 			if tt.apiKeyHeader != "" {
-				req.Header.Set("X-API-KEY", tt.apiKeyHeader)
+				req.Header.Set(models.HeaderApiKey, tt.apiKeyHeader)
 			}
 
 			ctx := logs.NewContext()
@@ -112,6 +163,12 @@ func TestCheckApiKey_WithRealSetup(t *testing.T) {
 				if apiErr != nil {
 					assert.Equal(t, tt.expectedCode, apiErr.Code)
 					assert.Equal(t, tt.expectedMsg, apiErr.Message)
+					if tt.apiKeyHeader != "" {
+						assert.NotContains(t, apiErr.Message, tt.apiKeyHeader)
+						if decoded, ok := keys.DecodeFromE2BSDKCompatible(tt.apiKeyHeader); ok {
+							assert.NotContains(t, apiErr.Message, decoded)
+						}
+					}
 				}
 			} else {
 				assert.Nil(t, apiErr)
@@ -123,6 +180,81 @@ func TestCheckApiKey_WithRealSetup(t *testing.T) {
 					}
 				}
 			}
+		})
+	}
+}
+
+func TestCheckApiKey_CanonicalizesE2BSDKCompatibleKeys(t *testing.T) {
+	rawKey := "legacy-raw-key"
+	rawUser := &models.CreatedTeamAPIKey{
+		ID:   uuid.New(),
+		Key:  rawKey,
+		Name: "legacy-user",
+		Team: &models.Team{Name: "team-a"},
+	}
+	encodedRawKey := keys.EncodeForE2BSDK(rawKey)
+
+	e2bLikeRawKey := "e2b_000000000000000"
+	e2bLikeUser := &models.CreatedTeamAPIKey{
+		ID:   uuid.New(),
+		Key:  e2bLikeRawKey,
+		Name: "e2b-like-user",
+		Team: &models.Team{Name: "team-a"},
+	}
+	encodedE2bLikeKey := keys.EncodeForE2BSDK(e2bLikeRawKey)
+
+	tests := []struct {
+		name      string
+		stored    map[string]*models.CreatedTeamAPIKey
+		header    string
+		wantUser  *models.CreatedTeamAPIKey
+		wantCalls []string
+	}{
+		{
+			name:      "raw key authenticates directly",
+			stored:    map[string]*models.CreatedTeamAPIKey{rawKey: rawUser},
+			header:    rawKey,
+			wantUser:  rawUser,
+			wantCalls: []string{rawKey},
+		},
+		{
+			name:      "compatible key authenticates as decoded raw key",
+			stored:    map[string]*models.CreatedTeamAPIKey{rawKey: rawUser},
+			header:    encodedRawKey,
+			wantUser:  rawUser,
+			wantCalls: []string{rawKey},
+		},
+		{
+			name:      "E2B-like raw key authenticates directly",
+			stored:    map[string]*models.CreatedTeamAPIKey{e2bLikeRawKey: e2bLikeUser},
+			header:    e2bLikeRawKey,
+			wantUser:  e2bLikeUser,
+			wantCalls: []string{e2bLikeRawKey},
+		},
+		{
+			name:      "E2B-like key authenticates as decoded raw key",
+			stored:    map[string]*models.CreatedTeamAPIKey{e2bLikeRawKey: e2bLikeUser},
+			header:    encodedE2bLikeKey,
+			wantUser:  e2bLikeUser,
+			wantCalls: []string{e2bLikeRawKey},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			storage := &lookupKeyStorage{byKey: tt.stored}
+			controller := &Controller{keys: storage}
+			req, err := http.NewRequest(http.MethodGet, "http://localhost/test", nil)
+			require.NoError(t, err)
+			req.Header.Set(models.HeaderApiKey, tt.header)
+
+			newCtx, apiErr := controller.CheckApiKey(logs.NewContext(), req)
+
+			require.Nil(t, apiErr)
+			user := GetUserFromContext(newCtx)
+			require.NotNil(t, user)
+			assert.Equal(t, tt.wantUser.ID, user.ID)
+			assert.Equal(t, tt.wantCalls, storage.calls)
 		})
 	}
 }
@@ -241,7 +373,7 @@ func TestCheckApiKey_SandboxOwnership(t *testing.T) {
 			require.NoError(t, err)
 
 			if tt.apiKeyHeader != "" {
-				req.Header.Set("X-API-KEY", tt.apiKeyHeader)
+				req.Header.Set(models.HeaderApiKey, tt.apiKeyHeader)
 			}
 
 			if tt.sandboxID != "" {

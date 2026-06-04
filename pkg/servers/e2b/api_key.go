@@ -78,7 +78,21 @@ func (sc *Controller) CreateAPIKey(r *http.Request) (web.ApiResponse[*models.Cre
 
 	return web.ApiResponse[*models.CreatedTeamAPIKey]{
 		Code: http.StatusCreated,
-		Body: createdAPIKey,
+		Body: keys.ConvertToE2BCompatibleCreatedAPIKey(createdAPIKey),
+	}, nil
+}
+
+// GetCompatibleAPIKey returns the E2B SDK-compatible form of the caller's API key.
+//
+// We intentionally read the raw key directly from the request header here instead of
+// retrieving it from a value stashed into the request context by CheckApiKey. Keeping
+// the lookup local to this low-frequency endpoint improves readability and avoids
+// scattering the key-passing logic across the auth middleware and the handler.
+func (sc *Controller) GetCompatibleAPIKey(r *http.Request) (web.ApiResponse[*models.CompatibleAPIKey], *web.ApiError) {
+	rawAPIKey := keys.ToStoredRawAPIKey(r.Header.Get(models.HeaderApiKey))
+
+	return web.ApiResponse[*models.CompatibleAPIKey]{
+		Body: &models.CompatibleAPIKey{Key: keys.EncodeForE2BSDK(rawAPIKey)},
 	}, nil
 }
 

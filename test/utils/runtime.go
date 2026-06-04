@@ -18,8 +18,12 @@ package utils
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"time"
 
 	"connectrpc.com/connect"
@@ -99,6 +103,7 @@ func NewTestRuntimeServer(opts TestRuntimeServerOptions) *httptest.Server {
 	service := &TestProcessService{
 		responses:   testResponses,
 		immediately: opts.RunCommandImmediately,
+		accessToken: runtime.AccessToken,
 	}
 	mux := http.NewServeMux()
 	grpcPath, handler := processconnect.NewProcessHandler(service)
@@ -108,6 +113,18 @@ func NewTestRuntimeServer(opts TestRuntimeServerOptions) *httptest.Server {
 			return web.ApiResponse[struct{}]{}, &web.ApiError{
 				Code: opts.InitErrCode,
 			}
+		}
+		var initRequest struct {
+			AccessToken string `json:"accessToken"`
+		}
+		if decodeErr := json.NewDecoder(r.Body).Decode(&initRequest); decodeErr != nil && !errors.Is(decodeErr, io.EOF) {
+			return web.ApiResponse[struct{}]{}, &web.ApiError{
+				Code:    http.StatusBadRequest,
+				Message: decodeErr.Error(),
+			}
+		}
+		if initRequest.AccessToken != "" {
+			service.SetAccessToken(initRequest.AccessToken)
 		}
 		return web.ApiResponse[struct{}]{
 			Code: http.StatusNoContent,
@@ -120,6 +137,20 @@ func NewTestRuntimeServer(opts TestRuntimeServerOptions) *httptest.Server {
 type TestProcessService struct {
 	responses   []process.StartResponse
 	immediately bool
+	mu          sync.RWMutex
+	accessToken string
+}
+
+func (s *TestProcessService) SetAccessToken(accessToken string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.accessToken = accessToken
+}
+
+func (s *TestProcessService) GetAccessToken() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.accessToken
 }
 
 func (s *TestProcessService) List(context.Context, *connect.Request[process.ListRequest]) (*connect.Response[process.ListResponse], error) {
@@ -131,7 +162,7 @@ func (s *TestProcessService) Connect(context.Context, *connect.Request[process.C
 }
 
 func (s *TestProcessService) Start(_ context.Context, req *connect.Request[process.StartRequest], stream *connect.ServerStream[process.StartResponse]) error {
-	if req.Header().Get("X-Access-Token") != runtime.AccessToken {
+	if req.Header().Get("X-Access-Token") != s.GetAccessToken() {
 		return connect.NewError(connect.CodeUnauthenticated, nil)
 	}
 	start := time.Now()

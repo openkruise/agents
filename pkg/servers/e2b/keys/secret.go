@@ -102,7 +102,7 @@ func (k *secretKeyStorage) Init(ctx context.Context) error {
 		if err := k.retryUpdateSecret(ctx, AdminKeyID.String(), adminKey); err != nil && !apierrors.IsConflict(err) {
 			return err
 		} else if err == nil {
-			log.Info("create admin key success", "key", adminKey.Key)
+			log.Info("create admin key success", "id", adminKey.ID)
 		}
 	}
 
@@ -343,7 +343,7 @@ func (k *secretKeyStorage) CreateKey(ctx context.Context, key *models.CreatedTea
 		},
 	}
 
-	log.Info("api-key generated", "key", apiKey)
+	log.Info("api-key generated", "id", apiKey.ID)
 	createdKey, err := k.retryCreateKey(ctx, newID.String(), apiKey)
 	if err != nil {
 		log.Error(err, "failed to update api-key")

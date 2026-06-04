@@ -96,9 +96,6 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 	log := klog.FromContext(ctx)
 	claimStart := time.Now()
 	var accessToken string
-	if request.Secure {
-		accessToken = config.NewDefaultAccessToken()
-	}
 	opts := infra.ClaimSandboxOptions{
 		Namespace:    sc.getNamespaceOfUser(user),
 		Template:     request.TemplateID,
@@ -114,6 +111,7 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 	}
 
 	if !request.Extensions.SkipInitRuntime {
+		accessToken = config.NewDefaultAccessToken()
 		opts.InitRuntime = &config.InitRuntimeOptions{
 			EnvVars:     request.EnvVars,
 			AccessToken: accessToken,
