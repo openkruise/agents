@@ -24,14 +24,13 @@ import (
 	"github.com/openkruise/agents/pkg/controller/sandboxset"
 	"github.com/openkruise/agents/pkg/controller/sandboxupdateops"
 	"github.com/openkruise/agents/pkg/controller/securitytokenrefresh"
-	"github.com/openkruise/agents/pkg/utils/metricsasync"
 )
 
 // Deps bundles process-wide dependencies passed to controller Add funcs.
 // New dependencies should be appended here rather than introducing extra
 // AddFunc parameters across all controllers.
 type Deps struct {
-	MetricsCleanup *metricsasync.Pool
+	MetricsCleanup sandbox.Enqueuer
 }
 
 func SetupWithManager(m manager.Manager, deps Deps) error {

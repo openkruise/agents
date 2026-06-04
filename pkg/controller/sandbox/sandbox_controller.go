@@ -57,9 +57,9 @@ var (
 )
 
 // Enqueuer is the contract the Sandbox controller depends on for async
-// metric cleanup. metricsasync.Pool satisfies it.
+// metric cleanup. sandboxmetricsgc.Reconciler satisfies it.
 type Enqueuer interface {
-	Enqueue(kind, namespace, name string)
+	Enqueue(namespace, name string)
 }
 
 func Add(mgr manager.Manager, metricsCleanup Enqueuer) error {
@@ -129,7 +129,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 			box.Name = req.NamespacedName.Name
 			core.ResourceVersionExpectations.Delete(box)
 			core.ScaleExpectation.DeleteExpectations(utils.GetControllerKey(box))
-			r.metricsCleanup.Enqueue("sandbox", req.NamespacedName.Namespace, req.NamespacedName.Name)
+			r.metricsCleanup.Enqueue(req.NamespacedName.Namespace, req.NamespacedName.Name)
 		}
 		return reconcile.Result{}, client.IgnoreNotFound(err)
 	}

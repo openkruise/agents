@@ -3911,19 +3911,19 @@ func TestUpdateSandboxStatus_Upgrading_RevisionUnchanged_NoReset(t *testing.T) {
 // fakeEnqueuer captures Enqueue invocations for assertion.
 type fakeEnqueuer struct {
 	mu    sync.Mutex
-	calls []struct{ Kind, Namespace, Name string }
+	calls []struct{ Namespace, Name string }
 }
 
-func (f *fakeEnqueuer) Enqueue(kind, namespace, name string) {
+func (f *fakeEnqueuer) Enqueue(namespace, name string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.calls = append(f.calls, struct{ Kind, Namespace, Name string }{kind, namespace, name})
+	f.calls = append(f.calls, struct{ Namespace, Name string }{namespace, name})
 }
 
-func (f *fakeEnqueuer) snapshot() []struct{ Kind, Namespace, Name string } {
+func (f *fakeEnqueuer) snapshot() []struct{ Namespace, Name string } {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	out := make([]struct{ Kind, Namespace, Name string }, len(f.calls))
+	out := make([]struct{ Namespace, Name string }, len(f.calls))
 	copy(out, f.calls)
 	return out
 }
@@ -3949,7 +3949,6 @@ func TestReconcile_NotFoundEnqueuesAsyncCleanup(t *testing.T) {
 
 	calls := enq.snapshot()
 	assert.Len(t, calls, 1)
-	assert.Equal(t, "sandbox", calls[0].Kind)
 	assert.Equal(t, "ns", calls[0].Namespace)
 	assert.Equal(t, "missing", calls[0].Name)
 }
