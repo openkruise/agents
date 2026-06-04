@@ -17,9 +17,16 @@ limitations under the License.
 package sandboxmetricsgc
 
 import (
+	"context"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	sandboxctrl "github.com/openkruise/agents/pkg/controller/sandbox"
 )
 
 func TestEnqueue_NonBlockingDropOnFullChannel(t *testing.T) {
@@ -43,6 +50,44 @@ func TestEnqueue_NonBlockingDropOnFullChannel(t *testing.T) {
 			got := testutil.ToFloat64(droppedTotal.WithLabelValues("channel_full"))
 			if got != tt.wantDrops {
 				t.Errorf("drops = %v, want %v", got, tt.wantDrops)
+			}
+		})
+	}
+}
+
+func TestReconcile_DeletesSandboxMetricSeries(t *testing.T) {
+	// This test verifies the Reconciler's single piece of behaviour: it must
+	// invoke sandbox.DeleteSandboxMetrics for the requested (ns, name). We
+	// assert side-effects on a known series instead of mocking the call, so
+	// the test fails for the right reason if the wiring breaks.
+	tests := []struct {
+		name string
+		ns   string
+		obj  string
+	}{
+		{name: "basic delete clears created gauge", ns: "default", obj: "gc-victim-1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sb := &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              tt.obj,
+					Namespace:         tt.ns,
+					CreationTimestamp: metav1.Now(),
+				},
+				Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxRunning},
+			}
+			sandboxctrl.RecordSandboxMetricsForTest(sb)
+
+			r := NewReconciler(Options{})
+			_, err := r.Reconcile(context.Background(), reconcile.Request{
+				NamespacedName: types.NamespacedName{Namespace: tt.ns, Name: tt.obj},
+			})
+			if err != nil {
+				t.Fatalf("Reconcile returned err: %v", err)
+			}
+			if got := sandboxctrl.CreatedGaugeValueForTest(tt.ns, tt.obj); got != 0 {
+				t.Errorf("created gauge after Reconcile = %v, want 0", got)
 			}
 		})
 	}

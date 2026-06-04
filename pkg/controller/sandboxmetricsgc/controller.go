@@ -17,10 +17,14 @@ limitations under the License.
 package sandboxmetricsgc
 
 import (
+	"context"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	sandboxctrl "github.com/openkruise/agents/pkg/controller/sandbox"
 )
 
 // Options configures the metrics GC controller. Zero values fall back to
@@ -72,4 +76,12 @@ func (r *Reconciler) Enqueue(namespace, name string) {
 	default:
 		droppedTotal.WithLabelValues("channel_full").Inc()
 	}
+}
+
+// Reconcile drops all Prometheus series owned by the Sandbox controller for
+// req.NamespacedName. DeleteSandboxMetrics is idempotent so repeated
+// reconciles are safe and never error.
+func (r *Reconciler) Reconcile(_ context.Context, req ctrl.Request) (ctrl.Result, error) {
+	sandboxctrl.DeleteSandboxMetrics(req.Namespace, req.Name)
+	return ctrl.Result{}, nil
 }
