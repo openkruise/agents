@@ -94,10 +94,9 @@ func TestReconcile_DeletesSandboxMetricSeries(t *testing.T) {
 	}
 }
 
-func TestSetupWithManager_Compiles(t *testing.T) {
+func TestSetupWithManager_Compiles(_ *testing.T) {
 	// Compile-time assertion: NewReconciler returns *Reconciler which has
 	// SetupWithManager(ctrl.Manager) error. If this stops compiling the
 	// wiring broke.
 	var _ func(ctrl.Manager) error = (*Reconciler)(nil).SetupWithManager
-	_ = t // keep go test happy with an unused param
 }
