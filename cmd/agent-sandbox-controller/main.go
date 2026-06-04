@@ -22,7 +22,6 @@ import (
 	"net/http"         // Added for pprof server
 	_ "net/http/pprof" // Added to register pprof handlers
 	"os"
-	"strconv"
 	"strings"
 
 	"github.com/spf13/pflag"
@@ -90,16 +89,6 @@ func main() {
 	var allowPrivileged bool
 	var metricLabelsAllowlist string
 
-	// envInt returns the integer value of envVar, or fallback if unset/invalid.
-	envInt := func(envVar string, fallback int) int {
-		if v := os.Getenv(envVar); v != "" {
-			if n, err := strconv.Atoi(v); err == nil {
-				return n
-			}
-		}
-		return fallback
-	}
-
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -134,11 +123,9 @@ func main() {
 
 	var metricsAsyncWorkers int
 	var metricsAsyncQueueCap int
-	flag.IntVar(&metricsAsyncWorkers, "metrics-async-workers",
-		envInt("METRICS_ASYNC_WORKERS", 8),
+	flag.IntVar(&metricsAsyncWorkers, "metrics-async-workers", 8,
 		"Concurrent reconciles for the sandbox metric GC controller.")
-	flag.IntVar(&metricsAsyncQueueCap, "metrics-async-queue-cap",
-		envInt("METRICS_ASYNC_QUEUE_CAP", 50000),
+	flag.IntVar(&metricsAsyncQueueCap, "metrics-async-queue-cap", 50000,
 		"Buffer size for the sandbox metric GC controller event channel. "+
 			"Sends that would block are counted under sandbox_metrics_gc_dropped_total{reason=\"channel_full\"}.")
 
