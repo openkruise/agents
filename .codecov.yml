@@ -11,10 +11,10 @@ coverage:
       default:
         # Wiring code (cmd/* entry points, SetupWithManager / Add registration
         # plumbing) is not realistically unit-testable without envtest. Allow
-        # patches to fall up to 25 percentage points below the project baseline
+        # patches to fall up to 10 percentage points below the project baseline
         # before failing.
         target: auto
-        threshold: 25%
+        threshold: 10%
 
 ignore:
 - "pkg/client/.*"
