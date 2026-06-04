@@ -28,6 +28,7 @@ import (
 type ApiV1alpha1Interface interface {
 	RESTClient() rest.Interface
 	CheckpointsGetter
+	CommitsGetter
 	SandboxesGetter
 	SandboxClaimsGetter
 	SandboxSetsGetter
@@ -43,6 +44,10 @@ type ApiV1alpha1Client struct {
 
 func (c *ApiV1alpha1Client) Checkpoints(namespace string) CheckpointInterface {
 	return newCheckpoints(c, namespace)
+}
+
+func (c *ApiV1alpha1Client) Commits(namespace string) CommitInterface {
+	return newCommits(c, namespace)
 }
 
 func (c *ApiV1alpha1Client) Sandboxes(namespace string) SandboxInterface {

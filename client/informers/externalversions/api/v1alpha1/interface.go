@@ -25,6 +25,8 @@ import (
 type Interface interface {
 	// Checkpoints returns a CheckpointInformer.
 	Checkpoints() CheckpointInformer
+	// Commits returns a CommitInformer.
+	Commits() CommitInformer
 	// Sandboxes returns a SandboxInformer.
 	Sandboxes() SandboxInformer
 	// SandboxClaims returns a SandboxClaimInformer.
@@ -53,6 +55,11 @@ func New(f internalinterfaces.SharedInformerFactory, namespace string, tweakList
 // Checkpoints returns a CheckpointInformer.
 func (v *version) Checkpoints() CheckpointInformer {
 	return &checkpointInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
+}
+
+// Commits returns a CommitInformer.
+func (v *version) Commits() CommitInformer {
+	return &commitInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
 }
 
 // Sandboxes returns a SandboxInformer.

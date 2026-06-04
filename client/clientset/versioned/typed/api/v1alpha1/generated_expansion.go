@@ -19,6 +19,8 @@ package v1alpha1
 
 type CheckpointExpansion interface{}
 
+type CommitExpansion interface{}
+
 type SandboxExpansion interface{}
 
 type SandboxClaimExpansion interface{}
