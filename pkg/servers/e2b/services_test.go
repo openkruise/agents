@@ -608,6 +608,55 @@ func TestCreateSandboxAlwaysCreatesAccessToken(t *testing.T) {
 	}
 }
 
+func TestCreateSandboxSkipsAccessTokenWhenInitRuntimeIsSkipped(t *testing.T) {
+	controller, fc, teardown := Setup(t)
+	defer teardown()
+
+	user := &models.CreatedTeamAPIKey{
+		ID:   keys.AdminKeyID,
+		Key:  InitKey,
+		Name: "test-user",
+	}
+
+	tests := []struct {
+		name string
+		body map[string]any
+	}{
+		{
+			name: "skip init runtime extension",
+			body: map[string]any{
+				"metadata": map[string]string{
+					models.ExtensionKeyClaimTimeout:    "1",
+					models.ExtensionKeySkipInitRuntime: v1alpha1.True,
+				},
+			},
+		},
+	}
+
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			templateName := fmt.Sprintf("skip-init-access-token-template-%d", i)
+			cleanup := CreateSandboxPool(t, controller, templateName, 1)
+			defer cleanup()
+
+			body := map[string]any{
+				"templateID": templateName,
+			}
+			for k, v := range tt.body {
+				body[k] = v
+			}
+
+			resp, apiError := controller.CreateSandbox(NewRequest(t, nil, body, nil, user))
+			require.Nil(t, apiError)
+			require.NotNil(t, resp.Body)
+			assert.Empty(t, resp.Body.EnvdAccessToken)
+
+			sbx := GetSandbox(t, resp.Body.SandboxID, fc)
+			assert.NotContains(t, sbx.Annotations, v1alpha1.AnnotationRuntimeAccessToken)
+		})
+	}
+}
+
 // CreateCheckpointAndTemplate creates a Checkpoint with associated SandboxTemplate for clone tests
 func CreateCheckpointAndTemplate(t *testing.T, controller *Controller, checkpointID string) func() {
 	tmpl := v1alpha1.EmbeddedSandboxTemplate{

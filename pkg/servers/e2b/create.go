@@ -95,7 +95,7 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models.NewSandboxRequest, user *models.CreatedTeamAPIKey) (web.ApiResponse[*models.Sandbox], *web.ApiError) {
 	log := klog.FromContext(ctx)
 	claimStart := time.Now()
-	accessToken := config.NewDefaultAccessToken()
+	var accessToken string
 	opts := infra.ClaimSandboxOptions{
 		Namespace:    sc.getNamespaceOfUser(user),
 		Template:     request.TemplateID,
@@ -111,6 +111,7 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 	}
 
 	if !request.Extensions.SkipInitRuntime {
+		accessToken = config.NewDefaultAccessToken()
 		opts.InitRuntime = &config.InitRuntimeOptions{
 			EnvVars:     request.EnvVars,
 			AccessToken: accessToken,
