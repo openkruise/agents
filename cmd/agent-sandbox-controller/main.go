@@ -24,7 +24,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/spf13/pflag"
 	corev1 "k8s.io/api/core/v1"
@@ -49,11 +48,11 @@ import (
 	"github.com/openkruise/agents/client"
 	"github.com/openkruise/agents/pkg/controller"
 	sandboxctrl "github.com/openkruise/agents/pkg/controller/sandbox"
+	"github.com/openkruise/agents/pkg/controller/sandboxmetricsgc"
 	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/utils"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 	"github.com/openkruise/agents/pkg/utils/fieldindex"
-	"github.com/openkruise/agents/pkg/utils/metricsasync"
 	customwebhook "github.com/openkruise/agents/pkg/webhook"
 	"github.com/openkruise/agents/pkg/webhook/sandboxset/mutating"
 )
@@ -100,14 +99,6 @@ func main() {
 		}
 		return fallback
 	}
-	envDuration := func(envVar string, fallback time.Duration) time.Duration {
-		if v := os.Getenv(envVar); v != "" {
-			if d, err := time.ParseDuration(v); err == nil {
-				return d
-			}
-		}
-		return fallback
-	}
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -142,17 +133,14 @@ func main() {
 		"Comma-separated list of Sandbox label keys to expose as sandbox_labels metric labels (e.g., app,env,version)")
 
 	var metricsAsyncWorkers int
-	var metricsAsyncDrainTimeout time.Duration
 	var metricsAsyncQueueCap int
 	flag.IntVar(&metricsAsyncWorkers, "metrics-async-workers",
 		envInt("METRICS_ASYNC_WORKERS", 8),
-		"Number of goroutines draining the async metric cleanup queue.")
-	flag.DurationVar(&metricsAsyncDrainTimeout, "metrics-async-drain-timeout",
-		envDuration("METRICS_ASYNC_DRAIN_TIMEOUT", 5*time.Second),
-		"Bounded time the manager waits for async metric cleanup to drain at shutdown.")
+		"Concurrent reconciles for the sandbox metric GC controller.")
 	flag.IntVar(&metricsAsyncQueueCap, "metrics-async-queue-cap",
-		envInt("METRICS_ASYNC_QUEUE_CAP", 0),
-		"Optional cap on the async metric cleanup queue. 0 means unbounded.")
+		envInt("METRICS_ASYNC_QUEUE_CAP", 50000),
+		"Buffer size for the sandbox metric GC controller event channel. "+
+			"Sends that would block are counted under sandbox_metrics_gc_dropped_total{reason=\"channel_full\"}.")
 
 	opts := zap.Options{
 		Development: true,
@@ -315,25 +303,19 @@ func main() {
 		os.Exit(1)
 	}
 
-	metricsCleanupPool := metricsasync.NewPool(metricsasync.Options{
-		Workers:      metricsAsyncWorkers,
-		DrainTimeout: metricsAsyncDrainTimeout,
-		QueueCap:     metricsAsyncQueueCap,
+	metricsGC := sandboxmetricsgc.NewReconciler(sandboxmetricsgc.Options{
+		Workers:       metricsAsyncWorkers,
+		ChannelBuffer: metricsAsyncQueueCap,
 	})
-	if err := metricsCleanupPool.RegisterKind("sandbox", sandboxctrl.DeleteSandboxMetrics); err != nil {
-		setupLog.Error(err, "unable to register sandbox metric cleanup")
-		os.Exit(1)
-	}
-	if err := mgr.Add(metricsCleanupPool); err != nil {
-		setupLog.Error(err, "unable to add metrics cleanup pool to manager")
+	if err := metricsGC.SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to setup sandbox metrics GC controller")
 		os.Exit(1)
 	}
 
 	setupLog.Info("setup controllers",
 		"metricsAsyncWorkers", metricsAsyncWorkers,
-		"metricsAsyncDrainTimeout", metricsAsyncDrainTimeout,
 		"metricsAsyncQueueCap", metricsAsyncQueueCap)
-	if err = controller.SetupWithManager(mgr, controller.Deps{MetricsCleanup: metricsCleanupPool}); err != nil {
+	if err = controller.SetupWithManager(mgr, controller.Deps{MetricsCleanup: metricsGC}); err != nil {
 		setupLog.Error(err, "unable to setup controllers")
 		os.Exit(1)
 	}
