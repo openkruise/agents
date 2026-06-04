@@ -39,6 +39,7 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/discovery"
+	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 )
 
@@ -144,12 +145,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, err
 	}
 
-	// 4. List matching sandboxes in the same namespace (only claimed ones)
+	// 4. List matching sandboxes in the same namespace (exclude sandboxes controlled by SandboxSet)
 	sandboxList := &agentsv1alpha1.SandboxList{}
 	if err := r.List(ctx, sandboxList,
 		client.InNamespace(ops.Namespace),
 		client.MatchingLabelsSelector{Selector: selector},
-		client.MatchingLabels{agentsv1alpha1.LabelSandboxIsClaimed: agentsv1alpha1.True},
 		client.UnsafeDisableDeepCopy); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -227,6 +227,11 @@ func (r *Reconciler) classifySandboxes(sandboxList *agentsv1alpha1.SandboxList, 
 		sbx := &sandboxList.Items[i]
 		if !sbx.DeletionTimestamp.IsZero() || (sbx.Status.Phase != agentsv1alpha1.SandboxRunning &&
 			sbx.Status.Phase != agentsv1alpha1.SandboxUpgrading) {
+			continue
+		}
+
+		// Skip sandboxes controlled by SandboxSet (pool sandboxes, not intended for update)
+		if utils.IsControlledBySandboxSet(sbx) {
 			continue
 		}
 

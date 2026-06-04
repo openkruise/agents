@@ -26,7 +26,6 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	cacheutils "github.com/openkruise/agents/pkg/cache/utils"
 	"github.com/openkruise/agents/pkg/utils"
-	"github.com/openkruise/agents/pkg/utils/sandboxutils"
 )
 
 // --- Sandbox: shared Update closure -----------------------------------------
@@ -58,7 +57,7 @@ func (c *Cache) CheckpointUpdateFunc(ctx context.Context) cacheutils.UpdateFunc[
 // stay lazy because they do not protect caller-side target-state mutation.
 func (c *Cache) NewSandboxPauseTask(ctx context.Context, sbx *agentsv1alpha1.Sandbox) (*cacheutils.WaitTask[*agentsv1alpha1.Sandbox], error) {
 	check := func(s *agentsv1alpha1.Sandbox) (bool, error) {
-		if pausable, reason := sandboxutils.IsSandboxPausable(s); !pausable {
+		if pausable, reason := utils.IsSandboxPausable(s); !pausable {
 			return false, fmt.Errorf("sandbox %s/%s is not pausable, reason: %s", s.Namespace, s.Name, reason)
 		}
 		cond := utils.GetSandboxCondition(&s.Status, string(agentsv1alpha1.SandboxConditionPaused))
@@ -80,7 +79,7 @@ func (c *Cache) NewSandboxPauseTask(ctx context.Context, sbx *agentsv1alpha1.San
 // stay lazy because they do not protect caller-side target-state mutation.
 func (c *Cache) NewSandboxResumeTask(ctx context.Context, sbx *agentsv1alpha1.Sandbox) (*cacheutils.WaitTask[*agentsv1alpha1.Sandbox], error) {
 	check := func(s *agentsv1alpha1.Sandbox) (bool, error) {
-		if resumable, reason := sandboxutils.IsSandboxResumable(s); !resumable {
+		if resumable, reason := utils.IsSandboxResumable(s); !resumable {
 			return false, fmt.Errorf("sandbox %s/%s is not resumable, reason: %s", s.Namespace, s.Name, reason)
 		}
 		cond := utils.GetSandboxCondition(&s.Status, string(agentsv1alpha1.SandboxConditionReady))
@@ -108,7 +107,7 @@ func (c *Cache) NewSandboxWaitReadyTask(ctx context.Context, sbx *agentsv1alpha1
 		if inplaceCond != nil && inplaceCond.Reason == agentsv1alpha1.SandboxInplaceUpdateReasonInplaceUpdating {
 			return false, nil
 		}
-		state, _ := sandboxutils.GetSandboxState(s)
+		state, _ := utils.GetSandboxState(s)
 		return state == agentsv1alpha1.SandboxStateRunning && s.Status.PodInfo.PodIP != "", nil
 	}
 	return cacheutils.NewWaitTask[*agentsv1alpha1.Sandbox](

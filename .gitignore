@@ -215,3 +215,4 @@ REVIEW.md
 .gomodcache/
 .modcache/
 .DS_Store
+.qoder/repowiki

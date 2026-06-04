@@ -34,7 +34,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	utilruntime "github.com/openkruise/agents/pkg/utils/runtime"
-	sandboxManagerUtils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
+	utestutils "github.com/openkruise/agents/pkg/utils/testutils"
 	testutils "github.com/openkruise/agents/test/utils"
 )
 
@@ -47,7 +47,7 @@ func init() {
 }
 
 func TestInitialize(t *testing.T) {
-	sandboxManagerUtils.InitLogOutput()
+	utestutils.InitLogOutput()
 	newFakeClient := func(initObj ...client.Object) client.Client {
 		return fake.NewClientBuilder().WithScheme(scheme).WithObjects(initObj...).Build()
 	}
@@ -434,7 +434,7 @@ func TestInitialize(t *testing.T) {
 }
 
 func TestDefaultSandboxInitializer(t *testing.T) {
-	sandboxManagerUtils.InitLogOutput()
+	utestutils.InitLogOutput()
 
 	fc := fake.NewClientBuilder().WithScheme(scheme).Build()
 

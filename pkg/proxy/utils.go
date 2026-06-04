@@ -21,12 +21,15 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
+)
 
-	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
+const (
+	RequestPeerTimeout = 100 * time.Millisecond
 )
 
 var requestPeerClient = &http.Client{
-	Timeout: consts.RequestPeerTimeout,
+	Timeout: RequestPeerTimeout,
 }
 
 func requestPeer(method, ip, path string, body []byte) error {

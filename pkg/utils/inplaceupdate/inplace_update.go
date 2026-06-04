@@ -284,7 +284,10 @@ func DefaultGenerateResizeSubresourceBody(opts InPlaceUpdateOptions) *corev1.Pod
 		if resourcesEqual(origin.Resources, container.Resources) {
 			continue
 		}
-		container.Resources = origin.Resources
+		// Merge origin resources into container, preserving system-injected fields
+		// (e.g., ephemeral-storage) that are not specified in the sandbox spec.
+		mergeResourceList(container.Resources.Limits, origin.Resources.Limits)
+		mergeResourceList(container.Resources.Requests, origin.Resources.Requests)
 		changed = true
 	}
 	if !changed {
@@ -663,4 +666,12 @@ func isResourceListCovered(actual, expected corev1.ResourceList) bool {
 		}
 	}
 	return true
+}
+
+// mergeResourceList overwrites entries in dst with values from src,
+// preserving any keys in dst that are not present in src.
+func mergeResourceList(dst, src corev1.ResourceList) {
+	for name, qty := range src {
+		dst[name] = qty
+	}
 }

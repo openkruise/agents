@@ -41,8 +41,9 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
-	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
-	"github.com/openkruise/agents/pkg/utils/sandboxutils"
+	"github.com/openkruise/agents/pkg/utils"
+	"github.com/openkruise/agents/pkg/utils/pagination"
+	"github.com/openkruise/agents/pkg/utils/testutils"
 	"github.com/openkruise/agents/pkg/utils/timeout"
 )
 
@@ -122,7 +123,7 @@ func CreateSandboxWithStatus(t *testing.T, client ctrlclient.Client, sbx *agents
 }
 
 func TestSandboxManager_ClaimSandbox(t *testing.T) {
-	utils.InitLogOutput()
+	testutils.InitLogOutput()
 	now := time.Now()
 	username := "test-user"
 	tests := []struct {
@@ -363,7 +364,7 @@ func TestSandboxManager_NamespaceAwareSandboxOptions(t *testing.T) {
 
 	got, err := manager.GetClaimedSandbox(t.Context(), testUser, infra.GetClaimedSandboxOptions{
 		Namespace: "team-b",
-		SandboxID: sandboxutils.GetSandboxID(sandboxes[1]),
+		SandboxID: utils.GetSandboxID(sandboxes[1]),
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "team-b", got.GetNamespace())
@@ -373,7 +374,7 @@ func TestSandboxManager_NamespaceAwareSandboxOptions(t *testing.T) {
 	defer cancel()
 	_, err = manager.GetClaimedSandbox(getCtx, testUser, infra.GetClaimedSandboxOptions{
 		Namespace: "team-a",
-		SandboxID: sandboxutils.GetSandboxID(sandboxes[1]),
+		SandboxID: utils.GetSandboxID(sandboxes[1]),
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not found")
@@ -556,7 +557,7 @@ func TestSandboxManager_Debug(t *testing.T) {
 }
 
 func TestSandboxManager_PauseSandbox(t *testing.T) {
-	utils.InitLogOutput()
+	testutils.InitLogOutput()
 
 	tests := []struct {
 		name          string
@@ -614,7 +615,7 @@ func TestSandboxManager_PauseSandbox(t *testing.T) {
 
 			// Get sandbox
 			sbx, err := manager.GetClaimedSandbox(t.Context(), testUser, infra.GetClaimedSandboxOptions{
-				SandboxID: sandboxutils.GetSandboxID(sandbox),
+				SandboxID: utils.GetSandboxID(sandbox),
 			})
 			if err != nil {
 				t.Fatalf("Failed to get sandbox: %v", err)
@@ -646,15 +647,15 @@ func TestSandboxManager_PauseSandbox(t *testing.T) {
 			assert.NoError(t, err)
 
 			// Verify route is synced (InplaceRefresh should have updated it)
-			route, ok := manager.proxy.LoadRoute(sandboxutils.GetSandboxID(sandbox))
+			route, ok := manager.proxy.LoadRoute(utils.GetSandboxID(sandbox))
 			assert.True(t, ok, "Route should be synced")
-			assert.Equal(t, sandboxutils.GetSandboxID(sandbox), route.ID)
+			assert.Equal(t, utils.GetSandboxID(sandbox), route.ID)
 			assert.Equal(t, tt.expectedIP, route.IP)
 			assert.Equal(t, testUser, route.Owner)
 			// Verify sandbox state matches expected
 			if tt.expectedState != "" {
 				actualSbx, err := manager.GetClaimedSandbox(t.Context(), testUser, infra.GetClaimedSandboxOptions{
-					SandboxID: sandboxutils.GetSandboxID(sandbox),
+					SandboxID: utils.GetSandboxID(sandbox),
 				})
 				if err == nil {
 					actualState, _ := actualSbx.GetState()
@@ -666,7 +667,7 @@ func TestSandboxManager_PauseSandbox(t *testing.T) {
 }
 
 func TestSandboxManager_ResumeSandbox(t *testing.T) {
-	utils.InitLogOutput()
+	testutils.InitLogOutput()
 
 	tests := []struct {
 		name          string
@@ -745,7 +746,7 @@ func TestSandboxManager_ResumeSandbox(t *testing.T) {
 
 			// Get sandbox
 			sbx, err := manager.GetClaimedSandbox(t.Context(), testUser, infra.GetClaimedSandboxOptions{
-				SandboxID: sandboxutils.GetSandboxID(sandbox),
+				SandboxID: utils.GetSandboxID(sandbox),
 			})
 			if err != nil {
 				t.Fatalf("Failed to get sandbox: %v", err)
@@ -788,9 +789,9 @@ func TestSandboxManager_ResumeSandbox(t *testing.T) {
 			assert.NoError(t, err)
 
 			// Verify route is synced
-			route, ok := manager.proxy.LoadRoute(sandboxutils.GetSandboxID(sandbox))
+			route, ok := manager.proxy.LoadRoute(utils.GetSandboxID(sandbox))
 			assert.True(t, ok, "Route should be synced")
-			assert.Equal(t, sandboxutils.GetSandboxID(sandbox), route.ID)
+			assert.Equal(t, utils.GetSandboxID(sandbox), route.ID)
 			assert.Equal(t, tt.expectedIP, route.IP)
 			assert.Equal(t, testUser, route.Owner)
 			assert.Equal(t, tt.expectedState, route.State)
@@ -799,7 +800,7 @@ func TestSandboxManager_ResumeSandbox(t *testing.T) {
 }
 
 func TestSandboxManager_CloneSandbox(t *testing.T) {
-	utils.InitLogOutput()
+	testutils.InitLogOutput()
 
 	checkpointID := "test-checkpoint-clone"
 	user := "test-user"
@@ -946,6 +947,14 @@ func TestSandboxManager_CloneSandbox(t *testing.T) {
 	}
 }
 
+func parseSandboxID(sandboxID string) (string, string, bool) {
+	namespace, name, ok := strings.Cut(sandboxID, "--")
+	if !ok || namespace == "" || name == "" {
+		return "", "", false
+	}
+	return namespace, name, true
+}
+
 func TestSandboxManager_GetOwnerOfSandbox(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -972,14 +981,45 @@ func TestSandboxManager_GetOwnerOfSandbox(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			manager, _ := setupTestManager(t)
+			manager, client := setupTestManager(t)
 
 			if tt.setupRoute {
+				namespace, name, ok := parseSandboxID(tt.sandboxID)
+				require.True(t, ok)
+
+				// Keep the route backed by a real Sandbox so the background route
+				// reconciler does not classify this test route as orphaned.
+				sandbox := &agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      name,
+						Namespace: namespace,
+						Annotations: map[string]string{
+							agentsv1alpha1.AnnotationOwner: testUser,
+						},
+						Labels: map[string]string{
+							agentsv1alpha1.LabelSandboxIsClaimed: "true",
+						},
+					},
+					Status: agentsv1alpha1.SandboxStatus{
+						Phase: agentsv1alpha1.SandboxRunning,
+						Conditions: []metav1.Condition{
+							{
+								Type:   string(agentsv1alpha1.SandboxConditionReady),
+								Status: metav1.ConditionTrue,
+							},
+						},
+						PodInfo: agentsv1alpha1.PodInfo{
+							PodIP: "10.0.0.1",
+						},
+					},
+				}
+				CreateSandboxWithStatus(t, client, sandbox)
 				manager.proxy.SetRoute(t.Context(), proxy.Route{
-					ID:    tt.sandboxID,
-					IP:    "10.0.0.1",
-					Owner: testUser,
-					State: agentsv1alpha1.SandboxStateRunning,
+					ID:              tt.sandboxID,
+					IP:              "10.0.0.1",
+					Owner:           testUser,
+					State:           agentsv1alpha1.SandboxStateRunning,
+					ResourceVersion: sandbox.GetResourceVersion(),
 				})
 			}
 
@@ -992,7 +1032,7 @@ func TestSandboxManager_GetOwnerOfSandbox(t *testing.T) {
 }
 
 func TestSandboxManager_ListSandboxes(t *testing.T) {
-	utils.InitLogOutput()
+	testutils.InitLogOutput()
 	manager, client := setupTestManager(t)
 
 	// Create 4 sandboxes with names that sort alphabetically
@@ -1035,7 +1075,7 @@ func TestSandboxManager_ListSandboxes(t *testing.T) {
 	})
 
 	t.Run("with paginator", func(t *testing.T) {
-		paginator := &utils.Paginator[infra.Sandbox]{
+		paginator := &pagination.Paginator[infra.Sandbox]{
 			Limit: 2, // Limit to 2 items per page, so 4 sandboxes will produce nextToken
 			GetKey: func(sbx infra.Sandbox) string {
 				return sbx.GetName()
@@ -1061,7 +1101,7 @@ func TestSandboxManager_ListSandboxes(t *testing.T) {
 }
 
 func TestSandboxManager_DeleteSandbox(t *testing.T) {
-	utils.InitLogOutput()
+	testutils.InitLogOutput()
 	manager, client := setupTestManager(t)
 
 	tests := []struct {
@@ -1145,7 +1185,7 @@ func TestSandboxManager_DeleteSandbox(t *testing.T) {
 
 			// Get sandbox
 			sbx, err := manager.GetClaimedSandbox(t.Context(), testUser, infra.GetClaimedSandboxOptions{
-				SandboxID: sandboxutils.GetSandboxID(sandbox),
+				SandboxID: utils.GetSandboxID(sandbox),
 			})
 			if err != nil {
 				t.Fatalf("Failed to get sandbox: %v", err)
@@ -1177,7 +1217,7 @@ func TestSandboxManager_DeleteSandbox(t *testing.T) {
 				ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
 				defer cancel()
 				_, getErr := manager.GetClaimedSandbox(ctx, testUser, infra.GetClaimedSandboxOptions{
-					SandboxID: sandboxutils.GetSandboxID(sandbox),
+					SandboxID: utils.GetSandboxID(sandbox),
 				})
 				assert.Error(t, getErr, "sandbox should not be found after deletion")
 			}
@@ -1186,13 +1226,13 @@ func TestSandboxManager_DeleteSandbox(t *testing.T) {
 }
 
 func TestSandboxManager_ListCheckpoints(t *testing.T) {
-	utils.InitLogOutput()
+	testutils.InitLogOutput()
 
 	tests := []struct {
 		name                  string
 		user                  string
 		setupCheckpoints      func(client ctrlclient.Client)
-		paginator             *utils.Paginator[infra.CheckpointInfo]
+		paginator             *pagination.Paginator[infra.CheckpointInfo]
 		expectError           bool
 		expectedErrorCode     errors.ErrorCode
 		expectedCheckpointIDs []string
@@ -1222,7 +1262,7 @@ func TestSandboxManager_ListCheckpoints(t *testing.T) {
 				createCheckpointForTest(t, client, "cp-c", "user1", "sandbox-c", "checkpoint-id-c", agentsv1alpha1.CheckpointSucceeded)
 				createCheckpointForTest(t, client, "cp-d", "user1", "sandbox-d", "checkpoint-id-d", agentsv1alpha1.CheckpointSucceeded)
 			},
-			paginator: &utils.Paginator[infra.CheckpointInfo]{
+			paginator: &pagination.Paginator[infra.CheckpointInfo]{
 				Limit: 2,
 				GetKey: func(cp infra.CheckpointInfo) string {
 					return cp.Name
@@ -1245,7 +1285,7 @@ func TestSandboxManager_ListCheckpoints(t *testing.T) {
 				createCheckpointForTest(t, client, "cp-c", "user1", "sandbox-c", "checkpoint-id-c", agentsv1alpha1.CheckpointSucceeded)
 				createCheckpointForTest(t, client, "cp-d", "user1", "sandbox-d", "checkpoint-id-d", agentsv1alpha1.CheckpointSucceeded)
 			},
-			paginator: &utils.Paginator[infra.CheckpointInfo]{
+			paginator: &pagination.Paginator[infra.CheckpointInfo]{
 				Limit:     2,
 				NextToken: "cp-b",
 				GetKey: func(cp infra.CheckpointInfo) string {
@@ -1310,7 +1350,7 @@ func TestSandboxManager_ListCheckpoints(t *testing.T) {
 				createCheckpointForTest(t, client, "cp-b", "user1", "sandbox-b", "checkpoint-b", agentsv1alpha1.CheckpointSucceeded)
 				createCheckpointForTest(t, client, "cp-c", "user1", "sandbox-c", "checkpoint-c", agentsv1alpha1.CheckpointSucceeded)
 			},
-			paginator: &utils.Paginator[infra.CheckpointInfo]{
+			paginator: &pagination.Paginator[infra.CheckpointInfo]{
 				Limit: 10,
 				GetKey: func(cp infra.CheckpointInfo) string {
 					return cp.Name
@@ -1382,7 +1422,7 @@ func createCheckpointForTest(t *testing.T, client ctrlclient.Client, name, owner
 }
 
 func TestSandboxManager_DeleteCheckpoint(t *testing.T) {
-	utils.InitLogOutput()
+	testutils.InitLogOutput()
 	namespace := "default"
 
 	tests := []struct {

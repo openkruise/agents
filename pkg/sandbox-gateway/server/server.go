@@ -34,7 +34,6 @@ import (
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/registry"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
-	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/utils"
 )
 
@@ -161,7 +160,7 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.V(consts.DebugLogLevel).Info("Received route refresh", "route", route)
+	log.V(utils.DebugLogLevel).Info("Received route refresh", "route", route)
 
 	// Handle based on state
 	if route.State == v1alpha1.SandboxStateRunning {
@@ -169,7 +168,7 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		if registry.GetRegistry().Update(route.ID, route) {
 			log.Info("Route updated via refresh", "id", route.ID, "ip", route.IP)
 		} else {
-			log.V(consts.DebugLogLevel).Info("Route update skipped due to older resourceVersion", "id", route.ID)
+			log.V(utils.DebugLogLevel).Info("Route update skipped due to older resourceVersion", "id", route.ID)
 		}
 	} else {
 		// Delete the route if the sandbox is dead

@@ -19,7 +19,9 @@ package models
 import (
 	"net/http"
 	"testing"
+	"time"
 
+	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -34,6 +36,7 @@ func TestParseExtensions(t *testing.T) {
 		name            string
 		metadata        map[string]string
 		wantErr         bool
+		errContains     string
 		expectExtension NewSandboxRequestExtension
 	}{
 		{
@@ -81,6 +84,110 @@ func TestParseExtensions(t *testing.T) {
 				ExtensionKeyCreateOnNoStock: "false",
 			},
 			wantErr: false,
+		},
+		{
+			name: "reserve failed sandbox for never",
+			metadata: map[string]string{
+				ExtensionKeyReserveFailedSandboxFor: "never",
+			},
+			wantErr: false,
+			expectExtension: NewSandboxRequestExtension{
+				CreateOnNoStock:         true,
+				ReserveFailedSandboxFor: ptr.To(consts.ReserveFailedSandboxNever),
+			},
+		},
+		{
+			name: "reserve failed sandbox for forever",
+			metadata: map[string]string{
+				ExtensionKeyReserveFailedSandboxFor: "forever",
+			},
+			wantErr: false,
+			expectExtension: NewSandboxRequestExtension{
+				CreateOnNoStock:         true,
+				ReserveFailedSandboxFor: ptr.To(consts.ReserveFailedSandboxForever),
+			},
+		},
+		{
+			name: "reserve failed sandbox for positive duration",
+			metadata: map[string]string{
+				ExtensionKeyReserveFailedSandboxFor: "600s",
+			},
+			wantErr: false,
+			expectExtension: NewSandboxRequestExtension{
+				CreateOnNoStock:         true,
+				ReserveFailedSandboxFor: ptr.To(10 * time.Minute),
+			},
+		},
+		{
+			name: "reserve failed sandbox for zero duration string",
+			metadata: map[string]string{
+				ExtensionKeyReserveFailedSandboxFor: "0s",
+			},
+			wantErr: false,
+			expectExtension: NewSandboxRequestExtension{
+				CreateOnNoStock:         true,
+				ReserveFailedSandboxFor: ptr.To(consts.ReserveFailedSandboxNever),
+			},
+		},
+		{
+			name: "reserve failed sandbox for negative duration is invalid",
+			metadata: map[string]string{
+				ExtensionKeyReserveFailedSandboxFor: "-1h",
+			},
+			wantErr:     true,
+			errContains: "cannot be negative",
+		},
+		{
+			name: "reserve failed sandbox for invalid duration is invalid",
+			metadata: map[string]string{
+				ExtensionKeyReserveFailedSandboxFor: "abc",
+			},
+			wantErr:     true,
+			errContains: "invalid reserve failed sandbox duration",
+		},
+		{
+			name: "old reserve failed sandbox true maps to forever",
+			metadata: map[string]string{
+				ExtensionKeyReserveFailedSandbox: v1alpha1.True,
+			},
+			wantErr: false,
+			expectExtension: NewSandboxRequestExtension{
+				CreateOnNoStock:         true,
+				ReserveFailedSandboxFor: ptr.To(consts.ReserveFailedSandboxForever),
+			},
+		},
+		{
+			name: "new reserve failed sandbox for overrides old reserve failed sandbox",
+			metadata: map[string]string{
+				ExtensionKeyReserveFailedSandbox:    v1alpha1.True,
+				ExtensionKeyReserveFailedSandboxFor: "never",
+			},
+			wantErr: false,
+			expectExtension: NewSandboxRequestExtension{
+				CreateOnNoStock:         true,
+				ReserveFailedSandboxFor: ptr.To(consts.ReserveFailedSandboxNever),
+			},
+		},
+		{
+			name: "return pod ip == true",
+			metadata: map[string]string{
+				ExtensionKeyReturnPodIP: v1alpha1.True,
+			},
+			wantErr: false,
+			expectExtension: NewSandboxRequestExtension{
+				CreateOnNoStock: true,
+				ReturnPodIP:     true,
+			},
+		},
+		{
+			name: "return pod ip == false",
+			metadata: map[string]string{
+				ExtensionKeyReturnPodIP: v1alpha1.False,
+			},
+			wantErr: false,
+			expectExtension: NewSandboxRequestExtension{
+				CreateOnNoStock: true,
+			},
 		},
 		{
 			name: "invalid image extension",
@@ -291,6 +398,9 @@ func TestParseExtensions(t *testing.T) {
 			err := req.ParseExtensions()
 			if tt.wantErr {
 				require.Error(t, err)
+				if tt.errContains != "" {
+					assert.Contains(t, err.Error(), tt.errContains)
+				}
 			} else {
 				require.NoError(t, err)
 				assert.EqualValues(t, tt.expectExtension, req.Extensions)

@@ -24,7 +24,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
 )
 
 // Index name constants (consistent with sandboxcr/index.go values)
@@ -56,9 +55,9 @@ func GetIndexFuncs() []IndexFunc {
 				if !ok {
 					return nil
 				}
-				state, _ := stateutils.GetSandboxState(sbx)
+				state, _ := utils.GetSandboxState(sbx)
 				if state == agentsv1alpha1.SandboxStateAvailable ||
-					(state == agentsv1alpha1.SandboxStateCreating && stateutils.IsControlledBySandboxSet(sbx)) {
+					(state == agentsv1alpha1.SandboxStateCreating && utils.IsControlledBySandboxSet(sbx)) {
 					tmpl := utils.GetTemplateFromSandbox(sbx)
 					if tmpl != "" {
 						return []string{tmpl}
@@ -76,7 +75,7 @@ func GetIndexFuncs() []IndexFunc {
 					return nil
 				}
 				if sbx.Labels[agentsv1alpha1.LabelSandboxIsClaimed] == agentsv1alpha1.True {
-					return []string{stateutils.GetSandboxID(sbx)}
+					return []string{utils.GetSandboxID(sbx)}
 				}
 				return nil
 			},

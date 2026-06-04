@@ -40,7 +40,7 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/cache/controllers"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
-	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
+	"github.com/openkruise/agents/pkg/utils"
 )
 
 // Cache is a controller-runtime based cache that replaces the legacy informer-based Cache.
@@ -192,7 +192,7 @@ func (c *Cache) Run(ctx context.Context) error {
 		cancel()
 		return fmt.Errorf("timed out waiting for caches to sync")
 	}
-	log.V(consts.DebugLogLevel).Info("Cache started, caches synced")
+	log.V(utils.DebugLogLevel).Info("Cache started, caches synced")
 	return nil
 }
 
@@ -202,7 +202,7 @@ func (c *Cache) Stop(ctx context.Context) {
 	if c.cancelFunc != nil {
 		c.cancelFunc()
 	}
-	log.V(consts.DebugLogLevel).Info("Cache stopped")
+	log.V(utils.DebugLogLevel).Info("Cache stopped")
 }
 
 func (c *Cache) GetClaimedSandbox(ctx context.Context, opts GetClaimedSandboxOptions) (*agentsv1alpha1.Sandbox, error) {
@@ -212,7 +212,7 @@ func (c *Cache) GetClaimedSandbox(ctx context.Context, opts GetClaimedSandboxOpt
 			return nil, err
 		}
 		if len(list.Items) == 0 {
-			return nil, fmt.Errorf("sandbox %s not found in cache", opts.SandboxID)
+			return nil, fmt.Errorf("%w: sandbox %s not found in cache", ErrSandboxNotFound, opts.SandboxID)
 		}
 		return &list.Items[0], nil
 	})

@@ -31,6 +31,8 @@ const (
 
 	AnnotationEnvdAccessToken = E2BPrefix + "envd-access-token"
 	AnnotationEnvdURL         = E2BPrefix + "envd-url"
+	// AnnotationCSIVolumeConfig is the annotation key for CSI mount configuration.
+	AnnotationCSIVolumeConfig = E2BPrefix + "csi-volume-config"
 )
 
 // LabelSandboxUpdateOps marks which SandboxUpdateOps is operating on this sandbox.

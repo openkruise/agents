@@ -33,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog/v2"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/openkruise/agents/api/v1alpha1"
@@ -41,7 +42,6 @@ import (
 	"github.com/openkruise/agents/pkg/controller/sandboxset"
 	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/identity"
-	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
@@ -50,9 +50,7 @@ import (
 	"github.com/openkruise/agents/pkg/utils/expectations"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 	"github.com/openkruise/agents/pkg/utils/runtime"
-	sandboxManagerUtils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
-	"github.com/openkruise/agents/pkg/utils/sandbox-manager/expectationutils"
-	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
+	timeoututils "github.com/openkruise/agents/pkg/utils/timeout"
 )
 
 var DefaultCleanupTimeout = 30 * time.Second
@@ -90,13 +88,16 @@ func ValidateAndInitClaimOptions(opts infra.ClaimSandboxOptions) (infra.ClaimSan
 		opts.CandidateCounts = consts.DefaultPoolingCandidateCounts
 	}
 	if opts.LockString == "" {
-		opts.LockString = sandboxManagerUtils.NewLockString()
+		opts.LockString = utils.NewLockString()
 	}
 	if opts.ClaimTimeout <= 0 {
 		opts.ClaimTimeout = DefaultClaimTimeout
 	}
 	if opts.WaitReadyTimeout <= 0 {
 		opts.WaitReadyTimeout = consts.DefaultWaitReadyTimeout
+	}
+	if opts.ReserveFailedSandboxFor == nil {
+		opts.ReserveFailedSandboxFor = ptr.To(DefaultReserveFailedSandboxFor)
 	}
 	return opts, nil
 }
@@ -145,7 +146,7 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 		}
 		metrics.LastError = err
 		log.Info("try claim sandbox result", "metrics", metrics.String())
-		clearFailedSandbox(ctx, claimed, err, opts.ReserveFailedSandbox)
+		clearFailedSandbox(ctx, claimed, err, opts.ReserveFailedSandboxFor)
 	}()
 	// Step 1: Pick an available sandbox
 	var sbx *Sandbox
@@ -180,7 +181,7 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 	if err != nil {
 		log.Error(err, "failed to lock sandbox")
 		if apierrors.IsConflict(err) {
-			expectationutils.ResourceVersionExpectationExpect(&metav1.ObjectMeta{
+			expectations.ResourceVersionExpectationExpect(&metav1.ObjectMeta{
 				UID:             sbx.GetUID(),
 				ResourceVersion: expectations.GetNewerResourceVersion(sbx),
 			})
@@ -195,7 +196,7 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 	metrics.LockType = lockType
 	metrics.PickAndLock = time.Since(pickStart)
 	metrics.Total += metrics.PickAndLock
-	expectationutils.ResourceVersionExpectationExpect(sbx)
+	expectations.ResourceVersionExpectationExpect(sbx)
 	log = log.WithValues("sandbox", klog.KObj(sbx.Sandbox))
 	log.Info("sandbox locked", "cost", metrics.PickAndLock, "type", metrics.LockType)
 	claimed = sbx
@@ -229,34 +230,34 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 	// Step 4: When SecurityIdentityProvider feature gate is enabled,
 	// the manager attempts to issue a security token via the identity provider, records its refresh status into
 	// sandbox annotations, and propagate the token to the runtime.
-	// On token issuance failure, the original UUID token is preserved (fallback behavior).
-	// On status recording or propagation failure, a retriable error is returned.
-	if utilfeature.DefaultFeatureGate.Enabled(features.SecurityIdentityProviderGate) {
-		opts.SecurityToken = &config.SecurityTokenOptions{}
+	// Any failure in issuance, status recording, or propagation returns a retriable error so callers can retry.
+	// We deliberately do NOT degrade to a UUID token on issuance failure: a UUID carries no identity and would
+	// be propagated to the runtime as a meaningless credential, masking real provider outages.
+	if utilfeature.DefaultFeatureGate.Enabled(features.SecurityIdentityProviderGate) && identity.IsIdentityProviderRequested(sbx.Sandbox) {
+		opts.SecurityToken = &infra.SecurityTokenOptions{}
 		log.Info("starting to issue security token via identity provider")
 		metrics.SecurityToken, err = issueSecurityToken(ctx, sbx, opts.SecurityToken)
-		if err == nil {
-			metrics.Total += metrics.SecurityToken
-			// 4.1: to record security token refresh status in sandbox annotations
-			if err = recordSecurityTokenRefreshStatus(sbx, opts); err != nil {
-				log.Error(err, "failed to modify picked sandbox for security token status")
-				err = retriableError{Message: fmt.Sprintf("failed to modify picked sandbox for security token status: %s", err)}
-				return
-			}
+		if err != nil {
+			log.Error(err, "failed to issue security token")
+			err = retriableError{Message: fmt.Sprintf("security token issuance failed: %s", err)}
+			return
+		}
+		metrics.Total += metrics.SecurityToken
+		// 4.1: to record security token refresh status in sandbox annotations.
+		// At this point modifyPickedSandbox has already persisted the locking
+		// patch, so additional annotation mutations on sbx.Sandbox would only
+		// live in memory. We patch via the apiserver here to actually persist
+		// the refresh status, and keep sbx.Sandbox in sync with the patched object.
+		if err = recordSecurityTokenRefreshStatus(ctx, cache.GetClient(), sbx, opts); err != nil {
+			log.Error(err, "failed to modify picked sandbox for security token status")
+			err = retriableError{Message: fmt.Sprintf("failed to modify picked sandbox for security token status: %s", err)}
+			return
+		}
 
-			log.Info("propagating security token to runtime", "propagatorCount", identity.SecurityTokenPropagatorCount())
-			startTime := time.Now()
-			// 4.2: to propagate security token to runtime
-			if err = identity.PropagateSecurityToken(ctx, sbx.Sandbox, &opts.SecurityToken.TokenResponse); err != nil {
-				log.Error(err, "security token propagation failed")
-				err = retriableError{Message: fmt.Sprintf("security token propagation failed: %s", err)}
-				return
-			}
-			log.Info("security token propagated", "cost", time.Since(startTime))
-
-		} else {
-			log.Error(err, "failed to issue security token, keeping original UUID token as fallback")
-			err = nil // clear error to avoid affecting downstream flow
+		// 4.2: to propagate security token to runtime
+		if err = identity.PropagateSandboxToken(ctx, sbx.Sandbox, &opts.SecurityToken.TokenResponse); err != nil {
+			err = retriableError{Message: fmt.Sprintf("security token propagation failed: %s", err)}
+			return
 		}
 	}
 
@@ -275,23 +276,38 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 	return
 }
 
-func clearFailedSandbox(ctx context.Context, sbx infra.Sandbox, err error, reserve bool) {
+// clearFailedSandbox cleans up (or reserves) a failed sandbox according to
+// reserveFor. A nil reserveFor falls back to DefaultReserveFailedSandboxFor.
+func clearFailedSandbox(ctx context.Context, sbx infra.Sandbox, err error, reserveFor *time.Duration) {
 	if err == nil || sbx == nil {
-		return // success or no need to clear
+		return
 	}
+	effective := ptr.Deref(reserveFor, DefaultReserveFailedSandboxFor)
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
-	if reserve {
-		log.Info("the locked sandbox is reserved for debugging")
-	} else {
-		log.Info("the locked sandbox will be deleted", "reason", err)
-		// Use a new context with timeout to avoid indefinite blocking
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), DefaultCleanupTimeout)
-		defer cancel()
-		if err := sbx.Kill(cleanupCtx); err != nil {
-			log.Error(err, "failed to delete locked sandbox")
-		} else {
-			log.Info("sandbox deleted")
+	if effective < 0 {
+		log.Info("the failed sandbox is reserved forever for debugging", "reason", err)
+		return
+	}
+
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), DefaultCleanupTimeout)
+	defer cancel()
+
+	if effective > 0 {
+		shutdownTime := time.Now().Add(effective)
+		log.Info("the failed sandbox will be reserved before delayed deletion", "reason", err, "shutdownTime", shutdownTime)
+		if _, updateErr := sbx.SaveTimeoutWithPolicy(cleanupCtx, timeoututils.Options{
+			ShutdownTime: shutdownTime,
+		}, timeoututils.UpdatePolicyAlways); updateErr != nil {
+			log.Error(updateErr, "failed to set delayed deletion time for failed sandbox")
 		}
+		return
+	}
+
+	log.Info("the failed sandbox will be deleted", "reason", err)
+	if killErr := sbx.Kill(cleanupCtx); killErr != nil {
+		log.Error(killErr, "failed to delete failed sandbox")
+	} else {
+		log.Info("sandbox deleted")
 	}
 }
 
@@ -311,7 +327,7 @@ func getPickFailureKey(sbx *v1alpha1.Sandbox) string {
 func pickAnAvailableSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCache *sync.Map, cache infracache.Provider, limiter *rate.Limiter) (*Sandbox, infra.LockType, error) {
 	template, cnt := opts.Template, opts.CandidateCounts
 	ctx = logs.Extend(ctx, "action", "pickAnAvailableSandbox")
-	log := klog.FromContext(ctx).WithValues("template", template).V(consts.DebugLogLevel)
+	log := klog.FromContext(ctx).WithValues("template", template).V(utils.DebugLogLevel)
 	objects, err := cache.ListSandboxesInPool(ctx, infracache.ListSandboxesInPoolOptions{Namespace: opts.Namespace, Pool: template})
 	if err != nil {
 		return nil, "", err
@@ -339,7 +355,7 @@ func pickAnAvailableSandbox(ctx context.Context, opts infra.ClaimSandboxOptions,
 				break
 			}
 		}
-		if !expectationutils.ResourceVersionExpectationSatisfied(obj) {
+		if !expectations.ResourceVersionExpectationSatisfied(obj) {
 			log.Info("skip out-dated sandbox cache", "sandbox", klog.KObj(obj))
 			continue
 		}
@@ -347,7 +363,7 @@ func pickAnAvailableSandbox(ctx context.Context, opts infra.ClaimSandboxOptions,
 			log.Error(checkErr, "skip invalid sandbox", "sandbox", klog.KObj(obj), "resourceVersion", obj.GetResourceVersion())
 			continue
 		}
-		state, _ := stateutils.GetSandboxState(obj)
+		state, _ := utils.GetSandboxState(obj)
 		switch state {
 		case v1alpha1.SandboxStateAvailable:
 			if len(availableCandidates) >= cnt {
@@ -420,7 +436,7 @@ func pickAnAvailableSandbox(ctx context.Context, opts infra.ClaimSandboxOptions,
 }
 
 func pickFromCandidates(ctx context.Context, candidates []*v1alpha1.Sandbox, pickCache *sync.Map) (*v1alpha1.Sandbox, error) {
-	log := klog.FromContext(ctx).V(consts.DebugLogLevel)
+	log := klog.FromContext(ctx).V(utils.DebugLogLevel)
 	// Step 1: select from candidate
 	if len(candidates) == 0 {
 		return nil, errors.New("no candidate")
@@ -442,7 +458,7 @@ func pickFromCandidates(ctx context.Context, candidates []*v1alpha1.Sandbox, pic
 			// Acquire pickCache -> Attempt second-level optimistic lock via k8s update api -> Release pickCache
 			// This ensures that for the same object, acquiring pickCache must happen after another request completes
 			// the expectation, and this check guarantees that the same object will not be selected
-			if !expectationutils.ResourceVersionExpectationSatisfied(obj) {
+			if !expectations.ResourceVersionExpectationSatisfied(obj) {
 				log.Info("expectation of picked candidate is out-of-date", "key", key)
 				pickCache.Delete(key)
 			} else {
@@ -460,41 +476,17 @@ func pickFromCandidates(ctx context.Context, candidates []*v1alpha1.Sandbox, pic
 	return nil, errors.New("all candidates are picked")
 }
 
-// issueSecurityToken issues a security token for the given sandbox using the registered identity provider.
-// The issued access token is written into the sandbox's SecurityToken option for downstream consumption.
-func issueSecurityToken(ctx context.Context, sbx *Sandbox, opts *config.SecurityTokenOptions) (time.Duration, error) {
-	ctx = logs.Extend(ctx, "action", "issueSecurityToken")
-	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx.Sandbox))
-	start := time.Now()
-
-	sbxLabels := sbx.GetLabels()
-	metadata := make(map[string]string)
-	for k, v := range sbxLabels {
-		if strings.HasPrefix(k, utils.SecurityMetadataPrefix) {
-			metadata[k] = v
-		}
-	}
-
-	tokenResp, err := identity.IssueToken(ctx, identity.TokenRequest{
-		TokenType: identity.TokenTypeAgent,
-		Sandbox: &identity.SandboxInfo{
-			PodName:      sbx.Name,
-			PodNamespace: sbx.Namespace,
-			SandboxID:    fmt.Sprintf("%s/%s/%s", sbx.Namespace, sbx.Name, sbx.UID),
-			SandboxName:  sbx.Name,
-			SandboxUID:   string(sbx.UID),
-		},
-		Metadata: metadata,
-	})
+// issueSecurityToken issues a security token for the given sandbox via
+// identity.IssueSandboxToken and writes the full issued token response into
+// the sandbox's SecurityToken option for downstream consumption (annotation
+// recording and runtime propagation).
+func issueSecurityToken(ctx context.Context, sbx *Sandbox, opts *infra.SecurityTokenOptions) (time.Duration, error) {
+	tokenResp, cost, err := identity.IssueSandboxToken(ctx, sbx.Sandbox)
 	if err != nil {
-		log.Error(err, "failed to issue security token")
-		return time.Since(start), fmt.Errorf("failed to issue security token: %w", err)
+		return cost, err
 	}
-
-	// Write the full issued token response back into the options for downstream use
 	opts.TokenResponse = *tokenResp
-	log.Info("security token issued", "costTime", time.Since(start))
-	return time.Since(start), nil
+	return cost, nil
 }
 
 var FilteredAnnotationsOnCreation []string
@@ -593,23 +585,35 @@ func modifyPickedSandbox(sbx *Sandbox, lockType infra.LockType, opts infra.Claim
 	return nil
 }
 
-// recordSecurityTokenRefreshStatus records the security token refresh status into sandbox annotations.
-func recordSecurityTokenRefreshStatus(sbx *Sandbox, opts infra.ClaimSandboxOptions) error {
+// recordSecurityTokenRefreshStatus persists the security token refresh status into the sandbox
+// annotation identity.AgentKeyTokenRefreshStatus via a MergeFrom patch, so that the change does not
+// stomp on concurrent updates to unrelated fields and is not overwritten by later InplaceRefresh
+// calls. The serialization is delegated to identity.EncodeTokenRefreshStatus so the claim flow and
+// the standalone refresh controller share the exact same annotation payload format.
+//
+// On success, the local sbx.Sandbox is replaced with the patched object so subsequent in-memory
+// reads observe the new annotation.
+func recordSecurityTokenRefreshStatus(ctx context.Context, c client.Client, sbx *Sandbox, opts infra.ClaimSandboxOptions) error {
 	if opts.SecurityToken == nil {
 		return nil
 	}
-	tokenRefreshStatusJSON, err := json.Marshal(identity.TokenRefreshStatus{
-		AccessTokenExpiration: opts.SecurityToken.AccessTokenExpiration,
-	})
+	raw, err := identity.EncodeTokenRefreshStatus(identity.BuildTokenRefreshStatus(&opts.SecurityToken.TokenResponse))
 	if err != nil {
 		return fmt.Errorf("failed to marshal token refresh expiration status: %w", err)
 	}
-	annotations := sbx.GetAnnotations()
-	if annotations == nil {
-		annotations = make(map[string]string, 1)
+	// MergeFrom is lazy: it only holds a reference to the base object and computes
+	// the diff against `updated` at Patch time. Since we never mutate sbx.Sandbox
+	// here (only `updated`, which is an independent DeepCopy), passing sbx.Sandbox
+	// directly as the base is safe and avoids a redundant DeepCopy.
+	updated := sbx.Sandbox.DeepCopy()
+	if updated.Annotations == nil {
+		updated.Annotations = make(map[string]string, 1)
 	}
-	annotations[utils.AgentKeyTokenRefreshStatus] = string(tokenRefreshStatusJSON)
-	sbx.SetAnnotations(annotations)
+	updated.Annotations[identity.AgentKeyTokenRefreshStatus] = raw
+	if err := c.Patch(ctx, updated, client.MergeFrom(sbx.Sandbox)); err != nil {
+		return fmt.Errorf("failed to patch token refresh status annotation: %w", err)
+	}
+	sbx.Sandbox = updated
 	return nil
 }
 
@@ -644,7 +648,7 @@ func performLockSandbox(ctx context.Context, sbx *Sandbox, lockType infra.LockTy
 	ctx = logs.Extend(ctx, "action", "performLockSandbox")
 	log := klog.FromContext(ctx)
 	c := cache.GetClient()
-	sandboxManagerUtils.LockSandbox(sbx.Sandbox, opts.LockString, opts.User)
+	utils.LockSandbox(sbx.Sandbox, opts.LockString, opts.User)
 	var updated *v1alpha1.Sandbox
 	var err error
 	if lockType == infra.LockTypeCreate {
@@ -714,7 +718,7 @@ func setContainerResources(container *corev1.Container, requests, limits corev1.
 
 func waitForSandboxReady(ctx context.Context, sbx *Sandbox, opts infra.ClaimSandboxOptions, cache infracache.Provider) (cost time.Duration, err error) {
 	ctx = logs.Extend(ctx, "action", "waitForSandboxReady")
-	log := klog.FromContext(ctx).V(consts.DebugLogLevel).WithValues("sandbox", klog.KObj(sbx))
+	log := klog.FromContext(ctx).V(utils.DebugLogLevel).WithValues("sandbox", klog.KObj(sbx))
 	start := time.Now()
 	defer func() {
 		cost = time.Since(start)
@@ -741,7 +745,7 @@ func waitForSandboxReady(ctx context.Context, sbx *Sandbox, opts infra.ClaimSand
 func sandboxReadyFailureMessage(sbx *v1alpha1.Sandbox) string {
 	readyCond := GetSandboxCondition(sbx, v1alpha1.SandboxConditionReady)
 	inplaceCond := GetSandboxCondition(sbx, v1alpha1.SandboxConditionInplaceUpdate)
-	state, _ := stateutils.GetSandboxState(sbx)
+	state, _ := utils.GetSandboxState(sbx)
 
 	reason := sandboxReadyFailureReason(sbx, state, readyCond, inplaceCond)
 	fields := []string{
@@ -789,7 +793,7 @@ func sandboxReadyFailureReason(sbx *v1alpha1.Sandbox, state string, readyCond, i
 }
 
 func checkSandboxReady(ctx context.Context, sbx *v1alpha1.Sandbox) (bool, error) {
-	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx), "resourceVersion", sbx.GetResourceVersion()).V(consts.DebugLogLevel)
+	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx), "resourceVersion", sbx.GetResourceVersion()).V(utils.DebugLogLevel)
 	if sbx.Status.ObservedGeneration != sbx.Generation {
 		log.Info("watched sandbox not updated", "generation", sbx.Generation, "observedGeneration", sbx.Status.ObservedGeneration)
 		return false, nil
@@ -810,12 +814,12 @@ func checkSandboxReady(ctx context.Context, sbx *v1alpha1.Sandbox) (bool, error)
 	}
 
 	ip := sbx.Status.PodInfo.PodIP
-	state, reason := stateutils.GetSandboxState(sbx)
+	state, reason := utils.GetSandboxState(sbx)
 	isReady := state == v1alpha1.SandboxStateRunning && ip != ""
 	log.Info("sandbox ready checked", "state", state, "reason", reason, "ip", ip, "isReady", isReady, "resourceVersion", sbx.GetResourceVersion())
 	if isReady {
 		// Expect the resourceVersion to ensure InplaceRefresh fetches the latest from API server
-		expectationutils.ResourceVersionExpectationExpect(sbx)
+		expectations.ResourceVersionExpectationExpect(sbx)
 	}
 	return isReady, nil
 }

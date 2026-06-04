@@ -28,7 +28,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/identity"
 	"github.com/openkruise/agents/pkg/utils"
+	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 )
 
 func TestInjectPodTemplateCSIAndRuntimeSidecar(t *testing.T) {
@@ -1535,7 +1537,7 @@ func TestDoSidecarInjectionDuplicateRuntimes(t *testing.T) {
 				}`,
 			},
 			expectEgressContainer: true,
-			expectContainers:       2, // main + egress sidecar
+			expectContainers:      2, // main + egress sidecar
 		},
 		{
 			name: "mixed unique and duplicate runtimes - order preserved, first wins",
@@ -1652,6 +1654,177 @@ func TestDoSidecarInjectionDuplicateRuntimes(t *testing.T) {
 				if len(tt.pod.Spec.Containers) != tt.expectContainers {
 					t.Errorf("expected %d Containers, got %d", tt.expectContainers, len(tt.pod.Spec.Containers))
 				}
+			}
+		})
+	}
+}
+
+// TestDoSidecarInjection_CAInjection covers the CA bundle Volume / VolumeMount
+// / EnvVar block embedded at the tail of doSidecarInjection. It exercises the
+// two-tier gating contract:
+//   - SecurityIdentityProviderGate is the cluster-level kill switch.
+//   - Per-spec CABundleSpec.EnabledFor predicate (bound at controller startup
+//     via identity.BindCAEnabledFor) is the only place runtime-level gating
+//     lives.
+//
+// The test does not assert on legacy sidecar/CSI injection, only on the
+// gateway CA artefacts produced by identity.InjectAllCAVolumes /
+// InjectAllCAIntoContainers, so the mainline runtime injection code paths are
+// kept untouched.
+func TestDoSidecarInjection_CAInjection(t *testing.T) {
+	const (
+		caVolumeName = "sandbox-gateway-ca"
+		caMountPath  = "/etc/ssl/certs/agent-identity/gateway-ca.crt"
+		caEnvName    = "SSL_CERT_FILE"
+	)
+
+	// Minimal traffic-proxy injection template so parseInjectConfig succeeds
+	// when the sandbox declares the runtime; the body is intentionally empty
+	// to keep the focus of this test on CA injection.
+	trafficProxyTemplate := map[string]string{
+		KEY_TRAFFIC_PROXY_INJECTION_CONFIG: `{"mainContainer":{},"csiSidecar":[],"volume":[]}`,
+	}
+
+	tests := []struct {
+		name               string
+		featureGateEnabled bool
+		withTrafficProxy   bool
+		// enabledForBinding controls how the gateway CABundleSpec's EnabledFor
+		// predicate is wired before the call. nil means "do not bind" (community
+		// baseline default), which causes specEnabled to treat the spec as
+		// always enabled.
+		enabledForBinding identity.SandboxPredicate
+		expectCAInjected  bool
+	}{
+		{
+			name:               "gate disabled, traffic-proxy present, predicate matches - gate kills CA injection",
+			featureGateEnabled: false,
+			withTrafficProxy:   true,
+			enabledForBinding: func(sbx *agentsv1alpha1.Sandbox) bool {
+				return IsRuntimeEnabled(sbx, agentsv1alpha1.RuntimeConfigForInjectTrafficProxy)
+			},
+			expectCAInjected: false,
+		},
+		{
+			name:               "gate enabled, traffic-proxy present, predicate matches - CA injected",
+			featureGateEnabled: true,
+			withTrafficProxy:   true,
+			enabledForBinding: func(sbx *agentsv1alpha1.Sandbox) bool {
+				return IsRuntimeEnabled(sbx, agentsv1alpha1.RuntimeConfigForInjectTrafficProxy)
+			},
+			expectCAInjected: true,
+		},
+		{
+			name:               "gate enabled, traffic-proxy missing, predicate vetoes - skip CA",
+			featureGateEnabled: true,
+			withTrafficProxy:   false,
+			enabledForBinding: func(sbx *agentsv1alpha1.Sandbox) bool {
+				return IsRuntimeEnabled(sbx, agentsv1alpha1.RuntimeConfigForInjectTrafficProxy)
+			},
+			expectCAInjected: false,
+		},
+		{
+			name:               "gate enabled, traffic-proxy present, predicate forced false - skip CA",
+			featureGateEnabled: true,
+			withTrafficProxy:   true,
+			enabledForBinding:  func(_ *agentsv1alpha1.Sandbox) bool { return false },
+			expectCAInjected:   false,
+		},
+		{
+			name:               "gate enabled, predicate unbound (community baseline default) - CA injected",
+			featureGateEnabled: true,
+			withTrafficProxy:   false,
+			enabledForBinding:  nil,
+			expectCAInjected:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.featureGateEnabled {
+				if err := utilfeature.DefaultMutableFeatureGate.Set("SecurityIdentityProvider=true"); err != nil {
+					t.Fatalf("set feature gate: %v", err)
+				}
+				t.Cleanup(func() {
+					_ = utilfeature.DefaultMutableFeatureGate.Set("SecurityIdentityProvider=false")
+				})
+			}
+			// Bind (or explicitly unbind) the gateway spec's EnabledFor predicate
+			// for this case, and always restore to nil on cleanup so subsequent
+			// test cases (and tests in other files) are not contaminated.
+			identity.BindCAEnabledFor(identity.GatewayCABundleName, tt.enabledForBinding)
+			t.Cleanup(func() {
+				identity.BindCAEnabledFor(identity.GatewayCABundleName, nil)
+			})
+
+			sandbox := &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "sbx", Namespace: "default"},
+			}
+			injectConfigMap := map[string]string{}
+			if tt.withTrafficProxy {
+				sandbox.Spec.Runtimes = []agentsv1alpha1.RuntimeConfig{
+					{Name: agentsv1alpha1.RuntimeConfigForInjectTrafficProxy},
+				}
+				injectConfigMap = trafficProxyTemplate
+			}
+
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "default"},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "main", Image: "nginx"}},
+				},
+			}
+
+			if err := doSidecarInjection(context.Background(), sandbox, pod, injectConfigMap); err != nil {
+				t.Fatalf("doSidecarInjection unexpected error: %v", err)
+			}
+
+			hasVolume := false
+			for _, v := range pod.Spec.Volumes {
+				if v.Name == caVolumeName {
+					hasVolume = true
+					if v.Secret == nil || v.Secret.SecretName != identity.GatewayCASecretName {
+						t.Errorf("CA volume must reference Secret %q via SecretVolumeSource, got %+v",
+							identity.GatewayCASecretName, v.VolumeSource)
+					}
+					break
+				}
+			}
+			if hasVolume != tt.expectCAInjected {
+				t.Errorf("pod CA volume present: got %v, want %v", hasVolume, tt.expectCAInjected)
+			}
+
+			if len(pod.Spec.Containers) == 0 {
+				t.Fatalf("main container missing after injection")
+			}
+			main := pod.Spec.Containers[0]
+
+			hasMount := false
+			for _, vm := range main.VolumeMounts {
+				if vm.Name == caVolumeName {
+					hasMount = true
+					if vm.MountPath != caMountPath {
+						t.Errorf("CA mount path: got %q, want %q", vm.MountPath, caMountPath)
+					}
+					break
+				}
+			}
+			if hasMount != tt.expectCAInjected {
+				t.Errorf("main container CA mount present: got %v, want %v", hasMount, tt.expectCAInjected)
+			}
+
+			hasEnv := false
+			for _, ev := range main.Env {
+				if ev.Name == caEnvName {
+					hasEnv = true
+					if ev.Value != caMountPath {
+						t.Errorf("%s value: got %q, want %q", caEnvName, ev.Value, caMountPath)
+					}
+					break
+				}
+			}
+			if hasEnv != tt.expectCAInjected {
+				t.Errorf("main container %s env present: got %v, want %v", caEnvName, hasEnv, tt.expectCAInjected)
 			}
 		})
 	}

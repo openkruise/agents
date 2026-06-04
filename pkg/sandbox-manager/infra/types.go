@@ -24,8 +24,19 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/identity"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 )
+
+// SecurityTokenOptions wraps the issued security token response for downstream
+// consumers in the claim pipeline. It lives here (rather than in
+// pkg/sandbox-manager/config) to avoid an import cycle:
+// pkg/identity -> pkg/utils/runtime -> pkg/sandbox-manager/config -> pkg/identity.
+// pkg/sandbox-manager/infra is allowed to depend on pkg/identity because it is
+// not transitively imported by pkg/identity.
+type SecurityTokenOptions struct {
+	identity.TokenResponse
+}
 
 type ClaimSandboxOptions struct {
 	Namespace string `json:"namespace,omitempty"`
@@ -41,8 +52,12 @@ type ClaimSandboxOptions struct {
 	PreCheck func(sandbox Sandbox) error `json:"-"`
 	// Set Modifier to modify the Sandbox before it is updated
 	Modifier func(sandbox Sandbox) `json:"-"`
-	// Set ReserveFailedSandbox to true to reserve failed sandboxes
-	ReserveFailedSandbox bool `json:"reserveFailedSandbox"`
+	// ReserveFailedSandboxFor controls how long failed sandboxes are kept for debugging.
+	//   nil                          — backend default (DefaultReserveFailedSandboxFor)
+	//   ReserveFailedSandboxNever    — delete immediately
+	//   positive                     — reserve for that duration, then delete
+	//   ReserveFailedSandboxForever  — reserve forever (never delete)
+	ReserveFailedSandboxFor *time.Duration `json:"reserveFailedSandboxFor"`
 	// Set InplaceUpdate to trigger an inplace-update (image and/or resources)
 	InplaceUpdate *config.InplaceUpdateOptions `json:"inplaceUpdate"`
 	// Set RuntimeConfig to non-nil value to inject runtime configuration
@@ -52,7 +67,7 @@ type ClaimSandboxOptions struct {
 	// Set CSIMount to non-nil value to mount a CSI volume
 	CSIMount *config.CSIMountOptions `json:"CSIMount"`
 	// Set SecurityToken value in runtime
-	SecurityToken *config.SecurityTokenOptions `json:"securityToken"`
+	SecurityToken *SecurityTokenOptions `json:"securityToken"`
 	// Max ClaimTimeout duration
 	ClaimTimeout time.Duration `json:"claimTimeout"`
 	// Max WaitReadyTimeout duration
@@ -74,6 +89,8 @@ type CloneSandboxOptions struct {
 	Modifier           func(sbx Sandbox)       `json:"-"`
 	CreateLimiter      *rate.Limiter           `json:"-"`
 	SkipWaitCheckpoint bool                    `json:"skipWaitCheckpoint"`
+	// See ReserveFailedSandboxFor on ClaimSandboxOptions.
+	ReserveFailedSandboxFor *time.Duration `json:"reserveFailedSandboxFor"`
 }
 
 type CreateCheckpointOptions struct {
@@ -164,6 +181,7 @@ func sanitizeErrorMessage(err error) string {
 }
 
 type CloneMetrics struct {
+	Retries       int
 	Wait          time.Duration
 	GetTemplate   time.Duration
 	CreateSandbox time.Duration
@@ -171,9 +189,27 @@ type CloneMetrics struct {
 	InitRuntime   time.Duration
 	CSIMount      time.Duration
 	Total         time.Duration
+	LastError     error
 }
 
-func (m CloneMetrics) String() string {
-	return fmt.Sprintf("CloneMetrics{Wait: %v, GetTemplate: %v, CreateSandbox: %v, WaitReady: %v, InitRuntime: %v, CSIMount: %v, Total: %v}",
-		m.Wait, m.GetTemplate, m.CreateSandbox, m.WaitReady, m.InitRuntime, m.CSIMount, m.Total)
+func (m *CloneMetrics) String() string {
+	var lastErrStr string
+	if m.LastError != nil {
+		lastErrStr = sanitizeErrorMessage(m.LastError)
+	}
+	return fmt.Sprintf("CloneMetrics{Retries: %d, Wait: %v, GetTemplate: %v, CreateSandbox: %v, WaitReady: %v, InitRuntime: %v, CSIMount: %v, Total: %v, LastError: %v}",
+		m.Retries, m.Wait, m.GetTemplate, m.CreateSandbox, m.WaitReady, m.InitRuntime, m.CSIMount, m.Total, lastErrStr)
+}
+
+// Merge accumulates per-attempt durations from src into m. Retries and
+// LastError are maintained by the outer retry loop, not derived from per-attempt
+// metrics, so they are intentionally not summed here.
+func (m *CloneMetrics) Merge(src CloneMetrics) {
+	m.Wait += src.Wait
+	m.GetTemplate += src.GetTemplate
+	m.CreateSandbox += src.CreateSandbox
+	m.WaitReady += src.WaitReady
+	m.InitRuntime += src.InitRuntime
+	m.CSIMount += src.CSIMount
+	m.Total += src.Total
 }

@@ -28,10 +28,19 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/webhookutils"
 )
+
+func IsRuntimeEnabled(sandbox *agentsv1alpha1.Sandbox, runtimeName string) bool {
+	for _, runtime := range sandbox.Spec.Runtimes {
+		if runtime.Name == runtimeName {
+			return true
+		}
+	}
+	return false
+}
 
 func fetchInjectionConfiguration(ctx context.Context, cli client.Client) (map[string]string, error) {
 	logger := logf.FromContext(ctx)
@@ -42,7 +51,7 @@ func fetchInjectionConfiguration(ctx context.Context, cli client.Client) (map[st
 	}, config)
 	if err != nil {
 		if errors.IsNotFound(err) {
-			logger.V(consts.DebugLogLevel).Info("injection configuration not found, skip injection")
+			logger.V(utils.DebugLogLevel).Info("injection configuration not found, skip injection")
 			return map[string]string{}, nil
 		}
 		return map[string]string{}, err
@@ -56,8 +65,7 @@ func parseInjectConfig(ctx context.Context, configKey string, configRaw map[stri
 
 	configValue, exists := configRaw[configKey]
 	if !exists || configValue == "" {
-		log.V(5).Info("config key not found or empty, using default configuration")
-		return sidecarConfig, nil
+		return sidecarConfig, fmt.Errorf("injection template %s not found", configKey)
 	}
 
 	err := json.Unmarshal([]byte(configRaw[configKey]), &sidecarConfig)
@@ -231,7 +239,7 @@ func setMainContainerConfigWhenInjectRuntimeSidecar(ctx context.Context, mainCon
 
 	if mainContainerHasValidPostStart {
 		if configHasValidPostStart {
-			log.V(consts.DebugLogLevel).Info("conflicting postStart hooks detected, main container already has a postStart hook defined",
+			log.V(utils.DebugLogLevel).Info("conflicting postStart hooks detected, main container already has a postStart hook defined",
 				"existingHook", mainContainer.Lifecycle.PostStart,
 				"injectedHook", config.MainContainer.Lifecycle.PostStart)
 		}

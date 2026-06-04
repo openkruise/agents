@@ -62,6 +62,14 @@ Every E2B route is registered twice via `RegisterE2BRoute`: once for the native 
 - Team UUIDs in API models, MySQL `teams.uid`, Secret payloads, and `/teams` responses are display-only compatibility
   metadata. They must not be used for storage lookup, authorization, namespace selection, or team equality checks.
 
+### Namespace Naming Constraint
+- Sandbox IDs are encoded as `<namespace>--<name>` (see `sandboxutils.GetSandboxID`). The `--` is a reserved separator.
+- Team / namespace names in the E2B path **must not contain `--`**. 
+- The constraint is enforced at API key creation in `validateTeamNamespace` via `sandboxutils.ValidateNamespaceForSandboxID`.
+  Admin-team callers creating keys for other teams pass through the same check.
+- The admin team itself (`models.AdminTeamName = "admin"`) has no `--`, never maps to a namespace
+  (`getNamespaceOfUser` returns `""` for admin), and is therefore not affected by this rule.
+
 ### List And Delete Authorization
 - Any resource returned by a List endpoint should be deletable by the same caller unless deletion is explicitly unsupported
   or blocked by a documented safety rule.
@@ -96,6 +104,13 @@ After resume, every caller runs `updateConnectTimeout` with `UpdatePolicyExtendO
 - If `templateID` matches a SandboxSet → claim path (`ClaimSandbox`).
 - If `templateID` matches a Checkpoint → clone path (`CloneSandbox`).
 - Otherwise → `400 Template or Checkpoint not found`.
+
+#### Server-Side Timeouts (Claim / Clone / WaitReady)
+- These are the server-side deadlines for the synchronous create operation, distinct from the sandbox lifecycle `timeout` field (auto-shutdown / auto-pause).
+- **Default is unlimited**: when no timeout extension is supplied, `create.go` passes `noServerTimeout` (a far-future duration, ~100 years) for `ClaimTimeout` / `CloneTimeout` / `WaitReadyTimeout`. The operation is then bounded only by the client request context, so it ends on success or client cancellation. A far-future value is used (not a negative sentinel) so downstream `ValidateAndInit*Options`, `context.WithTimeout`, `retrySteps`, and `pkg/cache/utils/wait.go` keep working unchanged — this mirrors the "far-future time" convention used by Pause.
+- **Explicit override**: the extension keys `e2b.agents.kruise.io/claim-timeout-seconds` and `e2b.agents.kruise.io/wait-ready-timeout-seconds` still apply a finite timeout when set to a positive value. A non-positive or absent value is treated as unlimited.
+- All four call sites go through the `resolveServerTimeout(seconds)` helper in `create.go`.
+- This unlimited default applies only to the E2B `CreateSandbox` HTTP path. The `SandboxClaim` controller builds its own options and calls `TryClaimSandbox` directly, keeping its CRD-level timeout semantics and finite defaults.
 
 ## Rules For Modification
 

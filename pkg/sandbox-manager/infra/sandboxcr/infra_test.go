@@ -18,10 +18,13 @@ package sandboxcr
 
 import (
 	"context"
+	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -38,9 +41,9 @@ import (
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/runtime"
-	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
-	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
+	utestutils "github.com/openkruise/agents/pkg/utils/testutils"
 	testutils "github.com/openkruise/agents/test/utils"
 )
 
@@ -94,7 +97,7 @@ func NewTestInfra(t *testing.T, opts ...config.SandboxManagerOptions) (*Infra, c
 }
 
 func TestInfra_SelectSandboxes(t *testing.T) {
-	utils.InitLogOutput()
+	utestutils.InitLogOutput()
 	tests := []struct {
 		name        string
 		sandboxes   []*v1alpha1.Sandbox
@@ -281,7 +284,7 @@ func TestInfra_GetClaimedSandboxWithOptions_NamespaceScoped(t *testing.T) {
 		},
 	}
 	CreateSandboxWithStatus(t, fc, sbx)
-	sandboxID := stateutils.GetSandboxID(sbx)
+	sandboxID := utils.GetSandboxID(sbx)
 
 	got, err := infraInstance.GetClaimedSandbox(t.Context(), infra.GetClaimedSandboxOptions{
 		Namespace: "team-a",
@@ -298,7 +301,312 @@ func TestInfra_GetClaimedSandboxWithOptions_NamespaceScoped(t *testing.T) {
 		SandboxID: sandboxID,
 	})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "not found")
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+}
+
+func TestInfra_GetClaimedSandbox_CacheMiss_WaitsUntilCacheHit(t *testing.T) {
+	tests := []struct {
+		name      string
+		withRoute bool
+	}{
+		{
+			name:      "route present does not trigger APIReader fallback",
+			withRoute: true,
+		},
+		{
+			name:      "no route waits for cache hit",
+			withRoute: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			apiSbx := makeClaimedSandbox("team-a", "sbx-cache-hit", "10.0.0.10")
+			apiSbx.ResourceVersion = "20"
+			id := utils.GetSandboxID(apiSbx)
+
+			stub := &stubAPIReader{objs: map[client.ObjectKey]*v1alpha1.Sandbox{
+				{Namespace: apiSbx.Namespace, Name: apiSbx.Name}: apiSbx,
+			}}
+			retryCache := &retryingClaimedSandboxCache{
+				sandbox:      apiSbx,
+				succeedAfter: 3,
+			}
+			options := config.InitOptions(config.SandboxManagerOptions{DisableRouteReconciliation: true})
+			infraInstance := NewInfraBuilder(options).
+				WithCache(retryCache).
+				WithAPIReader(stub).
+				WithProxy(proxy.NewServer(options)).
+				Build().(*Infra)
+
+			if tt.withRoute {
+				infraInstance.Proxy.SetRoute(t.Context(), proxy.Route{
+					ID:              id,
+					IP:              apiSbx.Status.PodInfo.PodIP,
+					State:           v1alpha1.SandboxStateRunning,
+					ResourceVersion: apiSbx.ResourceVersion,
+				})
+			}
+
+			ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
+			defer cancel()
+			got, err := infraInstance.GetClaimedSandbox(ctx, infra.GetClaimedSandboxOptions{
+				Namespace: "team-a",
+				SandboxID: id,
+			})
+
+			require.NoError(t, err)
+			require.NotNil(t, got)
+			assert.Equal(t, apiSbx.Name, got.GetName())
+			assert.GreaterOrEqual(t, retryCache.getCalls.Load(), int64(3))
+			assert.Equal(t, int64(0), stub.getCalls.Load())
+		})
+	}
+}
+
+func TestInfra_GetClaimedSandbox_SharedContextError_RetriesWhileContextLive(t *testing.T) {
+	tests := []struct {
+		name          string
+		injectedError error
+		expectError   string
+	}{
+		{
+			name:          "shared canceled error",
+			injectedError: context.Canceled,
+		},
+		{
+			name:          "shared deadline error",
+			injectedError: context.DeadlineExceeded,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			apiSbx := makeClaimedSandbox("team-a", "sbx-shared-context-error", "10.0.0.10")
+			id := utils.GetSandboxID(apiSbx)
+			stub := &stubAPIReader{objs: map[client.ObjectKey]*v1alpha1.Sandbox{
+				{Namespace: apiSbx.Namespace, Name: apiSbx.Name}: apiSbx,
+			}}
+			retryCache := &retryingClaimedSandboxCache{
+				sandbox:         apiSbx,
+				succeedAfter:    2,
+				transientErrors: []error{tt.injectedError},
+			}
+			options := config.InitOptions(config.SandboxManagerOptions{DisableRouteReconciliation: true})
+			infraInstance := NewInfraBuilder(options).
+				WithCache(retryCache).
+				WithAPIReader(stub).
+				WithProxy(proxy.NewServer(options)).
+				Build().(*Infra)
+
+			ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
+			defer cancel()
+			got, err := infraInstance.GetClaimedSandbox(ctx, infra.GetClaimedSandboxOptions{
+				Namespace: "team-a",
+				SandboxID: id,
+			})
+
+			if tt.expectError != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
+				assert.Nil(t, got)
+				return
+			}
+			require.NoError(t, err)
+			require.NotNil(t, got)
+			assert.Equal(t, apiSbx.Name, got.GetName())
+			assert.GreaterOrEqual(t, retryCache.getCalls.Load(), int64(2))
+			assert.Equal(t, int64(0), stub.getCalls.Load())
+		})
+	}
+}
+
+func TestInfra_GetClaimedSandbox_CacheMiss_ReturnsContextError(t *testing.T) {
+	tests := []struct {
+		name      string
+		withRoute bool
+	}{
+		{
+			name:      "route present",
+			withRoute: true,
+		},
+		{
+			name:      "no route",
+			withRoute: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			infraInstance, _, stub := newInfraWithStubAPIReader(t)
+			id := "team-a--missing"
+			if tt.withRoute {
+				infraInstance.Proxy.SetRoute(t.Context(), proxy.Route{
+					ID:              id,
+					IP:              "10.0.0.11",
+					State:           v1alpha1.SandboxStateRunning,
+					ResourceVersion: "21",
+				})
+			}
+
+			ctx, cancel := context.WithTimeout(t.Context(), 75*time.Millisecond)
+			defer cancel()
+			got, err := infraInstance.GetClaimedSandbox(ctx, infra.GetClaimedSandboxOptions{
+				Namespace: "team-a",
+				SandboxID: id,
+			})
+
+			require.Error(t, err)
+			assert.Nil(t, got)
+			assert.ErrorIs(t, err, context.DeadlineExceeded)
+			assert.Equal(t, int64(0), stub.getCalls.Load())
+		})
+	}
+}
+
+func TestInfra_GetClaimedSandbox_RouteRVNewerThanCache_FallsBackToAPIReader(t *testing.T) {
+	apiSbx := makeClaimedSandbox("team-a", "sbx-fresh", "10.0.0.1")
+	apiSbx.ResourceVersion = "777"
+
+	infraInstance, fc, stub := newInfraWithStubAPIReader(t, apiSbx)
+
+	cacheSbx := apiSbx.DeepCopy()
+	cacheSbx.ResourceVersion = ""
+	CreateSandboxWithStatus(t, fc, cacheSbx)
+	time.Sleep(100 * time.Millisecond)
+
+	id := utils.GetSandboxID(apiSbx)
+	infraInstance.Proxy.SetRoute(t.Context(), proxy.Route{
+		ID:              id,
+		IP:              apiSbx.Status.PodInfo.PodIP,
+		State:           v1alpha1.SandboxStateRunning,
+		ResourceVersion: "777",
+	})
+
+	got, err := infraInstance.GetClaimedSandbox(t.Context(), infra.GetClaimedSandboxOptions{
+		Namespace: "team-a",
+		SandboxID: id,
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, "777", got.GetResourceVersion())
+	assert.Equal(t, int64(1), stub.getCalls.Load())
+}
+
+func TestInfra_GetClaimedSandbox_CacheRVEqualsRouteRV_NoFallback(t *testing.T) {
+	apiSbx := makeClaimedSandbox("team-a", "sbx-equal", "10.0.0.3")
+
+	infraInstance, fc, stub := newInfraWithStubAPIReader(t, apiSbx)
+
+	cacheSbx := apiSbx.DeepCopy()
+	cacheSbx.ResourceVersion = ""
+	CreateSandboxWithStatus(t, fc, cacheSbx)
+	time.Sleep(100 * time.Millisecond)
+
+	stored := &v1alpha1.Sandbox{}
+	require.NoError(t, fc.Get(t.Context(), client.ObjectKey{Namespace: "team-a", Name: "sbx-equal"}, stored))
+	rv := stored.GetResourceVersion()
+	require.NotEmpty(t, rv)
+
+	id := utils.GetSandboxID(apiSbx)
+	infraInstance.Proxy.SetRoute(t.Context(), proxy.Route{
+		ID:              id,
+		IP:              apiSbx.Status.PodInfo.PodIP,
+		State:           v1alpha1.SandboxStateRunning,
+		ResourceVersion: rv,
+	})
+
+	got, err := infraInstance.GetClaimedSandbox(t.Context(), infra.GetClaimedSandboxOptions{
+		Namespace: "team-a",
+		SandboxID: id,
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, "sbx-equal", got.GetName())
+	assert.Equal(t, int64(0), stub.getCalls.Load())
+}
+
+func TestInfra_GetClaimedSandbox_StaleCacheFallback_APIReaderRequiresClaimedLabel(t *testing.T) {
+	tests := []struct {
+		name        string
+		labels      map[string]string
+		expectError string
+	}{
+		{
+			name:        "missing claimed label",
+			labels:      nil,
+			expectError: infracache.ErrSandboxNotFound.Error(),
+		},
+		{
+			name:        "claimed label false",
+			labels:      map[string]string{v1alpha1.LabelSandboxIsClaimed: v1alpha1.False},
+			expectError: infracache.ErrSandboxNotFound.Error(),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			apiSbx := makeClaimedSandbox("team-a", "sbx-unclaimed", "10.0.0.4")
+			apiSbx.ResourceVersion = "10"
+			apiSbx.Labels = tt.labels
+
+			infraInstance, fc, stub := newInfraWithStubAPIReader(t, apiSbx)
+			cacheSbx := makeClaimedSandbox("team-a", "sbx-unclaimed", "10.0.0.4")
+			cacheSbx.ResourceVersion = ""
+			CreateSandboxWithStatus(t, fc, cacheSbx)
+			time.Sleep(100 * time.Millisecond)
+
+			id := utils.GetSandboxID(apiSbx)
+			infraInstance.Proxy.SetRoute(t.Context(), proxy.Route{
+				ID:              id,
+				IP:              apiSbx.Status.PodInfo.PodIP,
+				State:           v1alpha1.SandboxStateRunning,
+				ResourceVersion: "10",
+			})
+
+			ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
+			defer cancel()
+			got, err := infraInstance.GetClaimedSandbox(ctx, infra.GetClaimedSandboxOptions{
+				Namespace: "team-a",
+				SandboxID: id,
+			})
+
+			require.Error(t, err)
+			assert.Nil(t, got)
+			assert.ErrorIs(t, err, infracache.ErrSandboxNotFound)
+			assert.Contains(t, err.Error(), tt.expectError)
+			assert.Equal(t, int64(1), stub.getCalls.Load())
+		})
+	}
+}
+
+func TestInfra_GetClaimedSandbox_StaleCacheFallback_APIReaderNotFound_WrapsCacheNotFound(t *testing.T) {
+	cacheSbx := makeClaimedSandbox("team-a", "missing-api", "10.0.0.5")
+	infraInstance, fc, stub := newInfraWithStubAPIReader(t)
+	CreateSandboxWithStatus(t, fc, cacheSbx)
+	time.Sleep(100 * time.Millisecond)
+
+	id := utils.GetSandboxID(cacheSbx)
+	infraInstance.Proxy.SetRoute(t.Context(), proxy.Route{
+		ID:              id,
+		IP:              "10.0.0.5",
+		State:           v1alpha1.SandboxStateRunning,
+		ResourceVersion: "999",
+	})
+
+	ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
+	defer cancel()
+	got, err := infraInstance.GetClaimedSandbox(ctx, infra.GetClaimedSandboxOptions{
+		Namespace: "team-a",
+		SandboxID: id,
+	})
+
+	require.Error(t, err)
+	assert.Nil(t, got)
+	assert.ErrorIs(t, err, infracache.ErrSandboxNotFound)
+	assert.Equal(t, int64(1), stub.getCalls.Load())
 }
 
 func TestInfra_DeleteCheckpointWithOptions_NamespaceScoped(t *testing.T) {
@@ -541,7 +849,7 @@ func TestInfra_reconcileSandbox(t *testing.T) {
 
 			if tt.addRouteFirst {
 				// Add route first for notFound case
-				id := stateutils.GetSandboxID(tt.sandbox)
+				id := utils.GetSandboxID(tt.sandbox)
 				infraInstance.Proxy.SetRoute(t.Context(), proxy.Route{
 					ID:    id,
 					IP:    tt.sandbox.Status.PodInfo.PodIP,
@@ -559,7 +867,7 @@ func TestInfra_reconcileSandbox(t *testing.T) {
 			assert.NoError(t, err)
 
 			// Check route
-			id := stateutils.GetSandboxID(tt.sandbox)
+			id := utils.GetSandboxID(tt.sandbox)
 			route, ok := infraInstance.Proxy.LoadRoute(id)
 			require.Equal(t, tt.expectRouteExist, ok, "expect route exist %v, got %v", tt.expectRouteExist, ok)
 			if tt.expectRouteExist {
@@ -638,7 +946,7 @@ func TestInfra_reconcileRoutes(t *testing.T) {
 			for _, sbx := range tt.sandboxes {
 				CreateSandboxWithStatus(t, c, sbx)
 				// Also add their routes to proxy
-				id := stateutils.GetSandboxID(sbx)
+				id := utils.GetSandboxID(sbx)
 				infraInstance.Proxy.SetRoute(t.Context(), proxy.Route{
 					ID:    id,
 					IP:    sbx.Status.PodInfo.PodIP,
@@ -676,7 +984,7 @@ func TestInfra_reconcileRoutes(t *testing.T) {
 }
 
 func TestInfra_CloneSandbox(t *testing.T) {
-	utils.InitLogOutput()
+	utestutils.InitLogOutput()
 	runtimeOpts := testutils.TestRuntimeServerOptions{
 		RunCommandResult: runtime.RunCommandResult{
 			PID:    1,
@@ -813,6 +1121,239 @@ func TestInfra_CloneSandbox(t *testing.T) {
 	assert.GreaterOrEqual(t, metrics.Total, time.Duration(0))
 }
 
+func TestInfra_CloneSandboxRetriesWaitReadyFailure(t *testing.T) {
+	infraInstance, fc := NewTestInfra(t)
+	checkpointID := "clone-retry-wait-ready"
+	createCloneTestCheckpoint(t, fc, infraInstance.Cache, checkpointID)
+
+	origCreateSandbox := DefaultCreateSandbox
+	attempts := 0
+	firstSandboxName := "clone-retry-first"
+	DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client) (*v1alpha1.Sandbox, error) {
+		attempts++
+		sbx.Name = fmt.Sprintf("clone-retry-%d", attempts)
+		created, err := origCreateSandbox(ctx, sbx, c)
+		if err != nil {
+			return nil, err
+		}
+		if attempts == 1 {
+			firstSandboxName = created.Name
+			return created, nil
+		}
+		created.Status = v1alpha1.SandboxStatus{
+			Phase:              v1alpha1.SandboxRunning,
+			ObservedGeneration: created.Generation,
+			Conditions: []metav1.Condition{
+				{
+					Type:   string(v1alpha1.SandboxConditionReady),
+					Status: metav1.ConditionTrue,
+					Reason: v1alpha1.SandboxReadyReasonPodReady,
+				},
+			},
+			PodInfo: v1alpha1.PodInfo{
+				PodIP: "1.2.3.4",
+			},
+		}
+		return created, c.Status().Update(ctx, created)
+	}
+	t.Cleanup(func() { DefaultCreateSandbox = origCreateSandbox })
+
+	opts := infra.CloneSandboxOptions{
+		User:                    "test-user",
+		CheckPointID:            checkpointID,
+		WaitReadyTimeout:        20 * time.Millisecond,
+		CloneTimeout:            300 * time.Millisecond,
+		ReserveFailedSandboxFor: ptr.To(consts.ReserveFailedSandboxNever),
+	}
+	sbx, metrics, err := infraInstance.CloneSandbox(t.Context(), opts)
+	require.NoError(t, err)
+	require.NotNil(t, sbx)
+	assert.Equal(t, 2, attempts)
+	assertCloneMetricsTotalConsistent(t, metrics)
+
+	got := &v1alpha1.Sandbox{}
+	err = fc.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: firstSandboxName}, got)
+	assert.True(t, apierrors.IsNotFound(err))
+}
+
+func TestInfra_CloneSandboxRetriesCreateFailure(t *testing.T) {
+	tests := []struct {
+		name             string
+		createErr        error
+		successOnAttempt int // attempt number that should succeed; 0 = always fail
+		expectError      string
+		expectRetries    int
+	}{
+		{
+			name:             "transient create error retries until success",
+			createErr:        fmt.Errorf("etcdserver: leader changed"),
+			successOnAttempt: 3,
+			expectRetries:    2,
+		},
+		{
+			name:             "non-transient create error also retries (orphan trade-off)",
+			createErr:        fmt.Errorf("sandbox validation failed"),
+			successOnAttempt: 2,
+			expectRetries:    1,
+		},
+		{
+			name:             "always-failing create exhausts retry budget",
+			createErr:        fmt.Errorf("apiserver unavailable"),
+			successOnAttempt: 0,
+			expectError:      "context deadline exceeded",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			infraInstance, fc := NewTestInfra(t)
+			checkpointID := "clone-retry-create"
+			createCloneTestCheckpoint(t, fc, infraInstance.Cache, checkpointID)
+
+			origCreateSandbox := DefaultCreateSandbox
+			attempts := 0
+			DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client) (*v1alpha1.Sandbox, error) {
+				attempts++
+				if tt.successOnAttempt == 0 || attempts < tt.successOnAttempt {
+					return nil, tt.createErr
+				}
+				sbx.Name = fmt.Sprintf("clone-retry-create-%d", attempts)
+				created, err := origCreateSandbox(ctx, sbx, c)
+				if err != nil {
+					return nil, err
+				}
+				created.Status = v1alpha1.SandboxStatus{
+					Phase:              v1alpha1.SandboxRunning,
+					ObservedGeneration: created.Generation,
+					Conditions: []metav1.Condition{
+						{
+							Type:   string(v1alpha1.SandboxConditionReady),
+							Status: metav1.ConditionTrue,
+							Reason: v1alpha1.SandboxReadyReasonPodReady,
+						},
+					},
+					PodInfo: v1alpha1.PodInfo{PodIP: "1.2.3.4"},
+				}
+				return created, c.Status().Update(ctx, created)
+			}
+			t.Cleanup(func() { DefaultCreateSandbox = origCreateSandbox })
+
+			opts := infra.CloneSandboxOptions{
+				User:                    "test-user",
+				CheckPointID:            checkpointID,
+				WaitReadyTimeout:        30 * time.Second,
+				CloneTimeout:            300 * time.Millisecond,
+				ReserveFailedSandboxFor: ptr.To(consts.ReserveFailedSandboxNever),
+			}
+			sbx, metrics, err := infraInstance.CloneSandbox(t.Context(), opts)
+			if tt.expectError != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
+				assert.Nil(t, sbx)
+				assert.Greater(t, attempts, 1, "should have retried at least once before giving up")
+				return
+			}
+			require.NoError(t, err)
+			require.NotNil(t, sbx)
+			assert.Equal(t, tt.expectRetries, metrics.Retries)
+			assert.Equal(t, tt.successOnAttempt, attempts)
+			assertCloneMetricsTotalConsistent(t, metrics)
+		})
+	}
+}
+
+func assertCloneMetricsTotalConsistent(t *testing.T, metrics infra.CloneMetrics) {
+	t.Helper()
+	expectedTotal := metrics.Wait + metrics.GetTemplate + metrics.CreateSandbox + metrics.WaitReady + metrics.InitRuntime + metrics.CSIMount
+	assert.Equal(t, expectedTotal, metrics.Total)
+}
+
+func TestInfra_CloneSandboxDoesNotRetryCSIMountFailure(t *testing.T) {
+	server := testutils.NewTestRuntimeServer(testutils.TestRuntimeServerOptions{
+		RunCommandResult: runtime.RunCommandResult{
+			PID:      1,
+			ExitCode: 1,
+			Stderr:   []string{"mount error"},
+			Exited:   true,
+		},
+		RunCommandImmediately: true,
+	})
+	defer server.Close()
+
+	infraInstance, fc := NewTestInfra(t)
+	checkpointID := "clone-csi-no-retry"
+	createCloneTestCheckpoint(t, fc, infraInstance.Cache, checkpointID)
+
+	origCreateSandbox := DefaultCreateSandbox
+	attempts := 0
+	DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client) (*v1alpha1.Sandbox, error) {
+		attempts++
+		sbx.Name = fmt.Sprintf("clone-csi-no-retry-%d", attempts)
+		if sbx.Annotations == nil {
+			sbx.Annotations = map[string]string{}
+		}
+		sbx.Annotations[v1alpha1.AnnotationRuntimeURL] = server.URL
+		sbx.Annotations[v1alpha1.AnnotationRuntimeAccessToken] = runtime.AccessToken
+		created, err := origCreateSandbox(ctx, sbx, c)
+		if err != nil {
+			return nil, err
+		}
+		created.Status = v1alpha1.SandboxStatus{
+			Phase:              v1alpha1.SandboxRunning,
+			ObservedGeneration: created.Generation,
+			Conditions: []metav1.Condition{
+				{
+					Type:   string(v1alpha1.SandboxConditionReady),
+					Status: metav1.ConditionTrue,
+					Reason: v1alpha1.SandboxReadyReasonPodReady,
+				},
+			},
+			PodInfo: v1alpha1.PodInfo{
+				PodIP: "1.2.3.4",
+			},
+		}
+		return created, c.Status().Update(ctx, created)
+	}
+	t.Cleanup(func() { DefaultCreateSandbox = origCreateSandbox })
+
+	opts := infra.CloneSandboxOptions{
+		User:             "test-user",
+		CheckPointID:     checkpointID,
+		WaitReadyTimeout: 30 * time.Second,
+		CloneTimeout:     300 * time.Millisecond,
+		CSIMount: &config.CSIMountOptions{
+			MountOptionList: []config.MountConfig{
+				{
+					Driver:     "test-driver",
+					RequestRaw: "test-request",
+				},
+			},
+		},
+	}
+	sbx, metrics, err := infraInstance.CloneSandbox(t.Context(), opts)
+	require.Error(t, err)
+	assert.Nil(t, sbx)
+	assert.Contains(t, err.Error(), "failed to perform csi mount")
+	assert.Equal(t, 1, attempts)
+	assert.Greater(t, metrics.CSIMount, time.Duration(0))
+	assertCloneMetricsTotalConsistent(t, metrics)
+}
+
+func TestInfra_CloneSandboxTinyTimeoutStillAttempts(t *testing.T) {
+	infraInstance, _ := NewTestInfra(t)
+
+	sbx, _, err := infraInstance.CloneSandbox(t.Context(), infra.CloneSandboxOptions{
+		User:               "test-user",
+		CheckPointID:       "missing-checkpoint",
+		SkipWaitCheckpoint: true,
+		CloneTimeout:       RetryInterval / 2,
+	})
+
+	assert.Nil(t, sbx)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not found")
+}
+
 func createTestCheckpoint(name, user string, namespace string, phase v1alpha1.CheckpointPhase) *v1alpha1.Checkpoint {
 	return &v1alpha1.Checkpoint{
 		ObjectMeta: metav1.ObjectMeta{
@@ -844,7 +1385,7 @@ func EnsureCheckpointInCache(t *testing.T, cache infracache.Provider, cp *v1alph
 }
 
 func TestInfra_SelectSucceededCheckpoints(t *testing.T) {
-	utils.InitLogOutput()
+	utestutils.InitLogOutput()
 
 	tests := []struct {
 		name                string
@@ -954,7 +1495,7 @@ func TestInfra_startRouteReconciler(t *testing.T) {
 			var createdSandboxes []string
 			for _, sbx := range tt.sandboxes {
 				CreateSandboxWithStatus(t, fc, sbx)
-				id := stateutils.GetSandboxID(sbx)
+				id := utils.GetSandboxID(sbx)
 				infraInstance.Proxy.SetRoute(t.Context(), proxy.Route{
 					ID:    id,
 					IP:    sbx.Status.PodInfo.PodIP,
@@ -1000,11 +1541,102 @@ func TestInfra_startRouteReconciler(t *testing.T) {
 
 			// Verify valid routes still exist
 			for _, sbx := range tt.sandboxes {
-				id := stateutils.GetSandboxID(sbx)
+				id := utils.GetSandboxID(sbx)
 				_, ok := infraInstance.Proxy.LoadRoute(id)
 				assert.True(t, ok, "valid route %s should always exist", id)
 			}
 		})
+	}
+}
+
+type stubAPIReader struct {
+	objs     map[client.ObjectKey]*v1alpha1.Sandbox
+	getCalls atomic.Int64
+}
+
+type retryingClaimedSandboxCache struct {
+	infracache.Provider
+	sandbox         *v1alpha1.Sandbox
+	succeedAfter    int64
+	transientErrors []error
+	getCalls        atomic.Int64
+}
+
+func (c *retryingClaimedSandboxCache) GetClaimedSandbox(ctx context.Context, _ infracache.GetClaimedSandboxOptions) (*v1alpha1.Sandbox, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+
+	call := c.getCalls.Add(1)
+	if int(call) <= len(c.transientErrors) {
+		return nil, c.transientErrors[call-1]
+	}
+	if c.sandbox != nil && c.succeedAfter > 0 && call >= c.succeedAfter {
+		return c.sandbox.DeepCopy(), nil
+	}
+	return nil, infracache.ErrSandboxNotFound
+}
+
+func (r *stubAPIReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object, _ ...client.GetOption) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
+	r.getCalls.Add(1)
+	sbx, ok := r.objs[key]
+	if !ok {
+		return apierrors.NewNotFound(v1alpha1.GroupVersion.WithResource("sandboxes").GroupResource(), key.Name)
+	}
+	target, ok := obj.(*v1alpha1.Sandbox)
+	if !ok {
+		return apierrors.NewBadRequest("stubAPIReader: expected *v1alpha1.Sandbox")
+	}
+	*target = *sbx.DeepCopy()
+	return nil
+}
+
+func (r *stubAPIReader) List(_ context.Context, _ client.ObjectList, _ ...client.ListOption) error {
+	panic("stubAPIReader.List: unexpected call from GetClaimedSandbox path")
+}
+
+func newInfraWithStubAPIReader(t *testing.T, apiObjects ...*v1alpha1.Sandbox) (*Infra, client.Client, *stubAPIReader) {
+	t.Helper()
+	options := config.InitOptions(config.SandboxManagerOptions{DisableRouteReconciliation: true})
+	c, fc, err := cachetest.NewTestCache(t)
+	require.NoError(t, err)
+
+	stub := &stubAPIReader{objs: make(map[client.ObjectKey]*v1alpha1.Sandbox, len(apiObjects))}
+	for _, sbx := range apiObjects {
+		stub.objs[client.ObjectKey{Namespace: sbx.Namespace, Name: sbx.Name}] = sbx.DeepCopy()
+	}
+
+	infraInstance := NewInfraBuilder(options).
+		WithCache(c).
+		WithAPIReader(stub).
+		WithProxy(proxy.NewServer(options)).
+		Build().(*Infra)
+	require.NoError(t, infraInstance.Run(t.Context()))
+	return infraInstance, fc, stub
+}
+
+func makeClaimedSandbox(namespace, name, podIP string) *v1alpha1.Sandbox {
+	return &v1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        name,
+			Namespace:   namespace,
+			UID:         types.UID(uuid.NewString()),
+			Annotations: map[string]string{v1alpha1.AnnotationOwner: "user-x"},
+			Labels:      map[string]string{v1alpha1.LabelSandboxIsClaimed: v1alpha1.True},
+		},
+		Status: v1alpha1.SandboxStatus{
+			Phase:      v1alpha1.SandboxRunning,
+			Conditions: []metav1.Condition{{Type: string(v1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue}},
+			PodInfo:    v1alpha1.PodInfo{PodIP: podIP},
+		},
 	}
 }
 

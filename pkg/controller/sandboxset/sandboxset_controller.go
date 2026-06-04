@@ -49,8 +49,6 @@ import (
 	"github.com/openkruise/agents/pkg/utils/expectations"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 	"github.com/openkruise/agents/pkg/utils/fieldindex"
-	managerutils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
-	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
 )
 
 func init() {
@@ -230,7 +228,7 @@ func (r *Reconciler) scaleUp(ctx context.Context, count int, sbs *agentsv1alpha1
 			log.Error(err, "failed to create sandbox")
 			return err
 		}
-		log.V(consts.DebugLogLevel).Info("sandbox created", "sandbox", klog.KObj(created))
+		log.V(utils.DebugLogLevel).Info("sandbox created", "sandbox", klog.KObj(created))
 		return nil
 	})
 	log.Info("scale up finished", "successes", successes, "fails", count-successes)
@@ -360,7 +358,7 @@ func (r *Reconciler) createSandbox(ctx context.Context, sbs *agentsv1alpha1.Sand
 }
 
 func (r *Reconciler) scaleDownSandbox(ctx context.Context, sbx *agentsv1alpha1.Sandbox, lock string) (err error) {
-	log := logf.FromContext(ctx).WithValues("sandbox", client.ObjectKeyFromObject(sbx)).V(consts.DebugLogLevel)
+	log := logf.FromContext(ctx).WithValues("sandbox", client.ObjectKeyFromObject(sbx)).V(utils.DebugLogLevel)
 	log.Info("try to scale down sandbox")
 	if sbx.Annotations[agentsv1alpha1.AnnotationLock] != "" && sbx.Annotations[agentsv1alpha1.AnnotationOwner] != consts.OwnerManagerScaleDown {
 		log.Info("sandbox to be scaled down claimed before performed, skip")
@@ -368,7 +366,7 @@ func (r *Reconciler) scaleDownSandbox(ctx context.Context, sbx *agentsv1alpha1.S
 	}
 	// Deep copy the sandbox before mutating it to avoid corrupting the informer cache.
 	sbx = sbx.DeepCopy()
-	managerutils.LockSandbox(sbx, lock, consts.OwnerManagerScaleDown)
+	utils.LockSandbox(sbx, lock, consts.OwnerManagerScaleDown)
 	if err = r.Update(ctx, sbx); err != nil {
 		return fmt.Errorf("failed to lock sandbox when scaling down: %s", err)
 	}
@@ -385,7 +383,7 @@ func (r *Reconciler) scaleDownSandbox(ctx context.Context, sbx *agentsv1alpha1.S
 // require maintaining replica counts (or rather, only needs to maintain the dead group's replica count at 0), so just
 // delete all dead sandboxes.
 func (r *Reconciler) deleteDeadSandboxes(ctx context.Context, dead []*agentsv1alpha1.Sandbox) error {
-	log := logf.FromContext(ctx).V(consts.DebugLogLevel)
+	log := logf.FromContext(ctx).V(utils.DebugLogLevel)
 	failNum := 0
 	for _, sbx := range dead {
 		if sbx.DeletionTimestamp != nil {
@@ -405,7 +403,7 @@ func (r *Reconciler) deleteDeadSandboxes(ctx context.Context, dead []*agentsv1al
 }
 
 func (r *Reconciler) updateSandboxSetStatus(ctx context.Context, newStatus agentsv1alpha1.SandboxSetStatus, sbs *agentsv1alpha1.SandboxSet) error {
-	log := logf.FromContext(ctx).V(consts.DebugLogLevel)
+	log := logf.FromContext(ctx).V(utils.DebugLogLevel)
 	clone := sbs.DeepCopy()
 	if err := r.Get(ctx, client.ObjectKey{Namespace: sbs.Namespace, Name: sbs.Name}, clone); err != nil {
 		log.Error(err, "failed to get updated sandboxset from client")
@@ -444,8 +442,8 @@ func (r *Reconciler) groupAllSandboxes(ctx context.Context, sbs *agentsv1alpha1.
 	for i := range sandboxList.Items {
 		sbx := &sandboxList.Items[i]
 		scaleUpExpectation.ObserveScale(GetControllerKey(sbs), expectations.Create, sbx.Name)
-		debugLog := log.V(consts.DebugLogLevel).WithValues("sandbox", sbx.Name)
-		state, reason := stateutils.GetSandboxState(sbx)
+		debugLog := log.V(utils.DebugLogLevel).WithValues("sandbox", sbx.Name)
+		state, reason := utils.GetSandboxState(sbx)
 		switch state {
 		case agentsv1alpha1.SandboxStateCreating:
 			groups.Creating = append(groups.Creating, sbx)

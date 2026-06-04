@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -55,7 +56,7 @@ import (
 	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
-	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
+	"github.com/openkruise/agents/pkg/utils/testutils"
 )
 
 var TestServerPort = 9999
@@ -79,8 +80,10 @@ func Setup(t *testing.T) (*Controller, ctrlclient.Client, func()) {
 // Controller.minResumeTimeout so floor-enforcement assertions can use a
 // non-default value (e.g., 120s with a 60s request to observe the bump).
 func SetupWithMinResumeTimeout(t *testing.T, minResumeTimeout int) (*Controller, ctrlclient.Client, func()) {
-	utils.InitLogOutput()
+	testutils.InitLogOutput()
 	namespace := "sandbox-system"
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
 
 	// Build infra using the builder pattern (avoids connecting to a real API server).
 	// InitOptions populates defaults (e.g. MaxCreateQPS) that the infra rate limiter
@@ -165,15 +168,20 @@ func SetupWithMinResumeTimeout(t *testing.T, minResumeTimeout int) (*Controller,
 	// would call manager.Run and try to start memberlist/peersManager).
 	controller.stop = make(chan os.Signal, 1)
 	signal.Notify(controller.stop, syscall.SIGINT, syscall.SIGTERM)
+	serverErr := make(chan error, 1)
 	go func() {
-		if err := controller.server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			t.Logf("HTTP server error: %v", err)
+		if err := controller.server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serverErr <- err
+			return
 		}
+		serverErr <- nil
 	}()
 
 	return controller, fc, func() {
-		controller.stop <- syscall.SIGTERM
+		t.Helper()
+		signal.Stop(controller.stop)
 		_ = controller.server.Close()
+		require.NoError(t, <-serverErr)
 	}
 }
 

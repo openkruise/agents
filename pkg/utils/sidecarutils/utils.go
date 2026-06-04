@@ -27,6 +27,9 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/features"
+	"github.com/openkruise/agents/pkg/identity"
+	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 	trafficproxy "github.com/openkruise/agents/pkg/utils/sidecarutils/traffic-proxy"
 )
 
@@ -42,26 +45,28 @@ func InjectSandboxRuntimes(ctx context.Context, sandbox *agentsv1alpha1.Sandbox,
 		logger.Error(err, "failed to fetch injection configuration")
 		return err
 	}
+
 	return doSidecarInjection(ctx, sandbox, pod, config)
 }
 
 func doSidecarInjection(ctx context.Context, sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod, injectConfigMap map[string]string) error {
-	logger := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(sandbox))
+	logger := logf.FromContext(ctx)
 
 	injectedRuntimes := sets.NewString()
-	for _, runtime := range sandbox.Spec.Runtimes {
-		if injectedRuntimes.Has(runtime.Name) {
-			logger.V(5).Info("skipping duplicate runtime, already processed", "runtime", runtime.Name)
+	for _, r := range sandbox.Spec.Runtimes {
+		runtime := r.Name
+		if injectedRuntimes.Has(runtime) {
+			logger.V(5).Info("skipping duplicate runtime, already processed", "runtime", runtime)
 			continue
 		}
-		injectedRuntimes.Insert(runtime.Name)
+		injectedRuntimes.Insert(runtime)
 
-		runtimeInjectConfig, err := parseInjectConfig(ctx, runtime.Name, injectConfigMap)
+		runtimeInjectConfig, err := parseInjectConfig(ctx, runtime, injectConfigMap)
 		if err != nil {
 			logger.Error(err, "failed to parse runtime injection configuration")
 			return err
 		}
-		switch runtime.Name {
+		switch runtime {
 		case agentsv1alpha1.RuntimeConfigForInjectAgentRuntime:
 			if !isContainersExists(pod.Spec.InitContainers, runtimeInjectConfig.Sidecars) && !isContainersExists(pod.Spec.Containers, runtimeInjectConfig.Sidecars) {
 				setAgentRuntimeContainer(ctx, &pod.Spec, runtimeInjectConfig)
@@ -86,6 +91,17 @@ func doSidecarInjection(ctx context.Context, sandbox *agentsv1alpha1.Sandbox, po
 			logger.Error(err, "failed to apply health probe rewrite")
 			return err
 		}
+	}
+
+	// Inject every enabled CA bundle as Volume + VolumeMount + EnvVar entries.
+	// SecurityIdentityProviderGate is the cluster-level kill switch; per-spec
+	// EnabledFor predicates (bound via identity.BindCAEnabledFor at controller
+	// startup) decide which specs apply to this sandbox. Runtime-level gating
+	// (e.g. traffic-proxy) lives exclusively inside those predicates to avoid
+	// drift with the caller side.
+	if utilfeature.DefaultFeatureGate.Enabled(features.SecurityIdentityProviderGate) {
+		identity.InjectAllCAVolumes(ctx, sandbox, pod)
+		identity.InjectAllCAIntoContainers(ctx, sandbox, pod)
 	}
 
 	return nil

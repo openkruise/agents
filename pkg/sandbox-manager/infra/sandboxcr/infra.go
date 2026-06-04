@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"golang.org/x/time/rate"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/retry"
@@ -36,14 +37,12 @@ import (
 	"github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
-	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
 	"github.com/openkruise/agents/pkg/utils"
-	managerutils "github.com/openkruise/agents/pkg/utils/sandbox-manager/expectationutils"
-	"github.com/openkruise/agents/pkg/utils/sandbox-manager/proxyutils"
-	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
+	"github.com/openkruise/agents/pkg/utils/expectations"
+	"github.com/openkruise/agents/pkg/utils/proxyutils"
 )
 
 var DefaultDeleteSandboxTemplate = deleteSandboxTemplate
@@ -138,11 +137,11 @@ func (i *Infra) ClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions
 	defer cancel()
 
 	// Start claiming sandbox
-	log.V(consts.DebugLogLevel).Info("claim sandbox options", "options", opts)
+	log.V(utils.DebugLogLevel).Info("claim sandbox options", "options", opts)
 	metrics.Retries = -1 // starts from 0
 	var claimedSandbox infra.Sandbox
 	err = retry.OnError(wait.Backoff{
-		Steps:    int(opts.ClaimTimeout / RetryInterval),
+		Steps:    retrySteps(opts.ClaimTimeout),
 		Duration: RetryInterval,
 		Factor:   LockBackoffFactor,
 		Jitter:   LockJitter,
@@ -168,14 +167,7 @@ func (i *Infra) ClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions
 		} else {
 			metrics.RetryCost += tryMetrics.Total
 		}
-		// client-go retry.OnError rewrites interrupted errors to the last
-		// retriable error. Context cancellation is interrupted but non-retriable,
-		// so keep its message while intentionally avoiding %w; wrapping would
-		// still let wait.Interrupted identify and rewrite it.
-		if wait.Interrupted(claimErr) {
-			return fmt.Errorf("%v", claimErr)
-		}
-		return claimErr
+		return preserveInterruptedError(claimErr)
 	})
 	return claimedSandbox, metrics, buildClaimError(err, metrics.LastError, metrics.PickSandboxFailures)
 }
@@ -197,20 +189,59 @@ func buildClaimError(err error, lastError error, failures []infra.PickSandboxFai
 
 func (i *Infra) CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions) (infra.Sandbox, infra.CloneMetrics, error) {
 	log := klog.FromContext(ctx)
+	metrics := infra.CloneMetrics{}
 	opts, err := ValidateAndInitCloneOptions(opts)
 	if err != nil {
 		log.Error(err, "invalid clone options")
-		return nil, infra.CloneMetrics{}, err
-	}
-	log.Info("clone options", "options", opts)
-	opts.CreateLimiter = i.createLimiter
-	sandbox, metrics, err := CloneSandbox(ctx, opts, i.Cache)
-	if err != nil {
-		log.Error(err, "failed to clone sandbox")
 		return nil, metrics, err
 	}
-	log.Info("sandbox cloned", "sandbox", klog.KObj(sandbox))
-	return sandbox, metrics, nil
+	log.V(utils.DebugLogLevel).Info("clone sandbox options", "options", opts)
+
+	cloneCtx, cancel := context.WithTimeout(ctx, opts.CloneTimeout)
+	defer cancel()
+
+	// Inject Infra-level limiter so the inner CloneSandbox enforces rate
+	// limiting at the same gate as ClaimSandbox (see newSandboxFromSandboxSet).
+	attemptOpts := opts
+	attemptOpts.CreateLimiter = i.createLimiter
+
+	metrics.Retries = -1 // starts from 0
+	var clonedSandbox infra.Sandbox
+	err = retry.OnError(wait.Backoff{
+		Steps:    retrySteps(opts.CloneTimeout),
+		Duration: RetryInterval,
+		Factor:   LockBackoffFactor,
+		Jitter:   LockJitter,
+	}, func(err error) bool {
+		return errors.As(err, &retriableError{})
+	}, func() error {
+		metrics.Retries++
+		cloned, tryMetrics, cloneErr := CloneSandbox(cloneCtx, attemptOpts, i.Cache)
+		metrics.Merge(tryMetrics)
+		if cloneErr == nil {
+			clonedSandbox = cloned
+		} else {
+			metrics.LastError = cloneErr
+		}
+		return preserveInterruptedError(cloneErr)
+	})
+	if err != nil {
+		log.Error(err, "failed to clone sandbox", "metrics", metrics.String())
+		return nil, metrics, err
+	}
+	log.Info("sandbox cloned", "sandbox", klog.KObj(clonedSandbox), "metrics", metrics.String())
+	return clonedSandbox, metrics, nil
+}
+
+// retrySteps converts a total timeout into the Steps value for wait.Backoff.
+// It clamps to at least one attempt so a sub-RetryInterval timeout still runs
+// the closure once.
+func retrySteps(timeout time.Duration) int {
+	steps := int(timeout / RetryInterval)
+	if steps < 1 {
+		return 1
+	}
+	return steps
 }
 
 func (i *Infra) DeleteCheckpoint(ctx context.Context, opts infra.DeleteCheckpointOptions) error {
@@ -283,7 +314,7 @@ func (i *Infra) SelectSandboxes(ctx context.Context, opts infra.SelectSandboxesO
 func (i *Infra) asSandboxes(objects []*v1alpha1.Sandbox) []infra.Sandbox {
 	var sandboxes = make([]infra.Sandbox, 0, len(objects))
 	for _, obj := range objects {
-		if !managerutils.ResourceVersionExpectationSatisfied(obj) {
+		if !expectations.ResourceVersionExpectationSatisfied(obj) {
 			continue
 		}
 		sandboxes = append(sandboxes, AsSandbox(obj, i.Cache))
@@ -314,29 +345,101 @@ func selectSucceededCheckpoints(checkpoints []*v1alpha1.Checkpoint) []infra.Chec
 	return results
 }
 
-func (i *Infra) GetClaimedSandbox(ctx context.Context, opts infra.GetClaimedSandboxOptions) (infra.Sandbox, error) {
-	var sandbox *v1alpha1.Sandbox
-	err := retry.OnError(utils.CacheBackoff, utils.RetryIfContextNotCanceled(ctx), func() error {
+type claimedSandboxLookup struct {
+	sandbox  *v1alpha1.Sandbox
+	route    proxy.Route
+	hasRoute bool
+}
+
+// lookupClaimedSandbox waits until the informer cache returns the claimed Sandbox.
+// Route state is loaded only after a cache hit and is used later as a staleness
+// signal, not as a cache-miss fallback trigger.
+func (i *Infra) lookupClaimedSandbox(ctx context.Context, opts infra.GetClaimedSandboxOptions) (claimedSandboxLookup, error) {
+	var lookup claimedSandboxLookup
+	err := wait.PollUntilContextCancel(ctx, RetryInterval, true, func(ctx context.Context) (bool, error) {
 		got, err := i.Cache.GetClaimedSandbox(ctx, cache.GetClaimedSandboxOptions{Namespace: opts.Namespace, SandboxID: opts.SandboxID})
-		if err != nil {
-			return err
+		if err == nil {
+			lookup.sandbox = got
+			if route, ok := i.Proxy.LoadRoute(opts.SandboxID); ok {
+				lookup.route = route
+				lookup.hasRoute = true
+			}
+			return true, nil
 		}
-		sandbox = got
-		return nil
+		if errors.Is(err, cache.ErrSandboxNotFound) {
+			return false, nil
+		}
+		if isContextError(err) {
+			return false, ctx.Err()
+		}
+		return false, err
 	})
+	if err != nil {
+		return lookup, err
+	}
+	return lookup, nil
+}
+
+func isContextError(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
+// isSandboxStale reports whether the cache-hit Sandbox should be refreshed via
+// the APIReader fallback. It is only called after lookupClaimedSandbox returns
+// a cache-hit Sandbox, and emits fallback metrics and debug logging internally
+// when it returns true.
+func isSandboxStale(ctx context.Context, lookup claimedSandboxLookup) bool {
+	cacheRV := lookup.sandbox.GetResourceVersion()
+	var reason string
+	switch {
+	case !expectations.ResourceVersionExpectationSatisfied(lookup.sandbox):
+		reason = fallbackReasonRVExpectation
+	case lookup.hasRoute &&
+		lookup.route.ResourceVersion != "" &&
+		expectations.IsResourceVersionReallyNewer(cacheRV, lookup.route.ResourceVersion):
+		reason = fallbackReasonCacheLagging
+	default:
+	}
+	if reason != "" {
+		klog.FromContext(ctx).V(utils.DebugLogLevel).Info("informer cache result requires APIReader fallback",
+			"sandbox", klog.KObj(lookup.sandbox), "reason", reason,
+			"routeRV", lookup.route.ResourceVersion, "cacheRV", cacheRV)
+		sandboxFallbackTotal.WithLabelValues(lookup.sandbox.Namespace, reason).Inc()
+		return true
+	}
+	return false
+}
+
+func (i *Infra) getClaimedSandboxFromAPIReader(ctx context.Context, key client.ObjectKey, sandboxID string) (*v1alpha1.Sandbox, error) {
+	fresh := &v1alpha1.Sandbox{}
+	if err := i.APIReader.Get(ctx, key, fresh); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, fmt.Errorf("%w: %s", cache.ErrSandboxNotFound, sandboxID)
+		}
+		return nil, err
+	}
+	if fresh.GetLabels()[v1alpha1.LabelSandboxIsClaimed] != v1alpha1.True {
+		return nil, fmt.Errorf("%w: %s", cache.ErrSandboxNotFound, sandboxID)
+	}
+	return fresh, nil
+}
+
+func (i *Infra) GetClaimedSandbox(ctx context.Context, opts infra.GetClaimedSandboxOptions) (infra.Sandbox, error) {
+	lookup, err := i.lookupClaimedSandbox(ctx, opts)
 	if err != nil {
 		return nil, err
 	}
-	if !managerutils.ResourceVersionExpectationSatisfied(sandbox) {
-		klog.FromContext(ctx).Info("resource version expectation not satisfied, will request APIServer directly")
-		sbx := &v1alpha1.Sandbox{}
-		err = i.APIReader.Get(ctx, client.ObjectKey{Namespace: sandbox.Namespace, Name: sandbox.Name}, sbx)
-		if err != nil {
-			return nil, err
-		}
-		sandbox = sbx
+
+	if !isSandboxStale(ctx, lookup) {
+		return AsSandbox(lookup.sandbox, i.Cache), nil
 	}
-	return AsSandbox(sandbox, i.Cache), nil
+
+	key := client.ObjectKey{Namespace: lookup.sandbox.Namespace, Name: lookup.sandbox.Name}
+	fresh, err := i.getClaimedSandboxFromAPIReader(ctx, key, opts.SandboxID)
+	if err != nil {
+		return nil, err
+	}
+	return AsSandbox(fresh, i.Cache), nil
 }
 
 func (i *Infra) reconcileSandbox(ctx context.Context, sbx *v1alpha1.Sandbox, notFound bool) (ctrl.Result, error) {
@@ -344,7 +447,7 @@ func (i *Infra) reconcileSandbox(ctx context.Context, sbx *v1alpha1.Sandbox, not
 
 	if notFound {
 		// Sandbox not found, clean up route
-		sandboxID := stateutils.GetSandboxID(sbx)
+		sandboxID := utils.GetSandboxID(sbx)
 		i.Proxy.DeleteRoute(sandboxID)
 		log.Info("sandbox route deleted during reconciliation", "sandboxID", sandboxID)
 		return ctrl.Result{}, nil
@@ -352,7 +455,7 @@ func (i *Infra) reconcileSandbox(ctx context.Context, sbx *v1alpha1.Sandbox, not
 
 	// Sandbox exists, refresh route
 	i.refreshRoute(sbx)
-	log.V(consts.DebugLogLevel).Info("sandbox route refreshed during reconciliation")
+	log.V(utils.DebugLogLevel).Info("sandbox route refreshed during reconciliation")
 	return ctrl.Result{}, nil
 }
 
@@ -406,7 +509,7 @@ func (i *Infra) reconcileRoutes(ctx context.Context) {
 		return
 	}
 	for idx := range sandboxList.Items {
-		sandboxID := stateutils.GetSandboxID(&sandboxList.Items[idx])
+		sandboxID := utils.GetSandboxID(&sandboxList.Items[idx])
 		existingSandboxIDs[sandboxID] = struct{}{}
 	}
 
@@ -417,7 +520,7 @@ func (i *Infra) reconcileRoutes(ctx context.Context) {
 		if _, exists := existingSandboxIDs[route.ID]; !exists {
 			i.Proxy.DeleteRoute(route.ID)
 			deletedCount++
-			managerutils.ResourceVersionExpectationDelete(&metav1.ObjectMeta{
+			expectations.ResourceVersionExpectationDelete(&metav1.ObjectMeta{
 				UID: route.UID,
 			})
 			log.Info("reconciler deleted orphaned route", "sandboxID", route.ID)
@@ -428,7 +531,7 @@ func (i *Infra) reconcileRoutes(ctx context.Context) {
 	addedCount := 0
 	for idx := range sandboxList.Items {
 		sbx := &sandboxList.Items[idx]
-		sandboxID := stateutils.GetSandboxID(sbx)
+		sandboxID := utils.GetSandboxID(sbx)
 		if _, hasRoute := i.Proxy.LoadRoute(sandboxID); !hasRoute {
 			route := proxyutils.DefaultGetRouteFunc(sbx)
 			i.Proxy.SetRoute(ctx, route)

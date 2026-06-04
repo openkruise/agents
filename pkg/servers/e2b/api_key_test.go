@@ -165,24 +165,13 @@ func TestCreateAPIKey(t *testing.T) {
 			request:     models.NewTeamAPIKey{Name: "test-key"},
 			expectError: &web.ApiError{Message: "User not found"},
 		},
-		{
-			name: "fail with empty name",
-			user: &models.CreatedTeamAPIKey{
-				ID:   keys.AdminKeyID,
-				Key:  InitKey,
-				Name: "admin",
-			},
-			request: models.NewTeamAPIKey{Name: ""},
-			expectError: &web.ApiError{
-				Code:    http.StatusInternalServerError,
-				Message: "Failed to create API key",
-			},
-		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			resp, apiError := controller.CreateAPIKey(NewRequest(t, nil, tt.request, nil, tt.user))
+			req := NewRequest(t, nil, tt.request, nil, tt.user)
+			ctx := context.WithValue(req.Context(), newAPIKeyRequestContextKey, &tt.request)
+			resp, apiError := controller.CreateAPIKey(req.WithContext(ctx))
 			if tt.expectError != nil {
 				require.NotNil(t, apiError)
 				assert.Equal(t, tt.expectError.Code, apiError.Code)
@@ -261,6 +250,13 @@ func TestCreateAPIKeyPermissionMiddleware(t *testing.T) {
 			request:    models.NewTeamAPIKey{Name: "admin-team-default"},
 			expectCode: http.StatusCreated,
 			expectTeam: models.AdminTeamName,
+		},
+		{
+			name:        "missing name fails",
+			user:        adminUser,
+			request:     models.NewTeamAPIKey{},
+			expectCode:  http.StatusBadRequest,
+			expectError: "name",
 		},
 		{
 			name:        "admin targeting missing namespace fails",

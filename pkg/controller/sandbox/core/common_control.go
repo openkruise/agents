@@ -32,8 +32,11 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
+	"github.com/openkruise/agents/pkg/features"
+	"github.com/openkruise/agents/pkg/identity"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
+	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 	"github.com/openkruise/agents/pkg/utils/inplaceupdate"
 	"github.com/openkruise/agents/pkg/utils/sidecarutils"
 )
@@ -46,6 +49,11 @@ const (
 	WaitingReasonPodInitializing = "PodInitializing"
 	// WaitingReasonContainerCreating indicates the container is being created (image pull, volume mount, etc.).
 	WaitingReasonContainerCreating = "ContainerCreating"
+
+	SandboxFinalizer = "agents.kruise.io/sandbox"
+
+	PodConditionContainersPaused  = "ContainersPaused"
+	PodConditionContainersResumed = "ContainersResumed"
 )
 
 type commonControl struct {
@@ -408,7 +416,7 @@ func (r *commonControl) EnsureSandboxTerminated(ctx context.Context, args Ensure
 	pod, box, _ := args.Pod, args.Box, args.NewStatus
 	var err error
 	if pod == nil {
-		_, err = utils.PatchFinalizer(ctx, r.Client, box, utils.RemoveFinalizerOpType, utils.SandboxFinalizer)
+		_, err = utils.PatchFinalizer(ctx, r.Client, box, utils.RemoveFinalizerOpType, SandboxFinalizer)
 		if err != nil {
 			klog.ErrorS(err, "update sandbox finalizer failed", "sandbox", klog.KObj(box))
 			return err
@@ -430,6 +438,19 @@ func (r *commonControl) EnsureSandboxTerminated(ctx context.Context, args Ensure
 }
 
 func (r *commonControl) createPod(ctx context.Context, box *agentsv1alpha1.Sandbox, newStatus *agentsv1alpha1.SandboxStatus) (*corev1.Pod, error) {
+
+	// Ensure all registered CA bundle Secrets exist in the sandbox namespace
+	// before creating the pod. Whether a given spec is actually copied is
+	// decided by its CABundleSpec.EnabledFor predicate (e.g. the gateway CA
+	// spec is bound at controller startup to require the traffic-proxy runtime),
+	// so a missing source Secret only blocks creation when the spec applies.
+	if shouldInjectCABundles() {
+		if err := identity.EnsureAllCACerts(ctx, r.Client, box, box.Namespace); err != nil {
+			klog.ErrorS(err, "failed to ensure CA bundle secrets", "sandbox", klog.KObj(box))
+			return nil, err
+		}
+	}
+
 	pod, err := GeneratePodFromSandbox(ctx, r.Client, box, newStatus.UpdateRevision)
 	if err != nil {
 		return nil, err
@@ -454,6 +475,16 @@ func (r *commonControl) createPod(ctx context.Context, box *agentsv1alpha1.Sandb
 	}
 	klog.InfoS("Create pod success", "sandbox", klog.KObj(box), "Body", utils.DumpJson(pod))
 	return pod, nil
+}
+
+// shouldInjectCABundles is the cluster-level kill switch for the CA bundle
+// ensure/inject pipeline. It only checks SecurityIdentityProviderGate; whether
+// a particular sandbox actually needs a given CA spec is decided exclusively
+// by that spec's EnabledFor predicate (bound via identity.BindCAEnabledFor at
+// controller startup). Keeping the runtime-level decision in a single place
+// avoids drift between the caller-side gate and the per-spec predicate.
+func shouldInjectCABundles() bool {
+	return utilfeature.DefaultFeatureGate.Enabled(features.SecurityIdentityProviderGate)
 }
 
 func (r *commonControl) handleInplaceUpdateSandbox(ctx context.Context, args EnsureFuncArgs) (bool, error) {

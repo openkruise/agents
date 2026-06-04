@@ -17,10 +17,13 @@ limitations under the License.
 package infra
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 )
 
 // TestClaimMetrics_String tests the String() method of ClaimMetrics
@@ -312,6 +315,38 @@ func TestClaimMetrics_String_LongError(t *testing.T) {
 	}
 }
 
+func TestClaimMetrics_String_IncludesSecurityToken(t *testing.T) {
+	tests := []struct {
+		name     string
+		metrics  ClaimMetrics
+		expected string
+	}{
+		{
+			name: "zero security token duration",
+			metrics: ClaimMetrics{
+				SecurityToken: 0,
+			},
+			expected: "SecurityToken: 0s",
+		},
+		{
+			name: "non-zero security token duration",
+			metrics: ClaimMetrics{
+				SecurityToken: 250 * time.Millisecond,
+			},
+			expected: "SecurityToken: 250ms",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.metrics.String()
+			if !strings.Contains(got, tt.expected) {
+				t.Fatalf("ClaimMetrics.String() missing security token duration %q, got %q", tt.expected, got)
+			}
+		})
+	}
+}
+
 func TestClaimMetrics_RecordPickSandboxFailure(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -396,4 +431,231 @@ func TestClaimMetrics_MergePickSandboxFailures(t *testing.T) {
 			t.Fatalf("failure[%d] = %#v, want %#v", i, metrics.PickSandboxFailures[i], expected[i])
 		}
 	}
+}
+
+func TestCloneMetrics_String(t *testing.T) {
+	tests := []struct {
+		name          string
+		metrics       CloneMetrics
+		wantContains  []string
+		shouldNotHave []string
+	}{
+		{
+			name: "all durations and retries",
+			metrics: CloneMetrics{
+				Retries:       2,
+				Wait:          time.Second,
+				GetTemplate:   2 * time.Second,
+				CreateSandbox: 3 * time.Second,
+				WaitReady:     4 * time.Second,
+				InitRuntime:   5 * time.Second,
+				CSIMount:      6 * time.Second,
+				Total:         21 * time.Second,
+			},
+			wantContains: []string{
+				"Retries: 2",
+				"Wait: 1s",
+				"GetTemplate: 2s",
+				"CreateSandbox: 3s",
+				"WaitReady: 4s",
+				"InitRuntime: 5s",
+				"CSIMount: 6s",
+				"Total: 21s",
+			},
+		},
+		{
+			name: "sanitizes last error",
+			metrics: CloneMetrics{
+				Retries:   1,
+				LastError: errors.New("clone failed\nresource conflict\ttry again"),
+			},
+			wantContains: []string{
+				"Retries: 1",
+				"LastError: clone failed resource conflict try again",
+			},
+			shouldNotHave: []string{
+				"\n",
+				"\t",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.metrics.String()
+			for _, want := range tt.wantContains {
+				if !strings.Contains(got, want) {
+					t.Fatalf("CloneMetrics.String() missing expected substring %q, got %q", want, got)
+				}
+			}
+			for _, unwanted := range tt.shouldNotHave {
+				if strings.Contains(got, unwanted) {
+					t.Fatalf("CloneMetrics.String() contains unwanted substring %q, got %q", unwanted, got)
+				}
+			}
+			if !strings.HasPrefix(got, "CloneMetrics{") {
+				t.Fatalf("CloneMetrics.String() should start with CloneMetrics{, got %q", got)
+			}
+			if !strings.HasSuffix(got, "}") {
+				t.Fatalf("CloneMetrics.String() should end with }, got %q", got)
+			}
+		})
+	}
+}
+
+func TestCloneMetrics_Merge(t *testing.T) {
+	tests := []struct {
+		name     string
+		initial  CloneMetrics
+		src      CloneMetrics
+		expected CloneMetrics
+	}{
+		{
+			name: "accumulates per-attempt durations",
+			initial: CloneMetrics{
+				Retries:       3,
+				Wait:          time.Second,
+				GetTemplate:   2 * time.Second,
+				CreateSandbox: 3 * time.Second,
+				WaitReady:     4 * time.Second,
+				InitRuntime:   5 * time.Second,
+				CSIMount:      6 * time.Second,
+				Total:         21 * time.Second,
+				LastError:     errors.New("outer retry error"),
+			},
+			src: CloneMetrics{
+				Retries:       9,
+				Wait:          10 * time.Millisecond,
+				GetTemplate:   20 * time.Millisecond,
+				CreateSandbox: 30 * time.Millisecond,
+				WaitReady:     40 * time.Millisecond,
+				InitRuntime:   50 * time.Millisecond,
+				CSIMount:      60 * time.Millisecond,
+				Total:         210 * time.Millisecond,
+				LastError:     errors.New("per-attempt error"),
+			},
+			expected: CloneMetrics{
+				Retries:       3,
+				Wait:          time.Second + 10*time.Millisecond,
+				GetTemplate:   2*time.Second + 20*time.Millisecond,
+				CreateSandbox: 3*time.Second + 30*time.Millisecond,
+				WaitReady:     4*time.Second + 40*time.Millisecond,
+				InitRuntime:   5*time.Second + 50*time.Millisecond,
+				CSIMount:      6*time.Second + 60*time.Millisecond,
+				Total:         21*time.Second + 210*time.Millisecond,
+				LastError:     errors.New("outer retry error"),
+			},
+		},
+		{
+			name: "keeps zero values stable",
+			initial: CloneMetrics{
+				Retries:   1,
+				LastError: errors.New("failed"),
+			},
+			src: CloneMetrics{},
+			expected: CloneMetrics{
+				Retries:   1,
+				LastError: errors.New("failed"),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.initial.Merge(tt.src)
+			if tt.initial.Retries != tt.expected.Retries {
+				t.Fatalf("Retries = %d, want %d", tt.initial.Retries, tt.expected.Retries)
+			}
+			if tt.initial.Wait != tt.expected.Wait {
+				t.Fatalf("Wait = %v, want %v", tt.initial.Wait, tt.expected.Wait)
+			}
+			if tt.initial.GetTemplate != tt.expected.GetTemplate {
+				t.Fatalf("GetTemplate = %v, want %v", tt.initial.GetTemplate, tt.expected.GetTemplate)
+			}
+			if tt.initial.CreateSandbox != tt.expected.CreateSandbox {
+				t.Fatalf("CreateSandbox = %v, want %v", tt.initial.CreateSandbox, tt.expected.CreateSandbox)
+			}
+			if tt.initial.WaitReady != tt.expected.WaitReady {
+				t.Fatalf("WaitReady = %v, want %v", tt.initial.WaitReady, tt.expected.WaitReady)
+			}
+			if tt.initial.InitRuntime != tt.expected.InitRuntime {
+				t.Fatalf("InitRuntime = %v, want %v", tt.initial.InitRuntime, tt.expected.InitRuntime)
+			}
+			if tt.initial.CSIMount != tt.expected.CSIMount {
+				t.Fatalf("CSIMount = %v, want %v", tt.initial.CSIMount, tt.expected.CSIMount)
+			}
+			if tt.initial.Total != tt.expected.Total {
+				t.Fatalf("Total = %v, want %v", tt.initial.Total, tt.expected.Total)
+			}
+			if tt.initial.LastError.Error() != tt.expected.LastError.Error() {
+				t.Fatalf("LastError = %q, want %q", tt.initial.LastError.Error(), tt.expected.LastError.Error())
+			}
+		})
+	}
+}
+
+func TestReserveFailedSandboxFor_JSON(t *testing.T) {
+	tests := []struct {
+		name       string
+		options    any
+		fieldName  string
+		expectJSON string
+	}{
+		{
+			name: "claim nil reserve duration keeps explicit null",
+			options: ClaimSandboxOptions{
+				ReserveFailedSandboxFor: nil,
+			},
+			fieldName:  "reserveFailedSandboxFor",
+			expectJSON: `"reserveFailedSandboxFor":null`,
+		},
+		{
+			name: "claim reserve forever uses sentinel duration",
+			options: ClaimSandboxOptions{
+				ReserveFailedSandboxFor: durationPtr(consts.ReserveFailedSandboxForever),
+			},
+			fieldName:  "reserveFailedSandboxFor",
+			expectJSON: `"reserveFailedSandboxFor":-1`,
+		},
+		{
+			name: "claim reserve positive duration uses nanoseconds",
+			options: ClaimSandboxOptions{
+				ReserveFailedSandboxFor: durationPtr(90 * time.Second),
+			},
+			fieldName:  "reserveFailedSandboxFor",
+			expectJSON: `"reserveFailedSandboxFor":90000000000`,
+		},
+		{
+			name: "clone reserve never uses sentinel duration",
+			options: CloneSandboxOptions{
+				ReserveFailedSandboxFor: durationPtr(consts.ReserveFailedSandboxNever),
+			},
+			fieldName:  "reserveFailedSandboxFor",
+			expectJSON: `"reserveFailedSandboxFor":0`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := json.Marshal(tt.options)
+			if err != nil {
+				t.Fatalf("json.Marshal() error = %v", err)
+			}
+			if !strings.Contains(string(got), tt.expectJSON) {
+				t.Fatalf("json output missing %s, got %s", tt.expectJSON, got)
+			}
+
+			var decoded map[string]any
+			if err := json.Unmarshal(got, &decoded); err != nil {
+				t.Fatalf("json.Unmarshal() error = %v", err)
+			}
+			if _, ok := decoded[tt.fieldName]; !ok {
+				t.Fatalf("json output missing field %q: %s", tt.fieldName, got)
+			}
+		})
+	}
+}
+
+func durationPtr(duration time.Duration) *time.Duration {
+	return &duration
 }

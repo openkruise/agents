@@ -27,6 +27,7 @@ import (
 
 	"k8s.io/klog/v2"
 
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
@@ -97,6 +98,11 @@ func (sc *Controller) convertToE2BSandbox(sbx infra.Sandbox, accessToken string)
 	for key, val := range annotations {
 		if ValidateMetadataKey(key) {
 			sandbox.Metadata[key] = val
+		}
+	}
+	if annotations[models.ExtensionKeyReturnPodIP] == agentsv1alpha1.True {
+		if ip := sbx.GetRoute().IP; ip != "" {
+			sandbox.Metadata[models.MetadataKeyPodIP] = ip
 		}
 	}
 

@@ -107,6 +107,7 @@ type SandboxReconciler struct {
 // +kubebuilder:rbac:groups=core,resources=pods/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;update;patch
 // +kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create
 
 //nolint:gocyclo // This function handles multiple reconciliation scenarios which require branching logic
 func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (crl ctrl.Result, err error) {
@@ -133,7 +134,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 		return reconcile.Result{}, client.IgnoreNotFound(err)
 	}
 	// Record sandbox lifecycle metrics on every reconcile
-	recordSandboxMetrics(box)
+	recordSandboxMetrics(box, pod)
 
 	if box.Spec.Template == nil && box.Spec.TemplateRef == nil {
 		if !box.DeletionTimestamp.IsZero() {
@@ -290,13 +291,13 @@ func pauseTimeReached(pauseTime *metav1.Time, now metav1.Time) bool {
 }
 
 func (r *SandboxReconciler) addSandboxFinalizerAndHash(ctx context.Context, box *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) {
-	if !box.DeletionTimestamp.IsZero() || controllerutil.ContainsFinalizer(box, utils.SandboxFinalizer) {
+	if !box.DeletionTimestamp.IsZero() || controllerutil.ContainsFinalizer(box, core.SandboxFinalizer) {
 		return box, nil
 	}
 
 	originObj := box.DeepCopy()
 	patch := client.MergeFrom(box)
-	controllerutil.AddFinalizer(originObj, utils.SandboxFinalizer)
+	controllerutil.AddFinalizer(originObj, core.SandboxFinalizer)
 	if originObj.Annotations == nil {
 		originObj.Annotations = make(map[string]string)
 	}
@@ -311,7 +312,7 @@ func (r *SandboxReconciler) addSandboxFinalizerAndHash(ctx context.Context, box 
 }
 
 func (r *SandboxReconciler) updateSandboxStatus(ctx context.Context, newStatus agentsv1alpha1.SandboxStatus, box *agentsv1alpha1.Sandbox) error {
-	if reflect.DeepEqual(box.Status, newStatus) || newStatus.Phase == agentsv1alpha1.SandboxPending {
+	if reflect.DeepEqual(box.Status, newStatus) {
 		return nil
 	}
 
@@ -326,8 +327,8 @@ func (r *SandboxReconciler) updateSandboxStatus(ctx context.Context, newStatus a
 	core.ResourceVersionExpectations.Expect(rcvObject)
 	klog.InfoS("update sandbox status success", "sandbox", klog.KObj(box), "status", utils.DumpJson(newStatus))
 	box.Status = newStatus
-	// Update metrics after status change
-	recordSandboxMetrics(box)
+	// Update metrics after status change (pod=nil: container metrics already recorded in Reconcile)
+	recordSandboxMetrics(box, nil)
 	return nil
 }
 

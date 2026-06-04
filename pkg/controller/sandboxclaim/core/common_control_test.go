@@ -820,7 +820,6 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 		Build()
 
 	fakeRecorder := record.NewFakeRecorder(10)
-	control := NewCommonControl(fakeClient, fakeRecorder, nil).(*commonControl)
 
 	ctx := context.Background()
 	shutdownTime := metav1.Now()
@@ -830,6 +829,7 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 		name        string
 		claim       *agentsv1alpha1.SandboxClaim
 		sandboxSet  *agentsv1alpha1.SandboxSet
+		initObjs    []client.Object
 		expectError bool
 		validate    func(t *testing.T, opts infra.ClaimSandboxOptions)
 	}{
@@ -1086,6 +1086,55 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 				},
 			},
 			expectError: true,
+		},
+		{
+			name: "reserve failed sandbox converts to forever duration",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim-reserve-failed",
+					Namespace: "default",
+					UID:       "test-uid-reserve",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName:         "test-template",
+					ReserveFailedSandbox: true,
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template",
+					Namespace: "default",
+				},
+			},
+			expectError: false,
+			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+				require.NotNil(t, opts.ReserveFailedSandboxFor)
+				assert.Equal(t, time.Duration(-1), *opts.ReserveFailedSandboxFor)
+			},
+		},
+		{
+			name: "reserve failed sandbox omitted defaults to backend default",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim-reserve-failed-default",
+					Namespace: "default",
+					UID:       "test-uid-reserve-default",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "test-template",
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template",
+					Namespace: "default",
+				},
+			},
+			expectError: false,
+			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+				require.NotNil(t, opts.ReserveFailedSandboxFor)
+				assert.Equal(t, sandboxcr.DefaultReserveFailedSandboxFor, *opts.ReserveFailedSandboxFor)
+			},
 		},
 		{
 			name: "claim with all fields",
@@ -1440,11 +1489,140 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 				assert.NotEmpty(t, opts.InitRuntime.AccessToken, "InitRuntime.AccessToken should not be empty")
 			},
 		},
+		{
+			name: "SkipInitRuntime=false with templateRef referencing template with runtime initContainer should set InitRuntime",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim-tempref-has-runtime",
+					Namespace: "default",
+					UID:       "uid-tempref-has-runtime",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "test-template-ref-pool",
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template-ref-pool",
+					Namespace: "default",
+				},
+				Spec: agentsv1alpha1.SandboxSetSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						TemplateRef: &agentsv1alpha1.SandboxTemplateRef{
+							Name: "my-template-with-runtime",
+						},
+					},
+				},
+			},
+			initObjs: []client.Object{
+				&agentsv1alpha1.SandboxTemplate{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "my-template-with-runtime",
+						Namespace: "default",
+					},
+					Spec: agentsv1alpha1.SandboxTemplateSpec{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								InitContainers: []corev1.Container{
+									{Name: "runtime", Image: "agent-runtime-image"},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectError: false,
+			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+				require.NotNil(t, opts.InitRuntime, "InitRuntime should not be nil when referenced SandboxTemplate has runtime initContainer")
+				assert.NotEmpty(t, opts.InitRuntime.AccessToken)
+			},
+		},
+		{
+			name: "SkipInitRuntime=false with templateRef referencing template without runtime initContainer should skip InitRuntime",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim-tempref-no-runtime",
+					Namespace: "default",
+					UID:       "uid-tempref-no-runtime",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "test-template-ref-pool",
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template-ref-pool",
+					Namespace: "default",
+				},
+				Spec: agentsv1alpha1.SandboxSetSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						TemplateRef: &agentsv1alpha1.SandboxTemplateRef{
+							Name: "my-template-without-runtime",
+						},
+					},
+				},
+			},
+			initObjs: []client.Object{
+				&agentsv1alpha1.SandboxTemplate{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "my-template-without-runtime",
+						Namespace: "default",
+					},
+					Spec: agentsv1alpha1.SandboxTemplateSpec{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								InitContainers: []corev1.Container{
+									{Name: "other-init", Image: "other-image"},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectError: false,
+			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+				assert.Nil(t, opts.InitRuntime, "InitRuntime should be nil when referenced SandboxTemplate does not have runtime initContainer")
+			},
+		},
+		{
+			name: "SkipInitRuntime=false with templateRef referencing missing template should return error",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim-tempref-missing",
+					Namespace: "default",
+					UID:       "uid-tempref-missing",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "test-template-ref-pool",
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template-ref-pool",
+					Namespace: "default",
+				},
+				Spec: agentsv1alpha1.SandboxSetSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						TemplateRef: &agentsv1alpha1.SandboxTemplateRef{
+							Name: "does-not-exist",
+						},
+					},
+				},
+			},
+			expectError: true,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			opts, err := control.buildClaimOptions(ctx, tt.claim, tt.sandboxSet)
+			var testClient client.Client
+			if len(tt.initObjs) > 0 {
+				testClient = fake.NewClientBuilder().WithScheme(scheme).WithObjects(tt.initObjs...).Build()
+			} else {
+				testClient = fakeClient
+			}
+			testControl := NewCommonControl(testClient, fakeRecorder, nil).(*commonControl)
+			opts, err := testControl.buildClaimOptions(ctx, tt.claim, tt.sandboxSet)
 			if (err != nil) != tt.expectError {
 				t.Errorf("buildClaimOptions() error = %v, expectError %v", err, tt.expectError)
 				return

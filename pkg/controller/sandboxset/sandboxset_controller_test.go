@@ -39,9 +39,9 @@ import (
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
+	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/fieldindex"
-	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
-	"github.com/openkruise/agents/pkg/utils/sandboxutils"
+	utestutils "github.com/openkruise/agents/pkg/utils/testutils"
 )
 
 var testScheme *runtime.Scheme
@@ -138,7 +138,7 @@ func CreateSandboxes(t *testing.T, tt createSandboxRequest, sbs *v1alpha1.Sandbo
 		sbx.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(sbs, v1alpha1.SandboxSetControllerKind)}
 		sbx.Status.Phase = creatingPhases[int(i)%len(creatingPhases)]
 		sbx.Labels["type"] = "creating"
-		state, reason := sandboxutils.GetSandboxState(sbx)
+		state, reason := utils.GetSandboxState(sbx)
 		assert.Equal(t, v1alpha1.SandboxStateCreating, state, reason)
 		toCreate = append(toCreate, sbx)
 		idx++
@@ -155,7 +155,7 @@ func CreateSandboxes(t *testing.T, tt createSandboxRequest, sbs *v1alpha1.Sandbo
 		}
 		sbx.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(sbs, v1alpha1.SandboxSetControllerKind)}
 		sbx.Labels["type"] = "available"
-		state, reason := sandboxutils.GetSandboxState(sbx)
+		state, reason := utils.GetSandboxState(sbx)
 		assert.Equal(t, v1alpha1.SandboxStateAvailable, state, reason)
 		toCreate = append(toCreate, sbx)
 		idx++
@@ -170,7 +170,7 @@ func CreateSandboxes(t *testing.T, tt createSandboxRequest, sbs *v1alpha1.Sandbo
 				Status: metav1.ConditionTrue,
 			},
 		}
-		state, reason := sandboxutils.GetSandboxState(sbx)
+		state, reason := utils.GetSandboxState(sbx)
 		assert.Equal(t, v1alpha1.SandboxStateRunning, state, reason)
 		sbx.Labels["type"] = "running"
 		toCreate = append(toCreate, sbx)
@@ -180,7 +180,7 @@ func CreateSandboxes(t *testing.T, tt createSandboxRequest, sbs *v1alpha1.Sandbo
 		sbx := getBaseSandbox(idx, "paused-", sbs.Status.UpdateRevision)
 		sbx.Status.Phase = v1alpha1.SandboxPaused
 		sbx.Labels["type"] = "paused"
-		state, reason := sandboxutils.GetSandboxState(sbx)
+		state, reason := utils.GetSandboxState(sbx)
 		assert.Equal(t, v1alpha1.SandboxStatePaused, state, reason)
 		toCreate = append(toCreate, sbx)
 		idx++
@@ -191,7 +191,7 @@ func CreateSandboxes(t *testing.T, tt createSandboxRequest, sbs *v1alpha1.Sandbo
 		_ = ctrl.SetControllerReference(sbs, sbx, testScheme)
 		sbx.Status.Phase = failedPhases[int(idx)%len(failedPhases)]
 		sbx.Labels["type"] = "failed"
-		state, reason := sandboxutils.GetSandboxState(sbx)
+		state, reason := utils.GetSandboxState(sbx)
 		assert.Equal(t, v1alpha1.SandboxStateDead, state, reason)
 		toCreate = append(toCreate, sbx)
 		idx++
@@ -210,7 +210,7 @@ func CreateSandboxes(t *testing.T, tt createSandboxRequest, sbs *v1alpha1.Sandbo
 		_ = ctrl.SetControllerReference(sbs, sbx, testScheme)
 		sbx.Status.Phase = v1alpha1.SandboxTerminating
 		sbx.Labels["type"] = "terminating"
-		state, reason := sandboxutils.GetSandboxState(sbx)
+		state, reason := utils.GetSandboxState(sbx)
 		assert.Equal(t, v1alpha1.SandboxStateDead, state, reason)
 		toCreate = append(toCreate, sbx)
 		idx++
@@ -225,7 +225,7 @@ func CreateSandboxes(t *testing.T, tt createSandboxRequest, sbs *v1alpha1.Sandbo
 			assert.NoError(t, k8sClient.Delete(context.TODO(), sbx))
 			deletedSbx := &v1alpha1.Sandbox{}
 			assert.NoError(t, k8sClient.Get(context.TODO(), types.NamespacedName{Name: sbx.Name, Namespace: sbx.Namespace}, deletedSbx))
-			state, reason := sandboxutils.GetSandboxState(deletedSbx)
+			state, reason := utils.GetSandboxState(deletedSbx)
 			assert.Equal(t, v1alpha1.SandboxStateDead, state, reason)
 		}
 	}
@@ -255,7 +255,7 @@ func CheckEvent(t *testing.T, eventRecorder *record.FakeRecorder, tp, evt string
 }
 
 func TestReconcile_DeleteDead(t *testing.T) {
-	utils.InitLogOutput()
+	utestutils.InitLogOutput()
 	checkFunc := func(expectNonDeletedCnt int) func(t *testing.T, client client.Client, sbs *v1alpha1.SandboxSet) {
 		return func(t *testing.T, client client.Client, sbs *v1alpha1.SandboxSet) {
 			var sandboxList v1alpha1.SandboxList
@@ -332,7 +332,7 @@ func TestReconcile_DeleteDead(t *testing.T) {
 }
 
 func TestReconcile_BasicScale(t *testing.T) {
-	utils.InitLogOutput()
+	utestutils.InitLogOutput()
 	checkFunc := func(totCnt, newCnt int) func(t *testing.T, client client.Client, sbs *v1alpha1.SandboxSet) {
 		return func(t *testing.T, client client.Client, sbs *v1alpha1.SandboxSet) {
 			var sandboxList v1alpha1.SandboxList
@@ -607,7 +607,7 @@ func TestReconcile_BasicScale(t *testing.T) {
 }
 
 func TestReconcile_ScaleDown(t *testing.T) {
-	utils.InitLogOutput()
+	utestutils.InitLogOutput()
 	tests := []struct {
 		name         string
 		replicas     int32
@@ -1053,7 +1053,7 @@ func TestCalculateScaleDelta(t *testing.T) {
 // to the new Sandbox, or surface the Get error as a Warning event when the
 // template is missing.
 func TestReconciler_createSandbox(t *testing.T) {
-	utils.InitLogOutput()
+	utestutils.InitLogOutput()
 
 	mkSBS := func(name string, ref *v1alpha1.SandboxTemplateRef, inline *corev1.PodTemplateSpec) *v1alpha1.SandboxSet {
 		return &v1alpha1.SandboxSet{

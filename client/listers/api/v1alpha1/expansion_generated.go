@@ -64,3 +64,11 @@ type SandboxUpdateOpsListerExpansion interface{}
 // SandboxUpdateOpsNamespaceListerExpansion allows custom methods to be added to
 // SandboxUpdateOpsNamespaceLister.
 type SandboxUpdateOpsNamespaceListerExpansion interface{}
+
+// SecurityProfileListerExpansion allows custom methods to be added to
+// SecurityProfileLister.
+type SecurityProfileListerExpansion interface{}
+
+// SecurityProfileNamespaceListerExpansion allows custom methods to be added to
+// SecurityProfileNamespaceLister.
+type SecurityProfileNamespaceListerExpansion interface{}

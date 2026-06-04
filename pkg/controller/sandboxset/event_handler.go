@@ -33,7 +33,6 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
-	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
 )
 
 type SandboxEventHandler struct{}
@@ -61,8 +60,8 @@ func (e *SandboxEventHandler) Update(ctx context.Context, evt event.TypedUpdateE
 	if !ok {
 		return
 	}
-	oldState, _ := stateutils.GetSandboxState(oldSbx)
-	newState, _ := stateutils.GetSandboxState(newSbx)
+	oldState, _ := utils.GetSandboxState(oldSbx)
+	newState, _ := utils.GetSandboxState(newSbx)
 	if oldState != newState {
 		w.Add(req)
 	}

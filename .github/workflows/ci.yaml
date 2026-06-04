@@ -31,7 +31,7 @@ jobs:
       - name: Checkout Actions Repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Check spelling with custom config file
-        uses: crate-ci/typos@aca895bf05aec0cb7dffa6f94495e923224d9f17 # v1.46.2
+        uses: crate-ci/typos@f8a58b6b53f2279f71eb605f03a4ae4d10608f45 # v1.47.0
         with:
           config: ./typos.toml
 
@@ -58,7 +58,7 @@ jobs:
         run: |
           make generate
       - name: Lint golang code
-        uses: golangci/golangci-lint-action@1e7e51e771db61008b38414a730f564565cf7c20 # v9.2.0
+        uses: golangci/golangci-lint-action@82606bf257cbaff209d206a39f5134f0cfbfd2ee # v9.2.1
         with:
           version: ${{ env.GOLANGCI_VERSION }}
           args: --verbose
@@ -73,7 +73,7 @@ jobs:
           output: 'trivy-results.sarif'
           severity: 'CRITICAL'
       - name: Upload Trivy scan results to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@9e0d7b8d25671d64c341c19c0152d693099fb5ba # v4.35.5
+        uses: github/codeql-action/upload-sarif@7211b7c8077ea37d8641b6271f6a365a22a5fbfa # v4.36.0
         with:
           sarif_file: 'trivy-results.sarif'
 

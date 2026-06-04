@@ -26,6 +26,7 @@ import (
 	"golang.org/x/time/rate"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -36,12 +37,12 @@ import (
 	"github.com/openkruise/agents/pkg/controller/sandboxset"
 	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/csiutils"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
-	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
 	"github.com/openkruise/agents/pkg/utils/timeout"
 )
 
@@ -256,6 +257,11 @@ func (c *commonControl) claimSandboxes(ctx context.Context, claim *agentsv1alpha
 // buildClaimOptions constructs ClaimSandboxOptions for TryClaimSandbox
 func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1alpha1.SandboxClaim, sandboxSet *agentsv1alpha1.SandboxSet) (infra.ClaimSandboxOptions, error) {
 	logger := logf.FromContext(ctx).WithValues("SandboxClaim", klog.KObj(claim))
+	var reserveFailedSandboxFor *time.Duration
+	if claim.Spec.ReserveFailedSandbox {
+		reserveFailedSandboxFor = ptr.To(consts.ReserveFailedSandboxForever)
+	}
+
 	opts := infra.ClaimSandboxOptions{
 		User:     string(claim.UID), // Use UID to ensure uniqueness across claim recreations
 		Template: sandboxSet.Name,
@@ -302,8 +308,8 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 				})
 			}
 		},
-		ReserveFailedSandbox: claim.Spec.ReserveFailedSandbox,
-		CreateOnNoStock:      claim.Spec.CreateOnNoStock,
+		ReserveFailedSandboxFor: reserveFailedSandboxFor,
+		CreateOnNoStock:         claim.Spec.CreateOnNoStock,
 	}
 
 	if claim.Spec.InplaceUpdate != nil {
@@ -332,12 +338,23 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 			}
 		}
 		// Check condition B: initContainer named "runtime"
-		// TODO support sandboxTemplateRef
-		if !hasAgentRuntime && sandboxSet.Spec.Template != nil {
-			for _, c := range sandboxSet.Spec.Template.Spec.InitContainers {
-				if c.Name == common.RuntimeInitContainerName {
-					hasAgentRuntime = true
-					break
+		if !hasAgentRuntime {
+			podTemplateSpec, err := utils.GetTemplateSpec(ctx, c.Client, sandboxSet.Namespace, &sandboxSet.Spec.EmbeddedSandboxTemplate)
+			if err != nil {
+				if sandboxSet.Spec.TemplateRef != nil {
+					logger.Error(err, "failed to get sandbox template for checking agent runtime", "template", sandboxSet.Spec.TemplateRef.Name)
+				} else {
+					logger.Error(err, "failed to get sandbox template for checking agent runtime")
+				}
+				return opts, err
+			}
+
+			if podTemplateSpec != nil {
+				for _, container := range podTemplateSpec.Spec.InitContainers {
+					if container.Name == common.RuntimeInitContainerName {
+						hasAgentRuntime = true
+						break
+					}
 				}
 			}
 		}
@@ -384,7 +401,6 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 		opts.RuntimeConfig = claim.Spec.Runtimes
 	}
 
-	// Validate and initialize
 	return sandboxcr.ValidateAndInitClaimOptions(opts)
 }
 
@@ -400,7 +416,7 @@ func (c *commonControl) countClaimedSandboxes(ctx context.Context, claim *agents
 	}
 	var cnt int32
 	for _, sbx := range sandboxes {
-		state, reason := stateutils.GetSandboxState(sbx)
+		state, reason := utils.GetSandboxState(sbx)
 		if state == agentsv1alpha1.SandboxStateDead {
 			log.Info("skip counting dead sandbox", "reason", reason)
 			continue

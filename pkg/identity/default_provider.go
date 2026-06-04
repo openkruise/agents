@@ -37,11 +37,13 @@ var provider IdentityProvider = NewDefaultIdentityProvider()
 // RegisterProvider registers a custom IdentityProvider implementation, overriding
 // the community default. This should be called during init() or application startup.
 //
-// The registered provider is automatically wrapped with fallback behavior:
-// if IssueToken fails, it degrades to UUID-based token generation to ensure
-// sandbox claim is never blocked by an external identity provider outage.
+// The registered provider is used as-is; no automatic fallback wrapping is applied.
+// If the provider's IssueToken fails, the error is propagated to callers so they
+// can decide how to handle the failure (e.g., return a retriable error). Callers
+// must never silently degrade to a meaningless UUID token, since such a token
+// carries no identity and cannot be honored as a credential by the runtime.
 func RegisterProvider(p IdentityProvider) {
-	provider = NewFallbackIdentityProvider(p)
+	provider = p
 }
 
 // IssueToken delegates to the registered provider to generate an access token.

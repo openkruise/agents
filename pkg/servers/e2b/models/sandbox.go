@@ -18,6 +18,8 @@ limitations under the License.
 package models
 
 import (
+	"time"
+
 	corev1 "k8s.io/api/core/v1"
 
 	"github.com/openkruise/agents/api/v1alpha1"
@@ -59,15 +61,16 @@ type NewSandboxRequest struct {
 }
 
 type NewSandboxRequestExtension struct {
-	InplaceUpdate        InplaceUpdateExtension
-	CSIMount             CSIMountExtension
-	SkipInitRuntime      bool
-	ReserveFailedSandbox bool
-	CreateOnNoStock      bool
-	WaitReadySeconds     int
-	TimeoutSeconds       int
-	NeverTimeout         bool
-	Labels               map[string]string
+	InplaceUpdate           InplaceUpdateExtension
+	CSIMount                CSIMountExtension
+	SkipInitRuntime         bool
+	ReserveFailedSandboxFor *time.Duration
+	CreateOnNoStock         bool
+	WaitReadySeconds        int
+	TimeoutSeconds          int
+	NeverTimeout            bool
+	ReturnPodIP             bool
+	Labels                  map[string]string
 }
 
 type InplaceUpdateExtension struct {

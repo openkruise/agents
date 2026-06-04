@@ -37,6 +37,22 @@ def _parse_rfc3339_utc(s: str) -> datetime:
     return datetime.fromisoformat(s).astimezone(timezone.utc)
 
 
+RETURN_POD_IP_METADATA_KEY = "e2b.agents.kruise.io/return-sandbox-ip"
+POD_IP_METADATA_KEY = "e2b.agents.kruise.io/sandbox-ip"
+
+
+def assert_pod_ip_metadata(info, expected_pod_ip: str | None = None) -> str:
+    metadata = info.metadata or {}
+    assert POD_IP_METADATA_KEY in metadata
+    pod_ip = metadata[POD_IP_METADATA_KEY]
+    assert isinstance(pod_ip, str)
+    if expected_pod_ip is None:
+        assert pod_ip != ""
+    else:
+        assert pod_ip == expected_pod_ip
+    return pod_ip
+
+
 # Link: https://e2b.dev/docs/sandbox
 def test_lifecycle(sandbox_context):
     sandbox: Sandbox = sandbox_context.add(Sandbox.create(
@@ -55,6 +71,50 @@ def test_lifecycle(sandbox_context):
     assert info.template_id == "code-interpreter"
     assert info.state == SandboxState.RUNNING
     assert info.metadata["userId"] == "123"
+    assert POD_IP_METADATA_KEY not in info.metadata
+
+
+def test_sandbox_with_pod_ip(sandbox_context):
+    test_case = f"test_sandbox_with_pod_ip-{uuid.uuid4()}"
+    sandbox: Sandbox = sandbox_context.add(Sandbox.create(
+        template="code-interpreter",
+        timeout=6000,
+        metadata={
+            "test_case": test_case,
+            RETURN_POD_IP_METADATA_KEY: "true",
+        },
+        headers={
+            "x-request-id": sandbox_context.request_id
+        }
+    ))
+    print(f"sandbox-id: {sandbox.sandbox_id}")
+
+    info = sandbox.get_info()
+    pod_ip = assert_pod_ip_metadata(info)
+    assert RETURN_POD_IP_METADATA_KEY not in info.metadata
+
+    listed = list_sandbox(
+        query=SandboxQuery(
+            metadata={
+                "test_case": test_case,
+            }
+        ),
+    )
+    matching = [item for item in listed if item.sandbox_id == sandbox.sandbox_id]
+    assert len(matching) == 1
+    assert_pod_ip_metadata(matching[0], pod_ip)
+
+    connected = connect_sandbox(sandbox, timeout=6000)
+    assert connected is not None
+    connected_info = connected.get_info()
+    assert_pod_ip_metadata(connected_info, pod_ip)
+
+    sandbox.beta_pause()
+    resumed = connect_sandbox(sandbox, timeout=6000)
+    assert resumed is not None
+    resumed_info = resumed.get_info()
+    assert resumed_info.state == SandboxState.RUNNING
+    assert_pod_ip_metadata(resumed_info)
 
 
 def test_no_stock(sandbox_context):
@@ -609,7 +669,7 @@ def test_concurrent_pause_resume_on_running_sandbox(sandbox_context):
 
     def do_resume():
         try:
-            connect_sandbox(sbx)
+            sbx.connect()
         except Exception as e:
             if "409" in str(e) or "conflict" in str(e).lower():
                 print(f"Concurrent resume got expected conflict: {e}")

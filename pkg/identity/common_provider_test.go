@@ -18,7 +18,6 @@ package identity
 
 import (
 	"context"
-	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -69,65 +68,4 @@ func TestDefaultTokenProvider_PropagateSecurityToken(t *testing.T) {
 	}
 	err := provider.PropagateSecurityToken(context.Background(), sbx, &TokenResponse{AccessToken: "tok"})
 	assert.NoError(t, err, "PropagateSecurityToken should be a no-op")
-}
-
-// ---------------------------------------------------------------------------
-// fallbackIdentityProvider
-// ---------------------------------------------------------------------------
-
-// mockIdentityProvider is a simple mock for IdentityProvider used in fallback tests.
-type mockIdentityProvider struct {
-	issueResp    *TokenResponse
-	issueErr     error
-	propagateErr error
-}
-
-func (m *mockIdentityProvider) IssueToken(_ context.Context, _ TokenRequest) (*TokenResponse, error) {
-	return m.issueResp, m.issueErr
-}
-
-func (m *mockIdentityProvider) PropagateSecurityToken(_ context.Context, _ *agentsv1alpha1.Sandbox, _ *TokenResponse) error {
-	return m.propagateErr
-}
-
-func TestNewFallbackIdentityProvider(t *testing.T) {
-	primary := &mockIdentityProvider{}
-	p := NewFallbackIdentityProvider(primary)
-	require.NotNil(t, p)
-	fp, ok := p.(*fallbackIdentityProvider)
-	require.True(t, ok)
-	assert.Equal(t, primary, fp.primary)
-	assert.NotNil(t, fp.fallback, "fallback should be the default provider")
-}
-
-func TestFallbackIdentityProvider_IssueToken_PrimarySuccess(t *testing.T) {
-	expected := &TokenResponse{RequestID: "req-1", AccessToken: "primary-token"}
-	primary := &mockIdentityProvider{issueResp: expected}
-	p := NewFallbackIdentityProvider(primary)
-
-	resp, err := p.IssueToken(context.Background(), TokenRequest{})
-	require.NoError(t, err)
-	assert.Equal(t, expected, resp, "should return primary provider's response")
-}
-
-func TestFallbackIdentityProvider_IssueToken_PrimaryError_FallbackToDefault(t *testing.T) {
-	primary := &mockIdentityProvider{issueErr: fmt.Errorf("primary down")}
-	p := NewFallbackIdentityProvider(primary)
-
-	resp, err := p.IssueToken(context.Background(), TokenRequest{})
-	require.NoError(t, err, "fallback should not return error")
-	require.NotNil(t, resp)
-	assert.NotEmpty(t, resp.AccessToken, "fallback should produce a UUID token")
-}
-
-func TestFallbackIdentityProvider_PropagateSecurityToken_DelegatesToPrimary(t *testing.T) {
-	primary := &mockIdentityProvider{propagateErr: fmt.Errorf("propagation failed")}
-	p := NewFallbackIdentityProvider(primary)
-
-	sbx := &agentsv1alpha1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
-	}
-	err := p.PropagateSecurityToken(context.Background(), sbx, &TokenResponse{AccessToken: "tok"})
-	assert.Error(t, err, "PropagateSecurityToken should return primary's error directly")
-	assert.Contains(t, err.Error(), "propagation failed")
 }

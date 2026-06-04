@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/openkruise/agents/pkg/cache"
@@ -33,6 +34,27 @@ type SandboxResource struct {
 	CPUMilli   int64
 	MemoryMB   int64
 	DiskSizeMB int64
+}
+
+// CalculateResourceFromContainers sums resource requests from a list of containers
+// and returns a SandboxResource. Moved from pkg/utils/sandbox-manager to eliminate
+// the utils → business-layer dependency.
+func CalculateResourceFromContainers(containers []corev1.Container) SandboxResource {
+	resource := SandboxResource{}
+	for _, container := range containers {
+		if requests := container.Resources.Requests; requests != nil {
+			if cpu, ok := requests[corev1.ResourceCPU]; ok {
+				resource.CPUMilli += cpu.MilliValue()
+			}
+			if memory, ok := requests[corev1.ResourceMemory]; ok {
+				resource.MemoryMB += memory.Value() / (1024 * 1024)
+			}
+			if disk, ok := requests[corev1.ResourceEphemeralStorage]; ok {
+				resource.DiskSizeMB += disk.Value() / (1024 * 1024)
+			}
+		}
+	}
+	return resource
 }
 
 type TimeoutUpdateResult struct {

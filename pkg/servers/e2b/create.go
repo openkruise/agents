@@ -27,17 +27,34 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/klog/v2"
 
-	"github.com/openkruise/agents/pkg/features"
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/csiutils"
-	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
-	utilruntime "github.com/openkruise/agents/pkg/utils/runtime"
 	"github.com/openkruise/agents/pkg/utils/timeout"
 )
+
+// noServerTimeout is used when the server should not impose its own deadline on
+// the claim/clone/wait-ready phases of CreateSandbox. The operation is then
+// bounded only by the client request context (cancellation). It is a far-future
+// duration rather than a true infinity so that existing timeout handling
+// (context deadlines, retry step counts, wait-ready polling) keeps working
+// unchanged. ~100 years is indistinguishable from unlimited for any real
+// request and stays well within time.Duration's int64 range (max ~292 years).
+const noServerTimeout = 100 * 365 * 24 * time.Hour
+
+// resolveServerTimeout maps an extension-provided seconds value to a server-side
+// timeout. A positive value yields a finite timeout; an absent (zero) or
+// non-positive value yields noServerTimeout.
+func resolveServerTimeout(seconds int) time.Duration {
+	if seconds > 0 {
+		return time.Duration(seconds) * time.Second
+	}
+	return noServerTimeout
+}
 
 // CreateSandbox allocates a Pod as a new sandbox
 func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sandbox], *web.ApiError) {
@@ -86,14 +103,14 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 		Namespace:    sc.getNamespaceOfUser(user),
 		Template:     request.TemplateID,
 		User:         user.ID.String(),
-		ClaimTimeout: time.Duration(request.Extensions.TimeoutSeconds) * time.Second,
+		ClaimTimeout: resolveServerTimeout(request.Extensions.TimeoutSeconds),
 		Modifier: func(sbx infra.Sandbox) {
 			sc.basicSandboxCreateModifier(ctx, sbx, request)
 			// record the basic csi mount persistent volume config to sandbox
 			sc.csiMountOptionsConfigRecord(ctx, sbx, request)
 		},
-		ReserveFailedSandbox: request.Extensions.ReserveFailedSandbox,
-		CreateOnNoStock:      request.Extensions.CreateOnNoStock,
+		ReserveFailedSandboxFor: request.Extensions.ReserveFailedSandboxFor,
+		CreateOnNoStock:         request.Extensions.CreateOnNoStock,
 	}
 
 	if !request.Extensions.SkipInitRuntime {
@@ -108,12 +125,6 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 			Image: extension.Image,
 		}
 		if extension.Resources != nil && (len(extension.Resources.Requests) > 0 || len(extension.Resources.Limits) > 0) {
-			if !utilfeature.DefaultFeatureGate.Enabled(features.SandboxInPlaceResourceResizeGate) {
-				return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
-					Code:    http.StatusBadRequest,
-					Message: fmt.Sprintf("in-place resource resize is disabled by feature gate %s", features.SandboxInPlaceResourceResizeGate),
-				}
-			}
 			opts.InplaceUpdate.Resources = &config.InplaceUpdateResourcesOptions{
 				Requests: extension.Resources.Requests,
 				Limits:   extension.Resources.Limits,
@@ -121,9 +132,7 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 		}
 	}
 
-	if request.Extensions.WaitReadySeconds > 0 {
-		opts.WaitReadyTimeout = time.Duration(request.Extensions.WaitReadySeconds) * time.Second
-	}
+	opts.WaitReadyTimeout = resolveServerTimeout(request.Extensions.WaitReadySeconds)
 
 	if len(request.Extensions.CSIMount.MountConfigs) != 0 {
 		csiMountOptions := make([]config.MountConfig, 0, len(request.Extensions.CSIMount.MountConfigs))
@@ -176,14 +185,13 @@ func (sc *Controller) createSandboxWithClone(ctx context.Context, request models
 		Namespace:    sc.getNamespaceOfUser(user),
 		User:         user.ID.String(),
 		CheckPointID: request.TemplateID,
-		CloneTimeout: time.Duration(request.Extensions.TimeoutSeconds) * time.Second,
+		CloneTimeout: resolveServerTimeout(request.Extensions.TimeoutSeconds),
 		Modifier: func(sbx infra.Sandbox) {
 			sc.basicSandboxCreateModifier(ctx, sbx, request)
 		},
+		ReserveFailedSandboxFor: request.Extensions.ReserveFailedSandboxFor,
 	}
-	if request.Extensions.WaitReadySeconds > 0 {
-		opts.WaitReadyTimeout = time.Duration(request.Extensions.WaitReadySeconds) * time.Second
-	}
+	opts.WaitReadyTimeout = resolveServerTimeout(request.Extensions.WaitReadySeconds)
 
 	if len(request.Extensions.CSIMount.MountConfigs) != 0 {
 		csiMountOptions := make([]config.MountConfig, 0, len(request.Extensions.CSIMount.MountConfigs))
@@ -217,7 +225,7 @@ func (sc *Controller) createSandboxWithClone(ctx context.Context, request models
 		"resourceVersion", sbx.GetResourceVersion(), "totalCost", time.Since(start))
 	return web.ApiResponse[*models.Sandbox]{
 		Code: http.StatusCreated,
-		Body: sc.convertToE2BSandbox(sbx, utilruntime.GetAccessToken(sbx)),
+		Body: sc.convertToE2BSandbox(sbx, utils.GetAccessToken(sbx)),
 	}, nil
 }
 
@@ -301,6 +309,9 @@ func (sc *Controller) basicSandboxCreateModifier(ctx context.Context, sbx infra.
 	}
 	for k, v := range request.Metadata {
 		annotations[k] = v
+	}
+	if request.Extensions.ReturnPodIP {
+		annotations[models.ExtensionKeyReturnPodIP] = agentsv1alpha1.True
 	}
 	sbx.SetAnnotations(annotations)
 

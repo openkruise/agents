@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/time/rate"
@@ -42,6 +43,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/klog/v2"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -56,11 +58,10 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	pkgutils "github.com/openkruise/agents/pkg/utils"
+	"github.com/openkruise/agents/pkg/utils/expectations"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 	"github.com/openkruise/agents/pkg/utils/runtime"
-	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
-	"github.com/openkruise/agents/pkg/utils/sandbox-manager/expectationutils"
-	"github.com/openkruise/agents/pkg/utils/sandboxutils"
+	utestutils "github.com/openkruise/agents/pkg/utils/testutils"
 	testutils "github.com/openkruise/agents/test/utils"
 )
 
@@ -91,9 +92,69 @@ func GetMetricsFromSandbox(t *testing.T, sbx infra.Sandbox) infra.ClaimMetrics {
 	return metrics
 }
 
+func TestValidateAndInitClaimOptions_ReserveFailedSandboxFor(t *testing.T) {
+	tests := []struct {
+		name        string
+		opts        infra.ClaimSandboxOptions
+		expectFor   time.Duration
+		expectInput bool // expects the returned pointer to be the same instance as input
+	}{
+		{
+			name: "unset defaults to DefaultReserveFailedSandboxFor",
+			opts: infra.ClaimSandboxOptions{
+				User:     "test-user",
+				Template: "test-template",
+			},
+			expectFor: DefaultReserveFailedSandboxFor,
+		},
+		{
+			name: "explicit never deletes immediately",
+			opts: infra.ClaimSandboxOptions{
+				User:                    "test-user",
+				Template:                "test-template",
+				ReserveFailedSandboxFor: ptr.To(consts.ReserveFailedSandboxNever),
+			},
+			expectFor:   consts.ReserveFailedSandboxNever,
+			expectInput: true,
+		},
+		{
+			name: "explicit finite reserve",
+			opts: infra.ClaimSandboxOptions{
+				User:                    "test-user",
+				Template:                "test-template",
+				ReserveFailedSandboxFor: ptr.To(2 * time.Hour),
+			},
+			expectFor:   2 * time.Hour,
+			expectInput: true,
+		},
+		{
+			name: "explicit forever reserve",
+			opts: infra.ClaimSandboxOptions{
+				User:                    "test-user",
+				Template:                "test-template",
+				ReserveFailedSandboxFor: ptr.To(consts.ReserveFailedSandboxForever),
+			},
+			expectFor:   consts.ReserveFailedSandboxForever,
+			expectInput: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ValidateAndInitClaimOptions(tt.opts)
+			require.NoError(t, err)
+			require.NotNil(t, got.ReserveFailedSandboxFor)
+			assert.Equal(t, tt.expectFor, *got.ReserveFailedSandboxFor)
+			if tt.expectInput {
+				assert.Same(t, tt.opts.ReserveFailedSandboxFor, got.ReserveFailedSandboxFor)
+			}
+		})
+	}
+}
+
 //goland:noinspection GoDeprecation
 func TestInfra_ClaimSandbox(t *testing.T) {
-	utils.InitLogOutput()
+	utestutils.InitLogOutput()
 
 	origCreateSandbox := DefaultCreateSandbox
 	DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client) (*v1alpha1.Sandbox, error) {
@@ -311,7 +372,7 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 				sbx.UID = types.UID(uuid.NewString())
 				sbx = sbx.DeepCopy()
 				sbx.ResourceVersion = "100"
-				expectationutils.ResourceVersionExpectationExpect(sbx)
+				expectations.ResourceVersionExpectationExpect(sbx)
 			},
 			expectError: "no candidate",
 		},
@@ -516,18 +577,20 @@ func TestClaimSandboxFailed(t *testing.T) {
 
 	// Test cases
 	tests := []struct {
-		name        string
-		options     infra.ClaimSandboxOptions
-		preModifier func(sbx *v1alpha1.Sandbox)
-		expectError string
-		getContext  func() context.Context
+		name           string
+		options        infra.ClaimSandboxOptions
+		preModifier    func(sbx *v1alpha1.Sandbox)
+		expectError    string
+		expectDeleted  bool
+		expectShutdown bool
+		getContext     func() context.Context
 	}{
 		{
 			name: "start container failed, reserved",
 			options: infra.ClaimSandboxOptions{
-				User:                 "test-user",
-				Template:             existTemplate,
-				ReserveFailedSandbox: true,
+				User:                    "test-user",
+				Template:                existTemplate,
+				ReserveFailedSandboxFor: ptr.To(consts.ReserveFailedSandboxForever),
 				InplaceUpdate: &config.InplaceUpdateOptions{
 					Image: "new-image",
 				},
@@ -542,13 +605,35 @@ func TestClaimSandboxFailed(t *testing.T) {
 				}
 			},
 			expectError: "sandbox start container failed",
+		},
+		{
+			name: "start container failed, reserved for duration",
+			options: infra.ClaimSandboxOptions{
+				User:                    "test-user",
+				Template:                existTemplate,
+				ReserveFailedSandboxFor: ptr.To(time.Hour),
+				InplaceUpdate: &config.InplaceUpdateOptions{
+					Image: "new-image",
+				},
+			},
+			preModifier: func(sbx *v1alpha1.Sandbox) {
+				sbx.Status.Conditions = []metav1.Condition{
+					{
+						Type:   string(v1alpha1.SandboxConditionReady),
+						Status: metav1.ConditionTrue,
+						Reason: v1alpha1.SandboxReadyReasonStartContainerFailed,
+					},
+				}
+			},
+			expectError:    "sandbox start container failed",
+			expectShutdown: true,
 		},
 		{
 			name: "start container failed, not reserved",
 			options: infra.ClaimSandboxOptions{
-				User:                 "test-user",
-				Template:             existTemplate,
-				ReserveFailedSandbox: false,
+				User:                    "test-user",
+				Template:                existTemplate,
+				ReserveFailedSandboxFor: ptr.To(consts.ReserveFailedSandboxNever),
 				InplaceUpdate: &config.InplaceUpdateOptions{
 					Image: "new-image",
 				},
@@ -562,15 +647,16 @@ func TestClaimSandboxFailed(t *testing.T) {
 					},
 				}
 			},
-			expectError: "sandbox start container failed",
+			expectError:   "sandbox start container failed",
+			expectDeleted: true,
 		},
 		{
 			name: "csi mount failed, reserved",
 			options: infra.ClaimSandboxOptions{
-				User:                 "test-user",
-				Template:             existTemplate,
-				ReserveFailedSandbox: true,
-				InitRuntime:          &config.InitRuntimeOptions{},
+				User:                    "test-user",
+				Template:                existTemplate,
+				ReserveFailedSandboxFor: ptr.To(consts.ReserveFailedSandboxForever),
+				InitRuntime:             &config.InitRuntimeOptions{},
 				CSIMount: &config.CSIMountOptions{
 					MountOptionList: []config.MountConfig{
 						{
@@ -588,10 +674,10 @@ func TestClaimSandboxFailed(t *testing.T) {
 		{
 			name: "csi mount failed, not reserved",
 			options: infra.ClaimSandboxOptions{
-				User:                 "test-user",
-				Template:             existTemplate,
-				ReserveFailedSandbox: false,
-				InitRuntime:          &config.InitRuntimeOptions{},
+				User:                    "test-user",
+				Template:                existTemplate,
+				ReserveFailedSandboxFor: ptr.To(consts.ReserveFailedSandboxNever),
+				InitRuntime:             &config.InitRuntimeOptions{},
 				CSIMount: &config.CSIMountOptions{
 					MountOptionList: []config.MountConfig{
 						{
@@ -604,15 +690,14 @@ func TestClaimSandboxFailed(t *testing.T) {
 				sbx.Annotations[v1alpha1.AnnotationRuntimeURL] = server.URL
 				sbx.Annotations[v1alpha1.AnnotationRuntimeAccessToken] = runtime.AccessToken
 			},
-			expectError: "command failed",
+			expectError:   "command failed",
+			expectDeleted: true,
 		},
 		{
 			name: "context canceled",
 			options: infra.ClaimSandboxOptions{
 				User:     "test-user",
 				Template: existTemplate,
-				// hack: the sandbox is not locked in this case, set true to pass the assertion
-				ReserveFailedSandbox: true,
 			},
 			getContext: func() context.Context {
 				ctx, cancel := context.WithCancel(t.Context())
@@ -626,8 +711,6 @@ func TestClaimSandboxFailed(t *testing.T) {
 			options: infra.ClaimSandboxOptions{
 				User:     "test-user",
 				Template: existTemplate,
-				// hack: the sandbox is not locked in this case, set true to pass the assertion
-				ReserveFailedSandbox: true,
 			},
 			preModifier: func(sbx *v1alpha1.Sandbox) {
 				sbx.Status.PodInfo.PodIP = ""
@@ -682,7 +765,7 @@ func TestClaimSandboxFailed(t *testing.T) {
 			if tt.preModifier != nil {
 				tt.preModifier(sbx)
 			}
-			state, reason := sandboxutils.GetSandboxState(sbx)
+			state, reason := pkgutils.GetSandboxState(sbx)
 			require.Equal(t, v1alpha1.SandboxStateAvailable, state, reason)
 			CreateSandboxWithStatus(t, fc, sbx)
 			require.Eventually(t, func() bool {
@@ -700,18 +783,25 @@ func TestClaimSandboxFailed(t *testing.T) {
 			_, _, err = TryClaimSandbox(ctx, opts, &testInfra.pickCache, testInfra.Cache, testInfra.claimLockChannel, testInfra.createLimiter)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.expectError)
-			err = fc.Get(t.Context(), types.NamespacedName{Namespace: sbx.Namespace, Name: name}, &v1alpha1.Sandbox{})
-			if tt.options.ReserveFailedSandbox {
-				assert.NoError(t, err)
-			} else {
+			got := &v1alpha1.Sandbox{}
+			err = fc.Get(t.Context(), types.NamespacedName{Namespace: sbx.Namespace, Name: name}, got)
+			if tt.expectDeleted {
 				assert.True(t, apierrors.IsNotFound(err))
+				return
+			}
+			require.NoError(t, err)
+			if tt.expectShutdown {
+				require.NotNil(t, got.Spec.ShutdownTime)
+				assert.WithinDuration(t, time.Now().Add(time.Hour), got.Spec.ShutdownTime.Time, 5*time.Second)
+			} else {
+				assert.Nil(t, got.Spec.ShutdownTime)
 			}
 		})
 	}
 }
 
 func TestCheckSandboxInplaceUpdate(t *testing.T) {
-	utils.InitLogOutput()
+	utestutils.InitLogOutput()
 	tests := []struct {
 		name               string
 		generation         int64
@@ -848,7 +938,7 @@ func TestCheckSandboxInplaceUpdate(t *testing.T) {
 			CreateSandboxWithStatus(t, fc, sbx)
 
 			gotSbx, err := testInfra.Cache.GetClaimedSandbox(t.Context(), infracache.GetClaimedSandboxOptions{
-				SandboxID: sandboxutils.GetSandboxID(sbx),
+				SandboxID: pkgutils.GetSandboxID(sbx),
 			})
 			assert.NoError(t, err)
 			if err != nil {
@@ -1875,7 +1965,7 @@ func TestWaitForPodResizeState(t *testing.T) {
 }
 
 func TestNewSandboxFromTemplate_RateLimitExceeded(t *testing.T) {
-	utils.InitLogOutput()
+	utestutils.InitLogOutput()
 
 	// Create a rate limiter with 0 burst to ensure it's always exhausted
 	limiter := rate.NewLimiter(rate.Limit(1), 0)
@@ -2070,7 +2160,7 @@ func TestRecordSecurityTokenRefreshStatus(t *testing.T) {
 		{
 			name: "with security token and expiration",
 			opts: infra.ClaimSandboxOptions{
-				SecurityToken: &config.SecurityTokenOptions{
+				SecurityToken: &infra.SecurityTokenOptions{
 					TokenResponse: identity.TokenResponse{
 						AccessToken:           "security-access-token",
 						AccessTokenExpiration: "2026-12-31T23:59:59Z",
@@ -2078,13 +2168,13 @@ func TestRecordSecurityTokenRefreshStatus(t *testing.T) {
 				},
 			},
 			expectedAnnos: map[string]string{
-				pkgutils.AgentKeyTokenRefreshStatus: `{"accessTokenExpiration":"2026-12-31T23:59:59Z"}`,
+				identity.AgentKeyTokenRefreshStatus: `{"accessTokenExpiration":"2026-12-31T23:59:59Z"}`,
 			},
 		},
 		{
 			name: "with security token without expiration",
 			opts: infra.ClaimSandboxOptions{
-				SecurityToken: &config.SecurityTokenOptions{
+				SecurityToken: &infra.SecurityTokenOptions{
 					TokenResponse: identity.TokenResponse{
 						AccessToken: "at-456",
 					},
@@ -2092,7 +2182,7 @@ func TestRecordSecurityTokenRefreshStatus(t *testing.T) {
 			},
 			expectedAnnos: map[string]string{
 				// AccessTokenExpiration is omitempty, so empty value produces "{}"
-				pkgutils.AgentKeyTokenRefreshStatus: `{}`,
+				identity.AgentKeyTokenRefreshStatus: `{}`,
 			},
 		},
 		{
@@ -2101,13 +2191,17 @@ func TestRecordSecurityTokenRefreshStatus(t *testing.T) {
 				SecurityToken: nil,
 			},
 			notExpectedAnnos: []string{
-				pkgutils.AgentKeyTokenRefreshStatus,
+				identity.AgentKeyTokenRefreshStatus,
 			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			scheme := k8sruntime.NewScheme()
+			utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+			utilruntime.Must(v1alpha1.AddToScheme(scheme))
+
 			sbx := &Sandbox{
 				Sandbox: &v1alpha1.Sandbox{
 					ObjectMeta: metav1.ObjectMeta{
@@ -2118,7 +2212,9 @@ func TestRecordSecurityTokenRefreshStatus(t *testing.T) {
 				},
 			}
 
-			err := recordSecurityTokenRefreshStatus(sbx, tt.opts)
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(sbx.Sandbox.DeepCopy()).Build()
+
+			err := recordSecurityTokenRefreshStatus(t.Context(), fakeClient, sbx, tt.opts)
 			require.NoError(t, err)
 
 			annotations := sbx.GetAnnotations()
@@ -2133,9 +2229,19 @@ func TestRecordSecurityTokenRefreshStatus(t *testing.T) {
 				assert.Empty(t, annotations[key], "annotation %s should not be set", key)
 			}
 
+			// Verify the patch was actually persisted to the apiserver, not just to the in-memory sbx.
+			persisted := &v1alpha1.Sandbox{}
+			require.NoError(t, fakeClient.Get(t.Context(), client.ObjectKeyFromObject(sbx.Sandbox), persisted))
+			for key, expectedValue := range tt.expectedAnnos {
+				assert.Equal(t, expectedValue, persisted.GetAnnotations()[key], "persisted annotation %s should match", key)
+			}
+			for _, key := range tt.notExpectedAnnos {
+				assert.Empty(t, persisted.GetAnnotations()[key], "persisted annotation %s should not be set", key)
+			}
+
 			// For the "with expiration" case, verify JSON round-trip
 			if tt.name == "with security token and expiration" {
-				raw := annotations[pkgutils.AgentKeyTokenRefreshStatus]
+				raw := annotations[identity.AgentKeyTokenRefreshStatus]
 				require.NotEmpty(t, raw)
 				var decoded identity.TokenRefreshStatus
 				require.NoError(t, json.Unmarshal([]byte(raw), &decoded))
@@ -2156,7 +2262,7 @@ func TestRecordSecurityTokenRefreshStatus_NilAnnotations(t *testing.T) {
 			name:         "nil annotations map is created",
 			initialAnnos: nil,
 			opts: infra.ClaimSandboxOptions{
-				SecurityToken: &config.SecurityTokenOptions{
+				SecurityToken: &infra.SecurityTokenOptions{
 					TokenResponse: identity.TokenResponse{
 						AccessToken:           "token-1",
 						AccessTokenExpiration: "2026-06-01T00:00:00Z",
@@ -2171,7 +2277,7 @@ func TestRecordSecurityTokenRefreshStatus_NilAnnotations(t *testing.T) {
 				"existing-key": "existing-value",
 			},
 			opts: infra.ClaimSandboxOptions{
-				SecurityToken: &config.SecurityTokenOptions{
+				SecurityToken: &infra.SecurityTokenOptions{
 					TokenResponse: identity.TokenResponse{
 						AccessToken:           "token-2",
 						AccessTokenExpiration: "2026-07-01T00:00:00Z",
@@ -2192,6 +2298,10 @@ func TestRecordSecurityTokenRefreshStatus_NilAnnotations(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			scheme := k8sruntime.NewScheme()
+			utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+			utilruntime.Must(v1alpha1.AddToScheme(scheme))
+
 			sbx := &Sandbox{
 				Sandbox: &v1alpha1.Sandbox{
 					ObjectMeta: metav1.ObjectMeta{
@@ -2202,13 +2312,15 @@ func TestRecordSecurityTokenRefreshStatus_NilAnnotations(t *testing.T) {
 				},
 			}
 
-			err := recordSecurityTokenRefreshStatus(sbx, tt.opts)
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(sbx.Sandbox.DeepCopy()).Build()
+
+			err := recordSecurityTokenRefreshStatus(t.Context(), fakeClient, sbx, tt.opts)
 			require.NoError(t, err)
 
 			annotations := sbx.GetAnnotations()
 
 			if tt.expectedValue != "" {
-				assert.Equal(t, tt.expectedValue, annotations[pkgutils.AgentKeyTokenRefreshStatus])
+				assert.Equal(t, tt.expectedValue, annotations[identity.AgentKeyTokenRefreshStatus])
 			} else {
 				// When SecurityToken is nil, annotations should remain unchanged
 				if tt.initialAnnos == nil {
@@ -2222,8 +2334,159 @@ func TestRecordSecurityTokenRefreshStatus_NilAnnotations(t *testing.T) {
 					assert.Equal(t, v, annotations[k], "existing annotation %s should be preserved", k)
 				}
 			}
+
+			// Verify the patch (or no-op) is observable via the apiserver as well.
+			persisted := &v1alpha1.Sandbox{}
+			require.NoError(t, fakeClient.Get(t.Context(), client.ObjectKeyFromObject(sbx.Sandbox), persisted))
+			if tt.expectedValue != "" {
+				assert.Equal(t, tt.expectedValue, persisted.GetAnnotations()[identity.AgentKeyTokenRefreshStatus])
+			}
+			for k, v := range tt.initialAnnos {
+				assert.Equal(t, v, persisted.GetAnnotations()[k], "persisted existing annotation %s should be preserved", k)
+			}
 		})
 	}
+}
+
+// TestRecordSecurityTokenRefreshStatus_PatchErrors covers the failure paths of
+// recordSecurityTokenRefreshStatus that go through the apiserver Patch call:
+//   - the apiserver returns an internal error: the helper should wrap it with the
+//     "failed to patch token refresh status annotation" prefix and must not mutate
+//     the in-memory sbx.Sandbox reference (so the caller can decide what to do).
+//   - the sandbox object does not exist in the apiserver: the patch returns NotFound
+//     and the same wrapping/no-mutation contract applies.
+func TestRecordSecurityTokenRefreshStatus_PatchErrors(t *testing.T) {
+	utestutils.InitLogOutput()
+
+	tests := []struct {
+		name               string
+		createInAPIServer  bool
+		patchInterceptor   func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error
+		expectErrSubstring string
+	}{
+		{
+			name:              "apiserver returns internal error",
+			createInAPIServer: true,
+			patchInterceptor: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				if _, ok := obj.(*v1alpha1.Sandbox); ok {
+					return apierrors.NewInternalError(fmt.Errorf("boom"))
+				}
+				return c.Patch(ctx, obj, patch, opts...)
+			},
+			expectErrSubstring: "failed to patch token refresh status annotation",
+		},
+		{
+			name:               "sandbox does not exist in apiserver",
+			createInAPIServer:  false,
+			patchInterceptor:   nil,
+			expectErrSubstring: "failed to patch token refresh status annotation",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := k8sruntime.NewScheme()
+			utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+			utilruntime.Must(v1alpha1.AddToScheme(scheme))
+
+			sbx := &Sandbox{
+				Sandbox: &v1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:        "test-sandbox",
+						Namespace:   "default",
+						Annotations: make(map[string]string),
+					},
+				},
+			}
+			originalSbxRef := sbx.Sandbox
+
+			builder := fake.NewClientBuilder().WithScheme(scheme)
+			if tt.createInAPIServer {
+				builder = builder.WithObjects(sbx.Sandbox.DeepCopy())
+			}
+			if tt.patchInterceptor != nil {
+				builder = builder.WithInterceptorFuncs(interceptor.Funcs{Patch: tt.patchInterceptor})
+			}
+			fakeClient := builder.Build()
+
+			opts := infra.ClaimSandboxOptions{
+				SecurityToken: &infra.SecurityTokenOptions{
+					TokenResponse: identity.TokenResponse{
+						AccessToken:           "at-err",
+						AccessTokenExpiration: "2027-01-01T00:00:00Z",
+					},
+				},
+			}
+
+			err := recordSecurityTokenRefreshStatus(t.Context(), fakeClient, sbx, opts)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.expectErrSubstring)
+
+			// On failure, sbx.Sandbox must not be replaced by the half-patched object;
+			// the original in-memory reference is preserved so the caller can recover.
+			assert.Same(t, originalSbxRef, sbx.Sandbox, "sbx.Sandbox should not be replaced when patch fails")
+			assert.Empty(t, sbx.GetAnnotations()[identity.AgentKeyTokenRefreshStatus], "in-memory annotation should not be set when patch fails")
+		})
+	}
+}
+
+// TestRecordSecurityTokenRefreshStatus_Overwrite verifies that when the sandbox
+// already carries an older AgentKeyTokenRefreshStatus annotation, the helper
+// overwrites it with the newly issued status, leaves unrelated annotations intact,
+// and replaces sbx.Sandbox with the patched object whose annotation matches the
+// value persisted in the apiserver.
+func TestRecordSecurityTokenRefreshStatus_Overwrite(t *testing.T) {
+	utestutils.InitLogOutput()
+
+	scheme := k8sruntime.NewScheme()
+	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(v1alpha1.AddToScheme(scheme))
+
+	const unrelatedKey = "unrelated/annotation"
+	const unrelatedVal = "keep-me"
+	oldStatus := `{"accessTokenExpiration":"2025-01-01T00:00:00Z"}`
+
+	sbx := &Sandbox{
+		Sandbox: &v1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-sandbox",
+				Namespace: "default",
+				Annotations: map[string]string{
+					unrelatedKey:                        unrelatedVal,
+					identity.AgentKeyTokenRefreshStatus: oldStatus,
+				},
+			},
+		},
+	}
+	originalSbxRef := sbx.Sandbox
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(sbx.Sandbox.DeepCopy()).Build()
+
+	opts := infra.ClaimSandboxOptions{
+		SecurityToken: &infra.SecurityTokenOptions{
+			TokenResponse: identity.TokenResponse{
+				AccessToken:           "at-new",
+				AccessTokenExpiration: "2027-06-01T00:00:00Z",
+			},
+		},
+	}
+
+	err := recordSecurityTokenRefreshStatus(t.Context(), fakeClient, sbx, opts)
+	require.NoError(t, err)
+
+	// Annotation is overwritten with the newly issued status.
+	wantStatus := `{"accessTokenExpiration":"2027-06-01T00:00:00Z"}`
+	assert.Equal(t, wantStatus, sbx.GetAnnotations()[identity.AgentKeyTokenRefreshStatus])
+	// Unrelated annotation must be preserved by MergeFrom semantics.
+	assert.Equal(t, unrelatedVal, sbx.GetAnnotations()[unrelatedKey])
+	// On success, sbx.Sandbox is swapped to the patched copy so subsequent in-memory
+	// reads observe the new annotation; identity check guards against accidental aliasing.
+	assert.NotSame(t, originalSbxRef, sbx.Sandbox, "sbx.Sandbox should be replaced with the patched copy on success")
+
+	// Verify the same state is observable through the apiserver.
+	persisted := &v1alpha1.Sandbox{}
+	require.NoError(t, fakeClient.Get(t.Context(), client.ObjectKeyFromObject(sbx.Sandbox), persisted))
+	assert.Equal(t, wantStatus, persisted.GetAnnotations()[identity.AgentKeyTokenRefreshStatus])
+	assert.Equal(t, unrelatedVal, persisted.GetAnnotations()[unrelatedKey])
 }
 
 // TestTryClaimSandbox_LockConflict tests the error handling in TryClaimSandbox when
@@ -2233,7 +2496,7 @@ func TestRecordSecurityTokenRefreshStatus_NilAnnotations(t *testing.T) {
 //
 //goland:noinspection GoDeprecation
 func TestTryClaimSandbox_LockConflict(t *testing.T) {
-	utils.InitLogOutput()
+	utestutils.InitLogOutput()
 	existTemplate := "test-template"
 	user := "test-user"
 
@@ -2364,7 +2627,7 @@ func TestTryClaimSandbox_LockConflict(t *testing.T) {
 			}, 100*time.Millisecond, 5*time.Millisecond)
 
 			// Clean up expectation state for this sandbox before the test
-			expectationutils.ResourceVersionExpectationDelete(sbx)
+			expectations.ResourceVersionExpectationDelete(sbx)
 
 			// Prepare claim options
 			claimOpts, err := ValidateAndInitClaimOptions(infra.ClaimSandboxOptions{
@@ -2392,23 +2655,23 @@ func TestTryClaimSandbox_LockConflict(t *testing.T) {
 			// Verify expectation state
 			if tt.verifyExpectation {
 				// After conflict error, expectation should be set (unsatisfied) for the sandbox's UID
-				assert.False(t, expectationutils.ResourceVersionExpectationSatisfied(sbx),
+				assert.False(t, expectations.ResourceVersionExpectationSatisfied(sbx),
 					"expectation should be unsatisfied after conflict error")
 			} else {
 				// For non-conflict errors, no expectation should be set
-				assert.True(t, expectationutils.ResourceVersionExpectationSatisfied(sbx),
+				assert.True(t, expectations.ResourceVersionExpectationSatisfied(sbx),
 					"expectation should not be set for non-conflict error")
 			}
 
 			// Clean up expectation state
-			expectationutils.ResourceVersionExpectationDelete(sbx)
+			expectations.ResourceVersionExpectationDelete(sbx)
 		})
 	}
 }
 
 //goland:noinspection GoDeprecation
 func TestInfraClaimSandboxReturnsErrorWhenLockContextCanceled(t *testing.T) {
-	utils.InitLogOutput()
+	utestutils.InitLogOutput()
 	existTemplate := "test-template"
 	user := "test-user"
 
@@ -2556,7 +2819,7 @@ func TestBuildClaimErrorWithPickSandboxFailures(t *testing.T) {
 }
 
 func TestTryClaimSandboxRecordsPickSandboxFailures(t *testing.T) {
-	utils.InitLogOutput()
+	utestutils.InitLogOutput()
 	existTemplate := "test-template"
 
 	tests := []struct {
@@ -2669,7 +2932,7 @@ func createAvailableSandboxForFailureRecord(t *testing.T, fc client.Client, temp
 }
 
 func TestInfraClaimSandboxAggregatesPickSandboxFailuresInError(t *testing.T) {
-	utils.InitLogOutput()
+	utestutils.InitLogOutput()
 	tests := []struct {
 		name        string
 		options     infra.ClaimSandboxOptions
@@ -2828,7 +3091,7 @@ func TestInfra_ClaimSandboxWithNamespace(t *testing.T) {
 }
 
 func TestPickAnAvailableSandbox_PrefersMatchingRevision(t *testing.T) {
-	utils.InitLogOutput()
+	utestutils.InitLogOutput()
 
 	origCreateSandbox := DefaultCreateSandbox
 	DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client) (*v1alpha1.Sandbox, error) {
@@ -3081,7 +3344,7 @@ func TestModifyPickedSandbox_InitRuntime(t *testing.T) {
 // Sandbox; if the SandboxTemplate cannot be resolved the function must
 // return a NoAvailable error rather than panicking.
 func TestNewSandboxFromSandboxSet_TemplateRef(t *testing.T) {
-	utils.InitLogOutput()
+	utestutils.InitLogOutput()
 
 	const templateName = "ref-sbs"
 	const refName = "my-sbt"
@@ -3217,7 +3480,7 @@ func (m *mockIdentityProvider) PropagateSecurityToken(ctx context.Context, sbx *
 
 //goland:noinspection GoDeprecation
 func TestTryClaimSandbox_SecurityToken(t *testing.T) {
-	utils.InitLogOutput()
+	utestutils.InitLogOutput()
 
 	// Enable SecurityIdentityProviderGate for all sub-tests
 	require.NoError(t, utilfeature.DefaultMutableFeatureGate.Set("SecurityIdentityProvider=true"))
@@ -3244,7 +3507,7 @@ func TestTryClaimSandbox_SecurityToken(t *testing.T) {
 				InitRuntime: &config.InitRuntimeOptions{
 					AccessToken: "original-uuid-token",
 				},
-				SecurityToken: &config.SecurityTokenOptions{
+				SecurityToken: &infra.SecurityTokenOptions{
 					TokenResponse: identity.TokenResponse{AccessToken: "placeholder"},
 				},
 			},
@@ -3263,21 +3526,21 @@ func TestTryClaimSandbox_SecurityToken(t *testing.T) {
 				// SecurityToken metrics should be recorded
 				assert.Greater(t, metrics.SecurityToken, time.Duration(0))
 				// TokenRefreshStatus annotation should be set
-				raw := annotations[pkgutils.AgentKeyTokenRefreshStatus]
+				raw := annotations[identity.AgentKeyTokenRefreshStatus]
 				assert.NotEmpty(t, raw)
 				var decoded identity.TokenRefreshStatus
 				require.NoError(t, json.Unmarshal([]byte(raw), &decoded))
 			},
 		},
 		{
-			name: "issue security token failure falls back to UUID transparently",
+			name: "issue security token failure returns retriable error",
 			options: infra.ClaimSandboxOptions{
 				User:     user,
 				Template: existTemplate,
 				InitRuntime: &config.InitRuntimeOptions{
 					AccessToken: "original-uuid-token",
 				},
-				SecurityToken: &config.SecurityTokenOptions{
+				SecurityToken: &infra.SecurityTokenOptions{
 					TokenResponse: identity.TokenResponse{AccessToken: "placeholder"},
 				},
 			},
@@ -3285,19 +3548,12 @@ func TestTryClaimSandbox_SecurityToken(t *testing.T) {
 				issueTokenFunc: func(ctx context.Context, req identity.TokenRequest) (*identity.TokenResponse, error) {
 					return nil, fmt.Errorf("identity provider unavailable")
 				},
+				propagateFunc: func(ctx context.Context, sbx *v1alpha1.Sandbox, tokenResp *identity.TokenResponse) error {
+					t.Fatalf("PropagateSecurityToken must not be called when IssueToken fails")
+					return nil
+				},
 			},
-			postCheck: func(t *testing.T, sbx infra.Sandbox, metrics infra.ClaimMetrics) {
-				// Fallback generates a UUID token automatically, so claim succeeds
-				annotations := sbx.GetAnnotations()
-				assert.Equal(t, "original-uuid-token", annotations[v1alpha1.AnnotationRuntimeAccessToken])
-				// TokenRefreshStatus IS set because fallback issuance succeeded
-				raw := annotations[pkgutils.AgentKeyTokenRefreshStatus]
-				assert.NotEmpty(t, raw)
-				var decoded identity.TokenRefreshStatus
-				require.NoError(t, json.Unmarshal([]byte(raw), &decoded))
-				// SecurityToken metrics should be recorded
-				assert.Greater(t, metrics.SecurityToken, time.Duration(0))
-			},
+			expectError: "security token issuance failed",
 		},
 		{
 			name: "propagate security token failure returns retriable error",
@@ -3307,7 +3563,7 @@ func TestTryClaimSandbox_SecurityToken(t *testing.T) {
 				InitRuntime: &config.InitRuntimeOptions{
 					AccessToken: "original-uuid-token",
 				},
-				SecurityToken: &config.SecurityTokenOptions{
+				SecurityToken: &infra.SecurityTokenOptions{
 					TokenResponse: identity.TokenResponse{AccessToken: "placeholder"},
 				},
 			},
@@ -3338,7 +3594,7 @@ func TestTryClaimSandbox_SecurityToken(t *testing.T) {
 			postCheck: func(t *testing.T, sbx infra.Sandbox, metrics infra.ClaimMetrics) {
 				annotations := sbx.GetAnnotations()
 				// TokenRefreshStatus should be set since issuance succeeded
-				assert.NotEmpty(t, annotations[pkgutils.AgentKeyTokenRefreshStatus])
+				assert.NotEmpty(t, annotations[identity.AgentKeyTokenRefreshStatus])
 				// SecurityToken metric should be recorded
 				assert.Greater(t, metrics.SecurityToken, time.Duration(0))
 			},
@@ -3357,9 +3613,47 @@ func TestTryClaimSandbox_SecurityToken(t *testing.T) {
 			postCheck: func(t *testing.T, sbx infra.Sandbox, metrics infra.ClaimMetrics) {
 				annotations := sbx.GetAnnotations()
 				// TokenRefreshStatus should be set since issuance succeeded
-				assert.NotEmpty(t, annotations[pkgutils.AgentKeyTokenRefreshStatus])
+				assert.NotEmpty(t, annotations[identity.AgentKeyTokenRefreshStatus])
 				// SecurityToken metric should be recorded
 				assert.Greater(t, metrics.SecurityToken, time.Duration(0))
+			},
+		},
+		{
+			// Verifies the second clause of the gate at claim.go:236 — when the
+			// sandbox does NOT carry the security.agents.kruise.io/agent-name
+			// label, the entire identity provider branch must be skipped: neither
+			// IssueToken nor PropagateSecurityToken may run, no TokenRefreshStatus
+			// annotation may be persisted, and metrics.SecurityToken must remain
+			// zero. This is the dedicated opt-in regression test for the
+			// IsIdentityProviderRequested predicate.
+			name: "skips security token issuance when agent-name label is absent",
+			options: infra.ClaimSandboxOptions{
+				User:     user,
+				Template: existTemplate,
+				InitRuntime: &config.InitRuntimeOptions{
+					AccessToken: "original-uuid-token",
+				},
+			},
+			preModifier: func(sbx *v1alpha1.Sandbox) {
+				// Strip the opt-in label so IsIdentityProviderRequested returns false.
+				delete(sbx.Labels, identity.LabelAgentName)
+			},
+			mockProvider: &mockIdentityProvider{
+				issueTokenFunc: func(ctx context.Context, req identity.TokenRequest) (*identity.TokenResponse, error) {
+					t.Fatalf("IssueToken must not be called when agent-name label is absent")
+					return nil, nil
+				},
+				propagateFunc: func(ctx context.Context, sbx *v1alpha1.Sandbox, tokenResp *identity.TokenResponse) error {
+					t.Fatalf("PropagateSecurityToken must not be called when agent-name label is absent")
+					return nil
+				},
+			},
+			postCheck: func(t *testing.T, sbx infra.Sandbox, metrics infra.ClaimMetrics) {
+				annotations := sbx.GetAnnotations()
+				assert.Empty(t, annotations[identity.AgentKeyTokenRefreshStatus],
+					"TokenRefreshStatus annotation must NOT be written when the provider branch is skipped")
+				assert.Equal(t, time.Duration(0), metrics.SecurityToken,
+					"SecurityToken metric must remain zero when the provider branch is skipped")
 			},
 		},
 	}
@@ -3388,6 +3682,9 @@ func TestTryClaimSandbox_SecurityToken(t *testing.T) {
 					Labels: map[string]string{
 						v1alpha1.LabelSandboxTemplate:        existTemplate,
 						agentsv1alpha1.LabelSandboxIsClaimed: "false",
+						// Opt the sandbox into the identity provider issuance path;
+						// the dedicated "absent" sub-test strips this label via preModifier.
+						identity.LabelAgentName: "test-agent",
 					},
 					CreationTimestamp: metav1.Now(),
 					Annotations: map[string]string{

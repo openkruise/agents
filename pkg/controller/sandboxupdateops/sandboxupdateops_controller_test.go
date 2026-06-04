@@ -587,6 +587,92 @@ func mustMarshalPatch(tmpl corev1.PodTemplateSpec) runtime.RawExtension {
 	return runtime.RawExtension{Raw: data}
 }
 
+func TestReconcile_SkipsSandboxSetControlledSandboxes(t *testing.T) {
+	ops := newSandboxUpdateOps("test-ops", "default", agentsv1alpha1.SandboxUpdateOpsUpdating, false, nil)
+	ops.Spec.Patch = mustMarshalPatch(corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{Name: "main", Image: "busybox:2.0"},
+			},
+		},
+	})
+
+	sbs := &agentsv1alpha1.SandboxSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-sbs",
+			Namespace: "default",
+			UID:       types.UID("sbs-uid"),
+		},
+	}
+
+	// sbx-pool: controlled by SandboxSet, should be skipped
+	sbxPool := newSandbox("sbx-pool", "default", "", agentsv1alpha1.SandboxRunning, nil)
+	sbxPool.OwnerReferences = []metav1.OwnerReference{
+		*metav1.NewControllerRef(sbs, agentsv1alpha1.SandboxSetControllerKind),
+	}
+
+	// sbx-standalone: not controlled by SandboxSet, should be processed
+	sbxStandalone := newSandbox("sbx-standalone", "default", "", agentsv1alpha1.SandboxRunning, nil)
+	// Remove the claimed label to verify it's no longer required
+	delete(sbxStandalone.Labels, agentsv1alpha1.LabelSandboxIsClaimed)
+
+	r := newTestReconciler(ops, sbxPool, sbxStandalone)
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-ops", Namespace: "default"},
+	})
+	assert.NoError(t, err)
+
+	// sbx-pool should NOT have been patched (still no ops label)
+	updatedPool := &agentsv1alpha1.Sandbox{}
+	err = r.Get(context.Background(), types.NamespacedName{Name: "sbx-pool", Namespace: "default"}, updatedPool)
+	assert.NoError(t, err)
+	assert.Empty(t, updatedPool.Labels[agentsv1alpha1.LabelSandboxUpdateOps],
+		"pool sandbox should not be patched")
+
+	// sbx-standalone should have been patched
+	updatedStandalone := &agentsv1alpha1.Sandbox{}
+	err = r.Get(context.Background(), types.NamespacedName{Name: "sbx-standalone", Namespace: "default"}, updatedStandalone)
+	assert.NoError(t, err)
+	assert.Equal(t, "test-ops", updatedStandalone.Labels[agentsv1alpha1.LabelSandboxUpdateOps],
+		"standalone sandbox should be patched")
+
+	// Verify status: only sbx-standalone counted (total=1)
+	updatedOps := &agentsv1alpha1.SandboxUpdateOps{}
+	err = r.Get(context.Background(), types.NamespacedName{Name: "test-ops", Namespace: "default"}, updatedOps)
+	assert.NoError(t, err)
+	assert.Equal(t, int32(1), updatedOps.Status.Replicas, "only non-SandboxSet-controlled sandboxes should be counted")
+}
+
+func TestReconcile_ProcessesSandboxWithoutClaimedLabel(t *testing.T) {
+	// Verify that sandboxes without the claimed label are still processed
+	// as long as they are not controlled by a SandboxSet
+	ops := newSandboxUpdateOps("test-ops", "default", agentsv1alpha1.SandboxUpdateOpsUpdating, false, nil)
+	ops.Spec.Patch = mustMarshalPatch(corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{Name: "main", Image: "busybox:2.0"},
+			},
+		},
+	})
+
+	sbx := newSandbox("sbx-no-claim", "default", "", agentsv1alpha1.SandboxRunning, nil)
+	delete(sbx.Labels, agentsv1alpha1.LabelSandboxIsClaimed)
+
+	r := newTestReconciler(ops, sbx)
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-ops", Namespace: "default"},
+	})
+	assert.NoError(t, err)
+
+	updatedSbx := &agentsv1alpha1.Sandbox{}
+	err = r.Get(context.Background(), types.NamespacedName{Name: "sbx-no-claim", Namespace: "default"}, updatedSbx)
+	assert.NoError(t, err)
+	assert.Equal(t, "test-ops", updatedSbx.Labels[agentsv1alpha1.LabelSandboxUpdateOps],
+		"sandbox without claimed label should still be patched")
+}
+
 func TestReconcile_StatusUnchangedSkipsUpdate(t *testing.T) {
 	// When status doesn't change, updateStatus should be a no-op
 	ops := newSandboxUpdateOps("test-ops", "default", agentsv1alpha1.SandboxUpdateOpsCompleted, false, nil)

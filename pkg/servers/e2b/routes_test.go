@@ -25,6 +25,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
@@ -323,6 +325,48 @@ func TestGetUserFromContext(t *testing.T) {
 					assert.Equal(t, tt.expectedID, user.ID)
 				}
 			}
+		})
+	}
+}
+
+// TestValidateTeamNamespace_RejectsDoubleDash verifies the API key creation guard rejects
+// namespace names containing the sandbox ID separator before consulting Kubernetes.
+func TestValidateTeamNamespace_RejectsDoubleDash(t *testing.T) {
+	controller, fc, teardown := Setup(t)
+	defer teardown()
+
+	// Create a real Kubernetes namespace whose name happens to contain "--" so we can
+	// prove the rejection comes from the validator, not from "namespace not found".
+	require.NoError(t, fc.Create(t.Context(), &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{Name: "team--blue"},
+	}))
+	require.NoError(t, fc.Create(t.Context(), &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{Name: "team-a"},
+	}))
+
+	tests := []struct {
+		name      string
+		teamName  string
+		expectErr bool
+		wantCode  int
+		wantMsg   string
+	}{
+		{name: "valid namespace passes", teamName: "team-a", expectErr: false},
+		{name: "double-dash rejected even when namespace exists", teamName: "team--blue", expectErr: true, wantCode: http.StatusBadRequest, wantMsg: "must not contain"},
+		{name: "double-dash at start", teamName: "--prefix", expectErr: true, wantCode: http.StatusBadRequest, wantMsg: "must not contain"},
+		{name: "missing namespace returns 400 too but for different reason", teamName: "no-such-ns", expectErr: true, wantCode: http.StatusBadRequest, wantMsg: "does not exist"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			apiErr := controller.validateTeamNamespace(t.Context(), tt.teamName)
+			if !tt.expectErr {
+				assert.Nil(t, apiErr)
+				return
+			}
+			require.NotNil(t, apiErr)
+			assert.Equal(t, tt.wantCode, apiErr.Code)
+			assert.Contains(t, apiErr.Message, tt.wantMsg)
 		})
 	}
 }

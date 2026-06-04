@@ -18,10 +18,14 @@ package e2b
 
 import (
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 )
 
@@ -94,6 +98,76 @@ func TestGetNamespaceOfUser(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.namespace, controller.getNamespaceOfUser(tt.user))
+		})
+	}
+}
+
+func TestConvertToE2BSandboxPodIPMetadata(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	tests := []struct {
+		name        string
+		annotations map[string]string
+		podIP       string
+		expectKey   bool
+		expectValue string
+	}{
+		{
+			name:  "disabled does not return pod ip metadata",
+			podIP: "1.2.3.4",
+		},
+		{
+			name: "enabled returns pod ip metadata",
+			annotations: map[string]string{
+				models.ExtensionKeyReturnPodIP: agentsv1alpha1.True,
+			},
+			podIP:       "1.2.3.4",
+			expectKey:   true,
+			expectValue: "1.2.3.4",
+		},
+		{
+			name: "enabled skips pod ip metadata when pod ip is empty",
+			annotations: map[string]string{
+				models.ExtensionKeyReturnPodIP: agentsv1alpha1.True,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			annotations := map[string]string{
+				agentsv1alpha1.AnnotationClaimTime: now.Format(time.RFC3339),
+			}
+			for k, v := range tt.annotations {
+				annotations[k] = v
+			}
+			sbx := &sandboxcr.Sandbox{
+				Sandbox: &agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:        "sandbox-1",
+						Namespace:   "default",
+						Annotations: annotations,
+					},
+					Status: agentsv1alpha1.SandboxStatus{
+						Phase: agentsv1alpha1.SandboxRunning,
+						Conditions: []metav1.Condition{
+							{
+								Type:   string(agentsv1alpha1.SandboxConditionReady),
+								Status: metav1.ConditionTrue,
+							},
+						},
+						PodInfo: agentsv1alpha1.PodInfo{
+							PodIP: tt.podIP,
+						},
+					},
+				},
+			}
+
+			got := (&Controller{}).convertToE2BSandbox(sbx, "")
+			value, exists := got.Metadata[models.MetadataKeyPodIP]
+			assert.Equal(t, tt.expectKey, exists)
+			if tt.expectKey {
+				assert.Equal(t, tt.expectValue, value)
+			}
 		})
 	}
 }

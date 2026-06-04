@@ -32,7 +32,7 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/cache/cachetest"
 	"github.com/openkruise/agents/pkg/controller/sandboxclaim/core"
-	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
+	"github.com/openkruise/agents/pkg/utils/testutils"
 )
 
 func TestReconciler_Reconcile_BasicFlow(t *testing.T) {
@@ -145,7 +145,7 @@ func TestReconciler_Reconcile_BasicFlow(t *testing.T) {
 }
 
 func TestReconciler_Reconcile_Claiming(t *testing.T) {
-	utils.InitLogOutput()
+	testutils.InitLogOutput()
 
 	claim := &agentsv1alpha1.SandboxClaim{
 		ObjectMeta: metav1.ObjectMeta{

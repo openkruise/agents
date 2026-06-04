@@ -34,10 +34,10 @@ import (
 	"k8s.io/klog/v2"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
+	"github.com/openkruise/agents/pkg/utils"
 )
 
-var LogLevel = consts.DebugLogLevel + 1
+var LogLevel = utils.DebugLogLevel + 1
 
 func (s *Server) Process(srv extProcPb.ExternalProcessor_ProcessServer) error {
 	log := klog.LoggerWithValues(klog.Background(), "contextID", uuid.NewString()).V(LogLevel)

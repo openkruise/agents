@@ -28,6 +28,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/time/rate"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
@@ -42,7 +43,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
-	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
+	utestutils "github.com/openkruise/agents/pkg/utils/testutils"
 	testutils "github.com/openkruise/agents/test/utils"
 )
 
@@ -107,6 +108,66 @@ func TestValidateAndInitCloneOptions(t *testing.T) {
 				if tt.opts.WaitReadyTimeout > 0 {
 					assert.Equal(t, tt.expectOpts.WaitReadyTimeout, result.WaitReadyTimeout)
 				}
+			}
+		})
+	}
+}
+
+func TestValidateAndInitCloneOptions_ReserveFailedSandboxFor(t *testing.T) {
+	tests := []struct {
+		name        string
+		opts        infra.CloneSandboxOptions
+		expectFor   time.Duration
+		expectInput bool // expects the returned pointer to be the same instance as input
+	}{
+		{
+			name: "unset defaults to DefaultReserveFailedSandboxFor",
+			opts: infra.CloneSandboxOptions{
+				User:         "test-user",
+				CheckPointID: "test-checkpoint",
+			},
+			expectFor: DefaultReserveFailedSandboxFor,
+		},
+		{
+			name: "explicit never deletes immediately",
+			opts: infra.CloneSandboxOptions{
+				User:                    "test-user",
+				CheckPointID:            "test-checkpoint",
+				ReserveFailedSandboxFor: ptr.To(consts.ReserveFailedSandboxNever),
+			},
+			expectFor:   consts.ReserveFailedSandboxNever,
+			expectInput: true,
+		},
+		{
+			name: "explicit finite reserve",
+			opts: infra.CloneSandboxOptions{
+				User:                    "test-user",
+				CheckPointID:            "test-checkpoint",
+				ReserveFailedSandboxFor: ptr.To(90 * time.Minute),
+			},
+			expectFor:   90 * time.Minute,
+			expectInput: true,
+		},
+		{
+			name: "explicit forever reserve",
+			opts: infra.CloneSandboxOptions{
+				User:                    "test-user",
+				CheckPointID:            "test-checkpoint",
+				ReserveFailedSandboxFor: ptr.To(consts.ReserveFailedSandboxForever),
+			},
+			expectFor:   consts.ReserveFailedSandboxForever,
+			expectInput: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ValidateAndInitCloneOptions(tt.opts)
+			require.NoError(t, err)
+			require.NotNil(t, got.ReserveFailedSandboxFor)
+			assert.Equal(t, tt.expectFor, *got.ReserveFailedSandboxFor)
+			if tt.expectInput {
+				assert.Same(t, tt.opts.ReserveFailedSandboxFor, got.ReserveFailedSandboxFor)
 			}
 		})
 	}
@@ -244,8 +305,110 @@ func TestFindCheckpointAndTemplateById_NamespaceScoped(t *testing.T) {
 	assert.Equal(t, "cp-b", tmpl.Name)
 }
 
+func createCloneTestCheckpoint(t *testing.T, c client.Client, cache infracache.Provider, checkpointID string) {
+	t.Helper()
+	sbt := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: checkpointID, Namespace: "default"},
+		Spec: v1alpha1.SandboxTemplateSpec{
+			Template: &corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "main", Image: "test-image"}},
+				},
+			},
+		},
+	}
+	require.NoError(t, c.Create(t.Context(), sbt))
+
+	cp := &v1alpha1.Checkpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      checkpointID,
+			Namespace: "default",
+			Labels: map[string]string{
+				v1alpha1.LabelSandboxTemplate: checkpointID,
+			},
+		},
+		Status: v1alpha1.CheckpointStatus{CheckpointId: checkpointID},
+	}
+	require.NoError(t, c.Create(t.Context(), cp))
+	require.Eventually(t, func() bool {
+		_, err := cache.GetCheckpoint(t.Context(), infracache.GetCheckpointOptions{CheckpointID: checkpointID})
+		return err == nil
+	}, time.Second, 10*time.Millisecond)
+}
+
+func TestCloneSandbox_CleansFailedCreatedSandbox(t *testing.T) {
+	tests := []struct {
+		name           string
+		reserveFor     time.Duration
+		expectDeleted  bool
+		expectShutdown bool
+	}{
+		{
+			name:          "reserve for zero deletes failed created sandbox",
+			reserveFor:    consts.ReserveFailedSandboxNever,
+			expectDeleted: true,
+		},
+		{
+			name:           "reserve for duration writes shutdown time",
+			reserveFor:     time.Hour,
+			expectShutdown: true,
+		},
+		{
+			name:       "reserve forever keeps sandbox without shutdown time",
+			reserveFor: consts.ReserveFailedSandboxForever,
+		},
+	}
+
+	origCreateSandbox := DefaultCreateSandbox
+	t.Cleanup(func() { DefaultCreateSandbox = origCreateSandbox })
+
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cache, fc, err := cachetest.NewTestCache(t)
+			require.NoError(t, err)
+			require.NoError(t, cache.Run(t.Context()))
+			defer cache.Stop(t.Context())
+
+			checkpointID := fmt.Sprintf("clone-cleanup-%d", i)
+			createCloneTestCheckpoint(t, fc, cache, checkpointID)
+
+			sandboxName := fmt.Sprintf("failed-clone-cleanup-%d", i)
+			DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client) (*v1alpha1.Sandbox, error) {
+				sbx.Name = sandboxName
+				return origCreateSandbox(ctx, sbx, c)
+			}
+
+			opts := infra.CloneSandboxOptions{
+				User:                    "test-user",
+				CheckPointID:            checkpointID,
+				WaitReadyTimeout:        20 * time.Millisecond,
+				CloneTimeout:            200 * time.Millisecond,
+				ReserveFailedSandboxFor: ptr.To(tt.reserveFor),
+			}
+			sbx, _, err := CloneSandbox(t.Context(), opts, cache)
+			require.Error(t, err)
+			assert.Nil(t, sbx)
+			assert.Contains(t, err.Error(), "failed to wait for sandbox ready")
+
+			got := &v1alpha1.Sandbox{}
+			err = fc.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: sandboxName}, got)
+			if tt.expectDeleted {
+				assert.True(t, apierrors.IsNotFound(err))
+				return
+			}
+			require.NoError(t, err)
+			if tt.expectShutdown {
+				require.NotNil(t, got.Spec.ShutdownTime)
+				assert.WithinDuration(t, time.Now().Add(time.Hour), got.Spec.ShutdownTime.Time, 5*time.Second)
+				return
+			}
+			assert.Nil(t, got.Spec.ShutdownTime)
+		})
+	}
+}
+
 func TestCloneSandbox(t *testing.T) {
-	utils.InitLogOutput()
+	utestutils.InitLogOutput()
 
 	checkpointID := "test-checkpoint-123"
 	user := "test-user"
@@ -749,6 +912,11 @@ func TestCloneSandbox(t *testing.T) {
 				}
 				ctx = context.WithValue(ctx, sbxOverrideKey{}, override)
 			}
+			if tt.opts.CloneTimeout > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, tt.opts.CloneTimeout)
+				defer cancel()
+			}
 
 			// Call CloneSandbox
 			sbx, metrics, err := CloneSandbox(ctx, tt.opts, cache)
@@ -768,88 +936,35 @@ func TestCloneSandbox(t *testing.T) {
 }
 
 func TestCloneSandbox_WithRateLimiter(t *testing.T) {
-	utils.InitLogOutput()
+	utestutils.InitLogOutput()
 
-	// Create a rate limiter with 0 burst to ensure it's always exhausted
-	limiter := rate.NewLimiter(rate.Limit(1), 0)
-
-	cache, fc, err := cachetest.NewTestCache(t)
-	require.NoError(t, err)
-	require.NoError(t, cache.Run(t.Context()))
-	defer cache.Stop(t.Context())
-
-	template := "test-template"
 	checkpointID := "test-checkpoint"
 	user := "test-user"
 
-	// Create SandboxSet
-	sbs := &v1alpha1.SandboxSet{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      template,
-			Namespace: "default",
-		},
-		Spec: v1alpha1.SandboxSetSpec{
-			EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
-				Template: &corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{
-							{
-								Name:  "main",
-								Image: "test-image",
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-	require.NoError(t, fc.Create(t.Context(), sbs))
-
-	// Wait for SandboxSet to be cached
-	require.Eventually(t, func() bool {
-		_, err := cache.PickSandboxSet(t.Context(), infracache.PickSandboxSetOptions{Name: template})
-		return err == nil
-	}, time.Second, 10*time.Millisecond)
-
-	// Create Checkpoint
-	cp := &v1alpha1.Checkpoint{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      checkpointID,
-			Namespace: "default",
-			Labels: map[string]string{
-				v1alpha1.LabelSandboxTemplate: template,
-			},
-		},
-		Status: v1alpha1.CheckpointStatus{
-			CheckpointId: checkpointID,
-		},
-	}
-	require.NoError(t, fc.Create(t.Context(), cp))
-	// Wait for checkpoint to be cached
-	require.Eventually(t, func() bool {
-		_, err := cache.GetCheckpoint(t.Context(), infracache.GetCheckpointOptions{CheckpointID: checkpointID})
-		return err == nil
-	}, time.Second, 10*time.Millisecond)
+	infraInstance, fc := NewTestInfra(t)
+	infraInstance.createLimiter = rate.NewLimiter(rate.Limit(1), 0)
+	createCloneTestCheckpoint(t, fc, infraInstance.Cache, checkpointID)
 
 	opts := infra.CloneSandboxOptions{
 		User:             user,
 		CheckPointID:     checkpointID,
 		WaitReadyTimeout: 30 * time.Second,
-		CreateLimiter:    limiter,
 	}
 
-	// Call CloneSandbox - should fail due to rate limit
-	sbx, metrics, err := CloneSandbox(t.Context(), opts, cache)
+	sbx, metrics, err := infraInstance.CloneSandbox(t.Context(), opts)
 
 	assert.Nil(t, sbx, "sandbox should be nil when rate limited")
 	assert.Error(t, err, "should return error when rate limited")
-	// The error message from rate limiter is "rate: Wait(n=1) exceeds limiter's burst 0"
 	assert.Contains(t, err.Error(), "rate:", "error should indicate rate limit")
-	assert.Equal(t, time.Duration(0), metrics.Total, "metrics should be zero when rate limited")
+	assert.Greater(t, metrics.Wait, time.Duration(0), "wait metric should include limiter wait cost")
+	// Limiter runs after GetTemplate, so Total covers both stages and is at
+	// least Wait. This mirrors ClaimSandbox where the limiter is gated after
+	// the pick/lock stage.
+	assert.GreaterOrEqual(t, metrics.Total, metrics.Wait, "total should include at least limiter wait cost")
 }
 
 func TestCloneSandbox_ContextCanceled(t *testing.T) {
-	utils.InitLogOutput()
+	utestutils.InitLogOutput()
 
 	cache, fc, err := cachetest.NewTestCache(t)
 	require.NoError(t, err)
@@ -953,7 +1068,7 @@ func newTestSandbox(name string) *v1alpha1.Sandbox {
 }
 
 func TestCreateCheckPoint(t *testing.T) {
-	utils.InitLogOutput()
+	utestutils.InitLogOutput()
 
 	// Define context key types
 	type cpStatusKey struct{}

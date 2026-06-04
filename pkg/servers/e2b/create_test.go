@@ -25,21 +25,46 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
-	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 )
+
+// TestResolveServerTimeout verifies that a positive seconds value yields a
+// finite timeout, while an absent (zero) or non-positive value yields
+// noServerTimeout, leaving the operation bounded only by the client context.
+func TestResolveServerTimeout(t *testing.T) {
+	tests := []struct {
+		name     string
+		seconds  int
+		expected time.Duration
+	}{
+		{
+			name:     "absent or non-positive yields no server timeout",
+			seconds:  0,
+			expected: noServerTimeout,
+		},
+		{
+			name:     "positive yields finite timeout",
+			seconds:  30,
+			expected: 30 * time.Second,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, resolveServerTimeout(tt.seconds))
+		})
+	}
+}
 
 // TestCsiMountOptionsConfigRecord tests the csiMountOptionsConfigRecord function
 func TestCsiMountOptionsConfigRecord(t *testing.T) {
@@ -381,104 +406,6 @@ func TestCreateSandboxWithClone_CSIMount(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestCreateSandboxWithClaim_CPUResizeFeatureGate(t *testing.T) {
-	user := &models.CreatedTeamAPIKey{ID: uuid.New(), Name: "test-user"}
-
-	t.Run("feature gate disabled rejects CPU resize with requests", func(t *testing.T) {
-		err := utilfeature.DefaultMutableFeatureGate.SetFromMap(map[string]bool{
-			string(features.SandboxInPlaceResourceResizeGate): false,
-		})
-		assert.NoError(t, err)
-		defer func() {
-			_ = utilfeature.DefaultMutableFeatureGate.SetFromMap(map[string]bool{
-				string(features.SandboxInPlaceResourceResizeGate): true,
-			})
-		}()
-
-		ctrl := &Controller{}
-		request := models.NewSandboxRequest{
-			TemplateID: "test-template",
-			Extensions: models.NewSandboxRequestExtension{
-				SkipInitRuntime: true,
-				InplaceUpdate: models.InplaceUpdateExtension{
-					Resources: &models.InplaceUpdateResourcesExtension{
-						Requests: corev1.ResourceList{
-							corev1.ResourceCPU: resource.MustParse("500m"),
-						},
-					},
-				},
-			},
-		}
-		_, apiErr := ctrl.createSandboxWithClaim(context.Background(), request, user)
-		assert.NotNil(t, apiErr)
-		assert.Equal(t, http.StatusBadRequest, apiErr.Code)
-		assert.Contains(t, apiErr.Message, "feature gate")
-	})
-
-	t.Run("feature gate disabled rejects CPU resize with limits", func(t *testing.T) {
-		err := utilfeature.DefaultMutableFeatureGate.SetFromMap(map[string]bool{
-			string(features.SandboxInPlaceResourceResizeGate): false,
-		})
-		assert.NoError(t, err)
-		defer func() {
-			_ = utilfeature.DefaultMutableFeatureGate.SetFromMap(map[string]bool{
-				string(features.SandboxInPlaceResourceResizeGate): true,
-			})
-		}()
-
-		ctrl := &Controller{}
-		request := models.NewSandboxRequest{
-			TemplateID: "test-template",
-			Extensions: models.NewSandboxRequestExtension{
-				SkipInitRuntime: true,
-				InplaceUpdate: models.InplaceUpdateExtension{
-					Resources: &models.InplaceUpdateResourcesExtension{
-						Limits: corev1.ResourceList{
-							corev1.ResourceCPU: resource.MustParse("1000m"),
-						},
-					},
-				},
-			},
-		}
-		_, apiErr := ctrl.createSandboxWithClaim(context.Background(), request, user)
-		assert.NotNil(t, apiErr)
-		assert.Equal(t, http.StatusBadRequest, apiErr.Code)
-		assert.Contains(t, apiErr.Message, "feature gate")
-	})
-
-	t.Run("feature gate disabled rejects mixed image and cpu resize", func(t *testing.T) {
-		err := utilfeature.DefaultMutableFeatureGate.SetFromMap(map[string]bool{
-			string(features.SandboxInPlaceResourceResizeGate): false,
-		})
-		assert.NoError(t, err)
-		defer func() {
-			_ = utilfeature.DefaultMutableFeatureGate.SetFromMap(map[string]bool{
-				string(features.SandboxInPlaceResourceResizeGate): true,
-			})
-		}()
-
-		ctrl := &Controller{}
-		request := models.NewSandboxRequest{
-			TemplateID: "test-template",
-			Extensions: models.NewSandboxRequestExtension{
-				SkipInitRuntime: true,
-				InplaceUpdate: models.InplaceUpdateExtension{
-					Image: "nginx:latest",
-					Resources: &models.InplaceUpdateResourcesExtension{
-						Requests: corev1.ResourceList{
-							corev1.ResourceCPU: resource.MustParse("500m"),
-						},
-					},
-				},
-			},
-		}
-		_, apiErr := ctrl.createSandboxWithClaim(context.Background(), request, user)
-		assert.NotNil(t, apiErr)
-		assert.Equal(t, http.StatusBadRequest, apiErr.Code)
-		assert.Contains(t, apiErr.Message, "feature gate")
-	})
 }
 
 func TestCreateSandboxWithClone_InplaceUpdateRejected(t *testing.T) {

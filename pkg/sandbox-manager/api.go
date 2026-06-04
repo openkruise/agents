@@ -25,7 +25,7 @@ import (
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
-	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
+	"github.com/openkruise/agents/pkg/utils/pagination"
 )
 
 // ClaimSandbox attempts to lock a Pod and assign it to the current caller.
@@ -128,7 +128,7 @@ func (m *SandboxManager) GetClaimedSandbox(ctx context.Context, user string, opt
 	return sbx, nil
 }
 
-func (m *SandboxManager) ListSandboxes(ctx context.Context, opts infra.SelectSandboxesOptions, p *utils.Paginator[infra.Sandbox]) ([]infra.Sandbox, string, error) {
+func (m *SandboxManager) ListSandboxes(ctx context.Context, opts infra.SelectSandboxesOptions, p *pagination.Paginator[infra.Sandbox]) ([]infra.Sandbox, string, error) {
 	sandboxes, err := m.infra.SelectSandboxes(ctx, opts)
 	if err != nil {
 		return nil, "", errors.NewError(errors.ErrorNotFound, "failed to list sandboxes: %v", err)
@@ -140,7 +140,7 @@ func (m *SandboxManager) ListSandboxes(ctx context.Context, opts infra.SelectSan
 	return sandboxes, nextToken, nil
 }
 
-func (m *SandboxManager) ListCheckpoints(ctx context.Context, opts infra.SelectSucceededCheckpointsOptions, p *utils.Paginator[infra.CheckpointInfo]) ([]infra.CheckpointInfo, string, error) {
+func (m *SandboxManager) ListCheckpoints(ctx context.Context, opts infra.SelectSucceededCheckpointsOptions, p *pagination.Paginator[infra.CheckpointInfo]) ([]infra.CheckpointInfo, string, error) {
 	checkpoints, err := m.infra.SelectSucceededCheckpoints(ctx, opts)
 	if err != nil {
 		return nil, "", errors.NewError(errors.ErrorNotFound, "failed to list checkpoints: %v", err)
