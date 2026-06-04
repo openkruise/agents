@@ -23,7 +23,7 @@ import (
 	"github.com/openkruise/agents/pkg/controller/sandboxclaim"
 	"github.com/openkruise/agents/pkg/controller/sandboxset"
 	"github.com/openkruise/agents/pkg/controller/sandboxupdateops"
-<<<<<<< HEAD
+	"github.com/openkruise/agents/pkg/controller/securitytokenrefresh"
 	"github.com/openkruise/agents/pkg/utils/metricsasync"
 )
 
@@ -32,19 +32,6 @@ import (
 // AddFunc parameters across all controllers.
 type Deps struct {
 	MetricsCleanup *metricsasync.Pool
-=======
-	"github.com/openkruise/agents/pkg/controller/securitytokenrefresh"
-)
-
-var controllerAddFuncs []func(manager.Manager) error
-
-func init() {
-	controllerAddFuncs = append(controllerAddFuncs, sandbox.Add)
-	controllerAddFuncs = append(controllerAddFuncs, sandboxset.Add)
-	controllerAddFuncs = append(controllerAddFuncs, sandboxclaim.Add)
-	controllerAddFuncs = append(controllerAddFuncs, sandboxupdateops.Add)
-	controllerAddFuncs = append(controllerAddFuncs, securitytokenrefresh.Add)
->>>>>>> master_keyofspectator_github
 }
 
 func SetupWithManager(m manager.Manager, deps Deps) error {
@@ -58,6 +45,9 @@ func SetupWithManager(m manager.Manager, deps Deps) error {
 		return err
 	}
 	if err := sandboxupdateops.Add(m); err != nil {
+		return err
+	}
+	if err := securitytokenrefresh.Add(m); err != nil {
 		return err
 	}
 	return nil
