@@ -88,3 +88,48 @@ func TestSetupWithManager_Compiles(_ *testing.T) {
 	// wiring broke.
 	var _ func(ctrl.Manager) error = (*Reconciler)(nil).SetupWithManager
 }
+
+func TestNewReconciler_AppliesDefaults(t *testing.T) {
+	tests := []struct {
+		name          string
+		opts          Options
+		wantWorkers   int
+		wantBufferCap int
+	}{
+		{
+			name:          "zero options gets both defaults",
+			opts:          Options{},
+			wantWorkers:   defaultWorkers,
+			wantBufferCap: defaultChannelBuffer,
+		},
+		{
+			name:          "negative workers clamped to default",
+			opts:          Options{Workers: -3, ChannelBuffer: 100},
+			wantWorkers:   defaultWorkers,
+			wantBufferCap: 100,
+		},
+		{
+			name:          "negative buffer clamped to default",
+			opts:          Options{Workers: 4, ChannelBuffer: -1},
+			wantWorkers:   4,
+			wantBufferCap: defaultChannelBuffer,
+		},
+		{
+			name:          "explicit values pass through",
+			opts:          Options{Workers: 2, ChannelBuffer: 16},
+			wantWorkers:   2,
+			wantBufferCap: 16,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := NewReconciler(tt.opts)
+			if r.workers != tt.wantWorkers {
+				t.Errorf("workers = %d, want %d", r.workers, tt.wantWorkers)
+			}
+			if got := cap(r.eventChan); got != tt.wantBufferCap {
+				t.Errorf("eventChan cap = %d, want %d", got, tt.wantBufferCap)
+			}
+		})
+	}
+}
