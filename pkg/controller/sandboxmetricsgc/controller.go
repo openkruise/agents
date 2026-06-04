@@ -21,7 +21,10 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	sandboxctrl "github.com/openkruise/agents/pkg/controller/sandbox"
@@ -84,4 +87,15 @@ func (r *Reconciler) Enqueue(namespace, name string) {
 func (r *Reconciler) Reconcile(_ context.Context, req ctrl.Request) (ctrl.Result, error) {
 	sandboxctrl.DeleteSandboxMetrics(req.Namespace, req.Name)
 	return ctrl.Result{}, nil
+}
+
+// SetupWithManager registers the controller with the manager using a Channel
+// source backed by r.eventChan. Workqueue dedup happens automatically once
+// requests reach the controller queue.
+func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
+	return ctrl.NewControllerManagedBy(mgr).
+		Named("sandbox-metrics-gc").
+		WithOptions(controller.Options{MaxConcurrentReconciles: r.workers}).
+		WatchesRawSource(source.Channel(r.eventChan, &handler.EnqueueRequestForObject{})).
+		Complete(r)
 }
