@@ -6,7 +6,7 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=1 go build -buildmode=c-shared -trimpath -ldflags="-s -w" -o sandbox-gateway.so ./cmd/sandbox-gateway/.
 
-FROM envoyproxy/envoy:contrib-v1.37.1
+FROM envoyproxy/envoy:contrib-v1.37.3
 
 COPY --from=builder /build/sandbox-gateway.so /etc/envoy/sandbox-gateway.so
 # COPY envoy.yaml /etc/envoy/envoy.yaml

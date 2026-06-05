@@ -47,6 +47,8 @@ github.com/emicklei/go-restful/v3 v3.12.2 h1:DhwDP0vY3k8ZzE0RunuJy8GhNpPL6zqLkDf
 github.com/emicklei/go-restful/v3 v3.12.2/go.mod h1:6n3XBCmQQb25CM2LCACGz8ukIrRry+4bhvbpWn3mrbc=
 github.com/envoyproxy/envoy v1.37.1 h1:6EssOVUJqvlGQAWbGGobe3p8y7MepNhs8De4pXfqgBw=
 github.com/envoyproxy/envoy v1.37.1/go.mod h1:B54Cuqc1UgTw7dhKzh6HYfBDRi2pXczlQlRY38Py2yE=
+github.com/envoyproxy/envoy v1.37.3 h1:rexuy7O5r3gEoDBt4S0ophrrX5SYfOdbtG78Tw781xo=
+github.com/envoyproxy/envoy v1.37.3/go.mod h1:B54Cuqc1UgTw7dhKzh6HYfBDRi2pXczlQlRY38Py2yE=
 github.com/envoyproxy/go-control-plane/envoy v1.36.0 h1:yg/JjO5E7ubRyKX3m07GF3reDNEnfOboJ0QySbH736g=
 github.com/envoyproxy/go-control-plane/envoy v1.36.0/go.mod h1:ty89S1YCCVruQAm9OtKeEkQLTb+Lkz0k8v9W0Oxsv98=
 github.com/envoyproxy/protoc-gen-validate v1.2.1 h1:DEo3O99U8j4hBFwbJfrz9VtgcDfUKS7KJ7spH3d86P8=

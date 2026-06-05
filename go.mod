@@ -8,7 +8,7 @@ require (
 	github.com/cncf/xds/go v0.0.0-20250501225837-2ac532fd4443
 	github.com/container-storage-interface/spec v1.9.0
 	github.com/distribution/reference v0.6.0
-	github.com/envoyproxy/envoy v1.37.1
+	github.com/envoyproxy/envoy v1.37.3
 	github.com/envoyproxy/go-control-plane/envoy v1.36.0
 	github.com/go-logr/logr v1.4.3
 	github.com/golang/protobuf v1.5.4
