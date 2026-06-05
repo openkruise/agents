@@ -17,14 +17,11 @@ limitations under the License.
 package core
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
@@ -80,59 +77,4 @@ func GeneratePVCName(templateName, sandboxName string) (string, error) {
 
 func GetControllerKey(obj client.Object) string {
 	return types.NamespacedName{Namespace: obj.GetNamespace(), Name: obj.GetName()}.String()
-}
-
-func GeneratePodFromSandbox(ctx context.Context, cli client.Client, box *agentsv1alpha1.Sandbox, revision string) (*corev1.Pod, error) {
-	podTemplate, err := utils.GetTemplateSpec(ctx, cli, box.Namespace, &box.Spec.EmbeddedSandboxTemplate)
-	if err != nil {
-		if box.Spec.TemplateRef != nil {
-			klog.ErrorS(err, "failed to get sandbox template", "sandbox", klog.KObj(box), "template", box.Spec.TemplateRef.Name)
-		} else {
-			klog.ErrorS(err, "failed to get sandbox template", "sandbox", klog.KObj(box))
-		}
-		return nil, err
-	}
-	if podTemplate == nil {
-		return nil, fmt.Errorf("pod template not found in sandbox %s/%s", box.Namespace, box.Name)
-	}
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace:       box.Namespace,
-			Name:            box.Name,
-			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(box, sandboxControllerKind)},
-			Labels:          podTemplate.Labels,
-			Annotations:     podTemplate.Annotations,
-		},
-		Spec: podTemplate.Spec,
-	}
-	if pod.Annotations == nil {
-		pod.Annotations = map[string]string{}
-	}
-	pod.Annotations[utils.PodAnnotationCreatedBy] = utils.CreatedBySandbox
-	if pod.Labels == nil {
-		pod.Labels = map[string]string{}
-	}
-	pod.Labels[utils.PodLabelCreatedBy] = utils.CreatedBySandbox
-	// todo, when resume, create Pod based on the revision from the paused state.
-	pod.Labels[agentsv1alpha1.PodLabelTemplateHash] = revision
-
-	volumes := make([]corev1.Volume, 0, len(box.Spec.VolumeClaimTemplates))
-	for _, template := range box.Spec.VolumeClaimTemplates {
-		pvcName, err := GeneratePVCName(template.Name, box.Name)
-		if err != nil {
-			klog.ErrorS(err, "failed to generate PVC name", "sandbox", klog.KObj(box), "template", template.Name)
-			return nil, err
-		}
-		volumes = append(volumes, corev1.Volume{
-			Name: template.Name,
-			VolumeSource: corev1.VolumeSource{
-				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-					ClaimName: pvcName,
-					ReadOnly:  false,
-				},
-			},
-		})
-	}
-	pod.Spec.Volumes = append(pod.Spec.Volumes, volumes...)
-	return pod, nil
 }

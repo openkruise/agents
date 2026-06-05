@@ -32,13 +32,9 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
-	"github.com/openkruise/agents/pkg/features"
-	"github.com/openkruise/agents/pkg/identity"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
-	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 	"github.com/openkruise/agents/pkg/utils/inplaceupdate"
-	"github.com/openkruise/agents/pkg/utils/sidecarutils"
 )
 
 const CommonControlName = "common"
@@ -61,6 +57,8 @@ type commonControl struct {
 	recorder             record.EventRecorder
 	inplaceUpdateControl *inplaceupdate.InPlaceUpdateControl
 	rateLimiter          *RateLimiter
+	checkpointControl    *CheckpointControl
+	podControl           *PodControl
 	lifecycleHookFunc    LifecycleHookFunc
 	initializer          SandboxInitializer
 }
@@ -71,6 +69,8 @@ func NewCommonControl(args SandboxControlArgs) SandboxControl {
 		recorder:             args.Recorder,
 		inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(args.Client, inplaceupdate.DefaultGeneratePatchBodyFunc),
 		rateLimiter:          args.RateLimiter,
+		checkpointControl:    args.CheckpointControl,
+		podControl:           args.PodControl,
 		lifecycleHookFunc:    ExecuteLifecycleHook,
 		initializer: &defaultSandboxInitializer{
 			client:          args.Client,
@@ -88,7 +88,7 @@ func (r *commonControl) EnsureSandboxRunning(ctx context.Context, args EnsureFun
 		if requeueAfter, shouldReturn := r.rateLimiter.getRateLimitDuration(ctx, pod, box); shouldReturn {
 			return requeueAfter, nil
 		}
-		_, err := r.createPod(ctx, box, newStatus)
+		_, err := r.podControl.CreatePod(ctx, CreatePodArgs{Box: box, NewStatus: newStatus})
 		return 0, err
 	}
 
@@ -189,6 +189,7 @@ func (r *commonControl) EnsureSandboxPaused(ctx context.Context, args EnsureFunc
 	// cond.Status == metav1.ConditionFalse just for sure
 	if pod == nil && cond.Status == metav1.ConditionFalse {
 		cond.Status = metav1.ConditionTrue
+		cond.Reason = agentsv1alpha1.SandboxPausedReasonSetPause
 		cond.LastTransitionTime = metav1.Now()
 		utils.SetSandboxCondition(newStatus, *cond)
 		klog.InfoS("Pod deletion completed, pause phase completed", "sandbox", klog.KObj(box))
@@ -199,6 +200,12 @@ func (r *commonControl) EnsureSandboxPaused(ctx context.Context, args EnsureFunc
 		klog.InfoS("Sandbox wait pod paused", "sandbox", klog.KObj(box))
 		return nil
 	}
+
+	// Validate images and create pod-info checkpoint before deletion
+	if rejected := r.checkpointControl.PreparePodInfo(ctx, pod, box, newStatus, cond); rejected {
+		return nil
+	}
+
 	err := client.IgnoreNotFound(r.Delete(ctx, pod, &client.DeleteOptions{GracePeriodSeconds: ptr.To(int64(5))}))
 	if err != nil {
 		klog.ErrorS(err, "Delete pod failed", "sandbox", klog.KObj(box))
@@ -220,7 +227,8 @@ func (r *commonControl) EnsureSandboxResumed(ctx context.Context, args EnsureFun
 	// first create pod
 	var err error
 	if pod == nil {
-		_, err = r.createPod(ctx, box, newStatus)
+		delta := r.checkpointControl.GetPodTemplateDelta(ctx, box)
+		_, err = r.podControl.CreatePod(ctx, CreatePodArgs{Box: box, NewStatus: newStatus, PodTemplateDelta: delta})
 		return err
 	}
 
@@ -248,6 +256,9 @@ func (r *commonControl) EnsureSandboxResumed(ctx context.Context, args EnsureFun
 			NodeName: pod.Spec.NodeName,
 			PodUID:   pod.UID,
 		}
+
+		// Delete all Checkpoint CRs after successful resume (pod is running and ready)
+		r.checkpointControl.Cleanup(ctx, box)
 
 		// re-initialize sandbox after resuming or upgrading (includes runtime re-init and CSI storage re-mount)
 		if err := r.initializer.Initialize(ctx, box, newStatus); err != nil {
@@ -437,56 +448,6 @@ func (r *commonControl) EnsureSandboxTerminated(ctx context.Context, args Ensure
 	return nil
 }
 
-func (r *commonControl) createPod(ctx context.Context, box *agentsv1alpha1.Sandbox, newStatus *agentsv1alpha1.SandboxStatus) (*corev1.Pod, error) {
-
-	// Ensure all registered CA bundle Secrets exist in the sandbox namespace
-	// before creating the pod. Whether a given spec is actually copied is
-	// decided by its CABundleSpec.EnabledFor predicate (e.g. the gateway CA
-	// spec is bound at controller startup to require the traffic-proxy runtime),
-	// so a missing source Secret only blocks creation when the spec applies.
-	if shouldInjectCABundles() {
-		if err := identity.EnsureAllCACerts(ctx, r.Client, box, box.Namespace); err != nil {
-			klog.ErrorS(err, "failed to ensure CA bundle secrets", "sandbox", klog.KObj(box))
-			return nil, err
-		}
-	}
-
-	pod, err := GeneratePodFromSandbox(ctx, r.Client, box, newStatus.UpdateRevision)
-	if err != nil {
-		return nil, err
-	}
-
-	// to avoid the performance issue, using the controller to inject csi containers
-	// fetch the configmap and parse the configuration based on the controller runtime
-	injectErr := sidecarutils.InjectSandboxRuntimes(ctx, box, pod, r.Client)
-	if injectErr != nil {
-		klog.ErrorS(injectErr, "failed to inject pod template with csi sidecar or runtime sidecar", "sandbox", klog.KObj(box))
-		return nil, injectErr
-	}
-
-	ScaleExpectation.ExpectScale(GetControllerKey(box), expectations.Create, box.Name)
-	err = r.Create(ctx, pod)
-	if err != nil {
-		ScaleExpectation.ObserveScale(GetControllerKey(box), expectations.Create, box.Name)
-		if !errors.IsAlreadyExists(err) {
-			klog.ErrorS(err, "create pod failed", "sandbox", klog.KObj(box))
-			return nil, err
-		}
-	}
-	klog.InfoS("Create pod success", "sandbox", klog.KObj(box), "Body", utils.DumpJson(pod))
-	return pod, nil
-}
-
-// shouldInjectCABundles is the cluster-level kill switch for the CA bundle
-// ensure/inject pipeline. It only checks SecurityIdentityProviderGate; whether
-// a particular sandbox actually needs a given CA spec is decided exclusively
-// by that spec's EnabledFor predicate (bound via identity.BindCAEnabledFor at
-// controller startup). Keeping the runtime-level decision in a single place
-// avoids drift between the caller-side gate and the per-spec predicate.
-func shouldInjectCABundles() bool {
-	return utilfeature.DefaultFeatureGate.Enabled(features.SecurityIdentityProviderGate)
-}
-
 func (r *commonControl) handleInplaceUpdateSandbox(ctx context.Context, args EnsureFuncArgs) (bool, error) {
 	pod, box, newStatus := args.Pod, args.Box, args.NewStatus
 	handler := &CommonInPlaceUpdateHandler{
@@ -522,7 +483,7 @@ func (r *commonControl) performRecreateUpgrade(ctx context.Context, args EnsureF
 	// Step 2: Create new Pod (old pod deleted)
 	if pod == nil {
 		klog.InfoS("Creating new pod for upgrade", "sandbox", klog.KObj(box))
-		newPod, err := r.createPod(ctx, box, newStatus)
+		newPod, err := r.podControl.CreatePod(ctx, CreatePodArgs{Box: box, NewStatus: newStatus})
 		if err != nil {
 			klog.ErrorS(err, "Failed to create new pod for upgrade", "sandbox", klog.KObj(box))
 			return false, err

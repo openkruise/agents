@@ -62,10 +62,12 @@ type SandboxControl interface {
 }
 
 type SandboxControlArgs struct {
-	Client      client.Client
-	APIReader   client.Reader
-	Recorder    record.EventRecorder
-	RateLimiter *RateLimiter
+	Client            client.Client
+	APIReader         client.Reader
+	Recorder          record.EventRecorder
+	RateLimiter       *RateLimiter
+	CheckpointControl *CheckpointControl
+	PodControl        *PodControl
 }
 
 func NewSandboxControl(args SandboxControlArgs) map[string]SandboxControl {

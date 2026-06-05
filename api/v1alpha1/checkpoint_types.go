@@ -18,6 +18,7 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 const (
@@ -26,6 +27,12 @@ const (
 
 	// CheckpointLabelSandboxName is checkpointed sandbox name
 	CheckpointLabelSandboxName = InternalPrefix + "sandbox-name"
+
+	// CheckpointLabelType is the checkpoint type label key
+	CheckpointLabelType = InternalPrefix + "checkpoint-type"
+
+	// CheckpointTypePodInfo indicates this checkpoint stores pod info delta
+	CheckpointTypePodInfo = "pod-info"
 
 	CheckpointPersistentContentMemory     = "memory"
 	CheckpointPersistentContentFilesystem = "filesystem"
@@ -88,6 +95,14 @@ type CheckpointStatus struct {
 	// CompletionTime is checkpoint completed time, and phase is Succeeded or Failed.
 	// +kubebuilder:validation:Optional
 	CompletionTime *metav1.Time `json:"completionTime,omitempty"`
+
+	// PodTemplateDelta stores a Strategic Merge Patch that captures the delta between
+	// the running Pod at pause time and the base Pod generated from sandbox.spec.template
+	// + runtime injection. Applied at resume time to reconstruct the Pod faithfully.
+	// +optional
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:Schemaless
+	PodTemplateDelta runtime.RawExtension `json:"podTemplateDelta,omitempty"`
 }
 
 // CheckpointPhase is a label for the condition of a pod at the current time.

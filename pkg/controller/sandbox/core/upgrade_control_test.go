@@ -117,6 +117,7 @@ func newTestCommonControl(hookFunc LifecycleHookFunc, objects ...client.Object) 
 		recorder:             record.NewFakeRecorder(100),
 		inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
 		rateLimiter:          NewRateLimiter(),
+		podControl:           NewPodControl(fakeClient, record.NewFakeRecorder(100), GeneratePodFromSandbox),
 		lifecycleHookFunc:    hookFunc,
 		initializer:          &defaultSandboxInitializer{},
 	}

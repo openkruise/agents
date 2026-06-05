@@ -745,8 +745,10 @@ func TestSandboxReconciler_Reconcile(t *testing.T) {
 					Client:      client,
 					Recorder:    fakeRecorder,
 					RateLimiter: rl,
+					PodControl:  core.NewPodControl(client, fakeRecorder, core.GeneratePodFromSandbox),
 				}),
-				rateLimiter: rl,
+				checkpointControl: core.NewCheckpointControl(client, fakeRecorder),
+				rateLimiter:       rl,
 			}
 			req := ctrl.Request{
 				NamespacedName: types.NamespacedName{
@@ -951,8 +953,10 @@ func TestSandboxReconciler_ShutdownTime(t *testing.T) {
 			Client:      client,
 			Recorder:    fakeRecorder,
 			RateLimiter: rl,
+			PodControl:  core.NewPodControl(client, fakeRecorder, core.GeneratePodFromSandbox),
 		}),
-		rateLimiter: rl,
+		checkpointControl: core.NewCheckpointControl(client, fakeRecorder),
+		rateLimiter:       rl,
 	}
 
 	// Create a sandbox with a shutdown time in the past
@@ -1143,8 +1147,10 @@ func TestSandboxReconciler_AutoPauseBranch(t *testing.T) {
 					Client:      cli,
 					Recorder:    fakeRecorder,
 					RateLimiter: rl,
+					PodControl:  core.NewPodControl(cli, fakeRecorder, core.GeneratePodFromSandbox),
 				}),
-				rateLimiter: rl,
+				checkpointControl: core.NewCheckpointControl(cli, fakeRecorder),
+				rateLimiter:       rl,
 			}
 
 			req := ctrl.Request{
@@ -2026,6 +2032,14 @@ func TestCalculateStatus(t *testing.T) {
 		},
 	}
 
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	reconciler := &SandboxReconciler{
+		checkpointControl: core.NewCheckpointControl(fakeClient, record.NewFakeRecorder(10)),
+	}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Ensure pod has matching template hash to avoid false upgrade trigger
@@ -2045,7 +2059,7 @@ func TestCalculateStatus(t *testing.T) {
 				NewStatus: tt.initStatus,
 			}
 
-			newStatus, shouldRequeue := calculateStatus(args)
+			newStatus, shouldRequeue := reconciler.calculateStatus(context.Background(), args)
 
 			if newStatus.Phase != tt.expectedPhase {
 				t.Errorf("Expected phase %s, got %s", tt.expectedPhase, newStatus.Phase)
@@ -2475,8 +2489,10 @@ func TestReconcile_SandboxLifecycle_ClearSpecThenDelete(t *testing.T) {
 			Client:      fakeClient,
 			Recorder:    fakeRecorder,
 			RateLimiter: rl,
+			PodControl:  core.NewPodControl(fakeClient, fakeRecorder, core.GeneratePodFromSandbox),
 		}),
-		rateLimiter: rl,
+		checkpointControl: core.NewCheckpointControl(fakeClient, fakeRecorder),
+		rateLimiter:       rl,
 	}
 
 	req := ctrl.Request{
@@ -2804,8 +2820,10 @@ func TestSandboxReconciler_Reconcile_RateLimitFeatureGate(t *testing.T) {
 					Client:      fakeClient,
 					Recorder:    fakeRecorder,
 					RateLimiter: rl,
+					PodControl:  core.NewPodControl(fakeClient, fakeRecorder, core.GeneratePodFromSandbox),
 				}),
-				rateLimiter: rl,
+				checkpointControl: core.NewCheckpointControl(fakeClient, fakeRecorder),
+				rateLimiter:       rl,
 			}
 
 			req := ctrl.Request{
@@ -2847,8 +2865,10 @@ func TestReconcile_SandboxNotFoundCleanup(t *testing.T) {
 			Client:      fakeClient,
 			Recorder:    fakeRecorder,
 			RateLimiter: rl,
+			PodControl:  core.NewPodControl(fakeClient, fakeRecorder, core.GeneratePodFromSandbox),
 		}),
-		rateLimiter:    rl,
+		checkpointControl: core.NewCheckpointControl(fakeClient, fakeRecorder),
+		rateLimiter:       rl,
 		metricsCleanup: &fakeEnqueuer{},
 	}
 
@@ -2916,8 +2936,10 @@ func TestReconcile_ScaleExpectationUnsatisfied(t *testing.T) {
 			Client:      fakeClient,
 			Recorder:    fakeRecorder,
 			RateLimiter: rl,
+			PodControl:  core.NewPodControl(fakeClient, fakeRecorder, core.GeneratePodFromSandbox),
 		}),
-		rateLimiter: rl,
+		checkpointControl: core.NewCheckpointControl(fakeClient, fakeRecorder),
+		rateLimiter:       rl,
 	}
 
 	// Set up unsatisfied ScaleExpectation (expect a pod that won't be observed)
@@ -2977,8 +2999,10 @@ func TestReconcile_ResourceVersionExpectationUnsatisfied(t *testing.T) {
 			Client:      fakeClient,
 			Recorder:    fakeRecorder,
 			RateLimiter: rl,
+			PodControl:  core.NewPodControl(fakeClient, fakeRecorder, core.GeneratePodFromSandbox),
 		}),
-		rateLimiter: rl,
+		checkpointControl: core.NewCheckpointControl(fakeClient, fakeRecorder),
+		rateLimiter:       rl,
 	}
 
 	// Create a fake object with the same UID but a much higher resource version
@@ -3044,8 +3068,10 @@ func TestReconcile_ScaleExpectationTimeout(t *testing.T) {
 			Client:      fakeClient,
 			Recorder:    fakeRecorder,
 			RateLimiter: rl,
+			PodControl:  core.NewPodControl(fakeClient, fakeRecorder, core.GeneratePodFromSandbox),
 		}),
-		rateLimiter: rl,
+		checkpointControl: core.NewCheckpointControl(fakeClient, fakeRecorder),
+		rateLimiter:       rl,
 	}
 
 	// Set up unsatisfied ScaleExpectation
@@ -3108,8 +3134,10 @@ func TestReconcile_ResourceVersionExpectationTimeout(t *testing.T) {
 			Client:      fakeClient,
 			Recorder:    fakeRecorder,
 			RateLimiter: rl,
+			PodControl:  core.NewPodControl(fakeClient, fakeRecorder, core.GeneratePodFromSandbox),
 		}),
-		rateLimiter: rl,
+		checkpointControl: core.NewCheckpointControl(fakeClient, fakeRecorder),
+		rateLimiter:       rl,
 	}
 
 	// Create expectation with very high resource version
@@ -3190,8 +3218,10 @@ func TestReconcile_GetPodNonNotFoundError(t *testing.T) {
 			Client:      fakeClient,
 			Recorder:    fakeRecorder,
 			RateLimiter: rl,
+			PodControl:  core.NewPodControl(fakeClient, fakeRecorder, core.GeneratePodFromSandbox),
 		}),
-		rateLimiter: rl,
+		checkpointControl: core.NewCheckpointControl(fakeClient, fakeRecorder),
+		rateLimiter:       rl,
 	}
 
 	req := ctrl.Request{
@@ -3260,8 +3290,10 @@ func TestReconcile_UpgradingPhase(t *testing.T) {
 			Client:      fakeClient,
 			Recorder:    fakeRecorder,
 			RateLimiter: rl,
+			PodControl:  core.NewPodControl(fakeClient, fakeRecorder, core.GeneratePodFromSandbox),
 		}),
-		rateLimiter: rl,
+		checkpointControl: core.NewCheckpointControl(fakeClient, fakeRecorder),
+		rateLimiter:       rl,
 	}
 
 	req := ctrl.Request{
@@ -3364,8 +3396,10 @@ func TestReconcile_ErrorPath_UpdatesSandboxStatus(t *testing.T) {
 			Client:      fakeClient,
 			Recorder:    fakeRecorder,
 			RateLimiter: rl,
+			PodControl:  core.NewPodControl(fakeClient, fakeRecorder, core.GeneratePodFromSandbox),
 		}),
-		rateLimiter: rl,
+		checkpointControl: core.NewCheckpointControl(fakeClient, fakeRecorder),
+		rateLimiter:       rl,
 	}
 
 	req := ctrl.Request{
@@ -3459,8 +3493,10 @@ func TestReconcile_ErrorPath_StatusUpdateAlsoFails(t *testing.T) {
 			Client:      fakeClient,
 			Recorder:    fakeRecorder,
 			RateLimiter: rl,
+			PodControl:  core.NewPodControl(fakeClient, fakeRecorder, core.GeneratePodFromSandbox),
 		}),
-		rateLimiter: rl,
+		checkpointControl: core.NewCheckpointControl(fakeClient, fakeRecorder),
+		rateLimiter:       rl,
 	}
 
 	req := ctrl.Request{
@@ -3836,7 +3872,14 @@ func TestUpdateSandboxStatus_Upgrading_RevisionChanged_ResetsToPreUpgrade(t *tes
 		NewStatus: initStatus,
 	}
 
-	newStatus, _ := calculateStatus(args)
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	reconciler := &SandboxReconciler{
+		checkpointControl: core.NewCheckpointControl(fakeClient, record.NewFakeRecorder(10)),
+	}
+	newStatus, _ := reconciler.calculateStatus(context.Background(), args)
 
 	// The computed hash from box.Spec should differ from "old-revision",
 	// so the upgrade lifecycle should be reset to PreUpgrade.
@@ -3893,7 +3936,14 @@ func TestUpdateSandboxStatus_Upgrading_RevisionUnchanged_NoReset(t *testing.T) {
 		NewStatus: initStatus,
 	}
 
-	newStatus, _ := calculateStatus(args)
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	reconciler := &SandboxReconciler{
+		checkpointControl: core.NewCheckpointControl(fakeClient, record.NewFakeRecorder(10)),
+	}
+	newStatus, _ := reconciler.calculateStatus(context.Background(), args)
 
 	// Revision unchanged, so the condition should NOT be reset
 	upgradeCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))

@@ -71,14 +71,20 @@ func Add(mgr manager.Manager, metricsCleanup Enqueuer) error {
 	}
 
 	rateLimiter := core.NewRateLimiter()
+	recorder := mgr.GetEventRecorderFor("sandbox")
+	checkpointControl := core.NewCheckpointControl(mgr.GetClient(), recorder)
+	podControl := core.NewPodControl(mgr.GetClient(), recorder, core.GeneratePodFromSandbox)
 	err := (&SandboxReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:            mgr.GetClient(),
+		Scheme:            mgr.GetScheme(),
+		checkpointControl: checkpointControl,
 		controls: core.NewSandboxControl(core.SandboxControlArgs{
-			Client:      mgr.GetClient(),
-			APIReader:   mgr.GetAPIReader(),
-			Recorder:    mgr.GetEventRecorderFor("sandbox"),
-			RateLimiter: rateLimiter,
+			Client:            mgr.GetClient(),
+			APIReader:         mgr.GetAPIReader(),
+			Recorder:          recorder,
+			RateLimiter:       rateLimiter,
+			CheckpointControl: checkpointControl,
+			PodControl:        podControl,
 		}), rateLimiter: rateLimiter,
 		metricsCleanup: metricsCleanup,
 	}).SetupWithManager(mgr)
@@ -92,9 +98,10 @@ func Add(mgr manager.Manager, metricsCleanup Enqueuer) error {
 // SandboxReconciler reconciles a Sandbox object
 type SandboxReconciler struct {
 	client.Client
-	Scheme         *runtime.Scheme
-	controls       map[string]core.SandboxControl
-	rateLimiter    *core.RateLimiter
+	Scheme            *runtime.Scheme
+	controls          map[string]core.SandboxControl
+	rateLimiter       *core.RateLimiter
+	checkpointControl *core.CheckpointControl
 	metricsCleanup Enqueuer
 }
 
@@ -107,7 +114,6 @@ type SandboxReconciler struct {
 // +kubebuilder:rbac:groups=core,resources=pods/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;update;patch
 // +kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create
 
 //nolint:gocyclo // This function handles multiple reconciliation scenarios which require branching logic
 func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (crl ctrl.Result, err error) {
@@ -197,7 +203,14 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 
 	// ensure sandbox terminating
 	if !box.DeletionTimestamp.IsZero() {
-		return r.handleTerminating(ctx, args)
+		if box.Status.Phase != agentsv1alpha1.SandboxFailed && box.Status.Phase != agentsv1alpha1.SandboxSucceeded {
+			klog.InfoS("Sandbox Delete started", "sandbox", klog.KObj(box), "previousPhase", string(box.Status.Phase))
+		}
+		result, termErr := r.handleTerminating(ctx, args)
+		if termErr == nil {
+			klog.InfoS("Sandbox Delete finished", "sandbox", klog.KObj(box))
+		}
+		return result, termErr
 	}
 
 	// if sandbox phase = Failed, Success
@@ -244,11 +257,16 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 
 	// calculate sandbox status
 	var shouldRequeue bool
-	newStatus, shouldRequeue = calculateStatus(args)
+	newStatus, shouldRequeue = r.calculateStatus(ctx, args)
 	if shouldRequeue {
 		return reconcile.Result{RequeueAfter: requeueAfter}, r.updateSandboxStatus(ctx, *newStatus, box)
 	}
 
+	if box.Status.Phase != newStatus.Phase {
+		klog.InfoS("Sandbox "+string(newStatus.Phase)+" started", "sandbox", klog.KObj(box), "previousPhase", string(box.Status.Phase))
+	}
+
+	phaseBefore := newStatus.Phase
 	switch newStatus.Phase {
 	case agentsv1alpha1.SandboxPending:
 		requeueAfter, err = r.getControl(args.Pod).EnsureSandboxRunning(ctx, args)
@@ -269,6 +287,9 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 			klog.ErrorS(retErr, "failed to persist upgrade status on error", "sandbox", klog.KObj(box))
 		}
 		return reconcile.Result{}, err
+	}
+	if newStatus.Phase != phaseBefore {
+		klog.InfoS("Sandbox "+string(phaseBefore)+" finished", "sandbox", klog.KObj(box), "nextPhase", string(newStatus.Phase))
 	}
 	return ctrl.Result{RequeueAfter: requeueAfter}, r.updateSandboxStatus(ctx, *newStatus, box)
 }
@@ -332,7 +353,7 @@ func (r *SandboxReconciler) updateSandboxStatus(ctx context.Context, newStatus a
 	return nil
 }
 
-func calculateStatus(args core.EnsureFuncArgs) (*agentsv1alpha1.SandboxStatus, bool) {
+func (r *SandboxReconciler) calculateStatus(ctx context.Context, args core.EnsureFuncArgs) (*agentsv1alpha1.SandboxStatus, bool) {
 	pod, box, newStatus := args.Pod, args.Box, args.NewStatus
 
 	hash, _ := core.HashSandbox(box)
@@ -366,6 +387,9 @@ func calculateStatus(args core.EnsureFuncArgs) (*agentsv1alpha1.SandboxStatus, b
 			// The paused and resumed condition are exclusive
 			utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionResumed))
 			newStatus.Phase = agentsv1alpha1.SandboxPaused
+			// Clean up checkpoint info on first entry into paused state
+			// Fallback: normally no checkpoint delta should exist at this point
+			r.checkpointControl.Cleanup(ctx, box)
 			// Check for upgrade: if template has changed (hash mismatch), transition to Upgrading phase
 		} else if pod != nil && pod.Labels[agentsv1alpha1.PodLabelTemplateHash] != newStatus.UpdateRevision &&
 			box.Spec.UpgradePolicy != nil && box.Spec.UpgradePolicy.Type == agentsv1alpha1.SandboxUpgradePolicyRecreate {
@@ -433,7 +457,9 @@ func (r *SandboxReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		WithOptions(controller.Options{MaxConcurrentReconciles: concurrentReconciles}).
 		For(&agentsv1alpha1.Sandbox{}).
 		Named("sandbox-controller").
-		Watches(&agentsv1alpha1.Sandbox{}, &handler.EnqueueRequestForObject{}).Watches(&corev1.Pod{}, &SandboxPodEventHandler{}).
+		Watches(&agentsv1alpha1.Sandbox{}, &handler.EnqueueRequestForObject{}).
+		Watches(&corev1.Pod{}, &SandboxPodEventHandler{}).
+		Watches(&agentsv1alpha1.Checkpoint{}, &CheckpointEventHandler{}).
 		Complete(r)
 }
 

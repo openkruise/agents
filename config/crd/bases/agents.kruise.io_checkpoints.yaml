@@ -93,6 +93,11 @@ spec:
               phase:
                 description: Checkpoint Phase
                 type: string
+              podTemplateDelta:
+                description: |-
+                  PodTemplateDelta stores a Strategic Merge Patch that captures the delta between
+                  the running Pod at pause time and the base Pod generated from sandbox.spec.template
+                x-kubernetes-preserve-unknown-fields: true
             type: object
         required:
         - spec

@@ -53,6 +53,10 @@ const (
 	// SecurityIdentityProviderGate enables issuing sandbox access tokens via an external
 	// identity provider service instead of random UUID generation.
 	SecurityIdentityProviderGate featuregate.Feature = "SecurityIdentityProvider"
+
+	// SandboxPauseCheckpointGate enables creating Checkpoint CRs during sandbox pause
+	// to capture pod state for resume.
+	SandboxPauseCheckpointGate featuregate.Feature = "SandboxPauseCheckpoint"
 )
 
 var defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
@@ -65,6 +69,7 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
 	SandboxInPlaceResourceResizeGate: {Default: true, PreRelease: featuregate.Alpha},
 	SandboxMultiClusterNaming:        {Default: false, PreRelease: featuregate.Alpha},
 	SecurityIdentityProviderGate:     {Default: false, PreRelease: featuregate.Alpha},
+	SandboxPauseCheckpointGate:       {Default: false, PreRelease: featuregate.Alpha},
 }
 
 func init() {

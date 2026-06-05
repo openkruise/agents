@@ -54,6 +54,10 @@ func RegisterFieldIndexes(c cache.Cache) error {
 		if err = c.IndexField(context.TODO(), &agentsv1alpha1.SandboxTemplate{}, IndexNameForOwnerRefUID, OwnerIndexFunc); err != nil {
 			return
 		}
+		// checkpoint ownerReference
+		if err = c.IndexField(context.TODO(), &agentsv1alpha1.Checkpoint{}, IndexNameForOwnerRefUID, OwnerIndexFunc); err != nil {
+			return
+		}
 	})
 	return err
 }

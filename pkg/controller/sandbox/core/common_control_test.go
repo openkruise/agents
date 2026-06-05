@@ -260,6 +260,7 @@ func TestCommonControl_EnsureSandboxRunning(t *testing.T) {
 				recorder:             record.NewFakeRecorder(10),
 				inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
 				rateLimiter:          rl,
+				podControl:           NewPodControl(fakeClient, record.NewFakeRecorder(10), GeneratePodFromSandbox),
 			}
 
 			requeue, err := control.EnsureSandboxRunning(context.TODO(), tt.args)
@@ -446,6 +447,7 @@ func TestCommonControl_EnsureSandboxUpdated(t *testing.T) {
 				Client:               fc,
 				recorder:             record.NewFakeRecorder(10),
 				inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fc, inplaceupdate.DefaultGeneratePatchBodyFunc),
+				podControl:           NewPodControl(fc, record.NewFakeRecorder(10), GeneratePodFromSandbox),
 			}
 
 			err := control.EnsureSandboxUpdated(context.TODO(), tt.args)
@@ -588,6 +590,7 @@ func TestCommonControl_EnsureSandboxPaused(t *testing.T) {
 				Client:               fc,
 				recorder:             record.NewFakeRecorder(10),
 				inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fc, inplaceupdate.DefaultGeneratePatchBodyFunc),
+				podControl:           NewPodControl(fc, record.NewFakeRecorder(10), GeneratePodFromSandbox),
 			}
 
 			err := control.EnsureSandboxPaused(context.TODO(), tt.args)
@@ -911,6 +914,7 @@ func TestCommonControl_EnsureSandboxResumed(t *testing.T) {
 				recorder:             record.NewFakeRecorder(10),
 				inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fc, inplaceupdate.DefaultGeneratePatchBodyFunc),
 				initializer:          init,
+				podControl:           NewPodControl(fc, record.NewFakeRecorder(10), GeneratePodFromSandbox),
 			}
 
 			err := control.EnsureSandboxResumed(context.TODO(), tt.args)
@@ -1037,6 +1041,7 @@ func TestCommonControl_EnsureSandboxTerminated(t *testing.T) {
 				Client:               fc,
 				recorder:             record.NewFakeRecorder(10),
 				inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fc, inplaceupdate.DefaultGeneratePatchBodyFunc),
+				podControl:           NewPodControl(fc, record.NewFakeRecorder(10), GeneratePodFromSandbox),
 			}
 
 			err := control.EnsureSandboxTerminated(context.TODO(), tt.args)
@@ -1057,15 +1062,13 @@ func TestCommonControl_EnsureSandboxTerminated(t *testing.T) {
 	}
 }
 
-func TestCommonControl_createPod(t *testing.T) {
+func TestPodControl_CreatePod(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)
 	_ = agentsv1alpha1.AddToScheme(scheme)
 
-	control := &commonControl{
-		Client:   fake.NewClientBuilder().WithScheme(scheme).Build(),
-		recorder: record.NewFakeRecorder(10),
-	}
+	cli := fake.NewClientBuilder().WithScheme(scheme).Build()
+	control := NewPodControl(cli, record.NewFakeRecorder(10), GeneratePodFromSandbox)
 
 	sandbox := &agentsv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1096,9 +1099,9 @@ func TestCommonControl_createPod(t *testing.T) {
 		UpdateRevision: "rev1",
 	}
 
-	pod, err := control.createPod(context.TODO(), sandbox, status)
+	pod, err := control.CreatePod(context.TODO(), CreatePodArgs{Box: sandbox, NewStatus: status})
 	if err != nil {
-		t.Fatalf("createPod() error = %v", err)
+		t.Fatalf("CreatePod() error = %v", err)
 	}
 
 	if pod.Name != sandbox.Name {
@@ -1163,9 +1166,9 @@ func TestCommonControl_createPod(t *testing.T) {
 		},
 	}
 
-	podWithPVC, err := control.createPod(context.TODO(), sandboxWithPVC, status)
+	podWithPVC, err := control.CreatePod(context.TODO(), CreatePodArgs{Box: sandboxWithPVC, NewStatus: status})
 	if err != nil {
-		t.Fatalf("createPod() with PVC error = %v", err)
+		t.Fatalf("CreatePod() with PVC error = %v", err)
 	}
 
 	expectedPVCName, err := GeneratePVCName("www", "test-sandbox-with-pvc")
@@ -1205,6 +1208,139 @@ func TestCommonControl_createPod(t *testing.T) {
 	}
 }
 
+func TestPodControl_CreatePod_WithCheckpointDelta(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	tests := []struct {
+		name         string
+		delta        *runtime.RawExtension
+		expectLabels map[string]string
+		expectError  string
+	}{
+		{
+			name:  "nil delta - no patch applied",
+			delta: nil,
+		},
+		{
+			name: "valid delta - patches pod",
+			delta: &runtime.RawExtension{
+				Raw: []byte(`{"metadata":{"labels":{"checkpoint":"restored"}}}`),
+			},
+			expectLabels: map[string]string{"checkpoint": "restored"},
+		},
+		{
+			name: "invalid delta - logs warning but continues",
+			delta: &runtime.RawExtension{
+				Raw: []byte(`{invalid json`),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			recorder := record.NewFakeRecorder(10)
+			cli := fake.NewClientBuilder().WithScheme(scheme).Build()
+			control := NewPodControl(cli, recorder, GeneratePodFromSandbox)
+			sandbox := &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-sandbox", Namespace: "default"},
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "main", Image: "nginx:latest"}},
+							},
+						},
+					},
+				},
+			}
+			pod, err := control.CreatePod(context.TODO(), CreatePodArgs{
+				Box:              sandbox,
+				NewStatus:        &agentsv1alpha1.SandboxStatus{UpdateRevision: "rev1"},
+				PodTemplateDelta: tt.delta,
+			})
+			if tt.expectError != "" {
+				if err == nil {
+					t.Fatalf("expected error containing %q, got nil", tt.expectError)
+				}
+				if !reflect.DeepEqual(err.Error(), tt.expectError) {
+					t.Fatalf("expected error %q, got %q", tt.expectError, err.Error())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("CreatePod() error = %v", err)
+			}
+			for k, v := range tt.expectLabels {
+				if pod.Labels[k] != v {
+					t.Errorf("expected label %s=%s, got %s", k, v, pod.Labels[k])
+				}
+			}
+		})
+	}
+}
+
+func TestPodControl_CreatePod_GenerateError(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	generateErr := func(_ context.Context, _ PodGenerateArgs) (*corev1.Pod, error) {
+		return nil, fmt.Errorf("generate failed")
+	}
+	cli := fake.NewClientBuilder().WithScheme(scheme).Build()
+	control := NewPodControl(cli, record.NewFakeRecorder(10), generateErr)
+
+	_, err := control.CreatePod(context.TODO(), CreatePodArgs{
+		Box: &agentsv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-sandbox", Namespace: "default"},
+		},
+		NewStatus: &agentsv1alpha1.SandboxStatus{UpdateRevision: "rev1"},
+	})
+	if err == nil || err.Error() != "generate failed" {
+		t.Fatalf("expected generate failed error, got %v", err)
+	}
+}
+
+func TestPodControl_CreatePod_AlreadyExists(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	existingPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-sandbox", Namespace: "default"},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "main", Image: "nginx:latest"}},
+		},
+	}
+	cli := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existingPod).Build()
+	control := NewPodControl(cli, record.NewFakeRecorder(10), GeneratePodFromSandbox)
+
+	sandbox := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-sandbox", Namespace: "default"},
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "main", Image: "nginx:latest"}},
+					},
+				},
+			},
+		},
+	}
+	pod, err := control.CreatePod(context.TODO(), CreatePodArgs{
+		Box:       sandbox,
+		NewStatus: &agentsv1alpha1.SandboxStatus{UpdateRevision: "rev1"},
+	})
+	if err != nil {
+		t.Fatalf("CreatePod() should succeed on AlreadyExists, got error = %v", err)
+	}
+	if pod == nil {
+		t.Fatal("expected non-nil pod")
+	}
+}
+
 func TestCommonControl_handleInplaceUpdateSandbox(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)
@@ -1215,6 +1351,7 @@ func TestCommonControl_handleInplaceUpdateSandbox(t *testing.T) {
 		recorder: record.NewFakeRecorder(10),
 	}
 	control.inplaceUpdateControl = inplaceupdate.NewInPlaceUpdateControl(control.Client, inplaceupdate.DefaultGeneratePatchBodyFunc)
+	control.podControl = NewPodControl(control.Client, record.NewFakeRecorder(10), GeneratePodFromSandbox)
 
 	// Test case 1: Pod doesn't have template hash label
 	sandbox1 := &agentsv1alpha1.Sandbox{
@@ -1355,7 +1492,7 @@ func TestCommonControl_handleInplaceUpdateSandbox(t *testing.T) {
 	}
 }
 
-func TestCommonControl_createPod_WithSidecarInjection(t *testing.T) {
+func TestPodControl_CreatePod_WithSidecarInjection(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)
 	_ = agentsv1alpha1.AddToScheme(scheme)
@@ -1606,20 +1743,16 @@ func TestCommonControl_createPod_WithSidecarInjection(t *testing.T) {
 			}
 
 			fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
-			control := &commonControl{
-				Client:               fakeClient,
-				recorder:             record.NewFakeRecorder(10),
-				inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
-			}
+			control := NewPodControl(fakeClient, record.NewFakeRecorder(10), GeneratePodFromSandbox)
 
 			newStatus := &agentsv1alpha1.SandboxStatus{
 				UpdateRevision: "test-revision",
 			}
 
-			// Call createPod
-			pod, err := control.createPod(context.TODO(), tt.sandbox, newStatus)
+			// Call CreatePod
+			pod, err := control.CreatePod(context.TODO(), CreatePodArgs{Box: tt.sandbox, NewStatus: newStatus})
 			if err != nil {
-				t.Fatalf("createPod() unexpected error: %v", err)
+				t.Fatalf("CreatePod() unexpected error: %v", err)
 			}
 
 			// Verify InitContainers
@@ -1787,6 +1920,7 @@ func TestCommonControl_EnsureSandboxUpdated_InplaceNotDone(t *testing.T) {
 		Client:               fakeClient,
 		recorder:             record.NewFakeRecorder(10),
 		inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
+		podControl:           NewPodControl(fakeClient, record.NewFakeRecorder(10), GeneratePodFromSandbox),
 	}
 
 	newStatus := &agentsv1alpha1.SandboxStatus{
@@ -1833,6 +1967,7 @@ func TestCommonControl_EnsureSandboxResumed_TerminatingPod(t *testing.T) {
 		Client:               fakeClient,
 		recorder:             record.NewFakeRecorder(10),
 		inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
+		podControl:           NewPodControl(fakeClient, record.NewFakeRecorder(10), GeneratePodFromSandbox),
 	}
 
 	newStatus := &agentsv1alpha1.SandboxStatus{
@@ -1873,6 +2008,7 @@ func TestCommonControl_EnsureSandboxResumed_SetResumedCondition(t *testing.T) {
 		Client:               fakeClient,
 		recorder:             record.NewFakeRecorder(10),
 		inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
+		podControl:           NewPodControl(fakeClient, record.NewFakeRecorder(10), GeneratePodFromSandbox),
 	}
 
 	newStatus := &agentsv1alpha1.SandboxStatus{
@@ -1928,6 +2064,7 @@ func TestCommonControl_EnsureSandboxTerminated_PodNotExist_NoFinalizer(t *testin
 		Client:               fakeClient,
 		recorder:             record.NewFakeRecorder(10),
 		inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
+		podControl:           NewPodControl(fakeClient, record.NewFakeRecorder(10), GeneratePodFromSandbox),
 	}
 
 	err := control.EnsureSandboxTerminated(context.TODO(), EnsureFuncArgs{Pod: nil, Box: box, NewStatus: &agentsv1alpha1.SandboxStatus{}})
@@ -1954,6 +2091,7 @@ func TestCommonControl_EnsureSandboxPaused_AlreadyPaused(t *testing.T) {
 		Client:               fakeClient,
 		recorder:             record.NewFakeRecorder(10),
 		inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
+		podControl:           NewPodControl(fakeClient, record.NewFakeRecorder(10), GeneratePodFromSandbox),
 	}
 
 	newStatus := &agentsv1alpha1.SandboxStatus{
@@ -2018,6 +2156,7 @@ func TestCommonControl_performRecreateUpgrade_PodTerminating(t *testing.T) {
 		Client:               fakeClient,
 		recorder:             record.NewFakeRecorder(10),
 		inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
+		podControl:           NewPodControl(fakeClient, record.NewFakeRecorder(10), GeneratePodFromSandbox),
 	}
 
 	newStatus := &agentsv1alpha1.SandboxStatus{
@@ -2072,6 +2211,7 @@ func TestCommonControl_performRecreateUpgrade_NewPodNotReady(t *testing.T) {
 		Client:               fakeClient,
 		recorder:             record.NewFakeRecorder(10),
 		inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
+		podControl:           NewPodControl(fakeClient, record.NewFakeRecorder(10), GeneratePodFromSandbox),
 	}
 
 	newStatus := &agentsv1alpha1.SandboxStatus{
@@ -2091,7 +2231,7 @@ func TestCommonControl_performRecreateUpgrade_NewPodNotReady(t *testing.T) {
 // CA Certificate Injection Tests (driven by identity.CABundleSpec registry)
 // ---------------------------------------------------------------------------
 
-func TestCommonControl_createPod_WithCAInjection(t *testing.T) {
+func TestPodControl_CreatePod_WithCAInjection(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)
 	_ = agentsv1alpha1.AddToScheme(scheme)
@@ -2184,10 +2324,8 @@ func TestCommonControl_createPod_WithCAInjection(t *testing.T) {
 				})
 			}
 
-			control := &commonControl{
-				Client:   fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build(),
-				recorder: record.NewFakeRecorder(10),
-			}
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
+			control := NewPodControl(fakeClient, record.NewFakeRecorder(10), GeneratePodFromSandbox)
 
 			sandbox := &agentsv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{
@@ -2213,7 +2351,7 @@ func TestCommonControl_createPod_WithCAInjection(t *testing.T) {
 			}
 
 			status := &agentsv1alpha1.SandboxStatus{UpdateRevision: "rev1"}
-			pod, err := control.createPod(context.TODO(), sandbox, status)
+			pod, err := control.CreatePod(context.TODO(), CreatePodArgs{Box: sandbox, NewStatus: status})
 
 			if tt.expectError != "" {
 				if err == nil {
@@ -2225,7 +2363,7 @@ func TestCommonControl_createPod_WithCAInjection(t *testing.T) {
 				return
 			}
 			if err != nil {
-				t.Fatalf("createPod() unexpected error: %v", err)
+				t.Fatalf("CreatePod() unexpected error: %v", err)
 			}
 
 			foundCAVolume := false
@@ -2318,6 +2456,7 @@ func TestCommonControl_performRecreateUpgrade_PodReadyFalse(t *testing.T) {
 		Client:               fakeClient,
 		recorder:             record.NewFakeRecorder(10),
 		inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
+		podControl:           NewPodControl(fakeClient, record.NewFakeRecorder(10), GeneratePodFromSandbox),
 	}
 
 	newStatus := &agentsv1alpha1.SandboxStatus{
