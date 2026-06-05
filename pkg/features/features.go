@@ -62,6 +62,9 @@ const (
 	// SandboxPauseCheckpointGate enables creating Checkpoint CRs during sandbox pause
 	// to capture pod state for resume.
 	SandboxPauseCheckpointGate featuregate.Feature = "SandboxPauseCheckpoint"
+
+	// CommitGate enables the Commit controller to commit container images from Sandbox pods.
+	CommitGate featuregate.Feature = "Commit"
 )
 
 var defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
@@ -76,6 +79,7 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
 	SandboxUpgradeResumeFromFailedStepGate: {Default: true, PreRelease: featuregate.Alpha},
 	SecurityIdentityProviderGate:           {Default: false, PreRelease: featuregate.Alpha},
 	SandboxPauseCheckpointGate:             {Default: false, PreRelease: featuregate.Alpha},
+	CommitGate:                             {Default: false, PreRelease: featuregate.Alpha},
 }
 
 func init() {
