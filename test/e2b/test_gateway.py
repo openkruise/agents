@@ -12,7 +12,7 @@ def test_gateway_header_based_routing(sandbox_context):
     """Test routing via e2b-sandbox-id and e2b-sandbox-port headers."""
     sandbox: Sandbox = sandbox_context.add(Sandbox.create(
         template="code-interpreter",
-        timeout=120,
+        timeout=300,
         headers={
             "x-request-id": sandbox_context.request_id
         }
@@ -37,7 +37,7 @@ def test_gateway_host_based_routing(sandbox_context):
     """Test routing via native E2B host header format: {port}-{sandboxID}.{domain}."""
     sandbox: Sandbox = sandbox_context.add(Sandbox.create(
         template="code-interpreter",
-        timeout=120,
+        timeout=300,
         headers={
             "x-request-id": sandbox_context.request_id
         }

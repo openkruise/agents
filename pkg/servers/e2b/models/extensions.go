@@ -58,6 +58,7 @@ const (
 	ExtensionKeyReserveFailedSandboxFor       = v1alpha1.E2BPrefix + "reserve-failed-sandbox-for"
 	ExtensionKeyCreateOnNoStock               = v1alpha1.E2BPrefix + "create-on-no-stock"
 	ExtensionKeyNeverTimeout                  = v1alpha1.E2BPrefix + "never-timeout"
+	ExtensionKeySkipCreateTimeoutMin          = v1alpha1.E2BPrefix + "skip-create-timeout-min"
 	ExtensionKeyReturnPodIP                   = v1alpha1.E2BPrefix + "return-sandbox-ip"
 	MetadataKeyPodIP                          = v1alpha1.E2BPrefix + "sandbox-ip"
 )
@@ -104,11 +105,13 @@ func (r *NewSandboxRequest) parseCommonExtensions() error {
 	}
 	r.Extensions.CreateOnNoStock = r.Metadata[ExtensionKeyCreateOnNoStock] != v1alpha1.False
 	r.Extensions.NeverTimeout = r.Metadata[ExtensionKeyNeverTimeout] == v1alpha1.True
+	r.Extensions.SkipCreateTimeoutMin = r.Metadata[ExtensionKeySkipCreateTimeoutMin] == v1alpha1.True
 	r.Extensions.ReturnPodIP = r.Metadata[ExtensionKeyReturnPodIP] == v1alpha1.True
 	delete(r.Metadata, ExtensionKeySkipInitRuntime)
 	delete(r.Metadata, ExtensionKeyReserveFailedSandbox)
 	delete(r.Metadata, ExtensionKeyCreateOnNoStock)
 	delete(r.Metadata, ExtensionKeyNeverTimeout)
+	delete(r.Metadata, ExtensionKeySkipCreateTimeoutMin)
 	delete(r.Metadata, ExtensionKeyReturnPodIP)
 	if r.Extensions.TimeoutSeconds, err = r.parseAndRemoveIntExtension(ExtensionKeyClaimTimeout); err != nil {
 		return err

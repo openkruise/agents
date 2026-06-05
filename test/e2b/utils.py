@@ -9,6 +9,9 @@ from e2b.sandbox.sandbox_api import SandboxInfo, SandboxQuery
 from e2b_code_interpreter import Sandbox
 
 
+SKIP_CREATE_TIMEOUT_MIN_METADATA_KEY = "e2b.agents.kruise.io/skip-create-timeout-min"
+
+
 def connect_sandbox(sbx: Sandbox, timeout: Optional[int] = None) -> Sandbox | None:
     """Connect to a sandbox with retry logic for pausing state.
     

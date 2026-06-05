@@ -11,7 +11,12 @@ from dateutil.tz import tzutc
 from e2b.exceptions import NotFoundException
 from e2b_code_interpreter import Sandbox, SandboxQuery, SandboxState
 
-from utils import list_sandbox, connect_sandbox, run_code_sandbox
+from utils import (
+    SKIP_CREATE_TIMEOUT_MIN_METADATA_KEY,
+    list_sandbox,
+    connect_sandbox,
+    run_code_sandbox,
+)
 
 # e2b-code-interpreter 2.4.x predates the `lifecycle={"on_timeout": "pause"}`
 # parameter, so auto-pause cannot be requested through that SDK.
@@ -57,7 +62,7 @@ def assert_pod_ip_metadata(info, expected_pod_ip: str | None = None) -> str:
 def test_lifecycle(sandbox_context):
     sandbox: Sandbox = sandbox_context.add(Sandbox.create(
         template="code-interpreter",
-        timeout=30,
+        timeout=300,
         metadata={
             'userId': '123',
         },
@@ -120,7 +125,7 @@ def test_sandbox_with_pod_ip(sandbox_context):
 def test_no_stock(sandbox_context):
     sandbox: Sandbox = sandbox_context.add(Sandbox.create(
         template="code-interpreter-0",
-        timeout=30,
+        timeout=300,
         metadata={
             'userId': '123',
         },
@@ -141,7 +146,7 @@ def test_list_by_metadata(sandbox_context):
 
     sandbox: Sandbox = sandbox_context.add(Sandbox.create(
         template="code-interpreter",
-        timeout=30,
+        timeout=300,
         metadata={
             'userId': random_user_id,
         },
@@ -167,7 +172,7 @@ def test_list_by_metadata(sandbox_context):
 def test_list_by_state(sandbox_context):
     sbx: Sandbox = sandbox_context.add(Sandbox.create(
         template="code-interpreter",
-        timeout=30,
+        timeout=300,
         metadata={"test_case": "test_list_by_state"},
         headers={
             "x-request-id": sandbox_context.request_id
@@ -198,7 +203,10 @@ def test_list_by_state(sandbox_context):
 def test_timeout(sandbox_context):
     sandbox: Sandbox = sandbox_context.add(Sandbox.create(
         template="code-interpreter",
-        metadata={"case": "timeout"},
+        metadata={
+            "case": "timeout",
+            SKIP_CREATE_TIMEOUT_MIN_METADATA_KEY: "true",
+        },
         timeout=30,
         headers={
             "x-request-id": sandbox_context.request_id
@@ -263,7 +271,10 @@ def test_auto_pause_resume_no_immediate_repause(sandbox_context):
         template="code-interpreter",
         timeout=auto_pause_timeout_seconds,
         lifecycle={"on_timeout": "pause"},
-        metadata={"test_case": "test_auto_pause_resume_no_immediate_repause"},
+        metadata={
+            "test_case": "test_auto_pause_resume_no_immediate_repause",
+            SKIP_CREATE_TIMEOUT_MIN_METADATA_KEY: "true",
+        },
         headers={
             "x-request-id": sandbox_context.request_id
         }
@@ -442,7 +453,7 @@ def test_inplace_update(sandbox_context):
     pytest.skip("inplace update is not supported yet")
     sbx: Sandbox = sandbox_context.add(Sandbox.create(
         template="code-interpreter",
-        timeout=30,
+        timeout=300,
         metadata={
             "case": "inplace-update",
             "e2b.agents.kruise.io/image": "registry-ap-southeast-1.ack.aliyuncs.com/acs/code-interpreter:v1.6-new"
@@ -466,6 +477,7 @@ def test_never_timeout(sandbox_context):
             "x-request-id": sandbox_context.request_id
         },
         metadata={
+            SKIP_CREATE_TIMEOUT_MIN_METADATA_KEY: "true",
             "e2b.agents.kruise.io/never-timeout": "true"
         }
     ))

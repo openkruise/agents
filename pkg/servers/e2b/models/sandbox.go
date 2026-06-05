@@ -68,6 +68,7 @@ type NewSandboxRequestExtension struct {
 	WaitReadySeconds        int
 	TimeoutSeconds          int
 	NeverTimeout            bool
+	SkipCreateTimeoutMin    bool
 	ReturnPodIP             bool
 	Labels                  map[string]string
 }

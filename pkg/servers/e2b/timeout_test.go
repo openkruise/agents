@@ -211,7 +211,8 @@ func TestSetTimeout(t *testing.T) {
 				AutoPause:  tt.autoPause,
 				Timeout:    initTimeoutSeconds,
 				Metadata: map[string]string{
-					models.ExtensionKeySkipInitRuntime: v1alpha1.True,
+					models.ExtensionKeySkipInitRuntime:      v1alpha1.True,
+					models.ExtensionKeySkipCreateTimeoutMin: v1alpha1.True,
 				},
 			}, nil, user))
 			assert.Nil(t, err)

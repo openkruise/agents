@@ -18,7 +18,7 @@ def execute_python_code(s: Sandbox, code: str, expect_stdout: list[str]):
 def test_run_code(sandbox_context):
     sbx: Sandbox = sandbox_context.add(Sandbox.create(
         template="code-interpreter",
-        timeout=30,
+        timeout=300,
         metadata={"test_case": "test_run_code"},
         headers={
             "x-request-id": sandbox_context.request_id
@@ -58,7 +58,7 @@ def test_static_charts(sandbox_context):
 
     sandbox: Sandbox = sandbox_context.add(Sandbox.create(
         template="code-interpreter",
-        timeout=30,
+        timeout=300,
         metadata={"test_case": "test_static_charts"},
         headers={
             "x-request-id": sandbox_context.request_id
@@ -105,7 +105,7 @@ def test_code_stream(sandbox_context):
     code_result = None
     sandbox: Sandbox = sandbox_context.add(Sandbox.create(
         template="code-interpreter",
-        timeout=30,
+        timeout=300,
         metadata={"test_case": "test_code_stream"},
         headers={
             "x-request-id": sandbox_context.request_id
