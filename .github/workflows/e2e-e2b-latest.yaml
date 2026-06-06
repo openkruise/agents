@@ -53,6 +53,16 @@ jobs:
           config: ./test/kind-conf.yaml
           version: ${{ env.KIND_VERSION }}
 
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          swap-storage: false
+
       - name: Cache Docker images
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
