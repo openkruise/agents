@@ -79,7 +79,6 @@ spec:
           - --leader-elect
           - --health-probe-bind-address=:8081
           - --webhook-cert-path=/home/nonroot/sandbox-controller-webhook-certs
-          - --feature-gates=AllAlpha=true
         image: controller:latest
         imagePullPolicy: IfNotPresent
         name: manager

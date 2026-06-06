@@ -1413,8 +1413,15 @@ var _ = Describe("SandboxClaim", func() {
 				return k8sClient.Update(ctx, latest)
 			}, time.Second*10, time.Second).Should(Succeed())
 
-			By("Waiting for SandboxSet to stop creating new sandboxes")
-			time.Sleep(time.Second * 2)
+			By("Waiting for SandboxSet to fully scale down (no owned sandboxes remain)")
+			Eventually(func() int32 {
+				latest := &agentsv1alpha1.SandboxSet{}
+				_ = k8sClient.Get(ctx, types.NamespacedName{
+					Name:      sandboxSet.Name,
+					Namespace: sandboxSet.Namespace,
+				}, latest)
+				return latest.Status.Replicas
+			}, time.Second*30, time.Second).Should(Equal(int32(0)))
 
 			By("Creating another claim when all sandboxes are already claimed")
 			sandboxClaim2 = &agentsv1alpha1.SandboxClaim{

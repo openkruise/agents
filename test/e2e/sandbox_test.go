@@ -259,6 +259,25 @@ var _ = Describe("Sandbox", func() {
 				return sandbox.Status.Phase
 			}, time.Second*30, time.Millisecond*500).Should(Equal(agentsv1alpha1.SandboxPaused))
 
+			// When SandboxPauseCheckpoint feature gate is enabled, the controller creates a
+			// Checkpoint CR and waits for it to reach Succeeded before deleting the pod. In
+			// E2E there is no checkpoint runtime to advance the CR, so we simulate completion
+			// here. When the gate is disabled, no Checkpoint CR is created and this step is
+			// effectively a no-op.
+			By("Simulating checkpoint succeeded if SandboxPauseCheckpoint gate is enabled")
+			Eventually(func() bool {
+				cps := listCheckpoints(ctx, sandbox.Namespace, sandbox.Name)
+				if len(cps) == 0 {
+					return true
+				}
+				cp := cps[0]
+				if cp.Status.Phase == agentsv1alpha1.CheckpointSucceeded {
+					return true
+				}
+				cp.Status.Phase = agentsv1alpha1.CheckpointSucceeded
+				return k8sClient.Status().Update(ctx, &cp) == nil
+			}, time.Second*30, time.Millisecond*500).Should(BeTrue())
+
 			By("Verifying the associated pod is deleted when paused")
 			Eventually(func() bool {
 				pod := &corev1.Pod{}

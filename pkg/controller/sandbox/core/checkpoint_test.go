@@ -473,7 +473,7 @@ func enableCheckpointGate(t *testing.T) {
 	})
 }
 
-func TestPreparePodInfo(t *testing.T) {
+func TestAssumePodCheckpointed(t *testing.T) {
 	tests := []struct {
 		name         string
 		enableGate   bool
@@ -607,7 +607,7 @@ func TestPreparePodInfo(t *testing.T) {
 				LastTransitionTime: metav1.Now(),
 			}
 
-			wait := ctrl.PreparePodInfo(context.TODO(), tt.pod, tt.box, newStatus, cond)
+			wait := ctrl.AssumePodCheckpointed(context.TODO(), tt.pod, tt.box, newStatus, cond)
 			assert.Equal(t, tt.expectWait, wait)
 			if tt.expectReason != "" {
 				assert.Equal(t, tt.expectReason, cond.Reason)
@@ -744,7 +744,7 @@ func TestCreateCheckpoint(t *testing.T) {
 	assert.Equal(t, box.Name, cp.OwnerReferences[0].Name)
 }
 
-func TestPreparePodInfo_ListError(t *testing.T) {
+func TestAssumePodCheckpointed_ListError(t *testing.T) {
 	enableCheckpointGate(t)
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)
@@ -769,13 +769,13 @@ func TestPreparePodInfo_ListError(t *testing.T) {
 		LastTransitionTime: metav1.Now(),
 	}
 
-	wait := ctrl.PreparePodInfo(context.TODO(), pod, box, newStatus, cond)
+	wait := ctrl.AssumePodCheckpointed(context.TODO(), pod, box, newStatus, cond)
 	assert.True(t, wait)
 	assert.Equal(t, agentsv1alpha1.SandboxPausedReasonCheckpointFailed, cond.Reason)
 	assert.Contains(t, cond.Message, "list unavailable")
 }
 
-func TestPreparePodInfo_CreateError(t *testing.T) {
+func TestAssumePodCheckpointed_CreateError(t *testing.T) {
 	enableCheckpointGate(t)
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)
@@ -800,7 +800,7 @@ func TestPreparePodInfo_CreateError(t *testing.T) {
 		LastTransitionTime: metav1.Now(),
 	}
 
-	wait := ctrl.PreparePodInfo(context.TODO(), pod, box, newStatus, cond)
+	wait := ctrl.AssumePodCheckpointed(context.TODO(), pod, box, newStatus, cond)
 	assert.True(t, wait)
 	assert.Equal(t, agentsv1alpha1.SandboxPausedReasonCheckpointFailed, cond.Reason)
 	assert.Contains(t, cond.Message, "create denied")

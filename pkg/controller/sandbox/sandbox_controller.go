@@ -85,7 +85,8 @@ func Add(mgr manager.Manager, metricsCleanup Enqueuer) error {
 			RateLimiter:       rateLimiter,
 			CheckpointControl: checkpointControl,
 			PodControl:        podControl,
-		}), rateLimiter: rateLimiter,
+		}),
+		rateLimiter:    rateLimiter,
 		metricsCleanup: metricsCleanup,
 	}).SetupWithManager(mgr)
 	if err != nil {
@@ -102,18 +103,19 @@ type SandboxReconciler struct {
 	controls          map[string]core.SandboxControl
 	rateLimiter       *core.RateLimiter
 	checkpointControl *core.CheckpointControl
-	metricsCleanup Enqueuer
+	metricsCleanup    Enqueuer
 }
 
 // +kubebuilder:rbac:groups=agents.kruise.io,resources=sandboxes,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=agents.kruise.io,resources=sandboxtemplates,verbs=get;list;watch
-// +kubebuilder:rbac:groups=agents.kruise.io,resources=checkpoints,verbs=get;list;watch
+// +kubebuilder:rbac:groups=agents.kruise.io,resources=checkpoints,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups=agents.kruise.io,resources=sandboxes/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=agents.kruise.io,resources=sandboxes/finalizers,verbs=update
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=pods/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;update;patch
 // +kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch
 
 //nolint:gocyclo // This function handles multiple reconciliation scenarios which require branching logic
 func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (crl ctrl.Result, err error) {
@@ -263,7 +265,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 	}
 
 	if box.Status.Phase != newStatus.Phase {
-		klog.InfoS("Sandbox "+string(newStatus.Phase)+" started", "sandbox", klog.KObj(box), "previousPhase", string(box.Status.Phase))
+		klog.InfoS("Sandbox phase started", "sandbox", klog.KObj(box), "phase", string(newStatus.Phase), "previousPhase", string(box.Status.Phase))
 	}
 
 	phaseBefore := newStatus.Phase
@@ -289,7 +291,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 		return reconcile.Result{}, err
 	}
 	if newStatus.Phase != phaseBefore {
-		klog.InfoS("Sandbox "+string(phaseBefore)+" finished", "sandbox", klog.KObj(box), "nextPhase", string(newStatus.Phase))
+		klog.InfoS("Sandbox phase finished", "sandbox", klog.KObj(box), "phase", string(phaseBefore), "nextPhase", string(newStatus.Phase))
 	}
 	return ctrl.Result{RequeueAfter: requeueAfter}, r.updateSandboxStatus(ctx, *newStatus, box)
 }
@@ -387,9 +389,6 @@ func (r *SandboxReconciler) calculateStatus(ctx context.Context, args core.Ensur
 			// The paused and resumed condition are exclusive
 			utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionResumed))
 			newStatus.Phase = agentsv1alpha1.SandboxPaused
-			// Clean up checkpoint info on first entry into paused state
-			// Fallback: normally no checkpoint delta should exist at this point
-			r.checkpointControl.Cleanup(ctx, box)
 			// Check for upgrade: if template has changed (hash mismatch), transition to Upgrading phase
 		} else if pod != nil && pod.Labels[agentsv1alpha1.PodLabelTemplateHash] != newStatus.UpdateRevision &&
 			box.Spec.UpgradePolicy != nil && box.Spec.UpgradePolicy.Type == agentsv1alpha1.SandboxUpgradePolicyRecreate {

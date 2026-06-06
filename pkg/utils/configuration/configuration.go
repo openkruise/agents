@@ -17,13 +17,11 @@ limitations under the License.
 package configuration
 
 import (
-	"context"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 
-	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"k8s.io/klog/v2"
 )
 
 const (
@@ -49,25 +47,21 @@ var (
 )
 
 func init() {
-	logger := logf.FromContext(context.TODO())
 	for i := range objs {
 		obj := objs[i]
 		filePath := filepath.Join(SandboxConfigurationDir, obj.Key)
 		data, err := os.ReadFile(filePath)
 		if err != nil {
-			fmt.Println(fmt.Sprintf("read file(%s) failed: %s", filePath, err.Error()))
-			logger.Error(err, "read file failed", "file", filePath)
+			klog.ErrorS(err, "read file failed", "file", filePath)
 			continue
 		}
 		err = json.Unmarshal(data, obj.Object)
 		if err != nil {
-			fmt.Println(fmt.Sprintf("read file(%s) failed: %s", filePath, err.Error()))
-			logger.Error(err, "Unmarshal failed", "file", filePath, "data", string(data))
+			klog.ErrorS(err, "Unmarshal failed", "file", filePath, "data", string(data))
 			continue
 		}
 		sandboxConfigurations[SandboxResumePodPersistentContentKey] = obj.Object
-		logger.Info("read configuration file success", "file", filePath)
-		fmt.Println(fmt.Sprintf("read file(%s) success", filePath))
+		klog.InfoS("read configuration file success", "file", filePath)
 	}
 }
 

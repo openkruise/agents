@@ -64,10 +64,15 @@ func (e *CheckpointEventHandler) Generic(context.Context, event.TypedGenericEven
 }
 
 // checkpointOwnerKey extracts the owning Sandbox's controller key and reconcile request
-// from the Checkpoint's controller ownerReference.
+// from the Checkpoint's controller ownerReference. Returns empty values when the
+// controller owner is missing or refers to a kind other than Sandbox (e.g. a
+// foreign CRD reusing the Checkpoint type).
 func checkpointOwnerKey(obj client.Object) (string, reconcile.Request) {
 	owner := metav1.GetControllerOfNoCopy(obj)
 	if owner == nil {
+		return "", reconcile.Request{}
+	}
+	if owner.APIVersion != sandboxControllerKind.GroupVersion().String() || owner.Kind != sandboxControllerKind.Kind {
 		return "", reconcile.Request{}
 	}
 	nn := types.NamespacedName{Namespace: obj.GetNamespace(), Name: owner.Name}

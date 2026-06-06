@@ -876,6 +876,77 @@ func TestHashData(t *testing.T) {
 	})
 }
 
+func TestRandStringN(t *testing.T) {
+	tests := []struct {
+		name       string
+		n          int
+		expectLen  int
+		expectRand bool
+	}{
+		{
+			name:       "zero length returns empty",
+			n:          0,
+			expectLen:  0,
+			expectRand: false,
+		},
+		{
+			name:       "negative length returns empty",
+			n:          -1,
+			expectLen:  0,
+			expectRand: false,
+		},
+		{
+			name:       "length 1",
+			n:          1,
+			expectLen:  1,
+			expectRand: true,
+		},
+		{
+			name:       "length 8",
+			n:          8,
+			expectLen:  8,
+			expectRand: true,
+		},
+		{
+			name:       "length 32",
+			n:          32,
+			expectLen:  32,
+			expectRand: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := RandStringN(tt.n)
+			if len(result) != tt.expectLen {
+				t.Errorf("RandStringN(%d) returned len %d, want %d", tt.n, len(result), tt.expectLen)
+			}
+			// Returned characters must be lower-case alphanumeric.
+			for _, r := range result {
+				isLower := r >= 'a' && r <= 'z'
+				isDigit := r >= '0' && r <= '9'
+				if !isLower && !isDigit {
+					t.Errorf("RandStringN(%d) contains invalid character %q", tt.n, r)
+				}
+			}
+			if tt.expectRand {
+				// With reasonable n, two consecutive calls should almost certainly differ.
+				// Allow a tiny retry window to keep the test deterministic for n==1.
+				differ := false
+				for i := 0; i < 5; i++ {
+					if RandStringN(tt.n) != result {
+						differ = true
+						break
+					}
+				}
+				if !differ {
+					t.Errorf("RandStringN(%d) appears non-random: repeated identical output", tt.n)
+				}
+			}
+		})
+	}
+}
+
 func TestFilterOutCondition(t *testing.T) {
 	tests := []struct {
 		name           string

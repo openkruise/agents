@@ -167,11 +167,14 @@ func (r *commonControl) EnsureSandboxPaused(ctx context.Context, args EnsureFunc
 		cond = &metav1.Condition{
 			Type:               string(agentsv1alpha1.SandboxConditionPaused),
 			Status:             metav1.ConditionFalse,
-			Reason:             agentsv1alpha1.SandboxPausedReasonDeletePod,
+			Reason:             agentsv1alpha1.SandboxPausedReasonPausing,
 			LastTransitionTime: metav1.Now(),
 		}
 		utils.SetSandboxCondition(newStatus, *cond)
 		klog.InfoS("Paused condition initialized", "sandbox", klog.KObj(box))
+		// Clean up checkpoint info on first entry into paused state
+		// Fallback: normally no checkpoint delta should exist at this point
+		r.checkpointControl.Cleanup(ctx, box)
 	} else if cond.Status == metav1.ConditionTrue {
 		klog.InfoS("Paused condition is already true", "sandbox", klog.KObj(box))
 		return nil
@@ -202,7 +205,7 @@ func (r *commonControl) EnsureSandboxPaused(ctx context.Context, args EnsureFunc
 	}
 
 	// Validate images and create pod-info checkpoint before deletion
-	if rejected := r.checkpointControl.PreparePodInfo(ctx, pod, box, newStatus, cond); rejected {
+	if rejected := r.checkpointControl.AssumePodCheckpointed(ctx, pod, box, newStatus, cond); rejected {
 		return nil
 	}
 

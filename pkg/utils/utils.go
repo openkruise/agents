@@ -112,6 +112,18 @@ func HashData(by []byte) string {
 	return rand.SafeEncodeString(hexStr)
 }
 
+// RandStringN returns a random string of n lower-case alphanumeric characters.
+// It is intended for generating short, non-deterministic suffixes (e.g. resource
+// name suffixes) where uniqueness across reconcile cycles is required and the
+// caller does not need the value to be reproducible from any input.
+// If n <= 0, an empty string is returned.
+func RandStringN(n int) string {
+	if n <= 0 {
+		return ""
+	}
+	return rand.String(n)
+}
+
 func EncodeBase64Proto[T proto.Message](data T) (string, error) {
 	marshal, err := proto.Marshal(data)
 	if err != nil {

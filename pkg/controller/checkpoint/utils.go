@@ -121,6 +121,23 @@ func buildInjectedContainerDelta(pod *corev1.Pod, box *agentsv1alpha1.Sandbox) (
 	return
 }
 
+// buildContainerNameOrder returns the partial-key list used by the
+// strategic-merge-patch "$setElementOrder/<list>" directive. Including this
+// directive in the delta forces the resumed Pod's container slice to follow
+// the order observed at pause time, which protects the resume path from
+// drift caused by InjectSandboxRuntimes producing a different injection
+// order (e.g. csi-mount and agent-runtime swapping positions).
+func buildContainerNameOrder(cs []corev1.Container) []map[string]string {
+	if len(cs) == 0 {
+		return nil
+	}
+	out := make([]map[string]string, 0, len(cs))
+	for _, c := range cs {
+		out = append(out, map[string]string{"name": c.Name})
+	}
+	return out
+}
+
 // BuildPodTemplateDelta assembles a Strategic Merge Patch from three
 // independent delta components captured at pause time:
 //  1. Metadata: whitelisted labels/annotations
@@ -152,9 +169,16 @@ func BuildPodTemplateDelta(pod *corev1.Pod, box *agentsv1alpha1.Sandbox) (runtim
 		spec := map[string]any{}
 		if len(containers) > 0 {
 			spec["containers"] = containers
+			// Force resumed Pod's container order to match the live Pod at
+			// pause time. Without this directive Strategic Merge Patch keeps
+			// the base Pod's order, so a wrong injection order during
+			// resume (e.g. agent-runtime before csi-mount) would not be
+			// corrected.
+			spec["$setElementOrder/containers"] = buildContainerNameOrder(pod.Spec.Containers)
 		}
 		if len(injectedInit) > 0 {
 			spec["initContainers"] = injectedInit
+			spec["$setElementOrder/initContainers"] = buildContainerNameOrder(pod.Spec.InitContainers)
 		}
 		patch["spec"] = spec
 	}

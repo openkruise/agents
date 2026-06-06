@@ -149,7 +149,7 @@ func TestBuildMetadataDelta(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
 						"topology.kubernetes.io/zone": "cn-hangzhou-b",
-						"app":                        "test",
+						"app":                         "test",
 					},
 					Annotations: map[string]string{
 						"scheduling.k8s.io/group-name": "pool-a",
@@ -714,7 +714,6 @@ func TestApplyPodTemplateDelta(t *testing.T) {
 		})
 	}
 }
-
 func TestBuildAndApplyPodTemplateDeltaRoundTrip(t *testing.T) {
 	configuration.SetSandboxResumePodPersistentContentForTest(&configuration.SandboxResumePodPersistentContent{
 		AnnotationKeys: []string{"scheduling.k8s.io/group-name"},
@@ -949,4 +948,209 @@ func TestBuildAndApplyPodTemplateDeltaRoundTripWithTemplateLabels(t *testing.T) 
 		}
 	}
 	assert.True(t, istioFound, "webhook-injected container should be added by delta")
+}
+
+// TestApplyPodTemplateDelta_PreservesContainerOrder verifies that the
+// $setElementOrder/containers directive emitted by BuildPodTemplateDelta
+// rewrites the resumed Pod's container slice to match the live Pod observed
+// at pause time, even when the resume-side base Pod was generated with a
+// different sidecar order (e.g. InjectSandboxRuntimes injecting agent-runtime
+// before csi-mount instead of the reverse). Without this directive the
+// resume path keeps the wrong base order and breaks startup dependencies.
+func TestApplyPodTemplateDelta_PreservesContainerOrder(t *testing.T) {
+	tests := []struct {
+		name          string
+		livePod       *corev1.Pod
+		box           *agentsv1alpha1.Sandbox
+		resumeBasePod *corev1.Pod
+		expectOrder   []string
+		expectInitOrd []string
+	}{
+		{
+			name: "sidecars in live pod order, base pod has them swapped",
+			livePod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{Name: "main", Image: "nginx:1.21"},
+						{Name: "csi-mount", Image: "csi:v1"},
+						{Name: "agent-runtime", Image: "runtime:v1"},
+					},
+				},
+			},
+			box: &agentsv1alpha1.Sandbox{
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{Name: "main", Image: "nginx:1.21"},
+								},
+							},
+						},
+					},
+				},
+			},
+			resumeBasePod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{Name: "main", Image: "nginx:1.21"},
+						// Wrong order produced by the resume-side injection.
+						{Name: "agent-runtime", Image: "runtime:v1"},
+						{Name: "csi-mount", Image: "csi:v1"},
+					},
+				},
+			},
+			expectOrder: []string{"main", "csi-mount", "agent-runtime"},
+		},
+		{
+			name: "injected container missing in base pod is appended in correct slot",
+			livePod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{Name: "main", Image: "nginx:1.21"},
+						{Name: "csi-mount", Image: "csi:v1"},
+						{Name: "agent-runtime", Image: "runtime:v1"},
+					},
+				},
+			},
+			box: &agentsv1alpha1.Sandbox{
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{Name: "main", Image: "nginx:1.21"},
+								},
+							},
+						},
+					},
+				},
+			},
+			resumeBasePod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{Name: "main", Image: "nginx:1.21"},
+						// agent-runtime missing entirely from base.
+						{Name: "csi-mount", Image: "csi:v1"},
+					},
+				},
+			},
+			expectOrder: []string{"main", "csi-mount", "agent-runtime"},
+		},
+		{
+			name: "init containers order also corrected",
+			livePod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					InitContainers: []corev1.Container{
+						{Name: "init-csi", Image: "csi-init:v1"},
+						{Name: "init-runtime", Image: "runtime-init:v1"},
+					},
+					Containers: []corev1.Container{
+						{Name: "main", Image: "nginx:1.21"},
+					},
+				},
+			},
+			box: &agentsv1alpha1.Sandbox{
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{Name: "main", Image: "nginx:1.21"},
+								},
+							},
+						},
+					},
+				},
+			},
+			resumeBasePod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					InitContainers: []corev1.Container{
+						{Name: "init-runtime", Image: "runtime-init:v1"},
+						{Name: "init-csi", Image: "csi-init:v1"},
+					},
+					Containers: []corev1.Container{
+						{Name: "main", Image: "nginx:1.21"},
+					},
+				},
+			},
+			expectOrder:   []string{"main", "init-csi", "init-runtime"}, // unused for containers comparison below
+			expectInitOrd: []string{"init-csi", "init-runtime"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			delta, err := BuildPodTemplateDelta(tt.livePod, tt.box)
+			assert.NoError(t, err)
+			assert.NotNil(t, delta.Raw, "delta should not be empty")
+
+			// Sanity check: the patch should embed $setElementOrder/<list>
+			// directives so the SMP layer can rewrite container order.
+			var patch map[string]any
+			assert.NoError(t, json.Unmarshal(delta.Raw, &patch))
+			spec, _ := patch["spec"].(map[string]any)
+			assert.NotNil(t, spec)
+			if tt.expectInitOrd == nil && len(tt.livePod.Spec.Containers) > 0 {
+				_, ok := spec["$setElementOrder/containers"]
+				assert.True(t, ok, "patch should include $setElementOrder/containers directive")
+			}
+			if len(tt.expectInitOrd) > 0 {
+				_, ok := spec["$setElementOrder/initContainers"]
+				assert.True(t, ok, "patch should include $setElementOrder/initContainers directive")
+			}
+
+			assert.NoError(t, ApplyPodTemplateDelta(tt.resumeBasePod, delta))
+
+			if tt.expectInitOrd != nil {
+				actualInit := make([]string, 0, len(tt.resumeBasePod.Spec.InitContainers))
+				for _, c := range tt.resumeBasePod.Spec.InitContainers {
+					actualInit = append(actualInit, c.Name)
+				}
+				assert.Equal(t, tt.expectInitOrd, actualInit, "init container order should match the live pod")
+			} else {
+				actual := make([]string, 0, len(tt.resumeBasePod.Spec.Containers))
+				for _, c := range tt.resumeBasePod.Spec.Containers {
+					actual = append(actual, c.Name)
+				}
+				assert.Equal(t, tt.expectOrder, actual, "container order should match the live pod")
+			}
+		})
+	}
+}
+
+// TestBuildContainerNameOrder verifies the helper directly so callers that
+// rely on the partial-key list shape (used by the SMP $setElementOrder/<list>
+// directive) are protected against regressions.
+func TestBuildContainerNameOrder(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    []corev1.Container
+		expected []map[string]string
+	}{
+		{
+			name:     "empty input returns nil",
+			input:    nil,
+			expected: nil,
+		},
+		{
+			name: "order preserved",
+			input: []corev1.Container{
+				{Name: "main"},
+				{Name: "csi-mount"},
+				{Name: "agent-runtime"},
+			},
+			expected: []map[string]string{
+				{"name": "main"},
+				{"name": "csi-mount"},
+				{"name": "agent-runtime"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, buildContainerNameOrder(tt.input))
+		})
+	}
 }

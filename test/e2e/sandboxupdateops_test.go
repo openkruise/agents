@@ -725,13 +725,15 @@ var _ = Describe("SandboxUpdateOps E2E", func() {
 				"sandbox", failedSbx.Name, "phase", failedSbx.Status.Phase)
 
 			By("Verifying ops status with MaxUnavailable=1")
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: ops1.Name, Namespace: ops1.Namespace}, ops1)).To(Succeed())
-			Expect(ops1.Status.Phase).To(Equal(agentsv1alpha1.SandboxUpdateOpsUpdating),
-				"ops should remain in Updating phase since failed occupies maxUnavailable quota")
-			Expect(ops1.Status.Replicas).To(Equal(int32(2)))
-			Expect(ops1.Status.FailedReplicas).To(Equal(int32(1)))
-			Expect(ops1.Status.UpdatingReplicas).To(Equal(int32(0)))
-			Expect(ops1.Status.UpdatedReplicas).To(Equal(int32(0)))
+			Eventually(func(g Gomega) {
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: ops1.Name, Namespace: ops1.Namespace}, ops1)).To(Succeed())
+				g.Expect(ops1.Status.Phase).To(Equal(agentsv1alpha1.SandboxUpdateOpsUpdating),
+					"ops should remain in Updating phase since failed occupies maxUnavailable quota")
+				g.Expect(ops1.Status.Replicas).To(Equal(int32(2)))
+				g.Expect(ops1.Status.FailedReplicas).To(Equal(int32(1)))
+				g.Expect(ops1.Status.UpdatingReplicas).To(Equal(int32(0)))
+				g.Expect(ops1.Status.UpdatedReplicas).To(Equal(int32(0)))
+			}, 30*time.Second, time.Second).Should(Succeed())
 			klog.InfoS("Ops status verified",
 				"phase", ops1.Status.Phase,
 				"replicas", ops1.Status.Replicas,

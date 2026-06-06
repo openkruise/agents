@@ -327,6 +327,7 @@ const (
 	SandboxUpgradingReasonUpgradePodFailed  = "UpgradePodFailed"
 
 	// SandboxConditionPaused Reason
+	SandboxPausedReasonPausing             = "Pausing"
 	SandboxPausedReasonImageChanged        = "ImageChanged"
 	SandboxPausedReasonCheckpointCreating  = "CheckpointCreating"
 	SandboxPausedReasonCheckpointSucceeded = "CheckpointSucceeded"

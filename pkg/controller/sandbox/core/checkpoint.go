@@ -48,14 +48,24 @@ func NewCheckpointControl(cli client.Client, recorder record.EventRecorder) *Che
 	return &CheckpointControl{Client: cli, recorder: recorder}
 }
 
-// PreparePodInfo validates container images and manages the Checkpoint CR lifecycle.
+// AssumePodCheckpointed validates container images and manages the Checkpoint CR lifecycle.
 // Returns true if the pause flow should wait (checkpoint in progress or image rejected).
-func (c *CheckpointControl) PreparePodInfo(ctx context.Context, pod *corev1.Pod, box *agentsv1alpha1.Sandbox, newStatus *agentsv1alpha1.SandboxStatus, cond *metav1.Condition) bool {
+func (c *CheckpointControl) AssumePodCheckpointed(ctx context.Context, pod *corev1.Pod, box *agentsv1alpha1.Sandbox, newStatus *agentsv1alpha1.SandboxStatus, cond *metav1.Condition) bool {
 	if !utilfeature.DefaultFeatureGate.Enabled(features.SandboxPauseCheckpointGate) {
 		return false
 	}
-	if cond.Reason != "" && cond.Reason != agentsv1alpha1.SandboxPausedReasonCheckpointCreating &&
-		cond.Reason != agentsv1alpha1.SandboxPausedReasonImageChanged && cond.Reason != agentsv1alpha1.SandboxPausedReasonCheckpointFailed {
+	// Allow-list of paused reasons that should drive the checkpoint flow.
+	// Any other reason (e.g. CheckpointSucceeded already reached, or a reason
+	// introduced in the future) skips this flow on purpose; new reasons that
+	// need checkpointing must be added here explicitly.
+	switch cond.Reason {
+	case "",
+		agentsv1alpha1.SandboxPausedReasonPausing,
+		agentsv1alpha1.SandboxPausedReasonCheckpointCreating,
+		agentsv1alpha1.SandboxPausedReasonImageChanged,
+		agentsv1alpha1.SandboxPausedReasonCheckpointFailed:
+		// fall through to checkpoint handling below
+	default:
 		return false
 	}
 
@@ -68,7 +78,8 @@ func (c *CheckpointControl) PreparePodInfo(ctx context.Context, pod *corev1.Pod,
 		klog.ErrorS(err, "Image validation failed, pause rejected", "sandbox", klog.KObj(box))
 		return true
 	}
-	if cond.Reason == "" || cond.Reason == agentsv1alpha1.SandboxPausedReasonImageChanged {
+	if cond.Reason == "" || cond.Reason == agentsv1alpha1.SandboxPausedReasonPausing ||
+		cond.Reason == agentsv1alpha1.SandboxPausedReasonImageChanged {
 		cond.Reason = agentsv1alpha1.SandboxPausedReasonCheckpointCreating
 		cond.Message = "Checkpoint created, waiting for completion"
 		utils.SetSandboxCondition(newStatus, *cond)
@@ -156,8 +167,13 @@ func (c *CheckpointControl) Cleanup(ctx context.Context, box *agentsv1alpha1.San
 
 // createCheckpoint creates a Checkpoint CR. The checkpoint controller is
 // responsible for processing it and updating the status.
+//
+// The name carries a random suffix so each invocation produces a distinct
+// checkpoint name. Idempotency within the same reconcile cycle is guaranteed
+// by the caller, which only invokes this function when no existing checkpoint
+// is found for the sandbox (see AssumePodCheckpointed).
 func (c *CheckpointControl) createCheckpoint(ctx context.Context, box *agentsv1alpha1.Sandbox) error {
-	cpName := box.Name + "-" + utils.HashData([]byte(box.Name+string(box.UID)))
+	cpName := box.Name + "-" + utils.RandStringN(8)
 	cp := &agentsv1alpha1.Checkpoint{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      cpName,

@@ -29,10 +29,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	checkpointutils "github.com/openkruise/agents/pkg/controller/checkpoint"
 	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/identity"
 	"github.com/openkruise/agents/pkg/utils"
-	checkpointutils "github.com/openkruise/agents/pkg/utils/checkpoint"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 	"github.com/openkruise/agents/pkg/utils/sidecarutils"
@@ -91,15 +91,19 @@ func (c *PodControl) CreatePod(ctx context.Context, args CreatePodArgs) (*corev1
 		return nil, injectErr
 	}
 
-	// Apply checkpoint pod template delta if present (resume path)
+	// Apply checkpoint pod template delta if present (resume path).
+	// The delta is best-effort: a malformed or otherwise unappliable delta must
+	// not block pod creation. Surface the failure via log + Warning event and
+	// continue with the freshly generated pod spec.
 	if args.PodTemplateDelta != nil {
-		klog.InfoS("Pod spec before checkpoint delta", "sandbox", klog.KObj(box), "pod", utils.DumpJson(pod), "delta", string(args.PodTemplateDelta.Raw))
+		klog.V(5).InfoS("Pod spec before checkpoint delta", "sandbox", klog.KObj(box), "pod", utils.DumpJson(pod), "delta", string(args.PodTemplateDelta.Raw))
 		if applyErr := checkpointutils.ApplyPodTemplateDelta(pod, *args.PodTemplateDelta); applyErr != nil {
-			klog.ErrorS(applyErr, "failed to apply pod template delta from checkpoint", "sandbox", klog.KObj(box))
+			klog.ErrorS(applyErr, "failed to apply pod template delta from checkpoint, continuing without delta", "sandbox", klog.KObj(box))
 			c.recorder.Event(box, corev1.EventTypeWarning, "CheckpointApplyFailed",
-				fmt.Sprintf("Failed to apply checkpoint delta: %v", applyErr))
+				fmt.Sprintf("Failed to apply checkpoint delta, continuing without it: %v", applyErr))
+		} else {
+			klog.V(5).InfoS("Pod spec after checkpoint delta", "sandbox", klog.KObj(box), "pod", utils.DumpJson(pod))
 		}
-		klog.InfoS("Pod spec after checkpoint delta", "sandbox", klog.KObj(box), "pod", utils.DumpJson(pod))
 	}
 
 	ScaleExpectation.ExpectScale(GetControllerKey(box), expectations.Create, box.Name)
@@ -111,7 +115,11 @@ func (c *PodControl) CreatePod(ctx context.Context, args CreatePodArgs) (*corev1
 			return nil, err
 		}
 	}
-	klog.InfoS("Create pod success", "sandbox", klog.KObj(box), "Body", utils.DumpJson(pod))
+	kvs := []any{"sandbox", klog.KObj(box), "pod", klog.KObj(pod)}
+	if klog.V(5).Enabled() {
+		kvs = append(kvs, "body", utils.DumpJson(pod))
+	}
+	klog.InfoS("Create pod success", kvs...)
 	return pod, nil
 }
 
