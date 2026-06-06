@@ -512,7 +512,7 @@ var _ = Describe("SandboxUpdateOps E2E", func() {
 			By("Waiting for recovery Ops to reach Completed")
 			waitOpsPhase(ops2, agentsv1alpha1.SandboxUpdateOpsCompleted, 2*time.Minute)
 
-			By("Verifying all 2 Sandboxes have been upgraded")
+			By("Verifying recovery Ops completed (both sandboxes need update: the previously-failed one is still Upgrading)")
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: ops2.Name, Namespace: ops2.Namespace}, ops2)).To(Succeed())
 			Expect(ops2.Status.UpdatedReplicas).To(Equal(int32(2)))
 			klog.InfoS("Recovery Ops completed", "updated", ops2.Status.UpdatedReplicas)
@@ -789,6 +789,67 @@ var _ = Describe("SandboxUpdateOps E2E", func() {
 				Expect(k8sClient.Get(ctx, types.NamespacedName{Name: sbx.Name, Namespace: sbx.Namespace}, pod)).To(Succeed())
 				Expect(pod.Spec.Containers[0].Image).To(Equal(updateImage),
 					"sandbox %s should have updated image after recovery", sbx.Name)
+			}
+		})
+
+		It("should skip sandboxes whose template already matches the patch target", func() {
+			const batchPrefix = "batch-skip"
+			labelValue := fmt.Sprintf("%s-%d", batchPrefix, time.Now().UnixNano())
+
+			By("Creating 2 Sandboxes with updateImage as initial image and waiting for Running")
+			sandboxes := make([]*agentsv1alpha1.Sandbox, 2)
+			for i := 0; i < 2; i++ {
+				sandboxes[i] = newOpsSandbox(
+					fmt.Sprintf("ops-skip-%s-%d", labelValue[:len(batchPrefix)], i),
+					labelValue, nil, nil,
+				)
+				// Set container image to the same value the patch will target
+				sandboxes[i].Spec.Template.Spec.Containers[0].Image = updateImage
+				Expect(k8sClient.Create(ctx, sandboxes[i])).To(Succeed())
+			}
+			for i := 0; i < 2; i++ {
+				waitSandboxRunning(sandboxes[i])
+				klog.InfoS("Sandbox is Running", "name", sandboxes[i].Name, "index", i)
+			}
+
+			By("Creating SandboxUpdateOps with patch target matching current template")
+			ops := &agentsv1alpha1.SandboxUpdateOps{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("ops-skip-%s", labelValue[:len(batchPrefix)]),
+					Namespace: namespace,
+				},
+				Spec: agentsv1alpha1.SandboxUpdateOpsSpec{
+					Selector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{batchLabel: labelValue},
+					},
+					Patch: mustMarshalPatch(corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{Name: "test-container", Image: updateImage},
+							},
+						},
+					}),
+				},
+			}
+			Expect(k8sClient.Create(ctx, ops)).To(Succeed())
+			klog.InfoS("Created SandboxUpdateOps targeting already-matching template", "name", ops.Name)
+
+			By("Waiting for Ops to reach Completed")
+			waitOpsPhase(ops, agentsv1alpha1.SandboxUpdateOpsCompleted, 30*time.Second)
+
+			By("Verifying status: all sandboxes skipped, no replicas counted")
+			Expect(ops.Status.Replicas).To(Equal(int32(0)), "no sandbox should be counted")
+			Expect(ops.Status.UpdatedReplicas).To(Equal(int32(0)))
+			Expect(ops.Status.UpdatingReplicas).To(Equal(int32(0)))
+			Expect(ops.Status.FailedReplicas).To(Equal(int32(0)))
+			klog.InfoS("Ops status verified", "replicas", ops.Status.Replicas)
+
+			By("Verifying sandboxes were NOT patched (no ops label)")
+			for _, sbx := range sandboxes {
+				updated := &agentsv1alpha1.Sandbox{}
+				Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), updated)).To(Succeed())
+				Expect(updated.Labels).NotTo(HaveKey(agentsv1alpha1.LabelSandboxUpdateOps),
+					"sandbox %s should not have ops label since template already matched", sbx.Name)
 			}
 		})
 	})

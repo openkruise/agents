@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
@@ -28,6 +29,29 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 )
+
+// isSandboxTemplateMatchPatch checks whether the sandbox template already matches
+// the patch target. If applying the SMP produces no change, the sandbox is already
+// up-to-date and should be skipped entirely (no patch, no counting).
+func isSandboxTemplateMatchPatch(sbx *agentsv1alpha1.Sandbox, ops *agentsv1alpha1.SandboxUpdateOps) bool {
+	if sbx.Spec.Template == nil || len(ops.Spec.Patch.Raw) == 0 {
+		return false
+	}
+	originalBytes, err := json.Marshal(sbx.Spec.Template)
+	if err != nil {
+		return false
+	}
+	mergedBytes, err := strategicpatch.StrategicMergePatch(originalBytes, ops.Spec.Patch.Raw, &v1.PodTemplateSpec{})
+	if err != nil {
+		klog.ErrorS(err, "Failed to apply strategic merge patch for match check", "sandbox", klog.KObj(sbx))
+		return false
+	}
+	merged := &v1.PodTemplateSpec{}
+	if err := json.Unmarshal(mergedBytes, merged); err != nil {
+		return false
+	}
+	return reflect.DeepEqual(sbx.Spec.Template, merged)
+}
 
 func (r *Reconciler) applySandboxPatch(ctx context.Context, sbx *agentsv1alpha1.Sandbox, ops *agentsv1alpha1.SandboxUpdateOps) error {
 	modified := sbx.DeepCopy()

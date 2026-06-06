@@ -155,7 +155,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 
 	// 5. Classify sandbox states
-	updated, failed, updating, candidates, requeueResult := r.classifySandboxes(sandboxList, ops)
+	updated, failed, updating, candidates, requeueResult := r.classifySandboxes(ctx, sandboxList, ops)
 	if requeueResult != nil {
 		return *requeueResult, nil
 	}
@@ -222,7 +222,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	return ctrl.Result{}, r.updateStatus(ctx, ops, newStatus)
 }
 
-func (r *Reconciler) classifySandboxes(sandboxList *agentsv1alpha1.SandboxList, ops *agentsv1alpha1.SandboxUpdateOps) (updated, failed, updating int32, candidates []*agentsv1alpha1.Sandbox, requeueResult *ctrl.Result) {
+func (r *Reconciler) classifySandboxes(ctx context.Context, sandboxList *agentsv1alpha1.SandboxList, ops *agentsv1alpha1.SandboxUpdateOps) (updated, failed, updating int32, candidates []*agentsv1alpha1.Sandbox, requeueResult *ctrl.Result) {
 	for i := range sandboxList.Items {
 		sbx := &sandboxList.Items[i]
 		if !sbx.DeletionTimestamp.IsZero() || (sbx.Status.Phase != agentsv1alpha1.SandboxRunning &&
@@ -249,7 +249,7 @@ func (r *Reconciler) classifySandboxes(sandboxList *agentsv1alpha1.SandboxList, 
 			ResourceVersionExpectations.Delete(sbx)
 		}
 
-		category := classifySandbox(sbx, ops.Name)
+		category := r.classifySandbox(ctx, sbx, ops)
 		klog.InfoS("Classified sandbox", "sandbox", klog.KObj(sbx), "category", category, "ops", klog.KObj(ops))
 		switch category {
 		case sandboxUpdated:
@@ -258,6 +258,8 @@ func (r *Reconciler) classifySandboxes(sandboxList *agentsv1alpha1.SandboxList, 
 			failed++
 		case sandboxUpdating:
 			updating++
+		case sandboxNoNeedUpdate:
+			continue
 		case sandboxCandidate:
 			candidates = append(candidates, sbx)
 		}
@@ -268,10 +270,11 @@ func (r *Reconciler) classifySandboxes(sandboxList *agentsv1alpha1.SandboxList, 
 type sandboxUpdateState int
 
 const (
-	sandboxCandidate sandboxUpdateState = iota // not yet started
-	sandboxUpdating                            // upgrading in progress
-	sandboxUpdated                             // upgrade completed
-	sandboxFailed                              // upgrade failed
+	sandboxCandidate    sandboxUpdateState = iota // not yet started
+	sandboxUpdating                               // upgrading in progress
+	sandboxUpdated                                // upgrade completed
+	sandboxFailed                                 // upgrade failed
+	sandboxNoNeedUpdate                           // template already matches patch, skip entirely
 )
 
 func (s sandboxUpdateState) String() string {
@@ -284,13 +287,30 @@ func (s sandboxUpdateState) String() string {
 		return "Updated"
 	case sandboxFailed:
 		return "Failed"
+	case sandboxNoNeedUpdate:
+		return "NoNeedUpdate"
 	default:
 		return "Unknown"
 	}
 }
 
-func classifySandbox(sbx *agentsv1alpha1.Sandbox, opsName string) sandboxUpdateState {
-	if sbx.Labels[agentsv1alpha1.LabelSandboxUpdateOps] != opsName {
+func (r *Reconciler) classifySandbox(ctx context.Context, sbx *agentsv1alpha1.Sandbox, ops *agentsv1alpha1.SandboxUpdateOps) sandboxUpdateState {
+	otherOpsName := sbx.Labels[agentsv1alpha1.LabelSandboxUpdateOps]
+	if otherOpsName != ops.Name {
+		if otherOpsName != "" {
+			otherOps := &agentsv1alpha1.SandboxUpdateOps{}
+			if err := r.Get(ctx, types.NamespacedName{Namespace: sbx.Namespace, Name: otherOpsName}, otherOps); err == nil &&
+				(otherOps.Status.Phase == agentsv1alpha1.SandboxUpdateOpsPending ||
+					otherOps.Status.Phase == agentsv1alpha1.SandboxUpdateOpsUpdating) {
+				klog.InfoS("Sandbox is being updated by another active ops, skipping",
+					"sandbox", klog.KObj(sbx), "otherOps", otherOpsName, "ops", klog.KObj(ops))
+				return sandboxNoNeedUpdate
+			}
+		}
+		if isSandboxTemplateMatchPatch(sbx, ops) && sbx.Status.Phase != agentsv1alpha1.SandboxUpgrading &&
+			sbx.Generation == sbx.Status.ObservedGeneration {
+			return sandboxNoNeedUpdate
+		}
 		return sandboxCandidate
 	}
 
@@ -310,6 +330,11 @@ func classifySandbox(sbx *agentsv1alpha1.Sandbox, opsName string) sandboxUpdateS
 			cond.Reason == agentsv1alpha1.SandboxUpgradingReasonPostUpgradeFailed ||
 			cond.Reason == agentsv1alpha1.SandboxUpgradingReasonUpgradePodFailed) {
 		return sandboxFailed
+	}
+
+	// Patched by ops but never entered upgrade flow — template already matched
+	if cond == nil && isSandboxTemplateMatchPatch(sbx, ops) {
+		return sandboxNoNeedUpdate
 	}
 
 	// All other states with ops label (Running / Upgrading / Pending etc.)
