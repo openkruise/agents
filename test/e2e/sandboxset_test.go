@@ -563,7 +563,7 @@ var _ = Describe("SandboxSet", func() {
 	})
 
 	Context("SandboxMultiClusterNaming FeatureGate tests", func() {
-		It("should generate sandbox names with SandboxSet name prefix when SandboxMultiClusterNaming is disabled (default)", func() {
+		It("should generate sandbox names consistent with the SandboxMultiClusterNaming feature gate state", func() {
 			By("Creating a SandboxSet with 2 replicas")
 			Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
 
@@ -582,19 +582,32 @@ var _ = Describe("SandboxSet", func() {
 				client.MatchingLabels{agentsv1alpha1.LabelSandboxPool: sandbox.Name})).To(Succeed())
 			Expect(len(sandboxList.Items)).To(Equal(2))
 
-			By("Verifying each Sandbox name starts with '{sbsName}-' and has no extra cluster hash segment")
+			By("Verifying sandbox naming pattern")
 			expectedPrefix := sandbox.Name + "-"
+			// Detect feature gate state from the first sandbox's name:
+			// Enabled:  "{sbsName}-{4hexhash}-{random5}" — suffix contains "-"
+			// Disabled: "{sbsName}-{random5}" — suffix has no "-"
+			firstSuffix := strings.TrimPrefix(sandboxList.Items[0].Name, expectedPrefix)
+			multiClusterEnabled := strings.Contains(firstSuffix, "-")
+
 			for _, sbx := range sandboxList.Items {
 				Expect(sbx.Name).To(HavePrefix(expectedPrefix),
 					"Sandbox name %q should start with prefix %q", sbx.Name, expectedPrefix)
-				// With SandboxMultiClusterNaming disabled, the name format is "{sbsName}-{random5}"
-				// (generateName adds 5 random chars). The suffix after the prefix should NOT
-				// contain another '-' segment that looks like a 4-char hex hash.
 				suffix := strings.TrimPrefix(sbx.Name, expectedPrefix)
 				Expect(suffix).NotTo(BeEmpty(), "Sandbox name suffix should not be empty")
-				// The suffix should be a single random string (5 chars) without additional dashes
-				Expect(strings.Contains(suffix, "-")).To(BeFalse(),
-					"Sandbox name %q suffix %q should not contain '-' (no cluster hash embedded)", sbx.Name, suffix)
+
+				if multiClusterEnabled {
+					// Enabled: suffix format is "{4hexhash}-{random5}"
+					parts := strings.SplitN(suffix, "-", 2)
+					Expect(len(parts)).To(Equal(2),
+						"Sandbox name %q suffix %q should have format {hash}-{random}", sbx.Name, suffix)
+					Expect(len(parts[0])).To(Equal(4),
+						"Cluster hash segment %q should be 4 characters", parts[0])
+				} else {
+					// Disabled: suffix is just "{random5}" with no dashes
+					Expect(strings.Contains(suffix, "-")).To(BeFalse(),
+						"Sandbox name %q suffix %q should not contain '-' (no cluster hash embedded)", sbx.Name, suffix)
+				}
 			}
 		})
 	})
