@@ -49,23 +49,40 @@ func InjectSandboxRuntimes(ctx context.Context, sandbox *agentsv1alpha1.Sandbox,
 	return doSidecarInjection(ctx, sandbox, pod, config)
 }
 
+// fixedOrderRuntimes defines the injection order for built-in runtimes.
+// Preserve historical injection order: agent-runtime first, then csi-mount,
+// to keep init container ordering stable for pre-existing pods regardless of
+// the declaration order in sandbox.Spec.Runtimes.
+var fixedOrderRuntimes = []string{
+	agentsv1alpha1.RuntimeConfigForInjectAgentRuntime,
+	agentsv1alpha1.RuntimeConfigForInjectCsiMount,
+}
+
 func doSidecarInjection(ctx context.Context, sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod, injectConfigMap map[string]string) error {
 	logger := logf.FromContext(ctx)
 
-	injectedRuntimes := sets.NewString()
+	// Build a quick-lookup set of declared runtimes for the fixed-order phase.
+	declared := sets.NewString()
 	for _, r := range sandbox.Spec.Runtimes {
-		runtime := r.Name
-		if injectedRuntimes.Has(runtime) {
-			logger.V(5).Info("skipping duplicate runtime, already processed", "runtime", runtime)
+		declared.Insert(r.Name)
+	}
+
+	injectedRuntimes := sets.NewString()
+
+	// Phase 1: inject built-in runtimes in a deterministic fixed order so that
+	// the resulting InitContainers sequence is stable across spec permutations.
+	for _, runtime := range fixedOrderRuntimes {
+		if !declared.Has(runtime) {
 			continue
 		}
-		injectedRuntimes.Insert(runtime)
 
 		runtimeInjectConfig, err := parseInjectConfig(ctx, runtime, injectConfigMap)
 		if err != nil {
 			logger.Error(err, "failed to parse runtime injection configuration")
 			return err
 		}
+		logger.V(5).Info("injecting runtime", "name", runtime)
+		injectedRuntimes.Insert(runtime)
 		switch runtime {
 		case agentsv1alpha1.RuntimeConfigForInjectAgentRuntime:
 			if !isContainersExists(pod.Spec.InitContainers, runtimeInjectConfig.Sidecars) && !isContainersExists(pod.Spec.Containers, runtimeInjectConfig.Sidecars) {
@@ -75,14 +92,28 @@ func doSidecarInjection(ctx context.Context, sandbox *agentsv1alpha1.Sandbox, po
 			if !isContainersExists(pod.Spec.InitContainers, runtimeInjectConfig.Sidecars) && !isContainersExists(pod.Spec.Containers, runtimeInjectConfig.Sidecars) {
 				setCSIMountContainer(ctx, &pod.Spec, runtimeInjectConfig)
 			}
-		default:
-			logger.V(5).Info("injecting runtime", "name", runtime)
-			// not mute the conflicts
-			if conflictErr := checkInjectionConflicts(pod, runtimeInjectConfig); conflictErr != nil {
-				return fmt.Errorf("failed to inject runtime %s: %v", runtime, conflictErr)
-			}
-			applyInjectionTemplate(pod, runtimeInjectConfig)
 		}
+	}
+
+	// Phase 2: inject remaining runtimes in their declaration order. New runtime
+	// types (e.g. traffic-proxy) fall through to the generic handler.
+	for _, r := range sandbox.Spec.Runtimes {
+		runtime := r.Name
+		if injectedRuntimes.Has(runtime) {
+			continue
+		}
+
+		runtimeInjectConfig, err := parseInjectConfig(ctx, runtime, injectConfigMap)
+		if err != nil {
+			logger.Error(err, "failed to parse runtime injection configuration")
+			return err
+		}
+		logger.V(5).Info("injecting runtime", "name", runtime)
+		if conflictErr := checkInjectionConflicts(pod, runtimeInjectConfig); conflictErr != nil {
+			return fmt.Errorf("failed to inject runtime %s: %v", runtime, conflictErr)
+		}
+		injectedRuntimes.Insert(runtime)
+		applyInjectionTemplate(pod, runtimeInjectConfig)
 	}
 
 	// Enable health probes rewrite if needed.

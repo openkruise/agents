@@ -1659,6 +1659,136 @@ func TestDoSidecarInjectionDuplicateRuntimes(t *testing.T) {
 	}
 }
 
+// TestDoSidecarInjection_FixedOrder verifies that regardless of the declaration
+// order of agent-runtime and csi-mount in sandbox.Spec.Runtimes, the resulting
+// InitContainers always appear in the historical fixed order:
+// [runtime-sidecar, csi-sidecar]. This guarantees backward compatibility with
+// pods injected by the older non-loop logic.
+func TestDoSidecarInjection_FixedOrder(t *testing.T) {
+	runtimeConfig := `{
+		"mainContainer": {"env": [{"name": "RUNTIME", "value": "on"}], "volumeMounts": []},
+		"csiSidecar": [{"name": "runtime-sidecar", "image": "runtime:v1"}],
+		"volume": []
+	}`
+	csiConfig := `{
+		"mainContainer": {"volumeMounts": [{"name": "csi-vol", "mountPath": "/csi"}]},
+		"csiSidecar": [{"name": "csi-sidecar", "image": "csi:v1"}],
+		"volume": [{"name": "csi-vol", "emptyDir": {}}]
+	}`
+
+	tests := []struct {
+		name     string
+		runtimes []agentsv1alpha1.RuntimeConfig
+		// expectSidecars is the ordered subsequence of known sidecar
+		// container names ("runtime-sidecar" / "csi-sidecar") that MUST
+		// appear in pod.Spec.InitContainers after injection. Other
+		// containers (e.g. the user "main" container) are ignored.
+		expectSidecars []string
+	}{
+		{
+			name: "normal order: agent-runtime then csi-mount",
+			runtimes: []agentsv1alpha1.RuntimeConfig{
+				{Name: agentsv1alpha1.RuntimeConfigForInjectAgentRuntime},
+				{Name: agentsv1alpha1.RuntimeConfigForInjectCsiMount},
+			},
+			expectSidecars: []string{"runtime-sidecar", "csi-sidecar"},
+		},
+		{
+			name: "reversed order: csi-mount then agent-runtime",
+			runtimes: []agentsv1alpha1.RuntimeConfig{
+				{Name: agentsv1alpha1.RuntimeConfigForInjectCsiMount},
+				{Name: agentsv1alpha1.RuntimeConfigForInjectAgentRuntime},
+			},
+			expectSidecars: []string{"runtime-sidecar", "csi-sidecar"},
+		},
+		{
+			name: "reversed order with traffic-proxy interleaved",
+			runtimes: []agentsv1alpha1.RuntimeConfig{
+				{Name: agentsv1alpha1.RuntimeConfigForInjectCsiMount},
+				{Name: agentsv1alpha1.RuntimeConfigForInjectTrafficProxy},
+				{Name: agentsv1alpha1.RuntimeConfigForInjectAgentRuntime},
+			},
+			expectSidecars: []string{"runtime-sidecar", "csi-sidecar"},
+		},
+		{
+			// Phase 1 must skip the absent csi-mount runtime and only
+			// inject runtime-sidecar; InitContainers list must remain
+			// well-formed (no panic, no stray csi-sidecar entry).
+			// Note: the symmetric "only csi-mount" combination is
+			// intentionally NOT covered here because csi-mount alone
+			// cannot work in production -- the CSI dynamic mount flow
+			// is driven by the agent-runtime sidecar (envd), so a pod
+			// declaring csi-mount without agent-runtime is an invalid
+			// business state and must not be modeled as a happy-path
+			// test case.
+			name: "only agent-runtime declared (csi-mount absent)",
+			runtimes: []agentsv1alpha1.RuntimeConfig{
+				{Name: agentsv1alpha1.RuntimeConfigForInjectAgentRuntime},
+			},
+			expectSidecars: []string{"runtime-sidecar"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sandbox := &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+				Spec: agentsv1alpha1.SandboxSpec{
+					Runtimes: tt.runtimes,
+				},
+			}
+			pod := &corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "main", Image: "nginx"}},
+				},
+			}
+			injectConfigMap := map[string]string{
+				KEY_RUNTIME_INJECTION_CONFIG:       runtimeConfig,
+				KEY_CSI_INJECTION_CONFIG:           csiConfig,
+				KEY_TRAFFIC_PROXY_INJECTION_CONFIG: `{"mainContainer":{},"csiSidecar":[],"volume":[]}`,
+			}
+
+			err := doSidecarInjection(context.Background(), sandbox, pod, injectConfigMap)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			// Extract only the known sidecar names from InitContainers
+			// while preserving their relative order, then compare with
+			// the expected subsequence. This keeps the assertion robust
+			// even when only one of the two built-in runtimes is present.
+			knownSidecars := map[string]struct{}{
+				"runtime-sidecar": {},
+				"csi-sidecar":     {},
+			}
+			var got []string
+			for _, c := range pod.Spec.InitContainers {
+				if _, ok := knownSidecars[c.Name]; ok {
+					got = append(got, c.Name)
+				}
+			}
+			if len(got) != len(tt.expectSidecars) {
+				t.Fatalf("expected sidecars %v, got %v (full InitContainers=%v)", tt.expectSidecars, got, initContainerNames(pod))
+			}
+			for i := range tt.expectSidecars {
+				if got[i] != tt.expectSidecars[i] {
+					t.Errorf("InitContainers sidecar at position %d: expected %q, got %q (full sequence=%v)", i, tt.expectSidecars[i], got[i], got)
+				}
+			}
+		})
+	}
+}
+
+// initContainerNames is a tiny test helper that extracts ordered
+// InitContainer names for richer error messages.
+func initContainerNames(pod *corev1.Pod) []string {
+	names := make([]string, 0, len(pod.Spec.InitContainers))
+	for _, c := range pod.Spec.InitContainers {
+		names = append(names, c.Name)
+	}
+	return names
+}
+
 // TestDoSidecarInjection_CAInjection covers the CA bundle Volume / VolumeMount
 // / EnvVar block embedded at the tail of doSidecarInjection. It exercises the
 // two-tier gating contract:
