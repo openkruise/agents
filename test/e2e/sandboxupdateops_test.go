@@ -449,8 +449,8 @@ var _ = Describe("SandboxUpdateOps E2E", func() {
 
 			By("Verifying MaxUnavailable=1 limited the blast radius")
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: ops1.Name, Namespace: ops1.Namespace}, ops1)).To(Succeed())
-			Expect(ops1.Status.Phase).To(Equal(agentsv1alpha1.SandboxUpdateOpsUpdating),
-				"ops should remain in Updating phase since failed occupies maxUnavailable quota")
+			Expect(ops1.Status.Phase).To(Equal(agentsv1alpha1.SandboxUpdateOpsFailed),
+				"ops should transition to Failed when failed sandboxes block all maxUnavailable slots")
 			Expect(ops1.Status.Replicas).To(Equal(int32(2)),
 				"total replicas should be 2")
 			Expect(ops1.Status.FailedReplicas).To(Equal(int32(1)),
@@ -726,8 +726,8 @@ var _ = Describe("SandboxUpdateOps E2E", func() {
 
 			By("Verifying ops status with MaxUnavailable=1")
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: ops1.Name, Namespace: ops1.Namespace}, ops1)).To(Succeed())
-			Expect(ops1.Status.Phase).To(Equal(agentsv1alpha1.SandboxUpdateOpsUpdating),
-				"ops should remain in Updating phase since failed occupies maxUnavailable quota")
+			Expect(ops1.Status.Phase).To(Equal(agentsv1alpha1.SandboxUpdateOpsFailed),
+				"ops should transition to Failed when failed sandboxes block all maxUnavailable slots")
 			Expect(ops1.Status.Replicas).To(Equal(int32(2)))
 			Expect(ops1.Status.FailedReplicas).To(Equal(int32(1)))
 			Expect(ops1.Status.UpdatingReplicas).To(Equal(int32(0)))

@@ -1582,6 +1582,63 @@ func TestHandleDeletion_UpdateFinalizerRemovalError(t *testing.T) {
 	assert.Contains(t, err.Error(), "simulated update error")
 }
 
+func TestReconcile_FailedBlocksAllSlotsLeadsToFailed(t *testing.T) {
+	maxUnavail := intstrutil.FromInt32(1)
+	ops := newSandboxUpdateOps("test-ops", "default", agentsv1alpha1.SandboxUpdateOpsUpdating, false, &maxUnavail)
+	// 1 failed sandbox (occupies the only maxUnavailable slot), 2 candidates remain
+	sbx1 := newSandbox("sbx-1", "default", "test-ops", agentsv1alpha1.SandboxRunning, []metav1.Condition{
+		{Type: string(agentsv1alpha1.SandboxConditionUpgrading), Reason: agentsv1alpha1.SandboxUpgradingReasonPreUpgradeFailed, Status: metav1.ConditionFalse},
+	})
+	sbx2 := newSandbox("sbx-2", "default", "", agentsv1alpha1.SandboxRunning, nil)
+	sbx3 := newSandbox("sbx-3", "default", "", agentsv1alpha1.SandboxRunning, nil)
+	r := newTestReconciler(ops, sbx1, sbx2, sbx3)
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-ops", Namespace: "default"},
+	})
+	assert.NoError(t, err)
+
+	updatedOps := &agentsv1alpha1.SandboxUpdateOps{}
+	err = r.Get(context.Background(), types.NamespacedName{Name: "test-ops", Namespace: "default"}, updatedOps)
+	assert.NoError(t, err)
+	assert.Equal(t, agentsv1alpha1.SandboxUpdateOpsFailed, updatedOps.Status.Phase)
+	assert.Equal(t, int32(1), updatedOps.Status.FailedReplicas)
+	// Candidates should NOT have been patched
+	for _, name := range []string{"sbx-2", "sbx-3"} {
+		sbx := &agentsv1alpha1.Sandbox{}
+		err = r.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "default"}, sbx)
+		assert.NoError(t, err)
+		assert.Empty(t, sbx.Labels[agentsv1alpha1.LabelSandboxUpdateOps])
+	}
+}
+
+func TestReconcile_FailedBelowMaxUnavailableContinuesUpdating(t *testing.T) {
+	maxUnavail := intstrutil.FromInt32(2)
+	ops := newSandboxUpdateOps("test-ops", "default", agentsv1alpha1.SandboxUpdateOpsUpdating, false, &maxUnavail)
+	// 1 failed, maxUnavailable=2 -> still has capacity to start 1 more
+	sbx1 := newSandbox("sbx-1", "default", "test-ops", agentsv1alpha1.SandboxRunning, []metav1.Condition{
+		{Type: string(agentsv1alpha1.SandboxConditionUpgrading), Reason: agentsv1alpha1.SandboxUpgradingReasonPreUpgradeFailed, Status: metav1.ConditionFalse},
+	})
+	sbx2 := newSandbox("sbx-2", "default", "", agentsv1alpha1.SandboxRunning, nil)
+	r := newTestReconciler(ops, sbx1, sbx2)
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-ops", Namespace: "default"},
+	})
+	assert.NoError(t, err)
+
+	updatedOps := &agentsv1alpha1.SandboxUpdateOps{}
+	err = r.Get(context.Background(), types.NamespacedName{Name: "test-ops", Namespace: "default"}, updatedOps)
+	assert.NoError(t, err)
+	assert.Equal(t, agentsv1alpha1.SandboxUpdateOpsUpdating, updatedOps.Status.Phase)
+
+	// Candidate should have been patched (2-0-1=1 slot available)
+	sbx := &agentsv1alpha1.Sandbox{}
+	err = r.Get(context.Background(), types.NamespacedName{Name: "sbx-2", Namespace: "default"}, sbx)
+	assert.NoError(t, err)
+	assert.Equal(t, "test-ops", sbx.Labels[agentsv1alpha1.LabelSandboxUpdateOps])
+}
+
 func TestUpdateStatus_NoChange(t *testing.T) {
 	ops := newSandboxUpdateOps("test-ops", "default", agentsv1alpha1.SandboxUpdateOpsUpdating, false, nil)
 	ops.Status.Replicas = 5
