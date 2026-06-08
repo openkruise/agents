@@ -27,12 +27,20 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 )
 
 var adminKey = "admin-key"
+
+// stubAdapterCache is a no-op ctrlcache.Cache used solely so the keys factory
+// validation passes during adapter test setup. The keystore built here is not
+// exercised by any adapter test; it only needs to construct successfully.
+type stubAdapterCache struct {
+	ctrlcache.Cache // embedded nil interface; unused methods will panic
+}
 
 func SetUpE2BAdapter(t *testing.T) *E2BAdapter {
 	scheme := runtime.NewScheme()
@@ -52,6 +60,7 @@ func SetUpE2BAdapter(t *testing.T) *E2BAdapter {
 		AdminKey:  adminKey,
 		Client:    fc,
 		APIReader: fc,
+		Cache:     &stubAdapterCache{},
 	})
 	require.NoError(t, err)
 	assert.NoError(t, keyStore.Init(context.Background()))

@@ -68,7 +68,7 @@ func newSecretStorageForTest(t *testing.T, data map[string][]byte) (*secretKeySt
 		ObjectMeta: metav1.ObjectMeta{Name: KeySecretName, Namespace: "default"},
 		Data:       data,
 	}).Build()
-	return NewSecretKeyStorage(c, c, "default", "admin-key").(*secretKeyStorage), c
+	return NewSecretKeyStorage(c, c, nil, "default", "admin-key").(*secretKeyStorage), c
 }
 
 func getSecretForTest(t *testing.T, c client.Client) *corev1.Secret {
@@ -142,7 +142,7 @@ func TestSecretKeyStorage_Init(t *testing.T) {
 			name: "secret not found",
 			prepare: func(t *testing.T) (*secretKeyStorage, client.Client) {
 				c := fake.NewClientBuilder().WithScheme(newTestScheme(t)).Build()
-				return NewSecretKeyStorage(c, c, "default", "admin-key").(*secretKeyStorage), c
+				return NewSecretKeyStorage(c, c, nil, "default", "admin-key").(*secretKeyStorage), c
 			},
 			expectError: "not found",
 		},
@@ -192,7 +192,7 @@ func TestSecretKeyStorage_Init(t *testing.T) {
 						return nil
 					},
 				}
-				return NewSecretKeyStorage(hookClient, hookClient, "default", "admin-key").(*secretKeyStorage), c
+				return NewSecretKeyStorage(hookClient, hookClient, nil, "default", "admin-key").(*secretKeyStorage), c
 			},
 		},
 		{
@@ -205,7 +205,7 @@ func TestSecretKeyStorage_Init(t *testing.T) {
 						return errors.New("update failed")
 					},
 				}
-				return NewSecretKeyStorage(hookClient, hookClient, "default", "admin-key").(*secretKeyStorage), c
+				return NewSecretKeyStorage(hookClient, hookClient, nil, "default", "admin-key").(*secretKeyStorage), c
 			},
 			expectError: "update failed",
 		},
@@ -264,7 +264,7 @@ func TestSecretKeyStorage_UpdateAndRetry(t *testing.T) {
 			name: "update get error",
 			run: func(t *testing.T) error {
 				c := fake.NewClientBuilder().WithScheme(newTestScheme(t)).Build()
-				storage := NewSecretKeyStorage(c, c, "default", "admin-key").(*secretKeyStorage)
+				storage := NewSecretKeyStorage(c, c, nil, "default", "admin-key").(*secretKeyStorage)
 				return storage.updateSecret(context.Background(), "id", &models.CreatedTeamAPIKey{ID: uuid.New(), Key: "x"})
 			},
 			expectError: "not found",
@@ -322,7 +322,7 @@ func TestSecretKeyStorage_UpdateAndRetry(t *testing.T) {
 						return nil
 					},
 				}
-				storage := NewSecretKeyStorage(hookClient, hookClient, "default", "admin-key").(*secretKeyStorage)
+				storage := NewSecretKeyStorage(hookClient, hookClient, nil, "default", "admin-key").(*secretKeyStorage)
 				err := storage.retryUpdateSecret(context.Background(), uuid.NewString(), &models.CreatedTeamAPIKey{ID: uuid.New(), Key: "x"})
 				if err == nil {
 					assert.GreaterOrEqual(t, atomic.LoadInt32(&updated), int32(2))
@@ -410,7 +410,7 @@ func TestSecretKeyStorage_CreateKey(t *testing.T) {
 						return errors.New("update failed")
 					},
 				}
-				storageErr := NewSecretKeyStorage(hookClient, hookClient, "default", "admin-key").(*secretKeyStorage)
+				storageErr := NewSecretKeyStorage(hookClient, hookClient, nil, "default", "admin-key").(*secretKeyStorage)
 				_, err := storageErr.CreateKey(context.Background(), user, CreateKeyOptions{Name: "name"})
 				return err
 			},
@@ -457,7 +457,7 @@ func TestSecretKeyStorage_CreateKey(t *testing.T) {
 						return apierrors.NewConflict(schema.GroupResource{Group: "", Resource: "secrets"}, KeySecretName, errors.New("conflict"))
 					},
 				}
-				storage := NewSecretKeyStorage(hookClient, hookClient, "default", "admin-key").(*secretKeyStorage)
+				storage := NewSecretKeyStorage(hookClient, hookClient, nil, "default", "admin-key").(*secretKeyStorage)
 
 				useGeneratedUUIDsForTest(t,
 					uuid.MustParse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
@@ -596,7 +596,7 @@ func TestSecretKeyStorage_DeleteAndList(t *testing.T) {
 			return errors.New("delete failed")
 		},
 	}
-	storageWithDeleteError := NewSecretKeyStorage(hookClient, hookClient, "default", "admin-key").(*secretKeyStorage)
+	storageWithDeleteError := NewSecretKeyStorage(hookClient, hookClient, nil, "default", "admin-key").(*secretKeyStorage)
 	require.Error(t, storageWithDeleteError.DeleteKey(context.Background(), key2))
 }
 

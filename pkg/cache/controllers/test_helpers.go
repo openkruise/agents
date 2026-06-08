@@ -45,6 +45,38 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 )
 
+// stubCtrlCache is a no-op placeholder for ctrlcache.Cache returned by
+// MockManager.GetCache(). Returning a non-nil value is required so production
+// code that injects the cache into downstream consumers (e.g., the e2b
+// key-storage factory) does not reject the test wiring as if no cache were
+// configured. The only methods exercised by the production cache lifecycle
+// in tests are IndexField and WaitForCacheSync; both are no-ops because the
+// fake client built alongside MockManager already has indexes wired through
+// fake.WithIndex, and tests never block on real informer sync. Any other
+// method falls through to the embedded nil interface and panics, which is
+// the desired loud-failure behavior for paths the tests should not reach.
+type stubCtrlCache struct {
+	ctrlcache.Cache // embedded nil interface
+}
+
+// IndexField is a no-op; cache.AddIndexesToCache forwards the field config
+// here, but the fake client already carries the same indexes from
+// cache.GetIndexFuncs.
+func (*stubCtrlCache) IndexField(_ context.Context, _ client.Object, _ string, _ client.IndexerFunc) error {
+	return nil
+}
+
+// WaitForCacheSync returns true so cache.Run does not block on a fake
+// informer that will never sync.
+func (*stubCtrlCache) WaitForCacheSync(_ context.Context) bool { return true }
+
+// Start blocks until ctx is done so cache.Run's mgr.Start goroutine has
+// something to exit cleanly when the test cancels its context.
+func (*stubCtrlCache) Start(ctx context.Context) error {
+	<-ctx.Done()
+	return nil
+}
+
 // MockManager implements manager.Manager for unit testing.
 // It provides controllable Add() behavior to allow error injection on specific calls.
 type MockManager struct {
@@ -126,7 +158,7 @@ func (b *MockManagerBuilder) Build() *MockManager {
 
 func (m *MockManager) GetHTTPClient() *http.Client          { return nil }
 func (m *MockManager) GetConfig() *rest.Config              { return nil }
-func (m *MockManager) GetCache() ctrlcache.Cache            { return nil }
+func (m *MockManager) GetCache() ctrlcache.Cache            { return &stubCtrlCache{} }
 func (m *MockManager) GetScheme() *runtime.Scheme           { return m.scheme }
 func (m *MockManager) GetClient() client.Client             { return m.client }
 func (m *MockManager) GetAPIReader() client.Reader          { return m.apiReader }

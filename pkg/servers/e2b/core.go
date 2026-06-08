@@ -142,6 +142,7 @@ func (sc *Controller) initKeyStorage(ctx context.Context) error {
 		if sc.cache != nil {
 			sc.keyCfg.Client = sc.cache.GetClient()
 			sc.keyCfg.APIReader = sc.cache.GetAPIReader()
+			sc.keyCfg.Cache = sc.cache.GetCache()
 		}
 		if sc.keys, err = keys.NewKeyStorage(*sc.keyCfg); err != nil {
 			return err

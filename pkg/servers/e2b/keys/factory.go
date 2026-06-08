@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 
+	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -41,16 +42,17 @@ type Config struct {
 	DisableAutoMigrate bool   // mysql mode
 	Client             client.Client
 	APIReader          client.Reader
+	Cache              ctrlcache.Cache // required for secret mode; ignored for mysql mode
 }
 
 // NewKeyStorage returns a KeyStorage implementation for the given config.
 func NewKeyStorage(cfg Config) (KeyStorage, error) {
 	switch cfg.Mode {
 	case "", StorageModeSecret:
-		if cfg.Client == nil || cfg.APIReader == nil {
-			return nil, errors.New("secret key storage requires controller-runtime client and api-reader")
+		if cfg.Client == nil || cfg.APIReader == nil || cfg.Cache == nil {
+			return nil, errors.New("secret key storage requires controller-runtime client, api-reader, and cache")
 		}
-		return NewSecretKeyStorage(cfg.Client, cfg.APIReader, cfg.Namespace, cfg.AdminKey), nil
+		return NewSecretKeyStorage(cfg.Client, cfg.APIReader, cfg.Cache, cfg.Namespace, cfg.AdminKey), nil
 	case StorageModeMySQL:
 		if cfg.DSN == "" {
 			return nil, errors.New("mysql key storage requires a DSN")

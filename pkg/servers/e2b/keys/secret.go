@@ -30,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
+	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
@@ -60,21 +61,24 @@ type secretKeyStorage struct {
 	Client client.Client
 	// APIReader is used for reading secrets before cache is started (e.g., during Init).
 	APIReader client.Reader
-	stop      chan struct{}
-	done      chan struct{}
-	stopOnce  sync.Once
+	Cache     ctrlcache.Cache
+
+	stop     chan struct{}
+	done     chan struct{}
+	stopOnce sync.Once
 
 	idxByKey  sync.Map
 	idxByID   sync.Map
 	idxByTeam sync.Map // teamName -> *models.Team
 }
 
-func NewSecretKeyStorage(client client.Client, apiReader client.Reader, namespace, adminKey string) KeyStorage {
+func NewSecretKeyStorage(client client.Client, apiReader client.Reader, cache ctrlcache.Cache, namespace, adminKey string) KeyStorage {
 	return &secretKeyStorage{
 		Namespace: namespace,
 		AdminKey:  adminKey,
 		Client:    client,
 		APIReader: apiReader,
+		Cache:     cache,
 		stop:      make(chan struct{}),
 		done:      make(chan struct{}),
 	}

@@ -47,9 +47,23 @@ func TestNewKeyStorage(t *testing.T) {
 				AdminKey:  "admin",
 				Client:    fc,
 				APIReader: fc,
+				Cache:     newStubCache(),
 			},
 			wantErr:  false,
 			wantType: &secretKeyStorage{},
+		},
+		{
+			name: "secret mode requires cache",
+			config: Config{
+				Mode:      StorageModeSecret,
+				Namespace: "default",
+				AdminKey:  "admin",
+				Client:    fc,
+				APIReader: fc,
+				Cache:     nil,
+			},
+			wantErr:     true,
+			errContains: "cache",
 		},
 		{
 			name:        "mysql mode requires dsn",
