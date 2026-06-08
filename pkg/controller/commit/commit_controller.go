@@ -213,10 +213,10 @@ func (r *CommitReconciler) handleCommitRunning(ctx context.Context, args *core.E
 }
 
 func (r *CommitReconciler) handleCommitTTL(ctx context.Context, commit *agentsv1alpha1.Commit) (ctrl.Result, error) {
-	if commit.Spec.Ttl == nil {
+	if commit.Spec.TtlAfterFinished == nil {
 		return ctrl.Result{}, nil
 	}
-	ttl := commit.Spec.Ttl.Duration
+	ttl := commit.Spec.TtlAfterFinished.Duration
 	completionTime := commit.Status.CompletionTime
 	if completionTime == nil {
 		return ctrl.Result{}, nil

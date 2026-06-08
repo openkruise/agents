@@ -232,7 +232,7 @@ func TestReconcile_CommitPhaseSucceeded_TTLNotExpired(t *testing.T) {
 	ttl := 10 * time.Minute
 	completionTime := metav1.NewTime(time.Now().Add(-5 * time.Minute))
 	commit := newCommit("test-commit", "default", agentsv1alpha1.CommitPhaseSucceeded)
-	commit.Spec.Ttl = &metav1.Duration{Duration: ttl}
+	commit.Spec.TtlAfterFinished = &metav1.Duration{Duration: ttl}
 	commit.Status.CompletionTime = &completionTime
 	r, _ := newTestReconciler(commit)
 
@@ -254,7 +254,7 @@ func TestReconcile_CommitPhaseSucceeded_TTLExpired(t *testing.T) {
 	ttl := 5 * time.Minute
 	completionTime := metav1.NewTime(time.Now().Add(-10 * time.Minute))
 	commit := newCommit("test-commit", "default", agentsv1alpha1.CommitPhaseSucceeded)
-	commit.Spec.Ttl = &metav1.Duration{Duration: ttl}
+	commit.Spec.TtlAfterFinished = &metav1.Duration{Duration: ttl}
 	commit.Status.CompletionTime = &completionTime
 	r, _ := newTestReconciler(commit)
 
@@ -295,7 +295,7 @@ func TestReconcile_CommitPhaseFailed_TTLExpired(t *testing.T) {
 	ttl := 5 * time.Minute
 	completionTime := metav1.NewTime(time.Now().Add(-10 * time.Minute))
 	commit := newCommit("test-commit", "default", agentsv1alpha1.CommitPhaseFailed)
-	commit.Spec.Ttl = &metav1.Duration{Duration: ttl}
+	commit.Spec.TtlAfterFinished = &metav1.Duration{Duration: ttl}
 	commit.Status.CompletionTime = &completionTime
 	r, _ := newTestReconciler(commit)
 
@@ -318,7 +318,7 @@ func TestReconcile_CommitPhaseFailed_TTLNotExpired(t *testing.T) {
 	ttl := 10 * time.Minute
 	completionTime := metav1.NewTime(time.Now().Add(-5 * time.Minute))
 	commit := newCommit("test-commit", "default", agentsv1alpha1.CommitPhaseFailed)
-	commit.Spec.Ttl = &metav1.Duration{Duration: ttl}
+	commit.Spec.TtlAfterFinished = &metav1.Duration{Duration: ttl}
 	commit.Status.CompletionTime = &completionTime
 	r, _ := newTestReconciler(commit)
 
@@ -340,7 +340,7 @@ func TestReconcile_CommitPhaseSucceeded_NoCompletionTime(t *testing.T) {
 	// TTL is set but completionTime is nil — should not requeue or delete
 	ttl := 5 * time.Minute
 	commit := newCommit("test-commit", "default", agentsv1alpha1.CommitPhaseSucceeded)
-	commit.Spec.Ttl = &metav1.Duration{Duration: ttl}
+	commit.Spec.TtlAfterFinished = &metav1.Duration{Duration: ttl}
 	// No CompletionTime set
 	r, _ := newTestReconciler(commit)
 
