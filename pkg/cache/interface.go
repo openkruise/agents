@@ -19,6 +19,7 @@ package cache
 import (
 	"context"
 
+	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
@@ -97,6 +98,11 @@ type Provider interface {
 	// Prefer GetClient() for most operations; use this only when cache staleness
 	// is unacceptable (e.g., validating critical state transitions).
 	GetAPIReader() client.Reader
+
+	// GetCache returns the underlying controller-runtime cache. Use this only
+	// when you need to register informer event handlers; for normal Get/List,
+	// prefer GetClient().
+	GetCache() ctrlcache.Cache
 }
 
 type GetClaimedSandboxOptions struct {

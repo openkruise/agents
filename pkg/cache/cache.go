@@ -357,6 +357,10 @@ func (c *Cache) GetAPIReader() ctrlclient.Reader {
 	return c.reader
 }
 
+func (c *Cache) GetCache() ctrlcache.Cache {
+	return c.mgr.GetCache()
+}
+
 // GetWaitHooks returns the internal waitHooks map used for wait simulation.
 // This is only intended for test infrastructure use.
 func (c *Cache) GetWaitHooks() *sync.Map {

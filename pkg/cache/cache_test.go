@@ -1284,3 +1284,11 @@ func TestBuildCacheConfig(t *testing.T) {
 }
 
 func boolPtr(b bool) *bool { return &b }
+
+func TestCache_GetCache_ReturnsManagerCache(t *testing.T) {
+	c, _, err := cachetest.NewTestCache(t)
+	require.NoError(t, err)
+
+	require.Equal(t, c.GetMockManager().GetCache(), c.GetCache(),
+		"GetCache must return the underlying manager's cache")
+}
