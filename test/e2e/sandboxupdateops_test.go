@@ -419,44 +419,21 @@ var _ = Describe("SandboxUpdateOps E2E", func() {
 			Expect(k8sClient.Create(ctx, ops1)).To(Succeed())
 			klog.InfoS("Created failing Ops", "name", ops1.Name)
 
-			By("Finding the sandbox that was attempted and verifying PreUpgradeFailed")
-			var failedSbx *agentsv1alpha1.Sandbox
-			Eventually(func(g Gomega) {
-				for _, sbx := range sandboxes {
-					updated := &agentsv1alpha1.Sandbox{}
-					g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), updated)).To(Succeed())
-					if updated.Labels[agentsv1alpha1.LabelSandboxUpdateOps] == ops1.Name {
-						failedSbx = updated
-						break
-					}
-				}
-				g.Expect(failedSbx).NotTo(BeNil(), "should find a sandbox with ops label")
-				g.Expect(failedSbx.Status.Phase).To(Equal(agentsv1alpha1.SandboxUpgrading),
-					"failed sandbox should be in Upgrading phase")
-				var upgradingCond *metav1.Condition
-				for i := range failedSbx.Status.Conditions {
-					if failedSbx.Status.Conditions[i].Type == string(agentsv1alpha1.SandboxConditionUpgrading) {
-						upgradingCond = &failedSbx.Status.Conditions[i]
-						break
-					}
-				}
-				g.Expect(upgradingCond).NotTo(BeNil(), "should have Upgrading condition")
-				g.Expect(upgradingCond.Reason).To(Equal(agentsv1alpha1.SandboxUpgradingReasonPreUpgradeFailed),
-					"Upgrading condition reason should be PreUpgradeFailed")
-			}, 30*time.Second, time.Second).Should(Succeed())
-			klog.InfoS("Failed sandbox state verified",
-				"sandbox", failedSbx.Name, "phase", failedSbx.Status.Phase)
+			// With the fix, failed sandboxes no longer consume the maxUnavailable budget.
+			// The controller immediately proceeds to patch remaining candidates after a failure,
+			// so both sandboxes (with preUpgrade=exit 1) will be attempted and fail.
+			// The ops transitions to Failed once all candidates are exhausted.
+			By("Waiting for ops to reach Failed (all sandboxes fail with broken preUpgrade hook)")
+			waitOpsPhase(ops1, agentsv1alpha1.SandboxUpdateOpsFailed, 2*time.Minute)
 
-			By("Verifying MaxUnavailable=1 limited the blast radius")
+			By("Verifying ops final status: all 2 sandboxes failed")
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: ops1.Name, Namespace: ops1.Namespace}, ops1)).To(Succeed())
-			Expect(ops1.Status.Phase).To(Equal(agentsv1alpha1.SandboxUpdateOpsUpdating),
-				"ops should remain in Updating phase since failed occupies maxUnavailable quota")
 			Expect(ops1.Status.Replicas).To(Equal(int32(2)),
 				"total replicas should be 2")
-			Expect(ops1.Status.FailedReplicas).To(Equal(int32(1)),
-				"only 1 sandbox should fail with MaxUnavailable=1")
+			Expect(ops1.Status.FailedReplicas).To(Equal(int32(2)),
+				"both sandboxes should fail since preUpgrade exits 1 for all")
 			Expect(ops1.Status.UpdatingReplicas).To(Equal(int32(0)),
-				"no sandbox should be actively updating")
+				"no sandbox should be actively updating after all complete")
 			Expect(ops1.Status.UpdatedReplicas).To(Equal(int32(0)),
 				"no sandbox should have been successfully updated")
 			klog.InfoS("Ops status verified",
@@ -696,41 +673,20 @@ var _ = Describe("SandboxUpdateOps E2E", func() {
 			Expect(k8sClient.Create(ctx, ops1)).To(Succeed())
 			klog.InfoS("Created bad-image Ops", "name", ops1.Name)
 
-			By("Finding the sandbox that was attempted and verifying UpgradePodFailed")
-			var failedSbx *agentsv1alpha1.Sandbox
-			Eventually(func(g Gomega) {
-				for _, sbx := range sandboxes {
-					updated := &agentsv1alpha1.Sandbox{}
-					g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), updated)).To(Succeed())
-					if updated.Labels[agentsv1alpha1.LabelSandboxUpdateOps] == ops1.Name {
-						failedSbx = updated
-						break
-					}
-				}
-				g.Expect(failedSbx).NotTo(BeNil(), "should find a sandbox with ops label")
-				g.Expect(failedSbx.Status.Phase).To(Equal(agentsv1alpha1.SandboxUpgrading),
-					"failed sandbox should be in Upgrading phase")
-				var upgradingCond *metav1.Condition
-				for i := range failedSbx.Status.Conditions {
-					if failedSbx.Status.Conditions[i].Type == string(agentsv1alpha1.SandboxConditionUpgrading) {
-						upgradingCond = &failedSbx.Status.Conditions[i]
-						break
-					}
-				}
-				g.Expect(upgradingCond).NotTo(BeNil(), "should have Upgrading condition")
-				g.Expect(upgradingCond.Reason).To(Equal(agentsv1alpha1.SandboxUpgradingReasonUpgradePodFailed),
-					"Upgrading condition reason should be UpgradePodFailed")
-			}, 3*time.Minute, time.Second).Should(Succeed())
-			klog.InfoS("Failed sandbox state verified",
-				"sandbox", failedSbx.Name, "phase", failedSbx.Status.Phase)
+			// With the fix, failed sandboxes no longer consume the maxUnavailable budget.
+			// The controller immediately proceeds to patch remaining candidates after a failure,
+			// so both sandboxes (with bad image) will be attempted and fail.
+			// The ops transitions to Failed once all candidates are exhausted.
+			By("Waiting for ops to reach Failed (all sandboxes fail with bad image)")
+			waitOpsPhase(ops1, agentsv1alpha1.SandboxUpdateOpsFailed, 5*time.Minute)
 
-			By("Verifying ops status with MaxUnavailable=1")
+			By("Verifying ops final status: all 2 sandboxes failed")
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: ops1.Name, Namespace: ops1.Namespace}, ops1)).To(Succeed())
-			Expect(ops1.Status.Phase).To(Equal(agentsv1alpha1.SandboxUpdateOpsUpdating),
-				"ops should remain in Updating phase since failed occupies maxUnavailable quota")
 			Expect(ops1.Status.Replicas).To(Equal(int32(2)))
-			Expect(ops1.Status.FailedReplicas).To(Equal(int32(1)))
-			Expect(ops1.Status.UpdatingReplicas).To(Equal(int32(0)))
+			Expect(ops1.Status.FailedReplicas).To(Equal(int32(2)),
+				"both sandboxes should fail since bad image pull fails for all")
+			Expect(ops1.Status.UpdatingReplicas).To(Equal(int32(0)),
+				"no sandbox should be actively updating after all complete")
 			Expect(ops1.Status.UpdatedReplicas).To(Equal(int32(0)))
 			klog.InfoS("Ops status verified",
 				"phase", ops1.Status.Phase,
