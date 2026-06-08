@@ -107,7 +107,7 @@ spec:
                   rule: self == oldSelf
               ttl:
                 description: |-
-                  Ttl is how long the Commit is retained after reaching a terminal phase.
+                  TtlAfterFinished is how long the Commit is retained after reaching a terminal phase.
                   The controller auto-deletes the Commit once TTL expires. Nil means no auto-deletion.
                 type: string
             required:

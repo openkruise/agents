@@ -72,10 +72,10 @@ type CommitSpec struct {
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="timeoutSeconds is immutable"
 	TimeoutSeconds int32 `json:"timeoutSeconds,omitempty"`
 
-	// Ttl is how long the Commit is retained after reaching a terminal phase.
+	// TtlAfterFinished is how long the Commit is retained after reaching a terminal phase.
 	// The controller auto-deletes the Commit once TTL expires. Nil means no auto-deletion.
 	// +kubebuilder:validation:Optional
-	Ttl *metav1.Duration `json:"ttl,omitempty"`
+	TtlAfterFinished *metav1.Duration `json:"ttl,omitempty"`
 
 	// RegistryAuth specifies credentials for pushing the committed image.
 	// If nil, credentials are resolved from namespace secrets or SA imagePullSecrets.
