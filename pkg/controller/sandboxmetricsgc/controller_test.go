@@ -21,9 +21,15 @@ import (
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 )
 
 func TestEnqueue_NonBlockingDropOnFullChannel(t *testing.T) {
@@ -82,11 +88,38 @@ func TestReconcile_ReturnsOK(t *testing.T) {
 	}
 }
 
-func TestSetupWithManager_Compiles(_ *testing.T) {
-	// Compile-time assertion: NewReconciler returns *Reconciler which has
-	// SetupWithManager(ctrl.Manager) error. If this stops compiling the
-	// wiring broke.
-	var _ func(ctrl.Manager) error = (*Reconciler)(nil).SetupWithManager
+// newTestManager creates a real controller-runtime Manager backed by a stub
+// REST config. The manager is never started, so no apiserver is needed — only
+// construction and controller registration are exercised.
+func newTestManager(t *testing.T) ctrl.Manager {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatalf("add clientgo scheme: %v", err)
+	}
+	if err := agentsv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add agents scheme: %v", err)
+	}
+	mgr, err := ctrl.NewManager(&rest.Config{Host: "http://127.0.0.1:0"}, ctrl.Options{
+		Scheme:                 scheme,
+		Metrics:                metricsserver.Options{BindAddress: "0"},
+		HealthProbeBindAddress: "0",
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	return mgr
+}
+
+func TestSetupWithManager_RegistersWithoutError(t *testing.T) {
+	// Only one registration per process is possible due to the global controller
+	// name uniqueness check in controller-runtime. We exercise the full
+	// SetupWithManager call path once, which is sufficient for coverage.
+	mgr := newTestManager(t)
+	r := NewReconciler(Options{})
+	if err := r.SetupWithManager(mgr); err != nil {
+		t.Fatalf("SetupWithManager: unexpected error: %v", err)
+	}
 }
 
 func TestNewReconciler_AppliesDefaults(t *testing.T) {

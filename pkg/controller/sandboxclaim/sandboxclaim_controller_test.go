@@ -24,9 +24,13 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/record"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
@@ -461,12 +465,32 @@ func TestReconciler_GetControl(t *testing.T) {
 	}
 }
 
-// TestReconciler_SetupWithManager tests the setup function
-// Note: This is a basic test. Full integration testing would require a real Manager.
+// TestReconciler_SetupWithManager verifies that SetupWithManager registers the
+// sandboxclaim controller with a real controller-runtime manager without error.
+// The manager is never started, so no apiserver is needed.
 func TestReconciler_SetupWithManager(t *testing.T) {
-	// Skip this test as it requires a full Manager implementation
-	// which is better tested in integration tests
-	t.Skip("Requires full Manager implementation - tested in e2e tests")
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatalf("add clientgo scheme: %v", err)
+	}
+	if err := agentsv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add agents scheme: %v", err)
+	}
+	mgr, err := ctrl.NewManager(&rest.Config{Host: "http://127.0.0.1:0"}, ctrl.Options{
+		Scheme:                 scheme,
+		Metrics:                metricsserver.Options{BindAddress: "0"},
+		HealthProbeBindAddress: "0",
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	r := &Reconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}
+	if err := r.SetupWithManager(mgr); err != nil {
+		t.Fatalf("Reconciler.SetupWithManager: unexpected error: %v", err)
+	}
 }
 
 // Helper functions
