@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/apimachinery/pkg/types"
 	intstrutil "k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/record"
@@ -308,17 +309,18 @@ func TestReconcile_DeleteDead(t *testing.T) {
 				Client:   k8sClient,
 				Scheme:   testScheme,
 				Recorder: eventRecorder,
+				Codec:    serializer.NewCodecFactory(testScheme).LegacyCodec(v1alpha1.SchemeGroupVersion),
 			}
 			assert.NoError(t, k8sClient.Create(ctx, sbs))
 			newStatus, err := reconciler.initNewStatus(ctx, sbs)
-
+		
 			assert.NoError(t, err)
-			sbs.Status = *newStatus
+			sbs.Status = *newStatus.status
 			CreateSandboxes(t, tt.request, sbs, k8sClient)
-
+		
 			_, err = reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(sbs)})
 			assert.NoError(t, err)
-
+		
 			if tt.checkFunc != nil {
 				tt.checkFunc(t, k8sClient, sbs)
 			}
@@ -570,11 +572,12 @@ func TestReconcile_BasicScale(t *testing.T) {
 				Client:   k8sClient,
 				Scheme:   testScheme,
 				Recorder: eventRecorder,
+				Codec:    serializer.NewCodecFactory(testScheme).LegacyCodec(v1alpha1.SchemeGroupVersion),
 			}
 			newStatus, err := reconciler.initNewStatus(ctx, sbs)
 
 			assert.NoError(t, err)
-			sbs.Status = *newStatus
+			sbs.Status = *newStatus.status
 			_ = CreateSandboxes(t, tt.request, sbs, k8sClient)
 			scaleUpExpectation.DeleteExpectations(GetControllerKey(sbs))
 			scaleDownExpectation.DeleteExpectations(GetControllerKey(sbs))
@@ -698,6 +701,7 @@ func TestReconcile_ScaleDown(t *testing.T) {
 				Client:   k8sClient,
 				Scheme:   testScheme,
 				Recorder: eventRecorder,
+				Codec:    serializer.NewCodecFactory(testScheme).LegacyCodec(v1alpha1.SchemeGroupVersion),
 			}
 			sbs := getSandboxSet(tt.replicas)
 			// Run preSetup if provided (e.g., to set UpdateRevision before creating sandboxes)
@@ -777,12 +781,13 @@ func TestSandboxSetReconcile_WithVolumeClaimTemplates(t *testing.T) {
 				Client:   k8sClient,
 				Scheme:   testScheme,
 				Recorder: eventRecorder,
+				Codec:    serializer.NewCodecFactory(testScheme).LegacyCodec(v1alpha1.SchemeGroupVersion),
 			}
 
 			assert.NoError(t, k8sClient.Create(ctx, sbs))
 			newStatus, err := reconciler.initNewStatus(ctx, sbs)
 			assert.NoError(t, err)
-			sbs.Status = *newStatus
+			sbs.Status = *newStatus.status
 
 			// First reconcile to create sandboxes
 			_, err = reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(sbs)})
@@ -1130,6 +1135,7 @@ func TestReconciler_createSandbox(t *testing.T) {
 				Client:   k8sClient,
 				Scheme:   testScheme,
 				Recorder: eventRecorder,
+				Codec:    serializer.NewCodecFactory(testScheme).LegacyCodec(v1alpha1.SchemeGroupVersion),
 			}
 
 			sbx, err := reconciler.createSandbox(ctx, tt.sbs, "rev-1")

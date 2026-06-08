@@ -23,6 +23,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -179,7 +180,7 @@ func TestBuildUpdateGroups(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ug := buildUpdateGroups(tt.groups, tt.updateRevision)
+			ug := buildUpdateGroups(tt.groups, tt.updateRevision, "")
 			if tt.expectNil {
 				assert.Nil(t, ug)
 			} else {
@@ -443,6 +444,7 @@ func TestReconcile_RollingUpdate(t *testing.T) {
 				Client:   k8sClient,
 				Scheme:   testScheme,
 				Recorder: eventRecorder,
+				Codec:    serializer.NewCodecFactory(testScheme).LegacyCodec(v1alpha1.SchemeGroupVersion),
 			}
 			sbs := getSandboxSet(tt.replicas)
 			assert.NoError(t, k8sClient.Create(ctx, sbs))
@@ -451,9 +453,9 @@ func TestReconcile_RollingUpdate(t *testing.T) {
 
 			// Use an old hash to create sandboxes (simulate old revision)
 			if tt.oldHash != "" {
-				newStatus.UpdateRevision = tt.oldHash
+				newStatus.status.UpdateRevision = tt.oldHash
 			}
-			sbs.Status = *newStatus
+			sbs.Status = *newStatus.status
 			CreateSandboxes(t, tt.request, sbs, k8sClient)
 
 			// Now update the SandboxSet template to trigger update
@@ -502,6 +504,7 @@ func TestReconcile_RollingUpdate_SurgeGate(t *testing.T) {
 		Client:   k8sClient,
 		Scheme:   testScheme,
 		Recorder: eventRecorder,
+		Codec:    serializer.NewCodecFactory(testScheme).LegacyCodec(v1alpha1.SchemeGroupVersion),
 	}
 
 	// replicas=4, default maxSurge=20% (ceil→1), maxUnavailable=20% (floor→0)
@@ -509,11 +512,11 @@ func TestReconcile_RollingUpdate_SurgeGate(t *testing.T) {
 	assert.NoError(t, k8sClient.Create(ctx, sbs))
 	newStatus, err := reconciler.initNewStatus(ctx, sbs)
 	assert.NoError(t, err)
-	newHash := newStatus.UpdateRevision
+	newHash := newStatus.status.UpdateRevision
 
 	// Create 4 old-revision available sandboxes (simulating pre-edit state)
-	newStatus.UpdateRevision = oldHash
-	sbs.Status = *newStatus
+	newStatus.status.UpdateRevision = oldHash
+	sbs.Status = *newStatus.status
 	CreateSandboxes(t, createSandboxRequest{createAvailableSandboxes: 4}, sbs, k8sClient)
 
 	// Simulate scaleUpExpectation being unsatisfied: a previous rolling update create

@@ -30,6 +30,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/serializer"
 	intstrutil "k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
@@ -81,6 +82,7 @@ type Reconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
 	Recorder record.EventRecorder
+	Codec    runtime.Codec
 }
 
 const (
@@ -115,11 +117,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	recordSandboxSetMetrics(sbs)
 
 	// Preparation
-	newStatus, err := r.initNewStatus(ctx, sbs)
+	result, err := r.initNewStatus(ctx, sbs)
 	if err != nil {
 		log.Error(err, "failed to init new status")
 		return ctrl.Result{}, err
 	}
+	newStatus := result.status
+	legacyRevision := result.legacyRevision
 
 	controllerKey := GetControllerKey(sbs)
 	groups, err := r.groupAllSandboxes(ctx, sbs)
@@ -160,7 +164,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		if !scaleUpSatisfied || !scaleDownSatisfied {
 			log.Info("skip scale down for scaleUpExpectation or scaleDownExpectation is not satisfied")
 		} else {
-			err = r.scaleDown(ctx, -delta, sbs, groups, newStatus.UpdateRevision)
+			err = r.scaleDown(ctx, -delta, sbs, groups, newStatus.UpdateRevision, legacyRevision)
 		}
 	}
 	if err != nil {
@@ -182,7 +186,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// Step 3: perform rolling update if needed
 	// update groups because status may change after scale
 	if delta == 0 && scaleUpSatisfied && scaleDownSatisfied {
-		updateGroups := buildUpdateGroups(groups, newStatus.UpdateRevision)
+		updateGroups := buildUpdateGroups(groups, newStatus.UpdateRevision, legacyRevision)
 		if updateGroups == nil {
 			log.Info("skip rolling update: scale expectations not satisfied, waiting for pending operations")
 		} else if needsUpdate(updateGroups) {
@@ -237,7 +241,7 @@ func (r *Reconciler) scaleUp(ctx context.Context, count int, sbs *agentsv1alpha1
 
 // scaleDown is allowed when both scaleUpExpectation and scaleDownExpectation are satisfied.
 // It prioritizes deleting old revision sandboxes first, then updated ones.
-func (r *Reconciler) scaleDown(ctx context.Context, count int, sbs *agentsv1alpha1.SandboxSet, groups GroupedSandboxes, updateRevision string) error {
+func (r *Reconciler) scaleDown(ctx context.Context, count int, sbs *agentsv1alpha1.SandboxSet, groups GroupedSandboxes, updateRevision, legacyRevision string) error {
 	log := logf.FromContext(ctx)
 	controllerKey := GetControllerKey(sbs)
 	lock := uuid.New().String()
@@ -252,10 +256,10 @@ func (r *Reconciler) scaleDown(ctx context.Context, count int, sbs *agentsv1alph
 	candidates = append(candidates, groups.Available...)
 	var oldCandidates, updatedCandidates []*agentsv1alpha1.Sandbox
 	for _, sbx := range candidates {
-		if sbx.Labels[agentsv1alpha1.LabelTemplateHash] != updateRevision {
-			oldCandidates = append(oldCandidates, sbx)
-		} else {
+		if isRevisionUpdated(sbx.Labels[agentsv1alpha1.LabelTemplateHash], updateRevision, legacyRevision) {
 			updatedCandidates = append(updatedCandidates, sbx)
+		} else {
+			oldCandidates = append(oldCandidates, sbx)
 		}
 	}
 
@@ -469,6 +473,7 @@ func (r *Reconciler) groupAllSandboxes(ctx context.Context, sbs *agentsv1alpha1.
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	controllerName := "sandboxset-controller"
 	r.Recorder = mgr.GetEventRecorderFor(controllerName)
+	r.Codec = serializer.NewCodecFactory(mgr.GetScheme()).LegacyCodec(agentsv1alpha1.SchemeGroupVersion)
 	return ctrl.NewControllerManagedBy(mgr).
 		Named(controllerName).
 		WithOptions(controller.Options{MaxConcurrentReconciles: concurrentReconciles}).

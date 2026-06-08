@@ -24,6 +24,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/klog/v2"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
@@ -49,7 +50,13 @@ type GroupedSandboxes struct {
 	Dead      []*agentsv1alpha1.Sandbox // Sandboxes should be deleted
 }
 
-func (r *Reconciler) initNewStatus(ctx context.Context, ss *agentsv1alpha1.SandboxSet) (*agentsv1alpha1.SandboxSetStatus, error) {
+// initStatusResult bundles the output of initNewStatus to avoid excessive return values.
+type initStatusResult struct {
+	status         *agentsv1alpha1.SandboxSetStatus
+	legacyRevision string
+}
+
+func (r *Reconciler) initNewStatus(ctx context.Context, ss *agentsv1alpha1.SandboxSet) (*initStatusResult, error) {
 	newStatus := ss.Status.DeepCopy()
 	hash, name, err := r.ensureTemplateRevision(ctx, ss)
 	if err != nil {
@@ -58,7 +65,19 @@ func (r *Reconciler) initNewStatus(ctx context.Context, ss *agentsv1alpha1.Sandb
 	newStatus.UpdateRevision = hash
 	newStatus.ObservedGeneration = ss.Generation
 	newStatus.CurrentRevision = name
-	return newStatus, nil
+
+	// Compute legacy hash for backward compatibility with sandboxes created
+	// before the hash algorithm was changed. Errors are non-fatal: if legacy
+	// hash cannot be computed, we simply skip the fallback comparison.
+	legacyHash, err := r.computeLegacyRevisionHash(ctx, ss)
+	if err != nil {
+		klog.ErrorS(err, "Failed to compute legacy revision hash")
+	}
+
+	return &initStatusResult{
+		status:         newStatus,
+		legacyRevision: legacyHash,
+	}, nil
 }
 
 func calculateSandboxSetStatusFromGroup(ctx context.Context, newStatus *agentsv1alpha1.SandboxSetStatus, groups GroupedSandboxes, dirtyScaleUp map[expectations.ScaleAction][]string) {

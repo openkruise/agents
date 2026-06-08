@@ -64,8 +64,10 @@ type UpdateInfo struct {
 // buildUpdateGroups builds update-specific groupings from existing GroupedSandboxes.
 // It categorizes unclaimed Creating and Available sandboxes by whether their template hash
 // matches the update revision. Claimed sandboxes are excluded from update consideration.
+// legacyRevision is the hash computed using the release-v0.3 algorithm; sandboxes whose
+// label matches either updateRevision or legacyRevision are considered up-to-date.
 // Returns nil if scale expectations are not satisfied, indicating the caller should wait.
-func buildUpdateGroups(groups GroupedSandboxes, updateRevision string) *UpdateGroupedSandboxes {
+func buildUpdateGroups(groups GroupedSandboxes, updateRevision, legacyRevision string) *UpdateGroupedSandboxes {
 	updateGroups := &UpdateGroupedSandboxes{}
 
 	// Categorize Creating sandboxes by revision (skip claimed)
@@ -74,7 +76,7 @@ func buildUpdateGroups(groups GroupedSandboxes, updateRevision string) *UpdateGr
 			continue
 		}
 		revision := sbx.Labels[agentsv1alpha1.LabelTemplateHash]
-		if revision == updateRevision {
+		if isRevisionUpdated(revision, updateRevision, legacyRevision) {
 			updateGroups.UpdatedCreating = append(updateGroups.UpdatedCreating, sbx)
 		} else {
 			updateGroups.OldCreating = append(updateGroups.OldCreating, sbx)
@@ -87,7 +89,7 @@ func buildUpdateGroups(groups GroupedSandboxes, updateRevision string) *UpdateGr
 			continue
 		}
 		revision := sbx.Labels[agentsv1alpha1.LabelTemplateHash]
-		if revision == updateRevision {
+		if isRevisionUpdated(revision, updateRevision, legacyRevision) {
 			updateGroups.UpdatedAvailable = append(updateGroups.UpdatedAvailable, sbx)
 		} else {
 			updateGroups.OldAvailable = append(updateGroups.OldAvailable, sbx)
@@ -95,6 +97,15 @@ func buildUpdateGroups(groups GroupedSandboxes, updateRevision string) *UpdateGr
 	}
 
 	return updateGroups
+}
+
+// isRevisionUpdated returns true if the sandbox's revision label matches
+// either the current updateRevision or the legacy (v0.3-compatible) revision.
+func isRevisionUpdated(revision, updateRevision, legacyRevision string) bool {
+	if revision == updateRevision {
+		return true
+	}
+	return legacyRevision != "" && revision == legacyRevision
 }
 
 // isSandboxClaimed checks if a sandbox has been claimed.
