@@ -1,6 +1,30 @@
 #!/bin/bash
 set -e  # Enable exit on error for the entire script
 
+# Parse arguments. Supported flags:
+#   --nolog   Suppress envd stdout/stderr (do not redirect to /proc/1/fd/1).
+#             Default behaviour pipes envd output to PID 1's stdout so that
+#             container log collectors pick it up.
+#   --help    Show usage information and exit.
+NOLOG=false
+for arg in "$@"; do
+    case "$arg" in
+        --nolog)
+            NOLOG=true
+            ;;
+        --help|-h)
+            echo "Usage: envd-run.sh [OPTIONS]"
+            echo "  --nolog    Suppress envd stdout/stderr (redirect to /dev/null)"
+            echo "  --help     Show this help message"
+            exit 0
+            ;;
+        *)
+            echo "Error: unknown argument '$arg'" >&2
+            exit 1
+            ;;
+    esac
+done
+
 # Check if ENVD_DIR environment variable is defined
 if [ -z "$ENVD_DIR" ]; then
     echo "Error: ENVD_DIR environment variable is not defined" >&2
@@ -150,4 +174,9 @@ create_user || echo "Warning: User creation encountered issues, but continuing..
 
 # Start Envd
 export GODEBUG=multipathtcp=0
-nohup $ENVD_DIR/envd > /proc/1/fd/1 2>&1 &
+if [ "$NOLOG" = "true" ]; then
+    # Suppress envd stdout/stderr entirely when invoked with --nolog.
+    nohup $ENVD_DIR/envd -isnotfc >/dev/null 2>&1 &
+else
+    nohup $ENVD_DIR/envd -isnotfc > /proc/1/fd/1 2>&1 &
+fi
