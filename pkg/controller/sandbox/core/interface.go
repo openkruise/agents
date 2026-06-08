@@ -61,6 +61,30 @@ type SandboxControl interface {
 	EnsureSandboxTerminated(ctx context.Context, args EnsureFuncArgs) error
 }
 
+// UpgradeOrchestratorArgs holds the dependencies for ensureSandboxUpgradedCommon,
+// which drives the three-phase upgrade state machine (PreUpgrade → UpgradePod → PostUpgrade).
+type UpgradeOrchestratorArgs struct {
+	Client                     client.Client
+	PerformRecreateUpgradeFunc func(ctx context.Context, args EnsureFuncArgs) (bool, error)
+	ExecuteUpgradeActionFunc   func(ctx context.Context, pod *corev1.Pod, box *agentsv1alpha1.Sandbox, action *agentsv1alpha1.UpgradeAction) upgradeActionResult
+}
+
+// RecreateUpgradeArgs holds the dependencies for performRecreateUpgradeCommon,
+// which deletes the old Pod, creates a new one, waits for Ready, and runs initialization.
+type RecreateUpgradeArgs struct {
+	Client        client.Client
+	Recorder      record.EventRecorder
+	Initializer   SandboxInitializer
+	CreatePodFunc func(ctx context.Context, box *agentsv1alpha1.Sandbox, newStatus *agentsv1alpha1.SandboxStatus) (*corev1.Pod, error)
+}
+
+// UpgradeActionArgs holds the dependencies for executeUpgradeActionCommon,
+// which executes a single upgrade hook action (PreUpgrade or PostUpgrade).
+type UpgradeActionArgs struct {
+	Action            *agentsv1alpha1.UpgradeAction
+	LifecycleHookFunc LifecycleHookFunc
+}
+
 type SandboxControlArgs struct {
 	Client      client.Client
 	APIReader   client.Reader

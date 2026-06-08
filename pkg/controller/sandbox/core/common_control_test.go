@@ -31,7 +31,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/identity"
 	"github.com/openkruise/agents/pkg/utils"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 	"github.com/openkruise/agents/pkg/utils/inplaceupdate"
@@ -970,7 +969,7 @@ func TestCommonControl_EnsureSandboxTerminated(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name:       "test-sandbox",
 						Namespace:  "default",
-						Finalizers: []string{SandboxFinalizer},
+						Finalizers: []string{utils.SandboxFinalizer},
 					},
 				},
 				NewStatus: &agentsv1alpha1.SandboxStatus{},
@@ -1205,16 +1204,17 @@ func TestCommonControl_createPod(t *testing.T) {
 	}
 }
 
-func TestCommonControl_handleInplaceUpdateSandbox(t *testing.T) {
+func TestHandleInPlaceUpdateCommon_ViaEnsureUpdated(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)
 	_ = agentsv1alpha1.AddToScheme(scheme)
 
-	control := &commonControl{
-		Client:   fake.NewClientBuilder().WithScheme(scheme).Build(),
-		recorder: record.NewFakeRecorder(10),
+	cli := fake.NewClientBuilder().WithScheme(scheme).Build()
+	rec := record.NewFakeRecorder(10)
+	handler := &CommonInPlaceUpdateHandler{
+		control:  inplaceupdate.NewInPlaceUpdateControl(cli, inplaceupdate.DefaultGeneratePatchBodyFunc),
+		recorder: rec,
 	}
-	control.inplaceUpdateControl = inplaceupdate.NewInPlaceUpdateControl(control.Client, inplaceupdate.DefaultGeneratePatchBodyFunc)
 
 	// Test case 1: Pod doesn't have template hash label
 	sandbox1 := &agentsv1alpha1.Sandbox{
@@ -1252,9 +1252,9 @@ func TestCommonControl_handleInplaceUpdateSandbox(t *testing.T) {
 		NewStatus: &agentsv1alpha1.SandboxStatus{},
 	}
 
-	done, err := control.handleInplaceUpdateSandbox(context.TODO(), args1)
+	done, err := handleInPlaceUpdateCommon(context.TODO(), handler, args1.Pod, args1.Box, args1.NewStatus)
 	if err != nil {
-		t.Fatalf("handleInplaceUpdateSandbox() error = %v", err)
+		t.Fatalf("handleInPlaceUpdateCommon() error = %v", err)
 	}
 	if !done {
 		t.Errorf("Expected done to be true when pod doesn't have template hash label")
@@ -1299,9 +1299,9 @@ func TestCommonControl_handleInplaceUpdateSandbox(t *testing.T) {
 		NewStatus: &agentsv1alpha1.SandboxStatus{UpdateRevision: "new-revision"},
 	}
 
-	done, err = control.handleInplaceUpdateSandbox(context.TODO(), args2)
+	done, err = handleInPlaceUpdateCommon(context.TODO(), handler, args2.Pod, args2.Box, args2.NewStatus)
 	if err != nil {
-		t.Fatalf("handleInplaceUpdateSandbox() error = %v", err)
+		t.Fatalf("handleInPlaceUpdateCommon() error = %v", err)
 	}
 	if !done {
 		t.Errorf("Expected done to be true when hash mismatch occurs")
@@ -1346,9 +1346,9 @@ func TestCommonControl_handleInplaceUpdateSandbox(t *testing.T) {
 		NewStatus: &agentsv1alpha1.SandboxStatus{UpdateRevision: "same-revision"},
 	}
 
-	done, err = control.handleInplaceUpdateSandbox(context.TODO(), args3)
+	done, err = handleInPlaceUpdateCommon(context.TODO(), handler, args3.Pod, args3.Box, args3.NewStatus)
 	if err != nil {
-		t.Fatalf("handleInplaceUpdateSandbox() error = %v", err)
+		t.Fatalf("handleInPlaceUpdateCommon() error = %v", err)
 	}
 	if !done {
 		t.Errorf("Expected done to be true when revision is consistent and inplace update is completed")
@@ -1797,7 +1797,7 @@ func TestCommonControl_EnsureSandboxUpdated_InplaceNotDone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnsureSandboxUpdated() unexpected error: %v", err)
 	}
-	// handleInplaceUpdateSandbox with hash mismatch returns (true, nil), so status gets synced
+	// handleInPlaceUpdateCommon with hash mismatch returns (true, nil), so status gets synced
 	if newStatus.SandboxIp != "10.0.0.2" {
 		t.Errorf("Expected SandboxIp '10.0.0.2', got %s", newStatus.SandboxIp)
 	}
@@ -2084,195 +2084,6 @@ func TestCommonControl_performRecreateUpgrade_NewPodNotReady(t *testing.T) {
 	}
 	if done {
 		t.Error("Expected done=false for pod not ready")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// CA Certificate Injection Tests (driven by identity.CABundleSpec registry)
-// ---------------------------------------------------------------------------
-
-func TestCommonControl_createPod_WithCAInjection(t *testing.T) {
-	scheme := runtime.NewScheme()
-	_ = clientgoscheme.AddToScheme(scheme)
-	_ = agentsv1alpha1.AddToScheme(scheme)
-
-	tests := []struct {
-		name                    string
-		featureGateEnabled      bool
-		seedSourceSecret        bool
-		withTrafficProxyRuntime bool
-		expectCAVolume          bool
-		expectCAMount           bool
-		expectError             string
-	}{
-		{
-			name:                    "feature gate enabled, traffic-proxy runtime, source secret present - CA injected",
-			featureGateEnabled:      true,
-			withTrafficProxyRuntime: true,
-			seedSourceSecret:        true,
-			expectCAVolume:          true,
-			expectCAMount:           true,
-		},
-		{
-			name:                    "feature gate disabled - no CA injection regardless of source",
-			featureGateEnabled:      false,
-			withTrafficProxyRuntime: true,
-			seedSourceSecret:        false,
-			expectCAVolume:          false,
-			expectCAMount:           false,
-		},
-		{
-			name:                    "feature gate enabled but no traffic-proxy runtime - no CA injection",
-			featureGateEnabled:      true,
-			withTrafficProxyRuntime: false,
-			seedSourceSecret:        false,
-			expectCAVolume:          false,
-			expectCAMount:           false,
-		},
-		{
-			name:                    "feature gate enabled, traffic-proxy runtime, source secret missing - block creation",
-			featureGateEnabled:      true,
-			withTrafficProxyRuntime: true,
-			seedSourceSecret:        false,
-			expectError:             "source CA secret",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if tt.featureGateEnabled {
-				_ = utilfeature.DefaultMutableFeatureGate.Set("SecurityIdentityProvider=true")
-				// Mirror the production binding in cmd/agent-sandbox-controller/ca_binding.go
-				// so the gateway CA spec only applies to sandboxes that declare the
-				// traffic-proxy runtime. This is the single place where runtime-level
-				// gating lives now (callers no longer pre-check IsRuntimeEnabled).
-				identity.BindCAEnabledFor(identity.GatewayCABundleName, func(sbx *agentsv1alpha1.Sandbox) bool {
-					return sidecarutils.IsRuntimeEnabled(sbx, agentsv1alpha1.RuntimeConfigForInjectTrafficProxy)
-				})
-				t.Cleanup(func() {
-					_ = utilfeature.DefaultMutableFeatureGate.Set("SecurityIdentityProvider=false")
-					identity.BindCAEnabledFor(identity.GatewayCABundleName, nil)
-				})
-			}
-
-			objs := []client.Object{}
-			if tt.seedSourceSecret {
-				objs = append(objs, &corev1.Secret{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      identity.GatewayCASecretName,
-						Namespace: utils.DefaultSandboxDeployNamespace,
-					},
-					Type: corev1.SecretTypeOpaque,
-					Data: map[string][]byte{
-						identity.GatewayCAKey: []byte("test-ca-bundle-content"),
-					},
-				})
-			}
-			// When the sandbox declares the traffic-proxy runtime, InjectSandboxRuntimes
-			// will look up the corresponding template in the sandbox-injection ConfigMap.
-			// Seed a minimal valid template so createPod's sidecar-injection step does
-			// not fail and we can isolate CA injection behaviour under test.
-			if tt.withTrafficProxyRuntime {
-				objs = append(objs, &corev1.ConfigMap{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      sidecarutils.SandboxInjectionConfigName,
-						Namespace: utils.DefaultSandboxDeployNamespace,
-					},
-					Data: map[string]string{
-						sidecarutils.KEY_TRAFFIC_PROXY_INJECTION_CONFIG: `{"mainContainer":{},"csiSidecar":[],"volume":[]}`,
-					},
-				})
-			}
-
-			control := &commonControl{
-				Client:   fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build(),
-				recorder: record.NewFakeRecorder(10),
-			}
-
-			sandbox := &agentsv1alpha1.Sandbox{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-sandbox",
-					Namespace: "default",
-				},
-				Spec: agentsv1alpha1.SandboxSpec{
-					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
-						Template: &corev1.PodTemplateSpec{
-							Spec: corev1.PodSpec{
-								Containers: []corev1.Container{
-									{Name: "main", Image: "nginx:latest"},
-								},
-							},
-						},
-					},
-				},
-			}
-			if tt.withTrafficProxyRuntime {
-				sandbox.Spec.Runtimes = []agentsv1alpha1.RuntimeConfig{
-					{Name: agentsv1alpha1.RuntimeConfigForInjectTrafficProxy},
-				}
-			}
-
-			status := &agentsv1alpha1.SandboxStatus{UpdateRevision: "rev1"}
-			pod, err := control.createPod(context.TODO(), sandbox, status)
-
-			if tt.expectError != "" {
-				if err == nil {
-					t.Fatalf("expected error containing %q, got nil", tt.expectError)
-				}
-				if !contains(err.Error(), tt.expectError) {
-					t.Fatalf("expected error containing %q, got %q", tt.expectError, err.Error())
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("createPod() unexpected error: %v", err)
-			}
-
-			foundCAVolume := false
-			for _, v := range pod.Spec.Volumes {
-				if v.Name == "sandbox-gateway-ca" {
-					foundCAVolume = true
-					if v.Secret == nil || v.Secret.SecretName != identity.GatewayCASecretName {
-						t.Errorf("CA volume has wrong secret source")
-					}
-					break
-				}
-			}
-			if foundCAVolume != tt.expectCAVolume {
-				t.Errorf("expected CA volume present=%v, got %v", tt.expectCAVolume, foundCAVolume)
-			}
-
-			foundCAMount := false
-			if len(pod.Spec.Containers) > 0 {
-				for _, vm := range pod.Spec.Containers[0].VolumeMounts {
-					if vm.Name == "sandbox-gateway-ca" {
-						foundCAMount = true
-						if vm.MountPath != "/etc/ssl/certs/agent-identity/gateway-ca.crt" {
-							t.Errorf("expected mount path '/etc/ssl/certs/agent-identity/gateway-ca.crt', got %q", vm.MountPath)
-						}
-						break
-					}
-				}
-			}
-			if foundCAMount != tt.expectCAMount {
-				t.Errorf("expected CA mount present=%v, got %v", tt.expectCAMount, foundCAMount)
-			}
-
-			if tt.featureGateEnabled && tt.seedSourceSecret && tt.withTrafficProxyRuntime {
-				var replicated corev1.Secret
-				err = control.Get(context.TODO(), types.NamespacedName{
-					Name:      identity.GatewayCASecretName,
-					Namespace: "default",
-				}, &replicated)
-				if err != nil {
-					t.Fatalf("expected gateway CA secret to be replicated to target ns, got error: %v", err)
-				}
-				if string(replicated.Data[identity.GatewayCAKey]) != "test-ca-bundle-content" {
-					t.Errorf("expected replicated secret data to match source, got %q",
-						string(replicated.Data[identity.GatewayCAKey]))
-				}
-			}
-		})
 	}
 }
 
