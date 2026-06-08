@@ -37,8 +37,11 @@ const (
 type CommitConditionType string
 
 const (
-	CommitConditionTypeCommitContainer    CommitConditionType = "CommitContainer"
-	CommitConditionTypePullBaseImage      CommitConditionType = "PullBaseImage"
+	// CommitConditionTypeCommitContainer indicates whether the container commit (snapshot) step succeeded.
+	CommitConditionTypeCommitContainer CommitConditionType = "CommitContainer"
+	// CommitConditionTypePullBaseImage is reserved for future use when incremental commit requires pulling a base image.
+	CommitConditionTypePullBaseImage CommitConditionType = "PullBaseImage"
+	// CommitConditionTypePushCommittedImage indicates whether the committed image push step succeeded.
 	CommitConditionTypePushCommittedImage CommitConditionType = "PushCommittedImage"
 )
 
@@ -117,7 +120,8 @@ type CommitStatus struct {
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:shortName=cmt
+// +kubebuilder:resource:path=commits,shortName=cmt
+// +kubebuilder:storageversion
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`,description="Current phase"
 // +kubebuilder:printcolumn:name="TTL",type=string,JSONPath=`.spec.ttl`,description="Time to live"
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`,description="Age"
@@ -126,8 +130,10 @@ type Commit struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec CommitSpec `json:"spec,omitempty"`
+	// +required
+	Spec CommitSpec `json:"spec"`
 
+	// +optional
 	// +kubebuilder:default:={phase: Pending}
 	Status CommitStatus `json:"status,omitempty"`
 }
