@@ -683,7 +683,7 @@ func TestGeneratePodFromSandbox(t *testing.T) {
 				WithRuntimeObjects(tt.sandbox).
 				Build()
 
-			pod, err := GeneratePodFromSandbox(context.Background(), PodGenerateArgs{Client: cli, Box: tt.sandbox, Revision: tt.revision})
+			pod, err := GeneratePodFromSandbox(context.Background(), PodGenerateArgs{Client: cli, Box: tt.sandbox, NewStatus: &agentsv1alpha1.SandboxStatus{UpdateRevision: tt.revision}})
 
 			if (err != nil) != tt.wantErr {
 				t.Errorf("GeneratePodFromSandbox() error = %v, wantErr %v", err, tt.wantErr)

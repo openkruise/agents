@@ -40,9 +40,9 @@ import (
 
 // PodGenerateArgs holds the arguments for PodGenerateFunc.
 type PodGenerateArgs struct {
-	Client   client.Client
-	Box      *agentsv1alpha1.Sandbox
-	Revision string
+	Client    client.Client
+	Box       *agentsv1alpha1.Sandbox
+	NewStatus *agentsv1alpha1.SandboxStatus
 }
 
 // PodGenerateFunc generates a Pod from a Sandbox spec.
@@ -78,17 +78,9 @@ func (c *PodControl) CreatePod(ctx context.Context, args CreatePodArgs) (*corev1
 		}
 	}
 
-	pod, err := c.generatePod(ctx, PodGenerateArgs{Client: c.Client, Box: box, Revision: args.NewStatus.UpdateRevision})
+	pod, err := c.generatePod(ctx, PodGenerateArgs{Client: c.Client, Box: box, NewStatus: args.NewStatus})
 	if err != nil {
 		return nil, err
-	}
-
-	// to avoid the performance issue, using the controller to inject csi containers
-	// fetch the configmap and parse the configuration based on the controller runtime
-	injectErr := sidecarutils.InjectSandboxRuntimes(ctx, box, pod, c.Client)
-	if injectErr != nil {
-		klog.ErrorS(injectErr, "failed to inject pod template with csi sidecar or runtime sidecar", "sandbox", klog.KObj(box))
-		return nil, injectErr
 	}
 
 	// Apply checkpoint pod template delta if present (resume path).
@@ -134,8 +126,34 @@ func shouldInjectCABundles() bool {
 }
 
 // GeneratePodFromSandbox creates a Pod object from a Sandbox spec and its template.
+// It is the default PodGenerateFunc for the common control path and is responsible
+// for generating the full pod (template + PVC volumes + sidecar/runtime injection).
 func GeneratePodFromSandbox(ctx context.Context, args PodGenerateArgs) (*corev1.Pod, error) {
-	cli, box, revision := args.Client, args.Box, args.Revision
+	pod, err := generateBasePodFromSandbox(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	// Inject sandbox runtime/CSI sidecars (community variant). Generators owned by
+	// other control modes are responsible for invoking their own
+	// injection variant (e.g. InjectSandboxRuntimesUsingCache) so that PodControl
+	// stays generator-agnostic and does not double-inject.
+	if err := sidecarutils.InjectSandboxRuntimes(ctx, args.Box, pod, args.Client); err != nil {
+		klog.ErrorS(err, "failed to inject pod template with csi sidecar or runtime sidecar", "sandbox", klog.KObj(args.Box))
+		return nil, err
+	}
+	return pod, nil
+}
+
+// generateBasePodFromSandbox builds the pod template + PVC volumes from the sandbox
+// spec without performing any sidecar/runtime injection. It is the shared building
+// block for both the community generator (GeneratePodFromSandbox) and others, each of which decides which sidecar
+// injection variant to apply afterwards.
+func generateBasePodFromSandbox(ctx context.Context, args PodGenerateArgs) (*corev1.Pod, error) {
+	cli, box := args.Client, args.Box
+	var revision string
+	if args.NewStatus != nil {
+		revision = args.NewStatus.UpdateRevision
+	}
 	podTemplate, err := utils.GetTemplateSpec(ctx, cli, box.Namespace, &box.Spec.EmbeddedSandboxTemplate)
 	if err != nil {
 		if box.Spec.TemplateRef != nil {
