@@ -18,6 +18,7 @@ set -e
 # Default values
 TIMEOUT="60m"
 WITH_GATEWAY="false"
+AUTH_DISABLED="false"
 
 # Get the directory where this script is located
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -143,9 +144,13 @@ while [[ $# -gt 0 ]]; do
             WITH_GATEWAY="true"
             shift # past argument
             ;;
+        --auth-disabled)
+            AUTH_DISABLED="true"
+            shift # past argument
+            ;;
         *)
             echo "Unknown parameter passed: $1"
-            echo "Usage: $0 [--e2b-version VERSION] [--sdk-version VERSION] [--timeout TIMEOUT] [--with-gateway]"
+            echo "Usage: $0 [--e2b-version VERSION] [--sdk-version VERSION] [--timeout TIMEOUT] [--with-gateway] [--auth-disabled]"
             exit 1
             ;;
     esac
@@ -215,7 +220,12 @@ if [ -z "$installed_e2b_version" ]; then
     echo "Error: failed to determine installed e2b version"
     exit 1
 fi
-convert_e2b_api_key_for_sdk_if_needed "$installed_e2b_version"
+if [ "$AUTH_DISABLED" = "true" ]; then
+    echo "E2B auth is disabled; skipping API key compatibility conversion"
+    export E2B_API_KEY="${E2B_AUTH_DISABLED_API_KEY:-e2b_abc123}"
+else
+    convert_e2b_api_key_for_sdk_if_needed "$installed_e2b_version"
+fi
 
 # Step 3: Run pytest tests serially (print the key for debug, it's safe to print it in a ci pipeline)
 echo "Using E2B_API_KEY: ${E2B_API_KEY:-}"
@@ -246,11 +256,15 @@ fi
 
 # Run pytest with serial execution (no parallel flag)
 cd "$PROJECT_ROOT"
-if [ "$WITH_GATEWAY" = "true" ]; then
-    pytest -v -s -x --tb=short "$TEST_DIR"
-else
-    pytest -v -s -x --tb=short --ignore="$TEST_DIR/test_gateway.py" --ignore="$TEST_DIR/test_gateway_auth.py" "$TEST_DIR"
+pytest_args=(-v -s -x --tb=short)
+if [ "$WITH_GATEWAY" != "true" ]; then
+    pytest_args+=(--ignore="$TEST_DIR/test_gateway.py")
+    pytest_args+=(--ignore="$TEST_DIR/test_gateway_auth.py")
 fi
+if [ "$AUTH_DISABLED" = "true" ]; then
+    pytest_args+=(--ignore="$TEST_DIR/test_apikey.py")
+fi
+pytest "${pytest_args[@]}" "$TEST_DIR"
 retVal=$?
 
 set +x

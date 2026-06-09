@@ -34,8 +34,13 @@ jobs:
         include:
           - name: without sandbox-gateway
             with_gateway: false
+            e2b_enable_auth: true
           - name: with sandbox-gateway
             with_gateway: true
+            e2b_enable_auth: true
+          - name: with sandbox-gateway, auth disabled
+            with_gateway: true
+            e2b_enable_auth: false
     name: sandbox (${{ matrix.name }})
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -122,6 +127,17 @@ jobs:
 
       - name: Install Kruise Agents
         run: |
+          if [ "${{ matrix.e2b_enable_auth }}" = "false" ]; then
+            {
+              echo ""
+              echo "# Disable E2B auth (appended by e2e-e2b-latest auth-disabled matrix)"
+              echo "- op: replace"
+              echo "  path: /spec/template/spec/containers/0/args/8"
+              echo "  value: --e2b-enable-auth=false"
+            } >> config/sandbox-manager/configuration_patch.yaml
+            echo "deployment patch:"
+            cat config/sandbox-manager/configuration_patch.yaml
+          fi
           make deploy-agent-sandbox-controller
           make deploy-sandbox-manager
           bash hack/wait-agent-sandbox-controller.sh
@@ -134,9 +150,16 @@ jobs:
         run: |
           export KUBECONFIG=/home/runner/.kube/config
           export E2B_DOMAIN=localhost
-          export E2B_API_KEY=some-api-key
-          if [ "${{ matrix.with_gateway }}" = "true" ]; then
-            bash hack/run-e2b-e2e-test.sh --with-gateway
+          if [ "${{ matrix.e2b_enable_auth }}" = "false" ]; then
+            export E2B_API_KEY=e2b_abc123
           else
-            bash hack/run-e2b-e2e-test.sh
+            export E2B_API_KEY=some-api-key
           fi
+          args=()
+          if [ "${{ matrix.with_gateway }}" = "true" ]; then
+            args+=(--with-gateway)
+          fi
+          if [ "${{ matrix.e2b_enable_auth }}" = "false" ]; then
+            args+=(--auth-disabled)
+          fi
+          bash hack/run-e2b-e2e-test.sh "${args[@]}"
