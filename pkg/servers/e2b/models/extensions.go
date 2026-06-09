@@ -47,6 +47,8 @@ const (
 	ExtensionKeyWaitReadyTimeout              = v1alpha1.E2BPrefix + "wait-ready-timeout-seconds"
 	ExtensionKeyClaimWithCPURequest           = v1alpha1.E2BPrefix + "cpu-request"
 	ExtensionKeyClaimWithCPULimit             = v1alpha1.E2BPrefix + "cpu-limit"
+	ExtensionKeyClaimWithMemoryRequest        = v1alpha1.E2BPrefix + "memory-request"
+	ExtensionKeyClaimWithMemoryLimit          = v1alpha1.E2BPrefix + "memory-limit"
 	ExtensionKeyClaimWithImage                = v1alpha1.E2BPrefix + "image"
 	ExtensionKeyClaimWithCSIMount             = v1alpha1.E2BPrefix + "csi"
 	ExtensionKeyClaimWithCSIMount_VolumeName  = ExtensionKeyClaimWithCSIMount + "-volume-name"
@@ -163,31 +165,38 @@ func (r *NewSandboxRequest) parseExtensionImage() error {
 }
 
 func (r *NewSandboxRequest) parseExtensionResources() error {
-	cpuReq, hasCPUReq, err := r.parseAndRemoveQuantity(ExtensionKeyClaimWithCPURequest)
-	if err != nil {
-		return err
+	resourceExtensions := []struct {
+		key          string
+		resourceName corev1.ResourceName
+		isRequest    bool
+	}{
+		{key: ExtensionKeyClaimWithCPURequest, resourceName: corev1.ResourceCPU, isRequest: true},
+		{key: ExtensionKeyClaimWithCPULimit, resourceName: corev1.ResourceCPU},
+		{key: ExtensionKeyClaimWithMemoryRequest, resourceName: corev1.ResourceMemory, isRequest: true},
+		{key: ExtensionKeyClaimWithMemoryLimit, resourceName: corev1.ResourceMemory},
 	}
-	cpuLim, hasCPULim, err := r.parseAndRemoveQuantity(ExtensionKeyClaimWithCPULimit)
-	if err != nil {
-		return err
-	}
-	if !hasCPUReq && !hasCPULim {
-		return nil
-	}
-	if r.Extensions.InplaceUpdate.Resources == nil {
-		r.Extensions.InplaceUpdate.Resources = &InplaceUpdateResourcesExtension{}
-	}
-	if hasCPUReq {
-		if r.Extensions.InplaceUpdate.Resources.Requests == nil {
-			r.Extensions.InplaceUpdate.Resources.Requests = corev1.ResourceList{}
+	for _, extension := range resourceExtensions {
+		quantity, ok, err := r.parseAndRemoveQuantity(extension.key)
+		if err != nil {
+			return err
 		}
-		r.Extensions.InplaceUpdate.Resources.Requests[corev1.ResourceCPU] = cpuReq
-	}
-	if hasCPULim {
+		if !ok {
+			continue
+		}
+		if r.Extensions.InplaceUpdate.Resources == nil {
+			r.Extensions.InplaceUpdate.Resources = &InplaceUpdateResourcesExtension{}
+		}
+		if extension.isRequest {
+			if r.Extensions.InplaceUpdate.Resources.Requests == nil {
+				r.Extensions.InplaceUpdate.Resources.Requests = corev1.ResourceList{}
+			}
+			r.Extensions.InplaceUpdate.Resources.Requests[extension.resourceName] = quantity
+			continue
+		}
 		if r.Extensions.InplaceUpdate.Resources.Limits == nil {
 			r.Extensions.InplaceUpdate.Resources.Limits = corev1.ResourceList{}
 		}
-		r.Extensions.InplaceUpdate.Resources.Limits[corev1.ResourceCPU] = cpuLim
+		r.Extensions.InplaceUpdate.Resources.Limits[extension.resourceName] = quantity
 	}
 	return nil
 }

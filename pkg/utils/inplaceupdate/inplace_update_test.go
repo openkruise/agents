@@ -51,6 +51,34 @@ func buildTestScheme(t *testing.T) *runtime.Scheme {
 	return scheme
 }
 
+func applyResizeSubresourcePatch(ctx context.Context, c client.Client, obj client.Object, patch client.Patch) error {
+	data, err := patch.Data(obj)
+	if err != nil {
+		return err
+	}
+	resizePatch := struct {
+		Spec struct {
+			Containers []corev1.Container `json:"containers"`
+		} `json:"spec"`
+	}{}
+	if err := json.Unmarshal(data, &resizePatch); err != nil {
+		return err
+	}
+
+	existing := &corev1.Pod{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(obj), existing); err != nil {
+		return err
+	}
+	for i, container := range existing.Spec.Containers {
+		for _, patchContainer := range resizePatch.Spec.Containers {
+			if patchContainer.Name == container.Name {
+				existing.Spec.Containers[i].Resources = patchContainer.Resources
+			}
+		}
+	}
+	return c.Update(ctx, existing)
+}
+
 func TestGetPodInPlaceUpdateState(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -354,6 +382,12 @@ func TestInPlaceUpdateControl_Update_ResizeViaSubresource(t *testing.T) {
 			Containers: []corev1.Container{{
 				Name:  "c",
 				Image: "img:1",
+				ResizePolicy: []corev1.ContainerResizePolicy{
+					{
+						ResourceName:  corev1.ResourceMemory,
+						RestartPolicy: corev1.RestartContainer,
+					},
+				},
 				Resources: corev1.ResourceRequirements{
 					Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m")},
 				},
@@ -381,34 +415,20 @@ func TestInPlaceUpdateControl_Update_ResizeViaSubresource(t *testing.T) {
 	resizeCalls := 0
 	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
 	wrapped := interceptor.NewClient(base, interceptor.Funcs{
-		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object,
-			opts ...client.SubResourceUpdateOption) error {
+		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object,
+			patch client.Patch, opts ...client.SubResourcePatchOption) error {
 			if sub != "resize" {
-				return c.SubResource(sub).Update(ctx, obj, opts...)
+				return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
 			}
 			resizeCalls++
-			body := obj
-			updateOpts := &client.SubResourceUpdateOptions{}
-			updateOpts.ApplyOptions(opts)
-			if updateOpts.SubResourceBody != nil {
-				body = updateOpts.SubResourceBody
-			}
-			resizePod, ok := body.(*corev1.Pod)
-			if !ok {
-				return fmt.Errorf("expected *corev1.Pod, got %T", body)
-			}
-			existing := &corev1.Pod{}
-			if err := c.Get(ctx, client.ObjectKeyFromObject(obj), existing); err != nil {
+			data, err := patch.Data(obj)
+			if err != nil {
 				return err
 			}
-			for i, container := range existing.Spec.Containers {
-				for _, rc := range resizePod.Spec.Containers {
-					if rc.Name == container.Name {
-						existing.Spec.Containers[i].Resources = rc.Resources
-					}
-				}
+			if strings.Contains(string(data), "resizePolicy") {
+				return fmt.Errorf("resize subresource patch must not include resizePolicy: %s", string(data))
 			}
-			return c.Update(ctx, existing)
+			return applyResizeSubresourcePatch(ctx, c, obj, patch)
 		},
 	})
 
@@ -478,13 +498,13 @@ func TestInPlaceUpdateControl_Update_ResizeFallbackToDirectPatch(t *testing.T) {
 	patchCalls := 0
 	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
 	wrapped := interceptor.NewClient(base, interceptor.Funcs{
-		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object,
-			opts ...client.SubResourceUpdateOption) error {
+		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object,
+			patch client.Patch, opts ...client.SubResourcePatchOption) error {
 			if sub == "resize" {
 				subCalls++
 				return apierrors.NewNotFound(schema.GroupResource{Resource: "pods"}, obj.GetName())
 			}
-			return c.SubResource(sub).Update(ctx, obj, opts...)
+			return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
 		},
 		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch,
 			opts ...client.PatchOption) error {
@@ -571,12 +591,12 @@ func TestInPlaceUpdateControl_Update_ResizeNotSupported(t *testing.T) {
 
 	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
 	wrapped := interceptor.NewClient(base, interceptor.Funcs{
-		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object,
-			opts ...client.SubResourceUpdateOption) error {
+		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object,
+			patch client.Patch, opts ...client.SubResourcePatchOption) error {
 			if sub == "resize" {
 				return apierrors.NewNotFound(schema.GroupResource{Resource: "pods"}, obj.GetName())
 			}
-			return c.SubResource(sub).Update(ctx, obj, opts...)
+			return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
 		},
 		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch,
 			opts ...client.PatchOption) error {
@@ -646,12 +666,12 @@ func TestInPlaceUpdateControl_Update_ResizeSubresourceServerError(t *testing.T) 
 
 	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
 	wrapped := interceptor.NewClient(base, interceptor.Funcs{
-		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object,
-			opts ...client.SubResourceUpdateOption) error {
+		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object,
+			patch client.Patch, opts ...client.SubResourcePatchOption) error {
 			if sub == "resize" {
 				return apierrors.NewInternalError(fmt.Errorf("etcd timeout"))
 			}
-			return c.SubResource(sub).Update(ctx, obj, opts...)
+			return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
 		},
 	})
 	ctrl := NewInPlaceUpdateControl(wrapped, nil)
@@ -716,10 +736,10 @@ func TestInPlaceUpdateControl_Update_ResizeConflictRetrySucceeds(t *testing.T) {
 	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
 	resizeAttempts := 0
 	wrapped := interceptor.NewClient(base, interceptor.Funcs{
-		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object,
-			opts ...client.SubResourceUpdateOption) error {
+		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object,
+			patch client.Patch, opts ...client.SubResourcePatchOption) error {
 			if sub != "resize" {
-				return c.SubResource(sub).Update(ctx, obj, opts...)
+				return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
 			}
 			resizeAttempts++
 			if resizeAttempts == 1 {
@@ -740,25 +760,7 @@ func TestInPlaceUpdateControl_Update_ResizeConflictRetrySucceeds(t *testing.T) {
 				)
 			}
 			// Subsequent attempts succeed and apply the resize.
-			body := obj
-			updateOpts := &client.SubResourceUpdateOptions{}
-			updateOpts.ApplyOptions(opts)
-			if updateOpts.SubResourceBody != nil {
-				body = updateOpts.SubResourceBody
-			}
-			rp := body.(*corev1.Pod)
-			existing := &corev1.Pod{}
-			if err := c.Get(ctx, client.ObjectKeyFromObject(obj), existing); err != nil {
-				return err
-			}
-			for i, container := range existing.Spec.Containers {
-				for _, rc := range rp.Spec.Containers {
-					if rc.Name == container.Name {
-						existing.Spec.Containers[i].Resources = rc.Resources
-					}
-				}
-			}
-			return c.Update(ctx, existing)
+			return applyResizeSubresourcePatch(ctx, c, obj, patch)
 		},
 	})
 	ctrl := NewInPlaceUpdateControl(wrapped, nil)
@@ -824,10 +826,10 @@ func TestInPlaceUpdateControl_Update_ResizeConflictRetryNoLongerNeeded(t *testin
 	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
 	resizeAttempts := 0
 	wrapped := interceptor.NewClient(base, interceptor.Funcs{
-		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object,
-			opts ...client.SubResourceUpdateOption) error {
+		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object,
+			patch client.Patch, opts ...client.SubResourcePatchOption) error {
 			if sub != "resize" {
-				return c.SubResource(sub).Update(ctx, obj, opts...)
+				return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
 			}
 			resizeAttempts++
 			// Simulate that another actor has already applied the resize, so
@@ -903,10 +905,10 @@ func TestInPlaceUpdateControl_Update_ResizeConflictGetFails(t *testing.T) {
 	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
 	getFailErr := fmt.Errorf("simulated get failure after conflict")
 	wrapped := interceptor.NewClient(base, interceptor.Funcs{
-		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object,
-			opts ...client.SubResourceUpdateOption) error {
+		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object,
+			patch client.Patch, opts ...client.SubResourcePatchOption) error {
 			if sub != "resize" {
-				return c.SubResource(sub).Update(ctx, obj, opts...)
+				return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
 			}
 			// Always return conflict to trigger the retry path
 			return apierrors.NewConflict(
@@ -2548,32 +2550,14 @@ func TestInPlaceUpdateControl_Update_ResizeBeforePatch(t *testing.T) {
 	var callOrder []string
 	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
 	wrapped := interceptor.NewClient(base, interceptor.Funcs{
-		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object,
-			opts ...client.SubResourceUpdateOption) error {
+		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object,
+			patch client.Patch, opts ...client.SubResourcePatchOption) error {
 			if sub == "resize" {
 				callOrder = append(callOrder, "resize")
 				// Simulate a successful resize by applying resources
-				body := obj
-				updateOpts := &client.SubResourceUpdateOptions{}
-				updateOpts.ApplyOptions(opts)
-				if updateOpts.SubResourceBody != nil {
-					body = updateOpts.SubResourceBody
-				}
-				rp := body.(*corev1.Pod)
-				existing := &corev1.Pod{}
-				if err := c.Get(ctx, client.ObjectKeyFromObject(obj), existing); err != nil {
-					return err
-				}
-				for i, container := range existing.Spec.Containers {
-					for _, rc := range rp.Spec.Containers {
-						if rc.Name == container.Name {
-							existing.Spec.Containers[i].Resources = rc.Resources
-						}
-					}
-				}
-				return c.Update(ctx, existing)
+				return applyResizeSubresourcePatch(ctx, c, obj, patch)
 			}
-			return c.SubResource(sub).Update(ctx, obj, opts...)
+			return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
 		},
 		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch,
 			opts ...client.PatchOption) error {

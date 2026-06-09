@@ -172,7 +172,7 @@ func (sc *Controller) createSandboxWithClone(ctx context.Context, request models
 	log := klog.FromContext(ctx)
 	start := time.Now()
 
-	if request.Extensions.InplaceUpdate.Image != "" {
+	if request.Extensions.InplaceUpdate.Image != "" || request.Extensions.InplaceUpdate.Resources != nil {
 		return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
 			Code:    http.StatusBadRequest,
 			Message: "InplaceUpdate is not supported for clone",

@@ -126,18 +126,17 @@ type SandboxClaimInplaceUpdateOptions struct {
 	Resources *SandboxClaimInplaceUpdateResourcesOptions `json:"resources,omitempty"`
 }
 
-// SandboxClaimInplaceUpdateResourcesOptions
-// TODO: now we only support cpu inplace resize, consider support mem resize in the future.
+// SandboxClaimInplaceUpdateResourcesOptions specifies resources for in-place resize.
 type SandboxClaimInplaceUpdateResourcesOptions struct {
 	// Requests specifies the target resource requests for each container.
-	// Only CPU is supported for now. The container's original request must already be set;
+	// CPU and memory are supported. The container's original request must already be set;
 	// otherwise the value is ignored.
 	// The new value must not change the Pod's QoS class; otherwise the claim will be rejected.
 	// +optional
 	Requests corev1.ResourceList `json:"requests,omitempty"`
 
 	// Limits specifies the target resource limits for each container.
-	// Only CPU is supported for now. The container's original limit must already be set;
+	// CPU and memory are supported. The container's original limit must already be set;
 	// otherwise the value is ignored.
 	// The new value must not change the Pod's QoS class; otherwise the claim will be rejected.
 	// +optional

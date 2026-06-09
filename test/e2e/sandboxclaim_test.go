@@ -287,7 +287,7 @@ var _ = Describe("SandboxClaim", func() {
 		})
 	})
 
-	Context("CPU resize on claim", func() {
+	Context("Resource resize on claim", func() {
 		var (
 			sandboxSet      *agentsv1alpha1.SandboxSet
 			sandboxClaim    *agentsv1alpha1.SandboxClaim
@@ -297,7 +297,7 @@ var _ = Describe("SandboxClaim", func() {
 		BeforeEach(func() {
 			sandboxSet = &agentsv1alpha1.SandboxSet{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      fmt.Sprintf("test-pool-cpu-resize-%d", time.Now().UnixNano()),
+					Name:      fmt.Sprintf("test-pool-resource-resize-%d", time.Now().UnixNano()),
 					Namespace: namespace,
 				},
 				Spec: agentsv1alpha1.SandboxSetSpec{
@@ -1071,11 +1071,11 @@ var _ = Describe("SandboxClaim", func() {
 			Expect(sidecar.Resources.Limits[corev1.ResourceCPU]).To(Equal(resource.MustParse("200m")))
 		})
 
-		It("should ignore memory in resize and only apply CPU", func() {
+		It("should apply CPU and memory resize when QoS class is preserved", func() {
 			By("Creating a SandboxClaim with both CPU and memory in requests/limits")
-			memIgnoreClaim := &agentsv1alpha1.SandboxClaim{
+			resourceResizeClaim := &agentsv1alpha1.SandboxClaim{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      fmt.Sprintf("test-claim-mem-ignore-%d", time.Now().UnixNano()),
+					Name:      fmt.Sprintf("test-claim-resource-resize-%d", time.Now().UnixNano()),
 					Namespace: namespace,
 				},
 				Spec: agentsv1alpha1.SandboxClaimSpec{
@@ -1089,30 +1089,30 @@ var _ = Describe("SandboxClaim", func() {
 						Resources: &agentsv1alpha1.SandboxClaimInplaceUpdateResourcesOptions{
 							Requests: corev1.ResourceList{
 								corev1.ResourceCPU:    resource.MustParse("400m"),
-								corev1.ResourceMemory: resource.MustParse("999Mi"),
+								corev1.ResourceMemory: resource.MustParse("192Mi"),
 							},
 							Limits: corev1.ResourceList{
 								corev1.ResourceCPU:    resource.MustParse("400m"),
-								corev1.ResourceMemory: resource.MustParse("999Mi"),
+								corev1.ResourceMemory: resource.MustParse("384Mi"),
 							},
 						},
 					},
 				},
 			}
-			Expect(k8sClient.Create(ctx, memIgnoreClaim)).To(Succeed())
-			defer func() { _ = k8sClient.Delete(ctx, memIgnoreClaim) }()
+			Expect(k8sClient.Create(ctx, resourceResizeClaim)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, resourceResizeClaim) }()
 
 			By("Verifying claim completes successfully")
 			Eventually(func() agentsv1alpha1.SandboxClaimPhase {
 				_ = k8sClient.Get(ctx, types.NamespacedName{
-					Name:      memIgnoreClaim.Name,
-					Namespace: memIgnoreClaim.Namespace,
-				}, memIgnoreClaim)
-				return memIgnoreClaim.Status.Phase
+					Name:      resourceResizeClaim.Name,
+					Namespace: resourceResizeClaim.Namespace,
+				}, resourceResizeClaim)
+				return resourceResizeClaim.Status.Phase
 			}, time.Minute*3, time.Second).Should(Equal(agentsv1alpha1.SandboxClaimPhaseCompleted))
 
-			By("Verifying CPU was resized to 400m")
-			claimedSandboxes, err := listClaimedSandboxes(ctx, memIgnoreClaim)
+			By("Verifying CPU and memory were resized")
+			claimedSandboxes, err := listClaimedSandboxes(ctx, resourceResizeClaim)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(claimedSandboxes).To(HaveLen(1))
 
@@ -1127,19 +1127,587 @@ var _ = Describe("SandboxClaim", func() {
 			cpuLim := pod.Spec.Containers[0].Resources.Limits[corev1.ResourceCPU]
 			Expect(cpuLim.MilliValue()).To(Equal(int64(400)))
 
-			By("Verifying memory remains unchanged (original values, not 999Mi)")
 			memReq := pod.Spec.Containers[0].Resources.Requests[corev1.ResourceMemory]
-			Expect(memReq.String()).To(Equal("128Mi"))
+			Expect(memReq.String()).To(Equal("192Mi"))
 			memLim := pod.Spec.Containers[0].Resources.Limits[corev1.ResourceMemory]
-			Expect(memLim.String()).To(Equal("256Mi"))
+			Expect(memLim.String()).To(Equal("384Mi"))
 
-			By("Verifying status resources reflect the actual CPU resize (if populated by kubelet)")
+			By("Verifying status resources reflect the actual resize (if populated by kubelet)")
 			if len(pod.Status.ContainerStatuses) > 0 && pod.Status.ContainerStatuses[0].Resources != nil {
 				cpuReq, ok := pod.Status.ContainerStatuses[0].Resources.Requests[corev1.ResourceCPU]
 				if ok {
 					Expect(cpuReq.MilliValue()).To(Equal(int64(400)))
 				}
+				memReq, ok := pod.Status.ContainerStatuses[0].Resources.Requests[corev1.ResourceMemory]
+				if ok {
+					Expect(memReq.String()).To(Equal("192Mi"))
+				}
 			}
+		})
+
+		It("should resize memory and restart the container when the warm pod already has memory RestartContainer resizePolicy", func() {
+			By("Creating a SandboxSet whose container declares resizePolicy")
+			resizePolicySet := &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("test-pool-resize-policy-%d", time.Now().UnixNano()),
+					Namespace: namespace,
+				},
+				Spec: agentsv1alpha1.SandboxSetSpec{
+					Replicas: 1,
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name:  "main",
+										Image: "nginx:stable-alpine3.23",
+										ResizePolicy: []corev1.ContainerResizePolicy{
+											{
+												ResourceName:  corev1.ResourceCPU,
+												RestartPolicy: corev1.NotRequired,
+											},
+											{
+												ResourceName:  corev1.ResourceMemory,
+												RestartPolicy: corev1.RestartContainer,
+											},
+										},
+										Resources: corev1.ResourceRequirements{
+											Requests: corev1.ResourceList{
+												corev1.ResourceCPU:    resource.MustParse("100m"),
+												corev1.ResourceMemory: resource.MustParse("128Mi"),
+											},
+											Limits: corev1.ResourceList{
+												corev1.ResourceCPU:    resource.MustParse("200m"),
+												corev1.ResourceMemory: resource.MustParse("256Mi"),
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resizePolicySet)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, resizePolicySet) }()
+
+			By("Waiting for the resizePolicy warm pool to be ready")
+			Eventually(func() int32 {
+				_ = k8sClient.Get(ctx, types.NamespacedName{
+					Name:      resizePolicySet.Name,
+					Namespace: resizePolicySet.Namespace,
+				}, resizePolicySet)
+				return resizePolicySet.Status.AvailableReplicas
+			}, time.Minute*2, time.Second).Should(Equal(int32(1)))
+
+			var warmName string
+			var initialRestartCount int32
+			var initialContainerID string
+			By("Verifying the warm pod starts with resizePolicy")
+			Eventually(func() bool {
+				sandboxList := &agentsv1alpha1.SandboxList{}
+				if err := k8sClient.List(ctx, sandboxList, client.InNamespace(namespace), client.MatchingLabels{
+					agentsv1alpha1.LabelSandboxPool: resizePolicySet.Name,
+				}); err != nil || len(sandboxList.Items) != 1 {
+					return false
+				}
+				warmName = sandboxList.Items[0].Name
+
+				pod := &corev1.Pod{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{
+					Name:      warmName,
+					Namespace: namespace,
+				}, pod); err != nil || len(pod.Spec.Containers) == 0 {
+					return false
+				}
+
+				for _, policy := range pod.Spec.Containers[0].ResizePolicy {
+					if policy.ResourceName == corev1.ResourceMemory && policy.RestartPolicy == corev1.RestartContainer {
+						return true
+					}
+				}
+				return false
+			}, time.Minute, time.Second).Should(BeTrue())
+
+			By("Recording the warm container restart count before memory resize")
+			Eventually(func() bool {
+				pod := &corev1.Pod{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{
+					Name:      warmName,
+					Namespace: namespace,
+				}, pod); err != nil {
+					return false
+				}
+				for _, status := range pod.Status.ContainerStatuses {
+					if status.Name == "main" && status.ContainerID != "" {
+						initialRestartCount = status.RestartCount
+						initialContainerID = status.ContainerID
+						return true
+					}
+				}
+				return false
+			}, time.Minute, time.Second).Should(BeTrue())
+
+			By("Creating a SandboxClaim that resizes memory only")
+			resizePolicyClaim := &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("test-claim-resize-policy-%d", time.Now().UnixNano()),
+					Namespace: namespace,
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName:    resizePolicySet.Name,
+					Replicas:        ptr.To(int32(1)),
+					SkipInitRuntime: true,
+					ClaimTimeout:    &metav1.Duration{Duration: 3 * time.Minute},
+					WaitReadyTimeout: &metav1.Duration{
+						Duration: 3 * time.Minute,
+					},
+					InplaceUpdate: &agentsv1alpha1.SandboxClaimInplaceUpdateOptions{
+						Resources: &agentsv1alpha1.SandboxClaimInplaceUpdateResourcesOptions{
+							Requests: corev1.ResourceList{
+								corev1.ResourceMemory: resource.MustParse("200Mi"),
+							},
+							Limits: corev1.ResourceList{
+								corev1.ResourceMemory: resource.MustParse("300Mi"),
+							},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, resizePolicyClaim)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, resizePolicyClaim) }()
+
+			By("Verifying claim completes without resizePolicy mutation errors")
+			Eventually(func() agentsv1alpha1.SandboxClaimPhase {
+				_ = k8sClient.Get(ctx, types.NamespacedName{
+					Name:      resizePolicyClaim.Name,
+					Namespace: resizePolicyClaim.Namespace,
+				}, resizePolicyClaim)
+				return resizePolicyClaim.Status.Phase
+			}, time.Minute*4, time.Second).Should(Equal(agentsv1alpha1.SandboxClaimPhaseCompleted))
+
+			By("Verifying memory resources were resized and resizePolicy was preserved")
+			Eventually(func() bool {
+				pod := &corev1.Pod{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{
+					Name:      warmName,
+					Namespace: namespace,
+				}, pod); err != nil || len(pod.Spec.Containers) == 0 {
+					return false
+				}
+
+				container := pod.Spec.Containers[0]
+				req, ok := container.Resources.Requests[corev1.ResourceMemory]
+				if !ok || req.Cmp(resource.MustParse("200Mi")) != 0 {
+					return false
+				}
+				lim, ok := container.Resources.Limits[corev1.ResourceMemory]
+				if !ok || lim.Cmp(resource.MustParse("300Mi")) != 0 {
+					return false
+				}
+				for _, policy := range container.ResizePolicy {
+					if policy.ResourceName == corev1.ResourceMemory && policy.RestartPolicy == corev1.RestartContainer {
+						return true
+					}
+				}
+				return false
+			}, time.Minute*2, time.Second).Should(BeTrue())
+
+			By("Verifying memory resize restarted the main container")
+			Eventually(func() bool {
+				pod := &corev1.Pod{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{
+					Name:      warmName,
+					Namespace: namespace,
+				}, pod); err != nil {
+					return false
+				}
+				for _, status := range pod.Status.ContainerStatuses {
+					if status.Name != "main" {
+						continue
+					}
+					return status.RestartCount > initialRestartCount &&
+						status.ContainerID != "" &&
+						status.ContainerID != initialContainerID
+				}
+				return false
+			}, time.Minute*2, time.Second).Should(BeTrue())
+		})
+
+		It("should resize CPU without restarting the container when resizePolicy is NotRequired", func() {
+			By("Creating a SandboxSet whose CPU resizePolicy is NotRequired")
+			noRestartSet := &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("test-pool-cpu-no-restart-%d", time.Now().UnixNano()),
+					Namespace: namespace,
+				},
+				Spec: agentsv1alpha1.SandboxSetSpec{
+					Replicas: 1,
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name:  "main",
+										Image: "nginx:stable-alpine3.23",
+										ResizePolicy: []corev1.ContainerResizePolicy{
+											{
+												ResourceName:  corev1.ResourceCPU,
+												RestartPolicy: corev1.NotRequired,
+											},
+											{
+												ResourceName:  corev1.ResourceMemory,
+												RestartPolicy: corev1.NotRequired,
+											},
+										},
+										Resources: corev1.ResourceRequirements{
+											Requests: corev1.ResourceList{
+												corev1.ResourceCPU:    resource.MustParse("100m"),
+												corev1.ResourceMemory: resource.MustParse("128Mi"),
+											},
+											Limits: corev1.ResourceList{
+												corev1.ResourceCPU:    resource.MustParse("200m"),
+												corev1.ResourceMemory: resource.MustParse("256Mi"),
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, noRestartSet)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, noRestartSet) }()
+
+			By("Waiting for the no-restart warm pool to be ready")
+			Eventually(func() int32 {
+				_ = k8sClient.Get(ctx, types.NamespacedName{
+					Name:      noRestartSet.Name,
+					Namespace: noRestartSet.Namespace,
+				}, noRestartSet)
+				return noRestartSet.Status.AvailableReplicas
+			}, time.Minute*2, time.Second).Should(Equal(int32(1)))
+
+			var warmName string
+			var initialRestartCount int32
+			var initialContainerID string
+			By("Verifying the warm pod starts with CPU NotRequired resizePolicy")
+			Eventually(func() bool {
+				sandboxList := &agentsv1alpha1.SandboxList{}
+				if err := k8sClient.List(ctx, sandboxList, client.InNamespace(namespace), client.MatchingLabels{
+					agentsv1alpha1.LabelSandboxPool: noRestartSet.Name,
+				}); err != nil || len(sandboxList.Items) != 1 {
+					return false
+				}
+				warmName = sandboxList.Items[0].Name
+
+				pod := &corev1.Pod{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{
+					Name:      warmName,
+					Namespace: namespace,
+				}, pod); err != nil || len(pod.Spec.Containers) == 0 {
+					return false
+				}
+
+				for _, policy := range pod.Spec.Containers[0].ResizePolicy {
+					if policy.ResourceName == corev1.ResourceCPU && policy.RestartPolicy == corev1.NotRequired {
+						return true
+					}
+				}
+				return false
+			}, time.Minute, time.Second).Should(BeTrue())
+
+			By("Recording the warm container identity before CPU resize")
+			Eventually(func() bool {
+				pod := &corev1.Pod{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{
+					Name:      warmName,
+					Namespace: namespace,
+				}, pod); err != nil {
+					return false
+				}
+				for _, status := range pod.Status.ContainerStatuses {
+					if status.Name == "main" && status.ContainerID != "" {
+						initialRestartCount = status.RestartCount
+						initialContainerID = status.ContainerID
+						return true
+					}
+				}
+				return false
+			}, time.Minute, time.Second).Should(BeTrue())
+
+			By("Creating a SandboxClaim that resizes CPU only")
+			noRestartClaim := &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("test-claim-cpu-no-restart-%d", time.Now().UnixNano()),
+					Namespace: namespace,
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName:    noRestartSet.Name,
+					Replicas:        ptr.To(int32(1)),
+					SkipInitRuntime: true,
+					ClaimTimeout:    &metav1.Duration{Duration: 3 * time.Minute},
+					WaitReadyTimeout: &metav1.Duration{
+						Duration: 3 * time.Minute,
+					},
+					InplaceUpdate: &agentsv1alpha1.SandboxClaimInplaceUpdateOptions{
+						Resources: &agentsv1alpha1.SandboxClaimInplaceUpdateResourcesOptions{
+							Requests: corev1.ResourceList{
+								corev1.ResourceCPU: resource.MustParse("150m"),
+							},
+							Limits: corev1.ResourceList{
+								corev1.ResourceCPU: resource.MustParse("300m"),
+							},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, noRestartClaim)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, noRestartClaim) }()
+
+			By("Verifying claim completes")
+			Eventually(func() agentsv1alpha1.SandboxClaimPhase {
+				_ = k8sClient.Get(ctx, types.NamespacedName{
+					Name:      noRestartClaim.Name,
+					Namespace: noRestartClaim.Namespace,
+				}, noRestartClaim)
+				return noRestartClaim.Status.Phase
+			}, time.Minute*4, time.Second).Should(Equal(agentsv1alpha1.SandboxClaimPhaseCompleted))
+
+			By("Verifying CPU resources were resized and resizePolicy was preserved")
+			Eventually(func() bool {
+				pod := &corev1.Pod{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{
+					Name:      warmName,
+					Namespace: namespace,
+				}, pod); err != nil || len(pod.Spec.Containers) == 0 {
+					return false
+				}
+
+				container := pod.Spec.Containers[0]
+				req, ok := container.Resources.Requests[corev1.ResourceCPU]
+				if !ok || req.Cmp(resource.MustParse("150m")) != 0 {
+					return false
+				}
+				lim, ok := container.Resources.Limits[corev1.ResourceCPU]
+				if !ok || lim.Cmp(resource.MustParse("300m")) != 0 {
+					return false
+				}
+				for _, policy := range container.ResizePolicy {
+					if policy.ResourceName == corev1.ResourceCPU && policy.RestartPolicy == corev1.NotRequired {
+						return true
+					}
+				}
+				return false
+			}, time.Minute*2, time.Second).Should(BeTrue())
+
+			By("Verifying CPU resize does not restart the main container")
+			Consistently(func() bool {
+				pod := &corev1.Pod{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{
+					Name:      warmName,
+					Namespace: namespace,
+				}, pod); err != nil {
+					return false
+				}
+				for _, status := range pod.Status.ContainerStatuses {
+					if status.Name != "main" {
+						continue
+					}
+					return status.RestartCount == initialRestartCount &&
+						status.ContainerID == initialContainerID
+				}
+				return false
+			}, 15*time.Second, time.Second).Should(BeTrue())
+		})
+
+		It("should resize memory without restarting the container when memory resizePolicy is NotRequired", func() {
+			By("Creating a SandboxSet whose memory resizePolicy is NotRequired")
+			memoryNoRestartSet := &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("test-pool-memory-no-restart-%d", time.Now().UnixNano()),
+					Namespace: namespace,
+				},
+				Spec: agentsv1alpha1.SandboxSetSpec{
+					Replicas: 1,
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name:  "main",
+										Image: "nginx:stable-alpine3.23",
+										ResizePolicy: []corev1.ContainerResizePolicy{
+											{
+												ResourceName:  corev1.ResourceCPU,
+												RestartPolicy: corev1.NotRequired,
+											},
+											{
+												ResourceName:  corev1.ResourceMemory,
+												RestartPolicy: corev1.NotRequired,
+											},
+										},
+										Resources: corev1.ResourceRequirements{
+											Requests: corev1.ResourceList{
+												corev1.ResourceCPU:    resource.MustParse("100m"),
+												corev1.ResourceMemory: resource.MustParse("128Mi"),
+											},
+											Limits: corev1.ResourceList{
+												corev1.ResourceCPU:    resource.MustParse("200m"),
+												corev1.ResourceMemory: resource.MustParse("256Mi"),
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, memoryNoRestartSet)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, memoryNoRestartSet) }()
+
+			By("Waiting for the memory no-restart warm pool to be ready")
+			Eventually(func() int32 {
+				_ = k8sClient.Get(ctx, types.NamespacedName{
+					Name:      memoryNoRestartSet.Name,
+					Namespace: memoryNoRestartSet.Namespace,
+				}, memoryNoRestartSet)
+				return memoryNoRestartSet.Status.AvailableReplicas
+			}, time.Minute*2, time.Second).Should(Equal(int32(1)))
+
+			var warmName string
+			var initialRestartCount int32
+			var initialContainerID string
+			By("Verifying the warm pod starts with memory NotRequired resizePolicy")
+			Eventually(func() bool {
+				sandboxList := &agentsv1alpha1.SandboxList{}
+				if err := k8sClient.List(ctx, sandboxList, client.InNamespace(namespace), client.MatchingLabels{
+					agentsv1alpha1.LabelSandboxPool: memoryNoRestartSet.Name,
+				}); err != nil || len(sandboxList.Items) != 1 {
+					return false
+				}
+				warmName = sandboxList.Items[0].Name
+
+				pod := &corev1.Pod{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{
+					Name:      warmName,
+					Namespace: namespace,
+				}, pod); err != nil || len(pod.Spec.Containers) == 0 {
+					return false
+				}
+
+				for _, policy := range pod.Spec.Containers[0].ResizePolicy {
+					if policy.ResourceName == corev1.ResourceMemory && policy.RestartPolicy == corev1.NotRequired {
+						return true
+					}
+				}
+				return false
+			}, time.Minute, time.Second).Should(BeTrue())
+
+			By("Recording the warm container identity before memory resize")
+			Eventually(func() bool {
+				pod := &corev1.Pod{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{
+					Name:      warmName,
+					Namespace: namespace,
+				}, pod); err != nil {
+					return false
+				}
+				for _, status := range pod.Status.ContainerStatuses {
+					if status.Name == "main" && status.ContainerID != "" {
+						initialRestartCount = status.RestartCount
+						initialContainerID = status.ContainerID
+						return true
+					}
+				}
+				return false
+			}, time.Minute, time.Second).Should(BeTrue())
+
+			By("Creating a SandboxClaim that resizes memory with NotRequired policy")
+			memoryNoRestartClaim := &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("test-claim-memory-no-restart-%d", time.Now().UnixNano()),
+					Namespace: namespace,
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName:    memoryNoRestartSet.Name,
+					Replicas:        ptr.To(int32(1)),
+					SkipInitRuntime: true,
+					ClaimTimeout:    &metav1.Duration{Duration: 3 * time.Minute},
+					WaitReadyTimeout: &metav1.Duration{
+						Duration: 3 * time.Minute,
+					},
+					InplaceUpdate: &agentsv1alpha1.SandboxClaimInplaceUpdateOptions{
+						Resources: &agentsv1alpha1.SandboxClaimInplaceUpdateResourcesOptions{
+							Requests: corev1.ResourceList{
+								corev1.ResourceMemory: resource.MustParse("192Mi"),
+							},
+							Limits: corev1.ResourceList{
+								corev1.ResourceMemory: resource.MustParse("384Mi"),
+							},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, memoryNoRestartClaim)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, memoryNoRestartClaim) }()
+
+			By("Verifying claim completes")
+			Eventually(func() agentsv1alpha1.SandboxClaimPhase {
+				_ = k8sClient.Get(ctx, types.NamespacedName{
+					Name:      memoryNoRestartClaim.Name,
+					Namespace: memoryNoRestartClaim.Namespace,
+				}, memoryNoRestartClaim)
+				return memoryNoRestartClaim.Status.Phase
+			}, time.Minute*4, time.Second).Should(Equal(agentsv1alpha1.SandboxClaimPhaseCompleted))
+
+			By("Verifying memory resources were resized and resizePolicy was preserved")
+			Eventually(func() bool {
+				pod := &corev1.Pod{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{
+					Name:      warmName,
+					Namespace: namespace,
+				}, pod); err != nil || len(pod.Spec.Containers) == 0 {
+					return false
+				}
+
+				container := pod.Spec.Containers[0]
+				req, ok := container.Resources.Requests[corev1.ResourceMemory]
+				if !ok || req.Cmp(resource.MustParse("192Mi")) != 0 {
+					return false
+				}
+				lim, ok := container.Resources.Limits[corev1.ResourceMemory]
+				if !ok || lim.Cmp(resource.MustParse("384Mi")) != 0 {
+					return false
+				}
+				for _, policy := range container.ResizePolicy {
+					if policy.ResourceName == corev1.ResourceMemory && policy.RestartPolicy == corev1.NotRequired {
+						return true
+					}
+				}
+				return false
+			}, time.Minute*2, time.Second).Should(BeTrue())
+
+			By("Verifying memory resize with NotRequired does not restart the main container")
+			Consistently(func() bool {
+				pod := &corev1.Pod{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{
+					Name:      warmName,
+					Namespace: namespace,
+				}, pod); err != nil {
+					return false
+				}
+				for _, status := range pod.Status.ContainerStatuses {
+					if status.Name != "main" {
+						continue
+					}
+					return status.RestartCount == initialRestartCount &&
+						status.ContainerID == initialContainerID
+				}
+				return false
+			}, 15*time.Second, time.Second).Should(BeTrue())
 		})
 
 	})
