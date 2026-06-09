@@ -296,6 +296,21 @@ func (c *Cache) ListSandboxes(ctx context.Context, opts ListSandboxesOptions) ([
 	return result, nil
 }
 
+func (c *Cache) CountActiveSandboxes(ctx context.Context, opts ListSandboxesOptions) (int32, error) {
+	list := &agentsv1alpha1.SandboxList{}
+	if err := listObjectWithUserAndNamespace(ctx, c.client, list, opts.User, opts.Namespace); err != nil {
+		return 0, err
+	}
+	var cnt int32
+	for i := range list.Items {
+		state, _ := utils.GetSandboxState(&list.Items[i])
+		if state != agentsv1alpha1.SandboxStateDead {
+			cnt++
+		}
+	}
+	return cnt, nil
+}
+
 func (c *Cache) ListCheckpoints(ctx context.Context, opts ListCheckpointsOptions) ([]*agentsv1alpha1.Checkpoint, error) {
 	list := &agentsv1alpha1.CheckpointList{}
 	if err := listObjectWithUserAndNamespace(ctx, c.client, list, opts.User, opts.Namespace); err != nil {

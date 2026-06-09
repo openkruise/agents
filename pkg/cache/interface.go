@@ -47,6 +47,10 @@ type Provider interface {
 	// Ownership is determined by the AnnotationOwner annotation on the Sandbox resource when User is set.
 	ListSandboxes(ctx context.Context, opts ListSandboxesOptions) ([]*agentsv1alpha1.Sandbox, error)
 
+	// CountActiveSandboxes counts active (non-dead) sandboxes filtered by namespace
+	// and optional owner. Faster than ListSandboxes when only the count is needed.
+	CountActiveSandboxes(ctx context.Context, opts ListSandboxesOptions) (int32, error)
+
 	// ListCheckpoints returns Checkpoint CRD objects filtered by namespace and optional owner.
 	// Ownership is determined by the AnnotationOwner annotation on the Checkpoint resource when User is set.
 	ListCheckpoints(ctx context.Context, opts ListCheckpointsOptions) ([]*agentsv1alpha1.Checkpoint, error)

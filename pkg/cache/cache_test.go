@@ -421,6 +421,109 @@ func TestCache_ListSandboxesWithOptions_WithoutUserReturnsNamespaceScopedResults
 	require.Len(t, list, 2)
 }
 
+func TestCache_CountActiveSandboxes(t *testing.T) {
+	sbx1 := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "sbx-1", Namespace: "default",
+			Annotations: map[string]string{agentsv1alpha1.AnnotationOwner: "user-1"},
+			Labels:      map[string]string{agentsv1alpha1.LabelSandboxIsClaimed: agentsv1alpha1.True},
+		},
+		Status: agentsv1alpha1.SandboxStatus{
+			Phase: agentsv1alpha1.SandboxRunning,
+			Conditions: []metav1.Condition{
+				{Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue},
+			},
+			PodInfo: agentsv1alpha1.PodInfo{PodIP: "10.0.0.1"},
+		},
+	}
+	sbx2 := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "sbx-2", Namespace: "default",
+			Annotations: map[string]string{agentsv1alpha1.AnnotationOwner: "user-1"},
+			Labels:      map[string]string{agentsv1alpha1.LabelSandboxIsClaimed: agentsv1alpha1.True},
+		},
+		Status: agentsv1alpha1.SandboxStatus{
+			Phase: agentsv1alpha1.SandboxRunning,
+			Conditions: []metav1.Condition{
+				{Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue},
+			},
+			PodInfo: agentsv1alpha1.PodInfo{PodIP: "10.0.0.2"},
+		},
+	}
+	// Dead sandbox: should be excluded from count
+	sbx3 := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "sbx-3", Namespace: "default",
+			Annotations:     map[string]string{agentsv1alpha1.AnnotationOwner: "user-1"},
+			Labels:          map[string]string{agentsv1alpha1.LabelSandboxIsClaimed: agentsv1alpha1.True},
+			DeletionTimestamp: &metav1.Time{Time: time.Now()},
+			Finalizers:      []string{"agents.kruise.io/sandbox"},
+		},
+	}
+	// Different user
+	sbx4 := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "sbx-4", Namespace: "default",
+			Annotations: map[string]string{agentsv1alpha1.AnnotationOwner: "user-2"},
+			Labels:      map[string]string{agentsv1alpha1.LabelSandboxIsClaimed: agentsv1alpha1.True},
+		},
+		Status: agentsv1alpha1.SandboxStatus{
+			Phase: agentsv1alpha1.SandboxRunning,
+			Conditions: []metav1.Condition{
+				{Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue},
+			},
+			PodInfo: agentsv1alpha1.PodInfo{PodIP: "10.0.0.4"},
+		},
+	}
+
+	c, _, err := cachetest.NewTestCache(t, sbx1, sbx2, sbx3, sbx4)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name        string
+		opts        cache.ListSandboxesOptions
+		expectCount int32
+	}{
+		{
+			name:        "user-1 counts 2 non-dead sandboxes",
+			opts:        cache.ListSandboxesOptions{User: "user-1"},
+			expectCount: 2,
+		},
+		{
+			name:        "user-2 counts 1 sandbox",
+			opts:        cache.ListSandboxesOptions{User: "user-2"},
+			expectCount: 1,
+		},
+		{
+			name:        "unknown user counts 0",
+			opts:        cache.ListSandboxesOptions{User: "user-nobody"},
+			expectCount: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cnt, err := c.CountActiveSandboxes(t.Context(), tt.opts)
+			require.NoError(t, err)
+			assert.Equal(t, tt.expectCount, cnt)
+		})
+	}
+
+	// Verify CountActiveSandboxes matches ListSandboxes result length (minus dead) for user-1
+	list, err := c.ListSandboxes(t.Context(), cache.ListSandboxesOptions{User: "user-1"})
+	require.NoError(t, err)
+	var listNonDead int32
+	for _, sbx := range list {
+		state, _ := utils.GetSandboxState(sbx)
+		if state != agentsv1alpha1.SandboxStateDead {
+			listNonDead++
+		}
+	}
+	cnt, err := c.CountActiveSandboxes(t.Context(), cache.ListSandboxesOptions{User: "user-1"})
+	require.NoError(t, err)
+	assert.Equal(t, listNonDead, cnt, "CountActiveSandboxes should match ListSandboxes non-dead count")
+}
+
 func TestCache_ListCheckpointsWithOptions_UserScoped(t *testing.T) {
 	cp1 := &agentsv1alpha1.Checkpoint{
 		ObjectMeta: metav1.ObjectMeta{

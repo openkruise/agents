@@ -404,24 +404,10 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 	return sandboxcr.ValidateAndInitClaimOptions(opts)
 }
 
-// countClaimedSandboxes counts sandboxes that are claimed by this claim
+// countClaimedSandboxes counts active sandboxes claimed by this claim.
 func (c *commonControl) countClaimedSandboxes(ctx context.Context, claim *agentsv1alpha1.SandboxClaim) (int32, error) {
-	log := logf.FromContext(ctx)
-	sandboxes, err := c.cache.ListSandboxes(ctx, cache.ListSandboxesOptions{
+	return c.cache.CountActiveSandboxes(ctx, cache.ListSandboxesOptions{
 		User:      string(claim.UID),
 		Namespace: claim.Namespace,
 	})
-	if err != nil {
-		return 0, err
-	}
-	var cnt int32
-	for _, sbx := range sandboxes {
-		state, reason := utils.GetSandboxState(sbx)
-		if state == agentsv1alpha1.SandboxStateDead {
-			log.Info("skip counting dead sandbox", "reason", reason)
-			continue
-		}
-		cnt++
-	}
-	return cnt, nil
 }
