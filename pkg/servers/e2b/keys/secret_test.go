@@ -71,6 +71,48 @@ func (c *getHookClient) Get(ctx context.Context, key client.ObjectKey, obj clien
 	return c.Client.Get(ctx, key, obj, opts...)
 }
 
+type staleSecretReadClient struct {
+	client.Client
+
+	mu       sync.Mutex
+	secret   *corev1.Secret
+	getCount int32
+}
+
+func (c *staleSecretReadClient) SetSecret(secret *corev1.Secret) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.secret = secret.DeepCopy()
+}
+
+func (c *staleSecretReadClient) ClearSecret() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.secret = nil
+}
+
+func (c *staleSecretReadClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	atomic.AddInt32(&c.getCount, 1)
+	c.mu.Lock()
+	var secret *corev1.Secret
+	if c.secret != nil {
+		secret = c.secret.DeepCopy()
+	}
+	c.mu.Unlock()
+	if secret != nil && key.Namespace == secret.Namespace && key.Name == secret.Name {
+		target, ok := obj.(*corev1.Secret)
+		if ok {
+			secret.DeepCopyInto(target)
+			return nil
+		}
+	}
+	return c.Client.Get(ctx, key, obj, opts...)
+}
+
+func (c *staleSecretReadClient) GetCount() int32 {
+	return atomic.LoadInt32(&c.getCount)
+}
+
 func newTestScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	scheme := runtime.NewScheme()
@@ -385,7 +427,7 @@ func TestSecretKeyStorage_CreateKey(t *testing.T) {
 		{
 			name: "success",
 			run: func(t *testing.T) error {
-				storage, _ := newSecretStorageForTest(t, map[string][]byte{})
+				storage, c := newSecretStorageForTest(t, map[string][]byte{})
 				userTeam := &models.Team{Name: "user-team"}
 				user := &models.CreatedTeamAPIKey{ID: uuid.New(), Team: userTeam, CreatedBy: &models.TeamUser{ID: uuid.New()}}
 				key, err := storage.CreateKey(context.Background(), user, CreateKeyOptions{Name: "name"})
@@ -395,7 +437,10 @@ func TestSecretKeyStorage_CreateKey(t *testing.T) {
 					require.NotNil(t, key.CreatedBy)
 					require.Equal(t, user.ID, key.CreatedBy.ID)
 					_, found := storage.LoadByID(context.Background(), key.ID.String())
-					assert.True(t, found)
+					assert.False(t, found, "created key should wait for informer-backed refresh before entering the index")
+
+					secret := getSecretForTest(t, c)
+					require.Contains(t, secret.Data, key.ID.String())
 				}
 				return err
 			},
@@ -487,9 +532,6 @@ func TestSecretKeyStorage_CreateKey(t *testing.T) {
 					return err
 				}
 				require.Equal(t, existingTeam, key.Team)
-				stored, found := storage.LoadByID(context.Background(), key.ID.String())
-				require.True(t, found)
-				require.Equal(t, existingTeam, stored.Team)
 
 				secret := getSecretForTest(t, c)
 				require.Contains(t, secret.Data, key.ID.String())
@@ -690,6 +732,9 @@ func TestSecretKeyStorage_DeleteAndList(t *testing.T) {
 
 	key, err := storage.CreateKey(context.Background(), user, CreateKeyOptions{Name: "name"})
 	require.NoError(t, err)
+	// This test exercises list/delete behavior. Seed the created key into the
+	// index explicitly because CreateKey no longer mutates informer-owned state.
+	storage.storeKey(key)
 
 	// Same-team key should be visible even if CreatedBy does not match.
 	otherKey := &models.CreatedTeamAPIKey{ID: other, Key: uuid.NewString(), Name: "other", Team: teamA, CreatedBy: &models.TeamUser{ID: uuid.New()}}
@@ -710,6 +755,9 @@ func TestSecretKeyStorage_DeleteAndList(t *testing.T) {
 	require.NoError(t, storage.DeleteKey(context.Background(), nil))
 	require.NoError(t, storage.DeleteKey(context.Background(), key))
 	_, found := storage.LoadByID(context.Background(), key.ID.String())
+	assert.True(t, found, "deleted key should wait for informer-backed refresh before leaving the index")
+	require.NoError(t, storage.refresh(context.Background(), storage.APIReader))
+	_, found = storage.LoadByID(context.Background(), key.ID.String())
 	assert.False(t, found)
 
 	secret := getSecretForTest(t, c)
@@ -1156,6 +1204,170 @@ func TestSecretKeyStorage_Run_HandlerEventTriggersRefresh(t *testing.T) {
 		_, ok := storage.LoadByKey(t.Context(), keyStr)
 		return ok
 	}, time.Second, 5*time.Millisecond, "expected refreshWorker to repopulate the index")
+}
+
+func TestSecretKeyStorage_Run_PeriodicRefreshTriggersRefresh(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "refreshes from cached reader without an event"},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			id := uuid.New()
+			keyStr := uuid.NewString()
+			apiKey := &models.CreatedTeamAPIKey{
+				ID: id, Key: keyStr, Name: "periodic", Team: models.AdminTeam(), CreatedAt: time.Now(),
+			}
+			apiKeyJSON, err := json.Marshal(apiKey)
+			require.NoError(t, err)
+
+			storage, _ := newSecretStorageForTest(t, map[string][]byte{id.String(): apiKeyJSON})
+			stub := newStubCache()
+			storage.Cache = stub
+			storage.refreshInterval = 10 * time.Millisecond
+			storage.idxByKey = sync.Map{}
+			storage.idxByID = sync.Map{}
+			storage.idxByTeam = sync.Map{}
+
+			storage.Run()
+			t.Cleanup(storage.Stop)
+
+			require.Eventually(t, func() bool {
+				_, ok := storage.LoadByKey(t.Context(), keyStr)
+				return ok
+			}, time.Second, 5*time.Millisecond, "expected periodic refresh to repopulate the index")
+		})
+	}
+}
+
+func TestSecretKeyStorage_CreateKeyWaitsForInformerRefresh(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "pending stale refresh keeps create waiting for informer-owned index"},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			apiClient := fake.NewClientBuilder().WithScheme(newTestScheme(t)).WithObjects(&corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: KeySecretName, Namespace: "default"},
+				Data:       map[string][]byte{},
+			}).Build()
+			cachedClient := &staleSecretReadClient{Client: apiClient}
+			cachedClient.SetSecret(&corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: KeySecretName, Namespace: "default"},
+				Data:       map[string][]byte{},
+			})
+			storage := NewSecretKeyStorage(cachedClient, apiClient, nil, "default", "admin-key").(*secretKeyStorage)
+			storage.triggerRefresh()
+
+			newID := uuid.MustParse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+			newKey := uuid.MustParse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+			useGeneratedUUIDsForTest(t, newID, newKey)
+			creator := &models.CreatedTeamAPIKey{
+				ID:        uuid.New(),
+				Team:      &models.Team{Name: "team-a"},
+				CreatedBy: &models.TeamUser{ID: uuid.New()},
+			}
+
+			created, err := storage.CreateKey(context.Background(), creator, CreateKeyOptions{Name: "created"})
+			require.NoError(t, err)
+			require.Equal(t, newID, created.ID)
+			require.Equal(t, newKey.String(), created.Key)
+
+			_, found := storage.LoadByID(context.Background(), created.ID.String())
+			require.False(t, found, "CreateKey must not update the in-memory index before informer refresh")
+			_, found = storage.LoadByKey(context.Background(), created.Key)
+			require.False(t, found, "CreateKey must not update the in-memory index before informer refresh")
+
+			storage.wg.Add(1)
+			go storage.refreshWorker(t.Context())
+			t.Cleanup(func() {
+				close(storage.stop)
+				storage.wg.Wait()
+			})
+
+			require.Eventually(t, func() bool {
+				return cachedClient.GetCount() > 0
+			}, time.Second, 5*time.Millisecond)
+			_, found = storage.LoadByID(context.Background(), created.ID.String())
+			require.False(t, found, "stale queued refresh should keep the informer-owned index unchanged")
+
+			cachedClient.ClearSecret()
+			storage.triggerRefresh()
+			require.Eventually(t, func() bool {
+				_, ok := storage.LoadByID(context.Background(), created.ID.String())
+				return ok
+			}, time.Second, 5*time.Millisecond, "expected fresh informer refresh to publish created key")
+			_, found = storage.LoadByKey(context.Background(), created.Key)
+			require.True(t, found)
+		})
+	}
+}
+
+func TestSecretKeyStorage_DeleteKeyWaitsForInformerRefresh(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "pending stale refresh keeps delete waiting for informer-owned index"},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			apiKey := &models.CreatedTeamAPIKey{
+				ID:   uuid.MustParse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+				Key:  "key-to-delete",
+				Name: "delete-me",
+				Team: &models.Team{Name: "team-a"},
+			}
+			apiKeyJSON, err := json.Marshal(apiKey)
+			require.NoError(t, err)
+			staleSecret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: KeySecretName, Namespace: "default"},
+				Data:       map[string][]byte{apiKey.ID.String(): apiKeyJSON},
+			}
+			apiClient := fake.NewClientBuilder().WithScheme(newTestScheme(t)).WithObjects(staleSecret.DeepCopy()).Build()
+			cachedClient := &staleSecretReadClient{Client: apiClient}
+			cachedClient.SetSecret(staleSecret)
+			storage := NewSecretKeyStorage(cachedClient, apiClient, nil, "default", "admin-key").(*secretKeyStorage)
+			storage.storeKey(apiKey)
+			storage.triggerRefresh()
+
+			require.NoError(t, storage.DeleteKey(context.Background(), apiKey))
+
+			_, found := storage.LoadByID(context.Background(), apiKey.ID.String())
+			require.True(t, found, "DeleteKey must not update the in-memory index before informer refresh")
+			_, found = storage.LoadByKey(context.Background(), apiKey.Key)
+			require.True(t, found, "DeleteKey must not update the in-memory index before informer refresh")
+
+			storage.wg.Add(1)
+			go storage.refreshWorker(t.Context())
+			t.Cleanup(func() {
+				close(storage.stop)
+				storage.wg.Wait()
+			})
+
+			require.Eventually(t, func() bool {
+				return cachedClient.GetCount() > 0
+			}, time.Second, 5*time.Millisecond)
+			_, found = storage.LoadByID(context.Background(), apiKey.ID.String())
+			require.True(t, found, "stale queued refresh should keep the informer-owned index unchanged")
+
+			cachedClient.ClearSecret()
+			storage.triggerRefresh()
+			require.Eventually(t, func() bool {
+				_, ok := storage.LoadByID(context.Background(), apiKey.ID.String())
+				return !ok
+			}, time.Second, 5*time.Millisecond, "expected fresh informer refresh to remove deleted key")
+			_, found = storage.LoadByKey(context.Background(), apiKey.Key)
+			require.False(t, found)
+		})
+	}
 }
 
 func TestSecretKeyStorage_Run_FilteredEventDoesNotTriggerRefresh(t *testing.T) {

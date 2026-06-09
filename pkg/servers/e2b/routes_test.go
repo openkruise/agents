@@ -99,6 +99,7 @@ func TestCheckApiKey_WithRealSetup(t *testing.T) {
 	regularUser, err := controller.keys.CreateKey(ctx, adminUser, keys.CreateKeyOptions{Name: "regular-user", TeamName: "regular-team"})
 	require.NoError(t, err)
 	require.NotNil(t, regularUser)
+	refreshKeyStorageForTest(t, controller)
 
 	tests := []struct {
 		name          string
@@ -284,6 +285,7 @@ func TestCheckApiKey_SandboxOwnership(t *testing.T) {
 	anotherUser, err := controller.keys.CreateKey(ctx, adminUser, keys.CreateKeyOptions{Name: "another-user", TeamName: "another-team"})
 	require.NoError(t, err)
 	require.NotNil(t, anotherUser)
+	refreshKeyStorageForTest(t, controller)
 
 	adminCleanup := CreateSandboxPool(t, controller, templateName, 2)
 	defer adminCleanup()

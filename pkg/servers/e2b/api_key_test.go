@@ -90,6 +90,7 @@ func TestListTeams(t *testing.T) {
 	require.NoError(t, err)
 	_, err = controller.keys.CreateKey(ctx, adminUser, keys.CreateKeyOptions{Name: "team-b-key", TeamName: "team-b"})
 	require.NoError(t, err)
+	refreshKeyStorageForTest(t, controller)
 
 	tests := []struct {
 		name        string
@@ -185,6 +186,7 @@ func TestCreateAPIKey(t *testing.T) {
 				rawKey, decoded := keys.DecodeFromE2BSDKCompatible(resp.Body.Key)
 				require.True(t, decoded)
 				assert.NotEqual(t, rawKey, resp.Body.Key)
+				refreshKeyStorageForTest(t, controller)
 				stored, found := controller.keys.LoadByID(t.Context(), resp.Body.ID.String())
 				require.True(t, found)
 				assert.Equal(t, rawKey, stored.Key)
@@ -213,6 +215,7 @@ func TestCompatibleAPIKeyEndpoint(t *testing.T) {
 	}
 	regularUser, err := controller.keys.CreateKey(ctx, adminUser, keys.CreateKeyOptions{Name: "regular-user", TeamName: "regular-team"})
 	require.NoError(t, err)
+	refreshKeyStorageForTest(t, controller)
 	compatibleKey := keys.EncodeForE2BSDK(regularUser.Key)
 
 	tests := []struct {
@@ -268,6 +271,7 @@ func TestCreateAPIKeyPermissionMiddleware(t *testing.T) {
 	}
 	teamAKey, err := controller.keys.CreateKey(ctx, adminUser, keys.CreateKeyOptions{Name: "team-a-key", TeamName: "team-a"})
 	require.NoError(t, err)
+	refreshKeyStorageForTest(t, controller)
 	require.NoError(t, fc.Create(t.Context(), &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{Name: "team-a"},
 	}))
@@ -380,6 +384,7 @@ func TestDeleteAPIKeyPermissionMiddleware(t *testing.T) {
 	require.NoError(t, err)
 	teamBKey, err := controller.keys.CreateKey(ctx, adminUser, keys.CreateKeyOptions{Name: "team-b-key", TeamName: "team-b"})
 	require.NoError(t, err)
+	refreshKeyStorageForTest(t, controller)
 
 	tests := []struct {
 		name                  string

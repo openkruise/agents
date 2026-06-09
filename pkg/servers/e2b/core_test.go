@@ -76,6 +76,11 @@ func Setup(t *testing.T) (*Controller, ctrlclient.Client, func()) {
 	return SetupWithMinResumeTimeout(t, models.DefaultMinResumeTimeoutSeconds)
 }
 
+func refreshKeyStorageForTest(t *testing.T, controller *Controller) {
+	t.Helper()
+	require.NoError(t, controller.keys.Init(t.Context()))
+}
+
 // SetupWithMinResumeTimeout mirrors Setup but lets the caller override
 // Controller.minResumeTimeout so floor-enforcement assertions can use a
 // non-default value (e.g., 120s with a 60s request to observe the bump).

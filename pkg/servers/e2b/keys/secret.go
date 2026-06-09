@@ -46,6 +46,8 @@ var (
 	marshalAPIKey = json.Marshal
 )
 
+const secretKeyStorageRefreshInterval = 15 * time.Second
+
 func init() {
 	AdminKeyID = uuid.MustParse("550e8400-e29b-41d4-a716-446655440000") // no means, just a const
 }
@@ -67,6 +69,8 @@ type secretKeyStorage struct {
 	refreshC chan struct{}
 	wg       sync.WaitGroup
 
+	refreshInterval time.Duration
+
 	idxByKey  sync.Map
 	idxByID   sync.Map
 	idxByTeam sync.Map // teamName -> *models.Team
@@ -74,14 +78,15 @@ type secretKeyStorage struct {
 
 func NewSecretKeyStorage(client client.Client, apiReader client.Reader, cache ctrlcache.Cache, namespace, adminKey string) KeyStorage {
 	return &secretKeyStorage{
-		Namespace: namespace,
-		AdminKey:  adminKey,
-		Client:    client,
-		APIReader: apiReader,
-		Cache:     cache,
-		stop:      make(chan struct{}),
-		done:      make(chan struct{}),
-		refreshC:  make(chan struct{}, 1),
+		Namespace:       namespace,
+		AdminKey:        adminKey,
+		Client:          client,
+		APIReader:       apiReader,
+		Cache:           cache,
+		stop:            make(chan struct{}),
+		done:            make(chan struct{}),
+		refreshC:        make(chan struct{}, 1),
+		refreshInterval: secretKeyStorageRefreshInterval,
 	}
 }
 
@@ -121,6 +126,11 @@ func (k *secretKeyStorage) refresh(ctx context.Context, reader client.Reader) er
 	if err := reader.Get(ctx, client.ObjectKey{Namespace: k.Namespace, Name: KeySecretName}, secret); err != nil {
 		return err
 	}
+	// refresh is the only path that mutates the in-memory indexes. CreateKey
+	// and DeleteKey intentionally only update the Secret and then wait for an
+	// informer-backed refresh to publish the change locally. Mixing writer-side
+	// index updates with queued stale informer refreshes can briefly revoke a
+	// newly created key or restore a newly deleted key on the auth path.
 	var ids, keys, teamNames = sets.NewString(), sets.NewString(), sets.NewString()
 	for id, bytes := range secret.Data {
 		var apiKey models.CreatedTeamAPIKey
@@ -169,9 +179,19 @@ func (k *secretKeyStorage) triggerRefresh() {
 func (k *secretKeyStorage) refreshWorker(ctx context.Context) {
 	defer k.wg.Done()
 	log := klog.FromContext(ctx)
+	refreshInterval := k.refreshInterval
+	if refreshInterval <= 0 {
+		refreshInterval = secretKeyStorageRefreshInterval
+	}
+	ticker := time.NewTicker(refreshInterval)
+	defer ticker.Stop()
 	for {
 		select {
 		case <-k.refreshC:
+			if err := k.refresh(ctx, k.Client); err != nil {
+				log.Error(err, "failed to refresh key store")
+			}
+		case <-ticker.C:
 			if err := k.refresh(ctx, k.Client); err != nil {
 				log.Error(err, "failed to refresh key store")
 			}
@@ -402,7 +422,6 @@ func (k *secretKeyStorage) CreateKey(ctx context.Context, key *models.CreatedTea
 		log.Error(err, "failed to update api-key")
 		return nil, err
 	}
-	k.storeKey(createdKey)
 	return createdKey, nil
 }
 
@@ -417,8 +436,6 @@ func (k *secretKeyStorage) DeleteKey(ctx context.Context, key *models.CreatedTea
 	if err != nil {
 		return err
 	}
-	k.idxByKey.Delete(key.Key)
-	k.idxByID.Delete(key.ID.String())
 	return nil
 }
 
