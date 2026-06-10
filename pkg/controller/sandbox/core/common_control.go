@@ -192,7 +192,7 @@ func (r *commonControl) EnsureSandboxPaused(ctx context.Context, args EnsureFunc
 	// cond.Status == metav1.ConditionFalse just for sure
 	if pod == nil && cond.Status == metav1.ConditionFalse {
 		cond.Status = metav1.ConditionTrue
-		cond.Reason = agentsv1alpha1.SandboxPausedReasonSetPause
+		cond.Reason = agentsv1alpha1.SandboxPausedReasonDeletePod
 		cond.LastTransitionTime = metav1.Now()
 		utils.SetSandboxCondition(newStatus, *cond)
 		klog.InfoS("Pod deletion completed, pause phase completed", "sandbox", klog.KObj(box))

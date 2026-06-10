@@ -52,6 +52,7 @@ func NewCheckpointControl(cli client.Client, recorder record.EventRecorder) *Che
 // Returns true if the pause flow should wait (checkpoint in progress or image rejected).
 func (c *CheckpointControl) AssumePodCheckpointed(ctx context.Context, pod *corev1.Pod, box *agentsv1alpha1.Sandbox, newStatus *agentsv1alpha1.SandboxStatus, cond *metav1.Condition) bool {
 	if !utilfeature.DefaultFeatureGate.Enabled(features.SandboxPauseCheckpointGate) {
+		cond.Reason = agentsv1alpha1.SandboxPausedReasonCheckpointSucceeded
 		return false
 	}
 	// Allow-list of paused reasons that should drive the checkpoint flow.

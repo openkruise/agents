@@ -333,6 +333,7 @@ const (
 	SandboxPausedReasonCheckpointSucceeded = "CheckpointSucceeded"
 	SandboxPausedReasonCheckpointFailed    = "CheckpointFailed"
 	SandboxPausedReasonSetPause            = "SetPause"
+	SandboxPausedReasonPausedSucceed       = "PauseSucceed"
 	SandboxPausedReasonDeletePod           = "DeletePod"
 
 	// SandboxConditionResume Reason
