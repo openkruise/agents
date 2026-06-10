@@ -126,9 +126,9 @@ jobs:
           MYSQL_ROOT_PASSWORD: ${{ env.MYSQL_ROOT_PASSWORD }}
         run: |
           kubectl exec -i deployment/mysql -n "${MYSQL_NAMESPACE}" -- \
-            env MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql -uroot "${MYSQL_DATABASE}" < hack/mysql-schema.sql
+            env MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql --protocol=TCP -h 127.0.0.1 -uroot "${MYSQL_DATABASE}" < hack/mysql-schema.sql
           kubectl exec deployment/mysql -n "${MYSQL_NAMESPACE}" -- \
-            env MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql -uroot "${MYSQL_DATABASE}" \
+            env MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql --protocol=TCP -h 127.0.0.1 -uroot "${MYSQL_DATABASE}" \
               -e "SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name IN ('teams', 'team_api_keys') ORDER BY table_name;"
 
       - name: Install Kruise Agents
