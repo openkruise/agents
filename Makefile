@@ -147,6 +147,14 @@ docker-build-sandbox-gateway: ## Build docker image for sandbox-gateway.
 build-traffic-extension: ## Build traffic-extension binary.
 	go build -o bin/traffic-extension ./cmd/traffic-extension
 
+# VERSION is derived from the nearest git tag; falls back to "dev" in untagged repos.
+STORAGE_CLI_VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+
+.PHONY: build-storage-cli
+build-storage-cli: ## Build sandbox-runtime-storage (storage-cli) binary with version injected via ldflags.
+	go build -trimpath -ldflags="-s -w -X main.version=$(STORAGE_CLI_VERSION)" \
+		-o bin/sandbox-runtime-storage ./pkg/agent-runtime/storage-cli/
+
 .PHONY: docker-build-traffic-extension
 docker-build-traffic-extension: ## Build docker image for traffic-extension.
 	docker build -f dockerfiles/traffic-extension.Dockerfile -t ${TRAFFIX_EXTENSION_IMG} .
