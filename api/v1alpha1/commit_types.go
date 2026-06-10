@@ -43,6 +43,8 @@ const (
 	CommitConditionTypePullBaseImage CommitConditionType = "PullBaseImage"
 	// CommitConditionTypePushCommittedImage indicates whether the committed image push step succeeded.
 	CommitConditionTypePushCommittedImage CommitConditionType = "PushCommittedImage"
+	// CommitConditionTypeNotFound indicates that the target Pod or container was not found.
+	CommitConditionTypeNotFound CommitConditionType = "CommitNotFound"
 )
 
 type CommitSpec struct {
