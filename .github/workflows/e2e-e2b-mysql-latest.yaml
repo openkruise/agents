@@ -89,7 +89,7 @@ jobs:
             echo "Cached inplace-update image"
           fi
 
-      # Flow: build/load images → MySQL → deploy agents with MySQL key storage (no post-deploy patch) → E2E
+      # Flow: build/load images → MySQL → schema → deploy agents with MySQL key storage (no post-deploy patch) → E2E
       - name: Build and load container images
         run: |
            make docker-build-manager
@@ -118,6 +118,18 @@ jobs:
           MYSQL_DATABASE: ${{ env.MYSQL_DATABASE }}
           MYSQL_ROOT_PASSWORD: ${{ env.MYSQL_ROOT_PASSWORD }}
         run: bash hack/deploy-mysql-kind-ci.sh
+
+      - name: Initialize MySQL key storage schema
+        env:
+          MYSQL_DATABASE: ${{ env.MYSQL_DATABASE }}
+          MYSQL_NAMESPACE: sandbox-system
+          MYSQL_ROOT_PASSWORD: ${{ env.MYSQL_ROOT_PASSWORD }}
+        run: |
+          kubectl exec -i deployment/mysql -n "${MYSQL_NAMESPACE}" -- \
+            env MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql -uroot "${MYSQL_DATABASE}" < hack/mysql-schema.sql
+          kubectl exec deployment/mysql -n "${MYSQL_NAMESPACE}" -- \
+            env MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql -uroot "${MYSQL_DATABASE}" \
+              -e "SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name IN ('teams', 'team_api_keys') ORDER BY table_name;"
 
       - name: Install Kruise Agents
         env:
@@ -158,6 +170,9 @@ jobs:
             echo "- op: add"
             echo "  path: /spec/template/spec/containers/0/args/-"
             echo "  value: --e2b-key-storage=mysql"
+            echo "- op: add"
+            echo "  path: /spec/template/spec/containers/0/args/-"
+            echo "  value: --e2b-key-storage-disable-schema-auto-update"
             echo "- op: add"
             echo "  path: /spec/template/spec/containers/0/env/-"
             printf '  value: {"name":"E2B_KEY_STORAGE_DSN","value":"%s"}\n' "${MYSQL_DSN}"
