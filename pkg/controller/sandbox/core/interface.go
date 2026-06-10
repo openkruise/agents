@@ -82,6 +82,30 @@ type SandboxInitializer interface {
 	Initialize(ctx context.Context, box *agentsv1alpha1.Sandbox, newStatus *agentsv1alpha1.SandboxStatus) error
 }
 
+// TraceHelper abstracts operation tracing for sandbox controllers.
+// Internal (ACS) builds supply a real implementation that writes trace logs;
+// external (common) builds use the default noopTraceHelper.
+type TraceHelper interface {
+	TraceOperation(ctx context.Context, phase string, obj interface{}, operation func() error) error
+	TraceOperationTreatNotFoundAsSuccess(ctx context.Context, phase string, obj interface{}, operation func() error) error
+}
+
+// noopTraceHelper is the default TraceHelper that performs no tracing.
+type noopTraceHelper struct{}
+
+func (n *noopTraceHelper) TraceOperation(_ context.Context, _ string, _ interface{}, operation func() error) error {
+	return operation()
+}
+
+func (n *noopTraceHelper) TraceOperationTreatNotFoundAsSuccess(_ context.Context, _ string, _ interface{}, operation func() error) error {
+	return operation()
+}
+
+// NewNoopTraceHelper returns a TraceHelper that simply executes the operation without tracing.
+func NewNoopTraceHelper() TraceHelper {
+	return &noopTraceHelper{}
+}
+
 // InPlaceUpdateHandler defines the interface for inplace update handlers
 type InPlaceUpdateHandler interface {
 	GetInPlaceUpdateControl() *inplaceupdate.InPlaceUpdateControl
