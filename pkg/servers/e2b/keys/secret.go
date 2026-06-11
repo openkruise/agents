@@ -46,7 +46,7 @@ var (
 	marshalAPIKey = json.Marshal
 )
 
-const secretKeyStorageRefreshInterval = 15 * time.Second
+const secretKeyStorageRefreshInterval = 10 * time.Minute
 
 func init() {
 	AdminKeyID = uuid.MustParse("550e8400-e29b-41d4-a716-446655440000") // no means, just a const
@@ -169,6 +169,9 @@ func (k *secretKeyStorage) refresh(ctx context.Context, reader client.Reader) er
 	return nil
 }
 
+// triggerRefresh uses refreshC, which is a buffered channel (cap=1), to coalesce refresh signals.
+// Multiple events between refresh cycles are collapsed into a single refresh,
+// preventing redundant Secret reads when the informer delivers a burst of events.
 func (k *secretKeyStorage) triggerRefresh() {
 	select {
 	case k.refreshC <- struct{}{}:
