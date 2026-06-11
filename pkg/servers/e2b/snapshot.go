@@ -30,11 +30,20 @@ import (
 	"github.com/openkruise/agents/pkg/servers/web"
 )
 
-func (sc *Controller) CreateSnapshot(r *http.Request) (web.ApiResponse[*models.Snapshot], *web.ApiError) {
+func (sc *Controller) CreateSnapshot(r *http.Request) (resp web.ApiResponse[*models.Snapshot], apiErr *web.ApiError) {
+	start := time.Now()
+	defer func() {
+		result := ResultSuccess
+		if apiErr != nil {
+			result = ResultError
+		}
+		apiOperationDuration.WithLabelValues("snapshot", result).Observe(time.Since(start).Seconds())
+		apiOperationTotal.WithLabelValues("snapshot", result).Inc()
+	}()
+
 	ctx := r.Context()
 	sandboxID := r.PathValue("sandboxID")
 	log := klog.FromContext(ctx)
-	start := time.Now()
 	request, parseErr := sc.parseCreateSnapshotRequest(r)
 	if parseErr != nil {
 		return web.ApiResponse[*models.Snapshot]{}, parseErr

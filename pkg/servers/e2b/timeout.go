@@ -31,7 +31,17 @@ import (
 )
 
 // SetSandboxTimeout sets the timeout of a claimed sandbox
-func (sc *Controller) SetSandboxTimeout(r *http.Request) (web.ApiResponse[struct{}], *web.ApiError) {
+func (sc *Controller) SetSandboxTimeout(r *http.Request) (resp web.ApiResponse[struct{}], apiErr *web.ApiError) {
+	start := time.Now()
+	defer func() {
+		result := ResultSuccess
+		if apiErr != nil {
+			result = ResultError
+		}
+		apiOperationDuration.WithLabelValues("timeout", result).Observe(time.Since(start).Seconds())
+		apiOperationTotal.WithLabelValues("timeout", result).Inc()
+	}()
+
 	err := sc.setSandboxTimeout(r)
 	if err != nil {
 		if err.Code != http.StatusNotFound {
