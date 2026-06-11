@@ -62,13 +62,21 @@ func TestGetUpdateDelete(t *testing.T) {
 	}
 
 	// Delete
-	r.Delete("default--app1")
+	r.Delete("default--app1", "1002")
 	if _, ok := r.Get("default--app1"); ok {
 		t.Fatal("expected not found after delete")
 	}
 
+	// A stale write after delete must not resurrect the route.
+	if r.Update("default--app1", proxy.Route{IP: "10.0.0.9", ResourceVersion: "1001"}) {
+		t.Fatal("expected stale write after delete to be rejected")
+	}
+	if _, ok := r.Get("default--app1"); ok {
+		t.Fatal("expected route to stay deleted after stale write")
+	}
+
 	// Delete non-existent key should not panic
-	r.Delete("nonexistent--key")
+	r.Delete("nonexistent--key", "")
 }
 
 func TestUpdate(t *testing.T) {
@@ -136,7 +144,7 @@ func TestConcurrentAccess(t *testing.T) {
 			key := "ns--app"
 			r.Update(key, proxy.Route{IP: "10.0.0.1", ResourceVersion: strconv.Itoa(i)})
 			r.Get(key)
-			r.Delete(key)
+			r.Delete(key, strconv.Itoa(i))
 		}(i)
 	}
 	wg.Wait()

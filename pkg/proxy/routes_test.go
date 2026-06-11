@@ -179,7 +179,7 @@ func TestDeleteRoute(t *testing.T) {
 	ctx := context.Background()
 	s.SetRoute(ctx, Route{ID: "sb-1", IP: "1.1.1.1", ResourceVersion: "1"})
 
-	s.DeleteRoute("sb-1")
+	s.DeleteRoute("sb-1", "2")
 
 	_, ok := s.LoadRoute("sb-1")
 	assert.False(t, ok)
@@ -188,7 +188,19 @@ func TestDeleteRoute(t *testing.T) {
 func TestDeleteRoute_NonExistent(t *testing.T) {
 	s := newTestServer(nil)
 	// Should not panic
-	s.DeleteRoute("nonexistent")
+	s.DeleteRoute("nonexistent", "")
+}
+
+func TestDeleteRoute_StaleWriteCannotResurrect(t *testing.T) {
+	s := newTestServer(nil)
+	ctx := context.Background()
+	s.SetRoute(ctx, Route{ID: "sb-1", IP: "1.1.1.1", ResourceVersion: "10"})
+	s.DeleteRoute("sb-1", "11")
+
+	// A stale write at the old version must not bring the route back.
+	s.SetRoute(ctx, Route{ID: "sb-1", IP: "1.1.1.1", ResourceVersion: "10"})
+	_, ok := s.LoadRoute("sb-1")
+	assert.False(t, ok, "stale write after delete must not resurrect the route")
 }
 
 // ---- ListPeers tests ----
@@ -371,8 +383,8 @@ func (m *muxRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 
 func TestSyncRouteWithPeers_TwoNodes_Memberlist(t *testing.T) {
 	// Start two real HTTP servers (acting as proxy system servers on dynamic ports)
-	server1 := &Server{}
-	server2 := &Server{}
+	server1 := NewServer(config.SandboxManagerOptions{})
+	server2 := NewServer(config.SandboxManagerOptions{})
 
 	// Set up HTTP handlers for /refresh on both servers
 	mux1 := http.NewServeMux()

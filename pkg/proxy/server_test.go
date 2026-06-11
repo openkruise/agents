@@ -204,7 +204,7 @@ func TestServer_handleRefresh(t *testing.T) {
 					State:           v1alpha1.SandboxStateRunning,
 					ResourceVersion: "1",
 				}
-				s.routes.Store(route.ID, route)
+				s.routes.Set(route.ID, route)
 			}
 
 			// Create request
@@ -224,7 +224,7 @@ func TestServer_handleRefresh(t *testing.T) {
 
 			// Verify route deletion
 			if tt.expectDeleted {
-				_, loaded := s.routes.Load("sandbox-1")
+				_, loaded := s.LoadRoute("sandbox-1")
 				assert.False(t, loaded, "route should be deleted")
 			}
 
@@ -236,7 +236,7 @@ func TestServer_handleRefresh(t *testing.T) {
 				} else if tt.name == "available state should set route" {
 					routeID = "sandbox-3"
 				}
-				_, loaded := s.routes.Load(routeID)
+				_, loaded := s.LoadRoute(routeID)
 				assert.True(t, loaded, "route should be set")
 			}
 		})
