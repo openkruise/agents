@@ -159,6 +159,69 @@ func TestHandleInPlaceUpdateCommon(t *testing.T) {
 			description:    "When hash mismatch occurs, should return true",
 		},
 		{
+			name: "missing SandboxHashImmutablePart annotation should skip hash check",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-pod",
+					Namespace: "default",
+					Labels: map[string]string{
+						agentsv1alpha1.PodLabelTemplateHash: "some-hash",
+					},
+					Annotations: map[string]string{
+						// Previous inplace update completed (no updateImages/updateResources flags)
+						inplaceupdate.PodAnnotationInPlaceUpdateStateKey: `{"revision":"prev-revision","updateTimestamp":"2024-01-01T00:00:00Z"}`,
+					},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:  "test-container",
+							Image: "nginx:latest",
+						},
+					},
+				},
+			},
+			box: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "test-sandbox",
+					Namespace:   "default",
+					Annotations: map[string]string{}, // No SandboxHashImmutablePart annotation
+				},
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name:  "test-container",
+										Image: "nginx:latest",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			newStatus: &agentsv1alpha1.SandboxStatus{
+				UpdateRevision: "test-revision",
+			},
+			setupHandler: func() InPlaceUpdateHandler {
+				scheme := runtime.NewScheme()
+				_ = clientgoscheme.AddToScheme(scheme)
+				_ = agentsv1alpha1.AddToScheme(scheme)
+
+				recorder := createTestRecorder()
+				return &MockInPlaceUpdateHandler{
+					control:  inplaceupdate.NewInPlaceUpdateControl(nil, inplaceupdate.DefaultGeneratePatchBodyFunc),
+					recorder: recorder,
+					logger:   logr.Discard(),
+				}
+			},
+			expectedResult: true,
+			expectError:    false,
+			description:    "When SandboxHashImmutablePart annotation is missing, hash check should be skipped and continue processing",
+		},
+		{
 			name: "revision consistent and update completed should return true",
 			pod: &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
