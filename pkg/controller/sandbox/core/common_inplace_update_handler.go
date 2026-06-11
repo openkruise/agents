@@ -59,7 +59,8 @@ func handleInPlaceUpdateCommon(
 	if pod.Labels[agentsv1alpha1.PodLabelTemplateHash] == "" {
 		return true, nil
 		// todo, update inplaceupdate condition
-	} else if box.Annotations[agentsv1alpha1.SandboxHashImmutablePart] != hashImmutablePart {
+	} else if box.Annotations[agentsv1alpha1.SandboxHashImmutablePart] != "" &&
+		box.Annotations[agentsv1alpha1.SandboxHashImmutablePart] != hashImmutablePart {
 		klog.InfoS("sandbox hash-immutable-part changed, and does not permit in-place upgrades", "sandbox", klog.KObj(box),
 			"old hash", box.Annotations[agentsv1alpha1.SandboxHashImmutablePart],
 			"new hash", hashImmutablePart)
