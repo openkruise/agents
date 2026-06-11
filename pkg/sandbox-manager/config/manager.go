@@ -38,6 +38,9 @@ type SandboxManagerOptions struct {
 	MemberlistBindPort         int
 	DisableRouteReconciliation bool
 	RestConfig                 *rest.Config
+	// HealthProbeBindAddress is the address the controller-runtime manager binds for /healthz and /readyz.
+	// Empty string disables the probe endpoints (backward compatible default).
+	HealthProbeBindAddress string
 }
 
 func InitOptions(opts SandboxManagerOptions) SandboxManagerOptions {

@@ -63,9 +63,10 @@ func SetupWithManager(logger logr.Logger, mgr manager.Manager) error {
 			HandlerMap[handler.Path()] = handler
 		}
 	}
-	// register admission handlers
+	// register admission handlers, wrapping each in a Prometheus-instrumented
+	// decorator so admission latency and admit/deny counts are observable.
 	for path, handler := range HandlerMap {
-		server.Register(path, &webhook.Admission{Handler: handler})
+		server.Register(path, &webhook.Admission{Handler: newInstrumentedHandler(path, handler)})
 		logger.Info("Registered webhook handler", "path", path)
 	}
 	ctx := klog.NewContext(context.Background(), logger)

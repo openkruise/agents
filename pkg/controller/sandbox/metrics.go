@@ -23,6 +23,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
@@ -252,6 +253,20 @@ var (
 		[]string{"namespace", "name", "type"},
 	)
 
+	// sandbox_reconcile_duration_seconds tracks the wall-clock duration of every
+	// Reconcile call, partitioned by namespace and final result.
+	// result label values: "success" (returned without requeue, no error),
+	// "requeue" (returned with Requeue=true or RequeueAfter>0, no error),
+	// "error" (returned a non-nil error).
+	sandboxReconcileDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "sandbox_reconcile_duration_seconds",
+			Help:    "Duration of Sandbox controller Reconcile calls in seconds, partitioned by result.",
+			Buckets: prometheus.ExponentialBuckets(0.001, 2, 14), // 1ms -> ~16s
+		},
+		[]string{"namespace", "result"},
+	)
+
 	// allPhases enumerates all possible sandbox phases for metric cleanup.
 	allPhases = []agentsv1alpha1.SandboxPhase{
 		agentsv1alpha1.SandboxPending,
@@ -325,7 +340,27 @@ func init() {
 		sandboxDeletionDuration,
 		sandboxRuntimeContainerAbnormal,
 		sandboxStatusAbnormal,
+		sandboxReconcileDuration,
 	)
+}
+
+// observeReconcileDuration records a Reconcile-call duration into the
+// sandbox_reconcile_duration_seconds histogram. result must be one of
+// "success", "requeue", "error".
+func observeReconcileDuration(namespace, result string, d time.Duration) {
+	sandboxReconcileDuration.WithLabelValues(namespace, result).Observe(d.Seconds())
+}
+
+// reconcileResultLabel maps a (Result, err) pair returned by Reconcile to a
+// result label value used by sandbox_reconcile_duration_seconds.
+func reconcileResultLabel(res ctrl.Result, err error) string {
+	if err != nil {
+		return "error"
+	}
+	if res.Requeue || res.RequeueAfter > 0 {
+		return "requeue"
+	}
+	return "success"
 }
 
 // InitSandboxLabelsMetric initializes the sandbox_labels metric with the given

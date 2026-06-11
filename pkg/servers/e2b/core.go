@@ -46,15 +46,16 @@ type Controller struct {
 	minResumeTimeoutValue int
 
 	// manager params
-	systemNamespace       string // the namespace where the sandbox manager is running
-	peerSelector          string
-	maxClaimWorkers       int
-	maxCreateQPS          int
-	extProcMaxConcurrency uint32
-	sandboxLabelSelector  string
-	sandboxNamespace      string
-	memberlistBindPort    int
-	keyCfg                *keys.Config
+	systemNamespace        string // the namespace where the sandbox manager is running
+	peerSelector           string
+	maxClaimWorkers        int
+	maxCreateQPS           int
+	extProcMaxConcurrency  uint32
+	sandboxLabelSelector   string
+	sandboxNamespace       string
+	memberlistBindPort     int
+	healthProbeBindAddress string
+	keyCfg                 *keys.Config
 
 	// fields
 	mux             *http.ServeMux
@@ -69,23 +70,24 @@ type Controller struct {
 }
 
 // NewController creates a new E2B Controller
-func NewController(domain, sysNs, peerSelector, sandboxNamespace, sandboxLabelSelector string, maxTimeout, minResumeTimeout, maxClaimWorkers, maxCreateQPS int, extProcMaxConcurrency uint32, port, memberlistBindPort int, keyCfg *keys.Config, clientConfig *rest.Config) *Controller {
+func NewController(domain, sysNs, peerSelector, sandboxNamespace, sandboxLabelSelector string, maxTimeout, minResumeTimeout, maxClaimWorkers, maxCreateQPS int, extProcMaxConcurrency uint32, port, memberlistBindPort int, healthProbeBindAddress string, keyCfg *keys.Config, clientConfig *rest.Config) *Controller {
 	sc := &Controller{
-		mux:                   http.NewServeMux(),
-		domain:                domain,
-		clientConfig:          clientConfig,
-		port:                  port,
-		maxTimeout:            maxTimeout,
-		minResumeTimeoutValue: minResumeTimeout,
-		systemNamespace:       sysNs, // the namespace where the sandbox manager is running
-		peerSelector:          peerSelector,
-		sandboxNamespace:      sandboxNamespace,
-		sandboxLabelSelector:  sandboxLabelSelector,
-		maxClaimWorkers:       maxClaimWorkers,
-		maxCreateQPS:          maxCreateQPS,
-		extProcMaxConcurrency: extProcMaxConcurrency,
-		memberlistBindPort:    memberlistBindPort,
-		keyCfg:                keyCfg,
+		mux:                    http.NewServeMux(),
+		domain:                 domain,
+		clientConfig:           clientConfig,
+		port:                   port,
+		maxTimeout:             maxTimeout,
+		minResumeTimeoutValue:  minResumeTimeout,
+		systemNamespace:        sysNs, // the namespace where the sandbox manager is running
+		peerSelector:           peerSelector,
+		sandboxNamespace:       sandboxNamespace,
+		sandboxLabelSelector:   sandboxLabelSelector,
+		maxClaimWorkers:        maxClaimWorkers,
+		maxCreateQPS:           maxCreateQPS,
+		extProcMaxConcurrency:  extProcMaxConcurrency,
+		memberlistBindPort:     memberlistBindPort,
+		healthProbeBindAddress: healthProbeBindAddress,
+		keyCfg:                 keyCfg,
 	}
 
 	sc.server = &http.Server{
@@ -123,15 +125,16 @@ func (sc *Controller) Init() error {
 
 func (sc *Controller) sandboxManagerOptions() config.SandboxManagerOptions {
 	return config.SandboxManagerOptions{
-		SystemNamespace:       sc.systemNamespace,
-		PeerSelector:          sc.peerSelector,
-		SandboxNamespace:      sc.sandboxNamespace,
-		SandboxLabelSelector:  sc.sandboxLabelSelector,
-		MaxClaimWorkers:       sc.maxClaimWorkers,
-		ExtProcMaxConcurrency: sc.extProcMaxConcurrency,
-		MaxCreateQPS:          sc.maxCreateQPS,
-		MemberlistBindPort:    sc.memberlistBindPort,
-		RestConfig:            sc.clientConfig,
+		SystemNamespace:        sc.systemNamespace,
+		PeerSelector:           sc.peerSelector,
+		SandboxNamespace:       sc.sandboxNamespace,
+		SandboxLabelSelector:   sc.sandboxLabelSelector,
+		MaxClaimWorkers:        sc.maxClaimWorkers,
+		ExtProcMaxConcurrency:  sc.extProcMaxConcurrency,
+		MaxCreateQPS:           sc.maxCreateQPS,
+		MemberlistBindPort:     sc.memberlistBindPort,
+		HealthProbeBindAddress: sc.healthProbeBindAddress,
+		RestConfig:             sc.clientConfig,
 	}
 }
 
