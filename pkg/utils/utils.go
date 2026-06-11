@@ -212,13 +212,29 @@ func NewLockString() string {
 	return uuid.NewString()
 }
 
+// nowFunc is the package-level clock used by sandbox state evaluation. It is
+// declared as a variable so that tests can substitute a fake clock via
+// SetNowFuncForTesting without depending on real wall-clock time.
+var nowFunc = time.Now
+
+// SetNowFuncForTesting replaces the package-level clock used by GetSandboxState
+// (and other helpers that consult nowFunc) for the duration of a test. It
+// returns a restore function that callers should defer to revert the change.
+//
+// Intended for tests only; production code must not call this.
+func SetNowFuncForTesting(fn func() time.Time) func() {
+	prev := nowFunc
+	nowFunc = fn
+	return func() { nowFunc = prev }
+}
+
 // GetSandboxState the state of agentsv1alpha1 Sandbox.
 // NOTE: the reason is unique and hard-coded, so we can easily search the conditions of some reason when debugging.
 func GetSandboxState(sbx *agentsv1alpha1.Sandbox) (state string, reason string) {
 	if sbx.DeletionTimestamp != nil {
 		return agentsv1alpha1.SandboxStateDead, "ResourceDeleted"
 	}
-	if sbx.Spec.ShutdownTime != nil && time.Since(sbx.Spec.ShutdownTime.Time) > 0 {
+	if sbx.Spec.ShutdownTime != nil && nowFunc().After(sbx.Spec.ShutdownTime.Time) {
 		return agentsv1alpha1.SandboxStateDead, "ShutdownTimeReached"
 	}
 	if sbx.Status.Phase == agentsv1alpha1.SandboxPending {

@@ -1904,6 +1904,11 @@ func TestSandbox_ResumeFailurePathsLeaveRealTimeout(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			// Pin GetSandboxState's clock to the same baseline as the test fixtures
+			// so the hard-coded ShutdownTime never gets overtaken by real wall-clock
+			// time when the suite is run far in the future.
+			defer utils.SetNowFuncForTesting(func() time.Time { return now })()
+
 			sandbox := &v1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-sandbox",
