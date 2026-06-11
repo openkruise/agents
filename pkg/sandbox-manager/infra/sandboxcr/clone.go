@@ -18,6 +18,7 @@ package sandboxcr
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -213,6 +214,21 @@ func waitCloneCreateLimiter(ctx context.Context, opts infra.CloneSandboxOptions,
 	metrics.Wait += cost
 	metrics.Total += cost
 	if waitErr != nil {
+		// rate.Limiter.Wait can return its own "rate: Wait(n=1) would exceed
+		// context deadline" sentinel when, at the moment Wait inspected the
+		// context, the wall-clock had already passed ctx.Deadline() but
+		// ctx.Done() was not yet observable. That is the same outcome as a
+		// plain deadline expiry, just surfaced through a different branch in
+		// the limiter. Normalize it so callers (and wait.Interrupted in the
+		// outer retry loop) always see the canonical context error and tests
+		// do not depend on which branch the runtime happens to pick.
+		if !errors.Is(waitErr, context.Canceled) && !errors.Is(waitErr, context.DeadlineExceeded) {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				waitErr = ctxErr
+			} else if deadline, ok := ctx.Deadline(); ok && !time.Now().Before(deadline) {
+				waitErr = context.DeadlineExceeded
+			}
+		}
 		log.Error(waitErr, "failed to wait create sandbox limiter")
 		return metrics, waitErr
 	}
