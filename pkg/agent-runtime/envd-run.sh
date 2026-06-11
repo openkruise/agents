@@ -150,4 +150,12 @@ create_user || echo "Warning: User creation encountered issues, but continuing..
 
 # Start Envd
 export GODEBUG=multipathtcp=0
-nohup $ENVD_DIR/envd > /proc/1/fd/1 2>&1 &
+# PostStart hook's stdout is NOT the container log. To make envd logs visible
+# via `kubectl logs`, redirect to PID 1's stdout (/proc/1/fd/1).
+# If permission denied (e.g., non-root or restricted policies), fallback to log file.
+# Set ENVD_LOG_FILE=true to force writing to /var/log/envd.log for debugging.
+ENVD_LOG_TARGET="/proc/1/fd/1"
+if [ "${ENVD_LOG_FILE}" = "true" ] || [ ! -w "$ENVD_LOG_TARGET" ]; then
+    ENVD_LOG_TARGET="/var/log/envd.log"
+fi
+nohup $ENVD_DIR/envd > "$ENVD_LOG_TARGET" 2>&1 &
