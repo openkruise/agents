@@ -26,7 +26,7 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	sandboxctrl "github.com/openkruise/agents/pkg/controller/sandbox"
+	"github.com/openkruise/agents/pkg/controller/sandboxmetricsgc"
 )
 
 // newControllersTestManager creates a real controller-runtime Manager backed
@@ -52,22 +52,28 @@ func newControllersTestManager(t *testing.T) ctrl.Manager {
 	return mgr
 }
 
-// nopEnqueuer satisfies sandbox.Enqueuer without side effects.
-type nopEnqueuer struct{}
-
-func (n *nopEnqueuer) Enqueue(_, _ string) {}
-
 // TestSetupWithManager_AllControllersEarlyReturn verifies that
-// SetupWithManager walks every sub-controller Add in sequence and returns nil
-// when no discovery client is registered (all controllers report GVK-not-found
-// and return early).  This exercises every statement in SetupWithManager and
-// ensures that a nil error propagates correctly.
+// SetupWithManager walks every sub-controller Add in sequence and returns nil.
 //
-// The discovery early-return is not a limitation of the test: in production,
-// the controller Add functions perform the same discovery guard.  Coverage of
-// the post-discovery path in each controller's Add (constructing the reconciler
-// and calling SetupWithManager) is exercised separately in each controller's
-// own test package.
+// Semantics covered here:
+//   - The sandbox-metrics-gc reconciler's SetupWithManager runs unconditionally
+//     (it has no discovery guard) and registers itself on the manager.
+//   - The remaining sub-controllers (sandbox, sandboxset, sandboxclaim,
+//     sandboxupdateops, securitytokenrefresh) each perform a discovery guard
+//     inside their own Add func and early-return with nil when their target
+//     GVK is not discoverable. In this test the manager is built against a
+//     stub REST config with no real apiserver, so the discovery client is
+//     unavailable and every guarded Add takes the early-return branch.
+//
+// This exercises every statement in SetupWithManager (including the
+// unconditional metricsGC registration) and ensures a nil error propagates
+// correctly. Coverage of the post-discovery path in each guarded controller's
+// Add (constructing the reconciler and calling SetupWithManager) is exercised
+// separately in each controller's own test package.
+//
+// NOTE: Only one table entry registers a controller because controller-runtime
+// uses a global prometheus registry keyed by controller name.  Registering
+// "sandbox-metrics-gc" twice in the same process causes a collision.
 func TestSetupWithManager_AllControllersEarlyReturn(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -75,22 +81,21 @@ func TestSetupWithManager_AllControllersEarlyReturn(t *testing.T) {
 		expectError string
 	}{
 		{
-			name:        "nil enqueuer with no discovery client returns nil",
-			deps:        Deps{MetricsCleanup: nil},
-			expectError: "",
-		},
-		{
-			name:        "noop enqueuer with no discovery client returns nil",
-			deps:        Deps{MetricsCleanup: &nopEnqueuer{}},
+			name: "explicit options with no discovery client returns nil",
+			deps: Deps{MetricsGCOptions: sandboxmetricsgc.Options{
+				Workers:       4,
+				ChannelBuffer: 1000,
+			}},
 			expectError: "",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Use a fresh manager per sub-test so each call to SetupWithManager
-			// starts with a clean controller registry.  In this environment,
-			// client.GetGenericClient() is nil, so discovery.DiscoverGVK always
-			// returns false and every sub-controller Add returns early with nil.
+			// starts with a clean controller registry. The metricsGC reconciler
+			// registers unconditionally; the other sub-controllers early-return
+			// because client.GetGenericClient() is nil here, so
+			// discovery.DiscoverGVK always returns false.
 			mgr := newControllersTestManager(t)
 			err := SetupWithManager(mgr, tt.deps)
 			if tt.expectError == "" {
@@ -108,5 +113,14 @@ func TestSetupWithManager_AllControllersEarlyReturn(t *testing.T) {
 	}
 }
 
-// compile-time check that nopEnqueuer satisfies sandboxctrl.Enqueuer.
-var _ sandboxctrl.Enqueuer = (*nopEnqueuer)(nil)
+// TestSetupWithManager_ZeroValueOptions verifies that a zero-value Options
+// (relying on NewReconciler defaults) results in a valid Reconciler being
+// created.  We verify this at the unit level without registering the controller
+// to avoid the global prometheus registry collision tested above.
+func TestSetupWithManager_ZeroValueOptions(t *testing.T) {
+	opts := sandboxmetricsgc.Options{}
+	r := sandboxmetricsgc.NewReconciler(opts)
+	if r == nil {
+		t.Fatal("NewReconciler returned nil for zero-value Options")
+	}
+}

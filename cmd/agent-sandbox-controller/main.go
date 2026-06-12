@@ -290,19 +290,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	metricsGC := sandboxmetricsgc.NewReconciler(sandboxmetricsgc.Options{
-		Workers:       metricsAsyncWorkers,
-		ChannelBuffer: metricsAsyncQueueCap,
-	})
-	if err := metricsGC.SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to setup sandbox metrics GC controller")
-		os.Exit(1)
-	}
-
 	setupLog.Info("setup controllers",
 		"metricsAsyncWorkers", metricsAsyncWorkers,
 		"metricsAsyncQueueCap", metricsAsyncQueueCap)
-	if err = controller.SetupWithManager(mgr, controller.Deps{MetricsCleanup: metricsGC}); err != nil {
+	if err = controller.SetupWithManager(mgr, controller.Deps{
+		MetricsGCOptions: sandboxmetricsgc.Options{
+			Workers:       metricsAsyncWorkers,
+			ChannelBuffer: metricsAsyncQueueCap,
+		},
+	}); err != nil {
 		setupLog.Error(err, "unable to setup controllers")
 		os.Exit(1)
 	}

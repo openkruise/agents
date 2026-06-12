@@ -17,10 +17,13 @@ limitations under the License.
 package controller
 
 import (
+	"fmt"
+
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	"github.com/openkruise/agents/pkg/controller/sandbox"
 	"github.com/openkruise/agents/pkg/controller/sandboxclaim"
+	"github.com/openkruise/agents/pkg/controller/sandboxmetricsgc"
 	"github.com/openkruise/agents/pkg/controller/sandboxset"
 	"github.com/openkruise/agents/pkg/controller/sandboxupdateops"
 	"github.com/openkruise/agents/pkg/controller/securitytokenrefresh"
@@ -30,24 +33,28 @@ import (
 // New dependencies should be appended here rather than introducing extra
 // AddFunc parameters across all controllers.
 type Deps struct {
-	MetricsCleanup sandbox.Enqueuer
+	MetricsGCOptions sandboxmetricsgc.Options
 }
 
 func SetupWithManager(m manager.Manager, deps Deps) error {
-	if err := sandbox.Add(m, deps.MetricsCleanup); err != nil {
-		return err
+	metricsGC := sandboxmetricsgc.NewReconciler(deps.MetricsGCOptions)
+	if err := metricsGC.SetupWithManager(m); err != nil {
+		return fmt.Errorf("sandbox-metrics-gc: %w", err)
+	}
+	if err := sandbox.Add(m, metricsGC); err != nil {
+		return fmt.Errorf("sandbox: %w", err)
 	}
 	if err := sandboxset.Add(m); err != nil {
-		return err
+		return fmt.Errorf("sandboxset: %w", err)
 	}
 	if err := sandboxclaim.Add(m); err != nil {
-		return err
+		return fmt.Errorf("sandboxclaim: %w", err)
 	}
 	if err := sandboxupdateops.Add(m); err != nil {
-		return err
+		return fmt.Errorf("sandboxupdateops: %w", err)
 	}
 	if err := securitytokenrefresh.Add(m); err != nil {
-		return err
+		return fmt.Errorf("securitytokenrefresh: %w", err)
 	}
 	return nil
 }
