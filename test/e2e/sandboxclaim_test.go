@@ -1071,6 +1071,165 @@ var _ = Describe("SandboxClaim", func() {
 			Expect(sidecar.Resources.Limits[corev1.ResourceCPU]).To(Equal(resource.MustParse("200m")))
 		})
 
+		It("should resize the main container without mutating init containers", func() {
+			By("Creating a SandboxSet with an init container")
+			initContainerSet := &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("test-pool-init-resize-%d", time.Now().UnixNano()),
+					Namespace: namespace,
+				},
+				Spec: agentsv1alpha1.SandboxSetSpec{
+					Replicas: 1,
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								InitContainers: []corev1.Container{
+									{
+										Name:    "init-setup",
+										Image:   "busybox:1.36",
+										Command: []string{"sh", "-c", "echo init-ready"},
+										Resources: corev1.ResourceRequirements{
+											Requests: corev1.ResourceList{
+												corev1.ResourceCPU:    resource.MustParse("50m"),
+												corev1.ResourceMemory: resource.MustParse("32Mi"),
+											},
+											Limits: corev1.ResourceList{
+												corev1.ResourceCPU:    resource.MustParse("100m"),
+												corev1.ResourceMemory: resource.MustParse("64Mi"),
+											},
+										},
+									},
+								},
+								Containers: []corev1.Container{
+									{
+										Name:  "main",
+										Image: "nginx:stable-alpine3.23",
+										Resources: corev1.ResourceRequirements{
+											Requests: corev1.ResourceList{
+												corev1.ResourceCPU:    resource.MustParse("250m"),
+												corev1.ResourceMemory: resource.MustParse("128Mi"),
+											},
+											Limits: corev1.ResourceList{
+												corev1.ResourceCPU:    resource.MustParse("500m"),
+												corev1.ResourceMemory: resource.MustParse("256Mi"),
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, initContainerSet)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, initContainerSet) }()
+
+			By("Waiting for pool to be ready")
+			Eventually(func() int32 {
+				_ = k8sClient.Get(ctx, types.NamespacedName{
+					Name:      initContainerSet.Name,
+					Namespace: initContainerSet.Namespace,
+				}, initContainerSet)
+				return initContainerSet.Status.AvailableReplicas
+			}, time.Minute*2, time.Second).Should(Equal(int32(1)))
+
+			var initWarmName string
+			findInitContainer := func(pod *corev1.Pod) *corev1.Container {
+				for i := range pod.Spec.InitContainers {
+					if pod.Spec.InitContainers[i].Name == "init-setup" {
+						return &pod.Spec.InitContainers[i]
+					}
+				}
+				return nil
+			}
+
+			By("Verifying the warm pod has the expected init container resources")
+			Eventually(func() bool {
+				sandboxList := &agentsv1alpha1.SandboxList{}
+				if err := k8sClient.List(ctx, sandboxList, client.InNamespace(namespace), client.MatchingLabels{
+					agentsv1alpha1.LabelSandboxPool: initContainerSet.Name,
+				}); err != nil || len(sandboxList.Items) != 1 {
+					return false
+				}
+				initWarmName = sandboxList.Items[0].Name
+
+				pod := &corev1.Pod{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{
+					Name:      initWarmName,
+					Namespace: namespace,
+				}, pod); err != nil {
+					return false
+				}
+				initContainer := findInitContainer(pod)
+				if initContainer == nil || initContainer.Image != "busybox:1.36" {
+					return false
+				}
+				cpuReq, ok := initContainer.Resources.Requests[corev1.ResourceCPU]
+				if !ok || cpuReq.Cmp(resource.MustParse("50m")) != 0 {
+					return false
+				}
+				cpuLim, ok := initContainer.Resources.Limits[corev1.ResourceCPU]
+				return ok && cpuLim.Cmp(resource.MustParse("100m")) == 0
+			}, time.Minute, time.Second).Should(BeTrue())
+
+			By("Creating a SandboxClaim that resizes only the main container")
+			initContainerClaim := &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("test-claim-init-resize-%d", time.Now().UnixNano()),
+					Namespace: namespace,
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName:    initContainerSet.Name,
+					Replicas:        ptr.To(int32(1)),
+					SkipInitRuntime: true,
+					WaitReadyTimeout: &metav1.Duration{
+						Duration: 2 * time.Minute,
+					},
+					InplaceUpdate: &agentsv1alpha1.SandboxClaimInplaceUpdateOptions{
+						Resources: &agentsv1alpha1.SandboxClaimInplaceUpdateResourcesOptions{
+							Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("300m")},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, initContainerClaim)).To(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, initContainerClaim) }()
+
+			By("Verifying claim completes")
+			Eventually(func() agentsv1alpha1.SandboxClaimPhase {
+				_ = k8sClient.Get(ctx, types.NamespacedName{
+					Name:      initContainerClaim.Name,
+					Namespace: initContainerClaim.Namespace,
+				}, initContainerClaim)
+				return initContainerClaim.Status.Phase
+			}, time.Minute*3, time.Second).Should(Equal(agentsv1alpha1.SandboxClaimPhaseCompleted))
+
+			By("Verifying main container CPU is resized and init container resources are unchanged")
+			Eventually(func() bool {
+				pod := &corev1.Pod{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{
+					Name:      initWarmName,
+					Namespace: namespace,
+				}, pod); err != nil || len(pod.Spec.Containers) == 0 {
+					return false
+				}
+				mainReq, ok := pod.Spec.Containers[0].Resources.Requests[corev1.ResourceCPU]
+				if !ok || mainReq.Cmp(resource.MustParse("300m")) != 0 {
+					return false
+				}
+				initContainer := findInitContainer(pod)
+				if initContainer == nil || initContainer.Image != "busybox:1.36" {
+					return false
+				}
+				initReq, ok := initContainer.Resources.Requests[corev1.ResourceCPU]
+				if !ok || initReq.Cmp(resource.MustParse("50m")) != 0 {
+					return false
+				}
+				initLim, ok := initContainer.Resources.Limits[corev1.ResourceCPU]
+				return ok && initLim.Cmp(resource.MustParse("100m")) == 0
+			}, time.Minute*2, time.Second).Should(BeTrue())
+		})
+
 		It("should apply CPU and memory resize when QoS class is preserved", func() {
 			By("Creating a SandboxClaim with both CPU and memory in requests/limits")
 			resourceResizeClaim := &agentsv1alpha1.SandboxClaim{
