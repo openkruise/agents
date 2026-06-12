@@ -35,7 +35,13 @@ resources:
 
 # Uncomment the patches line if you enable Metrics
 patches:
-# [METRICS] The following patch will enable the metrics endpoint using HTTPS and the port :8443.
+# [METRICS] The following patch enables the metrics endpoint on plain HTTP
+# port :8080 with authentication disabled. This trade-off allows in-cluster
+# scrapers (Prometheus, E2E tests via pods/proxy) to reach /metrics without
+# wiring a service-account bearer token; production deployments should add a
+# NetworkPolicy (see config/network-policy/) or a kube-rbac-proxy sidecar to
+# restrict access. To re-enable HTTPS+auth on :8443, edit
+# config/default/manager_metrics_patch.yaml.
 # More info: https://book.kubebuilder.io/reference/metrics
 - path: manager_metrics_patch.yaml
   target:

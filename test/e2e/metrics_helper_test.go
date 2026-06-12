@@ -37,12 +37,16 @@ const controllerMetricsNamespace = "sandbox-system"
 const controllerMetricsPodLabel = "control-plane=sandbox-controller-manager"
 
 // controllerMetricsPort is the metrics endpoint port exposed by the controller
-// manager (see config/default/manager_metrics_patch.yaml: --metrics-bind-address=:8443).
-const controllerMetricsPort = "8443"
+// manager (see config/default/manager_metrics_patch.yaml: --metrics-bind-address=:8080).
+const controllerMetricsPort = "8080"
 
 // controllerMetricsScheme is the scheme used to access the metrics endpoint.
-// The kubebuilder default deploys the metrics server with TLS enabled.
-const controllerMetricsScheme = "https"
+// The deployment serves /metrics over plain HTTP without authentication so
+// that in-cluster scrapers (including this E2E suite, which proxies through
+// the kube-apiserver pods/proxy subresource) can reach it without having to
+// forward a service-account bearer token. Hardening is provided by a
+// NetworkPolicy on the controller pod (see config/network-policy/).
+const controllerMetricsScheme = "http"
 
 // fetchControllerMetrics retrieves the raw Prometheus metrics text from the
 // agent-sandbox-controller's /metrics endpoint by proxying through the

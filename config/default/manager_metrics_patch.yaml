@@ -1,4 +1,23 @@
-# This patch adds the args to allow exposing the metrics endpoint using HTTPS
+# This patch configures the metrics endpoint to listen on plain HTTP on port
+# :8080 with authentication/authorization disabled.
+#
+# Rationale:
+#   - In-cluster scrapers (Prometheus, e2e tests via the kube-apiserver
+#     `pods/proxy` subresource) cannot easily forward bearer tokens to the
+#     upstream pod when going through the API server proxy, so the default
+#     kubebuilder `WithAuthenticationAndAuthorization` filter on :8443 cannot
+#     be reached without provisioning a service-account token on a curl pod.
+#   - Production hardening for the metrics endpoint is delegated to a
+#     NetworkPolicy (see config/network-policy/allow-metrics-traffic.yaml) or
+#     a kube-rbac-proxy sidecar, which are independent of the metrics server's
+#     own TLS+auth configuration.
+#
+# The patches below are applied as a JSON patch with `op: add` against the
+# existing args list defined in config/manager/manager.yaml, prepending the
+# two new flags so they take precedence over any inherited defaults.
 - op: add
   path: /spec/template/spec/containers/0/args/0
-  value: --metrics-bind-address=:8443
+  value: --metrics-bind-address=:8080
+- op: add
+  path: /spec/template/spec/containers/0/args/0
+  value: --metrics-secure=false
