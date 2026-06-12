@@ -89,7 +89,11 @@ func GetCommitCondition(pod *corev1.Pod) *metav1.Condition {
 				klog.InfoS("Unknown exit code, skipping condition", "containerID", cs.ContainerID, "exitCode", cs.State.Terminated.ExitCode)
 				return nil
 			}
-			klog.InfoS("Commit Failed", "containerID", cs.ContainerID, "exitCode", cs.State.Terminated.ExitCode)
+			klog.InfoS("Commit job container terminated",
+				"containerID", cs.ContainerID,
+				"exitCode", cs.State.Terminated.ExitCode,
+				"type", conditionValue.conditionType,
+				"reason", conditionValue.conditionReason)
 			status := metav1.ConditionTrue
 			if cs.State.Terminated.ExitCode != 0 {
 				status = metav1.ConditionFalse
