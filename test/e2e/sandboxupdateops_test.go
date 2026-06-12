@@ -188,6 +188,32 @@ var _ = Describe("SandboxUpdateOps E2E", func() {
 		})
 	}
 
+	getUpgradingCondition := func(sbx *agentsv1alpha1.Sandbox) *metav1.Condition {
+		for i := range sbx.Status.Conditions {
+			if sbx.Status.Conditions[i].Type == string(agentsv1alpha1.SandboxConditionUpgrading) {
+				return &sbx.Status.Conditions[i]
+			}
+		}
+		return nil
+	}
+
+	waitSandboxUpgradeReason := func(sbx *agentsv1alpha1.Sandbox, reason string, timeout time.Duration) {
+		Eventually(func() string {
+			_ = k8sClient.Get(ctx, types.NamespacedName{Name: sbx.Name, Namespace: sbx.Namespace}, sbx)
+			cond := getUpgradingCondition(sbx)
+			if cond == nil {
+				return ""
+			}
+			return cond.Reason
+		}, timeout, time.Second).Should(Equal(reason))
+	}
+
+	waitOpsDeleted := func(ops *agentsv1alpha1.SandboxUpdateOps) {
+		Eventually(func() bool {
+			return errors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: ops.Name, Namespace: ops.Namespace}, ops))
+		}, 30*time.Second, time.Second).Should(BeTrue())
+	}
+
 	Context("Webhook Validation", func() {
 		It("should reject Update that modifies Lifecycle field", func() {
 			By("Creating a Sandbox and waiting for Running")
@@ -854,5 +880,303 @@ var _ = Describe("SandboxUpdateOps E2E", func() {
 					"sandbox %s should not have ops label since template already matched", sbx.Name)
 			}
 		})
+
+		It("should recover previous UpgradePodFailed sandboxes without rerunning preUpgrade", func() {
+			labelValue := fmt.Sprintf("recover-upgradepod-%d", time.Now().UnixNano())
+			sbx := newOpsSandbox(
+				fmt.Sprintf("ops-recover-upgradepod-%s", labelValue[:10]),
+				labelValue, nil, nil,
+			)
+
+			By("Creating a Sandbox and waiting for Running")
+			Expect(k8sClient.Create(ctx, sbx)).To(Succeed())
+			waitSandboxRunning(sbx)
+
+			By("Creating a SandboxUpdateOps that succeeds preUpgrade and fails in UpgradePod")
+			ops1 := &agentsv1alpha1.SandboxUpdateOps{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("ops-recover-upgradepod-1-%s", labelValue[:10]),
+					Namespace: namespace,
+				},
+				Spec: agentsv1alpha1.SandboxUpdateOpsSpec{
+					Selector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{batchLabel: labelValue},
+					},
+					Patch: mustMarshalPatch(corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{Name: "test-container", Image: badImage},
+							},
+						},
+					}),
+					Lifecycle: &agentsv1alpha1.SandboxLifecycle{
+						PreUpgrade: &agentsv1alpha1.UpgradeAction{
+							Exec:           &corev1.ExecAction{Command: []string{"/bin/bash", "-c", "exit 0"}},
+							TimeoutSeconds: 30,
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, ops1)).To(Succeed())
+
+			By("Waiting for the sandbox to stop at UpgradePodFailed")
+			waitSandboxUpgradeReason(sbx, agentsv1alpha1.SandboxUpgradingReasonUpgradePodFailed, 3*time.Minute)
+
+			By("Deleting the failed SandboxUpdateOps and waiting for label cleanup")
+			Expect(k8sClient.Delete(ctx, ops1)).To(Succeed())
+			waitOpsDeleted(ops1)
+			Eventually(func() bool {
+				updated := &agentsv1alpha1.Sandbox{}
+				if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), updated); err != nil {
+					return false
+				}
+				return updated.Labels[agentsv1alpha1.LabelSandboxUpdateOps] == ""
+			}, 30*time.Second, time.Second).Should(BeTrue())
+
+			By("Creating a recovery SandboxUpdateOps with failing preUpgrade")
+			ops2 := &agentsv1alpha1.SandboxUpdateOps{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("ops-recover-upgradepod-2-%s", labelValue[:10]),
+					Namespace: namespace,
+				},
+				Spec: agentsv1alpha1.SandboxUpdateOpsSpec{
+					Selector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{batchLabel: labelValue},
+					},
+					Patch: mustMarshalPatch(corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{Name: "test-container", Image: updateImage},
+							},
+						},
+					}),
+					Lifecycle: &agentsv1alpha1.SandboxLifecycle{
+						PreUpgrade: &agentsv1alpha1.UpgradeAction{
+							Exec:           &corev1.ExecAction{Command: []string{"/bin/bash", "-c", "exit 1"}},
+							TimeoutSeconds: 30,
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, ops2)).To(Succeed())
+
+			By("Waiting for recovery to complete, which proves preUpgrade was skipped")
+			waitOpsPhase(ops2, agentsv1alpha1.SandboxUpdateOpsCompleted, 3*time.Minute)
+			waitSandboxRunning(sbx)
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: ops2.Name, Namespace: ops2.Namespace}, ops2)).To(Succeed())
+			Expect(ops2.Status.UpdatedReplicas).To(Equal(int32(1)))
+
+			updatedPod := &corev1.Pod{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: sbx.Name, Namespace: sbx.Namespace}, updatedPod)).To(Succeed())
+			Expect(updatedPod.Spec.Containers[0].Image).To(Equal(updateImage))
+		})
+
+		It("should recover previous PostUpgradeFailed sandboxes without rerunning preUpgrade or recreating pod when patch is unchanged", func() {
+			labelValue := fmt.Sprintf("recover-postupgrade-%d", time.Now().UnixNano())
+			sbx := newOpsSandbox(
+				fmt.Sprintf("ops-recover-postupgrade-%s", labelValue[:10]),
+				labelValue, nil, nil,
+			)
+
+			By("Creating a Sandbox and waiting for Running")
+			Expect(k8sClient.Create(ctx, sbx)).To(Succeed())
+			waitSandboxRunning(sbx)
+
+			By("Creating a SandboxUpdateOps that fails in postUpgrade after upgrading the pod")
+			ops1 := &agentsv1alpha1.SandboxUpdateOps{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("ops-recover-postupgrade-1-%s", labelValue[:10]),
+					Namespace: namespace,
+				},
+				Spec: agentsv1alpha1.SandboxUpdateOpsSpec{
+					Selector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{batchLabel: labelValue},
+					},
+					Patch: mustMarshalPatch(corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{Name: "test-container", Image: updateImage},
+							},
+						},
+					}),
+					Lifecycle: &agentsv1alpha1.SandboxLifecycle{
+						PreUpgrade: &agentsv1alpha1.UpgradeAction{
+							Exec:           &corev1.ExecAction{Command: []string{"/bin/bash", "-c", "exit 0"}},
+							TimeoutSeconds: 30,
+						},
+						PostUpgrade: &agentsv1alpha1.UpgradeAction{
+							Exec:           &corev1.ExecAction{Command: []string{"/bin/bash", "-c", "exit 1"}},
+							TimeoutSeconds: 30,
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, ops1)).To(Succeed())
+
+			By("Waiting for the sandbox to stop at PostUpgradeFailed")
+			waitSandboxUpgradeReason(sbx, agentsv1alpha1.SandboxUpgradingReasonPostUpgradeFailed, 3*time.Minute)
+
+			By("Recording pod UID after the failed postUpgrade")
+			failedPod := &corev1.Pod{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: sbx.Name, Namespace: sbx.Namespace}, failedPod)).To(Succeed())
+			failedPodUID := failedPod.UID
+
+			By("Deleting the failed SandboxUpdateOps and waiting for label cleanup")
+			Expect(k8sClient.Delete(ctx, ops1)).To(Succeed())
+			waitOpsDeleted(ops1)
+			Eventually(func() bool {
+				updated := &agentsv1alpha1.Sandbox{}
+				if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), updated); err != nil {
+					return false
+				}
+				return updated.Labels[agentsv1alpha1.LabelSandboxUpdateOps] == ""
+			}, 30*time.Second, time.Second).Should(BeTrue())
+
+			By("Creating a recovery SandboxUpdateOps with unchanged patch, failing preUpgrade, and fixed postUpgrade")
+			ops2 := &agentsv1alpha1.SandboxUpdateOps{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("ops-recover-postupgrade-2-%s", labelValue[:10]),
+					Namespace: namespace,
+				},
+				Spec: agentsv1alpha1.SandboxUpdateOpsSpec{
+					Selector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{batchLabel: labelValue},
+					},
+					Patch: mustMarshalPatch(corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{Name: "test-container", Image: updateImage},
+							},
+						},
+					}),
+					Lifecycle: &agentsv1alpha1.SandboxLifecycle{
+						PreUpgrade: &agentsv1alpha1.UpgradeAction{
+							Exec:           &corev1.ExecAction{Command: []string{"/bin/bash", "-c", "exit 1"}},
+							TimeoutSeconds: 30,
+						},
+						PostUpgrade: &agentsv1alpha1.UpgradeAction{
+							Exec:           &corev1.ExecAction{Command: []string{"/bin/bash", "-c", "exit 0"}},
+							TimeoutSeconds: 30,
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, ops2)).To(Succeed())
+
+			By("Waiting for recovery to complete, which proves preUpgrade was skipped")
+			waitOpsPhase(ops2, agentsv1alpha1.SandboxUpdateOpsCompleted, 3*time.Minute)
+			waitSandboxRunning(sbx)
+
+			By("Verifying the pod UID stays the same because the patch did not change")
+			recoveredPod := &corev1.Pod{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: sbx.Name, Namespace: sbx.Namespace}, recoveredPod)).To(Succeed())
+			Expect(recoveredPod.UID).To(Equal(failedPodUID))
+			Expect(recoveredPod.Spec.Containers[0].Image).To(Equal(updateImage))
+		})
+
+		It("should recover previous PostUpgradeFailed sandboxes by rerunning UpgradePod when the recovery patch changes", func() {
+			labelValue := fmt.Sprintf("recover-postupgrade-changed-%d", time.Now().UnixNano())
+			sbx := newOpsSandbox(
+				fmt.Sprintf("ops-recover-postupgrade-changed-%s", labelValue[:10]),
+				labelValue, nil, nil,
+			)
+
+			By("Creating a Sandbox and waiting for Running")
+			Expect(k8sClient.Create(ctx, sbx)).To(Succeed())
+			waitSandboxRunning(sbx)
+
+			By("Creating a SandboxUpdateOps that fails in postUpgrade after upgrading the pod")
+			ops1 := &agentsv1alpha1.SandboxUpdateOps{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("ops-recover-postupgrade-changed-1-%s", labelValue[:10]),
+					Namespace: namespace,
+				},
+				Spec: agentsv1alpha1.SandboxUpdateOpsSpec{
+					Selector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{batchLabel: labelValue},
+					},
+					Patch: mustMarshalPatch(corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{Name: "test-container", Image: updateImage},
+							},
+						},
+					}),
+					Lifecycle: &agentsv1alpha1.SandboxLifecycle{
+						PreUpgrade: &agentsv1alpha1.UpgradeAction{
+							Exec:           &corev1.ExecAction{Command: []string{"/bin/bash", "-c", "exit 0"}},
+							TimeoutSeconds: 30,
+						},
+						PostUpgrade: &agentsv1alpha1.UpgradeAction{
+							Exec:           &corev1.ExecAction{Command: []string{"/bin/bash", "-c", "exit 1"}},
+							TimeoutSeconds: 30,
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, ops1)).To(Succeed())
+
+			By("Waiting for the sandbox to stop at PostUpgradeFailed")
+			waitSandboxUpgradeReason(sbx, agentsv1alpha1.SandboxUpgradingReasonPostUpgradeFailed, 3*time.Minute)
+
+			By("Recording pod UID after the failed postUpgrade")
+			failedPod := &corev1.Pod{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: sbx.Name, Namespace: sbx.Namespace}, failedPod)).To(Succeed())
+			failedPodUID := failedPod.UID
+			Expect(failedPod.Spec.Containers[0].Image).To(Equal(updateImage))
+
+			By("Deleting the failed SandboxUpdateOps and waiting for label cleanup")
+			Expect(k8sClient.Delete(ctx, ops1)).To(Succeed())
+			waitOpsDeleted(ops1)
+			Eventually(func() bool {
+				updated := &agentsv1alpha1.Sandbox{}
+				if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), updated); err != nil {
+					return false
+				}
+				return updated.Labels[agentsv1alpha1.LabelSandboxUpdateOps] == ""
+			}, 30*time.Second, time.Second).Should(BeTrue())
+
+			By("Creating a recovery SandboxUpdateOps with a changed patch, failing preUpgrade, and fixed postUpgrade")
+			ops2 := &agentsv1alpha1.SandboxUpdateOps{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("ops-recover-postupgrade-changed-2-%s", labelValue[:10]),
+					Namespace: namespace,
+				},
+				Spec: agentsv1alpha1.SandboxUpdateOpsSpec{
+					Selector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{batchLabel: labelValue},
+					},
+					Patch: mustMarshalPatch(corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{Name: "test-container", Image: initialImage},
+							},
+						},
+					}),
+					Lifecycle: &agentsv1alpha1.SandboxLifecycle{
+						PreUpgrade: &agentsv1alpha1.UpgradeAction{
+							Exec:           &corev1.ExecAction{Command: []string{"/bin/bash", "-c", "exit 1"}},
+							TimeoutSeconds: 30,
+						},
+						PostUpgrade: &agentsv1alpha1.UpgradeAction{
+							Exec:           &corev1.ExecAction{Command: []string{"/bin/bash", "-c", "exit 0"}},
+							TimeoutSeconds: 30,
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, ops2)).To(Succeed())
+
+			By("Waiting for recovery to complete, which proves preUpgrade was skipped and UpgradePod reran")
+			waitOpsPhase(ops2, agentsv1alpha1.SandboxUpdateOpsCompleted, 3*time.Minute)
+			waitSandboxRunning(sbx)
+
+			By("Verifying the pod UID changed because the recovery patch changed the image")
+			recoveredPod := &corev1.Pod{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: sbx.Name, Namespace: sbx.Namespace}, recoveredPod)).To(Succeed())
+			Expect(recoveredPod.UID).NotTo(Equal(failedPodUID))
+			Expect(recoveredPod.Spec.Containers[0].Image).To(Equal(initialImage))
+		})
+
 	})
 })

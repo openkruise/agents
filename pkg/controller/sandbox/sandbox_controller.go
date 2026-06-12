@@ -419,22 +419,48 @@ func (r *SandboxReconciler) calculateStatus(ctx context.Context, args core.Ensur
 
 	case agentsv1alpha1.SandboxUpgrading:
 		// This indicates the podTemplate has changed again during an ongoing upgrade.
-		// Therefore, the Upgrading condition reason must be reset to PreUpgrade to restart the upgrade lifecycle.
+		// Determine the resume step after the desired template changes during an ongoing upgrade.
 		if newStatus.UpdateRevision != box.Status.UpdateRevision {
 			upgradeCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
 			if upgradeCond != nil {
-				klog.InfoS("podTemplate changed during upgrade, resetting condition Upgrading reason to PreUpgrade",
+				resumeReason := determineUpgradeResumeReason(pod, newStatus, upgradeCond)
+				klog.InfoS("podTemplate changed during upgrade, resetting condition Upgrading reason",
 					"sandbox", klog.KObj(box),
 					"previousReason", upgradeCond.Reason,
 					"oldRevision", box.Status.UpdateRevision,
-					"newRevision", newStatus.UpdateRevision)
-				upgradeCond.Reason = agentsv1alpha1.SandboxUpgradingReasonPreUpgrade
+					"newRevision", newStatus.UpdateRevision,
+					"resumeReason", resumeReason)
+				upgradeCond.Reason = resumeReason
 				upgradeCond.Message = ""
 				utils.SetSandboxCondition(newStatus, *upgradeCond)
 			}
 		}
 	}
 	return newStatus, false
+}
+
+func determineUpgradeResumeReason(
+	pod *corev1.Pod,
+	newStatus *agentsv1alpha1.SandboxStatus,
+	upgradeCond *metav1.Condition,
+) string {
+	if upgradeCond == nil || !utilfeature.DefaultFeatureGate.Enabled(features.SandboxUpgradeResumeFromFailedStepGate) {
+		return agentsv1alpha1.SandboxUpgradingReasonPreUpgrade
+	}
+
+	switch upgradeCond.Reason {
+	case agentsv1alpha1.SandboxUpgradingReasonPreUpgradeFailed:
+		return agentsv1alpha1.SandboxUpgradingReasonPreUpgrade
+	case agentsv1alpha1.SandboxUpgradingReasonUpgradePodFailed:
+		return agentsv1alpha1.SandboxUpgradingReasonUpgradePod
+	case agentsv1alpha1.SandboxUpgradingReasonPostUpgradeFailed:
+		if pod != nil && pod.Labels[agentsv1alpha1.PodLabelTemplateHash] == newStatus.UpdateRevision {
+			return agentsv1alpha1.SandboxUpgradingReasonPostUpgrade
+		}
+		return agentsv1alpha1.SandboxUpgradingReasonUpgradePod
+	default:
+		return agentsv1alpha1.SandboxUpgradingReasonPreUpgrade
+	}
 }
 
 func updateStatusIfPodCompleted(pod *corev1.Pod, newStatus *agentsv1alpha1.SandboxStatus) {
