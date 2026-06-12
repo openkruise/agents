@@ -18,8 +18,10 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/distribution/reference"
@@ -30,8 +32,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
-	"k8s.io/kubernetes/pkg/credentialprovider"
-	credentialprovidersecrets "k8s.io/kubernetes/pkg/credentialprovider/secrets"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
@@ -221,7 +221,8 @@ func (r *commonControl) resolveRegistrySecretName(ctx context.Context, commit *a
 }
 
 // resolveRegistrySecretByKeyring lists all dockerconfigjson secrets in the Commit's namespace,
-// builds a DockerKeyring, and looks up credentials matching the target registry.
+// parses their auth configs, and returns the name of the first secret that contains
+// credentials matching the target registry host.
 func (r *commonControl) resolveRegistrySecretByKeyring(ctx context.Context, commit *agentsv1alpha1.Commit) string {
 	targetRegistry := extractRegistryHost(commit.Spec.Image)
 	if targetRegistry == "" {
@@ -234,44 +235,91 @@ func (r *commonControl) resolveRegistrySecretByKeyring(ctx context.Context, comm
 		return ""
 	}
 
-	// Filter to dockerconfigjson secrets only
-	var dockerSecrets []corev1.Secret
 	for i := range secretList.Items {
-		if secretList.Items[i].Type == corev1.SecretTypeDockerConfigJson || secretList.Items[i].Type == corev1.SecretTypeDockercfg {
-			dockerSecrets = append(dockerSecrets, secretList.Items[i])
+		secret := &secretList.Items[i]
+		if secret.Type != corev1.SecretTypeDockerConfigJson && secret.Type != corev1.SecretTypeDockercfg {
+			continue
 		}
-	}
-	if len(dockerSecrets) == 0 {
-		return ""
-	}
-
-	keyring, err := credentialprovidersecrets.MakeDockerKeyring(dockerSecrets, &credentialprovider.BasicDockerKeyring{})
-	if err != nil {
-		klog.V(4).InfoS("Failed to build DockerKeyring for Tier 2", "err", err)
-		return ""
-	}
-
-	creds, found := keyring.Lookup(targetRegistry)
-	if !found || len(creds) == 0 {
-		return ""
-	}
-
-	// Find the secret that provided the matching credential
-	source := creds[0].Source
-	if source == nil || source.Secret == nil {
-		// Fallback: return first docker secret if credential source is unavailable
-		klog.InfoS("Using namespace secret for registry auth (Tier 2, no source tracking)", "namespace", commit.Namespace)
-		return dockerSecrets[0].Name
-	}
-	for i := range dockerSecrets {
-		if string(dockerSecrets[i].UID) == source.Secret.UID {
+		if matchRegistryInDockerConfig(secret, targetRegistry) {
 			klog.InfoS("Using namespace secret for registry auth (Tier 2)",
-				"namespace", dockerSecrets[i].Namespace, "name", dockerSecrets[i].Name, "registry", targetRegistry)
-			return dockerSecrets[i].Name
+				"namespace", secret.Namespace, "name", secret.Name, "registry", targetRegistry)
+			return secret.Name
 		}
 	}
 
 	return ""
+}
+
+// dockerConfigJSON represents the structure of a .dockerconfigjson secret.
+type dockerConfigJSON struct {
+	Auths map[string]dockerConfigEntry `json:"auths"`
+}
+
+type dockerConfigEntry struct {
+	Auth string `json:"auth,omitempty"`
+}
+
+// matchRegistryInDockerConfig checks whether the given secret contains credentials
+// for the target registry host by parsing its .dockerconfigjson data.
+func matchRegistryInDockerConfig(secret *corev1.Secret, targetRegistry string) bool {
+	var raw []byte
+	if secret.Type == corev1.SecretTypeDockerConfigJson {
+		raw = secret.Data[".dockerconfigjson"]
+	} else {
+		raw = secret.Data[".dockercfg"]
+	}
+	if len(raw) == 0 {
+		return false
+	}
+
+	var cfg dockerConfigJSON
+	if secret.Type == corev1.SecretTypeDockercfg {
+		// .dockercfg is a flat map: {"registry": {"auth": "..."}}
+		var flat map[string]dockerConfigEntry
+		if err := json.Unmarshal(raw, &flat); err != nil {
+			return false
+		}
+		cfg.Auths = flat
+	} else {
+		if err := json.Unmarshal(raw, &cfg); err != nil {
+			return false
+		}
+	}
+
+	for registryKey := range cfg.Auths {
+		if registryHostMatches(registryKey, targetRegistry) {
+			return true
+		}
+	}
+	return false
+}
+
+// registryHostMatches checks if a registry key from dockerconfigjson matches the target host.
+// Registry keys can be full URLs (https://registry.example.com) or plain hosts (registry.example.com).
+func registryHostMatches(registryKey, targetHost string) bool {
+	// Normalize: strip scheme prefix if present
+	host := registryKey
+	if idx := strings.Index(host, "://"); idx >= 0 {
+		host = host[idx+3:]
+	}
+	// Strip path suffix (e.g. "https://index.docker.io/v1/" -> "index.docker.io")
+	if idx := strings.Index(host, "/"); idx >= 0 {
+		host = host[:idx]
+	}
+
+	// docker.io normalization: "index.docker.io" and "docker.io" are equivalent
+	host = normalizeDockerHost(host)
+	target := normalizeDockerHost(targetHost)
+
+	return strings.EqualFold(host, target)
+}
+
+func normalizeDockerHost(host string) string {
+	switch strings.ToLower(host) {
+	case "index.docker.io", "docker.io", "registry-1.docker.io":
+		return "docker.io"
+	}
+	return host
 }
 
 // extractRegistryHost extracts the registry host from an image reference.
