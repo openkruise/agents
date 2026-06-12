@@ -31,6 +31,12 @@ const (
 	LabelCommitUID  = "agents.kruise.io/commit-uid"
 )
 
+// AgentJobContainerName is the name of the single container inside the commit
+// Job pod. Both the Job spec generator and downstream container-status readers
+// must reference this constant so that injected sidecars (e.g. service mesh
+// proxies) cannot accidentally pollute exit-code lookups.
+const AgentJobContainerName = "agent-job"
+
 const (
 	ExitCodeSuccess              = 0
 	ExitCodeCommitFailed         = 1
@@ -72,6 +78,11 @@ var CommitJobExitCodeMap = map[int32]CommitConditionValue{
 
 func GetCommitCondition(pod *corev1.Pod) *metav1.Condition {
 	for _, cs := range pod.Status.ContainerStatuses {
+		// Only consider the canonical commit-job container; ignore any sidecar or
+		// init container that may have been injected by webhooks.
+		if cs.Name != AgentJobContainerName {
+			continue
+		}
 		if cs.State.Terminated != nil {
 			conditionValue, ok := CommitJobExitCodeMap[cs.State.Terminated.ExitCode]
 			if !ok {

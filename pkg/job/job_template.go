@@ -216,7 +216,7 @@ func (g *JobGenerator) GenerateCommitJob() (*batchv1.Job, error) {
 					Volumes: volumes,
 					Containers: []corev1.Container{
 						{
-							Name:            "agent-job",
+							Name:            AgentJobContainerName,
 							Image:           jobImage,
 							VolumeMounts:    volumeMounts,
 							ImagePullPolicy: Config().ImagePullPolicy(),

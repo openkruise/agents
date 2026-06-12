@@ -393,7 +393,7 @@ func TestEnsureCommitRunning_JobPodAlreadyExists(t *testing.T) {
 			Name:      "existing-job-pod",
 			Namespace: "default",
 			Labels: map[string]string{
-				jobutil.LabelCommitUID: string(commit.UID),
+				"batch.kubernetes.io/job-name": jobutil.MakeJobName(string(commit.UID)),
 			},
 		},
 		Status: corev1.PodStatus{Phase: corev1.PodRunning},
@@ -545,7 +545,7 @@ func TestGetLatestJobPodExitCode(t *testing.T) {
 						Name:      "job-pod-1",
 						Namespace: "default",
 						Labels: map[string]string{
-							jobutil.LabelCommitUID: "test-uid-1234",
+							"batch.kubernetes.io/job-name": jobutil.MakeJobName("test-uid-1234"),
 						},
 						CreationTimestamp: metav1.Now(),
 					},
@@ -575,7 +575,7 @@ func TestGetLatestJobPodExitCode(t *testing.T) {
 						Name:      "job-pod-1",
 						Namespace: "default",
 						Labels: map[string]string{
-							jobutil.LabelCommitUID: "test-uid-1234",
+							"batch.kubernetes.io/job-name": jobutil.MakeJobName("test-uid-1234"),
 						},
 						CreationTimestamp: metav1.Now(),
 					},
@@ -605,7 +605,7 @@ func TestGetLatestJobPodExitCode(t *testing.T) {
 						Name:      "job-pod-1",
 						Namespace: "default",
 						Labels: map[string]string{
-							jobutil.LabelCommitUID: "test-uid-1234",
+							"batch.kubernetes.io/job-name": jobutil.MakeJobName("test-uid-1234"),
 						},
 						CreationTimestamp: metav1.Now(),
 					},
@@ -635,7 +635,7 @@ func TestGetLatestJobPodExitCode(t *testing.T) {
 						Name:      "job-pod-1",
 						Namespace: "default",
 						Labels: map[string]string{
-							jobutil.LabelCommitUID: "test-uid-1234",
+							"batch.kubernetes.io/job-name": jobutil.MakeJobName("test-uid-1234"),
 						},
 						CreationTimestamp: metav1.Now(),
 					},
@@ -662,7 +662,7 @@ func TestGetLatestJobPodExitCode(t *testing.T) {
 						Name:      "job-pod-1",
 						Namespace: "default",
 						Labels: map[string]string{
-							jobutil.LabelCommitUID: "test-uid-1234",
+							"batch.kubernetes.io/job-name": jobutil.MakeJobName("test-uid-1234"),
 						},
 						CreationTimestamp: metav1.Now(),
 					},

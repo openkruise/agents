@@ -333,8 +333,11 @@ func extractRegistryHost(image string) string {
 
 func (r *commonControl) listCRJobPods(ctx context.Context, commit *agentsv1alpha1.Commit) (*corev1.PodList, error) {
 	jobPods := &corev1.PodList{}
+	// Filter by the standard label set automatically by the Kubernetes Job
+	// controller (stable since K8s 1.27). This avoids relying on a custom label
+	// being correctly propagated from the Job spec to its child Pods.
 	matchingLabels := client.MatchingLabels{
-		jobutil.LabelCommitUID: string(commit.UID),
+		"batch.kubernetes.io/job-name": jobutil.MakeJobName(string(commit.UID)),
 	}
 	if err := r.Client.List(ctx, jobPods, client.InNamespace(commit.Namespace), matchingLabels); err != nil {
 		return nil, err
