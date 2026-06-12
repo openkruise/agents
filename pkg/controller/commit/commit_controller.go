@@ -137,8 +137,7 @@ func (r *CommitReconciler) Reconcile(ctx context.Context, req ctrl.Request) (res
 	// Handle deletion
 	if !commit.DeletionTimestamp.IsZero() {
 		args := &core.EnsureFuncArgs{Pod: pod, Commit: commit, NewStatus: newStatus}
-		_, err := control.EnsureCommitDeleted(ctx, args)
-		return ctrl.Result{}, err
+		return r.handleCommitDelete(ctx, args, control)
 	}
 
 	// Skip terminal phases
@@ -179,6 +178,17 @@ func (r *CommitReconciler) getControl(commit *agentsv1alpha1.Commit) (core.Commi
 		return nil, fmt.Errorf("commit mode(%s) control not found", core.CommonControlName)
 	}
 	return control, nil
+}
+
+func (r *CommitReconciler) handleCommitDelete(ctx context.Context, args *core.EnsureFuncArgs, control core.CommitControl) (ctrl.Result, error) {
+	commit := args.Commit
+	klog.V(3).InfoS("handleCommitDelete", "commit", klog.KObj(commit), "commitID", commit.Status.CommitID, "uid", commit.UID)
+	requeueAfter, err := control.EnsureCommitDeleted(ctx, args)
+	if err != nil {
+		klog.ErrorS(err, "handleCommitDelete failed", "commit", klog.KObj(commit))
+		return ctrl.Result{RequeueAfter: requeueAfter}, err
+	}
+	return ctrl.Result{}, nil
 }
 
 func (r *CommitReconciler) handleCommitPending(ctx context.Context, args *core.EnsureFuncArgs, control core.CommitControl) (ctrl.Result, error) {
@@ -251,6 +261,6 @@ func (r *CommitReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		WithOptions(controller.Options{MaxConcurrentReconciles: concurrentReconciles}).
 		For(&agentsv1alpha1.Commit{}).
-		Owns(&batchv1.Job{}).
+		Watches(&batchv1.Job{}, &enqueueRequestForJob{mgr.GetCache()}).
 		Complete(r)
 }
