@@ -348,6 +348,7 @@ func TestInPlaceUpdateControl_Update_MetadataOnlyLabels(t *testing.T) {
 
 func TestInPlaceUpdateControl_Update_ResizeViaSubresource(t *testing.T) {
 	scheme := buildTestScheme(t)
+	injectedResource := corev1.ResourceName("example.com/injected-resource")
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "default"},
 		Spec: corev1.PodSpec{
@@ -355,7 +356,14 @@ func TestInPlaceUpdateControl_Update_ResizeViaSubresource(t *testing.T) {
 				Name:  "c",
 				Image: "img:1",
 				Resources: corev1.ResourceRequirements{
-					Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m")},
+					Requests: corev1.ResourceList{
+						corev1.ResourceCPU:              resource.MustParse("100m"),
+						corev1.ResourceEphemeralStorage: resource.MustParse("30Gi"),
+						injectedResource:                resource.MustParse("1"),
+					},
+					Limits: corev1.ResourceList{
+						injectedResource: resource.MustParse("1"),
+					},
 				},
 			}},
 		},
@@ -381,34 +389,13 @@ func TestInPlaceUpdateControl_Update_ResizeViaSubresource(t *testing.T) {
 	resizeCalls := 0
 	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
 	wrapped := interceptor.NewClient(base, interceptor.Funcs{
-		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object,
-			opts ...client.SubResourceUpdateOption) error {
+		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object,
+			patch client.Patch, opts ...client.SubResourcePatchOption) error {
 			if sub != "resize" {
-				return c.SubResource(sub).Update(ctx, obj, opts...)
+				return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
 			}
 			resizeCalls++
-			body := obj
-			updateOpts := &client.SubResourceUpdateOptions{}
-			updateOpts.ApplyOptions(opts)
-			if updateOpts.SubResourceBody != nil {
-				body = updateOpts.SubResourceBody
-			}
-			resizePod, ok := body.(*corev1.Pod)
-			if !ok {
-				return fmt.Errorf("expected *corev1.Pod, got %T", body)
-			}
-			existing := &corev1.Pod{}
-			if err := c.Get(ctx, client.ObjectKeyFromObject(obj), existing); err != nil {
-				return err
-			}
-			for i, container := range existing.Spec.Containers {
-				for _, rc := range resizePod.Spec.Containers {
-					if rc.Name == container.Name {
-						existing.Spec.Containers[i].Resources = rc.Resources
-					}
-				}
-			}
-			return c.Update(ctx, existing)
+			return c.Patch(ctx, obj, patch)
 		},
 	})
 
@@ -439,6 +426,15 @@ func TestInPlaceUpdateControl_Update_ResizeViaSubresource(t *testing.T) {
 	cpuReq := updated.Spec.Containers[0].Resources.Requests[corev1.ResourceCPU]
 	if cpuReq.MilliValue() != 500 {
 		t.Fatalf("expected cpu request=500m, got %dm", cpuReq.MilliValue())
+	}
+	if got := updated.Spec.Containers[0].Resources.Requests[corev1.ResourceEphemeralStorage]; got.Cmp(resource.MustParse("30Gi")) != 0 {
+		t.Fatalf("expected ephemeral-storage request to be preserved, got %s", got.String())
+	}
+	if got := updated.Spec.Containers[0].Resources.Requests[injectedResource]; got.Cmp(resource.MustParse("1")) != 0 {
+		t.Fatalf("expected injected request to be preserved, got %s", got.String())
+	}
+	if got := updated.Spec.Containers[0].Resources.Limits[injectedResource]; got.Cmp(resource.MustParse("1")) != 0 {
+		t.Fatalf("expected injected limit to be preserved, got %s", got.String())
 	}
 }
 
@@ -478,13 +474,13 @@ func TestInPlaceUpdateControl_Update_ResizeFallbackToDirectPatch(t *testing.T) {
 	patchCalls := 0
 	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
 	wrapped := interceptor.NewClient(base, interceptor.Funcs{
-		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object,
-			opts ...client.SubResourceUpdateOption) error {
+		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object,
+			patch client.Patch, opts ...client.SubResourcePatchOption) error {
 			if sub == "resize" {
 				subCalls++
 				return apierrors.NewNotFound(schema.GroupResource{Resource: "pods"}, obj.GetName())
 			}
-			return c.SubResource(sub).Update(ctx, obj, opts...)
+			return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
 		},
 		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch,
 			opts ...client.PatchOption) error {
@@ -571,12 +567,12 @@ func TestInPlaceUpdateControl_Update_ResizeNotSupported(t *testing.T) {
 
 	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
 	wrapped := interceptor.NewClient(base, interceptor.Funcs{
-		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object,
-			opts ...client.SubResourceUpdateOption) error {
+		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object,
+			patch client.Patch, opts ...client.SubResourcePatchOption) error {
 			if sub == "resize" {
 				return apierrors.NewNotFound(schema.GroupResource{Resource: "pods"}, obj.GetName())
 			}
-			return c.SubResource(sub).Update(ctx, obj, opts...)
+			return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
 		},
 		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch,
 			opts ...client.PatchOption) error {
@@ -646,12 +642,12 @@ func TestInPlaceUpdateControl_Update_ResizeSubresourceServerError(t *testing.T) 
 
 	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
 	wrapped := interceptor.NewClient(base, interceptor.Funcs{
-		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object,
-			opts ...client.SubResourceUpdateOption) error {
+		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object,
+			patch client.Patch, opts ...client.SubResourcePatchOption) error {
 			if sub == "resize" {
 				return apierrors.NewInternalError(fmt.Errorf("etcd timeout"))
 			}
-			return c.SubResource(sub).Update(ctx, obj, opts...)
+			return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
 		},
 	})
 	ctrl := NewInPlaceUpdateControl(wrapped, nil)
@@ -716,10 +712,10 @@ func TestInPlaceUpdateControl_Update_ResizeConflictRetrySucceeds(t *testing.T) {
 	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
 	resizeAttempts := 0
 	wrapped := interceptor.NewClient(base, interceptor.Funcs{
-		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object,
-			opts ...client.SubResourceUpdateOption) error {
+		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object,
+			patch client.Patch, opts ...client.SubResourcePatchOption) error {
 			if sub != "resize" {
-				return c.SubResource(sub).Update(ctx, obj, opts...)
+				return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
 			}
 			resizeAttempts++
 			if resizeAttempts == 1 {
@@ -740,25 +736,7 @@ func TestInPlaceUpdateControl_Update_ResizeConflictRetrySucceeds(t *testing.T) {
 				)
 			}
 			// Subsequent attempts succeed and apply the resize.
-			body := obj
-			updateOpts := &client.SubResourceUpdateOptions{}
-			updateOpts.ApplyOptions(opts)
-			if updateOpts.SubResourceBody != nil {
-				body = updateOpts.SubResourceBody
-			}
-			rp := body.(*corev1.Pod)
-			existing := &corev1.Pod{}
-			if err := c.Get(ctx, client.ObjectKeyFromObject(obj), existing); err != nil {
-				return err
-			}
-			for i, container := range existing.Spec.Containers {
-				for _, rc := range rp.Spec.Containers {
-					if rc.Name == container.Name {
-						existing.Spec.Containers[i].Resources = rc.Resources
-					}
-				}
-			}
-			return c.Update(ctx, existing)
+			return c.Patch(ctx, obj, patch)
 		},
 	})
 	ctrl := NewInPlaceUpdateControl(wrapped, nil)
@@ -824,10 +802,10 @@ func TestInPlaceUpdateControl_Update_ResizeConflictRetryNoLongerNeeded(t *testin
 	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
 	resizeAttempts := 0
 	wrapped := interceptor.NewClient(base, interceptor.Funcs{
-		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object,
-			opts ...client.SubResourceUpdateOption) error {
+		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object,
+			patch client.Patch, opts ...client.SubResourcePatchOption) error {
 			if sub != "resize" {
-				return c.SubResource(sub).Update(ctx, obj, opts...)
+				return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
 			}
 			resizeAttempts++
 			// Simulate that another actor has already applied the resize, so
@@ -903,10 +881,10 @@ func TestInPlaceUpdateControl_Update_ResizeConflictGetFails(t *testing.T) {
 	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
 	getFailErr := fmt.Errorf("simulated get failure after conflict")
 	wrapped := interceptor.NewClient(base, interceptor.Funcs{
-		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object,
-			opts ...client.SubResourceUpdateOption) error {
+		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object,
+			patch client.Patch, opts ...client.SubResourcePatchOption) error {
 			if sub != "resize" {
-				return c.SubResource(sub).Update(ctx, obj, opts...)
+				return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
 			}
 			// Always return conflict to trigger the retry path
 			return apierrors.NewConflict(
@@ -2382,8 +2360,8 @@ func TestDefaultGenerateResizeSubresourceBody_MinimalFields(t *testing.T) {
 			},
 			expectNil:            false,
 			expectContainerCount: 1,
-			expectInitCount:      2,
-			verifyInitMinimal:    true,
+			expectInitCount:      0,
+			verifyInitMinimal:    false,
 		},
 		{
 			name: "multiple containers all minimal",
@@ -2548,32 +2526,13 @@ func TestInPlaceUpdateControl_Update_ResizeBeforePatch(t *testing.T) {
 	var callOrder []string
 	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
 	wrapped := interceptor.NewClient(base, interceptor.Funcs{
-		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object,
-			opts ...client.SubResourceUpdateOption) error {
+		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object,
+			patch client.Patch, opts ...client.SubResourcePatchOption) error {
 			if sub == "resize" {
 				callOrder = append(callOrder, "resize")
-				// Simulate a successful resize by applying resources
-				body := obj
-				updateOpts := &client.SubResourceUpdateOptions{}
-				updateOpts.ApplyOptions(opts)
-				if updateOpts.SubResourceBody != nil {
-					body = updateOpts.SubResourceBody
-				}
-				rp := body.(*corev1.Pod)
-				existing := &corev1.Pod{}
-				if err := c.Get(ctx, client.ObjectKeyFromObject(obj), existing); err != nil {
-					return err
-				}
-				for i, container := range existing.Spec.Containers {
-					for _, rc := range rp.Spec.Containers {
-						if rc.Name == container.Name {
-							existing.Spec.Containers[i].Resources = rc.Resources
-						}
-					}
-				}
-				return c.Update(ctx, existing)
+				return c.Patch(ctx, obj, patch)
 			}
-			return c.SubResource(sub).Update(ctx, obj, opts...)
+			return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
 		},
 		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch,
 			opts ...client.PatchOption) error {
@@ -3009,73 +2968,8 @@ func TestDefaultGenerateResizeSubresourceBody_NoResizeWhenExtraOrUnitDiff(t *tes
 	}
 }
 
-func TestMergeResourceList(t *testing.T) {
-	tests := []struct {
-		name     string
-		dst      corev1.ResourceList
-		src      corev1.ResourceList
-		expected corev1.ResourceList
-	}{
-		{
-			name: "merge overwrites existing and preserves extra",
-			dst: corev1.ResourceList{
-				corev1.ResourceCPU:              resource.MustParse("500m"),
-				corev1.ResourceMemory:           resource.MustParse("1Gi"),
-				corev1.ResourceEphemeralStorage: resource.MustParse("30Gi"),
-			},
-			src: corev1.ResourceList{
-				corev1.ResourceCPU:    resource.MustParse("1"),
-				corev1.ResourceMemory: resource.MustParse("2Gi"),
-			},
-			expected: corev1.ResourceList{
-				corev1.ResourceCPU:              resource.MustParse("1"),
-				corev1.ResourceMemory:           resource.MustParse("2Gi"),
-				corev1.ResourceEphemeralStorage: resource.MustParse("30Gi"),
-			},
-		},
-		{
-			name: "merge into empty dst",
-			dst:  corev1.ResourceList{},
-			src: corev1.ResourceList{
-				corev1.ResourceCPU: resource.MustParse("1"),
-			},
-			expected: corev1.ResourceList{
-				corev1.ResourceCPU: resource.MustParse("1"),
-			},
-		},
-		{
-			name: "merge empty src is no-op",
-			dst: corev1.ResourceList{
-				corev1.ResourceCPU: resource.MustParse("500m"),
-			},
-			src: corev1.ResourceList{},
-			expected: corev1.ResourceList{
-				corev1.ResourceCPU: resource.MustParse("500m"),
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			mergeResourceList(tt.dst, tt.src)
-			if len(tt.dst) != len(tt.expected) {
-				t.Fatalf("dst length = %d, want %d; dst=%v", len(tt.dst), len(tt.expected), tt.dst)
-			}
-			for name, wantQty := range tt.expected {
-				gotQty, ok := tt.dst[name]
-				if !ok {
-					t.Errorf("missing key %q in dst", name)
-					continue
-				}
-				if gotQty.Cmp(wantQty) != 0 {
-					t.Errorf("dst[%q] = %s, want %s", name, gotQty.String(), wantQty.String())
-				}
-			}
-		})
-	}
-}
-
-func TestDefaultGenerateResizeSubresourceBody_PreservesSystemInjectedFields(t *testing.T) {
+func TestDefaultGenerateResizeSubresourceBody_OnlyIncludesDesiredResources(t *testing.T) {
+	injectedResource := corev1.ResourceName("test-resource")
 	tests := []struct {
 		name string
 		box  *agentsv1alpha1.Sandbox
@@ -3122,10 +3016,12 @@ func TestDefaultGenerateResizeSubresourceBody_PreservesSystemInjectedFields(t *t
 									corev1.ResourceCPU:              resource.MustParse("500m"),
 									corev1.ResourceMemory:           resource.MustParse("2Gi"),
 									corev1.ResourceEphemeralStorage: resource.MustParse("30Gi"),
+									injectedResource:                resource.MustParse("1"),
 								},
 								Limits: corev1.ResourceList{
 									corev1.ResourceCPU:    resource.MustParse("500m"),
 									corev1.ResourceMemory: resource.MustParse("2Gi"),
+									injectedResource:      resource.MustParse("1"),
 								},
 							},
 						},
@@ -3149,11 +3045,14 @@ func TestDefaultGenerateResizeSubresourceBody_PreservesSystemInjectedFields(t *t
 			}
 			c := result.Spec.Containers[0]
 
-			gotEphemeral, ok := c.Resources.Requests[corev1.ResourceEphemeralStorage]
-			if !ok {
-				t.Errorf("expected ephemeral-storage to be preserved in Requests, but it was missing")
-			} else if gotEphemeral.Cmp(resource.MustParse("30Gi")) != 0 {
-				t.Errorf("ephemeral-storage = %s, want 30Gi", gotEphemeral.String())
+			if _, ok := c.Resources.Requests[corev1.ResourceEphemeralStorage]; ok {
+				t.Errorf("expected resize body to omit ephemeral-storage request")
+			}
+			if _, ok := c.Resources.Requests[injectedResource]; ok {
+				t.Errorf("expected resize body to omit injected request")
+			}
+			if _, ok := c.Resources.Limits[injectedResource]; ok {
+				t.Errorf("expected resize body to omit injected limit")
 			}
 
 			gotReqCPU, ok := c.Resources.Requests[corev1.ResourceCPU]
