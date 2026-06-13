@@ -233,11 +233,11 @@ func buildContainerResourcesMap(containers []corev1.Container) map[string]corev1
 	return result
 }
 
-// DefaultGenerateResizeSubresourceBody generates the Pod body for resize subResource update.
+// DefaultGenerateResizeSubresourceBody generates the desired Pod resource changes for resize.
 // It compares the current pod's container resources with the sandbox's container resources,
-// and returns a minimal Pod object containing only the fields required by the resize API:
+// and returns a minimal Pod object containing only the fields required by the resize patch:
 //   - metadata.name, metadata.namespace, metadata.resourceVersion
-//   - spec.containers[].resources
+//   - spec.containers[].name, spec.containers[].resources
 //
 // Only the main containers are processed; init containers are not resized.
 // Returns nil if no resource changes are detected.
@@ -256,26 +256,13 @@ func DefaultGenerateResizeSubresourceBody(opts InPlaceUpdateOptions) *corev1.Pod
 			ResourceVersion: pod.ResourceVersion,
 		},
 		Spec: corev1.PodSpec{
-			Containers:     make([]corev1.Container, len(pod.Spec.Containers)),
-			InitContainers: make([]corev1.Container, len(pod.Spec.InitContainers)),
+			Containers: make([]corev1.Container, 0, len(pod.Spec.Containers)),
 		},
-	}
-	for i := range pod.Spec.Containers {
-		resizeBody.Spec.Containers[i] = corev1.Container{
-			Name:      pod.Spec.Containers[i].Name,
-			Resources: pod.Spec.Containers[i].Resources,
-		}
-	}
-	for i := range pod.Spec.InitContainers {
-		resizeBody.Spec.InitContainers[i] = corev1.Container{
-			Name:      pod.Spec.InitContainers[i].Name,
-			Resources: pod.Spec.InitContainers[i].Resources,
-		}
 	}
 
 	changed := false
-	for i := range resizeBody.Spec.Containers {
-		container := &resizeBody.Spec.Containers[i]
+	for i := range pod.Spec.Containers {
+		container := &pod.Spec.Containers[i]
 		origin, ok := originContainers[container.Name]
 		if !ok {
 			continue
@@ -283,10 +270,10 @@ func DefaultGenerateResizeSubresourceBody(opts InPlaceUpdateOptions) *corev1.Pod
 		if ResourcesEqual(origin.Resources, container.Resources) {
 			continue
 		}
-		// Merge origin resources into container, preserving system-injected fields
-		// (e.g., ephemeral-storage) that are not specified in the sandbox spec.
-		mergeResourceList(container.Resources.Limits, origin.Resources.Limits)
-		mergeResourceList(container.Resources.Requests, origin.Resources.Requests)
+		resizeBody.Spec.Containers = append(resizeBody.Spec.Containers, corev1.Container{
+			Name:      container.Name,
+			Resources: origin.Resources,
+		})
 		changed = true
 	}
 	if !changed {
@@ -495,13 +482,14 @@ func (c *InPlaceUpdateControl) Update(ctx context.Context, opts InPlaceUpdateOpt
 	return true, nil
 }
 
-// resizePod applies a resource resize to the pod. It uses the pods/resize subresource
+// resizePod applies a resource resize to the pod. It patches the pods/resize subresource
 // on K8s >= 1.33 (see https://kubernetes.io/blog/2025/05/16/kubernetes-v1-33-in-place-pod-resize-beta/),
 // and falls back to a direct strategic merge patch on older versions (K8s 1.27-1.32).
 // The detection result is cached so the subresource is only probed once per controller lifetime.
 func (c *InPlaceUpdateControl) resizePod(ctx context.Context, logger klog.Logger, pod *corev1.Pod, resizeBody *corev1.Pod) error {
+	resourcePatch := buildResourcePatch(resizeBody)
 	if !c.useDirectResourcePatch.Load() {
-		err := c.SubResource("resize").Update(ctx, pod, client.WithSubResourceBody(resizeBody))
+		err := c.SubResource("resize").Patch(ctx, pod, client.RawPatch(types.StrategicMergePatchType, []byte(resourcePatch)))
 		if err == nil {
 			logger.Info("inplace update pod resize succeeded via resize subresource (K8s >= 1.33)")
 			return nil
@@ -665,12 +653,4 @@ func isResourceListCovered(actual, expected corev1.ResourceList) bool {
 		}
 	}
 	return true
-}
-
-// mergeResourceList overwrites entries in dst with values from src,
-// preserving any keys in dst that are not present in src.
-func mergeResourceList(dst, src corev1.ResourceList) {
-	for name, qty := range src {
-		dst[name] = qty
-	}
 }
