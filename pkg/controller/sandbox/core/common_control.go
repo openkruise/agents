@@ -263,6 +263,10 @@ func (r *commonControl) EnsureSandboxResumed(ctx context.Context, args EnsureFun
 		// Delete all Checkpoint CRs after successful resume (pod is running and ready)
 		r.checkpointControl.Cleanup(ctx, box)
 
+		if !isContainersConsistent(pod, box) {
+			return nil
+		}
+
 		// re-initialize sandbox after resuming or upgrading (includes runtime re-init and CSI storage re-mount)
 		if err := r.initializer.Initialize(ctx, box, newStatus); err != nil {
 			klog.ErrorS(err, "post-resume initialization failed", "sandbox", klog.KObj(box))
@@ -296,6 +300,34 @@ func (r *commonControl) EnsureSandboxResumed(ctx context.Context, args EnsureFun
 		utils.SetSandboxCondition(newStatus, *rCond)
 	}
 	return nil
+}
+
+// isContainersConsistent verifies that every init container's image in pod.Spec
+// matches the corresponding image reported in pod.Status. Returns false if any mismatch or
+// missing status is found, indicating the caller should wait for the status to converge.
+func isContainersConsistent(pod *corev1.Pod, box *agentsv1alpha1.Sandbox) bool {
+	initStatusImages := make(map[string]string, len(pod.Status.InitContainerStatuses))
+	for _, initStatus := range pod.Status.InitContainerStatuses {
+		initStatusImages[initStatus.Name] = initStatus.Image
+	}
+	for _, initContainer := range pod.Spec.InitContainers {
+		statusImage, found := initStatusImages[initContainer.Name]
+		if !found {
+			klog.InfoS("init container status not found, waiting",
+				"sandbox", klog.KObj(box),
+				"container", initContainer.Name)
+			return false
+		}
+		if statusImage != initContainer.Image {
+			klog.InfoS("init container image mismatch between spec and status, waiting",
+				"sandbox", klog.KObj(box),
+				"container", initContainer.Name,
+				"specImage", initContainer.Image,
+				"statusImage", statusImage)
+			return false
+		}
+	}
+	return true
 }
 
 // hasUpgradeAction checks if the sandbox has a non-empty upgrade action configured.

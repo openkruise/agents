@@ -85,6 +85,9 @@ func isActivePodUpdate(oldObj, newObj *corev1.Pod) bool {
 	if oldObj.Status.Phase != newObj.Status.Phase || oldObj.Status.PodIP != newObj.Status.PodIP {
 		return true
 	}
+	if !isContainerStatusImageEqual(oldObj.Status.InitContainerStatuses, newObj.Status.InitContainerStatuses) {
+		return true
+	}
 	rCond1 := utils.GetPodCondition(&oldObj.Status, corev1.PodReady)
 	rCond2 := utils.GetPodCondition(&newObj.Status, corev1.PodReady)
 	if !isPodConditionEqual(rCond1, rCond2) {
@@ -134,4 +137,23 @@ func isPodConditionEqual(a, b *corev1.PodCondition) bool {
 		return false
 	}
 	return a.Status == b.Status && a.Reason == b.Reason && a.Message == b.Message
+}
+
+// isContainerStatusImageEqual checks whether the Image field of each
+// init container status is the same between old and new. It matches by
+// container name so that ordering differences are tolerated.
+func isContainerStatusImageEqual(old, new []corev1.ContainerStatus) bool {
+	if len(old) != len(new) {
+		return false
+	}
+	oldImages := make(map[string]string, len(old))
+	for _, cs := range old {
+		oldImages[cs.Name] = cs.Image
+	}
+	for _, cs := range new {
+		if oldImages[cs.Name] != cs.Image {
+			return false
+		}
+	}
+	return true
 }
