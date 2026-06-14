@@ -631,6 +631,70 @@ func TestIsActivePodUpdate(t *testing.T) {
 			description: "should ignore changes in non-tracked conditions",
 		},
 		{
+			name: "InitContainerStatuses - image changed triggers update",
+			oldPod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					Phase: corev1.PodRunning,
+					InitContainerStatuses: []corev1.ContainerStatus{
+						{Name: "init-a", Image: "busybox:1.0"},
+					},
+				},
+			},
+			newPod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					Phase: corev1.PodRunning,
+					InitContainerStatuses: []corev1.ContainerStatus{
+						{Name: "init-a", Image: "busybox:2.0"},
+					},
+				},
+			},
+			expected:    true,
+			description: "should return true when init container status image changes",
+		},
+		{
+			name: "InitContainerStatuses - count changed triggers update",
+			oldPod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					Phase: corev1.PodRunning,
+					InitContainerStatuses: []corev1.ContainerStatus{
+						{Name: "init-a", Image: "busybox:1.0"},
+					},
+				},
+			},
+			newPod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					Phase: corev1.PodRunning,
+					InitContainerStatuses: []corev1.ContainerStatus{
+						{Name: "init-a", Image: "busybox:1.0"},
+						{Name: "init-b", Image: "alpine:3.18"},
+					},
+				},
+			},
+			expected:    true,
+			description: "should return true when init container status count changes",
+		},
+		{
+			name: "InitContainerStatuses - unchanged does not trigger",
+			oldPod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					Phase: corev1.PodRunning,
+					InitContainerStatuses: []corev1.ContainerStatus{
+						{Name: "init-a", Image: "busybox:1.0"},
+					},
+				},
+			},
+			newPod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					Phase: corev1.PodRunning,
+					InitContainerStatuses: []corev1.ContainerStatus{
+						{Name: "init-a", Image: "busybox:1.0"},
+					},
+				},
+			},
+			expected:    false,
+			description: "should return false when init container statuses are unchanged",
+		},
+		{
 			name: "ContainerStatuses - container added",
 			oldPod: &corev1.Pod{
 				Status: corev1.PodStatus{
@@ -1031,6 +1095,98 @@ func TestIsActivePodUpdate(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			result := isActivePodUpdate(tt.oldPod, tt.newPod)
 			assert.Equal(t, tt.expected, result, tt.description)
+		})
+	}
+}
+
+func TestIsContainerStatusImageEqual(t *testing.T) {
+	tests := []struct {
+		name     string
+		old      []corev1.ContainerStatus
+		new      []corev1.ContainerStatus
+		expected bool
+	}{
+		{
+			name:     "both empty",
+			old:      []corev1.ContainerStatus{},
+			new:      []corev1.ContainerStatus{},
+			expected: true,
+		},
+		{
+			name:     "both nil",
+			old:      nil,
+			new:      nil,
+			expected: true,
+		},
+		{
+			name: "single container - images match",
+			old:  []corev1.ContainerStatus{{Name: "init-a", Image: "busybox:1.0"}},
+			new:  []corev1.ContainerStatus{{Name: "init-a", Image: "busybox:1.0"}},
+			expected: true,
+		},
+		{
+			name: "single container - images differ",
+			old:  []corev1.ContainerStatus{{Name: "init-a", Image: "busybox:1.0"}},
+			new:  []corev1.ContainerStatus{{Name: "init-a", Image: "busybox:2.0"}},
+			expected: false,
+		},
+		{
+			name: "different count",
+			old:  []corev1.ContainerStatus{{Name: "init-a", Image: "busybox:1.0"}},
+			new: []corev1.ContainerStatus{
+				{Name: "init-a", Image: "busybox:1.0"},
+				{Name: "init-b", Image: "alpine:3.18"},
+			},
+			expected: false,
+		},
+		{
+			name: "multiple containers - all match",
+			old: []corev1.ContainerStatus{
+				{Name: "init-a", Image: "busybox:1.0"},
+				{Name: "init-b", Image: "alpine:3.18"},
+			},
+			new: []corev1.ContainerStatus{
+				{Name: "init-a", Image: "busybox:1.0"},
+				{Name: "init-b", Image: "alpine:3.18"},
+			},
+			expected: true,
+		},
+		{
+			name: "multiple containers - second differs",
+			old: []corev1.ContainerStatus{
+				{Name: "init-a", Image: "busybox:1.0"},
+				{Name: "init-b", Image: "alpine:3.18"},
+			},
+			new: []corev1.ContainerStatus{
+				{Name: "init-a", Image: "busybox:1.0"},
+				{Name: "init-b", Image: "alpine:3.19"},
+			},
+			expected: false,
+		},
+		{
+			name: "different order - still equal",
+			old: []corev1.ContainerStatus{
+				{Name: "init-b", Image: "alpine:3.18"},
+				{Name: "init-a", Image: "busybox:1.0"},
+			},
+			new: []corev1.ContainerStatus{
+				{Name: "init-a", Image: "busybox:1.0"},
+				{Name: "init-b", Image: "alpine:3.18"},
+			},
+			expected: true,
+		},
+		{
+			name: "same count but different names",
+			old:  []corev1.ContainerStatus{{Name: "init-a", Image: "busybox:1.0"}},
+			new:  []corev1.ContainerStatus{{Name: "init-b", Image: "busybox:1.0"}},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := isContainerStatusImageEqual(tt.old, tt.new)
+			assert.Equal(t, tt.expected, result)
 		})
 	}
 }
