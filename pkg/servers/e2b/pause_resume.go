@@ -188,7 +188,7 @@ func (sc *Controller) ConnectSandbox(r *http.Request) (web.ApiResponse[*models.S
 		return web.ApiResponse[*models.Sandbox]{}, apiErr
 	}
 
-	sbx, apiErr := sc.getSandboxOfUser(ctx, id, claimedSandboxStates)
+	sbx, apiErr := sc.getSandboxOfUser(ctx, id, liveSandboxStates)
 	if apiErr != nil {
 		return web.ApiResponse[*models.Sandbox]{}, apiErr
 	}

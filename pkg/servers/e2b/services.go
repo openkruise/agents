@@ -44,7 +44,7 @@ func (sc *Controller) DescribeSandbox(r *http.Request) (web.ApiResponse[*models.
 	log := klog.FromContext(r.Context())
 	log.Info("describe sandbox", "id", id)
 
-	sbx, err := sc.getSandboxOfUser(r.Context(), id, claimedSandboxStates)
+	sbx, err := sc.getSandboxOfUser(r.Context(), id, liveSandboxStates)
 	if err != nil {
 		log.Error(err, "failed to get sandbox", "id", id)
 		return web.ApiResponse[*models.Sandbox]{}, err

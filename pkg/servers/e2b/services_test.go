@@ -1591,12 +1591,13 @@ func TestDescribeSandboxDeadClaimedSandbox(t *testing.T) {
 		"sandboxID": sandboxID,
 	}, user))
 
-	require.Nil(t, apiErr)
-	assert.Equal(t, sandboxID, describeResp.Body.SandboxID)
-	assert.Equal(t, v1alpha1.SandboxStateDead, describeResp.Body.State)
+	assert.Equal(t, web.ApiResponse[*models.Sandbox]{}, describeResp)
+	require.NotNil(t, apiErr)
+	assert.Equal(t, http.StatusNotFound, apiErr.Code)
+	assert.Contains(t, apiErr.Message, "is not healthy")
 }
 
-func TestConnectSandboxDeadClaimedSandboxReturnsDeadState(t *testing.T) {
+func TestConnectSandboxDeadClaimedSandbox(t *testing.T) {
 	controller, fc, teardown := Setup(t)
 	defer teardown()
 
@@ -1616,10 +1617,10 @@ func TestConnectSandboxDeadClaimedSandboxReturnsDeadState(t *testing.T) {
 		"sandboxID": sandboxID,
 	}, user))
 
-	require.Nil(t, apiErr)
-	assert.Equal(t, http.StatusOK, connectResp.Code)
-	assert.Equal(t, sandboxID, connectResp.Body.SandboxID)
-	assert.Equal(t, v1alpha1.SandboxStateDead, connectResp.Body.State)
+	assert.Equal(t, web.ApiResponse[*models.Sandbox]{}, connectResp)
+	require.NotNil(t, apiErr)
+	assert.Equal(t, http.StatusNotFound, apiErr.Code)
+	assert.Contains(t, apiErr.Message, "is not healthy")
 }
 
 func TestSandboxNamespaceIsolationWithSameName(t *testing.T) {
