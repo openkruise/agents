@@ -358,7 +358,7 @@ func TestSetAgentRuntimeContainer(t *testing.T) {
 			expectedVolumeMountCount: 1,
 		},
 		{
-			name: "existing lifecycle - conflicting postStart should skip env and volumeMounts injection",
+			name: "existing lifecycle - conflicting postStart should only skip postStart injection, env and volumeMounts still injected",
 			template: &corev1.PodSpec{
 				Containers: []corev1.Container{
 					{
@@ -549,6 +549,9 @@ func TestSetMainContainerConfigWhenInjectRuntimeSidecar(t *testing.T) {
 		expectedVolumeMountCount int
 		hasPostStart             bool
 		postStartCommand         []string
+		// expectHTTPGetPreserved asserts the original HTTPGet hook is preserved (not overwritten)
+		// when a non-Exec user postStart cannot be merged.
+		expectHTTPGetPreserved bool
 	}{
 		{
 			name: "empty container with full config",
@@ -580,7 +583,7 @@ func TestSetMainContainerConfigWhenInjectRuntimeSidecar(t *testing.T) {
 			postStartCommand:         []string{"bash", "-c", "/mnt/envd/envd-run.sh"},
 		},
 		{
-			name: "container with existing lifecycle - conflicting postStart should skip all injection",
+			name: "container with existing Exec postStart - user command merged into injected script as extra arg",
 			mainContainer: &corev1.Container{
 				Name:  "main",
 				Image: "nginx:latest",
@@ -601,16 +604,81 @@ func TestSetMainContainerConfigWhenInjectRuntimeSidecar(t *testing.T) {
 					Lifecycle: &corev1.Lifecycle{
 						PostStart: &corev1.LifecycleHandler{
 							Exec: &corev1.ExecAction{
-								Command: []string{"echo", "new"},
+								Command: []string{"bash", "-c", "/mnt/envd/envd-run.sh"},
 							},
 						},
 					},
 				},
 			},
-			expectedEnvCount:         1, // conflicting postStart only skips postStart injection, env still injected
-			expectedVolumeMountCount: 1, // conflicting postStart only skips postStart injection, volumeMounts still injected
+			expectedEnvCount:         1,
+			expectedVolumeMountCount: 1,
 			hasPostStart:             true,
-			postStartCommand:         []string{"echo", "old"}, // keeps existing, NOT overridden
+			// merged: injected command + user's command joined as a single string argument
+			postStartCommand: []string{"bash", "-c", "/mnt/envd/envd-run.sh", "echo old"},
+		},
+		{
+			name: "container with existing Exec postStart multi-word command - merged correctly",
+			mainContainer: &corev1.Container{
+				Name:  "main",
+				Image: "nginx:latest",
+				Lifecycle: &corev1.Lifecycle{
+					PostStart: &corev1.LifecycleHandler{
+						Exec: &corev1.ExecAction{
+							Command: []string{"bash", "-c", "my-init.sh --setup && echo done"},
+						},
+					},
+				},
+			},
+			config: SidecarInjectConfig{
+				MainContainer: corev1.Container{
+					Env: []corev1.EnvVar{{Name: "ENVD_DIR", Value: "/mnt/envd"}},
+					Lifecycle: &corev1.Lifecycle{
+						PostStart: &corev1.LifecycleHandler{
+							Exec: &corev1.ExecAction{
+								Command: []string{"bash", "/mnt/envd/envd-run.sh"},
+							},
+						},
+					},
+				},
+			},
+			expectedEnvCount:         1,
+			expectedVolumeMountCount: 0,
+			hasPostStart:             true,
+			// user's three-element command is joined as one space-separated string
+			postStartCommand: []string{"bash", "/mnt/envd/envd-run.sh", "bash -c my-init.sh --setup && echo done"},
+		},
+		{
+			name: "container with existing non-Exec (HTTPGet) postStart - cannot merge, keep existing hook",
+			mainContainer: &corev1.Container{
+				Name:  "main",
+				Image: "nginx:latest",
+				Lifecycle: &corev1.Lifecycle{
+					PostStart: &corev1.LifecycleHandler{
+						HTTPGet: &corev1.HTTPGetAction{
+							Path: "/init",
+							Port: intstr.FromInt(8080),
+						},
+					},
+				},
+			},
+			config: SidecarInjectConfig{
+				MainContainer: corev1.Container{
+					Env: []corev1.EnvVar{{Name: "ENVD_DIR", Value: "/mnt/envd"}},
+					Lifecycle: &corev1.Lifecycle{
+						PostStart: &corev1.LifecycleHandler{
+							Exec: &corev1.ExecAction{
+								Command: []string{"bash", "/mnt/envd/envd-run.sh"},
+							},
+						},
+					},
+				},
+			},
+			expectedEnvCount:         1,
+			expectedVolumeMountCount: 0,
+			hasPostStart:             true,
+			// non-Exec user hook cannot be merged; existing hook is preserved
+			postStartCommand:       nil, // HTTPGet hook kept, postStartCommand (Exec) check skipped
+			expectHTTPGetPreserved: true,
 		},
 		{
 			name: "config without lifecycle - no override",
@@ -726,9 +794,120 @@ func TestSetMainContainerConfigWhenInjectRuntimeSidecar(t *testing.T) {
 					t.Error("expected PostStart lifecycle handler, got nil")
 				} else if tt.mainContainer.Lifecycle.PostStart.Exec == nil {
 					t.Error("expected Exec action in PostStart, got nil")
-				} else if len(tt.mainContainer.Lifecycle.PostStart.Exec.Command) != len(tt.postStartCommand) {
+				} else if !reflect.DeepEqual(tt.mainContainer.Lifecycle.PostStart.Exec.Command, tt.postStartCommand) {
 					t.Errorf("expected command %v, got %v", tt.postStartCommand, tt.mainContainer.Lifecycle.PostStart.Exec.Command)
 				}
+			}
+			// Verify the original non-Exec hook is preserved when merge is not possible
+			if tt.expectHTTPGetPreserved {
+				if tt.mainContainer.Lifecycle == nil || tt.mainContainer.Lifecycle.PostStart == nil {
+					t.Error("expected PostStart lifecycle handler to be preserved, got nil")
+				} else if tt.mainContainer.Lifecycle.PostStart.HTTPGet == nil {
+					t.Error("expected HTTPGet hook to be preserved, but it was overwritten or removed")
+				}
+			}
+		})
+	}
+}
+
+func TestMergePostStartExecCommands(t *testing.T) {
+	tests := []struct {
+		name            string
+		injected        *corev1.LifecycleHandler
+		user            *corev1.LifecycleHandler
+		expectedCommand []string // nil means the function should return nil
+	}{
+		{
+			name: "both are Exec - user command joined and appended",
+			injected: &corev1.LifecycleHandler{
+				Exec: &corev1.ExecAction{
+					Command: []string{"bash", "-c", "/mnt/envd/envd-run.sh"},
+				},
+			},
+			user: &corev1.LifecycleHandler{
+				Exec: &corev1.ExecAction{
+					Command: []string{"echo", "hello"},
+				},
+			},
+			expectedCommand: []string{"bash", "-c", "/mnt/envd/envd-run.sh", "echo hello"},
+		},
+		{
+			name: "user command is a single element",
+			injected: &corev1.LifecycleHandler{
+				Exec: &corev1.ExecAction{
+					Command: []string{"bash", "/mnt/envd/envd-run.sh"},
+				},
+			},
+			user: &corev1.LifecycleHandler{
+				Exec: &corev1.ExecAction{
+					Command: []string{"my-init.sh"},
+				},
+			},
+			expectedCommand: []string{"bash", "/mnt/envd/envd-run.sh", "my-init.sh"},
+		},
+		{
+			name: "user command has multiple elements - joined with space",
+			injected: &corev1.LifecycleHandler{
+				Exec: &corev1.ExecAction{
+					Command: []string{"bash", "/mnt/envd/envd-run.sh"},
+				},
+			},
+			user: &corev1.LifecycleHandler{
+				Exec: &corev1.ExecAction{
+					Command: []string{"bash", "-c", "setup.sh && echo done"},
+				},
+			},
+			expectedCommand: []string{"bash", "/mnt/envd/envd-run.sh", "bash -c setup.sh && echo done"},
+		},
+		{
+			name: "injected is nil - returns nil",
+			injected:        nil,
+			user:            &corev1.LifecycleHandler{Exec: &corev1.ExecAction{Command: []string{"echo", "hi"}}},
+			expectedCommand: nil,
+		},
+		{
+			name: "user is nil - returns nil",
+			injected:        &corev1.LifecycleHandler{Exec: &corev1.ExecAction{Command: []string{"bash", "run.sh"}}},
+			user:            nil,
+			expectedCommand: nil,
+		},
+		{
+			name: "injected has no Exec (HTTPGet) - returns nil",
+			injected: &corev1.LifecycleHandler{
+				HTTPGet: &corev1.HTTPGetAction{Path: "/init", Port: intstr.FromInt(8080)},
+			},
+			user: &corev1.LifecycleHandler{
+				Exec: &corev1.ExecAction{Command: []string{"echo", "hi"}},
+			},
+			expectedCommand: nil,
+		},
+		{
+			name: "user has no Exec (HTTPGet) - returns nil",
+			injected: &corev1.LifecycleHandler{
+				Exec: &corev1.ExecAction{Command: []string{"bash", "run.sh"}},
+			},
+			user: &corev1.LifecycleHandler{
+				HTTPGet: &corev1.HTTPGetAction{Path: "/init", Port: intstr.FromInt(8080)},
+			},
+			expectedCommand: nil,
+		},
+		{
+			name: "user Exec command is empty slice - injected command returned unchanged",
+			injected: &corev1.LifecycleHandler{
+				Exec: &corev1.ExecAction{Command: []string{"bash", "/mnt/envd/envd-run.sh"}},
+			},
+			user: &corev1.LifecycleHandler{
+				Exec: &corev1.ExecAction{Command: []string{}},
+			},
+			expectedCommand: []string{"bash", "/mnt/envd/envd-run.sh"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := mergePostStartExecCommands(tt.injected, tt.user)
+			if !reflect.DeepEqual(got, tt.expectedCommand) {
+				t.Errorf("expected command %v, got %v", tt.expectedCommand, got)
 			}
 		})
 	}

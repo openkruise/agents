@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -237,19 +238,31 @@ func setMainContainerConfigWhenInjectRuntimeSidecar(ctx context.Context, mainCon
 		config.MainContainer.Lifecycle.PostStart != nil &&
 		hasValidLifecycleHandler(config.MainContainer.Lifecycle.PostStart)
 
-	if mainContainerHasValidPostStart {
-		if configHasValidPostStart {
-			log.V(utils.DebugLogLevel).Info("conflicting postStart hooks detected, main container already has a postStart hook defined",
-				"existingHook", mainContainer.Lifecycle.PostStart,
-				"injectedHook", config.MainContainer.Lifecycle.PostStart)
+	if configHasValidPostStart {
+		if mainContainer.Lifecycle == nil {
+			mainContainer.Lifecycle = &corev1.Lifecycle{}
 		}
-	} else {
-		// Main container doesn't have valid postStart, apply config if available
-		if configHasValidPostStart {
-			// set main container lifecycle
-			if mainContainer.Lifecycle == nil {
-				mainContainer.Lifecycle = &corev1.Lifecycle{}
+		if mainContainerHasValidPostStart {
+			// The user has a postStart hook. Treat their command as a string and append it
+			// to our injected script as an additional argument so the script executes the
+			// user's command after its own initialisation.
+			mergedCmd := mergePostStartExecCommands(config.MainContainer.Lifecycle.PostStart, mainContainer.Lifecycle.PostStart)
+			if mergedCmd != nil {
+				log.V(utils.DebugLogLevel).Info("merging user's postStart command into injected script",
+					"userCommand", mainContainer.Lifecycle.PostStart.Exec.Command,
+					"injectedCommand", config.MainContainer.Lifecycle.PostStart.Exec.Command)
+				mainContainer.Lifecycle.PostStart = &corev1.LifecycleHandler{
+					Exec: &corev1.ExecAction{Command: mergedCmd},
+				}
+			} else {
+				// Cannot merge non-Exec handlers (e.g. HTTPGet/TCPSocket); keep the
+				// existing hook and skip injection of the injected postStart.
+				log.V(utils.DebugLogLevel).Info("cannot merge non-Exec postStart hooks, keeping existing hook",
+					"existingHook", mainContainer.Lifecycle.PostStart,
+					"injectedHook", config.MainContainer.Lifecycle.PostStart)
 			}
+		} else {
+			// Main container doesn't have a valid postStart; apply the config directly.
 			mainContainer.Lifecycle.PostStart = config.MainContainer.Lifecycle.PostStart
 		}
 	}
@@ -319,4 +332,27 @@ func hasValidLifecycleHandler(handler *corev1.LifecycleHandler) bool {
 		return false
 	}
 	return handler.Exec != nil || handler.HTTPGet != nil || handler.TCPSocket != nil
+}
+
+// mergePostStartExecCommands merges the user's postStart Exec command into the injected postStart
+// command. The user's command slice is joined into a single space-separated string and appended as
+// an additional positional argument to the injected script, allowing the script to execute the
+// user's command after its own initialisation (via eval).
+// Returns nil when either handler is not an Exec action, because non-Exec handlers (HTTPGet /
+// TCPSocket) cannot be represented as a command string.
+// Returns the injected command unchanged when the user's command slice is empty.
+func mergePostStartExecCommands(injected, user *corev1.LifecycleHandler) []string {
+	if injected == nil || injected.Exec == nil || user == nil || user.Exec == nil {
+		return nil
+	}
+	// If the user's command is empty, there is nothing to append.
+	if len(user.Exec.Command) == 0 {
+		merged := make([]string, len(injected.Exec.Command))
+		copy(merged, injected.Exec.Command)
+		return merged
+	}
+	userCmdStr := strings.Join(user.Exec.Command, " ")
+	merged := make([]string, len(injected.Exec.Command), len(injected.Exec.Command)+1)
+	copy(merged, injected.Exec.Command)
+	return append(merged, userCmdStr)
 }
