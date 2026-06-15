@@ -234,38 +234,8 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 		log.Info("runtime inited", "cost", metrics.InitRuntime)
 	}
 
-	// Step 4: When SecurityIdentityProvider feature gate is enabled,
-	// the manager attempts to issue a security token via the identity provider, records its refresh status into
-	// sandbox annotations, and propagate the token to the runtime.
-	// Any failure in issuance, status recording, or propagation returns a retriable error so callers can retry.
-	// We deliberately do NOT degrade to a UUID token on issuance failure: a UUID carries no identity and would
-	// be propagated to the runtime as a meaningless credential, masking real provider outages.
-	if utilfeature.DefaultFeatureGate.Enabled(features.SecurityIdentityProviderGate) && identity.IsIdentityProviderRequested(sbx.Sandbox) {
-		opts.SecurityToken = &infra.SecurityTokenOptions{}
-		log.Info("starting to issue security token via identity provider")
-		metrics.SecurityToken, err = issueSecurityToken(ctx, sbx, opts.SecurityToken)
-		if err != nil {
-			log.Error(err, "failed to issue security token")
-			err = retriableError{Message: fmt.Sprintf("security token issuance failed: %s", err)}
-			return
-		}
-		metrics.Total += metrics.SecurityToken
-		// 4.1: to record security token refresh status in sandbox annotations.
-		// At this point modifyPickedSandbox has already persisted the locking
-		// patch, so additional annotation mutations on sbx.Sandbox would only
-		// live in memory. We patch via the apiserver here to actually persist
-		// the refresh status, and keep sbx.Sandbox in sync with the patched object.
-		if err = recordSecurityTokenRefreshStatus(ctx, cache.GetClient(), sbx, opts); err != nil {
-			log.Error(err, "failed to modify picked sandbox for security token status")
-			err = retriableError{Message: fmt.Sprintf("failed to modify picked sandbox for security token status: %s", err)}
-			return
-		}
-
-		// 4.2: to propagate security token to runtime
-		if err = identity.PropagateSandboxToken(ctx, sbx.Sandbox, &opts.SecurityToken.TokenResponse); err != nil {
-			err = retriableError{Message: fmt.Sprintf("security token propagation failed: %s", err)}
-			return
-		}
+	if err = processSecurityToken(ctx, opts, sbx, cache, &metrics); err != nil {
+		return
 	}
 
 	if opts.CSIMount != nil {
@@ -281,6 +251,39 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 	}
 
 	return
+}
+
+// processSecurityToken issues and propagates a sandbox security token when the
+// identity provider feature gate and sandbox annotations request it.
+func processSecurityToken(ctx context.Context, opts infra.ClaimSandboxOptions, sbx *Sandbox, cache infracache.Provider, metrics *infra.ClaimMetrics) error {
+	if !utilfeature.DefaultFeatureGate.Enabled(features.SecurityIdentityProviderGate) || !identity.IsIdentityProviderRequested(sbx.Sandbox) {
+		return nil
+	}
+
+	log := klog.FromContext(ctx)
+	opts.SecurityToken = &infra.SecurityTokenOptions{}
+	log.Info("starting to issue security token via identity provider")
+	var err error
+	metrics.SecurityToken, err = issueSecurityToken(ctx, sbx, opts.SecurityToken)
+	if err != nil {
+		log.Error(err, "failed to issue security token")
+		return retriableError{Message: fmt.Sprintf("security token issuance failed: %s", err)}
+	}
+	metrics.Total += metrics.SecurityToken
+
+	// At this point modifyPickedSandbox has already persisted the locking patch,
+	// so additional annotation mutations on sbx.Sandbox would only live in memory.
+	// Patch via the apiserver here to persist the refresh status, and keep
+	// sbx.Sandbox in sync with the patched object.
+	if err = recordSecurityTokenRefreshStatus(ctx, cache.GetClient(), sbx, opts); err != nil {
+		log.Error(err, "failed to modify picked sandbox for security token status")
+		return retriableError{Message: fmt.Sprintf("failed to modify picked sandbox for security token status: %s", err)}
+	}
+
+	if err = identity.PropagateSandboxToken(ctx, sbx.Sandbox, &opts.SecurityToken.TokenResponse); err != nil {
+		return retriableError{Message: fmt.Sprintf("security token propagation failed: %s", err)}
+	}
+	return nil
 }
 
 // clearFailedSandbox cleans up (or reserves) a failed sandbox according to
