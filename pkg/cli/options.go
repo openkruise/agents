@@ -21,6 +21,7 @@ import (
 
 	"github.com/spf13/pflag"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
@@ -105,4 +106,18 @@ func (o *GlobalOptions) DynamicClient() (dynamic.Interface, error) {
 		return nil, fmt.Errorf("failed to create dynamic client: %w", err)
 	}
 	return dc, nil
+}
+
+// KubeClient builds a kubernetes.Interface from the current flags.
+func (o *GlobalOptions) KubeClient() (kubernetes.Interface, error) {
+	config, err := o.RESTConfig()
+	if err != nil {
+		return nil, err
+	}
+
+	cs, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create kube clientset: %w", err)
+	}
+	return cs, nil
 }

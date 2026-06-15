@@ -187,6 +187,115 @@ func TestSetImageSandboxSet(t *testing.T) {
 	}
 }
 
+func TestIsSandboxSetUpdateComplete(t *testing.T) {
+	tests := []struct {
+		name     string
+		sbs      *agentsv1alpha1.SandboxSet
+		expected bool
+	}{
+		{
+			name: "update complete",
+			sbs: &agentsv1alpha1.SandboxSet{
+				Spec:   agentsv1alpha1.SandboxSetSpec{Replicas: 3},
+				Status: agentsv1alpha1.SandboxSetStatus{UpdatedReplicas: 3, AvailableReplicas: 3, UpdatedAvailableReplicas: 3},
+			},
+			expected: true,
+		},
+		{
+			name: "updating in progress",
+			sbs: &agentsv1alpha1.SandboxSet{
+				Spec:   agentsv1alpha1.SandboxSetSpec{Replicas: 3},
+				Status: agentsv1alpha1.SandboxSetStatus{UpdatedReplicas: 1, AvailableReplicas: 3, UpdatedAvailableReplicas: 1},
+			},
+			expected: false,
+		},
+		{
+			name: "updated but not available",
+			sbs: &agentsv1alpha1.SandboxSet{
+				Spec:   agentsv1alpha1.SandboxSetSpec{Replicas: 3},
+				Status: agentsv1alpha1.SandboxSetStatus{UpdatedReplicas: 3, AvailableReplicas: 2, UpdatedAvailableReplicas: 2},
+			},
+			expected: false,
+		},
+		{
+			name: "zero replicas",
+			sbs: &agentsv1alpha1.SandboxSet{
+				Spec:   agentsv1alpha1.SandboxSetSpec{Replicas: 0},
+				Status: agentsv1alpha1.SandboxSetStatus{UpdatedReplicas: 0, AvailableReplicas: 0, UpdatedAvailableReplicas: 0},
+			},
+			expected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := isSandboxSetUpdateComplete(tt.sbs)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestSetImageStatus(t *testing.T) {
+	tests := []struct {
+		name        string
+		sbsName     string
+		namespace   string
+		objects     []runtime.Object
+		expectError string
+		expectPhase string
+	}{
+		{
+			name:      "sandboxset not found",
+			sbsName:   "nonexistent",
+			namespace: "default",
+			objects:   []runtime.Object{},
+			expectError: "failed to get sandboxset",
+		},
+		{
+			name:      "update complete",
+			sbsName:   "test-sbs",
+			namespace: "default",
+			objects: []runtime.Object{
+				&agentsv1alpha1.SandboxSet{
+					ObjectMeta: metav1.ObjectMeta{Name: "test-sbs", Namespace: "default"},
+					Spec:       agentsv1alpha1.SandboxSetSpec{Replicas: 3},
+					Status:     agentsv1alpha1.SandboxSetStatus{UpdatedReplicas: 3, AvailableReplicas: 3, UpdatedAvailableReplicas: 3},
+				},
+			},
+			expectPhase: "Complete",
+		},
+		{
+			name:      "updating in progress",
+			sbsName:   "test-sbs",
+			namespace: "default",
+			objects: []runtime.Object{
+				&agentsv1alpha1.SandboxSet{
+					ObjectMeta: metav1.ObjectMeta{Name: "test-sbs", Namespace: "default"},
+					Spec:       agentsv1alpha1.SandboxSetSpec{Replicas: 3},
+					Status:     agentsv1alpha1.SandboxSetStatus{UpdatedReplicas: 1, AvailableReplicas: 2, UpdatedAvailableReplicas: 1},
+				},
+			},
+			expectPhase: "Updating",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cs := fake.NewSimpleClientset(tt.objects...)
+			globalOpts := &GlobalOptions{Namespace: tt.namespace}
+
+			err := runSetImageStatusWithClient(cs.ApiV1alpha1(), globalOpts, tt.sbsName, false)
+
+			if tt.expectError != "" {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
 func TestParseContainerImages(t *testing.T) {
 	tests := []struct {
 		name        string
