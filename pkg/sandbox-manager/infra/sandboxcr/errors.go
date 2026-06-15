@@ -75,7 +75,7 @@ func classifyCreateError(err error, contextMsg string) error {
 
 	// Invalid / BadRequest - terminal user error
 	if apierrors.IsInvalid(err) || apierrors.IsBadRequest(err) {
-		return managererrors.NewError(managererrors.ErrorBadRequest, "%s: %s", contextMsg, sanitizeCreateErrorMessage(err))
+		return managererrors.NewError(managererrors.ErrorBadRequest, "%s: %s", contextMsg, err)
 	}
 
 	// Forbidden - always a platform issue. The sandbox-manager service account
@@ -83,35 +83,33 @@ func classifyCreateError(err error, contextMsg string) error {
 	// admission webhook, PodSecurity, etc.) denied the operation. Either way
 	// this is a server-side misconfiguration, not the HTTP caller's fault.
 	if apierrors.IsForbidden(err) {
-		return managererrors.NewError(managererrors.ErrorInternal, "%s: sandbox creation failed due to platform configuration issue", contextMsg)
+		return newPlatformCreateError(err, contextMsg)
 	}
 
 	// Unauthorized - platform issue
 	if apierrors.IsUnauthorized(err) {
-		return managererrors.NewError(managererrors.ErrorInternal, "%s: sandbox creation failed due to platform configuration issue", contextMsg)
+		return newPlatformCreateError(err, contextMsg)
 	}
 
 	// NotFound (CRD/namespace missing) - platform issue
 	if apierrors.IsNotFound(err) {
-		return managererrors.NewError(managererrors.ErrorInternal, "%s: sandbox creation failed due to platform configuration issue", contextMsg)
+		return newPlatformCreateError(err, contextMsg)
 	}
 
 	// MethodNotSupported - platform issue
 	if apierrors.IsMethodNotSupported(err) {
-		return managererrors.NewError(managererrors.ErrorInternal, "%s: sandbox creation failed due to platform configuration issue", contextMsg)
+		return newPlatformCreateError(err, contextMsg)
 	}
 
 	// Non-StatusError (network errors, etc.) - retryable (conservative)
 	return retriableError{Message: fmt.Sprintf("%s: %s", contextMsg, err)}
 }
 
-// sanitizeCreateErrorMessage returns a user-facing error message that preserves
-// quota/admission denial reasons but strips internal Kubernetes details like
-// namespace paths and service account names.
-func sanitizeCreateErrorMessage(err error) string {
-	var statusErr *apierrors.StatusError
-	if !errors.As(err, &statusErr) {
-		return err.Error()
-	}
-	return statusErr.Status().Message
+func newPlatformCreateError(err error, contextMsg string) error {
+	return managererrors.NewError(
+		managererrors.ErrorInternal,
+		"%s: sandbox creation failed due to platform configuration issue: %s",
+		contextMsg,
+		err,
+	)
 }

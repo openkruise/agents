@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/wait"
 
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 )
@@ -45,6 +46,14 @@ func TestClassifyCreateError(t *testing.T) {
 			err:             nil,
 			contextMsg:      "create sandbox",
 			expectRetryable: false,
+		},
+		{
+			name:            "interrupted wait returns original error",
+			err:             wait.ErrWaitTimeout,
+			contextMsg:      "create sandbox",
+			expectRetryable: false,
+			expectErrorCode: managererrors.ErrorUnknown,
+			expectContains:  wait.ErrWaitTimeout.Error(),
 		},
 		{
 			name:            "quota exceeded (Forbidden) is terminal Internal (platform issue)",
@@ -111,6 +120,22 @@ func TestClassifyCreateError(t *testing.T) {
 			expectContains:  "create sandbox",
 		},
 		{
+			name:            "BadRequest is terminal BadRequest",
+			err:             apierrors.NewBadRequest("metadata.labels: Invalid value: unsupported label"),
+			contextMsg:      "create sandbox",
+			expectRetryable: false,
+			expectErrorCode: managererrors.ErrorBadRequest,
+			expectContains:  "create sandbox",
+		},
+		{
+			name:            "wrapped BadRequest is terminal BadRequest",
+			err:             fmt.Errorf("create request rejected: %w", apierrors.NewBadRequest("metadata.labels: Invalid value: unsupported label")),
+			contextMsg:      "create sandbox",
+			expectRetryable: false,
+			expectErrorCode: managererrors.ErrorBadRequest,
+			expectContains:  "create sandbox",
+		},
+		{
 			name:            "Server timeout is retryable",
 			err:             apierrors.NewServerTimeout(gr, "create", 1),
 			contextMsg:      "create sandbox",
@@ -162,6 +187,14 @@ func TestClassifyCreateError(t *testing.T) {
 			expectContains:  "platform configuration",
 		},
 		{
+			name:            "MethodNotSupported is terminal Internal (platform issue)",
+			err:             apierrors.NewMethodNotSupported(gr, "create"),
+			contextMsg:      "create sandbox",
+			expectRetryable: false,
+			expectErrorCode: managererrors.ErrorInternal,
+			expectContains:  "platform configuration",
+		},
+		{
 			name:            "non-StatusError network error is retryable",
 			err:             fmt.Errorf("connection refused"),
 			contextMsg:      "create sandbox",
@@ -186,6 +219,7 @@ func TestClassifyCreateError(t *testing.T) {
 			if tt.expectContains != "" {
 				assert.Contains(t, result.Error(), tt.expectContains)
 			}
+			assert.Contains(t, result.Error(), tt.err.Error())
 		})
 	}
 }
