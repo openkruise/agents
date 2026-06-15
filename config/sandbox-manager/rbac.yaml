@@ -44,6 +44,7 @@ rules:
     resources: [ "secrets" ]
     resourceNames:
       - e2b-key-store
+      - e2b-connect-system-key-store
     verbs: [ "get", "list", "watch", "update", "patch" ]
 ---
 apiVersion: rbac.authorization.k8s.io/v1

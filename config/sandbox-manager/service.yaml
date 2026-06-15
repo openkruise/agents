@@ -14,6 +14,14 @@ spec:
       targetPort: 7788
       protocol: TCP
       name: http-envoy
+    - name: manager
+      protocol: TCP
+      port: 8080
+      targetPort: 8080
+    - name: grpc-extproc
+      protocol: TCP
+      port: 9002
+      targetPort: 9002
   selector:
     component: sandbox-manager
     app.kubernetes.io/name: sandbox-manager

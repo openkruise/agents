@@ -90,15 +90,19 @@ func ConvertPodToSandboxCR(pod *corev1.Pod) *v1alpha1.Sandbox {
 
 func TestSandbox_SaveTimeoutWithPolicy(t *testing.T) {
 	base := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	const wakeKey = v1alpha1.AnnotationWakeOnTraffic
 
 	tests := []struct {
-		name          string
-		current       timeout.Options
-		requested     timeout.Options
-		policy        timeout.UpdatePolicy
-		expectUpdated bool
-		expectTimeout timeout.Options
-		expectError   string
+		name                 string
+		current              timeout.Options
+		currentAnnotations   map[string]string
+		requested            timeout.Options
+		requestedAnnotations map[string]string
+		policy               timeout.UpdatePolicy
+		expectUpdated        bool
+		expectTimeout        timeout.Options
+		expectAnnotations    map[string]string
+		expectError          string
 	}{
 		{
 			name: "always updates when requested timeout differs",
@@ -162,6 +166,92 @@ func TestSandbox_SaveTimeoutWithPolicy(t *testing.T) {
 				ShutdownTime: base.Add(10 * time.Minute),
 			},
 		},
+		{
+			name:                 "always: timeout matches but annotation absent -> add",
+			current:              timeout.Options{ShutdownTime: base.Add(10 * time.Minute)},
+			requested:            timeout.Options{ShutdownTime: base.Add(10 * time.Minute)},
+			requestedAnnotations: map[string]string{wakeKey: "timeout:600"},
+			policy:               timeout.UpdatePolicyAlways,
+			expectUpdated:        true,
+			expectTimeout:        timeout.Options{ShutdownTime: base.Add(10 * time.Minute)},
+			expectAnnotations:    map[string]string{wakeKey: "timeout:600"},
+		},
+		{
+			name:                 "always: timeout matches and annotation matches -> no update",
+			current:              timeout.Options{ShutdownTime: base.Add(10 * time.Minute)},
+			currentAnnotations:   map[string]string{wakeKey: "timeout:600"},
+			requested:            timeout.Options{ShutdownTime: base.Add(10 * time.Minute)},
+			requestedAnnotations: map[string]string{wakeKey: "timeout:600"},
+			policy:               timeout.UpdatePolicyAlways,
+			expectUpdated:        false,
+			expectTimeout:        timeout.Options{ShutdownTime: base.Add(10 * time.Minute)},
+			expectAnnotations:    map[string]string{wakeKey: "timeout:600"},
+		},
+		{
+			name:                 "always: timeout matches but annotation differs -> rewrite annotation",
+			current:              timeout.Options{ShutdownTime: base.Add(10 * time.Minute)},
+			currentAnnotations:   map[string]string{wakeKey: "timeout:300"},
+			requested:            timeout.Options{ShutdownTime: base.Add(10 * time.Minute)},
+			requestedAnnotations: map[string]string{wakeKey: "timeout:900"},
+			policy:               timeout.UpdatePolicyAlways,
+			expectUpdated:        true,
+			expectTimeout:        timeout.Options{ShutdownTime: base.Add(10 * time.Minute)},
+			expectAnnotations:    map[string]string{wakeKey: "timeout:900"},
+		},
+		{
+			name:                 "always: empty value deletes existing annotation key",
+			current:              timeout.Options{ShutdownTime: base.Add(10 * time.Minute)},
+			currentAnnotations:   map[string]string{wakeKey: "timeout:300"},
+			requested:            timeout.Options{ShutdownTime: base.Add(10 * time.Minute)},
+			requestedAnnotations: map[string]string{wakeKey: ""},
+			policy:               timeout.UpdatePolicyAlways,
+			expectUpdated:        true,
+			expectTimeout:        timeout.Options{ShutdownTime: base.Add(10 * time.Minute)},
+			expectAnnotations:    map[string]string{wakeKey: ""},
+		},
+		{
+			name:                 "always: empty value with no existing key -> no update",
+			current:              timeout.Options{ShutdownTime: base.Add(10 * time.Minute)},
+			requested:            timeout.Options{ShutdownTime: base.Add(10 * time.Minute)},
+			requestedAnnotations: map[string]string{wakeKey: ""},
+			policy:               timeout.UpdatePolicyAlways,
+			expectUpdated:        false,
+			expectTimeout:        timeout.Options{ShutdownTime: base.Add(10 * time.Minute)},
+			expectAnnotations:    map[string]string{wakeKey: ""},
+		},
+		{
+			name:                 "always: timeout differs and annotation differs -> single update writes both",
+			current:              timeout.Options{ShutdownTime: base.Add(10 * time.Minute)},
+			currentAnnotations:   map[string]string{wakeKey: "timeout:300"},
+			requested:            timeout.Options{ShutdownTime: base.Add(20 * time.Minute)},
+			requestedAnnotations: map[string]string{wakeKey: "timeout:1200"},
+			policy:               timeout.UpdatePolicyAlways,
+			expectUpdated:        true,
+			expectTimeout:        timeout.Options{ShutdownTime: base.Add(20 * time.Minute)},
+			expectAnnotations:    map[string]string{wakeKey: "timeout:1200"},
+		},
+		{
+			name:                 "extend only: shorter timeout no-op but annotation differs -> annotation only",
+			current:              timeout.Options{ShutdownTime: base.Add(25 * time.Minute)},
+			currentAnnotations:   map[string]string{wakeKey: "timeout:1500"},
+			requested:            timeout.Options{ShutdownTime: base.Add(10 * time.Minute)},
+			requestedAnnotations: map[string]string{wakeKey: "timeout:600"},
+			policy:               timeout.UpdatePolicyExtendOnly,
+			expectUpdated:        true,
+			expectTimeout:        timeout.Options{ShutdownTime: base.Add(25 * time.Minute)},
+			expectAnnotations:    map[string]string{wakeKey: "timeout:600"},
+		},
+		{
+			name:                 "extend only: timeout extends and annotation matches -> timeout only",
+			current:              timeout.Options{ShutdownTime: base.Add(10 * time.Minute)},
+			currentAnnotations:   map[string]string{wakeKey: "timeout:600"},
+			requested:            timeout.Options{ShutdownTime: base.Add(25 * time.Minute)},
+			requestedAnnotations: map[string]string{wakeKey: "timeout:600"},
+			policy:               timeout.UpdatePolicyExtendOnly,
+			expectUpdated:        true,
+			expectTimeout:        timeout.Options{ShutdownTime: base.Add(25 * time.Minute)},
+			expectAnnotations:    map[string]string{wakeKey: "timeout:600"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -170,6 +260,14 @@ func TestSandbox_SaveTimeoutWithPolicy(t *testing.T) {
 
 			sbx := createTestSandboxWithDefaults("test-sandbox", "default")
 			setTimeout(sbx, tt.current)
+			if tt.currentAnnotations != nil {
+				if sbx.Annotations == nil {
+					sbx.Annotations = map[string]string{}
+				}
+				for k, v := range tt.currentAnnotations {
+					sbx.Annotations[k] = v
+				}
+			}
 			CreateSandboxWithStatus(t, fc, sbx)
 
 			var sandbox infra.Sandbox
@@ -182,7 +280,10 @@ func TestSandbox_SaveTimeoutWithPolicy(t *testing.T) {
 				return err == nil
 			}, time.Second, 10*time.Millisecond)
 
-			result, err := sandbox.SaveTimeoutWithPolicy(t.Context(), tt.requested, tt.policy)
+			opts := tt.requested
+			opts.SetAnnotations = tt.requestedAnnotations
+
+			result, err := sandbox.SaveTimeoutWithPolicy(t.Context(), opts, tt.policy)
 			if tt.expectError != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.expectError)
@@ -195,6 +296,13 @@ func TestSandbox_SaveTimeoutWithPolicy(t *testing.T) {
 			var updated v1alpha1.Sandbox
 			require.NoError(t, fc.Get(t.Context(), types.NamespacedName{Namespace: sbx.Namespace, Name: sbx.Name}, &updated))
 			assert.True(t, timeout.Equal(tt.expectTimeout, timeout.GetTimeoutFromSandbox(&updated)))
+			for k, v := range tt.expectAnnotations {
+				if v == "" {
+					assert.NotContains(t, updated.Annotations, k, "annotation %s expected absent", k)
+				} else {
+					assert.Equal(t, v, updated.Annotations[k], "annotation %s mismatch", k)
+				}
+			}
 		})
 	}
 }
@@ -314,6 +422,111 @@ func TestSandbox_SaveTimeoutWithPolicy_OnConflict(t *testing.T) {
 	var updated v1alpha1.Sandbox
 	require.NoError(t, fc.Get(t.Context(), types.NamespacedName{Namespace: sbx.Namespace, Name: sbx.Name}, &updated))
 	assert.True(t, timeout.Equal(requested, timeout.GetTimeoutFromSandbox(&updated)))
+}
+
+func TestSandbox_SaveTimeoutWithPolicy_SetAnnotationsOnConflict(t *testing.T) {
+	scheme := k8sruntime.NewScheme()
+	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(v1alpha1.AddToScheme(scheme))
+
+	const concurrentAnnotationKey = "review.agents.kruise.io/concurrent"
+	var interceptedUpdates atomic.Int32
+
+	builder := fake.NewClientBuilder().WithScheme(scheme)
+	for _, idx := range infracache.GetIndexFuncs() {
+		builder = builder.WithIndex(idx.Obj, idx.FieldName, idx.Extract)
+	}
+	builder = builder.WithStatusSubresource(&v1alpha1.Sandbox{})
+	builder = builder.WithInterceptorFuncs(interceptor.Funcs{
+		Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+			sbx, ok := obj.(*v1alpha1.Sandbox)
+			if !ok {
+				return c.Update(ctx, obj, opts...)
+			}
+			if interceptedUpdates.Add(1) != 1 {
+				return c.Update(ctx, obj, opts...)
+			}
+
+			refreshed := &v1alpha1.Sandbox{}
+			key := client.ObjectKeyFromObject(sbx)
+			if err := c.Get(ctx, key, refreshed); err != nil {
+				return err
+			}
+			if refreshed.Annotations == nil {
+				refreshed.Annotations = map[string]string{}
+			}
+			refreshed.Annotations[v1alpha1.AnnotationWakeOnTraffic] = "timeout:450"
+			refreshed.Annotations[concurrentAnnotationKey] = "kept"
+			if err := c.Update(ctx, refreshed, opts...); err != nil {
+				return err
+			}
+			return apierrors.NewConflict(
+				schema.GroupResource{Group: v1alpha1.GroupVersion.Group, Resource: "sandboxes"},
+				sbx.Name,
+				errors.New("simulated conflict"),
+			)
+		},
+	})
+	fc := builder.Build()
+
+	mgrBuilder, err := controllers.NewMockManagerBuilder(t)
+	require.NoError(t, err)
+	mgr := mgrBuilder.
+		WithScheme(scheme).
+		WithClient(fc).
+		WithWaitSimulation().
+		Build()
+
+	testCache, err := infracache.NewCache(mgr)
+	require.NoError(t, err)
+	mgr.SetWaitHooks(testCache.GetWaitHooks())
+
+	options := config.InitOptions(config.SandboxManagerOptions{
+		DisableRouteReconciliation: true,
+	})
+	infraInstance := NewInfraBuilder(options).
+		WithCache(testCache).
+		WithAPIReader(fc).
+		WithProxy(proxy.NewServer(options)).
+		Build()
+	require.NoError(t, infraInstance.Run(t.Context()))
+	infraImpl := infraInstance.(*Infra)
+
+	base := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	current := timeout.Options{ShutdownTime: base.Add(10 * time.Minute)}
+
+	sbx := createTestSandboxWithDefaults("test-sandbox", "default")
+	setTimeout(sbx, current)
+	sbx.Annotations = map[string]string{
+		v1alpha1.AnnotationWakeOnTraffic: "timeout:300",
+	}
+	CreateSandboxWithStatus(t, fc, sbx)
+
+	var sandbox infra.Sandbox
+	require.Eventually(t, func() bool {
+		var getErr error
+		sandbox, getErr = infraImpl.GetClaimedSandbox(t.Context(), infra.GetClaimedSandboxOptions{
+			SandboxID: utils.GetSandboxID(sbx),
+			Namespace: sbx.Namespace,
+		})
+		return getErr == nil
+	}, time.Second, 10*time.Millisecond)
+
+	requested := current
+	requested.SetAnnotations = map[string]string{
+		v1alpha1.AnnotationWakeOnTraffic: "timeout:600",
+	}
+
+	result, saveErr := sandbox.SaveTimeoutWithPolicy(t.Context(), requested, timeout.UpdatePolicyAlways)
+	require.NoError(t, saveErr)
+	assert.True(t, result.Updated)
+	assert.Equal(t, int32(2), interceptedUpdates.Load())
+
+	var updated v1alpha1.Sandbox
+	require.NoError(t, fc.Get(t.Context(), types.NamespacedName{Namespace: sbx.Namespace, Name: sbx.Name}, &updated))
+	assert.True(t, timeout.Equal(current, timeout.GetTimeoutFromSandbox(&updated)))
+	assert.Equal(t, "timeout:600", updated.Annotations[v1alpha1.AnnotationWakeOnTraffic])
+	assert.Equal(t, "kept", updated.Annotations[concurrentAnnotationKey])
 }
 
 type countingReader struct {

@@ -17,8 +17,10 @@ limitations under the License.
 package e2b
 
 import (
+	"bytes"
 	"context"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -27,11 +29,40 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
+	"github.com/openkruise/agents/pkg/servers/web"
 )
+
+type rejectingKeyStorage struct{}
+
+func (rejectingKeyStorage) Init(context.Context) error { return nil }
+func (rejectingKeyStorage) Run()                       {}
+func (rejectingKeyStorage) Stop()                      {}
+func (rejectingKeyStorage) LoadByKey(context.Context, string) (*models.CreatedTeamAPIKey, bool) {
+	return nil, false
+}
+func (rejectingKeyStorage) LoadByID(context.Context, string) (*models.CreatedTeamAPIKey, bool) {
+	return nil, false
+}
+func (rejectingKeyStorage) CreateKey(context.Context, *models.CreatedTeamAPIKey, keys.CreateKeyOptions) (*models.CreatedTeamAPIKey, error) {
+	return nil, nil
+}
+func (rejectingKeyStorage) DeleteKey(context.Context, *models.CreatedTeamAPIKey) error { return nil }
+func (rejectingKeyStorage) ListByOwnerTeam(context.Context, *models.CreatedTeamAPIKey) ([]*models.TeamAPIKey, error) {
+	return nil, nil
+}
+func (rejectingKeyStorage) ListTeams(context.Context, *models.CreatedTeamAPIKey) ([]*models.ListedTeam, error) {
+	return nil, nil
+}
+func (rejectingKeyStorage) FindTeamByName(context.Context, string) (*models.Team, bool, error) {
+	return nil, false, nil
+}
 
 type lookupKeyStorage struct {
 	byKey map[string]*models.CreatedTeamAPIKey
@@ -75,6 +106,24 @@ func (s *lookupKeyStorage) ListTeams(context.Context, *models.CreatedTeamAPIKey)
 
 func (s *lookupKeyStorage) FindTeamByName(context.Context, string) (*models.Team, bool, error) {
 	return nil, false, nil
+}
+
+func newConnectSystemKeyStore(t testing.TB, value string) *keys.SystemKeyStore {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	require.NoError(t, clientgoscheme.AddToScheme(scheme))
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "sandbox-system",
+			Name:      keys.ConnectSystemKeySecretName,
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{keys.SystemKeyDataKey: []byte(value)},
+	}
+	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
+	store := keys.NewSystemKeyStore(fc, fc, "sandbox-system")
+	require.NoError(t, store.EnsureKeys(context.Background()))
+	return store
 }
 
 // TestCheckApiKey_BasicTests tests basic CheckApiKey middleware functionality
@@ -404,6 +453,149 @@ func TestCheckApiKey_AnonymousUserWithAdminKeyID(t *testing.T) {
 	assert.Equal(t, keys.AdminKeyID, AnonymousUser.ID, "AnonymousUser should have AdminKeyID")
 	assert.Equal(t, "auth-disabled", AnonymousUser.Name, "AnonymousUser should have auth-disabled name")
 	assert.Equal(t, models.AdminTeam(), AnonymousUser.Team, "AnonymousUser should carry canonical admin team")
+}
+
+func TestCheckApiKey_AuthDisabled_PreservesAnonymousWithoutRequiredHeader(t *testing.T) {
+	const systemKey = "system-key-secret-value"
+	tests := []struct {
+		name   string
+		header string
+	}{
+		{name: "absent header"},
+		{name: "ordinary header", header: "ordinary-user-looking-key"},
+		{name: "blank header", header: " \t "},
+		{name: "system key header on non opt-in route", header: systemKey},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sc := &Controller{keys: nil, systemKeys: newConnectSystemKeyStore(t, systemKey)}
+			req := httptest.NewRequest(http.MethodGet, "/v2/sandboxes", nil)
+			if tt.header != "" {
+				req.Header.Set("X-API-KEY", tt.header)
+			}
+
+			outCtx, apiErr := sc.CheckApiKey(context.Background(), req)
+			require.Nil(t, apiErr)
+			assert.Equal(t, AnonymousUser, GetUserFromContext(outCtx))
+			assert.False(t, AllowAnyOwnerFromContext(outCtx))
+		})
+	}
+}
+
+func TestAllowSystemKey_InjectsAcceptedScopes(t *testing.T) {
+	sc := &Controller{}
+	ctx, apiErr := sc.AllowSystemKey(keys.SystemAuthConnect)(context.Background(), httptest.NewRequest(http.MethodPost, "/", nil))
+	require.Nil(t, apiErr)
+
+	got := acceptedSystemScopesFromContext(ctx)
+	require.Len(t, got, 1)
+	assert.Equal(t, keys.SystemAuthConnect, got[0])
+}
+
+func TestAllowSystemKey_EmptyOnUnregistered(t *testing.T) {
+	assert.Empty(t, acceptedSystemScopesFromContext(context.Background()))
+}
+
+func TestCheckApiKey_SystemKey_Behavior(t *testing.T) {
+	const presented = "system-key-secret-value"
+	tests := []struct {
+		name           string
+		header         string
+		acceptedScopes []keys.SystemAuth
+		expectStatus   int
+		expectUserID   uuid.UUID
+		expectAllowAny bool
+	}{
+		{
+			name:           "system key on opt-in connect route passes",
+			header:         presented,
+			acceptedScopes: []keys.SystemAuth{keys.SystemAuthConnect},
+			expectUserID:   keys.SystemKeyIDConnect,
+			expectAllowAny: true,
+		},
+		{
+			name:         "system key on non-opt-in route rejected",
+			header:       presented,
+			expectStatus: http.StatusForbidden,
+		},
+		{
+			name:           "system key with disjoint scope rejected",
+			header:         presented,
+			acceptedScopes: []keys.SystemAuth{keys.SystemAuth("future-scope")},
+			expectStatus:   http.StatusForbidden,
+		},
+		{
+			name:           "blank header rejected for normal key storage mode",
+			header:         "",
+			acceptedScopes: []keys.SystemAuth{keys.SystemAuthConnect},
+			expectStatus:   http.StatusUnauthorized,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sc := &Controller{systemKeys: newConnectSystemKeyStore(t, presented), keys: rejectingKeyStorage{}}
+			req := httptest.NewRequest(http.MethodPost, "/sandboxes/abc/connect", nil)
+			req.Header.Set("X-API-KEY", tt.header)
+			ctx := context.Background()
+			if tt.acceptedScopes != nil {
+				var apiErr *web.ApiError
+				ctx, apiErr = sc.AllowSystemKey(tt.acceptedScopes...)(ctx, req)
+				require.Nil(t, apiErr)
+			}
+
+			outCtx, apiErr := sc.CheckApiKey(ctx, req)
+			if tt.expectStatus != 0 {
+				require.NotNil(t, apiErr)
+				assert.Equal(t, tt.expectStatus, apiErr.Code)
+				return
+			}
+			require.Nil(t, apiErr)
+			user := GetUserFromContext(outCtx)
+			require.NotNil(t, user)
+			assert.Equal(t, tt.expectUserID, user.ID)
+			assert.Equal(t, tt.expectAllowAny, AllowAnyOwnerFromContext(outCtx))
+		})
+	}
+}
+
+func TestSystemKey_RouteWhitelist_Connect(t *testing.T) {
+	const presented = "system-key-secret-value"
+	controller, _, teardown := Setup(t)
+	defer teardown()
+	controller.systemKeys = newConnectSystemKeyStore(t, presented)
+
+	tests := []struct {
+		name         string
+		method       string
+		path         string
+		body         string
+		expectStatus int
+	}{
+		{name: "connect accepts system key", method: http.MethodPost, path: "/sandboxes/anything/connect", body: `{"timeout":300}`, expectStatus: -1},
+		{name: "pause rejects system key", method: http.MethodPost, path: "/sandboxes/anything/pause", expectStatus: http.StatusForbidden},
+		{name: "delete rejects system key", method: http.MethodDelete, path: "/sandboxes/anything", expectStatus: http.StatusForbidden},
+		{name: "create rejects system key", method: http.MethodPost, path: "/sandboxes", expectStatus: http.StatusForbidden},
+		{name: "list rejects system key", method: http.MethodGet, path: "/v2/sandboxes", expectStatus: http.StatusForbidden},
+		{name: "timeout rejects system key", method: http.MethodPost, path: "/sandboxes/anything/timeout", expectStatus: http.StatusForbidden},
+		{name: "resume rejects system key", method: http.MethodPost, path: "/sandboxes/anything/resume", expectStatus: http.StatusForbidden},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, tt.path, bytes.NewBufferString(tt.body))
+			req.Header.Set("X-API-KEY", presented)
+			w := httptest.NewRecorder()
+			controller.mux.ServeHTTP(w, req)
+
+			if tt.expectStatus == -1 {
+				assert.NotEqual(t, http.StatusForbidden, w.Code)
+				return
+			}
+			assert.Equal(t, tt.expectStatus, w.Code)
+		})
+	}
 }
 
 // TestGetUserFromContext tests the GetUserFromContext helper function

@@ -116,7 +116,7 @@ func (m *SandboxManager) GetClaimedSandbox(ctx context.Context, user string, opt
 		return nil, errors.NewError(errors.ErrorNotFound, "sandbox %s not found", opts.SandboxID)
 	}
 
-	if sbx.GetRoute().Owner != user {
+	if !opts.AllowAnyOwner && sbx.GetRoute().Owner != user {
 		log.Error(nil, "sandbox is not owned by user")
 		return nil, errors.NewError(errors.ErrorNotAllowed, "sandbox %s is not owned", opts.SandboxID)
 	}

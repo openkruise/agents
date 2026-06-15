@@ -21,6 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -64,10 +65,16 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	return ctrl.Result{}, nil
 }
 
-func StartManager(ctx context.Context) error {
+// NewManager constructs the controller-runtime manager and registers the
+// SandboxReconciler, but does not start it. The caller owns the lifecycle and
+// must invoke mgr.Start(ctx). The scheme includes the client-go core types so
+// that mgr.GetAPIReader() can decode core resources (e.g. Secret, Pod) for the
+// gateway's one-shot reads, avoiding a second standalone client.
+func NewManager() (ctrl.Manager, error) {
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
 
 	scheme := runtime.NewScheme()
+	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(agentsv1alpha1.AddToScheme(scheme))
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
@@ -79,7 +86,7 @@ func StartManager(ctx context.Context) error {
 		},
 	})
 	if err != nil {
-		return fmt.Errorf("unable to create manager: %w", err)
+		return nil, fmt.Errorf("unable to create manager: %w", err)
 	}
 
 	if err := ctrl.NewControllerManagedBy(mgr).
@@ -88,8 +95,8 @@ func StartManager(ctx context.Context) error {
 			Client: mgr.GetClient(),
 			Scheme: mgr.GetScheme(),
 		}); err != nil {
-		return fmt.Errorf("unable to create controller: %w", err)
+		return nil, fmt.Errorf("unable to create controller: %w", err)
 	}
 
-	return mgr.Start(ctx)
+	return mgr, nil
 }

@@ -1803,3 +1803,37 @@ func TestInfra_DeleteCheckpoint_IgnoresNotFoundDuringDeletes(t *testing.T) {
 		})
 	}
 }
+
+func TestRefreshRoute_KeyedBySandboxID_AndRVAdvances(t *testing.T) {
+	infraInstance, _ := NewTestInfra(t, config.SandboxManagerOptions{
+		DisableRouteReconciliation: true,
+	})
+
+	sbx := createTestSandbox("test-sandbox", "default", v1alpha1.SandboxRunning, true)
+	sbx.Status.PodInfo.PodIP = "10.0.0.1"
+	sbx.ResourceVersion = "1"
+	if sbx.Annotations == nil {
+		sbx.Annotations = map[string]string{}
+	}
+	sbx.Annotations[v1alpha1.AnnotationWakeOnTraffic] = "timeout:300"
+
+	infraInstance.refreshRoute(sbx)
+
+	id := utils.GetSandboxID(sbx)
+	got, ok := infraInstance.Proxy.LoadRoute(id)
+	require.True(t, ok, "route must be stored under the sandbox ID %q", id)
+	assert.Equal(t, v1alpha1.SandboxStateRunning, got.State)
+	assert.Equal(t, "timeout:300", got.WakeOnTraffic)
+	assert.Equal(t, "1", got.ResourceVersion)
+
+	// A later reconcile with a newer RV must advance the stored route, keeping
+	// the registry RV fresh for isSandboxStale's cache-lag detection.
+	sbx.ResourceVersion = "2"
+	sbx.Annotations[v1alpha1.AnnotationWakeOnTraffic] = "timeout:600"
+	infraInstance.refreshRoute(sbx)
+
+	got, ok = infraInstance.Proxy.LoadRoute(id)
+	require.True(t, ok)
+	assert.Equal(t, "2", got.ResourceVersion)
+	assert.Equal(t, "timeout:600", got.WakeOnTraffic)
+}

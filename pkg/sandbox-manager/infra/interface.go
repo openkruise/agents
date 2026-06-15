@@ -89,6 +89,9 @@ type HasCheckpointOptions struct {
 type GetClaimedSandboxOptions struct {
 	Namespace string
 	SandboxID string
+	// AllowAnyOwner skips the per-request owner equality check in
+	// SandboxManager.GetClaimedSandbox. Normal API keys leave this false.
+	AllowAnyOwner bool
 }
 
 type SelectSandboxesOptions struct {

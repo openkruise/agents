@@ -226,6 +226,75 @@ func TestCsiMountOptionsConfigRecord(t *testing.T) {
 	}
 }
 
+func TestBasicSandboxCreateModifier_WakeOnTraffic(t *testing.T) {
+	tests := []struct {
+		name          string
+		request       models.NewSandboxRequest
+		expectAnnoVal string
+	}{
+		{
+			name: "autoResume nil writes no annotation",
+			request: models.NewSandboxRequest{
+				TemplateID: "tpl",
+				Timeout:    300,
+			},
+			expectAnnoVal: "",
+		},
+		{
+			name: "autoResume disabled writes no annotation",
+			request: models.NewSandboxRequest{
+				TemplateID: "tpl",
+				Timeout:    300,
+				AutoResume: &models.AutoResumeConfig{Enabled: false},
+			},
+			expectAnnoVal: "",
+		},
+		{
+			name: "autoResume enabled with finite timeout writes timeout:<seconds>",
+			request: models.NewSandboxRequest{
+				TemplateID: "tpl",
+				Timeout:    300,
+				AutoResume: &models.AutoResumeConfig{Enabled: true},
+			},
+			expectAnnoVal: "timeout:300",
+		},
+		{
+			name: "autoResume enabled with never-timeout writes timeout:never",
+			request: models.NewSandboxRequest{
+				TemplateID: "tpl",
+				Timeout:    300,
+				AutoResume: &models.AutoResumeConfig{Enabled: true},
+				Extensions: models.NewSandboxRequestExtension{
+					NeverTimeout: true,
+				},
+			},
+			expectAnnoVal: "timeout:never",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockSbx := &sandboxcr.Sandbox{
+				Sandbox: &agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-sandbox",
+						Namespace: "default",
+					},
+				},
+			}
+			ctrl := &Controller{maxTimeout: 86400}
+			ctrl.basicSandboxCreateModifier(context.Background(), mockSbx, tt.request)
+
+			if tt.expectAnnoVal == "" {
+				assert.NotContains(t, mockSbx.GetAnnotations(), agentsv1alpha1.AnnotationWakeOnTraffic)
+			} else {
+				got := mockSbx.GetAnnotations()[agentsv1alpha1.AnnotationWakeOnTraffic]
+				assert.Equal(t, tt.expectAnnoVal, got)
+			}
+		})
+	}
+}
+
 func TestCreateSandboxWithClaim_CSIMount(t *testing.T) {
 	tests := []struct {
 		name               string
@@ -503,4 +572,45 @@ func TestParseCreateSandboxRequest(t *testing.T) {
 		assert.Equal(t, http.StatusBadRequest, apiErr.Code)
 		assert.Contains(t, apiErr.Message, "timeout should between")
 	})
+}
+
+func TestParseCreateSandboxRequest_AutoResumeRequiresAutoPause(t *testing.T) {
+	tests := []struct {
+		name        string
+		body        string
+		expectError string
+	}{
+		{
+			name:        "autoResume enabled without autoPause is rejected",
+			body:        `{"templateID":"t","timeout":300,"autoResume":{"enabled":true}}`,
+			expectError: "autoResume requires autoPause",
+		},
+		{
+			name: "autoResume enabled with autoPause is allowed",
+			body: `{"templateID":"t","timeout":300,"autoPause":true,"autoResume":{"enabled":true}}`,
+		},
+		{
+			name: "autoResume disabled without autoPause is allowed",
+			body: `{"templateID":"t","timeout":300,"autoResume":{"enabled":false}}`,
+		},
+		{
+			name: "autoResume absent is allowed",
+			body: `{"templateID":"t","timeout":300}`,
+		},
+	}
+
+	sc := &Controller{maxTimeout: 86400}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/sandboxes", strings.NewReader(tt.body))
+			_, apiErr := sc.parseCreateSandboxRequest(req)
+			if tt.expectError != "" {
+				require.NotNil(t, apiErr)
+				assert.Equal(t, http.StatusBadRequest, apiErr.Code)
+				assert.Contains(t, apiErr.Message, tt.expectError)
+			} else {
+				assert.Nil(t, apiErr)
+			}
+		})
+	}
 }

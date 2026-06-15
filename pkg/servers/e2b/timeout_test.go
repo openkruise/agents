@@ -293,6 +293,107 @@ func TestSetSandboxTimeoutStillShortensRunningSandbox(t *testing.T) {
 	assert.WithinDuration(t, beforeSet.Add(time.Duration(shorterSeconds)*time.Second), sbx.Spec.ShutdownTime.Time, 5*time.Second)
 }
 
+func TestSetSandboxTimeoutSyncsWakeAnnotation(t *testing.T) {
+	tests := []struct {
+		name                  string
+		templateName          string
+		initialTimeoutSeconds int
+		requestTimeoutSeconds int
+		initialAnnotations    map[string]string
+		expectAnnotation      string
+		expectAbsent          bool
+	}{
+		{
+			name:                  "absent annotation is not added",
+			templateName:          "test-timeout-wake-absent",
+			initialTimeoutSeconds: 300,
+			requestTimeoutSeconds: 600,
+			expectAbsent:          true,
+		},
+		{
+			name:                  "empty annotation is not synced",
+			templateName:          "test-timeout-wake-empty",
+			initialTimeoutSeconds: 300,
+			requestTimeoutSeconds: 600,
+			initialAnnotations: map[string]string{
+				v1alpha1.AnnotationWakeOnTraffic: "",
+			},
+			expectAnnotation: "",
+		},
+		{
+			name:                  "longer timeout rewrites existing annotation",
+			templateName:          "test-timeout-wake-longer",
+			initialTimeoutSeconds: 300,
+			requestTimeoutSeconds: 600,
+			initialAnnotations: map[string]string{
+				v1alpha1.AnnotationWakeOnTraffic: "timeout:300",
+			},
+			expectAnnotation: "timeout:600",
+		},
+		{
+			name:                  "shorter timeout rewrites existing annotation",
+			templateName:          "test-timeout-wake-shorter",
+			initialTimeoutSeconds: 600,
+			requestTimeoutSeconds: 300,
+			initialAnnotations: map[string]string{
+				v1alpha1.AnnotationWakeOnTraffic: "timeout:600",
+			},
+			expectAnnotation: "timeout:300",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			controller, client, teardown := Setup(t)
+			defer teardown()
+			user := &models.CreatedTeamAPIKey{
+				ID:   keys.AdminKeyID,
+				Key:  InitKey,
+				Name: "admin",
+			}
+
+			cleanup := CreateSandboxPool(t, controller, tt.templateName, 1)
+			defer cleanup()
+
+			createResp, err := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
+				TemplateID: tt.templateName,
+				Timeout:    tt.initialTimeoutSeconds,
+				Metadata: map[string]string{
+					models.ExtensionKeySkipInitRuntime: v1alpha1.True,
+				},
+			}, nil, user))
+			require.Nil(t, err)
+			assert.Equal(t, models.SandboxStateRunning, createResp.Body.State)
+
+			if tt.initialAnnotations != nil {
+				sbx := GetSandbox(t, createResp.Body.SandboxID, client)
+				if sbx.Annotations == nil {
+					sbx.Annotations = map[string]string{}
+				}
+				for k, v := range tt.initialAnnotations {
+					sbx.Annotations[k] = v
+				}
+				require.NoError(t, client.Update(t.Context(), sbx))
+			}
+
+			_, apiError := controller.SetSandboxTimeout(NewRequest(t, nil, models.SetTimeoutRequest{
+				TimeoutSeconds: tt.requestTimeoutSeconds,
+			}, map[string]string{
+				"sandboxID": createResp.Body.SandboxID,
+			}, user))
+			require.Nil(t, apiError)
+
+			sbx := GetSandbox(t, createResp.Body.SandboxID, client)
+			if tt.expectAbsent {
+				assert.NotContains(t, sbx.Annotations, v1alpha1.AnnotationWakeOnTraffic)
+			} else {
+				got := sbx.Annotations[v1alpha1.AnnotationWakeOnTraffic]
+				assert.Equal(t, tt.expectAnnotation, got)
+			}
+		})
+	}
+}
+
 // TestResumeSandboxExtendOnlyPreventsStaleConnectTimeout verifies that after
 // Resume sets a longer timeout, a subsequent updateConnectTimeout call with a
 // shorter requested value does NOT shrink the deadline — the ExtendOnly

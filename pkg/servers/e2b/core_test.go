@@ -63,6 +63,58 @@ var TestServerPort = 9999
 var Namespace = models.AdminTeamName
 var InitKey = "admin-987654321"
 
+func TestInitSystemKey(t *testing.T) {
+	tests := []struct {
+		name             string
+		hasCache         bool
+		keyCfg           *keys.Config
+		expectSystemKeys bool
+	}{
+		{
+			name:             "auth disabled initializes system keys when cache exists",
+			hasCache:         true,
+			keyCfg:           nil,
+			expectSystemKeys: true,
+		},
+		{
+			name:             "auth enabled initializes system keys when cache exists",
+			hasCache:         true,
+			keyCfg:           &keys.Config{},
+			expectSystemKeys: true,
+		},
+		{
+			name:             "missing cache skips system key initialization",
+			hasCache:         false,
+			keyCfg:           &keys.Config{},
+			expectSystemKeys: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var cacheProvider infracache.Provider
+			if tt.hasCache {
+				var err error
+				cacheProvider, _, err = cachetest.NewTestCache(t)
+				require.NoError(t, err)
+			}
+			controller := &Controller{
+				cache:           cacheProvider,
+				systemNamespace: "sandbox-system",
+				keyCfg:          tt.keyCfg,
+			}
+
+			controller.initSystemKey()
+
+			if tt.expectSystemKeys {
+				assert.NotNil(t, controller.systemKeys)
+			} else {
+				assert.Nil(t, controller.systemKeys)
+			}
+		})
+	}
+}
+
 func CreateSandboxWithStatus(t *testing.T, c ctrlclient.Client, sbx *agentsv1alpha1.Sandbox) {
 	t.Helper()
 	ctx := t.Context()
@@ -142,6 +194,16 @@ func SetupWithMinResumeTimeout(t *testing.T, minResumeTimeout int) (*Controller,
 	}
 	require.NoError(t, fc.Create(t.Context(), secret))
 
+	systemSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      keys.ConnectSystemKeySecretName,
+			Namespace: namespace,
+		},
+		Data: map[string][]byte{},
+		Type: corev1.SecretTypeOpaque,
+	}
+	require.NoError(t, fc.Create(t.Context(), systemSecret))
+
 	proxyServer := proxy.NewServer(opts)
 	infraInstance := sandboxcr.NewInfraBuilder(opts).
 		WithCache(cache).
@@ -165,6 +227,7 @@ func SetupWithMinResumeTimeout(t *testing.T, minResumeTimeout int) (*Controller,
 	controller.cache = cache
 	controller.manager = sandboxManager
 	controller.storageRegistry = storages.NewStorageProvider()
+	controller.systemKeys = keys.NewSystemKeyStore(fc, fc, namespace)
 	controller.registerRoutes()
 
 	require.NoError(t, controller.initKeyStorage(t.Context()))

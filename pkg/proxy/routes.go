@@ -25,6 +25,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/openkruise/agents/pkg/utils"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
@@ -40,7 +41,7 @@ import (
 type Route = proxyutils.Route
 
 func (s *Server) SetRoute(ctx context.Context, route Route) {
-	log := klog.FromContext(ctx)
+	log := klog.FromContext(ctx).V(utils.DebugLogLevel)
 	log.Info("try to set route", "new", route)
 	for {
 		old, loaded := s.routes.LoadOrStore(route.ID, route)
