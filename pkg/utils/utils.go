@@ -337,8 +337,13 @@ func IsSandboxPausable(sbx *agentsv1alpha1.Sandbox) (bool, string) {
 		}
 	}
 	switch sbx.Status.Phase {
-	case agentsv1alpha1.SandboxRunning, agentsv1alpha1.SandboxPaused:
-		return true, "SandboxIsRunningOrPaused"
+	case agentsv1alpha1.SandboxPaused:
+		return true, "SandboxIsPaused"
+	case agentsv1alpha1.SandboxRunning:
+		if IsSandboxReady(sbx) {
+			return true, "SandboxIsRunningAndReady"
+		}
+		return false, "SandboxIsRunningButNotReady"
 	default:
 		return false, "SandboxPhaseNotAllowed"
 	}
@@ -346,6 +351,15 @@ func IsSandboxPausable(sbx *agentsv1alpha1.Sandbox) (bool, string) {
 
 // IsSandboxResumable returns true when the resuming operation will not cause any conflict.
 func IsSandboxResumable(sbx *agentsv1alpha1.Sandbox) (bool, string) {
+	// Reject resume on sandboxes that are being deleted or have exceeded their shutdown time.
+	// These are the same pre-checks GetSandboxState performs before evaluating phase-based states.
+	if sbx.DeletionTimestamp != nil {
+		return false, "SandboxIsTerminating"
+	}
+	if sbx.Spec.ShutdownTime != nil && nowFunc().After(sbx.Spec.ShutdownTime.Time) {
+		return false, "ShutdownTimeReached"
+	}
+
 	switch sbx.Status.Phase {
 	case agentsv1alpha1.SandboxRunning:
 		if sbx.Spec.Paused {

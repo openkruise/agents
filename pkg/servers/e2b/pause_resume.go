@@ -40,7 +40,7 @@ func (sc *Controller) PauseSandbox(r *http.Request) (web.ApiResponse[struct{}], 
 	id := r.PathValue("sandboxID")
 	ctx := r.Context()
 	log := klog.FromContext(ctx).WithValues("sandboxID", id)
-	sbx, apiErr := sc.getSandboxOfUser(ctx, id)
+	sbx, apiErr := sc.getSandboxOfUser(ctx, id, claimedSandboxStates)
 	if apiErr != nil {
 		return web.ApiResponse[struct{}]{}, apiErr
 	}
@@ -124,7 +124,7 @@ func (sc *Controller) ResumeSandbox(r *http.Request) (web.ApiResponse[struct{}],
 		return web.ApiResponse[struct{}]{}, apiErr
 	}
 
-	sbx, apiErr := sc.getSandboxOfUser(ctx, id)
+	sbx, apiErr := sc.getSandboxOfUser(ctx, id, claimedSandboxStates)
 	if apiErr != nil {
 		return web.ApiResponse[struct{}]{}, apiErr
 	}
@@ -188,7 +188,7 @@ func (sc *Controller) ConnectSandbox(r *http.Request) (web.ApiResponse[*models.S
 		return web.ApiResponse[*models.Sandbox]{}, apiErr
 	}
 
-	sbx, apiErr := sc.getSandboxOfUser(ctx, id)
+	sbx, apiErr := sc.getSandboxOfUser(ctx, id, claimedSandboxStates)
 	if apiErr != nil {
 		return web.ApiResponse[*models.Sandbox]{}, apiErr
 	}

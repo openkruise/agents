@@ -44,7 +44,7 @@ func (sc *Controller) DescribeSandbox(r *http.Request) (web.ApiResponse[*models.
 	log := klog.FromContext(r.Context())
 	log.Info("describe sandbox", "id", id)
 
-	sbx, err := sc.getSandboxOfUser(r.Context(), id)
+	sbx, err := sc.getSandboxOfUser(r.Context(), id, claimedSandboxStates)
 	if err != nil {
 		log.Error(err, "failed to get sandbox", "id", id)
 		return web.ApiResponse[*models.Sandbox]{}, err
@@ -59,7 +59,7 @@ func (sc *Controller) DescribeSandbox(r *http.Request) (web.ApiResponse[*models.
 func (sc *Controller) DeleteSandbox(r *http.Request) (web.ApiResponse[struct{}], *web.ApiError) {
 	id := r.PathValue("sandboxID")
 	log := klog.FromContext(r.Context())
-	sbx, apiError := sc.getSandboxOfUser(r.Context(), id)
+	sbx, apiError := sc.getSandboxOfUser(r.Context(), id, claimedSandboxStates)
 	if apiError != nil {
 		log.Error(apiError, "failed to get sandbox, just return success", "id", id)
 		return web.ApiResponse[struct{}]{
@@ -117,7 +117,7 @@ func (sc *Controller) BrowserUse(r *http.Request) (web.ApiResponse[*browserHandS
 	if apiErr != nil {
 		return web.ApiResponse[*browserHandShake]{}, apiErr
 	}
-	sbx, apiErr := sc.getSandboxOfUser(r.Context(), sandboxID)
+	sbx, apiErr := sc.getSandboxOfUser(r.Context(), sandboxID, liveSandboxStates)
 	if apiErr != nil {
 		return web.ApiResponse[*browserHandShake]{}, apiErr
 	}

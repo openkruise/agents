@@ -1638,7 +1638,7 @@ func TestSandbox_ResumeMutatorAtomicity(t *testing.T) {
 func TestSandbox_ResumeExtendOnlyConcurrent(t *testing.T) {
 	utestutils.InitLogOutput()
 
-	now := time.Date(2026, 5, 22, 10, 0, 0, 0, time.UTC)
+	now := time.Now().UTC().Truncate(time.Second)
 	staleOpts := timeout.Options{
 		PauseTime:    now.Add(-5 * time.Minute),
 		ShutdownTime: now.Add(24 * time.Hour),

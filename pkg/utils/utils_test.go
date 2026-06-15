@@ -1585,14 +1585,36 @@ func TestIsSandboxPausable(t *testing.T) {
 		expectedReason string
 	}{
 		{
-			name: "Running sandbox is pausable",
+			name: "Running ready sandbox is pausable",
 			sandbox: &agentsv1alpha1.Sandbox{
 				Status: agentsv1alpha1.SandboxStatus{
 					Phase: agentsv1alpha1.SandboxRunning,
+					Conditions: []metav1.Condition{
+						{
+							Type:   string(agentsv1alpha1.SandboxConditionReady),
+							Status: metav1.ConditionTrue,
+						},
+					},
 				},
 			},
 			expectedResult: true,
-			expectedReason: "SandboxIsRunningOrPaused",
+			expectedReason: "SandboxIsRunningAndReady",
+		},
+		{
+			name: "Running not-ready sandbox is not pausable",
+			sandbox: &agentsv1alpha1.Sandbox{
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxRunning,
+					Conditions: []metav1.Condition{
+						{
+							Type:   string(agentsv1alpha1.SandboxConditionReady),
+							Status: metav1.ConditionFalse,
+						},
+					},
+				},
+			},
+			expectedResult: false,
+			expectedReason: "SandboxIsRunningButNotReady",
 		},
 		{
 			name: "Paused sandbox is pausable",
@@ -1602,7 +1624,7 @@ func TestIsSandboxPausable(t *testing.T) {
 				},
 			},
 			expectedResult: true,
-			expectedReason: "SandboxIsRunningOrPaused",
+			expectedReason: "SandboxIsPaused",
 		},
 		{
 			name: "Pending sandbox is not pausable",
@@ -1700,6 +1722,64 @@ func TestIsSandboxResumable(t *testing.T) {
 			},
 			expectedResult: false,
 			expectedReason: "SandboxPhaseNotAllowed",
+		},
+		{
+			name: "Deleting sandbox is not resumable",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					DeletionTimestamp: &metav1.Time{Time: time.Now().Add(-time.Minute)},
+					Finalizers:        []string{"test-finalizer"},
+				},
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxPaused,
+					Conditions: []metav1.Condition{
+						{
+							Type:   string(agentsv1alpha1.SandboxConditionPaused),
+							Status: metav1.ConditionTrue,
+						},
+					},
+				},
+			},
+			expectedResult: false,
+			expectedReason: "SandboxIsTerminating",
+		},
+		{
+			name: "ShutdownTime reached sandbox is not resumable",
+			sandbox: &agentsv1alpha1.Sandbox{
+				Spec: agentsv1alpha1.SandboxSpec{
+					ShutdownTime: &metav1.Time{Time: time.Now().Add(-time.Minute)},
+				},
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxPaused,
+					Conditions: []metav1.Condition{
+						{
+							Type:   string(agentsv1alpha1.SandboxConditionPaused),
+							Status: metav1.ConditionTrue,
+						},
+					},
+				},
+			},
+			expectedResult: false,
+			expectedReason: "ShutdownTimeReached",
+		},
+		{
+			name: "ShutdownTime not reached falls through to phase check",
+			sandbox: &agentsv1alpha1.Sandbox{
+				Spec: agentsv1alpha1.SandboxSpec{
+					ShutdownTime: &metav1.Time{Time: time.Now().Add(time.Hour)},
+				},
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxPaused,
+					Conditions: []metav1.Condition{
+						{
+							Type:   string(agentsv1alpha1.SandboxConditionPaused),
+							Status: metav1.ConditionTrue,
+						},
+					},
+				},
+			},
+			expectedResult: true,
+			expectedReason: "SandboxIsPaused",
 		},
 	}
 

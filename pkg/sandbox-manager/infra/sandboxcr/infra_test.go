@@ -256,7 +256,9 @@ func TestInfra_GetSandbox(t *testing.T) {
 			// Test GetClaimedSandbox
 			ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 			defer cancel()
-			result, err := infraInstance.GetClaimedSandbox(ctx, infra.GetClaimedSandboxOptions{SandboxID: tt.sandboxID})
+			result, err := infraInstance.GetSandbox(ctx, infra.GetSandboxOptions{
+				SandboxID:      tt.sandboxID,
+			})
 			if tt.expectError {
 				assert.Error(t, err)
 				assert.Nil(t, result)
@@ -286,9 +288,9 @@ func TestInfra_GetClaimedSandboxWithOptions_NamespaceScoped(t *testing.T) {
 	CreateSandboxWithStatus(t, fc, sbx)
 	sandboxID := utils.GetSandboxID(sbx)
 
-	got, err := infraInstance.GetClaimedSandbox(t.Context(), infra.GetClaimedSandboxOptions{
-		Namespace: "team-a",
-		SandboxID: sandboxID,
+	got, err := infraInstance.GetSandbox(t.Context(), infra.GetSandboxOptions{
+		Namespace:      "team-a",
+		SandboxID:      sandboxID,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "team-a", got.GetNamespace())
@@ -296,9 +298,9 @@ func TestInfra_GetClaimedSandboxWithOptions_NamespaceScoped(t *testing.T) {
 
 	getCtx, cancel := context.WithTimeout(t.Context(), 10*time.Millisecond)
 	defer cancel()
-	_, err = infraInstance.GetClaimedSandbox(getCtx, infra.GetClaimedSandboxOptions{
-		Namespace: "team-b",
-		SandboxID: sandboxID,
+	_, err = infraInstance.GetSandbox(getCtx, infra.GetSandboxOptions{
+		Namespace:      "team-b",
+		SandboxID:      sandboxID,
 	})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, context.DeadlineExceeded)
@@ -350,9 +352,9 @@ func TestInfra_GetClaimedSandbox_CacheMiss_WaitsUntilCacheHit(t *testing.T) {
 
 			ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
 			defer cancel()
-			got, err := infraInstance.GetClaimedSandbox(ctx, infra.GetClaimedSandboxOptions{
-				Namespace: "team-a",
-				SandboxID: id,
+			got, err := infraInstance.GetSandbox(ctx, infra.GetSandboxOptions{
+				Namespace:      "team-a",
+				SandboxID:      id,
 			})
 
 			require.NoError(t, err)
@@ -401,9 +403,9 @@ func TestInfra_GetClaimedSandbox_SharedContextError_RetriesWhileContextLive(t *t
 
 			ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
 			defer cancel()
-			got, err := infraInstance.GetClaimedSandbox(ctx, infra.GetClaimedSandboxOptions{
-				Namespace: "team-a",
-				SandboxID: id,
+			got, err := infraInstance.GetSandbox(ctx, infra.GetSandboxOptions{
+				Namespace:      "team-a",
+				SandboxID:      id,
 			})
 
 			if tt.expectError != "" {
@@ -451,9 +453,9 @@ func TestInfra_GetClaimedSandbox_CacheMiss_ReturnsContextError(t *testing.T) {
 
 			ctx, cancel := context.WithTimeout(t.Context(), 75*time.Millisecond)
 			defer cancel()
-			got, err := infraInstance.GetClaimedSandbox(ctx, infra.GetClaimedSandboxOptions{
-				Namespace: "team-a",
-				SandboxID: id,
+			got, err := infraInstance.GetSandbox(ctx, infra.GetSandboxOptions{
+				Namespace:      "team-a",
+				SandboxID:      id,
 			})
 
 			require.Error(t, err)
@@ -483,9 +485,9 @@ func TestInfra_GetClaimedSandbox_RouteRVNewerThanCache_FallsBackToAPIReader(t *t
 		ResourceVersion: "777",
 	})
 
-	got, err := infraInstance.GetClaimedSandbox(t.Context(), infra.GetClaimedSandboxOptions{
-		Namespace: "team-a",
-		SandboxID: id,
+	got, err := infraInstance.GetSandbox(t.Context(), infra.GetSandboxOptions{
+		Namespace:      "team-a",
+		SandboxID:      id,
 	})
 
 	require.NoError(t, err)
@@ -517,9 +519,9 @@ func TestInfra_GetClaimedSandbox_CacheRVEqualsRouteRV_NoFallback(t *testing.T) {
 		ResourceVersion: rv,
 	})
 
-	got, err := infraInstance.GetClaimedSandbox(t.Context(), infra.GetClaimedSandboxOptions{
-		Namespace: "team-a",
-		SandboxID: id,
+	got, err := infraInstance.GetSandbox(t.Context(), infra.GetSandboxOptions{
+		Namespace:      "team-a",
+		SandboxID:      id,
 	})
 
 	require.NoError(t, err)
@@ -568,9 +570,9 @@ func TestInfra_GetClaimedSandbox_StaleCacheFallback_APIReaderRequiresClaimedLabe
 
 			ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
 			defer cancel()
-			got, err := infraInstance.GetClaimedSandbox(ctx, infra.GetClaimedSandboxOptions{
-				Namespace: "team-a",
-				SandboxID: id,
+			got, err := infraInstance.GetSandbox(ctx, infra.GetSandboxOptions{
+				Namespace:      "team-a",
+				SandboxID:      id,
 			})
 
 			require.Error(t, err)
@@ -598,9 +600,9 @@ func TestInfra_GetClaimedSandbox_StaleCacheFallback_APIReaderNotFound_WrapsCache
 
 	ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
 	defer cancel()
-	got, err := infraInstance.GetClaimedSandbox(ctx, infra.GetClaimedSandboxOptions{
-		Namespace: "team-a",
-		SandboxID: id,
+	got, err := infraInstance.GetSandbox(ctx, infra.GetSandboxOptions{
+		Namespace:      "team-a",
+		SandboxID:      id,
 	})
 
 	require.Error(t, err)

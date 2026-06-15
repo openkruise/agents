@@ -362,7 +362,7 @@ func TestSandboxManager_NamespaceAwareSandboxOptions(t *testing.T) {
 	assert.Equal(t, "team-a", list[0].GetNamespace())
 	assert.Equal(t, "sandbox-a", list[0].GetName())
 
-	got, err := manager.GetClaimedSandbox(t.Context(), testUser, infra.GetClaimedSandboxOptions{
+	got, err := manager.GetSandbox(t.Context(), testUser, []string{agentsv1alpha1.SandboxStateRunning, agentsv1alpha1.SandboxStatePaused}, infra.GetSandboxOptions{
 		Namespace: "team-b",
 		SandboxID: utils.GetSandboxID(sandboxes[1]),
 	})
@@ -372,7 +372,7 @@ func TestSandboxManager_NamespaceAwareSandboxOptions(t *testing.T) {
 
 	getCtx, cancel := context.WithTimeout(t.Context(), 10*time.Millisecond)
 	defer cancel()
-	_, err = manager.GetClaimedSandbox(getCtx, testUser, infra.GetClaimedSandboxOptions{
+	_, err = manager.GetSandbox(getCtx, testUser, []string{agentsv1alpha1.SandboxStateRunning, agentsv1alpha1.SandboxStatePaused}, infra.GetSandboxOptions{
 		Namespace: "team-a",
 		SandboxID: utils.GetSandboxID(sandboxes[1]),
 	})
@@ -506,7 +506,7 @@ func TestSandboxManager_GetClaimedSandbox(t *testing.T) {
 			name:              "Get available pod should return error",
 			sandboxID:         "default--available-pod",
 			expectError:       true,
-			expectedErrorCode: errors.ErrorNotFound,
+			expectedErrorCode: errors.ErrorNotAllowed,
 			expectedState:     "",
 		},
 		{
@@ -529,7 +529,9 @@ func TestSandboxManager_GetClaimedSandbox(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 			defer cancel()
-			sbx, err := manager.GetClaimedSandbox(ctx, testUser, infra.GetClaimedSandboxOptions{SandboxID: tt.sandboxID})
+			sbx, err := manager.GetSandbox(ctx, testUser, []string{agentsv1alpha1.SandboxStateRunning, agentsv1alpha1.SandboxStatePaused}, infra.GetSandboxOptions{
+				SandboxID: tt.sandboxID,
+			})
 
 			if tt.expectError {
 				if err == nil {
@@ -547,6 +549,87 @@ func TestSandboxManager_GetClaimedSandbox(t *testing.T) {
 					t.Errorf("Expected pod state %s, got %s(%s)", tt.expectedState, state, reason)
 				}
 			}
+		})
+	}
+}
+
+func TestSandboxManager_GetClaimedSandboxExpectedStates(t *testing.T) {
+	manager, client := setupTestManager(t)
+
+	notReadySbx := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "not-ready-pod",
+			Namespace: "default",
+			Labels: map[string]string{
+				agentsv1alpha1.LabelSandboxIsClaimed: "true",
+			},
+			Annotations: map[string]string{
+				agentsv1alpha1.AnnotationOwner: testUser,
+			},
+			CreationTimestamp: metav1.Now(),
+		},
+		Status: agentsv1alpha1.SandboxStatus{
+			Phase: agentsv1alpha1.SandboxRunning,
+			Conditions: []metav1.Condition{
+				{
+					Type:   string(agentsv1alpha1.SandboxConditionReady),
+					Status: metav1.ConditionFalse,
+				},
+			},
+		},
+	}
+	CreateSandboxWithStatus(t, client, notReadySbx)
+
+	tests := []struct {
+		name              string
+		user              string
+		sandboxID         string
+		expectError       string
+		expectedErrorCode errors.ErrorCode
+		expectedState     string
+		expectedReason    string
+	}{
+		{
+			name:           "owned not-ready running sandbox is returned",
+			user:           testUser,
+			sandboxID:      utils.GetSandboxID(notReadySbx),
+			expectedState:  agentsv1alpha1.SandboxStateDead,
+			expectedReason: "RunningResourceClaimedButNotReady",
+		},
+		{
+			name:              "non-owner is rejected",
+			user:              "other-user",
+			sandboxID:         utils.GetSandboxID(notReadySbx),
+			expectError:       "not owned",
+			expectedErrorCode: errors.ErrorNotAllowed,
+		},
+		{
+			name:              "missing sandbox is not found",
+			user:              testUser,
+			sandboxID:         "default--missing-pod",
+			expectError:       "not found",
+			expectedErrorCode: errors.ErrorNotFound,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+			defer cancel()
+			sbx, err := manager.GetSandbox(ctx, tt.user, nil, infra.GetSandboxOptions{
+				SandboxID: tt.sandboxID,
+			})
+			if tt.expectError != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
+				assert.Equal(t, tt.expectedErrorCode, errors.GetErrCode(err))
+				return
+			}
+
+			require.NoError(t, err)
+			state, reason := sbx.GetState()
+			assert.Equal(t, tt.expectedState, state)
+			assert.Equal(t, tt.expectedReason, reason)
 		})
 	}
 }
@@ -614,7 +697,7 @@ func TestSandboxManager_PauseSandbox(t *testing.T) {
 			CreateSandboxWithStatus(t, client, sandbox)
 
 			// Get sandbox
-			sbx, err := manager.GetClaimedSandbox(t.Context(), testUser, infra.GetClaimedSandboxOptions{
+			sbx, err := manager.GetSandbox(t.Context(), testUser, []string{agentsv1alpha1.SandboxStateRunning, agentsv1alpha1.SandboxStatePaused}, infra.GetSandboxOptions{
 				SandboxID: utils.GetSandboxID(sandbox),
 			})
 			if err != nil {
@@ -654,7 +737,7 @@ func TestSandboxManager_PauseSandbox(t *testing.T) {
 			assert.Equal(t, testUser, route.Owner)
 			// Verify sandbox state matches expected
 			if tt.expectedState != "" {
-				actualSbx, err := manager.GetClaimedSandbox(t.Context(), testUser, infra.GetClaimedSandboxOptions{
+				actualSbx, err := manager.GetSandbox(t.Context(), testUser, []string{agentsv1alpha1.SandboxStateRunning, agentsv1alpha1.SandboxStatePaused}, infra.GetSandboxOptions{
 					SandboxID: utils.GetSandboxID(sandbox),
 				})
 				if err == nil {
@@ -745,7 +828,7 @@ func TestSandboxManager_ResumeSandbox(t *testing.T) {
 			mgr.AddWaitReconcileKey(sandbox)
 
 			// Get sandbox
-			sbx, err := manager.GetClaimedSandbox(t.Context(), testUser, infra.GetClaimedSandboxOptions{
+			sbx, err := manager.GetSandbox(t.Context(), testUser, []string{agentsv1alpha1.SandboxStateRunning, agentsv1alpha1.SandboxStatePaused}, infra.GetSandboxOptions{
 				SandboxID: utils.GetSandboxID(sandbox),
 			})
 			if err != nil {
@@ -1184,7 +1267,7 @@ func TestSandboxManager_DeleteSandbox(t *testing.T) {
 			CreateSandboxWithStatus(t, client, sandbox)
 
 			// Get sandbox
-			sbx, err := manager.GetClaimedSandbox(t.Context(), testUser, infra.GetClaimedSandboxOptions{
+			sbx, err := manager.GetSandbox(t.Context(), testUser, []string{agentsv1alpha1.SandboxStateRunning, agentsv1alpha1.SandboxStatePaused}, infra.GetSandboxOptions{
 				SandboxID: utils.GetSandboxID(sandbox),
 			})
 			if err != nil {
@@ -1216,7 +1299,7 @@ func TestSandboxManager_DeleteSandbox(t *testing.T) {
 				// Use a short timeout context to avoid long retry in GetClaimedSandbox
 				ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
 				defer cancel()
-				_, getErr := manager.GetClaimedSandbox(ctx, testUser, infra.GetClaimedSandboxOptions{
+				_, getErr := manager.GetSandbox(ctx, testUser, []string{agentsv1alpha1.SandboxStateRunning, agentsv1alpha1.SandboxStatePaused}, infra.GetSandboxOptions{
 					SandboxID: utils.GetSandboxID(sandbox),
 				})
 				assert.Error(t, getErr, "sandbox should not be found after deletion")

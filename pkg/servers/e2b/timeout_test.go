@@ -356,7 +356,7 @@ func TestResumeSandboxExtendOnlyPreventsStaleConnectTimeout(t *testing.T) {
 			require.NotNil(t, afterFirstCall.Spec.ShutdownTime)
 			assert.WithinDuration(t, beforeFirstCall.Add(time.Duration(tt.resumeTimeoutSeconds)*time.Second), afterFirstCall.Spec.ShutdownTime.Time, 5*time.Second)
 
-			wrapped, getErr := controller.getSandboxOfUser(req.Context(), createResp.Body.SandboxID)
+			wrapped, getErr := controller.getSandboxOfUser(req.Context(), createResp.Body.SandboxID, claimedSandboxStates)
 			require.Nil(t, getErr)
 			errResp := controller.updateConnectTimeout(req.Context(), wrapped, tt.connectTimeoutSeconds,
 				v1alpha1.SandboxStatePaused, false, afterFirstCall.Spec.ShutdownTime.Time)

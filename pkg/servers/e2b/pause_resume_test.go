@@ -841,7 +841,7 @@ func TestUpdateConnectTimeout(t *testing.T) {
 			req := NewRequest(t, nil, nil, map[string]string{
 				"sandboxID": createResp.Body.SandboxID,
 			}, user)
-			sbx, apiErr := controller.getSandboxOfUser(req.Context(), createResp.Body.SandboxID)
+			sbx, apiErr := controller.getSandboxOfUser(req.Context(), createResp.Body.SandboxID, claimedSandboxStates)
 			require.Nil(t, apiErr)
 			require.NotNil(t, sbx)
 

@@ -175,9 +175,9 @@ func TestSandbox_SaveTimeoutWithPolicy(t *testing.T) {
 			var sandbox infra.Sandbox
 			require.Eventually(t, func() bool {
 				var err error
-				sandbox, err = infraInstance.GetClaimedSandbox(t.Context(), infra.GetClaimedSandboxOptions{
-					SandboxID: utils.GetSandboxID(sbx),
-					Namespace: sbx.Namespace,
+				sandbox, err = infraInstance.GetSandbox(t.Context(), infra.GetSandboxOptions{
+					SandboxID:      utils.GetSandboxID(sbx),
+					Namespace:      sbx.Namespace,
 				})
 				return err == nil
 			}, time.Second, 10*time.Millisecond)
@@ -263,16 +263,16 @@ func TestSandbox_SaveTimeoutWithPolicy_OnConflict(t *testing.T) {
 	var sandboxB infra.Sandbox
 	require.Eventually(t, func() bool {
 		var getErr error
-		sandboxA, getErr = infraImpl.GetClaimedSandbox(t.Context(), infra.GetClaimedSandboxOptions{
-			SandboxID: utils.GetSandboxID(sbx),
-			Namespace: sbx.Namespace,
+		sandboxA, getErr = infraImpl.GetSandbox(t.Context(), infra.GetSandboxOptions{
+			SandboxID:      utils.GetSandboxID(sbx),
+			Namespace:      sbx.Namespace,
 		})
 		if getErr != nil {
 			return false
 		}
-		sandboxB, getErr = infraImpl.GetClaimedSandbox(t.Context(), infra.GetClaimedSandboxOptions{
-			SandboxID: utils.GetSandboxID(sbx),
-			Namespace: sbx.Namespace,
+		sandboxB, getErr = infraImpl.GetSandbox(t.Context(), infra.GetSandboxOptions{
+			SandboxID:      utils.GetSandboxID(sbx),
+			Namespace:      sbx.Namespace,
 		})
 		return getErr == nil
 	}, time.Second, 10*time.Millisecond)

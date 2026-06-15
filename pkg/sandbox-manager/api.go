@@ -97,35 +97,35 @@ func (m *SandboxManager) CloneSandbox(ctx context.Context, opts infra.CloneSandb
 	return sandbox, nil
 }
 
-func (m *SandboxManager) GetClaimedSandbox(ctx context.Context, user string, opts infra.GetClaimedSandboxOptions) (infra.Sandbox, error) {
+func (m *SandboxManager) GetSandbox(ctx context.Context, user string, expectedStates []string, opts infra.GetSandboxOptions) (infra.Sandbox, error) {
 	log := klog.FromContext(ctx).WithValues("sandboxID", opts.SandboxID)
 	if user == "" {
 		return nil, errors.NewError(errors.ErrorBadRequest, "user is required")
 	}
 	log.Info("try to get claimed sandbox")
-	sbx, err := m.infra.GetClaimedSandbox(ctx, opts)
+	sbx, err := m.infra.GetSandbox(ctx, opts)
 	if err != nil {
 		log.Error(err, "failed to get sandbox from cache")
 		return nil, errors.NewError(errors.ErrorNotFound, "sandbox %s not found", opts.SandboxID)
 	}
 
 	state, reason := sbx.GetState()
-	if state == v1alpha1.SandboxStateAvailable || state == v1alpha1.SandboxStateCreating {
-		// not claimed sandbox should return not found
-		log.Error(nil, "sandbox is not claimed", "state", state, "reason", reason)
-		return nil, errors.NewError(errors.ErrorNotFound, "sandbox %s not found", opts.SandboxID)
-	}
 
 	if sbx.GetRoute().Owner != user {
 		log.Error(nil, "sandbox is not owned by user")
 		return nil, errors.NewError(errors.ErrorNotAllowed, "sandbox %s is not owned", opts.SandboxID)
 	}
 
-	if state != v1alpha1.SandboxStatePaused && state != v1alpha1.SandboxStateRunning {
-		log.Error(nil, "sandbox is not healthy", "state", state, "reason", reason)
-		return nil, errors.NewError(errors.ErrorBadRequest, "sandbox %s is not healthy (state %s, reason %s)", opts.SandboxID, state, reason)
+	if len(expectedStates) == 0 {
+		return sbx, nil
 	}
-	return sbx, nil
+	for _, expectedState := range expectedStates {
+		if state == expectedState {
+			return sbx, nil
+		}
+	}
+	log.Error(nil, "sandbox state is not expected", "state", state, "reason", reason, "expectedStates", expectedStates)
+	return nil, errors.NewError(errors.ErrorBadRequest, "sandbox %s is not healthy (state %s, reason %s)", opts.SandboxID, state, reason)
 }
 
 func (m *SandboxManager) ListSandboxes(ctx context.Context, opts infra.SelectSandboxesOptions, p *pagination.Paginator[infra.Sandbox]) ([]infra.Sandbox, string, error) {

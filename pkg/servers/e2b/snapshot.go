@@ -40,7 +40,7 @@ func (sc *Controller) CreateSnapshot(r *http.Request) (web.ApiResponse[*models.S
 		return web.ApiResponse[*models.Snapshot]{}, parseErr
 	}
 	log.Info("create snapshot request received", "request", request)
-	sbx, apiErr := sc.getSandboxOfUser(ctx, sandboxID)
+	sbx, apiErr := sc.getSandboxOfUser(ctx, sandboxID, liveSandboxStates)
 	if apiErr != nil {
 		return web.ApiResponse[*models.Snapshot]{}, apiErr
 	}

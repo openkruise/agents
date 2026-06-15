@@ -454,10 +454,10 @@ func TestCache_CountActiveSandboxes(t *testing.T) {
 	sbx3 := &agentsv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "sbx-3", Namespace: "default",
-			Annotations:     map[string]string{agentsv1alpha1.AnnotationOwner: "user-1"},
-			Labels:          map[string]string{agentsv1alpha1.LabelSandboxIsClaimed: agentsv1alpha1.True},
+			Annotations:       map[string]string{agentsv1alpha1.AnnotationOwner: "user-1"},
+			Labels:            map[string]string{agentsv1alpha1.LabelSandboxIsClaimed: agentsv1alpha1.True},
 			DeletionTimestamp: &metav1.Time{Time: time.Now()},
-			Finalizers:      []string{"agents.kruise.io/sandbox"},
+			Finalizers:        []string{"agents.kruise.io/sandbox"},
 		},
 	}
 	// Different user
@@ -1056,7 +1056,13 @@ func TestRegression_SameActionConcurrentWaitsConverge(t *testing.T) {
 				agentsv1alpha1.LabelSandboxIsClaimed: agentsv1alpha1.True,
 			},
 		},
-		Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxRunning},
+		Status: agentsv1alpha1.SandboxStatus{
+			Phase: agentsv1alpha1.SandboxRunning,
+			Conditions: []metav1.Condition{{
+				Type:   string(agentsv1alpha1.SandboxConditionReady),
+				Status: metav1.ConditionTrue,
+			}},
+		},
 	}
 	c, fc, err := cachetest.NewTestCache(t, sbx)
 	require.NoError(t, err)
@@ -1083,10 +1089,10 @@ func TestRegression_SameActionConcurrentWaitsConverge(t *testing.T) {
 
 	fresh := &agentsv1alpha1.Sandbox{}
 	require.NoError(t, fc.Get(t.Context(), ctrlclient.ObjectKeyFromObject(sbx), fresh))
-	fresh.Status.Conditions = []metav1.Condition{{
+	fresh.Status.Conditions = append(fresh.Status.Conditions, metav1.Condition{
 		Type:   string(agentsv1alpha1.SandboxConditionPaused),
 		Status: metav1.ConditionTrue,
-	}}
+	})
 	require.NoError(t, fc.Status().Update(t.Context(), fresh))
 
 	key := cacheutils.WaitHookKey[*agentsv1alpha1.Sandbox](sbx)

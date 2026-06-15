@@ -36,9 +36,11 @@ import (
 
 var (
 	browserWebSocketReplacer = regexp.MustCompile(`^ws://[^/]+`)
+	claimedSandboxStates     = []string{agentsv1alpha1.SandboxStateRunning, agentsv1alpha1.SandboxStatePaused, agentsv1alpha1.SandboxStateDead}
+	liveSandboxStates        = []string{agentsv1alpha1.SandboxStateRunning, agentsv1alpha1.SandboxStatePaused}
 )
 
-func (sc *Controller) getSandboxOfUser(ctx context.Context, sandboxID string) (infra.Sandbox, *web.ApiError) {
+func (sc *Controller) getSandboxOfUser(ctx context.Context, sandboxID string, expectedStates []string) (infra.Sandbox, *web.ApiError) {
 	log := klog.FromContext(ctx).WithValues("sandboxID", sandboxID)
 	log.Info("getting sandbox of user")
 	user := GetUserFromContext(ctx)
@@ -50,12 +52,13 @@ func (sc *Controller) getSandboxOfUser(ctx context.Context, sandboxID string) (i
 	}
 	getCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	sbx, err := sc.manager.GetClaimedSandbox(getCtx, user.ID.String(), infra.GetClaimedSandboxOptions{
+	opts := infra.GetSandboxOptions{
 		Namespace: sc.getNamespaceOfUser(user),
 		SandboxID: sandboxID,
-	})
+	}
+	sbx, err := sc.manager.GetSandbox(getCtx, user.ID.String(), expectedStates, opts)
 	if err != nil {
-		log.Error(err, "sandbox not found")
+		log.Error(err, "failed to get sandbox")
 		return nil, &web.ApiError{
 			Code:    http.StatusNotFound,
 			Message: fmt.Sprintf("Cannot get sandbox %s: %v", sandboxID, err),

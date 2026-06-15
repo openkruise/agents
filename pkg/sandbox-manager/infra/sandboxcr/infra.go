@@ -351,10 +351,10 @@ type claimedSandboxLookup struct {
 	hasRoute bool
 }
 
-// lookupClaimedSandbox waits until the informer cache returns the claimed Sandbox.
+// lookupSandbox waits until the informer cache returns the claimed Sandbox.
 // Route state is loaded only after a cache hit and is used later as a staleness
 // signal, not as a cache-miss fallback trigger.
-func (i *Infra) lookupClaimedSandbox(ctx context.Context, opts infra.GetClaimedSandboxOptions) (claimedSandboxLookup, error) {
+func (i *Infra) lookupSandbox(ctx context.Context, opts infra.GetSandboxOptions) (claimedSandboxLookup, error) {
 	var lookup claimedSandboxLookup
 	err := wait.PollUntilContextCancel(ctx, RetryInterval, true, func(ctx context.Context) (bool, error) {
 		got, err := i.Cache.GetClaimedSandbox(ctx, cache.GetClaimedSandboxOptions{Namespace: opts.Namespace, SandboxID: opts.SandboxID})
@@ -410,7 +410,7 @@ func isSandboxStale(ctx context.Context, lookup claimedSandboxLookup) bool {
 	return false
 }
 
-func (i *Infra) getClaimedSandboxFromAPIReader(ctx context.Context, key client.ObjectKey, sandboxID string) (*v1alpha1.Sandbox, error) {
+func (i *Infra) getSandboxFromAPIReader(ctx context.Context, key client.ObjectKey, sandboxID string) (*v1alpha1.Sandbox, error) {
 	fresh := &v1alpha1.Sandbox{}
 	if err := i.APIReader.Get(ctx, key, fresh); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -424,8 +424,8 @@ func (i *Infra) getClaimedSandboxFromAPIReader(ctx context.Context, key client.O
 	return fresh, nil
 }
 
-func (i *Infra) GetClaimedSandbox(ctx context.Context, opts infra.GetClaimedSandboxOptions) (infra.Sandbox, error) {
-	lookup, err := i.lookupClaimedSandbox(ctx, opts)
+func (i *Infra) GetSandbox(ctx context.Context, opts infra.GetSandboxOptions) (infra.Sandbox, error) {
+	lookup, err := i.lookupSandbox(ctx, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -435,7 +435,7 @@ func (i *Infra) GetClaimedSandbox(ctx context.Context, opts infra.GetClaimedSand
 	}
 
 	key := client.ObjectKey{Namespace: lookup.sandbox.Namespace, Name: lookup.sandbox.Name}
-	fresh, err := i.getClaimedSandboxFromAPIReader(ctx, key, opts.SandboxID)
+	fresh, err := i.getSandboxFromAPIReader(ctx, key, opts.SandboxID)
 	if err != nil {
 		return nil, err
 	}

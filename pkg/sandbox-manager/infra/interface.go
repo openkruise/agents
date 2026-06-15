@@ -86,7 +86,7 @@ type HasCheckpointOptions struct {
 	CheckpointID string
 }
 
-type GetClaimedSandboxOptions struct {
+type GetSandboxOptions struct {
 	Namespace string
 	SandboxID string
 }
@@ -121,7 +121,7 @@ type Infrastructure interface {
 	GetCache() cache.Provider // Get the CacheProvider for the infra
 	LoadDebugInfo() map[string]any
 	SelectSandboxes(ctx context.Context, opts SelectSandboxesOptions) ([]Sandbox, error)
-	GetClaimedSandbox(ctx context.Context, opts GetClaimedSandboxOptions) (Sandbox, error)
+	GetSandbox(ctx context.Context, opts GetSandboxOptions) (Sandbox, error)
 	SelectSucceededCheckpoints(ctx context.Context, opts SelectSucceededCheckpointsOptions) ([]CheckpointInfo, error)
 	ClaimSandbox(ctx context.Context, opts ClaimSandboxOptions) (Sandbox, ClaimMetrics, error)
 	CloneSandbox(ctx context.Context, opts CloneSandboxOptions) (Sandbox, CloneMetrics, error)

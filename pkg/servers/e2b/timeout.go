@@ -56,7 +56,7 @@ func (sc *Controller) setSandboxTimeout(r *http.Request) *web.ApiError {
 	}
 
 	id := r.PathValue("sandboxID")
-	sbx, apiErr := sc.getSandboxOfUser(ctx, id)
+	sbx, apiErr := sc.getSandboxOfUser(ctx, id, liveSandboxStates)
 	if apiErr != nil {
 		return apiErr
 	}
