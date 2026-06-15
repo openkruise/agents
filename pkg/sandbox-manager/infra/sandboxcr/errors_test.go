@@ -17,6 +17,7 @@ limitations under the License.
 package sandboxcr
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
@@ -171,6 +172,13 @@ func TestClassifyCreateError(t *testing.T) {
 			expectContains:  "create sandbox",
 		},
 		{
+			name:            "AlreadyExists is retryable",
+			err:             apierrors.NewAlreadyExists(gr, "test-sbx"),
+			contextMsg:      "create sandbox",
+			expectRetryable: true,
+			expectContains:  "create sandbox",
+		},
+		{
 			name:            "Unauthorized is terminal Internal (platform issue)",
 			err:             apierrors.NewUnauthorized("missing token"),
 			contextMsg:      "create sandbox",
@@ -200,6 +208,14 @@ func TestClassifyCreateError(t *testing.T) {
 			contextMsg:      "create sandbox",
 			expectRetryable: true,
 			expectContains:  "create sandbox",
+		},
+		{
+			name:            "context canceled before creating sandbox returns original error",
+			err:             fmt.Errorf("context canceled before creating sandbox: %w", context.Canceled),
+			contextMsg:      "create sandbox",
+			expectRetryable: false,
+			expectErrorCode: managererrors.ErrorUnknown,
+			expectContains:  "context canceled before creating sandbox",
 		},
 	}
 

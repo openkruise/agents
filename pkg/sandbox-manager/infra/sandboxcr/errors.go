@@ -68,8 +68,8 @@ func classifyCreateError(err error, contextMsg string) error {
 		return retriableError{Message: fmt.Sprintf("%s: %s", contextMsg, err)}
 	}
 
-	// Conflict - retryable (optimistic locking)
-	if apierrors.IsConflict(err) {
+	// Conflict / AlreadyExists - retryable (optimistic locking or create name collision)
+	if apierrors.IsConflict(err) || apierrors.IsAlreadyExists(err) {
 		return retriableError{Message: fmt.Sprintf("%s: %s", contextMsg, err)}
 	}
 
