@@ -46,7 +46,7 @@ func NoAvailableError(template, reason string) error {
 	return retriableError{Message: fmt.Sprintf("no available sandboxes for template %s (%s)", template, reason)}
 }
 
-// classifyCreateError classifies a Kubernetes API error from a Create/Update
+// classifyCreateError classifies a Kubernetes API error from a Create
 // operation into one of three categories:
 // - retryable: transient server errors, conflicts, network errors -> retriableError
 // - terminal bad request: schema/validation errors -> managererrors.Error{ErrorBadRequest}
@@ -68,9 +68,14 @@ func classifyCreateError(err error, contextMsg string) error {
 		return retriableError{Message: fmt.Sprintf("%s: %s", contextMsg, err)}
 	}
 
-	// Conflict / AlreadyExists - retryable (optimistic locking or create name collision)
-	if apierrors.IsConflict(err) || apierrors.IsAlreadyExists(err) {
+	// Conflict - retryable (optimistic locking)
+	if apierrors.IsConflict(err) {
 		return retriableError{Message: fmt.Sprintf("%s: %s", contextMsg, err)}
+	}
+
+	// AlreadyExists - terminal conflict (create name collision)
+	if apierrors.IsAlreadyExists(err) {
+		return managererrors.NewError(managererrors.ErrorConflict, "%s: %s", contextMsg, err)
 	}
 
 	// Invalid / BadRequest - terminal user error

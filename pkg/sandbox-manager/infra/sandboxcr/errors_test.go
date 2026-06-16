@@ -172,10 +172,11 @@ func TestClassifyCreateError(t *testing.T) {
 			expectContains:  "create sandbox",
 		},
 		{
-			name:            "AlreadyExists is retryable",
+			name:            "AlreadyExists is terminal Conflict",
 			err:             apierrors.NewAlreadyExists(gr, "test-sbx"),
 			contextMsg:      "create sandbox",
-			expectRetryable: true,
+			expectRetryable: false,
+			expectErrorCode: managererrors.ErrorConflict,
 			expectContains:  "create sandbox",
 		},
 		{
