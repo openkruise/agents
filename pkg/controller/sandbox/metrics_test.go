@@ -128,6 +128,7 @@ func TestRecordSandboxMetrics_StatusPhase(t *testing.T) {
 	}{
 		{name: "Pending phase", phase: agentsv1alpha1.SandboxPending},
 		{name: "Running phase", phase: agentsv1alpha1.SandboxRunning},
+		{name: "Pausing phase", phase: agentsv1alpha1.SandboxPausing},
 		{name: "Paused phase", phase: agentsv1alpha1.SandboxPaused},
 		{name: "Resuming phase", phase: agentsv1alpha1.SandboxResuming},
 		{name: "Succeeded phase", phase: agentsv1alpha1.SandboxSucceeded},
@@ -1873,6 +1874,9 @@ func TestSandboxDeletionDuration(t *testing.T) {
 }
 
 func TestSandboxStatusAbnormal(t *testing.T) {
+	// Set threshold for test; production value is injected via --stuck-phase-threshold flag.
+	SetStuckPhaseThreshold(5 * time.Minute)
+
 	tests := []struct {
 		name               string
 		phase              agentsv1alpha1.SandboxPhase
@@ -1881,19 +1885,30 @@ func TestSandboxStatusAbnormal(t *testing.T) {
 		wantResumeAbnormal float64
 	}{
 		{
-			name:  "Phase=Paused with SandboxPaused=False is abnormal",
-			phase: agentsv1alpha1.SandboxPaused,
+			name:  "Phase=Pausing with condition=False recently is normal",
+			phase: agentsv1alpha1.SandboxPausing,
 			conditions: []metav1.Condition{{
 				Type:               string(agentsv1alpha1.SandboxConditionPaused),
 				Status:             metav1.ConditionFalse,
 				LastTransitionTime: metav1.NewTime(time.Now()),
 			}},
+			wantPauseAbnormal:  0,
+			wantResumeAbnormal: 0,
+		},
+		{
+			name:  "Phase=Pausing with condition=False too long is abnormal (stuck)",
+			phase: agentsv1alpha1.SandboxPausing,
+			conditions: []metav1.Condition{{
+				Type:               string(agentsv1alpha1.SandboxConditionPaused),
+				Status:             metav1.ConditionFalse,
+				LastTransitionTime: metav1.NewTime(time.Now().Add(-10 * time.Minute)),
+			}},
 			wantPauseAbnormal:  1,
 			wantResumeAbnormal: 0,
 		},
 		{
-			name:  "Phase=Paused with SandboxPaused=True is normal",
-			phase: agentsv1alpha1.SandboxPaused,
+			name:  "Phase=Pausing with condition=True is normal (transient state)",
+			phase: agentsv1alpha1.SandboxPausing,
 			conditions: []metav1.Condition{{
 				Type:               string(agentsv1alpha1.SandboxConditionPaused),
 				Status:             metav1.ConditionTrue,
@@ -1903,7 +1918,7 @@ func TestSandboxStatusAbnormal(t *testing.T) {
 			wantResumeAbnormal: 0,
 		},
 		{
-			name:  "Phase=Resuming with SandboxResumed=False is abnormal",
+			name:  "Phase=Resuming with condition=False recently is normal",
 			phase: agentsv1alpha1.SandboxResuming,
 			conditions: []metav1.Condition{{
 				Type:               string(agentsv1alpha1.SandboxConditionResumed),
@@ -1912,10 +1927,22 @@ func TestSandboxStatusAbnormal(t *testing.T) {
 				LastTransitionTime: metav1.NewTime(time.Now()),
 			}},
 			wantPauseAbnormal:  0,
+			wantResumeAbnormal: 0,
+		},
+		{
+			name:  "Phase=Resuming with condition=False too long is abnormal (stuck)",
+			phase: agentsv1alpha1.SandboxResuming,
+			conditions: []metav1.Condition{{
+				Type:               string(agentsv1alpha1.SandboxConditionResumed),
+				Status:             metav1.ConditionFalse,
+				Reason:             "CreatePod",
+				LastTransitionTime: metav1.NewTime(time.Now().Add(-10 * time.Minute)),
+			}},
+			wantPauseAbnormal:  0,
 			wantResumeAbnormal: 1,
 		},
 		{
-			name:  "Phase=Resuming with SandboxResumed=True is normal",
+			name:  "Phase=Resuming with condition=True is normal",
 			phase: agentsv1alpha1.SandboxResuming,
 			conditions: []metav1.Condition{{
 				Type:               string(agentsv1alpha1.SandboxConditionResumed),
@@ -1934,10 +1961,10 @@ func TestSandboxStatusAbnormal(t *testing.T) {
 			wantResumeAbnormal: 0,
 		},
 		{
-			name:               "Phase=Paused with no Paused condition is abnormal",
+			name:               "Phase=Paused is never abnormal (by design)",
 			phase:              agentsv1alpha1.SandboxPaused,
 			conditions:         nil,
-			wantPauseAbnormal:  1,
+			wantPauseAbnormal:  0,
 			wantResumeAbnormal: 0,
 		},
 	}

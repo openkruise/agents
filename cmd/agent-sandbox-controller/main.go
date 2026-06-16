@@ -23,6 +23,7 @@ import (
 	_ "net/http/pprof" // Added to register pprof handlers
 	"os"
 	"strings"
+	"time"
 
 	"github.com/spf13/pflag"
 	corev1 "k8s.io/api/core/v1"
@@ -88,6 +89,7 @@ func main() {
 	var pprofAddr string
 	var allowPrivileged bool
 	var metricLabelsAllowlist string
+	var stuckPhaseThreshold time.Duration
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -120,6 +122,8 @@ func main() {
 		"supporting three states: ip, memory, and filesystem. Format: comma-separated, e.g.: memory,filesystem")
 	flag.StringVar(&metricLabelsAllowlist, "metric-labels-allowlist", "",
 		"Comma-separated list of Sandbox label keys to expose as sandbox_labels metric labels (e.g., app,env,version)")
+	flag.DurationVar(&stuckPhaseThreshold, "stuck-phase-threshold", 1*time.Minute,
+		"Duration threshold after which a sandbox stuck in Pausing/Resuming phase is considered abnormal")
 
 	var metricsAsyncWorkers int
 	var metricsAsyncQueueCap int
@@ -147,6 +151,12 @@ func main() {
 		}
 		sandboxctrl.InitSandboxLabelsMetric(keys)
 	}
+
+	if stuckPhaseThreshold <= 0 {
+		setupLog.Error(nil, "--stuck-phase-threshold must be positive, using default 1m")
+		stuckPhaseThreshold = 1 * time.Minute
+	}
+	sandboxctrl.SetStuckPhaseThreshold(stuckPhaseThreshold)
 
 	err := mutating.SetDefaultPersistentContents(defaultPersistentContents)
 	if err != nil {

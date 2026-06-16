@@ -161,11 +161,13 @@ func pauseSandboxHelper(t *testing.T, controller *Controller, client client.Clie
 	describeResp, err := controller.DescribeSandbox(req)
 	require.Nil(t, err)
 	require.Equal(t, models.SandboxStatePaused, describeResp.Body.State)
-	// If pausing, modify it again
+	// If pausing, modify it again to simulate the intermediate Pausing phase.
+	// With the current state machine Running→Pausing→Paused, a sandbox that is
+	// still performing the pause has Phase=SandboxPausing.
 	if pausing {
 		UpdateSandboxWhen(t, client, sandboxID, func(sbx *agentsv1alpha1.Sandbox) bool {
 			return sbx.Spec.Paused == true
-		}, DoSetSandboxStatus(agentsv1alpha1.SandboxPaused, metav1.ConditionFalse, ""))
+		}, DoSetSandboxStatus(agentsv1alpha1.SandboxPausing, metav1.ConditionFalse, ""))
 	} else if resuming {
 		// Set resuming state: Spec.Paused=false, Phase=Resuming, Ready=false
 		// This means sandbox is transitioning from paused to running

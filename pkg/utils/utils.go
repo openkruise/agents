@@ -269,7 +269,7 @@ func GetSandboxState(sbx *agentsv1alpha1.Sandbox) (state string, reason string) 
 				}
 			}
 		} else {
-			// Paused and Resuming phases are both treated as paused state
+			// Pausing, Paused and Resuming phases are all treated as paused state
 			return agentsv1alpha1.SandboxStatePaused, "NotRunningResourceClaimed"
 		}
 	}
@@ -337,7 +337,7 @@ func IsSandboxPausable(sbx *agentsv1alpha1.Sandbox) (bool, string) {
 		}
 	}
 	switch sbx.Status.Phase {
-	case agentsv1alpha1.SandboxRunning, agentsv1alpha1.SandboxPaused:
+	case agentsv1alpha1.SandboxRunning, agentsv1alpha1.SandboxPausing, agentsv1alpha1.SandboxPaused:
 		return true, "SandboxIsRunningOrPaused"
 	default:
 		return false, "SandboxPhaseNotAllowed"
@@ -354,15 +354,12 @@ func IsSandboxResumable(sbx *agentsv1alpha1.Sandbox) (bool, string) {
 		return true, "SandboxIsRunning"
 	case agentsv1alpha1.SandboxResuming:
 		return true, "SandboxIsResuming"
+	case agentsv1alpha1.SandboxPausing:
+		return false, "SandboxIsPausing"
 	default:
 	}
 	if sbx.Status.Phase == agentsv1alpha1.SandboxPaused {
-		pauseCond := GetSandboxCondition(&sbx.Status, string(agentsv1alpha1.SandboxConditionPaused))
-		paused := pauseCond != nil && pauseCond.Status == metav1.ConditionTrue
-		if paused {
-			return true, "SandboxIsPaused"
-		}
-		return false, "SandboxIsPausing"
+		return true, "SandboxIsPaused"
 	}
 	return false, "SandboxPhaseNotAllowed"
 }
