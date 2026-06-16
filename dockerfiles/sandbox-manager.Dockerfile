@@ -1,5 +1,7 @@
 # Build stage
 FROM golang:1.25 AS builder
+ARG TARGETOS
+ARG TARGETARCH
 
 WORKDIR /app
 
@@ -18,7 +20,7 @@ COPY ../proto ./proto
 COPY ../test ./test
 
 # Build the binary
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o sandbox-manager ./cmd/sandbox-manager
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -installsuffix cgo -o sandbox-manager ./cmd/sandbox-manager
 
 # Final stage
 FROM alpine:3.20 AS runtime
