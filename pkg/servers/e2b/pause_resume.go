@@ -124,7 +124,7 @@ func (sc *Controller) ResumeSandbox(r *http.Request) (web.ApiResponse[struct{}],
 		return web.ApiResponse[struct{}]{}, apiErr
 	}
 
-	sbx, apiErr := sc.getSandboxOfUser(ctx, id, claimedSandboxStates)
+	sbx, apiErr := sc.getSandboxOfUser(ctx, id, liveSandboxStates)
 	if apiErr != nil {
 		return web.ApiResponse[struct{}]{}, apiErr
 	}

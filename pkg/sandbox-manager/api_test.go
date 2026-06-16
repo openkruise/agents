@@ -380,7 +380,7 @@ func TestSandboxManager_NamespaceAwareSandboxOptions(t *testing.T) {
 	assert.Contains(t, err.Error(), "not found")
 }
 
-func TestSandboxManager_GetClaimedSandbox(t *testing.T) {
+func TestSandboxManager_GetSandbox(t *testing.T) {
 	manager, client := setupTestManager(t)
 
 	runningSbx := &agentsv1alpha1.Sandbox{
@@ -553,7 +553,7 @@ func TestSandboxManager_GetClaimedSandbox(t *testing.T) {
 	}
 }
 
-func TestSandboxManager_GetClaimedSandboxExpectedStates(t *testing.T) {
+func TestSandboxManager_GetSandboxExpectedStates(t *testing.T) {
 	manager, client := setupTestManager(t)
 
 	notReadySbx := &agentsv1alpha1.Sandbox{
@@ -1296,7 +1296,7 @@ func TestSandboxManager_DeleteSandbox(t *testing.T) {
 			} else {
 				assert.NoError(t, err)
 				// After successful deletion, verify sandbox is not found
-				// Use a short timeout context to avoid long retry in GetClaimedSandbox
+				// Use a short timeout context to avoid long retry in GetSandbox
 				ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
 				defer cancel()
 				_, getErr := manager.GetSandbox(ctx, testUser, []string{agentsv1alpha1.SandboxStateRunning, agentsv1alpha1.SandboxStatePaused}, infra.GetSandboxOptions{

@@ -1591,10 +1591,10 @@ func TestDescribeSandboxDeadClaimedSandbox(t *testing.T) {
 		"sandboxID": sandboxID,
 	}, user))
 
-	assert.Equal(t, web.ApiResponse[*models.Sandbox]{}, describeResp)
-	require.NotNil(t, apiErr)
-	assert.Equal(t, http.StatusNotFound, apiErr.Code)
-	assert.Contains(t, apiErr.Message, "is not healthy")
+	require.Nil(t, apiErr)
+	require.NotNil(t, describeResp.Body)
+	assert.Equal(t, sandboxID, describeResp.Body.SandboxID)
+	assert.Equal(t, v1alpha1.SandboxStateDead, describeResp.Body.State)
 }
 
 func TestConnectSandboxDeadClaimedSandbox(t *testing.T) {

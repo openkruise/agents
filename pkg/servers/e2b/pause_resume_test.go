@@ -610,6 +610,7 @@ func TestResumeSandbox(t *testing.T) {
 		paused       bool   // if sandbox is set paused
 		pausing      bool   // if sandbox is performing pausing
 		resuming     bool   // if sandbox is performing resuming (Ready condition is false)
+		notReady     bool   // if running sandbox is not ready and therefore dead
 		sandboxID    string // if not set, use the created sandbox ID
 		timeout      int
 		expectStatus int
@@ -647,6 +648,12 @@ func TestResumeSandbox(t *testing.T) {
 			resuming:     true,
 			timeout:      300,
 			expectStatus: http.StatusNoContent,
+		},
+		{
+			name:         "running not-ready sandbox",
+			notReady:     true,
+			timeout:      300,
+			expectStatus: http.StatusNotFound,
 		},
 		{
 			name:         "not found",
@@ -689,6 +696,10 @@ func TestResumeSandbox(t *testing.T) {
 
 			if tt.paused {
 				pauseSandboxHelper(t, controller, fc, createResp.Body.SandboxID, tt.pausing, tt.resuming, user)
+			}
+			if tt.notReady {
+				UpdateSandboxWhen(t, fc, createResp.Body.SandboxID, Immediately,
+					DoSetSandboxStatus(agentsv1alpha1.SandboxRunning, "", metav1.ConditionFalse))
 			}
 			var inFlightResumeEndAt time.Time
 			if tt.resuming {

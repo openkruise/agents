@@ -343,6 +343,8 @@ func IsSandboxPausable(sbx *agentsv1alpha1.Sandbox) (bool, string) {
 		if IsSandboxReady(sbx) {
 			return true, "SandboxIsRunningAndReady"
 		}
+		// Running-but-not-ready claimed sandboxes are reported as dead by
+		// GetSandboxState, so pause must not accept them as live sandboxes.
 		return false, "SandboxIsRunningButNotReady"
 	default:
 		return false, "SandboxPhaseNotAllowed"

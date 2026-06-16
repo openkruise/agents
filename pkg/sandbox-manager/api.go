@@ -97,6 +97,10 @@ func (m *SandboxManager) CloneSandbox(ctx context.Context, opts infra.CloneSandb
 	return sandbox, nil
 }
 
+// GetSandbox returns a sandbox owned by user and optionally filters it by state.
+// When expectedStates is empty, ownership is still checked but any claimed state
+// is accepted. When expectedStates is non-empty, the sandbox state must match one
+// of the provided values.
 func (m *SandboxManager) GetSandbox(ctx context.Context, user string, expectedStates []string, opts infra.GetSandboxOptions) (infra.Sandbox, error) {
 	log := klog.FromContext(ctx).WithValues("sandboxID", opts.SandboxID)
 	if user == "" {
