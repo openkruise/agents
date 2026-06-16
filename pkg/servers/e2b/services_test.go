@@ -1550,6 +1550,7 @@ func TestDeleteSandboxDeadClaimedSandbox(t *testing.T) {
 	sandbox := CreateClaimedSandboxCR(t, controller, Namespace, "dead-delete-sandbox", "test-template", user.ID.String(), nil)
 	sandboxID := fmt.Sprintf("%s--%s", sandbox.Namespace, sandbox.Name)
 	UpdateSandboxWhen(t, fc, sandboxID, Immediately, DoSetSandboxStatus(v1alpha1.SandboxRunning, "", metav1.ConditionFalse))
+	require.NoError(t, fc.Get(t.Context(), ctrlclient.ObjectKey{Namespace: sandbox.Namespace, Name: sandbox.Name}, &v1alpha1.Sandbox{}))
 
 	deleteCalls := 0
 	origDeleteSandbox := sandboxcr.DefaultDeleteSandbox
@@ -1565,12 +1566,14 @@ func TestDeleteSandboxDeadClaimedSandbox(t *testing.T) {
 
 	require.Nil(t, apiErr)
 	assert.Equal(t, http.StatusNoContent, deleteResp.Code)
-	assert.Equal(t, 1, deleteCalls)
+	require.Equal(t, 1, deleteCalls)
+	var getErr error
 	require.Eventually(t, func() bool {
 		got := &v1alpha1.Sandbox{}
-		err := fc.Get(t.Context(), ctrlclient.ObjectKey{Namespace: sandbox.Namespace, Name: sandbox.Name}, got)
-		return apierrors.IsNotFound(err)
+		getErr = fc.Get(t.Context(), ctrlclient.ObjectKey{Namespace: sandbox.Namespace, Name: sandbox.Name}, got)
+		return apierrors.IsNotFound(getErr)
 	}, time.Second, 10*time.Millisecond)
+	require.True(t, apierrors.IsNotFound(getErr), "expected sandbox to be deleted, got error: %v", getErr)
 }
 
 func TestDescribeSandboxDeadClaimedSandbox(t *testing.T) {
