@@ -357,7 +357,7 @@ func TestSandboxReconciler_Reconcile(t *testing.T) {
 			wantErr:       false,
 		},
 		{
-			name: "sandbox resuming - should set to resuming",
+			name: "sandbox resuming - pod running transitions to running",
 			sandbox: &agentsv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "resuming-sandbox",
@@ -399,7 +399,7 @@ func TestSandboxReconciler_Reconcile(t *testing.T) {
 					Phase: corev1.PodRunning,
 				},
 			},
-			expectedPhase: agentsv1alpha1.SandboxResuming,
+			expectedPhase: agentsv1alpha1.SandboxRunning,
 			wantErr:       false,
 		},
 		{

@@ -26,6 +26,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -33,6 +34,7 @@ import (
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
+	"github.com/openkruise/agents/pkg/utils"
 	utilruntime "github.com/openkruise/agents/pkg/utils/runtime"
 	utestutils "github.com/openkruise/agents/pkg/utils/testutils"
 	testutils "github.com/openkruise/agents/test/utils"
@@ -436,24 +438,71 @@ func TestInitialize(t *testing.T) {
 func TestDefaultSandboxInitializer(t *testing.T) {
 	utestutils.InitLogOutput()
 
-	fc := fake.NewClientBuilder().WithScheme(scheme).Build()
-
-	initializer := &defaultSandboxInitializer{
-		client:          fc,
-		apiReader:       fc,
-		storageRegistry: storages.NewStorageProvider(),
-	}
-
-	// Test with unclaimed sandbox - should skip initialization
-	box := &agentsv1alpha1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-sandbox-default-init",
-			Namespace: "default",
-			Labels:    map[string]string{},
+	tests := []struct {
+		name                string
+		box                 *agentsv1alpha1.Sandbox
+		expectError         string
+		expectInitCondition metav1.ConditionStatus
+		expectInitReason    string
+	}{
+		{
+			name: "unclaimed sandbox - skip initialization, set RuntimeInitialized=True",
+			box: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox-default-init",
+					Namespace: "default",
+					Labels:    map[string]string{},
+				},
+			},
+			expectInitCondition: metav1.ConditionTrue,
+			expectInitReason:    agentsv1alpha1.SandboxConditionRuntimeInitReasonSucceeded,
+		},
+		{
+			name: "claimed sandbox with invalid init runtime annotation - error path sets RuntimeInitialized=False",
+			box: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox-init-fail",
+					Namespace: "default",
+					Labels: map[string]string{
+						agentsv1alpha1.LabelSandboxClaimName: "my-claim",
+					},
+					Annotations: map[string]string{
+						agentsv1alpha1.AnnotationInitRuntimeRequest: "not-valid-json",
+					},
+				},
+			},
+			expectError:         "failed to unmarshal init runtime request",
+			expectInitCondition: metav1.ConditionFalse,
+			expectInitReason:    agentsv1alpha1.SandboxConditionRuntimeInitReasonFailed,
 		},
 	}
-	newStatus := &agentsv1alpha1.SandboxStatus{}
 
-	err := initializer.Initialize(t.Context(), box, newStatus)
-	assert.NoError(t, err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fc := fake.NewClientBuilder().WithScheme(scheme).Build()
+			recorder := record.NewFakeRecorder(10)
+
+			initializer := &defaultSandboxInitializer{
+				client:          fc,
+				apiReader:       fc,
+				storageRegistry: storages.NewStorageProvider(),
+				recorder:        recorder,
+			}
+
+			newStatus := &agentsv1alpha1.SandboxStatus{}
+			err := initializer.Initialize(t.Context(), tt.box, newStatus)
+
+			if tt.expectError != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
+			} else {
+				assert.NoError(t, err)
+			}
+
+			initCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.RuntimeInitialized))
+			require.NotNil(t, initCond, "expected RuntimeInitialized condition to be set")
+			assert.Equal(t, tt.expectInitCondition, initCond.Status)
+			assert.Equal(t, tt.expectInitReason, initCond.Reason)
+		})
+	}
 }

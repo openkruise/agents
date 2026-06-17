@@ -341,6 +341,7 @@ const (
 	SandboxResumeReasonResumePod = "ResumePod"
 
 	// SandboxConditionRuntimeInit Reason
+	SandboxConditionRuntimeInitReasonPending   = "Pending"
 	SandboxConditionRuntimeInitReasonSucceeded = "Succeeded"
 	SandboxConditionRuntimeInitReasonFailed    = "Failed"
 )

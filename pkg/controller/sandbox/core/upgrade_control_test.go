@@ -119,7 +119,7 @@ func newTestCommonControl(hookFunc LifecycleHookFunc, objects ...client.Object) 
 		rateLimiter:          NewRateLimiter(),
 		podControl:           NewPodControl(fakeClient, record.NewFakeRecorder(100), GeneratePodFromSandbox),
 		lifecycleHookFunc:    hookFunc,
-		initializer:          &defaultSandboxInitializer{},
+		initializer:          &defaultSandboxInitializer{recorder: record.NewFakeRecorder(10)},
 	}
 }
 
