@@ -42,6 +42,7 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/controller/sandbox/core"
+	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
@@ -2869,7 +2870,7 @@ func TestReconcile_SandboxNotFoundCleanup(t *testing.T) {
 		}),
 		checkpointControl: core.NewCheckpointControl(fakeClient, fakeRecorder),
 		rateLimiter:       rl,
-		metricsCleanup: &fakeEnqueuer{},
+		metricsCleanup:    &fakeEnqueuer{},
 	}
 
 	// Set up expectations for a sandbox that will not be found
@@ -3955,6 +3956,193 @@ func TestUpdateSandboxStatus_Upgrading_RevisionUnchanged_NoReset(t *testing.T) {
 	}
 	if upgradeCond.Message != "upgrading pod" {
 		t.Errorf("Expected Message %q, got %q", "upgrading pod", upgradeCond.Message)
+	}
+}
+
+func TestUpdateSandboxStatus_Upgrading_RevisionChanged_ResumeFromFailedStep(t *testing.T) {
+	_ = utilfeature.DefaultMutableFeatureGate.Set(string(features.SandboxUpgradeResumeFromFailedStepGate) + "=true")
+	defer func() {
+		_ = utilfeature.DefaultMutableFeatureGate.Set(string(features.SandboxUpgradeResumeFromFailedStepGate) + "=true")
+	}()
+
+	tests := []struct {
+		name           string
+		pod            *corev1.Pod
+		reason         string
+		expectReason   string
+		updateRevision string
+	}{
+		{
+			name:           "pre upgrade failed resumes from preUpgrade",
+			reason:         agentsv1alpha1.SandboxUpgradingReasonPreUpgradeFailed,
+			expectReason:   agentsv1alpha1.SandboxUpgradingReasonPreUpgrade,
+			updateRevision: "old-revision",
+		},
+		{
+			name:           "upgrade pod failed resumes from upgradePod",
+			reason:         agentsv1alpha1.SandboxUpgradingReasonUpgradePodFailed,
+			expectReason:   agentsv1alpha1.SandboxUpgradingReasonUpgradePod,
+			updateRevision: "old-revision",
+		},
+		{
+			name: "post upgrade failed with matching pod revision resumes from postUpgrade",
+			pod: func() *corev1.Pod {
+				p := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{}}}
+				return p
+			}(),
+			reason:         agentsv1alpha1.SandboxUpgradingReasonPostUpgradeFailed,
+			expectReason:   agentsv1alpha1.SandboxUpgradingReasonPostUpgrade,
+			updateRevision: "old-revision",
+		},
+		{
+			name:           "post upgrade failed with mismatched pod revision resumes from upgradePod",
+			reason:         agentsv1alpha1.SandboxUpgradingReasonPostUpgradeFailed,
+			expectReason:   agentsv1alpha1.SandboxUpgradingReasonUpgradePod,
+			updateRevision: "old-revision",
+		},
+		{
+			name:           "non failed reason still resets to preUpgrade",
+			reason:         agentsv1alpha1.SandboxUpgradingReasonUpgradePod,
+			expectReason:   agentsv1alpha1.SandboxUpgradingReasonPreUpgrade,
+			updateRevision: "old-revision",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			box := &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-sandbox",
+					Namespace:  "default",
+					Generation: 1,
+				},
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "test", Image: "nginx"}},
+							},
+						},
+					},
+				},
+				Status: agentsv1alpha1.SandboxStatus{
+					UpdateRevision: tt.updateRevision,
+				},
+			}
+
+			hash, _ := core.HashSandbox(box)
+			if tt.pod != nil {
+				tt.pod = tt.pod.DeepCopy()
+				tt.pod.Labels[agentsv1alpha1.PodLabelTemplateHash] = hash
+			}
+
+			initStatus := &agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxUpgrading,
+				Conditions: []metav1.Condition{
+					{
+						Type:               string(agentsv1alpha1.SandboxConditionUpgrading),
+						Status:             metav1.ConditionFalse,
+						Reason:             tt.reason,
+						Message:            "needs reset",
+						LastTransitionTime: metav1.Now(),
+					},
+				},
+			}
+
+			args := core.EnsureFuncArgs{
+				Pod:       tt.pod,
+				Box:       box,
+				NewStatus: initStatus,
+			}
+
+			scheme := runtime.NewScheme()
+			_ = clientgoscheme.AddToScheme(scheme)
+			_ = agentsv1alpha1.AddToScheme(scheme)
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+			reconciler := &SandboxReconciler{
+				checkpointControl: core.NewCheckpointControl(fakeClient, record.NewFakeRecorder(10)),
+			}
+			newStatus, _ := reconciler.calculateStatus(context.Background(), args)
+			upgradeCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
+			if upgradeCond == nil {
+				t.Fatal("Expected Upgrading condition to exist")
+			}
+			if upgradeCond.Reason != tt.expectReason {
+				t.Errorf("Expected Reason %s, got %s", tt.expectReason, upgradeCond.Reason)
+			}
+			if upgradeCond.Message != "" {
+				t.Errorf("Expected Message to be empty, got %q", upgradeCond.Message)
+			}
+		})
+	}
+}
+
+func TestUpdateSandboxStatus_Upgrading_RevisionChanged_FeatureGateDisabled_ResetsToPreUpgrade(t *testing.T) {
+	_ = utilfeature.DefaultMutableFeatureGate.Set(string(features.SandboxUpgradeResumeFromFailedStepGate) + "=false")
+	defer func() {
+		_ = utilfeature.DefaultMutableFeatureGate.Set(string(features.SandboxUpgradeResumeFromFailedStepGate) + "=true")
+	}()
+
+	box := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test-sandbox",
+			Namespace:  "default",
+			Generation: 1,
+		},
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test", Image: "nginx"}},
+					},
+				},
+			},
+		},
+		Status: agentsv1alpha1.SandboxStatus{
+			UpdateRevision: "old-revision",
+		},
+	}
+
+	initStatus := &agentsv1alpha1.SandboxStatus{
+		Phase: agentsv1alpha1.SandboxUpgrading,
+		Conditions: []metav1.Condition{
+			{
+				Type:               string(agentsv1alpha1.SandboxConditionUpgrading),
+				Status:             metav1.ConditionFalse,
+				Reason:             agentsv1alpha1.SandboxUpgradingReasonPostUpgradeFailed,
+				Message:            "post failed",
+				LastTransitionTime: metav1.Now(),
+			},
+		},
+	}
+
+	args := core.EnsureFuncArgs{
+		Pod: &corev1.Pod{
+			Status: corev1.PodStatus{
+				Phase: corev1.PodRunning,
+			},
+		},
+		Box:       box,
+		NewStatus: initStatus,
+	}
+
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	reconciler := &SandboxReconciler{
+		checkpointControl: core.NewCheckpointControl(fakeClient, record.NewFakeRecorder(10)),
+	}
+	newStatus, _ := reconciler.calculateStatus(context.Background(), args)
+	upgradeCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
+	if upgradeCond == nil {
+		t.Fatal("Expected Upgrading condition to exist")
+	}
+	if upgradeCond.Reason != agentsv1alpha1.SandboxUpgradingReasonPreUpgrade {
+		t.Errorf("Expected Reason %s, got %s", agentsv1alpha1.SandboxUpgradingReasonPreUpgrade, upgradeCond.Reason)
+	}
+	if upgradeCond.Message != "" {
+		t.Errorf("Expected Message to be empty, got %q", upgradeCond.Message)
 	}
 }
 
