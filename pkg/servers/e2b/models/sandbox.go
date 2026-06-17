@@ -50,11 +50,12 @@ type Sandbox struct {
 
 // NewSandboxRequest represents a request to create a new sandbox
 type NewSandboxRequest struct {
-	TemplateID string            `json:"templateID"`
-	Timeout    int               `json:"timeout,omitempty"`
-	AutoPause  bool              `json:"autoPause,omitempty"`
-	Metadata   map[string]string `json:"metadata,omitempty"`
-	EnvVars    EnvVars           `json:"envVars,omitempty"`
+	TemplateID   string               `json:"templateID"`
+	Timeout      int                  `json:"timeout,omitempty"`
+	AutoPause    bool                 `json:"autoPause,omitempty"`
+	Metadata     map[string]string    `json:"metadata,omitempty"`
+	EnvVars      EnvVars              `json:"envVars,omitempty"`
+	VolumeMounts []VolumeMountRequest `json:"volume_mounts,omitempty"`
 
 	Extensions NewSandboxRequestExtension `json:"-"`
 }

@@ -126,6 +126,10 @@ type Infrastructure interface {
 	ClaimSandbox(ctx context.Context, opts ClaimSandboxOptions) (Sandbox, ClaimMetrics, error)
 	CloneSandbox(ctx context.Context, opts CloneSandboxOptions) (Sandbox, CloneMetrics, error)
 	DeleteCheckpoint(ctx context.Context, opts DeleteCheckpointOptions) error
+	RegisterVolume(ctx context.Context, opts RegisterVolumeOptions) (VolumeInfo, error)
+	ListVolumes(ctx context.Context, opts ListVolumesOptions) ([]VolumeInfo, error)
+	GetVolume(ctx context.Context, opts GetVolumeOptions) (VolumeInfo, error)
+	DeleteVolume(ctx context.Context, opts DeleteVolumeOptions) (DeleteVolumeResult, error)
 }
 
 type Sandbox interface {

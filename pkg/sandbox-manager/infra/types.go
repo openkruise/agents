@@ -180,6 +180,47 @@ func sanitizeErrorMessage(err error) string {
 	return replacer.Replace(err.Error())
 }
 
+// RegisterVolumeOptions contains the parameters for registering a pre-provisioned PV as a named volume.
+type RegisterVolumeOptions struct {
+	Namespace string
+	Name      string
+	PvName    string
+	SizeGB    int
+}
+
+// ListVolumesOptions contains the parameters for listing volumes in a namespace.
+type ListVolumesOptions struct {
+	Namespace string
+}
+
+// GetVolumeOptions contains the parameters for retrieving a single volume.
+type GetVolumeOptions struct {
+	Namespace string
+	VolumeID  string // = pvName
+}
+
+// DeleteVolumeOptions contains the parameters for unregistering a volume.
+type DeleteVolumeOptions struct {
+	Namespace string
+	VolumeID  string
+	Force     bool
+}
+
+// VolumeInfo holds the metadata of a registered volume.
+type VolumeInfo struct {
+	VolumeID  string
+	Name      string
+	PvName    string
+	SizeGB    int
+	CreatedAt string
+}
+
+// DeleteVolumeResult holds the outcome of a DeleteVolume operation.
+type DeleteVolumeResult struct {
+	AffectedSandboxIDs []string
+	ForcedDelete       bool
+}
+
 type CloneMetrics struct {
 	Retries       int
 	Wait          time.Duration
