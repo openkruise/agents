@@ -165,6 +165,9 @@ type RuleMatch struct {
 	// "https", or custom schemes used by gRPC/other protocols). Multiple
 	// entries are ORed. Matching is case-insensitive.
 	// +optional
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=32
+	// +kubebuilder:validation:items:Pattern=`^[a-zA-Z][a-zA-Z0-9+\-.]*$`
 	Schemes []string `json:"schemes,omitempty"`
 	// Headers lists header matches; multiple entries are ANDed.
 	// +optional
@@ -236,6 +239,11 @@ const (
 // CredentialRef identifies the credential source for a TokenTransformation.
 // The Kind field selects between built-in Secret and extensible
 // CredentialProvider; Name identifies the specific resource.
+//
+// For Kind=Secret the Secret must reside in the same namespace as the
+// SecurityProfile. Cross-namespace references are intentionally disallowed
+// to enforce namespace isolation; a future version may support them via a
+// ReferenceGrant-style mechanism.
 type CredentialRef struct {
 	// Kind selects the credential source type.
 	Kind CredentialRefKind `json:"kind"`
@@ -244,12 +252,6 @@ type CredentialRef struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
 	Name string `json:"name"`
-	// Namespace overrides the default namespace for Kind=Secret.
-	// Defaults to the SecurityProfile's namespace. Ignored when
-	// Kind=CredentialProvider.
-	// +optional
-	// +kubebuilder:validation:MaxLength=253
-	Namespace string `json:"namespace,omitempty"`
 }
 
 // ApiKeyConfig holds ApiKey-mode specific configuration.
@@ -376,6 +378,7 @@ type AuditWebhook struct {
 	// Timeout caps each HTTP attempt. Defaults to 2s, max 30s.
 	// +optional
 	// +kubebuilder:default:="2s"
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('500ms') && duration(self) <= duration('30s')",message="timeout must be between 500ms and 30s"
 	Timeout *metav1.Duration `json:"timeout,omitempty"`
 }
 

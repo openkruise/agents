@@ -152,6 +152,10 @@ spec:
                           description: Timeout caps each HTTP attempt. Defaults to
                             2s, max 30s.
                           type: string
+                          x-kubernetes-validations:
+                          - message: timeout must be between 500ms and 30s
+                            rule: duration(self) >= duration('500ms') && duration(self)
+                              <= duration('30s')
                         url:
                           description: |-
                             URL is the absolute HTTP(S) URL of the webhook. Supports Go
@@ -345,6 +349,10 @@ spec:
                                     description: Timeout caps each HTTP attempt. Defaults
                                       to 2s, max 30s.
                                     type: string
+                                    x-kubernetes-validations:
+                                    - message: timeout must be between 500ms and 30s
+                                      rule: duration(self) >= duration('500ms') &&
+                                        duration(self) <= duration('30s')
                                   url:
                                     description: |-
                                       URL is the absolute HTTP(S) URL of the webhook. Supports Go
@@ -490,13 +498,6 @@ spec:
                                     provider name for Kind=CredentialProvider.
                                   maxLength: 253
                                   minLength: 1
-                                  type: string
-                                namespace:
-                                  description: |-
-                                    Namespace overrides the default namespace for Kind=Secret.
-                                    Defaults to the SecurityProfile's namespace. Ignored when
-                                    Kind=CredentialProvider.
-                                  maxLength: 253
                                   type: string
                               required:
                               - kind
@@ -716,6 +717,9 @@ spec:
                               "https", or custom schemes used by gRPC/other protocols). Multiple
                               entries are ORed. Matching is case-insensitive.
                             items:
+                              maxLength: 32
+                              minLength: 1
+                              pattern: ^[a-zA-Z][a-zA-Z0-9+\-.]*$
                               type: string
                             type: array
                         required:
