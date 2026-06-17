@@ -30,6 +30,8 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/distribution/reference"
+
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
 	"github.com/openkruise/agents/pkg/utils"
@@ -301,7 +303,7 @@ func isContainersConsistent(pod *corev1.Pod, box *agentsv1alpha1.Sandbox) bool {
 				"container", initContainer.Name)
 			return false
 		}
-		if statusImage != initContainer.Image {
+		if !imageRefsEqual(initContainer.Image, statusImage) {
 			klog.InfoS("init container image mismatch between spec and status, waiting",
 				"sandbox", klog.KObj(box),
 				"container", initContainer.Name,
@@ -311,6 +313,23 @@ func isContainersConsistent(pod *corev1.Pod, box *agentsv1alpha1.Sandbox) bool {
 		}
 	}
 	return true
+}
+
+// imageRefsEqual compares two image references accounting for registry normalization.
+// Container runtimes may expand short names (e.g. "img:latest" → "docker.io/library/img:latest").
+func imageRefsEqual(a, b string) bool {
+	if a == b {
+		return true
+	}
+	return normalizeImageRef(a) == normalizeImageRef(b)
+}
+
+func normalizeImageRef(img string) string {
+	named, err := reference.ParseNormalizedNamed(img)
+	if err != nil {
+		return img
+	}
+	return reference.TagNameOnly(named).String()
 }
 
 // hasUpgradeAction checks if the sandbox has a non-empty upgrade action configured.

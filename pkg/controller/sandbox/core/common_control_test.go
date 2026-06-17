@@ -2967,6 +2967,54 @@ func Test_isContainersConsistent(t *testing.T) {
 			},
 			expected: false,
 		},
+		{
+			name: "short name in spec vs normalized name in status - should match",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					InitContainers: []corev1.Container{
+						{Name: "runtime", Image: "agent-runtime:latest"},
+					},
+				},
+				Status: corev1.PodStatus{
+					InitContainerStatuses: []corev1.ContainerStatus{
+						{Name: "runtime", Image: "docker.io/library/agent-runtime:latest"},
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "implicit latest tag in spec vs explicit in status - should match",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					InitContainers: []corev1.Container{
+						{Name: "runtime", Image: "agent-runtime"},
+					},
+				},
+				Status: corev1.PodStatus{
+					InitContainerStatuses: []corev1.ContainerStatus{
+						{Name: "runtime", Image: "docker.io/library/agent-runtime:latest"},
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "fully qualified registry image - different tags still mismatch",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					InitContainers: []corev1.Container{
+						{Name: "runtime", Image: "registry.example.com/org/runtime:v1"},
+					},
+				},
+				Status: corev1.PodStatus{
+					InitContainerStatuses: []corev1.ContainerStatus{
+						{Name: "runtime", Image: "registry.example.com/org/runtime:v2"},
+					},
+				},
+			},
+			expected: false,
+		},
 	}
 
 	for _, tt := range tests {
