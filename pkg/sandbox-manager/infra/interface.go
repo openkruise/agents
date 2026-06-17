@@ -199,11 +199,20 @@ type DeleteVolumeOptions struct {
 	Namespace string
 	VolumeID  string
 	UserID    string
+	Force     bool
 }
 
 type VolumeInfo struct {
-	Name     string `json:"name,omitempty"`
-	VolumeID string `json:"volumeID,omitempty"`
+	VolumeID  string `json:"volumeID,omitempty"`
+	Name      string `json:"name,omitempty"`
+	PvName    string `json:"pvName,omitempty"`
+	SizeGB    int    `json:"sizeGB,omitempty"`
+	CreatedAt string `json:"createdAt,omitempty"`
+}
+
+type DeleteVolumeResult struct {
+	AffectedSandboxIDs []string
+	ForcedDelete       bool
 }
 
 type Builder interface {
@@ -223,10 +232,10 @@ type Infrastructure interface {
 	ClaimSandbox(ctx context.Context, opts ClaimSandboxOptions) (Sandbox, ClaimMetrics, error)
 	CloneSandbox(ctx context.Context, opts CloneSandboxOptions) (Sandbox, CloneMetrics, error)
 	DeleteCheckpoint(ctx context.Context, opts DeleteCheckpointOptions) error
-	CreateVolume(ctx context.Context, opts CreateVolumeOptions) (*VolumeInfo, error)
-	ListVolumes(ctx context.Context, opts ListVolumesOptions) ([]*VolumeInfo, error)
-	GetVolume(ctx context.Context, opts GetVolumeOptions) (*VolumeInfo, error)
-	DeleteVolume(ctx context.Context, opts DeleteVolumeOptions) error
+	CreateVolume(ctx context.Context, opts CreateVolumeOptions) (VolumeInfo, error)
+	ListVolumes(ctx context.Context, opts ListVolumesOptions) ([]VolumeInfo, error)
+	GetVolume(ctx context.Context, opts GetVolumeOptions) (VolumeInfo, error)
+	DeleteVolume(ctx context.Context, opts DeleteVolumeOptions) (DeleteVolumeResult, error)
 }
 
 type Sandbox interface {

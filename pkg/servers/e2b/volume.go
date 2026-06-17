@@ -31,6 +31,7 @@ import (
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
@@ -38,17 +39,16 @@ import (
 	"github.com/openkruise/agents/pkg/servers/web"
 )
 
-// CreateVolume creates a new persistent volume for the user.
+// CreateVolume creates a new persistent volume (PVC) for the user.
 // Implementation: Creates a PVC and waits for it to bind to a PV.
-// Returns the volumeID (PV name) once binding is complete.
-func (sc *Controller) CreateVolume(r *http.Request) (web.ApiResponse[*models.Volume], *web.ApiError) {
+func (sc *Controller) CreateVolume(r *http.Request) (web.ApiResponse[*models.VolumeResponse], *web.ApiError) {
 	ctx := r.Context()
 	log := klog.FromContext(ctx)
 
 	// Get authenticated user & determine namespace
 	user := GetUserFromContext(ctx)
 	if user == nil {
-		return web.ApiResponse[*models.Volume]{}, &web.ApiError{
+		return web.ApiResponse[*models.VolumeResponse]{}, &web.ApiError{
 			Code:    http.StatusUnauthorized,
 			Message: "User is empty",
 		}
@@ -61,7 +61,7 @@ func (sc *Controller) CreateVolume(r *http.Request) (web.ApiResponse[*models.Vol
 	// Parse request body and headers
 	req, parseErr := sc.parseCreateVolumeRequest(ctx, r)
 	if parseErr != nil {
-		return web.ApiResponse[*models.Volume]{}, &web.ApiError{
+		return web.ApiResponse[*models.VolumeResponse]{}, &web.ApiError{
 			Code:    http.StatusBadRequest,
 			Message: parseErr.Error(),
 		}
@@ -81,23 +81,20 @@ func (sc *Controller) CreateVolume(r *http.Request) (web.ApiResponse[*models.Vol
 	if err != nil {
 		log.Error(err, "Failed to create volume", "name", req.Name, "namespace", namespace)
 		if managererrors.GetErrCode(err) == managererrors.ErrorNotAllowed {
-			return web.ApiResponse[*models.Volume]{}, &web.ApiError{
+			return web.ApiResponse[*models.VolumeResponse]{}, &web.ApiError{
 				Code:    http.StatusForbidden,
 				Message: "Permission denied",
 			}
 		}
-		return web.ApiResponse[*models.Volume]{}, &web.ApiError{
-			Code:    http.StatusInternalServerError,
+		return web.ApiResponse[*models.VolumeResponse]{}, &web.ApiError{
+			Code:    mapVolumeErrorToHTTP(managererrors.GetErrCode(err)),
 			Message: fmt.Sprintf("Failed to create volume: %v", err),
 		}
 	}
 	log.Info("Volume created", "name", volumeInfo.Name, "namespace", namespace, "size", req.Extensions.StorageSize)
-	return web.ApiResponse[*models.Volume]{
+	return web.ApiResponse[*models.VolumeResponse]{
 		Code: http.StatusCreated,
-		Body: &models.Volume{
-			Name:     volumeInfo.Name,
-			VolumeID: volumeInfo.VolumeID,
-		},
+		Body: volumeInfoToResponse(volumeInfo),
 	}, nil
 }
 
@@ -173,146 +170,176 @@ func (sc *Controller) validateStorageClass(ctx context.Context, storageClassName
 	return nil
 }
 
-// ListVolumes lists all volumes for the authenticated user
-func (sc *Controller) ListVolumes(r *http.Request) (web.ApiResponse[[]*models.Volume], *web.ApiError) {
+// ListVolumes handles GET /volumes — lists all volumes in the caller's namespace.
+func (sc *Controller) ListVolumes(r *http.Request) (web.ApiResponse[[]models.VolumeResponse], *web.ApiError) {
 	ctx := r.Context()
 	log := klog.FromContext(ctx)
 
 	user := GetUserFromContext(ctx)
 	if user == nil {
-		return web.ApiResponse[[]*models.Volume]{}, &web.ApiError{
+		return web.ApiResponse[[]models.VolumeResponse]{}, &web.ApiError{
 			Code:    http.StatusUnauthorized,
-			Message: "User is empty",
+			Message: "User not found",
 		}
 	}
+
 	namespace := sc.getNamespaceOfUser(user)
-	if namespace == "" {
-		namespace = sc.systemNamespace
-	}
+	log.Info("list volumes request", "namespace", namespace)
 
 	volumes, err := sc.manager.GetInfra().ListVolumes(ctx, infra.ListVolumesOptions{
 		Namespace: namespace,
 		UserID:    user.ID.String(),
 	})
 	if err != nil {
-		log.Error(err, "Failed to list volumes", "namespace", namespace, "user", user.ID)
-		return web.ApiResponse[[]*models.Volume]{}, &web.ApiError{
-			Code:    http.StatusInternalServerError,
-			Message: "Failed to list volumes",
+		log.Error(err, "failed to list volumes")
+		return web.ApiResponse[[]models.VolumeResponse]{}, &web.ApiError{
+			Code:    mapVolumeErrorToHTTP(managererrors.GetErrCode(err)),
+			Message: err.Error(),
 		}
 	}
 
-	result := make([]*models.Volume, 0, len(volumes))
+	result := make([]models.VolumeResponse, 0, len(volumes))
 	for _, v := range volumes {
-		result = append(result, &models.Volume{
-			Name:     v.Name,
-			VolumeID: v.VolumeID,
-		})
+		result = append(result, *volumeInfoToResponse(v))
 	}
 
-	return web.ApiResponse[[]*models.Volume]{
+	return web.ApiResponse[[]models.VolumeResponse]{
 		Code: http.StatusOK,
 		Body: result,
 	}, nil
 }
 
-// GetVolume retrieves a volume by volumeID
-func (sc *Controller) GetVolume(r *http.Request) (web.ApiResponse[*models.Volume], *web.ApiError) {
+// GetVolume handles GET /volumes/{volumeID} — retrieves a single volume by ID.
+func (sc *Controller) GetVolume(r *http.Request) (web.ApiResponse[*models.VolumeResponse], *web.ApiError) {
 	ctx := r.Context()
 	log := klog.FromContext(ctx)
 
 	user := GetUserFromContext(ctx)
 	if user == nil {
-		return web.ApiResponse[*models.Volume]{}, &web.ApiError{
+		return web.ApiResponse[*models.VolumeResponse]{}, &web.ApiError{
 			Code:    http.StatusUnauthorized,
-			Message: "User is empty",
+			Message: "User not found",
 		}
-	}
-	namespace := sc.getNamespaceOfUser(user)
-	if namespace == "" {
-		namespace = sc.systemNamespace
 	}
 
 	volumeID := r.PathValue("volumeID")
-	if volumeID == "" {
-		return web.ApiResponse[*models.Volume]{}, &web.ApiError{
-			Code:    http.StatusBadRequest,
-			Message: "volumeID is required",
-		}
-	}
+	namespace := sc.getNamespaceOfUser(user)
+	log.Info("get volume request", "namespace", namespace, "volumeID", volumeID)
 
-	volumeInfo, err := sc.manager.GetInfra().GetVolume(ctx, infra.GetVolumeOptions{
+	info, err := sc.manager.GetInfra().GetVolume(ctx, infra.GetVolumeOptions{
 		Namespace: namespace,
 		VolumeID:  volumeID,
 		UserID:    user.ID.String(),
 	})
 	if err != nil {
-		log.Error(err, "Failed to get volume", "volumeID", volumeID, "namespace", namespace)
-		if managererrors.GetErrCode(err) == managererrors.ErrorNotFound {
-			return web.ApiResponse[*models.Volume]{}, &web.ApiError{
-				Code:    http.StatusNotFound,
-				Message: "Volume not found",
-			}
-		}
-		return web.ApiResponse[*models.Volume]{}, &web.ApiError{
-			Code:    http.StatusInternalServerError,
-			Message: "Failed to get volume",
+		log.Error(err, "failed to get volume")
+		return web.ApiResponse[*models.VolumeResponse]{}, &web.ApiError{
+			Code:    mapVolumeErrorToHTTP(managererrors.GetErrCode(err)),
+			Message: err.Error(),
 		}
 	}
 
-	return web.ApiResponse[*models.Volume]{
+	return web.ApiResponse[*models.VolumeResponse]{
 		Code: http.StatusOK,
-		Body: &models.Volume{
-			Name:     volumeInfo.Name,
-			VolumeID: volumeInfo.VolumeID,
-		},
+		Body: volumeInfoToResponse(info),
 	}, nil
 }
 
-// DeleteVolume deletes a volume by volumeID
-func (sc *Controller) DeleteVolume(r *http.Request) (web.ApiResponse[struct{}], *web.ApiError) {
+// DeleteVolume handles DELETE /volumes/{volumeID} — deletes a volume.
+// Accepts optional ?force=true query parameter to force deletion even when mounted.
+func (sc *Controller) DeleteVolume(r *http.Request) (web.ApiResponse[*models.DeleteVolumeResponse], *web.ApiError) {
 	ctx := r.Context()
 	log := klog.FromContext(ctx)
 
 	user := GetUserFromContext(ctx)
 	if user == nil {
-		return web.ApiResponse[struct{}]{}, &web.ApiError{
+		return web.ApiResponse[*models.DeleteVolumeResponse]{}, &web.ApiError{
 			Code:    http.StatusUnauthorized,
-			Message: "User is empty",
+			Message: "User not found",
 		}
-	}
-	namespace := sc.getNamespaceOfUser(user)
-	if namespace == "" {
-		namespace = sc.systemNamespace
 	}
 
 	volumeID := r.PathValue("volumeID")
-	if volumeID == "" {
-		return web.ApiResponse[struct{}]{}, &web.ApiError{
-			Code:    http.StatusBadRequest,
-			Message: "volumeID is required",
-		}
-	}
+	force := r.URL.Query().Get("force") == "true"
+	namespace := sc.getNamespaceOfUser(user)
+	log.Info("delete volume request", "namespace", namespace, "volumeID", volumeID, "force", force)
 
-	if err := sc.manager.GetInfra().DeleteVolume(ctx, infra.DeleteVolumeOptions{
+	result, err := sc.manager.GetInfra().DeleteVolume(ctx, infra.DeleteVolumeOptions{
 		Namespace: namespace,
 		VolumeID:  volumeID,
 		UserID:    user.ID.String(),
-	}); err != nil {
-		log.Error(err, "Failed to delete volume", "volumeID", volumeID, "namespace", namespace)
-		if managererrors.GetErrCode(err) == managererrors.ErrorNotFound {
-			return web.ApiResponse[struct{}]{}, &web.ApiError{
-				Code:    http.StatusNotFound,
-				Message: "Volume not found",
-			}
-		}
-		return web.ApiResponse[struct{}]{}, &web.ApiError{
-			Code:    http.StatusInternalServerError,
-			Message: "Failed to delete volume",
+		Force:     force,
+	})
+	if err != nil {
+		log.Error(err, "failed to delete volume")
+		return web.ApiResponse[*models.DeleteVolumeResponse]{}, &web.ApiError{
+			Code:    mapVolumeErrorToHTTP(managererrors.GetErrCode(err)),
+			Message: err.Error(),
 		}
 	}
 
-	return web.ApiResponse[struct{}]{
-		Code: http.StatusNoContent,
+	resp := &models.DeleteVolumeResponse{}
+	if result.ForcedDelete {
+		resp.Warning = "volume was forcibly removed while mounted"
+		resp.AffectedBy = result.AffectedSandboxIDs
+	}
+
+	return web.ApiResponse[*models.DeleteVolumeResponse]{
+		Code: http.StatusOK,
+		Body: resp,
 	}, nil
+}
+
+// resolveVolumeMounts translates a slice of VolumeMountRequest into
+// v1alpha1.CSIMountConfig values by verifying that each volumeID is registered
+// under the caller's namespace. Returns an error if any volumeID is not found
+// or belongs to a different namespace.
+func (sc *Controller) resolveVolumeMounts(ctx context.Context, namespace string, mounts []models.VolumeMountRequest) ([]v1alpha1.CSIMountConfig, error) {
+	if len(mounts) == 0 {
+		return nil, nil
+	}
+	configs := make([]v1alpha1.CSIMountConfig, 0, len(mounts))
+	for _, m := range mounts {
+		info, err := sc.manager.GetInfra().GetVolume(ctx, infra.GetVolumeOptions{
+			Namespace: namespace,
+			VolumeID:  m.VolumeID,
+			UserID:    "", // Internal resolution uses namespace validation
+		})
+		if err != nil {
+			return nil, fmt.Errorf("volume %s: %w", m.VolumeID, err)
+		}
+		configs = append(configs, v1alpha1.CSIMountConfig{
+			PvName:    info.PvName,
+			MountPath: m.MountPath,
+			ReadOnly:  m.ReadOnly,
+		})
+	}
+	return configs, nil
+}
+
+// mapVolumeErrorToHTTP maps a managererrors.ErrorCode to an HTTP status code.
+func mapVolumeErrorToHTTP(code managererrors.ErrorCode) int {
+	switch code {
+	case managererrors.ErrorNotFound:
+		return http.StatusNotFound
+	case managererrors.ErrorConflict:
+		return http.StatusConflict
+	case managererrors.ErrorNotAllowed:
+		return http.StatusForbidden
+	case managererrors.ErrorBadRequest:
+		return http.StatusUnprocessableEntity
+	default:
+		return http.StatusInternalServerError
+	}
+}
+
+// volumeInfoToResponse converts an infra.VolumeInfo to an API response model.
+func volumeInfoToResponse(v infra.VolumeInfo) *models.VolumeResponse {
+	return &models.VolumeResponse{
+		VolumeID:  v.VolumeID,
+		Name:      v.Name,
+		PvName:    v.PvName,
+		SizeGB:    v.SizeGB,
+		CreatedAt: v.CreatedAt,
+	}
 }

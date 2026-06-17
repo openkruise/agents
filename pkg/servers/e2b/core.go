@@ -35,6 +35,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
+	volumepkg "github.com/openkruise/agents/pkg/sandbox-manager/volume"
 	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 )
@@ -67,6 +68,7 @@ type Controller struct {
 	domain          string
 	manager         *sandboxmanager.SandboxManager
 	keys            keys.KeyStorage
+	volumeManager   volumeManagerInterface
 }
 
 // NewController creates a new E2B Controller
@@ -116,6 +118,7 @@ func (sc *Controller) Init() error {
 	}
 
 	sc.manager = sandboxManager
+	sc.volumeManager = volumepkg.NewManager(sandboxManager.GetInfra())
 	sc.cache = sandboxManager.GetInfra().GetCache()
 	sc.storageRegistry = storages.NewStorageProvider()
 	sc.registerRoutes()

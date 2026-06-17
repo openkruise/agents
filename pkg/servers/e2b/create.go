@@ -143,8 +143,22 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 	log := klog.FromContext(ctx)
 	claimStart := time.Now()
 	var accessToken string
+	// Resolve E2B volume_mounts before entering the claim pipeline.
+	namespace := sc.getNamespaceOfUser(user)
+	if len(request.E2BVolumeMounts) > 0 {
+		resolved, err := sc.resolveVolumeMounts(ctx, namespace, request.E2BVolumeMounts)
+		if err != nil {
+			return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
+				Code:    http.StatusBadRequest,
+				Message: err.Error(),
+			}
+		}
+		// Prepend resolved configs to the CSIMount extension list.
+		request.Extensions.CSIMount.MountConfigs = append(resolved, request.Extensions.CSIMount.MountConfigs...)
+	}
+
 	infraOpts := infra.ClaimSandboxOptions{
-		Namespace:    sc.getNamespaceOfUser(user),
+		Namespace:    namespace,
 		Template:     request.TemplateID,
 		User:         user.ID.String(),
 		ClaimTimeout: resolveServerTimeout(request.Extensions.TimeoutSeconds),
@@ -230,8 +244,21 @@ func (sc *Controller) createSandboxWithClone(ctx context.Context, request models
 		}
 	}
 
+	// Resolve E2B volume_mounts before entering the clone pipeline.
+	namespace := sc.getNamespaceOfUser(user)
+	if len(request.E2BVolumeMounts) > 0 {
+		resolved, err := sc.resolveVolumeMounts(ctx, namespace, request.E2BVolumeMounts)
+		if err != nil {
+			return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
+				Code:    http.StatusBadRequest,
+				Message: err.Error(),
+			}
+		}
+		request.Extensions.CSIMount.MountConfigs = append(resolved, request.Extensions.CSIMount.MountConfigs...)
+	}
+
 	infraOpts := infra.CloneSandboxOptions{
-		Namespace:    sc.getNamespaceOfUser(user),
+		Namespace:    namespace,
 		User:         user.ID.String(),
 		CheckPointID: request.TemplateID,
 		CloneTimeout: resolveServerTimeout(request.Extensions.TimeoutSeconds),
@@ -304,6 +331,16 @@ func (sc *Controller) parseCreateSandboxRequest(r *http.Request) (models.NewSand
 				PvName:    vm.Name,
 				MountPath: vm.Path,
 			})
+		}
+	}
+
+	// Validate E2BVolumeMounts
+	if len(request.E2BVolumeMounts) > 0 {
+		if err := models.ValidateE2BVolumeMounts(request.E2BVolumeMounts); err != nil {
+			return request, &web.ApiError{
+				Code:    http.StatusBadRequest,
+				Message: err.Error(),
+			}
 		}
 	}
 

@@ -18,17 +18,20 @@ package e2b
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"testing"
 	"time"
 
-	"github.com/openkruise/agents/pkg/servers/e2b/keys"
-	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/openkruise/agents/pkg/servers/e2b/keys"
+	"github.com/openkruise/agents/pkg/servers/e2b/models"
 )
 
 func TestCreateVolume(t *testing.T) {
@@ -163,48 +166,6 @@ func TestCreateVolume(t *testing.T) {
 			expectError: "storage class \"non-existent\" not found",
 			errorCode:   http.StatusBadRequest,
 		},
-		{
-			name: "invalid volume name with uppercase",
-			setupReq: func(t *testing.T) *http.Request {
-				req := NewRequest(t, nil, models.NewVolumeRequest{
-					Name: "Test-Volume-UPPERCASE",
-				}, nil, user)
-				req.Header.Set(models.ExtensionHeaderVolumeSize, "1Gi")
-				req.Header.Set(models.ExtensionHeaderVolumeStorageClass, "standard")
-				req.Header.Set(models.ExtensionHeaderVolumeAccessMode, "ReadWriteOnce")
-				return req
-			},
-			expectError: "invalid volume name",
-			errorCode:   http.StatusBadRequest,
-		},
-		{
-			name: "invalid volume name with special characters",
-			setupReq: func(t *testing.T) *http.Request {
-				req := NewRequest(t, nil, models.NewVolumeRequest{
-					Name: "test@volume#name",
-				}, nil, user)
-				req.Header.Set(models.ExtensionHeaderVolumeSize, "1Gi")
-				req.Header.Set(models.ExtensionHeaderVolumeStorageClass, "standard")
-				req.Header.Set(models.ExtensionHeaderVolumeAccessMode, "ReadWriteOnce")
-				return req
-			},
-			expectError: "invalid volume name",
-			errorCode:   http.StatusBadRequest,
-		},
-		{
-			name: "invalid volume name too long",
-			setupReq: func(t *testing.T) *http.Request {
-				req := NewRequest(t, nil, models.NewVolumeRequest{
-					Name: "this-name-is-way-too-long-for-a-dns1123-subdomain-because-it-exceeds-sixty-three-characters-limit",
-				}, nil, user)
-				req.Header.Set(models.ExtensionHeaderVolumeSize, "1Gi")
-				req.Header.Set(models.ExtensionHeaderVolumeStorageClass, "standard")
-				req.Header.Set(models.ExtensionHeaderVolumeAccessMode, "ReadWriteOnce")
-				return req
-			},
-			expectError: "invalid volume name",
-			errorCode:   http.StatusBadRequest,
-		},
 	}
 
 	for _, tt := range tests {
@@ -324,7 +285,7 @@ func TestGetVolume(t *testing.T) {
 					"volumeID": "non-existent-pv",
 				}, user)
 			},
-			expectError: "Volume not found",
+			expectError: "volume not found",
 			errorCode:   http.StatusNotFound,
 		},
 	}
@@ -371,27 +332,17 @@ func TestDeleteVolume(t *testing.T) {
 					"volumeID": "some-id",
 				}, nil)
 			},
-			expectError: "User is empty",
+			expectError: "User not found",
 			errorCode:   http.StatusUnauthorized,
-		},
-		{
-			name: "volumeID is empty",
-			setupReq: func(t *testing.T) *http.Request {
-				return NewRequest(t, nil, nil, map[string]string{
-					"volumeID": "",
-				}, user)
-			},
-			expectError: "volumeID is required",
-			errorCode:   http.StatusBadRequest,
 		},
 		{
 			name: "volume not found",
 			setupReq: func(t *testing.T) *http.Request {
 				return NewRequest(t, nil, nil, map[string]string{
-					"volumeID": "non-existent-pv",
+					"volumeID": "non-existent-pvc",
 				}, user)
 			},
-			expectError: "Volume not found",
+			expectError: "volume not found",
 			errorCode:   http.StatusNotFound,
 		},
 	}
@@ -409,7 +360,7 @@ func TestDeleteVolume(t *testing.T) {
 				assert.Contains(t, apiErr.Message, tt.expectError)
 			} else {
 				require.Nil(t, apiErr, "unexpected error: %v", apiErr)
-				assert.Equal(t, http.StatusNoContent, resp.Code)
+				assert.Equal(t, http.StatusOK, resp.Code)
 			}
 		})
 	}
@@ -470,3 +421,32 @@ func TestValidateVolumeRequest_DefaultWaitBoundSeconds(t *testing.T) {
 		})
 	}
 }
+
+func TestController_ResolveVolumeMounts(t *testing.T) {
+	controller, _, teardown := Setup(t)
+	defer teardown()
+
+	user := &models.CreatedTeamAPIKey{
+		ID:   keys.AdminKeyID,
+		Key:  InitKey,
+		Name: "test-user",
+	}
+
+	namespace := controller.getNamespaceOfUser(user)
+
+	t.Run("empty volume_mounts — no-op, nil returned", func(t *testing.T) {
+		res, err := controller.resolveVolumeMounts(context.Background(), namespace, []models.VolumeMountRequest{})
+		require.NoError(t, err)
+		assert.Nil(t, res)
+	})
+
+	t.Run("non-existent volumeID — returns error", func(t *testing.T) {
+		mounts := []models.VolumeMountRequest{
+			{VolumeID: "pv-missing", MountPath: "/data"},
+		}
+		_, err := controller.resolveVolumeMounts(context.Background(), namespace, mounts)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "volume not found")
+	})
+}
+

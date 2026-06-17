@@ -41,3 +41,25 @@ type VolumeExtensions struct {
 	AccessMode       string
 	WaitBoundSeconds time.Duration
 }
+
+// VolumeResponse is returned by POST, GET, and as a list element.
+type VolumeResponse struct {
+	VolumeID  string `json:"volumeID"`
+	Name      string `json:"name"`
+	PvName    string `json:"pvName"`
+	SizeGB    int    `json:"sizeGB"`
+	CreatedAt string `json:"createdAt"`
+}
+
+// DeleteVolumeResponse is returned by DELETE /volumes/{volumeID}.
+type DeleteVolumeResponse struct {
+	Warning    string   `json:"warning,omitempty"`
+	AffectedBy []string `json:"affectedSandboxIDs,omitempty"`
+}
+
+// VolumeMountRequest is one entry in the POST /sandboxes volume_mounts array.
+type VolumeMountRequest struct {
+	VolumeID  string `json:"volumeID"`
+	MountPath string `json:"mountPath"`
+	ReadOnly  bool   `json:"readOnly,omitempty"`
+}

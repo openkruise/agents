@@ -65,7 +65,6 @@ func (sc *Controller) registerRoutes() {
 	RegisterE2BRoute(sc.mux, http.MethodGet, "/browser/{sandboxID}/json/version", sc.BrowserUse, sc.CheckApiKey)
 	RegisterE2BRoute(sc.mux, http.MethodGet, "/debug", sc.Debug, sc.CheckApiKey)
 
-	// Volume management endpoints
 	RegisterE2BRoute(sc.mux, http.MethodPost, "/volumes", sc.CreateVolume, sc.CheckApiKey)
 	RegisterE2BRoute(sc.mux, http.MethodGet, "/volumes", sc.ListVolumes, sc.CheckApiKey)
 	RegisterE2BRoute(sc.mux, http.MethodGet, "/volumes/{volumeID}", sc.GetVolume, sc.CheckApiKey)

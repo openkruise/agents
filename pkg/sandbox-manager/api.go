@@ -22,6 +22,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -268,20 +269,17 @@ func (m *SandboxManager) GetOwnerOfSandbox(sandboxID string) (string, bool) {
 // in the given namespace. Returns ("", false) if the volume is not found.
 func (m *SandboxManager) GetOwnerOfVolume(ctx context.Context, namespace, volumeID string) (string, bool) {
 	log := klog.FromContext(ctx)
-	pvcList := &corev1.PersistentVolumeClaimList{}
-	err := m.infra.GetCache().GetClient().List(ctx, pvcList,
-		client.InNamespace(namespace),
-		client.MatchingFields{cache.IndexVolumeName: volumeID},
-	)
+	pvc := &corev1.PersistentVolumeClaim{}
+	err := m.infra.GetCache().GetClient().Get(ctx, client.ObjectKey{Namespace: namespace, Name: volumeID}, pvc)
 	if err != nil {
-		log.Error(err, "failed to list PVCs for volume ownership check", "namespace", namespace, "volumeID", volumeID)
+		if apierrors.IsNotFound(err) {
+			log.Info("no PVC found for volume ownership check", "namespace", namespace, "volumeID", volumeID)
+			return "", false
+		}
+		log.Error(err, "failed to get PVC for volume ownership check", "namespace", namespace, "volumeID", volumeID)
 		return "", false
 	}
-	if len(pvcList.Items) == 0 {
-		log.Info("no PVC found for volume ownership check", "namespace", namespace, "volumeID", volumeID)
-		return "", false
-	}
-	return pvcList.Items[0].GetAnnotations()[v1alpha1.AnnotationOwner], true
+	return pvc.GetAnnotations()[v1alpha1.AnnotationOwner], true
 }
 
 // syncRoute syncs the sandbox route with peers

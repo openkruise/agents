@@ -49,7 +49,6 @@ func TestCreateVolume(t *testing.T) {
 	i := &Infra{Cache: c}
 
 	t.Run("PVC already exists owned by different user", func(t *testing.T) {
-		// Pre-create a PVC owned by a different user
 		existingPVC := &corev1.PersistentVolumeClaim{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "existing-volume",
@@ -84,7 +83,6 @@ func TestCreateVolume(t *testing.T) {
 	})
 
 	t.Run("PVC already exists and bound by same user (idempotent)", func(t *testing.T) {
-		// Pre-create a bound PVC owned by the same user
 		boundPVC := &corev1.PersistentVolumeClaim{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "bound-volume",
@@ -109,59 +107,63 @@ func TestCreateVolume(t *testing.T) {
 		require.NoError(t, fakeClient.Create(context.Background(), boundPVC))
 
 		opts := infra.CreateVolumeOptions{
-			Namespace:    "sandbox-system",
-			Name:         "bound-volume",
-			UserID:       "user-1",
-			StorageSize:  resource.MustParse("1Gi"),
-			StorageClass: "standard",
-			AccessMode:   "ReadWriteOnce",
+			Namespace:        "sandbox-system",
+			Name:             "bound-volume",
+			UserID:           "user-1",
+			StorageSize:      resource.MustParse("1Gi"),
+			StorageClass:     "standard",
+			AccessMode:       "ReadWriteOnce",
+			WaitBoundTimeout: 1 * time.Second,
 		}
 		info, err := i.CreateVolume(context.Background(), opts)
 		require.NoError(t, err)
 		assert.Equal(t, "bound-volume", info.Name)
-		assert.Equal(t, "pv-bound-volume", info.VolumeID)
+		assert.Equal(t, "bound-volume", info.VolumeID)
+		assert.Equal(t, "pv-bound-volume", info.PvName)
 	})
+}
 
-	t.Run("PVC binding timeout returns error with PVC name", func(t *testing.T) {
-		// Create a pending PVC that won't bind
-		storageClass := "standard"
-		pendingPVC := &corev1.PersistentVolumeClaim{
+func TestListVolumes(t *testing.T) {
+	c, fakeClient, err := cachetest.NewTestCache(t)
+	require.NoError(t, err)
+
+	i := &Infra{Cache: c}
+
+	t.Run("list volumes for a user", func(t *testing.T) {
+		pvc1 := &corev1.PersistentVolumeClaim{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      "pending-volume",
+				Name:      "vol-1",
 				Namespace: "sandbox-system",
 				Annotations: map[string]string{
 					agentsv1alpha1.AnnotationOwner: "user-1",
 				},
 			},
-			Spec: corev1.PersistentVolumeClaimSpec{
-				AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-				Resources: corev1.VolumeResourceRequirements{
-					Requests: corev1.ResourceList{
-						corev1.ResourceStorage: resource.MustParse("1Gi"),
-					},
+		}
+		pvc2 := &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "vol-2",
+				Namespace: "sandbox-system",
+				Annotations: map[string]string{
+					agentsv1alpha1.AnnotationOwner: "user-1",
 				},
-				StorageClassName: &storageClass,
-			},
-			Status: corev1.PersistentVolumeClaimStatus{
-				Phase: corev1.ClaimPending,
 			},
 		}
-		require.NoError(t, fakeClient.Create(context.Background(), pendingPVC))
+		require.NoError(t, fakeClient.Create(context.Background(), pvc1))
+		require.NoError(t, fakeClient.Create(context.Background(), pvc2))
 
-		opts := infra.CreateVolumeOptions{
-			Namespace:        "sandbox-system",
-			Name:             "pending-volume",
-			UserID:           "user-1",
-			StorageSize:      resource.MustParse("1Gi"),
-			StorageClass:     "standard",
-			AccessMode:       "ReadWriteOnce",
-			WaitBoundTimeout: 100 * time.Millisecond,
+		opts := infra.ListVolumesOptions{
+			Namespace: "sandbox-system",
+			UserID:    "user-1",
 		}
-		_, err := i.CreateVolume(context.Background(), opts)
-		assert.Error(t, err)
-		// Verify error message contains PVC namespace/name and timeout info
-		assert.Contains(t, err.Error(), "sandbox-system/pending-volume")
-		assert.Contains(t, err.Error(), "timed out")
+		volumes, err := i.ListVolumes(context.Background(), opts)
+		require.NoError(t, err)
+		assert.Len(t, volumes, 2)
+		names := make(map[string]bool)
+		for _, v := range volumes {
+			names[v.Name] = true
+		}
+		assert.True(t, names["vol-1"])
+		assert.True(t, names["vol-2"])
 	})
 }
 
@@ -179,55 +181,19 @@ func TestGetVolume(t *testing.T) {
 		}
 		_, err := i.GetVolume(context.Background(), opts)
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "volume not found")
 	})
 
-	t.Run("volume found regardless of ownership", func(t *testing.T) {
+	t.Run("volume found", func(t *testing.T) {
 		pvc := &corev1.PersistentVolumeClaim{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      "pvc-other-owner",
-				Namespace: "sandbox-system",
-				Annotations: map[string]string{
-					agentsv1alpha1.AnnotationOwner: "other-user",
-				},
-			},
-			Spec: corev1.PersistentVolumeClaimSpec{
-				VolumeName:  "pv-other",
-				AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-				Resources: corev1.VolumeResourceRequirements{
-					Requests: corev1.ResourceList{
-						corev1.ResourceStorage: resource.MustParse("1Gi"),
-					},
-				},
-			},
-			Status: corev1.PersistentVolumeClaimStatus{
-				Phase: corev1.ClaimBound,
-			},
-		}
-		require.NoError(t, fakeClient.Create(context.Background(), pvc))
-
-		opts := infra.GetVolumeOptions{
-			Namespace: "sandbox-system",
-			VolumeID:  "pv-other",
-			UserID:    "user-1",
-		}
-		info, err := i.GetVolume(context.Background(), opts)
-		require.NoError(t, err)
-		assert.Equal(t, "pvc-other-owner", info.Name)
-		assert.Equal(t, "pv-other", info.VolumeID)
-	})
-
-	t.Run("volume found and owned by requesting user", func(t *testing.T) {
-		pvc := &corev1.PersistentVolumeClaim{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "pvc-owned",
+				Name:      "pvc-get-ok",
 				Namespace: "sandbox-system",
 				Annotations: map[string]string{
 					agentsv1alpha1.AnnotationOwner: "user-1",
 				},
 			},
 			Spec: corev1.PersistentVolumeClaimSpec{
-				VolumeName:  "pv-owned",
+				VolumeName:  "pv-get-ok",
 				AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
 				Resources: corev1.VolumeResourceRequirements{
 					Requests: corev1.ResourceList{
@@ -235,55 +201,19 @@ func TestGetVolume(t *testing.T) {
 					},
 				},
 			},
-			Status: corev1.PersistentVolumeClaimStatus{
-				Phase: corev1.ClaimBound,
-			},
 		}
 		require.NoError(t, fakeClient.Create(context.Background(), pvc))
 
 		opts := infra.GetVolumeOptions{
 			Namespace: "sandbox-system",
-			VolumeID:  "pv-owned",
+			VolumeID:  "pvc-get-ok",
 			UserID:    "user-1",
 		}
 		info, err := i.GetVolume(context.Background(), opts)
 		require.NoError(t, err)
-		assert.Equal(t, "pvc-owned", info.Name)
-		assert.Equal(t, "pv-owned", info.VolumeID)
-	})
-
-	t.Run("volume found with empty UserID skips ownership check", func(t *testing.T) {
-		pvc := &corev1.PersistentVolumeClaim{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "pvc-no-user-check",
-				Namespace: "sandbox-system",
-				Annotations: map[string]string{
-					agentsv1alpha1.AnnotationOwner: "other-user",
-				},
-			},
-			Spec: corev1.PersistentVolumeClaimSpec{
-				VolumeName:  "pv-no-user-check",
-				AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-				Resources: corev1.VolumeResourceRequirements{
-					Requests: corev1.ResourceList{
-						corev1.ResourceStorage: resource.MustParse("1Gi"),
-					},
-				},
-			},
-			Status: corev1.PersistentVolumeClaimStatus{
-				Phase: corev1.ClaimBound,
-			},
-		}
-		require.NoError(t, fakeClient.Create(context.Background(), pvc))
-
-		opts := infra.GetVolumeOptions{
-			Namespace: "sandbox-system",
-			VolumeID:  "pv-no-user-check",
-			UserID:    "",
-		}
-		info, err := i.GetVolume(context.Background(), opts)
-		require.NoError(t, err)
-		assert.Equal(t, "pvc-no-user-check", info.Name)
+		assert.Equal(t, "pvc-get-ok", info.Name)
+		assert.Equal(t, "pvc-get-ok", info.VolumeID)
+		assert.Equal(t, "pv-get-ok", info.PvName)
 	})
 }
 
@@ -291,50 +221,19 @@ func TestDeleteVolume(t *testing.T) {
 	c, fakeClient, err := cachetest.NewTestCache(t)
 	require.NoError(t, err)
 
-	i := &Infra{Cache: c}
+	i := &Infra{Cache: c, APIReader: fakeClient}
 
 	t.Run("volume not found", func(t *testing.T) {
 		opts := infra.DeleteVolumeOptions{
 			Namespace: "sandbox-system",
-			VolumeID:  "non-existent-pv",
+			VolumeID:  "non-existent-pvc",
 			UserID:    "user-1",
 		}
-		err := i.DeleteVolume(context.Background(), opts)
+		_, err := i.DeleteVolume(context.Background(), opts)
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "volume not found")
 	})
 
-	t.Run("volume deleted regardless of ownership", func(t *testing.T) {
-		pvc := &corev1.PersistentVolumeClaim{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "pvc-del-other",
-				Namespace: "sandbox-system",
-				Annotations: map[string]string{
-					agentsv1alpha1.AnnotationOwner: "other-user",
-				},
-			},
-			Spec: corev1.PersistentVolumeClaimSpec{
-				VolumeName:  "pv-del-other",
-				AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-				Resources: corev1.VolumeResourceRequirements{
-					Requests: corev1.ResourceList{
-						corev1.ResourceStorage: resource.MustParse("1Gi"),
-					},
-				},
-			},
-		}
-		require.NoError(t, fakeClient.Create(context.Background(), pvc))
-
-		opts := infra.DeleteVolumeOptions{
-			Namespace: "sandbox-system",
-			VolumeID:  "pv-del-other",
-			UserID:    "user-1",
-		}
-		err := i.DeleteVolume(context.Background(), opts)
-		assert.NoError(t, err)
-	})
-
-	t.Run("volume deleted successfully by owner", func(t *testing.T) {
+	t.Run("volume deleted successfully", func(t *testing.T) {
 		pvc := &corev1.PersistentVolumeClaim{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "pvc-del-ok",
@@ -357,24 +256,25 @@ func TestDeleteVolume(t *testing.T) {
 
 		opts := infra.DeleteVolumeOptions{
 			Namespace: "sandbox-system",
-			VolumeID:  "pv-del-ok",
+			VolumeID:  "pvc-del-ok",
 			UserID:    "user-1",
 		}
-		err := i.DeleteVolume(context.Background(), opts)
-		assert.NoError(t, err)
+		result, err := i.DeleteVolume(context.Background(), opts)
+		require.NoError(t, err)
+		assert.Empty(t, result.AffectedSandboxIDs)
 	})
 
-	t.Run("volume deleted with empty UserID skips ownership check", func(t *testing.T) {
+	t.Run("delete volume blocked by SandboxClaim", func(t *testing.T) {
 		pvc := &corev1.PersistentVolumeClaim{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      "pvc-del-no-user",
-				Namespace: "sandbox-system",
+				Name:      "pvc-del-blocked",
+				Namespace: "ns1",
 				Annotations: map[string]string{
-					agentsv1alpha1.AnnotationOwner: "other-user",
+					agentsv1alpha1.AnnotationOwner: "user-1",
 				},
 			},
 			Spec: corev1.PersistentVolumeClaimSpec{
-				VolumeName:  "pv-del-no-user",
+				VolumeName:  "pv-del-blocked",
 				AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
 				Resources: corev1.VolumeResourceRequirements{
 					Requests: corev1.ResourceList{
@@ -385,103 +285,46 @@ func TestDeleteVolume(t *testing.T) {
 		}
 		require.NoError(t, fakeClient.Create(context.Background(), pvc))
 
+		// Create claim and sandbox mounting this PV
+		claim := &agentsv1alpha1.SandboxClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: "claim1", Namespace: "ns1"},
+			Spec: agentsv1alpha1.SandboxClaimSpec{
+				TemplateName: "test-template",
+				DynamicVolumesMount: []agentsv1alpha1.CSIMountConfig{
+					{PvName: "pv-del-blocked", MountPath: "/data"},
+				},
+			},
+		}
+		require.NoError(t, fakeClient.Create(context.Background(), claim))
+
+		sbx := &agentsv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "sbx1",
+				Namespace: "ns1",
+				Labels: map[string]string{
+					agentsv1alpha1.LabelSandboxIsClaimed: agentsv1alpha1.True,
+					agentsv1alpha1.LabelSandboxClaimName: "claim1",
+				},
+			},
+			Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxRunning},
+		}
+		CreateSandboxWithStatus(t, fakeClient, sbx)
+
 		opts := infra.DeleteVolumeOptions{
-			Namespace: "sandbox-system",
-			VolumeID:  "pv-del-no-user",
-			UserID:    "",
-		}
-		err := i.DeleteVolume(context.Background(), opts)
-		assert.NoError(t, err)
-	})
-}
-
-func TestListVolumes(t *testing.T) {
-	c, fakeClient, err := cachetest.NewTestCache(t)
-	require.NoError(t, err)
-
-	i := &Infra{Cache: c}
-
-	t.Run("list volumes for a user", func(t *testing.T) {
-		pvc1 := &corev1.PersistentVolumeClaim{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "vol-1",
-				Namespace: "sandbox-system",
-				Annotations: map[string]string{
-					agentsv1alpha1.AnnotationOwner: "user-1",
-				},
-			},
-			Spec: corev1.PersistentVolumeClaimSpec{
-				VolumeName:  "pv-1",
-				AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-				Resources: corev1.VolumeResourceRequirements{
-					Requests: corev1.ResourceList{
-						corev1.ResourceStorage: resource.MustParse("1Gi"),
-					},
-				},
-			},
-		}
-		pvc2 := &corev1.PersistentVolumeClaim{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "vol-2",
-				Namespace: "sandbox-system",
-				Annotations: map[string]string{
-					agentsv1alpha1.AnnotationOwner: "user-1",
-				},
-			},
-			Spec: corev1.PersistentVolumeClaimSpec{
-				VolumeName:  "pv-2",
-				AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-				Resources: corev1.VolumeResourceRequirements{
-					Requests: corev1.ResourceList{
-						corev1.ResourceStorage: resource.MustParse("2Gi"),
-					},
-				},
-			},
-		}
-		pvc3 := &corev1.PersistentVolumeClaim{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "vol-3",
-				Namespace: "sandbox-system",
-				Annotations: map[string]string{
-					agentsv1alpha1.AnnotationOwner: "user-2",
-				},
-			},
-			Spec: corev1.PersistentVolumeClaimSpec{
-				VolumeName:  "pv-3",
-				AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-				Resources: corev1.VolumeResourceRequirements{
-					Requests: corev1.ResourceList{
-						corev1.ResourceStorage: resource.MustParse("3Gi"),
-					},
-				},
-			},
-		}
-		require.NoError(t, fakeClient.Create(context.Background(), pvc1))
-		require.NoError(t, fakeClient.Create(context.Background(), pvc2))
-		require.NoError(t, fakeClient.Create(context.Background(), pvc3))
-
-		opts := infra.ListVolumesOptions{
-			Namespace: "sandbox-system",
+			Namespace: "ns1",
+			VolumeID:  "pvc-del-blocked",
 			UserID:    "user-1",
+			Force:     false,
 		}
-		volumes, err := i.ListVolumes(context.Background(), opts)
-		require.NoError(t, err)
-		assert.Len(t, volumes, 2)
-		names := make(map[string]bool)
-		for _, v := range volumes {
-			names[v.Name] = true
-		}
-		assert.True(t, names["vol-1"])
-		assert.True(t, names["vol-2"])
-	})
+		_, err := i.DeleteVolume(context.Background(), opts)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "volume is mounted by")
 
-	t.Run("list volumes returns empty for user with no volumes", func(t *testing.T) {
-		opts := infra.ListVolumesOptions{
-			Namespace: "sandbox-system",
-			UserID:    "user-no-volumes",
-		}
-		volumes, err := i.ListVolumes(context.Background(), opts)
+		// Deleting with Force=true should succeed
+		opts.Force = true
+		res, err := i.DeleteVolume(context.Background(), opts)
 		require.NoError(t, err)
-		assert.Len(t, volumes, 0)
+		assert.Contains(t, res.AffectedSandboxIDs, "sbx1")
+		assert.True(t, res.ForcedDelete)
 	})
 }

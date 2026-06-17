@@ -18,7 +18,7 @@ package models
 
 import (
 	"fmt"
-	"path/filepath"
+	"path"
 	"strings"
 
 	"github.com/openkruise/agents/api/v1alpha1"
@@ -39,8 +39,12 @@ func validateMountPoint(mountPoint string) error {
 		return fmt.Errorf("mount point contains invalid '..' path element")
 	}
 
-	// to parse the path, eliminating relative path symbols such as "." and ".."
-	cleanPath := filepath.Clean(mountPoint)
+	// Use path.Clean (POSIX semantics, always forward slash) so that the
+	// check works correctly on all host OSes including Windows.
+	// path.Clean eliminates "." components and collapses double slashes.
+	// If the cleaned path differs from the input the path contained relative
+	// elements (e.g. "/a/./b") that are not valid for a Linux mount target.
+	cleanPath := path.Clean(mountPoint)
 	if cleanPath != mountPoint {
 		return fmt.Errorf("mount point contains invalid path elements like '..' or '.'")
 	}
@@ -63,6 +67,25 @@ func ValidateVolumeMounts(mounts []VolumeMount) error {
 			return fmt.Errorf("volumeMounts[%d].path %q is duplicated", i, vm.Path)
 		}
 		seen[vm.Path] = struct{}{}
+	}
+	return nil
+}
+
+// ValidateE2BVolumeMounts validates each E2B volume mount entry for required fields,
+// path format, and duplicate mount paths.
+func ValidateE2BVolumeMounts(mounts []VolumeMountRequest) error {
+	seen := make(map[string]struct{}, len(mounts))
+	for i, vm := range mounts {
+		if vm.VolumeID == "" {
+			return fmt.Errorf("volume_mounts[%d].volumeID cannot be empty", i)
+		}
+		if err := validateMountPoint(vm.MountPath); err != nil {
+			return fmt.Errorf("volume_mounts[%d].mountPath is invalid: %w", i, err)
+		}
+		if _, exists := seen[vm.MountPath]; exists {
+			return fmt.Errorf("volume_mounts[%d].mountPath %q is duplicated", i, vm.MountPath)
+		}
+		seen[vm.MountPath] = struct{}{}
 	}
 	return nil
 }
