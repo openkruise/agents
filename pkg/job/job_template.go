@@ -170,8 +170,8 @@ func (g *JobGenerator) GenerateCommitJob() (*batchv1.Job, error) {
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: MakeJobName(string(g.Commit.UID)),
-			Namespace: g.Pod.Namespace,
-			Labels:    g.commitLabels(),
+			Namespace:    g.Pod.Namespace,
+			Labels:       g.commitLabels(),
 			OwnerReferences: []metav1.OwnerReference{
 				{
 					APIVersion:         v1alpha1.SchemeGroupVersion.String(),
