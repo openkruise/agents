@@ -80,14 +80,15 @@ const (
 // the override semantics.
 func init() {
 	RegisterCABundleSpec(CABundleSpec{
-		Name:              GatewayCABundleName,
-		SecretName:        GatewayCASecretName,
-		SecretDataKey:     GatewayCAKey,
-		VolumeName:        gatewayCAVolumeName,
-		MountPath:         gatewayCAMountPath,
-		SubPath:           GatewayCAKey,
-		ReadOnly:          true,
-		ContainerSelector: OnlyMainContainer(),
+		Name:                  GatewayCABundleName,
+		SecretName:            GatewayCASecretName,
+		SecretDataKey:         GatewayCAKey,
+		VolumeName:            gatewayCAVolumeName,
+		MountPath:             gatewayCAMountPath,
+		SubPath:               GatewayCAKey,
+		ReadOnly:              true,
+		ContainerSelector:     OnlyMainContainer(),
+		InitContainerSelector: nil, // community baseline targets only regular containers
 		EnvVars: []corev1.EnvVar{
 			{Name: "SSL_CERT_FILE", Value: gatewayCAMountPath},
 		},
@@ -153,20 +154,24 @@ func InjectAllCAVolumes(_ context.Context, sbx *agentsv1alpha1.Sandbox, pod *cor
 }
 
 // InjectAllCAIntoContainers walks every enabled CABundleSpec and, for each
-// container that the spec's ContainerSelector matches, appends the spec's
-// VolumeMount and EnvVars to that container in a single pass.
+// container selected by the spec's ContainerSelector or InitContainerSelector,
+// appends the spec's VolumeMount and EnvVars to that container.
+//
+// Regular containers (pod.Spec.Containers) and init containers
+// (pod.Spec.InitContainers) are evaluated independently so that
+// position-based selectors such as OnlyMainContainer() do not accidentally
+// match the first init container. Sidecars placed in InitContainers
+// (e.g. csi-agent-sidecar) receive CA mounts only when the spec explicitly
+// sets InitContainerSelector.
 //
 // VolumeMount and EnvVar entries whose Name already exists on the container
 // are preserved untouched, keeping the operation idempotent and avoiding
 // clobbering operator-supplied overrides.
 //
 // VolumeMounts are always injected when the spec is enabled and the container
-// is selected; EnvVars are only injected when the spec declares any. The
-// container-level gating (specEnabled + ContainerSelector) is shared between
-// the two artefacts because both target the same set of containers, so a
-// single iteration keeps the selection logic in lock-step.
+// is selected; EnvVars are only injected when the spec declares any.
 func InjectAllCAIntoContainers(_ context.Context, sbx *agentsv1alpha1.Sandbox, pod *corev1.Pod) {
-	if len(pod.Spec.Containers) == 0 {
+	if len(pod.Spec.Containers) == 0 && len(pod.Spec.InitContainers) == 0 {
 		klog.V(5).InfoS("no containers in pod, skipping CA container injection",
 			"pod", klog.KObj(pod))
 		return
@@ -177,13 +182,31 @@ func InjectAllCAIntoContainers(_ context.Context, sbx *agentsv1alpha1.Sandbox, p
 		if !specEnabled(&spec, sbx) {
 			continue
 		}
-		selector := spec.ContainerSelector
-		if selector == nil {
-			selector = OnlyMainContainer()
+
+		// Regular containers: nil selector defaults to OnlyMainContainer().
+		containerSelector := spec.ContainerSelector
+		if containerSelector == nil {
+			containerSelector = OnlyMainContainer()
 		}
 		for idx := range pod.Spec.Containers {
 			c := &pod.Spec.Containers[idx]
-			if !selector(c, idx) {
+			if !containerSelector(c, idx) {
+				continue
+			}
+			injectCAVolumeMount(&spec, c)
+			injectCAEnvVars(&spec, c)
+		}
+
+		// Init containers: nil selector means "do not inject into any init
+		// container", preventing accidental matches by position-based
+		// selectors such as OnlyMainContainer().
+		initSelector := spec.InitContainerSelector
+		if initSelector == nil {
+			continue
+		}
+		for idx := range pod.Spec.InitContainers {
+			c := &pod.Spec.InitContainers[idx]
+			if !initSelector(c, idx) {
 				continue
 			}
 			injectCAVolumeMount(&spec, c)

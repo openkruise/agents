@@ -77,8 +77,9 @@ type CABundleSpec struct {
 	// read-only inside the container.
 	ReadOnly bool
 
-	// ContainerSelector decides, for a multi-container Pod, which containers
-	// receive the CA injection (both VolumeMount and EnvVars).
+	// ContainerSelector decides, for a multi-container Pod, which regular
+	// containers (pod.Spec.Containers) receive the CA injection (both
+	// VolumeMount and EnvVars).
 	//
 	// A sandbox Pod typically carries more than one container — the main agent
 	// workload plus sidecars such as the traffic-proxy, runtime sidecar, CSI
@@ -102,8 +103,8 @@ type CABundleSpec struct {
 	//                                        when the agent workload AND a
 	//                                        sidecar (e.g. traffic-proxy)
 	//                                        both need the bundle.
-	//   - AllContainers()                  — every container; reserve for
-	//                                        cluster-wide trust roots that
+	//   - AllContainers()                  — every regular container; reserve
+	//                                        for cluster-wide trust roots that
 	//                                        every workload must honour.
 	//
 	// Custom selectors (e.g. by label, image prefix, or annotation) can be
@@ -115,10 +116,24 @@ type CABundleSpec struct {
 	// behaviour.
 	ContainerSelector ContainerSelector
 
+	// InitContainerSelector decides which init containers
+	// (pod.Spec.InitContainers) receive the CA injection. It is evaluated
+	// independently from ContainerSelector so that position-based selectors
+	// such as OnlyMainContainer() do not accidentally match the first init
+	// container.
+	//
+	// The same built-in helpers can be reused here (ByContainerName,
+	// AllContainers, ...). Leaving this nil means "do not inject into any init
+	// container", preserving the historical default that CA bundles target
+	// only regular containers. Set it explicitly when a sidecar placed in
+	// InitContainers (e.g. csi-agent-sidecar) must trust the bundle.
+	InitContainerSelector ContainerSelector
+
 	// EnvVars is an optional list of environment variables that the injector
-	// appends to every container selected by ContainerSelector, alongside the
-	// VolumeMount. It is intended for CA bundles whose consumers rely on
-	// well-known env vars to discover the trusted certificate file, e.g.:
+	// appends to every container selected by ContainerSelector or
+	// InitContainerSelector, alongside the VolumeMount. It is intended for CA
+	// bundles whose consumers rely on well-known env vars to discover the
+	// trusted certificate file, e.g.:
 	//
 	//   SSL_CERT_FILE       (OpenSSL / Go x509 SystemCertPool override)
 	//   NODE_EXTRA_CA_CERTS (Node.js)
@@ -128,10 +143,10 @@ type CABundleSpec struct {
 	// Typical values point at MountPath so user-mode HTTP clients automatically
 	// trust the bundle without per-application configuration.
 	//
-	// Note: EnvVars share the same ContainerSelector as VolumeMount above, so
-	// env vars and the certificate file always land on the same set of
-	// containers — a Pod's sidecars will only see them if the selector
-	// explicitly opts those containers in.
+	// Note: EnvVars share the same selectors as VolumeMount above, so env vars
+	// and the certificate file always land on the same set of containers — a
+	// Pod's sidecars will only see them if the selector explicitly opts those
+	// containers in.
 	//
 	// Injection is idempotent at the env-name level: if the container already
 	// has an env entry whose Name matches an entry here, the existing entry is
