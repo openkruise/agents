@@ -129,9 +129,6 @@ func (f *sandboxFilter) DecodeHeaders(header api.RequestHeaderMap, endStream boo
 		}
 	}
 
-	// Strip the access token header before forwarding to prevent token leakage to upstream sandbox
-	header.Del(accessTokenHeader)
-
 	// Apply extra headers from the adapter (e.g., :path rewrite for kruise custom protocol)
 	for k, v := range extraHeaders {
 		header.Set(k, v)

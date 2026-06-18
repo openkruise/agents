@@ -1024,9 +1024,6 @@ func TestDecodeHeadersAccessTokenAuth(t *testing.T) {
 				assert.NotNil(t, metadata)
 				assert.Equal(t, "10.0.0.1:49983", metadata["host"])
 
-				// Verify x-access-token header was stripped before forwarding
-				_, tokenExists := header.Get("x-access-token")
-				assert.False(t, tokenExists, "x-access-token header should be stripped before forwarding")
 			}
 		})
 	}
