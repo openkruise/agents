@@ -70,10 +70,10 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
 	SandboxClaimGate:                       {Default: true, PreRelease: featuregate.Alpha},
 	SandboxCreatePodRateLimitGate:          {Default: false, PreRelease: featuregate.Alpha},
 	SandboxCreatePodInjectConfigGate:       {Default: false, PreRelease: featuregate.Alpha},
-	CachePodLabelSelectorGate:              {Default: true, PreRelease: featuregate.Alpha},
+	CachePodLabelSelectorGate:              {Default: false, PreRelease: featuregate.Alpha},
 	SandboxInPlaceResourceResizeGate:       {Default: true, PreRelease: featuregate.Alpha},
 	SandboxMultiClusterNaming:              {Default: false, PreRelease: featuregate.Alpha},
-	SandboxUpgradeResumeFromFailedStepGate: {Default: true, PreRelease: featuregate.Alpha},
+	SandboxUpgradeResumeFromFailedStepGate: {Default: false, PreRelease: featuregate.Alpha},
 	SecurityIdentityProviderGate:           {Default: false, PreRelease: featuregate.Alpha},
 	SandboxPauseCheckpointGate:             {Default: false, PreRelease: featuregate.Alpha},
 }
