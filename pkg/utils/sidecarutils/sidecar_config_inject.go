@@ -237,19 +237,30 @@ func setMainContainerConfigWhenInjectRuntimeSidecar(ctx context.Context, mainCon
 		config.MainContainer.Lifecycle.PostStart != nil &&
 		hasValidLifecycleHandler(config.MainContainer.Lifecycle.PostStart)
 
-	if mainContainerHasValidPostStart {
-		if configHasValidPostStart {
-			log.V(utils.DebugLogLevel).Info("conflicting postStart hooks detected, main container already has a postStart hook defined",
-				"existingHook", mainContainer.Lifecycle.PostStart,
-				"injectedHook", config.MainContainer.Lifecycle.PostStart)
+	if configHasValidPostStart {
+		if mainContainer.Lifecycle == nil {
+			mainContainer.Lifecycle = &corev1.Lifecycle{}
 		}
-	} else {
-		// Main container doesn't have valid postStart, apply config if available
-		if configHasValidPostStart {
-			// set main container lifecycle
-			if mainContainer.Lifecycle == nil {
-				mainContainer.Lifecycle = &corev1.Lifecycle{}
+		if mainContainerHasValidPostStart {
+			// The user has a postStart hook. Merge using "--" separator so that
+			// envd-run.sh executes the user's command after its own initialisation.
+			mergedCmd := mergePostStartExecCommands(config.MainContainer.Lifecycle.PostStart, mainContainer.Lifecycle.PostStart)
+			if mergedCmd != nil {
+				log.V(utils.DebugLogLevel).Info("merging user's postStart command into injected script",
+					"userCommand", mainContainer.Lifecycle.PostStart.Exec.Command,
+					"injectedCommand", config.MainContainer.Lifecycle.PostStart.Exec.Command)
+				mainContainer.Lifecycle.PostStart = &corev1.LifecycleHandler{
+					Exec: &corev1.ExecAction{Command: mergedCmd},
+				}
+			} else {
+				// Cannot merge non-Exec handlers (e.g. HTTPGet/TCPSocket); keep the
+				// existing hook and skip injection of the injected postStart.
+				log.Error(nil, "cannot merge non-Exec postStart hooks, keeping existing hook",
+					"existingHook", mainContainer.Lifecycle.PostStart,
+					"injectedHook", config.MainContainer.Lifecycle.PostStart)
 			}
+		} else {
+			// Main container doesn't have a valid postStart; apply the config directly.
 			mainContainer.Lifecycle.PostStart = config.MainContainer.Lifecycle.PostStart
 		}
 	}
@@ -265,6 +276,34 @@ func setMainContainerConfigWhenInjectRuntimeSidecar(ctx context.Context, mainCon
 		mainContainer.VolumeMounts = make([]corev1.VolumeMount, 0, len(config.MainContainer.VolumeMounts))
 	}
 	mainContainer.VolumeMounts = append(mainContainer.VolumeMounts, config.MainContainer.VolumeMounts...)
+}
+
+// mergePostStartExecCommands merges the injected postStart Exec command with the user's
+// postStart Exec command using the "--" separator pattern. Everything after "--" is passed
+// to envd-run.sh as individual arguments representing the user command, executed directly
+// without shell interpretation. This follows the kubectl exec convention.
+//
+// Precondition: the caller has already verified that both the injected config and the main
+// container have valid postStart hooks (configHasValidPostStart && mainContainerHasValidPostStart),
+// so neither handler is nil and both have a non-nil action. Consequently, the nil checks below
+// are defensive; the only realistic failure mode is a non-Exec handler, which returns nil.
+// Returns nil if either handler is non-Exec (cannot be merged).
+func mergePostStartExecCommands(injected, user *corev1.LifecycleHandler) []string {
+	if injected == nil || injected.Exec == nil || user == nil || user.Exec == nil {
+		return nil
+	}
+	// If the user's command is empty, there is nothing to append.
+	if len(user.Exec.Command) == 0 {
+		return injected.Exec.Command
+	}
+	// Use "--" separator following the kubectl exec pattern. Everything after "--"
+	// is passed as individual arguments to envd-run.sh which executes the command
+	// directly without shell interpretation.
+	merged := make([]string, 0, len(injected.Exec.Command)+1+len(user.Exec.Command))
+	merged = append(merged, injected.Exec.Command...)
+	merged = append(merged, "--")
+	merged = append(merged, user.Exec.Command...)
+	return merged
 }
 
 func findVolumeMountByName(volumeMounts []corev1.VolumeMount, name string) bool {
