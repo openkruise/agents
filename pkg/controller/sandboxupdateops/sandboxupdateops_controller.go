@@ -311,6 +311,9 @@ func (r *Reconciler) classifySandbox(ctx context.Context, sbx *agentsv1alpha1.Sa
 			sbx.Generation == sbx.Status.ObservedGeneration {
 			return sandboxNoNeedUpdate
 		}
+		if sbx.Status.Phase != agentsv1alpha1.SandboxRunning && sbx.Status.Phase != agentsv1alpha1.SandboxUpgrading {
+			return sandboxNoNeedUpdate
+		}
 		return sandboxCandidate
 	}
 

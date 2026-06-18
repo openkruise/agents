@@ -1178,5 +1178,78 @@ var _ = Describe("SandboxUpdateOps E2E", func() {
 			Expect(recoveredPod.Spec.Containers[0].Image).To(Equal(initialImage))
 		})
 
+		It("should skip non-Running sandboxes during upgrade", func() {
+			labelValue := fmt.Sprintf("batch-phase-%d", time.Now().UnixNano())
+
+			By("Creating 2 Sandboxes and waiting for all Running")
+			sandboxes := make([]*agentsv1alpha1.Sandbox, 2)
+			for i := 0; i < 2; i++ {
+				sandboxes[i] = newOpsSandbox(
+					fmt.Sprintf("ops-phase-%s-%d", labelValue[:10], i),
+					labelValue, nil, nil,
+				)
+				Expect(k8sClient.Create(ctx, sandboxes[i])).To(Succeed())
+			}
+			for i := 0; i < 2; i++ {
+				waitSandboxRunning(sandboxes[i])
+				klog.InfoS("Sandbox is Running", "name", sandboxes[i].Name, "index", i)
+			}
+
+			By("Pausing the first sandbox")
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(sandboxes[0]), sandboxes[0])).To(Succeed())
+			sandboxes[0].Spec.Paused = true
+			Expect(k8sClient.Update(ctx, sandboxes[0])).To(Succeed())
+			Eventually(func() agentsv1alpha1.SandboxPhase {
+				_ = k8sClient.Get(ctx, client.ObjectKeyFromObject(sandboxes[0]), sandboxes[0])
+				return sandboxes[0].Status.Phase
+			}, 30*time.Second, 500*time.Millisecond).Should(Equal(agentsv1alpha1.SandboxPaused))
+			klog.InfoS("Sandbox is Paused", "name", sandboxes[0].Name)
+
+			By("Creating SandboxUpdateOps targeting both sandboxes")
+			ops := &agentsv1alpha1.SandboxUpdateOps{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("ops-phase-%s", labelValue[:10]),
+					Namespace: namespace,
+				},
+				Spec: agentsv1alpha1.SandboxUpdateOpsSpec{
+					Selector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{batchLabel: labelValue},
+					},
+					Patch: mustMarshalPatch(corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{Name: "test-container", Image: updateImage},
+							},
+						},
+					}),
+				},
+			}
+			Expect(k8sClient.Create(ctx, ops)).To(Succeed())
+			klog.InfoS("Created SandboxUpdateOps", "name", ops.Name)
+
+			By("Waiting for Ops to reach Completed")
+			waitOpsPhase(ops, agentsv1alpha1.SandboxUpdateOpsCompleted, 3*time.Minute)
+
+			By("Verifying only the Running sandbox was upgraded")
+			Expect(ops.Status.UpdatedReplicas).To(Equal(int32(1)))
+
+			By("Verifying the Paused sandbox was NOT upgraded")
+			pausedSbx := &agentsv1alpha1.Sandbox{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(sandboxes[0]), pausedSbx)).To(Succeed())
+			Expect(pausedSbx.Labels).NotTo(HaveKey(agentsv1alpha1.LabelSandboxUpdateOps),
+				"paused sandbox should not have ops label")
+			Expect(pausedSbx.Spec.Template.Spec.Containers[0].Image).To(Equal(initialImage),
+				"paused sandbox template should not be updated")
+
+			By("Verifying the Running sandbox was upgraded")
+			runningSbx := &agentsv1alpha1.Sandbox{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(sandboxes[1]), runningSbx)).To(Succeed())
+			pod := &corev1.Pod{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: sandboxes[1].Name, Namespace: sandboxes[1].Namespace}, pod)).To(Succeed())
+			Expect(pod.Spec.Containers[0].Image).To(Equal(updateImage),
+				"running sandbox should have updated image")
+			klog.InfoS("Verified: only Running sandbox upgraded, Paused sandbox skipped")
+		})
+
 	})
 })
