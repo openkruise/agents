@@ -1,6 +1,6 @@
 # API Key Sandbox Quota — Design Spec (Redis-backed, live-set model)
 
-- Date: 2026-06-18 (rev2)
+- Date: 2026-06-18 (rev3)
 - Branch: `feature/e2b-api-quota-260617`
 - Supersedes:
   - rev0: the per-shard Lease leader-election design (deleted).
@@ -11,11 +11,17 @@
     that *overwrites a counter*; it is only a **backstop** that a leader-elected controller diffs against to self-heal
     drift. This deletes the entire version-guard machinery (`q:committed`/`q:cver`, RV decimal compare, `mayCreate`,
     fast/slow reconcile cadences, fold/free, the `resv` ZSET overlay, lazy `NEED_SEED`).
+  - rev2 → rev3 (this revision): anti-drift **driver** moved from `pkg/cache` to the quota layer and enumerates limited
+    keys from the **key store** (Redis-independent → survives total loss); **owner label + backfill dropped** (reads
+    reuse the existing `IndexUser` informer index); **APIReader banned** (all reads informer-only, gated on cache sync);
+    added an atomic `resyncSums`; **clone** now stamps a lockstring; referenced templates are **immutable for quota**;
+    `unlimited → limited` is forbidden forever.
 - Scope: `pkg/servers/e2b/` (create, api_key, models, keys, routes), `pkg/servers/e2b/quota/` (new: `QuotaManager`,
-  backends, Lua), `pkg/sandbox-manager/` (api/infra wiring, a generic `IsPrimary()` leadership capability),
-  `pkg/sandbox-manager/config` + `clients` (Redis config/client), `pkg/cache/` (additive owner-by-label read + a
-  leader-gated quota anti-drift controller), `cmd/sandbox-manager/`, `api/v1alpha1/` (owner label constant),
-  `config/`/Helm chart (RBAC for `coordination.k8s.io/leases`, Redis config), `go.mod`/`vendor` (add a Redis client).
+  backends, Lua, and the leader-gated anti-drift **driver**), `pkg/sandbox-manager/` (api/infra wiring, a generic
+  `IsPrimary()` leadership capability), `pkg/sandbox-manager/config` + `clients` (Redis config/client), `pkg/cache/`
+  (additive live-CR read primitive `ListLiveSandboxEntriesByOwner` over the existing `IndexUser` field index, plus event
+  handler registration for event-driven release), `cmd/sandbox-manager/`, `config/`/Helm chart (RBAC for
+  `coordination.k8s.io/leases`, Redis config), `go.mod`/`vendor` (add a Redis client).
 
 ## 1. Background
 
@@ -51,23 +57,28 @@ rev2 removes the recompute entirely. Redis holds the **live set itself** (one en
 
 ### Key facts established from the codebase
 
-- `pkg/utils/utils.go:201` `LockSandbox(sbx, lock, owner)` already stamps `AnnotationLock = lock` (a UUID from
-  `NewLockString()` / `uuid.NewString()`, `utils.go:211`) **and** `AnnotationOwner = owner` on the **same** CR write
-  used by claim/create (`performLockSandbox`, `claim.go:661`) and clone. **The lockstring is therefore an existing,
-  per-sandbox UUID identity already persisted on the CR** — rev2 reuses it as the Redis entry key; no new `opID`
-  annotation is introduced.
+- `pkg/utils/utils.go:201` `LockSandbox(sbx, lock, owner)` stamps `AnnotationLock = lock` (a UUID from
+  `NewLockString()` / `uuid.NewString()`, `utils.go:211`) **and** `AnnotationOwner = owner` on the **same** CR write,
+  used by claim/create (`performLockSandbox`, `claim.go:661`). **The lockstring is an existing per-sandbox UUID identity
+  persisted on the CR** — rev2 reuses it as the Redis entry key; no new `opID` annotation is introduced. **Gap fixed in
+  rev3:** the **clone** path (`newSandboxFromTemplate`, `clone.go:303`) previously stamped only `AnnotationOwner`, *not* a
+  lockstring; rev3 makes clone stamp one too (via its `Modifier`, `create.go:200`, using `NewLockString()`) so **every**
+  owner-stamped CR carries a lockstring (§5).
 - Sandbox is Pod-backed: resources live in the inlined `EmbeddedSandboxTemplate` PodTemplateSpec
   (`sandbox_types.go:99-113`), as container `Resources`. The create request's **target** resources are known at admit
   time (claim may `InplaceUpdate` a pooled sandbox to the requested spec — `claim.go:213`, `create.go`), so the footprint
   to charge is computable before committing to a specific instance.
-- `pkg/cache` is the sandbox-manager-only, informer-backed cache. It already runs informers and exposes
-  `CacheSandboxCustomReconciler` + `AddReconcileHandlers()` for external event handlers, and `GetAPIReader()` (a
-  lag-free `client.Reader`). It maintains a `user` index over `AnnotationOwner`. This is the natural home for the
-  leader-gated quota anti-drift controller.
+- `pkg/cache` is the sandbox-manager-only, informer-backed cache. It already runs informers, exposes
+  `CacheSandboxCustomReconciler` + `AddReconcileHandlers()` for external event handlers, and maintains an `IndexUser`
+  field index over `AnnotationOwner` (`index.go:83`). rev3 adds only a live-CR read primitive
+  `ListLiveSandboxEntriesByOwner` here and lets the quota layer register an event handler; the anti-drift **driver**
+  itself lives in `pkg/servers/e2b/quota` (§6.5.2). Anti-drift never uses `GetAPIReader` — all its reads are informer
+  reads, gated on cache sync (§6.5.2).
 - `CountActiveSandboxes` **excludes** `Dead` (`cache.go:306`) and is relied on by the SandboxClaim controller. **It must
   not be modified.** Quota uses additive owner reads instead (§6).
-- `AnnotationOwner` is an **annotation**, not server-side selectable. rev2 adds a mirrored **owner label** to enable
-  consistent server-side-filtered reads for the anti-drift backstop (§5).
+- `AnnotationOwner` is an **annotation**. `pkg/cache` already registers an `IndexUser` field index over it
+  (`index.go:83`), so the anti-drift driver lists a key's live CRs with `cache.List(MatchingFields{user: K})` straight
+  off the **informer** — no owner label and no apiserver read are needed (§5).
 - `k8s.io/client-go/tools/leaderelection` (Lease-backed) is already vendored — reused for a single generic
   `IsPrimary()` capability (§8).
 - No Redis client is vendored yet; rev2 adds one (e.g. `github.com/redis/go-redis/v9`) behind a backend interface.
@@ -173,17 +184,17 @@ thereafter, §6.8). **No dynamic usage is ever written to the key store** — th
 
 ## 5. Identity, Owner Label, and Counting Primitive
 
-- **Sandbox identity in Redis = the lockstring** (`AnnotationLock`, a UUID already stamped by `LockSandbox`). It is
-  globally unique and already persisted on the CR, so it survives `GenerateName` (the create path need not know the final
-  object name). Re-keying every Redis op off it gives idempotency for free.
-- **Owner label (`agents.kruise.io/owner = <keyID>`)**: `AnnotationOwner` is an annotation and cannot be
-  server-side-filtered. rev2 mirrors it to a label on the **same** write path that stamps the annotation/lockstring
-  (`LockSandbox` for claim/create, direct set for clone). A UUID keyID is a valid label value. The label lets the
-  anti-drift backstop do `apiReader.List(MatchingLabels{owner=K})` consistent reads.
-  - **Backfill is a hard prerequisite** before enabling enforcement for a key that already owns sandboxes: the
-    consistent reads filter by the label, so an unlabelled pre-existing CR would be invisible → undercount → oversell.
-    Run the one-time backfill (label every existing Sandbox from its `AnnotationOwner`) and confirm completion before
-    turning enforcement on; until then such a key is treated as unlimited.
+- **Sandbox identity in Redis = the lockstring** (`AnnotationLock`, a UUID stamped by `LockSandbox`). It is globally
+  unique and persisted on the CR, so it survives `GenerateName` (the create path need not know the final object name).
+  Re-keying every Redis op off it gives idempotency for free. **Every owner-stamped create path must stamp a
+  lockstring:** claim/create already do (`LockSandbox`); rev3 adds it to **clone** (via the `Modifier`, `create.go:200`,
+  using `NewLockString()`), closing the one path (`clone.go:303`) that previously set only `AnnotationOwner`. This is a
+  hard precondition (§7).
+- **Owner read uses the existing `IndexUser` field index — no owner label, no backfill.** `pkg/cache` already indexes
+  `AnnotationOwner` (`index.go:83`), so the anti-drift driver lists a key's live CRs with
+  `cache.List(MatchingFields{user: K})` directly off the informer. Because all anti-drift reads are informer reads (never
+  APIReader, §6.5.2), no server-side label selector is required, so rev3 adds **no** owner label and needs **no** one-time
+  backfill. The index covers every CR carrying `AnnotationOwner`, including clones once they are owner-stamped.
 - **Quota "live" predicate — the single source of truth for charging, used identically by the count/sum reads and by
   both anti-drift directions (§6.5.2):**
 
@@ -199,15 +210,16 @@ thereafter, §6.8). **No dynamic usage is ever written to the key store** — th
 
   This predicate is **deliberately narrower** than `CountActiveSandboxes`'s "not `Dead`" filter (which *also* excludes
   Failed/Succeeded via `GetSandboxState`): quota frees a slot only when deletion is requested/terminating, **not** the
-  moment a pod fails. That difference — plus the need for per-entry `{lockstring, footprint}` data and an owner-**label**
-  server-side filter — is why quota uses its own additive read rather than `CountActiveSandboxes` (left untouched, §1).
-  The exact field/enum (`Status.Phase == SandboxTerminating`, `sandbox_types.go:262`) is confirmed at implementation; the
-  **semantics** above are fixed. We do **not** wait for the CR to become invisible.
+  moment a pod fails. That difference — plus the need for per-entry `{lockstring, footprint}` data — is why quota uses its
+  own additive read (over `IndexUser`) rather than `CountActiveSandboxes` (left untouched, §1). The exact field/enum
+  (`Status.Phase == SandboxTerminating`, `sandbox_types.go:262`) is confirmed at implementation; the **semantics** above
+  are fixed. We do **not** wait for the CR to become invisible.
 
   ```go
   // ListLiveSandboxEntriesByOwner returns, for owner K, every Sandbox CR with
   // isLiveForQuota == true, each as {lockstring, footprint}. Reads the warm informer
-  // (steady state) or GetAPIReader with the owner-label selector (consistent rebuild).
+  // via MatchingFields{user: K} (IndexUser). Never APIReader; the caller invokes it only
+  // after the cache has synced (§6.5.2), so an unsynced cache can never look "empty".
   func (c *Cache) ListLiveSandboxEntriesByOwner(ctx, opts) ([]LiveEntry, error)
   ```
 
@@ -268,7 +280,11 @@ removal decrements exactly what was charged with no drift and no update-event tr
 recomputes the identical footprint from the existing CR's spec (§5 primitive).
 
 Resource resolution: for an inline `Template`, read container `Resources` directly; for a `TemplateRef`, resolve the
-referenced `SandboxTemplate`. A shared `footprintOf(podSpec)` helper is used by both Acquire and anti-drift add.
+referenced `SandboxTemplate`. A referenced `SandboxTemplate` is **treated as immutable for quota** — so the anti-drift
+**add** path, resolving the same ref later, recomputes the **identical** footprint it charged at create; all footprint
+inputs are thus recoverable from the CR (inline) or the immutable referenced template, with no drift. A shared
+`footprintOf(podSpec)` helper is used by both Acquire and anti-drift add; a resolution failure **fails safe** (defer the
+add — never charge zero).
 
 ### 6.4 Acquire (hot path) — atomic, multi-dimensional, idempotent
 
@@ -297,7 +313,8 @@ return 'OK'
 - `REJECTED` → HTTP **429**, returned **immediately with no retry** (the create path must not loop on a quota miss; a
   pooled sandbox tentatively picked before the charge must be returned to the pool — see §10).
 - **Idempotent re-entry:** a retry with the same lockstring finds the field present → `OK` without double-charging. Sums
-  only move on the first commit.
+  only move on the first commit. (Lockstrings are fresh per-create UUIDs, never reused with a different footprint, so the
+  `HEXISTS` short-circuit cannot under-charge; a defensive footprint-mismatch check is unnecessary.)
 - **Redis transport error / unreachable** → **fail-open** (treat the key as unlimited for this request; allow). Phase 1
   default; a config knob to fail-closed instead is deferred (§9).
 - **Quantization:** values are integers; an unlimited dimension passes `-1`.
@@ -340,36 +357,54 @@ replacement). This is the deliberate trade for low-latency reclamation (§16). I
 concurrently terminating sandboxes and resolves when they truly disappear. The anti-drift **add** path does **not**
 resurrect such entries (it only adds entries for `isLiveForQuota` CRs), so it never fights an intended deletion.
 
-#### 6.5.2 Bidirectional anti-drift (leader-gated controller in `pkg/cache`)
+#### 6.5.2 Bidirectional anti-drift (leader-gated driver in `pkg/servers/e2b/quota`)
 
 This is the **single** correction primitive; it makes drift in **either** direction self-heal. Critical: in an
 incremental live-set model the backstop must be **bidirectional** — a "remove-only" GC would let a lost entry (Redis
 restart / async-failover / rollback that drops an entry whose CR exists) undercount **forever**, since nothing re-adds
-it → permanent oversell. So:
+it → permanent oversell.
 
-- **Remove (leaked entry → free):** for a lockstring present in `q:live:{K}` whose CR is **not** `isLiveForQuota` (gone,
-  or deletion-requested/terminating) **and** whose entry age (`now − entry.ts`, both on the Redis clock) `> grace` →
-  Release. Frees failed-create leftovers and any delete the event handler missed. The age gate guards against removing a
-  charge whose CR is merely lagging in a (warm-informer) read.
-- **Add (missing entry → charge):** for a CR of owner K that **is** `isLiveForQuota`, whose lockstring is absent from
-  `q:live:{K}`, and whose CR `CreationTimestamp` age `> grace` → add via the **same** Acquire-add Lua **without** the
-  limit checks (anti-drift reflects reality; it cannot reject an existing sandbox). Heals lost entries.
+**Placement & layering.** The reconcile **driver** lives in the quota layer (it owns the key store and the Redis
+backend); `pkg/cache` only exposes the live-CR read primitive `ListLiveSandboxEntriesByOwner` (§5, over `IndexUser`). The
+driver imports nothing from cache beyond that read; the event-driven release (path 3) is a closure owning the
+`QuotaManager` **registered into** the cache via `AddReconcileHandlers()` (cache never imports quota — no cycle). Both
+the periodic diff and the event handler run only while `IsPrimary()` (§8).
 
-Both directions are **per-lockstring, idempotent** (HEXISTS / HGET guards), so they are safe to run concurrently with
-the hot path and with a flapping leader, and require **no version guard**.
+**Enumerating the subjects.** The driver enumerates the **limited keys** (those whose stored `QuotaSpec` is non-empty)
+from the **key store** — the durable, Redis-independent source, which is exactly why it survives a total Redis loss (an
+empty Redis cannot tell you which keys *should* exist). Redis is never `SCAN`-ed to discover subjects (that would break
+on total loss and on Cluster). For each enumerated key K:
 
+1. `live := cache.List(MatchingFields{user: K})` filtered by `isLiveForQuota` → the authoritative set of
+   `{lockstring, footprint}` (informer only).
+2. `have := HGETALL q:live:{K}` → the current Redis entries.
+3. Diff:
+   - **Add (missing entry → charge):** lockstring in `live`, absent from `have`, CR `CreationTimestamp` age `> grace` →
+     add via the Acquire-add Lua **without** the limit checks (anti-drift reflects reality; it cannot reject an existing
+     sandbox). Heals lost entries / rebuilds after Redis loss.
+   - **Remove (leaked entry → free):** lockstring in `have`, **not** `isLiveForQuota` in `live` (gone or
+     deletion-requested/terminating), entry age (`now − entry.ts`, Redis clock) `> grace` → Release. Frees
+     failed-create leftovers and deletes the event handler missed.
+   - **Resync sums:** run the atomic `resyncSums` Lua (`HVALS q:live:{K}` → Σ → `SET q:sum:cpu/mem:{K}`) so the sums are
+     recomputed from authoritative membership — repairing any sum-only divergence (e.g. a partial loss that dropped a sum
+     key but not the hash) that the membership-guarded add/remove cannot see. Cost is bounded by the key's own live-set
+     size (≤ its count limit), so a single atomic pass is cheap.
+
+Add/Remove are **per-lockstring, idempotent** (HEXISTS / HGET guards) and `resyncSums` is a single atomic Lua, so the
+whole pass is safe to run concurrently with the hot path and with a flapping leader, with **no version guard**.
+
+- **Cache-sync gate (never APIReader).** All reads are informer reads; the driver starts its first sweep only after
+  `mgr.GetCache().WaitForCacheSync(ctx)` returns, and the event path only fires post-sync. This is what makes the warm
+  informer safe in the **remove** direction: an unsynced/cold cache can never look "empty" and wrongly free a live slot.
+  A lagging-but-synced informer is also safe — a create not yet in cache just defers the add; a delete still in cache
+  just defers the remove — both converge on the next pass, all within `grace`.
 - **Grace = 10 minutes** (§16), comfortably above the ~1-minute worst-case apiserver lag, so a just-created CR is never
   mistaken for "absent" and a just-released slot is never mistaken for "missing".
-- **Cadence / cost:** the *remove* direction is driven primarily by the leader's informer **events** (path 3) at event
-  speed; the periodic full **bidirectional diff** is an **infrequent** backstop (minutes) reading the leader's **warm
-  informer** (no apiserver `List` in steady state). A lag-free `GetAPIReader().List(MatchingLabels{owner=K})` is used
-  only for the **initial rebuild** of a key (or after a detected Redis loss) — this is the only place a consistent
-  cluster read happens, and it is rare. This directly addresses the 500k-scale `List` cost: the expensive read is no
-  longer on every tick.
-
-> Using the warm informer for the steady-state diff is safe because both error directions are self-correcting and
-> grace-protected: an informer lagging on a **create** (CR exists, not yet in cache) just defers the add; an informer
-> lagging on a **delete** (CR gone, still in cache) just defers the remove — both converge on the next pass.
+- **Cadence / cost.** The *remove* direction is driven primarily by the leader's informer **events** (path 3) at event
+  speed; the periodic full **bidirectional diff** is an **infrequent** backstop (minutes). Every read is informer-served
+  — there is **no apiserver `List`** anywhere — and the per-key work (`cache.List` by index + `HGETALL`/`resyncSums`) is
+  bounded by that key's own live-set size (≤ its count limit), not by the 500k cluster total. This is what removes the
+  rev1 relist cost.
 
 ### 6.6 New keys need no seed
 
@@ -381,9 +416,12 @@ self-healing envelope, not by a per-acquire seed.
 
 ### 6.7 Key-deletion cleanup
 
-On API-key delete (§11): best-effort `DEL q:live:{K}`, `q:sum:cpu:{K}`, `q:sum:mem:{K}`. Key IDs are fresh,
-never-reused UUIDs, so a missed cleanup is only harmless garbage. Failure is **non-fatal** (logged, not retried on the
-hot path).
+On API-key delete (§11): `DEL q:live:{K} q:sum:cpu:{K} q:sum:mem:{K}` — all three share the `{K}` hash-tag, so this is a
+**single one-slot command** (Cluster-safe, no `CROSSSLOT`). This is the **sole** cleanup for a deleted key's entries:
+since the driver enumerates subjects from the key store (§6.5.2), a deleted key is no longer reconciled, so its entries
+are never revisited — therefore there is **no `SCAN` sweep**. To shrink the leak window the `DEL` is retried a bounded,
+**non-blocking** number of times off the hot path; if it still fails the residue is harmless dead memory (key IDs are
+fresh, never-reused UUIDs) that is never read again — monitor Redis memory for it. Failure is **non-fatal**.
 
 ### 6.8 Quota lifecycle: immutable after create
 
@@ -415,18 +453,20 @@ The whole-system invariant is **convergence**: the Redis live set converges to t
    command) keyed by a stable lockstring and guarded by `HEXISTS`/`HGET`. Aggregates (`HLEN`, sums) move **only** through
    these guarded ops. Therefore concurrent acquires, retries, leadership handoff, and double-fired releases (pre-emptive
    + event) all converge — **no version guard, no stop-the-world.**
-2. **Bidirectional anti-drift (§6.5.2).** Every divergence is corrected within `grace`: a CR with no entry is added; an
-   entry with no live CR is removed. This is what keeps lost entries (Redis restart / failover / rollback) from
-   undercounting permanently — the rev2 property a remove-only GC would lack.
-3. **Sum/membership co-mutation (§6.2).** Sums never drift from membership because they are always changed in the same
-   script.
+2. **Bidirectional anti-drift (§6.5.2).** Every divergence is corrected after `grace` (plus the diff cadence): a CR with
+   no entry is added; an entry with no live CR is removed; sums are recomputed from membership (`resyncSums`). This is
+   what keeps lost entries (Redis restart / failover / rollback) — and sum-only losses — from drifting permanently, the
+   property a remove-only GC would lack.
+3. **Sum/membership consistency (§6.2 + §6.5.2).** Incrementally, sums move only in the same script as membership; for an
+   external loss that breaks that coupling, the periodic atomic `resyncSums` recomputes sums from authoritative
+   membership.
 4. **Deletion-requested = freed (§6.5.1).** A CR that is not `isLiveForQuota` (deletion-requested/terminating) does not
    count; anti-drift add only considers `isLiveForQuota` CRs, so it never fights a deletion.
 
 ### 7.1 Honest no-oversell statement
 
 - **Redis healthy:** enforcement is **strict at admit** — a grant never exceeds the limit at the moment it is made.
-- **Transients within `grace` (10 min), bounded and self-healing:**
+- **Transients bounded by `grace` (10 min) + the diff cadence, self-healing:**
   - *Eager/pre-emptive release of a CR that actually exists* → transient over-admission until anti-drift re-adds. Bounded
     by in-flight create-failures / stuck-terminating sandboxes.
   - *Leaked entry (failed create that did charge)* → transient over-rejection (under-sell) until anti-drift removes.
@@ -452,8 +492,9 @@ The hot path (`Acquire`/`Release` paths 1–2) runs on **all** replicas. Only th
 - `SandboxManager` gains a **generic** `IsPrimary() bool`, backed by a single `coordination.k8s.io/Lease`
   (`sandbox-manager-primary`) via the vendored `client-go/tools/leaderelection` — intentionally not coupled to quota, so
   any future singleton task can gate on it.
-- The quota anti-drift controller (in `pkg/cache`, via `CacheSandboxCustomReconciler` + `AddReconcileHandlers`) and its
-  periodic diff run only while `IsPrimary()`. The hot path and per-request release are **not** gated.
+- The quota anti-drift **driver** (in `pkg/servers/e2b/quota`) — both its event-driven release (registered into the
+  cache via `CacheSandboxCustomReconciler` + `AddReconcileHandlers`) and its periodic diff — runs only while
+  `IsPrimary()`. The hot path and per-request release are **not** gated.
 - **Leadership carries no correctness weight.** Correctness rests on per-lockstring idempotency (§7). If leadership
   flaps/splits, the worst case is anti-drift running on several replicas at once — idempotent, hence safe.
 - RBAC: `get/list/watch/create/update` on `coordination.k8s.io/leases` in the manager namespace (one lease).
@@ -467,11 +508,14 @@ Phase 1 posture: **fail-open** on any Redis trouble; rely on the leader's bidire
   **allows** (treated as unlimited for that request); unlimited keys unaffected. Bounded oversell, self-healing.
 - **Redis data loss** (cold restart / flush / first boot): hashes are empty, so `Acquire` reads `live = 0` and allows —
   which **is** the fail-open behaviour; no special detection needed. The leader's anti-drift **add** pass repopulates
-  `q:live:*`/`q:sum:*` from the cluster (warm informer for steady keys; a consistent `List(MatchingLabels{owner=K})` per
-  key for the initial rebuild). Enforcement resumes per key as its entries are rebuilt. The oversell window is the
-  rebuild duration; bounded and self-healing.
-- **Partial rollback** (some entries lost, others survive): identical to "lost entries" — the **add** direction of
-  anti-drift re-charges the missing live CRs within `grace`. No detection key is needed in the fail-open posture.
+  `q:live:*`/`q:sum:*` by enumerating the limited keys from the **key store** (Redis-independent, §6.5.2) and reading
+  each key's live CRs off the **informer** (`IndexUser`, never APIReader). Enforcement resumes per key as its entries are
+  rebuilt. The oversell window is the rebuild duration; bounded and self-healing.
+- **Partial rollback** (some entries or a sum key lost, others survive): the **add** direction re-charges missing live
+  CRs and `resyncSums` recomputes the sums from membership (§6.5.2) within `grace`. No detection key is needed in the
+  fail-open posture.
+- **Redis config removed after keys exist** (operational): treated exactly as a Redis **outage** — limited keys fall to
+  fail-open and new non-empty-quota key creates are rejected (`noopBackend`, §6.1). No special cross-check is added.
 
 > **Deferred (later PR): fail-closed posture.** A config knob `onRedisUnavailable: allow | reject` (default `allow`).
 > `reject` reintroduces the rev1 machinery only where it is actually needed for strictness across loss: a global
@@ -508,8 +552,8 @@ leader's event handler (path 3) is the backstop for all non-manager deletions.
   Redis (§6.1).
 - **No quota `PATCH`** (§6.8): immutable after create; change quota by creating a new key.
 - **Describe** (optional): per-dimension `live`/`limit` for a key, via `QuotaManager.Describe`.
-- **Key delete** (`DELETE /api-keys/{id}`): drop the quota config; **keep** existing sandboxes; best-effort `DEL` of the
-  key's Redis state (§6.7), non-fatal.
+- **Key delete** (`DELETE /api-keys/{id}`): drop the quota config; **keep** existing sandboxes; single one-slot `DEL` of
+  the key's three `{K}` Redis keys (§6.7), bounded non-blocking retry, non-fatal — this is the sole cleanup (no `SCAN`).
 
 Authorization reuses `CheckCreateAPIKeyPermission`; quota set chains `CheckApiKey` + admin check.
 
@@ -517,7 +561,7 @@ Authorization reuses `CheckCreateAPIKeyPermission`; quota set chains `CheckApiKe
 
 - Old keys without `quota` → unlimited; new JSON field is `omitempty`.
 - `CountActiveSandboxes` untouched; SandboxClaim self-healing preserved.
-- **Owner-label backfill is a hard prerequisite** before enabling enforcement for keys with pre-existing CRs (§5).
+- No owner label and **no backfill**: anti-drift reads live CRs off the existing `IndexUser` informer index (§5).
 - New RBAC: one generic lease (§8).
 - New dependency: a Redis client (dormant unless configured). Phase 1 has **no global Redis keys**, so standalone /
   Sentinel / Cluster are all structurally compatible (§6.2).
@@ -539,8 +583,9 @@ Authorization reuses `CheckCreateAPIKeyPermission`; quota set chains `CheckApiKe
   counters. Acceptable for Redis; the same storage is what enables exact `live` and cheap multi-dim. Monitor memory and
   per-key `HLEN`.
 - **Steady-state anti-drift still reads a (warm) view.** A periodic bidirectional diff must eventually compare Redis to
-  truth to catch missed events; rev2 makes it **infrequent** and informer-served (no apiserver `List`), with the
-  expensive consistent `List` reserved for rare rebuilds. Monitor diff lag and divergence counts.
+  truth to catch missed events; rev3 makes it **infrequent** and **entirely informer-served** (no apiserver `List`
+  anywhere, not even for rebuilds — subjects come from the key store, live CRs from `IndexUser`). Monitor diff lag and
+  divergence counts.
 - **Deletion-requested = freed transient over-actual** (§6.5.1). A stuck-terminating sandbox plus a replacement can
   briefly exceed `limit` in physical pods. Deliberate latency trade; bounded by concurrent terminations; not resurrected
   by anti-drift (live-CR-only add).
@@ -549,11 +594,15 @@ Authorization reuses `CheckCreateAPIKeyPermission`; quota set chains `CheckApiKe
   bounded and self-healing.
 - **Fail-open during Redis outage = temporary no enforcement.** Bounded oversell for the outage duration, self-healed by
   rebuild. The deferred fail-closed knob trades availability for strictness (§9).
-- **Owner-label backfill (correctness prerequisite).** Pre-existing unlabelled CRs are invisible to the consistent reads
-  → undercount. Enforcement must wait for backfill (§5/§12).
-- **Footprint resolution for `TemplateRef`.** Anti-drift add and create-time charge must resolve referenced templates to
-  compute the footprint; a resolution failure must fail safe (defer the add; do not charge zero). Implementation detail
-  (§6.3).
+- **Clone must stamp a lockstring.** Quota keys every entry off the lockstring; the clone path historically stamped only
+  `AnnotationOwner` (`clone.go:303`). rev3 fixes clone to stamp one (§1/§5); any future owner-stamping path must do the
+  same, or its sandboxes are untracked. No owner label / backfill is needed (reads go through `IndexUser`).
+- **Footprint resolution for `TemplateRef`.** Referenced templates are **treated as immutable for quota** (§6.3), so
+  anti-drift add recomputes the identical footprint; a resolution failure must fail safe (defer the add; never charge
+  zero). If a deployment mutates a referenced template in place, the recompute could diverge — out of scope by the
+  immutability rule; a future footprint-on-CR annotation (§17) would remove the dependency entirely.
+- **Deleted-key `DEL` failure.** If the key-delete `DEL` (§6.7) and its bounded retry both fail, the key's entries leak
+  as harmless, never-read dead memory (no `SCAN` reclaims them). Monitor Redis memory.
 - **Lockstring uniqueness/stamping.** Correctness keys off the lockstring being globally unique and present on every
   owner-stamped CR (it is, via `LockSandbox`). Any future create path stamping `owner` must also go through `Acquire`
   with that lockstring (§7 precondition).
@@ -569,9 +618,11 @@ Authorization reuses `CheckCreateAPIKeyPermission`; quota set chains `CheckApiKe
   idempotent with the leader's event-driven release (no double-decrement below zero).
 - Deletion-requested = freed: a `DeletionTimestamp`-set / Terminating owner CR no longer counts; anti-drift does **not**
   re-add it.
-- Bidirectional anti-drift: (a) an entry whose CR is gone is removed after grace; (b) **a live CR missing its entry is
-  re-added after grace** (the lost-entry self-heal) — verify a simulated Redis entry loss converges back to `<= limit`
-  and to exact sums. Both run only on the leader and are safe under a flapping leader (idempotent, no version guard).
+- Bidirectional anti-drift: subjects enumerated from the key store; (a) an entry whose CR is gone is removed after grace;
+  (b) **a live CR missing its entry is re-added after grace**; (c) `resyncSums` recomputes sums from membership so a
+  simulated entry **or sum-key** loss converges back to `<= limit` and to exact sums. The driver starts only after cache
+  sync (an unsynced cache never removes a live slot). Both directions run only on the leader and are safe under a
+  flapping leader (idempotent, no version guard).
 - New key needs no seed: first `Acquire` on an absent `q:live:{K}` charges from zero (no `NEED_SEED`, no per-acquire
   consistent read).
 - Fail-open: with Redis unreachable, limited keys are allowed (unenforced) and unlimited keys provably do zero Redis IO;
@@ -589,12 +640,13 @@ Authorization reuses `CheckCreateAPIKeyPermission`; quota set chains `CheckApiKe
 - `CountActiveSandboxes` and SandboxClaim self-healing unchanged (regression).
 - `IsPrimary()` gates only the anti-drift sweep + event-driven release; correctness holds with the sweep forced on all
   replicas (idempotency regression test).
-- Owner label stamped on every create path (claim/create/clone), is a valid label value, and a consistent
-  `List(MatchingLabels{owner})` returns the correct live set; backfill prerequisite enforced.
+- Lockstring stamped on **every** create path (claim/create **and clone**); the anti-drift driver lists a key's live set
+  via `IndexUser` (informer, never APIReader) and returns the correct set; no owner label, no backfill.
 - Redis topology: Phase 1 Lua touches only `{K}`-tagged keys (no `CROSSSLOT`); standalone/Sentinel verified, Cluster
   structurally compatible.
 - Table-driven unit tests for `QuotaManager` (acquire/release/describe, multi-dim, idempotency, fail-open) and the
-  anti-drift controller (both directions, grace, leader-gating), plus create-path integration.
+  anti-drift driver (both directions, `resyncSums`, grace, cache-sync gate, key-store enumeration, leader-gating), plus
+  create-path integration.
 
 ## 16. Resolved Decisions & Implementation Discretion
 
@@ -603,27 +655,35 @@ Authorization reuses `CheckCreateAPIKeyPermission`; quota set chains `CheckApiKe
 - **Model:** Redis holds the **live set** (one entry per live sandbox, keyed by lockstring, carrying footprint),
   maintained incrementally; cluster is a backstop. `live` = exact membership/sums; **no committed-counter recompute, no
   version guard** (replaced by per-lockstring idempotency).
-- **Identity:** the existing **lockstring** (`AnnotationLock`, UUID from `LockSandbox`); no new `opID` annotation.
+- **Identity:** the existing **lockstring** (`AnnotationLock`, UUID from `LockSandbox`), stamped on **every**
+  owner-stamping path — claim/create already do; **clone** is fixed to stamp one too (§1/§5). No new `opID` annotation.
 - **Dimensions (Phase 1, all enforced):** `sandbox.count`, `cpu` (millicores), `memory` (MB), from container
   **requests**, computed from the declared target spec at create. Model extensible to `limits.*` / per-template scope
   (reserved, not enforced; unknown dimension/non-empty scope **rejected**).
 - **No post-create 变配 in the manager:** footprint is fixed at create; **no informer update-event footprint tracking**.
-  If a create chooses an in-place update of a pooled sandbox, charge the **declared** target resources.
+  If a create chooses an in-place update of a pooled sandbox, charge the **declared** target resources. Referenced
+  `SandboxTemplate`s are **immutable for quota**, so anti-drift recomputes the identical footprint (§6.3).
 - **Removal:** eager release on **any** create failure; **pre-emptive** release on manager `DELETE`; leader event-driven
   release for non-manager deletions; leader bidirectional anti-drift backstop. **Deletion-requested = freed** (do not
   wait for CR invisibility). The single **quota-live predicate** `isLiveForQuota` frees a slot iff `DeletionTimestamp !=
   nil` or phase `Terminating`; Failed/Succeeded-but-not-deleted **still occupy** — deliberately **narrower** than
   `CountActiveSandboxes`'s Dead-exclusion, so quota uses its own owner read (§5).
-- **Anti-drift is bidirectional** (add missing live-CR entries; remove leaked entries) — required so lost entries
-  self-heal rather than undercount forever. Add considers `isLiveForQuota` CRs only; the remove age-gate uses the entry
-  `ts` (Redis clock). **Grace = 10 minutes.**
+- **Anti-drift is bidirectional** (add missing live-CR entries; remove leaked entries; `resyncSums` recomputes sums from
+  membership) — required so lost entries/sums self-heal rather than drift forever. Add considers `isLiveForQuota` CRs
+  only; the remove age-gate uses the entry `ts` (Redis clock). **Grace = 10 minutes.** The **driver lives in the quota
+  layer** and enumerates limited keys from the **key store** (Redis-independent → survives total loss); the **live-CR
+  read primitive** is in `pkg/cache` over `IndexUser`. All reads are **informer-only, never APIReader**, and start only
+  after **cache sync**. **No owner label, no backfill.**
 - **No seed:** absent `q:live:{K}` for a new key == zero; `NEED_SEED` deleted.
 - **Redis unavailable (Phase 1): fail-open** (treat as unlimited; rely on rebuild). Fail-closed posture + its
   `q:warm`/settle/`WAIT` machinery is **deferred** to a later PR (config knob `onRedisUnavailable`, default `allow`).
-- **Quota immutable** after key create (no `PATCH`); admin-only to set; subject is always the API key.
+- **Quota immutable** after key create (no `PATCH`); admin-only to set; subject is always the API key. **`unlimited →
+  limited` is forbidden forever** — even a future `PATCH` may only change a *limited* key's limits, never promote an
+  unlimited key — so the hot path's "unlimited ⇒ bypass Redis" assumption can never be invalidated (§6.8).
 - **Backend:** Redis, pluggable/optional; no Redis ⇒ unlimited and non-empty quota rejected.
-- **Reconciler placement:** leader-gated controller in `pkg/cache`; generic `IsPrimary()` lease; correctness via
-  idempotency, not leadership.
+- **Reconciler placement:** leader-gated **driver in `pkg/servers/e2b/quota`** (event handler registered into
+  `pkg/cache`); subjects enumerated from the key store; generic `IsPrimary()` lease; correctness via idempotency, not
+  leadership.
 - **All Redis writes are single atomic Lua (or one idempotent command) and per-lockstring idempotent**, guarded by
   `HEXISTS`/`HGET`; sums and membership are always co-mutated in the same script.
 - **Error codes:** quota exceeded **429** (no retry).
@@ -637,13 +697,13 @@ Authorization reuses `CheckCreateAPIKeyPermission`; quota set chains `CheckApiKe
 - Redis client choice and config wiring (`pkg/sandbox-manager/config` / `clients`, `cmd/sandbox-manager`): pooling,
   retry/back-off, acquire timeout, and the fail-open error classification.
 - The generic leadership lease name and `leaderelection` parameters; `IsPrimary()` exposure on `SandboxManager`.
-- Anti-drift cadence values, the warm-informer vs `GetAPIReader` split, and how missed-event divergence is monitored.
+- Anti-drift cadence values, the key-store enumeration of limited keys, and how missed-event divergence is monitored.
 - External nested JSON shape for `quota`.
-- The owner-label backfill **mechanism** (one-time Job vs init step); the **policy** (complete before enabling
-  enforcement) is resolved (§5/§12).
+- Where exactly clone stamps its lockstring (the `Modifier` at `create.go:200` vs `newSandboxFromTemplate`), reusing
+  `NewLockString()`.
 - Where exactly `Acquire`/`Release` hook into `TryClaimSandbox` / clone / `DELETE`, and how a tentatively-picked pooled
   sandbox is returned to the pool on a 429.
-- Owner label constant in `api/v1alpha1` and the `ListLiveSandboxEntriesByOwner` signature in `pkg/cache`.
+- The `ListLiveSandboxEntriesByOwner` signature in `pkg/cache` (over `IndexUser`) and the `resyncSums` Lua encoding.
 
 ## 17. Deferred / Future Work
 
@@ -653,8 +713,10 @@ Authorization reuses `CheckCreateAPIKeyPermission`; quota set chains `CheckApiKe
 - **`limits.cpu` / `limits.memory` dimensions** and **per-template scope** (model already reserves them).
 - **Post-create 变配** (if the manager ever exposes it): an informer update-event handler that adjusts the entry
   footprint and sums by the delta, plus optional admission gating of the resize against quota.
-- **Quota `PATCH`** with a safe-activation scheme (activation window or all-replica `QuotaSpec` cache invalidation).
-- **Footprint annotation on the CR** (if a consistent read should avoid template resolution).
+- **Quota `PATCH`** for *already-limited* keys (limit changes only — never `unlimited → limited`, §6.8/§16) with a
+  safe-activation scheme (activation window or all-replica `QuotaSpec` cache invalidation).
+- **Footprint annotation on the CR** — pure optimization to skip template resolution on the anti-drift add path (no
+  longer a correctness item, since referenced templates are immutable for quota, §6.3).
 - **Apiserver-side fencing** (a validating webhook rejecting a Sandbox create whose reservation is unknown/expired) for
   absolute 0-oversell under failure intersections — out of scope by product decision.
 - **Official Redis Cluster support** (testing + the deferred-posture hash-tag redesign).
