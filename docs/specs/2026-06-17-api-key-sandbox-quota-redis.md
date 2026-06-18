@@ -72,8 +72,8 @@ rev2 removes the recompute entirely. Redis holds the **live set itself** (one en
   `CacheSandboxCustomReconciler` + `AddReconcileHandlers()` for external event handlers, and maintains an `IndexUser`
   field index over `AnnotationOwner` (`index.go:83`). rev3 adds only a live-CR read primitive
   `ListLiveSandboxEntriesByOwner` here and lets the quota layer register an event handler; the anti-drift **driver**
-  itself lives in `pkg/servers/e2b/quota` (§6.5.2). Anti-drift never uses `GetAPIReader` — all its reads are informer
-  reads, gated on cache sync (§6.5.2).
+  itself lives in `pkg/servers/e2b/quota` (§6.5.2). Anti-drift never uses `GetAPIReader` — all its **Sandbox CR** reads
+  are informer reads, gated on cache sync (subjects come from the key store, not the apiserver; §6.5.2).
 - `CountActiveSandboxes` **excludes** `Dead` (`cache.go:306`) and is relied on by the SandboxClaim controller. **It must
   not be modified.** Quota uses additive owner reads instead (§6).
 - `AnnotationOwner` is an **annotation**. `pkg/cache` already registers an `IndexUser` field index over it
@@ -241,8 +241,9 @@ type QuotaManager interface {
 // AcquireRequest carries apiKeyID, namespace, lockstring, footprint{cpu,mem}, and the loaded QuotaSpec.
 ```
 
-The **anti-drift / removal controller** (leader-gated, §6.5) is not part of the request-serving interface; it lives in
-`pkg/cache` and shares the same Lua helpers.
+The **anti-drift / removal driver** (leader-gated, §6.5) is not part of the request-serving interface; it lives in the
+quota layer (`pkg/servers/e2b/quota`, §6.5.2) and reuses the same Lua helpers. `pkg/cache` only exposes the owner-indexed
+live-CR read (`ListLiveSandboxEntriesByOwner`) and accepts the registered event handler — it never drives reconcile.
 
 ### 6.1 Backend selection (pluggable, optional Redis)
 
@@ -272,9 +273,11 @@ sums depend on.
 
 ### 6.3 Footprint
 
-The footprint charged for a sandbox is the sum over its containers of `requests.cpu` (millicores) and `requests.memory`
-(MB, ceil), computed from the **declared target spec at create** (the resources the sandbox will have, including any
-create-time `InplaceUpdate` to a pooled instance). It is read from the spec — **not** written to a CR annotation. It is
+The footprint charged for a sandbox is the sum over its **regular containers** of `requests.cpu` (millicores) and
+`requests.memory` (MB, ceil), computed from the **declared target spec at create** (the resources the sandbox will have,
+including any create-time `InplaceUpdate` to a pooled instance). **Phase 1 counts regular containers only** — init
+containers and native sidecars (`restartPolicy: Always` init containers) are **not** charged; a Kubernetes
+effective-pod-request accounting is a possible later refinement. It is read from the spec — **not** written to a CR annotation. It is
 stored in the `q:live:{K}` entry value and is **fixed for the sandbox's lifetime** (no post-create 变配 exists, §2), so
 removal decrements exactly what was charged with no drift and no update-event tracking. The anti-drift **add** path
 recomputes the identical footprint from the existing CR's spec (§5 primitive).
@@ -285,6 +288,13 @@ referenced `SandboxTemplate`. A referenced `SandboxTemplate` is **treated as imm
 inputs are thus recoverable from the CR (inline) or the immutable referenced template, with no drift. A shared
 `footprintOf(podSpec)` helper is used by both Acquire and anti-drift add; a resolution failure **fails safe** (defer the
 add — never charge zero).
+
+This immutability is a **load-bearing assumption**, not yet machine-enforced: Phase 1 treats it as a deployment
+convention; the robust enforcement is a future validating webhook that rejects quota-relevant resource edits to a
+referenced `SandboxTemplate`. If a deployment ever needs mutable templates, the alternative is to **snapshot** the
+charged footprint onto the Sandbox CR at create (§17) so the recompute reads the CR, not the ref — removing the
+dependency entirely. Inline-`Template` sandboxes (e.g. clones, §1) already carry their resolved spec, so they are
+unaffected regardless.
 
 ### 6.4 Acquire (hot path) — atomic, multi-dimensional, idempotent
 
@@ -373,7 +383,11 @@ the periodic diff and the event handler run only while `IsPrimary()` (§8).
 **Enumerating the subjects.** The driver enumerates the **limited keys** (those whose stored `QuotaSpec` is non-empty)
 from the **key store** — the durable, Redis-independent source, which is exactly why it survives a total Redis loss (an
 empty Redis cannot tell you which keys *should* exist). Redis is never `SCAN`-ed to discover subjects (that would break
-on total loss and on Cluster). For each enumerated key K:
+on total loss and on Cluster). Enumeration cost is backend-specific: the **Secret** backend reads the single
+`e2b-key-store` object once and filters `QuotaSpec != nil` in memory (it necessarily parses all stored keys, but it is
+one read); the **MySQL** backend filters server-side (`WHERE quota IS NOT NULL`). Full-rebuild duration after a Redis
+loss is therefore bounded by `#limited-keys × per-key work`; the implementation paginates/budgets per cycle, jitters,
+and exports diff-lag / rebuild-duration / divergence metrics (§16). For each enumerated key K:
 
 1. `live := cache.List(MatchingFields{user: K})` filtered by `isLiveForQuota` → the authoritative set of
    `{lockstring, footprint}` (informer only).
@@ -388,23 +402,28 @@ on total loss and on Cluster). For each enumerated key K:
    - **Resync sums:** run the atomic `resyncSums` Lua (`HVALS q:live:{K}` → Σ → `SET q:sum:cpu/mem:{K}`) so the sums are
      recomputed from authoritative membership — repairing any sum-only divergence (e.g. a partial loss that dropped a sum
      key but not the hash) that the membership-guarded add/remove cannot see. Cost is bounded by the key's own live-set
-     size (≤ its count limit), so a single atomic pass is cheap.
+     size, which its **own quota** caps — a `sandbox.count` limit directly, or, since every sandbox requests a positive
+     cpu/memory amount, a cpu/memory limit equally bounds the entry count — so the hash never grows unboundedly and a
+     single atomic pass is cheap.
 
 Add/Remove are **per-lockstring, idempotent** (HEXISTS / HGET guards) and `resyncSums` is a single atomic Lua, so the
 whole pass is safe to run concurrently with the hot path and with a flapping leader, with **no version guard**.
 
-- **Cache-sync gate (never APIReader).** All reads are informer reads; the driver starts its first sweep only after
-  `mgr.GetCache().WaitForCacheSync(ctx)` returns, and the event path only fires post-sync. This is what makes the warm
-  informer safe in the **remove** direction: an unsynced/cold cache can never look "empty" and wrongly free a live slot.
+- **Cache-sync gate (never APIReader).** All **Sandbox CR** reads are informer reads (subjects come from the key store).
+  Crucially the gate is **not one-time**: **every remove-capable pass** first checks the Sandbox informer's current
+  sync/health (`HasSynced` true, no in-flight relist/watch error), and **skips the remove direction** if it is not
+  healthy — so a freshly-(re)elected leader, a mid-run relist, or a watch-bookmark gap can never make a partial/cold
+  cache look "empty" and wrongly free a live slot. The add direction is always safe (it only ever charges existing CRs).
   A lagging-but-synced informer is also safe — a create not yet in cache just defers the add; a delete still in cache
-  just defers the remove — both converge on the next pass, all within `grace`.
+  just defers the remove — both converge on the next pass, all within `grace`. Skipped-remove passes are counted as a
+  metric.
 - **Grace = 10 minutes** (§16), comfortably above the ~1-minute worst-case apiserver lag, so a just-created CR is never
   mistaken for "absent" and a just-released slot is never mistaken for "missing".
 - **Cadence / cost.** The *remove* direction is driven primarily by the leader's informer **events** (path 3) at event
   speed; the periodic full **bidirectional diff** is an **infrequent** backstop (minutes). Every read is informer-served
   — there is **no apiserver `List`** anywhere — and the per-key work (`cache.List` by index + `HGETALL`/`resyncSums`) is
-  bounded by that key's own live-set size (≤ its count limit), not by the 500k cluster total. This is what removes the
-  rev1 relist cost.
+  bounded by that key's own live-set size (capped by its own quota — see *Resync sums* above), not by the 500k cluster
+  total. This is what removes the rev1 relist cost.
 
 ### 6.6 New keys need no seed
 
@@ -437,8 +456,10 @@ mode at birth:
 - A replica that has not yet observed a newly-created key resolves it as **unknown** (auth failure), never as
   "unlimited" — so no replica ever holds a stale `unlimited` view of a limited key.
 
-To change a key's quota, create a **new** key. A future `PATCH` MUST ship a safe-activation scheme (activation window, or
-forced cross-replica `QuotaSpec` cache invalidation) — deferred.
+To change a key's quota, create a **new** key. Any future `PATCH` may only change the limits of a key that was **born
+limited** — promoting an `unlimited` key to `limited` is **forbidden forever** (so the hot path's "unlimited ⇒ bypass
+Redis" assumption can never be invalidated) — and MUST ship a safe-activation scheme (activation window, or forced
+cross-replica `QuotaSpec` cache invalidation). Deferred.
 
 ## 7. Correctness
 
@@ -602,7 +623,11 @@ Authorization reuses `CheckCreateAPIKeyPermission`; quota set chains `CheckApiKe
   zero). If a deployment mutates a referenced template in place, the recompute could diverge — out of scope by the
   immutability rule; a future footprint-on-CR annotation (§17) would remove the dependency entirely.
 - **Deleted-key `DEL` failure.** If the key-delete `DEL` (§6.7) and its bounded retry both fail, the key's entries leak
-  as harmless, never-read dead memory (no `SCAN` reclaims them). Monitor Redis memory.
+  as never-read dead memory (no `SCAN` reclaims them). It is correctness-harmless (deleted keys are never re-enumerated
+  and IDs never reused), but **not** availability-harmless: the leak is bounded by Σ (live-set size of each deleted
+  limited key whose `DEL` failed), and unbounded *growth* could pressure Redis memory and so widen the fail-open window.
+  Mitigation: alert on Redis memory and on `DEL`-failure count; an optional tombstone-retry queue (no `SCAN`) is a
+  future hardening.
 - **Lockstring uniqueness/stamping.** Correctness keys off the lockstring being globally unique and present on every
   owner-stamped CR (it is, via `LockSandbox`). Any future create path stamping `owner` must also go through `Acquire`
   with that lockstring (§7 precondition).
@@ -630,7 +655,8 @@ Authorization reuses `CheckCreateAPIKeyPermission`; quota set chains `CheckApiKe
 - No quota `PATCH`; a newly-created limited key enforces from its first `Acquire`; no replica observes a limited key as
   "unlimited" (unknown key → auth failure).
 - 429 with no retry: a quota miss returns immediately and a tentatively-picked pooled sandbox is returned to the pool.
-- Footprint: cpu in millicores and memory in MB (ceil) summed from container requests; `TemplateRef` is resolved; a
+- Footprint: cpu in millicores and memory in MB (ceil) summed from **regular**-container requests (init/sidecars
+  excluded, §6.3); `TemplateRef` is resolved; a
   resolution failure fails safe.
 - Sum/membership consistency: every add/remove changes the HASH field and the affected sums in one Lua; sums never drift
   from `HLEN`/membership under churn.
@@ -657,9 +683,9 @@ Authorization reuses `CheckCreateAPIKeyPermission`; quota set chains `CheckApiKe
   version guard** (replaced by per-lockstring idempotency).
 - **Identity:** the existing **lockstring** (`AnnotationLock`, UUID from `LockSandbox`), stamped on **every**
   owner-stamping path — claim/create already do; **clone** is fixed to stamp one too (§1/§5). No new `opID` annotation.
-- **Dimensions (Phase 1, all enforced):** `sandbox.count`, `cpu` (millicores), `memory` (MB), from container
-  **requests**, computed from the declared target spec at create. Model extensible to `limits.*` / per-template scope
-  (reserved, not enforced; unknown dimension/non-empty scope **rejected**).
+- **Dimensions (Phase 1, all enforced):** `sandbox.count`, `cpu` (millicores), `memory` (MB), from **regular**-container
+  **requests** (init/sidecars excluded, §6.3), computed from the declared target spec at create. Model extensible to
+  `limits.*` / per-template scope (reserved, not enforced; unknown dimension/non-empty scope **rejected**).
 - **No post-create 变配 in the manager:** footprint is fixed at create; **no informer update-event footprint tracking**.
   If a create chooses an in-place update of a pooled sandbox, charge the **declared** target resources. Referenced
   `SandboxTemplate`s are **immutable for quota**, so anti-drift recomputes the identical footprint (§6.3).
@@ -692,7 +718,7 @@ Authorization reuses `CheckCreateAPIKeyPermission`; quota set chains `CheckApiKe
 ### Left to the implementing agent
 
 - Redis key prefixes, hash-tag form (`{K}`), Lua script encoding, and the footprint JSON shape stored in the entry.
-- The `footprintOf(podSpec)` helper (container iteration, init/sidecar handling, MB ceil rounding, `TemplateRef`
+- The `footprintOf(podSpec)` helper (regular-container iteration — init/sidecars excluded per §6.3 — MB ceil rounding, `TemplateRef`
   resolution and its fail-safe behaviour).
 - Redis client choice and config wiring (`pkg/sandbox-manager/config` / `clients`, `cmd/sandbox-manager`): pooling,
   retry/back-off, acquire timeout, and the fail-open error classification.
