@@ -1,13 +1,20 @@
-# API Key Sandbox Quota — Design Spec (Redis-backed)
+# API Key Sandbox Quota — Design Spec (Redis-backed, live-set model)
 
-- Date: 2026-06-17
+- Date: 2026-06-18 (rev2)
 - Branch: `feature/e2b-api-quota-260617`
-- Supersedes: the previous per-shard Lease leader-election design (deleted). This revision replaces the self-built
-  sharding/leader-election/forwarding/settle machinery with an **optional Redis** counting backend (the standard
-  inventory-deduction pattern), keeping the same product contract and the same ground truth (the apiserver).
-- Scope: `pkg/servers/e2b/` (create, api_key, models, keys, routes), `pkg/servers/e2b/quota/` (new), `pkg/sandbox-manager/`
-  (api, infra wiring, a generic `IsPrimary()` leadership capability), `pkg/sandbox-manager/config` + `clients` (Redis
-  config/client), `pkg/cache/` (additive owner counter), `cmd/sandbox-manager/`, `api/v1alpha1/` (owner label constant),
+- Supersedes:
+  - rev0: the per-shard Lease leader-election design (deleted).
+  - rev1: the Redis **committed-counter + reservation-overlay + version-guarded reconcile** design (the previous content
+    of this file). rev2 replaces that with a **Redis live-set** model: Redis holds the *literal set* of sandboxes each
+    limited key currently holds (one entry per sandbox, keyed by its lockstring, carrying its resource footprint),
+    maintained **incrementally** (add at create, remove at delete). The cluster is no longer a frequently-relisted source
+    that *overwrites a counter*; it is only a **backstop** that a leader-elected controller diffs against to self-heal
+    drift. This deletes the entire version-guard machinery (`q:committed`/`q:cver`, RV decimal compare, `mayCreate`,
+    fast/slow reconcile cadences, fold/free, the `resv` ZSET overlay, lazy `NEED_SEED`).
+- Scope: `pkg/servers/e2b/` (create, api_key, models, keys, routes), `pkg/servers/e2b/quota/` (new: `QuotaManager`,
+  backends, Lua), `pkg/sandbox-manager/` (api/infra wiring, a generic `IsPrimary()` leadership capability),
+  `pkg/sandbox-manager/config` + `clients` (Redis config/client), `pkg/cache/` (additive owner-by-label read + a
+  leader-gated quota anti-drift controller), `cmd/sandbox-manager/`, `api/v1alpha1/` (owner label constant),
   `config/`/Helm chart (RBAC for `coordination.k8s.io/leases`, Redis config), `go.mod`/`vendor` (add a Redis client).
 
 ## 1. Background
@@ -17,98 +24,104 @@ authenticates via `X-API-KEY`, resolved to a `*models.CreatedTeamAPIKey` (with `
 the sandbox **owner**: every create path stamps it onto the Sandbox CR as `agentsv1alpha1.AnnotationOwner` (claim and
 create-on-no-stock via `utils.LockSandbox`, clone via direct set), and it surfaces as `route.Owner`.
 
-We need to cap how many sandboxes a single API key may hold, enforced **without overselling** even under highly concurrent
-creates across replicas, and **without materially slowing down create**. Peak create throughput is ~2500/sec (150k/min)
-aggregate. The worst case for a single limited key is "small limit + high churn" (a key that constantly creates and
-deletes against a tiny limit), which rules out any per-operation external IO on the **unlimited** hot path and demands a
-cheap, contention-free check on the **limited** hot path.
+We need to cap how much a single API key may hold — both **count** of sandboxes and their **resource footprint** (CPU,
+memory) — enforced across replicas without materially slowing down create. Peak create throughput is ~2500/sec
+(150k/min) aggregate; a single cluster may hold ~**500k** sandboxes; the apiserver may lag by up to ~**1 minute**. The
+worst case for a single limited key is "small limit + high churn" (constantly creating and deleting against a tiny
+limit), which rules out any per-operation external IO on the **unlimited** hot path and demands a cheap, contention-free
+check on the **limited** hot path, plus fast slot reclamation.
 
-Phase 1 exposes only a per-key **sandbox count** limit, but the internal model must extend to future dimensions (CPU,
-memory) and a future per-template scope (api-key, or api-key+template). The quota **subject is always the API key**;
-there is no per-team scope.
+### Why rev2 exists (relative to rev1)
 
-### Why this design exists (relative to the previous one)
+rev1 stored only an **aggregate counter** in Redis and had to periodically recompute it from a cluster `List` and
+overwrite it. That non-atomic, concurrent "read apiserver → overwrite a shared counter" is the *sole* reason it needed
+the version-guard machinery (enumerated in *Supersedes* above); the periodic relist is also the dominant cost at 500k
+sandboxes and makes the count laggy and imprecise.
 
-The previous design's entire complexity surface — per-shard Lease leader election, `fnv mod N` sharding, the reshard
-hazard, peer `Acquire`/`Release` forwarding over `SystemPort`, the per-handoff settle window, the warm/unwarm cell state
-machine, in-memory cell rebuild on takeover, and the two-leaders-during-partition risk — existed **only** to synthesize
-"exactly one writer per key" without a shared atomic store. A shared atomic store (Redis) provides that serialization
-directly via a single Lua script (the classic flash-sale / inventory-deduction `if remaining > 0 then decrement`
-pattern). Adopting Redis deletes all of that machinery. What remains is: a few small Lua scripts, an idempotent reconcile
-loop, and the same owner-label / opID bookkeeping.
+rev2 removes the recompute entirely. Redis holds the **live set itself** (one entry per live sandbox), so:
+
+- `live` is the *literal membership* — exact, no recompute, no lag.
+- Every mutation is a **targeted, per-lockstring, idempotent** op (add this sandbox / remove this sandbox), never a
+  read-modify-write of a shared counter. **Idempotency keyed by a stable per-sandbox identity replaces the version
+  guard.** Concurrent / retried / leadership-handoff / double-fired writes all converge.
+- A full cluster `List` is needed only by a **rare** backstop rebuild, not on every reconcile tick. Steady state is
+  incremental + an infrequent leader-side diff against the warm informer.
+- A per-entry **resource footprint** makes multi-dimensional quota (CPU/memory) natural: each dimension is just a sum
+  maintained alongside membership.
 
 ### Key facts established from the codebase
 
-- `pkg/cache` already maintains a `user` field index (`IndexUser`) over `AnnotationOwner` on Sandbox/Checkpoint, plus
-  `ListSandboxes({User})` and `CountActiveSandboxes({User})`, and exposes `GetAPIReader()` — a `client.Reader` that
-  bypasses the lagging local informer for a consistent apiserver read.
-- `CountActiveSandboxes` **excludes** `Dead` (`cache.go:306`). Its only production caller is the SandboxClaim
-  controller's `countClaimedSandboxes` (`common_control.go:408`), which relies on Dead being excluded so a dead sandbox
-  triggers a replacement. **It must not be modified.**
-- `AnnotationOwner` is an **annotation** (`api/v1alpha1`, `InternalPrefix + "owner"`). Annotations are not
-  server-side selectable, so a consistent per-owner read cannot filter on it. We add a mirrored **owner label** to enable
-  `apiReader.List(MatchingLabels{...})` server-side filtering (§5.1).
-- sandbox-manager **already runs informer-driven background work** (the Secret-backed `KeyStorage.Run()` installs an
-  informer event handler plus a worker goroutine; `pkg/cache` runs informers). A quota reconcile loop is consistent with
-  the component's existing shape — it is not a pure request/response server.
-- `k8s.io/client-go/tools/leaderelection` (with `resourcelock/leaselock.go`, backed by `coordination.k8s.io/Lease`) is
-  **already vendored**. We reuse it for a **single, generic "primary manager" Lease** (§8) — not for per-key ownership.
-- Create paths: `CreateSandbox` → `createSandboxWithClaim` / `createSandboxWithClone`, both passing `User: user.ID.String()`
-  and accepting a `Modifier func(infra.Sandbox)` (`basicSandboxCreateModifier`) that runs before the CR is written.
-- Key storage: `keys.KeyStorage` with Secret backend (`e2b-key-store` Secret, informer-synced in-memory indexes,
-  `retryUpdateSecret` CAS writes) and MySQL backend (GORM `teams`/`team_api_keys`, HMAC-only, TTL caches,
-  `DisableAutoMigrate`).
-- No Redis client is currently vendored. This design **adds** one (e.g. `github.com/redis/go-redis/v9`) behind a backend
-  interface, used only when Redis is configured.
+- `pkg/utils/utils.go:201` `LockSandbox(sbx, lock, owner)` already stamps `AnnotationLock = lock` (a UUID from
+  `NewLockString()` / `uuid.NewString()`, `utils.go:211`) **and** `AnnotationOwner = owner` on the **same** CR write
+  used by claim/create (`performLockSandbox`, `claim.go:661`) and clone. **The lockstring is therefore an existing,
+  per-sandbox UUID identity already persisted on the CR** — rev2 reuses it as the Redis entry key; no new `opID`
+  annotation is introduced.
+- Sandbox is Pod-backed: resources live in the inlined `EmbeddedSandboxTemplate` PodTemplateSpec
+  (`sandbox_types.go:99-113`), as container `Resources`. The create request's **target** resources are known at admit
+  time (claim may `InplaceUpdate` a pooled sandbox to the requested spec — `claim.go:213`, `create.go`), so the footprint
+  to charge is computable before committing to a specific instance.
+- `pkg/cache` is the sandbox-manager-only, informer-backed cache. It already runs informers and exposes
+  `CacheSandboxCustomReconciler` + `AddReconcileHandlers()` for external event handlers, and `GetAPIReader()` (a
+  lag-free `client.Reader`). It maintains a `user` index over `AnnotationOwner`. This is the natural home for the
+  leader-gated quota anti-drift controller.
+- `CountActiveSandboxes` **excludes** `Dead` (`cache.go:306`) and is relied on by the SandboxClaim controller. **It must
+  not be modified.** Quota uses additive owner reads instead (§6).
+- `AnnotationOwner` is an **annotation**, not server-side selectable. rev2 adds a mirrored **owner label** to enable
+  consistent server-side-filtered reads for the anti-drift backstop (§5).
+- `k8s.io/client-go/tools/leaderelection` (Lease-backed) is already vendored — reused for a single generic
+  `IsPrimary()` capability (§8).
+- No Redis client is vendored yet; rev2 adds one (e.g. `github.com/redis/go-redis/v9`) behind a backend interface.
 
 ## 2. Goals & Non-Goals
 
 ### Goals
 
-- Enforce a per-API-key maximum on the number of sandboxes it holds, strongly consistent across replicas with **strict
-  no-oversell** under normal operation. Strict no-oversell **across Redis failover** is a **configurable** posture
-  (§7 condition 4): a knob enables synchronous replication of reservation writes (default **off**). With the default
-  (async replication), a failover that drops un-replicated reservations degrades to a bounded, self-healing residual
-  (the same envelope as total-data-loss), never unbounded oversell; enabling the knob makes failover strict at a hot-path
-  latency / availability cost.
-- Make the counting backend **pluggable**. Redis is the strongly-consistent backend; without Redis, quota enforcement is
-  disabled (all keys unlimited) and attempts to set a non-empty quota are rejected (§6.1).
-- Internal model distinguishes static **QuotaSpec** (limits) from dynamic **usage** (committed) and **reservation**
-  (in-flight). Phase 1 exposes only `sandbox.count`; dimension/scope are extension points.
-- Unlimited / default keys perform **zero** external IO on the hot path (the majority of the 2500/sec). Limited keys
-  perform **at most one** Redis round-trip per acquire.
-- The apiserver remains the **ground truth**. Redis holds only a *cache of committed usage* plus a *short-lived in-flight
-  overlay*; both are reconstructible from the cluster.
-- During Redis unavailability, prefer **under-sell** (temporary retryable rejection of limited keys) over over-sell.
-- Backward compatible: old keys without a quota field default to **unlimited**.
+- Enforce per-API-key limits on **count**, **cpu** (requests, millicores), and **memory** (requests, MB) of sandboxes
+  held, strongly consistent across replicas while Redis is healthy. The model is **multi-dimensional and extensible**
+  (future: `limits.*`, per-template scope) without a schema change.
+- Make `live` **exact and lag-free in steady state** by storing the literal live set in Redis and maintaining it
+  incrementally — no periodic counter recompute, no frequent full `List`.
+- Keep enforcement correct under concurrency/retry/leadership-handoff using **per-lockstring idempotent, per-op atomic**
+  Redis writes (Lua) — no version guard.
+- Unlimited keys perform **zero** Redis IO on the hot path. Limited keys perform **at most one** Redis round-trip per
+  acquire.
+- The cluster remains the **ground truth**; the Redis live set is reconstructible from it and self-heals via a
+  **bidirectional** anti-drift diff (add entries for live CRs missing from Redis; remove entries whose CR is gone).
+- Reclaim slots **fast** for small-limit high-churn keys: eager release on create failure, pre-emptive release on
+  delete, plus event-driven removal — never solely the periodic backstop.
+- Backward compatible: keys without a quota field default to **unlimited**.
 
-### Non-Goals
+### Non-Goals (Phase 1)
 
-- Implementing CPU / memory / disk dimensions or per-template enforcement. Only model extension points (a future
-  dimension, and a future per-template scope) are added; there is **no** per-team scope — the API key, not a team, is the
-  quota subject.
-- Reclaiming or evicting existing sandboxes. A quota only blocks new creates; it never deletes or reclaims sandboxes a
-  key already holds (e.g. ones created before enforcement was enabled for that key). (Quota is immutable after key create
-  in Phase 1, §6.8, so there is no in-place "lowering" of an existing key's limit.)
-- High availability of the quota feature **without** Redis. Without Redis, quota is simply disabled.
-- Billing / usage reporting. This is hard-limit enforcement only.
-- Cross-cluster / multi-region quota.
-- A per-operation consensus log (Raft) **or** apiserver-side fencing (a validating webhook). Strict no-oversell is
-  achieved with Redis atomicity + a version-guarded reconcile under normal operation; the remaining rare, bounded,
-  self-healing residuals (§7.1) are accepted rather than closed with a webhook/consensus. Total Redis data loss is handled
-  by a global fail-closed cold-rebuild (§9).
+- **`limits.*` dimensions, per-template scope, per-team scope.** The quota subject is always the API key. Only model
+  extension points are reserved; not enforced.
+- **Post-create resize / 变配 admission as a separate API.** sandbox-manager exposes no post-create resource-change
+  capability. If a create chooses an in-place update of a pooled sandbox, the footprint charged is the **declared target
+  resources at create** (§6.3); since resources never change after create, **no informer update-event footprint tracking
+  is needed** and the entry footprint is fixed for the sandbox's lifetime.
+- **Strict no-oversell across Redis unavailability.** Phase 1 is **fail-open** by default on Redis trouble (§9): during a
+  Redis outage limited keys are temporarily unenforced (treated as unlimited), accepting a bounded oversell that the
+  leader's anti-drift rebuild self-heals once Redis returns. The **fail-closed** posture (and its `q:warm`/settle/`WAIT`
+  machinery) is deferred to a later PR (§9, §16-future).
+- Reclaiming/evicting existing sandboxes; quota only blocks new creates.
+- Quota mutability: settable only at **key create**, immutable thereafter — **no `PATCH`** (§6.8 eliminates the
+  `unlimited → limited` transition oversell by construction).
+- Billing/usage reporting; cross-cluster/multi-region quota; a per-op consensus log or apiserver-side fencing webhook.
 
 ## 3. Quota Data Model (static)
 
-Three layers, all addressed by `(apiKeyID, dimension, scope)`. Phase 1 only populates `dimension = sandbox.count`,
-`scope = {}`.
+Addressed by `(apiKeyID, dimension, scope)`. Phase 1 enforces three dimensions at `scope = {}` (per-api-key).
 
 ```go
-// Static — stored with key metadata.
 type QuotaDimension string
-const DimSandboxCount QuotaDimension = "sandbox.count" // future: cpu.millicores, memory.mb, ...
+const (
+    DimSandboxCount QuotaDimension = "sandbox.count" // unit: sandboxes
+    DimCPU          QuotaDimension = "cpu"           // unit: millicores (sum of container requests.cpu)
+    DimMemory       QuotaDimension = "memory"        // unit: MB        (sum of container requests.memory)
+    // future: limits.cpu, limits.memory, ...
+)
 
-// Scope narrows where a limit applies. The subject is always the API key (never a team).
+// Scope narrows where a limit applies. Subject is always the API key (never a team).
 // Phase 1: empty == per-api-key (the only enforced scope). Template is a forward extension point only.
 type QuotaScope struct {
     Template string `json:"template,omitempty"` // future per-template scope (not enforced in Phase 1)
@@ -117,7 +130,7 @@ type QuotaScope struct {
 type QuotaLimit struct {
     Dimension QuotaDimension `json:"dimension"`
     Scope     QuotaScope     `json:"scope,omitempty"`
-    Limit     *int64         `json:"limit,omitempty"` // nil == unlimited
+    Limit     *int64         `json:"limit,omitempty"` // nil == unlimited; normalized unit per dimension
 }
 
 type QuotaSpec struct {
@@ -125,850 +138,523 @@ type QuotaSpec struct {
 }
 ```
 
-External JSON on the key request/response is **nested** (not a flat `maxSandboxes`), e.g. `"quota": { "sandbox": { "count": 50 } }`;
-absent / `null` == unlimited. The handler normalizes it to `QuotaSpec.Limits`. The exact external shape is an
-implementation detail provided it stays nested and extensible.
+- **Units (internal, integer):** cpu in **millicores** (`resource.Quantity.MilliValue()` summed over containers);
+  memory in **MB** = 10^6 bytes (summed bytes, **ceil**-rounded, to bias conservative). All Lua math is integer.
+- **External JSON** is nested and extensible, e.g.
+  `"quota": { "sandbox": { "count": 50 }, "cpu": "16", "memory": "32Gi" }`. The handler normalizes resource values
+  (quantity strings) into the internal millicores/MB and into `QuotaSpec.Limits`. The exact external shape is an
+  implementation detail provided it stays nested.
+- `QuotaSpec` is loaded at auth time (`CheckApiKey` puts `user` in context), so the hot path never re-reads the key
+  store.
 
-`QuotaSpec` is loaded at auth time (`CheckApiKey` puts `user` in context), so the hot path never re-reads the key store.
+### 3.1 Validation (only at key create — Phase 1 has no quota `PATCH`)
 
-### 3.1 Validation
+A quota is **never silently ignored**:
 
-`QuotaSpec` is validated where it is set — **only at key create** (§11; Phase 1 has no quota `PATCH`). A quota is
-**never silently ignored**:
-
-- **Absent / `null` quota** (or empty `Limits`) → **unlimited** (back-compat).
-- **`Limit == nil`** for a dimension → that dimension is **unlimited**.
-- **`Limit == 0`** → **valid**; the key may hold **zero** sandboxes (every create returns 429). An explicit hard-zero is a
-  legitimate "disable creation" configuration, not an error.
-- **`Limit < 0`** → **rejected** (invalid).
-- **Duplicate `(dimension, scope)`** entries → **rejected** (ambiguous).
-- **Unknown `dimension`** (anything other than `sandbox.count` in Phase 1) → **rejected**, so a typo or a not-yet-enforced
-  future dimension is never silently dropped.
-- **Non-empty `scope`** (e.g. `scope.template` set) → **rejected in Phase 1** — only per-api-key (`scope == {}`) is
-  enforced, and accepting a per-template scope would silently fail to enforce it. The field exists only as a forward model
-  extension point.
+- **Absent / `null` quota** (or empty `Limits`) → **unlimited**.
+- **`Limit == nil`** for a dimension → that dimension **unlimited**.
+- **`Limit == 0`** → **valid** hard-zero (every create in that dimension returns 429).
+- **`Limit < 0`** → **rejected**.
+- **Duplicate `(dimension, scope)`** → **rejected**.
+- **Unknown dimension** (anything other than `sandbox.count` / `cpu` / `memory` in Phase 1, e.g. `limits.cpu`) →
+  **rejected**, so a not-yet-enforced future dimension is never silently dropped.
+- **Non-empty `scope`** → **rejected in Phase 1**.
 - **No Redis configured** + a non-empty quota → **rejected** (§6.1).
 
 ## 4. Static Config Storage
 
-Both backends store **only** the static `QuotaSpec`, alongside the key. This is a one-time write at **key create** (quota
-is immutable thereafter, §6.8). **No dynamic usage/reservation is ever written to the key store.**
+Both backends store **only** the static `QuotaSpec`, alongside the key, written once at **key create** (immutable
+thereafter, §6.8). **No dynamic usage is ever written to the key store** — that lives in Redis.
 
-### 4.1 Secret backend
+- **Secret backend:** add `Quota *QuotaSpec json:"quota,omitempty"` to `models.CreatedTeamAPIKey`; serializes into the
+  per-key JSON inside `e2b-key-store`; old payloads decode to `nil` == unlimited; writes reuse `retryUpdateSecret` CAS.
+- **MySQL backend:** add a nullable `quota JSON` column to `team_api_keys` (`NULL` == unlimited); `AutoMigrate` adds it,
+  gated by `DisableAutoMigrate` with a documented manual DDL alternative.
 
-- Add `Quota *QuotaSpec json:"quota,omitempty"` to `models.CreatedTeamAPIKey`; it serializes into the per-key JSON inside
-  `e2b-key-store`.
-- Old payloads decode to `nil` == unlimited (back-compat).
-- Writes reuse the existing `retryUpdateSecret` CAS path.
+## 5. Identity, Owner Label, and Counting Primitive
 
-### 4.2 MySQL backend
+- **Sandbox identity in Redis = the lockstring** (`AnnotationLock`, a UUID already stamped by `LockSandbox`). It is
+  globally unique and already persisted on the CR, so it survives `GenerateName` (the create path need not know the final
+  object name). Re-keying every Redis op off it gives idempotency for free.
+- **Owner label (`agents.kruise.io/owner = <keyID>`)**: `AnnotationOwner` is an annotation and cannot be
+  server-side-filtered. rev2 mirrors it to a label on the **same** write path that stamps the annotation/lockstring
+  (`LockSandbox` for claim/create, direct set for clone). A UUID keyID is a valid label value. The label lets the
+  anti-drift backstop do `apiReader.List(MatchingLabels{owner=K})` consistent reads.
+  - **Backfill is a hard prerequisite** before enabling enforcement for a key that already owns sandboxes: the
+    consistent reads filter by the label, so an unlabelled pre-existing CR would be invisible → undercount → oversell.
+    Run the one-time backfill (label every existing Sandbox from its `AnnotationOwner`) and confirm completion before
+    turning enforcement on; until then such a key is treated as unlimited.
+- **Quota "live" predicate — the single source of truth for charging, used identically by the count/sum reads and by
+  both anti-drift directions (§6.5.2):**
 
-- Add a nullable `quota JSON` column to `team_api_keys` (`NULL` == unlimited). `AutoMigrate` adds the column; gated by
-  `DisableAutoMigrate`, with a documented manual DDL alternative.
-- Old rows (`NULL`) == unlimited (back-compat).
-- **No usage/counter/reservation tables are required.**
+  ```go
+  // isLiveForQuota reports whether a Sandbox still occupies its owner's quota.
+  // Freed (NOT live) iff deletion has been requested or is in progress; a merely
+  // Failed/Succeeded-but-not-yet-deleted sandbox still occupies quota until it is.
+  func isLiveForQuota(sbx *agentsv1alpha1.Sandbox) bool {
+      return sbx.DeletionTimestamp == nil &&
+          sbx.Status.Phase != agentsv1alpha1.SandboxTerminating
+  }
+  ```
 
-## 5. Usage Source: the Cluster Itself
+  This predicate is **deliberately narrower** than `CountActiveSandboxes`'s "not `Dead`" filter (which *also* excludes
+  Failed/Succeeded via `GetSandboxState`): quota frees a slot only when deletion is requested/terminating, **not** the
+  moment a pod fails. That difference — plus the need for per-entry `{lockstring, footprint}` data and an owner-**label**
+  server-side filter — is why quota uses its own additive read rather than `CountActiveSandboxes` (left untouched, §1).
+  The exact field/enum (`Status.Phase == SandboxTerminating`, `sandbox_types.go:262`) is confirmed at implementation; the
+  **semantics** above are fixed. We do **not** wait for the CR to become invisible.
 
-The chosen counting rule is "a sandbox occupies a slot until it is truly deleted." Committed usage is therefore
-**exactly** the number of non-deleted Sandbox CRs carrying `AnnotationOwner = keyID`, **including `Dead`-but-not-yet-GC**
-(matching the previous design's deliberate, conservative no-oversell direction). Consequences:
+  ```go
+  // ListLiveSandboxEntriesByOwner returns, for owner K, every Sandbox CR with
+  // isLiveForQuota == true, each as {lockstring, footprint}. Reads the warm informer
+  // (steady state) or GetAPIReader with the owner-label selector (consistent rebuild).
+  func (c *Cache) ListLiveSandboxEntriesByOwner(ctx, opts) ([]LiveEntry, error)
+  ```
 
-1. **Committed usage is auto-persisted by the CRs themselves.** Every create produces a CR with the owner annotation;
-   that IS the durable record. No separate usage store is needed.
-2. **Committed is reconstructible by any replica** from the cluster (warm informer index, or a consistent read). This is
-   what makes the Redis counter recoverable after data loss (§9).
+## 6. Counting Model (Redis live-set)
 
-### 5.1 Owner label (enables consistent per-owner reads)
-
-`AnnotationOwner` is an annotation and cannot be server-side filtered. We add a mirrored **owner label**
-`agents.kruise.io/owner = <keyID>` to every Sandbox CR, stamped on the **same path** that stamps the annotation
-(`utils.LockSandbox` for claim/create, direct set for clone) — no new webhook, no extra write. A UUID keyID is a valid
-label value (≤63 chars, alphanumeric + `-`). The label lets `apiReader.List(MatchingLabels{...})` return only key `K`'s
-CRs in a consistent (lag-free) read, used for seed / cold-rebuild / anti-drift.
-
-### 5.2 Counting primitive
-
-`CountActiveSandboxes` excludes `Dead` and must not change (§1). Add a small additive method that counts **all** existing
-owner CRs including Dead:
-
-```go
-// CountSandboxesByOwner counts every existing Sandbox CR owned by User,
-// regardless of state (including Dead-but-not-yet-GC), matching the
-// "occupies a slot until truly deleted" quota rule. It can read from the
-// warm informer index (steady state) or from GetAPIReader with the owner
-// label selector (consistent read).
-func (c *Cache) CountSandboxesByOwner(ctx, opts ListSandboxesOptions) (int32, error)
-```
-
-The consistent variant also returns the snapshot's `ResourceVersion` and the set of per-CR `opID` annotations (§6),
-needed by the reconcile apply.
-
-## 6. Counting Model (Redis)
-
-All quota enforcement lives in a new `QuotaManager` (package `pkg/servers/e2b/quota`) backed by a `QuotaBackend`
-interface. Two backends: `redisBackend` (strongly consistent) and `noopBackend` (no Redis configured).
+All enforcement lives in a `QuotaManager` (package `pkg/servers/e2b/quota`) behind a `QuotaBackend` interface, with a
+`redisBackend` and a `noopBackend`.
 
 ```go
 type QuotaManager interface {
-    // Acquire reserves one slot or returns ErrQuotaExceeded (429). Unlimited keys are a no-op (zero Redis IO).
-    Acquire(ctx context.Context, req AcquireRequest) (Reservation, error)
-    // Release returns an in-flight reservation. Idempotent. See 6.4 for when it may be called.
-    Release(ctx context.Context, req ReleaseRequest) error
-    // Reconcile re-aligns committed from the cluster and retires/frees reservations. Safe to run concurrently.
-    Reconcile(ctx context.Context, scope ReconcileScope) error
-    // Describe reports current usage/limit for read APIs.
-    Describe(ctx context.Context, apiKeyID string) (QuotaStatus, error)
+    // Acquire charges one sandbox of the given footprint, or returns ErrQuotaExceeded (429).
+    // Unlimited keys are a no-op (zero Redis IO). Idempotent on the lockstring.
+    Acquire(ctx, req AcquireRequest) (Reservation, error)
+    // Release returns a charged sandbox. Idempotent. Issued with context.WithoutCancel.
+    Release(ctx, req ReleaseRequest) error
+    // Describe reports current per-dimension usage/limit for read APIs.
+    Describe(ctx, apiKeyID string) (QuotaStatus, error)
 }
+// AcquireRequest carries apiKeyID, namespace, lockstring, footprint{cpu,mem}, and the loaded QuotaSpec.
 ```
 
-`AcquireRequest` carries `apiKeyID, namespace, dims+amounts, QuotaSpec` (already loaded at auth time).
+The **anti-drift / removal controller** (leader-gated, §6.5) is not part of the request-serving interface; it lives in
+`pkg/cache` and shares the same Lua helpers.
 
 ### 6.1 Backend selection (pluggable, optional Redis)
 
-- **Redis configured** → `redisBackend`: full enforcement as below.
-- **Redis not configured** → `noopBackend`: `Acquire` returns a sentinel reservation (always allow), `Release` is a
-  no-op, `Describe` reports "unlimited". Additionally, setting a **non-empty** `QuotaSpec` at key create is
-  **rejected** with a clear error (so a quota is never silently ignored). Existing keys with a non-empty quota are
-  treated as unlimited (and the absence of enforcement is documented), since enforcement requires Redis.
+- **Redis configured** → `redisBackend`: full enforcement.
+- **Redis not configured** → `noopBackend`: `Acquire` always allows, `Release`/anti-drift are no-ops, `Describe` reports
+  "unlimited". Setting a **non-empty** quota at key create is **rejected** (§3.1) so a quota is never silently ignored.
 
-### 6.2 Redis keys (per limited key K)
+### 6.2 Redis keys (per limited key K; all hash-tagged `{K}`)
 
-| Redis key | Type | Writer | Meaning |
+| Redis key | Type | Writer(s) | Meaning |
 |---|---|---|---|
-| `q:committed:{K}` | int | version-guarded **apply** only (§6.5 sweep / §6.6 seed / §9 cold-rebuild) | committed CR count; a cached snapshot of apiserver truth |
-| `q:cver:{K}` | **decimal string** (opaque etcd `ResourceVersion`) | version-guarded **apply** only | the `ResourceVersion` watermark for that committed value (version guard); compared as an arbitrary-width decimal, never `tonumber` (§6.5) |
-| `q:resv:{K}` | ZSET (member=opID, score=acquire-time unix, Redis clock) | hot path (ZADD/ZREM); apply (ZREM only) | in-flight reservations not yet folded into committed |
-| `q:warm` | string | cold-rebuild (§9) | presence means Redis holds valid state; absence means total data loss / first boot |
-| `q:warmAt` | int (unix) | cold-rebuild (§9) | global settle deadline during a cold rebuild |
+| `q:live:{K}` | HASH | Acquire / anti-drift **add** (HSET+INCRBY); Release / event / anti-drift **remove** (HDEL+DECRBY) | field = **lockstring**, value = JSON `{"cpu":<m>,"mem":<MB>,"ts":<redis-unix>}`. Membership = the live set; `cpu`/`mem` are the authoritative per-sandbox charge decremented on removal; `ts` (Redis server clock at acquire) is the age source for the anti-drift remove gate (§6.5.2) |
+| `q:sum:cpu:{K}` | int | same ops (INCRBY/DECRBY) | Σ cpu footprint over `q:live:{K}` |
+| `q:sum:mem:{K}` | int | same ops (INCRBY/DECRBY) | Σ mem footprint over `q:live:{K}` |
 
-Live usage: **`live(K) = committed + ZCARD(resv)`**.
+`live(K)` per dimension: **count = `HLEN q:live:{K}`**, **cpu = `GET q:sum:cpu:{K}`**, **mem = `GET q:sum:mem:{K}`**.
 
-> **Redis topology — Phase 1 supports standalone or a Sentinel-managed primary only (a single logical keyspace); Redis
-> Cluster is NOT supported.** The acquire Lua (§6.3) and the apply Lua (§6.5) each span a **global** key
-> (`q:warm` / `q:warmAt`) together with **per-key** keys (`q:committed:{K}`, `q:resv:{K}`, `q:cver:{K}`). Under Redis
-> Cluster these are not guaranteed to hash to the same slot, so the multi-key scripts would fail with `CROSSSLOT`.
-> Supporting Cluster would require a hash-tag redesign co-locating every script's keys — but the global cold/warm barrier
-> is touched by *every* key's acquire, so co-locating it with all per-key keys forces all quota keys into one slot and
-> defeats sharding; that redesign is **deferred**. The client/config targets a single endpoint or a Sentinel master; a
-> Cluster topology is documented as unsupported (a Cluster client should be rejected or warned at startup).
+> **No global keys in Phase 1.** Because Phase 1 is fail-open (§9) there is **no** `q:warm`/`q:warmAt`/settle barrier.
+> Every Lua touches only per-`{K}` keys, so with the `{K}` hash-tag they co-locate in one slot — **Redis Cluster causes
+> no `CROSSSLOT`** here (standalone / Sentinel / Cluster are all structurally compatible in Phase 1; officially
+> testing/supporting Cluster is a separate call). The global cold/warm barrier returns only with the deferred
+> fail-closed posture, at which point the Cluster question reopens.
 
-**Writer separation is the foundation of correctness:** `committed`/`cver` are written *only* by the version-guarded
-reconcile apply; `resv` membership is *added* only by the hot path and *removed* by the hot path (release) or by reconcile
-(folding/freeing). This separation is what makes the inherently non-atomic "read apiserver → write Redis" reconcile safe
-(§7). "Writer" above means the *mutation pattern*: `committed`/`cver` move only through the version-guarded apply,
-regardless of whether that apply was triggered by the reconcile sweep (§6.5), a lazy seed (§6.6), or a cold-rebuild
-(§9) — the guard makes all of them mutually safe.
+**Sum/membership consistency** is guaranteed because **every** mutation changes the HASH field **and** the affected sums
+in the **same** Lua script — they are never written separately. This is a hard invariant (§16) and the only thing the
+sums depend on.
 
-**CR-visibility latency** is the maximum time from a successful `Acquire` to the created CR being observable in a
-**consistent** apiserver read. It is the admit→CR-write window only — *not* the full create-to-ready wait (which can be
-~unbounded under the unlimited server-side timeout), because the CR is written early and waiting-for-ready happens after.
-`Tgrace` (§6.5/§6.7) and the cold-rebuild settle window (§9) are both sized to exceed it, so it is small (sub-second to a
-few seconds), not minutes.
+### 6.3 Footprint
 
-### 6.3 Acquire (hot path) — atomic Lua
+The footprint charged for a sandbox is the sum over its containers of `requests.cpu` (millicores) and `requests.memory`
+(MB, ceil), computed from the **declared target spec at create** (the resources the sandbox will have, including any
+create-time `InplaceUpdate` to a pooled instance). It is read from the spec — **not** written to a CR annotation. It is
+stored in the `q:live:{K}` entry value and is **fixed for the sandbox's lifetime** (no post-create 变配 exists, §2), so
+removal decrements exactly what was charged with no drift and no update-event tracking. The anti-drift **add** path
+recomputes the identical footprint from the existing CR's spec (§5 primitive).
 
-```
--- KEYS[1]=q:committed:{K}  KEYS[2]=q:resv:{K}  KEYS[3]=q:warm
--- ARGV: opID, limit
-if redis.call('EXISTS', KEYS[3]) == 0 then return 'COLD' end          -- cold rebuild in progress / data lost
-if redis.call('EXISTS', KEYS[1]) == 0 then return 'NEED_SEED' end      -- key not seeded yet (see 6.6)
-local now = tonumber(redis.call('TIME')[1])                           -- Redis server clock — single source of time, skew-free
-local live = tonumber(redis.call('GET', KEYS[1])) + redis.call('ZCARD', KEYS[2])
-if live + 1 <= limit then
-    redis.call('ZADD', KEYS[2], now, opID)                           -- score = ACQUIRE TIME (Redis clock); the only age input for reconcile (6.5/6.7)
-    return 'OK'
-end
-return 'REJECTED'
-```
+Resource resolution: for an inline `Template`, read container `Resources` directly; for a `TemplateRef`, resolve the
+referenced `SandboxTemplate`. A shared `footprintOf(podSpec)` helper is used by both Acquire and anti-drift add.
 
-> **All reservation timing uses the Redis server clock, never a manager's clock.** The score is the acquire time from
-> `redis.call('TIME')`, and the reconcile's age test (§6.5/§6.7) compares `redis.call('TIME') - score > Tgrace` on that
-> same clock. This removes cross-manager skew: a skewed manager cannot stamp an already-"old" score that would let the
-> consistent-read free retire a still-live in-flight token. There is a **single** age threshold, `Tgrace` (no separate
-> "TTL"): a token is eligible for the absent+old free only when its age exceeds `Tgrace`. For that free to be safe,
-> **`Tgrace` must exceed the worst-case time from acquire to the created CR becoming visible in a consistent read**
-> (= the create-path CR-write *issue* deadline of §7 condition 4 **plus** the apiserver commit-visibility latency). See
-> §6.5 / §7 / Risk in §14 for the residual when apiserver commit latency pathologically exceeds this.
+### 6.4 Acquire (hot path) — atomic, multi-dimensional, idempotent
 
-> **No blind expiry on the hot path.** The acquire path never runs `ZREMRANGEBYSCORE`. The score is only an *age hint* for
-> the state-aware reconcile (§6.5/§6.7). Expiring a token blindly here would let admission remove the sole cover of an
-> *existing-but-not-yet-folded* CR whenever reconcile lags → `live < actual` → oversell. By never expiring on the hot
-> path, **reconcile being slow or down can only cause under-sell** (tokens linger, `live` stays high), never oversell.
-
-- **Unlimited keys**: `QuotaManager.Acquire` short-circuits before any Redis call (zero IO).
-- `OK` → proceed with create; `REJECTED` → HTTP **429**; `NEED_SEED` → seed this key then retry (§6.6);
-  `COLD` → fail-closed retryable error (503) — Redis lost state / is mid cold-rebuild (§9).
-- Redis transport error (timeout / connection refused) → **fail-closed** for limited keys (retryable 503/429); unlimited
-  keys are unaffected because they never call Redis.
-- The returned `opID` is stamped onto the CR via the existing `basicSandboxCreateModifier`, alongside the owner label, in
-  the **same** CR write (no extra round-trip, no infra interface change), e.g. annotation
-  `agents.kruise.io/quota-op-id`.
-- **`opID` MUST be globally unique and never reused** (e.g. a freshly generated UUIDv4 per `Acquire` that reaches the
-  `ZADD`). Correctness depends on it: the ZSET member, the `ZREM` on release, the fold-retire, and the CR annotation all
-  key off `opID`, so a collision or reuse could retire the wrong reservation (dropping a live CR's cover → oversell) or
-  fail to retire a stale one. A `NEED_SEED` retry that never reached `ZADD` leaves no token, so generating a new `opID`
-  on retry is safe.
-
-### 6.4 Release rule (must avoid under-counting a created CR)
-
-Release means `ZREM q:resv:{K} opID`. It is issued with `context.WithoutCancel(ctx)` so client cancellation cannot skip
-it. **Release is only safe when the create provably did NOT create a CR.**
-
-The classifier must be **conservative and concrete**, not a heuristic on error strings:
-
-- **Provably no CR — release.** The failure occurred *strictly before* the claim/clone code issued the CR-create
-  (`Create`/`Update`) call to the apiserver — e.g. template/checkpoint lookup failure, validation rejection, or a
-  pre-write context error. The create path knows this positionally (it has not yet reached the write call), so it can set
-  a definitive `crWriteAttempted=false` flag. Only then is `Release` issued.
-- **Everything at or after the CR-create call — do NOT release** (default). This includes timeouts, transport errors, and
-  any ambiguous outcome once the write call was issued, even if it appears to have failed (the apiserver may have
-  committed the object before the response was lost). The reservation is left in place and resolved by:
-  (a) reconcile folding it once the CR is observed present, or (b) reconcile's consistent-read **absent + old** free once
-  the CR is confirmed never to have appeared (§6.5/§6.7). Erring this way biases to a transient over-count (under-sell);
-  the opposite error (releasing a token whose CR exists, before it is folded) would cause `live < actual` → oversell
-  (§7 condition 3).
-
-### 6.5 Reconcile (correction) — single-snapshot, version-guarded apply
-
-The reconcile reads the cluster, then applies to Redis. Because a distributed system cannot stop-the-world between the
-read and the write, correctness relies on **(a)** writer separation (§6.2) and **(b)** a monotonic version guard.
+Single Lua, run on **every** replica (Redis is the serialization point; no leadership on the hot path):
 
 ```
-snapshot S of owner K:  C = count, opIDsPresent = {opID on each CR in S}, ver = snapshot ResourceVersion
-freeable = { opID in q:resv:{K} : opID NOT in opIDsPresent AND (redisTIME - score) > Tgrace }  -- age via Redis TIME; ONLY when S is a consistent read (§7)
-
--- apply (atomic Lua):
--- KEYS[1]=q:committed:{K} KEYS[2]=q:cver:{K} KEYS[3]=q:resv:{K}
--- ARGV: C, ver, mayCreate(1=consistent read, 0=informer/fast), [opIDs to retire (folded)], [opIDs to free]
--- `ver` is the List collection-level ResourceVersion: an OPAQUE NON-NEGATIVE DECIMAL STRING. It is compared as an
--- arbitrary-width decimal — NEVER tonumber: Lua numbers are doubles, so any RV > 2^53 loses precision, and the K8s
--- contract forbids treating RV as a number. Compare = validate decimal -> strip leading zeros -> length, then
--- lexicographic. Any non-decimal value fails safe (apply skipped, committed never written).
-local function isdec(s) return s ~= nil and s ~= false and string.match(s, '^%d+$') ~= nil end
-local function rvcmp(a, b)                            -- a,b already validated decimal; returns -1 / 0 / 1
-    a = string.gsub(a, '^0+(%d)', '%1'); b = string.gsub(b, '^0+(%d)', '%1')
-    if #a ~= #b then if #a < #b then return -1 else return 1 end end
-    if a < b then return -1 elseif a > b then return 1 else return 0 end
-end
-if not isdec(ver) then return 'SKIPPED_BADVER' end                                 -- malformed snapshot RV → never write committed
-local cver = redis.call('GET', KEYS[2])
-if cver == false then                                                              -- no watermark yet (key not seeded)
-    if mayCreate == 0 then return 'SKIPPED_UNSEEDED' end                           -- fast read MUST NOT create the first committed (6.5 / Risk 3)
-else
-    if not isdec(cver) then return 'SKIPPED_BADVER' end                            -- corrupt stored watermark → fail safe, do not overwrite
-    if rvcmp(ver, cver) <= 0 then return 'SKIPPED' end                             -- stale or equal snapshot → drop whole apply
-end
-redis.call('SET', KEYS[1], C)
-redis.call('SET', KEYS[2], ver)
-for _, op in ipairs(folded) do redis.call('ZREM', KEYS[3], op) end                 -- retire reservations now in committed
-for _, op in ipairs(freeable) do redis.call('ZREM', KEYS[3], op) end               -- GC leaked reservations (consistent only)
-return 'APPLIED'
+-- KEYS[1]=q:live:{K}  KEYS[2]=q:sum:cpu:{K}  KEYS[3]=q:sum:mem:{K}
+-- ARGV: lockstring, footCpu, footMem, limCount, limCpu, limMem   (-1 == unlimited for a dimension)
+if redis.call('HEXISTS', KEYS[1], lockstring) == 1 then return 'OK' end        -- idempotent re-entry: already charged
+local cnt = redis.call('HLEN', KEYS[1])
+local sc  = tonumber(redis.call('GET', KEYS[2]) or '0')
+local sm  = tonumber(redis.call('GET', KEYS[3]) or '0')
+if limCount >= 0 and cnt + 1      > limCount then return 'REJECTED' end         -- multi-dim: ALL must fit
+if limCpu   >= 0 and sc + footCpu  > limCpu   then return 'REJECTED' end
+if limMem   >= 0 and sm + footMem  > limMem   then return 'REJECTED' end
+local now = redis.call('TIME')[1]                                              -- Redis server clock (skew-free) for entry age
+redis.call('HSET',   KEYS[1], lockstring, cjson.encode({cpu=footCpu, mem=footMem, ts=now}))
+redis.call('INCRBY', KEYS[2], footCpu)
+redis.call('INCRBY', KEYS[3], footMem)
+return 'OK'
 ```
 
-`mayCreate` is **1 only for a consistent read** (lazy seed §6.6, slow reconcile, cold-rebuild) and **0 for the fast
-informer-backed reconcile**. This closes the "stale first write" hole: the version guard prevents a stale snapshot from
-*overwriting* a fresher `committed`, but it cannot stop an informer-stale cache from writing the *very first* `committed`
-too low (no prior `cver` to compare) and thereby suppressing the consistent seed (`NEED_SEED` only fires while
-`q:committed` is absent). So the **initial** `committed` for any key is always established by a lag-free consistent read;
-fast reconcile may only *update* an already-seeded key.
+- **Unlimited key** (no `QuotaSpec`, or every limit nil) → `QuotaManager.Acquire` short-circuits before any Redis call
+  (zero IO) — the majority of the 2500/sec.
+- `OK` → proceed with create; the lockstring is the one already stamped on the CR (`LockSandbox`), so no extra CR write.
+- `REJECTED` → HTTP **429**, returned **immediately with no retry** (the create path must not loop on a quota miss; a
+  pooled sandbox tentatively picked before the charge must be returned to the pool — see §10).
+- **Idempotent re-entry:** a retry with the same lockstring finds the field present → `OK` without double-charging. Sums
+  only move on the first commit.
+- **Redis transport error / unreachable** → **fail-open** (treat the key as unlimited for this request; allow). Phase 1
+  default; a config knob to fail-closed instead is deferred (§9).
+- **Quantization:** values are integers; an unlimited dimension passes `-1`.
 
-Two cadences feed the same apply:
+### 6.5 Removal — eager, pre-emptive, event-driven, and a leader backstop
 
-- **Fast reconcile (informer-backed, cheap, frequent):** owner-CR add/delete events (and a short periodic tick) decide
-  *which* keys to reconcile — that change-detection may use the cheap owner-index. But the apply's `(C, opIDsPresent, ver)`
-  MUST come from **one cached `List(MatchingLabels{owner=K})`** served from the informer cache (no apiserver round-trip),
-  because a `List` carries a collection-level `ListMeta.ResourceVersion` (the cache's synced etcd revision) while a bare
-  index counter does not. That cache RV is a valid, comparable watermark (§6.5 note). **If a comparable collection RV
-  cannot be obtained for a read path, that path MUST NOT apply** — it defers to the slow (consistent) reconcile rather
-  than writing `committed` without a sound `ver`. Fast reconcile applies with **`mayCreate=0`**: it may only *update* an
-  already-seeded key, never establish the first `committed` (Risk 3). It **only folds** present opIDs (never frees absent
-  ones — the informer may lag behind apiserver on creates, so "absent from the informer" does not imply "absent from
-  apiserver"). Folding from a possibly-stale-but-RV-stamped cache list is safe: a lower cache RV is simply skipped by the
-  guard, and an informer that still shows a just-deleted CR only over-counts (under-sell).
-- **Slow reconcile (consistent read, anti-drift / GC, less frequent):** `GetAPIReader().List(MatchingLabels{owner=K})`
-  is lag-free, so its `S` is authoritative; it applies with **`mayCreate=1`**. It re-seeds `committed` exactly **and**
-  frees `q:resv` tokens whose opID is absent from `S` and whose age exceeds `Tgrace` (creates that failed or whose CR was
-  already deleted before folding). **Safety of the free rests on `Tgrace` exceeding the acquire→consistent-visible bound**
-  (§6.3): a token absent from a lag-free read could still belong to a create whose CR-create call was *issued* but whose
-  apiserver commit is merely slow; freeing it before that commit becomes visible would drop a live CR's cover. `Tgrace` is
-  sized above the issue deadline **plus** the apiserver commit-visibility latency; the residual when commit latency
-  pathologically exceeds that is documented (§7, §14).
+Release means an atomic, idempotent Lua that reads the entry's stored footprint and removes it:
 
-Both cadences are **idempotent and safe to run concurrently** (multiple replicas, or a leadership handoff window): the
-version guard drops any apply built from a staler snapshot, in whole (both the `committed` write and the `ZREM`s are
-skipped together), so a stale writer can never erase a fresher writer's folds.
+```
+-- KEYS as above; ARGV: lockstring
+local v = redis.call('HGET', KEYS[1], lockstring)
+if not v then return 0 end                                                     -- already gone → no-op (idempotent)
+local f = cjson.decode(v)
+redis.call('HDEL',   KEYS[1], lockstring)
+redis.call('DECRBY', KEYS[2], f.cpu)
+redis.call('DECRBY', KEYS[3], f.mem)
+return 1
+```
 
-> **`ver` MUST be the List's collection-level `ResourceVersion`** (the etcd global revision returned in
-> `ListMeta.ResourceVersion`), **not** a per-object `resourceVersion` and not a wall-clock/logical counter. The etcd
-> revision is a single monotonic sequence, so values from the cached client (fast reconcile) and from `GetAPIReader`
-> (slow reconcile / seed / cold-rebuild) are mutually comparable, and a higher `ver` always means a strictly more recent
-> view. The guard's correctness — and therefore the whole no-oversell argument under concurrent/handoff reconcilers —
-> depends on this. `C` and `opIDsPresent` MUST be derived from the *same* List response that produced `ver` (one
-> snapshot), so the count and the folded set are always mutually consistent. Equal `ver` is treated as stale (`<=`),
-> which is safe because identical revisions imply identical state.
->
-> **`ver`/`cver` are compared as opaque, arbitrary-width decimal strings — never `tonumber`/int64/float.** A
-> `ResourceVersion` is opaque by the K8s contract and an etcd revision can exceed 2^53, which a Lua double would silently
-> truncate, corrupting the guard. The apply Lua validates each as a decimal, strips leading zeros, and compares by length
-> then lexicographically; a malformed/non-decimal value fails safe (`SKIPPED_BADVER`, `committed` never written). The
-> **Go** side likewise passes the raw `ListMeta.ResourceVersion` string straight through to the Lua and **never
-> `ParseInt`s** it; if it must order RVs outside the Lua it uses a client-go helper or the same arbitrary-width decimal
-> comparison.
+A sandbox's slot is freed as soon as its deletion is **requested or proven** — we do **not** wait for the CR to become
+invisible. Paths, fastest first (all idempotent, safe to overlap):
 
-### 6.6 Seed (lazy, per new key / cold-rebuild)
+1. **Create failure → eager Release** (replica handling the create). Unlike rev1's conservative "release only if provably
+   pre-CR", rev2 releases on **any** create failure rather than depend on the backstop. If the CR was in fact committed,
+   the bidirectional anti-drift **re-adds** it within grace (§6.5.2) — so an over-eager release self-heals; the
+   trade is a transient over-admission, bounded by grace.
+2. **Manager `DELETE /sandboxes/{id}` → pre-emptive Release** (replica handling the delete). The slot returns to the key
+   immediately, before the CR is gone. If the delete then fails/stalls, anti-drift behaviour is governed by the
+   live-CR rule below.
+3. **Leader informer event** (covers non-manager deletions — TTL, `kubectl`, controller-driven): on a Sandbox owner-CR
+   event where the CR transitions to **not** `isLiveForQuota` (deletion-requested / terminating) or is truly deleted →
+   Release that lockstring. Runs **only on the leader** (`IsPrimary()`); idempotent w.r.t. paths 1–2.
+4. **Leader anti-drift backstop** (§6.5.2): removes entries with no live CR after grace.
 
-When `Acquire` returns `NEED_SEED` (`q:committed` absent while `q:warm` present, i.e. Redis is healthy and this key has no
-committed value yet — a freshly-created limited key, or a key being lazily re-seeded after a cold-rebuild §9; **Phase 1
-has no quota `PATCH`, so there is no "invalidated/re-limited" case** — see §6.8), the handling replica performs a
-**consistent read** for that
-key and runs the **apply** with the read's `C`/`ver`, **`mayCreate=1`**, and empty fold/free lists, then retries
-`Acquire`. This is version-guarded like any other apply, so it is safe even if the reconciler seeds the same key
-concurrently. The single `Acquire` that observed `NEED_SEED` is briefly fail-closed (one consistent read) for that one
-key only. Because `mayCreate=1` is reserved for consistent reads (§6.5), the *first* `committed` of a key is always
-lag-free, never an informer-stale value.
+#### 6.5.1 Why "deletion-requested = freed" is safe and bounded
 
-### 6.7 Reservation retirement (handles small-limit high-churn — safely)
+A pre-emptively-released sandbox that is stuck `Terminating` still physically exists until GC, so for the window between
+delete-request and true deletion a key can have `actual > live` (e.g. a stuck-terminating pod plus a freshly created
+replacement). This is the deliberate trade for low-latency reclamation (§16). It is **bounded** by the number of
+concurrently terminating sandboxes and resolves when they truly disappear. The anti-drift **add** path does **not**
+resurrect such entries (it only adds entries for `isLiveForQuota` CRs), so it never fights an intended deletion.
 
-Every retirement path is **state-aware**: a token is removed only when its CR is known to be either *folded into committed*
-or *truly gone from the cluster*. A token is **never** removed merely because the manager *initiated* a delete or because
-a timer fired — the CR can outlive the delete request (`Dead`-but-not-yet-GC still occupies a slot, §5), so removing its
-token early would drop the sole cover of a still-existing CR (`live < actual` → oversell). Paths, fastest first:
+#### 6.5.2 Bidirectional anti-drift (leader-gated controller in `pkg/cache`)
 
-1. **Create provably produced no CR** → immediate `Release` (§6.4).
-2. **CR truly deleted** → the informer **delete event** for an owner-labelled Sandbox CR carries the object (with its
-   `opID` annotation). The handler does two things: (i) `ZREM`s that `opID` (releases the token when the CR had **not** yet
-   been folded), **and** (ii) **enqueues a per-owner fast reconcile** for K (§6.5). Step (ii) is essential for small-limit
-   high-churn: if the CR had **already** been folded into `committed`, its token is gone and the `ZREM` is a no-op, so only
-   a **recount** can lower `committed` and free the slot. Routing the delete event into the fast reconcile makes that
-   recount happen at event speed; without it a folded-then-deleted CR would hold its slot until the next *slow* sweep
-   (~1 min), starving a tiny-limit key. Both steps fire only when the CR is actually gone (`actual` has already dropped),
-   so both are safe; neither is triggered by `DELETE /sandboxes/{id}` initiation — only by observed deletion. Idempotent
-   across replicas that each see the event. (A missed event — e.g. replica restart — is backstopped by path 3.)
-3. **Reconcile fold** (CR present in snapshot → folded into committed, then `ZREM`) and **reconcile free** (CR absent +
-   token age > `Tgrace`, **consistent read only**) (§6.5). Free covers failed creates that never produced a CR and any
-   delete event that was missed.
-4. **Acquire-time score** — not a blind expiry. The score (Redis `TIME` at acquire) is purely the age input to path 3's
-   "older than `Tgrace`" test; there is no separate TTL and no hot-path expiry. If every reconcile/informer path is dead,
-   tokens simply linger (under-sell + bounded memory growth), never oversell.
+This is the **single** correction primitive; it makes drift in **either** direction self-heal. Critical: in an
+incremental live-set model the backstop must be **bidirectional** — a "remove-only" GC would let a lost entry (Redis
+restart / async-failover / rollback that drops an entry whose CR exists) undercount **forever**, since nothing re-adds
+it → permanent oversell. So:
 
-**Memory / availability note (addresses the churn-masking concern):** because freeing is state-aware, live-token count is
-bounded by `create-rate × fold-latency` and stale-token count by `churn × observation-latency`, both small under a healthy
-reconcile/informer. If reconcile lags, tokens accumulate → `live` inflates → **over-reject (under-sell)**, masking real
-headroom and growing Redis memory — an *availability* regression, not an oversell. Monitor reconcile lag and `q:resv`
-cardinality; alert when either exceeds a budget.
+- **Remove (leaked entry → free):** for a lockstring present in `q:live:{K}` whose CR is **not** `isLiveForQuota` (gone,
+  or deletion-requested/terminating) **and** whose entry age (`now − entry.ts`, both on the Redis clock) `> grace` →
+  Release. Frees failed-create leftovers and any delete the event handler missed. The age gate guards against removing a
+  charge whose CR is merely lagging in a (warm-informer) read.
+- **Add (missing entry → charge):** for a CR of owner K that **is** `isLiveForQuota`, whose lockstring is absent from
+  `q:live:{K}`, and whose CR `CreationTimestamp` age `> grace` → add via the **same** Acquire-add Lua **without** the
+  limit checks (anti-drift reflects reality; it cannot reject an existing sandbox). Heals lost entries.
 
-### 6.8 Quota lifecycle: immutable after create; key-deletion cleanup
+Both directions are **per-lockstring, idempotent** (HEXISTS / HGET guards), so they are safe to run concurrently with
+the hot path and with a flapping leader, and require **no version guard**.
 
-**Phase 1 makes a key's `QuotaSpec` immutable after creation — there is no quota `PATCH` endpoint (§11).** This is a
-deliberate scope decision that *eliminates by construction* the only normal-operation oversell this design would otherwise
-have: the **`unlimited → limited` transition race**. That race was: while a key is unlimited the hot path bypasses Redis
-(§10), so no `q:committed:{K}` is maintained; if the key were later re-limited, a replica still holding a **cached**
-`unlimited` `QuotaSpec` would keep creating CRs that carry **no reservation token** and are **absent from any seed
-snapshot**, while a freshly-limited replica admits against a `live` that is short by exactly those CRs → `actual > limit`.
-That is a routine PATCH-flow oversell (not one of the rare §7.1 residuals), and the cache-propagation window makes it
-likely rather than rare.
+- **Grace = 10 minutes** (§16), comfortably above the ~1-minute worst-case apiserver lag, so a just-created CR is never
+  mistaken for "absent" and a just-released slot is never mistaken for "missing".
+- **Cadence / cost:** the *remove* direction is driven primarily by the leader's informer **events** (path 3) at event
+  speed; the periodic full **bidirectional diff** is an **infrequent** backstop (minutes) reading the leader's **warm
+  informer** (no apiserver `List` in steady state). A lag-free `GetAPIReader().List(MatchingLabels{owner=K})` is used
+  only for the **initial rebuild** of a key (or after a detected Redis loss) — this is the only place a consistent
+  cluster read happens, and it is rare. This directly addresses the 500k-scale `List` cost: the expensive read is no
+  longer on every tick.
 
-By forbidding post-create quota changes, a key's enforcement mode is fixed at birth and **no replica ever holds a stale
-view of it**:
+> Using the warm informer for the steady-state diff is safe because both error directions are self-correcting and
+> grace-protected: an informer lagging on a **create** (CR exists, not yet in cache) just defers the add; an informer
+> lagging on a **delete** (CR gone, still in cache) just defers the remove — both converge on the next pass.
 
-- A key created **limited** is enforced from its first `Acquire`. A brand-new key owns zero sandboxes, so its lazy seed
-  (§6.6) reads `C = 0` from a consistent read and every subsequent create goes through `Acquire`; there is no prior
-  unlimited interval to leave a stale `q:committed`.
-- A key created **unlimited** stays unlimited; the hot path always bypasses Redis for it and `q:committed:{K}` is never
-  created or trusted.
-- A replica that has **not yet** observed a newly-created key resolves it as *unknown* (auth failure), **never** as
-  "unlimited". So there is no window in which one replica treats a limited key as unlimited.
+### 6.6 New keys need no seed
 
-To change a key's quota in Phase 1, create a **new** key with the desired quota; existing keys' quotas do not change.
+A brand-new limited key provably owns **zero** sandboxes, so an absent `q:live:{K}` legitimately means count 0 / sums 0
+— `Acquire` simply starts charging from empty. There is **no** `NEED_SEED` round-trip and no per-key consistent read on
+the cold path (rev1's lazy seed is deleted). The only case where an absent/short hash does **not** mean "truly zero" is a
+Redis data loss for an already-active key; that is handled by fail-open + the leader rebuild (§9), the same bounded
+self-healing envelope, not by a per-acquire seed.
 
-> **Future-work constraint (if a quota `PATCH` is ever added):** it MUST ship with a safe-activation scheme, because the
-> `unlimited → limited` transition above oversells otherwise. Two viable schemes: **(a) an activation window** — `PATCH`
-> records the new limit with an `effectiveAfter = now + (key-cache propagation bound + CR-write issue deadline +
-> commit-visibility margin)`; until `effectiveAfter` every replica still treats the key as unlimited, and seed/`Acquire`
-> begin only after it, so the seed's consistent read counts all CRs created during the window; or **(b) forced
-> cross-replica `QuotaSpec` cache invalidation** with all-replica refresh confirmed as a precondition to enabling
-> enforcement. Neither is in Phase-1 scope.
+### 6.7 Key-deletion cleanup
 
-**Key-deletion cleanup.** When an API key is deleted (§11), the handler issues a **best-effort** `DEL q:committed:{K}`,
-`q:cver:{K}`, `q:resv:{K}`. Key IDs are fresh UUIDs and never reused, so a stale per-key Redis entry is only harmless
-garbage; cleaning it bounds Redis memory. Failure of this `DEL` is **non-fatal** (logged, not retried on the hot path).
+On API-key delete (§11): best-effort `DEL q:live:{K}`, `q:sum:cpu:{K}`, `q:sum:mem:{K}`. Key IDs are fresh,
+never-reused UUIDs, so a missed cleanup is only harmless garbage. Failure is **non-fatal** (logged, not retried on the
+hot path).
 
-## 7. Correctness: `live >= actual` (no oversell)
+### 6.8 Quota lifecycle: immutable after create
 
-Admission grants iff `live + 1 <= limit`. Since `actual` (the count of existing owner-K CRs, the quantity being capped)
-satisfies `actual <= live` at every admission instant, granting implies `actual + 1 <= limit`, i.e. no oversell.
+A key's `QuotaSpec` is **immutable after creation — there is no quota `PATCH`** (§11). This eliminates by construction
+the only normal-operation oversell this design would otherwise have, the **`unlimited → limited` transition race**
+(rev1's most likely oversell): while unlimited the hot path bypasses Redis, so a later re-limit would leave CRs created
+by a stale-`unlimited` replica uncharged while a fresh-`limited` replica admits against a short `live`. By fixing the
+mode at birth:
 
-`live = committed + ZCARD(resv) >= actual` holds because **every existing CR is continuously covered by `committed` or a
-reservation token**, with a seamless handoff:
+- A key created **limited** is enforced from its first `Acquire`; it owns zero sandboxes at birth (§6.6), so there is no
+  prior unlimited interval leaving uncharged CRs.
+- A key created **unlimited** stays unlimited; the hot path always bypasses Redis for it.
+- A replica that has not yet observed a newly-created key resolves it as **unknown** (auth failure), never as
+  "unlimited" — so no replica ever holds a stale `unlimited` view of a limited key.
 
-| CR phase | covered by | in `actual`? | `live` vs `actual` |
-|---|---|---|---|
-| admitted, CR not yet written | token | no | over (safe) |
-| CR written, not yet folded | token | yes | exact |
-| reconcile fold (atomic: `SET committed=C` ∧ `ZREM opID`, same snapshot) | handoff instant | yes | no gap |
-| folded | committed | yes | exact |
-| CR deleted, before next reconcile | committed (stale-high) | no | over (safe) |
+To change a key's quota, create a **new** key. A future `PATCH` MUST ship a safe-activation scheme (activation window, or
+forced cross-replica `QuotaSpec` cache invalidation) — deferred.
 
-The invariant rests on four conditions the implementation must enforce. Each was a way the original draft could oversell;
-they are now requirements, not discretion.
+## 7. Correctness
 
-1. **Version-guarded single-snapshot apply, watermarked by the etcd revision.** Each apply derives `C` and the
-   retired/freed opIDs from one List response and writes them atomically under the `q:cver` guard, where `ver` is that
-   List's collection-level `ResourceVersion` (§6.5 note). A staler apply is skipped wholesale, so a fresh writer that
-   folded CRs 9–10 (committed=10, tokens removed) can never be overwritten by a stale writer (committed=8) that did not
-   observe them — which would otherwise leave 9–10 in neither committed nor resv. This is what makes the non-atomic,
-   leaderless, possibly concurrent (and handoff-window) reconcile safe with no stop-the-world. **Freeing absent tokens is
-   permitted only from a consistent read**, never from the lagging informer (informer-absent ≠ apiserver-absent → would
-   drop a live CR's token → oversell).
-2. **A token is never removed while its CR still exists (no blind expiry).** The token is the sole cover during "CR
-   written, not yet folded." Tokens are removed only by state-aware paths (§6.7): fold (committed then covers),
-   true-deletion event (CR gone), consistent-read absent+old free, or provable pre-CR release (CR never created). The hot
-   path runs **no** `ZREMRANGEBYSCORE`, so a slow or dead reconcile causes only under-sell (tokens linger), never the
-   oversell that blind expiry would have caused. The **absent+old free** carries one bounded assumption: "absent from a
-   consistent read **and** age > `Tgrace`" is taken to mean "this create produced no CR." That is true only if `Tgrace`
-   exceeds the acquire→consistent-visible bound (the CR-write *issue* deadline plus apiserver commit-visibility latency,
-   §6.3). If apiserver commit latency *pathologically* exceeds that — a create whose write call was issued, then its
-   object commits later than `Tgrace` after acquire — the free can retire a token whose CR is about to appear → a
-   **bounded, self-healing steady-state residual** (the CR, once visible, is folded; `committed` catches up; the
-   over-admission persists only until churn). This is the same class as the total-loss residual of condition 4 and is
-   likewise closeable only by apiserver-side fencing (out of scope). With `Tgrace` sized well above normal commit latency
-   (minutes), it requires extreme apiserver overload.
-3. **Release only when the CR provably does not exist** (§6.4, conservative positional classifier), and **cold Redis →
-   fail-closed** (§9). Releasing the token of a CR that actually got created before reconcile folds it would cause
-   `live < actual`; admitting against a wiped Redis would too. Both are forbidden; errors bias to over-count.
-4. **Reservation durability bounds the "lost token while its CR is created" window.** A reservation can be lost while its
-   create still writes a CR in two cases, each handled:
-   - **Redis failover.** With *asynchronous* replication, a primary can ack a `ZADD` that the promoted replica never
-     received; `committed` survives but the token is gone, so the created CR is uncovered until reconcile folds it →
-     a real (bounded, but persisting) oversell. This is governed by a **configurable knob, default off (async)**:
-     - **Knob off (default):** failover degrades to the same bounded, self-healing residual as cold-loss (mopped by
-       reconcile, but a persisting over-admission until churn). Chosen as the default for hot-path latency.
-     - **Knob on (strict across failover):** the acquire follows `ZADD` with `WAIT <numreplicas> <timeout>`. On `WAIT`
-       success → proceed; on `WAIT` timeout (the token is on the primary but not yet durable on a replica) → `ZREM` the
-       just-added token and fail-closed (503), so an un-replicated reservation is never relied upon. **`WAIT` alone is not
-       sufficient — `<numreplicas>` must cover every *electable* replica**, or the topology must guarantee that only a
-       replica that acked the write can be promoted (e.g. `min-replicas-to-write` + a failover policy that elects only
-       caught-up replicas). Otherwise a `WAIT 1` ack on replica R1 does not prevent promotion of R2 (which missed the
-       token) → `live < actual`. A single un-replicated instance can never be strict (see Partial Redis rollback, §9).
-       Cost: a replica-ack RTT on limited-key acquire, and acquire fails-closed while replicas lag or are down (an
-       availability dip, still under-sell, never oversell).
-   - **Total data loss + a create whose CR commits after the settle window.** Handled by the cold-rebuild settle (§9)
-     **only if** the admit→CR-write window is bounded. The create path enforces a deadline of CR-visibility latency on
-     **issuing** the `Create`/`Update` call: if the budget is exhausted it must **not issue** the call. This is the only
-     part the client can enforce — **once the call is issued, the apiserver may commit the object regardless of a
-     client-side timeout**, so "abort without writing" is *not* achievable post-issue. Therefore the residual is precisely:
-     a create whose write call was issued just before total loss and whose object the apiserver commits *after* the
-     `settle`/seed read. It is bounded by the in-flight creates at the loss instant and self-healing (reconcile folds them,
-     no further oversell). Closing it to a hard zero would require **apiserver-side fencing** — e.g. a validating webhook
-     that rejects a Sandbox create whose `opID`/reservation is expired or unknown — which is **out of Phase-1 scope**. So:
-     strict no-oversell holds for normal operation; total-data-loss carries this one bounded, self-healing residual by
-     design. `settle` and `Tgrace` must exceed the issue deadline.
+Per dimension, admission grants iff `live + charge <= limit`, computed and committed **atomically** in the Acquire Lua.
+While Redis is healthy, at the instant of every admission `live` equals the exact charged set, so a grant cannot exceed
+the limit — **strict enforcement at admit**.
 
-Implicit precondition A: **every path that stamps `owner=K` onto a CR goes through `Acquire`** (so the CR gets a token
-before it exists). Phase 1 stamps owner only on the E2B create paths (claim/clone), which all go through `Acquire`.
+The whole-system invariant is **convergence**: the Redis live set converges to the cluster's set of **live** owner-K CRs
+(by lockstring), with `q:sum:*` equal to the Σ of their footprints. This rests on:
 
-Implicit precondition B (**owner-label backfill is a hard prerequisite, not lazy**): the seed / cold-rebuild / anti-drift
-consistent reads filter by the owner **label** (§5.1), so any owner CR lacking the label is invisible to them and would
-be undercounted → oversell for keys that owned sandboxes before rollout. Enforcement for a key MUST NOT be enabled until
-all of its existing owner CRs carry the label. Concretely: run the one-time backfill (label every existing Sandbox from
-its `AnnotationOwner`) and confirm completion **before** turning quota enforcement on; until then a key with pre-existing
-unlabelled CRs is treated as unlimited. (The informer index reads the annotation and so counts them, but the
-strict-correctness paths use the label, hence the prerequisite.)
+1. **Per-lockstring idempotent, per-op atomic mutation.** Every Redis write is one Lua script (or one idempotent
+   command) keyed by a stable lockstring and guarded by `HEXISTS`/`HGET`. Aggregates (`HLEN`, sums) move **only** through
+   these guarded ops. Therefore concurrent acquires, retries, leadership handoff, and double-fired releases (pre-emptive
+   + event) all converge — **no version guard, no stop-the-world.**
+2. **Bidirectional anti-drift (§6.5.2).** Every divergence is corrected within `grace`: a CR with no entry is added; an
+   entry with no live CR is removed. This is what keeps lost entries (Redis restart / failover / rollback) from
+   undercounting permanently — the rev2 property a remove-only GC would lack.
+3. **Sum/membership co-mutation (§6.2).** Sums never drift from membership because they are always changed in the same
+   script.
+4. **Deletion-requested = freed (§6.5.1).** A CR that is not `isLiveForQuota` (deletion-requested/terminating) does not
+   count; anti-drift add only considers `isLiveForQuota` CRs, so it never fights a deletion.
 
-Drift, when it occurs within these conditions, is always toward **over-count → under-sell**, and self-heals at the next
-reconcile.
+### 7.1 Honest no-oversell statement
 
-### 7.1 No-oversell guarantee (the honest, consolidated statement)
+- **Redis healthy:** enforcement is **strict at admit** — a grant never exceeds the limit at the moment it is made.
+- **Transients within `grace` (10 min), bounded and self-healing:**
+  - *Eager/pre-emptive release of a CR that actually exists* → transient over-admission until anti-drift re-adds. Bounded
+    by in-flight create-failures / stuck-terminating sandboxes.
+  - *Leaked entry (failed create that did charge)* → transient over-rejection (under-sell) until anti-drift removes.
+  - *Lost Redis entries (restart/failover/rollback) while the key stays active* → transient over-admission until the
+    leader rebuild/diff re-adds; **fail-open** means the gap is "unenforced", not "rejected".
+- **Redis unavailable (Phase 1 default = fail-open):** limited keys are **temporarily unenforced** (treated as
+  unlimited). This is an explicit availability-over-enforcement choice; oversell during the outage is bounded by the
+  outage's create volume and self-heals once Redis returns and anti-drift rebuilds. A fail-closed posture (reject during
+  outage) is the deferred alternative (§9).
 
-This is the precise scope of "no oversell" — stated plainly so it is not over-claimed:
+In short: **strict at admit while Redis is healthy; bounded, self-healing, documented transients otherwise; fail-open by
+default.** This matches the product intent (prefer availability; never *unbounded* oversell) given the chosen
+architecture (cluster = ground truth, Redis = exact live cache, no per-op fencing).
 
-- **Under normal operation** (healthy apiserver + healthy Redis), and **across Redis failover when the strict knob is on**
-  with a correct topology, the design is **strictly 0-oversell**: `actual` never exceeds `limit`.
-- It is **not** absolutely 0-oversell under every failure. Three **rare, bounded, self-healing** residuals remain, each
-  documented above and accepted (per the product decision to not add apiserver-side fencing):
-  1. **Total Redis data loss** + a create whose CR-create call was issued just before the loss and commits *after* the
-     cold-rebuild seed read (§7 cond. 4, §9).
-  2. **Default async failover / partial Redis rollback** that drops un-replicated `resv` while `committed` survives
-     (§7 cond. 4, §9). The strict knob closes this sub-case; default config accepts it.
-  3. **Pathological apiserver commit latency** exceeding `Tgrace`, letting the absent+old free retire a token whose CR is
-     about to appear (§7 cond. 2, §6.5).
-- Each residual is **bounded** by the number of in-flight creates at the failure instant, **self-heals** as reconcile
-  folds the affected CRs (no further oversell; the over-admission persists only until churn frees a slot), and never
-  produces unbounded oversell.
-- The single mechanism that would collapse all three to **absolute** 0 is **apiserver-side fencing** (a validating webhook
-  rejecting a Sandbox create whose reservation is expired/unknown). It is **deliberately out of scope**; it remains a
-  clean future hardening if absolute 0 under these failure intersections is ever required.
+Implicit precondition: **every path that stamps `owner=K` onto a CR goes through `Acquire`** (so the charge precedes the
+CR). Phase 1 stamps owner only on the E2B create paths (claim/clone), which all go through `Acquire`.
 
-In short: **strict 0 in the common case; bounded, self-healing, documented residuals only under specific rare failure
-intersections.** This faithfully implements the product intent ("prefer under-sell, never unbounded oversell") given the
-chosen architecture (apiserver = ground truth, Redis = cache, no per-op fencing).
+## 8. Generic "primary manager" leadership
 
-## 8. Generic "primary manager" leadership (efficiency, decoupled from quota)
+The hot path (`Acquire`/`Release` paths 1–2) runs on **all** replicas. Only the leader-side removal/anti-drift
+(§6.5 paths 3–4) benefits from running once.
 
-The hot-path `Acquire`/`Release` run on **all** replicas (Redis is the serialization point — no leadership needed). Only
-the **steady-state reconcile sweep** benefits from running once instead of N times.
+- `SandboxManager` gains a **generic** `IsPrimary() bool`, backed by a single `coordination.k8s.io/Lease`
+  (`sandbox-manager-primary`) via the vendored `client-go/tools/leaderelection` — intentionally not coupled to quota, so
+  any future singleton task can gate on it.
+- The quota anti-drift controller (in `pkg/cache`, via `CacheSandboxCustomReconciler` + `AddReconcileHandlers`) and its
+  periodic diff run only while `IsPrimary()`. The hot path and per-request release are **not** gated.
+- **Leadership carries no correctness weight.** Correctness rests on per-lockstring idempotency (§7). If leadership
+  flaps/splits, the worst case is anti-drift running on several replicas at once — idempotent, hence safe.
+- RBAC: `get/list/watch/create/update` on `coordination.k8s.io/leases` in the manager namespace (one lease).
 
-- `SandboxManager` gains a **generic** leadership capability, intentionally **not** coupled to quota: a single
-  `coordination.k8s.io/Lease` (e.g. `sandbox-manager-primary`, in the manager namespace) elected via the already-vendored
-  `client-go/tools/leaderelection`. It exposes a thread-safe method **`IsPrimary() bool`** (set true in
-  `OnStartedLeading`, false in `OnStoppedLeading`). Any future singleton background task can gate on it.
-- The quota reconcile sweep is the **first consumer**: the periodic fast/slow sweeps run only while `IsPrimary()` is true.
-  Per-key lazy **seed** (§6.6) and the hot path are **not** gated — they must run on whichever replica handles the request.
-- **Leadership is an efficiency layer only; it carries no correctness weight.** Correctness rests entirely on the §7
-  version guard. If leadership flaps, splits, or is misconfigured, the worst outcome is the reconcile running on several
-  replicas at once — idempotent and version-guarded, hence safe. In particular, the brief handoff window where an old and
-  a new primary both reconcile is covered by the version guard (stale apply skipped), so no oversell.
-- RBAC: sandbox-manager needs `get/list/watch/create/update` on `coordination.k8s.io/leases` in its namespace, for this
-  **one** generic lease.
+## 9. Degradation & Redis Data Loss (Phase 1: fail-open)
 
-## 9. Degradation, Cold Start & Redis Data Loss
+Phase 1 posture: **fail-open** on any Redis trouble; rely on the leader's bidirectional anti-drift to rebuild.
 
-Invariant under uncertainty: **bias to over-count; never under-count** (beyond what fail-closed prevents).
+- **No Redis configured** → `noopBackend`: all keys unlimited; non-empty quota at key create rejected (§6.1).
+- **Redis transiently unreachable** (restart, network error, failover unreachable phase): limited-key `Acquire`
+  **allows** (treated as unlimited for that request); unlimited keys unaffected. Bounded oversell, self-healing.
+- **Redis data loss** (cold restart / flush / first boot): hashes are empty, so `Acquire` reads `live = 0` and allows —
+  which **is** the fail-open behaviour; no special detection needed. The leader's anti-drift **add** pass repopulates
+  `q:live:*`/`q:sum:*` from the cluster (warm informer for steady keys; a consistent `List(MatchingLabels{owner=K})` per
+  key for the initial rebuild). Enforcement resumes per key as its entries are rebuilt. The oversell window is the
+  rebuild duration; bounded and self-healing.
+- **Partial rollback** (some entries lost, others survive): identical to "lost entries" — the **add** direction of
+  anti-drift re-charges the missing live CRs within `grace`. No detection key is needed in the fail-open posture.
 
-- **No Redis configured** → `noopBackend`: all keys unlimited; setting a non-empty quota is rejected (§6.1).
-- **Redis configured but transiently unreachable** (restart, network error, or the unreachable phase of a failover):
-  limited-key `Acquire` returns a retryable error (503/429); clients retry. Unlimited keys are unaffected. Under-sell,
-  never oversell. (A failover that *completes* but silently dropped un-replicated reservations is a separate case — §7
-  condition 4 / §2.)
-- **New key (no `q:committed`, `q:warm` present)**: lazy seed (§6.6); that one key is briefly fail-closed for a single
-  consistent read.
-- **Total Redis data loss** (`q:warm` absent — un-persisted cold restart, flush, or first ever boot): this is the only
-  case that could oversell (committed and resv both gone → `live` momentarily 0). Handled by a **global fail-closed
-  cold-rebuild**:
-  1. `Acquire` sees `COLD` (no `q:warm`) and fails closed for all limited keys.
-  2. The first replica to notice anchors a single global settle window **on the Redis server clock, not a manager clock**:
-     a small Lua does `SET q:warmAt <redis.call('TIME') + settle> NX` (equivalently, a `q:cold` key with a Redis-server
-     `PEXPIRE settle`). Using Redis `TIME` here is essential — a backward-skewed manager must not be able to set a
-     `warmAt` already in the past and collapse the window. `settle ≈ CR-visibility latency`, so any create in flight at
-     the moment of loss has time to commit in apiserver.
-  3. All limited keys stay fail-closed until `redis.call('TIME') >= q:warmAt` (again the Redis clock). There is no need to
-     enumerate keys here (Redis is wiped, so there is nothing to list); the wait alone is what guarantees safety.
-  4. After `warmAt`, `q:warm` is set and normal service resumes. Each key is then seeded **lazily on its first `Acquire`**
-     via the per-key `NEED_SEED` path (§6.6, `mayCreate=1`): the seed's consistent read counts any create that was in
-     flight at the moment of loss, **provided that create's CR has become consistent-visible within `settle`** — which the
-     create-path CR-write *issue* deadline plus normal commit latency ensures (§7 condition 4). The residual is the same
-     one §7 documents: a create whose CR-create call was issued just before the loss and whose apiserver commit lands
-     *after* the seed read (pathological commit latency) — bounded and self-healing, closeable only by apiserver-side
-     fencing (out of scope).
+> **Deferred (later PR): fail-closed posture.** A config knob `onRedisUnavailable: allow | reject` (default `allow`).
+> `reject` reintroduces the rev1 machinery only where it is actually needed for strictness across loss: a global
+> `q:warm` total-loss detector, a Redis-server-clock `q:warmAt` settle window (so in-flight creates commit before the
+> rebuild seed), `COLD → 503` retryable on the hot path, and optionally synchronous reservation replication
+> (`WAIT`/sync topology) for strictness across failover. This is the fiddliest part of the old design and is **not**
+> built in Phase 1; its global keys are also what reopen the Redis Cluster `CROSSSLOT` question (§6.2).
 
-  This trades availability of limited keys during the (rare) cold-rebuild for **strict no-oversell**, with no need for
-  hot-path persistence writes. Recommended Redis operational posture (to make total data loss rare): AOF
-  `appendfsync everysec` + HA (a **Sentinel-managed primary with a replica**; Phase 1 does **not** support Redis
-  Cluster — §6.2). Failover then does not lose `committed`, so only an un-persisted total wipe triggers the cold-rebuild.
-  **Deployment docs MUST state the failover posture:** with the default async knob, a failover that drops un-replicated
-  `resv` is a bounded, self-healing residual (§7 cond. 4); the strict knob requires `min-replicas-to-write ≥ 1` **and** a
-  Sentinel configuration that promotes only a caught-up (acked) replica — never a single un-replicated instance.
-- **Partial Redis rollback** (`q:warm` and `committed` survive but recent `resv` writes are lost — AOF fsync gap on a
-  crash-restart, restore from a slightly stale snapshot, or async-failover to a replica that missed the latest `ZADD`s).
-  `q:warm` detects **total** loss only, so partial rollback is **not** caught by the cold-rebuild and `Acquire` proceeds
-  with `live` short by the lost tokens → the created-but-uncovered CRs oversell until reconcile folds them. This is
-  **exactly the bounded, self-healing residual of the default async posture** (§7 condition 4): bounded by the number of
-  reservations lost (the in-flight creates at the rollback instant), self-healing as reconcile folds those CRs (no further
-  oversell), persisting only until churn frees a slot. Handling, by posture:
-  - **Default (knob off):** accept this residual. It is the same envelope as async-failover; do not special-case it.
-  - **Strict (knob on):** synchronous reservation replication makes a *promoted replica* hold every acked `ZADD`, closing
-    the async-failover sub-case. It does **not** by itself cover single-instance AOF-gap (no replica to sync to) — so the
-    strict posture additionally **requires a replicated topology where only an acked node is electable** (§7 condition 4),
-    never a single un-replicated instance.
-  - **Optional hardening (either posture):** a monotonic `q:epoch` bumped by the reconcile; a replica that observes
-    `q:epoch` regress (or a self-written value missing) infers a rollback and triggers the cold-rebuild path. This
-    converts an undetected partial rollback into a detected fail-closed rebuild. Listed as discretion, not required for
-    the chosen default posture.
-
-Defaults (tunable): **CR-write issue deadline** seconds-scale (the admit→issue-`Create` bound, not the create-to-ready
-wait); **`Tgrace`** (the single token-age threshold; no separate TTL) **minute-scale** and generously above
-`issue deadline + worst plausible apiserver commit latency` — it only gates the *safe* under-sell-direction free, so
-erring large is fine and shrinks the §7 cond. 2 residual; **settle window** (cold-rebuild fail-closed) kept short —
-≈ issue deadline + a commit-latency margin (tens of seconds) — since it is an availability dip; **fast reconcile**
-event-driven + short periodic tick; **slow reconcile** every ~1 min; leadership lease/renew/retry per `client-go`
-defaults (≈15s/10s/2s).
+Operational recommendation to keep loss rare even under fail-open: Redis AOF `appendfsync everysec` + HA (Sentinel-managed
+primary with a replica).
 
 ## 10. Create Hot Path (limited key)
 
 1. `CheckApiKey` already put `user` (with `QuotaSpec`) in context.
-2. Unlimited key → `Acquire` returns a sentinel reservation; no Redis, no leadership lookup; zero cost. Majority of 2500/sec.
-3. Limited key → one Lua `Acquire`. `OK` records the reservation `opID`; `REJECTED` → 429; `NEED_SEED` → seed + retry;
-   `COLD`/transport error → fail-closed 503.
-4. `opID` is stamped onto the CR via `basicSandboxCreateModifier`, with the owner label, in the same CR write.
-5. Call `ClaimSandbox` / `CloneSandbox` **under a CR-write issue deadline** ≤ CR-visibility latency: if the time budget is
-   exhausted, do **not issue** the CR-create call (§7 condition 4) so "in flight" has a known finite bound. (Once the call
-   is issued, the apiserver may commit regardless of a client timeout — that is the documented total-loss residual, not a
-   correctness break.) On a **provably pre-CR** failure (write call not yet issued, §6.4) → `Release(opID)` with
-   `context.WithoutCancel`. On any failure at/after the write call (timeout/ambiguous) → **do not release** (§6.4). On
-   success → do nothing; the CR-with-opID is folded by reconcile.
+2. **Unlimited key** → `Acquire` returns a sentinel reservation; no Redis, no leadership lookup; zero cost.
+3. **Limited key** → resolve the **target footprint** from the requested spec/template (§6.3) **before** committing to a
+   specific pooled instance, then one Lua `Acquire(lockstring, footprint, limits)`:
+   - `OK` → proceed.
+   - `REJECTED` → **HTTP 429 immediately, no retry**; if a pooled sandbox was tentatively picked, return it to the pool
+     (do not lock it). `TryClaimSandbox` must surface the quota miss as terminal, not loop.
+   - transport error → **fail-open** (allow) in Phase 1.
+4. The `lockstring` is the one `LockSandbox` already stamps on the CR — no extra CR write, no infra interface change.
+5. Run `ClaimSandbox` / `CloneSandbox`. On **any** failure → `Release(lockstring)` with `context.WithoutCancel` (§6.5
+   path 1). On success → nothing; the entry already reflects the live sandbox.
 
-Acquire covers both claim and clone. The deletion side retires the reservation via the informer's true-deletion event
-(§6.7), not via the `DELETE` handler.
+`DELETE /sandboxes/{id}` issues a **pre-emptive** `Release(lockstring)` (§6.5 path 2) for low-latency slot return; the
+leader's event handler (path 3) is the backstop for all non-manager deletions.
 
 ## 11. API Surface
 
-- **Create** (`POST /sandboxes`): unchanged request shape; quota enforced internally. Quota exceeded → **HTTP 429** with
-  the E2B-compatible error body.
-- **Key create** (`POST /api-keys`): optional nested `quota`. Setting quota is **admin-only** (admin-team key); non-admin
-  callers may not set quota. Admin keys **may** be explicitly limited (default unlimited). With no Redis configured, a
-  non-empty quota is rejected (§6.1). Quota validation (§3.1) is applied here.
-- **Quota is immutable after create — Phase 1 has no quota `PATCH` endpoint (§6.8).** This deliberately eliminates the
-  `unlimited → limited` transition oversell (a normal-operation race, not a rare residual): a key's enforcement mode is
-  fixed at birth, so no replica ever holds a stale `unlimited` view of a limited key (an unknown key is an auth failure,
-  never "unlimited"). To change a key's quota, create a new key with the desired quota. (A future PATCH must ship with the
-  safe-activation scheme of §6.8.)
-- **Describe** (optional, read): expose current `live`/`limit` for a key (admin or owner-team), backed by
-  `QuotaManager.Describe`.
-- **Key delete** (`DELETE /api-keys/{id}`): the key's quota config is removed with the key; **existing sandboxes are kept**
-  (no cascade delete) and run out their own lifecycle. The handler additionally issues a **best-effort** cleanup of the
-  key's Redis state (`DEL q:committed/q:cver/q:resv`, §6.8); failure is non-fatal.
+- **Create** (`POST /sandboxes`): unchanged shape; quota enforced internally; exceeded → **429** with the E2B error body
+  (no retry).
+- **Key create** (`POST /api-keys`): optional nested `quota`; **admin-only** to set; validated (§3.1); rejected if no
+  Redis (§6.1).
+- **No quota `PATCH`** (§6.8): immutable after create; change quota by creating a new key.
+- **Describe** (optional): per-dimension `live`/`limit` for a key, via `QuotaManager.Describe`.
+- **Key delete** (`DELETE /api-keys/{id}`): drop the quota config; **keep** existing sandboxes; best-effort `DEL` of the
+  key's Redis state (§6.7), non-fatal.
 
-Authorization reuses the existing `CheckCreateAPIKeyPermission` admin/team gating; quota set at key create chains
-`CheckApiKey` + an admin check.
+Authorization reuses `CheckCreateAPIKeyPermission`; quota set chains `CheckApiKey` + admin check.
 
 ## 12. Compatibility
 
-- Old keys without a `quota` field → unlimited. New JSON field is `omitempty`; old/new payloads interoperate.
-- MySQL column add is gated by `DisableAutoMigrate` with a manual DDL fallback; no behavior change for existing rows.
-- `CountActiveSandboxes` is untouched; SandboxClaim self-healing is preserved. Quota uses the additive
-  `CountSandboxesByOwner`.
-- Existing sandboxes created before this change lack the owner **label**, which the strict-correctness consistent reads
-  filter on. **Owner-label backfill is therefore a hard prerequisite, not optional** (§7 precondition B): run the
-  one-time backfill (label every existing Sandbox from its `AnnotationOwner`) and confirm completion **before** enabling
-  enforcement; a key with un-backfilled pre-existing CRs is treated as unlimited until then. The hot-path annotation
-  behavior is unchanged.
-- New RBAC: sandbox-manager needs `get/list/watch/create/update` on `coordination.k8s.io/leases` in its namespace (one
-  generic lease, §8).
-- New dependency: a Redis client is vendored; it is dormant unless Redis is configured. **Phase 1 supports standalone or
-  Sentinel topology only — Redis Cluster is unsupported** (the Lua scripts span a global key and per-key keys, §6.2); a
-  Cluster client is rejected/warned at startup. A configurable knob (default off) enables synchronous reservation
-  replication for strict no-oversell across failover; the default (async) accepts a bounded self-healing failover residual
-  (§7 condition 4). Deployment docs state the failover posture and topology requirement (§9).
-- No change to E2B sandbox lifecycle semantics (pause/resume/timeout/delete) beyond the create-time admission and the
-  reservation retirement on the informer's observed true deletion (§6.7).
+- Old keys without `quota` → unlimited; new JSON field is `omitempty`.
+- `CountActiveSandboxes` untouched; SandboxClaim self-healing preserved.
+- **Owner-label backfill is a hard prerequisite** before enabling enforcement for keys with pre-existing CRs (§5).
+- New RBAC: one generic lease (§8).
+- New dependency: a Redis client (dormant unless configured). Phase 1 has **no global Redis keys**, so standalone /
+  Sentinel / Cluster are all structurally compatible (§6.2).
+- No change to E2B lifecycle semantics beyond create-time admission and the removal paths of §6.5.
 
 ## 13. Alternatives Considered
 
-| Option | Mechanism | Hot-path external IO | Small-limit high churn | No oversell | Verdict |
-|---|---|---|---|---|---|
-| **Redis committed + reservation ZSET overlay, version-guarded reconcile (chosen)** | atomic Lua acquire; reconcile reseeds committed from apiserver under a monotonic version guard | one Redis op for **limited** keys only; none for unlimited | OK (Redis single-key throughput ≫ one tenant's churn; fast retirement) | Yes (strict under normal op; across failover, strict iff the sync-replication knob is on — default off accepts a bounded self-healing residual; total-data-loss handled by cold-rebuild fail-closed) | Recommended; standard inventory-deduction pattern, minimal self-built coordination |
-| Per-shard Lease leader election + in-memory cell (previous design) | client-go leader election per shard; fnv mod N; consistent-read seed; peer forwarding; settle | none | OK | Yes (under-sell on handoff; tiny self-healing residual) | Rejected as too complex — large self-built distributed surface (sharding, forwarding, settle, warm state, rebuild, partition risk) |
-| MySQL atomic counter (no Redis) | row-lock conditional UPDATE per op | every limited op | single hot row serializes; MySQL-only; no Secret-backend story | Yes | Rejected — hot-row serialization + backend-specific; Redis handles a hot key far better |
-| Replicated consensus log (Raft/dragonboat) | reservations in a replicated state machine | none (off hot path) | OK | Yes, even total Redis loss | Deferred — heavy dependency; only removes the cold-rebuild availability dip, not required for the product contract |
-| K8s ConfigMap/Secret CAS counter | resourceVersion per op | every op | apiserver cannot sustain | Yes | Rejected (infeasible at scale) |
-| Informer-only counting (no shared store) | derive from per-replica cache | none | — | No (cross-replica lag → over-admit) | Rejected as enforcement; used only for committed maintenance/seed |
+| Option | Mechanism | Hot-path IO | Multi-dim (cpu/mem) | 500k `List` cost | No oversell | Verdict |
+|---|---|---|---|---|---|---|
+| **Redis live-set, incremental, bidirectional anti-drift (rev2, chosen)** | per-lockstring idempotent Lua add/remove; leader diffs vs cluster as backstop | 1 Lua for limited keys; none for unlimited | natural (per-entry footprint + sums) | rare (only initial rebuild / after loss) | strict at admit (Redis healthy); bounded self-healing transients; fail-open default | Recommended — exact `live`, simplest correctness (idempotency replaces version guard), cheap at scale |
+| Redis committed-counter + `resv` overlay + version-guarded reconcile (rev1) | atomic Lua acquire; periodic recompute of `committed` from `List` under an RV version guard | 1 Lua for limited keys | poor (committed is a count; cpu/mem needs a summed relist) | high (frequent relist is the source of `committed`) | strict normal-op; bounded residuals | Rejected — laggy/imprecise `live`, large version-guard surface, relist cost dominates at 500k |
+| Per-shard Lease leader election + in-memory cell (rev0) | client-go election per shard; sharding; forwarding; settle | none | poor | n/a | yes | Rejected — large self-built distributed surface |
+| MySQL atomic counter | row-lock conditional UPDATE per op | every op | poor | n/a | yes | Rejected — hot-row serialization; backend-specific |
+| Informer-only (no shared store) | per-replica cache | none | — | — | no (cross-replica lag) | Rejected for enforcement |
 
 ## 14. Risks
 
-- **Redis as a new dependency / operational posture.** Mitigated by making it optional (no Redis ⇒ no quota) and by the
-  cold-rebuild for total data loss. Recommend AOF + HA so failover does not lose `committed`.
-- **Partial Redis rollback that drops recent reservations** (§7 condition 4, §9, §2). Async-failover, AOF fsync gap on
-  crash-restart, or restore from a stale snapshot can lose recent `resv` writes while `committed`/`q:warm` survive — and
-  `q:warm` detects only *total* loss, so this is **undetected** and `Acquire` proceeds with `live` short → bounded,
-  self-healing oversell (same envelope as cold-loss). **Default (async): accepted.** Strict knob: requires synchronous
-  replication **and** a topology where only an acked node is electable (single un-replicated instance can never be
-  strict). Optional hardening: a monotonic `q:epoch` whose observed regression triggers the cold-rebuild (§9). The strict
-  knob is **default off**, so by default this residual is accepted in exchange for acquire latency.
-- **Clock skew on reservation timing** (resolved). If expiry/age used a manager's wall clock, a skewed manager could make
-  a live in-flight token look old → consistent-read free retires it → uncovered CR → oversell. Resolved by computing all
-  reservation time from `redis.call('TIME')` (one server clock) and requiring `Tgrace` > the CR-write issue deadline
-  (§6.3/§6.5).
-- **Reconcile liveness vs reservation accumulation.** Because the hot path never blind-expires tokens (§6.7/§7
-  condition 2), a slow/dead reconcile can no longer oversell — but tokens accumulate, inflating `live` → over-reject
-  (under-sell) and growing Redis memory. Mitigated by event-driven fast reconcile, the consistent-read free pass, and
-  monitoring reconcile lag + `q:resv` cardinality. This converts a former correctness risk into a monitored availability
-  risk.
-- **Create CR-write issue deadline.** The cold-rebuild settle and `Tgrace` assume admit→CR-write is bounded; the create
-  path enforces a deadline on **issuing** the CR-create call (§7 condition 4). Once the call is issued the apiserver may
-  commit regardless of a client timeout, so the cold-loss residual is precisely "issued-just-before-total-loss, commits
-  after the seed read" — bounded, self-healing. Closing it to hard zero needs apiserver-side fencing (out of scope).
-- **`unlimited → limited` transition oversell** (eliminated by scope decision). During cache propagation this would
-  oversell on a *normal* flow: a stale-`unlimited` replica creates uncovered CRs (no token, absent from any seed snapshot)
-  while a fresh-`limited` replica admits against a too-low `live` → `actual > limit` — and unlike the §7.1 residuals this
-  needs no failure, so it is likely rather than rare. **Phase 1 removes the quota `PATCH` endpoint** (§6.8/§11): a key's
-  mode is fixed at create, so the transition cannot occur and no replica holds a stale view (an unknown key is an auth
-  failure, never "unlimited"). A future PATCH MUST ship the §6.8 safe-activation scheme (activation window or all-replica
-  cache invalidation).
-- **Redis Cluster `CROSSSLOT`** (eliminated by scope decision). The acquire/apply Lua span a global key
-  (`q:warm`/`q:warmAt`) and per-key keys, which Cluster does not co-locate. **Phase 1 supports standalone / Sentinel
-  only** (§6.2); a Cluster client is documented as unsupported (rejected/warned at startup). Cluster support (hash-tag
-  redesign that would force all quota keys into one slot) is deferred.
-- **Absent+old free vs pathological apiserver commit latency** (steady-state residual). If a create's CR-create call was
-  issued but its apiserver commit is delayed beyond `Tgrace`, the consistent-read free can retire the token just before
-  the CR appears → bounded, self-healing oversell — even in normal operation. Mitigated by `Tgrace` ≫ normal commit
-  latency (minutes); requires extreme apiserver overload to trigger. Closing to hard zero needs apiserver-side fencing
-  (out of scope, accepted §7.1).
-- **Cold-rebuild availability dip.** Total Redis data loss fails limited keys closed for ≈ settle window. Accepted as the
-  price of strict no-oversell without hot-path persistence; rare with AOF + HA.
-- **Consistent-read load.** Slow reconcile + seed + cold-rebuild issue `List(MatchingLabels{owner})` reads from the
-  apiserver. Bounded to limited keys (a minority), server-side filtered, and off the hot path. Steady state uses the
-  cheap informer index.
-- **Freeing tokens from a lagging view.** Freeing absent reservations from the informer (not a consistent read) would
-  drop live CRs' tokens → oversell. The design forbids this (free only from consistent reads, §6.5/§7).
-- **Owner-label backfill (correctness prerequisite, not just a risk).** Sandboxes created before rollout lack the label
-  and are missed by the strict consistent reads → oversell for keys with pre-existing CRs. Enforcement MUST NOT be
-  enabled for a key until its existing CRs are backfilled (§7 precondition B, §12); un-backfilled keys are treated as
-  unlimited.
-- **Lingering Dead CRs hold quota** under the "count until truly deleted" rule (e.g. stuck finalizers). Deliberate,
-  conservative, no-oversell direction.
-- **Every owner-stamping path must Acquire.** A future code path that stamps `owner=K` without going through `Acquire`
-  would create an uncovered CR until reconcile folds it (transient oversell). Documented invariant; enforced by routing
-  all create paths through `QuotaManager.Acquire`.
+- **Redis memory for the live set.** Storing every live sandbox (~200 B/entry → ~100 MB at 500k) vs rev1's aggregate
+  counters. Acceptable for Redis; the same storage is what enables exact `live` and cheap multi-dim. Monitor memory and
+  per-key `HLEN`.
+- **Steady-state anti-drift still reads a (warm) view.** A periodic bidirectional diff must eventually compare Redis to
+  truth to catch missed events; rev2 makes it **infrequent** and informer-served (no apiserver `List`), with the
+  expensive consistent `List` reserved for rare rebuilds. Monitor diff lag and divergence counts.
+- **Deletion-requested = freed transient over-actual** (§6.5.1). A stuck-terminating sandbox plus a replacement can
+  briefly exceed `limit` in physical pods. Deliberate latency trade; bounded by concurrent terminations; not resurrected
+  by anti-drift (live-CR-only add).
+- **Eager release biases to transient over-admission.** Releasing on any create failure (incl. ambiguous post-CR-write
+  failures) can drop a live CR's charge until anti-drift re-adds (≤ grace). Chosen over depending on the backstop;
+  bounded and self-healing.
+- **Fail-open during Redis outage = temporary no enforcement.** Bounded oversell for the outage duration, self-healed by
+  rebuild. The deferred fail-closed knob trades availability for strictness (§9).
+- **Owner-label backfill (correctness prerequisite).** Pre-existing unlabelled CRs are invisible to the consistent reads
+  → undercount. Enforcement must wait for backfill (§5/§12).
+- **Footprint resolution for `TemplateRef`.** Anti-drift add and create-time charge must resolve referenced templates to
+  compute the footprint; a resolution failure must fail safe (defer the add; do not charge zero). Implementation detail
+  (§6.3).
+- **Lockstring uniqueness/stamping.** Correctness keys off the lockstring being globally unique and present on every
+  owner-stamped CR (it is, via `LockSandbox`). Any future create path stamping `owner` must also go through `Acquire`
+  with that lockstring (§7 precondition).
+- **`unlimited → limited` transition oversell** — eliminated by the no-`PATCH` scope decision (§6.8).
 
 ## 15. Acceptance Criteria
 
-- Concurrent creates for one limited key, across multiple replicas, never exceed `limit`; no oversell under small-limit
-  high-churn load.
-- Steady-state informer lag (simulated) never causes oversell: create-path counting is immediate (token at admit);
-  delete/fold lag only under-sells.
-- Reconcile is safe under concurrency and leadership handoff: a stale snapshot's apply is skipped by the `q:cver` guard;
-  after convergence `committed` equals the consistent `CountSandboxesByOwner(owner)`.
-- New-key lazy seed: first `Acquire` returns `NEED_SEED`, the key is seeded via a consistent read, retry succeeds; that
-  key alone is briefly fail-closed.
-- No blind hot-path expiry: with reconcile stopped, an existing-but-unfolded CR's token is **not** removed by `Acquire`,
-  so a concurrent create cannot oversell (it under-sells instead). The acquire Lua contains no `ZREMRANGEBYSCORE`.
-- Reservation retired on **true deletion**, not delete initiation: a `DELETE` whose CR is still terminating
-  (`Dead`-but-not-GC) does **not** drop the token; the token is removed only when the informer observes the CR gone.
-  A concurrent create during the terminating window cannot oversell.
-- Version guard uses the List collection `ResourceVersion`: a stale-snapshot apply (lower `ver`) is skipped wholesale and
-  cannot erase a fresher writer's folds; equal `ver` is a no-op.
-- Total Redis data loss: `q:warm` absent triggers a global fail-closed cold-rebuild; after the settle window, in-flight
-  creates that respected the CR-write deadline are counted and no oversell occurs.
-- Create CR-write issue deadline: a create whose budget is exhausted does **not issue** the `Create` call; `settle` and
-  `Tgrace` exceed that deadline. (Post-issue commits are the accepted bounded residual, not a test failure.)
-- Failover with synchronous reservation replication: an acked reservation survives primary loss → no oversell, and the
-  strict knob requires a topology where only an acked node is electable (test that `WAIT` ack on one replica does not
-  permit a non-acked replica to be relied upon — acquire fails-closed instead). With async (default), the documented
-  bounded self-healing residual is exercised.
-- Clock-skew safety: with manager clocks deliberately skewed, reservation expiry/age is computed from `redis.call('TIME')`
-  so a live in-flight token is never freed early by the consistent-read free pass (no oversell).
-- Partial Redis rollback (recent `resv` lost while `q:warm`/`committed` survive): default posture shows only a bounded,
-  self-healing over-admission (reconcile converges to `<= limit`); if the optional `q:epoch` hardening is implemented, the
-  rollback is detected and triggers the fail-closed cold-rebuild.
-- Cold-loss residual is bounded: a create whose CR-create call was issued just before total loss and commits after the
-  seed read is the only over-admission, and the system converges to `<= limit` as reconcile folds it.
-- Quota immutability / no transition oversell: there is **no** quota `PATCH` endpoint; quota is set only at key create. A
-  newly-created limited key enforces from its first `Acquire` (seed reads `C = 0`), and no replica ever observes it as
-  unlimited (an unknown key is an auth failure, not "unlimited"), so the stale-`unlimited` / fresh-`limited` concurrent-
-  create oversell class **cannot occur** because the transition does not exist (§6.8).
-- Redis topology: Phase 1 targets standalone / Sentinel; the multi-key Lua (global `q:warm`/`q:warmAt` + per-key keys) is
-  documented as Cluster-incompatible (would `CROSSSLOT`); configuration/startup declares a Cluster client unsupported
-  (rejected or warned), and the acquire/apply scripts run unchanged on a single keyspace (§6.2).
-- Version guard with arbitrary-width `ResourceVersion`: a very large RV (e.g. > 2^53) and RVs of differing decimal length
-  are ordered correctly by the decimal-string compare (validate → strip leading zeros → length, then lexicographic); a
-  malformed/non-decimal RV fails safe (`SKIPPED_BADVER`) and `committed` is never written from it; the apply Lua uses
-  **no** `tonumber` on `ver`/`cver`, and the Go side never `ParseInt`s the RV (§6.5).
-- Folded-CR delete releases headroom promptly: deleting a CR already folded into `committed` enqueues a per-owner fast
-  reconcile whose recount lowers `committed` at event speed, not only at the periodic slow reconcile; a small-limit
-  high-churn key recovers a slot without waiting for the slow sweep (§6.5/§6.7).
-- Quota validation (§3.1): `limit = 0` is accepted and blocks all creates (429); negative / duplicate `(dimension,scope)` /
-  unknown-dimension / non-empty-scope quotas are rejected at key create; an absent quota → unlimited.
-- Fast reconcile never seeds: with `q:committed` absent and a deliberately stale informer cache, the fast (mayCreate=0)
-  apply returns `SKIPPED_UNSEEDED`; the first `committed` is written only by a consistent read (§6.5/Risk 3).
-- Cold-rebuild settle is clock-skew-immune: a manager with a backward-skewed wall clock cannot collapse the settle window
-  because `q:warmAt` and the wait check use `redis.call('TIME')` (§9/Risk 4).
-- Steady-state absent+old residual: with `Tgrace` > issue deadline + normal commit latency, the consistent-read free does
-  not retire a token whose CR is merely slow-but-normal; the documented residual occurs only under pathological apiserver
-  commit latency and self-heals (§7 cond. 2).
-- Owner-label backfill prerequisite: a key with pre-existing unlabelled CRs is treated as unlimited until backfilled;
-  after backfill the consistent read counts them and enforcement is exact.
-- Redis transiently unreachable: limited keys fail closed (retryable); unlimited fast path is unaffected and provably does
-  zero Redis IO.
-- Release classifier: release fires only on a provably-pre-CR failure (write call not yet issued) and on request cancel
-  (`context.WithoutCancel`); any failure at/after the write call does **not** release. Reconcile free and the
-  true-deletion event are exercised for the no-release paths.
-- `IsPrimary()` gates the steady reconcile sweep only; correctness holds with the sweep forced on all replicas
-  (version-guard regression test).
-- No Redis configured: all keys behave as unlimited; setting a non-empty quota at key create is rejected (there is no
-  PATCH endpoint to reject).
-- Old keys without `quota` behave as unlimited; both Secret and MySQL backends store and load `QuotaSpec` correctly;
-  MySQL migration respects `DisableAutoMigrate`.
-- Owner label is stamped on every create path (claim/create/clone) and is a valid label value; consistent
-  `List(MatchingLabels{owner})` returns the correct count.
-- Quota exceeded returns HTTP 429 with the E2B-compatible error body.
-- Admin-only quota setting **at key create** enforced; non-admin cannot set quota; admin key may be explicitly limited.
-- `CountActiveSandboxes` and SandboxClaim self-healing behavior are unchanged (regression test).
-- Table-driven unit tests for `QuotaManager` (acquire/release/reconcile/seed, version guard, fail-closed paths,
-  lag-safety, churn retirement) and for the create-path integration.
+- Concurrent creates for one limited key across replicas never exceed `count`/`cpu`/`memory` limits while Redis is
+  healthy; multi-dimensional admission is all-or-nothing (a create that fits cpu but not memory is rejected and charges
+  nothing).
+- Idempotent acquire: a retried `Acquire` with the same lockstring does not double-charge any dimension.
+- Eager + pre-emptive release: a create failure releases the charge; `DELETE` returns the slot pre-emptively; both are
+  idempotent with the leader's event-driven release (no double-decrement below zero).
+- Deletion-requested = freed: a `DeletionTimestamp`-set / Terminating owner CR no longer counts; anti-drift does **not**
+  re-add it.
+- Bidirectional anti-drift: (a) an entry whose CR is gone is removed after grace; (b) **a live CR missing its entry is
+  re-added after grace** (the lost-entry self-heal) — verify a simulated Redis entry loss converges back to `<= limit`
+  and to exact sums. Both run only on the leader and are safe under a flapping leader (idempotent, no version guard).
+- New key needs no seed: first `Acquire` on an absent `q:live:{K}` charges from zero (no `NEED_SEED`, no per-acquire
+  consistent read).
+- Fail-open: with Redis unreachable, limited keys are allowed (unenforced) and unlimited keys provably do zero Redis IO;
+  after Redis returns, the leader rebuild restores exact `live`/sums and enforcement resumes.
+- No quota `PATCH`; a newly-created limited key enforces from its first `Acquire`; no replica observes a limited key as
+  "unlimited" (unknown key → auth failure).
+- 429 with no retry: a quota miss returns immediately and a tentatively-picked pooled sandbox is returned to the pool.
+- Footprint: cpu in millicores and memory in MB (ceil) summed from container requests; `TemplateRef` is resolved; a
+  resolution failure fails safe.
+- Sum/membership consistency: every add/remove changes the HASH field and the affected sums in one Lua; sums never drift
+  from `HLEN`/membership under churn.
+- `Describe` reports correct per-dimension `live`/`limit`.
+- Validation (§3.1): `limit = 0` blocks all creates in that dimension; negative / duplicate / unknown-dimension /
+  non-empty-scope / non-empty-quota-without-Redis are rejected at key create.
+- `CountActiveSandboxes` and SandboxClaim self-healing unchanged (regression).
+- `IsPrimary()` gates only the anti-drift sweep + event-driven release; correctness holds with the sweep forced on all
+  replicas (idempotency regression test).
+- Owner label stamped on every create path (claim/create/clone), is a valid label value, and a consistent
+  `List(MatchingLabels{owner})` returns the correct live set; backfill prerequisite enforced.
+- Redis topology: Phase 1 Lua touches only `{K}`-tagged keys (no `CROSSSLOT`); standalone/Sentinel verified, Cluster
+  structurally compatible.
+- Table-driven unit tests for `QuotaManager` (acquire/release/describe, multi-dim, idempotency, fail-open) and the
+  anti-drift controller (both directions, grace, leader-gating), plus create-path integration.
 
 ## 16. Resolved Decisions & Implementation Discretion
 
-### Resolved (product)
+### Resolved (product / architecture)
 
-- Counting rule: occupies a slot **until truly deleted** (includes Dead-not-GC); use `CountSandboxesByOwner`.
-- Quota mutability: settable **only at key create** (Phase 1); **immutable thereafter — no `PATCH` endpoint**. This
-  eliminates the `unlimited → limited` transition oversell by construction (§6.8). A PATCH is deferred; if added it MUST
-  ship with a safe-activation scheme (activation window or all-replica cache invalidation, §6.8).
-- Quota subject/scope: the subject is **always the API key** (no per-team scope). Phase 1 enforces per-api-key
-  (`scope == {}`); a per-template scope is a model extension point only, not enforced (§2/§3).
-- Quota validation (§3.1): absent/`null` → unlimited; `limit = 0` → valid (hard-zero, blocks all creates); negative →
-  reject; duplicate `(dimension, scope)` → reject; unknown dimension → reject; non-empty scope → reject in Phase 1;
-  non-empty quota with no Redis → reject. A quota is never silently ignored.
-- Authorization: **admin-only** to set quota (at key create); tenants cannot set their own quota.
-- Counting backend: **Redis, pluggable/optional**. No Redis ⇒ quota disabled (unlimited) and setting a non-empty quota is
-  rejected.
-- Redis transiently unavailable: limited keys **fail-closed**.
-- Total Redis data loss: **global fail-closed cold-rebuild** (consistent reseed + a settle window timed on the **Redis
-  server clock**, §9), strict except the one bounded self-healing residual of §7.1.
-- **No-oversell scope (product): accept bounded residuals; do NOT add apiserver-side fencing.** Strict 0 under normal
-  operation (and across failover with the strict knob); three rare, bounded, self-healing residuals are accepted (§7.1).
-  A validating webhook for absolute 0 is explicitly deferred / out of scope.
-- Redis topology: Phase 1 supports **standalone or Sentinel** only (a single logical keyspace); **Redis Cluster is
-  unsupported** because the acquire/apply Lua span a global key (`q:warm`/`q:warmAt`) and per-key keys with no
-  slot-colocation guarantee (`CROSSSLOT`, §6.2). Cluster support (hash-tag redesign) is deferred.
-- Key deletion: best-effort `DEL` of the key's Redis state (`q:committed/q:cver/q:resv`, §6.8/§11); key IDs are
-  non-reused UUIDs, so a missed cleanup is only harmless garbage and the `DEL` is non-fatal.
-- Initial `q:committed` for any key is established **only by a consistent read** (lazy seed / slow reconcile /
-  cold-rebuild, `mayCreate=1`); the fast informer reconcile (`mayCreate=0`) may only *update* an already-seeded key (§6.5).
-- Reconciler placement: **inside sandbox-manager**, steady sweep gated on a **generic `IsPrimary()`** leadership
-  capability (one generic Lease, decoupled from quota); correctness via the **version guard**, not leadership.
-- Version guard watermark: the **List collection-level `ResourceVersion`** (etcd revision), with `C`/`opIDs` from the same
-  snapshot. Not implementation discretion — the guard's correctness depends on it (§6.5). The fast (cache) reconcile must
-  obtain that RV from a cached `List` (which carries `ListMeta.ResourceVersion`); a read path that cannot supply a
-  comparable collection RV must **not** apply and defers to the slow reconcile. The RV is **opaque**: it is compared as an
-  **arbitrary-width decimal string** (validate → strip leading zeros → length, then lexicographic), never `tonumber`/
-  int64/float (a Lua double truncates RV > 2^53); a malformed value fails safe (`SKIPPED_BADVER`, `committed` never
-  written), and the Go side never `ParseInt`s it (§6.5).
-- `opID` is **globally unique, never reused** (e.g. UUIDv4 per `Acquire`); ZSET member / `ZREM` / fold / CR annotation all
-  key off it (§6.3).
-- Reservation timing uses the **Redis server clock** (`redis.call('TIME')`): the score is the **acquire time** and the
-  reconcile age test compares against Redis `TIME` — never a manager wall clock. There is a **single** age threshold
-  `Tgrace` (no separate "TTL"), which MUST exceed the acquire→consistent-visible bound (CR-write **issue** deadline +
-  apiserver commit-visibility latency); the cold-rebuild settle is likewise Redis-clock-timed (§6.3/§9).
-- Partial Redis rollback (recent `resv` lost, `q:warm` survives) is **undetected by `q:warm`** and falls into the default
-  async residual (§9); the strict knob requires synchronous replication **plus a topology where only an acked node is
-  electable** (`WAIT <all electable>`), never a single un-replicated instance (§7 condition 4).
-- Reservation retirement: **state-aware only**; the hot path performs **no blind expiry**. Tokens are freed by fold,
-  the informer **true-deletion** event, consistent-read absent+old free, or provable pre-CR release (§6.7). The `DELETE`
-  handler does not drop tokens. The true-deletion event also **enqueues a per-owner fast reconcile** so that an
-  already-folded CR's slot is released by a recount at event speed, not only at the slow-reconcile cadence (§6.5/§6.7).
-- Release classifier: **conservative and positional** — release only when the create failed *before* issuing the
-  CR-create call; everything at/after is no-release (§6.4).
-- Create path enforces a deadline on **issuing** the CR-create call (does not issue if the budget is exhausted); a
-  post-issue commit cannot be aborted client-side and is the documented bounded residual (§7 condition 4 / §7.1).
-- Owner identity for consistent reads: add an **owner label** mirroring `AnnotationOwner`. **Backfilling the label on
-  existing CRs is a hard prerequisite** before enabling enforcement (§7 precondition B / §12).
-- Failover strictness: **configurable knob, default off (async)**. Default accepts a bounded, self-healing failover
-  residual; turning the knob on enables synchronous reservation replication (`WAIT` / sync topology) for strict
-  no-oversell across failover, at a hot-path latency / availability cost (§7 condition 4).
-- Error codes: quota exceeded **429**; Redis-unavailable/cold **503** (retryable).
-- Delete key with existing sandboxes: **keep** sandboxes, drop only the quota config; best-effort `DEL` the key's Redis
-  state (§6.8/§11).
-- Admin key may be **explicitly limited** (default unlimited).
+- **Model:** Redis holds the **live set** (one entry per live sandbox, keyed by lockstring, carrying footprint),
+  maintained incrementally; cluster is a backstop. `live` = exact membership/sums; **no committed-counter recompute, no
+  version guard** (replaced by per-lockstring idempotency).
+- **Identity:** the existing **lockstring** (`AnnotationLock`, UUID from `LockSandbox`); no new `opID` annotation.
+- **Dimensions (Phase 1, all enforced):** `sandbox.count`, `cpu` (millicores), `memory` (MB), from container
+  **requests**, computed from the declared target spec at create. Model extensible to `limits.*` / per-template scope
+  (reserved, not enforced; unknown dimension/non-empty scope **rejected**).
+- **No post-create 变配 in the manager:** footprint is fixed at create; **no informer update-event footprint tracking**.
+  If a create chooses an in-place update of a pooled sandbox, charge the **declared** target resources.
+- **Removal:** eager release on **any** create failure; **pre-emptive** release on manager `DELETE`; leader event-driven
+  release for non-manager deletions; leader bidirectional anti-drift backstop. **Deletion-requested = freed** (do not
+  wait for CR invisibility). The single **quota-live predicate** `isLiveForQuota` frees a slot iff `DeletionTimestamp !=
+  nil` or phase `Terminating`; Failed/Succeeded-but-not-deleted **still occupy** — deliberately **narrower** than
+  `CountActiveSandboxes`'s Dead-exclusion, so quota uses its own owner read (§5).
+- **Anti-drift is bidirectional** (add missing live-CR entries; remove leaked entries) — required so lost entries
+  self-heal rather than undercount forever. Add considers `isLiveForQuota` CRs only; the remove age-gate uses the entry
+  `ts` (Redis clock). **Grace = 10 minutes.**
+- **No seed:** absent `q:live:{K}` for a new key == zero; `NEED_SEED` deleted.
+- **Redis unavailable (Phase 1): fail-open** (treat as unlimited; rely on rebuild). Fail-closed posture + its
+  `q:warm`/settle/`WAIT` machinery is **deferred** to a later PR (config knob `onRedisUnavailable`, default `allow`).
+- **Quota immutable** after key create (no `PATCH`); admin-only to set; subject is always the API key.
+- **Backend:** Redis, pluggable/optional; no Redis ⇒ unlimited and non-empty quota rejected.
+- **Reconciler placement:** leader-gated controller in `pkg/cache`; generic `IsPrimary()` lease; correctness via
+  idempotency, not leadership.
+- **All Redis writes are single atomic Lua (or one idempotent command) and per-lockstring idempotent**, guarded by
+  `HEXISTS`/`HGET`; sums and membership are always co-mutated in the same script.
+- **Error codes:** quota exceeded **429** (no retry).
+- **Topology:** Phase 1 has no global Redis keys → standalone/Sentinel/Cluster structurally compatible.
 
 ### Left to the implementing agent
 
-- Exact annotation key for `opID` and the owner label constant name; Redis key prefixes and Lua script encoding.
-- Redis client choice and config wiring (`pkg/sandbox-manager/config` / `clients`, `cmd/sandbox-manager`); connection
-  pooling, retry/back-off, acquire timeout. The strict-failover posture is a resolved config knob (default off, §16); the
-  exact `WAIT <numreplicas> <timeout>` parameters (or synchronous-topology setup) when it is enabled are discretion.
-- Generic leadership lease name, `leaderelection` parameter values, and the `IsPrimary()` exposure on `SandboxManager`.
-- Exact `Tgrace` / settle / reconcile-interval values; the CR-write issue-deadline value; how reconcile lag and `q:resv`
-  cardinality are monitored/alerted.
-- External nested JSON shape for `quota` (must stay nested/extensible).
-- The code-level mechanism that records "CR-create call issued" so the §6.4 positional release classifier can decide
-  (e.g. a flag set immediately before the `Create`/`Update` call on the claim/clone paths).
-- The owner-label backfill **mechanism** (one-time Job vs init step) — but it must complete before enforcement is enabled
-  (the *policy* is resolved, §7 precondition B).
-- How the List collection `ResourceVersion` watermark is obtained from each read path (cached client vs `GetAPIReader`),
-  and whether the fast reconcile reads counts from the informer owner-index directly or via a dedicated event counter.
-- Optional `q:epoch` partial-rollback detection (§9): whether to implement it, and the heartbeat cadence / regression
-  check. Not required for the default async posture.
-- Startup detection of an unsupported Redis Cluster topology (reject vs warn), and the exact standalone/Sentinel client
-  wiring (§6.2).
+- Redis key prefixes, hash-tag form (`{K}`), Lua script encoding, and the footprint JSON shape stored in the entry.
+- The `footprintOf(podSpec)` helper (container iteration, init/sidecar handling, MB ceil rounding, `TemplateRef`
+  resolution and its fail-safe behaviour).
+- Redis client choice and config wiring (`pkg/sandbox-manager/config` / `clients`, `cmd/sandbox-manager`): pooling,
+  retry/back-off, acquire timeout, and the fail-open error classification.
+- The generic leadership lease name and `leaderelection` parameters; `IsPrimary()` exposure on `SandboxManager`.
+- Anti-drift cadence values, the warm-informer vs `GetAPIReader` split, and how missed-event divergence is monitored.
+- External nested JSON shape for `quota`.
+- The owner-label backfill **mechanism** (one-time Job vs init step); the **policy** (complete before enabling
+  enforcement) is resolved (§5/§12).
+- Where exactly `Acquire`/`Release` hook into `TryClaimSandbox` / clone / `DELETE`, and how a tentatively-picked pooled
+  sandbox is returned to the pool on a 429.
+- Owner label constant in `api/v1alpha1` and the `ListLiveSandboxEntriesByOwner` signature in `pkg/cache`.
+
+## 17. Deferred / Future Work
+
+- **Fail-closed posture** (`onRedisUnavailable: reject`): `q:warm` total-loss detector, Redis-clock `q:warmAt` settle
+  window, `COLD → 503`, and synchronous reservation replication (`WAIT` / sync topology) for strictness across failover.
+  Reintroduces global Redis keys (reopens the Cluster `CROSSSLOT` question).
+- **`limits.cpu` / `limits.memory` dimensions** and **per-template scope** (model already reserves them).
+- **Post-create 变配** (if the manager ever exposes it): an informer update-event handler that adjusts the entry
+  footprint and sums by the delta, plus optional admission gating of the resize against quota.
+- **Quota `PATCH`** with a safe-activation scheme (activation window or all-replica `QuotaSpec` cache invalidation).
+- **Footprint annotation on the CR** (if a consistent read should avoid template resolution).
+- **Apiserver-side fencing** (a validating webhook rejecting a Sandbox create whose reservation is unknown/expired) for
+  absolute 0-oversell under failure intersections — out of scope by product decision.
+- **Official Redis Cluster support** (testing + the deferred-posture hash-tag redesign).
