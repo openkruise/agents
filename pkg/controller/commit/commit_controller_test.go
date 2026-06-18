@@ -86,10 +86,9 @@ func newTestReconciler(objs ...client.Object) (*CommitReconciler, *mockControl) 
 	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).WithStatusSubresource(&agentsv1alpha1.Commit{}).Build()
 	mock := &mockControl{}
 	r := &CommitReconciler{
-		Client:    fc,
-		APIReader: fc,
-		Scheme:    scheme,
-		Recorder:  record.NewFakeRecorder(10),
+		Client:   fc,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(10),
 		controls: map[string]core.CommitControl{
 			core.CommonControlName: mock,
 		},
@@ -480,31 +479,8 @@ func TestGetControl_EmptyDefault(t *testing.T) {
 	}
 }
 
-// errorReader is a client.Reader that returns a non-NotFound error for Pod Get.
-type errorReader struct {
-	client.Reader
-	err error
-}
-
-func (e *errorReader) Get(_ context.Context, _ client.ObjectKey, obj client.Object, _ ...client.GetOption) error {
-	if _, ok := obj.(*corev1.Pod); ok {
-		return e.err
-	}
-	return e.Reader.Get(context.TODO(), client.ObjectKey{}, obj)
-}
-
-func TestReconcile_PodGetNonNotFoundError(t *testing.T) {
-	commit := newCommit("test-commit", "default", agentsv1alpha1.CommitPhasePending)
-	r, _ := newTestReconciler(commit)
-	r.APIReader = &errorReader{Reader: r.Client, err: fmt.Errorf("connection refused")}
-
-	_, err := r.Reconcile(context.TODO(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "test-commit", Namespace: "default"},
-	})
-	if err == nil {
-		t.Fatal("expected error for non-NotFound pod fetch failure")
-	}
-}
+// errorReader is removed — the controller now reads pods from informer cache (r.Get),
+// so the APIReader error path no longer exists.
 
 func TestReconcile_UnknownPhase(t *testing.T) {
 	commit := newCommit("test-commit", "default", agentsv1alpha1.CommitPhase("UnknownPhase"))

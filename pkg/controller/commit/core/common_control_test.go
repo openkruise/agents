@@ -349,11 +349,13 @@ func TestEnsureCommitRunning_Success(t *testing.T) {
 		t.Errorf("expected CommitID 'test-commit', got %s", newStatus.CommitID)
 	}
 
-	// Verify Job was created
-	jobName := jobutil.MakeJobName(string(commit.UID))
-	createdJob := &batchv1.Job{}
-	if err := fc.Get(context.TODO(), client.ObjectKey{Namespace: "default", Name: jobName}, createdJob); err != nil {
-		t.Fatalf("expected Job to be created: %v", err)
+	// Verify Job was created (by label since GenerateName produces a random name)
+	jobList := &batchv1.JobList{}
+	if err := fc.List(context.TODO(), jobList, client.InNamespace("default"), client.MatchingLabels{jobutil.LabelCommitUID: string(commit.UID)}); err != nil {
+		t.Fatalf("failed to list jobs: %v", err)
+	}
+	if len(jobList.Items) != 1 {
+		t.Fatalf("expected 1 Job, got %d", len(jobList.Items))
 	}
 }
 
@@ -393,7 +395,7 @@ func TestEnsureCommitRunning_JobPodAlreadyExists(t *testing.T) {
 			Name:      "existing-job-pod",
 			Namespace: "default",
 			Labels: map[string]string{
-				"batch.kubernetes.io/job-name": jobutil.MakeJobName(string(commit.UID)),
+				jobutil.LabelCommitUID: string(commit.UID),
 			},
 		},
 		Status: corev1.PodStatus{Phase: corev1.PodRunning},
@@ -418,31 +420,9 @@ func TestEnsureCommitRunning_JobPodAlreadyExists(t *testing.T) {
 	}
 }
 
-func TestApplyCommitJob_AlreadyExists(t *testing.T) {
-	os.Setenv("AGENT_JOB_IMAGE", "test-image:latest")
-	defer os.Unsetenv("AGENT_JOB_IMAGE")
-
-	scheme := newTestScheme()
-	commit := newTestCommit("test-commit", "default")
-	pod := newTestPod("test-pod", "default", "node-1")
-
-	// Pre-create the job so applyCommitJob hits IsAlreadyExists path
-	jobName := jobutil.MakeJobName(string(commit.UID))
-	existingJob := &batchv1.Job{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      jobName,
-			Namespace: "default",
-		},
-	}
-
-	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(commit, pod, existingJob).Build()
-	ctrl := newCommonControlForTest(fc)
-
-	err := ctrl.applyCommitJob(context.TODO(), commit, pod)
-	if err != nil {
-		t.Fatalf("expected no error for already-exists job, got: %v", err)
-	}
-}
+// TestApplyCommitJob_AlreadyExists is removed — with GenerateName, the Job name is
+// randomly generated so Create collisions are effectively impossible. The
+// IsAlreadyExists safety net remains in the production code.
 
 func TestEnsureCommitRunning_WithDockerSecret(t *testing.T) {
 	os.Setenv("AGENT_JOB_IMAGE", "test-image:latest")
@@ -467,12 +447,15 @@ func TestEnsureCommitRunning_WithDockerSecret(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Verify Job has docker-config volume
-	jobName := jobutil.MakeJobName(string(commit.UID))
-	createdJob := &batchv1.Job{}
-	if err := fc.Get(context.TODO(), client.ObjectKey{Namespace: "default", Name: jobName}, createdJob); err != nil {
-		t.Fatalf("expected Job: %v", err)
+	// Verify Job has docker-config volume (by label since GenerateName produces a random name)
+	jobList := &batchv1.JobList{}
+	if err := fc.List(context.TODO(), jobList, client.InNamespace("default"), client.MatchingLabels{jobutil.LabelCommitUID: string(commit.UID)}); err != nil {
+		t.Fatalf("failed to list jobs: %v", err)
 	}
+	if len(jobList.Items) != 1 {
+		t.Fatalf("expected 1 Job, got %d", len(jobList.Items))
+	}
+	createdJob := &jobList.Items[0]
 	// Verify docker-config volume is mounted with the secret name
 	found := false
 	for _, v := range createdJob.Spec.Template.Spec.Volumes {
@@ -545,7 +528,7 @@ func TestGetLatestJobPodExitCode(t *testing.T) {
 						Name:      "job-pod-1",
 						Namespace: "default",
 						Labels: map[string]string{
-							"batch.kubernetes.io/job-name": jobutil.MakeJobName("test-uid-1234"),
+							jobutil.LabelCommitUID: "test-uid-1234",
 						},
 						CreationTimestamp: metav1.Now(),
 					},
@@ -575,7 +558,7 @@ func TestGetLatestJobPodExitCode(t *testing.T) {
 						Name:      "job-pod-1",
 						Namespace: "default",
 						Labels: map[string]string{
-							"batch.kubernetes.io/job-name": jobutil.MakeJobName("test-uid-1234"),
+							jobutil.LabelCommitUID: "test-uid-1234",
 						},
 						CreationTimestamp: metav1.Now(),
 					},
@@ -605,7 +588,7 @@ func TestGetLatestJobPodExitCode(t *testing.T) {
 						Name:      "job-pod-1",
 						Namespace: "default",
 						Labels: map[string]string{
-							"batch.kubernetes.io/job-name": jobutil.MakeJobName("test-uid-1234"),
+							jobutil.LabelCommitUID: "test-uid-1234",
 						},
 						CreationTimestamp: metav1.Now(),
 					},
@@ -635,7 +618,7 @@ func TestGetLatestJobPodExitCode(t *testing.T) {
 						Name:      "job-pod-1",
 						Namespace: "default",
 						Labels: map[string]string{
-							"batch.kubernetes.io/job-name": jobutil.MakeJobName("test-uid-1234"),
+							jobutil.LabelCommitUID: "test-uid-1234",
 						},
 						CreationTimestamp: metav1.Now(),
 					},
@@ -662,7 +645,7 @@ func TestGetLatestJobPodExitCode(t *testing.T) {
 						Name:      "job-pod-1",
 						Namespace: "default",
 						Labels: map[string]string{
-							"batch.kubernetes.io/job-name": jobutil.MakeJobName("test-uid-1234"),
+							jobutil.LabelCommitUID: "test-uid-1234",
 						},
 						CreationTimestamp: metav1.Now(),
 					},

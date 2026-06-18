@@ -33,11 +33,16 @@ import (
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	jobutil "github.com/openkruise/agents/pkg/job"
 	"github.com/openkruise/agents/pkg/utils"
+	"github.com/openkruise/agents/pkg/utils/expectations"
 )
+
+// defaultCommitRequeueDuration is the requeue interval used when a commit Job is still running.
+const defaultCommitRequeueDuration = 30 * time.Second
 
 func init() {
 	RegisterCommitControl(CommitControlFactory{
@@ -57,15 +62,16 @@ func newCommonControl(c client.Client, recorder record.EventRecorder) (CommitCon
 }
 
 func (r *commonControl) EnsureCommitRunning(ctx context.Context, args *EnsureFuncArgs) (time.Duration, error) {
+	log := log.FromContext(ctx)
 	pod, commit := args.Pod, args.Commit
 
-	klog.InfoS("EnsureCommitRunning", "name", commit.Name, "namespace", commit.Namespace, "phase", commit.Status.Phase)
+	log.Info("EnsureCommitRunning", "name", commit.Name, "namespace", commit.Namespace, "phase", commit.Status.Phase)
 
 	if _, ok := commit.Annotations[utils.CommitAnnotationModeKey]; !ok {
 		patch := fmt.Sprintf(`{"metadata":{"annotations":{"%s":"%s"}}}`, utils.CommitAnnotationModeKey, CommonControlName)
 		rcvObject := &agentsv1alpha1.Commit{ObjectMeta: metav1.ObjectMeta{Namespace: commit.Namespace, Name: commit.Name}}
 		if err := r.Patch(ctx, rcvObject, client.RawPatch(types.MergePatchType, []byte(patch))); err != nil {
-			klog.ErrorS(err, "patch annotations failed", "commit", klog.KObj(commit))
+			log.Error(err, "patch annotations failed", "commit", klog.KObj(commit))
 			return 0, err
 		}
 	}
@@ -75,7 +81,7 @@ func (r *commonControl) EnsureCommitRunning(ctx context.Context, args *EnsureFun
 		return 0, fmt.Errorf("failed to list commit job pods: %w", err)
 	}
 	if len(jobPods.Items) > 0 {
-		klog.InfoS("commit job pod already exists, transitioning to Running", "commit", klog.KObj(commit))
+		log.Info("commit job pod already exists, transitioning to Running", "commit", klog.KObj(commit))
 		now := metav1.Now()
 		args.NewStatus.StartTime = &now
 		args.NewStatus.Phase = agentsv1alpha1.CommitPhaseRunning
@@ -84,7 +90,7 @@ func (r *commonControl) EnsureCommitRunning(ctx context.Context, args *EnsureFun
 
 	now := metav1.Now()
 	if err = r.applyCommitJob(ctx, commit, pod); err != nil {
-		klog.ErrorS(err, "EnsureCommitRunning failed", "commit", klog.KObj(commit))
+		log.Error(err, "EnsureCommitRunning failed", "commit", klog.KObj(commit))
 		args.NewStatus.StartTime = &now
 		args.NewStatus.Phase = agentsv1alpha1.CommitPhaseFailed
 		args.NewStatus.CompletionTime = &now
@@ -98,14 +104,21 @@ func (r *commonControl) EnsureCommitRunning(ctx context.Context, args *EnsureFun
 }
 
 func (r *commonControl) EnsureCommitUpdated(ctx context.Context, args *EnsureFuncArgs) (time.Duration, error) {
+	log := log.FromContext(ctx)
 	commit := args.Commit
-	klog.InfoS("EnsureCommitUpdated", "commit", klog.KObj(commit), "commitID", commit.Status.CommitID)
+	log.Info("EnsureCommitUpdated", "commit", klog.KObj(commit), "commitID", commit.Status.CommitID)
+
+	// Read the generated Job name from annotation; fall back to MakeJobName for backward compatibility.
+	jobName := commit.Annotations[utils.CommitAnnotationJobNameKey]
+	if jobName == "" {
+		jobName = jobutil.MakeJobName(string(commit.UID))
+	}
 
 	job := new(batchv1.Job)
-	jobKey := client.ObjectKey{Namespace: commit.Namespace, Name: jobutil.MakeJobName(string(commit.UID))}
+	jobKey := client.ObjectKey{Namespace: commit.Namespace, Name: jobName}
 	if err := r.Client.Get(ctx, jobKey, job); err != nil {
 		if errors.IsNotFound(err) {
-			klog.InfoS("Job not found, marking commit as failed", "commit", klog.KObj(commit))
+			log.Info("Job not found, marking commit as failed", "commit", klog.KObj(commit))
 			now := metav1.Now()
 			args.NewStatus.Phase = agentsv1alpha1.CommitPhaseFailed
 			args.NewStatus.CompletionTime = &now
@@ -116,11 +129,11 @@ func (r *commonControl) EnsureCommitUpdated(ctx context.Context, args *EnsureFun
 
 	done, success := jobutil.IsJobCompleted(job)
 	if !done {
-		klog.InfoS("Job still running, will requeue", "job", klog.KObj(job), "commit", klog.KObj(commit))
-		return 30 * time.Second, nil
+		log.Info("Job still running, will requeue", "job", klog.KObj(job), "commit", klog.KObj(commit))
+		return defaultCommitRequeueDuration, nil
 	}
 
-	klog.InfoS("Job completed", "job", klog.KObj(job), "commit", klog.KObj(commit), "success", success)
+	log.Info("Job completed", "job", klog.KObj(job), "commit", klog.KObj(commit), "success", success)
 	phase := agentsv1alpha1.CommitPhaseSucceeded
 	if !success {
 		phase = agentsv1alpha1.CommitPhaseFailed
@@ -135,18 +148,20 @@ func (r *commonControl) EnsureCommitUpdated(ctx context.Context, args *EnsureFun
 }
 
 func (r *commonControl) EnsureCommitDeleted(ctx context.Context, args *EnsureFuncArgs) (time.Duration, error) {
+	log := log.FromContext(ctx)
 	commit := args.Commit
 
 	_, err := utils.PatchFinalizer(ctx, r.Client, commit, utils.RemoveFinalizerOpType, agentsv1alpha1.CommitFinalizer)
 	if err != nil {
-		klog.ErrorS(err, "remove commit finalizer failed", "commit", klog.KObj(commit))
+		log.Error(err, "remove commit finalizer failed", "commit", klog.KObj(commit))
 		return 0, err
 	}
-	klog.InfoS("remove commit finalizer success", "commit", klog.KObj(commit))
+	log.Info("remove commit finalizer success", "commit", klog.KObj(commit))
 	return 0, nil
 }
 
 func (r *commonControl) applyCommitJob(ctx context.Context, commit *agentsv1alpha1.Commit, pod *corev1.Pod) error {
+	log := log.FromContext(ctx)
 	g := &jobutil.JobGenerator{Commit: commit, Pod: pod}
 
 	// Resolve registry auth secret (same namespace, mounted directly by name)
@@ -158,12 +173,23 @@ func (r *commonControl) applyCommitJob(ctx context.Context, commit *agentsv1alph
 	}
 	if err := r.Client.Create(ctx, job); err != nil {
 		if errors.IsAlreadyExists(err) {
-			klog.InfoS("Job already exists, ignore", "job", klog.KObj(job), "commit", klog.KObj(commit))
+			log.Info("Job already exists, ignore", "job", klog.KObj(job), "commit", klog.KObj(commit))
 			return nil
 		}
 		return fmt.Errorf("failed to create job: %w", err)
 	}
-	klog.InfoS("created Job", "job", klog.KObj(job), "commit", klog.KObj(commit))
+
+	// Write the generated Job name back to Commit annotation for later lookup.
+	patch := fmt.Sprintf(`{"metadata":{"annotations":{"%s":"%s"}}}`, utils.CommitAnnotationJobNameKey, job.Name)
+	rcvObject := &agentsv1alpha1.Commit{ObjectMeta: metav1.ObjectMeta{Namespace: commit.Namespace, Name: commit.Name}}
+	if err := r.Patch(ctx, rcvObject, client.RawPatch(types.MergePatchType, []byte(patch))); err != nil {
+		return fmt.Errorf("failed to patch commit job name annotation: %w", err)
+	}
+
+	// Set expectation to prevent duplicated reconcile from stale cache.
+	ScaleExpectations.ExpectScale(utils.GetControllerKey(commit), expectations.Create, job.Name)
+
+	log.Info("created Job", "job", klog.KObj(job), "commit", klog.KObj(commit))
 	return nil
 }
 
@@ -174,6 +200,7 @@ func (r *commonControl) applyCommitJob(ctx context.Context, commit *agentsv1alph
 // Tier 3: Pod's ServiceAccount imagePullSecrets (best-effort)
 // Returns the secret name, or empty string if no matching secret is found.
 func (r *commonControl) resolveRegistrySecretName(ctx context.Context, commit *agentsv1alpha1.Commit, pod *corev1.Pod) string {
+	log := log.FromContext(ctx)
 	ns := commit.Namespace
 
 	// Tier 1: Explicit registryAuth.secrets
@@ -181,11 +208,11 @@ func (r *commonControl) resolveRegistrySecretName(ctx context.Context, commit *a
 		for _, name := range commit.Spec.RegistryAuth.Secrets {
 			secret := &corev1.Secret{}
 			if err := r.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, secret); err != nil {
-				klog.V(4).InfoS("Failed to get registryAuth secret, trying next", "namespace", ns, "name", name, "err", err)
+				log.V(4).Info("Failed to get registryAuth secret, trying next", "namespace", ns, "name", name, "err", err)
 				continue
 			}
 			if secret.Type == corev1.SecretTypeDockerConfigJson {
-				klog.InfoS("Using registryAuth secret for registry auth", "namespace", ns, "name", name)
+				log.Info("Using registryAuth secret for registry auth", "namespace", ns, "name", name)
 				return name
 			}
 		}
@@ -208,7 +235,7 @@ func (r *commonControl) resolveRegistrySecretName(ctx context.Context, commit *a
 				secret := &corev1.Secret{}
 				if err := r.Get(ctx, client.ObjectKey{Namespace: pod.Namespace, Name: ref.Name}, secret); err == nil {
 					if secret.Type == corev1.SecretTypeDockerConfigJson {
-						klog.InfoS("Using SA imagePullSecret for registry auth (best-effort)", "namespace", pod.Namespace, "name", ref.Name)
+						log.Info("Using SA imagePullSecret for registry auth (best-effort)", "namespace", pod.Namespace, "name", ref.Name)
 						return ref.Name
 					}
 				}
@@ -216,7 +243,7 @@ func (r *commonControl) resolveRegistrySecretName(ctx context.Context, commit *a
 		}
 	}
 
-	klog.InfoS("No registry secret found, commit will attempt anonymous push", "commit", klog.KObj(commit))
+	log.Info("No registry secret found, commit will attempt anonymous push", "commit", klog.KObj(commit))
 	return ""
 }
 
@@ -224,6 +251,7 @@ func (r *commonControl) resolveRegistrySecretName(ctx context.Context, commit *a
 // parses their auth configs, and returns the name of the first secret that contains
 // credentials matching the target registry host.
 func (r *commonControl) resolveRegistrySecretByKeyring(ctx context.Context, commit *agentsv1alpha1.Commit) string {
+	log := log.FromContext(ctx)
 	targetRegistry := extractRegistryHost(commit.Spec.Image)
 	if targetRegistry == "" {
 		return ""
@@ -231,7 +259,7 @@ func (r *commonControl) resolveRegistrySecretByKeyring(ctx context.Context, comm
 
 	secretList := &corev1.SecretList{}
 	if err := r.Client.List(ctx, secretList, client.InNamespace(commit.Namespace)); err != nil {
-		klog.V(4).InfoS("Failed to list secrets in namespace for Tier 2 lookup", "namespace", commit.Namespace, "err", err)
+		log.V(4).Info("Failed to list secrets in namespace for Tier 2 lookup", "namespace", commit.Namespace, "err", err)
 		return ""
 	}
 
@@ -241,7 +269,7 @@ func (r *commonControl) resolveRegistrySecretByKeyring(ctx context.Context, comm
 			continue
 		}
 		if matchRegistryInDockerConfig(secret, targetRegistry) {
-			klog.InfoS("Using namespace secret for registry auth (Tier 2)",
+			log.Info("Using namespace secret for registry auth (Tier 2)",
 				"namespace", secret.Namespace, "name", secret.Name, "registry", targetRegistry)
 			return secret.Name
 		}
@@ -333,11 +361,12 @@ func extractRegistryHost(image string) string {
 
 func (r *commonControl) listCRJobPods(ctx context.Context, commit *agentsv1alpha1.Commit) (*corev1.PodList, error) {
 	jobPods := &corev1.PodList{}
-	// Filter by the standard label set automatically by the Kubernetes Job
-	// controller (stable since K8s 1.27). This avoids relying on a custom label
-	// being correctly propagated from the Job spec to its child Pods.
+	// Filter by the commit-uid label set on the Job pod template. This works
+	// with GenerateName (where the Job name is not deterministic) and avoids
+	// relying on the batch.kubernetes.io/job-name label which requires knowing
+	// the generated name.
 	matchingLabels := client.MatchingLabels{
-		"batch.kubernetes.io/job-name": jobutil.MakeJobName(string(commit.UID)),
+		jobutil.LabelCommitUID: string(commit.UID),
 	}
 	if err := r.Client.List(ctx, jobPods, client.InNamespace(commit.Namespace), matchingLabels); err != nil {
 		return nil, err
@@ -346,13 +375,14 @@ func (r *commonControl) listCRJobPods(ctx context.Context, commit *agentsv1alpha
 }
 
 func (r *commonControl) getLatestJobPodExitCode(ctx context.Context, commit *agentsv1alpha1.Commit) *metav1.Condition {
+	log := log.FromContext(ctx)
 	jobPods, err := r.listCRJobPods(ctx, commit)
 	if err != nil {
-		klog.ErrorS(err, "list job pods failed", "commit", klog.KObj(commit))
+		log.Error(err, "list job pods failed", "commit", klog.KObj(commit))
 		return nil
 	}
 	if jobPods == nil || len(jobPods.Items) == 0 {
-		klog.InfoS("job pods not found", "commit", klog.KObj(commit))
+		log.Info("job pods not found", "commit", klog.KObj(commit))
 		return nil
 	}
 	sort.Slice(jobPods.Items, func(i, j int) bool {

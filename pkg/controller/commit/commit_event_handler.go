@@ -23,13 +23,14 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/workqueue"
-	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	"github.com/openkruise/agents/pkg/controller/commit/core"
 	jobutil "github.com/openkruise/agents/pkg/job"
+	"github.com/openkruise/agents/pkg/utils/expectations"
 )
 
 var _ handler.TypedEventHandler[client.Object, reconcile.Request] = &enqueueRequestForJob{}
@@ -44,21 +45,22 @@ type enqueueRequestForJob struct {
 func (p *enqueueRequestForJob) addEvent(q workqueue.TypedRateLimitingInterface[reconcile.Request], obj runtime.Object) {
 	job, ok := obj.(*batchv1.Job)
 	if !ok {
-		klog.Errorf("convert object to Job failed, object: %#v", obj)
 		return
 	}
-	klog.InfoS("add commit job event", "job", klog.KObj(job))
 
 	commitName, ok := job.Labels[jobutil.LabelCommitName]
 	if !ok {
 		return
 	}
 
-	complete, success := jobutil.IsJobCompleted(job)
+	// Observe the Create expectation so the controller knows the Job is in the cache.
+	commitKey := types.NamespacedName{Namespace: job.Namespace, Name: commitName}.String()
+	core.ScaleExpectations.ObserveScale(commitKey, expectations.Create, job.Name)
+
+	complete, _ := jobutil.IsJobCompleted(job)
 	if !complete {
 		return
 	}
-	klog.InfoS("job complete add commit job event", "commitName", commitName, "success", success, "job", klog.KObj(job))
 	q.Add(reconcile.Request{
 		NamespacedName: types.NamespacedName{
 			Namespace: job.Namespace,
@@ -72,6 +74,24 @@ func (e *enqueueRequestForJob) Create(_ context.Context, evt event.TypedCreateEv
 }
 
 func (p *enqueueRequestForJob) Delete(_ context.Context, evt event.TypedDeleteEvent[client.Object], q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
+	job, ok := evt.Object.(*batchv1.Job)
+	if !ok {
+		return
+	}
+	commitName, ok := job.Labels[jobutil.LabelCommitName]
+	if !ok {
+		return
+	}
+	// Clean up any stale Create expectation to prevent expectation leaks.
+	commitKey := types.NamespacedName{Namespace: job.Namespace, Name: commitName}.String()
+	core.ScaleExpectations.ObserveScale(commitKey, expectations.Create, job.Name)
+
+	q.Add(reconcile.Request{
+		NamespacedName: types.NamespacedName{
+			Namespace: job.Namespace,
+			Name:      commitName,
+		},
+	})
 }
 
 func (p *enqueueRequestForJob) Generic(_ context.Context, evt event.TypedGenericEvent[client.Object], q workqueue.TypedRateLimitingInterface[reconcile.Request]) {

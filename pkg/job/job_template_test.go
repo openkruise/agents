@@ -182,8 +182,8 @@ func TestGenerateCommitJob_Success(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if got := job.Name; got != MakeJobName(string(g.Commit.UID)) {
-		t.Errorf("job.Name=%q, want %q", got, MakeJobName(string(g.Commit.UID)))
+	if got := job.GenerateName; got != MakeJobName(string(g.Commit.UID)) {
+		t.Errorf("job.GenerateName=%q, want %q", got, MakeJobName(string(g.Commit.UID)))
 	}
 	if job.Namespace != "test-ns" {
 		t.Errorf("job.Namespace=%q, want test-ns", job.Namespace)

@@ -26,9 +26,16 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/utils/expectations"
 )
 
 const CommonControlName = "common"
+
+var (
+	// ScaleExpectations tracks expected Job create actions to avoid duplicated
+	// reconciles due to stale informer cache. Aligned with the sandbox controller pattern.
+	ScaleExpectations = expectations.NewScaleExpectations()
+)
 
 type EnsureFuncArgs struct {
 	Pod       *corev1.Pod

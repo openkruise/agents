@@ -32,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -42,6 +43,7 @@ import (
 	"github.com/openkruise/agents/pkg/discovery"
 	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/utils"
+	"github.com/openkruise/agents/pkg/utils/expectations"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 )
 
@@ -58,13 +60,9 @@ func init() {
 // CommitReconciler reconciles a Commit object
 type CommitReconciler struct {
 	client.Client
-	// APIReader bypasses the informer cache and reads directly from the API server.
-	// This is needed because the Pod informer cache may be filtered by label selector
-	// (CachePodLabelSelector feature gate), but Commit can target any Pod.
-	APIReader client.Reader
-	Scheme    *runtime.Scheme
-	Recorder  record.EventRecorder
-	controls  map[string]core.CommitControl
+	Scheme   *runtime.Scheme
+	Recorder record.EventRecorder
+	controls map[string]core.CommitControl
 }
 
 func Add(mgr ctrl.Manager) error {
@@ -77,11 +75,10 @@ func Add(mgr ctrl.Manager) error {
 		return err
 	}
 	if err = (&CommitReconciler{
-		Client:    mgr.GetClient(),
-		APIReader: mgr.GetAPIReader(),
-		Scheme:    mgr.GetScheme(),
-		Recorder:  recorder,
-		controls:  controls,
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: recorder,
+		controls: controls,
 	}).SetupWithManager(mgr); err != nil {
 		return err
 	}
@@ -99,11 +96,12 @@ func Add(mgr ctrl.Manager) error {
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=create;delete;get;watch;list
 
 func (r *CommitReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, err error) {
-	klog.InfoS("Reconcile", "name", req.Name, "namespace", req.Namespace)
+	log := log.FromContext(ctx)
+	log.Info("Reconcile", "name", req.Name, "namespace", req.Namespace)
 	commit := &agentsv1alpha1.Commit{}
 	if err = r.Get(ctx, req.NamespacedName, commit); err != nil {
 		if errors.IsNotFound(err) {
-			klog.V(4).InfoS("Commit not found", "name", req.Name, "namespace", req.Namespace)
+			log.V(4).Info("Commit not found", "name", req.Name, "namespace", req.Namespace)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
@@ -111,14 +109,14 @@ func (r *CommitReconciler) Reconcile(ctx context.Context, req ctrl.Request) (res
 
 	start := time.Now()
 	defer func() {
-		klog.V(4).InfoS("Reconcile finished", "name", req.Name, "namespace", req.Namespace, "elapsed", time.Since(start), "err", err)
+		log.V(4).Info("Reconcile finished", "name", req.Name, "namespace", req.Namespace, "elapsed", time.Since(start), "err", err)
 	}()
 
-	// Fetch target pod directly from API server to bypass informer cache filtering.
-	// The Pod informer may be scoped by label selector (CachePodLabelSelector),
-	// but Commit can target any Pod, not just Sandbox-managed ones.
+	// Fetch target pod from informer cache. Commit only targets Sandbox pods,
+	// which always carry the created-by label and are guaranteed in the cache
+	// even with CachePodLabelSelector enabled.
 	pod := &corev1.Pod{}
-	if err = r.APIReader.Get(ctx, client.ObjectKey{Namespace: commit.Namespace, Name: commit.Spec.PodName}, pod); err != nil {
+	if err = r.Get(ctx, client.ObjectKey{Namespace: commit.Namespace, Name: commit.Spec.PodName}, pod); err != nil {
 		if !errors.IsNotFound(err) {
 			return ctrl.Result{}, err
 		}
@@ -130,7 +128,7 @@ func (r *CommitReconciler) Reconcile(ctx context.Context, req ctrl.Request) (res
 	// Get control implementation
 	control, err := r.getControl(commit)
 	if err != nil {
-		klog.ErrorS(err, "get control failed", "commit", klog.KObj(commit))
+		log.Error(err, "get control failed", "commit", klog.KObj(commit))
 		return ctrl.Result{}, err
 	}
 
@@ -156,11 +154,20 @@ func (r *CommitReconciler) Reconcile(ctx context.Context, req ctrl.Request) (res
 
 	switch commit.Status.Phase {
 	case agentsv1alpha1.CommitPhasePending, "":
+		// Check ScaleExpectations to avoid duplicated Job creation due to stale cache.
+		if isSatisfied, unsatisfiedDuration, _ := core.ScaleExpectations.SatisfiedExpectations(utils.GetControllerKey(commit)); !isSatisfied {
+			if unsatisfiedDuration < expectations.ExpectationTimeout {
+				log.Info("Not satisfied ScaleExpectation for Commit, wait for cache event", "commit", klog.KObj(commit))
+				return ctrl.Result{RequeueAfter: expectations.ExpectationTimeout - unsatisfiedDuration}, nil
+			}
+			log.Info("ScaleExpectation unsatisfied overtime, proceeding", "commit", klog.KObj(commit))
+			core.ScaleExpectations.DeleteExpectations(utils.GetControllerKey(commit))
+		}
 		return r.handleCommitPending(ctx, args, control)
 	case agentsv1alpha1.CommitPhaseRunning:
 		return r.handleCommitRunning(ctx, args, control)
 	default:
-		klog.InfoS("Unknown commit phase", "commit", klog.KObj(commit), "phase", commit.Status.Phase)
+		log.Info("Unknown commit phase", "commit", klog.KObj(commit), "phase", commit.Status.Phase)
 		return ctrl.Result{}, nil
 	}
 }
@@ -181,17 +188,19 @@ func (r *CommitReconciler) getControl(commit *agentsv1alpha1.Commit) (core.Commi
 }
 
 func (r *CommitReconciler) handleCommitDelete(ctx context.Context, args *core.EnsureFuncArgs, control core.CommitControl) (ctrl.Result, error) {
+	log := log.FromContext(ctx)
 	commit := args.Commit
-	klog.V(3).InfoS("handleCommitDelete", "commit", klog.KObj(commit), "commitID", commit.Status.CommitID, "uid", commit.UID)
+	log.V(3).Info("handleCommitDelete", "commit", klog.KObj(commit), "commitID", commit.Status.CommitID, "uid", commit.UID)
 	requeueAfter, err := control.EnsureCommitDeleted(ctx, args)
 	if err != nil {
-		klog.ErrorS(err, "handleCommitDelete failed", "commit", klog.KObj(commit))
+		log.Error(err, "handleCommitDelete failed", "commit", klog.KObj(commit))
 		return ctrl.Result{RequeueAfter: requeueAfter}, err
 	}
 	return ctrl.Result{}, nil
 }
 
 func (r *CommitReconciler) handleCommitPending(ctx context.Context, args *core.EnsureFuncArgs, control core.CommitControl) (ctrl.Result, error) {
+	log := log.FromContext(ctx)
 	commit := args.Commit
 	if args.Pod == nil {
 		now := metav1.Now()
@@ -203,7 +212,7 @@ func (r *CommitReconciler) handleCommitPending(ctx context.Context, args *core.E
 	requeueAfter, err := control.EnsureCommitRunning(ctx, args)
 	if err != nil {
 		if retErr := r.updateCommitStatus(ctx, *args.NewStatus, commit); retErr != nil {
-			klog.ErrorS(retErr, "Failed to update commit status on error", "commit", klog.KObj(commit))
+			log.Error(retErr, "Failed to update commit status on error", "commit", klog.KObj(commit))
 		}
 		return ctrl.Result{}, err
 	}
@@ -211,11 +220,12 @@ func (r *CommitReconciler) handleCommitPending(ctx context.Context, args *core.E
 }
 
 func (r *CommitReconciler) handleCommitRunning(ctx context.Context, args *core.EnsureFuncArgs, control core.CommitControl) (ctrl.Result, error) {
+	log := log.FromContext(ctx)
 	commit := args.Commit
 	requeueAfter, err := control.EnsureCommitUpdated(ctx, args)
 	if err != nil {
 		if retErr := r.updateCommitStatus(ctx, *args.NewStatus, commit); retErr != nil {
-			klog.ErrorS(retErr, "Failed to update commit status on error", "commit", klog.KObj(commit))
+			log.Error(retErr, "Failed to update commit status on error", "commit", klog.KObj(commit))
 		}
 		return ctrl.Result{}, err
 	}
@@ -223,6 +233,7 @@ func (r *CommitReconciler) handleCommitRunning(ctx context.Context, args *core.E
 }
 
 func (r *CommitReconciler) handleCommitTTL(ctx context.Context, commit *agentsv1alpha1.Commit) (ctrl.Result, error) {
+	log := log.FromContext(ctx)
 	if commit.Spec.TtlAfterFinished == nil {
 		return ctrl.Result{}, nil
 	}
@@ -233,7 +244,7 @@ func (r *CommitReconciler) handleCommitTTL(ctx context.Context, commit *agentsv1
 	}
 	timeSinceCompletion := time.Since(completionTime.Time)
 	if timeSinceCompletion > ttl {
-		klog.InfoS("TTL expired, deleting commit", "commit", klog.KObj(commit), "ttl", ttl)
+		log.Info("TTL expired, deleting commit", "commit", klog.KObj(commit), "ttl", ttl)
 		r.Recorder.Eventf(commit, corev1.EventTypeNormal, "TTLExpired", "Deleting Commit after TTL of %v", ttl)
 		return ctrl.Result{}, client.IgnoreNotFound(r.Delete(ctx, commit))
 	}
@@ -242,6 +253,7 @@ func (r *CommitReconciler) handleCommitTTL(ctx context.Context, commit *agentsv1
 }
 
 func (r *CommitReconciler) updateCommitStatus(ctx context.Context, newStatus agentsv1alpha1.CommitStatus, commit *agentsv1alpha1.Commit) error {
+	log := log.FromContext(ctx)
 	if reflect.DeepEqual(commit.Status, newStatus) {
 		return nil
 	}
@@ -249,10 +261,10 @@ func (r *CommitReconciler) updateCommitStatus(ctx context.Context, newStatus age
 	patchStatus := fmt.Sprintf(`{"status":%s}`, string(by))
 	rcvObject := &agentsv1alpha1.Commit{ObjectMeta: metav1.ObjectMeta{Namespace: commit.Namespace, Name: commit.Name}}
 	if err := client.IgnoreNotFound(r.Status().Patch(ctx, rcvObject, client.RawPatch(types.MergePatchType, []byte(patchStatus)))); err != nil {
-		klog.ErrorS(err, "Failed to update commit status", "commit", klog.KObj(commit))
+		log.Error(err, "Failed to update commit status", "commit", klog.KObj(commit))
 		return err
 	}
-	klog.InfoS("Updated commit status", "commit", klog.KObj(commit), "phase", newStatus.Phase)
+	log.Info("Updated commit status", "commit", klog.KObj(commit), "phase", newStatus.Phase)
 	commit.Status = newStatus
 	return nil
 }
