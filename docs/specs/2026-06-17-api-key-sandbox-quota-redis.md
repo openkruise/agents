@@ -1,6 +1,6 @@
 # API Key Sandbox Quota — Design Spec (Redis-backed, count-only live-set)
 
-- Date: 2026-06-18 (rev4)
+- Date: 2026-06-19 (rev5)
 - Branch: `feature/e2b-api-quota-260617`
 - Supersedes:
   - rev0–rev2: the per-shard Lease leader-election design and the Redis **committed-counter +
@@ -9,7 +9,7 @@
     **footprint**, `q:sum:cpu/mem:{K}` keys, an atomic `resyncSums`, and a `TemplateRef`-immutability
     requirement; defaulted to **fail-open**; and reclaimed slots with **eager** release on any create failure
     and **pre-emptive** release on delete.
-  - rev3 → rev4 (this revision), driven by a scope/consistency review:
+  - rev3 → rev4, driven by a scope/consistency review:
     1. **Phase 1 scope cut to `sandbox.count` only.** The cpu/memory dimensions, the per-entry footprint, the
        `q:sum:*` keys, `resyncSums`, and the `TemplateRef`-immutability requirement are **removed from Phase 1**
        and reserved as future extension points (§16). The Redis live set is now a **count-only membership map**
@@ -27,6 +27,15 @@
        (the bidirectional anti-drift removes a truly-leaked entry after grace); manager `DELETE` releases **only
        after the deletion is accepted** (the CR has a `DeletionTimestamp` / is Terminating) or an informer event
        confirms it.
+  - rev4 → rev5 (this revision), driven by an implementation-planning review:
+    **Create-failure release widened from provably-pre-CR to also cover cleanup-deleted.** §6.4 path 1, the
+    acquire hook (step 5), and the §15 classification now release the charge not only when the failure is
+    provably **before any CR write**, but also when the attempt **did create a CR and the failed-sandbox cleanup
+    successfully requested its deletion** (so it is no longer `isLiveForQuota`, matching path 2). **Ambiguous**
+    failures (a CR may have been committed and deletion is unproven — e.g. a post-write timeout, or a reserved
+    failed Sandbox that still counts) **keep** the charge for anti-drift. Because this only releases
+    provably-gone slots, it tightens the bounded under-sell window without weakening the
+    no-over-sell-while-healthy guarantee.
 - Scope: `pkg/servers/e2b/` (create, api_key, models, keys, routes), `pkg/servers/e2b/quota/` (new:
   `QuotaManager`, the Redis backend, the count-only Lua, and the leader-gated anti-drift **driver**),
   `pkg/sandbox-manager/` (api/infra wiring, a generic `IsPrimary()` leadership capability),
@@ -333,11 +342,13 @@ A slot is freed only once its sandbox's deletion is **accepted or proven** — n
 idempotent, safe to overlap):
 
 1. **Create failure → conservative release.** The replica handling the create releases the charge **only when
-   it is provable that no CR was created** (the failure occurred strictly before any CR write). On an
-   **ambiguous** failure (a CR may have been committed — e.g. a post-write timeout), it **keeps** the charge.
-   If no live CR in fact exists, the bidirectional anti-drift (§6.4.2) removes the leaked entry once its age
-   exceeds grace; if a live CR does exist, the charge was correct. The trade is a bounded **under-sell**
-   (over-rejection) for up to grace, never an over-sell — the safe direction.
+   it is provable that no live CR remains charged by this attempt**: either the failure occurred strictly
+   before any CR write, or the attempt did create a CR and the failed-sandbox cleanup successfully requested
+   deletion for that CR (so it is no longer `isLiveForQuota`, matching path 2). On an **ambiguous** failure (a
+   CR may have been committed and cleanup did not prove deletion acceptance — e.g. a post-write timeout), it
+   **keeps** the charge. If no live CR in fact exists, the bidirectional anti-drift (§6.4.2) removes the leaked
+   entry once its age exceeds grace; if a live CR does exist, the charge was correct. The trade is a bounded
+   **under-sell** (over-rejection) for up to grace, never an over-sell — the safe direction.
 2. **Manager `DELETE /sandboxes/{id}` → release after deletion is accepted.** The handler issues the delete and
    releases the lockstring **only after the apiserver has accepted the deletion** (the CR has a
    `DeletionTimestamp` / has entered Terminating → no longer `isLiveForQuota`). This is **not** pre-emptive:
@@ -557,8 +568,9 @@ Operational recommendation to keep loss rare even under fail-open: Redis AOF `ap
 4. The `lockstring` is the one `LockSandbox` already stamps on the CR — no extra CR write, no infra interface
    change.
 5. Run `ClaimSandbox` / `CloneSandbox`. On failure → **conservative release** (§6.4 path 1): release with
-   `context.WithoutCancel` **only** if the failure is provably pre-CR; otherwise keep the charge for anti-drift.
-   On success → nothing; the entry already reflects the live sandbox.
+   `context.WithoutCancel` **only** if the failure is provably pre-CR or failed-sandbox cleanup has successfully
+   requested deletion of the attempt's CR; otherwise keep the charge for anti-drift. On success → nothing; the
+   entry already reflects the live sandbox.
 
 `DELETE /sandboxes/{id}` releases the lockstring (§6.4 path 2) **after** the apiserver accepts the deletion (CR
 → deletion-requested), for low-latency-but-safe slot return; the leader's event handler (path 3) is the backstop
@@ -721,9 +733,10 @@ Authorization reuses `CheckCreateAPIKeyPermission`; quota set chains `CheckApiKe
 - Anti-drift cadence values, the key-store enumeration of limited keys, and how missed-event divergence is
   monitored.
 - External nested JSON shape for `quota`.
-- The exact rule for classifying a create failure as **provably pre-CR** vs **ambiguous** (which infra errors
-  guarantee no CR was written), and where exactly clone stamps its lockstring (the `Modifier` at `create.go:200`
-  vs `newSandboxFromTemplate`), reusing `NewLockString()`.
+- The exact rule for classifying a create failure as **provably pre-CR**, **cleanup-deleted**, or **ambiguous**
+  (which infra errors guarantee no CR was written, and which failed-sandbox cleanup branches prove deletion
+  acceptance), and where exactly clone stamps its lockstring (the `Modifier` at `create.go:200` vs
+  `newSandboxFromTemplate`), reusing `NewLockString()`.
 - Where exactly `Acquire`/`Release` hook into `TryClaimSandbox` / clone / `DELETE`, and how a tentatively-picked
   pooled sandbox is returned to the pool on a 429.
 - The `ListLiveLockstringsByOwner` signature in `pkg/cache` (over `IndexUser`).
