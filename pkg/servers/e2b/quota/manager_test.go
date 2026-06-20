@@ -34,6 +34,8 @@ type managerTestBackend struct {
 	releaseCalls int
 	deleteCalls  int
 
+	releaseContextHasDeadline bool
+
 	acquireErr error
 	releaseErr error
 	deleteErr  error
@@ -44,8 +46,9 @@ func (b *managerTestBackend) Acquire(context.Context, string, string, int64) err
 	return b.acquireErr
 }
 
-func (b *managerTestBackend) Release(context.Context, string, string) error {
+func (b *managerTestBackend) Release(ctx context.Context, apiKeyID, lockString string) error {
 	b.releaseCalls++
+	_, b.releaseContextHasDeadline = ctx.Deadline()
 	return b.releaseErr
 }
 
@@ -64,22 +67,36 @@ func (b *managerTestBackend) DeleteSubject(context.Context, string) error {
 
 func TestManagerAcquireUnlimitedZeroBackendIO(t *testing.T) {
 	tests := []struct {
-		name  string
-		quota *models.QuotaSpec
+		name       string
+		apiKeyID   string
+		lockString string
+		quota      *models.QuotaSpec
 	}{
 		{
-			name:  "nil quota",
-			quota: nil,
+			name:       "nil quota with identity",
+			apiKeyID:   "key-1",
+			lockString: "lock-1",
+			quota:      nil,
 		},
 		{
-			name:  "empty quota",
-			quota: &models.QuotaSpec{},
+			name:       "empty quota with empty api key id",
+			apiKeyID:   "",
+			lockString: "lock-1",
+			quota:      &models.QuotaSpec{},
 		},
 		{
-			name: "limited fields absent",
+			name:       "limited fields absent with empty lock string",
+			apiKeyID:   "key-1",
+			lockString: "",
 			quota: &models.QuotaSpec{
 				Limits: []models.QuotaLimit{{Dimension: models.DimSandboxCount}},
 			},
+		},
+		{
+			name:       "nil quota with empty identity",
+			apiKeyID:   "",
+			lockString: "",
+			quota:      nil,
 		},
 	}
 
@@ -91,8 +108,8 @@ func TestManagerAcquireUnlimitedZeroBackendIO(t *testing.T) {
 			before := testutil.ToFloat64(acquireTotal.WithLabelValues("unlimited"))
 
 			err := manager.Acquire(context.Background(), AcquireRequest{
-				APIKeyID:   "",
-				LockString: "",
+				APIKeyID:   tt.apiKeyID,
+				LockString: tt.lockString,
 				Quota:      tt.quota,
 			})
 			require.NoError(t, err)
@@ -113,6 +130,12 @@ func TestManagerAcquireLimitedRejectAndFailOpen(t *testing.T) {
 		expectAcquireLabel  string
 		expectBackendErrors int
 	}{
+		{
+			name:               "backend allows",
+			expectNil:          true,
+			expectBackendCalls: 1,
+			expectAcquireLabel: "allowed",
+		},
 		{
 			name:               "quota exceeded rejects",
 			acquireErr:         ErrQuotaExceeded,
@@ -210,6 +233,123 @@ func TestManagerAcquireLimitedMissingIdentityErrors(t *testing.T) {
 			assert.Contains(t, err.Error(), tt.lock)
 			assert.Zero(t, backend.acquireCalls)
 			assert.Equal(t, before+1, testutil.ToFloat64(acquireTotal.WithLabelValues("error")))
+		})
+	}
+}
+
+func TestManagerRelease(t *testing.T) {
+	tests := []struct {
+		name                string
+		apiKeyID            string
+		lockString          string
+		releaseErr          error
+		contextWithDeadline bool
+		expectBackendCalls  int
+		expectError         bool
+		expectBackendErrors int
+	}{
+		{
+			name:       "empty api key id is no-op",
+			lockString: "lock-1",
+		},
+		{
+			name:     "empty lock string is no-op",
+			apiKeyID: "key-1",
+		},
+		{
+			name:               "backend success",
+			apiKeyID:           "key-1",
+			lockString:         "lock-1",
+			expectBackendCalls: 1,
+		},
+		{
+			name:                "backend error propagates",
+			apiKeyID:            "key-1",
+			lockString:          "lock-1",
+			releaseErr:          ErrBackendUnavailable,
+			expectBackendCalls:  1,
+			expectError:         true,
+			expectBackendErrors: 1,
+		},
+		{
+			name:                "caller deadline is preserved",
+			apiKeyID:            "key-1",
+			lockString:          "lock-1",
+			contextWithDeadline: true,
+			expectBackendCalls:  1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			backend := &managerTestBackend{releaseErr: tt.releaseErr}
+			manager := NewManager(backend)
+			beforeBackendErrors := testutil.ToFloat64(backendErrorsTotal.WithLabelValues("release"))
+			ctx := context.Background()
+			if tt.contextWithDeadline {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, time.Second)
+				defer cancel()
+			}
+
+			err := manager.Release(ctx, ReleaseRequest{APIKeyID: tt.apiKeyID, LockString: tt.lockString})
+			if tt.expectError {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+
+			assert.Equal(t, tt.expectBackendCalls, backend.releaseCalls)
+			assert.Equal(t, beforeBackendErrors+float64(tt.expectBackendErrors), testutil.ToFloat64(backendErrorsTotal.WithLabelValues("release")))
+			if tt.expectBackendCalls > 0 && tt.contextWithDeadline {
+				assert.True(t, backend.releaseContextHasDeadline)
+			}
+		})
+	}
+}
+
+func TestManagerDeleteSubject(t *testing.T) {
+	tests := []struct {
+		name                string
+		apiKeyID            string
+		deleteErr           error
+		expectBackendCalls  int
+		expectError         bool
+		expectBackendErrors int
+	}{
+		{
+			name: "empty api key id is no-op",
+		},
+		{
+			name:               "backend success",
+			apiKeyID:           "key-1",
+			expectBackendCalls: 1,
+		},
+		{
+			name:                "backend error propagates",
+			apiKeyID:            "key-1",
+			deleteErr:           ErrBackendUnavailable,
+			expectBackendCalls:  1,
+			expectError:         true,
+			expectBackendErrors: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			backend := &managerTestBackend{deleteErr: tt.deleteErr}
+			manager := NewManager(backend)
+			beforeBackendErrors := testutil.ToFloat64(backendErrorsTotal.WithLabelValues("delete_subject"))
+
+			err := manager.DeleteSubject(context.Background(), tt.apiKeyID)
+			if tt.expectError {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+
+			assert.Equal(t, tt.expectBackendCalls, backend.deleteCalls)
+			assert.Equal(t, beforeBackendErrors+float64(tt.expectBackendErrors), testutil.ToFloat64(backendErrorsTotal.WithLabelValues("delete_subject")))
 		})
 	}
 }

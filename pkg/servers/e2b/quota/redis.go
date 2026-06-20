@@ -66,19 +66,15 @@ func (b *RedisBackend) Acquire(ctx context.Context, apiKeyID, lockString string,
 
 	result, err := acquireRedisScript.Run(acquireCtx, b.client, []string{liveKey(apiKeyID)}, lockString, limit).Text()
 	if err != nil {
-		backendErrorsTotal.WithLabelValues("acquire").Inc()
 		return fmt.Errorf("%w: acquire quota in redis: %v", ErrBackendUnavailable, err)
 	}
 
 	switch result {
 	case "OK":
-		acquireTotal.WithLabelValues("allowed").Inc()
 		return nil
 	case "REJECTED":
-		acquireTotal.WithLabelValues("rejected").Inc()
 		return ErrQuotaExceeded
 	default:
-		backendErrorsTotal.WithLabelValues("acquire").Inc()
 		return fmt.Errorf("%w: unexpected acquire result %q", ErrBackendUnavailable, result)
 	}
 }
@@ -89,7 +85,6 @@ func (b *RedisBackend) Release(ctx context.Context, apiKeyID, lockString string)
 
 	deleted, err := releaseRedisScript.Run(releaseCtx, b.client, []string{liveKey(apiKeyID)}, lockString).Int64()
 	if err != nil {
-		backendErrorsTotal.WithLabelValues("release").Inc()
 		releaseTotal.WithLabelValues("error").Inc()
 		return fmt.Errorf("%w: release quota in redis: %v", ErrBackendUnavailable, err)
 	}
@@ -143,7 +138,6 @@ func (b *RedisBackend) DeleteSubject(ctx context.Context, apiKeyID string) error
 	defer cancel()
 
 	if err := b.client.Del(opCtx, liveKey(apiKeyID)).Err(); err != nil {
-		backendErrorsTotal.WithLabelValues("delete_subject").Inc()
 		return fmt.Errorf("%w: delete quota subject in redis: %v", ErrBackendUnavailable, err)
 	}
 

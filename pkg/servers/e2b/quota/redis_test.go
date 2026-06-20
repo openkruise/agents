@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -58,6 +59,42 @@ func TestRedisBackendAcquireCountOnly(t *testing.T) {
 	got, err := backend.List(ctx, "key-1")
 	require.NoError(t, err)
 	assert.Len(t, got, 1)
+}
+
+func TestRedisBackendAcquireDoesNotRecordManagerDecisionMetrics(t *testing.T) {
+	srv := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: srv.Addr()})
+	backend := NewRedisBackend(client, 50*time.Millisecond)
+
+	beforeAllowed := testutil.ToFloat64(acquireTotal.WithLabelValues("allowed"))
+	beforeRejected := testutil.ToFloat64(acquireTotal.WithLabelValues("rejected"))
+	beforeErrors := testutil.ToFloat64(backendErrorsTotal.WithLabelValues("acquire"))
+
+	require.NoError(t, backend.Acquire(context.Background(), "key-1", "lock-1", 1))
+	require.ErrorIs(t, backend.Acquire(context.Background(), "key-1", "lock-2", 1), ErrQuotaExceeded)
+
+	assert.Equal(t, beforeAllowed, testutil.ToFloat64(acquireTotal.WithLabelValues("allowed")))
+	assert.Equal(t, beforeRejected, testutil.ToFloat64(acquireTotal.WithLabelValues("rejected")))
+	assert.Equal(t, beforeErrors, testutil.ToFloat64(backendErrorsTotal.WithLabelValues("acquire")))
+}
+
+func TestRedisBackendWrappedErrorsDoNotRecordManagerBackendErrorMetrics(t *testing.T) {
+	srv := miniredis.RunT(t)
+	addr := srv.Addr()
+	srv.Close()
+
+	client := redis.NewClient(&redis.Options{Addr: addr})
+	backend := NewRedisBackend(client, 10*time.Millisecond)
+	beforeReleaseErrors := testutil.ToFloat64(backendErrorsTotal.WithLabelValues("release"))
+	beforeDeleteSubjectErrors := testutil.ToFloat64(backendErrorsTotal.WithLabelValues("delete_subject"))
+	beforeReleaseTotalErrors := testutil.ToFloat64(releaseTotal.WithLabelValues("error"))
+
+	require.ErrorIs(t, backend.Release(context.Background(), "key-1", "lock-1"), ErrBackendUnavailable)
+	require.ErrorIs(t, backend.DeleteSubject(context.Background(), "key-1"), ErrBackendUnavailable)
+
+	assert.Equal(t, beforeReleaseErrors, testutil.ToFloat64(backendErrorsTotal.WithLabelValues("release")))
+	assert.Equal(t, beforeDeleteSubjectErrors, testutil.ToFloat64(backendErrorsTotal.WithLabelValues("delete_subject")))
+	assert.Equal(t, beforeReleaseTotalErrors+1, testutil.ToFloat64(releaseTotal.WithLabelValues("error")))
 }
 
 func TestRedisBackendHardZeroAndRelease(t *testing.T) {
