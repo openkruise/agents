@@ -273,6 +273,36 @@ func TestNewSandboxFromTemplate_DeepCopiesTemplate(t *testing.T) {
 	}
 }
 
+func TestNewSandboxFromTemplate_StampsCloneLockString(t *testing.T) {
+	tmpl := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "checkpoint-template",
+			Namespace: "default",
+		},
+		Spec: v1alpha1.SandboxTemplateSpec{
+			Template: &corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:  "runtime",
+							Image: "nginx:old",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	sbx := newSandboxFromTemplate(infra.CloneSandboxOptions{
+		User:       "user-1",
+		LockString: "lock-1",
+	}, tmpl, nil)
+
+	require.NotNil(t, sbx.Annotations)
+	assert.Equal(t, "user-1", sbx.Annotations[v1alpha1.AnnotationOwner])
+	assert.Equal(t, "lock-1", sbx.Annotations[v1alpha1.AnnotationLock])
+}
+
 func TestFindCheckpointAndTemplateById_NamespaceScoped(t *testing.T) {
 	objects := []client.Object{
 		&v1alpha1.SandboxTemplate{

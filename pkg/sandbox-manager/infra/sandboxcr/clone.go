@@ -33,6 +33,7 @@ import (
 	infracache "github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
+	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/runtime"
@@ -57,10 +58,20 @@ func ValidateAndInitCloneOptions(opts infra.CloneSandboxOptions) (infra.CloneSan
 	if opts.CloneTimeout <= 0 {
 		opts.CloneTimeout = DefaultCloneTimeout
 	}
+	if opts.LockString == "" && opts.Admission == nil {
+		opts.LockString = utils.NewLockString()
+	}
 	if opts.ReserveFailedSandboxFor == nil {
 		opts.ReserveFailedSandboxFor = ptr.To(DefaultReserveFailedSandboxFor)
 	}
 	return opts, nil
+}
+
+func chooseCloneAttemptLockString(opts infra.CloneSandboxOptions) string {
+	if opts.Admission != nil || opts.LockString == "" {
+		return utils.NewLockString()
+	}
+	return opts.LockString
 }
 
 func ValidateAndInitCheckpointOptions(opts infra.CreateCheckpointOptions) infra.CreateCheckpointOptions {
@@ -72,6 +83,7 @@ func ValidateAndInitCheckpointOptions(opts infra.CreateCheckpointOptions) infra.
 
 func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache infracache.Provider) (cloned infra.Sandbox, metrics infra.CloneMetrics, err error) {
 	log := klog.FromContext(ctx).WithValues("checkpoint", opts.CheckPointID)
+	opts.LockString = chooseCloneAttemptLockString(opts)
 
 	select {
 	case <-ctx.Done():
@@ -103,6 +115,9 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 	// out-of-band (e.g. by a janitor reconciler).
 	sbx, initRuntimeOpts, metrics, err := createSandboxFromCheckpoint(ctx, opts, tmpl, cp, cache, metrics)
 	if err != nil {
+		if managererrors.GetErrCode(err) == managererrors.ErrorQuotaExceeded {
+			return nil, metrics, err
+		}
 		if !wait.Interrupted(err) {
 			err = classifyCreateError(err, "failed to create sandbox from checkpoint")
 		}
@@ -110,7 +125,7 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 	}
 	created := sbx
 	defer func() {
-		clearFailedSandbox(ctx, created, err, opts.ReserveFailedSandboxFor)
+		clearFailedSandbox(ctx, created, err, opts.ReserveFailedSandboxFor, opts.Admission, opts.LockString)
 	}()
 
 	// Step 4: wait for sandbox ready
@@ -253,6 +268,12 @@ func createSandboxFromCheckpoint(ctx context.Context, opts infra.CloneSandboxOpt
 	// e.g., copy csi mount config from checkpoint to sandbox obj
 	RestoreAnnotationsFromCheckpoint(cp, sbx.Sandbox)
 	DefaultPostProcessClonedSandbox(sbx.Sandbox)
+	if opts.Admission != nil && opts.Admission.Acquire != nil {
+		if err := opts.Admission.Acquire(ctx, opts.LockString); err != nil {
+			log.Error(err, "failed to acquire sandbox admission", "lockString", opts.LockString)
+			return nil, nil, metrics, err
+		}
+	}
 	log.Info("creating new sandbox from checkpoint")
 	sbx.Sandbox, err = DefaultCreateSandbox(ctx, sbx.Sandbox, cache.GetClient())
 	if err != nil {
@@ -329,6 +350,7 @@ func newSandboxFromTemplate(opts infra.CloneSandboxOptions, tmpl *v1alpha1.Sandb
 
 	annotations := sbx.GetAnnotations()
 	annotations[v1alpha1.AnnotationOwner] = opts.User
+	annotations[v1alpha1.AnnotationLock] = opts.LockString
 	annotations[v1alpha1.AnnotationClaimTime] = time.Now().Format(time.RFC3339)
 	annotations[v1alpha1.AnnotationRestoreFrom] = opts.CheckPointID
 	sbx.SetAnnotations(annotations)

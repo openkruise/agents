@@ -17,6 +17,7 @@ limitations under the License.
 package infra
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -38,6 +39,11 @@ type SecurityTokenOptions struct {
 	identity.TokenResponse
 }
 
+type SandboxAdmission struct {
+	Acquire func(ctx context.Context, lockString string) error
+	Release func(ctx context.Context, lockString string) error
+}
+
 type ClaimSandboxOptions struct {
 	Namespace string `json:"namespace,omitempty"`
 	// User specifies the owner of sandbox, Required
@@ -47,7 +53,8 @@ type ClaimSandboxOptions struct {
 	// CandidateCounts is the maximum number of available sandboxes to select from the cache
 	CandidateCounts int `json:"candidateCounts"`
 	// Lock string used in optimistic lock
-	LockString string `json:"lockString"`
+	LockString string            `json:"lockString"`
+	Admission  *SandboxAdmission `json:"-"`
 	// PreCheck checks the sandbox before modifying it
 	PreCheck func(sandbox Sandbox) error `json:"-"`
 	// Set Modifier to modify the Sandbox before it is updated
@@ -83,6 +90,8 @@ type CloneSandboxOptions struct {
 	Namespace          string                  `json:"namespace,omitempty"`
 	User               string                  `json:"user"`
 	CheckPointID       string                  `json:"checkPointID"`
+	LockString         string                  `json:"lockString"`
+	Admission          *SandboxAdmission       `json:"-"`
 	WaitReadyTimeout   time.Duration           `json:"waitReadyTimeout"`
 	CloneTimeout       time.Duration           `json:"cloneTimeout"`
 	CSIMount           *config.CSIMountOptions `json:"CSIMount"`
