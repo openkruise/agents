@@ -188,23 +188,35 @@ func TestAPIKeyQuotaJSONToQuotaSpec(t *testing.T) {
 }
 
 func TestAPIKeyQuotaFromSpecJSON(t *testing.T) {
-	spec := &QuotaSpec{
-		Limits: []QuotaLimit{{
-			Dimension: DimSandboxCount,
-			Limit:     int64Ptr(50),
-		}},
+	tests := []struct {
+		name          string
+		key           CreatedTeamAPIKey
+		expectedQuota string
+	}{
+		{
+			name: "internal quota spec marshals to public nested quota",
+			key: CreatedTeamAPIKey{
+				QuotaSpec: &QuotaSpec{
+					Limits: []QuotaLimit{{
+						Dimension: DimSandboxCount,
+						Limit:     int64Ptr(50),
+					}},
+				},
+			},
+			expectedQuota: `"quota":{"sandbox":{"count":50}}`,
+		},
 	}
 
-	key := CreatedTeamAPIKey{
-		QuotaSpec: spec,
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw, err := json.Marshal(tt.key)
+			require.NoError(t, err)
+
+			assert.Contains(t, string(raw), tt.expectedQuota)
+			assert.NotContains(t, string(raw), `"limits"`)
+			assert.NotContains(t, string(raw), "QuotaSpec")
+		})
 	}
-
-	raw, err := json.Marshal(key)
-	require.NoError(t, err)
-
-	assert.Contains(t, string(raw), `"quota":{"sandbox":{"count":50}}`)
-	assert.NotContains(t, string(raw), `"limits"`)
-	assert.NotContains(t, string(raw), "QuotaSpec")
 }
 
 func int64Ptr(v int64) *int64 {
