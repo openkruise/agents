@@ -551,6 +551,85 @@ func TestMySQL_CreateKeyReturnsAndCachesQuota(t *testing.T) {
 	require.True(t, byID.QuotaSpec.IsLimited())
 }
 
+func TestMySQL_InvalidQuotaPayloadDoesNotPoisonKey(t *testing.T) {
+	now := time.Now()
+	tests := []struct {
+		name     string
+		quotaRaw string
+	}{
+		{
+			name:     "quota string is ignored",
+			quotaRaw: `"bad"`,
+		},
+		{
+			name:     "internal limit string is ignored",
+			quotaRaw: `{"limits":[{"dimension":"sandbox.count","limit":"bad"}]}`,
+		},
+		{
+			name:     "public nested quota shape is ignored",
+			quotaRaw: `{"sandbox":{"count":2}}`,
+		},
+		{
+			name:     "unsupported internal dimension is ignored",
+			quotaRaw: `{"limits":[{"dimension":"cpu","limit":2}]}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Run("load by uid returns key with nil quota", func(t *testing.T) {
+				st, mock, done := newMockStorage(t)
+				defer done()
+
+				keyID := uuid.New()
+				mock.ExpectQuery(loadKeyJoinByUIDRegex).
+					WillReturnRows(sqlmock.NewRows(
+						[]string{"id", "created_at", "updated_at", "deleted_at", "uid", "name", "key_hash", "team_id", "created_by_uid", "quota", "team_uid", "team_name"},
+					).AddRow(1, now, now, nil, keyID.String(), "invalid-quota", st.hashKey("invalid-quota"), 9, nil, tt.quotaRaw, AdminTeamUID.String(), "admin"))
+
+				out, err := st.loadCreatedKeyByUIDFromDB(context.Background(), keyID.String())
+				require.NoError(t, err)
+				require.NotNil(t, out)
+				require.Nil(t, out.QuotaSpec)
+				require.Nil(t, out.Quota)
+			})
+
+			t.Run("list by owner returns row with nil quota", func(t *testing.T) {
+				st, mock, done := newMockStorage(t)
+				defer done()
+
+				owner := &models.CreatedTeamAPIKey{
+					ID:   uuid.New(),
+					Name: "owner",
+					Team: &models.Team{Name: "my-team"},
+				}
+				mock.ExpectQuery(listByOwnerRegex).
+					WillReturnRows(sqlmock.NewRows([]string{"created_at", "uid", "name", "created_by_uid", "quota"}).
+						AddRow(now, uuid.NewString(), "invalid-quota", nil, tt.quotaRaw))
+
+				keys, err := st.ListByOwnerTeam(context.Background(), owner)
+				require.NoError(t, err)
+				require.Len(t, keys, 1)
+				require.Nil(t, keys[0].Quota)
+			})
+
+			t.Run("list limited treats invalid row as unlimited", func(t *testing.T) {
+				st, mock, done := newMockStorage(t)
+				defer done()
+
+				mock.ExpectQuery(listLimitedRegex).
+					WillReturnRows(sqlmock.NewRows(
+						[]string{"id", "created_at", "updated_at", "deleted_at", "uid", "name", "key_hash", "team_id", "created_by_uid", "quota", "team_uid", "team_name"},
+					).AddRow(1, now, now, nil, uuid.NewString(), "invalid-quota", st.hashKey("invalid-quota"), 7, nil, tt.quotaRaw, AdminTeamUID.String(), "admin"))
+
+				limitedKeys, err := st.ListLimited(context.Background())
+				require.NoError(t, err)
+				require.Empty(t, limitedKeys)
+			})
+		})
+	}
+}
+
 func TestMySQL_ListByOwner(t *testing.T) {
 	ownerKey := &models.CreatedTeamAPIKey{
 		ID:   uuid.New(),

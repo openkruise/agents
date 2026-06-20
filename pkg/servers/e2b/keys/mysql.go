@@ -358,6 +358,15 @@ func unmarshalQuotaFromDB(raw *string) (*models.QuotaSpec, error) {
 	return normalized, nil
 }
 
+func quotaFromDBOrUnlimited(ctx context.Context, uid string, raw *string) *models.QuotaSpec {
+	quota, err := unmarshalQuotaFromDB(raw)
+	if err != nil {
+		klog.FromContext(ctx).Error(err, "failed to decode api-key quota from db, treat key as unlimited", "uid", uid)
+		return nil
+	}
+	return quota
+}
+
 // CreateKey generates a new API key, stores only the HMAC hash, and returns the raw key once.
 func (k *mysqlKeyStorage) CreateKey(ctx context.Context, key *models.CreatedTeamAPIKey, opts CreateKeyOptions) (*models.CreatedTeamAPIKey, error) {
 	log := klog.FromContext(ctx).WithValues("name", opts.Name).V(utils.DebugLogLevel)
@@ -540,10 +549,7 @@ func (k *mysqlKeyStorage) ListByOwnerTeam(ctx context.Context, owner *models.Cre
 			Mask:      models.IdentifierMaskingDetails{},
 			CreatedBy: teamUserFromUID(ctx, e.CreatedByUID),
 		}
-		quota, err := unmarshalQuotaFromDB(e.Quota)
-		if err != nil {
-			return nil, fmt.Errorf("list keys by team: %w", err)
-		}
+		quota := quotaFromDBOrUnlimited(ctx, e.UID, e.Quota)
 		tk.Quota = models.APIKeyQuotaFromSpec(quota)
 		out = append(out, tk)
 	}
@@ -744,10 +750,7 @@ func (k *mysqlKeyStorage) createdKeyFromJoinedRow(ctx context.Context, row *join
 		Name: row.TeamName,
 	}
 	k.cachePutTeam(team)
-	quota, err := unmarshalQuotaFromDB(row.Quota)
-	if err != nil {
-		return nil, fmt.Errorf("parse key quota for uid %q: %w", row.UID, err)
-	}
+	quota := quotaFromDBOrUnlimited(ctx, row.UID, row.Quota)
 	apiKey := &models.CreatedTeamAPIKey{
 		CreatedAt: row.CreatedAt,
 		ID:        id,
