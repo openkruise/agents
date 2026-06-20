@@ -128,7 +128,7 @@ func simulateInplaceUpdateController(ctx context.Context, c client.Client) {
 							Reason:             v1alpha1.SandboxReadyReasonPodReady,
 							LastTransitionTime: metav1.Now(),
 						})
-						_ = c.Status().Update(ctx, latest)
+						_ = c.Status().Update(ctx, latest) //nolint:errcheck // expected on resource version conflicts; next tick will retry
 					}
 				}
 			}
@@ -541,7 +541,7 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if tt.options.ClaimTimeout <= 0 {
 				if tt.options.InplaceUpdate != nil && tt.available > 0 {
-					tt.options.ClaimTimeout = 5 * time.Second
+					tt.options.ClaimTimeout = 2 * time.Second
 				} else {
 					tt.options.ClaimTimeout = 50 * time.Millisecond
 				}
@@ -1668,7 +1668,7 @@ func TestValidateAndInitClaimOptions_InplaceUpdateValidation(t *testing.T) {
 				InplaceUpdate: &config.InplaceUpdateOptions{},
 			},
 			expectErr:   true,
-			errContains: "requires at least one of image, resources, or metadata",
+			errContains: "requires at least one of image or resources",
 		},
 		{
 			name: "resources require requests or limits",

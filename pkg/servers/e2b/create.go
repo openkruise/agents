@@ -145,19 +145,6 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 		}
 	}
 
-	// Propagate request labels to the pod template via InplaceUpdate.Metadata.
-	// This ensures that waitForSandboxReady waits for the InplaceUpdate condition
-	// to become True before reporting ready, preventing premature readiness
-	// when label changes trigger an in-place update of an existing sandbox.
-	if len(request.Extensions.Labels) > 0 {
-		if opts.InplaceUpdate == nil {
-			opts.InplaceUpdate = &config.InplaceUpdateOptions{}
-		}
-		opts.InplaceUpdate.Metadata = &config.InplaceUpdateMetadataOptions{
-			Labels: request.Extensions.Labels,
-		}
-	}
-
 	opts.WaitReadyTimeout = resolveServerTimeout(request.Extensions.WaitReadySeconds)
 
 	if len(request.Extensions.CSIMount.MountConfigs) != 0 {
@@ -212,19 +199,6 @@ func (sc *Controller) createSandboxWithClone(ctx context.Context, request models
 		CloneTimeout: resolveServerTimeout(request.Extensions.TimeoutSeconds),
 		Modifier: func(sbx infra.Sandbox) {
 			sc.basicSandboxCreateModifier(ctx, sbx, request)
-			// Clone does not use InplaceUpdate, so pod template labels are
-			// set directly here. This is safe because clone creates a new pod
-			// from checkpoint, so no in-place update is triggered.
-			if len(request.Extensions.Labels) > 0 {
-				labels := sbx.GetPodLabels()
-				if labels == nil {
-					labels = make(map[string]string)
-				}
-				for k, v := range request.Extensions.Labels {
-					labels[k] = v
-				}
-				sbx.SetPodLabels(labels)
-			}
 		},
 		ReserveFailedSandboxFor: request.Extensions.ReserveFailedSandboxFor,
 	}
@@ -360,11 +334,11 @@ func (sc *Controller) basicSandboxCreateModifier(ctx context.Context, sbx infra.
 	}
 	sbx.SetLabels(labels)
 
-	// Note: Pod template labels (SetPodLabels) are NOT set here for claim path.
-	// They are handled via InplaceUpdate.Metadata.Labels in createSandboxWithClaim
-	// so that waitForSandboxReady can properly wait for the in-place update to complete.
-	// The clone path sets pod labels directly in its own Modifier since it does not
-	// use InplaceUpdate.
+	// Propagate request labels to the pod template metadata. This ensures the
+	// sandbox hash includes the labels, and the controller patches the pod metadata
+	// directly for metadata-only changes (no image/resources) without setting the
+	// InplaceUpdate condition.
+	infra.MergePodLabels(sbx, request.Extensions.Labels)
 }
 
 func (sc *Controller) csiMountOptionsConfigRecord(ctx context.Context, sbx infra.Sandbox, request models.NewSandboxRequest) {

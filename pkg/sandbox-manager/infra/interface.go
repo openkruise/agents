@@ -152,6 +152,23 @@ type Sandbox interface {
 	CreateCheckpoint(ctx context.Context, opts CreateCheckpointOptions) (string, error)
 }
 
+// MergePodLabels merges the given labels into the sandbox's pod template labels.
+// Existing labels with the same key are overwritten. The sandbox's pod template
+// is initialized if necessary.
+func MergePodLabels(sbx Sandbox, labels map[string]string) {
+	if len(labels) == 0 {
+		return
+	}
+	existing := sbx.GetPodLabels()
+	if existing == nil {
+		existing = make(map[string]string, len(labels))
+	}
+	for k, v := range labels {
+		existing[k] = v
+	}
+	sbx.SetPodLabels(existing)
+}
+
 type CheckpointInfo struct {
 	Name              string
 	Namespace         string

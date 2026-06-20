@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/record"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
@@ -1243,6 +1244,84 @@ func TestHandleInPlaceUpdateCommon_NoChangeReturnsTrue(t *testing.T) {
 	// control.Update returns !changed → return true, nil
 	if !result {
 		t.Error("Expected result true (no changes), got false")
+	}
+}
+
+func TestHandleInPlaceUpdateCommon_MetadataOnlyChange(t *testing.T) {
+	// Same image and resources, only labels differ → isMetadataOnlyChange returns true
+	// → controller patches pod metadata directly without setting InplaceUpdate condition
+	ctx := context.Background()
+
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	podSpec := corev1.PodSpec{
+		Containers: []corev1.Container{{
+			Name:  "main",
+			Image: "nginx:latest",
+		}},
+	}
+
+	box := buildMatchingHashBox("test-sandbox", "default", podSpec)
+	// Add labels to the sandbox template that the pod does not have.
+	// This is a metadata-only change — hash-immutable-part is unaffected.
+	box.Spec.Template.Labels = map[string]string{
+		"app": "test-app",
+	}
+
+	// Compute the new revision hash (includes labels)
+	hash, _ := HashSandbox(box)
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-pod",
+			Namespace: "default",
+			Labels: map[string]string{
+				agentsv1alpha1.PodLabelTemplateHash: "old-revision",
+			},
+		},
+		Spec: podSpec, // Same image and resources as box template
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
+
+	newStatus := &agentsv1alpha1.SandboxStatus{
+		UpdateRevision: hash,
+	}
+
+	recorder := createTestRecorder()
+	handler := &MockInPlaceUpdateHandler{
+		control:  inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
+		recorder: recorder,
+		logger:   logr.Discard(),
+	}
+
+	result, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if !result {
+		t.Error("Expected result true (metadata patched directly), got false")
+	}
+
+	// Verify NO InplaceUpdate condition was set
+	for _, cond := range newStatus.Conditions {
+		if cond.Type == string(agentsv1alpha1.SandboxConditionInplaceUpdate) {
+			t.Errorf("InplaceUpdate condition should not be set for metadata-only change, got: %s/%s", cond.Reason, cond.Status)
+		}
+	}
+
+	// Verify the pod was actually patched: template hash label should match new revision
+	updatedPod := &corev1.Pod{}
+	if err := fakeClient.Get(ctx, client.ObjectKey{Namespace: "default", Name: "test-pod"}, updatedPod); err != nil {
+		t.Fatalf("Failed to get updated pod: %v", err)
+	}
+	if updatedPod.Labels[agentsv1alpha1.PodLabelTemplateHash] != hash {
+		t.Errorf("Expected pod template hash to be %s, got %s", hash, updatedPod.Labels[agentsv1alpha1.PodLabelTemplateHash])
+	}
+	if updatedPod.Labels["app"] != "test-app" {
+		t.Errorf("Expected pod label app=test-app, got %s", updatedPod.Labels["app"])
 	}
 }
 

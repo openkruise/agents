@@ -80,7 +80,9 @@ type Provider interface {
 	// requires the InplaceUpdate condition to be non-nil and True before
 	// reporting ready. This prevents premature readiness when an in-place
 	// update (image, resources, or metadata change) has been requested but
-	// the controller has not yet processed it.
+	// the controller has not yet processed it. If the controller reports
+	// the InplaceUpdate condition as Failed, the task returns an error
+	// immediately instead of waiting for timeout.
 	NewSandboxWaitReadyTask(ctx context.Context, sbx *agentsv1alpha1.Sandbox, requireInplaceUpdateCompletion bool) *cacheutils.WaitTask[*agentsv1alpha1.Sandbox]
 
 	// NewCheckpointTask builds an immutable wait task for a Checkpoint that

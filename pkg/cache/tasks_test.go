@@ -147,6 +147,86 @@ func TestNewSandboxWaitReadyTask_StartContainerFailed_ReturnsError(t *testing.T)
 	assert.Contains(t, err.Error(), "start container failed")
 }
 
+func TestNewSandboxWaitReadyTask_RequireInplaceUpdateCompletion(t *testing.T) {
+	tests := []struct {
+		name        string
+		sbxName     string
+		inplaceCond *metav1.Condition
+		expectError string
+	}{
+		{
+			name:        "inplace update condition nil - waits until timeout",
+			sbxName:     "sbx-inplace-nil",
+			inplaceCond: nil,
+			expectError: "not satisfied",
+		},
+		{
+			name:    "inplace update condition InplaceUpdating - waits until timeout",
+			sbxName: "sbx-inplace-updating",
+			inplaceCond: &metav1.Condition{
+				Type:   string(agentsv1alpha1.SandboxConditionInplaceUpdate),
+				Status: metav1.ConditionFalse,
+				Reason: agentsv1alpha1.SandboxInplaceUpdateReasonInplaceUpdating,
+			},
+			expectError: "not satisfied",
+		},
+		{
+			name:    "inplace update condition Succeeded - ready immediately",
+			sbxName: "sbx-inplace-succeeded",
+			inplaceCond: &metav1.Condition{
+				Type:   string(agentsv1alpha1.SandboxConditionInplaceUpdate),
+				Status: metav1.ConditionTrue,
+				Reason: agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded,
+			},
+			expectError: "",
+		},
+		{
+			name:    "inplace update condition Failed - returns error immediately",
+			sbxName: "sbx-inplace-failed",
+			inplaceCond: &metav1.Condition{
+				Type:    string(agentsv1alpha1.SandboxConditionInplaceUpdate),
+				Status:  metav1.ConditionFalse,
+				Reason:  agentsv1alpha1.SandboxInplaceUpdateReasonFailed,
+				Message: "QoS class changed",
+			},
+			expectError: "in-place update failed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sbx := &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: tt.sbxName, Generation: 1},
+				Status: agentsv1alpha1.SandboxStatus{
+					ObservedGeneration: 1,
+					Phase:              agentsv1alpha1.SandboxRunning,
+					PodInfo:            agentsv1alpha1.PodInfo{PodIP: "10.0.0.1"},
+					Conditions: []metav1.Condition{
+						{
+							Type:   string(agentsv1alpha1.SandboxConditionReady),
+							Status: metav1.ConditionTrue,
+							Reason: agentsv1alpha1.SandboxReadyReasonPodReady,
+						},
+					},
+				},
+			}
+			if tt.inplaceCond != nil {
+				sbx.Status.Conditions = append(sbx.Status.Conditions, *tt.inplaceCond)
+			}
+			c, _, err := cachetest.NewTestCache(t, sbx)
+			require.NoError(t, err)
+			task := c.NewSandboxWaitReadyTask(context.Background(), sbx, true)
+			err = task.Wait(200 * time.Millisecond)
+			if tt.expectError != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
 func TestNewCheckpointTask_Succeeded(t *testing.T) {
 	cp := &agentsv1alpha1.Checkpoint{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "cp-1"},

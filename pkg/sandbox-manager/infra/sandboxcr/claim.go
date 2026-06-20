@@ -68,8 +68,8 @@ func ValidateAndInitClaimOptions(opts infra.ClaimSandboxOptions) (infra.ClaimSan
 			return infra.ClaimSandboxOptions{}, fmt.Errorf("init runtime is required when csi mount is specified")
 		}
 	}
-	if opts.InplaceUpdate != nil && opts.InplaceUpdate.Image == "" && opts.InplaceUpdate.Resources == nil && opts.InplaceUpdate.Metadata == nil {
-		return infra.ClaimSandboxOptions{}, fmt.Errorf("inplace update requires at least one of image, resources, or metadata to be set")
+	if opts.InplaceUpdate != nil && opts.InplaceUpdate.Image == "" && opts.InplaceUpdate.Resources == nil {
+		return infra.ClaimSandboxOptions{}, fmt.Errorf("inplace update requires at least one of image or resources to be set")
 	}
 	if opts.InplaceUpdate != nil && opts.InplaceUpdate.Resources != nil {
 		res := opts.InplaceUpdate.Resources
@@ -212,12 +212,18 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 	// Step 3: Built-in post processes. The locked sandbox must be always returned to be cleared properly.
 	if lockType == infra.LockTypeCreate || lockType == infra.LockTypeSpeculate || opts.InplaceUpdate != nil {
 		// For LockTypeUpdate (existing sandbox from pool), an InplaceUpdate
-		// option (image, resources, or metadata) triggers a real in-place
-		// update by the controller. We must wait for the InplaceUpdate
-		// condition to become non-nil and True before reporting ready.
+		// option with image or resources triggers a real in-place update by
+		// the controller. We must wait for the InplaceUpdate condition to
+		// become non-nil and True before reporting ready.
+		// Metadata-only changes are patched directly by the controller without
+		// setting the InplaceUpdate condition, so requireInplaceUpdateCompletion
+		// is false for those cases. The wait still ensures the controller has
+		// observed the new generation (ObservedGeneration == Generation).
 		// For LockTypeCreate/LockTypeSpeculate, the pod is created from the
 		// modified spec, so no in-place update occurs.
-		requireInplaceUpdateCompletion := opts.InplaceUpdate != nil && lockType == infra.LockTypeUpdate
+		hasImageOrResourcesChange := opts.InplaceUpdate != nil &&
+			(opts.InplaceUpdate.Image != "" || opts.InplaceUpdate.Resources != nil)
+		requireInplaceUpdateCompletion := hasImageOrResourcesChange && lockType == infra.LockTypeUpdate
 		log.Info("should wait for sandbox ready", "inplaceUpdate", opts.InplaceUpdate != nil, "requireInplaceUpdateCompletion", requireInplaceUpdateCompletion)
 		metrics.WaitReady, err = waitForSandboxReady(ctx, sbx, opts, cache, requireInplaceUpdateCompletion)
 		metrics.Total += metrics.WaitReady
@@ -561,28 +567,6 @@ func modifyPickedSandbox(sbx *Sandbox, lockType infra.LockType, opts infra.Claim
 		}
 		if opts.InplaceUpdate.Resources != nil {
 			sbx.SetResources(opts.InplaceUpdate.Resources.Requests, opts.InplaceUpdate.Resources.Limits)
-		}
-		if opts.InplaceUpdate.Metadata != nil {
-			if len(opts.InplaceUpdate.Metadata.Labels) > 0 {
-				labels := sbx.GetPodLabels()
-				if labels == nil {
-					labels = make(map[string]string)
-				}
-				for k, v := range opts.InplaceUpdate.Metadata.Labels {
-					labels[k] = v
-				}
-				sbx.SetPodLabels(labels)
-			}
-			if len(opts.InplaceUpdate.Metadata.Annotations) > 0 {
-				if sbx.Spec.Template != nil {
-					if sbx.Spec.Template.Annotations == nil {
-						sbx.Spec.Template.Annotations = make(map[string]string)
-					}
-					for k, v := range opts.InplaceUpdate.Metadata.Annotations {
-						sbx.Spec.Template.Annotations[k] = v
-					}
-				}
-			}
 		}
 	}
 	// claim sandbox

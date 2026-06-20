@@ -104,7 +104,9 @@ func (c *Cache) NewSandboxResumeTask(ctx context.Context, sbx *agentsv1alpha1.Sa
 // the InplaceUpdate condition to be non-nil and True before reporting ready.
 // This prevents premature readiness when an in-place update (image, resources,
 // or metadata change) has been requested but the controller has not yet
-// processed it.
+// processed it. If the controller reports the InplaceUpdate condition as
+// Failed, the task returns an error immediately instead of waiting for
+// timeout.
 func (c *Cache) NewSandboxWaitReadyTask(ctx context.Context, sbx *agentsv1alpha1.Sandbox, requireInplaceUpdateCompletion bool) *cacheutils.WaitTask[*agentsv1alpha1.Sandbox] {
 	check := func(s *agentsv1alpha1.Sandbox) (bool, error) {
 		if s.Status.ObservedGeneration != s.Generation {
@@ -120,7 +122,13 @@ func (c *Cache) NewSandboxWaitReadyTask(ctx context.Context, sbx *agentsv1alpha1
 			// for it to reach a terminal True state (Succeeded). A nil
 			// condition means the controller has not yet observed the spec
 			// change that triggers the in-place update.
-			if inplaceCond == nil || inplaceCond.Status != metav1.ConditionTrue {
+			if inplaceCond == nil {
+				return false, nil
+			}
+			if inplaceCond.Reason == agentsv1alpha1.SandboxInplaceUpdateReasonFailed {
+				return false, fmt.Errorf("in-place update failed: %s", inplaceCond.Message)
+			}
+			if inplaceCond.Status != metav1.ConditionTrue {
 				return false, nil
 			}
 		} else if inplaceCond != nil && inplaceCond.Reason == agentsv1alpha1.SandboxInplaceUpdateReasonInplaceUpdating {
