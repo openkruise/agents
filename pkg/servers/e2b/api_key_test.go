@@ -17,10 +17,12 @@ limitations under the License.
 package e2b
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -200,6 +202,162 @@ func TestCreateAPIKey(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCreateAPIKey_QuotaJSONValidationAndResponses(t *testing.T) {
+	controller, _, teardown := Setup(t)
+	defer teardown()
+
+	ctx := logs.NewContext()
+	adminUser := &models.CreatedTeamAPIKey{
+		ID:   keys.AdminKeyID,
+		Key:  InitKey,
+		Name: "admin",
+		Team: models.AdminTeam(),
+	}
+	regularUser, err := controller.keys.CreateKey(ctx, adminUser, keys.CreateKeyOptions{Name: "regular-user", TeamName: "regular-team"})
+	require.NoError(t, err)
+	refreshKeyStorageForTest(t, controller)
+
+	tests := []struct {
+		name           string
+		apiKey         string
+		body           string
+		expectCode     int
+		expectContains []string
+		expectMissing  []string
+	}{
+		{
+			name:       "admin creates limited key with nested quota",
+			apiKey:     InitKey,
+			body:       `{"name":"limited-key","quota":{"sandbox":{"count":2}}}`,
+			expectCode: http.StatusCreated,
+			expectContains: []string{
+				`"quota":{"sandbox":{"count":2}}`,
+			},
+			expectMissing: []string{`"limits"`},
+		},
+		{
+			name:       "admin creates hard zero quota key",
+			apiKey:     InitKey,
+			body:       `{"name":"hard-zero-key","quota":{"sandbox":{"count":0}}}`,
+			expectCode: http.StatusCreated,
+			expectContains: []string{
+				`"quota":{"sandbox":{"count":0}}`,
+			},
+			expectMissing: []string{`"limits"`},
+		},
+		{
+			name:       "regular key cannot set quota",
+			apiKey:     regularUser.Key,
+			body:       `{"name":"regular-limited","quota":{"sandbox":{"count":2}}}`,
+			expectCode: http.StatusForbidden,
+			expectContains: []string{
+				`only admin can set api-key quota`,
+			},
+		},
+		{
+			name:       "negative count is rejected",
+			apiKey:     InitKey,
+			body:       `{"name":"negative-key","quota":{"sandbox":{"count":-1}}}`,
+			expectCode: http.StatusBadRequest,
+			expectContains: []string{
+				`quota limit must be non-negative`,
+			},
+		},
+		{
+			name:       "unsupported top level quota field is rejected",
+			apiKey:     InitKey,
+			body:       `{"name":"cpu-key","quota":{"cpu":{"count":2}}}`,
+			expectCode: http.StatusBadRequest,
+			expectContains: []string{
+				`unsupported quota field "cpu"`,
+			},
+		},
+		{
+			name:       "internal limits shape is rejected",
+			apiKey:     InitKey,
+			body:       `{"name":"internal-shape","quota":{"limits":[{"dimension":"sandbox.count","limit":2}]}}`,
+			expectCode: http.StatusBadRequest,
+			expectContains: []string{
+				`unsupported quota field "limits"`,
+			},
+		},
+		{
+			name:       "missing quota remains unlimited",
+			apiKey:     InitKey,
+			body:       `{"name":"unlimited-key"}`,
+			expectCode: http.StatusCreated,
+			expectMissing: []string{
+				`"quota"`,
+				`"limits"`,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/api-keys", bytes.NewBufferString(tt.body))
+			req.Header.Set(models.HeaderApiKey, tt.apiKey)
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+
+			controller.mux.ServeHTTP(rec, req)
+
+			require.Equal(t, tt.expectCode, rec.Code, rec.Body.String())
+			body := rec.Body.String()
+			message := body
+			if rec.Code >= http.StatusBadRequest {
+				var apiErr web.ApiError
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &apiErr))
+				message = apiErr.Message
+			}
+			for _, expected := range tt.expectContains {
+				assert.Contains(t, message, expected)
+			}
+			for _, missing := range tt.expectMissing {
+				assert.NotContains(t, body, missing)
+			}
+		})
+	}
+}
+
+func TestListAPIKeys_ReturnsNestedQuotaJSON(t *testing.T) {
+	controller, _, teardown := Setup(t)
+	defer teardown()
+
+	req := httptest.NewRequest(http.MethodPost, "/api-keys", bytes.NewBufferString(`{"name":"limited-key","quota":{"sandbox":{"count":2}}}`))
+	req.Header.Set(models.HeaderApiKey, InitKey)
+	req.Header.Set("Content-Type", "application/json")
+	createRec := httptest.NewRecorder()
+	controller.mux.ServeHTTP(createRec, req)
+	require.Equal(t, http.StatusCreated, createRec.Code, createRec.Body.String())
+	refreshKeyStorageForTest(t, controller)
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api-keys", nil)
+	listReq.Header.Set(models.HeaderApiKey, InitKey)
+	listRec := httptest.NewRecorder()
+	controller.mux.ServeHTTP(listRec, listReq)
+
+	require.Equal(t, http.StatusOK, listRec.Code, listRec.Body.String())
+	assert.Contains(t, listRec.Body.String(), `"quota":{"sandbox":{"count":2}}`)
+	assert.NotContains(t, listRec.Body.String(), `"limits"`)
+}
+
+func TestCreateAPIKey_QuotaAcceptedWhenRedisAbsent(t *testing.T) {
+	controller, _, teardown := Setup(t)
+	defer teardown()
+
+	req := httptest.NewRequest(http.MethodPost, "/api-keys", strings.NewReader(`{"name":"limited-without-redis","quota":{"sandbox":{"count":2}}}`))
+	req.Header.Set(models.HeaderApiKey, InitKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	controller.mux.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), `"quota":{"sandbox":{"count":2}}`)
+	assert.NotContains(t, rec.Body.String(), `"limits"`)
 }
 
 func TestCompatibleAPIKeyEndpoint(t *testing.T) {

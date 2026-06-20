@@ -609,6 +609,99 @@ func TestSecretKeyStorage_CreateKey(t *testing.T) {
 	}
 }
 
+func TestSecretKeyStorage_QuotaPersistenceAndLimitedList(t *testing.T) {
+	storage, _ := newSecretStorageForTest(t, map[string][]byte{})
+	creator := &models.CreatedTeamAPIKey{ID: uuid.New(), Team: models.AdminTeam()}
+
+	created, err := storage.CreateKey(context.Background(), creator, CreateKeyOptions{
+		Name:  "limited-key",
+		Quota: quotaSpecWithSandboxCount(3),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, created.QuotaSpec)
+	count, limited := created.QuotaSpec.SandboxCountLimit()
+	require.True(t, limited)
+	require.EqualValues(t, 3, count)
+	require.NotNil(t, created.Quota)
+	createdQuotaSpec, err := created.Quota.ToQuotaSpec()
+	require.NoError(t, err)
+	require.NotNil(t, createdQuotaSpec)
+	createdQuotaCount, limited := createdQuotaSpec.SandboxCountLimit()
+	require.True(t, limited)
+	require.EqualValues(t, 3, createdQuotaCount)
+
+	require.NoError(t, storage.refresh(context.Background(), storage.APIReader))
+	stored, ok := storage.LoadByID(context.Background(), created.ID.String())
+	require.True(t, ok)
+	require.NotNil(t, stored.QuotaSpec)
+	storedCount, limited := stored.QuotaSpec.SandboxCountLimit()
+	require.True(t, limited)
+	require.EqualValues(t, 3, storedCount)
+	require.NotNil(t, stored.Quota)
+
+	limitedKeys, err := storage.ListLimited(context.Background())
+	require.NoError(t, err)
+	require.Len(t, limitedKeys, 1)
+	require.Equal(t, created.ID, limitedKeys[0].ID)
+	require.NotNil(t, limitedKeys[0].QuotaSpec)
+	limitedCount, limited := limitedKeys[0].QuotaSpec.SandboxCountLimit()
+	require.True(t, limited)
+	require.EqualValues(t, 3, limitedCount)
+}
+
+func TestSecretKeyStorage_OldPayloadWithoutQuotaIsUnlimited(t *testing.T) {
+	oldKey := &models.CreatedTeamAPIKey{
+		ID:   uuid.New(),
+		Key:  uuid.NewString(),
+		Name: "legacy-key",
+		Team: models.AdminTeam(),
+	}
+	payload, err := json.Marshal(oldKey)
+	require.NoError(t, err)
+
+	storage, _ := newSecretStorageForTest(t, map[string][]byte{
+		oldKey.ID.String(): payload,
+	})
+	require.NoError(t, storage.refresh(context.Background(), storage.APIReader))
+
+	stored, ok := storage.LoadByID(context.Background(), oldKey.ID.String())
+	require.True(t, ok)
+	require.Nil(t, stored.QuotaSpec)
+	require.Nil(t, stored.Quota)
+}
+
+func TestSecretKeyStorage_ListByOwnerTeamIncludesQuota(t *testing.T) {
+	storage, _ := newSecretStorageForTest(t, map[string][]byte{})
+	creator := &models.CreatedTeamAPIKey{ID: uuid.New(), Team: models.AdminTeam()}
+
+	created, err := storage.CreateKey(context.Background(), creator, CreateKeyOptions{
+		Name:  "team-key",
+		Quota: quotaSpecWithSandboxCount(2),
+	})
+	require.NoError(t, err)
+	require.NoError(t, storage.refresh(context.Background(), storage.APIReader))
+
+	listed, err := storage.ListByOwnerTeam(context.Background(), creator)
+	require.NoError(t, err)
+	require.NotEmpty(t, listed)
+
+	var target *models.TeamAPIKey
+	for _, apiKey := range listed {
+		if apiKey.ID == created.ID {
+			target = apiKey
+			break
+		}
+	}
+	require.NotNil(t, target)
+	require.NotNil(t, target.Quota)
+	spec, err := target.Quota.ToQuotaSpec()
+	require.NoError(t, err)
+	require.NotNil(t, spec)
+	count, limited := spec.SandboxCountLimit()
+	require.True(t, limited)
+	require.EqualValues(t, 2, count)
+}
+
 func TestSecretKeyStorage_CreateKeyInSecretErrors(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -673,6 +766,15 @@ func TestSecretKeyStorage_CreateKeyInSecretErrors(t *testing.T) {
 			err := tt.run(t)
 			assertExpectedError(t, err, tt.expectError)
 		})
+	}
+}
+
+func quotaSpecWithSandboxCount(count int64) *models.QuotaSpec {
+	return &models.QuotaSpec{
+		Limits: []models.QuotaLimit{{
+			Dimension: models.DimSandboxCount,
+			Limit:     &count,
+		}},
 	}
 }
 

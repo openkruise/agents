@@ -68,6 +68,7 @@ func (sc *Controller) CreateAPIKey(r *http.Request) (web.ApiResponse[*models.Cre
 	createdAPIKey, err := sc.keys.CreateKey(ctx, user, keys.CreateKeyOptions{
 		Name:     request.Name,
 		TeamName: request.TeamName,
+		Quota:    request.QuotaSpec.DeepCopy(),
 	})
 	if err != nil {
 		return web.ApiResponse[*models.CreatedTeamAPIKey]{}, &web.ApiError{
@@ -103,6 +104,18 @@ func validateCreateAPIKeyRequest(request *models.NewTeamAPIKey) *web.ApiError {
 			Message: "api-key name is required",
 		}
 	}
+	if request.Quota == nil {
+		request.QuotaSpec = nil
+		return nil
+	}
+	quota, err := request.Quota.ToQuotaSpec()
+	if err != nil {
+		return &web.ApiError{
+			Code:    http.StatusBadRequest,
+			Message: err.Error(),
+		}
+	}
+	request.QuotaSpec = quota
 	return nil
 }
 
