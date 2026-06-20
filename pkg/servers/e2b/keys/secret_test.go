@@ -702,6 +702,56 @@ func TestSecretKeyStorage_ListByOwnerTeamIncludesQuota(t *testing.T) {
 	require.EqualValues(t, 2, count)
 }
 
+func TestSecretKeyStorage_InvalidQuotaPayloadDoesNotPoisonKey(t *testing.T) {
+	keyID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	tests := []struct {
+		name     string
+		quotaRaw string
+	}{
+		{
+			name:     "quota limit string is ignored",
+			quotaRaw: `{"limits":[{"dimension":"sandbox.count","limit":"bad"}]}`,
+		},
+		{
+			name:     "quota string is ignored",
+			quotaRaw: `"bad"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rawPayload := buildStoredKeyPayloadWithQuotaRaw(t, &models.CreatedTeamAPIKey{
+				ID:   keyID,
+				Key:  "raw-key",
+				Name: "poison-test",
+				Team: &models.Team{Name: "team-a"},
+			}, tt.quotaRaw)
+
+			storage, c := newSecretStorageForTest(t, map[string][]byte{
+				keyID.String(): rawPayload,
+			})
+
+			require.NoError(t, storage.refresh(context.Background(), c))
+
+			stored, ok := storage.LoadByID(context.Background(), keyID.String())
+			require.True(t, ok)
+			require.NotNil(t, stored)
+			require.Equal(t, "poison-test", stored.Name)
+			require.Nil(t, stored.QuotaSpec)
+			require.Nil(t, stored.Quota)
+
+			limitedKeys, err := storage.ListLimited(context.Background())
+			require.NoError(t, err)
+			require.Empty(t, limitedKeys)
+
+			team, found := findTeamByNameInSecret(getSecretForTest(t, c), "team-a")
+			require.True(t, found)
+			require.NotNil(t, team)
+			require.Equal(t, "team-a", team.Name)
+		})
+	}
+}
+
 func TestSecretKeyStorage_CreateKeyInSecretErrors(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -776,6 +826,20 @@ func quotaSpecWithSandboxCount(count int64) *models.QuotaSpec {
 			Limit:     &count,
 		}},
 	}
+}
+
+func buildStoredKeyPayloadWithQuotaRaw(t *testing.T, apiKey *models.CreatedTeamAPIKey, quotaRaw string) []byte {
+	t.Helper()
+	base, err := marshalStoredAPIKey(apiKey)
+	require.NoError(t, err)
+
+	var payload map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(base, &payload))
+	payload["quota"] = json.RawMessage(quotaRaw)
+
+	rawPayload, err := json.Marshal(payload)
+	require.NoError(t, err)
+	return rawPayload
 }
 
 func TestFindTeamByNameInSecret(t *testing.T) {
