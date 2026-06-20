@@ -305,6 +305,16 @@ func CreateSandboxPool(t *testing.T, controller *Controller, name string, availa
 						Type:   string(agentsv1alpha1.SandboxConditionReady),
 						Status: metav1.ConditionTrue,
 					},
+					// Pre-set InplaceUpdate=True so that claim paths using
+					// InplaceUpdate (image, resources, or metadata/labels) can
+					// pass the requireInplaceUpdateCompletion check without a
+					// real controller. The fake client's WithStatusSubresource
+					// ensures this status is preserved across spec Update calls.
+					{
+						Type:   string(agentsv1alpha1.SandboxConditionInplaceUpdate),
+						Status: metav1.ConditionTrue,
+						Reason: agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded,
+					},
 				},
 				PodInfo: agentsv1alpha1.PodInfo{
 					PodIP: "1.2.3.4",

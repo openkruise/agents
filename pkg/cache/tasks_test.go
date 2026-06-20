@@ -118,7 +118,7 @@ func TestNewSandboxWaitReadyTask_BoundAction(t *testing.T) {
 	}
 	c, _, err := cachetest.NewTestCache(t, sbx)
 	require.NoError(t, err)
-	task := c.NewSandboxWaitReadyTask(context.Background(), sbx)
+	task := c.NewSandboxWaitReadyTask(context.Background(), sbx, false)
 	assert.Equal(t, cacheutils.WaitActionWaitReady, task.Action())
 	// Ready → satisfied fast path.
 	assert.NoError(t, task.Wait(100*time.Millisecond))
@@ -141,7 +141,7 @@ func TestNewSandboxWaitReadyTask_StartContainerFailed_ReturnsError(t *testing.T)
 	}
 	c, _, err := cachetest.NewTestCache(t, sbx)
 	require.NoError(t, err)
-	task := c.NewSandboxWaitReadyTask(context.Background(), sbx)
+	task := c.NewSandboxWaitReadyTask(context.Background(), sbx, false)
 	err = task.Wait(100 * time.Millisecond)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "start container failed")

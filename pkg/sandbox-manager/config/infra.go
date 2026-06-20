@@ -38,6 +38,11 @@ type InplaceUpdateOptions struct {
 	// Resources specifies in-place resource update options.
 	// +optional
 	Resources *InplaceUpdateResourcesOptions `json:"resources,omitempty"`
+	// Metadata specifies in-place metadata (labels/annotations) update options
+	// for the pod template. Changes to pod template labels or annotations
+	// affect the sandbox hash and trigger an in-place update.
+	// +optional
+	Metadata *InplaceUpdateMetadataOptions `json:"metadata,omitempty"`
 }
 
 type InplaceUpdateResourcesOptions struct {
@@ -45,4 +50,14 @@ type InplaceUpdateResourcesOptions struct {
 	Requests corev1.ResourceList
 	// Limits specifies the target resource limits.
 	Limits corev1.ResourceList
+}
+
+// InplaceUpdateMetadataOptions specifies in-place metadata update options
+// for the pod template. These changes affect the sandbox hash and trigger
+// an in-place update by the controller.
+type InplaceUpdateMetadataOptions struct {
+	// Labels specifies the labels to merge into the pod template metadata.
+	Labels map[string]string
+	// Annotations specifies the annotations to merge into the pod template metadata.
+	Annotations map[string]string
 }

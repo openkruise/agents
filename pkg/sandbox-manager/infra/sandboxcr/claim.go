@@ -68,8 +68,8 @@ func ValidateAndInitClaimOptions(opts infra.ClaimSandboxOptions) (infra.ClaimSan
 			return infra.ClaimSandboxOptions{}, fmt.Errorf("init runtime is required when csi mount is specified")
 		}
 	}
-	if opts.InplaceUpdate != nil && opts.InplaceUpdate.Image == "" && opts.InplaceUpdate.Resources == nil {
-		return infra.ClaimSandboxOptions{}, fmt.Errorf("inplace update requires either image or resources to be set")
+	if opts.InplaceUpdate != nil && opts.InplaceUpdate.Image == "" && opts.InplaceUpdate.Resources == nil && opts.InplaceUpdate.Metadata == nil {
+		return infra.ClaimSandboxOptions{}, fmt.Errorf("inplace update requires at least one of image, resources, or metadata to be set")
 	}
 	if opts.InplaceUpdate != nil && opts.InplaceUpdate.Resources != nil {
 		res := opts.InplaceUpdate.Resources
@@ -211,8 +211,15 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 
 	// Step 3: Built-in post processes. The locked sandbox must be always returned to be cleared properly.
 	if lockType == infra.LockTypeCreate || lockType == infra.LockTypeSpeculate || opts.InplaceUpdate != nil {
-		log.Info("should wait for sandbox ready", "inplaceUpdate", opts.InplaceUpdate != nil)
-		metrics.WaitReady, err = waitForSandboxReady(ctx, sbx, opts, cache)
+		// For LockTypeUpdate (existing sandbox from pool), an InplaceUpdate
+		// option (image, resources, or metadata) triggers a real in-place
+		// update by the controller. We must wait for the InplaceUpdate
+		// condition to become non-nil and True before reporting ready.
+		// For LockTypeCreate/LockTypeSpeculate, the pod is created from the
+		// modified spec, so no in-place update occurs.
+		requireInplaceUpdateCompletion := opts.InplaceUpdate != nil && lockType == infra.LockTypeUpdate
+		log.Info("should wait for sandbox ready", "inplaceUpdate", opts.InplaceUpdate != nil, "requireInplaceUpdateCompletion", requireInplaceUpdateCompletion)
+		metrics.WaitReady, err = waitForSandboxReady(ctx, sbx, opts, cache, requireInplaceUpdateCompletion)
 		metrics.Total += metrics.WaitReady
 		if err != nil {
 			log.Error(err, "failed to wait for sandbox ready", "cost", metrics.WaitReady)
@@ -555,6 +562,28 @@ func modifyPickedSandbox(sbx *Sandbox, lockType infra.LockType, opts infra.Claim
 		if opts.InplaceUpdate.Resources != nil {
 			sbx.SetResources(opts.InplaceUpdate.Resources.Requests, opts.InplaceUpdate.Resources.Limits)
 		}
+		if opts.InplaceUpdate.Metadata != nil {
+			if len(opts.InplaceUpdate.Metadata.Labels) > 0 {
+				labels := sbx.GetPodLabels()
+				if labels == nil {
+					labels = make(map[string]string)
+				}
+				for k, v := range opts.InplaceUpdate.Metadata.Labels {
+					labels[k] = v
+				}
+				sbx.SetPodLabels(labels)
+			}
+			if len(opts.InplaceUpdate.Metadata.Annotations) > 0 {
+				if sbx.Spec.Template != nil {
+					if sbx.Spec.Template.Annotations == nil {
+						sbx.Spec.Template.Annotations = make(map[string]string)
+					}
+					for k, v := range opts.InplaceUpdate.Metadata.Annotations {
+						sbx.Spec.Template.Annotations[k] = v
+					}
+				}
+			}
+		}
 	}
 	// claim sandbox
 	sbx.SetOwnerReferences([]metav1.OwnerReference{}) // make SandboxSet scale up
@@ -726,15 +755,15 @@ func setContainerResources(container *corev1.Container, requests, limits corev1.
 	return changed
 }
 
-func waitForSandboxReady(ctx context.Context, sbx *Sandbox, opts infra.ClaimSandboxOptions, cache infracache.Provider) (cost time.Duration, err error) {
+func waitForSandboxReady(ctx context.Context, sbx *Sandbox, opts infra.ClaimSandboxOptions, cache infracache.Provider, requireInplaceUpdateCompletion bool) (cost time.Duration, err error) {
 	ctx = logs.Extend(ctx, "action", "waitForSandboxReady")
 	log := klog.FromContext(ctx).V(utils.DebugLogLevel).WithValues("sandbox", klog.KObj(sbx))
 	start := time.Now()
 	defer func() {
 		cost = time.Since(start)
 	}()
-	log.Info("waiting for sandbox ready", "timeout", opts.WaitReadyTimeout)
-	if err = cache.NewSandboxWaitReadyTask(ctx, sbx.Sandbox).Wait(opts.WaitReadyTimeout); err != nil {
+	log.Info("waiting for sandbox ready", "timeout", opts.WaitReadyTimeout, "requireInplaceUpdateCompletion", requireInplaceUpdateCompletion)
+	if err = cache.NewSandboxWaitReadyTask(ctx, sbx.Sandbox, requireInplaceUpdateCompletion).Wait(opts.WaitReadyTimeout); err != nil {
 		log.Error(err, "failed to wait for sandbox ready")
 		if errors.Is(err, cacheutils.ErrWaitNotSatisfied) {
 			if refreshErr := sbx.InplaceRefresh(ctx, true); refreshErr != nil {

@@ -98,8 +98,14 @@ func (c *Cache) NewSandboxResumeTask(ctx context.Context, sbx *agentsv1alpha1.Sa
 	)
 }
 
-// NewSandboxWaitReadyTask builds a WaitTask that encapsulates the readiness check
-func (c *Cache) NewSandboxWaitReadyTask(ctx context.Context, sbx *agentsv1alpha1.Sandbox) *cacheutils.WaitTask[*agentsv1alpha1.Sandbox] {
+// NewSandboxWaitReadyTask builds a WaitTask that encapsulates the readiness check.
+//
+// When requireInplaceUpdateCompletion is true, the task additionally requires
+// the InplaceUpdate condition to be non-nil and True before reporting ready.
+// This prevents premature readiness when an in-place update (image, resources,
+// or metadata change) has been requested but the controller has not yet
+// processed it.
+func (c *Cache) NewSandboxWaitReadyTask(ctx context.Context, sbx *agentsv1alpha1.Sandbox, requireInplaceUpdateCompletion bool) *cacheutils.WaitTask[*agentsv1alpha1.Sandbox] {
 	check := func(s *agentsv1alpha1.Sandbox) (bool, error) {
 		if s.Status.ObservedGeneration != s.Generation {
 			return false, nil
@@ -109,7 +115,15 @@ func (c *Cache) NewSandboxWaitReadyTask(ctx context.Context, sbx *agentsv1alpha1
 			return false, fmt.Errorf("sandbox start container failed: %s", readyCond.Message)
 		}
 		inplaceCond := utils.GetSandboxCondition(&s.Status, string(agentsv1alpha1.SandboxConditionInplaceUpdate))
-		if inplaceCond != nil && inplaceCond.Reason == agentsv1alpha1.SandboxInplaceUpdateReasonInplaceUpdating {
+		if requireInplaceUpdateCompletion {
+			// Wait for the controller to set the InplaceUpdate condition and
+			// for it to reach a terminal True state (Succeeded). A nil
+			// condition means the controller has not yet observed the spec
+			// change that triggers the in-place update.
+			if inplaceCond == nil || inplaceCond.Status != metav1.ConditionTrue {
+				return false, nil
+			}
+		} else if inplaceCond != nil && inplaceCond.Reason == agentsv1alpha1.SandboxInplaceUpdateReasonInplaceUpdating {
 			return false, nil
 		}
 		state, _ := utils.GetSandboxState(s)
