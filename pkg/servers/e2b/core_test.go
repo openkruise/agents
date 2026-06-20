@@ -30,6 +30,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -42,12 +43,15 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	toolscache "k8s.io/client-go/tools/cache"
+	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
 	infracache "github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/cache/cachetest"
+	cacheutils "github.com/openkruise/agents/pkg/cache/utils"
 	"github.com/openkruise/agents/pkg/proxy"
 	sandboxmanager "github.com/openkruise/agents/pkg/sandbox-manager"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
@@ -56,6 +60,7 @@ import (
 	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
+	quotapkg "github.com/openkruise/agents/pkg/servers/e2b/quota"
 	"github.com/openkruise/agents/pkg/utils/testutils"
 )
 
@@ -107,7 +112,7 @@ func SetupWithMinResumeTimeout(t *testing.T, minResumeTimeout int) (*Controller,
 			AdminKey:  InitKey,
 			Client:    fc,
 			APIReader: fc,
-		}, nil)
+		}, nil, quotapkg.Config{})
 
 	// Create test resources using the controller-runtime fake client
 	pod := &corev1.Pod{
@@ -168,6 +173,7 @@ func SetupWithMinResumeTimeout(t *testing.T, minResumeTimeout int) (*Controller,
 	controller.registerRoutes()
 
 	require.NoError(t, controller.initKeyStorage(t.Context()))
+	require.NoError(t, controller.initQuota(t.Context()))
 
 	// Start HTTP server and stop channel directly (skip controller.Run which
 	// would call manager.Run and try to start memberlist/peersManager).
@@ -188,6 +194,337 @@ func SetupWithMinResumeTimeout(t *testing.T, minResumeTimeout int) (*Controller,
 		_ = controller.server.Close()
 		require.NoError(t, <-serverErr)
 	}
+}
+
+type quotaInitRegistration struct{}
+
+func (quotaInitRegistration) HasSynced() bool { return true }
+
+func (quotaInitRegistration) Remove() error { return nil }
+
+type quotaInitCache struct {
+	addCalls    atomic.Int64
+	lastHandler toolscache.ResourceEventHandler
+	addErr      error
+}
+
+func (c *quotaInitCache) GetClaimedSandbox(context.Context, infracache.GetClaimedSandboxOptions) (*agentsv1alpha1.Sandbox, error) {
+	return nil, nil
+}
+
+func (c *quotaInitCache) GetCheckpoint(context.Context, infracache.GetCheckpointOptions) (*agentsv1alpha1.Checkpoint, error) {
+	return nil, nil
+}
+
+func (c *quotaInitCache) PickSandboxSet(context.Context, infracache.PickSandboxSetOptions) (*agentsv1alpha1.SandboxSet, error) {
+	return nil, nil
+}
+
+func (c *quotaInitCache) ListSandboxSets(context.Context, infracache.ListSandboxSetsOptions) ([]*agentsv1alpha1.SandboxSet, error) {
+	return nil, nil
+}
+
+func (c *quotaInitCache) ListSandboxes(context.Context, infracache.ListSandboxesOptions) ([]*agentsv1alpha1.Sandbox, error) {
+	return nil, nil
+}
+
+func (c *quotaInitCache) CountActiveSandboxes(context.Context, infracache.ListSandboxesOptions) (int32, error) {
+	return 0, nil
+}
+
+func (c *quotaInitCache) ListLiveLockstringsByOwner(context.Context, infracache.ListLiveLockstringsByOwnerOptions) ([]infracache.LiveLockstring, error) {
+	return nil, nil
+}
+
+func (c *quotaInitCache) ListCheckpoints(context.Context, infracache.ListCheckpointsOptions) ([]*agentsv1alpha1.Checkpoint, error) {
+	return nil, nil
+}
+
+func (c *quotaInitCache) ListSandboxesInPool(context.Context, infracache.ListSandboxesInPoolOptions) ([]*agentsv1alpha1.Sandbox, error) {
+	return nil, nil
+}
+
+func (c *quotaInitCache) NewSandboxPauseTask(context.Context, *agentsv1alpha1.Sandbox) (*cacheutils.WaitTask[*agentsv1alpha1.Sandbox], error) {
+	return nil, nil
+}
+
+func (c *quotaInitCache) NewSandboxResumeTask(context.Context, *agentsv1alpha1.Sandbox) (*cacheutils.WaitTask[*agentsv1alpha1.Sandbox], error) {
+	return nil, nil
+}
+
+func (c *quotaInitCache) NewSandboxWaitReadyTask(context.Context, *agentsv1alpha1.Sandbox) *cacheutils.WaitTask[*agentsv1alpha1.Sandbox] {
+	return nil
+}
+
+func (c *quotaInitCache) NewCheckpointTask(context.Context, *agentsv1alpha1.Checkpoint) *cacheutils.WaitTask[*agentsv1alpha1.Checkpoint] {
+	return nil
+}
+
+func (c *quotaInitCache) AddSandboxEventHandler(_ context.Context, handler toolscache.ResourceEventHandler) (infracache.SandboxEventHandlerRegistration, error) {
+	c.addCalls.Add(1)
+	if c.addErr != nil {
+		return nil, c.addErr
+	}
+	c.lastHandler = handler
+	return quotaInitRegistration{}, nil
+}
+
+func (c *quotaInitCache) RemoveSafe() bool { return true }
+
+func (c *quotaInitCache) Run(context.Context) error { return nil }
+
+func (c *quotaInitCache) Stop(context.Context) {}
+
+func (c *quotaInitCache) GetClient() ctrlclient.Client { return nil }
+
+func (c *quotaInitCache) GetAPIReader() ctrlclient.Reader { return nil }
+
+func (c *quotaInitCache) GetCache() ctrlcache.Cache { return nil }
+
+type quotaInitKeyStorage struct{}
+
+func (*quotaInitKeyStorage) Init(context.Context) error { return nil }
+
+func (*quotaInitKeyStorage) Run() {}
+
+func (*quotaInitKeyStorage) Stop() {}
+
+func (*quotaInitKeyStorage) LoadByKey(context.Context, string) (*models.CreatedTeamAPIKey, bool) {
+	return nil, false
+}
+
+func (*quotaInitKeyStorage) LoadByID(context.Context, string) (*models.CreatedTeamAPIKey, bool) {
+	return nil, false
+}
+
+func (*quotaInitKeyStorage) CreateKey(context.Context, *models.CreatedTeamAPIKey, keys.CreateKeyOptions) (*models.CreatedTeamAPIKey, error) {
+	return nil, nil
+}
+
+func (*quotaInitKeyStorage) DeleteKey(context.Context, *models.CreatedTeamAPIKey) error { return nil }
+
+func (*quotaInitKeyStorage) ListByOwnerTeam(context.Context, *models.CreatedTeamAPIKey) ([]*models.TeamAPIKey, error) {
+	return nil, nil
+}
+
+func (*quotaInitKeyStorage) ListLimited(context.Context) ([]*models.CreatedTeamAPIKey, error) {
+	return nil, nil
+}
+
+func (*quotaInitKeyStorage) ListTeams(context.Context, *models.CreatedTeamAPIKey) ([]*models.ListedTeam, error) {
+	return nil, nil
+}
+
+func (*quotaInitKeyStorage) FindTeamByName(context.Context, string) (*models.Team, bool, error) {
+	return nil, false, nil
+}
+
+type recordingRedisCloser struct {
+	closed atomic.Bool
+}
+
+func (c *recordingRedisCloser) Close() error {
+	c.closed.Store(true)
+	return nil
+}
+
+func TestControllerInitQuotaRedisAbsentWithAuthDisabledDoesNotRegisterAntiDrift(t *testing.T) {
+	spyCache := &quotaInitCache{}
+	sc := &Controller{
+		cache: spyCache,
+	}
+
+	require.NoError(t, sc.initQuota(context.Background()))
+	require.NotNil(t, sc.quota)
+	assert.Nil(t, sc.quotaAntiDrift)
+	assert.Equal(t, int64(0), spyCache.addCalls.Load())
+	assert.Nil(t, spyCache.lastHandler)
+}
+
+func TestControllerInitQuotaRedisAbsentDoesNotRegisterAntiDrift(t *testing.T) {
+	spyCache := &quotaInitCache{}
+	sc := &Controller{
+		keys:  &quotaInitKeyStorage{},
+		cache: spyCache,
+	}
+
+	require.NoError(t, sc.initQuota(context.Background()))
+	require.NotNil(t, sc.quota)
+	assert.Nil(t, sc.quotaAntiDrift)
+	assert.Equal(t, int64(0), spyCache.addCalls.Load())
+	assert.Nil(t, spyCache.lastHandler)
+}
+
+func TestControllerInitQuotaRedisConfiguredRegistersHandler(t *testing.T) {
+	spyCache := &quotaInitCache{}
+	sc := &Controller{
+		keys:  &quotaInitKeyStorage{},
+		cache: spyCache,
+		quotaCfg: quotapkg.Config{
+			RedisAddr:         "127.0.0.1:1",
+			OperationTimeout:  time.Millisecond,
+			AntiDriftInterval: time.Minute,
+			AntiDriftGrace:    time.Minute,
+		},
+	}
+
+	require.NoError(t, sc.initQuota(context.Background()))
+	require.NotNil(t, sc.quota)
+	require.NotNil(t, sc.quotaAntiDrift)
+	assert.Equal(t, int64(1), spyCache.addCalls.Load(), "Redis configured must register the anti-drift event handler")
+	assert.NotNil(t, spyCache.lastHandler)
+}
+
+func TestControllerInitQuotaRedisConfiguredTransportUnavailableStillFailOpen(t *testing.T) {
+	spyCache := &quotaInitCache{}
+	sc := &Controller{
+		keys:  &quotaInitKeyStorage{},
+		cache: spyCache,
+		quotaCfg: quotapkg.Config{
+			RedisAddr:         "127.0.0.1:1",
+			OperationTimeout:  time.Millisecond,
+			AntiDriftInterval: time.Minute,
+			AntiDriftGrace:    time.Minute,
+		},
+	}
+
+	require.NoError(t, sc.initQuota(context.Background()))
+
+	limit := int64(1)
+	err := sc.quota.Acquire(context.Background(), quotapkg.AcquireRequest{
+		APIKeyID:   "key-1",
+		LockString: "lock-1",
+		Quota: &models.QuotaSpec{Limits: []models.QuotaLimit{{
+			Dimension: models.DimSandboxCount,
+			Limit:     &limit,
+		}}},
+	})
+	require.NoError(t, err, "configured Redis transport errors must fail open on the hot path")
+	require.NotNil(t, sc.quotaAntiDrift, "transport unavailability must not disable driver construction when Redis is configured")
+}
+
+func TestControllerInitQuotaRedisConfiguredRequiresCache(t *testing.T) {
+	sc := &Controller{
+		keys: &quotaInitKeyStorage{},
+		quotaCfg: quotapkg.Config{
+			RedisAddr:         "127.0.0.1:1",
+			OperationTimeout:  time.Millisecond,
+			AntiDriftInterval: time.Minute,
+			AntiDriftGrace:    time.Minute,
+		},
+	}
+
+	err := sc.initQuota(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cache is not available")
+	assert.Nil(t, sc.quota)
+	assert.Nil(t, sc.quotaAntiDrift)
+}
+
+func TestControllerInitQuotaRedisConfiguredRegistrationErrorDoesNotLeavePartialState(t *testing.T) {
+	spyCache := &quotaInitCache{addErr: errors.New("informer unavailable")}
+	sc := &Controller{
+		keys:  &quotaInitKeyStorage{},
+		cache: spyCache,
+		quotaCfg: quotapkg.Config{
+			RedisAddr:         "127.0.0.1:1",
+			OperationTimeout:  time.Millisecond,
+			AntiDriftInterval: time.Minute,
+			AntiDriftGrace:    time.Minute,
+		},
+	}
+
+	err := sc.initQuota(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "informer unavailable")
+	assert.Equal(t, int64(1), spyCache.addCalls.Load())
+	assert.Nil(t, sc.quota)
+	assert.Nil(t, sc.quotaAntiDrift)
+	assert.Nil(t, sc.quotaRedisClient)
+}
+
+func TestControllerShutdownClosesQuotaRedisAfterHTTPShutdown(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+
+	requestStarted := make(chan struct{})
+	releaseRequest := make(chan struct{})
+	server := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			close(requestStarted)
+			<-releaseRequest
+			_, _ = w.Write([]byte("ok"))
+		}),
+	}
+	shutdownStarted := make(chan struct{})
+	server.RegisterOnShutdown(func() {
+		close(shutdownStarted)
+	})
+	serverErr := make(chan error, 1)
+	go func() {
+		serverErr <- server.Serve(listener)
+	}()
+
+	client := &http.Client{
+		Timeout:   5 * time.Second,
+		Transport: &http.Transport{Proxy: nil},
+	}
+	defer client.CloseIdleConnections()
+	clientErr := make(chan error, 1)
+	go func() {
+		resp, err := client.Get("http://" + listener.Addr().String())
+		if err != nil {
+			clientErr <- err
+			return
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		clientErr <- resp.Body.Close()
+	}()
+
+	select {
+	case <-requestStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for request to start")
+	}
+
+	closer := &recordingRedisCloser{}
+	cancelCalled := atomic.Bool{}
+	shutdownCtx, shutdownCancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer shutdownCancel()
+	shutdownDone := make(chan struct{})
+	sc := &Controller{
+		server:           server,
+		quotaRedisClient: closer,
+	}
+	go func() {
+		sc.shutdown(shutdownCtx, func() {
+			cancelCalled.Store(true)
+		})
+		close(shutdownDone)
+	}()
+
+	select {
+	case <-shutdownStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for HTTP shutdown to start")
+	}
+	assert.False(t, closer.closed.Load(), "quota Redis client must stay open while HTTP requests are draining")
+	select {
+	case <-shutdownDone:
+		t.Fatal("shutdown completed before the active request drained")
+	default:
+	}
+
+	close(releaseRequest)
+	select {
+	case <-shutdownDone:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for shutdown to finish")
+	}
+	require.NoError(t, <-clientErr)
+	require.ErrorIs(t, <-serverErr, http.ErrServerClosed)
+	assert.True(t, closer.closed.Load())
+	assert.True(t, cancelCalled.Load())
 }
 
 func NewRequest(t *testing.T, query map[string]string, body any, pathValues map[string]string, user *models.CreatedTeamAPIKey) *http.Request {

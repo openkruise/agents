@@ -18,10 +18,12 @@ package config
 
 import (
 	"testing"
+	"time"
 
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestInitOptions(t *testing.T) {
@@ -217,6 +219,42 @@ func TestInitOptions(t *testing.T) {
 			if tt.input.DisableRouteReconciliation {
 				assert.True(t, result.DisableRouteReconciliation)
 			}
+		})
+	}
+}
+
+func TestValidateQuotaRedisTimeout(t *testing.T) {
+	tests := []struct {
+		name        string
+		timeout     time.Duration
+		expectError string
+	}{
+		{
+			name:        "positive timeout allowed",
+			timeout:     50 * time.Millisecond,
+			expectError: "",
+		},
+		{
+			name:        "zero timeout rejected",
+			timeout:     0,
+			expectError: "quota redis operation timeout must be greater than 0",
+		},
+		{
+			name:        "negative timeout rejected",
+			timeout:     -time.Millisecond,
+			expectError: "quota redis operation timeout must be greater than 0",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateQuotaRedisTimeout(tt.timeout)
+			if tt.expectError == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.expectError)
 		})
 	}
 }

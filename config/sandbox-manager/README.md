@@ -24,3 +24,12 @@ If deploying to a real K8s cluster, please modify to an appropriate tag and push
     kustomize build config/sandbox-manager > bin/sandbox-manager.yaml
     kubectl apply -f bin/sandbox-manager.yaml
     ```
+
+## API Key Sandbox Count Quota
+
+API keys may carry a static `sandbox.count` quota. Dynamic enforcement uses Redis only. If `--e2b-quota-redis-addr`
+is empty, or Redis is configured but unavailable, sandbox-manager intentionally fails open: limited keys are accepted
+and stored, but create requests are temporarily unenforced. Metrics and logs expose fail-open events.
+
+When Redis requires authentication, inject `E2B_QUOTA_REDIS_USERNAME` and `E2B_QUOTA_REDIS_PASSWORD` from a Kubernetes
+Secret rather than writing credentials directly into deployment patches.

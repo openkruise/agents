@@ -24,6 +24,16 @@ import (
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 )
 
+type Config struct {
+	RedisAddr         string
+	RedisUsername     string
+	RedisPassword     string
+	RedisDB           int
+	OperationTimeout  time.Duration
+	AntiDriftInterval time.Duration
+	AntiDriftGrace    time.Duration
+}
+
 type AcquireRequest struct {
 	APIKeyID   string
 	LockString string

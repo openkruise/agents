@@ -32,6 +32,7 @@ import (
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
 	"github.com/openkruise/agents/pkg/cache"
 	sandboxmanager "github.com/openkruise/agents/pkg/sandbox-manager"
+	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
@@ -44,6 +45,10 @@ type quotaManager interface {
 	Acquire(ctx context.Context, req quota.AcquireRequest) error
 	Release(ctx context.Context, req quota.ReleaseRequest) error
 	DeleteSubject(ctx context.Context, apiKeyID string) error
+}
+
+type redisClientCloser interface {
+	Close() error
 }
 
 // Controller handles sandbox-related operations
@@ -62,22 +67,25 @@ type Controller struct {
 	sandboxNamespace      string
 	memberlistBindPort    int
 	keyCfg                *keys.Config
+	quotaCfg              quota.Config
 
 	// fields
-	mux             *http.ServeMux
-	server          *http.Server
-	stop            chan os.Signal
-	cache           cache.Provider
-	storageRegistry storages.VolumeMountProviderRegistry
-	clientConfig    *rest.Config
-	domain          string
-	manager         *sandboxmanager.SandboxManager
-	keys            keys.KeyStorage
-	quota           quotaManager
+	mux              *http.ServeMux
+	server           *http.Server
+	stop             chan os.Signal
+	cache            cache.Provider
+	storageRegistry  storages.VolumeMountProviderRegistry
+	clientConfig     *rest.Config
+	domain           string
+	manager          *sandboxmanager.SandboxManager
+	keys             keys.KeyStorage
+	quota            quotaManager
+	quotaAntiDrift   *quota.AntiDriftDriver
+	quotaRedisClient redisClientCloser
 }
 
 // NewController creates a new E2B Controller
-func NewController(domain, sysNs, peerSelector, sandboxNamespace, sandboxLabelSelector string, maxTimeout, minResumeTimeout, maxClaimWorkers, maxCreateQPS int, extProcMaxConcurrency uint32, port, memberlistBindPort int, keyCfg *keys.Config, clientConfig *rest.Config) *Controller {
+func NewController(domain, sysNs, peerSelector, sandboxNamespace, sandboxLabelSelector string, maxTimeout, minResumeTimeout, maxClaimWorkers, maxCreateQPS int, extProcMaxConcurrency uint32, port, memberlistBindPort int, keyCfg *keys.Config, clientConfig *rest.Config, quotaCfg quota.Config) *Controller {
 	sc := &Controller{
 		mux:                   http.NewServeMux(),
 		domain:                domain,
@@ -94,6 +102,7 @@ func NewController(domain, sysNs, peerSelector, sandboxNamespace, sandboxLabelSe
 		extProcMaxConcurrency: extProcMaxConcurrency,
 		memberlistBindPort:    memberlistBindPort,
 		keyCfg:                keyCfg,
+		quotaCfg:              quotaCfg,
 	}
 
 	sc.server = &http.Server{
@@ -126,7 +135,10 @@ func (sc *Controller) Init() error {
 	sc.storageRegistry = storages.NewStorageProvider()
 	sc.registerRoutes()
 
-	return sc.initKeyStorage(ctx)
+	if err := sc.initKeyStorage(ctx); err != nil {
+		return err
+	}
+	return sc.initQuota(ctx)
 }
 
 func (sc *Controller) sandboxManagerOptions() config.SandboxManagerOptions {
@@ -162,6 +174,48 @@ func (sc *Controller) initKeyStorage(ctx context.Context) error {
 	return nil
 }
 
+func (sc *Controller) initQuota(ctx context.Context) error {
+	log := klog.FromContext(ctx)
+	if sc.keys == nil {
+		sc.quota = quota.NewManager(quota.NoopBackend{})
+		log.Info("api-key quota is unenforced because E2B auth is disabled")
+		return nil
+	}
+	if sc.quotaCfg.RedisAddr == "" {
+		sc.quota = quota.NewManager(quota.NoopBackend{})
+		log.Info("api-key quota Redis is not configured; limited keys are accepted but unenforced")
+		return nil
+	}
+	if sc.cache == nil {
+		return fmt.Errorf("api-key quota Redis is configured but cache is not available")
+	}
+
+	redisClient := clients.NewRedisClient(clients.RedisConfig{
+		Addr:     sc.quotaCfg.RedisAddr,
+		Username: sc.quotaCfg.RedisUsername,
+		Password: sc.quotaCfg.RedisPassword,
+		DB:       sc.quotaCfg.RedisDB,
+	})
+	backend := quota.NewRedisBackend(redisClient, sc.quotaCfg.OperationTimeout)
+	driver := quota.NewAntiDriftDriver(quota.AntiDriftConfig{
+		Interval: sc.quotaCfg.AntiDriftInterval,
+		Grace:    sc.quotaCfg.AntiDriftGrace,
+	}, sc.manager, sc.keys, sc.cache, backend)
+	registration, err := sc.cache.AddSandboxEventHandler(ctx, driver.SandboxEventHandler())
+	if err != nil {
+		if closeErr := redisClient.Close(); closeErr != nil {
+			log.Error(closeErr, "failed to close quota Redis client after anti-drift registration failure")
+		}
+		return err
+	}
+	driver.SetEventRegistration(registration)
+	sc.quota = quota.NewManager(backend)
+	sc.quotaAntiDrift = driver
+	sc.quotaRedisClient = redisClient
+	log.Info("api-key quota Redis configured; Redis transport errors fail open", "addr", sc.quotaCfg.RedisAddr)
+	return nil
+}
+
 func (sc *Controller) Run() (context.Context, error) {
 	if sc.stop != nil {
 		return nil, errors.New("controller already started")
@@ -185,25 +239,43 @@ func (sc *Controller) Run() (context.Context, error) {
 	// stopper
 	go func() {
 		<-sc.stop
-		// Shutdown server gracefully
 		shutdownCtx, shutdownCancel := context.WithTimeout(logs.NewContext("action", "shutdown"), consts.ShutdownTimeout)
-		log := klog.FromContext(shutdownCtx)
-		log.Info("Shutting down server...")
-		defer cancel()
-		sc.manager.Stop(shutdownCtx)
-		// Shutdown HTTP server with timeout
 		defer shutdownCancel()
-		if err := sc.server.Shutdown(shutdownCtx); err != nil {
-			klog.ErrorS(err, "HTTP server forced to shutdown")
-		}
-		if sc.keys != nil {
-			sc.keys.Stop()
-		}
-		klog.InfoS("Server exited")
+		sc.shutdown(shutdownCtx, cancel)
 	}()
 
 	if sc.keys != nil {
 		sc.keys.Run()
 	}
+	if sc.quotaAntiDrift != nil {
+		sc.quotaAntiDrift.Run(ctx)
+	}
 	return ctx, nil
+}
+
+func (sc *Controller) shutdown(ctx context.Context, cancel context.CancelFunc) {
+	log := klog.FromContext(ctx)
+	log.Info("Shutting down server...")
+	defer cancel()
+
+	if sc.quotaAntiDrift != nil {
+		sc.quotaAntiDrift.Stop()
+	}
+	if sc.server != nil {
+		if err := sc.server.Shutdown(ctx); err != nil {
+			klog.ErrorS(err, "HTTP server forced to shutdown")
+		}
+	}
+	if sc.quotaRedisClient != nil {
+		if err := sc.quotaRedisClient.Close(); err != nil {
+			log.Error(err, "failed to close quota Redis client")
+		}
+	}
+	if sc.manager != nil {
+		sc.manager.Stop(ctx)
+	}
+	if sc.keys != nil {
+		sc.keys.Stop()
+	}
+	klog.InfoS("Server exited")
 }

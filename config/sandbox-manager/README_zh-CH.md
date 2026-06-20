@@ -22,3 +22,12 @@ docker build -t sandbox-manager:latest .
     kustomize build config/sandbox-manager > bin/sandbox-manager.yaml
     kubectl apply -f bin/sandbox-manager.yaml
     ```
+
+## API Key Sandbox Count Quota
+
+API key 可以携带静态的 `sandbox.count` 配额。动态限额只依赖 Redis。如果 `--e2b-quota-redis-addr` 为空，或者
+Redis 已配置但暂时不可用，sandbox-manager 会有意 fail-open：受限 key 仍然可以创建和存储，但 create 请求会暂时
+不执行动态限额。相关 fail-open 事件会通过 metrics 和日志暴露出来。
+
+如果 Redis 需要认证，请通过 Kubernetes Secret 注入 `E2B_QUOTA_REDIS_USERNAME` 和
+`E2B_QUOTA_REDIS_PASSWORD`，不要把凭据直接写进 deployment patch。

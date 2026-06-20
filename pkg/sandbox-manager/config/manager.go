@@ -17,6 +17,9 @@ limitations under the License.
 package config
 
 import (
+	"fmt"
+	"time"
+
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/utils"
 	"k8s.io/client-go/rest"
@@ -57,4 +60,11 @@ func InitOptions(opts SandboxManagerOptions) SandboxManagerOptions {
 		opts.MemberlistBindPort = DefaultMemberlistBindPort
 	}
 	return opts
+}
+
+func ValidateQuotaRedisTimeout(timeout time.Duration) error {
+	if timeout <= 0 {
+		return fmt.Errorf("quota redis operation timeout must be greater than 0")
+	}
+	return nil
 }
