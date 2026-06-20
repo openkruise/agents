@@ -202,11 +202,12 @@ A quota is **never silently ignored or silently accepted**:
 Both key backends store **only** the static `QuotaSpec`, alongside the key, written once at **key create**
 (immutable thereafter, §6.7). **No dynamic usage is ever written to the key store** — that lives in Redis.
 
-- **Secret backend:** add `Quota *QuotaSpec json:"quota,omitempty"` to `models.CreatedTeamAPIKey`; serializes
-  into the per-key JSON inside `e2b-key-store`; old payloads decode to `nil` == unlimited; writes reuse the
-  existing `retryUpdateSecret` CAS. (The single `e2b-key-store` Secret is suited only to **static** config —
-  it cannot host per-create dynamic counters at 2500/sec; that is exactly why dynamic state lives in Redis,
-  not the Secret.)
+- **Secret backend:** store the internal normalized `QuotaSpec` in the per-key JSON inside `e2b-key-store`;
+  public API request/response structs use a separate nested wire model (`"quota": {"sandbox": {"count": N}}`)
+  and convert to/from `QuotaSpec` at the handler/storage boundary. Old payloads without quota decode to
+  `nil` == unlimited; writes reuse the existing `retryUpdateSecret` CAS. (The single `e2b-key-store` Secret is
+  suited only to **static** config — it cannot host per-create dynamic counters at 2500/sec; that is exactly why
+  dynamic state lives in Redis, not the Secret.)
 - **MySQL backend:** add a nullable `quota JSON` column to `team_api_keys` (`NULL` == unlimited); `AutoMigrate`
   adds it, gated by `DisableAutoMigrate` with a documented manual DDL alternative.
 
@@ -580,7 +581,9 @@ for all non-manager deletions.
 
 - **Create** (`POST /sandboxes`): unchanged shape; quota enforced internally; exceeded → **429** with the
   existing E2B error body (the spec-compliant `{code,message}` shape used by other E2B error paths), no retry.
-- **Key create** (`POST /api-keys`): optional nested `quota`; **admin-only** to set; validated (§3.1).
+- **Key create** (`POST /api-keys`): optional nested `quota`; **admin-only** to set; validated (§3.1). The
+  internal `{"limits":[...]}` shape is not a documented public API shape and must not cause a nested public
+  request to be silently ignored.
   **Accepted regardless of Redis presence** (unenforced if no Redis, §6.1).
 - **No quota `PATCH`** (§6.7): immutable after create; change quota by creating a new key. (Deliberate Phase 1
   scope-down — a product decision.)
