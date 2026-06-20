@@ -6,51 +6,11 @@
 
 ## 1. 定义模板
 
-类似 code-interpreter 模板，我们可以通过 `SandboxSet` 定义一个使用官方 E2B Desktop 镜像的模板并创建预热池。
+类似 code-interpreter 模板，我们可以使用官方 E2B Desktop 镜像，通过 `SandboxSet` 创建预热池。
+应用 [sandboxset.yaml](sandboxset.yaml) 以创建名为 `desktop` 的模板：
 
-```yaml
-apiVersion: agents.kruise.io/v1alpha1
-kind: SandboxSet
-metadata:
-  annotations:
-    # 启用 SandboxManager 的 Envd 初始化能力
-    e2b.agents.kruise.io/should-init-envd: "true"
-  name: code-interpreter
-  namespace: default
-spec:
-  # 预热池的大小，建议比预估的请求突发量略大
-  replicas: 100
-  template: # 声明一个 Pod 模板
-    spec:
-      initContainers:
-        - name: init # 通过 native sidecar 注入 agent-runtime 组件
-          image: registry-cn-hangzhou.ack.aliyuncs.com/acs/agent-runtime:v0.0.1
-          volumeMounts:
-            - name: agent-runtime-volume
-              mountPath: /mnt/agent-runtime
-          env:
-            - name: AGENT_RUNTIME_WORKSPACE
-              value: /mnt/agent-runtime
-          restartPolicy: Always
-      containers:
-        - name: sandbox
-          image: e2bdev/desktop:latest # 使用 E2B 官方的 desktop 镜像
-          resources:
-            requests:
-              cpu: 1
-              memory: 1Gi
-            limits:
-              cpu: 1
-              memory: 1Gi
-          env:
-            - name: AGENT_RUNTIME_WORKSPACE
-              value: /mnt/agent-runtime
-          volumeMounts:
-            - name: agent-runtime-volume
-              mountPath: /mnt/agent-runtime
-      volumes:
-        - name: agent-runtime-volume # 定义 agent-runtime 与主容器的共享目录
-          emptyDir: { }
+```shell
+kubectl apply -f examples/desktop/sandboxset.yaml
 ```
 
 ## 2. 通过 E2B Python SDK 使用沙箱
