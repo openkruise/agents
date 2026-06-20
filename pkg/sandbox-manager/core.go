@@ -62,11 +62,11 @@ func NewSandboxManagerBuilder(opts config.SandboxManagerOptions) *SandboxManager
 
 func (b *SandboxManagerBuilder) WithSandboxInfra() *SandboxManagerBuilder {
 	b.buildInfraFunc = func() (infra.Builder, error) {
-		mgr, err := infracache.NewControllerManager(b.opts.RestConfig, b.opts)
+		mgr, health, err := infracache.NewControllerManagerWithHealth(b.opts.RestConfig, b.opts)
 		if err != nil {
 			return nil, err
 		}
-		cache, err := infracache.NewCache(mgr)
+		cache, err := infracache.NewCacheWithHealth(mgr, health)
 		if err != nil {
 			return nil, err
 		}

@@ -207,6 +207,58 @@ func TestCache_GetSandboxSet_MultipleTemplates(t *testing.T) {
 	assert.Contains(t, err.Error(), "not found in cache")
 }
 
+func TestCache_ListLiveLockstringsByOwner(t *testing.T) {
+	now := metav1.Now()
+	base := func(name, owner, lock string, phase agentsv1alpha1.SandboxPhase) *agentsv1alpha1.Sandbox {
+		return &agentsv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: "default",
+				Annotations: map[string]string{
+					agentsv1alpha1.AnnotationOwner: owner,
+					agentsv1alpha1.AnnotationLock:  lock,
+				},
+				CreationTimestamp: now,
+			},
+			Status: agentsv1alpha1.SandboxStatus{Phase: phase},
+		}
+	}
+
+	deleting := base("deleting", "user-1", "lock-deleting", agentsv1alpha1.SandboxRunning)
+	deleting.DeletionTimestamp = &metav1.Time{Time: time.Now()}
+	deleting.Finalizers = []string{"test.finalizer"}
+
+	c, _, err := cachetest.NewTestCache(t,
+		base("running", "user-1", "lock-running", agentsv1alpha1.SandboxRunning),
+		base("failed", "user-1", "lock-failed", agentsv1alpha1.SandboxFailed),
+		base("succeeded", "user-1", "lock-succeeded", agentsv1alpha1.SandboxSucceeded),
+		base("terminating", "user-1", "lock-terminating", agentsv1alpha1.SandboxTerminating),
+		deleting,
+		base("nolock", "user-1", "", agentsv1alpha1.SandboxRunning),
+		base("other", "user-2", "lock-other", agentsv1alpha1.SandboxRunning),
+	)
+	require.NoError(t, err)
+
+	got, err := c.ListLiveLockstringsByOwner(t.Context(), cache.ListLiveLockstringsByOwnerOptions{
+		Namespace: "default",
+		Owner:     "user-1",
+	})
+	require.NoError(t, err)
+
+	gotLocks := make([]string, 0, len(got))
+	for _, item := range got {
+		gotLocks = append(gotLocks, item.LockString)
+		assert.Equal(t, now.Time.Truncate(time.Second), item.CreationTimestamp)
+	}
+	assert.ElementsMatch(t, []string{"lock-running", "lock-failed", "lock-succeeded"}, gotLocks)
+
+	got, err = c.ListLiveLockstringsByOwner(t.Context(), cache.ListLiveLockstringsByOwnerOptions{
+		Namespace: "default",
+	})
+	require.NoError(t, err)
+	assert.Nil(t, got)
+}
+
 func TestCache_PickSandboxSetWithOptions_NamespaceScoped(t *testing.T) {
 	sbsA := &agentsv1alpha1.SandboxSet{
 		ObjectMeta: metav1.ObjectMeta{Name: "shared-template", Namespace: "team-a"},

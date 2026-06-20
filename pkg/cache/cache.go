@@ -20,6 +20,8 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"golang.org/x/sync/singleflight"
 	corev1 "k8s.io/api/core/v1"
@@ -29,6 +31,7 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
+	toolscache "k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -42,6 +45,62 @@ import (
 	"github.com/openkruise/agents/pkg/utils"
 )
 
+// watchErrorSettle is how long the remove direction stays disabled after a
+// watch error. It is well under the anti-drift grace, so the gate only shrinks
+// the transient: any spurious remove that slips through during recovery is
+// re-charged by the add direction within grace.
+const watchErrorSettle = 2 * time.Minute
+
+type InformerHealth struct {
+	synced         atomic.Bool
+	lastWatchError atomic.Int64
+}
+
+func NewInformerHealth() *InformerHealth {
+	return &InformerHealth{}
+}
+
+func (h *InformerHealth) MarkSynced() {
+	if h == nil {
+		return
+	}
+	h.synced.Store(true)
+}
+
+func (h *InformerHealth) RecordWatchError(_ *toolscache.Reflector, err error) {
+	if h == nil || err == nil {
+		return
+	}
+	h.lastWatchError.Store(time.Now().UnixNano())
+}
+
+func (h *InformerHealth) RemoveSafe() bool {
+	if h == nil || !h.synced.Load() {
+		return false
+	}
+	last := h.lastWatchError.Load()
+	if last == 0 {
+		return true
+	}
+	return time.Since(time.Unix(0, last)) >= watchErrorSettle
+}
+
+type sandboxEventRegistration struct {
+	informer ctrlcache.Informer
+	handle   toolscache.ResourceEventHandlerRegistration
+}
+
+func (r *sandboxEventRegistration) HasSynced() bool {
+	return r != nil && r.handle != nil && r.handle.HasSynced()
+}
+
+func (r *sandboxEventRegistration) Remove() error {
+	if r == nil || r.informer == nil || r.handle == nil {
+		return nil
+	}
+	return r.informer.RemoveEventHandler(r.handle)
+}
+
 // Cache is a controller-runtime based cache that replaces the legacy informer-based Cache.
 type Cache struct {
 	client        ctrlclient.Client
@@ -51,6 +110,10 @@ type Cache struct {
 	cancelFunc    context.CancelFunc
 	indexGetGroup singleflight.Group
 	controllers   *controllers.CacheControllerHandlers
+	health        *InformerHealth
+
+	sandboxEventRegistrationMu sync.RWMutex
+	sandboxEventRegistration   SandboxEventHandlerRegistration
 }
 
 // BuildCacheConfig creates the informer filter configuration for the cache.
@@ -123,6 +186,22 @@ func BuildCacheConfig(opts config.SandboxManagerOptions) (map[ctrlclient.Object]
 // It configures informer filtering based on resource scope and returns a manager
 // that must be passed to NewCache.
 func NewControllerManager(cfg *rest.Config, opts config.SandboxManagerOptions) (ctrl.Manager, error) {
+	mgr, _, err := NewControllerManagerWithHealth(cfg, opts)
+	return mgr, err
+}
+
+// NewControllerManagerWithHealth creates a controller-runtime manager together
+// with the informer health gate used by cache-backed quota maintenance.
+func NewControllerManagerWithHealth(cfg *rest.Config, opts config.SandboxManagerOptions) (ctrl.Manager, *InformerHealth, error) {
+	health := NewInformerHealth()
+	mgr, err := newControllerManager(cfg, opts, health)
+	if err != nil {
+		return nil, nil, err
+	}
+	return mgr, health, nil
+}
+
+func newControllerManager(cfg *rest.Config, opts config.SandboxManagerOptions, health *InformerHealth) (ctrl.Manager, error) {
 	if cfg == nil {
 		return nil, errors.NewBadRequest("rest config cannot be nil")
 	}
@@ -137,10 +216,18 @@ func NewControllerManager(cfg *rest.Config, opts config.SandboxManagerOptions) (
 		return nil, err
 	}
 
+	cacheOpts := ctrlcache.Options{
+		ByObject:                     byObject,
+		DefaultUnsafeDisableDeepCopy: ptr.To(true),
+	}
+	if health != nil {
+		cacheOpts.DefaultWatchErrorHandler = health.RecordWatchError
+	}
+
 	// Create manager with unnecessary features disabled
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme:                 scheme,
-		Cache:                  ctrlcache.Options{ByObject: byObject, DefaultUnsafeDisableDeepCopy: ptr.To(true)},
+		Cache:                  cacheOpts,
 		Metrics:                metricsserver.Options{BindAddress: "0"},
 		HealthProbeBindAddress: "",
 		LeaderElection:         false,
@@ -155,6 +242,12 @@ func NewControllerManager(cfg *rest.Config, opts config.SandboxManagerOptions) (
 // NewCache creates a new Cache instance from a pre-configured controller manager.
 // The metadata must have been returned by NewControllerManager.
 func NewCache(mgr ctrl.Manager) (*Cache, error) {
+	return NewCacheWithHealth(mgr, nil)
+}
+
+// NewCacheWithHealth creates a cache backed by the given manager and informer
+// health gate.
+func NewCacheWithHealth(mgr ctrl.Manager, health *InformerHealth) (*Cache, error) {
 	waitHooks := &sync.Map{}
 	handlers, err := controllers.SetupCacheControllersWithManager(mgr, waitHooks)
 	if err != nil {
@@ -171,6 +264,7 @@ func NewCache(mgr ctrl.Manager) (*Cache, error) {
 		mgr:         mgr,
 		waitHooks:   waitHooks,
 		controllers: handlers,
+		health:      health,
 	}, nil
 }
 
@@ -190,6 +284,9 @@ func (c *Cache) Run(ctx context.Context) error {
 	if cache != nil && !cache.WaitForCacheSync(ctx) {
 		cancel()
 		return fmt.Errorf("timed out waiting for caches to sync")
+	}
+	if c.health != nil {
+		c.health.MarkSynced()
 	}
 	log.V(utils.DebugLogLevel).Info("Cache started, caches synced")
 	return nil
@@ -310,6 +407,36 @@ func (c *Cache) CountActiveSandboxes(ctx context.Context, opts ListSandboxesOpti
 	return cnt, nil
 }
 
+func isLiveForQuota(sbx *agentsv1alpha1.Sandbox) bool {
+	return sbx.GetDeletionTimestamp() == nil && sbx.Status.Phase != agentsv1alpha1.SandboxTerminating
+}
+
+func (c *Cache) ListLiveLockstringsByOwner(ctx context.Context, opts ListLiveLockstringsByOwnerOptions) ([]LiveLockstring, error) {
+	if opts.Owner == "" {
+		return nil, nil
+	}
+	list := &agentsv1alpha1.SandboxList{}
+	if err := listObjectWithUserAndNamespace(ctx, c.client, list, opts.Owner, opts.Namespace); err != nil {
+		return nil, err
+	}
+	result := make([]LiveLockstring, 0, len(list.Items))
+	for i := range list.Items {
+		sbx := &list.Items[i]
+		if !isLiveForQuota(sbx) {
+			continue
+		}
+		lock := sbx.GetAnnotations()[agentsv1alpha1.AnnotationLock]
+		if lock == "" {
+			continue
+		}
+		result = append(result, LiveLockstring{
+			LockString:        lock,
+			CreationTimestamp: sbx.CreationTimestamp.Time,
+		})
+	}
+	return result, nil
+}
+
 func (c *Cache) ListCheckpoints(ctx context.Context, opts ListCheckpointsOptions) ([]*agentsv1alpha1.Checkpoint, error) {
 	list := &agentsv1alpha1.CheckpointList{}
 	if err := listObjectWithUserAndNamespace(ctx, c.client, list, opts.User, opts.Namespace); err != nil {
@@ -360,6 +487,35 @@ func (c *Cache) GetAPIReader() ctrlclient.Reader {
 
 func (c *Cache) GetCache() ctrlcache.Cache {
 	return c.mgr.GetCache()
+}
+
+func (c *Cache) AddSandboxEventHandler(ctx context.Context, handler toolscache.ResourceEventHandler) (SandboxEventHandlerRegistration, error) {
+	informer, err := c.GetCache().GetInformer(ctx, &agentsv1alpha1.Sandbox{})
+	if err != nil {
+		return nil, err
+	}
+	handle, err := informer.AddEventHandler(handler)
+	if err != nil {
+		return nil, err
+	}
+	reg := &sandboxEventRegistration{informer: informer, handle: handle}
+	c.sandboxEventRegistrationMu.Lock()
+	c.sandboxEventRegistration = reg
+	c.sandboxEventRegistrationMu.Unlock()
+	return reg, nil
+}
+
+func (c *Cache) RemoveSafe() bool {
+	if c == nil || c.health == nil || !c.health.RemoveSafe() {
+		return false
+	}
+	c.sandboxEventRegistrationMu.RLock()
+	reg := c.sandboxEventRegistration
+	c.sandboxEventRegistrationMu.RUnlock()
+	if reg == nil {
+		return true
+	}
+	return reg.HasSynced()
 }
 
 // GetWaitHooks returns the internal waitHooks map used for wait simulation.

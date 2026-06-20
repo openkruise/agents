@@ -18,7 +18,9 @@ package cache
 
 import (
 	"context"
+	"time"
 
+	toolscache "k8s.io/client-go/tools/cache"
 	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -52,6 +54,10 @@ type Provider interface {
 	// and optional owner. Faster than ListSandboxes when only the count is needed.
 	CountActiveSandboxes(ctx context.Context, opts ListSandboxesOptions) (int32, error)
 
+	// ListLiveLockstringsByOwner returns the lockstrings of quota-live sandboxes
+	// filtered by namespace and owner.
+	ListLiveLockstringsByOwner(ctx context.Context, opts ListLiveLockstringsByOwnerOptions) ([]LiveLockstring, error)
+
 	// ListCheckpoints returns Checkpoint CRD objects filtered by namespace and optional owner.
 	// Ownership is determined by the AnnotationOwner annotation on the Checkpoint resource when User is set.
 	ListCheckpoints(ctx context.Context, opts ListCheckpointsOptions) ([]*agentsv1alpha1.Checkpoint, error)
@@ -81,6 +87,14 @@ type Provider interface {
 	// succeeds when Status.Phase == CheckpointSucceeded (with non-empty
 	// CheckpointId); fails on Terminating/Failed.
 	NewCheckpointTask(ctx context.Context, cp *agentsv1alpha1.Checkpoint) *cacheutils.WaitTask[*agentsv1alpha1.Checkpoint]
+
+	// AddSandboxEventHandler registers a raw informer event handler for Sandbox
+	// objects and returns a registration handle for sync tracking and removal.
+	AddSandboxEventHandler(ctx context.Context, handler toolscache.ResourceEventHandler) (SandboxEventHandlerRegistration, error)
+
+	// RemoveSafe reports whether cache-backed quota remove operations can safely
+	// proceed using the current informer health and raw sandbox handler state.
+	RemoveSafe() bool
 
 	// Run starts an owned manager and waits for cache sync.
 	// Do not call Run for a cache backed by an externally owned manager.
@@ -141,4 +155,19 @@ type ListCheckpointsOptions struct {
 type ListSandboxesInPoolOptions struct {
 	Namespace string
 	Pool      string
+}
+
+type LiveLockstring struct {
+	LockString        string
+	CreationTimestamp time.Time
+}
+
+type ListLiveLockstringsByOwnerOptions struct {
+	Namespace string
+	Owner     string
+}
+
+type SandboxEventHandlerRegistration interface {
+	HasSynced() bool
+	Remove() error
 }
