@@ -20,6 +20,7 @@ import (
 	"context"
 	"time"
 
+	cachepkg "github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 )
 
@@ -40,4 +41,17 @@ type Backend interface {
 	AddObserved(ctx context.Context, apiKeyID, lockString string, acquiredAt time.Time) error
 	List(ctx context.Context, apiKeyID string) (map[string]time.Time, error)
 	DeleteSubject(ctx context.Context, apiKeyID string) error
+}
+
+type LimitedKeyStore interface {
+	ListLimited(ctx context.Context) ([]*models.CreatedTeamAPIKey, error)
+}
+
+type LiveLockstringCache interface {
+	ListLiveLockstringsByOwner(ctx context.Context, opts cachepkg.ListLiveLockstringsByOwnerOptions) ([]cachepkg.LiveLockstring, error)
+	RemoveSafe() bool
+}
+
+type PrimaryChecker interface {
+	IsPrimary() bool
 }

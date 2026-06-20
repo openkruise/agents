@@ -80,13 +80,18 @@ func (b *RedisBackend) Acquire(ctx context.Context, apiKeyID, lockString string,
 }
 
 func (b *RedisBackend) Release(ctx context.Context, apiKeyID, lockString string) error {
+	_, err := b.ReleaseResult(ctx, apiKeyID, lockString)
+	return err
+}
+
+func (b *RedisBackend) ReleaseResult(ctx context.Context, apiKeyID, lockString string) (bool, error) {
 	releaseCtx, cancel := withOperationTimeout(ctx, defaultMaintenanceOperationTimeout)
 	defer cancel()
 
 	deleted, err := releaseRedisScript.Run(releaseCtx, b.client, []string{liveKey(apiKeyID)}, lockString).Int64()
 	if err != nil {
 		releaseTotal.WithLabelValues("error").Inc()
-		return fmt.Errorf("%w: release quota in redis: %v", ErrBackendUnavailable, err)
+		return false, fmt.Errorf("%w: release quota in redis: %v", ErrBackendUnavailable, err)
 	}
 
 	if deleted == 1 {
@@ -95,7 +100,7 @@ func (b *RedisBackend) Release(ctx context.Context, apiKeyID, lockString string)
 		releaseTotal.WithLabelValues("noop").Inc()
 	}
 
-	return nil
+	return deleted == 1, nil
 }
 
 func (b *RedisBackend) AddObserved(ctx context.Context, apiKeyID, lockString string, acquiredAt time.Time) error {

@@ -43,8 +43,44 @@ var (
 		},
 		[]string{"result"},
 	)
+	antiDriftSkippedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "e2b_quota_antidrift_skipped_total",
+			Help: "Total quota anti-drift skips by reason.",
+		},
+		[]string{"reason"},
+	)
+	antiDriftErrorsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "e2b_quota_antidrift_errors_total",
+			Help: "Total quota anti-drift errors by operation.",
+		},
+		[]string{"operation"},
+	)
+	antiDriftEventReleaseTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "e2b_quota_antidrift_event_release_total",
+			Help: "Total quota anti-drift event release results.",
+		},
+		[]string{"result"},
+	)
+	antiDriftEventProbeTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "e2b_quota_antidrift_event_probe_total",
+			Help: "Total quota anti-drift event live-set probes by result.",
+		},
+		[]string{"result"},
+	)
 )
 
 func init() {
-	metrics.Registry.MustRegister(acquireTotal, backendErrorsTotal, releaseTotal)
+	metrics.Registry.MustRegister(
+		acquireTotal,
+		backendErrorsTotal,
+		releaseTotal,
+		antiDriftSkippedTotal,
+		antiDriftErrorsTotal,
+		antiDriftEventReleaseTotal,
+		antiDriftEventProbeTotal,
+	)
 }

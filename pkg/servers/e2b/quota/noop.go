@@ -27,6 +27,8 @@ func (NoopBackend) Acquire(context.Context, string, string, int64) error { retur
 
 func (NoopBackend) Release(context.Context, string, string) error { return nil }
 
+func (NoopBackend) ReleaseResult(context.Context, string, string) (bool, error) { return false, nil }
+
 func (NoopBackend) AddObserved(context.Context, string, string, time.Time) error { return nil }
 
 func (NoopBackend) List(context.Context, string) (map[string]time.Time, error) {
