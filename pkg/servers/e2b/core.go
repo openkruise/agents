@@ -37,7 +37,14 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
 	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
+	"github.com/openkruise/agents/pkg/servers/e2b/quota"
 )
+
+type quotaManager interface {
+	Acquire(ctx context.Context, req quota.AcquireRequest) error
+	Release(ctx context.Context, req quota.ReleaseRequest) error
+	DeleteSubject(ctx context.Context, apiKeyID string) error
+}
 
 // Controller handles sandbox-related operations
 type Controller struct {
@@ -66,6 +73,7 @@ type Controller struct {
 	domain          string
 	manager         *sandboxmanager.SandboxManager
 	keys            keys.KeyStorage
+	quota           quotaManager
 }
 
 // NewController creates a new E2B Controller

@@ -17,9 +17,13 @@ limitations under the License.
 package e2b
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
+	"time"
+
+	"k8s.io/klog/v2"
 
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
@@ -160,6 +164,15 @@ func (sc *Controller) DeleteAPIKey(r *http.Request) (web.ApiResponse[struct{}], 
 				Code:    http.StatusInternalServerError,
 				Message: fmt.Sprintf("Failed to delete API key: %v", err),
 			}
+		}
+		if sc.quota != nil {
+			go func(apiKeyID string) {
+				cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				defer cancel()
+				if err := sc.quota.DeleteSubject(cleanupCtx, apiKeyID); err != nil {
+					klog.FromContext(cleanupCtx).Error(err, "failed to cleanup quota live set for deleted api-key", "apiKeyID", apiKeyID)
+				}
+			}(key.ID.String())
 		}
 	}
 

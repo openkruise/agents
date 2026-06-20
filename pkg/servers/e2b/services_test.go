@@ -44,6 +44,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
+	"github.com/openkruise/agents/pkg/servers/e2b/quota"
 	"github.com/openkruise/agents/pkg/servers/web"
 	"github.com/openkruise/agents/pkg/utils/proxyutils"
 	"github.com/openkruise/agents/pkg/utils/runtime"
@@ -586,6 +587,150 @@ func TestCreateSandboxReturnsImmediatelyWhenCreateOnNoStockHitsQuota(t *testing.
 	assert.Contains(t, apiError.Message, "platform configuration issue")
 	assert.Equal(t, int32(1), createCalls.Load(), "terminal quota denial must not retry sandbox creation")
 	assert.Less(t, elapsed, sandboxcr.CreateRetryInterval, "terminal quota denial must return before retry backoff")
+}
+
+func TestCreateSandbox_QuotaExceededReturns429WithoutRetry(t *testing.T) {
+	controller, _, teardown := Setup(t)
+	defer teardown()
+
+	cleanup := CreateSandboxPool(t, controller, "tmpl", 1)
+	defer cleanup()
+
+	limit := int64(0)
+	user := &models.CreatedTeamAPIKey{
+		ID:   uuid.New(),
+		Key:  uuid.NewString(),
+		Name: "limited",
+		Team: models.AdminTeam(),
+		QuotaSpec: &models.QuotaSpec{Limits: []models.QuotaLimit{{
+			Dimension: models.DimSandboxCount,
+			Limit:     &limit,
+		}}},
+	}
+	fakeQuota := &fakeQuotaManager{acquireErr: quota.ErrQuotaExceeded}
+	controller.quota = fakeQuota
+
+	resp, apiErr := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
+		TemplateID: "tmpl",
+		Metadata: map[string]string{
+			models.ExtensionKeySkipInitRuntime: v1alpha1.True,
+		},
+	}, nil, user))
+
+	require.NotNil(t, apiErr)
+	assert.Equal(t, http.StatusTooManyRequests, apiErr.Code)
+	assert.Contains(t, apiErr.Message, "quota exceeded")
+	assert.Zero(t, resp.Code)
+	assert.Equal(t, int64(1), fakeQuota.acquireCalls.Load())
+}
+
+func TestCreateSandbox_QuotaExceededLeavesPooledSandboxClaimable(t *testing.T) {
+	controller, _, teardown := Setup(t)
+	defer teardown()
+
+	cleanup := CreateSandboxPool(t, controller, "tmpl", 1)
+	defer cleanup()
+
+	limit := int64(0)
+	limited := &models.CreatedTeamAPIKey{
+		ID:   uuid.New(),
+		Key:  uuid.NewString(),
+		Name: "limited",
+		Team: models.AdminTeam(),
+		QuotaSpec: &models.QuotaSpec{Limits: []models.QuotaLimit{{
+			Dimension: models.DimSandboxCount,
+			Limit:     &limit,
+		}}},
+	}
+	fakeQuota := &fakeQuotaManager{acquireErr: quota.ErrQuotaExceeded}
+	controller.quota = fakeQuota
+
+	resp, apiErr := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
+		TemplateID: "tmpl",
+		Metadata: map[string]string{
+			models.ExtensionKeySkipInitRuntime: v1alpha1.True,
+		},
+	}, nil, limited))
+	require.NotNil(t, apiErr)
+	assert.Equal(t, http.StatusTooManyRequests, apiErr.Code)
+	assert.Zero(t, resp.Code)
+	assert.Equal(t, int64(1), fakeQuota.acquireCalls.Load(), "quota miss must not retry")
+
+	unlimited := &models.CreatedTeamAPIKey{
+		ID:   uuid.New(),
+		Key:  uuid.NewString(),
+		Name: "unlimited",
+		Team: models.AdminTeam(),
+	}
+	resp2, apiErr2 := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
+		TemplateID: "tmpl",
+		Metadata: map[string]string{
+			models.ExtensionKeySkipInitRuntime: v1alpha1.True,
+		},
+	}, nil, unlimited))
+	require.Nil(t, apiErr2)
+	assert.Equal(t, http.StatusCreated, resp2.Code)
+	require.NotNil(t, resp2.Body)
+	assert.Equal(t, fmt.Sprintf("%s--tmpl-0", Namespace), resp2.Body.SandboxID)
+	assert.Equal(t, int64(1), fakeQuota.acquireCalls.Load(), "unlimited key performs zero quota IO")
+
+	claimed := GetSandbox(t, resp2.Body.SandboxID, getTestCRClient(controller))
+	assert.Equal(t, unlimited.ID.String(), claimed.Annotations[v1alpha1.AnnotationOwner])
+	assert.NotEmpty(t, claimed.Annotations[v1alpha1.AnnotationLock])
+}
+
+func TestCreateSandbox_CloneQuotaExceededReturns429WithoutRetry(t *testing.T) {
+	controller, _, teardown := Setup(t)
+	defer teardown()
+
+	team := &models.Team{ID: uuid.New(), Name: "team-a"}
+	limit := int64(0)
+	user := &models.CreatedTeamAPIKey{
+		ID:   uuid.New(),
+		Key:  uuid.NewString(),
+		Name: "limited",
+		Team: team,
+		QuotaSpec: &models.QuotaSpec{Limits: []models.QuotaLimit{{
+			Dimension: models.DimSandboxCount,
+			Limit:     &limit,
+		}}},
+	}
+	cleanup := CreateCheckpointAndTemplateInNamespace(t, controller, team.Name, "clone-template", "checkpoint-1", user.ID.String(), "source-sandbox", "2026-06-19T00:00:00Z")
+	defer cleanup()
+
+	fakeQuota := &fakeQuotaManager{acquireErr: quota.ErrQuotaExceeded}
+	controller.quota = fakeQuota
+
+	resp, apiErr := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
+		TemplateID: "checkpoint-1",
+		Metadata: map[string]string{
+			models.ExtensionKeySkipInitRuntime: v1alpha1.True,
+		},
+	}, nil, user))
+
+	require.NotNil(t, apiErr)
+	assert.Equal(t, http.StatusTooManyRequests, apiErr.Code)
+	assert.Contains(t, apiErr.Message, "quota exceeded")
+	assert.Zero(t, resp.Code)
+	assert.Equal(t, int64(1), fakeQuota.acquireCalls.Load())
+}
+
+func TestCreateSandbox_UnlimitedKeyDoesNotCallQuota(t *testing.T) {
+	controller, _, teardown := Setup(t)
+	defer teardown()
+
+	fakeQuota := &fakeQuotaManager{}
+	controller.quota = fakeQuota
+	user := &models.CreatedTeamAPIKey{
+		ID:   uuid.New(),
+		Key:  uuid.NewString(),
+		Name: "unlimited",
+		Team: models.AdminTeam(),
+	}
+
+	admission := controller.quotaAdmission(user)
+	assert.Nil(t, admission)
+	assert.Equal(t, int64(0), fakeQuota.acquireCalls.Load())
 }
 
 func TestCreateSandboxAlwaysCreatesAccessToken(t *testing.T) {
@@ -1585,6 +1730,83 @@ func TestDeleteSandbox(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDeleteSandbox_ReleasesQuotaAfterAcceptedDelete(t *testing.T) {
+	controller, _, teardown := Setup(t)
+	defer teardown()
+
+	controller.quota = &fakeQuotaManager{}
+	user := &models.CreatedTeamAPIKey{
+		ID:   uuid.New(),
+		Key:  InitKey,
+		Name: "admin",
+		Team: models.AdminTeam(),
+	}
+
+	cleanup := CreateSandboxPool(t, controller, "test-template", 1)
+	_ = cleanup
+
+	createResp, apiErr := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
+		TemplateID: "test-template",
+		Metadata: map[string]string{
+			models.ExtensionKeySkipInitRuntime: v1alpha1.True,
+		},
+	}, nil, user))
+	require.Nil(t, apiErr)
+	require.NotNil(t, createResp.Body)
+
+	fakeQuota := controller.quota.(*fakeQuotaManager)
+	deleteResp, apiErr := controller.DeleteSandbox(NewRequest(t, nil, nil, map[string]string{
+		"sandboxID": createResp.Body.SandboxID,
+	}, user))
+
+	require.Nil(t, apiErr)
+	assert.Equal(t, http.StatusNoContent, deleteResp.Code)
+	assert.Equal(t, int64(1), fakeQuota.releaseCalls.Load())
+	assert.True(t, fakeQuota.releaseHasDeadline.Load())
+	assert.Equal(t, user.ID.String(), fakeQuota.lastRelease.APIKeyID)
+	assert.NotEmpty(t, fakeQuota.lastRelease.LockString)
+}
+
+func TestDeleteSandbox_DeleteFailureDoesNotReleaseQuota(t *testing.T) {
+	controller, _, teardown := Setup(t)
+	defer teardown()
+
+	fakeQuota := &fakeQuotaManager{}
+	controller.quota = fakeQuota
+	user := &models.CreatedTeamAPIKey{
+		ID:   uuid.New(),
+		Key:  InitKey,
+		Name: "admin",
+		Team: models.AdminTeam(),
+	}
+
+	cleanup := CreateSandboxPool(t, controller, "test-template", 1)
+	defer cleanup()
+
+	createResp, apiErr := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
+		TemplateID: "test-template",
+		Metadata: map[string]string{
+			models.ExtensionKeySkipInitRuntime: v1alpha1.True,
+		},
+	}, nil, user))
+	require.Nil(t, apiErr)
+	require.NotNil(t, createResp.Body)
+
+	origDeleteSandbox := sandboxcr.DefaultDeleteSandbox
+	sandboxcr.DefaultDeleteSandbox = func(context.Context, *v1alpha1.Sandbox, ctrlclient.Client) error {
+		return fmt.Errorf("mock delete error")
+	}
+	t.Cleanup(func() { sandboxcr.DefaultDeleteSandbox = origDeleteSandbox })
+
+	_, apiErr = controller.DeleteSandbox(NewRequest(t, nil, nil, map[string]string{
+		"sandboxID": createResp.Body.SandboxID,
+	}, user))
+
+	require.NotNil(t, apiErr)
+	assert.Contains(t, apiErr.Message, "mock delete error")
+	assert.Equal(t, int64(0), fakeQuota.releaseCalls.Load())
 }
 
 func TestDeleteSandboxDeadClaimedSandbox(t *testing.T) {

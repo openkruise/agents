@@ -26,8 +26,10 @@ import (
 
 	"k8s.io/klog/v2"
 
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	sandboxmanager "github.com/openkruise/agents/pkg/sandbox-manager"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
+	"github.com/openkruise/agents/pkg/servers/e2b/quota"
 	"github.com/openkruise/agents/pkg/servers/web"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/timeout"
@@ -71,6 +73,22 @@ func (sc *Controller) DeleteSandbox(r *http.Request) (web.ApiResponse[struct{}],
 		log.Error(err, "failed to delete sandbox", "id", id)
 		return web.ApiResponse[struct{}]{}, &web.ApiError{
 			Message: fmt.Sprintf("Failed to delete sandbox: %v", err),
+		}
+	}
+
+	if sc.quota != nil {
+		annotations := sbx.GetAnnotations()
+		lockString := annotations[agentsv1alpha1.AnnotationLock]
+		owner := annotations[agentsv1alpha1.AnnotationOwner]
+		if owner != "" && lockString != "" {
+			releaseCtx, cancel := quotaRequestReleaseContext(r.Context())
+			defer cancel()
+			if err := sc.quota.Release(releaseCtx, quota.ReleaseRequest{
+				APIKeyID:   owner,
+				LockString: lockString,
+			}); err != nil {
+				log.Error(err, "failed to release quota after accepted sandbox delete", "id", id, "owner", owner, "lockString", lockString)
+			}
 		}
 	}
 

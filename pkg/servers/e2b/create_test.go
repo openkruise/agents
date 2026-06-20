@@ -25,6 +25,8 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -38,7 +40,49 @@ import (
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
+	"github.com/openkruise/agents/pkg/servers/e2b/quota"
 )
+
+type fakeQuotaManager struct {
+	acquireErr         error
+	releaseErr         error
+	acquireCalls       atomic.Int64
+	releaseCalls       atomic.Int64
+	deleteSubjectCalls atomic.Int64
+	releaseHasDeadline atomic.Bool
+
+	mu                sync.Mutex
+	lastAcquire       quota.AcquireRequest
+	lastRelease       quota.ReleaseRequest
+	lastDeleteSubject string
+}
+
+func (f *fakeQuotaManager) Acquire(_ context.Context, req quota.AcquireRequest) error {
+	f.mu.Lock()
+	f.lastAcquire = req
+	f.mu.Unlock()
+	f.acquireCalls.Add(1)
+	return f.acquireErr
+}
+
+func (f *fakeQuotaManager) Release(ctx context.Context, req quota.ReleaseRequest) error {
+	if _, ok := ctx.Deadline(); ok {
+		f.releaseHasDeadline.Store(true)
+	}
+	f.mu.Lock()
+	f.lastRelease = req
+	f.mu.Unlock()
+	f.releaseCalls.Add(1)
+	return f.releaseErr
+}
+
+func (f *fakeQuotaManager) DeleteSubject(_ context.Context, apiKeyID string) error {
+	f.mu.Lock()
+	f.lastDeleteSubject = apiKeyID
+	f.mu.Unlock()
+	f.deleteSubjectCalls.Add(1)
+	return nil
+}
 
 // TestResolveServerTimeout verifies that a positive seconds value yields a
 // finite timeout, while an absent (zero) or non-positive value yields
@@ -527,6 +571,11 @@ func TestMapInfraErrorToApiError(t *testing.T) {
 			name:         "ErrorInternal maps to 500",
 			err:          managererrors.NewError(managererrors.ErrorInternal, "platform issue"),
 			expectedCode: http.StatusInternalServerError,
+		},
+		{
+			name:         "ErrorQuotaExceeded maps to 429",
+			err:          managererrors.NewError(managererrors.ErrorQuotaExceeded, "api-key quota exceeded"),
+			expectedCode: http.StatusTooManyRequests,
 		},
 		{
 			name:         "plain error maps to 500",
