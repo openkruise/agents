@@ -122,6 +122,26 @@ func releaseAdmission(ctx context.Context, admission *infra.SandboxAdmission, lo
 	}
 }
 
+func shouldReleaseAdmissionAfterLockError(lockType infra.LockType, err error) bool {
+	if err == nil {
+		return false
+	}
+	if lockType != infra.LockTypeCreate && apierrors.IsConflict(err) {
+		return true
+	}
+	return isKnownRejectedSandboxWrite(err)
+}
+
+func isKnownRejectedSandboxWrite(err error) bool {
+	return apierrors.IsInvalid(err) ||
+		apierrors.IsBadRequest(err) ||
+		apierrors.IsForbidden(err) ||
+		apierrors.IsUnauthorized(err) ||
+		apierrors.IsNotFound(err) ||
+		apierrors.IsAlreadyExists(err) ||
+		apierrors.IsMethodNotSupported(err)
+}
+
 // TryClaimSandbox attempts to claim a sandbox based on the provided Options.
 // The returned sandbox is valid only when nil error is returned. Once a non-nil sandbox is returned,
 // the sandbox object should not be used anymore and needs appropriate handling.
@@ -219,7 +239,7 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 	err = performLockSandbox(ctx, sbx, lockType, opts, cache)
 	if err != nil {
 		log.Error(err, "failed to lock sandbox")
-		if err != nil && admitted && lockType != infra.LockTypeCreate && apierrors.IsConflict(err) {
+		if admitted && shouldReleaseAdmissionAfterLockError(lockType, err) {
 			releaseAdmission(ctx, opts.Admission, attemptLockString)
 			admitted = false
 		}

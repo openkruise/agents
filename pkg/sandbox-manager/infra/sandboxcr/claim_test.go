@@ -2992,6 +2992,125 @@ func TestTryClaimSandbox_AdmissionDeniedReturnsPooledSandbox(t *testing.T) {
 	assert.Equal(t, "pooled-1", reclaimed.GetName())
 }
 
+func TestTryClaimSandbox_ReleasesAdmissionOnRejectedLockWrite(t *testing.T) {
+	tests := []struct {
+		name      string
+		setup     func(t *testing.T, admission *infra.SandboxAdmission) (*Infra, infra.ClaimSandboxOptions)
+		expectErr string
+	}{
+		{
+			name: "create bad request releases admission",
+			setup: func(t *testing.T, admission *infra.SandboxAdmission) (*Infra, infra.ClaimSandboxOptions) {
+				testInfra, fc := NewTestInfra(t)
+				template := "create-rejected-template"
+				sbs := sandboxSetForTest(template, "default")
+				require.NoError(t, fc.Create(t.Context(), sbs))
+				require.Eventually(t, func() bool {
+					_, err := testInfra.Cache.PickSandboxSet(t.Context(), infracache.PickSandboxSetOptions{
+						Namespace: sbs.Namespace,
+						Name:      sbs.Name,
+					})
+					return err == nil
+				}, time.Second, 10*time.Millisecond)
+
+				origCreateSandbox := DefaultCreateSandbox
+				DefaultCreateSandbox = func(context.Context, *v1alpha1.Sandbox, client.Client) (*v1alpha1.Sandbox, error) {
+					return nil, apierrors.NewBadRequest("sandbox create rejected")
+				}
+				t.Cleanup(func() { DefaultCreateSandbox = origCreateSandbox })
+
+				opts, err := ValidateAndInitClaimOptions(infra.ClaimSandboxOptions{
+					User:            "test-user",
+					Template:        template,
+					CreateOnNoStock: true,
+					Admission:       admission,
+				})
+				require.NoError(t, err)
+				return testInfra, opts
+			},
+			expectErr: "sandbox create rejected",
+		},
+		{
+			name: "update bad request releases admission",
+			setup: func(t *testing.T, admission *infra.SandboxAdmission) (*Infra, infra.ClaimSandboxOptions) {
+				scheme := k8sruntime.NewScheme()
+				utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+				utilruntime.Must(v1alpha1.AddToScheme(scheme))
+
+				builder := fake.NewClientBuilder().WithScheme(scheme)
+				for _, idx := range infracache.GetIndexFuncs() {
+					builder = builder.WithIndex(idx.Obj, idx.FieldName, idx.Extract)
+				}
+				builder = builder.WithStatusSubresource(&v1alpha1.Sandbox{}, &v1alpha1.SandboxSet{})
+				builder = builder.WithInterceptorFuncs(interceptor.Funcs{
+					Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+						if _, ok := obj.(*v1alpha1.Sandbox); ok {
+							return apierrors.NewBadRequest("sandbox update rejected")
+						}
+						return c.Update(ctx, obj, opts...)
+					},
+				})
+				fc := builder.Build()
+
+				mgrBuilder, err := controllers.NewMockManagerBuilder(t)
+				require.NoError(t, err)
+				mgr := mgrBuilder.WithScheme(scheme).WithClient(fc).WithWaitSimulation().Build()
+				testCache, err := infracache.NewCache(mgr)
+				require.NoError(t, err)
+				mgr.SetWaitHooks(testCache.GetWaitHooks())
+
+				options := config.InitOptions(config.SandboxManagerOptions{DisableRouteReconciliation: true})
+				infraInstance := NewInfraBuilder(options).
+					WithCache(testCache).
+					WithAPIReader(fc).
+					WithProxy(proxy.NewServer(options)).
+					Build()
+				require.NoError(t, infraInstance.Run(t.Context()))
+				testInfra := infraInstance.(*Infra)
+
+				template := "update-rejected-template"
+				createAvailableSandboxForFailureRecord(t, fc, template, func(sbx *v1alpha1.Sandbox) {
+					sbx.Name = "update-rejected-sbx"
+				})
+
+				opts, err := ValidateAndInitClaimOptions(infra.ClaimSandboxOptions{
+					User:      "test-user",
+					Template:  template,
+					Admission: admission,
+				})
+				require.NoError(t, err)
+				return testInfra, opts
+			},
+			expectErr: "sandbox update rejected",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			acquired := make([]string, 0, 1)
+			released := make([]string, 0, 1)
+			admission := &infra.SandboxAdmission{
+				Acquire: func(ctx context.Context, lockString string) error {
+					acquired = append(acquired, lockString)
+					return nil
+				},
+				Release: func(ctx context.Context, lockString string) error {
+					released = append(released, lockString)
+					return nil
+				},
+			}
+			testInfra, opts := tt.setup(t, admission)
+
+			claimed, _, err := TryClaimSandbox(t.Context(), opts, &testInfra.pickCache, testInfra.Cache, testInfra.claimLockChannel, testInfra.createLimiter)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.expectErr)
+			assert.Nil(t, claimed)
+			require.Len(t, acquired, 1)
+			assert.Equal(t, acquired, released)
+		})
+	}
+}
+
 func createAvailableSandboxForFailureRecord(t *testing.T, fc client.Client, template string, mutate func(sbx *v1alpha1.Sandbox)) {
 	t.Helper()
 	sbx := &v1alpha1.Sandbox{

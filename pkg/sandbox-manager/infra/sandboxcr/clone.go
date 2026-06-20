@@ -58,9 +58,6 @@ func ValidateAndInitCloneOptions(opts infra.CloneSandboxOptions) (infra.CloneSan
 	if opts.CloneTimeout <= 0 {
 		opts.CloneTimeout = DefaultCloneTimeout
 	}
-	if opts.LockString == "" && opts.Admission == nil {
-		opts.LockString = utils.NewLockString()
-	}
 	if opts.ReserveFailedSandboxFor == nil {
 		opts.ReserveFailedSandboxFor = ptr.To(DefaultReserveFailedSandboxFor)
 	}
@@ -278,6 +275,9 @@ func createSandboxFromCheckpoint(ctx context.Context, opts infra.CloneSandboxOpt
 	sbx.Sandbox, err = DefaultCreateSandbox(ctx, sbx.Sandbox, cache.GetClient())
 	if err != nil {
 		log.Error(err, "failed to create sandbox")
+		if opts.Admission != nil && opts.Admission.Acquire != nil && isKnownRejectedSandboxWrite(err) {
+			releaseAdmission(ctx, opts.Admission, opts.LockString)
+		}
 		return nil, nil, metrics, err
 	}
 	log = log.WithValues("sandbox", klog.KObj(sbx))

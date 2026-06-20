@@ -437,6 +437,45 @@ func TestCloneSandbox_CleansFailedCreatedSandbox(t *testing.T) {
 	}
 }
 
+func TestCloneSandbox_GeneratesDefaultLockStringPerAttempt(t *testing.T) {
+	testInfra, fc := NewTestInfra(t)
+	checkpointID := "clone-lockstring-attempt"
+	createCloneTestCheckpoint(t, fc, testInfra.Cache, checkpointID)
+
+	origCreateSandbox := DefaultCreateSandbox
+	t.Cleanup(func() { DefaultCreateSandbox = origCreateSandbox })
+	lockStrings := make([]string, 0, 2)
+	DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client) (*v1alpha1.Sandbox, error) {
+		lockStrings = append(lockStrings, sbx.Annotations[v1alpha1.AnnotationLock])
+		return nil, apierrors.NewBadRequest("stop retry")
+	}
+
+	opts, err := ValidateAndInitCloneOptions(infra.CloneSandboxOptions{
+		User:         "test-user",
+		CheckPointID: checkpointID,
+	})
+	require.NoError(t, err)
+
+	tests := []struct {
+		name string
+	}{
+		{name: "first attempt"},
+		{name: "second attempt with reused validated options"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, err := CloneSandbox(t.Context(), opts, testInfra.Cache)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "stop retry")
+		})
+	}
+
+	require.Len(t, lockStrings, 2)
+	assert.NotEmpty(t, lockStrings[0])
+	assert.NotEmpty(t, lockStrings[1])
+	assert.NotEqual(t, lockStrings[0], lockStrings[1])
+}
+
 func TestCloneSandbox(t *testing.T) {
 	utestutils.InitLogOutput()
 
