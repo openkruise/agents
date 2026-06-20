@@ -110,15 +110,16 @@ func TestRedisBackendListAddObservedAndDeleteSubject(t *testing.T) {
 	assert.Empty(t, got)
 }
 
-func TestRedisBackendListInvalidTimestampClassifiedUnavailable(t *testing.T) {
+func TestRedisBackendListInvalidTimestampPreservesMembershipAsAncient(t *testing.T) {
 	srv := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: srv.Addr()})
 	backend := NewRedisBackend(client, 50*time.Millisecond)
 
 	srv.HSet("q:live:{key-1}", "lock-1", "bad-ts")
 
-	_, err := backend.List(context.Background(), "key-1")
-	require.ErrorIs(t, err, ErrBackendUnavailable)
+	got, err := backend.List(context.Background(), "key-1")
+	require.NoError(t, err)
+	assert.Equal(t, time.Unix(0, 0), got["lock-1"])
 }
 
 func TestNoopBackend(t *testing.T) {

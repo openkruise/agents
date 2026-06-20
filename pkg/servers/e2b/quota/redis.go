@@ -129,8 +129,8 @@ func (b *RedisBackend) List(ctx context.Context, apiKeyID string) (map[string]ti
 	for lockString, rawValue := range values {
 		seconds, parseErr := strconv.ParseInt(rawValue, 10, 64)
 		if parseErr != nil {
-			backendErrorsTotal.WithLabelValues("list").Inc()
-			return nil, fmt.Errorf("%w: invalid redis acquire timestamp %q for %q: %v", ErrBackendUnavailable, rawValue, lockString, parseErr)
+			live[lockString] = time.Unix(0, 0)
+			continue
 		}
 		live[lockString] = time.Unix(seconds, 0)
 	}
