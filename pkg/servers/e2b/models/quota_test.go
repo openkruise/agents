@@ -154,7 +154,7 @@ func TestAPIKeyQuotaJSONToQuotaSpec(t *testing.T) {
 		{
 			name:        "unsupported sandbox dimension is rejected",
 			rawJSON:     `{"name":"demo","quota":{"sandbox":{"memory":1}}}`,
-			expectError: `unsupported quota field "memory"`,
+			expectError: `unsupported quota field "sandbox.memory"`,
 		},
 		{
 			name:        "internal limits shape is rejected",
@@ -215,6 +215,77 @@ func TestAPIKeyQuotaFromSpecJSON(t *testing.T) {
 			assert.Contains(t, string(raw), tt.expectedQuota)
 			assert.NotContains(t, string(raw), `"limits"`)
 			assert.NotContains(t, string(raw), "QuotaSpec")
+		})
+	}
+}
+
+func TestQuotaSpecJSONShape(t *testing.T) {
+	tests := []struct {
+		name             string
+		spec             *QuotaSpec
+		expectContains   []string
+		expectNotContain []string
+	}{
+		{
+			name: "sandbox count is stored in internal lower-case shape",
+			spec: &QuotaSpec{
+				Limits: []QuotaLimit{{
+					Dimension: DimSandboxCount,
+					Limit:     int64Ptr(3),
+				}},
+			},
+			expectContains: []string{
+				`"limits"`,
+				`"dimension":"sandbox.count"`,
+				`"limit":3`,
+			},
+			expectNotContain: []string{
+				`"Limits"`,
+				`"Dimension"`,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw, err := json.Marshal(tt.spec)
+			require.NoError(t, err)
+
+			for _, expected := range tt.expectContains {
+				assert.Contains(t, string(raw), expected)
+			}
+			for _, unexpected := range tt.expectNotContain {
+				assert.NotContains(t, string(raw), unexpected)
+			}
+		})
+	}
+}
+
+func TestAPIKeyQuotaInvalidInternalSpecMarshal(t *testing.T) {
+	tests := []struct {
+		name        string
+		key         CreatedTeamAPIKey
+		expectError string
+	}{
+		{
+			name: "invalid internal quota spec is rejected during marshal",
+			key: CreatedTeamAPIKey{
+				QuotaSpec: &QuotaSpec{
+					Limits: []QuotaLimit{{
+						Dimension: DimSandboxCount,
+						Limit:     int64Ptr(-1),
+					}},
+				},
+			},
+			expectError: "limit must be non-negative",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := json.Marshal(tt.key)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.expectError)
 		})
 	}
 }

@@ -111,7 +111,11 @@ func (k CreatedTeamAPIKey) MarshalJSON() ([]byte, error) {
 
 	out := alias(k)
 	if k.QuotaSpec != nil {
-		out.Quota = APIKeyQuotaFromSpec(k.QuotaSpec)
+		normalized, err := NormalizeQuotaSpec(k.QuotaSpec)
+		if err != nil {
+			return nil, err
+		}
+		out.Quota = APIKeyQuotaFromSpec(normalized)
 	}
 
 	return json.Marshal(out)
@@ -152,7 +156,11 @@ func (k NewTeamAPIKey) MarshalJSON() ([]byte, error) {
 
 	out := alias(k)
 	if k.QuotaSpec != nil {
-		out.Quota = APIKeyQuotaFromSpec(k.QuotaSpec)
+		normalized, err := NormalizeQuotaSpec(k.QuotaSpec)
+		if err != nil {
+			return nil, err
+		}
+		out.Quota = APIKeyQuotaFromSpec(normalized)
 	}
 
 	return json.Marshal(out)

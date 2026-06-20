@@ -26,17 +26,17 @@ type QuotaDimension string
 const DimSandboxCount QuotaDimension = "sandbox.count"
 
 type QuotaScope struct {
-	Template string
+	Template string `json:"template,omitempty"`
 }
 
 type QuotaLimit struct {
-	Dimension QuotaDimension
-	Scope     QuotaScope
-	Limit     *int64
+	Dimension QuotaDimension `json:"dimension"`
+	Scope     QuotaScope     `json:"scope,omitempty"`
+	Limit     *int64         `json:"limit,omitempty"`
 }
 
 type QuotaSpec struct {
-	Limits []QuotaLimit
+	Limits []QuotaLimit `json:"limits,omitempty"`
 }
 
 type APIKeyQuota struct {
@@ -90,7 +90,7 @@ func (q *SandboxQuota) UnmarshalJSON(data []byte) error {
 
 	for key := range raw {
 		if key != "count" {
-			return fmt.Errorf("unsupported quota field %q", key)
+			return fmt.Errorf("unsupported quota field %q", "sandbox."+key)
 		}
 	}
 
@@ -132,13 +132,14 @@ func (q *APIKeyQuota) ToQuotaSpec() (*QuotaSpec, error) {
 	return normalized, nil
 }
 
+// APIKeyQuotaFromSpec converts an already-normalized internal quota spec to the public wire model.
+// Callers that load untrusted storage must call NormalizeQuotaSpec first.
 func APIKeyQuotaFromSpec(spec *QuotaSpec) *APIKeyQuota {
-	normalized, err := NormalizeQuotaSpec(spec)
-	if err != nil || normalized == nil {
+	if spec == nil {
 		return nil
 	}
 
-	if count, ok := normalized.SandboxCountLimit(); ok {
+	if count, ok := spec.SandboxCountLimit(); ok {
 		return &APIKeyQuota{
 			Sandbox: &SandboxQuota{Count: &count},
 		}
