@@ -98,7 +98,7 @@ func Add(mgr ctrl.Manager) error {
 	}).SetupWithManager(mgr); err != nil {
 		return err
 	}
-	klog.InfoS("Started CommitReconciler successfully")
+	ctrl.Log.Info("Started CommitReconciler successfully")
 	return nil
 }
 
@@ -107,7 +107,6 @@ func Add(mgr ctrl.Manager) error {
 // +kubebuilder:rbac:groups=agents.kruise.io,resources=commits/finalizers,verbs=update
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list
-// +kubebuilder:rbac:groups=core,resources=serviceaccounts,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=create;delete;get;watch;list
 

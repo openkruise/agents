@@ -70,7 +70,7 @@ spec:
               registryAuth:
                 description: |-
                   RegistryAuth specifies credentials for pushing the committed image.
-                  If nil, credentials are resolved from namespace secrets or SA imagePullSecrets.
+                  If nil, the commit will attempt an anonymous push.
                 properties:
                   credentials:
                     additionalProperties:

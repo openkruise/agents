@@ -51,14 +51,6 @@ rules:
   - get
   - list
 - apiGroups:
-  - ""
-  resources:
-  - serviceaccounts
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
   - admissionregistration.k8s.io
   resources:
   - mutatingwebhookconfigurations
@@ -84,52 +76,6 @@ rules:
   - agents.kruise.io
   resources:
   - commits
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - agents.kruise.io
-  resources:
-  - commits/finalizers
-  verbs:
-  - update
-- apiGroups:
-  - agents.kruise.io
-  resources:
-  - commits/status
-  verbs:
-  - get
-  - patch
-  - update
-- apiGroups:
-  - agents.kruise.io
-  resources:
-  - sandboxclaims
-  verbs:
-  - delete
-  - get
-  - list
-  - patch
-  - watch
-- apiGroups:
-  - agents.kruise.io
-  resources:
-  - sandboxclaims/status
-  - sandboxes/status
-  - sandboxsets/status
-  - sandboxupdateops/status
-  verbs:
-  - get
-  - patch
-  - update
-- apiGroups:
-  - agents.kruise.io
-  resources:
   - sandboxes
   - sandboxsets
   - sandboxupdateops
@@ -144,10 +90,33 @@ rules:
 - apiGroups:
   - agents.kruise.io
   resources:
+  - commits/finalizers
   - sandboxes/finalizers
   - sandboxsets/finalizers
   verbs:
   - update
+- apiGroups:
+  - agents.kruise.io
+  resources:
+  - commits/status
+  - sandboxclaims/status
+  - sandboxes/status
+  - sandboxsets/status
+  - sandboxupdateops/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - agents.kruise.io
+  resources:
+  - sandboxclaims
+  verbs:
+  - delete
+  - get
+  - list
+  - patch
+  - watch
 - apiGroups:
   - batch
   resources:

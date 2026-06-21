@@ -122,7 +122,10 @@ func (r *commonControl) EnsureCommitUpdated(ctx context.Context, args *EnsureFun
 		return 0, nil
 	}
 	if len(jobList.Items) > 1 {
-		log.Info("Multiple jobs found for commit, using the first one", "commit", klog.KObj(commit), "count", len(jobList.Items))
+		log.Info("Multiple jobs found for commit, using the latest one", "commit", klog.KObj(commit), "count", len(jobList.Items))
+		sort.Slice(jobList.Items, func(i, j int) bool {
+			return jobList.Items[i].CreationTimestamp.After(jobList.Items[j].CreationTimestamp.Time)
+		})
 	}
 	job := &jobList.Items[0]
 
