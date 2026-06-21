@@ -23,6 +23,8 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -3095,6 +3097,7 @@ func TestTryClaimSandbox_ReleasesAdmissionOnRejectedLockWrite(t *testing.T) {
 					return nil
 				},
 				Release: func(ctx context.Context, lockString string) error {
+					assertShortQuotaReleaseDeadline(t, ctx)
 					released = append(released, lockString)
 					return nil
 				},
@@ -3109,6 +3112,312 @@ func TestTryClaimSandbox_ReleasesAdmissionOnRejectedLockWrite(t *testing.T) {
 			assert.Equal(t, acquired, released)
 		})
 	}
+}
+
+func assertShortQuotaReleaseDeadline(t *testing.T, ctx context.Context) {
+	t.Helper()
+
+	deadline, ok := ctx.Deadline()
+	require.True(t, ok, "release should use a bounded context")
+	remaining := time.Until(deadline)
+	require.Greater(t, remaining, time.Duration(0), "release deadline should not already be expired")
+	require.LessOrEqual(t, remaining, quotaReleaseTimeout+50*time.Millisecond)
+	assert.Less(t, quotaReleaseTimeout, DefaultCleanupTimeout)
+}
+
+func TestTryClaimSandbox_RejectedCreateReleaseDeadlineDoesNotReplaceBusinessError(t *testing.T) {
+	tests := []struct {
+		name          string
+		release       func(*testing.T, context.Context, string) error
+		expectError   string
+		expectRelease int64
+	}{
+		{
+			name: "release deadline exceeded preserves create rejection",
+			release: func(t *testing.T, ctx context.Context, lockString string) error {
+				assertShortQuotaReleaseDeadline(t, ctx)
+				<-ctx.Done()
+				return ctx.Err()
+			},
+			expectError:   "sandbox create rejected",
+			expectRelease: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			testInfra, fc := NewTestInfra(t)
+			template := "create-release-timeout-template"
+			sbs := sandboxSetForTest(template, "default")
+			require.NoError(t, fc.Create(t.Context(), sbs))
+			require.Eventually(t, func() bool {
+				_, err := testInfra.Cache.PickSandboxSet(t.Context(), infracache.PickSandboxSetOptions{
+					Namespace: sbs.Namespace,
+					Name:      sbs.Name,
+				})
+				return err == nil
+			}, time.Second, 10*time.Millisecond)
+
+			origCreateSandbox := DefaultCreateSandbox
+			DefaultCreateSandbox = func(context.Context, *v1alpha1.Sandbox, client.Client) (*v1alpha1.Sandbox, error) {
+				return nil, apierrors.NewBadRequest("sandbox create rejected")
+			}
+			t.Cleanup(func() { DefaultCreateSandbox = origCreateSandbox })
+
+			releaseCalls := atomic.Int64{}
+			admission := &infra.SandboxAdmission{
+				Acquire: func(ctx context.Context, lockString string) error {
+					return nil
+				},
+				Release: func(ctx context.Context, lockString string) error {
+					releaseCalls.Add(1)
+					return tt.release(t, ctx, lockString)
+				},
+			}
+			opts, err := ValidateAndInitClaimOptions(infra.ClaimSandboxOptions{
+				User:            "test-user",
+				Template:        template,
+				CreateOnNoStock: true,
+				Admission:       admission,
+			})
+			require.NoError(t, err)
+
+			claimed, _, err := TryClaimSandbox(t.Context(), opts, &testInfra.pickCache, testInfra.Cache, testInfra.claimLockChannel, testInfra.createLimiter)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.expectError)
+			assert.Nil(t, claimed)
+			assert.Equal(t, tt.expectRelease, releaseCalls.Load())
+		})
+	}
+}
+
+type claimAdmissionQuotaTracker struct {
+	t        *testing.T
+	limit    int
+	mu       sync.Mutex
+	held     map[string]struct{}
+	attempts []string
+	released []string
+	events   []string
+}
+
+func newClaimAdmissionQuotaTracker(t *testing.T, limit int) (*claimAdmissionQuotaTracker, *infra.SandboxAdmission) {
+	t.Helper()
+	tracker := &claimAdmissionQuotaTracker{
+		t:     t,
+		limit: limit,
+		held:  make(map[string]struct{}),
+	}
+	admission := &infra.SandboxAdmission{
+		Acquire: func(ctx context.Context, lockString string) error {
+			tracker.mu.Lock()
+			defer tracker.mu.Unlock()
+
+			tracker.attempts = append(tracker.attempts, lockString)
+			tracker.events = append(tracker.events, "acquire:"+lockString)
+			if _, exists := tracker.held[lockString]; exists {
+				tracker.t.Fatalf("duplicate admission acquire for %q", lockString)
+			}
+			if len(tracker.held) >= tracker.limit {
+				return managererrors.NewError(managererrors.ErrorQuotaExceeded, "api-key quota exceeded")
+			}
+			tracker.held[lockString] = struct{}{}
+			return nil
+		},
+		Release: func(ctx context.Context, lockString string) error {
+			assertShortQuotaReleaseDeadline(tracker.t, ctx)
+
+			tracker.mu.Lock()
+			defer tracker.mu.Unlock()
+
+			tracker.events = append(tracker.events, "release:"+lockString)
+			if _, exists := tracker.held[lockString]; !exists {
+				tracker.t.Fatalf("release called for unheld lockString %q", lockString)
+			}
+			delete(tracker.held, lockString)
+			tracker.released = append(tracker.released, lockString)
+			return nil
+		},
+	}
+	return tracker, admission
+}
+
+func (t *claimAdmissionQuotaTracker) attemptsSnapshot() []string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([]string(nil), t.attempts...)
+}
+
+func (t *claimAdmissionQuotaTracker) releasedSnapshot() []string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([]string(nil), t.released...)
+}
+
+func (t *claimAdmissionQuotaTracker) eventsSnapshot() []string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([]string(nil), t.events...)
+}
+
+func (t *claimAdmissionQuotaTracker) liveCount() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return len(t.held)
+}
+
+func TestClaimSandbox_CreateOnNoStockWaitReadyFailureReleasesAdmissionBeforeRetry(t *testing.T) {
+	testInfra, fc := NewTestInfra(t)
+	tracker, admission := newClaimAdmissionQuotaTracker(t, 1)
+
+	origCreateRetryInterval := CreateRetryInterval
+	origCreateRetryBackoffFactor := CreateRetryBackoffFactor
+	origCreateRetryJitter := CreateRetryJitter
+	origCreateRetryIntervalCap := CreateRetryIntervalCap
+	CreateRetryInterval = 10 * time.Millisecond
+	CreateRetryBackoffFactor = 1
+	CreateRetryJitter = 0
+	CreateRetryIntervalCap = 10 * time.Millisecond
+	t.Cleanup(func() {
+		CreateRetryInterval = origCreateRetryInterval
+		CreateRetryBackoffFactor = origCreateRetryBackoffFactor
+		CreateRetryJitter = origCreateRetryJitter
+		CreateRetryIntervalCap = origCreateRetryIntervalCap
+	})
+
+	sbs := sandboxSetForTest("retry-template", "default")
+	require.NoError(t, fc.Create(t.Context(), sbs))
+	require.Eventually(t, func() bool {
+		_, err := testInfra.Cache.PickSandboxSet(t.Context(), infracache.PickSandboxSetOptions{
+			Namespace: sbs.Namespace,
+			Name:      sbs.Name,
+		})
+		return err == nil
+	}, time.Second, 10*time.Millisecond)
+
+	origCreateSandbox := DefaultCreateSandbox
+	var createAttempts atomic.Int32
+	DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client) (*v1alpha1.Sandbox, error) {
+		attempt := createAttempts.Add(1)
+		created, err := origCreateSandbox(ctx, sbx, c)
+		if err != nil {
+			return nil, err
+		}
+		if attempt == 1 {
+			return created, nil
+		}
+		created.Status = v1alpha1.SandboxStatus{
+			Phase:              v1alpha1.SandboxRunning,
+			ObservedGeneration: created.Generation,
+			Conditions: []metav1.Condition{
+				{
+					Type:   string(v1alpha1.SandboxConditionReady),
+					Status: metav1.ConditionTrue,
+					Reason: v1alpha1.SandboxReadyReasonPodReady,
+				},
+			},
+			PodInfo: v1alpha1.PodInfo{PodIP: "10.0.0.2"},
+		}
+		if err := c.Status().Update(ctx, created); err != nil {
+			return nil, err
+		}
+		return created, nil
+	}
+	t.Cleanup(func() { DefaultCreateSandbox = origCreateSandbox })
+
+	opts, err := ValidateAndInitClaimOptions(infra.ClaimSandboxOptions{
+		User:                    "test-user",
+		Template:                sbs.Name,
+		CreateOnNoStock:         true,
+		Admission:               admission,
+		ClaimTimeout:            500 * time.Millisecond,
+		WaitReadyTimeout:        20 * time.Millisecond,
+		ReserveFailedSandboxFor: ptr.To(time.Duration(0)),
+	})
+	require.NoError(t, err)
+
+	claimed, _, err := testInfra.ClaimSandbox(t.Context(), opts)
+	require.NoError(t, err)
+	require.NotNil(t, claimed)
+
+	attempts := tracker.attemptsSnapshot()
+	require.Len(t, attempts, 2)
+	assert.NotEqual(t, attempts[0], attempts[1], "each retry should use a fresh lockString")
+	assert.Equal(t, attempts[1], claimed.GetAnnotations()[v1alpha1.AnnotationLock])
+
+	released := tracker.releasedSnapshot()
+	require.Len(t, released, 1)
+	assert.Equal(t, attempts[0], released[0])
+	assert.Equal(t, 1, tracker.liveCount())
+	assert.Equal(t, []string{
+		"acquire:" + attempts[0],
+		"release:" + attempts[0],
+		"acquire:" + attempts[1],
+	}, tracker.eventsSnapshot())
+}
+
+func TestClaimSandbox_CreateOnNoStockWaitReadyFailureDefaultReserveRetainsAdmission(t *testing.T) {
+	testInfra, fc := NewTestInfra(t)
+	tracker, admission := newClaimAdmissionQuotaTracker(t, 1)
+
+	origCreateRetryInterval := CreateRetryInterval
+	origCreateRetryBackoffFactor := CreateRetryBackoffFactor
+	origCreateRetryJitter := CreateRetryJitter
+	origCreateRetryIntervalCap := CreateRetryIntervalCap
+	CreateRetryInterval = 10 * time.Millisecond
+	CreateRetryBackoffFactor = 1
+	CreateRetryJitter = 0
+	CreateRetryIntervalCap = 10 * time.Millisecond
+	t.Cleanup(func() {
+		CreateRetryInterval = origCreateRetryInterval
+		CreateRetryBackoffFactor = origCreateRetryBackoffFactor
+		CreateRetryJitter = origCreateRetryJitter
+		CreateRetryIntervalCap = origCreateRetryIntervalCap
+	})
+
+	sbs := sandboxSetForTest("reserved-template", "default")
+	require.NoError(t, fc.Create(t.Context(), sbs))
+	require.Eventually(t, func() bool {
+		_, err := testInfra.Cache.PickSandboxSet(t.Context(), infracache.PickSandboxSetOptions{
+			Namespace: sbs.Namespace,
+			Name:      sbs.Name,
+		})
+		return err == nil
+	}, time.Second, 10*time.Millisecond)
+
+	origCreateSandbox := DefaultCreateSandbox
+	var createAttempts atomic.Int32
+	DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client) (*v1alpha1.Sandbox, error) {
+		createAttempts.Add(1)
+		return origCreateSandbox(ctx, sbx, c)
+	}
+	t.Cleanup(func() { DefaultCreateSandbox = origCreateSandbox })
+
+	opts, err := ValidateAndInitClaimOptions(infra.ClaimSandboxOptions{
+		User:             "test-user",
+		Template:         sbs.Name,
+		CreateOnNoStock:  true,
+		Admission:        admission,
+		ClaimTimeout:     500 * time.Millisecond,
+		WaitReadyTimeout: 20 * time.Millisecond,
+	})
+	require.NoError(t, err)
+
+	claimed, _, err := testInfra.ClaimSandbox(t.Context(), opts)
+	require.Error(t, err)
+	assert.Nil(t, claimed)
+	assert.Equal(t, managererrors.ErrorQuotaExceeded, managererrors.GetErrCode(err))
+
+	attempts := tracker.attemptsSnapshot()
+	require.Len(t, attempts, 2)
+	assert.NotEqual(t, attempts[0], attempts[1], "each retry should use a fresh lockString")
+	assert.Empty(t, tracker.releasedSnapshot())
+	assert.Equal(t, 1, tracker.liveCount())
+	assert.Equal(t, []string{
+		"acquire:" + attempts[0],
+		"acquire:" + attempts[1],
+	}, tracker.eventsSnapshot())
+	assert.Equal(t, int32(1), createAttempts.Load(), "the retry should stop at admission before a second create")
 }
 
 func createAvailableSandboxForFailureRecord(t *testing.T, fc client.Client, template string, mutate func(sbx *v1alpha1.Sandbox)) {

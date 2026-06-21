@@ -18,6 +18,9 @@ package quota
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -59,6 +62,74 @@ func TestRedisBackendAcquireCountOnly(t *testing.T) {
 	got, err := backend.List(ctx, "key-1")
 	require.NoError(t, err)
 	assert.Len(t, got, 1)
+}
+
+func TestRedisBackendConcurrentAcquireDoesNotExceedLimit(t *testing.T) {
+	srv := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: srv.Addr()})
+	backend := NewRedisBackend(client, 100*time.Millisecond)
+	ctx := context.Background()
+
+	const (
+		workers = 20
+		limit   = 3
+	)
+
+	type acquireResult struct {
+		lockString string
+		err        error
+	}
+
+	start := make(chan struct{})
+	results := make(chan acquireResult, workers)
+	var wg sync.WaitGroup
+
+	for i := 0; i < workers; i++ {
+		lockString := fmt.Sprintf("lock-%d", i)
+		wg.Add(1)
+
+		go func(lockString string) {
+			defer wg.Done()
+			<-start
+			results <- acquireResult{
+				lockString: lockString,
+				err:        backend.Acquire(ctx, "key-1", lockString, limit),
+			}
+		}(lockString)
+	}
+
+	close(start)
+	wg.Wait()
+	close(results)
+
+	allowed := make(map[string]struct{}, limit)
+	rejected := 0
+	var unexpected []string
+
+	for result := range results {
+		switch {
+		case result.err == nil:
+			allowed[result.lockString] = struct{}{}
+		case errors.Is(result.err, ErrQuotaExceeded):
+			rejected++
+		default:
+			unexpected = append(unexpected, fmt.Sprintf("%s: %v", result.lockString, result.err))
+		}
+	}
+
+	require.Empty(t, unexpected, "unexpected acquire errors: %v", unexpected)
+	assert.Len(t, allowed, limit)
+	assert.Equal(t, workers-limit, rejected)
+
+	live, err := backend.List(ctx, "key-1")
+	require.NoError(t, err)
+	assert.Len(t, live, limit)
+
+	liveLockStrings := make(map[string]struct{}, len(live))
+	for lockString := range live {
+		liveLockStrings[lockString] = struct{}{}
+	}
+	assert.Equal(t, allowed, liveLockStrings)
 }
 
 func TestRedisBackendAcquireDoesNotRecordManagerDecisionMetrics(t *testing.T) {

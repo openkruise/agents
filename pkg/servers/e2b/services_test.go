@@ -1769,6 +1769,162 @@ func TestDeleteSandbox_ReleasesQuotaAfterAcceptedDelete(t *testing.T) {
 	assert.NotEmpty(t, fakeQuota.lastRelease.LockString)
 }
 
+type deleteReleaseQuotaManager struct {
+	release func(context.Context, quota.ReleaseRequest) error
+
+	releaseCalls       atomic.Int64
+	releaseHasDeadline atomic.Bool
+	lastRelease        quota.ReleaseRequest
+}
+
+func (m *deleteReleaseQuotaManager) Acquire(context.Context, quota.AcquireRequest) error {
+	return nil
+}
+
+func (m *deleteReleaseQuotaManager) Release(ctx context.Context, req quota.ReleaseRequest) error {
+	if _, ok := ctx.Deadline(); ok {
+		m.releaseHasDeadline.Store(true)
+	}
+	m.lastRelease = req
+	m.releaseCalls.Add(1)
+	if m.release != nil {
+		return m.release(ctx, req)
+	}
+	return nil
+}
+
+func (m *deleteReleaseQuotaManager) DeleteSubject(context.Context, string) error {
+	return nil
+}
+
+func assertShortQuotaRequestReleaseDeadline(t *testing.T, ctx context.Context) {
+	t.Helper()
+
+	deadline, ok := ctx.Deadline()
+	require.True(t, ok, "release should use a bounded context")
+	remaining := time.Until(deadline)
+	require.Greater(t, remaining, time.Duration(0), "release deadline should not already be expired")
+	require.LessOrEqual(t, remaining, quotaReleaseTimeout+50*time.Millisecond)
+	assert.Less(t, quotaReleaseTimeout, time.Second)
+}
+
+func TestDeleteSandbox_ReleaseErrorsStillReturnAcceptedDelete(t *testing.T) {
+	tests := []struct {
+		name    string
+		release func(*testing.T, context.Context, quota.ReleaseRequest) error
+	}{
+		{
+			name: "immediate release error",
+			release: func(t *testing.T, ctx context.Context, req quota.ReleaseRequest) error {
+				assertShortQuotaRequestReleaseDeadline(t, ctx)
+				return fmt.Errorf("mock release error")
+			},
+		},
+		{
+			name: "release deadline exceeded",
+			release: func(t *testing.T, ctx context.Context, req quota.ReleaseRequest) error {
+				assertShortQuotaRequestReleaseDeadline(t, ctx)
+				<-ctx.Done()
+				return ctx.Err()
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			controller, _, teardown := Setup(t)
+			defer teardown()
+
+			fakeQuota := &deleteReleaseQuotaManager{
+				release: func(ctx context.Context, req quota.ReleaseRequest) error {
+					return tt.release(t, ctx, req)
+				},
+			}
+			controller.quota = fakeQuota
+			user := &models.CreatedTeamAPIKey{
+				ID:   uuid.New(),
+				Key:  InitKey,
+				Name: "admin",
+				Team: models.AdminTeam(),
+			}
+
+			cleanup := CreateSandboxPool(t, controller, "test-template", 1)
+			_ = cleanup
+
+			createResp, apiErr := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
+				TemplateID: "test-template",
+				Metadata: map[string]string{
+					models.ExtensionKeySkipInitRuntime: v1alpha1.True,
+				},
+			}, nil, user))
+			require.Nil(t, apiErr)
+			require.NotNil(t, createResp.Body)
+
+			deleteResp, apiErr := controller.DeleteSandbox(NewRequest(t, nil, nil, map[string]string{
+				"sandboxID": createResp.Body.SandboxID,
+			}, user))
+
+			require.Nil(t, apiErr)
+			assert.Equal(t, http.StatusNoContent, deleteResp.Code)
+			assert.Equal(t, int64(1), fakeQuota.releaseCalls.Load())
+			assert.True(t, fakeQuota.releaseHasDeadline.Load())
+			assert.Equal(t, user.ID.String(), fakeQuota.lastRelease.APIKeyID)
+			assert.NotEmpty(t, fakeQuota.lastRelease.LockString)
+		})
+	}
+}
+
+func TestDeleteSandbox_MissingSandboxOrLookupFailureDoesNotReleaseQuota(t *testing.T) {
+	tests := []struct {
+		name       string
+		setupReq   func(t *testing.T, controller *Controller) *http.Request
+		wantStatus int
+	}{
+		{
+			name: "missing sandbox returns idempotent success without release",
+			setupReq: func(t *testing.T, _ *Controller) *http.Request {
+				user := &models.CreatedTeamAPIKey{
+					ID:   uuid.New(),
+					Key:  InitKey,
+					Name: "admin",
+					Team: models.AdminTeam(),
+				}
+				return NewRequest(t, nil, nil, map[string]string{
+					"sandboxID": "missing-sandbox",
+				}, user)
+			},
+			wantStatus: http.StatusNoContent,
+		},
+		{
+			name: "missing user lookup failure returns idempotent success without release",
+			setupReq: func(t *testing.T, _ *Controller) *http.Request {
+				return NewRequest(t, nil, nil, map[string]string{
+					"sandboxID": "any-sandbox",
+				}, nil)
+			},
+			wantStatus: http.StatusNoContent,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			controller, _, teardown := Setup(t)
+			defer teardown()
+
+			fakeQuota := &fakeQuotaManager{}
+			controller.quota = fakeQuota
+			cleanup := CreateSandboxPool(t, controller, "test-template", 1)
+			defer cleanup()
+
+			deleteResp, apiErr := controller.DeleteSandbox(tt.setupReq(t, controller))
+
+			require.Nil(t, apiErr)
+			assert.Equal(t, tt.wantStatus, deleteResp.Code)
+			assert.Equal(t, int64(0), fakeQuota.releaseCalls.Load())
+		})
+	}
+}
+
 func TestDeleteSandbox_DeleteFailureDoesNotReleaseQuota(t *testing.T) {
 	controller, _, teardown := Setup(t)
 	defer teardown()

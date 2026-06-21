@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -41,6 +42,7 @@ import (
 	"github.com/openkruise/agents/pkg/cache/cachetest"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
+	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	utestutils "github.com/openkruise/agents/pkg/utils/testutils"
@@ -364,6 +366,272 @@ func createCloneTestCheckpoint(t *testing.T, c client.Client, cache infracache.P
 		_, err := cache.GetCheckpoint(t.Context(), infracache.GetCheckpointOptions{CheckpointID: checkpointID})
 		return err == nil
 	}, time.Second, 10*time.Millisecond)
+}
+
+type cloneAdmissionQuotaTracker struct {
+	t        *testing.T
+	limit    int
+	mu       sync.Mutex
+	held     map[string]struct{}
+	acquires []string
+	releases []string
+}
+
+func newCloneAdmissionQuotaTracker(t *testing.T, limit int) *cloneAdmissionQuotaTracker {
+	t.Helper()
+	return &cloneAdmissionQuotaTracker{
+		t:     t,
+		limit: limit,
+		held:  map[string]struct{}{},
+	}
+}
+
+func (q *cloneAdmissionQuotaTracker) admission() *infra.SandboxAdmission {
+	return &infra.SandboxAdmission{
+		Acquire: q.acquire,
+		Release: q.release,
+	}
+}
+
+func (q *cloneAdmissionQuotaTracker) acquire(ctx context.Context, lockString string) error {
+	q.t.Helper()
+
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	require.NotEmpty(q.t, lockString)
+	q.acquires = append(q.acquires, lockString)
+	if _, exists := q.held[lockString]; exists {
+		q.t.Fatalf("duplicate admission acquire for %q", lockString)
+	}
+	if len(q.held) >= q.limit {
+		return managererrors.NewError(managererrors.ErrorQuotaExceeded, "api-key quota exceeded")
+	}
+	q.held[lockString] = struct{}{}
+	return nil
+}
+
+func (q *cloneAdmissionQuotaTracker) release(ctx context.Context, lockString string) error {
+	q.t.Helper()
+
+	assertShortQuotaReleaseDeadline(q.t, ctx)
+
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	q.releases = append(q.releases, lockString)
+	if _, exists := q.held[lockString]; !exists {
+		q.t.Fatalf("release called for unheld lockString %q", lockString)
+	}
+	delete(q.held, lockString)
+	return nil
+}
+
+func (q *cloneAdmissionQuotaTracker) acquireCalls() []string {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return append([]string(nil), q.acquires...)
+}
+
+func (q *cloneAdmissionQuotaTracker) releaseCalls() []string {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return append([]string(nil), q.releases...)
+}
+
+func (q *cloneAdmissionQuotaTracker) heldLockStrings() []string {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	locks := make([]string, 0, len(q.held))
+	for lockString := range q.held {
+		locks = append(locks, lockString)
+	}
+	return locks
+}
+
+func setFastCloneRetryForTest(t *testing.T) {
+	t.Helper()
+
+	origCreateRetryInterval := CreateRetryInterval
+	origCreateRetryBackoffFactor := CreateRetryBackoffFactor
+	origCreateRetryJitter := CreateRetryJitter
+	origCreateRetryIntervalCap := CreateRetryIntervalCap
+	CreateRetryInterval = 10 * time.Millisecond
+	CreateRetryBackoffFactor = 1
+	CreateRetryJitter = 0
+	CreateRetryIntervalCap = 10 * time.Millisecond
+	t.Cleanup(func() {
+		CreateRetryInterval = origCreateRetryInterval
+		CreateRetryBackoffFactor = origCreateRetryBackoffFactor
+		CreateRetryJitter = origCreateRetryJitter
+		CreateRetryIntervalCap = origCreateRetryIntervalCap
+	})
+}
+
+func TestCloneSandbox_AdmissionQuotaExceededIsTerminalBeforeCreate(t *testing.T) {
+	testInfra, fc := NewTestInfra(t, config.SandboxManagerOptions{
+		MaxClaimWorkers:            1,
+		MaxCreateQPS:               1000,
+		DisableRouteReconciliation: true,
+	})
+	checkpointID := "clone-admission-terminal"
+	createCloneTestCheckpoint(t, fc, testInfra.Cache, checkpointID)
+
+	origCreateSandbox := DefaultCreateSandbox
+	t.Cleanup(func() { DefaultCreateSandbox = origCreateSandbox })
+
+	createCalls := 0
+	DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client) (*v1alpha1.Sandbox, error) {
+		createCalls++
+		t.Fatalf("DefaultCreateSandbox should not be called when admission rejects before create")
+		return nil, nil
+	}
+
+	quota := newCloneAdmissionQuotaTracker(t, 0)
+	opts, err := ValidateAndInitCloneOptions(infra.CloneSandboxOptions{
+		User:                    "test-user",
+		CheckPointID:            checkpointID,
+		WaitReadyTimeout:        20 * time.Millisecond,
+		CloneTimeout:            time.Second,
+		Admission:               quota.admission(),
+		ReserveFailedSandboxFor: ptr.To(consts.ReserveFailedSandboxNever),
+	})
+	require.NoError(t, err)
+
+	sbx, _, err := testInfra.CloneSandbox(t.Context(), opts)
+	require.Error(t, err)
+	assert.Nil(t, sbx)
+	assert.Equal(t, managererrors.ErrorQuotaExceeded, managererrors.GetErrCode(err))
+	assert.Zero(t, createCalls)
+	assert.Len(t, quota.acquireCalls(), 1)
+	assert.Empty(t, quota.releaseCalls())
+}
+
+func TestCloneSandbox_ReleasesQuotaAfterKilledFailedCloneAllowsRetryWithFreshLockString(t *testing.T) {
+	setFastCloneRetryForTest(t)
+
+	testInfra, fc := NewTestInfra(t, config.SandboxManagerOptions{
+		MaxClaimWorkers:            1,
+		MaxCreateQPS:               1000,
+		DisableRouteReconciliation: true,
+	})
+	checkpointID := "clone-quota-release-retry"
+	createCloneTestCheckpoint(t, fc, testInfra.Cache, checkpointID)
+
+	origCreateSandbox := DefaultCreateSandbox
+	t.Cleanup(func() { DefaultCreateSandbox = origCreateSandbox })
+
+	quota := newCloneAdmissionQuotaTracker(t, 1)
+	var createdNames []string
+	createCalls := 0
+	DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client) (*v1alpha1.Sandbox, error) {
+		createCalls++
+		require.NotEmpty(t, sbx.Annotations[v1alpha1.AnnotationLock])
+		assert.Equal(t, "test-user", sbx.Annotations[v1alpha1.AnnotationOwner])
+		if createCalls == 2 {
+			require.Len(t, quota.acquireCalls(), 2)
+			assert.NotEqual(t, quota.acquireCalls()[0], quota.acquireCalls()[1])
+			assert.Equal(t, quota.acquireCalls()[1], sbx.Annotations[v1alpha1.AnnotationLock])
+		}
+		sbx.Name = fmt.Sprintf("clone-quota-release-%d", createCalls)
+		createdNames = append(createdNames, sbx.Name)
+		created, err := origCreateSandbox(ctx, sbx, c)
+		if err != nil {
+			return nil, err
+		}
+		if createCalls == 2 {
+			created.Status = v1alpha1.SandboxStatus{
+				Phase:              v1alpha1.SandboxRunning,
+				ObservedGeneration: created.Generation,
+				Conditions: []metav1.Condition{{
+					Type:   string(v1alpha1.SandboxConditionReady),
+					Status: metav1.ConditionTrue,
+					Reason: v1alpha1.SandboxReadyReasonPodReady,
+				}},
+				PodInfo: v1alpha1.PodInfo{PodIP: "1.2.3.4"},
+			}
+			require.NoError(t, c.Status().Update(ctx, created))
+		}
+		return created, nil
+	}
+
+	opts, err := ValidateAndInitCloneOptions(infra.CloneSandboxOptions{
+		User:                    "test-user",
+		CheckPointID:            checkpointID,
+		WaitReadyTimeout:        20 * time.Millisecond,
+		CloneTimeout:            time.Second,
+		ReserveFailedSandboxFor: ptr.To(consts.ReserveFailedSandboxNever),
+		Admission:               quota.admission(),
+	})
+	require.NoError(t, err)
+
+	sbx, _, err := testInfra.CloneSandbox(t.Context(), opts)
+	require.NoError(t, err)
+	require.NotNil(t, sbx)
+	assert.Equal(t, "clone-quota-release-2", sbx.GetName())
+	require.Len(t, createdNames, 2)
+	assert.Len(t, quota.acquireCalls(), 2)
+	assert.Len(t, quota.releaseCalls(), 1)
+	assert.Equal(t, quota.acquireCalls()[0], quota.releaseCalls()[0])
+	assert.ElementsMatch(t, []string{quota.acquireCalls()[1]}, quota.heldLockStrings())
+
+	firstAttempt := &v1alpha1.Sandbox{}
+	err = fc.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: createdNames[0]}, firstAttempt)
+	assert.True(t, apierrors.IsNotFound(err))
+
+	secondAttempt := &v1alpha1.Sandbox{}
+	require.NoError(t, fc.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: createdNames[1]}, secondAttempt))
+}
+
+func TestCloneSandbox_DefaultReserveRetainsQuotaOnWaitReadyFailure(t *testing.T) {
+	setFastCloneRetryForTest(t)
+
+	testInfra, fc := NewTestInfra(t, config.SandboxManagerOptions{
+		MaxClaimWorkers:            1,
+		MaxCreateQPS:               1000,
+		DisableRouteReconciliation: true,
+	})
+	checkpointID := "clone-quota-default-reserve"
+	createCloneTestCheckpoint(t, fc, testInfra.Cache, checkpointID)
+
+	origCreateSandbox := DefaultCreateSandbox
+	t.Cleanup(func() { DefaultCreateSandbox = origCreateSandbox })
+
+	quota := newCloneAdmissionQuotaTracker(t, 1)
+	const firstSandboxName = "clone-quota-default-reserve-1"
+	createCalls := 0
+	DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client) (*v1alpha1.Sandbox, error) {
+		createCalls++
+		if createCalls > 1 {
+			t.Fatalf("DefaultCreateSandbox should not be called after quota is retained by the reserved failed clone")
+		}
+		sbx.Name = firstSandboxName
+		return origCreateSandbox(ctx, sbx, c)
+	}
+
+	opts, err := ValidateAndInitCloneOptions(infra.CloneSandboxOptions{
+		User:             "test-user",
+		CheckPointID:     checkpointID,
+		WaitReadyTimeout: 20 * time.Millisecond,
+		CloneTimeout:     time.Second,
+		Admission:        quota.admission(),
+	})
+	require.NoError(t, err)
+
+	sbx, _, err := testInfra.CloneSandbox(t.Context(), opts)
+	require.Error(t, err)
+	assert.Nil(t, sbx)
+	assert.Equal(t, managererrors.ErrorQuotaExceeded, managererrors.GetErrCode(err))
+	assert.Equal(t, 1, createCalls)
+	assert.Len(t, quota.acquireCalls(), 2)
+	assert.Empty(t, quota.releaseCalls())
+
+	reserved := &v1alpha1.Sandbox{}
+	require.NoError(t, fc.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: firstSandboxName}, reserved))
+	require.NotNil(t, reserved.Spec.ShutdownTime)
+	assert.WithinDuration(t, time.Now().Add(DefaultReserveFailedSandboxFor), reserved.Spec.ShutdownTime.Time, 5*time.Second)
+	assert.ElementsMatch(t, []string{quota.acquireCalls()[0]}, quota.heldLockStrings())
 }
 
 func TestCloneSandbox_CleansFailedCreatedSandbox(t *testing.T) {
