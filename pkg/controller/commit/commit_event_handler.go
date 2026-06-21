@@ -38,9 +38,7 @@ var _ handler.TypedEventHandler[client.Object, reconcile.Request] = &enqueueRequ
 // enqueueRequestForJob enqueues a Commit reconcile request only when the underlying
 // commit Job reaches a terminal state (Complete or Failed). Intermediate Job/Pod
 // status changes are filtered out to avoid unnecessary reconciles.
-type enqueueRequestForJob struct {
-	client.Reader
-}
+type enqueueRequestForJob struct{}
 
 func (p *enqueueRequestForJob) addEvent(q workqueue.TypedRateLimitingInterface[reconcile.Request], obj runtime.Object) {
 	job, ok := obj.(*batchv1.Job)

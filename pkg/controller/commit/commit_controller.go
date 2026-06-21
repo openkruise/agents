@@ -268,10 +268,9 @@ func (r *CommitReconciler) updateCommitStatus(ctx context.Context, newStatus age
 	if reflect.DeepEqual(commit.Status, newStatus) {
 		return nil
 	}
-	patchBase := commit.DeepCopy()
 	updatedCommit := commit.DeepCopy()
 	updatedCommit.Status = newStatus
-	if err := client.IgnoreNotFound(r.Status().Patch(ctx, updatedCommit, client.MergeFrom(patchBase))); err != nil {
+	if err := client.IgnoreNotFound(r.Status().Patch(ctx, updatedCommit, client.MergeFrom(commit))); err != nil {
 		log.Error(err, "Failed to update commit status", "commit", klog.KObj(commit))
 		return err
 	}
@@ -284,6 +283,6 @@ func (r *CommitReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		WithOptions(controller.Options{MaxConcurrentReconciles: concurrentReconciles}).
 		For(&agentsv1alpha1.Commit{}).
-		Watches(&batchv1.Job{}, &enqueueRequestForJob{mgr.GetCache()}).
+		Watches(&batchv1.Job{}, &enqueueRequestForJob{}).
 		Complete(r)
 }

@@ -73,17 +73,26 @@ func (r *commonControl) EnsureCommitRunning(ctx context.Context, args *EnsureFun
 		}
 	}
 
+	// If a Job already exists for this commit, do not create a duplicate.
+	// This covers both running and failed Jobs whose pods may have been GC'd.
+	jobList := &batchv1.JobList{}
+	if err := r.Client.List(ctx, jobList, client.InNamespace(commit.Namespace), client.MatchingFields{jobutil.IndexFieldCommitUID: string(commit.UID)}); err != nil {
+		return 0, fmt.Errorf("failed to list commit jobs: %w", err)
+	}
+	if len(jobList.Items) > 0 {
+		log.Info("commit job already exists, transitioning to Running", "commit", klog.KObj(commit))
+		setCommitRunning(args.NewStatus, commit)
+		return 0, nil
+	}
+
+	// Fallback: check for orphan job pods (e.g., Job was deleted but pod remains).
 	jobPods, err := r.listCRJobPods(ctx, commit)
 	if err != nil {
 		return 0, fmt.Errorf("failed to list commit job pods: %w", err)
 	}
 	if len(jobPods.Items) > 0 {
 		log.Info("commit job pod already exists, transitioning to Running", "commit", klog.KObj(commit))
-		if args.NewStatus.StartTime == nil {
-			now := metav1.Now()
-			args.NewStatus.StartTime = &now
-		}
-		args.NewStatus.Phase = agentsv1alpha1.CommitPhaseRunning
+		setCommitRunning(args.NewStatus, commit)
 		return 0, nil
 	}
 
@@ -97,10 +106,17 @@ func (r *commonControl) EnsureCommitRunning(ctx context.Context, args *EnsureFun
 		return 0, nil
 	}
 
-	args.NewStatus.StartTime = &now
-	args.NewStatus.Phase = agentsv1alpha1.CommitPhaseRunning
-	args.NewStatus.CommitID = commit.Name
+	setCommitRunning(args.NewStatus, commit)
 	return 0, nil
+}
+
+func setCommitRunning(status *agentsv1alpha1.CommitStatus, commit *agentsv1alpha1.Commit) {
+	if status.StartTime == nil {
+		now := metav1.Now()
+		status.StartTime = &now
+	}
+	status.Phase = agentsv1alpha1.CommitPhaseRunning
+	status.CommitID = commit.Name
 }
 
 func (r *commonControl) EnsureCommitUpdated(ctx context.Context, args *EnsureFuncArgs) (time.Duration, error) {
@@ -171,7 +187,7 @@ func (r *commonControl) applyCommitJob(ctx context.Context, commit *agentsv1alph
 
 	job, err := g.GenerateCommitJob()
 	if err != nil {
-		return fmt.Errorf("failed to generate commit job: %v", err)
+		return fmt.Errorf("failed to generate commit job: %w", err)
 	}
 	if err := r.Client.Create(ctx, job); err != nil {
 		if errors.IsAlreadyExists(err) {
