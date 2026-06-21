@@ -37,6 +37,9 @@ const (
 
 	AnnotationEnvdAccessToken = E2BPrefix + "envd-access-token"
 	AnnotationEnvdURL         = E2BPrefix + "envd-url"
+	// AnnotationNetworkConfig stores the E2B-compatible network configuration
+	// requested for a sandbox.
+	AnnotationNetworkConfig = E2BPrefix + "network-config"
 	// AnnotationCSIVolumeConfig is the annotation key for CSI mount configuration.
 	AnnotationCSIVolumeConfig = E2BPrefix + "csi-volume-config"
 )

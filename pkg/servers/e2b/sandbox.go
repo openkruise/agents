@@ -87,6 +87,12 @@ func (sc *Controller) convertToE2BSandbox(sbx infra.Sandbox, accessToken string)
 	}
 	sandbox.State, _ = sbx.GetState()
 	annotations := sbx.GetAnnotations()
+	networkState, err := unmarshalSandboxNetworkState(annotations[agentsv1alpha1.AnnotationNetworkConfig])
+	if err != nil {
+		klog.ErrorS(err, "failed to decode sandbox network configuration", "sandbox", klog.KObj(sbx))
+	}
+	sandbox.AllowInternetAccess = networkState.AllowInternetAccess
+	sandbox.Network = networkState.Network
 	labels := sbx.GetLabels()
 
 	sandbox.Metadata = make(map[string]string, len(annotations)+len(labels))
