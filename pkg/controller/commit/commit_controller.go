@@ -18,7 +18,6 @@ package commit
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"reflect"
@@ -29,7 +28,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -272,10 +270,10 @@ func (r *CommitReconciler) updateCommitStatus(ctx context.Context, newStatus age
 	if reflect.DeepEqual(commit.Status, newStatus) {
 		return nil
 	}
-	by, _ := json.Marshal(newStatus)
-	patchStatus := fmt.Sprintf(`{"status":%s}`, string(by))
-	rcvObject := &agentsv1alpha1.Commit{ObjectMeta: metav1.ObjectMeta{Namespace: commit.Namespace, Name: commit.Name}}
-	if err := client.IgnoreNotFound(r.Status().Patch(ctx, rcvObject, client.RawPatch(types.MergePatchType, []byte(patchStatus)))); err != nil {
+	patchBase := commit.DeepCopy()
+	updatedCommit := commit.DeepCopy()
+	updatedCommit.Status = newStatus
+	if err := client.IgnoreNotFound(r.Status().Patch(ctx, updatedCommit, client.MergeFrom(patchBase))); err != nil {
 		log.Error(err, "Failed to update commit status", "commit", klog.KObj(commit))
 		return err
 	}
