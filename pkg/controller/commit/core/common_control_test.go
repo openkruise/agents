@@ -33,7 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	jobutil "github.com/openkruise/agents/pkg/job"
+	jobutil "github.com/openkruise/agents/pkg/controller/commit/job"
 )
 
 func newTestScheme() *runtime.Scheme {
@@ -108,21 +108,33 @@ func newCommonControlForTest(c client.Client) *commonControl {
 	}
 }
 
+// newFakeClientBuilder returns a fake client builder with the commit-UID field index pre-registered.
+func newFakeClientBuilder(scheme *runtime.Scheme) *fake.ClientBuilder {
+	commitUIDIndex := func(obj client.Object) []string {
+		if uid, ok := obj.GetLabels()[jobutil.LabelCommitUID]; ok {
+			return []string{uid}
+		}
+		return nil
+	}
+	return fake.NewClientBuilder().WithScheme(scheme).
+		WithIndex(&batchv1.Job{}, jobutil.IndexFieldCommitUID, commitUIDIndex).
+		WithIndex(&corev1.Pod{}, jobutil.IndexFieldCommitUID, commitUIDIndex)
+}
+
 // --- resolveRegistrySecret tests ---
 
 func TestResolveRegistrySecretName_Tier1(t *testing.T) {
 	scheme := newTestScheme()
 	secret := newDockerConfigSecret("push-secret", "default")
-	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
+	fc := newFakeClientBuilder(scheme).WithObjects(secret).Build()
 	ctrl := newCommonControlForTest(fc)
 
 	commit := newTestCommit("test-commit", "default")
 	commit.Spec.RegistryAuth = &agentsv1alpha1.RegistryAuth{Secrets: []string{
 		"push-secret",
 	}}
-	pod := newTestPod("test-pod", "default", "node-1")
 
-	name := ctrl.resolveRegistrySecretName(context.TODO(), commit, pod)
+	name := ctrl.resolveRegistrySecretName(context.TODO(), commit)
 	if name != "push-secret" {
 		t.Errorf("expected 'push-secret', got %q", name)
 	}
@@ -130,7 +142,7 @@ func TestResolveRegistrySecretName_Tier1(t *testing.T) {
 
 func TestResolveRegistrySecretName_Tier1_NotFound(t *testing.T) {
 	scheme := newTestScheme()
-	fc := fake.NewClientBuilder().WithScheme(scheme).Build()
+	fc := newFakeClientBuilder(scheme).Build()
 	ctrl := newCommonControlForTest(fc)
 
 	commit := newTestCommit("test-commit", "default")
@@ -138,7 +150,7 @@ func TestResolveRegistrySecretName_Tier1_NotFound(t *testing.T) {
 		"nonexistent-secret",
 	}}
 
-	name := ctrl.resolveRegistrySecretName(context.TODO(), commit, nil)
+	name := ctrl.resolveRegistrySecretName(context.TODO(), commit)
 	if name != "" {
 		t.Errorf("expected empty, got %q", name)
 	}
@@ -150,7 +162,7 @@ func TestResolveRegistrySecretName_Tier1_WrongType(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "opaque-secret", Namespace: "default"},
 		Type:       corev1.SecretTypeOpaque,
 	}
-	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
+	fc := newFakeClientBuilder(scheme).WithObjects(secret).Build()
 	ctrl := newCommonControlForTest(fc)
 
 	commit := newTestCommit("test-commit", "default")
@@ -158,47 +170,22 @@ func TestResolveRegistrySecretName_Tier1_WrongType(t *testing.T) {
 		"opaque-secret",
 	}}
 
-	name := ctrl.resolveRegistrySecretName(context.TODO(), commit, nil)
+	name := ctrl.resolveRegistrySecretName(context.TODO(), commit)
 	if name != "" {
 		t.Errorf("expected empty for wrong secret type, got %q", name)
 	}
 }
 
-func TestResolveRegistrySecretName_Tier3_SAImagePullSecrets(t *testing.T) {
-	scheme := newTestScheme()
-	secret := newDockerConfigSecret("sa-pull-secret", "default")
-	sa := &corev1.ServiceAccount{
-		ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: "default"},
-		ImagePullSecrets: []corev1.LocalObjectReference{
-			{Name: "sa-pull-secret"},
-		},
-	}
-	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret, sa).Build()
-	ctrl := newCommonControlForTest(fc)
-
-	commit := newTestCommit("test-commit", "default")
-	pod := newTestPod("test-pod", "default", "node-1")
-
-	name := ctrl.resolveRegistrySecretName(context.TODO(), commit, pod)
-	if name != "sa-pull-secret" {
-		t.Errorf("expected 'sa-pull-secret', got %q", name)
-	}
-}
-
 func TestResolveRegistrySecretName_NoSecret(t *testing.T) {
 	scheme := newTestScheme()
-	sa := &corev1.ServiceAccount{
-		ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: "default"},
-	}
-	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(sa).Build()
+	fc := newFakeClientBuilder(scheme).Build()
 	ctrl := newCommonControlForTest(fc)
 
 	commit := newTestCommit("test-commit", "default")
-	pod := newTestPod("test-pod", "default", "node-1")
 
-	name := ctrl.resolveRegistrySecretName(context.TODO(), commit, pod)
+	name := ctrl.resolveRegistrySecretName(context.TODO(), commit)
 	if name != "" {
-		t.Errorf("expected empty when no secret matches, got %q", name)
+		t.Errorf("expected empty when no secret specified, got %q", name)
 	}
 }
 
@@ -213,6 +200,9 @@ func TestEnsureCommitUpdated_JobCompleted(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      jobName,
 			Namespace: "default",
+			Labels: map[string]string{
+				jobutil.LabelCommitUID: string(commit.UID),
+			},
 		},
 		Status: batchv1.JobStatus{
 			Conditions: []batchv1.JobCondition{
@@ -220,7 +210,7 @@ func TestEnsureCommitUpdated_JobCompleted(t *testing.T) {
 			},
 		},
 	}
-	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(job).Build()
+	fc := newFakeClientBuilder(scheme).WithObjects(job).Build()
 	ctrl := newCommonControlForTest(fc)
 
 	newStatus := commit.Status.DeepCopy()
@@ -247,6 +237,9 @@ func TestEnsureCommitUpdated_JobFailed(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      jobName,
 			Namespace: "default",
+			Labels: map[string]string{
+				jobutil.LabelCommitUID: string(commit.UID),
+			},
 		},
 		Status: batchv1.JobStatus{
 			Conditions: []batchv1.JobCondition{
@@ -254,7 +247,7 @@ func TestEnsureCommitUpdated_JobFailed(t *testing.T) {
 			},
 		},
 	}
-	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(job).Build()
+	fc := newFakeClientBuilder(scheme).WithObjects(job).Build()
 	ctrl := newCommonControlForTest(fc)
 
 	newStatus := commit.Status.DeepCopy()
@@ -272,7 +265,7 @@ func TestEnsureCommitUpdated_JobFailed(t *testing.T) {
 func TestEnsureCommitUpdated_JobNotFound(t *testing.T) {
 	scheme := newTestScheme()
 	commit := newTestCommit("test-commit", "default")
-	fc := fake.NewClientBuilder().WithScheme(scheme).Build()
+	fc := newFakeClientBuilder(scheme).Build()
 	ctrl := newCommonControlForTest(fc)
 
 	newStatus := commit.Status.DeepCopy()
@@ -296,12 +289,15 @@ func TestEnsureCommitUpdated_JobStillRunning(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      jobName,
 			Namespace: "default",
+			Labels: map[string]string{
+				jobutil.LabelCommitUID: string(commit.UID),
+			},
 		},
 		Status: batchv1.JobStatus{
 			Active: 1,
 		},
 	}
-	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(job).Build()
+	fc := newFakeClientBuilder(scheme).WithObjects(job).Build()
 	ctrl := newCommonControlForTest(fc)
 
 	newStatus := commit.Status.DeepCopy()
@@ -329,7 +325,7 @@ func TestEnsureCommitRunning_Success(t *testing.T) {
 	commit := newTestCommit("test-commit", "default")
 	pod := newTestPod("test-pod", "default", "node-1")
 
-	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(commit, pod).Build()
+	fc := newFakeClientBuilder(scheme).WithObjects(commit, pod).Build()
 	ctrl := newCommonControlForTest(fc)
 
 	newStatus := commit.Status.DeepCopy()
@@ -351,7 +347,7 @@ func TestEnsureCommitRunning_Success(t *testing.T) {
 
 	// Verify Job was created (by label since GenerateName produces a random name)
 	jobList := &batchv1.JobList{}
-	if err := fc.List(context.TODO(), jobList, client.InNamespace("default"), client.MatchingLabels{jobutil.LabelCommitUID: string(commit.UID)}); err != nil {
+	if err := fc.List(context.TODO(), jobList, client.InNamespace("default"), client.MatchingFields{jobutil.IndexFieldCommitUID: string(commit.UID)}); err != nil {
 		t.Fatalf("failed to list jobs: %v", err)
 	}
 	if len(jobList.Items) != 1 {
@@ -366,7 +362,7 @@ func TestEnsureCommitRunning_MissingJobImage(t *testing.T) {
 	commit := newTestCommit("test-commit", "default")
 	pod := newTestPod("test-pod", "default", "node-1")
 
-	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(commit, pod).Build()
+	fc := newFakeClientBuilder(scheme).WithObjects(commit, pod).Build()
 	ctrl := newCommonControlForTest(fc)
 
 	newStatus := commit.Status.DeepCopy()
@@ -401,7 +397,7 @@ func TestEnsureCommitRunning_JobPodAlreadyExists(t *testing.T) {
 		Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}
 
-	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(commit, pod, existingJobPod).Build()
+	fc := newFakeClientBuilder(scheme).WithObjects(commit, pod, existingJobPod).Build()
 	ctrl := newCommonControlForTest(fc)
 
 	newStatus := commit.Status.DeepCopy()
@@ -436,7 +432,7 @@ func TestEnsureCommitRunning_WithDockerSecret(t *testing.T) {
 	pod := newTestPod("test-pod", "default", "node-1")
 	secret := newDockerConfigSecret("push-secret", "default")
 
-	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(commit, pod, secret).Build()
+	fc := newFakeClientBuilder(scheme).WithObjects(commit, pod, secret).Build()
 	ctrl := newCommonControlForTest(fc)
 
 	newStatus := commit.Status.DeepCopy()
@@ -449,7 +445,7 @@ func TestEnsureCommitRunning_WithDockerSecret(t *testing.T) {
 
 	// Verify Job has docker-config volume (by label since GenerateName produces a random name)
 	jobList := &batchv1.JobList{}
-	if err := fc.List(context.TODO(), jobList, client.InNamespace("default"), client.MatchingLabels{jobutil.LabelCommitUID: string(commit.UID)}); err != nil {
+	if err := fc.List(context.TODO(), jobList, client.InNamespace("default"), client.MatchingFields{jobutil.IndexFieldCommitUID: string(commit.UID)}); err != nil {
 		t.Fatalf("failed to list jobs: %v", err)
 	}
 	if len(jobList.Items) != 1 {
@@ -478,7 +474,7 @@ func TestEnsureCommitDeleted(t *testing.T) {
 	commit := newTestCommit("test-commit", "default")
 	commit.Finalizers = []string{agentsv1alpha1.CommitFinalizer}
 
-	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(commit).Build()
+	fc := newFakeClientBuilder(scheme).WithObjects(commit).Build()
 	ctrl := newCommonControlForTest(fc)
 
 	args := &EnsureFuncArgs{Commit: commit, NewStatus: commit.Status.DeepCopy()}
@@ -494,7 +490,7 @@ func TestEnsureCommitDeleted_NoFinalizer(t *testing.T) {
 	commit := newTestCommit("test-commit", "default")
 	// No finalizers set
 
-	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(commit).Build()
+	fc := newFakeClientBuilder(scheme).WithObjects(commit).Build()
 	ctrl := newCommonControlForTest(fc)
 
 	args := &EnsureFuncArgs{Commit: commit, NewStatus: commit.Status.DeepCopy()}
@@ -508,12 +504,12 @@ func TestEnsureCommitDeleted_NoFinalizer(t *testing.T) {
 
 func TestGetLatestJobPodExitCode(t *testing.T) {
 	tests := []struct {
-		name           string
-		pods           []corev1.Pod
-		expectNil      bool
-		expectType     string
-		expectStatus   metav1.ConditionStatus
-		expectReason   string
+		name         string
+		pods         []corev1.Pod
+		expectNil    bool
+		expectType   string
+		expectStatus metav1.ConditionStatus
+		expectReason string
 	}{
 		{
 			name:      "no pods",
@@ -669,7 +665,7 @@ func TestGetLatestJobPodExitCode(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			scheme := newTestScheme()
-			builder := fake.NewClientBuilder().WithScheme(scheme)
+			builder := newFakeClientBuilder(scheme)
 			for i := range tt.pods {
 				builder = builder.WithObjects(&tt.pods[i])
 			}
@@ -731,7 +727,7 @@ func TestApplyCommitJob_EmptyContainerID(t *testing.T) {
 		},
 	}
 
-	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(commit, pod).Build()
+	fc := newFakeClientBuilder(scheme).WithObjects(commit, pod).Build()
 	ctrl := newCommonControlForTest(fc)
 
 	err := ctrl.applyCommitJob(context.TODO(), commit, pod)
@@ -740,180 +736,5 @@ func TestApplyCommitJob_EmptyContainerID(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "failed to generate commit job") {
 		t.Errorf("expected error to contain 'failed to generate commit job', got: %v", err)
-	}
-}
-
-// --- resolveRegistrySecretByKeyring tests (Tier 2) ---
-
-func TestResolveRegistrySecretByKeyring_NoDockerSecrets(t *testing.T) {
-	scheme := newTestScheme()
-	fc := fake.NewClientBuilder().WithScheme(scheme).Build()
-	ctrl := newCommonControlForTest(fc)
-
-	commit := newTestCommit("test-commit", "default")
-	name := ctrl.resolveRegistrySecretByKeyring(context.TODO(), commit)
-	if name != "" {
-		t.Errorf("expected empty when no docker secrets exist, got %q", name)
-	}
-}
-
-func TestResolveRegistrySecretByKeyring_WithDockerSecret(t *testing.T) {
-	scheme := newTestScheme()
-	secret := newDockerConfigSecret("ns-docker-secret", "default")
-	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
-	ctrl := newCommonControlForTest(fc)
-
-	commit := newTestCommit("test-commit", "default")
-	name := ctrl.resolveRegistrySecretByKeyring(context.TODO(), commit)
-	// Should return the secret name via fallback or source tracking
-	if name != "ns-docker-secret" {
-		t.Errorf("expected 'ns-docker-secret', got %q", name)
-	}
-}
-
-func TestResolveRegistrySecretByKeyring_OpaqueSecretIgnored(t *testing.T) {
-	scheme := newTestScheme()
-	// Only add an Opaque secret — should be filtered out
-	opaqueSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "opaque-secret", Namespace: "default"},
-		Type:       corev1.SecretTypeOpaque,
-		Data:       map[string][]byte{"key": []byte("value")},
-	}
-	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(opaqueSecret).Build()
-	ctrl := newCommonControlForTest(fc)
-
-	commit := newTestCommit("test-commit", "default")
-	name := ctrl.resolveRegistrySecretByKeyring(context.TODO(), commit)
-	if name != "" {
-		t.Errorf("expected empty when only opaque secrets exist, got %q", name)
-	}
-}
-
-func TestResolveRegistrySecretByKeyring_EmptyRegistryHost(t *testing.T) {
-	scheme := newTestScheme()
-	fc := fake.NewClientBuilder().WithScheme(scheme).Build()
-	ctrl := newCommonControlForTest(fc)
-
-	commit := newTestCommit("test-commit", "default")
-	commit.Spec.Image = "INVALID:::image" // unparsable -> empty registry host
-	name := ctrl.resolveRegistrySecretByKeyring(context.TODO(), commit)
-	if name != "" {
-		t.Errorf("expected empty for invalid image, got %q", name)
-	}
-}
-
-// --- resolveRegistrySecretName Tier 3 edge cases ---
-
-func TestResolveRegistrySecretName_Tier3_NilPod(t *testing.T) {
-	scheme := newTestScheme()
-	sa := &corev1.ServiceAccount{
-		ObjectMeta: metav1.ObjectMeta{Name: "default", Namespace: "default"},
-	}
-	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(sa).Build()
-	ctrl := newCommonControlForTest(fc)
-
-	commit := newTestCommit("test-commit", "default")
-	// pod is nil — Tier 3 should be skipped entirely
-	name := ctrl.resolveRegistrySecretName(context.TODO(), commit, nil)
-	if name != "" {
-		t.Errorf("expected empty when pod is nil and no Tier 1/2 match, got %q", name)
-	}
-}
-
-func TestResolveRegistrySecretName_Tier3_CustomSA(t *testing.T) {
-	scheme := newTestScheme()
-	secret := newDockerConfigSecret("custom-sa-secret", "default")
-	sa := &corev1.ServiceAccount{
-		ObjectMeta: metav1.ObjectMeta{Name: "custom-sa", Namespace: "default"},
-		ImagePullSecrets: []corev1.LocalObjectReference{
-			{Name: "custom-sa-secret"},
-		},
-	}
-	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret, sa).Build()
-	ctrl := newCommonControlForTest(fc)
-
-	commit := newTestCommit("test-commit", "default")
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-pod", Namespace: "default"},
-		Spec: corev1.PodSpec{
-			NodeName:           "node-1",
-			ServiceAccountName: "custom-sa",
-		},
-	}
-
-	name := ctrl.resolveRegistrySecretName(context.TODO(), commit, pod)
-	if name != "custom-sa-secret" {
-		t.Errorf("expected 'custom-sa-secret', got %q", name)
-	}
-}
-
-func TestResolveRegistrySecretName_Tier3_DefaultSANotFound(t *testing.T) {
-	scheme := newTestScheme()
-	// No ServiceAccount created — Get will return NotFound, Tier 3 skipped
-	fc := fake.NewClientBuilder().WithScheme(scheme).Build()
-	ctrl := newCommonControlForTest(fc)
-
-	commit := newTestCommit("test-commit", "default")
-	pod := newTestPod("test-pod", "default", "node-1")
-	// pod has ServiceAccountName "default" but SA doesn't exist
-
-	name := ctrl.resolveRegistrySecretName(context.TODO(), commit, pod)
-	if name != "" {
-		t.Errorf("expected empty when default SA not found, got %q", name)
-	}
-}
-
-// --- extractRegistryHost tests ---
-
-func TestExtractRegistryHost(t *testing.T) {
-	tests := []struct {
-		name     string
-		image    string
-		expected string
-	}{
-		{
-			name:     "full registry with port",
-			image:    "registry.example.com:5000/team/env:v1",
-			expected: "registry.example.com:5000",
-		},
-		{
-			name:     "standard registry",
-			image:    "registry.example.com/team/env:v1",
-			expected: "registry.example.com",
-		},
-		{
-			name:     "docker.io short form",
-			image:    "library/nginx:latest",
-			expected: "docker.io",
-		},
-		{
-			name:     "docker.io official image",
-			image:    "nginx:latest",
-			expected: "docker.io",
-		},
-		{
-			name:     "gcr.io",
-			image:    "gcr.io/my-project/my-image:v1",
-			expected: "gcr.io",
-		},
-		{
-			name:     "invalid image",
-			image:    "INVALID:::image",
-			expected: "",
-		},
-		{
-			name:     "empty string",
-			image:    "",
-			expected: "",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := extractRegistryHost(tt.image)
-			if got != tt.expected {
-				t.Errorf("extractRegistryHost(%q) = %q, want %q", tt.image, got, tt.expected)
-			}
-		})
 	}
 }

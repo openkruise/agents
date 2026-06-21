@@ -35,6 +35,7 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/controller/commit/core"
+	jobutil "github.com/openkruise/agents/pkg/controller/commit/job"
 	"github.com/openkruise/agents/pkg/utils"
 )
 
@@ -42,22 +43,21 @@ func newTestScheme() *runtime.Scheme {
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)
 	_ = agentsv1alpha1.AddToScheme(scheme)
-	_ = batchv1.AddToScheme(scheme)
 	return scheme
 }
 
 type mockControl struct {
-	ensureRunningErr    error
-	ensureRunningReq    time.Duration
-	ensureUpdatedErr    error
-	ensureUpdatedReq    time.Duration
-	ensureDeletedErr    error
-	ensureDeletedReq    time.Duration
-	runningCalled       bool
-	updatedCalled       bool
-	deletedCalled       bool
-	setPhaseOnRunning   agentsv1alpha1.CommitPhase
-	setPhaseOnUpdated   agentsv1alpha1.CommitPhase
+	ensureRunningErr  error
+	ensureRunningReq  time.Duration
+	ensureUpdatedErr  error
+	ensureUpdatedReq  time.Duration
+	ensureDeletedErr  error
+	ensureDeletedReq  time.Duration
+	runningCalled     bool
+	updatedCalled     bool
+	deletedCalled     bool
+	setPhaseOnRunning agentsv1alpha1.CommitPhase
+	setPhaseOnUpdated agentsv1alpha1.CommitPhase
 }
 
 func (m *mockControl) EnsureCommitRunning(_ context.Context, args *core.EnsureFuncArgs) (time.Duration, error) {
@@ -83,7 +83,17 @@ func (m *mockControl) EnsureCommitDeleted(_ context.Context, _ *core.EnsureFuncA
 
 func newTestReconciler(objs ...client.Object) (*CommitReconciler, *mockControl) {
 	scheme := newTestScheme()
-	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).WithStatusSubresource(&agentsv1alpha1.Commit{}).Build()
+	commitUIDIndex := func(obj client.Object) []string {
+		if uid, ok := obj.GetLabels()[jobutil.LabelCommitUID]; ok {
+			return []string{uid}
+		}
+		return nil
+	}
+	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).
+		WithStatusSubresource(&agentsv1alpha1.Commit{}).
+		WithIndex(&batchv1.Job{}, jobutil.IndexFieldCommitUID, commitUIDIndex).
+		WithIndex(&corev1.Pod{}, jobutil.IndexFieldCommitUID, commitUIDIndex).
+		Build()
 	mock := &mockControl{}
 	r := &CommitReconciler{
 		Client:   fc,

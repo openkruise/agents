@@ -29,7 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/openkruise/agents/pkg/controller/commit/core"
-	jobutil "github.com/openkruise/agents/pkg/job"
+	jobutil "github.com/openkruise/agents/pkg/controller/commit/job"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 )
 
@@ -82,10 +82,6 @@ func (p *enqueueRequestForJob) Delete(_ context.Context, evt event.TypedDeleteEv
 	if !ok {
 		return
 	}
-	// Clean up any stale Create expectation to prevent expectation leaks.
-	commitKey := types.NamespacedName{Namespace: job.Namespace, Name: commitName}.String()
-	core.ScaleExpectations.ObserveScale(commitKey, expectations.Create, job.Name)
-
 	q.Add(reconcile.Request{
 		NamespacedName: types.NamespacedName{
 			Namespace: job.Namespace,

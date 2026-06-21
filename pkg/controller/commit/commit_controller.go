@@ -40,6 +40,7 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/controller/commit/core"
+	jobutil "github.com/openkruise/agents/pkg/controller/commit/job"
 	"github.com/openkruise/agents/pkg/discovery"
 	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/utils"
@@ -74,6 +75,21 @@ func Add(mgr ctrl.Manager) error {
 	if err != nil {
 		return err
 	}
+
+	// Register field indexes for LabelCommitUID to speed up List queries.
+	commitUIDIndex := func(obj client.Object) []string {
+		if uid, ok := obj.GetLabels()[jobutil.LabelCommitUID]; ok {
+			return []string{uid}
+		}
+		return nil
+	}
+	if err = mgr.GetFieldIndexer().IndexField(context.Background(), &batchv1.Job{}, jobutil.IndexFieldCommitUID, commitUIDIndex); err != nil {
+		return err
+	}
+	if err = mgr.GetFieldIndexer().IndexField(context.Background(), &corev1.Pod{}, jobutil.IndexFieldCommitUID, commitUIDIndex); err != nil {
+		return err
+	}
+
 	if err = (&CommitReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),

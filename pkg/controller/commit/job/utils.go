@@ -29,6 +29,10 @@ import (
 const (
 	LabelCommitName = "agents.kruise.io/commit-name"
 	LabelCommitUID  = "agents.kruise.io/commit-uid"
+
+	// IndexFieldCommitUID is the field index name for LabelCommitUID, used to speed
+	// up List queries that filter by commit UID.
+	IndexFieldCommitUID = "metadata.commit-uid"
 )
 
 // AgentJobContainerName is the name of the single container inside the commit
@@ -62,12 +66,12 @@ func IsJobCompleted(job *batchv1.Job) (bool, bool) {
 	return false, false
 }
 
-type CommitConditionValue struct {
+type commitConditionValue struct {
 	conditionType   string
 	conditionReason string
 }
 
-var CommitJobExitCodeMap = map[int32]CommitConditionValue{
+var commitJobExitCodeMap = map[int32]commitConditionValue{
 	ExitCodeSuccess:              {"PushCommittedImage", "PushCommittedImageSuccess"},
 	ExitCodeCommitFailed:         {"CommitContainer", "CommitContainerFailed"},
 	ExitCodeGetImageSizeFailed:   {"CommitContainer", "GetImageSizeFailed"},
@@ -84,7 +88,7 @@ func GetCommitCondition(pod *corev1.Pod) *metav1.Condition {
 			continue
 		}
 		if cs.State.Terminated != nil {
-			conditionValue, ok := CommitJobExitCodeMap[cs.State.Terminated.ExitCode]
+			conditionValue, ok := commitJobExitCodeMap[cs.State.Terminated.ExitCode]
 			if !ok {
 				klog.InfoS("Unknown exit code, skipping condition", "containerID", cs.ContainerID, "exitCode", cs.State.Terminated.ExitCode)
 				return nil

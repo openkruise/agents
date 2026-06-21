@@ -98,9 +98,9 @@ func TestCommitJobExitCodeMap(t *testing.T) {
 		ExitCodeGetSandboxIDFailed:   {"CommitContainer", "GetSandboxIDFailed"},
 	}
 	for code, want := range expected {
-		got, ok := CommitJobExitCodeMap[code]
+		got, ok := commitJobExitCodeMap[code]
 		if !ok {
-			t.Errorf("exit code %d missing from CommitJobExitCodeMap", code)
+			t.Errorf("exit code %d missing from commitJobExitCodeMap", code)
 			continue
 		}
 		if got.conditionType != want.typ || got.conditionReason != want.reason {
@@ -110,97 +110,101 @@ func TestCommitJobExitCodeMap(t *testing.T) {
 	}
 }
 
-func TestGetCommitCondition_Success(t *testing.T) {
-	pod := &corev1.Pod{
-		Status: corev1.PodStatus{
-			ContainerStatuses: []corev1.ContainerStatus{
-				{
-					Name: "agent-job",
-					State: corev1.ContainerState{
-						Terminated: &corev1.ContainerStateTerminated{ExitCode: ExitCodeSuccess},
-					},
-				},
-			},
+func TestGetCommitCondition(t *testing.T) {
+	tests := []struct {
+		name          string
+		containerName string
+		exitCode      int32
+		terminated    bool
+		expectNil     bool
+		expectType    string
+		expectStatus  metav1.ConditionStatus
+		expectReason  string
+	}{
+		{
+			name:          "exit code 0 - success",
+			containerName: "agent-job",
+			exitCode:      ExitCodeSuccess,
+			terminated:    true,
+			expectNil:     false,
+			expectType:    "PushCommittedImage",
+			expectStatus:  metav1.ConditionTrue,
+			expectReason:  "PushCommittedImageSuccess",
+		},
+		{
+			name:          "exit code 1 - commit failed",
+			containerName: "agent-job",
+			exitCode:      ExitCodeCommitFailed,
+			terminated:    true,
+			expectNil:     false,
+			expectType:    "CommitContainer",
+			expectStatus:  metav1.ConditionFalse,
+			expectReason:  "CommitContainerFailed",
+		},
+		{
+			name:          "unknown exit code returns nil",
+			containerName: "agent-job",
+			exitCode:      999,
+			terminated:    true,
+			expectNil:     true,
+		},
+		{
+			name:          "running container returns nil",
+			containerName: "agent-job",
+			terminated:    false,
+			expectNil:     true,
+		},
+		{
+			name:          "wrong container name returns nil",
+			containerName: "other-container",
+			exitCode:      ExitCodeSuccess,
+			terminated:    true,
+			expectNil:     true,
+		},
+		{
+			name:          "empty container statuses returns nil",
+			containerName: "",
+			terminated:    false,
+			expectNil:     true,
 		},
 	}
-	cond := GetCommitCondition(pod)
-	if cond == nil {
-		t.Fatal("expected non-nil condition for success exit code")
-	}
-	if cond.Type != "PushCommittedImage" || cond.Reason != "PushCommittedImageSuccess" {
-		t.Errorf("unexpected condition: %+v", cond)
-	}
-	if cond.Status != metav1.ConditionTrue {
-		t.Errorf("expected Status=True for exit code 0, got %s", cond.Status)
-	}
-}
 
-func TestGetCommitCondition_Failure(t *testing.T) {
-	pod := &corev1.Pod{
-		Status: corev1.PodStatus{
-			ContainerStatuses: []corev1.ContainerStatus{
-				{
-					Name: "agent-job",
-					State: corev1.ContainerState{
-						Terminated: &corev1.ContainerStateTerminated{ExitCode: ExitCodeCommitFailed},
-					},
-				},
-			},
-		},
-	}
-	cond := GetCommitCondition(pod)
-	if cond == nil {
-		t.Fatal("expected non-nil condition for failure exit code")
-	}
-	if cond.Status != metav1.ConditionFalse {
-		t.Errorf("expected Status=False for non-zero exit code, got %s", cond.Status)
-	}
-	if cond.Type != "CommitContainer" || cond.Reason != "CommitContainerFailed" {
-		t.Errorf("unexpected condition: %+v", cond)
-	}
-}
-
-// TestGetCommitCondition_UnknownExitCode covers the early-return branch when the
-// container's terminated exit code is not registered in CommitJobExitCodeMap.
-func TestGetCommitCondition_UnknownExitCode(t *testing.T) {
-	pod := &corev1.Pod{
-		Status: corev1.PodStatus{
-			ContainerStatuses: []corev1.ContainerStatus{
-				{
-					Name: "agent-job",
-					State: corev1.ContainerState{
-						Terminated: &corev1.ContainerStateTerminated{ExitCode: 999},
-					},
-				},
-			},
-		},
-	}
-	if cond := GetCommitCondition(pod); cond != nil {
-		t.Errorf("expected nil condition for unknown exit code, got %+v", cond)
-	}
-}
-
-func TestGetCommitCondition_NotTerminated(t *testing.T) {
-	pod := &corev1.Pod{
-		Status: corev1.PodStatus{
-			ContainerStatuses: []corev1.ContainerStatus{
-				{
-					Name: "agent-job",
-					State: corev1.ContainerState{
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pod := &corev1.Pod{Status: corev1.PodStatus{}}
+			if tt.containerName != "" {
+				cs := corev1.ContainerStatus{Name: tt.containerName}
+				if tt.terminated {
+					cs.State = corev1.ContainerState{
+						Terminated: &corev1.ContainerStateTerminated{ExitCode: tt.exitCode},
+					}
+				} else {
+					cs.State = corev1.ContainerState{
 						Running: &corev1.ContainerStateRunning{StartedAt: metav1.Now()},
-					},
-				},
-			},
-		},
-	}
-	if cond := GetCommitCondition(pod); cond != nil {
-		t.Errorf("expected nil condition for running container, got %+v", cond)
-	}
-}
+					}
+				}
+				pod.Status.ContainerStatuses = []corev1.ContainerStatus{cs}
+			}
 
-func TestGetCommitCondition_EmptyContainerStatuses(t *testing.T) {
-	pod := &corev1.Pod{Status: corev1.PodStatus{}}
-	if cond := GetCommitCondition(pod); cond != nil {
-		t.Errorf("expected nil condition for pod without container statuses, got %+v", cond)
+			cond := GetCommitCondition(pod)
+			if tt.expectNil {
+				if cond != nil {
+					t.Errorf("expected nil condition, got %+v", cond)
+				}
+				return
+			}
+			if cond == nil {
+				t.Fatal("expected non-nil condition, got nil")
+			}
+			if cond.Type != tt.expectType {
+				t.Errorf("expected type %q, got %q", tt.expectType, cond.Type)
+			}
+			if cond.Status != tt.expectStatus {
+				t.Errorf("expected status %q, got %q", tt.expectStatus, cond.Status)
+			}
+			if cond.Reason != tt.expectReason {
+				t.Errorf("expected reason %q, got %q", tt.expectReason, cond.Reason)
+			}
+		})
 	}
 }
