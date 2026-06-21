@@ -213,7 +213,6 @@ func (r *CommitReconciler) handleCommitDelete(ctx context.Context, args *core.En
 }
 
 func (r *CommitReconciler) handleCommitPending(ctx context.Context, args *core.EnsureFuncArgs, control core.CommitControl) (ctrl.Result, error) {
-	log := log.FromContext(ctx)
 	commit := args.Commit
 	if args.Pod == nil {
 		now := metav1.Now()
@@ -222,20 +221,19 @@ func (r *CommitReconciler) handleCommitPending(ctx context.Context, args *core.E
 		r.Recorder.Eventf(commit, corev1.EventTypeWarning, "PodNotFound", "Target pod %s not found", commit.Spec.PodName)
 		return ctrl.Result{}, r.updateCommitStatus(ctx, *args.NewStatus, commit)
 	}
-	requeueAfter, err := control.EnsureCommitRunning(ctx, args)
-	if err != nil {
-		if retErr := r.updateCommitStatus(ctx, *args.NewStatus, commit); retErr != nil {
-			log.Error(retErr, "Failed to update commit status on error", "commit", klog.KObj(commit))
-		}
-		return ctrl.Result{}, err
-	}
-	return ctrl.Result{RequeueAfter: requeueAfter}, r.updateCommitStatus(ctx, *args.NewStatus, commit)
+	return r.ensureAndApply(ctx, args, control.EnsureCommitRunning)
 }
 
 func (r *CommitReconciler) handleCommitRunning(ctx context.Context, args *core.EnsureFuncArgs, control core.CommitControl) (ctrl.Result, error) {
+	return r.ensureAndApply(ctx, args, control.EnsureCommitUpdated)
+}
+
+// ensureAndApply calls the given ensure function, then applies the resulting status.
+// On error the status is still persisted (best-effort) before returning the error.
+func (r *CommitReconciler) ensureAndApply(ctx context.Context, args *core.EnsureFuncArgs, ensureFunc func(context.Context, *core.EnsureFuncArgs) (time.Duration, error)) (ctrl.Result, error) {
 	log := log.FromContext(ctx)
 	commit := args.Commit
-	requeueAfter, err := control.EnsureCommitUpdated(ctx, args)
+	requeueAfter, err := ensureFunc(ctx, args)
 	if err != nil {
 		if retErr := r.updateCommitStatus(ctx, *args.NewStatus, commit); retErr != nil {
 			log.Error(retErr, "Failed to update commit status on error", "commit", klog.KObj(commit))
