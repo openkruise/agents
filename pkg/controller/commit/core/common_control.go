@@ -90,6 +90,7 @@ func (r *commonControl) EnsureCommitRunning(ctx context.Context, args *EnsureFun
 	now := metav1.Now()
 	if err = r.applyCommitJob(ctx, commit, pod); err != nil {
 		log.Error(err, "EnsureCommitRunning failed", "commit", klog.KObj(commit))
+		r.Recorder.Eventf(commit, corev1.EventTypeWarning, "JobCreationFailed", "Failed to create commit job: %v", err)
 		args.NewStatus.StartTime = &now
 		args.NewStatus.Phase = agentsv1alpha1.CommitPhaseFailed
 		args.NewStatus.CompletionTime = &now
