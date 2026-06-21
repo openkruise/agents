@@ -49,35 +49,23 @@ func TestEnvConfig(t *testing.T) {
 		name     string
 		envKey   string
 		envValue string
-		got      string
+		getFunc  func(*EnvConfig) string
 		want     string
 	}{
-		{name: "ContainerID", envKey: EnvContainerID, envValue: "abc123", want: "abc123"},
-		{name: "CommitImage", envKey: EnvCommitImage, envValue: "registry.example.com/app:v1", want: "registry.example.com/app:v1"},
-		{name: "AgentJobImage", envKey: EnvAgentJobImage, envValue: "agent-job:latest", want: "agent-job:latest"},
-		{name: "ContainerdSockPath default", envKey: EnvContainerdSockPath, envValue: "", want: "/run/containerd/"},
-		{name: "ContainerdSockPath override", envKey: EnvContainerdSockPath, envValue: "/var/run/custom/", want: "/var/run/custom/"},
-		{name: "ContainerdSock default", envKey: EnvContainerdSock, envValue: "", want: "/run/containerd/containerd.sock"},
-		{name: "ContainerdSock override", envKey: EnvContainerdSock, envValue: "/var/run/custom.sock", want: "/var/run/custom.sock"},
+		{name: "ContainerID", envKey: EnvContainerID, envValue: "abc123", getFunc: func(c *EnvConfig) string { return c.ContainerID() }, want: "abc123"},
+		{name: "CommitImage", envKey: EnvCommitImage, envValue: "registry.example.com/app:v1", getFunc: func(c *EnvConfig) string { return c.CommitImage() }, want: "registry.example.com/app:v1"},
+		{name: "AgentJobImage", envKey: EnvAgentJobImage, envValue: "agent-job:latest", getFunc: func(c *EnvConfig) string { return c.AgentJobImage() }, want: "agent-job:latest"},
+		{name: "ContainerdSockPath default", envKey: EnvContainerdSockPath, envValue: "", getFunc: func(c *EnvConfig) string { return c.ContainerdSockPath() }, want: "/run/containerd/"},
+		{name: "ContainerdSockPath override", envKey: EnvContainerdSockPath, envValue: "/var/run/custom/", getFunc: func(c *EnvConfig) string { return c.ContainerdSockPath() }, want: "/var/run/custom/"},
+		{name: "ContainerdSock default", envKey: EnvContainerdSock, envValue: "", getFunc: func(c *EnvConfig) string { return c.ContainerdSock() }, want: "/run/containerd/containerd.sock"},
+		{name: "ContainerdSock override", envKey: EnvContainerdSock, envValue: "/var/run/custom.sock", getFunc: func(c *EnvConfig) string { return c.ContainerdSock() }, want: "/var/run/custom.sock"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			setEnv(t, tt.envKey, tt.envValue)
-			switch tt.name {
-			case "ContainerID":
-				tt.got = Config().ContainerID()
-			case "CommitImage":
-				tt.got = Config().CommitImage()
-			case "AgentJobImage":
-				tt.got = Config().AgentJobImage()
-			case "ContainerdSockPath default", "ContainerdSockPath override":
-				tt.got = Config().ContainerdSockPath()
-			case "ContainerdSock default", "ContainerdSock override":
-				tt.got = Config().ContainerdSock()
-			}
-			if tt.got != tt.want {
-				t.Errorf("got %q, want %q", tt.got, tt.want)
+			if got := tt.getFunc(Config()); got != tt.want {
+				t.Errorf("got %q, want %q", got, tt.want)
 			}
 		})
 	}

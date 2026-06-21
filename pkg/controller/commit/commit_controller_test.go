@@ -489,9 +489,6 @@ func TestGetControl_EmptyDefault(t *testing.T) {
 	}
 }
 
-// errorReader is removed — the controller now reads pods from informer cache (r.Get),
-// so the APIReader error path no longer exists.
-
 func TestReconcile_UnknownPhase(t *testing.T) {
 	commit := newCommit("test-commit", "default", agentsv1alpha1.CommitPhase("UnknownPhase"))
 	commit.Finalizers = []string{agentsv1alpha1.CommitFinalizer}

@@ -51,7 +51,7 @@ const (
 )
 
 func MakeJobName(uid string) string {
-	return fmt.Sprintf("agent-job-%s", strings.ReplaceAll(uid, "-", ""))
+	return fmt.Sprintf("agent-job-%s-", strings.ReplaceAll(uid, "-", ""))
 }
 
 func IsJobCompleted(job *batchv1.Job) (bool, bool) {

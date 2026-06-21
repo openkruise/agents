@@ -93,7 +93,7 @@ func (r *commonControl) EnsureCommitRunning(ctx context.Context, args *EnsureFun
 		args.NewStatus.StartTime = &now
 		args.NewStatus.Phase = agentsv1alpha1.CommitPhaseFailed
 		args.NewStatus.CompletionTime = &now
-		return 0, err
+		return 0, nil
 	}
 
 	args.NewStatus.StartTime = &now
@@ -114,10 +114,14 @@ func (r *commonControl) EnsureCommitUpdated(ctx context.Context, args *EnsureFun
 	}
 	if len(jobList.Items) == 0 {
 		log.Info("Job not found, marking commit as failed", "commit", klog.KObj(commit))
+		r.Recorder.Eventf(commit, corev1.EventTypeWarning, "JobNotFound", "Commit job not found for commit %s", commit.Name)
 		now := metav1.Now()
 		args.NewStatus.Phase = agentsv1alpha1.CommitPhaseFailed
 		args.NewStatus.CompletionTime = &now
 		return 0, nil
+	}
+	if len(jobList.Items) > 1 {
+		log.Info("Multiple jobs found for commit, using the first one", "commit", klog.KObj(commit), "count", len(jobList.Items))
 	}
 	job := &jobList.Items[0]
 
@@ -171,13 +175,6 @@ func (r *commonControl) applyCommitJob(ctx context.Context, commit *agentsv1alph
 			return nil
 		}
 		return fmt.Errorf("failed to create job: %w", err)
-	}
-
-	// Write the generated Job name back to Commit annotation for later lookup.
-	patch := fmt.Sprintf(`{"metadata":{"annotations":{"%s":"%s"}}}`, utils.CommitAnnotationJobNameKey, job.Name)
-	rcvObject := &agentsv1alpha1.Commit{ObjectMeta: metav1.ObjectMeta{Namespace: commit.Namespace, Name: commit.Name}}
-	if err := r.Patch(ctx, rcvObject, client.RawPatch(types.MergePatchType, []byte(patch))); err != nil {
-		return fmt.Errorf("failed to patch commit job name annotation: %w", err)
 	}
 
 	// Set expectation to prevent duplicated reconcile from stale cache.

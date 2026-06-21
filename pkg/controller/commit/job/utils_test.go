@@ -29,10 +29,10 @@ func TestMakeJobName(t *testing.T) {
 		uid      string
 		expected string
 	}{
-		{"abc123", "agent-job-abc123"},
-		{"abc-123", "agent-job-abc123"},
-		{"abc-123-def-456", "agent-job-abc123def456"},
-		{"", "agent-job-"},
+		{"abc123", "agent-job-abc123-"},
+		{"abc-123", "agent-job-abc123-"},
+		{"abc-123-def-456", "agent-job-abc123def456-"},
+		{"", "agent-job--"},
 	}
 	for _, c := range cases {
 		if got := MakeJobName(c.uid); got != c.expected {

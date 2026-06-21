@@ -58,9 +58,6 @@ const (
 const (
 	// CommitAnnotationModeKey is the annotation key for commit mode selection.
 	CommitAnnotationModeKey = "agents.kruise.io/commit-mode"
-
-	// CommitAnnotationJobNameKey stores the generated Job name after Create with GenerateName.
-	CommitAnnotationJobNameKey = "agents.kruise.io/commit-job-name"
 )
 
 var (

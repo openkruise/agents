@@ -369,8 +369,8 @@ func TestEnsureCommitRunning_MissingJobImage(t *testing.T) {
 	args := &EnsureFuncArgs{Pod: pod, Commit: commit, NewStatus: newStatus}
 
 	_, err := ctrl.EnsureCommitRunning(context.TODO(), args)
-	if err == nil {
-		t.Fatal("expected error when AGENT_JOB_IMAGE is empty")
+	if err != nil {
+		t.Fatalf("expected nil error after setting Failed status, got: %v", err)
 	}
 	if newStatus.Phase != agentsv1alpha1.CommitPhaseFailed {
 		t.Errorf("expected CommitPhaseFailed, got %s", newStatus.Phase)
