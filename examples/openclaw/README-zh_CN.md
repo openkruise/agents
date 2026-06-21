@@ -305,7 +305,70 @@ print("配置已写入，OpenClaw 将自动重启加载新配置")
 python create_sandbox.py
 ```
 
-### 3.3 获取 Sandbox 信息
+### 3.3 为每个用户挂载独立的 NFS 子路径
+
+当多个 OpenClaw 实例共享同一个大型 NFS 导出目录时，可以通过 `SandboxClaim` 为每个用户挂载不同的目录。
+这种场景应使用 `dynamicVolumesMount`；如果每个 Sandbox 都需要独立供应的存储卷，仍建议使用
+`volumeClaimTemplates`。
+
+创建 Claim 前，请确认：
+
+- NFS 卷由 **CSI 类型的 PV**（`spec.csi`）表示，而不是旧式的 `spec.nfs` PV；
+- sandbox-manager 已通过 `DYNAMIC_STORAGE_DRIVER_LIST` 启用该 PV 的 CSI 驱动，并且 Sandbox 已配置对应的
+  CSI sidecar；
+- SandboxSet 已配置 `agent-runtime` 和 `csi` runtime；
+- 如果 NFS CSI 驱动不会自动创建远端用户目录，需要提前创建该目录。
+
+对于使用 runtime 注入的资源池，SandboxSet 中的相关配置如下：
+
+```yaml
+spec:
+  runtimes:
+    - name: agent-runtime
+    - name: csi
+```
+
+集群管理员需要根据已安装的 NFS CSI 驱动，在 `sandbox-injection-config` ConfigMap 中配置
+`agent-runtime` 和 `csi`。前文的 SandboxSet 使用了旧式 runtime init container，因此添加上述配置前，
+需要先将其替换为 runtime 注入方式。请勿在同一个 Sandbox 中同时使用两种 runtime 配置。
+
+假设名为 `openclaw-shared-nfs` 的 CSI PV 基础路径为 `/exports/openclaw`，以下 Claim 会将
+`/exports/openclaw/users/alice` 挂载到 OpenClaw 的工作目录：
+
+```yaml
+apiVersion: agents.kruise.io/v1alpha1
+kind: SandboxClaim
+metadata:
+  name: openclaw-alice
+  namespace: default
+spec:
+  templateName: openclaw-sbs
+  replicas: 1
+  dynamicVolumesMount:
+    - pvName: openclaw-shared-nfs
+      mountPath: /home/node/.openclaw/workspace
+      subPath: users/alice
+      readOnly: false
+```
+
+应用 Claim 并等待完成：
+
+```bash
+kubectl apply -f sandboxclaim-alice.yaml
+kubectl wait --for=jsonpath='{.status.phase}'=Completed \
+  sandboxclaim/openclaw-alice --timeout=2m
+kubectl get sandbox \
+  -l agents.kruise.io/claim-name=openclaw-alice
+```
+
+后续 Claim 应使用唯一的 `subPath`，例如 `users/bob`。该路径会相对于 PV 的基础路径解析；试图跳出基础路径的值
+（例如 `../other-user`）会被拒绝。系统会把子路径追加到 PV 的 `spec.csi.volumeAttributes.path`，因此请使用
+能够识别 `path` 属性的 CSI 驱动，并根据该驱动的要求调整 PV 属性。
+
+> **安全提示：** 不同子路径可以避免意外的数据重叠，但不能作为授权边界。对于不受信任的租户，还需通过
+> NFS 导出策略、身份和文件权限实施隔离。
+
+### 3.4 获取 Sandbox 信息
 
 ```python
 print(f"Sandbox ID: {sbx.sandbox_id}")
