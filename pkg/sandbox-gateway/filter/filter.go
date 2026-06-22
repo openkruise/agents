@@ -111,9 +111,9 @@ func (f *sandboxFilter) DecodeHeaders(header api.RequestHeaderMap, endStream boo
 		return api.LocalReply
 	}
 
-	// Authenticate the request if the sandbox has an access token configured.
-	// Sandboxes without a token (empty string) skip authentication for backward compatibility.
-	if route.AccessToken != "" {
+	// Authenticate the request if auth is enabled and the sandbox has an access token configured.
+	// When EnableAuth is false (default), the gateway skips token validation for backward compatibility.
+	if f.config.EnableAuth && route.AccessToken != "" {
 		requestToken := headers[accessTokenHeader]
 		if subtle.ConstantTimeCompare([]byte(requestToken), []byte(route.AccessToken)) != 1 {
 			logger.Warn("Access token mismatch",

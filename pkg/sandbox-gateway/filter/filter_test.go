@@ -1001,6 +1001,7 @@ func TestDecodeHeadersAccessTokenAuth(t *testing.T) {
 			})
 
 			cfg := DefaultConfig()
+			cfg.EnableAuth = true
 			mockCallbacks := newMockFilterCallbackHandler()
 			filter := &sandboxFilter{callbacks: mockCallbacks, config: cfg, adapter: defaultTestAdapter()}
 
@@ -1041,6 +1042,7 @@ func TestDecodeHeadersAccessTokenAuthKruiseProtocol(t *testing.T) {
 	})
 
 	cfg := DefaultConfig()
+	cfg.EnableAuth = true
 
 	// Valid token via kruise protocol
 	mockCallbacks := newMockFilterCallbackHandler()
@@ -1068,4 +1070,35 @@ func TestDecodeHeadersAccessTokenAuthKruiseProtocol(t *testing.T) {
 	assert.Equal(t, api.LocalReply, status2)
 	assert.True(t, mockCallbacks2.decoderCallbacks.sendLocalReplyCalled)
 	assert.Equal(t, 401, mockCallbacks2.decoderCallbacks.replyStatusCode)
+}
+
+// TestDecodeHeadersAuthDisabled verifies that when EnableAuth is false,
+// token validation is skipped even if the route has a token configured.
+func TestDecodeHeadersAuthDisabled(t *testing.T) {
+	r := registry.GetRegistry()
+	defer r.Clear()
+	r.Update("default--auth-disabled", proxy.Route{
+		IP:              "10.0.0.5",
+		State:           agentsv1alpha1.SandboxStateRunning,
+		ResourceVersion: "1",
+		AccessToken:     "secret-token",
+	})
+
+	cfg := DefaultConfig()
+	// EnableAuth is false by default
+	mockCallbacks := newMockFilterCallbackHandler()
+	filter := &sandboxFilter{callbacks: mockCallbacks, config: cfg, adapter: defaultTestAdapter()}
+
+	header := newMockRequestHeaderMap()
+	header.Set(DefaultSandboxHeaderName, "default--auth-disabled")
+	// No token header set — should still pass because auth is disabled
+
+	status := filter.DecodeHeaders(header, true)
+	assert.Equal(t, api.Continue, status)
+	assert.False(t, mockCallbacks.decoderCallbacks.sendLocalReplyCalled)
+
+	// Verify upstream was set
+	metadata := mockCallbacks.streamInfo.dynamicMetadata.data["envoy.lb.original_dst"]
+	assert.NotNil(t, metadata)
+	assert.Equal(t, "10.0.0.5:49983", metadata["host"])
 }
