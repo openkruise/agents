@@ -519,6 +519,151 @@ func TestListSandboxes_Pagination(t *testing.T) {
 	}
 }
 
+func TestListSandboxes_PaginationDuplicateClaimTime(t *testing.T) {
+	tests := []struct {
+		name         string
+		sandboxCount int
+		limit        int
+		claimTime    string
+	}{
+		{
+			name:         "same claim time across page boundary",
+			sandboxCount: 5,
+			limit:        2,
+			claimTime:    "2024-01-01T00:00:01Z",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			templateName := "pagination-duplicate-template"
+			controller, fc, teardown := Setup(t)
+			defer teardown()
+			user := &models.CreatedTeamAPIKey{
+				ID:   keys.AdminKeyID,
+				Key:  InitKey,
+				Name: "admin",
+			}
+
+			tmpl := agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name:  "main",
+								Image: "test-image",
+							},
+						},
+					},
+				},
+			}
+			sbs := &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      templateName,
+					Namespace: Namespace,
+					UID:       types.UID(uuid.NewString()),
+				},
+				Spec: agentsv1alpha1.SandboxSetSpec{
+					EmbeddedSandboxTemplate: tmpl,
+				},
+			}
+			require.NoError(t, fc.Create(t.Context(), sbs))
+			defer func() {
+				_ = fc.Delete(context.Background(), sbs)
+			}()
+
+			expectedSandboxIDs := make([]string, 0, tt.sandboxCount)
+			now := metav1.Now()
+			for i := 0; i < tt.sandboxCount; i++ {
+				sbxName := fmt.Sprintf("%s-%d", templateName, i)
+				sbx := &agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      sbxName,
+						Namespace: Namespace,
+						Labels: map[string]string{
+							agentsv1alpha1.LabelSandboxTemplate:  templateName,
+							agentsv1alpha1.LabelSandboxIsClaimed: "true",
+						},
+						Annotations: map[string]string{
+							agentsv1alpha1.AnnotationClaimTime: tt.claimTime,
+							agentsv1alpha1.AnnotationOwner:     user.ID.String(),
+						},
+						UID:               types.UID(uuid.NewString()),
+						CreationTimestamp: now,
+					},
+					Spec: agentsv1alpha1.SandboxSpec{
+						EmbeddedSandboxTemplate: tmpl,
+					},
+					Status: agentsv1alpha1.SandboxStatus{
+						Phase: agentsv1alpha1.SandboxRunning,
+						Conditions: []metav1.Condition{
+							{
+								Type:   string(agentsv1alpha1.SandboxConditionReady),
+								Status: metav1.ConditionTrue,
+							},
+							{
+								Type:   string(agentsv1alpha1.SandboxConditionPaused),
+								Status: metav1.ConditionFalse,
+							},
+							{
+								Type:   string(agentsv1alpha1.SandboxConditionResumed),
+								Status: metav1.ConditionTrue,
+							},
+						},
+						PodInfo: agentsv1alpha1.PodInfo{
+							PodIP: "1.2.3.4",
+						},
+					},
+				}
+				CreateSandboxWithStatus(t, fc, sbx)
+				expectedSandboxIDs = append(expectedSandboxIDs, fmt.Sprintf("%s--%s", Namespace, sbxName))
+			}
+
+			assert.Eventually(t, func() bool {
+				resp, apiError := controller.ListSandboxes(NewRequest(t, nil, nil, nil, user))
+				return apiError == nil && len(resp.Body) >= len(expectedSandboxIDs)
+			}, 2*time.Second, 50*time.Millisecond, "sandboxes should be available in cache")
+
+			defer func() {
+				for i := 0; i < tt.sandboxCount; i++ {
+					sbxName := fmt.Sprintf("%s-%d", templateName, i)
+					sbx := &agentsv1alpha1.Sandbox{}
+					sbx.Name = sbxName
+					sbx.Namespace = Namespace
+					_ = fc.Delete(context.Background(), sbx)
+				}
+			}()
+
+			var nextToken string
+			var gotSandboxIDs []string
+			for page := 0; page < 10; page++ {
+				query := map[string]string{"limit": fmt.Sprintf("%d", tt.limit)}
+				if nextToken != "" {
+					query["nextToken"] = nextToken
+				}
+
+				resp, apiError := controller.ListSandboxes(NewRequest(t, query, nil, nil, user))
+				require.Nil(t, apiError, "page %d should not return error", page)
+				require.NotEmpty(t, resp.Body, "page %d should return at least one sandbox", page)
+
+				for _, sbx := range resp.Body {
+					gotSandboxIDs = append(gotSandboxIDs, sbx.SandboxID)
+					assert.Equal(t, tt.claimTime, sbx.StartedAt, "sandbox should keep duplicate claim time")
+				}
+
+				nextToken = resp.Headers["x-next-token"]
+				if nextToken == "" {
+					break
+				}
+			}
+
+			assert.Empty(t, nextToken, "pagination should finish")
+			assert.Len(t, gotSandboxIDs, len(expectedSandboxIDs))
+			assert.ElementsMatch(t, expectedSandboxIDs, gotSandboxIDs)
+		})
+	}
+}
+
 func TestListSnapshots(t *testing.T) {
 	controller, fc, teardown := Setup(t)
 	defer teardown()
@@ -536,13 +681,12 @@ func TestListSnapshots(t *testing.T) {
 		Name: "other",
 	}
 
-	// Helper to create a checkpoint with given parameters
-	createCheckpoint := func(name, owner, sandboxID, checkpointID, creationTime string) *agentsv1alpha1.Checkpoint {
+	createCheckpointInNamespace := func(namespace, name, owner, sandboxID, checkpointID, creationTime string) *agentsv1alpha1.Checkpoint {
 		parsedTime, _ := time.Parse(time.RFC3339, creationTime)
 		cp := &agentsv1alpha1.Checkpoint{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:              name,
-				Namespace:         Namespace,
+				Namespace:         namespace,
 				UID:               types.UID(uuid.NewString()),
 				CreationTimestamp: metav1.NewTime(parsedTime),
 				Annotations: map[string]string{
@@ -561,6 +705,11 @@ func TestListSnapshots(t *testing.T) {
 		err = fc.Status().Update(t.Context(), cp)
 		assert.NoError(t, err)
 		return cp
+	}
+
+	// Helper to create a checkpoint with given parameters
+	createCheckpoint := func(name, owner, sandboxID, checkpointID, creationTime string) *agentsv1alpha1.Checkpoint {
+		return createCheckpointInNamespace(Namespace, name, owner, sandboxID, checkpointID, creationTime)
 	}
 
 	// pageExpectation defines the expected result for each page in pagination
@@ -625,6 +774,68 @@ func TestListSnapshots(t *testing.T) {
 						cp := &agentsv1alpha1.Checkpoint{}
 						cp.Name = fmt.Sprintf("cp-chain-%d", i)
 						cp.Namespace = Namespace
+						_ = fc.Delete(context.Background(), cp)
+					}
+				}
+			},
+			user:  adminUser,
+			query: map[string]string{"limit": "2"},
+			pages: []pageExpectation{
+				{count: 2, hasNextToken: true},
+				{count: 2, hasNextToken: true},
+				{count: 1, hasNextToken: false},
+			},
+			expectedTotal: 5,
+		},
+		{
+			name: "pagination chain with duplicate creation timestamps",
+			setup: func() func() {
+				for i := 0; i < 5; i++ {
+					createCheckpoint(
+						fmt.Sprintf("cp-duplicate-time-%d", i),
+						adminUser.ID.String(),
+						fmt.Sprintf("sandbox-duplicate-time-%d", i),
+						fmt.Sprintf("duplicate-time-checkpoint-id-%d", i),
+						"2024-02-02T00:00:01Z",
+					)
+				}
+				return func() {
+					for i := 0; i < 5; i++ {
+						cp := &agentsv1alpha1.Checkpoint{}
+						cp.Name = fmt.Sprintf("cp-duplicate-time-%d", i)
+						cp.Namespace = Namespace
+						_ = fc.Delete(context.Background(), cp)
+					}
+				}
+			},
+			user:  adminUser,
+			query: map[string]string{"limit": "2"},
+			pages: []pageExpectation{
+				{count: 2, hasNextToken: true},
+				{count: 2, hasNextToken: true},
+				{count: 1, hasNextToken: false},
+			},
+			expectedTotal: 5,
+		},
+		{
+			name: "pagination chain with duplicate creation timestamps and checkpoint ids",
+			setup: func() func() {
+				namespaces := []string{"team-a", "team-b", "team-c", "team-d", "team-e"}
+				for i, namespace := range namespaces {
+					createCheckpointInNamespace(
+						namespace,
+						fmt.Sprintf("cp-duplicate-id-%d", i),
+						adminUser.ID.String(),
+						fmt.Sprintf("sandbox-duplicate-id-%d", i),
+						"shared-checkpoint-id",
+						"2024-02-03T00:00:01Z",
+					)
+				}
+				return func() {
+					for i, namespace := range namespaces {
+						cp := &agentsv1alpha1.Checkpoint{}
+						cp.Name = fmt.Sprintf("cp-duplicate-id-%d", i)
+						cp.Namespace = namespace
 						_ = fc.Delete(context.Background(), cp)
 					}
 				}
