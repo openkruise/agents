@@ -310,6 +310,7 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 		},
 		ReserveFailedSandboxFor: reserveFailedSandboxFor,
 		CreateOnNoStock:         claim.Spec.CreateOnNoStock,
+		UserMetadataKeys:        sandboxcr.BuildUserMetadataKeys(claim.Spec.Labels, claim.Spec.Annotations),
 	}
 
 	if claim.Spec.InplaceUpdate != nil {

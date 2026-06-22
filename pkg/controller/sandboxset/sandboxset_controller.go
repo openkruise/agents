@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -289,7 +290,9 @@ func (r *Reconciler) scaleDown(ctx context.Context, count int, sbs *agentsv1alph
 		return nil
 	}
 
-	// Phase 2: Delete updated revision sandboxes if more needed
+	// Phase 2: Delete updated revision sandboxes if more needed.
+	// Priority: Pending > Reused (reuseCount desc) > Running-NotReady > Available fresh.
+	slices.SortFunc(updatedCandidates, compareScaleDownPriority)
 	updatedToDelete := updatedCandidates[:min(remaining, len(updatedCandidates))]
 	successes, err = utils.DoItSlowlyWithInputs(updatedToDelete, initialBatchSize, deleteFunc)
 	totalSuccesses += successes
@@ -300,6 +303,35 @@ func (r *Reconciler) scaleDown(ctx context.Context, count int, sbs *agentsv1alph
 
 	log.Info("scale down finished", "success", totalSuccesses)
 	return nil
+}
+
+// scaleDownPriority returns a numeric tier for scale-down ordering.
+// Lower value = deleted first. Candidates are only Pending or Running phase.
+func scaleDownPriority(sbx *agentsv1alpha1.Sandbox) int {
+	if sbx.Status.Phase == agentsv1alpha1.SandboxPending {
+		return 0
+	}
+	ready := utils.IsSandboxReady(sbx)
+	if !ready {
+		return 2 // Running but not Ready
+	}
+	if sbx.Status.ReuseCount > 0 {
+		return 1 // Reused
+	}
+	return 3 // Available fresh
+}
+
+func compareScaleDownPriority(a, b *agentsv1alpha1.Sandbox) int {
+	pa, pb := scaleDownPriority(a), scaleDownPriority(b)
+	if pa != pb {
+		return pa - pb
+	}
+	if pa == 1 && a.Status.ReuseCount != b.Status.ReuseCount {
+		return int(b.Status.ReuseCount) - int(a.Status.ReuseCount)
+	}
+	// Within the same category (and same reuseCount for Reused),
+	// prefer to delete older sandboxes first.
+	return a.CreationTimestamp.Time.Compare(b.CreationTimestamp.Time)
 }
 
 // calculateScaleDelta calculates the delta for scaling, considering MaxUnavailable limit.

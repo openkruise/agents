@@ -428,3 +428,64 @@ func TestGetCsiMountExtensionRequest_v2(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildUserMetadataKeys(t *testing.T) {
+	tests := []struct {
+		name              string
+		labels            map[string]string
+		annotations       map[string]string
+		expectNil         bool
+		expectLabels      []string
+		expectAnnotations []string
+	}{
+		{
+			name:        "both nil returns nil",
+			labels:      nil,
+			annotations: nil,
+			expectNil:   true,
+		},
+		{
+			name:        "both empty returns nil",
+			labels:      map[string]string{},
+			annotations: map[string]string{},
+			expectNil:   true,
+		},
+		{
+			name:              "only labels returns keys with labels only",
+			labels:            map[string]string{"key1": "v1", "key2": "v2"},
+			annotations:       nil,
+			expectNil:         false,
+			expectLabels:      []string{"key1", "key2"},
+			expectAnnotations: nil,
+		},
+		{
+			name:              "only annotations returns keys with annotations only",
+			labels:            nil,
+			annotations:       map[string]string{"ann1": "v1", "ann2": "v2"},
+			expectNil:         false,
+			expectLabels:      nil,
+			expectAnnotations: []string{"ann1", "ann2"},
+		},
+		{
+			name:              "both labels and annotations returns keys with both",
+			labels:            map[string]string{"label1": "v1"},
+			annotations:       map[string]string{"ann1": "v1", "ann2": "v2"},
+			expectNil:         false,
+			expectLabels:      []string{"label1"},
+			expectAnnotations: []string{"ann1", "ann2"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := BuildUserMetadataKeys(tt.labels, tt.annotations)
+			if tt.expectNil {
+				assert.Nil(t, result)
+				return
+			}
+			assert.NotNil(t, result)
+			assert.ElementsMatch(t, tt.expectLabels, result.Labels)
+			assert.ElementsMatch(t, tt.expectAnnotations, result.Annotations)
+		})
+	}
+}

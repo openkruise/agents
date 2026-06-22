@@ -1716,3 +1716,57 @@ func TestPreserveTypedError(t *testing.T) {
 		})
 	}
 }
+
+func TestSandboxManager_deleteRouteAndSync(t *testing.T) {
+	testutils.InitLogOutput()
+
+	tests := []struct {
+		name            string
+		setRouteInProxy bool
+	}{
+		{
+			name:            "route deleted from proxy after deleteRouteAndSync",
+			setRouteInProxy: true,
+		},
+		{
+			name:            "deleteRouteAndSync does not panic when route does not exist",
+			setRouteInProxy: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			manager, client := setupTestManager(t)
+
+			sandbox := getSandboxForApiTest(tt.name)
+			sandbox.Status.Phase = agentsv1alpha1.SandboxRunning
+			sandbox.Status.Conditions = []metav1.Condition{
+				{
+					Type:   string(agentsv1alpha1.SandboxConditionReady),
+					Status: metav1.ConditionTrue,
+				},
+			}
+			sandbox.Status.PodInfo.PodIP = "10.0.0.99"
+			CreateSandboxWithStatus(t, client, sandbox)
+
+			sbx, err := manager.GetSandbox(t.Context(), testUser, nil, infra.GetSandboxOptions{
+				SandboxID: utils.GetSandboxID(sandbox),
+			})
+			require.NoError(t, err)
+
+			if tt.setRouteInProxy {
+				initialRoute := sbx.GetRoute()
+				manager.proxy.SetRoute(t.Context(), initialRoute)
+				_, ok := manager.proxy.LoadRoute(sbx.GetSandboxID())
+				require.True(t, ok, "route should exist before deleteRouteAndSync")
+			}
+
+			assert.NotPanics(t, func() {
+				manager.deleteRouteAndSync(t.Context(), sbx)
+			})
+
+			_, ok := manager.proxy.LoadRoute(sbx.GetSandboxID())
+			assert.False(t, ok, "route should not exist after deleteRouteAndSync")
+		})
+	}
+}

@@ -545,6 +545,7 @@ func modifyPickedSandbox(sbx *Sandbox, lockType infra.LockType, opts infra.Claim
 	if lockType != infra.LockTypeCreate {
 		sbx.Sandbox = sbx.Sandbox.DeepCopy()
 	}
+
 	if opts.Modifier != nil {
 		opts.Modifier(sbx)
 	}
@@ -589,6 +590,11 @@ func modifyPickedSandbox(sbx *Sandbox, lockType infra.LockType, opts infra.Claim
 			// record the csi mount config to annotation
 			annotations[models.ExtensionKeyClaimWithCSIMount_MountConfig] = opts.CSIMount.MountOptionListRaw
 		}
+	}
+
+	if opts.UserMetadataKeys != nil && (len(opts.UserMetadataKeys.Labels) > 0 || len(opts.UserMetadataKeys.Annotations) > 0) {
+		raw, _ := json.Marshal(opts.UserMetadataKeys)
+		annotations[v1alpha1.AnnotationUpdatedMetadataInClaim] = string(raw)
 	}
 
 	sbx.SetAnnotations(annotations)

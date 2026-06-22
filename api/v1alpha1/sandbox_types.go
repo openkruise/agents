@@ -231,6 +231,10 @@ type SandboxStatus struct {
 	// UpdateRevision is the template-hash calculated from `spec.template`.
 	// +optional
 	UpdateRevision string `json:"updateRevision,omitempty"`
+
+	// ReuseCount records the number of times this sandbox has been reused.
+	// +optional
+	ReuseCount int32 `json:"reuseCount,omitempty"`
 }
 
 // SandboxPhase is a label for the condition of a pod at the current time.
@@ -258,6 +262,8 @@ const (
 	// SandboxFailed means that all containers in the pod have terminated, and at least one container has
 	// terminated in a failure (exited with a non-zero exit code or was stopped by the system).
 	SandboxFailed SandboxPhase = "Failed"
+	// SandboxReusing means the sandbox is being cleaned up and preparing to return to pool.
+	SandboxReusing SandboxPhase = "Reusing"
 	// SandboxTerminating means sandbox will perform cleanup after deletion.
 	SandboxTerminating SandboxPhase = "Terminating"
 )
@@ -303,6 +309,9 @@ const (
 	// the sandbox pod has completed initialization (first-time init or re-init
 	// after resume/recreate/upgrade).
 	RuntimeInitialized SandboxConditionType = "RuntimeInitialized"
+
+	// SandboxConditionReusing tracks reuse progress.
+	SandboxConditionReusing SandboxConditionType = "Reusing"
 )
 
 const (
@@ -344,6 +353,13 @@ const (
 	SandboxConditionRuntimeInitReasonPending   = "Pending"
 	SandboxConditionRuntimeInitReasonSucceeded = "Succeeded"
 	SandboxConditionRuntimeInitReasonFailed    = "Failed"
+
+	// SandboxConditionReusing Reason
+	SandboxReusingReasonStarted   = "ReuseStarted"
+	SandboxReusingReasonCompleted = "ReuseCompleted"
+	SandboxReusingReasonSucceeded = "ReuseSucceeded"
+	SandboxReusingReasonFailed    = "ReuseFailed"
+	SandboxReusingReasonTimeout   = "ReuseTimeout"
 )
 
 // +genclient
