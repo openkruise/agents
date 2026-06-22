@@ -116,6 +116,9 @@ func BuildCacheConfig(opts config.SandboxManagerOptions) (map[ctrlclient.Object]
 	// Cluster-scoped resources
 	byObject[&corev1.PersistentVolume{}] = ctrlcache.ByObject{}
 
+	// Namespace-scoped resources (sandbox namespace)
+	byObject[&corev1.PersistentVolumeClaim{}] = customObjConfig
+
 	return byObject, nil
 }
 

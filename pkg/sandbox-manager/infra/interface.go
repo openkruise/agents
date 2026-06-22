@@ -23,6 +23,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/openkruise/agents/pkg/cache"
@@ -109,6 +110,38 @@ type DeleteCheckpointOptions struct {
 	User string
 }
 
+type CreateVolumeOptions struct {
+	Namespace        string
+	Name             string
+	UserID           string
+	StorageSize      resource.Quantity
+	StorageClass     string
+	AccessMode       string
+	WaitBoundTimeout time.Duration
+}
+
+type ListVolumesOptions struct {
+	Namespace string
+	UserID    string
+}
+
+type GetVolumeOptions struct {
+	Namespace string
+	VolumeID  string
+	UserID    string
+}
+
+type DeleteVolumeOptions struct {
+	Namespace string
+	VolumeID  string
+	UserID    string
+}
+
+type VolumeInfo struct {
+	Name     string `json:"name,omitempty"`
+	VolumeID string `json:"volumeID,omitempty"`
+}
+
 type Builder interface {
 	Build() Infrastructure
 }
@@ -126,6 +159,10 @@ type Infrastructure interface {
 	ClaimSandbox(ctx context.Context, opts ClaimSandboxOptions) (Sandbox, ClaimMetrics, error)
 	CloneSandbox(ctx context.Context, opts CloneSandboxOptions) (Sandbox, CloneMetrics, error)
 	DeleteCheckpoint(ctx context.Context, opts DeleteCheckpointOptions) error
+	CreateVolume(ctx context.Context, opts CreateVolumeOptions) (*VolumeInfo, error)
+	ListVolumes(ctx context.Context, opts ListVolumesOptions) ([]*VolumeInfo, error)
+	GetVolume(ctx context.Context, opts GetVolumeOptions) (*VolumeInfo, error)
+	DeleteVolume(ctx context.Context, opts DeleteVolumeOptions) error
 }
 
 type Sandbox interface {

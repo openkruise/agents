@@ -165,6 +165,9 @@ func SetupCacheControllersWithManager(mgr manager.Manager, waitHooks *sync.Map) 
 	if err := AddCacheCheckpointWaitReconciler(mgr, waitHooks); err != nil {
 		return nil, err
 	}
+	if err := AddCachePVCWaitReconciler(mgr, waitHooks); err != nil {
+		return nil, err
+	}
 	sandboxCustomReconciler, err := AddCacheSandboxCustomReconciler(mgr)
 	if err != nil {
 		return nil, err

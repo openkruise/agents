@@ -20,8 +20,10 @@ import (
 	"context"
 	"fmt"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	cacheutils "github.com/openkruise/agents/pkg/cache/utils"
@@ -45,6 +47,17 @@ func (c *Cache) CheckpointUpdateFunc(ctx context.Context) cacheutils.UpdateFunc[
 	return func(cp *agentsv1alpha1.Checkpoint) (*agentsv1alpha1.Checkpoint, error) {
 		key := types.NamespacedName{Namespace: cp.Namespace, Name: cp.Name}
 		got := &agentsv1alpha1.Checkpoint{}
+		if err := utils.GetFromInformerOrApiServer(ctx, got, key, c.client, c.reader); err != nil {
+			return nil, err
+		}
+		return got, nil
+	}
+}
+
+func (c *Cache) PVCUpdateFunc(ctx context.Context) cacheutils.UpdateFunc[*corev1.PersistentVolumeClaim] {
+	return func(pvc *corev1.PersistentVolumeClaim) (*corev1.PersistentVolumeClaim, error) {
+		key := types.NamespacedName{Namespace: pvc.Namespace, Name: pvc.Name}
+		got := &corev1.PersistentVolumeClaim{}
 		if err := utils.GetFromInformerOrApiServer(ctx, got, key, c.client, c.reader); err != nil {
 			return nil, err
 		}
@@ -138,5 +151,48 @@ func (c *Cache) NewCheckpointTask(ctx context.Context, cp *agentsv1alpha1.Checkp
 	}
 	return cacheutils.NewWaitTask[*agentsv1alpha1.Checkpoint](
 		ctx, c.waitHooks, cacheutils.WaitActionCheckpoint, cp, c.CheckpointUpdateFunc(ctx), check,
+	)
+}
+
+// NewPVCTask builds a WaitTask that succeeds when the PVC's Status.Phase transitions to Bound.
+// If the PVC fails to bind (e.g., provisioning fails), it queries Events to extract the failure reason.
+func (c *Cache) NewPVCTask(ctx context.Context, pvc *corev1.PersistentVolumeClaim) *cacheutils.WaitTask[*corev1.PersistentVolumeClaim] {
+	check := func(pvc *corev1.PersistentVolumeClaim) (bool, error) {
+		// PVC must be bound AND have a VolumeName (PV name) assigned
+		if pvc.Status.Phase == corev1.ClaimBound && pvc.Spec.VolumeName != "" {
+			return true, nil
+		}
+
+		// PVC is lost — fail fast with a meaningful error
+		if pvc.Status.Phase == corev1.ClaimLost {
+			return false, fmt.Errorf("PVC %s is in Lost phase", pvc.Name)
+		}
+
+		// If PVC is still Pending, check Events for provisioning failures
+		if pvc.Status.Phase == corev1.ClaimPending {
+			events := &corev1.EventList{}
+			if err := c.reader.List(ctx, events,
+				client.InNamespace(pvc.Namespace),
+				client.MatchingFields{
+					"involvedObject.name": pvc.Name,
+					"involvedObject.kind": "PersistentVolumeClaim",
+				},
+			); err != nil {
+				// If we can't query events, just continue waiting
+				return false, nil
+			}
+
+			// Look for failure events for this PVC
+			for _, event := range events.Items {
+				if event.Reason == "ProvisioningFailed" || event.Reason == "FailedBinding" || event.Reason == "Failed" {
+					return false, fmt.Errorf("PVC %s failed: %s (reason: %s)", pvc.Name, event.Message, event.Reason)
+				}
+			}
+		}
+
+		return false, nil
+	}
+	return cacheutils.NewWaitTask[*corev1.PersistentVolumeClaim](
+		ctx, c.waitHooks, cacheutils.WaitActionPVCBind, pvc, c.PVCUpdateFunc(ctx), check,
 	)
 }

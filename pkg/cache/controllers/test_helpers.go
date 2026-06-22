@@ -30,6 +30,7 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -105,6 +106,9 @@ type MockManagerBuilder struct {
 func NewMockManagerBuilder(t *testing.T) (*MockManagerBuilder, error) {
 	t.Helper()
 	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		return nil, fmt.Errorf("failed to add client-go scheme: %w", err)
+	}
 	if err := agentsv1alpha1.AddToScheme(scheme); err != nil {
 		return nil, fmt.Errorf("failed to add agents/v1alpha1 to scheme: %w", err)
 	}
@@ -276,7 +280,7 @@ func (m *MockManager) GetLogger() logr.Logger           { return logr.Discard() 
 // GetControllerOptions returns a config with SkipNameValidation=true.
 // This prevents the global name registry inside controller-runtime from causing
 // "controller already exists" failures across test cases that each call
-// SetupCacheControllersWithManager (which registers the same 4 controller names).
+// SetupCacheControllersWithManager (which registers the same 5 controller names).
 func (m *MockManager) GetControllerOptions() ctrlcfg.Controller {
 	skip := true
 	return ctrlcfg.Controller{SkipNameValidation: &skip}

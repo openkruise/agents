@@ -71,6 +71,10 @@ const (
 	ExtensionHeaderSnapshotTTL                = ExtensionHeaderPrefix + "snapshot-ttl"
 	ExtensionHeaderSnapshotPersistentContents = ExtensionHeaderPrefix + "snapshot-persistent-contents"
 	ExtensionHeaderWaitSuccessSeconds         = ExtensionHeaderPrefix + "snapshot-wait-success-seconds"
+	ExtensionHeaderVolumeSize                 = ExtensionHeaderPrefix + "volume-size"
+	ExtensionHeaderVolumeStorageClass         = ExtensionHeaderPrefix + "volume-storage-class"
+	ExtensionHeaderVolumeAccessMode           = ExtensionHeaderPrefix + "volume-access-mode"
+	ExtensionHeaderVolumeWaitSuccessSeconds   = ExtensionHeaderPrefix + "volume-wait-success-seconds"
 )
 
 const sandboxGenerateNameValidationSuffix = "abcde"
@@ -416,5 +420,35 @@ func (s *NewSnapshotRequest) ParseExtensions(headers http.Header) error {
 		}
 		s.Extensions.WaitSuccessSeconds = seconds
 	}
+	return nil
+}
+
+// ParseExtensions parses volume-related headers into Extensions.
+func (r *NewVolumeRequest) ParseExtensions(headers http.Header) error {
+	// Size
+	size := headers.Get(ExtensionHeaderVolumeSize)
+	// Parse storage size string into resource.Quantity
+	storageSize, err := resource.ParseQuantity(size)
+	if err != nil {
+		return fmt.Errorf("invalid storage size %q", size)
+	}
+	r.Extensions.StorageSize = storageSize
+
+	// StorageClass
+	r.Extensions.StorageClass = headers.Get(ExtensionHeaderVolumeStorageClass)
+	// AccessMode
+	r.Extensions.AccessMode = headers.Get(ExtensionHeaderVolumeAccessMode)
+	// WaitBoundTimeout
+	if waitBoundSeconds := headers.Get(ExtensionHeaderVolumeWaitSuccessSeconds); waitBoundSeconds != "" {
+		seconds, err := strconv.Atoi(waitBoundSeconds)
+		if err != nil {
+			return fmt.Errorf("invalid waitBoundSeconds format %q: %w", waitBoundSeconds, err)
+		}
+		if seconds < 0 {
+			return fmt.Errorf("waitBoundSeconds %s cannot be negative", waitBoundSeconds)
+		}
+		r.Extensions.WaitBoundSeconds = seconds
+	}
+
 	return nil
 }

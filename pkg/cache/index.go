@@ -20,6 +20,7 @@ import (
 	"context"
 
 	"github.com/openkruise/agents/pkg/utils"
+	corev1 "k8s.io/api/core/v1"
 	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -33,6 +34,7 @@ var (
 	IndexUser             = "user"
 	IndexTemplateID       = "templateID"
 	IndexCheckpointID     = "checkpointID"
+	IndexVolumeName       = "volumeName"
 )
 
 // IndexFunc defines a field index function for a specific resource type.
@@ -129,6 +131,34 @@ func GetIndexFuncs() []IndexFunc {
 				}
 				if user := cp.GetAnnotations()[agentsv1alpha1.AnnotationOwner]; user != "" {
 					return []string{user}
+				}
+				return nil
+			},
+		},
+		{
+			Obj:       &corev1.PersistentVolumeClaim{},
+			FieldName: IndexUser,
+			Extract: func(obj client.Object) []string {
+				pvc, ok := obj.(*corev1.PersistentVolumeClaim)
+				if !ok {
+					return nil
+				}
+				if user := pvc.GetAnnotations()[agentsv1alpha1.AnnotationOwner]; user != "" {
+					return []string{user}
+				}
+				return nil
+			},
+		},
+		{
+			Obj:       &corev1.PersistentVolumeClaim{},
+			FieldName: IndexVolumeName,
+			Extract: func(obj client.Object) []string {
+				pvc, ok := obj.(*corev1.PersistentVolumeClaim)
+				if !ok {
+					return nil
+				}
+				if pvc.Spec.VolumeName != "" {
+					return []string{pvc.Spec.VolumeName}
 				}
 				return nil
 			},

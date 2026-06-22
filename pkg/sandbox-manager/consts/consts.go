@@ -45,3 +45,7 @@ const (
 	// sandbox indefinitely for debugging.
 	ReserveFailedSandboxForever = time.Duration(-1)
 )
+
+const (
+	DefaultWaitBoundPVCTimeout = 60 * time.Second
+)
