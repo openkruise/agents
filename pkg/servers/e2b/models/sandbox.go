@@ -60,16 +60,17 @@ type NewSandboxRequest struct {
 }
 
 type NewSandboxRequestExtension struct {
-	InplaceUpdate           InplaceUpdateExtension
-	CSIMount                CSIMountExtension
-	SkipInitRuntime         bool
-	ReserveFailedSandboxFor *time.Duration
+	InplaceUpdate                 InplaceUpdateExtension
+	CSIMount                      CSIMountExtension
+	SkipInitRuntime               bool
+	ReserveFailedSandboxFor       *time.Duration
+	ReservePausedSandboxFor string
 	CreateOnNoStock         bool
-	WaitReadySeconds        int
-	TimeoutSeconds          int
-	NeverTimeout            bool
-	ReturnPodIP             bool
-	Labels                  map[string]string
+	WaitReadySeconds              int
+	TimeoutSeconds                int
+	NeverTimeout                  bool
+	ReturnPodIP                   bool
+	Labels                        map[string]string
 }
 
 type InplaceUpdateExtension struct {

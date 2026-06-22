@@ -28,6 +28,7 @@ import (
 	"k8s.io/klog/v2"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/pausedretention"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
@@ -287,28 +288,14 @@ func (sc *Controller) parseCreateSandboxRequest(r *http.Request) (models.NewSand
 
 func (sc *Controller) basicSandboxCreateModifier(ctx context.Context, sbx infra.Sandbox, request models.NewSandboxRequest) {
 	log := klog.FromContext(ctx)
-	// The E2B Timeout feature involves three sets of interfaces: create, connect, and pause,
-	// with two behavioral modes based on the `autoPause` parameter during creation:
-	//
-	// - `autoPause = false` (default): Automatically delete Sandbox when timeout
-	// - `autoPause = true`: Pause Sandbox when timeout
-	//
-	// The Timeout feature is implemented through two parameters in the `Sandbox` Infra:
-	//
-	// - During creation (create interface), set the corresponding parameter to `time.Now().Add(timeout)`
-	// - During connection (connect, timeout interfaces), set the corresponding parameter to `time.Now().Add(timeout)` as well
-	// - During pause (pause interface):
-	//   - if autoPause == true: Set `ShutdownTime` to `time.Now().Add(maxTimeout)` and clear `PauseTime`
-	//   - if autoPause == false: Set `ShutdownTime` to `time.Now().Add(maxTimeout)`
+	// E2B-managed sandboxes persist paused-retention preference so later timeout
+	// writes and controller auto-pause use the same policy. never-timeout keeps
+	// deadline fields empty; the annotation is only policy state.
 	now := time.Now()
 	timeoutOptions := timeout.Options{}
 	if !request.Extensions.NeverTimeout {
-		if request.AutoPause {
-			timeoutOptions.ShutdownTime = TimeAfterSeconds(now, sc.maxTimeout)
-			timeoutOptions.PauseTime = TimeAfterSeconds(now, request.Timeout)
-		} else {
-			timeoutOptions.ShutdownTime = TimeAfterSeconds(now, request.Timeout)
-		}
+		retention, _ := pausedretention.ParseReservePausedSandboxFor(request.Extensions.ReservePausedSandboxFor)
+		timeoutOptions = computeTimeoutOptions(request.AutoPause, now, request.Timeout, retention)
 	}
 	sbx.SetTimeout(timeoutOptions)
 	log.Info("timeout options calculated", "options", timeoutOptions)
@@ -318,6 +305,7 @@ func (sc *Controller) basicSandboxCreateModifier(ctx context.Context, sbx infra.
 	if annotations == nil {
 		annotations = make(map[string]string)
 	}
+	annotations[agentsv1alpha1.AnnotationReservePausedSandboxFor] = request.Extensions.ReservePausedSandboxFor
 	for k, v := range request.Metadata {
 		annotations[k] = v
 	}

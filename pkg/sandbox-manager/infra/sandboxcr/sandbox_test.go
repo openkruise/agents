@@ -182,7 +182,9 @@ func TestSandbox_SaveTimeoutWithPolicy(t *testing.T) {
 				return err == nil
 			}, time.Second, 10*time.Millisecond)
 
-			result, err := sandbox.SaveTimeoutWithPolicy(t.Context(), tt.requested, tt.policy)
+			result, err := sandbox.SaveTimeoutWithPolicy(t.Context(), infra.SaveTimeoutOptions{
+				Timeout: tt.requested,
+			}, tt.policy)
 			if tt.expectError != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.expectError)
@@ -195,6 +197,116 @@ func TestSandbox_SaveTimeoutWithPolicy(t *testing.T) {
 			var updated v1alpha1.Sandbox
 			require.NoError(t, fc.Get(t.Context(), types.NamespacedName{Namespace: sbx.Namespace, Name: sbx.Name}, &updated))
 			assert.True(t, timeout.Equal(tt.expectTimeout, timeout.GetTimeoutFromSandbox(&updated)))
+		})
+	}
+}
+
+const testRetentionAnnotation = "example.openkruise.io/retention"
+
+func TestSandbox_SaveTimeoutWithPolicyExtraAnnotations(t *testing.T) {
+	base := time.Date(2026, 6, 11, 10, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name              string
+		current           timeout.Options
+		requested         timeout.Options
+		policy            timeout.UpdatePolicy
+		initialAnnotation string
+		extraAnnotations  map[string]string
+		expectUpdated     bool
+		expectValue       string
+		expectValueSet    bool
+	}{
+		{
+			name:             "always accepted writes extra annotation",
+			current:          timeout.Options{ShutdownTime: base.Add(time.Hour)},
+			requested:        timeout.Options{ShutdownTime: base.Add(2 * time.Hour)},
+			policy:           timeout.UpdatePolicyAlways,
+			extraAnnotations: map[string]string{testRetentionAnnotation: "30m"},
+			expectUpdated:    true,
+			expectValue:      "30m",
+			expectValueSet:   true,
+		},
+		{
+			name:              "always accepted overwrites existing annotation",
+			current:           timeout.Options{ShutdownTime: base.Add(time.Hour)},
+			requested:         timeout.Options{ShutdownTime: base.Add(2 * time.Hour)},
+			policy:            timeout.UpdatePolicyAlways,
+			initialAnnotation: "10m",
+			extraAnnotations:  map[string]string{testRetentionAnnotation: "30m"},
+			expectUpdated:     true,
+			expectValue:       "30m",
+			expectValueSet:    true,
+		},
+		{
+			name:             "extend only skip does not backfill extra annotation",
+			current:          timeout.Options{PauseTime: base.Add(2 * time.Hour), ShutdownTime: base.Add(3 * time.Hour)},
+			requested:        timeout.Options{PauseTime: base.Add(time.Hour), ShutdownTime: base.Add(2 * time.Hour)},
+			policy:           timeout.UpdatePolicyExtendOnly,
+			extraAnnotations: map[string]string{testRetentionAnnotation: "30m"},
+			expectUpdated:    false,
+			expectValueSet:   false,
+		},
+		{
+			name:             "always skip on equal timeout does not backfill extra annotation",
+			current:          timeout.Options{ShutdownTime: base.Add(time.Hour)},
+			requested:        timeout.Options{ShutdownTime: base.Add(time.Hour)},
+			policy:           timeout.UpdatePolicyAlways,
+			extraAnnotations: map[string]string{testRetentionAnnotation: "30m"},
+			expectUpdated:    false,
+			expectValueSet:   false,
+		},
+		{
+			name:             "always accepted writes multiple annotations",
+			current:          timeout.Options{ShutdownTime: base.Add(time.Hour)},
+			requested:        timeout.Options{ShutdownTime: base.Add(2 * time.Hour)},
+			policy:           timeout.UpdatePolicyAlways,
+			extraAnnotations: map[string]string{testRetentionAnnotation: "30m", "example.openkruise.io/extra": "yes"},
+			expectUpdated:    true,
+			expectValue:      "30m",
+			expectValueSet:   true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			infraInstance, fc := NewTestInfra(t)
+			sbx := createTestSandboxWithDefaults("test-sandbox", "default")
+			setTimeout(sbx, tt.current)
+			if tt.initialAnnotation != "" {
+				if sbx.Annotations == nil {
+					sbx.Annotations = map[string]string{}
+				}
+				sbx.Annotations[testRetentionAnnotation] = tt.initialAnnotation
+			}
+			CreateSandboxWithStatus(t, fc, sbx)
+
+			var sandbox infra.Sandbox
+			require.Eventually(t, func() bool {
+				var err error
+				sandbox, err = infraInstance.GetClaimedSandbox(t.Context(), infra.GetClaimedSandboxOptions{
+					SandboxID: utils.GetSandboxID(sbx),
+					Namespace: sbx.Namespace,
+				})
+				return err == nil
+			}, time.Second, 10*time.Millisecond)
+
+			result, err := sandbox.SaveTimeoutWithPolicy(t.Context(), infra.SaveTimeoutOptions{
+				Timeout:          tt.requested,
+				ExtraAnnotations: tt.extraAnnotations,
+			}, tt.policy)
+			require.NoError(t, err)
+			assert.Equal(t, tt.expectUpdated, result.Updated)
+
+			var updated v1alpha1.Sandbox
+			require.NoError(t, fc.Get(t.Context(), types.NamespacedName{Namespace: sbx.Namespace, Name: sbx.Name}, &updated))
+			gotValue, gotSet := updated.Annotations[testRetentionAnnotation]
+			assert.Equal(t, tt.expectValueSet, gotSet)
+			if tt.expectValueSet {
+				assert.Equal(t, tt.expectValue, gotValue)
+			}
+			// Verify multi-annotation merging when applicable
+			if _, hasExtra := tt.extraAnnotations["example.openkruise.io/extra"]; hasExtra && tt.expectUpdated {
+				assert.Equal(t, "yes", updated.Annotations["example.openkruise.io/extra"])
+			}
 		})
 	}
 }
@@ -284,11 +396,15 @@ func TestSandbox_SaveTimeoutWithPolicy_OnConflict(t *testing.T) {
 
 	results := make(chan saveResult, 2)
 	go func() {
-		result, saveErr := sandboxA.SaveTimeoutWithPolicy(t.Context(), requested, timeout.UpdatePolicyAlways)
+		result, saveErr := sandboxA.SaveTimeoutWithPolicy(t.Context(), infra.SaveTimeoutOptions{
+			Timeout: requested,
+		}, timeout.UpdatePolicyAlways)
 		results <- saveResult{result: result, err: saveErr}
 	}()
 	go func() {
-		result, saveErr := sandboxB.SaveTimeoutWithPolicy(t.Context(), requested, timeout.UpdatePolicyAlways)
+		result, saveErr := sandboxB.SaveTimeoutWithPolicy(t.Context(), infra.SaveTimeoutOptions{
+			Timeout: requested,
+		}, timeout.UpdatePolicyAlways)
 		results <- saveResult{result: result, err: saveErr}
 	}()
 
