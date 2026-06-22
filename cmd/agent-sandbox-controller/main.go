@@ -47,10 +47,12 @@ import (
 	"github.com/openkruise/agents/client"
 	"github.com/openkruise/agents/pkg/controller"
 	sandboxctrl "github.com/openkruise/agents/pkg/controller/sandbox"
+	"github.com/openkruise/agents/pkg/controller/sandboxmetricsgc"
 	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/utils"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 	"github.com/openkruise/agents/pkg/utils/fieldindex"
+	"github.com/openkruise/agents/pkg/utils/tracing"
 	customwebhook "github.com/openkruise/agents/pkg/webhook"
 	"github.com/openkruise/agents/pkg/webhook/sandboxset/mutating"
 )
@@ -120,16 +122,32 @@ func main() {
 	flag.StringVar(&metricLabelsAllowlist, "metric-labels-allowlist", "",
 		"Comma-separated list of Sandbox label keys to expose as sandbox_labels metric labels (e.g., app,env,version)")
 
+	var metricsAsyncWorkers int
+	var metricsAsyncQueueCap int
+	var tracingCfg tracing.OTELConfig
+	flag.IntVar(&metricsAsyncWorkers, "metrics-async-workers", 8,
+		"Concurrent reconciles for the sandbox metric GC controller.")
+	flag.IntVar(&metricsAsyncQueueCap, "metrics-async-queue-cap", 50000,
+		"Buffer size for the sandbox metric GC controller event channel. "+
+			"Sends that would block are counted under sandbox_metrics_gc_dropped_total{reason=\"channel_full\"}.")
+
 	opts := zap.Options{
 		Development: true,
 	}
 	opts.BindFlags(flag.CommandLine)
 	utilfeature.DefaultMutableFeatureGate.AddFlag(pflag.CommandLine)
+	tracing.BindFlags(pflag.CommandLine, &tracingCfg)
 	klog.InitFlags(nil)
 	pflag.CommandLine.AddGoFlagSet(flag.CommandLine)
 	pflag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
+	// Initialize OTEL tracing emitter
+	otelEmitter := tracing.NewOTELEmitter(tracingCfg, "agent-sandbox-controller")
+	tracing.SetEmitter(otelEmitter)
+	otelEmitter.Init()
+	defer otelEmitter.Shutdown(ctrl.SetupSignalHandler())
 
 	if metricLabelsAllowlist != "" {
 		keys := strings.Split(metricLabelsAllowlist, ",")
@@ -281,8 +299,19 @@ func main() {
 		os.Exit(1)
 	}
 
-	setupLog.Info("setup controllers")
-	if err = controller.SetupWithManager(mgr); err != nil {
+	metricsGC := sandboxmetricsgc.NewReconciler(sandboxmetricsgc.Options{
+		Workers:       metricsAsyncWorkers,
+		ChannelBuffer: metricsAsyncQueueCap,
+	})
+	if err := metricsGC.SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to setup sandbox metrics GC controller")
+		os.Exit(1)
+	}
+
+	setupLog.Info("setup controllers",
+		"metricsAsyncWorkers", metricsAsyncWorkers,
+		"metricsAsyncQueueCap", metricsAsyncQueueCap)
+	if err = controller.SetupWithManager(mgr, controller.Deps{MetricsCleanup: metricsGC}); err != nil {
 		setupLog.Error(err, "unable to setup controllers")
 		os.Exit(1)
 	}
