@@ -1,3 +1,0 @@
-python-dotenv
-pytest==9.0.3
-requests

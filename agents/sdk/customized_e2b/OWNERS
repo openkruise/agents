@@ -1,9 +1,0 @@
-# List of usernames who may use /lgtm
-reviewers:
-  - chengzhycn
-  - AiRanthem
-
-# List of usernames who may use /approve
-approvers:
-  - chengzhycn
-  - AiRanthem
