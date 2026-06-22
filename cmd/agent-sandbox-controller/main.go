@@ -52,6 +52,7 @@ import (
 	"github.com/openkruise/agents/pkg/utils"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 	"github.com/openkruise/agents/pkg/utils/fieldindex"
+	"github.com/openkruise/agents/pkg/utils/tracing"
 	customwebhook "github.com/openkruise/agents/pkg/webhook"
 	"github.com/openkruise/agents/pkg/webhook/sandboxset/mutating"
 )
@@ -123,6 +124,7 @@ func main() {
 
 	var metricsAsyncWorkers int
 	var metricsAsyncQueueCap int
+	var tracingCfg tracing.OTELConfig
 	flag.IntVar(&metricsAsyncWorkers, "metrics-async-workers", 8,
 		"Concurrent reconciles for the sandbox metric GC controller.")
 	flag.IntVar(&metricsAsyncQueueCap, "metrics-async-queue-cap", 50000,
@@ -134,11 +136,18 @@ func main() {
 	}
 	opts.BindFlags(flag.CommandLine)
 	utilfeature.DefaultMutableFeatureGate.AddFlag(pflag.CommandLine)
+	tracing.BindFlags(pflag.CommandLine, &tracingCfg)
 	klog.InitFlags(nil)
 	pflag.CommandLine.AddGoFlagSet(flag.CommandLine)
 	pflag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
+	// Initialize OTEL tracing emitter
+	otelEmitter := tracing.NewOTELEmitter(tracingCfg, "agent-sandbox-controller")
+	tracing.SetEmitter(otelEmitter)
+	otelEmitter.Init()
+	defer otelEmitter.Shutdown(ctrl.SetupSignalHandler())
 
 	if metricLabelsAllowlist != "" {
 		keys := strings.Split(metricLabelsAllowlist, ",")
