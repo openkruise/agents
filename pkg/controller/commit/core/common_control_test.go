@@ -18,8 +18,8 @@ package core
 
 import (
 	"context"
+	"fmt"
 	"os"
-	"strings"
 	"testing"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -697,15 +697,26 @@ func TestGetLatestJobPodExitCode(t *testing.T) {
 	}
 }
 
-// --- applyCommitJob error tests ---
+// --- EnsureCommitRunning error tests ---
 
-func TestApplyCommitJob_EmptyContainerID(t *testing.T) {
+// createErrorClient wraps a client.Client and returns a fixed error on Create.
+// Used to simulate transient API server failures in unit tests.
+type createErrorClient struct {
+	client.Client
+	createErr error
+}
+
+func (c *createErrorClient) Create(_ context.Context, _ client.Object, _ ...client.CreateOption) error {
+	return c.createErr
+}
+
+func TestEnsureCommitRunning_EmptyContainerID(t *testing.T) {
 	os.Setenv("AGENT_JOB_IMAGE", "test-image:latest")
 	defer os.Unsetenv("AGENT_JOB_IMAGE")
 
 	scheme := newTestScheme()
 	commit := newTestCommit("test-commit", "default")
-	// Pod with empty container ID should cause job generation to fail
+	// Pod with empty container ID should cause job generation to fail (permanent error).
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-pod",
@@ -730,11 +741,41 @@ func TestApplyCommitJob_EmptyContainerID(t *testing.T) {
 	fc := newFakeClientBuilder(scheme).WithObjects(commit, pod).Build()
 	ctrl := newCommonControlForTest(fc)
 
-	err := ctrl.applyCommitJob(context.TODO(), commit, pod)
-	if err == nil {
-		t.Fatal("expected error when container ID is empty")
+	newStatus := commit.Status.DeepCopy()
+	args := &EnsureFuncArgs{Pod: pod, Commit: commit, NewStatus: newStatus}
+
+	_, err := ctrl.EnsureCommitRunning(context.TODO(), args)
+	// Permanent error: nil returned (no retry), status marked Failed.
+	if err != nil {
+		t.Fatalf("expected nil error for permanent error, got: %v", err)
 	}
-	if !strings.Contains(err.Error(), "failed to generate commit job") {
-		t.Errorf("expected error to contain 'failed to generate commit job', got: %v", err)
+	if newStatus.Phase != agentsv1alpha1.CommitPhaseFailed {
+		t.Errorf("expected CommitPhaseFailed, got %s", newStatus.Phase)
+	}
+}
+
+func TestEnsureCommitRunning_CreateTransientError(t *testing.T) {
+	os.Setenv("AGENT_JOB_IMAGE", "test-image:latest")
+	defer os.Unsetenv("AGENT_JOB_IMAGE")
+
+	scheme := newTestScheme()
+	commit := newTestCommit("test-commit", "default")
+	pod := newTestPod("test-pod", "default", "node-1")
+
+	fc := newFakeClientBuilder(scheme).WithObjects(commit, pod).Build()
+	// Wrap the fake client to inject a transient Create error.
+	errClient := &createErrorClient{Client: fc, createErr: fmt.Errorf("connection refused")}
+	ctrl := newCommonControlForTest(errClient)
+
+	newStatus := commit.Status.DeepCopy()
+	args := &EnsureFuncArgs{Pod: pod, Commit: commit, NewStatus: newStatus}
+
+	_, err := ctrl.EnsureCommitRunning(context.TODO(), args)
+	// Transient error: error returned for backoff retry, status NOT marked Failed.
+	if err == nil {
+		t.Fatal("expected error for transient Create failure")
+	}
+	if newStatus.Phase == agentsv1alpha1.CommitPhaseFailed {
+		t.Error("expected phase to NOT be Failed for transient error")
 	}
 }

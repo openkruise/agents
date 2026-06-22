@@ -96,15 +96,32 @@ func (r *commonControl) EnsureCommitRunning(ctx context.Context, args *EnsureFun
 		return 0, nil
 	}
 
-	now := metav1.Now()
-	if err = r.applyCommitJob(ctx, commit, pod); err != nil {
-		log.Error(err, "EnsureCommitRunning failed", "commit", klog.KObj(commit))
-		r.Recorder.Eventf(commit, corev1.EventTypeWarning, "JobCreationFailed", "Failed to create commit job: %v", err)
+	// Generate Job spec — permanent errors (bad input, missing config) mark Failed.
+	g := &jobutil.JobGenerator{Commit: commit, Pod: pod}
+	g.DockerConfigSecretName = r.resolveRegistrySecretName(ctx, commit)
+	job, err := g.GenerateCommitJob()
+	if err != nil {
+		log.Error(err, "failed to generate commit job", "commit", klog.KObj(commit))
+		r.Recorder.Eventf(commit, corev1.EventTypeWarning, "JobGenerationFailed", "Failed to generate commit job: %v", err)
+		now := metav1.Now()
 		args.NewStatus.StartTime = &now
 		args.NewStatus.Phase = agentsv1alpha1.CommitPhaseFailed
 		args.NewStatus.CompletionTime = &now
 		return 0, nil
 	}
+
+	// Create Job — transient errors return error for backoff retry, Commit stays Pending.
+	if err := r.Client.Create(ctx, job); err != nil {
+		if errors.IsAlreadyExists(err) {
+			log.Info("Job already exists, ignore", "job", klog.KObj(job), "commit", klog.KObj(commit))
+		} else {
+			return 0, fmt.Errorf("failed to create job: %w", err)
+		}
+	}
+
+	// Set expectation to prevent duplicated reconcile from stale cache.
+	ScaleExpectations.ExpectScale(utils.GetControllerKey(commit), expectations.Create, job.Name)
+	log.Info("created Job", "job", klog.KObj(job), "commit", klog.KObj(commit))
 
 	setCommitRunning(args.NewStatus, commit)
 	return 0, nil
@@ -176,32 +193,6 @@ func (r *commonControl) EnsureCommitDeleted(ctx context.Context, args *EnsureFun
 	}
 	log.Info("remove commit finalizer success", "commit", klog.KObj(commit))
 	return 0, nil
-}
-
-func (r *commonControl) applyCommitJob(ctx context.Context, commit *agentsv1alpha1.Commit, pod *corev1.Pod) error {
-	log := log.FromContext(ctx)
-	g := &jobutil.JobGenerator{Commit: commit, Pod: pod}
-
-	// Resolve registry auth secret (same namespace, mounted directly by name)
-	g.DockerConfigSecretName = r.resolveRegistrySecretName(ctx, commit)
-
-	job, err := g.GenerateCommitJob()
-	if err != nil {
-		return fmt.Errorf("failed to generate commit job: %w", err)
-	}
-	if err := r.Client.Create(ctx, job); err != nil {
-		if errors.IsAlreadyExists(err) {
-			log.Info("Job already exists, ignore", "job", klog.KObj(job), "commit", klog.KObj(commit))
-			return nil
-		}
-		return fmt.Errorf("failed to create job: %w", err)
-	}
-
-	// Set expectation to prevent duplicated reconcile from stale cache.
-	ScaleExpectations.ExpectScale(utils.GetControllerKey(commit), expectations.Create, job.Name)
-
-	log.Info("created Job", "job", klog.KObj(job), "commit", klog.KObj(commit))
-	return nil
 }
 
 // resolveRegistrySecretName resolves the registry auth secret from user-specified
