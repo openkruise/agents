@@ -1,0 +1,43 @@
+apiVersion: agents.kruise.io/v1alpha1
+kind: SandboxClaim
+metadata:
+  name: sandboxclaim-sample
+  namespace: default
+spec:
+  # TemplateName specifies which SandboxSet pool to claim from
+  templateName: python-pool
+  
+  # Replicas specifies how many sandboxes to claim (default: 1)
+  replicas: 3
+  
+  # ClaimTimeout specifies the maximum duration to wait for claiming sandboxes
+  # If the timeout is reached, the claim will be marked as Completed regardless of
+  # whether all replicas were successfully claimed
+  claimTimeout: 10m
+  
+  # TTLAfterCompleted specifies the time to live after the claim reaches Completed phase
+  # After this duration, the SandboxClaim will be automatically deleted.
+  # Note: Only the SandboxClaim resource will be deleted; the claimed sandboxes will NOT be deleted
+  ttlAfterCompleted: 1h
+  
+  # ShutdownTime specifies the absolute time when the sandbox should be shut down
+  # This will be set as spec.shutdownTime (absolute time) on the Sandbox
+  # shutdownTime: "2025-12-30T12:00:00Z"
+  
+  # Labels contains key-value pairs to be added as labels to claimed Sandbox resources
+  labels:
+    claim-id: "sandboxclaim-sample"
+    project: "my-project"
+    environment: "test"
+  
+  # Annotations contains key-value pairs to be added as annotations to claimed Sandbox resources
+  annotations:
+    claim-purpose: "integration-test"
+    owner: "test-team"
+  
+  # EnvVars contains environment variables to be injected into the sandbox
+  # These will be passed to the sandbox's init endpoint (envd) after claiming
+  # Only applicable if the SandboxSet has envd enabled
+  envVars:
+    API_KEY: "sk-test-key"
+    DEBUG: "true"

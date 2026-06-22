@@ -1,0 +1,1176 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package sandboxset
+
+import (
+	"context"
+	"fmt"
+	"strconv"
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/serializer"
+	"k8s.io/apimachinery/pkg/types"
+	intstrutil "k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/tools/record"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	"github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
+	"github.com/openkruise/agents/pkg/utils"
+	"github.com/openkruise/agents/pkg/utils/fieldindex"
+	utestutils "github.com/openkruise/agents/pkg/utils/testutils"
+)
+
+var testScheme *runtime.Scheme
+
+func init() {
+	testScheme = runtime.NewScheme()
+	_ = v1alpha1.AddToScheme(testScheme)
+	_ = corev1.AddToScheme(testScheme)
+}
+
+var newPodKey = "is-new-pod"
+
+func getSandboxSet(replicas int32) *v1alpha1.SandboxSet {
+	// sandboxset
+	sbs := &v1alpha1.SandboxSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test",
+			Namespace: "default",
+			UID:       types.UID("123456789"),
+		},
+		Spec: v1alpha1.SandboxSetSpec{
+			Replicas: replicas,
+			EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{
+						Labels: map[string]string{
+							newPodKey: "true",
+						},
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name:  "test",
+								Image: "test",
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	return sbs
+}
+
+func getBaseSandbox(idx int32, prefix, templateHash string) *v1alpha1.Sandbox {
+	return &v1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      prefix + strconv.Itoa(int(idx)),
+			Namespace: "default",
+			Labels: map[string]string{
+				v1alpha1.LabelTemplateHash:     templateHash,
+				v1alpha1.LabelSandboxPool:      "test",
+				v1alpha1.LabelSandboxIsClaimed: "false",
+			},
+			Annotations: map[string]string{},
+		},
+	}
+}
+
+func CreateSandboxWithStatus(t *testing.T, client client.Client, sbx *v1alpha1.Sandbox) {
+	ctx := context.Background()
+	assert.NoError(t, client.Create(ctx, sbx))
+	assert.NoError(t, client.Status().Update(ctx, sbx))
+}
+
+func NewClient() client.Client {
+	return fake.NewClientBuilder().WithScheme(testScheme).
+		WithStatusSubresource(&v1alpha1.SandboxSet{}, &v1alpha1.Sandbox{}).
+		WithLists(&v1alpha1.SandboxSetList{}, &v1alpha1.SandboxList{}).
+		WithIndex(&v1alpha1.Sandbox{}, fieldindex.IndexNameForOwnerRefUID, fieldindex.OwnerIndexFunc).
+		Build()
+}
+
+type createSandboxRequest struct {
+	createCreatingSandboxes    int32
+	createAvailableSandboxes   int32
+	createRunningSandboxes     int32
+	createPausedSandboxes      int32
+	createFailedSandboxes      int32
+	createLegacySandboxes      int32
+	createDeletedSandboxes     int32
+	createTerminatingSandboxes int32
+	lockedOwner                string
+}
+
+func CreateSandboxes(t *testing.T, tt createSandboxRequest, sbs *v1alpha1.SandboxSet, k8sClient client.Client) int32 {
+	var idx int32
+	var toCreate []*v1alpha1.Sandbox
+	creatingPhases := []v1alpha1.SandboxPhase{v1alpha1.SandboxRunning, v1alpha1.SandboxPending}
+	for i := int32(0); i < tt.createCreatingSandboxes; i++ {
+		sbx := getBaseSandbox(idx, "creating-", sbs.Status.UpdateRevision)
+		sbx.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(sbs, v1alpha1.SandboxSetControllerKind)}
+		sbx.Status.Phase = creatingPhases[int(i)%len(creatingPhases)]
+		sbx.Labels["type"] = "creating"
+		state, reason := utils.GetSandboxState(sbx)
+		assert.Equal(t, v1alpha1.SandboxStateCreating, state, reason)
+		toCreate = append(toCreate, sbx)
+		idx++
+	}
+	for i := int32(0); i < tt.createAvailableSandboxes; i++ {
+		sbx := getBaseSandbox(idx, "available-", sbs.Status.UpdateRevision)
+		sbx.Status.Phase = v1alpha1.SandboxRunning
+		sbx.Status.PodInfo.PodIP = "1.2.3.4"
+		sbx.Status.Conditions = []metav1.Condition{
+			{
+				Type:   string(v1alpha1.SandboxConditionReady),
+				Status: metav1.ConditionTrue,
+			},
+		}
+		sbx.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(sbs, v1alpha1.SandboxSetControllerKind)}
+		sbx.Labels["type"] = "available"
+		state, reason := utils.GetSandboxState(sbx)
+		assert.Equal(t, v1alpha1.SandboxStateAvailable, state, reason)
+		toCreate = append(toCreate, sbx)
+		idx++
+	}
+	for i := int32(0); i < tt.createRunningSandboxes; i++ {
+		sbx := getBaseSandbox(idx, "running-", sbs.Status.UpdateRevision)
+		sbx.Status.PodInfo.PodIP = "1.2.3.4"
+		sbx.Status.Phase = v1alpha1.SandboxRunning
+		sbx.Status.Conditions = []metav1.Condition{
+			{
+				Type:   string(v1alpha1.SandboxConditionReady),
+				Status: metav1.ConditionTrue,
+			},
+		}
+		state, reason := utils.GetSandboxState(sbx)
+		assert.Equal(t, v1alpha1.SandboxStateRunning, state, reason)
+		sbx.Labels["type"] = "running"
+		toCreate = append(toCreate, sbx)
+		idx++
+	}
+	for i := int32(0); i < tt.createPausedSandboxes; i++ {
+		sbx := getBaseSandbox(idx, "paused-", sbs.Status.UpdateRevision)
+		sbx.Status.Phase = v1alpha1.SandboxPaused
+		sbx.Labels["type"] = "paused"
+		state, reason := utils.GetSandboxState(sbx)
+		assert.Equal(t, v1alpha1.SandboxStatePaused, state, reason)
+		toCreate = append(toCreate, sbx)
+		idx++
+	}
+	failedPhases := []v1alpha1.SandboxPhase{v1alpha1.SandboxFailed, v1alpha1.SandboxSucceeded}
+	for i := int32(0); i < tt.createFailedSandboxes; i++ {
+		sbx := getBaseSandbox(idx, "failed-", sbs.Status.UpdateRevision)
+		_ = ctrl.SetControllerReference(sbs, sbx, testScheme)
+		sbx.Status.Phase = failedPhases[int(idx)%len(failedPhases)]
+		sbx.Labels["type"] = "failed"
+		state, reason := utils.GetSandboxState(sbx)
+		assert.Equal(t, v1alpha1.SandboxStateDead, state, reason)
+		toCreate = append(toCreate, sbx)
+		idx++
+	}
+	for i := int32(0); i < tt.createDeletedSandboxes; i++ {
+		sbx := getBaseSandbox(idx, "deleted-", sbs.Status.UpdateRevision)
+		_ = ctrl.SetControllerReference(sbs, sbx, testScheme)
+		sbx.Status.Phase = v1alpha1.SandboxRunning
+		sbx.Labels["type"] = "deleted"
+		sbx.Finalizers = []string{"kruise.test/finalizer"}
+		toCreate = append(toCreate, sbx)
+		idx++
+	}
+	for i := int32(0); i < tt.createTerminatingSandboxes; i++ {
+		sbx := getBaseSandbox(idx, "killed-", sbs.Status.UpdateRevision)
+		_ = ctrl.SetControllerReference(sbs, sbx, testScheme)
+		sbx.Status.Phase = v1alpha1.SandboxTerminating
+		sbx.Labels["type"] = "terminating"
+		state, reason := utils.GetSandboxState(sbx)
+		assert.Equal(t, v1alpha1.SandboxStateDead, state, reason)
+		toCreate = append(toCreate, sbx)
+		idx++
+	}
+	for _, sbx := range toCreate {
+		if tt.lockedOwner != "" {
+			sbx.Annotations[v1alpha1.AnnotationLock] = "some-lock"
+			sbx.Annotations[v1alpha1.AnnotationOwner] = tt.lockedOwner
+		}
+		CreateSandboxWithStatus(t, k8sClient, sbx)
+		if strings.HasPrefix(sbx.Name, "deleted-") {
+			assert.NoError(t, k8sClient.Delete(context.TODO(), sbx))
+			deletedSbx := &v1alpha1.Sandbox{}
+			assert.NoError(t, k8sClient.Get(context.TODO(), types.NamespacedName{Name: sbx.Name, Namespace: sbx.Namespace}, deletedSbx))
+			state, reason := utils.GetSandboxState(deletedSbx)
+			assert.Equal(t, v1alpha1.SandboxStateDead, state, reason)
+		}
+	}
+	return idx
+}
+
+func CheckAllEvents(t *testing.T, eventRecorder *record.FakeRecorder, expectEvents []string) {
+	for _, expectedEvent := range expectEvents {
+		CheckEvent(t, eventRecorder, corev1.EventTypeNormal, expectedEvent)
+	}
+	select {
+	case event := <-eventRecorder.Events:
+		t.Errorf("unexpected event: %s", event)
+	default:
+	}
+}
+
+func CheckEvent(t *testing.T, eventRecorder *record.FakeRecorder, tp, evt string) {
+	select {
+	case event := <-eventRecorder.Events:
+		t.Log(event)
+		prefix := fmt.Sprintf("%s %s", tp, evt)
+		assert.Equal(t, prefix, event[:len(prefix)])
+	default:
+		t.Errorf("no event received")
+	}
+}
+
+func TestReconcile_DeleteDead(t *testing.T) {
+	utestutils.InitLogOutput()
+	checkFunc := func(expectNonDeletedCnt int) func(t *testing.T, client client.Client, sbs *v1alpha1.SandboxSet) {
+		return func(t *testing.T, client client.Client, sbs *v1alpha1.SandboxSet) {
+			var sandboxList v1alpha1.SandboxList
+			assert.NoError(t, client.List(context.Background(), &sandboxList))
+
+			nonDeletedCount := 0
+			for _, sbx := range sandboxList.Items {
+				if sbx.DeletionTimestamp == nil {
+					nonDeletedCount++
+				}
+			}
+			assert.Equal(t, expectNonDeletedCnt, nonDeletedCount, "Expected 1 sandbox to remain (available)")
+		}
+	}
+	tests := []struct {
+		name         string
+		request      createSandboxRequest
+		replicas     int32
+		expectEvents []string
+		checkFunc    func(t *testing.T, client client.Client, sbs *v1alpha1.SandboxSet)
+	}{
+		{
+			name: "delete failed sandboxes",
+			request: createSandboxRequest{
+				createFailedSandboxes:    2,
+				createAvailableSandboxes: 1,
+			},
+			replicas:     1,
+			expectEvents: []string{EventFailedSandboxDeleted, EventFailedSandboxDeleted},
+			checkFunc:    checkFunc(1),
+		},
+		{
+			name: "delete dead sandboxes with already deleted ones",
+			request: createSandboxRequest{
+				createFailedSandboxes:    2,
+				createDeletedSandboxes:   1, // will not send a event
+				createAvailableSandboxes: 1,
+			},
+			replicas:     1,
+			expectEvents: []string{EventFailedSandboxDeleted, EventFailedSandboxDeleted},
+			checkFunc:    checkFunc(1),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			k8sClient := NewClient()
+
+			sbs := getSandboxSet(tt.replicas)
+			eventRecorder := record.NewFakeRecorder(10)
+			reconciler := &Reconciler{
+				Client:   k8sClient,
+				Scheme:   testScheme,
+				Recorder: eventRecorder,
+				Codec:    serializer.NewCodecFactory(testScheme).LegacyCodec(v1alpha1.SchemeGroupVersion),
+			}
+			assert.NoError(t, k8sClient.Create(ctx, sbs))
+			newStatus, err := reconciler.initNewStatus(ctx, sbs)
+		
+			assert.NoError(t, err)
+			sbs.Status = *newStatus.status
+			CreateSandboxes(t, tt.request, sbs, k8sClient)
+		
+			_, err = reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(sbs)})
+			assert.NoError(t, err)
+		
+			if tt.checkFunc != nil {
+				tt.checkFunc(t, k8sClient, sbs)
+			}
+			CheckAllEvents(t, eventRecorder, tt.expectEvents)
+		})
+	}
+}
+
+func TestReconcile_BasicScale(t *testing.T) {
+	utestutils.InitLogOutput()
+	checkFunc := func(totCnt, newCnt int) func(t *testing.T, client client.Client, sbs *v1alpha1.SandboxSet) {
+		return func(t *testing.T, client client.Client, sbs *v1alpha1.SandboxSet) {
+			var sandboxList v1alpha1.SandboxList
+			assert.NoError(t, client.List(context.Background(), &sandboxList))
+
+			var gotTotal, gotNew int
+			for _, sbx := range sandboxList.Items {
+				if sbx.DeletionTimestamp == nil {
+					gotTotal++
+				}
+				if sbx.Labels[newPodKey] == "true" {
+					gotNew++
+				}
+			}
+			assert.Equal(t, totCnt, gotTotal)
+			assert.Equal(t, newCnt, gotNew)
+		}
+	}
+	tests := []struct {
+		name     string
+		replicas int32
+
+		// create sandboxes before reconcile
+		request createSandboxRequest
+
+		// expect results after reconcile
+		expectTotalSandboxes  int
+		expectStatusAvailable int32
+		expectNewSandboxes    int
+		expectEvents          []string
+	}{
+		{
+			name:                 "simple scale up from 0",
+			replicas:             2,
+			expectTotalSandboxes: 2,
+			expectNewSandboxes:   2,
+			expectEvents:         []string{EventSandboxCreated, EventSandboxCreated},
+		},
+		{
+			name:     "1 claimed, scale up from 1 to 2",
+			replicas: 2,
+			request: createSandboxRequest{
+				createAvailableSandboxes: 1,
+				createRunningSandboxes:   1,
+			},
+			expectTotalSandboxes:  3,
+			expectStatusAvailable: 1,
+			expectNewSandboxes:    1,
+			expectEvents: []string{
+				EventSandboxCreated,
+			},
+		},
+		{
+			name:     "2 available, 1 running, not scale",
+			replicas: 2,
+			request: createSandboxRequest{
+				createAvailableSandboxes: 2,
+				createRunningSandboxes:   1,
+			},
+			expectTotalSandboxes:  3,
+			expectStatusAvailable: 2,
+			expectNewSandboxes:    0,
+			expectEvents:          []string{},
+		},
+		{
+			name:     "2 running, 2 paused",
+			replicas: 2,
+			request: createSandboxRequest{
+				createRunningSandboxes: 2,
+				createPausedSandboxes:  2,
+			},
+			expectTotalSandboxes: 6,
+			expectNewSandboxes:   2,
+			expectEvents: []string{
+				EventSandboxCreated, EventSandboxCreated,
+			},
+		},
+		{
+			name:     "1 deleted, scale up from 1 to 2",
+			replicas: 2,
+			request: createSandboxRequest{
+				createDeletedSandboxes:   1,
+				createAvailableSandboxes: 1,
+			},
+			expectTotalSandboxes:  2,
+			expectStatusAvailable: 1,
+			expectNewSandboxes:    1,
+			expectEvents:          []string{EventSandboxCreated},
+		},
+		{
+			name:     "1 killed, scale up from 1 to 2, 1 gc",
+			replicas: 2,
+			request: createSandboxRequest{
+				createTerminatingSandboxes: 1,
+				createAvailableSandboxes:   1,
+			},
+			expectTotalSandboxes:  2,
+			expectStatusAvailable: 1,
+			expectNewSandboxes:    1,
+			expectEvents:          []string{EventSandboxCreated, EventFailedSandboxDeleted},
+		},
+		{
+			name:     "scale down 1 available",
+			replicas: 2,
+			request: createSandboxRequest{
+				createAvailableSandboxes: 3,
+			},
+			expectTotalSandboxes:  2,
+			expectStatusAvailable: 2,
+			expectEvents:          []string{EventSandboxScaledDown},
+		},
+		{
+			name:     "scale down 1 creating",
+			replicas: 2,
+			request: createSandboxRequest{
+				createCreatingSandboxes:  1,
+				createAvailableSandboxes: 2,
+			},
+			expectTotalSandboxes:  2,
+			expectStatusAvailable: 2,
+			expectEvents:          []string{EventSandboxScaledDown},
+		},
+		{
+			name:     "complex",
+			replicas: 3,
+			request: createSandboxRequest{
+				createAvailableSandboxes:   2,
+				createRunningSandboxes:     2,
+				createPausedSandboxes:      2,
+				createFailedSandboxes:      2, // should gc
+				createTerminatingSandboxes: 2, // should gc
+				createDeletedSandboxes:     2, // should gc
+			},
+			expectEvents: []string{
+				EventSandboxCreated,
+				EventFailedSandboxDeleted, EventFailedSandboxDeleted,
+				EventFailedSandboxDeleted, EventFailedSandboxDeleted,
+			},
+			expectTotalSandboxes:  7,
+			expectStatusAvailable: 2,
+			expectNewSandboxes:    1,
+		},
+		{
+			name:     "user story 1, step 1: claim one from init",
+			replicas: 2,
+			request: createSandboxRequest{
+				createAvailableSandboxes: 1,
+				createRunningSandboxes:   1,
+			},
+			expectTotalSandboxes:  3,
+			expectStatusAvailable: 1,
+			expectNewSandboxes:    1,
+			expectEvents:          []string{EventSandboxCreated},
+		},
+		{
+			name:     "user story 1, step 2: pause it",
+			replicas: 2,
+			request: createSandboxRequest{
+				createAvailableSandboxes: 2,
+				createPausedSandboxes:    1,
+			},
+			expectTotalSandboxes:  3,
+			expectStatusAvailable: 2,
+			expectEvents:          []string{},
+		},
+		{
+			name:     "user story 1, step 3: claim the second",
+			replicas: 2,
+			request: createSandboxRequest{
+				createAvailableSandboxes: 1,
+				createRunningSandboxes:   1,
+				createPausedSandboxes:    1,
+			},
+			expectTotalSandboxes:  4,
+			expectStatusAvailable: 1,
+			expectNewSandboxes:    1,
+			expectEvents:          []string{EventSandboxCreated},
+		},
+		{
+			name:     "user story 1, step 4: claim the third",
+			replicas: 2,
+			request: createSandboxRequest{
+				createAvailableSandboxes: 1,
+				createRunningSandboxes:   2,
+				createPausedSandboxes:    1,
+			},
+			expectTotalSandboxes:  5,
+			expectStatusAvailable: 1,
+			expectNewSandboxes:    1,
+			expectEvents:          []string{EventSandboxCreated},
+		},
+		{
+			name:     "user story 1, step 5: claim the forth",
+			replicas: 2,
+			request: createSandboxRequest{
+				createAvailableSandboxes: 1,
+				createRunningSandboxes:   3,
+				createPausedSandboxes:    1,
+			},
+			expectTotalSandboxes:  6,
+			expectStatusAvailable: 1,
+			expectNewSandboxes:    1,
+			expectEvents:          []string{EventSandboxCreated},
+		},
+		{
+			name:     "user story 1, step 6: kill the first",
+			replicas: 2,
+			request: createSandboxRequest{
+				createAvailableSandboxes: 2,
+				createRunningSandboxes:   2,
+				createPausedSandboxes:    1,
+			},
+			expectTotalSandboxes:  5,
+			expectStatusAvailable: 2,
+			expectEvents:          []string{},
+		},
+		{
+			name:     "user story 1, step 7: kill the second and third and the forth",
+			replicas: 2,
+			request: createSandboxRequest{
+				createAvailableSandboxes: 2,
+				createPausedSandboxes:    1,
+			},
+			expectStatusAvailable: 2,
+			expectEvents:          []string{},
+			expectTotalSandboxes:  3,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			k8sClient := NewClient()
+
+			sbs := getSandboxSet(tt.replicas)
+			assert.NoError(t, k8sClient.Create(ctx, sbs))
+
+			eventRecorder := record.NewFakeRecorder(10)
+			reconciler := &Reconciler{
+				Client:   k8sClient,
+				Scheme:   testScheme,
+				Recorder: eventRecorder,
+				Codec:    serializer.NewCodecFactory(testScheme).LegacyCodec(v1alpha1.SchemeGroupVersion),
+			}
+			newStatus, err := reconciler.initNewStatus(ctx, sbs)
+
+			assert.NoError(t, err)
+			sbs.Status = *newStatus.status
+			_ = CreateSandboxes(t, tt.request, sbs, k8sClient)
+			scaleUpExpectation.DeleteExpectations(GetControllerKey(sbs))
+			scaleDownExpectation.DeleteExpectations(GetControllerKey(sbs))
+			_, err = reconciler.Reconcile(ctx, ctrl.Request{
+				NamespacedName: client.ObjectKeyFromObject(sbs),
+			})
+			assert.NoError(t, err)
+			checkFunc(tt.expectTotalSandboxes, tt.expectNewSandboxes)(t, k8sClient, sbs)
+
+			// reconcile again to refresh status
+			_, err = reconciler.Reconcile(ctx, ctrl.Request{
+				NamespacedName: client.ObjectKeyFromObject(sbs),
+			})
+			checkFunc(tt.expectTotalSandboxes, tt.expectNewSandboxes)(t, k8sClient, sbs)
+			assert.NoError(t, err)
+			var gotSbs v1alpha1.SandboxSet
+			assert.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(sbs), &gotSbs))
+			status := gotSbs.Status
+			assert.Equal(t, tt.replicas, status.Replicas)
+			assert.Equal(t, tt.expectStatusAvailable, status.AvailableReplicas)
+
+			CheckAllEvents(t, eventRecorder, tt.expectEvents)
+		})
+	}
+}
+
+func TestReconcile_ScaleDown(t *testing.T) {
+	utestutils.InitLogOutput()
+	tests := []struct {
+		name         string
+		replicas     int32
+		request      createSandboxRequest
+		expectEvents []string
+		expectError  bool
+		checkFunc    func(t *testing.T, sandboxes []v1alpha1.Sandbox)
+		preSetup     func(sbs *v1alpha1.SandboxSet)
+	}{
+		{
+			name:     "scale down available sandboxes",
+			replicas: 0,
+			request: createSandboxRequest{
+				createAvailableSandboxes: 1,
+			},
+			expectEvents: []string{EventSandboxScaledDown},
+			checkFunc: func(t *testing.T, sandboxes []v1alpha1.Sandbox) {
+				assert.Equal(t, 0, len(sandboxes))
+			},
+		},
+		{
+			name:     "scale down creating sandboxes",
+			replicas: 0,
+			request: createSandboxRequest{
+				createCreatingSandboxes: 1,
+			},
+			expectEvents: []string{EventSandboxScaledDown},
+			checkFunc: func(t *testing.T, sandboxes []v1alpha1.Sandbox) {
+				assert.Equal(t, 0, len(sandboxes))
+			},
+		},
+		{
+			name:     "not delete running sandboxes",
+			replicas: 0,
+			request: createSandboxRequest{
+				createRunningSandboxes: 1,
+			},
+			checkFunc: func(t *testing.T, sandboxes []v1alpha1.Sandbox) {
+				assert.Equal(t, 1, len(sandboxes))
+			},
+			expectEvents: []string{},
+		},
+		{
+			name:     "scale down mixed sandboxes (creating first)",
+			replicas: 1,
+			request: createSandboxRequest{
+				createAvailableSandboxes: 2,
+				createCreatingSandboxes:  2,
+			},
+			expectEvents: []string{EventSandboxScaledDown, EventSandboxScaledDown, EventSandboxScaledDown},
+			checkFunc: func(t *testing.T, sandboxes []v1alpha1.Sandbox) {
+				assert.Equal(t, 1, len(sandboxes))
+				// available left
+				assert.True(t, strings.HasPrefix(sandboxes[0].Name, "available"))
+			},
+			preSetup: func(sbs *v1alpha1.SandboxSet) {
+				// Set UpdateRevision so that created sandboxes match the expected revision
+				sbs.Status.UpdateRevision = "6b86f949c"
+			},
+		},
+		{
+			name:     "scale down skips locked sandboxes",
+			replicas: 0,
+			request: createSandboxRequest{
+				createAvailableSandboxes: 1,
+				lockedOwner:              "agent-user",
+			},
+			checkFunc: func(t *testing.T, sandboxes []v1alpha1.Sandbox) {
+				assert.Equal(t, 1, len(sandboxes))
+			},
+			expectError: true,
+		},
+		{
+			name:     "scale down manager-owned locked sandboxes",
+			replicas: 0,
+			request: createSandboxRequest{
+				createAvailableSandboxes: 1,
+				lockedOwner:              consts.OwnerManagerScaleDown,
+			},
+			checkFunc: func(t *testing.T, sandboxes []v1alpha1.Sandbox) {
+				assert.Equal(t, 0, len(sandboxes))
+			},
+			expectEvents: []string{EventSandboxScaledDown},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			k8sClient := NewClient()
+			eventRecorder := record.NewFakeRecorder(10)
+			reconciler := &Reconciler{
+				Client:   k8sClient,
+				Scheme:   testScheme,
+				Recorder: eventRecorder,
+				Codec:    serializer.NewCodecFactory(testScheme).LegacyCodec(v1alpha1.SchemeGroupVersion),
+			}
+			sbs := getSandboxSet(tt.replicas)
+			// Run preSetup if provided (e.g., to set UpdateRevision before creating sandboxes)
+			if tt.preSetup != nil {
+				tt.preSetup(sbs)
+			}
+			assert.NoError(t, k8sClient.Create(ctx, sbs))
+			CreateSandboxes(t, tt.request, sbs, k8sClient)
+
+			scaleUpExpectation.DeleteExpectations(GetControllerKey(sbs))
+			scaleDownExpectation.DeleteExpectations(GetControllerKey(sbs))
+			_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(sbs)})
+			if tt.expectError {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+
+			sandboxes := &v1alpha1.SandboxList{}
+			assert.NoError(t, k8sClient.List(ctx, sandboxes))
+			tt.checkFunc(t, sandboxes.Items)
+			CheckAllEvents(t, eventRecorder, tt.expectEvents)
+		})
+	}
+}
+
+func TestSandboxSetReconcile_WithVolumeClaimTemplates(t *testing.T) {
+	type Case struct {
+		name              string
+		getSandboxSet     func() *v1alpha1.SandboxSet
+		replicas          int32
+		expectedSandboxes int32
+		expectedPVCs      int
+		expectedPVCsFn    func(*testing.T, []corev1.PersistentVolumeClaim)
+	}
+
+	cases := []Case{
+		{
+			name: "sandboxset with volume claim templates creates sandboxes with PVC templates",
+			getSandboxSet: func() *v1alpha1.SandboxSet {
+				sbs := getSandboxSet(2)
+				sbs.Spec.VolumeClaimTemplates = []corev1.PersistentVolumeClaim{
+					{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: "www",
+						},
+						Spec: corev1.PersistentVolumeClaimSpec{
+							AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+							Resources: corev1.VolumeResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceStorage: resource.MustParse("1Gi"),
+								},
+							},
+						},
+					},
+				}
+				return sbs
+			},
+			replicas:          2,
+			expectedSandboxes: 2,
+			expectedPVCs:      0,
+			expectedPVCsFn: func(t *testing.T, pvcs []corev1.PersistentVolumeClaim) {
+				assert.Equal(t, 0, len(pvcs), "SandboxSet controller should not create PVCs directly")
+			},
+		},
+	}
+
+	for _, cs := range cases {
+		t.Run(cs.name, func(t *testing.T) {
+			ctx := context.Background()
+			k8sClient := NewClient()
+
+			sbs := cs.getSandboxSet()
+			sbs.Spec.Replicas = cs.replicas
+			eventRecorder := record.NewFakeRecorder(10)
+			reconciler := &Reconciler{
+				Client:   k8sClient,
+				Scheme:   testScheme,
+				Recorder: eventRecorder,
+				Codec:    serializer.NewCodecFactory(testScheme).LegacyCodec(v1alpha1.SchemeGroupVersion),
+			}
+
+			assert.NoError(t, k8sClient.Create(ctx, sbs))
+			newStatus, err := reconciler.initNewStatus(ctx, sbs)
+			assert.NoError(t, err)
+			sbs.Status = *newStatus.status
+
+			// First reconcile to create sandboxes
+			_, err = reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(sbs)})
+			assert.NoError(t, err)
+
+			// Check that sandboxes were created with volume claim templates
+			sandboxList := &v1alpha1.SandboxList{}
+			err = k8sClient.List(ctx, sandboxList, client.InNamespace(sbs.Namespace))
+			assert.NoError(t, err)
+			assert.Equal(t, int(cs.expectedSandboxes), len(sandboxList.Items))
+
+			// Verify that each sandbox has the volume claim templates
+			for _, sbx := range sandboxList.Items {
+				assert.Equal(t, len(sbs.Spec.VolumeClaimTemplates), len(sbx.Spec.VolumeClaimTemplates))
+				// Check that templates are correctly propagated
+				for i, expectedTemplate := range sbs.Spec.VolumeClaimTemplates {
+					actualTemplate := sbx.Spec.VolumeClaimTemplates[i]
+					assert.Equal(t, expectedTemplate.Name, actualTemplate.Name)
+					assert.Equal(t, expectedTemplate.Spec.AccessModes, actualTemplate.Spec.AccessModes)
+				}
+			}
+
+			// List PVCs (should be 0 as Sandbox controller hasn't run)
+			pvcList := &corev1.PersistentVolumeClaimList{}
+			err = k8sClient.List(ctx, pvcList, client.InNamespace(sbs.Namespace))
+			assert.NoError(t, err)
+			assert.Equal(t, cs.expectedPVCs, len(pvcList.Items))
+
+			// Run additional validation
+			if cs.expectedPVCsFn != nil {
+				cs.expectedPVCsFn(t, pvcList.Items)
+			}
+		})
+	}
+}
+
+func TestCalculateScaleDelta(t *testing.T) {
+	// Helper function to create pointer to IntOrString
+	intOrStringPtr := func(ios intstrutil.IntOrString) *intstrutil.IntOrString {
+		return &ios
+	}
+
+	tests := []struct {
+		name              string
+		replicas          int32
+		statusReplicas    int32
+		availableReplicas int32
+		maxUnavailable    *intstrutil.IntOrString
+		expectedDelta     int
+		description       string
+	}{
+		{
+			name:              "scale up 10, no MaxUnavailable (unlimited)",
+			replicas:          10,
+			statusReplicas:    0,
+			availableReplicas: 0,
+			maxUnavailable:    nil,
+			expectedDelta:     10,
+			description:       "should return full delta when MaxUnavailable is not set",
+		},
+		{
+			name:              "scale up 10, MaxUnavailable=3",
+			replicas:          10,
+			statusReplicas:    0,
+			availableReplicas: 0,
+			maxUnavailable:    intOrStringPtr(intstrutil.FromInt(3)),
+			expectedDelta:     3,
+			description:       "should limit scale up to MaxUnavailable value",
+		},
+		{
+			name:              "scale up 5 (from 2 to 7), MaxUnavailable=3",
+			replicas:          7,
+			statusReplicas:    2,
+			availableReplicas: 2,
+			maxUnavailable:    intOrStringPtr(intstrutil.FromInt(3)),
+			expectedDelta:     3,
+			description:       "should limit scale up delta to MaxUnavailable",
+		},
+		{
+			name:              "scale up 3, MaxUnavailable=5 (delta < maxUnavailable)",
+			replicas:          3,
+			statusReplicas:    0,
+			availableReplicas: 0,
+			maxUnavailable:    intOrStringPtr(intstrutil.FromInt(5)),
+			expectedDelta:     3,
+			description:       "should return actual delta when it's less than MaxUnavailable",
+		},
+		{
+			name:              "scale up 10, MaxUnavailable=50%",
+			replicas:          10,
+			statusReplicas:    0,
+			availableReplicas: 0,
+			maxUnavailable:    intOrStringPtr(intstrutil.FromString("50%")),
+			expectedDelta:     5,
+			description:       "should calculate percentage-based MaxUnavailable (50% of 10 = 5)",
+		},
+		{
+			name:              "scale up 20, MaxUnavailable=30%",
+			replicas:          20,
+			statusReplicas:    0,
+			availableReplicas: 0,
+			maxUnavailable:    intOrStringPtr(intstrutil.FromString("30%")),
+			expectedDelta:     6,
+			description:       "should calculate percentage-based MaxUnavailable (30% of 20 = 6)",
+		},
+		{
+			name:              "scale up 6 (from 4 to 10), MaxUnavailable=20%",
+			replicas:          10,
+			statusReplicas:    4,
+			availableReplicas: 4,
+			maxUnavailable:    intOrStringPtr(intstrutil.FromString("20%")),
+			expectedDelta:     2,
+			description:       "should limit to 20% of target replicas (20% of 10 = 2)",
+		},
+		{
+			name:              "MaxUnavailable=0, should block scale up",
+			replicas:          5,
+			statusReplicas:    0,
+			availableReplicas: 0,
+			maxUnavailable:    intOrStringPtr(intstrutil.FromInt(0)),
+			expectedDelta:     0,
+			description:       "should not allow any scale up when MaxUnavailable is 0",
+		},
+		{
+			name:              "MaxUnavailable=1, scale up 1 at a time",
+			replicas:          5,
+			statusReplicas:    0,
+			availableReplicas: 0,
+			maxUnavailable:    intOrStringPtr(intstrutil.FromInt(1)),
+			expectedDelta:     1,
+			description:       "should only scale up 1 sandbox at a time",
+		},
+		{
+			name:              "no scaling needed (replicas match)",
+			replicas:          5,
+			statusReplicas:    5,
+			availableReplicas: 5,
+			maxUnavailable:    intOrStringPtr(intstrutil.FromInt(3)),
+			expectedDelta:     0,
+			description:       "should return 0 when no scaling is needed",
+		},
+		{
+			name:              "scale down (negative delta), MaxUnavailable should not apply",
+			replicas:          3,
+			statusReplicas:    7,
+			availableReplicas: 7,
+			maxUnavailable:    intOrStringPtr(intstrutil.FromInt(2)),
+			expectedDelta:     -4,
+			description:       "MaxUnavailable should not limit scale down operations",
+		},
+		{
+			name:              "scale down without MaxUnavailable",
+			replicas:          2,
+			statusReplicas:    5,
+			availableReplicas: 5,
+			maxUnavailable:    nil,
+			expectedDelta:     -3,
+			description:       "should return negative delta for scale down",
+		},
+		{
+			name:              "large scale up with MaxUnavailable=100%",
+			replicas:          100,
+			statusReplicas:    0,
+			availableReplicas: 0,
+			maxUnavailable:    intOrStringPtr(intstrutil.FromString("100%")),
+			expectedDelta:     100,
+			description:       "100% MaxUnavailable should allow full scale up",
+		},
+		{
+			name:              "small percentage MaxUnavailable (10% of 100 = 10)",
+			replicas:          100,
+			statusReplicas:    0,
+			availableReplicas: 0,
+			maxUnavailable:    intOrStringPtr(intstrutil.FromString("10%")),
+			expectedDelta:     10,
+			description:       "should calculate 10% of 100 replicas correctly",
+		},
+		{
+			name:              "edge case: MaxUnavailable=1, scale up from 99 to 100",
+			replicas:          100,
+			statusReplicas:    99,
+			availableReplicas: 99,
+			maxUnavailable:    intOrStringPtr(intstrutil.FromInt(1)),
+			expectedDelta:     1,
+			description:       "should scale up 1 sandbox when delta equals MaxUnavailable",
+		},
+		{
+			name:              "MaxUnavailable with creating sandboxes - should subtract creating",
+			replicas:          10,
+			statusReplicas:    3,
+			availableReplicas: 1,
+			maxUnavailable:    intOrStringPtr(intstrutil.FromInt(5)),
+			expectedDelta:     3,
+			description:       "should subtract creating sandboxes (3) from MaxUnavailable (5-2=3)",
+		},
+		{
+			name:              "MaxUnavailable becomes negative after subtracting creating",
+			replicas:          10,
+			statusReplicas:    5,
+			availableReplicas: 0,
+			maxUnavailable:    intOrStringPtr(intstrutil.FromInt(3)),
+			expectedDelta:     0,
+			description:       "should set to 0 when MaxUnavailable - creating < 0 (3-5=-2, set to 0)",
+		},
+		{
+			name:              "scale up with many creating sandboxes",
+			replicas:          10,
+			statusReplicas:    4,
+			availableReplicas: 2,
+			maxUnavailable:    intOrStringPtr(intstrutil.FromString("50%")),
+			expectedDelta:     3,
+			description:       "50% of 10 = 5, minus 2 creating = 3",
+		},
+		{
+			name:              "zero delta when creating sandboxes >= MaxUnavailable",
+			replicas:          10,
+			statusReplicas:    6,
+			availableReplicas: 2,
+			maxUnavailable:    intOrStringPtr(intstrutil.FromInt(2)),
+			expectedDelta:     0,
+			description:       "MaxUnavailable=2 but already 4 creating, should not create more",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sbs := getSandboxSet(tt.replicas)
+			if tt.maxUnavailable != nil {
+				sbs.Spec.ScaleStrategy = v1alpha1.SandboxSetScaleStrategy{
+					MaxUnavailable: tt.maxUnavailable,
+				}
+			}
+
+			status := &v1alpha1.SandboxSetStatus{
+				Replicas:          tt.statusReplicas,
+				AvailableReplicas: tt.availableReplicas,
+			}
+
+			delta := calculateScaleDelta(sbs, status)
+
+			assert.Equal(t, tt.expectedDelta, delta, tt.description)
+
+			// Additional validations
+			if tt.replicas > tt.statusReplicas {
+				// Scale up case
+				assert.GreaterOrEqual(t, delta, 0, "delta should be non-negative for scale up")
+				assert.LessOrEqual(t, delta, int(tt.replicas-tt.statusReplicas),
+					"delta should not exceed the required scale up amount")
+			} else if tt.replicas < tt.statusReplicas {
+				// Scale down case: MaxUnavailable should not affect scale down
+				assert.Equal(t, int(tt.replicas-tt.statusReplicas), delta,
+					"scale down should return the full negative delta")
+			}
+		})
+	}
+}
+
+// TestReconciler_createSandbox covers the SandboxTemplate resolution branch
+// introduced in createSandbox: when spec.templateRef is set, the controller
+// must Get the referenced SandboxTemplate, propagate its labels/annotations
+// to the new Sandbox, or surface the Get error as a Warning event when the
+// template is missing.
+func TestReconciler_createSandbox(t *testing.T) {
+	utestutils.InitLogOutput()
+
+	mkSBS := func(name string, ref *v1alpha1.SandboxTemplateRef, inline *corev1.PodTemplateSpec) *v1alpha1.SandboxSet {
+		return &v1alpha1.SandboxSet{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: "default",
+				UID:       types.UID("uid-" + name),
+			},
+			Spec: v1alpha1.SandboxSetSpec{
+				Replicas: 1,
+				EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+					TemplateRef: ref,
+					Template:    inline,
+				},
+			},
+		}
+	}
+
+	tests := []struct {
+		name             string
+		sbs              *v1alpha1.SandboxSet
+		existingTemplate *v1alpha1.SandboxTemplate
+		wantErr          string
+		wantWarning      bool
+		checkSandbox     func(t *testing.T, sbx *v1alpha1.Sandbox)
+	}{
+		{
+			name: "inline template creates sandbox successfully",
+			sbs: mkSBS("inline-sbs", nil, &corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "inline"}},
+				Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "img:v1"}}},
+			}),
+			checkSandbox: func(t *testing.T, sbx *v1alpha1.Sandbox) {
+				assert.Equal(t, "inline", sbx.Labels["app"])
+				assert.Equal(t, "inline-sbs", sbx.Labels[v1alpha1.LabelSandboxTemplate])
+			},
+		},
+		{
+			name: "templateRef resolved successfully and labels inherited",
+			sbs:  mkSBS("ref-sbs", &v1alpha1.SandboxTemplateRef{Name: "tpl-ok"}, nil),
+			existingTemplate: &v1alpha1.SandboxTemplate{
+				ObjectMeta: metav1.ObjectMeta{Name: "tpl-ok", Namespace: "default"},
+				Spec: v1alpha1.SandboxTemplateSpec{
+					Template: &corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{
+							Labels:      map[string]string{"app": "from-tpl"},
+							Annotations: map[string]string{"source": "tpl"},
+						},
+						Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "img:v1"}}},
+					},
+				},
+			},
+			checkSandbox: func(t *testing.T, sbx *v1alpha1.Sandbox) {
+				assert.Equal(t, "from-tpl", sbx.Labels["app"])
+				assert.Equal(t, "tpl", sbx.Annotations["source"])
+				assert.Equal(t, "tpl-ok", sbx.Labels[v1alpha1.LabelSandboxTemplate])
+				// templateRef mode: Template stays nil, sandbox controller
+				// resolves the pod template from TemplateRef at pod creation time.
+				require.Nil(t, sbx.Spec.Template)
+				require.NotNil(t, sbx.Spec.TemplateRef)
+				assert.Equal(t, "tpl-ok", sbx.Spec.TemplateRef.Name)
+			},
+		},
+		{
+			name:        "templateRef not found returns error and emits warning",
+			sbs:         mkSBS("missing-sbs", &v1alpha1.SandboxTemplateRef{Name: "does-not-exist"}, nil),
+			wantErr:     "failed to resolve sandbox template",
+			wantWarning: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			k8sClient := NewClient()
+			if tt.existingTemplate != nil {
+				assert.NoError(t, k8sClient.Create(ctx, tt.existingTemplate))
+			}
+			eventRecorder := record.NewFakeRecorder(10)
+			reconciler := &Reconciler{
+				Client:   k8sClient,
+				Scheme:   testScheme,
+				Recorder: eventRecorder,
+				Codec:    serializer.NewCodecFactory(testScheme).LegacyCodec(v1alpha1.SchemeGroupVersion),
+			}
+
+			sbx, err := reconciler.createSandbox(ctx, tt.sbs, "rev-1")
+
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				assert.Nil(t, sbx)
+			} else {
+				require.NoError(t, err)
+				require.NotNil(t, sbx)
+				assert.Equal(t, "rev-1", sbx.Labels[v1alpha1.LabelTemplateHash])
+				assert.Equal(t, tt.sbs.Namespace, sbx.Namespace)
+				// Controller owner ref should be set.
+				var foundOwner bool
+				for _, ref := range sbx.OwnerReferences {
+					if ref.UID == tt.sbs.UID && ref.Controller != nil && *ref.Controller {
+						foundOwner = true
+					}
+				}
+				assert.True(t, foundOwner, "sandbox must have SandboxSet as controller owner")
+				if tt.checkSandbox != nil {
+					tt.checkSandbox(t, sbx)
+				}
+			}
+
+			if tt.wantWarning {
+				select {
+				case evt := <-eventRecorder.Events:
+					assert.Contains(t, evt, "Warning")
+					assert.Contains(t, evt, EventCreateSandboxFailed)
+				default:
+					t.Errorf("expected a warning event but got none")
+				}
+			}
+		})
+	}
+}

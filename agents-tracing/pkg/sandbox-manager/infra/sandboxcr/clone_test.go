@@ -1,0 +1,1524 @@
+/*
+Copyright 2025.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package sandboxcr
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"golang.org/x/time/rate"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/openkruise/agents/pkg/utils/runtime"
+
+	"github.com/openkruise/agents/api/v1alpha1"
+	infracache "github.com/openkruise/agents/pkg/cache"
+	"github.com/openkruise/agents/pkg/cache/cachetest"
+	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
+	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	"github.com/openkruise/agents/pkg/servers/e2b/models"
+	utestutils "github.com/openkruise/agents/pkg/utils/testutils"
+	testutils "github.com/openkruise/agents/test/utils"
+)
+
+func TestValidateAndInitCloneOptions(t *testing.T) {
+	tests := []struct {
+		name        string
+		opts        infra.CloneSandboxOptions
+		expectError string
+		expectOpts  infra.CloneSandboxOptions
+	}{
+		{
+			name: "valid options",
+			opts: infra.CloneSandboxOptions{
+				User:         "test-user",
+				CheckPointID: "test-checkpoint",
+			},
+			expectOpts: infra.CloneSandboxOptions{
+				User:             "test-user",
+				CheckPointID:     "test-checkpoint",
+				WaitReadyTimeout: 0, // will be set to default
+			},
+		},
+		{
+			name: "empty user",
+			opts: infra.CloneSandboxOptions{
+				CheckPointID: "test-checkpoint",
+			},
+			expectError: "user is required",
+		},
+		{
+			name: "empty checkpoint id",
+			opts: infra.CloneSandboxOptions{
+				User: "test-user",
+			},
+			expectError: "checkpoint id is required",
+		},
+		{
+			name: "custom wait ready timeout",
+			opts: infra.CloneSandboxOptions{
+				User:             "test-user",
+				CheckPointID:     "test-checkpoint",
+				WaitReadyTimeout: 60 * time.Second,
+			},
+			expectOpts: infra.CloneSandboxOptions{
+				User:             "test-user",
+				CheckPointID:     "test-checkpoint",
+				WaitReadyTimeout: 60 * time.Second,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := ValidateAndInitCloneOptions(tt.opts)
+			if tt.expectError != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, tt.expectOpts.User, result.User)
+				assert.Equal(t, tt.expectOpts.CheckPointID, result.CheckPointID)
+				if tt.opts.WaitReadyTimeout > 0 {
+					assert.Equal(t, tt.expectOpts.WaitReadyTimeout, result.WaitReadyTimeout)
+				}
+			}
+		})
+	}
+}
+
+func TestValidateAndInitCloneOptions_ReserveFailedSandboxFor(t *testing.T) {
+	tests := []struct {
+		name        string
+		opts        infra.CloneSandboxOptions
+		expectFor   time.Duration
+		expectInput bool // expects the returned pointer to be the same instance as input
+	}{
+		{
+			name: "unset defaults to DefaultReserveFailedSandboxFor",
+			opts: infra.CloneSandboxOptions{
+				User:         "test-user",
+				CheckPointID: "test-checkpoint",
+			},
+			expectFor: DefaultReserveFailedSandboxFor,
+		},
+		{
+			name: "explicit never deletes immediately",
+			opts: infra.CloneSandboxOptions{
+				User:                    "test-user",
+				CheckPointID:            "test-checkpoint",
+				ReserveFailedSandboxFor: ptr.To(consts.ReserveFailedSandboxNever),
+			},
+			expectFor:   consts.ReserveFailedSandboxNever,
+			expectInput: true,
+		},
+		{
+			name: "explicit finite reserve",
+			opts: infra.CloneSandboxOptions{
+				User:                    "test-user",
+				CheckPointID:            "test-checkpoint",
+				ReserveFailedSandboxFor: ptr.To(90 * time.Minute),
+			},
+			expectFor:   90 * time.Minute,
+			expectInput: true,
+		},
+		{
+			name: "explicit forever reserve",
+			opts: infra.CloneSandboxOptions{
+				User:                    "test-user",
+				CheckPointID:            "test-checkpoint",
+				ReserveFailedSandboxFor: ptr.To(consts.ReserveFailedSandboxForever),
+			},
+			expectFor:   consts.ReserveFailedSandboxForever,
+			expectInput: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ValidateAndInitCloneOptions(tt.opts)
+			require.NoError(t, err)
+			require.NotNil(t, got.ReserveFailedSandboxFor)
+			assert.Equal(t, tt.expectFor, *got.ReserveFailedSandboxFor)
+			if tt.expectInput {
+				assert.Same(t, tt.opts.ReserveFailedSandboxFor, got.ReserveFailedSandboxFor)
+			}
+		})
+	}
+}
+
+func TestValidateAndInitCheckpointOptions(t *testing.T) {
+	tests := []struct {
+		name       string
+		opts       infra.CreateCheckpointOptions
+		expectOpts infra.CreateCheckpointOptions
+	}{
+		{
+			name:       "default timeout",
+			opts:       infra.CreateCheckpointOptions{},
+			expectOpts: infra.CreateCheckpointOptions{WaitSuccessTimeout: consts.DefaultWaitCheckpointTimeout},
+		},
+		{
+			name: "custom timeout",
+			opts: infra.CreateCheckpointOptions{
+				WaitSuccessTimeout: 60 * time.Second,
+			},
+			expectOpts: infra.CreateCheckpointOptions{
+				WaitSuccessTimeout: 60 * time.Second,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := ValidateAndInitCheckpointOptions(tt.opts)
+			assert.Equal(t, tt.expectOpts.WaitSuccessTimeout, result.WaitSuccessTimeout)
+		})
+	}
+}
+
+func TestNewSandboxFromTemplate_DeepCopiesTemplate(t *testing.T) {
+	tests := []struct {
+		name          string
+		mutate        func(*Sandbox)
+		verifyInitial func(*testing.T, *v1alpha1.SandboxTemplate)
+	}{
+		{
+			name: "pod template labels are decoupled from source template",
+			mutate: func(sbx *Sandbox) {
+				sbx.SetPodLabels(map[string]string{"mutated": "true"})
+				sbx.SetImage("nginx:new")
+			},
+			verifyInitial: func(t *testing.T, tmpl *v1alpha1.SandboxTemplate) {
+				require.NotNil(t, tmpl.Spec.Template)
+				assert.Equal(t, map[string]string{"origin": "true"}, tmpl.Spec.Template.Labels)
+				require.Len(t, tmpl.Spec.Template.Spec.Containers, 1)
+				assert.Equal(t, "nginx:old", tmpl.Spec.Template.Spec.Containers[0].Image)
+			},
+		},
+		{
+			name: "volume claim templates are decoupled from source template",
+			mutate: func(sbx *Sandbox) {
+				sbx.Spec.VolumeClaimTemplates[0].Name = "mutated-pvc"
+			},
+			verifyInitial: func(t *testing.T, tmpl *v1alpha1.SandboxTemplate) {
+				require.Len(t, tmpl.Spec.VolumeClaimTemplates, 1)
+				assert.Equal(t, "data", tmpl.Spec.VolumeClaimTemplates[0].Name)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpl := &v1alpha1.SandboxTemplate{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "checkpoint-template",
+					Namespace: "default",
+				},
+				Spec: v1alpha1.SandboxTemplateSpec{
+					Template: &corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{
+							Labels: map[string]string{"origin": "true"},
+						},
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{
+									Name:  "runtime",
+									Image: "nginx:old",
+								},
+							},
+						},
+					},
+					VolumeClaimTemplates: []corev1.PersistentVolumeClaim{
+						{
+							ObjectMeta: metav1.ObjectMeta{Name: "data"},
+						},
+					},
+				},
+			}
+
+			sbx := newSandboxFromTemplate(infra.CloneSandboxOptions{
+				User:         "test-user",
+				CheckPointID: "checkpoint-template",
+			}, tmpl, nil)
+			tt.mutate(sbx)
+			tt.verifyInitial(t, tmpl)
+		})
+	}
+}
+
+func TestFindCheckpointAndTemplateById_NamespaceScoped(t *testing.T) {
+	objects := []client.Object{
+		&v1alpha1.SandboxTemplate{
+			ObjectMeta: metav1.ObjectMeta{Name: "cp-a", Namespace: "team-a"},
+		},
+		&v1alpha1.SandboxTemplate{
+			ObjectMeta: metav1.ObjectMeta{Name: "cp-b", Namespace: "team-b"},
+		},
+		&v1alpha1.Checkpoint{
+			ObjectMeta: metav1.ObjectMeta{Name: "cp-a", Namespace: "team-a"},
+			Status:     v1alpha1.CheckpointStatus{CheckpointId: "shared-checkpoint-id"},
+		},
+		&v1alpha1.Checkpoint{
+			ObjectMeta: metav1.ObjectMeta{Name: "cp-b", Namespace: "team-b"},
+			Status:     v1alpha1.CheckpointStatus{CheckpointId: "shared-checkpoint-id"},
+		},
+	}
+	cache, _, err := cachetest.NewTestCache(t, objects...)
+	require.NoError(t, err)
+
+	tmpl, cp, _, err := findCheckpointAndTemplateById(t.Context(), infra.CloneSandboxOptions{
+		Namespace:          "team-b",
+		CheckPointID:       "shared-checkpoint-id",
+		SkipWaitCheckpoint: true,
+	}, cache, infra.CloneMetrics{})
+	require.NoError(t, err)
+	assert.Equal(t, "team-b", cp.Namespace)
+	assert.Equal(t, "cp-b", cp.Name)
+	assert.Equal(t, "team-b", tmpl.Namespace)
+	assert.Equal(t, "cp-b", tmpl.Name)
+}
+
+func createCloneTestCheckpoint(t *testing.T, c client.Client, cache infracache.Provider, checkpointID string) {
+	t.Helper()
+	sbt := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: checkpointID, Namespace: "default"},
+		Spec: v1alpha1.SandboxTemplateSpec{
+			Template: &corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "main", Image: "test-image"}},
+				},
+			},
+		},
+	}
+	require.NoError(t, c.Create(t.Context(), sbt))
+
+	cp := &v1alpha1.Checkpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      checkpointID,
+			Namespace: "default",
+			Labels: map[string]string{
+				v1alpha1.LabelSandboxTemplate: checkpointID,
+			},
+		},
+		Status: v1alpha1.CheckpointStatus{CheckpointId: checkpointID},
+	}
+	require.NoError(t, c.Create(t.Context(), cp))
+	require.Eventually(t, func() bool {
+		_, err := cache.GetCheckpoint(t.Context(), infracache.GetCheckpointOptions{CheckpointID: checkpointID})
+		return err == nil
+	}, time.Second, 10*time.Millisecond)
+}
+
+func TestCloneSandbox_CleansFailedCreatedSandbox(t *testing.T) {
+	tests := []struct {
+		name           string
+		reserveFor     time.Duration
+		expectDeleted  bool
+		expectShutdown bool
+	}{
+		{
+			name:          "reserve for zero deletes failed created sandbox",
+			reserveFor:    consts.ReserveFailedSandboxNever,
+			expectDeleted: true,
+		},
+		{
+			name:           "reserve for duration writes shutdown time",
+			reserveFor:     time.Hour,
+			expectShutdown: true,
+		},
+		{
+			name:       "reserve forever keeps sandbox without shutdown time",
+			reserveFor: consts.ReserveFailedSandboxForever,
+		},
+	}
+
+	origCreateSandbox := DefaultCreateSandbox
+	t.Cleanup(func() { DefaultCreateSandbox = origCreateSandbox })
+
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cache, fc, err := cachetest.NewTestCache(t)
+			require.NoError(t, err)
+			require.NoError(t, cache.Run(t.Context()))
+			defer cache.Stop(t.Context())
+
+			checkpointID := fmt.Sprintf("clone-cleanup-%d", i)
+			createCloneTestCheckpoint(t, fc, cache, checkpointID)
+
+			sandboxName := fmt.Sprintf("failed-clone-cleanup-%d", i)
+			DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client) (*v1alpha1.Sandbox, error) {
+				sbx.Name = sandboxName
+				return origCreateSandbox(ctx, sbx, c)
+			}
+
+			opts := infra.CloneSandboxOptions{
+				User:                    "test-user",
+				CheckPointID:            checkpointID,
+				WaitReadyTimeout:        20 * time.Millisecond,
+				CloneTimeout:            200 * time.Millisecond,
+				ReserveFailedSandboxFor: ptr.To(tt.reserveFor),
+			}
+			sbx, _, err := CloneSandbox(t.Context(), opts, cache)
+			require.Error(t, err)
+			assert.Nil(t, sbx)
+			assert.Contains(t, err.Error(), "failed to wait for sandbox ready")
+
+			got := &v1alpha1.Sandbox{}
+			err = fc.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: sandboxName}, got)
+			if tt.expectDeleted {
+				assert.True(t, apierrors.IsNotFound(err))
+				return
+			}
+			require.NoError(t, err)
+			if tt.expectShutdown {
+				require.NotNil(t, got.Spec.ShutdownTime)
+				assert.WithinDuration(t, time.Now().Add(time.Hour), got.Spec.ShutdownTime.Time, 5*time.Second)
+				return
+			}
+			assert.Nil(t, got.Spec.ShutdownTime)
+		})
+	}
+}
+
+func TestCloneSandbox(t *testing.T) {
+	utestutils.InitLogOutput()
+
+	checkpointID := "test-checkpoint-123"
+	user := "test-user"
+
+	// Define context key types for sandbox override
+	type sbxOverrideKey struct{}
+	type sbxOverride struct {
+		Name        string
+		RuntimeURL  string
+		AccessToken string
+	}
+
+	// Decorator: DefaultCreateSandbox - set sandbox ready after creation
+	origCreateSandbox := DefaultCreateSandbox
+	DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client) (*v1alpha1.Sandbox, error) {
+		if override, ok := ctx.Value(sbxOverrideKey{}).(sbxOverride); ok {
+			if override.Name != "" {
+				sbx.Name = override.Name
+			}
+			if override.RuntimeURL != "" {
+				if sbx.Annotations == nil {
+					sbx.Annotations = map[string]string{}
+				}
+				sbx.Annotations[v1alpha1.AnnotationRuntimeURL] = override.RuntimeURL
+			}
+			if override.AccessToken != "" {
+				if sbx.Annotations == nil {
+					sbx.Annotations = map[string]string{}
+				}
+				sbx.Annotations[v1alpha1.AnnotationRuntimeAccessToken] = override.AccessToken
+			}
+		}
+		created, err := origCreateSandbox(ctx, sbx, c)
+		if err != nil {
+			return nil, err
+		}
+		// Update Sandbox status to Ready
+		// checkSandboxReady checks: state == SandboxStateRunning && PodIP != ""
+		// GetSandboxState requires: Phase == Running, not controlled by SandboxSet, Ready condition is true
+		created.Status = v1alpha1.SandboxStatus{
+			Phase:              v1alpha1.SandboxRunning,
+			ObservedGeneration: created.Generation,
+			Conditions: []metav1.Condition{
+				{
+					Type:   string(v1alpha1.SandboxConditionReady),
+					Status: metav1.ConditionTrue,
+					Reason: v1alpha1.SandboxReadyReasonPodReady,
+				},
+			},
+			PodInfo: v1alpha1.PodInfo{
+				PodIP: "1.2.3.4",
+			},
+		}
+		err = c.Status().Update(ctx, created)
+		if err != nil {
+			return nil, err
+		}
+		return created, nil
+	}
+	t.Cleanup(func() { DefaultCreateSandbox = origCreateSandbox })
+
+	tests := []struct {
+		name                  string
+		opts                  infra.CloneSandboxOptions
+		serverOpts            testutils.TestRuntimeServerOptions
+		initRuntime           *config.InitRuntimeOptions
+		sbxOverride           sbxOverride
+		checkpointAnnotations map[string]string
+		preProcess            func(t *testing.T, cache infracache.Provider, c client.Client)
+		postCheck             func(t *testing.T, sbx infra.Sandbox, metrics infra.CloneMetrics)
+		expectError           string
+	}{
+		{
+			name: "successful clone",
+			opts: infra.CloneSandboxOptions{
+				User:             user,
+				CheckPointID:     checkpointID,
+				WaitReadyTimeout: 30 * time.Second,
+			},
+			serverOpts: testutils.TestRuntimeServerOptions{
+				RunCommandResult: runtime.RunCommandResult{
+					PID:    1,
+					Exited: true,
+				},
+				RunCommandImmediately: true,
+			},
+			sbxOverride: sbxOverride{Name: "test-sandbox-clone-1"},
+			postCheck: func(t *testing.T, sbx infra.Sandbox, metrics infra.CloneMetrics) {
+				assert.NotNil(t, sbx)
+				assert.Equal(t, user, sbx.GetAnnotations()[v1alpha1.AnnotationOwner])
+				assert.Equal(t, checkpointID, sbx.GetLabels()[v1alpha1.LabelSandboxTemplate])
+				assert.Equal(t, "true", sbx.GetLabels()[v1alpha1.LabelSandboxIsClaimed])
+				assert.NotEmpty(t, sbx.GetAnnotations()[v1alpha1.AnnotationClaimTime])
+				// Verify metrics are recorded
+				assert.GreaterOrEqual(t, metrics.GetTemplate, time.Duration(0))
+				assert.GreaterOrEqual(t, metrics.CreateSandbox, time.Duration(0))
+				assert.GreaterOrEqual(t, metrics.WaitReady, time.Duration(0))
+				assert.GreaterOrEqual(t, metrics.Total, time.Duration(0))
+			},
+		},
+		{
+			name: "clone with modifier",
+			opts: infra.CloneSandboxOptions{
+				User:             user,
+				CheckPointID:     checkpointID,
+				WaitReadyTimeout: 30 * time.Second,
+				Modifier: func(sbx infra.Sandbox) {
+					sbx.SetAnnotations(map[string]string{
+						"custom-annotation": "custom-value",
+					})
+				},
+			},
+			serverOpts: testutils.TestRuntimeServerOptions{
+				RunCommandResult: runtime.RunCommandResult{
+					PID:    1,
+					Exited: true,
+				},
+				RunCommandImmediately: true,
+			},
+			sbxOverride: sbxOverride{Name: "test-sandbox-clone-2"},
+			postCheck: func(t *testing.T, sbx infra.Sandbox, metrics infra.CloneMetrics) {
+				assert.Equal(t, "custom-value", sbx.GetAnnotations()["custom-annotation"])
+				assert.Equal(t, user, sbx.GetAnnotations()[v1alpha1.AnnotationOwner])
+			},
+		},
+		{
+			name: "re-init runtime success",
+			opts: infra.CloneSandboxOptions{
+				User:             user,
+				CheckPointID:     checkpointID,
+				WaitReadyTimeout: 30 * time.Second,
+			},
+			initRuntime: &config.InitRuntimeOptions{
+				AccessToken: "test-access-token",
+				EnvVars: map[string]string{
+					"VAR1": "value1",
+					"VAR2": "value2",
+				},
+			},
+			serverOpts: testutils.TestRuntimeServerOptions{
+				RunCommandResult: runtime.RunCommandResult{
+					PID:    1,
+					Exited: true,
+				},
+				RunCommandImmediately: true,
+				InitErrCode:           0,
+			},
+			sbxOverride: sbxOverride{Name: "test-sandbox-clone-3"},
+			postCheck: func(t *testing.T, sbx infra.Sandbox, metrics infra.CloneMetrics) {
+				assert.NotNil(t, sbx)
+				assert.GreaterOrEqual(t, metrics.InitRuntime, time.Duration(0))
+				// Check runtime init annotations
+				assert.Equal(t, "test-access-token", sbx.GetAnnotations()[v1alpha1.AnnotationRuntimeAccessToken])
+				assert.NotEmpty(t, sbx.GetAnnotations()[v1alpha1.AnnotationInitRuntimeRequest])
+			},
+		},
+		{
+			name: "re-init runtime 401 (ReInit success)",
+			opts: infra.CloneSandboxOptions{
+				User:             user,
+				CheckPointID:     checkpointID,
+				WaitReadyTimeout: 30 * time.Second,
+			},
+			initRuntime: &config.InitRuntimeOptions{
+				AccessToken: "test-access-token",
+				EnvVars: map[string]string{
+					"VAR1": "value1",
+				},
+			},
+			serverOpts: testutils.TestRuntimeServerOptions{
+				RunCommandResult: runtime.RunCommandResult{
+					PID:    1,
+					Exited: true,
+				},
+				RunCommandImmediately: true,
+				InitErrCode:           401,
+			},
+			sbxOverride: sbxOverride{Name: "test-sandbox-clone-4"},
+			postCheck: func(t *testing.T, sbx infra.Sandbox, metrics infra.CloneMetrics) {
+				assert.NotNil(t, sbx)
+				assert.GreaterOrEqual(t, metrics.InitRuntime, time.Duration(0))
+				// Check runtime init annotations
+				assert.Equal(t, "test-access-token", sbx.GetAnnotations()[v1alpha1.AnnotationRuntimeAccessToken])
+				assert.NotEmpty(t, sbx.GetAnnotations()[v1alpha1.AnnotationInitRuntimeRequest])
+			},
+		},
+		{
+			name: "re-init runtime 500 error",
+			opts: infra.CloneSandboxOptions{
+				User:             user,
+				CheckPointID:     checkpointID,
+				WaitReadyTimeout: 30 * time.Second,
+			},
+			initRuntime: &config.InitRuntimeOptions{
+				AccessToken: "test-access-token",
+				EnvVars: map[string]string{
+					"VAR1": "value1",
+				},
+			},
+			serverOpts: testutils.TestRuntimeServerOptions{
+				RunCommandResult: runtime.RunCommandResult{
+					PID:    1,
+					Exited: true,
+				},
+				RunCommandImmediately: true,
+				InitErrCode:           500,
+			},
+			sbxOverride: sbxOverride{Name: "test-sandbox-clone-5"},
+			expectError: "failed to init runtime",
+		},
+		{
+			name: "checkpoint not found",
+			opts: infra.CloneSandboxOptions{
+				User:             user,
+				CheckPointID:     "non-existent-checkpoint",
+				WaitReadyTimeout: 30 * time.Second,
+			},
+			serverOpts: testutils.TestRuntimeServerOptions{
+				RunCommandResult: runtime.RunCommandResult{
+					PID:    1,
+					Exited: true,
+				},
+				RunCommandImmediately: true,
+			},
+			expectError: "not found",
+		},
+		{
+			name: "checkpoint without template label",
+			opts: infra.CloneSandboxOptions{
+				User:             user,
+				CheckPointID:     "checkpoint-no-template",
+				WaitReadyTimeout: 30 * time.Second,
+			},
+			serverOpts: testutils.TestRuntimeServerOptions{
+				RunCommandResult: runtime.RunCommandResult{
+					PID:    1,
+					Exited: true,
+				},
+				RunCommandImmediately: true,
+			},
+			preProcess: func(t *testing.T, cache infracache.Provider, c client.Client) {
+				// Create checkpoint without template label
+				cp := &v1alpha1.Checkpoint{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "checkpoint-no-template",
+						Namespace: "default",
+						Labels:    map[string]string{},
+					},
+					Status: v1alpha1.CheckpointStatus{
+						CheckpointId: "checkpoint-no-template",
+					},
+				}
+				require.NoError(t, c.Create(t.Context(), cp))
+				// Wait for checkpoint to be cached
+				require.Eventually(t, func() bool {
+					_, err := cache.GetCheckpoint(t.Context(), infracache.GetCheckpointOptions{CheckpointID: "checkpoint-no-template"})
+					return err == nil
+				}, time.Second, 10*time.Millisecond)
+			},
+			expectError: "not found",
+		},
+		{
+			name: "template not found",
+			opts: infra.CloneSandboxOptions{
+				User:             user,
+				CheckPointID:     "checkpoint-no-sbt",
+				WaitReadyTimeout: 30 * time.Second,
+			},
+			serverOpts: testutils.TestRuntimeServerOptions{
+				RunCommandResult: runtime.RunCommandResult{
+					PID:    1,
+					Exited: true,
+				},
+				RunCommandImmediately: true,
+			},
+			preProcess: func(t *testing.T, cache infracache.Provider, c client.Client) {
+				// Create checkpoint - CloneSandbox now looks for SandboxTemplate with same name as checkpoint
+				cp := &v1alpha1.Checkpoint{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "checkpoint-no-sbt",
+						Namespace: "default",
+						Labels: map[string]string{
+							v1alpha1.LabelSandboxTemplate: "checkpoint-no-sbt",
+						},
+					},
+					Status: v1alpha1.CheckpointStatus{
+						CheckpointId: "checkpoint-no-sbt",
+					},
+				}
+				require.NoError(t, c.Create(t.Context(), cp))
+				// Wait for checkpoint to be cached
+				require.Eventually(t, func() bool {
+					_, err := cache.GetCheckpoint(t.Context(), infracache.GetCheckpointOptions{CheckpointID: "checkpoint-no-sbt"})
+					return err == nil
+				}, time.Second, 10*time.Millisecond)
+			},
+			expectError: "not found",
+		},
+		{
+			name: "csi mount success",
+			opts: infra.CloneSandboxOptions{
+				User:             user,
+				CheckPointID:     checkpointID,
+				WaitReadyTimeout: 30 * time.Second,
+				CSIMount: &config.CSIMountOptions{
+					MountOptionList: []config.MountConfig{
+						{
+							Driver:     "test-driver",
+							RequestRaw: "test-request",
+						},
+					},
+				},
+			},
+			serverOpts: testutils.TestRuntimeServerOptions{
+				RunCommandResult: runtime.RunCommandResult{
+					PID:      1,
+					ExitCode: 0,
+					Exited:   true,
+				},
+				RunCommandImmediately: true,
+			},
+			sbxOverride: sbxOverride{Name: "test-sandbox-csi-mount-1", AccessToken: runtime.AccessToken},
+			postCheck: func(t *testing.T, sbx infra.Sandbox, metrics infra.CloneMetrics) {
+				assert.NotNil(t, sbx)
+				assert.Greater(t, metrics.CSIMount, time.Duration(0), "CSIMount metric should be greater than 0")
+				assert.GreaterOrEqual(t, metrics.Total, metrics.CSIMount, "Total should include CSIMount time")
+			},
+		},
+		{
+			name: "csi mount failure - non-zero exit code",
+			opts: infra.CloneSandboxOptions{
+				User:             user,
+				CheckPointID:     checkpointID,
+				WaitReadyTimeout: 30 * time.Second,
+				CSIMount: &config.CSIMountOptions{
+					MountOptionList: []config.MountConfig{
+						{
+							Driver:     "test-driver",
+							RequestRaw: "test-request",
+						},
+					},
+				},
+			},
+			serverOpts: testutils.TestRuntimeServerOptions{
+				RunCommandResult: runtime.RunCommandResult{
+					PID:      1,
+					ExitCode: 1,
+					Stderr:   []string{"mount error"},
+					Exited:   true,
+				},
+				RunCommandImmediately: true,
+			},
+			sbxOverride: sbxOverride{Name: "test-sandbox-csi-mount-2", AccessToken: runtime.AccessToken},
+			expectError: "failed to perform csi mount",
+		},
+		{
+			name: "annotation fallback - invalid json in checkpoint annotation",
+			opts: infra.CloneSandboxOptions{
+				User:             user,
+				CheckPointID:     checkpointID,
+				WaitReadyTimeout: 30 * time.Second,
+			},
+			serverOpts: testutils.TestRuntimeServerOptions{
+				RunCommandResult: runtime.RunCommandResult{
+					PID:    1,
+					Exited: true,
+				},
+				RunCommandImmediately: true,
+			},
+			sbxOverride: sbxOverride{Name: "test-sandbox-anno-invalid-json"},
+			checkpointAnnotations: map[string]string{
+				models.ExtensionKeyClaimWithCSIMount_MountConfig: "not-valid-json",
+			},
+			expectError: "failed to parse csi mount config from annotation",
+		},
+		{
+			name: "annotation fallback - valid json but pv not found",
+			opts: infra.CloneSandboxOptions{
+				User:             user,
+				CheckPointID:     checkpointID,
+				WaitReadyTimeout: 30 * time.Second,
+			},
+			serverOpts: testutils.TestRuntimeServerOptions{
+				RunCommandResult: runtime.RunCommandResult{
+					PID:    1,
+					Exited: true,
+				},
+				RunCommandImmediately: true,
+			},
+			sbxOverride: sbxOverride{Name: "test-sandbox-anno-pv-missing"},
+			checkpointAnnotations: map[string]string{
+				models.ExtensionKeyClaimWithCSIMount_MountConfig: `[{"pvName":"non-existent-pv","mountPath":"/data"}]`,
+			},
+			expectError: "failed to generate csi mount options config",
+		},
+		{
+			name: "annotation fallback - no csi annotation in checkpoint",
+			opts: infra.CloneSandboxOptions{
+				User:             user,
+				CheckPointID:     checkpointID,
+				WaitReadyTimeout: 30 * time.Second,
+			},
+			serverOpts: testutils.TestRuntimeServerOptions{
+				RunCommandResult: runtime.RunCommandResult{
+					PID:    1,
+					Exited: true,
+				},
+				RunCommandImmediately: true,
+			},
+			sbxOverride: sbxOverride{Name: "test-sandbox-anno-none"},
+			checkpointAnnotations: map[string]string{
+				"some-other-annotation": "value",
+			},
+			postCheck: func(t *testing.T, sbx infra.Sandbox, metrics infra.CloneMetrics) {
+				assert.NotNil(t, sbx)
+				// No CSI mount should have happened
+				assert.Equal(t, time.Duration(0), metrics.CSIMount)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := testutils.NewTestRuntimeServer(tt.serverOpts)
+			defer server.Close()
+
+			cache, fc, err := cachetest.NewTestCache(t)
+			require.NoError(t, err)
+			require.NoError(t, cache.Run(t.Context()))
+			defer cache.Stop(t.Context())
+
+			tt.opts.CloneTimeout = 500 * time.Millisecond
+
+			// Create SandboxTemplate with same name as checkpoint
+			// CloneSandbox now looks for template by checkpoint.Name, not by label
+			sbt := &v1alpha1.SandboxTemplate{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      checkpointID, // Same name as checkpoint
+					Namespace: "default",
+				},
+				Spec: v1alpha1.SandboxTemplateSpec{
+					Template: &corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{
+									Name:  "main",
+									Image: "test-image",
+								},
+							},
+						},
+					},
+				},
+			}
+			require.NoError(t, fc.Create(t.Context(), sbt))
+
+			// Create Checkpoint with same name as SandboxTemplate
+			if tt.opts.CheckPointID != "non-existent-checkpoint" && tt.name != "checkpoint without template label" && tt.name != "template not found" {
+				cpAnnotations := make(map[string]string)
+				for k, v := range tt.checkpointAnnotations {
+					cpAnnotations[k] = v
+				}
+				cp := &v1alpha1.Checkpoint{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:        checkpointID,
+						Namespace:   "default",
+						Annotations: cpAnnotations,
+						Labels: map[string]string{
+							v1alpha1.LabelSandboxTemplate: checkpointID,
+						},
+					},
+					Status: v1alpha1.CheckpointStatus{
+						CheckpointId: checkpointID,
+					},
+				}
+				if tt.initRuntime != nil {
+					initRuntimeAnnotation, err := json.Marshal(tt.initRuntime)
+					require.NoError(t, err)
+					cp.Annotations[v1alpha1.AnnotationInitRuntimeRequest] = string(initRuntimeAnnotation)
+				}
+				require.NoError(t, fc.Create(t.Context(), cp))
+				// Wait for checkpoint to be cached
+				require.Eventually(t, func() bool {
+					_, err := cache.GetCheckpoint(t.Context(), infracache.GetCheckpointOptions{CheckpointID: checkpointID})
+					return err == nil
+				}, time.Second, 10*time.Millisecond)
+			}
+
+			// Run preProcess if defined
+			if tt.preProcess != nil {
+				tt.preProcess(t, cache, fc)
+				// Wait a bit for preProcess to create resources
+				time.Sleep(50 * time.Millisecond)
+			}
+
+			// Build context with sbxOverride if needed
+			ctx := t.Context()
+			if tt.sbxOverride.Name != "" || tt.sbxOverride.RuntimeURL != "" {
+				override := tt.sbxOverride
+				if override.RuntimeURL == "" {
+					override.RuntimeURL = server.URL
+				}
+				ctx = context.WithValue(ctx, sbxOverrideKey{}, override)
+			}
+			if tt.opts.CloneTimeout > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, tt.opts.CloneTimeout)
+				defer cancel()
+			}
+
+			// Call CloneSandbox
+			sbx, metrics, err := CloneSandbox(ctx, tt.opts, cache)
+
+			if tt.expectError != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
+			} else {
+				require.NoError(t, err)
+				require.NotNil(t, sbx)
+				if tt.postCheck != nil {
+					tt.postCheck(t, sbx, metrics)
+				}
+			}
+		})
+	}
+}
+
+func TestCloneSandbox_WithRateLimiter(t *testing.T) {
+	utestutils.InitLogOutput()
+
+	checkpointID := "test-checkpoint"
+	user := "test-user"
+
+	infraInstance, fc := NewTestInfra(t)
+	infraInstance.createLimiter = rate.NewLimiter(rate.Limit(1), 0)
+	createCloneTestCheckpoint(t, fc, infraInstance.Cache, checkpointID)
+
+	opts := infra.CloneSandboxOptions{
+		User:             user,
+		CheckPointID:     checkpointID,
+		WaitReadyTimeout: 30 * time.Second,
+	}
+
+	sbx, metrics, err := infraInstance.CloneSandbox(t.Context(), opts)
+
+	assert.Nil(t, sbx, "sandbox should be nil when rate limited")
+	assert.Error(t, err, "should return error when rate limited")
+	assert.Contains(t, err.Error(), "rate:", "error should indicate rate limit")
+	assert.Greater(t, metrics.Wait, time.Duration(0), "wait metric should include limiter wait cost")
+	// Limiter runs after GetTemplate, so Total covers both stages and is at
+	// least Wait. This mirrors ClaimSandbox where the limiter is gated after
+	// the pick/lock stage.
+	assert.GreaterOrEqual(t, metrics.Total, metrics.Wait, "total should include at least limiter wait cost")
+}
+
+func TestCloneSandbox_ContextCanceled(t *testing.T) {
+	utestutils.InitLogOutput()
+
+	cache, fc, err := cachetest.NewTestCache(t)
+	require.NoError(t, err)
+	require.NoError(t, cache.Run(t.Context()))
+	defer cache.Stop(t.Context())
+
+	template := "test-template"
+	checkpointID := "test-checkpoint"
+	user := "test-user"
+
+	// Create SandboxSet
+	sbs := &v1alpha1.SandboxSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      template,
+			Namespace: "default",
+		},
+		Spec: v1alpha1.SandboxSetSpec{
+			EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name:  "main",
+								Image: "test-image",
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	require.NoError(t, fc.Create(t.Context(), sbs))
+
+	// Wait for SandboxSet to be cached
+	require.Eventually(t, func() bool {
+		_, err := cache.PickSandboxSet(t.Context(), infracache.PickSandboxSetOptions{Name: template})
+		return err == nil
+	}, time.Second, 10*time.Millisecond)
+
+	// Create Checkpoint
+	cp := &v1alpha1.Checkpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      checkpointID,
+			Namespace: "default",
+			Labels: map[string]string{
+				v1alpha1.LabelSandboxTemplate: template,
+			},
+		},
+		Status: v1alpha1.CheckpointStatus{
+			CheckpointId: checkpointID,
+		},
+	}
+	require.NoError(t, fc.Create(t.Context(), cp))
+	// Wait for checkpoint to be cached
+	require.Eventually(t, func() bool {
+		_, err := cache.GetCheckpoint(t.Context(), infracache.GetCheckpointOptions{CheckpointID: checkpointID})
+		return err == nil
+	}, time.Second, 10*time.Millisecond)
+
+	// Create canceled context
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	opts := infra.CloneSandboxOptions{
+		User:             user,
+		CheckPointID:     checkpointID,
+		WaitReadyTimeout: 30 * time.Second,
+	}
+
+	// Call CloneSandbox with canceled context
+	sbx, _, err := CloneSandbox(ctx, opts, cache)
+
+	assert.Nil(t, sbx, "sandbox should be nil when context is canceled")
+	assert.Error(t, err, "should return error when context is canceled")
+	// When context is canceled during waitForSandboxReady, the error is "context canceled"
+	// When context is canceled before, it could be different errors
+	isContextError := errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
+		(err != nil && assert.Contains(t, err.Error(), "context canceled"))
+	assert.True(t, isContextError, "error should indicate context canceled, got: %v", err)
+}
+
+func newTestSandbox(name string) *v1alpha1.Sandbox {
+	return &v1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        name,
+			Namespace:   "default",
+			Annotations: map[string]string{},
+		},
+		Spec: v1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{Name: "main", Image: "test-image"},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+func TestCreateCheckPoint(t *testing.T) {
+	utestutils.InitLogOutput()
+
+	// Define context key types
+	type cpStatusKey struct{}
+	type tmplOverrideKey struct{}
+	type tmplOverride struct {
+		Name string
+		UID  types.UID
+	}
+	// Error injection types
+	type injectErrKey struct{}
+	type injectErrTarget string
+	const (
+		injectErrTemplate   injectErrTarget = "template"
+		injectErrCheckpoint injectErrTarget = "checkpoint"
+	)
+
+	// Decorator 1: DefaultCreateSandboxTemplate (only for error injection now;
+	// after the flip, the SandboxTemplate inherits its Name from the Checkpoint).
+	origCreateSandboxTemplate := DefaultCreateSandboxTemplate
+	DefaultCreateSandboxTemplate = func(ctx context.Context, c client.Client, tmpl *v1alpha1.SandboxTemplate) (*v1alpha1.SandboxTemplate, error) {
+		if target, ok := ctx.Value(injectErrKey{}).(injectErrTarget); ok && target == injectErrTemplate {
+			return nil, fmt.Errorf("injected error: template creation failed")
+		}
+		return origCreateSandboxTemplate(ctx, c, tmpl)
+	}
+	t.Cleanup(func() { DefaultCreateSandboxTemplate = origCreateSandboxTemplate })
+
+	// Decorator 2: DefaultCreateCheckpoint
+	origCreateCheckpoint := DefaultCreateCheckpoint
+	DefaultCreateCheckpoint = func(ctx context.Context, c client.Client, cp *v1alpha1.Checkpoint) (*v1alpha1.Checkpoint, error) {
+		if target, ok := ctx.Value(injectErrKey{}).(injectErrTarget); ok && target == injectErrCheckpoint {
+			return nil, fmt.Errorf("injected error: checkpoint creation failed")
+		}
+		// After the flip the Checkpoint is the first object created (with GenerateName).
+		// Apply the test override here so the rest of the flow sees a deterministic
+		// Name and UID.
+		if override, ok := ctx.Value(tmplOverrideKey{}).(tmplOverride); ok {
+			if override.Name != "" {
+				cp.Name = override.Name
+				cp.GenerateName = ""
+			}
+			if override.UID != "" {
+				cp.UID = override.UID
+			}
+		}
+		if status, ok := ctx.Value(cpStatusKey{}).(v1alpha1.CheckpointStatus); ok {
+			cp.Status = status
+		}
+		created, err := origCreateCheckpoint(ctx, c, cp)
+		if err != nil {
+			return nil, err
+		}
+		return created, nil
+	}
+	t.Cleanup(func() { DefaultCreateCheckpoint = origCreateCheckpoint })
+
+	// table-driven tests
+	tests := []struct {
+		name         string
+		sandbox      *v1alpha1.Sandbox
+		cpStatus     v1alpha1.CheckpointStatus
+		tmplOverride tmplOverride
+		opts         infra.CreateCheckpointOptions
+		injectErr    injectErrTarget
+		expectError  string
+		postCheck    func(t *testing.T, id string, c client.Client)
+	}{
+		{
+			name:    "successful checkpoint creation",
+			sandbox: newTestSandbox("test-sandbox-1"),
+			cpStatus: v1alpha1.CheckpointStatus{
+				Phase:        v1alpha1.CheckpointSucceeded,
+				CheckpointId: "cp-id-123",
+			},
+			tmplOverride: tmplOverride{Name: "tmpl-1", UID: "uid-1"},
+			opts: infra.CreateCheckpointOptions{
+				WaitSuccessTimeout: 5 * time.Second,
+			},
+			postCheck: func(t *testing.T, id string, c client.Client) {
+				assert.Equal(t, "cp-id-123", id)
+				var cp v1alpha1.Checkpoint
+				require.NoError(t, c.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "tmpl-1"}, &cp))
+				assert.Equal(t, "tmpl-1", cp.Name)
+				assert.Equal(t, "test-sandbox-1", *cp.Spec.PodName)
+				assert.Empty(t, cp.OwnerReferences, "checkpoint should have no owner references")
+				var tmpl v1alpha1.SandboxTemplate
+				require.NoError(t, c.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "tmpl-1"}, &tmpl))
+				require.Len(t, tmpl.OwnerReferences, 1)
+				assert.Equal(t, "Checkpoint", tmpl.OwnerReferences[0].Kind)
+				assert.Equal(t, "tmpl-1", tmpl.OwnerReferences[0].Name)
+				assert.Equal(t, types.UID("uid-1"), tmpl.OwnerReferences[0].UID)
+				// Verify PersistentContents: sandbox has no PersistentContents, so both template and checkpoint should be empty
+				assert.Empty(t, tmpl.Spec.PersistentContents, "template PersistentContents should be empty when sandbox has no PersistentContents")
+				assert.Empty(t, cp.Spec.PersistentContents, "checkpoint PersistentContents should be empty when sandbox has no PersistentContents")
+			},
+		},
+		{
+			name:    "checkpoint with all options",
+			sandbox: newTestSandbox("test-sandbox-2"),
+			cpStatus: v1alpha1.CheckpointStatus{
+				Phase:        v1alpha1.CheckpointSucceeded,
+				CheckpointId: "cp-id-opts",
+			},
+			tmplOverride: tmplOverride{Name: "tmpl-2", UID: "uid-2"},
+			opts: infra.CreateCheckpointOptions{
+				KeepRunning:        ptr.To(true),
+				TTL:                ptr.To("30m"),
+				PersistentContents: []string{"memory", "filesystem"},
+				WaitSuccessTimeout: 5 * time.Second,
+			},
+			postCheck: func(t *testing.T, id string, c client.Client) {
+				assert.Equal(t, "cp-id-opts", id)
+				var cp v1alpha1.Checkpoint
+				require.NoError(t, c.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "tmpl-2"}, &cp))
+				assert.Equal(t, "tmpl-2", cp.Name)
+				assert.Equal(t, "test-sandbox-2", *cp.Spec.PodName)
+				assert.Empty(t, cp.OwnerReferences, "checkpoint should have no owner references")
+				var tmpl v1alpha1.SandboxTemplate
+				require.NoError(t, c.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "tmpl-2"}, &tmpl))
+				require.Len(t, tmpl.OwnerReferences, 1)
+				assert.Equal(t, "Checkpoint", tmpl.OwnerReferences[0].Kind)
+				assert.Equal(t, "tmpl-2", tmpl.OwnerReferences[0].Name)
+				assert.Equal(t, types.UID("uid-2"), tmpl.OwnerReferences[0].UID)
+				// Verify options
+				require.NotNil(t, cp.Spec.KeepRunning)
+				assert.True(t, *cp.Spec.KeepRunning)
+				require.NotNil(t, cp.Spec.TtlAfterFinished)
+				assert.Equal(t, "30m", *cp.Spec.TtlAfterFinished)
+				// Verify PersistentContents: opts.PersistentContents should override template's PersistentContents
+				assert.Empty(t, tmpl.Spec.PersistentContents, "template PersistentContents should be empty when sandbox has no PersistentContents")
+				assert.Equal(t, []string{"memory", "filesystem"}, cp.Spec.PersistentContents, "checkpoint PersistentContents should use opts.PersistentContents")
+			},
+		},
+		{
+			name: "checkpoint with init runtime annotation",
+			sandbox: func() *v1alpha1.Sandbox {
+				sbx := newTestSandbox("test-sandbox-3")
+				sbx.Annotations[v1alpha1.AnnotationInitRuntimeRequest] = `{"accessToken":"test-token","envVars":{"VAR1":"value1"}}`
+				return sbx
+			}(),
+			cpStatus: v1alpha1.CheckpointStatus{
+				Phase:        v1alpha1.CheckpointSucceeded,
+				CheckpointId: "cp-id-rt",
+			},
+			tmplOverride: tmplOverride{Name: "tmpl-3", UID: "uid-3"},
+			opts: infra.CreateCheckpointOptions{
+				WaitSuccessTimeout: 5 * time.Second,
+			},
+			postCheck: func(t *testing.T, id string, c client.Client) {
+				assert.Equal(t, "cp-id-rt", id)
+				var cp v1alpha1.Checkpoint
+				require.NoError(t, c.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "tmpl-3"}, &cp))
+				assert.Equal(t, "tmpl-3", cp.Name)
+				assert.Equal(t, "test-sandbox-3", *cp.Spec.PodName)
+				assert.Empty(t, cp.OwnerReferences, "checkpoint should have no owner references")
+				var tmpl v1alpha1.SandboxTemplate
+				require.NoError(t, c.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "tmpl-3"}, &tmpl))
+				require.Len(t, tmpl.OwnerReferences, 1)
+				assert.Equal(t, "Checkpoint", tmpl.OwnerReferences[0].Kind)
+				assert.Equal(t, "tmpl-3", tmpl.OwnerReferences[0].Name)
+				assert.Equal(t, types.UID("uid-3"), tmpl.OwnerReferences[0].UID)
+				// Verify init runtime annotation
+				assert.Equal(t, `{"accessToken":"test-token","envVars":{"VAR1":"value1"}}`, cp.Annotations[v1alpha1.AnnotationInitRuntimeRequest])
+			},
+		},
+		{
+			name:    "checkpoint failed",
+			sandbox: newTestSandbox("test-sandbox-4"),
+			cpStatus: v1alpha1.CheckpointStatus{
+				Phase:   v1alpha1.CheckpointFailed,
+				Message: "disk full",
+			},
+			tmplOverride: tmplOverride{Name: "tmpl-4", UID: "uid-4"},
+			opts: infra.CreateCheckpointOptions{
+				WaitSuccessTimeout: 5 * time.Second,
+			},
+			expectError: "failed",
+		},
+		{
+			name:    "checkpoint succeeded with empty id",
+			sandbox: newTestSandbox("test-sandbox-5"),
+			cpStatus: v1alpha1.CheckpointStatus{
+				Phase:        v1alpha1.CheckpointSucceeded,
+				CheckpointId: "",
+			},
+			tmplOverride: tmplOverride{Name: "tmpl-5", UID: "uid-5"},
+			opts: infra.CreateCheckpointOptions{
+				WaitSuccessTimeout: 5 * time.Second,
+			},
+			expectError: "has no checkpoint id",
+		},
+		{
+			name:    "checkpoint terminating",
+			sandbox: newTestSandbox("test-sandbox-6"),
+			cpStatus: v1alpha1.CheckpointStatus{
+				Phase:   v1alpha1.CheckpointTerminating,
+				Message: "terminating",
+			},
+			tmplOverride: tmplOverride{Name: "tmpl-6", UID: "uid-6"},
+			opts: infra.CreateCheckpointOptions{
+				WaitSuccessTimeout: 5 * time.Second,
+			},
+			expectError: "failed",
+		},
+		{
+			name:    "sandbox template creation failed",
+			sandbox: newTestSandbox("test-sbx-tmpl-fail"),
+			opts: infra.CreateCheckpointOptions{
+				WaitSuccessTimeout: 5 * time.Second,
+			},
+			injectErr:   injectErrTemplate,
+			expectError: "failed to create sandbox template",
+		},
+		{
+			name:    "checkpoint creation failed",
+			sandbox: newTestSandbox("test-sbx-cp-fail"),
+			opts: infra.CreateCheckpointOptions{
+				WaitSuccessTimeout: 5 * time.Second,
+			},
+			tmplOverride: tmplOverride{Name: "tmpl-fail", UID: "uid-fail"},
+			injectErr:    injectErrCheckpoint,
+			expectError:  "failed to create checkpoint",
+		},
+		{
+			name: "checkpoint with sandbox PersistentContents - opts overrides",
+			sandbox: func() *v1alpha1.Sandbox {
+				sbx := newTestSandbox("test-sandbox-pc")
+				sbx.Spec.PersistentContents = []string{"memory"}
+				return sbx
+			}(),
+			cpStatus: v1alpha1.CheckpointStatus{
+				Phase:        v1alpha1.CheckpointSucceeded,
+				CheckpointId: "cp-id-pc",
+			},
+			tmplOverride: tmplOverride{Name: "tmpl-pc", UID: "uid-pc"},
+			opts: infra.CreateCheckpointOptions{
+				PersistentContents: []string{"memory", "filesystem"},
+				WaitSuccessTimeout: 5 * time.Second,
+			},
+			postCheck: func(t *testing.T, id string, c client.Client) {
+				assert.Equal(t, "cp-id-pc", id)
+				var cp v1alpha1.Checkpoint
+				require.NoError(t, c.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "tmpl-pc"}, &cp))
+				var tmpl v1alpha1.SandboxTemplate
+				require.NoError(t, c.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "tmpl-pc"}, &tmpl))
+				// Verify PersistentContents logic:
+				// 1. Template should inherit from sandbox.Spec.PersistentContents
+				assert.Equal(t, []string{"memory"}, tmpl.Spec.PersistentContents, "template should inherit sandbox's PersistentContents")
+				// 2. Checkpoint should use opts.PersistentContents (override template's)
+				assert.Equal(t, []string{"memory", "filesystem"}, cp.Spec.PersistentContents, "checkpoint should use opts.PersistentContents override")
+			},
+		},
+		{
+			name: "checkpoint with multiple runtimes",
+			sandbox: func() *v1alpha1.Sandbox {
+				sbx := newTestSandbox("test-sandbox-runtimes-multi")
+				sbx.Spec.Runtimes = []v1alpha1.RuntimeConfig{
+					{Name: v1alpha1.RuntimeConfigForInjectCsiMount},
+					{Name: v1alpha1.RuntimeConfigForInjectAgentRuntime},
+				}
+				return sbx
+			}(),
+			cpStatus: v1alpha1.CheckpointStatus{
+				Phase:        v1alpha1.CheckpointSucceeded,
+				CheckpointId: "cp-id-runtimes-multi",
+			},
+			tmplOverride: tmplOverride{Name: "tmpl-runtimes-multi", UID: "uid-runtimes-multi"},
+			opts: infra.CreateCheckpointOptions{
+				WaitSuccessTimeout: 5 * time.Second,
+			},
+			postCheck: func(t *testing.T, id string, c client.Client) {
+				assert.Equal(t, "cp-id-runtimes-multi", id)
+				var tmpl v1alpha1.SandboxTemplate
+				require.NoError(t, c.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "tmpl-runtimes-multi"}, &tmpl))
+				require.Len(t, tmpl.Spec.Runtimes, 2, "template should have 2 runtimes")
+				assert.Equal(t, v1alpha1.RuntimeConfigForInjectCsiMount, tmpl.Spec.Runtimes[0].Name)
+				assert.Equal(t, v1alpha1.RuntimeConfigForInjectAgentRuntime, tmpl.Spec.Runtimes[1].Name)
+			},
+		},
+		{
+			name: "checkpoint with single runtime",
+			sandbox: func() *v1alpha1.Sandbox {
+				sbx := newTestSandbox("test-sandbox-runtimes-single")
+				sbx.Spec.Runtimes = []v1alpha1.RuntimeConfig{
+					{Name: v1alpha1.RuntimeConfigForInjectAgentRuntime},
+				}
+				return sbx
+			}(),
+			cpStatus: v1alpha1.CheckpointStatus{
+				Phase:        v1alpha1.CheckpointSucceeded,
+				CheckpointId: "cp-id-runtimes-single",
+			},
+			tmplOverride: tmplOverride{Name: "tmpl-runtimes-single", UID: "uid-runtimes-single"},
+			opts: infra.CreateCheckpointOptions{
+				WaitSuccessTimeout: 5 * time.Second,
+			},
+			postCheck: func(t *testing.T, id string, c client.Client) {
+				assert.Equal(t, "cp-id-runtimes-single", id)
+				var tmpl v1alpha1.SandboxTemplate
+				require.NoError(t, c.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "tmpl-runtimes-single"}, &tmpl))
+				require.Len(t, tmpl.Spec.Runtimes, 1, "template should have 1 runtime")
+				assert.Equal(t, v1alpha1.RuntimeConfigForInjectAgentRuntime, tmpl.Spec.Runtimes[0].Name)
+			},
+		},
+		{
+			name: "checkpoint with no runtimes",
+			sandbox: func() *v1alpha1.Sandbox {
+				sbx := newTestSandbox("test-sandbox-runtimes-none")
+				// No Runtimes set
+				return sbx
+			}(),
+			cpStatus: v1alpha1.CheckpointStatus{
+				Phase:        v1alpha1.CheckpointSucceeded,
+				CheckpointId: "cp-id-runtimes-none",
+			},
+			tmplOverride: tmplOverride{Name: "tmpl-runtimes-none", UID: "uid-runtimes-none"},
+			opts: infra.CreateCheckpointOptions{
+				WaitSuccessTimeout: 5 * time.Second,
+			},
+			postCheck: func(t *testing.T, id string, c client.Client) {
+				assert.Equal(t, "cp-id-runtimes-none", id)
+				var tmpl v1alpha1.SandboxTemplate
+				require.NoError(t, c.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "tmpl-runtimes-none"}, &tmpl))
+				assert.Nil(t, tmpl.Spec.Runtimes, "template Runtimes should be nil when sandbox has no Runtimes")
+			},
+		},
+		{
+			name: "checkpoint with CSI mount annotation - propagated to checkpoint",
+			sandbox: func() *v1alpha1.Sandbox {
+				sbx := newTestSandbox("test-sandbox-csi")
+				sbx.Annotations[models.ExtensionKeyClaimWithCSIMount_MountConfig] = `[{"driver":"nfs","source":"/data"}]`
+				return sbx
+			}(),
+			cpStatus: v1alpha1.CheckpointStatus{
+				Phase:        v1alpha1.CheckpointSucceeded,
+				CheckpointId: "cp-id-csi",
+			},
+			tmplOverride: tmplOverride{Name: "tmpl-csi", UID: "uid-csi"},
+			opts: infra.CreateCheckpointOptions{
+				WaitSuccessTimeout: 5 * time.Second,
+			},
+			postCheck: func(t *testing.T, id string, c client.Client) {
+				assert.Equal(t, "cp-id-csi", id)
+				// Verify CSI mount annotation is propagated to checkpoint
+				var cp v1alpha1.Checkpoint
+				require.NoError(t, c.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "tmpl-csi"}, &cp))
+				assert.Equal(t, `[{"driver":"nfs","source":"/data"}]`, cp.Annotations[models.ExtensionKeyClaimWithCSIMount_MountConfig],
+					"CSI mount annotation should be propagated to checkpoint")
+			},
+		},
+		{
+			name:    "checkpoint without CSI mount annotation - checkpoint has no CSI annotation",
+			sandbox: newTestSandbox("test-sandbox-no-csi"),
+			cpStatus: v1alpha1.CheckpointStatus{
+				Phase:        v1alpha1.CheckpointSucceeded,
+				CheckpointId: "cp-id-no-csi",
+			},
+			tmplOverride: tmplOverride{Name: "tmpl-no-csi", UID: "uid-no-csi"},
+			opts: infra.CreateCheckpointOptions{
+				WaitSuccessTimeout: 5 * time.Second,
+			},
+			postCheck: func(t *testing.T, id string, c client.Client) {
+				assert.Equal(t, "cp-id-no-csi", id)
+				var cp v1alpha1.Checkpoint
+				require.NoError(t, c.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "tmpl-no-csi"}, &cp))
+				assert.Empty(t, cp.Annotations[models.ExtensionKeyClaimWithCSIMount_MountConfig],
+					"checkpoint should not have CSI mount annotation when sandbox doesn't have one")
+			},
+		},
+		{
+			name: "checkpoint with sandbox PersistentContents - inherit from template",
+			sandbox: func() *v1alpha1.Sandbox {
+				sbx := newTestSandbox("test-sandbox-inherit")
+				sbx.Spec.PersistentContents = []string{"filesystem"}
+				return sbx
+			}(),
+			cpStatus: v1alpha1.CheckpointStatus{
+				Phase:        v1alpha1.CheckpointSucceeded,
+				CheckpointId: "cp-id-inherit",
+			},
+			tmplOverride: tmplOverride{Name: "tmpl-inherit", UID: "uid-inherit"},
+			opts: infra.CreateCheckpointOptions{
+				// No PersistentContents in opts, should inherit from template
+				WaitSuccessTimeout: 5 * time.Second,
+			},
+			postCheck: func(t *testing.T, id string, c client.Client) {
+				assert.Equal(t, "cp-id-inherit", id)
+				var cp v1alpha1.Checkpoint
+				require.NoError(t, c.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "tmpl-inherit"}, &cp))
+				var tmpl v1alpha1.SandboxTemplate
+				require.NoError(t, c.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "tmpl-inherit"}, &tmpl))
+				// Verify PersistentContents logic:
+				// 1. Template should inherit from sandbox.Spec.PersistentContents
+				assert.Equal(t, []string{"filesystem"}, tmpl.Spec.PersistentContents, "template should inherit sandbox's PersistentContents")
+				// 2. Checkpoint should inherit from template (opts.PersistentContents is empty)
+				assert.Equal(t, []string{"filesystem"}, cp.Spec.PersistentContents, "checkpoint should inherit template's PersistentContents when opts is empty")
+			},
+		},
+		{
+			name:    "template creation failure leaves checkpoint orphan for TTL drainage",
+			sandbox: newTestSandbox("test-sbx-tmpl-fail-after-cp"),
+			cpStatus: v1alpha1.CheckpointStatus{
+				Phase:        v1alpha1.CheckpointSucceeded,
+				CheckpointId: "cp-id-orphan",
+			},
+			tmplOverride: tmplOverride{Name: "tmpl-orphan", UID: "uid-orphan"},
+			opts: infra.CreateCheckpointOptions{
+				WaitSuccessTimeout: 5 * time.Second,
+			},
+			injectErr:   injectErrTemplate,
+			expectError: "failed to create sandbox template",
+			postCheck: func(t *testing.T, id string, c client.Client) {
+				// Checkpoint was created before the SandboxTemplate failed; it must remain
+				// in the fake store so the external TTL controller can drain it later.
+				var cp v1alpha1.Checkpoint
+				require.NoError(t, c.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "tmpl-orphan"}, &cp),
+					"checkpoint must exist after template create failed")
+				assert.Empty(t, cp.OwnerReferences, "orphan checkpoint must not have owner references")
+				// SandboxTemplate must NOT exist (creation was injected to fail).
+				err := c.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "tmpl-orphan"}, &v1alpha1.SandboxTemplate{})
+				require.Error(t, err, "sandbox template must not exist after injected failure")
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cache, fc, err := cachetest.NewTestCache(t)
+			require.NoError(t, err)
+			require.NoError(t, cache.Run(t.Context()))
+			defer cache.Stop(t.Context())
+
+			ctx := t.Context()
+			ctx = context.WithValue(ctx, cpStatusKey{}, tt.cpStatus)
+			ctx = context.WithValue(ctx, tmplOverrideKey{}, tt.tmplOverride)
+			if tt.injectErr != "" {
+				ctx = context.WithValue(ctx, injectErrKey{}, tt.injectErr)
+			}
+
+			id, err := CreateCheckpoint(ctx, tt.sandbox, cache, tt.opts)
+
+			if tt.expectError != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
+			} else {
+				require.NoError(t, err)
+			}
+			if tt.postCheck != nil {
+				tt.postCheck(t, id, fc)
+			}
+		})
+	}
+}

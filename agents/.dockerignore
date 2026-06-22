@@ -1,0 +1,6 @@
+.*
+*.pem
+bin/
+deploy
+dev/
+spec/

@@ -1,0 +1,4 @@
+# Agent sandbox operator image
+- op: replace
+  path: /spec/template/spec/containers/0/image
+  value: agent-sandbox-controller:latest

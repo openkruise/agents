@@ -1,0 +1,413 @@
+/*
+Copyright 2025.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package core
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"sync"
+	"time"
+
+	"golang.org/x/time/rate"
+	"k8s.io/client-go/tools/record"
+	"k8s.io/klog/v2"
+	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
+
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/agent-runtime/common"
+	"github.com/openkruise/agents/pkg/agent-runtime/storages"
+	"github.com/openkruise/agents/pkg/cache"
+	"github.com/openkruise/agents/pkg/controller/sandboxset"
+	"github.com/openkruise/agents/pkg/features"
+	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
+	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
+	"github.com/openkruise/agents/pkg/utils"
+	"github.com/openkruise/agents/pkg/utils/csiutils"
+	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
+	"github.com/openkruise/agents/pkg/utils/timeout"
+)
+
+type commonControl struct {
+	client.Client
+	recorder        record.EventRecorder
+	cache           cache.Provider
+	storageRegistry storages.VolumeMountProviderRegistry
+	pickCache       sync.Map
+}
+
+func NewCommonControl(c client.Client, recorder record.EventRecorder, cache cache.Provider) ClaimControl {
+	// Note: sandboxClient and cache can be nil for unit tests
+	// In production, SetupWithManager always provides these dependencies
+
+	control := &commonControl{
+		Client:          c,
+		recorder:        recorder,
+		cache:           cache,
+		storageRegistry: storages.NewStorageProvider(),
+		pickCache:       sync.Map{},
+	}
+
+	return control
+}
+
+// EnsureClaimClaiming handles the logic for claiming sandboxes
+func (c *commonControl) EnsureClaimClaiming(ctx context.Context, args ClaimArgs) (RequeueStrategy, error) {
+	log := logf.FromContext(ctx)
+	claim, sandboxSet := args.Claim, args.SandboxSet
+
+	// Step 1: Get desired replicas
+	desiredReplicas := getDesiredReplicas(claim)
+
+	// Step 2: Get current count from status
+	statusCount := claim.Status.ClaimedReplicas
+
+	// Step 3: Recovery logic - query actual count to prevent loss
+	// This handles edge cases:
+	// - Controller crashes after claiming but before status update
+	// - Status update fails due to network issues
+	// TODO: Known edge case - if the following sequence happens:
+	//   1. Sandboxes are successfully claimed
+	//   2. Controller crashes before status update
+	//   3. User manually deletes some claimed sandboxes
+	//   4. Controller restarts
+	//   Then the controller will create new sandboxes to reach the desired replicas,
+	//   even though the user intentionally deleted them, it's an extremely rare case.
+	actualCount, err := c.countClaimedSandboxes(ctx, claim)
+	if err != nil {
+		return NoRequeue(), fmt.Errorf("failed to count claimed sandboxes: %w", err)
+	}
+
+	// Step 4: Use max(statusCount, actualCount) to get current count
+	currentCount := statusCount
+	if actualCount > currentCount {
+		log.Info("Status count mismatch, using actual count",
+			"statusCount", statusCount,
+			"actualCount", actualCount)
+		currentCount = actualCount
+	}
+
+	// Step 5: Update status with current count
+	args.NewStatus.ClaimedReplicas = currentCount
+
+	// Step 6: Check if already completed
+	if currentCount >= desiredReplicas {
+		log.Info("All replicas claimed",
+			"claimed", currentCount,
+			"desired", desiredReplicas)
+		c.recorder.Event(claim, "Normal", "ClaimCompleted",
+			fmt.Sprintf("Successfully claimed %d/%d sandboxes", currentCount, desiredReplicas))
+		args.NewStatus.Message = fmt.Sprintf("Completed: %d/%d claimed", currentCount, desiredReplicas)
+		sandboxSetClaimsTotal.WithLabelValues(claim.Namespace, "success").Inc()
+		// Requeue immediately to transition to Completed phase
+		return RequeueImmediately(), nil
+	}
+
+	// Step 7: Precondition
+	if claim.Spec.InplaceUpdate != nil {
+		if res := claim.Spec.InplaceUpdate.Resources; res != nil && (len(res.Requests) > 0 || len(res.Limits) > 0) {
+			if !utilfeature.DefaultFeatureGate.Enabled(features.SandboxInPlaceResourceResizeGate) {
+				msg := fmt.Sprintf("in-place resource resize is disabled by feature gate %s", features.SandboxInPlaceResourceResizeGate)
+				log.Info(msg)
+				c.recorder.Event(claim, "Warning", "FeatureGateDisabled", msg)
+				TransitionToCompleted(args.NewStatus, "FeatureGateDisabled", msg)
+				return NoRequeue(), nil
+			}
+		}
+	}
+
+	// Step 8: Calculate batch size
+	remaining := desiredReplicas - currentCount
+	batchSize := min(int(remaining), MaxClaimBatchSize)
+
+	// Step 8: Perform claim
+	claimed, err := c.claimSandboxes(ctx, claim, sandboxSet, batchSize)
+	if err != nil {
+		log.Error(err, "Claim attempts completed with errors",
+			"claimed", claimed, "attempted", batchSize)
+	}
+
+	// Step 9: Update final count and status
+	finalCount := currentCount + int32(claimed)
+	args.NewStatus.ClaimedReplicas = finalCount
+	args.NewStatus.Message = fmt.Sprintf("Claiming sandboxes: %d/%d claimed", finalCount, desiredReplicas)
+
+	// Step 10: Record results and determine requeue strategy
+	if claimed > 0 {
+		sandboxset.IncSandboxesClaimedTotal(sandboxSet.Namespace, sandboxSet.Name, claimed)
+		log.Info("Claimed sandboxes in this cycle",
+			"claimed", claimed,
+			"total", finalCount,
+			"desired", desiredReplicas)
+		c.recorder.Event(claim, "Normal", "SandboxClaimed",
+			fmt.Sprintf("Claimed %d sandbox(es), total: %d/%d", claimed, finalCount, desiredReplicas))
+		// Made progress, requeue immediately to continue claiming
+		return RequeueImmediately(), nil
+	}
+
+	// No progress - no available sandboxes
+	log.Info("No available sandboxes, will retry",
+		"retryInterval", ClaimRetryInterval)
+	c.recorder.Event(claim, "Warning", "NoAvailableSandboxes",
+		fmt.Sprintf("No available sandboxes in pool %s", sandboxSet.Name))
+	sandboxSetClaimsTotal.WithLabelValues(claim.Namespace, "failed").Inc()
+	// Retry after interval to avoid busy loop
+	return RequeueAfter(ClaimRetryInterval), nil
+}
+
+// EnsureClaimCompleted handles claim in Completed phase
+func (c *commonControl) EnsureClaimCompleted(ctx context.Context, args ClaimArgs) (RequeueStrategy, error) {
+	log := logf.FromContext(ctx)
+	claim := args.Claim
+
+	log.V(1).Info("EnsureClaimCompleted called", "phase", args.NewStatus.Phase)
+
+	// Check if TTL cleanup is needed
+	if claim.Spec.TTLAfterCompleted != nil && args.NewStatus.CompletionTime != nil {
+		ttl := claim.Spec.TTLAfterCompleted.Duration
+		// Negative TTL means never delete - skip TTL cleanup
+		if ttl < 0 {
+			log.V(1).Info("TTL is negative, skipping automatic deletion (never delete)", "ttl", ttl)
+			return NoRequeue(), nil
+		}
+		elapsed := time.Since(args.NewStatus.CompletionTime.Time)
+
+		log.Info("Checking TTL for cleanup", "ttl", ttl, "elapsed", elapsed, "completionTime", args.NewStatus.CompletionTime.Time)
+
+		// Check if TTL expired
+		if elapsed >= ttl {
+			log.Info("TTL expired, deleting SandboxClaim", "ttl", ttl, "elapsed", elapsed)
+			c.recorder.Event(claim, "Normal", "SandboxClaimTTLDelete", fmt.Sprintf("Deleting SandboxClaim after TTL of %v", ttl))
+			if err := c.Delete(ctx, claim); err != nil {
+				log.Error(err, "failed to delete SandboxClaim")
+				// Return error to trigger exponential backoff retry
+				return NoRequeue(), err
+			}
+
+			sandboxClaimExpiredTotal.WithLabelValues(claim.Namespace).Inc()
+			log.Info("SandboxClaim deleted successfully due to TTL expiration")
+			return NoRequeue(), nil
+		}
+
+		// TTL not yet expired, calculate remaining time
+		remaining := ttl - elapsed
+		log.V(1).Info("TTL not yet expired, will requeue", "remaining", remaining)
+		return RequeueAfter(remaining), nil
+	}
+
+	// No TTL configured, no need to requeue
+	log.V(1).Info("No TTL cleanup configured", "hasTTL", claim.Spec.TTLAfterCompleted != nil, "hasCompletionTime", args.NewStatus.CompletionTime != nil)
+	return NoRequeue(), nil
+}
+
+// claimSandboxes attempts to claim up to batchSize sandboxes from the pool
+func (c *commonControl) claimSandboxes(ctx context.Context, claim *agentsv1alpha1.SandboxClaim, sandboxSet *agentsv1alpha1.SandboxSet, batchSize int) (int, error) {
+	log := logf.FromContext(ctx)
+
+	// Validate and build claim options
+	opts, err := c.buildClaimOptions(ctx, claim, sandboxSet)
+	if err != nil {
+		return 0, fmt.Errorf("failed to build claim options: %w", err)
+	}
+
+	claimLockChannel := make(chan struct{}, batchSize) // set to max batch size, not controlled
+	limiter := rate.NewLimiter(rate.Inf, batchSize)
+	// Attempt to claim sandboxes concurrently using DoItSlowly
+	claimedCount, err := utils.DoItSlowly(batchSize, InitialClaimBatchSize, func() error {
+		// Pass nil for rand so sandboxcr uses global rand (concurrent-safe).
+		sbx, metrics, claimErr := sandboxcr.TryClaimSandbox(ctx, opts, &c.pickCache, c.cache, claimLockChannel, limiter)
+		if claimErr != nil {
+			log.Error(claimErr, "Failed to claim sandbox")
+			return claimErr
+		}
+
+		log.Info("Successfully claimed sandbox",
+			"sandbox", sbx.GetName(),
+			"totalCost", metrics.Total,
+			"pickAndLock", metrics.PickAndLock,
+			"initRuntime", metrics.InitRuntime)
+		return nil
+	})
+
+	if claimedCount > 0 {
+		log.Info("Claimed sandboxes successfully", "count", claimedCount, "attempted", batchSize)
+	}
+
+	return claimedCount, err
+}
+
+// buildClaimOptions constructs ClaimSandboxOptions for TryClaimSandbox
+func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1alpha1.SandboxClaim, sandboxSet *agentsv1alpha1.SandboxSet) (infra.ClaimSandboxOptions, error) {
+	logger := logf.FromContext(ctx).WithValues("SandboxClaim", klog.KObj(claim))
+	var reserveFailedSandboxFor *time.Duration
+	if claim.Spec.ReserveFailedSandbox {
+		reserveFailedSandboxFor = ptr.To(consts.ReserveFailedSandboxForever)
+	}
+
+	opts := infra.ClaimSandboxOptions{
+		User:     string(claim.UID), // Use UID to ensure uniqueness across claim recreations
+		Template: sandboxSet.Name,
+		Modifier: func(sbx infra.Sandbox) {
+			// propagate annotations to sandbox
+			if len(claim.Spec.Annotations) > 0 {
+				annotations := sbx.GetAnnotations()
+				if annotations == nil {
+					annotations = make(map[string]string)
+				}
+				for k, v := range claim.Spec.Annotations {
+					annotations[k] = v
+				}
+				sbx.SetAnnotations(annotations)
+			}
+
+			// propagate labels to sandbox
+			labels := sbx.GetLabels()
+			if labels == nil {
+				labels = make(map[string]string)
+			}
+			labels[agentsv1alpha1.LabelSandboxClaimName] = claim.Name
+
+			for k, v := range claim.Spec.Labels {
+				labels[k] = v
+			}
+			sbx.SetLabels(labels)
+
+			// propagate labels to podtemplate
+			labels = sbx.GetPodLabels()
+			if labels == nil {
+				labels = make(map[string]string)
+			}
+
+			for k, v := range claim.Spec.Labels {
+				labels[k] = v
+			}
+			sbx.SetPodLabels(labels)
+
+			// apply shutdownTime
+			if claim.Spec.ShutdownTime != nil {
+				sbx.SetTimeout(timeout.Options{
+					ShutdownTime: claim.Spec.ShutdownTime.Time,
+				})
+			}
+		},
+		ReserveFailedSandboxFor: reserveFailedSandboxFor,
+		CreateOnNoStock:         claim.Spec.CreateOnNoStock,
+	}
+
+	if claim.Spec.InplaceUpdate != nil {
+		opts.InplaceUpdate = &config.InplaceUpdateOptions{
+			Image: claim.Spec.InplaceUpdate.Image,
+		}
+		if res := claim.Spec.InplaceUpdate.Resources; res != nil && (len(res.Requests) > 0 || len(res.Limits) > 0) {
+			opts.InplaceUpdate.Resources = &config.InplaceUpdateResourcesOptions{
+				Requests: res.Requests,
+				Limits:   res.Limits,
+			}
+		}
+	}
+
+	if claim.Spec.WaitReadyTimeout != nil {
+		opts.WaitReadyTimeout = claim.Spec.WaitReadyTimeout.Duration
+	}
+
+	if !claim.Spec.SkipInitRuntime {
+		hasAgentRuntime := false
+		// Check condition A: Runtimes field contains agent-runtime
+		for _, rt := range sandboxSet.Spec.Runtimes {
+			if rt.Name == agentsv1alpha1.RuntimeConfigForInjectAgentRuntime {
+				hasAgentRuntime = true
+				break
+			}
+		}
+		// Check condition B: initContainer named "runtime"
+		if !hasAgentRuntime {
+			podTemplateSpec, err := utils.GetTemplateSpec(ctx, c.Client, sandboxSet.Namespace, &sandboxSet.Spec.EmbeddedSandboxTemplate)
+			if err != nil {
+				if sandboxSet.Spec.TemplateRef != nil {
+					logger.Error(err, "failed to get sandbox template for checking agent runtime", "template", sandboxSet.Spec.TemplateRef.Name)
+				} else {
+					logger.Error(err, "failed to get sandbox template for checking agent runtime")
+				}
+				return opts, err
+			}
+
+			if podTemplateSpec != nil {
+				for _, container := range podTemplateSpec.Spec.InitContainers {
+					if container.Name == common.RuntimeInitContainerName {
+						hasAgentRuntime = true
+						break
+					}
+				}
+			}
+		}
+
+		if hasAgentRuntime {
+			opts.InitRuntime = &config.InitRuntimeOptions{
+				EnvVars:     claim.Spec.EnvVars,
+				AccessToken: config.NewDefaultAccessToken(),
+			}
+		} else {
+			logger.Error(fmt.Errorf("agent-runtime not configured in SandboxSet"), "SkipInitRuntime is false but no agent-runtime found, skip InitRuntime",
+				"sandboxSet", klog.KObj(sandboxSet), "claim", klog.KObj(claim))
+		}
+	}
+	if len(claim.Spec.DynamicVolumesMount) > 0 {
+		csiMountOptions := make([]config.MountConfig, 0, len(claim.Spec.DynamicVolumesMount))
+		csiClient := csiutils.NewCSIMountHandler(c.cache.GetClient(), c.cache.GetAPIReader(), c.storageRegistry, utils.DefaultSandboxDeployNamespace)
+		for _, mountConfig := range claim.Spec.DynamicVolumesMount {
+			driverName, csiReqConfigRaw, genErr := csiClient.CSIMountOptionsConfig(ctx, mountConfig)
+			if genErr != nil {
+				errMsg := "failed to generate csi mount options config for sandbox"
+				logger.Error(genErr, errMsg, "mountConfigRequest", mountConfig)
+				return opts, fmt.Errorf("%s, err: %v", errMsg, genErr)
+			}
+			csiMountOptions = append(csiMountOptions, config.MountConfig{
+				Driver:     driverName,
+				RequestRaw: csiReqConfigRaw,
+			})
+		}
+		opts.CSIMount = &config.CSIMountOptions{
+			MountOptionList: csiMountOptions,
+		}
+
+		// json marshal csi mount config to raw string
+		csiMountOptionsRaw, err := json.Marshal(claim.Spec.DynamicVolumesMount)
+		if err != nil {
+			logger.Error(err, "failed to marshal csi mount config")
+			return opts, fmt.Errorf("failed to marshal csi mount config, err: %v", err)
+		}
+		opts.CSIMount.MountOptionListRaw = string(csiMountOptionsRaw)
+	}
+
+	if len(claim.Spec.Runtimes) > 0 {
+		opts.RuntimeConfig = claim.Spec.Runtimes
+	}
+
+	return sandboxcr.ValidateAndInitClaimOptions(opts)
+}
+
+// countClaimedSandboxes counts active sandboxes claimed by this claim.
+func (c *commonControl) countClaimedSandboxes(ctx context.Context, claim *agentsv1alpha1.SandboxClaim) (int32, error) {
+	return c.cache.CountActiveSandboxes(ctx, cache.ListSandboxesOptions{
+		User:      string(claim.UID),
+		Namespace: claim.Namespace,
+	})
+}

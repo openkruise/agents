@@ -1,0 +1,83 @@
+/*
+Copyright 2025 The Kruise Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package features
+
+import (
+	"k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/component-base/featuregate"
+
+	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
+)
+
+const (
+	// SandboxGate enable Sandbox-controller to create a sandbox pod.
+	SandboxGate featuregate.Feature = "Sandbox"
+
+	// SandboxSetGate enable SandboxSet-controller to create a sandbox pod.
+	SandboxSetGate featuregate.Feature = "SandboxSet"
+
+	// SandboxClaimGate enable SandboxClaim-controller to claim sandboxes from SandboxSet pools.
+	SandboxClaimGate featuregate.Feature = "SandboxClaim"
+
+	// SandboxCreatePodRateLimitGate enables rate limiting for sandbox controller creating pod.
+	SandboxCreatePodRateLimitGate featuregate.Feature = "SandboxCreatePodRateLimitGate"
+
+	// SandboxCreatePodInjectConfigGate enables injecting sidecar config for sandbox pod
+	SandboxCreatePodInjectConfigGate featuregate.Feature = "SandboxCreatePodInjectConfigGate"
+
+	// CachePodLabelSelectorGate enables label selector filtering on the Pod informer cache
+	// to reduce memory consumption.
+	CachePodLabelSelectorGate featuregate.Feature = "CachePodLabelSelector"
+
+	// SandboxInPlaceResourceResizeGate enables in-place resource resize when claiming sandboxes.
+	SandboxInPlaceResourceResizeGate featuregate.Feature = "SandboxInPlaceResourceResize"
+
+	// SandboxMultiClusterNaming enables embedding a cluster ID hash in the Sandbox generateName
+	// to prevent naming collisions across multiple clusters.
+	SandboxMultiClusterNaming featuregate.Feature = "SandboxMultiClusterNaming"
+
+	// SandboxUpgradeResumeFromFailedStepGate enables phase-aware resume behavior for sandbox upgrades.
+	// When enabled, the sandbox controller resumes from the previously failed upgrade step instead of
+	// always restarting from PreUpgrade after a template change.
+	SandboxUpgradeResumeFromFailedStepGate featuregate.Feature = "SandboxUpgradeResumeFromFailedStep"
+
+	// SecurityIdentityProviderGate enables issuing sandbox access tokens via an external
+	// identity provider service instead of random UUID generation.
+	SecurityIdentityProviderGate featuregate.Feature = "SecurityIdentityProvider"
+
+	// SandboxPauseCheckpointGate enables creating Checkpoint CRs during sandbox pause
+	// to capture pod state for resume.
+	SandboxPauseCheckpointGate featuregate.Feature = "SandboxPauseCheckpoint"
+)
+
+var defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
+	SandboxGate:                            {Default: true, PreRelease: featuregate.Alpha},
+	SandboxSetGate:                         {Default: true, PreRelease: featuregate.Alpha},
+	SandboxClaimGate:                       {Default: true, PreRelease: featuregate.Alpha},
+	SandboxCreatePodRateLimitGate:          {Default: false, PreRelease: featuregate.Alpha},
+	SandboxCreatePodInjectConfigGate:       {Default: false, PreRelease: featuregate.Alpha},
+	CachePodLabelSelectorGate:              {Default: true, PreRelease: featuregate.Alpha},
+	SandboxInPlaceResourceResizeGate:       {Default: true, PreRelease: featuregate.Alpha},
+	SandboxMultiClusterNaming:              {Default: false, PreRelease: featuregate.Alpha},
+	SandboxUpgradeResumeFromFailedStepGate: {Default: true, PreRelease: featuregate.Alpha},
+	SecurityIdentityProviderGate:           {Default: false, PreRelease: featuregate.Alpha},
+	SandboxPauseCheckpointGate:             {Default: false, PreRelease: featuregate.Alpha},
+}
+
+func init() {
+	runtime.Must(utilfeature.DefaultMutableFeatureGate.Add(defaultFeatureGates))
+}
