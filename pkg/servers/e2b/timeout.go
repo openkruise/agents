@@ -25,6 +25,7 @@ import (
 	"k8s.io/klog/v2"
 
 	"github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
 	timeoututils "github.com/openkruise/agents/pkg/utils/timeout"
@@ -72,8 +73,11 @@ func (sc *Controller) setSandboxTimeout(r *http.Request) *web.ApiError {
 
 	autoPause, timeout := ParseTimeout(sbx)
 	if !timeout.IsZero() {
-		opts := sc.buildSetTimeoutOptions(autoPause, now, request.TimeoutSeconds)
-		if _, err := sbx.SaveTimeoutWithPolicy(ctx, opts, timeoututils.UpdatePolicyAlways); err != nil {
+		opts, extraAnnotations := sc.buildSetTimeoutOptions(ctx, sbx, autoPause, now, request.TimeoutSeconds)
+		if _, err := sbx.SaveTimeoutWithPolicy(ctx, infra.SaveTimeoutOptions{
+			Timeout:          opts,
+			ExtraAnnotations: extraAnnotations,
+		}, timeoututils.UpdatePolicyAlways); err != nil {
 			return &web.ApiError{
 				Message: fmt.Sprintf("Failed to set sandbox timeout: %v", err),
 			}

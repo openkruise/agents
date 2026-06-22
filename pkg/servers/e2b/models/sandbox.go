@@ -71,6 +71,7 @@ type NewSandboxRequestExtension struct {
 	CSIMount                CSIMountExtension
 	SkipInitRuntime         bool
 	ReserveFailedSandboxFor *time.Duration
+	ReservePausedSandboxFor string
 	CreateOnNoStock         bool
 	WaitReadySeconds        int
 	TimeoutSeconds          int

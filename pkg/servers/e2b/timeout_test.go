@@ -29,6 +29,7 @@ import (
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
+	timeoututils "github.com/openkruise/agents/pkg/utils/timeout"
 )
 
 func TestSetSandboxTimeoutWithNeverTimeout(t *testing.T) {
@@ -153,12 +154,14 @@ func TestSetTimeout(t *testing.T) {
 	start := time.Now()
 
 	tests := []struct {
-		name         string
-		autoPause    bool
-		phase        v1alpha1.SandboxPhase
-		timeout      int
-		expectStatus int
-		checker      func(t *testing.T, sbx *v1alpha1.Sandbox, timeout time.Duration)
+		name                          string
+		autoPause                     bool
+		phase                         v1alpha1.SandboxPhase
+		timeout                       int
+		initialAnnotation             string
+		removeAnnotationBeforeRequest bool
+		expectStatus                  int
+		checker                       func(t *testing.T, sbx *v1alpha1.Sandbox, timeout time.Duration)
 	}{
 		{
 			name:    "default",
@@ -187,8 +190,46 @@ func TestSetTimeout(t *testing.T) {
 			autoPause: true,
 			timeout:   30,
 			checker: func(t *testing.T, sbx *v1alpha1.Sandbox, timeout time.Duration) {
-				assert.WithinDuration(t, start.Add(time.Duration(models.DefaultMaxTimeout)*time.Second), sbx.Spec.ShutdownTime.Time, 2*time.Second)
 				assert.WithinDuration(t, start.Add(timeout), sbx.Spec.PauseTime.Time, 2*time.Second)
+				assert.WithinDuration(t, sbx.Spec.PauseTime.Time.Add(timeoututils.DefaultReservePausedSandboxFor), sbx.Spec.ShutdownTime.Time, 5*time.Second)
+			},
+		},
+		{
+			name:              "set-timeout auto-pause uses custom retention",
+			phase:             v1alpha1.SandboxRunning,
+			autoPause:         true,
+			timeout:           300,
+			initialAnnotation: "30m",
+			checker: func(t *testing.T, sbx *v1alpha1.Sandbox, timeout time.Duration) {
+				require.NotNil(t, sbx.Spec.PauseTime)
+				require.NotNil(t, sbx.Spec.ShutdownTime)
+				assert.WithinDuration(t, sbx.Spec.PauseTime.Time.Add(30*time.Minute), sbx.Spec.ShutdownTime.Time, 5*time.Second)
+			},
+		},
+		{
+			name:                          "set-timeout auto-pause missing annotation backfills default on accepted update",
+			phase:                         v1alpha1.SandboxRunning,
+			autoPause:                     true,
+			timeout:                       600,
+			removeAnnotationBeforeRequest: true,
+			checker: func(t *testing.T, sbx *v1alpha1.Sandbox, timeout time.Duration) {
+				assert.Equal(t, timeoututils.ReservePausedSandboxForDefaultValue, sbx.Annotations[v1alpha1.AnnotationReservePausedSandboxFor])
+				require.NotNil(t, sbx.Spec.PauseTime)
+				require.NotNil(t, sbx.Spec.ShutdownTime)
+				assert.WithinDuration(t, sbx.Spec.PauseTime.Time.Add(timeoututils.DefaultReservePausedSandboxFor), sbx.Spec.ShutdownTime.Time, 5*time.Second)
+			},
+		},
+		{
+			name:              "set-timeout auto-pause invalid annotation fails open and backfills default",
+			phase:             v1alpha1.SandboxRunning,
+			autoPause:         true,
+			timeout:           600,
+			initialAnnotation: "forever",
+			checker: func(t *testing.T, sbx *v1alpha1.Sandbox, timeout time.Duration) {
+				assert.Equal(t, timeoututils.ReservePausedSandboxForDefaultValue, sbx.Annotations[v1alpha1.AnnotationReservePausedSandboxFor])
+				require.NotNil(t, sbx.Spec.PauseTime)
+				require.NotNil(t, sbx.Spec.ShutdownTime)
+				assert.WithinDuration(t, sbx.Spec.PauseTime.Time.Add(timeoututils.DefaultReservePausedSandboxFor), sbx.Spec.ShutdownTime.Time, 5*time.Second)
 			},
 		},
 		{
@@ -217,6 +258,19 @@ func TestSetTimeout(t *testing.T) {
 			assert.Nil(t, err)
 			assert.Equal(t, models.SandboxStateRunning, createResp.Body.State)
 			AssertEndAt(t, initEndAt, createResp.Body.EndAt)
+
+			if tt.initialAnnotation != "" || tt.removeAnnotationBeforeRequest {
+				sbx := GetSandbox(t, createResp.Body.SandboxID, client)
+				if sbx.Annotations == nil {
+					sbx.Annotations = map[string]string{}
+				}
+				if tt.removeAnnotationBeforeRequest {
+					delete(sbx.Annotations, v1alpha1.AnnotationReservePausedSandboxFor)
+				} else {
+					sbx.Annotations[v1alpha1.AnnotationReservePausedSandboxFor] = tt.initialAnnotation
+				}
+				require.NoError(t, client.Update(t.Context(), sbx))
+			}
 
 			UpdateSandboxWhen(t, client, createResp.Body.SandboxID, Immediately,
 				DoSetSandboxStatus(tt.phase, metav1.ConditionFalse, metav1.ConditionTrue))

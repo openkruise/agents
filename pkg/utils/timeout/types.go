@@ -30,3 +30,8 @@ const (
 	UpdatePolicyAlways     UpdatePolicy = "Always"
 	UpdatePolicyExtendOnly UpdatePolicy = "ExtendOnly"
 )
+
+const (
+	ReservePausedSandboxForDefaultValue = "default"
+	DefaultReservePausedSandboxFor      = 100 * 365 * 24 * time.Hour
+)

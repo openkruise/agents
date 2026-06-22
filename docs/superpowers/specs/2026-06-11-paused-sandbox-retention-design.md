@@ -7,7 +7,7 @@ OpenKruise Agents currently has several related but inconsistent timeout behavio
 - Manual `PauseSandbox` in the E2B server pushes `ShutdownTime` to `now + 1000 years` and, when `PauseTime` is set, moves `PauseTime` to the same far future value.
 - E2B create with `autoPause=true` uses the server `maxTimeout` to compute `ShutdownTime`, while `PauseTime` is based on the request timeout.
 - The sandbox controller auto-pauses a sandbox when `PauseTime` is reached by patching only `Spec.Paused=true`; it does not recalculate `ShutdownTime`.
-- Shared timeout primitives already exist in `pkg/utils/timeout`, but there is no single helper for paused retention semantics.
+- Shared timeout primitives already exist in `pkg/utils/timeout`, but paused retention needs a purpose-specific package so legacy utilities do not keep growing.
 
 This creates a coupling between running timeout limits and paused sandbox retention, and manual pause and auto-pause can produce different retention deadlines.
 
@@ -122,9 +122,9 @@ The distinction is the anchor time:
 
 This handles controller scheduling delays without allowing connect, resume, or set-timeout to shrink paused retention back to `maxTimeout`.
 
-### Shared Timeout Helpers
+### Shared Paused Retention Helpers
 
-Add shared paused retention helpers under `pkg/utils/timeout`.
+Add shared paused retention helpers under `pkg/pausedretention`.
 
 Responsibilities:
 
@@ -141,7 +141,7 @@ The helper should distinguish between:
 - annotation absent: not managed by this paused retention model.
 - annotation present with `default`: managed, use 100 years.
 - annotation present with duration: managed, use that duration.
-- invalid annotation value: return a parse error to the caller; each caller decides whether that error is fatal. The controller handles this error by pausing without recalculating `ShutdownTime`.
+- invalid annotation value: return a parse error to the caller; each caller decides whether that error is fatal. E2B write paths fail open to the default retention and backfill `default` when their lifecycle update is accepted. The controller fails open to the default retention but does not mutate the annotation.
 
 ### Constants
 
@@ -158,7 +158,7 @@ ExtensionKeyReservePausedSandboxFor = v1alpha1.E2BPrefix + "reserve-paused-sandb
 ExtensionHeaderReservePausedSandboxFor = ExtensionHeaderPrefix + "reserve-paused-sandbox-for"
 ```
 
-The controller must import only the API-level annotation key and `pkg/utils/timeout`, not E2B server models.
+The controller must import only the API-level annotation key and purpose-specific timeout/retention helpers, not E2B server models.
 
 ### E2B Create
 
@@ -216,7 +216,7 @@ This requires replacing or extending `buildSetTimeoutOptions` so auto-pause call
 
 For historical sandboxes missing the internal annotation, connect/resume/set-timeout should compute with the default 100-year retention. If the endpoint actually writes timeout fields under its existing update policy, it should also persist `agents.kruise.io/reserve-paused-sandbox-for=default` in the same optimistic update. If ExtendOnly skips a timeout write, leave the object unchanged.
 
-If the internal annotation is present but invalid, these request paths fail open: compute with the default 100-year retention, log a warning, and preserve the invalid annotation. They should not return an API error solely because a persisted internal annotation was edited incorrectly. This keeps connect/resume usable for E2B users and matches the controller's fail-open behavior.
+If the internal annotation is present but invalid, these request paths fail open: compute with the default 100-year retention, log a warning, and backfill `default` if the timeout update is accepted. They should not return an API error solely because a persisted internal annotation was edited incorrectly. This keeps connect/resume usable for E2B users. The controller also fails open, but it preserves the invalid annotation value.
 
 ### E2B Manual Pause
 
@@ -228,7 +228,7 @@ Resolution order:
 2. Persisted annotation on the Sandbox.
 3. `default`, when the Sandbox has no persisted annotation.
 
-If the persisted annotation exists but is invalid, manual pause also fails open: use `default`, log a warning, and preserve the invalid annotation unless a valid header is provided. A valid header remains an explicit user override and is persisted when the pause update wins.
+If the persisted annotation exists but is invalid, manual pause also fails open: use `default`, log a warning, and backfill `default` when the pause update wins unless a valid header is provided. A valid header remains an explicit user override and is persisted when the pause update wins.
 
 For a timed sandbox, manual pause computes `ShutdownTime = now + pausedRetention`. If the current timeout options include `PauseTime`, the pause path moves `PauseTime` to the same paused retention deadline to preserve current E2B `EndAt` behavior for auto-pause mode.
 
@@ -254,9 +254,9 @@ New behavior:
 
 - If `agents.kruise.io/reserve-paused-sandbox-for` is absent, keep existing CRD behavior: patch only `Spec.Paused=true`.
 - If the annotation is present and `Spec.ShutdownTime` is non-nil, parse it and patch both `Spec.Paused=true` and `Spec.ShutdownTime=now+pausedRetention`.
-- If the annotation is present but `Spec.ShutdownTime` is nil, patch only `Spec.Paused=true`. This preserves the never-timeout meaning of an absent shutdown deadline even if a direct CRD writer adds the annotation.
+- If the annotation is present but `Spec.ShutdownTime` is nil, do not create a shutdown deadline. This preserves the never-timeout meaning of an absent shutdown deadline even if a direct CRD writer adds the annotation.
 - If the annotation value is `default`, use 100 years.
-- If the annotation value is invalid, patch `Spec.Paused=true` without recalculating `ShutdownTime`, preserve the invalid annotation, log the problem, and emit a Warning event. The controller should not return a reconcile error after successfully patching `Paused=true`; otherwise a bad annotation would keep the sandbox running and cause repeated reconcile failures.
+- If the annotation value is invalid, use the default retention, patch `Spec.Paused=true`, preserve the invalid annotation value, recalculate `ShutdownTime` when it is non-nil, log the problem, and emit a Warning event. The controller should not return a reconcile error after successfully patching `Paused=true`; otherwise a bad annotation would keep the sandbox running and cause repeated reconcile failures.
 
 The controller should not depend on E2B-specific package constants. The internal annotation is the boundary between the E2B server and controller behavior.
 
@@ -264,13 +264,16 @@ The current `SandboxReconciler` setup already creates an event recorder for sand
 
 ### Infra Timeout And Pause Atomicity
 
-Several infra write paths must be able to persist the internal paused retention annotation in the same optimistic update as their timeout or pause mutation. Use narrow fields such as `ReservePausedFor *string` rather than a generic annotations map, so the infra contract remains specific to this lifecycle policy.
+Several infra write paths must be able to persist caller-computed annotations in the same optimistic update as their timeout or pause mutation. The infra contract must stay backend-neutral: it should not know the paused-retention annotation key, should not parse paused-retention values, and should not call back into E2B/controller-specific retention resolvers.
 
 Required contract changes:
 
-- Timeout save path: replace or extend `SaveTimeoutWithPolicy(ctx, opts, policy)` with an options form that can carry `Timeout`, `Policy`, and `ReservePausedFor *string`.
-- Resume path: extend `infra.ResumeOptions` with `ReservePausedFor *string` so the atomic resume placeholder timeout write can also backfill the annotation.
-- Pause path: extend `infra.PauseOptions` with `ReservePausedFor *string` so manual pause can persist header/default retention atomically with `Spec.Paused=true`.
+- Timeout save path: keep the update policy as an explicit argument, `SaveTimeoutWithPolicy(ctx, opts, policy)`.
+- `infra.SaveTimeoutOptions` carries only `Timeout timeout.Options` and `ExtraAnnotations map[string]string`.
+- `infra.PauseOptions` carries `Timeout *timeout.Options` and `ExtraAnnotations map[string]string`.
+- `infra.ResumeOptions` carries only `Timeout *timeout.Options`; resume never writes paused-retention annotations.
+
+Handlers that derive timeout fields from the retained annotation must resolve paused retention before calling infra. For E2B request paths, this means the handler computes both the `timeout.Options` and the optional `ExtraAnnotations` map from the sandbox it has read. Infra only merges `ExtraAnnotations` into the object when the corresponding timeout or pause mutation is accepted.
 
 Timeout annotation writes must be coupled to accepted timeout writes:
 
@@ -278,9 +281,11 @@ Timeout annotation writes must be coupled to accepted timeout writes:
 - `UpdatePolicyExtendOnly`: write the annotation only when the requested timeout extends the effective deadline and the timeout write is accepted.
 - If the policy skips the timeout update, do not perform an annotation-only write.
 
-`sandboxcr.Pause` already uses `retryUpdate` to atomically set `Spec.Paused` and timeout fields. The same mutator should update the internal annotation only when the pause request wins the first-writer-wins race.
+`sandboxcr.Pause` already uses `retryUpdate` to atomically set `Spec.Paused` and timeout fields. The same mutator should merge `PauseOptions.ExtraAnnotations` only when the pause request wins the first-writer-wins race.
 
 If the latest object is already paused, `Pause` returns without modifying timeout or annotation.
+
+`sandboxcr.Resume` may still write a placeholder timeout atomically with `Spec.Paused=false` to close the auto-pause race, but it must not merge annotations. Any paused-retention annotation backfill for the legacy resume endpoint belongs to the later timeout save path, and only when that timeout save is accepted by its update policy.
 
 ## Data Flow
 
@@ -303,21 +308,31 @@ Create with custom retention:
 Connect, resume, or set-timeout on an auto-pause sandbox:
 
 1. Handler parses and validates the requested running timeout as it does today.
-2. Handler resolves paused retention from `agents.kruise.io/reserve-paused-sandbox-for`, falling back to `default` when missing.
+2. Handler reads `agents.kruise.io/reserve-paused-sandbox-for` from the sandbox it already loaded, falling back to `default` when missing or invalid.
 3. Handler builds timeout options with `PauseTime=now+requestedTimeout` and `ShutdownTime=PauseTime+pausedRetention`.
-4. Handler saves the timeout using the existing update policy for that endpoint.
+4. Handler prepares `ExtraAnnotations` only when the persisted annotation should be backfilled or replaced, such as missing or invalid persisted annotation.
+5. Handler saves the timeout using the existing update policy for that endpoint.
+6. Infra merges `ExtraAnnotations` only if the timeout update is accepted by that policy.
+
+Resume placeholder timeout write:
+
+1. Legacy resume and connect-on-paused paths may pass a placeholder timeout to `infra.ResumeOptions` so `Spec.Paused=false` and a fresh timeout are written atomically.
+2. The placeholder timeout uses the same auto-pause math, but `infra.ResumeOptions` has no annotation field.
+3. Missing or invalid paused-retention annotation is not backfilled by the resume mutation itself.
+4. The later timeout save path may backfill `default` if its update policy accepts the write.
 
 Manual pause with header:
 
 1. Client calls pause with `x-e2b-kruise-reserve-paused-sandbox-for=1h`.
-2. E2B validates the header and computes `ShutdownTime=now+1h`.
-3. Infra pause writes `Spec.Paused=true`, timeout fields, and `agents.kruise.io/reserve-paused-sandbox-for=1h` in one winning update.
+2. E2B validates the header, computes `ShutdownTime=now+1h`, and passes `ExtraAnnotations` containing `agents.kruise.io/reserve-paused-sandbox-for=1h`.
+3. Infra pause writes `Spec.Paused=true`, timeout fields, and the extra annotation in one winning update.
 
 Manual pause without header on a sandbox that lacks the internal annotation:
 
-1. E2B resolves the retention value to `default`.
+1. E2B sees the loaded sandbox lacks the internal annotation and resolves the retention value to `default`.
 2. For a timed sandbox, E2B computes `ShutdownTime=now+100 years`.
-3. Infra pause writes `Spec.Paused=true`, timeout fields, and `agents.kruise.io/reserve-paused-sandbox-for=default` in one winning update.
+3. E2B passes `ExtraAnnotations` containing `agents.kruise.io/reserve-paused-sandbox-for=default`.
+4. Infra pause writes `Spec.Paused=true`, timeout fields, and the extra annotation in one winning update.
 
 Controller auto-pause:
 
@@ -325,7 +340,7 @@ Controller auto-pause:
 2. If internal annotation exists and `Spec.ShutdownTime` is non-nil, it computes paused shutdown deadline from annotation.
 3. Controller patches `Spec.Paused=true` and the recalculated `ShutdownTime` under optimistic lock.
 4. If annotation is absent, controller does not recalculate `ShutdownTime`.
-5. If annotation is invalid, controller patches `Spec.Paused=true` only, records a warning, and leaves the existing `ShutdownTime` and annotation unchanged.
+5. If annotation is invalid, controller uses default retention, preserves the annotation value, records a warning, and recalculates `ShutdownTime` when it is non-nil.
 
 ## Error Handling
 
@@ -333,9 +348,9 @@ Invalid create metadata should return HTTP 400 with a clear extension parsing er
 
 Invalid pause header should return HTTP 400 before attempting to pause. These are request input errors.
 
-Invalid persisted retention annotation should not make E2B connect, resume, set-timeout, or manual pause fail. Those paths should use `default`, log a warning, preserve the invalid annotation, and continue with the existing timeout or pause operation. If a valid pause header is supplied, the header overrides the invalid annotation and is persisted when the pause update wins.
+Invalid persisted retention annotation should not make E2B connect, resume, set-timeout, or manual pause fail. Those paths should use `default`, log a warning, backfill the annotation to `default` when the timeout or pause update is accepted, and continue with the existing timeout or pause operation. If a valid pause header is supplied, the header overrides the invalid annotation and is persisted when the pause update wins.
 
-Invalid controller annotation should not block auto-pause. The controller should patch `Spec.Paused=true`, leave `ShutdownTime` unchanged, preserve the invalid annotation, log the validation error, and emit a Warning event. This deliberately favors stopping the running sandbox over enforcing retention parsing in the controller loop.
+Invalid controller annotation should not block auto-pause. The controller should patch `Spec.Paused=true`, preserve the invalid annotation value, recalculate `ShutdownTime` with the default retention when `ShutdownTime` is non-nil, log the validation error, and emit a Warning event. This deliberately favors stopping the running sandbox over enforcing retention parsing in the controller loop.
 
 Timeout calculation should normalize timestamps through existing timeout normalization behavior before persistence.
 
@@ -386,10 +401,10 @@ E2B connect/resume/set-timeout tests:
 - Auto-pause timeout writes use `ShutdownTime=PauseTime+customRetention` when annotation is a duration.
 - Auto-pause timeout writes fall back to default retention when annotation is absent.
 - Auto-pause timeout writes persist `default` in the same update when annotation is absent and the timeout write is accepted.
-- Invalid persisted retention annotation on these request paths fails open: use default retention, preserve the invalid annotation, and still write timeout when the existing update policy accepts the update.
+- Invalid persisted retention annotation on these request paths fails open: use default retention, backfill `default`, and still write timeout when the existing update policy accepts the update.
 - Non-auto-pause timeout writes keep existing `ShutdownTime=now+requestedTimeout` behavior.
 - Connect/resume extend-only behavior is unchanged except that the accepted requested timeout writes a retention-based `ShutdownTime`.
-- Resume placeholder timeout write backfills `default` when annotation is absent and the resume mutation accepts the timeout write.
+- Resume placeholder timeout write does not backfill the paused-retention annotation; only the later timeout save path may backfill `default` when its policy accepts the update.
 - ExtendOnly skip does not create an annotation-only update.
 
 E2B pause tests:
@@ -398,7 +413,7 @@ E2B pause tests:
 - Header `default` uses 100 years and persists `default`.
 - Header duration uses that duration and persists it.
 - No header and no annotation uses `default` and persists `default` when the pause update wins.
-- No header and invalid annotation uses `default`, preserves the invalid annotation, and completes pause when the pause update wins.
+- No header and invalid annotation uses `default`, backfills `default`, and completes pause when the pause update wins.
 - Valid header with invalid annotation uses the header value and persists it when the pause update wins.
 - Invalid header returns a bad request.
 - Already paused sandbox preserves first-writer-wins and does not update annotation.
@@ -409,9 +424,9 @@ Controller tests:
 - Expired `PauseTime` with internal annotation `default` patches `Paused=true` and `ShutdownTime=now+100 years`.
 - Expired `PauseTime` with duration annotation patches `ShutdownTime=now+duration`.
 - Expired `PauseTime` without annotation patches only `Paused=true`.
-- Expired `PauseTime` with annotation and nil `ShutdownTime` patches only `Paused=true`.
+- Expired `PauseTime` with a valid annotation and nil `ShutdownTime` patches only `Paused=true`.
 - Conflict behavior still requeues and leaves stored spec unchanged.
-- Invalid annotation patches only `Paused=true`, leaves `ShutdownTime` and annotation unchanged, and records a warning.
+- Invalid annotation patches `Paused=true`, preserves the invalid annotation value, recalculates `ShutdownTime` when it is non-nil, and records a warning.
 
 Infra pause tests:
 
@@ -421,10 +436,10 @@ Infra pause tests:
 
 Infra timeout/resume tests:
 
-- Accepted timeout save writes timeout fields and `ReservePausedFor` annotation in one retry update.
+- Accepted timeout save writes timeout fields and generic `ExtraAnnotations` in one retry update.
 - Skipped timeout save under ExtendOnly does not write an annotation-only update.
-- Resume placeholder timeout write persists `ReservePausedFor` when the resume mutation wins.
-- Resume does not write `ReservePausedFor` when the latest Sandbox is already resumed and no timeout mutation is accepted.
+- Resume placeholder timeout write does not persist paused-retention annotations when the resume mutation wins.
+- Resume does not write paused-retention annotations when the latest Sandbox is already resumed and no timeout mutation is accepted.
 
 Lifecycle regression tests:
 
@@ -440,17 +455,19 @@ Lifecycle regression tests:
 - E2B create with `autoPause=true` computes initial `ShutdownTime` from `PauseTime + pausedRetention`.
 - E2B connect, resume, and set-timeout on auto-pause sandboxes compute `ShutdownTime` from `PauseTime + pausedRetention`, not `maxTimeout`.
 - E2B connect, resume, and set-timeout backfill `agents.kruise.io/reserve-paused-sandbox-for=default` for auto-pause sandboxes missing the annotation when the timeout update is accepted.
+- E2B resume placeholder timeout writes do not backfill `agents.kruise.io/reserve-paused-sandbox-for`; any backfill happens through the accepted post-resume timeout save.
+- Infra timeout/pause APIs expose generic `ExtraAnnotations` and do not expose paused-retention-specific fields or resolver callbacks.
 - Controller auto-pause recalculates `ShutdownTime` only for sandboxes with `agents.kruise.io/reserve-paused-sandbox-for` and an existing non-nil `ShutdownTime`.
 - Controller auto-pause with an invalid retention annotation still patches `Paused=true` and records a warning instead of blocking reconcile.
 - Sandboxes without the internal annotation keep existing CRD behavior.
 - `never-timeout` sandboxes do not receive a shutdown deadline from paused retention.
 - Invalid metadata, header, or annotation values are handled explicitly and never panic.
-- Invalid persisted annotation values in E2B request paths are fail-open; invalid request metadata/header values remain client errors.
+- Invalid persisted annotation values in E2B request paths are fail-open and self-healing on accepted writes; invalid request metadata/header values remain client errors.
 - Existing create/connect/resume/set-timeout requested-timeout validation and extend-only semantics are preserved.
 
 ## Implementation Notes For Coding Agent
 
-- Helper names and exact file organization under `pkg/utils/timeout` can be chosen during implementation.
+- Keep paused retention helpers in a purpose-specific package such as `pkg/pausedretention`, not under legacy `pkg/utils`.
 - Test file placement should follow nearby package conventions.
 - Do not add new generic utility packages.
 - Do not import `pkg/servers/e2b/models` from controller code.
