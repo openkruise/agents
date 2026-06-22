@@ -26,6 +26,11 @@ import (
 )
 
 func main() {
+	const (
+		groupResource = "resource"
+		groupOther    = "other"
+	)
+
 	globalOpts := cli.NewGlobalOptions()
 
 	root := &cobra.Command{
@@ -40,24 +45,24 @@ func main() {
 
 	globalOpts.AddFlags(root.PersistentFlags())
 
-	root.AddGroup(&cobra.Group{ID: "resource", Title: "Resource Commands:"})
-	root.AddGroup(&cobra.Group{ID: "other", Title: "Other Commands:"})
+	root.AddGroup(&cobra.Group{ID: groupResource, Title: "Resource Commands:"})
+	root.AddGroup(&cobra.Group{ID: groupOther, Title: "Other Commands:"})
 
 	scaleCmd := cli.NewScaleCommand(globalOpts)
-	scaleCmd.GroupID = "resource"
+	scaleCmd.GroupID = groupResource
 	setCmd := cli.NewSetCommand(globalOpts)
-	setCmd.GroupID = "resource"
+	setCmd.GroupID = groupResource
 	restartCmd := cli.NewRestartCommand(globalOpts)
-	restartCmd.GroupID = "resource"
+	restartCmd.GroupID = groupResource
 	createCmd := cli.NewCreateCommand(globalOpts)
-	createCmd.GroupID = "resource"
+	createCmd.GroupID = groupResource
 
 	root.AddCommand(scaleCmd, setCmd, restartCmd, createCmd)
 
 	// Assign group ID to auto-generated commands (completion, help)
 	for _, cmd := range root.Commands() {
 		if cmd.GroupID == "" {
-			cmd.GroupID = "other"
+			cmd.GroupID = groupOther
 		}
 	}
 

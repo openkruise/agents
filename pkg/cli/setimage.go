@@ -25,6 +25,7 @@ import (
 	"github.com/spf13/cobra"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/util/retry"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	apiv1alpha1 "github.com/openkruise/agents/client/clientset/versioned/typed/api/v1alpha1"
@@ -124,29 +125,34 @@ func runSetImageWithClient(client apiv1alpha1.ApiV1alpha1Interface, o *setImageO
 	}
 
 	ctx := context.TODO()
-	sbs, err := client.SandboxSets(o.global.Namespace).Get(ctx, name, metav1.GetOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to get sandboxset %q: %w", name, err)
-	}
+	var updated []string
 
-	if sbs.Spec.Template == nil {
-		return fmt.Errorf("sandboxset %q uses a TemplateRef; modify the referenced SandboxTemplate directly instead", name)
-	}
-
-	updated := updateContainerImages(sbs.Spec.Template.Spec.Containers, images)
-	updated = append(updated, updateContainerImages(sbs.Spec.Template.Spec.InitContainers, images)...)
-
-	found := make(map[string]bool, len(updated))
-	for _, u := range updated {
-		found[u] = true
-	}
-	for container := range images {
-		if !found[container] {
-			return fmt.Errorf("container %q not found in sandboxset %q", container, name)
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		sbs, getErr := client.SandboxSets(o.global.Namespace).Get(ctx, name, metav1.GetOptions{})
+		if getErr != nil {
+			return fmt.Errorf("failed to get sandboxset %q: %w", name, getErr)
 		}
-	}
 
-	_, err = client.SandboxSets(o.global.Namespace).Update(ctx, sbs, metav1.UpdateOptions{})
+		if sbs.Spec.Template == nil {
+			return fmt.Errorf("sandboxset %q uses a TemplateRef; modify the referenced SandboxTemplate directly instead", name)
+		}
+
+		updated = updateContainerImages(sbs.Spec.Template.Spec.Containers, images)
+		updated = append(updated, updateContainerImages(sbs.Spec.Template.Spec.InitContainers, images)...)
+
+		found := make(map[string]bool, len(updated))
+		for _, u := range updated {
+			found[u] = true
+		}
+		for container := range images {
+			if !found[container] {
+				return fmt.Errorf("container %q not found in sandboxset %q", container, name)
+			}
+		}
+
+		_, updateErr := client.SandboxSets(o.global.Namespace).Update(ctx, sbs, metav1.UpdateOptions{})
+		return updateErr
+	})
 	if err != nil {
 		return fmt.Errorf("failed to update sandboxset %q: %w", name, err)
 	}

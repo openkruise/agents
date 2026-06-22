@@ -1,4 +1,4 @@
-name: E2E-1.32
+name: E2E-okactl
 
 on:
   push:
@@ -19,7 +19,7 @@ env:
   KIND_CLUSTER_NAME: 'ci-testing'
 
 jobs:
-  sandbox:
+  okactl:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -36,17 +36,26 @@ jobs:
           cluster_name: ${{ env.KIND_CLUSTER_NAME }}
           config: ./test/kind-conf.yaml
           version: ${{ env.KIND_VERSION }}
-      - name: Build image
+      - name: Build controller image
         run: |
           export IMAGE="agent-sandbox-controller:latest"
-          docker build -f dockerfiles/agent-sandbox-controller.Dockerfile  --pull --no-cache . -t $IMAGE
+          docker build -f dockerfiles/agent-sandbox-controller.Dockerfile --pull --no-cache . -t $IMAGE
           kind load docker-image --name=${KIND_CLUSTER_NAME} $IMAGE || { echo >&2 "kind not installed or error loading image: $IMAGE"; exit 1; }
       - name: Install Kruise Agents
         run: |
           CONTROLLER_IMG=agent-sandbox-controller:latest make deploy-agent-sandbox-controller
           bash hack/wait-agent-sandbox-controller.sh
-      - name: Run E2E Tests
+      - name: Install OpenKruise CRDs
+        run: |
+          # Install the ContainerRecreateRequest CRD so okactl restart can be tested
+          kubectl apply -f https://raw.githubusercontent.com/openkruise/kruise/master/config/crd/bases/apps.kruise.io_containerrecreaterequests.yaml || true
+      - name: Build okactl
+        run: |
+          make build-okactl
+          echo "$(pwd)/bin" >> $GITHUB_PATH
+      - name: Run okactl E2E Tests
         run: |
           export KUBECONFIG=/home/runner/.kube/config
-          hack/run-agents-e2e-test.sh --print-info --skip 'Sandbox Upgrade Lifecycle|SandboxUpdateOps E2E|okactl CLI'
-
+          export OKACTL_BIN=$(pwd)/bin/okactl
+          make ginkgo
+          ./bin/ginkgo -timeout 10m -v --fail-fast --focus='okactl CLI' test/e2e
