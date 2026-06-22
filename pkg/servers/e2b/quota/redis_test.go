@@ -168,6 +168,37 @@ func TestRedisBackendWrappedErrorsDoNotRecordManagerBackendErrorMetrics(t *testi
 	assert.Equal(t, beforeReleaseTotalErrors+1, testutil.ToFloat64(releaseTotal.WithLabelValues("error")))
 }
 
+func TestRedisBackendNilReceiverOrClientReturnsUnavailable(t *testing.T) {
+	tests := []struct {
+		name    string
+		backend *RedisBackend
+	}{
+		{
+			name:    "nil receiver",
+			backend: nil,
+		},
+		{
+			name:    "nil client",
+			backend: &RedisBackend{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.ErrorIs(t, tt.backend.Acquire(context.Background(), "key-1", "lock-1", 1), ErrBackendUnavailable)
+			require.ErrorIs(t, tt.backend.Release(context.Background(), "key-1", "lock-1"), ErrBackendUnavailable)
+			released, err := tt.backend.ReleaseResult(context.Background(), "key-1", "lock-1")
+			require.ErrorIs(t, err, ErrBackendUnavailable)
+			assert.False(t, released)
+			require.ErrorIs(t, tt.backend.AddObserved(context.Background(), "key-1", "lock-1", time.Now()), ErrBackendUnavailable)
+			listed, err := tt.backend.List(context.Background(), "key-1")
+			require.ErrorIs(t, err, ErrBackendUnavailable)
+			assert.Nil(t, listed)
+			require.ErrorIs(t, tt.backend.DeleteSubject(context.Background(), "key-1"), ErrBackendUnavailable)
+		})
+	}
+}
+
 func TestRedisBackendHardZeroAndRelease(t *testing.T) {
 	srv := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: srv.Addr()})

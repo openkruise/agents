@@ -18,12 +18,15 @@ package models
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 )
 
 type QuotaDimension string
 
 const DimSandboxCount QuotaDimension = "sandbox.count"
+
+var ErrQuotaLimitNegative = errors.New("limit must be non-negative")
 
 type QuotaScope struct {
 	Template string `json:"template,omitempty"`
@@ -123,7 +126,7 @@ func (q *APIKeyQuota) ToQuotaSpec() (*QuotaSpec, error) {
 
 	normalized, err := NormalizeQuotaSpec(spec)
 	if err != nil {
-		if err.Error() == "limit must be non-negative" {
+		if errors.Is(err, ErrQuotaLimitNegative) {
 			return nil, fmt.Errorf("quota limit must be non-negative: %w", err)
 		}
 		return nil, err
@@ -146,6 +149,33 @@ func APIKeyQuotaFromSpec(spec *QuotaSpec) *APIKeyQuota {
 	}
 
 	return nil
+}
+
+func MarshalQuotaSpec(spec *QuotaSpec) ([]byte, error) {
+	normalized, err := NormalizeQuotaSpec(spec)
+	if err != nil {
+		return nil, err
+	}
+	if normalized == nil {
+		return nil, nil
+	}
+	raw, err := json.Marshal(normalized)
+	if err != nil {
+		return nil, fmt.Errorf("marshal quota: %w", err)
+	}
+	return raw, nil
+}
+
+func DecodeQuotaSpec(raw []byte) (*QuotaSpec, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+
+	var spec QuotaSpec
+	if err := json.Unmarshal(raw, &spec); err != nil {
+		return nil, fmt.Errorf("unmarshal quota: %w", err)
+	}
+	return NormalizeQuotaSpec(&spec)
 }
 
 func NormalizeQuotaSpec(spec *QuotaSpec) (*QuotaSpec, error) {
@@ -176,7 +206,7 @@ func NormalizeQuotaSpec(spec *QuotaSpec) (*QuotaSpec, error) {
 			continue
 		}
 		if *limit.Limit < 0 {
-			return nil, fmt.Errorf("limit must be non-negative")
+			return nil, ErrQuotaLimitNegative
 		}
 		value := *limit.Limit
 		normalized.Limits = append(normalized.Limits, QuotaLimit{
@@ -226,23 +256,6 @@ func (q *QuotaSpec) DeepCopy() *QuotaSpec {
 		if q.Limits[i].Limit != nil {
 			value := *q.Limits[i].Limit
 			out.Limits[i].Limit = &value
-		}
-	}
-
-	return out
-}
-
-func (q *APIKeyQuota) deepCopy() *APIKeyQuota {
-	if q == nil {
-		return nil
-	}
-
-	out := &APIKeyQuota{}
-	if q.Sandbox != nil {
-		out.Sandbox = &SandboxQuota{}
-		if q.Sandbox.Count != nil {
-			value := *q.Sandbox.Count
-			out.Sandbox.Count = &value
 		}
 	}
 

@@ -31,3 +31,10 @@ Redis 已配置但暂时不可用，sandbox-manager 会有意 fail-open：受限
 
 如果 Redis 需要认证，请通过 Kubernetes Secret 注入 `E2B_QUOTA_REDIS_USERNAME` 和
 `E2B_QUOTA_REDIS_PASSWORD`，不要把凭据直接写进 deployment patch。
+
+使用 MySQL key storage 且设置 `--e2b-key-storage-disable-schema-auto-update=true` 时，启动期 schema check 会要求
+`team_api_keys.quota` 列已经存在。启动前请先应用 `hack/mysql-schema.sql` 中的手动迁移：
+
+```sql
+ALTER TABLE team_api_keys ADD COLUMN quota JSON DEFAULT NULL AFTER created_by_uid;
+```

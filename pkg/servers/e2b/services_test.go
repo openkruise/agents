@@ -1738,10 +1738,11 @@ func TestDeleteSandbox_ReleasesQuotaAfterAcceptedDelete(t *testing.T) {
 
 	controller.quota = &fakeQuotaManager{}
 	user := &models.CreatedTeamAPIKey{
-		ID:   uuid.New(),
-		Key:  InitKey,
-		Name: "admin",
-		Team: models.AdminTeam(),
+		ID:        uuid.New(),
+		Key:       InitKey,
+		Name:      "admin",
+		Team:      models.AdminTeam(),
+		QuotaSpec: quotaSpecForAPIKeyTest(2),
 	}
 
 	cleanup := CreateSandboxPool(t, controller, "test-template", 1)
@@ -1767,6 +1768,40 @@ func TestDeleteSandbox_ReleasesQuotaAfterAcceptedDelete(t *testing.T) {
 	assert.True(t, fakeQuota.releaseHasDeadline.Load())
 	assert.Equal(t, user.ID.String(), fakeQuota.lastRelease.APIKeyID)
 	assert.NotEmpty(t, fakeQuota.lastRelease.LockString)
+}
+
+func TestDeleteSandbox_UnlimitedKeyDoesNotReleaseQuota(t *testing.T) {
+	controller, _, teardown := Setup(t)
+	defer teardown()
+
+	fakeQuota := &fakeQuotaManager{}
+	controller.quota = fakeQuota
+	user := &models.CreatedTeamAPIKey{
+		ID:   uuid.New(),
+		Key:  InitKey,
+		Name: "admin",
+		Team: models.AdminTeam(),
+	}
+
+	cleanup := CreateSandboxPool(t, controller, "test-template", 1)
+	_ = cleanup
+
+	createResp, apiErr := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
+		TemplateID: "test-template",
+		Metadata: map[string]string{
+			models.ExtensionKeySkipInitRuntime: v1alpha1.True,
+		},
+	}, nil, user))
+	require.Nil(t, apiErr)
+	require.NotNil(t, createResp.Body)
+
+	deleteResp, apiErr := controller.DeleteSandbox(NewRequest(t, nil, nil, map[string]string{
+		"sandboxID": createResp.Body.SandboxID,
+	}, user))
+
+	require.Nil(t, apiErr)
+	assert.Equal(t, http.StatusNoContent, deleteResp.Code)
+	assert.Equal(t, int64(0), fakeQuota.releaseCalls.Load())
 }
 
 type deleteReleaseQuotaManager struct {
@@ -1842,10 +1877,11 @@ func TestDeleteSandbox_ReleaseErrorsStillReturnAcceptedDelete(t *testing.T) {
 			}
 			controller.quota = fakeQuota
 			user := &models.CreatedTeamAPIKey{
-				ID:   uuid.New(),
-				Key:  InitKey,
-				Name: "admin",
-				Team: models.AdminTeam(),
+				ID:        uuid.New(),
+				Key:       InitKey,
+				Name:      "admin",
+				Team:      models.AdminTeam(),
+				QuotaSpec: quotaSpecForAPIKeyTest(2),
 			}
 
 			cleanup := CreateSandboxPool(t, controller, "test-template", 1)

@@ -21,7 +21,6 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -62,6 +61,19 @@ var openMySQLDB = func(dsn string) (*gorm.DB, error) {
 
 var autoMigrateMySQLModels = func(ctx context.Context, db *gorm.DB) error {
 	return db.WithContext(ctx).AutoMigrate(&TeamEntity{}, &TeamAPIKeyEntity{})
+}
+
+var validateMySQLKeySchema = func(ctx context.Context, db *gorm.DB) error {
+	var count int64
+	if err := db.WithContext(ctx).
+		Raw("SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?", "team_api_keys", "quota").
+		Scan(&count).Error; err != nil {
+		return fmt.Errorf("check mysql key storage schema: %w", err)
+	}
+	if count == 0 {
+		return fmt.Errorf("mysql key storage schema missing required column team_api_keys.quota; run schema auto-migration or apply manual migration: ALTER TABLE team_api_keys ADD COLUMN quota JSON DEFAULT NULL")
+	}
+	return nil
 }
 
 // TeamEntity corresponds to the teams table.
@@ -148,6 +160,9 @@ func (k *mysqlKeyStorage) Init(ctx context.Context) error {
 
 	if k.cfg.DisableAutoMigrate {
 		log.Info("skip mysql schema auto-migration for key storage because disable-auto-migrate is enabled")
+		if err := validateMySQLKeySchema(ctx, k.db); err != nil {
+			return err
+		}
 	} else if err := autoMigrateMySQLModels(ctx, k.db); err != nil {
 		return fmt.Errorf("automigrate: %w", err)
 	}
@@ -328,16 +343,12 @@ func cloneTeamUser(user *models.TeamUser) *models.TeamUser {
 }
 
 func marshalQuotaForDB(spec *models.QuotaSpec) (*string, error) {
-	normalized, err := models.NormalizeQuotaSpec(spec)
+	raw, err := models.MarshalQuotaSpec(spec)
 	if err != nil {
 		return nil, err
 	}
-	if normalized == nil {
+	if raw == nil {
 		return nil, nil
-	}
-	raw, err := json.Marshal(normalized)
-	if err != nil {
-		return nil, fmt.Errorf("marshal quota: %w", err)
 	}
 	value := string(raw)
 	return &value, nil
@@ -347,15 +358,7 @@ func unmarshalQuotaFromDB(raw *string) (*models.QuotaSpec, error) {
 	if raw == nil || *raw == "" {
 		return nil, nil
 	}
-	var spec models.QuotaSpec
-	if err := json.Unmarshal([]byte(*raw), &spec); err != nil {
-		return nil, fmt.Errorf("unmarshal quota: %w", err)
-	}
-	normalized, err := models.NormalizeQuotaSpec(&spec)
-	if err != nil {
-		return nil, err
-	}
-	return normalized, nil
+	return models.DecodeQuotaSpec([]byte(*raw))
 }
 
 func quotaFromDBOrUnlimited(ctx context.Context, uid string, raw *string) *models.QuotaSpec {

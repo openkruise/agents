@@ -20,10 +20,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -34,8 +37,49 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
+	"github.com/openkruise/agents/pkg/servers/e2b/quota"
 	"github.com/openkruise/agents/pkg/servers/web"
 )
+
+type retryDeleteSubjectQuotaManager struct {
+	calls       atomic.Int64
+	failures    int64
+	callCh      chan int64
+	sawDeadline atomic.Bool
+}
+
+func newRetryDeleteSubjectQuotaManager(failures int64) *retryDeleteSubjectQuotaManager {
+	return &retryDeleteSubjectQuotaManager{
+		failures: failures,
+		callCh:   make(chan int64, 8),
+	}
+}
+
+func (m *retryDeleteSubjectQuotaManager) Acquire(context.Context, quota.AcquireRequest) error {
+	return nil
+}
+
+func (m *retryDeleteSubjectQuotaManager) Release(context.Context, quota.ReleaseRequest) error {
+	return nil
+}
+
+func (m *retryDeleteSubjectQuotaManager) DeleteSubject(ctx context.Context, _ string) error {
+	if deadline, ok := ctx.Deadline(); ok {
+		m.sawDeadline.Store(true)
+		if remaining := time.Until(deadline); remaining > apiKeyQuotaCleanupTimeout+50*time.Millisecond {
+			return errors.New("cleanup deadline is too long")
+		}
+	}
+	call := m.calls.Add(1)
+	select {
+	case m.callCh <- call:
+	default:
+	}
+	if call <= m.failures {
+		return errors.New("transient cleanup failure")
+	}
+	return nil
+}
 
 func TestListAPIKeys(t *testing.T) {
 	controller, _, teardown := Setup(t)
@@ -620,5 +664,49 @@ func TestDeleteAPIKeyPermissionMiddleware(t *testing.T) {
 			require.Nil(t, apiError)
 			assert.Equal(t, tt.expectCode, resp.Code)
 		})
+	}
+}
+
+func TestDeleteAPIKeyQuotaCleanupRetriesBestEffort(t *testing.T) {
+	controller, _, teardown := Setup(t)
+	defer teardown()
+
+	ctx := logs.NewContext()
+	adminUser := &models.CreatedTeamAPIKey{
+		ID:   keys.AdminKeyID,
+		Key:  InitKey,
+		Name: "admin",
+		Team: models.AdminTeam(),
+	}
+	target, err := controller.keys.CreateKey(ctx, adminUser, keys.CreateKeyOptions{Name: "limited-key", Quota: quotaSpecForAPIKeyTest(2)})
+	require.NoError(t, err)
+	refreshKeyStorageForTest(t, controller)
+
+	fakeQuota := newRetryDeleteSubjectQuotaManager(1)
+	controller.quota = fakeQuota
+
+	req := NewRequest(t, nil, nil, map[string]string{"apiKeyID": target.ID.String()}, adminUser)
+	req = req.WithContext(context.WithValue(req.Context(), targetAPIKeyContextKey, target))
+	resp, apiErr := controller.DeleteAPIKey(req)
+	require.Nil(t, apiErr)
+	assert.Equal(t, http.StatusNoContent, resp.Code)
+
+	for i := 0; i < 2; i++ {
+		select {
+		case <-fakeQuota.callCh:
+		case <-time.After(time.Second):
+			t.Fatalf("quota cleanup did not retry after transient failure, calls=%d", fakeQuota.calls.Load())
+		}
+	}
+	assert.True(t, fakeQuota.sawDeadline.Load())
+	assert.GreaterOrEqual(t, fakeQuota.calls.Load(), int64(2))
+}
+
+func quotaSpecForAPIKeyTest(count int64) *models.QuotaSpec {
+	return &models.QuotaSpec{
+		Limits: []models.QuotaLimit{{
+			Dimension: models.DimSandboxCount,
+			Limit:     &count,
+		}},
 	}
 }

@@ -60,11 +60,26 @@ func NewRedisBackend(client *redis.Client, timeout time.Duration) *RedisBackend 
 	}
 }
 
+func (b *RedisBackend) redisClient(op string) (*redis.Client, error) {
+	if b == nil || b.client == nil {
+		return nil, fmt.Errorf("%w: redis client unavailable for %s", ErrBackendUnavailable, op)
+	}
+	return b.client, nil
+}
+
 func (b *RedisBackend) Acquire(ctx context.Context, apiKeyID, lockString string, limit int64) error {
-	acquireCtx, cancel := context.WithTimeout(ctx, b.timeout)
+	client, err := b.redisClient("acquire")
+	if err != nil {
+		return err
+	}
+	timeout := b.timeout
+	if timeout <= 0 {
+		timeout = defaultAcquireTimeout
+	}
+	acquireCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	result, err := acquireRedisScript.Run(acquireCtx, b.client, []string{liveKey(apiKeyID)}, lockString, limit).Text()
+	result, err := acquireRedisScript.Run(acquireCtx, client, []string{liveKey(apiKeyID)}, lockString, limit).Text()
 	if err != nil {
 		return fmt.Errorf("%w: acquire quota in redis: %v", ErrBackendUnavailable, err)
 	}
@@ -85,10 +100,14 @@ func (b *RedisBackend) Release(ctx context.Context, apiKeyID, lockString string)
 }
 
 func (b *RedisBackend) ReleaseResult(ctx context.Context, apiKeyID, lockString string) (bool, error) {
+	client, err := b.redisClient("release")
+	if err != nil {
+		return false, err
+	}
 	releaseCtx, cancel := withOperationTimeout(ctx, defaultMaintenanceOperationTimeout)
 	defer cancel()
 
-	deleted, err := releaseRedisScript.Run(releaseCtx, b.client, []string{liveKey(apiKeyID)}, lockString).Int64()
+	deleted, err := releaseRedisScript.Run(releaseCtx, client, []string{liveKey(apiKeyID)}, lockString).Int64()
 	if err != nil {
 		releaseTotal.WithLabelValues("error").Inc()
 		return false, fmt.Errorf("%w: release quota in redis: %v", ErrBackendUnavailable, err)
@@ -104,10 +123,14 @@ func (b *RedisBackend) ReleaseResult(ctx context.Context, apiKeyID, lockString s
 }
 
 func (b *RedisBackend) AddObserved(ctx context.Context, apiKeyID, lockString string, acquiredAt time.Time) error {
+	client, err := b.redisClient("add_observed")
+	if err != nil {
+		return err
+	}
 	opCtx, cancel := withOperationTimeout(ctx, defaultMaintenanceOperationTimeout)
 	defer cancel()
 
-	if err := b.client.HSet(opCtx, liveKey(apiKeyID), lockString, acquiredAt.Unix()).Err(); err != nil {
+	if err := client.HSet(opCtx, liveKey(apiKeyID), lockString, acquiredAt.Unix()).Err(); err != nil {
 		backendErrorsTotal.WithLabelValues("add_observed").Inc()
 		return fmt.Errorf("%w: add observed quota entry in redis: %v", ErrBackendUnavailable, err)
 	}
@@ -116,10 +139,14 @@ func (b *RedisBackend) AddObserved(ctx context.Context, apiKeyID, lockString str
 }
 
 func (b *RedisBackend) List(ctx context.Context, apiKeyID string) (map[string]time.Time, error) {
+	client, err := b.redisClient("list")
+	if err != nil {
+		return nil, err
+	}
 	opCtx, cancel := withOperationTimeout(ctx, defaultMaintenanceOperationTimeout)
 	defer cancel()
 
-	values, err := b.client.HGetAll(opCtx, liveKey(apiKeyID)).Result()
+	values, err := client.HGetAll(opCtx, liveKey(apiKeyID)).Result()
 	if err != nil {
 		backendErrorsTotal.WithLabelValues("list").Inc()
 		return nil, fmt.Errorf("%w: list quota entries in redis: %v", ErrBackendUnavailable, err)
@@ -139,10 +166,14 @@ func (b *RedisBackend) List(ctx context.Context, apiKeyID string) (map[string]ti
 }
 
 func (b *RedisBackend) DeleteSubject(ctx context.Context, apiKeyID string) error {
+	client, err := b.redisClient("delete_subject")
+	if err != nil {
+		return err
+	}
 	opCtx, cancel := withOperationTimeout(ctx, defaultMaintenanceOperationTimeout)
 	defer cancel()
 
-	if err := b.client.Del(opCtx, liveKey(apiKeyID)).Err(); err != nil {
+	if err := client.Del(opCtx, liveKey(apiKeyID)).Err(); err != nil {
 		return fmt.Errorf("%w: delete quota subject in redis: %v", ErrBackendUnavailable, err)
 	}
 

@@ -55,7 +55,7 @@ import (
 
 var DefaultCleanupTimeout = 30 * time.Second
 
-const quotaReleaseTimeout = 250 * time.Millisecond
+const quotaReleaseTimeout = infra.SandboxAdmissionReleaseTimeout
 
 func ValidateAndInitClaimOptions(opts infra.ClaimSandboxOptions) (infra.ClaimSandboxOptions, error) {
 	if opts.User == "" {

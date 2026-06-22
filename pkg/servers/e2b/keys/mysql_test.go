@@ -164,11 +164,38 @@ func TestMySQL_InitBranches(t *testing.T) {
 		t.Cleanup(func() { openMySQLDB, autoMigrateMySQLModels = oldOpen, oldMigrate })
 
 		h := st.hashKey("admin")
+		mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM information_schema\\.columns").
+			WithArgs("team_api_keys", "quota").
+			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 		mock.ExpectQuery("SELECT .*FROM `teams`.*").WillReturnRows(sqlmock.NewRows([]string{"id", "uid", "name"}).AddRow(1, AdminTeamUID.String(), "admin"))
 		mock.ExpectQuery("SELECT .*FROM `team_api_keys`.*").WillReturnRows(sqlmock.NewRows([]string{"id", "uid", "key_hash", "name", "team_id", "deleted_at"}).AddRow(1, AdminKeyID.String(), h, "admin", 1, nil))
 		mock.ExpectExec("UPDATE `team_api_keys` SET .*").WillReturnResult(sqlmock.NewResult(0, 1))
 
 		require.NoError(t, st.Init(context.Background()))
+		require.Zero(t, autoMigrateCalls)
+	})
+
+	t.Run("disabled automigrate fails fast when quota column is missing", func(t *testing.T) {
+		st, mock, done := newMockStorage(t)
+		defer done()
+		st.cfg.DisableAutoMigrate = true
+
+		oldOpen, oldMigrate := openMySQLDB, autoMigrateMySQLModels
+		openMySQLDB = func(string) (*gorm.DB, error) { return st.db, nil }
+		autoMigrateCalls := 0
+		autoMigrateMySQLModels = func(context.Context, *gorm.DB) error {
+			autoMigrateCalls++
+			return errors.New("must not call automigrate")
+		}
+		t.Cleanup(func() { openMySQLDB, autoMigrateMySQLModels = oldOpen, oldMigrate })
+
+		mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM information_schema\\.columns").
+			WithArgs("team_api_keys", "quota").
+			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+
+		err := st.Init(context.Background())
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "team_api_keys.quota")
 		require.Zero(t, autoMigrateCalls)
 	})
 }

@@ -30,6 +30,12 @@ import (
 	"github.com/openkruise/agents/pkg/servers/web"
 )
 
+const (
+	apiKeyQuotaCleanupTimeout        = 2 * time.Second
+	apiKeyQuotaCleanupInitialBackoff = 100 * time.Millisecond
+	apiKeyQuotaCleanupMaxBackoff     = 500 * time.Millisecond
+)
+
 func (sc *Controller) ListAPIKeys(r *http.Request) (web.ApiResponse[[]*models.TeamAPIKey], *web.ApiError) {
 	ctx := r.Context()
 	user := GetUserFromContext(ctx)
@@ -166,17 +172,57 @@ func (sc *Controller) DeleteAPIKey(r *http.Request) (web.ApiResponse[struct{}], 
 			}
 		}
 		if sc.quota != nil {
-			go func(apiKeyID string) {
-				cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-				defer cancel()
-				if err := sc.quota.DeleteSubject(cleanupCtx, apiKeyID); err != nil {
-					klog.FromContext(cleanupCtx).Error(err, "failed to cleanup quota live set for deleted api-key", "apiKeyID", apiKeyID)
-				}
-			}(key.ID.String())
+			go sc.cleanupDeletedAPIKeyQuota(ctx, key.ID.String())
 		}
 	}
 
 	return web.ApiResponse[struct{}]{
 		Code: http.StatusNoContent,
 	}, nil
+}
+
+func (sc *Controller) cleanupDeletedAPIKeyQuota(ctx context.Context, apiKeyID string) {
+	if sc == nil || sc.quota == nil || apiKeyID == "" {
+		return
+	}
+
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), apiKeyQuotaCleanupTimeout)
+	defer cancel()
+	log := klog.FromContext(cleanupCtx)
+	backoff := apiKeyQuotaCleanupInitialBackoff
+	var lastErr error
+
+	for {
+		if err := cleanupCtx.Err(); err != nil {
+			if lastErr != nil {
+				log.Error(lastErr, "failed to cleanup quota live set for deleted api-key", "apiKeyID", apiKeyID, "contextError", err)
+			}
+			return
+		}
+		err := sc.quota.DeleteSubject(cleanupCtx, apiKeyID)
+		if err == nil {
+			return
+		}
+		lastErr = err
+
+		timer := time.NewTimer(backoff)
+		select {
+		case <-timer.C:
+		case <-cleanupCtx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			log.Error(lastErr, "failed to cleanup quota live set for deleted api-key", "apiKeyID", apiKeyID, "contextError", cleanupCtx.Err())
+			return
+		}
+		if backoff < apiKeyQuotaCleanupMaxBackoff {
+			backoff *= 2
+			if backoff > apiKeyQuotaCleanupMaxBackoff {
+				backoff = apiKeyQuotaCleanupMaxBackoff
+			}
+		}
+	}
 }

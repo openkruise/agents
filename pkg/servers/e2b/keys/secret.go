@@ -99,15 +99,11 @@ func marshalStoredTeamAPIKey(apiKey *models.CreatedTeamAPIKey) ([]byte, error) {
 		stored.LastUsed = &lastUsed
 	}
 	if apiKey.QuotaSpec != nil {
-		normalized, err := models.NormalizeQuotaSpec(apiKey.QuotaSpec)
+		quotaRaw, err := models.MarshalQuotaSpec(apiKey.QuotaSpec)
 		if err != nil {
 			return nil, fmt.Errorf("normalize quota: %w", err)
 		}
-		if normalized != nil {
-			quotaRaw, err := json.Marshal(normalized)
-			if err != nil {
-				return nil, fmt.Errorf("marshal quota: %w", err)
-			}
+		if quotaRaw != nil {
 			stored.Quota = quotaRaw
 		}
 	}
@@ -145,15 +141,7 @@ func decodeStoredAPIKey(data []byte) (*models.CreatedTeamAPIKey, error, error) {
 }
 
 func decodeStoredQuotaSpec(raw json.RawMessage) (*models.QuotaSpec, error) {
-	if len(raw) == 0 || string(raw) == "null" {
-		return nil, nil
-	}
-
-	var quota models.QuotaSpec
-	if err := json.Unmarshal(raw, &quota); err != nil {
-		return nil, err
-	}
-	return models.NormalizeQuotaSpec(&quota)
+	return models.DecodeQuotaSpec(raw)
 }
 
 // secretKeyStorage is a simple implement for api-key storage using k8s secret as storage backend.
@@ -374,7 +362,7 @@ func (k *secretKeyStorage) LoadByKey(_ context.Context, key string) (*models.Cre
 	if !ok {
 		return nil, false
 	}
-	return value.(*models.CreatedTeamAPIKey), true
+	return cloneCreatedTeamAPIKey(value.(*models.CreatedTeamAPIKey)), true
 }
 
 func (k *secretKeyStorage) LoadByID(_ context.Context, id string) (*models.CreatedTeamAPIKey, bool) {
@@ -382,7 +370,7 @@ func (k *secretKeyStorage) LoadByID(_ context.Context, id string) (*models.Creat
 	if !ok {
 		return nil, false
 	}
-	return value.(*models.CreatedTeamAPIKey), true
+	return cloneCreatedTeamAPIKey(value.(*models.CreatedTeamAPIKey)), true
 }
 
 func (k *secretKeyStorage) retryUpdateSecret(ctx context.Context, id string, apiKey *models.CreatedTeamAPIKey) error {
@@ -477,6 +465,10 @@ func findTeamByNameInSecret(secret *corev1.Secret, teamName string) (*models.Tea
 }
 
 func (k *secretKeyStorage) storeKey(apiKey *models.CreatedTeamAPIKey) {
+	apiKey = cloneCreatedTeamAPIKey(apiKey)
+	if apiKey == nil {
+		return
+	}
 	// after this, all old keys will be migrated to new keys in admin team
 	if apiKey.Team == nil {
 		apiKey.Team = models.AdminTeam()

@@ -21,9 +21,11 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"k8s.io/client-go/rest"
 
 	"github.com/openkruise/agents/pkg/cache/cachetest"
 	"github.com/openkruise/agents/pkg/proxy"
@@ -38,6 +40,18 @@ type recordingLeaderElector struct {
 
 func (r *recordingLeaderElector) Run(context.Context) {
 	r.calls.Add(1)
+}
+
+type cancelAfterRunsLeaderElector struct {
+	calls  atomic.Int64
+	cancel context.CancelFunc
+	after  int64
+}
+
+func (r *cancelAfterRunsLeaderElector) Run(context.Context) {
+	if r.calls.Add(1) >= r.after {
+		r.cancel()
+	}
 }
 
 func TestPrimaryState(t *testing.T) {
@@ -159,6 +173,33 @@ func TestPrimaryElectorRunDoesNotStartAfterStop(t *testing.T) {
 
 	assert.Equal(t, int64(0), runner.calls.Load())
 	assert.False(t, state.IsPrimary())
+}
+
+func TestPrimaryElectorRunRecontendsAfterLeaderElectorReturns(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	runner := &cancelAfterRunsLeaderElector{cancel: cancel, after: 2}
+	elector := &primaryElector{state: &primaryState{}, elector: runner}
+
+	elector.Run(ctx)
+
+	assert.GreaterOrEqual(t, runner.calls.Load(), int64(2))
+}
+
+func TestPrimaryKubeClientConfigUsesBoundedTimeoutAndUserAgent(t *testing.T) {
+	base := &rest.Config{
+		Host:      "https://kubernetes.example",
+		Timeout:   time.Minute,
+		UserAgent: "existing-agent",
+	}
+
+	got := primaryKubeClientConfig(base)
+
+	require.NotSame(t, base, got)
+	assert.Equal(t, base.Host, got.Host)
+	assert.Equal(t, time.Minute, base.Timeout)
+	assert.Equal(t, primaryRenewDeadline/2, got.Timeout)
+	assert.Contains(t, got.UserAgent, "existing-agent")
+	assert.Contains(t, got.UserAgent, primaryLeaseName)
 }
 
 func TestSandboxManagerIsPrimary(t *testing.T) {

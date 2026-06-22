@@ -33,3 +33,10 @@ and stored, but create requests are temporarily unenforced. Metrics and logs exp
 
 When Redis requires authentication, inject `E2B_QUOTA_REDIS_USERNAME` and `E2B_QUOTA_REDIS_PASSWORD` from a Kubernetes
 Secret rather than writing credentials directly into deployment patches.
+
+When using MySQL key storage with `--e2b-key-storage-disable-schema-auto-update=true`, the startup schema check requires
+the `team_api_keys.quota` column to exist. Apply the manual migration from `hack/mysql-schema.sql` before starting:
+
+```sql
+ALTER TABLE team_api_keys ADD COLUMN quota JSON DEFAULT NULL AFTER created_by_uid;
+```

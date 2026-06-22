@@ -44,6 +44,8 @@ type SandboxAdmission struct {
 	Release func(ctx context.Context, lockString string) error
 }
 
+const SandboxAdmissionReleaseTimeout = 250 * time.Millisecond
+
 type ClaimSandboxOptions struct {
 	Namespace string `json:"namespace,omitempty"`
 	// User specifies the owner of sandbox, Required

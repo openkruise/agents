@@ -18,6 +18,7 @@ package models
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -92,6 +93,9 @@ func TestNormalizeQuotaSpec(t *testing.T) {
 			if tt.expectError != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.expectError)
+				if tt.expectError == "limit must be non-negative" {
+					assert.ErrorIs(t, err, ErrQuotaLimitNegative)
+				}
 				return
 			}
 
@@ -111,6 +115,42 @@ func TestNormalizeQuotaSpec(t *testing.T) {
 			assert.Equal(t, tt.expectCount, count)
 		})
 	}
+}
+
+func TestQuotaSpecJSONHelpers(t *testing.T) {
+	t.Run("marshal and decode normalized quota", func(t *testing.T) {
+		raw, err := MarshalQuotaSpec(&QuotaSpec{Limits: []QuotaLimit{{
+			Dimension: DimSandboxCount,
+			Limit:     int64Ptr(4),
+		}}})
+		require.NoError(t, err)
+		require.NotEmpty(t, raw)
+		assert.Contains(t, string(raw), `"dimension":"sandbox.count"`)
+
+		got, err := DecodeQuotaSpec(raw)
+		require.NoError(t, err)
+		require.NotNil(t, got)
+		count, limited := got.SandboxCountLimit()
+		require.True(t, limited)
+		assert.EqualValues(t, 4, count)
+	})
+
+	t.Run("unlimited quota marshals and decodes nil", func(t *testing.T) {
+		raw, err := MarshalQuotaSpec(nil)
+		require.NoError(t, err)
+		assert.Nil(t, raw)
+
+		got, err := DecodeQuotaSpec(nil)
+		require.NoError(t, err)
+		assert.Nil(t, got)
+	})
+
+	t.Run("decode rejects invalid internal quota", func(t *testing.T) {
+		got, err := DecodeQuotaSpec([]byte(`{"limits":[{"dimension":"sandbox.count","limit":-1}]}`))
+		require.Error(t, err)
+		assert.Nil(t, got)
+		assert.True(t, errors.Is(err, ErrQuotaLimitNegative))
+	})
 }
 
 func TestAPIKeyQuotaJSONToQuotaSpec(t *testing.T) {

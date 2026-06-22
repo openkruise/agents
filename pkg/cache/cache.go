@@ -407,7 +407,10 @@ func (c *Cache) CountActiveSandboxes(ctx context.Context, opts ListSandboxesOpti
 	return cnt, nil
 }
 
-func isLiveForQuota(sbx *agentsv1alpha1.Sandbox) bool {
+func IsLiveForQuota(sbx *agentsv1alpha1.Sandbox) bool {
+	if sbx == nil {
+		return false
+	}
 	return sbx.GetDeletionTimestamp() == nil && sbx.Status.Phase != agentsv1alpha1.SandboxTerminating
 }
 
@@ -422,7 +425,7 @@ func (c *Cache) ListLiveLockstringsByOwner(ctx context.Context, opts ListLiveLoc
 	result := make([]LiveLockstring, 0, len(list.Items))
 	for i := range list.Items {
 		sbx := &list.Items[i]
-		if !isLiveForQuota(sbx) {
+		if !IsLiveForQuota(sbx) {
 			continue
 		}
 		lock := sbx.GetAnnotations()[agentsv1alpha1.AnnotationLock]

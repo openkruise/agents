@@ -259,6 +259,51 @@ func TestCache_ListLiveLockstringsByOwner(t *testing.T) {
 	assert.Nil(t, got)
 }
 
+func TestIsLiveForQuota(t *testing.T) {
+	tests := []struct {
+		name   string
+		sbx    *agentsv1alpha1.Sandbox
+		expect bool
+	}{
+		{
+			name: "nil sandbox is not live",
+		},
+		{
+			name:   "running sandbox is live",
+			sbx:    &agentsv1alpha1.Sandbox{Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxRunning}},
+			expect: true,
+		},
+		{
+			name:   "failed sandbox remains live until deletion",
+			sbx:    &agentsv1alpha1.Sandbox{Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxFailed}},
+			expect: true,
+		},
+		{
+			name:   "succeeded sandbox remains live until deletion",
+			sbx:    &agentsv1alpha1.Sandbox{Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxSucceeded}},
+			expect: true,
+		},
+		{
+			name: "terminating phase is not live",
+			sbx:  &agentsv1alpha1.Sandbox{Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxTerminating}},
+		},
+		{
+			name: "deleting sandbox is not live",
+			sbx: func() *agentsv1alpha1.Sandbox {
+				sbx := &agentsv1alpha1.Sandbox{Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxRunning}}
+				sbx.DeletionTimestamp = &metav1.Time{Time: time.Now()}
+				return sbx
+			}(),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expect, cache.IsLiveForQuota(tt.sbx))
+		})
+	}
+}
+
 func TestCache_PickSandboxSetWithOptions_NamespaceScoped(t *testing.T) {
 	sbsA := &agentsv1alpha1.SandboxSet{
 		ObjectMeta: metav1.ObjectMeta{Name: "shared-template", Namespace: "team-a"},

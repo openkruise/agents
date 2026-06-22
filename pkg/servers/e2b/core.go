@@ -258,24 +258,24 @@ func (sc *Controller) shutdown(ctx context.Context, cancel context.CancelFunc) {
 	log.Info("Shutting down server...")
 	defer cancel()
 
-	if sc.quotaAntiDrift != nil {
-		sc.quotaAntiDrift.Stop()
-	}
 	if sc.server != nil {
 		if err := sc.server.Shutdown(ctx); err != nil {
 			klog.ErrorS(err, "HTTP server forced to shutdown")
 		}
 	}
+	if sc.manager != nil {
+		sc.manager.Stop(ctx)
+	}
+	if sc.quotaAntiDrift != nil {
+		sc.quotaAntiDrift.Stop()
+	}
+	if sc.keys != nil {
+		sc.keys.Stop()
+	}
 	if sc.quotaRedisClient != nil {
 		if err := sc.quotaRedisClient.Close(); err != nil {
 			log.Error(err, "failed to close quota Redis client")
 		}
-	}
-	if sc.manager != nil {
-		sc.manager.Stop(ctx)
-	}
-	if sc.keys != nil {
-		sc.keys.Stop()
 	}
 	klog.InfoS("Server exited")
 }

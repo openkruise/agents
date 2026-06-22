@@ -76,15 +76,16 @@ func (sc *Controller) DeleteSandbox(r *http.Request) (web.ApiResponse[struct{}],
 		}
 	}
 
-	if sc.quota != nil {
+	user := GetUserFromContext(r.Context())
+	if sc.quota != nil && user != nil && user.QuotaSpec != nil && user.QuotaSpec.IsLimited() {
 		annotations := sbx.GetAnnotations()
 		lockString := annotations[agentsv1alpha1.AnnotationLock]
 		owner := annotations[agentsv1alpha1.AnnotationOwner]
-		if owner != "" && lockString != "" {
+		if owner == user.ID.String() && lockString != "" {
 			releaseCtx, cancel := quotaRequestReleaseContext(r.Context())
 			defer cancel()
 			if err := sc.quota.Release(releaseCtx, quota.ReleaseRequest{
-				APIKeyID:   owner,
+				APIKeyID:   user.ID.String(),
 				LockString: lockString,
 			}); err != nil {
 				log.Error(err, "failed to release quota after accepted sandbox delete", "id", id, "owner", owner, "lockString", lockString)

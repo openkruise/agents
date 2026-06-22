@@ -19,6 +19,7 @@ package quota
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -161,6 +162,32 @@ func (r *recordingBackend) ReleaseResult(ctx context.Context, apiKeyID, lockStri
 
 func (r *recordingBackend) DeleteSubject(context.Context, string) error {
 	return nil
+}
+
+type blockingReleaseBackend struct {
+	*recordingBackend
+
+	started chan struct{}
+	unblock chan struct{}
+	once    sync.Once
+}
+
+func newBlockingReleaseBackend() *blockingReleaseBackend {
+	return &blockingReleaseBackend{
+		recordingBackend: newRecordingBackend(),
+		started:          make(chan struct{}),
+		unblock:          make(chan struct{}),
+	}
+}
+
+func (b *blockingReleaseBackend) ReleaseResult(ctx context.Context, apiKeyID, lockString string) (bool, error) {
+	b.once.Do(func() { close(b.started) })
+	select {
+	case <-b.unblock:
+	case <-ctx.Done():
+		return false, ctx.Err()
+	}
+	return b.recordingBackend.ReleaseResult(ctx, apiKeyID, lockString)
 }
 
 type recordingRegistration struct {
@@ -583,6 +610,56 @@ func TestAntiDriftStopCancelsAndWaitsForActiveCycle(t *testing.T) {
 	case <-stopped:
 	case <-time.After(time.Second):
 		t.Fatal("Stop did not wait for the anti-drift run loop to exit")
+	}
+}
+
+func TestAntiDriftStopWaitsForInFlightEventRelease(t *testing.T) {
+	owner := uuid.New().String()
+	backend := newBlockingReleaseBackend()
+	backend.have[owner] = map[string]time.Time{"lock-1": time.Now()}
+	driver := NewAntiDriftDriver(
+		AntiDriftConfig{Interval: time.Hour, Grace: time.Minute},
+		fakePrimary{primary: true},
+		fakeLimitedKeyStore{},
+		fakeLiveCache{removeSafe: true},
+		backend,
+	)
+
+	eventDone := make(chan struct{})
+	go func() {
+		driver.SandboxEventHandler().OnDelete(sandboxForQuotaEvent(owner, "lock-1"))
+		close(eventDone)
+	}()
+
+	select {
+	case <-backend.started:
+	case <-time.After(time.Second):
+		t.Fatal("event release did not start")
+	}
+
+	stopped := make(chan struct{})
+	go func() {
+		driver.Stop()
+		close(stopped)
+	}()
+
+	select {
+	case <-stopped:
+		t.Fatal("Stop returned before the in-flight event release completed")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(backend.unblock)
+
+	select {
+	case <-eventDone:
+	case <-time.After(time.Second):
+		t.Fatal("event release did not finish after unblock")
+	}
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("Stop did not return after event release finished")
 	}
 }
 

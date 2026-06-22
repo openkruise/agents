@@ -48,7 +48,7 @@ import (
 // unchanged. ~100 years is indistinguishable from unlimited for any real
 // request and stays well within time.Duration's int64 range (max ~292 years).
 const noServerTimeout = 100 * 365 * 24 * time.Hour
-const quotaReleaseTimeout = 250 * time.Millisecond
+const quotaReleaseTimeout = infra.SandboxAdmissionReleaseTimeout
 
 // mapInfraErrorToApiError converts an infra-layer error to an ApiError with the
 // appropriate HTTP status code based on managererrors.ErrorCode.

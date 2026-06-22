@@ -236,10 +236,10 @@ Both key backends store **only** the static `QuotaSpec`, alongside the key, writ
   both anti-drift directions (§6.4.2):**
 
   ```go
-  // isLiveForQuota reports whether a Sandbox still occupies its owner's quota.
+  // IsLiveForQuota reports whether a Sandbox still occupies its owner's quota.
   // Freed (NOT live) iff deletion has been requested or is in progress; a merely
   // Failed/Succeeded-but-not-yet-deleted sandbox still occupies quota until it is.
-  func isLiveForQuota(sbx *agentsv1alpha1.Sandbox) bool {
+  func IsLiveForQuota(sbx *agentsv1alpha1.Sandbox) bool {
       return sbx.DeletionTimestamp == nil &&
           sbx.Status.Phase != agentsv1alpha1.SandboxTerminating
   }
@@ -254,7 +254,7 @@ Both key backends store **only** the static `QuotaSpec`, alongside the key, writ
 
   ```go
   // ListLiveLockstringsByOwner returns, for owner K, the lockstring of every Sandbox CR
-  // with isLiveForQuota == true. Reads the warm informer via MatchingFields{user: K}
+  // with IsLiveForQuota == true. Reads the warm informer via MatchingFields{user: K}
   // (IndexUser). Never APIReader; the caller invokes it only after the cache is healthy
   // (§6.4.2), so an unsynced cache can never look "empty".
   func (c *Cache) ListLiveLockstringsByOwner(ctx, opts) ([]string, error)

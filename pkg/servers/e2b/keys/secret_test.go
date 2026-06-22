@@ -189,6 +189,50 @@ func TestSecretKeyStorage_LoadByKeyAndID(t *testing.T) {
 	assert.False(t, found)
 }
 
+func TestSecretKeyStorage_LoadByKeyAndIDReturnClones(t *testing.T) {
+	storage, _ := newSecretStorageForTest(t, map[string][]byte{})
+	count := int64(2)
+	key := &models.CreatedTeamAPIKey{
+		ID:   uuid.New(),
+		Key:  uuid.NewString(),
+		Name: "limited",
+		Team: &models.Team{
+			ID:   uuid.New(),
+			Name: "team-a",
+		},
+		CreatedBy: &models.TeamUser{
+			ID: uuid.New(),
+		},
+		QuotaSpec: &models.QuotaSpec{Limits: []models.QuotaLimit{{
+			Dimension: models.DimSandboxCount,
+			Limit:     &count,
+		}}},
+	}
+	key.Quota = models.APIKeyQuotaFromSpec(key.QuotaSpec)
+	storage.storeKey(key)
+
+	gotByKey, found := storage.LoadByKey(context.Background(), key.Key)
+	require.True(t, found)
+	gotByKey.Name = "mutated"
+	gotByKey.Team.Name = "mutated-team"
+	gotByKey.CreatedBy.ID = uuid.New()
+	*gotByKey.QuotaSpec.Limits[0].Limit = 99
+
+	gotByID, found := storage.LoadByID(context.Background(), key.ID.String())
+	require.True(t, found)
+	assert.Equal(t, "limited", gotByID.Name)
+	assert.Equal(t, "team-a", gotByID.Team.Name)
+	assert.Equal(t, key.CreatedBy.ID, gotByID.CreatedBy.ID)
+	loadedCount, limited := gotByID.QuotaSpec.SandboxCountLimit()
+	require.True(t, limited)
+	assert.EqualValues(t, 2, loadedCount)
+
+	gotByID.Name = "mutated-again"
+	gotByKeyAgain, found := storage.LoadByKey(context.Background(), key.Key)
+	require.True(t, found)
+	assert.Equal(t, "limited", gotByKeyAgain.Name)
+}
+
 func TestSecretKeyStorage_Init(t *testing.T) {
 	tests := []struct {
 		name        string

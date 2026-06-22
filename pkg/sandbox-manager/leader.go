@@ -25,6 +25,7 @@ import (
 
 	"github.com/google/uuid"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/leaderelection"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
 
@@ -66,6 +67,7 @@ type primaryElector struct {
 
 	mu      sync.Mutex
 	runID   uint64
+	running bool
 	stopped bool
 	cancel  context.CancelFunc
 	done    chan struct{}
@@ -76,7 +78,7 @@ type primaryElector struct {
 type primaryRunIDContextKey struct{}
 
 func newPrimaryElector(opts config.SandboxManagerOptions, state *primaryState) (*primaryElector, error) {
-	clientset, err := kubernetes.NewForConfig(opts.RestConfig)
+	clientset, err := kubernetes.NewForConfig(primaryKubeClientConfig(opts.RestConfig))
 	if err != nil {
 		return nil, err
 	}
@@ -120,29 +122,82 @@ func newPrimaryElector(opts config.SandboxManagerOptions, state *primaryState) (
 	return primary, nil
 }
 
+func primaryKubeClientConfig(cfg *rest.Config) *rest.Config {
+	if cfg == nil {
+		return nil
+	}
+	out := rest.CopyConfig(cfg)
+	timeout := primaryRenewDeadline / 2
+	if timeout < time.Second {
+		timeout = time.Second
+	}
+	out.Timeout = timeout
+	if out.UserAgent != "" {
+		out.UserAgent = out.UserAgent + " " + primaryLeaseName
+		return out
+	}
+	return rest.AddUserAgent(out, primaryLeaseName)
+}
+
 func (e *primaryElector) Run(ctx context.Context) {
 	if e == nil || e.elector == nil {
 		return
 	}
-	runCtx, cancel := context.WithCancel(ctx)
-	runID := e.nextRunID.Add(1)
-	runCtx = context.WithValue(runCtx, primaryRunIDContextKey{}, runID)
 	done := make(chan struct{})
 
 	e.mu.Lock()
-	if e.stopped || e.runID != 0 {
+	if e.stopped || e.running {
 		e.mu.Unlock()
-		cancel()
 		close(done)
 		return
 	}
-	e.runID = runID
-	e.cancel = cancel
+	e.running = true
 	e.done = done
 	e.mu.Unlock()
 
-	defer close(done)
-	e.elector.Run(runCtx)
+	defer func() {
+		e.mu.Lock()
+		e.running = false
+		e.runID = 0
+		e.cancel = nil
+		if e.done == done {
+			e.done = nil
+		}
+		e.state.set(false)
+		e.mu.Unlock()
+		close(done)
+	}()
+
+	for ctx.Err() == nil {
+		runCtx, cancel := context.WithCancel(ctx)
+		runID := e.nextRunID.Add(1)
+		runCtx = context.WithValue(runCtx, primaryRunIDContextKey{}, runID)
+
+		e.mu.Lock()
+		if e.stopped {
+			e.mu.Unlock()
+			cancel()
+			return
+		}
+		e.runID = runID
+		e.cancel = cancel
+		e.mu.Unlock()
+
+		e.elector.Run(runCtx)
+		cancel()
+
+		e.mu.Lock()
+		if e.runID == runID {
+			e.runID = 0
+			e.state.set(false)
+		}
+		e.cancel = nil
+		stopped := e.stopped
+		e.mu.Unlock()
+		if stopped {
+			return
+		}
+	}
 }
 
 func (e *primaryElector) Stop(ctx context.Context) {

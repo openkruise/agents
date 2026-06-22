@@ -49,6 +49,7 @@ type AntiDriftDriver struct {
 	runDone      chan struct{}
 	cycleCancel  context.CancelFunc
 	stopped      bool
+	eventWG      sync.WaitGroup
 
 	runOnce  sync.Once
 	stopOnce sync.Once
@@ -191,7 +192,32 @@ func (d *AntiDriftDriver) Stop() {
 		if done != nil {
 			<-done
 		}
+		d.eventWG.Wait()
 	})
+}
+
+func (d *AntiDriftDriver) beginEventRelease() bool {
+	if d == nil {
+		return false
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.stopped {
+		return false
+	}
+	d.eventWG.Add(1)
+	return true
+}
+
+func (d *AntiDriftDriver) runEventRelease(fn func(context.Context)) {
+	if !d.beginEventRelease() {
+		return
+	}
+	defer d.eventWG.Done()
+
+	ctx, cancel := context.WithTimeout(context.Background(), eventReleaseTimeout)
+	defer cancel()
+	fn(ctx)
 }
 
 func (d *AntiDriftDriver) RunOnce(ctx context.Context) error {
@@ -291,26 +317,26 @@ func (d *AntiDriftDriver) RunOnce(ctx context.Context) error {
 func (d *AntiDriftDriver) SandboxEventHandler() toolscache.ResourceEventHandler {
 	return toolscache.ResourceEventHandlerFuncs{
 		UpdateFunc: func(oldObj, newObj any) {
-			ctx, cancel := context.WithTimeout(context.Background(), eventReleaseTimeout)
-			defer cancel()
-			d.releaseOnTransitionToNotLive(ctx, oldObj, newObj)
+			d.runEventRelease(func(ctx context.Context) {
+				d.releaseOnTransitionToNotLive(ctx, oldObj, newObj)
+			})
 		},
 		DeleteFunc: func(obj any) {
-			ctx, cancel := context.WithTimeout(context.Background(), eventReleaseTimeout)
-			defer cancel()
-			d.releaseDeleted(ctx, obj)
+			d.runEventRelease(func(ctx context.Context) {
+				d.releaseDeleted(ctx, obj)
+			})
 		},
 	}
 }
 
 func (d *AntiDriftDriver) releaseOnTransitionToNotLive(ctx context.Context, oldObj, newObj any) {
 	newSandbox, ok := newObj.(*agentsv1alpha1.Sandbox)
-	if !ok || newSandbox == nil || !sandboxIsNotLive(newSandbox) {
+	if !ok || newSandbox == nil || cachepkg.IsLiveForQuota(newSandbox) {
 		return
 	}
 
 	oldSandbox, ok := oldObj.(*agentsv1alpha1.Sandbox)
-	if ok && oldSandbox != nil && sandboxIsNotLive(oldSandbox) {
+	if ok && oldSandbox != nil && !cachepkg.IsLiveForQuota(oldSandbox) {
 		return
 	}
 
@@ -425,11 +451,4 @@ func quotaIdentityFromSandbox(sbx *agentsv1alpha1.Sandbox) (string, string) {
 	}
 
 	return annotations[agentsv1alpha1.AnnotationOwner], annotations[agentsv1alpha1.AnnotationLock]
-}
-
-func sandboxIsNotLive(sbx *agentsv1alpha1.Sandbox) bool {
-	if sbx == nil {
-		return false
-	}
-	return sbx.GetDeletionTimestamp() != nil || sbx.Status.Phase == agentsv1alpha1.SandboxTerminating
 }
