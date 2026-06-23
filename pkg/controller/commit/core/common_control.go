@@ -74,24 +74,12 @@ func (r *commonControl) EnsureCommitRunning(ctx context.Context, args *EnsureFun
 	}
 
 	// If a Job already exists for this commit, do not create a duplicate.
-	// This covers both running and failed Jobs whose pods may have been GC'd.
 	jobList := &batchv1.JobList{}
 	if err := r.Client.List(ctx, jobList, client.InNamespace(commit.Namespace), client.MatchingFields{jobutil.IndexFieldCommitUID: string(commit.UID)}); err != nil {
 		return 0, fmt.Errorf("failed to list commit jobs: %w", err)
 	}
 	if len(jobList.Items) > 0 {
 		log.Info("commit job already exists, transitioning to Running", "commit", klog.KObj(commit))
-		setCommitRunning(args.NewStatus, commit)
-		return 0, nil
-	}
-
-	// Fallback: check for orphan job pods (e.g., Job was deleted but pod remains).
-	jobPods, err := r.listCRJobPods(ctx, commit)
-	if err != nil {
-		return 0, fmt.Errorf("failed to list commit job pods: %w", err)
-	}
-	if len(jobPods.Items) > 0 {
-		log.Info("commit job pod already exists, transitioning to Running", "commit", klog.KObj(commit))
 		setCommitRunning(args.NewStatus, commit)
 		return 0, nil
 	}
