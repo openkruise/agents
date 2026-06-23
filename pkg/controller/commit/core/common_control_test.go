@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"testing"
+	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -777,5 +778,63 @@ func TestEnsureCommitRunning_CreateTransientError(t *testing.T) {
 	}
 	if newStatus.Phase == agentsv1alpha1.CommitPhaseFailed {
 		t.Error("expected phase to NOT be Failed for transient error")
+	}
+}
+
+// --- EnsureCommitUpdated multi-Job tests ---
+
+func TestEnsureCommitUpdated_MultipleJobs(t *testing.T) {
+	scheme := newTestScheme()
+	commit := newTestCommit("test-commit", "default")
+
+	// Create two Jobs with the same LabelCommitUID but different timestamps.
+	// The controller should pick the latest one.
+	earlier := metav1.NewTime(metav1.Now().Add(-10 * time.Minute))
+	later := metav1.Now()
+
+	jobOld := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "commit-old-abc",
+			Namespace:         "default",
+			CreationTimestamp: earlier,
+			Labels: map[string]string{
+				jobutil.LabelCommitUID: string(commit.UID),
+			},
+		},
+		Status: batchv1.JobStatus{
+			Conditions: []batchv1.JobCondition{
+				{Type: batchv1.JobFailed, Status: corev1.ConditionTrue},
+			},
+		},
+	}
+	jobNew := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "commit-new-xyz",
+			Namespace:         "default",
+			CreationTimestamp: later,
+			Labels: map[string]string{
+				jobutil.LabelCommitUID: string(commit.UID),
+			},
+		},
+		Status: batchv1.JobStatus{
+			Conditions: []batchv1.JobCondition{
+				{Type: batchv1.JobComplete, Status: corev1.ConditionTrue},
+			},
+		},
+	}
+
+	fc := newFakeClientBuilder(scheme).WithObjects(jobOld, jobNew).Build()
+	ctrl := newCommonControlForTest(fc)
+
+	newStatus := commit.Status.DeepCopy()
+	args := &EnsureFuncArgs{Commit: commit, NewStatus: newStatus}
+
+	_, err := ctrl.EnsureCommitUpdated(context.TODO(), args)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Latest Job (jobNew) is Complete, so Commit should be Succeeded.
+	if newStatus.Phase != agentsv1alpha1.CommitPhaseSucceeded {
+		t.Errorf("expected CommitPhaseSucceeded (from latest Job), got %s", newStatus.Phase)
 	}
 }
