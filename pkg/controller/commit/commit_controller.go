@@ -216,9 +216,9 @@ func (r *CommitReconciler) handleCommitDelete(ctx context.Context, args *core.En
 	requeueAfter, err := control.EnsureCommitDeleted(ctx, args)
 	if err != nil {
 		log.Error(err, "handleCommitDelete failed", "commit", klog.KObj(commit))
-		return ctrl.Result{RequeueAfter: requeueAfter}, err
+		return ctrl.Result{}, err
 	}
-	return ctrl.Result{}, nil
+	return ctrl.Result{RequeueAfter: requeueAfter}, nil
 }
 
 func (r *CommitReconciler) handleCommitPending(ctx context.Context, args *core.EnsureFuncArgs, control core.CommitControl) (ctrl.Result, error) {

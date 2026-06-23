@@ -39,7 +39,7 @@ var _ handler.TypedEventHandler[client.Object, reconcile.Request] = &enqueueRequ
 // status changes are filtered out to avoid unnecessary reconciles.
 type enqueueRequestForJob struct{}
 
-func (p *enqueueRequestForJob) addEvent(q workqueue.TypedRateLimitingInterface[reconcile.Request], obj runtime.Object) {
+func (h *enqueueRequestForJob) addEvent(q workqueue.TypedRateLimitingInterface[reconcile.Request], obj runtime.Object) {
 	job, ok := obj.(*batchv1.Job)
 	if !ok {
 		return
@@ -62,11 +62,11 @@ func (p *enqueueRequestForJob) addEvent(q workqueue.TypedRateLimitingInterface[r
 	})
 }
 
-func (e *enqueueRequestForJob) Create(_ context.Context, evt event.TypedCreateEvent[client.Object], q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
-	e.addEvent(q, evt.Object)
+func (h *enqueueRequestForJob) Create(_ context.Context, evt event.TypedCreateEvent[client.Object], q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
+	h.addEvent(q, evt.Object)
 }
 
-func (p *enqueueRequestForJob) Delete(_ context.Context, evt event.TypedDeleteEvent[client.Object], q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
+func (h *enqueueRequestForJob) Delete(_ context.Context, evt event.TypedDeleteEvent[client.Object], q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
 	job, ok := evt.Object.(*batchv1.Job)
 	if !ok {
 		return
@@ -83,11 +83,11 @@ func (p *enqueueRequestForJob) Delete(_ context.Context, evt event.TypedDeleteEv
 	})
 }
 
-func (p *enqueueRequestForJob) Generic(_ context.Context, evt event.TypedGenericEvent[client.Object], q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
+func (h *enqueueRequestForJob) Generic(_ context.Context, evt event.TypedGenericEvent[client.Object], q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
 }
 
-func (p *enqueueRequestForJob) Update(_ context.Context, evt event.TypedUpdateEvent[client.Object], q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
-	p.addEvent(q, evt.ObjectNew)
+func (h *enqueueRequestForJob) Update(_ context.Context, evt event.TypedUpdateEvent[client.Object], q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
+	h.addEvent(q, evt.ObjectNew)
 }
 
 // commitOwnerName extracts the Commit name from the Job's controller OwnerReference.

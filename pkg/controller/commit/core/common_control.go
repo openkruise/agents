@@ -165,7 +165,7 @@ func (r *commonControl) EnsureCommitUpdated(ctx context.Context, args *EnsureFun
 		args.NewStatus.Conditions = append(args.NewStatus.Conditions, *condition)
 	}
 	args.NewStatus.Phase = phase
-	now := metav1.NewTime(time.Now())
+	now := metav1.Now()
 	args.NewStatus.CompletionTime = &now
 	return 0, nil
 }
