@@ -102,9 +102,10 @@ func (r *commonControl) EnsureCommitRunning(ctx context.Context, args *EnsureFun
 	if err := r.Client.Create(ctx, job); err != nil {
 		if errors.IsAlreadyExists(err) {
 			log.Info("Job already exists, ignore", "job", klog.KObj(job), "commit", klog.KObj(commit))
-		} else {
-			return 0, fmt.Errorf("failed to create job: %w", err)
+			setCommitRunning(args.NewStatus, commit)
+			return 0, nil
 		}
+		return 0, fmt.Errorf("failed to create job: %w", err)
 	}
 
 	// Set expectation to prevent duplicated reconcile from stale cache.
