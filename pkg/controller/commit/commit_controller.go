@@ -115,6 +115,7 @@ func (r *CommitReconciler) Reconcile(ctx context.Context, req ctrl.Request) (res
 	if err = r.Get(ctx, req.NamespacedName, commit); err != nil {
 		if errors.IsNotFound(err) {
 			log.V(4).Info("Commit not found", "name", req.Name, "namespace", req.Namespace)
+			core.ScaleExpectations.DeleteExpectations(req.NamespacedName.String())
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
@@ -147,6 +148,7 @@ func (r *CommitReconciler) Reconcile(ctx context.Context, req ctrl.Request) (res
 
 	// Handle deletion
 	if !commit.DeletionTimestamp.IsZero() {
+		core.ScaleExpectations.DeleteExpectations(utils.GetControllerKey(commit))
 		args := &core.EnsureFuncArgs{Pod: pod, Commit: commit, NewStatus: newStatus}
 		return r.handleCommitDelete(ctx, args, control)
 	}
