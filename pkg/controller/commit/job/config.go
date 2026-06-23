@@ -17,6 +17,7 @@ limitations under the License.
 package job
 
 import (
+	"flag"
 	"os"
 
 	corev1 "k8s.io/api/core/v1"
@@ -58,12 +59,23 @@ const (
 	EnvAgentJobImagePullPolicy = "AGENT_JOB_IMAGE_PULL_POLICY"
 )
 
+var agentJobImage string
+
+func init() {
+	flag.StringVar(&agentJobImage, "agent-job-image", "", "Image for commit job pods. Defaults to AGENT_JOB_IMAGE env.")
+}
+
 // EnvConfig reads configuration from environment variables.
 type EnvConfig struct{}
 
-func (c *EnvConfig) ContainerID() string   { return os.Getenv(EnvContainerID) }
-func (c *EnvConfig) CommitImage() string   { return os.Getenv(EnvCommitImage) }
-func (c *EnvConfig) AgentJobImage() string { return os.Getenv(EnvAgentJobImage) }
+func (c *EnvConfig) ContainerID() string { return os.Getenv(EnvContainerID) }
+func (c *EnvConfig) CommitImage() string { return os.Getenv(EnvCommitImage) }
+func (c *EnvConfig) AgentJobImage() string {
+	if agentJobImage != "" {
+		return agentJobImage
+	}
+	return os.Getenv(EnvAgentJobImage)
+}
 
 func (c *EnvConfig) ContainerdSockPath() string {
 	if sock := os.Getenv(EnvContainerdSockPath); sock != "" {
