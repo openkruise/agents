@@ -17,6 +17,7 @@ limitations under the License.
 package job
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -186,7 +187,7 @@ func TestGetCommitCondition(t *testing.T) {
 				pod.Status.ContainerStatuses = []corev1.ContainerStatus{cs}
 			}
 
-			cond := GetCommitCondition(pod)
+			cond := GetCommitCondition(context.TODO(), pod)
 			if tt.expectNil {
 				if cond != nil {
 					t.Errorf("expected nil condition, got %+v", cond)

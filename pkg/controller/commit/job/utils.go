@@ -17,12 +17,13 @@ limitations under the License.
 package job
 
 import (
+	"context"
 	"fmt"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/klog/v2"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 const (
@@ -84,7 +85,8 @@ var commitJobExitCodeMap = map[int32]commitConditionValue{
 	ExitCodeGetSandboxIDFailed:   {"CommitContainer", "GetSandboxIDFailed"},
 }
 
-func GetCommitCondition(pod *corev1.Pod) *metav1.Condition {
+func GetCommitCondition(ctx context.Context, pod *corev1.Pod) *metav1.Condition {
+	log := log.FromContext(ctx)
 	for _, cs := range pod.Status.ContainerStatuses {
 		// Only consider the canonical commit-job container; ignore any sidecar or
 		// init container that may have been injected by webhooks.
@@ -94,10 +96,10 @@ func GetCommitCondition(pod *corev1.Pod) *metav1.Condition {
 		if cs.State.Terminated != nil {
 			conditionValue, ok := commitJobExitCodeMap[cs.State.Terminated.ExitCode]
 			if !ok {
-				klog.InfoS("Unknown exit code, skipping condition", "containerID", cs.ContainerID, "exitCode", cs.State.Terminated.ExitCode)
+				log.Info("Unknown exit code, skipping condition", "containerID", cs.ContainerID, "exitCode", cs.State.Terminated.ExitCode)
 				return nil
 			}
-			klog.InfoS("Commit job container terminated",
+			log.Info("Commit job container terminated",
 				"containerID", cs.ContainerID,
 				"exitCode", cs.State.Terminated.ExitCode,
 				"type", conditionValue.conditionType,

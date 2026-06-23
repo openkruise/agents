@@ -236,5 +236,5 @@ func (r *commonControl) getLatestJobPodExitCode(ctx context.Context, commit *age
 	sort.Slice(jobPods.Items, func(i, j int) bool {
 		return jobPods.Items[i].CreationTimestamp.After(jobPods.Items[j].CreationTimestamp.Time)
 	})
-	return jobutil.GetCommitCondition(&jobPods.Items[0])
+	return jobutil.GetCommitCondition(ctx, &jobPods.Items[0])
 }
