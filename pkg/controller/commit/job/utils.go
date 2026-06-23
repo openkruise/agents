@@ -18,7 +18,6 @@ package job
 
 import (
 	"fmt"
-	"strings"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -50,8 +49,13 @@ const (
 	ExitCodeGetSandboxIDFailed   = 5
 )
 
-func MakeJobName(uid string) string {
-	return fmt.Sprintf("agent-job-%s-", strings.ReplaceAll(uid, "-", ""))
+func MakeJobName(commitName string) string {
+	const maxPrefix = 50
+	name := commitName
+	if len(name) > maxPrefix {
+		name = name[:maxPrefix]
+	}
+	return fmt.Sprintf("commit-%s-", name)
 }
 
 func IsJobCompleted(job *batchv1.Job) (bool, bool) {
@@ -106,6 +110,7 @@ func GetCommitCondition(pod *corev1.Pod) *metav1.Condition {
 				Type:               conditionValue.conditionType,
 				Status:             status,
 				Reason:             conditionValue.conditionReason,
+				Message:            cs.State.Terminated.Message,
 				LastTransitionTime: metav1.Now(),
 			}
 			return cond

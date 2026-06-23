@@ -17,6 +17,7 @@ limitations under the License.
 package job
 
 import (
+	"strings"
 	"testing"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -26,17 +27,16 @@ import (
 
 func TestMakeJobName(t *testing.T) {
 	cases := []struct {
-		uid      string
+		name     string
 		expected string
 	}{
-		{"abc123", "agent-job-abc123-"},
-		{"abc-123", "agent-job-abc123-"},
-		{"abc-123-def-456", "agent-job-abc123def456-"},
-		{"", "agent-job--"},
+		{"my-snapshot", "commit-my-snapshot-"},
+		{"", "commit--"},
+		{strings.Repeat("a", 100), "commit-" + strings.Repeat("a", 50) + "-"},
 	}
 	for _, c := range cases {
-		if got := MakeJobName(c.uid); got != c.expected {
-			t.Errorf("MakeJobName(%q)=%q, want %q", c.uid, got, c.expected)
+		if got := MakeJobName(c.name); got != c.expected {
+			t.Errorf("MakeJobName(%q)=%q, want %q", c.name, got, c.expected)
 		}
 	}
 }

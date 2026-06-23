@@ -28,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	jobutil "github.com/openkruise/agents/pkg/controller/commit/job"
 )
 
@@ -44,7 +45,7 @@ func (p *enqueueRequestForJob) addEvent(q workqueue.TypedRateLimitingInterface[r
 		return
 	}
 
-	commitName, ok := job.Labels[jobutil.LabelCommitName]
+	commitName, ok := commitOwnerName(job)
 	if !ok {
 		return
 	}
@@ -70,7 +71,7 @@ func (p *enqueueRequestForJob) Delete(_ context.Context, evt event.TypedDeleteEv
 	if !ok {
 		return
 	}
-	commitName, ok := job.Labels[jobutil.LabelCommitName]
+	commitName, ok := commitOwnerName(job)
 	if !ok {
 		return
 	}
@@ -87,4 +88,15 @@ func (p *enqueueRequestForJob) Generic(_ context.Context, evt event.TypedGeneric
 
 func (p *enqueueRequestForJob) Update(_ context.Context, evt event.TypedUpdateEvent[client.Object], q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
 	p.addEvent(q, evt.ObjectNew)
+}
+
+// commitOwnerName extracts the Commit name from the Job's controller OwnerReference.
+func commitOwnerName(job *batchv1.Job) (string, bool) {
+	for _, ref := range job.OwnerReferences {
+		if ref.Kind == "Commit" && ref.APIVersion == agentsv1alpha1.SchemeGroupVersion.String() &&
+			ref.Controller != nil && *ref.Controller {
+			return ref.Name, true
+		}
+	}
+	return "", false
 }
