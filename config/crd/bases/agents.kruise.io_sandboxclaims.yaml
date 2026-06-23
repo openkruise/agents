@@ -85,6 +85,10 @@ spec:
                   be mounted into the sandbox
                 items:
                   properties:
+                    attributes:
+                      additionalProperties:
+                        type: string
+                      type: object
                     mountID:
                       type: string
                     mountPath:

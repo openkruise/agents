@@ -30,19 +30,13 @@ import (
 // It implements IdentityProvider with no-op propagation.
 type defaultTokenProvider struct{}
 
-// NewDefaultTokenProvider creates a TokenProvider that generates random tokens.
-// This is the default strategy used when no identity provider service is configured.
-func NewDefaultTokenProvider() TokenProvider {
-	return &defaultTokenProvider{}
-}
-
 // NewDefaultIdentityProvider creates an IdentityProvider with default token issuance
 // and no-op security token propagation. This is the community default.
 func NewDefaultIdentityProvider() IdentityProvider {
 	return &defaultTokenProvider{}
 }
 
-func (u *defaultTokenProvider) IssueToken(_ context.Context, _ TokenRequest) (*TokenResponse, error) {
+func (u *defaultTokenProvider) IssueToken(_ context.Context, _ *agentsv1alpha1.Sandbox, _ *agentsv1alpha1.SandboxClaim, _ TokenRequest) (*TokenResponse, error) {
 	return &TokenResponse{
 		RequestID:             uuid.NewString(),
 		AccessToken:           uuid.NewString(),

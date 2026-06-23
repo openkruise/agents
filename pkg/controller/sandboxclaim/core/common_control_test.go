@@ -39,6 +39,7 @@ import (
 	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
+	"github.com/openkruise/agents/pkg/utils/csiutils"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 )
 
@@ -2132,6 +2133,7 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 		name               string
 		claim              *agentsv1alpha1.SandboxClaim
 		sandboxSet         *agentsv1alpha1.SandboxSet
+		setup              func(t *testing.T) // optional per-test setup; use t.Cleanup for teardown
 		expectError        bool
 		errorContains      string
 		expectedMountCount int
@@ -2612,6 +2614,143 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 			errorContains: "failed to generate csi mount options config",
 		},
 		{
+			name: "CSI mount with credentialProviderName attribute injects storage-auth annotation via Modifier",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim-csi-cred-provider",
+					Namespace: "default",
+					UID:       "test-uid-cred-provider",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "test-template",
+					DynamicVolumesMount: []agentsv1alpha1.CSIMountConfig{
+						{
+							PvName:     "test-pv-nas",
+							MountPath:  "/workspace",
+							Attributes: map[string]string{"credentialProviderName": "my-cred-provider"},
+							SubPath:    "user-data",
+						},
+					},
+				},
+			},
+			setup: func(t *testing.T) {
+				// Register the BuildStorageAuthAnnotation hook to simulate enterprise deployment
+				csiutils.BuildStorageAuthAnnotation = func(_ context.Context, _ client.Client, mounts []agentsv1alpha1.CSIMountConfig) (string, string, error) {
+					type storageAuthItem struct {
+						CredentialProviderName string            `json:"credentialProviderName"`
+						Attributes            map[string]string `json:"attributes,omitempty"`
+					}
+					var items []storageAuthItem
+					for _, m := range mounts {
+						if cpName, ok := m.Attributes["credentialProviderName"]; ok {
+							items = append(items, storageAuthItem{
+								CredentialProviderName: cpName,
+								Attributes:            map[string]string{"sub-path": m.SubPath},
+							})
+						}
+					}
+					if len(items) == 0 {
+						return "", "", nil
+					}
+					data, err := json.Marshal(items)
+					if err != nil {
+						return "", "", err
+					}
+					return "security.agents.kruise.io/storage-auth", string(data), nil
+				}
+				t.Cleanup(func() {
+					csiutils.BuildStorageAuthAnnotation = nil
+				})
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template",
+					Namespace: "default",
+				},
+				Spec: agentsv1alpha1.SandboxSetSpec{
+					Runtimes: []agentsv1alpha1.RuntimeConfig{
+						{Name: agentsv1alpha1.RuntimeConfigForInjectAgentRuntime},
+					},
+				},
+			},
+			expectError:        false,
+			expectedMountCount: 1,
+			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+				require.NotNil(t, opts.CSIMount, "CSIMount should not be nil")
+				// Invoke the Modifier to verify storage-auth annotation injection
+				mockSandbox := &sandboxcr.Sandbox{
+					Sandbox: &agentsv1alpha1.Sandbox{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "test-sandbox",
+							Namespace: "default",
+						},
+					},
+				}
+				opts.Modifier(mockSandbox)
+				// Verify storage-auth annotation is set with correct JSON content
+				storageAuthVal := mockSandbox.GetAnnotations()["security.agents.kruise.io/storage-auth"]
+				assert.NotEmpty(t, storageAuthVal, "storage-auth annotation should be injected when credentialProviderName attribute is set")
+				// Parse and verify the JSON structure
+				var items []map[string]interface{}
+				err := json.Unmarshal([]byte(storageAuthVal), &items)
+				require.NoError(t, err, "storage-auth should be valid JSON")
+				assert.Len(t, items, 1, "Expected 1 storage auth item")
+				assert.Equal(t, "my-cred-provider", items[0]["credentialProviderName"], "credentialProviderName mismatch")
+				attrs, ok := items[0]["attributes"].(map[string]interface{})
+				require.True(t, ok, "attributes should be a map")
+				assert.Equal(t, "user-data", attrs["sub-path"], "sub-path attribute mismatch")
+			},
+		},
+		{
+			name: "CSI mount without credentialProviderName attribute does NOT inject storage-auth annotation",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim-csi-no-cred",
+					Namespace: "default",
+					UID:       "test-uid-no-cred",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "test-template",
+					DynamicVolumesMount: []agentsv1alpha1.CSIMountConfig{
+						{
+							PvName:    "test-pv-nas",
+							MountPath: "/workspace",
+						},
+					},
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template",
+					Namespace: "default",
+				},
+				Spec: agentsv1alpha1.SandboxSetSpec{
+					Runtimes: []agentsv1alpha1.RuntimeConfig{
+						{Name: agentsv1alpha1.RuntimeConfigForInjectAgentRuntime},
+					},
+				},
+			},
+			expectError:        false,
+			expectedMountCount: 1,
+			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+				require.NotNil(t, opts.CSIMount, "CSIMount should not be nil")
+				// Invoke the Modifier
+				mockSandbox := &sandboxcr.Sandbox{
+					Sandbox: &agentsv1alpha1.Sandbox{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "test-sandbox",
+							Namespace: "default",
+						},
+					},
+				}
+				opts.Modifier(mockSandbox)
+				// Verify storage-auth annotation is NOT set when credentialProviderName attribute is absent
+				annotations := mockSandbox.GetAnnotations()
+				_, exists := annotations["security.agents.kruise.io/storage-auth"]
+				assert.False(t, exists, "storage-auth annotation should NOT be injected when credentialProviderName attribute is absent")
+			},
+		},
+		{
 			name: "SkipInitRuntime=true with CSI mount should fail validation",
 			claim: &agentsv1alpha1.SandboxClaim{
 				ObjectMeta: metav1.ObjectMeta{
@@ -2643,6 +2782,10 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			if tt.setup != nil {
+				tt.setup(t)
+			}
+
 			opts, err := commonControl.buildClaimOptions(ctx, tt.claim, tt.sandboxSet)
 
 			// Check error expectations
