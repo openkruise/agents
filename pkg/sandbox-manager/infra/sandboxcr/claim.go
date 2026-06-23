@@ -329,6 +329,14 @@ func runClaimPostProcesses(ctx context.Context, sbx *Sandbox, lockType infra.Loc
 		log.Info("runtime inited", "cost", metrics.InitRuntime)
 	}
 
+	// Issue and propagate the identity-provider security token before performing
+	// CSI mounts. This ordering ensures the runtime sidecar (initialized above)
+	// receives the token first, and any downstream storage authentication
+	// decisions made by the provider can rely on the sandbox annotations already
+	// injected by modifyPickedSandbox.
+	// processSecurityToken already returns a descriptive retriableError; return
+	// it directly so the retry classification via errors.As(claimErr, &retriableError{})
+	// is preserved rather than being flattened into a terminal error.
 	if err := processSecurityToken(ctx, opts, sbx, cache, metrics); err != nil {
 		return err
 	}
@@ -344,6 +352,7 @@ func runClaimPostProcesses(ctx context.Context, sbx *Sandbox, lockType infra.Loc
 		metrics.Total += metrics.CSIMount
 		log.Info("csi mount completed", "cost", metrics.CSIMount)
 	}
+
 	return nil
 }
 
@@ -358,7 +367,7 @@ func processSecurityToken(ctx context.Context, opts infra.ClaimSandboxOptions, s
 	opts.SecurityToken = &infra.SecurityTokenOptions{}
 	log.Info("starting to issue security token via identity provider")
 	var err error
-	metrics.SecurityToken, err = issueSecurityToken(ctx, sbx, opts.SecurityToken)
+	metrics.SecurityToken, err = issueSecurityToken(ctx, sbx, opts.Claim, opts.SecurityToken)
 	if err != nil {
 		log.Error(err, "failed to issue security token")
 		return retriableError{Message: fmt.Sprintf("security token issuance failed: %s", err)}
@@ -628,8 +637,8 @@ func pickFromCandidates(ctx context.Context, candidates []*v1alpha1.Sandbox, pic
 // identity.IssueSandboxToken and writes the full issued token response into
 // the sandbox's SecurityToken option for downstream consumption (annotation
 // recording and runtime propagation).
-func issueSecurityToken(ctx context.Context, sbx *Sandbox, opts *infra.SecurityTokenOptions) (time.Duration, error) {
-	tokenResp, cost, err := identity.IssueSandboxToken(ctx, sbx.Sandbox)
+func issueSecurityToken(ctx context.Context, sbx *Sandbox, claim *v1alpha1.SandboxClaim, opts *infra.SecurityTokenOptions) (time.Duration, error) {
+	tokenResp, cost, err := identity.IssueSandboxToken(ctx, sbx.Sandbox, claim)
 	if err != nil {
 		return cost, err
 	}

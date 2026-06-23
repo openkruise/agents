@@ -31,13 +31,6 @@ import (
 // defaultTokenProvider
 // ---------------------------------------------------------------------------
 
-func TestNewDefaultTokenProvider(t *testing.T) {
-	provider := NewDefaultTokenProvider()
-	require.NotNil(t, provider)
-	_, ok := provider.(*defaultTokenProvider)
-	assert.True(t, ok, "should return *defaultTokenProvider")
-}
-
 func TestNewDefaultIdentityProvider(t *testing.T) {
 	provider := NewDefaultIdentityProvider()
 	require.NotNil(t, provider)
@@ -46,17 +39,17 @@ func TestNewDefaultIdentityProvider(t *testing.T) {
 }
 
 func TestDefaultTokenProvider_IssueToken(t *testing.T) {
-	provider := NewDefaultTokenProvider()
+	provider := NewDefaultIdentityProvider()
 	ctx := context.Background()
 
-	resp, err := provider.IssueToken(ctx, TokenRequest{TokenType: TokenTypeAgent})
+	resp, err := provider.IssueToken(ctx, nil, nil, TokenRequest{TokenType: TokenTypeAgent})
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 	assert.NotEmpty(t, resp.RequestID, "RequestID should be a non-empty string")
 	assert.NotEmpty(t, resp.AccessToken, "AccessToken should be a non-empty string")
 
 	// Two calls should produce different tokens.
-	resp2, err := provider.IssueToken(ctx, TokenRequest{TokenType: TokenTypeAgent})
+	resp2, err := provider.IssueToken(ctx, nil, nil, TokenRequest{TokenType: TokenTypeAgent})
 	require.NoError(t, err)
 	assert.NotEqual(t, resp.AccessToken, resp2.AccessToken, "each call should produce a unique token")
 }

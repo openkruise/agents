@@ -68,7 +68,7 @@ func NewDefaultRefresher(c client.Client) Refresher {
 func (r *defaultRefresher) Refresh(ctx context.Context, sbx *agentsv1alpha1.Sandbox) (*identity.TokenResponse, error) {
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
 
-	tokenResp, _, err := identity.IssueSandboxToken(ctx, sbx)
+	tokenResp, _, err := identity.IssueSandboxToken(ctx, sbx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("issue token: %w", err)
 	}

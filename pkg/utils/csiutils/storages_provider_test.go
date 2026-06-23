@@ -951,6 +951,152 @@ func (m *mockVolumeMountProvider) GenerateCSINodePublishVolumeRequest(
 	}, nil
 }
 
+func TestGenerateNodePublishVolumeRequest_AgentIdentitySkipsSecret(t *testing.T) {
+	tests := []struct {
+		name             string
+		pvName           string
+		initObjs         []client.Object
+		setupRegistry    func() *mockStorageProviderRegistry
+		expectError      string
+		expectDriverName string
+	}{
+		{
+			// When authType=agent-identity, the handler skips the Secret lookup entirely.
+			// The secret referenced in NodePublishSecretRef does NOT exist in the fake client,
+			// proving the handler never attempted to fetch it.
+			name:   "agent-identity auth skips secret lookup and succeeds",
+			pvName: "pv-agent-identity",
+			initObjs: []client.Object{
+				&corev1.PersistentVolume{
+					ObjectMeta: metav1.ObjectMeta{Name: "pv-agent-identity"},
+					Spec: corev1.PersistentVolumeSpec{
+						PersistentVolumeSource: corev1.PersistentVolumeSource{
+							CSI: &corev1.CSIPersistentVolumeSource{
+								Driver: "nas-driver",
+								VolumeAttributes: map[string]string{
+									"authType": "agent-identity",
+								},
+								NodePublishSecretRef: &corev1.SecretReference{
+									Name:      "non-existent-secret",
+									Namespace: utils.DefaultSandboxDeployNamespace,
+								},
+							},
+						},
+					},
+				},
+			},
+			setupRegistry: func() *mockStorageProviderRegistry {
+				return &mockStorageProviderRegistry{
+					supportedDrivers: map[string]bool{"nas-driver": true},
+					providers:        map[string]storages.VolumeMountProvider{"nas-driver": &mockVolumeMountProvider{}},
+				}
+			},
+			expectDriverName: "nas-driver",
+		},
+		{
+			// When authType is NOT agent-identity, the handler still attempts the Secret lookup.
+			// The oss-driver mock enforces that secretObj must not be nil.
+			name:   "non-agent-identity auth without secret ref fails for oss-driver",
+			pvName: "pv-normal-oss",
+			initObjs: []client.Object{
+				&corev1.PersistentVolume{
+					ObjectMeta: metav1.ObjectMeta{Name: "pv-normal-oss"},
+					Spec: corev1.PersistentVolumeSpec{
+						PersistentVolumeSource: corev1.PersistentVolumeSource{
+							CSI: &corev1.CSIPersistentVolumeSource{
+								Driver: "oss-driver",
+								VolumeAttributes: map[string]string{
+									"authType": "aksk",
+								},
+								NodePublishSecretRef: nil,
+							},
+						},
+					},
+				},
+			},
+			setupRegistry: func() *mockStorageProviderRegistry {
+				return &mockStorageProviderRegistry{
+					supportedDrivers: map[string]bool{"oss-driver": true},
+					providers:        map[string]storages.VolumeMountProvider{"oss-driver": &mockVolumeMountProvider{}},
+				}
+			},
+			expectError: "oss secret is required when mount oss volume",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			c, _, err := cachetest.NewTestCache(t, tt.initObjs...)
+			require.NoError(t, err)
+
+			handler := NewCSIMountHandler(c.GetClient(), c.GetAPIReader(), tt.setupRegistry(), utils.DefaultSandboxDeployNamespace)
+
+			driverName, _, reqErr := handler.GenerateNodePublishVolumeRequest(ctx, v1alpha1.CSIMountConfig{
+				PvName:    tt.pvName,
+				MountPath: "/mnt/data",
+			})
+			if tt.expectError != "" {
+				require.Error(t, reqErr)
+				assert.Contains(t, reqErr.Error(), tt.expectError)
+			} else {
+				require.NoError(t, reqErr)
+				assert.Equal(t, tt.expectDriverName, driverName)
+			}
+		})
+	}
+}
+
+func TestGenerateNodePublishVolumeRequest_NodePublishVolumeEnricher(t *testing.T) {
+	ctx := context.Background()
+	initObjs := []client.Object{
+		&corev1.PersistentVolume{
+			ObjectMeta: metav1.ObjectMeta{Name: "pv-enricher-test"},
+			Spec: corev1.PersistentVolumeSpec{
+				PersistentVolumeSource: corev1.PersistentVolumeSource{
+					CSI: &corev1.CSIPersistentVolumeSource{
+						Driver: "nas-driver",
+						VolumeAttributes: map[string]string{
+							"authType": "agent-identity",
+						},
+					},
+				},
+			},
+		},
+	}
+	c, _, err := cachetest.NewTestCache(t, initObjs...)
+	require.NoError(t, err)
+
+	registry := &mockStorageProviderRegistry{
+		supportedDrivers: map[string]bool{"nas-driver": true},
+		providers:        map[string]storages.VolumeMountProvider{"nas-driver": &mockVolumeMountProvider{}},
+	}
+	handler := NewCSIMountHandler(c.GetClient(), c.GetAPIReader(), registry, utils.DefaultSandboxDeployNamespace)
+
+	// Save and restore the package-level hook
+	saved := NodePublishVolumeEnricher
+	var capturedAttrs map[string]string
+	NodePublishVolumeEnricher = func(_ context.Context, req v1alpha1.CSIMountConfig, volumeAttributes map[string]string) {
+		// Simulate internal implementation injecting sandboxCredentialProviderName
+		if credName := req.Attributes["credentialProviderName"]; credName != "" {
+			volumeAttributes["sandboxCredentialProviderName"] = credName
+		}
+		capturedAttrs = volumeAttributes
+	}
+	t.Cleanup(func() { NodePublishVolumeEnricher = saved })
+
+	_, csiReq, err := handler.GenerateNodePublishVolumeRequest(ctx, v1alpha1.CSIMountConfig{
+		PvName:     "pv-enricher-test",
+		MountPath:  "/mnt/data",
+		Attributes: map[string]string{"credentialProviderName": "my-cred-provider"},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, csiReq)
+	// Verify the hook was called and enriched VolumeAttributes correctly.
+	assert.Equal(t, "my-cred-provider", capturedAttrs["sandboxCredentialProviderName"])
+	assert.Equal(t, "agent-identity", capturedAttrs["authType"])
+}
+
 func TestMergeAndValidatePaths(t *testing.T) {
 	tests := []struct {
 		name                   string
