@@ -28,9 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	"github.com/openkruise/agents/pkg/controller/commit/core"
 	jobutil "github.com/openkruise/agents/pkg/controller/commit/job"
-	"github.com/openkruise/agents/pkg/utils/expectations"
 )
 
 var _ handler.TypedEventHandler[client.Object, reconcile.Request] = &enqueueRequestForJob{}
@@ -50,10 +48,6 @@ func (p *enqueueRequestForJob) addEvent(q workqueue.TypedRateLimitingInterface[r
 	if !ok {
 		return
 	}
-
-	// Observe the Create expectation so the controller knows the Job is in the cache.
-	commitKey := types.NamespacedName{Namespace: job.Namespace, Name: commitName}.String()
-	core.ScaleExpectations.ObserveScale(commitKey, expectations.Create, job.Name)
 
 	complete, _ := jobutil.IsJobCompleted(job)
 	if !complete {
