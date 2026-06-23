@@ -148,38 +148,26 @@ func TestDefaultConfig(t *testing.T) {
 	}
 }
 
-// helperTypedStructAny creates an *anypb.Any wrapping a v3.TypedStruct with given fields.
-func helperTypedStructAny(t *testing.T, fields map[string]interface{}) *anypb.Any {
-	t.Helper()
-	ts := &v3.TypedStruct{}
-	if fields != nil {
-		s, err := structpb.NewStruct(fields)
-		if err != nil {
-			t.Fatalf("failed to create structpb.Struct: %v", err)
-		}
-		ts.Value = s
-	}
-	a, err := anypb.New(ts)
-	if err != nil {
-		t.Fatalf("failed to marshal TypedStruct to Any: %v", err)
-	}
-	return a
-}
-
 func TestConfigParserParse(t *testing.T) {
 	parser := &ConfigParser{}
 
 	tests := []struct {
 		name              string
-		any               *anypb.Any
+		input             *anypb.Any
 		wantErr           bool
 		wantSandboxHeader string
 		wantHostHeader    string
 		wantPortHeader    string
 		wantDefaultPort   string
+		wantEnableAuth    bool
 	}{
 		{
-			name:              "nil value in TypedStruct returns defaults",
+			name: "nil value in TypedStruct returns defaults",
+			input: func() *anypb.Any {
+				ts := &v3.TypedStruct{}
+				a, _ := anypb.New(ts)
+				return a
+			}(),
 			wantErr:           false,
 			wantSandboxHeader: DefaultSandboxHeaderName,
 			wantHostHeader:    DefaultHostHeaderName,
@@ -187,7 +175,13 @@ func TestConfigParserParse(t *testing.T) {
 			wantDefaultPort:   DefaultSandboxPort,
 		},
 		{
-			name:              "empty struct returns defaults",
+			name: "empty struct returns defaults",
+			input: func() *anypb.Any {
+				s, _ := structpb.NewStruct(map[string]any{})
+				ts := &v3.TypedStruct{Value: s}
+				a, _ := anypb.New(ts)
+				return a
+			}(),
 			wantErr:           false,
 			wantSandboxHeader: DefaultSandboxHeaderName,
 			wantHostHeader:    DefaultHostHeaderName,
@@ -195,7 +189,15 @@ func TestConfigParserParse(t *testing.T) {
 			wantDefaultPort:   DefaultSandboxPort,
 		},
 		{
-			name:              "custom sandbox header",
+			name: "custom sandbox header",
+			input: func() *anypb.Any {
+				s, _ := structpb.NewStruct(map[string]any{
+					"sandbox-header-name": "x-custom-sandbox",
+				})
+				ts := &v3.TypedStruct{Value: s}
+				a, _ := anypb.New(ts)
+				return a
+			}(),
 			wantErr:           false,
 			wantSandboxHeader: "x-custom-sandbox",
 			wantHostHeader:    DefaultHostHeaderName,
@@ -203,7 +205,18 @@ func TestConfigParserParse(t *testing.T) {
 			wantDefaultPort:   DefaultSandboxPort,
 		},
 		{
-			name:              "all custom values",
+			name: "all custom values",
+			input: func() *anypb.Any {
+				s, _ := structpb.NewStruct(map[string]any{
+					"sandbox-header-name": "x-sandbox",
+					"host-header-name":    "X-Forwarded-Host",
+					"sandbox-port-header": "x-port",
+					"default-port":        "8080",
+				})
+				ts := &v3.TypedStruct{Value: s}
+				a, _ := anypb.New(ts)
+				return a
+			}(),
 			wantErr:           false,
 			wantSandboxHeader: "x-sandbox",
 			wantHostHeader:    "X-Forwarded-Host",
@@ -211,40 +224,27 @@ func TestConfigParserParse(t *testing.T) {
 			wantDefaultPort:   "8080",
 		},
 		{
-			name:              "enable-auth parsed correctly",
+			name: "enable-auth parsed correctly",
+			input: func() *anypb.Any {
+				s, _ := structpb.NewStruct(map[string]any{
+					"enable-auth": true,
+				})
+				ts := &v3.TypedStruct{Value: s}
+				a, _ := anypb.New(ts)
+				return a
+			}(),
 			wantErr:           false,
 			wantSandboxHeader: DefaultSandboxHeaderName,
 			wantHostHeader:    DefaultHostHeaderName,
 			wantPortHeader:    DefaultSandboxPortHeader,
 			wantDefaultPort:   DefaultSandboxPort,
+			wantEnableAuth:    true,
 		},
 	}
 
-	// Build the Any payloads based on test expectations
-	tests[0].any = func() *anypb.Any {
-		ts := &v3.TypedStruct{}
-		a, _ := anypb.New(ts)
-		return a
-	}()
-	tests[1].any = func() *anypb.Any {
-		return helperTypedStructAny(t, map[string]interface{}{})
-	}()
-	tests[2].any = helperTypedStructAny(t, map[string]interface{}{
-		"sandbox-header-name": "x-custom-sandbox",
-	})
-	tests[3].any = helperTypedStructAny(t, map[string]interface{}{
-		"sandbox-header-name": "x-sandbox",
-		"host-header-name":    "X-Forwarded-Host",
-		"sandbox-port-header": "x-port",
-		"default-port":        "8080",
-	})
-	tests[4].any = helperTypedStructAny(t, map[string]interface{}{
-		"enable-auth": true,
-	})
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := parser.Parse(tt.any, nil)
+			result, err := parser.Parse(tt.input, nil)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("Parse() error = %v, wantErr %v", err, tt.wantErr)
 			}
@@ -267,10 +267,8 @@ func TestConfigParserParse(t *testing.T) {
 			if fc.DefaultPort != tt.wantDefaultPort && tt.wantDefaultPort != "" {
 				t.Errorf("DefaultPort = %q, want %q", fc.DefaultPort, tt.wantDefaultPort)
 			}
-			if tt.name == "enable-auth parsed correctly" {
-				if !fc.EnableAuth {
-					t.Error("EnableAuth = false, want true")
-				}
+			if fc.EnableAuth != tt.wantEnableAuth {
+				t.Errorf("EnableAuth = %v, want %v", fc.EnableAuth, tt.wantEnableAuth)
 			}
 			if fc.Adapter == nil {
 				t.Error("Parse() returned FilterConfig with nil Adapter")
