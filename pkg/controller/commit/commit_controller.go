@@ -247,7 +247,10 @@ func (r *CommitReconciler) ensureAndApply(ctx context.Context, args *core.Ensure
 		}
 		return ctrl.Result{}, err
 	}
-	return ctrl.Result{RequeueAfter: requeueAfter}, r.updateCommitStatus(ctx, *args.NewStatus, commit)
+	if retErr := r.updateCommitStatus(ctx, *args.NewStatus, commit); retErr != nil {
+		return ctrl.Result{}, retErr
+	}
+	return ctrl.Result{RequeueAfter: requeueAfter}, nil
 }
 
 func (r *CommitReconciler) handleCommitTTL(ctx context.Context, commit *agentsv1alpha1.Commit) (ctrl.Result, error) {
