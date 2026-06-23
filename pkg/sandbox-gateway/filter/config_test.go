@@ -210,6 +210,14 @@ func TestConfigParserParse(t *testing.T) {
 			wantPortHeader:    "x-port",
 			wantDefaultPort:   "8080",
 		},
+		{
+			name:              "enable-auth parsed correctly",
+			wantErr:           false,
+			wantSandboxHeader: DefaultSandboxHeaderName,
+			wantHostHeader:    DefaultHostHeaderName,
+			wantPortHeader:    DefaultSandboxPortHeader,
+			wantDefaultPort:   DefaultSandboxPort,
+		},
 	}
 
 	// Build the Any payloads based on test expectations
@@ -229,6 +237,9 @@ func TestConfigParserParse(t *testing.T) {
 		"host-header-name":    "X-Forwarded-Host",
 		"sandbox-port-header": "x-port",
 		"default-port":        "8080",
+	})
+	tests[4].any = helperTypedStructAny(t, map[string]interface{}{
+		"enable-auth": true,
 	})
 
 	for _, tt := range tests {
@@ -255,6 +266,11 @@ func TestConfigParserParse(t *testing.T) {
 			}
 			if fc.DefaultPort != tt.wantDefaultPort && tt.wantDefaultPort != "" {
 				t.Errorf("DefaultPort = %q, want %q", fc.DefaultPort, tt.wantDefaultPort)
+			}
+			if tt.name == "enable-auth parsed correctly" {
+				if !fc.EnableAuth {
+					t.Error("EnableAuth = false, want true")
+				}
 			}
 			if fc.Adapter == nil {
 				t.Error("Parse() returned FilterConfig with nil Adapter")
@@ -289,24 +305,27 @@ func TestConfigParserMerge(t *testing.T) {
 		wantHostHeader    string
 		wantPortHeader    string
 		wantDefaultPort   string
+		wantEnableAuth    bool
 	}{
 		{
 			name:              "child overrides all parent fields",
 			parent:            DefaultConfig(),
-			child:             &Config{SandboxHeaderName: "child-sbx", HostHeaderName: "child-host", SandboxPortHeader: "child-port", DefaultPort: "9999"},
+			child:             &Config{SandboxHeaderName: "child-sbx", HostHeaderName: "child-host", SandboxPortHeader: "child-port", DefaultPort: "9999", EnableAuth: true},
 			wantSandboxHeader: "child-sbx",
 			wantHostHeader:    "child-host",
 			wantPortHeader:    "child-port",
 			wantDefaultPort:   "9999",
+			wantEnableAuth:    true,
 		},
 		{
 			name:              "empty child preserves parent",
-			parent:            &Config{SandboxHeaderName: "parent-sbx", HostHeaderName: "parent-host", SandboxPortHeader: "parent-port", DefaultPort: "1234"},
+			parent:            &Config{SandboxHeaderName: "parent-sbx", HostHeaderName: "parent-host", SandboxPortHeader: "parent-port", DefaultPort: "1234", EnableAuth: true},
 			child:             &Config{},
 			wantSandboxHeader: "parent-sbx",
 			wantHostHeader:    "parent-host",
 			wantPortHeader:    "parent-port",
 			wantDefaultPort:   "1234",
+			wantEnableAuth:    true,
 		},
 		{
 			name:              "partial child override",
@@ -316,6 +335,7 @@ func TestConfigParserMerge(t *testing.T) {
 			wantHostHeader:    DefaultHostHeaderName,
 			wantPortHeader:    DefaultSandboxPortHeader,
 			wantDefaultPort:   DefaultSandboxPort,
+			wantEnableAuth:    false,
 		},
 		{
 			name:              "both defaults",
@@ -325,6 +345,17 @@ func TestConfigParserMerge(t *testing.T) {
 			wantHostHeader:    DefaultHostHeaderName,
 			wantPortHeader:    DefaultSandboxPortHeader,
 			wantDefaultPort:   DefaultSandboxPort,
+			wantEnableAuth:    false,
+		},
+		{
+			name:              "child enables auth overriding parent disabled",
+			parent:            &Config{SandboxHeaderName: DefaultSandboxHeaderName, DefaultPort: DefaultSandboxPort, EnableAuth: false},
+			child:             &Config{EnableAuth: true},
+			wantSandboxHeader: DefaultSandboxHeaderName,
+			wantHostHeader:    DefaultHostHeaderName,
+			wantPortHeader:    DefaultSandboxPortHeader,
+			wantDefaultPort:   DefaultSandboxPort,
+			wantEnableAuth:    true,
 		},
 	}
 
@@ -349,6 +380,9 @@ func TestConfigParserMerge(t *testing.T) {
 			}
 			if fc.DefaultPort != tt.wantDefaultPort {
 				t.Errorf("DefaultPort = %q, want %q", fc.DefaultPort, tt.wantDefaultPort)
+			}
+			if fc.EnableAuth != tt.wantEnableAuth {
+				t.Errorf("EnableAuth = %v, want %v", fc.EnableAuth, tt.wantEnableAuth)
 			}
 			if fc.Adapter == nil {
 				t.Error("Merge() returned FilterConfig with nil Adapter")
