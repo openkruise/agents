@@ -93,22 +93,9 @@ func (r *SandboxReuseControl) ensureSandboxReused(ctx context.Context, args Ensu
 func (r *SandboxReuseControl) doReuse(ctx context.Context, args EnsureFuncArgs) (time.Duration, error) {
 	box, newStatus := args.Box, args.NewStatus
 
-	poolName := box.Labels[agentsv1alpha1.LabelSandboxPool]
-	if poolName == "" {
-		return 0, fmt.Errorf("sandbox %s has no sandbox-pool label", box.Name)
-	}
-	sbs := &agentsv1alpha1.SandboxSet{}
-	if err := r.client.Get(ctx, client.ObjectKey{Namespace: box.Namespace, Name: poolName}, sbs); err != nil {
-		if apierrors.IsNotFound(err) {
-			return 0, fmt.Errorf("SandboxSet %s not found", poolName)
-		}
-		return 0, &RetriableError{Err: fmt.Errorf("failed to get SandboxSet %s: %w", poolName, err)}
-	}
-
-	// A nil Pod during reuse is an abnormal state — the sandbox should always
-	// have a running Pod. Fail immediately rather than waiting indefinitely.
-	if args.Pod == nil {
-		return 0, fmt.Errorf("pod not found during reuse")
+	sbs, err := r.validateReusePreconditions(ctx, args)
+	if err != nil {
+		return 0, err
 	}
 
 	reuseCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionReusing))
@@ -131,7 +118,6 @@ func (r *SandboxReuseControl) doReuse(ctx context.Context, args EnsureFuncArgs) 
 	}
 
 	var requeue time.Duration
-	var err error
 
 	switch reuseCond.Reason {
 	case agentsv1alpha1.SandboxReusingReasonStarted:
@@ -151,14 +137,63 @@ func (r *SandboxReuseControl) doReuse(ctx context.Context, args EnsureFuncArgs) 
 	return requeue, err
 }
 
+// validateReusePreconditions performs all pre-condition checks before the
+// reuse state machine begins: pool label, SandboxSet existence, template-hash
+// currency, and Pod health. It returns the SandboxSet (needed by later stages)
+// and an error if any check fails.
+func (r *SandboxReuseControl) validateReusePreconditions(ctx context.Context, args EnsureFuncArgs) (*agentsv1alpha1.SandboxSet, error) {
+	box := args.Box
+
+	poolName := box.Labels[agentsv1alpha1.LabelSandboxPool]
+	if poolName == "" {
+		return nil, fmt.Errorf("sandbox %s has no sandbox-pool label", box.Name)
+	}
+	sbs := &agentsv1alpha1.SandboxSet{}
+	if err := r.client.Get(ctx, client.ObjectKey{Namespace: box.Namespace, Name: poolName}, sbs); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, fmt.Errorf("SandboxSet %s not found", poolName)
+		}
+		return nil, &RetriableError{Err: fmt.Errorf("failed to get SandboxSet %s: %w", poolName, err)}
+	}
+
+	// If the sandbox's template-hash does not match the SandboxSet's
+	// updateRevision, the template has been updated since the sandbox was
+	// created. There is no point continuing the reuse — the sandbox is
+	// outdated and should not be returned to the pool.
+	// When the SandboxSet's updateRevision is empty (not yet reconciled),
+	// the check is skipped to avoid false failures during initial setup.
+	if sbs.Status.UpdateRevision != "" &&
+		box.Labels[agentsv1alpha1.LabelTemplateHash] != sbs.Status.UpdateRevision {
+		return nil, fmt.Errorf("sandbox template-hash %q does not match SandboxSet %s updateRevision %q, sandbox is outdated and cannot be reused",
+			box.Labels[agentsv1alpha1.LabelTemplateHash], sbs.Name, sbs.Status.UpdateRevision)
+	}
+
+	// A nil Pod during reuse is an abnormal state — the sandbox should always
+	// have a running Pod. Fail immediately rather than waiting indefinitely.
+	if args.Pod == nil {
+		return nil, fmt.Errorf("pod not found during reuse")
+	}
+
+	// If the Pod has already entered a terminal phase (Succeeded/Failed), the
+	// runtime can never complete the reset. Fail the reuse immediately instead
+	// of waiting until the timeout fires.
+	if args.Pod.Status.Phase == corev1.PodSucceeded || args.Pod.Status.Phase == corev1.PodFailed {
+		return nil, fmt.Errorf("pod entered terminal phase %s during reuse", args.Pod.Status.Phase)
+	}
+
+	return sbs, nil
+}
+
 func (r *SandboxReuseControl) handleReuseInProgress(ctx context.Context, args EnsureFuncArgs, reuseCond *metav1.Condition) (time.Duration, error) {
 	box, newStatus := args.Box, args.NewStatus
 
+	var remaining time.Duration
 	if r.config.Timeout > 0 {
 		elapsed := time.Since(reuseCond.LastTransitionTime.Time)
 		if elapsed > r.config.Timeout {
 			return 0, &reuseTimeoutError{timeout: r.config.Timeout}
 		}
+		remaining = r.config.Timeout - elapsed
 	}
 
 	complete, err := r.config.Reuser.IsReuseComplete(ctx, box, args.Pod)
@@ -167,7 +202,10 @@ func (r *SandboxReuseControl) handleReuseInProgress(ctx context.Context, args En
 	}
 	if !complete {
 		klog.InfoS("Reuse cleanup not yet complete, waiting", "sandbox", klog.KObj(box))
-		return 0, nil
+		// Return a requeue duration to guarantee the controller re-reconciles
+		// even if no external events arrive (e.g. runtime not responding).
+		// This ensures the timeout check is eventually executed.
+		return r.reusePollingInterval(remaining), nil
 	}
 	// Check whether the Pod is Ready before transitioning to the Completed phase.
 	// The reuser reports cleanup completion, but the Pod may still be restarting
@@ -175,7 +213,7 @@ func (r *SandboxReuseControl) handleReuseInProgress(ctx context.Context, args En
 	readyCond := utils.GetPodCondition(&args.Pod.Status, corev1.PodReady)
 	if readyCond == nil || readyCond.Status != corev1.ConditionTrue {
 		klog.InfoS("Reuse cleanup complete but pod not ready, waiting", "sandbox", klog.KObj(box))
-		return 0, nil
+		return r.reusePollingInterval(remaining), nil
 	}
 	reuseCond.Reason = agentsv1alpha1.SandboxReusingReasonCompleted
 	reuseCond.LastTransitionTime = metav1.Now()
@@ -183,6 +221,22 @@ func (r *SandboxReuseControl) handleReuseInProgress(ctx context.Context, args En
 	utils.SetSandboxCondition(newStatus, *reuseCond)
 	klog.InfoS("Reuse cleanup completed, entering grace period", "sandbox", klog.KObj(box))
 	return r.config.GracePeriod, nil
+}
+
+// reusePollingInterval returns the requeue duration when waiting for reuse to
+// complete. If a timeout is configured, it returns the remaining time so the
+// timeout fires on time. Otherwise it returns a default polling interval.
+const defaultReusePollingInterval = 5 * time.Second
+
+func (r *SandboxReuseControl) reusePollingInterval(remaining time.Duration) time.Duration {
+	if remaining > 0 {
+		if remaining < defaultReusePollingInterval {
+			return remaining
+		}
+		return defaultReusePollingInterval
+	}
+	// No timeout configured; poll periodically anyway to avoid stalling.
+	return defaultReusePollingInterval
 }
 
 func (r *SandboxReuseControl) handleReuseGracePeriod(ctx context.Context, args EnsureFuncArgs, reuseCond *metav1.Condition, sbs *agentsv1alpha1.SandboxSet) (time.Duration, error) {
@@ -279,23 +333,11 @@ func (r *SandboxReuseControl) resetMetadataForPool(ctx context.Context, box *age
 	}
 	box.Labels[agentsv1alpha1.LabelSandboxIsClaimed] = agentsv1alpha1.False
 	delete(box.Labels, agentsv1alpha1.LabelSandboxClaimName)
-	delete(box.Annotations, agentsv1alpha1.AnnotationClaimTime)
-	delete(box.Annotations, agentsv1alpha1.AnnotationLock)
-	delete(box.Annotations, agentsv1alpha1.AnnotationOwner)
-	delete(box.Annotations, agentsv1alpha1.AnnotationInitRuntimeRequest)
-	delete(box.Annotations, agentsv1alpha1.AnnotationRuntimeAccessToken)
-	delete(box.Annotations, agentsv1alpha1.AnnotationReuse)
-	delete(box.Annotations, agentsv1alpha1.AnnotationReuseRetainOnFailure)
-
-	// Annotations set during the claim flow but were missing from the initial cleanup:
-	delete(box.Annotations, agentsv1alpha1.AnnotationCSIVolumeConfig)
-	delete(box.Annotations, agentsv1alpha1.SandboxAnnotationPriority)
+	for _, ann := range agentsv1alpha1.AnnotationsClearedOnReuse {
+		delete(box.Annotations, ann)
+	}
+	// Annotations from other packages not included in AnnotationsClearedOnReuse:
 	delete(box.Annotations, identity.AgentKeyTokenRefreshStatus)
-
-	// Annotations that may carry user-session-specific data from post-claim steps:
-	delete(box.Annotations, agentsv1alpha1.AnnotationEnvdAccessToken)
-	delete(box.Annotations, agentsv1alpha1.AnnotationEnvdURL)
-	delete(box.Annotations, agentsv1alpha1.AnnotationRuntimeURL)
 
 	// Part 2: Delete user-specified metadata keys
 	metadataJSON := box.Annotations[agentsv1alpha1.AnnotationUpdatedMetadataInClaim]
@@ -318,83 +360,4 @@ func (r *SandboxReuseControl) resetMetadataForPool(ctx context.Context, box *age
 	}
 	klog.InfoS("Reset sandbox for pool", "sandbox", klog.KObj(box), "sandboxSet", sbs.Name)
 	return nil
-}
-
-const annotationResetRequest = "agents.kruise.io/reset-request"
-
-// ResetRequest is the JSON payload written to the Pod's reset-request annotation.
-type ResetRequest struct {
-	ResetID     string `json:"resetID"`
-	RequestTime string `json:"requestTime"`
-}
-
-// ResetResult is the JSON payload in the ResetComplete Pod condition message.
-type ResetResult struct {
-	ResetID    string `json:"resetID"`
-	StartTime  string `json:"startTime"`
-	FinishTime string `json:"finishTime"`
-	Error      string `json:"error,omitempty"`
-}
-
-// PodResetReuser implements SandboxReuser by writing a reset-request annotation
-// on the sandbox's Pod and polling a PodCondition for completion.
-type PodResetReuser struct {
-	client client.Client
-}
-
-func NewPodResetReuser(c client.Client) SandboxReuser {
-	return &PodResetReuser{client: c}
-}
-
-func (r *PodResetReuser) Reuse(ctx context.Context, sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod) error {
-	request := ResetRequest{
-		ResetID:     fmt.Sprintf("%d", sandbox.Status.ReuseCount+1),
-		RequestTime: time.Now().UTC().Format(time.RFC3339),
-	}
-	raw, err := json.Marshal(request)
-	if err != nil {
-		return fmt.Errorf("failed to marshal reset request: %w", err)
-	}
-
-	patch := client.MergeFrom(pod.DeepCopy())
-	if pod.Annotations == nil {
-		pod.Annotations = make(map[string]string)
-	}
-	pod.Annotations[annotationResetRequest] = string(raw)
-	if err := r.client.Patch(ctx, pod, patch); err != nil {
-		return &RetriableError{Err: fmt.Errorf("failed to patch pod with reset request: %w", err)}
-	}
-
-	klog.InfoS("Reset request sent to pod", "sandbox", klog.KObj(sandbox), "resetID", request.ResetID)
-	return nil
-}
-
-func (r *PodResetReuser) IsReuseComplete(_ context.Context, _ *agentsv1alpha1.Sandbox, pod *corev1.Pod) (bool, error) {
-	cond := utils.GetPodCondition(&pod.Status, PodConditionResetComplete)
-	if cond == nil {
-		return false, nil
-	}
-
-	var result ResetResult
-	if err := json.Unmarshal([]byte(cond.Message), &result); err != nil {
-		return false, nil
-	}
-
-	requestJSON := pod.Annotations[annotationResetRequest]
-	if requestJSON == "" {
-		return false, nil
-	}
-	var request ResetRequest
-	if err := json.Unmarshal([]byte(requestJSON), &request); err != nil {
-		return false, nil
-	}
-
-	if result.ResetID != request.ResetID {
-		return false, nil
-	}
-
-	if cond.Status == corev1.ConditionTrue {
-		return true, nil
-	}
-	return false, fmt.Errorf("reset %s: %s", cond.Reason, result.Error)
 }

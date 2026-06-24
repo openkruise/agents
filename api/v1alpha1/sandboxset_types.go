@@ -57,6 +57,40 @@ const (
 	AnnotationUpdatedMetadataInClaim = InternalPrefix + "updated-metadata-in-claim"
 )
 
+// AnnotationsClearedOnReuse lists all annotation keys that are removed from a
+// sandbox when it is successfully reused and returned to the pool. When adding
+// a new annotation that should be cleared during reuse, append it here to avoid
+// missing the cleanup in resetMetadataForPool.
+//
+// Note: AnnotationUpdatedMetadataInClaim is handled separately because it is
+// consumed before deletion to determine user-specified metadata keys.
+// Annotations from other packages (e.g. identity.AgentKeyTokenRefreshStatus)
+// are handled individually in resetMetadataForPool.
+var AnnotationsClearedOnReuse = []string{
+	AnnotationClaimTime,
+	AnnotationLock,
+	AnnotationOwner,
+	AnnotationInitRuntimeRequest,
+	AnnotationRuntimeAccessToken,
+	AnnotationReuse,
+	AnnotationReuseRetainOnFailure,
+	AnnotationCSIVolumeConfig,
+	SandboxAnnotationPriority,
+	AnnotationEnvdAccessToken,
+	AnnotationEnvdURL,
+	AnnotationRuntimeURL,
+}
+
+// InternalKeysPreservedOnCreation lists internal keys (with the InternalPrefix)
+// that are preserved when creating a new sandbox from a SandboxSet template.
+// All other internal keys are cleared to ensure a clean slate. When adding a
+// new internal key that should survive sandbox creation, add it here to avoid
+// accidental deletion in clearAndInitInnerKeys.
+var InternalKeysPreservedOnCreation = map[string]struct{}{
+	AnnotationReuseEnabled:         {},
+	AnnotationReuseRetainOnFailure: {},
+}
+
 // UpdatedMetadataInClaim records the keys of labels/annotations added or modified during claim.
 // Used by the reuse flow to determine which metadata to reset.
 type UpdatedMetadataInClaim struct {

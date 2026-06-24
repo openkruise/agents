@@ -360,6 +360,7 @@ const (
 	SandboxReusingReasonSucceeded = "ReuseSucceeded"
 	SandboxReusingReasonFailed    = "ReuseFailed"
 	SandboxReusingReasonTimeout   = "ReuseTimeout"
+	SandboxReusingReasonRejected  = "ReuseRejected"
 )
 
 // +genclient
@@ -372,6 +373,7 @@ const (
 // +kubebuilder:printcolumn:name="Claimed",type="string",JSONPath=".metadata.labels.agents\\.kruise\\.io/sandbox-claimed"
 // +kubebuilder:printcolumn:name="shutdown_time",type="string",JSONPath=".spec.shutdownTime"
 // +kubebuilder:printcolumn:name="pause_time",type="string",JSONPath=".spec.pauseTime"
+// +kubebuilder:printcolumn:name="ReuseCount",type="integer",JSONPath=".status.reuseCount"
 // +kubebuilder:printcolumn:name="Message",type="string",JSONPath=".status.message"
 
 // Sandbox is the Schema for the sandboxes API

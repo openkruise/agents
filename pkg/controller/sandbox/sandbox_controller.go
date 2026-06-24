@@ -29,6 +29,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -92,7 +93,6 @@ func Add(mgr manager.Manager, metricsCleanup Enqueuer) error {
 			CheckpointControl: checkpointControl,
 			PodControl:        podControl,
 			ReuseConfig: core.SandboxReuseConfig{
-				Reuser:               core.NewPodResetReuser(mgr.GetClient()),
 				Timeout:              reuseTimeout,
 				GracePeriod:          reuseGracePeriod,
 				FailureShutdownGrace: reuseFailureShutdownGrace,
@@ -100,6 +100,7 @@ func Add(mgr manager.Manager, metricsCleanup Enqueuer) error {
 		}),
 		rateLimiter:    rateLimiter,
 		metricsCleanup: metricsCleanup,
+		recorder:       recorder,
 	}).SetupWithManager(mgr)
 	if err != nil {
 		return err
@@ -116,6 +117,7 @@ type SandboxReconciler struct {
 	rateLimiter       *core.RateLimiter
 	checkpointControl *core.CheckpointControl
 	metricsCleanup    Enqueuer
+	recorder          record.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=agents.kruise.io,resources=sandboxes,verbs=get;list;watch;create;update;patch;delete
@@ -361,7 +363,24 @@ func (r *SandboxReconciler) calculateStatus(ctx context.Context, args core.Ensur
 			return newStatus, true
 		}
 	case agentsv1alpha1.SandboxRunning:
-		// At this stage, if the Pod does not exist, it can only be that the Pod was deleted externally, and the sandbox should enter the Failed state
+		// Reuse trigger takes priority over Pod terminal detection.
+		// If reuse is requested, always enter Reusing regardless of Pod state —
+		// doReuse's terminal phase check properly handles dead Pods via
+		// handleReuseFailed (which deletes the sandbox and cleans up metadata).
+		// This prevents the sandbox from getting stuck in Failed with dirty
+		// claim metadata when the Pod dies between claim-release and the next reconcile.
+		if isReuseTriggered(box) {
+			if hasPVCVolumes(box) {
+				r.rejectReuse(box, newStatus, "reuse is not supported for sandboxes with persistent volume claims")
+			} else {
+				klog.InfoS("Detected reuse trigger", "sandbox", klog.KObj(box))
+				newStatus.Phase = agentsv1alpha1.SandboxReusing
+				utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionReusing))
+				break
+			}
+		}
+
+		// Pod terminal detection (only when reuse is NOT triggered)
 		if pod == nil || !pod.DeletionTimestamp.IsZero() {
 			newStatus.Phase = agentsv1alpha1.SandboxFailed
 			newStatus.Message = "Pod Not Found"
@@ -378,11 +397,6 @@ func (r *SandboxReconciler) calculateStatus(ctx context.Context, args core.Ensur
 			// The paused and resumed condition are exclusive
 			utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionResumed))
 			newStatus.Phase = agentsv1alpha1.SandboxPaused
-		} else if box.Annotations[agentsv1alpha1.AnnotationReuse] == "true" &&
-			box.Annotations[agentsv1alpha1.AnnotationReuseEnabled] == "true" {
-			klog.InfoS("Detected reuse trigger", "sandbox", klog.KObj(box))
-			newStatus.Phase = agentsv1alpha1.SandboxReusing
-			utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionReusing))
 			// Check for upgrade: if template has changed (hash mismatch), transition to Upgrading phase
 		} else if pod != nil && pod.Labels[agentsv1alpha1.PodLabelTemplateHash] != newStatus.UpdateRevision &&
 			box.Spec.UpgradePolicy != nil && box.Spec.UpgradePolicy.Type == agentsv1alpha1.SandboxUpgradePolicyRecreate {
@@ -394,6 +408,11 @@ func (r *SandboxReconciler) calculateStatus(ctx context.Context, args core.Ensur
 		}
 
 	case agentsv1alpha1.SandboxPaused:
+		// Paused state does not support reuse; reject immediately.
+		if isReuseTriggered(box) {
+			r.rejectReuse(box, newStatus, "reuse is not supported in Paused state")
+		}
+
 		cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
 		// sandbox will only enter the resuming state after successful paused
 		if cond.Status == metav1.ConditionTrue && !box.Spec.Paused {
@@ -435,6 +454,55 @@ func (r *SandboxReconciler) calculateStatus(ctx context.Context, args core.Ensur
 		}
 	}
 	return newStatus, false
+}
+
+// isReuseTriggered returns true when the reuse annotation and the reuse-enabled
+// annotation are both set to "true" on the sandbox.
+func isReuseTriggered(box *agentsv1alpha1.Sandbox) bool {
+	return box.Annotations[agentsv1alpha1.AnnotationReuse] == "true" &&
+		box.Annotations[agentsv1alpha1.AnnotationReuseEnabled] == "true"
+}
+
+// hasPVCVolumes returns true if the sandbox has VolumeClaimTemplates or its pod
+// template references any PersistentVolumeClaim volumes.
+func hasPVCVolumes(box *agentsv1alpha1.Sandbox) bool {
+	if len(box.Spec.VolumeClaimTemplates) > 0 {
+		return true
+	}
+	if box.Spec.Template != nil {
+		for _, vol := range box.Spec.Template.Spec.Volumes {
+			if vol.PersistentVolumeClaim != nil {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// rejectReuse sets a Reusing condition with reason ReuseRejected and records a
+// Warning event. The sandbox stays in its current phase (Running or Paused).
+// The msg parameter provides the specific rejection reason.
+func (r *SandboxReconciler) rejectReuse(box *agentsv1alpha1.Sandbox, newStatus *agentsv1alpha1.SandboxStatus, msg string) {
+	// Avoid duplicate events if the condition is already set to ReuseRejected
+	// with the same message.
+	if existing := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionReusing)); existing != nil &&
+		existing.Reason == agentsv1alpha1.SandboxReusingReasonRejected && existing.Message == msg {
+		return
+	}
+
+	utils.SetSandboxCondition(newStatus, metav1.Condition{
+		Type:               string(agentsv1alpha1.SandboxConditionReusing),
+		Status:             metav1.ConditionFalse,
+		Reason:             agentsv1alpha1.SandboxReusingReasonRejected,
+		Message:            msg,
+		LastTransitionTime: metav1.Now(),
+	})
+
+	if r.recorder != nil {
+		r.recorder.Event(box, corev1.EventTypeWarning, agentsv1alpha1.SandboxReusingReasonRejected, msg)
+	}
+
+	klog.InfoS("Reuse rejected", "sandbox", klog.KObj(box), "reason", msg)
 }
 
 func determineUpgradeResumeReason(

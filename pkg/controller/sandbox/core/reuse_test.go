@@ -88,17 +88,17 @@ func TestEnsureSandboxReused(t *testing.T) {
 	}
 
 	tests := []struct {
-		name             string
-		reuser           *mockSandboxReuser
-		reuseTimeout     time.Duration
-		reuseGracePeriod time.Duration
-		box              *agentsv1alpha1.Sandbox
-		pod              *corev1.Pod
-		newStatus        *agentsv1alpha1.SandboxStatus
-		sbs              *agentsv1alpha1.SandboxSet
-		expectError      string
-		expectPhase      agentsv1alpha1.SandboxPhase
-		expectRequeue    bool
+		name               string
+		reuser             *mockSandboxReuser
+		reuseTimeout       time.Duration
+		reuseGracePeriod   time.Duration
+		box                *agentsv1alpha1.Sandbox
+		pod                *corev1.Pod
+		newStatus          *agentsv1alpha1.SandboxStatus
+		sbs                *agentsv1alpha1.SandboxSet
+		expectError        string
+		expectPhase        agentsv1alpha1.SandboxPhase
+		expectRequeue      bool
 		expectReuseCount   int32
 		expectCondReason   string
 		expectShutdownTime bool
@@ -166,7 +166,7 @@ func TestEnsureSandboxReused(t *testing.T) {
 			expectCondReason: agentsv1alpha1.SandboxReusingReasonStarted,
 		},
 		{
-			name: "reuse in progress - not complete, no requeue",
+			name: "reuse in progress - not complete, requeues for polling",
 			reuser: &mockSandboxReuser{
 				completeVal: false,
 			},
@@ -201,6 +201,7 @@ func TestEnsureSandboxReused(t *testing.T) {
 					},
 				},
 			},
+			expectRequeue:    true,
 			expectCondReason: agentsv1alpha1.SandboxReusingReasonStarted,
 		},
 		{
@@ -254,7 +255,7 @@ func TestEnsureSandboxReused(t *testing.T) {
 			expectCondReason: agentsv1alpha1.SandboxReusingReasonCompleted,
 		},
 		{
-			name: "reuse in progress - complete but pod not ready, waiting",
+			name: "reuse in progress - complete but pod not ready, requeues for polling",
 			reuser: &mockSandboxReuser{
 				completeVal: true,
 			},
@@ -295,6 +296,7 @@ func TestEnsureSandboxReused(t *testing.T) {
 					},
 				},
 			},
+			expectRequeue:    true,
 			expectCondReason: agentsv1alpha1.SandboxReusingReasonStarted,
 		},
 		{
@@ -312,6 +314,86 @@ func TestEnsureSandboxReused(t *testing.T) {
 						agentsv1alpha1.LabelSandboxPool: "test-pool",
 					},
 				},
+			},
+			sbs: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-pool",
+					Namespace: "default",
+				},
+				Spec: agentsv1alpha1.SandboxSetSpec{Replicas: 1},
+			},
+			newStatus: &agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxReusing,
+				Conditions: []metav1.Condition{
+					{
+						Type:               string(agentsv1alpha1.SandboxConditionReusing),
+						Status:             metav1.ConditionFalse,
+						Reason:             agentsv1alpha1.SandboxReusingReasonStarted,
+						LastTransitionTime: metav1.Now(),
+					},
+				},
+			},
+			expectCondReason: agentsv1alpha1.SandboxReusingReasonFailed,
+		},
+		{
+			name: "pod in Succeeded phase - reuse failed immediately",
+			reuser: &mockSandboxReuser{
+				completeVal: true,
+			},
+			reuseTimeout:     60 * time.Second,
+			reuseGracePeriod: 10 * time.Second,
+			box: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+					Labels: map[string]string{
+						agentsv1alpha1.LabelSandboxPool: "test-pool",
+					},
+				},
+			},
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-sandbox", Namespace: "default"},
+				Status:     corev1.PodStatus{Phase: corev1.PodSucceeded},
+			},
+			sbs: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-pool",
+					Namespace: "default",
+				},
+				Spec: agentsv1alpha1.SandboxSetSpec{Replicas: 1},
+			},
+			newStatus: &agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxReusing,
+				Conditions: []metav1.Condition{
+					{
+						Type:               string(agentsv1alpha1.SandboxConditionReusing),
+						Status:             metav1.ConditionFalse,
+						Reason:             agentsv1alpha1.SandboxReusingReasonStarted,
+						LastTransitionTime: metav1.Now(),
+					},
+				},
+			},
+			expectCondReason: agentsv1alpha1.SandboxReusingReasonFailed,
+		},
+		{
+			name: "pod in Failed phase - reuse failed immediately",
+			reuser: &mockSandboxReuser{
+				completeVal: true,
+			},
+			reuseTimeout:     60 * time.Second,
+			reuseGracePeriod: 10 * time.Second,
+			box: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+					Labels: map[string]string{
+						agentsv1alpha1.LabelSandboxPool: "test-pool",
+					},
+				},
+			},
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-sandbox", Namespace: "default"},
+				Status:     corev1.PodStatus{Phase: corev1.PodFailed},
 			},
 			sbs: &agentsv1alpha1.SandboxSet{
 				ObjectMeta: metav1.ObjectMeta{
@@ -615,7 +697,7 @@ func TestEnsureSandboxReused(t *testing.T) {
 			expectDeleted:    true,
 		},
 		{
-			name:             "fallthrough with GracePeriod == 0 - immediately succeeds",
+			name: "fallthrough with GracePeriod == 0 - immediately succeeds",
 			reuser: &mockSandboxReuser{
 				completeVal: true,
 			},
@@ -791,6 +873,109 @@ func TestEnsureSandboxReused(t *testing.T) {
 			expectRequeue:    true,
 			expectCondReason: agentsv1alpha1.SandboxReusingReasonCompleted,
 		},
+		{
+			name:             "template-hash mismatch - reuse failed immediately",
+			reuser:           &mockSandboxReuser{},
+			reuseTimeout:     60 * time.Second,
+			reuseGracePeriod: 10 * time.Second,
+			box: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+					Labels: map[string]string{
+						agentsv1alpha1.LabelSandboxPool:  "test-pool",
+						agentsv1alpha1.LabelTemplateHash: "old-hash",
+					},
+					Annotations: map[string]string{
+						agentsv1alpha1.AnnotationReuse:        "true",
+						agentsv1alpha1.AnnotationReuseEnabled: "true",
+					},
+				},
+			},
+			pod: readyPod,
+			sbs: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-pool",
+					Namespace: "default",
+					UID:       types.UID("test-uid"),
+				},
+				Spec: agentsv1alpha1.SandboxSetSpec{Replicas: 1},
+				Status: agentsv1alpha1.SandboxSetStatus{
+					UpdateRevision: "new-hash",
+				},
+			},
+			newStatus:        &agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxReusing},
+			expectCondReason: agentsv1alpha1.SandboxReusingReasonFailed,
+			expectDeleted:    true,
+		},
+		{
+			name:             "template-hash match - reuse proceeds normally",
+			reuser:           &mockSandboxReuser{},
+			reuseTimeout:     60 * time.Second,
+			reuseGracePeriod: 10 * time.Second,
+			box: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+					Labels: map[string]string{
+						agentsv1alpha1.LabelSandboxPool:  "test-pool",
+						agentsv1alpha1.LabelTemplateHash: "matching-hash",
+					},
+					Annotations: map[string]string{
+						agentsv1alpha1.AnnotationReuse:        "true",
+						agentsv1alpha1.AnnotationReuseEnabled: "true",
+					},
+				},
+			},
+			pod: readyPod,
+			sbs: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-pool",
+					Namespace: "default",
+					UID:       types.UID("test-uid"),
+				},
+				Spec: agentsv1alpha1.SandboxSetSpec{Replicas: 1},
+				Status: agentsv1alpha1.SandboxSetStatus{
+					UpdateRevision: "matching-hash",
+				},
+			},
+			newStatus:        &agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxReusing},
+			expectCondReason: agentsv1alpha1.SandboxReusingReasonStarted,
+		},
+		{
+			name:             "updateRevision empty - hash check skipped, reuse proceeds",
+			reuser:           &mockSandboxReuser{},
+			reuseTimeout:     60 * time.Second,
+			reuseGracePeriod: 10 * time.Second,
+			box: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+					Labels: map[string]string{
+						agentsv1alpha1.LabelSandboxPool:  "test-pool",
+						agentsv1alpha1.LabelTemplateHash: "some-hash",
+					},
+					Annotations: map[string]string{
+						agentsv1alpha1.AnnotationReuse:        "true",
+						agentsv1alpha1.AnnotationReuseEnabled: "true",
+					},
+				},
+			},
+			pod: readyPod,
+			sbs: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-pool",
+					Namespace: "default",
+					UID:       types.UID("test-uid"),
+				},
+				Spec: agentsv1alpha1.SandboxSetSpec{Replicas: 1},
+				Status: agentsv1alpha1.SandboxSetStatus{
+					UpdateRevision: "",
+				},
+			},
+			newStatus:        &agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxReusing},
+			expectCondReason: agentsv1alpha1.SandboxReusingReasonStarted,
+		},
 	}
 
 	for _, tt := range tests {
@@ -828,11 +1013,11 @@ func TestEnsureSandboxReused(t *testing.T) {
 			if tt.expectReuseCount > 0 {
 				assert.Equal(t, tt.expectReuseCount, tt.newStatus.ReuseCount)
 			}
-		
+
 			if tt.expectShutdownTime {
 				assert.NotNil(t, tt.box.Spec.ShutdownTime)
 			}
-		
+
 			if tt.expectDeleted {
 				err := fakeClient.Get(context.TODO(), types.NamespacedName{Name: tt.box.Name, Namespace: tt.box.Namespace}, &agentsv1alpha1.Sandbox{})
 				assert.True(t, apierrors.IsNotFound(err), "expected sandbox to be deleted")
@@ -904,7 +1089,7 @@ func TestResetForPool(t *testing.T) {
 						agentsv1alpha1.AnnotationEnvdAccessToken:      "legacy-envd-token",
 						agentsv1alpha1.AnnotationEnvdURL:              "http://legacy-envd.example.com",
 						agentsv1alpha1.AnnotationRuntimeURL:           "http://runtime.example.com",
-						"user-anno": "user-value",
+						"user-anno":                                   "user-value",
 						agentsv1alpha1.AnnotationUpdatedMetadataInClaim: mustMarshal(agentsv1alpha1.UpdatedMetadataInClaim{
 							Labels:      []string{"user-label"},
 							Annotations: []string{"user-anno"},
@@ -1017,6 +1202,87 @@ func TestNoopSandboxReuser(t *testing.T) {
 	assert.True(t, complete)
 }
 
+// annotationResetRequest is the annotation key used by MockSandboxReuser to
+// write reset requests on Pods.
+const annotationResetRequest = "agents.kruise.io/reset-request"
+
+// ResetRequest is the JSON payload written to the Pod's reset-request annotation.
+type ResetRequest struct {
+	ResetID     string `json:"resetID"`
+	RequestTime string `json:"requestTime"`
+}
+
+// ResetResult is the JSON payload in the ResetComplete Pod condition message.
+type ResetResult struct {
+	ResetID    string `json:"resetID"`
+	StartTime  string `json:"startTime"`
+	FinishTime string `json:"finishTime"`
+	Error      string `json:"error,omitempty"`
+}
+
+// MockSandboxReuser is a mock SandboxReuser implementation that writes a
+// reset-request annotation on the sandbox's Pod and polls a PodCondition for
+// completion. It is intended for testing and E2E scenarios where a real
+// agent-runtime is not available.
+type MockSandboxReuser struct {
+	client client.Client
+}
+
+func NewMockSandboxReuser(c client.Client) SandboxReuser {
+	return &MockSandboxReuser{client: c}
+}
+
+func (r *MockSandboxReuser) Reuse(ctx context.Context, sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod) error {
+	request := ResetRequest{
+		ResetID:     fmt.Sprintf("%d", sandbox.Status.ReuseCount+1),
+		RequestTime: time.Now().UTC().Format(time.RFC3339),
+	}
+	raw, err := json.Marshal(request)
+	if err != nil {
+		return fmt.Errorf("failed to marshal reset request: %w", err)
+	}
+
+	patch := client.MergeFrom(pod.DeepCopy())
+	if pod.Annotations == nil {
+		pod.Annotations = make(map[string]string)
+	}
+	pod.Annotations[annotationResetRequest] = string(raw)
+	if err := r.client.Patch(ctx, pod, patch); err != nil {
+		return &RetriableError{Err: fmt.Errorf("failed to patch pod with reset request: %w", err)}
+	}
+	return nil
+}
+
+func (r *MockSandboxReuser) IsReuseComplete(_ context.Context, _ *agentsv1alpha1.Sandbox, pod *corev1.Pod) (bool, error) {
+	cond := utils.GetPodCondition(&pod.Status, PodConditionResetComplete)
+	if cond == nil {
+		return false, nil
+	}
+
+	var result ResetResult
+	if err := json.Unmarshal([]byte(cond.Message), &result); err != nil {
+		return false, nil
+	}
+
+	requestJSON := pod.Annotations[annotationResetRequest]
+	if requestJSON == "" {
+		return false, nil
+	}
+	var request ResetRequest
+	if err := json.Unmarshal([]byte(requestJSON), &request); err != nil {
+		return false, nil
+	}
+
+	if result.ResetID != request.ResetID {
+		return false, nil
+	}
+
+	if cond.Status == corev1.ConditionTrue {
+		return true, nil
+	}
+	return false, fmt.Errorf("reset %s: %s", cond.Reason, result.Error)
+}
+
 func newFakeClient(objs ...client.Object) client.Client {
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)
@@ -1027,7 +1293,7 @@ func newFakeClient(objs ...client.Object) client.Client {
 		Build()
 }
 
-func TestPodResetReuser_Reuse(t *testing.T) {
+func TestMockSandboxReuser_Reuse(t *testing.T) {
 	tests := []struct {
 		name        string
 		sandbox     *agentsv1alpha1.Sandbox
@@ -1049,7 +1315,7 @@ func TestPodResetReuser_Reuse(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			objs := []client.Object{tt.pod}
-			reuser := NewPodResetReuser(newFakeClient(objs...))
+			reuser := NewMockSandboxReuser(newFakeClient(objs...))
 
 			err := reuser.Reuse(context.TODO(), tt.sandbox, tt.pod)
 
@@ -1061,7 +1327,7 @@ func TestPodResetReuser_Reuse(t *testing.T) {
 			require.NoError(t, err)
 
 			updated := &corev1.Pod{}
-			reuserImpl := reuser.(*PodResetReuser)
+			reuserImpl := reuser.(*MockSandboxReuser)
 			err = reuserImpl.client.Get(context.TODO(), client.ObjectKeyFromObject(tt.sandbox), updated)
 			require.NoError(t, err)
 
@@ -1076,7 +1342,7 @@ func TestPodResetReuser_Reuse(t *testing.T) {
 	}
 }
 
-func TestPodResetReuser_IsReuseComplete(t *testing.T) {
+func TestMockSandboxReuser_IsReuseComplete(t *testing.T) {
 	resetRequest := mustMarshal(ResetRequest{ResetID: "5", RequestTime: "2026-06-11T10:00:00Z"})
 
 	tests := []struct {
@@ -1248,7 +1514,7 @@ func TestPodResetReuser_IsReuseComplete(t *testing.T) {
 			sandbox := &agentsv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{Name: "sbx-1", Namespace: "default"},
 			}
-			reuser := NewPodResetReuser(newFakeClient())
+			reuser := NewMockSandboxReuser(newFakeClient())
 
 			complete, err := reuser.IsReuseComplete(context.TODO(), sandbox, tt.pod)
 
@@ -1554,7 +1820,7 @@ func TestDoReuse_SandboxSetGetError(t *testing.T) {
 	assert.Equal(t, time.Duration(0), requeue)
 }
 
-func TestPodResetReuser_Reuse_PatchError(t *testing.T) {
+func TestMockSandboxReuser_Reuse_PatchError(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)
 	_ = agentsv1alpha1.AddToScheme(scheme)
@@ -1572,7 +1838,7 @@ func TestPodResetReuser_Reuse_PatchError(t *testing.T) {
 			},
 		}).Build()
 
-	reuser := NewPodResetReuser(fakeClient)
+	reuser := NewMockSandboxReuser(fakeClient)
 	sandbox := &agentsv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "sbx-1", Namespace: "default"},
 	}

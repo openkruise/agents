@@ -26,31 +26,10 @@ import (
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 )
-
-const (
-	annotationResetRequest    = "agents.kruise.io/reset-request"
-	podConditionResetComplete = "ResetComplete"
-	resetReasonSucceeded      = "ResetSucceeded"
-	resetReasonFailed         = "ResetFailed"
-)
-
-type resetRequest struct {
-	ResetID     string `json:"resetID"`
-	RequestTime string `json:"requestTime"`
-}
-
-type resetResult struct {
-	ResetID    string `json:"resetID"`
-	StartTime  string `json:"startTime"`
-	FinishTime string `json:"finishTime"`
-	Error      string `json:"error,omitempty"`
-}
 
 var _ = Describe("Sandbox Reuse", func() {
 	var (
@@ -146,66 +125,6 @@ var _ = Describe("Sandbox Reuse", func() {
 		}, time.Second*10, time.Second).Should(Succeed())
 	}
 
-	// waitForResetRequest polls until the pod has a reset-request annotation, returns the parsed request.
-	waitForResetRequest := func(podKey types.NamespacedName) resetRequest {
-		var req resetRequest
-		Eventually(func() error {
-			pod := &corev1.Pod{}
-			if err := k8sClient.Get(ctx, podKey, pod); err != nil {
-				return err
-			}
-			raw := pod.Annotations[annotationResetRequest]
-			if raw == "" {
-				return fmt.Errorf("reset-request annotation not set yet")
-			}
-			return json.Unmarshal([]byte(raw), &req)
-		}, time.Second*30, time.Second).Should(Succeed())
-		return req
-	}
-
-	// simulateResetComplete patches the pod status with a ResetComplete condition.
-	simulateResetComplete := func(podKey types.NamespacedName, resetID string, success bool, errMsg string) {
-		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-			pod := &corev1.Pod{}
-			if err := k8sClient.Get(ctx, podKey, pod); err != nil {
-				return err
-			}
-			status := corev1.ConditionTrue
-			reason := resetReasonSucceeded
-			if !success {
-				status = corev1.ConditionFalse
-				reason = resetReasonFailed
-			}
-			result, _ := json.Marshal(resetResult{
-				ResetID:    resetID,
-				StartTime:  time.Now().Add(-time.Second).Format(time.RFC3339),
-				FinishTime: time.Now().Format(time.RFC3339),
-				Error:      errMsg,
-			})
-
-			cond := corev1.PodCondition{
-				Type:               corev1.PodConditionType(podConditionResetComplete),
-				Status:             status,
-				Reason:             reason,
-				Message:            string(result),
-				LastTransitionTime: metav1.Now(),
-			}
-			found := false
-			for i, c := range pod.Status.Conditions {
-				if c.Type == corev1.PodConditionType(podConditionResetComplete) {
-					pod.Status.Conditions[i] = cond
-					found = true
-					break
-				}
-			}
-			if !found {
-				pod.Status.Conditions = append(pod.Status.Conditions, cond)
-			}
-			return k8sClient.Status().Update(ctx, pod)
-		})
-		Expect(err).NotTo(HaveOccurred())
-	}
-
 	// waitForReuseCondition polls until the sandbox Reusing condition matches the given reason.
 	waitForReuseCondition := func(sbx *agentsv1alpha1.Sandbox, reason string) {
 		Eventually(func() string {
@@ -240,20 +159,26 @@ var _ = Describe("Sandbox Reuse", func() {
 		return k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), &agentsv1alpha1.Sandbox{}) != nil
 	}
 
-	// triggerReuseAndFail triggers reuse and simulates a reset failure.
+	// triggerReuseAndFail triggers reuse while removing the pool label in a
+	// single atomic patch, so doReuse fails immediately with "no sandbox-pool
+	// label". This avoids any race with the noopSandboxReuser completing
+	// the reuse before we can inject a failure.
 	triggerReuseAndFail := func(target *agentsv1alpha1.Sandbox) {
-		triggerReuse(target)
-
-		By("Waiting for Reusing phase")
-		Eventually(func() agentsv1alpha1.SandboxPhase {
-			_ = k8sClient.Get(ctx, client.ObjectKeyFromObject(target), target)
-			return target.Status.Phase
-		}, time.Second*30, time.Second).Should(Equal(agentsv1alpha1.SandboxReusing))
-
-		By("Simulating reset failure")
-		podKey := types.NamespacedName{Name: target.Name, Namespace: target.Namespace}
-		req := waitForResetRequest(podKey)
-		simulateResetComplete(podKey, req.ResetID, false, "disk full")
+		By("Triggering reuse with pool label removed to force failure")
+		Eventually(func() error {
+			latest := &agentsv1alpha1.Sandbox{}
+			if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(target), latest); err != nil {
+				return err
+			}
+			patch := client.MergeFrom(latest.DeepCopy())
+			delete(latest.Labels, agentsv1alpha1.LabelSandboxPool)
+			if latest.Annotations == nil {
+				latest.Annotations = map[string]string{}
+			}
+			latest.Annotations[agentsv1alpha1.AnnotationReuseEnabled] = "true"
+			latest.Annotations[agentsv1alpha1.AnnotationReuse] = "true"
+			return k8sClient.Patch(ctx, latest, patch)
+		}, time.Second*10, time.Second).Should(Succeed())
 
 		By("Waiting for reuse condition to show failure")
 		waitForReuseCondition(target, agentsv1alpha1.SandboxReusingReasonFailed)
@@ -277,12 +202,7 @@ var _ = Describe("Sandbox Reuse", func() {
 			Eventually(func() agentsv1alpha1.SandboxPhase {
 				_ = k8sClient.Get(ctx, client.ObjectKeyFromObject(target), target)
 				return target.Status.Phase
-			}, time.Second*30, time.Second).Should(Equal(agentsv1alpha1.SandboxReusing))
-
-			By("Simulating agent-runtime reset completion")
-			podKey := types.NamespacedName{Name: target.Name, Namespace: target.Namespace}
-			req := waitForResetRequest(podKey)
-			simulateResetComplete(podKey, req.ResetID, true, "")
+			}, time.Minute, time.Second).Should(Equal(agentsv1alpha1.SandboxReusing))
 
 			By("Waiting for sandbox to return to Running phase")
 			Eventually(func() agentsv1alpha1.SandboxPhase {
@@ -397,6 +317,56 @@ var _ = Describe("Sandbox Reuse", func() {
 			Eventually(func() bool {
 				return isSandboxDeleted(target)
 			}, time.Second*60, time.Second).Should(BeTrue())
+		})
+
+		It("should fail reuse when template-hash does not match SandboxSet updateRevision", func() {
+			sandboxes := listPoolSandboxes()
+			Expect(sandboxes).To(HaveLen(2))
+			target := &sandboxes[0]
+
+			By("Simulating a claim on the target sandbox")
+			simulateClaim(target)
+
+			By("Removing owner reference to prevent SandboxSet rolling update from deleting target")
+			Eventually(func() error {
+				latest := &agentsv1alpha1.Sandbox{}
+				if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(target), latest); err != nil {
+					return err
+				}
+				patch := client.MergeFrom(latest.DeepCopy())
+				latest.OwnerReferences = nil
+				return k8sClient.Patch(ctx, latest, patch)
+			}, time.Second*10, time.Second).Should(Succeed())
+
+			By("Capturing the original template-hash")
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(target), target)).To(Succeed())
+			originalHash := target.Labels[agentsv1alpha1.LabelTemplateHash]
+			Expect(originalHash).NotTo(BeEmpty())
+
+			By("Updating SandboxSet template to change updateRevision")
+			Eventually(func() error {
+				latest := &agentsv1alpha1.SandboxSet{}
+				if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(sandboxSet), latest); err != nil {
+					return err
+				}
+				patch := client.MergeFrom(latest.DeepCopy())
+				latest.Spec.Template.Spec.Containers[0].Image = "nginx:stable-alpine3.24"
+				return k8sClient.Patch(ctx, latest, patch)
+			}, time.Second*10, time.Second).Should(Succeed())
+
+			By("Waiting for SandboxSet updateRevision to change")
+			Eventually(func() bool {
+				_ = k8sClient.Get(ctx, client.ObjectKeyFromObject(sandboxSet), sandboxSet)
+				return sandboxSet.Status.UpdateRevision != "" && sandboxSet.Status.UpdateRevision != originalHash
+			}, time.Minute, time.Second).Should(BeTrue())
+
+			By("Triggering reuse on the target sandbox with outdated template-hash")
+			triggerReuse(target)
+
+			By("Verifying sandbox is deleted due to template-hash mismatch")
+			Eventually(func() bool {
+				return isSandboxDeleted(target)
+			}, time.Second*30, time.Second).Should(BeTrue())
 		})
 	})
 })

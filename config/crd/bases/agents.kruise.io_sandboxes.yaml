@@ -32,6 +32,9 @@ spec:
     - jsonPath: .spec.pauseTime
       name: pause_time
       type: string
+    - jsonPath: .status.reuseCount
+      name: ReuseCount
+      type: integer
     - jsonPath: .status.message
       name: Message
       type: string
