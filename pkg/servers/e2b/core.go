@@ -67,6 +67,7 @@ type Controller struct {
 	domain          string
 	manager         *sandboxmanager.SandboxManager
 	keys            keys.KeyStorage
+	deletedAPIKeys  *apiKeyDeletionTombstones
 }
 
 // NewController creates a new E2B Controller
@@ -88,6 +89,7 @@ func NewController(domain, sysNs, peerSelector, sandboxNamespace, sandboxLabelSe
 		memberlistBindPort:    memberlistBindPort,
 		keyCfg:                keyCfg,
 		quotaOpts:             quotaOpts,
+		deletedAPIKeys:        newAPIKeyDeletionTombstones(defaultAPIKeyDeletionTombstoneTTL),
 	}
 
 	sc.server = &http.Server{
