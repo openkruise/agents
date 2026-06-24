@@ -396,7 +396,7 @@ func (r *SandboxReconciler) calculateStatus(ctx context.Context, args core.Ensur
 	case agentsv1alpha1.SandboxPaused:
 		cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
 		// sandbox will only enter the resuming state after successful paused
-		if cond.Status == metav1.ConditionTrue && !box.Spec.Paused {
+		if cond != nil && cond.Status == metav1.ConditionTrue && !box.Spec.Paused {
 			// delete paused condition
 			utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
 			newStatus.Phase = agentsv1alpha1.SandboxResuming
@@ -407,7 +407,7 @@ func (r *SandboxReconciler) calculateStatus(ctx context.Context, args core.Ensur
 				LastTransitionTime: metav1.Now(),
 			}
 			utils.SetSandboxCondition(newStatus, rCond)
-		} else if !box.Spec.Paused && cond.Status == metav1.ConditionFalse {
+		} else if cond != nil && !box.Spec.Paused && cond.Status == metav1.ConditionFalse {
 			klog.InfoS("sandbox pause not completed, cannot enter resume state temporarily", "sandbox", klog.KObj(box))
 		}
 
