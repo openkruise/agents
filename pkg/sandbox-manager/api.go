@@ -20,7 +20,6 @@ import (
 	"context"
 	"time"
 
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/klog/v2"
 
 	"github.com/openkruise/agents/api/v1alpha1"
@@ -92,9 +91,6 @@ func (m *SandboxManager) CloneSandbox(ctx context.Context, opts infra.CloneSandb
 	if err != nil {
 		log.Error(err, "failed to clone sandbox", "metrics", cloneMetrics)
 		sandboxCloneTotal.WithLabelValues(opts.Namespace, "failure").Inc()
-		if apierrors.IsAlreadyExists(err) {
-			return nil, errors.NewError(errors.ErrorConflict, "failed to clone sandbox: %v", err)
-		}
 		return nil, preserveTypedError(err, "failed to clone sandbox")
 	}
 
