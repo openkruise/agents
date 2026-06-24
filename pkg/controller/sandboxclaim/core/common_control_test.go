@@ -541,7 +541,7 @@ func TestCommonControl_EnsureClaimClaiming_ClaimedGreaterThanZero(t *testing.T) 
 	assert.Equal(t, int32(1), newStatus.ClaimedReplicas, "ClaimedReplicas should be 1")
 }
 
-func TestCommonControl_EnsureClaimClaiming_CPUResizeFeatureGatePrecondition(t *testing.T) {
+func TestCommonControl_EnsureClaimClaiming_ResourceResizeFeatureGatePrecondition(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = agentsv1alpha1.AddToScheme(scheme)
 
@@ -557,7 +557,7 @@ func TestCommonControl_EnsureClaimClaiming_CPUResizeFeatureGatePrecondition(t *t
 				Replicas:     int32Ptr(1),
 				InplaceUpdate: &agentsv1alpha1.SandboxClaimInplaceUpdateOptions{
 					Resources: &agentsv1alpha1.SandboxClaimInplaceUpdateResourcesOptions{
-						Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")},
+						Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("512Mi")},
 					},
 				},
 			},
@@ -1031,16 +1031,22 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 			name: "claim with inplaceUpdate resources",
 			claim: &agentsv1alpha1.SandboxClaim{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-claim-cpu-resize",
+					Name:      "test-claim-resource-resize",
 					Namespace: "default",
-					UID:       "test-uid-cpu-resize",
+					UID:       "test-uid-resource-resize",
 				},
 				Spec: agentsv1alpha1.SandboxClaimSpec{
 					TemplateName: "test-template",
 					InplaceUpdate: &agentsv1alpha1.SandboxClaimInplaceUpdateOptions{
 						Resources: &agentsv1alpha1.SandboxClaimInplaceUpdateResourcesOptions{
-							Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")},
-							Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")},
+							Requests: corev1.ResourceList{
+								corev1.ResourceCPU:    resource.MustParse("500m"),
+								corev1.ResourceMemory: resource.MustParse("512Mi"),
+							},
+							Limits: corev1.ResourceList{
+								corev1.ResourceCPU:    resource.MustParse("500m"),
+								corev1.ResourceMemory: resource.MustParse("1Gi"),
+							},
 						},
 					},
 				},
@@ -1059,6 +1065,10 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 				reqCPU := opts.InplaceUpdate.Resources.Requests[corev1.ResourceCPU]
 				if reqCPU.String() != "500m" {
 					t.Errorf("InplaceUpdate.Resources.Requests[cpu] = %v, want 500m", reqCPU.String())
+				}
+				reqMemory := opts.InplaceUpdate.Resources.Requests[corev1.ResourceMemory]
+				if reqMemory.String() != "512Mi" {
+					t.Errorf("InplaceUpdate.Resources.Requests[memory] = %v, want 512Mi", reqMemory.String())
 				}
 			},
 		},

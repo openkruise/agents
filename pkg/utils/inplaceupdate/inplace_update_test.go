@@ -51,6 +51,34 @@ func buildTestScheme(t *testing.T) *runtime.Scheme {
 	return scheme
 }
 
+func applyResizeSubresourcePatch(ctx context.Context, c client.Client, obj client.Object, patch client.Patch) error {
+	data, err := patch.Data(obj)
+	if err != nil {
+		return err
+	}
+	resizePatch := struct {
+		Spec struct {
+			Containers []corev1.Container `json:"containers"`
+		} `json:"spec"`
+	}{}
+	if err := json.Unmarshal(data, &resizePatch); err != nil {
+		return err
+	}
+
+	existing := &corev1.Pod{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(obj), existing); err != nil {
+		return err
+	}
+	for i, container := range existing.Spec.Containers {
+		for _, patchContainer := range resizePatch.Spec.Containers {
+			if patchContainer.Name == container.Name {
+				existing.Spec.Containers[i].Resources = patchContainer.Resources
+			}
+		}
+	}
+	return c.Update(ctx, existing)
+}
+
 func TestGetPodInPlaceUpdateState(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -354,6 +382,12 @@ func TestInPlaceUpdateControl_Update_ResizeViaSubresource(t *testing.T) {
 			Containers: []corev1.Container{{
 				Name:  "c",
 				Image: "img:1",
+				ResizePolicy: []corev1.ContainerResizePolicy{
+					{
+						ResourceName:  corev1.ResourceMemory,
+						RestartPolicy: corev1.RestartContainer,
+					},
+				},
 				Resources: corev1.ResourceRequirements{
 					Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m")},
 				},
@@ -381,34 +415,20 @@ func TestInPlaceUpdateControl_Update_ResizeViaSubresource(t *testing.T) {
 	resizeCalls := 0
 	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
 	wrapped := interceptor.NewClient(base, interceptor.Funcs{
-		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object,
-			opts ...client.SubResourceUpdateOption) error {
+		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object,
+			patch client.Patch, opts ...client.SubResourcePatchOption) error {
 			if sub != "resize" {
-				return c.SubResource(sub).Update(ctx, obj, opts...)
+				return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
 			}
 			resizeCalls++
-			body := obj
-			updateOpts := &client.SubResourceUpdateOptions{}
-			updateOpts.ApplyOptions(opts)
-			if updateOpts.SubResourceBody != nil {
-				body = updateOpts.SubResourceBody
-			}
-			resizePod, ok := body.(*corev1.Pod)
-			if !ok {
-				return fmt.Errorf("expected *corev1.Pod, got %T", body)
-			}
-			existing := &corev1.Pod{}
-			if err := c.Get(ctx, client.ObjectKeyFromObject(obj), existing); err != nil {
+			data, err := patch.Data(obj)
+			if err != nil {
 				return err
 			}
-			for i, container := range existing.Spec.Containers {
-				for _, rc := range resizePod.Spec.Containers {
-					if rc.Name == container.Name {
-						existing.Spec.Containers[i].Resources = rc.Resources
-					}
-				}
+			if strings.Contains(string(data), "resizePolicy") {
+				return fmt.Errorf("resize subresource patch must not include resizePolicy: %s", string(data))
 			}
-			return c.Update(ctx, existing)
+			return applyResizeSubresourcePatch(ctx, c, obj, patch)
 		},
 	})
 
@@ -478,13 +498,13 @@ func TestInPlaceUpdateControl_Update_ResizeFallbackToDirectPatch(t *testing.T) {
 	patchCalls := 0
 	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
 	wrapped := interceptor.NewClient(base, interceptor.Funcs{
-		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object,
-			opts ...client.SubResourceUpdateOption) error {
+		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object,
+			patch client.Patch, opts ...client.SubResourcePatchOption) error {
 			if sub == "resize" {
 				subCalls++
 				return apierrors.NewNotFound(schema.GroupResource{Resource: "pods"}, obj.GetName())
 			}
-			return c.SubResource(sub).Update(ctx, obj, opts...)
+			return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
 		},
 		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch,
 			opts ...client.PatchOption) error {
@@ -571,12 +591,12 @@ func TestInPlaceUpdateControl_Update_ResizeNotSupported(t *testing.T) {
 
 	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
 	wrapped := interceptor.NewClient(base, interceptor.Funcs{
-		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object,
-			opts ...client.SubResourceUpdateOption) error {
+		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object,
+			patch client.Patch, opts ...client.SubResourcePatchOption) error {
 			if sub == "resize" {
 				return apierrors.NewNotFound(schema.GroupResource{Resource: "pods"}, obj.GetName())
 			}
-			return c.SubResource(sub).Update(ctx, obj, opts...)
+			return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
 		},
 		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch,
 			opts ...client.PatchOption) error {
@@ -646,12 +666,12 @@ func TestInPlaceUpdateControl_Update_ResizeSubresourceServerError(t *testing.T) 
 
 	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
 	wrapped := interceptor.NewClient(base, interceptor.Funcs{
-		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object,
-			opts ...client.SubResourceUpdateOption) error {
+		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object,
+			patch client.Patch, opts ...client.SubResourcePatchOption) error {
 			if sub == "resize" {
 				return apierrors.NewInternalError(fmt.Errorf("etcd timeout"))
 			}
-			return c.SubResource(sub).Update(ctx, obj, opts...)
+			return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
 		},
 	})
 	ctrl := NewInPlaceUpdateControl(wrapped, nil)
@@ -716,10 +736,10 @@ func TestInPlaceUpdateControl_Update_ResizeConflictRetrySucceeds(t *testing.T) {
 	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
 	resizeAttempts := 0
 	wrapped := interceptor.NewClient(base, interceptor.Funcs{
-		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object,
-			opts ...client.SubResourceUpdateOption) error {
+		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object,
+			patch client.Patch, opts ...client.SubResourcePatchOption) error {
 			if sub != "resize" {
-				return c.SubResource(sub).Update(ctx, obj, opts...)
+				return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
 			}
 			resizeAttempts++
 			if resizeAttempts == 1 {
@@ -740,25 +760,7 @@ func TestInPlaceUpdateControl_Update_ResizeConflictRetrySucceeds(t *testing.T) {
 				)
 			}
 			// Subsequent attempts succeed and apply the resize.
-			body := obj
-			updateOpts := &client.SubResourceUpdateOptions{}
-			updateOpts.ApplyOptions(opts)
-			if updateOpts.SubResourceBody != nil {
-				body = updateOpts.SubResourceBody
-			}
-			rp := body.(*corev1.Pod)
-			existing := &corev1.Pod{}
-			if err := c.Get(ctx, client.ObjectKeyFromObject(obj), existing); err != nil {
-				return err
-			}
-			for i, container := range existing.Spec.Containers {
-				for _, rc := range rp.Spec.Containers {
-					if rc.Name == container.Name {
-						existing.Spec.Containers[i].Resources = rc.Resources
-					}
-				}
-			}
-			return c.Update(ctx, existing)
+			return applyResizeSubresourcePatch(ctx, c, obj, patch)
 		},
 	})
 	ctrl := NewInPlaceUpdateControl(wrapped, nil)
@@ -824,15 +826,15 @@ func TestInPlaceUpdateControl_Update_ResizeConflictRetryNoLongerNeeded(t *testin
 	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
 	resizeAttempts := 0
 	wrapped := interceptor.NewClient(base, interceptor.Funcs{
-		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object,
-			opts ...client.SubResourceUpdateOption) error {
+		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object,
+			patch client.Patch, opts ...client.SubResourcePatchOption) error {
 			if sub != "resize" {
-				return c.SubResource(sub).Update(ctx, obj, opts...)
+				return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
 			}
 			resizeAttempts++
 			// Simulate that another actor has already applied the resize, so
-			// recomputing resizeBody from the latest pod returns nil and the
-			// retry loop should exit successfully without a re-attempt.
+			// recomputing the resize patch from the latest pod returns empty
+			// and the retry loop should exit successfully without a re-attempt.
 			latest := &corev1.Pod{}
 			if err := c.Get(ctx, client.ObjectKeyFromObject(obj), latest); err != nil {
 				return err
@@ -903,10 +905,10 @@ func TestInPlaceUpdateControl_Update_ResizeConflictGetFails(t *testing.T) {
 	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
 	getFailErr := fmt.Errorf("simulated get failure after conflict")
 	wrapped := interceptor.NewClient(base, interceptor.Funcs{
-		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object,
-			opts ...client.SubResourceUpdateOption) error {
+		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object,
+			patch client.Patch, opts ...client.SubResourcePatchOption) error {
 			if sub != "resize" {
-				return c.SubResource(sub).Update(ctx, obj, opts...)
+				return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
 			}
 			// Always return conflict to trigger the retry path
 			return apierrors.NewConflict(
@@ -963,18 +965,13 @@ func TestInPlaceUpdateControl_PatchPodResources_Conflict(t *testing.T) {
 	})
 	ctrl := NewInPlaceUpdateControl(wrapped, nil)
 
-	resizeBody := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "default"},
-		Spec: corev1.PodSpec{
-			Containers: []corev1.Container{{
-				Name: "c",
-				Resources: corev1.ResourceRequirements{
-					Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")},
-				},
-			}},
+	resourcePatch := buildResourcePatch([]corev1.Container{{
+		Name: "c",
+		Resources: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")},
 		},
-	}
-	err := ctrl.patchPodResources(context.Background(), klog.NewKlogr(), pod, resizeBody)
+	}})
+	err := ctrl.patchPodResources(context.Background(), klog.NewKlogr(), pod, resourcePatch)
 	if err == nil {
 		t.Fatalf("expected error from conflicted patch")
 	}
@@ -1164,8 +1161,8 @@ func TestResizeNotSupportedError(t *testing.T) {
 	}
 }
 
-func TestBuildResourcePatch(t *testing.T) {
-	body := &corev1.Pod{
+func TestDefaultGenerateResizePatch(t *testing.T) {
+	pod := &corev1.Pod{
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{
 				{
@@ -1179,11 +1176,61 @@ func TestBuildResourcePatch(t *testing.T) {
 						},
 					},
 				},
-				{Name: "c2"},
+				{
+					Name: "c2",
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceCPU: resource.MustParse("10m"),
+						},
+					},
+				},
+			},
+			InitContainers: []corev1.Container{
+				{
+					Name: "init",
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceCPU: resource.MustParse("50m"),
+						},
+					},
+				},
 			},
 		},
 	}
-	patch := buildResourcePatch(body)
+	patch := DefaultGenerateResizePatch(InPlaceUpdateOptions{
+		Box: &agentsv1alpha1.Sandbox{
+			Spec: agentsv1alpha1.SandboxSpec{
+				EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+					Template: &corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{
+									Name: "c1",
+									Resources: corev1.ResourceRequirements{
+										Requests: corev1.ResourceList{
+											corev1.ResourceCPU: resource.MustParse("500m"),
+										},
+										Limits: corev1.ResourceList{
+											corev1.ResourceMemory: resource.MustParse("256Mi"),
+										},
+									},
+								},
+								{
+									Name: "c2",
+									Resources: corev1.ResourceRequirements{
+										Requests: corev1.ResourceList{
+											corev1.ResourceCPU: resource.MustParse("20m"),
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		Pod: pod,
+	})
 	if patch == "" {
 		t.Fatalf("expected non-empty patch")
 	}
@@ -1205,20 +1252,27 @@ func TestBuildResourcePatch(t *testing.T) {
 	if _, exists := parsed["metadata"]; exists {
 		t.Fatalf("resource patch should not include metadata")
 	}
+	if _, exists := spec["initContainers"]; exists {
+		t.Fatalf("resource patch should not include initContainers")
+	}
+	cpuReq := pod.Spec.Containers[0].Resources.Requests[corev1.ResourceCPU]
+	if cpuReq.Cmp(resource.MustParse("250m")) != 0 {
+		t.Fatalf("generating patch mutated pod resources: got %s", cpuReq.String())
+	}
 }
 
-func TestDefaultGenerateResizeSubresourceBody_NilTemplateAndNoChange(t *testing.T) {
-	if got := DefaultGenerateResizeSubresourceBody(InPlaceUpdateOptions{
+func TestDefaultGenerateResizePatch_NilTemplateAndNoChange(t *testing.T) {
+	if got := DefaultGenerateResizePatch(InPlaceUpdateOptions{
 		Box: &agentsv1alpha1.Sandbox{},
 		Pod: &corev1.Pod{},
-	}); got != nil {
-		t.Fatalf("expected nil body when template is nil, got %+v", got)
+	}); got != "" {
+		t.Fatalf("expected empty patch when template is nil, got %s", got)
 	}
 
 	identical := corev1.ResourceRequirements{
 		Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m")},
 	}
-	body := DefaultGenerateResizeSubresourceBody(InPlaceUpdateOptions{
+	patch := DefaultGenerateResizePatch(InPlaceUpdateOptions{
 		Box: &agentsv1alpha1.Sandbox{
 			Spec: agentsv1alpha1.SandboxSpec{
 				EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
@@ -1242,8 +1296,8 @@ func TestDefaultGenerateResizeSubresourceBody_NilTemplateAndNoChange(t *testing.
 			},
 		},
 	})
-	if body != nil {
-		t.Fatalf("expected nil body when no resource changes, got %+v", body)
+	if patch != "" {
+		t.Fatalf("expected empty patch when no resource changes, got %s", patch)
 	}
 }
 
@@ -1650,13 +1704,12 @@ func TestResourceOnlyUpdatePayloads(t *testing.T) {
 		t.Fatalf("resource-only patch should not contain spec, got: %s", patchBody)
 	}
 
-	resizeBody := DefaultGenerateResizeSubresourceBody(opts)
-	if resizeBody == nil {
-		t.Fatalf("expected resize subresource body")
+	resizePatch := DefaultGenerateResizePatch(opts)
+	if resizePatch == "" {
+		t.Fatalf("expected resize patch")
 	}
-	got := resizeBody.Spec.Containers[0].Resources.Requests[corev1.ResourceCPU]
-	if got.MilliValue() != 1000 {
-		t.Fatalf("expected cpu request=1000m, got=%dm", got.MilliValue())
+	if !strings.Contains(resizePatch, `"spec"`) {
+		t.Fatalf("resize patch should contain spec, got: %s", resizePatch)
 	}
 }
 
@@ -2262,19 +2315,16 @@ func TestComputeQoSClass(t *testing.T) {
 	}
 }
 
-func TestDefaultGenerateResizeSubresourceBody_MinimalFields(t *testing.T) {
+func TestBuildResizeContainers_MinimalFields(t *testing.T) {
 	tests := []struct {
 		name                   string
 		box                    *agentsv1alpha1.Sandbox
 		pod                    *corev1.Pod
-		expectNil              bool
 		expectContainerCount   int
-		expectInitCount        int
 		verifyContainerMinimal bool
-		verifyInitMinimal      bool
 	}{
 		{
-			name: "main containers have no Image field in resizeBody",
+			name: "main containers have no Image field",
 			box: &agentsv1alpha1.Sandbox{
 				Spec: agentsv1alpha1.SandboxSpec{
 					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
@@ -2312,13 +2362,11 @@ func TestDefaultGenerateResizeSubresourceBody_MinimalFields(t *testing.T) {
 					},
 				},
 			},
-			expectNil:              false,
 			expectContainerCount:   1,
-			expectInitCount:        0,
 			verifyContainerMinimal: true,
 		},
 		{
-			name: "initContainers only contain Name and Resources",
+			name: "initContainers are omitted",
 			box: &agentsv1alpha1.Sandbox{
 				Spec: agentsv1alpha1.SandboxSpec{
 					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
@@ -2380,10 +2428,7 @@ func TestDefaultGenerateResizeSubresourceBody_MinimalFields(t *testing.T) {
 					},
 				},
 			},
-			expectNil:            false,
 			expectContainerCount: 1,
-			expectInitCount:      2,
-			verifyInitMinimal:    true,
 		},
 		{
 			name: "multiple containers all minimal",
@@ -2436,37 +2481,23 @@ func TestDefaultGenerateResizeSubresourceBody_MinimalFields(t *testing.T) {
 					},
 				},
 			},
-			expectNil:              false,
 			expectContainerCount:   2,
-			expectInitCount:        0,
 			verifyContainerMinimal: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			body := DefaultGenerateResizeSubresourceBody(InPlaceUpdateOptions{
+			containers := buildResizeContainers(InPlaceUpdateOptions{
 				Box: tt.box,
 				Pod: tt.pod,
 			})
-			if tt.expectNil {
-				if body != nil {
-					t.Fatalf("expected nil body, got %+v", body)
-				}
-				return
-			}
-			if body == nil {
-				t.Fatalf("expected non-nil body")
-			}
-			if len(body.Spec.Containers) != tt.expectContainerCount {
-				t.Fatalf("expected %d containers, got %d", tt.expectContainerCount, len(body.Spec.Containers))
-			}
-			if len(body.Spec.InitContainers) != tt.expectInitCount {
-				t.Fatalf("expected %d initContainers, got %d", tt.expectInitCount, len(body.Spec.InitContainers))
+			if len(containers) != tt.expectContainerCount {
+				t.Fatalf("expected %d containers, got %d", tt.expectContainerCount, len(containers))
 			}
 
 			if tt.verifyContainerMinimal {
-				for i, c := range body.Spec.Containers {
+				for i, c := range containers {
 					if c.Image != "" {
 						t.Errorf("container[%d] %q should have empty Image, got %q", i, c.Name, c.Image)
 					}
@@ -2482,27 +2513,6 @@ func TestDefaultGenerateResizeSubresourceBody_MinimalFields(t *testing.T) {
 				}
 			}
 
-			if tt.verifyInitMinimal {
-				for i, c := range body.Spec.InitContainers {
-					if c.Image != "" {
-						t.Errorf("initContainer[%d] %q should have empty Image, got %q", i, c.Name, c.Image)
-					}
-					if c.Name == "" {
-						t.Errorf("initContainer[%d] should have a Name", i)
-					}
-					if len(c.VolumeMounts) > 0 {
-						t.Errorf("initContainer[%d] %q should have no VolumeMounts", i, c.Name)
-					}
-					if len(c.Command) > 0 {
-						t.Errorf("initContainer[%d] %q should have no Command", i, c.Name)
-					}
-					// Verify that Resources are preserved
-					podInit := tt.pod.Spec.InitContainers[i]
-					if c.Resources.Requests == nil && podInit.Resources.Requests != nil {
-						t.Errorf("initContainer[%d] %q lost its Resources.Requests", i, c.Name)
-					}
-				}
-			}
 		})
 	}
 }
@@ -2548,32 +2558,14 @@ func TestInPlaceUpdateControl_Update_ResizeBeforePatch(t *testing.T) {
 	var callOrder []string
 	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
 	wrapped := interceptor.NewClient(base, interceptor.Funcs{
-		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object,
-			opts ...client.SubResourceUpdateOption) error {
+		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object,
+			patch client.Patch, opts ...client.SubResourcePatchOption) error {
 			if sub == "resize" {
 				callOrder = append(callOrder, "resize")
 				// Simulate a successful resize by applying resources
-				body := obj
-				updateOpts := &client.SubResourceUpdateOptions{}
-				updateOpts.ApplyOptions(opts)
-				if updateOpts.SubResourceBody != nil {
-					body = updateOpts.SubResourceBody
-				}
-				rp := body.(*corev1.Pod)
-				existing := &corev1.Pod{}
-				if err := c.Get(ctx, client.ObjectKeyFromObject(obj), existing); err != nil {
-					return err
-				}
-				for i, container := range existing.Spec.Containers {
-					for _, rc := range rp.Spec.Containers {
-						if rc.Name == container.Name {
-							existing.Spec.Containers[i].Resources = rc.Resources
-						}
-					}
-				}
-				return c.Update(ctx, existing)
+				return applyResizeSubresourcePatch(ctx, c, obj, patch)
 			}
-			return c.SubResource(sub).Update(ctx, obj, opts...)
+			return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
 		},
 		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch,
 			opts ...client.PatchOption) error {
@@ -2892,7 +2884,7 @@ func TestResourcesEqual(t *testing.T) {
 	}
 }
 
-func TestDefaultGenerateResizeSubresourceBody_NoResizeWhenExtraOrUnitDiff(t *testing.T) {
+func TestDefaultGenerateResizePatch_NoResizeWhenExtraOrUnitDiff(t *testing.T) {
 	tests := []struct {
 		name string
 		box  *agentsv1alpha1.Sandbox
@@ -2998,12 +2990,12 @@ func TestDefaultGenerateResizeSubresourceBody_NoResizeWhenExtraOrUnitDiff(t *tes
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := DefaultGenerateResizeSubresourceBody(InPlaceUpdateOptions{
+			result := DefaultGenerateResizePatch(InPlaceUpdateOptions{
 				Box: tt.box,
 				Pod: tt.pod,
 			})
-			if result != nil {
-				t.Errorf("expected nil (no resize needed), but got a resize body")
+			if result != "" {
+				t.Errorf("expected empty patch (no resize needed), got %s", result)
 			}
 		})
 	}
@@ -3075,7 +3067,7 @@ func TestMergeResourceList(t *testing.T) {
 	}
 }
 
-func TestDefaultGenerateResizeSubresourceBody_PreservesSystemInjectedFields(t *testing.T) {
+func TestBuildResizeContainers_PreservesSystemInjectedFields(t *testing.T) {
 	tests := []struct {
 		name string
 		box  *agentsv1alpha1.Sandbox
@@ -3137,17 +3129,14 @@ func TestDefaultGenerateResizeSubresourceBody_PreservesSystemInjectedFields(t *t
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := DefaultGenerateResizeSubresourceBody(InPlaceUpdateOptions{
+			result := buildResizeContainers(InPlaceUpdateOptions{
 				Box: tt.box,
 				Pod: tt.pod,
 			})
-			if result == nil {
-				t.Fatalf("expected non-nil resize body, but got nil")
+			if len(result) == 0 {
+				t.Fatalf("expected at least one container")
 			}
-			if len(result.Spec.Containers) == 0 {
-				t.Fatalf("expected at least one container in resize body")
-			}
-			c := result.Spec.Containers[0]
+			c := result[0]
 
 			gotEphemeral, ok := c.Resources.Requests[corev1.ResourceEphemeralStorage]
 			if !ok {

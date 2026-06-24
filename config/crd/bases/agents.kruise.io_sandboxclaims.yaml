@@ -131,7 +131,7 @@ spec:
                           x-kubernetes-int-or-string: true
                         description: |-
                           Limits specifies the target resource limits for each container.
-                          Only CPU is supported for now. The container's original limit must already be set;
+                          CPU and memory are supported. The container's original limit must already be set;
                           otherwise the value is ignored.
                           The new value must not change the Pod's QoS class; otherwise the claim will be rejected.
                         type: object
@@ -144,7 +144,7 @@ spec:
                           x-kubernetes-int-or-string: true
                         description: |-
                           Requests specifies the target resource requests for each container.
-                          Only CPU is supported for now. The container's original request must already be set;
+                          CPU and memory are supported. The container's original request must already be set;
                           otherwise the value is ignored.
                           The new value must not change the Pod's QoS class; otherwise the claim will be rejected.
                         type: object

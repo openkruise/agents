@@ -77,9 +77,12 @@ func ValidateAndInitClaimOptions(opts infra.ClaimSandboxOptions) (infra.ClaimSan
 			return infra.ClaimSandboxOptions{}, fmt.Errorf("resources must specify at least one of requests or limits")
 		}
 		for _, rl := range []corev1.ResourceList{res.Requests, res.Limits} {
-			if cpu, ok := rl[corev1.ResourceCPU]; ok {
-				if cpu.IsZero() || cpu.Cmp(resource.Quantity{}) < 0 {
-					return infra.ClaimSandboxOptions{}, fmt.Errorf("target cpu must be a positive value")
+			for resourceName, quantity := range rl {
+				if !supportedResizeResources[resourceName] {
+					continue
+				}
+				if quantity.IsZero() || quantity.Cmp(resource.Quantity{}) < 0 {
+					return infra.ClaimSandboxOptions{}, fmt.Errorf("target %s must be a positive value", resourceName)
 				}
 			}
 		}
@@ -695,7 +698,8 @@ func buildResourceResizedPod(pod *corev1.Pod, requests, limits corev1.ResourceLi
 
 // supportedResizeResources defines which resources are allowed for in-place resize.
 var supportedResizeResources = map[corev1.ResourceName]bool{
-	corev1.ResourceCPU: true,
+	corev1.ResourceCPU:    true,
+	corev1.ResourceMemory: true,
 }
 
 // setContainerResources updates the container's requests and limits for resources

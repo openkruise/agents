@@ -133,8 +133,8 @@ func (c *InPlaceUpdateControl) generatePatchBody(opts InPlaceUpdateOptions) stri
 	return c.generatePatchBodyFunc(opts)
 }
 
-func (c *InPlaceUpdateControl) generateResizeSubresourceBody(opts InPlaceUpdateOptions) *corev1.Pod {
-	return DefaultGenerateResizeSubresourceBody(opts)
+func (c *InPlaceUpdateControl) generateResizePatch(opts InPlaceUpdateOptions) string {
+	return DefaultGenerateResizePatch(opts)
 }
 
 func DefaultGeneratePatchBodyFunc(opts InPlaceUpdateOptions) string {
@@ -234,15 +234,21 @@ func buildContainerResourcesMap(containers []corev1.Container) map[string]corev1
 	return result
 }
 
-// DefaultGenerateResizeSubresourceBody generates the Pod body for resize subResource update.
-// It compares the current pod's container resources with the sandbox's container resources,
-// and returns a minimal Pod object containing only the fields required by the resize API:
-//   - metadata.name, metadata.namespace, metadata.resourceVersion
-//   - spec.containers[].resources
+// DefaultGenerateResizePatch generates the strategic merge patch for in-place resize.
+// It compares the current pod's container resources with the sandbox's container resources
+// and returns a patch containing only spec.containers[].resources for changed regular containers.
 //
-// Only the main containers are processed; init containers are not resized.
-// Returns nil if no resource changes are detected.
-func DefaultGenerateResizeSubresourceBody(opts InPlaceUpdateOptions) *corev1.Pod {
+// Only regular containers are processed; init containers are not resized.
+// Returns an empty string if no resource changes are detected.
+func DefaultGenerateResizePatch(opts InPlaceUpdateOptions) string {
+	resizeContainers := buildResizeContainers(opts)
+	if len(resizeContainers) == 0 {
+		return ""
+	}
+	return buildResourcePatch(resizeContainers)
+}
+
+func buildResizeContainers(opts InPlaceUpdateOptions) []corev1.Container {
 	box, pod := opts.Box, opts.Pod
 	if box.Spec.Template == nil {
 		return nil
@@ -250,33 +256,9 @@ func DefaultGenerateResizeSubresourceBody(opts InPlaceUpdateOptions) *corev1.Pod
 
 	originContainers := buildContainerResourcesMap(box.Spec.Template.Spec.Containers)
 
-	resizeBody := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:            pod.Name,
-			Namespace:       pod.Namespace,
-			ResourceVersion: pod.ResourceVersion,
-		},
-		Spec: corev1.PodSpec{
-			Containers:     make([]corev1.Container, len(pod.Spec.Containers)),
-			InitContainers: make([]corev1.Container, len(pod.Spec.InitContainers)),
-		},
-	}
+	resizeContainers := make([]corev1.Container, 0, len(pod.Spec.Containers))
 	for i := range pod.Spec.Containers {
-		resizeBody.Spec.Containers[i] = corev1.Container{
-			Name:      pod.Spec.Containers[i].Name,
-			Resources: pod.Spec.Containers[i].Resources,
-		}
-	}
-	for i := range pod.Spec.InitContainers {
-		resizeBody.Spec.InitContainers[i] = corev1.Container{
-			Name:      pod.Spec.InitContainers[i].Name,
-			Resources: pod.Spec.InitContainers[i].Resources,
-		}
-	}
-
-	changed := false
-	for i := range resizeBody.Spec.Containers {
-		container := &resizeBody.Spec.Containers[i]
+		container := &pod.Spec.Containers[i]
 		origin, ok := originContainers[container.Name]
 		if !ok {
 			continue
@@ -286,27 +268,32 @@ func DefaultGenerateResizeSubresourceBody(opts InPlaceUpdateOptions) *corev1.Pod
 		}
 		// Merge origin resources into container, preserving system-injected fields
 		// (e.g., ephemeral-storage) that are not specified in the sandbox spec.
-		mergeResourceList(container.Resources.Limits, origin.Resources.Limits)
-		mergeResourceList(container.Resources.Requests, origin.Resources.Requests)
-		changed = true
+		resources := *container.Resources.DeepCopy()
+		if resources.Limits == nil && len(origin.Resources.Limits) > 0 {
+			resources.Limits = corev1.ResourceList{}
+		}
+		if resources.Requests == nil && len(origin.Resources.Requests) > 0 {
+			resources.Requests = corev1.ResourceList{}
+		}
+		mergeResourceList(resources.Limits, origin.Resources.Limits)
+		mergeResourceList(resources.Requests, origin.Resources.Requests)
+		resizeContainers = append(resizeContainers, corev1.Container{
+			Name:      container.Name,
+			Resources: resources,
+		})
 	}
-	if !changed {
-		return nil
-	}
-	return resizeBody
+	return resizeContainers
 }
 
-// buildResourcePatch converts a resize body (as produced by generateResizeSubresourceBody)
-// into a strategic merge patch that can be applied directly to the pod object. This is
-// the fallback path for K8s 1.27-1.32, where InPlacePodVerticalScaling is supported but
-// the pods/resize subresource does not yet exist.
-func buildResourcePatch(resizeBody *corev1.Pod) string {
+// buildResourcePatch converts resize containers into a strategic merge patch that can be
+// applied to either the pods/resize subresource or directly to the pod object.
+func buildResourcePatch(resizeContainers []corev1.Container) string {
 	type containerPatch struct {
 		Name      string                      `json:"name"`
 		Resources corev1.ResourceRequirements `json:"resources"`
 	}
-	var containers []containerPatch
-	for _, c := range resizeBody.Spec.Containers {
+	containers := make([]containerPatch, 0, len(resizeContainers))
+	for _, c := range resizeContainers {
 		containers = append(containers, containerPatch{
 			Name:      c.Name,
 			Resources: c.Resources,
@@ -432,7 +419,7 @@ func (c *InPlaceUpdateControl) Update(ctx context.Context, opts InPlaceUpdateOpt
 
 	current := pod.DeepCopy()
 	// In-place update involves two sub-operations:
-	//   1. Resource resize  — adjust CPU via the pods/resize subresource.
+	//   1. Resource resize  — adjust compute resources via the pods/resize subresource.
 	//   2. Metadata/image patch — update container images and the pod-template-hash annotation.
 	//
 	// The pod-template-hash annotation is the authoritative signal that the upgrade has completed.
@@ -443,18 +430,16 @@ func (c *InPlaceUpdateControl) Update(ctx context.Context, opts InPlaceUpdateOpt
 	// do we apply the metadata/image patch to finalize the upgrade.
 
 	// Step 1: perform resize (resource adjustment)
-	resizeBody := c.generateResizeSubresourceBody(InPlaceUpdateOptions{
+	resizePatch := c.generateResizePatch(InPlaceUpdateOptions{
 		Box:      box,
 		Revision: revision,
-		// Use `current` (the post-patch pod) instead of the original `pod` so that
-		// generateResizeSubresourceBody picks up the latest ResourceVersion set by
-		// the patch response, avoiding "the object has been modified" conflicts on
-		// the subsequent resize sub-resource call.
+		// Use `current` instead of the original `pod` so the patch is generated
+		// from the latest resource state during conflict retries.
 		Pod: current,
 	})
-	if resizeBody != nil {
+	if resizePatch != "" {
 		if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-			err := c.resizePod(ctx, logger, current, resizeBody)
+			err := c.resizePod(ctx, logger, current, resizePatch)
 			if !apierrors.IsConflict(err) {
 				return err
 			}
@@ -464,12 +449,12 @@ func (c *InPlaceUpdateControl) Update(ctx context.Context, opts InPlaceUpdateOpt
 				return getErr
 			}
 			current = latestPod
-			resizeBody = c.generateResizeSubresourceBody(InPlaceUpdateOptions{
+			resizePatch = c.generateResizePatch(InPlaceUpdateOptions{
 				Box:      box,
 				Revision: revision,
 				Pod:      current,
 			})
-			if resizeBody == nil {
+			if resizePatch == "" {
 				return nil
 			}
 
@@ -489,26 +474,26 @@ func (c *InPlaceUpdateControl) Update(ctx context.Context, opts InPlaceUpdateOpt
 		}
 	}
 
-	if patchBody == "" && resizeBody == nil {
+	if patchBody == "" && resizePatch == "" {
 		return false, nil
 	}
-	logger.Info("inplace update pod success", "revision", revision, "patchBody", patchBody, "hasResizeBody", resizeBody != nil)
+	logger.Info("inplace update pod success", "revision", revision, "patchBody", patchBody, "hasResizePatch", resizePatch != "")
 	return true, nil
 }
 
-// resizePod applies a resource resize to the pod. It uses the pods/resize subresource
+// resizePod applies a resource resize to the pod. It patches the pods/resize subresource
 // on K8s >= 1.33 (see https://kubernetes.io/blog/2025/05/16/kubernetes-v1-33-in-place-pod-resize-beta/),
 // and falls back to a direct strategic merge patch on older versions (K8s 1.27-1.32).
 // The detection result is cached so the subresource is only probed once per controller lifetime.
-func (c *InPlaceUpdateControl) resizePod(ctx context.Context, logger klog.Logger, pod *corev1.Pod, resizeBody *corev1.Pod) error {
+func (c *InPlaceUpdateControl) resizePod(ctx context.Context, logger klog.Logger, pod *corev1.Pod, resourcePatch string) error {
 	if !c.useDirectResourcePatch.Load() {
-		err := c.SubResource("resize").Update(ctx, pod, client.WithSubResourceBody(resizeBody))
+		err := c.SubResource("resize").Patch(ctx, pod, client.RawPatch(types.StrategicMergePatchType, []byte(resourcePatch)))
 		if err == nil {
-			logger.Info("inplace update pod resize succeeded via resize subresource (K8s >= 1.33)")
+			logger.Info("inplace update pod resize succeeded via resize subresource patch (K8s >= 1.33)")
 			return nil
 		}
 		if !apierrors.IsNotFound(err) {
-			logger.Error(err, "inplace update pod resize failed via resize subresource")
+			logger.Error(err, "inplace update pod resize failed via resize subresource patch")
 			return err
 		}
 		// The pods/resize subresource was introduced in K8s 1.33. On K8s 1.27-1.32,
@@ -516,12 +501,11 @@ func (c *InPlaceUpdateControl) resizePod(ctx context.Context, logger klog.Logger
 		logger.Info("resize subresource not found, switching to direct resource patch (K8s < 1.33)")
 		c.useDirectResourcePatch.Store(true)
 	}
-	return c.patchPodResources(ctx, logger, pod, resizeBody)
+	return c.patchPodResources(ctx, logger, pod, resourcePatch)
 }
 
 // patchPodResources applies a strategic merge patch to update pod resources directly.
-func (c *InPlaceUpdateControl) patchPodResources(ctx context.Context, logger klog.Logger, pod *corev1.Pod, resizeBody *corev1.Pod) error {
-	resourcePatch := buildResourcePatch(resizeBody)
+func (c *InPlaceUpdateControl) patchPodResources(ctx context.Context, logger klog.Logger, pod *corev1.Pod, resourcePatch string) error {
 	if err := c.Patch(ctx, pod, client.RawPatch(types.StrategicMergePatchType, []byte(resourcePatch))); err != nil {
 		if apierrors.IsConflict(err) {
 			logger.Error(err, "direct resource patch conflicted")
