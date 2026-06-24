@@ -21,11 +21,13 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -198,6 +200,100 @@ func TestCacheSandboxWaitReconciler_Reconcile(t *testing.T) {
 					// Entry was not found; for the nil-waitHooks case this is fine
 				}
 			}
+		})
+	}
+}
+
+type waitReconcilerRecorderSink struct {
+	mu       sync.Mutex
+	messages []string
+}
+
+func (r *waitReconcilerRecorderSink) Init(logr.RuntimeInfo)        {}
+func (r *waitReconcilerRecorderSink) Enabled(int) bool             { return true }
+func (r *waitReconcilerRecorderSink) Error(error, string, ...any)  {}
+func (r *waitReconcilerRecorderSink) WithName(string) logr.LogSink { return r }
+func (r *waitReconcilerRecorderSink) WithValues(...any) logr.LogSink {
+	return r
+}
+func (r *waitReconcilerRecorderSink) Info(_ int, msg string, _ ...any) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.messages = append(r.messages, msg)
+}
+
+func (r *waitReconcilerRecorderSink) count(message string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var count int
+	for _, msg := range r.messages {
+		if msg == message {
+			count++
+		}
+	}
+	return count
+}
+
+func TestCacheSandboxWaitReconciler_LogsObjectChangedOnlyWithWaitHook(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, agentsv1alpha1.AddToScheme(scheme))
+
+	nsName := types.NamespacedName{Namespace: "default", Name: "test-sandbox"}
+	waitHookKey := "*v1alpha1.Sandbox/default/test-sandbox"
+
+	tests := []struct {
+		name         string
+		setupHook    bool
+		expectedLogs int
+	}{
+		{
+			name:         "does not log object changed without wait hook",
+			setupHook:    false,
+			expectedLogs: 0,
+		},
+		{
+			name:         "logs object changed when wait hook exists",
+			setupHook:    true,
+			expectedLogs: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sink := &waitReconcilerRecorderSink{}
+			klog.SetLogger(logr.New(sink))
+			t.Cleanup(klog.ClearLogger)
+
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(&agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{Name: "test-sandbox", Namespace: "default"},
+				}).
+				Build()
+
+			hooks := &sync.Map{}
+			if tt.setupHook {
+				hooks.Store(waitHookKey, cacheutils.NewWaitEntry[*agentsv1alpha1.Sandbox](
+					context.Background(),
+					cacheutils.WaitActionWaitReady,
+					func(*agentsv1alpha1.Sandbox) (bool, error) {
+						return false, nil
+					},
+				))
+			}
+
+			r := &CacheSandboxWaitReconciler{
+				WaitReconciler: WaitReconciler[*agentsv1alpha1.Sandbox]{
+					Client:    fakeClient,
+					Scheme:    scheme,
+					waitHooks: hooks,
+					NewObject: NewSandbox,
+				},
+			}
+
+			_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: nsName})
+			require.NoError(t, err)
+			assert.Equal(t, tt.expectedLogs, sink.count("object with wait hook changed"))
 		})
 	}
 }

@@ -117,16 +117,17 @@ func (r *WaitReconciler[T]) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	expectations.ResourceVersionExpectationObserve(obj)
-	log.V(utils.DebugLogLevel).Info("object with wait hook changed", "resourceVersion", obj.GetResourceVersion())
-	r.checkWaitHooks(waitKey, obj)
+	r.checkWaitHooks(ctx, waitKey, obj)
 	return ctrl.Result{}, nil
 }
 
-func (r *WaitReconciler[T]) checkWaitHooks(key string, obj T) {
+func (r *WaitReconciler[T]) checkWaitHooks(ctx context.Context, key string, obj T) {
 	entry, ok := r.loadWaitHook(key)
 	if !ok {
 		return
 	}
+	log := klog.FromContext(ctx)
+	log.V(utils.DebugLogLevel).Info("object with wait hook changed", "resourceVersion", obj.GetResourceVersion())
 	satisfied, err := entry.Check(obj)
 	if satisfied || err != nil {
 		entry.Close()
