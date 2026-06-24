@@ -282,7 +282,7 @@ func TestSandbox_SaveTimeoutWithPolicyExtraAnnotations(t *testing.T) {
 			var sandbox infra.Sandbox
 			require.Eventually(t, func() bool {
 				var err error
-				sandbox, err = infraInstance.GetClaimedSandbox(t.Context(), infra.GetClaimedSandboxOptions{
+				sandbox, err = infraInstance.GetSandbox(t.Context(), infra.GetSandboxOptions{
 					SandboxID: utils.GetSandboxID(sbx),
 					Namespace: sbx.Namespace,
 				})
