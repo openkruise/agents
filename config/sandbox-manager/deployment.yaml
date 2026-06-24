@@ -77,8 +77,8 @@ spec:
               cpu: "1"
               memory: "2Gi"
             requests:
-              cpu: "1"
-              memory: "2Gi"
+              cpu: "500m"
+              memory: "1Gi"
         - name: envoy-proxy
           image: envoyproxy/envoy:v1.33-latest
           imagePullPolicy: IfNotPresent
@@ -116,8 +116,8 @@ spec:
               cpu: "1"
               memory: "2Gi"
             requests:
-              cpu: "1"
-              memory: "2Gi"
+              cpu: "500m"
+              memory: "1Gi"
       volumes:
         - name: envoy-config
           configMap:

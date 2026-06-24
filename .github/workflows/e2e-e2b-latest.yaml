@@ -131,6 +131,7 @@ jobs:
             {
               echo ""
               echo "# Disable E2B auth (appended by e2e-e2b-latest auth-disabled matrix)"
+              echo "# Positional path targets --e2b-enable-auth in config/sandbox-manager/deployment.yaml."
               echo "- op: replace"
               echo "  path: /spec/template/spec/containers/0/args/8"
               echo "  value: --e2b-enable-auth=false"

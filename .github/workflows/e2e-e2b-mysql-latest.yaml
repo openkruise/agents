@@ -143,30 +143,6 @@ jobs:
             echo "- op: replace"
             echo "  path: /spec/replicas"
             echo "  value: 3"
-            echo "- op: replace"
-            echo "  path: /spec/template/spec/containers/0/resources/limits/cpu"
-            echo '  value: "500m"'
-            echo "- op: replace"
-            echo "  path: /spec/template/spec/containers/0/resources/limits/memory"
-            echo '  value: "1Gi"'
-            echo "- op: replace"
-            echo "  path: /spec/template/spec/containers/0/resources/requests/cpu"
-            echo '  value: "500m"'
-            echo "- op: replace"
-            echo "  path: /spec/template/spec/containers/0/resources/requests/memory"
-            echo '  value: "1Gi"'
-            echo "- op: replace"
-            echo "  path: /spec/template/spec/containers/1/resources/limits/cpu"
-            echo '  value: "500m"'
-            echo "- op: replace"
-            echo "  path: /spec/template/spec/containers/1/resources/limits/memory"
-            echo '  value: "1Gi"'
-            echo "- op: replace"
-            echo "  path: /spec/template/spec/containers/1/resources/requests/cpu"
-            echo '  value: "500m"'
-            echo "- op: replace"
-            echo "  path: /spec/template/spec/containers/1/resources/requests/memory"
-            echo '  value: "1Gi"'
             echo "- op: add"
             echo "  path: /spec/template/spec/containers/0/args/-"
             echo "  value: --e2b-key-storage=mysql"

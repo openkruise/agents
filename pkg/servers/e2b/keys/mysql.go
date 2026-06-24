@@ -212,7 +212,19 @@ func (k *mysqlKeyStorage) repairAdminKeyAfterDuplicate(ctx context.Context, key 
 		return fmt.Errorf("lookup admin key after duplicate insert: %w", err)
 	}
 
+	if adminKeyEqual(existing, key) {
+		return nil
+	}
+
 	return k.updateAdminKey(ctx, key)
+}
+
+func adminKeyEqual(existing, expected TeamAPIKeyEntity) bool {
+	return existing.UID == expected.UID &&
+		existing.Name == expected.Name &&
+		existing.KeyHash == expected.KeyHash &&
+		existing.TeamID == expected.TeamID &&
+		!existing.DeletedAt.Valid
 }
 
 func (k *mysqlKeyStorage) updateAdminKey(ctx context.Context, key TeamAPIKeyEntity) error {
