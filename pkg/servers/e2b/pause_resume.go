@@ -130,7 +130,7 @@ func reservePausedForAnnotations(value *string) map[string]string {
 // buildPauseOptions builds pause options.
 // Retention is resolved with priority: request header > sandbox annotation > default.
 func buildPauseOptions(ctx context.Context, sbx infra.Sandbox, now time.Time, headerRetention *time.Duration, headerReservePausedFor *string) infra.PauseOptions {
-	retention := timeout.DefaultReservePausedSandboxFor
+	var retention time.Duration
 	reservePausedFor := headerReservePausedFor
 	if headerRetention != nil {
 		retention = *headerRetention
