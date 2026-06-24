@@ -278,6 +278,9 @@ func buildCloneError(err error) error {
 	if errors.As(err, &mErr) {
 		return mErr
 	}
+	if apierrors.IsAlreadyExists(err) {
+		return err
+	}
 	return managererrors.NewError(managererrors.ErrorInternal, "%v", err)
 }
 
