@@ -332,6 +332,11 @@ spec:
 `agent-runtime` 和 `csi`。前文的 SandboxSet 使用了旧式 runtime init container，因此添加上述配置前，
 需要先将其替换为 runtime 注入方式。请勿在同一个 Sandbox 中同时使用两种 runtime 配置。
 
+`agent-runtime` 注入所使用的 runtime 镜像还必须在 `/mnt/envd/sandbox-runtime-storage` 位置包含存储辅助二进制。
+动态 CSI 挂载会在 Sandbox 内通过这个命令执行。如果 `SandboxClaim` 失败并报出
+`sandbox-runtime-storage not found`，请重新构建或替换 runtime 镜像，确保它包含通过 `make build-storage-cli`
+构建的二进制，并将其挂载或拷贝到 `/mnt/envd/sandbox-runtime-storage`。
+
 假设名为 `openclaw-shared-nfs` 的 CSI PV 基础路径为 `/exports/openclaw`，以下 Claim 会将
 `/exports/openclaw/users/alice` 挂载到 OpenClaw 的工作目录：
 

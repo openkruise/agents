@@ -340,6 +340,11 @@ The cluster administrator must configure the `agent-runtime` and `csi` entries i
 runtime init container, so replace that setup with runtime injection before adding these entries. Do not run both
 runtime setups in the same Sandbox.
 
+The runtime image used by the `agent-runtime` injection must also contain the storage helper binary at
+`/mnt/envd/sandbox-runtime-storage`. Dynamic CSI mounts are executed through this command inside the Sandbox. If a
+`SandboxClaim` fails with an error such as `sandbox-runtime-storage not found`, rebuild or replace the runtime image so
+that it includes the binary built by `make build-storage-cli`, and mount/copy it to `/mnt/envd/sandbox-runtime-storage`.
+
 Assume a CSI-backed PV named `openclaw-shared-nfs` has a base path of `/exports/openclaw`. The following claim mounts
 `/exports/openclaw/users/alice` at OpenClaw's workspace path:
 
