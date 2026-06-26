@@ -1191,6 +1191,49 @@ func TestResetForPool(t *testing.T) {
 	}
 }
 
+func TestResetForPool_PatchError(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	box := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-sandbox",
+			Namespace: "default",
+			Labels: map[string]string{
+				agentsv1alpha1.LabelSandboxPool: "test-pool",
+			},
+			Annotations: map[string]string{
+				agentsv1alpha1.AnnotationReuse: "true",
+			},
+		},
+	}
+	sbs := &agentsv1alpha1.SandboxSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-pool",
+			Namespace: "default",
+			UID:       types.UID("test-uid"),
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(box, sbs).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(_ context.Context, _ client.WithWatch, _ client.Object, _ client.Patch, _ ...client.PatchOption) error {
+				return fmt.Errorf("patch denied")
+			},
+		}).Build()
+
+	control := NewSandboxReuseControl(fakeClient, record.NewFakeRecorder(10), SandboxReuseConfig{})
+
+	err := control.resetMetadataForPool(context.TODO(), box, sbs)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to reset sandbox for pool")
+	assert.Contains(t, err.Error(), "patch denied")
+}
+
 func TestNoopSandboxReuser(t *testing.T) {
 	reuser := &noopSandboxReuser{}
 
@@ -1854,4 +1897,45 @@ func TestReuseTimeoutError(t *testing.T) {
 	e := &reuseTimeoutError{timeout: 30 * time.Second}
 	assert.Contains(t, e.Error(), "30s")
 	assert.Equal(t, agentsv1alpha1.SandboxReusingReasonTimeout, e.Reason())
+}
+
+func TestReusePollingInterval(t *testing.T) {
+	control := &SandboxReuseControl{}
+
+	tests := []struct {
+		name     string
+		remaining time.Duration
+		expected time.Duration
+	}{
+		{
+			name:     "remaining greater than default interval returns default",
+			remaining: 60 * time.Second,
+			expected: defaultReusePollingInterval,
+		},
+		{
+			name:     "remaining less than default interval returns remaining",
+			remaining: 2 * time.Second,
+			expected: 2 * time.Second,
+		},
+		{
+			name:     "remaining zero returns default (no timeout configured)",
+			remaining: 0,
+			expected: defaultReusePollingInterval,
+		},
+		{
+			name:     "remaining negative returns default (no timeout configured)",
+			remaining: -1 * time.Second,
+			expected: defaultReusePollingInterval,
+		},
+		{
+			name:     "remaining exactly default interval returns default",
+			remaining: defaultReusePollingInterval,
+			expected: defaultReusePollingInterval,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, control.reusePollingInterval(tt.remaining))
+		})
+	}
 }
