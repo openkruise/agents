@@ -712,6 +712,15 @@ def test_sandbox_with_labels_and_command(sandbox_context):
     ))
     print(f"sandbox-id: {sbx.sandbox_id}")
 
+    # Run a shell command immediately after create returns to confirm the
+    # sandbox is operational before any further API calls.
+    result = sbx.commands.run("echo 'hello from labeled sandbox'")
+    assert not result.error, f"command failed: {result.error}"
+    assert "hello from labeled sandbox" in result.stdout
+
+    # Also exercise run_code to confirm the code interpreter is functional.
+    run_code_sandbox(sbx, "print('labels work')")
+
     # Verify the labels are reflected back in the sandbox metadata.
     # The label: prefix is stripped before the key is stored as a K8s label,
     # and labels are returned as plain metadata (without the label: prefix).
@@ -726,11 +735,3 @@ def test_sandbox_with_labels_and_command(sandbox_context):
     # The label: prefixed keys must not leak into metadata.
     assert "label:app" not in info.metadata
     assert "label:env" not in info.metadata
-
-    # Run a shell command inside the sandbox to confirm it is operational.
-    result = sbx.commands.run("echo 'hello from labeled sandbox'")
-    assert not result.error, f"command failed: {result.error}"
-    assert "hello from labeled sandbox" in result.stdout
-
-    # Also exercise run_code to confirm the code interpreter is functional.
-    run_code_sandbox(sbx, "print('labels work')")
