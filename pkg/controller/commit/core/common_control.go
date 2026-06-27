@@ -86,7 +86,11 @@ func (r *commonControl) EnsureCommitRunning(ctx context.Context, args *EnsureFun
 
 	// Generate Job spec — permanent errors (bad input, missing config) mark Failed.
 	g := &jobutil.JobGenerator{Commit: commit, Pod: pod}
-	g.DockerConfigSecretName = r.resolveRegistrySecretName(ctx, commit)
+	secretName, err := r.resolveRegistrySecretName(ctx, commit)
+	if err != nil {
+		return 0, err
+	}
+	g.DockerConfigSecretName = secretName
 	job, err := g.GenerateCommitJob()
 	if err != nil {
 		log.Error(err, "failed to generate commit job", "commit", klog.KObj(commit))
@@ -186,7 +190,9 @@ func (r *commonControl) EnsureCommitDeleted(ctx context.Context, args *EnsureFun
 
 // resolveRegistrySecretName resolves the registry auth secret from user-specified
 // spec.registryAuth.secrets. Returns the secret name, or empty string if none found.
-func (r *commonControl) resolveRegistrySecretName(ctx context.Context, commit *agentsv1alpha1.Commit) string {
+// A transient API error (anything other than NotFound) is returned so the caller
+// can retry rather than silently falling back to anonymous push.
+func (r *commonControl) resolveRegistrySecretName(ctx context.Context, commit *agentsv1alpha1.Commit) (string, error) {
 	log := log.FromContext(ctx)
 	ns := commit.Namespace
 
@@ -194,18 +200,21 @@ func (r *commonControl) resolveRegistrySecretName(ctx context.Context, commit *a
 		for _, name := range commit.Spec.RegistryAuth.Secrets {
 			secret := &corev1.Secret{}
 			if err := r.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, secret); err != nil {
-				log.V(4).Info("Failed to get registryAuth secret, trying next", "namespace", ns, "name", name, "err", err)
+				if !errors.IsNotFound(err) {
+					return "", fmt.Errorf("failed to get registry secret %s/%s: %w", ns, name, err)
+				}
+				log.V(4).Info("Registry secret not found, trying next", "namespace", ns, "name", name)
 				continue
 			}
 			if secret.Type == corev1.SecretTypeDockerConfigJson {
 				log.Info("Using registryAuth secret for registry auth", "namespace", ns, "name", name)
-				return name
+				return name, nil
 			}
 		}
 	}
 
 	log.Info("No registry secret found, commit will attempt anonymous push", "commit", klog.KObj(commit))
-	return ""
+	return "", nil
 }
 
 func (r *commonControl) listCRJobPods(ctx context.Context, commit *agentsv1alpha1.Commit) (*corev1.PodList, error) {
