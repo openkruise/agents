@@ -44,6 +44,17 @@ const (
 	EnvMemberlistBindPort = "MEMBERLIST_BIND_PORT"
 )
 
+// globalPeerManager is set when server.Start() creates the peerManager.
+// It allows other packages (e.g. wake) to access the peer manager for
+// SyncRouteWithPeers without creating a full Server instance.
+var globalPeerManager peers.Peers
+
+// GetPeerManager returns the peer manager for use by the wake package.
+// Returns nil if the server has not been started yet.
+func GetPeerManager() peers.Peers {
+	return globalPeerManager
+}
+
 // getMemberlistBindPort reads the memberlist bind port from environment variable
 // Returns the default port if not set or invalid
 func getMemberlistBindPort() int {
@@ -110,6 +121,7 @@ func (s *Server) Start(ctx context.Context) error {
 	labelSelector := os.Getenv(EnvLabelSelector)
 
 	s.peerManager = peers.NewMemberlistPeers(s.client, peers.NodePrefixSandboxGateway+nodeName, namespace, labelSelector)
+	globalPeerManager = s.peerManager
 
 	if err := s.peerManager.Start(ctx, s.memberlistBindPort); err != nil {
 		return err

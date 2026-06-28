@@ -48,6 +48,13 @@ type Config struct {
 	// EnableAuth enables access token authentication when set to true.
 	// When disabled (default), the gateway skips token validation for backward compatibility.
 	EnableAuth bool `json:"enable-auth,omitempty"`
+	// EnableWakeOnTraffic enables wake-on-traffic for paused sandboxes.
+	// When true, the gateway will attempt to resume a paused sandbox by
+	// patching Spec.Paused=false when traffic arrives.
+	EnableWakeOnTraffic bool `json:"enable-wake-on-traffic,omitempty"`
+	// WakeTimeoutSeconds is the max time (in seconds) to wait for a sandbox
+	// to resume before returning an error. Defaults to 60.
+	WakeTimeoutSeconds int `json:"wake-timeout-seconds,omitempty"`
 }
 
 // DefaultConfig returns default configuration
@@ -57,6 +64,7 @@ func DefaultConfig() *Config {
 		SandboxPortHeader: DefaultSandboxPortHeader,
 		HostHeaderName:    DefaultHostHeaderName,
 		DefaultPort:       DefaultSandboxPort,
+		WakeTimeoutSeconds: 60,
 	}
 }
 
@@ -98,6 +106,14 @@ func (c *Config) GetDefaultPort() int {
 	}
 	p, _ := strconv.Atoi(DefaultSandboxPort)
 	return p
+}
+
+// GetWakeTimeoutSeconds returns the wake timeout in seconds, defaulting to 60.
+func (c *Config) GetWakeTimeoutSeconds() int {
+	if c.WakeTimeoutSeconds > 0 {
+		return c.WakeTimeoutSeconds
+	}
+	return 60
 }
 
 // FilterConfig wraps Config and holds the adapter created from the config
@@ -184,6 +200,12 @@ func (p *ConfigParser) Merge(parent interface{}, child interface{}) interface{} 
 	}
 	if childCfg.EnableAuth {
 		merged.EnableAuth = childCfg.EnableAuth
+	}
+	if childCfg.EnableWakeOnTraffic {
+		merged.EnableWakeOnTraffic = childCfg.EnableWakeOnTraffic
+	}
+	if childCfg.WakeTimeoutSeconds > 0 {
+		merged.WakeTimeoutSeconds = childCfg.WakeTimeoutSeconds
 	}
 
 	return NewFilterConfig(merged)

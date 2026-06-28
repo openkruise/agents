@@ -18,13 +18,18 @@ package e2b
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	cacheutils "github.com/openkruise/agents/pkg/cache/utils"
@@ -144,6 +149,13 @@ func (sc *Controller) ResumeSandbox(r *http.Request) (web.ApiResponse[struct{}],
 	if apiErr := sc.updateConnectTimeout(ctx, sbx, effectiveTimeout, state, autoPause, currentEndAt); apiErr != nil {
 		return web.ApiResponse[struct{}]{}, apiErr
 	}
+
+	// Update wake-on-traffic annotations if autoResume is requested or if
+	// timeout changes while wake-on-traffic is already enabled.
+	if err := sc.updateWakeAnnotations(ctx, sbx, request.AutoResume, request.TimeoutSeconds); err != nil {
+		log.Error(err, "failed to update wake-on-traffic annotations")
+	}
+
 	return web.ApiResponse[struct{}]{
 		Code: http.StatusNoContent,
 	}, nil
@@ -233,6 +245,12 @@ func (sc *Controller) ConnectSandbox(r *http.Request) (web.ApiResponse[*models.S
 	}
 	log.Info("sandbox timeout updated")
 
+	// Update wake-on-traffic annotations if autoResume is requested or if
+	// timeout changes while wake-on-traffic is already enabled.
+	if err := sc.updateWakeAnnotations(ctx, sbx, request.AutoResume, request.TimeoutSeconds); err != nil {
+		log.Error(err, "failed to update wake-on-traffic annotations")
+	}
+
 	return web.ApiResponse[*models.Sandbox]{
 		Code: statusCode,
 		Body: sc.convertToE2BSandbox(sbx, utils.GetAccessToken(sbx)),
@@ -271,4 +289,43 @@ func (sc *Controller) updateConnectTimeout(ctx context.Context, sbx infra.Sandbo
 		log.Info("timeout updated", "requestedTimeoutSeconds", timeoutSeconds)
 	}
 	return nil
+}
+
+// updateWakeAnnotations patches the wake-on-traffic annotations on the sandbox
+// CR. When autoResume is true, it sets AnnotationWakeOnTraffic=true and (if
+// timeoutSeconds > 0) AnnotationWakeTimeoutSeconds. When autoResume is false
+// but timeoutSeconds is provided and wake-on-traffic is already enabled, it
+// only updates AnnotationWakeTimeoutSeconds.
+func (sc *Controller) updateWakeAnnotations(ctx context.Context, sbx infra.Sandbox, autoResume bool, timeoutSeconds int) error {
+	annotations := make(map[string]string)
+	existingAnnotations := sbx.GetAnnotations()
+	wakeEnabled := existingAnnotations[v1alpha1.AnnotationWakeOnTraffic] == v1alpha1.True
+
+	if autoResume {
+		annotations[v1alpha1.AnnotationWakeOnTraffic] = v1alpha1.True
+	}
+	if timeoutSeconds > 0 && (autoResume || wakeEnabled) {
+		annotations[v1alpha1.AnnotationWakeTimeoutSeconds] = strconv.Itoa(timeoutSeconds)
+	}
+
+	if len(annotations) == 0 {
+		return nil
+	}
+
+	patchData, err := json.Marshal(map[string]interface{}{
+		"metadata": map[string]interface{}{
+			"annotations": annotations,
+		},
+	})
+	if err != nil {
+		return err
+	}
+
+	patchObj := &v1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: sbx.GetNamespace(),
+			Name:      sbx.GetName(),
+		},
+	}
+	return sc.cache.GetClient().Patch(ctx, patchObj, client.RawPatch(types.MergePatchType, patchData))
 }
