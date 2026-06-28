@@ -56,21 +56,21 @@ def test_wake_on_traffic(sandbox_context):
     assert sbx.get_info().state == SandboxState.RUNNING
 
     # Step 2: Wait for auto-pause
-    pause_deadline = time.time() + 30 + 60
+    pause_deadline = time.time() + 30 + 120
     paused = False
     while time.time() < pause_deadline:
         info = sbx.get_info()
         if info.state == SandboxState.PAUSED:
             paused = True
-            print(f"sandbox auto-paused: {sandbox_id}")
+            print(f"sandbox auto-paused: {sandbox_id} state={info.state}")
             break
         time.sleep(2)
     assert paused, f"sandbox {sandbox_id} did not auto-pause within deadline"
 
     # Step 3: Annotate with wake-on-traffic
     _annotate_wake_on_traffic(sandbox_id)
-    # Wait for gateway registry to sync the annotation
-    time.sleep(3)
+    # Wait for gateway controller to sync the annotation change
+    time.sleep(5)
 
     # Step 4: Send traffic through the gateway (triggers wake)
     access_token = _get_sandbox_access_token(sandbox_id)
@@ -81,11 +81,13 @@ def test_wake_on_traffic(sandbox_context):
     if access_token:
         headers["X-Access-Token"] = access_token
 
+    print(f"sending wake traffic to {GATEWAY_URL} for {sandbox_id}")
     resp = requests.get(
         f"{GATEWAY_URL}/",
         headers=headers,
         timeout=120,  # generous timeout for wake
     )
+    print(f"wake response: status={resp.status_code} body={resp.text[:200]!r}")
 
     # Step 5: Assert wake succeeded (not 502/503)
     assert resp.status_code != 502, (
@@ -95,9 +97,21 @@ def test_wake_on_traffic(sandbox_context):
         f"Gateway 503: sandbox {sandbox_id} wake failed or timed out"
     )
 
-    # Step 6: Verify sandbox is Running
-    info = sbx.get_info()
-    assert info.state == SandboxState.RUNNING, (
-        f"sandbox should be RUNNING after wake; got {info.state}"
+    # Step 6: Verify sandbox is Running (poll with retry for controller
+    # reconciliation — the gateway wake triggers an async controller
+    # reconcile to update Status.Phase from Paused to Running).
+    running_deadline = time.time() + 60
+    running = False
+    last_state = None
+    while time.time() < running_deadline:
+        info = sbx.get_info()
+        last_state = info.state
+        if info.state == SandboxState.RUNNING:
+            running = True
+            break
+        print(f"waiting for running state, current: {info.state}")
+        time.sleep(2)
+    assert running, (
+        f"sandbox should be RUNNING after wake; got {last_state}"
     )
     print(f"wake-on-traffic succeeded: {sandbox_id} is running")

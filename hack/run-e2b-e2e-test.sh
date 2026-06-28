@@ -260,6 +260,7 @@ pytest_args=(-v -s -x --tb=short)
 if [ "$WITH_GATEWAY" != "true" ]; then
     pytest_args+=(--ignore="$TEST_DIR/test_gateway.py")
     pytest_args+=(--ignore="$TEST_DIR/test_gateway_auth.py")
+    pytest_args+=(--ignore="$TEST_DIR/test_wake_on_traffic.py")
 fi
 if [ "$AUTH_DISABLED" = "true" ]; then
     pytest_args+=(--ignore="$TEST_DIR/test_apikey.py")
