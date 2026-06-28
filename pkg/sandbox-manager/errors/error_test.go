@@ -29,3 +29,8 @@ func TestError(t *testing.T) {
 	assert.Equal(t, "Internal: foo", newError.Error())
 	assert.Equal(t, ErrorUnknown, GetErrCode(nil))
 }
+
+func TestGetErrCode_QuotaExceeded(t *testing.T) {
+	newError := NewError(ErrorQuotaExceeded, "quota exceeded")
+	assert.Equal(t, ErrorQuotaExceeded, GetErrCode(newError))
+}

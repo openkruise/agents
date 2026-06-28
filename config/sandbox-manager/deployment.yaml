@@ -39,6 +39,10 @@ spec:
             - --e2b-admin-key=some-api-key
             - --e2b-enable-auth=true
             - --e2b-max-timeout=2592000
+            # - --e2b-quota-redis-addr=redis.sandbox-system.svc:6379
+            # - --e2b-quota-redis-operation-timeout=50ms
+            # - --e2b-quota-anti-drift-interval=5m
+            # - --e2b-quota-anti-drift-grace=10m
           ports:
             - containerPort: 8080
               name: http-manager
@@ -72,6 +76,16 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
+            # - name: E2B_QUOTA_REDIS_USERNAME
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: e2b-quota-redis
+            #       key: username
+            # - name: E2B_QUOTA_REDIS_PASSWORD
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: e2b-quota-redis
+            #       key: password
           resources:
             limits:
               cpu: "1"

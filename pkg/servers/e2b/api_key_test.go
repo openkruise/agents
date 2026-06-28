@@ -17,11 +17,16 @@ limitations under the License.
 package e2b
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -30,10 +35,51 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
+	"github.com/openkruise/agents/pkg/sandbox-manager/quota"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
 )
+
+type retryCleanupQuotaManager struct {
+	calls       atomic.Int64
+	failures    int64
+	callCh      chan int64
+	sawDeadline atomic.Bool
+}
+
+func newRetryCleanupQuotaManager(failures int64) *retryCleanupQuotaManager {
+	return &retryCleanupQuotaManager{
+		failures: failures,
+		callCh:   make(chan int64, 8),
+	}
+}
+
+func (m *retryCleanupQuotaManager) Acquire(context.Context, quota.AcquireRequest) error {
+	return nil
+}
+
+func (m *retryCleanupQuotaManager) Release(context.Context, quota.ReleaseRequest) error {
+	return nil
+}
+
+func (m *retryCleanupQuotaManager) Cleanup(ctx context.Context, _ string) error {
+	if deadline, ok := ctx.Deadline(); ok {
+		m.sawDeadline.Store(true)
+		if remaining := time.Until(deadline); remaining > apiKeyQuotaCleanupTimeout+50*time.Millisecond {
+			return errors.New("cleanup deadline is too long")
+		}
+	}
+	call := m.calls.Add(1)
+	select {
+	case m.callCh <- call:
+	default:
+	}
+	if call <= m.failures {
+		return errors.New("transient cleanup failure")
+	}
+	return nil
+}
 
 func TestListAPIKeys(t *testing.T) {
 	controller, _, teardown := Setup(t)
@@ -200,6 +246,162 @@ func TestCreateAPIKey(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCreateAPIKey_QuotaJSONValidationAndResponses(t *testing.T) {
+	controller, _, teardown := Setup(t)
+	defer teardown()
+
+	ctx := logs.NewContext()
+	adminUser := &models.CreatedTeamAPIKey{
+		ID:   keys.AdminKeyID,
+		Key:  InitKey,
+		Name: "admin",
+		Team: models.AdminTeam(),
+	}
+	regularUser, err := controller.keys.CreateKey(ctx, adminUser, keys.CreateKeyOptions{Name: "regular-user", TeamName: "regular-team"})
+	require.NoError(t, err)
+	refreshKeyStorageForTest(t, controller)
+
+	tests := []struct {
+		name           string
+		apiKey         string
+		body           string
+		expectCode     int
+		expectContains []string
+		expectMissing  []string
+	}{
+		{
+			name:       "admin creates limited key with nested quota",
+			apiKey:     InitKey,
+			body:       `{"name":"limited-key","quota":{"running":{"sandbox.count":2}}}`,
+			expectCode: http.StatusCreated,
+			expectContains: []string{
+				`"quota":{"running":{"sandbox.count":2}}`,
+			},
+			expectMissing: []string{`"limits"`},
+		},
+		{
+			name:       "admin creates hard zero quota key",
+			apiKey:     InitKey,
+			body:       `{"name":"hard-zero-key","quota":{"running":{"sandbox.count":0}}}`,
+			expectCode: http.StatusCreated,
+			expectContains: []string{
+				`"quota":{"running":{"sandbox.count":0}}`,
+			},
+			expectMissing: []string{`"limits"`},
+		},
+		{
+			name:       "regular key cannot set quota",
+			apiKey:     regularUser.Key,
+			body:       `{"name":"regular-limited","quota":{"running":{"sandbox.count":2}}}`,
+			expectCode: http.StatusForbidden,
+			expectContains: []string{
+				`only admin can set api-key quota`,
+			},
+		},
+		{
+			name:       "negative count is rejected",
+			apiKey:     InitKey,
+			body:       `{"name":"negative-key","quota":{"running":{"sandbox.count":-1}}}`,
+			expectCode: http.StatusBadRequest,
+			expectContains: []string{
+				`quota limit must be non-negative`,
+			},
+		},
+		{
+			name:       "unsupported top level quota field is rejected",
+			apiKey:     InitKey,
+			body:       `{"name":"cpu-key","quota":{"cpu":{"sandbox.count":2}}}`,
+			expectCode: http.StatusBadRequest,
+			expectContains: []string{
+				`unsupported quota scope "cpu"`,
+			},
+		},
+		{
+			name:       "internal limits shape is rejected",
+			apiKey:     InitKey,
+			body:       `{"name":"internal-shape","quota":{"limits":[{"dimension":"sandbox.count","limit":2}]}}`,
+			expectCode: http.StatusBadRequest,
+			expectContains: []string{
+				`unmarshal quota wire`,
+			},
+		},
+		{
+			name:       "missing quota remains unlimited",
+			apiKey:     InitKey,
+			body:       `{"name":"unlimited-key"}`,
+			expectCode: http.StatusCreated,
+			expectMissing: []string{
+				`"quota"`,
+				`"limits"`,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/api-keys", bytes.NewBufferString(tt.body))
+			req.Header.Set(models.HeaderApiKey, tt.apiKey)
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+
+			controller.mux.ServeHTTP(rec, req)
+
+			require.Equal(t, tt.expectCode, rec.Code, rec.Body.String())
+			body := rec.Body.String()
+			message := body
+			if rec.Code >= http.StatusBadRequest {
+				var apiErr web.ApiError
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &apiErr))
+				message = apiErr.Message
+			}
+			for _, expected := range tt.expectContains {
+				assert.Contains(t, message, expected)
+			}
+			for _, missing := range tt.expectMissing {
+				assert.NotContains(t, body, missing)
+			}
+		})
+	}
+}
+
+func TestListAPIKeys_ReturnsNestedQuotaJSON(t *testing.T) {
+	controller, _, teardown := Setup(t)
+	defer teardown()
+
+	req := httptest.NewRequest(http.MethodPost, "/api-keys", bytes.NewBufferString(`{"name":"limited-key","quota":{"running":{"sandbox.count":2}}}`))
+	req.Header.Set(models.HeaderApiKey, InitKey)
+	req.Header.Set("Content-Type", "application/json")
+	createRec := httptest.NewRecorder()
+	controller.mux.ServeHTTP(createRec, req)
+	require.Equal(t, http.StatusCreated, createRec.Code, createRec.Body.String())
+	refreshKeyStorageForTest(t, controller)
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api-keys", nil)
+	listReq.Header.Set(models.HeaderApiKey, InitKey)
+	listRec := httptest.NewRecorder()
+	controller.mux.ServeHTTP(listRec, listReq)
+
+	require.Equal(t, http.StatusOK, listRec.Code, listRec.Body.String())
+	assert.Contains(t, listRec.Body.String(), `"quota":{"running":{"sandbox.count":2}}`)
+	assert.NotContains(t, listRec.Body.String(), `"limits"`)
+}
+
+func TestCreateAPIKey_QuotaAcceptedWhenRedisAbsent(t *testing.T) {
+	controller, _, teardown := Setup(t)
+	defer teardown()
+
+	req := httptest.NewRequest(http.MethodPost, "/api-keys", strings.NewReader(`{"name":"limited-without-redis","quota":{"running":{"sandbox.count":2}}}`))
+	req.Header.Set(models.HeaderApiKey, InitKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	controller.mux.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), `"quota":{"running":{"sandbox.count":2}}`)
+	assert.NotContains(t, rec.Body.String(), `"limits"`)
 }
 
 func TestCompatibleAPIKeyEndpoint(t *testing.T) {
@@ -462,5 +664,82 @@ func TestDeleteAPIKeyPermissionMiddleware(t *testing.T) {
 			require.Nil(t, apiError)
 			assert.Equal(t, tt.expectCode, resp.Code)
 		})
+	}
+}
+
+func TestDeleteAPIKeyQuotaCleanupRetriesBestEffort(t *testing.T) {
+	controller, _, teardown := Setup(t)
+	defer teardown()
+
+	ctx := logs.NewContext()
+	adminUser := &models.CreatedTeamAPIKey{
+		ID:   keys.AdminKeyID,
+		Key:  InitKey,
+		Name: "admin",
+		Team: models.AdminTeam(),
+	}
+	target, err := controller.keys.CreateKey(ctx, adminUser, keys.CreateKeyOptions{Name: "limited-key", Quota: quotaSpecForAPIKeyTest(2)})
+	require.NoError(t, err)
+	refreshKeyStorageForTest(t, controller)
+
+	fakeQuota := newRetryCleanupQuotaManager(1)
+	controller.manager.SetQuotaEnforcer(fakeQuota)
+
+	req := NewRequest(t, nil, nil, map[string]string{"apiKeyID": target.ID.String()}, adminUser)
+	req = req.WithContext(context.WithValue(req.Context(), targetAPIKeyContextKey, target))
+	resp, apiErr := controller.DeleteAPIKey(req)
+	require.Nil(t, apiErr)
+	assert.Equal(t, http.StatusNoContent, resp.Code)
+
+	for i := 0; i < 2; i++ {
+		select {
+		case <-fakeQuota.callCh:
+		case <-time.After(time.Second):
+			t.Fatalf("quota cleanup did not retry after transient failure, calls=%d", fakeQuota.calls.Load())
+		}
+	}
+	assert.True(t, fakeQuota.sawDeadline.Load())
+	assert.GreaterOrEqual(t, fakeQuota.calls.Load(), int64(2))
+}
+
+func TestDeleteAPIKeyUnlimitedSkipsQuotaCleanup(t *testing.T) {
+	controller, _, teardown := Setup(t)
+	defer teardown()
+
+	ctx := logs.NewContext()
+	adminUser := &models.CreatedTeamAPIKey{
+		ID:   keys.AdminKeyID,
+		Key:  InitKey,
+		Name: "admin",
+		Team: models.AdminTeam(),
+	}
+	target, err := controller.keys.CreateKey(ctx, adminUser, keys.CreateKeyOptions{Name: "unlimited-key"})
+	require.NoError(t, err)
+	refreshKeyStorageForTest(t, controller)
+
+	fakeQuota := newRetryCleanupQuotaManager(0)
+	controller.manager.SetQuotaEnforcer(fakeQuota)
+
+	req := NewRequest(t, nil, nil, map[string]string{"apiKeyID": target.ID.String()}, adminUser)
+	req = req.WithContext(context.WithValue(req.Context(), targetAPIKeyContextKey, target))
+	resp, apiErr := controller.DeleteAPIKey(req)
+	require.Nil(t, apiErr)
+	assert.Equal(t, http.StatusNoContent, resp.Code)
+
+	select {
+	case <-fakeQuota.callCh:
+		t.Fatalf("unlimited key deletion must not call quota cleanup")
+	case <-time.After(200 * time.Millisecond):
+	}
+	assert.Equal(t, int64(0), fakeQuota.calls.Load())
+}
+
+func quotaSpecForAPIKeyTest(count int64) *models.QuotaSpec {
+	return &models.QuotaSpec{
+		Limits: []models.QuotaLimit{{
+			Dimension: models.DimSandboxCount,
+			Scope:     models.ScopeRunning,
+			Limit:     count,
+		}},
 	}
 }

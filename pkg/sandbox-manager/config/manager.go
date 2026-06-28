@@ -17,6 +17,8 @@ limitations under the License.
 package config
 
 import (
+	"time"
+
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/utils"
 	"k8s.io/client-go/rest"
@@ -26,6 +28,19 @@ const (
 	// DefaultMemberlistBindPort is the default port for memberlist gossip
 	DefaultMemberlistBindPort = 7946
 )
+
+// QuotaOptions holds runtime configuration for API-key quota enforcement.
+type QuotaOptions struct {
+	RedisAddr         string
+	RedisUsername     string
+	RedisPassword     string
+	RedisDB           int
+	OperationTimeout  time.Duration
+	BreakerN          int
+	BreakerD          time.Duration
+	AntiDriftInterval time.Duration
+	AntiDriftGrace    time.Duration
+}
 
 type SandboxManagerOptions struct {
 	SystemNamespace            string
@@ -38,6 +53,7 @@ type SandboxManagerOptions struct {
 	MemberlistBindPort         int
 	DisableRouteReconciliation bool
 	RestConfig                 *rest.Config
+	Quota                      QuotaOptions
 }
 
 func InitOptions(opts SandboxManagerOptions) SandboxManagerOptions {
@@ -55,6 +71,22 @@ func InitOptions(opts SandboxManagerOptions) SandboxManagerOptions {
 	}
 	if opts.MemberlistBindPort <= 0 {
 		opts.MemberlistBindPort = DefaultMemberlistBindPort
+	}
+	// Quota defaults
+	if opts.Quota.OperationTimeout <= 0 {
+		opts.Quota.OperationTimeout = 50 * time.Millisecond
+	}
+	if opts.Quota.BreakerN <= 0 {
+		opts.Quota.BreakerN = 3
+	}
+	if opts.Quota.BreakerD <= 0 {
+		opts.Quota.BreakerD = 30 * time.Second
+	}
+	if opts.Quota.AntiDriftInterval <= 0 {
+		opts.Quota.AntiDriftInterval = 5 * time.Minute
+	}
+	if opts.Quota.AntiDriftGrace <= 0 {
+		opts.Quota.AntiDriftGrace = 10 * time.Minute
 	}
 	return opts
 }

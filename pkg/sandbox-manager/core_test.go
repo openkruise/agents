@@ -19,6 +19,7 @@ package sandbox_manager
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
 	"github.com/stretchr/testify/assert"
@@ -477,4 +478,27 @@ func (m *mockRequestAdapter) IsSandboxRequest(string, string, int) bool {
 func (b *SandboxManagerBuilder) WithCustomPeers(getPeersFunc GetPeersFunc) *SandboxManagerBuilder {
 	b.getPeersFunc = getPeersFunc
 	return b
+}
+
+func TestInitOptionsQuotaDefaults(t *testing.T) {
+	opts := config.InitOptions(config.SandboxManagerOptions{})
+	assert.Equal(t, 50*time.Millisecond, opts.Quota.OperationTimeout)
+	assert.Equal(t, 3, opts.Quota.BreakerN)
+	assert.Equal(t, 30*time.Second, opts.Quota.BreakerD)
+	assert.Equal(t, 5*time.Minute, opts.Quota.AntiDriftInterval)
+	assert.Equal(t, 10*time.Minute, opts.Quota.AntiDriftGrace)
+}
+
+func TestCleanupQuotaNilSafe(t *testing.T) {
+	// nil manager
+	var m *SandboxManager
+	require.NoError(t, m.CleanupQuota(t.Context(), "user-1"))
+
+	// nil quota
+	m2 := &SandboxManager{}
+	require.NoError(t, m2.CleanupQuota(t.Context(), "user-1"))
+
+	// empty user
+	m3 := &SandboxManager{}
+	require.NoError(t, m3.CleanupQuota(t.Context(), ""))
 }

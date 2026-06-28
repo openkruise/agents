@@ -17,13 +17,23 @@ limitations under the License.
 package e2b
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
+	"time"
+
+	"k8s.io/klog/v2"
 
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
+)
+
+const (
+	apiKeyQuotaCleanupTimeout        = 2 * time.Second
+	apiKeyQuotaCleanupInitialBackoff = 100 * time.Millisecond
+	apiKeyQuotaCleanupMaxBackoff     = 500 * time.Millisecond
 )
 
 func (sc *Controller) ListAPIKeys(r *http.Request) (web.ApiResponse[[]*models.TeamAPIKey], *web.ApiError) {
@@ -68,6 +78,7 @@ func (sc *Controller) CreateAPIKey(r *http.Request) (web.ApiResponse[*models.Cre
 	createdAPIKey, err := sc.keys.CreateKey(ctx, user, keys.CreateKeyOptions{
 		Name:     request.Name,
 		TeamName: request.TeamName,
+		Quota:    request.QuotaSpec.DeepCopy(),
 	})
 	if err != nil {
 		return web.ApiResponse[*models.CreatedTeamAPIKey]{}, &web.ApiError{
@@ -103,6 +114,18 @@ func validateCreateAPIKeyRequest(request *models.NewTeamAPIKey) *web.ApiError {
 			Message: "api-key name is required",
 		}
 	}
+	if request.Quota == nil {
+		request.QuotaSpec = nil
+		return nil
+	}
+	quota, err := models.QuotaSpecFromWire(request.Quota)
+	if err != nil {
+		return &web.ApiError{
+			Code:    http.StatusBadRequest,
+			Message: err.Error(),
+		}
+	}
+	request.QuotaSpec = quota
 	return nil
 }
 
@@ -148,9 +171,50 @@ func (sc *Controller) DeleteAPIKey(r *http.Request) (web.ApiResponse[struct{}], 
 				Message: fmt.Sprintf("Failed to delete API key: %v", err),
 			}
 		}
+		if key.QuotaSpec != nil && key.QuotaSpec.IsLimited() {
+			// Deleted-key quota cleanup is bounded best-effort. If Redis stays
+			// unavailable past the retry window, the leftover q:live/q:sum keys become
+			// dead memory because API-key IDs are never reused and deleted keys are no
+			// longer enumerated by anti-drift. A stronger tombstone/TTL cleanup policy is
+			// intentionally deferred to a later PR.
+			go sc.cleanupDeletedAPIKeyQuota(ctx, key.ID.String())
+		}
 	}
 
 	return web.ApiResponse[struct{}]{
 		Code: http.StatusNoContent,
 	}, nil
+}
+
+func (sc *Controller) cleanupDeletedAPIKeyQuota(ctx context.Context, apiKeyID string) {
+	if sc == nil || apiKeyID == "" {
+		return
+	}
+
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), apiKeyQuotaCleanupTimeout)
+	defer cancel()
+	log := klog.FromContext(cleanupCtx)
+	backoff := apiKeyQuotaCleanupInitialBackoff
+	var lastErr error
+
+	for {
+		err := sc.manager.CleanupQuota(cleanupCtx, apiKeyID)
+		if err == nil {
+			return
+		}
+		lastErr = err
+
+		select {
+		case <-cleanupCtx.Done():
+			log.Error(lastErr, "failed to cleanup quota live set for deleted api-key", "apiKeyID", apiKeyID, "contextError", cleanupCtx.Err())
+			return
+		case <-time.After(backoff):
+		}
+		if backoff < apiKeyQuotaCleanupMaxBackoff {
+			backoff *= 2
+			if backoff > apiKeyQuotaCleanupMaxBackoff {
+				backoff = apiKeyQuotaCleanupMaxBackoff
+			}
+		}
+	}
 }

@@ -139,7 +139,7 @@ jobs:
           MYSQL_DSN="root:${MYSQL_ROOT_PASSWORD}@tcp(mysql.sandbox-system.svc.cluster.local:3306)/${MYSQL_DATABASE}?charset=utf8mb4&parseTime=True&loc=Local"
           {
             echo ""
-            echo "# E2B MySQL key storage (appended by e2e-e2b-mysql-latest before deploy)"
+            echo "# E2B MySQL key storage, quota Redis, and CI-sized manager requests (appended by e2e-e2b-mysql-latest before deploy)"
             echo "- op: replace"
             echo "  path: /spec/replicas"
             echo "  value: 3"
@@ -150,6 +150,18 @@ jobs:
             echo "  path: /spec/template/spec/containers/0/args/-"
             echo "  value: --e2b-key-storage-disable-schema-auto-update"
             echo "- op: add"
+            echo "  path: /spec/template/spec/containers/0/args/-"
+            echo "  value: --e2b-quota-redis-addr=redis.sandbox-system.svc.cluster.local:6379"
+            echo "- op: add"
+            echo "  path: /spec/template/spec/containers/0/args/-"
+            echo "  value: --e2b-quota-redis-operation-timeout=1s"
+            echo "- op: replace"
+            echo "  path: /spec/template/spec/containers/0/resources/requests"
+            printf '  value: {"cpu":"100m","memory":"256Mi"}\n'
+            echo "- op: replace"
+            echo "  path: /spec/template/spec/containers/1/resources/requests"
+            printf '  value: {"cpu":"50m","memory":"128Mi"}\n'
+            echo "- op: add"
             echo "  path: /spec/template/spec/containers/0/env/-"
             printf '  value: {"name":"E2B_KEY_STORAGE_DSN","value":"%s"}\n' "${MYSQL_DSN}"
             echo "- op: add"
@@ -159,8 +171,10 @@ jobs:
           echo "deployment patch:"
           cat config/sandbox-manager/configuration_patch.yaml
           make deploy-agent-sandbox-controller
+          kubectl rollout status deployment/sandbox-controller-manager -n sandbox-system --timeout=5m
+          kubectl apply -f test/e2b/assets/quota-redis.yaml
+          kubectl wait --for=condition=available deployment/redis -n sandbox-system --timeout=120s
           make deploy-sandbox-manager
-          bash hack/wait-agent-sandbox-controller.sh
 
       - name: Deploy sandbox-gateway
         if: matrix.with_gateway
@@ -172,6 +186,7 @@ jobs:
           export E2B_DOMAIN=localhost
           export E2B_API_KEY=some-api-key
           export INPLACE_UPDATE_IMAGE="${INPLACE_UPDATE_IMG}"
+          export QUOTA_E2E_PROFILE=redis
           if [ "${{ matrix.with_gateway }}" = "true" ]; then
             bash hack/run-e2b-e2e-test.sh --with-gateway --pytest-extra-args "-s -x"
           else

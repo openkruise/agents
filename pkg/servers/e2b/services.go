@@ -67,7 +67,12 @@ func (sc *Controller) DeleteSandbox(r *http.Request) (web.ApiResponse[struct{}],
 		}, nil
 	}
 
-	if err := sc.manager.DeleteSandbox(r.Context(), sbx); err != nil {
+	user := GetUserFromContext(r.Context())
+	if err := sc.manager.DeleteSandbox(r.Context(), sandboxmanager.DeleteSandboxOptions{
+		Sandbox: sbx,
+		User:    user.ID.String(),
+		Quota:   user.QuotaSpec.DeepCopy(),
+	}); err != nil {
 		log.Error(err, "failed to delete sandbox", "id", id)
 		return web.ApiResponse[struct{}]{}, &web.ApiError{
 			Message: fmt.Sprintf("Failed to delete sandbox: %v", err),

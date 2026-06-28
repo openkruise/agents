@@ -203,6 +203,12 @@ func (sc *Controller) CheckCreateAPIKeyPermission(ctx context.Context, r *http.R
 
 	// Only admin can create API key for other team
 	isAdmin := callerTeam.Name == models.AdminTeamName
+	if request.QuotaSpec != nil && !isAdmin {
+		return ctx, &web.ApiError{
+			Code:    http.StatusForbidden,
+			Message: "only admin can set api-key quota",
+		}
+	}
 	if !isAdmin && targetTeamName != callerTeam.Name {
 		return ctx, &web.ApiError{
 			Code:    http.StatusForbidden,
