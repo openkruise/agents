@@ -296,7 +296,7 @@ func (sc *Controller) parseCreateSandboxRequest(r *http.Request) (models.NewSand
 
 	// autoResume requires autoPause: wake-on-traffic only makes sense for
 	// sandboxes that auto-pause on timeout.
-	if request.AutoResume && !request.AutoPause {
+	if request.AutoResume.Enabled && !request.AutoPause {
 		return request, &web.ApiError{
 			Code:    http.StatusBadRequest,
 			Message: "autoResume requires autoPause to be true",
@@ -304,7 +304,7 @@ func (sc *Controller) parseCreateSandboxRequest(r *http.Request) (models.NewSand
 	}
 
 	// Propagate AutoResume to extensions for downstream consumers.
-	request.Extensions.AutoResume = request.AutoResume
+	request.Extensions.AutoResume = request.AutoResume.Enabled
 
 	return request, nil
 }
@@ -351,7 +351,7 @@ func (sc *Controller) basicSandboxCreateModifier(ctx context.Context, sbx infra.
 	// Set wake-on-traffic annotations when autoResume is enabled.
 	// The gateway reads these to decide whether to wake a paused sandbox
 	// and how long to re-arm the auto-pause timeout after wake.
-	if request.AutoResume {
+	if request.AutoResume.Enabled {
 		annotations[agentsv1alpha1.AnnotationWakeOnTraffic] = agentsv1alpha1.True
 		annotations[agentsv1alpha1.AnnotationWakeTimeoutSeconds] = strconv.Itoa(request.Timeout)
 	}
