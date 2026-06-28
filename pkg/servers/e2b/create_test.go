@@ -846,6 +846,188 @@ func TestParseCreateSandboxRequest(t *testing.T) {
 		require.Len(t, got.VolumeMounts, 1)
 		assert.Equal(t, "volume-pv", got.VolumeMounts[0].Name)
 	})
+	t.Run("autoResume with autoPause succeeds", func(t *testing.T) {
+		raw, err := json.Marshal(models.NewSandboxRequest{
+			TemplateID: "t1",
+			Timeout:    300,
+			AutoPause:  true,
+			AutoResume: models.AutoResumeConfig{Enabled: true},
+		})
+		require.NoError(t, err)
+		req := httptest.NewRequest(http.MethodPost, "/sandboxes", bytes.NewReader(raw))
+
+		got, apiErr := ctrl.parseCreateSandboxRequest(req)
+		require.Nil(t, apiErr)
+		assert.True(t, got.AutoResume.Enabled)
+		assert.True(t, got.Extensions.AutoResume, "Extensions.AutoResume should be propagated")
+	})
+
+	t.Run("autoResume without autoPause returns 400", func(t *testing.T) {
+		raw, err := json.Marshal(models.NewSandboxRequest{
+			TemplateID: "t1",
+			Timeout:    300,
+			AutoResume: models.AutoResumeConfig{Enabled: true},
+		})
+		require.NoError(t, err)
+		req := httptest.NewRequest(http.MethodPost, "/sandboxes", bytes.NewReader(raw))
+
+		_, apiErr := ctrl.parseCreateSandboxRequest(req)
+		require.NotNil(t, apiErr)
+		assert.Equal(t, http.StatusBadRequest, apiErr.Code)
+		assert.Contains(t, apiErr.Message, "autoResume requires autoPause")
+	})
+
+	t.Run("autoResume false is always valid", func(t *testing.T) {
+		raw, err := json.Marshal(models.NewSandboxRequest{
+			TemplateID: "t1",
+			Timeout:    300,
+			AutoResume: models.AutoResumeConfig{Enabled: false},
+		})
+		require.NoError(t, err)
+		req := httptest.NewRequest(http.MethodPost, "/sandboxes", bytes.NewReader(raw))
+
+		_, apiErr := ctrl.parseCreateSandboxRequest(req)
+		require.Nil(t, apiErr)
+	})
+
+	t.Run("autoResume SDK object format decodes correctly", func(t *testing.T) {
+		// The E2B SDK sends autoResume as {"enabled": true}, not a plain bool.
+		body := `{"templateID":"t1","timeout":300,"autoPause":true,"autoResume":{"enabled":true}}`
+		req := httptest.NewRequest(http.MethodPost, "/sandboxes", strings.NewReader(body))
+
+		got, apiErr := ctrl.parseCreateSandboxRequest(req)
+		require.Nil(t, apiErr)
+		assert.True(t, got.AutoResume.Enabled)
+		assert.True(t, got.Extensions.AutoResume)
+	})
+}
+
+func TestBasicSandboxCreateModifier(t *testing.T) {
+	tests := []struct {
+		name                string
+		request             models.NewSandboxRequest
+		initialAnnotations  map[string]string
+		initialLabels       map[string]string
+		maxTimeout          int
+		expectAnnotations   map[string]string
+		expectNoAnnotations []string
+		expectLabels        map[string]string
+	}{
+		{
+			name: "autoResume sets wake annotations",
+			request: models.NewSandboxRequest{
+				TemplateID: "t1",
+				Timeout:    300,
+				AutoPause:  true,
+				AutoResume: models.AutoResumeConfig{Enabled: true},
+			},
+			maxTimeout: 3600,
+			expectAnnotations: map[string]string{
+				agentsv1alpha1.AnnotationWakeOnTraffic:      agentsv1alpha1.True,
+				agentsv1alpha1.AnnotationWakeTimeoutSeconds: "300",
+			},
+		},
+		{
+			name: "autoResume false does not set wake annotations",
+			request: models.NewSandboxRequest{
+				TemplateID: "t1",
+				Timeout:    300,
+				AutoPause:  true,
+				AutoResume: models.AutoResumeConfig{Enabled: false},
+			},
+			maxTimeout: 3600,
+			expectNoAnnotations: []string{
+				agentsv1alpha1.AnnotationWakeOnTraffic,
+				agentsv1alpha1.AnnotationWakeTimeoutSeconds,
+			},
+		},
+		{
+			name: "metadata propagated to annotations",
+			request: models.NewSandboxRequest{
+				TemplateID: "t1",
+				Timeout:    300,
+				Metadata:   map[string]string{"user-key": "user-val"},
+			},
+			maxTimeout:        3600,
+			expectAnnotations: map[string]string{"user-key": "user-val"},
+		},
+		{
+			name: "returnPodIP extension sets annotation",
+			request: models.NewSandboxRequest{
+				TemplateID: "t1",
+				Timeout:    300,
+				Extensions: models.NewSandboxRequestExtension{ReturnPodIP: true},
+			},
+			maxTimeout: 3600,
+			expectAnnotations: map[string]string{
+				models.ExtensionKeyReturnPodIP: agentsv1alpha1.True,
+			},
+		},
+		{
+			name: "labels propagated from extensions",
+			request: models.NewSandboxRequest{
+				TemplateID: "t1",
+				Timeout:    300,
+				Extensions: models.NewSandboxRequestExtension{
+					Labels: map[string]string{"env": "test"},
+				},
+			},
+			maxTimeout:     3600,
+			expectLabels:   map[string]string{"env": "test"},
+		},
+		{
+			name: "wake annotations coexist with metadata",
+			request: models.NewSandboxRequest{
+				TemplateID: "t1",
+				Timeout:    600,
+				AutoPause:  true,
+				AutoResume: models.AutoResumeConfig{Enabled: true},
+				Metadata:   map[string]string{"app": "myapp"},
+			},
+			maxTimeout: 3600,
+			expectAnnotations: map[string]string{
+				agentsv1alpha1.AnnotationWakeOnTraffic:      agentsv1alpha1.True,
+				agentsv1alpha1.AnnotationWakeTimeoutSeconds: "600",
+				"app": "myapp",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockSbx := &sandboxcr.Sandbox{
+				Sandbox: &agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:        "test-sandbox",
+						Namespace:   "default",
+						Annotations: tt.initialAnnotations,
+						Labels:      tt.initialLabels,
+					},
+				},
+			}
+
+			c := &Controller{maxTimeout: tt.maxTimeout}
+			c.basicSandboxCreateModifier(context.Background(), mockSbx, tt.request)
+
+			annotations := mockSbx.GetAnnotations()
+			for k, v := range tt.expectAnnotations {
+				got, ok := annotations[k]
+				assert.True(t, ok, "expected annotation %q to exist", k)
+				assert.Equal(t, v, got, "annotation %q value mismatch", k)
+			}
+			for _, k := range tt.expectNoAnnotations {
+				_, ok := annotations[k]
+				assert.False(t, ok, "expected annotation %q to NOT exist", k)
+			}
+
+			labels := mockSbx.GetLabels()
+			for k, v := range tt.expectLabels {
+				got, ok := labels[k]
+				assert.True(t, ok, "expected label %q to exist", k)
+				assert.Equal(t, v, got, "label %q value mismatch", k)
+			}
+		})
+	}
 }
 
 func TestMapInfraErrorToApiError(t *testing.T) {

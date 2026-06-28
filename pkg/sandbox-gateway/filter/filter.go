@@ -17,8 +17,11 @@ limitations under the License.
 package filter
 
 import (
+	"context"
 	"crypto/subtle"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/envoyproxy/envoy/contrib/golang/common/go/api"
 	"go.uber.org/zap"
@@ -26,6 +29,7 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/registry"
+	"github.com/openkruise/agents/pkg/sandbox-gateway/wake"
 	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
 )
 
@@ -100,15 +104,80 @@ func (f *sandboxFilter) DecodeHeaders(header api.RequestHeaderMap, endStream boo
 	}
 
 	if route.State != agentsv1alpha1.SandboxStateRunning {
-		logger.Warn("Sandbox is not running", zap.String("sandboxID", sandboxID), zap.String("state", route.State))
-		f.callbacks.DecoderFilterCallbacks().SendLocalReply(
-			502,
-			"healthy sandbox not found: "+sandboxID,
-			nil,
-			-1,
-			"sandbox_not_running",
-		)
-		return api.LocalReply
+		// Check if wake-on-traffic should be attempted for this sandbox.
+		// route.WakeOnTraffic is the primary check (fast, from registry).
+		// HasWakeAnnotation is a fallback that reads the informer cache
+		// directly, covering the window between kubectl annotate and the
+		// gateway controller reconciling the change into the route registry.
+		waker := wake.GetWaker()
+		parts := strings.SplitN(sandboxID, "--", 2)
+		shouldWake := route.WakeOnTraffic
+		if !shouldWake && f.config.EnableWakeOnTraffic && waker != nil &&
+			len(parts) == 2 && route.State == agentsv1alpha1.SandboxStatePaused {
+			shouldWake = waker.HasWakeAnnotation(context.Background(), parts[0], parts[1])
+		}
+		logger.Info("Wake eligibility check",
+			zap.String("sandboxID", sandboxID),
+			zap.String("state", route.State),
+			zap.Bool("wakeOnTraffic", route.WakeOnTraffic),
+			zap.Bool("shouldWake", shouldWake),
+			zap.Bool("enableWakeOnTraffic", f.config.EnableWakeOnTraffic),
+			zap.Bool("wakerInitialized", waker != nil))
+		if f.config.EnableWakeOnTraffic && shouldWake && route.State == agentsv1alpha1.SandboxStatePaused {
+			if waker != nil {
+				if len(parts) == 2 {
+					waitTimeout := time.Duration(f.config.GetWakeTimeoutSeconds()) * time.Second
+					ctx, cancel := context.WithTimeout(context.Background(), waitTimeout)
+					err := waker.Wake(ctx, parts[0], parts[1], waitTimeout)
+					cancel()
+					if err != nil {
+						logger.Warn("Sandbox wake failed",
+							zap.String("sandboxID", sandboxID),
+							zap.Error(err))
+						f.callbacks.DecoderFilterCallbacks().SendLocalReply(
+							503,
+							"sandbox wake failed: "+err.Error(),
+							nil,
+							-1,
+							"sandbox_wake_failed",
+						)
+						return api.LocalReply
+					}
+					// Wake succeeded — sandbox is now Running.
+					// The Waker has already updated the local registry via syncRoute.
+					route, ok = registry.GetRegistry().Get(sandboxID)
+					if !ok || route.State != agentsv1alpha1.SandboxStateRunning {
+						logger.Warn("Sandbox not running after wake",
+							zap.String("sandboxID", sandboxID))
+						f.callbacks.DecoderFilterCallbacks().SendLocalReply(
+							502,
+							"healthy sandbox not found: "+sandboxID,
+							nil,
+							-1,
+							"sandbox_not_running",
+						)
+						return api.LocalReply
+					}
+					logger.Info("Sandbox woken successfully", zap.String("sandboxID", sandboxID))
+					// Fall through to normal forwarding (auth + upstream override)
+				} else {
+					logger.Warn("Invalid sandbox ID format for wake",
+						zap.String("sandboxID", sandboxID))
+				}
+			}
+		}
+		// Not running and not wakeable -> 502 (existing behavior)
+		if route.State != agentsv1alpha1.SandboxStateRunning {
+			logger.Warn("Sandbox is not running", zap.String("sandboxID", sandboxID), zap.String("state", route.State))
+			f.callbacks.DecoderFilterCallbacks().SendLocalReply(
+				502,
+				"healthy sandbox not found: "+sandboxID,
+				nil,
+				-1,
+				"sandbox_not_running",
+			)
+			return api.LocalReply
+		}
 	}
 
 	// Authenticate the request if auth is enabled and the sandbox has an access token configured.

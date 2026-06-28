@@ -32,8 +32,10 @@ import (
 	"k8s.io/utils/ptr"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/cache/cachetest"
 	cacheutils "github.com/openkruise/agents/pkg/cache/utils"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
+	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	timeoututils "github.com/openkruise/agents/pkg/utils/timeout"
@@ -1594,6 +1596,109 @@ func TestComputeTimeoutOptions(t *testing.T) {
 				assert.Equal(t, *tt.wantPause, got.PauseTime)
 			}
 			assert.Equal(t, tt.wantShutdown, got.ShutdownTime)
+		})
+	}
+}
+
+func TestUpdateWakeAnnotations(t *testing.T) {
+	tests := []struct {
+		name              string
+		existingAnns      map[string]string
+		autoResume        bool
+		timeoutSeconds    int
+		expectAnnotations map[string]string
+		expectNoPatch     bool
+	}{
+		{
+			name:           "autoResume true with timeout sets both annotations",
+			existingAnns:   map[string]string{},
+			autoResume:     true,
+			timeoutSeconds: 120,
+			expectAnnotations: map[string]string{
+				agentsv1alpha1.AnnotationWakeOnTraffic:        agentsv1alpha1.True,
+				agentsv1alpha1.AnnotationWakeTimeoutSeconds: "120",
+			},
+		},
+		{
+			name:           "autoResume true without timeout sets only wake-on-traffic",
+			existingAnns:   map[string]string{},
+			autoResume:     true,
+			timeoutSeconds: 0,
+			expectAnnotations: map[string]string{
+				agentsv1alpha1.AnnotationWakeOnTraffic: agentsv1alpha1.True,
+			},
+		},
+		{
+			name: "autoResume false with wake already enabled updates timeout",
+			existingAnns: map[string]string{
+				agentsv1alpha1.AnnotationWakeOnTraffic: agentsv1alpha1.True,
+			},
+			autoResume:     false,
+			timeoutSeconds: 90,
+			expectAnnotations: map[string]string{
+				agentsv1alpha1.AnnotationWakeTimeoutSeconds: "90",
+			},
+		},
+		{
+			name:           "autoResume false without wake enabled skips patch",
+			existingAnns:   map[string]string{},
+			autoResume:     false,
+			timeoutSeconds: 60,
+			expectNoPatch:  true,
+		},
+		{
+			name:           "autoResume false without wake enabled and zero timeout skips patch",
+			existingAnns:   map[string]string{},
+			autoResume:     false,
+			timeoutSeconds: 0,
+			expectNoPatch:  true,
+		},
+		{
+			name: "autoResume false with wake enabled and zero timeout skips timeout annotation",
+			existingAnns: map[string]string{
+				agentsv1alpha1.AnnotationWakeOnTraffic: agentsv1alpha1.True,
+			},
+			autoResume:        false,
+			timeoutSeconds:    0,
+			expectNoPatch:     true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			sbx := &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "test-sbx",
+					Namespace:   "default",
+					Annotations: tc.existingAnns,
+				},
+			}
+
+			cacheProvider, fc, err := cachetest.NewTestCache(t, sbx)
+			require.NoError(t, err)
+
+			sc := &Controller{cache: cacheProvider}
+			wrapper := sandboxcr.AsSandbox(sbx, cacheProvider)
+
+			err = sc.updateWakeAnnotations(t.Context(), wrapper, tc.autoResume, tc.timeoutSeconds)
+			require.NoError(t, err)
+
+			if tc.expectNoPatch {
+				// Verify annotations are unchanged
+				var updated agentsv1alpha1.Sandbox
+				require.NoError(t, fc.Get(t.Context(), client.ObjectKey{Namespace: "default", Name: "test-sbx"}, &updated))
+				for k, v := range tc.existingAnns {
+					assert.Equal(t, v, updated.Annotations[k], "annotation %s should be unchanged", k)
+				}
+				return
+			}
+
+			// Verify patched annotations
+			var updated agentsv1alpha1.Sandbox
+			require.NoError(t, fc.Get(t.Context(), client.ObjectKey{Namespace: "default", Name: "test-sbx"}, &updated))
+			for k, v := range tc.expectAnnotations {
+				assert.Equal(t, v, updated.Annotations[k], "annotation %s should be %s", k, v)
+			}
 		})
 	}
 }
