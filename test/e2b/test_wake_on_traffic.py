@@ -13,18 +13,14 @@ GATEWAY_URL = "http://localhost:80"
 # v2 list endpoint which accepts GET.
 _HEALTH_PATH = "/kruise/api/v2/sandboxes"
 
-# e2b-code-interpreter 2.4.x predates the `lifecycle={"on_timeout": "pause"}`
-# parameter, so auto-pause cannot be requested through that SDK.
+# e2b-code-interpreter 2.4.x predates the `lifecycle` parameter and
+# `beta_pause()` method, so wake-on-traffic cannot be exercised through it.
 _E2B_CODE_INTERPRETER_VERSION = _pkg_version("e2b-code-interpreter")
 _SDK_LACKS_AUTO_PAUSE = _E2B_CODE_INTERPRETER_VERSION.startswith("2.4.")
 
-# Short auto-pause timeout so the sandbox pauses quickly (~30s).
-# The controller's auto-pause does NOT extend ShutdownTime (only the
-# manager API PauseSandbox handler does).  ShutdownTime stays at
-# creation + maxTimeout, which can be as short as ~120s in some CI
-# environments.  A short auto-pause timeout ensures we send the wake
-# request well before ShutdownTime fires.
-_AUTO_PAUSE_TIMEOUT = 30
+# Long timeout so the sandbox stays alive throughout the test without
+# risking ShutdownTime expiry.  We pause manually via beta_pause().
+_SANDBOX_TIMEOUT = 300
 
 
 def _gateway_health_check():
@@ -36,9 +32,6 @@ def _gateway_health_check():
     """
     try:
         r = requests.get(f"{GATEWAY_URL}{_HEALTH_PATH}", timeout=10)
-        # 401 is acceptable when gateway auth is enabled (the curl carries no
-        # token).  Any status code means the gateway responded, so the
-        # port-forward is alive.
         ok = r.status_code < 500
         print(f"gateway health-check: status={r.status_code} ok={ok}")
         return ok
@@ -47,17 +40,17 @@ def _gateway_health_check():
         return False
 
 
-@pytest.mark.skipif(_SDK_LACKS_AUTO_PAUSE, reason="SDK lacks lifecycle on_timeout pause")
+@pytest.mark.skipif(_SDK_LACKS_AUTO_PAUSE, reason="SDK lacks lifecycle / beta_pause()")
 def test_wake_on_traffic(sandbox_context):
     """Traffic to a paused sandbox with wake-on-traffic should resume it."""
-    # Step 1: Create sandbox with auto-pause and auto-resume (wake-on-traffic).
-    # lifecycle.auto_resume=True makes the server set the wake-on-traffic
-    # annotation at creation time, so no post-create kubectl annotate is needed.
-    # Use a short timeout (_AUTO_PAUSE_TIMEOUT) so auto-pause fires quickly
-    # and the wake test completes before any ShutdownTime deadline.
+    # Step 1: Create sandbox with wake-on-traffic (auto_resume=True).
+    # on_timeout="pause" is required by the server for auto_resume to be
+    # accepted (autoResume requires autoPause).  Use a long timeout so the
+    # sandbox won't auto-pause or expire during the test.  We pause it
+    # manually via beta_pause() instead.
     sbx: Sandbox = sandbox_context.add(Sandbox.create(
         template="code-interpreter",
-        timeout=_AUTO_PAUSE_TIMEOUT,
+        timeout=_SANDBOX_TIMEOUT,
         lifecycle={"on_timeout": "pause", "auto_resume": True},
         metadata={"test_case": "test_wake_on_traffic"},
         headers={"x-request-id": sandbox_context.request_id},
@@ -66,34 +59,35 @@ def test_wake_on_traffic(sandbox_context):
     print(f"sandbox-id: {sandbox_id}")
     assert sbx.get_info().state == SandboxState.RUNNING
 
-    # Step 2: Wait for auto-pause.
-    # The sandbox timeout is _AUTO_PAUSE_TIMEOUT, after which the controller
-    # triggers auto-pause.  Poll until PAUSED with a generous buffer.
-    pause_deadline = time.time() + _AUTO_PAUSE_TIMEOUT + 90
+    # Step 2: Manually pause the sandbox via E2B API (POST /sandboxes/{id}/pause).
+    print(f"pausing sandbox: {sandbox_id}")
+    sbx.beta_pause()
+
+    # Step 3: Wait until the sandbox reaches PAUSED state.
     paused = False
+    pause_deadline = time.time() + 120
     while time.time() < pause_deadline:
         info = sbx.get_info()
         if info.state == SandboxState.PAUSED:
             paused = True
-            print(f"sandbox auto-paused: {sandbox_id} state={info.state}")
+            print(f"sandbox paused: {sandbox_id}")
             break
+        print(f"waiting for paused state, current: {info.state}")
         time.sleep(2)
-    assert paused, f"sandbox {sandbox_id} did not auto-pause within deadline"
+    assert paused, f"sandbox {sandbox_id} did not pause within deadline"
 
-    # Step 3: Verify gateway connectivity before sending wake traffic.
+    # Step 4: Verify gateway connectivity before sending wake traffic.
     assert _gateway_health_check(), (
-        "Gateway port-forward is not alive before wake request. "
-        "The port-forward may have dropped during the auto-pause wait."
+        "Gateway port-forward is not alive before wake request."
     )
 
-    # Step 4: Send traffic through the gateway (triggers wake).
-    # The wake-on-traffic annotation was set at creation time, so the
-    # gateway registry already has WakeOnTraffic=true.
+    # Step 5: Send traffic through the gateway (triggers wake).
+    # The wake-on-traffic annotation was set at creation time via
+    # lifecycle.auto_resume=True, so the gateway registry has WakeOnTraffic=true.
     #
     # The access token is required by the agent-runtime sidecar inside
     # the pod (not the gateway filter). Even when gateway auth is disabled,
-    # the pod's envd still validates the token. The SDK returns it directly
-    # from the create response, so no kubectl lookup is needed.
+    # the pod's envd still validates the token.
     access_token = sbx._envd_access_token or ""
     headers = {
         "e2b-sandbox-id": sandbox_id,
@@ -111,7 +105,7 @@ def test_wake_on_traffic(sandbox_context):
     print(f"wake response: status={resp.status_code} body={resp.text[:200]!r}")
     print(f"wake response headers: {dict(resp.headers)}")
 
-    # Step 5: Assert wake succeeded (not 502/503)
+    # Step 6: Assert wake succeeded (not 502/503)
     assert resp.status_code != 502, (
         f"Gateway 502: sandbox {sandbox_id} not found or not running after wake"
     )
@@ -119,12 +113,10 @@ def test_wake_on_traffic(sandbox_context):
         f"Gateway 503: sandbox {sandbox_id} wake failed or timed out"
     )
 
-    # Step 6: Verify sandbox is Running (poll with retry for controller
-    # reconciliation — the gateway wake triggers an async controller
-    # reconcile to update Status.Phase from Paused to Running).
-    running_deadline = time.time() + 60
+    # Step 7: Verify sandbox is Running again.
     running = False
     last_state = None
+    running_deadline = time.time() + 60
     while time.time() < running_deadline:
         info = sbx.get_info()
         last_state = info.state
