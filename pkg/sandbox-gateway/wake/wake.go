@@ -56,6 +56,22 @@ func GetWaker() *Waker {
 	return defaultWaker.Load()
 }
 
+// HasWakeAnnotation checks the informer cache for the wake-on-traffic annotation.
+// This is a fallback for when the gateway controller's route registry hasn't
+// yet synced the annotation change. Returns false if the waker is nil or the
+// sandbox cannot be read from cache.
+func (w *Waker) HasWakeAnnotation(ctx context.Context, namespace, name string) bool {
+	if w == nil {
+		return false
+	}
+	cli := w.cache.GetClient()
+	var sbx agentsv1alpha1.Sandbox
+	if err := cli.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, &sbx); err != nil {
+		return false
+	}
+	return sbx.GetAnnotations()[agentsv1alpha1.AnnotationWakeOnTraffic] == agentsv1alpha1.True
+}
+
 // Wake resumes a paused sandbox by calling the existing sandbox-manager
 // connect Resume implementation, then syncs the route locally and to peers.
 // It does NOT reimplement spec patching or wait-for-running — it delegates

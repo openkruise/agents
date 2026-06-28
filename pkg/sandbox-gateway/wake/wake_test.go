@@ -57,6 +57,88 @@ func TestInitWakerAndGetWaker(t *testing.T) {
 	defaultWaker = zero
 }
 
+func TestHasWakeAnnotation(t *testing.T) {
+	tests := []struct {
+		name        string
+		sandboxName string
+		sandboxNS   string
+		annotations map[string]string
+		createSbx   bool
+		wakerNil    bool
+		want        bool
+	}{
+		{
+			name:        "annotation present true",
+			sandboxName: "sbx-wake",
+			sandboxNS:   "default",
+			annotations: map[string]string{
+				agentsv1alpha1.AnnotationWakeOnTraffic: agentsv1alpha1.True,
+			},
+			createSbx: true,
+			want:      true,
+		},
+		{
+			name:        "annotation present false",
+			sandboxName: "sbx-no-wake",
+			sandboxNS:   "default",
+			annotations: map[string]string{
+				agentsv1alpha1.AnnotationWakeOnTraffic: "false",
+			},
+			createSbx: true,
+			want:      false,
+		},
+		{
+			name:        "annotation absent",
+			sandboxName: "sbx-no-annot",
+			sandboxNS:   "default",
+			annotations: nil,
+			createSbx:   true,
+			want:        false,
+		},
+		{
+			name:        "sandbox not found",
+			sandboxName: "sbx-missing",
+			sandboxNS:   "default",
+			createSbx:   false,
+			want:        false,
+		},
+		{
+			name:     "nil waker returns false",
+			wakerNil: true,
+			want:     false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.wakerNil {
+				var nilWaker *Waker
+				assert.False(t, nilWaker.HasWakeAnnotation(context.Background(), "default", "sbx"))
+				return
+			}
+
+			var initObjs []ctrl.Object
+			if tt.createSbx {
+				sbx := &agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:        tt.sandboxName,
+						Namespace:   tt.sandboxNS,
+						Annotations: tt.annotations,
+					},
+				}
+				initObjs = append(initObjs, sbx)
+			}
+
+			cacheProvider, _, err := cachetest.NewTestCache(t, initObjs...)
+			require.NoError(t, err)
+
+			waker := &Waker{cache: cacheProvider}
+			got := waker.HasWakeAnnotation(context.Background(), tt.sandboxNS, tt.sandboxName)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
 // newPausedSandbox creates a Sandbox CR in Paused state with Paused condition True.
 func newPausedSandbox(name, namespace string, annotations map[string]string, shutdownTime *metav1.Time) *agentsv1alpha1.Sandbox {
 	sbx := &agentsv1alpha1.Sandbox{
@@ -163,10 +245,10 @@ func TestWake(t *testing.T) {
 			expectError:    "",
 		},
 		{
-			name:        "zero default timeout still resumes",
-			sandboxName: "sbx-zero-timeout",
-			sandboxNS:   "default",
-			annotations: map[string]string{},
+			name:           "zero default timeout still resumes",
+			sandboxName:    "sbx-zero-timeout",
+			sandboxNS:      "default",
+			annotations:    map[string]string{},
 			shutdownTime:   &metav1.Time{Time: shutdownTime},
 			pauseTime:      &metav1.Time{Time: pauseTime},
 			defaultTimeout: 0,

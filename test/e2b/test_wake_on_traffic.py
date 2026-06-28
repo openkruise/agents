@@ -16,6 +16,16 @@ _E2B_CODE_INTERPRETER_VERSION = _pkg_version("e2b-code-interpreter")
 _SDK_LACKS_AUTO_PAUSE = _E2B_CODE_INTERPRETER_VERSION.startswith("2.4.")
 
 
+def _get_sandbox_cr(sandbox_id: str) -> dict:
+    """Retrieve the full Sandbox CR as a dict."""
+    name = sandbox_id.split("--")[1] if "--" in sandbox_id else sandbox_id
+    result = subprocess.run(
+        ["kubectl", "get", "sandbox", name, "-o", "json"],
+        capture_output=True, text=True, check=True,
+    )
+    return json.loads(result.stdout)
+
+
 def _annotate_wake_on_traffic(sandbox_id: str):
     """Annotate the sandbox CR with wake-on-traffic=true."""
     name = sandbox_id.split("--")[1] if "--" in sandbox_id else sandbox_id
@@ -28,15 +38,37 @@ def _annotate_wake_on_traffic(sandbox_id: str):
     )
 
 
+def _wait_for_annotation_sync(sandbox_id: str, timeout: float = 30):
+    """Poll until the wake-on-traffic annotation is visible on the CR.
+
+    After kubectl annotate returns, the API server has persisted the change.
+    We poll to confirm the annotation is readable, then sleep briefly for
+    the gateway controller's informer cache to propagate the update.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        cr = _get_sandbox_cr(sandbox_id)
+        annotations = cr.get("metadata", {}).get("annotations", {})
+        if annotations.get("agents.kruise.io/wake-on-traffic") == "true":
+            rv = cr.get("metadata", {}).get("resourceVersion", "")
+            print(f"annotation synced: resourceVersion={rv}")
+            # Brief sleep for gateway informer cache propagation.
+            # The filter's cache fallback (HasWakeAnnotation) provides
+            # additional resilience even if the route registry hasn't
+            # reconciled yet.
+            time.sleep(2)
+            return
+        time.sleep(1)
+    raise TimeoutError(
+        f"wake-on-traffic annotation not visible on {sandbox_id} "
+        f"within {timeout}s"
+    )
+
+
 def _get_sandbox_access_token(sandbox_id: str) -> str:
     """Retrieve the runtime-access-token annotation from a Sandbox CR."""
-    name = sandbox_id.split("--")[1] if "--" in sandbox_id else sandbox_id
-    result = subprocess.run(
-        ["kubectl", "get", "sandbox", name, "-o", "json"],
-        capture_output=True, text=True, check=True,
-    )
-    sbx = json.loads(result.stdout)
-    annotations = sbx.get("metadata", {}).get("annotations", {})
+    cr = _get_sandbox_cr(sandbox_id)
+    annotations = cr.get("metadata", {}).get("annotations", {})
     return annotations.get("agents.kruise.io/runtime-access-token", "")
 
 
@@ -67,10 +99,9 @@ def test_wake_on_traffic(sandbox_context):
         time.sleep(2)
     assert paused, f"sandbox {sandbox_id} did not auto-pause within deadline"
 
-    # Step 3: Annotate with wake-on-traffic
+    # Step 3: Annotate with wake-on-traffic and wait for sync
     _annotate_wake_on_traffic(sandbox_id)
-    # Wait for gateway controller to sync the annotation change
-    time.sleep(5)
+    _wait_for_annotation_sync(sandbox_id)
 
     # Step 4: Send traffic through the gateway (triggers wake)
     access_token = _get_sandbox_access_token(sandbox_id)

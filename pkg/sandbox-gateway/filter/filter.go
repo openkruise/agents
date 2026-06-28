@@ -104,12 +104,20 @@ func (f *sandboxFilter) DecodeHeaders(header api.RequestHeaderMap, endStream boo
 	}
 
 	if route.State != agentsv1alpha1.SandboxStateRunning {
-		// Check if wake-on-traffic is enabled for this sandbox
-		if f.config.EnableWakeOnTraffic && route.WakeOnTraffic && route.State == agentsv1alpha1.SandboxStatePaused {
-			waker := wake.GetWaker()
+		// Check if wake-on-traffic should be attempted for this sandbox.
+		// route.WakeOnTraffic is the primary check (fast, from registry).
+		// HasWakeAnnotation is a fallback that reads the informer cache
+		// directly, covering the window between kubectl annotate and the
+		// gateway controller reconciling the change into the route registry.
+		waker := wake.GetWaker()
+		parts := strings.SplitN(sandboxID, "--", 2)
+		shouldWake := route.WakeOnTraffic
+		if !shouldWake && f.config.EnableWakeOnTraffic && waker != nil &&
+			len(parts) == 2 && route.State == agentsv1alpha1.SandboxStatePaused {
+			shouldWake = waker.HasWakeAnnotation(context.Background(), parts[0], parts[1])
+		}
+		if f.config.EnableWakeOnTraffic && shouldWake && route.State == agentsv1alpha1.SandboxStatePaused {
 			if waker != nil {
-				// Split sandbox ID "namespace--name" into namespace and name
-				parts := strings.SplitN(sandboxID, "--", 2)
 				if len(parts) == 2 {
 					waitTimeout := time.Duration(f.config.GetWakeTimeoutSeconds()) * time.Second
 					ctx, cancel := context.WithTimeout(context.Background(), waitTimeout)
