@@ -72,6 +72,10 @@ func (s *lookupKeyStorage) ListByOwnerTeam(context.Context, *models.CreatedTeamA
 	return nil, nil
 }
 
+func (s *lookupKeyStorage) ListLimited(context.Context) ([]*models.CreatedTeamAPIKey, error) {
+	return nil, nil
+}
+
 func (s *lookupKeyStorage) ListTeams(context.Context, *models.CreatedTeamAPIKey) ([]*models.ListedTeam, error) {
 	return nil, nil
 }

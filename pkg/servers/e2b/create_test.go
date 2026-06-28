@@ -25,22 +25,70 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/cache"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
+	"github.com/openkruise/agents/pkg/sandbox-manager/quota"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
 )
+
+type fakeQuotaManager struct {
+	acquireErr         error
+	releaseErr         error
+	acquireCalls       atomic.Int64
+	releaseCalls       atomic.Int64
+	cleanupCalls       atomic.Int64
+	releaseHasDeadline atomic.Bool
+
+	mu          sync.Mutex
+	lastAcquire quota.AcquireRequest
+	lastRelease quota.ReleaseRequest
+	lastCleanup string
+}
+
+func (f *fakeQuotaManager) Acquire(_ context.Context, req quota.AcquireRequest) error {
+	f.mu.Lock()
+	f.lastAcquire = req
+	f.mu.Unlock()
+	f.acquireCalls.Add(1)
+	return f.acquireErr
+}
+
+func (f *fakeQuotaManager) Release(ctx context.Context, req quota.ReleaseRequest) error {
+	if _, ok := ctx.Deadline(); ok {
+		f.releaseHasDeadline.Store(true)
+	}
+	f.mu.Lock()
+	f.lastRelease = req
+	f.mu.Unlock()
+	f.releaseCalls.Add(1)
+	return f.releaseErr
+}
+
+func (f *fakeQuotaManager) Cleanup(_ context.Context, user string) error {
+	f.mu.Lock()
+	f.lastCleanup = user
+	f.mu.Unlock()
+	f.cleanupCalls.Add(1)
+	return nil
+}
 
 // TestResolveServerTimeout verifies that a positive seconds value yields a
 // finite timeout, while an absent (zero) or non-positive value yields
@@ -800,6 +848,11 @@ func TestMapInfraErrorToApiError(t *testing.T) {
 			expectedCode: http.StatusInternalServerError,
 		},
 		{
+			name:         "ErrorQuotaExceeded maps to 403",
+			err:          managererrors.NewError(managererrors.ErrorQuotaExceeded, "api-key quota exceeded"),
+			expectedCode: http.StatusForbidden,
+		},
+		{
 			name:         "plain error maps to 500",
 			err:          fmt.Errorf("some unknown error"),
 			expectedCode: http.StatusInternalServerError,
@@ -811,5 +864,182 @@ func TestMapInfraErrorToApiError(t *testing.T) {
 			assert.Equal(t, tt.expectedCode, apiErr.Code)
 			assert.Contains(t, apiErr.Message, tt.err.Error())
 		})
+	}
+}
+func TestCreateSandbox_TopLevelMissingTemplateOrCheckpointReturns400(t *testing.T) {
+	controller, _, teardown := Setup(t)
+	defer teardown()
+
+	fakeQuota := &fakeQuotaManager{}
+	controller.manager.SetQuotaEnforcer(fakeQuota)
+	user := quotaLimitedUser([]models.QuotaLimit{{
+		Dimension: models.DimLimitsCPU,
+		Scope:     models.ScopeRunning,
+		Limit:     4000,
+	}})
+
+	resp, apiErr := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
+		TemplateID: "missing-template",
+		Metadata: map[string]string{
+			models.ExtensionKeySkipInitRuntime: v1alpha1.True,
+		},
+	}, nil, user))
+
+	require.NotNil(t, apiErr)
+	assert.Equal(t, http.StatusBadRequest, apiErr.Code)
+	assert.Contains(t, apiErr.Message, "Template or Checkpoint not found")
+	assert.Zero(t, resp.Code)
+	assert.Equal(t, int64(0), fakeQuota.acquireCalls.Load())
+}
+
+func TestCreateSandbox_MemoryOverrideRejectedBeforeQuotaAcquire(t *testing.T) {
+	fakeQuota := &fakeQuotaManager{}
+
+	apiErr := validateCreateResourceOverride(models.NewSandboxRequest{
+		TemplateID: "claim-template",
+		Extensions: models.NewSandboxRequestExtension{
+			InplaceUpdate: models.InplaceUpdateExtension{
+				Resources: &models.InplaceUpdateResourcesExtension{
+					Limits: corev1.ResourceList{
+						corev1.ResourceMemory: resource.MustParse("1024Mi"),
+					},
+				},
+			},
+		},
+		Metadata: map[string]string{
+			models.ExtensionKeySkipInitRuntime: v1alpha1.True,
+		},
+	})
+
+	require.NotNil(t, apiErr)
+	assert.Equal(t, http.StatusBadRequest, apiErr.Code)
+	assert.Contains(t, apiErr.Message, "memory")
+	assert.Equal(t, int64(0), fakeQuota.acquireCalls.Load())
+}
+
+func quotaLimitedUser(limits []models.QuotaLimit) *models.CreatedTeamAPIKey {
+	return &models.CreatedTeamAPIKey{
+		ID:   uuid.New(),
+		Key:  uuid.NewString(),
+		Name: "limited",
+		Team: models.AdminTeam(),
+		QuotaSpec: &models.QuotaSpec{
+			Limits: limits,
+		},
+	}
+}
+
+func createSandboxSetTemplateRefFixture(t *testing.T, controller *Controller, namespace, sandboxSetName, templateRefName, cpu, memory string) {
+	t.Helper()
+	fc := getTestCRClient(controller)
+
+	sbt := &agentsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      templateRefName,
+			Namespace: namespace,
+			UID:       types.UID(uuid.NewString()),
+		},
+		Spec: agentsv1alpha1.SandboxTemplateSpec{
+			Template: podTemplateWithLimits(cpu, memory),
+		},
+	}
+	require.NoError(t, fc.Create(t.Context(), sbt))
+
+	sbs := &agentsv1alpha1.SandboxSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sandboxSetName,
+			Namespace: namespace,
+		},
+		Spec: agentsv1alpha1.SandboxSetSpec{
+			Replicas: 0,
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				TemplateRef: &agentsv1alpha1.SandboxTemplateRef{Name: templateRefName},
+			},
+		},
+	}
+	require.NoError(t, fc.Create(t.Context(), sbs))
+}
+
+func createSandboxSetWithoutTemplateRefFixture(t *testing.T, controller *Controller, namespace, sandboxSetName, templateRefName string) {
+	t.Helper()
+	fc := getTestCRClient(controller)
+
+	sbs := &agentsv1alpha1.SandboxSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      sandboxSetName,
+			Namespace: namespace,
+		},
+		Spec: agentsv1alpha1.SandboxSetSpec{
+			Replicas: 0,
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				TemplateRef: &agentsv1alpha1.SandboxTemplateRef{Name: templateRefName},
+			},
+		},
+	}
+	require.NoError(t, fc.Create(t.Context(), sbs))
+}
+
+func createCheckpointTemplateWithLimitsFixture(t *testing.T, controller *Controller, namespace, name, checkpointID, owner, sandboxID, creationTime, cpu, memory string) {
+	t.Helper()
+	fc := getTestCRClient(controller)
+	createdAt, err := time.Parse(time.RFC3339, creationTime)
+	require.NoError(t, err)
+
+	sbt := &agentsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+			UID:       types.UID(uuid.NewString()),
+		},
+		Spec: agentsv1alpha1.SandboxTemplateSpec{
+			Template: podTemplateWithLimits(cpu, memory),
+		},
+	}
+	require.NoError(t, fc.Create(t.Context(), sbt))
+
+	cp := &agentsv1alpha1.Checkpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              name,
+			Namespace:         namespace,
+			UID:               types.UID(uuid.NewString()),
+			CreationTimestamp: metav1.NewTime(createdAt),
+			Labels: map[string]string{
+				agentsv1alpha1.LabelSandboxTemplate: name,
+			},
+			Annotations: map[string]string{
+				agentsv1alpha1.AnnotationOwner:     owner,
+				agentsv1alpha1.AnnotationSandboxID: sandboxID,
+			},
+		},
+		Status: agentsv1alpha1.CheckpointStatus{
+			Phase:        agentsv1alpha1.CheckpointSucceeded,
+			CheckpointId: checkpointID,
+		},
+	}
+	require.NoError(t, fc.Create(t.Context(), cp))
+	require.NoError(t, fc.Status().Update(t.Context(), cp))
+	require.Eventually(t, func() bool {
+		_, err := controller.cache.GetCheckpoint(t.Context(), cache.GetCheckpointOptions{
+			Namespace:    namespace,
+			CheckpointID: checkpointID,
+		})
+		return err == nil
+	}, time.Second, 10*time.Millisecond)
+}
+
+func podTemplateWithLimits(cpu, memory string) *corev1.PodTemplateSpec {
+	return &corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:  "main",
+				Image: "test-image",
+				Resources: corev1.ResourceRequirements{
+					Limits: corev1.ResourceList{
+						corev1.ResourceCPU:    resource.MustParse(cpu),
+						corev1.ResourceMemory: resource.MustParse(memory),
+					},
+				},
+			}},
+		},
 	}
 }

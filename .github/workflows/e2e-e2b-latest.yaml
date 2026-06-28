@@ -35,12 +35,23 @@ jobs:
           - name: without sandbox-gateway
             with_gateway: false
             e2b_enable_auth: true
+            quota_profile: redis-clone
           - name: with sandbox-gateway
             with_gateway: true
             e2b_enable_auth: true
+            quota_profile: redis
           - name: with sandbox-gateway, auth disabled
             with_gateway: true
             e2b_enable_auth: false
+            quota_profile: none
+          - name: quota redis fault
+            with_gateway: false
+            e2b_enable_auth: true
+            quota_profile: redis-fault
+          - name: quota no redis
+            with_gateway: false
+            e2b_enable_auth: true
+            quota_profile: no-redis
     name: sandbox (${{ matrix.name }})
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -136,12 +147,44 @@ jobs:
               echo "  path: /spec/template/spec/containers/0/args/8"
               echo "  value: --e2b-enable-auth=false"
             } >> config/sandbox-manager/configuration_patch.yaml
-            echo "deployment patch:"
-            cat config/sandbox-manager/configuration_patch.yaml
           fi
           make deploy-agent-sandbox-controller
+          kubectl rollout status deployment/sandbox-controller-manager -n sandbox-system --timeout=5m
+          if [ "${{ matrix.quota_profile }}" = "redis" ] || [ "${{ matrix.quota_profile }}" = "redis-clone" ] || [ "${{ matrix.quota_profile }}" = "redis-fault" ]; then
+            kubectl apply -f test/e2b/assets/quota-redis.yaml
+            kubectl wait --for=condition=available deployment/redis -n sandbox-system --timeout=120s
+          fi
+          if [ "${{ matrix.quota_profile }}" != "none" ]; then
+            {
+              echo ""
+              echo "# E2B quota profile and CI-sized manager requests (appended by e2e-e2b-latest before deploy)"
+              if [ "${{ matrix.quota_profile }}" = "redis" ] || [ "${{ matrix.quota_profile }}" = "redis-clone" ] || [ "${{ matrix.quota_profile }}" = "redis-fault" ]; then
+                echo "- op: add"
+                echo "  path: /spec/template/spec/containers/0/args/-"
+                echo "  value: --e2b-quota-redis-addr=redis.sandbox-system.svc.cluster.local:6379"
+                echo "- op: add"
+                echo "  path: /spec/template/spec/containers/0/args/-"
+                echo "  value: --e2b-quota-redis-operation-timeout=1s"
+              fi
+              if [ "${{ matrix.quota_profile }}" = "redis-fault" ]; then
+                echo "- op: add"
+                echo "  path: /spec/template/spec/containers/0/args/-"
+                echo "  value: --e2b-quota-anti-drift-interval=30s"
+                echo "- op: add"
+                echo "  path: /spec/template/spec/containers/0/args/-"
+                echo "  value: --e2b-quota-anti-drift-grace=60s"
+              fi
+              echo "- op: replace"
+              echo "  path: /spec/template/spec/containers/0/resources/requests"
+              printf '  value: {"cpu":"100m","memory":"256Mi"}\n'
+              echo "- op: replace"
+              echo "  path: /spec/template/spec/containers/1/resources/requests"
+              printf '  value: {"cpu":"50m","memory":"128Mi"}\n'
+            } >> config/sandbox-manager/configuration_patch.yaml
+          fi
+          echo "deployment patch:"
+          cat config/sandbox-manager/configuration_patch.yaml
           make deploy-sandbox-manager
-          bash hack/wait-agent-sandbox-controller.sh
 
       - name: Deploy sandbox-gateway
         if: matrix.with_gateway
@@ -163,5 +206,8 @@ jobs:
           fi
           if [ "${{ matrix.e2b_enable_auth }}" = "false" ]; then
             args+=(--auth-disabled)
+          fi
+          if [ "${{ matrix.quota_profile }}" != "none" ]; then
+            export QUOTA_E2E_PROFILE="${{ matrix.quota_profile }}"
           fi
           bash hack/run-e2b-e2e-test.sh "${args[@]}" --pytest-extra-args "-s -x"

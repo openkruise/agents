@@ -39,6 +39,8 @@ CREATE TABLE IF NOT EXISTS `team_api_keys` (
   `team_id`         BIGINT UNSIGNED NOT NULL,
   -- Creator metadata only; not used for ownership or authorization
   `created_by_uid`  VARCHAR(36)     DEFAULT NULL,
+  -- Static per-key quota config stored as normalized internal JSON
+  `quota`           JSON            DEFAULT NULL,
   PRIMARY KEY (`id`),
   UNIQUE INDEX `idx_team_api_keys_uid`      (`uid`),
   UNIQUE INDEX `idx_team_api_keys_key_hash` (`key_hash`),
@@ -78,3 +80,6 @@ ON DUPLICATE KEY UPDATE
 --   `key_hash`   = VALUES(`key_hash`),
 --   `team_id`    = VALUES(`team_id`),
 --   `updated_at` = NOW(3);
+
+-- Manual migration for existing deployments:
+-- ALTER TABLE team_api_keys ADD COLUMN quota JSON DEFAULT NULL AFTER created_by_uid;

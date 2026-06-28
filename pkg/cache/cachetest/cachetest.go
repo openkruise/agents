@@ -74,7 +74,8 @@ func NewTestCache(t *testing.T, initObjs ...ctrlclient.Object) (*cache.Cache, ct
 		WithWaitSimulation(). // enable wait simulation by default
 		Build()
 
-	c, err := cache.NewCache(mgr)
+	health := cache.NewInformerHealth()
+	c, err := cache.NewCacheWithHealth(mgr, health)
 	if err != nil {
 		return nil, nil, err
 	}

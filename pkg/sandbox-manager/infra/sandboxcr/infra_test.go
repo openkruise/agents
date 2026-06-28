@@ -1187,31 +1187,26 @@ func TestInfra_CloneSandboxRetriesWaitReadyFailure(t *testing.T) {
 	assert.True(t, apierrors.IsNotFound(err))
 }
 
-func TestInfra_CloneSandboxRetriesCreateFailure(t *testing.T) {
+func TestInfra_CloneSandboxDoesNotRetryCreateFailure(t *testing.T) {
 	tests := []struct {
-		name             string
-		createErr        error
-		successOnAttempt int // attempt number that should succeed; 0 = always fail
-		expectError      string
-		expectRetries    int
+		name        string
+		createErr   error
+		expectError string
 	}{
 		{
-			name:             "transient create error retries until success",
-			createErr:        fmt.Errorf("etcdserver: leader changed"),
-			successOnAttempt: 3,
-			expectRetries:    2,
+			name:        "transient create error is terminal",
+			createErr:   fmt.Errorf("etcdserver: leader changed"),
+			expectError: "etcdserver: leader changed",
 		},
 		{
-			name:             "non-transient create error also retries (orphan trade-off)",
-			createErr:        fmt.Errorf("sandbox validation failed"),
-			successOnAttempt: 2,
-			expectRetries:    1,
+			name:        "validation create error is terminal",
+			createErr:   fmt.Errorf("sandbox validation failed"),
+			expectError: "sandbox validation failed",
 		},
 		{
-			name:             "always-failing create exhausts retry budget",
-			createErr:        fmt.Errorf("apiserver unavailable"),
-			successOnAttempt: 0,
-			expectError:      "context deadline exceeded",
+			name:        "always-failing create stops after first attempt",
+			createErr:   fmt.Errorf("apiserver unavailable"),
+			expectError: "apiserver unavailable",
 		},
 	}
 
@@ -1225,27 +1220,7 @@ func TestInfra_CloneSandboxRetriesCreateFailure(t *testing.T) {
 			attempts := 0
 			DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client) (*v1alpha1.Sandbox, error) {
 				attempts++
-				if tt.successOnAttempt == 0 || attempts < tt.successOnAttempt {
-					return nil, tt.createErr
-				}
-				sbx.Name = fmt.Sprintf("clone-retry-create-%d", attempts)
-				created, err := origCreateSandbox(ctx, sbx, c)
-				if err != nil {
-					return nil, err
-				}
-				created.Status = v1alpha1.SandboxStatus{
-					Phase:              v1alpha1.SandboxRunning,
-					ObservedGeneration: created.Generation,
-					Conditions: []metav1.Condition{
-						{
-							Type:   string(v1alpha1.SandboxConditionReady),
-							Status: metav1.ConditionTrue,
-							Reason: v1alpha1.SandboxReadyReasonPodReady,
-						},
-					},
-					PodInfo: v1alpha1.PodInfo{PodIP: "1.2.3.4"},
-				}
-				return created, c.Status().Update(ctx, created)
+				return nil, tt.createErr
 			}
 			t.Cleanup(func() { DefaultCreateSandbox = origCreateSandbox })
 
@@ -1260,17 +1235,11 @@ func TestInfra_CloneSandboxRetriesCreateFailure(t *testing.T) {
 				ReserveFailedSandboxFor: ptr.To(consts.ReserveFailedSandboxNever),
 			}
 			sbx, metrics, err := infraInstance.CloneSandbox(t.Context(), opts)
-			if tt.expectError != "" {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tt.expectError)
-				assert.Nil(t, sbx)
-				assert.Greater(t, attempts, 1, "should have retried at least once before giving up")
-				return
-			}
-			require.NoError(t, err)
-			require.NotNil(t, sbx)
-			assert.Equal(t, tt.expectRetries, metrics.Retries)
-			assert.Equal(t, tt.successOnAttempt, attempts)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.expectError)
+			assert.Nil(t, sbx)
+			assert.Equal(t, 1, attempts)
+			assert.Zero(t, metrics.Retries)
 			assertCloneMetricsTotalConsistent(t, metrics)
 		})
 	}

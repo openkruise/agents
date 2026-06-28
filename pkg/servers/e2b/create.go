@@ -24,10 +24,12 @@ import (
 	"strings"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/klog/v2"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	sandboxmanager "github.com/openkruise/agents/pkg/sandbox-manager"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
@@ -51,17 +53,33 @@ const noServerTimeout = 100 * 365 * 24 * time.Hour
 // mapInfraErrorToApiError converts an infra-layer error to an ApiError with the
 // appropriate HTTP status code based on managererrors.ErrorCode.
 func mapInfraErrorToApiError(err error) *web.ApiError {
-	// The E2B POST /sandboxes spec only defines 400/401/500, so client-side
-	// errors (bad request, not found) map to 400 and everything else to 500.
+	// The create API maps validation/lookups to 400, quota misses to 403, and
+	// everything else to 500.
 	switch managererrors.GetErrCode(err) {
 	case managererrors.ErrorBadRequest, managererrors.ErrorNotFound:
 		return &web.ApiError{Code: http.StatusBadRequest, Message: err.Error()}
 	case managererrors.ErrorConflict:
 		return &web.ApiError{Code: http.StatusConflict, Message: err.Error()}
+	case managererrors.ErrorQuotaExceeded:
+		return &web.ApiError{Code: http.StatusForbidden, Message: err.Error()}
 	default:
 		// ErrorInternal, ErrorUnknown, or untyped errors (e.g., retry exhausted) → 500
 		return &web.ApiError{Code: http.StatusInternalServerError, Message: err.Error()}
 	}
+}
+
+func validateCreateResourceOverride(request models.NewSandboxRequest) *web.ApiError {
+	res := request.Extensions.InplaceUpdate.Resources
+	if res == nil {
+		return nil
+	}
+	if _, ok := res.Requests[corev1.ResourceMemory]; ok {
+		return &web.ApiError{Code: http.StatusBadRequest, Message: "memory inplace update is not supported"}
+	}
+	if _, ok := res.Limits[corev1.ResourceMemory]; ok {
+		return &web.ApiError{Code: http.StatusBadRequest, Message: "memory inplace update is not supported"}
+	}
+	return nil
 }
 
 // resolveServerTimeout maps an extension-provided seconds value to a server-side
@@ -88,6 +106,9 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 	request, parseErr := sc.parseCreateSandboxRequest(r)
 	if parseErr != nil {
 		return web.ApiResponse[*models.Sandbox]{}, parseErr
+	}
+	if validateErr := validateCreateResourceOverride(request); validateErr != nil {
+		return web.ApiResponse[*models.Sandbox]{}, validateErr
 	}
 	namespace := sc.getNamespaceOfUser(user)
 	log.Info("create sandbox request received", "request", request)
@@ -121,7 +142,7 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 	log := klog.FromContext(ctx)
 	claimStart := time.Now()
 	var accessToken string
-	opts := infra.ClaimSandboxOptions{
+	infraOpts := infra.ClaimSandboxOptions{
 		Namespace:    sc.getNamespaceOfUser(user),
 		Template:     request.TemplateID,
 		User:         user.ID.String(),
@@ -138,25 +159,25 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 
 	if !request.Extensions.SkipInitRuntime {
 		accessToken = config.NewDefaultAccessToken()
-		opts.InitRuntime = &config.InitRuntimeOptions{
+		infraOpts.InitRuntime = &config.InitRuntimeOptions{
 			EnvVars:     request.EnvVars,
 			AccessToken: accessToken,
 		}
 	}
 
 	if extension := request.Extensions.InplaceUpdate; extension.Image != "" || extension.Resources != nil {
-		opts.InplaceUpdate = &config.InplaceUpdateOptions{
+		infraOpts.InplaceUpdate = &config.InplaceUpdateOptions{
 			Image: extension.Image,
 		}
 		if extension.Resources != nil && (len(extension.Resources.Requests) > 0 || len(extension.Resources.Limits) > 0) {
-			opts.InplaceUpdate.Resources = &config.InplaceUpdateResourcesOptions{
+			infraOpts.InplaceUpdate.Resources = &config.InplaceUpdateResourcesOptions{
 				Requests: extension.Resources.Requests,
 				Limits:   extension.Resources.Limits,
 			}
 		}
 	}
 
-	opts.WaitReadyTimeout = resolveServerTimeout(request.Extensions.WaitReadySeconds)
+	infraOpts.WaitReadyTimeout = resolveServerTimeout(request.Extensions.WaitReadySeconds)
 
 	if len(request.Extensions.CSIMount.MountConfigs) != 0 {
 		csiMountOptions := make([]config.MountConfig, 0, len(request.Extensions.CSIMount.MountConfigs))
@@ -174,9 +195,14 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 				RequestRaw: csiReqConfigRaw,
 			})
 		}
-		opts.CSIMount = &config.CSIMountOptions{
+		infraOpts.CSIMount = &config.CSIMountOptions{
 			MountOptionList: csiMountOptions,
 		}
+	}
+
+	opts := sandboxmanager.ClaimSandboxOptions{
+		Infra: infraOpts,
+		Quota: user.QuotaSpec.DeepCopy(),
 	}
 
 	sbx, err := sc.manager.ClaimSandbox(ctx, opts)
@@ -203,7 +229,7 @@ func (sc *Controller) createSandboxWithClone(ctx context.Context, request models
 		}
 	}
 
-	opts := infra.CloneSandboxOptions{
+	infraOpts := infra.CloneSandboxOptions{
 		Namespace:    sc.getNamespaceOfUser(user),
 		User:         user.ID.String(),
 		CheckPointID: request.TemplateID,
@@ -215,7 +241,7 @@ func (sc *Controller) createSandboxWithClone(ctx context.Context, request models
 		Name:                    request.Extensions.Name,
 		GenerateName:            request.Extensions.GenerateName,
 	}
-	opts.WaitReadyTimeout = resolveServerTimeout(request.Extensions.WaitReadySeconds)
+	infraOpts.WaitReadyTimeout = resolveServerTimeout(request.Extensions.WaitReadySeconds)
 
 	if len(request.Extensions.CSIMount.MountConfigs) != 0 {
 		csiMountOptions := make([]config.MountConfig, 0, len(request.Extensions.CSIMount.MountConfigs))
@@ -232,10 +258,15 @@ func (sc *Controller) createSandboxWithClone(ctx context.Context, request models
 				Driver:     driverName,
 				RequestRaw: csiReqConfigRaw,
 			})
-			opts.CSIMount = &config.CSIMountOptions{
+			infraOpts.CSIMount = &config.CSIMountOptions{
 				MountOptionList: csiMountOptions,
 			}
 		}
+	}
+
+	opts := sandboxmanager.CloneSandboxOptions{
+		Infra: infraOpts,
+		Quota: user.QuotaSpec.DeepCopy(),
 	}
 
 	sbx, err := sc.manager.CloneSandbox(ctx, opts)

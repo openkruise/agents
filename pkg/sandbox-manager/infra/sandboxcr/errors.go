@@ -48,7 +48,7 @@ func NoAvailableError(template, reason string) error {
 
 // classifyCreateError classifies a Kubernetes API error from a Create
 // operation into one of three categories:
-// - retryable: transient server errors, conflicts, network errors -> retriableError
+// - ambiguous: transient server errors, conflicts, network errors -> managererrors.Error{ErrorInternal}
 // - terminal bad request: schema/validation errors -> managererrors.Error{ErrorBadRequest}
 // - terminal internal: Forbidden/auth/platform misconfig -> managererrors.Error{ErrorInternal}
 func classifyCreateError(err error, contextMsg string) error {
@@ -61,16 +61,19 @@ func classifyCreateError(err error, contextMsg string) error {
 		return err
 	}
 
-	// Transient server errors - retryable
+	// Transient server errors are ambiguous for create: the apiserver may have
+	// persisted the CR before the client observed failure, so do not retry with
+	// a new object/lockstring.
 	if apierrors.IsServerTimeout(err) || apierrors.IsTimeout(err) ||
 		apierrors.IsServiceUnavailable(err) || apierrors.IsTooManyRequests(err) ||
 		apierrors.IsInternalError(err) {
-		return retriableError{Message: fmt.Sprintf("%s: %s", contextMsg, err)}
+		return managererrors.NewError(managererrors.ErrorInternal, "%s: %s", contextMsg, err)
 	}
 
-	// Conflict - retryable (optimistic locking)
+	// Conflict is also terminal for Create. There is no existing sandbox object
+	// safely locked by this attempt that the retry loop can reuse.
 	if apierrors.IsConflict(err) {
-		return retriableError{Message: fmt.Sprintf("%s: %s", contextMsg, err)}
+		return managererrors.NewError(managererrors.ErrorInternal, "%s: %s", contextMsg, err)
 	}
 
 	// AlreadyExists - terminal conflict (create name collision)
@@ -106,8 +109,8 @@ func classifyCreateError(err error, contextMsg string) error {
 		return newPlatformCreateError(err, contextMsg)
 	}
 
-	// Non-StatusError (network errors, etc.) - retryable (conservative)
-	return retriableError{Message: fmt.Sprintf("%s: %s", contextMsg, err)}
+	// Non-StatusError (network errors, etc.) - ambiguous create outcome.
+	return managererrors.NewError(managererrors.ErrorInternal, "%s: %s", contextMsg, err)
 }
 
 func newPlatformCreateError(err error, contextMsg string) error {

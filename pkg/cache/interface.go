@@ -20,6 +20,7 @@ import (
 	"context"
 
 	corev1 "k8s.io/api/core/v1"
+	toolscache "k8s.io/client-go/tools/cache"
 	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -54,6 +55,10 @@ type Provider interface {
 	// filtered by namespace and optional owner. Faster than ListSandboxes when only the count is needed.
 	CountActiveSandboxes(ctx context.Context, opts ListSandboxesOptions) (int32, error)
 
+	// ListLiveSandboxesByOwner returns quota-live sandboxes for the given owner
+	// using the informer-backed owner index only.
+	ListLiveSandboxesByOwner(ctx context.Context, owner string) ([]*agentsv1alpha1.Sandbox, error)
+
 	// ListCheckpoints returns Checkpoint CRD objects filtered by namespace and optional owner.
 	// Ownership is determined by the AnnotationOwner annotation on the Checkpoint resource when User is set.
 	ListCheckpoints(ctx context.Context, opts ListCheckpointsOptions) ([]*agentsv1alpha1.Checkpoint, error)
@@ -87,6 +92,14 @@ type Provider interface {
 	// NewPVCTask builds an immutable wait task for a PVC that succeeds when
 	// Status.Phase == ClaimBound.
 	NewPVCTask(ctx context.Context, pvc *corev1.PersistentVolumeClaim) *cacheutils.WaitTask[*corev1.PersistentVolumeClaim]
+
+	// AddSandboxEventHandler registers a raw informer event handler for Sandbox
+	// objects and returns a registration handle for sync tracking and removal.
+	AddSandboxEventHandler(ctx context.Context, handler toolscache.ResourceEventHandler) (SandboxEventHandlerRegistration, error)
+
+	// SandboxInformerHealthy reports the smallest truthful sandbox informer
+	// health signal currently available from the cache internals.
+	SandboxInformerHealthy() bool
 
 	// Run starts an owned manager and waits for cache sync.
 	// Do not call Run for a cache backed by an externally owned manager.
@@ -147,4 +160,9 @@ type ListCheckpointsOptions struct {
 type ListSandboxesInPoolOptions struct {
 	Namespace string
 	Pool      string
+}
+
+type SandboxEventHandlerRegistration interface {
+	HasSynced() bool
+	Remove() error
 }

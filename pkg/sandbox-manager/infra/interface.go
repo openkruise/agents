@@ -31,31 +31,75 @@ import (
 	"github.com/openkruise/agents/pkg/utils/timeout"
 )
 
-type SandboxResource struct {
+const bytesPerMiB = int64(1024 * 1024)
+
+type ResourceList struct {
 	CPUMilli   int64
 	MemoryMB   int64
 	DiskSizeMB int64
 }
 
-// CalculateResourceFromContainers sums resource requests from a list of containers
-// and returns a SandboxResource. Moved from pkg/utils/sandbox-manager to eliminate
-// the utils → business-layer dependency.
-func CalculateResourceFromContainers(containers []corev1.Container) SandboxResource {
-	resource := SandboxResource{}
+type SandboxResource struct {
+	// Legacy request totals used by current E2B response conversion.
+	CPUMilli   int64
+	MemoryMB   int64
+	DiskSizeMB int64
+
+	Requests ResourceList
+	Limits   ResourceList
+}
+
+func memoryBytesToFloorMiB(q resource.Quantity) int64 {
+	return q.Value() / bytesPerMiB
+}
+
+func memoryBytesToCeilMiB(q resource.Quantity) int64 {
+	bytes := q.Value()
+	if bytes <= 0 {
+		return 0
+	}
+	return (bytes + bytesPerMiB - 1) / bytesPerMiB
+}
+
+func calculateResourceList(
+	containers []corev1.Container,
+	pick func(corev1.ResourceRequirements) corev1.ResourceList,
+	memoryToMiB func(resource.Quantity) int64,
+) ResourceList {
+	out := ResourceList{}
 	for _, container := range containers {
-		if requests := container.Resources.Requests; requests != nil {
-			if cpu, ok := requests[corev1.ResourceCPU]; ok {
-				resource.CPUMilli += cpu.MilliValue()
-			}
-			if memory, ok := requests[corev1.ResourceMemory]; ok {
-				resource.MemoryMB += memory.Value() / (1024 * 1024)
-			}
-			if disk, ok := requests[corev1.ResourceEphemeralStorage]; ok {
-				resource.DiskSizeMB += disk.Value() / (1024 * 1024)
-			}
+		resources := pick(container.Resources)
+		if resources == nil {
+			continue
+		}
+		if cpu, ok := resources[corev1.ResourceCPU]; ok {
+			out.CPUMilli += cpu.MilliValue()
+		}
+		if memory, ok := resources[corev1.ResourceMemory]; ok {
+			out.MemoryMB += memoryToMiB(memory)
+		}
+		if disk, ok := resources[corev1.ResourceEphemeralStorage]; ok {
+			out.DiskSizeMB += disk.Value() / bytesPerMiB
 		}
 	}
-	return resource
+	return out
+}
+
+// CalculateResourceFromContainers sums resource requests and limits from a list of containers.
+func CalculateResourceFromContainers(containers []corev1.Container) SandboxResource {
+	requests := calculateResourceList(containers, func(r corev1.ResourceRequirements) corev1.ResourceList {
+		return r.Requests
+	}, memoryBytesToFloorMiB)
+	limits := calculateResourceList(containers, func(r corev1.ResourceRequirements) corev1.ResourceList {
+		return r.Limits
+	}, memoryBytesToCeilMiB)
+	return SandboxResource{
+		CPUMilli:   requests.CPUMilli,
+		MemoryMB:   requests.MemoryMB,
+		DiskSizeMB: requests.DiskSizeMB,
+		Requests:   requests,
+		Limits:     limits,
+	}
 }
 
 type TimeoutUpdateResult struct {

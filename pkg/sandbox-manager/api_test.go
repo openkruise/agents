@@ -42,6 +42,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
+	"github.com/openkruise/agents/pkg/sandbox-manager/quota"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/pagination"
 	"github.com/openkruise/agents/pkg/utils/testutils"
@@ -384,7 +385,7 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 			}, func(err error) bool {
 				return strings.Contains(err.Error(), "no stock")
 			}, func() error {
-				got, err := manager.ClaimSandbox(t.Context(), tt.opts)
+				got, err := manager.ClaimSandbox(t.Context(), ClaimSandboxOptions{Infra: tt.opts})
 				if err == nil {
 					claimed = got
 				}
@@ -1134,7 +1135,7 @@ func TestSandboxManager_CloneSandbox(t *testing.T) {
 
 			tt.opts.CloneTimeout = 100 * time.Millisecond
 			// Call CloneSandbox
-			sbx, err := manager.CloneSandbox(ctx, tt.opts)
+			sbx, err := manager.CloneSandbox(ctx, CloneSandboxOptions{Infra: tt.opts})
 
 			if tt.expectError {
 				require.Error(t, err)
@@ -1409,7 +1410,7 @@ func TestSandboxManager_DeleteSandbox(t *testing.T) {
 			}
 
 			// Delete sandbox
-			err = manager.DeleteSandbox(t.Context(), sbx)
+			err = manager.DeleteSandbox(t.Context(), DeleteSandboxOptions{Sandbox: sbx, User: testUser})
 
 			if tt.expectError {
 				assert.Error(t, err)
@@ -2043,4 +2044,101 @@ func TestGetOwnerOfVolume(t *testing.T) {
 			}
 		})
 	}
+}
+
+// fakeManagerQuota is a minimal quotaEnforcer for tests.
+type fakeManagerQuota struct {
+	lastAcquire quota.AcquireRequest
+	lastRelease quota.ReleaseRequest
+	acquireErr  error
+	releaseErr  error
+}
+
+func (f *fakeManagerQuota) Acquire(_ context.Context, req quota.AcquireRequest) error {
+	f.lastAcquire = req
+	return f.acquireErr
+}
+
+func (f *fakeManagerQuota) Release(_ context.Context, req quota.ReleaseRequest) error {
+	f.lastRelease = req
+	return f.releaseErr
+}
+
+func (f *fakeManagerQuota) Cleanup(_ context.Context, _ string) error {
+	return nil
+}
+
+func TestSandboxManagerBuildsQuotaAdmission(t *testing.T) {
+	quotaMgr := &fakeManagerQuota{}
+	manager, _ := setupTestManager(t)
+	manager.quota = quotaMgr
+
+	user := "user-1"
+	spec := &quota.QuotaSpec{Limits: []quota.QuotaLimit{{Dimension: quota.DimSandboxCount, Scope: quota.ScopeRunning, Limit: 1}}}
+
+	// Verify the manager's quotaAdmission builds a non-nil admission that calls Acquire.
+	admission := manager.quotaAdmission(user, spec)
+	require.NotNil(t, admission)
+
+	// The admission's Acquire should call quota.Acquire with the correct user.
+	err := admission.Acquire(t.Context(), "lock-1", infra.SandboxResource{})
+	require.NoError(t, err)
+	assert.Equal(t, user, quotaMgr.lastAcquire.User)
+	assert.Equal(t, "lock-1", quotaMgr.lastAcquire.LockString)
+	assert.Equal(t, []quota.QuotaScope{quota.ScopeRunning}, quotaMgr.lastAcquire.Scopes)
+
+	// The admission's Release should call quota.Release with the correct user.
+	err = admission.Release(t.Context(), "lock-1")
+	require.NoError(t, err)
+	assert.Equal(t, user, quotaMgr.lastRelease.User)
+	assert.Equal(t, "lock-1", quotaMgr.lastRelease.LockString)
+}
+
+func TestSandboxManagerQuotaAdmissionNilWhenNoQuota(t *testing.T) {
+	manager, _ := setupTestManager(t)
+	admission := manager.quotaAdmission("user-1", nil)
+	assert.Nil(t, admission)
+
+	admission = manager.quotaAdmission("user-1", &quota.QuotaSpec{})
+	assert.Nil(t, admission)
+}
+
+func TestSandboxManagerQuotaAdmissionNilWhenNoEnforcer(t *testing.T) {
+	manager, _ := setupTestManager(t)
+	spec := &quota.QuotaSpec{Limits: []quota.QuotaLimit{{Dimension: quota.DimSandboxCount, Scope: quota.ScopeRunning, Limit: 5}}}
+	admission := manager.quotaAdmission("user-1", spec)
+	assert.Nil(t, admission)
+}
+
+func TestSandboxManagerReleaseQuotaAfterDelete(t *testing.T) {
+	quotaMgr := &fakeManagerQuota{}
+	manager, client := setupTestManager(t)
+	manager.quota = quotaMgr
+
+	sandbox := getSandboxForApiTest("quota-release-test")
+	sandbox.Annotations[agentsv1alpha1.AnnotationOwner] = testUser
+	sandbox.Annotations[agentsv1alpha1.AnnotationLock] = "lock-123"
+	sandbox.Status.Phase = agentsv1alpha1.SandboxRunning
+	sandbox.Status.Conditions = []metav1.Condition{
+		{Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue},
+	}
+	sandbox.Status.PodInfo.PodIP = "10.0.0.1"
+	CreateSandboxWithStatus(t, client, sandbox)
+
+	sbx, err := manager.GetSandbox(t.Context(), testUser, nil, infra.GetSandboxOptions{
+		SandboxID: utils.GetSandboxID(sandbox),
+	})
+	require.NoError(t, err)
+
+	manager.proxy.SetRoute(t.Context(), sbx.GetRoute())
+
+	quotaSpec := &quota.QuotaSpec{Limits: []quota.QuotaLimit{{Dimension: quota.DimSandboxCount, Scope: quota.ScopeRunning, Limit: 5}}}
+	err = manager.DeleteSandbox(t.Context(), DeleteSandboxOptions{
+		Sandbox: sbx,
+		User:    testUser,
+		Quota:   quotaSpec,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, testUser, quotaMgr.lastRelease.User)
+	assert.Equal(t, "lock-123", quotaMgr.lastRelease.LockString)
 }

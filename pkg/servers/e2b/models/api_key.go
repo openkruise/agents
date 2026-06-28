@@ -17,9 +17,12 @@ limitations under the License.
 package models
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/google/uuid"
+
+	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
 )
 
 const AdminTeamName = "admin"
@@ -64,6 +67,8 @@ type CreatedTeamAPIKey struct {
 	CreatedBy *TeamUser                `json:"createdBy"`
 	Team      *Team                    `json:"team,omitempty"`
 	LastUsed  *time.Time               `json:"lastUsed"`
+	Quota     json.RawMessage          `json:"quota,omitempty"`
+	QuotaSpec *quotaspec.QuotaSpec     `json:"-"`
 }
 
 // TeamAPIKey represents a team API key
@@ -74,12 +79,15 @@ type TeamAPIKey struct {
 	Name      string                   `json:"name"`
 	CreatedBy *TeamUser                `json:"createdBy"`
 	LastUsed  *time.Time               `json:"lastUsed"`
+	Quota     json.RawMessage          `json:"quota,omitempty"`
 }
 
 // NewTeamAPIKey represents a request to create a new team API key
 type NewTeamAPIKey struct {
-	Name     string `json:"name"`
-	TeamName string `json:"teamName,omitempty"`
+	Name      string               `json:"name"`
+	TeamName  string               `json:"teamName,omitempty"`
+	Quota     json.RawMessage      `json:"quota,omitempty"`
+	QuotaSpec *quotaspec.QuotaSpec `json:"-"`
 }
 
 // CompatibleAPIKey represents the SDK-compatible form of an authenticated API key.
