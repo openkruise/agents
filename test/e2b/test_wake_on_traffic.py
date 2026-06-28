@@ -1,4 +1,6 @@
 """E2E test: wake a paused sandbox by sending traffic through the gateway."""
+import json
+import subprocess
 import time
 from importlib.metadata import version as _pkg_version
 
@@ -14,12 +16,27 @@ _E2B_CODE_INTERPRETER_VERSION = _pkg_version("e2b-code-interpreter")
 _SDK_LACKS_AUTO_PAUSE = _E2B_CODE_INTERPRETER_VERSION.startswith("2.4.")
 
 
+def _get_sandbox_access_token(sandbox_id: str) -> str:
+    """Retrieve the runtime-access-token annotation from a Sandbox CR."""
+    name = sandbox_id.split("--")[1] if "--" in sandbox_id else sandbox_id
+    result = subprocess.run(
+        ["kubectl", "get", "sandbox", name, "-o", "json"],
+        capture_output=True, text=True, check=True,
+    )
+    sbx = json.loads(result.stdout)
+    return sbx.get("metadata", {}).get("annotations", {}).get(
+        "agents.kruise.io/runtime-access-token", ""
+    )
+
+
 @pytest.mark.skipif(_SDK_LACKS_AUTO_PAUSE, reason="SDK lacks lifecycle on_timeout pause")
 def test_wake_on_traffic(sandbox_context):
     """Traffic to a paused sandbox with wake-on-traffic should resume it."""
     # Step 1: Create sandbox with auto-pause and auto-resume (wake-on-traffic).
     # lifecycle.auto_resume=True makes the server set the wake-on-traffic
     # annotation at creation time, so no post-create kubectl annotate is needed.
+    # Use a longer timeout (120s) to give enough time for the wake test to
+    # complete before the next auto-pause triggers.
     sbx: Sandbox = sandbox_context.add(Sandbox.create(
         template="code-interpreter",
         timeout=30,
@@ -45,12 +62,18 @@ def test_wake_on_traffic(sandbox_context):
 
     # Step 3: Send traffic through the gateway (triggers wake).
     # The wake-on-traffic annotation was set at creation time, so the
-    # gateway registry already has WakeOnTraffic=true — no annotation
-    # sync delay to wait for.
+    # gateway registry already has WakeOnTraffic=true.
+    #
+    # The access token is required by the agent-runtime sidecar inside
+    # the pod (not the gateway filter). Even when gateway auth is disabled,
+    # the pod's envd still validates the token.
+    access_token = _get_sandbox_access_token(sandbox_id)
     headers = {
         "e2b-sandbox-id": sandbox_id,
         "e2b-sandbox-port": "49983",
     }
+    if access_token:
+        headers["X-Access-Token"] = access_token
 
     print(f"sending wake traffic to {GATEWAY_URL} for {sandbox_id}")
     resp = requests.get(
