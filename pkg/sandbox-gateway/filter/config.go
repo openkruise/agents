@@ -60,10 +60,10 @@ type Config struct {
 // DefaultConfig returns default configuration
 func DefaultConfig() *Config {
 	return &Config{
-		SandboxHeaderName: DefaultSandboxHeaderName,
-		SandboxPortHeader: DefaultSandboxPortHeader,
-		HostHeaderName:    DefaultHostHeaderName,
-		DefaultPort:       DefaultSandboxPort,
+		SandboxHeaderName:  DefaultSandboxHeaderName,
+		SandboxPortHeader:  DefaultSandboxPortHeader,
+		HostHeaderName:     DefaultHostHeaderName,
+		DefaultPort:        DefaultSandboxPort,
 		WakeTimeoutSeconds: 60,
 	}
 }
