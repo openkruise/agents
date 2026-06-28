@@ -1072,6 +1072,154 @@ func TestDecodeHeadersAccessTokenAuthKruiseProtocol(t *testing.T) {
 	assert.Equal(t, 401, mockCallbacks2.decoderCallbacks.replyStatusCode)
 }
 
+// TestDecodeHeadersWakeOnTrafficDisabled verifies that when EnableWakeOnTraffic
+// is false, a paused sandbox with WakeOnTraffic=true is NOT woken and returns 502.
+func TestDecodeHeadersWakeOnTrafficDisabled(t *testing.T) {
+	r := registry.GetRegistry()
+	defer r.Clear()
+	r.Update("default--paused-sbx", proxy.Route{
+		IP:              "10.0.0.1",
+		State:           agentsv1alpha1.SandboxStatePaused,
+		WakeOnTraffic:   true,
+		ResourceVersion: "1",
+	})
+
+	cfg := DefaultConfig()
+	// EnableWakeOnTraffic is false by default
+	mockCallbacks := newMockFilterCallbackHandler()
+	filter := &sandboxFilter{callbacks: mockCallbacks, config: cfg, adapter: defaultTestAdapter()}
+
+	header := newMockRequestHeaderMap()
+	header.Set(DefaultSandboxHeaderName, "default--paused-sbx")
+
+	status := filter.DecodeHeaders(header, true)
+
+	assert.Equal(t, api.LocalReply, status)
+	assert.True(t, mockCallbacks.decoderCallbacks.sendLocalReplyCalled)
+	assert.Equal(t, 502, mockCallbacks.decoderCallbacks.replyStatusCode)
+	assert.Equal(t, "sandbox_not_running", mockCallbacks.decoderCallbacks.replyDetails)
+}
+
+// TestDecodeHeadersWakeOnTrafficRouteNotEnabled verifies that when the route's
+// WakeOnTraffic flag is false, a paused sandbox is NOT woken even if the filter
+// has EnableWakeOnTraffic=true.
+func TestDecodeHeadersWakeOnTrafficRouteNotEnabled(t *testing.T) {
+	r := registry.GetRegistry()
+	defer r.Clear()
+	r.Update("default--paused-sbx", proxy.Route{
+		IP:              "10.0.0.1",
+		State:           agentsv1alpha1.SandboxStatePaused,
+		WakeOnTraffic:   false,
+		ResourceVersion: "1",
+	})
+
+	cfg := DefaultConfig()
+	cfg.EnableWakeOnTraffic = true
+	mockCallbacks := newMockFilterCallbackHandler()
+	filter := &sandboxFilter{callbacks: mockCallbacks, config: cfg, adapter: defaultTestAdapter()}
+
+	header := newMockRequestHeaderMap()
+	header.Set(DefaultSandboxHeaderName, "default--paused-sbx")
+
+	status := filter.DecodeHeaders(header, true)
+
+	assert.Equal(t, api.LocalReply, status)
+	assert.Equal(t, 502, mockCallbacks.decoderCallbacks.replyStatusCode)
+	assert.Equal(t, "sandbox_not_running", mockCallbacks.decoderCallbacks.replyDetails)
+}
+
+// TestDecodeHeadersWakeOnTrafficNoWaker verifies that when EnableWakeOnTraffic
+// is true and the route has WakeOnTraffic=true but the waker is nil (not
+// initialized), the filter falls through to the 502 "not running" path.
+func TestDecodeHeadersWakeOnTrafficNoWaker(t *testing.T) {
+	r := registry.GetRegistry()
+	defer r.Clear()
+	r.Update("default--paused-sbx", proxy.Route{
+		IP:              "10.0.0.1",
+		State:           agentsv1alpha1.SandboxStatePaused,
+		WakeOnTraffic:   true,
+		ResourceVersion: "1",
+	})
+
+	cfg := DefaultConfig()
+	cfg.EnableWakeOnTraffic = true
+	cfg.WakeTimeoutSeconds = 30
+	mockCallbacks := newMockFilterCallbackHandler()
+	filter := &sandboxFilter{callbacks: mockCallbacks, config: cfg, adapter: defaultTestAdapter()}
+
+	header := newMockRequestHeaderMap()
+	header.Set(DefaultSandboxHeaderName, "default--paused-sbx")
+
+	// Waker is nil (default state when InitWaker hasn't been called)
+	status := filter.DecodeHeaders(header, true)
+
+	assert.Equal(t, api.LocalReply, status)
+	assert.Equal(t, 502, mockCallbacks.decoderCallbacks.replyStatusCode)
+	assert.Equal(t, "sandbox_not_running", mockCallbacks.decoderCallbacks.replyDetails)
+}
+
+// TestDecodeHeadersWakeOnTrafficInvalidSandboxID verifies that when wake-on-traffic
+// is triggered but the sandbox ID cannot be split into namespace--name (no "--"
+// separator), the filter falls through to the 502 "not running" path.
+func TestDecodeHeadersWakeOnTrafficInvalidSandboxID(t *testing.T) {
+	r := registry.GetRegistry()
+	defer r.Clear()
+	// Sandbox ID without "--" separator — unusual but tests the SplitN branch
+	r.Update("invalid-id-no-separator", proxy.Route{
+		IP:              "10.0.0.1",
+		State:           agentsv1alpha1.SandboxStatePaused,
+		WakeOnTraffic:   true,
+		ResourceVersion: "1",
+	})
+
+	cfg := DefaultConfig()
+	cfg.EnableWakeOnTraffic = true
+	cfg.WakeTimeoutSeconds = 30
+	mockCallbacks := newMockFilterCallbackHandler()
+	filter := &sandboxFilter{callbacks: mockCallbacks, config: cfg, adapter: defaultTestAdapter()}
+
+	header := newMockRequestHeaderMap()
+	header.Set(DefaultSandboxHeaderName, "invalid-id-no-separator")
+
+	status := filter.DecodeHeaders(header, true)
+
+	// Falls through because SplitN returns only 1 part (no "--"), waker nil, or both
+	assert.Equal(t, api.LocalReply, status)
+	assert.Equal(t, 502, mockCallbacks.decoderCallbacks.replyStatusCode)
+	assert.Equal(t, "sandbox_not_running", mockCallbacks.decoderCallbacks.replyDetails)
+}
+
+// TestDecodeHeadersWakeOnTrafficPausedWithRunning verifies that a running sandbox
+// with WakeOnTraffic=true passes through without attempting wake.
+func TestDecodeHeadersWakeOnTrafficPausedWithRunning(t *testing.T) {
+	r := registry.GetRegistry()
+	defer r.Clear()
+	r.Update("default--running-wakeable", proxy.Route{
+		IP:              "10.0.0.5",
+		State:           agentsv1alpha1.SandboxStateRunning,
+		WakeOnTraffic:   true,
+		ResourceVersion: "1",
+	})
+
+	cfg := DefaultConfig()
+	cfg.EnableWakeOnTraffic = true
+	mockCallbacks := newMockFilterCallbackHandler()
+	filter := &sandboxFilter{callbacks: mockCallbacks, config: cfg, adapter: defaultTestAdapter()}
+
+	header := newMockRequestHeaderMap()
+	header.Set(DefaultSandboxHeaderName, "default--running-wakeable")
+
+	status := filter.DecodeHeaders(header, true)
+
+	// Already running → no wake attempt, continue
+	assert.Equal(t, api.Continue, status)
+	assert.False(t, mockCallbacks.decoderCallbacks.sendLocalReplyCalled)
+
+	metadata := mockCallbacks.streamInfo.dynamicMetadata.data["envoy.lb.original_dst"]
+	assert.NotNil(t, metadata)
+	assert.Equal(t, "10.0.0.5:49983", metadata["host"])
+}
+
 // TestDecodeHeadersAuthDisabled verifies that when EnableAuth is false,
 // token validation is skipped even if the route has a token configured.
 func TestDecodeHeadersAuthDisabled(t *testing.T) {
