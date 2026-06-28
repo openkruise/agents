@@ -33,7 +33,6 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-gateway/server"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
-	"github.com/openkruise/agents/pkg/utils/proxyutils"
 	"github.com/openkruise/agents/pkg/utils/timeout"
 )
 
@@ -56,48 +55,6 @@ func InitWaker(cacheProvider cache.Provider) {
 // been called yet.
 func GetWaker() *Waker {
 	return defaultWaker.Load()
-}
-
-// HasWakeAnnotation checks the informer cache for the wake-on-traffic annotation.
-// This is a fallback for when the gateway controller's route registry hasn't
-// yet synced the annotation change. Returns false if the waker is nil or the
-// sandbox cannot be read from cache.
-func (w *Waker) HasWakeAnnotation(ctx context.Context, namespace, name string) bool {
-	if w == nil {
-		return false
-	}
-	cli := w.cache.GetClient()
-	var sbx agentsv1alpha1.Sandbox
-	if err := cli.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, &sbx); err != nil {
-		return false
-	}
-	return sbx.GetAnnotations()[agentsv1alpha1.AnnotationWakeOnTraffic] == agentsv1alpha1.True
-}
-
-// ResolveRoute returns the most up-to-date Route for a sandbox by reading
-// from the informer cache. The registry route is used as a fallback only
-// when the informer cache lookup fails (e.g. the sandbox was just deleted).
-//
-// Returns the effective route and true if the sandbox was found in the
-// informer cache. Returns the original route and false otherwise.
-//
-// This replaces ad-hoc informer checks (IsSandboxPaused, HasWakeAnnotation)
-// with a single, general-purpose resolver: any state query in the filter
-// should use the returned route rather than the registry route.
-func (w *Waker) ResolveRoute(ctx context.Context, sandboxID string, route proxy.Route) (proxy.Route, bool) {
-	if w == nil {
-		return route, false
-	}
-	parts := strings.SplitN(sandboxID, "--", 2)
-	if len(parts) != 2 {
-		return route, false
-	}
-	cli := w.cache.GetClient()
-	var sbx agentsv1alpha1.Sandbox
-	if err := cli.Get(ctx, client.ObjectKey{Namespace: parts[0], Name: parts[1]}, &sbx); err != nil {
-		return route, false
-	}
-	return proxyutils.GetRouteFromSandbox(&sbx), true
 }
 
 // Wake resumes a paused sandbox by calling the existing sandbox-manager
