@@ -98,18 +98,13 @@ func TestPrimaryState(t *testing.T) {
 func TestPrimaryElectorCallbacksRespectRunLifecycle(t *testing.T) {
 	tests := []struct {
 		name       string
-		stopFirst  bool
 		cancel     bool
 		stopped    bool
 		expectLive bool
 	}{
 		{
-			name:       "matching active run becomes primary",
+			name:       "active run becomes primary",
 			expectLive: true,
-		},
-		{
-			name:      "stopped run ignores late start callback",
-			stopFirst: true,
 		},
 		{
 			name:   "canceled context ignores start callback",
@@ -124,11 +119,8 @@ func TestPrimaryElectorCallbacksRespectRunLifecycle(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			state := &primaryState{}
-			elector := &primaryElector{state: state, runID: 1, stopped: tt.stopped}
-			ctx, cancel := context.WithCancel(context.WithValue(context.Background(), primaryRunIDContextKey{}, uint64(1)))
-			if tt.stopFirst {
-				elector.stopLeading()
-			}
+			elector := &primaryElector{state: state, stopped: tt.stopped}
+			ctx, cancel := context.WithCancel(context.Background())
 			if tt.cancel {
 				cancel()
 			} else {
@@ -141,6 +133,15 @@ func TestPrimaryElectorCallbacksRespectRunLifecycle(t *testing.T) {
 	}
 }
 
+func TestPrimaryElectorStopLeadingClearsPrimary(t *testing.T) {
+	state := &primaryState{}
+	state.set(true)
+	elector := &primaryElector{state: state}
+
+	elector.stopLeading()
+	assert.False(t, state.IsPrimary())
+}
+
 func TestPrimaryElectorStopCancelsAndClearsPrimary(t *testing.T) {
 	state := &primaryState{}
 	state.set(true)
@@ -148,7 +149,6 @@ func TestPrimaryElectorStopCancelsAndClearsPrimary(t *testing.T) {
 	done := make(chan struct{})
 	elector := &primaryElector{
 		state:  state,
-		runID:  1,
 		cancel: cancel,
 		done:   done,
 	}

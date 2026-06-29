@@ -102,6 +102,8 @@ func (s *primaryState) WaitPrimary(ctx context.Context) error {
 	}
 }
 
+// leaderElectionRunner abstracts the K8s LeaderElector so that the election
+// loop can be tested without a real API server.
 type leaderElectionRunner interface {
 	Run(ctx context.Context)
 }
@@ -111,16 +113,10 @@ type primaryElector struct {
 	state   *primaryState
 
 	mu      sync.Mutex
-	runID   uint64
-	running bool
 	stopped bool
 	cancel  context.CancelFunc
 	done    chan struct{}
-
-	nextRunID atomic.Uint64
 }
-
-type primaryRunIDContextKey struct{}
 
 func newPrimaryElector(opts config.SandboxManagerOptions, state *primaryState) (*primaryElector, error) {
 	clientset, err := kubernetes.NewForConfig(primaryKubeClientConfig(opts.RestConfig))
@@ -192,40 +188,30 @@ func (e *primaryElector) Run(ctx context.Context) {
 	done := make(chan struct{})
 
 	e.mu.Lock()
-	if e.stopped || e.running {
+	if e.stopped {
 		e.mu.Unlock()
 		close(done)
 		return
 	}
-	e.running = true
 	e.done = done
 	e.mu.Unlock()
 
 	defer func() {
 		e.mu.Lock()
-		e.running = false
-		e.runID = 0
+		e.done = nil
 		e.cancel = nil
-		if e.done == done {
-			e.done = nil
-		}
 		e.state.set(false)
 		e.mu.Unlock()
 		close(done)
 	}()
 
 	for ctx.Err() == nil {
-		runCtx, cancel := context.WithCancel(ctx)
-		runID := e.nextRunID.Add(1)
-		runCtx = context.WithValue(runCtx, primaryRunIDContextKey{}, runID)
-
 		e.mu.Lock()
 		if e.stopped {
 			e.mu.Unlock()
-			cancel()
 			return
 		}
-		e.runID = runID
+		runCtx, cancel := context.WithCancel(ctx)
 		e.cancel = cancel
 		e.mu.Unlock()
 
@@ -233,10 +219,6 @@ func (e *primaryElector) Run(ctx context.Context) {
 		cancel()
 
 		e.mu.Lock()
-		if e.runID == runID {
-			e.runID = 0
-			e.state.set(false)
-		}
 		e.cancel = nil
 		stopped := e.stopped
 		e.mu.Unlock()
@@ -255,7 +237,6 @@ func (e *primaryElector) Stop(ctx context.Context) {
 	cancel := e.cancel
 	done := e.done
 	e.stopped = true
-	e.runID = 0
 	e.state.set(false)
 	e.mu.Unlock()
 
@@ -273,17 +254,12 @@ func (e *primaryElector) Stop(ctx context.Context) {
 }
 
 func (e *primaryElector) startLeading(ctx context.Context) {
-	if e == nil || ctx.Err() != nil {
+	if e == nil {
 		return
 	}
-	runID, ok := ctx.Value(primaryRunIDContextKey{}).(uint64)
-	if !ok {
-		return
-	}
-
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.stopped || e.runID != runID || ctx.Err() != nil {
+	if e.stopped || ctx.Err() != nil {
 		return
 	}
 	e.state.set(true)
@@ -293,10 +269,6 @@ func (e *primaryElector) stopLeading() {
 	if e == nil {
 		return
 	}
-
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	e.runID = 0
 	e.state.set(false)
 }
 
