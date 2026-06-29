@@ -592,7 +592,9 @@ func TestMySQL_ListByOwnerTeamIncludesQuota(t *testing.T) {
 	spec, err := models.QuotaSpecFromWire(keys[0].Quota)
 	require.NoError(t, err)
 	require.Equal(t, mysqlQuotaSpecWithMultipleLimits(), spec)
-	require.JSONEq(t, `{"running":{"limits.cpu":8000,"limits.memory":16384},"all":{"sandbox.count":50}}`, string(keys[0].Quota))
+	quotaJSON, err := json.Marshal(keys[0].Quota)
+	require.NoError(t, err)
+	require.JSONEq(t, `{"running":{"limits.cpu":8000,"limits.memory":16384},"all":{"sandbox.count":50}}`, string(quotaJSON))
 }
 
 func TestMySQL_CreateKeyReturnsAndCachesQuota(t *testing.T) {

@@ -31,38 +31,48 @@ var quotaWireDimensions = []quotaspec.QuotaDimension{
 	quotaspec.DimLimitsMemory,
 }
 
-// QuotaSpecFromWire decodes the public wire format (scope → full-dimension → limit)
-// into a validated QuotaSpec. Short keys such as "count", "cpu", and "memory" are
-// rejected; callers must use the full keys "sandbox.count", "limits.cpu", and
-// "limits.memory".
-func QuotaSpecFromWire(raw json.RawMessage) (*quotaspec.QuotaSpec, error) {
-	if len(raw) == 0 || string(raw) == "null" {
-		return nil, nil
-	}
+// QuotaWire is the typed wire-format representation of quota for JSON
+// encoding and decoding in API requests and responses.
+//
+// JSON shape: {"running":{"sandbox.count":10,"limits.cpu":8000},"all":{"sandbox.count":50}}
+type QuotaWire struct {
+	// Scopes maps scope names (e.g. "running", "all") to their dimension limits.
+	Scopes map[string]map[string]int64 `json:",omitempty"`
+}
 
-	var wire map[string]map[string]int64
-	if err := json.Unmarshal(raw, &wire); err != nil {
-		return nil, fmt.Errorf("unmarshal quota wire: %w", err)
+// MarshalJSON implements json.Marshaler. Returns JSON null for a nil receiver.
+func (q *QuotaWire) MarshalJSON() ([]byte, error) {
+	if q == nil {
+		return []byte("null"), nil
 	}
-	if len(wire) == 0 {
-		return nil, nil
-	}
+	return json.Marshal(q.Scopes)
+}
 
-	for scopeName, dims := range wire {
-		scope := quotaspec.QuotaScope(scopeName)
-		if err := validateQuotaScope(scope); err != nil {
-			return nil, err
-		}
-		for dimName := range dims {
-			if _, err := quotaDimensionFromWireKey(dimName); err != nil {
-				return nil, err
-			}
-		}
+// UnmarshalJSON implements json.Unmarshaler. Accepts JSON null or an object
+// with scope keys.
+func (q *QuotaWire) UnmarshalJSON(data []byte) error {
+	if string(data) == "null" {
+		q.Scopes = nil
+		return nil
+	}
+	return json.Unmarshal(data, &q.Scopes)
+}
+
+// IsEmpty reports whether the wire carries no scope data.
+func (q *QuotaWire) IsEmpty() bool {
+	return q == nil || len(q.Scopes) == 0
+}
+
+// ToQuotaSpec converts the wire format into a validated QuotaSpec.
+// Returns nil for empty/unlimited quotas.
+func (q *QuotaWire) ToQuotaSpec() (*quotaspec.QuotaSpec, error) {
+	if q.IsEmpty() {
+		return nil, nil
 	}
 
 	spec := &quotaspec.QuotaSpec{}
 	for _, scope := range []quotaspec.QuotaScope{quotaspec.ScopeRunning, quotaspec.ScopeAll} {
-		dims, ok := wire[string(scope)]
+		dims, ok := q.Scopes[string(scope)]
 		if !ok {
 			continue
 		}
@@ -82,24 +92,52 @@ func QuotaSpecFromWire(raw json.RawMessage) (*quotaspec.QuotaSpec, error) {
 	return quotaspec.NormalizeQuotaSpec(spec)
 }
 
-// WireFromQuotaSpec encodes a QuotaSpec into the public wire format using full
-// dimension keys ("sandbox.count", "limits.cpu", "limits.memory").
-func WireFromQuotaSpec(spec *quotaspec.QuotaSpec) json.RawMessage {
+// QuotaWireFromSpec builds a QuotaWire from an internal QuotaSpec.
+// Returns nil for nil or unlimited specs.
+func QuotaWireFromSpec(spec *quotaspec.QuotaSpec) *QuotaWire {
 	if spec == nil || len(spec.Limits) == 0 {
 		return nil
 	}
 
-	wire := make(map[string]map[string]int64, 2)
+	wire := &QuotaWire{Scopes: make(map[string]map[string]int64, 2)}
 	for _, limit := range spec.Limits {
 		scopeKey := string(limit.Scope)
-		if _, ok := wire[scopeKey]; !ok {
-			wire[scopeKey] = map[string]int64{}
+		if _, ok := wire.Scopes[scopeKey]; !ok {
+			wire.Scopes[scopeKey] = map[string]int64{}
 		}
-		wire[scopeKey][string(limit.Dimension)] = limit.Limit
+		wire.Scopes[scopeKey][string(limit.Dimension)] = limit.Limit
+	}
+	return wire
+}
+
+// QuotaSpecFromWire decodes the public wire format into a validated QuotaSpec.
+// Accepts a nil wire for unlimited quotas.
+func QuotaSpecFromWire(wire *QuotaWire) (*quotaspec.QuotaSpec, error) {
+	if wire == nil {
+		return nil, nil
 	}
 
-	raw, _ := json.Marshal(wire)
-	return raw
+	for scopeName := range wire.Scopes {
+		scope := quotaspec.QuotaScope(scopeName)
+		if err := validateQuotaScope(scope); err != nil {
+			return nil, err
+		}
+		for dimName := range wire.Scopes[scopeName] {
+			switch quotaspec.QuotaDimension(dimName) {
+			case quotaspec.DimSandboxCount, quotaspec.DimLimitsCPU, quotaspec.DimLimitsMemory:
+				// valid
+			default:
+				return nil, fmt.Errorf("unsupported quota dimension %q", dimName)
+			}
+		}
+	}
+
+	return wire.ToQuotaSpec()
+}
+
+// WireFromQuotaSpec encodes a QuotaSpec into the public wire format.
+func WireFromQuotaSpec(spec *quotaspec.QuotaSpec) *QuotaWire {
+	return QuotaWireFromSpec(spec)
 }
 
 func validateQuotaScope(scope quotaspec.QuotaScope) error {
@@ -108,16 +146,5 @@ func validateQuotaScope(scope quotaspec.QuotaScope) error {
 		return nil
 	default:
 		return fmt.Errorf("unsupported quota scope %q", scope)
-	}
-}
-
-func quotaDimensionFromWireKey(key string) (quotaspec.QuotaDimension, error) {
-	switch quotaspec.QuotaDimension(key) {
-	case quotaspec.DimSandboxCount, quotaspec.DimLimitsCPU, quotaspec.DimLimitsMemory:
-		return quotaspec.QuotaDimension(key), nil
-	case "count", "cpu", "memory":
-		return "", fmt.Errorf("unsupported quota dimension %q; use full key", key)
-	default:
-		return "", fmt.Errorf("unsupported quota dimension %q", key)
 	}
 }

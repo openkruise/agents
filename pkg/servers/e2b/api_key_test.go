@@ -325,7 +325,7 @@ func TestCreateAPIKey_QuotaJSONValidationAndResponses(t *testing.T) {
 			body:       `{"name":"internal-shape","quota":{"limits":[{"dimension":"sandbox.count","limit":2}]}}`,
 			expectCode: http.StatusBadRequest,
 			expectContains: []string{
-				`unmarshal quota wire`,
+				`cannot unmarshal array`,
 			},
 		},
 		{

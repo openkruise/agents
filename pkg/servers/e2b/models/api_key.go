@@ -17,7 +17,6 @@ limitations under the License.
 package models
 
 import (
-	"encoding/json"
 	"time"
 
 	"github.com/google/uuid"
@@ -67,7 +66,7 @@ type CreatedTeamAPIKey struct {
 	CreatedBy *TeamUser                `json:"createdBy"`
 	Team      *Team                    `json:"team,omitempty"`
 	LastUsed  *time.Time               `json:"lastUsed"`
-	Quota     json.RawMessage          `json:"quota,omitempty"`
+	Quota     *QuotaWire               `json:"quota,omitempty"`
 	QuotaSpec *quotaspec.QuotaSpec     `json:"-"`
 }
 
@@ -79,14 +78,14 @@ type TeamAPIKey struct {
 	Name      string                   `json:"name"`
 	CreatedBy *TeamUser                `json:"createdBy"`
 	LastUsed  *time.Time               `json:"lastUsed"`
-	Quota     json.RawMessage          `json:"quota,omitempty"`
+	Quota     *QuotaWire               `json:"quota,omitempty"`
 }
 
 // NewTeamAPIKey represents a request to create a new team API key
 type NewTeamAPIKey struct {
 	Name      string               `json:"name"`
 	TeamName  string               `json:"teamName,omitempty"`
-	Quota     json.RawMessage      `json:"quota,omitempty"`
+	Quota     *QuotaWire           `json:"quota,omitempty"`
 	QuotaSpec *quotaspec.QuotaSpec `json:"-"`
 }
 

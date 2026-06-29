@@ -31,7 +31,7 @@ import (
 )
 
 const (
-	apiKeyQuotaCleanupTimeout        = 2 * time.Second
+	apiKeyQuotaCleanupTimeout        = 10 * time.Second
 	apiKeyQuotaCleanupInitialBackoff = 100 * time.Millisecond
 	apiKeyQuotaCleanupMaxBackoff     = 500 * time.Millisecond
 )
@@ -190,10 +190,12 @@ func (sc *Controller) cleanupDeletedAPIKeyQuota(ctx context.Context, apiKeyID st
 	if sc == nil || apiKeyID == "" {
 		return
 	}
+	log := klog.FromContext(ctx)
 
-	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), apiKeyQuotaCleanupTimeout)
+	// ctx is used only for extracting the request-scoped logger; actual cleanup
+	// runs against an independent background context so it survives handler cancellation.
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), apiKeyQuotaCleanupTimeout)
 	defer cancel()
-	log := klog.FromContext(cleanupCtx)
 	backoff := apiKeyQuotaCleanupInitialBackoff
 	var lastErr error
 
