@@ -179,7 +179,9 @@ func (sc *Controller) CheckCreateAPIKeyPermission(ctx context.Context, r *http.R
 
 	// Parse caller team and target team
 	var request models.NewTeamAPIKey
-	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
 		return ctx, &web.ApiError{
 			Code:    http.StatusBadRequest,
 			Message: err.Error(),

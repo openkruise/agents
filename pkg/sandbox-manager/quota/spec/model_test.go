@@ -113,19 +113,15 @@ func TestDecodeQuotaSpec(t *testing.T) {
 		{name: "empty is unlimited", raw: []byte(""), want: nil},
 		{name: "null is unlimited", raw: []byte("null"), want: nil},
 		{
-			name: "valid stored spec",
+			name: "valid limits spec",
 			raw:  []byte(`{"limits":[{"dimension":"sandbox.count","scope":"all","limit":50}]}`),
 			want: &QuotaSpec{Limits: []QuotaLimit{{Dimension: DimSandboxCount, Scope: ScopeAll, Limit: 50}}},
 		},
+		{name: "empty object is unlimited", raw: []byte(`{}`), want: nil},
 		{
-			name:        "missing limits field",
-			raw:         []byte(`{}`),
-			expectError: "stored quota missing limits",
-		},
-		{
-			name:        "extra fields rejected",
-			raw:         []byte(`{"limits":[],"extra":true}`),
-			expectError: "stored quota contains unsupported fields",
+			name:        "nested wire shape rejected",
+			raw:         []byte(`{"all":{"sandbox.count":50}}`),
+			expectError: "unmarshal quota",
 		},
 	}
 	for _, tt := range tests {
@@ -220,4 +216,82 @@ func TestMarshalQuotaSpecJSON(t *testing.T) {
 	raw, err := json.Marshal(spec)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{"limits":[{"dimension":"sandbox.count","scope":"all","limit":50}]}`, string(raw))
+}
+
+func TestQuotaSpecJSONLimitsFormat(t *testing.T) {
+	tests := []struct {
+		name string
+		spec *QuotaSpec
+		want string
+	}{
+		{
+			name: "limited quota uses limits array",
+			spec: &QuotaSpec{Limits: []QuotaLimit{
+				{Dimension: DimSandboxCount, Scope: ScopeRunning, Limit: 10},
+				{Dimension: DimLimitsCPU, Scope: ScopeAll, Limit: 8000},
+			}},
+			want: `{"limits":[{"dimension":"sandbox.count","scope":"running","limit":10},{"dimension":"limits.cpu","scope":"all","limit":8000}]}`,
+		},
+		{name: "empty quota marshals as empty object", spec: &QuotaSpec{}, want: `{}`},
+		{name: "nil quota marshals as null", spec: nil, want: `null`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw, err := json.Marshal(tt.spec)
+			require.NoError(t, err)
+			assert.JSONEq(t, tt.want, string(raw))
+		})
+	}
+}
+
+func TestQuotaSpecUnmarshalJSONLimitsFormat(t *testing.T) {
+	tests := []struct {
+		name        string
+		raw         string
+		want        *QuotaSpec
+		expectError string
+	}{
+		{
+			name: "limits quota",
+			raw:  `{"limits":[{"dimension":"sandbox.count","scope":"running","limit":10},{"dimension":"limits.cpu","scope":"all","limit":8000}]}`,
+			want: &QuotaSpec{Limits: []QuotaLimit{
+				{Dimension: DimSandboxCount, Scope: ScopeRunning, Limit: 10},
+				{Dimension: DimLimitsCPU, Scope: ScopeAll, Limit: 8000},
+			}},
+		},
+		{name: "null is unlimited", raw: `null`, want: nil},
+		{name: "empty object is unlimited", raw: `{}`, want: nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got QuotaSpec
+			err := json.Unmarshal([]byte(tt.raw), &got)
+			require.NoError(t, err)
+			if tt.want == nil {
+				assert.Empty(t, got.Limits)
+				return
+			}
+			assert.Equal(t, tt.want.Limits, got.Limits)
+		})
+	}
+}
+
+func TestQuotaSpecUnmarshalJSONClearsExistingLimits(t *testing.T) {
+	spec := QuotaSpec{Limits: []QuotaLimit{{Dimension: DimSandboxCount, Scope: ScopeAll, Limit: 99}}}
+	require.NoError(t, json.Unmarshal([]byte(`{"limits":[{"dimension":"limits.memory","scope":"running","limit":1024}]}`), &spec))
+	assert.Equal(t, []QuotaLimit{{Dimension: DimLimitsMemory, Scope: ScopeRunning, Limit: 1024}}, spec.Limits)
+}
+
+func TestMarshalDecodeQuotaSpecUseLimitsFormat(t *testing.T) {
+	original := &QuotaSpec{Limits: []QuotaLimit{
+		{Dimension: DimSandboxCount, Scope: ScopeRunning, Limit: 5},
+		{Dimension: DimLimitsMemory, Scope: ScopeAll, Limit: 16384},
+	}}
+	raw, err := MarshalQuotaSpec(original)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"limits":[{"dimension":"sandbox.count","scope":"running","limit":5},{"dimension":"limits.memory","scope":"all","limit":16384}]}`, string(raw))
+
+	decoded, err := DecodeQuotaSpec(raw)
+	require.NoError(t, err)
+	assert.Equal(t, original.Limits, decoded.Limits)
 }

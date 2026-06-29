@@ -21,8 +21,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"strings"
 )
 
 // QuotaDimension identifies a metered resource axis.
@@ -44,6 +42,9 @@ const (
 
 // ErrQuotaLimitNegative is returned when a quota limit is negative.
 var ErrQuotaLimitNegative = errors.New("quota limit must be non-negative")
+
+// ErrInvalidQuotaSpec is returned when a quota spec cannot be decoded or validated.
+var ErrInvalidQuotaSpec = errors.New("invalid quota spec")
 
 // QuotaLimit is a single dimension/scope/limit triple.
 type QuotaLimit struct {
@@ -125,37 +126,20 @@ func NormalizeQuotaSpec(spec *QuotaSpec) (*QuotaSpec, error) {
 
 // DecodeQuotaSpec deserializes a stored quota JSON blob and normalizes it.
 func DecodeQuotaSpec(raw []byte) (*QuotaSpec, error) {
-	if len(raw) == 0 || string(raw) == "null" {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
 		return nil, nil
 	}
 
-	var stored struct {
-		Limits json.RawMessage `json:"limits"`
-	}
+	var spec QuotaSpec
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&stored); err != nil {
-		if strings.Contains(err.Error(), "unknown field") {
-			return nil, errors.New("stored quota contains unsupported fields")
-		}
-		return nil, fmt.Errorf("unmarshal quota: %w", err)
+	if err := decoder.Decode(&spec); err != nil {
+		return nil, fmt.Errorf("%w: unmarshal quota: %v", ErrInvalidQuotaSpec, err)
 	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		return nil, fmt.Errorf("unmarshal quota: multiple JSON values")
-	}
-	var spec QuotaSpec
-	if len(stored.Limits) == 0 {
-		return nil, errors.New("stored quota missing limits")
-	}
-	if string(stored.Limits) != "null" {
-		if err := json.Unmarshal(stored.Limits, &spec.Limits); err != nil {
-			return nil, fmt.Errorf("unmarshal quota: %w", err)
-		}
-	}
-
 	normalized, err := NormalizeQuotaSpec(&spec)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %v", ErrInvalidQuotaSpec, err)
 	}
 	return normalized, nil
 }
@@ -164,12 +148,11 @@ func DecodeQuotaSpec(raw []byte) (*QuotaSpec, error) {
 func MarshalQuotaSpec(spec *QuotaSpec) ([]byte, error) {
 	normalized, err := NormalizeQuotaSpec(spec)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %v", ErrInvalidQuotaSpec, err)
 	}
 	if normalized == nil {
 		return nil, nil
 	}
-
 	raw, err := json.Marshal(normalized)
 	if err != nil {
 		return nil, fmt.Errorf("marshal quota: %w", err)

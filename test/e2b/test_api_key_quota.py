@@ -63,6 +63,10 @@ def key_headers(api_key, request_id=None):
     return with_request_id({"X-API-KEY": api_key, "Content-Type": "application/json"}, request_id)
 
 
+def quota_spec(*limits):
+    return {"limits": [{"dimension": dimension, "scope": scope, "limit": limit} for dimension, scope, limit in limits]}
+
+
 def assert_static_quota_response(payload, expected_quota):
     assert "usage" not in payload
     assert "quotaUsage" not in payload
@@ -113,7 +117,7 @@ def create_sandbox_with_key(api_key, template, marker, timeout=600):
 
 def create_snapshot_with_key(api_key, sbx, marker):
     resp = requests.post(
-        f"{api_url()}/sandboxes/{sandbox_name(sbx)}/snapshots",
+        f"{api_url()}/sandboxes/{sbx.sandbox_id}/snapshots",
         json={},
         headers={**key_headers(api_key), "x-request-id": marker},
     )
@@ -475,18 +479,24 @@ def assert_ready_sandbox_count(sandboxset_name, minimum):
         ("absent", ABSENT_QUOTA, None),
         ("null", None, None),
         ("empty", {}, None),
-        ("empty_all_scope", {"all": {}}, None),
-        ("empty_running_scope", {"running": {}}, None),
         (
             "full",
-            {
-                "all": {"sandbox.count": 5, "limits.cpu": 500, "limits.memory": 512},
-                "running": {"sandbox.count": 2, "limits.cpu": 200, "limits.memory": 256},
-            },
-            {
-                "all": {"sandbox.count": 5, "limits.cpu": 500, "limits.memory": 512},
-                "running": {"sandbox.count": 2, "limits.cpu": 200, "limits.memory": 256},
-            },
+            quota_spec(
+                ("sandbox.count", "all", 5),
+                ("limits.cpu", "all", 500),
+                ("limits.memory", "all", 512),
+                ("sandbox.count", "running", 2),
+                ("limits.cpu", "running", 200),
+                ("limits.memory", "running", 256),
+            ),
+            quota_spec(
+                ("sandbox.count", "all", 5),
+                ("limits.cpu", "all", 500),
+                ("limits.memory", "all", 512),
+                ("sandbox.count", "running", 2),
+                ("limits.cpu", "running", 200),
+                ("limits.memory", "running", 256),
+            ),
         ),
     ],
 )
@@ -516,16 +526,13 @@ def test_api_key_quota_create_list_static_response(sandbox_context, case_name, q
 @pytest.mark.parametrize(
     "case_name,raw_body,expected_fragment",
     [
-        ("negative_count", {"name": "x", "quota": {"all": {"sandbox.count": -1}}}, "limit"),
-        ("negative_cpu", {"name": "x", "quota": {"running": {"limits.cpu": -1}}}, "limit"),
-        ("negative_memory", {"name": "x", "quota": {"all": {"limits.memory": -1}}}, "limit"),
-        ("unsupported_scope", {"name": "x", "quota": {"template:code-interpreter": {"sandbox.count": 1}}}, "scope"),
-        ("unsupported_dimension", {"name": "x", "quota": {"all": {"gpu": 1}}}, "dimension"),
-        (
-            "internal_shape_not_public",
-            {"name": "x", "quota": {"limits": [{"dimension": "sandbox.count", "scope": "all", "limit": 1}]}},
-            "quota",
-        ),
+        ("negative_count", {"name": "x", "quota": quota_spec(("sandbox.count", "all", -1))}, "limit"),
+        ("negative_cpu", {"name": "x", "quota": quota_spec(("limits.cpu", "running", -1))}, "limit"),
+        ("negative_memory", {"name": "x", "quota": quota_spec(("limits.memory", "all", -1))}, "limit"),
+        ("unsupported_scope", {"name": "x", "quota": quota_spec(("sandbox.count", "template:code-interpreter", 1))}, "scope"),
+        ("unsupported_dimension", {"name": "x", "quota": quota_spec(("gpu", "all", 1))}, "dimension"),
+        ("nested_wire_all", {"name": "x", "quota": {"all": {"sandbox.count": 1}}}, "unknown"),
+        ("nested_wire_running", {"name": "x", "quota": {"running": {}}}, "unknown"),
     ],
 )
 def test_api_key_quota_validation_rejects_invalid_values(case_name, raw_body, expected_fragment):
@@ -541,7 +548,7 @@ def test_api_key_quota_zero_limit_is_valid_and_blocks_create(sandbox_context):
     created_id = None
     owned = []
     try:
-        resp = create_api_key("quota-zero", marker, quota={"all": {"sandbox.count": 0}})
+        resp = create_api_key("quota-zero", marker, quota=quota_spec(("sandbox.count", "all", 0)))
         assert resp.status_code == 201, resp.text
         body = resp.json()
         created_id = body["id"]
@@ -564,7 +571,7 @@ def test_count_all_limit_blocks_then_delete_releases(sandbox_context):
     created_id = None
     owned = []
     try:
-        resp = create_api_key("quota-count-all", marker, quota={"all": {"sandbox.count": 1}})
+        resp = create_api_key("quota-count-all", marker, quota=quota_spec(("sandbox.count", "all", 1)))
         assert resp.status_code == 201, resp.text
         body = resp.json()
         created_id = body["id"]
@@ -591,7 +598,7 @@ def test_count_all_limit_still_counts_paused_sandbox(sandbox_context):
     created_id = None
     owned = []
     try:
-        resp = create_api_key("quota-count-all-paused", marker, quota={"all": {"sandbox.count": 1}})
+        resp = create_api_key("quota-count-all-paused", marker, quota=quota_spec(("sandbox.count", "all", 1)))
         assert resp.status_code == 201, resp.text
         body = resp.json()
         created_id = body["id"]
@@ -611,7 +618,7 @@ def test_count_running_limit_pause_frees_running_scope(sandbox_context):
     created_id = None
     owned = []
     try:
-        resp = create_api_key("quota-count-running", marker, quota={"running": {"sandbox.count": 1}})
+        resp = create_api_key("quota-count-running", marker, quota=quota_spec(("sandbox.count", "running", 1)))
         assert resp.status_code == 201, resp.text
         body = resp.json()
         created_id = body["id"]
@@ -634,7 +641,7 @@ def test_running_resume_can_exceed_limit_and_blocks_new_creates(sandbox_context)
     created_id = None
     owned = []
     try:
-        resp = create_api_key("quota-running-resume", marker, quota={"running": {"sandbox.count": 1}})
+        resp = create_api_key("quota-running-resume", marker, quota=quota_spec(("sandbox.count", "running", 1)))
         assert resp.status_code == 201, resp.text
         body = resp.json()
         created_id = body["id"]
@@ -660,7 +667,7 @@ def test_cpu_all_limit_uses_millicore_footprint(sandbox_context):
     created_id = None
     owned = []
     try:
-        resp = create_api_key("quota-cpu-all", marker, quota={"all": {"limits.cpu": 750}})
+        resp = create_api_key("quota-cpu-all", marker, quota=quota_spec(("limits.cpu", "all", 750)))
         assert resp.status_code == 201, resp.text
         body = resp.json()
         created_id = body["id"]
@@ -678,7 +685,7 @@ def test_memory_all_limit_uses_mib_footprint(sandbox_context):
     created_id = None
     owned = []
     try:
-        resp = create_api_key("quota-memory-all", marker, quota={"all": {"limits.memory": 768}})
+        resp = create_api_key("quota-memory-all", marker, quota=quota_spec(("limits.memory", "all", 768)))
         assert resp.status_code == 201, resp.text
         body = resp.json()
         created_id = body["id"]
@@ -699,7 +706,7 @@ def test_running_resource_limits_pause_and_resume(sandbox_context):
         resp = create_api_key(
             "quota-running-resources",
             marker,
-            quota={"running": {"limits.cpu": 750, "limits.memory": 768}},
+            quota=quota_spec(("limits.cpu", "running", 750), ("limits.memory", "running", 768)),
         )
         assert resp.status_code == 201, resp.text
         body = resp.json()
@@ -729,7 +736,7 @@ def test_no_stock_path_stamps_owner_lockstring_and_counts_quota(sandbox_context)
         resp = create_api_key(
             "quota-no-stock-lock",
             marker,
-            quota={"all": {"sandbox.count": 1, "limits.cpu": 2000, "limits.memory": 2048}},
+            quota=quota_spec(("sandbox.count", "all", 1), ("limits.cpu", "all", 2000), ("limits.memory", "all", 2048)),
         )
         assert resp.status_code == 201, resp.text
         body = resp.json()
@@ -757,7 +764,7 @@ def test_checkpoint_clone_path_stamps_owner_and_lockstring(sandbox_context):
         resp = create_api_key(
             "quota-checkpoint-clone-lock",
             marker,
-            quota={"all": {"sandbox.count": 2, "limits.cpu": 1000, "limits.memory": 1024}},
+            quota=quota_spec(("sandbox.count", "all", 2), ("limits.cpu", "all", 1000), ("limits.memory", "all", 1024)),
         )
         assert resp.status_code == 201, resp.text
         body = resp.json()
@@ -788,7 +795,7 @@ def test_concurrent_creates_do_not_exceed_count_limit(sandbox_context):
     successes = []
     owned = []
     try:
-        resp = create_api_key("quota-concurrent", marker, quota={"all": {"sandbox.count": 3}})
+        resp = create_api_key("quota-concurrent", marker, quota=quota_spec(("sandbox.count", "all", 3)))
         assert resp.status_code == 201, resp.text
         body = resp.json()
         created_id = body["id"]
@@ -832,7 +839,7 @@ def test_quota_miss_returns_e2b_error_body_and_does_not_lock_pooled_sandbox():
     created_id = None
     owned = []
     try:
-        resp = create_api_key("quota-pool-return", marker, quota={"all": {"sandbox.count": 0}})
+        resp = create_api_key("quota-pool-return", marker, quota=quota_spec(("sandbox.count", "all", 0)))
         assert resp.status_code == 201, resp.text
         body = resp.json()
         created_id = body["id"]
@@ -879,7 +886,7 @@ def test_api_key_quota_create_requires_admin_permission():
         resp = create_api_key(
             "quota-non-admin-target",
             marker,
-            quota={"all": {"sandbox.count": 1}},
+            quota=quota_spec(("sandbox.count", "all", 1)),
             headers=key_headers(source_body["key"], marker),
         )
         if resp.status_code == 201:
@@ -895,7 +902,7 @@ def test_api_key_quota_create_requires_admin_permission():
 def test_api_key_quota_patch_is_not_supported():
     marker = str(uuid.uuid4())
     created_id = None
-    expected_quota = {"all": {"sandbox.count": 2}}
+    expected_quota = quota_spec(("sandbox.count", "all", 2))
     try:
         resp = create_api_key("quota-no-patch", marker, quota=expected_quota)
         assert resp.status_code == 201, resp.text
@@ -905,7 +912,7 @@ def test_api_key_quota_patch_is_not_supported():
 
         patch = requests.patch(
             f"{api_url()}/api-keys/{created_id}",
-            json={"quota": {"all": {"sandbox.count": 99}}},
+            json={"quota": quota_spec(("sandbox.count", "all", 99))},
             headers=admin_headers(marker),
         )
         assert 400 <= patch.status_code < 500, patch.text
@@ -923,7 +930,7 @@ def test_api_key_delete_cleans_quota_state_but_keeps_sandbox(sandbox_context):
     marker = sandbox_context.request_id
     sbx_name = None
     owned = []
-    resp = create_api_key("quota-delete-cleanup", marker, quota={"all": {"sandbox.count": 2}})
+    resp = create_api_key("quota-delete-cleanup", marker, quota=quota_spec(("sandbox.count", "all", 2)))
     assert resp.status_code == 201, resp.text
     body = resp.json()
     key_id = body["id"]
@@ -960,7 +967,7 @@ def test_antidrift_releases_non_manager_deleted_sandbox(sandbox_context):
     created_id = None
     owned = []
     try:
-        resp = create_api_key("quota-antidrift-release", marker, quota={"all": {"sandbox.count": 1}})
+        resp = create_api_key("quota-antidrift-release", marker, quota=quota_spec(("sandbox.count", "all", 1)))
         assert resp.status_code == 201, resp.text
         body = resp.json()
         created_id = body["id"]
@@ -993,7 +1000,7 @@ def test_redis_data_loss_rebuilds_from_live_crs_and_reenforces(sandbox_context):
     created_id = None
     owned = []
     try:
-        resp = create_api_key("quota-redis-loss", marker, quota={"all": {"sandbox.count": 2}})
+        resp = create_api_key("quota-redis-loss", marker, quota=quota_spec(("sandbox.count", "all", 2)))
         assert resp.status_code == 201, resp.text
         body = resp.json()
         created_id = body["id"]
@@ -1022,7 +1029,7 @@ def test_quota_is_accepted_and_unenforced_without_redis(sandbox_context):
     marker = sandbox_context.request_id
     created_id = None
     owned = []
-    expected_quota = {"all": {"sandbox.count": 0}}
+    expected_quota = quota_spec(("sandbox.count", "all", 0))
     try:
         resp = create_api_key("quota-no-redis", marker, quota=expected_quota)
         assert resp.status_code == 201, resp.text
@@ -1048,7 +1055,7 @@ def test_redis_outage_fails_open_then_reenforces_after_rebuild(sandbox_context):
     created_id = None
     owned = []
     try:
-        resp = create_api_key("quota-redis-outage", marker, quota={"all": {"sandbox.count": 1}})
+        resp = create_api_key("quota-redis-outage", marker, quota=quota_spec(("sandbox.count", "all", 1)))
         assert resp.status_code == 201, resp.text
         body = resp.json()
         created_id = body["id"]

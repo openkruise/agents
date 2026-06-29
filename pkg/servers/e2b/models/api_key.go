@@ -66,8 +66,7 @@ type CreatedTeamAPIKey struct {
 	CreatedBy *TeamUser                `json:"createdBy"`
 	Team      *Team                    `json:"team,omitempty"`
 	LastUsed  *time.Time               `json:"lastUsed"`
-	Quota     *QuotaWire               `json:"quota,omitempty"`
-	QuotaSpec *quotaspec.QuotaSpec     `json:"-"`
+	QuotaSpec *quotaspec.QuotaSpec     `json:"quota,omitempty"`
 }
 
 // TeamAPIKey represents a team API key
@@ -78,15 +77,14 @@ type TeamAPIKey struct {
 	Name      string                   `json:"name"`
 	CreatedBy *TeamUser                `json:"createdBy"`
 	LastUsed  *time.Time               `json:"lastUsed"`
-	Quota     *QuotaWire               `json:"quota,omitempty"`
+	QuotaSpec *quotaspec.QuotaSpec     `json:"quota,omitempty"`
 }
 
 // NewTeamAPIKey represents a request to create a new team API key
 type NewTeamAPIKey struct {
 	Name      string               `json:"name"`
 	TeamName  string               `json:"teamName,omitempty"`
-	Quota     *QuotaWire           `json:"quota,omitempty"`
-	QuotaSpec *quotaspec.QuotaSpec `json:"-"`
+	QuotaSpec *quotaspec.QuotaSpec `json:"quota,omitempty"`
 }
 
 // CompatibleAPIKey represents the SDK-compatible form of an authenticated API key.

@@ -99,7 +99,7 @@ func (m *SandboxManager) releaseQuotaAfterDelete(ctx context.Context, opts Delet
 	releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), infra.SandboxAdmissionReleaseTimeout)
 	defer cancel()
 	if err := m.quota.Release(releaseCtx, quota.ReleaseRequest{User: opts.User, LockString: lockString}); err != nil {
-		klog.FromContext(ctx).Error(err, "failed to release quota after accepted sandbox delete", "owner", opts.User, "lockString", lockString)
+		klog.FromContext(releaseCtx).Error(err, "failed to release quota after accepted sandbox delete", "owner", opts.User, "lockString", lockString)
 	}
 }
 

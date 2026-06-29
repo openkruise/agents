@@ -166,10 +166,10 @@ type QuotaSpec struct {
   is **unlimited**. There is no nil-limit sentinel — normalization (§3.1) drops any explicitly-unlimited pair, so
   a "limited key" is defined uniformly as *having ≥1 `QuotaLimit`* (the same definition the hot path and the
   anti-drift driver use, §6.4.2).
-- **External JSON** is scope-outer and uses the same full dimension keys as the internal model, e.g.
-  `"quota": { "running": { "sandbox.count": 10, "limits.cpu": 8000, "limits.memory": 16384 }, "all": {
-  "sandbox.count": 50 } }` (cpu in millicores, memory in MiB). There is no short-key mapping (`count` / `cpu` /
-  `memory` are rejected), so the wire shape, static model, and Redis dimensions stay identical.
+- **External JSON uses the same `QuotaSpec` shape as the internal model.** API-key create/list responses serialize
+  quota as `{"limits":[{"dimension":"sandbox.count","scope":"running","limit":10}]}` (cpu in millicores, memory in
+  MiB). There is no separate public quota model and no short-key mapping (`count` / `cpu` / `memory` are rejected),
+  so the public payload, static storage model, and Redis dimensions stay identical.
 - `QuotaSpec` is loaded at auth time (`CheckApiKey` puts `user` in context), so the hot path never re-reads the
   key store.
 
@@ -177,11 +177,10 @@ type QuotaSpec struct {
 
 A quota is **never silently ignored or silently accepted**:
 
-Validation and normalization belong with the quota model in `pkg/sandbox-manager/quota`: legal dimensions, legal
-scopes, duplicate detection, limit bounds, and `NormalizeQuotaSpec`. The E2B layer owns only the public
-scope-outer JSON parsing/formatting and rejects short wire keys by refusing to map `count` / `cpu` / `memory` to
-full dimensions before calling quota normalization. This keeps future API-key `PATCH` or non-E2B callers on the
-same quota-domain validation path.
+Validation and normalization belong with the quota model in `pkg/sandbox-manager/quota/spec`: legal dimensions,
+legal scopes, duplicate detection, limit bounds, JSON decoding, and `NormalizeQuotaSpec`. The E2B layer uses
+`quotaspec.QuotaSpec` directly in public API request/response structs and only calls quota normalization. This
+keeps future API-key `PATCH` or non-E2B callers on the same quota-domain validation path.
 
 - **Absent / `null` quota** (or empty `Limits`) → **unlimited**.
 - **Explicitly-unlimited pairs** → **dropped at normalization**, so a "limited key" is uniformly *≥1 limit*.
@@ -190,8 +189,8 @@ same quota-domain validation path.
 - **Duplicate `(dimension, scope)`** → **rejected**.
 - **Any dimension other than `sandbox.count` / `limits.cpu` / `limits.memory`** → **rejected** (reserved, not
   yet enforceable), so a future dimension is never silently dropped or silently honored.
-- **Short wire dimension keys** (`count`, `cpu`, `memory`) → **rejected**; public JSON uses the full internal
-  dimension strings.
+- **Short dimension keys** (`count`, `cpu`, `memory`) → **rejected**; public JSON uses the full internal dimension
+  strings in `QuotaLimit.dimension`.
 - **Any scope other than `all` / `running`** (e.g. `template:<name>`) → **rejected in Phase 1**.
 - **No constraint on Redis presence.** A non-empty quota is **accepted regardless of whether Redis is
   configured**; if Redis is absent (or later unavailable) the limit is simply **unenforced** (fail-open, §6.1).
@@ -203,11 +202,11 @@ Both E2B key backends store **only** the static `quotaspec.QuotaSpec`, alongside
 create** (immutable thereafter for Phase 1, §6.7). **No dynamic usage is ever written to the key store** — that
 lives in Redis and is owned by sandbox-manager quota.
 
-- **Secret backend:** store the internal normalized `QuotaSpec` in the per-key JSON inside `e2b-key-store`;
-  public API request/response structs use the separate nested wire model and convert to/from `QuotaSpec` at the
-  handler/storage boundary. Old payloads without quota decode to empty == unlimited; writes reuse the existing
-  `retryUpdateSecret` CAS. (The single `e2b-key-store` Secret is suited only to **static** config — it cannot
-  host per-create dynamic state at 2500/sec; that is exactly why dynamic state lives in Redis, not the Secret.)
+- **Secret backend:** store the normalized `QuotaSpec` in the per-key JSON inside `e2b-key-store`; public API
+  request/response structs use the same `QuotaSpec` shape. Old payloads without quota decode to empty == unlimited;
+  writes reuse the existing `retryUpdateSecret` CAS. (The single `e2b-key-store` Secret is suited only to
+  **static** config — it cannot host per-create dynamic state at 2500/sec; that is exactly why dynamic state lives
+  in Redis, not the Secret.)
 - **MySQL backend:** add a nullable `quota JSON` column to `team_api_keys` (`NULL` == unlimited); `AutoMigrate`
   adds it, gated by `DisableAutoMigrate` with a documented manual DDL alternative.
 
@@ -281,10 +280,10 @@ Quota is owned by sandbox-manager, while API-key storage remains owned by the E2
 
 - `pkg/sandbox-manager/quota/spec` defines the static quota model (`QuotaSpec`, `QuotaLimit`, dimensions,
   scopes) and subject-lister interfaces. `pkg/sandbox-manager/quota` owns the dynamic Redis machinery.
-  `pkg/servers/e2b/models` keeps public wire conversion helpers and transitional aliases, but new storage/domain
-  code should use `quotaspec.*` directly.
-- E2B creates/list/deletes API keys, parses the public quota JSON, and stores static quota config. After auth it
-  passes only the resolved `User string` and `Quota *quotaspec.QuotaSpec` to sandbox-manager.
+  `pkg/servers/e2b/models` references `quotaspec.*` directly for API-key quota fields.
+- E2B creates/list/deletes API keys, decodes the public quota JSON into `quotaspec.QuotaSpec`, and stores static
+  quota config. After auth it passes only the resolved `User string` and `Quota *quotaspec.QuotaSpec` to
+  sandbox-manager.
 - sandbox-manager exposes manager-level `ClaimSandboxOptions` / `CloneSandboxOptions` / `DeleteSandboxOptions`.
   To avoid copying every infra option field, these are thin wrapper types around the existing infra options plus
   quota metadata, for example `ClaimSandboxOptions{Infra infra.ClaimSandboxOptions, Quota *quotaspec.QuotaSpec}`.
@@ -787,11 +786,10 @@ deletions, and the sole driver of `running`-scope adjustments on pause/resume.
 
 - **Create** (`POST /sandboxes`): unchanged shape; quota enforced internally; exceeded → **403** with the
   existing E2B error body (the spec-compliant `{code,message}` shape used by other E2B error paths), no retry.
-- **Key create** (`POST /api-keys`): optional nested `quota`; **admin-only** to set; validated (§3.1). The
-  internal `{"limits":[...]}` shape is not a documented public API shape and must not cause a nested public
-  request to be silently ignored. Public quota JSON is scope-outer and uses full dimension keys
-  (`sandbox.count`, `limits.cpu`, `limits.memory`); short keys are not supported. **Accepted regardless of Redis
-  presence** (unenforced if no Redis, §6.1).
+- **Key create** (`POST /api-keys`): optional `quota` in the canonical `QuotaSpec` shape; **admin-only** to set;
+  validated (§3.1). Public quota JSON is `{"limits":[...]}` and uses full dimension keys (`sandbox.count`,
+  `limits.cpu`, `limits.memory`) in `QuotaLimit.dimension`; short keys are not supported. **Accepted regardless
+  of Redis presence** (unenforced if no Redis, §6.1).
 - **No quota `PATCH` in Phase 1** (§6.7): immutable after create; change quota by creating a new key. (Quota
   mutation and `unlimited → limited` promotion are **planned** for a later phase, §16.)
 - **No Describe / usage reporting in Phase 1:** do not add a public quota Describe endpoint, dynamic usage field,
@@ -808,9 +806,9 @@ Authorization reuses `CheckCreateAPIKeyPermission`; quota set chains `CheckApiKe
 ## 12. Compatibility
 
 - Old keys without `quota` → unlimited; the new JSON field is `omitempty` / nullable.
-- Public quota JSON is pre-release in this branch. Removing short dimension keys is therefore accepted, but all
-  branch tests and fixtures that still send or expect `count` / `cpu` / `memory` must be updated to
-  `sandbox.count` / `limits.cpu` / `limits.memory` in the same implementation change.
+- Public quota JSON is pre-release in this branch. Removing short dimension keys and the old scope-outer quota
+  shape is therefore accepted; all branch tests and fixtures must use the canonical `{"limits":[...]}` shape with
+  `sandbox.count` / `limits.cpu` / `limits.memory`.
 - `CountActiveSandboxes` untouched; SandboxClaim self-healing preserved.
 - No owner label and **no backfill**: anti-drift reads live CRs off the existing `IndexUser` informer index (§5).
 - New RBAC: one generic lease (§8).
@@ -899,12 +897,12 @@ Authorization reuses `CheckCreateAPIKeyPermission`; quota set chains `CheckApiKe
   pooled sandbox is returned to the pool.
 - Validation (§3.1): `limit = 0` blocks all creates charging that pair; an all-unlimited quota normalizes to
   unlimited; negative / duplicate / non-`{sandbox.count,limits.cpu,limits.memory}`-dimension / non-`{all,running}`
-  -scope are rejected at key create; short wire dimension keys (`count`, `cpu`, `memory`) are rejected; Redis
-  presence imposes **no** validation constraint. Dimension/scope legality and `NormalizeQuotaSpec` are tested in
-  `pkg/sandbox-manager/quota/spec`; E2B tests cover only the nested wire parsing/formatting and short-key
-  rejection.
-- Existing E2E/unit tests introduced before this decision and using short wire keys are updated to the full
-  dimension keys; stored internal quota JSON remains `{"limits":[...]}` and is unaffected by the wire break.
+  -scope are rejected at key create; short dimension keys (`count`, `cpu`, `memory`) are rejected; Redis presence
+  imposes **no** validation constraint. Dimension/scope legality, JSON decoding, and `NormalizeQuotaSpec` are
+  tested in `pkg/sandbox-manager/quota/spec`; E2B tests cover only API-key request/response wiring and admin
+  authorization.
+- Existing E2E/unit tests introduced before this decision and using short keys or the old scope-outer shape are
+  updated to the canonical `{"limits":[...]}` quota spec.
 - `CountActiveSandboxes` and SandboxClaim self-healing unchanged (regression).
 - Primary signals gate only the anti-drift diff + event-driven reconcile; correctness holds with them forced on
   all replicas (idempotency regression test).
@@ -938,11 +936,12 @@ Authorization reuses `CheckCreateAPIKeyPermission`; quota set chains `CheckApiKe
 - **Layering:** static API-key config is E2B-owned; quota types and quota-domain validation/normalization live in
   `pkg/sandbox-manager/quota/spec`; dynamic quota lives in `pkg/sandbox-manager/quota`. sandbox-manager receives
   only `User` + `QuotaSpec` and creates Admission internally. E2B keeps its sandbox `Modifier` business logic and
-  public wire parser/formatter but does not create `infra.SandboxAdmission` and does not call Redis quota APIs.
+  API-key business logic but does not create `infra.SandboxAdmission` and does not call Redis quota APIs.
 - **Manager options:** use wrapper options around existing infra options plus quota metadata; do not copy every
   infra option field into parallel manager structs.
-- **Wire shape:** public API quota JSON stays scope-outer but uses full dimension keys (`sandbox.count`,
-  `limits.cpu`, `limits.memory`). No short-key mapping.
+- **Quota shape:** public API quota JSON uses the canonical `QuotaSpec` shape (`{"limits":[...]}`) with full
+  dimension keys (`sandbox.count`, `limits.cpu`, `limits.memory`). No short-key mapping and no separate public
+  quota model.
 - **Storage:** Redis holds the **live set** (`q:live:{K}` HASH: lockstring → footprint without count + conditional
   scopes without `all`) plus **per-dimension sum hashes** (`q:sum:{K}:<dim>`: scope → integer, scheme A).
   `count` and `all` are **structural/implicit** (count = const 1 per entry; `all` ⟺ entry exists), never stored
@@ -1009,9 +1008,9 @@ Authorization reuses `CheckCreateAPIKeyPermission`; quota set chains `CheckApiKe
   storage, and how missed-event divergence / breaker state are monitored (metrics).
 - The integer units for cpu (millicores) and memory (MiB), implemented through the shared infra resource
   extraction helper plus the shared `FootprintFromResource` mapper used by both hot path and anti-drift.
-- External nested JSON parsing/formatting for `quota`, using full dimension keys only, plus updating the branch's
-  existing E2E/unit tests that still use short wire keys. Normalization and quota-domain validation stay in
-  `pkg/sandbox-manager/quota`.
+- API-key request/response wiring for `quota` using `quotaspec.QuotaSpec` directly, plus updating the branch's
+  existing E2E/unit tests that still use short keys or the old scope-outer shape. Normalization and quota-domain
+  validation stay in `pkg/sandbox-manager/quota/spec`.
 - The exact rule for classifying a create failure as **provably pre-CR**, **cleanup-deleted**, or **ambiguous**,
   and the mechanical clone lockstring call site (the `Modifier` at `create.go:200` vs
   `newSandboxFromTemplate`), provided it happens before `Admission.Acquire` reads the object and persists the

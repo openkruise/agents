@@ -359,7 +359,6 @@ func cloneCreatedTeamAPIKey(apiKey *models.CreatedTeamAPIKey) *models.CreatedTea
 	cloned.Team = cloneTeam(apiKey.Team)
 	cloned.CreatedBy = cloneTeamUser(apiKey.CreatedBy)
 	cloned.QuotaSpec = apiKey.QuotaSpec.DeepCopy()
-	cloned.Quota = models.WireFromQuotaSpec(cloned.QuotaSpec)
 	if apiKey.LastUsed != nil {
 		lastUsed := *apiKey.LastUsed
 		cloned.LastUsed = &lastUsed
@@ -395,7 +394,10 @@ func unmarshalQuotaFromDB(raw *string) (*quotaspec.QuotaSpec, error) {
 	}
 	spec, err := quotaspec.DecodeQuotaSpec([]byte(*raw))
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", errInvalidQuotaSpec, err)
+		return nil, err
+	}
+	if spec == nil || !spec.IsLimited() {
+		return nil, nil
 	}
 	return spec, nil
 }
@@ -475,7 +477,6 @@ func (k *mysqlKeyStorage) CreateKey(ctx context.Context, key *models.CreatedTeam
 		CreatedBy: &models.TeamUser{ID: key.ID},
 		QuotaSpec: normalizedQuota.DeepCopy(),
 	}
-	apiKey.Quota = models.WireFromQuotaSpec(apiKey.QuotaSpec)
 	log.Info("api-key generated", "id", apiKey.ID)
 	k.cachePutTeam(team)
 	k.cachePutKey(apiKey)
@@ -586,7 +587,7 @@ func (k *mysqlKeyStorage) ListByOwnerTeam(ctx context.Context, owner *models.Cre
 		if err != nil {
 			klog.FromContext(ctx).Error(err, "ignore invalid stored api-key quota while listing team keys", "apiKeyID", e.UID)
 		} else {
-			tk.Quota = models.WireFromQuotaSpec(quota)
+			tk.QuotaSpec = quota
 		}
 		out = append(out, tk)
 	}
@@ -608,7 +609,7 @@ func (k *mysqlKeyStorage) ListLimited(ctx context.Context) ([]*models.CreatedTea
 	for i := range rows {
 		apiKey, err := k.createdKeyFromJoinedRow(ctx, &rows[i], true)
 		if err != nil {
-			if errors.Is(err, errInvalidQuotaSpec) {
+			if errors.Is(err, quotaspec.ErrInvalidQuotaSpec) {
 				klog.FromContext(ctx).Error(err, "skip invalid api-key quota while listing limited keys", "uid", rows[i].UID)
 				continue
 			}
@@ -810,7 +811,6 @@ func (k *mysqlKeyStorage) createdKeyFromJoinedRow(ctx context.Context, row *join
 	}
 	if err == nil {
 		apiKey.QuotaSpec = quota
-		apiKey.Quota = models.WireFromQuotaSpec(quota)
 	}
 	return apiKey, nil
 }

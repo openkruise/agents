@@ -25,6 +25,7 @@ import (
 
 	"k8s.io/klog/v2"
 
+	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
@@ -114,18 +115,14 @@ func validateCreateAPIKeyRequest(request *models.NewTeamAPIKey) *web.ApiError {
 			Message: "api-key name is required",
 		}
 	}
-	if request.Quota == nil {
-		request.QuotaSpec = nil
-		return nil
-	}
-	quota, err := models.QuotaSpecFromWire(request.Quota)
+	normalizedQuota, err := quotaspec.NormalizeQuotaSpec(request.QuotaSpec)
 	if err != nil {
 		return &web.ApiError{
 			Code:    http.StatusBadRequest,
 			Message: err.Error(),
 		}
 	}
-	request.QuotaSpec = quota
+	request.QuotaSpec = normalizedQuota
 	return nil
 }
 
@@ -190,12 +187,10 @@ func (sc *Controller) cleanupDeletedAPIKeyQuota(ctx context.Context, apiKeyID st
 	if sc == nil || apiKeyID == "" {
 		return
 	}
-	log := klog.FromContext(ctx)
 
-	// ctx is used only for extracting the request-scoped logger; actual cleanup
-	// runs against an independent background context so it survives handler cancellation.
-	cleanupCtx, cancel := context.WithTimeout(context.Background(), apiKeyQuotaCleanupTimeout)
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), apiKeyQuotaCleanupTimeout)
 	defer cancel()
+	log := klog.FromContext(cleanupCtx)
 	backoff := apiKeyQuotaCleanupInitialBackoff
 	var lastErr error
 
