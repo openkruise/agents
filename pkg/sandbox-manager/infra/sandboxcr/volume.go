@@ -19,6 +19,7 @@ package sandboxcr
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/cache"
@@ -31,6 +32,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	utilvalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -67,8 +69,32 @@ func (i *Infra) CreateVolume(ctx context.Context, opts infra.CreateVolumeOptions
 
 	err := i.Cache.GetClient().Create(ctx, pvc)
 	if err != nil {
-		log.Error(err, "Failed to create PVC", "name", opts.Name, "namespace", opts.Namespace)
-		return nil, fmt.Errorf("failed to create PVC: %w", err)
+		if apierrors.IsAlreadyExists(err) {
+			// PVC already exists — check ownership for idempotent handling
+			existingPVC := &corev1.PersistentVolumeClaim{}
+			if getErr := i.Cache.GetClient().Get(ctx, client.ObjectKey{Namespace: opts.Namespace, Name: opts.Name}, existingPVC); getErr != nil {
+				log.Error(getErr, "Failed to get existing PVC", "name", opts.Name, "namespace", opts.Namespace)
+				return nil, fmt.Errorf("failed to get existing PVC: %w", getErr)
+			}
+			if owner := existingPVC.GetAnnotations()[agentsv1alpha1.AnnotationOwner]; owner != opts.UserID {
+				log.Error(err, "PVC exists but belongs to another user", "name", opts.Name, "namespace", opts.Namespace, "owner", owner)
+				return nil, managererrors.NewError(managererrors.ErrorNotAllowed, "volume %s is owned by another user", opts.Name)
+			}
+			// Same user — if already bound, return idempotent response immediately
+			if existingPVC.Spec.VolumeName != "" && existingPVC.Status.Phase == corev1.ClaimBound {
+				log.Info("PVC already exists and bound, returning existing volume", "name", opts.Name, "namespace", opts.Namespace)
+				return &infra.VolumeInfo{
+					Name:     existingPVC.Name,
+					VolumeID: existingPVC.Spec.VolumeName,
+				}, nil
+			}
+			// PVC exists but not yet bound — fall through to wait logic
+			pvc = existingPVC
+			log.Info("PVC already exists but not bound, waiting for binding", "name", opts.Name, "namespace", opts.Namespace)
+		} else {
+			log.Error(err, "Failed to create PVC", "name", opts.Name, "namespace", opts.Namespace)
+			return nil, fmt.Errorf("failed to create PVC: %w", err)
+		}
 	}
 
 	log.Info("PVC created, waiting", "name", pvc.Name, "namespace", opts.Namespace)
@@ -77,10 +103,6 @@ func (i *Infra) CreateVolume(ctx context.Context, opts infra.CreateVolumeOptions
 	task := i.Cache.NewPVCTask(ctx, pvc)
 	if err := task.Wait(opts.WaitBoundTimeout); err != nil {
 		log.Error(err, "Failed to wait for PVC", "name", opts.Name, "namespace", opts.Namespace)
-		// Clean up the PVC that failed to bind to prevent resource leak
-		if deleteErr := i.Cache.GetClient().Delete(ctx, pvc); deleteErr != nil && !apierrors.IsNotFound(deleteErr) {
-			log.Error(deleteErr, "Failed to clean up PVC after bind failure", "name", opts.Name, "namespace", opts.Namespace)
-		}
 		return nil, fmt.Errorf("failed to wait for PVC: %w", err)
 	}
 
@@ -205,6 +227,10 @@ func (i *Infra) DeleteVolume(ctx context.Context, opts infra.DeleteVolumeOptions
 func (i *Infra) validateCreateVolumeOptions(ctx context.Context, opts *infra.CreateVolumeOptions) error {
 	if opts.WaitBoundTimeout <= 0 {
 		opts.WaitBoundTimeout = consts.DefaultWaitBoundPVCTimeout
+	}
+	// Validate volume name conforms to DNS-1123 label format
+	if errs := utilvalidation.IsDNS1123Label(opts.Name); len(errs) > 0 {
+		return fmt.Errorf("invalid volume name %q: %s", opts.Name, strings.Join(errs, ", "))
 	}
 	// Validate storage size is set and positive
 	if opts.StorageSize.IsZero() || opts.StorageSize.Cmp(resource.Quantity{}) < 0 {

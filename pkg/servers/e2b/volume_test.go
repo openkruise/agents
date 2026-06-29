@@ -176,6 +176,48 @@ func TestCreateVolume(t *testing.T) {
 			expectError: "Failed to create volume",
 			errorCode:   http.StatusInternalServerError,
 		},
+		{
+			name: "invalid volume name with uppercase",
+			setupReq: func(t *testing.T) *http.Request {
+				req := NewRequest(t, nil, models.NewVolumeRequest{
+					Name: "Test-Volume-UPPERCASE",
+				}, nil, user)
+				req.Header.Set(models.ExtensionHeaderVolumeSize, "1Gi")
+				req.Header.Set(models.ExtensionHeaderVolumeStorageClass, "standard")
+				req.Header.Set(models.ExtensionHeaderVolumeAccessMode, "ReadWriteOnce")
+				return req
+			},
+			expectError: "Failed to create volume",
+			errorCode:   http.StatusInternalServerError,
+		},
+		{
+			name: "invalid volume name with special characters",
+			setupReq: func(t *testing.T) *http.Request {
+				req := NewRequest(t, nil, models.NewVolumeRequest{
+					Name: "test@volume#name",
+				}, nil, user)
+				req.Header.Set(models.ExtensionHeaderVolumeSize, "1Gi")
+				req.Header.Set(models.ExtensionHeaderVolumeStorageClass, "standard")
+				req.Header.Set(models.ExtensionHeaderVolumeAccessMode, "ReadWriteOnce")
+				return req
+			},
+			expectError: "Failed to create volume",
+			errorCode:   http.StatusInternalServerError,
+		},
+		{
+			name: "invalid volume name too long",
+			setupReq: func(t *testing.T) *http.Request {
+				req := NewRequest(t, nil, models.NewVolumeRequest{
+					Name: "this-name-is-way-too-long-for-a-dns1123-subdomain-because-it-exceeds-sixty-three-characters-limit",
+				}, nil, user)
+				req.Header.Set(models.ExtensionHeaderVolumeSize, "1Gi")
+				req.Header.Set(models.ExtensionHeaderVolumeStorageClass, "standard")
+				req.Header.Set(models.ExtensionHeaderVolumeAccessMode, "ReadWriteOnce")
+				return req
+			},
+			expectError: "Failed to create volume",
+			errorCode:   http.StatusInternalServerError,
+		},
 	}
 
 	for _, tt := range tests {

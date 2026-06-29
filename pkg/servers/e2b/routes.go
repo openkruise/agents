@@ -135,6 +135,27 @@ func (sc *Controller) CheckApiKey(ctx context.Context, r *http.Request) (context
 			}
 		}
 	}
+	if volumeID := r.PathValue("volumeID"); volumeID != "" {
+		middleWareLog = middleWareLog.WithValues("volumeID", volumeID)
+		namespace := sc.getNamespaceOfUser(user)
+		if namespace == "" {
+			namespace = sc.systemNamespace
+		}
+		owner, ok := sc.manager.GetOwnerOfVolume(namespace, volumeID)
+		if !ok {
+			middleWareLog.Info("failed to get owner of volume")
+			return ctx, &web.ApiError{
+				Code:    http.StatusNotFound,
+				Message: fmt.Sprintf("Volume not found: %s", volumeID),
+			}
+		}
+		if owner != AnonymousUser.ID.String() && owner != user.ID.String() {
+			return ctx, &web.ApiError{
+				Code:    http.StatusUnauthorized,
+				Message: fmt.Sprintf("The user of API key is not the owner of volume: %s", volumeID),
+			}
+		}
+	}
 	ctx = klog.NewContext(ctx, logger.WithValues("user", user.Name))
 	ctx = context.WithValue(ctx, "user", user)
 	return ctx, nil

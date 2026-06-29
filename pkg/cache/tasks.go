@@ -23,7 +23,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	cacheutils "github.com/openkruise/agents/pkg/cache/utils"
@@ -155,7 +154,8 @@ func (c *Cache) NewCheckpointTask(ctx context.Context, cp *agentsv1alpha1.Checkp
 }
 
 // NewPVCTask builds a WaitTask that succeeds when the PVC's Status.Phase transitions to Bound.
-// If the PVC fails to bind (e.g., provisioning fails), it queries Events to extract the failure reason.
+// If the PVC fails to bind, it checks PVC Conditions for common failure reasons.
+// When no explicit failure condition is found, it relies on timeout to determine failure.
 func (c *Cache) NewPVCTask(ctx context.Context, pvc *corev1.PersistentVolumeClaim) *cacheutils.WaitTask[*corev1.PersistentVolumeClaim] {
 	check := func(pvc *corev1.PersistentVolumeClaim) (bool, error) {
 		// PVC must be bound AND have a VolumeName (PV name) assigned
@@ -168,25 +168,10 @@ func (c *Cache) NewPVCTask(ctx context.Context, pvc *corev1.PersistentVolumeClai
 			return false, fmt.Errorf("PVC %s is in Lost phase", pvc.Name)
 		}
 
-		// If PVC is still Pending, check Events for provisioning failures
-		if pvc.Status.Phase == corev1.ClaimPending {
-			events := &corev1.EventList{}
-			if err := c.reader.List(ctx, events,
-				client.InNamespace(pvc.Namespace),
-				client.MatchingFields{
-					"involvedObject.name": pvc.Name,
-					"involvedObject.kind": "PersistentVolumeClaim",
-				},
-			); err != nil {
-				// If we can't query events, just continue waiting
-				return false, nil
-			}
-
-			// Look for failure events for this PVC
-			for _, event := range events.Items {
-				if event.Reason == "ProvisioningFailed" || event.Reason == "FailedBinding" || event.Reason == "Failed" {
-					return false, fmt.Errorf("PVC %s failed: %s (reason: %s)", pvc.Name, event.Message, event.Reason)
-				}
+		// Check PVC Conditions for known failure reasons.
+		for _, condition := range pvc.Status.Conditions {
+			if condition.Status == corev1.ConditionTrue && isPVCFailureCondition(condition.Type, condition.Reason) {
+				return false, fmt.Errorf("PVC %s failed: %s (type: %s, reason: %s)", pvc.Name, condition.Message, condition.Type, condition.Reason)
 			}
 		}
 
@@ -195,4 +180,26 @@ func (c *Cache) NewPVCTask(ctx context.Context, pvc *corev1.PersistentVolumeClai
 	return cacheutils.NewWaitTask[*corev1.PersistentVolumeClaim](
 		ctx, c.waitHooks, cacheutils.WaitActionPVCBind, pvc, c.PVCUpdateFunc(ctx), check,
 	)
+}
+
+// isPVCFailureCondition returns true if the condition type and reason indicate a PVC failure.
+func isPVCFailureCondition(conditionType corev1.PersistentVolumeClaimConditionType, reason string) bool {
+	switch conditionType {
+	case corev1.PersistentVolumeClaimConditionType(corev1.ClaimLost):
+		return true
+	case corev1.PersistentVolumeClaimControllerResizeError,
+		corev1.PersistentVolumeClaimNodeResizeError,
+		corev1.PersistentVolumeClaimVolumeModifyVolumeError:
+		return true
+	case corev1.PersistentVolumeClaimResizing,
+		corev1.PersistentVolumeClaimFileSystemResizePending:
+		return false
+	default:
+		switch reason {
+		case "ResizeFailed", "VolumeResizeFailed", "FileSystemResizeFailed", "VolumeModifyFailed":
+			return true
+		default:
+			return false
+		}
+	}
 }

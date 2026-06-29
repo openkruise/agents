@@ -20,9 +20,12 @@ import (
 	"context"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/klog/v2"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/utils/pagination"
@@ -181,6 +184,20 @@ func (m *SandboxManager) DeleteCheckpoint(ctx context.Context, user string, opts
 func (m *SandboxManager) GetOwnerOfSandbox(sandboxID string) (string, bool) {
 	route, ok := m.proxy.LoadRoute(sandboxID)
 	return route.Owner, ok
+}
+
+// GetOwnerOfVolume returns the owner (UserID) of the volume identified by volumeID (PV Name)
+// in the given namespace. Returns ("", false) if the volume is not found.
+func (m *SandboxManager) GetOwnerOfVolume(namespace, volumeID string) (string, bool) {
+	pvcList := &corev1.PersistentVolumeClaimList{}
+	err := m.infra.GetCache().GetClient().List(context.Background(), pvcList,
+		client.InNamespace(namespace),
+		client.MatchingFields{cache.IndexVolumeName: volumeID},
+	)
+	if err != nil || len(pvcList.Items) == 0 {
+		return "", false
+	}
+	return pvcList.Items[0].GetAnnotations()[v1alpha1.AnnotationOwner], true
 }
 
 // syncRoute syncs the sandbox route with peers

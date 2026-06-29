@@ -26,6 +26,7 @@ const (
 	DefaultPoolingCandidateCounts = 100
 	DefaultWaitReadyTimeout       = 60 * time.Second
 	DefaultWaitCheckpointTimeout  = 60 * time.Second
+	DefaultWaitBoundPVCTimeout    = 60 * time.Second
 	DefaultClaimWorkers           = 500
 	DefaultCreateQPS              = 49
 )
@@ -44,8 +45,4 @@ const (
 	// ReserveFailedSandboxForever instructs the backend to keep a failed
 	// sandbox indefinitely for debugging.
 	ReserveFailedSandboxForever = time.Duration(-1)
-)
-
-const (
-	DefaultWaitBoundPVCTimeout = 60 * time.Second
 )

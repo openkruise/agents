@@ -22,7 +22,6 @@ import (
 	"net/http"
 	"time"
 
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/klog/v2"
 
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
@@ -198,7 +197,7 @@ func (sc *Controller) GetVolume(r *http.Request) (web.ApiResponse[*models.Volume
 	})
 	if err != nil {
 		log.Error(err, "Failed to get volume", "volumeID", volumeID, "namespace", namespace)
-		if apierrors.IsNotFound(err) || managererrors.GetErrCode(err) == managererrors.ErrorNotFound {
+		if managererrors.GetErrCode(err) == managererrors.ErrorNotFound {
 			return web.ApiResponse[*models.Volume]{}, &web.ApiError{
 				Code:    http.StatusNotFound,
 				Message: "Volume not found",
@@ -256,7 +255,7 @@ func (sc *Controller) DeleteVolume(r *http.Request) (web.ApiResponse[struct{}], 
 		UserID:    user.ID.String(),
 	}); err != nil {
 		log.Error(err, "Failed to delete volume", "volumeID", volumeID, "namespace", namespace)
-		if apierrors.IsNotFound(err) || managererrors.GetErrCode(err) == managererrors.ErrorNotFound {
+		if managererrors.GetErrCode(err) == managererrors.ErrorNotFound {
 			return web.ApiResponse[struct{}]{}, &web.ApiError{
 				Code:    http.StatusNotFound,
 				Message: "Volume not found",
