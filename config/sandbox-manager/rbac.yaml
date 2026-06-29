@@ -17,7 +17,7 @@ rules:
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["events"]
-    verbs: [ "get", "list", "watch", "create", "patch" ]
+    verbs: ["create", "patch"]
   - apiGroups: [ "agents.kruise.io" ]
     resources: [ "sandboxes", "sandboxsets", "checkpoints", "sandboxtemplates" ]
     verbs: [ "get", "list", "watch", "update", "patch", "delete", "create" ]
