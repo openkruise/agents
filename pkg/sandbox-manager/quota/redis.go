@@ -25,6 +25,8 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+
+	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
 )
 
 const (
@@ -34,7 +36,7 @@ const (
 )
 
 var (
-	redisQuotaDimensions = []QuotaDimension{DimSandboxCount, DimLimitsCPU, DimLimitsMemory}
+	redisQuotaDimensions = []quotaspec.QuotaDimension{quotaspec.DimSandboxCount, quotaspec.DimLimitsCPU, quotaspec.DimLimitsMemory}
 	redisLuaDimensions   = redisLuaDimensionTables(redisQuotaDimensions)
 
 	acquireRedisScript = redis.NewScript(redisScriptWithDimensions(`
@@ -186,8 +188,8 @@ type RedisBackend struct {
 }
 
 type redisEntry struct {
-	Footprint map[QuotaDimension]int64 `json:"d"`
-	Scopes    []QuotaScope             `json:"s"`
+	Footprint map[quotaspec.QuotaDimension]int64 `json:"d"`
+	Scopes    []quotaspec.QuotaScope             `json:"s"`
 }
 
 func NewRedisBackend(client *redis.Client, timeout time.Duration) *RedisBackend {
@@ -317,10 +319,10 @@ func marshalEntry(entry Entry) (string, error) {
 		Scopes:    normalizeScopes(entry.Scopes),
 	}
 	if payload.Footprint == nil {
-		payload.Footprint = map[QuotaDimension]int64{}
+		payload.Footprint = map[quotaspec.QuotaDimension]int64{}
 	}
 	if payload.Scopes == nil {
-		payload.Scopes = []QuotaScope{}
+		payload.Scopes = []quotaspec.QuotaScope{}
 	}
 
 	raw, err := json.Marshal(payload)
@@ -341,7 +343,7 @@ func unmarshalEntry(raw string) (Entry, error) {
 	}, nil
 }
 
-func marshalLimits(limits map[QuotaDimension]map[QuotaScope]int64) (string, error) {
+func marshalLimits(limits map[quotaspec.QuotaDimension]map[quotaspec.QuotaScope]int64) (string, error) {
 	if len(limits) == 0 {
 		return "", nil
 	}
@@ -352,13 +354,13 @@ func marshalLimits(limits map[QuotaDimension]map[QuotaScope]int64) (string, erro
 	return string(raw), nil
 }
 
-func normalizeFootprint(in map[QuotaDimension]int64) map[QuotaDimension]int64 {
+func normalizeFootprint(in map[quotaspec.QuotaDimension]int64) map[quotaspec.QuotaDimension]int64 {
 	if len(in) == 0 {
 		return nil
 	}
-	out := make(map[QuotaDimension]int64, len(in))
+	out := make(map[quotaspec.QuotaDimension]int64, len(in))
 	for dim, amount := range in {
-		if dim != DimLimitsCPU && dim != DimLimitsMemory {
+		if dim != quotaspec.DimLimitsCPU && dim != quotaspec.DimLimitsMemory {
 			continue
 		}
 		if amount == 0 {
@@ -372,14 +374,14 @@ func normalizeFootprint(in map[QuotaDimension]int64) map[QuotaDimension]int64 {
 	return out
 }
 
-func normalizeScopes(in []QuotaScope) []QuotaScope {
+func normalizeScopes(in []quotaspec.QuotaScope) []quotaspec.QuotaScope {
 	if len(in) == 0 {
 		return nil
 	}
-	seen := make(map[QuotaScope]struct{}, len(in))
-	out := make([]QuotaScope, 0, len(in))
+	seen := make(map[quotaspec.QuotaScope]struct{}, len(in))
+	out := make([]quotaspec.QuotaScope, 0, len(in))
 	for _, scope := range in {
-		if scope == ScopeAll {
+		if scope == quotaspec.ScopeAll {
 			continue
 		}
 		if _, ok := seen[scope]; ok {
@@ -403,7 +405,7 @@ func redisKeys(user string) []string {
 	return keys
 }
 
-func redisLuaDimensionTables(dimensions []QuotaDimension) string {
+func redisLuaDimensionTables(dimensions []quotaspec.QuotaDimension) string {
 	dims := make([]string, 0, len(dimensions))
 	indexes := make([]string, 0, len(dimensions))
 	for i, dimension := range dimensions {
@@ -422,7 +424,7 @@ func liveKey(user string) string {
 	return "q:live:{" + user + "}"
 }
 
-func sumKey(user string, dimension QuotaDimension) string {
+func sumKey(user string, dimension quotaspec.QuotaDimension) string {
 	return "q:sum:{" + user + "}:" + string(dimension)
 }
 

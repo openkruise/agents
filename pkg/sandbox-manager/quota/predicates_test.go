@@ -26,6 +26,7 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -47,49 +48,49 @@ func TestScopePredicates(t *testing.T) {
 		sbx         *agentsv1alpha1.Sandbox
 		wantLive    bool
 		wantRunning bool
-		wantScopes  []QuotaScope
+		wantScopes  []quotaspec.QuotaScope
 	}{
 		{
 			name:        "running not paused",
 			sbx:         sbx(agentsv1alpha1.SandboxRunning, false, false),
 			wantLive:    true,
 			wantRunning: true,
-			wantScopes:  []QuotaScope{ScopeRunning},
+			wantScopes:  []quotaspec.QuotaScope{quotaspec.ScopeRunning},
 		},
 		{
 			name:        "running paused",
 			sbx:         sbx(agentsv1alpha1.SandboxPaused, true, false),
 			wantLive:    true,
 			wantRunning: false,
-			wantScopes:  []QuotaScope{},
+			wantScopes:  []quotaspec.QuotaScope{},
 		},
 		{
 			name:        "pending live and running",
 			sbx:         sbx(agentsv1alpha1.SandboxPending, false, false),
 			wantLive:    true,
 			wantRunning: true,
-			wantScopes:  []QuotaScope{ScopeRunning},
+			wantScopes:  []quotaspec.QuotaScope{quotaspec.ScopeRunning},
 		},
 		{
 			name:        "failed still live",
 			sbx:         sbx(agentsv1alpha1.SandboxFailed, false, false),
 			wantLive:    true,
 			wantRunning: true,
-			wantScopes:  []QuotaScope{ScopeRunning},
+			wantScopes:  []quotaspec.QuotaScope{quotaspec.ScopeRunning},
 		},
 		{
 			name:        "terminating freed",
 			sbx:         sbx(agentsv1alpha1.SandboxTerminating, false, false),
 			wantLive:    false,
 			wantRunning: false,
-			wantScopes:  []QuotaScope{},
+			wantScopes:  []quotaspec.QuotaScope{},
 		},
 		{
 			name:        "deletion requested freed",
 			sbx:         sbx(agentsv1alpha1.SandboxRunning, false, true),
 			wantLive:    false,
 			wantRunning: false,
-			wantScopes:  []QuotaScope{},
+			wantScopes:  []quotaspec.QuotaScope{},
 		},
 	}
 
@@ -128,9 +129,9 @@ func TestFootprintOf(t *testing.T) {
 		},
 	}
 
-	assert.Equal(t, map[QuotaDimension]int64{
-		DimLimitsCPU:    2000,
-		DimLimitsMemory: 4096,
+	assert.Equal(t, map[quotaspec.QuotaDimension]int64{
+		quotaspec.DimLimitsCPU:    2000,
+		quotaspec.DimLimitsMemory: 4096,
 	}, FootprintOf(sbx))
 }
 
@@ -138,14 +139,14 @@ func TestFootprintOfRoundsMemoryUpToMiB(t *testing.T) {
 	sbx := runningSandbox(time.Now(), "owner", "lock", time.Hour, 0, 0, false)
 	sbx.Spec.Template.Spec.Containers[0].Resources.Limits[corev1.ResourceMemory] = *resource.NewQuantity(1024*1024+1, resource.BinarySI)
 
-	assert.Equal(t, int64(2), FootprintOf(sbx)[DimLimitsMemory])
+	assert.Equal(t, int64(2), FootprintOf(sbx)[quotaspec.DimLimitsMemory])
 }
 
 func TestFootprintFromResourceUsesLimits(t *testing.T) {
 	tests := []struct {
 		name string
 		in   infra.SandboxResource
-		want map[QuotaDimension]int64
+		want map[quotaspec.QuotaDimension]int64
 	}{
 		{
 			name: "uses limits not requests",
@@ -153,17 +154,17 @@ func TestFootprintFromResourceUsesLimits(t *testing.T) {
 				Requests: infra.ResourceList{CPUMilli: 500, MemoryMB: 512},
 				Limits:   infra.ResourceList{CPUMilli: 1500, MemoryMB: 1537},
 			},
-			want: map[QuotaDimension]int64{
-				DimLimitsCPU:    1500,
-				DimLimitsMemory: 1537,
+			want: map[quotaspec.QuotaDimension]int64{
+				quotaspec.DimLimitsCPU:    1500,
+				quotaspec.DimLimitsMemory: 1537,
 			},
 		},
 		{
 			name: "missing limits produce zeros",
 			in:   infra.SandboxResource{},
-			want: map[QuotaDimension]int64{
-				DimLimitsCPU:    0,
-				DimLimitsMemory: 0,
+			want: map[quotaspec.QuotaDimension]int64{
+				quotaspec.DimLimitsCPU:    0,
+				quotaspec.DimLimitsMemory: 0,
 			},
 		},
 	}
@@ -185,5 +186,5 @@ func TestFootprintFromCalculatedResourceRoundsLimitMemoryUp(t *testing.T) {
 	}})
 
 	got := FootprintFromResource(res)
-	assert.Equal(t, int64(2), got[DimLimitsMemory])
+	assert.Equal(t, int64(2), got[quotaspec.DimLimitsMemory])
 }

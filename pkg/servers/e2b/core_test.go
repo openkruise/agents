@@ -58,6 +58,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/sandbox-manager/quota"
+	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
 	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
@@ -328,9 +329,9 @@ func TestManagerInitQuotaRedisConfiguredTransportUnavailableStillFailOpen(t *tes
 	err := mgr.GetQuotaEnforcer().Acquire(context.Background(), quota.AcquireRequest{
 		User:       "test-user",
 		LockString: "test-lock",
-		Quota:      &quota.QuotaSpec{Limits: []quota.QuotaLimit{{Dimension: quota.DimSandboxCount, Scope: quota.ScopeAll, Limit: 1}}},
-		Footprint:  map[quota.QuotaDimension]int64{quota.DimSandboxCount: 1},
-		Scopes:     []quota.QuotaScope{quota.ScopeAll},
+		Quota:      &quotaspec.QuotaSpec{Limits: []quotaspec.QuotaLimit{{Dimension: quotaspec.DimSandboxCount, Scope: quotaspec.ScopeAll, Limit: 1}}},
+		Footprint:  map[quotaspec.QuotaDimension]int64{quotaspec.DimSandboxCount: 1},
+		Scopes:     []quotaspec.QuotaScope{quotaspec.ScopeAll},
 	})
 	require.NoError(t, err, "configured Redis transport errors must fail open on the hot path")
 }

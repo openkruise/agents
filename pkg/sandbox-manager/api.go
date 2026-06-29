@@ -30,6 +30,7 @@ import (
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/quota"
+	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
 	"github.com/openkruise/agents/pkg/utils/pagination"
 )
 
@@ -37,13 +38,13 @@ import (
 // The manager builds the admission internally from Quota and the infra User field.
 type ClaimSandboxOptions struct {
 	Infra infra.ClaimSandboxOptions
-	Quota *quota.QuotaSpec
+	Quota *quotaspec.QuotaSpec
 }
 
 // CloneSandboxOptions wraps infra-level clone options with an optional quota spec.
 type CloneSandboxOptions struct {
 	Infra infra.CloneSandboxOptions
-	Quota *quota.QuotaSpec
+	Quota *quotaspec.QuotaSpec
 }
 
 // DeleteSandboxOptions carries the sandbox, user identity, and optional quota spec
@@ -51,12 +52,12 @@ type CloneSandboxOptions struct {
 type DeleteSandboxOptions struct {
 	Sandbox infra.Sandbox
 	User    string
-	Quota   *quota.QuotaSpec
+	Quota   *quotaspec.QuotaSpec
 }
 
 // quotaAdmission builds a SandboxAdmission that enforces the given quota spec via
 // the manager's quotaEnforcer. Returns nil when enforcement is not applicable.
-func (m *SandboxManager) quotaAdmission(user string, spec *quota.QuotaSpec) *infra.SandboxAdmission {
+func (m *SandboxManager) quotaAdmission(user string, spec *quotaspec.QuotaSpec) *infra.SandboxAdmission {
 	if m == nil || m.quota == nil || spec == nil || !spec.IsLimited() {
 		return nil
 	}
@@ -68,7 +69,7 @@ func (m *SandboxManager) quotaAdmission(user string, spec *quota.QuotaSpec) *inf
 				LockString: lockString,
 				Quota:      quotaSpec,
 				Footprint:  quota.FootprintFromResource(resource),
-				Scopes:     []quota.QuotaScope{quota.ScopeRunning},
+				Scopes:     []quotaspec.QuotaScope{quotaspec.ScopeRunning},
 			})
 			if errors.Is(err, quota.ErrQuotaExceeded) {
 				return managererrors.NewError(managererrors.ErrorQuotaExceeded, "api-key quota exceeded")

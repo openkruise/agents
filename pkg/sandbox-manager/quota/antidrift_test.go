@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -287,7 +288,7 @@ func TestAntiDriftDiff(t *testing.T) {
 		{
 			name:        "fresh CR with stale entry corrected immediately",
 			liveCRs:     []*agentsv1alpha1.Sandbox{runningSandbox(now, owner, "l3", time.Minute, 250, 128, false)},
-			haveEntries: map[string]Entry{"l3": {Scopes: []QuotaScope{}}},
+			haveEntries: map[string]Entry{"l3": {Scopes: []quotaspec.QuotaScope{}}},
 			healthy:     true,
 			wantCharged: []string{"l3"},
 		},
@@ -762,14 +763,14 @@ func TestEntriesEqualNormalizesLiveEntry(t *testing.T) {
 		{
 			name: "nil and empty scopes",
 			have: Entry{Scopes: nil},
-			want: Entry{Scopes: []QuotaScope{}},
+			want: Entry{Scopes: []quotaspec.QuotaScope{}},
 		},
 		{
 			name: "missing and explicit zero footprint dimensions",
-			have: Entry{Footprint: map[QuotaDimension]int64{DimLimitsCPU: 250}},
-			want: Entry{Footprint: map[QuotaDimension]int64{
-				DimLimitsCPU:    250,
-				DimLimitsMemory: 0,
+			have: Entry{Footprint: map[quotaspec.QuotaDimension]int64{quotaspec.DimLimitsCPU: 250}},
+			want: Entry{Footprint: map[quotaspec.QuotaDimension]int64{
+				quotaspec.DimLimitsCPU:    250,
+				quotaspec.DimLimitsMemory: 0,
 			}},
 		},
 	}
@@ -1002,9 +1003,9 @@ func (b *fakeBackend) resetCalls() {
 func limitedSubject(user string) Subject {
 	return Subject{
 		User: user,
-		Quota: &QuotaSpec{Limits: []QuotaLimit{{
-			Dimension: DimSandboxCount,
-			Scope:     ScopeRunning,
+		Quota: &quotaspec.QuotaSpec{Limits: []quotaspec.QuotaLimit{{
+			Dimension: quotaspec.DimSandboxCount,
+			Scope:     quotaspec.ScopeRunning,
 			Limit:     1,
 		}}},
 	}
