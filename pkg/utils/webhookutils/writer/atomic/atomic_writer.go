@@ -61,7 +61,7 @@ type Writer struct {
 
 type FileProjection struct {
 	Data []byte
-	Mode int32
+	Mode os.FileMode
 }
 
 // NewAtomicWriter creates a new Writer configured to write to the given
@@ -191,22 +191,22 @@ func (w *Writer) Write(payload map[string]FileProjection) error {
 	// (8)
 	newDataDirPath := path.Join(w.targetDir, newDataDirName)
 	if err = os.Symlink(tsDirName, newDataDirPath); err != nil {
-		os.RemoveAll(tsDir)
+		os.RemoveAll(tsDir) // #nosec -- best-effort cleanup
 		klog.Error(err, "unable to create symbolic link for atomic update")
 		return err
 	}
 
 	// (9)
 	if runtime.GOOS == "windows" {
-		os.Remove(dataDirPath)
+		os.Remove(dataDirPath) // #nosec -- best-effort cleanup
 		err = os.Symlink(tsDirName, dataDirPath)
-		os.Remove(newDataDirPath)
+		os.Remove(newDataDirPath) // #nosec -- best-effort cleanup
 	} else {
 		err = os.Rename(newDataDirPath, dataDirPath)
 	}
 	if err != nil {
-		os.Remove(newDataDirPath)
-		os.RemoveAll(tsDir)
+		os.Remove(newDataDirPath) // #nosec -- best-effort cleanup
+		os.RemoveAll(tsDir)       // #nosec -- best-effort cleanup
 		klog.Error(err, "unable to rename symbolic link for data directory", "data directory", newDataDirPath)
 		return err
 	}
@@ -305,7 +305,7 @@ func shouldWriteFile(path string, content []byte) (bool, error) {
 		return true, nil
 	}
 
-	contentOnFs, err := ioutil.ReadFile(path)
+	contentOnFs, err := ioutil.ReadFile(path) // #nosec -- path is internally constructed
 	if err != nil {
 		return false, err
 	}
@@ -366,7 +366,7 @@ func (w *Writer) newTimestampDir() (string, error) {
 	// 0755 permissions are needed to allow 'group' and 'other' to recurse the
 	// directory tree.  do a chmod here to ensure that permissions are set correctly
 	// regardless of the process' umask.
-	err = os.Chmod(tsDir, 0755)
+	err = os.Chmod(tsDir, 0755) // #nosec -- 0755 needed for group/other traversal
 	if err != nil {
 		klog.Error(err, "unable to set mode on new temp directory")
 		return "", err
@@ -380,11 +380,11 @@ func (w *Writer) newTimestampDir() (string, error) {
 func (w *Writer) writePayloadToDir(payload map[string]FileProjection, dir string) error {
 	for userVisiblePath, fileProjection := range payload {
 		content := fileProjection.Data
-		mode := os.FileMode(fileProjection.Mode)
+		mode := fileProjection.Mode
 		fullPath := path.Join(dir, userVisiblePath)
 		baseDir, _ := filepath.Split(fullPath)
 
-		err := os.MkdirAll(baseDir, os.ModePerm)
+		err := os.MkdirAll(baseDir, os.ModePerm) // #nosec -- matches upstream K8s atomic writer
 		if err != nil {
 			klog.Error(err, "unable to create directory", "directory", baseDir)
 			return err
