@@ -36,6 +36,7 @@ import (
 
 	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
 	"github.com/openkruise/agents/pkg/sandbox-manager/quota"
+	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
@@ -734,11 +735,11 @@ func TestDeleteAPIKeyUnlimitedSkipsQuotaCleanup(t *testing.T) {
 	assert.Equal(t, int64(0), fakeQuota.calls.Load())
 }
 
-func quotaSpecForAPIKeyTest(count int64) *models.QuotaSpec {
-	return &models.QuotaSpec{
-		Limits: []models.QuotaLimit{{
-			Dimension: models.DimSandboxCount,
-			Scope:     models.ScopeRunning,
+func quotaSpecForAPIKeyTest(count int64) *quotaspec.QuotaSpec {
+	return &quotaspec.QuotaSpec{
+		Limits: []quotaspec.QuotaLimit{{
+			Dimension: quotaspec.DimSandboxCount,
+			Scope:     quotaspec.ScopeRunning,
 			Limit:     count,
 		}},
 	}

@@ -43,6 +43,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/sandbox-manager/quota"
+	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
@@ -602,9 +603,9 @@ func TestCreateSandbox_QuotaExceededReturns403WithoutRetry(t *testing.T) {
 		Key:  uuid.NewString(),
 		Name: "limited",
 		Team: models.AdminTeam(),
-		QuotaSpec: &models.QuotaSpec{Limits: []models.QuotaLimit{{
-			Dimension: models.DimSandboxCount,
-			Scope:     models.ScopeRunning,
+		QuotaSpec: &quotaspec.QuotaSpec{Limits: []quotaspec.QuotaLimit{{
+			Dimension: quotaspec.DimSandboxCount,
+			Scope:     quotaspec.ScopeRunning,
 			Limit:     limit,
 		}}},
 	}
@@ -623,7 +624,7 @@ func TestCreateSandbox_QuotaExceededReturns403WithoutRetry(t *testing.T) {
 	assert.Contains(t, apiErr.Message, "quota exceeded")
 	assert.Zero(t, resp.Code)
 	assert.Equal(t, int64(1), fakeQuota.acquireCalls.Load())
-	assert.Equal(t, []models.QuotaScope{models.ScopeRunning}, fakeQuota.lastAcquire.Scopes)
+	assert.Equal(t, []quotaspec.QuotaScope{quotaspec.ScopeRunning}, fakeQuota.lastAcquire.Scopes)
 }
 
 func TestCreateSandbox_QuotaExceededLeavesPooledSandboxClaimable(t *testing.T) {
@@ -639,9 +640,9 @@ func TestCreateSandbox_QuotaExceededLeavesPooledSandboxClaimable(t *testing.T) {
 		Key:  uuid.NewString(),
 		Name: "limited",
 		Team: models.AdminTeam(),
-		QuotaSpec: &models.QuotaSpec{Limits: []models.QuotaLimit{{
-			Dimension: models.DimSandboxCount,
-			Scope:     models.ScopeRunning,
+		QuotaSpec: &quotaspec.QuotaSpec{Limits: []quotaspec.QuotaLimit{{
+			Dimension: quotaspec.DimSandboxCount,
+			Scope:     quotaspec.ScopeRunning,
 			Limit:     limit,
 		}}},
 	}
@@ -658,7 +659,7 @@ func TestCreateSandbox_QuotaExceededLeavesPooledSandboxClaimable(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, apiErr.Code)
 	assert.Zero(t, resp.Code)
 	assert.Equal(t, int64(1), fakeQuota.acquireCalls.Load(), "quota miss must not retry")
-	assert.Equal(t, []models.QuotaScope{models.ScopeRunning}, fakeQuota.lastAcquire.Scopes)
+	assert.Equal(t, []quotaspec.QuotaScope{quotaspec.ScopeRunning}, fakeQuota.lastAcquire.Scopes)
 
 	unlimited := &models.CreatedTeamAPIKey{
 		ID:   uuid.New(),
@@ -694,9 +695,9 @@ func TestCreateSandbox_CloneQuotaExceededReturns403WithoutRetry(t *testing.T) {
 		Key:  uuid.NewString(),
 		Name: "limited",
 		Team: team,
-		QuotaSpec: &models.QuotaSpec{Limits: []models.QuotaLimit{{
-			Dimension: models.DimSandboxCount,
-			Scope:     models.ScopeRunning,
+		QuotaSpec: &quotaspec.QuotaSpec{Limits: []quotaspec.QuotaLimit{{
+			Dimension: quotaspec.DimSandboxCount,
+			Scope:     quotaspec.ScopeRunning,
 			Limit:     limit,
 		}}},
 	}
@@ -718,7 +719,7 @@ func TestCreateSandbox_CloneQuotaExceededReturns403WithoutRetry(t *testing.T) {
 	assert.Contains(t, apiErr.Message, "quota exceeded")
 	assert.Zero(t, resp.Code)
 	assert.Equal(t, int64(1), fakeQuota.acquireCalls.Load())
-	assert.Equal(t, []models.QuotaScope{models.ScopeRunning}, fakeQuota.lastAcquire.Scopes)
+	assert.Equal(t, []quotaspec.QuotaScope{quotaspec.ScopeRunning}, fakeQuota.lastAcquire.Scopes)
 }
 
 func TestCreateSandbox_UnlimitedKeyDoesNotCallQuota(t *testing.T) {
