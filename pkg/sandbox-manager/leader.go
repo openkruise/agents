@@ -173,6 +173,7 @@ func primaryKubeClientConfig(cfg *rest.Config) *rest.Config {
 	}
 	out := rest.CopyConfig(cfg)
 	timeout := primaryRenewDeadline / 2
+	//goland:noinspection GoBoolExpressions Just for defense
 	if timeout < time.Second {
 		timeout = time.Second
 	}
