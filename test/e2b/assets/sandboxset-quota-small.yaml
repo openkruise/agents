@@ -4,7 +4,7 @@ metadata:
   name: quota-small
   namespace: default
 spec:
-  replicas: 6
+  replicas: 8
   template:
     metadata:
       annotations:
