@@ -18,6 +18,7 @@ package filter
 
 import (
 	"testing"
+	"time"
 
 	"github.com/envoyproxy/envoy/contrib/golang/common/go/api"
 	"github.com/stretchr/testify/assert"
@@ -248,15 +249,37 @@ type mockDecoderFilterCallbacks struct {
 	replyStatusCode      int
 	replyBody            string
 	replyDetails         string
+
+	continueCalled bool
+	continueStatus api.StatusType
+
+	// done is signalled when Continue or SendLocalReply is called,
+	// allowing tests to synchronize with async wake goroutines.
+	done chan struct{}
 }
 
-func (m *mockDecoderFilterCallbacks) Continue(statusType api.StatusType) {}
+func (m *mockDecoderFilterCallbacks) Continue(statusType api.StatusType) {
+	m.continueCalled = true
+	m.continueStatus = statusType
+	if m.done != nil {
+		select {
+		case m.done <- struct{}{}:
+		default:
+		}
+	}
+}
 
 func (m *mockDecoderFilterCallbacks) SendLocalReply(responseCode int, bodyText string, headers map[string][]string, grpcStatus int64, details string) {
 	m.sendLocalReplyCalled = true
 	m.replyStatusCode = responseCode
 	m.replyBody = bodyText
 	m.replyDetails = details
+	if m.done != nil {
+		select {
+		case m.done <- struct{}{}:
+		default:
+		}
+	}
 }
 
 func (m *mockDecoderFilterCallbacks) RecoverPanic() {}
@@ -1256,9 +1279,9 @@ func TestDecodeHeadersAuthDisabled(t *testing.T) {
 
 // TestDecodeHeadersWakeOnTrafficCacheFallback verifies that when
 // route.WakeOnTraffic is false (registry not yet synced) but the informer
-// cache has the wake-on-traffic annotation, the filter still attempts wake.
-// The wake fails because the sandbox is not actually resumable in this test
-// setup, so we get 503 (wake failed) instead of 502 (not wakeable).
+// cache has the wake-on-traffic annotation, the filter still attempts wake
+// asynchronously. Returns api.Running, and the goroutine sends 503 on
+// wake failure.
 func TestDecodeHeadersWakeOnTrafficCacheFallback(t *testing.T) {
 	r := registry.GetRegistry()
 	defer r.Clear()
@@ -1294,7 +1317,11 @@ func TestDecodeHeadersWakeOnTrafficCacheFallback(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.EnableWakeOnTraffic = true
 	cfg.WakeTimeoutSeconds = 5
-	mockCallbacks := newMockFilterCallbackHandler()
+	done := make(chan struct{}, 1)
+	mockCallbacks := &mockFilterCallbackHandler{
+		streamInfo:       newMockStreamInfo(),
+		decoderCallbacks: &mockDecoderFilterCallbacks{done: done},
+	}
 	filter := &sandboxFilter{callbacks: mockCallbacks, config: cfg, adapter: defaultTestAdapter()}
 
 	header := newMockRequestHeaderMap()
@@ -1302,10 +1329,19 @@ func TestDecodeHeadersWakeOnTrafficCacheFallback(t *testing.T) {
 
 	status := filter.DecodeHeaders(header, true)
 
-	// The filter should attempt wake via the cache fallback.
-	// Wake fails (sandbox not resumable in test) -> 503 wake_failed.
-	// Without the fallback, the filter would return 502 (not_running).
-	assert.Equal(t, api.LocalReply, status)
+	// DecodeHeaders should return Running (async wake in progress).
+	assert.Equal(t, api.Running, status)
+
+	// Wait for the async goroutine to complete.
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for async wake completion")
+	}
+
+	// The filter should have sent a 503 (wake failed) because the sandbox
+	// is not actually resumable in this test setup.
+	assert.True(t, mockCallbacks.decoderCallbacks.sendLocalReplyCalled)
 	assert.Equal(t, 503, mockCallbacks.decoderCallbacks.replyStatusCode)
 	assert.Equal(t, "sandbox_wake_failed", mockCallbacks.decoderCallbacks.replyDetails)
 }
