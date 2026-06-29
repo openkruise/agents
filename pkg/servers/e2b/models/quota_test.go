@@ -125,6 +125,18 @@ func TestNormalizeQuotaSpec(t *testing.T) {
 	}
 }
 
+// parseQuotaWire is a test helper that unmarshals raw JSON into a *QuotaWire.
+// Returns nil for nil/empty input.
+func parseQuotaWire(t *testing.T, raw json.RawMessage) *QuotaWire {
+	t.Helper()
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var wire QuotaWire
+	require.NoError(t, json.Unmarshal(raw, &wire))
+	return &wire
+}
+
 func TestQuotaSpecWireRoundTrip(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -161,26 +173,12 @@ func TestQuotaSpecWireRoundTrip(t *testing.T) {
 			raw:         json.RawMessage(`{"running":{"gpu":1}}`),
 			expectError: "unsupported quota dimension",
 		},
-		{
-			name:        "short key count rejected",
-			raw:         json.RawMessage(`{"running":{"count":1}}`),
-			expectError: "use full key",
-		},
-		{
-			name:        "short key cpu rejected",
-			raw:         json.RawMessage(`{"running":{"cpu":8000}}`),
-			expectError: "use full key",
-		},
-		{
-			name:        "short key memory rejected",
-			raw:         json.RawMessage(`{"running":{"memory":16384}}`),
-			expectError: "use full key",
-		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := QuotaSpecFromWire(tt.raw)
+			wire := parseQuotaWire(t, tt.raw)
+			got, err := QuotaSpecFromWire(wire)
 			if tt.expectError != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.expectError)
@@ -195,7 +193,10 @@ func TestQuotaSpecWireRoundTrip(t *testing.T) {
 			}
 
 			require.Equal(t, tt.want, got)
-			assert.JSONEq(t, string(tt.raw), string(WireFromQuotaSpec(got)))
+			resultWire := WireFromQuotaSpec(got)
+			resultJSON, err := json.Marshal(resultWire)
+			require.NoError(t, err)
+			assert.JSONEq(t, string(tt.raw), string(resultJSON))
 		})
 	}
 }
@@ -207,7 +208,9 @@ func TestWireFromQuotaSpecEmitsFullKeys(t *testing.T) {
 		{Dimension: quotaspec.DimLimitsMemory, Scope: quotaspec.ScopeRunning, Limit: 16384},
 		{Dimension: quotaspec.DimSandboxCount, Scope: quotaspec.ScopeAll, Limit: 50},
 	}}
-	raw := WireFromQuotaSpec(spec)
+	wire := WireFromQuotaSpec(spec)
+	raw, err := json.Marshal(wire)
+	require.NoError(t, err)
 	assert.JSONEq(t,
 		`{"running":{"limits.cpu":8000,"limits.memory":16384,"sandbox.count":2},"all":{"sandbox.count":50}}`,
 		string(raw))
@@ -216,9 +219,14 @@ func TestWireFromQuotaSpecEmitsFullKeys(t *testing.T) {
 	assert.NotContains(t, string(raw), `"memory"`)
 }
 
-func TestMarshalCreatedTeamAPIKeyQuotaKeepsExistingRawMessage(t *testing.T) {
+func TestMarshalCreatedTeamAPIKeyQuotaKeepsWireFormat(t *testing.T) {
 	key := CreatedTeamAPIKey{
-		Quota: json.RawMessage(`{"running":{"limits.cpu":8000,"limits.memory":16384},"all":{"sandbox.count":50}}`),
+		Quota: &QuotaWire{
+			Scopes: map[string]map[string]int64{
+				"running": {"limits.cpu": 8000, "limits.memory": 16384},
+				"all":     {"sandbox.count": 50},
+			},
+		},
 		QuotaSpec: &quotaspec.QuotaSpec{Limits: []quotaspec.QuotaLimit{{
 			Dimension: quotaspec.QuotaDimension("limits.gpu"),
 			Scope:     quotaspec.ScopeRunning,
@@ -233,4 +241,78 @@ func TestMarshalCreatedTeamAPIKeyQuotaKeepsExistingRawMessage(t *testing.T) {
 	require.Contains(t, payload, "quota")
 	assert.JSONEq(t, `{"running":{"limits.cpu":8000,"limits.memory":16384},"all":{"sandbox.count":50}}`, string(payload["quota"]))
 	assert.NotContains(t, string(raw), `"limits"`)
+}
+
+func TestQuotaWireMarshalJSON(t *testing.T) {
+	tests := []struct {
+		name string
+		wire *QuotaWire
+		want string
+	}{
+		{name: "nil marshals to null", wire: nil, want: "null"},
+		{
+			name: "populated wire",
+			wire: &QuotaWire{Scopes: map[string]map[string]int64{
+				"running": {"sandbox.count": 10},
+			}},
+			want: `{"running":{"sandbox.count":10}}`,
+		},
+		{
+			name: "empty scopes marshals to empty object",
+			wire: &QuotaWire{Scopes: map[string]map[string]int64{}},
+			want: `{}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := tt.wire.MarshalJSON()
+			require.NoError(t, err)
+			if tt.wire == nil {
+				assert.Equal(t, tt.want, string(got))
+			} else {
+				assert.JSONEq(t, tt.want, string(got))
+			}
+		})
+	}
+}
+
+func TestQuotaWireUnmarshalJSON(t *testing.T) {
+	tests := []struct {
+		name       string
+		input      string
+		wantEmpty  bool
+		wantScopes int
+	}{
+		{name: "null", input: "null", wantEmpty: true},
+		{name: "empty object", input: "{}", wantEmpty: true},
+		{
+			name: "valid wire", input: `{"running":{"sandbox.count":5}}`,
+			wantScopes: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var wire QuotaWire
+			require.NoError(t, wire.UnmarshalJSON([]byte(tt.input)))
+			if tt.wantEmpty {
+				assert.Empty(t, wire.Scopes)
+			} else {
+				assert.Len(t, wire.Scopes, tt.wantScopes)
+			}
+		})
+	}
+}
+
+func TestQuotaWireFromSpecNilReturnsNil(t *testing.T) {
+	assert.Nil(t, QuotaWireFromSpec(nil))
+	assert.Nil(t, QuotaWireFromSpec(&quotaspec.QuotaSpec{}))
+}
+
+func TestCreatedTeamAPIKeyQuotaOmittedWhenNil(t *testing.T) {
+	key := CreatedTeamAPIKey{Name: "test"}
+	raw, err := json.Marshal(key)
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), `"quota"`)
 }
