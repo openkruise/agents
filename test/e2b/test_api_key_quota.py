@@ -833,6 +833,7 @@ def test_no_stock_path_stamps_owner_lockstring_and_counts_quota(sandbox_context)
         cleanup_quota_case(created_id, owned, marker)
 
 
+@pytest.mark.skip(reason="checkpoint is not available in kind")
 @pytest.mark.skipif(QUOTA_E2E_PROFILE != "redis-clone", reason="requires checkpoint clone quota profile")
 def test_checkpoint_clone_path_stamps_owner_and_lockstring(sandbox_context):
     marker = sandbox_context.request_id
