@@ -21,6 +21,7 @@ import (
 	"errors"
 	"testing"
 
+	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -61,13 +62,13 @@ func (b *managerTestBackend) Cleanup(_ context.Context, user string) error {
 }
 
 func TestManagerAcquire(t *testing.T) {
-	quota := &QuotaSpec{Limits: []QuotaLimit{{
-		Dimension: DimSandboxCount,
-		Scope:     ScopeAll,
+	quota := &quotaspec.QuotaSpec{Limits: []quotaspec.QuotaLimit{{
+		Dimension: quotaspec.DimSandboxCount,
+		Scope:     quotaspec.ScopeAll,
 		Limit:     2,
 	}, {
-		Dimension: DimLimitsCPU,
-		Scope:     ScopeRunning,
+		Dimension: quotaspec.DimLimitsCPU,
+		Scope:     quotaspec.ScopeRunning,
 		Limit:     4000,
 	}}}
 
@@ -86,7 +87,7 @@ func TestManagerAcquire(t *testing.T) {
 			req: AcquireRequest{
 				User:       "K",
 				LockString: "l1",
-				Scopes:     []QuotaScope{ScopeRunning},
+				Scopes:     []quotaspec.QuotaScope{quotaspec.ScopeRunning},
 			},
 			expectMetric: "unlimited",
 		},
@@ -96,20 +97,20 @@ func TestManagerAcquire(t *testing.T) {
 				User:       "K",
 				LockString: "l1",
 				Quota:      quota,
-				Footprint: map[QuotaDimension]int64{
-					DimLimitsCPU: 2000,
+				Footprint: map[quotaspec.QuotaDimension]int64{
+					quotaspec.DimLimitsCPU: 2000,
 				},
-				Scopes: []QuotaScope{ScopeRunning},
+				Scopes: []quotaspec.QuotaScope{quotaspec.ScopeRunning},
 			},
 			expectMetric:       "allowed",
 			expectBackendCalls: 1,
 			wantParams: &AcquireParams{
 				User:       "K",
 				LockString: "l1",
-				Footprint: map[QuotaDimension]int64{
-					DimLimitsCPU: 2000,
+				Footprint: map[quotaspec.QuotaDimension]int64{
+					quotaspec.DimLimitsCPU: 2000,
 				},
-				Scopes:  []QuotaScope{ScopeRunning},
+				Scopes:  []quotaspec.QuotaScope{quotaspec.ScopeRunning},
 				Enforce: true,
 				Limits:  quota.LimitedPairs(),
 			},
@@ -120,7 +121,7 @@ func TestManagerAcquire(t *testing.T) {
 				User:       "K",
 				LockString: "l1",
 				Quota:      quota,
-				Scopes:     []QuotaScope{ScopeRunning},
+				Scopes:     []quotaspec.QuotaScope{quotaspec.ScopeRunning},
 			},
 			acquireErr:         ErrQuotaExceeded,
 			expectError:        "quota exceeded",
@@ -133,7 +134,7 @@ func TestManagerAcquire(t *testing.T) {
 				User:       "K",
 				LockString: "l1",
 				Quota:      quota,
-				Scopes:     []QuotaScope{ScopeRunning},
+				Scopes:     []quotaspec.QuotaScope{quotaspec.ScopeRunning},
 			},
 			acquireErr:          ErrBackendUnavailable,
 			expectMetric:        "fail_open",
@@ -146,7 +147,7 @@ func TestManagerAcquire(t *testing.T) {
 				User:       "K",
 				LockString: "l1",
 				Quota:      quota,
-				Scopes:     []QuotaScope{ScopeRunning},
+				Scopes:     []quotaspec.QuotaScope{quotaspec.ScopeRunning},
 			},
 			acquireErr:          errors.New("boom"),
 			expectMetric:        "fail_open",

@@ -24,17 +24,17 @@ import (
 )
 
 type Entry struct {
-	Footprint map[QuotaDimension]int64
-	Scopes    []QuotaScope
+	Footprint map[quotaspec.QuotaDimension]int64
+	Scopes    []quotaspec.QuotaScope
 }
 
 type AcquireParams struct {
 	User       string
 	LockString string
-	Footprint  map[QuotaDimension]int64
-	Scopes     []QuotaScope
+	Footprint  map[quotaspec.QuotaDimension]int64
+	Scopes     []quotaspec.QuotaScope
 	Enforce    bool
-	Limits     map[QuotaDimension]map[QuotaScope]int64
+	Limits     map[quotaspec.QuotaDimension]map[quotaspec.QuotaScope]int64
 }
 
 type Backend interface {
@@ -47,9 +47,9 @@ type Backend interface {
 type AcquireRequest struct {
 	User       string
 	LockString string
-	Quota      *QuotaSpec
-	Footprint  map[QuotaDimension]int64
-	Scopes     []QuotaScope
+	Quota      *quotaspec.QuotaSpec
+	Footprint  map[quotaspec.QuotaDimension]int64
+	Scopes     []quotaspec.QuotaScope
 }
 
 type ReleaseRequest struct {

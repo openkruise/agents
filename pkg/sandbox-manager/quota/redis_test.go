@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
+	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
@@ -43,10 +44,10 @@ func TestAcquireUpsert(t *testing.T) {
 			op: AcquireParams{
 				User:       "K",
 				LockString: "l1",
-				Scopes:     []QuotaScope{ScopeRunning},
+				Scopes:     []quotaspec.QuotaScope{quotaspec.ScopeRunning},
 				Enforce:    true,
-				Limits: map[QuotaDimension]map[QuotaScope]int64{
-					DimSandboxCount: {ScopeAll: 10},
+				Limits: map[quotaspec.QuotaDimension]map[quotaspec.QuotaScope]int64{
+					quotaspec.DimSandboxCount: {quotaspec.ScopeAll: 10},
 				},
 			},
 			wantSum: map[string]map[string]int64{
@@ -58,12 +59,12 @@ func TestAcquireUpsert(t *testing.T) {
 			seed: []AcquireParams{{
 				User:       "K",
 				LockString: "l1",
-				Scopes:     []QuotaScope{ScopeRunning},
+				Scopes:     []quotaspec.QuotaScope{quotaspec.ScopeRunning},
 			}},
 			op: AcquireParams{
 				User:       "K",
 				LockString: "l1",
-				Scopes:     []QuotaScope{ScopeRunning},
+				Scopes:     []quotaspec.QuotaScope{quotaspec.ScopeRunning},
 			},
 			wantSum: map[string]map[string]int64{
 				"sandbox.count": {"all": 1, "running": 1},
@@ -74,7 +75,7 @@ func TestAcquireUpsert(t *testing.T) {
 			seed: []AcquireParams{{
 				User:       "K",
 				LockString: "l1",
-				Scopes:     []QuotaScope{ScopeRunning},
+				Scopes:     []quotaspec.QuotaScope{quotaspec.ScopeRunning},
 			}},
 			op: AcquireParams{
 				User:       "K",
@@ -89,15 +90,15 @@ func TestAcquireUpsert(t *testing.T) {
 			seed: []AcquireParams{{
 				User:       "K",
 				LockString: "l1",
-				Scopes:     []QuotaScope{ScopeRunning},
+				Scopes:     []quotaspec.QuotaScope{quotaspec.ScopeRunning},
 			}},
 			op: AcquireParams{
 				User:       "K",
 				LockString: "l2",
-				Scopes:     []QuotaScope{ScopeRunning},
+				Scopes:     []quotaspec.QuotaScope{quotaspec.ScopeRunning},
 				Enforce:    true,
-				Limits: map[QuotaDimension]map[QuotaScope]int64{
-					DimSandboxCount: {ScopeAll: 1},
+				Limits: map[quotaspec.QuotaDimension]map[quotaspec.QuotaScope]int64{
+					quotaspec.DimSandboxCount: {quotaspec.ScopeAll: 1},
 				},
 			},
 			expectError: "quota exceeded",
@@ -107,10 +108,10 @@ func TestAcquireUpsert(t *testing.T) {
 			op: AcquireParams{
 				User:       "K",
 				LockString: "l1",
-				Footprint: map[QuotaDimension]int64{
-					DimLimitsCPU: 2000,
+				Footprint: map[quotaspec.QuotaDimension]int64{
+					quotaspec.DimLimitsCPU: 2000,
 				},
-				Scopes: []QuotaScope{ScopeRunning},
+				Scopes: []quotaspec.QuotaScope{quotaspec.ScopeRunning},
 			},
 			wantSum: map[string]map[string]int64{
 				"sandbox.count": {"all": 1, "running": 1},
@@ -138,7 +139,7 @@ func TestAcquireUpsert(t *testing.T) {
 
 			for dim, scopes := range tt.wantSum {
 				for scope, want := range scopes {
-					assert.Equal(t, want, readSum(t, client, "K", QuotaDimension(dim), QuotaScope(scope)))
+					assert.Equal(t, want, readSum(t, client, "K", quotaspec.QuotaDimension(dim), quotaspec.QuotaScope(scope)))
 				}
 			}
 		})
@@ -171,22 +172,22 @@ func TestReleaseSubtractsAllScopes(t *testing.T) {
 	require.NoError(t, backend.Acquire(ctx, AcquireParams{
 		User:       "K",
 		LockString: "l1",
-		Footprint: map[QuotaDimension]int64{
-			DimLimitsCPU:    2000,
-			DimLimitsMemory: 4096,
+		Footprint: map[quotaspec.QuotaDimension]int64{
+			quotaspec.DimLimitsCPU:    2000,
+			quotaspec.DimLimitsMemory: 4096,
 		},
-		Scopes: []QuotaScope{ScopeRunning},
+		Scopes: []quotaspec.QuotaScope{quotaspec.ScopeRunning},
 	}))
 
 	require.NoError(t, backend.Release(ctx, "K", "l1"))
 	require.NoError(t, backend.Release(ctx, "K", "l1"))
 
-	assert.Equal(t, int64(0), readSum(t, client, "K", DimSandboxCount, ScopeAll))
-	assert.Equal(t, int64(0), readSum(t, client, "K", DimSandboxCount, ScopeRunning))
-	assert.Equal(t, int64(0), readSum(t, client, "K", DimLimitsCPU, ScopeAll))
-	assert.Equal(t, int64(0), readSum(t, client, "K", DimLimitsCPU, ScopeRunning))
-	assert.Equal(t, int64(0), readSum(t, client, "K", DimLimitsMemory, ScopeAll))
-	assert.Equal(t, int64(0), readSum(t, client, "K", DimLimitsMemory, ScopeRunning))
+	assert.Equal(t, int64(0), readSum(t, client, "K", quotaspec.DimSandboxCount, quotaspec.ScopeAll))
+	assert.Equal(t, int64(0), readSum(t, client, "K", quotaspec.DimSandboxCount, quotaspec.ScopeRunning))
+	assert.Equal(t, int64(0), readSum(t, client, "K", quotaspec.DimLimitsCPU, quotaspec.ScopeAll))
+	assert.Equal(t, int64(0), readSum(t, client, "K", quotaspec.DimLimitsCPU, quotaspec.ScopeRunning))
+	assert.Equal(t, int64(0), readSum(t, client, "K", quotaspec.DimLimitsMemory, quotaspec.ScopeAll))
+	assert.Equal(t, int64(0), readSum(t, client, "K", quotaspec.DimLimitsMemory, quotaspec.ScopeRunning))
 
 	entries, err := backend.ListEntries(ctx, "K")
 	require.NoError(t, err)
@@ -200,10 +201,10 @@ func TestListEntriesReturnsDecodedEntries(t *testing.T) {
 	require.NoError(t, backend.Acquire(ctx, AcquireParams{
 		User:       "K",
 		LockString: "l1",
-		Footprint: map[QuotaDimension]int64{
-			DimLimitsCPU: 2000,
+		Footprint: map[quotaspec.QuotaDimension]int64{
+			quotaspec.DimLimitsCPU: 2000,
 		},
-		Scopes: []QuotaScope{ScopeRunning},
+		Scopes: []quotaspec.QuotaScope{quotaspec.ScopeRunning},
 	}))
 	require.NoError(t, backend.Acquire(ctx, AcquireParams{
 		User:       "K",
@@ -215,8 +216,8 @@ func TestListEntriesReturnsDecodedEntries(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, entries, 2)
 	assert.Equal(t, Entry{
-		Footprint: map[QuotaDimension]int64{DimLimitsCPU: 2000},
-		Scopes:    []QuotaScope{ScopeRunning},
+		Footprint: map[quotaspec.QuotaDimension]int64{quotaspec.DimLimitsCPU: 2000},
+		Scopes:    []quotaspec.QuotaScope{quotaspec.ScopeRunning},
 	}, entries["l1"])
 	assert.Equal(t, Entry{}, entries["l2"])
 }
@@ -228,10 +229,10 @@ func TestListEntriesNormalizesConditionalScopesOnly(t *testing.T) {
 	require.NoError(t, backend.Acquire(ctx, AcquireParams{
 		User:       "K",
 		LockString: "l1",
-		Scopes: []QuotaScope{
-			ScopeAll,
-			ScopeRunning,
-			ScopeRunning,
+		Scopes: []quotaspec.QuotaScope{
+			quotaspec.ScopeAll,
+			quotaspec.ScopeRunning,
+			quotaspec.ScopeRunning,
 		},
 	}))
 
@@ -239,7 +240,7 @@ func TestListEntriesNormalizesConditionalScopesOnly(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, entries, "l1")
 	assert.Equal(t, Entry{
-		Scopes: []QuotaScope{ScopeRunning},
+		Scopes: []quotaspec.QuotaScope{quotaspec.ScopeRunning},
 	}, entries["l1"])
 }
 
@@ -250,12 +251,12 @@ func TestListEntriesNormalizesFootprintDimensions(t *testing.T) {
 	require.NoError(t, backend.Acquire(ctx, AcquireParams{
 		User:       "K",
 		LockString: "l1",
-		Footprint: map[QuotaDimension]int64{
-			DimSandboxCount:               1,
-			DimLimitsCPU:                  2000,
-			DimLimitsMemory:               4096,
-			QuotaDimension("limits.gpu"):  8,
-			QuotaDimension("unknown.dim"): -1,
+		Footprint: map[quotaspec.QuotaDimension]int64{
+			quotaspec.DimSandboxCount:               1,
+			quotaspec.DimLimitsCPU:                  2000,
+			quotaspec.DimLimitsMemory:               4096,
+			quotaspec.QuotaDimension("limits.gpu"):  8,
+			quotaspec.QuotaDimension("unknown.dim"): -1,
 		},
 	}))
 
@@ -263,9 +264,9 @@ func TestListEntriesNormalizesFootprintDimensions(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, entries, "l1")
 	assert.Equal(t, Entry{
-		Footprint: map[QuotaDimension]int64{
-			DimLimitsCPU:    2000,
-			DimLimitsMemory: 4096,
+		Footprint: map[quotaspec.QuotaDimension]int64{
+			quotaspec.DimLimitsCPU:    2000,
+			quotaspec.DimLimitsMemory: 4096,
 		},
 	}, entries["l1"])
 }
@@ -279,8 +280,8 @@ func TestListEntriesSkipsMalformedEntries(t *testing.T) {
 	require.NoError(t, backend.Acquire(ctx, AcquireParams{
 		User:       "K",
 		LockString: "good",
-		Footprint:  map[QuotaDimension]int64{DimLimitsCPU: 1000},
-		Scopes:     []QuotaScope{ScopeRunning},
+		Footprint:  map[quotaspec.QuotaDimension]int64{quotaspec.DimLimitsCPU: 1000},
+		Scopes:     []quotaspec.QuotaScope{quotaspec.ScopeRunning},
 	}))
 	srv.HSet(liveKey("K"), "bad", "{")
 
@@ -298,19 +299,19 @@ func TestCleanupDeletesLiveAndAllSums(t *testing.T) {
 	require.NoError(t, backend.Acquire(ctx, AcquireParams{
 		User:       "K",
 		LockString: "l1",
-		Footprint: map[QuotaDimension]int64{
-			DimLimitsCPU: 2000,
+		Footprint: map[quotaspec.QuotaDimension]int64{
+			quotaspec.DimLimitsCPU: 2000,
 		},
-		Scopes: []QuotaScope{ScopeRunning},
+		Scopes: []quotaspec.QuotaScope{quotaspec.ScopeRunning},
 	}))
 	require.NoError(t, backend.Cleanup(ctx, "K"))
 
-	assert.Equal(t, int64(0), readSum(t, client, "K", DimSandboxCount, ScopeAll))
-	assert.Equal(t, int64(0), readSum(t, client, "K", DimLimitsCPU, ScopeAll))
+	assert.Equal(t, int64(0), readSum(t, client, "K", quotaspec.DimSandboxCount, quotaspec.ScopeAll))
+	assert.Equal(t, int64(0), readSum(t, client, "K", quotaspec.DimLimitsCPU, quotaspec.ScopeAll))
 	assert.False(t, keyExists(t, client, liveKey("K")))
-	assert.False(t, keyExists(t, client, sumKey("K", DimSandboxCount)))
-	assert.False(t, keyExists(t, client, sumKey("K", DimLimitsCPU)))
-	assert.False(t, keyExists(t, client, sumKey("K", DimLimitsMemory)))
+	assert.False(t, keyExists(t, client, sumKey("K", quotaspec.DimSandboxCount)))
+	assert.False(t, keyExists(t, client, sumKey("K", quotaspec.DimLimitsCPU)))
+	assert.False(t, keyExists(t, client, sumKey("K", quotaspec.DimLimitsMemory)))
 }
 
 func TestNoopBackend(t *testing.T) {
@@ -338,7 +339,7 @@ func newTestRedisBackend(t *testing.T) (*RedisBackend, *redis.Client) {
 	return NewRedisBackend(client, 50*time.Millisecond), client
 }
 
-func readSum(t *testing.T, client *redis.Client, user string, dimension QuotaDimension, scope QuotaScope) int64 {
+func readSum(t *testing.T, client *redis.Client, user string, dimension quotaspec.QuotaDimension, scope quotaspec.QuotaScope) int64 {
 	t.Helper()
 
 	value, err := client.HGet(context.Background(), sumKey(user, dimension), string(scope)).Result()

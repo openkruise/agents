@@ -43,6 +43,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/sandbox-manager/quota"
+	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/pagination"
 	"github.com/openkruise/agents/pkg/utils/testutils"
@@ -2074,7 +2075,7 @@ func TestSandboxManagerBuildsQuotaAdmission(t *testing.T) {
 	manager.quota = quotaMgr
 
 	user := "user-1"
-	spec := &quota.QuotaSpec{Limits: []quota.QuotaLimit{{Dimension: quota.DimSandboxCount, Scope: quota.ScopeRunning, Limit: 1}}}
+	spec := &quotaspec.QuotaSpec{Limits: []quotaspec.QuotaLimit{{Dimension: quotaspec.DimSandboxCount, Scope: quotaspec.ScopeRunning, Limit: 1}}}
 
 	// Verify the manager's quotaAdmission builds a non-nil admission that calls Acquire.
 	admission := manager.quotaAdmission(user, spec)
@@ -2085,7 +2086,7 @@ func TestSandboxManagerBuildsQuotaAdmission(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, user, quotaMgr.lastAcquire.User)
 	assert.Equal(t, "lock-1", quotaMgr.lastAcquire.LockString)
-	assert.Equal(t, []quota.QuotaScope{quota.ScopeRunning}, quotaMgr.lastAcquire.Scopes)
+	assert.Equal(t, []quotaspec.QuotaScope{quotaspec.ScopeRunning}, quotaMgr.lastAcquire.Scopes)
 
 	// The admission's Release should call quota.Release with the correct user.
 	err = admission.Release(t.Context(), "lock-1")
@@ -2099,13 +2100,13 @@ func TestSandboxManagerQuotaAdmissionNilWhenNoQuota(t *testing.T) {
 	admission := manager.quotaAdmission("user-1", nil)
 	assert.Nil(t, admission)
 
-	admission = manager.quotaAdmission("user-1", &quota.QuotaSpec{})
+	admission = manager.quotaAdmission("user-1", &quotaspec.QuotaSpec{})
 	assert.Nil(t, admission)
 }
 
 func TestSandboxManagerQuotaAdmissionNilWhenNoEnforcer(t *testing.T) {
 	manager, _ := setupTestManager(t)
-	spec := &quota.QuotaSpec{Limits: []quota.QuotaLimit{{Dimension: quota.DimSandboxCount, Scope: quota.ScopeRunning, Limit: 5}}}
+	spec := &quotaspec.QuotaSpec{Limits: []quotaspec.QuotaLimit{{Dimension: quotaspec.DimSandboxCount, Scope: quotaspec.ScopeRunning, Limit: 5}}}
 	admission := manager.quotaAdmission("user-1", spec)
 	assert.Nil(t, admission)
 }
@@ -2132,7 +2133,7 @@ func TestSandboxManagerReleaseQuotaAfterDelete(t *testing.T) {
 
 	manager.proxy.SetRoute(t.Context(), sbx.GetRoute())
 
-	quotaSpec := &quota.QuotaSpec{Limits: []quota.QuotaLimit{{Dimension: quota.DimSandboxCount, Scope: quota.ScopeRunning, Limit: 5}}}
+	quotaSpec := &quotaspec.QuotaSpec{Limits: []quotaspec.QuotaLimit{{Dimension: quotaspec.DimSandboxCount, Scope: quotaspec.ScopeRunning, Limit: 5}}}
 	err = manager.DeleteSandbox(t.Context(), DeleteSandboxOptions{
 		Sandbox: sbx,
 		User:    testUser,
