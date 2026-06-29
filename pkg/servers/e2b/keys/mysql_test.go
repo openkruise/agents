@@ -540,7 +540,7 @@ func TestMySQL_QuotaMarshalAndLimitedList(t *testing.T) {
 		raw, err := marshalQuotaForDB(mysqlQuotaSpecWithMultipleLimits())
 		require.NoError(t, err)
 		require.NotNil(t, raw)
-		require.Contains(t, *raw, `"dimension":"limits.cpu"`)
+		require.JSONEq(t, `{"limits":[{"dimension":"limits.cpu","scope":"running","limit":8000},{"dimension":"limits.memory","scope":"running","limit":16384},{"dimension":"sandbox.count","scope":"all","limit":50}]}`, *raw)
 
 		spec, err := unmarshalQuotaFromDB(raw)
 		require.NoError(t, err)
@@ -588,13 +588,11 @@ func TestMySQL_ListByOwnerTeamIncludesQuota(t *testing.T) {
 	keys, err := st.ListByOwnerTeam(context.Background(), owner)
 	require.NoError(t, err)
 	require.Len(t, keys, 1)
-	require.NotNil(t, keys[0].Quota)
-	spec, err := models.QuotaSpecFromWire(keys[0].Quota)
+	require.NotNil(t, keys[0].QuotaSpec)
+	require.Equal(t, mysqlQuotaSpecWithMultipleLimits(), keys[0].QuotaSpec)
+	quotaJSON, err := json.Marshal(keys[0].QuotaSpec)
 	require.NoError(t, err)
-	require.Equal(t, mysqlQuotaSpecWithMultipleLimits(), spec)
-	quotaJSON, err := json.Marshal(keys[0].Quota)
-	require.NoError(t, err)
-	require.JSONEq(t, `{"running":{"limits.cpu":8000,"limits.memory":16384},"all":{"sandbox.count":50}}`, string(quotaJSON))
+	require.JSONEq(t, `{"limits":[{"dimension":"limits.cpu","scope":"running","limit":8000},{"dimension":"limits.memory","scope":"running","limit":16384},{"dimension":"sandbox.count","scope":"all","limit":50}]}`, string(quotaJSON))
 }
 
 func TestMySQL_CreateKeyReturnsAndCachesQuota(t *testing.T) {
@@ -616,12 +614,10 @@ func TestMySQL_CreateKeyReturnsAndCachesQuota(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, created.QuotaSpec)
 	require.Equal(t, mysqlQuotaSpecWithMultipleLimits(), created.QuotaSpec)
-	require.NotNil(t, created.Quota)
 
 	payload, err := json.Marshal(created)
 	require.NoError(t, err)
-	require.JSONEq(t, `{"createdAt":"`+created.CreatedAt.Format(time.RFC3339Nano)+`","id":"`+created.ID.String()+`","key":"`+created.Key+`","mask":{"maskedValuePrefix":"","maskedValueSuffix":"","prefix":"","valueLength":0},"name":"limited","createdBy":{"email":"","id":"`+user.ID.String()+`"},"team":{"id":"`+userTeam.ID.String()+`","name":"team-a"},"lastUsed":null,"quota":{"running":{"limits.cpu":8000,"limits.memory":16384},"all":{"sandbox.count":50}}}`, string(payload))
-	require.NotContains(t, string(payload), `"limits"`)
+	require.JSONEq(t, `{"createdAt":"`+created.CreatedAt.Format(time.RFC3339Nano)+`","id":"`+created.ID.String()+`","key":"`+created.Key+`","mask":{"maskedValuePrefix":"","maskedValueSuffix":"","prefix":"","valueLength":0},"name":"limited","createdBy":{"email":"","id":"`+user.ID.String()+`"},"team":{"id":"`+userTeam.ID.String()+`","name":"team-a"},"lastUsed":null,"quota":{"limits":[{"dimension":"limits.cpu","scope":"running","limit":8000},{"dimension":"limits.memory","scope":"running","limit":16384},{"dimension":"sandbox.count","scope":"all","limit":50}]}}`, string(payload))
 
 	byKey, ok := st.LoadByKey(context.Background(), created.Key)
 	require.True(t, ok)
@@ -640,7 +636,9 @@ func TestMySQLKeyStorage_LoadInvalidStoredQuotaAsUnlimited(t *testing.T) {
 		quotaRaw string
 	}{
 		{name: "quota string is ignored on auth path", quotaRaw: `"bad"`},
-		{name: "public wire shape is ignored on auth path", quotaRaw: `{"running":{"sandbox.count":2}}`},
+		{name: "unknown scope is ignored on auth path", quotaRaw: `{"unknown_scope":{"sandbox.count":2}}`},
+		{name: "unknown dimension is ignored on auth path", quotaRaw: `{"running":{"bad.dimension":2}}`},
+		{name: "non-integer limit is ignored on auth path", quotaRaw: `{"limits":[{"dimension":"sandbox.count","scope":"running","limit":"bad"}]}`},
 	}
 
 	for _, tt := range tests {
@@ -663,7 +661,6 @@ func TestMySQLKeyStorage_LoadInvalidStoredQuotaAsUnlimited(t *testing.T) {
 			require.True(t, ok)
 			require.Equal(t, keyID, got.ID)
 			require.Nil(t, got.QuotaSpec)
-			require.Nil(t, got.Quota)
 			require.NoError(t, mock.ExpectationsWereMet())
 		})
 	}
@@ -676,26 +673,11 @@ func TestMySQL_InvalidQuotaPayloadIsRejected(t *testing.T) {
 		quotaRaw    string
 		expectError string
 	}{
-		{
-			name:        "quota string is rejected",
-			quotaRaw:    `"bad"`,
-			expectError: "unmarshal quota",
-		},
-		{
-			name:        "internal limit string is rejected",
-			quotaRaw:    `{"limits":[{"dimension":"sandbox.count","limit":"bad"}]}`,
-			expectError: "unmarshal quota",
-		},
-		{
-			name:        "public nested quota shape is rejected",
-			quotaRaw:    `{"running":{"sandbox.count":2}}`,
-			expectError: "missing limits",
-		},
-		{
-			name:        "unsupported internal dimension is rejected",
-			quotaRaw:    `{"limits":[{"dimension":"cpu","limit":2}]}`,
-			expectError: "unsupported quota dimension",
-		},
+		{name: "bad JSON string", quotaRaw: `"bad"`, expectError: "invalid quota spec"},
+		{name: "unknown scope", quotaRaw: `{"limits":[{"dimension":"sandbox.count","scope":"unknown_scope","limit":2}]}`, expectError: "unsupported quota scope"},
+		{name: "unknown dimension", quotaRaw: `{"limits":[{"dimension":"bad.dimension","scope":"running","limit":2}]}`, expectError: "unsupported quota dimension"},
+		{name: "non-integer limit", quotaRaw: `{"limits":[{"dimension":"sandbox.count","scope":"running","limit":"bad"}]}`, expectError: "unmarshal quota"},
+		{name: "nested wire shape", quotaRaw: `{"running":{"sandbox.count":1}}`, expectError: "unknown field"},
 	}
 
 	for _, tt := range tests {
@@ -715,7 +697,6 @@ func TestMySQL_InvalidQuotaPayloadIsRejected(t *testing.T) {
 				require.NotNil(t, out)
 				require.Equal(t, keyID, out.ID)
 				require.Nil(t, out.QuotaSpec)
-				require.Nil(t, out.Quota)
 			})
 
 			t.Run("list by owner treats invalid quota as unlimited", func(t *testing.T) {
@@ -736,7 +717,7 @@ func TestMySQL_InvalidQuotaPayloadIsRejected(t *testing.T) {
 				require.NoError(t, err)
 				require.Len(t, keys, 1)
 				require.Equal(t, keyID, keys[0].ID)
-				require.Nil(t, keys[0].Quota)
+				require.Nil(t, keys[0].QuotaSpec)
 			})
 
 			t.Run("list limited skips invalid quota row", func(t *testing.T) {

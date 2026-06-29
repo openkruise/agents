@@ -205,7 +205,6 @@ func TestSecretKeyStorage_LoadByKeyAndIDReturnClones(t *testing.T) {
 		},
 		QuotaSpec: quotaSpecWithMultipleLimits(),
 	}
-	key.Quota = models.WireFromQuotaSpec(key.QuotaSpec)
 	storage.storeKey(key)
 
 	gotByKey, found := storage.LoadByKey(context.Background(), key.Key)
@@ -399,7 +398,7 @@ func TestSecretKeyStorage_UpdateAndRetry(t *testing.T) {
 			run: func(t *testing.T) error {
 				storage, _ := newSecretStorageForTest(t, map[string][]byte{})
 				oldMarshal := marshalAPIKey
-				marshalAPIKey = func(v any) ([]byte, error) { return nil, fmt.Errorf("boom") }
+				marshalAPIKey = func(_ *models.CreatedTeamAPIKey) ([]byte, error) { return nil, fmt.Errorf("boom") }
 				t.Cleanup(func() { marshalAPIKey = oldMarshal })
 				return storage.updateSecret(context.Background(), "id", &models.CreatedTeamAPIKey{ID: uuid.New(), Key: "x"})
 			},
@@ -659,20 +658,15 @@ func TestSecretKeyStorage_QuotaPersistenceAndLimitedList(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, created.QuotaSpec)
 	require.Equal(t, quotaSpecWithMultipleLimits(), created.QuotaSpec)
-	require.NotNil(t, created.Quota)
-	createdQuotaSpec, err := models.QuotaSpecFromWire(created.Quota)
+	quotaJSON, err := json.Marshal(created.QuotaSpec)
 	require.NoError(t, err)
-	require.Equal(t, quotaSpecWithMultipleLimits(), createdQuotaSpec)
-	quotaJSON, err := json.Marshal(created.Quota)
-	require.NoError(t, err)
-	assert.JSONEq(t, `{"running":{"limits.cpu":8000,"limits.memory":16384},"all":{"sandbox.count":50}}`, string(quotaJSON))
+	assert.JSONEq(t, `{"limits":[{"dimension":"limits.cpu","scope":"running","limit":8000},{"dimension":"limits.memory","scope":"running","limit":16384},{"dimension":"sandbox.count","scope":"all","limit":50}]}`, string(quotaJSON))
 
 	require.NoError(t, storage.refresh(context.Background(), storage.APIReader))
 	stored, ok := storage.LoadByID(context.Background(), created.ID.String())
 	require.True(t, ok)
 	require.NotNil(t, stored.QuotaSpec)
 	require.Equal(t, quotaSpecWithMultipleLimits(), stored.QuotaSpec)
-	require.NotNil(t, stored.Quota)
 
 	limitedKeys, err := storage.ListLimited(context.Background())
 	require.NoError(t, err)
@@ -700,7 +694,6 @@ func TestSecretKeyStorage_OldPayloadWithoutQuotaIsUnlimited(t *testing.T) {
 	stored, ok := storage.LoadByID(context.Background(), oldKey.ID.String())
 	require.True(t, ok)
 	require.Nil(t, stored.QuotaSpec)
-	require.Nil(t, stored.Quota)
 }
 
 func TestSecretKeyStorage_ListByOwnerTeamIncludesQuota(t *testing.T) {
@@ -726,13 +719,11 @@ func TestSecretKeyStorage_ListByOwnerTeamIncludesQuota(t *testing.T) {
 		}
 	}
 	require.NotNil(t, target)
-	require.NotNil(t, target.Quota)
-	spec, err := models.QuotaSpecFromWire(target.Quota)
+	require.NotNil(t, target.QuotaSpec)
+	require.Equal(t, quotaSpecWithMultipleLimits(), target.QuotaSpec)
+	targetQuotaJSON, err := json.Marshal(target.QuotaSpec)
 	require.NoError(t, err)
-	require.Equal(t, quotaSpecWithMultipleLimits(), spec)
-	targetQuotaJSON, err := json.Marshal(target.Quota)
-	require.NoError(t, err)
-	assert.JSONEq(t, `{"running":{"limits.cpu":8000,"limits.memory":16384},"all":{"sandbox.count":50}}`, string(targetQuotaJSON))
+	assert.JSONEq(t, `{"limits":[{"dimension":"limits.cpu","scope":"running","limit":8000},{"dimension":"limits.memory","scope":"running","limit":16384},{"dimension":"sandbox.count","scope":"all","limit":50}]}`, string(targetQuotaJSON))
 }
 
 func TestSecretKeyStorage_InvalidQuotaPayloadLoadsAsUnlimited(t *testing.T) {
@@ -741,18 +732,10 @@ func TestSecretKeyStorage_InvalidQuotaPayloadLoadsAsUnlimited(t *testing.T) {
 		name     string
 		quotaRaw string
 	}{
-		{
-			name:     "quota limit string is ignored on auth path",
-			quotaRaw: `{"limits":[{"dimension":"sandbox.count","limit":"bad"}]}`,
-		},
-		{
-			name:     "quota string is ignored on auth path",
-			quotaRaw: `"bad"`,
-		},
-		{
-			name:     "public nested quota shape is ignored on auth path",
-			quotaRaw: `{"running":{"sandbox.count":2}}`,
-		},
+		{name: "bad JSON string is ignored", quotaRaw: `"bad"`},
+		{name: "unknown scope is ignored", quotaRaw: `{"unknown_scope":{"sandbox.count":2}}`},
+		{name: "unknown dimension is ignored", quotaRaw: `{"running":{"bad.dimension":2}}`},
+		{name: "non-integer limit is ignored", quotaRaw: `{"limits":[{"dimension":"sandbox.count","scope":"running","limit":"bad"}]}`},
 	}
 
 	for _, tt := range tests {
@@ -773,7 +756,6 @@ func TestSecretKeyStorage_InvalidQuotaPayloadLoadsAsUnlimited(t *testing.T) {
 			loaded, ok := storage.LoadByID(context.Background(), keyID.String())
 			require.True(t, ok)
 			require.Nil(t, loaded.QuotaSpec)
-			require.Nil(t, loaded.Quota)
 
 			limitedKeys, err := storage.ListLimited(context.Background())
 			require.NoError(t, err)
@@ -799,7 +781,7 @@ func TestSecretKeyStorage_ListLimitedReturnsInvalidStoredPayload(t *testing.T) {
 
 func TestSecretKeyStorage_ListLimitedSkipsInvalidQuotaPayload(t *testing.T) {
 	validKeyID := uuid.MustParse("22222222-2222-2222-2222-222222222222")
-	validPayload, err := marshalStoredAPIKey(&models.CreatedTeamAPIKey{
+	validPayload, err := json.Marshal(&models.CreatedTeamAPIKey{
 		ID:        validKeyID,
 		Key:       "valid-key",
 		Name:      "valid-limited",
@@ -812,7 +794,7 @@ func TestSecretKeyStorage_ListLimitedSkipsInvalidQuotaPayload(t *testing.T) {
 		Key:  "invalid-key",
 		Name: "invalid-limited",
 		Team: &models.Team{Name: "team-a"},
-	}, `{"limits":[{"dimension":"sandbox.count","limit":"bad"}]}`)
+	}, `{"limits":[{"dimension":"sandbox.count","scope":"running","limit":"bad"}]}`)
 
 	storage, _ := newSecretStorageForTest(t, map[string][]byte{
 		validKeyID.String(): validPayload,
@@ -832,8 +814,8 @@ func TestSecretKeyStorage_LoadInvalidStoredQuotaAsUnlimited(t *testing.T) {
 		quotaRaw string
 	}{
 		{name: "quota string is ignored on auth path", quotaRaw: `"bad"`},
-		{name: "public wire shape is ignored on auth path", quotaRaw: `{"running":{"sandbox.count":2}}`},
-		{name: "unsupported stored dimension is ignored on auth path", quotaRaw: `{"limits":[{"dimension":"bad","scope":"running","limit":1}]}`},
+		{name: "unknown scope is ignored on auth path", quotaRaw: `{"unknown_scope":{"sandbox.count":2}}`},
+		{name: "unsupported stored dimension is ignored on auth path", quotaRaw: `{"running":{"bad.dimension":2}}`},
 	}
 
 	for _, tt := range tests {
@@ -847,21 +829,18 @@ func TestSecretKeyStorage_LoadInvalidStoredQuotaAsUnlimited(t *testing.T) {
 				Team:      models.AdminTeam(),
 			}
 
-			decoded, err := decodeStoredAPIKey(buildStoredKeyPayloadWithQuotaRaw(t, apiKey, tt.quotaRaw))
+			decoded, err := unmarshalStoredAPIKey(buildStoredKeyPayloadWithQuotaRaw(t, apiKey, tt.quotaRaw), false)
 			require.NoError(t, err)
 			require.Nil(t, decoded.QuotaSpec)
-			require.Nil(t, decoded.Quota)
 
 			storage.storeKey(decoded)
 			gotByKey, ok := storage.LoadByKey(context.Background(), apiKey.Key)
 			require.True(t, ok)
 			require.Nil(t, gotByKey.QuotaSpec)
-			require.Nil(t, gotByKey.Quota)
 
 			gotByID, ok := storage.LoadByID(context.Background(), apiKey.ID.String())
 			require.True(t, ok)
 			require.Nil(t, gotByID.QuotaSpec)
-			require.Nil(t, gotByID.Quota)
 		})
 	}
 }
@@ -891,7 +870,7 @@ func TestSecretKeyStorage_CreateKeyInSecretErrors(t *testing.T) {
 			run: func(t *testing.T) error {
 				storage, _ := newSecretStorageForTest(t, map[string][]byte{})
 				oldMarshal := marshalAPIKey
-				marshalAPIKey = func(v any) ([]byte, error) { return nil, fmt.Errorf("marshal failed") }
+				marshalAPIKey = func(_ *models.CreatedTeamAPIKey) ([]byte, error) { return nil, fmt.Errorf("marshal failed") }
 				t.Cleanup(func() { marshalAPIKey = oldMarshal })
 				_, err := storage.createKeyInSecret(t.Context(), uuid.NewString(), &models.CreatedTeamAPIKey{
 					ID:   uuid.New(),
@@ -945,7 +924,7 @@ func quotaSpecWithMultipleLimits() *quotaspec.QuotaSpec {
 
 func buildStoredKeyPayloadWithQuotaRaw(t *testing.T, apiKey *models.CreatedTeamAPIKey, quotaRaw string) []byte {
 	t.Helper()
-	base, err := marshalStoredAPIKey(apiKey)
+	base, err := json.Marshal(apiKey)
 	require.NoError(t, err)
 
 	var payload map[string]json.RawMessage

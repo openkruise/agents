@@ -273,29 +273,27 @@ func TestCreateAPIKey_QuotaJSONValidationAndResponses(t *testing.T) {
 		expectMissing  []string
 	}{
 		{
-			name:       "admin creates limited key with nested quota",
+			name:       "admin creates limited key with limits quota",
 			apiKey:     InitKey,
-			body:       `{"name":"limited-key","quota":{"running":{"sandbox.count":2}}}`,
+			body:       `{"name":"limited-key","quota":{"limits":[{"dimension":"sandbox.count","scope":"running","limit":2}]}}`,
 			expectCode: http.StatusCreated,
 			expectContains: []string{
-				`"quota":{"running":{"sandbox.count":2}}`,
+				`"quota":{"limits":[{"dimension":"sandbox.count","scope":"running","limit":2}]}`,
 			},
-			expectMissing: []string{`"limits"`},
 		},
 		{
 			name:       "admin creates hard zero quota key",
 			apiKey:     InitKey,
-			body:       `{"name":"hard-zero-key","quota":{"running":{"sandbox.count":0}}}`,
+			body:       `{"name":"hard-zero-key","quota":{"limits":[{"dimension":"sandbox.count","scope":"running","limit":0}]}}`,
 			expectCode: http.StatusCreated,
 			expectContains: []string{
-				`"quota":{"running":{"sandbox.count":0}}`,
+				`"quota":{"limits":[{"dimension":"sandbox.count","scope":"running","limit":0}]}`,
 			},
-			expectMissing: []string{`"limits"`},
 		},
 		{
 			name:       "regular key cannot set quota",
 			apiKey:     regularUser.Key,
-			body:       `{"name":"regular-limited","quota":{"running":{"sandbox.count":2}}}`,
+			body:       `{"name":"regular-limited","quota":{"limits":[{"dimension":"sandbox.count","scope":"running","limit":2}]}}`,
 			expectCode: http.StatusForbidden,
 			expectContains: []string{
 				`only admin can set api-key quota`,
@@ -304,28 +302,28 @@ func TestCreateAPIKey_QuotaJSONValidationAndResponses(t *testing.T) {
 		{
 			name:       "negative count is rejected",
 			apiKey:     InitKey,
-			body:       `{"name":"negative-key","quota":{"running":{"sandbox.count":-1}}}`,
+			body:       `{"name":"negative-key","quota":{"limits":[{"dimension":"sandbox.count","scope":"running","limit":-1}]}}`,
 			expectCode: http.StatusBadRequest,
 			expectContains: []string{
 				`quota limit must be non-negative`,
 			},
 		},
 		{
-			name:       "unsupported top level quota field is rejected",
+			name:       "nested wire quota field is rejected",
 			apiKey:     InitKey,
-			body:       `{"name":"cpu-key","quota":{"cpu":{"sandbox.count":2}}}`,
+			body:       `{"name":"nested-key","quota":{"running":{"sandbox.count":2}}}`,
 			expectCode: http.StatusBadRequest,
 			expectContains: []string{
-				`unsupported quota scope "cpu"`,
+				`unknown field "running"`,
 			},
 		},
 		{
-			name:       "internal limits shape is rejected",
+			name:       "missing quota scope is rejected",
 			apiKey:     InitKey,
 			body:       `{"name":"internal-shape","quota":{"limits":[{"dimension":"sandbox.count","limit":2}]}}`,
 			expectCode: http.StatusBadRequest,
 			expectContains: []string{
-				`cannot unmarshal array`,
+				`unsupported quota scope`,
 			},
 		},
 		{
@@ -367,11 +365,11 @@ func TestCreateAPIKey_QuotaJSONValidationAndResponses(t *testing.T) {
 	}
 }
 
-func TestListAPIKeys_ReturnsNestedQuotaJSON(t *testing.T) {
+func TestListAPIKeys_ReturnsLimitsQuotaJSON(t *testing.T) {
 	controller, _, teardown := Setup(t)
 	defer teardown()
 
-	req := httptest.NewRequest(http.MethodPost, "/api-keys", bytes.NewBufferString(`{"name":"limited-key","quota":{"running":{"sandbox.count":2}}}`))
+	req := httptest.NewRequest(http.MethodPost, "/api-keys", bytes.NewBufferString(`{"name":"limited-key","quota":{"limits":[{"dimension":"sandbox.count","scope":"running","limit":2}]}}`))
 	req.Header.Set(models.HeaderApiKey, InitKey)
 	req.Header.Set("Content-Type", "application/json")
 	createRec := httptest.NewRecorder()
@@ -385,15 +383,14 @@ func TestListAPIKeys_ReturnsNestedQuotaJSON(t *testing.T) {
 	controller.mux.ServeHTTP(listRec, listReq)
 
 	require.Equal(t, http.StatusOK, listRec.Code, listRec.Body.String())
-	assert.Contains(t, listRec.Body.String(), `"quota":{"running":{"sandbox.count":2}}`)
-	assert.NotContains(t, listRec.Body.String(), `"limits"`)
+	assert.Contains(t, listRec.Body.String(), `"quota":{"limits":[{"dimension":"sandbox.count","scope":"running","limit":2}]}`)
 }
 
 func TestCreateAPIKey_QuotaAcceptedWhenRedisAbsent(t *testing.T) {
 	controller, _, teardown := Setup(t)
 	defer teardown()
 
-	req := httptest.NewRequest(http.MethodPost, "/api-keys", strings.NewReader(`{"name":"limited-without-redis","quota":{"running":{"sandbox.count":2}}}`))
+	req := httptest.NewRequest(http.MethodPost, "/api-keys", strings.NewReader(`{"name":"limited-without-redis","quota":{"limits":[{"dimension":"sandbox.count","scope":"running","limit":2}]}}`))
 	req.Header.Set(models.HeaderApiKey, InitKey)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -401,8 +398,7 @@ func TestCreateAPIKey_QuotaAcceptedWhenRedisAbsent(t *testing.T) {
 	controller.mux.ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
-	assert.Contains(t, rec.Body.String(), `"quota":{"running":{"sandbox.count":2}}`)
-	assert.NotContains(t, rec.Body.String(), `"limits"`)
+	assert.Contains(t, rec.Body.String(), `"quota":{"limits":[{"dimension":"sandbox.count","scope":"running","limit":2}]}`)
 }
 
 func TestCompatibleAPIKeyEndpoint(t *testing.T) {

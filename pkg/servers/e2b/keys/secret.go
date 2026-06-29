@@ -45,17 +45,11 @@ var (
 	AdminKeyID    uuid.UUID
 	generateUUID  = uuid.New
 	marshalAPIKey = marshalStoredAPIKey
-
-	errInvalidQuotaSpec = errors.New("invalid api-key quota")
 )
 
-const secretKeyStorageRefreshInterval = 10 * time.Minute
-
-func init() {
-	AdminKeyID = uuid.MustParse("550e8400-e29b-41d4-a716-446655440000") // no means, just a const
-}
-
-type storedTeamAPIKey struct {
+// storedAPIKey mirrors the Secret JSON blob. Quota stays raw so invalid
+// persisted quota cannot poison the rest of the API key on auth/load paths.
+type storedAPIKey struct {
 	CreatedAt time.Time                       `json:"createdAt"`
 	ID        uuid.UUID                       `json:"id"`
 	Key       string                          `json:"key"`
@@ -67,22 +61,12 @@ type storedTeamAPIKey struct {
 	Quota     json.RawMessage                 `json:"quota,omitempty"`
 }
 
-func marshalStoredAPIKey(v any) ([]byte, error) {
-	switch value := v.(type) {
-	case *models.CreatedTeamAPIKey:
-		return marshalStoredTeamAPIKey(value)
-	case models.CreatedTeamAPIKey:
-		return marshalStoredTeamAPIKey(&value)
-	default:
-		return json.Marshal(v)
+func marshalStoredAPIKey(apiKey *models.CreatedTeamAPIKey) ([]byte, error) {
+	quota, err := quotaspec.MarshalQuotaSpec(apiKey.QuotaSpec)
+	if err != nil {
+		return nil, err
 	}
-}
-
-func marshalStoredTeamAPIKey(apiKey *models.CreatedTeamAPIKey) ([]byte, error) {
-	if apiKey == nil {
-		return json.Marshal((*storedTeamAPIKey)(nil))
-	}
-	stored := &storedTeamAPIKey{
+	return json.Marshal(storedAPIKey{
 		CreatedAt: apiKey.CreatedAt,
 		ID:        apiKey.ID,
 		Key:       apiKey.Key,
@@ -90,68 +74,44 @@ func marshalStoredTeamAPIKey(apiKey *models.CreatedTeamAPIKey) ([]byte, error) {
 		Name:      apiKey.Name,
 		CreatedBy: cloneTeamUser(apiKey.CreatedBy),
 		Team:      cloneTeam(apiKey.Team),
-	}
-	if apiKey.LastUsed != nil {
-		lastUsed := *apiKey.LastUsed
-		stored.LastUsed = &lastUsed
-	}
-	if apiKey.QuotaSpec != nil {
-		quotaRaw, err := quotaspec.MarshalQuotaSpec(apiKey.QuotaSpec)
-		if err != nil {
-			return nil, fmt.Errorf("normalize quota: %w", err)
-		}
-		if quotaRaw != nil {
-			stored.Quota = quotaRaw
-		}
-	}
-	return json.Marshal(stored)
+		LastUsed:  apiKey.LastUsed,
+		Quota:     quota,
+	})
 }
 
-func storedTeamAPIKeyToModel(stored *storedTeamAPIKey) *models.CreatedTeamAPIKey {
-	if stored == nil {
-		return nil
-	}
-	apiKey := &models.CreatedTeamAPIKey{
-		CreatedAt: stored.CreatedAt,
-		ID:        stored.ID,
-		Key:       stored.Key,
-		Mask:      stored.Mask,
-		Name:      stored.Name,
-		CreatedBy: cloneTeamUser(stored.CreatedBy),
-		Team:      cloneTeam(stored.Team),
-		LastUsed:  stored.LastUsed,
-	}
-	return apiKey
-}
-
-func decodeStoredAPIKey(data []byte) (*models.CreatedTeamAPIKey, error) {
-	return decodeStoredAPIKeyWithQuotaMode(data, false)
-}
-
-func decodeStoredAPIKeyWithQuotaMode(data []byte, strictQuota bool) (*models.CreatedTeamAPIKey, error) {
-	var stored storedTeamAPIKey
-	if err := json.Unmarshal(data, &stored); err != nil {
+func unmarshalStoredAPIKey(data []byte, strictQuota bool) (*models.CreatedTeamAPIKey, error) {
+	var stripped storedAPIKey
+	if err := json.Unmarshal(data, &stripped); err != nil {
 		return nil, err
 	}
 
-	apiKey := storedTeamAPIKeyToModel(&stored)
-	quotaSpec, err := decodeStoredQuotaSpec(stored.Quota)
+	quota, err := quotaspec.DecodeQuotaSpec(stripped.Quota)
 	if err != nil {
-		// Product decision: invalid stored quota must not break authentication. Treat
-		// the key as unlimited on request load paths and let strict ListLimited skip it.
-		if !strictQuota {
-			klog.FromContext(context.Background()).Error(err, "ignore invalid stored api-key quota on auth path", "apiKeyID", stored.ID)
-			return apiKey, nil
+		if strictQuota {
+			return nil, fmt.Errorf("%w: decode stored api-key quota: %v", quotaspec.ErrInvalidQuotaSpec, err)
 		}
-		return nil, fmt.Errorf("%w: decode stored api-key quota: %v", errInvalidQuotaSpec, err)
+		// Match MySQL storage: authentication remains available and treats bad
+		// stored quota as unlimited; ListLimited uses strictQuota and skips it.
+		klog.FromContext(context.Background()).Error(err, "ignore invalid stored api-key quota on auth path", "apiKeyID", stripped.ID)
+		quota = nil
 	}
-	apiKey.QuotaSpec = quotaSpec
-	apiKey.Quota = models.WireFromQuotaSpec(quotaSpec)
-	return apiKey, nil
+	return &models.CreatedTeamAPIKey{
+		CreatedAt: stripped.CreatedAt,
+		ID:        stripped.ID,
+		Key:       stripped.Key,
+		Mask:      stripped.Mask,
+		Name:      stripped.Name,
+		CreatedBy: cloneTeamUser(stripped.CreatedBy),
+		Team:      cloneTeam(stripped.Team),
+		LastUsed:  stripped.LastUsed,
+		QuotaSpec: quota,
+	}, nil
 }
 
-func decodeStoredQuotaSpec(raw json.RawMessage) (*quotaspec.QuotaSpec, error) {
-	return quotaspec.DecodeQuotaSpec(raw)
+const secretKeyStorageRefreshInterval = 10 * time.Minute
+
+func init() {
+	AdminKeyID = uuid.MustParse("550e8400-e29b-41d4-a716-446655440000") // no means, just a const
 }
 
 // secretKeyStorage is a simple implement for api-key storage using k8s secret as storage backend.
@@ -235,7 +195,7 @@ func (k *secretKeyStorage) refresh(ctx context.Context, reader client.Reader) er
 	// newly created key or restore a newly deleted key on the auth path.
 	var ids, keys, teamNames = sets.NewString(), sets.NewString(), sets.NewString()
 	for id, bytes := range secret.Data {
-		apiKey, err := decodeStoredAPIKey(bytes)
+		apiKey, err := unmarshalStoredAPIKey(bytes, false)
 		if err != nil {
 			log.Error(err, "failed to decode api-key", "id", id)
 			continue
@@ -411,9 +371,7 @@ func (k *secretKeyStorage) updateSecret(ctx context.Context, id string, apiKey *
 		secret.Data = make(map[string][]byte)
 	}
 	if apiKey != nil {
-		keyToStore := cloneCreatedTeamAPIKey(apiKey)
-		keyToStore.Quota = models.WireFromQuotaSpec(keyToStore.QuotaSpec)
-		marshaled, err := marshalAPIKey(keyToStore)
+		marshaled, err := marshalAPIKey(apiKey)
 		if err != nil {
 			return fmt.Errorf("failed to marshal api-key: %w", err)
 		}
@@ -438,7 +396,6 @@ func (k *secretKeyStorage) createKeyInSecret(ctx context.Context, id string, api
 	if existingTeam, ok := findTeamByNameInSecret(secret, keyToStore.Team.Name); ok {
 		keyToStore.Team = existingTeam
 	}
-	keyToStore.Quota = models.WireFromQuotaSpec(keyToStore.QuotaSpec)
 
 	marshaled, err := marshalAPIKey(&keyToStore)
 	if err != nil {
@@ -457,7 +414,7 @@ func (k *secretKeyStorage) createKeyInSecret(ctx context.Context, id string, api
 // the cache here could miss teams created by other replicas between retries.
 func findTeamByNameInSecret(secret *corev1.Secret, teamName string) (*models.Team, bool) {
 	for _, bytes := range secret.Data {
-		apiKey, err := decodeStoredAPIKey(bytes)
+		apiKey, err := unmarshalStoredAPIKey(bytes, false)
 		if err != nil {
 			continue
 		}
@@ -515,6 +472,11 @@ func (k *secretKeyStorage) CreateKey(ctx context.Context, key *models.CreatedTea
 		}
 	}
 
+	normalizedQuota, err := quotaspec.NormalizeQuotaSpec(opts.Quota)
+	if err != nil {
+		return nil, err
+	}
+
 	apiKey := &models.CreatedTeamAPIKey{
 		CreatedAt: time.Now(),
 		ID:        newID,
@@ -525,9 +487,8 @@ func (k *secretKeyStorage) CreateKey(ctx context.Context, key *models.CreatedTea
 		CreatedBy: &models.TeamUser{
 			ID: key.ID,
 		},
-		QuotaSpec: opts.Quota.DeepCopy(),
+		QuotaSpec: normalizedQuota.DeepCopy(),
 	}
-	apiKey.Quota = models.WireFromQuotaSpec(apiKey.QuotaSpec)
 
 	log.Info("api-key generated", "id", apiKey.ID)
 	createdKey, err := k.retryCreateKey(ctx, newID.String(), apiKey)
@@ -568,7 +529,7 @@ func (k *secretKeyStorage) ListByOwnerTeam(_ context.Context, owner *models.Crea
 				Name:      apikey.Name,
 				CreatedBy: apikey.CreatedBy,
 				LastUsed:  apikey.LastUsed,
-				Quota:     models.WireFromQuotaSpec(apikey.QuotaSpec),
+				QuotaSpec: apikey.QuotaSpec.DeepCopy(),
 			})
 		}
 		return true
@@ -584,9 +545,9 @@ func (k *secretKeyStorage) ListLimited(ctx context.Context) ([]*models.CreatedTe
 
 	limitedKeys := make([]*models.CreatedTeamAPIKey, 0)
 	for id, raw := range secret.Data {
-		apiKey, err := decodeStoredAPIKeyWithQuotaMode(raw, true)
+		apiKey, err := unmarshalStoredAPIKey(raw, true)
 		if err != nil {
-			if errors.Is(err, errInvalidQuotaSpec) {
+			if errors.Is(err, quotaspec.ErrInvalidQuotaSpec) {
 				klog.FromContext(ctx).Error(err, "skip invalid api-key quota while listing limited keys", "apiKeyID", id)
 				continue
 			}
