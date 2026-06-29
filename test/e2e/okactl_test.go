@@ -269,7 +269,7 @@ var _ = Describe("okactl CLI", func() {
 			}, 3*time.Minute, time.Second).Should(Equal(agentsv1alpha1.SandboxRunning))
 
 			By("Running okactl restart sandbox")
-			output, err := runOkactl("-n", namespace, "restart", "sandbox", sbx.Name)
+			output, err := runOkactl("-n", namespace, "restart", "sandbox", sbx.Name, "-c", "app")
 			Expect(err).NotTo(HaveOccurred(), "okactl output: %s", output)
 			Expect(output).To(ContainSubstring("created"))
 			Expect(output).To(ContainSubstring(sbx.Name))
@@ -315,7 +315,7 @@ var _ = Describe("okactl CLI", func() {
 		})
 
 		It("should fail when sandbox does not exist", func() {
-			output, err := runOkactl("-n", namespace, "restart", "sandbox", "non-existent-sbx")
+			output, err := runOkactl("-n", namespace, "restart", "sandbox", "non-existent-sbx", "-c", "app")
 			Expect(err).To(HaveOccurred())
 			Expect(output).To(ContainSubstring("failed to get sandbox"))
 		})

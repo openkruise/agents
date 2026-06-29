@@ -309,6 +309,5 @@ Available Commands:
 ## Future Work
 
 - Add `--output` flag to status commands for JSON/YAML output.
-- Add timeout parameter (e.g., `--timeout=5m`) to prevent indefinite waiting in `set image --wait` mode.
 - Add `okactl status sbx` for individual Sandbox status.
 - Add `okactl status cp` for Checkpoint operation status.

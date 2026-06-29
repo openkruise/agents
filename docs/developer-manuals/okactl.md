@@ -109,6 +109,7 @@ okactl set image sandboxset <name> <container=image> [container=image ...] [flag
 | Flag | Short | Required | Description |
 |------|-------|----------|-------------|
 | `--wait` | `-w` | No | Poll every 3s until all replicas are updated and available |
+| `--timeout` | | No | Timeout for `--wait` (default: `5m`; `0` disables timeout) |
 | `--namespace` | `-n` | No | Target namespace (default: `default`) |
 
 > **Note**: Refuses to operate on SandboxSets using `TemplateRef`. Users should modify the referenced `SandboxTemplate`
@@ -125,6 +126,9 @@ okactl set image sandboxset my-pool app=nginx:1.25 sidecar=envoy:1.28 -n staging
 
 # Update and wait for the rollout to complete
 okactl set image sbs my-pool app=nginx:1.25 --wait
+
+# Update with a custom timeout
+okactl set image sbs my-pool app=nginx:1.25 --wait --timeout=10m
 ```
 
 When `--wait` is used and the update appears stalled, the command automatically diagnoses potential issues by
@@ -192,13 +196,19 @@ Restart specific containers in a running sandbox without killing the entire pod.
 `ContainerRecreateRequest` (CRR) under the hood.
 
 ```bash
-okactl restart sandbox <name> -c <container> [-c <container> ...] [flags]
+okactl restart sandbox <name> -c <container> [-c <container> ...] [--all] [--failure-policy=Fail|Ignore] [flags]
 ```
 
 | Flag | Short | Required | Description |
 |------|-------|----------|-------------|
-| `--container` | `-c` | Yes | Container name(s) to restart (repeatable) |
+| `--container` | `-c` | No | Container name(s) to restart (repeatable) |
+| `--all` | | No | Restart all containers in the sandbox |
+| `--failure-policy` | | No | Failure policy: `Fail` (stop on error, default) or `Ignore` (continue on error) |
 | `--namespace` | `-n` | No | Target namespace (default: `default`) |
+
+> **Note**: At least one of `-c` or `--all` must be specified. Running without either
+> will print available container names and exit with an error. The two flags are
+> mutually exclusive.
 
 > **Prerequisites**:
 > - The OpenKruise [ContainerRecreateRequest CRD](https://openkruise.io/docs/user-manuals/containerrecreaterequest)
@@ -214,14 +224,19 @@ okactl restart sandbox my-sandbox -c app -n production
 
 # Restart multiple containers
 okactl restart sbx my-sandbox -c app -c sidecar
+
+# Restart all containers (explicit)
+okactl restart sbx my-sandbox --all
+
+# Restart all containers, continuing even if one fails
+okactl restart sbx my-sandbox --all --failure-policy=Ignore
 ```
 
 ---
 
 ## 5. Create SandboxUpdateOps (SUO)
 
-Create a `SandboxUpdateOps` to batch update images for claimed sandboxes (those managed by `SandboxClaim`). If an active
-SUO already exists for the same selector, it will be automatically cleaned up before creating the new one.
+Create a `SandboxUpdateOps` to batch update images for claimed sandboxes (those managed by `SandboxClaim`).
 
 ```bash
 okactl create suo -l <key=value> <container=image> [container=image ...] [flags]
@@ -234,12 +249,9 @@ okactl create suo -l <key=value> <container=image> [container=image ...] [flags]
 
 ### Validation
 
-- The selector must match at least one existing sandbox
+- The selector must match at least one existing sandbox (validated via server-side label filtering)
 - The selector supports full Kubernetes label selector syntax, including `key=value`,
   `key!=value`, `key in (v1,v2)`, and `!key`
-- Container names are validated against **all** matching sandboxes; if a container is missing
-  from some sandboxes, a warning is printed but the SUO is still created. If a container is
-  missing from **all** matching sandboxes, an error is returned
 - Image arguments must be in `container=image` format
 
 ### Examples
@@ -275,14 +287,14 @@ okactl scale sbs code-interpreter --replicas=10 -n sandbox-system
 # 2. Update container images and wait for the rollout to complete
 okactl set image sbs code-interpreter app=my-registry/interpreter:v2.0 --wait -n sandbox-system
 
-# 4. Batch update images for claimed sandboxes
+# 3. Batch update images for claimed sandboxes
 okactl create suo -l agents.kruise.io/claim-name=my-claim \
     app=my-registry/interpreter:v2.0 -n sandbox-system
 
-# 5. Check SUO batch update progress
+# 4. Check SUO batch update progress
 okactl status suo <suo-name> -n sandbox-system
 
-# 6. Restart a misbehaving container
+# 5. Restart a misbehaving container
 okactl restart sbx code-interpreter-abc12 -c app -n sandbox-system
 ```
 

@@ -21,25 +21,21 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/client-go/dynamic"
+
+	kruiseappsv1alpha1 "github.com/openkruise/kruise-api/apps/v1alpha1"
+	kruiseversioned "github.com/openkruise/kruise-api/client/clientset/versioned"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	apiv1alpha1 "github.com/openkruise/agents/client/clientset/versioned/typed/api/v1alpha1"
 )
 
-// OpenKruise ContainerRecreateRequest GVR
-var containerRecreateRequestGVR = schema.GroupVersionResource{
-	Group:    "apps.kruise.io",
-	Version:  "v1alpha1",
-	Resource: "containerrecreaterequests",
-}
-
 type restartOptions struct {
-	global     *GlobalOptions
-	containers []string
+	global        *GlobalOptions
+	containers    []string
+	allContainers bool
+	failurePolicy string
 }
 
 // NewRestartCommand returns the "restart" command with its subcommands.
@@ -60,29 +56,41 @@ func newRestartSandboxCommand(globalOpts *GlobalOptions) *cobra.Command {
 	o := &restartOptions{global: globalOpts}
 
 	cmd := &cobra.Command{
-		Use:     "sandbox NAME [-c CONTAINER ...]",
+		Use:     "sandbox NAME [-c CONTAINER ...] [--all] [--failure-policy=Fail|Ignore]",
 		Aliases: []string{"sbx"},
 		Short:   "Restart containers in a Sandbox by creating an OpenKruise ContainerRecreateRequest",
 		Long: `Restart one or more containers in a running Sandbox.
-If no -c flags are specified, all user containers in the Sandbox will be restarted.
-This command creates an OpenKruise ContainerRecreateRequest (CRR) targeting the Sandbox's Pod.`,
-		Example: `  # Restart all user containers in a Sandbox
-  okactl restart sandbox my-sbx
+If -c is specified, only the listed containers are restarted.
+If --all is specified, all user containers in the Sandbox are restarted.
+At least one of -c or --all must be provided; running without either will
+print available container names and exit with an error.
+This command creates an OpenKruise ContainerRecreateRequest (CRR) targeting the Sandbox's Pod.
 
-  # Restart a specific container
+The --failure-policy flag controls how failures are handled:
+  Fail    - Stop recreating remaining containers if one fails (default).
+  Ignore  - Continue recreating remaining containers even if one fails.`,
+		Example: `  # Restart a specific container
   okactl restart sandbox my-sbx -c app
 
   # Restart multiple containers
   okactl restart sandbox my-sbx -c app -c sidecar
 
+  # Restart all containers (explicit)
+  okactl restart sandbox my-sbx --all
+
+  # Restart all containers, continuing even if one fails
+  okactl restart sandbox my-sbx --all --failure-policy=Ignore
+
   # Restart in a specific namespace
-  okactl -n agent-system restart sandbox my-sbx`,
+  okactl -n agent-system restart sandbox my-sbx -c app`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return o.run(args[0])
 		},
 	}
 	cmd.Flags().StringArrayVarP(&o.containers, "container", "c", nil, "Container name to restart (can be specified multiple times)")
+	cmd.Flags().BoolVarP(&o.allContainers, "all", "", false, "Restart all containers in the sandbox")
+	cmd.Flags().StringVarP(&o.failurePolicy, "failure-policy", "", "Fail", "Failure policy: Fail (stop on error) or Ignore (continue on error)")
 	return cmd
 }
 
@@ -91,14 +99,14 @@ func (o *restartOptions) run(sandboxName string) error {
 	if err != nil {
 		return err
 	}
-	dynClient, err := o.global.DynamicClient()
+	kruiseClient, err := o.global.KruiseClient()
 	if err != nil {
 		return err
 	}
-	return runRestartWithClients(agentsClient, dynClient, o, sandboxName)
+	return runRestartWithClients(agentsClient, kruiseClient, o, sandboxName)
 }
 
-func runRestartWithClients(agentsClient apiv1alpha1.ApiV1alpha1Interface, dynClient dynamic.Interface, o *restartOptions, sandboxName string) error {
+func runRestartWithClients(agentsClient apiv1alpha1.ApiV1alpha1Interface, kruiseClient kruiseversioned.Interface, o *restartOptions, sandboxName string) error {
 	ctx := context.TODO()
 	ns := o.global.Namespace
 
@@ -114,7 +122,26 @@ func runRestartWithClients(agentsClient apiv1alpha1.ApiV1alpha1Interface, dynCli
 		return fmt.Errorf("sandbox %q is not running (current phase: %s)", sandboxName, sbx.Status.Phase)
 	}
 
+	// Validate failure policy
+	failurePolicy := kruiseappsv1alpha1.ContainerRecreateRequestFailurePolicyType(o.failurePolicy)
+	if failurePolicy == "" {
+		failurePolicy = kruiseappsv1alpha1.ContainerRecreateRequestFailurePolicyFail
+	}
+	if failurePolicy != kruiseappsv1alpha1.ContainerRecreateRequestFailurePolicyFail && failurePolicy != kruiseappsv1alpha1.ContainerRecreateRequestFailurePolicyIgnore {
+		return fmt.Errorf("invalid failure-policy %q: must be Fail or Ignore", failurePolicy)
+	}
+
 	containers := o.containers
+	if len(containers) == 0 && !o.allContainers {
+		available, _, ferr := fetchContainerNames(ctx, agentsClient, sbx)
+		if ferr != nil {
+			return ferr
+		}
+		return fmt.Errorf("no containers specified: use -c <name> or --all to restart. Available containers: %v", available)
+	}
+	if len(containers) > 0 && o.allContainers {
+		return fmt.Errorf("--all cannot be used together with -c")
+	}
 	if len(containers) == 0 {
 		containers, err = extractContainerNames(ctx, agentsClient, sbx)
 		if err != nil {
@@ -129,41 +156,75 @@ func runRestartWithClients(agentsClient apiv1alpha1.ApiV1alpha1Interface, dynCli
 		}
 	}
 
-	// Build OpenKruise CRR spec.containers list
-	containerTargets := make([]interface{}, 0, len(containers))
+	// Build typed CRR spec.containers list
+	containerTargets := make([]kruiseappsv1alpha1.ContainerRecreateRequestContainer, 0, len(containers))
 	for _, c := range containers {
-		containerTargets = append(containerTargets, map[string]interface{}{
-			"name": c,
+		containerTargets = append(containerTargets, kruiseappsv1alpha1.ContainerRecreateRequestContainer{
+			Name: c,
 		})
 	}
 
+	// Use a deterministic name so that repeated restarts of the same sandbox
+	// reuse the same CRR instead of accumulating new ones.
+	crrName := sandboxName + "-restart"
+
+	// Check for an existing CRR with the same name. If it is still active,
+	// refuse to create a duplicate. If it has completed, delete it so we can
+	// create a fresh one.
+	existing, getErr := kruiseClient.AppsV1alpha1().ContainerRecreateRequests(ns).Get(ctx, crrName, metav1.GetOptions{})
+	if getErr != nil {
+		if !apierrors.IsNotFound(getErr) {
+			return fmt.Errorf("failed to check existing ContainerRecreateRequest: %w", getErr)
+		}
+	} else if isCRRActive(existing) {
+		return fmt.Errorf("an active ContainerRecreateRequest %q already exists for sandbox %q (phase: %s); wait for it to complete or delete it manually",
+			crrName, sandboxName, existing.Status.Phase)
+	} else {
+		// Previous CRR has completed — delete it to make room for the new one.
+		if delErr := kruiseClient.AppsV1alpha1().ContainerRecreateRequests(ns).Delete(ctx, crrName, metav1.DeleteOptions{}); delErr != nil {
+			if !apierrors.IsNotFound(delErr) {
+				return fmt.Errorf("failed to delete completed ContainerRecreateRequest %q: %w", crrName, delErr)
+			}
+		}
+	}
+
 	// CRR targets the Pod which has the same name as the Sandbox
-	crr := &unstructured.Unstructured{
-		Object: map[string]interface{}{
-			"apiVersion": "apps.kruise.io/v1alpha1",
-			"kind":       "ContainerRecreateRequest",
-			"metadata": map[string]interface{}{
-				"generateName": sandboxName + "-restart-",
-				"namespace":    ns,
-			},
-			"spec": map[string]interface{}{
-				"podName":    sandboxName,
-				"containers": containerTargets,
-				"strategy": map[string]interface{}{
-					"failurePolicy": "Fail",
-				},
+	crr := &kruiseappsv1alpha1.ContainerRecreateRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      crrName,
+			Namespace: ns,
+		},
+		Spec: kruiseappsv1alpha1.ContainerRecreateRequestSpec{
+			PodName:    sandboxName,
+			Containers: containerTargets,
+			Strategy: &kruiseappsv1alpha1.ContainerRecreateRequestStrategy{
+				FailurePolicy: failurePolicy,
 			},
 		},
 	}
 
-	created, err := dynClient.Resource(containerRecreateRequestGVR).Namespace(ns).Create(ctx, crr, metav1.CreateOptions{})
+	created, err := kruiseClient.AppsV1alpha1().ContainerRecreateRequests(ns).Create(ctx, crr, metav1.CreateOptions{})
 	if err != nil {
+		if apierrors.IsAlreadyExists(err) {
+			return fmt.Errorf("an active ContainerRecreateRequest %q already exists for sandbox %q; wait for it to complete or delete it manually",
+				crrName, sandboxName)
+		}
 		return fmt.Errorf("failed to create ContainerRecreateRequest: %w", err)
 	}
 
 	fmt.Printf("containerrecreaterequests.apps.kruise.io/%s created (pod: %s, containers: %v)\n",
 		created.GetName(), sandboxName, containers)
 	return nil
+}
+
+// isCRRActive returns true if the ContainerRecreateRequest has not yet reached
+// a terminal state. A CRR with an empty phase is considered active because it
+// has just been created and the controller has not yet populated the status.
+func isCRRActive(crr *kruiseappsv1alpha1.ContainerRecreateRequest) bool {
+	phase := crr.Status.Phase
+	return phase == "" ||
+		phase == kruiseappsv1alpha1.ContainerRecreateRequestPending ||
+		phase == kruiseappsv1alpha1.ContainerRecreateRequestRecreating
 }
 
 // fetchContainerNames retrieves container and init-container names from the sandbox's

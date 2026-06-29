@@ -22,14 +22,10 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	apiv1alpha1 "github.com/openkruise/agents/client/clientset/versioned/typed/api/v1alpha1"
@@ -108,46 +104,29 @@ func runCreateSuoWithClient(client apiv1alpha1.ApiV1alpha1Interface, o *createSu
 	ctx := context.TODO()
 	ns := o.global.Namespace
 
-	// Parse the label selector
-	sel, err := labels.Parse(o.selector)
-	if err != nil {
-		return fmt.Errorf("invalid label selector %q: %w", o.selector, err)
-	}
-
-	// List all sandboxes and filter by label selector
-	sbxList, err := client.Sandboxes(ns).List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to list sandboxes: %w", err)
-	}
-
-	var matched []agentsv1alpha1.Sandbox
-	for i := range sbxList.Items {
-		if sel.Matches(labels.Set(sbxList.Items[i].Labels)) {
-			matched = append(matched, sbxList.Items[i])
-		}
-	}
-	if len(matched) == 0 {
-		return fmt.Errorf("no sandboxes found matching selector %q in namespace %q", o.selector, ns)
-	}
-
-	// Validate container names against all matching sandboxes
-	if err := validateSuoImageContainers(matched, images); err != nil {
-		return err
-	}
-
 	patchData, err := buildSuoImagePatch(images)
 	if err != nil {
 		return fmt.Errorf("failed to build patch: %w", err)
 	}
 
-	// Delete any active (non-terminal) SUO before creating a new one
-	if err := deleteActiveSandboxUpdateOps(client, ns); err != nil {
-		return err
-	}
-
 	labelSelector, err := metav1.ParseToLabelSelector(o.selector)
 	if err != nil {
 		return fmt.Errorf("invalid label selector %q: %w", o.selector, err)
+	}
+
+	// Validate that at least one sandbox matches the selector.
+	selector, err := metav1.LabelSelectorAsSelector(labelSelector)
+	if err != nil {
+		return fmt.Errorf("invalid label selector %q: %w", o.selector, err)
+	}
+
+	sandboxList, err := client.Sandboxes(ns).List(ctx, metav1.ListOptions{LabelSelector: selector.String()})
+	if err != nil {
+		return fmt.Errorf("failed to list sandboxes: %w", err)
+	}
+
+	if len(sandboxList.Items) == 0 {
+		return fmt.Errorf("no sandboxes found matching selector %q in namespace %q", o.selector, ns)
 	}
 
 	suo := &agentsv1alpha1.SandboxUpdateOps{
@@ -198,40 +177,6 @@ func buildSuoImagePatch(images map[string]string) ([]byte, error) {
 	return json.Marshal(patch)
 }
 
-// validateSuoImageContainers checks that container names in images exist in the matched sandboxes.
-// If a container name is missing from ALL sandboxes, it returns an error (likely a typo).
-// If a container name is missing from SOME sandboxes, it prints a warning but does not fail,
-// because different sandboxes may use different template versions with varying container sets.
-func validateSuoImageContainers(sandboxes []agentsv1alpha1.Sandbox, images map[string]string) error {
-	missingCount := make(map[string]int)
-	for i := range sandboxes {
-		sbx := &sandboxes[i]
-		known := make(map[string]bool)
-		if sbx.Spec.Template != nil {
-			for _, c := range sbx.Spec.Template.Spec.Containers {
-				known[c.Name] = true
-			}
-			for _, c := range sbx.Spec.Template.Spec.InitContainers {
-				known[c.Name] = true
-			}
-		}
-		for name := range images {
-			if !known[name] {
-				missingCount[name]++
-				fmt.Printf("Warning: container %q not found in sandbox %q\n", name, sbx.Name)
-			}
-		}
-	}
-
-	// If a container is missing from ALL sandboxes, it is likely a typo
-	for name, count := range missingCount {
-		if count == len(sandboxes) {
-			return fmt.Errorf("container %q not found in any of the %d matching sandboxes", name, len(sandboxes))
-		}
-	}
-	return nil
-}
-
 // formatSuoImagePairs formats a map of container=image pairs as a slice of "container=image" strings.
 func formatSuoImagePairs(images map[string]string) []string {
 	names := make([]string, 0, len(images))
@@ -245,75 +190,4 @@ func formatSuoImagePairs(images map[string]string) []string {
 		pairs = append(pairs, name+"="+images[name])
 	}
 	return pairs
-}
-
-// deleteActiveSandboxUpdateOps deletes existing SUOs that are still active (Pending or Updating)
-// in the namespace to avoid conflicts. Completed and Failed SUOs are preserved for historical reference.
-// It first removes the finalizer (if present) to ensure the SUO can be deleted immediately,
-// even if the SUO controller is not running.
-func deleteActiveSandboxUpdateOps(client apiv1alpha1.ApiV1alpha1Interface, ns string) error {
-	list, err := client.Sandboxupdateops(ns).List(context.TODO(), metav1.ListOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to list SandboxUpdateOps: %w", err)
-	}
-
-	var deleted []string
-	for i := range list.Items {
-		suo := &list.Items[i]
-		phase := suo.Status.Phase
-
-		// Only delete SUOs that are Pending or Updating (including empty phase for newly created SUOs).
-		// Completed and Failed SUOs are left for historical reference.
-		if phase != "" && phase != agentsv1alpha1.SandboxUpdateOpsPending && phase != agentsv1alpha1.SandboxUpdateOpsUpdating {
-			continue
-		}
-
-		// Remove finalizer first to allow immediate deletion
-		// The SUO controller may not be running, so finalizer cleanup won't happen automatically
-		if err := removeSUOFinalizer(client, ns, suo.Name); err != nil {
-			return fmt.Errorf("failed to remove finalizer from SandboxUpdateOps %q: %w", suo.Name, err)
-		}
-
-		// Now delete the SUO (should be immediate without finalizer)
-		if err := client.Sandboxupdateops(ns).Delete(context.TODO(), suo.Name, metav1.DeleteOptions{}); err != nil {
-			return fmt.Errorf("failed to delete SandboxUpdateOps %q: %w", suo.Name, err)
-		}
-		fmt.Printf("sandboxupdateops.agents.kruise.io/%s deleted (was %s)\n", suo.Name, phase)
-		deleted = append(deleted, suo.Name)
-	}
-
-	// Wait for deleted SUOs to be fully removed (should be near-instant now)
-	for _, name := range deleted {
-		if err := waitForSUODeletion(client, ns, name); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// removeSUOFinalizer removes the finalizer from a SandboxUpdateOps via JSON patch.
-// This allows the SUO to be deleted immediately without waiting for the controller to process it.
-func removeSUOFinalizer(client apiv1alpha1.ApiV1alpha1Interface, ns, name string) error {
-	patch := []byte(`[{"op":"replace","path":"/metadata/finalizers","value":[]}]`)
-	_, err := client.Sandboxupdateops(ns).Patch(context.TODO(), name, types.JSONPatchType, patch, metav1.PatchOptions{})
-	return err
-}
-
-// waitForSUODeletion polls until the SUO is fully removed from the API server.
-// After finalizer removal, deletion should be near-instant.
-func waitForSUODeletion(client apiv1alpha1.ApiV1alpha1Interface, ns, name string) error {
-	const maxWait = 10 * time.Second
-	const pollInterval = 500 * time.Millisecond
-
-	for elapsed := time.Duration(0); elapsed < maxWait; elapsed += pollInterval {
-		_, err := client.Sandboxupdateops(ns).Get(context.TODO(), name, metav1.GetOptions{})
-		if err != nil {
-			if apierrors.IsNotFound(err) {
-				return nil
-			}
-			return fmt.Errorf("failed to check SandboxUpdateOps %q deletion: %w", name, err)
-		}
-		time.Sleep(pollInterval)
-	}
-	return fmt.Errorf("timeout waiting for SandboxUpdateOps %q to be deleted (finalizer may be stuck)", name)
 }

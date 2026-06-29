@@ -19,6 +19,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -33,8 +34,9 @@ import (
 )
 
 type setImageOptions struct {
-	global *GlobalOptions
-	wait   bool
+	global  *GlobalOptions
+	wait    bool
+	timeout time.Duration
 }
 
 // NewSetCommand returns the "set" command with its subcommands.
@@ -88,6 +90,7 @@ insufficient resources) by inspecting sandbox and pod status.`,
 		},
 	}
 	cmd.Flags().BoolVarP(&o.wait, "wait", "w", false, "Wait for the rollout to complete")
+	cmd.Flags().DurationVarP(&o.timeout, "timeout", "", 5*time.Minute, "Timeout for --wait (e.g., 5m, 10m; 0 disables timeout)")
 	return cmd
 }
 
@@ -117,6 +120,29 @@ func updateContainerImages(containers []corev1.Container, images map[string]stri
 	return updated
 }
 
+// validateSandboxSetContainers checks that every container name in images
+// exists in the SandboxSet's inline template (containers or init containers).
+// Returns an error naming the first missing container.
+func validateSandboxSetContainers(sbs *agentsv1alpha1.SandboxSet, images map[string]string, name string) error {
+	found := make(map[string]bool, len(images))
+	for _, c := range sbs.Spec.Template.Spec.Containers {
+		if _, ok := images[c.Name]; ok {
+			found[c.Name] = true
+		}
+	}
+	for _, c := range sbs.Spec.Template.Spec.InitContainers {
+		if _, ok := images[c.Name]; ok {
+			found[c.Name] = true
+		}
+	}
+	for container := range images {
+		if !found[container] {
+			return fmt.Errorf("container %q not found in sandboxset %q", container, name)
+		}
+	}
+	return nil
+}
+
 func (o *setImageOptions) run(name string, imageArgs []string) error {
 	client, err := o.global.AgentsClient()
 	if err != nil {
@@ -132,30 +158,33 @@ func runSetImageWithClient(client apiv1alpha1.ApiV1alpha1Interface, o *setImageO
 	}
 
 	ctx := context.TODO()
-	var updated []string
 
+	// Pre-validate before entering the retry loop. Validation errors are
+	// deterministic (not transient conflicts) and must be returned directly
+	// without wrapping as "failed to update" — the update was never attempted.
+	sbs, err := client.SandboxSets(o.global.Namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to get sandboxset %q: %w", name, err)
+	}
+
+	if sbs.Spec.Template == nil {
+		return fmt.Errorf("sandboxset %q uses a TemplateRef; modify the referenced SandboxTemplate directly instead", name)
+	}
+
+	if err := validateSandboxSetContainers(sbs, images, name); err != nil {
+		return err
+	}
+
+	// Retry only the Get-Modify-Update cycle on conflict.
+	var updated []string
 	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		sbs, getErr := client.SandboxSets(o.global.Namespace).Get(ctx, name, metav1.GetOptions{})
 		if getErr != nil {
-			return fmt.Errorf("failed to get sandboxset %q: %w", name, getErr)
-		}
-
-		if sbs.Spec.Template == nil {
-			return fmt.Errorf("sandboxset %q uses a TemplateRef; modify the referenced SandboxTemplate directly instead", name)
+			return getErr
 		}
 
 		updated = updateContainerImages(sbs.Spec.Template.Spec.Containers, images)
 		updated = append(updated, updateContainerImages(sbs.Spec.Template.Spec.InitContainers, images)...)
-
-		found := make(map[string]bool, len(updated))
-		for _, u := range updated {
-			found[u] = true
-		}
-		for container := range images {
-			if !found[container] {
-				return fmt.Errorf("container %q not found in sandboxset %q", container, name)
-			}
-		}
 
 		_, updateErr := client.SandboxSets(o.global.Namespace).Update(ctx, sbs, metav1.UpdateOptions{})
 		return updateErr
@@ -167,6 +196,11 @@ func runSetImageWithClient(client apiv1alpha1.ApiV1alpha1Interface, o *setImageO
 	fmt.Printf("sandboxset.agents.kruise.io/%s image updated (%s)\n", name, strings.Join(updated, ", "))
 
 	if wait {
+		if o.timeout > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, o.timeout)
+			defer cancel()
+		}
 		return waitForSandboxSetUpdate(client, ctx, o.global.Namespace, name, o.global)
 	}
 	return nil
@@ -183,7 +217,10 @@ func runSetImageStatusWithClient(client apiv1alpha1.ApiV1alpha1Interface, global
 
 	printSandboxSetStatus(sbs)
 	var reported map[string]bool
-	kubeClient, _ := globalOpts.KubeClient()
+	kubeClient, err := globalOpts.KubeClient()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to create kube client for diagnosis: %v\n", err)
+	}
 	diagnoseSandboxSetUpdate(client, kubeClient, ns, sbs, &reported)
 	return nil
 }
@@ -195,7 +232,10 @@ func waitForSandboxSetUpdate(client apiv1alpha1.ApiV1alpha1Interface, ctx contex
 	var reported map[string]bool
 
 	// Create kubeClient once for diagnosis instead of on every poll cycle
-	kubeClient, _ := globalOpts.KubeClient()
+	kubeClient, err := globalOpts.KubeClient()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to create kube client for diagnosis: %v\n", err)
+	}
 
 	for {
 		sbs, err := client.SandboxSets(ns).Get(ctx, name, metav1.GetOptions{})
@@ -225,7 +265,11 @@ func waitForSandboxSetUpdate(client apiv1alpha1.ApiV1alpha1Interface, ctx contex
 			stallCount = 0
 		}
 
-		time.Sleep(pollInterval)
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("timed out waiting for sandboxset %q update: %w", name, ctx.Err())
+		case <-time.After(pollInterval):
+		}
 	}
 }
 
@@ -263,7 +307,7 @@ func diagnoseSandboxSetUpdate(agentsClient apiv1alpha1.ApiV1alpha1Interface, kub
 	}
 
 	sbxList, err := agentsClient.Sandboxes(ns).List(context.TODO(), metav1.ListOptions{
-		LabelSelector: fmt.Sprintf("agents.kruise.io/sandbox-template=%s", sbs.Name),
+		LabelSelector: fmt.Sprintf("%s=%s", agentsv1alpha1.LabelSandboxTemplate, sbs.Name),
 	})
 	if err != nil {
 		return

@@ -23,27 +23,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	fakedynamic "k8s.io/client-go/dynamic/fake"
+
+	kruiseappsv1alpha1 "github.com/openkruise/kruise-api/apps/v1alpha1"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/client/clientset/versioned/fake"
 )
-
-func newDynamicScheme() *runtime.Scheme {
-	s := runtime.NewScheme()
-	s.AddKnownTypeWithName(
-		schema.GroupVersionKind{Group: "apps.kruise.io", Version: "v1alpha1", Kind: "ContainerRecreateRequest"},
-		&unstructured.Unstructured{},
-	)
-	s.AddKnownTypeWithName(
-		schema.GroupVersionKind{Group: "apps.kruise.io", Version: "v1alpha1", Kind: "ContainerRecreateRequestList"},
-		&unstructured.UnstructuredList{},
-	)
-	return s
-}
 
 func TestRestartSandbox(t *testing.T) {
 	inlineSandbox := func() *agentsv1alpha1.Sandbox {
@@ -113,42 +98,65 @@ func TestRestartSandbox(t *testing.T) {
 	}
 
 	tests := []struct {
-		name           string
-		sandboxName    string
-		namespace      string
-		containers     []string
-		seedSandboxes  []*agentsv1alpha1.Sandbox
-		seedTemplates  []*agentsv1alpha1.SandboxTemplate
-		expectError    string
-		expectCreated  bool
-		expectContains []string
+		name                string
+		sandboxName         string
+		namespace           string
+		containers          []string
+		allContainers       bool
+		failurePolicy       string
+		seedSandboxes       []*agentsv1alpha1.Sandbox
+		seedTemplates       []*agentsv1alpha1.SandboxTemplate
+		seedCRRs            []*kruiseappsv1alpha1.ContainerRecreateRequest
+		expectError         string
+		expectCreated       bool
+		expectContains      []string
+		expectFailurePolicy string
 	}{
 		{
-			name:           "restart specific container",
-			sandboxName:    "test-sbx",
-			namespace:      "default",
-			containers:     []string{"main"},
-			seedSandboxes:  []*agentsv1alpha1.Sandbox{inlineSandbox()},
-			expectCreated:  true,
-			expectContains: []string{"main"},
+			name:                "restart specific container",
+			sandboxName:         "test-sbx",
+			namespace:           "default",
+			containers:          []string{"main"},
+			seedSandboxes:       []*agentsv1alpha1.Sandbox{inlineSandbox()},
+			expectCreated:       true,
+			expectContains:      []string{"main"},
+			expectFailurePolicy: "Fail",
 		},
 		{
-			name:           "restart multiple containers",
-			sandboxName:    "test-sbx",
-			namespace:      "default",
-			containers:     []string{"main", "sidecar"},
-			seedSandboxes:  []*agentsv1alpha1.Sandbox{inlineSandbox()},
-			expectCreated:  true,
-			expectContains: []string{"main", "sidecar"},
+			name:                "restart multiple containers",
+			sandboxName:         "test-sbx",
+			namespace:           "default",
+			containers:          []string{"main", "sidecar"},
+			seedSandboxes:       []*agentsv1alpha1.Sandbox{inlineSandbox()},
+			expectCreated:       true,
+			expectContains:      []string{"main", "sidecar"},
+			expectFailurePolicy: "Fail",
 		},
 		{
-			name:           "restart all containers when none specified",
-			sandboxName:    "test-sbx",
-			namespace:      "default",
-			containers:     nil,
-			seedSandboxes:  []*agentsv1alpha1.Sandbox{inlineSandbox()},
-			expectCreated:  true,
-			expectContains: []string{"main", "sidecar"},
+			name:                "restart all containers with --all flag",
+			sandboxName:         "test-sbx",
+			namespace:           "default",
+			allContainers:       true,
+			seedSandboxes:       []*agentsv1alpha1.Sandbox{inlineSandbox()},
+			expectCreated:       true,
+			expectContains:      []string{"main", "sidecar"},
+			expectFailurePolicy: "Fail",
+		},
+		{
+			name:          "no flags returns error with available containers",
+			sandboxName:   "test-sbx",
+			namespace:     "default",
+			seedSandboxes: []*agentsv1alpha1.Sandbox{inlineSandbox()},
+			expectError:   "no containers specified",
+		},
+		{
+			name:          "--all conflicts with -c",
+			sandboxName:   "test-sbx",
+			namespace:     "default",
+			containers:    []string{"main"},
+			allContainers: true,
+			seedSandboxes: []*agentsv1alpha1.Sandbox{inlineSandbox()},
+			expectError:   "--all cannot be used together with -c",
 		},
 		{
 			name:          "container not found",
@@ -195,24 +203,98 @@ func TestRestartSandbox(t *testing.T) {
 			expectError: "is not running",
 		},
 		{
-			name:           "templateRef sandbox without -c flag",
-			sandboxName:    "ref-sbx",
-			namespace:      "default",
-			containers:     nil,
-			seedSandboxes:  []*agentsv1alpha1.Sandbox{templateRefSandbox()},
-			seedTemplates:  []*agentsv1alpha1.SandboxTemplate{refSandboxTemplate()},
-			expectCreated:  true,
-			expectContains: []string{"main", "sidecar"},
+			name:                "templateRef sandbox with --all flag",
+			sandboxName:         "ref-sbx",
+			namespace:           "default",
+			allContainers:       true,
+			seedSandboxes:       []*agentsv1alpha1.Sandbox{templateRefSandbox()},
+			seedTemplates:       []*agentsv1alpha1.SandboxTemplate{refSandboxTemplate()},
+			expectCreated:       true,
+			expectContains:      []string{"main", "sidecar"},
+			expectFailurePolicy: "Fail",
 		},
 		{
-			name:           "templateRef sandbox with explicit -c flag",
-			sandboxName:    "ref-sbx",
-			namespace:      "default",
-			containers:     []string{"main"},
-			seedSandboxes:  []*agentsv1alpha1.Sandbox{templateRefSandbox()},
-			seedTemplates:  []*agentsv1alpha1.SandboxTemplate{refSandboxTemplate()},
-			expectCreated:  true,
-			expectContains: []string{"main"},
+			name:                "templateRef sandbox with explicit -c flag",
+			sandboxName:         "ref-sbx",
+			namespace:           "default",
+			containers:          []string{"main"},
+			seedSandboxes:       []*agentsv1alpha1.Sandbox{templateRefSandbox()},
+			seedTemplates:       []*agentsv1alpha1.SandboxTemplate{refSandboxTemplate()},
+			expectCreated:       true,
+			expectContains:      []string{"main"},
+			expectFailurePolicy: "Fail",
+		},
+		{
+			name:                "Ignore failure policy creates CRR with Ignore policy",
+			sandboxName:         "test-sbx",
+			namespace:           "default",
+			containers:          []string{"main", "sidecar"},
+			failurePolicy:       "Ignore",
+			seedSandboxes:       []*agentsv1alpha1.Sandbox{inlineSandbox()},
+			expectCreated:       true,
+			expectContains:      []string{"main", "sidecar"},
+			expectFailurePolicy: "Ignore",
+		},
+		{
+			name:          "invalid failure policy returns error",
+			sandboxName:   "test-sbx",
+			namespace:     "default",
+			containers:    []string{"main"},
+			failurePolicy: "Retry",
+			seedSandboxes: []*agentsv1alpha1.Sandbox{inlineSandbox()},
+			expectError:   "invalid failure-policy",
+		},
+		{
+			name:          "active CRR exists returns error",
+			sandboxName:   "test-sbx",
+			namespace:     "default",
+			containers:    []string{"main"},
+			seedSandboxes: []*agentsv1alpha1.Sandbox{inlineSandbox()},
+			seedCRRs: []*kruiseappsv1alpha1.ContainerRecreateRequest{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-sbx-restart",
+						Namespace: "default",
+					},
+					Spec: kruiseappsv1alpha1.ContainerRecreateRequestSpec{
+						PodName: "test-sbx",
+						Containers: []kruiseappsv1alpha1.ContainerRecreateRequestContainer{
+							{Name: "main"},
+						},
+					},
+					Status: kruiseappsv1alpha1.ContainerRecreateRequestStatus{
+						Phase: kruiseappsv1alpha1.ContainerRecreateRequestRecreating,
+					},
+				},
+			},
+			expectError: "an active ContainerRecreateRequest",
+		},
+		{
+			name:          "completed CRR is replaced by new CRR",
+			sandboxName:   "test-sbx",
+			namespace:     "default",
+			containers:    []string{"main"},
+			seedSandboxes: []*agentsv1alpha1.Sandbox{inlineSandbox()},
+			seedCRRs: []*kruiseappsv1alpha1.ContainerRecreateRequest{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-sbx-restart",
+						Namespace: "default",
+					},
+					Spec: kruiseappsv1alpha1.ContainerRecreateRequestSpec{
+						PodName: "test-sbx",
+						Containers: []kruiseappsv1alpha1.ContainerRecreateRequestContainer{
+							{Name: "sidecar"},
+						},
+					},
+					Status: kruiseappsv1alpha1.ContainerRecreateRequestStatus{
+						Phase: kruiseappsv1alpha1.ContainerRecreateRequestCompleted,
+					},
+				},
+			},
+			expectCreated:       true,
+			expectContains:      []string{"main"},
+			expectFailurePolicy: "Fail",
 		},
 	}
 
@@ -232,21 +314,23 @@ func TestRestartSandbox(t *testing.T) {
 				assert.NoError(t, err)
 			}
 
-			dynCS := fakedynamic.NewSimpleDynamicClientWithCustomListKinds(
-				newDynamicScheme(),
-				map[schema.GroupVersionResource]string{
-					containerRecreateRequestGVR: "SandboxContainerRestartList",
-				},
-			)
+			kruiseCS := newFakeKruiseClientset()
+			for _, crr := range tt.seedCRRs {
+				kruiseCS.AppsV1alpha1().ContainerRecreateRequests(crr.Namespace).Create(
+					context.TODO(), crr, metav1.CreateOptions{},
+				)
+			}
 
 			o := &restartOptions{
 				global: &GlobalOptions{
 					Namespace: tt.namespace,
 				},
-				containers: tt.containers,
+				containers:    tt.containers,
+				allContainers: tt.allContainers,
+				failurePolicy: tt.failurePolicy,
 			}
 
-			err := runRestartWithClients(agentsCS.ApiV1alpha1(), dynCS, o, tt.sandboxName)
+			err := runRestartWithClients(agentsCS.ApiV1alpha1(), kruiseCS, o, tt.sandboxName)
 
 			if tt.expectError != "" {
 				assert.Error(t, err)
@@ -256,23 +340,26 @@ func TestRestartSandbox(t *testing.T) {
 			}
 
 			if tt.expectCreated {
-				list, listErr := dynCS.Resource(containerRecreateRequestGVR).Namespace(tt.namespace).List(
+				list, listErr := kruiseCS.AppsV1alpha1().ContainerRecreateRequests(tt.namespace).List(
 					context.TODO(), metav1.ListOptions{},
 				)
 				assert.NoError(t, listErr)
 				assert.Len(t, list.Items, 1)
 
-				created := list.Items[0]
-				spec, _ := created.Object["spec"].(map[string]interface{})
-				assert.Equal(t, tt.sandboxName, spec["podName"])
+				created := &list.Items[0]
+				assert.Equal(t, tt.sandboxName+"-restart", created.Name)
+				assert.Equal(t, tt.sandboxName, created.Spec.PodName)
 
-				containers, _ := spec["containers"].([]interface{})
 				var containerNames []string
-				for _, c := range containers {
-					cm, _ := c.(map[string]interface{})
-					containerNames = append(containerNames, cm["name"].(string))
+				for _, c := range created.Spec.Containers {
+					containerNames = append(containerNames, c.Name)
 				}
 				assert.Equal(t, tt.expectContains, containerNames)
+
+				if tt.expectFailurePolicy != "" {
+					assert.NotNil(t, created.Spec.Strategy)
+					assert.Equal(t, kruiseappsv1alpha1.ContainerRecreateRequestFailurePolicyType(tt.expectFailurePolicy), created.Spec.Strategy.FailurePolicy)
+				}
 			}
 		})
 	}

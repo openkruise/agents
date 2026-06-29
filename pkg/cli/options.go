@@ -18,6 +18,7 @@ package cli
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/spf13/pflag"
 	"k8s.io/client-go/dynamic"
@@ -27,6 +28,7 @@ import (
 
 	clientset "github.com/openkruise/agents/client/clientset/versioned"
 	apiv1alpha1 "github.com/openkruise/agents/client/clientset/versioned/typed/api/v1alpha1"
+	kruiseversioned "github.com/openkruise/kruise-api/client/clientset/versioned"
 )
 
 var inClusterConfigFn = rest.InClusterConfig
@@ -61,6 +63,8 @@ func (o *GlobalOptions) RESTConfig() (*rest.Config, error) {
 	if o.KubeConfig == "" && o.Context == "" {
 		if cfg, err := inClusterConfigFn(); err == nil {
 			return cfg, nil
+		} else {
+			fmt.Fprintf(os.Stderr, "Warning: in-cluster config failed (%v), falling back to kubeconfig\n", err)
 		}
 	}
 
@@ -92,6 +96,20 @@ func (o *GlobalOptions) AgentsClient() (apiv1alpha1.ApiV1alpha1Interface, error)
 		return nil, fmt.Errorf("failed to create agents clientset: %w", err)
 	}
 	return cs.ApiV1alpha1(), nil
+}
+
+// KruiseClient builds a kruise-api clientset from the current flags.
+func (o *GlobalOptions) KruiseClient() (kruiseversioned.Interface, error) {
+	config, err := o.RESTConfig()
+	if err != nil {
+		return nil, err
+	}
+
+	cs, err := kruiseversioned.NewForConfig(config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create kruise clientset: %w", err)
+	}
+	return cs, nil
 }
 
 // DynamicClient builds a dynamic.Interface from the current flags.

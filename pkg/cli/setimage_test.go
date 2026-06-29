@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
@@ -74,13 +75,14 @@ func TestSetImageSandboxSet(t *testing.T) {
 	}
 
 	tests := []struct {
-		name           string
-		sbsName        string
-		namespace      string
-		imageArgs      []string
-		objects        []runtime.Object
-		expectError    string
-		expectedImages map[string]string
+		name              string
+		sbsName           string
+		namespace         string
+		imageArgs         []string
+		objects           []runtime.Object
+		expectError       string
+		expectNotContains string
+		expectedImages    map[string]string
 	}{
 		{
 			name:      "update single container image",
@@ -115,28 +117,31 @@ func TestSetImageSandboxSet(t *testing.T) {
 			},
 		},
 		{
-			name:        "container not found",
-			sbsName:     "test-sbs",
-			namespace:   "default",
-			imageArgs:   []string{"nonexistent=foo:1.0"},
-			objects:     []runtime.Object{inlineSandboxSet()},
-			expectError: "container \"nonexistent\" not found",
+			name:              "container not found",
+			sbsName:           "test-sbs",
+			namespace:         "default",
+			imageArgs:         []string{"nonexistent=foo:1.0"},
+			objects:           []runtime.Object{inlineSandboxSet()},
+			expectError:       "container \"nonexistent\" not found",
+			expectNotContains: "failed to update sandboxset",
 		},
 		{
-			name:        "sandboxset not found",
-			sbsName:     "nonexistent",
-			namespace:   "default",
-			imageArgs:   []string{"main=nginx:2.0"},
-			objects:     []runtime.Object{},
-			expectError: "failed to get sandboxset",
+			name:              "sandboxset not found",
+			sbsName:           "nonexistent",
+			namespace:         "default",
+			imageArgs:         []string{"main=nginx:2.0"},
+			objects:           []runtime.Object{},
+			expectError:       "failed to get sandboxset",
+			expectNotContains: "failed to update sandboxset",
 		},
 		{
-			name:        "sandboxset uses TemplateRef",
-			sbsName:     "ref-sbs",
-			namespace:   "default",
-			imageArgs:   []string{"main=nginx:2.0"},
-			objects:     []runtime.Object{templateRefSandboxSet()},
-			expectError: "uses a TemplateRef",
+			name:              "sandboxset uses TemplateRef",
+			sbsName:           "ref-sbs",
+			namespace:         "default",
+			imageArgs:         []string{"main=nginx:2.0"},
+			objects:           []runtime.Object{templateRefSandboxSet()},
+			expectError:       "uses a TemplateRef",
+			expectNotContains: "failed to update sandboxset",
 		},
 		{
 			name:        "invalid image argument format",
@@ -171,6 +176,9 @@ func TestSetImageSandboxSet(t *testing.T) {
 			if tt.expectError != "" {
 				assert.Error(t, err)
 				assert.Contains(t, err.Error(), tt.expectError)
+				if tt.expectNotContains != "" {
+					assert.NotContains(t, err.Error(), tt.expectNotContains)
+				}
 			} else {
 				assert.NoError(t, err)
 
@@ -389,7 +397,7 @@ func TestDiagnoseSandboxSetUpdate(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "sbx-1",
 						Namespace: "default",
-						Labels:    map[string]string{"agents.kruise.io/sandbox-template": "test-sbs"},
+						Labels:    map[string]string{agentsv1alpha1.LabelSandboxTemplate: "test-sbs"},
 					},
 					Status: agentsv1alpha1.SandboxStatus{
 						Phase:   agentsv1alpha1.SandboxPending,
@@ -410,7 +418,7 @@ func TestDiagnoseSandboxSetUpdate(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "sbx-failed",
 						Namespace: "default",
-						Labels:    map[string]string{"agents.kruise.io/sandbox-template": "test-sbs"},
+						Labels:    map[string]string{agentsv1alpha1.LabelSandboxTemplate: "test-sbs"},
 					},
 					Status: agentsv1alpha1.SandboxStatus{
 						Phase:   agentsv1alpha1.SandboxFailed,
@@ -431,7 +439,7 @@ func TestDiagnoseSandboxSetUpdate(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "sbx-sched",
 						Namespace: "default",
-						Labels:    map[string]string{"agents.kruise.io/sandbox-template": "test-sbs"},
+						Labels:    map[string]string{agentsv1alpha1.LabelSandboxTemplate: "test-sbs"},
 					},
 					Status: agentsv1alpha1.SandboxStatus{
 						Phase:   agentsv1alpha1.SandboxPending,
@@ -466,7 +474,7 @@ func TestDiagnoseSandboxSetUpdate(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "sbx-pull",
 						Namespace: "default",
-						Labels:    map[string]string{"agents.kruise.io/sandbox-template": "test-sbs"},
+						Labels:    map[string]string{agentsv1alpha1.LabelSandboxTemplate: "test-sbs"},
 					},
 					Status: agentsv1alpha1.SandboxStatus{
 						Phase:   agentsv1alpha1.SandboxPending,
@@ -504,7 +512,7 @@ func TestDiagnoseSandboxSetUpdate(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "sbx-nopod",
 						Namespace: "default",
-						Labels:    map[string]string{"agents.kruise.io/sandbox-template": "test-sbs"},
+						Labels:    map[string]string{agentsv1alpha1.LabelSandboxTemplate: "test-sbs"},
 					},
 					Status: agentsv1alpha1.SandboxStatus{
 						Phase:   agentsv1alpha1.SandboxPending,
@@ -526,7 +534,7 @@ func TestDiagnoseSandboxSetUpdate(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "sbx-running",
 						Namespace: "default",
-						Labels:    map[string]string{"agents.kruise.io/sandbox-template": "test-sbs"},
+						Labels:    map[string]string{agentsv1alpha1.LabelSandboxTemplate: "test-sbs"},
 					},
 					Status: agentsv1alpha1.SandboxStatus{
 						Phase: agentsv1alpha1.SandboxRunning,
@@ -696,6 +704,25 @@ func TestWaitForSandboxSetUpdate(t *testing.T) {
 
 	err := waitForSandboxSetUpdate(cs.ApiV1alpha1(), context.TODO(), "default", "test-sbs", globalOpts)
 	assert.NoError(t, err)
+}
+
+func TestWaitForSandboxSetUpdateTimeout(t *testing.T) {
+	// Test --wait timeout when SandboxSet never completes
+	sbs := &agentsv1alpha1.SandboxSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-sbs-timeout", Namespace: "default"},
+		Spec:       agentsv1alpha1.SandboxSetSpec{Replicas: 3},
+		Status:     agentsv1alpha1.SandboxSetStatus{UpdatedReplicas: 0, AvailableReplicas: 0},
+	}
+
+	cs := fake.NewSimpleClientset(sbs)
+	globalOpts := &GlobalOptions{Namespace: "default"}
+
+	ctx, cancel := context.WithTimeout(context.TODO(), 100*time.Millisecond)
+	defer cancel()
+
+	err := waitForSandboxSetUpdate(cs.ApiV1alpha1(), ctx, "default", "test-sbs-timeout", globalOpts)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "timed out")
 }
 
 func TestIsSuoComplete(t *testing.T) {
