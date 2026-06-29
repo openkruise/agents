@@ -247,13 +247,21 @@ func (s *Sandbox) GetImage() string {
 //   - Always: overwrite timeout whenever the requested value differs from current.
 //   - ExtendOnly: only extend to a later effective end time.
 func (s *Sandbox) SaveTimeoutWithPolicy(ctx context.Context, opts timeout.Options, policy timeout.UpdatePolicy) (infra.TimeoutUpdateResult, error) {
+	return s.SaveTimeoutAndAnnotations(ctx, opts, policy, nil)
+}
+
+// SaveTimeoutAndAnnotations writes timeout and annotations in a single
+// retryUpdate, avoiding separate API server round-trips. When annotations is
+// nil or empty, behaves identically to SaveTimeoutWithPolicy.
+func (s *Sandbox) SaveTimeoutAndAnnotations(ctx context.Context, opts timeout.Options, policy timeout.UpdatePolicy, annotations map[string]string) (infra.TimeoutUpdateResult, error) {
 	log := klog.FromContext(ctx).V(utils.DebugLogLevel).WithValues("sandbox", klog.KObj(s.Sandbox), "policy", policy)
 	result := infra.TimeoutUpdateResult{}
 
 	updated, err := s.retryUpdate(ctx, func(sbx *agentsv1alpha1.Sandbox) (bool, error) {
-		current := timeout.GetTimeoutFromSandbox(sbx)
-		log.Info("data fetched before saving timeout", "current", current)
+		changed := false
 
+		// Timeout update with policy
+		current := timeout.GetTimeoutFromSandbox(sbx)
 		shouldUpdate := false
 		switch policy {
 		case timeout.UpdatePolicyAlways:
@@ -263,20 +271,33 @@ func (s *Sandbox) SaveTimeoutWithPolicy(ctx context.Context, opts timeout.Option
 		default:
 			return false, fmt.Errorf("unsupported timeout update policy %q", policy)
 		}
-
-		if !shouldUpdate {
-			return false, nil
+		if shouldUpdate {
+			setTimeout(sbx, opts)
+			changed = true
 		}
-		setTimeout(sbx, opts)
-		return true, nil
+
+		// Annotations update
+		if len(annotations) > 0 {
+			if sbx.Annotations == nil {
+				sbx.Annotations = make(map[string]string, len(annotations))
+			}
+			for k, v := range annotations {
+				if sbx.Annotations[k] != v {
+					sbx.Annotations[k] = v
+					changed = true
+				}
+			}
+		}
+
+		return changed, nil
 	})
 	if err != nil {
-		log.Error(err, "failed to update sandbox timeout after retries")
+		log.Error(err, "failed to update sandbox timeout/annotations after retries")
 		return infra.TimeoutUpdateResult{}, err
 	}
 	result.Updated = updated
 
-	log.Info("sandbox timeout updated successfully", "updated", result.Updated, "timeout", s.GetTimeout())
+	log.Info("sandbox timeout/annotations updated successfully", "updated", result.Updated, "timeout", s.GetTimeout())
 	return result, nil
 }
 
@@ -389,6 +410,14 @@ func (s *Sandbox) Resume(ctx context.Context, opts infra.ResumeOptions) error {
 		sbx.Spec.Paused = false
 		if opts.Timeout != nil {
 			setTimeout(sbx, *opts.Timeout)
+		}
+		if len(opts.Annotations) > 0 {
+			if sbx.Annotations == nil {
+				sbx.Annotations = make(map[string]string, len(opts.Annotations))
+			}
+			for k, v := range opts.Annotations {
+				sbx.Annotations[k] = v
+			}
 		}
 		return true, nil
 	})

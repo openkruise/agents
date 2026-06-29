@@ -17,6 +17,7 @@ limitations under the License.
 package filter
 
 import (
+	"strings"
 	"testing"
 
 	v3 "github.com/cncf/xds/go/xds/type/v3"
@@ -274,6 +275,28 @@ func TestConfigParserParse(t *testing.T) {
 				t.Error("Parse() returned FilterConfig with nil Adapter")
 			}
 		})
+	}
+}
+
+func TestConfigParserParseUnmarshalError(t *testing.T) {
+	parser := &ConfigParser{}
+
+	// Provide a string value for an int field, causing json.Unmarshal to fail
+	s, err := structpb.NewStruct(map[string]any{
+		"wake-timeout-seconds": "not-a-number",
+	})
+	if err != nil {
+		t.Fatalf("NewStruct() error = %v", err)
+	}
+	ts := &v3.TypedStruct{Value: s}
+	input, _ := anypb.New(ts)
+
+	_, err = parser.Parse(input, nil)
+	if err == nil {
+		t.Fatal("Parse() expected error for invalid field type, got nil")
+	}
+	if got := err.Error(); !strings.Contains(got, "failed to parse config") {
+		t.Errorf("Parse() error = %q, want containing 'failed to parse config'", got)
 	}
 }
 

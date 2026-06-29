@@ -72,8 +72,12 @@ type PauseOptions struct {
 // between Resume returning and the caller writing the real business
 // timeout. Pass nil to skip the atomic write (the caller accepts that
 // PauseTime may remain stale until the next write).
+//
+// Annotations, when non-empty, are written in the same Update as
+// Spec.Paused=false and Timeout, eliminating a separate Patch round-trip.
 type ResumeOptions struct {
-	Timeout *timeout.Options
+	Timeout     *timeout.Options
+	Annotations map[string]string
 }
 
 type HasTemplateOptions struct {
@@ -143,6 +147,10 @@ type Sandbox interface {
 	GetPodLabels() map[string]string
 	SetTimeout(opts timeout.Options)
 	SaveTimeoutWithPolicy(ctx context.Context, opts timeout.Options, policy timeout.UpdatePolicy) (TimeoutUpdateResult, error)
+	// SaveTimeoutAndAnnotations writes timeout and annotations in a single
+	// retryUpdate, avoiding separate API server round-trips. When annotations
+	// is nil or empty, behaves identically to SaveTimeoutWithPolicy.
+	SaveTimeoutAndAnnotations(ctx context.Context, opts timeout.Options, policy timeout.UpdatePolicy, annotations map[string]string) (TimeoutUpdateResult, error)
 	GetTimeout() timeout.Options
 	GetClaimTime() (time.Time, error)
 	Kill(ctx context.Context) error                                                                     // Delete the Sandbox resource

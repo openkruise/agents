@@ -175,6 +175,9 @@ func (m *mockSandboxForLabels) SetTimeout(timeout.Options)       {}
 func (m *mockSandboxForLabels) SaveTimeoutWithPolicy(context.Context, timeout.Options, timeout.UpdatePolicy) (TimeoutUpdateResult, error) {
 	return TimeoutUpdateResult{}, nil
 }
+func (m *mockSandboxForLabels) SaveTimeoutAndAnnotations(context.Context, timeout.Options, timeout.UpdatePolicy, map[string]string) (TimeoutUpdateResult, error) {
+	return TimeoutUpdateResult{}, nil
+}
 func (m *mockSandboxForLabels) GetTimeout() timeout.Options { return timeout.Options{} }
 func (m *mockSandboxForLabels) GetClaimTime() (time.Time, error) {
 	return time.Time{}, nil

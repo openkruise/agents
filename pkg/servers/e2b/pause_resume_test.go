@@ -1131,14 +1131,14 @@ func TestResumeSandbox_ResumeFloorAndPlaceholder(t *testing.T) {
 	}
 }
 
-func TestUpdateWakeAnnotations(t *testing.T) {
+func TestBuildWakeAnnotations(t *testing.T) {
 	tests := []struct {
 		name              string
 		existingAnns      map[string]string
 		autoResume        bool
 		timeoutSeconds    int
 		expectAnnotations map[string]string
-		expectNoPatch     bool
+		expectNil         bool
 	}{
 		{
 			name:           "autoResume true with timeout sets both annotations",
@@ -1171,27 +1171,27 @@ func TestUpdateWakeAnnotations(t *testing.T) {
 			},
 		},
 		{
-			name:           "autoResume false without wake enabled skips patch",
+			name:           "autoResume false without wake enabled returns nil",
 			existingAnns:   map[string]string{},
 			autoResume:     false,
 			timeoutSeconds: 60,
-			expectNoPatch:  true,
+			expectNil:      true,
 		},
 		{
-			name:           "autoResume false without wake enabled and zero timeout skips patch",
+			name:           "autoResume false without wake enabled and zero timeout returns nil",
 			existingAnns:   map[string]string{},
 			autoResume:     false,
 			timeoutSeconds: 0,
-			expectNoPatch:  true,
+			expectNil:      true,
 		},
 		{
-			name: "autoResume false with wake enabled and zero timeout skips timeout annotation",
+			name: "autoResume false with wake enabled and zero timeout returns nil",
 			existingAnns: map[string]string{
 				agentsv1alpha1.AnnotationWakeOnTraffic: agentsv1alpha1.True,
 			},
-			autoResume:        false,
-			timeoutSeconds:    0,
-			expectNoPatch:     true,
+			autoResume:     false,
+			timeoutSeconds: 0,
+			expectNil:      true,
 		},
 	}
 
@@ -1205,31 +1205,19 @@ func TestUpdateWakeAnnotations(t *testing.T) {
 				},
 			}
 
-			cacheProvider, fc, err := cachetest.NewTestCache(t, sbx)
+			cacheProvider, _, err := cachetest.NewTestCache(t, sbx)
 			require.NoError(t, err)
 
-			sc := &Controller{cache: cacheProvider}
 			wrapper := sandboxcr.AsSandbox(sbx, cacheProvider)
+			result := buildWakeAnnotations(wrapper, tc.autoResume, tc.timeoutSeconds)
 
-			err = sc.updateWakeAnnotations(t.Context(), wrapper, tc.autoResume, tc.timeoutSeconds)
-			require.NoError(t, err)
-
-			if tc.expectNoPatch {
-				// Verify annotations are unchanged
-				var updated agentsv1alpha1.Sandbox
-				require.NoError(t, fc.Get(t.Context(), client.ObjectKey{Namespace: "default", Name: "test-sbx"}, &updated))
-				for k, v := range tc.existingAnns {
-					assert.Equal(t, v, updated.Annotations[k], "annotation %s should be unchanged", k)
-				}
+			if tc.expectNil {
+				assert.Nil(t, result)
 				return
 			}
 
-			// Verify patched annotations
-			var updated agentsv1alpha1.Sandbox
-			require.NoError(t, fc.Get(t.Context(), client.ObjectKey{Namespace: "default", Name: "test-sbx"}, &updated))
-			for k, v := range tc.expectAnnotations {
-				assert.Equal(t, v, updated.Annotations[k], "annotation %s should be %s", k, v)
-			}
+			require.NotNil(t, result)
+			assert.Equal(t, tc.expectAnnotations, result)
 		})
 	}
 }

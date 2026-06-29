@@ -107,7 +107,7 @@ func (f *sandboxFilter) DecodeHeaders(header api.RequestHeaderMap, endStream boo
 		// Attempt wake-on-traffic if the sandbox is paused and wake is enabled.
 		waker := wake.GetWaker()
 		parts := strings.SplitN(sandboxID, "--", 2)
-		logger.Info("Wake eligibility check",
+		logger.Debug("Wake eligibility check",
 			zap.String("sandboxID", sandboxID),
 			zap.String("state", route.State),
 			zap.Bool("wakeOnTraffic", route.WakeOnTraffic),
