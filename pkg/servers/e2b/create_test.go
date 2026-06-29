@@ -45,6 +45,7 @@ import (
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/sandbox-manager/quota"
+	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
 )
@@ -741,9 +742,9 @@ func TestCreateSandbox_TopLevelMissingTemplateOrCheckpointReturns400(t *testing.
 
 	fakeQuota := &fakeQuotaManager{}
 	controller.manager.SetQuotaEnforcer(fakeQuota)
-	user := quotaLimitedUser([]models.QuotaLimit{{
-		Dimension: models.DimLimitsCPU,
-		Scope:     models.ScopeRunning,
+	user := quotaLimitedUser([]quotaspec.QuotaLimit{{
+		Dimension: quotaspec.DimLimitsCPU,
+		Scope:     quotaspec.ScopeRunning,
 		Limit:     4000,
 	}})
 
@@ -786,13 +787,13 @@ func TestCreateSandbox_MemoryOverrideRejectedBeforeQuotaAcquire(t *testing.T) {
 	assert.Equal(t, int64(0), fakeQuota.acquireCalls.Load())
 }
 
-func quotaLimitedUser(limits []models.QuotaLimit) *models.CreatedTeamAPIKey {
+func quotaLimitedUser(limits []quotaspec.QuotaLimit) *models.CreatedTeamAPIKey {
 	return &models.CreatedTeamAPIKey{
 		ID:   uuid.New(),
 		Key:  uuid.NewString(),
 		Name: "limited",
 		Team: models.AdminTeam(),
-		QuotaSpec: &models.QuotaSpec{
+		QuotaSpec: &quotaspec.QuotaSpec{
 			Limits: limits,
 		},
 	}

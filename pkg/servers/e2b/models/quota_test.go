@@ -22,23 +22,25 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
 )
 
 func TestNormalizeQuotaSpec(t *testing.T) {
 	tests := []struct {
 		name        string
-		in          *QuotaSpec
+		in          *quotaspec.QuotaSpec
 		wantLimited bool
 		wantLen     int
 		expectError string
 	}{
 		{name: "nil is unlimited", in: nil},
-		{name: "empty is unlimited", in: &QuotaSpec{}},
+		{name: "empty is unlimited", in: &quotaspec.QuotaSpec{}},
 		{
 			name: "count over all",
-			in: &QuotaSpec{Limits: []QuotaLimit{{
-				Dimension: DimSandboxCount,
-				Scope:     ScopeAll,
+			in: &quotaspec.QuotaSpec{Limits: []quotaspec.QuotaLimit{{
+				Dimension: quotaspec.DimSandboxCount,
+				Scope:     quotaspec.ScopeAll,
 				Limit:     50,
 			}}},
 			wantLimited: true,
@@ -46,9 +48,9 @@ func TestNormalizeQuotaSpec(t *testing.T) {
 		},
 		{
 			name: "limit zero is valid hard zero",
-			in: &QuotaSpec{Limits: []QuotaLimit{{
-				Dimension: DimSandboxCount,
-				Scope:     ScopeRunning,
+			in: &quotaspec.QuotaSpec{Limits: []quotaspec.QuotaLimit{{
+				Dimension: quotaspec.DimSandboxCount,
+				Scope:     quotaspec.ScopeRunning,
 				Limit:     0,
 			}}},
 			wantLimited: true,
@@ -56,45 +58,45 @@ func TestNormalizeQuotaSpec(t *testing.T) {
 		},
 		{
 			name: "negative rejected",
-			in: &QuotaSpec{Limits: []QuotaLimit{{
-				Dimension: DimLimitsCPU,
-				Scope:     ScopeAll,
+			in: &quotaspec.QuotaSpec{Limits: []quotaspec.QuotaLimit{{
+				Dimension: quotaspec.DimLimitsCPU,
+				Scope:     quotaspec.ScopeAll,
 				Limit:     -1,
 			}}},
 			expectError: "non-negative",
 		},
 		{
 			name: "duplicate dimension scope rejected",
-			in: &QuotaSpec{Limits: []QuotaLimit{
-				{Dimension: DimSandboxCount, Scope: ScopeAll, Limit: 1},
-				{Dimension: DimSandboxCount, Scope: ScopeAll, Limit: 2},
+			in: &quotaspec.QuotaSpec{Limits: []quotaspec.QuotaLimit{
+				{Dimension: quotaspec.DimSandboxCount, Scope: quotaspec.ScopeAll, Limit: 1},
+				{Dimension: quotaspec.DimSandboxCount, Scope: quotaspec.ScopeAll, Limit: 2},
 			}},
 			expectError: "duplicate",
 		},
 		{
 			name: "unknown dimension rejected",
-			in: &QuotaSpec{Limits: []QuotaLimit{{
-				Dimension: QuotaDimension("limits.gpu"),
-				Scope:     ScopeAll,
+			in: &quotaspec.QuotaSpec{Limits: []quotaspec.QuotaLimit{{
+				Dimension: quotaspec.QuotaDimension("limits.gpu"),
+				Scope:     quotaspec.ScopeAll,
 				Limit:     1,
 			}}},
 			expectError: "unsupported quota dimension",
 		},
 		{
 			name: "unknown scope rejected",
-			in: &QuotaSpec{Limits: []QuotaLimit{{
-				Dimension: DimSandboxCount,
-				Scope:     QuotaScope("template:x"),
+			in: &quotaspec.QuotaSpec{Limits: []quotaspec.QuotaLimit{{
+				Dimension: quotaspec.DimSandboxCount,
+				Scope:     quotaspec.QuotaScope("template:x"),
 				Limit:     1,
 			}}},
 			expectError: "unsupported quota scope",
 		},
 		{
 			name: "cpu memory count over running and all",
-			in: &QuotaSpec{Limits: []QuotaLimit{
-				{Dimension: DimLimitsCPU, Scope: ScopeRunning, Limit: 8000},
-				{Dimension: DimLimitsMemory, Scope: ScopeRunning, Limit: 16384},
-				{Dimension: DimSandboxCount, Scope: ScopeAll, Limit: 50},
+			in: &quotaspec.QuotaSpec{Limits: []quotaspec.QuotaLimit{
+				{Dimension: quotaspec.DimLimitsCPU, Scope: quotaspec.ScopeRunning, Limit: 8000},
+				{Dimension: quotaspec.DimLimitsMemory, Scope: quotaspec.ScopeRunning, Limit: 16384},
+				{Dimension: quotaspec.DimSandboxCount, Scope: quotaspec.ScopeAll, Limit: 50},
 			}},
 			wantLimited: true,
 			wantLen:     3,
@@ -103,7 +105,7 @@ func TestNormalizeQuotaSpec(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := NormalizeQuotaSpec(tt.in)
+			got, err := quotaspec.NormalizeQuotaSpec(tt.in)
 			if tt.expectError != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.expectError)
@@ -127,24 +129,24 @@ func TestQuotaSpecWireRoundTrip(t *testing.T) {
 	tests := []struct {
 		name        string
 		raw         json.RawMessage
-		want        *QuotaSpec
+		want        *quotaspec.QuotaSpec
 		expectError string
 	}{
 		{
 			name: "full keys running and all round trip",
 			raw:  json.RawMessage(`{"running":{"limits.cpu":8000,"limits.memory":16384,"sandbox.count":10},"all":{"sandbox.count":50}}`),
-			want: &QuotaSpec{Limits: []QuotaLimit{
-				{Dimension: DimSandboxCount, Scope: ScopeRunning, Limit: 10},
-				{Dimension: DimLimitsCPU, Scope: ScopeRunning, Limit: 8000},
-				{Dimension: DimLimitsMemory, Scope: ScopeRunning, Limit: 16384},
-				{Dimension: DimSandboxCount, Scope: ScopeAll, Limit: 50},
+			want: &quotaspec.QuotaSpec{Limits: []quotaspec.QuotaLimit{
+				{Dimension: quotaspec.DimSandboxCount, Scope: quotaspec.ScopeRunning, Limit: 10},
+				{Dimension: quotaspec.DimLimitsCPU, Scope: quotaspec.ScopeRunning, Limit: 8000},
+				{Dimension: quotaspec.DimLimitsMemory, Scope: quotaspec.ScopeRunning, Limit: 16384},
+				{Dimension: quotaspec.DimSandboxCount, Scope: quotaspec.ScopeAll, Limit: 50},
 			}},
 		},
 		{
 			name: "full key sandbox.count running",
 			raw:  json.RawMessage(`{"running":{"sandbox.count":2}}`),
-			want: &QuotaSpec{Limits: []QuotaLimit{
-				{Dimension: DimSandboxCount, Scope: ScopeRunning, Limit: 2},
+			want: &quotaspec.QuotaSpec{Limits: []quotaspec.QuotaLimit{
+				{Dimension: quotaspec.DimSandboxCount, Scope: quotaspec.ScopeRunning, Limit: 2},
 			}},
 		},
 		{name: "null is unlimited", raw: json.RawMessage(`null`)},
@@ -199,11 +201,11 @@ func TestQuotaSpecWireRoundTrip(t *testing.T) {
 }
 
 func TestWireFromQuotaSpecEmitsFullKeys(t *testing.T) {
-	spec := &QuotaSpec{Limits: []QuotaLimit{
-		{Dimension: DimSandboxCount, Scope: ScopeRunning, Limit: 2},
-		{Dimension: DimLimitsCPU, Scope: ScopeRunning, Limit: 8000},
-		{Dimension: DimLimitsMemory, Scope: ScopeRunning, Limit: 16384},
-		{Dimension: DimSandboxCount, Scope: ScopeAll, Limit: 50},
+	spec := &quotaspec.QuotaSpec{Limits: []quotaspec.QuotaLimit{
+		{Dimension: quotaspec.DimSandboxCount, Scope: quotaspec.ScopeRunning, Limit: 2},
+		{Dimension: quotaspec.DimLimitsCPU, Scope: quotaspec.ScopeRunning, Limit: 8000},
+		{Dimension: quotaspec.DimLimitsMemory, Scope: quotaspec.ScopeRunning, Limit: 16384},
+		{Dimension: quotaspec.DimSandboxCount, Scope: quotaspec.ScopeAll, Limit: 50},
 	}}
 	raw := WireFromQuotaSpec(spec)
 	assert.JSONEq(t,
@@ -217,9 +219,9 @@ func TestWireFromQuotaSpecEmitsFullKeys(t *testing.T) {
 func TestMarshalCreatedTeamAPIKeyQuotaKeepsExistingRawMessage(t *testing.T) {
 	key := CreatedTeamAPIKey{
 		Quota: json.RawMessage(`{"running":{"limits.cpu":8000,"limits.memory":16384},"all":{"sandbox.count":50}}`),
-		QuotaSpec: &QuotaSpec{Limits: []QuotaLimit{{
-			Dimension: QuotaDimension("limits.gpu"),
-			Scope:     ScopeRunning,
+		QuotaSpec: &quotaspec.QuotaSpec{Limits: []quotaspec.QuotaLimit{{
+			Dimension: quotaspec.QuotaDimension("limits.gpu"),
+			Scope:     quotaspec.ScopeRunning,
 			Limit:     1,
 		}}},
 	}

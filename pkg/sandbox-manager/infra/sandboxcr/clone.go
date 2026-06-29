@@ -130,7 +130,6 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 	if err != nil {
 		if admitted && shouldReleaseAdmissionAfterLockError(infra.LockTypeCreate, err) {
 			releaseAdmission(ctx, opts.Admission, opts.LockString)
-			admitted = false
 		}
 		if managererrors.GetErrCode(err) == managererrors.ErrorQuotaExceeded {
 			return nil, metrics, err

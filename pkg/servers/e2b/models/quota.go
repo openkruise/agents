@@ -23,28 +23,6 @@ import (
 	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
 )
 
-// Transitional re-exports so existing models.Quota* references keep compiling during
-// the quota relocation. Removed in Task 9 after every caller migrates to quotaspec.*.
-type (
-	QuotaSpec      = quotaspec.QuotaSpec
-	QuotaLimit     = quotaspec.QuotaLimit
-	QuotaDimension = quotaspec.QuotaDimension
-	QuotaScope     = quotaspec.QuotaScope
-)
-
-const (
-	DimSandboxCount = quotaspec.DimSandboxCount
-	DimLimitsCPU    = quotaspec.DimLimitsCPU
-	DimLimitsMemory = quotaspec.DimLimitsMemory
-	ScopeAll        = quotaspec.ScopeAll
-	ScopeRunning    = quotaspec.ScopeRunning
-)
-
-var (
-	ErrQuotaLimitNegative = quotaspec.ErrQuotaLimitNegative
-	NormalizeQuotaSpec    = quotaspec.NormalizeQuotaSpec
-)
-
 // quotaWireDimensions defines the canonical full-key iteration order for
 // wire format encoding and decoding.
 var quotaWireDimensions = []quotaspec.QuotaDimension{
@@ -122,14 +100,6 @@ func WireFromQuotaSpec(spec *quotaspec.QuotaSpec) json.RawMessage {
 
 	raw, _ := json.Marshal(wire)
 	return raw
-}
-
-// DecodeQuotaSpec delegates to the relocated quotaspec.DecodeQuotaSpec.
-func DecodeQuotaSpec(raw []byte) (*quotaspec.QuotaSpec, error) { return quotaspec.DecodeQuotaSpec(raw) }
-
-// MarshalQuotaSpec delegates to the relocated quotaspec.MarshalQuotaSpec.
-func MarshalQuotaSpec(spec *quotaspec.QuotaSpec) ([]byte, error) {
-	return quotaspec.MarshalQuotaSpec(spec)
 }
 
 func validateQuotaScope(scope quotaspec.QuotaScope) error {
