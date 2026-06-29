@@ -178,3 +178,222 @@ func TestNewCheckpointTask_Failed_ReturnsError(t *testing.T) {
 	assert.Contains(t, err.Error(), "checkpoint default/cp-2 failed")
 	assert.Contains(t, err.Error(), "disk full")
 }
+
+// --- PVC Task tests ---
+func TestNewPVCTask_BoundAction(t *testing.T) {
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pvc-1"},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			VolumeName: "pv-1",
+		},
+		Status: corev1.PersistentVolumeClaimStatus{
+			Phase: corev1.ClaimBound,
+		},
+	}
+	c, _, err := cachetest.NewTestCache(t, pvc)
+	require.NoError(t, err)
+	task := c.NewPVCTask(context.Background(), pvc)
+	assert.Equal(t, cacheutils.WaitActionPVCBind, task.Action())
+	// Already bound → satisfied fast path.
+	assert.NoError(t, task.Wait(100*time.Millisecond))
+}
+
+func TestNewPVCTask_PendingTimeout(t *testing.T) {
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pvc-pending"},
+		Status: corev1.PersistentVolumeClaimStatus{
+			Phase: corev1.ClaimPending,
+		},
+	}
+	c, _, err := cachetest.NewTestCache(t, pvc)
+	require.NoError(t, err)
+	task := c.NewPVCTask(context.Background(), pvc)
+	err = task.Wait(100 * time.Millisecond)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "object is not satisfied")
+}
+
+func TestNewPVCTask_LostPhase_ReturnsError(t *testing.T) {
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pvc-lost"},
+		Status: corev1.PersistentVolumeClaimStatus{
+			Phase: corev1.ClaimLost,
+		},
+	}
+	c, _, err := cachetest.NewTestCache(t, pvc)
+	require.NoError(t, err)
+	task := c.NewPVCTask(context.Background(), pvc)
+	err = task.Wait(100 * time.Millisecond)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "is in Lost phase")
+}
+
+func TestNewPVCTask_FailureCondition_ReturnsError(t *testing.T) {
+	tests := []struct {
+		name          string
+		conditionType corev1.PersistentVolumeClaimConditionType
+		reason        string
+		expectError   string
+	}{
+		{
+			name:          "ControllerResizeError",
+			conditionType: corev1.PersistentVolumeClaimControllerResizeError,
+			reason:        "some-reason",
+			expectError:   "ControllerResizeError",
+		},
+		{
+			name:          "NodeResizeError",
+			conditionType: corev1.PersistentVolumeClaimNodeResizeError,
+			reason:        "some-reason",
+			expectError:   "NodeResizeError",
+		},
+		{
+			name:          "ModifyVolumeError",
+			conditionType: corev1.PersistentVolumeClaimVolumeModifyVolumeError,
+			reason:        "some-reason",
+			expectError:   "ModifyVolumeError",
+		},
+		{
+			name:          "ClaimLost condition",
+			conditionType: corev1.PersistentVolumeClaimConditionType(corev1.ClaimLost),
+			reason:        "volume deleted",
+			expectError:   "ClaimLost",
+		},
+		{
+			name:          "unknown condition with ResizeFailed reason",
+			conditionType: "UnknownType",
+			reason:        "ResizeFailed",
+			expectError:   "ResizeFailed",
+		},
+		{
+			name:          "unknown condition with VolumeResizeFailed reason",
+			conditionType: "UnknownType",
+			reason:        "VolumeResizeFailed",
+			expectError:   "VolumeResizeFailed",
+		},
+		{
+			name:          "unknown condition with FileSystemResizeFailed reason",
+			conditionType: "UnknownType",
+			reason:        "FileSystemResizeFailed",
+			expectError:   "FileSystemResizeFailed",
+		},
+		{
+			name:          "unknown condition with VolumeModifyFailed reason",
+			conditionType: "UnknownType",
+			reason:        "VolumeModifyFailed",
+			expectError:   "VolumeModifyFailed",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pvc := &corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pvc-fail-" + tt.name},
+				Status: corev1.PersistentVolumeClaimStatus{
+					Phase: corev1.ClaimPending,
+					Conditions: []corev1.PersistentVolumeClaimCondition{
+						{
+							Type:    tt.conditionType,
+							Status:  corev1.ConditionTrue,
+							Reason:  tt.reason,
+							Message: "something went wrong",
+						},
+					},
+				},
+			}
+			c, _, err := cachetest.NewTestCache(t, pvc)
+			require.NoError(t, err)
+			task := c.NewPVCTask(context.Background(), pvc)
+			err = task.Wait(100 * time.Millisecond)
+			assert.Error(t, err)
+			assert.Contains(t, err.Error(), tt.expectError)
+		})
+	}
+}
+
+func TestNewPVCTask_NonFailureConditions_DoNotFailFast(t *testing.T) {
+	tests := []struct {
+		name          string
+		conditionType corev1.PersistentVolumeClaimConditionType
+		reason        string
+	}{
+		{
+			name:          "Resizing condition",
+			conditionType: corev1.PersistentVolumeClaimResizing,
+			reason:        "some-reason",
+		},
+		{
+			name:          "FileSystemResizePending condition",
+			conditionType: corev1.PersistentVolumeClaimFileSystemResizePending,
+			reason:        "some-reason",
+		},
+		{
+			name:          "unknown condition with benign reason",
+			conditionType: "UnknownType",
+			reason:        "BenignReason",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pvc := &corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pvc-nonfail-" + tt.name},
+				Status: corev1.PersistentVolumeClaimStatus{
+					Phase: corev1.ClaimPending,
+					Conditions: []corev1.PersistentVolumeClaimCondition{
+						{
+							Type:   tt.conditionType,
+							Status: corev1.ConditionTrue,
+							Reason: tt.reason,
+						},
+					},
+				},
+			}
+			c, _, err := cachetest.NewTestCache(t, pvc)
+			require.NoError(t, err)
+			task := c.NewPVCTask(context.Background(), pvc)
+			err = task.Wait(100 * time.Millisecond)
+			// Should timeout, not fail-fast with a specific error
+			assert.Error(t, err)
+			assert.Contains(t, err.Error(), "object is not satisfied")
+		})
+	}
+}
+
+func TestNewPVCTask_FailureConditionWithFalseStatus_DoesNotFailFast(t *testing.T) {
+	// A failure condition with Status=False should not trigger fail-fast
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pvc-cond-false"},
+		Status: corev1.PersistentVolumeClaimStatus{
+			Phase: corev1.ClaimPending,
+			Conditions: []corev1.PersistentVolumeClaimCondition{
+				{
+					Type:   corev1.PersistentVolumeClaimControllerResizeError,
+					Status: corev1.ConditionFalse,
+					Reason: "some-reason",
+				},
+			},
+		},
+	}
+	c, _, err := cachetest.NewTestCache(t, pvc)
+	require.NoError(t, err)
+	task := c.NewPVCTask(context.Background(), pvc)
+	err = task.Wait(100 * time.Millisecond)
+	// Should timeout, not fail-fast
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "object is not satisfied")
+}
+
+func TestNewPVCTask_BoundWithoutVolumeName_NotSatisfied(t *testing.T) {
+	// Bound phase but no VolumeName — should not be considered satisfied
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pvc-bound-no-vol"},
+		Status: corev1.PersistentVolumeClaimStatus{
+			Phase: corev1.ClaimBound,
+		},
+	}
+	c, _, err := cachetest.NewTestCache(t, pvc)
+	require.NoError(t, err)
+	task := c.NewPVCTask(context.Background(), pvc)
+	err = task.Wait(100 * time.Millisecond)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "object is not satisfied")
+}

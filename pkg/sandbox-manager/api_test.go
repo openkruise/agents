@@ -26,6 +26,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -1887,6 +1888,159 @@ func TestSandboxManager_deleteRouteAndSync(t *testing.T) {
 
 			_, ok := manager.proxy.LoadRoute(sbx.GetSandboxID())
 			assert.False(t, ok, "route should not exist after deleteRouteAndSync")
+		})
+	}
+}
+
+func TestGetOwnerOfVolume(t *testing.T) {
+	testutils.InitLogOutput()
+	manager, fc := setupTestManager(t)
+
+	namespace := "default"
+
+	// Create PVCs with different owner annotations and volume names
+	pvcOwnerA := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pvc-owner-a",
+			Namespace: namespace,
+			Annotations: map[string]string{
+				agentsv1alpha1.AnnotationOwner: "user-a",
+			},
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			VolumeName:       "pv-owner-a",
+			AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			Resources:        corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Gi")}},
+			StorageClassName: ptr.To("standard"),
+		},
+	}
+	require.NoError(t, fc.Create(t.Context(), pvcOwnerA))
+
+	pvcOwnerB := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pvc-owner-b",
+			Namespace: namespace,
+			Annotations: map[string]string{
+				agentsv1alpha1.AnnotationOwner: "user-b",
+			},
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			VolumeName:       "pv-owner-b",
+			AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			Resources:        corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("5Gi")}},
+			StorageClassName: ptr.To("standard"),
+		},
+	}
+	require.NoError(t, fc.Create(t.Context(), pvcOwnerB))
+
+	// PVC without owner annotation
+	pvcNoOwner := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pvc-no-owner",
+			Namespace: namespace,
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			VolumeName:       "pv-no-owner",
+			AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			Resources:        corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Gi")}},
+			StorageClassName: ptr.To("standard"),
+		},
+	}
+	require.NoError(t, fc.Create(t.Context(), pvcNoOwner))
+
+	// PVC in a different namespace
+	otherNamespace := "other-ns"
+	nsOther := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{Name: otherNamespace},
+	}
+	require.NoError(t, fc.Create(t.Context(), nsOther))
+
+	pvcOtherNs := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pvc-other-ns",
+			Namespace: otherNamespace,
+			Annotations: map[string]string{
+				agentsv1alpha1.AnnotationOwner: "user-c",
+			},
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			VolumeName:       "pv-other-ns",
+			AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			Resources:        corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Gi")}},
+			StorageClassName: ptr.To("standard"),
+		},
+	}
+	require.NoError(t, fc.Create(t.Context(), pvcOtherNs))
+
+	// Wait for cache indexes to be populated
+	require.NoError(t, wait.PollUntilContextTimeout(t.Context(), 10*time.Millisecond, 5*time.Second, true, func(ctx context.Context) (bool, error) {
+		owner, ok := manager.GetOwnerOfVolume(namespace, "pv-owner-a")
+		return ok && owner == "user-a", nil
+	}))
+
+	tests := []struct {
+		name        string
+		namespace   string
+		volumeID    string
+		expectOwner string
+		expectFound bool
+	}{
+		{
+			name:        "found with owner annotation",
+			namespace:   namespace,
+			volumeID:    "pv-owner-a",
+			expectOwner: "user-a",
+			expectFound: true,
+		},
+		{
+			name:        "found with different owner",
+			namespace:   namespace,
+			volumeID:    "pv-owner-b",
+			expectOwner: "user-b",
+			expectFound: true,
+		},
+		{
+			name:        "found without owner annotation returns empty string",
+			namespace:   namespace,
+			volumeID:    "pv-no-owner",
+			expectOwner: "",
+			expectFound: true,
+		},
+		{
+			name:        "volume in different namespace found by correct namespace",
+			namespace:   otherNamespace,
+			volumeID:    "pv-other-ns",
+			expectOwner: "user-c",
+			expectFound: true,
+		},
+		{
+			name:        "volume not found in wrong namespace",
+			namespace:   otherNamespace,
+			volumeID:    "pv-owner-a",
+			expectFound: false,
+		},
+		{
+			name:        "non-existent volume returns not found",
+			namespace:   namespace,
+			volumeID:    "non-existent-pv",
+			expectFound: false,
+		},
+		{
+			name:        "empty namespace lists all namespaces and finds volume",
+			namespace:   "",
+			volumeID:    "pv-owner-a",
+			expectOwner: "user-a",
+			expectFound: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			owner, ok := manager.GetOwnerOfVolume(tt.namespace, tt.volumeID)
+			assert.Equal(t, tt.expectFound, ok)
+			if tt.expectFound {
+				assert.Equal(t, tt.expectOwner, owner)
+			}
 		})
 	}
 }
