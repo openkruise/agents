@@ -22,6 +22,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"golang.org/x/sync/singleflight"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -40,6 +41,11 @@ import (
 // route locally and to peer gateways.
 type Waker struct {
 	cache cache.Provider
+
+	// flight coalesces concurrent Wake calls for the same sandbox so only
+	// one Resume is issued to the API server. Additional callers receive
+	// the shared result via DoChan.
+	flight singleflight.Group
 }
 
 var defaultWaker atomic.Pointer[Waker]
@@ -72,25 +78,43 @@ func (w *Waker) HasWakeAnnotation(ctx context.Context, namespace, name string) b
 	return sbx.GetAnnotations()[agentsv1alpha1.AnnotationWakeOnTraffic] == agentsv1alpha1.True
 }
 
-// Wake resumes a paused sandbox by calling the existing sandbox-manager
-// connect Resume implementation, then syncs the route locally and to peers.
-// It does NOT reimplement spec patching or wait-for-running — it delegates
-// entirely to sandboxcr.Sandbox.Resume().
+// Wake resumes a paused sandbox by delegating to sandboxcr.Sandbox.Resume().
+// Concurrent calls for the same sandbox (identified by namespace/name) are
+// coalesced via singleflight so only one Resume is issued to the API server.
+// The caller's context is used only for the wait deadline; the actual Resume
+// runs under a detached context so it survives individual caller cancellation.
 //
-// Resume internally handles:
-//   - refreshFromAPIReader (fresh fetch from API server)
-//   - IsSandboxResumable validation
-//   - NewSandboxResumeTask (pre-acquired wait task)
-//   - retryUpdate: patches Spec.Paused=false + setTimeout(PauseTime)
-//   - resumeTask.Wait() — blocks until Ready condition is True
-//   - InplaceRefresh + expectations
-//   - Concurrent dedup: first-writer-wins via retryUpdate optimistic lock
-//
-// After Resume succeeds, syncRoute mirrors the manager's syncRoute flow:
-//   - Get updated route from the refreshed sandbox (sandbox.GetRoute())
-//   - Update local gateway registry (registry.GetRegistry().Update)
-//   - Sync route to peer gateways (proxy.SyncRouteWithPeers)
+// defaultWakeTimeout must be positive.  The caller (typically the filter) is
+// responsible for providing a valid timeout via Config.GetWakeTimeoutSeconds()
+// which defaults to 60s when the configured value is <= 0.
 func (w *Waker) Wake(ctx context.Context, namespace, name string, defaultWakeTimeout time.Duration) error {
+	key := namespace + "/" + name
+
+	// Use a detached context so the shared Resume is not tied to any single
+	// caller's context.  When the caller's ctx has a shorter deadline it can
+	// still bail out via DoChan + select.
+	wakeCtx, wakeCancel := context.WithTimeout(context.Background(), defaultWakeTimeout)
+	defer wakeCancel()
+
+	type result struct{ err error }
+	ch := w.flight.DoChan(key, func() (interface{}, error) {
+		err := w.wakeInternal(wakeCtx, namespace, name, defaultWakeTimeout)
+		return result{err: err}, nil
+	})
+
+	select {
+	case r := <-ch:
+		// singleflight delivers the (possibly shared) result.
+		return r.Val.(result).err
+	case <-ctx.Done():
+		// Caller gave up; the shared work continues in the background.
+		return ctx.Err()
+	}
+}
+
+// wakeInternal performs the actual wake work: reads annotations from cache,
+// calls sandbox.Resume, and syncs the route.
+func (w *Waker) wakeInternal(ctx context.Context, namespace, name string, defaultWakeTimeout time.Duration) error {
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KRef(namespace, name))
 
 	cli := w.cache.GetClient()
