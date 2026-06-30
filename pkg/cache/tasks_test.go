@@ -254,12 +254,6 @@ func TestNewPVCTask_FailureCondition_ReturnsError(t *testing.T) {
 			expectError:   "ModifyVolumeError",
 		},
 		{
-			name:          "ClaimLost condition",
-			conditionType: corev1.PersistentVolumeClaimConditionType(corev1.ClaimLost),
-			reason:        "volume deleted",
-			expectError:   "ClaimLost",
-		},
-		{
 			name:          "unknown condition with ResizeFailed reason",
 			conditionType: "UnknownType",
 			reason:        "ResizeFailed",

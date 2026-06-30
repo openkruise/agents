@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/klog/v2"
 
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
@@ -53,7 +54,10 @@ func (sc *Controller) CreateVolume(r *http.Request) (web.ApiResponse[*models.Vol
 	// Parse request body and headers
 	req, parseErr := sc.parseCreateVolumeRequest(r)
 	if parseErr != nil {
-		return web.ApiResponse[*models.Volume]{}, parseErr
+		return web.ApiResponse[*models.Volume]{}, &web.ApiError{
+			Code:    http.StatusBadRequest,
+			Message: parseErr.Error(),
+		}
 	}
 	log.Info("create volume request received", "request", req)
 
@@ -69,6 +73,12 @@ func (sc *Controller) CreateVolume(r *http.Request) (web.ApiResponse[*models.Vol
 	})
 	if err != nil {
 		log.Error(err, "Failed to create volume", "name", req.Name, "namespace", namespace)
+		if managererrors.GetErrCode(err) == managererrors.ErrorNotAllowed {
+			return web.ApiResponse[*models.Volume]{}, &web.ApiError{
+				Code:    http.StatusForbidden,
+				Message: "Permission denied",
+			}
+		}
 		return web.ApiResponse[*models.Volume]{}, &web.ApiError{
 			Code:    http.StatusInternalServerError,
 			Message: fmt.Sprintf("Failed to create volume: %v", err),
@@ -84,27 +94,18 @@ func (sc *Controller) CreateVolume(r *http.Request) (web.ApiResponse[*models.Vol
 	}, nil
 }
 
-func (sc *Controller) parseCreateVolumeRequest(r *http.Request) (models.NewVolumeRequest, *web.ApiError) {
+func (sc *Controller) parseCreateVolumeRequest(r *http.Request) (models.NewVolumeRequest, error) {
 	var request models.NewVolumeRequest
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-		return request, &web.ApiError{
-			Code:    http.StatusBadRequest,
-			Message: "invalid request body",
-		}
+		return request, fmt.Errorf("invalid request body: %w", err)
 	}
 
 	if err := request.ParseExtensions(r.Header); err != nil {
-		return request, &web.ApiError{
-			Code:    http.StatusBadRequest,
-			Message: fmt.Sprintf("Bad extension param: %s", err.Error()),
-		}
+		return request, fmt.Errorf("bad extension param: %w", err)
 	}
 
 	if err := validateVolumeRequest(request); err != nil {
-		return request, &web.ApiError{
-			Code:    http.StatusBadRequest,
-			Message: err.Error(),
-		}
+		return request, err
 	}
 	return request, nil
 }
@@ -118,6 +119,9 @@ func validateVolumeRequest(request models.NewVolumeRequest) error {
 	}
 	if request.Extensions.AccessMode == "" {
 		return fmt.Errorf("access mode is required")
+	}
+	if request.Extensions.StorageSize.IsZero() || request.Extensions.StorageSize.Cmp(resource.Quantity{}) < 0 {
+		return fmt.Errorf("invalid storage size: must be a positive value")
 	}
 	return nil
 }

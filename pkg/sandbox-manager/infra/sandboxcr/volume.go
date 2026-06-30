@@ -30,7 +30,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilvalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/klog/v2"
@@ -170,13 +169,6 @@ func (i *Infra) GetVolume(ctx context.Context, opts infra.GetVolumeOptions) (*in
 	}
 
 	pvc := &pvcList.Items[0]
-
-	// Verify ownership if UserID is specified
-	if opts.UserID != "" && pvc.GetAnnotations()[agentsv1alpha1.AnnotationOwner] != opts.UserID {
-		return nil, managererrors.NewError(managererrors.ErrorNotAllowed,
-			"volume %s is not owned by user %s", opts.VolumeID, opts.UserID)
-	}
-
 	volumeInfo := &infra.VolumeInfo{
 		Name:     pvc.Name,
 		VolumeID: pvc.Spec.VolumeName,
@@ -206,13 +198,6 @@ func (i *Infra) DeleteVolume(ctx context.Context, opts infra.DeleteVolumeOptions
 	}
 
 	pvc := &pvcList.Items[0]
-
-	// Verify ownership if UserID is specified
-	if opts.UserID != "" && pvc.GetAnnotations()[agentsv1alpha1.AnnotationOwner] != opts.UserID {
-		return managererrors.NewError(managererrors.ErrorNotAllowed,
-			"volume %s is not owned by user %s", opts.VolumeID, opts.UserID)
-	}
-
 	// Delete the PVC
 	if err := i.Cache.GetClient().Delete(ctx, pvc); err != nil {
 		log.Error(err, "Failed to delete PVC", "name", pvc.Name, "namespace", opts.Namespace)
@@ -231,10 +216,6 @@ func (i *Infra) validateCreateVolumeOptions(ctx context.Context, opts *infra.Cre
 	// Validate volume name conforms to DNS-1123 label format
 	if errs := utilvalidation.IsDNS1123Label(opts.Name); len(errs) > 0 {
 		return fmt.Errorf("invalid volume name %q: %s", opts.Name, strings.Join(errs, ", "))
-	}
-	// Validate storage size is set and positive
-	if opts.StorageSize.IsZero() || opts.StorageSize.Cmp(resource.Quantity{}) < 0 {
-		return fmt.Errorf("invalid storage size: must be a positive value")
 	}
 	// Validate AccessMode
 	if err := validateAccessMode(opts.AccessMode); err != nil {

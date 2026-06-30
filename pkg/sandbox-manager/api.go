@@ -188,13 +188,19 @@ func (m *SandboxManager) GetOwnerOfSandbox(sandboxID string) (string, bool) {
 
 // GetOwnerOfVolume returns the owner (UserID) of the volume identified by volumeID (PV Name)
 // in the given namespace. Returns ("", false) if the volume is not found.
-func (m *SandboxManager) GetOwnerOfVolume(namespace, volumeID string) (string, bool) {
+func (m *SandboxManager) GetOwnerOfVolume(ctx context.Context, namespace, volumeID string) (string, bool) {
+	log := klog.FromContext(ctx)
 	pvcList := &corev1.PersistentVolumeClaimList{}
-	err := m.infra.GetCache().GetClient().List(context.Background(), pvcList,
+	err := m.infra.GetCache().GetClient().List(ctx, pvcList,
 		client.InNamespace(namespace),
 		client.MatchingFields{cache.IndexVolumeName: volumeID},
 	)
-	if err != nil || len(pvcList.Items) == 0 {
+	if err != nil {
+		log.Error(err, "failed to list PVCs for volume ownership check", "namespace", namespace, "volumeID", volumeID)
+		return "", false
+	}
+	if len(pvcList.Items) == 0 {
+		log.Info("no PVC found for volume ownership check", "namespace", namespace, "volumeID", volumeID)
 		return "", false
 	}
 	return pvcList.Items[0].GetAnnotations()[v1alpha1.AnnotationOwner], true

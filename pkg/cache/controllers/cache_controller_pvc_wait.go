@@ -30,7 +30,7 @@ type CachePVCWaitReconciler struct {
 	WaitReconciler[*corev1.PersistentVolumeClaim]
 }
 
-func NewPVC() *corev1.PersistentVolumeClaim {
+func NewPVCObject() *corev1.PersistentVolumeClaim {
 	return &corev1.PersistentVolumeClaim{}
 }
 
@@ -49,7 +49,7 @@ func AddCachePVCWaitReconciler(mgr ctrl.Manager, waitHooks *sync.Map) error {
 			Client:    mgr.GetClient(),
 			Scheme:    mgr.GetScheme(),
 			waitHooks: waitHooks,
-			NewObject: NewPVC,
+			NewObject: NewPVCObject,
 			Name:      "PVCWait",
 		},
 	}).SetupWithManager(mgr)

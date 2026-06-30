@@ -141,7 +141,7 @@ func (sc *Controller) CheckApiKey(ctx context.Context, r *http.Request) (context
 		if namespace == "" {
 			namespace = sc.systemNamespace
 		}
-		owner, ok := sc.manager.GetOwnerOfVolume(namespace, volumeID)
+		owner, ok := sc.manager.GetOwnerOfVolume(ctx, namespace, volumeID)
 		if !ok {
 			middleWareLog.Info("failed to get owner of volume")
 			return ctx, &web.ApiError{

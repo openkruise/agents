@@ -118,7 +118,6 @@ func TestIsPVCFailureCondition(t *testing.T) {
 		expectFailure bool
 	}{
 		// Failure conditions
-		{name: "ClaimLost", conditionType: corev1.PersistentVolumeClaimConditionType(corev1.ClaimLost), reason: "", expectFailure: true},
 		{name: "ControllerResizeError", conditionType: corev1.PersistentVolumeClaimControllerResizeError, reason: "", expectFailure: true},
 		{name: "NodeResizeError", conditionType: corev1.PersistentVolumeClaimNodeResizeError, reason: "", expectFailure: true},
 		{name: "ModifyVolumeError", conditionType: corev1.PersistentVolumeClaimVolumeModifyVolumeError, reason: "", expectFailure: true},

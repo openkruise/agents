@@ -1974,7 +1974,7 @@ func TestGetOwnerOfVolume(t *testing.T) {
 
 	// Wait for cache indexes to be populated
 	require.NoError(t, wait.PollUntilContextTimeout(t.Context(), 10*time.Millisecond, 5*time.Second, true, func(ctx context.Context) (bool, error) {
-		owner, ok := manager.GetOwnerOfVolume(namespace, "pv-owner-a")
+		owner, ok := manager.GetOwnerOfVolume(ctx, namespace, "pv-owner-a")
 		return ok && owner == "user-a", nil
 	}))
 
@@ -2036,7 +2036,7 @@ func TestGetOwnerOfVolume(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			owner, ok := manager.GetOwnerOfVolume(tt.namespace, tt.volumeID)
+			owner, ok := manager.GetOwnerOfVolume(t.Context(), tt.namespace, tt.volumeID)
 			assert.Equal(t, tt.expectFound, ok)
 			if tt.expectFound {
 				assert.Equal(t, tt.expectOwner, owner)

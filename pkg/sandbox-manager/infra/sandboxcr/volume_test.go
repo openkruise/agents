@@ -31,7 +31,6 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/cache/cachetest"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
-	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 )
 
@@ -164,18 +163,6 @@ func TestValidateCreateVolumeOptions(t *testing.T) {
 				AccessMode:   "ReadWriteOnce",
 			},
 			expectError: "invalid volume name",
-		},
-		{
-			name: "zero storage size",
-			opts: infra.CreateVolumeOptions{
-				Namespace:    "sandbox-system",
-				Name:         "test-volume",
-				UserID:       "user-1",
-				StorageSize:  resource.MustParse("0"),
-				StorageClass: "standard",
-				AccessMode:   "ReadWriteOnce",
-			},
-			expectError: "invalid storage size",
 		},
 		{
 			name: "invalid access mode",
@@ -357,7 +344,7 @@ func TestGetVolume(t *testing.T) {
 		assert.Contains(t, err.Error(), "volume not found")
 	})
 
-	t.Run("volume found but not owned by requesting user", func(t *testing.T) {
+	t.Run("volume found regardless of ownership", func(t *testing.T) {
 		pvc := &corev1.PersistentVolumeClaim{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "pvc-other-owner",
@@ -386,9 +373,10 @@ func TestGetVolume(t *testing.T) {
 			VolumeID:  "pv-other",
 			UserID:    "user-1",
 		}
-		_, err := i.GetVolume(context.Background(), opts)
-		assert.Error(t, err)
-		assert.Equal(t, managererrors.ErrorNotAllowed, managererrors.GetErrCode(err))
+		info, err := i.GetVolume(context.Background(), opts)
+		require.NoError(t, err)
+		assert.Equal(t, "pvc-other-owner", info.Name)
+		assert.Equal(t, "pv-other", info.VolumeID)
 	})
 
 	t.Run("volume found and owned by requesting user", func(t *testing.T) {
@@ -480,7 +468,7 @@ func TestDeleteVolume(t *testing.T) {
 		assert.Contains(t, err.Error(), "volume not found")
 	})
 
-	t.Run("volume found but not owned by requesting user", func(t *testing.T) {
+	t.Run("volume deleted regardless of ownership", func(t *testing.T) {
 		pvc := &corev1.PersistentVolumeClaim{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "pvc-del-other",
@@ -507,8 +495,7 @@ func TestDeleteVolume(t *testing.T) {
 			UserID:    "user-1",
 		}
 		err := i.DeleteVolume(context.Background(), opts)
-		assert.Error(t, err)
-		assert.Equal(t, managererrors.ErrorNotAllowed, managererrors.GetErrCode(err))
+		assert.NoError(t, err)
 	})
 
 	t.Run("volume deleted successfully by owner", func(t *testing.T) {
