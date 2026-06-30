@@ -33,7 +33,6 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
-	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/pagination"
 )
 
@@ -184,9 +183,6 @@ func getListFilter(request ListSandboxesRequest) func(sbx infra.Sandbox) bool {
 		request.States = []string{agentsv1alpha1.SandboxStateRunning, agentsv1alpha1.SandboxStatePaused}
 	}
 	return func(sbx infra.Sandbox) bool {
-		if utils.IsReservedFailedSandbox(sbx.GetLabels()) {
-			return false
-		}
 		if len(request.States) > 0 {
 			state, _ := sbx.GetState()
 			if !slices.Contains(request.States, state) {
