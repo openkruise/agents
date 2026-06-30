@@ -18,7 +18,7 @@ package models
 
 import (
 	"fmt"
-	"path/filepath"
+	"path"
 	"strings"
 
 	"github.com/openkruise/agents/api/v1alpha1"
@@ -39,8 +39,12 @@ func validateMountPoint(mountPoint string) error {
 		return fmt.Errorf("mount point contains invalid '..' path element")
 	}
 
-	// to parse the path, eliminating relative path symbols such as "." and ".."
-	cleanPath := filepath.Clean(mountPoint)
+	// Use path.Clean (POSIX semantics, always forward slash) so that the
+	// check works correctly on all host OSes including Windows.
+	// path.Clean eliminates "." components and collapses double slashes.
+	// If the cleaned path differs from the input the path contained relative
+	// elements (e.g. "/a/./b") that are not valid for a Linux mount target.
+	cleanPath := path.Clean(mountPoint)
 	if cleanPath != mountPoint {
 		return fmt.Errorf("mount point contains invalid path elements like '..' or '.'")
 	}

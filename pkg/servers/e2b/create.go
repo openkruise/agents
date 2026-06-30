@@ -121,8 +121,23 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 	log := klog.FromContext(ctx)
 	claimStart := time.Now()
 	var accessToken string
+
+	// Resolve volume_mounts before entering the claim pipeline.
+	namespace := sc.getNamespaceOfUser(user)
+	if len(request.VolumeMounts) > 0 {
+		resolved, err := sc.resolveVolumeMounts(ctx, namespace, request.VolumeMounts)
+		if err != nil {
+			return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
+				Code:    http.StatusBadRequest,
+				Message: err.Error(),
+			}
+		}
+		// Prepend resolved configs to the CSIMount extension list.
+		request.Extensions.CSIMount.MountConfigs = append(resolved, request.Extensions.CSIMount.MountConfigs...)
+	}
+
 	opts := infra.ClaimSandboxOptions{
-		Namespace:    sc.getNamespaceOfUser(user),
+		Namespace:    namespace,
 		Template:     request.TemplateID,
 		User:         user.ID.String(),
 		ClaimTimeout: resolveServerTimeout(request.Extensions.TimeoutSeconds),
@@ -203,8 +218,21 @@ func (sc *Controller) createSandboxWithClone(ctx context.Context, request models
 		}
 	}
 
+	// Resolve volume_mounts before entering the clone pipeline.
+	namespace := sc.getNamespaceOfUser(user)
+	if len(request.VolumeMounts) > 0 {
+		resolved, err := sc.resolveVolumeMounts(ctx, namespace, request.VolumeMounts)
+		if err != nil {
+			return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
+				Code:    http.StatusBadRequest,
+				Message: err.Error(),
+			}
+		}
+		request.Extensions.CSIMount.MountConfigs = append(resolved, request.Extensions.CSIMount.MountConfigs...)
+	}
+
 	opts := infra.CloneSandboxOptions{
-		Namespace:    sc.getNamespaceOfUser(user),
+		Namespace:    namespace,
 		User:         user.ID.String(),
 		CheckPointID: request.TemplateID,
 		CloneTimeout: resolveServerTimeout(request.Extensions.TimeoutSeconds),

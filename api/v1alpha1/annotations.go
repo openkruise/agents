@@ -44,5 +44,14 @@ const (
 // LabelSandboxUpdateOps marks which SandboxUpdateOps is operating on this sandbox.
 const LabelSandboxUpdateOps = InternalPrefix + "update-ops"
 
+// Volume label constants.
+
+const (
+	// LabelVolumeOwnerNamespace scopes a PV to a namespace; its absence means the PV is unregistered.
+	LabelVolumeOwnerNamespace = InternalPrefix + "volume-owner-namespace"
+	// LabelVolumeName stores the human-readable name chosen at registration; must be unique per namespace.
+	LabelVolumeName = InternalPrefix + "volume-name"
+)
+
 const True = "true"
 const False = "false"
