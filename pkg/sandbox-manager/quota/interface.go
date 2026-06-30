@@ -28,42 +28,67 @@ type Entry struct {
 	Scopes    []quotaspec.QuotaScope
 }
 
+// AcquireParams carries inputs used by Backend.Acquire.
 type AcquireParams struct {
-	User       string
+	// User identifies the quota owner.
+	User string
+	// LockString uniquely identifies one quota allocation for the user.
 	LockString string
-	Footprint  map[quotaspec.QuotaDimension]int64
-	Scopes     []quotaspec.QuotaScope
-	Enforce    bool
-	Limits     map[quotaspec.QuotaDimension]map[quotaspec.QuotaScope]int64
+	// Footprint is the quota usage by dimension to reserve.
+	Footprint map[quotaspec.QuotaDimension]int64
+	// Scopes lists conditional quota scopes that also receive the footprint.
+	Scopes []quotaspec.QuotaScope
+	// Enforce controls whether the backend rejects requests exceeding limits.
+	Enforce bool
+	// Limits contains per-dimension, per-scope quota ceilings.
+	Limits map[quotaspec.QuotaDimension]map[quotaspec.QuotaScope]int64
 }
 
 type Backend interface {
+	// Acquire reserves or updates quota for one lock string.
 	Acquire(ctx context.Context, p AcquireParams) error
+	// Release removes quota reserved by one user lock string.
 	Release(ctx context.Context, user, lockString string) error
+	// ListEntries returns all quota entries for a user keyed by lock string.
 	ListEntries(ctx context.Context, user string) (map[string]Entry, error)
+	// Cleanup removes all quota state for a user.
 	Cleanup(ctx context.Context, user string) error
 }
 
+// AcquireRequest carries inputs used by Manager.Acquire.
 type AcquireRequest struct {
-	User       string
+	// User identifies the quota owner.
+	User string
+	// LockString uniquely identifies one quota allocation for the user.
 	LockString string
-	Quota      *quotaspec.QuotaSpec
-	Footprint  map[quotaspec.QuotaDimension]int64
-	Scopes     []quotaspec.QuotaScope
+	// Quota describes the limits to enforce for this acquisition.
+	Quota *quotaspec.QuotaSpec
+	// Footprint is the quota usage by dimension to reserve.
+	Footprint map[quotaspec.QuotaDimension]int64
+	// Scopes lists conditional quota scopes that also receive the footprint.
+	Scopes []quotaspec.QuotaScope
 }
 
+// ReleaseRequest carries inputs used by Manager.Release.
 type ReleaseRequest struct {
-	User       string
+	// User identifies the quota owner.
+	User string
+	// LockString identifies the quota allocation to release.
 	LockString string
 }
 
 type LiveSandboxCache interface {
+	// ListLiveSandboxesByOwner returns live sandboxes owned by owner.
 	ListLiveSandboxesByOwner(ctx context.Context, owner string) ([]*agentsv1alpha1.Sandbox, error)
+	// SandboxInformerHealthy reports whether the sandbox informer cache is usable.
 	SandboxInformerHealthy() bool
 }
 
 type PrimaryChecker interface {
+	// IsPrimary reports whether this instance currently owns primary duties.
 	IsPrimary() bool
+	// WaitPrimary blocks until this instance becomes primary or ctx is done.
 	WaitPrimary(ctx context.Context) error
+	// PrimaryChanged returns a channel closed or signaled when primary state changes.
 	PrimaryChanged() <-chan struct{}
 }

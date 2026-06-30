@@ -160,20 +160,27 @@ func MarshalQuotaSpec(spec *QuotaSpec) ([]byte, error) {
 	return raw, nil
 }
 
+var AllowedQuotaDimensions = map[QuotaDimension]struct{}{
+	DimSandboxCount: {},
+	DimLimitsCPU:    {},
+	DimLimitsMemory: {},
+}
+
+var AllowedQuotaScopes = map[QuotaScope]struct{}{
+	ScopeAll:     {},
+	ScopeRunning: {},
+}
+
 func validateQuotaDimension(dimension QuotaDimension) error {
-	switch dimension {
-	case DimSandboxCount, DimLimitsCPU, DimLimitsMemory:
+	if _, ok := AllowedQuotaDimensions[dimension]; ok {
 		return nil
-	default:
-		return fmt.Errorf("unsupported quota dimension %q", dimension)
 	}
+	return fmt.Errorf("unsupported quota dimension %q", dimension)
 }
 
 func validateQuotaScope(scope QuotaScope) error {
-	switch scope {
-	case ScopeAll, ScopeRunning:
+	if _, ok := AllowedQuotaScopes[scope]; ok {
 		return nil
-	default:
-		return fmt.Errorf("unsupported quota scope %q", scope)
 	}
+	return fmt.Errorf("unsupported quota scope %q", scope)
 }
