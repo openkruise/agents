@@ -71,6 +71,58 @@ func TestCache_GetClaimedSandbox(t *testing.T) {
 	})
 }
 
+func TestCache_IndexSandboxClaimName(t *testing.T) {
+	var extract func(ctrlclient.Object) []string
+	for _, idx := range cache.GetIndexFuncs() {
+		if idx.FieldName == cache.IndexSandboxClaimName {
+			extract = idx.Extract
+			break
+		}
+	}
+	require.NotNil(t, extract)
+
+	tests := []struct {
+		name       string
+		obj        ctrlclient.Object
+		expectKeys []string
+	}{
+		{
+			name:       "non sandbox object returns no index keys",
+			obj:        &corev1.ConfigMap{},
+			expectKeys: nil,
+		},
+		{
+			name: "sandbox without claim name returns no index keys",
+			obj: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "unclaimed-sandbox",
+					Namespace: "default",
+				},
+			},
+			expectKeys: nil,
+		},
+		{
+			name: "sandbox with claim name returns claim name index key",
+			obj: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "claimed-sandbox",
+					Namespace: "default",
+					Labels: map[string]string{
+						agentsv1alpha1.LabelSandboxClaimName: "test-claim",
+					},
+				},
+			},
+			expectKeys: []string{"test-claim"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expectKeys, extract(tt.obj))
+		})
+	}
+}
+
 func TestCache_GetCheckpoint(t *testing.T) {
 	cp := &agentsv1alpha1.Checkpoint{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-cp", Namespace: "default"},
@@ -522,6 +574,143 @@ func TestCache_CountActiveSandboxes(t *testing.T) {
 	cnt, err := c.CountActiveSandboxes(t.Context(), cache.ListSandboxesOptions{User: "user-1"})
 	require.NoError(t, err)
 	assert.Equal(t, listNonDead, cnt, "CountActiveSandboxes should match ListSandboxes non-dead count")
+}
+
+func TestCache_CountActiveSandboxesWithClaimIdentity(t *testing.T) {
+	const (
+		namespace = "default"
+		claimName = "recreated-claim"
+		newUID    = "new-claim-uid"
+		oldUID    = "old-claim-uid"
+	)
+
+	runningStatus := agentsv1alpha1.SandboxStatus{
+		Phase: agentsv1alpha1.SandboxRunning,
+		Conditions: []metav1.Condition{
+			{Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue},
+		},
+	}
+	sandboxes := []ctrlclient.Object{
+		&agentsv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "matching-sandbox",
+				Namespace: namespace,
+				Annotations: map[string]string{
+					agentsv1alpha1.AnnotationOwner: newUID,
+				},
+				Labels: map[string]string{
+					agentsv1alpha1.LabelSandboxIsClaimed: agentsv1alpha1.True,
+					agentsv1alpha1.LabelSandboxClaimName: claimName,
+				},
+			},
+			Status: runningStatus,
+		},
+		&agentsv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "old-uid-sandbox",
+				Namespace: namespace,
+				Annotations: map[string]string{
+					agentsv1alpha1.AnnotationOwner: oldUID,
+				},
+				Labels: map[string]string{
+					agentsv1alpha1.LabelSandboxIsClaimed: agentsv1alpha1.True,
+					agentsv1alpha1.LabelSandboxClaimName: claimName,
+				},
+			},
+			Status: runningStatus,
+		},
+		&agentsv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "other-claim-sandbox",
+				Namespace: namespace,
+				Annotations: map[string]string{
+					agentsv1alpha1.AnnotationOwner: newUID,
+				},
+				Labels: map[string]string{
+					agentsv1alpha1.LabelSandboxIsClaimed: agentsv1alpha1.True,
+					agentsv1alpha1.LabelSandboxClaimName: "other-claim",
+				},
+			},
+			Status: runningStatus,
+		},
+		&agentsv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "dead-matching-sandbox",
+				Namespace: namespace,
+				Annotations: map[string]string{
+					agentsv1alpha1.AnnotationOwner: newUID,
+				},
+				Labels: map[string]string{
+					agentsv1alpha1.LabelSandboxIsClaimed: agentsv1alpha1.True,
+					agentsv1alpha1.LabelSandboxClaimName: claimName,
+				},
+				DeletionTimestamp: &metav1.Time{Time: time.Now()},
+				Finalizers:        []string{"agents.kruise.io/sandbox"},
+			},
+			Status: runningStatus,
+		},
+	}
+	c, _, err := cachetest.NewTestCache(t, sandboxes...)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name        string
+		opts        cache.ListSandboxesOptions
+		expectCount int32
+	}{
+		{
+			name: "claim name and uid count only the matching active sandbox",
+			opts: cache.ListSandboxesOptions{
+				Namespace: namespace,
+				User:      newUID,
+				ClaimName: claimName,
+			},
+			expectCount: 1,
+		},
+		{
+			name: "same claim name with old uid is isolated",
+			opts: cache.ListSandboxesOptions{
+				Namespace: namespace,
+				User:      oldUID,
+				ClaimName: claimName,
+			},
+			expectCount: 1,
+		},
+		{
+			name: "same uid with another claim name is isolated",
+			opts: cache.ListSandboxesOptions{
+				Namespace: namespace,
+				User:      newUID,
+				ClaimName: "other-claim",
+			},
+			expectCount: 1,
+		},
+		{
+			name: "unknown uid with same claim name counts zero",
+			opts: cache.ListSandboxesOptions{
+				Namespace: namespace,
+				User:      "missing-uid",
+				ClaimName: claimName,
+			},
+			expectCount: 0,
+		},
+		{
+			name: "claim name alone excludes dead sandboxes",
+			opts: cache.ListSandboxesOptions{
+				Namespace: namespace,
+				ClaimName: claimName,
+			},
+			expectCount: 2,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cnt, err := c.CountActiveSandboxes(t.Context(), tt.opts)
+			require.NoError(t, err)
+			assert.Equal(t, tt.expectCount, cnt)
+		})
+	}
 }
 
 func TestCache_ListCheckpointsWithOptions_UserScoped(t *testing.T) {
