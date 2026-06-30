@@ -2545,3 +2545,153 @@ func TestDeleteSandboxMetrics_ClearsAbnormalTimeMetrics(t *testing.T) {
 		t.Errorf("sandbox_runtime_container_abnormal_time after delete = %v, want 0", runtimeTimeVal)
 	}
 }
+
+// TestAbnormalTimeMetricStableAcrossReconciles verifies that sandbox_status_abnormal_time
+// is set only on the first transition into abnormal and does NOT refresh on subsequent
+// reconciles while the sandbox remains in the same abnormal state.
+// This is the critical test for the bug where time() - abnormal_time never exceeded
+// the reconcile interval, making alerts impossible to trigger.
+func TestAbnormalTimeMetricStableAcrossReconciles(t *testing.T) {
+	ns := "default"
+	name := "stable-abnormal-time-sandbox"
+	now := metav1.NewTime(time.Now())
+
+	sandbox := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: ns,
+			CreationTimestamp: metav1.NewTime(time.Now()),
+		},
+		Status: agentsv1alpha1.SandboxStatus{
+			Phase: agentsv1alpha1.SandboxResuming,
+			Conditions: []metav1.Condition{
+				{
+					Type:               string(agentsv1alpha1.SandboxConditionResumed),
+					Status:             metav1.ConditionFalse,
+					LastTransitionTime: now,
+				},
+			},
+		},
+	}
+
+	// First reconcile: should set the time metric
+	recordSandboxMetrics(sandbox, nil)
+	firstTime := testutil.ToFloat64(sandboxStatusAbnormalTime.WithLabelValues(ns, name, "resume_incomplete"))
+	if firstTime <= 0 {
+		t.Fatalf("first reconcile: sandbox_status_abnormal_time = %v, want > 0", firstTime)
+	}
+
+	// Wait a bit so time.Now() would differ if we refreshed
+	time.Sleep(2 * time.Second)
+
+	// Second reconcile with the same abnormal state: time should NOT change
+	recordSandboxMetrics(sandbox, nil)
+	secondTime := testutil.ToFloat64(sandboxStatusAbnormalTime.WithLabelValues(ns, name, "resume_incomplete"))
+	if secondTime != firstTime {
+		t.Errorf("second reconcile: sandbox_status_abnormal_time = %v, want %v (should not refresh)", secondTime, firstTime)
+	}
+
+	// Third reconcile: still the same
+	time.Sleep(1 * time.Second)
+	recordSandboxMetrics(sandbox, nil)
+	thirdTime := testutil.ToFloat64(sandboxStatusAbnormalTime.WithLabelValues(ns, name, "resume_incomplete"))
+	if thirdTime != firstTime {
+		t.Errorf("third reconcile: sandbox_status_abnormal_time = %v, want %v (should not refresh)", thirdTime, firstTime)
+	}
+
+	// Now transition to normal
+	sandbox.Status.Phase = agentsv1alpha1.SandboxRunning
+	sandbox.Status.Conditions = []metav1.Condition{
+		{
+			Type:               string(agentsv1alpha1.SandboxConditionResumed),
+			Status:             metav1.ConditionTrue,
+			LastTransitionTime: metav1.NewTime(time.Now()),
+		},
+	}
+	recordSandboxMetrics(sandbox, nil)
+	defer DeleteSandboxMetrics(ns, name)
+
+	// Time metric should be deleted (returns 0 from new series)
+	normalTime := testutil.ToFloat64(sandboxStatusAbnormalTime.WithLabelValues(ns, name, "resume_incomplete"))
+	if normalTime != 0 {
+		t.Errorf("after recovery: sandbox_status_abnormal_time = %v, want 0 (deleted)", normalTime)
+	}
+
+	// If abnormal again, a NEW timestamp should be set (not the old one)
+	sandbox.Status.Phase = agentsv1alpha1.SandboxResuming
+	sandbox.Status.Conditions = []metav1.Condition{
+		{
+			Type:               string(agentsv1alpha1.SandboxConditionResumed),
+			Status:             metav1.ConditionFalse,
+			LastTransitionTime: metav1.NewTime(time.Now()),
+		},
+	}
+	recordSandboxMetrics(sandbox, nil)
+	reAbnormalTime := testutil.ToFloat64(sandboxStatusAbnormalTime.WithLabelValues(ns, name, "resume_incomplete"))
+	if reAbnormalTime <= 0 {
+		t.Errorf("re-abnormal: sandbox_status_abnormal_time = %v, want > 0", reAbnormalTime)
+	}
+	if reAbnormalTime == firstTime {
+		t.Errorf("re-abnormal: sandbox_status_abnormal_time = %v, should differ from first time %v", reAbnormalTime, firstTime)
+	}
+}
+
+// TestRuntimeContainerAbnormalTimeStableAcrossReconciles verifies that
+// sandbox_runtime_container_abnormal_time does NOT refresh on subsequent reconciles
+// while the container remains in the same abnormal state.
+func TestRuntimeContainerAbnormalTimeStableAcrossReconciles(t *testing.T) {
+	ns, name := "default", "stable-container-abnormal-time-sandbox"
+
+	pod := &corev1.Pod{
+		Status: corev1.PodStatus{
+			InitContainerStatuses: []corev1.ContainerStatus{
+				{Name: "agent-runtime", Ready: false, RestartCount: 2},
+			},
+		},
+	}
+
+	// First reconcile: should set the time metric
+	recordRuntimeContainerAbnormal(ns, name, pod)
+	firstTime := testutil.ToFloat64(sandboxRuntimeContainerAbnormalTime.WithLabelValues(ns, name, "agent-runtime"))
+	if firstTime <= 0 {
+		t.Fatalf("first reconcile: sandbox_runtime_container_abnormal_time = %v, want > 0", firstTime)
+	}
+
+	// Wait a bit so time.Now() would differ if we refreshed
+	time.Sleep(2 * time.Second)
+
+	// Second reconcile: time should NOT change
+	recordRuntimeContainerAbnormal(ns, name, pod)
+	secondTime := testutil.ToFloat64(sandboxRuntimeContainerAbnormalTime.WithLabelValues(ns, name, "agent-runtime"))
+	if secondTime != firstTime {
+		t.Errorf("second reconcile: sandbox_runtime_container_abnormal_time = %v, want %v (should not refresh)", secondTime, firstTime)
+	}
+
+	// Third reconcile: still the same
+	time.Sleep(1 * time.Second)
+	recordRuntimeContainerAbnormal(ns, name, pod)
+	thirdTime := testutil.ToFloat64(sandboxRuntimeContainerAbnormalTime.WithLabelValues(ns, name, "agent-runtime"))
+	if thirdTime != firstTime {
+		t.Errorf("third reconcile: sandbox_runtime_container_abnormal_time = %v, want %v (should not refresh)", thirdTime, firstTime)
+	}
+
+	// Now container recovers
+	pod.Status.InitContainerStatuses[0].Ready = true
+	recordRuntimeContainerAbnormal(ns, name, pod)
+
+	// Time metric should be deleted
+	recoveredTime := testutil.ToFloat64(sandboxRuntimeContainerAbnormalTime.WithLabelValues(ns, name, "agent-runtime"))
+	if recoveredTime != 0 {
+		t.Errorf("after recovery: sandbox_runtime_container_abnormal_time = %v, want 0 (deleted)", recoveredTime)
+	}
+
+	// If abnormal again, a NEW timestamp should be set
+	pod.Status.InitContainerStatuses[0].Ready = false
+	recordRuntimeContainerAbnormal(ns, name, pod)
+	reAbnormalTime := testutil.ToFloat64(sandboxRuntimeContainerAbnormalTime.WithLabelValues(ns, name, "agent-runtime"))
+	if reAbnormalTime <= 0 {
+		t.Errorf("re-abnormal: sandbox_runtime_container_abnormal_time = %v, want > 0", reAbnormalTime)
+	}
+	if reAbnormalTime == firstTime {
+		t.Errorf("re-abnormal: sandbox_runtime_container_abnormal_time = %v, should differ from first time %v", reAbnormalTime, firstTime)
+	}
+}
