@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/cache"
@@ -30,10 +29,8 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/utils"
 	corev1 "k8s.io/api/core/v1"
-	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	utilvalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -104,7 +101,7 @@ func (i *Infra) CreateVolume(ctx context.Context, opts infra.CreateVolumeOptions
 	task := i.Cache.NewPVCTask(ctx, pvc)
 	if err := task.Wait(opts.WaitBoundTimeout); err != nil {
 		log.Error(err, "Failed to wait for PVC", "name", opts.Name, "namespace", opts.Namespace)
-		if errors.Is(err, &cacheutils.WaitNotSatisfiedError{}) {
+		if errors.Is(err, cacheutils.ErrWaitNotSatisfied) {
 			return nil, fmt.Errorf("PVC %s/%s binding timed out after %v: %w", opts.Namespace, opts.Name, opts.WaitBoundTimeout, err)
 		}
 		return nil, fmt.Errorf("failed to wait for PVC %s/%s: %w", opts.Namespace, opts.Name, err)
@@ -203,8 +200,8 @@ func (i *Infra) DeleteVolume(ctx context.Context, opts infra.DeleteVolumeOptions
 	}
 
 	pvc := &pvcList.Items[0]
-	// Delete the PVC
-	if err := i.Cache.GetClient().Delete(ctx, pvc); err != nil {
+	// Delete the PVC, ignore NotFound error to handle race conditions
+	if err := client.IgnoreNotFound(i.Cache.GetClient().Delete(ctx, pvc)); err != nil {
 		log.Error(err, "Failed to delete PVC", "name", pvc.Name, "namespace", opts.Namespace)
 		return fmt.Errorf("failed to delete PVC: %w", err)
 	}
@@ -218,47 +215,5 @@ func (i *Infra) validateCreateVolumeOptions(ctx context.Context, opts *infra.Cre
 	if opts.WaitBoundTimeout <= 0 {
 		opts.WaitBoundTimeout = consts.DefaultWaitBoundPVCTimeout
 	}
-	// Validate volume name conforms to DNS-1123 label format
-	if errs := utilvalidation.IsDNS1123Label(opts.Name); len(errs) > 0 {
-		return fmt.Errorf("invalid volume name %q: %s", opts.Name, strings.Join(errs, ", "))
-	}
-	// Validate AccessMode
-	if err := validateAccessMode(opts.AccessMode); err != nil {
-		return fmt.Errorf("invalid access mode: %w", err)
-	}
-	// Validate StorageClass
-	if err := i.validateStorageClass(ctx, opts.StorageClass); err != nil {
-		return fmt.Errorf("invalid storage class: %w", err)
-	}
-	return nil
-}
-
-// validateAccessMode checks if the access mode is valid.
-func validateAccessMode(accessMode string) error {
-	switch accessMode {
-	case string(corev1.ReadWriteOnce), string(corev1.ReadOnlyMany), string(corev1.ReadWriteMany), string(corev1.ReadWriteOncePod):
-		return nil
-	default:
-		return fmt.Errorf("unsupported access mode %q, must be one of: ReadWriteOnce, ReadOnlyMany, ReadWriteMany, ReadWriteOncePod", accessMode)
-	}
-}
-
-// validateStorageClass checks if the StorageClass exists and uses Immediate binding mode.
-func (i *Infra) validateStorageClass(ctx context.Context, storageClassName string) error {
-	// StorageClass is a cluster-scoped resource, no namespace needed
-	sc := &storagev1.StorageClass{}
-	err := i.Cache.GetClient().Get(ctx, client.ObjectKey{Name: storageClassName}, sc)
-	if err != nil {
-		if apierrors.IsNotFound(err) {
-			return fmt.Errorf("storage class %q not found", storageClassName)
-		}
-		return fmt.Errorf("failed to get storage class %q: %w", storageClassName, err)
-	}
-
-	// Check volume binding mode
-	if sc.VolumeBindingMode != nil && *sc.VolumeBindingMode == storagev1.VolumeBindingWaitForFirstConsumer {
-		return fmt.Errorf("storage class %q uses WaitForFirstConsumer binding mode, which is not supported. Please use a StorageClass with Immediate binding mode", storageClassName)
-	}
-
 	return nil
 }

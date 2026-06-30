@@ -94,7 +94,7 @@ func TestCreateVolume(t *testing.T) {
 			errorCode:   http.StatusBadRequest,
 		},
 		{
-			name: "name is required",
+			name: "empty name fails DNS-1123 validation",
 			setupReq: func(t *testing.T) *http.Request {
 				req := NewRequest(t, nil, models.NewVolumeRequest{
 					Name: "",
@@ -104,7 +104,7 @@ func TestCreateVolume(t *testing.T) {
 				req.Header.Set(models.ExtensionHeaderVolumeAccessMode, "ReadWriteOnce")
 				return req
 			},
-			expectError: "name is required",
+			expectError: "invalid volume name",
 			errorCode:   http.StatusBadRequest,
 		},
 		{
@@ -144,8 +144,8 @@ func TestCreateVolume(t *testing.T) {
 				req.Header.Set(models.ExtensionHeaderVolumeAccessMode, "InvalidMode")
 				return req
 			},
-			expectError: "Failed to create volume",
-			errorCode:   http.StatusInternalServerError,
+			expectError: "unsupported access mode",
+			errorCode:   http.StatusBadRequest,
 		},
 		{
 			name: "invalid wait bound seconds",
@@ -173,8 +173,8 @@ func TestCreateVolume(t *testing.T) {
 				req.Header.Set(models.ExtensionHeaderVolumeAccessMode, "ReadWriteOnce")
 				return req
 			},
-			expectError: "Failed to create volume",
-			errorCode:   http.StatusInternalServerError,
+			expectError: "storage class \"non-existent\" not found",
+			errorCode:   http.StatusBadRequest,
 		},
 		{
 			name: "invalid volume name with uppercase",
@@ -187,8 +187,8 @@ func TestCreateVolume(t *testing.T) {
 				req.Header.Set(models.ExtensionHeaderVolumeAccessMode, "ReadWriteOnce")
 				return req
 			},
-			expectError: "Failed to create volume",
-			errorCode:   http.StatusInternalServerError,
+			expectError: "invalid volume name",
+			errorCode:   http.StatusBadRequest,
 		},
 		{
 			name: "invalid volume name with special characters",
@@ -201,8 +201,8 @@ func TestCreateVolume(t *testing.T) {
 				req.Header.Set(models.ExtensionHeaderVolumeAccessMode, "ReadWriteOnce")
 				return req
 			},
-			expectError: "Failed to create volume",
-			errorCode:   http.StatusInternalServerError,
+			expectError: "invalid volume name",
+			errorCode:   http.StatusBadRequest,
 		},
 		{
 			name: "invalid volume name too long",
@@ -215,8 +215,8 @@ func TestCreateVolume(t *testing.T) {
 				req.Header.Set(models.ExtensionHeaderVolumeAccessMode, "ReadWriteOnce")
 				return req
 			},
-			expectError: "Failed to create volume",
-			errorCode:   http.StatusInternalServerError,
+			expectError: "invalid volume name",
+			errorCode:   http.StatusBadRequest,
 		},
 	}
 

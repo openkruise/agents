@@ -17,13 +17,20 @@ limitations under the License.
 package e2b
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
+	utilvalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/klog/v2"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
@@ -52,7 +59,7 @@ func (sc *Controller) CreateVolume(r *http.Request) (web.ApiResponse[*models.Vol
 	}
 
 	// Parse request body and headers
-	req, parseErr := sc.parseCreateVolumeRequest(r)
+	req, parseErr := sc.parseCreateVolumeRequest(ctx, r)
 	if parseErr != nil {
 		return web.ApiResponse[*models.Volume]{}, &web.ApiError{
 			Code:    http.StatusBadRequest,
@@ -94,7 +101,7 @@ func (sc *Controller) CreateVolume(r *http.Request) (web.ApiResponse[*models.Vol
 	}, nil
 }
 
-func (sc *Controller) parseCreateVolumeRequest(r *http.Request) (models.NewVolumeRequest, error) {
+func (sc *Controller) parseCreateVolumeRequest(ctx context.Context, r *http.Request) (models.NewVolumeRequest, error) {
 	var request models.NewVolumeRequest
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 		return request, fmt.Errorf("invalid request body: %w", err)
@@ -104,24 +111,60 @@ func (sc *Controller) parseCreateVolumeRequest(r *http.Request) (models.NewVolum
 		return request, fmt.Errorf("bad extension param: %w", err)
 	}
 
-	if err := validateVolumeRequest(request); err != nil {
+	if err := sc.validateVolumeRequest(ctx, request); err != nil {
 		return request, err
 	}
 	return request, nil
 }
 
-func validateVolumeRequest(request models.NewVolumeRequest) error {
-	if request.Name == "" {
-		return fmt.Errorf("name is required")
+func (sc *Controller) validateVolumeRequest(ctx context.Context, request models.NewVolumeRequest) error {
+	// Validate volume name conforms to DNS-1123 label format
+	if errs := utilvalidation.IsDNS1123Label(request.Name); len(errs) > 0 {
+		return fmt.Errorf("invalid volume name %q: %s", request.Name, strings.Join(errs, ", "))
 	}
-	if request.Extensions.StorageClass == "" {
-		return fmt.Errorf("storage class is required")
-	}
-	if request.Extensions.AccessMode == "" {
-		return fmt.Errorf("access mode is required")
+	// Validate AccessMode
+	if err := validateAccessMode(request.Extensions.AccessMode); err != nil {
+		return err
 	}
 	if request.Extensions.StorageSize.IsZero() || request.Extensions.StorageSize.Cmp(resource.Quantity{}) < 0 {
 		return fmt.Errorf("invalid storage size: must be a positive value")
+	}
+	// Validate StorageClass
+	if err := sc.validateStorageClass(ctx, request.Extensions.StorageClass); err != nil {
+		return fmt.Errorf("invalid storage class: %w", err)
+	}
+	return nil
+}
+
+// validateAccessMode checks if the access mode is valid.
+func validateAccessMode(accessMode string) error {
+	switch accessMode {
+	case "":
+		return fmt.Errorf("access mode is required")
+	case string(corev1.ReadWriteOnce), string(corev1.ReadOnlyMany), string(corev1.ReadWriteMany), string(corev1.ReadWriteOncePod):
+		return nil
+	default:
+		return fmt.Errorf("unsupported access mode %q, must be one of: ReadWriteOnce, ReadOnlyMany, ReadWriteMany, ReadWriteOncePod", accessMode)
+	}
+}
+
+// validateStorageClass checks if the StorageClass exists and uses Immediate binding mode.
+func (sc *Controller) validateStorageClass(ctx context.Context, storageClassName string) error {
+	if storageClassName == "" {
+		return fmt.Errorf("storage class is required")
+	}
+	// StorageClass is a cluster-scoped resource, no namespace needed
+	storageClass := &storagev1.StorageClass{}
+	err := sc.manager.GetInfra().GetCache().GetClient().Get(ctx, client.ObjectKey{Name: storageClassName}, storageClass)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Errorf("storage class %q not found", storageClassName)
+		}
+		return fmt.Errorf("failed to get storage class %q: %w", storageClassName, err)
+	}
+	// Check volume binding mode
+	if storageClass.VolumeBindingMode != nil && *storageClass.VolumeBindingMode == storagev1.VolumeBindingWaitForFirstConsumer {
+		return fmt.Errorf("storage class %q uses WaitForFirstConsumer binding mode, which is not supported. Please use a StorageClass with Immediate binding mode", storageClassName)
 	}
 	return nil
 }

@@ -34,34 +34,6 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 )
 
-func TestValidateAccessMode(t *testing.T) {
-	tests := []struct {
-		name        string
-		accessMode  string
-		expectError string
-	}{
-		{name: "ReadWriteOnce is valid", accessMode: "ReadWriteOnce", expectError: ""},
-		{name: "ReadOnlyMany is valid", accessMode: "ReadOnlyMany", expectError: ""},
-		{name: "ReadWriteMany is valid", accessMode: "ReadWriteMany", expectError: ""},
-		{name: "ReadWriteOncePod is valid", accessMode: "ReadWriteOncePod", expectError: ""},
-		{name: "invalid access mode", accessMode: "InvalidMode", expectError: "unsupported access mode"},
-		{name: "empty access mode", accessMode: "", expectError: "unsupported access mode"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := validateAccessMode(tt.accessMode)
-			if tt.expectError == "" {
-				assert.NoError(t, err)
-			} else {
-				assert.Error(t, err)
-				assert.Contains(t, err.Error(), tt.expectError)
-			}
-		})
-	}
-}
-
-// --- validateCreateVolumeOptions tests (needs Infra with Cache for StorageClass validation) ---
-
 func TestValidateCreateVolumeOptions(t *testing.T) {
 	c, _, err := cachetest.NewTestCache(t)
 	require.NoError(t, err)
@@ -116,90 +88,6 @@ func TestValidateCreateVolumeOptions(t *testing.T) {
 			},
 			expectError: "",
 		},
-		{
-			name: "invalid volume name uppercase",
-			opts: infra.CreateVolumeOptions{
-				Namespace:    "sandbox-system",
-				Name:         "Test-Volume-UPPERCASE",
-				UserID:       "user-1",
-				StorageSize:  resource.MustParse("1Gi"),
-				StorageClass: "standard",
-				AccessMode:   "ReadWriteOnce",
-			},
-			expectError: "invalid volume name",
-		},
-		{
-			name: "invalid volume name special chars",
-			opts: infra.CreateVolumeOptions{
-				Namespace:    "sandbox-system",
-				Name:         "test@volume#name",
-				UserID:       "user-1",
-				StorageSize:  resource.MustParse("1Gi"),
-				StorageClass: "standard",
-				AccessMode:   "ReadWriteOnce",
-			},
-			expectError: "invalid volume name",
-		},
-		{
-			name: "invalid volume name too long (exceeds 63 chars)",
-			opts: infra.CreateVolumeOptions{
-				Namespace:    "sandbox-system",
-				Name:         "this-name-is-way-too-long-for-a-dns1123-label-because-it-exceeds-sixty-three-characters",
-				UserID:       "user-1",
-				StorageSize:  resource.MustParse("1Gi"),
-				StorageClass: "standard",
-				AccessMode:   "ReadWriteOnce",
-			},
-			expectError: "must be no more than 63 characters",
-		},
-		{
-			name: "empty volume name",
-			opts: infra.CreateVolumeOptions{
-				Namespace:    "sandbox-system",
-				Name:         "",
-				UserID:       "user-1",
-				StorageSize:  resource.MustParse("1Gi"),
-				StorageClass: "standard",
-				AccessMode:   "ReadWriteOnce",
-			},
-			expectError: "invalid volume name",
-		},
-		{
-			name: "invalid access mode",
-			opts: infra.CreateVolumeOptions{
-				Namespace:    "sandbox-system",
-				Name:         "test-volume",
-				UserID:       "user-1",
-				StorageSize:  resource.MustParse("1Gi"),
-				StorageClass: "standard",
-				AccessMode:   "InvalidMode",
-			},
-			expectError: "invalid access mode",
-		},
-		{
-			name: "storage class not found",
-			opts: infra.CreateVolumeOptions{
-				Namespace:    "sandbox-system",
-				Name:         "test-volume",
-				UserID:       "user-1",
-				StorageSize:  resource.MustParse("1Gi"),
-				StorageClass: "non-existent",
-				AccessMode:   "ReadWriteOnce",
-			},
-			expectError: "storage class \"non-existent\" not found",
-		},
-		{
-			name: "storage class with WaitForFirstConsumer binding mode",
-			opts: infra.CreateVolumeOptions{
-				Namespace:    "sandbox-system",
-				Name:         "test-volume",
-				UserID:       "user-1",
-				StorageSize:  resource.MustParse("1Gi"),
-				StorageClass: "wait-first-consumer",
-				AccessMode:   "ReadWriteOnce",
-			},
-			expectError: "WaitForFirstConsumer binding mode",
-		},
 	}
 
 	for _, tt := range tests {
@@ -219,8 +107,6 @@ func TestValidateCreateVolumeOptions(t *testing.T) {
 	}
 }
 
-// --- CreateVolume business logic tests ---
-
 func TestCreateVolume(t *testing.T) {
 	c, fakeClient, err := cachetest.NewTestCache(t)
 	require.NoError(t, err)
@@ -235,20 +121,6 @@ func TestCreateVolume(t *testing.T) {
 	require.NoError(t, fakeClient.Create(context.Background(), sc))
 
 	i := &Infra{Cache: c}
-
-	t.Run("validation fails for invalid name", func(t *testing.T) {
-		opts := infra.CreateVolumeOptions{
-			Namespace:    "sandbox-system",
-			Name:         "INVALID-NAME",
-			UserID:       "user-1",
-			StorageSize:  resource.MustParse("1Gi"),
-			StorageClass: "standard",
-			AccessMode:   "ReadWriteOnce",
-		}
-		_, err := i.CreateVolume(context.Background(), opts)
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "validation failed")
-	})
 
 	t.Run("PVC already exists owned by different user", func(t *testing.T) {
 		// Pre-create a PVC owned by a different user
@@ -366,8 +238,6 @@ func TestCreateVolume(t *testing.T) {
 		assert.Contains(t, err.Error(), "timed out")
 	})
 }
-
-// --- GetVolume business logic tests ---
 
 func TestGetVolume(t *testing.T) {
 	c, fakeClient, err := cachetest.NewTestCache(t)
@@ -491,8 +361,6 @@ func TestGetVolume(t *testing.T) {
 	})
 }
 
-// --- DeleteVolume business logic tests ---
-
 func TestDeleteVolume(t *testing.T) {
 	c, fakeClient, err := cachetest.NewTestCache(t)
 	require.NoError(t, err)
@@ -600,8 +468,6 @@ func TestDeleteVolume(t *testing.T) {
 		assert.NoError(t, err)
 	})
 }
-
-// --- ListVolumes business logic tests ---
 
 func TestListVolumes(t *testing.T) {
 	c, fakeClient, err := cachetest.NewTestCache(t)
