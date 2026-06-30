@@ -69,6 +69,28 @@ func TestBreaker(t *testing.T) {
 		require.Equal(t, 5, backend.acquireCalls)
 	})
 
+	for _, tt := range []struct {
+		name string
+		call func(t *testing.T, b *BreakerBackend, backend *breakerTestBackend)
+	}{
+		{
+			name: "release failure opens breaker and acquire fast-fails",
+			call: func(t *testing.T, b *BreakerBackend, backend *breakerTestBackend) {
+				b.n = 1
+				backend.releaseErr = errors.New("dial tcp")
+				require.ErrorIs(t, b.Release(context.Background(), "K", "l1"), ErrBackendUnavailable)
+				require.Equal(t, 1, backend.releaseCalls)
+				require.ErrorIs(t, b.Acquire(context.Background(), AcquireParams{User: "K", LockString: "l2"}), ErrBackendUnavailable)
+				require.Equal(t, 0, backend.acquireCalls)
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			backend := &breakerTestBackend{}
+			tt.call(t, NewBreakerBackend(backend, 1, 30*time.Second), backend)
+		})
+	}
+
 	t.Run("failed half-open probe reopens full window", func(t *testing.T) {
 		clk := &breakerTestClock{t: time.Unix(0, 0)}
 		backend := &breakerTestBackend{acquireErr: errors.New("dial tcp")}
@@ -95,7 +117,7 @@ func TestBreaker(t *testing.T) {
 		require.Equal(t, 30*time.Second, b.d)
 	})
 
-	t.Run("maintenance methods bypass the acquire breaker", func(t *testing.T) {
+	t.Run("list and cleanup bypass the open breaker", func(t *testing.T) {
 		clk := &breakerTestClock{t: time.Unix(0, 0)}
 		backend := &breakerTestBackend{
 			acquireErr:     errors.New("dial tcp"),
@@ -109,11 +131,6 @@ func TestBreaker(t *testing.T) {
 		ctx := context.Background()
 		require.ErrorIs(t, b.Acquire(ctx, AcquireParams{User: "K", LockString: "l0"}), ErrBackendUnavailable)
 		require.Equal(t, 1, backend.acquireCalls)
-
-		require.ErrorIs(t, b.Release(ctx, "K", "l1"), ErrBackendUnavailable)
-		require.Equal(t, 1, backend.releaseCalls)
-		require.ErrorIs(t, b.Release(ctx, "K", "l2"), ErrBackendUnavailable)
-		require.Equal(t, 2, backend.releaseCalls)
 
 		_, err := b.ListEntries(ctx, "K")
 		require.ErrorIs(t, err, ErrBackendUnavailable)

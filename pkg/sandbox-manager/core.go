@@ -230,10 +230,12 @@ func (m *SandboxManager) InitQuota(ctx context.Context, opts config.QuotaOptions
 	})
 	redisBackend := quota.NewRedisBackend(redisClient, opts.OperationTimeout)
 	hotBackend := quota.NewBreakerBackend(redisBackend, opts.BreakerN, opts.BreakerD)
+	// Request admission and anti-drift events share this breaker so Redis release
+	// failures trip request-path fail-open behavior instead of drifting silently.
 	driver := quota.NewAntiDriftDriver(quota.AntiDriftConfig{
 		Interval: opts.AntiDriftInterval,
 		Grace:    opts.AntiDriftGrace,
-	}, m, subjects, m.infra.GetCache(), redisBackend)
+	}, m, subjects, m.infra.GetCache(), hotBackend)
 	registration, err := m.infra.GetCache().AddSandboxEventHandler(ctx, driver.SandboxEventHandler())
 	if err != nil {
 		_ = redisClient.Close()

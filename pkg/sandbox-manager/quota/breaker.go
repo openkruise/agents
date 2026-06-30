@@ -66,26 +66,18 @@ func NewBreakerBackend(inner Backend, n int, d time.Duration) *BreakerBackend {
 }
 
 func (b *BreakerBackend) Acquire(ctx context.Context, p AcquireParams) (err error) {
-	if err = b.beforeCall(); err != nil {
-		return err
-	}
-	defer func() {
-		// Keep breaker state consistent if the wrapped backend panics; rethrow below.
-		if recovered := recover(); recovered != nil {
-			b.afterCall(fmt.Errorf("%w: panic in quota backend acquire", ErrBackendUnavailable))
-			panic(recovered)
-		}
-		b.afterCall(err)
-		err = breakerError(err)
-	}()
-	err = b.inner.Acquire(ctx, p)
-	return err
+	return b.call("acquire", func() error {
+		return b.inner.Acquire(ctx, p)
+	})
 }
 
 func (b *BreakerBackend) Release(ctx context.Context, user, lockString string) error {
-	return breakerError(b.inner.Release(ctx, user, lockString))
+	return b.call("release", func() error {
+		return b.inner.Release(ctx, user, lockString)
+	})
 }
 
+// ListEntries and Cleanup intentionally bypass the breaker; Cleanup must keep trying Redis so API-key deletion can clear leaked quota state.
 func (b *BreakerBackend) ListEntries(ctx context.Context, user string) (map[string]Entry, error) {
 	entries, err := b.inner.ListEntries(ctx, user)
 	return entries, breakerError(err)
@@ -93,6 +85,23 @@ func (b *BreakerBackend) ListEntries(ctx context.Context, user string) (map[stri
 
 func (b *BreakerBackend) Cleanup(ctx context.Context, user string) error {
 	return breakerError(b.inner.Cleanup(ctx, user))
+}
+
+func (b *BreakerBackend) call(op string, fn func() error) (err error) {
+	if err = b.beforeCall(); err != nil {
+		return err
+	}
+	defer func() {
+		// Keep breaker state consistent if the wrapped backend panics; rethrow below.
+		if recovered := recover(); recovered != nil {
+			b.afterCall(fmt.Errorf("%w: panic in quota backend %s", ErrBackendUnavailable, op))
+			panic(recovered)
+		}
+		b.afterCall(err)
+		err = breakerError(err)
+	}()
+	err = fn()
+	return err
 }
 
 func (b *BreakerBackend) beforeCall() error {
