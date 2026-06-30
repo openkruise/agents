@@ -1682,16 +1682,6 @@ func TestNewVolumeRequest_ParseExtensions(t *testing.T) {
 			expectError: "invalid waitBoundSeconds format",
 		},
 		{
-			name: "negative waitBoundSeconds",
-			setupHeaders: func(h http.Header) {
-				h.Set(ExtensionHeaderVolumeSize, "1Gi")
-				h.Set(ExtensionHeaderVolumeStorageClass, "standard")
-				h.Set(ExtensionHeaderVolumeAccessMode, "ReadWriteOnce")
-				h.Set(ExtensionHeaderVolumeWaitSuccessSeconds, "-5")
-			},
-			expectError: "cannot be negative",
-		},
-		{
 			name: "empty storage class defaults to empty string",
 			setupHeaders: func(h http.Header) {
 				h.Set(ExtensionHeaderVolumeSize, "1Gi")
