@@ -17,12 +17,15 @@ limitations under the License.
 package filter
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	"github.com/envoyproxy/envoy/contrib/golang/common/go/api"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	ctrl "sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/cache/cachetest"
@@ -1391,4 +1394,208 @@ func TestDecodeHeadersWakeOnTrafficCacheFallbackNoAnnotation(t *testing.T) {
 	assert.Equal(t, api.LocalReply, status)
 	assert.Equal(t, 502, mockCallbacks.decoderCallbacks.replyStatusCode)
 	assert.Equal(t, "sandbox_not_running", mockCallbacks.decoderCallbacks.replyDetails)
+}
+
+// TestIsEnvoyStreamGonePanic tests the pure function that detects known
+// Envoy panic messages indicating the stream has been finished or the
+// filter destroyed.
+func TestIsEnvoyStreamGonePanic(t *testing.T) {
+	tests := []struct {
+		name      string
+		recovered interface{}
+		want      bool
+	}{
+		{
+			name:      "request finished panic",
+			recovered: "request has been finished",
+			want:      true,
+		},
+		{
+			name:      "filter destroyed panic",
+			recovered: "golang filter has been destroyed",
+			want:      true,
+		},
+		{
+			name:      "partial match request finished",
+			recovered: "error: request has been finished unexpectedly",
+			want:      true,
+		},
+		{
+			name:      "unrelated panic message",
+			recovered: "something else went wrong",
+			want:      false,
+		},
+		{
+			name:      "non-string panic",
+			recovered: 42,
+			want:      false,
+		},
+		{
+			name:      "nil panic",
+			recovered: nil,
+			want:      false,
+		},
+		{
+			name:      "empty string",
+			recovered: "",
+			want:      false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isEnvoyStreamGonePanic(tt.recovered)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// TestDestroyCancelsContext verifies that Destroy() cancels the in-flight
+// wake context, causing the async goroutine to exit via context.Canceled.
+func TestDestroyCancelsContext(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.EnableWakeOnTraffic = true
+	mockCallbacks := newMockFilterCallbackHandler()
+	filter := &sandboxFilter{callbacks: mockCallbacks, config: cfg, adapter: defaultTestAdapter()}
+
+	// Simulate the state after DecodeHeaders launches async wake
+	ctx, cancel := context.WithCancel(context.Background())
+	filter.mu.Lock()
+	filter.cancel = cancel
+	filter.mu.Unlock()
+
+	// Verify context is not yet canceled
+	select {
+	case <-ctx.Done():
+		t.Fatal("context should not be canceled before Destroy")
+	default:
+	}
+
+	// Call Destroy
+	filter.Destroy()
+
+	// Verify context is now canceled
+	select {
+	case <-ctx.Done():
+		// expected
+	default:
+		t.Fatal("context should be canceled after Destroy")
+	}
+
+	// Verify destroyed flag is set
+	filter.mu.Lock()
+	assert.True(t, filter.destroyed)
+	filter.mu.Unlock()
+}
+
+// TestWakeAndContinueSuccess verifies the async wake success path:
+// wake succeeds, route becomes Running, Continue is called with upstream
+// metadata set.
+func TestWakeAndContinueSuccess(t *testing.T) {
+	r := registry.GetRegistry()
+	defer r.Clear()
+
+	// Add paused route to registry (wake-on-traffic enabled)
+	r.Update("default--async-success", proxy.Route{
+		IP:              "10.0.0.1",
+		State:           agentsv1alpha1.SandboxStatePaused,
+		WakeOnTraffic:   true,
+		ResourceVersion: "1",
+	})
+
+	// Create a paused sandbox that will be woken
+	sbx := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "async-success",
+			Namespace: "default",
+			Annotations: map[string]string{
+				agentsv1alpha1.AnnotationWakeOnTraffic: agentsv1alpha1.True,
+			},
+			Labels: map[string]string{
+				agentsv1alpha1.LabelSandboxIsClaimed: "true",
+			},
+		},
+		Spec: agentsv1alpha1.SandboxSpec{
+			Paused: true,
+		},
+		Status: agentsv1alpha1.SandboxStatus{
+			Phase: agentsv1alpha1.SandboxPaused,
+			Conditions: []metav1.Condition{
+				{Type: string(agentsv1alpha1.SandboxConditionPaused), Status: metav1.ConditionTrue},
+			},
+			PodInfo: agentsv1alpha1.PodInfo{PodIP: "10.0.0.1"},
+		},
+	}
+
+	cacheProvider, fc, err := cachetest.NewTestCache(t)
+	if err != nil {
+		t.Fatalf("failed to create test cache: %v", err)
+	}
+	require.NoError(t, cacheProvider.Run(t.Context()))
+	t.Cleanup(func() { cacheProvider.Stop(t.Context()) })
+
+	require.NoError(t, fc.Create(t.Context(), sbx))
+	require.NoError(t, fc.Status().Update(t.Context(), sbx))
+	time.Sleep(10 * time.Millisecond)
+
+	// Set up mock to simulate successful resume
+	mockMgr := cacheProvider.GetMockManager()
+	mockMgr.AddWaitReconcileKey(sbx)
+
+	// Delay the status update to simulate async resume
+	modified := sbx.DeepCopy()
+	mergeFrom := ctrl.MergeFrom(sbx)
+	time.AfterFunc(50*time.Millisecond, func() {
+		modified.Status.Phase = agentsv1alpha1.SandboxRunning
+		modified.Status.Conditions = []metav1.Condition{
+			{Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue, Reason: "Resume"},
+		}
+		_ = fc.Status().Patch(t.Context(), modified, mergeFrom)
+		// Also update registry to Running (simulating controller reconciliation)
+		r.Update("default--async-success", proxy.Route{
+			IP:              "10.0.0.1",
+			State:           agentsv1alpha1.SandboxStateRunning,
+			ResourceVersion: "2",
+		})
+	})
+
+	wake.InitWaker(cacheProvider)
+	t.Cleanup(func() { wake.InitWaker(nil) })
+
+	cfg := DefaultConfig()
+	cfg.EnableWakeOnTraffic = true
+	cfg.WakeTimeoutSeconds = 30
+
+	done := make(chan struct{}, 1)
+	mockCallbacks := &mockFilterCallbackHandler{
+		streamInfo:       newMockStreamInfo(),
+		decoderCallbacks: &mockDecoderFilterCallbacks{done: done},
+	}
+	filter := &sandboxFilter{callbacks: mockCallbacks, config: cfg, adapter: defaultTestAdapter()}
+
+	// Launch async wake
+	header := newMockRequestHeaderMap()
+	header.Set(DefaultSandboxHeaderName, "default--async-success")
+
+	status := filter.DecodeHeaders(header, true)
+	assert.Equal(t, api.Running, status)
+
+	// Wait for async completion
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for async wake completion")
+	}
+
+	// Verify Continue was called (not SendLocalReply)
+	assert.True(t, mockCallbacks.decoderCallbacks.continueCalled,
+		"Continue should be called on successful wake")
+	assert.Equal(t, api.Continue, mockCallbacks.decoderCallbacks.continueStatus)
+	assert.False(t, mockCallbacks.decoderCallbacks.sendLocalReplyCalled,
+		"SendLocalReply should not be called on successful wake")
+
+	// Verify upstream metadata was set
+	metadata := mockCallbacks.streamInfo.dynamicMetadata.data["envoy.lb.original_dst"]
+	assert.NotNil(t, metadata)
+	assert.Equal(t, "10.0.0.1:49983", metadata["host"])
 }
