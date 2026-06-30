@@ -29,26 +29,35 @@ const (
 	defaultBreakerD = 30 * time.Second
 )
 
-type breakerBackend struct {
+// BreakerBackend wraps a Backend and fails fast after repeated acquire failures.
+type BreakerBackend struct {
+	// inner is the backend protected by the breaker.
 	inner Backend
-	n     int
-	d     time.Duration
-	now   func() time.Time
+	// n is the number of consecutive failures required to open the breaker.
+	n int
+	// d is how long the breaker stays open before a half-open probe.
+	d time.Duration
+	// now returns the current time and is replaceable in tests.
+	now func() time.Time
 
-	mu             sync.Mutex
+	// mu protects breaker state.
+	mu sync.Mutex
+	// consecutiveErr counts backend failures since the last successful acquire.
 	consecutiveErr int
-	openedUntil    time.Time
-	halfOpen       bool
+	// openedUntil marks the end of the open period; acquire calls fail fast before it.
+	openedUntil time.Time
+	// halfOpen means the open period ended and one probe acquire is checking recovery.
+	halfOpen bool
 }
 
-func NewBreakerBackend(inner Backend, n int, d time.Duration) *breakerBackend {
+func NewBreakerBackend(inner Backend, n int, d time.Duration) *BreakerBackend {
 	if n <= 0 {
 		n = defaultBreakerN
 	}
 	if d <= 0 {
 		d = defaultBreakerD
 	}
-	return &breakerBackend{
+	return &BreakerBackend{
 		inner: inner,
 		n:     n,
 		d:     d,
@@ -56,11 +65,12 @@ func NewBreakerBackend(inner Backend, n int, d time.Duration) *breakerBackend {
 	}
 }
 
-func (b *breakerBackend) Acquire(ctx context.Context, p AcquireParams) (err error) {
+func (b *BreakerBackend) Acquire(ctx context.Context, p AcquireParams) (err error) {
 	if err = b.beforeCall(); err != nil {
 		return err
 	}
 	defer func() {
+		// Keep breaker state consistent if the wrapped backend panics; rethrow below.
 		if recovered := recover(); recovered != nil {
 			b.afterCall(fmt.Errorf("%w: panic in quota backend acquire", ErrBackendUnavailable))
 			panic(recovered)
@@ -72,41 +82,46 @@ func (b *breakerBackend) Acquire(ctx context.Context, p AcquireParams) (err erro
 	return err
 }
 
-func (b *breakerBackend) Release(ctx context.Context, user, lockString string) error {
+func (b *BreakerBackend) Release(ctx context.Context, user, lockString string) error {
 	return breakerError(b.inner.Release(ctx, user, lockString))
 }
 
-func (b *breakerBackend) ListEntries(ctx context.Context, user string) (map[string]Entry, error) {
+func (b *BreakerBackend) ListEntries(ctx context.Context, user string) (map[string]Entry, error) {
 	entries, err := b.inner.ListEntries(ctx, user)
 	return entries, breakerError(err)
 }
 
-func (b *breakerBackend) Cleanup(ctx context.Context, user string) error {
+func (b *BreakerBackend) Cleanup(ctx context.Context, user string) error {
 	return breakerError(b.inner.Cleanup(ctx, user))
 }
 
-func (b *breakerBackend) beforeCall() error {
+func (b *BreakerBackend) beforeCall() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	if b.now().Before(b.openedUntil) {
+		// breaker is open, fail fast
 		return ErrBackendUnavailable
 	}
 	if !b.openedUntil.IsZero() {
+		// 1. breaker is open but may be about to close
 		if b.halfOpen {
+			// 3. the probe acquire failed, breaker stays open
 			return ErrBackendUnavailable
 		}
+		// 2.1. allow only one probe acquire to check recovery
 		b.halfOpen = true
 		breakerStateTotal.WithLabelValues("half_open").Inc()
 	}
 	return nil
 }
 
-func (b *breakerBackend) afterCall(err error) {
+func (b *BreakerBackend) afterCall(err error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	if err == nil || errors.Is(err, ErrQuotaExceeded) {
+		// acquire succeeded (no error or quota exceeded), close the breaker
 		if !b.openedUntil.IsZero() || b.halfOpen {
 			breakerStateTotal.WithLabelValues("closed").Inc()
 		}
@@ -117,20 +132,20 @@ func (b *breakerBackend) afterCall(err error) {
 	}
 
 	if b.halfOpen {
+		// 2.2. the probe acquire failed, re-open the breaker
 		b.open()
 		return
 	}
 
+	// the breaker opens for too many failures
 	b.consecutiveErr++
 	if b.consecutiveErr < b.n {
 		return
 	}
-
-	// ponytail: single breaker for the one Redis backend; split per shard only if multi-Redis arrives.
 	b.open()
 }
 
-func (b *breakerBackend) open() {
+func (b *BreakerBackend) open() {
 	b.consecutiveErr = 0
 	b.halfOpen = false
 	b.openedUntil = b.now().Add(b.d)

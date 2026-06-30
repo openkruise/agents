@@ -20,7 +20,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
@@ -352,48 +351,6 @@ func marshalLimits(limits map[quotaspec.QuotaDimension]map[quotaspec.QuotaScope]
 		return "", err
 	}
 	return string(raw), nil
-}
-
-func normalizeFootprint(in map[quotaspec.QuotaDimension]int64) map[quotaspec.QuotaDimension]int64 {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make(map[quotaspec.QuotaDimension]int64, len(in))
-	for dim, amount := range in {
-		if dim != quotaspec.DimLimitsCPU && dim != quotaspec.DimLimitsMemory {
-			continue
-		}
-		if amount == 0 {
-			continue
-		}
-		out[dim] = amount
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
-}
-
-func normalizeScopes(in []quotaspec.QuotaScope) []quotaspec.QuotaScope {
-	if len(in) == 0 {
-		return nil
-	}
-	seen := make(map[quotaspec.QuotaScope]struct{}, len(in))
-	out := make([]quotaspec.QuotaScope, 0, len(in))
-	for _, scope := range in {
-		if scope == quotaspec.ScopeAll {
-			continue
-		}
-		if _, ok := seen[scope]; ok {
-			continue
-		}
-		seen[scope] = struct{}{}
-		out = append(out, scope)
-	}
-	sort.Slice(out, func(i, j int) bool {
-		return out[i] < out[j]
-	})
-	return out
 }
 
 func redisKeys(user string) []string {
