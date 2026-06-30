@@ -106,11 +106,15 @@ func ValidateAndInitClaimOptions(opts infra.ClaimSandboxOptions) (infra.ClaimSan
 	return opts, nil
 }
 
-func chooseAttemptLockString(opts infra.ClaimSandboxOptions) string {
-	if opts.Admission != nil || opts.LockString == "" {
+// chooseLockString returns the lock string to use for the current attempt.
+// When admission is configured (each retry needs a fresh lockString for
+// correct acquire/release pairing) or no lockString was supplied, it
+// generates a new one; otherwise it reuses the caller-provided value.
+func chooseLockString(admission *infra.SandboxAdmission, lockString string) string {
+	if admission != nil || lockString == "" {
 		return utils.NewLockString()
 	}
-	return opts.LockString
+	return lockString
 }
 
 func releaseAdmission(ctx context.Context, admission *infra.SandboxAdmission, lockString string) {
@@ -172,8 +176,7 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 	}
 
 	var pickedSandboxKey string
-	attemptLockString := chooseAttemptLockString(opts)
-	opts.LockString = attemptLockString
+	opts.LockString = chooseLockString(opts.Admission, opts.LockString)
 	defer func() {
 		freeWorkerOnce()
 		if err != nil {
@@ -185,13 +188,13 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 		}
 		metrics.LastError = err
 		log.Info("try claim sandbox result", "metrics", metrics.String())
-		clearFailedSandbox(ctx, claimed, err, opts.ReserveFailedSandboxFor, opts.Admission, attemptLockString)
+		clearFailedSandbox(ctx, claimed, err, opts.ReserveFailedSandboxFor, opts.Admission, opts.LockString)
 	}()
 	// Step 1: Pick an available sandbox
 	var sbx *Sandbox
 	var lockType infra.LockType
 	pickStart := time.Now()
-	sbx, lockType, err = pickAnAvailableSandbox(ctx, opts, pickCache, cache, createLimiter)
+	sbx, lockType, err = pickAnAvailableSandbox(ctx, opts, pickCache, cache)
 	if err != nil {
 		log.Error(err, "failed to select available sandbox")
 		return
@@ -223,7 +226,7 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 		return
 	}
 
-	if err = lockPickedSandbox(ctx, sbx, lockType, opts, cache, attemptLockString); err != nil {
+	if err = lockPickedSandbox(ctx, sbx, lockType, opts, cache); err != nil {
 		return
 	}
 	// The picked sandbox key may be changed after lock, for example, when lockType is LockTypeCreate
@@ -264,12 +267,12 @@ func acquireClaimWorker(ctx context.Context, claimLockChannel chan struct{}) (fu
 }
 
 func lockPickedSandbox(ctx context.Context, sbx *Sandbox, lockType infra.LockType, opts infra.ClaimSandboxOptions,
-	cache infracache.Provider, attemptLockString string) error {
+	cache infracache.Provider) error {
 	log := klog.FromContext(ctx)
 	admitted := false
 	if opts.Admission != nil && opts.Admission.Acquire != nil {
-		if err := opts.Admission.Acquire(ctx, attemptLockString, sbx.GetResource()); err != nil {
-			log.Error(err, "failed to acquire sandbox admission", "lockString", attemptLockString)
+		if err := opts.Admission.Acquire(ctx, opts.LockString, sbx.GetResource()); err != nil {
+			log.Error(err, "failed to acquire sandbox admission", "lockString", opts.LockString)
 			return err
 		}
 		admitted = true
@@ -281,7 +284,7 @@ func lockPickedSandbox(ctx context.Context, sbx *Sandbox, lockType infra.LockTyp
 	}
 	log.Error(err, "failed to lock sandbox")
 	if admitted && shouldReleaseAdmissionAfterLockError(err) {
-		releaseAdmission(ctx, opts.Admission, attemptLockString)
+		releaseAdmission(ctx, opts.Admission, opts.LockString)
 	}
 	if apierrors.IsConflict(err) {
 		expectations.ResourceVersionExpectationExpect(&metav1.ObjectMeta{
@@ -469,7 +472,7 @@ func getPickFailureKey(sbx *v1alpha1.Sandbox) string {
 	return getPickKey(sbx)
 }
 
-func pickAnAvailableSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCache *sync.Map, cache infracache.Provider, limiter *rate.Limiter) (*Sandbox, infra.LockType, error) {
+func pickAnAvailableSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCache *sync.Map, cache infracache.Provider) (*Sandbox, infra.LockType, error) {
 	template, cnt := opts.Template, opts.CandidateCounts
 	ctx = logs.Extend(ctx, "action", "pickAnAvailableSandbox")
 	log := klog.FromContext(ctx).WithValues("template", template).V(utils.DebugLogLevel)
@@ -480,7 +483,7 @@ func pickAnAvailableSandbox(ctx context.Context, opts infra.ClaimSandboxOptions,
 	if len(objects) == 0 {
 		if opts.CreateOnNoStock {
 			log.Info("will create a new sandbox", "reason", "NoStock")
-			return newSandboxFromSandboxSet(ctx, opts, cache, limiter)
+			return newSandboxFromSandboxSet(ctx, opts, cache)
 		}
 		return nil, "", NoAvailableError(template, "no stock")
 	}
@@ -575,7 +578,7 @@ func pickAnAvailableSandbox(ctx context.Context, opts infra.ClaimSandboxOptions,
 	// Step 3: create new sandbox
 	if opts.CreateOnNoStock {
 		log.Info("will create a new sandbox")
-		return newSandboxFromSandboxSet(ctx, opts, cache, limiter)
+		return newSandboxFromSandboxSet(ctx, opts, cache)
 	}
 	return nil, "", NoAvailableError(template, pickErr.Error())
 }
@@ -636,7 +639,7 @@ func issueSecurityToken(ctx context.Context, sbx *Sandbox, opts *infra.SecurityT
 
 var FilteredAnnotationsOnCreation []string
 
-func newSandboxFromSandboxSet(ctx context.Context, opts infra.ClaimSandboxOptions, cache infracache.Provider, _ *rate.Limiter) (*Sandbox, infra.LockType, error) {
+func newSandboxFromSandboxSet(ctx context.Context, opts infra.ClaimSandboxOptions, cache infracache.Provider) (*Sandbox, infra.LockType, error) {
 	sbs, err := cache.PickSandboxSet(ctx, infracache.PickSandboxSetOptions{Namespace: opts.Namespace, Name: opts.Template})
 	if err != nil {
 		return nil, "", NoAvailableError(opts.Template, "cannot create new sandbox: "+err.Error())

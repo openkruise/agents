@@ -4438,7 +4438,7 @@ func TestNewSandboxFromSandboxSet_TemplateRef(t *testing.T) {
 				Template: templateName,
 				User:     "test-user",
 			}
-			sbx, _, err := newSandboxFromSandboxSet(t.Context(), opts, infraInstance.Cache, nil)
+			sbx, _, err := newSandboxFromSandboxSet(t.Context(), opts, infraInstance.Cache)
 
 			if tt.wantErr != "" {
 				require.Error(t, err)

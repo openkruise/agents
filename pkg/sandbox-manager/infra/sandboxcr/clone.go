@@ -68,13 +68,6 @@ func ValidateAndInitCloneOptions(opts infra.CloneSandboxOptions) (infra.CloneSan
 	return opts, nil
 }
 
-func chooseCloneAttemptLockString(opts infra.CloneSandboxOptions) string {
-	if opts.Admission != nil || opts.LockString == "" {
-		return utils.NewLockString()
-	}
-	return opts.LockString
-}
-
 func ValidateAndInitCheckpointOptions(opts infra.CreateCheckpointOptions) infra.CreateCheckpointOptions {
 	if opts.WaitSuccessTimeout <= 0 {
 		opts.WaitSuccessTimeout = consts.DefaultWaitCheckpointTimeout
@@ -84,7 +77,7 @@ func ValidateAndInitCheckpointOptions(opts infra.CreateCheckpointOptions) infra.
 
 func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache infracache.Provider) (cloned infra.Sandbox, metrics infra.CloneMetrics, err error) {
 	log := klog.FromContext(ctx).WithValues("checkpoint", opts.CheckPointID)
-	opts.LockString = chooseCloneAttemptLockString(opts)
+	opts.LockString = chooseLockString(opts.Admission, opts.LockString)
 	admitted := false
 
 	select {
