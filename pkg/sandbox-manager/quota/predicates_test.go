@@ -18,129 +18,15 @@ package quota
 
 import (
 	"testing"
-	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
 
 	"github.com/stretchr/testify/assert"
 )
-
-func TestScopePredicates(t *testing.T) {
-	sbx := func(phase agentsv1alpha1.SandboxPhase, paused, deleting bool) *agentsv1alpha1.Sandbox {
-		s := &agentsv1alpha1.Sandbox{}
-		s.Status.Phase = phase
-		s.Spec.Paused = paused
-		if deleting {
-			now := metav1.Now()
-			s.DeletionTimestamp = &now
-		}
-		return s
-	}
-
-	tests := []struct {
-		name        string
-		sbx         *agentsv1alpha1.Sandbox
-		wantLive    bool
-		wantRunning bool
-		wantScopes  []quotaspec.QuotaScope
-	}{
-		{
-			name:        "running not paused",
-			sbx:         sbx(agentsv1alpha1.SandboxRunning, false, false),
-			wantLive:    true,
-			wantRunning: true,
-			wantScopes:  []quotaspec.QuotaScope{quotaspec.ScopeRunning},
-		},
-		{
-			name:        "running paused",
-			sbx:         sbx(agentsv1alpha1.SandboxPaused, true, false),
-			wantLive:    true,
-			wantRunning: false,
-			wantScopes:  []quotaspec.QuotaScope{},
-		},
-		{
-			name:        "pending live and running",
-			sbx:         sbx(agentsv1alpha1.SandboxPending, false, false),
-			wantLive:    true,
-			wantRunning: true,
-			wantScopes:  []quotaspec.QuotaScope{quotaspec.ScopeRunning},
-		},
-		{
-			name:        "failed still live",
-			sbx:         sbx(agentsv1alpha1.SandboxFailed, false, false),
-			wantLive:    true,
-			wantRunning: true,
-			wantScopes:  []quotaspec.QuotaScope{quotaspec.ScopeRunning},
-		},
-		{
-			name:        "terminating freed",
-			sbx:         sbx(agentsv1alpha1.SandboxTerminating, false, false),
-			wantLive:    false,
-			wantRunning: false,
-			wantScopes:  []quotaspec.QuotaScope{},
-		},
-		{
-			name:        "deletion requested freed",
-			sbx:         sbx(agentsv1alpha1.SandboxRunning, false, true),
-			wantLive:    false,
-			wantRunning: false,
-			wantScopes:  []quotaspec.QuotaScope{},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.wantLive, IsLiveForQuota(tt.sbx))
-			assert.Equal(t, tt.wantRunning, InRunningScope(tt.sbx))
-			assert.Equal(t, tt.wantScopes, ConditionalScopesOf(tt.sbx))
-		})
-	}
-}
-
-func TestFootprintOf(t *testing.T) {
-	sbx := &agentsv1alpha1.Sandbox{
-		Spec: agentsv1alpha1.SandboxSpec{
-			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
-				Template: &corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{
-							{
-								Resources: corev1.ResourceRequirements{
-									Requests: corev1.ResourceList{
-										corev1.ResourceCPU:    resource.MustParse("500m"),
-										corev1.ResourceMemory: resource.MustParse("1Gi"),
-									},
-									Limits: corev1.ResourceList{
-										corev1.ResourceCPU:    resource.MustParse("2000m"),
-										corev1.ResourceMemory: resource.MustParse("4Gi"),
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-
-	assert.Equal(t, map[quotaspec.QuotaDimension]int64{
-		quotaspec.DimLimitsCPU:    2000,
-		quotaspec.DimLimitsMemory: 4096,
-	}, FootprintOf(sbx))
-}
-
-func TestFootprintOfRoundsMemoryUpToMiB(t *testing.T) {
-	sbx := runningSandbox(time.Now(), "owner", "lock", time.Hour, 0, 0, false)
-	sbx.Spec.Template.Spec.Containers[0].Resources.Limits[corev1.ResourceMemory] = *resource.NewQuantity(1024*1024+1, resource.BinarySI)
-
-	assert.Equal(t, int64(2), FootprintOf(sbx)[quotaspec.DimLimitsMemory])
-}
 
 func TestFootprintFromResourceUsesLimits(t *testing.T) {
 	tests := []struct {

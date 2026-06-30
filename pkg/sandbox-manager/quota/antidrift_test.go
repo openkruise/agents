@@ -25,16 +25,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	toolscache "k8s.io/client-go/tools/cache"
-
-	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 )
 
 type mutablePrimary struct {
@@ -120,27 +115,31 @@ func (s *fakeSubjectLister) Load(_ context.Context, user string) (quotaspec.Subj
 	return subject, ok
 }
 
-type fakeLiveSandboxCache struct {
-	liveByOwner map[string][]*agentsv1alpha1.Sandbox
+type fakeQuotaSandboxSource struct {
+	liveByOwner map[string][]infra.QuotaSandboxSnapshot
 	healthy     bool
 	err         error
 }
 
-func (c *fakeLiveSandboxCache) ListLiveSandboxesByOwner(_ context.Context, owner string) ([]*agentsv1alpha1.Sandbox, error) {
+func (c *fakeQuotaSandboxSource) ListLiveQuotaSandboxesByOwner(_ context.Context, owner string) ([]infra.QuotaSandboxSnapshot, error) {
 	if c.err != nil {
 		return nil, c.err
 	}
 	live := c.liveByOwner[owner]
-	out := make([]*agentsv1alpha1.Sandbox, 0, len(live))
-	for _, sbx := range live {
-		if IsLiveForQuota(sbx) {
-			out = append(out, sbx)
+	out := make([]infra.QuotaSandboxSnapshot, 0, len(live))
+	for _, snapshot := range live {
+		if snapshot.Live {
+			out = append(out, snapshot)
 		}
 	}
 	return out, nil
 }
 
-func (c *fakeLiveSandboxCache) SandboxInformerHealthy() bool {
+func (c *fakeQuotaSandboxSource) Subscribe(context.Context, func(infra.QuotaSandboxEvent)) (infra.QuotaSandboxSubscription, error) {
+	return nil, nil
+}
+
+func (c *fakeQuotaSandboxSource) Healthy() bool {
 	return c.healthy
 }
 
@@ -222,10 +221,6 @@ type stubRegistration struct {
 	removed atomic.Bool
 }
 
-func (r *stubRegistration) HasSynced() bool {
-	return true
-}
-
 func (r *stubRegistration) Remove() error {
 	r.removed.Store(true)
 	return nil
@@ -237,20 +232,20 @@ func TestAntiDriftDiff(t *testing.T) {
 	subject := limitedSubject(owner)
 
 	tests := []struct {
-		name         string
-		liveCRs      []*agentsv1alpha1.Sandbox
-		haveEntries  map[string]Entry
-		healthy      bool
-		secondPass   bool
-		leakedAge    time.Duration
-		wantCharged  []string
-		wantReleased []string
+		name          string
+		liveSnapshots []infra.QuotaSandboxSnapshot
+		haveEntries   map[string]Entry
+		healthy       bool
+		secondPass    bool
+		leakedAge     time.Duration
+		wantCharged   []string
+		wantReleased  []string
 	}{
 		{
-			name:        "missing entry for live CR charged",
-			liveCRs:     []*agentsv1alpha1.Sandbox{runningSandbox(now, owner, "l1", 11*time.Minute, 250, 128, false)},
-			healthy:     true,
-			wantCharged: []string{"l1"},
+			name:          "missing entry for live snapshot charged",
+			liveSnapshots: []infra.QuotaSandboxSnapshot{runningSnapshot(owner, "l1", 250, 128, false)},
+			healthy:       true,
+			wantCharged:   []string{"l1"},
 		},
 		{
 			name:         "leaked released 2nd pass healthy past grace",
@@ -280,38 +275,38 @@ func TestAntiDriftDiff(t *testing.T) {
 			leakedAge:   11 * time.Minute,
 		},
 		{
-			name:        "fresh CR under grace with missing entry charged immediately",
-			liveCRs:     []*agentsv1alpha1.Sandbox{runningSandbox(now, owner, "l2", time.Minute, 250, 128, false)},
-			healthy:     true,
-			wantCharged: []string{"l2"},
+			name:          "fresh snapshot under grace with missing entry charged immediately",
+			liveSnapshots: []infra.QuotaSandboxSnapshot{runningSnapshot(owner, "l2", 250, 128, false)},
+			healthy:       true,
+			wantCharged:   []string{"l2"},
 		},
 		{
-			name:        "fresh CR with stale entry corrected immediately",
-			liveCRs:     []*agentsv1alpha1.Sandbox{runningSandbox(now, owner, "l3", time.Minute, 250, 128, false)},
-			haveEntries: map[string]Entry{"l3": {Scopes: []quotaspec.QuotaScope{}}},
-			healthy:     true,
-			wantCharged: []string{"l3"},
+			name:          "fresh snapshot with stale entry corrected immediately",
+			liveSnapshots: []infra.QuotaSandboxSnapshot{runningSnapshot(owner, "l3", 250, 128, false)},
+			haveEntries:   map[string]Entry{"l3": {Scopes: []quotaspec.QuotaScope{}}},
+			healthy:       true,
+			wantCharged:   []string{"l3"},
 		},
 		{
-			name:        "reuse-triggered CR is not charged as live",
-			liveCRs:     []*agentsv1alpha1.Sandbox{reuseTriggeredSandbox(now, owner, "reuse-lock")},
-			haveEntries: map[string]Entry{},
-			healthy:     true,
+			name:          "not-live snapshot is not charged",
+			liveSnapshots: []infra.QuotaSandboxSnapshot{deadSnapshot(owner, "reuse-lock")},
+			haveEntries:   map[string]Entry{},
+			healthy:       true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			backend := &fakeBackend{entriesByKey: map[string]map[string]Entry{owner: tt.haveEntries}}
-			liveCache := &fakeLiveSandboxCache{
-				liveByOwner: map[string][]*agentsv1alpha1.Sandbox{owner: tt.liveCRs},
+			source := &fakeQuotaSandboxSource{
+				liveByOwner: map[string][]infra.QuotaSandboxSnapshot{owner: tt.liveSnapshots},
 				healthy:     tt.healthy,
 			}
 			driver := NewAntiDriftDriver(
 				AntiDriftConfig{Interval: time.Hour, Grace: 10 * time.Minute},
 				newMutablePrimary(true),
 				&fakeSubjectLister{subjects: []quotaspec.Subject{subject}},
-				liveCache,
+				source,
 				backend,
 			)
 			currentNow := now
@@ -331,14 +326,13 @@ func TestAntiDriftDiff(t *testing.T) {
 }
 
 func TestAntiDriftEventReconcile(t *testing.T) {
-	now := time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)
 	owner := uuid.NewSHA1(uuid.Nil, []byte("owner-event")).String()
 	otherOwner := uuid.NewSHA1(uuid.Nil, []byte("owner-event-other")).String()
 
 	tests := []struct {
 		name          string
 		limitedOwners []string
-		sbx           *agentsv1alpha1.Sandbox
+		event         infra.QuotaSandboxEvent
 		healthy       bool
 		wantCharged   []string
 		wantReleased  []string
@@ -346,34 +340,34 @@ func TestAntiDriftEventReconcile(t *testing.T) {
 		{
 			name:          "live sandbox acquired with predicate data",
 			limitedOwners: []string{owner},
-			sbx:           runningSandbox(now, owner, "lock-live", 30*time.Minute, 500, 256, false),
+			event:         infra.QuotaSandboxEvent{Snapshot: runningSnapshot(owner, "lock-live", 500, 256, false)},
 			healthy:       true,
 			wantCharged:   []string{"lock-live"},
 		},
 		{
 			name:          "not live sandbox released when cache healthy",
 			limitedOwners: []string{owner},
-			sbx:           terminatingSandbox(now, owner, "lock-dead"),
+			event:         infra.QuotaSandboxEvent{Snapshot: deadSnapshot(owner, "lock-dead")},
 			healthy:       true,
 			wantReleased:  []string{"lock-dead"},
 		},
 		{
-			name:          "reuse-triggered sandbox released when cache healthy",
+			name:          "deleted sandbox released when cache healthy",
 			limitedOwners: []string{owner},
-			sbx:           reuseTriggeredSandbox(now, owner, "lock-reuse"),
+			event:         infra.QuotaSandboxEvent{Snapshot: runningSnapshot(owner, "lock-reuse", 0, 0, false), Deleted: true},
 			healthy:       true,
 			wantReleased:  []string{"lock-reuse"},
 		},
 		{
 			name:          "not live sandbox release skipped when cache unhealthy",
 			limitedOwners: []string{owner},
-			sbx:           terminatingSandbox(now, owner, "lock-skipped"),
+			event:         infra.QuotaSandboxEvent{Snapshot: deadSnapshot(owner, "lock-skipped")},
 			healthy:       false,
 		},
 		{
 			name:          "owner not in limited set skipped",
 			limitedOwners: []string{otherOwner},
-			sbx:           runningSandbox(now, owner, "lock-unlimited", 30*time.Minute, 500, 256, false),
+			event:         infra.QuotaSandboxEvent{Snapshot: runningSnapshot(owner, "lock-unlimited", 500, 256, false)},
 			healthy:       true,
 		},
 	}
@@ -389,26 +383,26 @@ func TestAntiDriftEventReconcile(t *testing.T) {
 				AntiDriftConfig{Interval: time.Hour, Grace: 10 * time.Minute},
 				newMutablePrimary(true),
 				&fakeSubjectLister{subjects: subjects},
-				&fakeLiveSandboxCache{
+				&fakeQuotaSandboxSource{
 					healthy:     tt.healthy,
-					liveByOwner: map[string][]*agentsv1alpha1.Sandbox{},
+					liveByOwner: map[string][]infra.QuotaSandboxSnapshot{},
 				},
 				backend,
 			)
 			require.NoError(t, driver.RunOnce(context.Background()))
 			backend.resetCalls()
 
-			driver.SandboxEventHandler().OnUpdate(nil, tt.sbx)
+			driver.QuotaEventHandler()(tt.event)
 			assert.ElementsMatch(t, tt.wantCharged, backend.acquireLockstrings())
 			assert.ElementsMatch(t, tt.wantReleased, backend.releaseLockstrings())
 
 			if len(tt.wantCharged) == 1 {
 				require.Len(t, backend.acquireCalls, 1)
 				got := backend.acquireCalls[0].params
-				assert.Equal(t, owner, got.User)
-				assert.Equal(t, "lock-live", got.LockString)
-				assert.Equal(t, FootprintOf(tt.sbx), got.Footprint)
-				assert.Equal(t, ConditionalScopesOf(tt.sbx), got.Scopes)
+				assert.Equal(t, tt.event.Snapshot.Owner, got.User)
+				assert.Equal(t, tt.event.Snapshot.LockString, got.LockString)
+				assert.Equal(t, FootprintFromResource(tt.event.Snapshot.Resource), got.Footprint)
+				assert.Equal(t, scopesForTestSnapshot(tt.event.Snapshot), got.Scopes)
 				assert.False(t, got.Enforce)
 			}
 		})
@@ -419,9 +413,8 @@ func TestAntiDriftAcquiresMissingLiveEntryWithoutGrace(t *testing.T) {
 	now := time.Date(2026, 6, 24, 12, 0, 0, 0, time.UTC)
 	owner := uuid.NewString()
 	subject := limitedSubject(owner)
-	sb := runningSandbox(now, owner, "lock-1", time.Minute, 1000, 512, false)
-	cache := &fakeLiveSandboxCache{
-		liveByOwner: map[string][]*agentsv1alpha1.Sandbox{owner: {sb}},
+	source := &fakeQuotaSandboxSource{
+		liveByOwner: map[string][]infra.QuotaSandboxSnapshot{owner: {runningSnapshot(owner, "lock-1", 1000, 512, false)}},
 		healthy:     true,
 	}
 	backend := &fakeBackend{entriesByKey: map[string]map[string]Entry{owner: {}}}
@@ -429,7 +422,7 @@ func TestAntiDriftAcquiresMissingLiveEntryWithoutGrace(t *testing.T) {
 		AntiDriftConfig{Grace: 10 * time.Minute},
 		newMutablePrimary(true),
 		&fakeSubjectLister{subjects: []quotaspec.Subject{subject}},
-		cache,
+		source,
 		backend,
 	)
 	driver.now = func() time.Time { return now }
@@ -439,7 +432,6 @@ func TestAntiDriftAcquiresMissingLiveEntryWithoutGrace(t *testing.T) {
 }
 
 func TestAntiDriftStopsCycleWhenPrimaryLost(t *testing.T) {
-	now := time.Now()
 	owner1 := uuid.NewString()
 	owner2 := uuid.NewString()
 	primary := newMutablePrimary(true)
@@ -447,36 +439,35 @@ func TestAntiDriftStopsCycleWhenPrimaryLost(t *testing.T) {
 		limitedSubject(owner1),
 		limitedSubject(owner2),
 	}}
-	cache := &fakeLiveSandboxCache{
-		liveByOwner: map[string][]*agentsv1alpha1.Sandbox{
-			owner1: {runningSandbox(now, owner1, "lock-1", time.Hour, 1000, 512, false)},
-			owner2: {runningSandbox(now, owner2, "lock-2", time.Hour, 1000, 512, false)},
+	source := &fakeQuotaSandboxSource{
+		liveByOwner: map[string][]infra.QuotaSandboxSnapshot{
+			owner1: {runningSnapshot(owner1, "lock-1", 1000, 512, false)},
+			owner2: {runningSnapshot(owner2, "lock-2", 1000, 512, false)},
 		},
 		healthy: true,
 	}
 	backend := &fakeBackend{entriesByKey: map[string]map[string]Entry{owner1: {}, owner2: {}}}
 	backend.afterListEntries = func() { primary.SetPrimary(false) }
-	driver := NewAntiDriftDriver(AntiDriftConfig{Grace: time.Minute}, primary, subjects, cache, backend)
+	driver := NewAntiDriftDriver(AntiDriftConfig{Grace: time.Minute}, primary, subjects, source, backend)
 
 	require.NoError(t, driver.RunOnce(context.Background()))
 	require.Empty(t, backend.acquireLockstrings())
 }
 
 func TestAntiDriftEventReconcileLooksUpUnknownLimitedOwner(t *testing.T) {
-	now := time.Now()
 	owner := uuid.NewString()
 	subject := limitedSubject(owner)
-	sb := runningSandbox(now, owner, "lock-1", time.Hour, 1000, 512, false)
+	event := infra.QuotaSandboxEvent{Snapshot: runningSnapshot(owner, "lock-1", 1000, 512, false)}
 	backend := &fakeBackend{}
 	driver := NewAntiDriftDriver(
 		AntiDriftConfig{Interval: time.Hour, Grace: 10 * time.Minute},
 		newMutablePrimary(true),
 		&fakeSubjectLister{byUser: map[string]quotaspec.Subject{owner: subject}},
-		&fakeLiveSandboxCache{healthy: true},
+		&fakeQuotaSandboxSource{healthy: true},
 		backend,
 	)
 
-	driver.reconcileSandboxEvent(sb, false)
+	driver.QuotaEventHandler()(event)
 
 	calls := backend.acquireCallsSnapshot()
 	require.Len(t, calls, 1)
@@ -489,37 +480,30 @@ func TestAntiDriftEventReconcileSkipsWriteWhenPrimaryLostBeforeWrite(t *testing.
 
 	tests := []struct {
 		name             string
-		sbx              *agentsv1alpha1.Sandbox
-		cache            *fakeLiveSandboxCache
-		reconcile        func(*AntiDriftDriver, *agentsv1alpha1.Sandbox)
+		event            infra.QuotaSandboxEvent
+		source           *fakeQuotaSandboxSource
 		wantAcquireCalls int
 		wantReleaseCalls int
 	}{
 		{
-			name: "before acquire",
-			sbx:  runningSandbox(now, uuid.NewString(), "lock-acquire", time.Hour, 1000, 512, false),
-			cache: &fakeLiveSandboxCache{
+			name:  "before acquire",
+			event: infra.QuotaSandboxEvent{Snapshot: runningSnapshot(uuid.NewString(), "lock-acquire", 1000, 512, false)},
+			source: &fakeQuotaSandboxSource{
 				healthy: true,
-			},
-			reconcile: func(driver *AntiDriftDriver, sbx *agentsv1alpha1.Sandbox) {
-				driver.reconcileSandboxEvent(sbx, false)
 			},
 		},
 		{
-			name: "before release",
-			sbx:  terminatingSandbox(now, uuid.NewString(), "lock-release"),
-			cache: &fakeLiveSandboxCache{
+			name:  "before release",
+			event: infra.QuotaSandboxEvent{Snapshot: deadSnapshot(uuid.NewString(), "lock-release")},
+			source: &fakeQuotaSandboxSource{
 				healthy: true,
-			},
-			reconcile: func(driver *AntiDriftDriver, sbx *agentsv1alpha1.Sandbox) {
-				driver.reconcileSandboxEvent(sbx, false)
 			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			owner := tt.sbx.GetAnnotations()[agentsv1alpha1.AnnotationOwner]
+			owner := tt.event.Snapshot.Owner
 			subject := limitedSubject(owner)
 			primary := newMutablePrimary(true)
 			subjectLister := &fakeSubjectLister{
@@ -535,14 +519,14 @@ func TestAntiDriftEventReconcileSkipsWriteWhenPrimaryLostBeforeWrite(t *testing.
 				AntiDriftConfig{Interval: time.Hour, Grace: time.Minute},
 				primary,
 				subjectLister,
-				tt.cache,
+				tt.source,
 				backend,
 			)
 			driver.seenLeaked[leakedKey(owner, "stale-lock")] = leakedObservation{firstSeen: now, confirmed: true}
 
 			beforeSkipped := testutil.ToFloat64(antiDriftSkippedTotal.WithLabelValues("not_primary"))
 
-			tt.reconcile(driver, tt.sbx)
+			driver.QuotaEventHandler()(tt.event)
 
 			assert.Len(t, backend.acquireCallsSnapshot(), tt.wantAcquireCalls)
 			assert.Len(t, backend.releaseLockstrings(), tt.wantReleaseCalls)
@@ -552,46 +536,25 @@ func TestAntiDriftEventReconcileSkipsWriteWhenPrimaryLostBeforeWrite(t *testing.
 	}
 }
 
-func TestAntiDriftDriver_DeleteEventReleasesTombstone(t *testing.T) {
-	now := time.Now()
+func TestAntiDriftDriverDeleteEventReleasesSnapshot(t *testing.T) {
 	owner := uuid.NewString()
 	subject := limitedSubject(owner)
-	sb := runningSandbox(now, owner, "lock-1", time.Hour, 1000, 512, false)
-	tests := []struct {
-		name string
-		obj  any
-	}{
-		{
-			name: "direct sandbox delete object",
-			obj:  sb,
-		},
-		{
-			name: "deleted final state unknown",
-			obj: toolscache.DeletedFinalStateUnknown{
-				Key: "default/sbx",
-				Obj: sb,
-			},
+	backend := &fakeBackend{}
+	subjects := &fakeSubjectLister{
+		byUser: map[string]quotaspec.Subject{
+			owner: subject,
 		},
 	}
+	source := &fakeQuotaSandboxSource{healthy: true}
+	driver := NewAntiDriftDriver(AntiDriftConfig{}, nil, subjects, source, backend)
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			backend := &fakeBackend{}
-			subjects := &fakeSubjectLister{
-				byUser: map[string]quotaspec.Subject{
-					owner: subject,
-				},
-			}
-			cache := &fakeLiveSandboxCache{healthy: true}
-			driver := NewAntiDriftDriver(AntiDriftConfig{}, nil, subjects, cache, backend)
+	driver.QuotaEventHandler()(infra.QuotaSandboxEvent{
+		Snapshot: runningSnapshot(owner, "lock-1", 1000, 512, false),
+		Deleted:  true,
+	})
 
-			handler := driver.SandboxEventHandler()
-			handler.OnDelete(tt.obj)
-
-			require.Equal(t, []string{"lock-1"}, backend.releaseLockstrings())
-			require.Empty(t, backend.acquireCallsSnapshot())
-		})
-	}
+	require.Equal(t, []string{"lock-1"}, backend.releaseLockstrings())
+	require.Empty(t, backend.acquireCallsSnapshot())
 }
 
 func TestAntiDriftKeyStoreErrorSkipsCycle(t *testing.T) {
@@ -602,7 +565,7 @@ func TestAntiDriftKeyStoreErrorSkipsCycle(t *testing.T) {
 		AntiDriftConfig{Interval: time.Hour, Grace: time.Minute},
 		newMutablePrimary(true),
 		&fakeSubjectLister{err: errors.New("boom")},
-		&fakeLiveSandboxCache{healthy: true},
+		&fakeQuotaSandboxSource{healthy: true},
 		backend,
 	)
 	require.NoError(t, driver.RunOnce(context.Background()))
@@ -617,12 +580,12 @@ func TestAntiDriftUnhealthyReleasePassDoesNotConfirmLeakedEntry(t *testing.T) {
 	backend := &fakeBackend{entriesByKey: map[string]map[string]Entry{
 		owner: {"leaked-lock": {}},
 	}}
-	liveCache := &fakeLiveSandboxCache{healthy: false}
+	source := &fakeQuotaSandboxSource{healthy: false}
 	driver := NewAntiDriftDriver(
 		AntiDriftConfig{Interval: time.Hour, Grace: 10 * time.Minute},
 		newMutablePrimary(true),
 		&fakeSubjectLister{subjects: []quotaspec.Subject{subject}},
-		liveCache,
+		source,
 		backend,
 	)
 	now := time.Unix(1000, 0)
@@ -631,7 +594,7 @@ func TestAntiDriftUnhealthyReleasePassDoesNotConfirmLeakedEntry(t *testing.T) {
 	require.NoError(t, driver.RunOnce(context.Background()))
 	assert.Empty(t, backend.releaseLockstrings())
 
-	liveCache.healthy = true
+	source.healthy = true
 	now = now.Add(11 * time.Minute)
 	require.NoError(t, driver.RunOnce(context.Background()))
 	assert.Empty(t, backend.releaseLockstrings(), "unhealthy pass must not count as the previous successful confirmation")
@@ -648,7 +611,7 @@ func TestAntiDriftKeyStoreErrorDoesNotCountAsPreviousPass(t *testing.T) {
 		AntiDriftConfig{Interval: time.Hour, Grace: 10 * time.Minute},
 		newMutablePrimary(true),
 		subjectLister,
-		&fakeLiveSandboxCache{healthy: true},
+		&fakeQuotaSandboxSource{healthy: true},
 		backend,
 	)
 	currentNow := now
@@ -678,7 +641,7 @@ func TestAntiDriftListEntriesErrorDoesNotCountAsPreviousPass(t *testing.T) {
 		AntiDriftConfig{Interval: time.Hour, Grace: 10 * time.Minute},
 		newMutablePrimary(true),
 		&fakeSubjectLister{subjects: []quotaspec.Subject{limitedSubject(owner)}},
-		&fakeLiveSandboxCache{healthy: true},
+		&fakeQuotaSandboxSource{healthy: true},
 		backend,
 	)
 	currentNow := now
@@ -708,7 +671,7 @@ func TestAntiDriftReleaseErrorDoesNotCountAsPreviousPass(t *testing.T) {
 		AntiDriftConfig{Interval: time.Hour, Grace: 10 * time.Minute},
 		newMutablePrimary(true),
 		&fakeSubjectLister{subjects: []quotaspec.Subject{limitedSubject(owner)}},
-		&fakeLiveSandboxCache{healthy: true},
+		&fakeQuotaSandboxSource{healthy: true},
 		backend,
 	)
 	currentNow := now
@@ -728,7 +691,7 @@ func TestAntiDriftReleaseErrorDoesNotCountAsPreviousPass(t *testing.T) {
 func TestAntiDriftAcquireErrorDoesNotResetUnrelatedLeakedConfirmation(t *testing.T) {
 	now := time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)
 	owner := uuid.NewSHA1(uuid.Nil, []byte("owner-acquire-error")).String()
-	live := runningSandbox(now, owner, "live-bad", 30*time.Minute, 250, 128, false)
+	live := runningSnapshot(owner, "live-bad", 250, 128, false)
 	backend := &fakeBackend{
 		entriesByKey: map[string]map[string]Entry{
 			owner: {"leaked-ok": {}},
@@ -739,9 +702,9 @@ func TestAntiDriftAcquireErrorDoesNotResetUnrelatedLeakedConfirmation(t *testing
 		AntiDriftConfig{Interval: time.Hour, Grace: 10 * time.Minute},
 		newMutablePrimary(true),
 		&fakeSubjectLister{subjects: []quotaspec.Subject{limitedSubject(owner)}},
-		&fakeLiveSandboxCache{
+		&fakeQuotaSandboxSource{
 			healthy:     true,
-			liveByOwner: map[string][]*agentsv1alpha1.Sandbox{owner: {live}},
+			liveByOwner: map[string][]infra.QuotaSandboxSnapshot{owner: {live}},
 		},
 		backend,
 	)
@@ -783,24 +746,23 @@ func TestEntriesEqualNormalizesLiveEntry(t *testing.T) {
 }
 
 func TestAntiDriftEventReconcileUsesShortDeadline(t *testing.T) {
-	now := time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)
 	owner := uuid.NewSHA1(uuid.Nil, []byte("owner-event-deadline")).String()
 
 	tests := []struct {
 		name        string
-		sbx         *agentsv1alpha1.Sandbox
+		event       infra.QuotaSandboxEvent
 		timeoutFunc func(*fakeBackend) []time.Duration
 	}{
 		{
-			name: "acquire",
-			sbx:  runningSandbox(now, owner, "lock-live", 30*time.Minute, 250, 128, false),
+			name:  "acquire",
+			event: infra.QuotaSandboxEvent{Snapshot: runningSnapshot(owner, "lock-live", 250, 128, false)},
 			timeoutFunc: func(backend *fakeBackend) []time.Duration {
 				return backend.acquireTimeoutsSnapshot()
 			},
 		},
 		{
-			name: "release",
-			sbx:  terminatingSandbox(now, owner, "lock-dead"),
+			name:  "release",
+			event: infra.QuotaSandboxEvent{Snapshot: deadSnapshot(owner, "lock-dead")},
 			timeoutFunc: func(backend *fakeBackend) []time.Duration {
 				return backend.releaseTimeoutsSnapshot()
 			},
@@ -814,16 +776,16 @@ func TestAntiDriftEventReconcileUsesShortDeadline(t *testing.T) {
 				AntiDriftConfig{Interval: time.Hour, Grace: 10 * time.Minute, CycleTimeout: 30 * time.Second},
 				newMutablePrimary(true),
 				&fakeSubjectLister{subjects: []quotaspec.Subject{limitedSubject(owner)}},
-				&fakeLiveSandboxCache{
+				&fakeQuotaSandboxSource{
 					healthy:     true,
-					liveByOwner: map[string][]*agentsv1alpha1.Sandbox{},
+					liveByOwner: map[string][]infra.QuotaSandboxSnapshot{},
 				},
 				backend,
 			)
 			require.NoError(t, driver.RunOnce(context.Background()))
 			backend.resetCalls()
 
-			driver.SandboxEventHandler().OnUpdate(nil, tt.sbx)
+			driver.QuotaEventHandler()(tt.event)
 			timeouts := tt.timeoutFunc(backend)
 			require.Len(t, timeouts, 1)
 			assert.Less(t, timeouts[0], 3*time.Second)
@@ -835,16 +797,16 @@ func TestAntiDriftEventReconcileUsesShortDeadline(t *testing.T) {
 func TestAntiDriftReappearingEntryClearsLeakedMemory(t *testing.T) {
 	now := time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)
 	owner := uuid.NewSHA1(uuid.Nil, []byte("owner-reappear")).String()
-	live := runningSandbox(now, owner, "lock-1", 30*time.Minute, 250, 128, false)
+	live := runningSnapshot(owner, "lock-1", 250, 128, false)
 	backend := &fakeBackend{entriesByKey: map[string]map[string]Entry{
-		owner: {"lock-1": entryForSandbox(live)},
+		owner: {"lock-1": entryForTestSnapshot(live)},
 	}}
-	liveCache := &fakeLiveSandboxCache{liveByOwner: map[string][]*agentsv1alpha1.Sandbox{owner: nil}, healthy: true}
+	source := &fakeQuotaSandboxSource{liveByOwner: map[string][]infra.QuotaSandboxSnapshot{owner: nil}, healthy: true}
 	driver := NewAntiDriftDriver(
 		AntiDriftConfig{Interval: time.Hour, Grace: 10 * time.Minute},
 		newMutablePrimary(true),
 		&fakeSubjectLister{subjects: []quotaspec.Subject{limitedSubject(owner)}},
-		liveCache,
+		source,
 		backend,
 	)
 	currentNow := now
@@ -853,7 +815,7 @@ func TestAntiDriftReappearingEntryClearsLeakedMemory(t *testing.T) {
 	require.NoError(t, driver.RunOnce(context.Background()))
 	require.Len(t, driver.seenLeaked, 1)
 
-	liveCache.liveByOwner[owner] = []*agentsv1alpha1.Sandbox{live}
+	source.liveByOwner[owner] = []infra.QuotaSandboxSnapshot{live}
 	currentNow = currentNow.Add(11 * time.Minute)
 	require.NoError(t, driver.RunOnce(context.Background()))
 	assert.Empty(t, backend.releaseLockstrings())
@@ -868,7 +830,7 @@ func TestAntiDriftRunOnceNotPrimaryClearsLeakedState(t *testing.T) {
 		AntiDriftConfig{Interval: time.Hour, Grace: 10 * time.Minute},
 		primary,
 		&fakeSubjectLister{subjects: []quotaspec.Subject{limitedSubject(owner)}},
-		&fakeLiveSandboxCache{healthy: true},
+		&fakeQuotaSandboxSource{healthy: true},
 		&fakeBackend{entriesByKey: map[string]map[string]Entry{owner: {"lock-1": {}}}},
 	)
 	driver.now = func() time.Time { return now }
@@ -890,7 +852,7 @@ func TestAntiDriftRunStartsNonBlockingAndStopRemovesRegistration(t *testing.T) {
 		nil,
 		&fakeBackend{},
 	)
-	driver.SetEventRegistration(registration)
+	driver.SetSubscription(registration)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -919,9 +881,9 @@ func TestAntiDriftRunExecutesInitialCycleBeforeInterval(t *testing.T) {
 		AntiDriftConfig{Interval: time.Hour, Grace: time.Minute},
 		newMutablePrimary(true),
 		&fakeSubjectLister{subjects: []quotaspec.Subject{limitedSubject(owner)}},
-		&fakeLiveSandboxCache{
+		&fakeQuotaSandboxSource{
 			healthy:     true,
-			liveByOwner: map[string][]*agentsv1alpha1.Sandbox{owner: nil},
+			liveByOwner: map[string][]infra.QuotaSandboxSnapshot{owner: nil},
 		},
 		backend,
 	)
@@ -937,7 +899,7 @@ func TestAntiDriftRunExecutesInitialCycleBeforeInterval(t *testing.T) {
 	driver.Stop()
 }
 
-func TestAntiDriftSetEventRegistrationAfterStopRemovesRegistration(t *testing.T) {
+func TestAntiDriftSetSubscriptionAfterStopRemovesSubscription(t *testing.T) {
 	driver := NewAntiDriftDriver(
 		AntiDriftConfig{Interval: time.Hour, Grace: time.Minute},
 		newMutablePrimary(true),
@@ -948,7 +910,7 @@ func TestAntiDriftSetEventRegistrationAfterStopRemovesRegistration(t *testing.T)
 	registration := &stubRegistration{}
 
 	driver.Stop()
-	driver.SetEventRegistration(registration)
+	driver.SetSubscription(registration)
 	driver.Stop()
 	assert.True(t, registration.removed.Load())
 }
@@ -1011,54 +973,39 @@ func limitedSubject(user string) quotaspec.Subject {
 	}
 }
 
-func runningSandbox(now time.Time, owner, lock string, age time.Duration, cpuMilli, memoryMi int64, paused bool) *agentsv1alpha1.Sandbox {
-	sbx := &agentsv1alpha1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:              lock,
-			CreationTimestamp: metav1.NewTime(now.Add(-age)),
-			Annotations: map[string]string{
-				agentsv1alpha1.AnnotationOwner: owner,
-				agentsv1alpha1.AnnotationLock:  lock,
-			},
-		},
-		Spec: agentsv1alpha1.SandboxSpec{
-			Paused: paused,
-		},
-		Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxRunning},
+func runningSnapshot(owner, lock string, cpuMilli, memoryMi int64, paused bool) infra.QuotaSandboxSnapshot {
+	return infra.QuotaSandboxSnapshot{
+		Owner:      owner,
+		LockString: lock,
+		Resource: infra.SandboxResource{Limits: infra.ResourceList{
+			CPUMilli: cpuMilli,
+			MemoryMB: memoryMi,
+		}},
+		Live:    true,
+		Running: !paused,
 	}
-	sbx.Spec.Template = &corev1.PodTemplateSpec{
-		Spec: corev1.PodSpec{
-			Containers: []corev1.Container{{
-				Resources: corev1.ResourceRequirements{
-					Limits: corev1.ResourceList{
-						corev1.ResourceCPU:    *resource.NewMilliQuantity(cpuMilli, resource.DecimalSI),
-						corev1.ResourceMemory: *resource.NewQuantity(memoryMi*1024*1024, resource.BinarySI),
-					},
-				},
-			}},
-		},
+}
+
+func deadSnapshot(owner, lock string) infra.QuotaSandboxSnapshot {
+	return infra.QuotaSandboxSnapshot{
+		Owner:      owner,
+		LockString: lock,
+		Live:       false,
 	}
-	return sbx
 }
 
-func terminatingSandbox(now time.Time, owner, lock string) *agentsv1alpha1.Sandbox {
-	sbx := runningSandbox(now, owner, lock, 30*time.Minute, 0, 0, false)
-	sbx.Status.Phase = agentsv1alpha1.SandboxTerminating
-	return sbx
-}
-
-func reuseTriggeredSandbox(now time.Time, owner, lock string) *agentsv1alpha1.Sandbox {
-	sbx := runningSandbox(now, owner, lock, 30*time.Minute, 0, 0, false)
-	sbx.Annotations[agentsv1alpha1.AnnotationReuse] = "true"
-	sbx.Annotations[agentsv1alpha1.AnnotationReuseEnabled] = "true"
-	return sbx
-}
-
-func entryForSandbox(sbx *agentsv1alpha1.Sandbox) Entry {
+func entryForTestSnapshot(snapshot infra.QuotaSandboxSnapshot) Entry {
 	return Entry{
-		Footprint: FootprintOf(sbx),
-		Scopes:    ConditionalScopesOf(sbx),
+		Footprint: FootprintFromResource(snapshot.Resource),
+		Scopes:    scopesForTestSnapshot(snapshot),
 	}
+}
+
+func scopesForTestSnapshot(snapshot infra.QuotaSandboxSnapshot) []quotaspec.QuotaScope {
+	if !snapshot.Running {
+		return []quotaspec.QuotaScope{}
+	}
+	return []quotaspec.QuotaScope{quotaspec.ScopeRunning}
 }
 
 func TestAntiDriftRunWaitsForPrimary(t *testing.T) {
@@ -1069,7 +1016,7 @@ func TestAntiDriftRunWaitsForPrimary(t *testing.T) {
 		AntiDriftConfig{Interval: time.Hour, Grace: time.Minute},
 		primary,
 		&fakeSubjectLister{subjects: []quotaspec.Subject{limitedSubject(owner)}},
-		&fakeLiveSandboxCache{healthy: true},
+		&fakeQuotaSandboxSource{healthy: true},
 		backend,
 	)
 
@@ -1099,7 +1046,7 @@ func TestAntiDriftPrimaryLossCancelsCycleAndClearsLeaked(t *testing.T) {
 		AntiDriftConfig{Interval: time.Hour, Grace: 10 * time.Minute},
 		primary,
 		&fakeSubjectLister{subjects: []quotaspec.Subject{limitedSubject(owner)}},
-		&fakeLiveSandboxCache{healthy: true},
+		&fakeQuotaSandboxSource{healthy: true},
 		backend,
 	)
 	driver.now = func() time.Time { return now }
@@ -1137,7 +1084,7 @@ func TestAntiDriftRunsImmediateCycleOnPrimaryAcquire(t *testing.T) {
 		AntiDriftConfig{Interval: time.Hour, Grace: time.Minute},
 		primary,
 		&fakeSubjectLister{subjects: []quotaspec.Subject{limitedSubject(owner)}},
-		&fakeLiveSandboxCache{healthy: true},
+		&fakeQuotaSandboxSource{healthy: true},
 		backend,
 	)
 
