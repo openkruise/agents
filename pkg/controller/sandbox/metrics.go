@@ -252,6 +252,24 @@ var (
 		[]string{"namespace", "name", "type"},
 	)
 
+	// sandboxStatusAbnormalTime records the Unix timestamp when the sandbox entered the abnormal state.
+	sandboxStatusAbnormalTime = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "sandbox_status_abnormal_time",
+			Help: "Unix timestamp when the sandbox entered an abnormal state",
+		},
+		[]string{"namespace", "name", "type"},
+	)
+
+	// sandboxRuntimeContainerAbnormalTime records the Unix timestamp when a runtime container became abnormal.
+	sandboxRuntimeContainerAbnormalTime = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "sandbox_runtime_container_abnormal_time",
+			Help: "Unix timestamp when a sandbox runtime container became abnormal",
+		},
+		[]string{"namespace", "name", "container"},
+	)
+
 	// sandboxReuseTotal tracks the total number of sandbox reuse operations.
 	sandboxReuseTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
@@ -355,7 +373,9 @@ func init() {
 		sandboxResumeTotal,
 		sandboxDeletionDuration,
 		sandboxRuntimeContainerAbnormal,
+		sandboxRuntimeContainerAbnormalTime,
 		sandboxStatusAbnormal,
+		sandboxStatusAbnormalTime,
 		sandboxReuseTotal,
 		sandboxReuseDuration,
 	)
@@ -459,6 +479,14 @@ func findCondition(conditions []metav1.Condition, condType string) *metav1.Condi
 }
 
 func recordSandboxConditionMetrics(sandbox *agentsv1alpha1.Sandbox, namespace, name string) {
+	// Reset all condition-based "un" metrics to 0 before processing conditions.
+	// This ensures that when a condition is absent from the conditions slice
+	// (e.g., SandboxConditionResumed is removed during pause), stale metric
+	// values from a previous reconcile are cleared.
+	sandboxStatusInplaceUpdating.WithLabelValues(namespace, name).Set(0)
+	sandboxStatusUnpaused.WithLabelValues(namespace, name).Set(0)
+	sandboxStatusUnresumed.WithLabelValues(namespace, name).Set(0)
+
 	for _, condition := range sandbox.Status.Conditions {
 		switch agentsv1alpha1.SandboxConditionType(condition.Type) {
 		case agentsv1alpha1.SandboxConditionReady:
@@ -595,15 +623,20 @@ func recordSandboxMetrics(sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod) {
 		}
 	}
 
+	abnormalTime := float64(time.Now().Unix())
 	if pauseAbnormal {
 		sandboxStatusAbnormal.WithLabelValues(namespace, name, "pause_incomplete").Set(1)
+		sandboxStatusAbnormalTime.WithLabelValues(namespace, name, "pause_incomplete").Set(abnormalTime)
 	} else {
 		sandboxStatusAbnormal.DeleteLabelValues(namespace, name, "pause_incomplete")
+		sandboxStatusAbnormalTime.DeleteLabelValues(namespace, name, "pause_incomplete")
 	}
 	if resumeAbnormal {
 		sandboxStatusAbnormal.WithLabelValues(namespace, name, "resume_incomplete").Set(1)
+		sandboxStatusAbnormalTime.WithLabelValues(namespace, name, "resume_incomplete").Set(abnormalTime)
 	} else {
 		sandboxStatusAbnormal.DeleteLabelValues(namespace, name, "resume_incomplete")
+		sandboxStatusAbnormalTime.DeleteLabelValues(namespace, name, "resume_incomplete")
 	}
 
 	// sandbox_labels: opt-in metric controlled via --metric-labels-allowlist
@@ -648,7 +681,9 @@ func DeleteSandboxMetrics(namespace, name string) {
 	// Counter metrics at namespace level are not deleted per-sandbox
 
 	sandboxStatusAbnormal.DeletePartialMatch(prometheus.Labels{"namespace": namespace, "name": name})
+	sandboxStatusAbnormalTime.DeletePartialMatch(prometheus.Labels{"namespace": namespace, "name": name})
 	sandboxRuntimeContainerAbnormal.DeletePartialMatch(prometheus.Labels{"namespace": namespace, "name": name})
+	sandboxRuntimeContainerAbnormalTime.DeletePartialMatch(prometheus.Labels{"namespace": namespace, "name": name})
 
 	if sandboxLabels != nil {
 		sandboxLabels.DeletePartialMatch(prometheus.Labels{"namespace": namespace, "name": name})
@@ -677,8 +712,10 @@ func recordRuntimeContainerAbnormal(namespace, name string, pod *corev1.Pod) {
 		}
 		if cs.RestartCount > 0 && !cs.Ready {
 			sandboxRuntimeContainerAbnormal.WithLabelValues(namespace, name, cs.Name).Set(1)
+			sandboxRuntimeContainerAbnormalTime.WithLabelValues(namespace, name, cs.Name).Set(float64(time.Now().Unix()))
 		} else {
 			sandboxRuntimeContainerAbnormal.WithLabelValues(namespace, name, cs.Name).Set(0)
+			sandboxRuntimeContainerAbnormalTime.DeleteLabelValues(namespace, name, cs.Name)
 		}
 	}
 }
