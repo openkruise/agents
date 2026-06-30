@@ -56,7 +56,7 @@ jobs:
           version: ${{ env.KIND_VERSION }}
 
       - name: Cache Docker images
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
         with:
           path: /tmp/docker-images
           key: ${{ runner.os }}-docker-${{ env.CODE_INTERPRETER_IMG }}
@@ -89,7 +89,7 @@ jobs:
             echo "Cached inplace-update image"
           fi
 
-      # Flow: build/load images → MySQL → deploy agents with MySQL key storage (no post-deploy patch) → E2E
+      # Flow: build/load images → MySQL → schema → deploy agents with MySQL key storage (no post-deploy patch) → E2E
       - name: Build and load container images
         run: |
            make docker-build-manager
@@ -119,6 +119,18 @@ jobs:
           MYSQL_ROOT_PASSWORD: ${{ env.MYSQL_ROOT_PASSWORD }}
         run: bash hack/deploy-mysql-kind-ci.sh
 
+      - name: Initialize MySQL key storage schema
+        env:
+          MYSQL_DATABASE: ${{ env.MYSQL_DATABASE }}
+          MYSQL_NAMESPACE: sandbox-system
+          MYSQL_ROOT_PASSWORD: ${{ env.MYSQL_ROOT_PASSWORD }}
+        run: |
+          kubectl exec -i deployment/mysql -n "${MYSQL_NAMESPACE}" -- \
+            env MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql --protocol=TCP -h 127.0.0.1 -uroot "${MYSQL_DATABASE}" < hack/mysql-schema.sql
+          kubectl exec deployment/mysql -n "${MYSQL_NAMESPACE}" -- \
+            env MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql --protocol=TCP -h 127.0.0.1 -uroot "${MYSQL_DATABASE}" \
+              -e "SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name IN ('teams', 'team_api_keys') ORDER BY table_name;"
+
       - name: Install Kruise Agents
         env:
           MYSQL_DATABASE: ${{ env.MYSQL_DATABASE }}
@@ -128,9 +140,15 @@ jobs:
           {
             echo ""
             echo "# E2B MySQL key storage (appended by e2e-e2b-mysql-latest before deploy)"
+            echo "- op: replace"
+            echo "  path: /spec/replicas"
+            echo "  value: 3"
             echo "- op: add"
             echo "  path: /spec/template/spec/containers/0/args/-"
             echo "  value: --e2b-key-storage=mysql"
+            echo "- op: add"
+            echo "  path: /spec/template/spec/containers/0/args/-"
+            echo "  value: --e2b-key-storage-disable-schema-auto-update"
             echo "- op: add"
             echo "  path: /spec/template/spec/containers/0/env/-"
             printf '  value: {"name":"E2B_KEY_STORAGE_DSN","value":"%s"}\n' "${MYSQL_DSN}"

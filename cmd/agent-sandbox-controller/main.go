@@ -20,9 +20,10 @@ import (
 	"crypto/tls"
 	"flag"
 	"net/http"         // Added for pprof server
-	_ "net/http/pprof" // Added to register pprof handlers
+	_ "net/http/pprof" // #nosec -- intentional pprof endpoint for diagnostics
 	"os"
 	"strings"
+	"time"
 
 	"github.com/spf13/pflag"
 	corev1 "k8s.io/api/core/v1"
@@ -158,7 +159,8 @@ func main() {
 	if enablePprof {
 		go func() {
 			setupLog.Info("starting pprof server", "addr", pprofAddr)
-			if err := http.ListenAndServe(pprofAddr, nil); err != nil {
+			pprofServer := &http.Server{Addr: pprofAddr, ReadHeaderTimeout: 10 * time.Second}
+			if err := pprofServer.ListenAndServe(); err != nil {
 				setupLog.Error(err, "unable to start pprof server")
 			}
 		}()

@@ -69,7 +69,7 @@ func ValidateAndInitClaimOptions(opts infra.ClaimSandboxOptions) (infra.ClaimSan
 		}
 	}
 	if opts.InplaceUpdate != nil && opts.InplaceUpdate.Image == "" && opts.InplaceUpdate.Resources == nil {
-		return infra.ClaimSandboxOptions{}, fmt.Errorf("inplace update requires either image or resources to be set")
+		return infra.ClaimSandboxOptions{}, fmt.Errorf("inplace update requires at least one of image or resources to be set")
 	}
 	if opts.InplaceUpdate != nil && opts.InplaceUpdate.Resources != nil {
 		res := opts.InplaceUpdate.Resources
@@ -293,32 +293,69 @@ func clearFailedSandbox(ctx context.Context, sbx infra.Sandbox, err error, reser
 		return
 	}
 	effective := ptr.Deref(reserveFor, DefaultReserveFailedSandboxFor)
-	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), DefaultCleanupTimeout)
+	defer cancel()
+	log := klog.FromContext(cleanupCtx).WithValues("sandbox", klog.KObj(sbx))
+
 	if effective < 0 {
-		log.Info("the failed sandbox is reserved forever for debugging", "reason", err)
+		log.Info("reserving failed sandbox forever for debugging", "reason", err)
+		// Keep any existing ShutdownTime as the original upper bound for debug retention.
+		if updateErr := reserveFailedSandbox(cleanupCtx, sbx, timeoututils.Options{}); updateErr != nil {
+			log.Error(updateErr, "failed to mark failed sandbox as reserved, deleting it instead")
+			deleteFailedSandbox(cleanupCtx, sbx, log)
+		}
 		return
 	}
-
-	cleanupCtx, cancel := context.WithTimeout(context.Background(), DefaultCleanupTimeout)
-	defer cancel()
 
 	if effective > 0 {
 		shutdownTime := time.Now().Add(effective)
 		log.Info("the failed sandbox will be reserved before delayed deletion", "reason", err, "shutdownTime", shutdownTime)
-		if _, updateErr := sbx.SaveTimeoutWithPolicy(cleanupCtx, timeoututils.Options{
+		if updateErr := reserveFailedSandbox(cleanupCtx, sbx, timeoututils.Options{
 			ShutdownTime: shutdownTime,
-		}, timeoututils.UpdatePolicyAlways); updateErr != nil {
-			log.Error(updateErr, "failed to set delayed deletion time for failed sandbox")
+		}); updateErr != nil {
+			log.Error(updateErr, "failed to reserve failed sandbox, deleting it instead")
+			deleteFailedSandbox(cleanupCtx, sbx, log)
 		}
 		return
 	}
 
 	log.Info("the failed sandbox will be deleted", "reason", err)
-	if killErr := sbx.Kill(cleanupCtx); killErr != nil {
-		log.Error(killErr, "failed to delete failed sandbox")
-	} else {
-		log.Info("sandbox deleted")
+	deleteFailedSandbox(cleanupCtx, sbx, log)
+}
+
+func reserveFailedSandbox(ctx context.Context, sbx infra.Sandbox, opts timeoututils.Options) error {
+	crSandbox, ok := sbx.(*Sandbox)
+	if !ok {
+		return fmt.Errorf("unsupported sandbox type %T", sbx)
 	}
+	_, err := crSandbox.retryUpdate(ctx, func(s *v1alpha1.Sandbox) (bool, error) {
+		labels := s.GetLabels()
+		if labels == nil {
+			labels = make(map[string]string, 1)
+		}
+		changed := labels[v1alpha1.LabelSandboxReservedFailed] != v1alpha1.True
+		labels[v1alpha1.LabelSandboxReservedFailed] = v1alpha1.True
+		s.SetLabels(labels)
+
+		if !opts.ShutdownTime.IsZero() && !timeoututils.Equal(timeoututils.GetTimeoutFromSandbox(s), opts) {
+			setTimeout(s, opts)
+			changed = true
+		}
+		return changed, nil
+	})
+	return err
+}
+
+func deleteFailedSandbox(ctx context.Context, sbx infra.Sandbox, log klog.Logger) {
+	if killErr := sbx.Kill(ctx); killErr != nil {
+		if apierrors.IsNotFound(killErr) {
+			log.Info("sandbox already deleted")
+			return
+		}
+		log.Error(killErr, "failed to delete failed sandbox")
+		return
+	}
+	log.Info("sandbox deleted")
 }
 
 func getPickKey(sbx *v1alpha1.Sandbox) string {
@@ -451,7 +488,7 @@ func pickFromCandidates(ctx context.Context, candidates []*v1alpha1.Sandbox, pic
 	if len(candidates) == 0 {
 		return nil, errors.New("no candidate")
 	}
-	start := rand.IntN(len(candidates))
+	start := rand.IntN(len(candidates)) // #nosec G404 -- non-security random for load distribution
 	i := start
 	for {
 		// Check if context is canceled
@@ -545,6 +582,7 @@ func modifyPickedSandbox(sbx *Sandbox, lockType infra.LockType, opts infra.Claim
 	if lockType != infra.LockTypeCreate {
 		sbx.Sandbox = sbx.Sandbox.DeepCopy()
 	}
+
 	if opts.Modifier != nil {
 		opts.Modifier(sbx)
 	}
@@ -589,6 +627,11 @@ func modifyPickedSandbox(sbx *Sandbox, lockType infra.LockType, opts infra.Claim
 			// record the csi mount config to annotation
 			annotations[models.ExtensionKeyClaimWithCSIMount_MountConfig] = opts.CSIMount.MountOptionListRaw
 		}
+	}
+
+	if opts.UserMetadataKeys != nil && (len(opts.UserMetadataKeys.Labels) > 0 || len(opts.UserMetadataKeys.Annotations) > 0) {
+		raw, _ := json.Marshal(opts.UserMetadataKeys)
+		annotations[v1alpha1.AnnotationUpdatedMetadataInClaim] = string(raw)
 	}
 
 	sbx.SetAnnotations(annotations)

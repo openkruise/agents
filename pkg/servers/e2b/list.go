@@ -143,6 +143,9 @@ func (sc *Controller) ListSandboxes(r *http.Request) (web.ApiResponse[[]*models.
 		GetKey: func(sbx infra.Sandbox) string {
 			return sbx.GetAnnotations()[agentsv1alpha1.AnnotationClaimTime]
 		},
+		GetUniqueKey: func(sbx infra.Sandbox) string {
+			return sbx.GetSandboxID()
+		},
 	})
 	var headers map[string]string
 	if nextToken != "" {
@@ -284,6 +287,9 @@ func (sc *Controller) listCheckpointsForUser(ctx context.Context, user *models.C
 		NextToken: nextTokenParam,
 		GetKey: func(cp infra.CheckpointInfo) string {
 			return cp.CreationTimestamp // Sort by creation timestamp
+		},
+		GetUniqueKey: func(cp infra.CheckpointInfo) string {
+			return fmt.Sprintf("%s/%s", cp.Namespace, cp.Name)
 		},
 		Filter: filter,
 	})

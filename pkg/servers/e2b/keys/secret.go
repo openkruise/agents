@@ -40,7 +40,7 @@ import (
 )
 
 var (
-	KeySecretName = "e2b-key-store"
+	KeySecretName = "e2b-key-store" // #nosec G101 -- resource name, not a credential
 	AdminKeyID    uuid.UUID
 	generateUUID  = uuid.New
 	marshalAPIKey = json.Marshal

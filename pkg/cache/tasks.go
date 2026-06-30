@@ -98,7 +98,7 @@ func (c *Cache) NewSandboxResumeTask(ctx context.Context, sbx *agentsv1alpha1.Sa
 	)
 }
 
-// NewSandboxWaitReadyTask builds a WaitTask that encapsulates the readiness check
+// NewSandboxWaitReadyTask builds a WaitTask that encapsulates the readiness check.
 func (c *Cache) NewSandboxWaitReadyTask(ctx context.Context, sbx *agentsv1alpha1.Sandbox) *cacheutils.WaitTask[*agentsv1alpha1.Sandbox] {
 	check := func(s *agentsv1alpha1.Sandbox) (bool, error) {
 		if s.Status.ObservedGeneration != s.Generation {

@@ -1577,6 +1577,45 @@ func TestValidateNamespaceForSandboxID(t *testing.T) {
 	}
 }
 
+func TestIsReservedFailedSandbox(t *testing.T) {
+	tests := []struct {
+		name   string
+		labels map[string]string
+		expect bool
+	}{
+		{
+			name:   "nil labels",
+			labels: nil,
+			expect: false,
+		},
+		{
+			name:   "missing label",
+			labels: map[string]string{},
+			expect: false,
+		},
+		{
+			name: "reserved failed true",
+			labels: map[string]string{
+				agentsv1alpha1.LabelSandboxReservedFailed: agentsv1alpha1.True,
+			},
+			expect: true,
+		},
+		{
+			name: "reserved failed false",
+			labels: map[string]string{
+				agentsv1alpha1.LabelSandboxReservedFailed: agentsv1alpha1.False,
+			},
+			expect: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expect, IsReservedFailedSandbox(tt.labels))
+		})
+	}
+}
+
 func TestIsSandboxPausable(t *testing.T) {
 	tests := []struct {
 		name           string

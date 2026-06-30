@@ -28,7 +28,7 @@ import (
 // When apiServerURL is provided, it will proxy through the apiServer (requires restConfig to be provided as well, otherwise connect directly via SandboxIP
 func ProxyRequest(r *http.Request) (*http.Response, error) {
 	log := klog.FromContext(r.Context())
-	resp, err := http.DefaultClient.Do(r)
+	resp, err := http.DefaultClient.Do(r) // #nosec G704 -- request URL constructed by upstream proxy logic
 	if err != nil {
 		return nil, fmt.Errorf("failed to proxy request to sandbox: %w", err)
 	}

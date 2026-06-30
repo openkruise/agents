@@ -191,17 +191,51 @@ func (k *mysqlKeyStorage) ensureAdminKey(ctx context.Context, adminTeamID uint) 
 			return fmt.Errorf("lookup admin key by uid: %w", err)
 		}
 		if err := k.db.WithContext(ctx).Session(&gorm.Session{SkipDefaultTransaction: true}).Create(&key).Error; err != nil {
+			if errors.Is(err, gorm.ErrDuplicatedKey) {
+				return k.repairAdminKeyAfterDuplicate(ctx, key)
+			}
 			return fmt.Errorf("create admin key: %w", err)
 		}
 		return nil
 	}
 
+	return k.updateAdminKey(ctx, key)
+}
+
+func (k *mysqlKeyStorage) repairAdminKeyAfterDuplicate(ctx context.Context, key TeamAPIKeyEntity) error {
+	var existing TeamAPIKeyEntity
+	if err := k.db.WithContext(ctx).Unscoped().Where(&TeamAPIKeyEntity{UID: key.UID}).
+		First(&existing).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return fmt.Errorf("create admin key: duplicate conflict but admin uid %s not present", key.UID)
+		}
+		return fmt.Errorf("lookup admin key after duplicate insert: %w", err)
+	}
+
+	if adminKeyEqual(existing, key) {
+		return nil
+	}
+
+	return k.updateAdminKey(ctx, key)
+}
+
+func adminKeyEqual(existing, expected TeamAPIKeyEntity) bool {
+	return existing.UID == expected.UID &&
+		existing.Name == expected.Name &&
+		existing.KeyHash == expected.KeyHash &&
+		existing.TeamID == expected.TeamID &&
+		!existing.DeletedAt.Valid
+}
+
+func (k *mysqlKeyStorage) updateAdminKey(ctx context.Context, key TeamAPIKeyEntity) error {
 	if err := k.db.WithContext(ctx).Session(&gorm.Session{SkipDefaultTransaction: true}).Model(&TeamAPIKeyEntity{}).
+		Unscoped().
 		Where("uid = ?", key.UID).
 		Updates(map[string]any{
-			"name":     key.Name,
-			"key_hash": key.KeyHash,
-			"team_id":  key.TeamID,
+			"name":       key.Name,
+			"key_hash":   key.KeyHash,
+			"team_id":    key.TeamID,
+			"deleted_at": nil,
 		}).Error; err != nil {
 		return fmt.Errorf("update admin key: %w", err)
 	}

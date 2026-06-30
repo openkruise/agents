@@ -52,6 +52,11 @@ const (
 
 	PodConditionContainersPaused  = "ContainersPaused"
 	PodConditionContainersResumed = "ContainersResumed"
+	PodConditionResetComplete     = "ResetComplete"
+
+	PodConditionResetReasonSucceeded = "ResetSucceeded"
+	PodConditionResetReasonFailed    = "ResetFailed"
+	PodConditionResetReasonTimeout   = "ResetTimeout"
 )
 
 type commonControl struct {
@@ -63,6 +68,7 @@ type commonControl struct {
 	podControl           *PodControl
 	lifecycleHookFunc    LifecycleHookFunc
 	initializer          SandboxInitializer
+	reuseControl         *SandboxReuseControl
 }
 
 func NewCommonControl(args SandboxControlArgs) SandboxControl {
@@ -80,8 +86,13 @@ func NewCommonControl(args SandboxControlArgs) SandboxControl {
 			storageRegistry: storages.NewStorageProvider(),
 			recorder:        args.Recorder,
 		},
+		reuseControl: NewSandboxReuseControl(args.Client, args.Recorder, args.ReuseConfig),
 	}
 	return control
+}
+
+func (r *commonControl) EnsureSandboxReused(ctx context.Context, args EnsureFuncArgs) (time.Duration, error) {
+	return r.reuseControl.ensureSandboxReused(ctx, args)
 }
 
 func (r *commonControl) EnsureSandboxRunning(ctx context.Context, args EnsureFuncArgs) (time.Duration, error) {

@@ -122,6 +122,60 @@ func CreateSandboxWithStatus(t *testing.T, client ctrlclient.Client, sbx *agents
 	assert.NoError(t, err)
 }
 
+// simulateInplaceUpdateControllerForApiTest simulates the controller processing
+// an in-place update by polling the fake client and setting the InplaceUpdate
+// condition to True/Succeeded, syncing ObservedGeneration, and setting Ready=True.
+// This allows tests with InplaceUpdate to pass without a real controller.
+//
+// This mirrors simulateInplaceUpdateController in pkg/sandbox-manager/infra/sandboxcr/claim_test.go.
+// If that function changes, update this one accordingly (or extract to a shared helper).
+func simulateInplaceUpdateControllerForApiTest(ctx context.Context, c ctrlclient.Client) {
+	go func() {
+		ticker := time.NewTicker(5 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+			sbxList := &agentsv1alpha1.SandboxList{}
+			if err := c.List(ctx, sbxList); err != nil {
+				continue
+			}
+			for i := range sbxList.Items {
+				sbx := &sbxList.Items[i]
+				inplaceCond := utils.GetSandboxCondition(&sbx.Status, string(agentsv1alpha1.SandboxConditionInplaceUpdate))
+				if inplaceCond == nil || inplaceCond.Status != metav1.ConditionTrue {
+					// Fetch the latest resource version before updating
+					// status, since the fake client's Status().Update()
+					// checks resource versions and the object from List may
+					// be stale by the time we call Status().Update().
+					latest := &agentsv1alpha1.Sandbox{}
+					if err := c.Get(ctx, ctrlclient.ObjectKeyFromObject(sbx), latest); err != nil {
+						continue
+					}
+					latest.Status.ObservedGeneration = latest.Generation
+					latest.Status.Phase = agentsv1alpha1.SandboxRunning
+					utils.SetSandboxCondition(&latest.Status, metav1.Condition{
+						Type:               string(agentsv1alpha1.SandboxConditionInplaceUpdate),
+						Status:             metav1.ConditionTrue,
+						Reason:             agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded,
+						LastTransitionTime: metav1.Now(),
+					})
+					utils.SetSandboxCondition(&latest.Status, metav1.Condition{
+						Type:               string(agentsv1alpha1.SandboxConditionReady),
+						Status:             metav1.ConditionTrue,
+						Reason:             agentsv1alpha1.SandboxReadyReasonPodReady,
+						LastTransitionTime: metav1.Now(),
+					})
+					_ = c.Status().Update(ctx, latest) //nolint:errcheck // expected on resource version conflicts; next tick will retry
+				}
+			}
+		}
+	}()
+}
+
 func TestSandboxManager_ClaimSandbox(t *testing.T) {
 	testutils.InitLogOutput()
 	now := time.Now()
@@ -203,6 +257,31 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 				assert.Equal(t, "new-image", sbx.GetImage())
 			},
 		},
+		{
+			// Metadata-only change: labels are propagated via Modifier (MergePodLabels),
+			// without InplaceUpdate. The controller patches pod metadata directly
+			// without setting the InplaceUpdate condition, so no simulation goroutine
+			// is needed and the claim should succeed quickly.
+			name: "Claim with metadata-only labels (no inplace update)",
+			opts: infra.ClaimSandboxOptions{
+				User:     username,
+				Template: "exist-1",
+				Modifier: func(sbx infra.Sandbox) {
+					infra.MergePodLabels(sbx, map[string]string{
+						"app": "test-app",
+						"env": "prod",
+					})
+				},
+			},
+			templateSetup: map[string]int{
+				"exist-1": 1,
+			},
+			postCheck: func(t *testing.T, sbx infra.Sandbox) {
+				labels := sbx.GetPodLabels()
+				assert.Equal(t, "test-app", labels["app"], "pod label app should be set via MergePodLabels")
+				assert.Equal(t, "prod", labels["env"], "pod label env should be set via MergePodLabels")
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -280,7 +359,22 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 				}, 100*time.Millisecond, 5*time.Millisecond)
 			}
 
-			tt.opts.ClaimTimeout = 100 * time.Millisecond
+			// For tests with InplaceUpdate and available sandboxes (LockTypeUpdate),
+			// simulate the controller processing the in-place update by setting the
+			// InplaceUpdate condition to True/Succeeded.
+			hasAvailable := false
+			for _, count := range tt.templateSetup {
+				if count > 0 {
+					hasAvailable = true
+					break
+				}
+			}
+			if tt.opts.InplaceUpdate != nil && hasAvailable {
+				tt.opts.ClaimTimeout = 2 * time.Second
+				simulateInplaceUpdateControllerForApiTest(t.Context(), client)
+			} else {
+				tt.opts.ClaimTimeout = 100 * time.Millisecond
+			}
 			var claimed infra.Sandbox
 			err := retry.OnError(wait.Backoff{
 				Duration: 100 * time.Millisecond,
@@ -896,12 +990,13 @@ func TestSandboxManager_CloneSandbox(t *testing.T) {
 	}
 
 	tests := []struct {
-		name              string
-		opts              infra.CloneSandboxOptions
-		sbxOverride       sbxOverride
-		setupResources    bool
-		expectError       bool
-		expectedErrorCode errors.ErrorCode
+		name                   string
+		opts                   infra.CloneSandboxOptions
+		sbxOverride            sbxOverride
+		setupResources         bool
+		preexistingSandboxName string
+		expectError            bool
+		expectedErrorCode      errors.ErrorCode
 	}{
 		{
 			name: "successful clone",
@@ -924,6 +1019,20 @@ func TestSandboxManager_CloneSandbox(t *testing.T) {
 			setupResources:    false,
 			expectError:       true,
 			expectedErrorCode: errors.ErrorInternal,
+		},
+		{
+			name: "explicit name collision returns conflict",
+			opts: infra.CloneSandboxOptions{
+				Namespace:        "default",
+				User:             user,
+				CheckPointID:     checkpointID,
+				Name:             "existing-sandbox",
+				WaitReadyTimeout: 30 * time.Second,
+			},
+			setupResources:         true,
+			preexistingSandboxName: "existing-sandbox",
+			expectError:            true,
+			expectedErrorCode:      errors.ErrorConflict,
 		},
 	}
 
@@ -1002,6 +1111,17 @@ func TestSandboxManager_CloneSandbox(t *testing.T) {
 				require.NoError(t, err)
 				cp.Status.CheckpointId = checkpointID
 				err = client.Status().Update(t.Context(), cp)
+				require.NoError(t, err)
+			}
+
+			if tt.preexistingSandboxName != "" {
+				existing := &agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      tt.preexistingSandboxName,
+						Namespace: "default",
+					},
+				}
+				err := client.Create(t.Context(), existing)
 				require.NoError(t, err)
 			}
 
@@ -1713,6 +1833,60 @@ func TestPreserveTypedError(t *testing.T) {
 			result := preserveTypedError(tt.err, tt.contextMsg)
 			assert.Equal(t, tt.expectErrorCode, errors.GetErrCode(result))
 			assert.Contains(t, result.Error(), tt.expectContains)
+		})
+	}
+}
+
+func TestSandboxManager_deleteRouteAndSync(t *testing.T) {
+	testutils.InitLogOutput()
+
+	tests := []struct {
+		name            string
+		setRouteInProxy bool
+	}{
+		{
+			name:            "route deleted from proxy after deleteRouteAndSync",
+			setRouteInProxy: true,
+		},
+		{
+			name:            "deleteRouteAndSync does not panic when route does not exist",
+			setRouteInProxy: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			manager, client := setupTestManager(t)
+
+			sandbox := getSandboxForApiTest(tt.name)
+			sandbox.Status.Phase = agentsv1alpha1.SandboxRunning
+			sandbox.Status.Conditions = []metav1.Condition{
+				{
+					Type:   string(agentsv1alpha1.SandboxConditionReady),
+					Status: metav1.ConditionTrue,
+				},
+			}
+			sandbox.Status.PodInfo.PodIP = "10.0.0.99"
+			CreateSandboxWithStatus(t, client, sandbox)
+
+			sbx, err := manager.GetSandbox(t.Context(), testUser, nil, infra.GetSandboxOptions{
+				SandboxID: utils.GetSandboxID(sandbox),
+			})
+			require.NoError(t, err)
+
+			if tt.setRouteInProxy {
+				initialRoute := sbx.GetRoute()
+				manager.proxy.SetRoute(t.Context(), initialRoute)
+				_, ok := manager.proxy.LoadRoute(sbx.GetSandboxID())
+				require.True(t, ok, "route should exist before deleteRouteAndSync")
+			}
+
+			assert.NotPanics(t, func() {
+				manager.deleteRouteAndSync(t.Context(), sbx)
+			})
+
+			_, ok := manager.proxy.LoadRoute(sbx.GetSandboxID())
+			assert.False(t, ok, "route should not exist after deleteRouteAndSync")
 		})
 	}
 }

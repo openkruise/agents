@@ -146,7 +146,7 @@ func (c *commonControl) EnsureClaimClaiming(ctx context.Context, args ClaimArgs)
 	}
 
 	// Step 9: Update final count and status
-	finalCount := currentCount + int32(claimed)
+	finalCount := currentCount + int32(claimed) // #nosec G115 -- K8s object count
 	args.NewStatus.ClaimedReplicas = finalCount
 	args.NewStatus.Message = fmt.Sprintf("Claiming sandboxes: %d/%d claimed", finalCount, desiredReplicas)
 
@@ -311,6 +311,7 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 		},
 		ReserveFailedSandboxFor: reserveFailedSandboxFor,
 		CreateOnNoStock:         claim.Spec.CreateOnNoStock,
+		UserMetadataKeys:        sandboxcr.BuildUserMetadataKeys(claim.Spec.Labels, claim.Spec.Annotations),
 	}
 
 	if claim.Spec.InplaceUpdate != nil {

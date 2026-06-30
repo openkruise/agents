@@ -1650,6 +1650,30 @@ func TestDescribeSandboxDeadClaimedSandbox(t *testing.T) {
 	assert.Equal(t, v1alpha1.SandboxStateDead, describeResp.Body.State)
 }
 
+func TestDescribeSandboxReservedFailedSandboxReturnsNotFound(t *testing.T) {
+	controller, fc, teardown := Setup(t)
+	defer teardown()
+
+	user := &models.CreatedTeamAPIKey{
+		ID:   keys.AdminKeyID,
+		Key:  InitKey,
+		Name: "admin",
+		Team: models.AdminTeam(),
+	}
+	sandbox := CreateClaimedSandboxCR(t, controller, Namespace, "reserved-failed-describe", "test-template", user.ID.String(), nil)
+	sandbox.Labels[v1alpha1.LabelSandboxReservedFailed] = v1alpha1.True
+	require.NoError(t, fc.Update(t.Context(), sandbox))
+	sandboxID := fmt.Sprintf("%s--%s", sandbox.Namespace, sandbox.Name)
+
+	resp, apiErr := controller.DescribeSandbox(NewRequest(t, nil, nil, map[string]string{
+		"sandboxID": sandboxID,
+	}, user))
+
+	assert.Nil(t, resp.Body)
+	require.NotNil(t, apiErr)
+	assert.Equal(t, http.StatusNotFound, apiErr.Code)
+}
+
 func TestConnectSandboxDeadClaimedSandbox(t *testing.T) {
 	controller, fc, teardown := Setup(t)
 	defer teardown()

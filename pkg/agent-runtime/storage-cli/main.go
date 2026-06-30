@@ -18,7 +18,7 @@ package main
 
 import (
 	"context"
-	"crypto/md5"
+	"crypto/md5" // #nosec G501 -- non-security short hash
 	"encoding/base64"
 	"fmt"
 	"log"
@@ -74,7 +74,7 @@ var (
 )
 
 func rootRun(cmd *cobra.Command, args []string) {
-	cmd.Help()
+	cmd.Help() // #nosec G104 -- help output error is non-actionable
 }
 
 // runMount contains the core logic of the mount subcommand. It returns an
@@ -83,13 +83,13 @@ func rootRun(cmd *cobra.Command, args []string) {
 func runMount(cmd *cobra.Command) error {
 	configRaw, err := base64.StdEncoding.DecodeString(config)
 	if err != nil {
-		cmd.Help()
+		cmd.Help() // #nosec G104 -- help output error is non-actionable
 		return fmt.Errorf("failed to decode CSI request config: %w", err)
 	}
 
 	csiReq := csi.NodePublishVolumeRequest{}
 	if err := proto.Unmarshal(configRaw, &csiReq); err != nil {
-		cmd.Help()
+		cmd.Help() // #nosec G104 -- help output error is non-actionable
 		return fmt.Errorf("failed to unmarshal CSI request: %w", err)
 	}
 
@@ -106,7 +106,7 @@ func runMount(cmd *cobra.Command) error {
 	}
 
 	if err := validateGeneralParams(csiReq); err != nil {
-		cmd.Help()
+		cmd.Help() // #nosec G104 -- help output error is non-actionable
 		return err
 	}
 
@@ -122,12 +122,12 @@ func runMount(cmd *cobra.Command) error {
 	provider, ok := storageLookupFn(driver)
 	if !ok {
 		log.Printf("Supported drivers: %v", storage.Drivers())
-		cmd.Help()
+		cmd.Help() // #nosec G104 -- help output error is non-actionable
 		return fmt.Errorf("unsupported storage driver: %s", driver)
 	}
 
 	if err = provider.Validate(csiReq); err != nil {
-		cmd.Help()
+		cmd.Help() // #nosec G104 -- help output error is non-actionable
 		return err
 	}
 
@@ -173,7 +173,7 @@ func unmountRun(cmd *cobra.Command, args []string) {
 	err := validateUnmountParams() // unmount uses the same parameter validation
 	if err != nil {
 		log.Printf("Error: %v\n", err)
-		cmd.Help()
+		cmd.Help() // #nosec G104 -- help output error is non-actionable
 		return
 	}
 	// TODO
@@ -206,7 +206,7 @@ func validateUnmountParams() error {
 }
 
 func getMD5String(s string) string {
-	h := md5.New()
-	h.Write([]byte(s))
+	h := md5.New()     // #nosec G401 -- non-security short hash
+	h.Write([]byte(s)) // #nosec G104 -- hash.Write never returns error
 	return fmt.Sprintf("%x", h.Sum(nil))
 }

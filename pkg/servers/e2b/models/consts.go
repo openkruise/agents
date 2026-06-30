@@ -28,5 +28,5 @@ const (
 	MaxListLimit = 100
 	MinListLimit = 1
 
-	HeaderApiKey = "X-API-Key"
+	HeaderApiKey = "X-API-Key" // #nosec G101 -- header name, not a credential
 )

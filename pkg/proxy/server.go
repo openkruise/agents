@@ -37,7 +37,7 @@ import (
 	"github.com/openkruise/agents/pkg/peers"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
-	"github.com/openkruise/agents/pkg/servers/web"
+	"github.com/openkruise/agents/pkg/utils"
 )
 
 const (
@@ -107,7 +107,7 @@ func (s *Server) Run() error {
 
 	// HTTP
 	mux := http.NewServeMux()
-	web.RegisterRoute(mux, http.MethodPost, RefreshAPI, s.handleRefresh)
+	mux.HandleFunc(fmt.Sprintf("%s %s", http.MethodPost, RefreshAPI), s.handleRefresh)
 	s.httpSrv = &http.Server{
 		Addr:              fmt.Sprintf(":%d", SystemPort),
 		Handler:           mux,
@@ -153,24 +153,21 @@ func (s *Server) Stop(ctx context.Context) {
 	}
 }
 
-func (s *Server) handleRefresh(r *http.Request) (web.ApiResponse[struct{}], *web.ApiError) {
+func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	log := klog.FromContext(ctx)
 	var route Route
 	if err := json.NewDecoder(r.Body).Decode(&route); err != nil {
-		return web.ApiResponse[struct{}]{}, &web.ApiError{
-			Code:    http.StatusBadRequest,
-			Message: fmt.Sprintf("failed to unmarshal body: %s", err.Error()),
-		}
+		log.Error(err, "failed to unmarshal refresh request body")
+		http.Error(w, fmt.Sprintf("failed to unmarshal body: %s", err.Error()), http.StatusBadRequest)
+		return
 	}
 	if route.State == v1alpha1.SandboxStateDead {
 		s.DeleteRoute(route.ID)
-		log.Info("route deleted")
+		log.V(utils.DebugLogLevel + 1).Info("route deleted")
 	} else {
 		s.SetRoute(ctx, route)
-		log.Info("route refreshed", "route", route)
+		log.V(utils.DebugLogLevel+1).Info("route refreshed", "route", route)
 	}
-	return web.ApiResponse[struct{}]{
-		Code: http.StatusNoContent,
-	}, nil
+	w.WriteHeader(http.StatusNoContent)
 }

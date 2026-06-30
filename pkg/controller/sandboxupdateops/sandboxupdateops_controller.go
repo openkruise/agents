@@ -160,7 +160,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return *requeueResult, nil
 	}
 
-	total := updated + failed + updating + int32(len(candidates))
+	total := updated + failed + updating + int32(len(candidates)) // #nosec G115 -- K8s object count
 	newStatus := ops.Status.DeepCopy()
 	newStatus.ObservedGeneration = ops.Generation
 	newStatus.Replicas = total
@@ -364,7 +364,7 @@ func calculateMaxUnavailable(maxUnavailable *intstrutil.IntOrString, total int32
 	if err != nil || val <= 0 {
 		return 1
 	}
-	return int32(val)
+	return int32(val) // #nosec G115 -- val derived from int32 total
 }
 
 func (r *Reconciler) handleDeletion(ctx context.Context, ops *agentsv1alpha1.SandboxUpdateOps) (ctrl.Result, error) {

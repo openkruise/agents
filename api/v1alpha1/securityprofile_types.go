@@ -233,7 +233,7 @@ const (
 	CredentialRefKindSecret CredentialRefKind = "Secret"
 	// CredentialRefKindCredentialProvider fetches credentials at runtime
 	// from an external credential provider (e.g. agent-identity service).
-	CredentialRefKindCredentialProvider CredentialRefKind = "CredentialProvider"
+	CredentialRefKindCredentialProvider CredentialRefKind = "CredentialProvider" // #nosec G101 -- not a credential
 )
 
 // CredentialRef identifies the credential source for a TokenTransformation.

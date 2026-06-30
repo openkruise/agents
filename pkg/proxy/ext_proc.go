@@ -177,7 +177,7 @@ func (s *Server) logAndCreateErrorResponse(statusCode int, message string, log l
 		Response: &extProcPb.ProcessingResponse_ImmediateResponse{
 			ImmediateResponse: &extProcPb.ImmediateResponse{
 				Status: &types.HttpStatus{
-					Code: types.StatusCode(statusCode),
+					Code: types.StatusCode(statusCode), // #nosec G115 -- HTTP status code range
 				},
 				Body: []byte(fmt.Sprintf("API Error: %s", message)),
 			},

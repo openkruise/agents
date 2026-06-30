@@ -1416,49 +1416,138 @@ func TestIsPodResourceResizeCompleted(t *testing.T) {
 		Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")},
 		Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")},
 	}
-	pod := &corev1.Pod{
-		Spec: corev1.PodSpec{
-			Containers: []corev1.Container{{Name: "c", Resources: tmpl}},
+
+	tests := []struct {
+		name       string
+		pod        *corev1.Pod
+		expectDone bool
+	}{
+		{
+			name: "no container statuses",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "c", Resources: tmpl}},
+				},
+			},
+			expectDone: false,
+		},
+		{
+			name: "container status exists but resources is nil",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "c", Resources: tmpl}},
+				},
+				Status: corev1.PodStatus{
+					ContainerStatuses: []corev1.ContainerStatus{{Name: "c"}},
+				},
+			},
+			expectDone: false,
+		},
+		{
+			name: "requests do not match",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "c", Resources: tmpl}},
+				},
+				Status: corev1.PodStatus{
+					ContainerStatuses: []corev1.ContainerStatus{{
+						Name: "c",
+						Resources: &corev1.ResourceRequirements{
+							Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("250m")},
+							Limits:   tmpl.Limits,
+						},
+					}},
+				},
+			},
+			expectDone: false,
+		},
+		{
+			name: "limits do not match",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "c", Resources: tmpl}},
+				},
+				Status: corev1.PodStatus{
+					ContainerStatuses: []corev1.ContainerStatus{{
+						Name: "c",
+						Resources: &corev1.ResourceRequirements{
+							Requests: tmpl.Requests,
+							Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("250m")},
+						},
+					}},
+				},
+			},
+			expectDone: false,
+		},
+		{
+			name: "spec and status resources match",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "c", Resources: tmpl}},
+				},
+				Status: corev1.PodStatus{
+					ContainerStatuses: []corev1.ContainerStatus{{
+						Name:      "c",
+						Resources: &tmpl,
+					}},
+				},
+			},
+			expectDone: true,
+		},
+		{
+			name: "spec has more resource types than status",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name: "c",
+						Resources: corev1.ResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceCPU:              resource.MustParse("500m"),
+								corev1.ResourceEphemeralStorage: resource.MustParse("1Gi"),
+							},
+							Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")},
+						},
+					}},
+				},
+				Status: corev1.PodStatus{
+					ContainerStatuses: []corev1.ContainerStatus{{
+						Name:      "c",
+						Resources: &tmpl, // Only CPU, missing ephemeral-storage
+					}},
+				},
+			},
+			expectDone: false,
+		},
+		{
+			name: "status has more resource types than spec",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "c", Resources: tmpl}},
+				},
+				Status: corev1.PodStatus{
+					ContainerStatuses: []corev1.ContainerStatus{{
+						Name: "c",
+						Resources: &corev1.ResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceCPU:              resource.MustParse("500m"),
+								corev1.ResourceEphemeralStorage: resource.MustParse("1Gi"),
+							},
+							Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")},
+						},
+					}},
+				},
+			},
+			expectDone: true,
 		},
 	}
 
-	if isPodResourceResizeCompleted(pod) {
-		t.Fatalf("expected not completed when status is empty")
-	}
-
-	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "c"}}
-	if isPodResourceResizeCompleted(pod) {
-		t.Fatalf("expected not completed when status.resources is nil")
-	}
-
-	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
-		Name: "c",
-		Resources: &corev1.ResourceRequirements{
-			Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("250m")},
-			Limits:   tmpl.Limits,
-		},
-	}}
-	if isPodResourceResizeCompleted(pod) {
-		t.Fatalf("expected not completed when requests do not match")
-	}
-
-	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
-		Name: "c",
-		Resources: &corev1.ResourceRequirements{
-			Requests: tmpl.Requests,
-			Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("250m")},
-		},
-	}}
-	if isPodResourceResizeCompleted(pod) {
-		t.Fatalf("expected not completed when limits do not match")
-	}
-
-	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
-		Name:      "c",
-		Resources: &tmpl,
-	}}
-	if !isPodResourceResizeCompleted(pod) {
-		t.Fatalf("expected completed when spec/status resources match")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isPodResourceResizeCompleted(tt.pod)
+			if got != tt.expectDone {
+				t.Errorf("isPodResourceResizeCompleted() = %v, want %v", got, tt.expectDone)
+			}
+		})
 	}
 }
 
@@ -2884,9 +2973,9 @@ func TestResourcesEqual(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := resourcesEqual(tt.desired, tt.actual)
+			got := ResourcesEqual(tt.desired, tt.actual)
 			if got != tt.expect {
-				t.Errorf("resourcesEqual() = %v, want %v", got, tt.expect)
+				t.Errorf("ResourcesEqual() = %v, want %v", got, tt.expect)
 			}
 		})
 	}

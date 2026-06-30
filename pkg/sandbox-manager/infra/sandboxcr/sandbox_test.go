@@ -176,8 +176,8 @@ func TestSandbox_SaveTimeoutWithPolicy(t *testing.T) {
 			require.Eventually(t, func() bool {
 				var err error
 				sandbox, err = infraInstance.GetSandbox(t.Context(), infra.GetSandboxOptions{
-					SandboxID:      utils.GetSandboxID(sbx),
-					Namespace:      sbx.Namespace,
+					SandboxID: utils.GetSandboxID(sbx),
+					Namespace: sbx.Namespace,
 				})
 				return err == nil
 			}, time.Second, 10*time.Millisecond)
@@ -264,15 +264,15 @@ func TestSandbox_SaveTimeoutWithPolicy_OnConflict(t *testing.T) {
 	require.Eventually(t, func() bool {
 		var getErr error
 		sandboxA, getErr = infraImpl.GetSandbox(t.Context(), infra.GetSandboxOptions{
-			SandboxID:      utils.GetSandboxID(sbx),
-			Namespace:      sbx.Namespace,
+			SandboxID: utils.GetSandboxID(sbx),
+			Namespace: sbx.Namespace,
 		})
 		if getErr != nil {
 			return false
 		}
 		sandboxB, getErr = infraImpl.GetSandbox(t.Context(), infra.GetSandboxOptions{
-			SandboxID:      utils.GetSandboxID(sbx),
-			Namespace:      sbx.Namespace,
+			SandboxID: utils.GetSandboxID(sbx),
+			Namespace: sbx.Namespace,
 		})
 		return getErr == nil
 	}, time.Second, 10*time.Millisecond)
@@ -1195,6 +1195,79 @@ func TestSandbox_CSIMount(t *testing.T) {
 				assert.ErrorContains(t, err, tt.expectError)
 			} else {
 				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestSandbox_TriggerReuse(t *testing.T) {
+	tests := []struct {
+		name               string
+		initialAnnotations map[string]string
+		patchInterceptor   func(context.Context, client.WithWatch, client.Object, client.Patch, ...client.PatchOption) error
+		expectError        string
+	}{
+		{
+			name:               "success with nil annotations",
+			initialAnnotations: nil,
+		},
+		{
+			name:               "success with existing annotations",
+			initialAnnotations: map[string]string{"existing": "value"},
+		},
+		{
+			name:               "patch error returns error",
+			initialAnnotations: nil,
+			patchInterceptor: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				return errors.New("forced patch error")
+			},
+			expectError: "forced patch error",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sbx := createTestSandboxWithDefaults("test-sandbox", "default")
+			sbx.Annotations = tt.initialAnnotations
+
+			scheme := k8sruntime.NewScheme()
+			utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+			utilruntime.Must(v1alpha1.AddToScheme(scheme))
+
+			builder := fake.NewClientBuilder().WithScheme(scheme)
+			for _, idx := range infracache.GetIndexFuncs() {
+				builder = builder.WithIndex(idx.Obj, idx.FieldName, idx.Extract)
+			}
+			builder = builder.WithStatusSubresource(&v1alpha1.Sandbox{})
+			builder = builder.WithObjects(sbx)
+			if tt.patchInterceptor != nil {
+				builder = builder.WithInterceptorFuncs(interceptor.Funcs{Patch: tt.patchInterceptor})
+			}
+			fc := builder.Build()
+
+			provider := &retryUpdateTestProvider{
+				client:         fc,
+				apiReader:      &countingReader{Reader: fc},
+				claimedSandbox: sbx,
+			}
+			s := AsSandbox(sbx, provider)
+
+			err := s.TriggerReuse(t.Context())
+			if tt.expectError != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
+			} else {
+				require.NoError(t, err)
+				// Verify annotation is set on the in-memory object
+				assert.Equal(t, "true", s.Sandbox.Annotations[v1alpha1.AnnotationReuse])
+				// Verify annotation is persisted to the fake client
+				var stored v1alpha1.Sandbox
+				require.NoError(t, fc.Get(t.Context(), types.NamespacedName{Namespace: sbx.Namespace, Name: sbx.Name}, &stored))
+				assert.Equal(t, "true", stored.Annotations[v1alpha1.AnnotationReuse])
+				// Verify existing annotations are preserved
+				for k, v := range tt.initialAnnotations {
+					assert.Equal(t, v, stored.Annotations[k])
+				}
 			}
 		})
 	}

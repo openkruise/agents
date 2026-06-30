@@ -245,13 +245,37 @@ func (m *SandboxManager) ResumeSandbox(ctx context.Context, sbx infra.Sandbox, o
 	return nil
 }
 
-// DeleteSandbox deletes a sandbox and syncs route with peers
-func (m *SandboxManager) DeleteSandbox(ctx context.Context, sbx infra.Sandbox) error {
-	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
-	start := time.Now()
+// deleteRouteAndSync removes the route locally and syncs the deletion with peers.
+func (m *SandboxManager) deleteRouteAndSync(ctx context.Context, sbx infra.Sandbox) {
+	log := klog.FromContext(ctx)
 	route := sbx.GetRoute()
 	route.State = v1alpha1.SandboxStateDead
+	m.proxy.DeleteRoute(route.ID)
+	if err := m.proxy.SyncRouteWithPeers(route); err != nil {
+		log.Error(err, "failed to sync route with peers")
+	}
+}
 
+// DeleteSandbox deletes a sandbox and syncs route with peers.
+// If the sandbox is reuse-enabled and in Running phase, it triggers reuse instead of deletion.
+func (m *SandboxManager) DeleteSandbox(ctx context.Context, sbx infra.Sandbox) error {
+	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
+
+	if sbx.IsReuseEnabled() && sbx.Phase() == string(v1alpha1.SandboxRunning) {
+		log.Info("sandbox is reuse-enabled, triggering reuse instead of deletion")
+		start := time.Now()
+		if err := sbx.TriggerReuse(ctx); err != nil {
+			log.Error(err, "failed to trigger reuse, falling back to delete")
+			sandboxReuseResponses.WithLabelValues(sbx.GetNamespace(), "failure").Inc()
+		} else {
+			sandboxReuseResponses.WithLabelValues(sbx.GetNamespace(), "success").Inc()
+			sandboxReuseDuration.WithLabelValues(sbx.GetNamespace()).Observe(time.Since(start).Seconds())
+			m.deleteRouteAndSync(ctx, sbx)
+			return nil
+		}
+	}
+
+	start := time.Now()
 	if err := sbx.Kill(ctx); err != nil {
 		log.Error(err, "failed to delete sandbox")
 		sandboxDeleteResponses.WithLabelValues(sbx.GetNamespace(), "failure").Inc()
@@ -261,10 +285,6 @@ func (m *SandboxManager) DeleteSandbox(ctx context.Context, sbx infra.Sandbox) e
 	sandboxDeleteDuration.WithLabelValues(sbx.GetNamespace()).Observe(time.Since(start).Seconds())
 	log.Info("sandbox deleted")
 
-	m.proxy.DeleteRoute(route.ID)
-	if err := m.proxy.SyncRouteWithPeers(route); err != nil {
-		log.Error(err, "failed to sync route with peers after delete")
-	}
-	log.Info("route synced with peers after delete", "route", route)
+	m.deleteRouteAndSync(ctx, sbx)
 	return nil
 }

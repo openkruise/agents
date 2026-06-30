@@ -83,6 +83,59 @@ func CreateSandboxWithStatus(t *testing.T, c client.Client, sbx *v1alpha1.Sandbo
 	require.NoError(t, err)
 }
 
+// simulateInplaceUpdateController starts a background goroutine that polls the
+// fake client and simulates the controller processing an in-place update.
+// When it detects that the InplaceUpdate condition is nil or not True, it sets
+// the InplaceUpdate condition to True/Succeeded, the Ready condition to
+// True/PodReady, and syncs ObservedGeneration. This allows tests with
+// InplaceUpdate to pass without a real controller.
+func simulateInplaceUpdateController(ctx context.Context, c client.Client) {
+	go func() {
+		ticker := time.NewTicker(5 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				sbxList := &v1alpha1.SandboxList{}
+				if err := c.List(ctx, sbxList); err != nil {
+					continue
+				}
+				for i := range sbxList.Items {
+					sbx := &sbxList.Items[i]
+					inplaceCond := pkgutils.GetSandboxCondition(&sbx.Status, string(v1alpha1.SandboxConditionInplaceUpdate))
+					if inplaceCond == nil || inplaceCond.Status != metav1.ConditionTrue {
+						// Fetch the latest resource version before updating
+						// status, since the fake client's Status().Update()
+						// checks resource versions and the object from List may
+						// be stale by the time we call Status().Update().
+						latest := &v1alpha1.Sandbox{}
+						if err := c.Get(ctx, client.ObjectKeyFromObject(sbx), latest); err != nil {
+							continue
+						}
+						latest.Status.ObservedGeneration = latest.Generation
+						latest.Status.Phase = v1alpha1.SandboxRunning
+						pkgutils.SetSandboxCondition(&latest.Status, metav1.Condition{
+							Type:               string(v1alpha1.SandboxConditionInplaceUpdate),
+							Status:             metav1.ConditionTrue,
+							Reason:             v1alpha1.SandboxInplaceUpdateReasonSucceeded,
+							LastTransitionTime: metav1.Now(),
+						})
+						pkgutils.SetSandboxCondition(&latest.Status, metav1.Condition{
+							Type:               string(v1alpha1.SandboxConditionReady),
+							Status:             metav1.ConditionTrue,
+							Reason:             v1alpha1.SandboxReadyReasonPodReady,
+							LastTransitionTime: metav1.Now(),
+						})
+						_ = c.Status().Update(ctx, latest) //nolint:errcheck // expected on resource version conflicts; next tick will retry
+					}
+				}
+			}
+		}
+	}()
+}
+
 var metricsAnnotationKey = v1alpha1.InternalPrefix + "metrics"
 
 func GetMetricsFromSandbox(t *testing.T, sbx infra.Sandbox) infra.ClaimMetrics {
@@ -105,7 +158,7 @@ func TestValidateAndInitClaimOptions_ReserveFailedSandboxFor(t *testing.T) {
 				User:     "test-user",
 				Template: "test-template",
 			},
-			expectFor: DefaultReserveFailedSandboxFor,
+			expectFor: consts.ReserveFailedSandboxNever,
 		},
 		{
 			name: "explicit never deletes immediately",
@@ -487,7 +540,11 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if tt.options.ClaimTimeout <= 0 {
-				tt.options.ClaimTimeout = 50 * time.Millisecond
+				if tt.options.InplaceUpdate != nil && tt.available > 0 {
+					tt.options.ClaimTimeout = 2 * time.Second
+				} else {
+					tt.options.ClaimTimeout = 50 * time.Millisecond
+				}
 			}
 			testInfra, fc := NewTestInfra(t, tt.infraOptions)
 			now := metav1.Now()
@@ -533,6 +590,28 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 			if tt.preProcess != nil {
 				tt.preProcess(t, testInfra)
 			}
+			// For tests with InplaceUpdate and available sandboxes (LockTypeUpdate),
+			// simulate the controller processing the in-place update by setting
+			// the InplaceUpdate condition to True/Succeeded.
+			if tt.options.InplaceUpdate != nil && tt.available > 0 {
+				// Register available sandboxes as wait reconcile keys so the
+				// mock manager's wait simulation goroutine (500ms tick) will
+				// periodically reconcile them and resolve wait entries once
+				// the simulated controller updates the status.
+				if c, ok := testInfra.Cache.(*infracache.Cache); ok {
+					if mgr := c.GetMockManager(); mgr != nil {
+						for i := 0; i < tt.available; i++ {
+							mgr.AddWaitReconcileKey(&v1alpha1.Sandbox{
+								ObjectMeta: metav1.ObjectMeta{
+									Name:      fmt.Sprintf("sbx-%d", i),
+									Namespace: "default",
+								},
+							})
+						}
+					}
+				}
+				simulateInplaceUpdateController(t.Context(), fc)
+			}
 			claimCtx := t.Context()
 			if tt.claimCtx != nil {
 				claimCtx = tt.claimCtx(t.Context())
@@ -576,14 +655,16 @@ func TestClaimSandboxFailed(t *testing.T) {
 	existTemplate := "test-template"
 
 	// Test cases
+	existingShutdownTime := metav1.NewTime(time.Date(2027, 1, 2, 3, 4, 5, 0, time.UTC))
 	tests := []struct {
-		name           string
-		options        infra.ClaimSandboxOptions
-		preModifier    func(sbx *v1alpha1.Sandbox)
-		expectError    string
-		expectDeleted  bool
-		expectShutdown bool
-		getContext     func() context.Context
+		name                   string
+		options                infra.ClaimSandboxOptions
+		preModifier            func(sbx *v1alpha1.Sandbox)
+		expectError            string
+		expectDeleted          bool
+		expectShutdown         bool
+		expectExistingShutdown *metav1.Time
+		getContext             func() context.Context
 	}{
 		{
 			name: "start container failed, reserved",
@@ -605,6 +686,29 @@ func TestClaimSandboxFailed(t *testing.T) {
 				}
 			},
 			expectError: "sandbox start container failed",
+		},
+		{
+			name: "start container failed, reserved forever keeps existing shutdown time",
+			options: infra.ClaimSandboxOptions{
+				User:                    "test-user",
+				Template:                existTemplate,
+				ReserveFailedSandboxFor: ptr.To(consts.ReserveFailedSandboxForever),
+				InplaceUpdate: &config.InplaceUpdateOptions{
+					Image: "new-image",
+				},
+			},
+			preModifier: func(sbx *v1alpha1.Sandbox) {
+				sbx.Spec.ShutdownTime = existingShutdownTime.DeepCopy()
+				sbx.Status.Conditions = []metav1.Condition{
+					{
+						Type:   string(v1alpha1.SandboxConditionReady),
+						Status: metav1.ConditionTrue,
+						Reason: v1alpha1.SandboxReadyReasonStartContainerFailed,
+					},
+				}
+			},
+			expectError:            "sandbox start container failed",
+			expectExistingShutdown: &existingShutdownTime,
 		},
 		{
 			name: "start container failed, reserved for duration",
@@ -793,9 +897,51 @@ func TestClaimSandboxFailed(t *testing.T) {
 			if tt.expectShutdown {
 				require.NotNil(t, got.Spec.ShutdownTime)
 				assert.WithinDuration(t, time.Now().Add(time.Hour), got.Spec.ShutdownTime.Time, 5*time.Second)
+				assert.Equal(t, v1alpha1.True, got.Labels[v1alpha1.LabelSandboxReservedFailed])
+			} else if tt.expectExistingShutdown != nil {
+				require.NotNil(t, got.Spec.ShutdownTime)
+				assert.True(t, got.Spec.ShutdownTime.Time.Equal(tt.expectExistingShutdown.Time))
+				assert.Equal(t, v1alpha1.True, got.Labels[v1alpha1.LabelSandboxReservedFailed])
 			} else {
 				assert.Nil(t, got.Spec.ShutdownTime)
+				if tt.options.ReserveFailedSandboxFor != nil && *tt.options.ReserveFailedSandboxFor == consts.ReserveFailedSandboxForever {
+					assert.Equal(t, v1alpha1.True, got.Labels[v1alpha1.LabelSandboxReservedFailed])
+				}
 			}
+		})
+	}
+}
+
+func TestClearFailedSandboxReserveUpdateFailureDeletesSandbox(t *testing.T) {
+	tests := []struct {
+		name       string
+		reserveFor time.Duration
+	}{
+		{
+			name:       "reserve forever falls back to delete",
+			reserveFor: consts.ReserveFailedSandboxForever,
+		},
+		{
+			name:       "reserve for duration falls back to delete",
+			reserveFor: time.Hour,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sbx := createTestSandboxWithDefaults("test-sbx", "default")
+			testCache, fc := newRetryUpdateTestCache(t, sbx, sbx.DeepCopy(), func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+				if _, ok := obj.(*v1alpha1.Sandbox); ok {
+					return apierrors.NewInternalError(errors.New("reserve update failed"))
+				}
+				return c.Update(ctx, obj, opts...)
+			})
+
+			clearFailedSandbox(t.Context(), AsSandbox(sbx, testCache), errors.New("claim failed"), ptr.To(tt.reserveFor))
+
+			got := &v1alpha1.Sandbox{}
+			err := fc.Get(t.Context(), client.ObjectKeyFromObject(sbx), got)
+			assert.True(t, apierrors.IsNotFound(err))
 		})
 	}
 }
@@ -1589,7 +1735,7 @@ func TestValidateAndInitClaimOptions_InplaceUpdateValidation(t *testing.T) {
 				InplaceUpdate: &config.InplaceUpdateOptions{},
 			},
 			expectErr:   true,
-			errContains: "requires either image or resources",
+			errContains: "requires at least one of image or resources",
 		},
 		{
 			name: "resources require requests or limits",

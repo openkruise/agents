@@ -17,7 +17,7 @@ package utils
 
 import (
 	"context"
-	"crypto/md5"
+	"crypto/md5" // #nosec G501 -- non-security short hash
 	"fmt"
 	"os"
 	"sync"
@@ -170,7 +170,7 @@ func GetClusterIDHash() string {
 	if clusterID == "" {
 		return ""
 	}
-	hash := fmt.Sprintf("%x", md5.Sum([]byte(clusterID)))
+	hash := fmt.Sprintf("%x", md5.Sum([]byte(clusterID))) // #nosec G401 -- non-security short hash
 	return hash[:4]
 }
 func GetFromInformerOrApiServer[T client.Object](ctx context.Context, target T, key client.ObjectKey,

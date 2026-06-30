@@ -146,10 +146,30 @@ type Sandbox interface {
 	GetTimeout() timeout.Options
 	GetClaimTime() (time.Time, error)
 	Kill(ctx context.Context) error                                                                     // Delete the Sandbox resource
+	TriggerReuse(ctx context.Context) error                                                             // Trigger sandbox reuse flow instead of deletion
+	IsReuseEnabled() bool                                                                               // Whether the sandbox supports reuse
+	Phase() string                                                                                      // Get the current sandbox phase
 	InplaceRefresh(ctx context.Context, deepcopy bool) error                                            // Update the Sandbox resource object to the latest
 	Request(ctx context.Context, method, path string, port int, body io.Reader) (*http.Response, error) // Make a request to the Sandbox
 	CSIMount(ctx context.Context, driver string, request string) error                                  // request is string config for csi.NodePublishVolumeRequest
 	CreateCheckpoint(ctx context.Context, opts CreateCheckpointOptions) (string, error)
+}
+
+// MergePodLabels merges the given labels into the sandbox's pod template labels.
+// Existing labels with the same key are overwritten. The sandbox's pod template
+// is initialized if necessary.
+func MergePodLabels(sbx Sandbox, labels map[string]string) {
+	if len(labels) == 0 {
+		return
+	}
+	existing := sbx.GetPodLabels()
+	if existing == nil {
+		existing = make(map[string]string, len(labels))
+	}
+	for k, v := range labels {
+		existing[k] = v
+	}
+	sbx.SetPodLabels(existing)
 }
 
 type CheckpointInfo struct {

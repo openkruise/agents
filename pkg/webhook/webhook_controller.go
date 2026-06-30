@@ -86,7 +86,7 @@ func New(cfg *rest.Config, handlers map[string]admission.Handler) (*Controller, 
 	secretInformer := coreinformers.New(c.informerFactory, namespace, nil).Secrets()
 	admissionRegistrationInformer := admissionregistrationinformers.New(c.informerFactory, v1.NamespaceAll, nil)
 
-	secretInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+	secretInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{ // #nosec G104 -- client-go informer pattern
 		AddFunc: func(obj interface{}) {
 			secret := obj.(*v1.Secret)
 			if secret.Name == secretName {
@@ -101,7 +101,7 @@ func New(cfg *rest.Config, handlers map[string]admission.Handler) (*Controller, 
 		},
 	})
 
-	admissionRegistrationInformer.MutatingWebhookConfigurations().Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+	admissionRegistrationInformer.MutatingWebhookConfigurations().Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{ // #nosec G104 -- client-go informer pattern
 		AddFunc: func(obj interface{}) {
 			conf := obj.(*admissionregistrationv1.MutatingWebhookConfiguration)
 			if conf.Name == mutatingWebhookConfigurationName {
@@ -118,7 +118,7 @@ func New(cfg *rest.Config, handlers map[string]admission.Handler) (*Controller, 
 		},
 	})
 
-	admissionRegistrationInformer.ValidatingWebhookConfigurations().Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+	admissionRegistrationInformer.ValidatingWebhookConfigurations().Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{ // #nosec G104 -- client-go informer pattern
 		AddFunc: func(obj interface{}) {
 			conf := obj.(*admissionregistrationv1.ValidatingWebhookConfiguration)
 			if conf.Name == validatingWebhookConfigurationName {

@@ -19,6 +19,7 @@ package controller
 import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
+	"github.com/openkruise/agents/pkg/controller/commit"
 	"github.com/openkruise/agents/pkg/controller/sandbox"
 	"github.com/openkruise/agents/pkg/controller/sandboxclaim"
 	"github.com/openkruise/agents/pkg/controller/sandboxset"
@@ -47,6 +48,9 @@ func SetupWithManager(m manager.Manager, deps Deps) error {
 		return err
 	}
 	if err := securitytokenrefresh.Add(m); err != nil {
+		return err
+	}
+	if err := commit.Add(m); err != nil {
 		return err
 	}
 	return nil

@@ -52,7 +52,7 @@ func CreateSymlink(target, link string) error {
 
 	// Ensure parent directory of link exists
 	linkDir := filepath.Dir(link)
-	if err := os.MkdirAll(linkDir, 0755); err != nil {
+	if err := os.MkdirAll(linkDir, 0755); err != nil { // #nosec G301 -- standard directory permissions
 		return fmt.Errorf("failed to create parent directory %s: %v", linkDir, err)
 	}
 

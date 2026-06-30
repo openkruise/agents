@@ -20,7 +20,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"reflect"
 	"sync/atomic"
 
 	corev1 "k8s.io/api/core/v1"
@@ -176,7 +175,7 @@ func DefaultGeneratePatchBodyFunc(opts InPlaceUpdateOptions) string {
 			continue
 		}
 		imageChanged := origin.Image != container.Image
-		resourceChanged := !reflect.DeepEqual(origin.Resources, container.Resources)
+		resourceChanged := !ResourcesEqual(origin.Resources, container.Resources)
 		if !imageChanged && !resourceChanged {
 			continue
 		}
@@ -281,7 +280,7 @@ func DefaultGenerateResizeSubresourceBody(opts InPlaceUpdateOptions) *corev1.Pod
 		if !ok {
 			continue
 		}
-		if resourcesEqual(origin.Resources, container.Resources) {
+		if ResourcesEqual(origin.Resources, container.Resources) {
 			continue
 		}
 		// Merge origin resources into container, preserving system-injected fields
@@ -596,7 +595,7 @@ func isPodResourceResizeCompleted(pod *corev1.Pod) bool {
 		if !ok || status.Resources == nil {
 			return false
 		}
-		if !resourcesEqual(c.Resources, *status.Resources) {
+		if !ResourcesEqual(c.Resources, *status.Resources) {
 			return false
 		}
 	}
@@ -644,11 +643,11 @@ func checkPodResizeInfeasible(pod *corev1.Pod) error {
 	return nil
 }
 
-// resourcesEqual compares two ResourceRequirements semantically.
+// ResourcesEqual compares two ResourceRequirements semantically.
 // It only checks resources specified in 'desired' (the sandbox spec), ignoring extra resources
 // in 'actual' (the pod) injected by the system (e.g., ephemeral-storage).
 // It uses Quantity.Cmp() to handle different unit representations (e.g., "1" vs "1000m").
-func resourcesEqual(desired, actual corev1.ResourceRequirements) bool {
+func ResourcesEqual(desired, actual corev1.ResourceRequirements) bool {
 	if !isResourceListCovered(actual.Limits, desired.Limits) {
 		return false
 	}

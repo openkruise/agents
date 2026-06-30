@@ -50,6 +50,8 @@ const listByOwnerRegex = "SELECT `created_at`,`uid`,`name`,`created_by_uid` FROM
 // listTeamsRegex matches the EXISTS subquery used by ListTeams for admin users.
 const listTeamsRegex = "SELECT `uid`,`name` FROM `teams` WHERE \\(EXISTS \\(SELECT 1 FROM team_api_keys WHERE team_api_keys\\.team_id = teams\\.id AND team_api_keys\\.deleted_at IS NULL\\)\\) AND `teams`\\.`deleted_at` IS NULL"
 
+const updateAdminKeyRegex = "UPDATE `team_api_keys` SET .*`deleted_at`=.*"
+
 func newMockStorage(t *testing.T) (*mysqlKeyStorage, sqlmock.Sqlmock, func()) {
 	t.Helper()
 	sqlDB, mock, err := sqlmock.New()
@@ -142,7 +144,7 @@ func TestMySQL_InitBranches(t *testing.T) {
 		h := st.hashKey("admin")
 		mock.ExpectQuery("SELECT .*FROM `teams`.*").WillReturnRows(sqlmock.NewRows([]string{"id", "uid", "name"}).AddRow(1, AdminTeamUID.String(), "admin"))
 		mock.ExpectQuery("SELECT .*FROM `team_api_keys`.*").WillReturnRows(sqlmock.NewRows([]string{"id", "uid", "key_hash", "name", "team_id", "deleted_at"}).AddRow(1, AdminKeyID.String(), h, "admin", 1, nil))
-		mock.ExpectExec("UPDATE `team_api_keys` SET .*").WillReturnResult(sqlmock.NewResult(0, 1))
+		mock.ExpectExec(updateAdminKeyRegex).WillReturnResult(sqlmock.NewResult(0, 1))
 		require.NoError(t, st.Init(context.Background()))
 	})
 
@@ -163,7 +165,7 @@ func TestMySQL_InitBranches(t *testing.T) {
 		h := st.hashKey("admin")
 		mock.ExpectQuery("SELECT .*FROM `teams`.*").WillReturnRows(sqlmock.NewRows([]string{"id", "uid", "name"}).AddRow(1, AdminTeamUID.String(), "admin"))
 		mock.ExpectQuery("SELECT .*FROM `team_api_keys`.*").WillReturnRows(sqlmock.NewRows([]string{"id", "uid", "key_hash", "name", "team_id", "deleted_at"}).AddRow(1, AdminKeyID.String(), h, "admin", 1, nil))
-		mock.ExpectExec("UPDATE `team_api_keys` SET .*").WillReturnResult(sqlmock.NewResult(0, 1))
+		mock.ExpectExec(updateAdminKeyRegex).WillReturnResult(sqlmock.NewResult(0, 1))
 
 		require.NoError(t, st.Init(context.Background()))
 		require.Zero(t, autoMigrateCalls)
@@ -195,7 +197,7 @@ func TestMySQL_EnsureAdminTeamAndKey(t *testing.T) {
 		mock.ExpectQuery("SELECT .*FROM `team_api_keys`.*").WillReturnRows(
 			sqlmock.NewRows([]string{"id", "uid", "key_hash", "name", "team_id", "deleted_at"}).AddRow(1, AdminKeyID.String(), h, "admin", 1, nil),
 		)
-		mock.ExpectExec("UPDATE `team_api_keys` SET .*").WillReturnResult(sqlmock.NewResult(0, 1))
+		mock.ExpectExec(updateAdminKeyRegex).WillReturnResult(sqlmock.NewResult(0, 1))
 		require.NoError(t, st.ensureAdminKey(context.Background(), 1))
 	})
 
@@ -221,6 +223,62 @@ func TestMySQL_EnsureAdminTeamAndKey(t *testing.T) {
 		mock.ExpectExec("INSERT INTO `team_api_keys`.*").WillReturnError(errors.New("insert fail"))
 		require.Error(t, st.ensureAdminKey(context.Background(), 1))
 	})
+}
+
+func TestMySQL_EnsureAdminKeyDuplicateConflict(t *testing.T) {
+	tests := []struct {
+		name        string
+		setup       func(*mysqlKeyStorage, sqlmock.Sqlmock)
+		expectError string
+	}{
+		{
+			name: "succeeds when concurrent replica creates matching admin key first",
+			setup: func(st *mysqlKeyStorage, mock sqlmock.Sqlmock) {
+				h := st.hashKey("admin")
+				mock.ExpectQuery("SELECT .*FROM `team_api_keys`.*").WillReturnError(gorm.ErrRecordNotFound)
+				mock.ExpectExec("INSERT INTO `team_api_keys`.*").WillReturnError(gorm.ErrDuplicatedKey)
+				mock.ExpectQuery("SELECT .*FROM `team_api_keys`.*").WillReturnRows(
+					sqlmock.NewRows([]string{"id", "uid", "key_hash", "name", "team_id", "deleted_at"}).AddRow(1, AdminKeyID.String(), h, "admin", 1, nil),
+				)
+			},
+		},
+		{
+			name: "repairs when concurrent replica leaves stale admin key fields",
+			setup: func(_ *mysqlKeyStorage, mock sqlmock.Sqlmock) {
+				mock.ExpectQuery("SELECT .*FROM `team_api_keys`.*").WillReturnError(gorm.ErrRecordNotFound)
+				mock.ExpectExec("INSERT INTO `team_api_keys`.*").WillReturnError(gorm.ErrDuplicatedKey)
+				mock.ExpectQuery("SELECT .*FROM `team_api_keys`.*").WillReturnRows(
+					sqlmock.NewRows([]string{"id", "uid", "key_hash", "name", "team_id", "deleted_at"}).AddRow(1, AdminKeyID.String(), "stale-hash", "admin", 1, nil),
+				)
+				mock.ExpectExec(updateAdminKeyRegex).WillReturnResult(sqlmock.NewResult(0, 1))
+			},
+		},
+		{
+			name: "returns conflict when duplicate row is not admin key",
+			setup: func(_ *mysqlKeyStorage, mock sqlmock.Sqlmock) {
+				mock.ExpectQuery("SELECT .*FROM `team_api_keys`.*").WillReturnError(gorm.ErrRecordNotFound)
+				mock.ExpectExec("INSERT INTO `team_api_keys`.*").WillReturnError(gorm.ErrDuplicatedKey)
+				mock.ExpectQuery("SELECT .*FROM `team_api_keys`.*").WillReturnError(gorm.ErrRecordNotFound)
+			},
+			expectError: "duplicate conflict but admin uid",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st, mock, done := newMockStorage(t)
+			defer done()
+			tt.setup(st, mock)
+
+			err := st.ensureAdminKey(context.Background(), 1)
+			if tt.expectError != "" {
+				require.Error(t, err)
+				require.Contains(t, err.Error(), tt.expectError)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
 }
 
 func TestMySQL_LoadByKeyAndID(t *testing.T) {

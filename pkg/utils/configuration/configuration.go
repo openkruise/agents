@@ -50,7 +50,7 @@ func init() {
 	for i := range objs {
 		obj := objs[i]
 		filePath := filepath.Join(SandboxConfigurationDir, obj.Key)
-		data, err := os.ReadFile(filePath)
+		data, err := os.ReadFile(filePath) // #nosec G304 -- path built from constant directory
 		if err != nil {
 			klog.ErrorS(err, "read file failed", "file", filePath)
 			continue

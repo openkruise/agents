@@ -307,6 +307,9 @@ func (c *Cache) ListSandboxes(ctx context.Context, opts ListSandboxesOptions) ([
 	}
 	result := make([]*agentsv1alpha1.Sandbox, 0, len(list.Items))
 	for i := range list.Items {
+		if utils.IsReservedFailedSandbox(list.Items[i].Labels) {
+			continue
+		}
 		result = append(result, &list.Items[i])
 	}
 	return result, nil
@@ -319,6 +322,9 @@ func (c *Cache) CountActiveSandboxes(ctx context.Context, opts ListSandboxesOpti
 	}
 	var cnt int32
 	for i := range list.Items {
+		if utils.IsReservedFailedSandbox(list.Items[i].Labels) {
+			continue
+		}
 		state, _ := utils.GetSandboxState(&list.Items[i])
 		if state != agentsv1alpha1.SandboxStateDead {
 			cnt++

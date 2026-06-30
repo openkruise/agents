@@ -693,3 +693,45 @@ def test_concurrent_pause_resume_on_running_sandbox(sandbox_context):
     info = sbx.get_info()
     print(f"Final state: {info.state}")
     assert info.state == SandboxState.PAUSED
+
+
+def test_sandbox_with_labels_and_command(sandbox_context):
+    """Create a sandbox with labels via label: prefix metadata, verify labels
+    are present in the returned sandbox metadata, then run a command inside."""
+    sbx: Sandbox = sandbox_context.add(Sandbox.create(
+        template="code-interpreter",
+        timeout=30,
+        metadata={
+            "test_case": "test_sandbox_with_labels_and_command",
+            "label:app": "my-test-app",
+            "label:env": "e2e",
+        },
+        headers={
+            "x-request-id": sandbox_context.request_id,
+        },
+    ))
+    print(f"sandbox-id: {sbx.sandbox_id}")
+
+    # Run a shell command immediately after create returns to confirm the
+    # sandbox is operational before any further API calls.
+    result = sbx.commands.run("echo 'hello from labeled sandbox'")
+    assert not result.error, f"command failed: {result.error}"
+    assert "hello from labeled sandbox" in result.stdout
+
+    # Also exercise run_code to confirm the code interpreter is functional.
+    run_code_sandbox(sbx, "print('labels work')")
+
+    # Verify the labels are reflected back in the sandbox metadata.
+    # The label: prefix is stripped before the key is stored as a K8s label,
+    # and labels are returned as plain metadata (without the label: prefix).
+    info = sbx.get_info()
+    print(info)
+    assert info.metadata.get("app") == "my-test-app", (
+        f"expected label 'app=my-test-app' in metadata, got: {info.metadata}"
+    )
+    assert info.metadata.get("env") == "e2e", (
+        f"expected label 'env=e2e' in metadata, got: {info.metadata}"
+    )
+    # The label: prefixed keys must not leak into metadata.
+    assert "label:app" not in info.metadata
+    assert "label:env" not in info.metadata

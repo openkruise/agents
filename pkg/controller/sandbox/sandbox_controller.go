@@ -29,6 +29,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -49,11 +50,17 @@ import (
 
 func init() {
 	flag.IntVar(&concurrentReconciles, "sandbox-workers", concurrentReconciles, "Max concurrent reconciles for Sandbox controller.")
+	flag.DurationVar(&reuseTimeout, "reuse-timeout", reuseTimeout, "Timeout for sandbox reuse cleanup operations.")
+	flag.DurationVar(&reuseGracePeriod, "reuse-grace-period", reuseGracePeriod, "Grace period after reuse cleanup before sandbox returns to pool.")
+	flag.DurationVar(&reuseFailureShutdownGrace, "reuse-failure-shutdown-grace", reuseFailureShutdownGrace, "Grace period before shutting down a sandbox after reuse failure.")
 }
 
 var (
-	concurrentReconciles  = 500
-	sandboxControllerKind = agentsv1alpha1.GroupVersion.WithKind("Sandbox")
+	concurrentReconciles      = 500
+	sandboxControllerKind     = agentsv1alpha1.GroupVersion.WithKind("Sandbox")
+	reuseTimeout              = 60 * time.Second
+	reuseGracePeriod          = 10 * time.Second
+	reuseFailureShutdownGrace = 5 * time.Minute
 )
 
 // Enqueuer is the contract the Sandbox controller depends on for async
@@ -85,9 +92,15 @@ func Add(mgr manager.Manager, metricsCleanup Enqueuer) error {
 			RateLimiter:       rateLimiter,
 			CheckpointControl: checkpointControl,
 			PodControl:        podControl,
+			ReuseConfig: core.SandboxReuseConfig{
+				Timeout:              reuseTimeout,
+				GracePeriod:          reuseGracePeriod,
+				FailureShutdownGrace: reuseFailureShutdownGrace,
+			},
 		}),
 		rateLimiter:    rateLimiter,
 		metricsCleanup: metricsCleanup,
+		recorder:       recorder,
 	}).SetupWithManager(mgr)
 	if err != nil {
 		return err
@@ -104,6 +117,7 @@ type SandboxReconciler struct {
 	rateLimiter       *core.RateLimiter
 	checkpointControl *core.CheckpointControl
 	metricsCleanup    Enqueuer
+	recorder          record.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=agents.kruise.io,resources=sandboxes,verbs=get;list;watch;create;update;patch;delete
@@ -226,36 +240,11 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 	}
 
 	// Check ShutdownTime and PauseTime
-	now := metav1.Now()
-	var requeueAfter time.Duration
-	if box.Spec.ShutdownTime != nil && box.DeletionTimestamp == nil {
-		if box.Spec.ShutdownTime.Before(&now) {
-			klog.InfoS("sandbox shutdown time reached, will be deleted", "sandbox", klog.KObj(box), "shutdownTime", box.Spec.ShutdownTime)
-			return ctrl.Result{}, r.Delete(ctx, box)
-		}
-		requeueAfter = box.Spec.ShutdownTime.Sub(now.Time)
+	result, done, timerErr := r.checkTimers(ctx, box)
+	if done {
+		return result, timerErr
 	}
-	if box.Spec.PauseTime != nil && !box.Spec.Paused {
-		if pauseTimeReached(box.Spec.PauseTime, now) {
-			klog.InfoS("sandbox pause time reached", "sandbox", klog.KObj(box))
-			modified := box.DeepCopy()
-			// Optimistic-lock so concurrent writers surface as 409 instead of
-			// silently winning a last-writer race.
-			patch := client.MergeFromWithOptions(box, client.MergeFromWithOptimisticLock{})
-			modified.Spec.Paused = true
-			if err := r.Patch(ctx, modified, patch); err != nil {
-				if errors.IsConflict(err) {
-					return ctrl.Result{Requeue: true}, nil
-				}
-				return ctrl.Result{}, err
-			}
-			return ctrl.Result{}, nil
-		}
-		pauseDelta := box.Spec.PauseTime.Sub(now.Time)
-		if pauseDelta > 0 && (requeueAfter == 0 || pauseDelta < requeueAfter) {
-			requeueAfter = pauseDelta
-		}
-	}
+	requeueAfter := result.RequeueAfter
 
 	// calculate sandbox status
 	var shouldRequeue bool
@@ -280,6 +269,8 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 		err = r.getControl(args.Pod).EnsureSandboxResumed(ctx, args)
 	case agentsv1alpha1.SandboxUpgrading:
 		err = r.getControl(args.Pod).EnsureSandboxUpgraded(ctx, args)
+	case agentsv1alpha1.SandboxReusing:
+		requeueAfter, err = r.getControl(args.Pod).EnsureSandboxReused(ctx, args)
 	default:
 		klog.InfoS("sandbox status phase is invalid", "sandbox", klog.KObj(box), "phase", box.Status.Phase)
 		return ctrl.Result{RequeueAfter: requeueAfter}, nil
@@ -372,7 +363,24 @@ func (r *SandboxReconciler) calculateStatus(ctx context.Context, args core.Ensur
 			return newStatus, true
 		}
 	case agentsv1alpha1.SandboxRunning:
-		// At this stage, if the Pod does not exist, it can only be that the Pod was deleted externally, and the sandbox should enter the Failed state
+		// Reuse trigger takes priority over Pod terminal detection.
+		// If reuse is requested, always enter Reusing regardless of Pod state —
+		// doReuse's terminal phase check properly handles dead Pods via
+		// handleReuseFailed (which deletes the sandbox and cleans up metadata).
+		// This prevents the sandbox from getting stuck in Failed with dirty
+		// claim metadata when the Pod dies between claim-release and the next reconcile.
+		if isReuseTriggered(box) {
+			if hasPVCVolumes(box) {
+				r.rejectReuse(box, newStatus, "reuse is not supported for sandboxes with persistent volume claims")
+			} else {
+				klog.InfoS("Detected reuse trigger", "sandbox", klog.KObj(box))
+				newStatus.Phase = agentsv1alpha1.SandboxReusing
+				utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionReusing))
+				break
+			}
+		}
+
+		// Pod terminal detection (only when reuse is NOT triggered)
 		if pod == nil || !pod.DeletionTimestamp.IsZero() {
 			newStatus.Phase = agentsv1alpha1.SandboxFailed
 			newStatus.Message = "Pod Not Found"
@@ -400,6 +408,11 @@ func (r *SandboxReconciler) calculateStatus(ctx context.Context, args core.Ensur
 		}
 
 	case agentsv1alpha1.SandboxPaused:
+		// Paused state does not support reuse; reject immediately.
+		if isReuseTriggered(box) {
+			r.rejectReuse(box, newStatus, "reuse is not supported in Paused state")
+		}
+
 		cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
 		// sandbox will only enter the resuming state after successful paused
 		if cond.Status == metav1.ConditionTrue && !box.Spec.Paused {
@@ -416,6 +429,10 @@ func (r *SandboxReconciler) calculateStatus(ctx context.Context, args core.Ensur
 		} else if !box.Spec.Paused && cond.Status == metav1.ConditionFalse {
 			klog.InfoS("sandbox pause not completed, cannot enter resume state temporarily", "sandbox", klog.KObj(box))
 		}
+
+	case agentsv1alpha1.SandboxReusing:
+		// Reuse lifecycle (progress checking, grace period, success/failure
+		// transitions) is handled entirely by EnsureSandboxReused.
 
 	case agentsv1alpha1.SandboxUpgrading:
 		// This indicates the podTemplate has changed again during an ongoing upgrade.
@@ -437,6 +454,55 @@ func (r *SandboxReconciler) calculateStatus(ctx context.Context, args core.Ensur
 		}
 	}
 	return newStatus, false
+}
+
+// isReuseTriggered returns true when the reuse annotation and the reuse-enabled
+// annotation are both set to "true" on the sandbox.
+func isReuseTriggered(box *agentsv1alpha1.Sandbox) bool {
+	return box.Annotations[agentsv1alpha1.AnnotationReuse] == "true" &&
+		box.Annotations[agentsv1alpha1.AnnotationReuseEnabled] == "true"
+}
+
+// hasPVCVolumes returns true if the sandbox has VolumeClaimTemplates or its pod
+// template references any PersistentVolumeClaim volumes.
+func hasPVCVolumes(box *agentsv1alpha1.Sandbox) bool {
+	if len(box.Spec.VolumeClaimTemplates) > 0 {
+		return true
+	}
+	if box.Spec.Template != nil {
+		for _, vol := range box.Spec.Template.Spec.Volumes {
+			if vol.PersistentVolumeClaim != nil {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// rejectReuse sets a Reusing condition with reason ReuseRejected and records a
+// Warning event. The sandbox stays in its current phase (Running or Paused).
+// The msg parameter provides the specific rejection reason.
+func (r *SandboxReconciler) rejectReuse(box *agentsv1alpha1.Sandbox, newStatus *agentsv1alpha1.SandboxStatus, msg string) {
+	// Avoid duplicate events if the condition is already set to ReuseRejected
+	// with the same message.
+	if existing := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionReusing)); existing != nil &&
+		existing.Reason == agentsv1alpha1.SandboxReusingReasonRejected && existing.Message == msg {
+		return
+	}
+
+	utils.SetSandboxCondition(newStatus, metav1.Condition{
+		Type:               string(agentsv1alpha1.SandboxConditionReusing),
+		Status:             metav1.ConditionFalse,
+		Reason:             agentsv1alpha1.SandboxReusingReasonRejected,
+		Message:            msg,
+		LastTransitionTime: metav1.Now(),
+	})
+
+	if r.recorder != nil {
+		r.recorder.Event(box, corev1.EventTypeWarning, agentsv1alpha1.SandboxReusingReasonRejected, msg)
+	}
+
+	klog.InfoS("Reuse rejected", "sandbox", klog.KObj(box), "reason", msg)
 }
 
 func determineUpgradeResumeReason(
@@ -544,4 +610,51 @@ func (r *SandboxReconciler) ensureVolumeClaimTemplates(ctx context.Context, box 
 	}
 
 	return nil
+}
+
+func (r *SandboxReconciler) checkTimers(ctx context.Context, box *agentsv1alpha1.Sandbox) (ctrl.Result, bool, error) {
+	// Skip timers during reuse unless the reuse has reached a terminal
+	// failure state (Failed/Timeout). Only then can ShutdownTime set by
+	// handleReuseFailed be processed. Using != avoids needing to update
+	// this check when new in-progress reasons are added in the future.
+	if box.Status.Phase == agentsv1alpha1.SandboxReusing {
+		reuseCond := utils.GetSandboxCondition(&box.Status, string(agentsv1alpha1.SandboxConditionReusing))
+		if reuseCond == nil ||
+			(reuseCond.Reason != agentsv1alpha1.SandboxReusingReasonFailed &&
+				reuseCond.Reason != agentsv1alpha1.SandboxReusingReasonTimeout) {
+			return ctrl.Result{}, false, nil
+		}
+	}
+
+	now := metav1.Now()
+	var requeueAfter time.Duration
+	if box.Spec.ShutdownTime != nil && box.DeletionTimestamp == nil {
+		if box.Spec.ShutdownTime.Before(&now) {
+			klog.InfoS("sandbox shutdown time reached, will be deleted", "sandbox", klog.KObj(box), "shutdownTime", box.Spec.ShutdownTime)
+			return ctrl.Result{}, true, r.Delete(ctx, box)
+		}
+		requeueAfter = box.Spec.ShutdownTime.Sub(now.Time)
+	}
+	if box.Spec.PauseTime != nil && !box.Spec.Paused {
+		if pauseTimeReached(box.Spec.PauseTime, now) {
+			klog.InfoS("sandbox pause time reached", "sandbox", klog.KObj(box))
+			modified := box.DeepCopy()
+			// Optimistic-lock so concurrent writers surface as 409 instead of
+			// silently winning a last-writer race.
+			patch := client.MergeFromWithOptions(box, client.MergeFromWithOptimisticLock{})
+			modified.Spec.Paused = true
+			if err := r.Patch(ctx, modified, patch); err != nil {
+				if errors.IsConflict(err) {
+					return ctrl.Result{Requeue: true}, true, nil
+				}
+				return ctrl.Result{}, true, err
+			}
+			return ctrl.Result{}, true, nil
+		}
+		pauseDelta := box.Spec.PauseTime.Sub(now.Time)
+		if pauseDelta > 0 && (requeueAfter == 0 || pauseDelta < requeueAfter) {
+			requeueAfter = pauseDelta
+		}
+	}
+	return ctrl.Result{RequeueAfter: requeueAfter}, false, nil
 }

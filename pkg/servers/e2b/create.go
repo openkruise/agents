@@ -31,6 +31,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
 	"github.com/openkruise/agents/pkg/utils"
@@ -55,6 +56,8 @@ func mapInfraErrorToApiError(err error) *web.ApiError {
 	switch managererrors.GetErrCode(err) {
 	case managererrors.ErrorBadRequest, managererrors.ErrorNotFound:
 		return &web.ApiError{Code: http.StatusBadRequest, Message: err.Error()}
+	case managererrors.ErrorConflict:
+		return &web.ApiError{Code: http.StatusConflict, Message: err.Error()}
 	default:
 		// ErrorInternal, ErrorUnknown, or untyped errors (e.g., retry exhausted) → 500
 		return &web.ApiError{Code: http.StatusInternalServerError, Message: err.Error()}
@@ -108,6 +111,13 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 }
 
 func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models.NewSandboxRequest, user *models.CreatedTeamAPIKey) (web.ApiResponse[*models.Sandbox], *web.ApiError) {
+	if request.Extensions.Name != "" || request.Extensions.GenerateName != "" {
+		return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
+			Code:    http.StatusBadRequest,
+			Message: "sandbox-name and sandbox-generate-name are only supported for clone",
+		}
+	}
+
 	log := klog.FromContext(ctx)
 	claimStart := time.Now()
 	var accessToken string
@@ -123,6 +133,7 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 		},
 		ReserveFailedSandboxFor: request.Extensions.ReserveFailedSandboxFor,
 		CreateOnNoStock:         request.Extensions.CreateOnNoStock,
+		UserMetadataKeys:        sandboxcr.BuildUserMetadataKeys(request.Extensions.Labels, request.Metadata),
 	}
 
 	if !request.Extensions.SkipInitRuntime {
@@ -201,6 +212,8 @@ func (sc *Controller) createSandboxWithClone(ctx context.Context, request models
 			sc.basicSandboxCreateModifier(ctx, sbx, request)
 		},
 		ReserveFailedSandboxFor: request.Extensions.ReserveFailedSandboxFor,
+		Name:                    request.Extensions.Name,
+		GenerateName:            request.Extensions.GenerateName,
 	}
 	opts.WaitReadyTimeout = resolveServerTimeout(request.Extensions.WaitReadySeconds)
 
@@ -324,7 +337,7 @@ func (sc *Controller) basicSandboxCreateModifier(ctx context.Context, sbx infra.
 	}
 	sbx.SetAnnotations(annotations)
 
-	// propagate labels to sandbox
+	// propagate labels to sandbox metadata (does not affect pod template hash)
 	labels := sbx.GetLabels()
 	if labels == nil {
 		labels = make(map[string]string)
@@ -334,15 +347,11 @@ func (sc *Controller) basicSandboxCreateModifier(ctx context.Context, sbx infra.
 	}
 	sbx.SetLabels(labels)
 
-	// propagate annotations to podtemplate
-	labels = sbx.GetPodLabels()
-	if labels == nil {
-		labels = make(map[string]string)
-	}
-	for k, v := range request.Extensions.Labels {
-		labels[k] = v
-	}
-	sbx.SetPodLabels(labels)
+	// Propagate request labels to the pod template metadata. This ensures the
+	// sandbox hash includes the labels, and the controller patches the pod metadata
+	// directly for metadata-only changes (no image/resources) without setting the
+	// InplaceUpdate condition.
+	infra.MergePodLabels(sbx, request.Extensions.Labels)
 }
 
 func (sc *Controller) csiMountOptionsConfigRecord(ctx context.Context, sbx infra.Sandbox, request models.NewSandboxRequest) {

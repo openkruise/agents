@@ -384,7 +384,7 @@ func InitRuntime(ctx context.Context, sbx *agentsv1alpha1.Sandbox, opts config.I
 	ctx = logs.Extend(ctx, "action", "initRuntime")
 	log := klog.FromContext(ctx).WithValues("sandboxID", sbx.GetName(), "resourceVersion", sbx.GetResourceVersion())
 	start := time.Now()
-	initBody, err := json.Marshal(opts)
+	initBody, err := json.Marshal(opts) // #nosec G117 -- AccessToken intentionally serialized for runtime init
 	if err != nil {
 		log.Error(err, "failed to marshal initBody")
 		return 0, err

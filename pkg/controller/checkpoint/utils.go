@@ -19,7 +19,6 @@ package checkpoint
 import (
 	"encoding/json"
 	"fmt"
-	"reflect"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -28,6 +27,7 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/utils/configuration"
+	"github.com/openkruise/agents/pkg/utils/inplaceupdate"
 )
 
 func getTemplateContainers(box *agentsv1alpha1.Sandbox) []corev1.Container {
@@ -86,7 +86,7 @@ func buildTemplateContainerDelta(pod *corev1.Pod, box *agentsv1alpha1.Sandbox) [
 		if !isTemplate {
 			continue
 		}
-		if !reflect.DeepEqual(pc.Resources, tc.Resources) {
+		if !inplaceupdate.ResourcesEqual(tc.Resources, pc.Resources) {
 			result = append(result, corev1.Container{
 				Name:      pc.Name,
 				Resources: *pc.Resources.DeepCopy(),

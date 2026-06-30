@@ -174,6 +174,23 @@ func (s *Sandbox) Kill(ctx context.Context) error {
 	return DefaultDeleteSandbox(ctx, s.Sandbox, s.Cache.GetClient())
 }
 
+func (s *Sandbox) TriggerReuse(ctx context.Context) error {
+	patch := client.MergeFrom(s.Sandbox.DeepCopy())
+	if s.Sandbox.Annotations == nil {
+		s.Sandbox.Annotations = make(map[string]string, 1)
+	}
+	s.Sandbox.Annotations[agentsv1alpha1.AnnotationReuse] = "true"
+	return s.Cache.GetClient().Patch(ctx, s.Sandbox, patch)
+}
+
+func (s *Sandbox) IsReuseEnabled() bool {
+	return s.Sandbox.Annotations[agentsv1alpha1.AnnotationReuseEnabled] == "true"
+}
+
+func (s *Sandbox) Phase() string {
+	return string(s.Sandbox.Status.Phase)
+}
+
 func (s *Sandbox) GetSandboxID() string {
 	return utils.GetSandboxID(s.Sandbox)
 }

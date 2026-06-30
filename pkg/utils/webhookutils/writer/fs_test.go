@@ -62,7 +62,7 @@ func TestCertToProjectionMap(t *testing.T) {
 
 	tests := []struct {
 		name         string
-		expectedMode int32
+		expectedMode os.FileMode
 	}{
 		{CAKeyName, 0600},
 		{CACertName, 0644},

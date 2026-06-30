@@ -18,12 +18,14 @@ package sandboxcr
 
 import (
 	"time"
+
+	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 )
 
 var (
 	DefaultClaimTimeout            = time.Minute
 	DefaultCloneTimeout            = time.Minute
-	DefaultReserveFailedSandboxFor = 30 * time.Minute
+	DefaultReserveFailedSandboxFor = consts.ReserveFailedSandboxNever
 	RetryInterval                  = 25 * time.Millisecond
 	CreateRetryInterval            = 1 * time.Second
 	CreateRetryBackoffFactor       = 2.0

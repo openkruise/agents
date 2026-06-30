@@ -87,6 +87,37 @@ func TestGetRouteFromSandbox(t *testing.T) {
 				State: v1alpha1.SandboxStateCreating,
 			},
 		},
+		{
+			name: "sandbox with runtime access token annotation",
+			sandbox: &v1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "token-sandbox",
+					Namespace: "default",
+					Annotations: map[string]string{
+						v1alpha1.AnnotationRuntimeAccessToken: "secret-token-123",
+					},
+				},
+				Status: v1alpha1.SandboxStatus{
+					Phase: v1alpha1.SandboxRunning,
+					Conditions: []metav1.Condition{
+						{
+							Type:   string(v1alpha1.SandboxConditionReady),
+							Status: metav1.ConditionTrue,
+						},
+					},
+					PodInfo: v1alpha1.PodInfo{
+						PodIP: "10.0.0.3",
+					},
+				},
+			},
+			expectedRoute: Route{
+				IP:          "10.0.0.3",
+				ID:          "default--token-sandbox",
+				Owner:       "",
+				State:       v1alpha1.SandboxStateRunning,
+				AccessToken: "secret-token-123",
+			},
+		},
 	}
 
 	for _, tt := range tests {

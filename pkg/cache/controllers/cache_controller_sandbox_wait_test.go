@@ -201,3 +201,33 @@ func TestCacheSandboxWaitReconciler_Reconcile(t *testing.T) {
 		})
 	}
 }
+
+func TestCacheSandboxWaitReconciler_CheckWaitHooksRequiresMatchingEntry(t *testing.T) {
+	waitHookKey := "*v1alpha1.Sandbox/default/test-sandbox"
+	sandbox := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-sandbox", Namespace: "default"},
+	}
+	hooks := &sync.Map{}
+	var checked bool
+
+	r := &CacheSandboxWaitReconciler{
+		WaitReconciler: WaitReconciler[*agentsv1alpha1.Sandbox]{
+			waitHooks: hooks,
+		},
+	}
+
+	r.checkWaitHooks(context.Background(), waitHookKey, sandbox)
+	assert.False(t, checked)
+
+	hooks.Store(waitHookKey, cacheutils.NewWaitEntry[*agentsv1alpha1.Sandbox](
+		context.Background(),
+		cacheutils.WaitActionWaitReady,
+		func(*agentsv1alpha1.Sandbox) (bool, error) {
+			checked = true
+			return false, nil
+		},
+	))
+
+	r.checkWaitHooks(context.Background(), waitHookKey, sandbox)
+	assert.True(t, checked)
+}
