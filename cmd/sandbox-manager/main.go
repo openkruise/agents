@@ -129,11 +129,11 @@ func main() {
 		"Disable schema auto-migration for DB-Based key storage like mysql; when enabled, schema changes are skipped but admin team/key bootstrap still runs")
 	pflag.StringVar(&e2bQuotaRedisAddr, "e2b-quota-redis-addr", "", "Redis address for E2B API-key quota enforcement. Empty disables enforcement and fails open.")
 	pflag.IntVar(&e2bQuotaRedisDB, "e2b-quota-redis-db", 0, "Redis DB for E2B API-key quota enforcement.")
-	pflag.DurationVar(&e2bQuotaRedisOperationTimeout, "e2b-quota-redis-operation-timeout", 50*time.Millisecond, "Per-operation timeout for Redis quota commands.")
-	pflag.IntVar(&e2bQuotaRedisBreakerN, "e2b-quota-redis-breaker-n", 3, "Consecutive Redis quota backend errors required to open the fail-open breaker.")
-	pflag.DurationVar(&e2bQuotaRedisBreakerD, "e2b-quota-redis-breaker-d", 30*time.Second, "How long the Redis quota fail-open breaker stays open before probing again.")
-	pflag.DurationVar(&e2bQuotaAntiDriftInterval, "e2b-quota-anti-drift-interval", 5*time.Minute, "Interval for quota anti-drift reconciliation.")
-	pflag.DurationVar(&e2bQuotaAntiDriftGrace, "e2b-quota-anti-drift-grace", 10*time.Minute, "Grace period before quota anti-drift adds or removes live-set entries.")
+	pflag.DurationVar(&e2bQuotaRedisOperationTimeout, "e2b-quota-redis-operation-timeout", consts.DefaultQuotaRedisOperationTimeout, "Per-operation timeout for Redis quota commands.")
+	pflag.IntVar(&e2bQuotaRedisBreakerN, "e2b-quota-redis-breaker-n", consts.DefaultQuotaRedisBreakerN, "Consecutive Redis quota backend errors required to open the fail-open breaker.")
+	pflag.DurationVar(&e2bQuotaRedisBreakerD, "e2b-quota-redis-breaker-d", consts.DefaultQuotaRedisBreakerD, "How long the Redis quota fail-open breaker stays open before probing again.")
+	pflag.DurationVar(&e2bQuotaAntiDriftInterval, "e2b-quota-anti-drift-interval", consts.DefaultQuotaAntiDriftInterval, "Interval for quota anti-drift reconciliation.")
+	pflag.DurationVar(&e2bQuotaAntiDriftGrace, "e2b-quota-anti-drift-grace", consts.DefaultQuotaAntiDriftGrace, "Grace period before quota anti-drift adds or removes live-set entries.")
 
 	opts := zap.Options{
 		Development: false,

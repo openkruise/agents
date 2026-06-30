@@ -19,7 +19,6 @@ package sandbox_manager
 import (
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
 	"github.com/stretchr/testify/assert"
@@ -29,6 +28,7 @@ import (
 	"github.com/openkruise/agents/pkg/peers"
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
@@ -482,11 +482,11 @@ func (b *SandboxManagerBuilder) WithCustomPeers(getPeersFunc GetPeersFunc) *Sand
 
 func TestInitOptionsQuotaDefaults(t *testing.T) {
 	opts := config.InitOptions(config.SandboxManagerOptions{})
-	assert.Equal(t, 50*time.Millisecond, opts.Quota.OperationTimeout)
-	assert.Equal(t, 3, opts.Quota.BreakerN)
-	assert.Equal(t, 30*time.Second, opts.Quota.BreakerD)
-	assert.Equal(t, 5*time.Minute, opts.Quota.AntiDriftInterval)
-	assert.Equal(t, 10*time.Minute, opts.Quota.AntiDriftGrace)
+	assert.Equal(t, consts.DefaultQuotaRedisOperationTimeout, opts.Quota.OperationTimeout)
+	assert.Equal(t, consts.DefaultQuotaRedisBreakerN, opts.Quota.BreakerN)
+	assert.Equal(t, consts.DefaultQuotaRedisBreakerD, opts.Quota.BreakerD)
+	assert.Equal(t, consts.DefaultQuotaAntiDriftInterval, opts.Quota.AntiDriftInterval)
+	assert.Equal(t, consts.DefaultQuotaAntiDriftGrace, opts.Quota.AntiDriftGrace)
 }
 
 func TestCleanupQuotaNilSafe(t *testing.T) {

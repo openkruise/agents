@@ -60,8 +60,6 @@ func TestCalculateResourceFromContainers(t *testing.T) {
 				},
 			},
 			want: SandboxResource{
-				CPUMilli: 1000,
-				MemoryMB: 1024,
 				Requests: ResourceList{
 					CPUMilli: 1000,
 					MemoryMB: 1024,
@@ -87,8 +85,6 @@ func TestCalculateResourceFromContainers(t *testing.T) {
 				},
 			},
 			want: SandboxResource{
-				CPUMilli: 500,
-				MemoryMB: 512,
 				Requests: ResourceList{
 					CPUMilli: 500,
 					MemoryMB: 512,
@@ -116,7 +112,6 @@ func TestCalculateResourceFromContainers(t *testing.T) {
 				},
 			},
 			want: SandboxResource{
-				MemoryMB: 1,
 				Requests: ResourceList{
 					MemoryMB: 1,
 				},
@@ -150,8 +145,6 @@ func TestCalculateResourceFromContainers(t *testing.T) {
 				},
 			},
 			want: SandboxResource{
-				CPUMilli: 1500,
-				MemoryMB: 1536,
 				Requests: ResourceList{
 					CPUMilli: 1500,
 					MemoryMB: 1536,
@@ -165,10 +158,7 @@ func TestCalculateResourceFromContainers(t *testing.T) {
 					Containers: []corev1.Container{},
 				},
 			},
-			want: SandboxResource{
-				CPUMilli: 0,
-				MemoryMB: 0,
-			},
+			want: SandboxResource{},
 		},
 		{
 			name: "containers without resources",
@@ -183,18 +173,13 @@ func TestCalculateResourceFromContainers(t *testing.T) {
 					},
 				},
 			},
-			want: SandboxResource{
-				CPUMilli: 0,
-				MemoryMB: 0,
-			},
+			want: SandboxResource{},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := CalculateResourceFromContainers(tt.pod.Spec.Containers)
-			assert.Equal(t, tt.want.CPUMilli, got.CPUMilli)
-			assert.Equal(t, tt.want.MemoryMB, got.MemoryMB)
 			assert.Equal(t, tt.want.Requests, got.Requests)
 			assert.Equal(t, tt.want.Limits, got.Limits)
 		})

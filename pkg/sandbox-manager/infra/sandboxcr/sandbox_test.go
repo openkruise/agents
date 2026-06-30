@@ -613,8 +613,6 @@ func TestSandbox_GetResource(t *testing.T) {
 				},
 			},
 			want: infra.SandboxResource{
-				CPUMilli: 1000,
-				MemoryMB: 1024,
 				Requests: infra.ResourceList{
 					CPUMilli: 1000,
 					MemoryMB: 1024,
@@ -640,8 +638,6 @@ func TestSandbox_GetResource(t *testing.T) {
 				},
 			},
 			want: infra.SandboxResource{
-				CPUMilli: 500,
-				MemoryMB: 512,
 				Requests: infra.ResourceList{
 					CPUMilli: 500,
 					MemoryMB: 512,
@@ -669,7 +665,6 @@ func TestSandbox_GetResource(t *testing.T) {
 				},
 			},
 			want: infra.SandboxResource{
-				MemoryMB: 1,
 				Requests: infra.ResourceList{
 					MemoryMB: 1,
 				},
@@ -703,8 +698,6 @@ func TestSandbox_GetResource(t *testing.T) {
 				},
 			},
 			want: infra.SandboxResource{
-				CPUMilli: 1500,
-				MemoryMB: 1536,
 				Requests: infra.ResourceList{
 					CPUMilli: 1500,
 					MemoryMB: 1536,
@@ -718,10 +711,7 @@ func TestSandbox_GetResource(t *testing.T) {
 					Containers: []corev1.Container{},
 				},
 			},
-			want: infra.SandboxResource{
-				CPUMilli: 0,
-				MemoryMB: 0,
-			},
+			want: infra.SandboxResource{},
 		},
 		{
 			name: "containers without resources",
@@ -736,10 +726,7 @@ func TestSandbox_GetResource(t *testing.T) {
 					},
 				},
 			},
-			want: infra.SandboxResource{
-				CPUMilli: 0,
-				MemoryMB: 0,
-			},
+			want: infra.SandboxResource{},
 		},
 	}
 
@@ -747,8 +734,6 @@ func TestSandbox_GetResource(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			s := AsSandbox(ConvertPodToSandboxCR(tt.pod), nil)
 			got := s.GetResource()
-			assert.Equal(t, tt.want.CPUMilli, got.CPUMilli)
-			assert.Equal(t, tt.want.MemoryMB, got.MemoryMB)
 			assert.Equal(t, tt.want.Requests, got.Requests)
 			assert.Equal(t, tt.want.Limits, got.Limits)
 		})

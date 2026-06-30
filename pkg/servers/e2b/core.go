@@ -126,10 +126,12 @@ func (sc *Controller) Init() error {
 
 	// Initialize quota through the sandbox-manager, which owns the runtime lifecycle.
 	if sc.keys != nil {
+		log.Info("will init quota management with quota options")
 		if err := sc.manager.InitQuota(ctx, sc.quotaOpts, keys.NewQuotaSubjectLister(sc.keys)); err != nil {
 			return err
 		}
 	} else {
+		log.Info("api-key quota is unenforced because E2B auth is disabled")
 		if err := sc.manager.InitQuota(ctx, config.QuotaOptions{}, nil); err != nil {
 			return err
 		}

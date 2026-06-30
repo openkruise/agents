@@ -57,9 +57,6 @@ type ReleaseRequest struct {
 	LockString string
 }
 
-type Subject = quotaspec.Subject
-type SubjectLister = quotaspec.SubjectLister
-
 type LiveSandboxCache interface {
 	ListLiveSandboxesByOwner(ctx context.Context, owner string) ([]*agentsv1alpha1.Sandbox, error)
 	SandboxInformerHealthy() bool

@@ -227,15 +227,10 @@ func BuildResource(tmpl *agentsv1alpha1.SandboxSet) (int, int, int) {
 	cpuCount, memoryMB, diskSizeMB := 0, 0, 0
 	if tmpl.Spec.Template != nil {
 		resource := infra.CalculateResourceFromContainers(tmpl.Spec.Template.Spec.Containers)
-		if resource.CPUMilli > 0 {
-			cpuCount = int(resource.CPUMilli / 1000)
-		}
-		if resource.MemoryMB > 0 {
-			memoryMB = int(resource.MemoryMB)
-		}
-		if resource.DiskSizeMB > 0 {
-			diskSizeMB = int(resource.DiskSizeMB)
-		}
+		cpuCount64, memoryMB64, diskSizeMB64 := e2bResource(resource)
+		cpuCount = int(cpuCount64)
+		memoryMB = int(memoryMB64)
+		diskSizeMB = int(diskSizeMB64)
 		// Calculate disk size from volumeClaimTemplates
 		for _, pvc := range tmpl.Spec.VolumeClaimTemplates {
 			if storage := pvc.Spec.Resources.Requests.Storage(); storage != nil && !storage.IsZero() {

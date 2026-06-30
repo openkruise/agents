@@ -29,6 +29,7 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	cachepkg "github.com/openkruise/agents/pkg/cache"
+	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
 )
 
 const eventReconcileTimeout = 2 * time.Second
@@ -47,7 +48,7 @@ type leakedObservation struct {
 type AntiDriftDriver struct {
 	cfg      AntiDriftConfig
 	primary  PrimaryChecker
-	subjects SubjectLister
+	subjects quotaspec.SubjectLister
 	cache    LiveSandboxCache
 	backend  Backend
 
@@ -65,7 +66,7 @@ type AntiDriftDriver struct {
 	stopCh   chan struct{}
 }
 
-func NewAntiDriftDriver(cfg AntiDriftConfig, primary PrimaryChecker, subjects SubjectLister, liveCache LiveSandboxCache, backend Backend) *AntiDriftDriver {
+func NewAntiDriftDriver(cfg AntiDriftConfig, primary PrimaryChecker, subjects quotaspec.SubjectLister, liveCache LiveSandboxCache, backend Backend) *AntiDriftDriver {
 	if cfg.Interval <= 0 {
 		cfg.Interval = 5 * time.Minute
 	}
@@ -245,7 +246,7 @@ func (d *AntiDriftDriver) RunOnce(ctx context.Context) error {
 	return firstErr
 }
 
-func limitedOwnerIDs(subjects []Subject) map[string]struct{} {
+func limitedOwnerIDs(subjects []quotaspec.Subject) map[string]struct{} {
 	limitedOwners := map[string]struct{}{}
 	for _, subject := range subjects {
 		if subject.Quota != nil && subject.Quota.IsLimited() {
@@ -255,7 +256,7 @@ func limitedOwnerIDs(subjects []Subject) map[string]struct{} {
 	return limitedOwners
 }
 
-func (d *AntiDriftDriver) reconcileLimitedSubject(ctx context.Context, subject Subject, now time.Time) (bool, error) {
+func (d *AntiDriftDriver) reconcileLimitedSubject(ctx context.Context, subject quotaspec.Subject, now time.Time) (bool, error) {
 	user := subject.User
 	liveSandboxes, err := d.cache.ListLiveSandboxesByOwner(ctx, user)
 	if err != nil {

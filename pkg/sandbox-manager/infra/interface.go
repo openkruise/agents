@@ -40,11 +40,6 @@ type ResourceList struct {
 }
 
 type SandboxResource struct {
-	// Legacy request totals used by current E2B response conversion.
-	CPUMilli   int64
-	MemoryMB   int64
-	DiskSizeMB int64
-
 	Requests ResourceList
 	Limits   ResourceList
 }
@@ -94,11 +89,8 @@ func CalculateResourceFromContainers(containers []corev1.Container) SandboxResou
 		return r.Limits
 	}, memoryBytesToCeilMiB)
 	return SandboxResource{
-		CPUMilli:   requests.CPUMilli,
-		MemoryMB:   requests.MemoryMB,
-		DiskSizeMB: requests.DiskSizeMB,
-		Requests:   requests,
-		Limits:     limits,
+		Requests: requests,
+		Limits:   limits,
 	}
 }
 

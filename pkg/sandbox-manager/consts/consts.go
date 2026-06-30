@@ -37,6 +37,14 @@ const (
 	ShutdownTimeout           = 90 * time.Second
 )
 
+const (
+	DefaultQuotaRedisOperationTimeout = 50 * time.Millisecond
+	DefaultQuotaRedisBreakerN         = 3
+	DefaultQuotaRedisBreakerD         = 30 * time.Second
+	DefaultQuotaAntiDriftInterval     = 5 * time.Minute
+	DefaultQuotaAntiDriftGrace        = 10 * time.Minute
+)
+
 // Sentinel values for ReserveFailedSandboxFor.
 const (
 	// ReserveFailedSandboxNever instructs the backend to delete a failed

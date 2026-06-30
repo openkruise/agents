@@ -43,22 +43,17 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	toolscache "k8s.io/client-go/tools/cache"
-	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
 	infracache "github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/cache/cachetest"
-	cacheutils "github.com/openkruise/agents/pkg/cache/utils"
 	"github.com/openkruise/agents/pkg/proxy"
 	sandboxmanager "github.com/openkruise/agents/pkg/sandbox-manager"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
-	"github.com/openkruise/agents/pkg/sandbox-manager/quota"
-	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
 	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
@@ -82,12 +77,20 @@ func Setup(t *testing.T) (*Controller, ctrlclient.Client, func()) {
 	return SetupWithMinResumeTimeout(t, models.DefaultMinResumeTimeoutSeconds)
 }
 
+func SetupWithQuota(t *testing.T, enforcer sandboxmanager.QuotaEnforcer) (*Controller, ctrlclient.Client, func()) {
+	return setupWithMinResumeTimeoutAndQuota(t, models.DefaultMinResumeTimeoutSeconds, enforcer)
+}
+
 func refreshKeyStorageForTest(t *testing.T, controller *Controller) {
 	t.Helper()
 	require.NoError(t, controller.keys.Init(t.Context()))
 }
 
 func SetupWithMinResumeTimeout(t *testing.T, minResumeTimeout int) (*Controller, ctrlclient.Client, func()) {
+	return setupWithMinResumeTimeoutAndQuota(t, minResumeTimeout, nil)
+}
+
+func setupWithMinResumeTimeoutAndQuota(t *testing.T, minResumeTimeout int, quotaEnforcer sandboxmanager.QuotaEnforcer) (*Controller, ctrlclient.Client, func()) {
 	testutils.InitLogOutput()
 	namespace := "sandbox-system"
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -142,6 +145,7 @@ func SetupWithMinResumeTimeout(t *testing.T, minResumeTimeout int) (*Controller,
 
 	sandboxManager, err := sandboxmanager.NewSandboxManagerBuilder(opts).
 		WithRequestAdapter(adapters.DefaultAdapterFactory(controller.port)).
+		WithQuotaEnforcer(quotaEnforcer).
 		WithCustomInfra(func() (infra.Builder, error) {
 			return sandboxcr.NewInfraBuilder(opts).
 				WithCache(cache).
@@ -158,11 +162,13 @@ func SetupWithMinResumeTimeout(t *testing.T, minResumeTimeout int) (*Controller,
 
 	require.NoError(t, controller.initKeyStorage(t.Context()))
 
-	// Initialize quota through the manager (mirrors Init() logic)
-	if controller.keys != nil {
-		require.NoError(t, controller.manager.InitQuota(t.Context(), config.QuotaOptions{}, keys.NewQuotaSubjectLister(controller.keys)))
-	} else {
-		require.NoError(t, controller.manager.InitQuota(t.Context(), config.QuotaOptions{}, nil))
+	if quotaEnforcer == nil {
+		// Initialize quota through the manager (mirrors Init() logic).
+		if controller.keys != nil {
+			require.NoError(t, controller.manager.InitQuota(t.Context(), config.QuotaOptions{}, keys.NewQuotaSubjectLister(controller.keys)))
+		} else {
+			require.NoError(t, controller.manager.InitQuota(t.Context(), config.QuotaOptions{}, nil))
+		}
 	}
 
 	controller.stop = make(chan os.Signal, 1)
@@ -184,224 +190,26 @@ func SetupWithMinResumeTimeout(t *testing.T, minResumeTimeout int) (*Controller,
 	}
 }
 
-type quotaInitRegistration struct{}
-
-func (quotaInitRegistration) HasSynced() bool { return true }
-func (quotaInitRegistration) Remove() error   { return nil }
-
-type quotaInitCache struct {
-	addCalls    atomic.Int64
-	lastHandler toolscache.ResourceEventHandler
-	addErr      error
+type stopProbeInfraBuilder struct {
+	base infra.Builder
+	stop func()
 }
 
-func (c *quotaInitCache) GetClaimedSandbox(context.Context, infracache.GetClaimedSandboxOptions) (*agentsv1alpha1.Sandbox, error) {
-	return nil, nil
-}
-func (c *quotaInitCache) GetCheckpoint(context.Context, infracache.GetCheckpointOptions) (*agentsv1alpha1.Checkpoint, error) {
-	return nil, nil
-}
-func (c *quotaInitCache) PickSandboxSet(context.Context, infracache.PickSandboxSetOptions) (*agentsv1alpha1.SandboxSet, error) {
-	return nil, nil
-}
-func (c *quotaInitCache) ListSandboxSets(context.Context, infracache.ListSandboxSetsOptions) ([]*agentsv1alpha1.SandboxSet, error) {
-	return nil, nil
-}
-func (c *quotaInitCache) ListSandboxes(context.Context, infracache.ListSandboxesOptions) ([]*agentsv1alpha1.Sandbox, error) {
-	return nil, nil
-}
-func (c *quotaInitCache) CountActiveSandboxes(context.Context, infracache.ListSandboxesOptions) (int32, error) {
-	return 0, nil
-}
-func (c *quotaInitCache) ListLiveSandboxesByOwner(context.Context, string) ([]*agentsv1alpha1.Sandbox, error) {
-	return nil, nil
-}
-func (c *quotaInitCache) ListCheckpoints(context.Context, infracache.ListCheckpointsOptions) ([]*agentsv1alpha1.Checkpoint, error) {
-	return nil, nil
-}
-func (c *quotaInitCache) ListSandboxesInPool(context.Context, infracache.ListSandboxesInPoolOptions) ([]*agentsv1alpha1.Sandbox, error) {
-	return nil, nil
-}
-func (c *quotaInitCache) NewSandboxPauseTask(context.Context, *agentsv1alpha1.Sandbox) (*cacheutils.WaitTask[*agentsv1alpha1.Sandbox], error) {
-	return nil, nil
-}
-func (c *quotaInitCache) NewSandboxResumeTask(context.Context, *agentsv1alpha1.Sandbox) (*cacheutils.WaitTask[*agentsv1alpha1.Sandbox], error) {
-	return nil, nil
-}
-func (c *quotaInitCache) NewSandboxWaitReadyTask(context.Context, *agentsv1alpha1.Sandbox) *cacheutils.WaitTask[*agentsv1alpha1.Sandbox] {
-	return nil
-}
-func (c *quotaInitCache) NewCheckpointTask(context.Context, *agentsv1alpha1.Checkpoint) *cacheutils.WaitTask[*agentsv1alpha1.Checkpoint] {
-	return nil
-}
-func (c *quotaInitCache) AddSandboxEventHandler(_ context.Context, handler toolscache.ResourceEventHandler) (infracache.SandboxEventHandlerRegistration, error) {
-	c.addCalls.Add(1)
-	if c.addErr != nil {
-		return nil, c.addErr
-	}
-	c.lastHandler = handler
-	return quotaInitRegistration{}, nil
-}
-func (c *quotaInitCache) SandboxInformerHealthy() bool    { return true }
-func (c *quotaInitCache) Run(context.Context) error       { return nil }
-func (c *quotaInitCache) Stop(context.Context)            {}
-func (c *quotaInitCache) GetClient() ctrlclient.Client    { return nil }
-func (c *quotaInitCache) GetAPIReader() ctrlclient.Reader { return nil }
-func (c *quotaInitCache) GetCache() ctrlcache.Cache       { return nil }
-
-// quotaInitSubjectLister is a minimal SubjectLister for InitQuota tests.
-type quotaInitSubjectLister struct{}
-
-func (*quotaInitSubjectLister) ListLimited(context.Context) ([]quota.Subject, error) { return nil, nil }
-func (*quotaInitSubjectLister) Load(context.Context, string) (quota.Subject, bool) {
-	return quota.Subject{}, false
+func (b stopProbeInfraBuilder) Build() infra.Infrastructure {
+	return stopProbeInfra{Infrastructure: b.base.Build(), stop: b.stop}
 }
 
-// buildQuotaTestManager creates a SandboxManager backed by the given cache for InitQuota tests.
-func buildQuotaTestManager(t *testing.T, spyCache *quotaInitCache) *sandboxmanager.SandboxManager {
-	t.Helper()
-	opts := config.InitOptions(config.SandboxManagerOptions{
-		SystemNamespace:            "sandbox-system",
-		MemberlistBindPort:         config.DefaultMemberlistBindPort,
-		DisableRouteReconciliation: true,
-	})
-	proxyServer := proxy.NewServer(opts)
-	mgr, err := sandboxmanager.NewSandboxManagerBuilder(opts).
-		WithCustomInfra(func() (infra.Builder, error) {
-			return sandboxcr.NewInfraBuilder(opts).
-				WithCache(spyCache).
-				WithAPIReader(nil).
-				WithProxy(proxyServer), nil
-		}).
-		Build()
-	require.NoError(t, err)
-	return mgr
+type stopProbeInfra struct {
+	infra.Infrastructure
+	stop func()
 }
 
-func TestManagerInitQuotaNoKeysDoesNotRegisterAntiDrift(t *testing.T) {
-	spyCache := &quotaInitCache{}
-	mgr := buildQuotaTestManager(t, spyCache)
-
-	require.NoError(t, mgr.InitQuota(context.Background(), config.QuotaOptions{}, nil))
-	assert.Nil(t, mgr.GetQuotaAntiDrift())
-	assert.Equal(t, int64(0), spyCache.addCalls.Load())
-	assert.Nil(t, spyCache.lastHandler)
+func (i stopProbeInfra) Stop(ctx context.Context) {
+	i.stop()
+	i.Infrastructure.Stop(ctx)
 }
 
-func TestManagerInitQuotaRedisAbsentDoesNotRegisterAntiDrift(t *testing.T) {
-	spyCache := &quotaInitCache{}
-	mgr := buildQuotaTestManager(t, spyCache)
-
-	require.NoError(t, mgr.InitQuota(context.Background(), config.QuotaOptions{}, &quotaInitSubjectLister{}))
-	assert.Nil(t, mgr.GetQuotaAntiDrift())
-	assert.Equal(t, int64(0), spyCache.addCalls.Load())
-	assert.Nil(t, spyCache.lastHandler)
-}
-
-func TestManagerInitQuotaRedisConfiguredRegistersHandler(t *testing.T) {
-	spyCache := &quotaInitCache{}
-	mgr := buildQuotaTestManager(t, spyCache)
-
-	require.NoError(t, mgr.InitQuota(context.Background(), config.QuotaOptions{
-		RedisAddr:         "127.0.0.1:1",
-		OperationTimeout:  time.Millisecond,
-		AntiDriftInterval: time.Minute,
-		AntiDriftGrace:    time.Minute,
-	}, &quotaInitSubjectLister{}))
-	require.NotNil(t, mgr.GetQuotaAntiDrift())
-	assert.Equal(t, int64(1), spyCache.addCalls.Load(), "Redis configured must register the anti-drift event handler")
-	assert.NotNil(t, spyCache.lastHandler)
-}
-
-func TestManagerInitQuotaRedisConfiguredTransportUnavailableStillFailOpen(t *testing.T) {
-	spyCache := &quotaInitCache{}
-	mgr := buildQuotaTestManager(t, spyCache)
-
-	require.NoError(t, mgr.InitQuota(context.Background(), config.QuotaOptions{
-		RedisAddr:         "127.0.0.1:1",
-		OperationTimeout:  time.Millisecond,
-		AntiDriftInterval: time.Minute,
-		AntiDriftGrace:    time.Minute,
-	}, &quotaInitSubjectLister{}))
-	require.NotNil(t, mgr.GetQuotaAntiDrift(), "transport unavailability must not disable driver construction when Redis is configured")
-
-	// Verify the hot path fails open: Acquire must succeed even with an unreachable Redis.
-	err := mgr.GetQuotaEnforcer().Acquire(context.Background(), quota.AcquireRequest{
-		User:       "test-user",
-		LockString: "test-lock",
-		Quota:      &quotaspec.QuotaSpec{Limits: []quotaspec.QuotaLimit{{Dimension: quotaspec.DimSandboxCount, Scope: quotaspec.ScopeAll, Limit: 1}}},
-		Footprint:  map[quotaspec.QuotaDimension]int64{quotaspec.DimSandboxCount: 1},
-		Scopes:     []quotaspec.QuotaScope{quotaspec.ScopeAll},
-	})
-	require.NoError(t, err, "configured Redis transport errors must fail open on the hot path")
-}
-
-func TestManagerInitQuotaRedisConfiguredRequiresCache(t *testing.T) {
-	mgr := &sandboxmanager.SandboxManager{}
-	err := mgr.InitQuota(context.Background(), config.QuotaOptions{
-		RedisAddr:         "127.0.0.1:1",
-		OperationTimeout:  time.Millisecond,
-		AntiDriftInterval: time.Minute,
-		AntiDriftGrace:    time.Minute,
-	}, &quotaInitSubjectLister{})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "cache is not available")
-}
-
-func TestManagerInitQuotaRedisConfiguredRegistrationErrorDoesNotLeavePartialState(t *testing.T) {
-	spyCache := &quotaInitCache{addErr: errors.New("informer unavailable")}
-	mgr := buildQuotaTestManager(t, spyCache)
-
-	err := mgr.InitQuota(context.Background(), config.QuotaOptions{
-		RedisAddr:         "127.0.0.1:1",
-		OperationTimeout:  time.Millisecond,
-		AntiDriftInterval: time.Minute,
-		AntiDriftGrace:    time.Minute,
-	}, &quotaInitSubjectLister{})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "informer unavailable")
-	assert.Equal(t, int64(1), spyCache.addCalls.Load())
-	assert.Nil(t, mgr.GetQuotaAntiDrift())
-	assert.Nil(t, mgr.GetQuotaRedisClient())
-}
-
-type recordingRedisCloser struct {
-	closed atomic.Bool
-}
-
-func (c *recordingRedisCloser) Close() error {
-	c.closed.Store(true)
-	return nil
-}
-
-func TestManagerStopClosesQuotaRedis(t *testing.T) {
-	closer := &recordingRedisCloser{}
-	opts := config.InitOptions(config.SandboxManagerOptions{
-		SystemNamespace:    "sandbox-system",
-		MemberlistBindPort: config.DefaultMemberlistBindPort,
-	})
-	cache, fc, err := cachetest.NewTestCache(t)
-	require.NoError(t, err)
-
-	proxyServer := proxy.NewServer(opts)
-	mgr, err := sandboxmanager.NewSandboxManagerBuilder(opts).
-		WithCustomInfra(func() (infra.Builder, error) {
-			return sandboxcr.NewInfraBuilder(opts).
-				WithCache(cache).
-				WithAPIReader(fc).
-				WithProxy(proxyServer), nil
-		}).
-		Build()
-	require.NoError(t, err)
-
-	require.NoError(t, mgr.GetInfra().Run(t.Context()))
-	mgr.SetQuotaRedisClient(closer)
-
-	mgr.Stop(t.Context())
-	assert.True(t, closer.closed.Load())
-}
-
-func TestControllerShutdownClosesQuotaRedisAfterHTTPShutdown(t *testing.T) {
+func TestControllerShutdownStopsManagerAfterHTTPShutdown(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 
@@ -445,8 +253,8 @@ func TestControllerShutdownClosesQuotaRedisAfterHTTPShutdown(t *testing.T) {
 		t.Fatal("timed out waiting for request to start")
 	}
 
-	closer := &recordingRedisCloser{}
 	cancelCalled := atomic.Bool{}
+	managerStopped := make(chan struct{})
 
 	opts := config.InitOptions(config.SandboxManagerOptions{
 		SystemNamespace:    "sandbox-system",
@@ -457,15 +265,19 @@ func TestControllerShutdownClosesQuotaRedisAfterHTTPShutdown(t *testing.T) {
 	proxyServer := proxy.NewServer(opts)
 	mgr, err := sandboxmanager.NewSandboxManagerBuilder(opts).
 		WithCustomInfra(func() (infra.Builder, error) {
-			return sandboxcr.NewInfraBuilder(opts).
+			builder := sandboxcr.NewInfraBuilder(opts).
 				WithCache(fakeCache).
 				WithAPIReader(fc).
-				WithProxy(proxyServer), nil
+				WithProxy(proxyServer)
+			return stopProbeInfraBuilder{
+				base: builder,
+				stop: func() {
+					close(managerStopped)
+				},
+			}, nil
 		}).
 		Build()
 	require.NoError(t, err)
-	require.NoError(t, mgr.GetInfra().Run(t.Context()))
-	mgr.SetQuotaRedisClient(closer)
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer shutdownCancel()
@@ -486,7 +298,11 @@ func TestControllerShutdownClosesQuotaRedisAfterHTTPShutdown(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for HTTP shutdown to start")
 	}
-	assert.False(t, closer.closed.Load(), "quota Redis client must stay open while HTTP requests are draining")
+	select {
+	case <-managerStopped:
+		t.Fatal("manager.Stop must not run while HTTP requests are draining")
+	default:
+	}
 	select {
 	case <-shutdownDone:
 		t.Fatal("shutdown completed before the active request drained")
@@ -499,9 +315,13 @@ func TestControllerShutdownClosesQuotaRedisAfterHTTPShutdown(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for shutdown to finish")
 	}
+	select {
+	case <-managerStopped:
+	default:
+		t.Fatal("manager.Stop must run after HTTP requests drain")
+	}
 	require.NoError(t, <-clientErr)
 	require.ErrorIs(t, <-serverErr, http.ErrServerClosed)
-	assert.True(t, closer.closed.Load())
 	assert.True(t, cancelCalled.Load())
 }
 
@@ -554,11 +374,14 @@ func CreateSandboxPool(t *testing.T, controller *Controller, name string, availa
 	container := corev1.Container{Name: "main", Image: "old-image"}
 	if options.CPURequest != "" || options.Memory != "" {
 		container.Resources.Requests = corev1.ResourceList{}
+		container.Resources.Limits = corev1.ResourceList{}
 		if options.CPURequest != "" {
 			container.Resources.Requests[corev1.ResourceCPU] = resource.MustParse(options.CPURequest)
+			container.Resources.Limits[corev1.ResourceCPU] = resource.MustParse(options.CPURequest)
 		}
 		if options.Memory != "" {
 			container.Resources.Requests[corev1.ResourceMemory] = resource.MustParse(options.Memory)
+			container.Resources.Limits[corev1.ResourceMemory] = resource.MustParse(options.Memory)
 		}
 	}
 	tmpl := agentsv1alpha1.EmbeddedSandboxTemplate{

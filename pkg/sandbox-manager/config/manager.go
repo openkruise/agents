@@ -74,19 +74,19 @@ func InitOptions(opts SandboxManagerOptions) SandboxManagerOptions {
 	}
 	// Quota defaults
 	if opts.Quota.OperationTimeout <= 0 {
-		opts.Quota.OperationTimeout = 50 * time.Millisecond
+		opts.Quota.OperationTimeout = consts.DefaultQuotaRedisOperationTimeout
 	}
 	if opts.Quota.BreakerN <= 0 {
-		opts.Quota.BreakerN = 3
+		opts.Quota.BreakerN = consts.DefaultQuotaRedisBreakerN
 	}
 	if opts.Quota.BreakerD <= 0 {
-		opts.Quota.BreakerD = 30 * time.Second
+		opts.Quota.BreakerD = consts.DefaultQuotaRedisBreakerD
 	}
 	if opts.Quota.AntiDriftInterval <= 0 {
-		opts.Quota.AntiDriftInterval = 5 * time.Minute
+		opts.Quota.AntiDriftInterval = consts.DefaultQuotaAntiDriftInterval
 	}
 	if opts.Quota.AntiDriftGrace <= 0 {
-		opts.Quota.AntiDriftGrace = 10 * time.Minute
+		opts.Quota.AntiDriftGrace = consts.DefaultQuotaAntiDriftGrace
 	}
 	return opts
 }
