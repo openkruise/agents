@@ -62,7 +62,8 @@ type TimeoutUpdateResult struct {
 }
 
 type PauseOptions struct {
-	Timeout *timeout.Options
+	Timeout          *timeout.Options
+	ExtraAnnotations map[string]string
 }
 
 // ResumeOptions configures a Resume operation.
@@ -142,7 +143,7 @@ type Sandbox interface {
 	SetPodLabels(labels map[string]string)
 	GetPodLabels() map[string]string
 	SetTimeout(opts timeout.Options)
-	SaveTimeoutWithPolicy(ctx context.Context, opts timeout.Options, policy timeout.UpdatePolicy) (TimeoutUpdateResult, error)
+	SaveTimeoutWithPolicy(ctx context.Context, opts SaveTimeoutOptions, policy timeout.UpdatePolicy) (TimeoutUpdateResult, error)
 	GetTimeout() timeout.Options
 	GetClaimTime() (time.Time, error)
 	Kill(ctx context.Context) error                                                                     // Delete the Sandbox resource

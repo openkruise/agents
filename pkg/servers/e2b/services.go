@@ -30,7 +30,6 @@ import (
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
 	"github.com/openkruise/agents/pkg/utils"
-	"github.com/openkruise/agents/pkg/utils/timeout"
 )
 
 // GetSandboxAddress returns the sandbox address in the format "{port}-{sandboxId}.{domain}".
@@ -78,18 +77,6 @@ func (sc *Controller) DeleteSandbox(r *http.Request) (web.ApiResponse[struct{}],
 	return web.ApiResponse[struct{}]{
 		Code: http.StatusNoContent,
 	}, nil
-}
-
-func (sc *Controller) buildSetTimeoutOptions(autoPause bool, now time.Time, timeoutSeconds int) timeout.Options {
-	if autoPause {
-		return timeout.Options{
-			PauseTime:    TimeAfterSeconds(now, timeoutSeconds),
-			ShutdownTime: TimeAfterSeconds(now, sc.maxTimeout),
-		}
-	}
-	return timeout.Options{
-		ShutdownTime: TimeAfterSeconds(now, timeoutSeconds),
-	}
 }
 
 func TimeAfterSeconds(now time.Time, afterSeconds int) time.Time {

@@ -386,6 +386,54 @@ var _ = Describe("Sandbox", func() {
 				return err != nil
 			}, time.Second*30, time.Millisecond*500).Should(BeTrue())
 		})
+
+		It("should pause instead of deleting when shutdown and pause deadlines are both due with retention annotation", func() {
+			By("Creating a new Sandbox")
+			Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
+
+			By("Waiting for sandbox to reach Running phase")
+			Eventually(func() agentsv1alpha1.SandboxPhase {
+				_ = k8sClient.Get(ctx, types.NamespacedName{
+					Name:      sandbox.Name,
+					Namespace: sandbox.Namespace,
+				}, sandbox)
+				return sandbox.Status.Phase
+			}, time.Second*60, time.Millisecond*500).Should(Equal(agentsv1alpha1.SandboxRunning))
+
+			By("Setting due shutdown and pause deadlines with paused retention")
+			pastPauseTime := metav1.NewTime(time.Now().Add(-time.Minute))
+			pastShutdownTime := metav1.NewTime(time.Now().Add(-time.Minute))
+			Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
+				latestSandbox := &agentsv1alpha1.Sandbox{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{
+					Name:      sandbox.Name,
+					Namespace: sandbox.Namespace,
+				}, latestSandbox); err != nil {
+					return err
+				}
+				if latestSandbox.Annotations == nil {
+					latestSandbox.Annotations = map[string]string{}
+				}
+				latestSandbox.Annotations[agentsv1alpha1.AnnotationReservePausedSandboxFor] = "3m"
+				latestSandbox.Spec.PauseTime = &pastPauseTime
+				latestSandbox.Spec.ShutdownTime = &pastShutdownTime
+				return k8sClient.Update(ctx, latestSandbox)
+			})).To(Succeed())
+
+			By("Verifying the sandbox is paused and retained")
+			Eventually(func(g Gomega) {
+				latestSandbox := &agentsv1alpha1.Sandbox{}
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{
+					Name:      sandbox.Name,
+					Namespace: sandbox.Namespace,
+				}, latestSandbox)).To(Succeed())
+				g.Expect(latestSandbox.Spec.Paused).To(BeTrue())
+				g.Expect(latestSandbox.Spec.ShutdownTime).NotTo(BeNil())
+				g.Expect(latestSandbox.Spec.PauseTime).NotTo(BeNil())
+				g.Expect(latestSandbox.Spec.PauseTime.Time.Equal(latestSandbox.Spec.ShutdownTime.Time)).To(BeTrue())
+				g.Expect(latestSandbox.Spec.ShutdownTime.Time).To(BeTemporally("~", time.Now().Add(3*time.Minute), 10*time.Second))
+			}, time.Second*30, time.Millisecond*500).Should(Succeed())
+		})
 	})
 
 	Context("failed state", func() {

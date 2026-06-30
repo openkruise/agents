@@ -199,16 +199,28 @@ func (s *Sandbox) GetRoute() proxy.Route {
 	return proxyutils.DefaultGetRouteFunc(s.Sandbox)
 }
 
-func setTimeout(s *agentsv1alpha1.Sandbox, opts timeout.Options) {
+func setTimeout(sbx *agentsv1alpha1.Sandbox, opts timeout.Options) {
 	if !opts.PauseTime.IsZero() {
-		s.Spec.PauseTime = ptr.To(metav1.NewTime(timeout.NormalizeTime(opts.PauseTime)))
+		sbx.Spec.PauseTime = ptr.To(metav1.NewTime(timeout.NormalizeTime(opts.PauseTime)))
 	} else {
-		s.Spec.PauseTime = nil
+		sbx.Spec.PauseTime = nil
 	}
 	if !opts.ShutdownTime.IsZero() {
-		s.Spec.ShutdownTime = ptr.To(metav1.NewTime(timeout.NormalizeTime(opts.ShutdownTime)))
+		sbx.Spec.ShutdownTime = ptr.To(metav1.NewTime(timeout.NormalizeTime(opts.ShutdownTime)))
 	} else {
-		s.Spec.ShutdownTime = nil
+		sbx.Spec.ShutdownTime = nil
+	}
+}
+
+func mergeExtraAnnotations(sbx *agentsv1alpha1.Sandbox, annotations map[string]string) {
+	if len(annotations) == 0 {
+		return
+	}
+	if sbx.Annotations == nil {
+		sbx.Annotations = map[string]string{}
+	}
+	for key, value := range annotations {
+		sbx.Annotations[key] = value
 	}
 }
 
@@ -246,7 +258,7 @@ func (s *Sandbox) GetImage() string {
 // SaveTimeoutWithPolicy updates timeout with given policy. Available timeout update policies:
 //   - Always: overwrite timeout whenever the requested value differs from current.
 //   - ExtendOnly: only extend to a later effective end time.
-func (s *Sandbox) SaveTimeoutWithPolicy(ctx context.Context, opts timeout.Options, policy timeout.UpdatePolicy) (infra.TimeoutUpdateResult, error) {
+func (s *Sandbox) SaveTimeoutWithPolicy(ctx context.Context, opts infra.SaveTimeoutOptions, policy timeout.UpdatePolicy) (infra.TimeoutUpdateResult, error) {
 	log := klog.FromContext(ctx).V(utils.DebugLogLevel).WithValues("sandbox", klog.KObj(s.Sandbox), "policy", policy)
 	result := infra.TimeoutUpdateResult{}
 
@@ -257,9 +269,9 @@ func (s *Sandbox) SaveTimeoutWithPolicy(ctx context.Context, opts timeout.Option
 		shouldUpdate := false
 		switch policy {
 		case timeout.UpdatePolicyAlways:
-			shouldUpdate = !timeout.Equal(current, opts)
+			shouldUpdate = !timeout.Equal(current, opts.Timeout)
 		case timeout.UpdatePolicyExtendOnly:
-			shouldUpdate = timeout.ShouldExtendTimeout(current, opts)
+			shouldUpdate = timeout.ShouldExtendTimeout(current, opts.Timeout)
 		default:
 			return false, fmt.Errorf("unsupported timeout update policy %q", policy)
 		}
@@ -267,7 +279,8 @@ func (s *Sandbox) SaveTimeoutWithPolicy(ctx context.Context, opts timeout.Option
 		if !shouldUpdate {
 			return false, nil
 		}
-		setTimeout(sbx, opts)
+		setTimeout(sbx, opts.Timeout)
+		mergeExtraAnnotations(sbx, opts.ExtraAnnotations)
 		return true, nil
 	})
 	if err != nil {
@@ -319,8 +332,8 @@ func (s *Sandbox) Pause(ctx context.Context, opts infra.PauseOptions) error {
 	defer pauseTask.Release()
 	updated, err := s.retryUpdate(ctx, func(sbx *agentsv1alpha1.Sandbox) (bool, error) {
 		if sbx.Spec.Paused {
-			// Pause is first-writer-wins: only the request that flips
-			// No need to update if spec.paused is already true.
+			// Pause is first-writer-wins: only the request that flips Spec.Paused
+			// from false to true may update timeout fields or annotations.
 			return false, nil
 		}
 		sbx.Spec.Paused = true
@@ -330,6 +343,7 @@ func (s *Sandbox) Pause(ctx context.Context, opts infra.PauseOptions) error {
 				setTimeout(sbx, *opts.Timeout)
 			}
 		}
+		mergeExtraAnnotations(sbx, opts.ExtraAnnotations)
 		return true, nil
 	})
 	if err != nil {
