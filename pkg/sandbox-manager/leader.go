@@ -112,10 +112,10 @@ type primaryElector struct {
 	elector leaderElectionRunner
 	state   *primaryState
 
-	mu      sync.Mutex
-	stopped bool
-	cancel  context.CancelFunc
-	done    chan struct{}
+	runOnce  sync.Once
+	stopOnce sync.Once
+	stopCh   chan struct{}
+	done     chan struct{}
 }
 
 func newPrimaryElector(opts config.SandboxManagerOptions, state *primaryState) (*primaryElector, error) {
@@ -124,7 +124,11 @@ func newPrimaryElector(opts config.SandboxManagerOptions, state *primaryState) (
 		return nil, err
 	}
 
-	primary := &primaryElector{state: state}
+	primary := &primaryElector{
+		state:  state,
+		stopCh: make(chan struct{}),
+		done:   make(chan struct{}),
+	}
 
 	lock, err := resourcelock.New(
 		resourcelock.LeasesResourceLock,
@@ -185,47 +189,34 @@ func (e *primaryElector) Run(ctx context.Context) {
 	if e == nil || e.elector == nil {
 		return
 	}
-	done := make(chan struct{})
 
-	e.mu.Lock()
-	if e.stopped {
-		e.mu.Unlock()
-		close(done)
-		return
-	}
-	e.done = done
-	e.mu.Unlock()
-
-	defer func() {
-		e.mu.Lock()
-		e.done = nil
-		e.cancel = nil
-		e.state.set(false)
-		e.mu.Unlock()
-		close(done)
-	}()
-
-	for ctx.Err() == nil {
-		e.mu.Lock()
-		if e.stopped {
-			e.mu.Unlock()
-			return
+	e.runOnce.Do(func() {
+		if e.stopCh == nil {
+			e.stopCh = make(chan struct{})
 		}
+		if e.done == nil {
+			e.done = make(chan struct{})
+		}
+
 		runCtx, cancel := context.WithCancel(ctx)
-		e.cancel = cancel
-		e.mu.Unlock()
+		defer func() {
+			cancel()
+			e.state.set(false)
+			close(e.done)
+		}()
 
-		e.elector.Run(runCtx)
-		cancel()
+		go func() {
+			select {
+			case <-e.stopCh:
+				cancel()
+			case <-runCtx.Done():
+			}
+		}()
 
-		e.mu.Lock()
-		e.cancel = nil
-		stopped := e.stopped
-		e.mu.Unlock()
-		if stopped {
-			return
+		for runCtx.Err() == nil {
+			e.elector.Run(runCtx)
 		}
-	}
+	})
 }
 
 func (e *primaryElector) Stop(ctx context.Context) {
@@ -233,22 +224,16 @@ func (e *primaryElector) Stop(ctx context.Context) {
 		return
 	}
 
-	e.mu.Lock()
-	cancel := e.cancel
-	done := e.done
-	e.stopped = true
-	e.state.set(false)
-	e.mu.Unlock()
-
-	if cancel != nil {
-		cancel()
+	if e.stopCh != nil {
+		e.stopOnce.Do(func() { close(e.stopCh) })
 	}
-	if done == nil {
+	e.state.set(false)
+	if e.done == nil {
 		return
 	}
 
 	select {
-	case <-done:
+	case <-e.done:
 	case <-ctx.Done():
 	}
 }
@@ -257,10 +242,15 @@ func (e *primaryElector) startLeading(ctx context.Context) {
 	if e == nil {
 		return
 	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if e.stopped || ctx.Err() != nil {
+	if ctx.Err() != nil {
 		return
+	}
+	if e.stopCh != nil {
+		select {
+		case <-e.stopCh:
+			return
+		default:
+		}
 	}
 	e.state.set(true)
 }

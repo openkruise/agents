@@ -19,6 +19,7 @@ package sandbox_manager
 import (
 	"context"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -34,14 +35,6 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 )
 
-type recordingLeaderElector struct {
-	calls atomic.Int64
-}
-
-func (r *recordingLeaderElector) Run(context.Context) {
-	r.calls.Add(1)
-}
-
 type cancelAfterRunsLeaderElector struct {
 	calls  atomic.Int64
 	cancel context.CancelFunc
@@ -52,6 +45,21 @@ func (r *cancelAfterRunsLeaderElector) Run(context.Context) {
 	if r.calls.Add(1) >= r.after {
 		r.cancel()
 	}
+}
+
+type blockingLeaderElector struct {
+	calls    atomic.Int64
+	started  chan struct{}
+	returned chan struct{}
+	start    sync.Once
+	done     sync.Once
+}
+
+func (r *blockingLeaderElector) Run(ctx context.Context) {
+	r.calls.Add(1)
+	r.start.Do(func() { close(r.started) })
+	<-ctx.Done()
+	r.done.Do(func() { close(r.returned) })
 }
 
 func TestPrimaryState(t *testing.T) {
@@ -99,7 +107,7 @@ func TestPrimaryElectorCallbacksRespectRunLifecycle(t *testing.T) {
 	tests := []struct {
 		name       string
 		cancel     bool
-		stopped    bool
+		stop       bool
 		expectLive bool
 	}{
 		{
@@ -111,15 +119,18 @@ func TestPrimaryElectorCallbacksRespectRunLifecycle(t *testing.T) {
 			cancel: true,
 		},
 		{
-			name:    "stopped elector ignores start callback",
-			stopped: true,
+			name: "stopped elector ignores start callback",
+			stop: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			state := &primaryState{}
-			elector := &primaryElector{state: state, stopped: tt.stopped}
+			elector := &primaryElector{state: state, stopCh: make(chan struct{})}
+			if tt.stop {
+				close(elector.stopCh)
+			}
 			ctx, cancel := context.WithCancel(context.Background())
 			if tt.cancel {
 				cancel()
@@ -145,34 +156,82 @@ func TestPrimaryElectorStopLeadingClearsPrimary(t *testing.T) {
 func TestPrimaryElectorStopCancelsAndClearsPrimary(t *testing.T) {
 	state := &primaryState{}
 	state.set(true)
-	runCtx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
+	runner := &blockingLeaderElector{
+		started:  make(chan struct{}),
+		returned: make(chan struct{}),
+	}
 	elector := &primaryElector{
-		state:  state,
-		cancel: cancel,
-		done:   done,
+		state:   state,
+		elector: runner,
+		stopCh:  make(chan struct{}),
+		done:    make(chan struct{}),
+	}
+
+	go elector.Run(context.Background())
+
+	select {
+	case <-runner.started:
+	case <-time.After(time.Second):
+		t.Fatal("leader elector did not start")
+	}
+
+	elector.Stop(context.Background())
+	assert.False(t, state.IsPrimary())
+
+	select {
+	case <-runner.returned:
+	case <-time.After(time.Second):
+		t.Fatal("leader elector did not stop")
+	}
+}
+
+func TestPrimaryElectorRunOnlyStartsOnce(t *testing.T) {
+	state := &primaryState{}
+	runner := &blockingLeaderElector{
+		started:  make(chan struct{}),
+		returned: make(chan struct{}),
+	}
+	elector := &primaryElector{
+		state:   state,
+		elector: runner,
+		stopCh:  make(chan struct{}),
+		done:    make(chan struct{}),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	firstDone := make(chan struct{})
+	secondDone := make(chan struct{})
+
+	go func() {
+		elector.Run(ctx)
+		close(firstDone)
+	}()
+	select {
+	case <-runner.started:
+	case <-time.After(time.Second):
+		t.Fatal("leader elector did not start")
 	}
 
 	go func() {
-		<-runCtx.Done()
-		close(done)
+		elector.Run(ctx)
+		close(secondDone)
 	}()
 
-	elector.Stop(context.Background())
-	assert.False(t, state.IsPrimary())
-	assert.ErrorIs(t, runCtx.Err(), context.Canceled)
-}
+	time.Sleep(20 * time.Millisecond)
+	assert.Equal(t, int64(1), runner.calls.Load())
 
-func TestPrimaryElectorRunDoesNotStartAfterStop(t *testing.T) {
-	state := &primaryState{}
-	runner := &recordingLeaderElector{}
-	elector := &primaryElector{state: state, elector: runner}
-
-	elector.Stop(context.Background())
-	elector.Run(context.Background())
-
-	assert.Equal(t, int64(0), runner.calls.Load())
-	assert.False(t, state.IsPrimary())
+	cancel()
+	select {
+	case <-secondDone:
+	case <-time.After(time.Second):
+		t.Fatal("second Run call did not return")
+	}
+	select {
+	case <-firstDone:
+	case <-time.After(time.Second):
+		t.Fatal("first Run call did not return")
+	}
 }
 
 func TestPrimaryElectorRunRecontendsAfterLeaderElectorReturns(t *testing.T) {
