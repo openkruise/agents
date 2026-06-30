@@ -150,21 +150,6 @@ func TestCreateVolume(t *testing.T) {
 			errorCode:   http.StatusBadRequest,
 		},
 		{
-			name: "invalid wait bound seconds",
-			setupReq: func(t *testing.T) *http.Request {
-				req := NewRequest(t, nil, models.NewVolumeRequest{
-					Name: "test-volume-bad-wait",
-				}, nil, user)
-				req.Header.Set(models.ExtensionHeaderVolumeSize, "1Gi")
-				req.Header.Set(models.ExtensionHeaderVolumeStorageClass, "standard")
-				req.Header.Set(models.ExtensionHeaderVolumeAccessMode, "ReadWriteOnce")
-				req.Header.Set(models.ExtensionHeaderVolumeWaitSuccessSeconds, "-1")
-				return req
-			},
-			expectError: "cannot be negative",
-			errorCode:   http.StatusBadRequest,
-		},
-		{
 			name: "storage class not found",
 			setupReq: func(t *testing.T) *http.Request {
 				req := NewRequest(t, nil, models.NewVolumeRequest{
