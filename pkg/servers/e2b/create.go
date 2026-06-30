@@ -259,6 +259,22 @@ func (sc *Controller) parseCreateSandboxRequest(r *http.Request) (models.NewSand
 		}
 	}
 
+	// Validate and convert volumeMounts to CSI mount configs
+	if len(request.VolumeMounts) > 0 {
+		if err := models.ValidateVolumeMounts(request.VolumeMounts); err != nil {
+			return request, &web.ApiError{
+				Code:    http.StatusBadRequest,
+				Message: err.Error(),
+			}
+		}
+		for _, vm := range request.VolumeMounts {
+			request.Extensions.CSIMount.MountConfigs = append(request.Extensions.CSIMount.MountConfigs, agentsv1alpha1.CSIMountConfig{
+				PvName:    vm.Name,
+				MountPath: vm.Path,
+			})
+		}
+	}
+
 	if err := request.ParseExtensions(); err != nil {
 		return request, &web.ApiError{
 			Code:    http.StatusBadRequest,

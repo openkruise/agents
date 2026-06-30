@@ -640,6 +640,85 @@ func TestParseCreateSandboxRequest(t *testing.T) {
 		assert.Equal(t, http.StatusBadRequest, apiErr.Code)
 		assert.Contains(t, apiErr.Message, "timeout should between")
 	})
+
+	t.Run("valid volumeMounts", func(t *testing.T) {
+		body := `{
+			"templateID":"t1",
+			"volumeMounts":[
+				{"name":"pv-nas-001","path":"/data"},
+				{"name":"pv-oss-002","path":"/models"}
+			]
+		}`
+		req := httptest.NewRequest(http.MethodPost, "/sandboxes", strings.NewReader(body))
+		got, apiErr := ctrl.parseCreateSandboxRequest(req)
+		require.Nil(t, apiErr)
+		require.Len(t, got.VolumeMounts, 2)
+		assert.Equal(t, "pv-nas-001", got.VolumeMounts[0].Name)
+		assert.Equal(t, "/data", got.VolumeMounts[0].Path)
+		assert.Equal(t, "pv-oss-002", got.VolumeMounts[1].Name)
+		assert.Equal(t, "/models", got.VolumeMounts[1].Path)
+		// Verify CSIMount configs are populated
+		require.Len(t, got.Extensions.CSIMount.MountConfigs, 2)
+		assert.Equal(t, "pv-nas-001", got.Extensions.CSIMount.MountConfigs[0].PvName)
+		assert.Equal(t, "/data", got.Extensions.CSIMount.MountConfigs[0].MountPath)
+		assert.Equal(t, "pv-oss-002", got.Extensions.CSIMount.MountConfigs[1].PvName)
+		assert.Equal(t, "/models", got.Extensions.CSIMount.MountConfigs[1].MountPath)
+	})
+
+	t.Run("volumeMounts with empty name", func(t *testing.T) {
+		body := `{
+			"templateID":"t1",
+			"volumeMounts":[
+				{"name":"","path":"/data"}
+			]
+		}`
+		req := httptest.NewRequest(http.MethodPost, "/sandboxes", strings.NewReader(body))
+		_, apiErr := ctrl.parseCreateSandboxRequest(req)
+		require.NotNil(t, apiErr)
+		assert.Equal(t, http.StatusBadRequest, apiErr.Code)
+		assert.Contains(t, apiErr.Message, "volumeMounts[0].name cannot be empty")
+	})
+
+	t.Run("volumeMounts with invalid path", func(t *testing.T) {
+		body := `{
+			"templateID":"t1",
+			"volumeMounts":[
+				{"name":"pv-001","path":"invalid/path"}
+			]
+		}`
+		req := httptest.NewRequest(http.MethodPost, "/sandboxes", strings.NewReader(body))
+		_, apiErr := ctrl.parseCreateSandboxRequest(req)
+		require.NotNil(t, apiErr)
+		assert.Equal(t, http.StatusBadRequest, apiErr.Code)
+		assert.Contains(t, apiErr.Message, "volumeMounts[0].path: mount point must start with '/'")
+	})
+
+	t.Run("volumeMounts with duplicate paths", func(t *testing.T) {
+		body := `{
+			"templateID":"t1",
+			"volumeMounts":[
+				{"name":"pv-001","path":"/data"},
+				{"name":"pv-002","path":"/data"}
+			]
+		}`
+		req := httptest.NewRequest(http.MethodPost, "/sandboxes", strings.NewReader(body))
+		_, apiErr := ctrl.parseCreateSandboxRequest(req)
+		require.NotNil(t, apiErr)
+		assert.Equal(t, http.StatusBadRequest, apiErr.Code)
+		assert.Contains(t, apiErr.Message, `volumeMounts[1].path "/data" is duplicated`)
+	})
+
+	t.Run("empty volumeMounts array", func(t *testing.T) {
+		body := `{
+			"templateID":"t1",
+			"volumeMounts":[]
+		}`
+		req := httptest.NewRequest(http.MethodPost, "/sandboxes", strings.NewReader(body))
+		got, apiErr := ctrl.parseCreateSandboxRequest(req)
+		require.Nil(t, apiErr)
+		assert.Empty(t, got.VolumeMounts)
+		assert.Empty(t, got.Extensions.CSIMount.MountConfigs)
+	})
 }
 
 func TestMapInfraErrorToApiError(t *testing.T) {

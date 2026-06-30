@@ -112,6 +112,117 @@ func TestValidateMountPoint(t *testing.T) {
 	}
 }
 
+func TestValidateVolumeMounts(t *testing.T) {
+	tests := []struct {
+		name          string
+		mounts        []VolumeMount
+		expectError   bool
+		errorContains string
+	}{
+		{
+			name:        "empty mounts",
+			mounts:      []VolumeMount{},
+			expectError: false,
+		},
+		{
+			name: "single valid mount",
+			mounts: []VolumeMount{
+				{Name: "pv-001", Path: "/data"},
+			},
+			expectError: false,
+		},
+		{
+			name: "multiple valid mounts",
+			mounts: []VolumeMount{
+				{Name: "pv-nas-001", Path: "/workspace"},
+				{Name: "pv-oss-002", Path: "/models"},
+				{Name: "pv-disk-003", Path: "/storage"},
+			},
+			expectError: false,
+		},
+		{
+			name: "empty name",
+			mounts: []VolumeMount{
+				{Name: "", Path: "/data"},
+			},
+			expectError:   true,
+			errorContains: "volumeMounts[0].name cannot be empty",
+		},
+		{
+			name: "empty path",
+			mounts: []VolumeMount{
+				{Name: "pv-001", Path: ""},
+			},
+			expectError:   true,
+			errorContains: "volumeMounts[0].path: mount point cannot be empty",
+		},
+		{
+			name: "path not starting with slash",
+			mounts: []VolumeMount{
+				{Name: "pv-001", Path: "invalid/path"},
+			},
+			expectError:   true,
+			errorContains: "volumeMounts[0].path: mount point must start with '/'",
+		},
+		{
+			name: "path contains ..",
+			mounts: []VolumeMount{
+				{Name: "pv-001", Path: "/path/../etc"},
+			},
+			expectError:   true,
+			errorContains: "volumeMounts[0].path: mount point contains invalid '..' path element",
+		},
+		{
+			name: "duplicate paths",
+			mounts: []VolumeMount{
+				{Name: "pv-001", Path: "/data"},
+				{Name: "pv-002", Path: "/data"},
+			},
+			expectError:   true,
+			errorContains: `volumeMounts[1].path "/data" is duplicated`,
+		},
+		{
+			name: "second mount has empty name",
+			mounts: []VolumeMount{
+				{Name: "pv-001", Path: "/data"},
+				{Name: "", Path: "/models"},
+			},
+			expectError:   true,
+			errorContains: "volumeMounts[1].name cannot be empty",
+		},
+		{
+			name: "third mount has invalid path",
+			mounts: []VolumeMount{
+				{Name: "pv-001", Path: "/data"},
+				{Name: "pv-002", Path: "/models"},
+				{Name: "pv-003", Path: "invalid"},
+			},
+			expectError:   true,
+			errorContains: "volumeMounts[2].path: mount point must start with '/'",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateVolumeMounts(tt.mounts)
+
+			if tt.expectError {
+				if err == nil {
+					t.Errorf("expected error but got none")
+					return
+				}
+				if tt.errorContains != "" && !strings.Contains(err.Error(), tt.errorContains) {
+					t.Errorf("expected error to contain '%s', but got '%s'", tt.errorContains, err.Error())
+				}
+			} else {
+				if err != nil {
+					t.Errorf("unexpected error: %v", err)
+				}
+			}
+		})
+	}
+}
+
 func TestParseAndValidatePersistentContents(t *testing.T) {
 	tests := []struct {
 		name           string
