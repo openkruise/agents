@@ -59,6 +59,14 @@ func (sc *Controller) DescribeSandbox(r *http.Request) (web.ApiResponse[*models.
 func (sc *Controller) DeleteSandbox(r *http.Request) (web.ApiResponse[struct{}], *web.ApiError) {
 	id := r.PathValue("sandboxID")
 	log := klog.FromContext(r.Context())
+	user := GetUserFromContext(r.Context())
+	if user == nil {
+		return web.ApiResponse[struct{}]{}, &web.ApiError{
+			Code:    http.StatusUnauthorized,
+			Message: "User not found",
+		}
+	}
+
 	sbx, apiError := sc.getSandboxOfUser(r.Context(), id, claimedSandboxStates)
 	if apiError != nil {
 		log.Error(apiError, "failed to get sandbox, just return success", "id", id)
@@ -67,11 +75,14 @@ func (sc *Controller) DeleteSandbox(r *http.Request) (web.ApiResponse[struct{}],
 		}, nil
 	}
 
-	user := GetUserFromContext(r.Context())
+	quotaSpec := user.QuotaSpec
+	if quotaSpec != nil {
+		quotaSpec = quotaSpec.DeepCopy()
+	}
 	if err := sc.manager.DeleteSandbox(r.Context(), sandboxmanager.DeleteSandboxOptions{
 		Sandbox: sbx,
 		User:    user.ID.String(),
-		Quota:   user.QuotaSpec.DeepCopy(),
+		Quota:   quotaSpec,
 	}); err != nil {
 		log.Error(err, "failed to delete sandbox", "id", id)
 		return web.ApiResponse[struct{}]{}, &web.ApiError{

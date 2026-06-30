@@ -665,7 +665,8 @@ func TestDeleteAPIKeyPermissionMiddleware(t *testing.T) {
 }
 
 func TestDeleteAPIKeyQuotaCleanupRetriesBestEffort(t *testing.T) {
-	controller, _, teardown := Setup(t)
+	fakeQuota := newRetryCleanupQuotaManager(1)
+	controller, _, teardown := SetupWithQuota(t, fakeQuota)
 	defer teardown()
 
 	ctx := logs.NewContext()
@@ -678,9 +679,6 @@ func TestDeleteAPIKeyQuotaCleanupRetriesBestEffort(t *testing.T) {
 	target, err := controller.keys.CreateKey(ctx, adminUser, keys.CreateKeyOptions{Name: "limited-key", Quota: quotaSpecForAPIKeyTest(2)})
 	require.NoError(t, err)
 	refreshKeyStorageForTest(t, controller)
-
-	fakeQuota := newRetryCleanupQuotaManager(1)
-	controller.manager.SetQuotaEnforcer(fakeQuota)
 
 	req := NewRequest(t, nil, nil, map[string]string{"apiKeyID": target.ID.String()}, adminUser)
 	req = req.WithContext(context.WithValue(req.Context(), targetAPIKeyContextKey, target))
@@ -700,7 +698,8 @@ func TestDeleteAPIKeyQuotaCleanupRetriesBestEffort(t *testing.T) {
 }
 
 func TestDeleteAPIKeyUnlimitedSkipsQuotaCleanup(t *testing.T) {
-	controller, _, teardown := Setup(t)
+	fakeQuota := newRetryCleanupQuotaManager(0)
+	controller, _, teardown := SetupWithQuota(t, fakeQuota)
 	defer teardown()
 
 	ctx := logs.NewContext()
@@ -713,9 +712,6 @@ func TestDeleteAPIKeyUnlimitedSkipsQuotaCleanup(t *testing.T) {
 	target, err := controller.keys.CreateKey(ctx, adminUser, keys.CreateKeyOptions{Name: "unlimited-key"})
 	require.NoError(t, err)
 	refreshKeyStorageForTest(t, controller)
-
-	fakeQuota := newRetryCleanupQuotaManager(0)
-	controller.manager.SetQuotaEnforcer(fakeQuota)
 
 	req := NewRequest(t, nil, nil, map[string]string{"apiKeyID": target.ID.String()}, adminUser)
 	req = req.WithContext(context.WithValue(req.Context(), targetAPIKeyContextKey, target))

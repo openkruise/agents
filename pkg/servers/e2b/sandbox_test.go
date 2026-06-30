@@ -174,15 +174,16 @@ func TestConvertToE2BSandboxPodIPMetadata(t *testing.T) {
 	}
 }
 
-func TestConvertToE2BSandboxUsesRequestResources(t *testing.T) {
+func TestConvertToE2BSandboxUsesLimitResources(t *testing.T) {
 	tests := []struct {
 		name       string
 		sbx        *sandboxcr.Sandbox
 		wantCPU    int64
 		wantMemory int64
+		wantDisk   int64
 	}{
 		{
-			name: "uses request cpu and memory instead of limits",
+			name: "uses limit cpu and memory",
 			sbx: &sandboxcr.Sandbox{
 				Sandbox: &agentsv1alpha1.Sandbox{
 					ObjectMeta: metav1.ObjectMeta{
@@ -214,8 +215,42 @@ func TestConvertToE2BSandboxUsesRequestResources(t *testing.T) {
 					},
 				},
 			},
-			wantCPU:    1,
-			wantMemory: 1024,
+			wantCPU:    4,
+			wantMemory: 8192,
+		},
+		{
+			name: "falls back to request resources",
+			sbx: &sandboxcr.Sandbox{
+				Sandbox: &agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "sandbox-1",
+						Namespace: "default",
+						Annotations: map[string]string{
+							agentsv1alpha1.AnnotationClaimTime: time.Now().Format(time.RFC3339),
+						},
+					},
+					Spec: agentsv1alpha1.SandboxSpec{
+						EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+							Template: &corev1.PodTemplateSpec{
+								Spec: corev1.PodSpec{
+									Containers: []corev1.Container{{
+										Resources: corev1.ResourceRequirements{
+											Requests: corev1.ResourceList{
+												corev1.ResourceCPU:              resource.MustParse("2000m"),
+												corev1.ResourceMemory:           resource.MustParse("2048Mi"),
+												corev1.ResourceEphemeralStorage: resource.MustParse("3Gi"),
+											},
+										},
+									}},
+								},
+							},
+						},
+					},
+				},
+			},
+			wantCPU:    2,
+			wantMemory: 2048,
+			wantDisk:   3072,
 		},
 	}
 
@@ -224,6 +259,7 @@ func TestConvertToE2BSandboxUsesRequestResources(t *testing.T) {
 			got := (&Controller{}).convertToE2BSandbox(tt.sbx, "")
 			assert.Equal(t, tt.wantCPU, got.CPUCount)
 			assert.Equal(t, tt.wantMemory, got.MemoryMB)
+			assert.Equal(t, tt.wantDisk, got.DiskSizeMB)
 		})
 	}
 }

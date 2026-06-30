@@ -20,7 +20,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
@@ -31,18 +30,24 @@ import (
 	"github.com/openkruise/agents/pkg/peers"
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/sandbox-manager/quota"
+	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
 )
 
-// quotaEnforcer is the minimal surface sandbox-manager needs for admission, delete release, and cleanup.
-// Use an interface so api_test can inject fakes before InitQuota wires a real *quota.Manager.
-type quotaEnforcer interface {
+// QuotaEnforcer is the minimal surface sandbox-manager needs for admission, delete release, and cleanup.
+// InitQuota wires the production implementation.
+type QuotaEnforcer interface {
 	Acquire(ctx context.Context, req quota.AcquireRequest) error
 	Release(ctx context.Context, req quota.ReleaseRequest) error
 	Cleanup(ctx context.Context, user string) error
+}
+
+type RedisClient interface {
+	Close() error
 }
 
 type GetInfraBuilderFunc func() (infra.Builder, error)
@@ -124,6 +129,13 @@ func (b *SandboxManagerBuilder) WithRequestAdapter(adapter proxy.RequestAdapter)
 	return b
 }
 
+// WithQuotaEnforcer injects a quota enforcer before Build.
+// InitQuota overwrites this value; tests using this helper must skip InitQuota.
+func (b *SandboxManagerBuilder) WithQuotaEnforcer(qe QuotaEnforcer) *SandboxManagerBuilder {
+	b.instance.quota = qe
+	return b
+}
+
 func (b *SandboxManagerBuilder) Build() (*SandboxManager, error) {
 	// Build infra
 	if b.buildInfraFunc == nil {
@@ -174,40 +186,19 @@ type SandboxManager struct {
 	primary *primaryState
 	elector *primaryElector
 
-	quota            quotaEnforcer              // nil until InitQuota or test injection
-	quotaAntiDrift   *quota.AntiDriftDriver     // nil when Redis is not configured
-	quotaRedisClient interface{ Close() error } // nil when Redis is not configured
-}
-
-// SetQuotaEnforcer wires a quota enforcer into the manager.
-// Pass nil to clear the enforcer (e.g. in tests).
-func (m *SandboxManager) SetQuotaEnforcer(qe quotaEnforcer) {
-	if m == nil {
-		return
-	}
-	m.quota = qe
-}
-
-// GetQuotaEnforcer returns the current quota enforcer, primarily for testing.
-func (m *SandboxManager) GetQuotaEnforcer() quotaEnforcer {
-	if m == nil {
-		return nil
-	}
-	return m.quota
+	quota            QuotaEnforcer          // nil until InitQuota or builder injection
+	quotaAntiDrift   *quota.AntiDriftDriver // nil when Redis is not configured
+	quotaRedisClient RedisClient            // nil when Redis is not configured
 }
 
 // InitQuota initializes the quota subsystem. Call after Build() so that m.infra is available.
 // When opts.RedisAddr is empty, a no-op backend is used (limited keys are accepted but unenforced).
 // subjects may be nil when key storage is disabled.
-func (m *SandboxManager) InitQuota(ctx context.Context, opts config.QuotaOptions, subjects quota.SubjectLister) error {
+func (m *SandboxManager) InitQuota(ctx context.Context, opts config.QuotaOptions, subjects quotaspec.SubjectLister) error {
 	log := klog.FromContext(ctx)
 	if opts.RedisAddr == "" {
 		m.quota = quota.NewManager(quota.NoopBackend{})
-		if subjects == nil {
-			log.Info("api-key quota is unenforced because E2B auth is disabled")
-		} else {
-			log.Info("api-key quota Redis is not configured; limited keys are accepted but unenforced")
-		}
+		log.Info("api-key quota Redis is not configured; limited keys are accepted but unenforced")
 		return nil
 	}
 	if m.infra == nil || m.infra.GetCache() == nil {
@@ -216,19 +207,19 @@ func (m *SandboxManager) InitQuota(ctx context.Context, opts config.QuotaOptions
 
 	// Apply defensive defaults for programmatic callers that skip InitOptions.
 	if opts.OperationTimeout <= 0 {
-		opts.OperationTimeout = 50 * time.Millisecond
+		opts.OperationTimeout = consts.DefaultQuotaRedisOperationTimeout
 	}
 	if opts.BreakerN <= 0 {
-		opts.BreakerN = 3
+		opts.BreakerN = consts.DefaultQuotaRedisBreakerN
 	}
 	if opts.BreakerD <= 0 {
-		opts.BreakerD = 30 * time.Second
+		opts.BreakerD = consts.DefaultQuotaRedisBreakerD
 	}
 	if opts.AntiDriftInterval <= 0 {
-		opts.AntiDriftInterval = 5 * time.Minute
+		opts.AntiDriftInterval = consts.DefaultQuotaAntiDriftInterval
 	}
 	if opts.AntiDriftGrace <= 0 {
-		opts.AntiDriftGrace = 10 * time.Minute
+		opts.AntiDriftGrace = consts.DefaultQuotaAntiDriftGrace
 	}
 
 	redisClient := redis.NewClient(&redis.Options{
@@ -349,28 +340,4 @@ func (m *SandboxManager) PrimaryChanged() <-chan struct{} {
 		return ch
 	}
 	return m.primary.PrimaryChanged()
-}
-
-// GetQuotaAntiDrift returns the anti-drift driver, primarily for testing.
-func (m *SandboxManager) GetQuotaAntiDrift() *quota.AntiDriftDriver {
-	if m == nil {
-		return nil
-	}
-	return m.quotaAntiDrift
-}
-
-// GetQuotaRedisClient returns the Redis client used for quota, primarily for testing.
-func (m *SandboxManager) GetQuotaRedisClient() interface{ Close() error } {
-	if m == nil {
-		return nil
-	}
-	return m.quotaRedisClient
-}
-
-// SetQuotaRedisClient sets the Redis client for quota, primarily for testing.
-func (m *SandboxManager) SetQuotaRedisClient(c interface{ Close() error }) {
-	if m == nil {
-		return
-	}
-	m.quotaRedisClient = c
 }

@@ -2047,7 +2047,7 @@ func TestGetOwnerOfVolume(t *testing.T) {
 	}
 }
 
-// fakeManagerQuota is a minimal quotaEnforcer for tests.
+// fakeManagerQuota is a minimal QuotaEnforcer for tests.
 type fakeManagerQuota struct {
 	lastAcquire quota.AcquireRequest
 	lastRelease quota.ReleaseRequest

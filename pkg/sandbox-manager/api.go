@@ -56,7 +56,7 @@ type DeleteSandboxOptions struct {
 }
 
 // quotaAdmission builds a SandboxAdmission that enforces the given quota spec via
-// the manager's quotaEnforcer. Returns nil when enforcement is not applicable.
+// the manager's QuotaEnforcer. Returns nil when enforcement is not applicable.
 func (m *SandboxManager) quotaAdmission(user string, spec *quotaspec.QuotaSpec) *infra.SandboxAdmission {
 	if m == nil || m.quota == nil || spec == nil || !spec.IsLimited() {
 		return nil

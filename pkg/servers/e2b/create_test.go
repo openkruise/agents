@@ -868,11 +868,10 @@ func TestMapInfraErrorToApiError(t *testing.T) {
 	}
 }
 func TestCreateSandbox_TopLevelMissingTemplateOrCheckpointReturns400(t *testing.T) {
-	controller, _, teardown := Setup(t)
+	fakeQuota := &fakeQuotaManager{}
+	controller, _, teardown := SetupWithQuota(t, fakeQuota)
 	defer teardown()
 
-	fakeQuota := &fakeQuotaManager{}
-	controller.manager.SetQuotaEnforcer(fakeQuota)
 	user := quotaLimitedUser([]quotaspec.QuotaLimit{{
 		Dimension: quotaspec.DimLimitsCPU,
 		Scope:     quotaspec.ScopeRunning,

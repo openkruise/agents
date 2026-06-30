@@ -96,25 +96,25 @@ func (p *mutablePrimary) PrimaryChanged() <-chan struct{} {
 }
 
 type fakeSubjectLister struct {
-	subjects []Subject
-	byUser   map[string]Subject
+	subjects []quotaspec.Subject
+	byUser   map[string]quotaspec.Subject
 	err      error
 	load     func(string)
 }
 
-func (s *fakeSubjectLister) ListLimited(context.Context) ([]Subject, error) {
+func (s *fakeSubjectLister) ListLimited(context.Context) ([]quotaspec.Subject, error) {
 	if s.err != nil {
 		return nil, s.err
 	}
 	return s.subjects, nil
 }
 
-func (s *fakeSubjectLister) Load(_ context.Context, user string) (Subject, bool) {
+func (s *fakeSubjectLister) Load(_ context.Context, user string) (quotaspec.Subject, bool) {
 	if s.load != nil {
 		s.load(user)
 	}
 	if s.byUser == nil {
-		return Subject{}, false
+		return quotaspec.Subject{}, false
 	}
 	subject, ok := s.byUser[user]
 	return subject, ok
@@ -310,7 +310,7 @@ func TestAntiDriftDiff(t *testing.T) {
 			driver := NewAntiDriftDriver(
 				AntiDriftConfig{Interval: time.Hour, Grace: 10 * time.Minute},
 				newMutablePrimary(true),
-				&fakeSubjectLister{subjects: []Subject{subject}},
+				&fakeSubjectLister{subjects: []quotaspec.Subject{subject}},
 				liveCache,
 				backend,
 			)
@@ -381,7 +381,7 @@ func TestAntiDriftEventReconcile(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			backend := &fakeBackend{}
-			subjects := make([]Subject, 0, len(tt.limitedOwners))
+			subjects := make([]quotaspec.Subject, 0, len(tt.limitedOwners))
 			for _, limitedOwner := range tt.limitedOwners {
 				subjects = append(subjects, limitedSubject(limitedOwner))
 			}
@@ -428,7 +428,7 @@ func TestAntiDriftAcquiresMissingLiveEntryWithoutGrace(t *testing.T) {
 	driver := NewAntiDriftDriver(
 		AntiDriftConfig{Grace: 10 * time.Minute},
 		newMutablePrimary(true),
-		&fakeSubjectLister{subjects: []Subject{subject}},
+		&fakeSubjectLister{subjects: []quotaspec.Subject{subject}},
 		cache,
 		backend,
 	)
@@ -443,7 +443,7 @@ func TestAntiDriftStopsCycleWhenPrimaryLost(t *testing.T) {
 	owner1 := uuid.NewString()
 	owner2 := uuid.NewString()
 	primary := newMutablePrimary(true)
-	subjects := &fakeSubjectLister{subjects: []Subject{
+	subjects := &fakeSubjectLister{subjects: []quotaspec.Subject{
 		limitedSubject(owner1),
 		limitedSubject(owner2),
 	}}
@@ -471,7 +471,7 @@ func TestAntiDriftEventReconcileLooksUpUnknownLimitedOwner(t *testing.T) {
 	driver := NewAntiDriftDriver(
 		AntiDriftConfig{Interval: time.Hour, Grace: 10 * time.Minute},
 		newMutablePrimary(true),
-		&fakeSubjectLister{byUser: map[string]Subject{owner: subject}},
+		&fakeSubjectLister{byUser: map[string]quotaspec.Subject{owner: subject}},
 		&fakeLiveSandboxCache{healthy: true},
 		backend,
 	)
@@ -523,7 +523,7 @@ func TestAntiDriftEventReconcileSkipsWriteWhenPrimaryLostBeforeWrite(t *testing.
 			subject := limitedSubject(owner)
 			primary := newMutablePrimary(true)
 			subjectLister := &fakeSubjectLister{
-				byUser: map[string]Subject{
+				byUser: map[string]quotaspec.Subject{
 					owner: subject,
 				},
 				load: func(string) {
@@ -578,7 +578,7 @@ func TestAntiDriftDriver_DeleteEventReleasesTombstone(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			backend := &fakeBackend{}
 			subjects := &fakeSubjectLister{
-				byUser: map[string]Subject{
+				byUser: map[string]quotaspec.Subject{
 					owner: subject,
 				},
 			}
@@ -621,7 +621,7 @@ func TestAntiDriftUnhealthyReleasePassDoesNotConfirmLeakedEntry(t *testing.T) {
 	driver := NewAntiDriftDriver(
 		AntiDriftConfig{Interval: time.Hour, Grace: 10 * time.Minute},
 		newMutablePrimary(true),
-		&fakeSubjectLister{subjects: []Subject{subject}},
+		&fakeSubjectLister{subjects: []quotaspec.Subject{subject}},
 		liveCache,
 		backend,
 	)
@@ -640,7 +640,7 @@ func TestAntiDriftUnhealthyReleasePassDoesNotConfirmLeakedEntry(t *testing.T) {
 func TestAntiDriftKeyStoreErrorDoesNotCountAsPreviousPass(t *testing.T) {
 	now := time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)
 	owner := uuid.NewSHA1(uuid.Nil, []byte("owner-key-store-error")).String()
-	subjectLister := &fakeSubjectLister{subjects: []Subject{limitedSubject(owner)}}
+	subjectLister := &fakeSubjectLister{subjects: []quotaspec.Subject{limitedSubject(owner)}}
 	backend := &fakeBackend{entriesByKey: map[string]map[string]Entry{
 		owner: {"lock-1": {}},
 	}}
@@ -677,7 +677,7 @@ func TestAntiDriftListEntriesErrorDoesNotCountAsPreviousPass(t *testing.T) {
 	driver := NewAntiDriftDriver(
 		AntiDriftConfig{Interval: time.Hour, Grace: 10 * time.Minute},
 		newMutablePrimary(true),
-		&fakeSubjectLister{subjects: []Subject{limitedSubject(owner)}},
+		&fakeSubjectLister{subjects: []quotaspec.Subject{limitedSubject(owner)}},
 		&fakeLiveSandboxCache{healthy: true},
 		backend,
 	)
@@ -707,7 +707,7 @@ func TestAntiDriftReleaseErrorDoesNotCountAsPreviousPass(t *testing.T) {
 	driver := NewAntiDriftDriver(
 		AntiDriftConfig{Interval: time.Hour, Grace: 10 * time.Minute},
 		newMutablePrimary(true),
-		&fakeSubjectLister{subjects: []Subject{limitedSubject(owner)}},
+		&fakeSubjectLister{subjects: []quotaspec.Subject{limitedSubject(owner)}},
 		&fakeLiveSandboxCache{healthy: true},
 		backend,
 	)
@@ -738,7 +738,7 @@ func TestAntiDriftAcquireErrorDoesNotResetUnrelatedLeakedConfirmation(t *testing
 	driver := NewAntiDriftDriver(
 		AntiDriftConfig{Interval: time.Hour, Grace: 10 * time.Minute},
 		newMutablePrimary(true),
-		&fakeSubjectLister{subjects: []Subject{limitedSubject(owner)}},
+		&fakeSubjectLister{subjects: []quotaspec.Subject{limitedSubject(owner)}},
 		&fakeLiveSandboxCache{
 			healthy:     true,
 			liveByOwner: map[string][]*agentsv1alpha1.Sandbox{owner: {live}},
@@ -813,7 +813,7 @@ func TestAntiDriftEventReconcileUsesShortDeadline(t *testing.T) {
 			driver := NewAntiDriftDriver(
 				AntiDriftConfig{Interval: time.Hour, Grace: 10 * time.Minute, CycleTimeout: 30 * time.Second},
 				newMutablePrimary(true),
-				&fakeSubjectLister{subjects: []Subject{limitedSubject(owner)}},
+				&fakeSubjectLister{subjects: []quotaspec.Subject{limitedSubject(owner)}},
 				&fakeLiveSandboxCache{
 					healthy:     true,
 					liveByOwner: map[string][]*agentsv1alpha1.Sandbox{},
@@ -843,7 +843,7 @@ func TestAntiDriftReappearingEntryClearsLeakedMemory(t *testing.T) {
 	driver := NewAntiDriftDriver(
 		AntiDriftConfig{Interval: time.Hour, Grace: 10 * time.Minute},
 		newMutablePrimary(true),
-		&fakeSubjectLister{subjects: []Subject{limitedSubject(owner)}},
+		&fakeSubjectLister{subjects: []quotaspec.Subject{limitedSubject(owner)}},
 		liveCache,
 		backend,
 	)
@@ -867,7 +867,7 @@ func TestAntiDriftRunOnceNotPrimaryClearsLeakedState(t *testing.T) {
 	driver := NewAntiDriftDriver(
 		AntiDriftConfig{Interval: time.Hour, Grace: 10 * time.Minute},
 		primary,
-		&fakeSubjectLister{subjects: []Subject{limitedSubject(owner)}},
+		&fakeSubjectLister{subjects: []quotaspec.Subject{limitedSubject(owner)}},
 		&fakeLiveSandboxCache{healthy: true},
 		&fakeBackend{entriesByKey: map[string]map[string]Entry{owner: {"lock-1": {}}}},
 	)
@@ -918,7 +918,7 @@ func TestAntiDriftRunExecutesInitialCycleBeforeInterval(t *testing.T) {
 	driver := NewAntiDriftDriver(
 		AntiDriftConfig{Interval: time.Hour, Grace: time.Minute},
 		newMutablePrimary(true),
-		&fakeSubjectLister{subjects: []Subject{limitedSubject(owner)}},
+		&fakeSubjectLister{subjects: []quotaspec.Subject{limitedSubject(owner)}},
 		&fakeLiveSandboxCache{
 			healthy:     true,
 			liveByOwner: map[string][]*agentsv1alpha1.Sandbox{owner: nil},
@@ -1000,8 +1000,8 @@ func (b *fakeBackend) resetCalls() {
 	b.releaseTimeouts = nil
 }
 
-func limitedSubject(user string) Subject {
-	return Subject{
+func limitedSubject(user string) quotaspec.Subject {
+	return quotaspec.Subject{
 		User: user,
 		Quota: &quotaspec.QuotaSpec{Limits: []quotaspec.QuotaLimit{{
 			Dimension: quotaspec.DimSandboxCount,
@@ -1068,7 +1068,7 @@ func TestAntiDriftRunWaitsForPrimary(t *testing.T) {
 	driver := NewAntiDriftDriver(
 		AntiDriftConfig{Interval: time.Hour, Grace: time.Minute},
 		primary,
-		&fakeSubjectLister{subjects: []Subject{limitedSubject(owner)}},
+		&fakeSubjectLister{subjects: []quotaspec.Subject{limitedSubject(owner)}},
 		&fakeLiveSandboxCache{healthy: true},
 		backend,
 	)
@@ -1098,7 +1098,7 @@ func TestAntiDriftPrimaryLossCancelsCycleAndClearsLeaked(t *testing.T) {
 	driver := NewAntiDriftDriver(
 		AntiDriftConfig{Interval: time.Hour, Grace: 10 * time.Minute},
 		primary,
-		&fakeSubjectLister{subjects: []Subject{limitedSubject(owner)}},
+		&fakeSubjectLister{subjects: []quotaspec.Subject{limitedSubject(owner)}},
 		&fakeLiveSandboxCache{healthy: true},
 		backend,
 	)
@@ -1136,7 +1136,7 @@ func TestAntiDriftRunsImmediateCycleOnPrimaryAcquire(t *testing.T) {
 	driver := NewAntiDriftDriver(
 		AntiDriftConfig{Interval: time.Hour, Grace: time.Minute},
 		primary,
-		&fakeSubjectLister{subjects: []Subject{limitedSubject(owner)}},
+		&fakeSubjectLister{subjects: []quotaspec.Subject{limitedSubject(owner)}},
 		&fakeLiveSandboxCache{healthy: true},
 		backend,
 	)

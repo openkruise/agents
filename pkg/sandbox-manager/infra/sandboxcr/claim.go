@@ -124,7 +124,7 @@ func releaseAdmission(ctx context.Context, admission *infra.SandboxAdmission, lo
 	}
 }
 
-func shouldReleaseAdmissionAfterLockError(lockType infra.LockType, err error) bool {
+func shouldReleaseAdmissionAfterLockError(err error) bool {
 	if err == nil {
 		return false
 	}
@@ -280,7 +280,7 @@ func lockPickedSandbox(ctx context.Context, sbx *Sandbox, lockType infra.LockTyp
 		return nil
 	}
 	log.Error(err, "failed to lock sandbox")
-	if admitted && shouldReleaseAdmissionAfterLockError(lockType, err) {
+	if admitted && shouldReleaseAdmissionAfterLockError(err) {
 		releaseAdmission(ctx, opts.Admission, attemptLockString)
 	}
 	if apierrors.IsConflict(err) {

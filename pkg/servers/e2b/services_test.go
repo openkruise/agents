@@ -591,7 +591,8 @@ func TestCreateSandboxReturnsImmediatelyWhenCreateOnNoStockHitsQuota(t *testing.
 }
 
 func TestCreateSandbox_QuotaExceededReturns403WithoutRetry(t *testing.T) {
-	controller, _, teardown := Setup(t)
+	fakeQuota := &fakeQuotaManager{acquireErr: quota.ErrQuotaExceeded}
+	controller, _, teardown := SetupWithQuota(t, fakeQuota)
 	defer teardown()
 
 	cleanup := CreateSandboxPool(t, controller, "tmpl", 1)
@@ -609,9 +610,6 @@ func TestCreateSandbox_QuotaExceededReturns403WithoutRetry(t *testing.T) {
 			Limit:     limit,
 		}}},
 	}
-	fakeQuota := &fakeQuotaManager{acquireErr: quota.ErrQuotaExceeded}
-	controller.manager.SetQuotaEnforcer(fakeQuota)
-
 	resp, apiErr := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
 		TemplateID: "tmpl",
 		Metadata: map[string]string{
@@ -628,7 +626,8 @@ func TestCreateSandbox_QuotaExceededReturns403WithoutRetry(t *testing.T) {
 }
 
 func TestCreateSandbox_QuotaExceededLeavesPooledSandboxClaimable(t *testing.T) {
-	controller, _, teardown := Setup(t)
+	fakeQuota := &fakeQuotaManager{acquireErr: quota.ErrQuotaExceeded}
+	controller, _, teardown := SetupWithQuota(t, fakeQuota)
 	defer teardown()
 
 	cleanup := CreateSandboxPool(t, controller, "tmpl", 1)
@@ -646,9 +645,6 @@ func TestCreateSandbox_QuotaExceededLeavesPooledSandboxClaimable(t *testing.T) {
 			Limit:     limit,
 		}}},
 	}
-	fakeQuota := &fakeQuotaManager{acquireErr: quota.ErrQuotaExceeded}
-	controller.manager.SetQuotaEnforcer(fakeQuota)
-
 	resp, apiErr := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
 		TemplateID: "tmpl",
 		Metadata: map[string]string{
@@ -685,7 +681,8 @@ func TestCreateSandbox_QuotaExceededLeavesPooledSandboxClaimable(t *testing.T) {
 }
 
 func TestCreateSandbox_CloneQuotaExceededReturns403WithoutRetry(t *testing.T) {
-	controller, _, teardown := Setup(t)
+	fakeQuota := &fakeQuotaManager{acquireErr: quota.ErrQuotaExceeded}
+	controller, _, teardown := SetupWithQuota(t, fakeQuota)
 	defer teardown()
 
 	team := &models.Team{ID: uuid.New(), Name: "team-a"}
@@ -704,9 +701,6 @@ func TestCreateSandbox_CloneQuotaExceededReturns403WithoutRetry(t *testing.T) {
 	cleanup := CreateCheckpointAndTemplateInNamespace(t, controller, team.Name, "clone-template", "checkpoint-1", user.ID.String(), "source-sandbox", "2026-06-19T00:00:00Z")
 	defer cleanup()
 
-	fakeQuota := &fakeQuotaManager{acquireErr: quota.ErrQuotaExceeded}
-	controller.manager.SetQuotaEnforcer(fakeQuota)
-
 	resp, apiErr := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
 		TemplateID: "checkpoint-1",
 		Metadata: map[string]string{
@@ -723,11 +717,10 @@ func TestCreateSandbox_CloneQuotaExceededReturns403WithoutRetry(t *testing.T) {
 }
 
 func TestCreateSandbox_UnlimitedKeyDoesNotCallQuota(t *testing.T) {
-	controller, _, teardown := Setup(t)
+	fakeQuota := &fakeQuotaManager{}
+	controller, _, teardown := SetupWithQuota(t, fakeQuota)
 	defer teardown()
 
-	fakeQuota := &fakeQuotaManager{}
-	controller.manager.SetQuotaEnforcer(fakeQuota)
 	user := &models.CreatedTeamAPIKey{
 		ID:   uuid.New(),
 		Key:  uuid.NewString(),
@@ -1742,10 +1735,10 @@ func TestDeleteSandbox(t *testing.T) {
 }
 
 func TestDeleteSandbox_ReleasesQuotaAfterAcceptedDelete(t *testing.T) {
-	controller, _, teardown := Setup(t)
+	fakeQuota := &fakeQuotaManager{}
+	controller, _, teardown := SetupWithQuota(t, fakeQuota)
 	defer teardown()
 
-	controller.manager.SetQuotaEnforcer(&fakeQuotaManager{})
 	user := &models.CreatedTeamAPIKey{
 		ID:        uuid.New(),
 		Key:       InitKey,
@@ -1766,7 +1759,6 @@ func TestDeleteSandbox_ReleasesQuotaAfterAcceptedDelete(t *testing.T) {
 	require.Nil(t, apiErr)
 	require.NotNil(t, createResp.Body)
 
-	fakeQuota := controller.manager.GetQuotaEnforcer().(*fakeQuotaManager)
 	deleteResp, apiErr := controller.DeleteSandbox(NewRequest(t, nil, nil, map[string]string{
 		"sandboxID": createResp.Body.SandboxID,
 	}, user))
@@ -1780,11 +1772,10 @@ func TestDeleteSandbox_ReleasesQuotaAfterAcceptedDelete(t *testing.T) {
 }
 
 func TestDeleteSandbox_UnlimitedKeyDoesNotReleaseQuota(t *testing.T) {
-	controller, _, teardown := Setup(t)
+	fakeQuota := &fakeQuotaManager{}
+	controller, _, teardown := SetupWithQuota(t, fakeQuota)
 	defer teardown()
 
-	fakeQuota := &fakeQuotaManager{}
-	controller.manager.SetQuotaEnforcer(fakeQuota)
 	user := &models.CreatedTeamAPIKey{
 		ID:   uuid.New(),
 		Key:  InitKey,
@@ -1876,15 +1867,14 @@ func TestDeleteSandbox_ReleaseErrorsStillReturnAcceptedDelete(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			controller, _, teardown := Setup(t)
-			defer teardown()
-
 			fakeQuota := &deleteReleaseQuotaManager{
 				release: func(ctx context.Context, req quota.ReleaseRequest) error {
 					return tt.release(t, ctx, req)
 				},
 			}
-			controller.manager.SetQuotaEnforcer(fakeQuota)
+			controller, _, teardown := SetupWithQuota(t, fakeQuota)
+			defer teardown()
+
 			user := &models.CreatedTeamAPIKey{
 				ID:        uuid.New(),
 				Key:       InitKey,
@@ -1921,9 +1911,10 @@ func TestDeleteSandbox_ReleaseErrorsStillReturnAcceptedDelete(t *testing.T) {
 
 func TestDeleteSandbox_MissingSandboxOrLookupFailureDoesNotReleaseQuota(t *testing.T) {
 	tests := []struct {
-		name       string
-		setupReq   func(t *testing.T, controller *Controller) *http.Request
-		wantStatus int
+		name        string
+		setupReq    func(t *testing.T, controller *Controller) *http.Request
+		wantStatus  int
+		expectError string
 	}{
 		{
 			name: "missing sandbox returns idempotent success without release",
@@ -1941,41 +1932,46 @@ func TestDeleteSandbox_MissingSandboxOrLookupFailureDoesNotReleaseQuota(t *testi
 			wantStatus: http.StatusNoContent,
 		},
 		{
-			name: "missing user lookup failure returns idempotent success without release",
+			name: "missing user returns unauthorized without release",
 			setupReq: func(t *testing.T, _ *Controller) *http.Request {
 				return NewRequest(t, nil, nil, map[string]string{
 					"sandboxID": "any-sandbox",
 				}, nil)
 			},
-			wantStatus: http.StatusNoContent,
+			wantStatus:  http.StatusUnauthorized,
+			expectError: "User not found",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			controller, _, teardown := Setup(t)
+			fakeQuota := &fakeQuotaManager{}
+			controller, _, teardown := SetupWithQuota(t, fakeQuota)
 			defer teardown()
 
-			fakeQuota := &fakeQuotaManager{}
-			controller.manager.SetQuotaEnforcer(fakeQuota)
 			cleanup := CreateSandboxPool(t, controller, "test-template", 1)
 			defer cleanup()
 
 			deleteResp, apiErr := controller.DeleteSandbox(tt.setupReq(t, controller))
 
-			require.Nil(t, apiErr)
-			assert.Equal(t, tt.wantStatus, deleteResp.Code)
+			if tt.expectError != "" {
+				require.NotNil(t, apiErr)
+				assert.Equal(t, tt.wantStatus, apiErr.Code)
+				assert.Contains(t, apiErr.Message, tt.expectError)
+			} else {
+				require.Nil(t, apiErr)
+				assert.Equal(t, tt.wantStatus, deleteResp.Code)
+			}
 			assert.Equal(t, int64(0), fakeQuota.releaseCalls.Load())
 		})
 	}
 }
 
 func TestDeleteSandbox_DeleteFailureDoesNotReleaseQuota(t *testing.T) {
-	controller, _, teardown := Setup(t)
+	fakeQuota := &fakeQuotaManager{}
+	controller, _, teardown := SetupWithQuota(t, fakeQuota)
 	defer teardown()
 
-	fakeQuota := &fakeQuotaManager{}
-	controller.manager.SetQuotaEnforcer(fakeQuota)
 	user := &models.CreatedTeamAPIKey{
 		ID:   uuid.New(),
 		Key:  InitKey,

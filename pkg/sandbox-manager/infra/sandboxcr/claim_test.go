@@ -3481,7 +3481,7 @@ func TestShouldReleaseAdmissionAfterLockError(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, shouldReleaseAdmissionAfterLockError(tt.lockType, tt.err))
+			assert.Equal(t, tt.want, shouldReleaseAdmissionAfterLockError(tt.err))
 		})
 	}
 }
