@@ -2525,12 +2525,45 @@ func TestSandboxRuntimeContainerAbnormalTime(t *testing.T) {
 // cleans up sandbox_status_abnormal_time and sandbox_runtime_container_abnormal_time.
 func TestDeleteSandboxMetrics_ClearsAbnormalTimeMetrics(t *testing.T) {
 	ns, name := "default", "cleanup-abnormal-time-sandbox"
+	now := metav1.NewTime(time.Now())
 
-	// Set up abnormal metrics
-	sandboxStatusAbnormal.WithLabelValues(ns, name, "pause_incomplete").Set(1)
-	sandboxStatusAbnormalTime.WithLabelValues(ns, name, "pause_incomplete").Set(float64(time.Now().Unix()))
-	sandboxRuntimeContainerAbnormal.WithLabelValues(ns, name, "agent-runtime").Set(1)
-	sandboxRuntimeContainerAbnormalTime.WithLabelValues(ns, name, "agent-runtime").Set(float64(time.Now().Unix()))
+	// Populate abnormal state through the real recording functions so that both
+	// the Prometheus gauges AND the sync.Map start-time trackers are populated.
+	// Directly setting gauges would leave the sync.Maps empty, causing the Range
+	// cleanup in DeleteSandboxMetrics to be uncovered.
+	sandbox := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: ns,
+			CreationTimestamp: metav1.NewTime(time.Now()),
+		},
+		Status: agentsv1alpha1.SandboxStatus{
+			Phase: agentsv1alpha1.SandboxPaused,
+			Conditions: []metav1.Condition{{
+				Type:               string(agentsv1alpha1.SandboxConditionPaused),
+				Status:             metav1.ConditionFalse,
+				LastTransitionTime: now,
+			}},
+		},
+	}
+	pod := &corev1.Pod{
+		Status: corev1.PodStatus{
+			InitContainerStatuses: []corev1.ContainerStatus{
+				{Name: "agent-runtime", Ready: false, RestartCount: 2},
+			},
+		},
+	}
+
+	recordSandboxMetrics(sandbox, pod)
+
+	// Verify sync.Map entries were populated
+	statusKey := ns + "/" + name + "/pause_incomplete"
+	if _, ok := abnormalStartTimes.Load(statusKey); !ok {
+		t.Fatalf("precondition: abnormalStartTimes should have entry for %s", statusKey)
+	}
+	containerKey := ns + "/" + name + "/agent-runtime"
+	if _, ok := runtimeContainerAbnormalStartTimes.Load(containerKey); !ok {
+		t.Fatalf("precondition: runtimeContainerAbnormalStartTimes should have entry for %s", containerKey)
+	}
 
 	DeleteSandboxMetrics(ns, name)
 
@@ -2543,6 +2576,14 @@ func TestDeleteSandboxMetrics_ClearsAbnormalTimeMetrics(t *testing.T) {
 	runtimeTimeVal := testutil.ToFloat64(sandboxRuntimeContainerAbnormalTime.WithLabelValues(ns, name, "agent-runtime"))
 	if runtimeTimeVal != 0 {
 		t.Errorf("sandbox_runtime_container_abnormal_time after delete = %v, want 0", runtimeTimeVal)
+	}
+
+	// Verify sync.Map entries were cleaned up
+	if _, ok := abnormalStartTimes.Load(statusKey); ok {
+		t.Errorf("abnormalStartTimes should not have entry for %s after delete", statusKey)
+	}
+	if _, ok := runtimeContainerAbnormalStartTimes.Load(containerKey); ok {
+		t.Errorf("runtimeContainerAbnormalStartTimes should not have entry for %s after delete", containerKey)
 	}
 }
 
