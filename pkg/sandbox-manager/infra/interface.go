@@ -44,6 +44,33 @@ type SandboxResource struct {
 	Limits   ResourceList
 }
 
+type QuotaSandboxSourceProvider interface {
+	GetQuotaSandboxSource() QuotaSandboxSource
+}
+
+type QuotaSandboxSource interface {
+	ListLiveQuotaSandboxesByOwner(context.Context, string) ([]QuotaSandboxSnapshot, error)
+	Subscribe(context.Context, func(QuotaSandboxEvent)) (QuotaSandboxSubscription, error)
+	Healthy() bool
+}
+
+type QuotaSandboxSnapshot struct {
+	Owner      string
+	LockString string
+	Resource   SandboxResource
+	Live       bool
+	Running    bool
+}
+
+type QuotaSandboxEvent struct {
+	Snapshot QuotaSandboxSnapshot
+	Deleted  bool
+}
+
+type QuotaSandboxSubscription interface {
+	Remove() error
+}
+
 func memoryBytesToFloorMiB(q resource.Quantity) int64 {
 	return q.Value() / bytesPerMiB
 }

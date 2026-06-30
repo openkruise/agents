@@ -17,29 +17,9 @@ limitations under the License.
 package quota
 
 import (
-	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
-	"github.com/openkruise/agents/pkg/sandbox/lifecycle"
 )
-
-func IsLiveForQuota(sbx *agentsv1alpha1.Sandbox) bool {
-	return lifecycle.IsLiveForQuota(sbx)
-}
-
-// InRunningScope uses Spec.Paused (pause request), matching current production behavior.
-// Design §5 pseudocode uses Status.Phase; §15 leaves the exact transition-phase boundary to
-// implementation. Do not change this predicate during the refactor.
-func InRunningScope(sbx *agentsv1alpha1.Sandbox) bool {
-	return lifecycle.IsLiveForQuota(sbx) && !sbx.Spec.Paused
-}
-
-func ConditionalScopesOf(sbx *agentsv1alpha1.Sandbox) []quotaspec.QuotaScope {
-	if !InRunningScope(sbx) {
-		return []quotaspec.QuotaScope{}
-	}
-	return []quotaspec.QuotaScope{quotaspec.ScopeRunning}
-}
 
 // FootprintFromResource converts an infra SandboxResource to a quota footprint.
 func FootprintFromResource(resource infra.SandboxResource) map[quotaspec.QuotaDimension]int64 {
@@ -47,11 +27,4 @@ func FootprintFromResource(resource infra.SandboxResource) map[quotaspec.QuotaDi
 		quotaspec.DimLimitsCPU:    resource.Limits.CPUMilli,
 		quotaspec.DimLimitsMemory: resource.Limits.MemoryMB,
 	}
-}
-
-func FootprintOf(sbx *agentsv1alpha1.Sandbox) map[quotaspec.QuotaDimension]int64 {
-	if sbx == nil || sbx.Spec.Template == nil {
-		return FootprintFromResource(infra.SandboxResource{})
-	}
-	return FootprintFromResource(infra.CalculateResourceFromContainers(sbx.Spec.Template.Spec.Containers))
 }

@@ -204,6 +204,10 @@ func (m *SandboxManager) InitQuota(ctx context.Context, opts config.QuotaOptions
 	if m.infra == nil || m.infra.GetCache() == nil {
 		return fmt.Errorf("api-key quota Redis is configured but cache is not available")
 	}
+	provider, ok := m.infra.(infra.QuotaSandboxSourceProvider)
+	if !ok {
+		return fmt.Errorf("api-key quota Redis is configured but quota sandbox source is not available")
+	}
 
 	// Apply defensive defaults for programmatic callers that skip InitOptions.
 	if opts.OperationTimeout <= 0 {
@@ -232,16 +236,17 @@ func (m *SandboxManager) InitQuota(ctx context.Context, opts config.QuotaOptions
 	hotBackend := quota.NewBreakerBackend(redisBackend, opts.BreakerN, opts.BreakerD)
 	// Request admission and anti-drift events share this breaker so Redis release
 	// failures trip request-path fail-open behavior instead of drifting silently.
+	source := provider.GetQuotaSandboxSource()
 	driver := quota.NewAntiDriftDriver(quota.AntiDriftConfig{
 		Interval: opts.AntiDriftInterval,
 		Grace:    opts.AntiDriftGrace,
-	}, m, subjects, m.infra.GetCache(), hotBackend)
-	registration, err := m.infra.GetCache().AddSandboxEventHandler(ctx, driver.SandboxEventHandler())
+	}, m, subjects, source, hotBackend)
+	subscription, err := source.Subscribe(ctx, driver.QuotaEventHandler())
 	if err != nil {
 		_ = redisClient.Close()
 		return err
 	}
-	driver.SetEventRegistration(registration)
+	driver.SetSubscription(subscription)
 	m.quota = quota.NewManager(hotBackend)
 	m.quotaAntiDrift = driver
 	m.quotaRedisClient = redisClient

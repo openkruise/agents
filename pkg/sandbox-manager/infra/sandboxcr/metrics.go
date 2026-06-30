@@ -35,6 +35,14 @@ var sandboxFallbackTotal = prometheus.NewCounterVec(
 	[]string{"namespace", "reason"},
 )
 
+var quotaSourceEventDropTotal = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "sandboxcr_quota_source_event_drop_total",
+		Help: "Total number of quota source sandbox events dropped by reason.",
+	},
+	[]string{"reason"},
+)
+
 func init() {
-	metrics.Registry.MustRegister(sandboxFallbackTotal)
+	metrics.Registry.MustRegister(sandboxFallbackTotal, quotaSourceEventDropTotal)
 }

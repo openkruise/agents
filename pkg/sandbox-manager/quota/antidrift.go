@@ -24,11 +24,9 @@ import (
 	"sync"
 	"time"
 
-	toolscache "k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 
-	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	cachepkg "github.com/openkruise/agents/pkg/cache"
+	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
 )
 
@@ -49,11 +47,11 @@ type AntiDriftDriver struct {
 	cfg      AntiDriftConfig
 	primary  PrimaryChecker
 	subjects quotaspec.SubjectLister
-	cache    LiveSandboxCache
+	source   infra.QuotaSandboxSource
 	backend  Backend
 
 	mu            sync.Mutex
-	registration  cachepkg.SandboxEventHandlerRegistration
+	subscription  infra.QuotaSandboxSubscription
 	runDone       chan struct{}
 	cycleCancel   context.CancelFunc
 	seenLeaked    map[string]leakedObservation
@@ -66,7 +64,7 @@ type AntiDriftDriver struct {
 	stopCh   chan struct{}
 }
 
-func NewAntiDriftDriver(cfg AntiDriftConfig, primary PrimaryChecker, subjects quotaspec.SubjectLister, liveCache LiveSandboxCache, backend Backend) *AntiDriftDriver {
+func NewAntiDriftDriver(cfg AntiDriftConfig, primary PrimaryChecker, subjects quotaspec.SubjectLister, source infra.QuotaSandboxSource, backend Backend) *AntiDriftDriver {
 	if cfg.Interval <= 0 {
 		cfg.Interval = 5 * time.Minute
 	}
@@ -80,7 +78,7 @@ func NewAntiDriftDriver(cfg AntiDriftConfig, primary PrimaryChecker, subjects qu
 		cfg:           cfg,
 		primary:       primary,
 		subjects:      subjects,
-		cache:         liveCache,
+		source:        source,
 		backend:       backend,
 		seenLeaked:    map[string]leakedObservation{},
 		limitedOwners: map[string]struct{}{},
@@ -89,21 +87,21 @@ func NewAntiDriftDriver(cfg AntiDriftConfig, primary PrimaryChecker, subjects qu
 	}
 }
 
-func (d *AntiDriftDriver) SetEventRegistration(reg cachepkg.SandboxEventHandlerRegistration) {
+func (d *AntiDriftDriver) SetSubscription(sub infra.QuotaSandboxSubscription) {
 	if d == nil {
 		return
 	}
 	d.mu.Lock()
 	if d.stopped {
 		d.mu.Unlock()
-		if reg != nil {
-			if err := reg.Remove(); err != nil {
-				klog.Background().Error(err, "failed to remove quota anti-drift event registration after stop")
+		if sub != nil {
+			if err := sub.Remove(); err != nil {
+				klog.Background().Error(err, "failed to remove quota anti-drift subscription after stop")
 			}
 		}
 		return
 	}
-	d.registration = reg
+	d.subscription = sub
 	d.mu.Unlock()
 }
 
@@ -207,7 +205,7 @@ func (d *AntiDriftDriver) RunOnce(ctx context.Context) error {
 		d.clearLeaked()
 		return nil
 	}
-	if d.subjects == nil || d.cache == nil || d.backend == nil {
+	if d.subjects == nil || d.source == nil || d.backend == nil {
 		antiDriftSkippedTotal.WithLabelValues("not_ready").Inc()
 		return nil
 	}
@@ -258,7 +256,7 @@ func limitedOwnerIDs(subjects []quotaspec.Subject) map[string]struct{} {
 
 func (d *AntiDriftDriver) reconcileLimitedSubject(ctx context.Context, subject quotaspec.Subject, now time.Time) (bool, error) {
 	user := subject.User
-	liveSandboxes, err := d.cache.ListLiveSandboxesByOwner(ctx, user)
+	liveSandboxes, err := d.source.ListLiveQuotaSandboxesByOwner(ctx, user)
 	if err != nil {
 		antiDriftErrorsTotal.WithLabelValues("list_live").Inc()
 		d.clearLeakedForKey(user)
@@ -275,14 +273,14 @@ func (d *AntiDriftDriver) reconcileLimitedSubject(ctx context.Context, subject q
 	var firstErr error
 	liveLocks := make(map[string]struct{}, len(liveSandboxes))
 	nextLeaked := map[string]leakedObservation{}
-	for _, sbx := range liveSandboxes {
-		lockString := lockStringOf(sbx)
+	for _, snapshot := range liveSandboxes {
+		lockString := snapshot.LockString
 		if lockString == "" {
 			continue
 		}
 		liveLocks[lockString] = struct{}{}
 
-		want := liveEntryForSandbox(sbx)
+		want := entryForSnapshot(snapshot)
 		have, ok := haveEntries[lockString]
 		if ok && entriesEqual(have, want) {
 			continue
@@ -308,7 +306,7 @@ func (d *AntiDriftDriver) reconcileLimitedSubject(ctx context.Context, subject q
 		}
 	}
 
-	healthy := d.cache.SandboxInformerHealthy()
+	healthy := d.source.Healthy()
 	for lockString := range haveEntries {
 		if _, ok := liveLocks[lockString]; ok {
 			continue
@@ -347,17 +345,9 @@ func (d *AntiDriftDriver) reconcileLimitedSubject(ctx context.Context, subject q
 	return false, firstErr
 }
 
-func (d *AntiDriftDriver) SandboxEventHandler() toolscache.ResourceEventHandler {
-	return toolscache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj any) {
-			d.reconcileSandboxEvent(sandboxFromEvent(obj), false)
-		},
-		UpdateFunc: func(_, newObj any) {
-			d.reconcileSandboxEvent(sandboxFromEvent(newObj), false)
-		},
-		DeleteFunc: func(obj any) {
-			d.reconcileSandboxEvent(sandboxFromEvent(obj), true)
-		},
+func (d *AntiDriftDriver) QuotaEventHandler() func(infra.QuotaSandboxEvent) {
+	return func(event infra.QuotaSandboxEvent) {
+		d.onQuotaEvent(event)
 	}
 }
 
@@ -369,8 +359,8 @@ func (d *AntiDriftDriver) Stop() {
 	d.stopOnce.Do(func() {
 		d.mu.Lock()
 		d.stopped = true
-		registration := d.registration
-		d.registration = nil
+		subscription := d.subscription
+		d.subscription = nil
 		d.seenLeaked = map[string]leakedObservation{}
 		d.limitedOwners = map[string]struct{}{}
 		done := d.runDone
@@ -381,9 +371,9 @@ func (d *AntiDriftDriver) Stop() {
 		if cycleCancel != nil {
 			cycleCancel()
 		}
-		if registration != nil {
-			if err := registration.Remove(); err != nil {
-				klog.Background().Error(err, "failed to remove quota anti-drift event registration")
+		if subscription != nil {
+			if err := subscription.Remove(); err != nil {
+				klog.Background().Error(err, "failed to remove quota anti-drift subscription")
 			}
 		}
 		if done != nil {
@@ -420,8 +410,8 @@ func (d *AntiDriftDriver) clearCycleCancel() {
 	d.cycleCancel = nil
 }
 
-func (d *AntiDriftDriver) reconcileSandboxEvent(sbx *agentsv1alpha1.Sandbox, deleted bool) {
-	if d == nil || sbx == nil || d.backend == nil {
+func (d *AntiDriftDriver) onQuotaEvent(event infra.QuotaSandboxEvent) {
+	if d == nil || d.backend == nil {
 		return
 	}
 	if !d.stillPrimary() {
@@ -430,8 +420,8 @@ func (d *AntiDriftDriver) reconcileSandboxEvent(sbx *agentsv1alpha1.Sandbox, del
 		return
 	}
 
-	user := sbx.GetAnnotations()[agentsv1alpha1.AnnotationOwner]
-	lockString := lockStringOf(sbx)
+	user := event.Snapshot.Owner
+	lockString := event.Snapshot.LockString
 	if user == "" || lockString == "" {
 		return
 	}
@@ -441,8 +431,8 @@ func (d *AntiDriftDriver) reconcileSandboxEvent(sbx *agentsv1alpha1.Sandbox, del
 		return
 	}
 
-	if deleted || !IsLiveForQuota(sbx) {
-		if d.cache == nil || !d.cache.SandboxInformerHealthy() {
+	if event.Deleted || !event.Snapshot.Live {
+		if d.source == nil || !d.source.Healthy() {
 			antiDriftEventReleaseTotal.WithLabelValues("skipped_unhealthy").Inc()
 			return
 		}
@@ -465,11 +455,12 @@ func (d *AntiDriftDriver) reconcileSandboxEvent(sbx *agentsv1alpha1.Sandbox, del
 		d.clearLeaked()
 		return
 	}
+	want := entryForSnapshot(event.Snapshot)
 	if err := d.backend.Acquire(ctx, AcquireParams{
 		User:       user,
 		LockString: lockString,
-		Footprint:  FootprintOf(sbx),
-		Scopes:     ConditionalScopesOf(sbx),
+		Footprint:  want.Footprint,
+		Scopes:     want.Scopes,
 		Enforce:    false,
 	}); err != nil {
 		antiDriftErrorsTotal.WithLabelValues("event_acquire").Inc()
@@ -546,29 +537,14 @@ func leakedKey(user, lockString string) string {
 	return user + "\x00" + lockString
 }
 
-func sandboxFromEvent(obj any) *agentsv1alpha1.Sandbox {
-	switch v := obj.(type) {
-	case *agentsv1alpha1.Sandbox:
-		return v
-	case toolscache.DeletedFinalStateUnknown:
-		sbx, _ := v.Obj.(*agentsv1alpha1.Sandbox)
-		return sbx
-	default:
-		return nil
+func entryForSnapshot(s infra.QuotaSandboxSnapshot) Entry {
+	var scopes []quotaspec.QuotaScope
+	if s.Running {
+		scopes = []quotaspec.QuotaScope{quotaspec.ScopeRunning}
 	}
-}
-
-func lockStringOf(sbx *agentsv1alpha1.Sandbox) string {
-	if sbx == nil {
-		return ""
-	}
-	return sbx.GetAnnotations()[agentsv1alpha1.AnnotationLock]
-}
-
-func liveEntryForSandbox(sbx *agentsv1alpha1.Sandbox) Entry {
 	return Entry{
-		Footprint: FootprintOf(sbx),
-		Scopes:    ConditionalScopesOf(sbx),
+		Footprint: FootprintFromResource(s.Resource),
+		Scopes:    scopes,
 	}
 }
 

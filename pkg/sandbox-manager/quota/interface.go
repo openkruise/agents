@@ -19,7 +19,6 @@ package quota
 import (
 	"context"
 
-	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
 )
 
@@ -75,13 +74,6 @@ type ReleaseRequest struct {
 	User string
 	// LockString identifies the quota allocation to release.
 	LockString string
-}
-
-type LiveSandboxCache interface {
-	// ListLiveSandboxesByOwner returns live sandboxes owned by owner.
-	ListLiveSandboxesByOwner(ctx context.Context, owner string) ([]*agentsv1alpha1.Sandbox, error)
-	// SandboxInformerHealthy reports whether the sandbox informer cache is usable.
-	SandboxInformerHealthy() bool
 }
 
 type PrimaryChecker interface {
