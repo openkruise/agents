@@ -167,37 +167,9 @@ func (c *Cache) NewPVCTask(ctx context.Context, pvc *corev1.PersistentVolumeClai
 		if pvc.Status.Phase == corev1.ClaimLost {
 			return false, fmt.Errorf("PVC %s is in Lost phase", pvc.Name)
 		}
-
-		// Check PVC Conditions for known failure reasons.
-		for _, condition := range pvc.Status.Conditions {
-			if condition.Status == corev1.ConditionTrue && isPVCFailureCondition(condition.Type, condition.Reason) {
-				return false, fmt.Errorf("PVC %s failed with condition type: %s, reason: %s, message: %s)", pvc.Name, condition.Type, condition.Reason, condition.Message)
-			}
-		}
-
 		return false, nil
 	}
 	return cacheutils.NewWaitTask[*corev1.PersistentVolumeClaim](
 		ctx, c.waitHooks, cacheutils.WaitActionPVCBind, pvc, c.PVCUpdateFunc(ctx), check,
 	)
-}
-
-// isPVCFailureCondition returns true if the condition type and reason indicate a PVC failure.
-func isPVCFailureCondition(conditionType corev1.PersistentVolumeClaimConditionType, reason string) bool {
-	switch conditionType {
-	case corev1.PersistentVolumeClaimControllerResizeError,
-		corev1.PersistentVolumeClaimNodeResizeError,
-		corev1.PersistentVolumeClaimVolumeModifyVolumeError:
-		return true
-	case corev1.PersistentVolumeClaimResizing,
-		corev1.PersistentVolumeClaimFileSystemResizePending:
-		return false
-	default:
-		switch reason {
-		case "ResizeFailed", "VolumeResizeFailed", "FileSystemResizeFailed", "VolumeModifyFailed":
-			return true
-		default:
-			return false
-		}
-	}
 }

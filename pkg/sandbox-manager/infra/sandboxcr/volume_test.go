@@ -323,6 +323,48 @@ func TestCreateVolume(t *testing.T) {
 		assert.Equal(t, "bound-volume", info.Name)
 		assert.Equal(t, "pv-bound-volume", info.VolumeID)
 	})
+
+	t.Run("PVC binding timeout returns error with PVC name", func(t *testing.T) {
+		// Create a pending PVC that won't bind
+		storageClass := "standard"
+		pendingPVC := &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "pending-volume",
+				Namespace: "sandbox-system",
+				Annotations: map[string]string{
+					agentsv1alpha1.AnnotationOwner: "user-1",
+				},
+			},
+			Spec: corev1.PersistentVolumeClaimSpec{
+				AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+				Resources: corev1.VolumeResourceRequirements{
+					Requests: corev1.ResourceList{
+						corev1.ResourceStorage: resource.MustParse("1Gi"),
+					},
+				},
+				StorageClassName: &storageClass,
+			},
+			Status: corev1.PersistentVolumeClaimStatus{
+				Phase: corev1.ClaimPending,
+			},
+		}
+		require.NoError(t, fakeClient.Create(context.Background(), pendingPVC))
+
+		opts := infra.CreateVolumeOptions{
+			Namespace:        "sandbox-system",
+			Name:             "pending-volume",
+			UserID:           "user-1",
+			StorageSize:      resource.MustParse("1Gi"),
+			StorageClass:     "standard",
+			AccessMode:       "ReadWriteOnce",
+			WaitBoundTimeout: 100 * time.Millisecond,
+		}
+		_, err := i.CreateVolume(context.Background(), opts)
+		assert.Error(t, err)
+		// Verify error message contains PVC namespace/name and timeout info
+		assert.Contains(t, err.Error(), "sandbox-system/pending-volume")
+		assert.Contains(t, err.Error(), "timed out")
+	})
 }
 
 // --- GetVolume business logic tests ---

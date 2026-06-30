@@ -207,12 +207,6 @@ func (sc *Controller) GetVolume(r *http.Request) (web.ApiResponse[*models.Volume
 				Message: "Volume not found",
 			}
 		}
-		if managererrors.GetErrCode(err) == managererrors.ErrorNotAllowed {
-			return web.ApiResponse[*models.Volume]{}, &web.ApiError{
-				Code:    http.StatusForbidden,
-				Message: "Volume is not owned by the requesting user",
-			}
-		}
 		return web.ApiResponse[*models.Volume]{}, &web.ApiError{
 			Code:    http.StatusInternalServerError,
 			Message: "Failed to get volume",
@@ -263,12 +257,6 @@ func (sc *Controller) DeleteVolume(r *http.Request) (web.ApiResponse[struct{}], 
 			return web.ApiResponse[struct{}]{}, &web.ApiError{
 				Code:    http.StatusNotFound,
 				Message: "Volume not found",
-			}
-		}
-		if managererrors.GetErrCode(err) == managererrors.ErrorNotAllowed {
-			return web.ApiResponse[struct{}]{}, &web.ApiError{
-				Code:    http.StatusForbidden,
-				Message: "Volume is not owned by the requesting user",
 			}
 		}
 		return web.ApiResponse[struct{}]{}, &web.ApiError{

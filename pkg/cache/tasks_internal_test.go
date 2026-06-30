@@ -22,7 +22,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -108,34 +107,4 @@ func newCheckpointUpdateFuncTestClient(t *testing.T, objects ...ctrlclient.Objec
 	scheme := runtime.NewScheme()
 	require.NoError(t, agentsv1alpha1.AddToScheme(scheme))
 	return fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
-}
-
-func TestIsPVCFailureCondition(t *testing.T) {
-	tests := []struct {
-		name          string
-		conditionType corev1.PersistentVolumeClaimConditionType
-		reason        string
-		expectFailure bool
-	}{
-		// Failure conditions
-		{name: "ControllerResizeError", conditionType: corev1.PersistentVolumeClaimControllerResizeError, reason: "", expectFailure: true},
-		{name: "NodeResizeError", conditionType: corev1.PersistentVolumeClaimNodeResizeError, reason: "", expectFailure: true},
-		{name: "ModifyVolumeError", conditionType: corev1.PersistentVolumeClaimVolumeModifyVolumeError, reason: "", expectFailure: true},
-		{name: "unknown type ResizeFailed reason", conditionType: "UnknownType", reason: "ResizeFailed", expectFailure: true},
-		{name: "unknown type VolumeResizeFailed reason", conditionType: "UnknownType", reason: "VolumeResizeFailed", expectFailure: true},
-		{name: "unknown type FileSystemResizeFailed reason", conditionType: "UnknownType", reason: "FileSystemResizeFailed", expectFailure: true},
-		{name: "unknown type VolumeModifyFailed reason", conditionType: "UnknownType", reason: "VolumeModifyFailed", expectFailure: true},
-
-		// Non-failure conditions
-		{name: "Resizing", conditionType: corev1.PersistentVolumeClaimResizing, reason: "", expectFailure: false},
-		{name: "FileSystemResizePending", conditionType: corev1.PersistentVolumeClaimFileSystemResizePending, reason: "", expectFailure: false},
-		{name: "unknown type benign reason", conditionType: "UnknownType", reason: "BenignReason", expectFailure: false},
-		{name: "unknown type empty reason", conditionType: "UnknownType", reason: "", expectFailure: false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := isPVCFailureCondition(tt.conditionType, tt.reason)
-			assert.Equal(t, tt.expectFailure, got)
-		})
-	}
 }

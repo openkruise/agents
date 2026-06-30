@@ -18,11 +18,13 @@ package sandboxcr
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/cache"
+	cacheutils "github.com/openkruise/agents/pkg/cache/utils"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
@@ -102,7 +104,10 @@ func (i *Infra) CreateVolume(ctx context.Context, opts infra.CreateVolumeOptions
 	task := i.Cache.NewPVCTask(ctx, pvc)
 	if err := task.Wait(opts.WaitBoundTimeout); err != nil {
 		log.Error(err, "Failed to wait for PVC", "name", opts.Name, "namespace", opts.Namespace)
-		return nil, fmt.Errorf("failed to wait for PVC: %w", err)
+		if errors.Is(err, &cacheutils.WaitNotSatisfiedError{}) {
+			return nil, fmt.Errorf("PVC %s/%s binding timed out after %v: %w", opts.Namespace, opts.Name, opts.WaitBoundTimeout, err)
+		}
+		return nil, fmt.Errorf("failed to wait for PVC %s/%s: %w", opts.Namespace, opts.Name, err)
 	}
 
 	// Get the bound PVC from cache
@@ -147,7 +152,7 @@ func (i *Infra) ListVolumes(ctx context.Context, opts infra.ListVolumesOptions) 
 	return volumes, nil
 }
 
-// GetVolume retrieves a volume by volumeID (PV Name) and verifies ownership.
+// GetVolume retrieves a volume by volumeID (PV Name)
 func (i *Infra) GetVolume(ctx context.Context, opts infra.GetVolumeOptions) (*infra.VolumeInfo, error) {
 	log := klog.FromContext(ctx)
 	log.V(utils.DebugLogLevel).Info("get volume", "volumeID", opts.VolumeID, "namespace", opts.Namespace, "userId", opts.UserID)
@@ -176,7 +181,7 @@ func (i *Infra) GetVolume(ctx context.Context, opts infra.GetVolumeOptions) (*in
 	return volumeInfo, nil
 }
 
-// DeleteVolume deletes a volume by volumeID (PV Name) and verifies ownership.
+// DeleteVolume deletes a volume by volumeID (PV Name)
 func (i *Infra) DeleteVolume(ctx context.Context, opts infra.DeleteVolumeOptions) error {
 	log := klog.FromContext(ctx)
 	log.V(utils.DebugLogLevel).Info("delete volume", "volumeID", opts.VolumeID, "namespace", opts.Namespace, "userId", opts.UserID)
@@ -221,7 +226,7 @@ func (i *Infra) validateCreateVolumeOptions(ctx context.Context, opts *infra.Cre
 	if err := validateAccessMode(opts.AccessMode); err != nil {
 		return fmt.Errorf("invalid access mode: %w", err)
 	}
-	// Validate StorageClass if specified
+	// Validate StorageClass
 	if err := i.validateStorageClass(ctx, opts.StorageClass); err != nil {
 		return fmt.Errorf("invalid storage class: %w", err)
 	}
