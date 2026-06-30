@@ -21,29 +21,24 @@ import (
 	"errors"
 	"fmt"
 
-	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/cache"
-	cacheutils "github.com/openkruise/agents/pkg/cache/utils"
-	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
-	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
-	"github.com/openkruise/agents/pkg/utils"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/cache"
+	cacheutils "github.com/openkruise/agents/pkg/cache/utils"
+	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
+	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	"github.com/openkruise/agents/pkg/utils"
 )
 
 // CreateVolume creates a new PersistentVolumeClaim for the user
 func (i *Infra) CreateVolume(ctx context.Context, opts infra.CreateVolumeOptions) (*infra.VolumeInfo, error) {
 	log := klog.FromContext(ctx)
 	log.V(utils.DebugLogLevel).Info("create volume options", "options", opts)
-
-	// Pre-flight checks
-	if err := i.validateCreateVolumeOptions(ctx, &opts); err != nil {
-		return nil, fmt.Errorf("validation failed: %w", err)
-	}
 
 	// Create PVC
 	pvc := &corev1.PersistentVolumeClaim{
@@ -207,13 +202,5 @@ func (i *Infra) DeleteVolume(ctx context.Context, opts infra.DeleteVolumeOptions
 	}
 
 	log.Info("Volume deleted", "name", pvc.Name, "namespace", opts.Namespace, "volumeID", opts.VolumeID)
-	return nil
-}
-
-// validateCreateVolumeOptions validates volume creation parameters before creating PVC.
-func (i *Infra) validateCreateVolumeOptions(ctx context.Context, opts *infra.CreateVolumeOptions) error {
-	if opts.WaitBoundTimeout <= 0 {
-		opts.WaitBoundTimeout = consts.DefaultWaitBoundPVCTimeout
-	}
 	return nil
 }

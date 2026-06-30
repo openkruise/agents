@@ -30,82 +30,8 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/cache/cachetest"
-	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 )
-
-func TestValidateCreateVolumeOptions(t *testing.T) {
-	c, _, err := cachetest.NewTestCache(t)
-	require.NoError(t, err)
-
-	// Create a valid StorageClass for positive test cases
-	immediateBinding := storagev1.VolumeBindingImmediate
-	sc := &storagev1.StorageClass{
-		ObjectMeta:        metav1.ObjectMeta{Name: "standard"},
-		Provisioner:       "kubernetes.io/no-provisioner",
-		VolumeBindingMode: &immediateBinding,
-	}
-	require.NoError(t, c.GetClient().Create(context.Background(), sc))
-
-	// Create a WaitForFirstConsumer StorageClass for binding mode test
-	waitBinding := storagev1.VolumeBindingWaitForFirstConsumer
-	wfscStorageClass := &storagev1.StorageClass{
-		ObjectMeta:        metav1.ObjectMeta{Name: "wait-first-consumer"},
-		Provisioner:       "kubernetes.io/no-provisioner",
-		VolumeBindingMode: &waitBinding,
-	}
-	require.NoError(t, c.GetClient().Create(context.Background(), wfscStorageClass))
-
-	i := &Infra{Cache: c}
-
-	tests := []struct {
-		name        string
-		opts        infra.CreateVolumeOptions
-		expectError string
-	}{
-		{
-			name: "valid options",
-			opts: infra.CreateVolumeOptions{
-				Namespace:    "sandbox-system",
-				Name:         "test-volume",
-				UserID:       "user-1",
-				StorageSize:  resource.MustParse("1Gi"),
-				StorageClass: "standard",
-				AccessMode:   "ReadWriteOnce",
-			},
-			expectError: "",
-		},
-		{
-			name: "default WaitBoundTimeout is set when zero",
-			opts: infra.CreateVolumeOptions{
-				Namespace:        "sandbox-system",
-				Name:             "test-volume",
-				UserID:           "user-1",
-				StorageSize:      resource.MustParse("1Gi"),
-				StorageClass:     "standard",
-				AccessMode:       "ReadWriteOnce",
-				WaitBoundTimeout: 0,
-			},
-			expectError: "",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := i.validateCreateVolumeOptions(context.Background(), &tt.opts)
-			if tt.expectError == "" {
-				assert.NoError(t, err)
-				// Verify default timeout was applied for zero timeout case
-				if tt.opts.WaitBoundTimeout == 0 && tt.name == "default WaitBoundTimeout is set when zero" {
-					assert.Equal(t, consts.DefaultWaitBoundPVCTimeout, tt.opts.WaitBoundTimeout)
-				}
-			} else {
-				assert.Error(t, err)
-				assert.Contains(t, err.Error(), tt.expectError)
-			}
-		})
-	}
-}
 
 func TestCreateVolume(t *testing.T) {
 	c, fakeClient, err := cachetest.NewTestCache(t)

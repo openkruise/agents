@@ -17,6 +17,8 @@ limitations under the License.
 package models
 
 import (
+	"time"
+
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
@@ -37,5 +39,5 @@ type VolumeExtensions struct {
 	StorageSize      resource.Quantity
 	StorageClass     string
 	AccessMode       string
-	WaitBoundSeconds int
+	WaitBoundSeconds time.Duration
 }

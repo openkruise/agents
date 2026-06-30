@@ -447,7 +447,7 @@ func (r *NewVolumeRequest) ParseExtensions(headers http.Header) error {
 		if seconds < 0 {
 			return fmt.Errorf("waitBoundSeconds %s cannot be negative", waitBoundSeconds)
 		}
-		r.Extensions.WaitBoundSeconds = seconds
+		r.Extensions.WaitBoundSeconds = time.Duration(seconds) * time.Second
 	}
 
 	return nil

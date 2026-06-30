@@ -20,12 +20,14 @@ import (
 	"context"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	storagev1 "k8s.io/api/storage/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -424,6 +426,62 @@ func TestDeleteVolume(t *testing.T) {
 				require.Nil(t, apiErr, "unexpected error: %v", apiErr)
 				assert.Equal(t, http.StatusNoContent, resp.Code)
 			}
+		})
+	}
+}
+
+func TestValidateVolumeRequest_DefaultWaitBoundSeconds(t *testing.T) {
+	controller, _, teardown := Setup(t)
+	defer teardown()
+
+	// Create StorageClass for validation tests
+	fc := getTestCRClient(controller)
+	immediateBinding := storagev1.VolumeBindingImmediate
+	sc := &storagev1.StorageClass{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "standard",
+		},
+		Provisioner:       "kubernetes.io/no-provisioner",
+		VolumeBindingMode: &immediateBinding,
+	}
+	err := fc.Create(context.Background(), sc)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name                 string
+		waitBoundSeconds     int
+		expectedWaitBoundSec int
+	}{
+		{
+			name:                 "zero WaitBoundSeconds gets default",
+			waitBoundSeconds:     0,
+			expectedWaitBoundSec: 60,
+		},
+		{
+			name:                 "negative WaitBoundSeconds gets default",
+			waitBoundSeconds:     -5,
+			expectedWaitBoundSec: 60,
+		},
+		{
+			name:                 "positive WaitBoundSeconds remains unchanged",
+			waitBoundSeconds:     30,
+			expectedWaitBoundSec: 30,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			request := models.NewVolumeRequest{
+				Name: "test-volume",
+			}
+			request.Extensions.StorageSize = resource.MustParse("1Gi")
+			request.Extensions.StorageClass = "standard"
+			request.Extensions.AccessMode = "ReadWriteOnce"
+			request.Extensions.WaitBoundSeconds = time.Duration(tt.waitBoundSeconds) * time.Second
+
+			err := controller.validateVolumeRequest(context.Background(), &request)
+			require.NoError(t, err)
+			assert.Equal(t, time.Duration(tt.expectedWaitBoundSec)*time.Second, request.Extensions.WaitBoundSeconds)
 		})
 	}
 }

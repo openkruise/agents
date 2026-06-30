@@ -1615,7 +1615,7 @@ func TestNewVolumeRequest_ParseExtensions(t *testing.T) {
 		expectSize    string
 		expectSC      string
 		expectAM      string
-		expectWaitSec int
+		expectWaitSec time.Duration
 	}{
 		{
 			name: "valid full headers",
@@ -1628,7 +1628,7 @@ func TestNewVolumeRequest_ParseExtensions(t *testing.T) {
 			expectSize:    "1Gi",
 			expectSC:      "standard",
 			expectAM:      "ReadWriteOnce",
-			expectWaitSec: 30,
+			expectWaitSec: 30 * time.Second,
 		},
 		{
 			name: "valid without WaitBoundSeconds",

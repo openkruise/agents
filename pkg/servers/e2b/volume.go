@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
@@ -32,6 +31,7 @@ import (
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
@@ -76,7 +76,7 @@ func (sc *Controller) CreateVolume(r *http.Request) (web.ApiResponse[*models.Vol
 		StorageSize:      req.Extensions.StorageSize,
 		StorageClass:     req.Extensions.StorageClass,
 		AccessMode:       req.Extensions.AccessMode,
-		WaitBoundTimeout: time.Duration(req.Extensions.WaitBoundSeconds) * time.Second,
+		WaitBoundTimeout: req.Extensions.WaitBoundSeconds,
 	})
 	if err != nil {
 		log.Error(err, "Failed to create volume", "name", req.Name, "namespace", namespace)
@@ -111,13 +111,13 @@ func (sc *Controller) parseCreateVolumeRequest(ctx context.Context, r *http.Requ
 		return request, fmt.Errorf("bad extension param: %w", err)
 	}
 
-	if err := sc.validateVolumeRequest(ctx, request); err != nil {
+	if err := sc.validateVolumeRequest(ctx, &request); err != nil {
 		return request, err
 	}
 	return request, nil
 }
 
-func (sc *Controller) validateVolumeRequest(ctx context.Context, request models.NewVolumeRequest) error {
+func (sc *Controller) validateVolumeRequest(ctx context.Context, request *models.NewVolumeRequest) error {
 	// Validate volume name conforms to DNS-1123 label format
 	if errs := utilvalidation.IsDNS1123Label(request.Name); len(errs) > 0 {
 		return fmt.Errorf("invalid volume name %q: %s", request.Name, strings.Join(errs, ", "))
@@ -132,6 +132,10 @@ func (sc *Controller) validateVolumeRequest(ctx context.Context, request models.
 	// Validate StorageClass
 	if err := sc.validateStorageClass(ctx, request.Extensions.StorageClass); err != nil {
 		return fmt.Errorf("invalid storage class: %w", err)
+	}
+	// Set default WaitBoundSeconds if not specified
+	if request.Extensions.WaitBoundSeconds <= 0 {
+		request.Extensions.WaitBoundSeconds = consts.DefaultWaitBoundPVCTimeout
 	}
 	return nil
 }
