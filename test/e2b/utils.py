@@ -6,28 +6,34 @@ from typing import List, Optional
 
 import pytest
 from e2b.sandbox.sandbox_api import SandboxInfo, SandboxQuery
+from e2b_code_interpreter import SandboxState
 from e2b_code_interpreter import Sandbox
+
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 
 def connect_sandbox(sbx: Sandbox, timeout: Optional[int] = None) -> Sandbox | None:
     """Connect to a sandbox with retry logic for pausing state.
-    
+
     If the sandbox is pausing, will retry up to 30 times with 2 second intervals.
-    
+
     Args:
         sbx: The Sandbox instance to connect to.
         timeout: Optional timeout parameter to pass to connect().
-        
+
     Returns:
         The connected Sandbox instance.
-        
+
     Raises:
         Exception: If connection fails with error other than pausing state,
                    or if pausing state persists after 30 retries.
     """
     max_retries = 30
     retry_interval = 2  # seconds
-    
+
     for attempt in range(max_retries):
         try:
             if timeout is not None:
@@ -45,7 +51,10 @@ def connect_sandbox(sbx: Sandbox, timeout: Optional[int] = None) -> Sandbox | No
             )
             if is_pausing:
                 if attempt < max_retries - 1:
-                    print(f"Sandbox is pausing, waiting {retry_interval}s before retry... (attempt {attempt + 1}/{max_retries})")
+                    logger.debug(
+                        "Sandbox is pausing, waiting %ds before retry... (attempt %d/%d)",
+                        retry_interval, attempt + 1, max_retries,
+                    )
                     time.sleep(retry_interval)
                     continue
                 else:
@@ -58,89 +67,160 @@ def connect_sandbox(sbx: Sandbox, timeout: Optional[int] = None) -> Sandbox | No
 
 def run_code_sandbox(sbx: Sandbox, code: str, **kwargs):
     """Run code in a sandbox with retry logic.
-    
+
     Args:
         sbx: The Sandbox instance to run code in.
         code: The code to execute.
         **kwargs: Additional arguments to pass to run_code (e.g., context, on_result).
-        
+
     Returns:
         The execution result from run_code.
-        
+
     Raises:
         Exception: If code execution fails after all retries.
     """
     max_retries = 5
     retry_interval = 5  # seconds
-    
+
     for attempt in range(max_retries):
         try:
             return sbx.run_code(code, request_timeout=120., **kwargs)
         except Exception as e:
             if attempt < max_retries - 1:
-                print(f"Failed to run code (attempt {attempt + 1}/{max_retries}): {e}")
-                print(f"Retrying in {retry_interval}s...")
+                logger.warning(
+                    "Failed to run code (attempt %d/%d): %s",
+                    attempt + 1, max_retries, e,
+                )
+                logger.debug("Retrying in %ds...", retry_interval)
                 time.sleep(retry_interval)
                 continue
             else:
-                print(f"Failed to run code after {max_retries} attempts")
+                logger.error("Failed to run code after %d attempts", max_retries)
                 raise
     return None
 
 
-def list_sandbox(query: SandboxQuery = None) -> List[SandboxInfo]:
-    """List all sandboxes matching the given query with full pagination.
-    
+def list_sandbox(query: SandboxQuery = None, namespace: str = "default") -> List[SandboxInfo]:
+    """List sandboxes matching the given query with full pagination.
+
+    By default, only returns RUNNING sandboxes belonging to the current test
+    namespace. This avoids fixture race conditions caused by:
+    - PAUSED sandboxes from pause_resume tests on other workers
+    - Warm-pool sandboxes from other namespaces
+
     Args:
-        query: SandboxQuery to filter sandboxes. If None, lists all sandboxes.
-        
+        query: SandboxQuery to filter sandboxes. If provided, overrides default filters.
+        namespace: Namespace to filter by (prefix match on sandbox_id).
+            Defaults to test_namespace. Pass None to skip namespace filtering.
+
     Returns:
-        List of all matching SandboxInfo objects.
+        List of matching SandboxInfo objects.
     """
-    paginator = Sandbox.list(query=query) if query else Sandbox.list()
+    # Default: only RUNNING state (exclude PAUSED sandboxes from pause_resume tests)
+    if query is None:
+        query = SandboxQuery(state=[SandboxState.RUNNING])
+
+    paginator = Sandbox.list(query=query)
     sandboxes = paginator.next_items()
 
     while paginator.has_next:
         items = paginator.next_items()
         sandboxes.extend(items)
 
+    # Post-filter by namespace prefix (sandbox_id format: namespace--pod-name)
+    ns = namespace
+    if ns:
+        prefix = f"{ns}--"
+        sandboxes = [sb for sb in sandboxes if sb.sandbox_id.startswith(prefix)]
+
     return sandboxes
 
 
+def _force_kill_remaining_sandboxes(test_namespace: str):
+    """Kill all remaining sandboxes in the test namespace to prevent cascade failures.
+
+    Uses both SDK kill and kubectl delete to ensure cleanup — SDK kill may
+    silently fail for sandboxes in non-running states (e.g. creating/dead).
+    """
+    try:
+        remaining = list_sandbox(namespace=test_namespace)
+        if not remaining:
+            return
+        logger.warning(
+            "Force-killing %d remaining sandbox(es) to prevent cascade...",
+            len(remaining),
+        )
+        for sbx_info in remaining:
+            full_id = sbx_info.sandbox_id
+            short_id = full_id.split("--")[1] if "--" in full_id else full_id
+            try:
+                Sandbox.kill(full_id)
+                logger.info("  SDK kill %s", full_id)
+            except Exception as e:
+                logger.warning("  SDK kill %s failed: %s", full_id, e)
+            try:
+                kubectl("delete", "sbx", short_id, "-n", test_namespace,
+                        "--ignore-not-found=true", "--timeout=10s")
+                logger.info("  kubectl delete %s", short_id)
+            except Exception:
+                pass
+    except Exception as e:
+        logger.warning("Force-kill failed: %s", e)
+
+
 @pytest.fixture(autouse=True)
-def wait_for_sandbox():
-    """BeforeEach: Wait up to 60 seconds until list_sandbox returns empty,
-    then check sandbox Ready condition via kubectl."""
-    timeout = 30
+def wait_for_sandbox(config):
+    """BeforeEach: Wait for sandbox cleanup, then check warm pool Ready count.
+
+    If sandboxes are not cleaned up within the initial timeout, force-kill them
+    to prevent cascade failures across subsequent tests.
+
+    When e2e_debug is set, skip the cleanup wait entirely so failed sandboxes
+    are preserved for investigation.
+    """
+    if config.debug:
+        logger.info("E2E_DEBUG: skipping sandbox cleanup wait (preserving resources)")
+        yield
+        return
+
+    timeout = config.sandbox_cleanup_timeout
     interval = 2
     start_time = time.time()
 
-    # Wait for sandboxes cleanup
+    # Phase 1: Wait for sandboxes to be cleaned up naturally
     while time.time() - start_time < timeout:
         try:
-            sandboxes = list_sandbox()
+            sandboxes = list_sandbox(namespace=config.test_namespace)
         except Exception as e:
-            print(f"list_sandbox() failed: {e}")
-            print("\n=== Sandbox Manager Logs ===")
-            kubectl("logs", "-n", "sandbox-system", "-l", "app.kubernetes.io/name=sandbox-manager", "--tail=100")
+            logger.error("list_sandbox() failed: %s", e)
+            logger.info("=== Sandbox Manager Logs ===")
+            try:
+                kubectl("logs", "-n", "sandbox-system", "-l", "app.kubernetes.io/name=sandbox-manager", "--tail=100")
+            except Exception:
+                logger.warning("(failed to fetch sandbox-manager logs)")
             raise
         if len(sandboxes) == 0:
-            print("No sandboxes running, proceeding to check Ready conditions")
+            logger.debug("No sandboxes running, proceeding to check Ready conditions")
             break
-        print(f"Waiting for {len(sandboxes)} sandbox(es) to be cleaned up...")
+        logger.debug("Waiting for %d sandbox(es) to be cleaned up...", len(sandboxes))
         time.sleep(interval)
 
     else:
-        # Timeout reached, fail the test
-        remaining = list_sandbox()
-        raise TimeoutError(f"{len(remaining)} sandbox(es) still running after {timeout}s timeout")
+        # Phase 2: Timeout — force-kill remaining sandboxes instead of failing
+        _force_kill_remaining_sandboxes(config.test_namespace)
+        time.sleep(5)
+        still_remaining = list_sandbox(namespace=config.test_namespace)
+        if still_remaining:
+            raise TimeoutError(
+                f"{len(still_remaining)} sandbox(es) still running after force-kill"
+            )
 
     # Wait for at least 2 Ready sandboxes
     ready_start_time = time.time()
     while time.time() - ready_start_time < timeout:
         try:
             result = subprocess.run(
-                ["kubectl", "get", "sbx", "-o", "json"],
+                ["kubectl", "get", "sbx", "-o", "json", "-n", config.test_namespace],
                 capture_output=True,
                 text=True,
                 check=True
@@ -156,13 +236,16 @@ def wait_for_sandbox():
                         break
 
             total_count = len(sbx_list.get("items", []))
-            print(f"Found {ready_count} Ready sandbox(es) out of {total_count} total")
+            logger.debug(
+                "Found %d Ready sandbox(es) out of %d total",
+                ready_count, total_count,
+            )
 
             if ready_count >= 2:
-                print(f"Required Ready sandboxes available, proceeding with test")
+                logger.debug("Required Ready sandboxes available, proceeding with test")
                 break
 
-            print(f"Waiting for more Ready sandboxes ({ready_count}/2)...")
+            logger.debug("Waiting for more Ready sandboxes (%d/2)...", ready_count)
             time.sleep(interval)
 
         except subprocess.CalledProcessError as e:
@@ -174,7 +257,7 @@ def wait_for_sandbox():
         # Get final state and describe not-ready sandboxes
         try:
             result = subprocess.run(
-                ["kubectl", "get", "sbx", "-o", "json"],
+                ["kubectl", "get", "sbx", "-o", "json", "-n", config.test_namespace],
                 capture_output=True,
                 text=True,
                 check=True
@@ -198,16 +281,27 @@ def wait_for_sandbox():
                 else:
                     not_ready_sandboxes.append(sbx_name)
 
-            # Describe all not-ready sandboxes
-            print(f"\n=== Timeout: Only {len(ready_sandboxes)} Ready sandbox(es), expected at least 2 ===")
-            print(f"Ready sandboxes: {ready_sandboxes}")
-            print(f"Not-ready sandboxes: {not_ready_sandboxes}\n")
+            logger.error(
+                "Timeout: Only %d Ready sandbox(es), expected at least 2",
+                len(ready_sandboxes),
+            )
+            logger.error("Ready sandboxes: %s", ready_sandboxes)
+            logger.error("Not-ready sandboxes: %s", not_ready_sandboxes)
 
             for sbx_name in not_ready_sandboxes:
-                print(f"\n=== Describing not-ready sandbox: {sbx_name} ===")
-                kubectl("describe", "pod", sbx_name)
-                kubectl("logs", sbx_name, "-c", "runtime")
-                kubectl("logs", sbx_name, "-c", "sandbox")
+                logger.info("=== Describing not-ready sandbox: %s ===", sbx_name)
+                try:
+                    kubectl("describe", "pod", sbx_name, "-n", config.test_namespace)
+                except Exception:
+                    logger.warning("(failed to describe %s)", sbx_name)
+                try:
+                    kubectl("logs", sbx_name, "-n", config.test_namespace, "-c", "runtime")
+                except Exception:
+                    logger.warning("(failed to get runtime logs for %s)", sbx_name)
+                try:
+                    kubectl("logs", sbx_name, "-n", config.test_namespace, "-c", "sandbox")
+                except Exception:
+                    logger.warning("(failed to get sandbox logs for %s)", sbx_name)
 
             raise TimeoutError(
                 f"Timeout waiting for Ready sandboxes: found {len(ready_sandboxes)}/2 after {timeout}s. "
@@ -223,13 +317,36 @@ def wait_for_sandbox():
 
 
 def kubectl(*args):
-    """Execute kubectl command and print output."""
+    """Execute kubectl command (no shell interpretation) and log output.
+
+    Raises subprocess.CalledProcessError on non-zero exit.
+    """
     result = subprocess.run(
-        "kubectl " + " ".join(args),
+        ["kubectl", *args],
         capture_output=True,
         text=True,
-        shell=True
+        check=True,
     )
-    print(result.stdout)
+    if result.stdout:
+        logger.info("%s", result.stdout.rstrip("\n"))
     if result.stderr:
-        print(f"Error: {result.stderr}")
+        logger.warning("stderr: %s", result.stderr.rstrip("\n"))
+
+
+def kubectl_shell(cmd: str):
+    """Execute a kubectl pipeline via the shell and log output.
+
+    Use this only when shell features (pipes, redirects) are needed.
+    Callers must build the full command string themselves.
+    Does not raise on non-zero exit — callers inspect output as needed.
+    """
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        shell=True,
+    )
+    if result.stdout:
+        logger.info("%s", result.stdout.rstrip("\n"))
+    if result.stderr:
+        logger.warning("stderr: %s", result.stderr.rstrip("\n"))
