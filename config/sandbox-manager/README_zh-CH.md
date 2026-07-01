@@ -28,7 +28,7 @@ docker build -t sandbox-manager:latest .
 API key 可以携带静态配额，维度包括 `sandbox.count`、`limits.cpu`、`limits.memory`，作用域为 `running` 或 `all`。
 对外 wire JSON 采用嵌套结构，例如 `{"running":{"sandbox.count":10,"limits.cpu":8000,"limits.memory":16384},"all":{"sandbox.count":50}}`；
 Secret/MySQL 存储层持久化的是归一化后的 `(dimension, scope, limit)` 列表。动态限额只依赖 Redis。如果
-`--e2b-quota-redis-addr` 为空，或者 Redis 已配置但暂时不可用，sandbox-manager 会有意 fail-open：受限 key
+`--quota-redis-addr` 为空，或者 Redis 已配置但暂时不可用，sandbox-manager 会有意 fail-open：受限 key
 仍然可以创建和存储，但 create 请求会暂时不执行动态限额。相关 fail-open 事件会通过 metrics 和日志暴露出来。
 
 如果 Redis 需要认证，请通过 Kubernetes Secret 注入 `E2B_QUOTA_REDIS_USERNAME` 和

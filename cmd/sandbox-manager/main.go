@@ -89,13 +89,13 @@ func main() {
 	var memberlistBindPort int
 	var e2bKeyStorage string
 	var e2bKeyStorageDisableAutoMigrate bool
-	var e2bQuotaRedisAddr string
-	var e2bQuotaRedisDB int
-	var e2bQuotaRedisOperationTimeout time.Duration
-	var e2bQuotaRedisBreakerN int
-	var e2bQuotaRedisBreakerD time.Duration
-	var e2bQuotaAntiDriftInterval time.Duration
-	var e2bQuotaAntiDriftGrace time.Duration
+	var quotaRedisAddr string
+	var quotaRedisDB int
+	var quotaRedisOperationTimeout time.Duration
+	var quotaRedisBreakerN int
+	var quotaRedisBreakerD time.Duration
+	var quotaAntiDriftInterval time.Duration
+	var quotaAntiDriftGrace time.Duration
 
 	utilfeature.DefaultMutableFeatureGate.AddFlag(pflag.CommandLine)
 
@@ -127,13 +127,13 @@ func main() {
 			"When --e2b-key-storage=mysql and auth is enabled, set MySQL DSN via environment variable "+E2BKeyStorageDSNEnvVar)
 	pflag.BoolVar(&e2bKeyStorageDisableAutoMigrate, "e2b-key-storage-disable-schema-auto-update", false,
 		"Disable schema auto-migration for DB-Based key storage like mysql; when enabled, schema changes are skipped but admin team/key bootstrap still runs")
-	pflag.StringVar(&e2bQuotaRedisAddr, "e2b-quota-redis-addr", "", "Redis address for E2B API-key quota enforcement. Empty disables enforcement and fails open.")
-	pflag.IntVar(&e2bQuotaRedisDB, "e2b-quota-redis-db", 0, "Redis DB for E2B API-key quota enforcement.")
-	pflag.DurationVar(&e2bQuotaRedisOperationTimeout, "e2b-quota-redis-operation-timeout", consts.DefaultQuotaRedisOperationTimeout, "Per-operation timeout for Redis quota commands.")
-	pflag.IntVar(&e2bQuotaRedisBreakerN, "e2b-quota-redis-breaker-n", consts.DefaultQuotaRedisBreakerN, "Consecutive Redis quota backend errors required to open the fail-open breaker.")
-	pflag.DurationVar(&e2bQuotaRedisBreakerD, "e2b-quota-redis-breaker-d", consts.DefaultQuotaRedisBreakerD, "How long the Redis quota fail-open breaker stays open before probing again.")
-	pflag.DurationVar(&e2bQuotaAntiDriftInterval, "e2b-quota-anti-drift-interval", consts.DefaultQuotaAntiDriftInterval, "Interval for quota anti-drift reconciliation.")
-	pflag.DurationVar(&e2bQuotaAntiDriftGrace, "e2b-quota-anti-drift-grace", consts.DefaultQuotaAntiDriftGrace, "Grace period before quota anti-drift adds or removes live-set entries.")
+	pflag.StringVar(&quotaRedisAddr, "quota-redis-addr", "", "Redis address for sandbox-manager quota enforcement. Empty disables enforcement and fails open.")
+	pflag.IntVar(&quotaRedisDB, "quota-redis-db", 0, "Redis DB for sandbox-manager quota enforcement.")
+	pflag.DurationVar(&quotaRedisOperationTimeout, "quota-redis-operation-timeout", consts.DefaultQuotaRedisOperationTimeout, "Per-operation timeout for Redis quota commands.")
+	pflag.IntVar(&quotaRedisBreakerN, "quota-redis-breaker-n", consts.DefaultQuotaRedisBreakerN, "Consecutive Redis quota backend errors required to open the fail-open breaker.")
+	pflag.DurationVar(&quotaRedisBreakerD, "quota-redis-breaker-d", consts.DefaultQuotaRedisBreakerD, "How long the Redis quota fail-open breaker stays open before probing again.")
+	pflag.DurationVar(&quotaAntiDriftInterval, "quota-anti-drift-interval", consts.DefaultQuotaAntiDriftInterval, "Interval for quota anti-drift reconciliation.")
+	pflag.DurationVar(&quotaAntiDriftGrace, "quota-anti-drift-grace", consts.DefaultQuotaAntiDriftGrace, "Grace period before quota anti-drift adds or removes live-set entries.")
 
 	opts := zap.Options{
 		Development: false,
@@ -182,8 +182,8 @@ func main() {
 	if err := validateE2BTimeoutFlags(e2bMinResumeTimeout, e2bMaxTimeout); err != nil {
 		klog.Fatalf("invalid e2b timeout flags: %v", err)
 	}
-	if e2bQuotaRedisOperationTimeout <= 0 {
-		klog.Fatalf("--e2b-quota-redis-operation-timeout must be greater than 0")
+	if quotaRedisOperationTimeout <= 0 {
+		klog.Fatalf("--quota-redis-operation-timeout must be greater than 0")
 	}
 
 	if maxClaimWorkers < 0 {
@@ -208,8 +208,8 @@ func main() {
 
 	e2bKeyStorageDSN := strings.TrimSpace(os.Getenv(E2BKeyStorageDSNEnvVar))
 	e2bKeyStoragePepper := strings.TrimSpace(os.Getenv(E2BKeyHashPepperEnvVar))
-	e2bQuotaRedisUsername := strings.TrimSpace(os.Getenv(E2BQuotaRedisUsernameEnvVar))
-	e2bQuotaRedisPassword := strings.TrimSpace(os.Getenv(E2BQuotaRedisPasswordEnvVar))
+	quotaRedisUsername := strings.TrimSpace(os.Getenv(E2BQuotaRedisUsernameEnvVar))
+	quotaRedisPassword := strings.TrimSpace(os.Getenv(E2BQuotaRedisPasswordEnvVar))
 	if e2bEnableAuth {
 		// Validate key storage args
 		switch e2bKeyStorage {
@@ -227,15 +227,15 @@ func main() {
 	}
 
 	quotaOpts := config.QuotaOptions{
-		RedisAddr:         e2bQuotaRedisAddr,
-		RedisUsername:     e2bQuotaRedisUsername,
-		RedisPassword:     e2bQuotaRedisPassword,
-		RedisDB:           e2bQuotaRedisDB,
-		OperationTimeout:  e2bQuotaRedisOperationTimeout,
-		BreakerN:          e2bQuotaRedisBreakerN,
-		BreakerD:          e2bQuotaRedisBreakerD,
-		AntiDriftInterval: e2bQuotaAntiDriftInterval,
-		AntiDriftGrace:    e2bQuotaAntiDriftGrace,
+		RedisAddr:         quotaRedisAddr,
+		RedisUsername:     quotaRedisUsername,
+		RedisPassword:     quotaRedisPassword,
+		RedisDB:           quotaRedisDB,
+		OperationTimeout:  quotaRedisOperationTimeout,
+		BreakerN:          quotaRedisBreakerN,
+		BreakerD:          quotaRedisBreakerD,
+		AntiDriftInterval: quotaAntiDriftInterval,
+		AntiDriftGrace:    quotaAntiDriftGrace,
 	}
 
 	// Initialize Kubernetes client and config
