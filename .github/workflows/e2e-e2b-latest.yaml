@@ -161,18 +161,18 @@ jobs:
               if [ "${{ matrix.quota_profile }}" = "redis" ] || [ "${{ matrix.quota_profile }}" = "redis-clone" ] || [ "${{ matrix.quota_profile }}" = "redis-fault" ]; then
                 echo "- op: add"
                 echo "  path: /spec/template/spec/containers/0/args/-"
-                echo "  value: --e2b-quota-redis-addr=redis.sandbox-system.svc.cluster.local:6379"
+                echo "  value: --quota-redis-addr=redis.sandbox-system.svc.cluster.local:6379"
                 echo "- op: add"
                 echo "  path: /spec/template/spec/containers/0/args/-"
-                echo "  value: --e2b-quota-redis-operation-timeout=1s"
+                echo "  value: --quota-redis-operation-timeout=1s"
               fi
               if [ "${{ matrix.quota_profile }}" = "redis-fault" ]; then
                 echo "- op: add"
                 echo "  path: /spec/template/spec/containers/0/args/-"
-                echo "  value: --e2b-quota-anti-drift-interval=30s"
+                echo "  value: --quota-anti-drift-interval=30s"
                 echo "- op: add"
                 echo "  path: /spec/template/spec/containers/0/args/-"
-                echo "  value: --e2b-quota-anti-drift-grace=60s"
+                echo "  value: --quota-anti-drift-grace=60s"
               fi
               echo "- op: replace"
               echo "  path: /spec/template/spec/containers/0/resources/requests"
