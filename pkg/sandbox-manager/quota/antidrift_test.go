@@ -522,7 +522,7 @@ func TestAntiDriftEventReconcileSkipsWriteWhenPrimaryLostBeforeWrite(t *testing.
 				tt.source,
 				backend,
 			)
-			driver.seenLeaked[leakedKey(owner, "stale-lock")] = leakedObservation{firstSeen: now, confirmed: true}
+			driver.seenLeaked[leakedKey(owner, "stale-lock")] = leakedObservation{firstSeen: now}
 
 			beforeSkipped := testutil.ToFloat64(antiDriftSkippedTotal.WithLabelValues("not_primary"))
 

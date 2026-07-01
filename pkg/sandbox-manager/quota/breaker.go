@@ -77,7 +77,7 @@ func (b *BreakerBackend) Release(ctx context.Context, user, lockString string) e
 	})
 }
 
-// ListEntries and Cleanup intentionally bypass the breaker; Cleanup must keep trying Redis so API-key deletion can clear leaked quota state.
+// ListEntries and Cleanup intentionally bypass the breaker; Cleanup must keep trying the backend so API-key deletion can clear leaked quota state.
 func (b *BreakerBackend) ListEntries(ctx context.Context, user string) (map[string]Entry, error) {
 	entries, err := b.inner.ListEntries(ctx, user)
 	return entries, breakerError(err)

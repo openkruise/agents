@@ -40,28 +40,41 @@ type AntiDriftConfig struct {
 
 type leakedObservation struct {
 	firstSeen time.Time
-	confirmed bool
 }
 
 type AntiDriftDriver struct {
-	cfg      AntiDriftConfig
-	primary  PrimaryChecker
+	// cfg controls the periodic repair interval and delayed release grace window.
+	cfg AntiDriftConfig
+	// primary gates all backend repairs so only the current leader mutates quota state.
+	primary PrimaryChecker
+	// subjects provides the limited owners that need periodic repair.
 	subjects quotaspec.SubjectLister
-	source   infra.QuotaSandboxSource
-	backend  Backend
+	// source is the observed Sandbox state.
+	source infra.QuotaSandboxSource
+	// backend is the quota state to repair.
+	backend Backend
 
-	mu            sync.Mutex
-	subscription  infra.QuotaSandboxSubscription
-	runDone       chan struct{}
-	cycleCancel   context.CancelFunc
-	seenLeaked    map[string]leakedObservation
+	mu sync.Mutex
+	// subscription owns the informer handler registered for event reconciliation.
+	subscription infra.QuotaSandboxSubscription
+	// runDone closes when the background loop exits, allowing Stop to wait.
+	runDone chan struct{}
+	// cycleCancel cancels the active periodic pass when leadership or Stop changes.
+	cycleCancel context.CancelFunc
+	// seenLeaked tracks backend entries missing from observed state until grace expires.
+	seenLeaked map[string]leakedObservation
+	// limitedOwners is a small event-path cache to skip unlimited owners.
 	limitedOwners map[string]struct{}
-	stopped       bool
-	now           func() time.Time
+	// stopped prevents new work and makes late subscriptions self-remove.
+	stopped bool
+	// now is injectable for grace-window tests.
+	now func() time.Time
 
+	// runOnce and stopOnce make Run/Stop idempotent.
 	runOnce  sync.Once
 	stopOnce sync.Once
-	stopCh   chan struct{}
+	// stopCh cancels waits that are not directly tied to the caller context.
+	stopCh chan struct{}
 }
 
 func NewAntiDriftDriver(cfg AntiDriftConfig, primary PrimaryChecker, subjects quotaspec.SubjectLister, source infra.QuotaSandboxSource, backend Backend) *AntiDriftDriver {
@@ -105,6 +118,7 @@ func (d *AntiDriftDriver) SetSubscription(sub infra.QuotaSandboxSubscription) {
 	d.mu.Unlock()
 }
 
+// Run -> runLoop -> runWhilePrimary -> runCycle -> RunOnce is the main loop of the background goroutine.
 func (d *AntiDriftDriver) Run(ctx context.Context) {
 	if d == nil {
 		return
@@ -196,31 +210,38 @@ func (d *AntiDriftDriver) runCycle(ctx context.Context) {
 	cancel()
 }
 
+// RunOnce performs a single quota anti-drift cycle.
 func (d *AntiDriftDriver) RunOnce(ctx context.Context) error {
 	if d == nil {
 		return nil
 	}
+	// Only the primary manager may repair backend quota state.
 	if !d.stillPrimary() {
 		antiDriftSkippedTotal.WithLabelValues("not_primary").Inc()
 		d.clearLeaked()
 		return nil
 	}
+	// A partial driver cannot safely decide what backend state should contain.
 	if d.subjects == nil || d.source == nil || d.backend == nil {
 		antiDriftSkippedTotal.WithLabelValues("not_ready").Inc()
 		return nil
 	}
 
+	// Periodic repair is scoped to owners with limited quota.
 	subjects, err := d.subjects.ListLimited(ctx)
 	if err != nil {
 		antiDriftSkippedTotal.WithLabelValues("key_store_error").Inc()
 		d.clearLeaked()
 		return nil
 	}
+	// Event reconciliation uses this cache to avoid writing backend state for unlimited owners.
 	d.replaceLimitedOwners(limitedOwnerIDs(subjects))
 
 	now := d.now()
 	var firstErr error
+	// A subject is one quota owner/user plus its quota rule.
 	for _, subject := range subjects {
+		// Re-check leadership and cancellation between owners to stop handoff quickly.
 		if !d.stillPrimary() {
 			antiDriftSkippedTotal.WithLabelValues("not_primary").Inc()
 			d.clearLeaked()
@@ -232,6 +253,7 @@ func (d *AntiDriftDriver) RunOnce(ctx context.Context) error {
 		if subject.Quota == nil || !subject.Quota.IsLimited() {
 			continue
 		}
+		// Reconcile one owner at a time; keep going after ordinary owner-level errors.
 		stop, err := d.reconcileLimitedSubject(ctx, subject, now)
 		if stop {
 			return err
@@ -254,8 +276,10 @@ func limitedOwnerIDs(subjects []quotaspec.Subject) map[string]struct{} {
 	return limitedOwners
 }
 
+// reconcileLimitedSubject is the periodic backstop that repairs backend quota state for one owner.
 func (d *AntiDriftDriver) reconcileLimitedSubject(ctx context.Context, subject quotaspec.Subject, now time.Time) (bool, error) {
 	user := subject.User
+	// Compare the observed live Sandbox snapshots with backend live entries for this owner.
 	liveSandboxes, err := d.source.ListLiveQuotaSandboxesByOwner(ctx, user)
 	if err != nil {
 		antiDriftErrorsTotal.WithLabelValues("list_live").Inc()
@@ -263,7 +287,7 @@ func (d *AntiDriftDriver) reconcileLimitedSubject(ctx context.Context, subject q
 		return false, err
 	}
 
-	haveEntries, err := d.backend.ListEntries(ctx, user)
+	listedEntries, err := d.backend.ListEntries(ctx, user)
 	if err != nil {
 		antiDriftErrorsTotal.WithLabelValues("list_entries").Inc()
 		d.clearLeakedForKey(user)
@@ -271,21 +295,24 @@ func (d *AntiDriftDriver) reconcileLimitedSubject(ctx context.Context, subject q
 	}
 
 	var firstErr error
-	liveLocks := make(map[string]struct{}, len(liveSandboxes))
+	observedLiveSandboxes := make(map[string]struct{}, len(liveSandboxes))
 	nextLeaked := map[string]leakedObservation{}
+	// Phase 1: every observed live Sandbox must have a matching backend entry.
 	for _, snapshot := range liveSandboxes {
 		lockString := snapshot.LockString
 		if lockString == "" {
 			continue
 		}
-		liveLocks[lockString] = struct{}{}
+		observedLiveSandboxes[lockString] = struct{}{}
 
+		// Missing or stale backend entries are corrected immediately.
 		want := entryForSnapshot(snapshot)
-		have, ok := haveEntries[lockString]
+		have, ok := listedEntries[lockString]
 		if ok && entriesEqual(have, want) {
 			continue
 		}
 
+		// This repairs accounting for an already-live Sandbox, so it must not enforce quota.
 		if !d.stillPrimary() {
 			antiDriftSkippedTotal.WithLabelValues("not_primary").Inc()
 			d.clearLeaked()
@@ -306,24 +333,24 @@ func (d *AntiDriftDriver) reconcileLimitedSubject(ctx context.Context, subject q
 		}
 	}
 
-	healthy := d.source.Healthy()
-	for lockString := range haveEntries {
-		if _, ok := liveLocks[lockString]; ok {
+	// Phase 2: backend entries with no observed live Sandbox are possible leaks.
+	for lockString := range listedEntries {
+		if _, ok := observedLiveSandboxes[lockString]; ok {
 			continue
 		}
-		if !healthy {
+		if !d.source.Healthy() {
 			continue
 		}
 
+		// Missing observed state may be cache lag; release only after a confirmed grace window.
 		obs := d.leakedObservation(user, lockString)
+		previouslySeen := !obs.firstSeen.IsZero()
 		if obs.firstSeen.IsZero() {
 			obs.firstSeen = now
 		}
-		seenPreviousSuccessfulPass := obs.confirmed
-		obs.confirmed = true
 		nextLeaked[lockString] = obs
 
-		if !seenPreviousSuccessfulPass || now.Sub(obs.firstSeen) < d.cfg.Grace {
+		if !previouslySeen || now.Sub(obs.firstSeen) < d.cfg.Grace {
 			continue
 		}
 		if !d.stillPrimary() {
@@ -338,9 +365,11 @@ func (d *AntiDriftDriver) reconcileLimitedSubject(ctx context.Context, subject q
 			}
 			continue
 		}
+		// Released entries should not be remembered as leaks in the next pass.
 		delete(nextLeaked, lockString)
 	}
 
+	// Commit leak observations only after this owner was compared successfully.
 	d.replaceLeakedForKey(user, nextLeaked)
 	return false, firstErr
 }
@@ -394,6 +423,7 @@ func (d *AntiDriftDriver) cycleTimeout() time.Duration {
 	return timeout
 }
 
+// setCycleCancel exposes the active cycle cancel to Stop and leadership-loss handling.
 func (d *AntiDriftDriver) setCycleCancel(cancel context.CancelFunc) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -410,6 +440,7 @@ func (d *AntiDriftDriver) clearCycleCancel() {
 	d.cycleCancel = nil
 }
 
+// onQuotaEvent is the event-driven fast path that adjusts backend quota state in real time.
 func (d *AntiDriftDriver) onQuotaEvent(event infra.QuotaSandboxEvent) {
 	if d == nil || d.backend == nil {
 		return
@@ -431,6 +462,7 @@ func (d *AntiDriftDriver) onQuotaEvent(event infra.QuotaSandboxEvent) {
 		return
 	}
 
+	// Events are a fast path; the periodic cycle remains the correctness backstop.
 	if event.Deleted || !event.Snapshot.Live {
 		if d.source == nil || !d.source.Healthy() {
 			antiDriftEventReleaseTotal.WithLabelValues("skipped_unhealthy").Inc()
@@ -542,6 +574,7 @@ func entryForSnapshot(s infra.QuotaSandboxSnapshot) Entry {
 	if s.Running {
 		scopes = []quotaspec.QuotaScope{quotaspec.ScopeRunning}
 	}
+	// Snapshot is the quota boundary: Sandbox CR details have already been flattened by infra.
 	return Entry{
 		Footprint: FootprintFromResource(s.Resource),
 		Scopes:    scopes,
