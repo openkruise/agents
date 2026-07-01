@@ -6,8 +6,9 @@ import time
 import requests
 from e2b_code_interpreter import Sandbox
 
+import logging
 
-GATEWAY_URL = "http://localhost:80"
+logger = logging.getLogger(__name__)
 
 
 def get_sandbox_access_token(sandbox_id: str) -> str:
@@ -24,22 +25,21 @@ def get_sandbox_access_token(sandbox_id: str) -> str:
     return annotations.get("agents.kruise.io/runtime-access-token", "")
 
 
-def test_gateway_header_based_routing(sandbox_context):
+def test_gateway_header_based_routing(sandbox_context, config):
     """Test routing via e2b-sandbox-id and e2b-sandbox-port headers."""
     sandbox: Sandbox = sandbox_context.add(Sandbox.create(
-        template="code-interpreter",
+        template=config.templates.code_interpreter,
         timeout=120,
         headers={
             "x-request-id": sandbox_context.request_id
         }
     ))
     sandbox_id = sandbox.sandbox_id
-    print(f"sandbox-id: {sandbox_id}")
+    logger.info("sandbox-id: %s", sandbox_id)
 
     # Wait for gateway registry to sync
     time.sleep(3)
 
-    # Retrieve access token for authentication
     access_token = get_sandbox_access_token(sandbox_id)
 
     headers = {
@@ -50,7 +50,7 @@ def test_gateway_header_based_routing(sandbox_context):
         headers["X-Access-Token"] = access_token
 
     resp = requests.get(
-        f"{GATEWAY_URL}/",
+        f"{config.gateway_url}/",
         headers=headers,
         timeout=10,
     )
@@ -58,32 +58,30 @@ def test_gateway_header_based_routing(sandbox_context):
     assert resp.status_code != 401, f"Gateway 401: access token mismatch for sandbox {sandbox_id}"
 
 
-def test_gateway_host_based_routing(sandbox_context):
+def test_gateway_host_based_routing(sandbox_context, config):
     """Test routing via native E2B host header format: {port}-{sandboxID}.{domain}."""
     sandbox: Sandbox = sandbox_context.add(Sandbox.create(
-        template="code-interpreter",
+        template=config.templates.code_interpreter,
         timeout=120,
         headers={
             "x-request-id": sandbox_context.request_id
         }
     ))
     sandbox_id = sandbox.sandbox_id
-    print(f"sandbox-id: {sandbox_id}")
+    logger.info("sandbox-id: %s", sandbox_id)
 
     # Wait for gateway registry to sync
     time.sleep(3)
 
-    # Retrieve access token for authentication
     access_token = get_sandbox_access_token(sandbox_id)
 
-    # Native E2B host format: {port}-{namespace}--{name}.example.com
-    host = f"49983-{sandbox_id}.example.com"
+    host = f"49983-{sandbox_id}.{config.e2b_domain}"
     headers = {"Host": host}
     if access_token:
         headers["X-Access-Token"] = access_token
 
     resp = requests.get(
-        f"{GATEWAY_URL}/",
+        f"{config.gateway_url}/",
         headers=headers,
         timeout=10,
     )
