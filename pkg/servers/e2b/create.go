@@ -265,6 +265,9 @@ func (sc *Controller) parseCreateSandboxRequest(r *http.Request) (models.NewSand
 			Message: fmt.Sprintf("Bad extension param: %s", err.Error()),
 		}
 	}
+	if apiErr := validateSandboxNetwork(request.Network); apiErr != nil {
+		return request, apiErr
+	}
 
 	for k := range request.Metadata {
 		if errLists := validation.IsQualifiedName(k); len(errLists) > 0 {
@@ -331,6 +334,13 @@ func (sc *Controller) basicSandboxCreateModifier(ctx context.Context, sbx infra.
 	}
 	for k, v := range request.Metadata {
 		annotations[k] = v
+	}
+	if request.Network != nil || request.AllowInternetAccess != nil {
+		if raw, err := marshalSandboxNetworkState(networkStateFromCreateRequest(request)); err != nil {
+			log.Error(err, "failed to marshal sandbox network configuration")
+		} else {
+			annotations[agentsv1alpha1.AnnotationNetworkConfig] = raw
+		}
 	}
 	if request.Extensions.ReturnPodIP {
 		annotations[models.ExtensionKeyReturnPodIP] = agentsv1alpha1.True

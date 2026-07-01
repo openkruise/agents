@@ -32,31 +32,62 @@ const (
 
 // Sandbox represents an E2B sandbox running as a Kubernetes Pod
 type Sandbox struct {
-	TemplateID      string            `json:"templateID"`
-	SandboxID       string            `json:"sandboxID"`
-	ClientID        string            `json:"clientID"`
-	StartedAt       string            `json:"startedAt"`
-	EndAt           string            `json:"endAt"`
-	EnvdVersion     string            `json:"envdVersion"`
-	EnvdAccessToken string            `json:"envdAccessToken,omitempty"`
-	Domain          string            `json:"domain"`
-	CPUCount        int64             `json:"cpuCount"`
-	MemoryMB        int64             `json:"memoryMB"`
-	DiskSizeMB      int64             `json:"diskSizeMB"`
-	Alias           string            `json:"alias"`
-	Metadata        map[string]string `json:"metadata"`
-	State           string            `json:"state"`
+	TemplateID          string            `json:"templateID"`
+	SandboxID           string            `json:"sandboxID"`
+	ClientID            string            `json:"clientID"`
+	StartedAt           string            `json:"startedAt"`
+	EndAt               string            `json:"endAt"`
+	EnvdVersion         string            `json:"envdVersion"`
+	EnvdAccessToken     string            `json:"envdAccessToken,omitempty"`
+	Domain              string            `json:"domain"`
+	CPUCount            int64             `json:"cpuCount"`
+	MemoryMB            int64             `json:"memoryMB"`
+	DiskSizeMB          int64             `json:"diskSizeMB"`
+	Alias               string            `json:"alias"`
+	Metadata            map[string]string `json:"metadata"`
+	State               string            `json:"state"`
+	AllowInternetAccess bool              `json:"allowInternetAccess"`
+	Network             *SandboxNetwork   `json:"network,omitempty"`
 }
 
 // NewSandboxRequest represents a request to create a new sandbox
 type NewSandboxRequest struct {
-	TemplateID string            `json:"templateID"`
-	Timeout    int               `json:"timeout,omitempty"`
-	AutoPause  bool              `json:"autoPause,omitempty"`
-	Metadata   map[string]string `json:"metadata,omitempty"`
-	EnvVars    EnvVars           `json:"envVars,omitempty"`
+	TemplateID          string            `json:"templateID"`
+	Timeout             int               `json:"timeout,omitempty"`
+	AutoPause           bool              `json:"autoPause,omitempty"`
+	Metadata            map[string]string `json:"metadata,omitempty"`
+	EnvVars             EnvVars           `json:"envVars,omitempty"`
+	AllowInternetAccess *bool             `json:"allow_internet_access,omitempty"`
+	Network             *SandboxNetwork   `json:"network,omitempty"`
 
 	Extensions NewSandboxRequestExtension `json:"-"`
+}
+
+// SandboxNetwork contains the E2B-compatible egress and public ingress
+// configuration for a sandbox.
+type SandboxNetwork struct {
+	AllowOut           []string                        `json:"allowOut,omitempty"`
+	DenyOut            []string                        `json:"denyOut,omitempty"`
+	Rules              map[string][]SandboxNetworkRule `json:"rules,omitempty"`
+	AllowPublicTraffic *bool                           `json:"allowPublicTraffic,omitempty"`
+	MaskRequestHost    string                          `json:"maskRequestHost,omitempty"`
+}
+
+type SandboxNetworkRule struct {
+	Transform *SandboxNetworkTransform `json:"transform,omitempty"`
+}
+
+type SandboxNetworkTransform struct {
+	Headers map[string]string `json:"headers,omitempty"`
+}
+
+// UpdateSandboxNetworkRequest replaces the mutable egress configuration.
+// Public traffic and request-host masking are configured only at creation.
+type UpdateSandboxNetworkRequest struct {
+	AllowOut            []string                        `json:"allowOut,omitempty"`
+	DenyOut             []string                        `json:"denyOut,omitempty"`
+	Rules               map[string][]SandboxNetworkRule `json:"rules,omitempty"`
+	AllowInternetAccess *bool                           `json:"allow_internet_access,omitempty"`
 }
 
 type NewSandboxRequestExtension struct {
