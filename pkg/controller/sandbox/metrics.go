@@ -17,7 +17,6 @@ limitations under the License.
 package sandbox
 
 import (
-	"strings"
 	"sync"
 	"time"
 
@@ -306,6 +305,10 @@ var (
 		agentsv1alpha1.SandboxFailed,
 		agentsv1alpha1.SandboxTerminating,
 	}
+
+	// abnormalTypes enumerates all possible sandbox_status_abnormal type label values.
+	// Used for O(1) cleanup in DeleteSandboxMetrics instead of O(N) Range scan.
+	abnormalTypes = []string{"pause_incomplete", "resume_incomplete"}
 )
 
 // observedCreationToReady tracks which sandboxes have had their creation-to-ready
@@ -699,20 +702,15 @@ func DeleteSandboxMetrics(namespace, name string) {
 	reuseStartTimes.Delete(key)
 	observedReuseDurations.Delete(key)
 
-	// Clean up abnormal start-time tracking.
-	// Use prefix matching to catch all types/containers for this sandbox.
-	abnormalStartTimes.Range(func(k, _ any) bool {
-		if s, ok := k.(string); ok && strings.HasPrefix(s, key+"/") {
-			abnormalStartTimes.Delete(k)
-		}
-		return true
-	})
-	runtimeContainerAbnormalStartTimes.Range(func(k, _ any) bool {
-		if s, ok := k.(string); ok && strings.HasPrefix(s, key+"/") {
-			runtimeContainerAbnormalStartTimes.Delete(k)
-		}
-		return true
-	})
+	// Clean up abnormal start-time tracking with O(1) direct deletes.
+	// The set of possible types and container names is fixed and small,
+	// so we avoid an O(N) Range scan across all sandboxes' entries.
+	for _, t := range abnormalTypes {
+		abnormalStartTimes.Delete(key + "/" + t)
+	}
+	for _, c := range sidecarutils.RuntimeContainerNames.List() {
+		runtimeContainerAbnormalStartTimes.Delete(key + "/" + c)
+	}
 }
 
 // setAbnormalTimeMetric manages the abnormal gauge and its _time companion.
