@@ -25,6 +25,6 @@ jobs:
           password: ${{ secrets.HUB_KRUISE }}
       - name: Build the Docker image
         run: |
-          docker buildx create --use --platform=linux/amd64,linux/arm64 --name multi-platform-builder
+          docker buildx create --use --platform=linux/amd64,linux/arm64,linux/ppc64le --name multi-platform-builder
           docker buildx ls
-          CONTROLLER_IMG=openkruise/agent-sandbox-controller:${{ github.ref_name }} IMAGE_PLATFORMS=linux/amd64,linux/arm64 make docker-buildx-controller
+          CONTROLLER_IMG=openkruise/agent-sandbox-controller:${{ github.ref_name }} IMAGE_PLATFORMS=linux/amd64,linux/arm64,linux/ppc64le make docker-buildx-controller

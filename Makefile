@@ -32,7 +32,9 @@ endif
 # scaffolded by default. However, you might want to replace it to use other
 # tools. (i.e. podman)
 CONTAINER_TOOL ?= docker
-IMAGE_PLATFORMS ?= linux/amd64,linux/arm64
+IMAGE_PLATFORMS ?= linux/amd64,linux/arm64,linux/ppc64le
+# envoyproxy/envoy:contrib-v1.37.3 is published for amd64 and arm64 only.
+GATEWAY_IMAGE_PLATFORMS ?= linux/amd64,linux/arm64
 BUILDX_OUTPUT ?= --push
 
 # Setting SHELL to bash allows bash commands to be executed by recipes.
@@ -162,7 +164,7 @@ docker-build-sandbox-gateway: ## Build docker image for sandbox-gateway.
 
 .PHONY: docker-buildx-sandbox-gateway
 docker-buildx-sandbox-gateway: ## Build and push multi-platform docker image for sandbox-gateway.
-	$(CONTAINER_TOOL) buildx build --platform $(IMAGE_PLATFORMS) $(BUILDX_OUTPUT) -f dockerfiles/sandbox-gateway.Dockerfile -t ${GATEWAY_IMG} .
+	$(CONTAINER_TOOL) buildx build --platform $(GATEWAY_IMAGE_PLATFORMS) $(BUILDX_OUTPUT) -f dockerfiles/sandbox-gateway.Dockerfile -t ${GATEWAY_IMG} .
 
 .PHONY: build-traffic-extension
 build-traffic-extension: ## Build traffic-extension binary.

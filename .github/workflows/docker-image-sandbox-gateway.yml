@@ -25,6 +25,7 @@ jobs:
           password: ${{ secrets.HUB_KRUISE }}
       - name: Build the Docker image
         run: |
+          # envoyproxy/envoy:contrib-v1.37.3 is published for amd64 and arm64 only.
           docker buildx create --use --platform=linux/amd64,linux/arm64 --name multi-platform-builder
           docker buildx ls
-          GATEWAY_IMG=openkruise/sandbox-gateway:${{ github.ref_name }} IMAGE_PLATFORMS=linux/amd64,linux/arm64 make docker-buildx-sandbox-gateway
+          GATEWAY_IMG=openkruise/sandbox-gateway:${{ github.ref_name }} GATEWAY_IMAGE_PLATFORMS=linux/amd64,linux/arm64 make docker-buildx-sandbox-gateway
