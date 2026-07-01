@@ -640,6 +640,71 @@ func TestParseCreateSandboxRequest(t *testing.T) {
 		assert.Equal(t, http.StatusBadRequest, apiErr.Code)
 		assert.Contains(t, apiErr.Message, "timeout should between")
 	})
+
+	t.Run("timeout minimum floor", func(t *testing.T) {
+		tests := []struct {
+			name          string
+			timeout       int
+			metadata      map[string]string
+			expectError   string
+			expectTimeout int
+		}{
+			{
+				name:        "rejects timeout below create minimum without override",
+				timeout:     60,
+				expectError: "timeout should between 300 and",
+			},
+			{
+				name:    "allows positive timeout below create minimum with override",
+				timeout: 1,
+				metadata: map[string]string{
+					models.ExtensionKeySkipCreateTimeoutMin: agentsv1alpha1.True,
+				},
+				expectTimeout: 1,
+			},
+			{
+				name:    "rejects timeout above maximum even with override",
+				timeout: ctrl.maxTimeout + 1,
+				metadata: map[string]string{
+					models.ExtensionKeySkipCreateTimeoutMin: agentsv1alpha1.True,
+				},
+				expectError: "timeout should between 0 and",
+			},
+			{
+				name:    "rejects non-positive timeout with override",
+				timeout: -1,
+				metadata: map[string]string{
+					models.ExtensionKeySkipCreateTimeoutMin: agentsv1alpha1.True,
+				},
+				expectError: "timeout should between 0 and",
+			},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				raw, err := json.Marshal(models.NewSandboxRequest{
+					TemplateID: "t1",
+					Timeout:    tt.timeout,
+					Metadata:   tt.metadata,
+				})
+				require.NoError(t, err)
+				req := httptest.NewRequest(http.MethodPost, "/sandboxes", bytes.NewReader(raw))
+
+				got, apiErr := ctrl.parseCreateSandboxRequest(req)
+				if tt.expectError != "" {
+					require.NotNil(t, apiErr)
+					assert.Equal(t, http.StatusBadRequest, apiErr.Code)
+					assert.Contains(t, apiErr.Message, tt.expectError)
+					return
+				}
+
+				require.Nil(t, apiErr)
+				assert.Equal(t, tt.expectTimeout, got.Timeout)
+				_, exists := got.Metadata[models.ExtensionKeySkipCreateTimeoutMin]
+				assert.False(t, exists)
+			})
+		}
+	})
 }
 
 func TestMapInfraErrorToApiError(t *testing.T) {

@@ -8,7 +8,7 @@ from e2b_code_interpreter import Sandbox
 def test_read_write_file(sandbox_context):
     sbx: Sandbox = sandbox_context.add(Sandbox.create(
         template="code-interpreter",
-        timeout=30,
+        timeout=300,
         metadata={"test_case": "test_read_write_file"},
         headers={
             "x-request-id": sandbox_context.request_id
@@ -25,7 +25,7 @@ def test_read_write_file(sandbox_context):
 def test_read_write_multifile(sandbox_context):
     sbx: Sandbox = sandbox_context.add(Sandbox.create(
         template="code-interpreter",
-        timeout=30,
+        timeout=300,
         metadata={"test_case": "test_read_write_multifile"},
         headers={
             "x-request-id": sandbox_context.request_id

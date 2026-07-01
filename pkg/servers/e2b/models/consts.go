@@ -17,9 +17,9 @@ limitations under the License.
 package models
 
 const (
-	DefaultMaxTimeout        = 2592000 // 30 days
-	DefaultMinTimeoutSeconds = 30
-	DefaultTimeoutSeconds    = 300
+	DefaultMaxTimeout              = 2592000 // 30 days
+	DefaultMinCreateTimeoutSeconds = 300
+	DefaultTimeoutSeconds          = 300
 	// DefaultMinResumeTimeoutSeconds floors Connect/Resume requests that
 	// trigger Resume on a Paused sandbox, so the placeholder cannot expire
 	// mid-Resume. Tune via --e2b-min-resume-timeout.

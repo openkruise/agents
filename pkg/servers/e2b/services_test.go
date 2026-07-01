@@ -119,7 +119,7 @@ func TestCreateSandbox(t *testing.T) {
 			userName:  "test-user",
 			request: models.NewSandboxRequest{
 				TemplateID: templateName,
-				Timeout:    30,
+				Timeout:    models.DefaultMinCreateTimeoutSeconds,
 			},
 		},
 		{
@@ -141,7 +141,7 @@ func TestCreateSandbox(t *testing.T) {
 			},
 			expectError: &web.ApiError{
 				Code:    400,
-				Message: "timeout should between 30 and 2592000",
+				Message: "timeout should between 300 and 2592000",
 			},
 		},
 		{
@@ -154,7 +154,7 @@ func TestCreateSandbox(t *testing.T) {
 			},
 			expectError: &web.ApiError{
 				Code:    400,
-				Message: "timeout should between 30 and 2592000",
+				Message: "timeout should between 300 and 2592000",
 			},
 		},
 		{
@@ -953,7 +953,7 @@ func TestCloneSandbox(t *testing.T) {
 			},
 			expectError: &web.ApiError{
 				Code:    400,
-				Message: "timeout should between 30 and 2592000",
+				Message: "timeout should between 300 and 2592000",
 			},
 		},
 		{

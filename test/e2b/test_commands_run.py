@@ -36,7 +36,7 @@ def test_commands_run(sandbox_context):
     """Test basic shell command execution"""
     sbx: Sandbox = sandbox_context.add(Sandbox.create(
         template="code-interpreter",
-        timeout=30,
+        timeout=300,
         metadata={"test_case": "test_commands_run"},
         headers={
             "x-request-id": sandbox_context.request_id
@@ -67,7 +67,7 @@ def test_commands_run_error_handling(sandbox_context):
     """Test error handling for invalid commands"""
     sbx: Sandbox = sandbox_context.add(Sandbox.create(
         template="code-interpreter",
-        timeout=30,
+        timeout=300,
         metadata={"test_case": "test_commands_run_error_handling"},
         headers={
             "x-request-id": sandbox_context.request_id
@@ -95,7 +95,7 @@ def test_commands_background_execution(sandbox_context):
     """Test background command execution and killing"""
     sbx: Sandbox = sandbox_context.add(Sandbox.create(
         template="code-interpreter",
-        timeout=30,
+        timeout=300,
         metadata={"test_case": "test_commands_background_execution"},
         headers={
             "x-request-id": sandbox_context.request_id
@@ -126,7 +126,7 @@ def test_commands_realtime_callbacks(sandbox_context):
     """Test real-time output callbacks"""
     sbx: Sandbox = sandbox_context.add(Sandbox.create(
         template="code-interpreter",
-        timeout=30,
+        timeout=300,
         metadata={"test_case": "test_commands_realtime_callbacks"},
         headers={
             "x-request-id": sandbox_context.request_id

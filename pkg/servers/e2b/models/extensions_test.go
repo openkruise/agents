@@ -190,6 +190,17 @@ func TestParseExtensions(t *testing.T) {
 			},
 		},
 		{
+			name: "skip create timeout min == true",
+			metadata: map[string]string{
+				ExtensionKeySkipCreateTimeoutMin: v1alpha1.True,
+			},
+			wantErr: false,
+			expectExtension: NewSandboxRequestExtension{
+				CreateOnNoStock:      true,
+				SkipCreateTimeoutMin: true,
+			},
+		},
+		{
 			name: "invalid image extension",
 			metadata: map[string]string{
 				ExtensionKeyClaimWithImage: "invalid:image:name",
