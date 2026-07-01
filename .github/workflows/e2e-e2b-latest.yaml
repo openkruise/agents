@@ -156,6 +156,7 @@ jobs:
           else
             export E2B_API_KEY=some-api-key
           fi
+          export INPLACE_UPDATE_IMAGE="${INPLACE_UPDATE_IMG}"
           args=()
           if [ "${{ matrix.with_gateway }}" = "true" ]; then
             args+=(--with-gateway)
@@ -163,4 +164,4 @@ jobs:
           if [ "${{ matrix.e2b_enable_auth }}" = "false" ]; then
             args+=(--auth-disabled)
           fi
-          bash hack/run-e2b-e2e-test.sh "${args[@]}"
+          bash hack/run-e2b-e2e-test.sh "${args[@]}" --pytest-extra-args "-s -x"
