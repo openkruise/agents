@@ -159,6 +159,57 @@ func TestReconcile_CommitPhasePending_PodNotFound(t *testing.T) {
 	}
 }
 
+func TestReconcile_CommitPhasePending_PodDeleting(t *testing.T) {
+	now := metav1.Now()
+	commit := newCommit("test-commit", "default", agentsv1alpha1.CommitPhasePending)
+	commit.Finalizers = []string{agentsv1alpha1.CommitFinalizer}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "test-pod",
+			Namespace:         "default",
+			DeletionTimestamp: &now,
+			Finalizers:        []string{"test-finalizer"},
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	r, mock := newTestReconciler(commit, pod)
+
+	_, err := r.Reconcile(context.TODO(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-commit", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if mock.runningCalled {
+		t.Error("EnsureCommitRunning should not be called when pod is deleting")
+	}
+
+	updated := &agentsv1alpha1.Commit{}
+	_ = r.Get(context.TODO(), client.ObjectKey{Name: "test-commit", Namespace: "default"}, updated)
+	if updated.Status.Phase != agentsv1alpha1.CommitPhaseFailed {
+		t.Errorf("expected Failed phase, got %s", updated.Status.Phase)
+	}
+}
+
+func TestReconcile_CommitDeleting_NoCommitID(t *testing.T) {
+	now := metav1.Now()
+	commit := newCommit("test-commit", "default", agentsv1alpha1.CommitPhaseRunning)
+	// CommitID is empty — commit never reached Running via provider
+	commit.DeletionTimestamp = &now
+	commit.Finalizers = []string{agentsv1alpha1.CommitFinalizer}
+	r, mock := newTestReconciler(commit)
+
+	_, err := r.Reconcile(context.TODO(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-commit", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if mock.deletedCalled {
+		t.Error("EnsureCommitDeleted should NOT be called when CommitID is empty")
+	}
+}
+
 func TestReconcile_CommitPhasePending_PodExists(t *testing.T) {
 	commit := newCommit("test-commit", "default", agentsv1alpha1.CommitPhasePending)
 	commit.Finalizers = []string{agentsv1alpha1.CommitFinalizer}
@@ -204,6 +255,7 @@ func TestReconcile_CommitPhaseRunning(t *testing.T) {
 func TestReconcile_CommitDeleting(t *testing.T) {
 	now := metav1.Now()
 	commit := newCommit("test-commit", "default", agentsv1alpha1.CommitPhaseRunning)
+	commit.Status.CommitID = "cm-test-123"
 	commit.DeletionTimestamp = &now
 	commit.Finalizers = []string{agentsv1alpha1.CommitFinalizer}
 	r, mock := newTestReconciler(commit)

@@ -213,6 +213,17 @@ func (r *CommitReconciler) handleCommitDelete(ctx context.Context, args *core.En
 	log := log.FromContext(ctx)
 	commit := args.Commit
 	log.V(3).Info("handleCommitDelete", "commit", klog.KObj(commit), "commitID", commit.Status.CommitID, "uid", commit.UID)
+
+	// If commit never reached Running (no CommitID), just remove finalizer without
+	// calling the provider to delete a non-existent remote resource.
+	if commit.Status.CommitID == "" {
+		log.Info("Commit has no commitID, just remove finalizer", "commit", klog.KObj(commit))
+		if _, err := utils.PatchFinalizer(ctx, r.Client, commit, utils.RemoveFinalizerOpType, agentsv1alpha1.CommitFinalizer); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil
+	}
+
 	requeueAfter, err := control.EnsureCommitDeleted(ctx, args)
 	if err != nil {
 		log.Error(err, "handleCommitDelete failed", "commit", klog.KObj(commit))
@@ -223,11 +234,11 @@ func (r *CommitReconciler) handleCommitDelete(ctx context.Context, args *core.En
 
 func (r *CommitReconciler) handleCommitPending(ctx context.Context, args *core.EnsureFuncArgs, control core.CommitControl) (ctrl.Result, error) {
 	commit := args.Commit
-	if args.Pod == nil {
+	if args.Pod == nil || !args.Pod.DeletionTimestamp.IsZero() {
 		now := metav1.Now()
 		args.NewStatus.Phase = agentsv1alpha1.CommitPhaseFailed
 		args.NewStatus.CompletionTime = &now
-		r.Recorder.Eventf(commit, corev1.EventTypeWarning, "PodNotFound", "Target pod %s not found", commit.Spec.PodName)
+		r.Recorder.Eventf(commit, corev1.EventTypeWarning, "PodNotFound", "Target pod %s not found or deleting", commit.Spec.PodName)
 		return ctrl.Result{}, r.updateCommitStatus(ctx, *args.NewStatus, commit)
 	}
 	return r.ensureAndApply(ctx, args, control.EnsureCommitRunning)
