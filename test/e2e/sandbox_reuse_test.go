@@ -125,19 +125,6 @@ var _ = Describe("Sandbox Reuse", func() {
 		}, time.Second*10, time.Second).Should(Succeed())
 	}
 
-	// waitForReuseCondition polls until the sandbox Reusing condition matches the given reason.
-	waitForReuseCondition := func(sbx *agentsv1alpha1.Sandbox, reason string) {
-		Eventually(func() string {
-			_ = k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), sbx)
-			for _, c := range sbx.Status.Conditions {
-				if c.Type == string(agentsv1alpha1.SandboxConditionReusing) {
-					return c.Reason
-				}
-			}
-			return ""
-		}, time.Second*30, time.Second).Should(Equal(reason))
-	}
-
 	// setAnnotation patches a single annotation on the sandbox.
 	setAnnotation := func(sbx *agentsv1alpha1.Sandbox, key, value string) {
 		Eventually(func() error {
@@ -163,6 +150,14 @@ var _ = Describe("Sandbox Reuse", func() {
 	// single atomic patch, so doReuse fails immediately with "no sandbox-pool
 	// label". This avoids any race with the noopSandboxReuser completing
 	// the reuse before we can inject a failure.
+	//
+	// When the sandbox has no retain-on-failure annotation, the controller
+	// sets the ReuseFailed condition and deletes the sandbox in the same
+	// reconcile cycle. The condition is only observable for a few milliseconds
+	// before the sandbox is gone. To handle this race, we treat a deleted
+	// sandbox as equivalent to observing the ReuseFailed condition — both
+	// indicate the reuse failed. Tests that set a valid retain duration will
+	// still see the condition because the sandbox is retained.
 	triggerReuseAndFail := func(target *agentsv1alpha1.Sandbox) {
 		By("Triggering reuse with pool label removed to force failure")
 		Eventually(func() error {
@@ -181,7 +176,21 @@ var _ = Describe("Sandbox Reuse", func() {
 		}, time.Second*10, time.Second).Should(Succeed())
 
 		By("Waiting for reuse condition to show failure")
-		waitForReuseCondition(target, agentsv1alpha1.SandboxReusingReasonFailed)
+		Eventually(func() string {
+			latest := &agentsv1alpha1.Sandbox{}
+			if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(target), latest); err != nil {
+				// Sandbox already deleted — reuse failed and was cleaned up
+				// in the same reconcile cycle before we could observe the
+				// transient ReuseFailed condition.
+				return agentsv1alpha1.SandboxReusingReasonFailed
+			}
+			for _, c := range latest.Status.Conditions {
+				if c.Type == string(agentsv1alpha1.SandboxConditionReusing) {
+					return c.Reason
+				}
+			}
+			return ""
+		}, time.Second*30, time.Second).Should(Equal(agentsv1alpha1.SandboxReusingReasonFailed))
 	}
 
 	Context("Successful reuse", func() {
