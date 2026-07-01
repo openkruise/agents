@@ -19,6 +19,7 @@ MANAGER_IMG ?= sandbox-manager:latest
 RUNTIME_IMG ?= agent-runtime:latest
 GATEWAY_IMG ?= $(GATEWAY_PLUGIN_NAME):latest
 TRAFFIX_EXTENSION_IMG ?= traffic-extension:latest
+PLATFORMS ?= linux/amd64,linux/arm64
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -127,13 +128,37 @@ lint-config: golangci-lint ## Verify golangci-lint linter configuration
 docker-build-controller: ## Build docker image for agent-sandbox-controller.
 	docker build -f dockerfiles/agent-sandbox-controller.Dockerfile -t ${CONTROLLER_IMG} .
 
+.PHONY: docker-buildx-controller
+docker-buildx-controller: ## Build multi-platform docker image for agent-sandbox-controller.
+	docker buildx build --platform=$(PLATFORMS) -f dockerfiles/agent-sandbox-controller.Dockerfile -t ${CONTROLLER_IMG} .
+
+.PHONY: docker-pushx-controller
+docker-pushx-controller: ## Build and push multi-platform docker image for agent-sandbox-controller.
+	docker buildx build --platform=$(PLATFORMS) -f dockerfiles/agent-sandbox-controller.Dockerfile -t ${CONTROLLER_IMG} --push .
+
 .PHONY: docker-build-manager
 docker-build-manager: ## Build docker image for sandbox-manager.
 	docker build -f dockerfiles/sandbox-manager.Dockerfile -t ${MANAGER_IMG} .
 
+.PHONY: docker-buildx-manager
+docker-buildx-manager: ## Build multi-platform docker image for sandbox-manager.
+	docker buildx build --platform=$(PLATFORMS) -f dockerfiles/sandbox-manager.Dockerfile -t ${MANAGER_IMG} .
+
+.PHONY: docker-pushx-manager
+docker-pushx-manager: ## Build and push multi-platform docker image for sandbox-manager.
+	docker buildx build --platform=$(PLATFORMS) -f dockerfiles/sandbox-manager.Dockerfile -t ${MANAGER_IMG} --push .
+
 .PHONY: docker-build-runtime
 docker-build-runtime: ## Build docker image for agent-runtime.
 	docker build -f dockerfiles/agent-runtime.Dockerfile -t ${RUNTIME_IMG} .
+
+.PHONY: docker-buildx-runtime
+docker-buildx-runtime: ## Build multi-platform docker image for agent-runtime.
+	docker buildx build --platform=$(PLATFORMS) -f dockerfiles/agent-runtime.Dockerfile -t ${RUNTIME_IMG} .
+
+.PHONY: docker-pushx-runtime
+docker-pushx-runtime: ## Build and push multi-platform docker image for agent-runtime.
+	docker buildx build --platform=$(PLATFORMS) -f dockerfiles/agent-runtime.Dockerfile -t ${RUNTIME_IMG} --push .
 
 .PHONY: build-sandbox-gateway
 build-sandbox-gateway: ## Build sandbox-gateway plugin binary.
@@ -142,6 +167,14 @@ build-sandbox-gateway: ## Build sandbox-gateway plugin binary.
 .PHONY: docker-build-sandbox-gateway
 docker-build-sandbox-gateway: ## Build docker image for sandbox-gateway.
 	docker build -f dockerfiles/sandbox-gateway.Dockerfile -t ${GATEWAY_IMG} .
+
+.PHONY: docker-buildx-sandbox-gateway
+docker-buildx-sandbox-gateway: ## Build multi-platform docker image for sandbox-gateway.
+	docker buildx build --platform=$(PLATFORMS) -f dockerfiles/sandbox-gateway.Dockerfile -t ${GATEWAY_IMG} .
+
+.PHONY: docker-pushx-sandbox-gateway
+docker-pushx-sandbox-gateway: ## Build and push multi-platform docker image for sandbox-gateway.
+	docker buildx build --platform=$(PLATFORMS) -f dockerfiles/sandbox-gateway.Dockerfile -t ${GATEWAY_IMG} --push .
 
 .PHONY: build-traffic-extension
 build-traffic-extension: ## Build traffic-extension binary.
@@ -158,6 +191,14 @@ build-storage-cli: ## Build sandbox-runtime-storage (storage-cli) binary with ve
 .PHONY: docker-build-traffic-extension
 docker-build-traffic-extension: ## Build docker image for traffic-extension.
 	docker build -f dockerfiles/traffic-extension.Dockerfile -t ${TRAFFIX_EXTENSION_IMG} .
+
+.PHONY: docker-buildx-traffic-extension
+docker-buildx-traffic-extension: ## Build multi-platform docker image for traffic-extension.
+	docker buildx build --platform=$(PLATFORMS) -f dockerfiles/traffic-extension.Dockerfile -t ${TRAFFIX_EXTENSION_IMG} .
+
+.PHONY: docker-pushx-traffic-extension
+docker-pushx-traffic-extension: ## Build and push multi-platform docker image for traffic-extension.
+	docker buildx build --platform=$(PLATFORMS) -f dockerfiles/traffic-extension.Dockerfile -t ${TRAFFIX_EXTENSION_IMG} --push .
 
 ifndef ignore-not-found
   ignore-not-found = false
