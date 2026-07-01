@@ -32,6 +32,8 @@ endif
 # scaffolded by default. However, you might want to replace it to use other
 # tools. (i.e. podman)
 CONTAINER_TOOL ?= docker
+IMAGE_PLATFORMS ?= linux/amd64,linux/arm64
+BUILDX_OUTPUT ?= --push
 
 # Setting SHELL to bash allows bash commands to be executed by recipes.
 # Options are set to exit when a recipe line exits non-zero or a piped command fails.
@@ -125,15 +127,30 @@ lint-config: golangci-lint ## Verify golangci-lint linter configuration
 
 .PHONY: docker-build-controller
 docker-build-controller: ## Build docker image for agent-sandbox-controller.
-	docker build -f dockerfiles/agent-sandbox-controller.Dockerfile -t ${CONTROLLER_IMG} .
+	$(CONTAINER_TOOL) build -f dockerfiles/agent-sandbox-controller.Dockerfile -t ${CONTROLLER_IMG} .
+
+.PHONY: docker-buildx
+docker-buildx: docker-buildx-controller ## Build and push multi-platform docker image for agent-sandbox-controller.
+
+.PHONY: docker-buildx-controller
+docker-buildx-controller: ## Build and push multi-platform docker image for agent-sandbox-controller.
+	$(CONTAINER_TOOL) buildx build --platform $(IMAGE_PLATFORMS) $(BUILDX_OUTPUT) -f dockerfiles/agent-sandbox-controller.Dockerfile -t ${CONTROLLER_IMG} .
 
 .PHONY: docker-build-manager
 docker-build-manager: ## Build docker image for sandbox-manager.
-	docker build -f dockerfiles/sandbox-manager.Dockerfile -t ${MANAGER_IMG} .
+	$(CONTAINER_TOOL) build -f dockerfiles/sandbox-manager.Dockerfile -t ${MANAGER_IMG} .
+
+.PHONY: docker-buildx-manager
+docker-buildx-manager: ## Build and push multi-platform docker image for sandbox-manager.
+	$(CONTAINER_TOOL) buildx build --platform $(IMAGE_PLATFORMS) $(BUILDX_OUTPUT) -f dockerfiles/sandbox-manager.Dockerfile -t ${MANAGER_IMG} .
 
 .PHONY: docker-build-runtime
 docker-build-runtime: ## Build docker image for agent-runtime.
-	docker build -f dockerfiles/agent-runtime.Dockerfile -t ${RUNTIME_IMG} .
+	$(CONTAINER_TOOL) build -f dockerfiles/agent-runtime.Dockerfile -t ${RUNTIME_IMG} .
+
+.PHONY: docker-buildx-runtime
+docker-buildx-runtime: ## Build and push multi-platform docker image for agent-runtime.
+	$(CONTAINER_TOOL) buildx build --platform $(IMAGE_PLATFORMS) $(BUILDX_OUTPUT) -f dockerfiles/agent-runtime.Dockerfile -t ${RUNTIME_IMG} .
 
 .PHONY: build-sandbox-gateway
 build-sandbox-gateway: ## Build sandbox-gateway plugin binary.
@@ -141,7 +158,11 @@ build-sandbox-gateway: ## Build sandbox-gateway plugin binary.
 
 .PHONY: docker-build-sandbox-gateway
 docker-build-sandbox-gateway: ## Build docker image for sandbox-gateway.
-	docker build -f dockerfiles/sandbox-gateway.Dockerfile -t ${GATEWAY_IMG} .
+	$(CONTAINER_TOOL) build -f dockerfiles/sandbox-gateway.Dockerfile -t ${GATEWAY_IMG} .
+
+.PHONY: docker-buildx-sandbox-gateway
+docker-buildx-sandbox-gateway: ## Build and push multi-platform docker image for sandbox-gateway.
+	$(CONTAINER_TOOL) buildx build --platform $(IMAGE_PLATFORMS) $(BUILDX_OUTPUT) -f dockerfiles/sandbox-gateway.Dockerfile -t ${GATEWAY_IMG} .
 
 .PHONY: build-traffic-extension
 build-traffic-extension: ## Build traffic-extension binary.
@@ -157,7 +178,11 @@ build-storage-cli: ## Build sandbox-runtime-storage (storage-cli) binary with ve
 
 .PHONY: docker-build-traffic-extension
 docker-build-traffic-extension: ## Build docker image for traffic-extension.
-	docker build -f dockerfiles/traffic-extension.Dockerfile -t ${TRAFFIX_EXTENSION_IMG} .
+	$(CONTAINER_TOOL) build -f dockerfiles/traffic-extension.Dockerfile -t ${TRAFFIX_EXTENSION_IMG} .
+
+.PHONY: docker-buildx-traffic-extension
+docker-buildx-traffic-extension: ## Build and push multi-platform docker image for traffic-extension.
+	$(CONTAINER_TOOL) buildx build --platform $(IMAGE_PLATFORMS) $(BUILDX_OUTPUT) -f dockerfiles/traffic-extension.Dockerfile -t ${TRAFFIX_EXTENSION_IMG} .
 
 ifndef ignore-not-found
   ignore-not-found = false
