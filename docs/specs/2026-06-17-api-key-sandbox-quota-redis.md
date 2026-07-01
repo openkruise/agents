@@ -442,14 +442,15 @@ idempotent, safe to overlap):
    in fact exists, the bidirectional anti-drift (§6.4.2) releases the leaked entry; if a live CR does exist, the
    charge was correct. The trade is a bounded **under-sell** (over-rejection), never an over-sell.
 
-   **Reserved failed sandbox (positive `ReserveFailedSandboxFor`).** When the create *succeeds* (CR persisted,
-   lockstring stamped) but a post-lock step fails (waitReady / initRuntime / csi), the cleanup path may
-   **reserve** the failed sandbox for a configurable retention window (default 30 min) before delayed deletion,
-   preserving it for diagnosis. In this case the sandbox is `IsLiveForQuota` (no `DeletionTimestamp`, not
-   `Terminating`), carries a valid `AnnotationLock`, and **intentionally continues to occupy its quota slot for
-   the entire retention duration**. The charge is **not released** on this path — it accurately reflects a live
-   CR. The slot is freed only when the retention timer fires, deletion is requested, and the sandbox enters
-   `Terminating` (at which point the leader event handler or anti-drift releases the entry, path 3/4).
+   **Reserved failed sandbox (`ReserveFailedSandboxFor` configured to retain).** When the create *succeeds* (CR
+   persisted, lockstring stamped) but a post-lock step fails (waitReady / initRuntime / csi), the cleanup path may
+   **reserve** the failed sandbox before delayed deletion, preserving it for diagnosis. In this case the sandbox is
+   `IsLiveForQuota` (no `DeletionTimestamp`, not `Terminating`), carries a valid `AnnotationLock`, and
+   **intentionally continues to occupy its quota slot while it is retained**. The charge is **not released** on this
+   path — it accurately reflects a live CR. If the failed sandbox is not retained and cleanup successfully requests
+   deletion, the charge is released by the request path. A retained slot is freed only when deletion is requested and
+   the sandbox enters `Terminating` (at which point the request path, leader event handler, or anti-drift releases the
+   entry).
 
    Because the outer retry loop may `Acquire` a new slot for the next attempt, a single user request can
    transiently hold **multiple** quota slots (one per reserved failed sandbox plus the eventual success). This is
@@ -659,10 +660,11 @@ owner-K CRs (by lockstring), each with the correct footprint and scope membershi
   only healthy-state transient is a bounded **under-sell** (over-rejection): an ambiguous failed create that
   charged but produced no CR holds a leaked entry until anti-drift releases it.
 - **Reserved failed sandbox under-sell (§6.4 path 1).** A create that succeeds but whose post-lock step fails
-  with positive `ReserveFailedSandboxFor` holds its quota slot for the retention window. If the outer retry loop
+  holds its quota slot only when `ReserveFailedSandboxFor` retains the failed sandbox. If the outer retry loop
   succeeds, both the reserved failed sandbox and the successful sandbox occupy quota simultaneously — a bounded
-  under-sell (over-rejection for the same key), self-healing when the retention expires and deletion frees the
-  slot. Never an over-admission (each slot maps to a live CR). Bounded by `maxRetries × retention`.
+  under-sell (over-rejection for the same key), self-healing when deletion frees the retained sandbox. If the failed
+  sandbox is not retained and cleanup successfully requests deletion, the request path releases the slot. Never an
+  over-admission (each charged slot maps to a live CR).
 - **`running` scope via un-gated `resume` (§6.4.1):** a burst of resumes can push a `running` sum above its
   limit. The quota charge tracks the truth; the leader never drains; further creates charging that pair are
   rejected until it falls. Bounded by the number of paused sandboxes a key can resume; a **deliberately-accepted
