@@ -135,7 +135,7 @@ cat > "$OUTPUT_DIR/signing.conf" << EOF
 default_ca = CA_default
 
 [CA_default]
-dir = .
+dir = $OUTPUT_DIR
 database = \$dir/index.txt
 serial = \$dir/serial
 private_key = $OUTPUT_DIR/ca-privkey.pem
