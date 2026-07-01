@@ -118,6 +118,66 @@ func TestGetRouteFromSandbox(t *testing.T) {
 				AccessToken: "secret-token-123",
 			},
 		},
+		{
+			name: "sandbox with wake-on-traffic annotation",
+			sandbox: &v1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "wake-sandbox",
+					Namespace: "default",
+					Annotations: map[string]string{
+						v1alpha1.AnnotationWakeOnTraffic:     v1alpha1.True,
+						v1alpha1.AnnotationWakeTimeoutSeconds: "600",
+					},
+				},
+				Status: v1alpha1.SandboxStatus{
+					Phase: v1alpha1.SandboxRunning,
+					Conditions: []metav1.Condition{
+						{
+							Type:   string(v1alpha1.SandboxConditionReady),
+							Status: metav1.ConditionTrue,
+						},
+					},
+					PodInfo: v1alpha1.PodInfo{
+						PodIP: "10.0.0.4",
+					},
+				},
+			},
+			expectedRoute: Route{
+				IP:            "10.0.0.4",
+				ID:            "default--wake-sandbox",
+				Owner:         "",
+				State:         v1alpha1.SandboxStateRunning,
+				WakeOnTraffic: true,
+			},
+		},
+		{
+			name: "sandbox without wake-on-traffic annotation",
+			sandbox: &v1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "no-wake-sandbox",
+					Namespace: "default",
+				},
+				Status: v1alpha1.SandboxStatus{
+					Phase: v1alpha1.SandboxRunning,
+					Conditions: []metav1.Condition{
+						{
+							Type:   string(v1alpha1.SandboxConditionReady),
+							Status: metav1.ConditionTrue,
+						},
+					},
+					PodInfo: v1alpha1.PodInfo{
+						PodIP: "10.0.0.5",
+					},
+				},
+			},
+			expectedRoute: Route{
+				IP:            "10.0.0.5",
+				ID:            "default--no-wake-sandbox",
+				Owner:         "",
+				State:         v1alpha1.SandboxStateRunning,
+				WakeOnTraffic: false,
+			},
+		},
 	}
 
 	for _, tt := range tests {

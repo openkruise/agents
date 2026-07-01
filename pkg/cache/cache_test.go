@@ -1422,3 +1422,28 @@ func TestCache_GetCache_ReturnsManagerCache(t *testing.T) {
 	require.Equal(t, c.GetMockManager().GetCache(), c.GetCache(),
 		"GetCache must return the underlying manager's cache")
 }
+
+func TestBuildGatewayCacheConfig(t *testing.T) {
+	byObject := cache.BuildGatewayCacheConfig()
+	require.NotNil(t, byObject)
+
+	// Gateway cache should only contain Sandbox
+	assert.Len(t, byObject, 1, "gateway cache should have exactly 1 resource type")
+
+	// Verify Sandbox is present
+	sandboxCfg, ok := getConfigByType(byObject, &agentsv1alpha1.Sandbox{})
+	require.True(t, ok, "Sandbox should be in byObject")
+	assert.Nil(t, sandboxCfg.Namespaces, "Sandbox should have no namespace filter in gateway mode")
+	assert.Nil(t, sandboxCfg.Label, "Sandbox should have no label filter in gateway mode")
+
+	// Verify other types are NOT present
+	_, sbsOk := getConfigByType(byObject, &agentsv1alpha1.SandboxSet{})
+	assert.False(t, sbsOk, "SandboxSet should not be in gateway cache config")
+	_, cpOk := getConfigByType(byObject, &agentsv1alpha1.Checkpoint{})
+	assert.False(t, cpOk, "Checkpoint should not be in gateway cache config")
+	_, sbtOk := getConfigByType(byObject, &agentsv1alpha1.SandboxTemplate{})
+	assert.False(t, sbtOk, "SandboxTemplate should not be in gateway cache config")
+	_, pvOk := getConfigByType(byObject, &corev1.PersistentVolume{})
+	assert.False(t, pvOk, "PersistentVolume should not be in gateway cache config")
+}
+

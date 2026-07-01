@@ -196,6 +196,19 @@ if [ "$WITH_GATEWAY" = "true" ]; then
 
     # Port-forward gateway as unified entry point (80 -> 7788, which targets Envoy :10000)
     sudo -E kubectl port-forward svc/sandbox-gateway 80:7788 -n sandbox-system &
+    PF_PID=$!
+
+    # Keep-alive: send periodic requests through the port-forward to prevent
+    # the TCP tunnel from going idle and being dropped by the network layer.
+    # This is especially important for long-running tests (e.g., wake-on-traffic
+    # which waits for auto-pause).
+    (
+        while kill -0 "$PF_PID" 2>/dev/null; do
+            sleep 15
+            curl -s -o /dev/null --max-time 5 http://localhost:80/kruise/api/v2/sandboxes 2>/dev/null || true
+        done
+    ) &
+    KEEPALIVE_PID=$!
 else
     # Port-forward sandbox-manager directly
     sudo -E kubectl port-forward svc/sandbox-manager 80:7788 -n sandbox-system &
@@ -254,12 +267,16 @@ else
     sleep 5
 fi
 
-# Run pytest with serial execution (no parallel flag)
+# Run pytest with serial execution (no parallel flag).
+# NOTE: do NOT use -x (stop-on-first-failure) because a flaky test (e.g.
+# test_run_code timeout) would prevent later tests like test_wake_on_traffic
+# from running, masking regressions in the feature under test.
 cd "$PROJECT_ROOT"
-pytest_args=(-v -s -x --tb=short)
+pytest_args=(-v -s --tb=short)
 if [ "$WITH_GATEWAY" != "true" ]; then
     pytest_args+=(--ignore="$TEST_DIR/test_gateway.py")
     pytest_args+=(--ignore="$TEST_DIR/test_gateway_auth.py")
+    pytest_args+=(--ignore="$TEST_DIR/test_wake_on_traffic.py")
 fi
 if [ "$AUTH_DISABLED" = "true" ]; then
     pytest_args+=(--ignore="$TEST_DIR/test_apikey.py")
@@ -271,6 +288,17 @@ set +x
 
 if [ "$retVal" -ne 0 ]; then
     echo "Tests failed"
+
+    # Dump sandbox-gateway pod logs on failure for debugging wake-on-traffic
+    # and other gateway issues. The gateway runs Envoy + Go filter, and its
+    # logs are not captured otherwise.
+    if [ "$WITH_GATEWAY" = "true" ]; then
+        echo "=== sandbox-gateway pod logs (current) ==="
+        for gwPod in $(kubectl get pod -n sandbox-system -l app.kubernetes.io/name=sandbox-gateway --no-headers -o jsonpath='{.items[*].metadata.name}'); do
+            echo "--- Logs for gateway pod: $gwPod ---"
+            kubectl logs "$gwPod" -n sandbox-system --tail=500 2>&1 || echo "Failed to get logs for $gwPod"
+        done
+    fi
 else
     echo "All E2B tests passed successfully!"
 fi

@@ -181,3 +181,10 @@ func SetupCacheControllersWithManager(mgr manager.Manager, waitHooks *sync.Map) 
 		SandboxSetCustomReconciler: sandboxSetCustomReconciler,
 	}, nil
 }
+
+// SetupSandboxCacheControllersWithManager registers only the Sandbox wait reconciler
+// with the given manager. This is used by components that only need Sandbox data
+// (e.g., sandbox-gateway) to avoid unnecessary informer overhead.
+func SetupSandboxCacheControllersWithManager(mgr manager.Manager, waitHooks *sync.Map) error {
+	return AddCacheSandboxWaitReconciler(mgr, waitHooks)
+}

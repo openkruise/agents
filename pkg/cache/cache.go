@@ -42,6 +42,16 @@ import (
 	"github.com/openkruise/agents/pkg/utils"
 )
 
+// NewCacheOptions configures optional behavior for NewCache.
+type NewCacheOptions struct {
+	// SandboxOnly restricts the cache to Sandbox resources only.
+	// When true, only the Sandbox wait reconciler is set up and
+	// only Sandbox field indexes are registered. This reduces memory
+	// and API server load for components that only need Sandbox data
+	// (e.g., sandbox-gateway).
+	SandboxOnly bool
+}
+
 // Cache is a controller-runtime based cache that replaces the legacy informer-based Cache.
 type Cache struct {
 	client        ctrlclient.Client
@@ -51,6 +61,7 @@ type Cache struct {
 	cancelFunc    context.CancelFunc
 	indexGetGroup singleflight.Group
 	controllers   *controllers.CacheControllerHandlers
+	opts          NewCacheOptions
 }
 
 // BuildCacheConfig creates the informer filter configuration for the cache.
@@ -122,6 +133,15 @@ func BuildCacheConfig(opts config.SandboxManagerOptions) (map[ctrlclient.Object]
 	return byObject, nil
 }
 
+// BuildGatewayCacheConfig creates a minimal cache configuration that only watches
+// Sandbox resources. This is intended for the sandbox-gateway, which only needs
+// Sandbox data for route registry updates and wake-on-traffic.
+func BuildGatewayCacheConfig() map[ctrlclient.Object]ctrlcache.ByObject {
+	return map[ctrlclient.Object]ctrlcache.ByObject{
+		&agentsv1alpha1.Sandbox{}: {},
+	}
+}
+
 // NewControllerManager creates a controller-runtime manager configured for the sandbox manager cache.
 // It configures informer filtering based on resource scope and returns a manager
 // that must be passed to NewCache.
@@ -156,15 +176,33 @@ func NewControllerManager(cfg *rest.Config, opts config.SandboxManagerOptions) (
 }
 
 // NewCache creates a new Cache instance from a pre-configured controller manager.
-// The metadata must have been returned by NewControllerManager.
-func NewCache(mgr ctrl.Manager) (*Cache, error) {
-	waitHooks := &sync.Map{}
-	handlers, err := controllers.SetupCacheControllersWithManager(mgr, waitHooks)
-	if err != nil {
-		return nil, fmt.Errorf("failed to setup cache controllers: %w", err)
+// The manager must have been created with the appropriate scheme and cache configuration.
+// Optional NewCacheOptions can be passed to customize behavior:
+//   - SandboxOnly: restricts the cache to Sandbox resources only (used by sandbox-gateway)
+func NewCache(mgr ctrl.Manager, opts ...NewCacheOptions) (*Cache, error) {
+	var o NewCacheOptions
+	if len(opts) > 0 {
+		o = opts[0]
 	}
-	// Register field indexes
-	if err := AddIndexesToCache(mgr.GetCache()); err != nil {
+
+	waitHooks := &sync.Map{}
+
+	var handlers *controllers.CacheControllerHandlers
+	var err error
+	if o.SandboxOnly {
+		// Gateway mode: only set up sandbox wait reconciler.
+		if err := controllers.SetupSandboxCacheControllersWithManager(mgr, waitHooks); err != nil {
+			return nil, fmt.Errorf("failed to setup sandbox cache controllers: %w", err)
+		}
+	} else {
+		handlers, err = controllers.SetupCacheControllersWithManager(mgr, waitHooks)
+		if err != nil {
+			return nil, fmt.Errorf("failed to setup cache controllers: %w", err)
+		}
+	}
+
+	// Register field indexes (filtered by options)
+	if err := addIndexesToCache(mgr.GetCache(), o); err != nil {
 		return nil, fmt.Errorf("failed to add indexes to cache: %w", err)
 	}
 
@@ -174,6 +212,7 @@ func NewCache(mgr ctrl.Manager) (*Cache, error) {
 		mgr:         mgr,
 		waitHooks:   waitHooks,
 		controllers: handlers,
+		opts:        o,
 	}, nil
 }
 
@@ -351,11 +390,17 @@ func (c *Cache) ListSandboxesInPool(ctx context.Context, opts ListSandboxesInPoo
 
 // GetSandboxController returns the sandbox custom reconciler for external handler registration.
 func (c *Cache) GetSandboxController() *controllers.CacheSandboxCustomReconciler {
+	if c.controllers == nil {
+		return nil
+	}
 	return c.controllers.SandboxCustomReconciler
 }
 
 // GetSandboxSetController returns the sandboxset custom reconciler for external handler registration.
 func (c *Cache) GetSandboxSetController() *controllers.CacheSandboxSetCustomReconciler {
+	if c.controllers == nil {
+		return nil
+	}
 	return c.controllers.SandboxSetCustomReconciler
 }
 

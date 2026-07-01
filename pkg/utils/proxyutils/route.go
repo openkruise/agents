@@ -35,6 +35,7 @@ func GetRouteFromSandbox(s *agentsv1alpha1.Sandbox) Route {
 		State:           state,
 		ResourceVersion: s.GetResourceVersion(),
 		AccessToken:     s.GetAnnotations()[agentsv1alpha1.AnnotationRuntimeAccessToken],
+		WakeOnTraffic:   s.GetAnnotations()[agentsv1alpha1.AnnotationWakeOnTraffic] == agentsv1alpha1.True,
 	}
 }
 
@@ -48,4 +49,5 @@ type Route struct {
 	State           string    `json:"state"`
 	ResourceVersion string    `json:"resourceVersion"`
 	AccessToken     string    `json:"accessToken,omitempty"`
+	WakeOnTraffic   bool      `json:"wakeOnTraffic,omitempty"`
 }

@@ -96,8 +96,8 @@ func (c *Cache) NewSandboxPauseTask(ctx context.Context, sbx *agentsv1alpha1.San
 // stay lazy because they do not protect caller-side target-state mutation.
 func (c *Cache) NewSandboxResumeTask(ctx context.Context, sbx *agentsv1alpha1.Sandbox) (*cacheutils.WaitTask[*agentsv1alpha1.Sandbox], error) {
 	check := func(s *agentsv1alpha1.Sandbox) (bool, error) {
-		if resumable, reason := utils.IsSandboxResumable(s); !resumable {
-			return false, fmt.Errorf("sandbox %s/%s is not resumable, reason: %s", s.Namespace, s.Name, reason)
+		if resumable, err := utils.IsSandboxResumable(s); !resumable {
+			return false, fmt.Errorf("sandbox %s/%s is not resumable: %w", s.Namespace, s.Name, err)
 		}
 		cond := utils.GetSandboxCondition(&s.Status, string(agentsv1alpha1.SandboxConditionReady))
 		if cond == nil {

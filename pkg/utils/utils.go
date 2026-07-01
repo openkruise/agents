@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -355,36 +356,50 @@ func IsSandboxPausable(sbx *agentsv1alpha1.Sandbox) (bool, string) {
 	}
 }
 
+// Sentinel errors for IsSandboxResumable. Callers can use errors.Is() to
+// classify the reason a sandbox is not resumable.
+var (
+	// ErrSandboxIsPausing indicates the sandbox is transitioning to paused state.
+	ErrSandboxIsPausing = errors.New("SandboxIsPausing")
+	// ErrSandboxIsTerminating indicates the sandbox has a DeletionTimestamp.
+	ErrSandboxIsTerminating = errors.New("SandboxIsTerminating")
+	// ErrShutdownTimeReached indicates the sandbox ShutdownTime has passed.
+	ErrShutdownTimeReached = errors.New("ShutdownTimeReached")
+	// ErrSandboxPhaseNotAllowed indicates the sandbox phase does not allow resume.
+	ErrSandboxPhaseNotAllowed = errors.New("SandboxPhaseNotAllowed")
+)
+
 // IsSandboxResumable returns true when the resuming operation will not cause any conflict.
-func IsSandboxResumable(sbx *agentsv1alpha1.Sandbox) (bool, string) {
+// When false, the returned error is a sentinel error that can be checked with errors.Is().
+func IsSandboxResumable(sbx *agentsv1alpha1.Sandbox) (bool, error) {
 	// Reject resume on sandboxes that are being deleted or have exceeded their shutdown time.
 	// These are the same pre-checks GetSandboxState performs before evaluating phase-based states.
 	if sbx.DeletionTimestamp != nil {
-		return false, "SandboxIsTerminating"
+		return false, ErrSandboxIsTerminating
 	}
 	if sbx.Spec.ShutdownTime != nil && nowFunc().After(sbx.Spec.ShutdownTime.Time) {
-		return false, "ShutdownTimeReached"
+		return false, ErrShutdownTimeReached
 	}
 
 	switch sbx.Status.Phase {
 	case agentsv1alpha1.SandboxRunning:
 		if sbx.Spec.Paused {
-			return false, "SandboxIsPausing"
+			return false, ErrSandboxIsPausing
 		}
-		return true, "SandboxIsRunning"
+		return true, nil
 	case agentsv1alpha1.SandboxResuming:
-		return true, "SandboxIsResuming"
+		return true, nil
 	default:
 	}
 	if sbx.Status.Phase == agentsv1alpha1.SandboxPaused {
 		pauseCond := GetSandboxCondition(&sbx.Status, string(agentsv1alpha1.SandboxConditionPaused))
 		paused := pauseCond != nil && pauseCond.Status == metav1.ConditionTrue
 		if paused {
-			return true, "SandboxIsPaused"
+			return true, nil
 		}
-		return false, "SandboxIsPausing"
+		return false, ErrSandboxIsPausing
 	}
-	return false, "SandboxPhaseNotAllowed"
+	return false, ErrSandboxPhaseNotAllowed
 }
 
 // GetTemplateSpec resolves and returns the PodTemplateSpec from the EmbeddedSandboxTemplate.

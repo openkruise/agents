@@ -44,6 +44,17 @@ const (
 	EnvMemberlistBindPort = "MEMBERLIST_BIND_PORT"
 )
 
+// globalPeerManager is set when server.Start() creates the peerManager.
+// It allows other packages (e.g. wake) to access the peer manager for
+// SyncRouteWithPeers without creating a full Server instance.
+var globalPeerManager peers.Peers
+
+// GetPeerManager returns the peer manager for use by the wake package.
+// Returns nil if the server has not been started yet.
+func GetPeerManager() peers.Peers {
+	return globalPeerManager
+}
+
 // getMemberlistBindPort reads the memberlist bind port from environment variable
 // Returns the default port if not set or invalid
 func getMemberlistBindPort() int {
@@ -110,6 +121,7 @@ func (s *Server) Start(ctx context.Context) error {
 	labelSelector := os.Getenv(EnvLabelSelector)
 
 	s.peerManager = peers.NewMemberlistPeers(s.client, peers.NodePrefixSandboxGateway+nodeName, namespace, labelSelector)
+	globalPeerManager = s.peerManager
 
 	if err := s.peerManager.Start(ctx, s.memberlistBindPort); err != nil {
 		return err
@@ -162,17 +174,20 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 
 	log.V(utils.DebugLogLevel).Info("Received route refresh", "route", route)
 
-	// Handle based on state
-	if route.State == v1alpha1.SandboxStateRunning {
-		// Update the route
+	// Handle based on state.
+	// Only dead and empty-state routes are removed from the registry.
+	// All other states (running, paused, creating, available) are kept
+	// so the filter has full visibility for routing decisions.
+	switch route.State {
+	case v1alpha1.SandboxStateDead, "":
+		registry.GetRegistry().Delete(route.ID)
+		log.Info("Route removed via refresh", "id", route.ID, "state", route.State)
+	default:
 		if registry.GetRegistry().Update(route.ID, route) {
-			log.Info("Route updated via refresh", "id", route.ID, "ip", route.IP)
+			log.Info("Route updated via refresh", "id", route.ID, "ip", route.IP, "state", route.State)
 		} else {
 			log.V(utils.DebugLogLevel).Info("Route update skipped due to older resourceVersion", "id", route.ID)
 		}
-	} else {
-		// Delete the route if the sandbox is dead
-		registry.GetRegistry().Delete(route.ID)
 	}
 
 	w.WriteHeader(http.StatusNoContent)

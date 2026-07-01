@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -132,8 +133,9 @@ func (sc *Controller) ResumeSandbox(r *http.Request) (web.ApiResponse[struct{}],
 	state, _ := sbx.GetState()
 
 	effectiveTimeout := sc.getEffectivePauseTimeSeconds(log, request.TimeoutSeconds, true, !currentEndAt.IsZero())
-	resumeOpts := sc.buildResumeOpts(autoPause, time.Now(), effectiveTimeout, !currentEndAt.IsZero())
 	log.Info("resuming sandbox")
+	resumeOpts := sc.buildResumeOpts(autoPause, time.Now(), effectiveTimeout, !currentEndAt.IsZero())
+	resumeOpts.Annotations = buildWakeAnnotations(sbx, request.AutoResume, request.TimeoutSeconds)
 	if err := sc.manager.ResumeSandbox(ctx, sbx, resumeOpts); err != nil {
 		return web.ApiResponse[struct{}]{}, &web.ApiError{
 			Code:    resumeSandboxErrorCode(err),
@@ -141,9 +143,13 @@ func (sc *Controller) ResumeSandbox(r *http.Request) (web.ApiResponse[struct{}],
 		}
 	}
 
+	// After Resume, updateConnectTimeout extends the timeout under ExtendOnly.
+	// For the first-writer this is a no-op (Resume already wrote the placeholder);
+	// for the loser it re-applies this request's timeout.
 	if apiErr := sc.updateConnectTimeout(ctx, sbx, effectiveTimeout, state, autoPause, currentEndAt); apiErr != nil {
 		return web.ApiResponse[struct{}]{}, apiErr
 	}
+
 	return web.ApiResponse[struct{}]{
 		Code: http.StatusNoContent,
 	}, nil
@@ -201,13 +207,13 @@ func (sc *Controller) ConnectSandbox(r *http.Request) (web.ApiResponse[*models.S
 
 	paused := state == v1alpha1.SandboxStatePaused
 	effectiveTimeout := sc.getEffectivePauseTimeSeconds(log, request.TimeoutSeconds, paused, !currentEndAt.IsZero())
-
 	// Step 1: Resume the sandbox if it is paused, atomically writing the
-	// placeholder timeout for timed sandboxes.
+	// placeholder timeout and wake annotations for timed sandboxes.
 	statusCode := http.StatusOK
 	if paused {
 		log.Info("sandbox is paused, will resume it", "reason", pauseResumeReason)
 		resumeOpts := sc.buildResumeOpts(autoPause, time.Now(), effectiveTimeout, !currentEndAt.IsZero())
+		resumeOpts.Annotations = buildWakeAnnotations(sbx, request.AutoResume, request.TimeoutSeconds)
 		if err := sc.manager.ResumeSandbox(ctx, sbx, resumeOpts); err != nil {
 			log.Error(err, "failed to resume sandbox")
 			code := http.StatusInternalServerError
@@ -225,7 +231,9 @@ func (sc *Controller) ConnectSandbox(r *http.Request) (web.ApiResponse[*models.S
 		log.Info("sandbox is not paused, skip resuming", "state", state, "reason", pauseResumeReason)
 	}
 
-	// Step 2: Update the sandbox timeout with the effective (post-floor) value.
+	// Step 2: Update the sandbox timeout under ExtendOnly policy. For the
+	// first-writer Resume path this is a no-op; for the loser path or
+	// non-paused sandboxes it writes the timeout.
 	log.Info("updating sandbox timeout")
 	if err := sc.updateConnectTimeout(ctx, sbx, effectiveTimeout, state, autoPause, currentEndAt); err != nil {
 		log.Error(err, "failed to update sandbox timeout")
@@ -247,7 +255,7 @@ func (sc *Controller) updateConnectTimeout(ctx context.Context, sbx infra.Sandbo
 	log := klog.FromContext(ctx).WithValues("sandboxID", sbx.GetSandboxID())
 
 	if currentEndAt.IsZero() {
-		log.Info("skip resetting timeout for never-timeout sandbox")
+		log.V(utils.DebugLogLevel).Info("skip resetting timeout for never-timeout sandbox")
 		return nil
 	}
 
@@ -271,4 +279,29 @@ func (sc *Controller) updateConnectTimeout(ctx context.Context, sbx infra.Sandbo
 		log.Info("timeout updated", "requestedTimeoutSeconds", timeoutSeconds)
 	}
 	return nil
+}
+
+// buildWakeAnnotations constructs the wake-on-traffic annotation map from the
+// request parameters and the sandbox's existing annotations. When autoResume
+// is true, it sets AnnotationWakeOnTraffic=true and (if timeoutSeconds > 0)
+// AnnotationWakeTimeoutSeconds. When autoResume is false but timeoutSeconds is
+// provided and wake-on-traffic is already enabled, it only updates
+// AnnotationWakeTimeoutSeconds. Returns nil when there are no annotations to
+// write.
+func buildWakeAnnotations(sbx infra.Sandbox, autoResume bool, timeoutSeconds int) map[string]string {
+	existingAnnotations := sbx.GetAnnotations()
+	wakeEnabled := existingAnnotations[v1alpha1.AnnotationWakeOnTraffic] == v1alpha1.True
+
+	if !autoResume && !(timeoutSeconds > 0 && wakeEnabled) {
+		return nil
+	}
+
+	annotations := make(map[string]string)
+	if autoResume {
+		annotations[v1alpha1.AnnotationWakeOnTraffic] = v1alpha1.True
+	}
+	if timeoutSeconds > 0 {
+		annotations[v1alpha1.AnnotationWakeTimeoutSeconds] = strconv.Itoa(timeoutSeconds)
+	}
+	return annotations
 }

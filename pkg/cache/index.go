@@ -168,10 +168,22 @@ func GetIndexFuncs() []IndexFunc {
 
 // AddIndexesToCache registers all required field indexes on the controller-runtime cache.
 func AddIndexesToCache(c ctrlcache.Cache) error {
+	return addIndexesToCache(c, NewCacheOptions{})
+}
+
+// addIndexesToCache registers field indexes filtered by the given options.
+// When opts.SandboxOnly is true, only Sandbox indexes are registered.
+func addIndexesToCache(c ctrlcache.Cache, opts NewCacheOptions) error {
 	if c == nil {
 		return nil
 	}
 	for _, idx := range GetIndexFuncs() {
+		if opts.SandboxOnly {
+			// Skip non-Sandbox indexes when in SandboxOnly mode.
+			if _, ok := idx.Obj.(*agentsv1alpha1.Sandbox); !ok {
+				continue
+			}
+		}
 		if err := c.IndexField(context.Background(), idx.Obj, idx.FieldName, idx.Extract); err != nil {
 			return err
 		}

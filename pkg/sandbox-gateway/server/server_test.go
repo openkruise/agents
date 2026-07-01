@@ -229,7 +229,8 @@ func TestHandleRefresh_AvailableState(t *testing.T) {
 
 	s := &Server{}
 
-	// Available state is treated as non-running and will delete the route
+	// Available state means unclaimed pool sandbox — not routable,
+	// but the route is kept in the registry for full visibility.
 	route := proxy.Route{
 		ID:              "test-sandbox-3",
 		IP:              "10.0.0.3",
@@ -245,9 +246,116 @@ func TestHandleRefresh_AvailableState(t *testing.T) {
 
 	assert.Equal(t, http.StatusNoContent, rr.Code)
 
-	// Verify route was deleted (only Running state keeps routes)
-	_, ok := registry.GetRegistry().Get("test-sandbox-3")
+	// Verify route was kept in the registry with available state
+	got, ok := registry.GetRegistry().Get("test-sandbox-3")
+	assert.True(t, ok)
+	assert.Equal(t, v1alpha1.SandboxStateAvailable, got.State)
+}
+
+func TestHandleRefresh_CreatingState(t *testing.T) {
+	// Clear registry and add a route first
+	registry.GetRegistry().Clear()
+	registry.GetRegistry().Update("test-sandbox-creating", proxy.Route{
+		ID:              "test-sandbox-creating",
+		IP:              "10.0.0.6",
+		State:           v1alpha1.SandboxStateRunning,
+		ResourceVersion: "1",
+	})
+
+	s := &Server{}
+
+	// Creating state — should be kept in the registry
+	route := proxy.Route{
+		ID:              "test-sandbox-creating",
+		IP:              "10.0.0.6",
+		State:           v1alpha1.SandboxStateCreating,
+		ResourceVersion: "2",
+	}
+	body, _ := json.Marshal(route)
+
+	req := httptest.NewRequest(http.MethodPost, proxy.RefreshAPI, bytes.NewReader(body))
+	rr := httptest.NewRecorder()
+
+	s.handleRefresh(rr, req)
+
+	assert.Equal(t, http.StatusNoContent, rr.Code)
+
+	// Verify route was kept in the registry with creating state
+	got, ok := registry.GetRegistry().Get("test-sandbox-creating")
+	assert.True(t, ok)
+	assert.Equal(t, v1alpha1.SandboxStateCreating, got.State)
+}
+
+func TestHandleRefresh_EmptyState(t *testing.T) {
+	// Clear registry and add a route first
+	registry.GetRegistry().Clear()
+	registry.GetRegistry().Update("test-sandbox-empty", proxy.Route{
+		ID:              "test-sandbox-empty",
+		IP:              "10.0.0.7",
+		State:           v1alpha1.SandboxStateRunning,
+		ResourceVersion: "1",
+	})
+
+	s := &Server{}
+
+	// Empty state — should be deleted from the registry
+	route := proxy.Route{
+		ID:              "test-sandbox-empty",
+		IP:              "10.0.0.7",
+		State:           "",
+		ResourceVersion: "2",
+	}
+	body, _ := json.Marshal(route)
+
+	req := httptest.NewRequest(http.MethodPost, proxy.RefreshAPI, bytes.NewReader(body))
+	rr := httptest.NewRecorder()
+
+	s.handleRefresh(rr, req)
+
+	assert.Equal(t, http.StatusNoContent, rr.Code)
+
+	// Verify route was deleted from registry
+	_, ok := registry.GetRegistry().Get("test-sandbox-empty")
 	assert.False(t, ok)
+}
+
+func TestHandleRefresh_PausedState(t *testing.T) {
+	// Clear registry and add a running route first
+	registry.GetRegistry().Clear()
+	registry.GetRegistry().Update("test-sandbox-paused", proxy.Route{
+		ID:              "test-sandbox-paused",
+		IP:              "10.0.0.10",
+		State:           v1alpha1.SandboxStateRunning,
+		ResourceVersion: "1",
+		WakeOnTraffic:   true,
+	})
+
+	s := &Server{}
+
+	// Send a paused state route — should be kept in the registry
+	// so the filter can detect it and trigger wake-on-traffic.
+	route := proxy.Route{
+		ID:              "test-sandbox-paused",
+		IP:              "10.0.0.10",
+		State:           v1alpha1.SandboxStatePaused,
+		ResourceVersion: "2",
+		WakeOnTraffic:   true,
+	}
+	body, _ := json.Marshal(route)
+
+	req := httptest.NewRequest(http.MethodPost, proxy.RefreshAPI, bytes.NewReader(body))
+	rr := httptest.NewRecorder()
+
+	s.handleRefresh(rr, req)
+
+	assert.Equal(t, http.StatusNoContent, rr.Code)
+
+	// Verify route was kept in the registry with paused state
+	got, ok := registry.GetRegistry().Get("test-sandbox-paused")
+	assert.True(t, ok)
+	assert.Equal(t, v1alpha1.SandboxStatePaused, got.State)
+	assert.Equal(t, "10.0.0.10", got.IP)
+	assert.True(t, got.WakeOnTraffic)
 }
 
 func TestHandleRefresh_UpdateExistingRoute(t *testing.T) {

@@ -21,14 +21,19 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	infracache "github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/registry"
+	"github.com/openkruise/agents/pkg/sandbox-gateway/wake"
 	proxyutils "github.com/openkruise/agents/pkg/utils/proxyutils"
 )
 
@@ -68,10 +73,20 @@ func StartManager(ctx context.Context) error {
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
 
 	scheme := runtime.NewScheme()
+	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(agentsv1alpha1.AddToScheme(scheme))
+
+	// Configure the manager to only cache Sandbox resources.
+	// The gateway does not need Checkpoint, SandboxSet, SandboxTemplate,
+	// or other resources that the full sandbox-manager caches.
+	byObject := infracache.BuildGatewayCacheConfig()
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme: scheme,
+		Cache: cache.Options{
+			ByObject:                     byObject,
+			DefaultUnsafeDisableDeepCopy: ptr.To(true),
+		},
 		// Disable metrics and health probe servers to avoid port conflicts with Envoy.
 		HealthProbeBindAddress: "0",
 		Metrics: metricsserver.Options{
@@ -81,6 +96,20 @@ func StartManager(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("unable to create manager: %w", err)
 	}
+
+	// Create cache provider with SandboxOnly mode.
+	// This sets up only the Sandbox wait reconciler and Sandbox indexes,
+	// avoiding unnecessary informer overhead for resources the gateway
+	// does not use (Checkpoint, SandboxSet, SandboxTemplate).
+	// The wait reconciler is required for sandboxcr.Sandbox.Resume() to
+	// use NewSandboxResumeTask().Wait() from within the gateway process.
+	cacheProvider, err := infracache.NewCache(mgr, infracache.NewCacheOptions{SandboxOnly: true})
+	if err != nil {
+		return fmt.Errorf("unable to create cache provider: %w", err)
+	}
+
+	// Initialize wake waker with the cache provider
+	wake.InitWaker(cacheProvider)
 
 	if err := ctrl.NewControllerManagedBy(mgr).
 		For(&agentsv1alpha1.Sandbox{}).

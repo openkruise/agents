@@ -35,16 +35,31 @@ const (
 type Error struct {
 	Code    ErrorCode
 	Message string
+	inner   error
 }
 
 func (t *Error) Error() string {
 	return fmt.Sprintf("%s: %s", t.Code, t.Message)
 }
 
+// Unwrap returns the wrapped error, enabling errors.Is and errors.As.
+func (t *Error) Unwrap() error { return t.inner }
+
 func NewError(code ErrorCode, format string, a ...any) *Error {
 	return &Error{
 		Code:    code,
 		Message: fmt.Sprintf(format, a...),
+	}
+}
+
+// NewErrorWrap creates an Error that wraps an inner error, preserving
+// the inner error for errors.Is / errors.As classification while
+// providing a human-readable message and error code.
+func NewErrorWrap(code ErrorCode, err error, format string, a ...any) *Error {
+	return &Error{
+		Code:    code,
+		Message: fmt.Sprintf(format, a...),
+		inner:   err,
 	}
 }
 
