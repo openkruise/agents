@@ -309,6 +309,11 @@ var (
 	// abnormalTypes enumerates all possible sandbox_status_abnormal type label values.
 	// Used for O(1) cleanup in DeleteSandboxMetrics instead of O(N) Range scan.
 	abnormalTypes = []string{"pause_incomplete", "resume_incomplete"}
+
+	// runtimeContainerNamesList is the pre-computed sorted list of runtime container
+	// names, used for O(1) cleanup in DeleteSandboxMetrics. Pre-computed to avoid
+	// allocating a new slice on every DeleteSandboxMetrics call.
+	runtimeContainerNamesList = sidecarutils.RuntimeContainerNames.List()
 )
 
 // observedCreationToReady tracks which sandboxes have had their creation-to-ready
@@ -708,7 +713,7 @@ func DeleteSandboxMetrics(namespace, name string) {
 	for _, t := range abnormalTypes {
 		abnormalStartTimes.Delete(key + "/" + t)
 	}
-	for _, c := range sidecarutils.RuntimeContainerNames.List() {
+	for _, c := range runtimeContainerNamesList {
 		runtimeContainerAbnormalStartTimes.Delete(key + "/" + c)
 	}
 }

@@ -2736,3 +2736,47 @@ func TestRuntimeContainerAbnormalTimeStableAcrossReconciles(t *testing.T) {
 		t.Errorf("re-abnormal: sandbox_runtime_container_abnormal_time = %v, should differ from first time %v", reAbnormalTime, firstTime)
 	}
 }
+
+// TestDeleteSandboxMetrics_ClearsAllSyncMapEntries verifies that DeleteSandboxMetrics
+// cleans up ALL abnormalStartTimes and runtimeContainerAbnormalStartTimes entries,
+// not just the ones that were populated during the test.
+func TestDeleteSandboxMetrics_ClearsAllSyncMapEntries(t *testing.T) {
+	ns, name := "default", "syncmap-cleanup-sandbox"
+	key := ns + "/" + name
+
+	// Populate ALL possible abnormal type entries
+	for _, at := range abnormalTypes {
+		abnormalStartTimes.Store(key+"/"+at, float64(time.Now().Unix()))
+	}
+
+	// Populate ALL possible runtime container entries
+	for _, c := range runtimeContainerNamesList {
+		runtimeContainerAbnormalStartTimes.Store(key+"/"+c, float64(time.Now().Unix()))
+	}
+
+	// Verify all entries exist
+	for _, at := range abnormalTypes {
+		if _, ok := abnormalStartTimes.Load(key + "/" + at); !ok {
+			t.Fatalf("precondition: abnormalStartTimes missing entry for type %s", at)
+		}
+	}
+	for _, c := range runtimeContainerNamesList {
+		if _, ok := runtimeContainerAbnormalStartTimes.Load(key + "/" + c); !ok {
+			t.Fatalf("precondition: runtimeContainerAbnormalStartTimes missing entry for container %s", c)
+		}
+	}
+
+	DeleteSandboxMetrics(ns, name)
+
+	// Verify ALL entries are cleaned up
+	for _, at := range abnormalTypes {
+		if _, ok := abnormalStartTimes.Load(key + "/" + at); ok {
+			t.Errorf("abnormalStartTimes should not have entry for type %s after delete", at)
+		}
+	}
+	for _, c := range runtimeContainerNamesList {
+		if _, ok := runtimeContainerAbnormalStartTimes.Load(key + "/" + c); ok {
+			t.Errorf("runtimeContainerAbnormalStartTimes should not have entry for container %s after delete", c)
+		}
+	}
+}
