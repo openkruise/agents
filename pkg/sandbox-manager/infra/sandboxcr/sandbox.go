@@ -179,12 +179,12 @@ func (s *Sandbox) TriggerRecycle(ctx context.Context) error {
 	if s.Sandbox.Annotations == nil {
 		s.Sandbox.Annotations = make(map[string]string, 1)
 	}
-	s.Sandbox.Annotations[agentsv1alpha1.AnnotationCleanup] = "true"
+	s.Sandbox.Annotations[agentsv1alpha1.AnnotationCleanup] = agentsv1alpha1.True
 	return s.Cache.GetClient().Patch(ctx, s.Sandbox, patch)
 }
 
 func (s *Sandbox) IsRecycleEnabled() bool {
-	return s.Sandbox.Annotations[agentsv1alpha1.AnnotationCleanupEnabled] == "true"
+	return s.Sandbox.Annotations[agentsv1alpha1.AnnotationCleanupEnabled] == agentsv1alpha1.True
 }
 
 func (s *Sandbox) Phase() string {

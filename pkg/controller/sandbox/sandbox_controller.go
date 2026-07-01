@@ -468,8 +468,8 @@ func (r *SandboxReconciler) calculateStatus(ctx context.Context, args core.Ensur
 // isRecycleTriggered returns true when the recycle annotation and the recycle-enabled
 // annotation are both set to "true" on the sandbox.
 func isRecycleTriggered(box *agentsv1alpha1.Sandbox) bool {
-	return box.Annotations[agentsv1alpha1.AnnotationCleanup] == "true" &&
-		box.Annotations[agentsv1alpha1.AnnotationCleanupEnabled] == "true"
+	return box.Annotations[agentsv1alpha1.AnnotationCleanup] == agentsv1alpha1.True &&
+		box.Annotations[agentsv1alpha1.AnnotationCleanupEnabled] == agentsv1alpha1.True
 }
 
 // hasPVCVolumes returns true if the sandbox has VolumeClaimTemplates or its pod
