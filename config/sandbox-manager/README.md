@@ -34,7 +34,7 @@ normalized internal `(dimension, scope, limit)` list. Dynamic enforcement uses R
 is empty, or Redis is configured but unavailable, sandbox-manager intentionally fails open: limited keys are accepted
 and stored, but create requests are temporarily unenforced. Metrics and logs expose fail-open events.
 
-When Redis requires authentication, inject `E2B_QUOTA_REDIS_USERNAME` and `E2B_QUOTA_REDIS_PASSWORD` from a Kubernetes
+When Redis requires authentication, inject `QUOTA_REDIS_USERNAME` and `QUOTA_REDIS_PASSWORD` from a Kubernetes
 Secret rather than writing credentials directly into deployment patches.
 
 When using MySQL key storage with `--e2b-key-storage-disable-schema-auto-update=true`, the startup schema check requires

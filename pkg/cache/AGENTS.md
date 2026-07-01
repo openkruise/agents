@@ -96,6 +96,15 @@ to deduplicate concurrent identical queries.
 `CacheSandboxCustomReconciler` and `CacheSandboxSetCustomReconciler` allow external callers (e.g., sandbox-manager
 infra layer) to register event handlers via `AddReconcileHandlers()`.
 
+### 7. Quota Cache Boundary
+
+`ListLiveSandboxesByOwner` is the cache-owned quota enumeration primitive. It uses the owner index and
+`pkg/utils/lifecycle` predicates to return live Sandbox CRD objects only.
+
+Do not add quota footprint calculation, Redis behavior, breaker behavior, or HTTP status semantics to this package.
+Those belong in `pkg/sandbox-manager/infra`, `pkg/sandbox-manager/infra/sandboxcr`,
+`pkg/sandbox-manager/quota`, and `pkg/servers/e2b` respectively.
+
 ## Testing
 
 Use `cachetest.NewTestCache(t, initObjs...)` to create a `*Cache` with a fake client and mock manager.

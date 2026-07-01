@@ -24,7 +24,7 @@ import (
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
-	"github.com/openkruise/agents/pkg/sandbox/lifecycle"
+	"github.com/openkruise/agents/pkg/utils/lifecycle"
 )
 
 func (i *Infra) GetQuotaSandboxSource() infra.QuotaSandboxSource {

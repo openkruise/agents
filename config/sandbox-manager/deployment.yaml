@@ -76,15 +76,15 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
-            # - name: E2B_QUOTA_REDIS_USERNAME
+            # - name: QUOTA_REDIS_USERNAME
             #   valueFrom:
             #     secretKeyRef:
-            #       name: e2b-quota-redis
+            #       name: quota-redis
             #       key: username
-            # - name: E2B_QUOTA_REDIS_PASSWORD
+            # - name: QUOTA_REDIS_PASSWORD
             #   valueFrom:
             #     secretKeyRef:
-            #       name: e2b-quota-redis
+            #       name: quota-redis
             #       key: password
           resources:
             limits:

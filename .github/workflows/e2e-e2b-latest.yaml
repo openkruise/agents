@@ -157,7 +157,7 @@ jobs:
           if [ "${{ matrix.quota_profile }}" != "none" ]; then
             {
               echo ""
-              echo "# E2B quota profile and CI-sized manager requests (appended by e2e-e2b-latest before deploy)"
+              echo "# Quota profile and CI-sized manager requests (appended by e2e-e2b-latest before deploy)"
               if [ "${{ matrix.quota_profile }}" = "redis" ] || [ "${{ matrix.quota_profile }}" = "redis-clone" ] || [ "${{ matrix.quota_profile }}" = "redis-fault" ]; then
                 echo "- op: add"
                 echo "  path: /spec/template/spec/containers/0/args/-"

@@ -24,55 +24,55 @@ import (
 var (
 	acquireTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "e2b_quota_acquire_total",
+			Name: "sandbox_manager_quota_acquire_total",
 			Help: "Total quota acquire decisions.",
 		},
 		[]string{"result"},
 	)
 	backendErrorsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "e2b_quota_backend_errors_total",
+			Name: "sandbox_manager_quota_backend_errors_total",
 			Help: "Total quota backend errors by operation.",
 		},
 		[]string{"operation"},
 	)
 	breakerStateTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "e2b_quota_breaker_state_total",
+			Name: "sandbox_manager_quota_breaker_state_total",
 			Help: "Total quota backend breaker state transitions.",
 		},
 		[]string{"state"},
 	)
 	breakerOpenDurationSeconds = prometheus.NewHistogram(
 		prometheus.HistogramOpts{
-			Name: "e2b_quota_breaker_open_duration_seconds",
+			Name: "sandbox_manager_quota_breaker_open_duration_seconds",
 			Help: "Configured quota backend breaker open window duration.",
 		},
 	)
 	releaseTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "e2b_quota_release_total",
+			Name: "sandbox_manager_quota_release_total",
 			Help: "Total quota release decisions.",
 		},
 		[]string{"result"},
 	)
 	antiDriftSkippedTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "e2b_quota_antidrift_skipped_total",
+			Name: "sandbox_manager_quota_antidrift_skipped_total",
 			Help: "Total quota anti-drift skips by reason.",
 		},
 		[]string{"reason"},
 	)
 	antiDriftErrorsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "e2b_quota_antidrift_errors_total",
+			Name: "sandbox_manager_quota_antidrift_errors_total",
 			Help: "Total quota anti-drift errors by operation.",
 		},
 		[]string{"operation"},
 	)
 	antiDriftEventReleaseTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "e2b_quota_antidrift_event_release_total",
+			Name: "sandbox_manager_quota_antidrift_event_release_total",
 			Help: "Total quota anti-drift event release results.",
 		},
 		[]string{"result"},

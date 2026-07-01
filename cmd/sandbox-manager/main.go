@@ -43,10 +43,10 @@ import (
 )
 
 const (
-	E2BKeyStorageDSNEnvVar      = "E2B_KEY_STORAGE_DSN"
-	E2BKeyHashPepperEnvVar      = "E2B_KEY_HASH_PEPPER"
-	E2BQuotaRedisUsernameEnvVar = "E2B_QUOTA_REDIS_USERNAME"
-	E2BQuotaRedisPasswordEnvVar = "E2B_QUOTA_REDIS_PASSWORD"
+	E2BKeyStorageDSNEnvVar   = "E2B_KEY_STORAGE_DSN"
+	E2BKeyHashPepperEnvVar   = "E2B_KEY_HASH_PEPPER"
+	QuotaRedisUsernameEnvVar = "QUOTA_REDIS_USERNAME"
+	QuotaRedisPasswordEnvVar = "QUOTA_REDIS_PASSWORD"
 )
 
 // validateE2BTimeoutFlags rejects misconfigurations that would either
@@ -208,8 +208,8 @@ func main() {
 
 	e2bKeyStorageDSN := strings.TrimSpace(os.Getenv(E2BKeyStorageDSNEnvVar))
 	e2bKeyStoragePepper := strings.TrimSpace(os.Getenv(E2BKeyHashPepperEnvVar))
-	quotaRedisUsername := strings.TrimSpace(os.Getenv(E2BQuotaRedisUsernameEnvVar))
-	quotaRedisPassword := strings.TrimSpace(os.Getenv(E2BQuotaRedisPasswordEnvVar))
+	quotaRedisUsername := strings.TrimSpace(os.Getenv(QuotaRedisUsernameEnvVar))
+	quotaRedisPassword := strings.TrimSpace(os.Getenv(QuotaRedisPasswordEnvVar))
 	if e2bEnableAuth {
 		// Validate key storage args
 		switch e2bKeyStorage {

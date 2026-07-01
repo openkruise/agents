@@ -139,7 +139,7 @@ jobs:
           MYSQL_DSN="root:${MYSQL_ROOT_PASSWORD}@tcp(mysql.sandbox-system.svc.cluster.local:3306)/${MYSQL_DATABASE}?charset=utf8mb4&parseTime=True&loc=Local"
           {
             echo ""
-            echo "# E2B MySQL key storage, quota Redis, and CI-sized manager requests (appended by e2e-e2b-mysql-latest before deploy)"
+            echo "# MySQL key storage, quota Redis, and CI-sized manager requests (appended by e2e-e2b-mysql-latest before deploy)"
             echo "- op: replace"
             echo "  path: /spec/replicas"
             echo "  value: 3"

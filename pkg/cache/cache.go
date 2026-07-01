@@ -23,6 +23,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/openkruise/agents/pkg/utils/lifecycle"
 	"golang.org/x/sync/singleflight"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -42,7 +43,6 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/cache/controllers"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
-	"github.com/openkruise/agents/pkg/sandbox/lifecycle"
 	"github.com/openkruise/agents/pkg/utils"
 )
 
@@ -183,14 +183,6 @@ func BuildCacheConfig(opts config.SandboxManagerOptions) (map[ctrlclient.Object]
 	byObject[&corev1.PersistentVolumeClaim{}] = customObjConfig
 
 	return byObject, nil
-}
-
-// NewControllerManager creates a controller-runtime manager configured for the sandbox manager cache.
-// It configures informer filtering based on resource scope and returns a manager
-// that must be passed to NewCache.
-func NewControllerManager(cfg *rest.Config, opts config.SandboxManagerOptions) (ctrl.Manager, error) {
-	mgr, _, err := NewControllerManagerWithHealth(cfg, opts)
-	return mgr, err
 }
 
 // NewControllerManagerWithHealth creates a controller-runtime manager together
