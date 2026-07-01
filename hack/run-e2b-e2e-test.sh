@@ -374,7 +374,10 @@ if [ -z "$installed_e2b_version" ]; then
     exit 1
 fi
 echo "Detected e2b version: $installed_e2b_version"
-if [[ "$AUTH_DISABLED" != "true" ]]; then
+if [[ "$AUTH_DISABLED" == "true" ]]; then
+    echo "E2B auth is disabled; skipping API key compatibility conversion"
+    export E2B_API_KEY="${E2B_API_KEY:-e2b_abc123}"
+else
     convert_e2b_api_key_for_sdk_if_needed "$installed_e2b_version"
 fi
 
@@ -406,7 +409,10 @@ pytest_args=(-p "$PLUGIN")
 if [[ -n "$REPEAT" ]]; then pytest_args+=(--count "$REPEAT"); fi
 if [[ -n "$PYTEST_KEYWORD_EXPR" ]]; then pytest_args+=(-k "$PYTEST_KEYWORD_EXPR"); fi
 if [[ -n "$PYTEST_MARKER_EXPR" ]]; then pytest_args+=(-m "$PYTEST_MARKER_EXPR"); fi
-if [[ "$WITH_GATEWAY" != "true" ]]; then pytest_args+=(--ignore="$TEST_DIR/test_gateway.py"); fi
+if [[ "$WITH_GATEWAY" != "true" ]]; then
+    pytest_args+=(--ignore="$TEST_DIR/test_gateway.py")
+    pytest_args+=(--ignore="$TEST_DIR/test_gateway_auth.py")
+fi
 if [[ "$AUTH_DISABLED" == "true" ]]; then pytest_args+=(--ignore="$TEST_DIR/test_apikey.py"); fi
 
 # CI-only: write JUnit XML for the CI system to parse, and surface each
