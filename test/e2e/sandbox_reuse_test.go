@@ -26,6 +26,7 @@ import (
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
@@ -377,5 +378,127 @@ var _ = Describe("Sandbox Reuse", func() {
 				return isSandboxDeleted(target)
 			}, time.Second*30, time.Second).Should(BeTrue())
 		})
+	})
+})
+
+// This suite covers the CSI reset-signal write that runs before a sandbox is
+// returned to the pool. Unlike the reuse suite above (which uses the noop reuser
+// and a bare nginx pod), it needs a pod running the real agent-runtime (envd)
+// sidecar, because the controller writes the reset signal through the
+// agent-runtime files API. It requires the controller to be started with
+// --csi-reset-signal-dir and the agent-runtime image to be available in-cluster.
+var _ = Describe("Sandbox Reuse CSI Reset Signal", func() {
+	var (
+		ctx        = context.Background()
+		namespace  string
+		sandboxSet *agentsv1alpha1.SandboxSet
+	)
+
+	BeforeEach(func() {
+		namespace = createNamespace(ctx)
+		alwaysRestart := corev1.ContainerRestartPolicyAlways
+		sandboxSet = &agentsv1alpha1.SandboxSet{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      fmt.Sprintf("reuse-csi-pool-%d", time.Now().UnixNano()),
+				Namespace: namespace,
+			},
+			Spec: agentsv1alpha1.SandboxSetSpec{
+				Replicas: 1,
+				EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+					Template: &corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							InitContainers: []corev1.Container{
+								{
+									Name:            "runtime",
+									Image:           "agent-runtime:latest",
+									ImagePullPolicy: corev1.PullIfNotPresent,
+									Command:         []string{"sh", "/workspace/entrypoint.sh"},
+									VolumeMounts:    []corev1.VolumeMount{{Name: "envd-volume", MountPath: "/mnt/envd"}},
+									Env:             []corev1.EnvVar{{Name: "ENVD_DIR", Value: "/mnt/envd"}},
+									RestartPolicy:   &alwaysRestart,
+								},
+							},
+							Containers: []corev1.Container{
+								{
+									Name:         "sandbox",
+									Image:        "centos:7",
+									Command:      []string{"/bin/bash", "-c", "sleep infinity"},
+									Env:          []corev1.EnvVar{{Name: "ENVD_DIR", Value: "/mnt/envd"}},
+									VolumeMounts: []corev1.VolumeMount{{Name: "envd-volume", MountPath: "/mnt/envd"}},
+									StartupProbe: &corev1.Probe{
+										ProbeHandler: corev1.ProbeHandler{
+											TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt(49983)},
+										},
+										FailureThreshold:    20,
+										InitialDelaySeconds: 3,
+										PeriodSeconds:       1,
+										SuccessThreshold:    1,
+										TimeoutSeconds:      1,
+									},
+									Lifecycle: &corev1.Lifecycle{
+										PostStart: &corev1.LifecycleHandler{
+											Exec: &corev1.ExecAction{Command: []string{"sh", "/mnt/envd/envd-run.sh"}},
+										},
+									},
+								},
+							},
+							Volumes: []corev1.Volume{
+								{Name: "envd-volume", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+							},
+							RestartPolicy: corev1.RestartPolicyNever,
+						},
+					},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, sandboxSet)).To(Succeed())
+
+		By("Waiting for the runtime-backed sandbox to be Running")
+		Eventually(func() int32 {
+			_ = k8sClient.Get(ctx, client.ObjectKeyFromObject(sandboxSet), sandboxSet)
+			return sandboxSet.Status.AvailableReplicas
+		}, time.Minute*3, time.Second).Should(Equal(int32(1)))
+	})
+
+	AfterEach(func() {
+		if sandboxSet != nil {
+			_ = k8sClient.Delete(ctx, sandboxSet)
+		}
+	})
+
+	It("should write the reset signal through agent-runtime and return the sandbox to the pool", func() {
+		list := &agentsv1alpha1.SandboxList{}
+		Expect(k8sClient.List(ctx, list, client.InNamespace(namespace),
+			client.MatchingLabels{agentsv1alpha1.LabelSandboxPool: sandboxSet.Name})).To(Succeed())
+		Expect(list.Items).To(HaveLen(1))
+		target := &list.Items[0]
+
+		By("Marking the sandbox as carrying a CSI mount and triggering reuse")
+		Eventually(func() error {
+			latest := &agentsv1alpha1.Sandbox{}
+			if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(target), latest); err != nil {
+				return err
+			}
+			patch := client.MergeFrom(latest.DeepCopy())
+			if latest.Annotations == nil {
+				latest.Annotations = map[string]string{}
+			}
+			latest.Annotations[agentsv1alpha1.AnnotationCSIVolumeConfig] = `[{"mountPath":"/data"}]`
+			latest.Annotations[agentsv1alpha1.AnnotationReuseEnabled] = "true"
+			latest.Annotations[agentsv1alpha1.AnnotationReuse] = "true"
+			return k8sClient.Patch(ctx, latest, patch)
+		}, time.Second*10, time.Second).Should(Succeed())
+
+		// Reuse only succeeds if the controller wrote the reset-signal file into
+		// the sandbox through the agent-runtime files API. A failed write is a
+		// permanent reuse failure that deletes the sandbox, so observing a
+		// successful reuse (sandbox back in the pool with ReuseCount incremented)
+		// proves the write link works end to end.
+		By("Waiting for the sandbox to return to Running with ReuseCount incremented")
+		Eventually(func(g Gomega) {
+			g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(target), target)).To(Succeed())
+			g.Expect(target.Status.Phase).To(Equal(agentsv1alpha1.SandboxRunning))
+			g.Expect(target.Status.ReuseCount).To(Equal(int32(1)))
+		}, time.Minute*2, time.Second).Should(Succeed())
 	})
 })
