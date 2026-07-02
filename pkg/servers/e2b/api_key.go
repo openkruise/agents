@@ -148,6 +148,7 @@ func (sc *Controller) DeleteAPIKey(r *http.Request) (web.ApiResponse[struct{}], 
 				Message: fmt.Sprintf("Failed to delete API key: %v", err),
 			}
 		}
+		sc.deletedAPIKeys.Add(key.ID.String())
 	}
 
 	return web.ApiResponse[struct{}]{
