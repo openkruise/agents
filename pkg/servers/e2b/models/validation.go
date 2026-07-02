@@ -57,7 +57,7 @@ func ValidateVolumeMounts(mounts []VolumeMount) error {
 			return fmt.Errorf("volumeMounts[%d].name cannot be empty", i)
 		}
 		if err := validateMountPoint(vm.Path); err != nil {
-			return fmt.Errorf("volumeMounts[%d].path: %w", i, err)
+			return fmt.Errorf("volumeMounts[%d].path is invalid: %w", i, err)
 		}
 		if _, exists := seen[vm.Path]; exists {
 			return fmt.Errorf("volumeMounts[%d].path %q is duplicated", i, vm.Path)

@@ -719,6 +719,58 @@ func TestParseCreateSandboxRequest(t *testing.T) {
 		assert.Empty(t, got.VolumeMounts)
 		assert.Empty(t, got.Extensions.CSIMount.MountConfigs)
 	})
+
+	t.Run("volumeMounts and single csi volume metadata conflict", func(t *testing.T) {
+		// When both volumeMounts and single csi volume metadata are specified,
+		// single csi volume metadata takes precedence (overwrites volumeMounts)
+		body := `{
+			"templateID":"t1",
+			"metadata":{
+				"` + models.ExtensionKeyClaimWithCSIMount_VolumeName + `":"oss-pv-sandbox-system",
+				"` + models.ExtensionKeyClaimWithCSIMount_MountPoint + `":"/data-oss",
+				"` + models.ExtensionKeyClaimWithCSIMount_SubPath + `":"data-subPath"
+			},
+			"volumeMounts":[
+				{"name":"volume-pv","path":"/volume-path"}
+			]
+		}`
+		req := httptest.NewRequest(http.MethodPost, "/sandboxes", strings.NewReader(body))
+		got, apiErr := ctrl.parseCreateSandboxRequest(req)
+		require.Nil(t, apiErr)
+		// single csi volume metadata should override volumeMounts
+		require.Len(t, got.Extensions.CSIMount.MountConfigs, 1)
+		assert.Equal(t, "oss-pv-sandbox-system", got.Extensions.CSIMount.MountConfigs[0].PvName)
+		assert.Equal(t, "/data-oss", got.Extensions.CSIMount.MountConfigs[0].MountPath)
+		assert.Equal(t, "data-subPath", got.Extensions.CSIMount.MountConfigs[0].SubPath)
+		// volumeMounts should still be parsed
+		require.Len(t, got.VolumeMounts, 1)
+		assert.Equal(t, "volume-pv", got.VolumeMounts[0].Name)
+	})
+
+	t.Run("volumeMounts and multi csi volume metadata conflict", func(t *testing.T) {
+		// When both volumeMounts and metadata csi-volume-config are specified,
+		// metadata csi-volume-config takes precedence (overwrites volumeMounts)
+		csiConfig := `[{"pvName":"metadata-pv","mountPath":"/metadata-path","subPath":"sub","readOnly":true}]`
+		body := `{
+			"templateID":"t1",
+			"metadata":{"` + models.ExtensionKeyClaimWithCSIMount_MountConfig + `":` + fmt.Sprintf("%q", csiConfig) + `},
+			"volumeMounts":[
+				{"name":"volume-pv","path":"/volume-path"}
+			]
+		}`
+		req := httptest.NewRequest(http.MethodPost, "/sandboxes", strings.NewReader(body))
+		got, apiErr := ctrl.parseCreateSandboxRequest(req)
+		require.Nil(t, apiErr)
+		// metadata csi-volume-config should override volumeMounts
+		require.Len(t, got.Extensions.CSIMount.MountConfigs, 1)
+		assert.Equal(t, "metadata-pv", got.Extensions.CSIMount.MountConfigs[0].PvName)
+		assert.Equal(t, "/metadata-path", got.Extensions.CSIMount.MountConfigs[0].MountPath)
+		assert.Equal(t, "sub", got.Extensions.CSIMount.MountConfigs[0].SubPath)
+		assert.True(t, got.Extensions.CSIMount.MountConfigs[0].ReadOnly)
+		// volumeMounts should still be parsed
+		require.Len(t, got.VolumeMounts, 1)
+		assert.Equal(t, "volume-pv", got.VolumeMounts[0].Name)
+	})
 }
 
 func TestMapInfraErrorToApiError(t *testing.T) {
