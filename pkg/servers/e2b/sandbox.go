@@ -125,11 +125,24 @@ func (sc *Controller) convertToE2BSandbox(sbx infra.Sandbox, accessToken string)
 	}
 	_, endAt := ParseTimeout(sbx)
 	sandbox.EndAt = endAt.Format(time.RFC3339)
-	resource := sbx.GetResource()
-	sandbox.CPUCount = resource.CPUMilli / 1000
-	sandbox.MemoryMB = resource.MemoryMB
-	sandbox.DiskSizeMB = resource.DiskSizeMB
+	sandbox.CPUCount, sandbox.MemoryMB, sandbox.DiskSizeMB = e2bResource(sbx.GetResource())
 	return sandbox
+}
+
+func e2bResource(resource infra.SandboxResource) (int64, int64, int64) {
+	cpuMilli := resource.Limits.CPUMilli
+	if cpuMilli == 0 {
+		cpuMilli = resource.Requests.CPUMilli
+	}
+	memoryMB := resource.Limits.MemoryMB
+	if memoryMB == 0 {
+		memoryMB = resource.Requests.MemoryMB
+	}
+	diskSizeMB := resource.Limits.DiskSizeMB
+	if diskSizeMB == 0 {
+		diskSizeMB = resource.Requests.DiskSizeMB
+	}
+	return cpuMilli / 1000, memoryMB, diskSizeMB
 }
 
 func ValidateMetadataKey(key string) bool {

@@ -613,8 +613,64 @@ func TestSandbox_GetResource(t *testing.T) {
 				},
 			},
 			want: infra.SandboxResource{
-				CPUMilli: 1000,
-				MemoryMB: 1024,
+				Requests: infra.ResourceList{
+					CPUMilli: 1000,
+					MemoryMB: 1024,
+				},
+			},
+		},
+		{
+			name: "requests and limits are reported separately",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Resources: corev1.ResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceCPU:    resource.MustParse("500m"),
+								corev1.ResourceMemory: resource.MustParse("512Mi"),
+							},
+							Limits: corev1.ResourceList{
+								corev1.ResourceCPU:    resource.MustParse("1500m"),
+								corev1.ResourceMemory: resource.MustParse("1537Mi"),
+							},
+						},
+					}},
+				},
+			},
+			want: infra.SandboxResource{
+				Requests: infra.ResourceList{
+					CPUMilli: 500,
+					MemoryMB: 512,
+				},
+				Limits: infra.ResourceList{
+					CPUMilli: 1500,
+					MemoryMB: 1537,
+				},
+			},
+		},
+		{
+			name: "request memory floors while limit memory ceilings",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Resources: corev1.ResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceMemory: *resource.NewQuantity(1024*1024+1, resource.BinarySI),
+							},
+							Limits: corev1.ResourceList{
+								corev1.ResourceMemory: *resource.NewQuantity(1024*1024+1, resource.BinarySI),
+							},
+						},
+					}},
+				},
+			},
+			want: infra.SandboxResource{
+				Requests: infra.ResourceList{
+					MemoryMB: 1,
+				},
+				Limits: infra.ResourceList{
+					MemoryMB: 2,
+				},
 			},
 		},
 		{
@@ -642,8 +698,10 @@ func TestSandbox_GetResource(t *testing.T) {
 				},
 			},
 			want: infra.SandboxResource{
-				CPUMilli: 1500,
-				MemoryMB: 1536,
+				Requests: infra.ResourceList{
+					CPUMilli: 1500,
+					MemoryMB: 1536,
+				},
 			},
 		},
 		{
@@ -653,10 +711,7 @@ func TestSandbox_GetResource(t *testing.T) {
 					Containers: []corev1.Container{},
 				},
 			},
-			want: infra.SandboxResource{
-				CPUMilli: 0,
-				MemoryMB: 0,
-			},
+			want: infra.SandboxResource{},
 		},
 		{
 			name: "containers without resources",
@@ -671,10 +726,7 @@ func TestSandbox_GetResource(t *testing.T) {
 					},
 				},
 			},
-			want: infra.SandboxResource{
-				CPUMilli: 0,
-				MemoryMB: 0,
-			},
+			want: infra.SandboxResource{},
 		},
 	}
 
@@ -682,12 +734,8 @@ func TestSandbox_GetResource(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			s := AsSandbox(ConvertPodToSandboxCR(tt.pod), nil)
 			got := s.GetResource()
-			if got.CPUMilli != tt.want.CPUMilli {
-				t.Errorf("GetResource().CPUMilli = %v, want %v", got.CPUMilli, tt.want.CPUMilli)
-			}
-			if got.MemoryMB != tt.want.MemoryMB {
-				t.Errorf("GetResource().MemoryMB = %v, want %v", got.MemoryMB, tt.want.MemoryMB)
-			}
+			assert.Equal(t, tt.want.Requests, got.Requests)
+			assert.Equal(t, tt.want.Limits, got.Limits)
 		})
 	}
 }

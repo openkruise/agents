@@ -660,6 +660,9 @@ func TestGetTemplate(t *testing.T) {
 func TestBuildResource(t *testing.T) {
 	cpuQuantity, _ := resource.ParseQuantity("2000m")
 	memoryQuantity, _ := resource.ParseQuantity("2048Mi")
+	requestCPUQuantity, _ := resource.ParseQuantity("3000m")
+	requestMemoryQuantity, _ := resource.ParseQuantity("3072Mi")
+	requestStorageQuantity, _ := resource.ParseQuantity("4Gi")
 	storageQuantity, _ := resource.ParseQuantity("10Gi")
 
 	tests := []struct {
@@ -680,7 +683,7 @@ func TestBuildResource(t *testing.T) {
 									{
 										Name: "main",
 										Resources: corev1.ResourceRequirements{
-											Requests: corev1.ResourceList{
+											Limits: corev1.ResourceList{
 												corev1.ResourceCPU:    cpuQuantity,
 												corev1.ResourceMemory: memoryQuantity,
 											},
@@ -707,7 +710,7 @@ func TestBuildResource(t *testing.T) {
 									{
 										Name: "main",
 										Resources: corev1.ResourceRequirements{
-											Requests: corev1.ResourceList{
+											Limits: corev1.ResourceList{
 												corev1.ResourceCPU:    cpuQuantity,
 												corev1.ResourceMemory: memoryQuantity,
 											},
@@ -716,7 +719,7 @@ func TestBuildResource(t *testing.T) {
 									{
 										Name: "sidecar",
 										Resources: corev1.ResourceRequirements{
-											Requests: corev1.ResourceList{
+											Limits: corev1.ResourceList{
 												corev1.ResourceCPU:    cpuQuantity,
 												corev1.ResourceMemory: memoryQuantity,
 											},
@@ -733,7 +736,7 @@ func TestBuildResource(t *testing.T) {
 			expectDiskMB:   0,
 		},
 		{
-			name: "sandbox set with volume claim templates",
+			name: "falls back to request resources",
 			sandboxSet: &v1alpha1.SandboxSet{
 				Spec: v1alpha1.SandboxSetSpec{
 					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
@@ -744,6 +747,34 @@ func TestBuildResource(t *testing.T) {
 										Name: "main",
 										Resources: corev1.ResourceRequirements{
 											Requests: corev1.ResourceList{
+												corev1.ResourceCPU:              requestCPUQuantity,
+												corev1.ResourceMemory:           requestMemoryQuantity,
+												corev1.ResourceEphemeralStorage: requestStorageQuantity,
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectCPU:      3,
+			expectMemoryMB: 3072,
+			expectDiskMB:   4096,
+		},
+		{
+			name: "sandbox set with volume claim templates",
+			sandboxSet: &v1alpha1.SandboxSet{
+				Spec: v1alpha1.SandboxSetSpec{
+					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name: "main",
+										Resources: corev1.ResourceRequirements{
+											Limits: corev1.ResourceList{
 												corev1.ResourceCPU:    cpuQuantity,
 												corev1.ResourceMemory: memoryQuantity,
 											},
@@ -821,7 +852,7 @@ func TestBuildResource(t *testing.T) {
 									{
 										Name: "main",
 										Resources: corev1.ResourceRequirements{
-											Requests: corev1.ResourceList{
+											Limits: corev1.ResourceList{
 												corev1.ResourceCPU:    cpuQuantity,
 												corev1.ResourceMemory: memoryQuantity,
 											},

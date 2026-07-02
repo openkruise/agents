@@ -104,6 +104,8 @@ After resume, every caller runs `updateConnectTimeout` with `UpdatePolicyExtendO
 - If `templateID` matches a SandboxSet → claim path (`ClaimSandbox`).
 - If `templateID` matches a Checkpoint → clone path (`CloneSandbox`).
 - Otherwise → `400 Template or Checkpoint not found`.
+- API-key quota specs are passed to sandbox-manager create/clone options. Quota misses map to HTTP `403`.
+- Keep quota admission, Redis fail-open behavior, and anti-drift repair in sandbox-manager/quota layers; this package owns request parsing and E2B-compatible status/response mapping.
 
 #### Server-Side Timeouts (Claim / Clone / WaitReady)
 - These are the server-side deadlines for the synchronous create operation, distinct from the sandbox lifecycle `timeout` field (auto-shutdown / auto-pause).
@@ -120,6 +122,7 @@ After resume, every caller runs `updateConnectTimeout` with `UpdatePolicyExtendO
 4. **Timeout rules**: Resume and Connect(Paused→Resume) use the effective timeout after the resume floor, and post-resume Connect timeout writes are extend-only. Connect(Running) is also extend-only and must not apply the resume floor. Do not change this unless the product contract changes.
 5. **Middleware ordering**: `CheckAdminKey` must always come after `CheckApiKey`.
 6. **Model changes**: Request/response types live in `models/`. Keep validation logic in `models/validation.go`.
+7. **Quota errors**: Preserve `ErrorQuotaExceeded` → `403` mapping for create/clone. Do not move HTTP-code decisions into sandbox-manager or infra packages.
 
 ## Tests
 

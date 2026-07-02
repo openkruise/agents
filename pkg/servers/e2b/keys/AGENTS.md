@@ -61,6 +61,9 @@ sub-second).
 - Avoid `uuid.MustParse` on DB-loaded values. Use `uuid.Parse` and return/log errors instead of panicking on bad persisted data.
 - Be explicit about GORM delete behavior. If you rely on hard delete semantics, do not accidentally change behavior via soft-delete fields or default `Delete`.
 - When changing entities, also review `DeleteAPIKey` authorization expectations around `CreatedBy`.
+- Invalid stored quota payloads on request authentication/load paths are intentionally treated as unlimited for
+  compatibility and availability. `ListLimited` remains strict and skips invalid quota rows so anti-drift only
+  reconciles keys with a valid stored quota. Do not change this to fail-closed without an explicit product decision.
 
 ## Tests
 

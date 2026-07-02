@@ -179,7 +179,9 @@ func (sc *Controller) CheckCreateAPIKeyPermission(ctx context.Context, r *http.R
 
 	// Parse caller team and target team
 	var request models.NewTeamAPIKey
-	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
 		return ctx, &web.ApiError{
 			Code:    http.StatusBadRequest,
 			Message: err.Error(),
@@ -203,6 +205,12 @@ func (sc *Controller) CheckCreateAPIKeyPermission(ctx context.Context, r *http.R
 
 	// Only admin can create API key for other team
 	isAdmin := callerTeam.Name == models.AdminTeamName
+	if request.QuotaSpec != nil && !isAdmin {
+		return ctx, &web.ApiError{
+			Code:    http.StatusForbidden,
+			Message: "only admin can set api-key quota",
+		}
+	}
 	if !isAdmin && targetTeamName != callerTeam.Name {
 		return ctx, &web.ApiError{
 			Code:    http.StatusForbidden,

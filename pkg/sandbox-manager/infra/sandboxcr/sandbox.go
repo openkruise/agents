@@ -179,12 +179,12 @@ func (s *Sandbox) TriggerReuse(ctx context.Context) error {
 	if s.Sandbox.Annotations == nil {
 		s.Sandbox.Annotations = make(map[string]string, 1)
 	}
-	s.Sandbox.Annotations[agentsv1alpha1.AnnotationReuse] = "true"
+	s.Sandbox.Annotations[agentsv1alpha1.AnnotationReuse] = agentsv1alpha1.True
 	return s.Cache.GetClient().Patch(ctx, s.Sandbox, patch)
 }
 
 func (s *Sandbox) IsReuseEnabled() bool {
-	return s.Sandbox.Annotations[agentsv1alpha1.AnnotationReuseEnabled] == "true"
+	return s.Sandbox.Annotations[agentsv1alpha1.AnnotationReuseEnabled] == agentsv1alpha1.True
 }
 
 func (s *Sandbox) Phase() string {

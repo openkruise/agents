@@ -10,6 +10,7 @@ interfaces, and metrics without depending on one concrete backend.
 - Treat option structs in `types.go` as manager-facing operation contracts.
 - Keep claim, clone, timeout, checkpoint, runtime-init, and CSI-mount options stable for callers.
 - Use `ClaimMetrics` and `CloneMetrics` for implementation timing and single-line logs.
+- Keep quota source contracts backend-neutral: snapshots, events, subscriptions, health, and `SandboxResource`.
 
 ## Local Guidance
 
@@ -17,3 +18,4 @@ interfaces, and metrics without depending on one concrete backend.
 - Extend interfaces only when the sandbox-manager needs a capability from every backend.
 - Keep helper methods on shared types small and serialization-safe.
 - Avoid leaking controller or CR reconciliation details into this abstraction layer.
+- Do not add Redis, breaker, anti-drift policy, or HTTP status-code behavior here.

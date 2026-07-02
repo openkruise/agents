@@ -55,6 +55,7 @@ type Controller struct {
 	sandboxNamespace      string
 	memberlistBindPort    int
 	keyCfg                *keys.Config
+	quotaOpts             config.QuotaOptions
 
 	// fields
 	mux             *http.ServeMux
@@ -69,7 +70,7 @@ type Controller struct {
 }
 
 // NewController creates a new E2B Controller
-func NewController(domain, sysNs, peerSelector, sandboxNamespace, sandboxLabelSelector string, maxTimeout, minResumeTimeout, maxClaimWorkers, maxCreateQPS int, extProcMaxConcurrency uint32, port, memberlistBindPort int, keyCfg *keys.Config, clientConfig *rest.Config) *Controller {
+func NewController(domain, sysNs, peerSelector, sandboxNamespace, sandboxLabelSelector string, maxTimeout, minResumeTimeout, maxClaimWorkers, maxCreateQPS int, extProcMaxConcurrency uint32, port, memberlistBindPort int, keyCfg *keys.Config, clientConfig *rest.Config, quotaOpts config.QuotaOptions) *Controller {
 	sc := &Controller{
 		mux:                   http.NewServeMux(),
 		domain:                domain,
@@ -86,6 +87,7 @@ func NewController(domain, sysNs, peerSelector, sandboxNamespace, sandboxLabelSe
 		extProcMaxConcurrency: extProcMaxConcurrency,
 		memberlistBindPort:    memberlistBindPort,
 		keyCfg:                keyCfg,
+		quotaOpts:             quotaOpts,
 	}
 
 	sc.server = &http.Server{
@@ -118,7 +120,23 @@ func (sc *Controller) Init() error {
 	sc.storageRegistry = storages.NewStorageProvider()
 	sc.registerRoutes()
 
-	return sc.initKeyStorage(ctx)
+	if err := sc.initKeyStorage(ctx); err != nil {
+		return err
+	}
+
+	// Initialize quota through the sandbox-manager, which owns the runtime lifecycle.
+	if sc.keys != nil {
+		log.Info("will init quota management with quota options")
+		if err := sc.manager.InitQuota(ctx, sc.quotaOpts, keys.NewQuotaSubjectLister(sc.keys)); err != nil {
+			return err
+		}
+	} else {
+		log.Info("api-key quota is unenforced because E2B auth is disabled")
+		if err := sc.manager.InitQuota(ctx, config.QuotaOptions{}, nil); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (sc *Controller) sandboxManagerOptions() config.SandboxManagerOptions {
@@ -132,6 +150,7 @@ func (sc *Controller) sandboxManagerOptions() config.SandboxManagerOptions {
 		MaxCreateQPS:          sc.maxCreateQPS,
 		MemberlistBindPort:    sc.memberlistBindPort,
 		RestConfig:            sc.clientConfig,
+		Quota:                 sc.quotaOpts,
 	}
 }
 
@@ -177,25 +196,32 @@ func (sc *Controller) Run() (context.Context, error) {
 	// stopper
 	go func() {
 		<-sc.stop
-		// Shutdown server gracefully
 		shutdownCtx, shutdownCancel := context.WithTimeout(logs.NewContext("action", "shutdown"), consts.ShutdownTimeout)
-		log := klog.FromContext(shutdownCtx)
-		log.Info("Shutting down server...")
-		defer cancel()
-		sc.manager.Stop(shutdownCtx)
-		// Shutdown HTTP server with timeout
 		defer shutdownCancel()
-		if err := sc.server.Shutdown(shutdownCtx); err != nil {
-			klog.ErrorS(err, "HTTP server forced to shutdown")
-		}
-		if sc.keys != nil {
-			sc.keys.Stop()
-		}
-		klog.InfoS("Server exited")
+		sc.shutdown(shutdownCtx, cancel)
 	}()
 
 	if sc.keys != nil {
 		sc.keys.Run()
 	}
 	return ctx, nil
+}
+
+func (sc *Controller) shutdown(ctx context.Context, cancel context.CancelFunc) {
+	log := klog.FromContext(ctx)
+	log.Info("Shutting down server...")
+	defer cancel()
+
+	if sc.server != nil {
+		if err := sc.server.Shutdown(ctx); err != nil {
+			klog.ErrorS(err, "HTTP server forced to shutdown")
+		}
+	}
+	if sc.manager != nil {
+		sc.manager.Stop(ctx)
+	}
+	if sc.keys != nil {
+		sc.keys.Stop()
+	}
+	klog.InfoS("Server exited")
 }

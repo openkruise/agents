@@ -30,6 +30,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -76,23 +77,25 @@ func Setup(t *testing.T) (*Controller, ctrlclient.Client, func()) {
 	return SetupWithMinResumeTimeout(t, models.DefaultMinResumeTimeoutSeconds)
 }
 
+func SetupWithQuota(t *testing.T, enforcer sandboxmanager.QuotaEnforcer) (*Controller, ctrlclient.Client, func()) {
+	return setupWithMinResumeTimeoutAndQuota(t, models.DefaultMinResumeTimeoutSeconds, enforcer)
+}
+
 func refreshKeyStorageForTest(t *testing.T, controller *Controller) {
 	t.Helper()
 	require.NoError(t, controller.keys.Init(t.Context()))
 }
 
-// SetupWithMinResumeTimeout mirrors Setup but lets the caller override
-// Controller.minResumeTimeout so floor-enforcement assertions can use a
-// non-default value (e.g., 120s with a 60s request to observe the bump).
 func SetupWithMinResumeTimeout(t *testing.T, minResumeTimeout int) (*Controller, ctrlclient.Client, func()) {
+	return setupWithMinResumeTimeoutAndQuota(t, minResumeTimeout, nil)
+}
+
+func setupWithMinResumeTimeoutAndQuota(t *testing.T, minResumeTimeout int, quotaEnforcer sandboxmanager.QuotaEnforcer) (*Controller, ctrlclient.Client, func()) {
 	testutils.InitLogOutput()
 	namespace := "sandbox-system"
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 
-	// Build infra using the builder pattern (avoids connecting to a real API server).
-	// InitOptions populates defaults (e.g. MaxCreateQPS) that the infra rate limiter
-	// relies on — omitting this previously produced "limiter's burst 0" errors.
 	opts := config.InitOptions(config.SandboxManagerOptions{
 		SystemNamespace:    namespace,
 		MaxClaimWorkers:    10,
@@ -107,24 +110,18 @@ func SetupWithMinResumeTimeout(t *testing.T, minResumeTimeout int) (*Controller,
 			AdminKey:  InitKey,
 			Client:    fc,
 			APIReader: fc,
-		}, nil)
+		}, nil, config.QuotaOptions{})
 
-	// Create test resources using the controller-runtime fake client
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "sandbox-manager",
 			Namespace: namespace,
-			Labels: map[string]string{
-				"component": "sandbox-manager",
-			},
+			Labels:    map[string]string{"component": "sandbox-manager"},
 		},
 		Status: corev1.PodStatus{
 			Phase: corev1.PodRunning,
 			Conditions: []corev1.PodCondition{
-				{
-					Type:   corev1.PodReady,
-					Status: corev1.ConditionTrue,
-				},
+				{Type: corev1.PodReady, Status: corev1.ConditionTrue},
 			},
 			PodIP: "127.0.0.1",
 		},
@@ -132,13 +129,9 @@ func SetupWithMinResumeTimeout(t *testing.T, minResumeTimeout int) (*Controller,
 	require.NoError(t, fc.Create(t.Context(), pod))
 	require.NoError(t, fc.Status().Update(t.Context(), pod))
 
-	// create key store secret
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      keys.KeySecretName,
-			Namespace: namespace,
-		},
-		Data: map[string][]byte{},
+		ObjectMeta: metav1.ObjectMeta{Name: keys.KeySecretName, Namespace: namespace},
+		Data:       map[string][]byte{},
 	}
 	require.NoError(t, fc.Create(t.Context(), secret))
 
@@ -148,11 +141,11 @@ func SetupWithMinResumeTimeout(t *testing.T, minResumeTimeout int) (*Controller,
 		WithAPIReader(fc).
 		WithProxy(proxyServer).
 		Build()
-
 	require.NoError(t, infraInstance.Run(t.Context()))
 
 	sandboxManager, err := sandboxmanager.NewSandboxManagerBuilder(opts).
 		WithRequestAdapter(adapters.DefaultAdapterFactory(controller.port)).
+		WithQuotaEnforcer(quotaEnforcer).
 		WithCustomInfra(func() (infra.Builder, error) {
 			return sandboxcr.NewInfraBuilder(opts).
 				WithCache(cache).
@@ -169,8 +162,15 @@ func SetupWithMinResumeTimeout(t *testing.T, minResumeTimeout int) (*Controller,
 
 	require.NoError(t, controller.initKeyStorage(t.Context()))
 
-	// Start HTTP server and stop channel directly (skip controller.Run which
-	// would call manager.Run and try to start memberlist/peersManager).
+	if quotaEnforcer == nil {
+		// Initialize quota through the manager (mirrors Init() logic).
+		if controller.keys != nil {
+			require.NoError(t, controller.manager.InitQuota(t.Context(), config.QuotaOptions{}, keys.NewQuotaSubjectLister(controller.keys)))
+		} else {
+			require.NoError(t, controller.manager.InitQuota(t.Context(), config.QuotaOptions{}, nil))
+		}
+	}
+
 	controller.stop = make(chan os.Signal, 1)
 	signal.Notify(controller.stop, syscall.SIGINT, syscall.SIGTERM)
 	serverErr := make(chan error, 1)
@@ -188,6 +188,141 @@ func SetupWithMinResumeTimeout(t *testing.T, minResumeTimeout int) (*Controller,
 		_ = controller.server.Close()
 		require.NoError(t, <-serverErr)
 	}
+}
+
+type stopProbeInfraBuilder struct {
+	base infra.Builder
+	stop func()
+}
+
+func (b stopProbeInfraBuilder) Build() infra.Infrastructure {
+	return stopProbeInfra{Infrastructure: b.base.Build(), stop: b.stop}
+}
+
+type stopProbeInfra struct {
+	infra.Infrastructure
+	stop func()
+}
+
+func (i stopProbeInfra) Stop(ctx context.Context) {
+	i.stop()
+	i.Infrastructure.Stop(ctx)
+}
+
+func TestControllerShutdownStopsManagerAfterHTTPShutdown(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+
+	requestStarted := make(chan struct{})
+	releaseRequest := make(chan struct{})
+	server := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			close(requestStarted)
+			<-releaseRequest
+			_, _ = w.Write([]byte("ok"))
+		}),
+	}
+	shutdownStarted := make(chan struct{})
+	server.RegisterOnShutdown(func() {
+		close(shutdownStarted)
+	})
+	serverErr := make(chan error, 1)
+	go func() {
+		serverErr <- server.Serve(listener)
+	}()
+
+	client := &http.Client{
+		Timeout:   5 * time.Second,
+		Transport: &http.Transport{Proxy: nil},
+	}
+	defer client.CloseIdleConnections()
+	clientErr := make(chan error, 1)
+	go func() {
+		resp, err := client.Get("http://" + listener.Addr().String())
+		if err != nil {
+			clientErr <- err
+			return
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		clientErr <- resp.Body.Close()
+	}()
+
+	select {
+	case <-requestStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for request to start")
+	}
+
+	cancelCalled := atomic.Bool{}
+	managerStopped := make(chan struct{})
+
+	opts := config.InitOptions(config.SandboxManagerOptions{
+		SystemNamespace:    "sandbox-system",
+		MemberlistBindPort: config.DefaultMemberlistBindPort,
+	})
+	fakeCache, fc, cacheErr := cachetest.NewTestCache(t)
+	require.NoError(t, cacheErr)
+	proxyServer := proxy.NewServer(opts)
+	mgr, err := sandboxmanager.NewSandboxManagerBuilder(opts).
+		WithCustomInfra(func() (infra.Builder, error) {
+			builder := sandboxcr.NewInfraBuilder(opts).
+				WithCache(fakeCache).
+				WithAPIReader(fc).
+				WithProxy(proxyServer)
+			return stopProbeInfraBuilder{
+				base: builder,
+				stop: func() {
+					close(managerStopped)
+				},
+			}, nil
+		}).
+		Build()
+	require.NoError(t, err)
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer shutdownCancel()
+	shutdownDone := make(chan struct{})
+	sc := &Controller{
+		server:  server,
+		manager: mgr,
+	}
+	go func() {
+		sc.shutdown(shutdownCtx, func() {
+			cancelCalled.Store(true)
+		})
+		close(shutdownDone)
+	}()
+
+	select {
+	case <-shutdownStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for HTTP shutdown to start")
+	}
+	select {
+	case <-managerStopped:
+		t.Fatal("manager.Stop must not run while HTTP requests are draining")
+	default:
+	}
+	select {
+	case <-shutdownDone:
+		t.Fatal("shutdown completed before the active request drained")
+	default:
+	}
+
+	close(releaseRequest)
+	select {
+	case <-shutdownDone:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for shutdown to finish")
+	}
+	select {
+	case <-managerStopped:
+	default:
+		t.Fatal("manager.Stop must run after HTTP requests drain")
+	}
+	require.NoError(t, <-clientErr)
+	require.ErrorIs(t, <-serverErr, http.ErrServerClosed)
+	assert.True(t, cancelCalled.Load())
 }
 
 func NewRequest(t *testing.T, query map[string]string, body any, pathValues map[string]string, user *models.CreatedTeamAPIKey) *http.Request {
@@ -219,7 +354,6 @@ func GetSbsOwnerReference(sbs *agentsv1alpha1.SandboxSet) []metav1.OwnerReferenc
 	return []metav1.OwnerReference{*metav1.NewControllerRef(sbs, agentsv1alpha1.SandboxSetControllerKind)}
 }
 
-// CreateSandboxPoolOptions contains options for creating a sandbox pool
 type CreateSandboxPoolOptions struct {
 	Namespace   string
 	RuntimeURL  string
@@ -237,37 +371,28 @@ func CreateSandboxPool(t *testing.T, controller *Controller, name string, availa
 	if options.Namespace != "" {
 		ns = options.Namespace
 	}
-	container := corev1.Container{
-		Name:  "main",
-		Image: "old-image",
-	}
+	container := corev1.Container{Name: "main", Image: "old-image"}
 	if options.CPURequest != "" || options.Memory != "" {
 		container.Resources.Requests = corev1.ResourceList{}
+		container.Resources.Limits = corev1.ResourceList{}
 		if options.CPURequest != "" {
 			container.Resources.Requests[corev1.ResourceCPU] = resource.MustParse(options.CPURequest)
+			container.Resources.Limits[corev1.ResourceCPU] = resource.MustParse(options.CPURequest)
 		}
 		if options.Memory != "" {
 			container.Resources.Requests[corev1.ResourceMemory] = resource.MustParse(options.Memory)
+			container.Resources.Limits[corev1.ResourceMemory] = resource.MustParse(options.Memory)
 		}
 	}
 	tmpl := agentsv1alpha1.EmbeddedSandboxTemplate{
 		Template: &corev1.PodTemplateSpec{
-			Spec: corev1.PodSpec{
-				Containers: []corev1.Container{container},
-			},
+			Spec: corev1.PodSpec{Containers: []corev1.Container{container}},
 		},
 	}
 	sbs := &agentsv1alpha1.SandboxSet{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: ns,
-			UID:       types.UID(uuid.NewString()),
-		},
-		Spec: agentsv1alpha1.SandboxSetSpec{
-			EmbeddedSandboxTemplate: tmpl,
-		},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, UID: types.UID(uuid.NewString())},
+		Spec:       agentsv1alpha1.SandboxSetSpec{EmbeddedSandboxTemplate: tmpl},
 	}
-	// Use the controller-runtime client (CacheV2's fake client) for all CRD operations
 	fc := getTestCRClient(controller)
 	err := fc.Create(t.Context(), sbs)
 	if err != nil && !apierrors.IsAlreadyExists(err) {
@@ -284,40 +409,27 @@ func CreateSandboxPool(t *testing.T, controller *Controller, name string, availa
 		}
 		sbx := &agentsv1alpha1.Sandbox{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      fmt.Sprintf("%s-%d", name, i),
-				Namespace: ns,
+				Name: fmt.Sprintf("%s-%d", name, i), Namespace: ns,
 				Labels: map[string]string{
 					agentsv1alpha1.LabelSandboxTemplate:  name,
 					agentsv1alpha1.LabelSandboxIsClaimed: "false",
 				},
-				Annotations:       annotations,
-				OwnerReferences:   GetSbsOwnerReference(sbs),
-				UID:               types.UID(uuid.NewString()),
-				CreationTimestamp: now,
+				Annotations: annotations, OwnerReferences: GetSbsOwnerReference(sbs),
+				UID: types.UID(uuid.NewString()), CreationTimestamp: now,
 			},
-			Spec: agentsv1alpha1.SandboxSpec{
-				EmbeddedSandboxTemplate: tmpl,
-			},
+			Spec: agentsv1alpha1.SandboxSpec{EmbeddedSandboxTemplate: tmpl},
 			Status: agentsv1alpha1.SandboxStatus{
 				Phase: agentsv1alpha1.SandboxRunning,
-				Conditions: []metav1.Condition{
-					{
-						Type:   string(agentsv1alpha1.SandboxConditionReady),
-						Status: metav1.ConditionTrue,
-					},
-				},
-				PodInfo: agentsv1alpha1.PodInfo{
-					PodIP: "1.2.3.4",
-				},
+				Conditions: []metav1.Condition{{
+					Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue,
+				}},
+				PodInfo: agentsv1alpha1.PodInfo{PodIP: "1.2.3.4"},
 			},
 		}
 		CreateSandboxWithStatus(t, fc, sbx)
 	}
 	require.Eventually(t, func() bool {
-		pool, _ := controller.cache.ListSandboxesInPool(t.Context(), infracache.ListSandboxesInPoolOptions{
-			Namespace: ns,
-			Pool:      name,
-		})
+		pool, _ := controller.cache.ListSandboxesInPool(t.Context(), infracache.ListSandboxesInPoolOptions{Namespace: ns, Pool: name})
 		return len(pool) == available
 	}, time.Minute, 100*time.Millisecond)
 	return func() {
@@ -345,45 +457,32 @@ func CreateClaimedSandboxCR(t *testing.T, controller *Controller, namespace, nam
 	}
 	sbx := &agentsv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
+			Name: name, Namespace: namespace,
 			Labels: map[string]string{
 				agentsv1alpha1.LabelSandboxTemplate:  template,
 				agentsv1alpha1.LabelSandboxIsClaimed: agentsv1alpha1.True,
 			},
-			Annotations:       copiedAnnotations,
-			UID:               types.UID(uuid.NewString()),
-			CreationTimestamp: now,
+			Annotations: copiedAnnotations, UID: types.UID(uuid.NewString()), CreationTimestamp: now,
 		},
 		Spec: agentsv1alpha1.SandboxSpec{
 			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
 				Template: &corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{{Name: "main", Image: "test-image"}},
-					},
+					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "test-image"}}},
 				},
 			},
 		},
 		Status: agentsv1alpha1.SandboxStatus{
 			Phase: agentsv1alpha1.SandboxRunning,
-			Conditions: []metav1.Condition{
-				{
-					Type:   string(agentsv1alpha1.SandboxConditionReady),
-					Status: metav1.ConditionTrue,
-				},
-			},
-			PodInfo: agentsv1alpha1.PodInfo{
-				PodIP: "1.2.3.4",
-			},
+			Conditions: []metav1.Condition{{
+				Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue,
+			}},
+			PodInfo: agentsv1alpha1.PodInfo{PodIP: "1.2.3.4"},
 		},
 	}
 	CreateSandboxWithStatus(t, fc, sbx)
 	sandboxID := fmt.Sprintf("%s--%s", namespace, name)
 	require.Eventually(t, func() bool {
-		_, err := controller.cache.GetClaimedSandbox(t.Context(), infracache.GetClaimedSandboxOptions{
-			Namespace: namespace,
-			SandboxID: sandboxID,
-		})
+		_, err := controller.cache.GetClaimedSandbox(t.Context(), infracache.GetClaimedSandboxOptions{Namespace: namespace, SandboxID: sandboxID})
 		return err == nil
 	}, time.Second, 10*time.Millisecond)
 	return sbx
@@ -394,63 +493,36 @@ func CreateCheckpointAndTemplateInNamespace(t *testing.T, controller *Controller
 	fc := getTestCRClient(controller)
 	createdAt, err := time.Parse(time.RFC3339, creationTime)
 	require.NoError(t, err)
-
 	tmpl := agentsv1alpha1.EmbeddedSandboxTemplate{
 		Template: &corev1.PodTemplateSpec{
-			Spec: corev1.PodSpec{
-				Containers: []corev1.Container{{Name: "main", Image: "checkpoint-image"}},
-			},
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "checkpoint-image"}}},
 		},
 	}
 	sbt := &agentsv1alpha1.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
-			UID:       types.UID(uuid.NewString()),
-		},
-		Spec: agentsv1alpha1.SandboxTemplateSpec{
-			Template: tmpl.Template,
-		},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, UID: types.UID(uuid.NewString())},
+		Spec:       agentsv1alpha1.SandboxTemplateSpec{Template: tmpl.Template},
 	}
 	require.NoError(t, fc.Create(t.Context(), sbt))
-
 	cp := &agentsv1alpha1.Checkpoint{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:              name,
-			Namespace:         namespace,
-			UID:               types.UID(uuid.NewString()),
-			CreationTimestamp: metav1.NewTime(createdAt),
-			Labels: map[string]string{
-				agentsv1alpha1.LabelSandboxTemplate: name,
-			},
-			Annotations: map[string]string{
-				agentsv1alpha1.AnnotationOwner:     owner,
-				agentsv1alpha1.AnnotationSandboxID: sandboxID,
-			},
+			Name: name, Namespace: namespace, UID: types.UID(uuid.NewString()), CreationTimestamp: metav1.NewTime(createdAt),
+			Labels:      map[string]string{agentsv1alpha1.LabelSandboxTemplate: name},
+			Annotations: map[string]string{agentsv1alpha1.AnnotationOwner: owner, agentsv1alpha1.AnnotationSandboxID: sandboxID},
 		},
-		Status: agentsv1alpha1.CheckpointStatus{
-			Phase:        agentsv1alpha1.CheckpointSucceeded,
-			CheckpointId: checkpointID,
-		},
+		Status: agentsv1alpha1.CheckpointStatus{Phase: agentsv1alpha1.CheckpointSucceeded, CheckpointId: checkpointID},
 	}
 	require.NoError(t, fc.Create(t.Context(), cp))
 	require.NoError(t, fc.Status().Update(t.Context(), cp))
 	require.Eventually(t, func() bool {
-		_, err := controller.cache.GetCheckpoint(t.Context(), infracache.GetCheckpointOptions{
-			Namespace:    namespace,
-			CheckpointID: checkpointID,
-		})
+		_, err := controller.cache.GetCheckpoint(t.Context(), infracache.GetCheckpointOptions{Namespace: namespace, CheckpointID: checkpointID})
 		return err == nil
 	}, time.Second, 10*time.Millisecond)
-
 	return func() {
 		_ = fc.Delete(t.Context(), cp)
 		_ = fc.Delete(t.Context(), sbt)
 	}
 }
 
-// getTestCRClient retrieves the controller-runtime client from the infra.
-// This is the CacheV2's fake client used in tests.
 func getTestCRClient(controller *Controller) ctrlclient.Client {
 	return controller.manager.GetInfra().GetCache().GetClient()
 }
@@ -472,9 +544,7 @@ func EnableWaitSim(t *testing.T, controller *Controller, sandboxID string) {
 type DoFunc func(t *testing.T, c ctrlclient.Client, sbx *agentsv1alpha1.Sandbox)
 type WhenFunc func(sbx *agentsv1alpha1.Sandbox) bool
 
-func Immediately(sbx *agentsv1alpha1.Sandbox) bool {
-	return sbx != nil
-}
+func Immediately(sbx *agentsv1alpha1.Sandbox) bool { return sbx != nil }
 
 func UpdateSandboxWhen(t *testing.T, c ctrlclient.Client, sandboxID string, when WhenFunc, do DoFunc) {
 	require.NotNil(t, do)
@@ -507,14 +577,12 @@ func DoSetSandboxStatus(phase agentsv1alpha1.SandboxPhase, pausedStatus, readySt
 		sbx.Status.Conditions = nil
 		if pausedStatus != "" {
 			sbx.Status.Conditions = append(sbx.Status.Conditions, metav1.Condition{
-				Type:   string(agentsv1alpha1.SandboxConditionPaused),
-				Status: pausedStatus,
+				Type: string(agentsv1alpha1.SandboxConditionPaused), Status: pausedStatus,
 			})
 		}
 		if readyStatus != "" {
 			sbx.Status.Conditions = append(sbx.Status.Conditions, metav1.Condition{
-				Type:   string(agentsv1alpha1.SandboxConditionReady),
-				Status: readyStatus,
+				Type: string(agentsv1alpha1.SandboxConditionReady), Status: readyStatus,
 			})
 		}
 		err := c.Status().Update(t.Context(), sbx)

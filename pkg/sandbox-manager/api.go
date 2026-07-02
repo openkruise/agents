@@ -18,6 +18,7 @@ package sandbox_manager
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -26,20 +27,91 @@ import (
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/cache"
-	"github.com/openkruise/agents/pkg/sandbox-manager/errors"
+	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	"github.com/openkruise/agents/pkg/sandbox-manager/quota"
+	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
 	"github.com/openkruise/agents/pkg/utils/pagination"
 )
+
+// ClaimSandboxOptions wraps infra-level claim options with an optional quota spec.
+// The manager builds the admission internally from Quota and the infra User field.
+type ClaimSandboxOptions struct {
+	Infra infra.ClaimSandboxOptions
+	Quota *quotaspec.QuotaSpec
+}
+
+// CloneSandboxOptions wraps infra-level clone options with an optional quota spec.
+type CloneSandboxOptions struct {
+	Infra infra.CloneSandboxOptions
+	Quota *quotaspec.QuotaSpec
+}
+
+// DeleteSandboxOptions carries the sandbox, user identity, and optional quota spec
+// needed for delete and post-delete quota release.
+type DeleteSandboxOptions struct {
+	Sandbox infra.Sandbox
+	User    string
+	Quota   *quotaspec.QuotaSpec
+}
+
+// quotaAdmission builds a SandboxAdmission that enforces the given quota spec via
+// the manager's QuotaEnforcer. Returns nil when enforcement is not applicable.
+func (m *SandboxManager) quotaAdmission(user string, spec *quotaspec.QuotaSpec) *infra.SandboxAdmission {
+	if m == nil || m.quota == nil || spec == nil || !spec.IsLimited() {
+		return nil
+	}
+	quotaSpec := spec.DeepCopy()
+	return &infra.SandboxAdmission{
+		Acquire: func(ctx context.Context, lockString string, resource infra.SandboxResource) error {
+			err := m.quota.Acquire(ctx, quota.AcquireRequest{
+				User:       user,
+				LockString: lockString,
+				Quota:      quotaSpec,
+				Footprint:  quota.FootprintFromResource(resource),
+				Scopes:     []quotaspec.QuotaScope{quotaspec.ScopeRunning},
+			})
+			if errors.Is(err, quota.ErrQuotaExceeded) {
+				return managererrors.NewError(managererrors.ErrorQuotaExceeded, "api-key quota exceeded")
+			}
+			return err
+		},
+		Release: func(ctx context.Context, lockString string) error {
+			return m.quota.Release(ctx, quota.ReleaseRequest{User: user, LockString: lockString})
+		},
+	}
+}
+
+// releaseQuotaAfterDelete releases quota after a successful delete.
+// It uses a bounded context derived from the caller's context to avoid blocking.
+func (m *SandboxManager) releaseQuotaAfterDelete(ctx context.Context, opts DeleteSandboxOptions) {
+	if m == nil || m.quota == nil || opts.Quota == nil || !opts.Quota.IsLimited() || opts.Sandbox == nil {
+		return
+	}
+	annotations := opts.Sandbox.GetAnnotations()
+	if annotations[v1alpha1.AnnotationOwner] != opts.User {
+		return
+	}
+	lockString := annotations[v1alpha1.AnnotationLock]
+	if lockString == "" {
+		return
+	}
+	releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), infra.SandboxAdmissionReleaseTimeout)
+	defer cancel()
+	if err := m.quota.Release(releaseCtx, quota.ReleaseRequest{User: opts.User, LockString: lockString}); err != nil {
+		klog.FromContext(releaseCtx).Error(err, "failed to release quota after accepted sandbox delete", "owner", opts.User, "lockString", lockString)
+	}
+}
 
 // preserveTypedError keeps an already-classified manager error (e.g. the
 // ErrorBadRequest / ErrorInternal produced by the infra create-error classifier)
 // so its ErrorCode survives up to the HTTP layer and maps to the right status.
 // Only untyped errors are wrapped as ErrorInternal with the given context.
 func preserveTypedError(err error, contextMsg string) error {
-	if errors.GetErrCode(err) != errors.ErrorUnknown {
+	if managererrors.GetErrCode(err) != managererrors.ErrorUnknown {
 		return err
 	}
-	return errors.NewError(errors.ErrorInternal, "%s: %v", contextMsg, err)
+	return managererrors.NewError(managererrors.ErrorInternal, "%s: %v", contextMsg, err)
 }
 
 // ClaimSandbox attempts to lock a Pod and assign it to the current caller.
@@ -48,15 +120,18 @@ func preserveTypedError(err error, contextMsg string) error {
 // (so this is NOT double counting):
 //   - sandboxClaimCreationResponses: API-level result counter (success/failure).
 //   - sandboxClaimTotal: claim-operation counter broken down by lock_type.
-func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions) (infra.Sandbox, error) {
+func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts ClaimSandboxOptions) (infra.Sandbox, error) {
 	log := klog.FromContext(ctx)
-	if !m.infra.HasTemplate(ctx, infra.HasTemplateOptions{Namespace: opts.Namespace, Name: opts.Template}) {
+	infraOpts := opts.Infra
+	infraOpts.Admission = m.quotaAdmission(infraOpts.User, opts.Quota)
+
+	if !m.infra.HasTemplate(ctx, infra.HasTemplateOptions{Namespace: infraOpts.Namespace, Name: infraOpts.Template}) {
 		// Template lookup failed before any sandbox was picked, so lock_type is unknown.
-		sandboxClaimCreationResponses.WithLabelValues(opts.Namespace, "failure").Inc()
-		sandboxClaimTotal.WithLabelValues(opts.Namespace, "failure", "unknown").Inc()
-		return nil, errors.NewError(errors.ErrorNotFound, "template %s not found", opts.Template)
+		sandboxClaimCreationResponses.WithLabelValues(infraOpts.Namespace, "failure").Inc()
+		sandboxClaimTotal.WithLabelValues(infraOpts.Namespace, "failure", "unknown").Inc()
+		return nil, managererrors.NewError(managererrors.ErrorNotFound, "template %s not found", infraOpts.Template)
 	}
-	sandbox, claimMetrics, err := m.infra.ClaimSandbox(ctx, opts)
+	sandbox, claimMetrics, err := m.infra.ClaimSandbox(ctx, infraOpts)
 	if err != nil {
 		log.Error(err, "failed to claim sandbox", "metrics", claimMetrics.String())
 		// claimMetrics may carry the actual lock_type even on failure; fall back to
@@ -65,8 +140,8 @@ func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts infra.ClaimSandb
 		if lockType == "" {
 			lockType = "unknown"
 		}
-		sandboxClaimCreationResponses.WithLabelValues(opts.Namespace, "failure").Inc()
-		sandboxClaimTotal.WithLabelValues(opts.Namespace, "failure", lockType).Inc()
+		sandboxClaimCreationResponses.WithLabelValues(infraOpts.Namespace, "failure").Inc()
+		sandboxClaimTotal.WithLabelValues(infraOpts.Namespace, "failure", lockType).Inc()
 		return nil, preserveTypedError(err, "failed to claim sandbox")
 	}
 
@@ -88,12 +163,15 @@ func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts infra.ClaimSandb
 	return sandbox, nil
 }
 
-func (m *SandboxManager) CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions) (infra.Sandbox, error) {
+func (m *SandboxManager) CloneSandbox(ctx context.Context, opts CloneSandboxOptions) (infra.Sandbox, error) {
 	log := klog.FromContext(ctx)
-	sandbox, cloneMetrics, err := m.infra.CloneSandbox(ctx, opts)
+	infraOpts := opts.Infra
+	infraOpts.Admission = m.quotaAdmission(infraOpts.User, opts.Quota)
+
+	sandbox, cloneMetrics, err := m.infra.CloneSandbox(ctx, infraOpts)
 	if err != nil {
 		log.Error(err, "failed to clone sandbox", "metrics", cloneMetrics)
-		sandboxCloneTotal.WithLabelValues(opts.Namespace, "failure").Inc()
+		sandboxCloneTotal.WithLabelValues(infraOpts.Namespace, "failure").Inc()
 		return nil, preserveTypedError(err, "failed to clone sandbox")
 	}
 
@@ -118,20 +196,20 @@ func (m *SandboxManager) CloneSandbox(ctx context.Context, opts infra.CloneSandb
 func (m *SandboxManager) GetSandbox(ctx context.Context, user string, expectedStates []string, opts infra.GetSandboxOptions) (infra.Sandbox, error) {
 	log := klog.FromContext(ctx).WithValues("sandboxID", opts.SandboxID)
 	if user == "" {
-		return nil, errors.NewError(errors.ErrorBadRequest, "user is required")
+		return nil, managererrors.NewError(managererrors.ErrorBadRequest, "user is required")
 	}
 	log.Info("try to get claimed sandbox")
 	sbx, err := m.infra.GetSandbox(ctx, opts)
 	if err != nil {
 		log.Error(err, "failed to get sandbox from cache")
-		return nil, errors.NewError(errors.ErrorNotFound, "sandbox %s not found", opts.SandboxID)
+		return nil, managererrors.NewError(managererrors.ErrorNotFound, "sandbox %s not found", opts.SandboxID)
 	}
 
 	state, reason := sbx.GetState()
 
 	if sbx.GetRoute().Owner != user {
 		log.Error(nil, "sandbox is not owned by user")
-		return nil, errors.NewError(errors.ErrorNotAllowed, "sandbox %s is not owned", opts.SandboxID)
+		return nil, managererrors.NewError(managererrors.ErrorNotAllowed, "sandbox %s is not owned", opts.SandboxID)
 	}
 
 	if len(expectedStates) == 0 {
@@ -143,13 +221,13 @@ func (m *SandboxManager) GetSandbox(ctx context.Context, user string, expectedSt
 		}
 	}
 	log.Error(nil, "sandbox state is not expected", "state", state, "reason", reason, "expectedStates", expectedStates)
-	return nil, errors.NewError(errors.ErrorBadRequest, "sandbox %s is not healthy (state %s, reason %s)", opts.SandboxID, state, reason)
+	return nil, managererrors.NewError(managererrors.ErrorBadRequest, "sandbox %s is not healthy (state %s, reason %s)", opts.SandboxID, state, reason)
 }
 
 func (m *SandboxManager) ListSandboxes(ctx context.Context, opts infra.SelectSandboxesOptions, p *pagination.Paginator[infra.Sandbox]) ([]infra.Sandbox, string, error) {
 	sandboxes, err := m.infra.SelectSandboxes(ctx, opts)
 	if err != nil {
-		return nil, "", errors.NewError(errors.ErrorNotFound, "failed to list sandboxes: %v", err)
+		return nil, "", managererrors.NewError(managererrors.ErrorNotFound, "failed to list sandboxes: %v", err)
 	}
 	var nextToken string
 	if p != nil {
@@ -161,7 +239,7 @@ func (m *SandboxManager) ListSandboxes(ctx context.Context, opts infra.SelectSan
 func (m *SandboxManager) ListCheckpoints(ctx context.Context, opts infra.SelectSucceededCheckpointsOptions, p *pagination.Paginator[infra.CheckpointInfo]) ([]infra.CheckpointInfo, string, error) {
 	checkpoints, err := m.infra.SelectSucceededCheckpoints(ctx, opts)
 	if err != nil {
-		return nil, "", errors.NewError(errors.ErrorNotFound, "failed to list checkpoints: %v", err)
+		return nil, "", managererrors.NewError(managererrors.ErrorNotFound, "failed to list checkpoints: %v", err)
 	}
 	var nextToken string
 	if p != nil {
@@ -281,8 +359,10 @@ func (m *SandboxManager) deleteRouteAndSync(ctx context.Context, sbx infra.Sandb
 
 // DeleteSandbox deletes a sandbox and syncs route with peers.
 // If the sandbox is reuse-enabled and in Running phase, it triggers reuse instead of deletion.
-func (m *SandboxManager) DeleteSandbox(ctx context.Context, sbx infra.Sandbox) error {
-	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
+// On both accepted-delete return paths (reuse trigger success and Kill success), quota is released.
+func (m *SandboxManager) DeleteSandbox(ctx context.Context, opts DeleteSandboxOptions) error {
+	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(opts.Sandbox))
+	sbx := opts.Sandbox
 
 	if sbx.IsReuseEnabled() && sbx.Phase() == string(v1alpha1.SandboxRunning) {
 		log.Info("sandbox is reuse-enabled, triggering reuse instead of deletion")
@@ -294,6 +374,7 @@ func (m *SandboxManager) DeleteSandbox(ctx context.Context, sbx infra.Sandbox) e
 			sandboxReuseResponses.WithLabelValues(sbx.GetNamespace(), "success").Inc()
 			sandboxReuseDuration.WithLabelValues(sbx.GetNamespace()).Observe(time.Since(start).Seconds())
 			m.deleteRouteAndSync(ctx, sbx)
+			m.releaseQuotaAfterDelete(ctx, opts)
 			return nil
 		}
 	}
@@ -309,5 +390,6 @@ func (m *SandboxManager) DeleteSandbox(ctx context.Context, sbx infra.Sandbox) e
 	log.Info("sandbox deleted")
 
 	m.deleteRouteAndSync(ctx, sbx)
+	m.releaseQuotaAfterDelete(ctx, opts)
 	return nil
 }

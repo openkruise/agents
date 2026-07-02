@@ -33,6 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
+	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/servers/e2b"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
@@ -42,8 +43,10 @@ import (
 )
 
 const (
-	E2BKeyStorageDSNEnvVar = "E2B_KEY_STORAGE_DSN"
-	E2BKeyHashPepperEnvVar = "E2B_KEY_HASH_PEPPER"
+	E2BKeyStorageDSNEnvVar   = "E2B_KEY_STORAGE_DSN"
+	E2BKeyHashPepperEnvVar   = "E2B_KEY_HASH_PEPPER"
+	QuotaRedisUsernameEnvVar = "QUOTA_REDIS_USERNAME"
+	QuotaRedisPasswordEnvVar = "QUOTA_REDIS_PASSWORD"
 )
 
 // validateE2BTimeoutFlags rejects misconfigurations that would either
@@ -86,6 +89,13 @@ func main() {
 	var memberlistBindPort int
 	var e2bKeyStorage string
 	var e2bKeyStorageDisableAutoMigrate bool
+	var quotaRedisAddr string
+	var quotaRedisDB int
+	var quotaRedisOperationTimeout time.Duration
+	var quotaRedisBreakerN int
+	var quotaRedisBreakerD time.Duration
+	var quotaAntiDriftInterval time.Duration
+	var quotaAntiDriftGrace time.Duration
 
 	utilfeature.DefaultMutableFeatureGate.AddFlag(pflag.CommandLine)
 
@@ -117,6 +127,13 @@ func main() {
 			"When --e2b-key-storage=mysql and auth is enabled, set MySQL DSN via environment variable "+E2BKeyStorageDSNEnvVar)
 	pflag.BoolVar(&e2bKeyStorageDisableAutoMigrate, "e2b-key-storage-disable-schema-auto-update", false,
 		"Disable schema auto-migration for DB-Based key storage like mysql; when enabled, schema changes are skipped but admin team/key bootstrap still runs")
+	pflag.StringVar(&quotaRedisAddr, "quota-redis-addr", "", "Redis address for sandbox-manager quota enforcement. Empty disables enforcement and fails open.")
+	pflag.IntVar(&quotaRedisDB, "quota-redis-db", 0, "Redis DB for sandbox-manager quota enforcement.")
+	pflag.DurationVar(&quotaRedisOperationTimeout, "quota-redis-operation-timeout", consts.DefaultQuotaRedisOperationTimeout, "Per-operation timeout for Redis quota commands.")
+	pflag.IntVar(&quotaRedisBreakerN, "quota-redis-breaker-n", consts.DefaultQuotaRedisBreakerN, "Consecutive Redis quota backend errors required to open the fail-open breaker.")
+	pflag.DurationVar(&quotaRedisBreakerD, "quota-redis-breaker-d", consts.DefaultQuotaRedisBreakerD, "How long the Redis quota fail-open breaker stays open before probing again.")
+	pflag.DurationVar(&quotaAntiDriftInterval, "quota-anti-drift-interval", consts.DefaultQuotaAntiDriftInterval, "Interval for quota anti-drift reconciliation.")
+	pflag.DurationVar(&quotaAntiDriftGrace, "quota-anti-drift-grace", consts.DefaultQuotaAntiDriftGrace, "Grace period before quota anti-drift adds or removes live-set entries.")
 
 	opts := zap.Options{
 		Development: false,
@@ -165,6 +182,9 @@ func main() {
 	if err := validateE2BTimeoutFlags(e2bMinResumeTimeout, e2bMaxTimeout); err != nil {
 		klog.Fatalf("invalid e2b timeout flags: %v", err)
 	}
+	if quotaRedisOperationTimeout <= 0 {
+		klog.Fatalf("--quota-redis-operation-timeout must be greater than 0")
+	}
 
 	if maxClaimWorkers < 0 {
 		klog.Fatalf("--max-claim-workers must be non-negative")
@@ -188,6 +208,8 @@ func main() {
 
 	e2bKeyStorageDSN := strings.TrimSpace(os.Getenv(E2BKeyStorageDSNEnvVar))
 	e2bKeyStoragePepper := strings.TrimSpace(os.Getenv(E2BKeyHashPepperEnvVar))
+	quotaRedisUsername := strings.TrimSpace(os.Getenv(QuotaRedisUsernameEnvVar))
+	quotaRedisPassword := strings.TrimSpace(os.Getenv(QuotaRedisPasswordEnvVar))
 	if e2bEnableAuth {
 		// Validate key storage args
 		switch e2bKeyStorage {
@@ -202,6 +224,18 @@ func main() {
 		default:
 			klog.Fatalf("--e2b-key-storage must be 'secret' or 'mysql'")
 		}
+	}
+
+	quotaOpts := config.QuotaOptions{
+		RedisAddr:         quotaRedisAddr,
+		RedisUsername:     quotaRedisUsername,
+		RedisPassword:     quotaRedisPassword,
+		RedisDB:           quotaRedisDB,
+		OperationTimeout:  quotaRedisOperationTimeout,
+		BreakerN:          quotaRedisBreakerN,
+		BreakerD:          quotaRedisBreakerD,
+		AntiDriftInterval: quotaAntiDriftInterval,
+		AntiDriftGrace:    quotaAntiDriftGrace,
 	}
 
 	// Initialize Kubernetes client and config
@@ -222,8 +256,8 @@ func main() {
 		}
 	}
 
-	sandboxController := e2b.NewController(domain, sysNs, peerSelector, sandboxNamespace, sandboxLabelSelector, e2bMaxTimeout, e2bMinResumeTimeout, maxClaimWorkers, maxCreateQPS, uint32(extProcMaxConcurrency), // #nosec -- validated non-negative above
-		port, memberlistBindPort, keyCfg, clientConfig)
+	sandboxController := e2b.NewController(domain, sysNs, peerSelector, sandboxNamespace, sandboxLabelSelector, e2bMaxTimeout, e2bMinResumeTimeout, maxClaimWorkers, maxCreateQPS, uint32(extProcMaxConcurrency),
+		port, memberlistBindPort, keyCfg, clientConfig, quotaOpts)
 
 	if err := sandboxController.Init(); err != nil {
 		klog.Fatalf("Failed to initialize sandbox controller: %v", err)

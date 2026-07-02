@@ -9,6 +9,7 @@ controller-runtime clients, informer cache, and the local proxy route model.
 - Claim flow validates options, selects or creates a sandbox, locks it, waits for readiness, initializes runtime, mounts CSI storage, and cleans up failed claims.
 - Clone flow resolves checkpoint/template data, creates a sandbox from checkpoint state, waits for readiness, then restores runtime and CSI mounts.
 - `Sandbox` wraps the CR object and exposes manager operations such as pause, resume, kill, timeout updates, route lookup, runtime requests, and checkpoint creation.
+- Quota source code converts Sandbox CRD/cache objects into `infra.QuotaSandboxSnapshot` and `infra.QuotaSandboxEvent`.
 
 ## Local Guidance
 
@@ -18,3 +19,6 @@ controller-runtime clients, informer cache, and the local proxy route model.
 - Update `infra.ClaimMetrics` or `infra.CloneMetrics` consistently when adding operation stages.
 - Preserve package-level `Default...` function variables as test seams.
 - Treat `Pause` and `Resume` as first-writer-wins state transitions.
+- Keep admission acquire/release timing here, but keep quota limit evaluation and Redis/backend behavior out of this package.
+- Preserve quota snapshot semantics: `Running` is `Live && !Spec.Paused`; invalid informer tombstones are dropped and counted.
+- Keep lifecycle predicate changes in `pkg/utils/lifecycle` when shared by cache and infra.

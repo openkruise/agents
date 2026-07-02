@@ -60,6 +60,7 @@ data:
                                 prefix: "/kruise/api"
                               route:
                                 cluster: manager_cluster
+                                timeout: 600s
                             - match:
                                 prefix: "/"
                               route:

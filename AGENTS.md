@@ -50,7 +50,7 @@ pkg/
   cache/           Cache layer with index, tasks, and controller-specific caches
   discovery/       Sandbox discovery service
   identity/        Identity and token providers (sandbox tokens, security tokens)
-  utils/           Shared utilities (MUST NOT grow into a dumping ground; see Package Naming below)
+  utils/           Shared utilities with clearly scoped responsibilities (see Package Naming below)
 proto/             Generated protobuf (DO NOT edit)
 hack/              Scripts, boilerplate, certs
 test/              E2E (Go), E2B (Python) tests
@@ -85,8 +85,6 @@ test/              E2E (Go), E2B (Python) tests
 - When adding new functionality, prefer creating a purpose-specific sub-package under the appropriate domain directory
   over adding files to an existing generic package. For example, add `pkg/controller/rollback/` instead of
   `pkg/utils/rollback.go`.
-- The existing `pkg/utils/` directory contains legacy code that should not grow further. New utilities must be placed in
-  domain-specific packages. If a utility is only used by one component, keep it local to that component.
 - If multiple packages share a helper, create a clearly-named package under `pkg/` that reflects its purpose
   (e.g., `pkg/identity/` for token providers, `pkg/discovery/` for sandbox discovery), not a catch-all `pkg/common/`.
 - Avoid introducing dependency from utility package to domain-specific packages

@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 
+	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 )
 
@@ -31,6 +32,7 @@ var (
 type CreateKeyOptions struct {
 	Name     string
 	TeamName string
+	Quota    *quotaspec.QuotaSpec
 }
 
 // KeyStorage abstracts API key persistence. Implementations must be safe for concurrent use.
@@ -43,6 +45,7 @@ type KeyStorage interface {
 	CreateKey(ctx context.Context, key *models.CreatedTeamAPIKey, opts CreateKeyOptions) (*models.CreatedTeamAPIKey, error)
 	DeleteKey(ctx context.Context, key *models.CreatedTeamAPIKey) error
 	ListByOwnerTeam(ctx context.Context, owner *models.CreatedTeamAPIKey) ([]*models.TeamAPIKey, error)
+	ListLimited(ctx context.Context) ([]*models.CreatedTeamAPIKey, error)
 	ListTeams(ctx context.Context, user *models.CreatedTeamAPIKey) ([]*models.ListedTeam, error)
 	FindTeamByName(ctx context.Context, teamName string) (*models.Team, bool, error)
 }

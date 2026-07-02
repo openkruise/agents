@@ -28,6 +28,7 @@ import (
 	"github.com/openkruise/agents/pkg/peers"
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
@@ -477,4 +478,27 @@ func (m *mockRequestAdapter) IsSandboxRequest(string, string, int) bool {
 func (b *SandboxManagerBuilder) WithCustomPeers(getPeersFunc GetPeersFunc) *SandboxManagerBuilder {
 	b.getPeersFunc = getPeersFunc
 	return b
+}
+
+func TestInitOptionsQuotaDefaults(t *testing.T) {
+	opts := config.InitOptions(config.SandboxManagerOptions{})
+	assert.Equal(t, consts.DefaultQuotaRedisOperationTimeout, opts.Quota.OperationTimeout)
+	assert.Equal(t, consts.DefaultQuotaRedisBreakerN, opts.Quota.BreakerN)
+	assert.Equal(t, consts.DefaultQuotaRedisBreakerD, opts.Quota.BreakerD)
+	assert.Equal(t, consts.DefaultQuotaAntiDriftInterval, opts.Quota.AntiDriftInterval)
+	assert.Equal(t, consts.DefaultQuotaAntiDriftGrace, opts.Quota.AntiDriftGrace)
+}
+
+func TestCleanupQuotaNilSafe(t *testing.T) {
+	// nil manager
+	var m *SandboxManager
+	require.NoError(t, m.CleanupQuota(t.Context(), "user-1"))
+
+	// nil quota
+	m2 := &SandboxManager{}
+	require.NoError(t, m2.CleanupQuota(t.Context(), "user-1"))
+
+	// empty user
+	m3 := &SandboxManager{}
+	require.NoError(t, m3.CleanupQuota(t.Context(), ""))
 }
