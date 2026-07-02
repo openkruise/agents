@@ -81,6 +81,10 @@ vet: ## Run go vet against code.
 build: generate fmt vet manifests ## Build manager binary.
 	go build -o bin/agent-sandbox-controller cmd/agent-sandbox-controller/main.go
 
+.PHONY: build-okactl
+build-okactl: ## Build okactl CLI binary.
+	go build -o bin/okactl ./cmd/okactl
+
 
 # TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
 # The default setup assumes Kind is pre-installed and builds/loads the Manager Docker image locally.

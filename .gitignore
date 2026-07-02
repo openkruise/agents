@@ -7,6 +7,9 @@
 bin/*
 Dockerfile.cross
 
+# Pre-built okactl binary (distributed via GitHub Releases)
+okactl
+
 # Test binary, built with `go test -c`
 *.test
 
