@@ -297,6 +297,30 @@ func TestCreateSandboxWithClaim_CSIMount(t *testing.T) {
 			expectCSIMount:     true,
 			expectedMountCount: 3,
 		},
+		{
+			name: "csi mount with credentialProviderName attribute for RRSA storage auth",
+			request: models.NewSandboxRequest{
+				TemplateID: "test-template",
+				Extensions: models.NewSandboxRequestExtension{
+					CSIMount: models.CSIMountExtension{
+						MountConfigs: []v1alpha1.CSIMountConfig{
+							{
+								PvName:     "pv-oss-rrsa",
+								MountPath:  "/data",
+								Attributes: map[string]string{"credentialProviderName": "my-cred-provider"},
+								SubPath:    "user-files",
+							},
+							{
+								PvName:    "pv-nas-normal",
+								MountPath: "/workspace",
+							},
+						},
+					},
+				},
+			},
+			expectCSIMount:     true,
+			expectedMountCount: 2,
+		},
 	}
 
 	for _, tt := range tests {
@@ -810,6 +834,103 @@ func TestMapInfraErrorToApiError(t *testing.T) {
 			apiErr := mapInfraErrorToApiError(tt.err)
 			assert.Equal(t, tt.expectedCode, apiErr.Code)
 			assert.Contains(t, apiErr.Message, tt.err.Error())
+		})
+	}
+}
+
+func TestInjectStorageAuthAnnotation(t *testing.T) {
+	tests := []struct {
+		name               string
+		initialAnnotations map[string]string
+		key                string
+		value              string
+		expectAnnotation   bool
+		expectedKey        string
+		expectedValue      string
+	}{
+		{
+			name:             "both key and value non-empty injects annotation",
+			key:              "security.agents.kruise.io/storage-auth",
+			value:            `[{"credentialProviderName":"my-provider"}]`,
+			expectAnnotation: true,
+			expectedKey:      "security.agents.kruise.io/storage-auth",
+			expectedValue:    `[{"credentialProviderName":"my-provider"}]`,
+		},
+		{
+			name:             "empty key skips injection",
+			key:              "",
+			value:            `[{"credentialProviderName":"my-provider"}]`,
+			expectAnnotation: false,
+		},
+		{
+			name:             "empty value skips injection",
+			key:              "security.agents.kruise.io/storage-auth",
+			value:            "",
+			expectAnnotation: false,
+		},
+		{
+			name:             "both key and value empty skips injection",
+			key:              "",
+			value:            "",
+			expectAnnotation: false,
+		},
+		{
+			name:               "nil annotations map creates new map and injects",
+			initialAnnotations: nil,
+			key:                "security.agents.kruise.io/storage-auth",
+			value:              `[{"credentialProviderName":"rrsa-provider"}]`,
+			expectAnnotation:   true,
+			expectedKey:        "security.agents.kruise.io/storage-auth",
+			expectedValue:      `[{"credentialProviderName":"rrsa-provider"}]`,
+		},
+		{
+			name:               "existing annotations are preserved",
+			initialAnnotations: map[string]string{"existing-key": "existing-val"},
+			key:                "security.agents.kruise.io/storage-auth",
+			value:              `[{"credentialProviderName":"provider-x"}]`,
+			expectAnnotation:   true,
+			expectedKey:        "security.agents.kruise.io/storage-auth",
+			expectedValue:      `[{"credentialProviderName":"provider-x"}]`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockSbx := &sandboxcr.Sandbox{
+				Sandbox: &agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:        "test-sandbox",
+						Namespace:   "default",
+						Annotations: tt.initialAnnotations,
+					},
+				},
+			}
+
+			ctrl := &Controller{}
+			ctrl.injectStorageAuthAnnotation(mockSbx, tt.key, tt.value)
+
+			annotations := mockSbx.GetAnnotations()
+
+			if !tt.expectAnnotation {
+				// Verify no new annotation was added
+				if tt.initialAnnotations == nil {
+					assert.Nil(t, annotations, "annotations should remain nil when injection is skipped")
+				} else {
+					assert.Equal(t, len(tt.initialAnnotations), len(annotations),
+						"no new annotations should be added when injection is skipped")
+				}
+				return
+			}
+
+			require.NotNil(t, annotations, "annotations should not be nil after injection")
+			val, exists := annotations[tt.expectedKey]
+			assert.True(t, exists, "expected annotation key %q to exist", tt.expectedKey)
+			assert.Equal(t, tt.expectedValue, val, "annotation value mismatch")
+
+			// Verify existing annotations are preserved
+			for k, v := range tt.initialAnnotations {
+				assert.Equal(t, v, annotations[k], "existing annotation %q should be preserved", k)
+			}
 		})
 	}
 }
