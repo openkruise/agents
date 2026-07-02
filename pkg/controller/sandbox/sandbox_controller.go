@@ -53,6 +53,11 @@ func init() {
 	flag.DurationVar(&reuseTimeout, "reuse-timeout", reuseTimeout, "Timeout for sandbox reuse cleanup operations.")
 	flag.DurationVar(&reuseGracePeriod, "reuse-grace-period", reuseGracePeriod, "Grace period after reuse cleanup before sandbox returns to pool.")
 	flag.DurationVar(&reuseFailureShutdownGrace, "reuse-failure-shutdown-grace", reuseFailureShutdownGrace, "Grace period before shutting down a sandbox after reuse failure.")
+	flag.StringVar(&csiResetSignalDir, "csi-reset-signal-dir", csiResetSignalDir,
+		"Directory inside the sandbox where a reset signal file is written before reuse when the sandbox carries CSI mounts, "+
+			"so a restarting csi-sidecar can unmount stale volumes. Empty disables the behavior.")
+	flag.StringVar(&csiResetSignalFileName, "csi-reset-signal-file", csiResetSignalFileName,
+		"Name of the reset signal file written into --csi-reset-signal-dir before reuse.")
 }
 
 var (
@@ -61,6 +66,8 @@ var (
 	reuseTimeout              = 60 * time.Second
 	reuseGracePeriod          = 10 * time.Second
 	reuseFailureShutdownGrace = 5 * time.Minute
+	csiResetSignalDir         = ""
+	csiResetSignalFileName    = "reset"
 )
 
 // Enqueuer is the contract the Sandbox controller depends on for async
@@ -93,9 +100,11 @@ func Add(mgr manager.Manager, metricsCleanup Enqueuer) error {
 			CheckpointControl: checkpointControl,
 			PodControl:        podControl,
 			ReuseConfig: core.SandboxReuseConfig{
-				Timeout:              reuseTimeout,
-				GracePeriod:          reuseGracePeriod,
-				FailureShutdownGrace: reuseFailureShutdownGrace,
+				Timeout:                reuseTimeout,
+				GracePeriod:            reuseGracePeriod,
+				FailureShutdownGrace:   reuseFailureShutdownGrace,
+				CSIResetSignalDir:      csiResetSignalDir,
+				CSIResetSignalFileName: csiResetSignalFileName,
 			},
 		}),
 		rateLimiter:    rateLimiter,

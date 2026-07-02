@@ -39,6 +39,7 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/identity"
 	"github.com/openkruise/agents/pkg/utils"
+	agentsruntime "github.com/openkruise/agents/pkg/utils/runtime"
 )
 
 type mockSandboxReuser struct {
@@ -96,6 +97,8 @@ func TestEnsureSandboxReused(t *testing.T) {
 		pod                *corev1.Pod
 		newStatus          *agentsv1alpha1.SandboxStatus
 		sbs                *agentsv1alpha1.SandboxSet
+		csiResetSignalDir  string
+		csiWriteErr        error
 		expectError        string
 		expectPhase        agentsv1alpha1.SandboxPhase
 		expectRequeue      bool
@@ -103,6 +106,7 @@ func TestEnsureSandboxReused(t *testing.T) {
 		expectCondReason   string
 		expectShutdownTime bool
 		expectDeleted      bool
+		expectCSIWrite     bool
 	}{
 		{
 			name:             "missing sandbox-pool label - reuse failed",
@@ -164,6 +168,72 @@ func TestEnsureSandboxReused(t *testing.T) {
 			},
 			newStatus:        &agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxReusing},
 			expectCondReason: agentsv1alpha1.SandboxReusingReasonStarted,
+		},
+		{
+			name:             "first entry - csi mounts with reset-signal-dir configured - signal written, reuse started",
+			reuser:           &mockSandboxReuser{},
+			reuseTimeout:     60 * time.Second,
+			reuseGracePeriod: 10 * time.Second,
+			box: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+					Labels: map[string]string{
+						agentsv1alpha1.LabelSandboxPool: "test-pool",
+					},
+					Annotations: map[string]string{
+						agentsv1alpha1.AnnotationReuse:           "true",
+						agentsv1alpha1.AnnotationReuseEnabled:    "true",
+						agentsv1alpha1.AnnotationCSIVolumeConfig: `[{"mountPath":"/data"}]`,
+					},
+				},
+			},
+			pod: readyPod,
+			sbs: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-pool",
+					Namespace: "default",
+					UID:       types.UID("test-uid"),
+				},
+				Spec: agentsv1alpha1.SandboxSetSpec{Replicas: 1},
+			},
+			newStatus:         &agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxReusing},
+			csiResetSignalDir: "/var/run/csi-reset",
+			expectCSIWrite:    true,
+			expectCondReason:  agentsv1alpha1.SandboxReusingReasonStarted,
+		},
+		{
+			name:             "first entry - csi mounts but reset-signal-dir not configured - reuse failed and deleted",
+			reuser:           &mockSandboxReuser{},
+			reuseTimeout:     60 * time.Second,
+			reuseGracePeriod: 10 * time.Second,
+			box: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+					Labels: map[string]string{
+						agentsv1alpha1.LabelSandboxPool: "test-pool",
+					},
+					Annotations: map[string]string{
+						agentsv1alpha1.AnnotationReuse:           "true",
+						agentsv1alpha1.AnnotationReuseEnabled:    "true",
+						agentsv1alpha1.AnnotationCSIVolumeConfig: `[{"mountPath":"/data"}]`,
+					},
+				},
+			},
+			pod: readyPod,
+			sbs: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-pool",
+					Namespace: "default",
+					UID:       types.UID("test-uid"),
+				},
+				Spec: agentsv1alpha1.SandboxSetSpec{Replicas: 1},
+			},
+			newStatus:        &agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxReusing},
+			csiResetSignalDir: "",
+			expectCondReason: agentsv1alpha1.SandboxReusingReasonFailed,
+			expectDeleted:    true,
 		},
 		{
 			name: "reuse in progress - not complete, requeues for polling",
@@ -980,14 +1050,35 @@ func TestEnsureSandboxReused(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			origWrite := writeRuntimeFileFunc
+			origInterval := csiResetSignalRetryInterval
+			t.Cleanup(func() {
+				writeRuntimeFileFunc = origWrite
+				csiResetSignalRetryInterval = origInterval
+			})
+			csiResetSignalRetryInterval = time.Millisecond
+			var csiWriteCalls int
+			writeRuntimeFileFunc = func(_ context.Context, _ agentsruntime.WriteFileArgs) (agentsruntime.WriteFileResult, error) {
+				csiWriteCalls++
+				if tt.csiWriteErr != nil {
+					return agentsruntime.WriteFileResult{}, tt.csiWriteErr
+				}
+				return agentsruntime.WriteFileResult{StatusCode: 200}, nil
+			}
+
 			objs := []client.Object{tt.box}
 			if tt.sbs != nil {
 				objs = append(objs, tt.sbs)
 			}
 			control, fakeClient := newTestReuseControl(t, objs, tt.reuser, tt.reuseTimeout, tt.reuseGracePeriod)
+			control.config.CSIResetSignalDir = tt.csiResetSignalDir
 
 			args := EnsureFuncArgs{Pod: tt.pod, Box: tt.box, NewStatus: tt.newStatus}
 			requeue, err := control.ensureSandboxReused(context.TODO(), args)
+
+			if tt.expectCSIWrite {
+				assert.Positive(t, csiWriteCalls, "expected CSI reset signal to be written")
+			}
 
 			if tt.expectError != "" {
 				require.Error(t, err)
@@ -1936,6 +2027,139 @@ func TestReusePollingInterval(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.expected, control.reusePollingInterval(tt.remaining))
+		})
+	}
+}
+
+func TestEnsureCSIResetSignal(t *testing.T) {
+	origWrite := writeRuntimeFileFunc
+	origInterval := csiResetSignalRetryInterval
+	t.Cleanup(func() {
+		writeRuntimeFileFunc = origWrite
+		csiResetSignalRetryInterval = origInterval
+	})
+	csiResetSignalRetryInterval = time.Millisecond
+
+	sandboxWithCSI := func() *agentsv1alpha1.Sandbox {
+		return &agentsv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-sandbox",
+				Namespace: "default",
+				Annotations: map[string]string{
+					agentsv1alpha1.AnnotationCSIVolumeConfig: `[{"mountPath":"/data"}]`,
+				},
+			},
+		}
+	}
+
+	tests := []struct {
+		name         string
+		dir          string
+		fileName     string
+		box          *agentsv1alpha1.Sandbox
+		cancelCtx    bool
+		failTimes    int // number of leading write attempts that fail before succeeding
+		writeErr     error
+		wantCalls    int
+		wantFilePath string
+		expectError  string
+	}{
+		{
+			name:        "csi mounts but no reset dir configured fails",
+			dir:         "",
+			box:         sandboxWithCSI(),
+			wantCalls:   0,
+			expectError: "csi-reset-signal-dir is not configured",
+		},
+		{
+			name: "no csi annotation skips write",
+			dir:  "/var/run/csi-reset",
+			box: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-sandbox", Namespace: "default"},
+			},
+			wantCalls: 0,
+		},
+		{
+			name:         "success on first attempt",
+			dir:          "/var/run/csi-reset",
+			fileName:     "reset",
+			box:          sandboxWithCSI(),
+			wantCalls:    1,
+			wantFilePath: "/var/run/csi-reset/reset",
+		},
+		{
+			name:         "custom file name is used",
+			dir:          "/var/run/csi-reset",
+			fileName:     "unmount",
+			box:          sandboxWithCSI(),
+			wantCalls:    1,
+			wantFilePath: "/var/run/csi-reset/unmount",
+		},
+		{
+			name:         "success after retries",
+			dir:          "/var/run/csi-reset",
+			fileName:     "reset",
+			box:          sandboxWithCSI(),
+			failTimes:    2,
+			writeErr:     fmt.Errorf("runtime unavailable"),
+			wantCalls:    3,
+			wantFilePath: "/var/run/csi-reset/reset",
+		},
+		{
+			name:        "failure after exhausting retries",
+			dir:         "/var/run/csi-reset",
+			box:         sandboxWithCSI(),
+			failTimes:   csiResetSignalMaxRetries,
+			writeErr:    fmt.Errorf("runtime unavailable"),
+			wantCalls:   csiResetSignalMaxRetries,
+			expectError: "runtime unavailable",
+		},
+		{
+			name:        "canceled context returns before writing",
+			dir:         "/var/run/csi-reset",
+			box:         sandboxWithCSI(),
+			cancelCtx:   true,
+			wantCalls:   0,
+			expectError: "context canceled",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var calls int
+			var gotPath string
+			var gotContent []byte
+			writeRuntimeFileFunc = func(_ context.Context, args agentsruntime.WriteFileArgs) (agentsruntime.WriteFileResult, error) {
+				calls++
+				gotPath = args.FilePath
+				gotContent = args.Content
+				if calls <= tt.failTimes {
+					return agentsruntime.WriteFileResult{}, tt.writeErr
+				}
+				return agentsruntime.WriteFileResult{StatusCode: 200}, nil
+			}
+
+			ctx := context.Background()
+			if tt.cancelCtx {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			}
+
+			control := &SandboxReuseControl{config: SandboxReuseConfig{CSIResetSignalDir: tt.dir, CSIResetSignalFileName: tt.fileName}}
+			err := control.ensureCSIResetSignal(ctx, tt.box)
+
+			assert.Equal(t, tt.wantCalls, calls)
+			if tt.wantFilePath != "" {
+				assert.Equal(t, tt.wantFilePath, gotPath)
+				assert.Empty(t, gotContent, "reset signal file must be an empty marker")
+			}
+			if tt.expectError == "" {
+				assert.NoError(t, err)
+			} else {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
+			}
 		})
 	}
 }

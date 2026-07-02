@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -33,7 +34,25 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/identity"
 	"github.com/openkruise/agents/pkg/utils"
+	agentsruntime "github.com/openkruise/agents/pkg/utils/runtime"
 )
+
+const (
+	// csiResetSignalWriteTimeout bounds a single write attempt of the reset signal file.
+	csiResetSignalWriteTimeout = 3 * time.Second
+	// csiResetSignalMaxRetries is the number of write attempts for the reset signal
+	// file before giving up. Transient runtime unavailability right at reuse start
+	// is common, so a few inline retries smooth over it.
+	csiResetSignalMaxRetries = 3
+)
+
+// csiResetSignalRetryInterval is the backoff between reset signal write attempts.
+// It is a var rather than a const so tests can shorten it.
+var csiResetSignalRetryInterval = 1 * time.Second
+
+// writeRuntimeFileFunc is a package-level seam over agentsruntime.WriteFileWithRuntime
+// so tests can stub the runtime file write without a live sandbox.
+var writeRuntimeFileFunc = agentsruntime.WriteFileWithRuntime
 
 // TODO for CRR based reuser
 type noopSandboxReuser struct{}
@@ -111,6 +130,13 @@ func (r *SandboxReuseControl) doReuse(ctx context.Context, args EnsureFuncArgs) 
 			fmt.Sprintf("Reuse started for sandbox %s", box.Name))
 		klog.InfoS("Reuse started", "sandbox", klog.KObj(box))
 
+		// Signal the csi-sidecar to unmount stale CSI volumes on its next restart
+		// before handing the sandbox back for reuse. Must run while the runtime is
+		// still reachable, i.e. before the reuser resets the sandbox.
+		if err := r.ensureCSIResetSignal(ctx, box); err != nil {
+			return 0, err
+		}
+
 		if err := r.config.Reuser.Reuse(ctx, box, args.Pod); err != nil {
 			return 0, err
 		}
@@ -135,6 +161,54 @@ func (r *SandboxReuseControl) doReuse(ctx context.Context, args EnsureFuncArgs) 
 	}
 
 	return requeue, err
+}
+
+// ensureCSIResetSignal writes an empty reset signal file into the sandbox's
+// configured CSI reset directory so that a restarting csi-sidecar can detect it
+// and unmount stale CSI volumes before the sandbox is returned to the pool.
+//
+// It is a no-op when the sandbox carries no CSI mount annotation. When the sandbox
+// does carry CSI mounts but the reset directory is not configured, it fails the
+// reuse rather than silently returning stale mounts to the pool. The write goes
+// through the agent-runtime files API, so it only depends on the runtime sidecar
+// being reachable, not on any binary inside the sandbox. Transient failures are
+// retried a few times inline.
+func (r *SandboxReuseControl) ensureCSIResetSignal(ctx context.Context, box *agentsv1alpha1.Sandbox) error {
+	if box.Annotations[agentsv1alpha1.AnnotationCSIVolumeConfig] == "" {
+		return nil
+	}
+	if r.config.CSIResetSignalDir == "" {
+		return fmt.Errorf("sandbox carries CSI mounts but csi-reset-signal-dir is not configured")
+	}
+
+	resetFile := path.Join(r.config.CSIResetSignalDir, r.config.CSIResetSignalFileName)
+	var lastErr error
+	for attempt := 1; attempt <= csiResetSignalMaxRetries; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		_, lastErr = writeRuntimeFileFunc(ctx, agentsruntime.WriteFileArgs{
+			Sbx:         box,
+			FilePath:    resetFile,
+			Content:     []byte{},
+			Permissions: 0644,
+			Timeout:     csiResetSignalWriteTimeout,
+		})
+		if lastErr == nil {
+			klog.InfoS("Wrote CSI reset signal for reuse", "sandbox", klog.KObj(box), "file", resetFile, "attempt", attempt)
+			return nil
+		}
+		klog.InfoS("Failed to write CSI reset signal, will retry", "sandbox", klog.KObj(box),
+			"file", resetFile, "attempt", attempt, "error", lastErr)
+		if attempt < csiResetSignalMaxRetries {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(csiResetSignalRetryInterval):
+			}
+		}
+	}
+	return fmt.Errorf("failed to write csi reset signal to %s after %d attempts: %w", resetFile, csiResetSignalMaxRetries, lastErr)
 }
 
 // validateReusePreconditions performs all pre-condition checks before the
