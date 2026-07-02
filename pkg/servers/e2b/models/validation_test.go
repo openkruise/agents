@@ -154,7 +154,7 @@ func TestValidateVolumeMounts(t *testing.T) {
 				{Name: "pv-001", Path: ""},
 			},
 			expectError:   true,
-			errorContains: "volumeMounts[0].path: mount point cannot be empty",
+			errorContains: "volumeMounts[0].path is invalid: mount point cannot be empty",
 		},
 		{
 			name: "path not starting with slash",
@@ -162,7 +162,7 @@ func TestValidateVolumeMounts(t *testing.T) {
 				{Name: "pv-001", Path: "invalid/path"},
 			},
 			expectError:   true,
-			errorContains: "volumeMounts[0].path: mount point must start with '/'",
+			errorContains: "volumeMounts[0].path is invalid: mount point must start with '/'",
 		},
 		{
 			name: "path contains ..",
@@ -170,7 +170,7 @@ func TestValidateVolumeMounts(t *testing.T) {
 				{Name: "pv-001", Path: "/path/../etc"},
 			},
 			expectError:   true,
-			errorContains: "volumeMounts[0].path: mount point contains invalid '..' path element",
+			errorContains: "volumeMounts[0].path is invalid: mount point contains invalid '..' path element",
 		},
 		{
 			name: "duplicate paths",
@@ -198,7 +198,7 @@ func TestValidateVolumeMounts(t *testing.T) {
 				{Name: "pv-003", Path: "invalid"},
 			},
 			expectError:   true,
-			errorContains: "volumeMounts[2].path: mount point must start with '/'",
+			errorContains: "volumeMounts[2].path is invalid: mount point must start with '/'",
 		},
 	}
 

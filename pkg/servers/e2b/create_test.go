@@ -690,7 +690,7 @@ func TestParseCreateSandboxRequest(t *testing.T) {
 		_, apiErr := ctrl.parseCreateSandboxRequest(req)
 		require.NotNil(t, apiErr)
 		assert.Equal(t, http.StatusBadRequest, apiErr.Code)
-		assert.Contains(t, apiErr.Message, "volumeMounts[0].path: mount point must start with '/'")
+		assert.Contains(t, apiErr.Message, "volumeMounts[0].path is invalid: mount point must start with '/'")
 	})
 
 	t.Run("volumeMounts with duplicate paths", func(t *testing.T) {
