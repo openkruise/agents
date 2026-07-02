@@ -2354,123 +2354,98 @@ func TestStaleUnpausedMetricReset(t *testing.T) {
 
 // TestSandboxStatusAbnormalTime verifies that sandbox_status_abnormal_time is set when
 // the sandbox enters an abnormal state and deleted when it returns to normal.
+// It is parameterized by abnormal type (resume_incomplete / pause_incomplete).
 func TestSandboxStatusAbnormalTime(t *testing.T) {
-	ns := "default"
-	name := "abnormal-time-sandbox"
 	now := metav1.NewTime(time.Now())
-
-	// Step 1: Record with an abnormal state (Phase=Resuming, SandboxResumed=False)
-	sandboxAbnormal := &agentsv1alpha1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: name, Namespace: ns,
-			CreationTimestamp: metav1.NewTime(time.Now()),
+	tests := []struct {
+		name             string
+		abnormalPhase    agentsv1alpha1.SandboxPhase
+		abnormalConds    []metav1.Condition
+		abnormalType     string
+		normalPhase      agentsv1alpha1.SandboxPhase
+		normalConds      []metav1.Condition
+	}{
+		{
+			name:          "resume_incomplete",
+			abnormalPhase: agentsv1alpha1.SandboxResuming,
+			abnormalConds: []metav1.Condition{{
+				Type:               string(agentsv1alpha1.SandboxConditionResumed),
+				Status:             metav1.ConditionFalse,
+				LastTransitionTime: now,
+			}},
+			abnormalType: "resume_incomplete",
+			normalPhase:  agentsv1alpha1.SandboxRunning,
+			normalConds: []metav1.Condition{{
+				Type:               string(agentsv1alpha1.SandboxConditionResumed),
+				Status:             metav1.ConditionTrue,
+				LastTransitionTime: now,
+			}},
 		},
-		Status: agentsv1alpha1.SandboxStatus{
-			Phase: agentsv1alpha1.SandboxResuming,
-			Conditions: []metav1.Condition{
-				{
-					Type:               string(agentsv1alpha1.SandboxConditionResumed),
-					Status:             metav1.ConditionFalse,
-					LastTransitionTime: now,
+		{
+			name:          "pause_incomplete",
+			abnormalPhase: agentsv1alpha1.SandboxPaused,
+			abnormalConds: nil, // No Paused condition → abnormal
+			abnormalType: "pause_incomplete",
+			normalPhase:  agentsv1alpha1.SandboxRunning,
+			normalConds:  nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ns := "default"
+			name := tt.name + "-abnormal-time-sandbox"
+
+			// Step 1: Record with an abnormal state
+			sandboxAbnormal := &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: name, Namespace: ns,
+					CreationTimestamp: metav1.NewTime(time.Now()),
 				},
-			},
-		},
-	}
-	recordSandboxMetrics(sandboxAbnormal, nil)
-
-	// Abnormal metric should be 1 and time metric should be set (>0)
-	abnormalVal := testutil.ToFloat64(sandboxStatusAbnormal.WithLabelValues(ns, name, "resume_incomplete"))
-	if abnormalVal != 1 {
-		t.Fatalf("sandbox_status_abnormal{type=resume_incomplete} = %v, want 1", abnormalVal)
-	}
-
-	timeVal := testutil.ToFloat64(sandboxStatusAbnormalTime.WithLabelValues(ns, name, "resume_incomplete"))
-	if timeVal <= 0 {
-		t.Errorf("sandbox_status_abnormal_time{type=resume_incomplete} = %v, want > 0", timeVal)
-	}
-
-	// Step 2: Record with a normal state (Phase=Running, SandboxResumed=True)
-	sandboxNormal := &agentsv1alpha1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: name, Namespace: ns,
-			CreationTimestamp: metav1.NewTime(time.Now()),
-		},
-		Status: agentsv1alpha1.SandboxStatus{
-			Phase: agentsv1alpha1.SandboxRunning,
-			Conditions: []metav1.Condition{
-				{
-					Type:               string(agentsv1alpha1.SandboxConditionResumed),
-					Status:             metav1.ConditionTrue,
-					LastTransitionTime: now,
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase:      tt.abnormalPhase,
+					Conditions: tt.abnormalConds,
 				},
-			},
-		},
-	}
-	recordSandboxMetrics(sandboxNormal, nil)
-	defer DeleteSandboxMetrics(ns, name)
+			}
+			recordSandboxMetrics(sandboxAbnormal, nil)
 
-	// Abnormal metric should be deleted (returns 0 from a new series)
-	abnormalVal = testutil.ToFloat64(sandboxStatusAbnormal.WithLabelValues(ns, name, "resume_incomplete"))
-	if abnormalVal != 0 {
-		t.Errorf("sandbox_status_abnormal{type=resume_incomplete} = %v, want 0 after recovery", abnormalVal)
-	}
+			// Abnormal metric should be 1 and time metric should be set (>0)
+			abnormalVal := testutil.ToFloat64(sandboxStatusAbnormal.WithLabelValues(ns, name, tt.abnormalType))
+			if abnormalVal != 1 {
+				t.Fatalf("sandbox_status_abnormal{type=%s} = %v, want 1", tt.abnormalType, abnormalVal)
+			}
 
-	// Time metric should also be deleted (returns 0 from a new series)
-	timeVal = testutil.ToFloat64(sandboxStatusAbnormalTime.WithLabelValues(ns, name, "resume_incomplete"))
-	if timeVal != 0 {
-		t.Errorf("sandbox_status_abnormal_time{type=resume_incomplete} = %v, want 0 after recovery", timeVal)
-	}
-}
+			timeVal := testutil.ToFloat64(sandboxStatusAbnormalTime.WithLabelValues(ns, name, tt.abnormalType))
+			if timeVal <= 0 {
+				t.Errorf("sandbox_status_abnormal_time{type=%s} = %v, want > 0", tt.abnormalType, timeVal)
+			}
 
-// TestSandboxStatusAbnormalTime_PauseIncomplete verifies the pause_incomplete abnormal time metric.
-func TestSandboxStatusAbnormalTime_PauseIncomplete(t *testing.T) {
-	ns := "default"
-	name := "pause-abnormal-time-sandbox"
+			// Step 2: Record with a normal state
+			sandboxNormal := &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: name, Namespace: ns,
+					CreationTimestamp: metav1.NewTime(time.Now()),
+				},
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase:      tt.normalPhase,
+					Conditions: tt.normalConds,
+				},
+			}
+			recordSandboxMetrics(sandboxNormal, nil)
+			defer DeleteSandboxMetrics(ns, name)
 
-	// Phase=Paused but SandboxPaused condition is absent → abnormal
-	sandboxAbnormal := &agentsv1alpha1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: name, Namespace: ns,
-			CreationTimestamp: metav1.NewTime(time.Now()),
-		},
-		Status: agentsv1alpha1.SandboxStatus{
-			Phase:      agentsv1alpha1.SandboxPaused,
-			Conditions: nil, // No Paused condition → abnormal
-		},
-	}
-	recordSandboxMetrics(sandboxAbnormal, nil)
+			// Abnormal metric should be deleted (returns 0 from a new series)
+			abnormalVal = testutil.ToFloat64(sandboxStatusAbnormal.WithLabelValues(ns, name, tt.abnormalType))
+			if abnormalVal != 0 {
+				t.Errorf("sandbox_status_abnormal{type=%s} = %v, want 0 after recovery", tt.abnormalType, abnormalVal)
+			}
 
-	abnormalVal := testutil.ToFloat64(sandboxStatusAbnormal.WithLabelValues(ns, name, "pause_incomplete"))
-	if abnormalVal != 1 {
-		t.Fatalf("sandbox_status_abnormal{type=pause_incomplete} = %v, want 1", abnormalVal)
-	}
-
-	timeVal := testutil.ToFloat64(sandboxStatusAbnormalTime.WithLabelValues(ns, name, "pause_incomplete"))
-	if timeVal <= 0 {
-		t.Errorf("sandbox_status_abnormal_time{type=pause_incomplete} = %v, want > 0", timeVal)
-	}
-
-	// Now transition to normal (Phase=Running)
-	sandboxNormal := &agentsv1alpha1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: name, Namespace: ns,
-			CreationTimestamp: metav1.NewTime(time.Now()),
-		},
-		Status: agentsv1alpha1.SandboxStatus{
-			Phase: agentsv1alpha1.SandboxRunning,
-		},
-	}
-	recordSandboxMetrics(sandboxNormal, nil)
-	defer DeleteSandboxMetrics(ns, name)
-
-	abnormalVal = testutil.ToFloat64(sandboxStatusAbnormal.WithLabelValues(ns, name, "pause_incomplete"))
-	if abnormalVal != 0 {
-		t.Errorf("sandbox_status_abnormal{type=pause_incomplete} = %v, want 0 after recovery", abnormalVal)
-	}
-
-	timeVal = testutil.ToFloat64(sandboxStatusAbnormalTime.WithLabelValues(ns, name, "pause_incomplete"))
-	if timeVal != 0 {
-		t.Errorf("sandbox_status_abnormal_time{type=pause_incomplete} = %v, want 0 after recovery", timeVal)
+			// Time metric should also be deleted (returns 0 from a new series)
+			timeVal = testutil.ToFloat64(sandboxStatusAbnormalTime.WithLabelValues(ns, name, tt.abnormalType))
+			if timeVal != 0 {
+				t.Errorf("sandbox_status_abnormal_time{type=%s} = %v, want 0 after recovery", tt.abnormalType, timeVal)
+			}
+		})
 	}
 }
 
@@ -2478,6 +2453,7 @@ func TestSandboxStatusAbnormalTime_PauseIncomplete(t *testing.T) {
 // is set when a runtime container is abnormal and deleted when it becomes healthy.
 func TestSandboxRuntimeContainerAbnormalTime(t *testing.T) {
 	ns, name := "default", "container-abnormal-time-sandbox"
+	defer DeleteSandboxMetrics(ns, name)
 
 	// Step 1: Record with an abnormal container (RestartCount > 0 and not Ready)
 	podAbnormal := &corev1.Pod{
@@ -2681,6 +2657,7 @@ func TestAbnormalTimeMetricStableAcrossReconciles(t *testing.T) {
 // while the container remains in the same abnormal state.
 func TestRuntimeContainerAbnormalTimeStableAcrossReconciles(t *testing.T) {
 	ns, name := "default", "stable-container-abnormal-time-sandbox"
+	defer DeleteSandboxMetrics(ns, name)
 
 	pod := &corev1.Pod{
 		Status: corev1.PodStatus{
