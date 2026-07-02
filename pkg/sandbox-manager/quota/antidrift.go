@@ -24,6 +24,7 @@ import (
 	"sync"
 	"time"
 
+	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
 
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
@@ -59,10 +60,16 @@ type AntiDriftDriver struct {
 	subscription infra.QuotaSandboxSubscription
 	// runDone closes when the background loop exits, allowing Stop to wait.
 	runDone chan struct{}
+	// eventQueue coalesces quota events by owner and lock string.
+	eventQueue *workqueue.Typed[string]
+	// eventWorkerDone closes when the event worker exits, allowing Stop to wait.
+	eventWorkerDone chan struct{}
 	// cycleCancel cancels the active periodic pass when leadership or Stop changes.
 	cycleCancel context.CancelFunc
 	// seenLeaked tracks backend entries missing from observed state until grace expires.
 	seenLeaked map[string]leakedObservation
+	// pendingEvents stores the latest event payload for each queued owner and lock string.
+	pendingEvents map[string]infra.QuotaSandboxEvent
 	// limitedOwners is a small event-path cache to skip unlimited owners.
 	limitedOwners map[string]struct{}
 	// stopped prevents new work and makes late subscriptions self-remove.
@@ -88,12 +95,16 @@ func NewAntiDriftDriver(cfg AntiDriftConfig, primary PrimaryChecker, subjects qu
 		cfg.CycleTimeout = 30 * time.Second
 	}
 	return &AntiDriftDriver{
-		cfg:           cfg,
-		primary:       primary,
-		subjects:      subjects,
-		source:        source,
-		backend:       backend,
+		cfg:      cfg,
+		primary:  primary,
+		subjects: subjects,
+		source:   source,
+		backend:  backend,
+		eventQueue: workqueue.NewTypedWithConfig(workqueue.TypedQueueConfig[string]{
+			Name: "antidrift_quota_event",
+		}),
 		seenLeaked:    map[string]leakedObservation{},
+		pendingEvents: map[string]infra.QuotaSandboxEvent{},
 		limitedOwners: map[string]struct{}{},
 		now:           time.Now,
 		stopCh:        make(chan struct{}),
@@ -131,10 +142,25 @@ func (d *AntiDriftDriver) Run(ctx context.Context) {
 			return
 		}
 		d.runDone = make(chan struct{})
+		d.eventWorkerDone = make(chan struct{})
+		runDone := d.runDone
+		eventWorkerDone := d.eventWorkerDone
 		d.mu.Unlock()
 
 		go func() {
-			defer close(d.runDone)
+			defer close(eventWorkerDone)
+			d.runQuotaEventWorker(ctx)
+		}()
+		go func() {
+			select {
+			case <-ctx.Done():
+				d.eventQueue.ShutDown()
+			case <-d.stopCh:
+			}
+		}()
+
+		go func() {
+			defer close(runDone)
 			// Derive a context that cancels when stopCh closes, so WaitPrimary
 			// unblocks on Stop() even if the parent context is still alive.
 			runCtx, cancel := context.WithCancel(ctx)
@@ -376,7 +402,7 @@ func (d *AntiDriftDriver) reconcileLimitedSubject(ctx context.Context, subject q
 
 func (d *AntiDriftDriver) QuotaEventHandler() func(infra.QuotaSandboxEvent) {
 	return func(event infra.QuotaSandboxEvent) {
-		d.onQuotaEvent(event)
+		d.enqueueQuotaEvent(event)
 	}
 }
 
@@ -391,8 +417,11 @@ func (d *AntiDriftDriver) Stop() {
 		subscription := d.subscription
 		d.subscription = nil
 		d.seenLeaked = map[string]leakedObservation{}
+		d.pendingEvents = map[string]infra.QuotaSandboxEvent{}
 		d.limitedOwners = map[string]struct{}{}
 		done := d.runDone
+		eventWorkerDone := d.eventWorkerDone
+		eventQueue := d.eventQueue
 		cycleCancel := d.cycleCancel
 		close(d.stopCh)
 		d.mu.Unlock()
@@ -400,10 +429,16 @@ func (d *AntiDriftDriver) Stop() {
 		if cycleCancel != nil {
 			cycleCancel()
 		}
+		if eventQueue != nil {
+			eventQueue.ShutDown()
+		}
 		if subscription != nil {
 			if err := subscription.Remove(); err != nil {
 				klog.Background().Error(err, "failed to remove quota anti-drift subscription")
 			}
+		}
+		if eventWorkerDone != nil {
+			<-eventWorkerDone
 		}
 		if done != nil {
 			<-done
@@ -440,8 +475,8 @@ func (d *AntiDriftDriver) clearCycleCancel() {
 	d.cycleCancel = nil
 }
 
-// onQuotaEvent is the event-driven fast path that adjusts backend quota state in real time.
-func (d *AntiDriftDriver) onQuotaEvent(event infra.QuotaSandboxEvent) {
+// reconcileQuotaEvent is the event-driven fast path that adjusts backend quota state in real time.
+func (d *AntiDriftDriver) reconcileQuotaEvent(ctx context.Context, event infra.QuotaSandboxEvent) {
 	if d == nil || d.backend == nil {
 		return
 	}
@@ -456,7 +491,7 @@ func (d *AntiDriftDriver) onQuotaEvent(event infra.QuotaSandboxEvent) {
 	if user == "" || lockString == "" {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), eventReconcileTimeout)
+	ctx, cancel := context.WithTimeout(ctx, eventReconcileTimeout)
 	defer cancel()
 	if !d.ensureKnownLimited(ctx, user) {
 		return
@@ -538,7 +573,7 @@ func (d *AntiDriftDriver) ensureKnownLimited(ctx context.Context, user string) b
 func (d *AntiDriftDriver) leakedObservation(user, lockString string) leakedObservation {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return d.seenLeaked[leakedKey(user, lockString)]
+	return d.seenLeaked[eventKey(user, lockString)]
 }
 
 func (d *AntiDriftDriver) clearLeakedForKey(user string) {
@@ -552,7 +587,7 @@ func (d *AntiDriftDriver) replaceLeakedForKey(user string, leaked map[string]lea
 	defer d.mu.Unlock()
 	d.deleteLeakedForKeyLocked(user)
 	for lockString, obs := range leaked {
-		d.seenLeaked[leakedKey(user, lockString)] = obs
+		d.seenLeaked[eventKey(user, lockString)] = obs
 	}
 }
 
@@ -565,7 +600,7 @@ func (d *AntiDriftDriver) deleteLeakedForKeyLocked(user string) {
 	}
 }
 
-func leakedKey(user, lockString string) string {
+func eventKey(user, lockString string) string {
 	return user + "\x00" + lockString
 }
 

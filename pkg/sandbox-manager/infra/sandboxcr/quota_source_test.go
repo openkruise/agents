@@ -186,6 +186,43 @@ func TestQuotaEventFromObject(t *testing.T) {
 	}
 }
 
+func TestQuotaEventFromUpdateObject(t *testing.T) {
+	tests := []struct {
+		name   string
+		oldObj any
+		newObj any
+		wantOK bool
+	}{
+		{
+			name:   "unchanged snapshot is ignored",
+			oldObj: quotaSourceSandbox(),
+			newObj: quotaSourceSandbox(),
+		},
+		{
+			name:   "changed snapshot emits event",
+			oldObj: quotaSourceSandbox(),
+			newObj: func() *v1alpha1.Sandbox {
+				sbx := quotaSourceSandbox()
+				sbx.Spec.Paused = true
+				sbx.Status.Phase = v1alpha1.SandboxPaused
+				return sbx
+			}(),
+			wantOK: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := quotaEventFromUpdateObject(tt.oldObj, tt.newObj)
+			assert.Equal(t, tt.wantOK, ok)
+			if tt.wantOK {
+				assert.Equal(t, "owner-1", got.Snapshot.Owner)
+				assert.Equal(t, "lock-1", got.Snapshot.LockString)
+			}
+		})
+	}
+}
+
 func TestQuotaSourceListLiveQuotaSandboxesByOwner(t *testing.T) {
 	live := quotaSourceSandbox()
 	dead := quotaSourceSandbox()

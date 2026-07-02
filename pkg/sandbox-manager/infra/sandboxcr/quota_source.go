@@ -53,8 +53,8 @@ func (i *Infra) Subscribe(ctx context.Context, fn func(infra.QuotaSandboxEvent))
 				fn(event)
 			}
 		},
-		UpdateFunc: func(_, newObj any) {
-			if event, ok := quotaEventFromObject(newObj, false); ok {
+		UpdateFunc: func(oldObj, newObj any) {
+			if event, ok := quotaEventFromUpdateObject(oldObj, newObj); ok {
 				fn(event)
 			}
 		},
@@ -92,6 +92,18 @@ func quotaEventFromObject(obj any, deleted bool) (infra.QuotaSandboxEvent, bool)
 		return infra.QuotaSandboxEvent{}, false
 	}
 	return infra.QuotaSandboxEvent{Snapshot: snapshot, Deleted: deleted}, true
+}
+
+func quotaEventFromUpdateObject(oldObj, newObj any) (infra.QuotaSandboxEvent, bool) {
+	event, ok := quotaEventFromObject(newObj, false)
+	if !ok {
+		return infra.QuotaSandboxEvent{}, false
+	}
+	oldSnapshot, oldOK := quotaSnapshotFromSandbox(sandboxFromQuotaEvent(oldObj, false))
+	if oldOK && oldSnapshot == event.Snapshot {
+		return infra.QuotaSandboxEvent{}, false
+	}
+	return event, true
 }
 
 func sandboxFromQuotaEvent(obj any, deleted bool) *v1alpha1.Sandbox {

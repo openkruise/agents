@@ -164,9 +164,17 @@ type fakeBackend struct {
 	listEntriesErrByKey map[string]error
 	afterListEntries    func()
 	listEntriesCalls    atomic.Int64
+	acquireBlock        chan struct{}
 }
 
 func (b *fakeBackend) Acquire(ctx context.Context, p AcquireParams) error {
+	if b.acquireBlock != nil {
+		select {
+		case <-b.acquireBlock:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.acquireCalls = append(b.acquireCalls, acquireCall{params: p})
@@ -393,6 +401,7 @@ func TestAntiDriftEventReconcile(t *testing.T) {
 			backend.resetCalls()
 
 			driver.QuotaEventHandler()(tt.event)
+			require.True(t, driver.processNextQuotaEvent(context.Background()))
 			assert.ElementsMatch(t, tt.wantCharged, backend.acquireLockstrings())
 			assert.ElementsMatch(t, tt.wantReleased, backend.releaseLockstrings())
 
@@ -468,6 +477,7 @@ func TestAntiDriftEventReconcileLooksUpUnknownLimitedOwner(t *testing.T) {
 	)
 
 	driver.QuotaEventHandler()(event)
+	require.True(t, driver.processNextQuotaEvent(context.Background()))
 
 	calls := backend.acquireCallsSnapshot()
 	require.Len(t, calls, 1)
@@ -522,11 +532,12 @@ func TestAntiDriftEventReconcileSkipsWriteWhenPrimaryLostBeforeWrite(t *testing.
 				tt.source,
 				backend,
 			)
-			driver.seenLeaked[leakedKey(owner, "stale-lock")] = leakedObservation{firstSeen: now}
+			driver.seenLeaked[eventKey(owner, "stale-lock")] = leakedObservation{firstSeen: now}
 
 			beforeSkipped := testutil.ToFloat64(antiDriftSkippedTotal.WithLabelValues("not_primary"))
 
 			driver.QuotaEventHandler()(tt.event)
+			require.True(t, driver.processNextQuotaEvent(context.Background()))
 
 			assert.Len(t, backend.acquireCallsSnapshot(), tt.wantAcquireCalls)
 			assert.Len(t, backend.releaseLockstrings(), tt.wantReleaseCalls)
@@ -552,6 +563,7 @@ func TestAntiDriftDriverDeleteEventReleasesSnapshot(t *testing.T) {
 		Snapshot: runningSnapshot(owner, "lock-1", 1000, 512, false),
 		Deleted:  true,
 	})
+	require.True(t, driver.processNextQuotaEvent(context.Background()))
 
 	require.Equal(t, []string{"lock-1"}, backend.releaseLockstrings())
 	require.Empty(t, backend.acquireCallsSnapshot())
@@ -786,6 +798,7 @@ func TestAntiDriftEventReconcileUsesShortDeadline(t *testing.T) {
 			backend.resetCalls()
 
 			driver.QuotaEventHandler()(tt.event)
+			require.True(t, driver.processNextQuotaEvent(context.Background()))
 			timeouts := tt.timeoutFunc(backend)
 			require.Len(t, timeouts, 1)
 			assert.Less(t, timeouts[0], 3*time.Second)
@@ -841,6 +854,61 @@ func TestAntiDriftRunOnceNotPrimaryClearsLeakedState(t *testing.T) {
 	primary.SetPrimary(false)
 	require.NoError(t, driver.RunOnce(context.Background()))
 	assert.Empty(t, driver.seenLeaked)
+}
+
+func TestAntiDriftEventHandlerQueuesWithoutBackendIO(t *testing.T) {
+	owner := uuid.NewString()
+	backend := &fakeBackend{acquireBlock: make(chan struct{})}
+	driver := NewAntiDriftDriver(
+		AntiDriftConfig{Interval: time.Hour, Grace: time.Minute},
+		newMutablePrimary(true),
+		&fakeSubjectLister{subjects: []quotaspec.Subject{limitedSubject(owner)}},
+		&fakeQuotaSandboxSource{healthy: true},
+		backend,
+	)
+	require.NoError(t, driver.RunOnce(context.Background()))
+	backend.resetCalls()
+
+	done := make(chan struct{})
+	go func() {
+		driver.QuotaEventHandler()(infra.QuotaSandboxEvent{Snapshot: runningSnapshot(owner, "lock-live", 1000, 512, false)})
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("event handler blocked on backend I/O")
+	}
+	require.Empty(t, backend.acquireCallsSnapshot())
+	close(backend.acquireBlock)
+	require.True(t, driver.processNextQuotaEvent(context.Background()))
+	require.Equal(t, []string{"lock-live"}, backend.acquireLockstrings())
+}
+
+func TestAntiDriftEventWorkerStopsWhenRunContextCanceled(t *testing.T) {
+	driver := NewAntiDriftDriver(
+		AntiDriftConfig{Interval: time.Hour, Grace: time.Minute},
+		newMutablePrimary(false),
+		nil,
+		nil,
+		&fakeBackend{},
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	driver.Run(ctx)
+	driver.mu.Lock()
+	done := driver.eventWorkerDone
+	driver.mu.Unlock()
+
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("event worker did not stop after run context cancellation")
+	}
+	driver.Stop()
 }
 
 func TestAntiDriftRunStartsNonBlockingAndStopRemovesRegistration(t *testing.T) {
