@@ -31,6 +31,7 @@ import (
 var (
 	IndexSandboxPool      = "sandboxPool"
 	IndexClaimedSandboxID = "sandboxID"
+	IndexSandboxClaimName = "sandboxClaimName"
 	IndexUser             = "user"
 	IndexTemplateID       = "templateID"
 	IndexCheckpointID     = "checkpointID"
@@ -92,6 +93,20 @@ func GetIndexFuncs() []IndexFunc {
 				}
 				if user := sbx.GetAnnotations()[agentsv1alpha1.AnnotationOwner]; user != "" {
 					return []string{user}
+				}
+				return nil
+			},
+		},
+		{
+			Obj:       &agentsv1alpha1.Sandbox{},
+			FieldName: IndexSandboxClaimName,
+			Extract: func(obj client.Object) []string {
+				sbx, ok := obj.(*agentsv1alpha1.Sandbox)
+				if !ok {
+					return nil
+				}
+				if claimName := sbx.GetLabels()[agentsv1alpha1.LabelSandboxClaimName]; claimName != "" {
+					return []string{claimName}
 				}
 				return nil
 			},
