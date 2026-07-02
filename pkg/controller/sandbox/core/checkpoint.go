@@ -43,6 +43,11 @@ type CheckpointControl struct {
 	recorder record.EventRecorder
 }
 
+const (
+	EventCheckpointStarted   = "CheckpointStarted"
+	EventCheckpointSucceeded = "CheckpointSucceeded"
+)
+
 // NewCheckpointControl creates a new CheckpointControl.
 func NewCheckpointControl(cli client.Client, recorder record.EventRecorder) *CheckpointControl {
 	return &CheckpointControl{Client: cli, recorder: recorder}
@@ -111,6 +116,7 @@ func (c *CheckpointControl) AssumePodCheckpointed(ctx context.Context, pod *core
 		cond.Reason = agentsv1alpha1.SandboxPausedReasonCheckpointSucceeded
 		cond.Message = ""
 		utils.SetSandboxCondition(newStatus, *cond)
+		c.recordCheckpointEvent(box, corev1.EventTypeNormal, EventCheckpointSucceeded, "Checkpoint %s succeeded", cp.Name)
 		return false
 	case agentsv1alpha1.CheckpointFailed:
 		cond.Reason = agentsv1alpha1.SandboxPausedReasonCheckpointFailed
@@ -196,8 +202,16 @@ func (c *CheckpointControl) createCheckpoint(ctx context.Context, box *agentsv1a
 		ScaleExpectation.ObserveScale(GetControllerKey(box), expectations.Create, cpName)
 		return fmt.Errorf("failed to create checkpoint CR: %w", err)
 	}
+	c.recordCheckpointEvent(box, corev1.EventTypeNormal, EventCheckpointStarted, "Checkpoint %s created, waiting for completion", cpName)
 	klog.InfoS("Created checkpoint CR", "sandbox", klog.KObj(box), "checkpoint", cpName)
 	return nil
+}
+
+func (c *CheckpointControl) recordCheckpointEvent(box *agentsv1alpha1.Sandbox, eventType, reason, messageFmt string, args ...any) {
+	if c.recorder == nil {
+		return
+	}
+	c.recorder.Eventf(box, eventType, reason, messageFmt, args...)
 }
 
 // validateContainerImages compares each user container's Image in the live Pod

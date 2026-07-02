@@ -51,6 +51,10 @@ var (
 	ResourceVersionExpectations = expectations.NewResourceVersionExpectation()
 )
 
+const (
+	eventReasonSandboxUpdateOpsPhaseChanged = "SandboxUpdateOpsPhaseChanged"
+)
+
 func init() {
 	flag.IntVar(&concurrentReconciles, "sandboxupdateops-workers", concurrentReconciles, "Max concurrent workers for SandboxUpdateOps controller.")
 }
@@ -415,6 +419,8 @@ func (r *Reconciler) updateStatus(ctx context.Context, ops *agentsv1alpha1.Sandb
 	if reflect.DeepEqual(ops.Status, *newStatus) {
 		return nil
 	}
+	oldPhase := ops.Status.Phase
+
 	by, _ := json.Marshal(newStatus)
 	patchStatus := fmt.Sprintf(`{"status":%s}`, string(by))
 	rcvObject := &agentsv1alpha1.SandboxUpdateOps{
@@ -426,6 +432,29 @@ func (r *Reconciler) updateStatus(ctx context.Context, ops *agentsv1alpha1.Sandb
 		klog.ErrorS(err, "Failed to update SandboxUpdateOps status", "ops", klog.KObj(ops), "patch", patchStatus)
 	} else {
 		klog.InfoS("Successfully updated SandboxUpdateOps status", "ops", klog.KObj(ops), "patch", patchStatus)
+		r.recordPhaseEvent(ops, oldPhase, newStatus)
 	}
 	return err
+}
+
+func (r *Reconciler) recordPhaseEvent(ops *agentsv1alpha1.SandboxUpdateOps, oldPhase agentsv1alpha1.SandboxUpdateOpsPhase, newStatus *agentsv1alpha1.SandboxUpdateOpsStatus) {
+	if r.Recorder == nil || oldPhase == newStatus.Phase || newStatus.Phase == "" {
+		return
+	}
+
+	eventType := v1.EventTypeNormal
+	if newStatus.Phase == agentsv1alpha1.SandboxUpdateOpsFailed {
+		eventType = v1.EventTypeWarning
+	}
+	r.Recorder.Eventf(ops, eventType, eventReasonSandboxUpdateOpsPhaseChanged,
+		"SandboxUpdateOps phase changed from %s to %s: total=%d, updated=%d, updating=%d, failed=%d",
+		updateOpsPhaseForEvent(oldPhase), newStatus.Phase, newStatus.Replicas,
+		newStatus.UpdatedReplicas, newStatus.UpdatingReplicas, newStatus.FailedReplicas)
+}
+
+func updateOpsPhaseForEvent(phase agentsv1alpha1.SandboxUpdateOpsPhase) string {
+	if phase == "" {
+		return "<empty>"
+	}
+	return string(phase)
 }
