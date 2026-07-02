@@ -862,6 +862,403 @@ func TestSandboxReconciler_updateSandboxStatus(t *testing.T) {
 	}
 }
 
+func TestSandboxReconciler_updateSandboxStatusRecordsPhaseEvent(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	tests := []struct {
+		name           string
+		oldStatus      agentsv1alpha1.SandboxStatus
+		newStatus      agentsv1alpha1.SandboxStatus
+		expectEvent    bool
+		expectPrefix   string
+		expectContains string
+	}{
+		{
+			name:      "records start message for initial pending phase",
+			oldStatus: agentsv1alpha1.SandboxStatus{},
+			newStatus: agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxPending,
+			},
+			expectEvent:    true,
+			expectPrefix:   corev1.EventTypeNormal + " SandboxPending",
+			expectContains: "Start sandbox",
+		},
+		{
+			name: "records started message when pending sandbox becomes running",
+			oldStatus: agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxPending,
+			},
+			newStatus: agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxRunning,
+			},
+			expectEvent:    true,
+			expectPrefix:   corev1.EventTypeNormal + " SandboxRunning",
+			expectContains: "Sandbox started",
+		},
+		{
+			name: "records resume message when paused sandbox becomes resuming",
+			oldStatus: agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxPaused,
+			},
+			newStatus: agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxResuming,
+			},
+			expectEvent:    true,
+			expectPrefix:   corev1.EventTypeNormal + " SandboxResuming",
+			expectContains: "Resume sandbox",
+		},
+		{
+			name: "records resume message when paused sandbox becomes running",
+			oldStatus: agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxPaused,
+			},
+			newStatus: agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxRunning,
+			},
+			expectEvent:    true,
+			expectPrefix:   corev1.EventTypeNormal + " SandboxRunning",
+			expectContains: "Resume sandbox",
+		},
+		{
+			name: "records resume message when resuming sandbox becomes running",
+			oldStatus: agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxResuming,
+			},
+			newStatus: agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxRunning,
+			},
+			expectEvent:    true,
+			expectPrefix:   corev1.EventTypeNormal + " SandboxRunning",
+			expectContains: "Sandbox resumed",
+		},
+		{
+			name: "records pause message when running sandbox becomes paused",
+			oldStatus: agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxRunning,
+			},
+			newStatus: agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxPaused,
+			},
+			expectEvent:    true,
+			expectPrefix:   corev1.EventTypeNormal + " SandboxPaused",
+			expectContains: "Pause sandbox",
+		},
+		{
+			name: "records upgrade message when running sandbox becomes upgrading",
+			oldStatus: agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxRunning,
+			},
+			newStatus: agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxUpgrading,
+			},
+			expectEvent:    true,
+			expectPrefix:   corev1.EventTypeNormal + " SandboxUpgrading",
+			expectContains: "Upgrade sandbox",
+		},
+		{
+			name: "records upgraded message when upgrading sandbox becomes running",
+			oldStatus: agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxUpgrading,
+			},
+			newStatus: agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxRunning,
+			},
+			expectEvent:    true,
+			expectPrefix:   corev1.EventTypeNormal + " SandboxRunning",
+			expectContains: "Sandbox upgraded",
+		},
+		{
+			name: "records recycle message when running sandbox becomes recycling",
+			oldStatus: agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxRunning,
+			},
+			newStatus: agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxRecycling,
+			},
+			expectEvent:    true,
+			expectPrefix:   corev1.EventTypeNormal + " SandboxRecycling",
+			expectContains: "Recycle sandbox",
+		},
+		{
+			name: "records recycled message when recycling sandbox becomes running",
+			oldStatus: agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxRecycling,
+			},
+			newStatus: agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxRunning,
+			},
+			expectEvent:    true,
+			expectPrefix:   corev1.EventTypeNormal + " SandboxRunning",
+			expectContains: "Sandbox recycled",
+		},
+		{
+			name: "records warning event when phase changes to failed",
+			oldStatus: agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxRunning,
+			},
+			newStatus: agentsv1alpha1.SandboxStatus{
+				Phase:   agentsv1alpha1.SandboxFailed,
+				Message: "Pod status phase is Failed",
+			},
+			expectEvent:    true,
+			expectPrefix:   corev1.EventTypeWarning + " SandboxFailed",
+			expectContains: "Sandbox failed: Pod status phase is Failed",
+		},
+		{
+			name: "records succeeded message when phase changes to succeeded",
+			oldStatus: agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxRunning,
+			},
+			newStatus: agentsv1alpha1.SandboxStatus{
+				Phase:   agentsv1alpha1.SandboxSucceeded,
+				Message: "Pod status phase is Succeeded",
+			},
+			expectEvent:    true,
+			expectPrefix:   corev1.EventTypeNormal + " SandboxSucceeded",
+			expectContains: "Sandbox succeeded: Pod status phase is Succeeded",
+		},
+		{
+			name: "records generic message for unknown transition",
+			oldStatus: agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxPhase("CustomOldPhase"),
+			},
+			newStatus: agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxPhase("CustomNewPhase"),
+			},
+			expectEvent:    true,
+			expectPrefix:   corev1.EventTypeNormal + " SandboxCustomNewPhase",
+			expectContains: "Sandbox phase changed from CustomOldPhase to CustomNewPhase",
+		},
+		{
+			name: "does not record event when only message changes",
+			oldStatus: agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxRunning,
+			},
+			newStatus: agentsv1alpha1.SandboxStatus{
+				Phase:   agentsv1alpha1.SandboxRunning,
+				Message: "still running",
+			},
+			expectEvent: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			recorder := record.NewFakeRecorder(10)
+			sandbox := &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+				},
+				Status: tt.oldStatus,
+			}
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(&agentsv1alpha1.Sandbox{}).
+				WithObjects(sandbox).
+				Build()
+			reconciler := &SandboxReconciler{
+				Client:   fakeClient,
+				Scheme:   scheme,
+				recorder: recorder,
+			}
+
+			err := reconciler.updateSandboxStatus(context.Background(), tt.newStatus, sandbox)
+			assert.NoError(t, err)
+			if tt.expectEvent {
+				assertSandboxRecorderEvent(t, recorder, tt.expectPrefix, tt.expectContains)
+			} else {
+				assertNoSandboxRecorderEvent(t, recorder)
+			}
+		})
+	}
+}
+
+func TestSandboxReconciler_recordSandboxTerminatingEvent(t *testing.T) {
+	tests := []struct {
+		name           string
+		recorder       *record.FakeRecorder
+		deleting       bool
+		expectEvent    bool
+		expectContains string
+	}{
+		{
+			name:           "records terminating event for deleting sandbox",
+			recorder:       record.NewFakeRecorder(10),
+			deleting:       true,
+			expectEvent:    true,
+			expectContains: "Sandbox deletion is in progress from phase Running",
+		},
+		{
+			name:        "does not record event without deletion timestamp",
+			recorder:    record.NewFakeRecorder(10),
+			deleting:    false,
+			expectEvent: false,
+		},
+		{
+			name:        "nil recorder is ignored",
+			recorder:    nil,
+			deleting:    true,
+			expectEvent: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sandbox := &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+				},
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxRunning,
+				},
+			}
+			if tt.deleting {
+				now := metav1.Now()
+				sandbox.DeletionTimestamp = &now
+			}
+			var eventRecorder record.EventRecorder
+			if tt.recorder != nil {
+				eventRecorder = tt.recorder
+			}
+			reconciler := &SandboxReconciler{recorder: eventRecorder}
+
+			reconciler.recordSandboxTerminatingEvent(sandbox)
+
+			if tt.expectEvent {
+				assertSandboxRecorderEvent(t, tt.recorder, corev1.EventTypeNormal+" "+eventReasonSandboxTerminating, tt.expectContains)
+			} else if tt.recorder != nil {
+				assertNoSandboxRecorderEvent(t, tt.recorder)
+			}
+		})
+	}
+}
+
+func TestSandboxReconciler_handleTerminatingRecordsEventOnlyWhenDeletingPod(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	now := metav1.Now()
+	tests := []struct {
+		name                   string
+		pod                    *corev1.Pod
+		expectEvent            bool
+		expectFinalizerRemoved bool
+	}{
+		{
+			name: "records event when active pod is deleted",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+				},
+			},
+			expectEvent: true,
+		},
+		{
+			name: "does not record event when pod is already deleting",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "test-sandbox",
+					Namespace:         "default",
+					DeletionTimestamp: &now,
+					Finalizers:        []string{"fake-finalizer"},
+				},
+			},
+			expectEvent: false,
+		},
+		{
+			name:                   "does not record event when removing finalizer after pod is gone",
+			pod:                    nil,
+			expectEvent:            false,
+			expectFinalizerRemoved: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			deletionTime := metav1.Now()
+			sandbox := &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "test-sandbox",
+					Namespace:         "default",
+					DeletionTimestamp: &deletionTime,
+					Finalizers:        []string{core.SandboxFinalizer},
+				},
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxRunning,
+				},
+			}
+
+			objects := []client.Object{sandbox}
+			if tt.pod != nil {
+				objects = append(objects, tt.pod)
+			}
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(objects...).
+				Build()
+			recorder := record.NewFakeRecorder(10)
+			reconciler := &SandboxReconciler{
+				Client:   fakeClient,
+				Scheme:   scheme,
+				recorder: recorder,
+				controls: core.NewSandboxControl(core.SandboxControlArgs{
+					Client:   fakeClient,
+					Recorder: recorder,
+				}),
+			}
+
+			_, err := reconciler.handleTerminating(context.Background(), core.EnsureFuncArgs{
+				Pod:       tt.pod,
+				Box:       sandbox,
+				NewStatus: sandbox.Status.DeepCopy(),
+			})
+			assert.NoError(t, err)
+
+			if tt.expectEvent {
+				assertSandboxRecorderEvent(t, recorder, corev1.EventTypeNormal+" "+eventReasonSandboxTerminating, "Sandbox deletion is in progress from phase Running")
+			} else {
+				assertNoSandboxRecorderEvent(t, recorder)
+			}
+
+			if tt.expectFinalizerRemoved {
+				updatedSandbox := &agentsv1alpha1.Sandbox{}
+				err := fakeClient.Get(context.Background(), types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}, updatedSandbox)
+				if apierrors.IsNotFound(err) {
+					return
+				}
+				assert.NoError(t, err)
+				assert.NotContains(t, updatedSandbox.Finalizers, core.SandboxFinalizer)
+			}
+		})
+	}
+}
+
+func assertSandboxRecorderEvent(t *testing.T, recorder *record.FakeRecorder, expectPrefix, expectContains string) {
+	t.Helper()
+	select {
+	case event := <-recorder.Events:
+		assert.Contains(t, event, expectPrefix)
+		assert.Contains(t, event, expectContains)
+	default:
+		t.Fatalf("expected event %q, got none", expectPrefix)
+	}
+}
+
+func assertNoSandboxRecorderEvent(t *testing.T, recorder *record.FakeRecorder) {
+	t.Helper()
+	select {
+	case event := <-recorder.Events:
+		t.Fatalf("unexpected event: %s", event)
+	default:
+	}
+}
+
 func TestSandboxReconciler_updateSandboxStatusNoChange(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)

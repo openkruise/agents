@@ -72,6 +72,33 @@ var (
 	csiResetSignalFileName      = "reset"
 )
 
+const (
+	eventReasonSandboxTerminating = "SandboxTerminating"
+)
+
+type sandboxPhaseTransition struct {
+	oldPhase agentsv1alpha1.SandboxPhase
+	newPhase agentsv1alpha1.SandboxPhase
+}
+
+var sandboxPhaseTransitionMessages = map[sandboxPhaseTransition]string{
+	{oldPhase: "", newPhase: agentsv1alpha1.SandboxPending}:                              "Start sandbox",
+	{oldPhase: agentsv1alpha1.SandboxPending, newPhase: agentsv1alpha1.SandboxRunning}:   "Sandbox started",
+	{oldPhase: agentsv1alpha1.SandboxRunning, newPhase: agentsv1alpha1.SandboxPaused}:    "Pause sandbox",
+	{oldPhase: agentsv1alpha1.SandboxPaused, newPhase: agentsv1alpha1.SandboxResuming}:   "Resume sandbox",
+	{oldPhase: agentsv1alpha1.SandboxPaused, newPhase: agentsv1alpha1.SandboxRunning}:    "Resume sandbox",
+	{oldPhase: agentsv1alpha1.SandboxResuming, newPhase: agentsv1alpha1.SandboxRunning}:  "Sandbox resumed",
+	{oldPhase: agentsv1alpha1.SandboxRunning, newPhase: agentsv1alpha1.SandboxUpgrading}: "Upgrade sandbox",
+	{oldPhase: agentsv1alpha1.SandboxUpgrading, newPhase: agentsv1alpha1.SandboxRunning}: "Sandbox upgraded",
+	{oldPhase: agentsv1alpha1.SandboxRunning, newPhase: agentsv1alpha1.SandboxRecycling}: "Recycle sandbox",
+	{oldPhase: agentsv1alpha1.SandboxRecycling, newPhase: agentsv1alpha1.SandboxRunning}: "Sandbox recycled",
+}
+
+var sandboxPhaseTargetMessages = map[agentsv1alpha1.SandboxPhase]string{
+	agentsv1alpha1.SandboxSucceeded: "Sandbox succeeded",
+	agentsv1alpha1.SandboxFailed:    "Sandbox failed",
+}
+
 // Enqueuer is the contract the Sandbox controller depends on for async
 // metric cleanup. sandboxmetricsgc.Reconciler satisfies it.
 type Enqueuer interface {
@@ -303,8 +330,15 @@ func (r *SandboxReconciler) EnsureSandboxPaused(ctx context.Context, args core.E
 }
 
 func (r *SandboxReconciler) handleTerminating(ctx context.Context, args core.EnsureFuncArgs) (ctrl.Result, error) {
-	pod, _, _ := args.Pod, args.Box, args.NewStatus
-	return ctrl.Result{}, r.getControl(pod).EnsureSandboxTerminated(ctx, args)
+	pod, box, _ := args.Pod, args.Box, args.NewStatus
+	recordTerminatingEvent := pod != nil && pod.DeletionTimestamp.IsZero()
+	if err := r.getControl(pod).EnsureSandboxTerminated(ctx, args); err != nil {
+		return ctrl.Result{}, err
+	}
+	if recordTerminatingEvent {
+		r.recordSandboxTerminatingEvent(box)
+	}
+	return ctrl.Result{}, nil
 }
 
 func isSandboxCompletedPhase(phase agentsv1alpha1.SandboxPhase) bool {
@@ -340,6 +374,7 @@ func (r *SandboxReconciler) updateSandboxStatus(ctx context.Context, newStatus a
 	if reflect.DeepEqual(box.Status, newStatus) {
 		return nil
 	}
+	oldPhase := box.Status.Phase
 
 	by, _ := json.Marshal(newStatus)
 	patchStatus := fmt.Sprintf(`{"status":%s}`, string(by))
@@ -352,9 +387,58 @@ func (r *SandboxReconciler) updateSandboxStatus(ctx context.Context, newStatus a
 	core.ResourceVersionExpectations.Expect(rcvObject)
 	klog.InfoS("update sandbox status success", "sandbox", klog.KObj(box), "status", utils.DumpJson(newStatus))
 	box.Status = newStatus
+	r.recordSandboxPhaseEvent(box, oldPhase, newStatus)
 	// Update metrics after status change (pod=nil: container metrics already recorded in Reconcile)
 	recordSandboxMetrics(box, nil)
 	return nil
+}
+
+func (r *SandboxReconciler) recordSandboxPhaseEvent(box *agentsv1alpha1.Sandbox, oldPhase agentsv1alpha1.SandboxPhase, newStatus agentsv1alpha1.SandboxStatus) {
+	if r.recorder == nil || oldPhase == newStatus.Phase || newStatus.Phase == "" {
+		return
+	}
+
+	eventType := corev1.EventTypeNormal
+	if newStatus.Phase == agentsv1alpha1.SandboxFailed {
+		eventType = corev1.EventTypeWarning
+	}
+	message := sandboxPhaseEventMessage(oldPhase, newStatus.Phase)
+	if newStatus.Message != "" {
+		message = fmt.Sprintf("%s: %s", message, newStatus.Message)
+	}
+	r.recorder.Event(box, eventType, sandboxPhaseEventReason(newStatus.Phase), message)
+}
+
+func (r *SandboxReconciler) recordSandboxTerminatingEvent(box *agentsv1alpha1.Sandbox) {
+	if r.recorder == nil || box == nil || box.DeletionTimestamp.IsZero() {
+		return
+	}
+	r.recorder.Eventf(box, corev1.EventTypeNormal, eventReasonSandboxTerminating,
+		"Sandbox deletion is in progress from phase %s", phaseForEvent(box.Status.Phase))
+}
+
+func sandboxPhaseEventMessage(oldPhase, newPhase agentsv1alpha1.SandboxPhase) string {
+	if message, ok := sandboxPhaseTransitionMessages[sandboxPhaseTransition{oldPhase: oldPhase, newPhase: newPhase}]; ok {
+		return message
+	}
+	if message, ok := sandboxPhaseTargetMessages[newPhase]; ok {
+		return message
+	}
+	return fmt.Sprintf("Sandbox phase changed from %s to %s", phaseForEvent(oldPhase), newPhase)
+}
+
+func sandboxPhaseEventReason(phase agentsv1alpha1.SandboxPhase) string {
+	if phase == "" {
+		return "SandboxPhaseChanged"
+	}
+	return "Sandbox" + string(phase)
+}
+
+func phaseForEvent(phase agentsv1alpha1.SandboxPhase) string {
+	if phase == "" {
+		return "<empty>"
+	}
+	return string(phase)
 }
 
 func (r *SandboxReconciler) calculateStatus(ctx context.Context, args core.EnsureFuncArgs) (*agentsv1alpha1.SandboxStatus, bool) {
