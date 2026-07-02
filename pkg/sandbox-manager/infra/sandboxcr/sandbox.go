@@ -229,15 +229,18 @@ func (s *Sandbox) SetPodLabels(labels map[string]string) {
 	}
 }
 
-// SetImage sets the image of the first container
+// SetImage sets the image of the first container.
+// It is a no-op if the template is nil or has no containers.
 func (s *Sandbox) SetImage(image string) {
-	if s.Spec.Template != nil {
+	if s.Spec.Template != nil && len(s.Spec.Template.Spec.Containers) > 0 {
 		s.Spec.Template.Spec.Containers[0].Image = image
 	}
 }
 
+// GetImage returns the image of the first container, or an empty string
+// if the template is nil or has no containers.
 func (s *Sandbox) GetImage() string {
-	if s.Spec.Template != nil {
+	if s.Spec.Template != nil && len(s.Spec.Template.Spec.Containers) > 0 {
 		return s.Spec.Template.Spec.Containers[0].Image
 	}
 	return ""

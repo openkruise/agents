@@ -148,22 +148,39 @@ type SandboxManager struct {
 
 	infra infra.Infrastructure
 	proxy *proxy.Server
+	// cancelRun cancels the context created in Run(); called by Stop() to
+	// terminate all background goroutines that depend on the run context.
+	cancelRun context.CancelFunc
 }
 
 func (m *SandboxManager) Run(ctx context.Context) error {
 	log := klog.FromContext(ctx)
 
+	// Derive a cancellable context so the proxy watcher goroutine can trigger
+	// a clean shutdown if a listener crashes mid-run. The cancel function is
+	// stored on the struct so Stop() can also cancel it cleanly.
+	runCtx, cancel := context.WithCancel(ctx)
+	m.cancelRun = cancel
+
+	proxyErrCh := make(chan error, 2)
+	klog.InfoS("starting proxy")
+	if err := m.proxy.Run(proxyErrCh); err != nil {
+		cancel()
+		return fmt.Errorf("proxy failed to start synchronously: %w", err)
+	}
+
 	go func() {
-		klog.InfoS("starting proxy")
-		err := m.proxy.Run()
-		if err != nil {
-			klog.Error(err, "proxy stopped")
+		select {
+		case <-runCtx.Done():
+		case err := <-proxyErrCh:
+			klog.ErrorS(err, "proxy server stopped unexpectedly, initiating graceful shutdown")
+			cancel()
 		}
 	}()
 
 	// Start peers (optional - only if configured)
 	if m.peersManager != nil {
-		if err := m.peersManager.Start(ctx, m.memberlistBindPort); err != nil {
+		if err := m.peersManager.Start(runCtx, m.memberlistBindPort); err != nil {
 			return fmt.Errorf("failed to start memberlist: %w", err)
 		}
 		log.Info("memberlist started successfully")
@@ -171,7 +188,7 @@ func (m *SandboxManager) Run(ctx context.Context) error {
 		log.Info("peers manager not configured, skip starting memberlist")
 	}
 
-	if err := m.infra.Run(ctx); err != nil {
+	if err := m.infra.Run(runCtx); err != nil {
 		return err
 	}
 	return nil
@@ -179,6 +196,10 @@ func (m *SandboxManager) Run(ctx context.Context) error {
 
 func (m *SandboxManager) Stop(ctx context.Context) {
 	log := klog.FromContext(ctx)
+	// Cancel the run context first so all background goroutines start draining.
+	if m.cancelRun != nil {
+		m.cancelRun()
+	}
 	m.proxy.Stop(ctx)
 	m.infra.Stop(ctx)
 	if m.peersManager != nil {
