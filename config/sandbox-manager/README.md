@@ -28,9 +28,10 @@ If deploying to a real K8s cluster, please modify to an appropriate tag and push
 ## API Key Quota
 
 API keys may carry static quotas across `sandbox.count`, `limits.cpu`, and `limits.memory`, scoped by `running` or
-`all`. The public wire shape is nested JSON such as
-`{"running":{"sandbox.count":10,"limits.cpu":8000,"limits.memory":16384},"all":{"sandbox.count":50}}`, while Secret/MySQL storage persists the
-normalized internal `(dimension, scope, limit)` list. Dynamic enforcement uses Redis only. If `--quota-redis-addr`
+`all`. Public API payloads, Kubernetes Secrets, and MySQL storage all use the canonical `QuotaSpec` limits shape,
+such as
+`{"limits":[{"dimension":"sandbox.count","scope":"running","limit":10},{"dimension":"limits.cpu","scope":"running","limit":8000},{"dimension":"limits.memory","scope":"running","limit":16384},{"dimension":"sandbox.count","scope":"all","limit":50}]}`.
+Dynamic enforcement uses Redis only. If `--quota-redis-addr`
 is empty, or Redis is configured but unavailable, sandbox-manager intentionally fails open: limited keys are accepted
 and stored, but create requests are temporarily unenforced. Metrics and logs expose fail-open events.
 

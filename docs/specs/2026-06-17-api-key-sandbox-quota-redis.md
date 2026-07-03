@@ -538,7 +538,9 @@ jitters, and exports diff-lag / rebuild-duration / divergence metrics (§15). Fo
      footprint/scope drift the events missed. `enforce=false`, so it never rejects an existing sandbox. Heals lost
      entries and rebuilds after Redis loss without waiting for the CR to age.
    - **Release (CR gone / not live):** lockstring in `have`, no matching `IsLiveForQuota` CR → `Release`. Frees
-     failed-create leftovers (path 1's kept charges) and deletions the event handler missed.
+     failed-create leftovers (path 1's kept charges) and deletions the event handler missed, but only after the
+     cache is healthy, the entry was already observed leaked in an earlier full-diff pass, and its first observation
+     is older than the configured grace.
 
 There is **no separate `resyncSums`**: every charge/correct/release goes through the same atomic Lua that updates
 the entry **and** its sums together, and the co-write invariant guarantees the entry and its sum contributions
@@ -559,13 +561,12 @@ atomic-replication guarantee; it is **not required for correctness** and is opti
   defers the release — both converge on the next pass. A **subject-listing error** likewise skips that
   cycle (metric + log) and is **never** interpreted as an empty subject set. Skipped passes are counted.
 - **No per-entry timestamp.** The live entry carries **no `ts`**. The full-diff **release of a leaked entry**
-  (CR-gone, which has no CR to read an age from) is gated instead by **leader-local "seen-leaked in two
-  consecutive passes"** memory plus the cache-health gate: an entry is freed only if it looked leaked on the
-  previous pass too. The implementation MUST pick a diff cadence such that the span of two consecutive passes
-  **exceeds the worst-case apiserver lag**, so two passes comfortably clear the ~1-minute lag — giving the same
-  protection the old time-grace did without storing anything per entry. On leader failover the in-memory set resets
-  — safe, it only delays a GC. The **charge** direction deliberately has no age grace: a live CR missing from Redis
-  is acquired immediately with `enforce=false`, which is idempotent with any late-arriving hot-path `Acquire`.
+  (CR-gone, which has no CR to read an age from) is gated instead by leader-local first-seen memory plus the
+  cache-health gate: an entry is freed only if it looked leaked on the previous pass too and `now-firstSeen` is
+  greater than the configured grace. On leader failover the in-memory set resets — safe, it only delays a GC. The
+  **charge** direction deliberately has no age grace: a live CR missing from Redis is acquired immediately with
+  `enforce=false`, which is idempotent with any late-arriving hot-path `Acquire`. A live CR with stale footprint or
+  scope data is corrected immediately the same way.
 - **Cadence / cost.** The *release* direction is driven primarily by the leader's informer **events** (path 3) at
   event speed; the periodic full **bidirectional diff** is an **infrequent** backstop (minutes). Every read is
   informer-served — **no apiserver `List`** anywhere — and the per-subject work (`ListLiveSandboxesByOwner` by
@@ -731,14 +732,16 @@ To avoid paying a Redis round-trip (and its timeout) on **every** limited-key re
 `redisBackend` is wrapped by a small circuit breaker:
 
 - **Closed (healthy):** requests hit Redis normally.
-- **Open:** after **N consecutive Acquire failures** (transport error / timeout; default **N = 3**), the breaker
-  opens for a cooldown window (default **D = 30s**). While open, create-path `Acquire` **fails open immediately
-  without touching Redis** (the limited key is treated as unlimited), so a sustained outage costs no Redis IO on
-  limited-key admission requests. Request-side `Release`, key cleanup, `ListEntries`, and leader reconcile bypass
-  the acquire breaker and talk to Redis directly with their own bounded contexts; their failures are logged/counted
-  and do not reset acquire-breaker state.
-- **Half-open:** after the window, the next probe is allowed through; success → close, failure → re-open for
-  another window.
+- **Open:** after **N consecutive protected-operation failures** (transport error / timeout from `Acquire` or
+  `Release`; default **N = 3**), the breaker opens for a cooldown window (default **D = 30s**). While open,
+  create-path `Acquire` **fails open immediately without touching Redis** (the limited key is treated as
+  unlimited), so a sustained outage costs no Redis IO on limited-key admission requests. `Release` uses the same
+  breaker, so release backend failures open the breaker too; the risk is delayed release / temporary under-sell,
+  not healthy-Redis over-sell. `ListEntries` and `Cleanup` bypass the breaker and talk to Redis
+  directly with their own bounded contexts so API-key deletion cleanup is not blocked by an open request-path
+  breaker.
+- **Half-open:** after the window, the next protected operation is allowed through; success → close, failure →
+  re-open for another window.
 - `N` and `D` are configurable. The breaker is purely an **optimization of the fail-open path** — it changes how
   unavailability is detected, never the posture; correctness still rests on the leader rebuild once Redis returns.
   Breaker state transitions and open-duration are exported as metrics (§15).
@@ -875,7 +878,7 @@ Authorization reuses `CheckCreateAPIKeyPermission`; quota set chains `CheckApiKe
   failure or change the delete success response.
 - Bidirectional anti-drift: subjects enumerated through `quota.SubjectLister`, not by importing or depending on
   key storage; (a) an entry whose CR is gone is released
-  (gated by two-consecutive-pass + cache health, no per-entry ts); (b) a live CR missing/incorrect in Redis is
+  (gated by previous full-diff observation + grace + cache health, no per-entry ts); (b) a live CR missing/incorrect in Redis is
   charged/corrected immediately, so a simulated entry loss converges to the exact sums (usage may legitimately
   remain `> limit` after a fail-open over-admission — anti-drift converges to *truth*, further creates rejected
   until usage falls; quota never drains). A subject-listing error skips the cycle without treating the subject set
@@ -886,9 +889,9 @@ Authorization reuses `CheckCreateAPIKeyPermission`; quota set chains `CheckApiKe
   consistent (no half-script), and the leader rebuild restores exact sums **without** a separate sum recompute.
 - New key needs no seed: first `Acquire` on absent `q:live:{K}` / `q:sum:{K}:*` charges from zero.
 - Fail-open + circuit breaker: with Redis unreachable **or absent**, limited keys are allowed (unenforced) and
-  unlimited keys provably do zero Redis IO; after N consecutive Acquire failures the breaker opens and subsequent
-  limited-key admission requests do **no** Redis IO for the cooldown D, then half-open probes. Maintenance paths
-  bypass the acquire breaker and use bounded direct Redis calls. After Redis returns, the breaker closes and the
+  unlimited keys provably do zero Redis IO; after N consecutive `Acquire`/`Release` backend failures the shared
+  breaker opens and subsequent limited-key admission requests do **no** Redis IO for the cooldown D, then half-open
+  probes. `ListEntries` and `Cleanup` bypass the breaker and use bounded direct Redis calls. After Redis returns, the breaker closes and the
   leader rebuild restores exact sums and enforcement.
 - Quota settable without Redis: a non-empty quota at key create is accepted and persisted even when no Redis is
   configured; unenforced; API-key create/list responses still return the stored static quota; no dynamic usage
@@ -971,15 +974,15 @@ Authorization reuses `CheckCreateAPIKeyPermission`; quota set chains `CheckApiKe
   after deletion is accepted); **leader event reconcile** for pause/resume/footprint/non-manager-delete; **leader
   bidirectional anti-drift** backstop. Subjects come from a Redis-independent `SubjectLister` supplied by E2B, not
   from key storage imports. All Sandbox reads are **informer-only, never APIReader**; **every release-capable pass
-  is cache-health-gated**; the full-diff leaked release uses **two-consecutive-pass** leader memory in place of a
-  per-entry `ts`. Missing live entries are charged immediately with `enforce=false`. **No owner label, no
+  is cache-health-gated**; the full-diff leaked release uses previous-observation plus grace leader memory in place
+  of a per-entry `ts`. Missing live entries are charged immediately with `enforce=false`. **No owner label, no
   backfill.**
 - **`running` admission:** gated **only at create** (un-gated resume → bounded over-limit tolerated, §6.4.1);
   out-of-band footprint changes reconciled by the leader, not admission-gated.
 - **No seed:** absent state for a new key == zero.
-- **Redis unavailable / absent (Phase 1): fail-open**, with an **Acquire-only circuit breaker** (default N=3
-  Acquire failures → open D=30s, then half-open) so a sustained outage costs no admission-path Redis IO.
-  Maintenance paths bypass the acquire breaker and use bounded direct Redis calls. Fail-closed posture is
+- **Redis unavailable / absent (Phase 1): fail-open**, with a shared `Acquire`/`Release` circuit breaker (default
+  N=3 backend failures → open D=30s, then half-open) so a sustained outage costs no admission-path Redis IO.
+  `ListEntries` and `Cleanup` bypass the breaker and use bounded direct Redis calls. Fail-closed posture is
   **deferred** (§16).
 - **Quota immutable in Phase 1** (no `PATCH`); admin-only to set; E2B maps each API key to a sandbox-manager
   subject/user and passes that static quota to manager calls. **Mutation and
@@ -1006,7 +1009,7 @@ Authorization reuses `CheckCreateAPIKeyPermission`; quota set chains `CheckApiKe
 - The generic leadership lease name, `leaderelection` parameters, and exact primary signal API (`IsPrimary` plus
   `WaitPrimary` / `PrimaryChanged` or equivalent) on `SandboxManager`.
 - Anti-drift cadence values, minimum interval on primary reacquire, budget/pagination/jitter for the immediate
-  primary diff, the two-consecutive-pass leaked-release memory, `SubjectLister` adapter wiring from E2B key
+  primary diff, the previous-observation plus grace leaked-release memory, `SubjectLister` adapter wiring from E2B key
   storage, and how missed-event divergence / breaker state are monitored (metrics).
 - The integer units for cpu (millicores) and memory (MiB), implemented through the shared infra resource
   extraction helper plus the shared `FootprintFromResource` mapper used by both hot path and anti-drift.
