@@ -101,8 +101,8 @@ type SandboxReuseConfig struct {
 	FailureShutdownGrace time.Duration
 	// CSIResetSignalDir is the directory inside the sandbox where a reset signal
 	// file is written before reuse when the sandbox carries CSI mounts, so that a
-	// restarting csi-sidecar can detect it and unmount stale volumes. Empty
-	// disables the behavior.
+	// stopping csi-sidecar can detect it during prestop/SIGTERM and unmount stale
+	// volumes. Empty disables the behavior.
 	CSIResetSignalDir string
 	// CSIResetSignalFileName is the name of the reset signal file written into
 	// CSIResetSignalDir.

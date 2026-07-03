@@ -55,7 +55,7 @@ func init() {
 	flag.DurationVar(&reuseFailureShutdownGrace, "reuse-failure-shutdown-grace", reuseFailureShutdownGrace, "Grace period before shutting down a sandbox after reuse failure.")
 	flag.StringVar(&csiResetSignalDir, "csi-reset-signal-dir", csiResetSignalDir,
 		"Directory inside the sandbox where a reset signal file is written before reuse when the sandbox carries CSI mounts, "+
-			"so a restarting csi-sidecar can unmount stale volumes. Empty disables the behavior.")
+			"so a stopping csi-sidecar can unmount stale volumes during prestop/SIGTERM. Empty disables the behavior.")
 	flag.StringVar(&csiResetSignalFileName, "csi-reset-signal-file", csiResetSignalFileName,
 		"Name of the reset signal file written into --csi-reset-signal-dir before reuse.")
 }

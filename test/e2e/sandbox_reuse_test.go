@@ -421,7 +421,7 @@ var _ = Describe("Sandbox Reuse CSI Reset Signal", func() {
 							Containers: []corev1.Container{
 								{
 									Name:         "sandbox",
-									Image:        "centos:7",
+									Image:        "ubuntu:24.04",
 									Command:      []string{"/bin/bash", "-c", "sleep infinity"},
 									Env:          []corev1.EnvVar{{Name: "ENVD_DIR", Value: "/mnt/envd"}},
 									VolumeMounts: []corev1.VolumeMount{{Name: "envd-volume", MountPath: "/mnt/envd"}},
@@ -437,7 +437,7 @@ var _ = Describe("Sandbox Reuse CSI Reset Signal", func() {
 									},
 									Lifecycle: &corev1.Lifecycle{
 										PostStart: &corev1.LifecycleHandler{
-											Exec: &corev1.ExecAction{Command: []string{"sh", "/mnt/envd/envd-run.sh"}},
+											Exec: &corev1.ExecAction{Command: []string{"bash", "/mnt/envd/envd-run.sh"}},
 										},
 									},
 								},

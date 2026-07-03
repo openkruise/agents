@@ -130,9 +130,10 @@ func (r *SandboxReuseControl) doReuse(ctx context.Context, args EnsureFuncArgs) 
 			fmt.Sprintf("Reuse started for sandbox %s", box.Name))
 		klog.InfoS("Reuse started", "sandbox", klog.KObj(box))
 
-		// Signal the csi-sidecar to unmount stale CSI volumes on its next restart
-		// before handing the sandbox back for reuse. Must run while the runtime is
-		// still reachable, i.e. before the reuser resets the sandbox.
+		// Signal the csi-sidecar to unmount stale CSI volumes when it stops
+		// (prestop/SIGTERM) before handing the sandbox back for reuse. Must run
+		// while the runtime is still reachable, i.e. before the reuser resets the
+		// sandbox.
 		if err := r.ensureCSIResetSignal(ctx, box); err != nil {
 			return 0, err
 		}
@@ -164,8 +165,9 @@ func (r *SandboxReuseControl) doReuse(ctx context.Context, args EnsureFuncArgs) 
 }
 
 // ensureCSIResetSignal writes an empty reset signal file into the sandbox's
-// configured CSI reset directory so that a restarting csi-sidecar can detect it
-// and unmount stale CSI volumes before the sandbox is returned to the pool.
+// configured CSI reset directory so that a stopping csi-sidecar can detect it
+// during prestop/SIGTERM and unmount stale CSI volumes before the sandbox is
+// returned to the pool.
 //
 // It is a no-op when the sandbox carries no CSI mount annotation. When the sandbox
 // does carry CSI mounts but the reset directory is not configured, it fails the
@@ -198,9 +200,9 @@ func (r *SandboxReuseControl) ensureCSIResetSignal(ctx context.Context, box *age
 			klog.InfoS("Wrote CSI reset signal for reuse", "sandbox", klog.KObj(box), "file", resetFile, "attempt", attempt)
 			return nil
 		}
-		klog.InfoS("Failed to write CSI reset signal, will retry", "sandbox", klog.KObj(box),
-			"file", resetFile, "attempt", attempt, "error", lastErr)
 		if attempt < csiResetSignalMaxRetries {
+			klog.InfoS("Failed to write CSI reset signal, will retry", "sandbox", klog.KObj(box),
+				"file", resetFile, "attempt", attempt, "error", lastErr)
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
