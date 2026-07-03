@@ -47,6 +47,8 @@ You are warmly welcome to hack on OpenKruise Agents. We have prepared a detailed
 
 OpenKruise Agents offers high-level APIs for sandbox management, enabling efficient resource provisioning, user management, and traffic routing. Under the hood, OpenKruise Agents includes built-in sandbox APIs and implementations, while maintaining compatibility with Sig Agent-Sandbox when available.
 
+## Security
+Please report vulnerabilities by email to kubernetes-security@service.aliyun.com. Also see our [SECURITY.md](SECURITY.md) file for details.
 
 ## Community
 Active communication channels:
