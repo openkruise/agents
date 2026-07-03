@@ -327,6 +327,10 @@ func IsSandboxReady(sbx *agentsv1alpha1.Sandbox) bool {
 	return readyCond != nil && readyCond.Status == metav1.ConditionTrue
 }
 
+func IsReservedFailedSandbox(labels map[string]string) bool {
+	return labels[agentsv1alpha1.LabelSandboxReservedFailed] == agentsv1alpha1.True
+}
+
 // IsSandboxPausable returns true when the pausing operation will not cause any conflict.
 func IsSandboxPausable(sbx *agentsv1alpha1.Sandbox) (bool, string) {
 	if IsControlledBySandboxSet(sbx) {

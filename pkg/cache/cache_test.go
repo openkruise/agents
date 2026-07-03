@@ -475,8 +475,29 @@ func TestCache_CountActiveSandboxes(t *testing.T) {
 			PodInfo: agentsv1alpha1.PodInfo{PodIP: "10.0.0.4"},
 		},
 	}
+	// Reserved failed sandbox: should be excluded from active count
+	sbx5 := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "sbx-5",
+			Namespace: "default",
+			Annotations: map[string]string{
+				agentsv1alpha1.AnnotationOwner: "user-1",
+			},
+			Labels: map[string]string{
+				agentsv1alpha1.LabelSandboxIsClaimed:      agentsv1alpha1.True,
+				agentsv1alpha1.LabelSandboxReservedFailed: agentsv1alpha1.True,
+			},
+		},
+		Status: agentsv1alpha1.SandboxStatus{
+			Phase: agentsv1alpha1.SandboxRunning,
+			Conditions: []metav1.Condition{
+				{Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue},
+			},
+			PodInfo: agentsv1alpha1.PodInfo{PodIP: "10.0.0.5"},
+		},
+	}
 
-	c, _, err := cachetest.NewTestCache(t, sbx1, sbx2, sbx3, sbx4)
+	c, _, err := cachetest.NewTestCache(t, sbx1, sbx2, sbx3, sbx4, sbx5)
 	require.NoError(t, err)
 
 	tests := []struct {
@@ -509,19 +530,19 @@ func TestCache_CountActiveSandboxes(t *testing.T) {
 		})
 	}
 
-	// Verify CountActiveSandboxes matches ListSandboxes result length (minus dead) for user-1
+	// Verify CountActiveSandboxes matches non-dead ListSandboxes count for user-1.
 	list, err := c.ListSandboxes(t.Context(), cache.ListSandboxesOptions{User: "user-1"})
 	require.NoError(t, err)
-	var listNonDead int32
+	var listActive int32
 	for _, sbx := range list {
 		state, _ := utils.GetSandboxState(sbx)
 		if state != agentsv1alpha1.SandboxStateDead {
-			listNonDead++
+			listActive++
 		}
 	}
 	cnt, err := c.CountActiveSandboxes(t.Context(), cache.ListSandboxesOptions{User: "user-1"})
 	require.NoError(t, err)
-	assert.Equal(t, listNonDead, cnt, "CountActiveSandboxes should match ListSandboxes non-dead count")
+	assert.Equal(t, listActive, cnt, "CountActiveSandboxes should match ListSandboxes active count")
 }
 
 func TestCache_ListCheckpointsWithOptions_UserScoped(t *testing.T) {

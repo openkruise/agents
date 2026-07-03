@@ -7,52 +7,11 @@ For basic concepts, please refer to [Running E2B Code Interpreter Sandbox](../co
 
 ## 1. Defining Templates
 
-Similar to the code-interpreter template, we can define a template using the official E2B Desktop image and create a
-pre-warming pool via `SandboxSet`.
+Similar to the code-interpreter template, we can use the official E2B Desktop image to create a pre-warming pool via
+`SandboxSet`. Apply [sandboxset.yaml](sandboxset.yaml) to create a template named `desktop`:
 
-```yaml
-apiVersion: agents.kruise.io/v1alpha1
-kind: SandboxSet
-metadata:
-  annotations:
-    # Enable SandboxManager's Envd initialization capability
-    e2b.agents.kruise.io/should-init-envd: "true"
-  name: code-interpreter
-  namespace: default
-spec:
-  # Pre-warming pool size, recommended to be slightly larger than the estimated request burst volume
-  replicas: 100
-  template: # Declare a Pod template
-    spec:
-      initContainers:
-        - name: init # Inject agent-runtime component through native sidecar
-          image: registry-cn-hangzhou.ack.aliyuncs.com/acs/agent-runtime:v0.0.1
-          volumeMounts:
-            - name: agent-runtime-volume
-              mountPath: /mnt/agent-runtime
-          env:
-            - name: AGENT_RUNTIME_WORKSPACE
-              value: /mnt/agent-runtime
-          restartPolicy: Always
-      containers:
-        - name: sandbox
-          image: e2bdev/desktop:latest # Use the official E2B desktop image
-          resources:
-            requests:
-              cpu: 1
-              memory: 1Gi
-            limits:
-              cpu: 1
-              memory: 1Gi
-          env:
-            - name: AGENT_RUNTIME_WORKSPACE
-              value: /mnt/agent-runtime
-          volumeMounts:
-            - name: agent-runtime-volume
-              mountPath: /mnt/agent-runtime
-      volumes:
-        - name: agent-runtime-volume # Define the shared directory between agent-runtime and main container
-          emptyDir: { }
+```shell
+kubectl apply -f examples/desktop/sandboxset.yaml
 ```
 
 ## 2. Using Sandboxes via E2B Python SDK

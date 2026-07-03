@@ -4,10 +4,14 @@ import pytest
 import requests
 from e2b_code_interpreter import Sandbox
 
+import logging
 
-def test_read_write_file(sandbox_context):
+logger = logging.getLogger(__name__)
+
+
+def test_read_write_file(sandbox_context, config):
     sbx: Sandbox = sandbox_context.add(Sandbox.create(
-        template="code-interpreter",
+        template=config.templates.code_interpreter,
         timeout=30,
         metadata={"test_case": "test_read_write_file"},
         headers={
@@ -22,9 +26,9 @@ def test_read_write_file(sandbox_context):
     assert file_content == content.decode('utf-8')
 
 
-def test_read_write_multifile(sandbox_context):
+def test_read_write_multifile(sandbox_context, config):
     sbx: Sandbox = sandbox_context.add(Sandbox.create(
-        template="code-interpreter",
+        template=config.templates.code_interpreter,
         timeout=30,
         metadata={"test_case": "test_read_write_multifile"},
         headers={
@@ -42,10 +46,10 @@ def test_read_write_multifile(sandbox_context):
     assert file_content == "file b content"
 
 
-def test_upload_with_signed_url(sandbox_context):
-    pytest.skip("Not implemented yet")
+@pytest.mark.skip(reason="not yet supported")
+def test_upload_with_signed_url(sandbox_context, config):
     sbx: Sandbox = sandbox_context.add(Sandbox.create(
-        template="code-interpreter",
+        template=config.templates.code_interpreter,
         timeout=3000,
         metadata={"test_case": "test_upload_with_signed_url"},
         headers={
@@ -53,18 +57,18 @@ def test_upload_with_signed_url(sandbox_context):
         }
     ))
     signed_url = sbx.upload_url(path="demo.txt", user="user", use_signature_expiration=10_000)
-    print(signed_url)
-    form_data = {"file": "uploaded content"}
-    resp = requests.post(signed_url, data=form_data)
-    print(resp)
+    logger.debug("signed_url: %s", signed_url)
+    resp = requests.post(signed_url, files={"file": ("demo.txt", "uploaded content")})
+    logger.debug("upload response: %s", resp)
+    assert resp.status_code == 200, f"Upload failed with status {resp.status_code}: {resp.text}"
     file_content = sbx.files.read("demo.txt")
     assert file_content == "uploaded content"
 
 
-def test_download_with_signed_url(sandbox_context):
-    pytest.skip("Not implemented yet")
+@pytest.mark.skip(reason="not yet supported")
+def test_download_with_signed_url(sandbox_context, config):
     sbx: Sandbox = sandbox_context.add(Sandbox.create(
-        template="code-interpreter",
+        template=config.templates.code_interpreter,
         timeout=3000,
         metadata={"test_case": "test_download_with_signed_url"},
         headers={
@@ -72,4 +76,4 @@ def test_download_with_signed_url(sandbox_context):
         }
     ))
     signed_url = sbx.download_url(path="demo.txt", user="user", use_signature_expiration=10_000)
-    print(signed_url)
+    logger.debug("signed_url: %s", signed_url)

@@ -23,10 +23,13 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 
 	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
@@ -501,6 +504,159 @@ func TestValidateTeamNamespace_RejectsDoubleDash(t *testing.T) {
 			require.NotNil(t, apiErr)
 			assert.Equal(t, tt.wantCode, apiErr.Code)
 			assert.Contains(t, apiErr.Message, tt.wantMsg)
+		})
+	}
+}
+
+func TestCheckApiKey_VolumeOwnership(t *testing.T) {
+	controller, fc, teardown := Setup(t)
+	defer teardown()
+
+	adminUser := &models.CreatedTeamAPIKey{
+		ID:   keys.AdminKeyID,
+		Key:  InitKey,
+		Name: "admin",
+		Team: models.AdminTeam(),
+	}
+
+	// Create a regular user in regular-team namespace
+	ctx := logs.NewContext()
+	regularUser, err := controller.keys.CreateKey(ctx, adminUser, keys.CreateKeyOptions{Name: "regular-user", TeamName: "regular-team"})
+	require.NoError(t, err)
+	require.NotNil(t, regularUser)
+
+	// Create another user in another-team namespace for non-owner test
+	anotherUser, err := controller.keys.CreateKey(ctx, adminUser, keys.CreateKeyOptions{Name: "another-user", TeamName: "another-team"})
+	require.NoError(t, err)
+	require.NotNil(t, anotherUser)
+	refreshKeyStorageForTest(t, controller)
+
+	// Create namespaces for regular teams (admin uses sandbox-system as fallback)
+	require.NoError(t, fc.Create(t.Context(), &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{Name: "regular-team"},
+	}))
+	require.NoError(t, fc.Create(t.Context(), &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{Name: "another-team"},
+	}))
+
+	// Create PVCs in each user's namespace.
+	// getNamespaceOfUser returns "" for admin (→ sandbox-system) and team.Name for others.
+	// The volumeID in the URL path maps to the PVC's VolumeName (PV name),
+	// which is indexed by cache.IndexVolumeName.
+
+	// PVC owned by regular user in regular-team namespace
+	pvcOwnedByRegular := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pvc-regular-user",
+			Namespace: "regular-team",
+			Annotations: map[string]string{
+				v1alpha1.AnnotationOwner: regularUser.ID.String(),
+			},
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			VolumeName:       "pv-regular-vol",
+			AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			Resources:        corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Gi")}},
+			StorageClassName: ptr.To("standard"),
+		},
+	}
+	require.NoError(t, fc.Create(t.Context(), pvcOwnedByRegular))
+
+	// PVC owned by admin in sandbox-system namespace (admin's namespace fallback)
+	pvcOwnedByAdmin := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pvc-admin-user",
+			Namespace: "sandbox-system",
+			Annotations: map[string]string{
+				v1alpha1.AnnotationOwner: adminUser.ID.String(),
+			},
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			VolumeName:       "pv-admin-vol",
+			AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			Resources:        corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Gi")}},
+			StorageClassName: ptr.To("standard"),
+		},
+	}
+	require.NoError(t, fc.Create(t.Context(), pvcOwnedByAdmin))
+
+	tests := []struct {
+		name         string
+		apiKeyHeader string
+		volumeID     string
+		expectError  bool
+		expectedCode int
+		expectedMsg  string
+	}{
+		{
+			name:         "owner can access own volume",
+			apiKeyHeader: regularUser.Key,
+			volumeID:     "pv-regular-vol",
+			expectError:  false,
+		},
+		{
+			name:         "admin can access admin-owned volume",
+			apiKeyHeader: InitKey,
+			volumeID:     "pv-admin-vol",
+			expectError:  false,
+		},
+		{
+			name:         "non-owner cannot access volume in same namespace",
+			apiKeyHeader: anotherUser.Key,
+			volumeID:     "pv-regular-vol",
+			expectError:  true,
+			expectedCode: http.StatusNotFound,
+			expectedMsg:  "Volume not found: pv-regular-vol",
+		},
+		{
+			name:         "admin cannot access other user's volume in different namespace",
+			apiKeyHeader: InitKey,
+			volumeID:     "pv-regular-vol",
+			expectError:  true,
+			expectedCode: http.StatusNotFound,
+			expectedMsg:  "Volume not found: pv-regular-vol",
+		},
+		{
+			name:         "volume not found",
+			apiKeyHeader: InitKey,
+			volumeID:     "non-existent-volume",
+			expectError:  true,
+			expectedCode: http.StatusNotFound,
+			expectedMsg:  "Volume not found: non-existent-volume",
+		},
+		{
+			name:         "no volumeID in path - success",
+			apiKeyHeader: regularUser.Key,
+			volumeID:     "",
+			expectError:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req, err := http.NewRequest(http.MethodGet, "http://localhost/test", nil)
+			require.NoError(t, err)
+
+			if tt.apiKeyHeader != "" {
+				req.Header.Set(models.HeaderApiKey, tt.apiKeyHeader)
+			}
+
+			if tt.volumeID != "" {
+				req.SetPathValue("volumeID", tt.volumeID)
+			}
+
+			ctx := logs.NewContext()
+			_, apiErr := controller.CheckApiKey(ctx, req)
+
+			if tt.expectError {
+				assert.NotNil(t, apiErr)
+				if apiErr != nil {
+					assert.Equal(t, tt.expectedCode, apiErr.Code)
+					assert.Equal(t, tt.expectedMsg, apiErr.Message)
+				}
+			} else {
+				assert.Nil(t, apiErr)
+			}
 		})
 	}
 }

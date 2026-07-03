@@ -77,7 +77,7 @@ func computeRevisionHash(spec *agentsv1alpha1.SandboxTemplateSpec) (string, erro
 		return "", err
 	}
 	hf := fnv.New32()
-	hf.Write(data)
+	hf.Write(data) // #nosec G104 -- hash.Write never returns error
 	return rand.SafeEncodeString(fmt.Sprint(hf.Sum32())), nil
 }
 
@@ -174,10 +174,10 @@ const ControllerRevisionHashLabel = "controller.kubernetes.io/hash"
 func HashControllerRevision(revision *apps.ControllerRevision, probe *int32) string {
 	hf := fnv.New32()
 	if len(revision.Data.Raw) > 0 {
-		hf.Write(revision.Data.Raw)
+		hf.Write(revision.Data.Raw) // #nosec G104 -- hash.Write never returns error
 	}
 	if probe != nil {
-		hf.Write([]byte(strconv.FormatInt(int64(*probe), 10)))
+		hf.Write([]byte(strconv.FormatInt(int64(*probe), 10))) // #nosec G104 -- hash.Write never returns error
 	}
 	return rand.SafeEncodeString(fmt.Sprint(hf.Sum32()))
 }

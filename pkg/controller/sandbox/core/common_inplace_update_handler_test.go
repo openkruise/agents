@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/record"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
@@ -1243,6 +1244,282 @@ func TestHandleInPlaceUpdateCommon_NoChangeReturnsTrue(t *testing.T) {
 	// control.Update returns !changed → return true, nil
 	if !result {
 		t.Error("Expected result true (no changes), got false")
+	}
+}
+
+func TestHandleInPlaceUpdateCommon_MetadataOnlyChange(t *testing.T) {
+	// Same image and resources, only labels differ → isMetadataOnlyChange returns true
+	// → controller patches pod metadata directly without setting InplaceUpdate condition
+	ctx := context.Background()
+
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	podSpec := corev1.PodSpec{
+		Containers: []corev1.Container{{
+			Name:  "main",
+			Image: "nginx:latest",
+		}},
+	}
+
+	box := buildMatchingHashBox("test-sandbox", "default", podSpec)
+	// Add labels to the sandbox template that the pod does not have.
+	// This is a metadata-only change — hash-immutable-part is unaffected.
+	box.Spec.Template.Labels = map[string]string{
+		"app": "test-app",
+	}
+
+	// Compute the new revision hash (includes labels)
+	hash, _ := HashSandbox(box)
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-pod",
+			Namespace: "default",
+			Labels: map[string]string{
+				agentsv1alpha1.PodLabelTemplateHash: "old-revision",
+			},
+		},
+		Spec: podSpec, // Same image and resources as box template
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
+
+	newStatus := &agentsv1alpha1.SandboxStatus{
+		UpdateRevision: hash,
+	}
+
+	recorder := createTestRecorder()
+	handler := &MockInPlaceUpdateHandler{
+		control:  inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
+		recorder: recorder,
+		logger:   logr.Discard(),
+	}
+
+	result, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if !result {
+		t.Error("Expected result true (metadata patched directly), got false")
+	}
+
+	// Verify NO InplaceUpdate condition was set
+	for _, cond := range newStatus.Conditions {
+		if cond.Type == string(agentsv1alpha1.SandboxConditionInplaceUpdate) {
+			t.Errorf("InplaceUpdate condition should not be set for metadata-only change, got: %s/%s", cond.Reason, cond.Status)
+		}
+	}
+
+	// Verify the pod was actually patched: template hash label should match new revision
+	updatedPod := &corev1.Pod{}
+	if err := fakeClient.Get(ctx, client.ObjectKey{Namespace: "default", Name: "test-pod"}, updatedPod); err != nil {
+		t.Fatalf("Failed to get updated pod: %v", err)
+	}
+	if updatedPod.Labels[agentsv1alpha1.PodLabelTemplateHash] != hash {
+		t.Errorf("Expected pod template hash to be %s, got %s", hash, updatedPod.Labels[agentsv1alpha1.PodLabelTemplateHash])
+	}
+	if updatedPod.Labels["app"] != "test-app" {
+		t.Errorf("Expected pod label app=test-app, got %s", updatedPod.Labels["app"])
+	}
+}
+
+func TestIsMetadataOnlyChange(t *testing.T) {
+	tests := []struct {
+		name     string
+		pod      *corev1.Pod
+		box      *agentsv1alpha1.Sandbox
+		expected bool
+	}{
+		{
+			name: "identical image and resources",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name:  "main",
+						Image: "nginx:latest",
+						Resources: corev1.ResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceCPU: resource.MustParse("100m"),
+							},
+						},
+					}},
+				},
+			},
+			box: &agentsv1alpha1.Sandbox{
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{
+									Name:  "main",
+									Image: "nginx:latest",
+									Resources: corev1.ResourceRequirements{
+										Requests: corev1.ResourceList{
+											corev1.ResourceCPU: resource.MustParse("100m"),
+										},
+									},
+								}},
+							},
+						},
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "pod has extra injected resources (subset match)",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name:  "main",
+						Image: "nginx:latest",
+						Resources: corev1.ResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceCPU:              resource.MustParse("100m"),
+								corev1.ResourceMemory:           resource.MustParse("128Mi"),
+								corev1.ResourceEphemeralStorage: resource.MustParse("1Gi"),
+							},
+							Limits: corev1.ResourceList{
+								corev1.ResourceCPU: resource.MustParse("500m"),
+							},
+						},
+					}},
+				},
+			},
+			box: &agentsv1alpha1.Sandbox{
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{
+									Name:  "main",
+									Image: "nginx:latest",
+									Resources: corev1.ResourceRequirements{
+										Requests: corev1.ResourceList{
+											corev1.ResourceCPU:    resource.MustParse("100m"),
+											corev1.ResourceMemory: resource.MustParse("128Mi"),
+										},
+									},
+								}},
+							},
+						},
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "image differs",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name:  "main",
+						Image: "nginx:old",
+					}},
+				},
+			},
+			box: &agentsv1alpha1.Sandbox{
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{
+									Name:  "main",
+									Image: "nginx:new",
+								}},
+							},
+						},
+					},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "template resource value differs",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name:  "main",
+						Image: "nginx:latest",
+						Resources: corev1.ResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceCPU: resource.MustParse("200m"),
+							},
+						},
+					}},
+				},
+			},
+			box: &agentsv1alpha1.Sandbox{
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{
+									Name:  "main",
+									Image: "nginx:latest",
+									Resources: corev1.ResourceRequirements{
+										Requests: corev1.ResourceList{
+											corev1.ResourceCPU: resource.MustParse("100m"),
+										},
+									},
+								}},
+							},
+						},
+					},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "template resource missing from pod",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name:  "main",
+						Image: "nginx:latest",
+					}},
+				},
+			},
+			box: &agentsv1alpha1.Sandbox{
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{
+									Name:  "main",
+									Image: "nginx:latest",
+									Resources: corev1.ResourceRequirements{
+										Requests: corev1.ResourceList{
+											corev1.ResourceCPU: resource.MustParse("100m"),
+										},
+									},
+								}},
+							},
+						},
+					},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "nil template returns false",
+			pod:  &corev1.Pod{},
+			box: &agentsv1alpha1.Sandbox{
+				Spec: agentsv1alpha1.SandboxSpec{},
+			},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isMetadataOnlyChange(tt.pod, tt.box)
+			if got != tt.expected {
+				t.Errorf("isMetadataOnlyChange() = %v, want %v", got, tt.expected)
+			}
+		})
 	}
 }
 

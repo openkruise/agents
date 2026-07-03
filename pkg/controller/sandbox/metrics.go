@@ -252,16 +252,68 @@ var (
 		[]string{"namespace", "name", "type"},
 	)
 
+	// sandboxStatusAbnormalTime records the Unix timestamp when the sandbox entered the abnormal state.
+	sandboxStatusAbnormalTime = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "sandbox_status_abnormal_time",
+			Help: "Unix timestamp when the sandbox entered an abnormal state",
+		},
+		[]string{"namespace", "name", "type"},
+	)
+
+	// sandboxRuntimeContainerAbnormalTime records the Unix timestamp when a runtime container became abnormal.
+	sandboxRuntimeContainerAbnormalTime = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "sandbox_runtime_container_abnormal_time",
+			Help: "Unix timestamp when a sandbox runtime container became abnormal",
+		},
+		[]string{"namespace", "name", "container"},
+	)
+
+	// sandboxReuseTotal tracks the total number of sandbox reuse operations.
+	sandboxReuseTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name:        "sandbox_reuse_total",
+			Help:        "Total number of sandbox reuse operations",
+			ConstLabels: prometheus.Labels{"source": "k8s"},
+		},
+		[]string{"namespace", "result"},
+	)
+
+	// sandboxReuseDuration tracks the duration of sandbox reuse operations.
+	// Reuse includes cleanup, pod-ready wait, and a configurable grace period, so
+	// buckets extend higher than other lifecycle histograms.
+	sandboxReuseDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:        "sandbox_reuse_duration_seconds",
+			Help:        "Duration of sandbox reuse operations from start to success in seconds",
+			ConstLabels: prometheus.Labels{"source": "k8s"},
+			Buckets:     prometheus.ExponentialBuckets(0.1, 2, 13), // 100ms -> ~409s (~7min)
+		},
+		[]string{"namespace"},
+	)
+
 	// allPhases enumerates all possible sandbox phases for metric cleanup.
 	allPhases = []agentsv1alpha1.SandboxPhase{
 		agentsv1alpha1.SandboxPending,
 		agentsv1alpha1.SandboxRunning,
 		agentsv1alpha1.SandboxPaused,
 		agentsv1alpha1.SandboxResuming,
+		agentsv1alpha1.SandboxUpgrading,
+		agentsv1alpha1.SandboxReusing,
 		agentsv1alpha1.SandboxSucceeded,
 		agentsv1alpha1.SandboxFailed,
 		agentsv1alpha1.SandboxTerminating,
 	}
+
+	// abnormalTypes enumerates all possible sandbox_status_abnormal type label values.
+	// Used for O(1) cleanup in DeleteSandboxMetrics instead of O(N) Range scan.
+	abnormalTypes = []string{"pause_incomplete", "resume_incomplete"}
+
+	// runtimeContainerNamesList is the pre-computed sorted list of runtime container
+	// names, used for O(1) cleanup in DeleteSandboxMetrics. Pre-computed to avoid
+	// allocating a new slice on every DeleteSandboxMetrics call.
+	runtimeContainerNamesList = sidecarutils.RuntimeContainerNames.List()
 )
 
 // observedCreationToReady tracks which sandboxes have had their creation-to-ready
@@ -291,8 +343,25 @@ var observedResumeDurations sync.Map
 // observedCreationFailure tracks which sandboxes have had their creation failure counted.
 var observedCreationFailure sync.Map
 
+// reuseStartTimes tracks the start time of reuse operations
+var reuseStartTimes sync.Map
+
+// observedReuseDurations tracks which sandboxes have had their reuse duration observed
+var observedReuseDurations sync.Map
+
 // deletionStartTimes tracks the deletion start time per sandbox for duration calculation.
 var deletionStartTimes sync.Map
+
+// abnormalStartTimes tracks the first time a sandbox entered an abnormal state.
+// Key format: "namespace/name/type". The timestamp is set only on the normal→abnormal
+// transition and cleared on abnormal→normal, so the _time metric stays stable across
+// repeated reconciles while the sandbox remains abnormal.
+var abnormalStartTimes sync.Map
+
+// runtimeContainerAbnormalStartTimes tracks the first time a runtime container became
+// abnormal. Key format: "namespace/name/container". Same stable-timestamp pattern as
+// abnormalStartTimes.
+var runtimeContainerAbnormalStartTimes sync.Map
 
 // sandboxLabels is the opt-in metric that exposes sandbox labels as Prometheus labels,
 // controlled via --metric-labels-allowlist flag, following the kube_pod_labels pattern.
@@ -324,7 +393,11 @@ func init() {
 		sandboxResumeTotal,
 		sandboxDeletionDuration,
 		sandboxRuntimeContainerAbnormal,
+		sandboxRuntimeContainerAbnormalTime,
 		sandboxStatusAbnormal,
+		sandboxStatusAbnormalTime,
+		sandboxReuseTotal,
+		sandboxReuseDuration,
 	)
 }
 
@@ -425,40 +498,15 @@ func findCondition(conditions []metav1.Condition, condType string) *metav1.Condi
 	return nil
 }
 
-// recordSandboxMetrics updates all sandbox lifecycle metrics based on the current sandbox state.
-// pod may be nil; when nil, container-level metrics are skipped.
-func recordSandboxMetrics(sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod) {
-	namespace := sandbox.Namespace
-	name := sandbox.Name
+func recordSandboxConditionMetrics(sandbox *agentsv1alpha1.Sandbox, namespace, name string) {
+	// Reset all condition-based "un" metrics to 0 before processing conditions.
+	// This ensures that when a condition is absent from the conditions slice
+	// (e.g., SandboxConditionResumed is removed during pause), stale metric
+	// values from a previous reconcile are cleared.
+	sandboxStatusInplaceUpdating.WithLabelValues(namespace, name).Set(0)
+	sandboxStatusUnpaused.WithLabelValues(namespace, name).Set(0)
+	sandboxStatusUnresumed.WithLabelValues(namespace, name).Set(0)
 
-	// sandbox_info: sandbox metadata
-	sandboxPool := sandbox.Labels[agentsv1alpha1.LabelSandboxPool]
-	node := sandbox.Status.NodeName
-	sandboxTemplate := sandbox.Labels[agentsv1alpha1.LabelSandboxTemplate]
-	sandboxInfo.WithLabelValues(namespace, name, sandboxPool, node, sandboxTemplate).Set(1)
-
-	// sandbox_created: creation timestamp
-	sandboxCreated.WithLabelValues(namespace, name).Set(float64(sandbox.CreationTimestamp.Unix()))
-
-	// sandbox_deletion_timestamp
-	if sandbox.DeletionTimestamp != nil {
-		sandboxDeletionTimestamp.WithLabelValues(namespace, name).Set(float64(sandbox.DeletionTimestamp.Unix()))
-		key := namespace + "/" + name
-		deletionStartTimes.LoadOrStore(key, sandbox.DeletionTimestamp.Time)
-	}
-
-	// sandbox_status_phase: Only emit the current phase (value=1), delete stale phase series to reduce cardinality.
-	currentPhase := sandbox.Status.Phase
-	if currentPhase != "" {
-		for _, p := range allPhases {
-			if p != currentPhase {
-				sandboxStatusPhase.DeleteLabelValues(namespace, name, string(p))
-			}
-		}
-		sandboxStatusPhase.WithLabelValues(namespace, name, string(currentPhase)).Set(1)
-	}
-
-	// Process conditions
 	for _, condition := range sandbox.Status.Conditions {
 		switch agentsv1alpha1.SandboxConditionType(condition.Type) {
 		case agentsv1alpha1.SandboxConditionReady:
@@ -467,7 +515,6 @@ func recordSandboxMetrics(sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod) {
 			if isReady {
 				sandboxStatusReadyTime.WithLabelValues(namespace, name).Set(float64(condition.LastTransitionTime.Unix()))
 			}
-			// Observe creation-to-ready duration histogram (once per sandbox)
 			if isReady {
 				key := namespace + "/" + name
 				if _, loaded := observedCreationToReady.LoadOrStore(key, true); !loaded {
@@ -506,8 +553,68 @@ func recordSandboxMetrics(sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod) {
 			recordConditionDuration(condition, key, &resumeStartTimes, &observedResumeDurations,
 				sandboxResumeDuration.WithLabelValues(namespace),
 				sandboxResumeTotal.WithLabelValues(namespace, "success"))
+
+		case agentsv1alpha1.SandboxConditionReusing:
+			key := namespace + "/" + name
+			if condition.Status == metav1.ConditionFalse && condition.Reason == agentsv1alpha1.SandboxReusingReasonStarted {
+				reuseStartTimes.Store(key, condition.LastTransitionTime.Time)
+				observedReuseDurations.Delete(key)
+			} else if condition.Status == metav1.ConditionTrue && condition.Reason == agentsv1alpha1.SandboxReusingReasonSucceeded {
+				if startTime, ok := reuseStartTimes.Load(key); ok {
+					if _, observed := observedReuseDurations.LoadOrStore(key, true); !observed {
+						duration := condition.LastTransitionTime.Sub(startTime.(time.Time))
+						sandboxReuseDuration.WithLabelValues(namespace).Observe(duration.Seconds())
+						sandboxReuseTotal.WithLabelValues(namespace, "success").Inc()
+					}
+				}
+			} else if condition.Status == metav1.ConditionFalse &&
+				(condition.Reason == agentsv1alpha1.SandboxReusingReasonFailed || condition.Reason == agentsv1alpha1.SandboxReusingReasonTimeout) {
+				if _, observed := observedReuseDurations.LoadOrStore(key, true); !observed {
+					result := "failed"
+					if condition.Reason == agentsv1alpha1.SandboxReusingReasonTimeout {
+						result = "timeout"
+					}
+					sandboxReuseTotal.WithLabelValues(namespace, result).Inc()
+				}
+			}
 		}
 	}
+}
+
+// recordSandboxMetrics updates all sandbox lifecycle metrics based on the current sandbox state.
+// pod may be nil; when nil, container-level metrics are skipped.
+func recordSandboxMetrics(sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod) {
+	namespace := sandbox.Namespace
+	name := sandbox.Name
+
+	// sandbox_info: sandbox metadata
+	sandboxPool := sandbox.Labels[agentsv1alpha1.LabelSandboxPool]
+	node := sandbox.Status.NodeName
+	sandboxTemplate := sandbox.Labels[agentsv1alpha1.LabelSandboxTemplate]
+	sandboxInfo.WithLabelValues(namespace, name, sandboxPool, node, sandboxTemplate).Set(1)
+
+	// sandbox_created: creation timestamp
+	sandboxCreated.WithLabelValues(namespace, name).Set(float64(sandbox.CreationTimestamp.Unix()))
+
+	// sandbox_deletion_timestamp
+	if sandbox.DeletionTimestamp != nil {
+		sandboxDeletionTimestamp.WithLabelValues(namespace, name).Set(float64(sandbox.DeletionTimestamp.Unix()))
+		key := namespace + "/" + name
+		deletionStartTimes.LoadOrStore(key, sandbox.DeletionTimestamp.Time)
+	}
+
+	// sandbox_status_phase: Only emit the current phase (value=1), delete stale phase series to reduce cardinality.
+	currentPhase := sandbox.Status.Phase
+	if currentPhase != "" {
+		for _, p := range allPhases {
+			if p != currentPhase {
+				sandboxStatusPhase.DeleteLabelValues(namespace, name, string(p))
+			}
+		}
+		sandboxStatusPhase.WithLabelValues(namespace, name, string(currentPhase)).Set(1)
+	}
+
+	recordSandboxConditionMetrics(sandbox, namespace, name)
 
 	// Detect creation failure
 	if currentPhase == agentsv1alpha1.SandboxFailed {
@@ -536,16 +643,8 @@ func recordSandboxMetrics(sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod) {
 		}
 	}
 
-	if pauseAbnormal {
-		sandboxStatusAbnormal.WithLabelValues(namespace, name, "pause_incomplete").Set(1)
-	} else {
-		sandboxStatusAbnormal.DeleteLabelValues(namespace, name, "pause_incomplete")
-	}
-	if resumeAbnormal {
-		sandboxStatusAbnormal.WithLabelValues(namespace, name, "resume_incomplete").Set(1)
-	} else {
-		sandboxStatusAbnormal.DeleteLabelValues(namespace, name, "resume_incomplete")
-	}
+	setAbnormalTimeMetric(namespace, name, "pause_incomplete", pauseAbnormal)
+	setAbnormalTimeMetric(namespace, name, "resume_incomplete", resumeAbnormal)
 
 	// sandbox_labels: opt-in metric controlled via --metric-labels-allowlist
 	if sandboxLabels != nil {
@@ -589,7 +688,9 @@ func DeleteSandboxMetrics(namespace, name string) {
 	// Counter metrics at namespace level are not deleted per-sandbox
 
 	sandboxStatusAbnormal.DeletePartialMatch(prometheus.Labels{"namespace": namespace, "name": name})
+	sandboxStatusAbnormalTime.DeletePartialMatch(prometheus.Labels{"namespace": namespace, "name": name})
 	sandboxRuntimeContainerAbnormal.DeletePartialMatch(prometheus.Labels{"namespace": namespace, "name": name})
+	sandboxRuntimeContainerAbnormalTime.DeletePartialMatch(prometheus.Labels{"namespace": namespace, "name": name})
 
 	if sandboxLabels != nil {
 		sandboxLabels.DeletePartialMatch(prometheus.Labels{"namespace": namespace, "name": name})
@@ -603,6 +704,41 @@ func DeleteSandboxMetrics(namespace, name string) {
 	resumeStartTimes.Delete(key)
 	observedResumeDurations.Delete(key)
 	observedCreationFailure.Delete(key)
+	reuseStartTimes.Delete(key)
+	observedReuseDurations.Delete(key)
+
+	// Clean up abnormal start-time tracking with O(1) direct deletes.
+	// The set of possible types and container names is fixed and small,
+	// so we avoid an O(N) Range scan across all sandboxes' entries.
+	for _, t := range abnormalTypes {
+		abnormalStartTimes.Delete(key + "/" + t)
+	}
+	for _, c := range runtimeContainerNamesList {
+		runtimeContainerAbnormalStartTimes.Delete(key + "/" + c)
+	}
+}
+
+// setAbnormalTimeMetric manages the abnormal gauge and its _time companion.
+// On the normal→abnormal transition it stores the current timestamp in
+// abnormalStartTimes and sets the _time metric to that value. While the state
+// remains abnormal across subsequent reconciles, the timestamp is NOT refreshed.
+// On the abnormal→normal transition it deletes both the metric series and the
+// stored start time.
+func setAbnormalTimeMetric(namespace, name, abnormalType string, abnormal bool) {
+	key := namespace + "/" + name + "/" + abnormalType
+	if abnormal {
+		// Only set the timestamp on the first transition into abnormal.
+		if _, exists := abnormalStartTimes.Load(key); !exists {
+			now := float64(time.Now().Unix())
+			abnormalStartTimes.Store(key, now)
+			sandboxStatusAbnormalTime.WithLabelValues(namespace, name, abnormalType).Set(now)
+		}
+		sandboxStatusAbnormal.WithLabelValues(namespace, name, abnormalType).Set(1)
+	} else {
+		abnormalStartTimes.Delete(key)
+		sandboxStatusAbnormal.DeleteLabelValues(namespace, name, abnormalType)
+		sandboxStatusAbnormalTime.DeleteLabelValues(namespace, name, abnormalType)
+	}
 }
 
 func recordRuntimeContainerAbnormal(namespace, name string, pod *corev1.Pod) {
@@ -614,10 +750,19 @@ func recordRuntimeContainerAbnormal(namespace, name string, pod *corev1.Pod) {
 		if !sidecarutils.RuntimeContainerNames.Has(cs.Name) {
 			continue
 		}
+		containerKey := namespace + "/" + name + "/" + cs.Name
 		if cs.RestartCount > 0 && !cs.Ready {
+			// Only set the timestamp on the first transition into abnormal.
+			if _, exists := runtimeContainerAbnormalStartTimes.Load(containerKey); !exists {
+				now := float64(time.Now().Unix())
+				runtimeContainerAbnormalStartTimes.Store(containerKey, now)
+				sandboxRuntimeContainerAbnormalTime.WithLabelValues(namespace, name, cs.Name).Set(now)
+			}
 			sandboxRuntimeContainerAbnormal.WithLabelValues(namespace, name, cs.Name).Set(1)
 		} else {
+			runtimeContainerAbnormalStartTimes.Delete(containerKey)
 			sandboxRuntimeContainerAbnormal.WithLabelValues(namespace, name, cs.Name).Set(0)
+			sandboxRuntimeContainerAbnormalTime.DeleteLabelValues(namespace, name, cs.Name)
 		}
 	}
 }

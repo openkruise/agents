@@ -1,10 +1,13 @@
 import base64
 import time
 
-import pytest
 from e2b_code_interpreter import Sandbox
 
+import logging
+
 from utils import run_code_sandbox
+
+logger = logging.getLogger(__name__)
 
 
 def execute_python_code(s: Sandbox, code: str, expect_stdout: list[str]):
@@ -15,9 +18,9 @@ def execute_python_code(s: Sandbox, code: str, expect_stdout: list[str]):
     assert execution.logs.stdout == expect_stdout
 
 
-def test_run_code(sandbox_context):
+def test_run_code(sandbox_context, config):
     sbx: Sandbox = sandbox_context.add(Sandbox.create(
-        template="code-interpreter",
+        template=config.templates.code_interpreter,
         timeout=30,
         metadata={"test_case": "test_run_code"},
         headers={
@@ -47,7 +50,7 @@ def test_run_code(sandbox_context):
     """, ["[1, 2, 3, 4, 5, 6, 7]\n"])
 
 
-def test_static_charts(sandbox_context):
+def test_static_charts(sandbox_context, config):
     code_to_run = """
     import matplotlib.pyplot as plt
 
@@ -57,7 +60,7 @@ def test_static_charts(sandbox_context):
     """
 
     sandbox: Sandbox = sandbox_context.add(Sandbox.create(
-        template="code-interpreter",
+        template=config.templates.code_interpreter,
         timeout=30,
         metadata={"test_case": "test_static_charts"},
         headers={
@@ -75,10 +78,10 @@ def test_static_charts(sandbox_context):
     # Save the png to a file. The png is in base64 format.
     with open('chart.png', 'wb') as f:
         f.write(base64.b64decode(first_result.png))
-    print('Chart saved as chart.png')
+    logger.info('Chart saved as chart.png')
 
 
-def test_code_stream(sandbox_context):
+def test_code_stream(sandbox_context, config):
     code_to_run = """
     import matplotlib.pyplot as plt
 
@@ -100,11 +103,11 @@ def test_code_stream(sandbox_context):
     def on_result_callback(result):
         nonlocal code_result
         code_result = result
-        print('result:', result)
+        logger.info("result: %s", result)
 
     code_result = None
     sandbox: Sandbox = sandbox_context.add(Sandbox.create(
-        template="code-interpreter",
+        template=config.templates.code_interpreter,
         timeout=30,
         metadata={"test_case": "test_code_stream"},
         headers={
@@ -119,19 +122,19 @@ def test_code_stream(sandbox_context):
     assert code_result is not None
 
 
-def test_pause_resume_code_context(sandbox_context):
-    pytest.skip("Not implemented yet")
+def test_pause_resume_code_context(sandbox_context, config):
     """Test creating a code context, running code, pausing and resuming, then running more code"""
     # 1) Create a code context (sandbox)
-    sbx: Sandbox = Sandbox.create(
-        template="code-interpreter",
+    sbx: Sandbox = sandbox_context.add(Sandbox.create(
+        template=config.templates.code_interpreter,
         timeout=6000,
-    )
-    print(f"Sandbox created: {sbx.sandbox_id}")
+        headers={"x-request-id": sandbox_context.request_id},
+    ))
+    logger.info("Sandbox created: %s", sbx.sandbox_id)
 
     # Create a code context and save the context ID
     context = sbx.create_code_context()
-    print(f"Code context created: {context.id}")
+    logger.info("Code context created: %s", context.id)
 
     # 2) Run some Python code in the context
     execution = run_code_sandbox(sbx, "x = 10", context=context)
@@ -143,22 +146,26 @@ def test_pause_resume_code_context(sandbox_context):
     assert execution.logs.stdout == ["x = 10, y = 20\n"]
 
     # 3) Pause and resume (connect)
-    print("Pausing sandbox...")
+    logger.info("Pausing sandbox...")
     sbx.beta_pause()
-    print(f"Sandbox paused: {sbx.sandbox_id}")
+    logger.info("Sandbox paused: %s", sbx.sandbox_id)
 
-    print("Sleeping...")
+    logger.info("Sleeping...")
     time.sleep(120)
 
-    print("Resuming (connecting) to sandbox...")
+    logger.info("Resuming (connecting) to sandbox...")
     sbx = sbx.connect()
-    print(f"Connected to sandbox: {sbx.sandbox_id}")
+    logger.info("Connected to sandbox: %s", sbx.sandbox_id)
 
-    # 4) Run some Python code in the context (created before)
-    # Variables and functions defined before pause should still exist
-    # Use the same context ID
-    execution = run_code_sandbox(sbx, "print(f'x = {x}, y = {y}')", context=context)
-    assert not execution.error
-    assert execution.logs.stdout == ["x = 10, y = 20\n"]
-
-    assert sbx.kill()
+    # 4) Verify sandbox is operational after resume.
+    # Memory state is only preserved when persistent_contents includes "memory".
+    if "memory" in config.persistent_contents:
+        # Code context and variables survive pause/resume
+        execution = run_code_sandbox(sbx, "print(f'x = {x}, y = {y}')", context=context)
+        assert not execution.error
+        assert execution.logs.stdout == ["x = 10, y = 20\n"]
+    else:
+        # Code context is lost; just verify the sandbox can execute code
+        execution = run_code_sandbox(sbx, "print('sandbox alive')")
+        assert not execution.error
+        assert execution.logs.stdout == ["sandbox alive\n"]

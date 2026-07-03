@@ -50,3 +50,17 @@ func GetSandboxCondition(sbx *v1alpha1.Sandbox, tp v1alpha1.SandboxConditionType
 	}
 	return metav1.Condition{}
 }
+
+func BuildUserMetadataKeys(labels, annotations map[string]string) *v1alpha1.UpdatedMetadataInClaim {
+	if len(labels) == 0 && len(annotations) == 0 {
+		return nil
+	}
+	keys := &v1alpha1.UpdatedMetadataInClaim{}
+	for k := range labels {
+		keys.Labels = append(keys.Labels, k)
+	}
+	for k := range annotations {
+		keys.Annotations = append(keys.Annotations, k)
+	}
+	return keys
+}

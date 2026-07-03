@@ -20,9 +20,12 @@ import (
 	"context"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/klog/v2"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/utils/pagination"
@@ -183,6 +186,26 @@ func (m *SandboxManager) GetOwnerOfSandbox(sandboxID string) (string, bool) {
 	return route.Owner, ok
 }
 
+// GetOwnerOfVolume returns the owner (UserID) of the volume identified by volumeID (PV Name)
+// in the given namespace. Returns ("", false) if the volume is not found.
+func (m *SandboxManager) GetOwnerOfVolume(ctx context.Context, namespace, volumeID string) (string, bool) {
+	log := klog.FromContext(ctx)
+	pvcList := &corev1.PersistentVolumeClaimList{}
+	err := m.infra.GetCache().GetClient().List(ctx, pvcList,
+		client.InNamespace(namespace),
+		client.MatchingFields{cache.IndexVolumeName: volumeID},
+	)
+	if err != nil {
+		log.Error(err, "failed to list PVCs for volume ownership check", "namespace", namespace, "volumeID", volumeID)
+		return "", false
+	}
+	if len(pvcList.Items) == 0 {
+		log.Info("no PVC found for volume ownership check", "namespace", namespace, "volumeID", volumeID)
+		return "", false
+	}
+	return pvcList.Items[0].GetAnnotations()[v1alpha1.AnnotationOwner], true
+}
+
 // syncRoute syncs the sandbox route with peers
 // If refresh is true, it will refresh the sandbox state before syncing
 // Returns error if route sync fails, but refresh failures are logged and ignored
@@ -245,13 +268,37 @@ func (m *SandboxManager) ResumeSandbox(ctx context.Context, sbx infra.Sandbox, o
 	return nil
 }
 
-// DeleteSandbox deletes a sandbox and syncs route with peers
-func (m *SandboxManager) DeleteSandbox(ctx context.Context, sbx infra.Sandbox) error {
-	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
-	start := time.Now()
+// deleteRouteAndSync removes the route locally and syncs the deletion with peers.
+func (m *SandboxManager) deleteRouteAndSync(ctx context.Context, sbx infra.Sandbox) {
+	log := klog.FromContext(ctx)
 	route := sbx.GetRoute()
 	route.State = v1alpha1.SandboxStateDead
+	m.proxy.DeleteRoute(route.ID)
+	if err := m.proxy.SyncRouteWithPeers(route); err != nil {
+		log.Error(err, "failed to sync route with peers")
+	}
+}
 
+// DeleteSandbox deletes a sandbox and syncs route with peers.
+// If the sandbox is reuse-enabled and in Running phase, it triggers reuse instead of deletion.
+func (m *SandboxManager) DeleteSandbox(ctx context.Context, sbx infra.Sandbox) error {
+	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
+
+	if sbx.IsReuseEnabled() && sbx.Phase() == string(v1alpha1.SandboxRunning) {
+		log.Info("sandbox is reuse-enabled, triggering reuse instead of deletion")
+		start := time.Now()
+		if err := sbx.TriggerReuse(ctx); err != nil {
+			log.Error(err, "failed to trigger reuse, falling back to delete")
+			sandboxReuseResponses.WithLabelValues(sbx.GetNamespace(), "failure").Inc()
+		} else {
+			sandboxReuseResponses.WithLabelValues(sbx.GetNamespace(), "success").Inc()
+			sandboxReuseDuration.WithLabelValues(sbx.GetNamespace()).Observe(time.Since(start).Seconds())
+			m.deleteRouteAndSync(ctx, sbx)
+			return nil
+		}
+	}
+
+	start := time.Now()
 	if err := sbx.Kill(ctx); err != nil {
 		log.Error(err, "failed to delete sandbox")
 		sandboxDeleteResponses.WithLabelValues(sbx.GetNamespace(), "failure").Inc()
@@ -261,10 +308,6 @@ func (m *SandboxManager) DeleteSandbox(ctx context.Context, sbx infra.Sandbox) e
 	sandboxDeleteDuration.WithLabelValues(sbx.GetNamespace()).Observe(time.Since(start).Seconds())
 	log.Info("sandbox deleted")
 
-	m.proxy.DeleteRoute(route.ID)
-	if err := m.proxy.SyncRouteWithPeers(route); err != nil {
-		log.Error(err, "failed to sync route with peers after delete")
-	}
-	log.Info("route synced with peers after delete", "route", route)
+	m.deleteRouteAndSync(ctx, sbx)
 	return nil
 }

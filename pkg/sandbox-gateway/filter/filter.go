@@ -17,6 +17,7 @@ limitations under the License.
 package filter
 
 import (
+	"crypto/subtle"
 	"fmt"
 
 	"github.com/envoyproxy/envoy/contrib/golang/common/go/api"
@@ -35,6 +36,12 @@ func init() {
 	config.Level = zap.NewAtomicLevelAt(zapcore.InfoLevel)
 	logger, _ = config.Build()
 }
+
+const (
+	// accessTokenHeader is the HTTP header name that clients must set
+	// to carry the sandbox access token for authentication.
+	accessTokenHeader = "x-access-token"
+)
 
 func FilterFactory(c interface{}, callbacks api.FilterCallbackHandler) api.StreamFilter {
 	cfg := c.(*FilterConfig)
@@ -102,6 +109,24 @@ func (f *sandboxFilter) DecodeHeaders(header api.RequestHeaderMap, endStream boo
 			"sandbox_not_running",
 		)
 		return api.LocalReply
+	}
+
+	// Authenticate the request if auth is enabled and the sandbox has an access token configured.
+	// When EnableAuth is false (default), the gateway skips token validation for backward compatibility.
+	if f.config.EnableAuth && route.AccessToken != "" {
+		requestToken, _ := header.Get(accessTokenHeader)
+		if subtle.ConstantTimeCompare([]byte(requestToken), []byte(route.AccessToken)) != 1 {
+			logger.Warn("Access token mismatch",
+				zap.String("sandboxID", sandboxID))
+			f.callbacks.DecoderFilterCallbacks().SendLocalReply(
+				401,
+				"unauthorized: invalid or missing access token",
+				nil,
+				-1,
+				"unauthorized",
+			)
+			return api.LocalReply
+		}
 	}
 
 	// Apply extra headers from the adapter (e.g., :path rewrite for kruise custom protocol)

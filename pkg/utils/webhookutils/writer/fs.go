@@ -125,7 +125,7 @@ func prepareToWrite(dir string) error {
 	switch {
 	case os.IsNotExist(err):
 		klog.InfoS("cert directory doesn't exist, creating", "directory", dir)
-		err = os.MkdirAll(dir, 0755)
+		err = os.MkdirAll(dir, 0755) // #nosec -- standard cert directory permissions
 		if err != nil {
 			return fmt.Errorf("can't create dir: %v, reason: %v", dir, err)
 		}

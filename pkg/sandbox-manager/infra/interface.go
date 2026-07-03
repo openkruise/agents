@@ -23,6 +23,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/openkruise/agents/pkg/cache"
@@ -109,6 +110,38 @@ type DeleteCheckpointOptions struct {
 	User string
 }
 
+type CreateVolumeOptions struct {
+	Namespace        string
+	Name             string
+	UserID           string
+	StorageSize      resource.Quantity
+	StorageClass     string
+	AccessMode       string
+	WaitBoundTimeout time.Duration
+}
+
+type ListVolumesOptions struct {
+	Namespace string
+	UserID    string
+}
+
+type GetVolumeOptions struct {
+	Namespace string
+	VolumeID  string
+	UserID    string
+}
+
+type DeleteVolumeOptions struct {
+	Namespace string
+	VolumeID  string
+	UserID    string
+}
+
+type VolumeInfo struct {
+	Name     string `json:"name,omitempty"`
+	VolumeID string `json:"volumeID,omitempty"`
+}
+
 type Builder interface {
 	Build() Infrastructure
 }
@@ -126,6 +159,10 @@ type Infrastructure interface {
 	ClaimSandbox(ctx context.Context, opts ClaimSandboxOptions) (Sandbox, ClaimMetrics, error)
 	CloneSandbox(ctx context.Context, opts CloneSandboxOptions) (Sandbox, CloneMetrics, error)
 	DeleteCheckpoint(ctx context.Context, opts DeleteCheckpointOptions) error
+	CreateVolume(ctx context.Context, opts CreateVolumeOptions) (*VolumeInfo, error)
+	ListVolumes(ctx context.Context, opts ListVolumesOptions) ([]*VolumeInfo, error)
+	GetVolume(ctx context.Context, opts GetVolumeOptions) (*VolumeInfo, error)
+	DeleteVolume(ctx context.Context, opts DeleteVolumeOptions) error
 }
 
 type Sandbox interface {
@@ -146,10 +183,30 @@ type Sandbox interface {
 	GetTimeout() timeout.Options
 	GetClaimTime() (time.Time, error)
 	Kill(ctx context.Context) error                                                                     // Delete the Sandbox resource
+	TriggerReuse(ctx context.Context) error                                                             // Trigger sandbox reuse flow instead of deletion
+	IsReuseEnabled() bool                                                                               // Whether the sandbox supports reuse
+	Phase() string                                                                                      // Get the current sandbox phase
 	InplaceRefresh(ctx context.Context, deepcopy bool) error                                            // Update the Sandbox resource object to the latest
 	Request(ctx context.Context, method, path string, port int, body io.Reader) (*http.Response, error) // Make a request to the Sandbox
 	CSIMount(ctx context.Context, driver string, request string) error                                  // request is string config for csi.NodePublishVolumeRequest
 	CreateCheckpoint(ctx context.Context, opts CreateCheckpointOptions) (string, error)
+}
+
+// MergePodLabels merges the given labels into the sandbox's pod template labels.
+// Existing labels with the same key are overwritten. The sandbox's pod template
+// is initialized if necessary.
+func MergePodLabels(sbx Sandbox, labels map[string]string) {
+	if len(labels) == 0 {
+		return
+	}
+	existing := sbx.GetPodLabels()
+	if existing == nil {
+		existing = make(map[string]string, len(labels))
+	}
+	for k, v := range labels {
+		existing[k] = v
+	}
+	sbx.SetPodLabels(existing)
 }
 
 type CheckpointInfo struct {

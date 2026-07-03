@@ -2,24 +2,39 @@
 set -e  # Enable exit on error for the entire script
 
 # Parse arguments. Supported flags:
-#   --nolog   Suppress envd stdout/stderr (do not redirect to /proc/1/fd/1).
-#             Default behaviour pipes envd output to PID 1's stdout so that
-#             container log collectors pick it up.
-#   --help    Show usage information and exit.
+#   --nolog              Suppress envd stdout/stderr (do not redirect to /proc/1/fd/1).
+#                        Default behaviour pipes envd output to PID 1's stdout so that
+#                        container log collectors pick it up.
+#   -- <cmd> [args...]   Everything after "--" is collected as a command array and
+#                        executed directly (no shell interpretation). This follows the
+#                        kubectl exec pattern and avoids double-interpretation pitfalls.
+#                        Examples:
+#                        /bin/bash envd-run.sh -- /path/to/script arg1 arg2
+#                        /bin/bash envd-run.sh -- echo hello world
+#   --help               Show usage information and exit.
 NOLOG=false
-for arg in "$@"; do
-    case "$arg" in
+USER_INIT_ARGS=()
+while [ $# -gt 0 ]; do
+    case "$1" in
         --nolog)
             NOLOG=true
+            shift
+            ;;
+        --)
+            # Everything after -- becomes the init command (no shell interpretation)
+            shift
+            USER_INIT_ARGS=("$@")
+            shift $#
             ;;
         --help|-h)
-            echo "Usage: envd-run.sh [OPTIONS]"
-            echo "  --nolog    Suppress envd stdout/stderr (redirect to /dev/null)"
-            echo "  --help     Show this help message"
+            echo "Usage: envd-run.sh [OPTIONS] [-- <cmd> [args...]]"
+            echo "  --nolog              Suppress envd stdout/stderr (redirect to /dev/null)"
+            echo "  -- <cmd> [args...]   Run command directly without shell interpretation"
+            echo "  --help               Show this help message"
             exit 0
             ;;
         *)
-            echo "Error: unknown argument '$arg'" >&2
+            echo "Error: unknown argument '$1'" >&2
             exit 1
             ;;
     esac
@@ -179,4 +194,25 @@ if [ "$NOLOG" = "true" ]; then
     nohup $ENVD_DIR/envd -isnotfc >/dev/null 2>&1 &
 else
     nohup $ENVD_DIR/envd -isnotfc > /proc/1/fd/1 2>&1 &
+fi
+
+# ---------------------------------------------------------------------------
+# User init hook: "--" separator (direct exec, no shell interpretation)
+#
+# Follows the kubectl exec pattern. Everything after "--" is collected as an
+# argument array and executed directly, bypassing any shell interpretation.
+# This avoids double-quoting issues present with "sh -c" and is the preferred
+# method for commands with arguments. Example:
+#   lifecycle:
+#     postStart:
+#       exec:
+#         command: ["/bin/bash", "envd-run.sh", "--", "/mnt/init/setup.sh", "arg1", "arg2"]
+#   or:
+#         command: ["/bin/bash", "envd-run.sh", "--", "echo", "hello", "world"]
+#
+# A non-zero exit code aborts startup to surface postStart hook failures.
+# ---------------------------------------------------------------------------
+if [ ${#USER_INIT_ARGS[@]} -gt 0 ]; then
+    echo "[user-init] Running direct exec: ${USER_INIT_ARGS[*]}"
+    "${USER_INIT_ARGS[@]}"
 fi

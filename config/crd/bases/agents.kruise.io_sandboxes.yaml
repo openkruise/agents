@@ -32,6 +32,9 @@ spec:
     - jsonPath: .spec.pauseTime
       name: pause_time
       type: string
+    - jsonPath: .status.reuseCount
+      name: ReuseCount
+      type: integer
     - jsonPath: .status.message
       name: Message
       type: string
@@ -302,6 +305,11 @@ spec:
                     description: PodUID is pod uid.
                     type: string
                 type: object
+              reuseCount:
+                description: ReuseCount records the number of times this sandbox has
+                  been reused.
+                format: int32
+                type: integer
               sandboxIp:
                 description: SandboxIp is the ip address allocated to the sandbox.
                 type: string

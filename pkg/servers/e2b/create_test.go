@@ -32,12 +32,14 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
+	"github.com/openkruise/agents/pkg/servers/web"
 )
 
 // TestResolveServerTimeout verifies that a positive seconds value yields a
@@ -410,6 +412,45 @@ func TestCreateSandboxWithClone_CSIMount(t *testing.T) {
 	}
 }
 
+func TestCreateSandboxWithClaim_NamingExtensionRejected(t *testing.T) {
+	user := &models.CreatedTeamAPIKey{ID: uuid.New(), Name: "test-user"}
+	tests := []struct {
+		name      string
+		extension models.NewSandboxRequestExtension
+	}{
+		{
+			name: "sandbox name",
+			extension: models.NewSandboxRequestExtension{
+				Name: "test-sandbox",
+			},
+		},
+		{
+			name: "sandbox generate name",
+			extension: models.NewSandboxRequestExtension{
+				GenerateName: "test-sandbox-",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl := &Controller{}
+			request := models.NewSandboxRequest{
+				TemplateID: "test-template",
+				Extensions: tt.extension,
+			}
+
+			var apiErr *web.ApiError
+			require.NotPanics(t, func() {
+				_, apiErr = ctrl.createSandboxWithClaim(context.Background(), request, user)
+			})
+			require.NotNil(t, apiErr)
+			assert.Equal(t, http.StatusBadRequest, apiErr.Code)
+			assert.Contains(t, apiErr.Message, "only supported for clone")
+		})
+	}
+}
+
 func TestCreateSandboxWithClone_InplaceUpdateRejected(t *testing.T) {
 	ctrl := &Controller{}
 	request := models.NewSandboxRequest{
@@ -426,6 +467,100 @@ func TestCreateSandboxWithClone_InplaceUpdateRejected(t *testing.T) {
 	require.NotNil(t, apiErr)
 	assert.Equal(t, http.StatusBadRequest, apiErr.Code)
 	assert.Contains(t, apiErr.Message, "InplaceUpdate is not supported for clone")
+}
+
+// TestCreateSandboxWithClone_Naming asserts that Extensions.Name and
+// Extensions.GenerateName flow through the controller into the
+// CloneSandboxOptions and onto the resulting Sandbox ObjectMeta.
+func TestCreateSandboxWithClone_Naming(t *testing.T) {
+	controller, _, teardown := Setup(t)
+	defer teardown()
+
+	user := &models.CreatedTeamAPIKey{
+		ID:   uuid.New(),
+		Name: "team-a-user",
+		Team: &models.Team{Name: "team-a"},
+	}
+	cleanupCP := CreateCheckpointAndTemplateInNamespace(
+		t, controller, "team-a", "tmpl", "cp-id",
+		user.ID.String(), "src-sbx", "2024-07-01T00:00:01Z",
+	)
+	defer cleanupCP()
+
+	var capturedName, capturedGenerateName string
+	origCreateSandbox := sandboxcr.DefaultCreateSandbox
+	sandboxcr.DefaultCreateSandbox = func(ctx context.Context, sbx *agentsv1alpha1.Sandbox, c ctrlclient.Client) (*agentsv1alpha1.Sandbox, error) {
+		capturedName = sbx.Name
+		capturedGenerateName = sbx.GenerateName
+		// The fake client does not auto-resolve GenerateName; assign a unique
+		// Name so Create succeeds. Capture happens before mutation.
+		if sbx.Name == "" {
+			sbx.Name = sbx.GenerateName + uuid.NewString()[:8]
+		}
+		created, err := origCreateSandbox(ctx, sbx, c)
+		if err != nil {
+			return nil, err
+		}
+		created.Status = agentsv1alpha1.SandboxStatus{
+			Phase:              agentsv1alpha1.SandboxRunning,
+			ObservedGeneration: created.Generation,
+			Conditions: []metav1.Condition{
+				{
+					Type:   string(agentsv1alpha1.SandboxConditionReady),
+					Status: metav1.ConditionTrue,
+					Reason: agentsv1alpha1.SandboxReadyReasonPodReady,
+				},
+			},
+			PodInfo: agentsv1alpha1.PodInfo{PodIP: "1.2.3.4"},
+		}
+		if err := c.Status().Update(ctx, created); err != nil {
+			return nil, err
+		}
+		return created, nil
+	}
+	t.Cleanup(func() { sandboxcr.DefaultCreateSandbox = origCreateSandbox })
+
+	tests := []struct {
+		name               string
+		ext                models.NewSandboxRequestExtension
+		expectName         string
+		expectGenerateName string
+	}{
+		{
+			name: "explicit name passes through",
+			ext: models.NewSandboxRequestExtension{
+				Name:            "explicit-sbx",
+				CreateOnNoStock: true,
+			},
+			expectName:         "explicit-sbx",
+			expectGenerateName: "",
+		},
+		{
+			name: "explicit generateName passes through",
+			ext: models.NewSandboxRequestExtension{
+				GenerateName:    "pool-",
+				CreateOnNoStock: true,
+			},
+			expectName:         "",
+			expectGenerateName: "pool-",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			capturedName = ""
+			capturedGenerateName = ""
+			request := models.NewSandboxRequest{
+				TemplateID: "cp-id",
+				Timeout:    600,
+				Extensions: tt.ext,
+			}
+			_, apiErr := controller.createSandboxWithClone(t.Context(), request, user)
+			require.Nil(t, apiErr)
+			assert.Equal(t, tt.expectName, capturedName, "ObjectMeta.Name should reflect Extensions.Name")
+			assert.Equal(t, tt.expectGenerateName, capturedGenerateName, "ObjectMeta.GenerateName should reflect Extensions.GenerateName")
+		})
+	}
 }
 
 func TestParseCreateSandboxRequest(t *testing.T) {
@@ -505,6 +640,137 @@ func TestParseCreateSandboxRequest(t *testing.T) {
 		assert.Equal(t, http.StatusBadRequest, apiErr.Code)
 		assert.Contains(t, apiErr.Message, "timeout should between")
 	})
+
+	t.Run("valid volumeMounts", func(t *testing.T) {
+		body := `{
+			"templateID":"t1",
+			"volumeMounts":[
+				{"name":"pv-nas-001","path":"/data"},
+				{"name":"pv-oss-002","path":"/models"}
+			]
+		}`
+		req := httptest.NewRequest(http.MethodPost, "/sandboxes", strings.NewReader(body))
+		got, apiErr := ctrl.parseCreateSandboxRequest(req)
+		require.Nil(t, apiErr)
+		require.Len(t, got.VolumeMounts, 2)
+		assert.Equal(t, "pv-nas-001", got.VolumeMounts[0].Name)
+		assert.Equal(t, "/data", got.VolumeMounts[0].Path)
+		assert.Equal(t, "pv-oss-002", got.VolumeMounts[1].Name)
+		assert.Equal(t, "/models", got.VolumeMounts[1].Path)
+		// Verify CSIMount configs are populated
+		require.Len(t, got.Extensions.CSIMount.MountConfigs, 2)
+		assert.Equal(t, "pv-nas-001", got.Extensions.CSIMount.MountConfigs[0].PvName)
+		assert.Equal(t, "/data", got.Extensions.CSIMount.MountConfigs[0].MountPath)
+		assert.Equal(t, "pv-oss-002", got.Extensions.CSIMount.MountConfigs[1].PvName)
+		assert.Equal(t, "/models", got.Extensions.CSIMount.MountConfigs[1].MountPath)
+	})
+
+	t.Run("volumeMounts with empty name", func(t *testing.T) {
+		body := `{
+			"templateID":"t1",
+			"volumeMounts":[
+				{"name":"","path":"/data"}
+			]
+		}`
+		req := httptest.NewRequest(http.MethodPost, "/sandboxes", strings.NewReader(body))
+		_, apiErr := ctrl.parseCreateSandboxRequest(req)
+		require.NotNil(t, apiErr)
+		assert.Equal(t, http.StatusBadRequest, apiErr.Code)
+		assert.Contains(t, apiErr.Message, "volumeMounts[0].name cannot be empty")
+	})
+
+	t.Run("volumeMounts with invalid path", func(t *testing.T) {
+		body := `{
+			"templateID":"t1",
+			"volumeMounts":[
+				{"name":"pv-001","path":"invalid/path"}
+			]
+		}`
+		req := httptest.NewRequest(http.MethodPost, "/sandboxes", strings.NewReader(body))
+		_, apiErr := ctrl.parseCreateSandboxRequest(req)
+		require.NotNil(t, apiErr)
+		assert.Equal(t, http.StatusBadRequest, apiErr.Code)
+		assert.Contains(t, apiErr.Message, "volumeMounts[0].path is invalid: mount point must start with '/'")
+	})
+
+	t.Run("volumeMounts with duplicate paths", func(t *testing.T) {
+		body := `{
+			"templateID":"t1",
+			"volumeMounts":[
+				{"name":"pv-001","path":"/data"},
+				{"name":"pv-002","path":"/data"}
+			]
+		}`
+		req := httptest.NewRequest(http.MethodPost, "/sandboxes", strings.NewReader(body))
+		_, apiErr := ctrl.parseCreateSandboxRequest(req)
+		require.NotNil(t, apiErr)
+		assert.Equal(t, http.StatusBadRequest, apiErr.Code)
+		assert.Contains(t, apiErr.Message, `volumeMounts[1].path "/data" is duplicated`)
+	})
+
+	t.Run("empty volumeMounts array", func(t *testing.T) {
+		body := `{
+			"templateID":"t1",
+			"volumeMounts":[]
+		}`
+		req := httptest.NewRequest(http.MethodPost, "/sandboxes", strings.NewReader(body))
+		got, apiErr := ctrl.parseCreateSandboxRequest(req)
+		require.Nil(t, apiErr)
+		assert.Empty(t, got.VolumeMounts)
+		assert.Empty(t, got.Extensions.CSIMount.MountConfigs)
+	})
+
+	t.Run("volumeMounts and single csi volume metadata conflict", func(t *testing.T) {
+		// When both volumeMounts and single csi volume metadata are specified,
+		// single csi volume metadata takes precedence (overwrites volumeMounts)
+		body := `{
+			"templateID":"t1",
+			"metadata":{
+				"` + models.ExtensionKeyClaimWithCSIMount_VolumeName + `":"oss-pv-sandbox-system",
+				"` + models.ExtensionKeyClaimWithCSIMount_MountPoint + `":"/data-oss",
+				"` + models.ExtensionKeyClaimWithCSIMount_SubPath + `":"data-subPath"
+			},
+			"volumeMounts":[
+				{"name":"volume-pv","path":"/volume-path"}
+			]
+		}`
+		req := httptest.NewRequest(http.MethodPost, "/sandboxes", strings.NewReader(body))
+		got, apiErr := ctrl.parseCreateSandboxRequest(req)
+		require.Nil(t, apiErr)
+		// single csi volume metadata should override volumeMounts
+		require.Len(t, got.Extensions.CSIMount.MountConfigs, 1)
+		assert.Equal(t, "oss-pv-sandbox-system", got.Extensions.CSIMount.MountConfigs[0].PvName)
+		assert.Equal(t, "/data-oss", got.Extensions.CSIMount.MountConfigs[0].MountPath)
+		assert.Equal(t, "data-subPath", got.Extensions.CSIMount.MountConfigs[0].SubPath)
+		// volumeMounts should still be parsed
+		require.Len(t, got.VolumeMounts, 1)
+		assert.Equal(t, "volume-pv", got.VolumeMounts[0].Name)
+	})
+
+	t.Run("volumeMounts and multi csi volume metadata conflict", func(t *testing.T) {
+		// When both volumeMounts and metadata csi-volume-config are specified,
+		// metadata csi-volume-config takes precedence (overwrites volumeMounts)
+		csiConfig := `[{"pvName":"metadata-pv","mountPath":"/metadata-path","subPath":"sub","readOnly":true}]`
+		body := `{
+			"templateID":"t1",
+			"metadata":{"` + models.ExtensionKeyClaimWithCSIMount_MountConfig + `":` + fmt.Sprintf("%q", csiConfig) + `},
+			"volumeMounts":[
+				{"name":"volume-pv","path":"/volume-path"}
+			]
+		}`
+		req := httptest.NewRequest(http.MethodPost, "/sandboxes", strings.NewReader(body))
+		got, apiErr := ctrl.parseCreateSandboxRequest(req)
+		require.Nil(t, apiErr)
+		// metadata csi-volume-config should override volumeMounts
+		require.Len(t, got.Extensions.CSIMount.MountConfigs, 1)
+		assert.Equal(t, "metadata-pv", got.Extensions.CSIMount.MountConfigs[0].PvName)
+		assert.Equal(t, "/metadata-path", got.Extensions.CSIMount.MountConfigs[0].MountPath)
+		assert.Equal(t, "sub", got.Extensions.CSIMount.MountConfigs[0].SubPath)
+		assert.True(t, got.Extensions.CSIMount.MountConfigs[0].ReadOnly)
+		// volumeMounts should still be parsed
+		require.Len(t, got.VolumeMounts, 1)
+		assert.Equal(t, "volume-pv", got.VolumeMounts[0].Name)
+	})
 }
 
 func TestMapInfraErrorToApiError(t *testing.T) {
@@ -522,6 +788,11 @@ func TestMapInfraErrorToApiError(t *testing.T) {
 			name:         "ErrorNotFound maps to 400",
 			err:          managererrors.NewError(managererrors.ErrorNotFound, "template not found"),
 			expectedCode: http.StatusBadRequest,
+		},
+		{
+			name:         "ErrorConflict maps to 409",
+			err:          managererrors.NewError(managererrors.ErrorConflict, "sandbox already exists"),
+			expectedCode: http.StatusConflict,
 		},
 		{
 			name:         "ErrorInternal maps to 500",

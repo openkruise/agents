@@ -128,6 +128,26 @@ func handleInPlaceUpdateCommon(
 		return true, nil
 	}
 
+	// If only metadata (labels/annotations) changed, directly patch the pod metadata
+	// without going through the in-place update flow. This avoids unnecessarily
+	// setting the InplaceUpdate condition and Ready=False, which would block
+	// sandbox readiness for metadata-only changes.
+	if isMetadataOnlyChange(pod, box) {
+		klog.InfoS("metadata-only change detected, patching pod metadata directly", "sandbox", klog.KObj(box))
+		opts := inplaceupdate.InPlaceUpdateOptions{
+			Pod:      pod,
+			Box:      box,
+			Revision: newStatus.UpdateRevision,
+		}
+		control := handler.GetInPlaceUpdateControl()
+		if _, err := control.Update(ctx, opts); err != nil {
+			msg := err.Error()
+			handler.GetRecorder().Eventf(box, corev1.EventTypeWarning, "InplaceUpdateFailed", msg)
+			return false, err
+		}
+		return true, nil
+	}
+
 	// Pre-check: reject resize if it would change the pod's QoS class
 	origQoS, newQoS, qosChanged := inplaceupdate.CheckResizeQoSChange(box, pod)
 	if qosChanged {
@@ -194,6 +214,40 @@ func handleInPlaceUpdateCommon(
 	}
 
 	return false, nil
+}
+
+// isMetadataOnlyChange returns true if the only difference between the pod and
+// the sandbox template is metadata (labels/annotations), with no image or
+// resource changes. When this is the case, the controller can directly patch
+// the pod metadata without going through the full in-place update flow.
+//
+// Resource comparison is subset-based: only the resources declared in the
+// sandbox template are checked against the pod. Extra resources injected into
+// the pod (e.g., by LimitRanger or other admission webhooks) are ignored so
+// that metadata-only changes are not mistakenly treated as in-place updates.
+func isMetadataOnlyChange(pod *corev1.Pod, box *agentsv1alpha1.Sandbox) bool {
+	if box.Spec.Template == nil {
+		return false
+	}
+	originContainers := make(map[string]corev1.Container, len(box.Spec.Template.Spec.Containers))
+	for i := range box.Spec.Template.Spec.Containers {
+		obj := box.Spec.Template.Spec.Containers[i]
+		originContainers[obj.Name] = obj
+	}
+	for i := range pod.Spec.Containers {
+		container := pod.Spec.Containers[i]
+		origin, ok := originContainers[container.Name]
+		if !ok {
+			continue
+		}
+		if origin.Image != container.Image {
+			return false
+		}
+		if !inplaceupdate.ResourcesEqual(origin.Resources, container.Resources) {
+			return false
+		}
+	}
+	return true
 }
 
 // isInplaceUpdateTerminal returns true if the InplaceUpdate condition has already

@@ -278,6 +278,9 @@ func buildCloneError(err error) error {
 	if errors.As(err, &mErr) {
 		return mErr
 	}
+	if apierrors.IsAlreadyExists(err) {
+		return managererrors.NewError(managererrors.ErrorConflict, "%v", err)
+	}
 	return managererrors.NewError(managererrors.ErrorInternal, "%v", err)
 }
 
@@ -491,17 +494,20 @@ func (i *Infra) reconcileSandbox(ctx context.Context, sbx *v1alpha1.Sandbox, not
 	}
 
 	// Sandbox exists, refresh route
-	i.refreshRoute(sbx)
-	log.V(utils.DebugLogLevel).Info("sandbox route refreshed during reconciliation")
+	if i.refreshRoute(sbx) {
+		log.V(utils.DebugLogLevel).Info("sandbox route refreshed during reconciliation")
+	}
 	return ctrl.Result{}, nil
 }
 
-func (i *Infra) refreshRoute(sbx *v1alpha1.Sandbox) {
-	oldRoute, exists := i.Proxy.LoadRoute(sbx.GetName())
+func (i *Infra) refreshRoute(sbx *v1alpha1.Sandbox) bool {
+	oldRoute, exists := i.Proxy.LoadRoute(utils.GetSandboxID(sbx))
 	newRoute := proxyutils.DefaultGetRouteFunc(sbx)
 	if !exists || newRoute.State != oldRoute.State || newRoute.IP != oldRoute.IP {
 		i.Proxy.SetRoute(logs.NewContext(), newRoute)
+		return true
 	}
+	return false
 }
 
 const (

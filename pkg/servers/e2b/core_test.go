@@ -480,7 +480,18 @@ func UpdateSandboxWhen(t *testing.T, c ctrlclient.Client, sandboxID string, when
 	require.NotNil(t, do)
 	var sbx *agentsv1alpha1.Sandbox
 	if !assert.Eventually(t, func() bool {
-		sbx = GetSandbox(t, sandboxID, c)
+		// Do not use GetSandbox here because it calls require.NoError,
+		// which panics when called from a goroutine after the parent
+		// test has completed (assert.Eventually runs this callback in
+		// a separate goroutine). Instead, handle the Get error
+		// gracefully so Eventually can retry or time out.
+		split := strings.Split(sandboxID, "--")
+		namespace, name := split[0], split[1]
+		sbx = &agentsv1alpha1.Sandbox{}
+		if err := c.Get(t.Context(), ctrlclient.ObjectKey{Namespace: namespace, Name: name}, sbx); err != nil {
+			sbx = nil
+			return false
+		}
 		return when(sbx)
 	}, 5*time.Second, 100*time.Millisecond) {
 		return

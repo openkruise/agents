@@ -18,6 +18,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -57,8 +58,55 @@ type SandboxControl interface {
 	// EnsureSandboxUpgraded handle sandbox with status phase = Upgrading
 	EnsureSandboxUpgraded(ctx context.Context, args EnsureFuncArgs) error
 
+	// EnsureSandboxReused handle sandbox with status phase = Reusing
+	EnsureSandboxReused(ctx context.Context, args EnsureFuncArgs) (time.Duration, error)
+
 	// EnsureSandboxTerminated handle sandbox with status phase = Terminating
 	EnsureSandboxTerminated(ctx context.Context, args EnsureFuncArgs) error
+}
+
+// SandboxReuser handles the cleanup of user and container data inside a sandbox.
+// Implementations should wrap transient errors (API timeouts, network issues) with
+// RetriableError so the caller can distinguish them from permanent failures.
+type SandboxReuser interface {
+	Reuse(ctx context.Context, sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod) error
+	IsReuseComplete(ctx context.Context, sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod) (complete bool, err error)
+}
+
+// RetriableError wraps a transient error that the caller should retry.
+type RetriableError struct {
+	Err error
+}
+
+func (e *RetriableError) Error() string { return e.Err.Error() }
+func (e *RetriableError) Unwrap() error { return e.Err }
+
+func IsRetriable(err error) bool {
+	var re *RetriableError
+	return errors.As(err, &re)
+}
+
+// FailedReason allows a permanent error to specify a condition reason other
+// than the default SandboxReusingReasonFailed. handleReuseFailed checks for
+// this interface to set the correct condition reason.
+type FailedReason interface {
+	Reason() string
+}
+
+// SandboxReuseConfig groups all reuse-related configuration for the sandbox controller.
+type SandboxReuseConfig struct {
+	Reuser               SandboxReuser
+	Timeout              time.Duration
+	GracePeriod          time.Duration
+	FailureShutdownGrace time.Duration
+	// CSIResetSignalDir is the directory inside the sandbox where a reset signal
+	// file is written before reuse when the sandbox carries CSI mounts, so that a
+	// stopping csi-sidecar can detect it during prestop/SIGTERM and unmount stale
+	// volumes. Empty disables the behavior.
+	CSIResetSignalDir string
+	// CSIResetSignalFileName is the name of the reset signal file written into
+	// CSIResetSignalDir.
+	CSIResetSignalFileName string
 }
 
 type SandboxControlArgs struct {
@@ -68,6 +116,7 @@ type SandboxControlArgs struct {
 	RateLimiter       *RateLimiter
 	CheckpointControl *CheckpointControl
 	PodControl        *PodControl
+	ReuseConfig       SandboxReuseConfig
 }
 
 func NewSandboxControl(args SandboxControlArgs) map[string]SandboxControl {

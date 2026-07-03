@@ -45,6 +45,9 @@ type Config struct {
 	HostHeaderName string `json:"host-header-name,omitempty"`
 	// DefaultPort is the default port if not specified
 	DefaultPort string `json:"default-port,omitempty"`
+	// EnableAuth enables access token authentication when set to true.
+	// When disabled (default), the gateway skips token validation for backward compatibility.
+	EnableAuth bool `json:"enable-auth,omitempty"`
 }
 
 // DefaultConfig returns default configuration
@@ -178,6 +181,9 @@ func (p *ConfigParser) Merge(parent interface{}, child interface{}) interface{} 
 	}
 	if childCfg.DefaultPort != "" {
 		merged.DefaultPort = childCfg.DefaultPort
+	}
+	if childCfg.EnableAuth {
+		merged.EnableAuth = childCfg.EnableAuth
 	}
 
 	return NewFilterConfig(merged)

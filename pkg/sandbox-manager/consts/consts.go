@@ -26,6 +26,7 @@ const (
 	DefaultPoolingCandidateCounts = 100
 	DefaultWaitReadyTimeout       = 60 * time.Second
 	DefaultWaitCheckpointTimeout  = 60 * time.Second
+	DefaultWaitBoundPVCTimeout    = 60 * time.Second
 	DefaultClaimWorkers           = 500
 	DefaultCreateQPS              = 49
 )

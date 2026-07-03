@@ -593,3 +593,63 @@ func TestNewSandboxFromSandboxSet(t *testing.T) {
 		})
 	}
 }
+
+func TestClearAndInitInnerKeys(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    map[string]string
+		expected map[string]string
+	}{
+		{
+			name:     "nil map returns empty map",
+			input:    nil,
+			expected: map[string]string{},
+		},
+		{
+			name:     "empty map returns empty map",
+			input:    map[string]string{},
+			expected: map[string]string{},
+		},
+		{
+			name: "internal keys are deleted except preserved ones",
+			input: map[string]string{
+				agentsv1alpha1.InternalPrefix + "reuse-enabled":         "true",
+				agentsv1alpha1.InternalPrefix + "reuse-retain-on-failure": "5m",
+				agentsv1alpha1.InternalPrefix + "cleanup-candidate":        "true",
+				agentsv1alpha1.InternalPrefix + "sandbox-pool":             "test-pool",
+			},
+			expected: map[string]string{
+				agentsv1alpha1.InternalPrefix + "reuse-enabled":         "true",
+				agentsv1alpha1.InternalPrefix + "reuse-retain-on-failure": "5m",
+			},
+		},
+		{
+			name: "non-internal keys are preserved",
+			input: map[string]string{
+				"app":                       "my-app",
+				"agents.kruise.io/cleanup-candidate": "true",
+			},
+			expected: map[string]string{
+				"app": "my-app",
+			},
+		},
+		{
+			name: "mix of internal, preserved, and non-internal keys",
+			input: map[string]string{
+				"app":                                           "my-app",
+				agentsv1alpha1.InternalPrefix + "reuse-enabled":  "true",
+				agentsv1alpha1.InternalPrefix + "cleanup-candidate": "true",
+			},
+			expected: map[string]string{
+				"app":                                      "my-app",
+				agentsv1alpha1.InternalPrefix + "reuse-enabled": "true",
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := clearAndInitInnerKeys(tt.input)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}

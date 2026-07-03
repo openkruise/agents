@@ -65,6 +65,12 @@ func (sc *Controller) registerRoutes() {
 	RegisterE2BRoute(sc.mux, http.MethodGet, "/browser/{sandboxID}/json/version", sc.BrowserUse, sc.CheckApiKey)
 	RegisterE2BRoute(sc.mux, http.MethodGet, "/debug", sc.Debug, sc.CheckApiKey)
 
+	// Volume management endpoints
+	RegisterE2BRoute(sc.mux, http.MethodPost, "/volumes", sc.CreateVolume, sc.CheckApiKey)
+	RegisterE2BRoute(sc.mux, http.MethodGet, "/volumes", sc.ListVolumes, sc.CheckApiKey)
+	RegisterE2BRoute(sc.mux, http.MethodGet, "/volumes/{volumeID}", sc.GetVolume, sc.CheckApiKey)
+	RegisterE2BRoute(sc.mux, http.MethodDelete, "/volumes/{volumeID}", sc.DeleteVolume, sc.CheckApiKey)
+
 	// API Keys management endpoints
 	if sc.keyCfg != nil {
 		RegisterE2BRoute(sc.mux, http.MethodGet, "/teams", sc.ListTeams, sc.CheckApiKey)
@@ -126,6 +132,27 @@ func (sc *Controller) CheckApiKey(ctx context.Context, r *http.Request) (context
 			return ctx, &web.ApiError{
 				Code:    http.StatusUnauthorized,
 				Message: fmt.Sprintf("The user of API key is not the owner of sandbox: %s", sandboxID),
+			}
+		}
+	}
+	if volumeID := r.PathValue("volumeID"); volumeID != "" {
+		middleWareLog = middleWareLog.WithValues("volumeID", volumeID)
+		namespace := sc.getNamespaceOfUser(user)
+		if namespace == "" {
+			namespace = sc.systemNamespace
+		}
+		owner, ok := sc.manager.GetOwnerOfVolume(ctx, namespace, volumeID)
+		if !ok {
+			middleWareLog.Info("failed to get owner of volume")
+			return ctx, &web.ApiError{
+				Code:    http.StatusNotFound,
+				Message: fmt.Sprintf("Volume not found: %s", volumeID),
+			}
+		}
+		if owner != AnonymousUser.ID.String() && owner != user.ID.String() {
+			return ctx, &web.ApiError{
+				Code:    http.StatusUnauthorized,
+				Message: fmt.Sprintf("The user of API key is not the owner of volume: %s", volumeID),
 			}
 		}
 	}

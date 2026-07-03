@@ -2219,3 +2219,541 @@ func TestDeleteSandboxMetrics_ClearsRuntimeContainerAbnormal(t *testing.T) {
 		t.Errorf("after delete, csi-sidecar series = %v, want 0", val)
 	}
 }
+
+// TestStaleConditionMetricsReset verifies the bug fix where condition-based "un" metrics
+// (sandbox_status_unresumed, sandbox_status_unpaused, sandbox_status_inplace_updating)
+// are correctly reset to 0 when the corresponding condition is absent from the conditions slice.
+//
+// Bug: When a condition (e.g. SandboxConditionResumed) is removed during lifecycle transitions
+// (e.g. pause), the metric from the previous reconcile persisted with value 1, causing false alerts.
+func TestStaleConditionMetricsReset(t *testing.T) {
+	ns := "default"
+	name := "stale-condition-sandbox"
+	now := metav1.NewTime(time.Now())
+
+	// Step 1: Record metrics with SandboxResumed=False (unresumed=1)
+	sandboxResuming := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: ns,
+			CreationTimestamp: metav1.NewTime(time.Now()),
+		},
+		Status: agentsv1alpha1.SandboxStatus{
+			Phase: agentsv1alpha1.SandboxResuming,
+			Conditions: []metav1.Condition{
+				{
+					Type:               string(agentsv1alpha1.SandboxConditionResumed),
+					Status:             metav1.ConditionFalse,
+					LastTransitionTime: now,
+				},
+			},
+		},
+	}
+	recordSandboxMetrics(sandboxResuming, nil)
+
+	unresumedVal := testutil.ToFloat64(sandboxStatusUnresumed.WithLabelValues(ns, name))
+	if unresumedVal != 1 {
+		t.Fatalf("precondition: sandbox_status_unresumed = %v, want 1 after Resumed=False", unresumedVal)
+	}
+
+	// Step 2: Record metrics again with conditions that NO LONGER include SandboxResumed.
+	// This simulates the scenario where the condition was removed during a lifecycle transition.
+	// The metric should be reset to 0, not persist at 1.
+	sandboxRunning := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: ns,
+			CreationTimestamp: metav1.NewTime(time.Now()),
+		},
+		Status: agentsv1alpha1.SandboxStatus{
+			Phase: agentsv1alpha1.SandboxRunning,
+			Conditions: []metav1.Condition{
+				{
+					Type:               string(agentsv1alpha1.SandboxConditionReady),
+					Status:             metav1.ConditionTrue,
+					LastTransitionTime: now,
+				},
+			},
+		},
+	}
+	recordSandboxMetrics(sandboxRunning, nil)
+	defer DeleteSandboxMetrics(ns, name)
+
+	// The unresumed metric should now be 0 because the SandboxResumed condition is absent.
+	unresumedVal = testutil.ToFloat64(sandboxStatusUnresumed.WithLabelValues(ns, name))
+	if unresumedVal != 0 {
+		t.Errorf("sandbox_status_unresumed = %v, want 0 (condition absent, should be reset)", unresumedVal)
+	}
+
+	// Similarly verify unpaused and inplace_updating are reset
+	unpausedVal := testutil.ToFloat64(sandboxStatusUnpaused.WithLabelValues(ns, name))
+	if unpausedVal != 0 {
+		t.Errorf("sandbox_status_unpaused = %v, want 0 (condition absent, should be reset)", unpausedVal)
+	}
+
+	inplaceVal := testutil.ToFloat64(sandboxStatusInplaceUpdating.WithLabelValues(ns, name))
+	if inplaceVal != 0 {
+		t.Errorf("sandbox_status_inplace_updating = %v, want 0 (condition absent, should be reset)", inplaceVal)
+	}
+}
+
+// TestStaleUnpausedMetricReset verifies the same bug fix for sandbox_status_unpaused.
+// When SandboxPaused condition is removed (e.g. during resume transition), the metric should reset to 0.
+func TestStaleUnpausedMetricReset(t *testing.T) {
+	ns := "default"
+	name := "stale-unpaused-sandbox"
+	now := metav1.NewTime(time.Now())
+
+	// Step 1: Record with SandboxPaused=False (unpaused=1)
+	sandboxPaused := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: ns,
+			CreationTimestamp: metav1.NewTime(time.Now()),
+		},
+		Status: agentsv1alpha1.SandboxStatus{
+			Phase: agentsv1alpha1.SandboxPaused,
+			Conditions: []metav1.Condition{
+				{
+					Type:               string(agentsv1alpha1.SandboxConditionPaused),
+					Status:             metav1.ConditionFalse,
+					LastTransitionTime: now,
+				},
+			},
+		},
+	}
+	recordSandboxMetrics(sandboxPaused, nil)
+
+	unpausedVal := testutil.ToFloat64(sandboxStatusUnpaused.WithLabelValues(ns, name))
+	if unpausedVal != 1 {
+		t.Fatalf("precondition: sandbox_status_unpaused = %v, want 1 after Paused=False", unpausedVal)
+	}
+
+	// Step 2: Record with conditions that no longer include SandboxPaused.
+	sandboxRunning := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: ns,
+			CreationTimestamp: metav1.NewTime(time.Now()),
+		},
+		Status: agentsv1alpha1.SandboxStatus{
+			Phase: agentsv1alpha1.SandboxRunning,
+			Conditions: []metav1.Condition{
+				{
+					Type:               string(agentsv1alpha1.SandboxConditionReady),
+					Status:             metav1.ConditionTrue,
+					LastTransitionTime: now,
+				},
+			},
+		},
+	}
+	recordSandboxMetrics(sandboxRunning, nil)
+	defer DeleteSandboxMetrics(ns, name)
+
+	unpausedVal = testutil.ToFloat64(sandboxStatusUnpaused.WithLabelValues(ns, name))
+	if unpausedVal != 0 {
+		t.Errorf("sandbox_status_unpaused = %v, want 0 (condition absent, should be reset)", unpausedVal)
+	}
+}
+
+// TestSandboxStatusAbnormalTime verifies that sandbox_status_abnormal_time is set when
+// the sandbox enters an abnormal state and deleted when it returns to normal.
+// It is parameterized by abnormal type (resume_incomplete / pause_incomplete).
+func TestSandboxStatusAbnormalTime(t *testing.T) {
+	now := metav1.NewTime(time.Now())
+	tests := []struct {
+		name             string
+		abnormalPhase    agentsv1alpha1.SandboxPhase
+		abnormalConds    []metav1.Condition
+		abnormalType     string
+		normalPhase      agentsv1alpha1.SandboxPhase
+		normalConds      []metav1.Condition
+	}{
+		{
+			name:          "resume_incomplete",
+			abnormalPhase: agentsv1alpha1.SandboxResuming,
+			abnormalConds: []metav1.Condition{{
+				Type:               string(agentsv1alpha1.SandboxConditionResumed),
+				Status:             metav1.ConditionFalse,
+				LastTransitionTime: now,
+			}},
+			abnormalType: "resume_incomplete",
+			normalPhase:  agentsv1alpha1.SandboxRunning,
+			normalConds: []metav1.Condition{{
+				Type:               string(agentsv1alpha1.SandboxConditionResumed),
+				Status:             metav1.ConditionTrue,
+				LastTransitionTime: now,
+			}},
+		},
+		{
+			name:          "pause_incomplete",
+			abnormalPhase: agentsv1alpha1.SandboxPaused,
+			abnormalConds: nil, // No Paused condition → abnormal
+			abnormalType: "pause_incomplete",
+			normalPhase:  agentsv1alpha1.SandboxRunning,
+			normalConds:  nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ns := "default"
+			name := tt.name + "-abnormal-time-sandbox"
+
+			// Step 1: Record with an abnormal state
+			sandboxAbnormal := &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: name, Namespace: ns,
+					CreationTimestamp: metav1.NewTime(time.Now()),
+				},
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase:      tt.abnormalPhase,
+					Conditions: tt.abnormalConds,
+				},
+			}
+			recordSandboxMetrics(sandboxAbnormal, nil)
+
+			// Abnormal metric should be 1 and time metric should be set (>0)
+			abnormalVal := testutil.ToFloat64(sandboxStatusAbnormal.WithLabelValues(ns, name, tt.abnormalType))
+			if abnormalVal != 1 {
+				t.Fatalf("sandbox_status_abnormal{type=%s} = %v, want 1", tt.abnormalType, abnormalVal)
+			}
+
+			timeVal := testutil.ToFloat64(sandboxStatusAbnormalTime.WithLabelValues(ns, name, tt.abnormalType))
+			if timeVal <= 0 {
+				t.Errorf("sandbox_status_abnormal_time{type=%s} = %v, want > 0", tt.abnormalType, timeVal)
+			}
+
+			// Step 2: Record with a normal state
+			sandboxNormal := &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: name, Namespace: ns,
+					CreationTimestamp: metav1.NewTime(time.Now()),
+				},
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase:      tt.normalPhase,
+					Conditions: tt.normalConds,
+				},
+			}
+			recordSandboxMetrics(sandboxNormal, nil)
+			defer DeleteSandboxMetrics(ns, name)
+
+			// Abnormal metric should be deleted (returns 0 from a new series)
+			abnormalVal = testutil.ToFloat64(sandboxStatusAbnormal.WithLabelValues(ns, name, tt.abnormalType))
+			if abnormalVal != 0 {
+				t.Errorf("sandbox_status_abnormal{type=%s} = %v, want 0 after recovery", tt.abnormalType, abnormalVal)
+			}
+
+			// Time metric should also be deleted (returns 0 from a new series)
+			timeVal = testutil.ToFloat64(sandboxStatusAbnormalTime.WithLabelValues(ns, name, tt.abnormalType))
+			if timeVal != 0 {
+				t.Errorf("sandbox_status_abnormal_time{type=%s} = %v, want 0 after recovery", tt.abnormalType, timeVal)
+			}
+		})
+	}
+}
+
+// TestSandboxRuntimeContainerAbnormalTime verifies that sandbox_runtime_container_abnormal_time
+// is set when a runtime container is abnormal and deleted when it becomes healthy.
+func TestSandboxRuntimeContainerAbnormalTime(t *testing.T) {
+	ns, name := "default", "container-abnormal-time-sandbox"
+	defer DeleteSandboxMetrics(ns, name)
+
+	// Step 1: Record with an abnormal container (RestartCount > 0 and not Ready)
+	podAbnormal := &corev1.Pod{
+		Status: corev1.PodStatus{
+			InitContainerStatuses: []corev1.ContainerStatus{
+				{Name: "agent-runtime", Ready: false, RestartCount: 2},
+			},
+		},
+	}
+	recordRuntimeContainerAbnormal(ns, name, podAbnormal)
+
+	abnormalVal := testutil.ToFloat64(sandboxRuntimeContainerAbnormal.WithLabelValues(ns, name, "agent-runtime"))
+	if abnormalVal != 1 {
+		t.Fatalf("sandbox_runtime_container_abnormal{container=agent-runtime} = %v, want 1", abnormalVal)
+	}
+
+	timeVal := testutil.ToFloat64(sandboxRuntimeContainerAbnormalTime.WithLabelValues(ns, name, "agent-runtime"))
+	if timeVal <= 0 {
+		t.Errorf("sandbox_runtime_container_abnormal_time{container=agent-runtime} = %v, want > 0", timeVal)
+	}
+
+	// Step 2: Container recovers (Ready=true)
+	podHealthy := &corev1.Pod{
+		Status: corev1.PodStatus{
+			InitContainerStatuses: []corev1.ContainerStatus{
+				{Name: "agent-runtime", Ready: true, RestartCount: 2},
+			},
+		},
+	}
+	recordRuntimeContainerAbnormal(ns, name, podHealthy)
+
+	abnormalVal = testutil.ToFloat64(sandboxRuntimeContainerAbnormal.WithLabelValues(ns, name, "agent-runtime"))
+	if abnormalVal != 0 {
+		t.Errorf("sandbox_runtime_container_abnormal{container=agent-runtime} = %v, want 0 after recovery", abnormalVal)
+	}
+
+	// Time metric should be deleted (returns 0 from a new series)
+	timeVal = testutil.ToFloat64(sandboxRuntimeContainerAbnormalTime.WithLabelValues(ns, name, "agent-runtime"))
+	if timeVal != 0 {
+		t.Errorf("sandbox_runtime_container_abnormal_time{container=agent-runtime} = %v, want 0 after recovery", timeVal)
+	}
+}
+
+// TestDeleteSandboxMetrics_ClearsAbnormalTimeMetrics verifies that DeleteSandboxMetrics
+// cleans up sandbox_status_abnormal_time and sandbox_runtime_container_abnormal_time.
+func TestDeleteSandboxMetrics_ClearsAbnormalTimeMetrics(t *testing.T) {
+	ns, name := "default", "cleanup-abnormal-time-sandbox"
+	now := metav1.NewTime(time.Now())
+
+	// Populate abnormal state through the real recording functions so that both
+	// the Prometheus gauges AND the sync.Map start-time trackers are populated.
+	// Directly setting gauges would leave the sync.Maps empty, causing the Range
+	// cleanup in DeleteSandboxMetrics to be uncovered.
+	sandbox := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: ns,
+			CreationTimestamp: metav1.NewTime(time.Now()),
+		},
+		Status: agentsv1alpha1.SandboxStatus{
+			Phase: agentsv1alpha1.SandboxPaused,
+			Conditions: []metav1.Condition{{
+				Type:               string(agentsv1alpha1.SandboxConditionPaused),
+				Status:             metav1.ConditionFalse,
+				LastTransitionTime: now,
+			}},
+		},
+	}
+	pod := &corev1.Pod{
+		Status: corev1.PodStatus{
+			InitContainerStatuses: []corev1.ContainerStatus{
+				{Name: "agent-runtime", Ready: false, RestartCount: 2},
+			},
+		},
+	}
+
+	recordSandboxMetrics(sandbox, pod)
+
+	// Verify sync.Map entries were populated
+	statusKey := ns + "/" + name + "/pause_incomplete"
+	if _, ok := abnormalStartTimes.Load(statusKey); !ok {
+		t.Fatalf("precondition: abnormalStartTimes should have entry for %s", statusKey)
+	}
+	containerKey := ns + "/" + name + "/agent-runtime"
+	if _, ok := runtimeContainerAbnormalStartTimes.Load(containerKey); !ok {
+		t.Fatalf("precondition: runtimeContainerAbnormalStartTimes should have entry for %s", containerKey)
+	}
+
+	DeleteSandboxMetrics(ns, name)
+
+	// All time metrics should be cleaned up (return 0 from new series)
+	statusTimeVal := testutil.ToFloat64(sandboxStatusAbnormalTime.WithLabelValues(ns, name, "pause_incomplete"))
+	if statusTimeVal != 0 {
+		t.Errorf("sandbox_status_abnormal_time after delete = %v, want 0", statusTimeVal)
+	}
+
+	runtimeTimeVal := testutil.ToFloat64(sandboxRuntimeContainerAbnormalTime.WithLabelValues(ns, name, "agent-runtime"))
+	if runtimeTimeVal != 0 {
+		t.Errorf("sandbox_runtime_container_abnormal_time after delete = %v, want 0", runtimeTimeVal)
+	}
+
+	// Verify sync.Map entries were cleaned up
+	if _, ok := abnormalStartTimes.Load(statusKey); ok {
+		t.Errorf("abnormalStartTimes should not have entry for %s after delete", statusKey)
+	}
+	if _, ok := runtimeContainerAbnormalStartTimes.Load(containerKey); ok {
+		t.Errorf("runtimeContainerAbnormalStartTimes should not have entry for %s after delete", containerKey)
+	}
+}
+
+// TestAbnormalTimeMetricStableAcrossReconciles verifies that sandbox_status_abnormal_time
+// is set only on the first transition into abnormal and does NOT refresh on subsequent
+// reconciles while the sandbox remains in the same abnormal state.
+// This is the critical test for the bug where time() - abnormal_time never exceeded
+// the reconcile interval, making alerts impossible to trigger.
+func TestAbnormalTimeMetricStableAcrossReconciles(t *testing.T) {
+	ns := "default"
+	name := "stable-abnormal-time-sandbox"
+	now := metav1.NewTime(time.Now())
+
+	sandbox := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: ns,
+			CreationTimestamp: metav1.NewTime(time.Now()),
+		},
+		Status: agentsv1alpha1.SandboxStatus{
+			Phase: agentsv1alpha1.SandboxResuming,
+			Conditions: []metav1.Condition{
+				{
+					Type:               string(agentsv1alpha1.SandboxConditionResumed),
+					Status:             metav1.ConditionFalse,
+					LastTransitionTime: now,
+				},
+			},
+		},
+	}
+
+	// First reconcile: should set the time metric
+	recordSandboxMetrics(sandbox, nil)
+	firstTime := testutil.ToFloat64(sandboxStatusAbnormalTime.WithLabelValues(ns, name, "resume_incomplete"))
+	if firstTime <= 0 {
+		t.Fatalf("first reconcile: sandbox_status_abnormal_time = %v, want > 0", firstTime)
+	}
+
+	// Wait a bit so time.Now() would differ if we refreshed
+	time.Sleep(2 * time.Second)
+
+	// Second reconcile with the same abnormal state: time should NOT change
+	recordSandboxMetrics(sandbox, nil)
+	secondTime := testutil.ToFloat64(sandboxStatusAbnormalTime.WithLabelValues(ns, name, "resume_incomplete"))
+	if secondTime != firstTime {
+		t.Errorf("second reconcile: sandbox_status_abnormal_time = %v, want %v (should not refresh)", secondTime, firstTime)
+	}
+
+	// Third reconcile: still the same
+	time.Sleep(1 * time.Second)
+	recordSandboxMetrics(sandbox, nil)
+	thirdTime := testutil.ToFloat64(sandboxStatusAbnormalTime.WithLabelValues(ns, name, "resume_incomplete"))
+	if thirdTime != firstTime {
+		t.Errorf("third reconcile: sandbox_status_abnormal_time = %v, want %v (should not refresh)", thirdTime, firstTime)
+	}
+
+	// Now transition to normal
+	sandbox.Status.Phase = agentsv1alpha1.SandboxRunning
+	sandbox.Status.Conditions = []metav1.Condition{
+		{
+			Type:               string(agentsv1alpha1.SandboxConditionResumed),
+			Status:             metav1.ConditionTrue,
+			LastTransitionTime: metav1.NewTime(time.Now()),
+		},
+	}
+	recordSandboxMetrics(sandbox, nil)
+	defer DeleteSandboxMetrics(ns, name)
+
+	// Time metric should be deleted (returns 0 from new series)
+	normalTime := testutil.ToFloat64(sandboxStatusAbnormalTime.WithLabelValues(ns, name, "resume_incomplete"))
+	if normalTime != 0 {
+		t.Errorf("after recovery: sandbox_status_abnormal_time = %v, want 0 (deleted)", normalTime)
+	}
+
+	// If abnormal again, a NEW timestamp should be set (not the old one)
+	sandbox.Status.Phase = agentsv1alpha1.SandboxResuming
+	sandbox.Status.Conditions = []metav1.Condition{
+		{
+			Type:               string(agentsv1alpha1.SandboxConditionResumed),
+			Status:             metav1.ConditionFalse,
+			LastTransitionTime: metav1.NewTime(time.Now()),
+		},
+	}
+	recordSandboxMetrics(sandbox, nil)
+	reAbnormalTime := testutil.ToFloat64(sandboxStatusAbnormalTime.WithLabelValues(ns, name, "resume_incomplete"))
+	if reAbnormalTime <= 0 {
+		t.Errorf("re-abnormal: sandbox_status_abnormal_time = %v, want > 0", reAbnormalTime)
+	}
+	if reAbnormalTime == firstTime {
+		t.Errorf("re-abnormal: sandbox_status_abnormal_time = %v, should differ from first time %v", reAbnormalTime, firstTime)
+	}
+}
+
+// TestRuntimeContainerAbnormalTimeStableAcrossReconciles verifies that
+// sandbox_runtime_container_abnormal_time does NOT refresh on subsequent reconciles
+// while the container remains in the same abnormal state.
+func TestRuntimeContainerAbnormalTimeStableAcrossReconciles(t *testing.T) {
+	ns, name := "default", "stable-container-abnormal-time-sandbox"
+	defer DeleteSandboxMetrics(ns, name)
+
+	pod := &corev1.Pod{
+		Status: corev1.PodStatus{
+			InitContainerStatuses: []corev1.ContainerStatus{
+				{Name: "agent-runtime", Ready: false, RestartCount: 2},
+			},
+		},
+	}
+
+	// First reconcile: should set the time metric
+	recordRuntimeContainerAbnormal(ns, name, pod)
+	firstTime := testutil.ToFloat64(sandboxRuntimeContainerAbnormalTime.WithLabelValues(ns, name, "agent-runtime"))
+	if firstTime <= 0 {
+		t.Fatalf("first reconcile: sandbox_runtime_container_abnormal_time = %v, want > 0", firstTime)
+	}
+
+	// Wait a bit so time.Now() would differ if we refreshed
+	time.Sleep(2 * time.Second)
+
+	// Second reconcile: time should NOT change
+	recordRuntimeContainerAbnormal(ns, name, pod)
+	secondTime := testutil.ToFloat64(sandboxRuntimeContainerAbnormalTime.WithLabelValues(ns, name, "agent-runtime"))
+	if secondTime != firstTime {
+		t.Errorf("second reconcile: sandbox_runtime_container_abnormal_time = %v, want %v (should not refresh)", secondTime, firstTime)
+	}
+
+	// Third reconcile: still the same
+	time.Sleep(1 * time.Second)
+	recordRuntimeContainerAbnormal(ns, name, pod)
+	thirdTime := testutil.ToFloat64(sandboxRuntimeContainerAbnormalTime.WithLabelValues(ns, name, "agent-runtime"))
+	if thirdTime != firstTime {
+		t.Errorf("third reconcile: sandbox_runtime_container_abnormal_time = %v, want %v (should not refresh)", thirdTime, firstTime)
+	}
+
+	// Now container recovers
+	pod.Status.InitContainerStatuses[0].Ready = true
+	recordRuntimeContainerAbnormal(ns, name, pod)
+
+	// Time metric should be deleted
+	recoveredTime := testutil.ToFloat64(sandboxRuntimeContainerAbnormalTime.WithLabelValues(ns, name, "agent-runtime"))
+	if recoveredTime != 0 {
+		t.Errorf("after recovery: sandbox_runtime_container_abnormal_time = %v, want 0 (deleted)", recoveredTime)
+	}
+
+	// If abnormal again, a NEW timestamp should be set
+	pod.Status.InitContainerStatuses[0].Ready = false
+	recordRuntimeContainerAbnormal(ns, name, pod)
+	reAbnormalTime := testutil.ToFloat64(sandboxRuntimeContainerAbnormalTime.WithLabelValues(ns, name, "agent-runtime"))
+	if reAbnormalTime <= 0 {
+		t.Errorf("re-abnormal: sandbox_runtime_container_abnormal_time = %v, want > 0", reAbnormalTime)
+	}
+	if reAbnormalTime == firstTime {
+		t.Errorf("re-abnormal: sandbox_runtime_container_abnormal_time = %v, should differ from first time %v", reAbnormalTime, firstTime)
+	}
+}
+
+// TestDeleteSandboxMetrics_ClearsAllSyncMapEntries verifies that DeleteSandboxMetrics
+// cleans up ALL abnormalStartTimes and runtimeContainerAbnormalStartTimes entries,
+// not just the ones that were populated during the test.
+func TestDeleteSandboxMetrics_ClearsAllSyncMapEntries(t *testing.T) {
+	ns, name := "default", "syncmap-cleanup-sandbox"
+	key := ns + "/" + name
+
+	// Populate ALL possible abnormal type entries
+	for _, at := range abnormalTypes {
+		abnormalStartTimes.Store(key+"/"+at, float64(time.Now().Unix()))
+	}
+
+	// Populate ALL possible runtime container entries
+	for _, c := range runtimeContainerNamesList {
+		runtimeContainerAbnormalStartTimes.Store(key+"/"+c, float64(time.Now().Unix()))
+	}
+
+	// Verify all entries exist
+	for _, at := range abnormalTypes {
+		if _, ok := abnormalStartTimes.Load(key + "/" + at); !ok {
+			t.Fatalf("precondition: abnormalStartTimes missing entry for type %s", at)
+		}
+	}
+	for _, c := range runtimeContainerNamesList {
+		if _, ok := runtimeContainerAbnormalStartTimes.Load(key + "/" + c); !ok {
+			t.Fatalf("precondition: runtimeContainerAbnormalStartTimes missing entry for container %s", c)
+		}
+	}
+
+	DeleteSandboxMetrics(ns, name)
+
+	// Verify ALL entries are cleaned up
+	for _, at := range abnormalTypes {
+		if _, ok := abnormalStartTimes.Load(key + "/" + at); ok {
+			t.Errorf("abnormalStartTimes should not have entry for type %s after delete", at)
+		}
+	}
+	for _, c := range runtimeContainerNamesList {
+		if _, ok := runtimeContainerAbnormalStartTimes.Load(key + "/" + c); ok {
+			t.Errorf("runtimeContainerAbnormalStartTimes should not have entry for container %s after delete", c)
+		}
+	}
+}

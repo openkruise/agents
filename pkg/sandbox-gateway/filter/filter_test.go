@@ -930,3 +930,175 @@ func TestDecodeHeadersKruiseCustomProtocolInvalidPath(t *testing.T) {
 	assert.Equal(t, api.Continue, status)
 	assert.False(t, mockCallbacks.decoderCallbacks.sendLocalReplyCalled)
 }
+
+// TestDecodeHeadersAccessTokenAuth tests access token authentication logic
+func TestDecodeHeadersAccessTokenAuth(t *testing.T) {
+	tests := []struct {
+		name                string
+		routeAccessToken    string
+		requestToken        string
+		setTokenHeader      bool
+		expectedStatus      api.StatusType
+		expectLocalReply    bool
+		expectedStatusCode  int
+		expectedReplyDetail string
+	}{
+		{
+			name:             "valid token - request matches route token",
+			routeAccessToken: "secret-token-123",
+			requestToken:     "secret-token-123",
+			setTokenHeader:   true,
+			expectedStatus:   api.Continue,
+			expectLocalReply: false,
+		},
+		{
+			name:                "invalid token - request token does not match",
+			routeAccessToken:    "secret-token-123",
+			requestToken:        "wrong-token",
+			setTokenHeader:      true,
+			expectedStatus:      api.LocalReply,
+			expectLocalReply:    true,
+			expectedStatusCode:  401,
+			expectedReplyDetail: "unauthorized",
+		},
+		{
+			name:                "missing token - route requires token but request has none",
+			routeAccessToken:    "secret-token-123",
+			requestToken:        "",
+			setTokenHeader:      false,
+			expectedStatus:      api.LocalReply,
+			expectLocalReply:    true,
+			expectedStatusCode:  401,
+			expectedReplyDetail: "unauthorized",
+		},
+		{
+			name:             "no token configured - backward compatible, skip auth",
+			routeAccessToken: "",
+			requestToken:     "",
+			setTokenHeader:   false,
+			expectedStatus:   api.Continue,
+			expectLocalReply: false,
+		},
+		{
+			name:             "no token configured - request carries token anyway, still allowed",
+			routeAccessToken: "",
+			requestToken:     "some-token",
+			setTokenHeader:   true,
+			expectedStatus:   api.Continue,
+			expectLocalReply: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := registry.GetRegistry()
+			defer r.Clear()
+			r.Update("default--auth-sandbox", proxy.Route{
+				IP:              "10.0.0.1",
+				State:           agentsv1alpha1.SandboxStateRunning,
+				ResourceVersion: "1",
+				AccessToken:     tt.routeAccessToken,
+			})
+
+			cfg := DefaultConfig()
+			cfg.EnableAuth = true
+			mockCallbacks := newMockFilterCallbackHandler()
+			filter := &sandboxFilter{callbacks: mockCallbacks, config: cfg, adapter: defaultTestAdapter()}
+
+			header := newMockRequestHeaderMap()
+			header.Set(DefaultSandboxHeaderName, "default--auth-sandbox")
+			if tt.setTokenHeader {
+				header.Set("x-access-token", tt.requestToken)
+			}
+
+			status := filter.DecodeHeaders(header, true)
+
+			assert.Equal(t, tt.expectedStatus, status)
+			assert.Equal(t, tt.expectLocalReply, mockCallbacks.decoderCallbacks.sendLocalReplyCalled)
+			if tt.expectLocalReply {
+				assert.Equal(t, tt.expectedStatusCode, mockCallbacks.decoderCallbacks.replyStatusCode)
+				assert.Equal(t, tt.expectedReplyDetail, mockCallbacks.decoderCallbacks.replyDetails)
+				assert.Contains(t, mockCallbacks.decoderCallbacks.replyBody, "unauthorized")
+			} else {
+				// Verify upstream was set correctly for successful cases
+				metadata := mockCallbacks.streamInfo.dynamicMetadata.data["envoy.lb.original_dst"]
+				assert.NotNil(t, metadata)
+				assert.Equal(t, "10.0.0.1:49983", metadata["host"])
+
+			}
+		})
+	}
+}
+
+// TestDecodeHeadersAccessTokenAuthKruiseProtocol tests access token auth with kruise custom protocol
+func TestDecodeHeadersAccessTokenAuthKruiseProtocol(t *testing.T) {
+	r := registry.GetRegistry()
+	defer r.Clear()
+	r.Update("ns--mysandbox", proxy.Route{
+		IP:              "10.0.0.10",
+		State:           agentsv1alpha1.SandboxStateRunning,
+		ResourceVersion: "1",
+		AccessToken:     "kruise-secret",
+	})
+
+	cfg := DefaultConfig()
+	cfg.EnableAuth = true
+
+	// Valid token via kruise protocol
+	mockCallbacks := newMockFilterCallbackHandler()
+	filter := &sandboxFilter{callbacks: mockCallbacks, config: cfg, adapter: defaultTestAdapter()}
+	header := &mockRequestHeaderMapCustom{
+		mockRequestHeaderMap: *newMockRequestHeaderMap(),
+		pathValue:            "/kruise/ns--mysandbox/3000/api/v1/data",
+	}
+	header.Set("x-access-token", "kruise-secret")
+
+	status := filter.DecodeHeaders(header, true)
+	assert.Equal(t, api.Continue, status)
+	assert.False(t, mockCallbacks.decoderCallbacks.sendLocalReplyCalled)
+
+	// Invalid token via kruise protocol
+	mockCallbacks2 := newMockFilterCallbackHandler()
+	filter2 := &sandboxFilter{callbacks: mockCallbacks2, config: cfg, adapter: defaultTestAdapter()}
+	header2 := &mockRequestHeaderMapCustom{
+		mockRequestHeaderMap: *newMockRequestHeaderMap(),
+		pathValue:            "/kruise/ns--mysandbox/3000/api/v1/data",
+	}
+	header2.Set("x-access-token", "wrong-token")
+
+	status2 := filter2.DecodeHeaders(header2, true)
+	assert.Equal(t, api.LocalReply, status2)
+	assert.True(t, mockCallbacks2.decoderCallbacks.sendLocalReplyCalled)
+	assert.Equal(t, 401, mockCallbacks2.decoderCallbacks.replyStatusCode)
+}
+
+// TestDecodeHeadersAuthDisabled verifies that when EnableAuth is false,
+// token validation is skipped even if the route has a token configured.
+func TestDecodeHeadersAuthDisabled(t *testing.T) {
+	r := registry.GetRegistry()
+	defer r.Clear()
+	r.Update("default--auth-disabled", proxy.Route{
+		IP:              "10.0.0.5",
+		State:           agentsv1alpha1.SandboxStateRunning,
+		ResourceVersion: "1",
+		AccessToken:     "secret-token",
+	})
+
+	cfg := DefaultConfig()
+	// EnableAuth is false by default
+	mockCallbacks := newMockFilterCallbackHandler()
+	filter := &sandboxFilter{callbacks: mockCallbacks, config: cfg, adapter: defaultTestAdapter()}
+
+	header := newMockRequestHeaderMap()
+	header.Set(DefaultSandboxHeaderName, "default--auth-disabled")
+	// No token header set — should still pass because auth is disabled
+
+	status := filter.DecodeHeaders(header, true)
+	assert.Equal(t, api.Continue, status)
+	assert.False(t, mockCallbacks.decoderCallbacks.sendLocalReplyCalled)
+
+	// Verify upstream was set
+	metadata := mockCallbacks.streamInfo.dynamicMetadata.data["envoy.lb.original_dst"]
+	assert.NotNil(t, metadata)
+	assert.Equal(t, "10.0.0.5:49983", metadata["host"])
+}

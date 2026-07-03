@@ -34,11 +34,9 @@ jobs:
         include:
           - name: without sandbox-gateway
             with_gateway: false
-          - name: with sandbox-gateway
-            with_gateway: true
     name: sandbox (${{ matrix.name }})
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           submodules: true
       - name: Setup Go
@@ -54,7 +52,7 @@ jobs:
           version: ${{ env.KIND_VERSION }}
 
       - name: Cache Docker images
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: /tmp/docker-images
           key: ${{ runner.os }}-docker-${{ env.CODE_INTERPRETER_IMG }}
@@ -124,8 +122,9 @@ jobs:
           export KUBECONFIG=/home/runner/.kube/config
           export E2B_DOMAIN=localhost
           export E2B_API_KEY=some-api-key
+          export INPLACE_UPDATE_IMAGE="${INPLACE_UPDATE_IMG}"
           if [ "${{ matrix.with_gateway }}" = "true" ]; then
-            bash hack/run-e2b-e2e-test.sh --e2b-version 2.8.1 --sdk-version 2.4.1 --with-gateway
+            bash hack/run-e2b-e2e-test.sh --e2b-version 2.8.1 --sdk-version 2.4.1 --with-gateway --pytest-extra-args "-s -x"
           else
-            bash hack/run-e2b-e2e-test.sh --e2b-version 2.8.1 --sdk-version 2.4.1
+            bash hack/run-e2b-e2e-test.sh --e2b-version 2.8.1 --sdk-version 2.4.1 --pytest-extra-args "-s -x"
           fi

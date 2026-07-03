@@ -34,6 +34,7 @@ func GetRouteFromSandbox(s *agentsv1alpha1.Sandbox) Route {
 		Owner:           s.GetAnnotations()[agentsv1alpha1.AnnotationOwner],
 		State:           state,
 		ResourceVersion: s.GetResourceVersion(),
+		AccessToken:     s.GetAnnotations()[agentsv1alpha1.AnnotationRuntimeAccessToken],
 	}
 }
 
@@ -46,4 +47,5 @@ type Route struct {
 	Owner           string    `json:"owner"`
 	State           string    `json:"state"`
 	ResourceVersion string    `json:"resourceVersion"`
+	AccessToken     string    `json:"accessToken,omitempty"`
 }

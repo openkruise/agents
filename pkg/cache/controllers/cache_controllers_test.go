@@ -31,7 +31,7 @@ import (
 )
 
 // TestSetupCacheControllersWithManager verifies that SetupCacheControllersWithManager
-// correctly registers all 4 cache controllers with the manager and returns a
+// correctly registers all 5 cache controllers with the manager and returns a
 // CacheControllerHandlers with valid reconciler references, or propagates errors
 // from any individual Add call.
 func TestSetupCacheControllersWithManager(t *testing.T) {
@@ -74,9 +74,9 @@ func TestSetupCacheControllersWithManager(t *testing.T) {
 				assert.IsType(t, &agentsv1alpha1.Sandbox{}, handlers.SandboxCustomReconciler.NewObject())
 				assert.IsType(t, &agentsv1alpha1.SandboxSet{}, handlers.SandboxSetCustomReconciler.NewObject())
 
-				// All 4 controllers must have been added to the manager:
-				// SandboxWait, CheckpointWait, SandboxCustom, SandboxSetCustom
-				assert.Equal(t, 4, mgr.addCallsCount(), "expected exactly 4 Add() calls")
+				// All 5 controllers must have been added to the manager:
+				// SandboxWait, CheckpointWait, PVCWait, SandboxCustom, SandboxSetCustom
+				assert.Equal(t, 5, mgr.addCallsCount(), "expected exactly 5 Add() calls")
 			},
 		},
 		{
@@ -89,7 +89,7 @@ func TestSetupCacheControllersWithManager(t *testing.T) {
 				require.NotNil(t, handlers)
 				require.NotNil(t, handlers.SandboxCustomReconciler)
 				require.NotNil(t, handlers.SandboxSetCustomReconciler)
-				assert.Equal(t, 4, mgr.addCallsCount())
+				assert.Equal(t, 5, mgr.addCallsCount())
 			},
 		},
 		{
@@ -105,14 +105,20 @@ func TestSetupCacheControllersWithManager(t *testing.T) {
 			wantErr:      true,
 		},
 		{
-			name:         "fail on 3rd Add - SandboxCustomReconciler registration error",
+			name:         "fail on 3rd Add - PVCWaitReconciler registration error",
 			failOnNthAdd: 3,
 			addError:     sentinel,
 			wantErr:      true,
 		},
 		{
-			name:         "fail on 4th Add - SandboxSetCustomReconciler registration error",
+			name:         "fail on 4th Add - SandboxCustomReconciler registration error",
 			failOnNthAdd: 4,
+			addError:     sentinel,
+			wantErr:      true,
+		},
+		{
+			name:         "fail on 5th Add - SandboxSetCustomReconciler registration error",
+			failOnNthAdd: 5,
 			addError:     sentinel,
 			wantErr:      true,
 		},

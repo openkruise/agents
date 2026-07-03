@@ -84,6 +84,7 @@ coverage.xml
 .hypothesis/
 .pytest_cache/
 cover/
+test/e2b/reports/
 
 # Translations
 *.mo

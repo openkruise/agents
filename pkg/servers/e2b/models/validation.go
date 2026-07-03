@@ -48,6 +48,25 @@ func validateMountPoint(mountPoint string) error {
 	return nil
 }
 
+// ValidateVolumeMounts validates each volume mount entry for required fields,
+// path format, and duplicate mount paths.
+func ValidateVolumeMounts(mounts []VolumeMount) error {
+	seen := make(map[string]struct{}, len(mounts))
+	for i, vm := range mounts {
+		if vm.Name == "" {
+			return fmt.Errorf("volumeMounts[%d].name cannot be empty", i)
+		}
+		if err := validateMountPoint(vm.Path); err != nil {
+			return fmt.Errorf("volumeMounts[%d].path is invalid: %w", i, err)
+		}
+		if _, exists := seen[vm.Path]; exists {
+			return fmt.Errorf("volumeMounts[%d].path %q is duplicated", i, vm.Path)
+		}
+		seen[vm.Path] = struct{}{}
+	}
+	return nil
+}
+
 // parseAndValidatePersistentContents parses and validates persistent contents string.
 // Valid values are: "memory", "filesystem", or "memory,filesystem" (order doesn't matter).
 // Duplicates are not allowed.

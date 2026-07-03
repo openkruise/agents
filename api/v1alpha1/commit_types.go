@@ -78,7 +78,7 @@ type CommitSpec struct {
 	TtlAfterFinished *metav1.Duration `json:"ttl,omitempty"`
 
 	// RegistryAuth specifies credentials for pushing the committed image.
-	// If nil, credentials are resolved from namespace secrets or SA imagePullSecrets.
+	// If nil, the commit will attempt an anonymous push.
 	// +kubebuilder:validation:Optional
 	RegistryAuth *RegistryAuth `json:"registryAuth,omitempty"`
 }

@@ -20,9 +20,10 @@ import (
 	"flag"
 	"fmt"
 	"net/http"         // Added for pprof server
-	_ "net/http/pprof" // Added to register pprof handlers
+	_ "net/http/pprof" // #nosec -- intentional pprof endpoint for diagnostics
 	"os"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/spf13/pflag"
@@ -135,7 +136,8 @@ func main() {
 	if enablePprof {
 		go func() {
 			klog.Infof("Starting pprof server on %s", pprofAddr)
-			if err := http.ListenAndServe(pprofAddr, nil); err != nil {
+			pprofServer := &http.Server{Addr: pprofAddr, ReadHeaderTimeout: 10 * time.Second}
+			if err := pprofServer.ListenAndServe(); err != nil {
 				klog.Errorf("Unable to start pprof server: %v", err)
 			}
 		}()
@@ -220,7 +222,7 @@ func main() {
 		}
 	}
 
-	sandboxController := e2b.NewController(domain, sysNs, peerSelector, sandboxNamespace, sandboxLabelSelector, e2bMaxTimeout, e2bMinResumeTimeout, maxClaimWorkers, maxCreateQPS, uint32(extProcMaxConcurrency),
+	sandboxController := e2b.NewController(domain, sysNs, peerSelector, sandboxNamespace, sandboxLabelSelector, e2bMaxTimeout, e2bMinResumeTimeout, maxClaimWorkers, maxCreateQPS, uint32(extProcMaxConcurrency), // #nosec -- validated non-negative above
 		port, memberlistBindPort, keyCfg, clientConfig)
 
 	if err := sandboxController.Init(); err != nil {

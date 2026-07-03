@@ -1,3 +1,7 @@
 python-dotenv
 pytest==9.0.3
+pytest-rerunfailures
+pytest-repeat
+pytest-timeout
+pytest-instafail
 requests

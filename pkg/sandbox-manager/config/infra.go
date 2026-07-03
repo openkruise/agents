@@ -33,6 +33,8 @@ const DefaultCSIMountConcurrency = runtimeconfig.DefaultCSIMountConcurrency
 func NewDefaultAccessToken() string { return runtimeconfig.NewDefaultAccessToken() }
 
 // InplaceUpdateOptions stays in pkg/sandbox-manager/config — not used by pkg/utils.
+// Metadata (labels/annotations) changes are handled separately by the controller
+// via isMetadataOnlyChange and do not require InplaceUpdateOptions.
 type InplaceUpdateOptions struct {
 	Image string
 	// Resources specifies in-place resource update options.

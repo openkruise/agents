@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
@@ -45,6 +46,17 @@ func (c *Cache) CheckpointUpdateFunc(ctx context.Context) cacheutils.UpdateFunc[
 	return func(cp *agentsv1alpha1.Checkpoint) (*agentsv1alpha1.Checkpoint, error) {
 		key := types.NamespacedName{Namespace: cp.Namespace, Name: cp.Name}
 		got := &agentsv1alpha1.Checkpoint{}
+		if err := utils.GetFromInformerOrApiServer(ctx, got, key, c.client, c.reader); err != nil {
+			return nil, err
+		}
+		return got, nil
+	}
+}
+
+func (c *Cache) PVCUpdateFunc(ctx context.Context) cacheutils.UpdateFunc[*corev1.PersistentVolumeClaim] {
+	return func(pvc *corev1.PersistentVolumeClaim) (*corev1.PersistentVolumeClaim, error) {
+		key := types.NamespacedName{Namespace: pvc.Namespace, Name: pvc.Name}
+		got := &corev1.PersistentVolumeClaim{}
 		if err := utils.GetFromInformerOrApiServer(ctx, got, key, c.client, c.reader); err != nil {
 			return nil, err
 		}
@@ -98,7 +110,7 @@ func (c *Cache) NewSandboxResumeTask(ctx context.Context, sbx *agentsv1alpha1.Sa
 	)
 }
 
-// NewSandboxWaitReadyTask builds a WaitTask that encapsulates the readiness check
+// NewSandboxWaitReadyTask builds a WaitTask that encapsulates the readiness check.
 func (c *Cache) NewSandboxWaitReadyTask(ctx context.Context, sbx *agentsv1alpha1.Sandbox) *cacheutils.WaitTask[*agentsv1alpha1.Sandbox] {
 	check := func(s *agentsv1alpha1.Sandbox) (bool, error) {
 		if s.Status.ObservedGeneration != s.Generation {
@@ -138,5 +150,26 @@ func (c *Cache) NewCheckpointTask(ctx context.Context, cp *agentsv1alpha1.Checkp
 	}
 	return cacheutils.NewWaitTask[*agentsv1alpha1.Checkpoint](
 		ctx, c.waitHooks, cacheutils.WaitActionCheckpoint, cp, c.CheckpointUpdateFunc(ctx), check,
+	)
+}
+
+// NewPVCTask builds a WaitTask that succeeds when the PVC's Status.Phase transitions to Bound.
+// If the PVC fails to bind, it checks PVC Conditions for common failure reasons.
+// When no explicit failure condition is found, it relies on timeout to determine failure.
+func (c *Cache) NewPVCTask(ctx context.Context, pvc *corev1.PersistentVolumeClaim) *cacheutils.WaitTask[*corev1.PersistentVolumeClaim] {
+	check := func(pvc *corev1.PersistentVolumeClaim) (bool, error) {
+		// PVC must be bound AND have a VolumeName (PV name) assigned
+		if pvc.Status.Phase == corev1.ClaimBound && pvc.Spec.VolumeName != "" {
+			return true, nil
+		}
+
+		// PVC is lost — fail fast with a meaningful error
+		if pvc.Status.Phase == corev1.ClaimLost {
+			return false, fmt.Errorf("PVC %s is in Lost phase", pvc.Name)
+		}
+		return false, nil
+	}
+	return cacheutils.NewWaitTask[*corev1.PersistentVolumeClaim](
+		ctx, c.waitHooks, cacheutils.WaitActionPVCBind, pvc, c.PVCUpdateFunc(ctx), check,
 	)
 }

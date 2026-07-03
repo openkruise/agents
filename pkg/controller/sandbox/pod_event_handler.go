@@ -103,6 +103,11 @@ func isActivePodUpdate(oldObj, newObj *corev1.Pod) bool {
 	if !isPodConditionEqual(cCond1, cCond2) {
 		return true
 	}
+	rcCond1 := utils.GetPodCondition(&oldObj.Status, core.PodConditionResetComplete)
+	rcCond2 := utils.GetPodCondition(&newObj.Status, core.PodConditionResetComplete)
+	if !isPodConditionEqual(rcCond1, rcCond2) {
+		return true
+	}
 	// for in-place upgrade scenarios
 	if !reflect.DeepEqual(oldObj.Status.ContainerStatuses, newObj.Status.ContainerStatuses) {
 		return true

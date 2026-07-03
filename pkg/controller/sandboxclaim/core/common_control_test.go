@@ -37,6 +37,7 @@ import (
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
 	"github.com/openkruise/agents/pkg/cache/cachetest"
 	"github.com/openkruise/agents/pkg/features"
+	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
@@ -1133,7 +1134,7 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 			expectError: false,
 			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
 				require.NotNil(t, opts.ReserveFailedSandboxFor)
-				assert.Equal(t, sandboxcr.DefaultReserveFailedSandboxFor, *opts.ReserveFailedSandboxFor)
+				assert.Equal(t, consts.ReserveFailedSandboxNever, *opts.ReserveFailedSandboxFor)
 			},
 		},
 		{

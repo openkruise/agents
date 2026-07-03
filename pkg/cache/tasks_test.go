@@ -178,3 +178,68 @@ func TestNewCheckpointTask_Failed_ReturnsError(t *testing.T) {
 	assert.Contains(t, err.Error(), "checkpoint default/cp-2 failed")
 	assert.Contains(t, err.Error(), "disk full")
 }
+
+// --- PVC Task tests ---
+func TestNewPVCTask_BoundAction(t *testing.T) {
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pvc-1"},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			VolumeName: "pv-1",
+		},
+		Status: corev1.PersistentVolumeClaimStatus{
+			Phase: corev1.ClaimBound,
+		},
+	}
+	c, _, err := cachetest.NewTestCache(t, pvc)
+	require.NoError(t, err)
+	task := c.NewPVCTask(context.Background(), pvc)
+	assert.Equal(t, cacheutils.WaitActionPVCBind, task.Action())
+	// Already bound → satisfied fast path.
+	assert.NoError(t, task.Wait(100*time.Millisecond))
+}
+
+func TestNewPVCTask_PendingTimeout(t *testing.T) {
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pvc-pending"},
+		Status: corev1.PersistentVolumeClaimStatus{
+			Phase: corev1.ClaimPending,
+		},
+	}
+	c, _, err := cachetest.NewTestCache(t, pvc)
+	require.NoError(t, err)
+	task := c.NewPVCTask(context.Background(), pvc)
+	err = task.Wait(100 * time.Millisecond)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "object is not satisfied")
+}
+
+func TestNewPVCTask_LostPhase_ReturnsError(t *testing.T) {
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pvc-lost"},
+		Status: corev1.PersistentVolumeClaimStatus{
+			Phase: corev1.ClaimLost,
+		},
+	}
+	c, _, err := cachetest.NewTestCache(t, pvc)
+	require.NoError(t, err)
+	task := c.NewPVCTask(context.Background(), pvc)
+	err = task.Wait(100 * time.Millisecond)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "is in Lost phase")
+}
+
+func TestNewPVCTask_BoundWithoutVolumeName_NotSatisfied(t *testing.T) {
+	// Bound phase but no VolumeName — should not be considered satisfied
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pvc-bound-no-vol"},
+		Status: corev1.PersistentVolumeClaimStatus{
+			Phase: corev1.ClaimBound,
+		},
+	}
+	c, _, err := cachetest.NewTestCache(t, pvc)
+	require.NoError(t, err)
+	task := c.NewPVCTask(context.Background(), pvc)
+	err = task.Wait(100 * time.Millisecond)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "object is not satisfied")
+}

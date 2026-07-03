@@ -142,7 +142,7 @@ func (sc *Controller) BrowserUse(r *http.Request) (web.ApiResponse[*browserHandS
 	}
 
 	h.WebSocketDebuggerURL = browserWebSocketReplacer.ReplaceAllString(h.WebSocketDebuggerURL,
-		fmt.Sprintf("wss://%s", GetSandboxAddress(sandboxID, sc.domain, int32(cdpPort))))
+		fmt.Sprintf("wss://%s", GetSandboxAddress(sandboxID, sc.domain, int32(cdpPort)))) // #nosec G115 -- port range
 	return web.ApiResponse[*browserHandShake]{
 		Code: resp.StatusCode,
 		Body: &h,

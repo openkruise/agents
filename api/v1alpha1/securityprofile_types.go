@@ -17,13 +17,24 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// NOTE: only Block and Bypass are currently implemented by the
-// traffic-extension data plane. Additional action types (TokenTransformation /
-// IdentityInjection / SecurityCheck / Mirroring / RateLimit / Forwarding)
-// were removed from this CRD until their plugin implementations land — see
-// docs/components/traffic-extension.md.
+// FailStrategy controls behaviour when an external service call fails or
+// when the action encounters an error.
+// +kubebuilder:validation:Enum=Allow;Block;Ignore
+type FailStrategy string
+
+const (
+	// FailStrategyAllow lets the request proceed when the external call fails.
+	FailStrategyAllow FailStrategy = "Allow"
+	// FailStrategyBlock aborts the request when the external call fails.
+	FailStrategyBlock FailStrategy = "Block"
+	// FailStrategyIgnore silently ignores the failure and continues the
+	// action chain as if the action was never configured. Unlike Allow,
+	// Ignore also suppresses any warning headers or error metrics.
+	FailStrategyIgnore FailStrategy = "Ignore"
+)
 
 // PathMatchType enumerates URL path matching strategies.
 // +kubebuilder:validation:Enum=Prefix;Exact;Regex
@@ -150,6 +161,14 @@ type RuleMatch struct {
 	// +kubebuilder:validation:items:Minimum=1
 	// +kubebuilder:validation:items:Maximum=65535
 	Ports []int32 `json:"ports,omitempty"`
+	// Schemes filters by the request's :scheme pseudo-header (e.g. "http",
+	// "https", or custom schemes used by gRPC/other protocols). Multiple
+	// entries are ORed. Matching is case-insensitive.
+	// +optional
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=32
+	// +kubebuilder:validation:items:Pattern=`^[a-zA-Z][a-zA-Z0-9+\-.]*$`
+	Schemes []string `json:"schemes,omitempty"`
 	// Headers lists header matches; multiple entries are ANDed.
 	// +optional
 	Headers []HeaderMatch `json:"headers,omitempty"`
@@ -173,6 +192,253 @@ type BlockAction struct {
 	Body *string `json:"body,omitempty"`
 }
 
+// ActionCondition is an optional pre-condition that gates action execution.
+// The action only fires when the specified header matches the pattern.
+type ActionCondition struct {
+	// Header is the request header name to inspect.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9!#$%&'*+\-.^_|~]+$`
+	Header string `json:"header"`
+	// Pattern is an RE2 regex evaluated against the header value.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=512
+	Pattern string `json:"pattern"`
+}
+
+// TokenTransformationType discriminates the credential-transformation
+// strategy used by a TokenTransformationAction.
+// +kubebuilder:validation:Enum=ApiKey;AliyunSTS
+type TokenTransformationType string
+
+const (
+	// TokenTransformationTypeApiKey rewrites a single header with a token
+	// fetched from the credential provider. Backwards-compatible default.
+	TokenTransformationTypeApiKey TokenTransformationType = "ApiKey"
+	// TokenTransformationTypeAliyunSTS swaps the AK/SK/STS triplet inside
+	// an intercepted Aliyun-SDK request and recomputes the signature.
+	TokenTransformationTypeAliyunSTS TokenTransformationType = "AliyunSTS"
+)
+
+// CredentialRefKind discriminates the credential source type.
+// +kubebuilder:validation:Enum=Secret;CredentialProvider
+type CredentialRefKind string
+
+const (
+	// CredentialRefKindSecret reads credential material from a Kubernetes
+	// Secret. The expected data keys follow well-known conventions per
+	// transformation type:
+	//   ApiKey mode:    "apiKey"
+	//   AliyunSTS mode: "accessKeyId", "accessKeySecret", "securityToken"
+	CredentialRefKindSecret CredentialRefKind = "Secret"
+	// CredentialRefKindCredentialProvider fetches credentials at runtime
+	// from an external credential provider (e.g. agent-identity service).
+	CredentialRefKindCredentialProvider CredentialRefKind = "CredentialProvider" // #nosec G101 -- not a credential
+)
+
+// CredentialRef identifies the credential source for a TokenTransformation.
+// The Kind field selects between built-in Secret and extensible
+// CredentialProvider; Name identifies the specific resource.
+//
+// For Kind=Secret the Secret must reside in the same namespace as the
+// SecurityProfile. Cross-namespace references are intentionally disallowed
+// to enforce namespace isolation; a future version may support them via a
+// ReferenceGrant-style mechanism.
+type CredentialRef struct {
+	// Kind selects the credential source type.
+	Kind CredentialRefKind `json:"kind"`
+	// Name is the resource name — Secret name for Kind=Secret, or
+	// provider name for Kind=CredentialProvider.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	Name string `json:"name"`
+}
+
+// ApiKeyConfig holds ApiKey-mode specific configuration.
+type ApiKeyConfig struct {
+	// When is an optional condition; the transformation is skipped if
+	// the header does not match.
+	// +optional
+	When *ActionCondition `json:"when,omitempty"`
+	// TargetHeader is the request header to overwrite with the new token.
+	// +kubebuilder:default:="Authorization"
+	// +kubebuilder:validation:MaxLength=256
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9!#$%&'*+\-.^_|~]+$`
+	TargetHeader string `json:"targetHeader,omitempty"`
+	// ValueTemplate is a Go text/template for the header value.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=1024
+	ValueTemplate string `json:"valueTemplate"`
+}
+
+// TokenTransformationAction rewrites credential/authorization material on
+// outgoing requests. The Type field selects between two implementations:
+// ApiKey (default, header rewrite) and AliyunSTS (Aliyun-SDK triplet
+// swap + signature recompute). The CredentialRef field selects the
+// credential source (Secret or CredentialProvider) independently.
+//
+// +kubebuilder:validation:XValidation:rule="(!has(self.type) || self.type == 'ApiKey') ? has(self.apiKey) : true",message="apiKey config is required when type is ApiKey"
+// +kubebuilder:validation:XValidation:rule="self.type == 'AliyunSTS' ? !has(self.apiKey) : true",message="apiKey must be unset when type is AliyunSTS"
+type TokenTransformationAction struct {
+	// Disabled temporarily disables this action without removing its
+	// configuration. When true the action is skipped during evaluation.
+	// +optional
+	// +kubebuilder:default:=false
+	Disabled bool `json:"disabled,omitempty"`
+	// FailStrategy controls behaviour when the transformation fails.
+	// +optional
+	// +kubebuilder:default:=Block
+	FailStrategy FailStrategy `json:"failStrategy,omitempty"`
+	// Type discriminates the transformation strategy. Defaults to ApiKey.
+	// +optional
+	// +kubebuilder:default:=ApiKey
+	Type TokenTransformationType `json:"type,omitempty"`
+	// CredentialRef identifies the credential source for this
+	// transformation. Required.
+	CredentialRef CredentialRef `json:"credentialRef"`
+
+	// ApiKey holds ApiKey-mode specific configuration.
+	// Required when Type == ApiKey, must be unset when Type == AliyunSTS.
+	// +optional
+	ApiKey *ApiKeyConfig `json:"apiKey,omitempty"`
+}
+
+// AuditBody is the request body sent to the webhook. Exactly one of JSON or
+// Text must be set.
+//
+// +kubebuilder:validation:XValidation:rule="(has(self.json) && !has(self.text)) || (!has(self.json) && has(self.text))",message="exactly one of json or text must be set"
+type AuditBody struct {
+	// JSON is a structured body. String leaves are rendered through Go
+	// text/template against AuditContext; non-string scalars and nested
+	// objects/arrays are emitted verbatim. Serialised as application/json
+	// by default.
+	//
+	// +optional
+	// +kubebuilder:pruning:PreserveUnknownFields
+	JSON *runtime.RawExtension `json:"json,omitempty"`
+	// Text is a raw text body. The entire string is rendered through Go
+	// text/template against AuditContext. Sent as text/plain by default.
+	//
+	// +optional
+	// +kubebuilder:validation:MaxLength=8192
+	Text *string `json:"text,omitempty"`
+}
+
+// AuditHeader represents a single HTTP header on the audit request. Value
+// may contain text/template expressions.
+type AuditHeader struct {
+	// Name is the header name. Restricted to a safe subset of RFC 7230
+	// tchar characters.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9!#$%&'*+\-.^_|~]+$`
+	Name string `json:"name"`
+	// Value is the header value template.
+	// +kubebuilder:validation:MaxLength=2048
+	Value string `json:"value"`
+}
+
+// AuditRequest describes the HTTP request shape.
+type AuditRequest struct {
+	// Method is the HTTP request method. Defaults to POST.
+	// +optional
+	// +kubebuilder:default:=POST
+	// +kubebuilder:validation:Enum=POST;PUT;PATCH
+	Method string `json:"method,omitempty"`
+	// Headers are appended to the request after the default Content-Type
+	// header.
+	// +optional
+	Headers []AuditHeader `json:"headers,omitempty"`
+	// Body is the request body. Exactly one of Body.JSON or Body.Text must
+	// be set. Omitting Body sends an empty request.
+	// +optional
+	Body *AuditBody `json:"body,omitempty"`
+}
+
+// AuditWebhook describes an HTTP(S) webhook target for an audit action.
+// It is grouped under AuditAction.Webhook so future audit transports
+// (e.g. message bus, structured log sink) can be added as sibling
+// fields without breaking the surrounding shape.
+type AuditWebhook struct {
+	// URL is the absolute HTTP(S) URL of the webhook. Supports Go
+	// text/template expressions over AuditContext, allowing per-Pod
+	// addressing such as: http://{{ .Pod.IP }}:8080/audit
+	//
+	// Rendering failures (template error or non-HTTP scheme) cause the
+	// event to be dropped and counted under
+	// traffic_extension_audit_webhook_dropped_total{reason="render_url"}.
+	//
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=2048
+	URL string `json:"url"`
+	// Request describes the HTTP request shape. Defaults to method=POST
+	// and empty body when omitted.
+	// +optional
+	Request *AuditRequest `json:"request,omitempty"`
+	// Timeout caps each HTTP attempt. Defaults to 2s, max 30s.
+	// +optional
+	// +kubebuilder:default:="2s"
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('500ms') && duration(self) <= duration('30s')",message="timeout must be between 500ms and 30s"
+	Timeout *metav1.Duration `json:"timeout,omitempty"`
+}
+
+// AuditAction is a named, conditional audit fan-out entry. Audit is
+// non-terminal: it does not influence the request response and is
+// dispatched asynchronously after the request resolves.
+//
+// AuditAction lists may appear at two levels:
+//   - SecurityProfileSpec.Audit: profile-wide defaults applied to every
+//     matched rule.
+//   - SecurityRuleActions.Audit: per-rule overrides. When non-empty, the
+//     spec-level list is suppressed for that rule's matches.
+//
+// For each (matched rule, audit entry) pair the data plane evaluates
+// `When` against AuditContext and dispatches when the expression is
+// true (or when `When` is empty, which defaults to true).
+type AuditAction struct {
+	// Name uniquely identifies this audit entry within its enclosing
+	// list. Used in metrics labels and dispatcher dedup. Restricted to
+	// label-safe characters so it can flow into Prometheus labels.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	Name string `json:"name"`
+	// When is a CEL expression evaluated against AuditContext at
+	// resolution time. The expression must evaluate to a bool; the audit
+	// fires when the result is true. Empty (default) means "always fire".
+	//
+	// Available variables:
+	//   result   string                  one of passthrough/mutated/blocked/bypassed/error
+	//   request  map<string, dyn>        host, port, path, method, scheme, headers, queryParams
+	//   pod      map<string, dyn>        name, namespace, ip, labels
+	//   profile  map<string, string>     name, namespace
+	//   rule     map<string, string>     name (the matched rule's name)
+	//
+	// Examples:
+	//   result == "blocked"
+	//   result in ["blocked", "bypassed"]
+	//   pod.labels["team"] == "fraud" && result != "passthrough"
+	//   rule.name.startsWith("pii-")
+	//
+	// Map indexing follows CEL's strict semantics: indexing with an
+	// absent key raises an eval error (counted as a drop, not a "false"
+	// match). Use `in` for safe presence checks, e.g.
+	//   "x-priority" in request.headers && request.headers["x-priority"] == "high"
+	//
+	// Compilation failures (parse, type-check) cause the enclosing
+	// SecurityProfile to be rejected at load time. Runtime evaluation
+	// errors are counted under
+	// traffic_extension_audit_webhook_dropped_total{reason="when_eval"}
+	// and the event is dropped.
+	//
+	// +optional
+	// +kubebuilder:validation:MaxLength=1024
+	When string `json:"when,omitempty"`
+	// Webhook is the HTTP webhook target. Required for now (no other
+	// transports are implemented).
+	Webhook *AuditWebhook `json:"webhook"`
+}
+
 // SecurityRuleActions is a map-style struct where each field corresponds to
 // one action type. All fields are optional. In the Envoy data plane the
 // execution order is deterministic and each action runs at most once, so
@@ -191,6 +457,23 @@ type SecurityRuleActions struct {
 	// internal domains.
 	// +optional
 	Bypass bool `json:"bypass,omitempty"`
+	// TokenTransformation rewrites credential headers (e.g. replacing a
+	// placeholder Bearer token with a real one from a token service).
+	// Non-terminal.
+	// +optional
+	TokenTransformation *TokenTransformationAction `json:"tokenTransformation,omitempty"`
+	// Audit lists per-rule audit entries. When non-empty, this list
+	// REPLACES the profile-level SecurityProfileSpec.Audit list for this
+	// rule's matches (override semantics). When empty or omitted, the
+	// spec-level list applies. To suppress audit on a specific rule,
+	// add a single entry with `when: "false"`.
+	//
+	// Audit is non-terminal — it never alters the upstream response and
+	// does not short-circuit the rule chain.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	Audit []AuditAction `json:"audit,omitempty"`
 }
 
 // SecurityRule is one entry in the ordered rule chain.
@@ -238,6 +521,15 @@ type SecurityProfileSpec struct {
 	// +listType=map
 	// +listMapKey=name
 	Rules []SecurityRule `json:"rules,omitempty"`
+	// Audit declares profile-wide audit entries. They fire for every
+	// matched rule (subject to each entry's `When` CEL expression),
+	// providing a default audit configuration for all rules in this
+	// profile. A SecurityRule may override this list via
+	// SecurityRuleActions.Audit.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	Audit []AuditAction `json:"audit,omitempty"`
 }
 
 // Standard SecurityProfile condition types. Controllers MUST use these
@@ -272,8 +564,6 @@ type SecurityProfileStatus struct {
 //
 // SecurityProfile defines the L7 security/compliance profile for Sandbox
 // AI Agent egress HTTP/HTTPS traffic.
-//
-// See docs/components/traffic-extension.md for the full semantic model.
 type SecurityProfile struct {
 	metav1.TypeMeta `json:",inline"`
 	// +optional

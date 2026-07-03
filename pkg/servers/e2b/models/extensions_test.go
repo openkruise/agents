@@ -748,6 +748,119 @@ func TestParseExtensionInplaceUpdate(t *testing.T) {
 	}
 }
 
+func TestParseExtensionSandboxNaming(t *testing.T) {
+	tests := []struct {
+		name               string
+		metadata           map[string]string
+		expectName         string
+		expectGenerateName string
+		expectError        string
+	}{
+		{
+			name:       "name only",
+			metadata:   map[string]string{v1alpha1.E2BPrefix + "sandbox-name": "my-sbx"},
+			expectName: "my-sbx",
+		},
+		{
+			name:               "gen only",
+			metadata:           map[string]string{v1alpha1.E2BPrefix + "sandbox-generate-name": "pool-"},
+			expectGenerateName: "pool-",
+		},
+		{
+			name: "both set",
+			metadata: map[string]string{
+				v1alpha1.E2BPrefix + "sandbox-name":          "x",
+				v1alpha1.E2BPrefix + "sandbox-generate-name": "y-",
+			},
+			expectError: "mutually exclusive",
+		},
+		{
+			name:        "name empty",
+			metadata:    map[string]string{v1alpha1.E2BPrefix + "sandbox-name": ""},
+			expectError: "sandbox-name must not be empty",
+		},
+		{
+			name:        "name invalid",
+			metadata:    map[string]string{v1alpha1.E2BPrefix + "sandbox-name": "Bad_Name"},
+			expectError: "invalid sandbox-name",
+		},
+		{
+			name:        "name with dot invalid",
+			metadata:    map[string]string{v1alpha1.E2BPrefix + "sandbox-name": "my.sbx"},
+			expectError: "invalid sandbox-name",
+		},
+		{
+			name:        "gen empty",
+			metadata:    map[string]string{v1alpha1.E2BPrefix + "sandbox-generate-name": ""},
+			expectError: "sandbox-generate-name must not be empty",
+		},
+		{
+			name:        "gen invalid",
+			metadata:    map[string]string{v1alpha1.E2BPrefix + "sandbox-generate-name": "BAD-"},
+			expectError: "invalid sandbox-generate-name",
+		},
+		{
+			name:        "gen with dot invalid",
+			metadata:    map[string]string{v1alpha1.E2BPrefix + "sandbox-generate-name": "pool.sbx-"},
+			expectError: "invalid sandbox-generate-name",
+		},
+		{
+			name:        "gen with invalid char before trailing dash",
+			metadata:    map[string]string{v1alpha1.E2BPrefix + "sandbox-generate-name": "bad_-"},
+			expectError: "invalid sandbox-generate-name",
+		},
+		{
+			name:        "gen with dot before trailing dash",
+			metadata:    map[string]string{v1alpha1.E2BPrefix + "sandbox-generate-name": "a.-"},
+			expectError: "invalid sandbox-generate-name",
+		},
+		{
+			name:               "trailing dash ok",
+			metadata:           map[string]string{v1alpha1.E2BPrefix + "sandbox-generate-name": "good-prefix-"},
+			expectGenerateName: "good-prefix-",
+		},
+		{
+			name:               "truncation at max prefix length ok",
+			metadata:           map[string]string{v1alpha1.E2BPrefix + "sandbox-generate-name": "a-very-long-sandbox-generate-name-that-exceeds-max-prefix-len-"},
+			expectGenerateName: "a-very-long-sandbox-generate-name-that-exceeds-max-prefix-len-",
+		},
+		{
+			name:       "keys stripped from metadata",
+			metadata:   map[string]string{v1alpha1.E2BPrefix + "sandbox-name": "x"},
+			expectName: "x",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			expectedNamingMetadata := make(map[string]string)
+			for _, key := range []string{ExtensionKeySandboxName, ExtensionKeySandboxGenerateName} {
+				if value, ok := tt.metadata[key]; ok {
+					expectedNamingMetadata[key] = value
+				}
+			}
+
+			r := &NewSandboxRequest{Metadata: tt.metadata}
+			err := r.parseExtensionSandboxNaming()
+			if tt.expectError != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
+				for key, value := range expectedNamingMetadata {
+					assert.Equal(t, value, r.Metadata[key], "naming key should remain in Metadata when validation fails")
+				}
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.expectName, r.Extensions.Name)
+			assert.Equal(t, tt.expectGenerateName, r.Extensions.GenerateName)
+			_, hasName := r.Metadata[ExtensionKeySandboxName]
+			_, hasGen := r.Metadata[ExtensionKeySandboxGenerateName]
+			assert.False(t, hasName, "sandbox-name key should be deleted from Metadata")
+			assert.False(t, hasGen, "sandbox-generate-name key should be deleted from Metadata")
+		})
+	}
+}
+
 func TestParseExtensionLabels(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -1489,6 +1602,137 @@ func TestNewSnapshotRequest_ParseExtensions(t *testing.T) {
 
 			// Verify WaitSuccessSeconds
 			assert.Equal(t, tt.expectWaitSuccessSeconds, req.Extensions.WaitSuccessSeconds)
+		})
+	}
+}
+
+// --- NewVolumeRequest.ParseExtensions tests ---
+func TestNewVolumeRequest_ParseExtensions(t *testing.T) {
+	tests := []struct {
+		name          string
+		setupHeaders  func(h http.Header)
+		expectError   string
+		expectSize    string
+		expectSC      string
+		expectAM      string
+		expectWaitSec time.Duration
+	}{
+		{
+			name: "valid full headers",
+			setupHeaders: func(h http.Header) {
+				h.Set(ExtensionHeaderVolumeSize, "1Gi")
+				h.Set(ExtensionHeaderVolumeStorageClass, "standard")
+				h.Set(ExtensionHeaderVolumeAccessMode, "ReadWriteOnce")
+				h.Set(ExtensionHeaderVolumeWaitSuccessSeconds, "30")
+			},
+			expectSize:    "1Gi",
+			expectSC:      "standard",
+			expectAM:      "ReadWriteOnce",
+			expectWaitSec: 30 * time.Second,
+		},
+		{
+			name: "valid without WaitBoundSeconds",
+			setupHeaders: func(h http.Header) {
+				h.Set(ExtensionHeaderVolumeSize, "5Gi")
+				h.Set(ExtensionHeaderVolumeStorageClass, "ssd")
+				h.Set(ExtensionHeaderVolumeAccessMode, "ReadWriteMany")
+			},
+			expectSize: "5Gi",
+			expectSC:   "ssd",
+			expectAM:   "ReadWriteMany",
+		},
+		{
+			name: "zero WaitBoundSeconds",
+			setupHeaders: func(h http.Header) {
+				h.Set(ExtensionHeaderVolumeSize, "1Gi")
+				h.Set(ExtensionHeaderVolumeStorageClass, "standard")
+				h.Set(ExtensionHeaderVolumeAccessMode, "ReadWriteOnce")
+				h.Set(ExtensionHeaderVolumeWaitSuccessSeconds, "0")
+			},
+			expectSize:    "1Gi",
+			expectSC:      "standard",
+			expectAM:      "ReadWriteOnce",
+			expectWaitSec: 0,
+		},
+		{
+			name: "missing size header",
+			setupHeaders: func(h http.Header) {
+				h.Set(ExtensionHeaderVolumeStorageClass, "standard")
+				h.Set(ExtensionHeaderVolumeAccessMode, "ReadWriteOnce")
+			},
+			expectError: "invalid storage size",
+		},
+		{
+			name: "invalid size format",
+			setupHeaders: func(h http.Header) {
+				h.Set(ExtensionHeaderVolumeSize, "not-a-size")
+				h.Set(ExtensionHeaderVolumeStorageClass, "standard")
+				h.Set(ExtensionHeaderVolumeAccessMode, "ReadWriteOnce")
+			},
+			expectError: "invalid storage size",
+		},
+		{
+			name: "invalid waitBoundSeconds format",
+			setupHeaders: func(h http.Header) {
+				h.Set(ExtensionHeaderVolumeSize, "1Gi")
+				h.Set(ExtensionHeaderVolumeStorageClass, "standard")
+				h.Set(ExtensionHeaderVolumeAccessMode, "ReadWriteOnce")
+				h.Set(ExtensionHeaderVolumeWaitSuccessSeconds, "abc")
+			},
+			expectError: "invalid waitBoundSeconds format",
+		},
+		{
+			name: "empty storage class defaults to empty string",
+			setupHeaders: func(h http.Header) {
+				h.Set(ExtensionHeaderVolumeSize, "1Gi")
+				h.Set(ExtensionHeaderVolumeAccessMode, "ReadWriteOnce")
+			},
+			expectSize: "1Gi",
+			expectSC:   "",
+			expectAM:   "ReadWriteOnce",
+		},
+		{
+			name: "empty access mode defaults to empty string",
+			setupHeaders: func(h http.Header) {
+				h.Set(ExtensionHeaderVolumeSize, "1Gi")
+				h.Set(ExtensionHeaderVolumeStorageClass, "standard")
+			},
+			expectSize: "1Gi",
+			expectSC:   "standard",
+			expectAM:   "",
+		},
+		{
+			name: "large storage size",
+			setupHeaders: func(h http.Header) {
+				h.Set(ExtensionHeaderVolumeSize, "100Ti")
+				h.Set(ExtensionHeaderVolumeStorageClass, "standard")
+				h.Set(ExtensionHeaderVolumeAccessMode, "ReadWriteOnce")
+			},
+			expectSize: "100Ti",
+			expectSC:   "standard",
+			expectAM:   "ReadWriteOnce",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := make(http.Header)
+			tt.setupHeaders(h)
+			r := &NewVolumeRequest{}
+			err := r.ParseExtensions(h)
+			if tt.expectError != "" {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.expectSC, r.Extensions.StorageClass)
+			assert.Equal(t, tt.expectAM, r.Extensions.AccessMode)
+			assert.Equal(t, tt.expectWaitSec, r.Extensions.WaitBoundSeconds)
+			if tt.expectSize != "" {
+				expectedQty := resource.MustParse(tt.expectSize)
+				assert.True(t, r.Extensions.StorageSize.Equal(expectedQty), "expected %s, got %s", tt.expectSize, r.Extensions.StorageSize.String())
+			}
 		})
 	}
 }

@@ -22,8 +22,6 @@ spec:
         description: |-
           SecurityProfile defines the L7 security/compliance profile for Sandbox
           AI Agent egress HTTP/HTTPS traffic.
-
-          See docs/components/traffic-extension.md for the full semantic model.
         properties:
           apiVersion:
             description: |-
@@ -47,6 +45,171 @@ spec:
               SecurityProfileSpec describes an L7 security profile applied to the egress
               traffic of the selected Pods.
             properties:
+              audit:
+                description: |-
+                  Audit declares profile-wide audit entries. They fire for every
+                  matched rule (subject to each entry's `When` CEL expression),
+                  providing a default audit configuration for all rules in this
+                  profile. A SecurityRule may override this list via
+                  SecurityRuleActions.Audit.
+                items:
+                  description: |-
+                    AuditAction is a named, conditional audit fan-out entry. Audit is
+                    non-terminal: it does not influence the request response and is
+                    dispatched asynchronously after the request resolves.
+
+                    AuditAction lists may appear at two levels:
+                      - SecurityProfileSpec.Audit: profile-wide defaults applied to every
+                        matched rule.
+                      - SecurityRuleActions.Audit: per-rule overrides. When non-empty, the
+                        spec-level list is suppressed for that rule's matches.
+
+                    For each (matched rule, audit entry) pair the data plane evaluates
+                    `When` against AuditContext and dispatches when the expression is
+                    true (or when `When` is empty, which defaults to true).
+                  properties:
+                    name:
+                      description: |-
+                        Name uniquely identifies this audit entry within its enclosing
+                        list. Used in metrics labels and dispatcher dedup. Restricted to
+                        label-safe characters so it can flow into Prometheus labels.
+                      maxLength: 63
+                      minLength: 1
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                      type: string
+                    webhook:
+                      description: |-
+                        Webhook is the HTTP webhook target. Required for now (no other
+                        transports are implemented).
+                      properties:
+                        request:
+                          description: |-
+                            Request describes the HTTP request shape. Defaults to method=POST
+                            and empty body when omitted.
+                          properties:
+                            body:
+                              description: |-
+                                Body is the request body. Exactly one of Body.JSON or Body.Text must
+                                be set. Omitting Body sends an empty request.
+                              properties:
+                                json:
+                                  description: |-
+                                    JSON is a structured body. String leaves are rendered through Go
+                                    text/template against AuditContext; non-string scalars and nested
+                                    objects/arrays are emitted verbatim. Serialised as application/json
+                                    by default.
+                                  type: object
+                                  x-kubernetes-preserve-unknown-fields: true
+                                text:
+                                  description: |-
+                                    Text is a raw text body. The entire string is rendered through Go
+                                    text/template against AuditContext. Sent as text/plain by default.
+                                  maxLength: 8192
+                                  type: string
+                              type: object
+                              x-kubernetes-validations:
+                              - message: exactly one of json or text must be set
+                                rule: (has(self.json) && !has(self.text)) || (!has(self.json)
+                                  && has(self.text))
+                            headers:
+                              description: |-
+                                Headers are appended to the request after the default Content-Type
+                                header.
+                              items:
+                                description: |-
+                                  AuditHeader represents a single HTTP header on the audit request. Value
+                                  may contain text/template expressions.
+                                properties:
+                                  name:
+                                    description: |-
+                                      Name is the header name. Restricted to a safe subset of RFC 7230
+                                      tchar characters.
+                                    maxLength: 256
+                                    minLength: 1
+                                    pattern: ^[A-Za-z0-9!#$%&'*+\-.^_|~]+$
+                                    type: string
+                                  value:
+                                    description: Value is the header value template.
+                                    maxLength: 2048
+                                    type: string
+                                required:
+                                - name
+                                - value
+                                type: object
+                              type: array
+                            method:
+                              default: POST
+                              description: Method is the HTTP request method. Defaults
+                                to POST.
+                              enum:
+                              - POST
+                              - PUT
+                              - PATCH
+                              type: string
+                          type: object
+                        timeout:
+                          default: 2s
+                          description: Timeout caps each HTTP attempt. Defaults to
+                            2s, max 30s.
+                          type: string
+                          x-kubernetes-validations:
+                          - message: timeout must be between 500ms and 30s
+                            rule: duration(self) >= duration('500ms') && duration(self)
+                              <= duration('30s')
+                        url:
+                          description: |-
+                            URL is the absolute HTTP(S) URL of the webhook. Supports Go
+                            text/template expressions over AuditContext, allowing per-Pod
+                            addressing such as: http://{{ .Pod.IP }}:8080/audit
+
+                            Rendering failures (template error or non-HTTP scheme) cause the
+                            event to be dropped and counted under
+                            traffic_extension_audit_webhook_dropped_total{reason="render_url"}.
+                          maxLength: 2048
+                          minLength: 1
+                          type: string
+                      required:
+                      - url
+                      type: object
+                    when:
+                      description: |-
+                        When is a CEL expression evaluated against AuditContext at
+                        resolution time. The expression must evaluate to a bool; the audit
+                        fires when the result is true. Empty (default) means "always fire".
+
+                        Available variables:
+                          result   string                  one of passthrough/mutated/blocked/bypassed/error
+                          request  map<string, dyn>        host, port, path, method, scheme, headers, queryParams
+                          pod      map<string, dyn>        name, namespace, ip, labels
+                          profile  map<string, string>     name, namespace
+                          rule     map<string, string>     name (the matched rule's name)
+
+                        Examples:
+                          result == "blocked"
+                          result in ["blocked", "bypassed"]
+                          pod.labels["team"] == "fraud" && result != "passthrough"
+                          rule.name.startsWith("pii-")
+
+                        Map indexing follows CEL's strict semantics: indexing with an
+                        absent key raises an eval error (counted as a drop, not a "false"
+                        match). Use `in` for safe presence checks, e.g.
+                          "x-priority" in request.headers && request.headers["x-priority"] == "high"
+
+                        Compilation failures (parse, type-check) cause the enclosing
+                        SecurityProfile to be rejected at load time. Runtime evaluation
+                        errors are counted under
+                        traffic_extension_audit_webhook_dropped_total{reason="when_eval"}
+                        and the event is dropped.
+                      maxLength: 1024
+                      type: string
+                  required:
+                  - name
+                  - webhook
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
               rules:
                 description: |-
                   Rules is the ordered rule chain. Semantics are Default Continue:
@@ -74,6 +237,176 @@ spec:
                         action runs at most once. Terminal actions (Block, Bypass)
                         short-circuit the rule chain.
                       properties:
+                        audit:
+                          description: |-
+                            Audit lists per-rule audit entries. When non-empty, this list
+                            REPLACES the profile-level SecurityProfileSpec.Audit list for this
+                            rule's matches (override semantics). When empty or omitted, the
+                            spec-level list applies. To suppress audit on a specific rule,
+                            add a single entry with `when: "false"`.
+
+                            Audit is non-terminal — it never alters the upstream response and
+                            does not short-circuit the rule chain.
+                          items:
+                            description: |-
+                              AuditAction is a named, conditional audit fan-out entry. Audit is
+                              non-terminal: it does not influence the request response and is
+                              dispatched asynchronously after the request resolves.
+
+                              AuditAction lists may appear at two levels:
+                                - SecurityProfileSpec.Audit: profile-wide defaults applied to every
+                                  matched rule.
+                                - SecurityRuleActions.Audit: per-rule overrides. When non-empty, the
+                                  spec-level list is suppressed for that rule's matches.
+
+                              For each (matched rule, audit entry) pair the data plane evaluates
+                              `When` against AuditContext and dispatches when the expression is
+                              true (or when `When` is empty, which defaults to true).
+                            properties:
+                              name:
+                                description: |-
+                                  Name uniquely identifies this audit entry within its enclosing
+                                  list. Used in metrics labels and dispatcher dedup. Restricted to
+                                  label-safe characters so it can flow into Prometheus labels.
+                                maxLength: 63
+                                minLength: 1
+                                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                                type: string
+                              webhook:
+                                description: |-
+                                  Webhook is the HTTP webhook target. Required for now (no other
+                                  transports are implemented).
+                                properties:
+                                  request:
+                                    description: |-
+                                      Request describes the HTTP request shape. Defaults to method=POST
+                                      and empty body when omitted.
+                                    properties:
+                                      body:
+                                        description: |-
+                                          Body is the request body. Exactly one of Body.JSON or Body.Text must
+                                          be set. Omitting Body sends an empty request.
+                                        properties:
+                                          json:
+                                            description: |-
+                                              JSON is a structured body. String leaves are rendered through Go
+                                              text/template against AuditContext; non-string scalars and nested
+                                              objects/arrays are emitted verbatim. Serialised as application/json
+                                              by default.
+                                            type: object
+                                            x-kubernetes-preserve-unknown-fields: true
+                                          text:
+                                            description: |-
+                                              Text is a raw text body. The entire string is rendered through Go
+                                              text/template against AuditContext. Sent as text/plain by default.
+                                            maxLength: 8192
+                                            type: string
+                                        type: object
+                                        x-kubernetes-validations:
+                                        - message: exactly one of json or text must
+                                            be set
+                                          rule: (has(self.json) && !has(self.text))
+                                            || (!has(self.json) && has(self.text))
+                                      headers:
+                                        description: |-
+                                          Headers are appended to the request after the default Content-Type
+                                          header.
+                                        items:
+                                          description: |-
+                                            AuditHeader represents a single HTTP header on the audit request. Value
+                                            may contain text/template expressions.
+                                          properties:
+                                            name:
+                                              description: |-
+                                                Name is the header name. Restricted to a safe subset of RFC 7230
+                                                tchar characters.
+                                              maxLength: 256
+                                              minLength: 1
+                                              pattern: ^[A-Za-z0-9!#$%&'*+\-.^_|~]+$
+                                              type: string
+                                            value:
+                                              description: Value is the header value
+                                                template.
+                                              maxLength: 2048
+                                              type: string
+                                          required:
+                                          - name
+                                          - value
+                                          type: object
+                                        type: array
+                                      method:
+                                        default: POST
+                                        description: Method is the HTTP request method.
+                                          Defaults to POST.
+                                        enum:
+                                        - POST
+                                        - PUT
+                                        - PATCH
+                                        type: string
+                                    type: object
+                                  timeout:
+                                    default: 2s
+                                    description: Timeout caps each HTTP attempt. Defaults
+                                      to 2s, max 30s.
+                                    type: string
+                                    x-kubernetes-validations:
+                                    - message: timeout must be between 500ms and 30s
+                                      rule: duration(self) >= duration('500ms') &&
+                                        duration(self) <= duration('30s')
+                                  url:
+                                    description: |-
+                                      URL is the absolute HTTP(S) URL of the webhook. Supports Go
+                                      text/template expressions over AuditContext, allowing per-Pod
+                                      addressing such as: http://{{ .Pod.IP }}:8080/audit
+
+                                      Rendering failures (template error or non-HTTP scheme) cause the
+                                      event to be dropped and counted under
+                                      traffic_extension_audit_webhook_dropped_total{reason="render_url"}.
+                                    maxLength: 2048
+                                    minLength: 1
+                                    type: string
+                                required:
+                                - url
+                                type: object
+                              when:
+                                description: |-
+                                  When is a CEL expression evaluated against AuditContext at
+                                  resolution time. The expression must evaluate to a bool; the audit
+                                  fires when the result is true. Empty (default) means "always fire".
+
+                                  Available variables:
+                                    result   string                  one of passthrough/mutated/blocked/bypassed/error
+                                    request  map<string, dyn>        host, port, path, method, scheme, headers, queryParams
+                                    pod      map<string, dyn>        name, namespace, ip, labels
+                                    profile  map<string, string>     name, namespace
+                                    rule     map<string, string>     name (the matched rule's name)
+
+                                  Examples:
+                                    result == "blocked"
+                                    result in ["blocked", "bypassed"]
+                                    pod.labels["team"] == "fraud" && result != "passthrough"
+                                    rule.name.startsWith("pii-")
+
+                                  Map indexing follows CEL's strict semantics: indexing with an
+                                  absent key raises an eval error (counted as a drop, not a "false"
+                                  match). Use `in` for safe presence checks, e.g.
+                                    "x-priority" in request.headers && request.headers["x-priority"] == "high"
+
+                                  Compilation failures (parse, type-check) cause the enclosing
+                                  SecurityProfile to be rejected at load time. Runtime evaluation
+                                  errors are counted under
+                                  traffic_extension_audit_webhook_dropped_total{reason="when_eval"}
+                                  and the event is dropped.
+                                maxLength: 1024
+                                type: string
+                            required:
+                            - name
+                            - webhook
+                            type: object
+                          type: array
+                          x-kubernetes-list-map-keys:
+                          - name
+                          x-kubernetes-list-type: map
                         block:
                           description: |-
                             Block is a terminal action that returns a configured HTTP response
@@ -98,6 +431,111 @@ spec:
                             forwards the request without further processing. Useful for trusted
                             internal domains.
                           type: boolean
+                        tokenTransformation:
+                          description: |-
+                            TokenTransformation rewrites credential headers (e.g. replacing a
+                            placeholder Bearer token with a real one from a token service).
+                            Non-terminal.
+                          properties:
+                            apiKey:
+                              description: |-
+                                ApiKey holds ApiKey-mode specific configuration.
+                                Required when Type == ApiKey, must be unset when Type == AliyunSTS.
+                              properties:
+                                targetHeader:
+                                  default: Authorization
+                                  description: TargetHeader is the request header
+                                    to overwrite with the new token.
+                                  maxLength: 256
+                                  pattern: ^[A-Za-z0-9!#$%&'*+\-.^_|~]+$
+                                  type: string
+                                valueTemplate:
+                                  description: ValueTemplate is a Go text/template
+                                    for the header value.
+                                  maxLength: 1024
+                                  minLength: 1
+                                  type: string
+                                when:
+                                  description: |-
+                                    When is an optional condition; the transformation is skipped if
+                                    the header does not match.
+                                  properties:
+                                    header:
+                                      description: Header is the request header name
+                                        to inspect.
+                                      maxLength: 256
+                                      minLength: 1
+                                      pattern: ^[A-Za-z0-9!#$%&'*+\-.^_|~]+$
+                                      type: string
+                                    pattern:
+                                      description: Pattern is an RE2 regex evaluated
+                                        against the header value.
+                                      maxLength: 512
+                                      minLength: 1
+                                      type: string
+                                  required:
+                                  - header
+                                  - pattern
+                                  type: object
+                              required:
+                              - valueTemplate
+                              type: object
+                            credentialRef:
+                              description: |-
+                                CredentialRef identifies the credential source for this
+                                transformation. Required.
+                              properties:
+                                kind:
+                                  description: Kind selects the credential source
+                                    type.
+                                  enum:
+                                  - Secret
+                                  - CredentialProvider
+                                  type: string
+                                name:
+                                  description: |-
+                                    Name is the resource name — Secret name for Kind=Secret, or
+                                    provider name for Kind=CredentialProvider.
+                                  maxLength: 253
+                                  minLength: 1
+                                  type: string
+                              required:
+                              - kind
+                              - name
+                              type: object
+                            disabled:
+                              default: false
+                              description: |-
+                                Disabled temporarily disables this action without removing its
+                                configuration. When true the action is skipped during evaluation.
+                              type: boolean
+                            failStrategy:
+                              default: Block
+                              description: FailStrategy controls behaviour when the
+                                transformation fails.
+                              enum:
+                              - Allow
+                              - Block
+                              - Ignore
+                              type: string
+                            type:
+                              default: ApiKey
+                              description: Type discriminates the transformation strategy.
+                                Defaults to ApiKey.
+                              enum:
+                              - ApiKey
+                              - AliyunSTS
+                              type: string
+                          required:
+                          - credentialRef
+                          type: object
+                          x-kubernetes-validations:
+                          - message: apiKey config is required when type is ApiKey
+                            rule: '(!has(self.type) || self.type == ''ApiKey'') ?
+                              has(self.apiKey) : true'
+                          - message: apiKey must be unset when type is AliyunSTS
+                            rule: 'self.type == ''AliyunSTS'' ? !has(self.apiKey)
+                              : true'
                       type: object
                     match:
                       description: Match lists match conditions. Multiple entries
@@ -272,6 +710,17 @@ spec:
                               - name
                               - value
                               type: object
+                            type: array
+                          schemes:
+                            description: |-
+                              Schemes filters by the request's :scheme pseudo-header (e.g. "http",
+                              "https", or custom schemes used by gRPC/other protocols). Multiple
+                              entries are ORed. Matching is case-insensitive.
+                            items:
+                              maxLength: 32
+                              minLength: 1
+                              pattern: ^[a-zA-Z][a-zA-Z0-9+\-.]*$
+                              type: string
                             type: array
                         required:
                         - domains

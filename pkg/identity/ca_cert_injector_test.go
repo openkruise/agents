@@ -737,6 +737,231 @@ func TestCACertInjector_InjectAllCAIntoContainers_EnvVars(t *testing.T) {
 	}
 }
 
+// --- InitContainers tests --------------------------------------------------
+
+// TestCACertInjector_InjectAllCAIntoContainers_InitContainers validates that
+// CA injection covers InitContainers as well as regular Containers.
+func TestCACertInjector_InjectAllCAIntoContainers_InitContainers(t *testing.T) {
+	tests := []struct {
+		name                  string
+		spec                  CABundleSpec
+		initContainers        []corev1.Container
+		containers            []corev1.Container
+		sandbox               *agentsv1alpha1.Sandbox
+		expectInitMountsByIx  map[int][]string
+		expectMountsByIx      map[int][]string
+		expectInitEnvsByIx    map[int][]string
+		expectEnvsByIx        map[int][]string
+	}{
+		{
+			name: "InitContainerSelector ByContainerName targets init container by name",
+			spec: func() CABundleSpec {
+				s := newTestSpec()
+				// Isolate init-container selection so the test only verifies
+				// InitContainerSelector behaviour.
+				s.ContainerSelector = func(_ *corev1.Container, _ int) bool { return false }
+				s.InitContainerSelector = ByContainerName("csi-agent-sidecar")
+				s.EnvVars = []corev1.EnvVar{{Name: "SSL_CERT_FILE", Value: testMount}}
+				return s
+			}(),
+			initContainers: []corev1.Container{{Name: "csi-agent-sidecar"}, {Name: "init-other"}},
+			containers:     []corev1.Container{{Name: "main"}},
+			sandbox:        newSandbox(),
+			expectInitMountsByIx: map[int][]string{
+				0: {testVolume},
+				1: nil,
+			},
+			expectMountsByIx: map[int][]string{
+				0: nil,
+			},
+			expectInitEnvsByIx: map[int][]string{
+				0: {"SSL_CERT_FILE"},
+				1: nil,
+			},
+			expectEnvsByIx: map[int][]string{
+				0: nil,
+			},
+		},
+		{
+			name: "AllContainers selectors cover both init and regular containers",
+			spec: func() CABundleSpec {
+				s := newTestSpec()
+				s.ContainerSelector = AllContainers()
+				s.InitContainerSelector = AllContainers()
+				s.EnvVars = []corev1.EnvVar{{Name: "SSL_CERT_FILE", Value: testMount}}
+				return s
+			}(),
+			initContainers: []corev1.Container{{Name: "init"}},
+			containers:     []corev1.Container{{Name: "main"}},
+			sandbox:        newSandbox(),
+			expectInitMountsByIx: map[int][]string{
+				0: {testVolume},
+			},
+			expectMountsByIx: map[int][]string{
+				0: {testVolume},
+			},
+			expectInitEnvsByIx: map[int][]string{
+				0: {"SSL_CERT_FILE"},
+			},
+			expectEnvsByIx: map[int][]string{
+				0: {"SSL_CERT_FILE"},
+			},
+		},
+		{
+			name: "default nil InitContainerSelector skips all init containers",
+			spec: newTestSpec(),
+			initContainers: []corev1.Container{{Name: "init"}},
+			containers:     []corev1.Container{{Name: "main"}},
+			sandbox:        newSandbox(),
+			expectInitMountsByIx: map[int][]string{
+				0: nil,
+			},
+			expectMountsByIx: map[int][]string{
+				0: {testVolume},
+			},
+		},
+		{
+			name: "AllContainers ContainerSelector does not inject init containers",
+			spec: func() CABundleSpec {
+				s := newTestSpec()
+				s.ContainerSelector = AllContainers()
+				// InitContainerSelector intentionally left nil to prove that
+				// ContainerSelector alone does not target init containers.
+				return s
+			}(),
+			initContainers: []corev1.Container{{Name: "init"}},
+			containers:     []corev1.Container{{Name: "main"}},
+			sandbox:        newSandbox(),
+			expectInitMountsByIx: map[int][]string{
+				0: nil,
+			},
+			expectMountsByIx: map[int][]string{
+				0: {testVolume},
+			},
+		},
+		{
+			name: "only init containers, no regular containers",
+			spec: func() CABundleSpec {
+				s := newTestSpec()
+				s.ContainerSelector = func(_ *corev1.Container, _ int) bool { return false }
+				s.InitContainerSelector = ByContainerName("init")
+				return s
+			}(),
+			initContainers: []corev1.Container{{Name: "init"}},
+			containers:     nil,
+			sandbox:        newSandbox(),
+			expectInitMountsByIx: map[int][]string{
+				0: {testVolume},
+			},
+			expectMountsByIx: map[int][]string{},
+		},
+		{
+			name: "idempotent: existing mount on init container is not duplicated",
+			spec: func() CABundleSpec {
+				s := newTestSpec()
+				s.ContainerSelector = func(_ *corev1.Container, _ int) bool { return false }
+				s.InitContainerSelector = ByContainerName("init")
+				return s
+			}(),
+			initContainers: []corev1.Container{{
+				Name:         "init",
+				VolumeMounts: []corev1.VolumeMount{{Name: testVolume, MountPath: "/old"}},
+			}},
+			containers: []corev1.Container{{Name: "main"}},
+			sandbox:    newSandbox(),
+			expectInitMountsByIx: map[int][]string{
+				0: {testVolume}, // kept original, not duplicated
+			},
+			expectMountsByIx: map[int][]string{
+				0: nil,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			withTestSpec(t, tt.spec)
+
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: testTargetNS},
+				Spec: corev1.PodSpec{
+					InitContainers: tt.initContainers,
+					Containers:     tt.containers,
+				},
+			}
+			InjectAllCAIntoContainers(context.Background(), tt.sandbox, pod)
+
+			// Verify init containers
+			for idx, want := range tt.expectInitMountsByIx {
+				gotNames := make([]string, 0)
+				if idx < len(pod.Spec.InitContainers) {
+					for _, vm := range pod.Spec.InitContainers[idx].VolumeMounts {
+						gotNames = append(gotNames, vm.Name)
+					}
+				}
+				if want == nil {
+					if len(gotNames) != 0 {
+						t.Errorf("initContainer[%d] should have no mounts, got %v", idx, gotNames)
+					}
+				} else if !reflect.DeepEqual(gotNames, want) {
+					t.Errorf("initContainer[%d] mounts mismatch: got %v, want %v", idx, gotNames, want)
+				}
+			}
+
+			// Verify regular containers
+			for idx, want := range tt.expectMountsByIx {
+				gotNames := make([]string, 0)
+				if idx < len(pod.Spec.Containers) {
+					for _, vm := range pod.Spec.Containers[idx].VolumeMounts {
+						gotNames = append(gotNames, vm.Name)
+					}
+				}
+				if want == nil {
+					if len(gotNames) != 0 {
+						t.Errorf("container[%d] should have no mounts, got %v", idx, gotNames)
+					}
+				} else if !reflect.DeepEqual(gotNames, want) {
+					t.Errorf("container[%d] mounts mismatch: got %v, want %v", idx, gotNames, want)
+				}
+			}
+
+			// Verify init container env vars
+			for idx, want := range tt.expectInitEnvsByIx {
+				gotNames := make([]string, 0)
+				if idx < len(pod.Spec.InitContainers) {
+					for _, ev := range pod.Spec.InitContainers[idx].Env {
+						gotNames = append(gotNames, ev.Name)
+					}
+				}
+				if want == nil {
+					if len(gotNames) != 0 {
+						t.Errorf("initContainer[%d] should have no env vars, got %v", idx, gotNames)
+					}
+				} else if !reflect.DeepEqual(gotNames, want) {
+					t.Errorf("initContainer[%d] env vars mismatch: got %v, want %v", idx, gotNames, want)
+				}
+			}
+
+			// Verify regular container env vars
+			for idx, want := range tt.expectEnvsByIx {
+				gotNames := make([]string, 0)
+				if idx < len(pod.Spec.Containers) {
+					for _, ev := range pod.Spec.Containers[idx].Env {
+						gotNames = append(gotNames, ev.Name)
+					}
+				}
+				if want == nil {
+					if len(gotNames) != 0 {
+						t.Errorf("container[%d] should have no env vars, got %v", idx, gotNames)
+					}
+				} else if !reflect.DeepEqual(gotNames, want) {
+					t.Errorf("container[%d] env vars mismatch: got %v, want %v", idx, gotNames, want)
+				}
+			}
+		})
+	}
+}
+
 // --- buildCopiedSecret unit test -------------------------------------------
 
 func TestBuildCopiedSecret(t *testing.T) {

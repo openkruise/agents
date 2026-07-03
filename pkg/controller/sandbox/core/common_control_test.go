@@ -20,6 +20,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -481,6 +483,209 @@ func TestCommonControl_EnsureSandboxUpdated(t *testing.T) {
 	}
 }
 
+func TestCommonControl_EnsureSandboxUpdated_InitializePath(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	now := metav1.Now()
+
+	readyPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-sandbox",
+			Namespace: "default",
+			UID:       "pod-uid-1",
+		},
+		Spec: corev1.PodSpec{NodeName: "node-1"},
+		Status: corev1.PodStatus{
+			PodIP: "10.0.0.1",
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: corev1.ConditionTrue, LastTransitionTime: now},
+			},
+		},
+	}
+
+	notReadyPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-sandbox",
+			Namespace: "default",
+			UID:       "pod-uid-1",
+		},
+		Spec: corev1.PodSpec{NodeName: "node-1"},
+		Status: corev1.PodStatus{
+			PodIP: "10.0.0.1",
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: corev1.ConditionFalse, LastTransitionTime: now},
+			},
+		},
+	}
+
+	baseSandbox := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-sandbox",
+			Namespace: "default",
+		},
+	}
+
+	pendingInitConditions := []metav1.Condition{
+		{
+			Type:               string(agentsv1alpha1.SandboxConditionReady),
+			Status:             metav1.ConditionFalse,
+			LastTransitionTime: now,
+			Reason:             agentsv1alpha1.SandboxReadyReasonPodReady,
+		},
+		{
+			Type:               string(agentsv1alpha1.RuntimeInitialized),
+			Status:             metav1.ConditionFalse,
+			LastTransitionTime: now,
+			Reason:             agentsv1alpha1.SandboxConditionRuntimeInitReasonPending,
+			Message:            "Waiting for pod ready before initialization",
+		},
+	}
+
+	tests := []struct {
+		name           string
+		pod            *corev1.Pod
+		initializer    SandboxInitializer
+		conditions     []metav1.Condition
+		expectError    string
+		expectReady    metav1.ConditionStatus
+		expectInitDone bool
+	}{
+		{
+			name:           "pod not ready, init pending, returns nil and waits",
+			pod:            notReadyPod,
+			initializer:    &mockSandboxInitializer{},
+			conditions:     pendingInitConditions,
+			expectReady:    metav1.ConditionFalse,
+			expectInitDone: false,
+		},
+		{
+			name:           "pod ready, init pending, initialize succeeds, sets Ready=True",
+			pod:            readyPod,
+			initializer:    &mockSandboxInitializer{},
+			conditions:     pendingInitConditions,
+			expectReady:    metav1.ConditionTrue,
+			expectInitDone: true,
+		},
+		{
+			name:        "pod ready, init pending, initialize fails, returns error",
+			pod:         readyPod,
+			initializer: &mockSandboxInitializer{err: fmt.Errorf("runtime init failed")},
+			conditions:  pendingInitConditions,
+			expectError: "runtime init failed",
+		},
+		{
+			name: "pod ready, init failed, retries initialize and succeeds",
+			pod:  readyPod,
+			initializer: &mockSandboxInitializer{},
+			conditions: []metav1.Condition{
+				{
+					Type:               string(agentsv1alpha1.SandboxConditionReady),
+					Status:             metav1.ConditionFalse,
+					LastTransitionTime: now,
+					Reason:             agentsv1alpha1.SandboxReadyReasonPodReady,
+				},
+				{
+					Type:               string(agentsv1alpha1.RuntimeInitialized),
+					Status:             metav1.ConditionFalse,
+					LastTransitionTime: now,
+					Reason:             agentsv1alpha1.SandboxConditionRuntimeInitReasonFailed,
+					Message:            "Runtime initialization failed: previous error",
+				},
+			},
+			expectReady:    metav1.ConditionTrue,
+			expectInitDone: true,
+		},
+		{
+			name:        "no RuntimeInitialized condition, skips init block entirely",
+			pod:         readyPod,
+			initializer: &mockSandboxInitializer{},
+			conditions: []metav1.Condition{
+				{
+					Type:               string(agentsv1alpha1.SandboxConditionReady),
+					Status:             metav1.ConditionFalse,
+					LastTransitionTime: now,
+					Reason:             agentsv1alpha1.SandboxReadyReasonPodReady,
+				},
+			},
+			expectReady:    metav1.ConditionTrue,
+			expectInitDone: false,
+		},
+		{
+			name:        "RuntimeInitialized already True, skips init block",
+			pod:         readyPod,
+			initializer: &mockSandboxInitializer{},
+			conditions: []metav1.Condition{
+				{
+					Type:               string(agentsv1alpha1.SandboxConditionReady),
+					Status:             metav1.ConditionFalse,
+					LastTransitionTime: now,
+					Reason:             agentsv1alpha1.SandboxReadyReasonPodReady,
+				},
+				{
+					Type:               string(agentsv1alpha1.RuntimeInitialized),
+					Status:             metav1.ConditionTrue,
+					LastTransitionTime: now,
+					Reason:             agentsv1alpha1.SandboxConditionRuntimeInitReasonSucceeded,
+				},
+			},
+			expectReady:    metav1.ConditionTrue,
+			expectInitDone: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fc := fake.NewClientBuilder().WithScheme(scheme).Build()
+			control := &commonControl{
+				Client:               fc,
+				recorder:             record.NewFakeRecorder(10),
+				inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fc, inplaceupdate.DefaultGeneratePatchBodyFunc),
+				initializer:          tt.initializer,
+				podControl:           NewPodControl(fc, record.NewFakeRecorder(10), GeneratePodFromSandbox),
+			}
+
+			newStatus := &agentsv1alpha1.SandboxStatus{
+				Phase:      agentsv1alpha1.SandboxRunning,
+				Conditions: append([]metav1.Condition{}, tt.conditions...),
+			}
+
+			err := control.EnsureSandboxUpdated(context.TODO(), EnsureFuncArgs{
+				Pod:       tt.pod,
+				Box:       baseSandbox.DeepCopy(),
+				NewStatus: newStatus,
+			})
+
+			if tt.expectError != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
+				return
+			}
+			require.NoError(t, err)
+
+			readyCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionReady))
+			require.NotNil(t, readyCond, "expected Ready condition to exist")
+			if readyCond.Status != tt.expectReady {
+				t.Errorf("expected Ready=%s, got %s", tt.expectReady, readyCond.Status)
+			}
+
+			if tt.expectInitDone {
+				initCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.RuntimeInitialized))
+				require.NotNil(t, initCond, "expected RuntimeInitialized condition to exist")
+			}
+
+			// Verify Initialize was called exactly when expected
+			mock := tt.initializer.(*mockSandboxInitializer)
+			if tt.expectInitDone {
+				assert.Equal(t, 1, mock.called, "Initialize should have been called once")
+			} else {
+				assert.Equal(t, 0, mock.called, "Initialize should not have been called")
+			}
+		})
+	}
+}
+
 func TestCommonControl_EnsureSandboxPaused(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)
@@ -721,7 +926,7 @@ func TestCommonControl_EnsureSandboxResumed(t *testing.T) {
 			},
 		},
 		{
-			name: "pod is running and ready",
+			name: "pod is running and ready, transitions to Running with RuntimeInitialized=Pending",
 			args: EnsureFuncArgs{
 				Pod: &corev1.Pod{
 					ObjectMeta: metav1.ObjectMeta{
@@ -764,22 +969,22 @@ func TestCommonControl_EnsureSandboxResumed(t *testing.T) {
 				Conditions: []metav1.Condition{
 					{
 						Type:               string(agentsv1alpha1.SandboxConditionReady),
-						Status:             metav1.ConditionTrue,
+						Status:             metav1.ConditionFalse,
 						LastTransitionTime: now,
 						Reason:             agentsv1alpha1.SandboxReadyReasonPodReady,
 					},
 					{
 						Type:               string(agentsv1alpha1.RuntimeInitialized),
-						Status:             metav1.ConditionTrue,
+						Status:             metav1.ConditionFalse,
+						Reason:             agentsv1alpha1.SandboxConditionRuntimeInitReasonPending,
+						Message:            "Waiting for pod ready before initialization",
 						LastTransitionTime: now,
-						Reason:             agentsv1alpha1.SandboxConditionRuntimeInitReasonSucceeded,
-						Message:            "Runtime initialization completed",
 					},
 				},
 			},
 		},
 		{
-			name: "pod is running and ready, but initializer fails",
+			name: "pod is running and ready, initializer not called during resume",
 			args: EnsureFuncArgs{
 				Pod: &corev1.Pod{
 					ObjectMeta: metav1.ObjectMeta{
@@ -821,8 +1026,7 @@ func TestCommonControl_EnsureSandboxResumed(t *testing.T) {
 				},
 			},
 			podExist:    true,
-			wantErr:     true,
-			expectError: "runtime re-init failed",
+			wantErr:     false,
 			initializer: &mockSandboxInitializer{err: fmt.Errorf("runtime re-init failed")},
 			expectedStatus: &agentsv1alpha1.SandboxStatus{
 				Phase:     agentsv1alpha1.SandboxRunning,
@@ -841,16 +1045,17 @@ func TestCommonControl_EnsureSandboxResumed(t *testing.T) {
 						Reason:             agentsv1alpha1.SandboxReadyReasonPodReady,
 					},
 					{
-						Type:    string(agentsv1alpha1.RuntimeInitialized),
-						Status:  metav1.ConditionFalse,
-						Reason:  agentsv1alpha1.SandboxConditionRuntimeInitReasonFailed,
-						Message: "Runtime initialization failed: runtime re-init failed",
+						Type:               string(agentsv1alpha1.RuntimeInitialized),
+						Status:             metav1.ConditionFalse,
+						Reason:             agentsv1alpha1.SandboxConditionRuntimeInitReasonPending,
+						Message:            "Waiting for pod ready before initialization",
+						LastTransitionTime: now,
 					},
 				},
 			},
 		},
 		{
-			name: "pod is running, but not ready",
+			name: "pod is running but not ready, transitions to Running",
 			args: EnsureFuncArgs{
 				Pod: &corev1.Pod{
 					ObjectMeta: metav1.ObjectMeta{
@@ -889,13 +1094,102 @@ func TestCommonControl_EnsureSandboxResumed(t *testing.T) {
 			podExist: true,
 			wantErr:  false,
 			expectedStatus: &agentsv1alpha1.SandboxStatus{
-				Phase: agentsv1alpha1.SandboxResuming,
+				Phase: agentsv1alpha1.SandboxRunning,
 				Conditions: []metav1.Condition{
 					{
 						Type:               string(agentsv1alpha1.SandboxConditionReady),
 						Status:             metav1.ConditionFalse,
 						LastTransitionTime: now,
 						Reason:             agentsv1alpha1.SandboxReadyReasonPodReady,
+					},
+					{
+						Type:               string(agentsv1alpha1.RuntimeInitialized),
+						Status:             metav1.ConditionFalse,
+						Reason:             agentsv1alpha1.SandboxConditionRuntimeInitReasonPending,
+						Message:            "Waiting for pod ready before initialization",
+						LastTransitionTime: now,
+					},
+				},
+			},
+		},
+		{
+			name: "pod is running with resumed condition, sets Resumed=True",
+			args: EnsureFuncArgs{
+				Pod: &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-sandbox",
+						Namespace: "default",
+						UID:       "pod-uid-456",
+					},
+					Spec: corev1.PodSpec{
+						NodeName: "node-2",
+					},
+					Status: corev1.PodStatus{
+						Phase: corev1.PodRunning,
+						PodIP: "10.0.0.10",
+						Conditions: []corev1.PodCondition{
+							{
+								Type:               corev1.PodReady,
+								Status:             corev1.ConditionTrue,
+								LastTransitionTime: now,
+							},
+						},
+					},
+				},
+				Box: &agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-sandbox",
+						Namespace: "default",
+					},
+				},
+				NewStatus: &agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxResuming,
+					Conditions: []metav1.Condition{
+						{
+							Type:               string(agentsv1alpha1.SandboxConditionReady),
+							Status:             metav1.ConditionFalse,
+							LastTransitionTime: now,
+							Reason:             agentsv1alpha1.SandboxReadyReasonPodReady,
+						},
+						{
+							Type:               string(agentsv1alpha1.SandboxConditionResumed),
+							Status:             metav1.ConditionFalse,
+							LastTransitionTime: now,
+							Reason:             agentsv1alpha1.SandboxResumeReasonCreatePod,
+						},
+					},
+				},
+			},
+			podExist: true,
+			wantErr:  false,
+			expectedStatus: &agentsv1alpha1.SandboxStatus{
+				Phase:     agentsv1alpha1.SandboxRunning,
+				NodeName:  "node-2",
+				SandboxIp: "10.0.0.10",
+				PodInfo: agentsv1alpha1.PodInfo{
+					PodIP:    "10.0.0.10",
+					NodeName: "node-2",
+					PodUID:   "pod-uid-456",
+				},
+				Conditions: []metav1.Condition{
+					{
+						Type:               string(agentsv1alpha1.SandboxConditionReady),
+						Status:             metav1.ConditionFalse,
+						LastTransitionTime: now,
+						Reason:             agentsv1alpha1.SandboxReadyReasonPodReady,
+					},
+					{
+						Type:               string(agentsv1alpha1.SandboxConditionResumed),
+						Status:             metav1.ConditionTrue,
+						LastTransitionTime: now,
+						Reason:             agentsv1alpha1.SandboxResumeReasonCreatePod,
+					},
+					{
+						Type:               string(agentsv1alpha1.RuntimeInitialized),
+						Status:             metav1.ConditionFalse,
+						Reason:             agentsv1alpha1.SandboxConditionRuntimeInitReasonPending,
+						Message:            "Waiting for pod ready before initialization",
+						LastTransitionTime: now,
 					},
 				},
 			},
@@ -907,7 +1201,7 @@ func TestCommonControl_EnsureSandboxResumed(t *testing.T) {
 			fc := fake.NewClientBuilder().WithScheme(scheme).Build()
 			init := tt.initializer
 			if init == nil {
-				init = &defaultSandboxInitializer{}
+				init = &defaultSandboxInitializer{recorder: record.NewFakeRecorder(10)}
 			}
 			control := &commonControl{
 				Client:               fc,
@@ -922,10 +1216,9 @@ func TestCommonControl_EnsureSandboxResumed(t *testing.T) {
 				t.Errorf("EnsureSandboxResumed() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
-			if tt.expectError != "" && err != nil {
-				if !contains(err.Error(), tt.expectError) {
-					t.Errorf("EnsureSandboxResumed() error = %v, expectError contains %q", err, tt.expectError)
-				}
+			if tt.expectError != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
 			}
 
 			// Verify that pod was created if it didn't exist
@@ -2034,16 +2327,104 @@ func TestCommonControl_EnsureSandboxResumed_SetResumedCondition(t *testing.T) {
 		t.Fatalf("EnsureSandboxResumed() unexpected error: %v", err)
 	}
 
+	// Pod is Pending, so resumed condition stays False and phase stays Resuming
 	resumedCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionResumed))
 	if resumedCond == nil {
 		t.Fatal("Expected Resumed condition to exist")
 	}
-	if resumedCond.Status != metav1.ConditionTrue {
-		t.Errorf("Expected Resumed condition to be True, got %s", resumedCond.Status)
+	if resumedCond.Status != metav1.ConditionFalse {
+		t.Errorf("Expected Resumed condition to be False (pod not running yet), got %s", resumedCond.Status)
 	}
 
 	if newStatus.Phase != agentsv1alpha1.SandboxResuming {
 		t.Errorf("Expected phase Resuming, got %s", newStatus.Phase)
+	}
+}
+
+func TestCommonControl_EnsureSandboxResumed_LegacyBackfill(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	control := &commonControl{
+		Client:               fakeClient,
+		recorder:             record.NewFakeRecorder(10),
+		inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
+		podControl:           NewPodControl(fakeClient, record.NewFakeRecorder(10), GeneratePodFromSandbox),
+		checkpointControl:    NewCheckpointControl(fakeClient, record.NewFakeRecorder(10)),
+	}
+
+	tests := []struct {
+		name       string
+		conditions []metav1.Condition
+	}{
+		{
+			name:       "legacy Resuming without RuntimeInitialized should set Pending",
+			conditions: []metav1.Condition{},
+		},
+		{
+			name: "stale Succeeded from prior resume should be reset to Pending",
+			conditions: []metav1.Condition{
+				{
+					Type:               string(agentsv1alpha1.RuntimeInitialized),
+					Status:             metav1.ConditionTrue,
+					Reason:             agentsv1alpha1.SandboxConditionRuntimeInitReasonSucceeded,
+					LastTransitionTime: metav1.Now(),
+				},
+			},
+		},
+		{
+			name: "Failed from prior attempt should be reset to Pending",
+			conditions: []metav1.Condition{
+				{
+					Type:               string(agentsv1alpha1.RuntimeInitialized),
+					Status:             metav1.ConditionFalse,
+					Reason:             agentsv1alpha1.SandboxConditionRuntimeInitReasonFailed,
+					LastTransitionTime: metav1.Now(),
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-sandbox", Namespace: "default"},
+				Spec:       corev1.PodSpec{NodeName: "node1"},
+				Status: corev1.PodStatus{
+					Phase: corev1.PodRunning,
+					PodIP: "10.0.0.1",
+				},
+			}
+			box := &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-sandbox", Namespace: "default"},
+			}
+			newStatus := &agentsv1alpha1.SandboxStatus{
+				Phase:      agentsv1alpha1.SandboxResuming,
+				Conditions: append([]metav1.Condition{}, tt.conditions...),
+			}
+
+			err := control.EnsureSandboxResumed(context.TODO(), EnsureFuncArgs{Pod: pod, Box: box, NewStatus: newStatus})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if newStatus.Phase != agentsv1alpha1.SandboxRunning {
+				t.Fatalf("expected phase Running, got %s", newStatus.Phase)
+			}
+
+			initCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.RuntimeInitialized))
+			if initCond == nil {
+				t.Fatal("expected RuntimeInitialized condition to exist")
+			}
+			if initCond.Reason != agentsv1alpha1.SandboxConditionRuntimeInitReasonPending {
+				t.Errorf("expected reason Pending, got %s", initCond.Reason)
+			}
+			if initCond.Status != metav1.ConditionFalse {
+				t.Errorf("expected status False, got %s", initCond.Status)
+			}
+		})
 	}
 }
 
@@ -2354,17 +2735,11 @@ func TestPodControl_CreatePod_WithCAInjection(t *testing.T) {
 			pod, err := control.CreatePod(context.TODO(), CreatePodArgs{Box: sandbox, NewStatus: status})
 
 			if tt.expectError != "" {
-				if err == nil {
-					t.Fatalf("expected error containing %q, got nil", tt.expectError)
-				}
-				if !contains(err.Error(), tt.expectError) {
-					t.Fatalf("expected error containing %q, got %q", tt.expectError, err.Error())
-				}
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
 				return
 			}
-			if err != nil {
-				t.Fatalf("CreatePod() unexpected error: %v", err)
-			}
+			require.NoError(t, err)
 
 			foundCAVolume := false
 			for _, v := range pod.Spec.Volumes {
@@ -2592,6 +2967,54 @@ func Test_isContainersConsistent(t *testing.T) {
 			},
 			expected: false,
 		},
+		{
+			name: "short name in spec vs normalized name in status - should match",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					InitContainers: []corev1.Container{
+						{Name: "runtime", Image: "agent-runtime:latest"},
+					},
+				},
+				Status: corev1.PodStatus{
+					InitContainerStatuses: []corev1.ContainerStatus{
+						{Name: "runtime", Image: "docker.io/library/agent-runtime:latest"},
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "implicit latest tag in spec vs explicit in status - should match",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					InitContainers: []corev1.Container{
+						{Name: "runtime", Image: "agent-runtime"},
+					},
+				},
+				Status: corev1.PodStatus{
+					InitContainerStatuses: []corev1.ContainerStatus{
+						{Name: "runtime", Image: "docker.io/library/agent-runtime:latest"},
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "fully qualified registry image - different tags still mismatch",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					InitContainers: []corev1.Container{
+						{Name: "runtime", Image: "registry.example.com/org/runtime:v1"},
+					},
+				},
+				Status: corev1.PodStatus{
+					InitContainerStatuses: []corev1.ContainerStatus{
+						{Name: "runtime", Image: "registry.example.com/org/runtime:v2"},
+					},
+				},
+			},
+			expected: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -2618,7 +3041,7 @@ func TestCommonControl_EnsureSandboxResumed_InitContainerInconsistent(t *testing
 		expectInitCon bool // expect RuntimeInitialized condition to be set
 	}{
 		{
-			name: "init container image mismatch - should wait and not initialize",
+			name: "init container image mismatch - should wait and not transition",
 			pod: &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-sandbox",
@@ -2642,11 +3065,11 @@ func TestCommonControl_EnsureSandboxResumed_InitContainerInconsistent(t *testing
 					},
 				},
 			},
-			expectPhase:   agentsv1alpha1.SandboxRunning,
+			expectPhase:   agentsv1alpha1.SandboxResuming,
 			expectInitCon: false,
 		},
 		{
-			name: "init container status missing - should wait and not initialize",
+			name: "init container status missing - should wait and not transition",
 			pod: &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-sandbox",
@@ -2668,7 +3091,7 @@ func TestCommonControl_EnsureSandboxResumed_InitContainerInconsistent(t *testing
 					InitContainerStatuses: []corev1.ContainerStatus{},
 				},
 			},
-			expectPhase:   agentsv1alpha1.SandboxRunning,
+			expectPhase:   agentsv1alpha1.SandboxResuming,
 			expectInitCon: false,
 		},
 		{
@@ -2740,6 +3163,13 @@ func TestCommonControl_EnsureSandboxResumed_InitContainerInconsistent(t *testing
 				t.Errorf("expected phase %s, got %s", tt.expectPhase, newStatus.Phase)
 			}
 
+			// When containers are inconsistent, no side effects should occur
+			if tt.expectPhase == agentsv1alpha1.SandboxResuming {
+				assert.Empty(t, newStatus.NodeName, "NodeName should not be set when containers are inconsistent")
+				assert.Empty(t, newStatus.SandboxIp, "SandboxIp should not be set when containers are inconsistent")
+				assert.Equal(t, agentsv1alpha1.PodInfo{}, newStatus.PodInfo, "PodInfo should not be set when containers are inconsistent")
+			}
+
 			initCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.RuntimeInitialized))
 			if tt.expectInitCon {
 				if initCond == nil {
@@ -2756,10 +3186,12 @@ func TestCommonControl_EnsureSandboxResumed_InitContainerInconsistent(t *testing
 
 // mockSandboxInitializer is a test double for SandboxInitializer.
 type mockSandboxInitializer struct {
-	err error
+	err    error
+	called int
 }
 
 func (m *mockSandboxInitializer) Initialize(_ context.Context, _ *agentsv1alpha1.Sandbox, _ *agentsv1alpha1.SandboxStatus) error {
+	m.called++
 	return m.err
 }
 
@@ -2850,16 +3282,10 @@ func TestCommonControl_performRecreateUpgrade_InitializerPath(t *testing.T) {
 			})
 
 			if tt.expectError == "" {
-				if err != nil {
-					t.Fatalf("unexpected error: %v", err)
-				}
+				require.NoError(t, err)
 			} else {
-				if err == nil {
-					t.Fatalf("expected error containing %q, got nil", tt.expectError)
-				}
-				if !contains(err.Error(), tt.expectError) {
-					t.Fatalf("expected error containing %q, got %q", tt.expectError, err.Error())
-				}
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
 			}
 
 			if done != tt.expectDone {
@@ -2869,16 +3295,3 @@ func TestCommonControl_performRecreateUpgrade_InitializerPath(t *testing.T) {
 	}
 }
 
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(substr) == 0 ||
-		(len(s) > 0 && len(substr) > 0 && stringContains(s, substr)))
-}
-
-func stringContains(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
-}

@@ -398,7 +398,7 @@ func TestClassifySandbox(t *testing.T) {
 		expected sandboxUpdateState
 	}{
 		{
-			name: "no ops label, template differs -> candidate",
+			name: "no ops label, template differs, Running -> candidate",
 			sandbox: &agentsv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{}},
 				Spec: agentsv1alpha1.SandboxSpec{
@@ -410,6 +410,7 @@ func TestClassifySandbox(t *testing.T) {
 						},
 					},
 				},
+				Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxRunning},
 			},
 			expected: sandboxCandidate,
 		},
@@ -465,7 +466,7 @@ func TestClassifySandbox(t *testing.T) {
 			expected: sandboxCandidate,
 		},
 		{
-			name: "different ops label, template differs -> candidate",
+			name: "different ops label, template differs, Running -> candidate",
 			sandbox: &agentsv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
 					agentsv1alpha1.LabelSandboxUpdateOps: "other-ops",
@@ -479,8 +480,60 @@ func TestClassifySandbox(t *testing.T) {
 						},
 					},
 				},
+				Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxRunning},
 			},
 			expected: sandboxCandidate,
+		},
+		{
+			name: "no ops label, template differs, Paused -> noNeedUpdate",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{}},
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "main", Image: "busybox:1.0"}},
+							},
+						},
+					},
+				},
+				Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxPaused},
+			},
+			expected: sandboxNoNeedUpdate,
+		},
+		{
+			name: "no ops label, template differs, Resuming -> noNeedUpdate",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{}},
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "main", Image: "busybox:1.0"}},
+							},
+						},
+					},
+				},
+				Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxResuming},
+			},
+			expected: sandboxNoNeedUpdate,
+		},
+		{
+			name: "no ops label, template differs, Pending -> noNeedUpdate",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{}},
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "main", Image: "busybox:1.0"}},
+							},
+						},
+					},
+				},
+				Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxPending},
+			},
+			expected: sandboxNoNeedUpdate,
 		},
 		{
 			name: "ops label + generation mismatch -> updating",
@@ -772,6 +825,7 @@ func TestClassifySandbox_OtherOpsLabel(t *testing.T) {
 				},
 			},
 		},
+		Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxRunning},
 	}
 	tests := []struct {
 		name           string

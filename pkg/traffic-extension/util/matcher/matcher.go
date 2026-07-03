@@ -66,7 +66,7 @@ func parsePort(s string) int32 {
 	if err != nil || v <= 0 || v > 65535 {
 		return 0
 	}
-	return int32(v)
+	return int32(v) // #nosec G109 -- range checked above
 }
 
 // splitPathAndQuery separates the "/path" and "query=string" halves of a

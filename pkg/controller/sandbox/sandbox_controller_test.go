@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -42,6 +43,7 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/controller/sandbox/core"
+	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
@@ -356,7 +358,7 @@ func TestSandboxReconciler_Reconcile(t *testing.T) {
 			wantErr:       false,
 		},
 		{
-			name: "sandbox resuming - should set to resuming",
+			name: "sandbox resuming - pod running transitions to running",
 			sandbox: &agentsv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "resuming-sandbox",
@@ -398,7 +400,7 @@ func TestSandboxReconciler_Reconcile(t *testing.T) {
 					Phase: corev1.PodRunning,
 				},
 			},
-			expectedPhase: agentsv1alpha1.SandboxResuming,
+			expectedPhase: agentsv1alpha1.SandboxRunning,
 			wantErr:       false,
 		},
 		{
@@ -2030,14 +2032,230 @@ func TestCalculateStatus(t *testing.T) {
 			expectedMessage:   "Pod status phase is Succeeded",
 			expectedShouldReq: true,
 		},
+		{
+			name: "running phase with reuse annotations should transition to reusing",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+				},
+				Status: corev1.PodStatus{Phase: corev1.PodRunning},
+			},
+			box: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-sandbox",
+					Namespace:  "default",
+					Generation: 1,
+					Annotations: map[string]string{
+						agentsv1alpha1.AnnotationReuse:        "true",
+						agentsv1alpha1.AnnotationReuseEnabled: "true",
+					},
+				},
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "test", Image: "nginx"}},
+							},
+						},
+					},
+				},
+			},
+			initStatus: &agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxRunning,
+			},
+			expectedPhase:     agentsv1alpha1.SandboxReusing,
+			expectedShouldReq: false,
+		},
+		{
+			name: "running phase with only reuse annotation (no reuse-enabled) should not transition",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+				},
+				Status: corev1.PodStatus{Phase: corev1.PodRunning},
+			},
+			box: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-sandbox",
+					Namespace:  "default",
+					Generation: 1,
+					Annotations: map[string]string{
+						agentsv1alpha1.AnnotationReuse: "true",
+					},
+				},
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "test", Image: "nginx"}},
+							},
+						},
+					},
+				},
+			},
+			initStatus: &agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxRunning,
+			},
+			expectedPhase:     agentsv1alpha1.SandboxRunning,
+			expectedShouldReq: false,
+		},
+		{
+			name: "running phase with reuse annotations and VolumeClaimTemplates should reject and stay running",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+				},
+				Status: corev1.PodStatus{Phase: corev1.PodRunning},
+			},
+			box: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-sandbox",
+					Namespace:  "default",
+					Generation: 1,
+					Annotations: map[string]string{
+						agentsv1alpha1.AnnotationReuse:        "true",
+						agentsv1alpha1.AnnotationReuseEnabled: "true",
+					},
+				},
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "test", Image: "nginx"}},
+							},
+						},
+						VolumeClaimTemplates: []corev1.PersistentVolumeClaim{
+							{ObjectMeta: metav1.ObjectMeta{Name: "data"}},
+						},
+					},
+				},
+			},
+			initStatus: &agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxRunning,
+			},
+			expectedPhase:     agentsv1alpha1.SandboxRunning,
+			expectedShouldReq: false,
+			checkConditions: func(t *testing.T, status *agentsv1alpha1.SandboxStatus) {
+				cond := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionReusing))
+				require.NotNil(t, cond, "Reusing condition should be set")
+				assert.Equal(t, metav1.ConditionFalse, cond.Status)
+				assert.Equal(t, agentsv1alpha1.SandboxReusingReasonRejected, cond.Reason)
+				assert.Contains(t, cond.Message, "persistent volume claims")
+			},
+		},
+		{
+			name: "running phase with reuse annotations and PVC in pod template volumes should reject and stay running",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+				},
+				Status: corev1.PodStatus{Phase: corev1.PodRunning},
+			},
+			box: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-sandbox",
+					Namespace:  "default",
+					Generation: 1,
+					Annotations: map[string]string{
+						agentsv1alpha1.AnnotationReuse:        "true",
+						agentsv1alpha1.AnnotationReuseEnabled: "true",
+					},
+				},
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "test", Image: "nginx"}},
+								Volumes: []corev1.Volume{
+									{
+										Name: "data",
+										VolumeSource: corev1.VolumeSource{
+											PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+												ClaimName: "my-pvc",
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			initStatus: &agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxRunning,
+			},
+			expectedPhase:     agentsv1alpha1.SandboxRunning,
+			expectedShouldReq: false,
+			checkConditions: func(t *testing.T, status *agentsv1alpha1.SandboxStatus) {
+				cond := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionReusing))
+				require.NotNil(t, cond, "Reusing condition should be set")
+				assert.Equal(t, metav1.ConditionFalse, cond.Status)
+				assert.Equal(t, agentsv1alpha1.SandboxReusingReasonRejected, cond.Reason)
+			},
+		},
+		{
+			name: "paused phase with reuse annotations should reject and stay paused",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+				},
+				Status: corev1.PodStatus{Phase: corev1.PodRunning},
+			},
+			box: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-sandbox",
+					Namespace:  "default",
+					Generation: 1,
+					Annotations: map[string]string{
+						agentsv1alpha1.AnnotationReuse:        "true",
+						agentsv1alpha1.AnnotationReuseEnabled: "true",
+					},
+				},
+				Spec: agentsv1alpha1.SandboxSpec{
+					Paused: true,
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "test", Image: "nginx"}},
+							},
+						},
+					},
+				},
+			},
+			initStatus: &agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxPaused,
+				Conditions: []metav1.Condition{
+					{
+						Type:   string(agentsv1alpha1.SandboxConditionPaused),
+						Status: metav1.ConditionTrue,
+					},
+				},
+			},
+			expectedPhase:     agentsv1alpha1.SandboxPaused,
+			expectedShouldReq: false,
+			checkConditions: func(t *testing.T, status *agentsv1alpha1.SandboxStatus) {
+				cond := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionReusing))
+				require.NotNil(t, cond, "Reusing condition should be set")
+				assert.Equal(t, metav1.ConditionFalse, cond.Status)
+				assert.Equal(t, agentsv1alpha1.SandboxReusingReasonRejected, cond.Reason)
+				assert.Contains(t, cond.Message, "Paused state")
+			},
+		},
 	}
 
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)
 	_ = agentsv1alpha1.AddToScheme(scheme)
+	fakeRecorder := record.NewFakeRecorder(100)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	reconciler := &SandboxReconciler{
 		checkpointControl: core.NewCheckpointControl(fakeClient, record.NewFakeRecorder(10)),
+		recorder:          fakeRecorder,
 	}
 
 	for _, tt := range tests {
@@ -2869,7 +3087,7 @@ func TestReconcile_SandboxNotFoundCleanup(t *testing.T) {
 		}),
 		checkpointControl: core.NewCheckpointControl(fakeClient, fakeRecorder),
 		rateLimiter:       rl,
-		metricsCleanup: &fakeEnqueuer{},
+		metricsCleanup:    &fakeEnqueuer{},
 	}
 
 	// Set up expectations for a sandbox that will not be found
@@ -3958,6 +4176,193 @@ func TestUpdateSandboxStatus_Upgrading_RevisionUnchanged_NoReset(t *testing.T) {
 	}
 }
 
+func TestUpdateSandboxStatus_Upgrading_RevisionChanged_ResumeFromFailedStep(t *testing.T) {
+	_ = utilfeature.DefaultMutableFeatureGate.Set(string(features.SandboxUpgradeResumeFromFailedStepGate) + "=true")
+	defer func() {
+		_ = utilfeature.DefaultMutableFeatureGate.Set(string(features.SandboxUpgradeResumeFromFailedStepGate) + "=true")
+	}()
+
+	tests := []struct {
+		name           string
+		pod            *corev1.Pod
+		reason         string
+		expectReason   string
+		updateRevision string
+	}{
+		{
+			name:           "pre upgrade failed resumes from preUpgrade",
+			reason:         agentsv1alpha1.SandboxUpgradingReasonPreUpgradeFailed,
+			expectReason:   agentsv1alpha1.SandboxUpgradingReasonPreUpgrade,
+			updateRevision: "old-revision",
+		},
+		{
+			name:           "upgrade pod failed resumes from upgradePod",
+			reason:         agentsv1alpha1.SandboxUpgradingReasonUpgradePodFailed,
+			expectReason:   agentsv1alpha1.SandboxUpgradingReasonUpgradePod,
+			updateRevision: "old-revision",
+		},
+		{
+			name: "post upgrade failed with matching pod revision resumes from postUpgrade",
+			pod: func() *corev1.Pod {
+				p := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{}}}
+				return p
+			}(),
+			reason:         agentsv1alpha1.SandboxUpgradingReasonPostUpgradeFailed,
+			expectReason:   agentsv1alpha1.SandboxUpgradingReasonPostUpgrade,
+			updateRevision: "old-revision",
+		},
+		{
+			name:           "post upgrade failed with mismatched pod revision resumes from upgradePod",
+			reason:         agentsv1alpha1.SandboxUpgradingReasonPostUpgradeFailed,
+			expectReason:   agentsv1alpha1.SandboxUpgradingReasonUpgradePod,
+			updateRevision: "old-revision",
+		},
+		{
+			name:           "non failed reason still resets to preUpgrade",
+			reason:         agentsv1alpha1.SandboxUpgradingReasonUpgradePod,
+			expectReason:   agentsv1alpha1.SandboxUpgradingReasonPreUpgrade,
+			updateRevision: "old-revision",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			box := &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-sandbox",
+					Namespace:  "default",
+					Generation: 1,
+				},
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "test", Image: "nginx"}},
+							},
+						},
+					},
+				},
+				Status: agentsv1alpha1.SandboxStatus{
+					UpdateRevision: tt.updateRevision,
+				},
+			}
+
+			hash, _ := core.HashSandbox(box)
+			if tt.pod != nil {
+				tt.pod = tt.pod.DeepCopy()
+				tt.pod.Labels[agentsv1alpha1.PodLabelTemplateHash] = hash
+			}
+
+			initStatus := &agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxUpgrading,
+				Conditions: []metav1.Condition{
+					{
+						Type:               string(agentsv1alpha1.SandboxConditionUpgrading),
+						Status:             metav1.ConditionFalse,
+						Reason:             tt.reason,
+						Message:            "needs reset",
+						LastTransitionTime: metav1.Now(),
+					},
+				},
+			}
+
+			args := core.EnsureFuncArgs{
+				Pod:       tt.pod,
+				Box:       box,
+				NewStatus: initStatus,
+			}
+
+			scheme := runtime.NewScheme()
+			_ = clientgoscheme.AddToScheme(scheme)
+			_ = agentsv1alpha1.AddToScheme(scheme)
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+			reconciler := &SandboxReconciler{
+				checkpointControl: core.NewCheckpointControl(fakeClient, record.NewFakeRecorder(10)),
+			}
+			newStatus, _ := reconciler.calculateStatus(context.Background(), args)
+			upgradeCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
+			if upgradeCond == nil {
+				t.Fatal("Expected Upgrading condition to exist")
+			}
+			if upgradeCond.Reason != tt.expectReason {
+				t.Errorf("Expected Reason %s, got %s", tt.expectReason, upgradeCond.Reason)
+			}
+			if upgradeCond.Message != "" {
+				t.Errorf("Expected Message to be empty, got %q", upgradeCond.Message)
+			}
+		})
+	}
+}
+
+func TestUpdateSandboxStatus_Upgrading_RevisionChanged_FeatureGateDisabled_ResetsToPreUpgrade(t *testing.T) {
+	_ = utilfeature.DefaultMutableFeatureGate.Set(string(features.SandboxUpgradeResumeFromFailedStepGate) + "=false")
+	defer func() {
+		_ = utilfeature.DefaultMutableFeatureGate.Set(string(features.SandboxUpgradeResumeFromFailedStepGate) + "=true")
+	}()
+
+	box := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test-sandbox",
+			Namespace:  "default",
+			Generation: 1,
+		},
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test", Image: "nginx"}},
+					},
+				},
+			},
+		},
+		Status: agentsv1alpha1.SandboxStatus{
+			UpdateRevision: "old-revision",
+		},
+	}
+
+	initStatus := &agentsv1alpha1.SandboxStatus{
+		Phase: agentsv1alpha1.SandboxUpgrading,
+		Conditions: []metav1.Condition{
+			{
+				Type:               string(agentsv1alpha1.SandboxConditionUpgrading),
+				Status:             metav1.ConditionFalse,
+				Reason:             agentsv1alpha1.SandboxUpgradingReasonPostUpgradeFailed,
+				Message:            "post failed",
+				LastTransitionTime: metav1.Now(),
+			},
+		},
+	}
+
+	args := core.EnsureFuncArgs{
+		Pod: &corev1.Pod{
+			Status: corev1.PodStatus{
+				Phase: corev1.PodRunning,
+			},
+		},
+		Box:       box,
+		NewStatus: initStatus,
+	}
+
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	reconciler := &SandboxReconciler{
+		checkpointControl: core.NewCheckpointControl(fakeClient, record.NewFakeRecorder(10)),
+	}
+	newStatus, _ := reconciler.calculateStatus(context.Background(), args)
+	upgradeCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
+	if upgradeCond == nil {
+		t.Fatal("Expected Upgrading condition to exist")
+	}
+	if upgradeCond.Reason != agentsv1alpha1.SandboxUpgradingReasonPreUpgrade {
+		t.Errorf("Expected Reason %s, got %s", agentsv1alpha1.SandboxUpgradingReasonPreUpgrade, upgradeCond.Reason)
+	}
+	if upgradeCond.Message != "" {
+		t.Errorf("Expected Message to be empty, got %q", upgradeCond.Message)
+	}
+}
+
 // fakeEnqueuer captures Enqueue invocations for assertion.
 type fakeEnqueuer struct {
 	mu    sync.Mutex
@@ -4001,4 +4406,206 @@ func TestReconcile_NotFoundEnqueuesAsyncCleanup(t *testing.T) {
 	assert.Len(t, calls, 1)
 	assert.Equal(t, "ns", calls[0].Namespace)
 	assert.Equal(t, "missing", calls[0].Name)
+}
+
+func TestHasPVCVolumes(t *testing.T) {
+	tests := []struct {
+		name     string
+		box      *agentsv1alpha1.Sandbox
+		expected bool
+	}{
+		{
+			name:     "nil template",
+			box:      &agentsv1alpha1.Sandbox{},
+			expected: false,
+		},
+		{
+			name: "no volumes",
+			box: &agentsv1alpha1.Sandbox{
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "test", Image: "nginx"}},
+							},
+						},
+					},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "only emptyDir volumes",
+			box: &agentsv1alpha1.Sandbox{
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Volumes: []corev1.Volume{
+									{Name: "tmp", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+								},
+							},
+						},
+					},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "has VolumeClaimTemplates",
+			box: &agentsv1alpha1.Sandbox{
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						VolumeClaimTemplates: []corev1.PersistentVolumeClaim{
+							{ObjectMeta: metav1.ObjectMeta{Name: "data"}},
+						},
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "has PVC in pod template volumes",
+			box: &agentsv1alpha1.Sandbox{
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Volumes: []corev1.Volume{
+									{
+										Name: "data",
+										VolumeSource: corev1.VolumeSource{
+											PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "pvc1"},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "has both VolumeClaimTemplates and PVC volume",
+			box: &agentsv1alpha1.Sandbox{
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Volumes: []corev1.Volume{
+									{Name: "data", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "pvc1"}}},
+								},
+							},
+						},
+						VolumeClaimTemplates: []corev1.PersistentVolumeClaim{
+							{ObjectMeta: metav1.ObjectMeta{Name: "data"}},
+						},
+					},
+				},
+			},
+			expected: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, hasPVCVolumes(tt.box))
+		})
+	}
+}
+
+func TestRejectReuse(t *testing.T) {
+	box := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-sandbox",
+			Namespace: "default",
+		},
+	}
+
+	t.Run("sets condition and records event", func(t *testing.T) {
+		recorder := record.NewFakeRecorder(10)
+		r := &SandboxReconciler{recorder: recorder}
+		status := &agentsv1alpha1.SandboxStatus{}
+
+		r.rejectReuse(box, status, "test reason")
+
+		cond := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionReusing))
+		require.NotNil(t, cond)
+		assert.Equal(t, metav1.ConditionFalse, cond.Status)
+		assert.Equal(t, agentsv1alpha1.SandboxReusingReasonRejected, cond.Reason)
+		assert.Equal(t, "test reason", cond.Message)
+
+		// Verify event was recorded
+		select {
+		case event := <-recorder.Events:
+			assert.Contains(t, event, agentsv1alpha1.SandboxReusingReasonRejected)
+			assert.Contains(t, event, "test reason")
+		default:
+			t.Error("expected event to be recorded")
+		}
+	})
+
+	t.Run("nil recorder does not panic", func(t *testing.T) {
+		r := &SandboxReconciler{}
+		status := &agentsv1alpha1.SandboxStatus{}
+
+		assert.NotPanics(t, func() {
+			r.rejectReuse(box, status, "test reason")
+		})
+
+		cond := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionReusing))
+		require.NotNil(t, cond)
+		assert.Equal(t, agentsv1alpha1.SandboxReusingReasonRejected, cond.Reason)
+	})
+
+	t.Run("deduplication - same reason and message skips update", func(t *testing.T) {
+		recorder := record.NewFakeRecorder(10)
+		r := &SandboxReconciler{recorder: recorder}
+		status := &agentsv1alpha1.SandboxStatus{}
+
+		// First call sets the condition and records an event
+		r.rejectReuse(box, status, "test reason")
+
+		// Second call with same reason+message should be a no-op
+		r.rejectReuse(box, status, "test reason")
+
+		// Only one event should have been recorded
+		select {
+		case <-recorder.Events:
+			// First event consumed
+		default:
+			t.Error("expected first event to be recorded")
+		}
+		select {
+		case <-recorder.Events:
+			t.Error("second event should not have been recorded")
+		default:
+			// Expected - no second event
+		}
+	})
+
+	t.Run("different message triggers new update", func(t *testing.T) {
+		recorder := record.NewFakeRecorder(10)
+		r := &SandboxReconciler{recorder: recorder}
+		status := &agentsv1alpha1.SandboxStatus{}
+
+		r.rejectReuse(box, status, "reason A")
+		r.rejectReuse(box, status, "reason B")
+
+		cond := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionReusing))
+		require.NotNil(t, cond)
+		assert.Equal(t, "reason B", cond.Message)
+
+		// Both events should have been recorded
+		select {
+		case <-recorder.Events:
+		default:
+			t.Error("expected first event")
+		}
+		select {
+		case <-recorder.Events:
+		default:
+			t.Error("expected second event")
+		}
+	})
 }

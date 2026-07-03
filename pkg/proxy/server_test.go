@@ -71,10 +71,10 @@ func TestHandleRefresh_Success(t *testing.T) {
 	require.NoError(t, err)
 
 	req := httptest.NewRequest(http.MethodPost, RefreshAPI, bytes.NewReader(body))
-	resp, apiErr := s.handleRefresh(req)
+	rr := httptest.NewRecorder()
+	s.handleRefresh(rr, req)
 
-	assert.Nil(t, apiErr)
-	assert.Equal(t, http.StatusNoContent, resp.Code)
+	assert.Equal(t, http.StatusNoContent, rr.Code)
 
 	// Verify the route was actually stored
 	got, ok := s.LoadRoute("sb-refresh")
@@ -86,21 +86,20 @@ func TestHandleRefresh_InvalidBody(t *testing.T) {
 	s := newTestServer(nil)
 
 	req := httptest.NewRequest(http.MethodPost, RefreshAPI, bytes.NewBufferString("not-json"))
-	resp, apiErr := s.handleRefresh(req)
+	rr := httptest.NewRecorder()
+	s.handleRefresh(rr, req)
 
-	assert.NotNil(t, apiErr)
-	assert.Equal(t, http.StatusBadRequest, apiErr.Code)
-	assert.Empty(t, resp.Code)
+	assert.Equal(t, http.StatusBadRequest, rr.Code)
 }
 
 func TestHandleRefresh_EmptyBody(t *testing.T) {
 	s := newTestServer(nil)
 
 	req := httptest.NewRequest(http.MethodPost, RefreshAPI, bytes.NewBufferString("{}"))
-	resp, apiErr := s.handleRefresh(req)
+	rr := httptest.NewRecorder()
+	s.handleRefresh(rr, req)
 
-	assert.Nil(t, apiErr)
-	assert.Equal(t, http.StatusNoContent, resp.Code)
+	assert.Equal(t, http.StatusNoContent, rr.Code)
 }
 
 func TestHandleRefresh_ContextPropagated(t *testing.T) {
@@ -112,9 +111,10 @@ func TestHandleRefresh_ContextPropagated(t *testing.T) {
 
 	ctx := context.WithValue(context.Background(), "test-key", "test-value")
 	req := httptest.NewRequest(http.MethodPost, RefreshAPI, bytes.NewReader(body)).WithContext(ctx)
-	_, apiErr := s.handleRefresh(req)
+	rr := httptest.NewRecorder()
+	s.handleRefresh(rr, req)
 
-	assert.Nil(t, apiErr)
+	assert.Equal(t, http.StatusNoContent, rr.Code)
 	got, ok := s.LoadRoute("sb-ctx")
 	require.True(t, ok)
 	assert.Equal(t, "9.9.9.9", got.IP)
@@ -131,9 +131,10 @@ func TestHandleRefresh_OverwritesExistingRoute(t *testing.T) {
 	newer := Route{ID: "sb-over", IP: "2.2.2.2", ResourceVersion: "2"}
 	body, _ := json.Marshal(newer)
 	req := httptest.NewRequest(http.MethodPost, RefreshAPI, bytes.NewReader(body))
-	_, apiErr := s.handleRefresh(req)
+	rr := httptest.NewRecorder()
+	s.handleRefresh(rr, req)
 
-	assert.Nil(t, apiErr)
+	assert.Equal(t, http.StatusNoContent, rr.Code)
 	got, _ := s.LoadRoute("sb-over")
 	assert.Equal(t, "2.2.2.2", got.IP)
 }
@@ -143,15 +144,13 @@ func TestServer_handleRefresh(t *testing.T) {
 		name           string
 		body           string
 		expectedCode   int
-		expectedError  bool
 		expectDeleted  bool
 		expectRouteSet bool
 	}{
 		{
-			name:          "invalid json body",
-			body:          "invalid json",
-			expectedCode:  http.StatusBadRequest,
-			expectedError: true,
+			name:         "invalid json body",
+			body:         "invalid json",
+			expectedCode: http.StatusBadRequest,
 		},
 		{
 			name: "dead state should delete route",
@@ -162,7 +161,6 @@ func TestServer_handleRefresh(t *testing.T) {
 				ResourceVersion: "1",
 			}),
 			expectedCode:  http.StatusNoContent,
-			expectedError: false,
 			expectDeleted: true,
 		},
 		{
@@ -174,7 +172,6 @@ func TestServer_handleRefresh(t *testing.T) {
 				ResourceVersion: "1",
 			}),
 			expectedCode:   http.StatusNoContent,
-			expectedError:  false,
 			expectRouteSet: true,
 		},
 		{
@@ -186,7 +183,6 @@ func TestServer_handleRefresh(t *testing.T) {
 				ResourceVersion: "1",
 			}),
 			expectedCode:   http.StatusNoContent,
-			expectedError:  false,
 			expectRouteSet: true,
 		},
 	}
@@ -209,18 +205,13 @@ func TestServer_handleRefresh(t *testing.T) {
 
 			// Create request
 			req := httptest.NewRequest(http.MethodPost, RefreshAPI, strings.NewReader(tt.body))
+			rr := httptest.NewRecorder()
 
 			// Call handleRefresh
-			resp, apiErr := s.handleRefresh(req)
+			s.handleRefresh(rr, req)
 
 			// Verify response
-			if tt.expectedError {
-				assert.NotNil(t, apiErr)
-				assert.Equal(t, tt.expectedCode, apiErr.Code)
-			} else {
-				assert.Nil(t, apiErr)
-				assert.Equal(t, tt.expectedCode, resp.Code)
-			}
+			assert.Equal(t, tt.expectedCode, rr.Code)
 
 			// Verify route deletion
 			if tt.expectDeleted {
@@ -255,10 +246,9 @@ func TestServer_handleRefresh_EmptyBody(t *testing.T) {
 	s := NewServer(config.SandboxManagerOptions{})
 
 	req := httptest.NewRequest(http.MethodPost, RefreshAPI, bytes.NewReader([]byte{}))
-	resp, apiErr := s.handleRefresh(req)
+	rr := httptest.NewRecorder()
+	s.handleRefresh(rr, req)
 
-	assert.NotNil(t, apiErr)
-	assert.Equal(t, http.StatusBadRequest, apiErr.Code)
-	assert.Contains(t, apiErr.Message, "failed to unmarshal body")
-	assert.Equal(t, 0, resp.Code)
+	assert.Equal(t, http.StatusBadRequest, rr.Code)
+	assert.Contains(t, rr.Body.String(), "failed to unmarshal body")
 }

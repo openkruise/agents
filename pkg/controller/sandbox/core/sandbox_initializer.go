@@ -20,6 +20,9 @@ import (
 	"context"
 	"fmt"
 
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -36,10 +39,33 @@ type defaultSandboxInitializer struct {
 	client          client.Client
 	apiReader       client.Reader
 	storageRegistry storages.VolumeMountProviderRegistry
+	recorder        record.EventRecorder
 }
 
 func (d *defaultSandboxInitializer) Initialize(ctx context.Context, box *agentsv1alpha1.Sandbox, newStatus *agentsv1alpha1.SandboxStatus) error {
-	return Initialize(ctx, box, newStatus, d.client, d.apiReader, d.storageRegistry)
+	if err := Initialize(ctx, box, newStatus, d.client, d.apiReader, d.storageRegistry); err != nil {
+		klog.ErrorS(err, "post-resume/upgrade initialization failed", "sandbox", klog.KObj(box))
+		d.recorder.Event(box, corev1.EventTypeWarning, string(agentsv1alpha1.RuntimeInitialized),
+			fmt.Sprintf("Failed to perform initialization: %v", err))
+		utils.SetSandboxCondition(newStatus, metav1.Condition{
+			Type:               string(agentsv1alpha1.RuntimeInitialized),
+			Status:             metav1.ConditionFalse,
+			Reason:             agentsv1alpha1.SandboxConditionRuntimeInitReasonFailed,
+			Message:            utils.TruncateConditionMessage(fmt.Sprintf("Runtime initialization failed: %v", err)),
+			LastTransitionTime: metav1.Now(),
+		})
+		return err
+	}
+	d.recorder.Event(box, corev1.EventTypeNormal, string(agentsv1alpha1.RuntimeInitialized),
+		"Initialization completed successfully")
+	utils.SetSandboxCondition(newStatus, metav1.Condition{
+		Type:               string(agentsv1alpha1.RuntimeInitialized),
+		Status:             metav1.ConditionTrue,
+		Reason:             agentsv1alpha1.SandboxConditionRuntimeInitReasonSucceeded,
+		Message:            "Runtime initialization completed",
+		LastTransitionTime: metav1.Now(),
+	})
+	return nil
 }
 
 // Initialize performs post-recreation initialization for a sandbox.

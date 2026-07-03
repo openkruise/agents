@@ -32,10 +32,10 @@ def execute_shell_command(s: Sandbox, command: str, expect_stdout: list[str] = N
     return result
 
 
-def test_commands_run(sandbox_context):
+def test_commands_run(sandbox_context, config):
     """Test basic shell command execution"""
     sbx: Sandbox = sandbox_context.add(Sandbox.create(
-        template="code-interpreter",
+        template=config.templates.code_interpreter,
         timeout=30,
         metadata={"test_case": "test_commands_run"},
         headers={
@@ -63,10 +63,10 @@ def test_commands_run(sandbox_context):
     execute_shell_command(sbx, "ls -la | grep test_dir")  # Just check it doesn't error
 
 
-def test_commands_run_error_handling(sandbox_context):
+def test_commands_run_error_handling(sandbox_context, config):
     """Test error handling for invalid commands"""
     sbx: Sandbox = sandbox_context.add(Sandbox.create(
-        template="code-interpreter",
+        template=config.templates.code_interpreter,
         timeout=30,
         metadata={"test_case": "test_commands_run_error_handling"},
         headers={
@@ -76,7 +76,7 @@ def test_commands_run_error_handling(sandbox_context):
 
     # Test non-existent command - should catch CommandExitException
     try:
-        result = sbx.commands.run("nonexistentcommand12345")
+        sbx.commands.run("nonexistentcommand12345")
         assert False, "Should have raised CommandExitException"
     except CommandExitException as e:
         assert e.exit_code == 127
@@ -84,17 +84,17 @@ def test_commands_run_error_handling(sandbox_context):
 
     # Test command with stderr output
     try:
-        result = sbx.commands.run("ls /nonexistent_directory")
+        sbx.commands.run("ls /nonexistent_directory")
         assert False, "Should have raised CommandExitException"
     except CommandExitException as e:
         assert e.exit_code != 0
         assert len(e.stderr) > 0
 
 
-def test_commands_background_execution(sandbox_context):
+def test_commands_background_execution(sandbox_context, config):
     """Test background command execution and killing"""
     sbx: Sandbox = sandbox_context.add(Sandbox.create(
-        template="code-interpreter",
+        template=config.templates.code_interpreter,
         timeout=30,
         metadata={"test_case": "test_commands_background_execution"},
         headers={
@@ -122,10 +122,10 @@ def test_commands_background_execution(sandbox_context):
     command.kill()
 
 
-def test_commands_realtime_callbacks(sandbox_context):
+def test_commands_realtime_callbacks(sandbox_context, config):
     """Test real-time output callbacks"""
     sbx: Sandbox = sandbox_context.add(Sandbox.create(
-        template="code-interpreter",
+        template=config.templates.code_interpreter,
         timeout=30,
         metadata={"test_case": "test_commands_realtime_callbacks"},
         headers={
@@ -137,7 +137,7 @@ def test_commands_realtime_callbacks(sandbox_context):
     stderr_lines = []
 
     # Execute command with real-time callbacks
-    result = sbx.commands.run(
+    sbx.commands.run(
         'echo hello; echo error >&2',
         on_stdout=lambda data: stdout_lines.append(data),
         on_stderr=lambda data: stderr_lines.append(data)

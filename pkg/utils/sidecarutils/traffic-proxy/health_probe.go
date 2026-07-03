@@ -66,7 +66,7 @@ func convertAppProber(probe *corev1.Probe, newURL string, statusPort int) *corev
 // Also rewrites the scheme to HTTP if the scheme is HTTPS
 // as pilot agent uses https to request application endpoint.
 func rewriteHTTPGetAction(action *corev1.HTTPGetAction, url string, port int) {
-	action.Port = intstr.FromInt32(int32(port))
+	action.Port = intstr.FromInt32(int32(port)) // #nosec G115 -- port range
 	action.Path = url
 	// Kubelet -> HTTP -> Pilot Agent -> HTTPS -> Application
 	if action.Scheme == corev1.URISchemeHTTPS {

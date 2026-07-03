@@ -1,22 +1,16 @@
-import os
-import requests
+import time
 import uuid
-import pytest
 
-def get_api_url():
-    # Priority 1: E2B_API_URL (provided by CI/scripts)
-    # Priority 2: Kruise-Agents specific URL based on E2B_DOMAIN
-    url = os.environ.get("E2B_API_URL")
-    if not url:
-        domain = os.environ.get("E2B_DOMAIN", "localhost")
-        url = f"http://{domain}/kruise/api"
-    return url
+import requests
 
-def get_headers():
-    # E2B_API_KEY is used for authentication
-    api_key = os.environ.get("E2B_API_KEY", "e2b_00000000")
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+def get_headers(config):
     return {
-        "X-API-KEY": api_key,
+        "X-API-KEY": config.api_key,
         "Content-Type": "application/json"
     }
 
@@ -28,22 +22,25 @@ def cleanup_api_key(api_url, headers, key_id):
     try:
         cleanup_resp = requests.delete(f"{api_url}/api-keys/{key_id}", headers=headers)
         if cleanup_resp.status_code not in (204, 404):
-            print(f"Cleanup failed for key {key_id}: status={cleanup_resp.status_code}, body={cleanup_resp.text}")
+            logger.warning(
+                "Cleanup failed for key %s: status=%s, body=%s",
+                key_id, cleanup_resp.status_code, cleanup_resp.text,
+            )
     except Exception as e:
-        print(f"Cleanup exception for key {key_id}: {e}")
+        logger.warning("Cleanup exception for key %s: %s", key_id, e)
 
 
-def test_api_keys_lifecycle(sandbox_context):
+def test_api_keys_lifecycle(config):
     """
     Test the full lifecycle of an API key: Create, List, Delete, and List teams.
     """
-    api_url = get_api_url()
-    headers = get_headers()
-    
+    api_url = config.api_url
+    headers = get_headers(config)
+
     unique_suffix = str(uuid.uuid4())[:8]
     test_key_name = f"e2e-test-key-{unique_suffix}"
     created_key_id = None
-    
+
     try:
         # 1. Create API key
         payload = {
@@ -51,7 +48,7 @@ def test_api_keys_lifecycle(sandbox_context):
         }
         create_resp = requests.post(f"{api_url}/api-keys", json=payload, headers=headers)
         assert create_resp.status_code == 201, f"Failed to create key: {create_resp.text}"
-        
+
         try:
             created_key_data = create_resp.json()
         except ValueError:
@@ -63,14 +60,36 @@ def test_api_keys_lifecycle(sandbox_context):
         )
         created_key_id = created_key_data["id"]
         assert created_key_data["name"] == test_key_name
-        
-        # 2. List API keys and verify existence
-        list_resp = requests.get(f"{api_url}/api-keys", headers=headers)
-        assert list_resp.status_code == 200
-        try:
-            keys_list = list_resp.json()
-        except ValueError:
-            assert False, f"List API keys response is not valid JSON: {list_resp.text}"
+
+        # 2. Poll until the new key appears in list (cache sync across replicas).
+        # The Secret-backed key store uses a 10-minute in-memory cache refresh
+        # cycle, so create and list may hit different replicas.
+        poll_interval = 30
+        poll_timeout = 600
+        elapsed = 0
+        found_in_list = False
+        while elapsed < poll_timeout:
+            list_resp = requests.get(f"{api_url}/api-keys", headers=headers)
+            if list_resp.status_code == 200:
+                try:
+                    keys_list = list_resp.json()
+                except ValueError:
+                    keys_list = []
+                if isinstance(keys_list, list) and any(
+                    isinstance(k, dict) and k.get("id") == created_key_id for k in keys_list
+                ):
+                    found_in_list = True
+                    break
+                logger.debug(
+                    "Key not yet visible in list, retrying in %ds... (%d/%ds)",
+                    poll_interval, elapsed, poll_timeout,
+                )
+            time.sleep(poll_interval)
+            elapsed += poll_interval
+
+        assert found_in_list, f"Created key {created_key_id} not found in list after {poll_timeout}s"
+
+        # Validate the list response structure
         assert isinstance(keys_list, list), f"List API keys response should be a list: {list_resp.text}"
         invalid_list_items = [
             {"index": idx, "missing_fields": [field for field in ("id", "name") if field not in key_item], "value": key_item}
@@ -82,7 +101,6 @@ def test_api_keys_lifecycle(sandbox_context):
             f"Invalid items: {invalid_list_items[:3]} (showing 3 of {len(invalid_list_items)} invalid entries). "
             f"Body: {list_resp.text}"
         )
-        assert any(k["id"] == created_key_id for k in keys_list), f"Created key {created_key_id} not found in list"
         
         # 3. List Teams
         teams_resp = requests.get(f"{api_url}/teams", headers=headers)
@@ -128,25 +146,45 @@ def test_api_keys_lifecycle(sandbox_context):
         delete_resp = requests.delete(f"{api_url}/api-keys/{created_key_id}", headers=headers)
         assert delete_resp.status_code == 204
         
-        # 5. Verify deletion in list
-        list_resp_2 = requests.get(f"{api_url}/api-keys", headers=headers)
-        assert list_resp_2.status_code == 200
-        try:
-            keys_list_2 = list_resp_2.json()
-        except ValueError:
-            assert False, f"Second list API keys response is not valid JSON: {list_resp_2.text}"
-        assert isinstance(keys_list_2, list), f"Second list API keys response should be a list: {list_resp_2.text}"
-        assert not any(isinstance(k, dict) and k.get("id") == created_key_id for k in keys_list_2), f"Deleted key {created_key_id} still found in list"
+        # 5. Poll until the deleted key disappears from list (cache sync).
+        poll_interval = 30
+        poll_timeout = 600
+        elapsed = 0
+        while elapsed < poll_timeout:
+            list_resp_2 = requests.get(f"{api_url}/api-keys", headers=headers)
+            assert list_resp_2.status_code == 200
+            try:
+                keys_list_2 = list_resp_2.json()
+            except ValueError:
+                assert False, f"Second list API keys response is not valid JSON: {list_resp_2.text}"
+            assert isinstance(keys_list_2, list), f"Second list API keys response should be a list: {list_resp_2.text}"
+
+            if not any(isinstance(k, dict) and k.get("id") == created_key_id for k in keys_list_2):
+                logger.info(
+                    "Deleted key %s no longer in list after %ds",
+                    created_key_id, elapsed,
+                )
+                break
+
+            logger.debug(
+                "Deleted key %s still in list, waiting %ds... (%d/%ds)",
+                created_key_id, poll_interval, elapsed, poll_timeout,
+            )
+            time.sleep(poll_interval)
+            elapsed += poll_interval
+        else:
+            assert False, f"Deleted key {created_key_id} still found in list after {poll_timeout}s"
     finally:
         cleanup_api_key(api_url, headers, created_key_id)
 
-def test_create_api_key_invalid_namespace(sandbox_context):
+
+def test_create_api_key_invalid_namespace(config):
     """
     Test creating an API key with an invalid namespace (non-DNS-1123).
     Verifies the fix for returning 400 instead of 500.
     """
-    api_url = get_api_url()
-    headers = get_headers()
+    api_url = config.api_url
+    headers = get_headers(config)
     
     unique_suffix = str(uuid.uuid4())[:8]
     test_key_name = f"e2e-test-invalid-{unique_suffix}"

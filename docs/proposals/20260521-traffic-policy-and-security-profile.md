@@ -597,6 +597,37 @@ PreserveHost bool   `json:"preserveHost,omitempty"`
 // Mirroring. Then at most one terminal action fires and ends the rule
 // chain; when multiple terminals are populated on the same rule,
 // precedence is Bypass > Block > Forwarding.
+// AuditWebhook describes an HTTP(S) webhook target for an audit action.
+type AuditWebhook struct {
+// URL is the absolute HTTP(S) URL. Supports Go text/template expressions
+// over AuditContext (see "Template Rendering" section below).
+// +kubebuilder:validation:MinLength=1
+// +kubebuilder:validation:MaxLength=2048
+URL string `json:"url"`
+// Request describes the HTTP request shape (method, headers, body).
+// +optional
+Request *AuditRequest `json:"request,omitempty"`
+// Timeout caps each HTTP attempt. Defaults to 2s, max 30s.
+// +optional
+// +kubebuilder:default:="2s"
+Timeout *metav1.Duration `json:"timeout,omitempty"`
+}
+
+// AuditAction is a named, conditional audit fan-out entry. Audit is
+// non-terminal: dispatched asynchronously after the request resolves.
+type AuditAction struct {
+// Name uniquely identifies this audit entry.
+// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+Name string `json:"name"`
+// When is a CEL expression evaluated against AuditContext at resolution
+// time. Empty means "always fire". See "CEL Expression Evaluation" below.
+// +optional
+// +kubebuilder:validation:MaxLength=1024
+When string `json:"when,omitempty"`
+// Webhook is the HTTP webhook target.
+Webhook *AuditWebhook `json:"webhook"`
+}
+
 type SecurityRuleActions struct {
 // +optional
 Block *BlockAction `json:"block,omitempty"`
@@ -614,6 +645,12 @@ Mirroring *MirroringAction `json:"mirroring,omitempty"`
 RateLimit *RateLimitAction `json:"rateLimit,omitempty"`
 // +optional
 Forwarding *ForwardingAction `json:"forwarding,omitempty"`
+// Audit lists per-rule audit entries. When non-empty, replaces the
+// profile-level Audit list for this rule's matches (override semantics).
+// +optional
+// +listType=map
+// +listMapKey=name
+Audit []AuditAction `json:"audit,omitempty"`
 }
 
 type SecurityRule struct {
@@ -629,6 +666,13 @@ Selector metav1.LabelSelector `json:"selector"`
 // +listType=map
 // +listMapKey=name
 Rules []SecurityRule `json:"rules,omitempty"`
+// Audit declares profile-wide audit entries. They fire for every matched
+// rule (subject to each entry's When CEL expression). A SecurityRule may
+// override this list via SecurityRuleActions.Audit.
+// +optional
+// +listType=map
+// +listMapKey=name
+Audit []AuditAction `json:"audit,omitempty"`
 }
 
 const (
@@ -749,6 +793,80 @@ configuration covering:
 - Token lookup wiring to the `SecurityIdentityProvider` framework for actions
   that need issued identity tokens.
 
+#### Audit Webhook, Template Rendering, and CEL
+
+**Audit Action** is a non-terminal action that asynchronously dispatches HTTP
+webhooks after a request resolves. It does NOT influence the request response.
+Two new mechanisms are introduced:
+
+**Template Rendering (Go `text/template`)**
+
+Several `AuditWebhook` fields (`URL`, header values, body text) are rendered
+through Go `text/template` against an `AuditContext` struct at dispatch time.
+The context exposes four variables:
+
+| Variable          | Type / Access                      | Description                                       |
+|-------------------|------------------------------------|---------------------------------------------------|
+| `.Pod.Name`       | `string`                           | Sandbox pod name                                  |
+| `.Pod.Namespace`  | `string`                           | Sandbox pod namespace                             |
+| `.Pod.IP`         | `string`                           | Sandbox pod IP                                    |
+| `.Pod.Labels`     | `map[string]string`                | Pod labels; also `.Pod.Label(key)` helper         |
+| `.Request.Host`   | `string`                           | Request authority host                            |
+| `.Request.Port`   | `int32`                            | Request authority port                            |
+| `.Request.Path`   | `string`                           | URL path                                          |
+| `.Request.Method` | `string`                           | HTTP method                                       |
+| `.Request.Scheme` | `string`                           | `:scheme` pseudo-header                           |
+| `.Request.Header(name)` | method → `string`           | Case-insensitive header lookup (headers are unexported) |
+| `.Request.Query`  | `map[string][]string`              | Multi-valued query params; `.Request.QueryParam(name)` returns first value |
+| `.Profile`        | `{Name, Namespace}`                | The SecurityProfile that matched                  |
+| `.Rule`           | `{Name}`                           | The rule that fired                               |
+| `.Result`         | `string`                           | One of `passthrough`, `mutated`, `blocked`, `bypassed`, `error` |
+| `.MatchedCriteria`| `{Host, Method, Path, Port, Headers, QueryParams}` | Only populated for dimensions the rule constrained |
+
+Rendering constraints:
+
+- No `sprig` functions are registered. Two minimal helpers are provided:
+  `default(fallback, v)` (returns fallback if v is empty) and `json(v)`
+  (marshals to JSON string). This eliminates `env`, `expandenv`, file I/O,
+  and shell execution vectors.
+- Rendered body output is capped at 64 KB (`MaxRenderedBodyBytes`). Exceeding
+  the cap triggers truncation and increments `WebhookBodyTruncatedTotal`.
+- Template parse errors are detected at SecurityProfile load time; the
+  profile is excluded from the in-memory store with an error log. Runtime
+  rendering errors are counted under
+  `traffix_extension_audit_webhook_dropped_total{reason="render_*"}`.
+- `AuditBody.JSON` renders only string-typed leaf values; non-string scalars,
+  nested objects, and arrays pass through verbatim. This prevents template
+  expansion from altering the JSON structure.
+
+**CEL Expression Evaluation (`When` field)**
+
+The `AuditAction.When` field is a CEL (Common Expression Language) expression
+that gates whether an audit entry fires. It is compiled once at profile load
+time and evaluated per matched request:
+
+- **Compilation**: the expression is parsed, type-checked against five
+  declared variables (`result`, `request`, `pod`, `profile`, `rule`), and
+  compiled to a `cel.Program` with `cel.OptOptimize`. Any parse or
+  type-check error, or a non-`bool` output type, causes the profile to be
+  excluded from the in-memory store at load time.
+- **Evaluation**: the expression must return `bool`. A runtime error
+  (e.g. absent map key indexing) drops the event and increments
+  `traffix_extension_audit_eval_dropped_total{reason="when_eval"}`. No
+  explicit CEL cost budget is configured; expressions are bounded
+  indirectly by the `MaxLength=1024` constraint on the `When` field.
+- **No side effects**: CEL is a pure expression language. It cannot modify
+  state, call external services, or allocate unbounded memory.
+
+**Security Considerations**
+
+| Threat                         | Mitigation                                                                                                                                               |
+|--------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **SSRF via template-rendered URL** | Rendered URL must parse as valid HTTP/HTTPS; non-HTTP schemes are rejected. Internal-network targets are the operator's responsibility to restrict via `NetworkPolicy` on the traffic-extension pod. URL `MaxLength=2048` bounds expansion. |
+| **CEL injection**              | CEL expressions are authored by cluster operators (RBAC-protected), not by sandboxed agents. The CEL compiler runs type-checking at load time; only the five declared variables are in scope. No custom functions or host access. |
+| **Template injection**         | Go `text/template` is not HTML-aware — no XSS vector. Only `default` and `json` helper functions are registered (no sprig, no OS-level functions). `MaxLength` constraints on template fields and 64 KB body cap bound output size. |
+| **Webhook amplification**      | Async dispatch uses a bounded channel (default 8192). Overflow drops events with `DroppedTotal{reason="buffer_full"}` metric, preventing OOM from a burst of matched requests. |
+
 #### Status Reporting
 
 Once controllers are implemented, both CRDs use standard `metav1.Condition`
@@ -769,6 +887,8 @@ arrays under `status.conditions`:
 | FQDN resolution drift (TTL races)                                   | Brief allow/deny errors | Cache with explicit TTL refresh; on stale FQDN, fail closed for `deny` rules and fail according to last-known-good for `allow` rules.                            |
 | L7 actions amplify per-request latency (especially `securityCheck`) | Throughput regression   | All external-call actions support `failStrategy` and `disabled` knobs; metrics expose per-action P99 latency.                                                    |
 | `GlobalTrafficPolicy` misuse by tenants                             | Privilege escalation    | RBAC: only platform admins can create/update `GlobalTrafficPolicy`; cluster-scoped resource simplifies this.                                                     |
+| Audit webhook SSRF via template-rendered URL                        | Internal-network access | Rendered URL must be HTTP/HTTPS; internal targets guarded by NetworkPolicy on traffic-extension pod; URL MaxLength=2048.                                         |
+| CEL / template injection in audit expressions                       | Code execution          | CEL is pure + type-checked at load time; `text/template` has no sprig/custom functions; all fields have MaxLength constraints.                                   |
 
 ## Alternatives
 

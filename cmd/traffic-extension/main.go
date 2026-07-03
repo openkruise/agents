@@ -20,8 +20,9 @@ import (
 	"flag"
 	"fmt"
 	"net/http"
-	_ "net/http/pprof"
+	_ "net/http/pprof" // #nosec -- intentional pprof endpoint for diagnostics
 	"os"
+	"time"
 
 	"github.com/go-logr/logr"
 	uberzap "go.uber.org/zap"
@@ -165,7 +166,8 @@ func run() error {
 	if *enablePprof {
 		go func() {
 			setupLog.Info("Starting pprof server", "addr", *pprofAddr)
-			if err := http.ListenAndServe(*pprofAddr, nil); err != nil {
+			pprofServer := &http.Server{Addr: *pprofAddr, ReadHeaderTimeout: 10 * time.Second}
+			if err := pprofServer.ListenAndServe(); err != nil {
 				setupLog.Error(err, "pprof server failed")
 			}
 		}()
@@ -216,7 +218,7 @@ func initLogging(opts *zap.Options) {
 	if useV {
 		// See https://pkg.go.dev/sigs.k8s.io/controller-runtime/pkg/log/zap#Options.Level
 		lvl := -1 * (*logVerbosity)
-		opts.Level = uberzap.NewAtomicLevelAt(zapcore.Level(int8(lvl)))
+		opts.Level = uberzap.NewAtomicLevelAt(zapcore.Level(int8(lvl))) // #nosec -- log level range is bounded by CLI flags
 	}
 
 	logger := zap.New(zap.UseFlagOptions(opts), zap.RawZapOpts(uberzap.AddCaller()))

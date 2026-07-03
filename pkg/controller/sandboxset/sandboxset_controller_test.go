@@ -728,6 +728,204 @@ func TestReconcile_ScaleDown(t *testing.T) {
 	}
 }
 
+func TestReconcile_ScaleDown_ReusedFirst(t *testing.T) {
+	utestutils.InitLogOutput()
+	ctx := context.Background()
+	k8sClient := NewClient()
+	eventRecorder := record.NewFakeRecorder(10)
+	reconciler := &Reconciler{
+		Client:   k8sClient,
+		Scheme:   testScheme,
+		Recorder: eventRecorder,
+		Codec:    serializer.NewCodecFactory(testScheme).LegacyCodec(v1alpha1.SchemeGroupVersion),
+	}
+	sbs := getSandboxSet(1)
+	assert.NoError(t, k8sClient.Create(ctx, sbs))
+
+	// Compute the real template hash to match what the reconciler will produce.
+	spec, err := reconciler.buildSandboxTemplateSpec(ctx, sbs)
+	require.NoError(t, err)
+	hash, err := computeRevisionHash(spec)
+	require.NoError(t, err)
+
+	ownerRef := []metav1.OwnerReference{*metav1.NewControllerRef(sbs, v1alpha1.SandboxSetControllerKind)}
+	makeAvailable := func(name string, reuseCount int32) *v1alpha1.Sandbox {
+		sbx := getBaseSandbox(0, name, hash)
+		sbx.Name = name
+		sbx.Status.Phase = v1alpha1.SandboxRunning
+		sbx.Status.PodInfo.PodIP = "1.2.3.4"
+		sbx.Status.Conditions = []metav1.Condition{
+			{Type: string(v1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue},
+		}
+		sbx.Status.ReuseCount = reuseCount
+		sbx.OwnerReferences = ownerRef
+		return sbx
+	}
+
+	fresh := makeAvailable("fresh-0", 0)
+	reused := makeAvailable("reused-1", 2)
+	CreateSandboxWithStatus(t, k8sClient, fresh)
+	CreateSandboxWithStatus(t, k8sClient, reused)
+
+	scaleUpExpectation.DeleteExpectations(GetControllerKey(sbs))
+	scaleDownExpectation.DeleteExpectations(GetControllerKey(sbs))
+	_, err = reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(sbs)})
+	assert.NoError(t, err)
+
+	sandboxes := &v1alpha1.SandboxList{}
+	assert.NoError(t, k8sClient.List(ctx, sandboxes))
+	require.Len(t, sandboxes.Items, 1)
+	assert.Equal(t, "fresh-0", sandboxes.Items[0].Name, "reused sandbox should be deleted first, fresh one kept")
+}
+
+func TestReconcile_ScaleDown_Priority(t *testing.T) {
+	utestutils.InitLogOutput()
+	ctx := context.Background()
+	k8sClient := NewClient()
+	eventRecorder := record.NewFakeRecorder(10)
+	reconciler := &Reconciler{
+		Client:   k8sClient,
+		Scheme:   testScheme,
+		Recorder: eventRecorder,
+		Codec:    serializer.NewCodecFactory(testScheme).LegacyCodec(v1alpha1.SchemeGroupVersion),
+	}
+	sbs := getSandboxSet(1)
+	assert.NoError(t, k8sClient.Create(ctx, sbs))
+
+	spec, err := reconciler.buildSandboxTemplateSpec(ctx, sbs)
+	require.NoError(t, err)
+	hash, err := computeRevisionHash(spec)
+	require.NoError(t, err)
+
+	ownerRef := []metav1.OwnerReference{*metav1.NewControllerRef(sbs, v1alpha1.SandboxSetControllerKind)}
+
+	// Priority 0: Pending
+	pending := getBaseSandbox(0, "pending-", hash)
+	pending.Name = "pending-0"
+	pending.Status.Phase = v1alpha1.SandboxPending
+	pending.OwnerReferences = ownerRef
+	CreateSandboxWithStatus(t, k8sClient, pending)
+
+	// Priority 1: Reused (Available with reuseCount > 0)
+	reused := getBaseSandbox(0, "reused-", hash)
+	reused.Name = "reused-0"
+	reused.Status.Phase = v1alpha1.SandboxRunning
+	reused.Status.PodInfo.PodIP = "1.2.3.4"
+	reused.Status.Conditions = []metav1.Condition{
+		{Type: string(v1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue},
+	}
+	reused.Status.ReuseCount = 2
+	reused.OwnerReferences = ownerRef
+	CreateSandboxWithStatus(t, k8sClient, reused)
+
+	// Priority 2: Running but not Ready
+	notReady := getBaseSandbox(0, "notready-", hash)
+	notReady.Name = "notready-0"
+	notReady.Status.Phase = v1alpha1.SandboxRunning
+	notReady.Status.PodInfo.PodIP = "1.2.3.5"
+	notReady.Status.Conditions = []metav1.Condition{
+		{Type: string(v1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse},
+	}
+	notReady.OwnerReferences = ownerRef
+	CreateSandboxWithStatus(t, k8sClient, notReady)
+
+	// Priority 3: Available fresh
+	fresh := getBaseSandbox(0, "fresh-", hash)
+	fresh.Name = "fresh-0"
+	fresh.Status.Phase = v1alpha1.SandboxRunning
+	fresh.Status.PodInfo.PodIP = "1.2.3.6"
+	fresh.Status.Conditions = []metav1.Condition{
+		{Type: string(v1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue},
+	}
+	fresh.Status.ReuseCount = 0
+	fresh.OwnerReferences = ownerRef
+	CreateSandboxWithStatus(t, k8sClient, fresh)
+
+	scaleUpExpectation.DeleteExpectations(GetControllerKey(sbs))
+	scaleDownExpectation.DeleteExpectations(GetControllerKey(sbs))
+	_, err = reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(sbs)})
+	assert.NoError(t, err)
+
+	sandboxes := &v1alpha1.SandboxList{}
+	assert.NoError(t, k8sClient.List(ctx, sandboxes))
+	require.Len(t, sandboxes.Items, 1)
+	assert.Equal(t, "fresh-0", sandboxes.Items[0].Name, "pending, reused, and not-ready should be deleted; fresh available kept")
+}
+
+func TestCompareScaleDownPriority(t *testing.T) {
+	makeSandbox := func(phase v1alpha1.SandboxPhase, ready bool, reuseCount int32) *v1alpha1.Sandbox {
+		readyStatus := metav1.ConditionFalse
+		if ready {
+			readyStatus = metav1.ConditionTrue
+		}
+		return &v1alpha1.Sandbox{
+			Status: v1alpha1.SandboxStatus{
+				Phase:      phase,
+				ReuseCount: reuseCount,
+				Conditions: []metav1.Condition{
+					{Type: string(v1alpha1.SandboxConditionReady), Status: readyStatus},
+				},
+			},
+		}
+	}
+
+	tests := []struct {
+		name     string
+		a, b     *v1alpha1.Sandbox
+		wantSign int // -1: a first, 0: equal, 1: b first
+	}{
+		{
+			name:     "pending before reused",
+			a:        makeSandbox(v1alpha1.SandboxPending, false, 0),
+			b:        makeSandbox(v1alpha1.SandboxRunning, true, 3),
+			wantSign: -1,
+		},
+		{
+			name:     "reused before running-not-ready",
+			a:        makeSandbox(v1alpha1.SandboxRunning, true, 1),
+			b:        makeSandbox(v1alpha1.SandboxRunning, false, 0),
+			wantSign: -1,
+		},
+		{
+			name:     "running-not-ready before fresh",
+			a:        makeSandbox(v1alpha1.SandboxRunning, false, 0),
+			b:        makeSandbox(v1alpha1.SandboxRunning, true, 0),
+			wantSign: -1,
+		},
+		{
+			name:     "higher reuseCount first among reused",
+			a:        makeSandbox(v1alpha1.SandboxRunning, true, 5),
+			b:        makeSandbox(v1alpha1.SandboxRunning, true, 2),
+			wantSign: -1,
+		},
+		{
+			name:     "equal reuseCount among reused",
+			a:        makeSandbox(v1alpha1.SandboxRunning, true, 3),
+			b:        makeSandbox(v1alpha1.SandboxRunning, true, 3),
+			wantSign: 0,
+		},
+		{
+			name:     "both fresh are equal",
+			a:        makeSandbox(v1alpha1.SandboxRunning, true, 0),
+			b:        makeSandbox(v1alpha1.SandboxRunning, true, 0),
+			wantSign: 0,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := compareScaleDownPriority(tt.a, tt.b)
+			switch {
+			case tt.wantSign < 0:
+				assert.Negative(t, got, "expected a before b")
+			case tt.wantSign > 0:
+				assert.Positive(t, got, "expected b before a")
+			default:
+				assert.Zero(t, got, "expected equal priority")
+			}
+		})
+	}
+}
+
 func TestSandboxSetReconcile_WithVolumeClaimTemplates(t *testing.T) {
 	type Case struct {
 		name              string

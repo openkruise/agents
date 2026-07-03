@@ -36,6 +36,7 @@ const (
 	WaitActionPause      WaitAction = "Pause"
 	WaitActionWaitReady  WaitAction = "WaitReady"
 	WaitActionCheckpoint WaitAction = "Checkpoint"
+	WaitActionPVCBind    WaitAction = "PVCBind"
 )
 
 // defaultWaitPollInterval is the interval for the ticker-based polling fallback.

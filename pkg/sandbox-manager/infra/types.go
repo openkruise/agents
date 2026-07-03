@@ -77,6 +77,10 @@ type ClaimSandboxOptions struct {
 	// A creating sandbox lasts for SpeculateCreatingDuration may be picked as a candidate when no available ones in SandboxSets.
 	// Set to 0 to disable speculation feature
 	SpeculateCreatingDuration time.Duration `json:"speculateCreatingDuration"`
+	// UserMetadataKeys records the keys of user-specified labels/annotations
+	// added during claim (from SandboxClaim.Spec or E2B request). Used by the
+	// reuse flow to clean up user metadata when returning the sandbox to the pool.
+	UserMetadataKeys *v1alpha1.UpdatedMetadataInClaim `json:"-"`
 }
 
 type CloneSandboxOptions struct {
@@ -91,6 +95,12 @@ type CloneSandboxOptions struct {
 	SkipWaitCheckpoint bool                    `json:"skipWaitCheckpoint"`
 	// See ReserveFailedSandboxFor on ClaimSandboxOptions.
 	ReserveFailedSandboxFor *time.Duration `json:"reserveFailedSandboxFor"`
+	// Name sets ObjectMeta.Name on the cloned sandbox (exact name).
+	// Mutually exclusive with GenerateName.
+	Name string `json:"name,omitempty"`
+	// GenerateName sets ObjectMeta.GenerateName on the cloned sandbox (prefix).
+	// Mutually exclusive with Name.
+	GenerateName string `json:"generateName,omitempty"`
 }
 
 type CreateCheckpointOptions struct {

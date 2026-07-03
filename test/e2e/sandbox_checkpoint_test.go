@@ -266,10 +266,14 @@ var _ = Describe("Sandbox Checkpoint", Ordered, func() {
 			Expect(cp.OwnerReferences[0].Kind).To(Equal("Sandbox"))
 
 			By("Verifying sandbox condition reason is CheckpointCreating")
-			sandbox = getSandbox(ctx, nn)
-			cond := getPausedCondition(sandbox)
-			Expect(cond).NotTo(BeNil())
-			Expect(cond.Reason).To(Equal(agentsv1alpha1.SandboxPausedReasonCheckpointCreating))
+			Eventually(func() string {
+				sandbox = getSandbox(ctx, nn)
+				cond := getPausedCondition(sandbox)
+				if cond == nil {
+					return ""
+				}
+				return cond.Reason
+			}, 30*time.Second, 500*time.Millisecond).Should(Equal(agentsv1alpha1.SandboxPausedReasonCheckpointCreating))
 
 			By("Verifying pod is NOT deleted yet (waiting for checkpoint)")
 			pod := &corev1.Pod{}

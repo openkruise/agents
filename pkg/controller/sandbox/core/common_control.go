@@ -30,6 +30,8 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/distribution/reference"
+
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
 	"github.com/openkruise/agents/pkg/utils"
@@ -50,6 +52,11 @@ const (
 
 	PodConditionContainersPaused  = "ContainersPaused"
 	PodConditionContainersResumed = "ContainersResumed"
+	PodConditionResetComplete     = "ResetComplete"
+
+	PodConditionResetReasonSucceeded = "ResetSucceeded"
+	PodConditionResetReasonFailed    = "ResetFailed"
+	PodConditionResetReasonTimeout   = "ResetTimeout"
 )
 
 type commonControl struct {
@@ -61,6 +68,7 @@ type commonControl struct {
 	podControl           *PodControl
 	lifecycleHookFunc    LifecycleHookFunc
 	initializer          SandboxInitializer
+	reuseControl         *SandboxReuseControl
 }
 
 func NewCommonControl(args SandboxControlArgs) SandboxControl {
@@ -76,9 +84,15 @@ func NewCommonControl(args SandboxControlArgs) SandboxControl {
 			client:          args.Client,
 			apiReader:       args.APIReader,
 			storageRegistry: storages.NewStorageProvider(),
+			recorder:        args.Recorder,
 		},
+		reuseControl: NewSandboxReuseControl(args.Client, args.Recorder, args.ReuseConfig),
 	}
 	return control
+}
+
+func (r *commonControl) EnsureSandboxReused(ctx context.Context, args EnsureFuncArgs) (time.Duration, error) {
+	return r.reuseControl.ensureSandboxReused(ctx, args)
 }
 
 func (r *commonControl) EnsureSandboxRunning(ctx context.Context, args EnsureFuncArgs) (time.Duration, error) {
@@ -110,6 +124,20 @@ func (r *commonControl) EnsureSandboxUpdated(ctx context.Context, args EnsureFun
 		newStatus.Message = "Sandbox Pod Not Found"
 		return nil
 	}
+
+	// If RuntimeInitialized is pending (set during resume), wait for Pod Ready then run Initialize
+	initCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.RuntimeInitialized))
+	if initCond != nil && initCond.Status != metav1.ConditionTrue {
+		pCond := utils.GetPodCondition(&pod.Status, corev1.PodReady)
+		if pCond == nil || pCond.Status != corev1.ConditionTrue {
+			klog.InfoS("Waiting for pod ready before initialization", "sandbox", klog.KObj(box))
+			return nil
+		}
+		if err := r.initializer.Initialize(ctx, box, newStatus); err != nil {
+			return err
+		}
+	}
+
 	// For non-Recreate upgrade policy (e.g., sandbox-manager triggered inplace update via annotation),
 	// perform inplace update directly without entering the full upgrade lifecycle (PreUpgrade -> UpgradePod -> PostUpgrade).
 	if box.Spec.UpgradePolicy == nil || box.Spec.UpgradePolicy.Type != agentsv1alpha1.SandboxUpgradePolicyRecreate {
@@ -235,23 +263,9 @@ func (r *commonControl) EnsureSandboxResumed(ctx context.Context, args EnsureFun
 		return err
 	}
 
-	// create pod success, set resumed condition to true
-	if resumedCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionResumed)); resumedCond != nil && resumedCond.Status == metav1.ConditionFalse {
-		resumedCond.Status = metav1.ConditionTrue
-		resumedCond.LastTransitionTime = metav1.Now()
-		utils.SetSandboxCondition(newStatus, *resumedCond)
-	}
-
-	// when pod is ready, sandbox status from resuming to running
-	pCond := utils.GetPodCondition(&pod.Status, corev1.PodReady)
-	if pod.Status.Phase == corev1.PodRunning && pCond != nil && pCond.Status == corev1.ConditionTrue {
+	// when pod is running, transition sandbox from resuming to running
+	if pod.Status.Phase == corev1.PodRunning && isContainersConsistent(pod, box) {
 		newStatus.Phase = agentsv1alpha1.SandboxRunning
-
-		// Sync PodInfo (IP/NodeName/UID) before Initialize to ensure runtimeURL is resolvable
-		// (pod IP may have changed after resume). Note: we intentionally do NOT set Ready=True
-		// here; Ready is only set after Initialize succeeds, so that sandbox-manager's
-		// NewSandboxResumeTask (which gates on state==Running, requiring Ready==True)
-		// won't observe a premature Running state before init/CSI-mount completes.
 		newStatus.NodeName = pod.Spec.NodeName
 		newStatus.SandboxIp = pod.Status.PodIP
 		newStatus.PodInfo = agentsv1alpha1.PodInfo{
@@ -260,44 +274,26 @@ func (r *commonControl) EnsureSandboxResumed(ctx context.Context, args EnsureFun
 			PodUID:   pod.UID,
 		}
 
-		// Delete all Checkpoint CRs after successful resume (pod is running and ready)
 		r.checkpointControl.Cleanup(ctx, box)
 
-		if !isContainersConsistent(pod, box) {
-			return nil
+		// set resumed condition to true after pod is running
+		if resumedCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionResumed)); resumedCond != nil &&
+			resumedCond.Status == metav1.ConditionFalse {
+			resumedCond.Status = metav1.ConditionTrue
+			resumedCond.LastTransitionTime = metav1.Now()
+			utils.SetSandboxCondition(newStatus, *resumedCond)
 		}
 
-		// re-initialize sandbox after resuming or upgrading (includes runtime re-init and CSI storage re-mount)
-		if err := r.initializer.Initialize(ctx, box, newStatus); err != nil {
-			klog.ErrorS(err, "post-resume initialization failed", "sandbox", klog.KObj(box))
-			r.recorder.Event(box, corev1.EventTypeWarning, string(agentsv1alpha1.RuntimeInitialized),
-				fmt.Sprintf("Failed to perform post-resume initialization: %v", err))
-			utils.SetSandboxCondition(newStatus, metav1.Condition{
-				Type:   string(agentsv1alpha1.RuntimeInitialized),
-				Status: metav1.ConditionFalse,
-				Reason: agentsv1alpha1.SandboxConditionRuntimeInitReasonFailed,
-				// TODO to differentiate init and mount errors
-				Message:            utils.TruncateConditionMessage(fmt.Sprintf("Runtime initialization failed: %v", err)),
-				LastTransitionTime: metav1.Now(),
-			})
-			return err
-		}
-		r.recorder.Event(box, corev1.EventTypeNormal, string(agentsv1alpha1.RuntimeInitialized),
-			"Post-resume initialization completed successfully")
+		// Every resume cycle needs fresh runtime re-init and CSI re-mount.
+		// Unconditionally set Pending so EnsureSandboxUpdated will run Initialize
+		// after Pod Ready, regardless of any stale Succeeded from a prior cycle.
 		utils.SetSandboxCondition(newStatus, metav1.Condition{
 			Type:               string(agentsv1alpha1.RuntimeInitialized),
-			Status:             metav1.ConditionTrue,
-			Reason:             agentsv1alpha1.SandboxConditionRuntimeInitReasonSucceeded,
-			Message:            "Runtime initialization completed",
+			Status:             metav1.ConditionFalse,
+			Reason:             agentsv1alpha1.SandboxConditionRuntimeInitReasonPending,
+			Message:            "Waiting for pod ready before initialization",
 			LastTransitionTime: metav1.Now(),
 		})
-
-		// Initialize succeeded: now set Ready=True to signal sandbox-manager's
-		// NewSandboxResumeTask that all post-resume initialization is done.
-		rCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionReady))
-		rCond.Status = metav1.ConditionStatus(pCond.Status)
-		rCond.LastTransitionTime = pCond.LastTransitionTime
-		utils.SetSandboxCondition(newStatus, *rCond)
 	}
 	return nil
 }
@@ -318,7 +314,7 @@ func isContainersConsistent(pod *corev1.Pod, box *agentsv1alpha1.Sandbox) bool {
 				"container", initContainer.Name)
 			return false
 		}
-		if statusImage != initContainer.Image {
+		if !imageRefsEqual(initContainer.Image, statusImage) {
 			klog.InfoS("init container image mismatch between spec and status, waiting",
 				"sandbox", klog.KObj(box),
 				"container", initContainer.Name,
@@ -328,6 +324,23 @@ func isContainersConsistent(pod *corev1.Pod, box *agentsv1alpha1.Sandbox) bool {
 		}
 	}
 	return true
+}
+
+// imageRefsEqual compares two image references accounting for registry normalization.
+// Container runtimes may expand short names (e.g. "img:latest" → "docker.io/library/img:latest").
+func imageRefsEqual(a, b string) bool {
+	if a == b {
+		return true
+	}
+	return normalizeImageRef(a) == normalizeImageRef(b)
+}
+
+func normalizeImageRef(img string) string {
+	named, err := reference.ParseNormalizedNamed(img)
+	if err != nil {
+		return img
+	}
+	return reference.TagNameOnly(named).String()
 }
 
 // hasUpgradeAction checks if the sandbox has a non-empty upgrade action configured.
@@ -572,29 +585,8 @@ func (r *commonControl) performRecreateUpgrade(ctx context.Context, args EnsureF
 
 	// Step 4: Perform post-recreate-upgrade initialization (re-init runtime, re-mount CSI).
 	if err := r.initializer.Initialize(ctx, box, newStatus); err != nil {
-		klog.ErrorS(err, "post-upgrade initialization failed", "sandbox", klog.KObj(box))
-		r.recorder.Event(box, corev1.EventTypeWarning, string(agentsv1alpha1.RuntimeInitialized),
-			fmt.Sprintf("Failed to perform post-upgrade initialization: %v", err))
-		utils.SetSandboxCondition(newStatus, metav1.Condition{
-			Type:   string(agentsv1alpha1.RuntimeInitialized),
-			Status: metav1.ConditionFalse,
-			Reason: agentsv1alpha1.SandboxConditionRuntimeInitReasonFailed,
-			// TODO to differentiate init and mount errors
-			Message:            utils.TruncateConditionMessage(fmt.Sprintf("Runtime initialization failed: %v", err)),
-			LastTransitionTime: metav1.Now(),
-		})
 		return false, err
 	}
-
-	r.recorder.Event(box, corev1.EventTypeNormal, string(agentsv1alpha1.RuntimeInitialized),
-		"Post-upgrade initialization completed successfully")
-	utils.SetSandboxCondition(newStatus, metav1.Condition{
-		Type:               string(agentsv1alpha1.RuntimeInitialized),
-		Status:             metav1.ConditionTrue,
-		Reason:             agentsv1alpha1.SandboxConditionRuntimeInitReasonSucceeded,
-		Message:            "Runtime initialization completed",
-		LastTransitionTime: metav1.Now(),
-	})
 
 	return true, nil
 }

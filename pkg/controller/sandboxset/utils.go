@@ -82,8 +82,8 @@ func (r *Reconciler) initNewStatus(ctx context.Context, ss *agentsv1alpha1.Sandb
 
 func calculateSandboxSetStatusFromGroup(ctx context.Context, newStatus *agentsv1alpha1.SandboxSetStatus, groups GroupedSandboxes, dirtyScaleUp map[expectations.ScaleAction][]string) {
 	log := logf.FromContext(ctx)
-	newStatus.AvailableReplicas = int32(len(groups.Available))
-	newStatus.Replicas = int32(len(groups.Creating)) + int32(len(groups.Available)) + int32(len(dirtyScaleUp[expectations.Create]))
+	newStatus.AvailableReplicas = int32(len(groups.Available))                                                                      // #nosec G115 -- K8s object count
+	newStatus.Replicas = int32(len(groups.Creating)) + int32(len(groups.Available)) + int32(len(dirtyScaleUp[expectations.Create])) // #nosec G115 -- K8s object count
 	log.Info("new status calculated", "replicas", newStatus.Replicas, "available", newStatus.AvailableReplicas,
 		"creating", len(groups.Creating), "dirtyCreating", len(dirtyScaleUp[expectations.Create]))
 }
@@ -135,7 +135,9 @@ func clearAndInitInnerKeys(m map[string]string) map[string]string {
 	}
 	for k := range m {
 		if strings.HasPrefix(k, agentsv1alpha1.InternalPrefix) {
-			delete(m, k)
+			if _, preserve := agentsv1alpha1.InternalKeysPreservedOnCreation[k]; !preserve {
+				delete(m, k)
+			}
 		}
 	}
 	return m

@@ -29,7 +29,7 @@ func generateRandomString(length int) string {
 	rand.Seed(time.Now().UnixNano())
 	b := make([]byte, length)
 	for i := range b {
-		b[i] = charset[rand.Intn(len(charset))]
+		b[i] = charset[rand.Intn(len(charset))] // #nosec G404 -- non-security random for temp names
 	}
 	return string(b)
 }

@@ -29,12 +29,14 @@ type ApiV1alpha1Interface interface {
 	RESTClient() rest.Interface
 	CheckpointsGetter
 	CommitsGetter
+	GlobalTrafficPoliciesGetter
 	SandboxesGetter
 	SandboxClaimsGetter
 	SandboxSetsGetter
 	SandboxTemplatesGetter
 	SandboxupdateopsGetter
 	SecurityProfilesGetter
+	TrafficPoliciesGetter
 }
 
 // ApiV1alpha1Client is used to interact with features provided by the api group.
@@ -48,6 +50,10 @@ func (c *ApiV1alpha1Client) Checkpoints(namespace string) CheckpointInterface {
 
 func (c *ApiV1alpha1Client) Commits(namespace string) CommitInterface {
 	return newCommits(c, namespace)
+}
+
+func (c *ApiV1alpha1Client) GlobalTrafficPolicies() GlobalTrafficPolicyInterface {
+	return newGlobalTrafficPolicies(c)
 }
 
 func (c *ApiV1alpha1Client) Sandboxes(namespace string) SandboxInterface {
@@ -72,6 +78,10 @@ func (c *ApiV1alpha1Client) Sandboxupdateops(namespace string) SandboxUpdateOpsI
 
 func (c *ApiV1alpha1Client) SecurityProfiles(namespace string) SecurityProfileInterface {
 	return newSecurityProfiles(c, namespace)
+}
+
+func (c *ApiV1alpha1Client) TrafficPolicies(namespace string) TrafficPolicyInterface {
+	return newTrafficPolicies(c, namespace)
 }
 
 // NewForConfig creates a new ApiV1alpha1Client for the given config.

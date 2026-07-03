@@ -55,6 +55,11 @@ const (
 	CreatedBySandbox  = "sandbox"
 )
 
+const (
+	// CommitAnnotationModeKey is the annotation key for commit mode selection.
+	CommitAnnotationModeKey = "agents.kruise.io/commit-mode"
+)
+
 var (
 	// MaxConditionMessageLen is the max length for a Condition.Message.
 	// Configurable via MAX_CONDITION_MESSAGE_LEN env var, defaults to 1024.

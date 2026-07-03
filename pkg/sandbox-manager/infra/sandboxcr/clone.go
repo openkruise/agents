@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/retry"
@@ -50,6 +51,9 @@ func ValidateAndInitCloneOptions(opts infra.CloneSandboxOptions) (infra.CloneSan
 	}
 	if opts.CheckPointID == "" {
 		return infra.CloneSandboxOptions{}, fmt.Errorf("checkpoint id is required")
+	}
+	if opts.Name != "" && opts.GenerateName != "" {
+		return infra.CloneSandboxOptions{}, fmt.Errorf("name and generateName are mutually exclusive")
 	}
 	if opts.WaitReadyTimeout <= 0 {
 		opts.WaitReadyTimeout = consts.DefaultWaitReadyTimeout
@@ -104,6 +108,13 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 	sbx, initRuntimeOpts, metrics, err := createSandboxFromCheckpoint(ctx, opts, tmpl, cp, cache, metrics)
 	if err != nil {
 		if !wait.Interrupted(err) {
+			// When the user explicitly specified a name and the sandbox already
+			// exists, retrying is pointless — the name collision is deterministic.
+			// Return the raw AlreadyExists error so upper layers (api.go) can map
+			// it to ErrorConflict instead of ErrorInternal.
+			if opts.Name != "" && apierrors.IsAlreadyExists(err) {
+				return nil, metrics, err
+			}
 			err = classifyCreateError(err, "failed to create sandbox from checkpoint")
 		}
 		return nil, metrics, err
@@ -302,14 +313,22 @@ func cloneReInitRuntime(ctx context.Context, sbx *Sandbox, opts infra.CloneSandb
 // newSandboxFromTemplate returns a Sandbox object whose annotations / labels are not nil
 func newSandboxFromTemplate(opts infra.CloneSandboxOptions, tmpl *v1alpha1.SandboxTemplate, cache infracache.Provider) *Sandbox {
 	tmplCopy := tmpl.DeepCopy()
+	meta := metav1.ObjectMeta{
+		Namespace:   tmplCopy.Namespace,
+		Labels:      map[string]string{},
+		Annotations: map[string]string{},
+	}
+	switch {
+	case opts.Name != "":
+		meta.Name = opts.Name
+	case opts.GenerateName != "":
+		meta.GenerateName = opts.GenerateName
+	default:
+		// Use checkpoint id as the prefix to avoid name length explosion caused by repeated checkpoints.
+		meta.GenerateName = opts.CheckPointID + "-"
+	}
 	sbx := AsSandbox(&v1alpha1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{
-			// Use checkpoint id as the prefix to avoid name length explosion caused by repeated checkpoints.
-			GenerateName: opts.CheckPointID + "-",
-			Namespace:    tmplCopy.Namespace,
-			Labels:       map[string]string{},
-			Annotations:  map[string]string{},
-		},
+		ObjectMeta: meta,
 		Spec: v1alpha1.SandboxSpec{
 			PersistentContents: tmplCopy.Spec.PersistentContents,
 			Runtimes:           tmplCopy.Spec.Runtimes,
