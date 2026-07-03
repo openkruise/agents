@@ -87,7 +87,7 @@ func TestScaleSandboxSet(t *testing.T) {
 			namespace:   "default",
 			replicas:    2,
 			objects:     []runtime.Object{},
-			expectError: "failed to get sandboxset",
+			expectError: "not found",
 		},
 	}
 
@@ -95,7 +95,7 @@ func TestScaleSandboxSet(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			cs := fake.NewSimpleClientset(tt.objects...)
 
-			o := &scaleOptions{
+			opts := &scaleOptions{
 				global: &GlobalOptions{
 					Namespace: tt.namespace,
 				},
@@ -103,7 +103,7 @@ func TestScaleSandboxSet(t *testing.T) {
 			}
 
 			// Override AgentsClient by calling the fake client directly.
-			err := runScaleWithClient(cs.ApiV1alpha1(), o, tt.sbsName)
+			err := runScaleWithClient(cs.ApiV1alpha1(), opts, tt.sbsName)
 
 			if tt.expectError != "" {
 				assert.Error(t, err)

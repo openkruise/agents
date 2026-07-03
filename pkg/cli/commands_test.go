@@ -155,7 +155,7 @@ func TestCreateSuoRunFailsWithInvalidConfig(t *testing.T) {
 		return nil, fmt.Errorf("not in cluster")
 	}
 
-	o := &createSuoOptions{
+	opts := &createSuoOptions{
 		global: &GlobalOptions{
 			KubeConfig: "/nonexistent/config",
 			Namespace:  "default",
@@ -163,7 +163,7 @@ func TestCreateSuoRunFailsWithInvalidConfig(t *testing.T) {
 		selector: "app=my-app",
 	}
 
-	err := o.run([]string{"main=nginx:2.0"})
+	err := opts.run([]string{"main=nginx:2.0"})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to build kubeconfig")
 }
@@ -175,14 +175,14 @@ func TestSetImageRunFailsWithInvalidConfig(t *testing.T) {
 		return nil, fmt.Errorf("not in cluster")
 	}
 
-	o := &setImageOptions{
+	opts := &setImageOptions{
 		global: &GlobalOptions{
 			KubeConfig: "/nonexistent/config",
 			Namespace:  "default",
 		},
 	}
 
-	err := o.run("test-sbs", []string{"main=nginx:2.0"})
+	err := opts.run("test-sbs", []string{"main=nginx:2.0"})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to build kubeconfig")
 }
@@ -194,7 +194,7 @@ func TestRestartRunFailsWithInvalidConfig(t *testing.T) {
 		return nil, fmt.Errorf("not in cluster")
 	}
 
-	o := &restartOptions{
+	opts := &restartOptions{
 		global: &GlobalOptions{
 			KubeConfig: "/nonexistent/config",
 			Namespace:  "default",
@@ -202,7 +202,7 @@ func TestRestartRunFailsWithInvalidConfig(t *testing.T) {
 		containers: []string{"main"},
 	}
 
-	err := o.run("test-sbx")
+	err := opts.run("test-sbx")
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to build kubeconfig")
 }
@@ -214,7 +214,7 @@ func TestScaleRunFailsWithInvalidConfig(t *testing.T) {
 		return nil, fmt.Errorf("not in cluster")
 	}
 
-	o := &scaleOptions{
+	opts := &scaleOptions{
 		global: &GlobalOptions{
 			KubeConfig: "/nonexistent/config",
 			Namespace:  "default",
@@ -222,20 +222,20 @@ func TestScaleRunFailsWithInvalidConfig(t *testing.T) {
 		replicas: 5,
 	}
 
-	err := o.run("test-sbs")
+	err := opts.run("test-sbs")
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to build kubeconfig")
 }
 
 func TestCreateSuoRunEmptySelectorFails(t *testing.T) {
-	o := &createSuoOptions{
+	opts := &createSuoOptions{
 		global: &GlobalOptions{
 			Namespace: "default",
 		},
 		selector: "",
 	}
 
-	err := o.run([]string{"main=nginx:2.0"})
+	err := opts.run([]string{"main=nginx:2.0"})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "--selector (-l) is required")
 }

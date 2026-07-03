@@ -21,6 +21,7 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
@@ -46,7 +47,7 @@ Currently supports scaling SandboxSet resources.`,
 }
 
 func newScaleSandboxSetCommand(globalOpts *GlobalOptions) *cobra.Command {
-	o := &scaleOptions{global: globalOpts}
+	opts := &scaleOptions{global: globalOpts}
 
 	cmd := &cobra.Command{
 		Use:     "sandboxset NAME --replicas=N",
@@ -70,42 +71,40 @@ Setting --replicas=0 drains the pool entirely.`,
   okactl -n agent-system scale sandboxset my-pool --replicas=10`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return o.run(args[0])
+			return opts.run(args[0])
 		},
 	}
-	cmd.Flags().Int32Var(&o.replicas, "replicas", 0, "The new desired number of replicas (required)")
+	cmd.Flags().Int32Var(&opts.replicas, "replicas", 0, "The new desired number of replicas (required)")
 	_ = cmd.MarkFlagRequired("replicas")
 	return cmd
 }
 
-func (o *scaleOptions) run(name string) error {
-	client, err := o.global.AgentsClient()
+func (opts *scaleOptions) run(name string) error {
+	client, err := opts.global.AgentsClient()
 	if err != nil {
 		return err
 	}
-	return runScaleWithClient(client, o, name)
+	return runScaleWithClient(client, opts, name)
 }
 
-func runScaleWithClient(client apiv1alpha1.ApiV1alpha1Interface, o *scaleOptions, name string) error {
-	if o.replicas < 0 {
-		return fmt.Errorf("--replicas must be >= 0, got %d", o.replicas)
+func runScaleWithClient(client apiv1alpha1.ApiV1alpha1Interface, opts *scaleOptions, name string) error {
+	if opts.replicas < 0 {
+		return fmt.Errorf("--replicas must be >= 0, got %d", opts.replicas)
 	}
 
 	ctx := context.TODO()
 
-	_, err := client.SandboxSets(o.global.Namespace).Get(ctx, name, metav1.GetOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to get sandboxset %q: %w", name, err)
-	}
-
-	patch := fmt.Sprintf(`{"spec":{"replicas":%d}}`, o.replicas)
-	_, err = client.SandboxSets(o.global.Namespace).Patch(
+	patch := fmt.Sprintf(`{"spec":{"replicas":%d}}`, opts.replicas)
+	_, err := client.SandboxSets(opts.global.Namespace).Patch(
 		ctx, name, types.MergePatchType, []byte(patch), metav1.PatchOptions{},
 	)
 	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Errorf("sandboxset %q not found", name)
+		}
 		return fmt.Errorf("failed to scale sandboxset %q: %w", name, err)
 	}
 
-	fmt.Printf("sandboxset.agents.kruise.io/%s scaled to %d\n", name, o.replicas)
+	fmt.Printf("sandboxset.agents.kruise.io/%s scaled to %d\n", name, opts.replicas)
 	return nil
 }

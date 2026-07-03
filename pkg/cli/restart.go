@@ -53,7 +53,7 @@ restarts without recreating the entire Pod.`,
 }
 
 func newRestartSandboxCommand(globalOpts *GlobalOptions) *cobra.Command {
-	o := &restartOptions{global: globalOpts}
+	opts := &restartOptions{global: globalOpts}
 
 	cmd := &cobra.Command{
 		Use:     "sandbox NAME [-c CONTAINER ...] [--all] [--failure-policy=Fail|Ignore]",
@@ -85,30 +85,30 @@ The --failure-policy flag controls how failures are handled:
   okactl -n agent-system restart sandbox my-sbx -c app`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return o.run(args[0])
+			return opts.run(args[0])
 		},
 	}
-	cmd.Flags().StringArrayVarP(&o.containers, "container", "c", nil, "Container name to restart (can be specified multiple times)")
-	cmd.Flags().BoolVarP(&o.allContainers, "all", "", false, "Restart all containers in the sandbox")
-	cmd.Flags().StringVarP(&o.failurePolicy, "failure-policy", "", "Fail", "Failure policy: Fail (stop on error) or Ignore (continue on error)")
+	cmd.Flags().StringArrayVarP(&opts.containers, "container", "c", nil, "Container name to restart (can be specified multiple times)")
+	cmd.Flags().BoolVarP(&opts.allContainers, "all", "", false, "Restart all containers in the sandbox")
+	cmd.Flags().StringVarP(&opts.failurePolicy, "failure-policy", "", "Fail", "Failure policy: Fail (stop on error) or Ignore (continue on error)")
 	return cmd
 }
 
-func (o *restartOptions) run(sandboxName string) error {
-	agentsClient, err := o.global.AgentsClient()
+func (opts *restartOptions) run(sandboxName string) error {
+	agentsClient, err := opts.global.AgentsClient()
 	if err != nil {
 		return err
 	}
-	kruiseClient, err := o.global.KruiseClient()
+	kruiseClient, err := opts.global.KruiseClient()
 	if err != nil {
 		return err
 	}
-	return runRestartWithClients(agentsClient, kruiseClient, o, sandboxName)
+	return runRestartWithClients(agentsClient, kruiseClient, opts, sandboxName)
 }
 
-func runRestartWithClients(agentsClient apiv1alpha1.ApiV1alpha1Interface, kruiseClient kruiseversioned.Interface, o *restartOptions, sandboxName string) error {
+func runRestartWithClients(agentsClient apiv1alpha1.ApiV1alpha1Interface, kruiseClient kruiseversioned.Interface, opts *restartOptions, sandboxName string) error {
 	ctx := context.TODO()
-	ns := o.global.Namespace
+	ns := opts.global.Namespace
 
 	sbx, err := agentsClient.Sandboxes(ns).Get(ctx, sandboxName, metav1.GetOptions{})
 	if err != nil {
@@ -123,7 +123,7 @@ func runRestartWithClients(agentsClient apiv1alpha1.ApiV1alpha1Interface, kruise
 	}
 
 	// Validate failure policy
-	failurePolicy := kruiseappsv1alpha1.ContainerRecreateRequestFailurePolicyType(o.failurePolicy)
+	failurePolicy := kruiseappsv1alpha1.ContainerRecreateRequestFailurePolicyType(opts.failurePolicy)
 	if failurePolicy == "" {
 		failurePolicy = kruiseappsv1alpha1.ContainerRecreateRequestFailurePolicyFail
 	}
@@ -131,15 +131,15 @@ func runRestartWithClients(agentsClient apiv1alpha1.ApiV1alpha1Interface, kruise
 		return fmt.Errorf("invalid failure-policy %q: must be Fail or Ignore", failurePolicy)
 	}
 
-	containers := o.containers
-	if len(containers) == 0 && !o.allContainers {
+	containers := opts.containers
+	if len(containers) == 0 && !opts.allContainers {
 		available, _, ferr := fetchContainerNames(ctx, agentsClient, sbx)
 		if ferr != nil {
 			return ferr
 		}
 		return fmt.Errorf("no containers specified: use -c <name> or --all to restart. Available containers: %v", available)
 	}
-	if len(containers) > 0 && o.allContainers {
+	if len(containers) > 0 && opts.allContainers {
 		return fmt.Errorf("--all cannot be used together with -c")
 	}
 	if len(containers) == 0 {

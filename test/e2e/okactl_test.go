@@ -111,7 +111,7 @@ var _ = Describe("okactl CLI", func() {
 		It("should fail when SandboxSet does not exist", func() {
 			output, err := runOkactl("-n", namespace, "scale", "sbs", "non-existent-sbs", "--replicas=2")
 			Expect(err).To(HaveOccurred())
-			Expect(output).To(ContainSubstring("failed to get sandboxset"))
+			Expect(output).To(ContainSubstring("not found"))
 		})
 	})
 

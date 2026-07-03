@@ -100,12 +100,6 @@ func runSuoStatusWithClient(client apiv1alpha1.ApiV1alpha1Interface, globalOpts 
 	return nil
 }
 
-// isSuoComplete checks if all replicas have been successfully updated.
-func isSuoComplete(suo *agentsv1alpha1.SandboxUpdateOps) bool {
-	return suo.Status.Phase == agentsv1alpha1.SandboxUpdateOpsCompleted ||
-		(suo.Status.UpdatedReplicas >= suo.Status.Replicas && suo.Status.UpdatingReplicas == 0)
-}
-
 // printSuoStatus prints a one-line status of the SandboxUpdateOps.
 func printSuoStatus(suo *agentsv1alpha1.SandboxUpdateOps) {
 	status := suo.Status

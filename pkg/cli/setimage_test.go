@@ -165,13 +165,13 @@ func TestSetImageSandboxSet(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			cs := fake.NewSimpleClientset(tt.objects...)
 
-			o := &setImageOptions{
+			opts := &setImageOptions{
 				global: &GlobalOptions{
 					Namespace: tt.namespace,
 				},
 			}
 
-			err := runSetImageWithClient(cs.ApiV1alpha1(), o, tt.sbsName, tt.imageArgs, false)
+			err := runSetImageWithClient(cs.ApiV1alpha1(), opts, tt.sbsName, tt.imageArgs, false)
 
 			if tt.expectError != "" {
 				assert.Error(t, err)
@@ -562,8 +562,8 @@ func TestDiagnoseSandboxSetUpdate(t *testing.T) {
 			}
 			kubeCS := kubernetesfake.NewSimpleClientset(objs...)
 
-			var reported map[string]bool
-			diagnoseSandboxSetUpdate(agentsCS.ApiV1alpha1(), kubeCS, "default", tt.sbs, &reported)
+			reported := make(map[string]bool)
+			diagnoseSandboxSetUpdate(agentsCS.ApiV1alpha1(), kubeCS, "default", tt.sbs, reported)
 
 			if tt.expectSkip {
 				// When update is complete, the function returns early
@@ -723,68 +723,6 @@ func TestWaitForSandboxSetUpdateTimeout(t *testing.T) {
 	err := waitForSandboxSetUpdate(cs.ApiV1alpha1(), ctx, "default", "test-sbs-timeout", globalOpts)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "timed out")
-}
-
-func TestIsSuoComplete(t *testing.T) {
-	tests := []struct {
-		name     string
-		suo      *agentsv1alpha1.SandboxUpdateOps
-		expected bool
-	}{
-		{
-			name: "phase is Completed",
-			suo: &agentsv1alpha1.SandboxUpdateOps{
-				Status: agentsv1alpha1.SandboxUpdateOpsStatus{
-					Phase:            agentsv1alpha1.SandboxUpdateOpsCompleted,
-					Replicas:         2,
-					UpdatedReplicas:  2,
-					UpdatingReplicas: 0,
-				},
-			},
-			expected: true,
-		},
-		{
-			name: "all updated and no updating",
-			suo: &agentsv1alpha1.SandboxUpdateOps{
-				Status: agentsv1alpha1.SandboxUpdateOpsStatus{
-					Phase:            agentsv1alpha1.SandboxUpdateOpsUpdating,
-					Replicas:         2,
-					UpdatedReplicas:  2,
-					UpdatingReplicas: 0,
-				},
-			},
-			expected: true,
-		},
-		{
-			name: "updating in progress",
-			suo: &agentsv1alpha1.SandboxUpdateOps{
-				Status: agentsv1alpha1.SandboxUpdateOpsStatus{
-					Phase:            agentsv1alpha1.SandboxUpdateOpsUpdating,
-					Replicas:         2,
-					UpdatedReplicas:  1,
-					UpdatingReplicas: 1,
-				},
-			},
-			expected: false,
-		},
-		{
-			name: "pending phase",
-			suo: &agentsv1alpha1.SandboxUpdateOps{
-				Status: agentsv1alpha1.SandboxUpdateOpsStatus{
-					Phase:    agentsv1alpha1.SandboxUpdateOpsPending,
-					Replicas: 2,
-				},
-			},
-			expected: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := isSuoComplete(tt.suo)
-			assert.Equal(t, tt.expected, result)
-		})
-	}
 }
 
 func TestPrintSuoStatus(t *testing.T) {

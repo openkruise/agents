@@ -50,7 +50,7 @@ Currently supports creating SandboxUpdateOps for batch updating claimed sandboxe
 }
 
 func newCreateSuoCommand(globalOpts *GlobalOptions) *cobra.Command {
-	o := &createSuoOptions{global: globalOpts}
+	opts := &createSuoOptions{global: globalOpts}
 
 	cmd := &cobra.Command{
 		Use:     "suo -l SELECTOR CONTAINER=IMAGE [CONTAINER=IMAGE ...]",
@@ -71,28 +71,28 @@ SandboxSet) can be updated this way.`,
   okactl -n production create suo -l app=openclaw gateway=nginx:1.27`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return o.run(args)
+			return opts.run(args)
 		},
 	}
-	cmd.Flags().StringVarP(&o.selector, "selector", "l", "", "Label selector to match target sandboxes (required)")
+	cmd.Flags().StringVarP(&opts.selector, "selector", "l", "", "Label selector to match target sandboxes (required)")
 	_ = cmd.MarkFlagRequired("selector")
 	return cmd
 }
 
-func (o *createSuoOptions) run(imageArgs []string) error {
-	if o.selector == "" {
+func (opts *createSuoOptions) run(imageArgs []string) error {
+	if opts.selector == "" {
 		return fmt.Errorf("--selector (-l) is required")
 	}
 
-	client, err := o.global.AgentsClient()
+	client, err := opts.global.AgentsClient()
 	if err != nil {
 		return err
 	}
-	return runCreateSuoWithClient(client, o, imageArgs)
+	return runCreateSuoWithClient(client, opts, imageArgs)
 }
 
-func runCreateSuoWithClient(client apiv1alpha1.ApiV1alpha1Interface, o *createSuoOptions, imageArgs []string) error {
-	if o.selector == "" {
+func runCreateSuoWithClient(client apiv1alpha1.ApiV1alpha1Interface, opts *createSuoOptions, imageArgs []string) error {
+	if opts.selector == "" {
 		return fmt.Errorf("--selector (-l) is required")
 	}
 
@@ -102,22 +102,22 @@ func runCreateSuoWithClient(client apiv1alpha1.ApiV1alpha1Interface, o *createSu
 	}
 
 	ctx := context.TODO()
-	ns := o.global.Namespace
+	ns := opts.global.Namespace
 
 	patchData, err := buildSuoImagePatch(images)
 	if err != nil {
 		return fmt.Errorf("failed to build patch: %w", err)
 	}
 
-	labelSelector, err := metav1.ParseToLabelSelector(o.selector)
+	labelSelector, err := metav1.ParseToLabelSelector(opts.selector)
 	if err != nil {
-		return fmt.Errorf("invalid label selector %q: %w", o.selector, err)
+		return fmt.Errorf("invalid label selector %q: %w", opts.selector, err)
 	}
 
 	// Validate that at least one sandbox matches the selector.
 	selector, err := metav1.LabelSelectorAsSelector(labelSelector)
 	if err != nil {
-		return fmt.Errorf("invalid label selector %q: %w", o.selector, err)
+		return fmt.Errorf("invalid label selector %q: %w", opts.selector, err)
 	}
 
 	sandboxList, err := client.Sandboxes(ns).List(ctx, metav1.ListOptions{LabelSelector: selector.String()})
@@ -126,7 +126,7 @@ func runCreateSuoWithClient(client apiv1alpha1.ApiV1alpha1Interface, o *createSu
 	}
 
 	if len(sandboxList.Items) == 0 {
-		return fmt.Errorf("no sandboxes found matching selector %q in namespace %q", o.selector, ns)
+		return fmt.Errorf("no sandboxes found matching selector %q in namespace %q", opts.selector, ns)
 	}
 
 	suo := &agentsv1alpha1.SandboxUpdateOps{
@@ -146,7 +146,7 @@ func runCreateSuoWithClient(client apiv1alpha1.ApiV1alpha1Interface, o *createSu
 	}
 
 	fmt.Printf("sandboxupdateops.agents.kruise.io/%s created (selector: %s, images: %s)\n",
-		created.Name, o.selector, strings.Join(formatSuoImagePairs(images), ", "))
+		created.Name, opts.selector, strings.Join(formatSuoImagePairs(images), ", "))
 	return nil
 }
 

@@ -85,14 +85,14 @@ func TestCreateSuo(t *testing.T) {
 				assert.NoError(t, createErr)
 			}
 
-			o := &createSuoOptions{
+			opts := &createSuoOptions{
 				global: &GlobalOptions{
 					Namespace: "default",
 				},
 				selector: tt.selector,
 			}
 
-			err := runCreateSuoWithClient(cs.ApiV1alpha1(), o, tt.imageArgs)
+			err := runCreateSuoWithClient(cs.ApiV1alpha1(), opts, tt.imageArgs)
 
 			if tt.expectError != "" {
 				assert.Error(t, err)

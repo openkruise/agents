@@ -321,7 +321,7 @@ func TestRestartSandbox(t *testing.T) {
 				)
 			}
 
-			o := &restartOptions{
+			opts := &restartOptions{
 				global: &GlobalOptions{
 					Namespace: tt.namespace,
 				},
@@ -330,7 +330,7 @@ func TestRestartSandbox(t *testing.T) {
 				failurePolicy: tt.failurePolicy,
 			}
 
-			err := runRestartWithClients(agentsCS.ApiV1alpha1(), kruiseCS, o, tt.sandboxName)
+			err := runRestartWithClients(agentsCS.ApiV1alpha1(), kruiseCS, opts, tt.sandboxName)
 
 			if tt.expectError != "" {
 				assert.Error(t, err)

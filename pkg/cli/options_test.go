@@ -282,66 +282,6 @@ users:
 	}
 }
 
-func TestDynamicClient(t *testing.T) {
-	tmpDir := t.TempDir()
-	kubeconfigPath := filepath.Join(tmpDir, "config")
-	kubeconfigContent := `apiVersion: v1
-kind: Config
-clusters:
-- cluster:
-    server: https://127.0.0.1:6443
-  name: test-cluster
-contexts:
-- context:
-    cluster: test-cluster
-    user: test-user
-  name: test-context
-current-context: test-context
-users:
-- name: test-user
-  user:
-    token: test-token
-`
-	err := os.WriteFile(kubeconfigPath, []byte(kubeconfigContent), 0600)
-	assert.NoError(t, err)
-
-	origFn := inClusterConfigFn
-	defer func() { inClusterConfigFn = origFn }()
-	inClusterConfigFn = func() (*rest.Config, error) {
-		return nil, fmt.Errorf("not in cluster")
-	}
-
-	tests := []struct {
-		name        string
-		opts        *GlobalOptions
-		expectError string
-	}{
-		{
-			name:        "valid kubeconfig",
-			opts:        &GlobalOptions{KubeConfig: kubeconfigPath},
-			expectError: "",
-		},
-		{
-			name:        "invalid kubeconfig path",
-			opts:        &GlobalOptions{KubeConfig: "/nonexistent/path"},
-			expectError: "failed to build kubeconfig",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			client, err := tt.opts.DynamicClient()
-			if tt.expectError != "" {
-				assert.Error(t, err)
-				assert.Contains(t, err.Error(), tt.expectError)
-			} else {
-				assert.NoError(t, err)
-				assert.NotNil(t, client)
-			}
-		})
-	}
-}
-
 func TestKubeClient(t *testing.T) {
 	tmpDir := t.TempDir()
 	kubeconfigPath := filepath.Join(tmpDir, "config")

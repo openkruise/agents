@@ -21,7 +21,6 @@ import (
 	"os"
 
 	"github.com/spf13/pflag"
-	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -50,17 +49,17 @@ func NewGlobalOptions() *GlobalOptions {
 }
 
 // AddFlags registers common flags on the provided FlagSet.
-func (o *GlobalOptions) AddFlags(flags *pflag.FlagSet) {
-	flags.StringVar(&o.KubeConfig, "kubeconfig", o.KubeConfig, "Path to the kubeconfig file (defaults to ~/.kube/config)")
-	flags.StringVarP(&o.Namespace, "namespace", "n", o.Namespace, "Namespace scope for this request")
-	flags.StringVar(&o.Context, "context", o.Context, "Kubeconfig context to use (overrides current-context)")
+func (opts *GlobalOptions) AddFlags(flags *pflag.FlagSet) {
+	flags.StringVar(&opts.KubeConfig, "kubeconfig", opts.KubeConfig, "Path to the kubeconfig file (defaults to ~/.kube/config)")
+	flags.StringVarP(&opts.Namespace, "namespace", "n", opts.Namespace, "Namespace scope for this request")
+	flags.StringVar(&opts.Context, "context", opts.Context, "Kubeconfig context to use (overrides current-context)")
 }
 
 // RESTConfig builds a rest.Config from the current flags.
 // When running inside a Pod (no explicit kubeconfig), it uses the mounted ServiceAccount token.
 // When running locally, it falls back to the kubeconfig file.
-func (o *GlobalOptions) RESTConfig() (*rest.Config, error) {
-	if o.KubeConfig == "" && o.Context == "" {
+func (opts *GlobalOptions) RESTConfig() (*rest.Config, error) {
+	if opts.KubeConfig == "" && opts.Context == "" {
 		if cfg, err := inClusterConfigFn(); err == nil {
 			return cfg, nil
 		} else {
@@ -69,12 +68,12 @@ func (o *GlobalOptions) RESTConfig() (*rest.Config, error) {
 	}
 
 	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
-	if o.KubeConfig != "" {
-		loadingRules.ExplicitPath = o.KubeConfig
+	if opts.KubeConfig != "" {
+		loadingRules.ExplicitPath = opts.KubeConfig
 	}
 	overrides := &clientcmd.ConfigOverrides{}
-	if o.Context != "" {
-		overrides.CurrentContext = o.Context
+	if opts.Context != "" {
+		overrides.CurrentContext = opts.Context
 	}
 
 	config, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, overrides).ClientConfig()
@@ -85,8 +84,8 @@ func (o *GlobalOptions) RESTConfig() (*rest.Config, error) {
 }
 
 // AgentsClient builds an ApiV1alpha1Interface from the current flags.
-func (o *GlobalOptions) AgentsClient() (apiv1alpha1.ApiV1alpha1Interface, error) {
-	config, err := o.RESTConfig()
+func (opts *GlobalOptions) AgentsClient() (apiv1alpha1.ApiV1alpha1Interface, error) {
+	config, err := opts.RESTConfig()
 	if err != nil {
 		return nil, err
 	}
@@ -99,8 +98,8 @@ func (o *GlobalOptions) AgentsClient() (apiv1alpha1.ApiV1alpha1Interface, error)
 }
 
 // KruiseClient builds a kruise-api clientset from the current flags.
-func (o *GlobalOptions) KruiseClient() (kruiseversioned.Interface, error) {
-	config, err := o.RESTConfig()
+func (opts *GlobalOptions) KruiseClient() (kruiseversioned.Interface, error) {
+	config, err := opts.RESTConfig()
 	if err != nil {
 		return nil, err
 	}
@@ -112,23 +111,9 @@ func (o *GlobalOptions) KruiseClient() (kruiseversioned.Interface, error) {
 	return cs, nil
 }
 
-// DynamicClient builds a dynamic.Interface from the current flags.
-func (o *GlobalOptions) DynamicClient() (dynamic.Interface, error) {
-	config, err := o.RESTConfig()
-	if err != nil {
-		return nil, err
-	}
-
-	dc, err := dynamic.NewForConfig(config)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create dynamic client: %w", err)
-	}
-	return dc, nil
-}
-
 // KubeClient builds a kubernetes.Interface from the current flags.
-func (o *GlobalOptions) KubeClient() (kubernetes.Interface, error) {
-	config, err := o.RESTConfig()
+func (opts *GlobalOptions) KubeClient() (kubernetes.Interface, error) {
+	config, err := opts.RESTConfig()
 	if err != nil {
 		return nil, err
 	}
