@@ -15,7 +15,7 @@ def execute_python_code(s: Sandbox, code: str, expect_stdout: list[str]):
     execution = run_code_sandbox(s, code)
     if execution.error:
         raise Exception(execution.error)
-    assert execution.logs.stdout == expect_stdout
+    assert "".join(execution.logs.stdout) == "".join(expect_stdout)
 
 
 def test_run_code(sandbox_context, config):
@@ -143,7 +143,7 @@ def test_pause_resume_code_context(sandbox_context, config):
     assert not execution.error
     execution = run_code_sandbox(sbx, "print(f'x = {x}, y = {y}')", context=context)
     assert not execution.error
-    assert execution.logs.stdout == ["x = 10, y = 20\n"]
+    assert "".join(execution.logs.stdout) == "x = 10, y = 20\n"
 
     # 3) Pause and resume (connect)
     logger.info("Pausing sandbox...")
@@ -163,9 +163,9 @@ def test_pause_resume_code_context(sandbox_context, config):
         # Code context and variables survive pause/resume
         execution = run_code_sandbox(sbx, "print(f'x = {x}, y = {y}')", context=context)
         assert not execution.error
-        assert execution.logs.stdout == ["x = 10, y = 20\n"]
+        assert "".join(execution.logs.stdout) == "x = 10, y = 20\n"
     else:
         # Code context is lost; just verify the sandbox can execute code
         execution = run_code_sandbox(sbx, "print('sandbox alive')")
         assert not execution.error
-        assert execution.logs.stdout == ["sandbox alive\n"]
+        assert "".join(execution.logs.stdout) == "sandbox alive\n"
