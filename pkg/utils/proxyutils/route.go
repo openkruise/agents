@@ -17,6 +17,8 @@ limitations under the License.
 package proxyutils
 
 import (
+	"fmt"
+
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/utils"
 	"k8s.io/apimachinery/pkg/types"
@@ -48,4 +50,11 @@ type Route struct {
 	State           string    `json:"state"`
 	ResourceVersion string    `json:"resourceVersion"`
 	AccessToken     string    `json:"accessToken,omitempty"`
+}
+
+// String implements fmt.Stringer to prevent AccessToken from being leaked in logs.
+// Always prints "***" to avoid revealing whether a token is configured.
+func (r Route) String() string {
+	return fmt.Sprintf("{IP:%s ID:%s UID:%s Owner:%s State:%s ResourceVersion:%s AccessToken:***}",
+		r.IP, r.ID, r.UID, r.Owner, r.State, r.ResourceVersion)
 }
