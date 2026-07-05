@@ -13,9 +13,15 @@ logger = logging.getLogger(__name__)
 
 def get_sandbox_access_token(sandbox_id: str) -> str:
     """Retrieve the runtime-access-token annotation from a Sandbox CR via kubectl."""
-    name = sandbox_id.split("--")[1] if "--" in sandbox_id else sandbox_id
+    if "--" in sandbox_id:
+        parts = sandbox_id.split("--")
+        namespace = parts[0]
+        name = parts[1]
+    else:
+        namespace = "default"
+        name = sandbox_id
     result = subprocess.run(
-        ["kubectl", "get", "sandbox", name, "-o", "json"],
+        ["kubectl", "get", "sandbox", name, "-n", namespace, "-o", "json"],
         capture_output=True,
         text=True,
         check=True,
