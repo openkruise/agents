@@ -270,23 +270,23 @@ var (
 		[]string{"namespace", "name", "container"},
 	)
 
-	// sandboxReuseTotal tracks the total number of sandbox reuse operations.
-	sandboxReuseTotal = prometheus.NewCounterVec(
+	// sandboxRecycleTotal tracks the total number of sandbox recycle operations.
+	sandboxRecycleTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Name:        "sandbox_reuse_total",
-			Help:        "Total number of sandbox reuse operations",
+			Name:        "sandbox_recycle_total",
+			Help:        "Total number of sandbox recycle operations",
 			ConstLabels: prometheus.Labels{"source": "k8s"},
 		},
 		[]string{"namespace", "result"},
 	)
 
-	// sandboxReuseDuration tracks the duration of sandbox reuse operations.
-	// Reuse includes cleanup, pod-ready wait, and a configurable grace period, so
+	// sandboxRecycleDuration tracks the duration of sandbox recycle operations.
+	// Recycle includes the recycle step, pod-ready wait, and a configurable grace period, so
 	// buckets extend higher than other lifecycle histograms.
-	sandboxReuseDuration = prometheus.NewHistogramVec(
+	sandboxRecycleDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Name:        "sandbox_reuse_duration_seconds",
-			Help:        "Duration of sandbox reuse operations from start to success in seconds",
+			Name:        "sandbox_recycle_duration_seconds",
+			Help:        "Duration of sandbox recycle operations from start to success in seconds",
 			ConstLabels: prometheus.Labels{"source": "k8s"},
 			Buckets:     prometheus.ExponentialBuckets(0.1, 2, 13), // 100ms -> ~409s (~7min)
 		},
@@ -300,7 +300,7 @@ var (
 		agentsv1alpha1.SandboxPaused,
 		agentsv1alpha1.SandboxResuming,
 		agentsv1alpha1.SandboxUpgrading,
-		agentsv1alpha1.SandboxReusing,
+		agentsv1alpha1.SandboxRecycling,
 		agentsv1alpha1.SandboxSucceeded,
 		agentsv1alpha1.SandboxFailed,
 		agentsv1alpha1.SandboxTerminating,
@@ -343,11 +343,11 @@ var observedResumeDurations sync.Map
 // observedCreationFailure tracks which sandboxes have had their creation failure counted.
 var observedCreationFailure sync.Map
 
-// reuseStartTimes tracks the start time of reuse operations
-var reuseStartTimes sync.Map
+// recycleStartTimes tracks the start time of recycle operations
+var recycleStartTimes sync.Map
 
-// observedReuseDurations tracks which sandboxes have had their reuse duration observed
-var observedReuseDurations sync.Map
+// observedRecycleDurations tracks which sandboxes have had their recycle duration observed
+var observedRecycleDurations sync.Map
 
 // deletionStartTimes tracks the deletion start time per sandbox for duration calculation.
 var deletionStartTimes sync.Map
@@ -396,8 +396,8 @@ func init() {
 		sandboxRuntimeContainerAbnormalTime,
 		sandboxStatusAbnormal,
 		sandboxStatusAbnormalTime,
-		sandboxReuseTotal,
-		sandboxReuseDuration,
+		sandboxRecycleTotal,
+		sandboxRecycleDuration,
 	)
 }
 
@@ -554,27 +554,27 @@ func recordSandboxConditionMetrics(sandbox *agentsv1alpha1.Sandbox, namespace, n
 				sandboxResumeDuration.WithLabelValues(namespace),
 				sandboxResumeTotal.WithLabelValues(namespace, "success"))
 
-		case agentsv1alpha1.SandboxConditionReusing:
+		case agentsv1alpha1.SandboxConditionRecycling:
 			key := namespace + "/" + name
-			if condition.Status == metav1.ConditionFalse && condition.Reason == agentsv1alpha1.SandboxReusingReasonStarted {
-				reuseStartTimes.Store(key, condition.LastTransitionTime.Time)
-				observedReuseDurations.Delete(key)
-			} else if condition.Status == metav1.ConditionTrue && condition.Reason == agentsv1alpha1.SandboxReusingReasonSucceeded {
-				if startTime, ok := reuseStartTimes.Load(key); ok {
-					if _, observed := observedReuseDurations.LoadOrStore(key, true); !observed {
+			if condition.Status == metav1.ConditionFalse && condition.Reason == agentsv1alpha1.SandboxRecyclingReasonStarted {
+				recycleStartTimes.Store(key, condition.LastTransitionTime.Time)
+				observedRecycleDurations.Delete(key)
+			} else if condition.Status == metav1.ConditionTrue && condition.Reason == agentsv1alpha1.SandboxRecyclingReasonSucceeded {
+				if startTime, ok := recycleStartTimes.Load(key); ok {
+					if _, observed := observedRecycleDurations.LoadOrStore(key, true); !observed {
 						duration := condition.LastTransitionTime.Sub(startTime.(time.Time))
-						sandboxReuseDuration.WithLabelValues(namespace).Observe(duration.Seconds())
-						sandboxReuseTotal.WithLabelValues(namespace, "success").Inc()
+						sandboxRecycleDuration.WithLabelValues(namespace).Observe(duration.Seconds())
+						sandboxRecycleTotal.WithLabelValues(namespace, "success").Inc()
 					}
 				}
 			} else if condition.Status == metav1.ConditionFalse &&
-				(condition.Reason == agentsv1alpha1.SandboxReusingReasonFailed || condition.Reason == agentsv1alpha1.SandboxReusingReasonTimeout) {
-				if _, observed := observedReuseDurations.LoadOrStore(key, true); !observed {
+				(condition.Reason == agentsv1alpha1.SandboxRecyclingReasonFailed || condition.Reason == agentsv1alpha1.SandboxRecyclingReasonTimeout) {
+				if _, observed := observedRecycleDurations.LoadOrStore(key, true); !observed {
 					result := "failed"
-					if condition.Reason == agentsv1alpha1.SandboxReusingReasonTimeout {
+					if condition.Reason == agentsv1alpha1.SandboxRecyclingReasonTimeout {
 						result = "timeout"
 					}
-					sandboxReuseTotal.WithLabelValues(namespace, result).Inc()
+					sandboxRecycleTotal.WithLabelValues(namespace, result).Inc()
 				}
 			}
 		}
@@ -704,8 +704,8 @@ func DeleteSandboxMetrics(namespace, name string) {
 	resumeStartTimes.Delete(key)
 	observedResumeDurations.Delete(key)
 	observedCreationFailure.Delete(key)
-	reuseStartTimes.Delete(key)
-	observedReuseDurations.Delete(key)
+	recycleStartTimes.Delete(key)
+	observedRecycleDurations.Delete(key)
 
 	// Clean up abnormal start-time tracking with O(1) direct deletes.
 	// The set of possible types and container names is fixed and small,

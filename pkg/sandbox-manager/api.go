@@ -280,19 +280,19 @@ func (m *SandboxManager) deleteRouteAndSync(ctx context.Context, sbx infra.Sandb
 }
 
 // DeleteSandbox deletes a sandbox and syncs route with peers.
-// If the sandbox is reuse-enabled and in Running phase, it triggers reuse instead of deletion.
+// If the sandbox is cleanup-enabled and in Running phase, it triggers cleanup instead of deletion.
 func (m *SandboxManager) DeleteSandbox(ctx context.Context, sbx infra.Sandbox) error {
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
 
-	if sbx.IsReuseEnabled() && sbx.Phase() == string(v1alpha1.SandboxRunning) {
-		log.Info("sandbox is reuse-enabled, triggering reuse instead of deletion")
+	if sbx.IsRecycleEnabled() && sbx.Phase() == string(v1alpha1.SandboxRunning) {
+		log.Info("sandbox is recycle-enabled, triggering recycle instead of deletion")
 		start := time.Now()
-		if err := sbx.TriggerReuse(ctx); err != nil {
-			log.Error(err, "failed to trigger reuse, falling back to delete")
-			sandboxReuseResponses.WithLabelValues(sbx.GetNamespace(), "failure").Inc()
+		if err := sbx.TriggerRecycle(ctx); err != nil {
+			log.Error(err, "failed to trigger recycle, falling back to delete")
+			sandboxRecycleResponses.WithLabelValues(sbx.GetNamespace(), "failure").Inc()
 		} else {
-			sandboxReuseResponses.WithLabelValues(sbx.GetNamespace(), "success").Inc()
-			sandboxReuseDuration.WithLabelValues(sbx.GetNamespace()).Observe(time.Since(start).Seconds())
+			sandboxRecycleResponses.WithLabelValues(sbx.GetNamespace(), "success").Inc()
+			sandboxRecycleDuration.WithLabelValues(sbx.GetNamespace()).Observe(time.Since(start).Seconds())
 			m.deleteRouteAndSync(ctx, sbx)
 			return nil
 		}

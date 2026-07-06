@@ -1200,7 +1200,7 @@ func TestSandbox_CSIMount(t *testing.T) {
 	}
 }
 
-func TestSandbox_TriggerReuse(t *testing.T) {
+func TestSandbox_TriggerRecycle(t *testing.T) {
 	tests := []struct {
 		name               string
 		initialAnnotations map[string]string
@@ -1252,18 +1252,18 @@ func TestSandbox_TriggerReuse(t *testing.T) {
 			}
 			s := AsSandbox(sbx, provider)
 
-			err := s.TriggerReuse(t.Context())
+			err := s.TriggerRecycle(t.Context())
 			if tt.expectError != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.expectError)
 			} else {
 				require.NoError(t, err)
 				// Verify annotation is set on the in-memory object
-				assert.Equal(t, "true", s.Sandbox.Annotations[v1alpha1.AnnotationReuse])
+				assert.Equal(t, "true", s.Sandbox.Annotations[v1alpha1.AnnotationCleanup])
 				// Verify annotation is persisted to the fake client
 				var stored v1alpha1.Sandbox
 				require.NoError(t, fc.Get(t.Context(), types.NamespacedName{Namespace: sbx.Namespace, Name: sbx.Name}, &stored))
-				assert.Equal(t, "true", stored.Annotations[v1alpha1.AnnotationReuse])
+				assert.Equal(t, "true", stored.Annotations[v1alpha1.AnnotationCleanup])
 				// Verify existing annotations are preserved
 				for k, v := range tt.initialAnnotations {
 					assert.Equal(t, v, stored.Annotations[k])

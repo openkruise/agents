@@ -1539,7 +1539,7 @@ var _ = Describe("SandboxClaim", func() {
 		})
 	})
 
-	Context("Cleanup and deletion", func() {
+	Context("Recycling and deletion", func() {
 		var (
 			sandboxSet   *agentsv1alpha1.SandboxSet
 			sandboxClaim *agentsv1alpha1.SandboxClaim
@@ -2357,7 +2357,7 @@ var _ = Describe("SandboxClaim", func() {
 				Expect(sandbox.Annotations).To(HaveKeyWithValue("git-sha", "abc123"))
 			})
 
-			It("should not reuse sandboxes from previous claim with same name", func() {
+			It("should not cleanup sandboxes from previous claim with same name", func() {
 				By("Creating a SandboxClaim and waiting for completion")
 				firstClaimName := fmt.Sprintf("test-claim-recreate-%d", time.Now().UnixNano())
 				sandboxClaim = &agentsv1alpha1.SandboxClaim{
@@ -2484,7 +2484,7 @@ var _ = Describe("SandboxClaim", func() {
 				// No overlap between first and second claim sandboxes
 				for _, newName := range secondClaimSandboxNames {
 					Expect(firstClaimSandboxNames).NotTo(ContainElement(newName),
-						"Second claim should NOT reuse sandboxes from first claim")
+						"Second claim should NOT cleanup sandboxes from first claim")
 				}
 
 				By("Verifying both sets of sandboxes exist simultaneously")

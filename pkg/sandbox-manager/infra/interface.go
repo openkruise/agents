@@ -183,8 +183,8 @@ type Sandbox interface {
 	GetTimeout() timeout.Options
 	GetClaimTime() (time.Time, error)
 	Kill(ctx context.Context) error                                                                     // Delete the Sandbox resource
-	TriggerReuse(ctx context.Context) error                                                             // Trigger sandbox reuse flow instead of deletion
-	IsReuseEnabled() bool                                                                               // Whether the sandbox supports reuse
+	TriggerRecycle(ctx context.Context) error                                                           // Trigger sandbox recycle flow instead of deletion
+	IsRecycleEnabled() bool                                                                             // Whether the sandbox supports recycle
 	Phase() string                                                                                      // Get the current sandbox phase
 	InplaceRefresh(ctx context.Context, deepcopy bool) error                                            // Update the Sandbox resource object to the latest
 	Request(ctx context.Context, method, path string, port int, body io.Reader) (*http.Response, error) // Make a request to the Sandbox

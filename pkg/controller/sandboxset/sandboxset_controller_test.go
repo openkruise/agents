@@ -313,14 +313,14 @@ func TestReconcile_DeleteDead(t *testing.T) {
 			}
 			assert.NoError(t, k8sClient.Create(ctx, sbs))
 			newStatus, err := reconciler.initNewStatus(ctx, sbs)
-		
+
 			assert.NoError(t, err)
 			sbs.Status = *newStatus.status
 			CreateSandboxes(t, tt.request, sbs, k8sClient)
-		
+
 			_, err = reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(sbs)})
 			assert.NoError(t, err)
-		
+
 			if tt.checkFunc != nil {
 				tt.checkFunc(t, k8sClient, sbs)
 			}
@@ -728,7 +728,7 @@ func TestReconcile_ScaleDown(t *testing.T) {
 	}
 }
 
-func TestReconcile_ScaleDown_ReusedFirst(t *testing.T) {
+func TestReconcile_ScaleDown_RecycledFirst(t *testing.T) {
 	utestutils.InitLogOutput()
 	ctx := context.Background()
 	k8sClient := NewClient()
@@ -749,7 +749,7 @@ func TestReconcile_ScaleDown_ReusedFirst(t *testing.T) {
 	require.NoError(t, err)
 
 	ownerRef := []metav1.OwnerReference{*metav1.NewControllerRef(sbs, v1alpha1.SandboxSetControllerKind)}
-	makeAvailable := func(name string, reuseCount int32) *v1alpha1.Sandbox {
+	makeAvailable := func(name string, recycledCount int32) *v1alpha1.Sandbox {
 		sbx := getBaseSandbox(0, name, hash)
 		sbx.Name = name
 		sbx.Status.Phase = v1alpha1.SandboxRunning
@@ -757,15 +757,15 @@ func TestReconcile_ScaleDown_ReusedFirst(t *testing.T) {
 		sbx.Status.Conditions = []metav1.Condition{
 			{Type: string(v1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue},
 		}
-		sbx.Status.ReuseCount = reuseCount
+		sbx.Status.RecycledCount = recycledCount
 		sbx.OwnerReferences = ownerRef
 		return sbx
 	}
 
 	fresh := makeAvailable("fresh-0", 0)
-	reused := makeAvailable("reused-1", 2)
+	recycled := makeAvailable("recycled-1", 2)
 	CreateSandboxWithStatus(t, k8sClient, fresh)
-	CreateSandboxWithStatus(t, k8sClient, reused)
+	CreateSandboxWithStatus(t, k8sClient, recycled)
 
 	scaleUpExpectation.DeleteExpectations(GetControllerKey(sbs))
 	scaleDownExpectation.DeleteExpectations(GetControllerKey(sbs))
@@ -775,7 +775,7 @@ func TestReconcile_ScaleDown_ReusedFirst(t *testing.T) {
 	sandboxes := &v1alpha1.SandboxList{}
 	assert.NoError(t, k8sClient.List(ctx, sandboxes))
 	require.Len(t, sandboxes.Items, 1)
-	assert.Equal(t, "fresh-0", sandboxes.Items[0].Name, "reused sandbox should be deleted first, fresh one kept")
+	assert.Equal(t, "fresh-0", sandboxes.Items[0].Name, "recycled sandbox should be deleted first, fresh one kept")
 }
 
 func TestReconcile_ScaleDown_Priority(t *testing.T) {
@@ -806,17 +806,17 @@ func TestReconcile_ScaleDown_Priority(t *testing.T) {
 	pending.OwnerReferences = ownerRef
 	CreateSandboxWithStatus(t, k8sClient, pending)
 
-	// Priority 1: Reused (Available with reuseCount > 0)
-	reused := getBaseSandbox(0, "reused-", hash)
-	reused.Name = "reused-0"
-	reused.Status.Phase = v1alpha1.SandboxRunning
-	reused.Status.PodInfo.PodIP = "1.2.3.4"
-	reused.Status.Conditions = []metav1.Condition{
+	// Priority 1: Recycled (Available with recycledCount > 0)
+	recycled := getBaseSandbox(0, "recycled-", hash)
+	recycled.Name = "recycled-0"
+	recycled.Status.Phase = v1alpha1.SandboxRunning
+	recycled.Status.PodInfo.PodIP = "1.2.3.4"
+	recycled.Status.Conditions = []metav1.Condition{
 		{Type: string(v1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue},
 	}
-	reused.Status.ReuseCount = 2
-	reused.OwnerReferences = ownerRef
-	CreateSandboxWithStatus(t, k8sClient, reused)
+	recycled.Status.RecycledCount = 2
+	recycled.OwnerReferences = ownerRef
+	CreateSandboxWithStatus(t, k8sClient, recycled)
 
 	// Priority 2: Running but not Ready
 	notReady := getBaseSandbox(0, "notready-", hash)
@@ -837,7 +837,7 @@ func TestReconcile_ScaleDown_Priority(t *testing.T) {
 	fresh.Status.Conditions = []metav1.Condition{
 		{Type: string(v1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue},
 	}
-	fresh.Status.ReuseCount = 0
+	fresh.Status.RecycledCount = 0
 	fresh.OwnerReferences = ownerRef
 	CreateSandboxWithStatus(t, k8sClient, fresh)
 
@@ -849,19 +849,19 @@ func TestReconcile_ScaleDown_Priority(t *testing.T) {
 	sandboxes := &v1alpha1.SandboxList{}
 	assert.NoError(t, k8sClient.List(ctx, sandboxes))
 	require.Len(t, sandboxes.Items, 1)
-	assert.Equal(t, "fresh-0", sandboxes.Items[0].Name, "pending, reused, and not-ready should be deleted; fresh available kept")
+	assert.Equal(t, "fresh-0", sandboxes.Items[0].Name, "pending, recycled, and not-ready should be deleted; fresh available kept")
 }
 
 func TestCompareScaleDownPriority(t *testing.T) {
-	makeSandbox := func(phase v1alpha1.SandboxPhase, ready bool, reuseCount int32) *v1alpha1.Sandbox {
+	makeSandbox := func(phase v1alpha1.SandboxPhase, ready bool, recycledCount int32) *v1alpha1.Sandbox {
 		readyStatus := metav1.ConditionFalse
 		if ready {
 			readyStatus = metav1.ConditionTrue
 		}
 		return &v1alpha1.Sandbox{
 			Status: v1alpha1.SandboxStatus{
-				Phase:      phase,
-				ReuseCount: reuseCount,
+				Phase:        phase,
+				RecycledCount: recycledCount,
 				Conditions: []metav1.Condition{
 					{Type: string(v1alpha1.SandboxConditionReady), Status: readyStatus},
 				},
@@ -875,13 +875,13 @@ func TestCompareScaleDownPriority(t *testing.T) {
 		wantSign int // -1: a first, 0: equal, 1: b first
 	}{
 		{
-			name:     "pending before reused",
+			name:     "pending before recycled",
 			a:        makeSandbox(v1alpha1.SandboxPending, false, 0),
 			b:        makeSandbox(v1alpha1.SandboxRunning, true, 3),
 			wantSign: -1,
 		},
 		{
-			name:     "reused before running-not-ready",
+			name:     "recycled before running-not-ready",
 			a:        makeSandbox(v1alpha1.SandboxRunning, true, 1),
 			b:        makeSandbox(v1alpha1.SandboxRunning, false, 0),
 			wantSign: -1,
@@ -893,13 +893,13 @@ func TestCompareScaleDownPriority(t *testing.T) {
 			wantSign: -1,
 		},
 		{
-			name:     "higher reuseCount first among reused",
+			name:     "higher recycledCount first among recycled",
 			a:        makeSandbox(v1alpha1.SandboxRunning, true, 5),
 			b:        makeSandbox(v1alpha1.SandboxRunning, true, 2),
 			wantSign: -1,
 		},
 		{
-			name:     "equal reuseCount among reused",
+			name:     "equal recycledCount among recycled",
 			a:        makeSandbox(v1alpha1.SandboxRunning, true, 3),
 			b:        makeSandbox(v1alpha1.SandboxRunning, true, 3),
 			wantSign: 0,

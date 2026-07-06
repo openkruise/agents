@@ -41,7 +41,7 @@ const (
 	// csiResetSignalWriteTimeout bounds a single write attempt of the reset signal file.
 	csiResetSignalWriteTimeout = 3 * time.Second
 	// csiResetSignalMaxRetries is the number of write attempts for the reset signal
-	// file before giving up. Transient runtime unavailability right at reuse start
+	// file before giving up. Transient runtime unavailability right at recycle start
 	// is common, so a few inline retries smooth over it.
 	csiResetSignalMaxRetries = 3
 )
@@ -54,91 +54,91 @@ var csiResetSignalRetryInterval = 1 * time.Second
 // so tests can stub the runtime file write without a live sandbox.
 var writeRuntimeFileFunc = agentsruntime.WriteFileWithRuntime
 
-// TODO for CRR based reuser
-type noopSandboxReuser struct{}
+// TODO for CRR based recycler
+type noopSandboxRecycler struct{}
 
-func (n *noopSandboxReuser) Reuse(_ context.Context, _ *agentsv1alpha1.Sandbox, _ *corev1.Pod) error {
+func (n *noopSandboxRecycler) Recycle(_ context.Context, _ *agentsv1alpha1.Sandbox, _ *corev1.Pod) error {
 	return nil
 }
 
-func (n *noopSandboxReuser) IsReuseComplete(_ context.Context, _ *agentsv1alpha1.Sandbox, _ *corev1.Pod) (bool, error) {
+func (n *noopSandboxRecycler) IsRecycleComplete(_ context.Context, _ *agentsv1alpha1.Sandbox, _ *corev1.Pod) (bool, error) {
 	return true, nil
 }
 
-// SandboxReuseControl handles the sandbox reuse lifecycle (Reusing phase).
+// SandboxRecycleControl handles the sandbox recycle lifecycle (Recycling phase).
 // It is designed to be used by any SandboxControl implementation
-// (e.g. commonControl, acsControl) to share the reuse logic.
-type SandboxReuseControl struct {
+// (e.g. commonControl, acsControl) to share the recycle logic.
+type SandboxRecycleControl struct {
 	client   client.Client
 	recorder record.EventRecorder
-	config   SandboxReuseConfig
+	config   SandboxRecycleConfig
 }
 
 const defaultFailureShutdownGrace = 5 * time.Minute
 
-func NewSandboxReuseControl(c client.Client, recorder record.EventRecorder, config SandboxReuseConfig) *SandboxReuseControl {
-	if config.Reuser == nil {
-		config.Reuser = &noopSandboxReuser{}
+func NewSandboxRecycleControl(c client.Client, recorder record.EventRecorder, config SandboxRecycleConfig) *SandboxRecycleControl {
+	if config.Recycler == nil {
+		config.Recycler = &noopSandboxRecycler{}
 	}
 	if config.FailureShutdownGrace == 0 {
 		config.FailureShutdownGrace = defaultFailureShutdownGrace
 	}
-	return &SandboxReuseControl{
+	return &SandboxRecycleControl{
 		client:   c,
 		recorder: recorder,
 		config:   config,
 	}
 }
 
-// ensureSandboxReused is the entry point for the reuse lifecycle. It delegates
-// the core logic to doReuse and unifies error handling: retriable errors are
+// ensureSandboxRecycled is the entry point for the recycle lifecycle. It delegates
+// the core logic to doRecycle and unifies error handling: retriable errors are
 // returned directly so the controller retries; permanent failures are
-// delegated to handleReuseFailed.
-func (r *SandboxReuseControl) ensureSandboxReused(ctx context.Context, args EnsureFuncArgs) (time.Duration, error) {
-	requeue, err := r.doReuse(ctx, args)
+// delegated to handleRecycleFailed.
+func (r *SandboxRecycleControl) ensureSandboxRecycled(ctx context.Context, args EnsureFuncArgs) (time.Duration, error) {
+	requeue, err := r.doRecycle(ctx, args)
 	if err == nil {
 		return requeue, nil
 	}
 	if IsRetriable(err) {
 		return 0, err
 	}
-	return r.handleReuseFailed(ctx, args.Box, args.NewStatus, err)
+	return r.handleRecycleFailed(ctx, args.Box, args.NewStatus, err)
 }
 
-// doReuse contains the core reuse state-machine logic. Every error is returned
+// doRecycle contains the core recycle state-machine logic. Every error is returned
 // directly — either as a RetriableError (transient, caller should retry) or a
-// plain error (permanent). The caller (ensureSandboxReused) is responsible for
+// plain error (permanent). The caller (ensureSandboxRecycled) is responsible for
 // classifying and acting on the error.
-func (r *SandboxReuseControl) doReuse(ctx context.Context, args EnsureFuncArgs) (time.Duration, error) {
+func (r *SandboxRecycleControl) doRecycle(ctx context.Context, args EnsureFuncArgs) (time.Duration, error) {
 	box, newStatus := args.Box, args.NewStatus
 
-	sbs, err := r.validateReusePreconditions(ctx, args)
+	sbs, err := r.validateRecyclePreconditions(ctx, args)
 	if err != nil {
 		return 0, err
 	}
 
-	reuseCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionReusing))
-	if reuseCond == nil {
-		reuseCond = &metav1.Condition{
-			Type:               string(agentsv1alpha1.SandboxConditionReusing),
+	recycleCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionRecycling))
+	if recycleCond == nil {
+		recycleCond = &metav1.Condition{
+			Type:               string(agentsv1alpha1.SandboxConditionRecycling),
 			Status:             metav1.ConditionFalse,
-			Reason:             agentsv1alpha1.SandboxReusingReasonStarted,
+			Reason:             agentsv1alpha1.SandboxRecyclingReasonStarted,
 			LastTransitionTime: metav1.Now(),
 		}
-		utils.SetSandboxCondition(newStatus, *reuseCond)
-		r.recorder.Event(box, corev1.EventTypeNormal, agentsv1alpha1.SandboxReusingReasonStarted,
-			fmt.Sprintf("Reuse started for sandbox %s", box.Name))
-		klog.InfoS("Reuse started", "sandbox", klog.KObj(box))
+		utils.SetSandboxCondition(newStatus, *recycleCond)
+		r.recorder.Event(box, corev1.EventTypeNormal, agentsv1alpha1.SandboxRecyclingReasonStarted,
+			fmt.Sprintf("Recycling started for sandbox %s", box.Name))
+		klog.InfoS("Recycling started", "sandbox", klog.KObj(box))
 
 		// Signal the csi-sidecar to unmount stale CSI volumes when it stops
-		// (prestop/SIGTERM) before handing the sandbox back for reuse. Must run
-		// while the runtime is still reachable, i.e. before the reuser resets the
+		// (prestop/SIGTERM) before handing the sandbox back for recycle. Must run
+		// while the runtime is still reachable, i.e. before the recycler resets the
 		// sandbox.
 		if err := r.ensureCSIResetSignal(ctx, box); err != nil {
 			return 0, err
 		}
 
-		if err := r.config.Reuser.Reuse(ctx, box, args.Pod); err != nil {
+		if err := r.config.Recycler.Recycle(ctx, box, args.Pod); err != nil {
 			return 0, err
 		}
 		return 0, nil
@@ -146,17 +146,17 @@ func (r *SandboxReuseControl) doReuse(ctx context.Context, args EnsureFuncArgs) 
 
 	var requeue time.Duration
 
-	switch reuseCond.Reason {
-	case agentsv1alpha1.SandboxReusingReasonStarted:
-		requeue, err = r.handleReuseInProgress(ctx, args, reuseCond)
-		if err != nil || reuseCond.Reason != agentsv1alpha1.SandboxReusingReasonCompleted {
+	switch recycleCond.Reason {
+	case agentsv1alpha1.SandboxRecyclingReasonStarted:
+		requeue, err = r.handleRecycleInProgress(ctx, args, recycleCond)
+		if err != nil || recycleCond.Reason != agentsv1alpha1.SandboxRecyclingReasonCompleted {
 			return requeue, err
 		}
-		// Reuse just transitioned to Completed; fall through to grace period
+		// Recycle just transitioned to Completed; fall through to grace period
 		// handling to avoid wasting a reconcile cycle (especially when GracePeriod == 0).
 		fallthrough
-	case agentsv1alpha1.SandboxReusingReasonCompleted:
-		requeue, err = r.handleReuseGracePeriod(ctx, args, reuseCond, sbs)
+	case agentsv1alpha1.SandboxRecyclingReasonCompleted:
+		requeue, err = r.handleRecycleGracePeriod(ctx, args, recycleCond, sbs)
 	default:
 		// no action needed for terminal states (Succeeded, Failed, Timeout)
 	}
@@ -171,11 +171,11 @@ func (r *SandboxReuseControl) doReuse(ctx context.Context, args EnsureFuncArgs) 
 //
 // It is a no-op when the sandbox carries no CSI mount annotation. When the sandbox
 // does carry CSI mounts but the reset directory is not configured, it fails the
-// reuse rather than silently returning stale mounts to the pool. The write goes
+// recycle rather than silently returning stale mounts to the pool. The write goes
 // through the agent-runtime files API, so it only depends on the runtime sidecar
 // being reachable, not on any binary inside the sandbox. Transient failures are
 // retried a few times inline.
-func (r *SandboxReuseControl) ensureCSIResetSignal(ctx context.Context, box *agentsv1alpha1.Sandbox) error {
+func (r *SandboxRecycleControl) ensureCSIResetSignal(ctx context.Context, box *agentsv1alpha1.Sandbox) error {
 	if box.Annotations[agentsv1alpha1.AnnotationCSIVolumeConfig] == "" {
 		return nil
 	}
@@ -197,7 +197,7 @@ func (r *SandboxReuseControl) ensureCSIResetSignal(ctx context.Context, box *age
 			Timeout:     csiResetSignalWriteTimeout,
 		})
 		if lastErr == nil {
-			klog.InfoS("Wrote CSI reset signal for reuse", "sandbox", klog.KObj(box), "file", resetFile, "attempt", attempt)
+			klog.InfoS("Wrote CSI reset signal for recycle", "sandbox", klog.KObj(box), "file", resetFile, "attempt", attempt)
 			return nil
 		}
 		if attempt < csiResetSignalMaxRetries {
@@ -213,11 +213,11 @@ func (r *SandboxReuseControl) ensureCSIResetSignal(ctx context.Context, box *age
 	return fmt.Errorf("failed to write csi reset signal to %s after %d attempts: %w", resetFile, csiResetSignalMaxRetries, lastErr)
 }
 
-// validateReusePreconditions performs all pre-condition checks before the
-// reuse state machine begins: pool label, SandboxSet existence, template-hash
+// validateRecyclePreconditions performs all pre-condition checks before the
+// recycle state machine begins: pool label, SandboxSet existence, template-hash
 // currency, and Pod health. It returns the SandboxSet (needed by later stages)
 // and an error if any check fails.
-func (r *SandboxReuseControl) validateReusePreconditions(ctx context.Context, args EnsureFuncArgs) (*agentsv1alpha1.SandboxSet, error) {
+func (r *SandboxRecycleControl) validateRecyclePreconditions(ctx context.Context, args EnsureFuncArgs) (*agentsv1alpha1.SandboxSet, error) {
 	box := args.Box
 
 	poolName := box.Labels[agentsv1alpha1.LabelSandboxPool]
@@ -234,91 +234,91 @@ func (r *SandboxReuseControl) validateReusePreconditions(ctx context.Context, ar
 
 	// If the sandbox's template-hash does not match the SandboxSet's
 	// updateRevision, the template has been updated since the sandbox was
-	// created. There is no point continuing the reuse — the sandbox is
+	// created. There is no point continuing the recycle — the sandbox is
 	// outdated and should not be returned to the pool.
 	// When the SandboxSet's updateRevision is empty (not yet reconciled),
 	// the check is skipped to avoid false failures during initial setup.
 	if sbs.Status.UpdateRevision != "" &&
 		box.Labels[agentsv1alpha1.LabelTemplateHash] != sbs.Status.UpdateRevision {
-		return nil, fmt.Errorf("sandbox template-hash %q does not match SandboxSet %s updateRevision %q, sandbox is outdated and cannot be reused",
+		return nil, fmt.Errorf("sandbox template-hash %q does not match SandboxSet %s updateRevision %q, sandbox is outdated and cannot be recycled",
 			box.Labels[agentsv1alpha1.LabelTemplateHash], sbs.Name, sbs.Status.UpdateRevision)
 	}
 
-	// A nil Pod during reuse is an abnormal state — the sandbox should always
+	// A nil Pod during recycle is an abnormal state — the sandbox should always
 	// have a running Pod. Fail immediately rather than waiting indefinitely.
 	if args.Pod == nil {
-		return nil, fmt.Errorf("pod not found during reuse")
+		return nil, fmt.Errorf("pod not found during recycle")
 	}
 
 	// If the Pod has already entered a terminal phase (Succeeded/Failed), the
-	// runtime can never complete the reset. Fail the reuse immediately instead
+	// runtime can never complete the reset. Fail the recycle immediately instead
 	// of waiting until the timeout fires.
 	if args.Pod.Status.Phase == corev1.PodSucceeded || args.Pod.Status.Phase == corev1.PodFailed {
-		return nil, fmt.Errorf("pod entered terminal phase %s during reuse", args.Pod.Status.Phase)
+		return nil, fmt.Errorf("pod entered terminal phase %s during recycle", args.Pod.Status.Phase)
 	}
 
 	return sbs, nil
 }
 
-func (r *SandboxReuseControl) handleReuseInProgress(ctx context.Context, args EnsureFuncArgs, reuseCond *metav1.Condition) (time.Duration, error) {
+func (r *SandboxRecycleControl) handleRecycleInProgress(ctx context.Context, args EnsureFuncArgs, recycleCond *metav1.Condition) (time.Duration, error) {
 	box, newStatus := args.Box, args.NewStatus
 
 	var remaining time.Duration
 	if r.config.Timeout > 0 {
-		elapsed := time.Since(reuseCond.LastTransitionTime.Time)
+		elapsed := time.Since(recycleCond.LastTransitionTime.Time)
 		if elapsed > r.config.Timeout {
-			return 0, &reuseTimeoutError{timeout: r.config.Timeout}
+			return 0, &recycleTimeoutError{timeout: r.config.Timeout}
 		}
 		remaining = r.config.Timeout - elapsed
 	}
 
-	complete, err := r.config.Reuser.IsReuseComplete(ctx, box, args.Pod)
+	complete, err := r.config.Recycler.IsRecycleComplete(ctx, box, args.Pod)
 	if err != nil {
 		return 0, err
 	}
 	if !complete {
-		klog.InfoS("Reuse cleanup not yet complete, waiting", "sandbox", klog.KObj(box))
+		klog.InfoS("Recycling not yet complete, waiting", "sandbox", klog.KObj(box))
 		// Return a requeue duration to guarantee the controller re-reconciles
 		// even if no external events arrive (e.g. runtime not responding).
 		// This ensures the timeout check is eventually executed.
-		return r.reusePollingInterval(remaining), nil
+		return r.recyclePollingInterval(remaining), nil
 	}
 	// Check whether the Pod is Ready before transitioning to the Completed phase.
-	// The reuser reports cleanup completion, but the Pod may still be restarting
+	// The recycler reports recycle completion, but the Pod may still be restarting
 	// after reset. We wait for Pod Ready to ensure the sandbox is truly available.
 	readyCond := utils.GetPodCondition(&args.Pod.Status, corev1.PodReady)
 	if readyCond == nil || readyCond.Status != corev1.ConditionTrue {
-		klog.InfoS("Reuse cleanup complete but pod not ready, waiting", "sandbox", klog.KObj(box))
-		return r.reusePollingInterval(remaining), nil
+		klog.InfoS("Recycling complete but pod not ready, waiting", "sandbox", klog.KObj(box))
+		return r.recyclePollingInterval(remaining), nil
 	}
-	reuseCond.Reason = agentsv1alpha1.SandboxReusingReasonCompleted
-	reuseCond.LastTransitionTime = metav1.Now()
-	reuseCond.Message = ""
-	utils.SetSandboxCondition(newStatus, *reuseCond)
-	klog.InfoS("Reuse cleanup completed, entering grace period", "sandbox", klog.KObj(box))
+	recycleCond.Reason = agentsv1alpha1.SandboxRecyclingReasonCompleted
+	recycleCond.LastTransitionTime = metav1.Now()
+	recycleCond.Message = ""
+	utils.SetSandboxCondition(newStatus, *recycleCond)
+	klog.InfoS("Recycling completed, entering grace period", "sandbox", klog.KObj(box))
 	return r.config.GracePeriod, nil
 }
 
-// reusePollingInterval returns the requeue duration when waiting for reuse to
+// recyclePollingInterval returns the requeue duration when waiting for recycle to
 // complete. If a timeout is configured, it returns the remaining time so the
 // timeout fires on time. Otherwise it returns a default polling interval.
-const defaultReusePollingInterval = 5 * time.Second
+const defaultRecyclePollingInterval = 5 * time.Second
 
-func (r *SandboxReuseControl) reusePollingInterval(remaining time.Duration) time.Duration {
+func (r *SandboxRecycleControl) recyclePollingInterval(remaining time.Duration) time.Duration {
 	if remaining > 0 {
-		if remaining < defaultReusePollingInterval {
+		if remaining < defaultRecyclePollingInterval {
 			return remaining
 		}
-		return defaultReusePollingInterval
+		return defaultRecyclePollingInterval
 	}
 	// No timeout configured; poll periodically anyway to avoid stalling.
-	return defaultReusePollingInterval
+	return defaultRecyclePollingInterval
 }
 
-func (r *SandboxReuseControl) handleReuseGracePeriod(ctx context.Context, args EnsureFuncArgs, reuseCond *metav1.Condition, sbs *agentsv1alpha1.SandboxSet) (time.Duration, error) {
+func (r *SandboxRecycleControl) handleRecycleGracePeriod(ctx context.Context, args EnsureFuncArgs, recycleCond *metav1.Condition, sbs *agentsv1alpha1.SandboxSet) (time.Duration, error) {
 	box, newStatus := args.Box, args.NewStatus
 
-	elapsed := time.Since(reuseCond.LastTransitionTime.Time)
+	elapsed := time.Since(recycleCond.LastTransitionTime.Time)
 	if elapsed < r.config.GracePeriod {
 		return r.config.GracePeriod - elapsed, nil
 	}
@@ -327,40 +327,40 @@ func (r *SandboxReuseControl) handleReuseGracePeriod(ctx context.Context, args E
 		return 0, &RetriableError{Err: err}
 	}
 
-	newStatus.ReuseCount++
+	newStatus.RecycledCount++
 	newStatus.Phase = agentsv1alpha1.SandboxRunning
-	reuseCond.Reason = agentsv1alpha1.SandboxReusingReasonSucceeded
-	reuseCond.Status = metav1.ConditionTrue
-	reuseCond.LastTransitionTime = metav1.Now()
-	utils.SetSandboxCondition(newStatus, *reuseCond)
+	recycleCond.Reason = agentsv1alpha1.SandboxRecyclingReasonSucceeded
+	recycleCond.Status = metav1.ConditionTrue
+	recycleCond.LastTransitionTime = metav1.Now()
+	utils.SetSandboxCondition(newStatus, *recycleCond)
 	utils.SetSandboxCondition(newStatus, metav1.Condition{
 		Type:               string(agentsv1alpha1.SandboxConditionReady),
 		Status:             metav1.ConditionTrue,
 		Reason:             agentsv1alpha1.SandboxReadyReasonPodReady,
 		LastTransitionTime: metav1.Now(),
 	})
-	r.recorder.Event(box, corev1.EventTypeNormal, agentsv1alpha1.SandboxReusingReasonSucceeded,
-		fmt.Sprintf("Reuse succeeded, sandbox returned to pool (reuseCount: %d)", newStatus.ReuseCount))
-	klog.InfoS("Sandbox returned to pool", "sandbox", klog.KObj(box), "reuseCount", newStatus.ReuseCount)
+	r.recorder.Event(box, corev1.EventTypeNormal, agentsv1alpha1.SandboxRecyclingReasonSucceeded,
+		fmt.Sprintf("Recycling succeeded, sandbox returned to pool (recycledCount: %d)", newStatus.RecycledCount))
+	klog.InfoS("Sandbox returned to pool", "sandbox", klog.KObj(box), "recycledCount", newStatus.RecycledCount)
 	return 0, nil
 }
 
-// reuseTimeoutError is a permanent error that carries the SandboxReusingReasonTimeout
-// condition reason so handleReuseFailed can distinguish it from other failures.
-type reuseTimeoutError struct {
+// recycleTimeoutError is a permanent error that carries the SandboxRecyclingReasonTimeout
+// condition reason so handleRecycleFailed can distinguish it from other failures.
+type recycleTimeoutError struct {
 	timeout time.Duration
 }
 
-func (e *reuseTimeoutError) Error() string {
-	return fmt.Sprintf("reuse timed out after %s", e.timeout)
+func (e *recycleTimeoutError) Error() string {
+	return fmt.Sprintf("recycle timed out after %s", e.timeout)
 }
 
-func (e *reuseTimeoutError) Reason() string {
-	return agentsv1alpha1.SandboxReusingReasonTimeout
+func (e *recycleTimeoutError) Reason() string {
+	return agentsv1alpha1.SandboxRecyclingReasonTimeout
 }
 
-func (r *SandboxReuseControl) handleReuseFailed(ctx context.Context, box *agentsv1alpha1.Sandbox, newStatus *agentsv1alpha1.SandboxStatus, err error) (time.Duration, error) {
-	reason := agentsv1alpha1.SandboxReusingReasonFailed
+func (r *SandboxRecycleControl) handleRecycleFailed(ctx context.Context, box *agentsv1alpha1.Sandbox, newStatus *agentsv1alpha1.SandboxStatus, err error) (time.Duration, error) {
+	reason := agentsv1alpha1.SandboxRecyclingReasonFailed
 	var fr FailedReason
 	if errors.As(err, &fr) {
 		reason = fr.Reason()
@@ -368,37 +368,37 @@ func (r *SandboxReuseControl) handleReuseFailed(ctx context.Context, box *agents
 	msg := err.Error()
 	r.recorder.Event(box, corev1.EventTypeWarning, reason, msg)
 	utils.SetSandboxCondition(newStatus, metav1.Condition{
-		Type:               string(agentsv1alpha1.SandboxConditionReusing),
+		Type:               string(agentsv1alpha1.SandboxConditionRecycling),
 		Status:             metav1.ConditionFalse,
 		Reason:             reason,
 		Message:            msg,
 		LastTransitionTime: metav1.Now(),
 	})
-	// Parse reuse-retain-on-failure annotation (duration string, e.g. "5m"):
+	// Parse cleanup-retain-on-failure annotation (duration string, e.g. "5m"):
 	//   - not set: delete the sandbox immediately.
 	//   - valid duration: set ShutdownTime = now + duration, let checkTimers handle deletion.
 	//   - invalid: log a warning and delete the sandbox immediately.
-	retainStr := box.Annotations[agentsv1alpha1.AnnotationReuseRetainOnFailure]
+	retainStr := box.Annotations[agentsv1alpha1.AnnotationCleanupRetainOnFailure]
 	if retainStr == "" {
-		klog.InfoS("Reuse failed, deleting sandbox immediately", "sandbox", klog.KObj(box), "reason", msg)
+		klog.InfoS("Recycling failed, deleting sandbox immediately", "sandbox", klog.KObj(box), "reason", msg)
 		return 0, r.client.Delete(ctx, box)
 	}
 	retainDuration, parseErr := time.ParseDuration(retainStr)
 	if parseErr != nil || retainDuration <= 0 {
-		klog.InfoS("Reuse failed, invalid reuse-retain-on-failure value, deleting sandbox", "sandbox", klog.KObj(box), "value", retainStr, "reason", msg)
+		klog.InfoS("Recycling failed, invalid cleanup-retain-on-failure value, deleting sandbox", "sandbox", klog.KObj(box), "value", retainStr, "reason", msg)
 		return 0, r.client.Delete(ctx, box)
 	}
 	shutdownAt := metav1.NewTime(time.Now().Add(retainDuration))
 	patch := client.MergeFrom(box.DeepCopy())
 	box.Spec.ShutdownTime = &shutdownAt
 	if err := r.client.Patch(ctx, box, patch); err != nil {
-		return 0, fmt.Errorf("failed to set shutdownTime on reuse failure: %w", err)
+		return 0, fmt.Errorf("failed to set shutdownTime on recycle failure: %w", err)
 	}
-	klog.InfoS("Reuse failed, scheduled shutdown", "sandbox", klog.KObj(box), "shutdownTime", shutdownAt.Time, "retainDuration", retainDuration, "reason", msg)
+	klog.InfoS("Recycling failed, scheduled shutdown", "sandbox", klog.KObj(box), "shutdownTime", shutdownAt.Time, "retainDuration", retainDuration, "reason", msg)
 	return retainDuration, nil
 }
 
-func (r *SandboxReuseControl) resetMetadataForPool(ctx context.Context, box *agentsv1alpha1.Sandbox, sbs *agentsv1alpha1.SandboxSet) error {
+func (r *SandboxRecycleControl) resetMetadataForPool(ctx context.Context, box *agentsv1alpha1.Sandbox, sbs *agentsv1alpha1.SandboxSet) error {
 	patch := client.MergeFrom(box.DeepCopy())
 
 	// Part 1: Reset fixed claim metadata
@@ -409,10 +409,10 @@ func (r *SandboxReuseControl) resetMetadataForPool(ctx context.Context, box *age
 	}
 	box.Labels[agentsv1alpha1.LabelSandboxIsClaimed] = agentsv1alpha1.False
 	delete(box.Labels, agentsv1alpha1.LabelSandboxClaimName)
-	for _, ann := range agentsv1alpha1.AnnotationsClearedOnReuse {
+	for _, ann := range agentsv1alpha1.AnnotationsClearedOnRecycle {
 		delete(box.Annotations, ann)
 	}
-	// Annotations from other packages not included in AnnotationsClearedOnReuse:
+	// Annotations from other packages not included in AnnotationsClearedOnRecycle:
 	delete(box.Annotations, identity.AgentKeyTokenRefreshStatus)
 
 	// Part 2: Delete user-specified metadata keys

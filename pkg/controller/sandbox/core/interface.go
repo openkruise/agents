@@ -58,19 +58,19 @@ type SandboxControl interface {
 	// EnsureSandboxUpgraded handle sandbox with status phase = Upgrading
 	EnsureSandboxUpgraded(ctx context.Context, args EnsureFuncArgs) error
 
-	// EnsureSandboxReused handle sandbox with status phase = Reusing
-	EnsureSandboxReused(ctx context.Context, args EnsureFuncArgs) (time.Duration, error)
+	// EnsureSandboxRecycled handle sandbox with status phase = Recycling
+	EnsureSandboxRecycled(ctx context.Context, args EnsureFuncArgs) (time.Duration, error)
 
 	// EnsureSandboxTerminated handle sandbox with status phase = Terminating
 	EnsureSandboxTerminated(ctx context.Context, args EnsureFuncArgs) error
 }
 
-// SandboxReuser handles the cleanup of user and container data inside a sandbox.
+// SandboxRecycler handles the recycle of user and container data inside a sandbox.
 // Implementations should wrap transient errors (API timeouts, network issues) with
 // RetriableError so the caller can distinguish them from permanent failures.
-type SandboxReuser interface {
-	Reuse(ctx context.Context, sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod) error
-	IsReuseComplete(ctx context.Context, sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod) (complete bool, err error)
+type SandboxRecycler interface {
+	Recycle(ctx context.Context, sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod) error
+	IsRecycleComplete(ctx context.Context, sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod) (complete bool, err error)
 }
 
 // RetriableError wraps a transient error that the caller should retry.
@@ -87,20 +87,20 @@ func IsRetriable(err error) bool {
 }
 
 // FailedReason allows a permanent error to specify a condition reason other
-// than the default SandboxReusingReasonFailed. handleReuseFailed checks for
+// than the default SandboxRecyclingReasonFailed. handleRecycleFailed checks for
 // this interface to set the correct condition reason.
 type FailedReason interface {
 	Reason() string
 }
 
-// SandboxReuseConfig groups all reuse-related configuration for the sandbox controller.
-type SandboxReuseConfig struct {
-	Reuser               SandboxReuser
+// SandboxRecycleConfig groups all recycle-related configuration for the sandbox controller.
+type SandboxRecycleConfig struct {
+	Recycler              SandboxRecycler
 	Timeout              time.Duration
 	GracePeriod          time.Duration
 	FailureShutdownGrace time.Duration
 	// CSIResetSignalDir is the directory inside the sandbox where a reset signal
-	// file is written before reuse when the sandbox carries CSI mounts, so that a
+	// file is written before recycle when the sandbox carries CSI mounts, so that a
 	// stopping csi-sidecar can detect it during prestop/SIGTERM and unmount stale
 	// volumes. Empty disables the behavior.
 	CSIResetSignalDir string
@@ -116,7 +116,7 @@ type SandboxControlArgs struct {
 	RateLimiter       *RateLimiter
 	CheckpointControl *CheckpointControl
 	PodControl        *PodControl
-	ReuseConfig       SandboxReuseConfig
+	RecycleConfig     SandboxRecycleConfig
 }
 
 func NewSandboxControl(args SandboxControlArgs) map[string]SandboxControl {

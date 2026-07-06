@@ -180,8 +180,8 @@ func (m *mockSandboxForLabels) GetClaimTime() (time.Time, error) {
 	return time.Time{}, nil
 }
 func (m *mockSandboxForLabels) Kill(context.Context) error             { return nil }
-func (m *mockSandboxForLabels) TriggerReuse(context.Context) error     { return nil }
-func (m *mockSandboxForLabels) IsReuseEnabled() bool                   { return false }
+func (m *mockSandboxForLabels) TriggerRecycle(context.Context) error     { return nil }
+func (m *mockSandboxForLabels) IsRecycleEnabled() bool                   { return false }
 func (m *mockSandboxForLabels) Phase() string                          { return "" }
 func (m *mockSandboxForLabels) InplaceRefresh(context.Context, bool) error {
 	return nil

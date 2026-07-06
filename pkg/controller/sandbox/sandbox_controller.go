@@ -50,24 +50,24 @@ import (
 
 func init() {
 	flag.IntVar(&concurrentReconciles, "sandbox-workers", concurrentReconciles, "Max concurrent reconciles for Sandbox controller.")
-	flag.DurationVar(&reuseTimeout, "reuse-timeout", reuseTimeout, "Timeout for sandbox reuse cleanup operations.")
-	flag.DurationVar(&reuseGracePeriod, "reuse-grace-period", reuseGracePeriod, "Grace period after reuse cleanup before sandbox returns to pool.")
-	flag.DurationVar(&reuseFailureShutdownGrace, "reuse-failure-shutdown-grace", reuseFailureShutdownGrace, "Grace period before shutting down a sandbox after reuse failure.")
+	flag.DurationVar(&recycleTimeout, "recycle-timeout", recycleTimeout, "Timeout for sandbox recycle operations.")
+	flag.DurationVar(&recycleGracePeriod, "recycle-grace-period", recycleGracePeriod, "Grace period after recycle before sandbox returns to pool.")
+	flag.DurationVar(&recycleFailureShutdownGrace, "recycle-failure-shutdown-grace", recycleFailureShutdownGrace, "Grace period before shutting down a sandbox after recycle failure.")
 	flag.StringVar(&csiResetSignalDir, "csi-reset-signal-dir", csiResetSignalDir,
-		"Directory inside the sandbox where a reset signal file is written before reuse when the sandbox carries CSI mounts, "+
+		"Directory inside the sandbox where a reset signal file is written before recycle when the sandbox carries CSI mounts, "+
 			"so a stopping csi-sidecar can unmount stale volumes during prestop/SIGTERM. Empty disables the behavior.")
 	flag.StringVar(&csiResetSignalFileName, "csi-reset-signal-file", csiResetSignalFileName,
-		"Name of the reset signal file written into --csi-reset-signal-dir before reuse.")
+		"Name of the reset signal file written into --csi-reset-signal-dir before recycle.")
 }
 
 var (
-	concurrentReconciles      = 500
-	sandboxControllerKind     = agentsv1alpha1.GroupVersion.WithKind("Sandbox")
-	reuseTimeout              = 60 * time.Second
-	reuseGracePeriod          = 10 * time.Second
-	reuseFailureShutdownGrace = 5 * time.Minute
-	csiResetSignalDir         = ""
-	csiResetSignalFileName    = "reset"
+	concurrentReconciles        = 500
+	sandboxControllerKind       = agentsv1alpha1.GroupVersion.WithKind("Sandbox")
+	recycleTimeout              = 60 * time.Second
+	recycleGracePeriod          = 10 * time.Second
+	recycleFailureShutdownGrace = 5 * time.Minute
+	csiResetSignalDir           = ""
+	csiResetSignalFileName      = "reset"
 )
 
 // Enqueuer is the contract the Sandbox controller depends on for async
@@ -99,10 +99,10 @@ func Add(mgr manager.Manager, metricsCleanup Enqueuer) error {
 			RateLimiter:       rateLimiter,
 			CheckpointControl: checkpointControl,
 			PodControl:        podControl,
-			ReuseConfig: core.SandboxReuseConfig{
-				Timeout:                reuseTimeout,
-				GracePeriod:            reuseGracePeriod,
-				FailureShutdownGrace:   reuseFailureShutdownGrace,
+			RecycleConfig: core.SandboxRecycleConfig{
+				Timeout:                recycleTimeout,
+				GracePeriod:            recycleGracePeriod,
+				FailureShutdownGrace:   recycleFailureShutdownGrace,
 				CSIResetSignalDir:      csiResetSignalDir,
 				CSIResetSignalFileName: csiResetSignalFileName,
 			},
@@ -278,8 +278,8 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 		err = r.getControl(args.Pod).EnsureSandboxResumed(ctx, args)
 	case agentsv1alpha1.SandboxUpgrading:
 		err = r.getControl(args.Pod).EnsureSandboxUpgraded(ctx, args)
-	case agentsv1alpha1.SandboxReusing:
-		requeueAfter, err = r.getControl(args.Pod).EnsureSandboxReused(ctx, args)
+	case agentsv1alpha1.SandboxRecycling:
+		requeueAfter, err = r.getControl(args.Pod).EnsureSandboxRecycled(ctx, args)
 	default:
 		klog.InfoS("sandbox status phase is invalid", "sandbox", klog.KObj(box), "phase", box.Status.Phase)
 		return ctrl.Result{RequeueAfter: requeueAfter}, nil
@@ -372,24 +372,24 @@ func (r *SandboxReconciler) calculateStatus(ctx context.Context, args core.Ensur
 			return newStatus, true
 		}
 	case agentsv1alpha1.SandboxRunning:
-		// Reuse trigger takes priority over Pod terminal detection.
-		// If reuse is requested, always enter Reusing regardless of Pod state —
-		// doReuse's terminal phase check properly handles dead Pods via
-		// handleReuseFailed (which deletes the sandbox and cleans up metadata).
+		// Recycle trigger takes priority over Pod terminal detection.
+		// If recycle is requested, always enter Recycling regardless of Pod state —
+		// doRecycle's terminal phase check properly handles dead Pods via
+		// handleRecycleFailed (which deletes the sandbox and cleans up metadata).
 		// This prevents the sandbox from getting stuck in Failed with dirty
 		// claim metadata when the Pod dies between claim-release and the next reconcile.
-		if isReuseTriggered(box) {
+		if isRecycleTriggered(box) {
 			if hasPVCVolumes(box) {
-				r.rejectReuse(box, newStatus, "reuse is not supported for sandboxes with persistent volume claims")
+				r.rejectRecycle(box, newStatus, "recycle is not supported for sandboxes with persistent volume claims")
 			} else {
-				klog.InfoS("Detected reuse trigger", "sandbox", klog.KObj(box))
-				newStatus.Phase = agentsv1alpha1.SandboxReusing
-				utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionReusing))
+				klog.InfoS("Detected recycle trigger", "sandbox", klog.KObj(box))
+				newStatus.Phase = agentsv1alpha1.SandboxRecycling
+				utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionRecycling))
 				break
 			}
 		}
 
-		// Pod terminal detection (only when reuse is NOT triggered)
+		// Pod terminal detection (only when recycle is NOT triggered)
 		if pod == nil || !pod.DeletionTimestamp.IsZero() {
 			newStatus.Phase = agentsv1alpha1.SandboxFailed
 			newStatus.Message = "Pod Not Found"
@@ -417,9 +417,9 @@ func (r *SandboxReconciler) calculateStatus(ctx context.Context, args core.Ensur
 		}
 
 	case agentsv1alpha1.SandboxPaused:
-		// Paused state does not support reuse; reject immediately.
-		if isReuseTriggered(box) {
-			r.rejectReuse(box, newStatus, "reuse is not supported in Paused state")
+		// Paused state does not support recycle; reject immediately.
+		if isRecycleTriggered(box) {
+			r.rejectRecycle(box, newStatus, "recycle is not supported in Paused state")
 		}
 
 		cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
@@ -439,9 +439,9 @@ func (r *SandboxReconciler) calculateStatus(ctx context.Context, args core.Ensur
 			klog.InfoS("sandbox pause not completed, cannot enter resume state temporarily", "sandbox", klog.KObj(box))
 		}
 
-	case agentsv1alpha1.SandboxReusing:
-		// Reuse lifecycle (progress checking, grace period, success/failure
-		// transitions) is handled entirely by EnsureSandboxReused.
+	case agentsv1alpha1.SandboxRecycling:
+		// Recycle lifecycle (progress checking, grace period, success/failure
+		// transitions) is handled entirely by EnsureSandboxRecycled.
 
 	case agentsv1alpha1.SandboxUpgrading:
 		// This indicates the podTemplate has changed again during an ongoing upgrade.
@@ -465,11 +465,11 @@ func (r *SandboxReconciler) calculateStatus(ctx context.Context, args core.Ensur
 	return newStatus, false
 }
 
-// isReuseTriggered returns true when the reuse annotation and the reuse-enabled
+// isRecycleTriggered returns true when the recycle annotation and the recycle-enabled
 // annotation are both set to "true" on the sandbox.
-func isReuseTriggered(box *agentsv1alpha1.Sandbox) bool {
-	return box.Annotations[agentsv1alpha1.AnnotationReuse] == "true" &&
-		box.Annotations[agentsv1alpha1.AnnotationReuseEnabled] == "true"
+func isRecycleTriggered(box *agentsv1alpha1.Sandbox) bool {
+	return box.Annotations[agentsv1alpha1.AnnotationCleanup] == "true" &&
+		box.Annotations[agentsv1alpha1.AnnotationCleanupEnabled] == "true"
 }
 
 // hasPVCVolumes returns true if the sandbox has VolumeClaimTemplates or its pod
@@ -488,30 +488,30 @@ func hasPVCVolumes(box *agentsv1alpha1.Sandbox) bool {
 	return false
 }
 
-// rejectReuse sets a Reusing condition with reason ReuseRejected and records a
+// rejectRecycle sets a Recycling condition with reason RecycleRejected and records a
 // Warning event. The sandbox stays in its current phase (Running or Paused).
 // The msg parameter provides the specific rejection reason.
-func (r *SandboxReconciler) rejectReuse(box *agentsv1alpha1.Sandbox, newStatus *agentsv1alpha1.SandboxStatus, msg string) {
-	// Avoid duplicate events if the condition is already set to ReuseRejected
+func (r *SandboxReconciler) rejectRecycle(box *agentsv1alpha1.Sandbox, newStatus *agentsv1alpha1.SandboxStatus, msg string) {
+	// Avoid duplicate events if the condition is already set to RecycleRejected
 	// with the same message.
-	if existing := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionReusing)); existing != nil &&
-		existing.Reason == agentsv1alpha1.SandboxReusingReasonRejected && existing.Message == msg {
+	if existing := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionRecycling)); existing != nil &&
+		existing.Reason == agentsv1alpha1.SandboxRecyclingReasonRejected && existing.Message == msg {
 		return
 	}
 
 	utils.SetSandboxCondition(newStatus, metav1.Condition{
-		Type:               string(agentsv1alpha1.SandboxConditionReusing),
+		Type:               string(agentsv1alpha1.SandboxConditionRecycling),
 		Status:             metav1.ConditionFalse,
-		Reason:             agentsv1alpha1.SandboxReusingReasonRejected,
+		Reason:             agentsv1alpha1.SandboxRecyclingReasonRejected,
 		Message:            msg,
 		LastTransitionTime: metav1.Now(),
 	})
 
 	if r.recorder != nil {
-		r.recorder.Event(box, corev1.EventTypeWarning, agentsv1alpha1.SandboxReusingReasonRejected, msg)
+		r.recorder.Event(box, corev1.EventTypeWarning, agentsv1alpha1.SandboxRecyclingReasonRejected, msg)
 	}
 
-	klog.InfoS("Reuse rejected", "sandbox", klog.KObj(box), "reason", msg)
+	klog.InfoS("Recycling rejected", "sandbox", klog.KObj(box), "reason", msg)
 }
 
 func determineUpgradeResumeReason(
@@ -622,15 +622,15 @@ func (r *SandboxReconciler) ensureVolumeClaimTemplates(ctx context.Context, box 
 }
 
 func (r *SandboxReconciler) checkTimers(ctx context.Context, box *agentsv1alpha1.Sandbox) (ctrl.Result, bool, error) {
-	// Skip timers during reuse unless the reuse has reached a terminal
+	// Skip timers during recycle unless the recycle has reached a terminal
 	// failure state (Failed/Timeout). Only then can ShutdownTime set by
-	// handleReuseFailed be processed. Using != avoids needing to update
+	// handleRecycleFailed be processed. Using != avoids needing to update
 	// this check when new in-progress reasons are added in the future.
-	if box.Status.Phase == agentsv1alpha1.SandboxReusing {
-		reuseCond := utils.GetSandboxCondition(&box.Status, string(agentsv1alpha1.SandboxConditionReusing))
-		if reuseCond == nil ||
-			(reuseCond.Reason != agentsv1alpha1.SandboxReusingReasonFailed &&
-				reuseCond.Reason != agentsv1alpha1.SandboxReusingReasonTimeout) {
+	if box.Status.Phase == agentsv1alpha1.SandboxRecycling {
+		recycleCond := utils.GetSandboxCondition(&box.Status, string(agentsv1alpha1.SandboxConditionRecycling))
+		if recycleCond == nil ||
+			(recycleCond.Reason != agentsv1alpha1.SandboxRecyclingReasonFailed &&
+				recycleCond.Reason != agentsv1alpha1.SandboxRecyclingReasonTimeout) {
 			return ctrl.Result{}, false, nil
 		}
 	}

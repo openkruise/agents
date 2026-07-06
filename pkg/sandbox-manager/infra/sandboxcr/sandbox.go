@@ -105,7 +105,7 @@ func (s *Sandbox) refreshFunc() runtime.RefreshFunc {
 }
 
 // retryUpdate loads the latest sandbox from informer first, applies modifier, and retries on conflict.
-// Conflict retries refresh from APIReader to avoid reusing stale informer data.
+// Conflict retries refresh from APIReader to avoid cleaning stale informer data.
 //
 // Returns:
 //   - updated: true if a real Update was issued and the sandbox was written back; false if no update was needed.
@@ -174,17 +174,17 @@ func (s *Sandbox) Kill(ctx context.Context) error {
 	return DefaultDeleteSandbox(ctx, s.Sandbox, s.Cache.GetClient())
 }
 
-func (s *Sandbox) TriggerReuse(ctx context.Context) error {
+func (s *Sandbox) TriggerRecycle(ctx context.Context) error {
 	patch := client.MergeFrom(s.Sandbox.DeepCopy())
 	if s.Sandbox.Annotations == nil {
 		s.Sandbox.Annotations = make(map[string]string, 1)
 	}
-	s.Sandbox.Annotations[agentsv1alpha1.AnnotationReuse] = "true"
+	s.Sandbox.Annotations[agentsv1alpha1.AnnotationCleanup] = "true"
 	return s.Cache.GetClient().Patch(ctx, s.Sandbox, patch)
 }
 
-func (s *Sandbox) IsReuseEnabled() bool {
-	return s.Sandbox.Annotations[agentsv1alpha1.AnnotationReuseEnabled] == "true"
+func (s *Sandbox) IsRecycleEnabled() bool {
+	return s.Sandbox.Annotations[agentsv1alpha1.AnnotationCleanupEnabled] == "true"
 }
 
 func (s *Sandbox) Phase() string {

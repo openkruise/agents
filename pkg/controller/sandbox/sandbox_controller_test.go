@@ -2033,7 +2033,7 @@ func TestCalculateStatus(t *testing.T) {
 			expectedShouldReq: true,
 		},
 		{
-			name: "running phase with reuse annotations should transition to reusing",
+			name: "running phase with cleanup annotations should transition to cleaning",
 			pod: &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-sandbox",
@@ -2047,8 +2047,8 @@ func TestCalculateStatus(t *testing.T) {
 					Namespace:  "default",
 					Generation: 1,
 					Annotations: map[string]string{
-						agentsv1alpha1.AnnotationReuse:        "true",
-						agentsv1alpha1.AnnotationReuseEnabled: "true",
+						agentsv1alpha1.AnnotationCleanup:        "true",
+						agentsv1alpha1.AnnotationCleanupEnabled: "true",
 					},
 				},
 				Spec: agentsv1alpha1.SandboxSpec{
@@ -2064,11 +2064,11 @@ func TestCalculateStatus(t *testing.T) {
 			initStatus: &agentsv1alpha1.SandboxStatus{
 				Phase: agentsv1alpha1.SandboxRunning,
 			},
-			expectedPhase:     agentsv1alpha1.SandboxReusing,
+			expectedPhase:     agentsv1alpha1.SandboxRecycling,
 			expectedShouldReq: false,
 		},
 		{
-			name: "running phase with only reuse annotation (no reuse-enabled) should not transition",
+			name: "running phase with only cleanup annotation (no cleanup-enabled) should not transition",
 			pod: &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-sandbox",
@@ -2082,7 +2082,7 @@ func TestCalculateStatus(t *testing.T) {
 					Namespace:  "default",
 					Generation: 1,
 					Annotations: map[string]string{
-						agentsv1alpha1.AnnotationReuse: "true",
+						agentsv1alpha1.AnnotationCleanup: "true",
 					},
 				},
 				Spec: agentsv1alpha1.SandboxSpec{
@@ -2102,7 +2102,7 @@ func TestCalculateStatus(t *testing.T) {
 			expectedShouldReq: false,
 		},
 		{
-			name: "running phase with reuse annotations and VolumeClaimTemplates should reject and stay running",
+			name: "running phase with cleanup annotations and VolumeClaimTemplates should reject and stay running",
 			pod: &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-sandbox",
@@ -2116,8 +2116,8 @@ func TestCalculateStatus(t *testing.T) {
 					Namespace:  "default",
 					Generation: 1,
 					Annotations: map[string]string{
-						agentsv1alpha1.AnnotationReuse:        "true",
-						agentsv1alpha1.AnnotationReuseEnabled: "true",
+						agentsv1alpha1.AnnotationCleanup:        "true",
+						agentsv1alpha1.AnnotationCleanupEnabled: "true",
 					},
 				},
 				Spec: agentsv1alpha1.SandboxSpec{
@@ -2139,15 +2139,15 @@ func TestCalculateStatus(t *testing.T) {
 			expectedPhase:     agentsv1alpha1.SandboxRunning,
 			expectedShouldReq: false,
 			checkConditions: func(t *testing.T, status *agentsv1alpha1.SandboxStatus) {
-				cond := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionReusing))
-				require.NotNil(t, cond, "Reusing condition should be set")
+				cond := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionRecycling))
+				require.NotNil(t, cond, "Cleaning condition should be set")
 				assert.Equal(t, metav1.ConditionFalse, cond.Status)
-				assert.Equal(t, agentsv1alpha1.SandboxReusingReasonRejected, cond.Reason)
+				assert.Equal(t, agentsv1alpha1.SandboxRecyclingReasonRejected, cond.Reason)
 				assert.Contains(t, cond.Message, "persistent volume claims")
 			},
 		},
 		{
-			name: "running phase with reuse annotations and PVC in pod template volumes should reject and stay running",
+			name: "running phase with cleanup annotations and PVC in pod template volumes should reject and stay running",
 			pod: &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-sandbox",
@@ -2161,8 +2161,8 @@ func TestCalculateStatus(t *testing.T) {
 					Namespace:  "default",
 					Generation: 1,
 					Annotations: map[string]string{
-						agentsv1alpha1.AnnotationReuse:        "true",
-						agentsv1alpha1.AnnotationReuseEnabled: "true",
+						agentsv1alpha1.AnnotationCleanup:        "true",
+						agentsv1alpha1.AnnotationCleanupEnabled: "true",
 					},
 				},
 				Spec: agentsv1alpha1.SandboxSpec{
@@ -2191,14 +2191,14 @@ func TestCalculateStatus(t *testing.T) {
 			expectedPhase:     agentsv1alpha1.SandboxRunning,
 			expectedShouldReq: false,
 			checkConditions: func(t *testing.T, status *agentsv1alpha1.SandboxStatus) {
-				cond := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionReusing))
-				require.NotNil(t, cond, "Reusing condition should be set")
+				cond := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionRecycling))
+				require.NotNil(t, cond, "Cleaning condition should be set")
 				assert.Equal(t, metav1.ConditionFalse, cond.Status)
-				assert.Equal(t, agentsv1alpha1.SandboxReusingReasonRejected, cond.Reason)
+				assert.Equal(t, agentsv1alpha1.SandboxRecyclingReasonRejected, cond.Reason)
 			},
 		},
 		{
-			name: "paused phase with reuse annotations should reject and stay paused",
+			name: "paused phase with cleanup annotations should reject and stay paused",
 			pod: &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-sandbox",
@@ -2212,8 +2212,8 @@ func TestCalculateStatus(t *testing.T) {
 					Namespace:  "default",
 					Generation: 1,
 					Annotations: map[string]string{
-						agentsv1alpha1.AnnotationReuse:        "true",
-						agentsv1alpha1.AnnotationReuseEnabled: "true",
+						agentsv1alpha1.AnnotationCleanup:        "true",
+						agentsv1alpha1.AnnotationCleanupEnabled: "true",
 					},
 				},
 				Spec: agentsv1alpha1.SandboxSpec{
@@ -2239,10 +2239,10 @@ func TestCalculateStatus(t *testing.T) {
 			expectedPhase:     agentsv1alpha1.SandboxPaused,
 			expectedShouldReq: false,
 			checkConditions: func(t *testing.T, status *agentsv1alpha1.SandboxStatus) {
-				cond := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionReusing))
-				require.NotNil(t, cond, "Reusing condition should be set")
+				cond := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionRecycling))
+				require.NotNil(t, cond, "Cleaning condition should be set")
 				assert.Equal(t, metav1.ConditionFalse, cond.Status)
-				assert.Equal(t, agentsv1alpha1.SandboxReusingReasonRejected, cond.Reason)
+				assert.Equal(t, agentsv1alpha1.SandboxRecyclingReasonRejected, cond.Reason)
 				assert.Contains(t, cond.Message, "Paused state")
 			},
 		},
@@ -4514,7 +4514,7 @@ func TestHasPVCVolumes(t *testing.T) {
 	}
 }
 
-func TestRejectReuse(t *testing.T) {
+func TestRejectCleanup(t *testing.T) {
 	box := &agentsv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-sandbox",
@@ -4527,18 +4527,18 @@ func TestRejectReuse(t *testing.T) {
 		r := &SandboxReconciler{recorder: recorder}
 		status := &agentsv1alpha1.SandboxStatus{}
 
-		r.rejectReuse(box, status, "test reason")
+		r.rejectRecycle(box, status, "test reason")
 
-		cond := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionReusing))
+		cond := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionRecycling))
 		require.NotNil(t, cond)
 		assert.Equal(t, metav1.ConditionFalse, cond.Status)
-		assert.Equal(t, agentsv1alpha1.SandboxReusingReasonRejected, cond.Reason)
+		assert.Equal(t, agentsv1alpha1.SandboxRecyclingReasonRejected, cond.Reason)
 		assert.Equal(t, "test reason", cond.Message)
 
 		// Verify event was recorded
 		select {
 		case event := <-recorder.Events:
-			assert.Contains(t, event, agentsv1alpha1.SandboxReusingReasonRejected)
+			assert.Contains(t, event, agentsv1alpha1.SandboxRecyclingReasonRejected)
 			assert.Contains(t, event, "test reason")
 		default:
 			t.Error("expected event to be recorded")
@@ -4550,12 +4550,12 @@ func TestRejectReuse(t *testing.T) {
 		status := &agentsv1alpha1.SandboxStatus{}
 
 		assert.NotPanics(t, func() {
-			r.rejectReuse(box, status, "test reason")
+			r.rejectRecycle(box, status, "test reason")
 		})
 
-		cond := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionReusing))
+		cond := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionRecycling))
 		require.NotNil(t, cond)
-		assert.Equal(t, agentsv1alpha1.SandboxReusingReasonRejected, cond.Reason)
+		assert.Equal(t, agentsv1alpha1.SandboxRecyclingReasonRejected, cond.Reason)
 	})
 
 	t.Run("deduplication - same reason and message skips update", func(t *testing.T) {
@@ -4564,10 +4564,10 @@ func TestRejectReuse(t *testing.T) {
 		status := &agentsv1alpha1.SandboxStatus{}
 
 		// First call sets the condition and records an event
-		r.rejectReuse(box, status, "test reason")
+		r.rejectRecycle(box, status, "test reason")
 
 		// Second call with same reason+message should be a no-op
-		r.rejectReuse(box, status, "test reason")
+		r.rejectRecycle(box, status, "test reason")
 
 		// Only one event should have been recorded
 		select {
@@ -4589,10 +4589,10 @@ func TestRejectReuse(t *testing.T) {
 		r := &SandboxReconciler{recorder: recorder}
 		status := &agentsv1alpha1.SandboxStatus{}
 
-		r.rejectReuse(box, status, "reason A")
-		r.rejectReuse(box, status, "reason B")
+		r.rejectRecycle(box, status, "reason A")
+		r.rejectRecycle(box, status, "reason B")
 
-		cond := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionReusing))
+		cond := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionRecycling))
 		require.NotNil(t, cond)
 		assert.Equal(t, "reason B", cond.Message)
 

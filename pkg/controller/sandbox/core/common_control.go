@@ -68,7 +68,7 @@ type commonControl struct {
 	podControl           *PodControl
 	lifecycleHookFunc    LifecycleHookFunc
 	initializer          SandboxInitializer
-	reuseControl         *SandboxReuseControl
+	recycleControl       *SandboxRecycleControl
 }
 
 func NewCommonControl(args SandboxControlArgs) SandboxControl {
@@ -86,13 +86,13 @@ func NewCommonControl(args SandboxControlArgs) SandboxControl {
 			storageRegistry: storages.NewStorageProvider(),
 			recorder:        args.Recorder,
 		},
-		reuseControl: NewSandboxReuseControl(args.Client, args.Recorder, args.ReuseConfig),
+		recycleControl: NewSandboxRecycleControl(args.Client, args.Recorder, args.RecycleConfig),
 	}
 	return control
 }
 
-func (r *commonControl) EnsureSandboxReused(ctx context.Context, args EnsureFuncArgs) (time.Duration, error) {
-	return r.reuseControl.ensureSandboxReused(ctx, args)
+func (r *commonControl) EnsureSandboxRecycled(ctx context.Context, args EnsureFuncArgs) (time.Duration, error) {
+	return r.recycleControl.ensureSandboxRecycled(ctx, args)
 }
 
 func (r *commonControl) EnsureSandboxRunning(ctx context.Context, args EnsureFuncArgs) (time.Duration, error) {

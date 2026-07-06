@@ -25,7 +25,7 @@ const (
 	InternalPrefix = "agents.kruise.io/"
 
 	// LabelSandboxPool identifies which SandboxSet generated the sandbox.
-	// Used by the reuse flow to find the origin SandboxSet.
+	// Used by the recycle flow to find the origin SandboxSet.
 	LabelSandboxPool = InternalPrefix + "sandbox-pool"
 	// LabelSandboxTemplate identifies which template generated the sandbox
 	LabelSandboxTemplate = InternalPrefix + "sandbox-template"
@@ -45,37 +45,37 @@ const (
 	AnnotationSandboxID          = InternalPrefix + "sandbox-id"
 	AnnotationMemberlistURL      = InternalPrefix + "memberlist-url"
 
-	// AnnotationReuseEnabled marks a sandbox as supporting reuse.
-	AnnotationReuseEnabled = InternalPrefix + "reuse-enabled"
-	// AnnotationReuse triggers the sandbox reuse flow. Removed by the controller after successful reuse.
-	AnnotationReuse = InternalPrefix + "reuse"
-	// AnnotationReuseRetainOnFailure controls how long the sandbox is retained after reuse failure.
+	// AnnotationCleanupEnabled marks a sandbox as supporting recycle.
+	AnnotationCleanupEnabled = InternalPrefix + "cleanup-enabled"
+	// AnnotationCleanup triggers the sandbox recycle flow. Removed by the controller after successful recycle.
+	AnnotationCleanup = InternalPrefix + "cleanup"
+	// AnnotationCleanupRetainOnFailure controls how long the sandbox is retained after recycle failure.
 	// Accepts a Go duration string (e.g., "5m") — the sandbox is retained for that duration and then
-	// deleted via ShutdownTime. By default (unset), the sandbox is deleted immediately after reuse failure.
+	// deleted via ShutdownTime. By default (unset), the sandbox is deleted immediately after recycle failure.
 	// If the value is invalid, the sandbox is also deleted immediately with a warning log.
-	AnnotationReuseRetainOnFailure = InternalPrefix + "reuse-retain-on-failure"
+	AnnotationCleanupRetainOnFailure = InternalPrefix + "cleanup-retain-on-failure"
 	// AnnotationUpdatedMetadataInClaim stores the keys of labels/annotations added or modified
-	// during the claim flow (JSON format, keys only). Used by the reuse flow to reset metadata.
+	// during the claim flow (JSON format, keys only). Used by the recycle flow to reset metadata.
 	AnnotationUpdatedMetadataInClaim = InternalPrefix + "updated-metadata-in-claim"
 )
 
-// AnnotationsClearedOnReuse lists all annotation keys that are removed from a
-// sandbox when it is successfully reused and returned to the pool. When adding
-// a new annotation that should be cleared during reuse, append it here to avoid
-// missing the cleanup in resetMetadataForPool.
+// AnnotationsClearedOnRecycle lists all annotation keys that are removed from a
+// sandbox when it is successfully recycled and returned to the pool. When adding
+// a new annotation that should be cleared during recycle, append it here to avoid
+// missing the recycle in resetMetadataForPool.
 //
 // Note: AnnotationUpdatedMetadataInClaim is handled separately because it is
 // consumed before deletion to determine user-specified metadata keys.
 // Annotations from other packages (e.g. identity.AgentKeyTokenRefreshStatus)
 // are handled individually in resetMetadataForPool.
-var AnnotationsClearedOnReuse = []string{
+var AnnotationsClearedOnRecycle = []string{
 	AnnotationClaimTime,
 	AnnotationLock,
 	AnnotationOwner,
 	AnnotationInitRuntimeRequest,
 	AnnotationRuntimeAccessToken,
-	AnnotationReuse,
-	AnnotationReuseRetainOnFailure,
+	AnnotationCleanup,
+	AnnotationCleanupRetainOnFailure,
 	AnnotationCSIVolumeConfig,
 	SandboxAnnotationPriority,
 	AnnotationEnvdAccessToken,
@@ -89,12 +89,12 @@ var AnnotationsClearedOnReuse = []string{
 // new internal key that should survive sandbox creation, add it here to avoid
 // accidental deletion in clearAndInitInnerKeys.
 var InternalKeysPreservedOnCreation = map[string]struct{}{
-	AnnotationReuseEnabled:         {},
-	AnnotationReuseRetainOnFailure: {},
+	AnnotationCleanupEnabled:         {},
+	AnnotationCleanupRetainOnFailure: {},
 }
 
 // UpdatedMetadataInClaim records the keys of labels/annotations added or modified during claim.
-// Used by the reuse flow to determine which metadata to reset.
+// Used by the recycle flow to determine which metadata to reset.
 type UpdatedMetadataInClaim struct {
 	Labels      []string `json:"labels,omitempty"`
 	Annotations []string `json:"annotations,omitempty"`

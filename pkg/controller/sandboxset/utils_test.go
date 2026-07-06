@@ -613,20 +613,20 @@ func TestClearAndInitInnerKeys(t *testing.T) {
 		{
 			name: "internal keys are deleted except preserved ones",
 			input: map[string]string{
-				agentsv1alpha1.InternalPrefix + "reuse-enabled":         "true",
-				agentsv1alpha1.InternalPrefix + "reuse-retain-on-failure": "5m",
-				agentsv1alpha1.InternalPrefix + "cleanup-candidate":        "true",
-				agentsv1alpha1.InternalPrefix + "sandbox-pool":             "test-pool",
+				agentsv1alpha1.InternalPrefix + "cleanup-enabled":           "true",
+				agentsv1alpha1.InternalPrefix + "cleanup-retain-on-failure": "5m",
+				agentsv1alpha1.InternalPrefix + "cleanup-candidate":         "true",
+				agentsv1alpha1.InternalPrefix + "sandbox-pool":              "test-pool",
 			},
 			expected: map[string]string{
-				agentsv1alpha1.InternalPrefix + "reuse-enabled":         "true",
-				agentsv1alpha1.InternalPrefix + "reuse-retain-on-failure": "5m",
+				agentsv1alpha1.InternalPrefix + "cleanup-enabled":           "true",
+				agentsv1alpha1.InternalPrefix + "cleanup-retain-on-failure": "5m",
 			},
 		},
 		{
 			name: "non-internal keys are preserved",
 			input: map[string]string{
-				"app":                       "my-app",
+				"app":                                "my-app",
 				"agents.kruise.io/cleanup-candidate": "true",
 			},
 			expected: map[string]string{
@@ -636,13 +636,13 @@ func TestClearAndInitInnerKeys(t *testing.T) {
 		{
 			name: "mix of internal, preserved, and non-internal keys",
 			input: map[string]string{
-				"app":                                           "my-app",
-				agentsv1alpha1.InternalPrefix + "reuse-enabled":  "true",
+				"app": "my-app",
+				agentsv1alpha1.InternalPrefix + "cleanup-enabled":   "true",
 				agentsv1alpha1.InternalPrefix + "cleanup-candidate": "true",
 			},
 			expected: map[string]string{
-				"app":                                      "my-app",
-				agentsv1alpha1.InternalPrefix + "reuse-enabled": "true",
+				"app": "my-app",
+				agentsv1alpha1.InternalPrefix + "cleanup-enabled": "true",
 			},
 		},
 	}

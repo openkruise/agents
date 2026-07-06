@@ -79,7 +79,7 @@ type ClaimSandboxOptions struct {
 	SpeculateCreatingDuration time.Duration `json:"speculateCreatingDuration"`
 	// UserMetadataKeys records the keys of user-specified labels/annotations
 	// added during claim (from SandboxClaim.Spec or E2B request). Used by the
-	// reuse flow to clean up user metadata when returning the sandbox to the pool.
+	// cleanup flow to clean up user metadata when returning the sandbox to the pool.
 	UserMetadataKeys *v1alpha1.UpdatedMetadataInClaim `json:"-"`
 }
 

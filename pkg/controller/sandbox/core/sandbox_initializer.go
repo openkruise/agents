@@ -118,7 +118,7 @@ func Initialize(ctx context.Context, box *agentsv1alpha1.Sandbox, newStatus *age
 			})
 		}
 
-		// Reuse ProcessCSIMounts for concurrent mount execution
+		// Cleanup ProcessCSIMounts for concurrent mount execution
 		duration, mountErr := utilruntime.ProcessCSIMounts(ctx, sbxForInit, config.CSIMountOptions{
 			MountOptionList: mountOptionList,
 		})

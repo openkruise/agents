@@ -291,7 +291,7 @@ func (r *Reconciler) scaleDown(ctx context.Context, count int, sbs *agentsv1alph
 	}
 
 	// Phase 2: Delete updated revision sandboxes if more needed.
-	// Priority: Pending > Reused (reuseCount desc) > Running-NotReady > Available fresh.
+	// Priority: Pending > Recycled (recycledCount desc) > Running-NotReady > Available fresh.
 	slices.SortFunc(updatedCandidates, compareScaleDownPriority)
 	updatedToDelete := updatedCandidates[:min(remaining, len(updatedCandidates))]
 	successes, err = utils.DoItSlowlyWithInputs(updatedToDelete, initialBatchSize, deleteFunc)
@@ -315,8 +315,8 @@ func scaleDownPriority(sbx *agentsv1alpha1.Sandbox) int {
 	if !ready {
 		return 2 // Running but not Ready
 	}
-	if sbx.Status.ReuseCount > 0 {
-		return 1 // Reused
+	if sbx.Status.RecycledCount > 0 {
+		return 1 // Recycled
 	}
 	return 3 // Available fresh
 }
@@ -326,10 +326,10 @@ func compareScaleDownPriority(a, b *agentsv1alpha1.Sandbox) int {
 	if pa != pb {
 		return pa - pb
 	}
-	if pa == 1 && a.Status.ReuseCount != b.Status.ReuseCount {
-		return int(b.Status.ReuseCount) - int(a.Status.ReuseCount)
+	if pa == 1 && a.Status.RecycledCount != b.Status.RecycledCount {
+		return int(b.Status.RecycledCount) - int(a.Status.RecycledCount)
 	}
-	// Within the same category (and same reuseCount for Reused),
+	// Within the same category (and same recycledCount for Recycled),
 	// prefer to delete older sandboxes first.
 	return a.CreationTimestamp.Time.Compare(b.CreationTimestamp.Time)
 }

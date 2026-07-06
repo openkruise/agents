@@ -32,7 +32,7 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 )
 
-var _ = Describe("Sandbox Reuse", func() {
+var _ = Describe("Sandbox Recycle", func() {
 	var (
 		ctx        = context.Background()
 		namespace  string
@@ -43,7 +43,7 @@ var _ = Describe("Sandbox Reuse", func() {
 		namespace = createNamespace(ctx)
 		sandboxSet = &agentsv1alpha1.SandboxSet{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      fmt.Sprintf("reuse-pool-%d", time.Now().UnixNano()),
+				Name:      fmt.Sprintf("recycle-pool-%d", time.Now().UnixNano()),
 				Namespace: namespace,
 			},
 			Spec: agentsv1alpha1.SandboxSetSpec{
@@ -112,16 +112,16 @@ var _ = Describe("Sandbox Reuse", func() {
 		}, time.Second*10, time.Second).Should(Succeed())
 	}
 
-	// triggerReuse patches the sandbox to trigger reuse.
-	triggerReuse := func(sbx *agentsv1alpha1.Sandbox) {
+	// triggerRecycle patches the sandbox to trigger recycle.
+	triggerRecycle := func(sbx *agentsv1alpha1.Sandbox) {
 		Eventually(func() error {
 			latest := &agentsv1alpha1.Sandbox{}
 			if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), latest); err != nil {
 				return err
 			}
 			patch := client.MergeFrom(latest.DeepCopy())
-			latest.Annotations[agentsv1alpha1.AnnotationReuseEnabled] = "true"
-			latest.Annotations[agentsv1alpha1.AnnotationReuse] = "true"
+			latest.Annotations[agentsv1alpha1.AnnotationCleanupEnabled] = "true"
+			latest.Annotations[agentsv1alpha1.AnnotationCleanup] = "true"
 			return k8sClient.Patch(ctx, latest, patch)
 		}, time.Second*10, time.Second).Should(Succeed())
 	}
@@ -147,20 +147,20 @@ var _ = Describe("Sandbox Reuse", func() {
 		return k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), &agentsv1alpha1.Sandbox{}) != nil
 	}
 
-	// triggerReuseAndFail triggers reuse while removing the pool label in a
-	// single atomic patch, so doReuse fails immediately with "no sandbox-pool
-	// label". This avoids any race with the noopSandboxReuser completing
-	// the reuse before we can inject a failure.
+	// triggerRecycleAndFail triggers recycle while removing the pool label in a
+	// single atomic patch, so doRecycle fails immediately with "no sandbox-pool
+	// label". This avoids any race with the noopSandboxRecycler completing
+	// the recycle before we can inject a failure.
 	//
 	// When the sandbox has no retain-on-failure annotation, the controller
-	// sets the ReuseFailed condition and deletes the sandbox in the same
+	// sets the RecycleFailed condition and deletes the sandbox in the same
 	// reconcile cycle. The condition is only observable for a few milliseconds
 	// before the sandbox is gone. To handle this race, we treat a deleted
-	// sandbox as equivalent to observing the ReuseFailed condition — both
-	// indicate the reuse failed. Tests that set a valid retain duration will
+	// sandbox as equivalent to observing the RecycleFailed condition — both
+	// indicate the recycle failed. Tests that set a valid retain duration will
 	// still see the condition because the sandbox is retained.
-	triggerReuseAndFail := func(target *agentsv1alpha1.Sandbox) {
-		By("Triggering reuse with pool label removed to force failure")
+	triggerRecycleAndFail := func(target *agentsv1alpha1.Sandbox) {
+		By("Triggering recycle with pool label removed to force failure")
 		Eventually(func() error {
 			latest := &agentsv1alpha1.Sandbox{}
 			if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(target), latest); err != nil {
@@ -171,30 +171,30 @@ var _ = Describe("Sandbox Reuse", func() {
 			if latest.Annotations == nil {
 				latest.Annotations = map[string]string{}
 			}
-			latest.Annotations[agentsv1alpha1.AnnotationReuseEnabled] = "true"
-			latest.Annotations[agentsv1alpha1.AnnotationReuse] = "true"
+			latest.Annotations[agentsv1alpha1.AnnotationCleanupEnabled] = "true"
+			latest.Annotations[agentsv1alpha1.AnnotationCleanup] = "true"
 			return k8sClient.Patch(ctx, latest, patch)
 		}, time.Second*10, time.Second).Should(Succeed())
 
-		By("Waiting for reuse condition to show failure")
+		By("Waiting for recycle condition to show failure")
 		Eventually(func() string {
 			latest := &agentsv1alpha1.Sandbox{}
 			if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(target), latest); err != nil {
-				// Sandbox already deleted — reuse failed and was cleaned up
+				// Sandbox already deleted — recycle failed and was recycled up
 				// in the same reconcile cycle before we could observe the
-				// transient ReuseFailed condition.
-				return agentsv1alpha1.SandboxReusingReasonFailed
+				// transient RecycleFailed condition.
+				return agentsv1alpha1.SandboxRecyclingReasonFailed
 			}
 			for _, c := range latest.Status.Conditions {
-				if c.Type == string(agentsv1alpha1.SandboxConditionReusing) {
+				if c.Type == string(agentsv1alpha1.SandboxConditionRecycling) {
 					return c.Reason
 				}
 			}
 			return ""
-		}, time.Second*30, time.Second).Should(Equal(agentsv1alpha1.SandboxReusingReasonFailed))
+		}, time.Second*30, time.Second).Should(Equal(agentsv1alpha1.SandboxRecyclingReasonFailed))
 	}
 
-	Context("Successful reuse", func() {
+	Context("Successful recycle", func() {
 		It("should return sandbox to pool with metadata matching baseline sandbox", func() {
 			sandboxes := listPoolSandboxes()
 			Expect(sandboxes).To(HaveLen(2))
@@ -205,14 +205,14 @@ var _ = Describe("Sandbox Reuse", func() {
 			By("Simulating a claim on the target sandbox")
 			simulateClaim(target)
 
-			By("Triggering reuse on the target sandbox")
-			triggerReuse(target)
+			By("Triggering recycle on the target sandbox")
+			triggerRecycle(target)
 
-			By("Waiting for sandbox to enter Reusing phase")
+			By("Waiting for sandbox to enter Recycling phase")
 			Eventually(func() agentsv1alpha1.SandboxPhase {
 				_ = k8sClient.Get(ctx, client.ObjectKeyFromObject(target), target)
 				return target.Status.Phase
-			}, time.Minute, time.Second).Should(Equal(agentsv1alpha1.SandboxReusing))
+			}, time.Minute, time.Second).Should(Equal(agentsv1alpha1.SandboxRecycling))
 
 			By("Waiting for sandbox to return to Running phase")
 			Eventually(func() agentsv1alpha1.SandboxPhase {
@@ -224,10 +224,10 @@ var _ = Describe("Sandbox Reuse", func() {
 			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(baseline), baseline)).To(Succeed())
 			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(target), target)).To(Succeed())
 
-			By("Verifying ReuseCount is incremented")
-			Expect(target.Status.ReuseCount).To(Equal(int32(1)))
+			By("Verifying RecycledCount is incremented")
+			Expect(target.Status.RecycledCount).To(Equal(int32(1)))
 
-			By("Verifying target labels match baseline (except ReuseCount in status)")
+			By("Verifying target labels match baseline (except RecycledCount in status)")
 			Expect(target.Labels[agentsv1alpha1.LabelSandboxIsClaimed]).To(Equal(baseline.Labels[agentsv1alpha1.LabelSandboxIsClaimed]))
 			Expect(target.Labels[agentsv1alpha1.LabelSandboxIsClaimed]).To(Equal("false"))
 			Expect(target.Labels[agentsv1alpha1.LabelSandboxPool]).To(Equal(baseline.Labels[agentsv1alpha1.LabelSandboxPool]))
@@ -238,8 +238,8 @@ var _ = Describe("Sandbox Reuse", func() {
 			Expect(target.Annotations).NotTo(HaveKey(agentsv1alpha1.AnnotationLock))
 			Expect(target.Annotations).NotTo(HaveKey(agentsv1alpha1.AnnotationOwner))
 			Expect(target.Annotations).NotTo(HaveKey(agentsv1alpha1.AnnotationClaimTime))
-			Expect(target.Annotations).NotTo(HaveKey(agentsv1alpha1.AnnotationReuse))
-			Expect(target.Annotations).NotTo(HaveKey(agentsv1alpha1.AnnotationReuseRetainOnFailure))
+			Expect(target.Annotations).NotTo(HaveKey(agentsv1alpha1.AnnotationCleanup))
+			Expect(target.Annotations).NotTo(HaveKey(agentsv1alpha1.AnnotationCleanupRetainOnFailure))
 			Expect(target.Annotations).NotTo(HaveKey(agentsv1alpha1.AnnotationInitRuntimeRequest))
 			Expect(target.Annotations).NotTo(HaveKey(agentsv1alpha1.AnnotationRuntimeAccessToken))
 			Expect(target.Annotations).NotTo(HaveKey(agentsv1alpha1.AnnotationUpdatedMetadataInClaim))
@@ -256,14 +256,14 @@ var _ = Describe("Sandbox Reuse", func() {
 		})
 	})
 
-	Context("Reuse failure", func() {
+	Context("Recycling failure", func() {
 		It("should delete sandbox immediately when reset fails without retain annotation", func() {
 			sandboxes := listPoolSandboxes()
 			Expect(sandboxes).To(HaveLen(2))
 			target := &sandboxes[0]
 
-			By("Triggering reuse without any retain-on-failure annotation")
-			triggerReuseAndFail(target)
+			By("Triggering recycle without any retain-on-failure annotation")
+			triggerRecycleAndFail(target)
 
 			By("Verifying sandbox is deleted immediately")
 			Eventually(func() bool {
@@ -277,9 +277,9 @@ var _ = Describe("Sandbox Reuse", func() {
 			target := &sandboxes[0]
 
 			By("Setting invalid retain-on-failure annotation")
-			setAnnotation(target, agentsv1alpha1.AnnotationReuseRetainOnFailure, "not-a-duration")
+			setAnnotation(target, agentsv1alpha1.AnnotationCleanupRetainOnFailure, "not-a-duration")
 
-			triggerReuseAndFail(target)
+			triggerRecycleAndFail(target)
 
 			By("Verifying sandbox is deleted immediately")
 			Eventually(func() bool {
@@ -293,9 +293,9 @@ var _ = Describe("Sandbox Reuse", func() {
 			target := &sandboxes[0]
 
 			By("Setting valid retain-on-failure annotation")
-			setAnnotation(target, agentsv1alpha1.AnnotationReuseRetainOnFailure, "5m")
+			setAnnotation(target, agentsv1alpha1.AnnotationCleanupRetainOnFailure, "5m")
 
-			triggerReuseAndFail(target)
+			triggerRecycleAndFail(target)
 
 			By("Verifying ShutdownTime is set")
 			Eventually(func() bool {
@@ -313,9 +313,9 @@ var _ = Describe("Sandbox Reuse", func() {
 			target := &sandboxes[0]
 
 			By("Setting short retain-on-failure annotation")
-			setAnnotation(target, agentsv1alpha1.AnnotationReuseRetainOnFailure, "10s")
+			setAnnotation(target, agentsv1alpha1.AnnotationCleanupRetainOnFailure, "10s")
 
-			triggerReuseAndFail(target)
+			triggerRecycleAndFail(target)
 
 			By("Waiting for ShutdownTime to be set")
 			Eventually(func() bool {
@@ -329,7 +329,7 @@ var _ = Describe("Sandbox Reuse", func() {
 			}, time.Second*60, time.Second).Should(BeTrue())
 		})
 
-		It("should fail reuse when template-hash does not match SandboxSet updateRevision", func() {
+		It("should fail recycle when template-hash does not match SandboxSet updateRevision", func() {
 			sandboxes := listPoolSandboxes()
 			Expect(sandboxes).To(HaveLen(2))
 			target := &sandboxes[0]
@@ -370,8 +370,8 @@ var _ = Describe("Sandbox Reuse", func() {
 				return sandboxSet.Status.UpdateRevision != "" && sandboxSet.Status.UpdateRevision != originalHash
 			}, time.Minute, time.Second).Should(BeTrue())
 
-			By("Triggering reuse on the target sandbox with outdated template-hash")
-			triggerReuse(target)
+			By("Triggering recycle on the target sandbox with outdated template-hash")
+			triggerRecycle(target)
 
 			By("Verifying sandbox is deleted due to template-hash mismatch")
 			Eventually(func() bool {
@@ -382,12 +382,12 @@ var _ = Describe("Sandbox Reuse", func() {
 })
 
 // This suite covers the CSI reset-signal write that runs before a sandbox is
-// returned to the pool. Unlike the reuse suite above (which uses the noop reuser
+// returned to the pool. Unlike the recycle suite above (which uses the noop recycler
 // and a bare nginx pod), it needs a pod running the real agent-runtime (envd)
 // sidecar, because the controller writes the reset signal through the
 // agent-runtime files API. It requires the controller to be started with
 // --csi-reset-signal-dir and the agent-runtime image to be available in-cluster.
-var _ = Describe("Sandbox Reuse CSI Reset Signal", func() {
+var _ = Describe("Sandbox Recycle CSI Reset Signal", func() {
 	var (
 		ctx        = context.Background()
 		namespace  string
@@ -399,7 +399,7 @@ var _ = Describe("Sandbox Reuse CSI Reset Signal", func() {
 		alwaysRestart := corev1.ContainerRestartPolicyAlways
 		sandboxSet = &agentsv1alpha1.SandboxSet{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      fmt.Sprintf("reuse-csi-pool-%d", time.Now().UnixNano()),
+				Name:      fmt.Sprintf("recycle-csi-pool-%d", time.Now().UnixNano()),
 				Namespace: namespace,
 			},
 			Spec: agentsv1alpha1.SandboxSetSpec{
@@ -473,7 +473,7 @@ var _ = Describe("Sandbox Reuse CSI Reset Signal", func() {
 		Expect(list.Items).To(HaveLen(1))
 		target := &list.Items[0]
 
-		By("Marking the sandbox as carrying a CSI mount and triggering reuse")
+		By("Marking the sandbox as carrying a CSI mount and triggering recycle")
 		Eventually(func() error {
 			latest := &agentsv1alpha1.Sandbox{}
 			if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(target), latest); err != nil {
@@ -484,21 +484,21 @@ var _ = Describe("Sandbox Reuse CSI Reset Signal", func() {
 				latest.Annotations = map[string]string{}
 			}
 			latest.Annotations[agentsv1alpha1.AnnotationCSIVolumeConfig] = `[{"mountPath":"/data"}]`
-			latest.Annotations[agentsv1alpha1.AnnotationReuseEnabled] = "true"
-			latest.Annotations[agentsv1alpha1.AnnotationReuse] = "true"
+			latest.Annotations[agentsv1alpha1.AnnotationCleanupEnabled] = "true"
+			latest.Annotations[agentsv1alpha1.AnnotationCleanup] = "true"
 			return k8sClient.Patch(ctx, latest, patch)
 		}, time.Second*10, time.Second).Should(Succeed())
 
-		// Reuse only succeeds if the controller wrote the reset-signal file into
+		// Recycle only succeeds if the controller wrote the reset-signal file into
 		// the sandbox through the agent-runtime files API. A failed write is a
-		// permanent reuse failure that deletes the sandbox, so observing a
-		// successful reuse (sandbox back in the pool with ReuseCount incremented)
+		// permanent recycle failure that deletes the sandbox, so observing a
+		// successful recycle (sandbox back in the pool with RecycledCount incremented)
 		// proves the write link works end to end.
-		By("Waiting for the sandbox to return to Running with ReuseCount incremented")
+		By("Waiting for the sandbox to return to Running with RecycledCount incremented")
 		Eventually(func(g Gomega) {
 			g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(target), target)).To(Succeed())
 			g.Expect(target.Status.Phase).To(Equal(agentsv1alpha1.SandboxRunning))
-			g.Expect(target.Status.ReuseCount).To(Equal(int32(1)))
+			g.Expect(target.Status.RecycledCount).To(Equal(int32(1)))
 		}, time.Minute*2, time.Second).Should(Succeed())
 	})
 })
