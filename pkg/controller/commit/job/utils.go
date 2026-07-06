@@ -39,7 +39,7 @@ const (
 // Job pod. Both the Job spec generator and downstream container-status readers
 // must reference this constant so that injected sidecars (e.g. service mesh
 // proxies) cannot accidentally pollute exit-code lookups.
-const AgentJobContainerName = "agent-job"
+const AgentJobContainerName = "commit-job"
 
 const (
 	ExitCodeSuccess              = 0

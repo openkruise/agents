@@ -59,6 +59,14 @@ func TestEnvConfig(t *testing.T) {
 		{name: "ContainerdSockPath override", envKey: EnvContainerdSockPath, envValue: "/var/run/custom/", getFunc: func(c *EnvConfig) string { return c.ContainerdSockPath() }, want: "/var/run/custom/"},
 		{name: "ContainerdSock default", envKey: EnvContainerdSock, envValue: "", getFunc: func(c *EnvConfig) string { return c.ContainerdSock() }, want: "/run/containerd/containerd.sock"},
 		{name: "ContainerdSock override", envKey: EnvContainerdSock, envValue: "/var/run/custom.sock", getFunc: func(c *EnvConfig) string { return c.ContainerdSock() }, want: "/var/run/custom.sock"},
+		{name: "ContainerName", envKey: EnvContainerName, envValue: "workspace", getFunc: func(c *EnvConfig) string { return c.ContainerName() }, want: "workspace"},
+		{name: "CommitNamespace", envKey: EnvCommitNamespace, envValue: "test-ns", getFunc: func(c *EnvConfig) string { return c.CommitNamespace() }, want: "test-ns"},
+		{name: "CommitName", envKey: EnvCommitName, envValue: "my-commit", getFunc: func(c *EnvConfig) string { return c.CommitName() }, want: "my-commit"},
+		{name: "CommitPodName", envKey: EnvCommitPodName, envValue: "pod-1", getFunc: func(c *EnvConfig) string { return c.CommitPodName() }, want: "pod-1"},
+		{name: "CommitPodNamespace", envKey: EnvCommitPodNamespace, envValue: "ns-1", getFunc: func(c *EnvConfig) string { return c.CommitPodNamespace() }, want: "ns-1"},
+		{name: "CommitPodUID", envKey: EnvCommitPodUID, envValue: "uid-abc", getFunc: func(c *EnvConfig) string { return c.CommitPodUID() }, want: "uid-abc"},
+		{name: "NerdctlHostsDir default", envKey: EnvNerdctlHostsDir, envValue: "", getFunc: func(c *EnvConfig) string { return c.NerdctlHostsDir() }, want: "/etc/containerd/certs.d"},
+		{name: "NerdctlHostsDir set", envKey: EnvNerdctlHostsDir, envValue: "/etc/containerd/certs.d", getFunc: func(c *EnvConfig) string { return c.NerdctlHostsDir() }, want: "/etc/containerd/certs.d"},
 	}
 
 	for _, tt := range tests {

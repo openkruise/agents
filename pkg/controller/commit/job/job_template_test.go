@@ -241,7 +241,7 @@ func TestGenerateCommitJob_Success(t *testing.T) {
 		t.Fatalf("expected 1 container, got %d", len(podSpec.Containers))
 	}
 	c := podSpec.Containers[0]
-	if c.Name != "agent-job" || c.Image != "agent-job:latest" {
+	if c.Name != "commit-job" || c.Image != "agent-job:latest" {
 		t.Errorf("unexpected container basics: name=%q image=%q", c.Name, c.Image)
 	}
 	if c.SecurityContext == nil || c.SecurityContext.RunAsUser == nil || *c.SecurityContext.RunAsUser != 0 {
