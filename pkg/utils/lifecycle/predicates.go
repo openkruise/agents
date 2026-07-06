@@ -33,10 +33,10 @@ func IsLiveForQuota(sbx *agentsv1alpha1.Sandbox) bool {
 	if !IsNotTerminating(sbx) {
 		return false
 	}
-	if sbx.Status.Phase == agentsv1alpha1.SandboxReusing {
+	if sbx.Status.Phase == agentsv1alpha1.SandboxRecycling {
 		return false
 	}
 	annotations := sbx.GetAnnotations()
-	return !(annotations[agentsv1alpha1.AnnotationReuse] == "true" &&
-		annotations[agentsv1alpha1.AnnotationReuseEnabled] == "true")
+	return !(annotations[agentsv1alpha1.AnnotationCleanup] == agentsv1alpha1.True &&
+		annotations[agentsv1alpha1.AnnotationCleanupEnabled] == agentsv1alpha1.True)
 }

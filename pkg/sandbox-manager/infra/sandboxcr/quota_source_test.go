@@ -66,8 +66,8 @@ func TestQuotaSnapshotFromSandbox(t *testing.T) {
 		{
 			name: "reuse requested sandbox is not live",
 			mutate: func(sbx *v1alpha1.Sandbox) {
-				sbx.Annotations[v1alpha1.AnnotationReuse] = "true"
-				sbx.Annotations[v1alpha1.AnnotationReuseEnabled] = "true"
+				sbx.Annotations[v1alpha1.AnnotationCleanup] = "true"
+				sbx.Annotations[v1alpha1.AnnotationCleanupEnabled] = "true"
 			},
 			wantOwner:  "owner-1",
 			wantLock:   "lock-1",
@@ -77,7 +77,7 @@ func TestQuotaSnapshotFromSandbox(t *testing.T) {
 		{
 			name: "reusing sandbox is not live",
 			mutate: func(sbx *v1alpha1.Sandbox) {
-				sbx.Status.Phase = v1alpha1.SandboxReusing
+				sbx.Status.Phase = v1alpha1.SandboxRecycling
 			},
 			wantOwner:  "owner-1",
 			wantLock:   "lock-1",
@@ -228,7 +228,7 @@ func TestQuotaSourceListLiveQuotaSandboxesByOwner(t *testing.T) {
 	dead := quotaSourceSandbox()
 	dead.Name = "dead"
 	dead.Annotations[v1alpha1.AnnotationLock] = "dead-lock"
-	dead.Status.Phase = v1alpha1.SandboxReusing
+	dead.Status.Phase = v1alpha1.SandboxRecycling
 	cache, _, err := cachetest.NewTestCache(t, live, dead)
 	require.NoError(t, err)
 	source := &Infra{Cache: cache}

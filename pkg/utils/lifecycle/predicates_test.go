@@ -57,13 +57,13 @@ func TestIsLiveForQuota(t *testing.T) {
 		{name: "running sandbox is live", sbx: &agentsv1alpha1.Sandbox{Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxRunning}}, want: true},
 		{name: "deletion timestamp is not live", sbx: &agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{DeletionTimestamp: &now}}, want: false},
 		{name: "terminating phase is not live", sbx: &agentsv1alpha1.Sandbox{Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxTerminating}}, want: false},
-		{name: "reusing phase is not live", sbx: &agentsv1alpha1.Sandbox{Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxReusing}}, want: false},
+		{name: "reusing phase is not live", sbx: &agentsv1alpha1.Sandbox{Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxRecycling}}, want: false},
 		{
 			name: "reuse trigger on reusable sandbox is not live",
 			sbx: &agentsv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
-					agentsv1alpha1.AnnotationReuse:        "true",
-					agentsv1alpha1.AnnotationReuseEnabled: "true",
+					agentsv1alpha1.AnnotationCleanup:        "true",
+					agentsv1alpha1.AnnotationCleanupEnabled: "true",
 				}},
 				Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxRunning},
 			},
@@ -72,7 +72,7 @@ func TestIsLiveForQuota(t *testing.T) {
 		{
 			name: "reuse trigger without reusable marker is live",
 			sbx: &agentsv1alpha1.Sandbox{
-				ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{agentsv1alpha1.AnnotationReuse: "true"}},
+				ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{agentsv1alpha1.AnnotationCleanup: "true"}},
 				Status:     agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxRunning},
 			},
 			want: true,
