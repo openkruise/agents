@@ -24,7 +24,7 @@ import (
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
-	"github.com/openkruise/agents/pkg/utils/lifecycle"
+	"github.com/openkruise/agents/pkg/utils"
 )
 
 func (i *Infra) GetQuotaSandboxSource() infra.QuotaSandboxSource {
@@ -125,7 +125,7 @@ func quotaSnapshotFromSandbox(sbx *v1alpha1.Sandbox) (infra.QuotaSandboxSnapshot
 	if sbx == nil {
 		return infra.QuotaSandboxSnapshot{}, false
 	}
-	live := lifecycle.IsLiveForQuota(sbx)
+	live := utils.IsLiveForQuota(sbx)
 	return infra.QuotaSandboxSnapshot{
 		Owner:      sbx.GetAnnotations()[v1alpha1.AnnotationOwner],
 		LockString: quotaLockStringOf(sbx),

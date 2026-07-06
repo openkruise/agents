@@ -23,7 +23,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/openkruise/agents/pkg/utils/lifecycle"
+	"github.com/openkruise/agents/pkg/utils"
 	"golang.org/x/sync/singleflight"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -43,7 +43,6 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/cache/controllers"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
-	"github.com/openkruise/agents/pkg/utils"
 )
 
 // watchErrorSettle is how long sandbox informer health stays conservative after
@@ -419,7 +418,7 @@ func (c *Cache) ListLiveSandboxesByOwner(ctx context.Context, owner string) ([]*
 	result := make([]*agentsv1alpha1.Sandbox, 0, len(list.Items))
 	for i := range list.Items {
 		sbx := &list.Items[i]
-		if !lifecycle.IsLiveForQuota(sbx) {
+		if !utils.IsLiveForQuota(sbx) {
 			continue
 		}
 		result = append(result, sbx)

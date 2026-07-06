@@ -130,8 +130,8 @@ func main() {
 	pflag.StringVar(&quotaRedisAddr, "quota-redis-addr", "", "Redis address for sandbox-manager quota enforcement. Empty disables enforcement and fails open.")
 	pflag.IntVar(&quotaRedisDB, "quota-redis-db", 0, "Redis DB for sandbox-manager quota enforcement.")
 	pflag.DurationVar(&quotaRedisOperationTimeout, "quota-redis-operation-timeout", consts.DefaultQuotaRedisOperationTimeout, "Per-operation timeout for Redis quota commands.")
-	pflag.IntVar(&quotaRedisBreakerN, "quota-redis-breaker-n", consts.DefaultQuotaRedisBreakerN, "Consecutive Redis quota backend errors required to open the fail-open breaker.")
-	pflag.DurationVar(&quotaRedisBreakerD, "quota-redis-breaker-d", consts.DefaultQuotaRedisBreakerD, "How long the Redis quota fail-open breaker stays open before probing again.")
+	pflag.IntVar(&quotaRedisBreakerN, "quota-redis-breaker-max-failures", consts.DefaultQuotaRedisBreakerN, "Consecutive Redis quota backend errors required to open the fail-open breaker.")
+	pflag.DurationVar(&quotaRedisBreakerD, "quota-redis-breaker-open-duration", consts.DefaultQuotaRedisBreakerD, "How long the Redis quota fail-open breaker stays open before probing again.")
 	pflag.DurationVar(&quotaAntiDriftInterval, "quota-anti-drift-interval", consts.DefaultQuotaAntiDriftInterval, "Interval for quota anti-drift reconciliation.")
 	pflag.DurationVar(&quotaAntiDriftGrace, "quota-anti-drift-grace", consts.DefaultQuotaAntiDriftGrace, "Grace period before periodic quota anti-drift releases suspected leaked entries.")
 

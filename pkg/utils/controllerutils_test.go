@@ -251,7 +251,7 @@ func TestDoItSlowly(t *testing.T) {
 		name             string
 		count            int
 		initialBatchSize int
-		failAtCall       int    // -1 means no failure
+		failAtCall       int // -1 means no failure
 		wantSuccesses    int
 		expectError      string
 	}{

@@ -331,6 +331,29 @@ func IsReservedFailedSandbox(labels map[string]string) bool {
 	return labels[agentsv1alpha1.LabelSandboxReservedFailed] == agentsv1alpha1.True
 }
 
+// IsNotTerminating reports whether sbx is a live sandbox that should count
+// towards quota. A sandbox is considered not-terminating when it is non-nil,
+// has no DeletionTimestamp, and is not in the Terminating phase.
+func IsNotTerminating(sbx *agentsv1alpha1.Sandbox) bool {
+	if sbx == nil {
+		return false
+	}
+	return sbx.GetDeletionTimestamp() == nil && sbx.Status.Phase != agentsv1alpha1.SandboxTerminating
+}
+
+// IsLiveForQuota reports whether sbx should still occupy API-key quota.
+func IsLiveForQuota(sbx *agentsv1alpha1.Sandbox) bool {
+	if !IsNotTerminating(sbx) {
+		return false
+	}
+	if sbx.Status.Phase == agentsv1alpha1.SandboxRecycling {
+		return false
+	}
+	annotations := sbx.GetAnnotations()
+	return !(annotations[agentsv1alpha1.AnnotationCleanup] == agentsv1alpha1.True &&
+		annotations[agentsv1alpha1.AnnotationCleanupEnabled] == agentsv1alpha1.True)
+}
+
 // IsSandboxPausable returns true when the pausing operation will not cause any conflict.
 func IsSandboxPausable(sbx *agentsv1alpha1.Sandbox) (bool, string) {
 	if IsControlledBySandboxSet(sbx) {
