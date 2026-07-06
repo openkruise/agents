@@ -71,7 +71,7 @@ func newTestRecycleControl(t *testing.T, objs []client.Object, recycler SandboxR
 		WithStatusSubresource(&agentsv1alpha1.Sandbox{}).
 		Build()
 	control := NewSandboxRecycleControl(fakeClient, record.NewFakeRecorder(10), SandboxRecycleConfig{
-		Recycler:     recycler,
+		Recycler:    recycler,
 		Timeout:     recycleTimeout,
 		GracePeriod: gracePeriod,
 	})
@@ -89,24 +89,24 @@ func TestEnsureSandboxRecycled(t *testing.T) {
 	}
 
 	tests := []struct {
-		name               string
-		recycler           *mockSandboxRecycler
-		recycleTimeout     time.Duration
-		recycleGracePeriod time.Duration
-		box                *agentsv1alpha1.Sandbox
-		pod                *corev1.Pod
-		newStatus          *agentsv1alpha1.SandboxStatus
-		sbs                *agentsv1alpha1.SandboxSet
-		csiResetSignalDir  string
-		csiWriteErr        error
-		expectError        string
-		expectPhase        agentsv1alpha1.SandboxPhase
-		expectRequeue      bool
+		name                string
+		recycler            *mockSandboxRecycler
+		recycleTimeout      time.Duration
+		recycleGracePeriod  time.Duration
+		box                 *agentsv1alpha1.Sandbox
+		pod                 *corev1.Pod
+		newStatus           *agentsv1alpha1.SandboxStatus
+		sbs                 *agentsv1alpha1.SandboxSet
+		csiResetSignalDir   string
+		csiWriteErr         error
+		expectError         string
+		expectPhase         agentsv1alpha1.SandboxPhase
+		expectRequeue       bool
 		expectRecycledCount int32
-		expectCondReason   string
-		expectShutdownTime bool
-		expectDeleted      bool
-		expectCSIWrite     bool
+		expectCondReason    string
+		expectShutdownTime  bool
+		expectDeleted       bool
+		expectCSIWrite      bool
 	}{
 		{
 			name:               "missing sandbox-pool label - recycle failed",
@@ -520,9 +520,9 @@ func TestEnsureSandboxRecycled(t *testing.T) {
 					},
 				},
 			},
-			expectPhase:        agentsv1alpha1.SandboxRunning,
+			expectPhase:         agentsv1alpha1.SandboxRunning,
 			expectRecycledCount: 1,
-			expectCondReason:   agentsv1alpha1.SandboxRecyclingReasonSucceeded,
+			expectCondReason:    agentsv1alpha1.SandboxRecyclingReasonSucceeded,
 		},
 		{
 			name: "recycle timeout - condition reason Timeout",
@@ -802,9 +802,9 @@ func TestEnsureSandboxRecycled(t *testing.T) {
 					},
 				},
 			},
-			expectPhase:        agentsv1alpha1.SandboxRunning,
+			expectPhase:         agentsv1alpha1.SandboxRunning,
 			expectRecycledCount: 1,
-			expectCondReason:   agentsv1alpha1.SandboxRecyclingReasonSucceeded,
+			expectCondReason:    agentsv1alpha1.SandboxRecyclingReasonSucceeded,
 		},
 		{
 			name: "first entry - Recycle returns non-retriable error - recycle failed",
@@ -1689,7 +1689,7 @@ func TestNewSandboxRecycleControl(t *testing.T) {
 	t.Run("explicit values are preserved", func(t *testing.T) {
 		recycler := &mockSandboxRecycler{}
 		control := NewSandboxRecycleControl(newFakeClient(), record.NewFakeRecorder(10), SandboxRecycleConfig{
-			Recycler:              recycler,
+			Recycler:             recycler,
 			Timeout:              30 * time.Second,
 			GracePeriod:          5 * time.Second,
 			FailureShutdownGrace: 10 * time.Second,

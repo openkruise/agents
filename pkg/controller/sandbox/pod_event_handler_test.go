@@ -1119,15 +1119,15 @@ func TestIsContainerStatusImageEqual(t *testing.T) {
 			expected: true,
 		},
 		{
-			name: "single container - images match",
-			old:  []corev1.ContainerStatus{{Name: "init-a", Image: "busybox:1.0"}},
-			new:  []corev1.ContainerStatus{{Name: "init-a", Image: "busybox:1.0"}},
+			name:     "single container - images match",
+			old:      []corev1.ContainerStatus{{Name: "init-a", Image: "busybox:1.0"}},
+			new:      []corev1.ContainerStatus{{Name: "init-a", Image: "busybox:1.0"}},
 			expected: true,
 		},
 		{
-			name: "single container - images differ",
-			old:  []corev1.ContainerStatus{{Name: "init-a", Image: "busybox:1.0"}},
-			new:  []corev1.ContainerStatus{{Name: "init-a", Image: "busybox:2.0"}},
+			name:     "single container - images differ",
+			old:      []corev1.ContainerStatus{{Name: "init-a", Image: "busybox:1.0"}},
+			new:      []corev1.ContainerStatus{{Name: "init-a", Image: "busybox:2.0"}},
 			expected: false,
 		},
 		{
@@ -1176,9 +1176,9 @@ func TestIsContainerStatusImageEqual(t *testing.T) {
 			expected: true,
 		},
 		{
-			name: "same count but different names",
-			old:  []corev1.ContainerStatus{{Name: "init-a", Image: "busybox:1.0"}},
-			new:  []corev1.ContainerStatus{{Name: "init-b", Image: "busybox:1.0"}},
+			name:     "same count but different names",
+			old:      []corev1.ContainerStatus{{Name: "init-a", Image: "busybox:1.0"}},
+			new:      []corev1.ContainerStatus{{Name: "init-b", Image: "busybox:1.0"}},
 			expected: false,
 		},
 	}

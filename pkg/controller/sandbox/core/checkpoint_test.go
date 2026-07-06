@@ -279,7 +279,7 @@ func TestListCheckpointsForSandbox(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name:              "test-sandbox-abc",
 						Namespace:         "default",
-						CreationTimestamp:  metav1.Now(),
+						CreationTimestamp: metav1.Now(),
 						OwnerReferences:   []metav1.OwnerReference{ownerRef},
 						Labels: map[string]string{
 							agentsv1alpha1.CheckpointLabelSandboxName: "test-sandbox",
@@ -304,7 +304,7 @@ func TestListCheckpointsForSandbox(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name:              "test-sandbox-old",
 						Namespace:         "default",
-						CreationTimestamp:  metav1.NewTime(metav1.Now().Add(-10 * 60 * 1e9)),
+						CreationTimestamp: metav1.NewTime(metav1.Now().Add(-10 * 60 * 1e9)),
 						OwnerReferences:   []metav1.OwnerReference{ownerRef},
 						Labels: map[string]string{
 							agentsv1alpha1.CheckpointLabelSandboxName: "test-sandbox",
@@ -316,7 +316,7 @@ func TestListCheckpointsForSandbox(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name:              "test-sandbox-new",
 						Namespace:         "default",
-						CreationTimestamp:  metav1.Now(),
+						CreationTimestamp: metav1.Now(),
 						OwnerReferences:   []metav1.OwnerReference{ownerRef},
 						Labels: map[string]string{
 							agentsv1alpha1.CheckpointLabelSandboxName: "test-sandbox",
@@ -514,9 +514,9 @@ func TestAssumePodCheckpointed(t *testing.T) {
 			expectReason: agentsv1alpha1.SandboxPausedReasonImageChanged,
 		},
 		{
-			name:         "image changed retry from ImageChanged reason",
-			enableGate:   true,
-			condReason:   agentsv1alpha1.SandboxPausedReasonImageChanged,
+			name:       "image changed retry from ImageChanged reason",
+			enableGate: true,
+			condReason: agentsv1alpha1.SandboxPausedReasonImageChanged,
 			pod: &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{Name: "test-sandbox", Namespace: "default", UID: "pod-uid-001"},
 				Spec: corev1.PodSpec{

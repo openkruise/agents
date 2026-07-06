@@ -164,14 +164,14 @@ func (m *mockSandboxForLabels) Pause(context.Context, PauseOptions) error { retu
 func (m *mockSandboxForLabels) Resume(context.Context, ResumeOptions) error {
 	return nil
 }
-func (m *mockSandboxForLabels) GetSandboxID() string             { return "" }
-func (m *mockSandboxForLabels) GetRoute() proxy.Route            { return proxy.Route{} }
-func (m *mockSandboxForLabels) GetState() (string, string)       { return "", "" }
-func (m *mockSandboxForLabels) GetTemplate() string              { return "" }
-func (m *mockSandboxForLabels) GetResource() SandboxResource     { return SandboxResource{} }
-func (m *mockSandboxForLabels) SetImage(string)                  {}
-func (m *mockSandboxForLabels) GetImage() string                 { return "" }
-func (m *mockSandboxForLabels) SetTimeout(timeout.Options)       {}
+func (m *mockSandboxForLabels) GetSandboxID() string         { return "" }
+func (m *mockSandboxForLabels) GetRoute() proxy.Route        { return proxy.Route{} }
+func (m *mockSandboxForLabels) GetState() (string, string)   { return "", "" }
+func (m *mockSandboxForLabels) GetTemplate() string          { return "" }
+func (m *mockSandboxForLabels) GetResource() SandboxResource { return SandboxResource{} }
+func (m *mockSandboxForLabels) SetImage(string)              {}
+func (m *mockSandboxForLabels) GetImage() string             { return "" }
+func (m *mockSandboxForLabels) SetTimeout(timeout.Options)   {}
 func (m *mockSandboxForLabels) SaveTimeoutWithPolicy(context.Context, timeout.Options, timeout.UpdatePolicy) (TimeoutUpdateResult, error) {
 	return TimeoutUpdateResult{}, nil
 }
@@ -179,10 +179,10 @@ func (m *mockSandboxForLabels) GetTimeout() timeout.Options { return timeout.Opt
 func (m *mockSandboxForLabels) GetClaimTime() (time.Time, error) {
 	return time.Time{}, nil
 }
-func (m *mockSandboxForLabels) Kill(context.Context) error             { return nil }
-func (m *mockSandboxForLabels) TriggerRecycle(context.Context) error     { return nil }
-func (m *mockSandboxForLabels) IsRecycleEnabled() bool                   { return false }
-func (m *mockSandboxForLabels) Phase() string                          { return "" }
+func (m *mockSandboxForLabels) Kill(context.Context) error           { return nil }
+func (m *mockSandboxForLabels) TriggerRecycle(context.Context) error { return nil }
+func (m *mockSandboxForLabels) IsRecycleEnabled() bool               { return false }
+func (m *mockSandboxForLabels) Phase() string                        { return "" }
 func (m *mockSandboxForLabels) InplaceRefresh(context.Context, bool) error {
 	return nil
 }

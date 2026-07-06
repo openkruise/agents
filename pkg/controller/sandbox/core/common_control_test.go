@@ -576,8 +576,8 @@ func TestCommonControl_EnsureSandboxUpdated_InitializePath(t *testing.T) {
 			expectError: "runtime init failed",
 		},
 		{
-			name: "pod ready, init failed, retries initialize and succeeds",
-			pod:  readyPod,
+			name:        "pod ready, init failed, retries initialize and succeeds",
+			pod:         readyPod,
 			initializer: &mockSandboxInitializer{},
 			conditions: []metav1.Condition{
 				{
@@ -3294,4 +3294,3 @@ func TestCommonControl_performRecreateUpgrade_InitializerPath(t *testing.T) {
 		})
 	}
 }
-

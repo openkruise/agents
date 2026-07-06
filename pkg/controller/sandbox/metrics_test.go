@@ -2358,12 +2358,12 @@ func TestStaleUnpausedMetricReset(t *testing.T) {
 func TestSandboxStatusAbnormalTime(t *testing.T) {
 	now := metav1.NewTime(time.Now())
 	tests := []struct {
-		name             string
-		abnormalPhase    agentsv1alpha1.SandboxPhase
-		abnormalConds    []metav1.Condition
-		abnormalType     string
-		normalPhase      agentsv1alpha1.SandboxPhase
-		normalConds      []metav1.Condition
+		name          string
+		abnormalPhase agentsv1alpha1.SandboxPhase
+		abnormalConds []metav1.Condition
+		abnormalType  string
+		normalPhase   agentsv1alpha1.SandboxPhase
+		normalConds   []metav1.Condition
 	}{
 		{
 			name:          "resume_incomplete",
@@ -2385,9 +2385,9 @@ func TestSandboxStatusAbnormalTime(t *testing.T) {
 			name:          "pause_incomplete",
 			abnormalPhase: agentsv1alpha1.SandboxPaused,
 			abnormalConds: nil, // No Paused condition → abnormal
-			abnormalType: "pause_incomplete",
-			normalPhase:  agentsv1alpha1.SandboxRunning,
-			normalConds:  nil,
+			abnormalType:  "pause_incomplete",
+			normalPhase:   agentsv1alpha1.SandboxRunning,
+			normalConds:   nil,
 		},
 	}
 

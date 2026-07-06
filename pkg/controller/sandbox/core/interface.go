@@ -95,7 +95,7 @@ type FailedReason interface {
 
 // SandboxRecycleConfig groups all recycle-related configuration for the sandbox controller.
 type SandboxRecycleConfig struct {
-	Recycler              SandboxRecycler
+	Recycler             SandboxRecycler
 	Timeout              time.Duration
 	GracePeriod          time.Duration
 	FailureShutdownGrace time.Duration
