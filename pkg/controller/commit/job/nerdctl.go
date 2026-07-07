@@ -38,20 +38,38 @@ func WithArgs(args ...string) CmdOpt {
 	}
 }
 
+// WithBinary overrides the binary path (for testing).
+func WithBinary(bin string) CmdOpt {
+	return func(cmd *exec.Cmd) {
+		cmd.Path = bin
+	}
+}
+
 // NerdctlExec executes a nerdctl command with the given options.
 func NerdctlExec(ctx context.Context, opts ...CmdOpt) error {
 	presetArgs := []string{
+		"nerdctl",
 		"--debug",
 		"--namespace=k8s.io",
 		fmt.Sprintf("--host=%s", Config().ContainerdSock()),
+		fmt.Sprintf("--hosts-dir=%s", DefaultNerdctlHostsDir),
 	}
-	presetArgs = append(presetArgs, fmt.Sprintf("--hosts-dir=%s", DefaultNerdctlHostsDir))
-	cmd := exec.Command("nerdctl", presetArgs...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.SysProcAttr = &syscall.SysProcAttr{}
+	cmd := &exec.Cmd{
+		Args:        presetArgs,
+		Stdout:      os.Stdout,
+		Stderr:      os.Stderr,
+		SysProcAttr: &syscall.SysProcAttr{},
+	}
 	for _, opt := range opts {
 		opt(cmd)
+	}
+	// Resolve binary path after opts (WithBinary may override cmd.Path)
+	if cmd.Path == "" {
+		p, err := exec.LookPath("nerdctl")
+		if err != nil {
+			return fmt.Errorf("start cmd failed: %w", err)
+		}
+		cmd.Path = p
 	}
 	stdErrBuf := &bytes.Buffer{}
 	cmd.Stderr = io.MultiWriter(cmd.Stderr, stdErrBuf)

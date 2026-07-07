@@ -34,3 +34,25 @@ func TestSetupRegistryAuth_NoSecret(t *testing.T) {
 		t.Errorf("DOCKER_CONFIG should not be set when secret is absent")
 	}
 }
+
+func TestSetupRegistryAuth_WithSecret(t *testing.T) {
+	// Create a temp directory simulating the mounted secret
+	tmpDir := t.TempDir()
+	configPath := tmpDir + "/config.json"
+	if err := os.WriteFile(configPath, []byte(`{"auths":{}}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Temporarily override registryConfigDir by testing the internal logic directly.
+	// Since registryConfigDir is a const, we test via setupRegistryAuthFrom helper.
+	os.Unsetenv("DOCKER_CONFIG")
+	err := setupRegistryAuthFrom(tmpDir)
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if got := os.Getenv("DOCKER_CONFIG"); got != tmpDir {
+		t.Errorf("DOCKER_CONFIG = %q, want %q", got, tmpDir)
+	}
+	// Cleanup
+	os.Unsetenv("DOCKER_CONFIG")
+}

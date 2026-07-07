@@ -33,14 +33,19 @@ const registryConfigDir = "/var/run/secrets/registry"
 // setupRegistryAuth sets DOCKER_CONFIG to point at the mounted registry secret directory.
 // If no secret is mounted, it does nothing (anonymous push).
 func setupRegistryAuth() error {
-	configPath := registryConfigDir + "/config.json"
+	return setupRegistryAuthFrom(registryConfigDir)
+}
+
+// setupRegistryAuthFrom is the testable implementation that accepts a configDir parameter.
+func setupRegistryAuthFrom(configDir string) error {
+	configPath := configDir + "/config.json"
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
 		klog.InfoS("No registry secret mounted, skipping auth setup")
 		return nil
 	}
-	if err := os.Setenv("DOCKER_CONFIG", registryConfigDir); err != nil {
+	if err := os.Setenv("DOCKER_CONFIG", configDir); err != nil {
 		return err
 	}
-	klog.InfoS("Registry authentication configured", "dir", registryConfigDir)
+	klog.InfoS("Registry authentication configured", "dir", configDir)
 	return nil
 }

@@ -23,9 +23,19 @@ import (
 	"k8s.io/klog/v2"
 )
 
+// Executor defines the interface for running nerdctl commands.
+type Executor func(ctx context.Context, opts ...CmdOpt) error
+
+// defaultExecutor is the production executor.
+var defaultExecutor Executor = NerdctlExec
+
 // DoCommit is the main entry point for the commit-job binary.
 // It performs: setup registry auth → nerdctl commit → nerdctl push.
 func DoCommit(ctx context.Context) int {
+	return doCommitWith(ctx, defaultExecutor)
+}
+
+func doCommitWith(ctx context.Context, executor Executor) int {
 	containerID := Config().ContainerID()
 	image := Config().CommitImage()
 
@@ -38,7 +48,7 @@ func DoCommit(ctx context.Context) int {
 
 	// 2. nerdctl commit
 	start := time.Now()
-	if err := NerdctlExec(ctx, WithArgs("commit", containerID, image)); err != nil {
+	if err := executor(ctx, WithArgs("commit", containerID, image)); err != nil {
 		klog.ErrorS(err, "Commit failed", "containerID", containerID, "image", image)
 		return ExitCodeCommitFailed
 	}
@@ -47,7 +57,7 @@ func DoCommit(ctx context.Context) int {
 	// 3. nerdctl push
 	klog.InfoS("Start to push image", "image", image)
 	start = time.Now()
-	if err := NerdctlExec(ctx, WithArgs("push", image)); err != nil {
+	if err := executor(ctx, WithArgs("push", image)); err != nil {
 		klog.ErrorS(err, "Push failed", "image", image)
 		return ExitCodePushFailed
 	}

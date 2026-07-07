@@ -18,6 +18,7 @@ package job
 
 import (
 	"context"
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -33,6 +34,21 @@ func TestNerdctlExec_BinaryNotFound(t *testing.T) {
 	}
 }
 
+func TestNerdctlExec_WaitFailed(t *testing.T) {
+	// Use "false" binary which exits with code 1 to cover the Wait() error path.
+	falseBin, err := exec.LookPath("false")
+	if err != nil {
+		t.Skip("false binary not available")
+	}
+	err = NerdctlExec(context.Background(), WithBinary(falseBin))
+	if err == nil {
+		t.Fatal("expected error from false binary")
+	}
+	if !strings.Contains(err.Error(), "nerdctl output") {
+		t.Errorf("unexpected error format: %v", err)
+	}
+}
+
 func TestNerdctlExec_ContextCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel immediately
@@ -44,13 +60,26 @@ func TestNerdctlExec_ContextCancelled(t *testing.T) {
 }
 
 func TestWithArgs(t *testing.T) {
-	// Verify WithArgs appends correctly
-	args := []string{"nerdctl", "--debug"}
+	cmd := exec.Command("echo")
+	cmd.Args = []string{"nerdctl", "--debug"}
 	opt := WithArgs("commit", "abc123", "image:v1")
-	// Simulate what NerdctlExec does
-	type fakeCmd struct{ Args []string }
-	cmd := &fakeCmd{Args: args}
-	// Can't directly test on exec.Cmd without running, so just verify the type exists
-	_ = opt
-	_ = cmd
+	opt(cmd)
+	want := []string{"nerdctl", "--debug", "commit", "abc123", "image:v1"}
+	if len(cmd.Args) != len(want) {
+		t.Fatalf("Args length = %d, want %d", len(cmd.Args), len(want))
+	}
+	for i, arg := range cmd.Args {
+		if arg != want[i] {
+			t.Errorf("Args[%d] = %q, want %q", i, arg, want[i])
+		}
+	}
+}
+
+func TestWithBinary(t *testing.T) {
+	cmd := exec.Command("nerdctl")
+	opt := WithBinary("/usr/bin/false")
+	opt(cmd)
+	if cmd.Path != "/usr/bin/false" {
+		t.Errorf("Path = %q, want /usr/bin/false", cmd.Path)
+	}
 }
