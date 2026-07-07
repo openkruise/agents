@@ -686,7 +686,7 @@ func TestCreateSandboxCleanupDeletedAPIKeyIgnoresNilSandbox(t *testing.T) {
 	controller, _, teardown := Setup(t)
 	defer teardown()
 
-	controller.cleanupSandboxForDeletedAPIKey(t.Context(), nil)
+	controller.cleanupSandboxForDeletedAPIKey(t.Context(), nil, nil)
 }
 
 func TestCreateSandboxReturnsUnauthorizedWhenDeletedKeyCleanupFails(t *testing.T) {
