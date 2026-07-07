@@ -51,6 +51,19 @@ func buildTestScheme(t *testing.T) *runtime.Scheme {
 	return scheme
 }
 
+func mustGetInPlaceUpdateStateFromPod(t *testing.T, pod *corev1.Pod) *InPlaceUpdateState {
+	t.Helper()
+	raw := pod.Annotations[PodAnnotationInPlaceUpdateStateKey]
+	if raw == "" {
+		t.Fatalf("expected inplace update state annotation on pod %s/%s", pod.Namespace, pod.Name)
+	}
+	state := &InPlaceUpdateState{}
+	if err := json.Unmarshal([]byte(raw), state); err != nil {
+		t.Fatalf("decode inplace update state: %v", err)
+	}
+	return state
+}
+
 func TestGetPodInPlaceUpdateState(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -436,6 +449,10 @@ func TestInPlaceUpdateControl_Update_ResizeViaSubresource(t *testing.T) {
 	if got := updated.Spec.Containers[0].Resources.Limits[injectedResource]; got.Cmp(resource.MustParse("1")) != 0 {
 		t.Fatalf("expected injected limit to be preserved, got %s", got.String())
 	}
+	state := mustGetInPlaceUpdateStateFromPod(t, updated)
+	if !state.UpdateResources {
+		t.Fatalf("expected UpdateResources=true after resize, got %+v", state)
+	}
 }
 
 func TestInPlaceUpdateControl_Update_ResizeFallbackToDirectPatch(t *testing.T) {
@@ -809,7 +826,7 @@ func TestInPlaceUpdateControl_Update_ResizeConflictRetryNoLongerNeeded(t *testin
 			}
 			resizeAttempts++
 			// Simulate that another actor has already applied the resize, so
-			// recomputing resizeBody from the latest pod returns nil and the
+			// recomputing resize containers from the latest pod returns nil and the
 			// retry loop should exit successfully without a re-attempt.
 			latest := &corev1.Pod{}
 			if err := c.Get(ctx, client.ObjectKeyFromObject(obj), latest); err != nil {
@@ -843,6 +860,23 @@ func TestInPlaceUpdateControl_Update_ResizeConflictRetryNoLongerNeeded(t *testin
 	if resizeAttempts != 1 {
 		t.Fatalf("expected exactly 1 resize attempt (no retry needed when resize is no-op), got %d",
 			resizeAttempts)
+	}
+
+	updated := &corev1.Pod{}
+	if err := ctrl.Get(context.Background(),
+		types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace}, updated); err != nil {
+		t.Fatalf("get updated pod: %v", err)
+	}
+	if updated.Labels[agentsv1alpha1.PodLabelTemplateHash] != "rev" {
+		t.Fatalf("expected pod-template-hash=rev, got %q", updated.Labels[agentsv1alpha1.PodLabelTemplateHash])
+	}
+	state := mustGetInPlaceUpdateStateFromPod(t, updated)
+	if !state.UpdateResources {
+		t.Fatalf("expected UpdateResources=true when retry finds resize already applied, got %+v", state)
+	}
+	cpuReq := updated.Spec.Containers[0].Resources.Requests[corev1.ResourceCPU]
+	if cpuReq.MilliValue() != 750 {
+		t.Fatalf("expected cpu request=750m after conflict handoff, got %dm", cpuReq.MilliValue())
 	}
 }
 
@@ -940,19 +974,13 @@ func TestInPlaceUpdateControl_PatchPodResources_Conflict(t *testing.T) {
 		},
 	})
 	ctrl := NewInPlaceUpdateControl(wrapped, nil)
-
-	resizeBody := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "default"},
-		Spec: corev1.PodSpec{
-			Containers: []corev1.Container{{
-				Name: "c",
-				Resources: corev1.ResourceRequirements{
-					Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")},
-				},
-			}},
+	resizeContainers := []corev1.Container{{
+		Name: "c",
+		Resources: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")},
 		},
-	}
-	err := ctrl.patchPodResources(context.Background(), klog.NewKlogr(), pod, resizeBody)
+	}}
+	err := ctrl.patchPodResources(context.Background(), klog.NewKlogr(), pod, resizeContainers)
 	if err == nil {
 		t.Fatalf("expected error from conflicted patch")
 	}
@@ -1143,25 +1171,21 @@ func TestResizeNotSupportedError(t *testing.T) {
 }
 
 func TestBuildResourcePatch(t *testing.T) {
-	body := &corev1.Pod{
-		Spec: corev1.PodSpec{
-			Containers: []corev1.Container{
-				{
-					Name: "c1",
-					Resources: corev1.ResourceRequirements{
-						Requests: corev1.ResourceList{
-							corev1.ResourceCPU: resource.MustParse("250m"),
-						},
-						Limits: corev1.ResourceList{
-							corev1.ResourceMemory: resource.MustParse("128Mi"),
-						},
-					},
+	containers := []corev1.Container{
+		{
+			Name: "c1",
+			Resources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("250m"),
 				},
-				{Name: "c2"},
+				Limits: corev1.ResourceList{
+					corev1.ResourceMemory: resource.MustParse("128Mi"),
+				},
 			},
 		},
+		{Name: "c2"},
 	}
-	patch := buildResourcePatch(body)
+	patch := buildResourcePatch(containers)
 	if patch == "" {
 		t.Fatalf("expected non-empty patch")
 	}
@@ -1173,30 +1197,30 @@ func TestBuildResourcePatch(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected spec in patch, got %v", parsed)
 	}
-	containers, ok := spec["containers"].([]any)
+	patchContainers, ok := spec["containers"].([]any)
 	if !ok {
 		t.Fatalf("expected containers slice, got %v", spec)
 	}
-	if len(containers) != 2 {
-		t.Fatalf("expected 2 containers, got %d", len(containers))
+	if len(patchContainers) != 2 {
+		t.Fatalf("expected 2 containers, got %d", len(patchContainers))
 	}
 	if _, exists := parsed["metadata"]; exists {
 		t.Fatalf("resource patch should not include metadata")
 	}
 }
 
-func TestDefaultGenerateResizeSubresourceBody_NilTemplateAndNoChange(t *testing.T) {
-	if got := DefaultGenerateResizeSubresourceBody(InPlaceUpdateOptions{
+func TestDefaultBuildResizeContainers_NilTemplateAndNoChange(t *testing.T) {
+	if got := DefaultBuildResizeContainers(InPlaceUpdateOptions{
 		Box: &agentsv1alpha1.Sandbox{},
 		Pod: &corev1.Pod{},
 	}); got != nil {
-		t.Fatalf("expected nil body when template is nil, got %+v", got)
+		t.Fatalf("expected nil resize containers when template is nil, got %+v", got)
 	}
 
 	identical := corev1.ResourceRequirements{
 		Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m")},
 	}
-	body := DefaultGenerateResizeSubresourceBody(InPlaceUpdateOptions{
+	resizeContainers := DefaultBuildResizeContainers(InPlaceUpdateOptions{
 		Box: &agentsv1alpha1.Sandbox{
 			Spec: agentsv1alpha1.SandboxSpec{
 				EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
@@ -1220,8 +1244,8 @@ func TestDefaultGenerateResizeSubresourceBody_NilTemplateAndNoChange(t *testing.
 			},
 		},
 	})
-	if body != nil {
-		t.Fatalf("expected nil body when no resource changes, got %+v", body)
+	if resizeContainers != nil {
+		t.Fatalf("expected nil resize containers when no resource changes, got %+v", resizeContainers)
 	}
 }
 
@@ -1331,6 +1355,147 @@ func TestDefaultGeneratePatchBodyFunc_ImageOnly(t *testing.T) {
 	}
 	if state.LastContainerStatuses["c"].ImageID != "old-id" {
 		t.Fatalf("expected previous image id captured, got %+v", state.LastContainerStatuses)
+	}
+}
+
+func TestDefaultGeneratePatchBodyFunc_IgnoresInjectedOrEquivalentResources(t *testing.T) {
+	tests := []struct {
+		name                string
+		templateImage       string
+		podImage            string
+		templateResources   corev1.ResourceRequirements
+		podResources        corev1.ResourceRequirements
+		wantPatch           bool
+		wantUpdateImages    bool
+		wantUpdateResources bool
+	}{
+		{
+			name:          "extra ephemeral storage does not trigger resource update",
+			templateImage: "img:1",
+			podImage:      "img:1",
+			templateResources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("500m"),
+				},
+			},
+			podResources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU:              resource.MustParse("500m"),
+					corev1.ResourceEphemeralStorage: resource.MustParse("1Gi"),
+				},
+			},
+		},
+		{
+			name:          "equivalent cpu quantity does not trigger resource update",
+			templateImage: "img:1",
+			podImage:      "img:1",
+			templateResources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("1000m"),
+				},
+			},
+			podResources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("1"),
+				},
+			},
+		},
+		{
+			name:          "image change with injected resource does not set resource update",
+			templateImage: "img:2",
+			podImage:      "img:1",
+			templateResources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("500m"),
+				},
+			},
+			podResources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU:              resource.MustParse("500m"),
+					corev1.ResourceEphemeralStorage: resource.MustParse("1Gi"),
+				},
+			},
+			wantPatch:        true,
+			wantUpdateImages: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			const revision = "rev-current"
+			body := DefaultGeneratePatchBodyFunc(InPlaceUpdateOptions{
+				Box: &agentsv1alpha1.Sandbox{
+					Spec: agentsv1alpha1.SandboxSpec{
+						EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+							Template: &corev1.PodTemplateSpec{
+								Spec: corev1.PodSpec{
+									Containers: []corev1.Container{
+										{
+											Name:      "main",
+											Image:     tt.templateImage,
+											Resources: tt.templateResources,
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+				Pod: &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "p",
+						Namespace: "default",
+						Labels: map[string]string{
+							agentsv1alpha1.PodLabelTemplateHash: revision,
+						},
+					},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name:      "main",
+								Image:     tt.podImage,
+								Resources: tt.podResources,
+							},
+						},
+					},
+					Status: corev1.PodStatus{
+						ContainerStatuses: []corev1.ContainerStatus{
+							{Name: "main", ImageID: "img:1@sha256:old"},
+						},
+					},
+				},
+				Revision: revision,
+			})
+
+			if !tt.wantPatch {
+				if body != "" {
+					t.Fatalf("expected empty patch body, got %s", body)
+				}
+				return
+			}
+			if body == "" {
+				t.Fatalf("expected non-empty patch body")
+			}
+
+			var decoded map[string]any
+			if err := json.Unmarshal([]byte(body), &decoded); err != nil {
+				t.Fatalf("unmarshal patch: %v", err)
+			}
+			metadata, _ := decoded["metadata"].(map[string]any)
+			annotations, _ := metadata["annotations"].(map[string]any)
+			stateRaw, ok := annotations[PodAnnotationInPlaceUpdateStateKey].(string)
+			if !ok || stateRaw == "" {
+				t.Fatalf("expected inplace update state annotation, got %v", annotations)
+			}
+			state := &InPlaceUpdateState{}
+			if err := json.Unmarshal([]byte(stateRaw), state); err != nil {
+				t.Fatalf("decode state: %v", err)
+			}
+			if state.UpdateImages != tt.wantUpdateImages || state.UpdateResources != tt.wantUpdateResources {
+				t.Fatalf("unexpected update state: got images=%v resources=%v, want images=%v resources=%v",
+					state.UpdateImages, state.UpdateResources, tt.wantUpdateImages, tt.wantUpdateResources)
+			}
+		})
 	}
 }
 
@@ -1717,11 +1882,11 @@ func TestResourceOnlyUpdatePayloads(t *testing.T) {
 		t.Fatalf("resource-only patch should not contain spec, got: %s", patchBody)
 	}
 
-	resizeBody := DefaultGenerateResizeSubresourceBody(opts)
-	if resizeBody == nil {
-		t.Fatalf("expected resize subresource body")
+	resizeContainers := DefaultBuildResizeContainers(opts)
+	if len(resizeContainers) == 0 {
+		t.Fatalf("expected resize containers")
 	}
-	got := resizeBody.Spec.Containers[0].Resources.Requests[corev1.ResourceCPU]
+	got := resizeContainers[0].Resources.Requests[corev1.ResourceCPU]
 	if got.MilliValue() != 1000 {
 		t.Fatalf("expected cpu request=1000m, got=%dm", got.MilliValue())
 	}
@@ -2329,19 +2494,17 @@ func TestComputeQoSClass(t *testing.T) {
 	}
 }
 
-func TestDefaultGenerateResizeSubresourceBody_MinimalFields(t *testing.T) {
+func TestDefaultBuildResizeContainers_MinimalFields(t *testing.T) {
 	tests := []struct {
 		name                   string
 		box                    *agentsv1alpha1.Sandbox
 		pod                    *corev1.Pod
 		expectNil              bool
 		expectContainerCount   int
-		expectInitCount        int
 		verifyContainerMinimal bool
-		verifyInitMinimal      bool
 	}{
 		{
-			name: "main containers have no Image field in resizeBody",
+			name: "resize containers have no Image field",
 			box: &agentsv1alpha1.Sandbox{
 				Spec: agentsv1alpha1.SandboxSpec{
 					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
@@ -2381,11 +2544,10 @@ func TestDefaultGenerateResizeSubresourceBody_MinimalFields(t *testing.T) {
 			},
 			expectNil:              false,
 			expectContainerCount:   1,
-			expectInitCount:        0,
 			verifyContainerMinimal: true,
 		},
 		{
-			name: "initContainers only contain Name and Resources",
+			name: "initContainers are ignored by resize containers",
 			box: &agentsv1alpha1.Sandbox{
 				Spec: agentsv1alpha1.SandboxSpec{
 					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
@@ -2447,10 +2609,9 @@ func TestDefaultGenerateResizeSubresourceBody_MinimalFields(t *testing.T) {
 					},
 				},
 			},
-			expectNil:            false,
-			expectContainerCount: 1,
-			expectInitCount:      0,
-			verifyInitMinimal:    false,
+			expectNil:              false,
+			expectContainerCount:   1,
+			verifyContainerMinimal: true,
 		},
 		{
 			name: "multiple containers all minimal",
@@ -2505,35 +2666,31 @@ func TestDefaultGenerateResizeSubresourceBody_MinimalFields(t *testing.T) {
 			},
 			expectNil:              false,
 			expectContainerCount:   2,
-			expectInitCount:        0,
 			verifyContainerMinimal: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			body := DefaultGenerateResizeSubresourceBody(InPlaceUpdateOptions{
+			resizeContainers := DefaultBuildResizeContainers(InPlaceUpdateOptions{
 				Box: tt.box,
 				Pod: tt.pod,
 			})
 			if tt.expectNil {
-				if body != nil {
-					t.Fatalf("expected nil body, got %+v", body)
+				if resizeContainers != nil {
+					t.Fatalf("expected nil resize containers, got %+v", resizeContainers)
 				}
 				return
 			}
-			if body == nil {
-				t.Fatalf("expected non-nil body")
+			if len(resizeContainers) == 0 {
+				t.Fatalf("expected non-empty resize containers")
 			}
-			if len(body.Spec.Containers) != tt.expectContainerCount {
-				t.Fatalf("expected %d containers, got %d", tt.expectContainerCount, len(body.Spec.Containers))
-			}
-			if len(body.Spec.InitContainers) != tt.expectInitCount {
-				t.Fatalf("expected %d initContainers, got %d", tt.expectInitCount, len(body.Spec.InitContainers))
+			if len(resizeContainers) != tt.expectContainerCount {
+				t.Fatalf("expected %d containers, got %d", tt.expectContainerCount, len(resizeContainers))
 			}
 
 			if tt.verifyContainerMinimal {
-				for i, c := range body.Spec.Containers {
+				for i, c := range resizeContainers {
 					if c.Image != "" {
 						t.Errorf("container[%d] %q should have empty Image, got %q", i, c.Name, c.Image)
 					}
@@ -2549,27 +2706,6 @@ func TestDefaultGenerateResizeSubresourceBody_MinimalFields(t *testing.T) {
 				}
 			}
 
-			if tt.verifyInitMinimal {
-				for i, c := range body.Spec.InitContainers {
-					if c.Image != "" {
-						t.Errorf("initContainer[%d] %q should have empty Image, got %q", i, c.Name, c.Image)
-					}
-					if c.Name == "" {
-						t.Errorf("initContainer[%d] should have a Name", i)
-					}
-					if len(c.VolumeMounts) > 0 {
-						t.Errorf("initContainer[%d] %q should have no VolumeMounts", i, c.Name)
-					}
-					if len(c.Command) > 0 {
-						t.Errorf("initContainer[%d] %q should have no Command", i, c.Name)
-					}
-					// Verify that Resources are preserved
-					podInit := tt.pod.Spec.InitContainers[i]
-					if c.Resources.Requests == nil && podInit.Resources.Requests != nil {
-						t.Errorf("initContainer[%d] %q lost its Resources.Requests", i, c.Name)
-					}
-				}
-			}
 		})
 	}
 }
@@ -2940,7 +3076,7 @@ func TestResourcesEqual(t *testing.T) {
 	}
 }
 
-func TestDefaultGenerateResizeSubresourceBody_NoResizeWhenExtraOrUnitDiff(t *testing.T) {
+func TestDefaultBuildResizeContainers_NoResizeWhenExtraOrUnitDiff(t *testing.T) {
 	tests := []struct {
 		name string
 		box  *agentsv1alpha1.Sandbox
@@ -3046,18 +3182,18 @@ func TestDefaultGenerateResizeSubresourceBody_NoResizeWhenExtraOrUnitDiff(t *tes
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := DefaultGenerateResizeSubresourceBody(InPlaceUpdateOptions{
+			result := DefaultBuildResizeContainers(InPlaceUpdateOptions{
 				Box: tt.box,
 				Pod: tt.pod,
 			})
 			if result != nil {
-				t.Errorf("expected nil (no resize needed), but got a resize body")
+				t.Errorf("expected nil (no resize needed), but got resize containers")
 			}
 		})
 	}
 }
 
-func TestDefaultGenerateResizeSubresourceBody_OnlyIncludesDesiredResources(t *testing.T) {
+func TestDefaultBuildResizeContainers_OnlyIncludesDesiredResources(t *testing.T) {
 	injectedResource := corev1.ResourceName("test-resource")
 	tests := []struct {
 		name string
@@ -3122,26 +3258,23 @@ func TestDefaultGenerateResizeSubresourceBody_OnlyIncludesDesiredResources(t *te
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := DefaultGenerateResizeSubresourceBody(InPlaceUpdateOptions{
+			result := DefaultBuildResizeContainers(InPlaceUpdateOptions{
 				Box: tt.box,
 				Pod: tt.pod,
 			})
-			if result == nil {
-				t.Fatalf("expected non-nil resize body, but got nil")
+			if len(result) == 0 {
+				t.Fatalf("expected non-zero resize containers, but got zero")
 			}
-			if len(result.Spec.Containers) == 0 {
-				t.Fatalf("expected at least one container in resize body")
-			}
-			c := result.Spec.Containers[0]
+			c := result[0]
 
 			if _, ok := c.Resources.Requests[corev1.ResourceEphemeralStorage]; ok {
-				t.Errorf("expected resize body to omit ephemeral-storage request")
+				t.Errorf("expected resize containers to omit ephemeral-storage request")
 			}
 			if _, ok := c.Resources.Requests[injectedResource]; ok {
-				t.Errorf("expected resize body to omit injected request")
+				t.Errorf("expected resize containers to omit injected request")
 			}
 			if _, ok := c.Resources.Limits[injectedResource]; ok {
-				t.Errorf("expected resize body to omit injected limit")
+				t.Errorf("expected resize containers to omit injected limit")
 			}
 
 			gotReqCPU, ok := c.Resources.Requests[corev1.ResourceCPU]
