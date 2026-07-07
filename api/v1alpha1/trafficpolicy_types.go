@@ -89,13 +89,15 @@ type TrafficPolicyPeer struct {
 	Workload *TrafficPolicyWorkloadRef `json:"workload,omitempty"`
 }
 
-// TrafficPolicyPort restricts a rule to specific TCP port ranges.
-// Currently only TCP is supported.
-// If Port is nil, there is no L4 match (matches all TCP ports).
+// TrafficPolicyPort restricts a rule to specific protocol/port combinations.
+// If Protocol is non-empty and Port is nil, matches all ports of that protocol.
 //
 // +kubebuilder:validation:XValidation:rule="!has(self.endPort) || has(self.port)",message="endPort requires port to be set"
 // +kubebuilder:validation:XValidation:rule="!has(self.endPort) || self.endPort >= self.port",message="endPort must be greater than or equal to port"
 type TrafficPolicyPort struct {
+	// +optional
+	// +kubebuilder:validation:Enum=TCP;UDP;ICMP;SCTP
+	Protocol string `json:"protocol,omitempty"`
 	// Port is the destination port number. When nil, the rule applies to all
 	// TCP ports.
 	//
