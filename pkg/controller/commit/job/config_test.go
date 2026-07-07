@@ -65,8 +65,6 @@ func TestEnvConfig(t *testing.T) {
 		{name: "CommitPodName", envKey: EnvCommitPodName, envValue: "pod-1", getFunc: func(c *EnvConfig) string { return c.CommitPodName() }, want: "pod-1"},
 		{name: "CommitPodNamespace", envKey: EnvCommitPodNamespace, envValue: "ns-1", getFunc: func(c *EnvConfig) string { return c.CommitPodNamespace() }, want: "ns-1"},
 		{name: "CommitPodUID", envKey: EnvCommitPodUID, envValue: "uid-abc", getFunc: func(c *EnvConfig) string { return c.CommitPodUID() }, want: "uid-abc"},
-		{name: "NerdctlHostsDir default", envKey: EnvNerdctlHostsDir, envValue: "", getFunc: func(c *EnvConfig) string { return c.NerdctlHostsDir() }, want: "/etc/containerd/certs.d"},
-		{name: "NerdctlHostsDir set", envKey: EnvNerdctlHostsDir, envValue: "/etc/containerd/certs.d", getFunc: func(c *EnvConfig) string { return c.NerdctlHostsDir() }, want: "/etc/containerd/certs.d"},
 	}
 
 	for _, tt := range tests {

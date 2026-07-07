@@ -45,9 +45,7 @@ func NerdctlExec(ctx context.Context, opts ...CmdOpt) error {
 		"--namespace=k8s.io",
 		fmt.Sprintf("--host=%s", Config().ContainerdSock()),
 	}
-	if hostsDir := Config().NerdctlHostsDir(); hostsDir != "" {
-		presetArgs = append(presetArgs, fmt.Sprintf("--hosts-dir=%s", hostsDir))
-	}
+	presetArgs = append(presetArgs, fmt.Sprintf("--hosts-dir=%s", DefaultNerdctlHostsDir))
 	cmd := exec.Command("nerdctl", presetArgs...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

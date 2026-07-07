@@ -58,10 +58,9 @@ const (
 	// EnvAgentJobImagePullPolicy is the environment variable name for the agent job image pull policy.
 	EnvAgentJobImagePullPolicy = "AGENT_JOB_IMAGE_PULL_POLICY"
 
-	// EnvNerdctlHostsDir is the environment variable name for the directory nerdctl loads
-	// containerd hosts.toml registry configs from (passed as --hosts-dir).
-	// When empty, --hosts-dir is not passed and nerdctl ignores hosts.toml entirely.
-	EnvNerdctlHostsDir = "NERDCTL_HOSTS_DIR"
+	// DefaultNerdctlHostsDir is the directory nerdctl loads containerd hosts.toml
+	// registry configs from (passed as --hosts-dir).
+	DefaultNerdctlHostsDir = "/etc/containerd/certs.d"
 )
 
 var agentJobImage string
@@ -108,15 +107,6 @@ func (c *EnvConfig) ImagePullPolicy() corev1.PullPolicy {
 		return corev1.PullPolicy(p)
 	}
 	return corev1.PullIfNotPresent
-}
-
-// NerdctlHostsDir returns the directory to pass as --hosts-dir to nerdctl.
-// Defaults to /etc/containerd/certs.d which is the standard containerd registry config path.
-func (c *EnvConfig) NerdctlHostsDir() string {
-	if dir := os.Getenv(EnvNerdctlHostsDir); dir != "" {
-		return dir
-	}
-	return "/etc/containerd/certs.d"
 }
 
 var defaultConfig = &EnvConfig{}
