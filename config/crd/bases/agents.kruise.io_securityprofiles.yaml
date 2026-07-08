@@ -431,6 +431,77 @@ spec:
                             forwards the request without further processing. Useful for trusted
                             internal domains.
                           type: boolean
+                        mcpToolPolicy:
+                          description: |-
+                            MCPToolPolicy defines inline MCP tool access control rules.
+                            Non-terminal when the policy allows; terminal (like Block) when denied.
+                          properties:
+                            defaultAction:
+                              default: deny
+                              description: 'DefaultAction when no rule matches: "deny"
+                                (whitelist) or "allow" (blacklist).'
+                              enum:
+                              - allow
+                              - deny
+                              type: string
+                            denyResponse:
+                              description: DenyResponse configures the HTTP response
+                                when a tool is denied.
+                              properties:
+                                body:
+                                  type: string
+                                statusCode:
+                                  default: 403
+                                  format: int32
+                                  maximum: 599
+                                  minimum: 100
+                                  type: integer
+                              type: object
+                            rules:
+                              description: Rules are evaluated in order. First match
+                                wins.
+                              items:
+                                description: MCPToolPolicyRule is a single allow/deny
+                                  rule within an MCPToolPolicy.
+                                properties:
+                                  action:
+                                    description: 'Action: "allow" or "deny".'
+                                    enum:
+                                    - allow
+                                    - deny
+                                    type: string
+                                  method:
+                                    description: Method is the JSON-RPC method (e.g.
+                                      "tools/call", "tools/list").
+                                    minLength: 1
+                                    type: string
+                                  toolNames:
+                                    description: ToolNames matches params.name for
+                                      tools/call. Empty = any tool for this method.
+                                    items:
+                                      type: string
+                                    type: array
+                                required:
+                                - action
+                                - method
+                                type: object
+                              minItems: 1
+                              type: array
+                            unsupportedVersionAction:
+                              default: deny
+                              description: |-
+                                UnsupportedVersionAction controls how tools/call requests with an
+                                unsupported or missing MCP-Protocol-Version header are handled.
+                                "deny" (default): reject the request.
+                                "passthrough": skip ACL evaluation and allow the request through.
+                              enum:
+                              - deny
+                              - passthrough
+                              type: string
+                          required:
+                          - defaultAction
+                          - rules
+                          type: object
                         tokenTransformation:
                           description: |-
                             TokenTransformation rewrites credential headers (e.g. replacing a
