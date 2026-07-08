@@ -75,7 +75,7 @@ func NewTestCache(t *testing.T, initObjs ...ctrlclient.Object) (*cache.Cache, ct
 		Build()
 
 	health := cache.NewInformerHealth()
-	c, err := cache.NewCacheWithHealth(mgr, health)
+	c, err := cache.NewCacheWithHealth(mgr, health, false)
 	if err != nil {
 		return nil, nil, err
 	}

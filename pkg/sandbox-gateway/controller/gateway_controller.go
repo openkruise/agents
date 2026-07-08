@@ -90,7 +90,7 @@ func StartManager(ctx context.Context) error {
 	// wait hooks in the sandbox-manager connect path. This enables
 	// sandboxcr.Sandbox.Resume() to use NewSandboxResumeTask().Wait() from
 	// within the gateway process.
-	cacheProvider, err := cache.NewCache(mgr)
+	cacheProvider, err := cache.NewCache(mgr, true)
 	if err != nil {
 		return fmt.Errorf("unable to create cache provider: %w", err)
 	}
