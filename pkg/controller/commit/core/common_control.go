@@ -74,9 +74,12 @@ func (r *commonControl) EnsureCommitRunning(ctx context.Context, args *EnsureFun
 	}
 
 	// If a Job already exists for this commit, do not create a duplicate.
-	jobList := &batchv1.JobList{}
-	if err := r.Client.List(ctx, jobList, client.InNamespace(commit.Namespace), client.MatchingFields{jobutil.IndexFieldCommitUID: string(commit.UID)}); err != nil {
-		return 0, fmt.Errorf("failed to list commit jobs: %w", err)
+	jobList := args.JobList
+	if jobList == nil {
+		jobList = &batchv1.JobList{}
+		if err := r.Client.List(ctx, jobList, client.InNamespace(commit.Namespace), client.MatchingFields{jobutil.IndexFieldCommitUID: string(commit.UID)}); err != nil {
+			return 0, fmt.Errorf("failed to list commit jobs: %w", err)
+		}
 	}
 	if len(jobList.Items) > 0 {
 		log.Info("commit job already exists, transitioning to Running", "commit", klog.KObj(commit))

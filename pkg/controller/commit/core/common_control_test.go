@@ -417,6 +417,48 @@ func TestEnsureCommitRunning_JobPodAlreadyExists(t *testing.T) {
 	}
 }
 
+func TestEnsureCommitRunning_UsesJobListFromArgs(t *testing.T) {
+	scheme := newTestScheme()
+	commit := newTestCommit("test-commit", "default")
+	pod := newTestPod("test-pod", "default", "node-1")
+	existingJob := batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "existing-job",
+			Namespace: "default",
+			Labels: map[string]string{
+				jobutil.LabelCommitUID: string(commit.UID),
+			},
+		},
+	}
+
+	fc := newFakeClientBuilder(scheme).WithObjects(commit, pod).Build()
+	ctrl := newCommonControlForTest(fc)
+
+	newStatus := commit.Status.DeepCopy()
+	args := &EnsureFuncArgs{
+		Pod:       pod,
+		Commit:    commit,
+		NewStatus: newStatus,
+		JobList:   &batchv1.JobList{Items: []batchv1.Job{existingJob}},
+	}
+
+	_, err := ctrl.EnsureCommitRunning(context.TODO(), args)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if newStatus.Phase != agentsv1alpha1.CommitPhaseRunning {
+		t.Errorf("expected phase to be Running, got %s", newStatus.Phase)
+	}
+
+	jobList := &batchv1.JobList{}
+	if err := fc.List(context.TODO(), jobList, client.InNamespace("default"), client.MatchingFields{jobutil.IndexFieldCommitUID: string(commit.UID)}); err != nil {
+		t.Fatalf("failed to list jobs: %v", err)
+	}
+	if len(jobList.Items) != 0 {
+		t.Fatalf("expected no new Job to be created, got %d", len(jobList.Items))
+	}
+}
+
 // TestApplyCommitJob_AlreadyExists is removed — with GenerateName, the Job name is
 // randomly generated so Create collisions are effectively impossible. The
 // IsAlreadyExists safety net remains in the production code.

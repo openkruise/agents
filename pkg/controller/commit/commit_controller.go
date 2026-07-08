@@ -157,6 +157,7 @@ func (r *CommitReconciler) Reconcile(ctx context.Context, req ctrl.Request) (res
 		// Observe expectations in reconcile loop instead of event handler to avoid lock contention.
 		jobList := &batchv1.JobList{}
 		if err := r.List(ctx, jobList, client.InNamespace(commit.Namespace), client.MatchingFields{jobutil.IndexFieldCommitUID: string(commit.UID)}); err == nil {
+			args.JobList = jobList
 			for _, j := range jobList.Items {
 				core.ScaleExpectations.ObserveScale(utils.GetControllerKey(commit), expectations.Create, j.Name)
 			}
