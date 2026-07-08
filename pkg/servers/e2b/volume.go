@@ -39,6 +39,14 @@ import (
 	"github.com/openkruise/agents/pkg/servers/web"
 )
 
+// volumeManagerInterface allows mocking the volume manager in tests.
+type volumeManagerInterface interface {
+	CreateVolume(ctx context.Context, opts infra.CreateVolumeOptions) (infra.VolumeInfo, error)
+	ListVolumes(ctx context.Context, opts infra.ListVolumesOptions) ([]infra.VolumeInfo, error)
+	GetVolume(ctx context.Context, opts infra.GetVolumeOptions) (infra.VolumeInfo, error)
+	DeleteVolume(ctx context.Context, opts infra.DeleteVolumeOptions) (infra.DeleteVolumeResult, error)
+}
+
 // CreateVolume creates a new persistent volume (PVC) for the user.
 // Implementation: Creates a PVC and waits for it to bind to a PV.
 func (sc *Controller) CreateVolume(r *http.Request) (web.ApiResponse[*models.VolumeResponse], *web.ApiError) {
@@ -68,8 +76,8 @@ func (sc *Controller) CreateVolume(r *http.Request) (web.ApiResponse[*models.Vol
 	}
 	log.Info("create volume request received", "request", req)
 
-	// Call infra layer to create volume
-	volumeInfo, err := sc.manager.GetInfra().CreateVolume(ctx, infra.CreateVolumeOptions{
+	// Call volume manager (metrics wrapper → infra) to create volume
+	volumeInfo, err := sc.volumeManager.CreateVolume(ctx, infra.CreateVolumeOptions{
 		Namespace:        namespace,
 		Name:             req.Name,
 		UserID:           user.ID.String(),
@@ -179,14 +187,14 @@ func (sc *Controller) ListVolumes(r *http.Request) (web.ApiResponse[[]models.Vol
 	if user == nil {
 		return web.ApiResponse[[]models.VolumeResponse]{}, &web.ApiError{
 			Code:    http.StatusUnauthorized,
-			Message: "User not found",
+			Message: "User is empty",
 		}
 	}
 
 	namespace := sc.getNamespaceOfUser(user)
 	log.Info("list volumes request", "namespace", namespace)
 
-	volumes, err := sc.manager.GetInfra().ListVolumes(ctx, infra.ListVolumesOptions{
+	volumes, err := sc.volumeManager.ListVolumes(ctx, infra.ListVolumesOptions{
 		Namespace: namespace,
 		UserID:    user.ID.String(),
 	})
@@ -218,15 +226,21 @@ func (sc *Controller) GetVolume(r *http.Request) (web.ApiResponse[*models.Volume
 	if user == nil {
 		return web.ApiResponse[*models.VolumeResponse]{}, &web.ApiError{
 			Code:    http.StatusUnauthorized,
-			Message: "User not found",
+			Message: "User is empty",
 		}
 	}
 
 	volumeID := r.PathValue("volumeID")
+	if volumeID == "" {
+		return web.ApiResponse[*models.VolumeResponse]{}, &web.ApiError{
+			Code:    http.StatusBadRequest,
+			Message: "volumeID is required",
+		}
+	}
 	namespace := sc.getNamespaceOfUser(user)
 	log.Info("get volume request", "namespace", namespace, "volumeID", volumeID)
 
-	info, err := sc.manager.GetInfra().GetVolume(ctx, infra.GetVolumeOptions{
+	info, err := sc.volumeManager.GetVolume(ctx, infra.GetVolumeOptions{
 		Namespace: namespace,
 		VolumeID:  volumeID,
 		UserID:    user.ID.String(),
@@ -255,16 +269,22 @@ func (sc *Controller) DeleteVolume(r *http.Request) (web.ApiResponse[*models.Del
 	if user == nil {
 		return web.ApiResponse[*models.DeleteVolumeResponse]{}, &web.ApiError{
 			Code:    http.StatusUnauthorized,
-			Message: "User not found",
+			Message: "User is empty",
 		}
 	}
 
 	volumeID := r.PathValue("volumeID")
+	if volumeID == "" {
+		return web.ApiResponse[*models.DeleteVolumeResponse]{}, &web.ApiError{
+			Code:    http.StatusBadRequest,
+			Message: "volumeID is required",
+		}
+	}
 	force := r.URL.Query().Get("force") == "true"
 	namespace := sc.getNamespaceOfUser(user)
 	log.Info("delete volume request", "namespace", namespace, "volumeID", volumeID, "force", force)
 
-	result, err := sc.manager.GetInfra().DeleteVolume(ctx, infra.DeleteVolumeOptions{
+	result, err := sc.volumeManager.DeleteVolume(ctx, infra.DeleteVolumeOptions{
 		Namespace: namespace,
 		VolumeID:  volumeID,
 		UserID:    user.ID.String(),
@@ -303,7 +323,10 @@ func (sc *Controller) resolveVolumeMounts(ctx context.Context, namespace string,
 		info, err := sc.manager.GetInfra().GetVolume(ctx, infra.GetVolumeOptions{
 			Namespace: namespace,
 			VolumeID:  m.VolumeID,
-			UserID:    "", // Internal resolution uses namespace validation
+			// UserID is intentionally empty: namespace already scopes to one team
+			// (admin → sandbox-system, others → team.Name), so namespace isolation
+			// is the ownership boundary for internal mount resolution.
+			UserID: "",
 		})
 		if err != nil {
 			return nil, fmt.Errorf("volume %s: %w", m.VolumeID, err)

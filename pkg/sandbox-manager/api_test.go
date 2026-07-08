@@ -1976,7 +1976,7 @@ func TestGetOwnerOfVolume(t *testing.T) {
 
 	// Wait for cache indexes to be populated
 	require.NoError(t, wait.PollUntilContextTimeout(t.Context(), 10*time.Millisecond, 5*time.Second, true, func(ctx context.Context) (bool, error) {
-		owner, ok := manager.GetOwnerOfVolume(ctx, namespace, "pv-owner-a")
+		owner, ok := manager.GetOwnerOfVolume(ctx, namespace, "pvc-owner-a")
 		return ok && owner == "user-a", nil
 	}))
 
@@ -1990,49 +1990,48 @@ func TestGetOwnerOfVolume(t *testing.T) {
 		{
 			name:        "found with owner annotation",
 			namespace:   namespace,
-			volumeID:    "pv-owner-a",
+			volumeID:    "pvc-owner-a",
 			expectOwner: "user-a",
 			expectFound: true,
 		},
 		{
 			name:        "found with different owner",
 			namespace:   namespace,
-			volumeID:    "pv-owner-b",
+			volumeID:    "pvc-owner-b",
 			expectOwner: "user-b",
 			expectFound: true,
 		},
 		{
 			name:        "found without owner annotation returns empty string",
 			namespace:   namespace,
-			volumeID:    "pv-no-owner",
+			volumeID:    "pvc-no-owner",
 			expectOwner: "",
 			expectFound: true,
 		},
 		{
 			name:        "volume in different namespace found by correct namespace",
 			namespace:   otherNamespace,
-			volumeID:    "pv-other-ns",
+			volumeID:    "pvc-other-ns",
 			expectOwner: "user-c",
 			expectFound: true,
 		},
 		{
 			name:        "volume not found in wrong namespace",
 			namespace:   otherNamespace,
-			volumeID:    "pv-owner-a",
+			volumeID:    "pvc-owner-a",
 			expectFound: false,
 		},
 		{
 			name:        "non-existent volume returns not found",
 			namespace:   namespace,
-			volumeID:    "non-existent-pv",
+			volumeID:    "pvc-non-existent",
 			expectFound: false,
 		},
 		{
-			name:        "empty namespace lists all namespaces and finds volume",
+			name:        "empty namespace does not find volume in specific namespace",
 			namespace:   "",
-			volumeID:    "pv-owner-a",
-			expectOwner: "user-a",
-			expectFound: true,
+			volumeID:    "pvc-owner-a",
+			expectFound: false,
 		},
 	}
 

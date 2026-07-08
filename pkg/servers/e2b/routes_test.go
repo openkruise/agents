@@ -545,8 +545,8 @@ func TestCheckApiKey_VolumeOwnership(t *testing.T) {
 
 	// Create PVCs in each user's namespace.
 	// getNamespaceOfUser returns "" for admin (→ sandbox-system) and team.Name for others.
-	// The volumeID in the URL path maps to the PVC's VolumeName (PV name),
-	// which is indexed by cache.IndexVolumeName.
+	// The volumeID in the URL path maps to the PVC name (public E2B identifier).
+	// The bound PV is an internal implementation detail exposed via VolumeResponse.pvName.
 
 	// PVC owned by regular user in regular-team namespace
 	pvcOwnedByRegular := &corev1.PersistentVolumeClaim{
@@ -595,30 +595,30 @@ func TestCheckApiKey_VolumeOwnership(t *testing.T) {
 		{
 			name:         "owner can access own volume",
 			apiKeyHeader: regularUser.Key,
-			volumeID:     "pv-regular-vol",
+			volumeID:     "pvc-regular-user",
 			expectError:  false,
 		},
 		{
 			name:         "admin can access admin-owned volume",
 			apiKeyHeader: InitKey,
-			volumeID:     "pv-admin-vol",
+			volumeID:     "pvc-admin-user",
 			expectError:  false,
 		},
 		{
 			name:         "non-owner cannot access volume in same namespace",
 			apiKeyHeader: anotherUser.Key,
-			volumeID:     "pv-regular-vol",
+			volumeID:     "pvc-regular-user",
 			expectError:  true,
 			expectedCode: http.StatusNotFound,
-			expectedMsg:  "Volume not found: pv-regular-vol",
+			expectedMsg:  "Volume not found: pvc-regular-user",
 		},
 		{
 			name:         "admin cannot access other user's volume in different namespace",
 			apiKeyHeader: InitKey,
-			volumeID:     "pv-regular-vol",
+			volumeID:     "pvc-regular-user",
 			expectError:  true,
 			expectedCode: http.StatusNotFound,
-			expectedMsg:  "Volume not found: pv-regular-vol",
+			expectedMsg:  "Volume not found: pvc-regular-user",
 		},
 		{
 			name:         "volume not found",

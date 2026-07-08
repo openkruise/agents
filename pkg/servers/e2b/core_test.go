@@ -54,6 +54,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
+	volumepkg "github.com/openkruise/agents/pkg/sandbox-manager/volume"
 	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
@@ -157,6 +158,7 @@ func setupWithMinResumeTimeoutAndQuota(t *testing.T, minResumeTimeout int, quota
 
 	controller.cache = cache
 	controller.manager = sandboxManager
+	controller.volumeManager = volumepkg.NewManager(sandboxManager.GetInfra())
 	controller.storageRegistry = storages.NewStorageProvider()
 	controller.registerRoutes()
 

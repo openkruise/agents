@@ -18,7 +18,6 @@ package e2b
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"testing"
 	"time"
@@ -30,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 )
@@ -332,7 +332,7 @@ func TestDeleteVolume(t *testing.T) {
 					"volumeID": "some-id",
 				}, nil)
 			},
-			expectError: "User not found",
+			expectError: "User is empty",
 			errorCode:   http.StatusUnauthorized,
 		},
 		{
@@ -448,5 +448,117 @@ func TestController_ResolveVolumeMounts(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "volume not found")
 	})
+
+	t.Run("valid PVC — resolves to PV name in CSIMountConfig", func(t *testing.T) {
+		fc := getTestCRClient(controller)
+		pvc := &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "data-pvc",
+				Namespace: namespace,
+			},
+			Spec: corev1.PersistentVolumeClaimSpec{
+				VolumeName:  "pv-data-001",
+				AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+				Resources: corev1.VolumeResourceRequirements{
+					Requests: corev1.ResourceList{
+						corev1.ResourceStorage: resource.MustParse("1Gi"),
+					},
+				},
+			},
+		}
+		require.NoError(t, fc.Create(context.Background(), pvc))
+
+		mounts := []models.VolumeMountRequest{
+			{VolumeID: "data-pvc", MountPath: "/workspace", ReadOnly: false},
+		}
+		configs, err := controller.resolveVolumeMounts(context.Background(), namespace, mounts)
+		require.NoError(t, err)
+		require.Len(t, configs, 1)
+		// PvName must be the bound PV, not the PVC name
+		assert.Equal(t, "pv-data-001", configs[0].PvName)
+		assert.Equal(t, "/workspace", configs[0].MountPath)
+		assert.False(t, configs[0].ReadOnly)
+	})
 }
 
+func TestDeleteVolume_MountedAndForce(t *testing.T) {
+	controller, _, teardown := Setup(t)
+	defer teardown()
+
+	user := &models.CreatedTeamAPIKey{
+		ID:   keys.AdminKeyID,
+		Key:  InitKey,
+		Name: "test-user",
+	}
+
+	fc := getTestCRClient(controller)
+	namespace := controller.getNamespaceOfUser(user)
+
+	// Create the PVC that will be "mounted"
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "mounted-vol",
+			Namespace: namespace,
+			Annotations: map[string]string{
+				"agents.kruise.io/owner": user.ID.String(),
+			},
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			VolumeName:  "pv-mounted-001",
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceStorage: resource.MustParse("1Gi"),
+				},
+			},
+		},
+	}
+	require.NoError(t, fc.Create(context.Background(), pvc))
+
+	// Create a SandboxClaim referencing the PV by its PvName
+	claim := &agentsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: namespace},
+		Spec: agentsv1alpha1.SandboxClaimSpec{
+			TemplateName: "tmpl",
+			DynamicVolumesMount: []agentsv1alpha1.CSIMountConfig{
+				{PvName: "pv-mounted-001", MountPath: "/data"},
+			},
+		},
+	}
+	require.NoError(t, fc.Create(context.Background(), claim))
+
+	sbx := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "sbx-consumer",
+			Namespace: namespace,
+			Labels: map[string]string{
+				agentsv1alpha1.LabelSandboxIsClaimed: agentsv1alpha1.True,
+				agentsv1alpha1.LabelSandboxClaimName: "test-claim",
+			},
+		},
+		Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxRunning},
+	}
+	require.NoError(t, fc.Create(context.Background(), sbx))
+	require.NoError(t, fc.Status().Update(context.Background(), sbx))
+
+	t.Run("delete blocked when mounted and force=false", func(t *testing.T) {
+		req := NewRequest(t, nil, nil, map[string]string{
+			"volumeID": "mounted-vol",
+		}, user)
+		_, apiErr := controller.DeleteVolume(req)
+		require.NotNil(t, apiErr)
+		assert.Equal(t, http.StatusConflict, apiErr.Code)
+		assert.Contains(t, apiErr.Message, "mounted by")
+	})
+
+	t.Run("delete succeeds with force=true", func(t *testing.T) {
+		req := NewRequest(t, map[string]string{"force": "true"}, nil, map[string]string{
+			"volumeID": "mounted-vol",
+		}, user)
+		resp, apiErr := controller.DeleteVolume(req)
+		require.Nil(t, apiErr)
+		assert.Equal(t, http.StatusOK, resp.Code)
+		assert.NotEmpty(t, resp.Body.Warning)
+		assert.Contains(t, resp.Body.AffectedBy, namespace+"--sbx-consumer")
+	})
+}

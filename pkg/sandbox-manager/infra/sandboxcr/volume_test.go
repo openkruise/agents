@@ -324,7 +324,7 @@ func TestDeleteVolume(t *testing.T) {
 		opts.Force = true
 		res, err := i.DeleteVolume(context.Background(), opts)
 		require.NoError(t, err)
-		assert.Contains(t, res.AffectedSandboxIDs, "sbx1")
+		assert.Contains(t, res.AffectedSandboxIDs, "ns1--sbx1")
 		assert.True(t, res.ForcedDelete)
 	})
 }

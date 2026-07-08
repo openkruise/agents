@@ -27,7 +27,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/cache"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/quota"
@@ -265,7 +264,7 @@ func (m *SandboxManager) GetOwnerOfSandbox(sandboxID string) (string, bool) {
 	return route.Owner, ok
 }
 
-// GetOwnerOfVolume returns the owner (UserID) of the volume identified by volumeID (PV Name)
+// GetOwnerOfVolume returns the owner (UserID) of the volume identified by volumeID (PVC name)
 // in the given namespace. Returns ("", false) if the volume is not found.
 func (m *SandboxManager) GetOwnerOfVolume(ctx context.Context, namespace, volumeID string) (string, bool) {
 	log := klog.FromContext(ctx)

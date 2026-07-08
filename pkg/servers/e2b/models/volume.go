@@ -25,7 +25,7 @@ import (
 // Volume represents an E2B-compatible volume.
 type Volume struct {
 	Name     string `json:"name"`     // PVC Name (e.g., harness-data)
-	VolumeID string `json:"volumeID"` // Underlying PV Name (e.g., d-bp1j7dd96qrivw02u7gy)
+	VolumeID string `json:"volumeID"` // Public E2B volume identifier, equal to the PVC name
 }
 
 // NewVolumeRequest represents the request to create a volume.

@@ -108,7 +108,7 @@ func (i *Infra) CreateVolume(ctx context.Context, opts infra.CreateVolumeOptions
 		return infra.VolumeInfo{}, fmt.Errorf("failed to get bound PVC: %w", err)
 	}
 
-	log.Info("Volume created and bound", "name", boundPVC.Name, "namespace", opts.Namespace, "volumeID", boundPVC.Spec.VolumeName)
+	log.Info("Volume created and bound", "pvcName", boundPVC.Name, "namespace", opts.Namespace, "pvName", boundPVC.Spec.VolumeName)
 
 	return pvcToVolumeInfo(boundPVC), nil
 }
