@@ -81,6 +81,42 @@ func TestDoCommitWith_PushFailed(t *testing.T) {
 	}
 }
 
+func TestDoCommitWith_EmptyContainerID(t *testing.T) {
+	setEnv(t, EnvContainerID, "")
+	setEnv(t, EnvCommitImage, "registry.example.com/app:v1")
+
+	called := false
+	fakeExec := func(ctx context.Context, opts ...CmdOpt) error {
+		called = true
+		return nil
+	}
+	code := doCommitWith(context.Background(), fakeExec)
+	if code != ExitCodeCommitFailed {
+		t.Errorf("expected ExitCodeCommitFailed (%d), got %d", ExitCodeCommitFailed, code)
+	}
+	if called {
+		t.Error("executor should not be called when container ID is empty")
+	}
+}
+
+func TestDoCommitWith_EmptyImage(t *testing.T) {
+	setEnv(t, EnvContainerID, "test-container-id")
+	setEnv(t, EnvCommitImage, "")
+
+	called := false
+	fakeExec := func(ctx context.Context, opts ...CmdOpt) error {
+		called = true
+		return nil
+	}
+	code := doCommitWith(context.Background(), fakeExec)
+	if code != ExitCodeCommitFailed {
+		t.Errorf("expected ExitCodeCommitFailed (%d), got %d", ExitCodeCommitFailed, code)
+	}
+	if called {
+		t.Error("executor should not be called when image is empty")
+	}
+}
+
 func TestDoCommitWith_ArgsPassedCorrectly(t *testing.T) {
 	os.Setenv(EnvContainerID, "ctr-123")
 	os.Setenv(EnvCommitImage, "reg.io/img:v2")

@@ -56,3 +56,18 @@ func TestSetupRegistryAuth_WithSecret(t *testing.T) {
 	// Cleanup
 	os.Unsetenv("DOCKER_CONFIG")
 }
+
+func TestSetupRegistryAuth_StatError(t *testing.T) {
+	configDir := t.TempDir() + "/not-dir"
+	if err := os.WriteFile(configDir, []byte("not a dir"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	os.Unsetenv("DOCKER_CONFIG")
+	err := setupRegistryAuthFrom(configDir)
+	if err == nil {
+		t.Fatal("expected stat error, got nil")
+	}
+	if got := os.Getenv("DOCKER_CONFIG"); got != "" {
+		t.Errorf("DOCKER_CONFIG should not be set on stat error, got %q", got)
+	}
+}

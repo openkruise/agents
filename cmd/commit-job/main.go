@@ -18,6 +18,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"os"
 	"os/signal"
 	"syscall"
@@ -29,6 +30,7 @@ import (
 
 func main() {
 	klog.InitFlags(nil)
+	flag.Parse()
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
@@ -41,7 +43,7 @@ func main() {
 	case jobutil.EnvAgentJobActionCommit:
 		exitCode = jobutil.DoCommit(ctx)
 	default:
-		klog.Errorf("Unknown action: %s", action)
+		klog.ErrorS(nil, "Unknown action", "action", action)
 		exitCode = 1
 	}
 

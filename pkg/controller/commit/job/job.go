@@ -39,6 +39,15 @@ func doCommitWith(ctx context.Context, executor Executor) int {
 	containerID := Config().ContainerID()
 	image := Config().CommitImage()
 
+	if containerID == "" {
+		klog.ErrorS(nil, "Commit container ID is empty", "env", EnvContainerID)
+		return ExitCodeCommitFailed
+	}
+	if image == "" {
+		klog.ErrorS(nil, "Commit image is empty", "env", EnvCommitImage)
+		return ExitCodeCommitFailed
+	}
+
 	klog.InfoS("Start commit", "containerID", containerID, "image", image)
 
 	// 1. Setup registry authentication
