@@ -19,7 +19,6 @@ package commit
 import (
 	"context"
 	"flag"
-	"fmt"
 	"reflect"
 	"time"
 
@@ -192,21 +191,6 @@ func (r *CommitReconciler) Reconcile(ctx context.Context, req ctrl.Request) (res
 		log.Info("Unknown commit phase", "commit", klog.KObj(commit), "phase", commit.Status.Phase)
 		return ctrl.Result{}, nil
 	}
-}
-
-func (r *CommitReconciler) getControl(commit *agentsv1alpha1.Commit) (core.CommitControl, error) {
-	if mode, ok := commit.Annotations[utils.CommitAnnotationModeKey]; ok && mode != "" {
-		control, ok := r.controls[mode]
-		if !ok {
-			return nil, fmt.Errorf("commit mode(%s) control not found", mode)
-		}
-		return control, nil
-	}
-	control, ok := r.controls[core.CommonControlName]
-	if !ok {
-		return nil, fmt.Errorf("commit mode(%s) control not found", core.CommonControlName)
-	}
-	return control, nil
 }
 
 func (r *CommitReconciler) handleCommitDelete(ctx context.Context, args *core.EnsureFuncArgs, control core.CommitControl) (ctrl.Result, error) {
