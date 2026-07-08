@@ -73,20 +73,6 @@ func Add(mgr ctrl.Manager) error {
 		return err
 	}
 
-	// Register field indexes for LabelCommitUID to speed up List queries.
-	commitUIDIndex := func(obj client.Object) []string {
-		if uid, ok := obj.GetLabels()[jobutil.LabelCommitUID]; ok {
-			return []string{uid}
-		}
-		return nil
-	}
-	if err = mgr.GetFieldIndexer().IndexField(context.Background(), &batchv1.Job{}, jobutil.IndexFieldCommitUID, commitUIDIndex); err != nil {
-		return err
-	}
-	if err = mgr.GetFieldIndexer().IndexField(context.Background(), &corev1.Pod{}, jobutil.IndexFieldCommitUID, commitUIDIndex); err != nil {
-		return err
-	}
-
 	if err = (&CommitReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
