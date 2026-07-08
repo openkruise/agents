@@ -254,6 +254,51 @@ type CredentialRef struct {
 	Name string `json:"name"`
 }
 
+// MCPToolPolicyRule is a single allow/deny rule within an MCPToolPolicy.
+type MCPToolPolicyRule struct {
+	// Method is the JSON-RPC method (e.g. "tools/call", "tools/list").
+	// +kubebuilder:validation:MinLength=1
+	Method string `json:"method"`
+	// ToolNames matches params.name for tools/call. Empty = any tool for this method.
+	// +optional
+	ToolNames []string `json:"toolNames,omitempty"`
+	// Action: "allow" or "deny".
+	// +kubebuilder:validation:Enum=allow;deny
+	Action string `json:"action"`
+}
+
+// MCPDenyResponse configures the response returned when MCP ACL denies a request.
+type MCPDenyResponse struct {
+	// +kubebuilder:default:=403
+	// +kubebuilder:validation:Minimum=100
+	// +kubebuilder:validation:Maximum=599
+	StatusCode int32 `json:"statusCode,omitempty"`
+	// +optional
+	Body string `json:"body,omitempty"`
+}
+
+// MCPToolPolicySpec defines MCP tool access control rules.
+type MCPToolPolicySpec struct {
+	// DefaultAction when no rule matches: "deny" (whitelist) or "allow" (blacklist).
+	// +kubebuilder:validation:Enum=allow;deny
+	// +kubebuilder:default:=deny
+	DefaultAction string `json:"defaultAction"`
+	// UnsupportedVersionAction controls how tools/call requests with an
+	// unsupported or missing MCP-Protocol-Version header are handled.
+	// "deny" (default): reject the request.
+	// "passthrough": skip ACL evaluation and allow the request through.
+	// +kubebuilder:validation:Enum=deny;passthrough
+	// +kubebuilder:default:=deny
+	// +optional
+	UnsupportedVersionAction string `json:"unsupportedVersionAction,omitempty"`
+	// DenyResponse configures the HTTP response when a tool is denied.
+	// +optional
+	DenyResponse *MCPDenyResponse `json:"denyResponse,omitempty"`
+	// Rules are evaluated in order. First match wins.
+	// +kubebuilder:validation:MinItems=1
+	Rules []MCPToolPolicyRule `json:"rules"`
+}
+
 // ApiKeyConfig holds ApiKey-mode specific configuration.
 type ApiKeyConfig struct {
 	// When is an optional condition; the transformation is skipped if
@@ -462,6 +507,10 @@ type SecurityRuleActions struct {
 	// Non-terminal.
 	// +optional
 	TokenTransformation *TokenTransformationAction `json:"tokenTransformation,omitempty"`
+	// MCPToolPolicy defines inline MCP tool access control rules.
+	// Non-terminal when the policy allows; terminal (like Block) when denied.
+	// +optional
+	MCPToolPolicy *MCPToolPolicySpec `json:"mcpToolPolicy,omitempty"`
 	// Audit lists per-rule audit entries. When non-empty, this list
 	// REPLACES the profile-level SecurityProfileSpec.Audit list for this
 	// rule's matches (override semantics). When empty or omitted, the
