@@ -47,6 +47,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	utestutils "github.com/openkruise/agents/pkg/utils/testutils"
+	timeoututils "github.com/openkruise/agents/pkg/utils/timeout"
 	testutils "github.com/openkruise/agents/test/utils"
 )
 
@@ -1078,6 +1079,30 @@ func TestCloneSandbox(t *testing.T) {
 				assert.GreaterOrEqual(t, metrics.CreateSandbox, time.Duration(0))
 				assert.GreaterOrEqual(t, metrics.WaitReady, time.Duration(0))
 				assert.GreaterOrEqual(t, metrics.Total, time.Duration(0))
+			},
+		},
+		{
+			name: "successful clone saves timeout",
+			opts: infra.CloneSandboxOptions{
+				User:             user,
+				CheckPointID:     checkpointID,
+				WaitReadyTimeout: 30 * time.Second,
+				SaveTimeoutOptions: &infra.SaveTimeoutOptions{Timeout: timeoututils.Options{
+					ShutdownTime: time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC),
+				}},
+			},
+			serverOpts: testutils.TestRuntimeServerOptions{
+				RunCommandResult: runtime.RunCommandResult{
+					PID:    1,
+					Exited: true,
+				},
+				RunCommandImmediately: true,
+			},
+			sbxOverride: sbxOverride{Name: "test-sandbox-clone-timeout"},
+			postCheck: func(t *testing.T, sbx infra.Sandbox, metrics infra.CloneMetrics) {
+				assert.True(t, timeoututils.Equal(timeoututils.Options{
+					ShutdownTime: time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC),
+				}, sbx.GetTimeout()))
 			},
 		},
 		{

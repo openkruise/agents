@@ -40,8 +40,20 @@ type SecurityTokenOptions struct {
 	identity.TokenResponse
 }
 
+// TimeoutSnapshot contains the fresh timeout state read for a SaveTimeout attempt.
+type TimeoutSnapshot struct {
+	Timeout timeout.Options
+}
+
+// SaveTimeoutOptions controls the timeout and annotation values persisted by SaveTimeout.
 type SaveTimeoutOptions struct {
-	Timeout          timeout.Options
+	// Timeout is the fixed target when TimeoutGetter is nil.
+	Timeout timeout.Options
+	// TimeoutGetter receives fresh state on every retry, returns the complete target,
+	// and takes precedence over Timeout when set.
+	TimeoutGetter func(TimeoutSnapshot) timeout.Options
+	// ExtraAnnotations are merged with the sandbox. A value difference triggers an
+	// update even when the timeout target is unchanged.
 	ExtraAnnotations map[string]string
 }
 
@@ -83,6 +95,8 @@ type ClaimSandboxOptions struct {
 	CSIMount *config.CSIMountOptions `json:"CSIMount"`
 	// Set SecurityToken value in runtime
 	SecurityToken *SecurityTokenOptions `json:"securityToken"`
+	// SaveTimeoutOptions persists timeout after built-in post processes.
+	SaveTimeoutOptions *SaveTimeoutOptions `json:"-"`
 	// Max ClaimTimeout duration
 	ClaimTimeout time.Duration `json:"claimTimeout"`
 	// Max WaitReadyTimeout duration
@@ -108,6 +122,7 @@ type CloneSandboxOptions struct {
 	CloneTimeout       time.Duration           `json:"cloneTimeout"`
 	CSIMount           *config.CSIMountOptions `json:"CSIMount"`
 	Modifier           func(sbx Sandbox)       `json:"-"`
+	SaveTimeoutOptions *SaveTimeoutOptions     `json:"-"`
 	CreateLimiter      *rate.Limiter           `json:"-"`
 	SkipWaitCheckpoint bool                    `json:"skipWaitCheckpoint"`
 	// See ReserveFailedSandboxFor on ClaimSandboxOptions.

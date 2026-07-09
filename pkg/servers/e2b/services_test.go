@@ -868,8 +868,12 @@ func TestCreateSandboxRetentionSemantics(t *testing.T) {
 	tests := []struct {
 		name             string
 		metadata         map[string]string
+		extensions       models.NewSandboxRequestExtension
 		autoPause        bool
 		neverTimeout     bool
+		seedStaleTimeout bool
+		wantMetadata     map[string]string
+		wantLabels       map[string]string
 		wantAnnotation   string
 		wantShutdownFrom func(pauseTime time.Time) time.Time
 		expectCreateErr  string
@@ -908,6 +912,18 @@ func TestCreateSandboxRetentionSemantics(t *testing.T) {
 			wantAnnotation: timeout.ReservePausedSandboxDurationForeverValue,
 		},
 		{
+			name: "create clears stale timeout and keeps metadata",
+			metadata: map[string]string{
+				models.ExtensionKeySkipInitRuntime: v1alpha1.True,
+				"meta":                             "value",
+				v1alpha1.E2BLabelPrefix + "label":  "value",
+			},
+			seedStaleTimeout: true,
+			wantMetadata:     map[string]string{"meta": "value"},
+			wantLabels:       map[string]string{"label": "value"},
+			wantAnnotation:   timeout.ReservePausedSandboxDurationForeverValue,
+		},
+		{
 			name: "invalid retention metadata returns bad request",
 			metadata: map[string]string{
 				models.ExtensionKeyReservePausedSandboxDuration: "0s",
@@ -919,17 +935,50 @@ func TestCreateSandboxRetentionSemantics(t *testing.T) {
 	for i, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			templateName := fmt.Sprintf("retention-semantics-%d", i)
-			if tt.expectCreateErr == "" {
-				cleanup := CreateSandboxPool(t, controller, templateName, 1)
-				defer cleanup()
-			}
-
-			createResp, apiError := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
+			request := models.NewSandboxRequest{
 				TemplateID: templateName,
 				AutoPause:  tt.autoPause,
 				Timeout:    300,
 				Metadata:   maps.Clone(tt.metadata),
-			}, nil, user))
+				Extensions: tt.extensions,
+			}
+			if tt.expectCreateErr == "" {
+				preReadyRequest := request
+				preReadyRequest.Metadata = maps.Clone(request.Metadata)
+				require.NoError(t, preReadyRequest.ParseExtensions())
+				preReadySbx := &sandboxcr.Sandbox{Sandbox: &v1alpha1.Sandbox{}}
+				beforeGuard := time.Now()
+				controller.basicSandboxCreateModifier(t.Context(), preReadySbx, preReadyRequest)
+				afterGuard := time.Now()
+				assert.Nil(t, preReadySbx.Spec.PauseTime)
+				if tt.neverTimeout {
+					assert.Nil(t, preReadySbx.Spec.ShutdownTime)
+				} else {
+					require.NotNil(t, preReadySbx.Spec.ShutdownTime)
+					assert.WithinDuration(t, beforeGuard.Add(createTimeoutGuard), preReadySbx.Spec.ShutdownTime.Time, time.Second)
+					assert.WithinDuration(t, afterGuard.Add(createTimeoutGuard), preReadySbx.Spec.ShutdownTime.Time, time.Second)
+				}
+
+				cleanup := CreateSandboxPool(t, controller, templateName, 1)
+				defer cleanup()
+				if tt.seedStaleTimeout {
+					sbx := &v1alpha1.Sandbox{}
+					require.NoError(t, client.Get(t.Context(), types.NamespacedName{Namespace: Namespace, Name: templateName + "-0"}, sbx))
+					sbx.Spec.PauseTime = &metav1.Time{Time: time.Now().Add(time.Minute)}
+					sbx.Spec.ShutdownTime = &metav1.Time{Time: time.Now().Add(2 * time.Minute)}
+					if sbx.Annotations == nil {
+						sbx.Annotations = map[string]string{}
+					}
+					if sbx.Labels == nil {
+						sbx.Labels = map[string]string{}
+					}
+					sbx.Annotations["old"] = "annotation"
+					sbx.Labels["old"] = "label"
+					require.NoError(t, client.Update(t.Context(), sbx))
+				}
+			}
+
+			createResp, apiError := controller.CreateSandbox(NewRequest(t, nil, request, nil, user))
 
 			if tt.expectCreateErr != "" {
 				require.NotNil(t, apiError)
@@ -944,6 +993,17 @@ func TestCreateSandboxRetentionSemantics(t *testing.T) {
 			assert.Equal(t, tt.wantAnnotation, sbx.Annotations[v1alpha1.AnnotationReservePausedSandboxDuration])
 			assert.NotContains(t, createResp.Body.Metadata, v1alpha1.AnnotationReservePausedSandboxDuration)
 			assert.NotContains(t, createResp.Body.Metadata, models.ExtensionKeyReservePausedSandboxDuration)
+			for key, want := range tt.wantMetadata {
+				assert.Equal(t, want, sbx.Annotations[key])
+			}
+			for key, want := range tt.wantLabels {
+				assert.Equal(t, want, sbx.Labels[key])
+			}
+			if tt.seedStaleTimeout {
+				assert.Nil(t, sbx.Spec.PauseTime)
+				require.NotNil(t, sbx.Spec.ShutdownTime)
+				assert.True(t, sbx.Spec.ShutdownTime.Time.After(time.Now().Add(290*time.Second)))
+			}
 			if tt.neverTimeout {
 				assert.Nil(t, sbx.Spec.PauseTime)
 				assert.Nil(t, sbx.Spec.ShutdownTime)
@@ -952,6 +1012,46 @@ func TestCreateSandboxRetentionSemantics(t *testing.T) {
 				require.NotNil(t, sbx.Spec.ShutdownTime)
 				assert.WithinDuration(t, tt.wantShutdownFrom(sbx.Spec.PauseTime.Time), sbx.Spec.ShutdownTime.Time, 5*time.Second)
 			}
+		})
+	}
+}
+
+func TestBuildCreateSaveTimeoutOptions(t *testing.T) {
+	tests := []struct {
+		name    string
+		request models.NewSandboxRequest
+		check   func(t *testing.T, opts infra.SaveTimeoutOptions)
+	}{
+		{
+			name:    "anchors deadline when getter runs",
+			request: models.NewSandboxRequest{Timeout: 300},
+			check: func(t *testing.T, opts infra.SaveTimeoutOptions) {
+				require.NotNil(t, opts.TimeoutGetter)
+				time.Sleep(200 * time.Millisecond)
+				anchor := time.Now()
+				got := opts.TimeoutGetter(infra.TimeoutSnapshot{})
+				assert.False(t, got.ShutdownTime.Before(anchor.Add(300*time.Second-100*time.Millisecond)),
+					"shutdown time %s was anchored before save at %s", got.ShutdownTime, anchor)
+			},
+		},
+		{
+			name: "never-timeout uses fixed zero timeout",
+			request: models.NewSandboxRequest{
+				Timeout: 300,
+				Extensions: models.NewSandboxRequestExtension{
+					NeverTimeout: true,
+				},
+			},
+			check: func(t *testing.T, opts infra.SaveTimeoutOptions) {
+				assert.Nil(t, opts.TimeoutGetter)
+				assert.Equal(t, timeout.Options{}, opts.Timeout)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.check(t, buildCreateSaveTimeoutOptions(tt.request))
 		})
 	}
 }
@@ -2256,10 +2356,10 @@ func TestDescribeSandboxDeadClaimedSandbox(t *testing.T) {
 		"sandboxID": sandboxID,
 	}, user))
 
-	require.Nil(t, apiErr)
-	require.NotNil(t, describeResp.Body)
-	assert.Equal(t, sandboxID, describeResp.Body.SandboxID)
-	assert.Equal(t, v1alpha1.SandboxStateDead, describeResp.Body.State)
+	assert.Nil(t, describeResp.Body)
+	require.NotNil(t, apiErr)
+	assert.Equal(t, http.StatusNotFound, apiErr.Code)
+	assert.Contains(t, apiErr.Message, "is not healthy")
 }
 
 func TestDescribeSandboxReservedFailedSandboxReturnsNotFound(t *testing.T) {

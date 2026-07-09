@@ -18,7 +18,6 @@ package sandboxcr
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"net/http"
 	"time"
@@ -228,6 +227,40 @@ func (s *Sandbox) SetTimeout(opts timeout.Options) {
 	setTimeout(s.Sandbox, opts)
 }
 
+// SaveTimeout persists timeout and annotations, retrying conflicts against fresh state.
+func (s *Sandbox) SaveTimeout(ctx context.Context, opts infra.SaveTimeoutOptions) (infra.TimeoutUpdateResult, error) {
+	log := klog.FromContext(ctx).V(utils.DebugLogLevel).WithValues("sandbox", klog.KObj(s.Sandbox))
+	updated, err := s.retryUpdate(ctx, func(sbx *agentsv1alpha1.Sandbox) (bool, error) {
+		current := timeout.GetTimeoutFromSandbox(sbx)
+		target := opts.Timeout
+		if opts.TimeoutGetter != nil {
+			target = opts.TimeoutGetter(infra.TimeoutSnapshot{Timeout: current})
+		}
+		skip := timeout.Equal(current, target)
+		for k, v := range opts.ExtraAnnotations {
+			if sbx.Annotations[k] != v {
+				skip = false
+				break
+			}
+		}
+		if skip {
+			return false, nil
+		}
+		setTimeout(sbx, target)
+		mergeExtraAnnotations(sbx, opts.ExtraAnnotations)
+		return true, nil
+	})
+	if err != nil {
+		return infra.TimeoutUpdateResult{}, err
+	}
+	if updated {
+		log.Info("sandbox timeout updated successfully", "timeout", s.GetTimeout())
+	} else {
+		log.Info("sandbox timeout update skipped")
+	}
+	return infra.TimeoutUpdateResult{Updated: updated}, nil
+}
+
 func (s *Sandbox) GetPodLabels() map[string]string {
 	if s.Spec.Template != nil {
 		return s.Spec.Template.Labels
@@ -253,44 +286,6 @@ func (s *Sandbox) GetImage() string {
 		return s.Spec.Template.Spec.Containers[0].Image
 	}
 	return ""
-}
-
-// SaveTimeoutWithPolicy updates timeout with given policy. Available timeout update policies:
-//   - Always: overwrite timeout whenever the requested value differs from current.
-//   - ExtendOnly: only extend to a later effective end time.
-func (s *Sandbox) SaveTimeoutWithPolicy(ctx context.Context, opts infra.SaveTimeoutOptions, policy timeout.UpdatePolicy) (infra.TimeoutUpdateResult, error) {
-	log := klog.FromContext(ctx).V(utils.DebugLogLevel).WithValues("sandbox", klog.KObj(s.Sandbox), "policy", policy)
-	result := infra.TimeoutUpdateResult{}
-
-	updated, err := s.retryUpdate(ctx, func(sbx *agentsv1alpha1.Sandbox) (bool, error) {
-		current := timeout.GetTimeoutFromSandbox(sbx)
-		log.Info("data fetched before saving timeout", "current", current)
-
-		shouldUpdate := false
-		switch policy {
-		case timeout.UpdatePolicyAlways:
-			shouldUpdate = !timeout.Equal(current, opts.Timeout)
-		case timeout.UpdatePolicyExtendOnly:
-			shouldUpdate = timeout.ShouldExtendTimeout(current, opts.Timeout)
-		default:
-			return false, fmt.Errorf("unsupported timeout update policy %q", policy)
-		}
-
-		if !shouldUpdate {
-			return false, nil
-		}
-		setTimeout(sbx, opts.Timeout)
-		mergeExtraAnnotations(sbx, opts.ExtraAnnotations)
-		return true, nil
-	})
-	if err != nil {
-		log.Error(err, "failed to update sandbox timeout after retries")
-		return infra.TimeoutUpdateResult{}, err
-	}
-	result.Updated = updated
-
-	log.Info("sandbox timeout updated successfully", "updated", result.Updated, "timeout", s.GetTimeout())
-	return result, nil
 }
 
 func (s *Sandbox) GetTimeout() timeout.Options {

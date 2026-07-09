@@ -22,7 +22,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -47,9 +46,7 @@ import (
 	"github.com/openkruise/agents/api/v1alpha1"
 	infracache "github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/cache/cachetest"
-	"github.com/openkruise/agents/pkg/cache/controllers"
 	"github.com/openkruise/agents/pkg/proxy"
-	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/proxyutils"
@@ -88,79 +85,58 @@ func ConvertPodToSandboxCR(pod *corev1.Pod) *v1alpha1.Sandbox {
 	return sbx
 }
 
-func TestSandbox_SaveTimeoutWithPolicy(t *testing.T) {
+func TestSandbox_SaveTimeout(t *testing.T) {
 	base := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 
 	tests := []struct {
 		name          string
 		current       timeout.Options
 		requested     timeout.Options
-		policy        timeout.UpdatePolicy
 		expectUpdated bool
 		expectTimeout timeout.Options
-		expectError   string
 	}{
 		{
-			name: "always updates when requested timeout differs",
+			name: "updates when requested timeout differs",
 			current: timeout.Options{
 				ShutdownTime: base.Add(10 * time.Minute),
 			},
 			requested: timeout.Options{
 				ShutdownTime: base.Add(20 * time.Minute),
 			},
-			policy:        timeout.UpdatePolicyAlways,
 			expectUpdated: true,
 			expectTimeout: timeout.Options{ShutdownTime: base.Add(20 * time.Minute)},
 		},
 		{
-			name: "always skips when requested timeout matches current",
+			name: "skips when requested timeout matches current",
 			current: timeout.Options{
 				ShutdownTime: base.Add(10 * time.Minute),
 			},
 			requested: timeout.Options{
 				ShutdownTime: base.Add(10 * time.Minute),
 			},
-			policy:        timeout.UpdatePolicyAlways,
 			expectUpdated: false,
 			expectTimeout: timeout.Options{ShutdownTime: base.Add(10 * time.Minute)},
 		},
 		{
-			name: "extend only updates when requested timeout extends current timeout",
+			name: "directly overwrites with shorter timeout",
 			current: timeout.Options{
-				ShutdownTime: base.Add(10 * time.Minute),
-			},
-			requested: timeout.Options{
 				ShutdownTime: base.Add(25 * time.Minute),
 			},
-			policy:        timeout.UpdatePolicyExtendOnly,
+			requested: timeout.Options{
+				ShutdownTime: base.Add(10 * time.Minute),
+			},
 			expectUpdated: true,
-			expectTimeout: timeout.Options{ShutdownTime: base.Add(25 * time.Minute)},
+			expectTimeout: timeout.Options{ShutdownTime: base.Add(10 * time.Minute)},
 		},
 		{
-			name: "extend only skips when requested timeout shortens current timeout",
+			name: "directly clears finite fields when requested",
 			current: timeout.Options{
-				ShutdownTime: base.Add(25 * time.Minute),
-			},
-			requested: timeout.Options{
-				ShutdownTime: base.Add(10 * time.Minute),
-			},
-			policy:        timeout.UpdatePolicyExtendOnly,
-			expectUpdated: false,
-			expectTimeout: timeout.Options{ShutdownTime: base.Add(25 * time.Minute)},
-		},
-		{
-			name: "unsupported policy returns error without mutating timeout",
-			current: timeout.Options{
-				ShutdownTime: base.Add(10 * time.Minute),
-			},
-			requested: timeout.Options{
+				PauseTime:    base.Add(10 * time.Minute),
 				ShutdownTime: base.Add(20 * time.Minute),
 			},
-			policy:      timeout.UpdatePolicy("Invalid"),
-			expectError: "unsupported timeout update policy",
-			expectTimeout: timeout.Options{
-				ShutdownTime: base.Add(10 * time.Minute),
-			},
+			requested:     timeout.Options{},
+			expectUpdated: true,
+			expectTimeout: timeout.Options{},
 		},
 	}
 
@@ -182,17 +158,12 @@ func TestSandbox_SaveTimeoutWithPolicy(t *testing.T) {
 				return err == nil
 			}, time.Second, 10*time.Millisecond)
 
-			result, err := sandbox.SaveTimeoutWithPolicy(t.Context(), infra.SaveTimeoutOptions{
+			result, err := sandbox.SaveTimeout(t.Context(), infra.SaveTimeoutOptions{
 				Timeout: tt.requested,
-			}, tt.policy)
-			if tt.expectError != "" {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tt.expectError)
-			} else {
-				require.NoError(t, err)
-				assert.Equal(t, tt.expectUpdated, result.Updated)
-				assert.True(t, timeout.Equal(tt.expectTimeout, sandbox.GetTimeout()))
-			}
+			})
+			require.NoError(t, err)
+			assert.Equal(t, tt.expectUpdated, result.Updated)
+			assert.True(t, timeout.Equal(tt.expectTimeout, sandbox.GetTimeout()))
 
 			var updated v1alpha1.Sandbox
 			require.NoError(t, fc.Get(t.Context(), types.NamespacedName{Namespace: sbx.Namespace, Name: sbx.Name}, &updated))
@@ -203,67 +174,59 @@ func TestSandbox_SaveTimeoutWithPolicy(t *testing.T) {
 
 const testRetentionAnnotation = "example.openkruise.io/retention"
 
-func TestSandbox_SaveTimeoutWithPolicyExtraAnnotations(t *testing.T) {
+func TestSandbox_SaveTimeoutExtraAnnotations(t *testing.T) {
 	base := time.Date(2026, 6, 11, 10, 0, 0, 0, time.UTC)
 	tests := []struct {
-		name              string
-		current           timeout.Options
-		requested         timeout.Options
-		policy            timeout.UpdatePolicy
-		initialAnnotation string
-		extraAnnotations  map[string]string
-		expectUpdated     bool
-		expectValue       string
-		expectValueSet    bool
+		name                string
+		current             timeout.Options
+		requested           timeout.Options
+		initialAnnotations  map[string]string
+		extraAnnotations    map[string]string
+		expectUpdated       bool
+		expectedAnnotations map[string]string
 	}{
 		{
-			name:             "always accepted writes extra annotation",
-			current:          timeout.Options{ShutdownTime: base.Add(time.Hour)},
-			requested:        timeout.Options{ShutdownTime: base.Add(2 * time.Hour)},
-			policy:           timeout.UpdatePolicyAlways,
-			extraAnnotations: map[string]string{testRetentionAnnotation: "30m"},
-			expectUpdated:    true,
-			expectValue:      "30m",
-			expectValueSet:   true,
+			name:                "accepted write adds extra annotation",
+			current:             timeout.Options{ShutdownTime: base.Add(time.Hour)},
+			requested:           timeout.Options{ShutdownTime: base.Add(2 * time.Hour)},
+			extraAnnotations:    map[string]string{testRetentionAnnotation: "30m", "example.openkruise.io/extra": "yes"},
+			expectUpdated:       true,
+			expectedAnnotations: map[string]string{testRetentionAnnotation: "30m", "example.openkruise.io/extra": "yes"},
 		},
 		{
-			name:              "always accepted overwrites existing annotation",
-			current:           timeout.Options{ShutdownTime: base.Add(time.Hour)},
-			requested:         timeout.Options{ShutdownTime: base.Add(2 * time.Hour)},
-			policy:            timeout.UpdatePolicyAlways,
-			initialAnnotation: "10m",
-			extraAnnotations:  map[string]string{testRetentionAnnotation: "30m"},
-			expectUpdated:     true,
-			expectValue:       "30m",
-			expectValueSet:    true,
+			name:                "accepted write overwrites existing annotation",
+			current:             timeout.Options{ShutdownTime: base.Add(time.Hour)},
+			requested:           timeout.Options{ShutdownTime: base.Add(2 * time.Hour)},
+			initialAnnotations:  map[string]string{testRetentionAnnotation: "10m"},
+			extraAnnotations:    map[string]string{testRetentionAnnotation: "30m"},
+			expectUpdated:       true,
+			expectedAnnotations: map[string]string{testRetentionAnnotation: "30m"},
 		},
 		{
-			name:             "extend only skip does not backfill extra annotation",
-			current:          timeout.Options{PauseTime: base.Add(2 * time.Hour), ShutdownTime: base.Add(3 * time.Hour)},
-			requested:        timeout.Options{PauseTime: base.Add(time.Hour), ShutdownTime: base.Add(2 * time.Hour)},
-			policy:           timeout.UpdatePolicyExtendOnly,
-			extraAnnotations: map[string]string{testRetentionAnnotation: "30m"},
-			expectUpdated:    false,
-			expectValueSet:   false,
+			name:                "equal timeout still backfills missing extra annotation",
+			current:             timeout.Options{ShutdownTime: base.Add(time.Hour)},
+			requested:           timeout.Options{ShutdownTime: base.Add(time.Hour)},
+			extraAnnotations:    map[string]string{testRetentionAnnotation: "30m"},
+			expectUpdated:       true,
+			expectedAnnotations: map[string]string{testRetentionAnnotation: "30m"},
 		},
 		{
-			name:             "always skip on equal timeout does not backfill extra annotation",
-			current:          timeout.Options{ShutdownTime: base.Add(time.Hour)},
-			requested:        timeout.Options{ShutdownTime: base.Add(time.Hour)},
-			policy:           timeout.UpdatePolicyAlways,
-			extraAnnotations: map[string]string{testRetentionAnnotation: "30m"},
-			expectUpdated:    false,
-			expectValueSet:   false,
+			name:                "equal timeout and matching annotation skips update",
+			current:             timeout.Options{ShutdownTime: base.Add(time.Hour)},
+			requested:           timeout.Options{ShutdownTime: base.Add(time.Hour)},
+			initialAnnotations:  map[string]string{testRetentionAnnotation: "30m"},
+			extraAnnotations:    map[string]string{testRetentionAnnotation: "30m"},
+			expectUpdated:       false,
+			expectedAnnotations: map[string]string{testRetentionAnnotation: "30m"},
 		},
 		{
-			name:             "always accepted writes multiple annotations",
-			current:          timeout.Options{ShutdownTime: base.Add(time.Hour)},
-			requested:        timeout.Options{ShutdownTime: base.Add(2 * time.Hour)},
-			policy:           timeout.UpdatePolicyAlways,
-			extraAnnotations: map[string]string{testRetentionAnnotation: "30m", "example.openkruise.io/extra": "yes"},
-			expectUpdated:    true,
-			expectValue:      "30m",
-			expectValueSet:   true,
+			name:                "equal timeout still overwrites differing annotation",
+			current:             timeout.Options{ShutdownTime: base.Add(time.Hour)},
+			requested:           timeout.Options{ShutdownTime: base.Add(time.Hour)},
+			initialAnnotations:  map[string]string{testRetentionAnnotation: "10m"},
+			extraAnnotations:    map[string]string{testRetentionAnnotation: "30m"},
+			expectUpdated:       true,
+			expectedAnnotations: map[string]string{testRetentionAnnotation: "30m"},
 		},
 	}
 	for _, tt := range tests {
@@ -271,11 +234,8 @@ func TestSandbox_SaveTimeoutWithPolicyExtraAnnotations(t *testing.T) {
 			infraInstance, fc := NewTestInfra(t)
 			sbx := createTestSandboxWithDefaults("test-sandbox", "default")
 			setTimeout(sbx, tt.current)
-			if tt.initialAnnotation != "" {
-				if sbx.Annotations == nil {
-					sbx.Annotations = map[string]string{}
-				}
-				sbx.Annotations[testRetentionAnnotation] = tt.initialAnnotation
+			if len(tt.initialAnnotations) > 0 {
+				sbx.Annotations = tt.initialAnnotations
 			}
 			CreateSandboxWithStatus(t, fc, sbx)
 
@@ -289,147 +249,123 @@ func TestSandbox_SaveTimeoutWithPolicyExtraAnnotations(t *testing.T) {
 				return err == nil
 			}, time.Second, 10*time.Millisecond)
 
-			result, err := sandbox.SaveTimeoutWithPolicy(t.Context(), infra.SaveTimeoutOptions{
+			result, err := sandbox.SaveTimeout(t.Context(), infra.SaveTimeoutOptions{
 				Timeout:          tt.requested,
 				ExtraAnnotations: tt.extraAnnotations,
-			}, tt.policy)
+			})
 			require.NoError(t, err)
 			assert.Equal(t, tt.expectUpdated, result.Updated)
 
 			var updated v1alpha1.Sandbox
 			require.NoError(t, fc.Get(t.Context(), types.NamespacedName{Namespace: sbx.Namespace, Name: sbx.Name}, &updated))
-			gotValue, gotSet := updated.Annotations[testRetentionAnnotation]
-			assert.Equal(t, tt.expectValueSet, gotSet)
-			if tt.expectValueSet {
-				assert.Equal(t, tt.expectValue, gotValue)
-			}
-			// Verify multi-annotation merging when applicable
-			if _, hasExtra := tt.extraAnnotations["example.openkruise.io/extra"]; hasExtra && tt.expectUpdated {
-				assert.Equal(t, "yes", updated.Annotations["example.openkruise.io/extra"])
+			for key, want := range tt.expectedAnnotations {
+				assert.Equal(t, want, updated.Annotations[key])
 			}
 		})
 	}
 }
 
-//goland:noinspection GoDeprecation
-func TestSandbox_SaveTimeoutWithPolicy_OnConflict(t *testing.T) {
+func TestSandbox_SaveTimeout_OnConflict(t *testing.T) {
 	scheme := k8sruntime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(v1alpha1.AddToScheme(scheme))
 
-	var interceptedUpdates atomic.Int32
-	var firstTwoUpdates sync.WaitGroup
-	firstTwoUpdates.Add(2)
-	releaseUpdates := make(chan struct{})
-
-	builder := fake.NewClientBuilder().WithScheme(scheme)
-	for _, idx := range infracache.GetIndexFuncs() {
-		builder = builder.WithIndex(idx.Obj, idx.FieldName, idx.Extract)
-	}
-	builder = builder.WithStatusSubresource(&v1alpha1.Sandbox{})
-	builder = builder.WithInterceptorFuncs(interceptor.Funcs{
-		Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
-			if _, ok := obj.(*v1alpha1.Sandbox); ok {
-				if interceptedUpdates.Add(1) <= 2 {
-					firstTwoUpdates.Done()
-					<-releaseUpdates
-				}
-			}
-			return c.Update(ctx, obj, opts...)
-		},
-	})
-	fc := builder.Build()
-
-	mgrBuilder, err := controllers.NewMockManagerBuilder(t)
-	require.NoError(t, err)
-	mgr := mgrBuilder.
-		WithScheme(scheme).
-		WithClient(fc).
-		WithWaitSimulation().
-		Build()
-
-	testCache, err := infracache.NewCache(mgr)
-	require.NoError(t, err)
-	mgr.SetWaitHooks(testCache.GetWaitHooks())
-
-	options := config.InitOptions(config.SandboxManagerOptions{
-		DisableRouteReconciliation: true,
-	})
-	infraInstance := NewInfraBuilder(options).
-		WithCache(testCache).
-		WithAPIReader(fc).
-		WithProxy(proxy.NewServer(options)).
-		Build()
-	require.NoError(t, infraInstance.Run(t.Context()))
-	infraImpl := infraInstance.(*Infra)
-
 	base := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	current := timeout.Options{ShutdownTime: base.Add(10 * time.Minute)}
-	requested := timeout.Options{ShutdownTime: base.Add(20 * time.Minute)}
 
-	sbx := createTestSandboxWithDefaults("test-sandbox", "default")
-	setTimeout(sbx, current)
-	CreateSandboxWithStatus(t, fc, sbx)
-
-	var sandboxA infra.Sandbox
-	var sandboxB infra.Sandbox
-	require.Eventually(t, func() bool {
-		var getErr error
-		sandboxA, getErr = infraImpl.GetSandbox(t.Context(), infra.GetSandboxOptions{
-			SandboxID: utils.GetSandboxID(sbx),
-			Namespace: sbx.Namespace,
-		})
-		if getErr != nil {
-			return false
-		}
-		sandboxB, getErr = infraImpl.GetSandbox(t.Context(), infra.GetSandboxOptions{
-			SandboxID: utils.GetSandboxID(sbx),
-			Namespace: sbx.Namespace,
-		})
-		return getErr == nil
-	}, time.Second, 10*time.Millisecond)
-
-	type saveResult struct {
-		result infra.TimeoutUpdateResult
-		err    error
+	tests := []struct {
+		name           string
+		winner         timeout.Options
+		requested      timeout.Options
+		useGetter      bool
+		expectUpdated  bool
+		expectTimeout  timeout.Options
+		expectAttempts int32
+	}{
+		{
+			name:           "static timeout overwrites fresh winner after conflict",
+			winner:         timeout.Options{ShutdownTime: base.Add(30 * time.Minute)},
+			requested:      timeout.Options{ShutdownTime: base.Add(20 * time.Minute)},
+			expectUpdated:  true,
+			expectTimeout:  timeout.Options{ShutdownTime: base.Add(20 * time.Minute)},
+			expectAttempts: 2,
+		},
+		{
+			name:           "getter updates when fresh winner is earlier than requested",
+			winner:         timeout.Options{ShutdownTime: base.Add(20 * time.Minute)},
+			requested:      timeout.Options{ShutdownTime: base.Add(30 * time.Minute)},
+			useGetter:      true,
+			expectUpdated:  true,
+			expectTimeout:  timeout.Options{ShutdownTime: base.Add(30 * time.Minute)},
+			expectAttempts: 2,
+		},
+		{
+			name:           "getter skips when fresh winner is later than requested",
+			winner:         timeout.Options{ShutdownTime: base.Add(40 * time.Minute)},
+			requested:      timeout.Options{ShutdownTime: base.Add(30 * time.Minute)},
+			useGetter:      true,
+			expectUpdated:  false,
+			expectTimeout:  timeout.Options{ShutdownTime: base.Add(40 * time.Minute)},
+			expectAttempts: 1,
+		},
 	}
 
-	results := make(chan saveResult, 2)
-	go func() {
-		result, saveErr := sandboxA.SaveTimeoutWithPolicy(t.Context(), infra.SaveTimeoutOptions{
-			Timeout: requested,
-		}, timeout.UpdatePolicyAlways)
-		results <- saveResult{result: result, err: saveErr}
-	}()
-	go func() {
-		result, saveErr := sandboxB.SaveTimeoutWithPolicy(t.Context(), infra.SaveTimeoutOptions{
-			Timeout: requested,
-		}, timeout.UpdatePolicyAlways)
-		results <- saveResult{result: result, err: saveErr}
-	}()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sbx := createTestSandboxWithDefaults("test-sandbox", "default")
+			setTimeout(sbx, current)
+			key := types.NamespacedName{Namespace: sbx.Namespace, Name: sbx.Name}
 
-	firstTwoUpdates.Wait()
-	close(releaseUpdates)
+			var updateAttempts atomic.Int32
+			builder := fake.NewClientBuilder().WithScheme(scheme).WithObjects(sbx)
+			builder = builder.WithInterceptorFuncs(interceptor.Funcs{
+				Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+					if _, ok := obj.(*v1alpha1.Sandbox); ok {
+						if updateAttempts.Add(1) == 1 {
+							latest := &v1alpha1.Sandbox{}
+							require.NoError(t, c.Get(ctx, key, latest))
+							patched := latest.DeepCopy()
+							setTimeout(patched, tt.winner)
+							require.NoError(t, c.Update(ctx, patched))
+							return apierrors.NewConflict(
+								schema.GroupResource{Group: v1alpha1.GroupVersion.Group, Resource: "sandboxes"},
+								obj.GetName(),
+								errors.New("forced conflict"),
+							)
+						}
+					}
+					return c.Update(ctx, obj, opts...)
+				},
+			})
+			fc := builder.Build()
+			testCache := &retryUpdateTestProvider{
+				client:         fc,
+				apiReader:      &countingReader{Reader: fc},
+				claimedSandbox: sbx.DeepCopy(),
+			}
 
-	first := <-results
-	second := <-results
-	require.NoError(t, first.err)
-	require.NoError(t, second.err)
+			sandbox := AsSandbox(sbx.DeepCopy(), testCache)
+			opts := infra.SaveTimeoutOptions{Timeout: tt.requested}
+			if tt.useGetter {
+				opts = infra.SaveTimeoutOptions{TimeoutGetter: func(snapshot infra.TimeoutSnapshot) timeout.Options {
+					if snapshot.Timeout.ShutdownTime.Before(tt.requested.ShutdownTime) {
+						return tt.requested
+					}
+					return snapshot.Timeout
+				}}
+			}
+			result, err := sandbox.SaveTimeout(t.Context(), opts)
+			require.NoError(t, err)
+			assert.Equal(t, tt.expectUpdated, result.Updated)
+			assert.Equal(t, tt.expectAttempts, updateAttempts.Load())
+			assert.Equal(t, int32(1), testCache.apiReader.Calls())
+			assert.True(t, timeout.Equal(tt.expectTimeout, sandbox.GetTimeout()))
 
-	updatedCount := 0
-	for _, item := range []saveResult{first, second} {
-		if item.result.Updated {
-			updatedCount++
-		}
+			var updated v1alpha1.Sandbox
+			require.NoError(t, fc.Get(t.Context(), key, &updated))
+			assert.True(t, timeout.Equal(tt.expectTimeout, timeout.GetTimeoutFromSandbox(&updated)))
+		})
 	}
-	assert.Equal(t, 1, updatedCount)
-	assert.Equal(t, int32(2), interceptedUpdates.Load())
-	assert.True(t, timeout.Equal(requested, sandboxA.GetTimeout()))
-	assert.True(t, timeout.Equal(requested, sandboxB.GetTimeout()))
-
-	var updated v1alpha1.Sandbox
-	require.NoError(t, fc.Get(t.Context(), types.NamespacedName{Namespace: sbx.Namespace, Name: sbx.Name}, &updated))
-	assert.True(t, timeout.Equal(requested, timeout.GetTimeoutFromSandbox(&updated)))
 }
 
 type countingReader struct {
@@ -515,17 +451,17 @@ func TestSandbox_retryUpdate(t *testing.T) {
 		wrapperPaused     *bool
 		claimedPaused     *bool
 		modifier          func(t *testing.T) ModifierFunc
+		conflictPatch     func(t *testing.T, c client.WithWatch, latest *v1alpha1.Sandbox)
 		expectUpdated     bool
 		expectUpdateCalls int32
 		expectClientGets  int32
+		expectAPIReader   int32
 		expectPaused      bool
 		expectError       string
 	}{
 		{
 			name:          "modifier returns false skips update and refreshes sandbox",
 			initialPaused: false,
-			wrapperPaused: ptr.To(true),
-			claimedPaused: ptr.To(true),
 			modifier: func(t *testing.T) ModifierFunc {
 				return func(sbx *v1alpha1.Sandbox) (bool, error) {
 					assert.False(t, sbx.Spec.Paused)
@@ -566,6 +502,29 @@ func TestSandbox_retryUpdate(t *testing.T) {
 			expectPaused:      true,
 			expectError:       "modifier failed",
 		},
+		{
+			name:          "conflict refreshes from api reader",
+			initialPaused: true,
+			modifier: func(t *testing.T) ModifierFunc {
+				return func(sbx *v1alpha1.Sandbox) (bool, error) {
+					if !sbx.Spec.Paused {
+						return false, nil
+					}
+					sbx.Spec.Paused = false
+					return true, nil
+				}
+			},
+			conflictPatch: func(t *testing.T, c client.WithWatch, latest *v1alpha1.Sandbox) {
+				patched := latest.DeepCopy()
+				patched.Spec.Paused = false
+				require.NoError(t, c.Patch(t.Context(), patched, client.MergeFrom(latest)))
+			},
+			expectUpdated:     false,
+			expectUpdateCalls: 1,
+			expectClientGets:  1,
+			expectAPIReader:   1,
+			expectPaused:      false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -577,9 +536,19 @@ func TestSandbox_retryUpdate(t *testing.T) {
 			if tt.claimedPaused != nil {
 				claimedSandbox.Spec.Paused = *tt.claimedPaused
 			}
+			key := types.NamespacedName{Namespace: sbx.Namespace, Name: sbx.Name}
 
 			testCache, fc := newRetryUpdateTestCache(t, sbx, claimedSandbox, func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
-				updateCalls.Add(1)
+				if updateCalls.Add(1) == 1 && tt.conflictPatch != nil {
+					latest := &v1alpha1.Sandbox{}
+					require.NoError(t, c.Get(ctx, key, latest))
+					tt.conflictPatch(t, c, latest)
+					return apierrors.NewConflict(
+						schema.GroupResource{Group: v1alpha1.GroupVersion.Group, Resource: "sandboxes"},
+						obj.GetName(),
+						errors.New("forced conflict"),
+					)
+				}
 				return c.Update(ctx, obj, opts...)
 			})
 			wrapper := sbx.DeepCopy()
@@ -598,7 +567,7 @@ func TestSandbox_retryUpdate(t *testing.T) {
 			assert.Equal(t, tt.expectUpdated, updated)
 			assert.Equal(t, tt.expectUpdateCalls, updateCalls.Load())
 			assert.Equal(t, tt.expectClientGets, testCache.clientGetCalls.Load())
-			assert.Equal(t, int32(0), testCache.apiReader.Calls())
+			assert.Equal(t, tt.expectAPIReader, testCache.apiReader.Calls())
 			assert.Equal(t, tt.expectPaused, s.Sandbox.Spec.Paused)
 
 			var stored v1alpha1.Sandbox
@@ -606,50 +575,6 @@ func TestSandbox_retryUpdate(t *testing.T) {
 			assert.Equal(t, tt.expectPaused, stored.Spec.Paused)
 		})
 	}
-}
-
-func TestSandbox_retryUpdate_ConflictRefreshesFromAPIReader(t *testing.T) {
-	sbx := createTestSandboxWithDefaults("test-sandbox", "default")
-	sbx.Spec.Paused = true
-
-	var updateAttempts atomic.Int32
-	key := types.NamespacedName{Namespace: sbx.Namespace, Name: sbx.Name}
-	staleClaimedSandbox := sbx.DeepCopy()
-	testCache, fc := newRetryUpdateTestCache(t, sbx, staleClaimedSandbox, func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
-		if updateAttempts.Add(1) == 1 {
-			latest := &v1alpha1.Sandbox{}
-			require.NoError(t, c.Get(ctx, key, latest))
-			patched := latest.DeepCopy()
-			patched.Spec.Paused = false
-			require.NoError(t, c.Patch(ctx, patched, client.MergeFrom(latest)))
-			return apierrors.NewConflict(
-				schema.GroupResource{Group: v1alpha1.GroupVersion.Group, Resource: "sandboxes"},
-				obj.GetName(),
-				errors.New("forced conflict"),
-			)
-		}
-		return c.Update(ctx, obj, opts...)
-	})
-
-	s := AsSandbox(sbx.DeepCopy(), testCache)
-	updated, err := s.retryUpdate(t.Context(), func(sbx *v1alpha1.Sandbox) (bool, error) {
-		if !sbx.Spec.Paused {
-			return false, nil
-		}
-		sbx.Spec.Paused = false
-		return true, nil
-	})
-
-	require.NoError(t, err)
-	assert.False(t, updated)
-	assert.Equal(t, int32(1), updateAttempts.Load())
-	assert.Equal(t, int32(1), testCache.clientGetCalls.Load())
-	assert.Equal(t, int32(1), testCache.apiReader.Calls())
-	assert.False(t, s.Sandbox.Spec.Paused)
-
-	var stored v1alpha1.Sandbox
-	require.NoError(t, fc.Get(t.Context(), key, &stored))
-	assert.False(t, stored.Spec.Paused)
 }
 
 func TestSandbox_GetTemplate(t *testing.T) {

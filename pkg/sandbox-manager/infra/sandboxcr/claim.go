@@ -344,7 +344,20 @@ func runClaimPostProcesses(ctx context.Context, sbx *Sandbox, lockType infra.Loc
 		metrics.Total += metrics.CSIMount
 		log.Info("csi mount completed", "cost", metrics.CSIMount)
 	}
+
+	if err := processSaveTimeout(ctx, sbx, opts.SaveTimeoutOptions); err != nil {
+		log.Error(err, "failed to save timeout after claim post processes")
+		return retriableError{Message: fmt.Sprintf("failed to save timeout: %s", err)}
+	}
 	return nil
+}
+
+func processSaveTimeout(ctx context.Context, sbx infra.Sandbox, opts *infra.SaveTimeoutOptions) error {
+	if opts == nil {
+		return nil
+	}
+	_, err := sbx.SaveTimeout(ctx, *opts)
+	return err
 }
 
 // processSecurityToken issues and propagates a sandbox security token when the

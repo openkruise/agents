@@ -184,6 +184,12 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 		log.Info("csi mount completed", "cost", metrics.CSIMount)
 	}
 
+	if err = processSaveTimeout(ctx, sbx, opts.SaveTimeoutOptions); err != nil {
+		log.Error(err, "failed to save timeout after clone post processes")
+		err = retriableError{Message: fmt.Sprintf("failed to save timeout: %s", err)}
+		return
+	}
+
 	cloned = sbx
 	return
 }

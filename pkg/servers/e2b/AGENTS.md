@@ -88,9 +88,9 @@ Every E2B route is registered twice via `RegisterE2BRoute`: once for the native 
 
 ### Timeout Semantics
 - **Pause**: for timed sandboxes, writes the paused retention deadline (`now + retention`) while flipping `Spec.Paused=true`; the default retention is 100 years and can be overridden by `x-e2b-kruise-reserve-paused-sandbox-duration`. Never-timeout sandboxes keep nil timeout fields.
-- **Resume**: for timed sandboxes, writes an effective timeout while flipping `Spec.Paused=false`; the effective timeout is the request value after the resume floor. Never-timeout sandboxes keep nil timeout fields.
-- **Connect (Running)**: extend-only — never shortens the effective deadline. If the requested deadline is earlier than the current one, the update is silently skipped.
-- **Connect (Paused → Resume)**: resumes with an effective timeout placeholder, then applies the post-resume timeout with `UpdatePolicyExtendOnly`.
+- **Resume**: for timed sandboxes, writes an effective timeout placeholder while flipping `Spec.Paused=false`, then reanchors the final effective timeout after Resume completes. Never-timeout sandboxes keep nil timeout fields.
+- **Connect (Running)**: computes one requested timeout per request, then extends `PauseTime` and `ShutdownTime` independently. It never clears never-timeout fields and skips the write when neither field changes.
+- **Connect (Paused → Resume)**: resumes with a request-start-anchored effective timeout placeholder, then applies a Resume-completion-anchored timeout through the same E2B-owned merge. Auto-pause `EndAt` remains based on `PauseTime`.
 - **SetTimeout**: only applies to running sandboxes; conflicts return `409`.
 
 ### Connect Timeout Race Handling
@@ -98,7 +98,7 @@ Concurrent `ConnectSandbox` calls intentionally converge by deadline rather than
 
 For a timed paused sandbox, `ConnectSandbox` first applies the resume floor only when the sandbox is paused and has an existing deadline. `Resume` then updates `Spec.Paused=false` and writes the placeholder timeout in the same Sandbox update, so the controller cannot observe an unpaused sandbox with an already-expired pause deadline. If several callers race, only the first update that flips `Spec.Paused` wins; losing resume callers must not overwrite the winner's placeholder.
 
-After resume, every caller runs `updateConnectTimeout` with `UpdatePolicyExtendOnly`. A later deadline extends the sandbox, while an earlier or stale deadline is skipped. This makes concurrent Connect timeout writes monotonic: final state is the longest effective deadline among the racing requests, and a shorter request cannot shrink a longer timeout even if it finishes later. Running-sandbox Connect also uses `ExtendOnly`, but the resume floor must not apply there.
+After resume, every caller runs `updateConnectTimeout`, anchors its final requested timeout to Resume completion, and retries Kubernetes conflicts by re-merging that fixed post-Resume request against the latest sandbox timeout. This makes concurrent Connect timeout writes monotonic per field: final state keeps the latest accepted `PauseTime` and `ShutdownTime`, and a shorter request cannot shrink a longer timeout even if it finishes later. Running-sandbox Connect uses the request-start anchor and the same E2B-owned merge, but the resume floor must not apply there. Infra `SaveTimeout` is a direct save operation and has no policy enum.
 
 ### Create Sandbox
 - If `templateID` matches a SandboxSet → claim path (`ClaimSandbox`).
