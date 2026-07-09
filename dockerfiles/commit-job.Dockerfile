@@ -10,15 +10,14 @@ WORKDIR /workspace
 COPY go.mod go.mod
 COPY go.sum go.sum
 # Copy the go source
-COPY cmd/commit-job/main.go cmd/main.go
+COPY cmd/commit-job/ cmd/commit-job/
 COPY api api/
 COPY pkg pkg/
 COPY client client/
 
 # Build
-RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -ldflags "-X main.version=${VERSION}" -a -o commit-job cmd/main.go
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -ldflags "-X main.version=${VERSION}" -a -o commit-job ./cmd/commit-job
 
-RUN mkdir nerdctl-builder && cd nerdctl-builder
 WORKDIR /workspace/nerdctl-builder
 RUN git clone -b ${NERDCTL_BRANCH:-v2.0.0} https://github.com/containerd/nerdctl.git
 RUN cd nerdctl && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} make

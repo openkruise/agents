@@ -52,7 +52,7 @@ func doCommitWith(ctx context.Context, executor Executor) int {
 
 	// 1. Setup registry authentication
 	if err := setupRegistryAuth(); err != nil {
-		klog.Warningf("Failed to setup registry authentication, push may fail: %v", err)
+		klog.ErrorS(err, "Failed to setup registry authentication, push may fail")
 	}
 
 	// 2. nerdctl commit
