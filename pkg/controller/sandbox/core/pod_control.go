@@ -104,6 +104,18 @@ func (c *PodControl) CreatePod(ctx context.Context, args CreatePodArgs) (*corev1
 		ScaleExpectation.ObserveScale(GetControllerKey(box), expectations.Create, box.Name)
 		if !errors.IsAlreadyExists(err) {
 			klog.ErrorS(err, "create pod failed", "sandbox", klog.KObj(box))
+			// Emit Warning Event and set Ready condition to reflect the failure
+			// so that users can diagnose the root cause (e.g., invalid PVC, quota
+			// exceeded, etc.) without digging through controller logs.
+			c.recorder.Event(box, corev1.EventTypeWarning, agentsv1alpha1.SandboxReadyReasonPodCreateFailed,
+				fmt.Sprintf("Failed to create pod: %v", err))
+			utils.SetSandboxCondition(args.NewStatus, metav1.Condition{
+				Type:               string(agentsv1alpha1.SandboxConditionReady),
+				Status:             metav1.ConditionFalse,
+				LastTransitionTime: metav1.Now(),
+				Reason:             agentsv1alpha1.SandboxReadyReasonPodCreateFailed,
+				Message:            utils.TruncateConditionMessage(err.Error()),
+			})
 			return nil, err
 		}
 	}
