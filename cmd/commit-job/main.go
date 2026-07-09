@@ -30,22 +30,15 @@ import (
 
 func main() {
 	klog.InitFlags(nil)
+	containerID := flag.String(jobutil.ArgContainerID, "", "Target container ID to commit.")
+	image := flag.String(jobutil.ArgImage, "", "Target image to commit and push.")
 	flag.Parse()
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 
-	action := os.Getenv(jobutil.EnvAgentJobActionKey)
-	klog.InfoS("Commit job starting", "action", action)
-
-	var exitCode int
-	switch action {
-	case jobutil.EnvAgentJobActionCommit:
-		exitCode = jobutil.DoCommit(ctx)
-	default:
-		klog.ErrorS(nil, "Unknown action", "action", action)
-		exitCode = 1
-	}
+	klog.InfoS("Commit job starting")
+	exitCode := jobutil.DoCommit(ctx, jobutil.CommitOptions{ContainerID: *containerID, Image: *image})
 
 	klog.InfoS("Commit job finished", "exitCode", exitCode)
 	klog.Flush()

@@ -26,12 +26,8 @@ const (
 	// EnvAgentJobImage is the environment variable name for the agent job self-image.
 	EnvAgentJobImage = "AGENT_JOB_IMAGE"
 
-	// EnvContainerID is the environment variable name for the commit target container ID.
-	EnvContainerID = "COMMIT_CONTAINER_ID"
 	// EnvContainerName is the environment variable name for the commit target container name.
 	EnvContainerName = "COMMIT_CONTAINER_NAME"
-	// EnvCommitImage is the environment variable name for the commit target image.
-	EnvCommitImage = "COMMIT_IMAGE"
 	// EnvContainerdSock is the environment variable name for the containerd socket path.
 	EnvContainerdSock = "COMMIT_CONTAINERD_SOCK"
 	// EnvContainerdSockPath is the environment variable name for the containerd socket dir.
@@ -49,10 +45,10 @@ const (
 	// EnvCommitPodUID is the environment variable name for the commit pod uid.
 	EnvCommitPodUID = "COMMIT_POD_UID"
 
-	// EnvAgentJobActionKey is the environment variable name for the job action.
-	EnvAgentJobActionKey = "ACTION"
-	// EnvAgentJobActionCommit is the environment variable value for the commit job action.
-	EnvAgentJobActionCommit = "COMMIT"
+	// ArgContainerID is the CLI argument name for the commit target container ID.
+	ArgContainerID = "container-id"
+	// ArgImage is the CLI argument name for the commit target image.
+	ArgImage = "image"
 
 	// EnvAgentJobImagePullPolicy is the environment variable name for the agent job image pull policy.
 	EnvAgentJobImagePullPolicy = "AGENT_JOB_IMAGE_PULL_POLICY"
@@ -65,9 +61,7 @@ const (
 // EnvConfig reads configuration from environment variables.
 type EnvConfig struct{}
 
-func (c *EnvConfig) ContainerID() string        { return os.Getenv(EnvContainerID) }
 func (c *EnvConfig) ContainerName() string      { return os.Getenv(EnvContainerName) }
-func (c *EnvConfig) CommitImage() string        { return os.Getenv(EnvCommitImage) }
 func (c *EnvConfig) CommitNamespace() string    { return os.Getenv(EnvCommitNamespace) }
 func (c *EnvConfig) CommitName() string         { return os.Getenv(EnvCommitName) }
 func (c *EnvConfig) CommitPodName() string      { return os.Getenv(EnvCommitPodName) }

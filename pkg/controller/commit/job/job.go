@@ -29,22 +29,28 @@ type Executor func(ctx context.Context, opts ...CmdOpt) error
 // defaultExecutor is the production executor.
 var defaultExecutor Executor = NerdctlExec
 
-// DoCommit is the main entry point for the commit-job binary.
-// It performs: setup registry auth → nerdctl commit → nerdctl push.
-func DoCommit(ctx context.Context) int {
-	return doCommitWith(ctx, defaultExecutor)
+// CommitOptions contains the explicit runtime inputs for a commit job.
+type CommitOptions struct {
+	ContainerID string
+	Image       string
 }
 
-func doCommitWith(ctx context.Context, executor Executor) int {
-	containerID := Config().ContainerID()
-	image := Config().CommitImage()
+// DoCommit is the main entry point for the commit-job binary.
+// It performs: setup registry auth → nerdctl commit → nerdctl push.
+func DoCommit(ctx context.Context, opts CommitOptions) int {
+	return doCommitWith(ctx, opts, defaultExecutor)
+}
+
+func doCommitWith(ctx context.Context, opts CommitOptions, executor Executor) int {
+	containerID := opts.ContainerID
+	image := opts.Image
 
 	if containerID == "" {
-		klog.ErrorS(nil, "Commit container ID is empty", "env", EnvContainerID)
+		klog.ErrorS(nil, "Commit container ID is empty", "arg", ArgContainerID)
 		return ExitCodeCommitFailed
 	}
 	if image == "" {
-		klog.ErrorS(nil, "Commit image is empty", "env", EnvCommitImage)
+		klog.ErrorS(nil, "Commit image is empty", "arg", ArgImage)
 		return ExitCodeCommitFailed
 	}
 

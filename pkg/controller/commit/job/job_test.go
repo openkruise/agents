@@ -19,31 +19,24 @@ package job
 import (
 	"context"
 	"fmt"
-	"os"
 	"os/exec"
 	"testing"
 )
 
 func TestDoCommitWith_Success(t *testing.T) {
-	os.Setenv(EnvContainerID, "test-container-id")
-	os.Setenv(EnvCommitImage, "registry.example.com/app:v1")
-	defer os.Unsetenv(EnvContainerID)
-	defer os.Unsetenv(EnvCommitImage)
+	opts := CommitOptions{ContainerID: "test-container-id", Image: "registry.example.com/app:v1"}
 
 	fakeExec := func(ctx context.Context, opts ...CmdOpt) error {
 		return nil
 	}
-	code := doCommitWith(context.Background(), fakeExec)
+	code := doCommitWith(context.Background(), opts, fakeExec)
 	if code != ExitCodeSuccess {
 		t.Errorf("expected ExitCodeSuccess (%d), got %d", ExitCodeSuccess, code)
 	}
 }
 
 func TestDoCommitWith_CommitFailed(t *testing.T) {
-	os.Setenv(EnvContainerID, "test-container-id")
-	os.Setenv(EnvCommitImage, "registry.example.com/app:v1")
-	defer os.Unsetenv(EnvContainerID)
-	defer os.Unsetenv(EnvCommitImage)
+	opts := CommitOptions{ContainerID: "test-container-id", Image: "registry.example.com/app:v1"}
 
 	callCount := 0
 	fakeExec := func(ctx context.Context, opts ...CmdOpt) error {
@@ -54,17 +47,14 @@ func TestDoCommitWith_CommitFailed(t *testing.T) {
 		}
 		return nil
 	}
-	code := doCommitWith(context.Background(), fakeExec)
+	code := doCommitWith(context.Background(), opts, fakeExec)
 	if code != ExitCodeCommitFailed {
 		t.Errorf("expected ExitCodeCommitFailed (%d), got %d", ExitCodeCommitFailed, code)
 	}
 }
 
 func TestDoCommitWith_PushFailed(t *testing.T) {
-	os.Setenv(EnvContainerID, "test-container-id")
-	os.Setenv(EnvCommitImage, "registry.example.com/app:v1")
-	defer os.Unsetenv(EnvContainerID)
-	defer os.Unsetenv(EnvCommitImage)
+	opts := CommitOptions{ContainerID: "test-container-id", Image: "registry.example.com/app:v1"}
 
 	callCount := 0
 	fakeExec := func(ctx context.Context, opts ...CmdOpt) error {
@@ -75,22 +65,21 @@ func TestDoCommitWith_PushFailed(t *testing.T) {
 		}
 		return nil
 	}
-	code := doCommitWith(context.Background(), fakeExec)
+	code := doCommitWith(context.Background(), opts, fakeExec)
 	if code != ExitCodePushFailed {
 		t.Errorf("expected ExitCodePushFailed (%d), got %d", ExitCodePushFailed, code)
 	}
 }
 
 func TestDoCommitWith_EmptyContainerID(t *testing.T) {
-	setEnv(t, EnvContainerID, "")
-	setEnv(t, EnvCommitImage, "registry.example.com/app:v1")
+	opts := CommitOptions{Image: "registry.example.com/app:v1"}
 
 	called := false
 	fakeExec := func(ctx context.Context, opts ...CmdOpt) error {
 		called = true
 		return nil
 	}
-	code := doCommitWith(context.Background(), fakeExec)
+	code := doCommitWith(context.Background(), opts, fakeExec)
 	if code != ExitCodeCommitFailed {
 		t.Errorf("expected ExitCodeCommitFailed (%d), got %d", ExitCodeCommitFailed, code)
 	}
@@ -100,15 +89,14 @@ func TestDoCommitWith_EmptyContainerID(t *testing.T) {
 }
 
 func TestDoCommitWith_EmptyImage(t *testing.T) {
-	setEnv(t, EnvContainerID, "test-container-id")
-	setEnv(t, EnvCommitImage, "")
+	opts := CommitOptions{ContainerID: "test-container-id"}
 
 	called := false
 	fakeExec := func(ctx context.Context, opts ...CmdOpt) error {
 		called = true
 		return nil
 	}
-	code := doCommitWith(context.Background(), fakeExec)
+	code := doCommitWith(context.Background(), opts, fakeExec)
 	if code != ExitCodeCommitFailed {
 		t.Errorf("expected ExitCodeCommitFailed (%d), got %d", ExitCodeCommitFailed, code)
 	}
@@ -118,10 +106,7 @@ func TestDoCommitWith_EmptyImage(t *testing.T) {
 }
 
 func TestDoCommitWith_ArgsPassedCorrectly(t *testing.T) {
-	os.Setenv(EnvContainerID, "ctr-123")
-	os.Setenv(EnvCommitImage, "reg.io/img:v2")
-	defer os.Unsetenv(EnvContainerID)
-	defer os.Unsetenv(EnvCommitImage)
+	opts := CommitOptions{ContainerID: "ctr-123", Image: "reg.io/img:v2"}
 
 	var capturedCalls [][]string
 	fakeExec := func(ctx context.Context, opts ...CmdOpt) error {
@@ -133,7 +118,7 @@ func TestDoCommitWith_ArgsPassedCorrectly(t *testing.T) {
 		capturedCalls = append(capturedCalls, cmd.Args)
 		return nil
 	}
-	code := doCommitWith(context.Background(), fakeExec)
+	code := doCommitWith(context.Background(), opts, fakeExec)
 	if code != ExitCodeSuccess {
 		t.Fatalf("expected success, got %d", code)
 	}
