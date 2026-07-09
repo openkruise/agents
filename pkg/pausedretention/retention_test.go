@@ -100,25 +100,3 @@ func TestResolveReservePausedSandboxDurationAnnotation(t *testing.T) {
 		})
 	}
 }
-
-func TestPausedShutdownTime(t *testing.T) {
-	tests := []struct {
-		name            string
-		anchor          time.Time
-		pausedRetention time.Duration
-		want            time.Time
-	}{
-		{
-			name:            "adds paused retention",
-			anchor:          time.Date(2026, time.June, 11, 10, 0, 0, 123, time.UTC),
-			pausedRetention: 30 * time.Minute,
-			want:            time.Date(2026, time.June, 11, 10, 30, 0, 0, time.UTC),
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := PausedShutdownTime(tt.anchor, tt.pausedRetention)
-			assert.Equal(t, tt.want, got)
-		})
-	}
-}

@@ -86,17 +86,6 @@ func timePtrOrNil(t time.Time) *metav1.Time {
 	return &metav1.Time{Time: timeout.NormalizeTime(t)}
 }
 
-func mutateTimeout(ctx context.Context, c ctrl.Client, key types.NamespacedName, opts timeout.Options) error {
-	var current v1alpha1.Sandbox
-	if err := c.Get(ctx, key, &current); err != nil {
-		return err
-	}
-	modified := current.DeepCopy()
-	modified.Spec.PauseTime = timePtrOrNil(opts.PauseTime)
-	modified.Spec.ShutdownTime = timePtrOrNil(opts.ShutdownTime)
-	return c.Patch(ctx, modified, ctrl.MergeFrom(&current))
-}
-
 // TestSandbox_ResumeConcurrent tests concurrent resume operations on the same sandbox
 func TestSandbox_ResumeConcurrent(t *testing.T) {
 	utestutils.InitLogOutput()
@@ -1712,7 +1701,7 @@ func TestSandbox_ResumeMutatorAtomicity(t *testing.T) {
 	}
 }
 
-func TestSandbox_ResumeExtendOnlyConcurrent(t *testing.T) {
+func TestSandbox_ResumeThenDirectSaveTimeout(t *testing.T) {
 	utestutils.InitLogOutput()
 
 	now := time.Now().UTC().Truncate(time.Second)
@@ -1728,144 +1717,62 @@ func TestSandbox_ResumeExtendOnlyConcurrent(t *testing.T) {
 		PauseTime:    now.Add(10 * time.Minute),
 		ShutdownTime: now.Add(30 * 24 * time.Hour),
 	}
-	longerOpts := timeout.Options{
-		PauseTime:    now.Add(20 * time.Minute),
-		ShutdownTime: now.Add(30 * 24 * time.Hour),
-	}
-	shorterOpts := timeout.Options{
-		PauseTime:    now.Add(2 * time.Minute),
-		ShutdownTime: now.Add(30 * 24 * time.Hour),
-	}
 
-	cases := []struct {
-		name                 string
-		initialPaused        bool
-		initialTimeout       timeout.Options
-		concurrentTimeout    *timeout.Options
-		postTimeout          timeout.Options
-		expectTimeout        timeout.Options
-		expectSaveWasUpdated bool
-	}{
-		{
-			name:                 "winner-clean",
-			initialPaused:        true,
-			initialTimeout:       staleOpts,
-			postTimeout:          postOpts,
-			expectTimeout:        postOpts,
-			expectSaveWasUpdated: true,
+	sandbox := &v1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-sandbox",
+			Namespace: "default",
+			Labels:    map[string]string{v1alpha1.LabelSandboxIsClaimed: "true"},
 		},
-		{
-			name:                 "winner-concurrent-longer",
-			initialPaused:        true,
-			initialTimeout:       staleOpts,
-			concurrentTimeout:    &longerOpts,
-			postTimeout:          postOpts,
-			expectTimeout:        longerOpts,
-			expectSaveWasUpdated: false,
+		Spec: v1alpha1.SandboxSpec{
+			Paused:       true,
+			PauseTime:    timePtrOrNil(staleOpts.PauseTime),
+			ShutdownTime: timePtrOrNil(staleOpts.ShutdownTime),
 		},
-		{
-			name:                 "winner-concurrent-shorter",
-			initialPaused:        true,
-			initialTimeout:       staleOpts,
-			concurrentTimeout:    &shorterOpts,
-			postTimeout:          postOpts,
-			expectTimeout:        postOpts,
-			expectSaveWasUpdated: true,
-		},
-		{
-			name:                 "loser-after-winner-finalized-shorter-opts",
-			initialPaused:        false,
-			initialTimeout:       longerOpts,
-			postTimeout:          postOpts,
-			expectTimeout:        longerOpts,
-			expectSaveWasUpdated: false,
-		},
-		{
-			name:                 "loser-longer-than-winner",
-			initialPaused:        false,
-			initialTimeout:       shorterOpts,
-			postTimeout:          postOpts,
-			expectTimeout:        postOpts,
-			expectSaveWasUpdated: true,
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			phase := v1alpha1.SandboxPaused
-			conditions := []metav1.Condition{
+		Status: v1alpha1.SandboxStatus{
+			Phase: v1alpha1.SandboxPaused,
+			Conditions: []metav1.Condition{
 				{Type: string(v1alpha1.SandboxConditionPaused), Status: metav1.ConditionTrue, Reason: "Paused"},
-			}
-			if !tc.initialPaused {
-				phase = v1alpha1.SandboxRunning
-				conditions = []metav1.Condition{
-					{Type: string(v1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue, Reason: "Ready"},
-				}
-			}
-
-			sandbox := &v1alpha1.Sandbox{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-sandbox",
-					Namespace: "default",
-					Labels:    map[string]string{v1alpha1.LabelSandboxIsClaimed: "true"},
-				},
-				Spec: v1alpha1.SandboxSpec{
-					Paused:       tc.initialPaused,
-					PauseTime:    timePtrOrNil(tc.initialTimeout.PauseTime),
-					ShutdownTime: timePtrOrNil(tc.initialTimeout.ShutdownTime),
-				},
-				Status: v1alpha1.SandboxStatus{
-					Phase:      phase,
-					Conditions: conditions,
-				},
-			}
-
-			cache, fc, err := cachetest.NewTestCache(t)
-			require.NoError(t, err)
-			require.NoError(t, cache.Run(t.Context()))
-			defer cache.Stop(t.Context())
-			CreateSandboxWithStatus(t, fc, sandbox)
-			time.Sleep(10 * time.Millisecond)
-
-			key := types.NamespacedName{Namespace: sandbox.Namespace, Name: sandbox.Name}
-			if tc.initialPaused {
-				cache.GetMockManager().AddWaitReconcileKey(sandbox)
-				time.AfterFunc(20*time.Millisecond, func() {
-					var current v1alpha1.Sandbox
-					if err := fc.Get(t.Context(), key, &current); err != nil {
-						return
-					}
-					modified := current.DeepCopy()
-					modified.Status.Phase = v1alpha1.SandboxRunning
-					modified.Status.Conditions = []metav1.Condition{
-						{Type: string(v1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue, Reason: "Resume"},
-					}
-					_ = fc.Status().Patch(t.Context(), modified, ctrl.MergeFrom(&current))
-				})
-			}
-
-			s := AsSandbox(sandbox.DeepCopy(), cache)
-			resumeCtx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-			defer cancel()
-			require.NoError(t, s.Resume(resumeCtx, infra.ResumeOptions{Timeout: &placeholder}))
-
-			if tc.concurrentTimeout != nil {
-				require.NoError(t, mutateTimeout(t.Context(), fc, key, *tc.concurrentTimeout))
-			}
-
-			result, err := s.SaveTimeoutWithPolicy(t.Context(), infra.SaveTimeoutOptions{
-				Timeout: tc.postTimeout,
-			}, timeout.UpdatePolicyExtendOnly)
-			require.NoError(t, err)
-			assert.Equal(t, tc.expectSaveWasUpdated, result.Updated)
-
-			var final v1alpha1.Sandbox
-			require.NoError(t, fc.Get(t.Context(), key, &final))
-			assert.False(t, final.Spec.Paused)
-			assertTimePtrEqual(t, timePtrOrNil(tc.expectTimeout.PauseTime), final.Spec.PauseTime, "final PauseTime must match expected")
-			assertTimePtrEqual(t, timePtrOrNil(tc.expectTimeout.ShutdownTime), final.Spec.ShutdownTime, "final ShutdownTime must match expected")
-		})
+			},
+		},
 	}
+
+	cache, fc, err := cachetest.NewTestCache(t)
+	require.NoError(t, err)
+	require.NoError(t, cache.Run(t.Context()))
+	defer cache.Stop(t.Context())
+	CreateSandboxWithStatus(t, fc, sandbox)
+	time.Sleep(10 * time.Millisecond)
+
+	key := types.NamespacedName{Namespace: sandbox.Namespace, Name: sandbox.Name}
+	cache.GetMockManager().AddWaitReconcileKey(sandbox)
+	time.AfterFunc(20*time.Millisecond, func() {
+		var current v1alpha1.Sandbox
+		if err := fc.Get(t.Context(), key, &current); err != nil {
+			return
+		}
+		modified := current.DeepCopy()
+		modified.Status.Phase = v1alpha1.SandboxRunning
+		modified.Status.Conditions = []metav1.Condition{
+			{Type: string(v1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue, Reason: "Resume"},
+		}
+		_ = fc.Status().Patch(t.Context(), modified, ctrl.MergeFrom(&current))
+	})
+
+	s := AsSandbox(sandbox.DeepCopy(), cache)
+	resumeCtx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, s.Resume(resumeCtx, infra.ResumeOptions{Timeout: &placeholder}))
+
+	result, err := s.SaveTimeout(t.Context(), infra.SetTimeoutOptions{Timeout: postOpts})
+	require.NoError(t, err)
+	assert.True(t, result.Updated)
+
+	var final v1alpha1.Sandbox
+	require.NoError(t, fc.Get(t.Context(), key, &final))
+	assert.False(t, final.Spec.Paused)
+	assertTimePtrEqual(t, timePtrOrNil(postOpts.PauseTime), final.Spec.PauseTime, "final PauseTime must match expected")
+	assertTimePtrEqual(t, timePtrOrNil(postOpts.ShutdownTime), final.Spec.ShutdownTime, "final ShutdownTime must match expected")
 }
 
 func TestSandbox_ResumeFailurePathsLeaveRealTimeout(t *testing.T) {
@@ -1973,9 +1880,9 @@ func TestSandbox_ResumeFailurePathsLeaveRealTimeout(t *testing.T) {
 				defer cancel()
 				require.NoError(t, s.Resume(resumeCtx, infra.ResumeOptions{Timeout: &resumeTimeout}))
 
-				_, err := s.SaveTimeoutWithPolicy(t.Context(), infra.SaveTimeoutOptions{
+				_, err := s.SaveTimeout(t.Context(), infra.SetTimeoutOptions{
 					Timeout: realTimeout,
-				}, timeout.UpdatePolicyExtendOnly)
+				})
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), injectedErr.Error())
 			},

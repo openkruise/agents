@@ -757,7 +757,7 @@ func (r *SandboxReconciler) handlePauseTimeout(ctx context.Context, box *agentsv
 	// sandbox is preserved for the configured duration after being paused.
 	if retention, managed := r.resolveRetentionAnnotationOrDefault(box); managed {
 		if box.Spec.ShutdownTime != nil {
-			newShutdown := metav1.NewTime(pausedretention.PausedShutdownTime(now.Time, retention))
+			newShutdown := metav1.NewTime(timeoututils.NormalizeTime(now.Time.Add(retention)))
 			modified.Spec.ShutdownTime = &newShutdown
 			// Keep PauseTime aligned so the next connect/resume can preserve auto-pause mode.
 			modified.Spec.PauseTime = &newShutdown

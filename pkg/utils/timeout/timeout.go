@@ -38,16 +38,6 @@ func Equal(a, b Options) bool {
 	return timeEqual(a.ShutdownTime, b.ShutdownTime) && timeEqual(a.PauseTime, b.PauseTime)
 }
 
-// ShouldExtendTimeout reports whether requested extends the effective end time.
-func ShouldExtendTimeout(current, requested Options) bool {
-	currentEndAt := timeoutEndAt(current)
-	requestedEndAt := timeoutEndAt(requested)
-	if currentEndAt.IsZero() || requestedEndAt.IsZero() {
-		return false
-	}
-	return requestedEndAt.After(currentEndAt)
-}
-
 // NormalizeTime converts timeout values to the precision Kubernetes persists and
 // E2B exposes: wall-clock time at whole-second precision in UTC. This removes Go's
 // monotonic clock reading, drops sub-second differences, and normalizes the
@@ -58,13 +48,6 @@ func NormalizeTime(t time.Time) time.Time {
 		return time.Time{}
 	}
 	return t.Round(0).Truncate(time.Second).UTC()
-}
-
-func timeoutEndAt(opts Options) time.Time {
-	if !opts.PauseTime.IsZero() {
-		return opts.PauseTime
-	}
-	return opts.ShutdownTime
 }
 
 func timeEqual(a, b time.Time) bool {
