@@ -330,7 +330,7 @@ func TestEnsureCommitRunning_Success(t *testing.T) {
 	ctrl := newCommonControlForTest(fc)
 
 	newStatus := commit.Status.DeepCopy()
-	args := &EnsureFuncArgs{Pod: pod, Commit: commit, NewStatus: newStatus}
+	args := &EnsureFuncArgs{Pod: pod, Commit: commit, NewStatus: newStatus, JobList: &batchv1.JobList{}}
 
 	_, err := ctrl.EnsureCommitRunning(context.TODO(), args)
 	if err != nil {
@@ -367,7 +367,7 @@ func TestEnsureCommitRunning_MissingJobImage(t *testing.T) {
 	ctrl := newCommonControlForTest(fc)
 
 	newStatus := commit.Status.DeepCopy()
-	args := &EnsureFuncArgs{Pod: pod, Commit: commit, NewStatus: newStatus}
+	args := &EnsureFuncArgs{Pod: pod, Commit: commit, NewStatus: newStatus, JobList: &batchv1.JobList{}}
 
 	_, err := ctrl.EnsureCommitRunning(context.TODO(), args)
 	if err != nil {
@@ -402,7 +402,7 @@ func TestEnsureCommitRunning_JobPodAlreadyExists(t *testing.T) {
 	ctrl := newCommonControlForTest(fc)
 
 	newStatus := commit.Status.DeepCopy()
-	args := &EnsureFuncArgs{Pod: pod, Commit: commit, NewStatus: newStatus}
+	args := &EnsureFuncArgs{Pod: pod, Commit: commit, NewStatus: newStatus, JobList: &batchv1.JobList{}}
 
 	_, err := ctrl.EnsureCommitRunning(context.TODO(), args)
 	if err != nil {
@@ -479,7 +479,7 @@ func TestEnsureCommitRunning_WithDockerSecret(t *testing.T) {
 	ctrl := newCommonControlForTest(fc)
 
 	newStatus := commit.Status.DeepCopy()
-	args := &EnsureFuncArgs{Pod: pod, Commit: commit, NewStatus: newStatus}
+	args := &EnsureFuncArgs{Pod: pod, Commit: commit, NewStatus: newStatus, JobList: &batchv1.JobList{}}
 
 	_, err := ctrl.EnsureCommitRunning(context.TODO(), args)
 	if err != nil {
@@ -785,7 +785,7 @@ func TestEnsureCommitRunning_EmptyContainerID(t *testing.T) {
 	ctrl := newCommonControlForTest(fc)
 
 	newStatus := commit.Status.DeepCopy()
-	args := &EnsureFuncArgs{Pod: pod, Commit: commit, NewStatus: newStatus}
+	args := &EnsureFuncArgs{Pod: pod, Commit: commit, NewStatus: newStatus, JobList: &batchv1.JobList{}}
 
 	_, err := ctrl.EnsureCommitRunning(context.TODO(), args)
 	// Permanent error: nil returned (no retry), status marked Failed.
@@ -811,7 +811,7 @@ func TestEnsureCommitRunning_CreateTransientError(t *testing.T) {
 	ctrl := newCommonControlForTest(errClient)
 
 	newStatus := commit.Status.DeepCopy()
-	args := &EnsureFuncArgs{Pod: pod, Commit: commit, NewStatus: newStatus}
+	args := &EnsureFuncArgs{Pod: pod, Commit: commit, NewStatus: newStatus, JobList: &batchv1.JobList{}}
 
 	_, err := ctrl.EnsureCommitRunning(context.TODO(), args)
 	// Transient error: error returned for backoff retry, status NOT marked Failed.

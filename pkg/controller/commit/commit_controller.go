@@ -156,11 +156,12 @@ func (r *CommitReconciler) Reconcile(ctx context.Context, req ctrl.Request) (res
 	case agentsv1alpha1.CommitPhasePending, "":
 		// Observe expectations in reconcile loop instead of event handler to avoid lock contention.
 		jobList := &batchv1.JobList{}
-		if err := r.List(ctx, jobList, client.InNamespace(commit.Namespace), client.MatchingFields{jobutil.IndexFieldCommitUID: string(commit.UID)}); err == nil {
-			args.JobList = jobList
-			for _, j := range jobList.Items {
-				core.ScaleExpectations.ObserveScale(utils.GetControllerKey(commit), expectations.Create, j.Name)
-			}
+		if err := r.List(ctx, jobList, client.InNamespace(commit.Namespace), client.MatchingFields{jobutil.IndexFieldCommitUID: string(commit.UID)}); err != nil {
+			return ctrl.Result{}, err
+		}
+		args.JobList = jobList
+		for _, j := range jobList.Items {
+			core.ScaleExpectations.ObserveScale(utils.GetControllerKey(commit), expectations.Create, j.Name)
 		}
 		// Check ScaleExpectations to avoid duplicated Job creation due to stale cache.
 		if isSatisfied, unsatisfiedDuration, _ := core.ScaleExpectations.SatisfiedExpectations(utils.GetControllerKey(commit)); !isSatisfied {
