@@ -466,7 +466,74 @@ func TestSandbox_Pause(t *testing.T) {
 	}
 }
 
+func TestSandbox_PauseWritesExtraAnnotationsWhenUpdateWins(t *testing.T) {
+	tests := []struct {
+		name         string
+		reserveValue string
+	}{
+		{name: "writes reserve annotation when update wins", reserveValue: "30m"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			now := time.Now()
+			sandbox := &v1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+					Labels: map[string]string{
+						v1alpha1.LabelSandboxIsClaimed: "true",
+					},
+					Annotations: map[string]string{
+						"existing": "kept",
+					},
+				},
+				Spec: v1alpha1.SandboxSpec{
+					ShutdownTime: &metav1.Time{Time: now.Add(2 * time.Hour)},
+				},
+				Status: v1alpha1.SandboxStatus{
+					Phase: v1alpha1.SandboxRunning,
+					Conditions: []metav1.Condition{
+						{Type: string(v1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue},
+					},
+				},
+			}
+			cache, fc, err := cachetest.NewTestCache(t)
+			require.NoError(t, err)
+			require.NoError(t, cache.Run(t.Context()))
+			defer cache.Stop(t.Context())
+			CreateSandboxWithStatus(t, fc, sandbox)
+			time.Sleep(10 * time.Millisecond)
+
+			s := AsSandbox(sandbox, cache)
+			cache.GetMockManager().AddWaitReconcileKey(sandbox)
+			modified := s.Sandbox.DeepCopy()
+			mergeFrom := ctrl.MergeFrom(s.Sandbox)
+			time.AfterFunc(20*time.Millisecond, func() {
+				modified.Status.Phase = v1alpha1.SandboxPaused
+				SetSandboxCondition(modified, string(v1alpha1.SandboxConditionPaused), metav1.ConditionTrue, "Pause", "Paused by user")
+				require.NoError(t, fc.Status().Patch(t.Context(), modified, mergeFrom))
+			})
+			pauseCtx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			require.NoError(t, s.Pause(pauseCtx, infra.PauseOptions{
+				Timeout: &timeout.Options{ShutdownTime: now.Add(time.Hour)},
+				ExtraAnnotations: map[string]string{
+					v1alpha1.AnnotationReservePausedSandboxDuration: tt.reserveValue,
+				},
+			}))
+
+			var updated v1alpha1.Sandbox
+			require.NoError(t, fc.Get(t.Context(), types.NamespacedName{Namespace: sandbox.Namespace, Name: sandbox.Name}, &updated))
+			assert.True(t, updated.Spec.Paused)
+			assert.Equal(t, "kept", updated.Annotations["existing"])
+			assert.Equal(t, tt.reserveValue, updated.Annotations[v1alpha1.AnnotationReservePausedSandboxDuration])
+		})
+	}
+}
+
 func TestSandbox_PauseSkipsSideEffectsWhenLatestAlreadyPaused(t *testing.T) {
+	value := "30m"
 	tests := []struct {
 		name string
 		opts infra.PauseOptions
@@ -477,6 +544,9 @@ func TestSandbox_PauseSkipsSideEffectsWhenLatestAlreadyPaused(t *testing.T) {
 				Timeout: &timeout.Options{
 					ShutdownTime: time.Now().Add(3 * time.Hour),
 					PauseTime:    time.Now().Add(90 * time.Minute),
+				},
+				ExtraAnnotations: map[string]string{
+					v1alpha1.AnnotationReservePausedSandboxDuration: value,
 				},
 			},
 		},
@@ -574,6 +644,8 @@ func TestSandbox_PauseSkipsSideEffectsWhenLatestAlreadyPaused(t *testing.T) {
 			require.NotNil(t, updatedSbx.Spec.PauseTime)
 			assert.WithinDuration(t, now.Add(2*time.Hour), updatedSbx.Spec.ShutdownTime.Time, time.Second)
 			assert.WithinDuration(t, now.Add(time.Hour), updatedSbx.Spec.PauseTime.Time, time.Second)
+			_, gotAnnotation := updatedSbx.Annotations[v1alpha1.AnnotationReservePausedSandboxDuration]
+			assert.False(t, gotAnnotation)
 		})
 	}
 }
@@ -693,7 +765,7 @@ func TestSandbox_PauseAlreadyPausedShortCircuitsWithActiveResumeWaitHook(t *test
 	err = s.Pause(t.Context(), infra.PauseOptions{})
 	require.NoError(t, err)
 
-	// Synthetic guard: production should not keep a Resume hook after the sandbox is already paused.
+	// Synthetic guard: production should not leave a Resume hook after the sandbox is already paused.
 	val, ok := cache.GetWaitHooks().Load(key)
 	require.True(t, ok)
 	entry := val.(*cacheutils.WaitEntry[*v1alpha1.Sandbox])
@@ -1611,7 +1683,9 @@ func TestSandbox_ResumeMutatorAtomicity(t *testing.T) {
 				client:   interceptedClient,
 			})
 
-			err = s.Resume(t.Context(), infra.ResumeOptions{Timeout: tc.optsTimeout})
+			err = s.Resume(t.Context(), infra.ResumeOptions{
+				Timeout: tc.optsTimeout,
+			})
 			require.NoError(t, err)
 
 			// Loser case: Resume early-returns; no Update should have happened.
@@ -1631,6 +1705,9 @@ func TestSandbox_ResumeMutatorAtomicity(t *testing.T) {
 			assert.Equal(t, tc.want.paused, final.Spec.Paused)
 			assertTimePtrEqual(t, tc.want.pauseTime, final.Spec.PauseTime, "final PauseTime must match expected")
 			assertTimePtrEqual(t, tc.want.shutdownTime, final.Spec.ShutdownTime, "final ShutdownTime must match expected")
+			// Resume must never write the reserve-paused annotation.
+			_, gotAnnotationSet := final.Annotations[v1alpha1.AnnotationReservePausedSandboxDuration]
+			assert.False(t, gotAnnotationSet, "Resume must not write reserve paused annotation")
 		})
 	}
 }
@@ -1776,7 +1853,9 @@ func TestSandbox_ResumeExtendOnlyConcurrent(t *testing.T) {
 				require.NoError(t, mutateTimeout(t.Context(), fc, key, *tc.concurrentTimeout))
 			}
 
-			result, err := s.SaveTimeoutWithPolicy(t.Context(), tc.postTimeout, timeout.UpdatePolicyExtendOnly)
+			result, err := s.SaveTimeoutWithPolicy(t.Context(), infra.SaveTimeoutOptions{
+				Timeout: tc.postTimeout,
+			}, timeout.UpdatePolicyExtendOnly)
 			require.NoError(t, err)
 			assert.Equal(t, tc.expectSaveWasUpdated, result.Updated)
 
@@ -1792,7 +1871,7 @@ func TestSandbox_ResumeExtendOnlyConcurrent(t *testing.T) {
 func TestSandbox_ResumeFailurePathsLeaveRealTimeout(t *testing.T) {
 	utestutils.InitLogOutput()
 
-	now := time.Date(2026, 5, 22, 11, 0, 0, 0, time.UTC)
+	now := time.Now().UTC().Truncate(time.Second)
 	realTimeout := timeout.Options{
 		PauseTime:    now.Add(5 * time.Minute),
 		ShutdownTime: now.Add(30 * 24 * time.Hour),
@@ -1894,7 +1973,9 @@ func TestSandbox_ResumeFailurePathsLeaveRealTimeout(t *testing.T) {
 				defer cancel()
 				require.NoError(t, s.Resume(resumeCtx, infra.ResumeOptions{Timeout: &resumeTimeout}))
 
-				_, err := s.SaveTimeoutWithPolicy(t.Context(), realTimeout, timeout.UpdatePolicyExtendOnly)
+				_, err := s.SaveTimeoutWithPolicy(t.Context(), infra.SaveTimeoutOptions{
+					Timeout: realTimeout,
+				}, timeout.UpdatePolicyExtendOnly)
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), injectedErr.Error())
 			},

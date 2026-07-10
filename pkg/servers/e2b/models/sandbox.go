@@ -67,18 +67,19 @@ type VolumeMount struct {
 }
 
 type NewSandboxRequestExtension struct {
-	InplaceUpdate           InplaceUpdateExtension
-	CSIMount                CSIMountExtension
-	SkipInitRuntime         bool
-	ReserveFailedSandboxFor *time.Duration
-	CreateOnNoStock         bool
-	WaitReadySeconds        int
-	TimeoutSeconds          int
-	NeverTimeout            bool
-	ReturnPodIP             bool
-	Labels                  map[string]string
-	Name                    string
-	GenerateName            string
+	InplaceUpdate                InplaceUpdateExtension
+	CSIMount                     CSIMountExtension
+	SkipInitRuntime              bool
+	ReserveFailedSandboxFor      *time.Duration
+	ReservePausedSandboxDuration string
+	CreateOnNoStock              bool
+	WaitReadySeconds             int
+	TimeoutSeconds               int
+	NeverTimeout                 bool
+	ReturnPodIP                  bool
+	Labels                       map[string]string
+	Name                         string
+	GenerateName                 string
 }
 
 type InplaceUpdateExtension struct {

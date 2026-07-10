@@ -104,6 +104,12 @@ func TestNewServer(t *testing.T) {
 			wantBindPort: config.DefaultMemberlistBindPort,
 		},
 		{
+			name:         "with negative port uses default",
+			port:         -1,
+			wantPort:     proxy.SystemPort,
+			wantBindPort: config.DefaultMemberlistBindPort,
+		},
+		{
 			name:         "with custom memberlist port from env",
 			port:         8080,
 			wantPort:     8080,

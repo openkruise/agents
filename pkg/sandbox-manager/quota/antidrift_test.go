@@ -1131,6 +1131,14 @@ func TestAntiDriftPrimaryLossCancelsCycleAndClearsLeaked(t *testing.T) {
 		return len(driver.seenLeaked) > 0
 	}, time.Second, 10*time.Millisecond)
 
+	// Ensure the background loop is back in the primary-change select before
+	// we demote primary. Otherwise the test can race with runCycle finishing.
+	require.Eventually(t, func() bool {
+		driver.mu.Lock()
+		defer driver.mu.Unlock()
+		return driver.cycleCancel == nil
+	}, time.Second, 10*time.Millisecond, "active cycle should complete before primary loss")
+
 	// Lose primary — triggers cancelActiveCycleAndClearLeaked
 	primary.SetPrimary(false)
 

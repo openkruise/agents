@@ -220,7 +220,7 @@ func (m *mockSandboxForLabels) GetResource() SandboxResource { return SandboxRes
 func (m *mockSandboxForLabels) SetImage(string)              {}
 func (m *mockSandboxForLabels) GetImage() string             { return "" }
 func (m *mockSandboxForLabels) SetTimeout(timeout.Options)   {}
-func (m *mockSandboxForLabels) SaveTimeoutWithPolicy(context.Context, timeout.Options, timeout.UpdatePolicy) (TimeoutUpdateResult, error) {
+func (m *mockSandboxForLabels) SaveTimeoutWithPolicy(context.Context, SaveTimeoutOptions, timeout.UpdatePolicy) (TimeoutUpdateResult, error) {
 	return TimeoutUpdateResult{}, nil
 }
 func (m *mockSandboxForLabels) GetTimeout() timeout.Options { return timeout.Options{} }

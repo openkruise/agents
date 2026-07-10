@@ -202,11 +202,6 @@ spec:
           status:
             description: status defines the observed state of Sandbox
             properties:
-              recycledCount:
-                description: RecycledCount records the number of times this sandbox
-                  has been recycled.
-                format: int32
-                type: integer
               conditions:
                 description: |-
                   conditions represent the current state of the Sandbox resource.
@@ -310,6 +305,11 @@ spec:
                     description: PodUID is pod uid.
                     type: string
                 type: object
+              recycledCount:
+                description: RecycledCount records the number of times this sandbox
+                  has been recycled.
+                format: int32
+                type: integer
               sandboxIp:
                 description: SandboxIp is the ip address allocated to the sandbox.
                 type: string

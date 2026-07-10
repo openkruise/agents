@@ -87,7 +87,7 @@ Every E2B route is registered twice via `RegisterE2BRoute`: once for the native 
   safety rules.
 
 ### Timeout Semantics
-- **Pause**: sets timeout far into the future (1000 years) so paused sandboxes are kept indefinitely.
+- **Pause**: for timed sandboxes, writes the paused retention deadline (`now + retention`) while flipping `Spec.Paused=true`; the default retention is 100 years and can be overridden by `x-e2b-kruise-reserve-paused-sandbox-duration`. Never-timeout sandboxes keep nil timeout fields.
 - **Resume**: for timed sandboxes, writes an effective timeout while flipping `Spec.Paused=false`; the effective timeout is the request value after the resume floor. Never-timeout sandboxes keep nil timeout fields.
 - **Connect (Running)**: extend-only — never shortens the effective deadline. If the requested deadline is earlier than the current one, the update is silently skipped.
 - **Connect (Paused → Resume)**: resumes with an effective timeout placeholder, then applies the post-resume timeout with `UpdatePolicyExtendOnly`.
@@ -109,7 +109,7 @@ After resume, every caller runs `updateConnectTimeout` with `UpdatePolicyExtendO
 
 #### Server-Side Timeouts (Claim / Clone / WaitReady)
 - These are the server-side deadlines for the synchronous create operation, distinct from the sandbox lifecycle `timeout` field (auto-shutdown / auto-pause).
-- **Default is unlimited**: when no timeout extension is supplied, `create.go` passes `noServerTimeout` (a far-future duration, ~100 years) for `ClaimTimeout` / `CloneTimeout` / `WaitReadyTimeout`. The operation is then bounded only by the client request context, so it ends on success or client cancellation. A far-future value is used (not a negative sentinel) so downstream `ValidateAndInit*Options`, `context.WithTimeout`, `retrySteps`, and `pkg/cache/utils/wait.go` keep working unchanged — this mirrors the "far-future time" convention used by Pause.
+- **Default is unlimited**: when no timeout extension is supplied, `create.go` passes `noServerTimeout` (a far-future duration, ~100 years) for `ClaimTimeout` / `CloneTimeout` / `WaitReadyTimeout`. The operation is then bounded only by the client request context, so it ends on success or client cancellation. A far-future value is used (not a negative sentinel) so downstream `ValidateAndInit*Options`, `context.WithTimeout`, `retrySteps`, and `pkg/cache/utils/wait.go` keep working unchanged — this uses the same 100-year duration as the default paused retention.
 - **Explicit override**: the extension keys `e2b.agents.kruise.io/claim-timeout-seconds` and `e2b.agents.kruise.io/wait-ready-timeout-seconds` still apply a finite timeout when set to a positive value. A non-positive or absent value is treated as unlimited.
 - All four call sites go through the `resolveServerTimeout(seconds)` helper in `create.go`.
 - This unlimited default applies only to the E2B `CreateSandbox` HTTP path. The `SandboxClaim` controller builds its own options and calls `TryClaimSandbox` directly, keeping its CRD-level timeout semantics and finite defaults.

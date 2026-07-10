@@ -396,6 +396,11 @@ func TestListCheckpointsForSandbox(t *testing.T) {
 }
 
 func newCheckpointTestControl(objs ...client.Object) (*CheckpointControl, client.Client) {
+	ctrl, cli, _ := newCheckpointTestControlWithRecorder(objs...)
+	return ctrl, cli
+}
+
+func newCheckpointTestControlWithRecorder(objs ...client.Object) (*CheckpointControl, client.Client, *record.FakeRecorder) {
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)
 	_ = agentsv1alpha1.AddToScheme(scheme)
@@ -407,7 +412,7 @@ func newCheckpointTestControl(objs ...client.Object) (*CheckpointControl, client
 	}
 	cli := builder.Build()
 	recorder := record.NewFakeRecorder(10)
-	return NewCheckpointControl(cli, recorder), cli
+	return NewCheckpointControl(cli, recorder), cli, recorder
 }
 
 func newCheckpointTestSandbox() *agentsv1alpha1.Sandbox {
@@ -725,7 +730,7 @@ func TestCleanup(t *testing.T) {
 func TestCreateCheckpoint(t *testing.T) {
 	enableCheckpointGate(t)
 	box := newCheckpointTestSandbox()
-	ctrl, cli := newCheckpointTestControl()
+	ctrl, cli, recorder := newCheckpointTestControlWithRecorder()
 
 	err := ctrl.createCheckpoint(context.TODO(), box)
 	assert.NoError(t, err)
@@ -742,6 +747,55 @@ func TestCreateCheckpoint(t *testing.T) {
 	assert.Equal(t, agentsv1alpha1.CheckpointTypePodInfo, cp.Labels[agentsv1alpha1.CheckpointLabelType])
 	assert.Len(t, cp.OwnerReferences, 1)
 	assert.Equal(t, box.Name, cp.OwnerReferences[0].Name)
+	assertCheckpointRecorderEvent(t, recorder, corev1.EventTypeNormal+" "+EventCheckpointStarted, "created, waiting for completion")
+}
+
+func TestAssumePodCheckpointedRecordsCheckpointSuccessEvent(t *testing.T) {
+	tests := []struct {
+		name           string
+		checkpoint     *agentsv1alpha1.Checkpoint
+		expectPrefix   string
+		expectContains string
+	}{
+		{
+			name:           "checkpoint succeeded records normal event",
+			checkpoint:     newCheckpointTestCP("test-sandbox-cp1", newCheckpointTestSandbox(), agentsv1alpha1.CheckpointSucceeded),
+			expectPrefix:   corev1.EventTypeNormal + " " + EventCheckpointSucceeded,
+			expectContains: "Checkpoint test-sandbox-cp1 succeeded",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			enableCheckpointGate(t)
+			box := newCheckpointTestSandbox()
+			ctrl, _, recorder := newCheckpointTestControlWithRecorder(tt.checkpoint)
+			newStatus := &agentsv1alpha1.SandboxStatus{}
+			cond := &metav1.Condition{
+				Type:               string(agentsv1alpha1.SandboxConditionPaused),
+				Status:             metav1.ConditionFalse,
+				Reason:             agentsv1alpha1.SandboxPausedReasonCheckpointCreating,
+				LastTransitionTime: metav1.Now(),
+			}
+
+			wait := ctrl.AssumePodCheckpointed(context.TODO(), newCheckpointTestPod(), box, newStatus, cond)
+
+			assert.False(t, wait)
+			assert.Equal(t, agentsv1alpha1.SandboxPausedReasonCheckpointSucceeded, cond.Reason)
+			assertCheckpointRecorderEvent(t, recorder, tt.expectPrefix, tt.expectContains)
+		})
+	}
+}
+
+func assertCheckpointRecorderEvent(t *testing.T, recorder *record.FakeRecorder, expectPrefix, expectContains string) {
+	t.Helper()
+	select {
+	case event := <-recorder.Events:
+		assert.Contains(t, event, expectPrefix)
+		assert.Contains(t, event, expectContains)
+	default:
+		t.Fatalf("expected event %q, got none", expectPrefix)
+	}
 }
 
 func TestAssumePodCheckpointed_ListError(t *testing.T) {

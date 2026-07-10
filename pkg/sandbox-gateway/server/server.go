@@ -55,6 +55,13 @@ func getMemberlistBindPort() int {
 	return config.DefaultMemberlistBindPort
 }
 
+func normalizePort(port int, defaultPort int) int {
+	if port <= 0 {
+		return defaultPort
+	}
+	return port
+}
+
 // Server handles peer-to-peer communication for route synchronization
 type Server struct {
 	httpServer         *http.Server
@@ -66,11 +73,8 @@ type Server struct {
 
 // NewServer creates a new peer server
 func NewServer(client client.Client, port int) *Server {
-	if port == 0 {
-		port = proxy.SystemPort
-	}
 	return &Server{
-		port:               port,
+		port:               normalizePort(port, proxy.SystemPort),
 		client:             client,
 		memberlistBindPort: getMemberlistBindPort(),
 	}
@@ -82,7 +86,7 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc(proxy.RefreshAPI, s.handleRefresh)
 
 	s.httpServer = &http.Server{
-		Addr:              fmt.Sprintf(":%d", s.port),
+		Addr:              fmt.Sprintf(":%d", normalizePort(s.port, proxy.SystemPort)),
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 	}

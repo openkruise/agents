@@ -25,7 +25,9 @@ import (
 	"time"
 
 	"github.com/distribution/reference"
+	"github.com/openkruise/agents/pkg/pausedretention"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
+	"github.com/openkruise/agents/pkg/utils/timeout"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	apivalidation "k8s.io/apimachinery/pkg/api/validation"
@@ -57,6 +59,7 @@ const (
 	ExtensionKeySkipInitRuntime               = v1alpha1.E2BPrefix + "skip-init-runtime"
 	ExtensionKeyReserveFailedSandbox          = v1alpha1.E2BPrefix + "reserve-failed-sandbox"
 	ExtensionKeyReserveFailedSandboxFor       = v1alpha1.E2BPrefix + "reserve-failed-sandbox-for"
+	ExtensionKeyReservePausedSandboxDuration  = v1alpha1.E2BPrefix + "reserve-paused-sandbox-duration"
 	ExtensionKeyCreateOnNoStock               = v1alpha1.E2BPrefix + "create-on-no-stock"
 	ExtensionKeyNeverTimeout                  = v1alpha1.E2BPrefix + "never-timeout"
 	ExtensionKeyReturnPodIP                   = v1alpha1.E2BPrefix + "return-sandbox-ip"
@@ -66,15 +69,16 @@ const (
 )
 
 const (
-	ExtensionHeaderPrefix                     = "x-e2b-kruise-"
-	ExtensionHeaderSnapshotKeepRunning        = ExtensionHeaderPrefix + "snapshot-keep-running"
-	ExtensionHeaderSnapshotTTL                = ExtensionHeaderPrefix + "snapshot-ttl"
-	ExtensionHeaderSnapshotPersistentContents = ExtensionHeaderPrefix + "snapshot-persistent-contents"
-	ExtensionHeaderWaitSuccessSeconds         = ExtensionHeaderPrefix + "snapshot-wait-success-seconds"
-	ExtensionHeaderVolumeSize                 = ExtensionHeaderPrefix + "volume-size"
-	ExtensionHeaderVolumeStorageClass         = ExtensionHeaderPrefix + "volume-storage-class"
-	ExtensionHeaderVolumeAccessMode           = ExtensionHeaderPrefix + "volume-access-mode"
-	ExtensionHeaderVolumeWaitSuccessSeconds   = ExtensionHeaderPrefix + "volume-wait-success-seconds"
+	ExtensionHeaderPrefix                       = "x-e2b-kruise-"
+	ExtensionHeaderSnapshotKeepRunning          = ExtensionHeaderPrefix + "snapshot-keep-running"
+	ExtensionHeaderSnapshotTTL                  = ExtensionHeaderPrefix + "snapshot-ttl"
+	ExtensionHeaderSnapshotPersistentContents   = ExtensionHeaderPrefix + "snapshot-persistent-contents"
+	ExtensionHeaderWaitSuccessSeconds           = ExtensionHeaderPrefix + "snapshot-wait-success-seconds"
+	ExtensionHeaderVolumeSize                   = ExtensionHeaderPrefix + "volume-size"
+	ExtensionHeaderVolumeStorageClass           = ExtensionHeaderPrefix + "volume-storage-class"
+	ExtensionHeaderVolumeAccessMode             = ExtensionHeaderPrefix + "volume-access-mode"
+	ExtensionHeaderVolumeWaitSuccessSeconds     = ExtensionHeaderPrefix + "volume-wait-success-seconds"
+	ExtensionHeaderReservePausedSandboxDuration = ExtensionHeaderPrefix + "reserve-paused-sandbox-duration"
 )
 
 const sandboxGenerateNameValidationSuffix = "abcde"
@@ -110,6 +114,10 @@ func (r *NewSandboxRequest) parseCommonExtensions() error {
 		r.Extensions.ReserveFailedSandboxFor = reserveFor
 	} else if r.Metadata[ExtensionKeyReserveFailedSandbox] == v1alpha1.True {
 		r.Extensions.ReserveFailedSandboxFor = ptr.To(consts.ReserveFailedSandboxForever)
+	}
+	r.Extensions.ReservePausedSandboxDuration, err = r.parseAndRemoveReservePausedSandboxDuration()
+	if err != nil {
+		return err
 	}
 	r.Extensions.CreateOnNoStock = r.Metadata[ExtensionKeyCreateOnNoStock] != v1alpha1.False
 	r.Extensions.NeverTimeout = r.Metadata[ExtensionKeyNeverTimeout] == v1alpha1.True
@@ -369,6 +377,18 @@ func (r *NewSandboxRequest) parseAndRemoveReserveFailedSandboxFor() (*time.Durat
 		return nil, true, fmt.Errorf("reserve failed sandbox duration %q cannot be negative, use %q", raw, ReserveFailedSandboxValueForever)
 	}
 	return &duration, true, nil
+}
+
+func (r *NewSandboxRequest) parseAndRemoveReservePausedSandboxDuration() (string, error) {
+	raw, ok := r.Metadata[ExtensionKeyReservePausedSandboxDuration]
+	if !ok {
+		return timeout.ReservePausedSandboxDurationForeverValue, nil
+	}
+	defer delete(r.Metadata, ExtensionKeyReservePausedSandboxDuration)
+	if _, err := pausedretention.ParseReservePausedSandboxDuration(raw); err != nil {
+		return "", err
+	}
+	return raw, nil
 }
 
 func (r *NewSandboxRequest) parseAndRemoveQuantity(key string) (resource.Quantity, bool, error) {

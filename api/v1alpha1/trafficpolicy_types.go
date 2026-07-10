@@ -59,6 +59,8 @@ type TrafficPolicyWorkloadRef struct {
 	// +kubebuilder:validation:MaxLength=63
 	Namespace string `json:"namespace"`
 	// Selector is a label selector that matches the target pods.
+	//
+	// +kubebuilder:validation:MaxProperties=10
 	Selector map[string]string `json:"selector"`
 }
 
@@ -71,6 +73,7 @@ type TrafficPolicyPeer struct {
 	//
 	// +optional
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=43
 	CIDR string `json:"cidr,omitempty"`
 	// FQDN is a fully qualified domain name to match (e.g. "api.example.com").
 	//
@@ -89,13 +92,15 @@ type TrafficPolicyPeer struct {
 	Workload *TrafficPolicyWorkloadRef `json:"workload,omitempty"`
 }
 
-// TrafficPolicyPort restricts a rule to specific TCP port ranges.
-// Currently only TCP is supported.
-// If Port is nil, there is no L4 match (matches all TCP ports).
+// TrafficPolicyPort restricts a rule to specific protocol/port combinations.
+// If Protocol is non-empty and Port is nil, matches all ports of that protocol.
 //
 // +kubebuilder:validation:XValidation:rule="!has(self.endPort) || has(self.port)",message="endPort requires port to be set"
 // +kubebuilder:validation:XValidation:rule="!has(self.endPort) || self.endPort >= self.port",message="endPort must be greater than or equal to port"
 type TrafficPolicyPort struct {
+	// +optional
+	// +kubebuilder:validation:Enum=TCP;UDP;ICMP;SCTP
+	Protocol string `json:"protocol,omitempty"`
 	// Port is the destination port number. When nil, the rule applies to all
 	// TCP ports.
 	//
@@ -124,17 +129,20 @@ type TrafficPolicyRule struct {
 	//
 	// +optional
 	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=20
 	From []TrafficPolicyPeer `json:"from,omitempty"`
 	// To lists destination peers. Multiple entries are ORed.
 	//
 	// +optional
 	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=20
 	To []TrafficPolicyPeer `json:"to,omitempty"`
 	// Ports restricts this rule to specific L4 protocol/port combinations.
 	// Multiple entries are ORed. If empty, the rule matches all ports.
 	//
 	// +optional
 	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=20
 	Ports []TrafficPolicyPort `json:"ports,omitempty"`
 }
 
@@ -146,6 +154,7 @@ type TrafficPolicyDirection struct {
 	//
 	// +optional
 	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=50
 	Rules []TrafficPolicyRule `json:"rules,omitempty"`
 }
 
@@ -196,6 +205,7 @@ type TrafficPolicyStatus struct {
 	// +optional
 	// +listType=map
 	// +listMapKey=type
+	// +kubebuilder:validation:MaxItems=20
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 

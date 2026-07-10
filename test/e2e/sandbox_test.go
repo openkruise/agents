@@ -25,6 +25,7 @@ import (
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/rand"
@@ -386,6 +387,54 @@ var _ = Describe("Sandbox", func() {
 				return err != nil
 			}, time.Second*30, time.Millisecond*500).Should(BeTrue())
 		})
+
+		It("should pause instead of deleting when shutdown and pause deadlines are both due with retention annotation", func() {
+			By("Creating a new Sandbox")
+			Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
+
+			By("Waiting for sandbox to reach Running phase")
+			Eventually(func() agentsv1alpha1.SandboxPhase {
+				_ = k8sClient.Get(ctx, types.NamespacedName{
+					Name:      sandbox.Name,
+					Namespace: sandbox.Namespace,
+				}, sandbox)
+				return sandbox.Status.Phase
+			}, time.Second*60, time.Millisecond*500).Should(Equal(agentsv1alpha1.SandboxRunning))
+
+			By("Setting due shutdown and pause deadlines with paused retention")
+			pastPauseTime := metav1.NewTime(time.Now().Add(-time.Minute))
+			pastShutdownTime := metav1.NewTime(time.Now().Add(-time.Minute))
+			Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
+				latestSandbox := &agentsv1alpha1.Sandbox{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{
+					Name:      sandbox.Name,
+					Namespace: sandbox.Namespace,
+				}, latestSandbox); err != nil {
+					return err
+				}
+				if latestSandbox.Annotations == nil {
+					latestSandbox.Annotations = map[string]string{}
+				}
+				latestSandbox.Annotations[agentsv1alpha1.AnnotationReservePausedSandboxDuration] = "3m"
+				latestSandbox.Spec.PauseTime = &pastPauseTime
+				latestSandbox.Spec.ShutdownTime = &pastShutdownTime
+				return k8sClient.Update(ctx, latestSandbox)
+			})).To(Succeed())
+
+			By("Verifying the sandbox is paused and retained")
+			Eventually(func(g Gomega) {
+				latestSandbox := &agentsv1alpha1.Sandbox{}
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{
+					Name:      sandbox.Name,
+					Namespace: sandbox.Namespace,
+				}, latestSandbox)).To(Succeed())
+				g.Expect(latestSandbox.Spec.Paused).To(BeTrue())
+				g.Expect(latestSandbox.Spec.ShutdownTime).NotTo(BeNil())
+				g.Expect(latestSandbox.Spec.PauseTime).NotTo(BeNil())
+				g.Expect(latestSandbox.Spec.PauseTime.Time.Equal(latestSandbox.Spec.ShutdownTime.Time)).To(BeTrue())
+				g.Expect(latestSandbox.Spec.ShutdownTime.Time).To(BeTemporally("~", time.Now().Add(3*time.Minute), 10*time.Second))
+			}, time.Second*30, time.Millisecond*500).Should(Succeed())
+		})
 	})
 
 	Context("failed state", func() {
@@ -428,6 +477,76 @@ var _ = Describe("Sandbox", func() {
 
 			// Clean up the failing sandbox
 			_ = k8sClient.Delete(ctx, failingSandbox)
+		})
+	})
+
+	Context("pod creation failure", func() {
+		It("should emit warning event and set Ready condition when pod creation fails", func() {
+			By("Creating a ResourceQuota that prevents pod creation")
+			quota := &corev1.ResourceQuota{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "prevent-pods",
+					Namespace: namespace,
+				},
+				Spec: corev1.ResourceQuotaSpec{
+					Hard: corev1.ResourceList{
+						corev1.ResourcePods: resource.MustParse("0"),
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, quota)).To(Succeed())
+			defer func() {
+				_ = k8sClient.Delete(ctx, quota)
+			}()
+
+			By("Creating a new Sandbox")
+			Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
+
+			By("Verifying sandbox reaches Pending phase")
+			Eventually(func() agentsv1alpha1.SandboxPhase {
+				_ = k8sClient.Get(ctx, types.NamespacedName{
+					Name:      sandbox.Name,
+					Namespace: sandbox.Namespace,
+				}, sandbox)
+				return sandbox.Status.Phase
+			}, time.Second*30, time.Millisecond*500).Should(Equal(agentsv1alpha1.SandboxPending))
+
+			By("Verifying sandbox stays in Pending phase (pod creation fails)")
+			Consistently(func() agentsv1alpha1.SandboxPhase {
+				_ = k8sClient.Get(ctx, types.NamespacedName{
+					Name:      sandbox.Name,
+					Namespace: sandbox.Namespace,
+				}, sandbox)
+				return sandbox.Status.Phase
+			}, time.Second*10, time.Second*2).Should(Equal(agentsv1alpha1.SandboxPending))
+
+			By("Verifying Ready condition is set to False with PodCreateFailed reason")
+			Eventually(func(g Gomega) {
+				_ = k8sClient.Get(ctx, types.NamespacedName{
+					Name:      sandbox.Name,
+					Namespace: sandbox.Namespace,
+				}, sandbox)
+				cond := utils.GetSandboxCondition(&sandbox.Status, string(agentsv1alpha1.SandboxConditionReady))
+				g.Expect(cond).NotTo(BeNil())
+				g.Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+				g.Expect(cond.Reason).To(Equal(agentsv1alpha1.SandboxReadyReasonPodCreateFailed))
+			}, time.Second*30, time.Millisecond*500).Should(Succeed())
+
+			By("Verifying a warning event is emitted")
+			Eventually(func(g Gomega) {
+				events, err := clientset.CoreV1().Events(sandbox.Namespace).List(ctx, metav1.ListOptions{
+					FieldSelector: fmt.Sprintf("involvedObject.name=%s", sandbox.Name),
+				})
+				g.Expect(err).To(Succeed())
+				found := false
+				for _, event := range events.Items {
+					if event.Reason == "PodCreateFailed" && event.Type == corev1.EventTypeWarning {
+						found = true
+						break
+					}
+				}
+				g.Expect(found).To(BeTrue(), "expected a Warning event with reason PodCreateFailed")
+			}, time.Second*30, time.Millisecond*500).Should(Succeed())
 		})
 	})
 

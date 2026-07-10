@@ -828,9 +828,9 @@ func TestClassifySandbox_OtherOpsLabel(t *testing.T) {
 		Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxRunning},
 	}
 	tests := []struct {
-		name           string
-		otherOpsPhase  agentsv1alpha1.SandboxUpdateOpsPhase
-		expected       sandboxUpdateState
+		name          string
+		otherOpsPhase agentsv1alpha1.SandboxUpdateOpsPhase
+		expected      sandboxUpdateState
 	}{
 		{
 			name:          "other ops Pending -> noNeedUpdate",
@@ -1656,4 +1656,95 @@ func TestUpdateStatus_NoChange(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, ops.Status.Phase, updatedOps.Status.Phase)
 	assert.Equal(t, ops.Status.Replicas, updatedOps.Status.Replicas)
+}
+
+func TestUpdateStatus_RecordsPhaseEvent(t *testing.T) {
+	tests := []struct {
+		name           string
+		oldPhase       agentsv1alpha1.SandboxUpdateOpsPhase
+		newPhase       agentsv1alpha1.SandboxUpdateOpsPhase
+		expectEvent    bool
+		expectPrefix   string
+		expectContains string
+	}{
+		{
+			name:           "records normal event when phase changes to updating",
+			oldPhase:       agentsv1alpha1.SandboxUpdateOpsPending,
+			newPhase:       agentsv1alpha1.SandboxUpdateOpsUpdating,
+			expectEvent:    true,
+			expectPrefix:   corev1.EventTypeNormal + " " + eventReasonSandboxUpdateOpsPhaseChanged,
+			expectContains: "phase changed from Pending to Updating",
+		},
+		{
+			name:           "records warning event when phase changes to failed",
+			oldPhase:       agentsv1alpha1.SandboxUpdateOpsUpdating,
+			newPhase:       agentsv1alpha1.SandboxUpdateOpsFailed,
+			expectEvent:    true,
+			expectPrefix:   corev1.EventTypeWarning + " " + eventReasonSandboxUpdateOpsPhaseChanged,
+			expectContains: "failed=1",
+		},
+		{
+			name:        "does not record event when phase does not change",
+			oldPhase:    agentsv1alpha1.SandboxUpdateOpsUpdating,
+			newPhase:    agentsv1alpha1.SandboxUpdateOpsUpdating,
+			expectEvent: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := newSandboxUpdateOps("test-ops", "default", tt.oldPhase, false, nil)
+			ops.Status.Replicas = 3
+			ops.Status.UpdatedReplicas = 1
+			ops.Status.UpdatingReplicas = 2
+			recorder := record.NewFakeRecorder(10)
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(testScheme).
+				WithStatusSubresource(&agentsv1alpha1.SandboxUpdateOps{}).
+				WithRuntimeObjects(ops).
+				Build()
+			r := &Reconciler{
+				Client:   fakeClient,
+				Scheme:   testScheme,
+				Recorder: recorder,
+			}
+			newStatus := ops.Status.DeepCopy()
+			newStatus.Phase = tt.newPhase
+			if tt.newPhase == agentsv1alpha1.SandboxUpdateOpsFailed {
+				newStatus.FailedReplicas = 1
+				newStatus.UpdatingReplicas = 0
+			} else {
+				newStatus.UpdatedReplicas = 2
+			}
+
+			err := r.updateStatus(context.Background(), ops, newStatus)
+
+			assert.NoError(t, err)
+			if tt.expectEvent {
+				assertUpdateOpsRecorderEvent(t, recorder, tt.expectPrefix, tt.expectContains)
+			} else {
+				assertNoUpdateOpsRecorderEvent(t, recorder)
+			}
+		})
+	}
+}
+
+func assertUpdateOpsRecorderEvent(t *testing.T, recorder *record.FakeRecorder, expectPrefix, expectContains string) {
+	t.Helper()
+	select {
+	case event := <-recorder.Events:
+		assert.Contains(t, event, expectPrefix)
+		assert.Contains(t, event, expectContains)
+	default:
+		t.Fatalf("expected event %q, got none", expectPrefix)
+	}
+}
+
+func assertNoUpdateOpsRecorderEvent(t *testing.T, recorder *record.FakeRecorder) {
+	t.Helper()
+	select {
+	case event := <-recorder.Events:
+		t.Fatalf("unexpected event: %s", event)
+	default:
+	}
 }

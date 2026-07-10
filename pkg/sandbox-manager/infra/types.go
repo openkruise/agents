@@ -27,6 +27,7 @@ import (
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/identity"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	"github.com/openkruise/agents/pkg/utils/timeout"
 )
 
 // SecurityTokenOptions wraps the issued security token response for downstream
@@ -37,6 +38,11 @@ import (
 // not transitively imported by pkg/identity.
 type SecurityTokenOptions struct {
 	identity.TokenResponse
+}
+
+type SaveTimeoutOptions struct {
+	Timeout          timeout.Options
+	ExtraAnnotations map[string]string
 }
 
 type SandboxAdmission struct {

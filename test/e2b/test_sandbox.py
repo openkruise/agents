@@ -21,17 +21,23 @@ logger = logging.getLogger(__name__)
 # parameter, so auto-pause cannot be requested through that SDK.
 _E2B_CODE_INTERPRETER_VERSION = _pkg_version("e2b-code-interpreter")
 _SDK_LACKS_AUTO_PAUSE = _E2B_CODE_INTERPRETER_VERSION.startswith("2.4.")
+_SDK_LACKS_SANDBOX_PAUSE = not hasattr(Sandbox, "pause")
 
 
-def _get_sandbox_spec(name: str) -> dict:
-    """Fetch the live Spec of a Sandbox CR by name (post `--` portion of sandbox_id)."""
+def _get_sandbox_json(name: str) -> dict:
+    """Fetch the live Sandbox CR by name (post `--` portion of sandbox_id)."""
     result = subprocess.run(
         ["kubectl", "get", "sbx", name, "-o", "json"],
         capture_output=True,
         text=True,
         check=True,
     )
-    return json.loads(result.stdout).get("spec", {})
+    return json.loads(result.stdout)
+
+
+def _get_sandbox_spec(name: str) -> dict:
+    """Fetch the live Spec of a Sandbox CR by name (post `--` portion of sandbox_id)."""
+    return _get_sandbox_json(name).get("spec", {})
 
 
 def _parse_rfc3339_utc(s: str) -> datetime:
@@ -43,6 +49,9 @@ def _parse_rfc3339_utc(s: str) -> datetime:
 
 RETURN_POD_IP_METADATA_KEY = "e2b.agents.kruise.io/return-sandbox-ip"
 POD_IP_METADATA_KEY = "e2b.agents.kruise.io/sandbox-ip"
+RESERVE_PAUSED_SANDBOX_FOR_METADATA_KEY = "e2b.agents.kruise.io/reserve-paused-sandbox-duration"
+RESERVE_PAUSED_SANDBOX_FOR_HEADER = "x-e2b-kruise-reserve-paused-sandbox-duration"
+RESERVE_PAUSED_SANDBOX_FOR_ANNOTATION = "agents.kruise.io/reserve-paused-sandbox-duration"
 
 
 def assert_pod_ip_metadata(info, expected_pod_ip: str | None = None) -> str:
@@ -55,6 +64,18 @@ def assert_pod_ip_metadata(info, expected_pod_ip: str | None = None) -> str:
     else:
         assert pod_ip == expected_pod_ip
     return pod_ip
+
+
+def _wait_for_sandbox_state(sbx: Sandbox, expected_state: SandboxState, timeout_seconds: int):
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        info = sbx.get_info()
+        if info.state == expected_state:
+            return info
+        time.sleep(2)
+    raise AssertionError(
+        f"sandbox {sbx.sandbox_id} did not reach {expected_state} within {timeout_seconds}s"
+    )
 
 
 # Link: https://e2b.dev/docs/sandbox
@@ -349,6 +370,105 @@ def test_auto_pause_resume_no_immediate_repause(sandbox_context, config):
         f"spec.pauseTime should be ~connect_start + {connect_timeout_seconds}s; "
         f"got {pause_time_after_str}, expected in [{expected_min.isoformat()}, "
         f"{expected_max.isoformat()}]"
+    )
+
+
+@pytest.mark.skipif(
+    _SDK_LACKS_AUTO_PAUSE,
+    reason=(
+        f"e2b-code-interpreter {_E2B_CODE_INTERPRETER_VERSION} does not support "
+        "lifecycle={'on_timeout': 'pause'}; auto-pause cannot be exercised."
+    ),
+)
+def test_auto_pause_respects_custom_paused_retention(sandbox_context, config):
+    auto_pause_timeout_seconds = 30
+    paused_retention = timedelta(minutes=2)
+    skew_tolerance = timedelta(seconds=10)
+    sbx: Sandbox = sandbox_context.add(Sandbox.create(
+        template=config.templates.code_interpreter,
+        timeout=auto_pause_timeout_seconds,
+        lifecycle={"on_timeout": "pause"},
+        metadata={
+            "test_case": "test_auto_pause_respects_custom_paused_retention",
+            RESERVE_PAUSED_SANDBOX_FOR_METADATA_KEY: "2m",
+        },
+        headers={
+            "x-request-id": sandbox_context.request_id
+        }
+    ))
+    logger.info("sandbox-id: %s", sbx.sandbox_id)
+    sandbox_name = sbx.sandbox_id.split("--")[1]
+
+    crd = _get_sandbox_json(sandbox_name)
+    annotations = crd.get("metadata", {}).get("annotations", {})
+    spec = crd.get("spec", {})
+    assert annotations.get(RESERVE_PAUSED_SANDBOX_FOR_ANNOTATION) == "2m"
+    pause_time = _parse_rfc3339_utc(spec["pauseTime"])
+    shutdown_time = _parse_rfc3339_utc(spec["shutdownTime"])
+    assert abs((shutdown_time - pause_time) - paused_retention) <= skew_tolerance, (
+        f"shutdownTime - pauseTime should be ~2m; spec={spec}"
+    )
+
+    pause_wait_start = datetime.now(timezone.utc)
+    _wait_for_sandbox_state(sbx, SandboxState.PAUSED, auto_pause_timeout_seconds + 60)
+    pause_wait_end = datetime.now(timezone.utc)
+
+    crd_after_pause = _get_sandbox_json(sandbox_name)
+    annotations_after_pause = crd_after_pause.get("metadata", {}).get("annotations", {})
+    spec_after_pause = crd_after_pause.get("spec", {})
+    assert spec_after_pause.get("paused") is True, (
+        f"spec.paused must be true after auto-pause; got spec={spec_after_pause}"
+    )
+    assert annotations_after_pause.get(RESERVE_PAUSED_SANDBOX_FOR_ANNOTATION) == "2m"
+    shutdown_time_after = _parse_rfc3339_utc(spec_after_pause["shutdownTime"])
+    expected_min = pause_wait_start + paused_retention - skew_tolerance
+    expected_max = pause_wait_end + paused_retention + skew_tolerance
+    assert expected_min <= shutdown_time_after <= expected_max, (
+        f"shutdownTime should be ~auto-pause time + 2m; got {shutdown_time_after.isoformat()}, "
+        f"expected in [{expected_min.isoformat()}, {expected_max.isoformat()}]"
+    )
+
+
+@pytest.mark.skipif(
+    _SDK_LACKS_SANDBOX_PAUSE,
+    reason=(
+        f"e2b-code-interpreter {_E2B_CODE_INTERPRETER_VERSION} does not support "
+        "Sandbox.pause(headers=...); manual pause header cannot be exercised."
+    ),
+)
+def test_manual_pause_header_respects_custom_paused_retention(sandbox_context, config):
+    paused_retention = timedelta(minutes=3)
+    skew_tolerance = timedelta(seconds=10)
+    sbx: Sandbox = sandbox_context.add(Sandbox.create(
+        template=config.templates.code_interpreter,
+        timeout=6000,
+        metadata={"test_case": "test_manual_pause_header_respects_custom_paused_retention"},
+        headers={
+            "x-request-id": sandbox_context.request_id
+        }
+    ))
+    logger.info("sandbox-id: %s", sbx.sandbox_id)
+    sandbox_name = sbx.sandbox_id.split("--")[1]
+
+    pause_start = datetime.now(timezone.utc)
+    sbx.pause(headers={
+        RESERVE_PAUSED_SANDBOX_FOR_HEADER: "3m",
+    })
+    pause_end = datetime.now(timezone.utc)
+
+    _wait_for_sandbox_state(sbx, SandboxState.PAUSED, 60)
+
+    crd = _get_sandbox_json(sandbox_name)
+    annotations = crd.get("metadata", {}).get("annotations", {})
+    spec = crd.get("spec", {})
+    assert spec.get("paused") is True, f"spec.paused must be true after manual pause; got spec={spec}"
+    assert annotations.get(RESERVE_PAUSED_SANDBOX_FOR_ANNOTATION) == "3m"
+    shutdown_time = _parse_rfc3339_utc(spec["shutdownTime"])
+    expected_min = pause_start + paused_retention - skew_tolerance
+    expected_max = pause_end + paused_retention + skew_tolerance
+    assert expected_min <= shutdown_time <= expected_max, (
+        f"shutdownTime should be ~pause request time + 3m; got {shutdown_time.isoformat()}, "
+        f"expected in [{expected_min.isoformat()}, {expected_max.isoformat()}]"
     )
 
 
@@ -736,6 +856,3 @@ def test_sandbox_with_labels_and_command(sandbox_context, config):
     # The label: prefixed keys must not leak into metadata.
     assert "label:app" not in info.metadata
     assert "label:env" not in info.metadata
-
-
-
