@@ -24,12 +24,12 @@ import (
 func TestSetupRegistryAuth_NoSecret(t *testing.T) {
 	// registryConfigDir points to a non-existent path in test env,
 	// so setupRegistryAuth should skip silently without error.
-	os.Unsetenv("DOCKER_CONFIG")
+	t.Setenv("DOCKER_CONFIG", "")
 	err := setupRegistryAuth()
 	if err != nil {
 		t.Fatalf("expected no error, got: %v", err)
 	}
-	// DOCKER_CONFIG should NOT be set when no secret is mounted
+	// DOCKER_CONFIG should NOT be set to registryConfigDir when no secret is mounted
 	if got := os.Getenv("DOCKER_CONFIG"); got == registryConfigDir {
 		t.Errorf("DOCKER_CONFIG should not be set when secret is absent")
 	}
@@ -45,7 +45,7 @@ func TestSetupRegistryAuth_WithSecret(t *testing.T) {
 
 	// Temporarily override registryConfigDir by testing the internal logic directly.
 	// Since registryConfigDir is a const, we test via setupRegistryAuthFrom helper.
-	os.Unsetenv("DOCKER_CONFIG")
+	t.Setenv("DOCKER_CONFIG", "")
 	err := setupRegistryAuthFrom(tmpDir)
 	if err != nil {
 		t.Fatalf("expected no error, got: %v", err)
@@ -53,8 +53,6 @@ func TestSetupRegistryAuth_WithSecret(t *testing.T) {
 	if got := os.Getenv("DOCKER_CONFIG"); got != tmpDir {
 		t.Errorf("DOCKER_CONFIG = %q, want %q", got, tmpDir)
 	}
-	// Cleanup
-	os.Unsetenv("DOCKER_CONFIG")
 }
 
 func TestSetupRegistryAuth_StatError(t *testing.T) {
@@ -62,7 +60,7 @@ func TestSetupRegistryAuth_StatError(t *testing.T) {
 	if err := os.WriteFile(configDir, []byte("not a dir"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	os.Unsetenv("DOCKER_CONFIG")
+	t.Setenv("DOCKER_CONFIG", "")
 	err := setupRegistryAuthFrom(configDir)
 	if err == nil {
 		t.Fatal("expected stat error, got nil")
