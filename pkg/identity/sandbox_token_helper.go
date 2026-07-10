@@ -31,37 +31,47 @@ import (
 // identity provider issuance path.
 //
 // The opt-in signal is the presence of a non-empty
-// "security.agents.kruise.io/agent-name" label on the sandbox: setting this
-// label expresses the user's intent to bind the sandbox to a logical agent
-// identity, which is the precondition for the identity provider to mint a
-// security token. A nil sandbox, a sandbox without Labels, or one whose value
-// for that key is empty all collapse to "not requested", letting callers
+// "security.agents.kruise.io/agent-name" annotation on the sandbox: setting
+// this annotation expresses the user's intent to bind the sandbox to a logical
+// agent identity, which is the precondition for the identity provider to mint a
+// security token. A nil sandbox, a sandbox without Annotations, or one whose
+// value for that key is empty all collapse to "not requested", letting callers
 // short-circuit the issuance path without paying any provider cost.
 //
-// The check is intentionally label-only and value-presence-only: it does NOT
-// validate the label value against any naming convention, since the identity
+// The check is intentionally annotation-only and value-presence-only: it does
+// NOT validate the value against any naming convention, since the identity
 // provider is the authoritative source of truth for agent-name semantics.
 func IsIdentityProviderRequested(sbx *agentsv1alpha1.Sandbox) bool {
 	if sbx == nil {
 		return false
 	}
-	return sbx.GetLabels()[LabelAgentName] != ""
+	return sbx.GetAnnotations()[AnnotationAgentName] != ""
 }
 
-// ExtractSecurityMetadata returns a map containing only the sandbox labels
+// ExtractSecurityMetadata returns a map containing only the sandbox annotations
 // whose keys are prefixed with SecurityMetadataPrefix. Providers that want to
-// include security labels in token issuance requests should call this helper
+// include security metadata in token issuance requests should call this helper
 // instead of re-implementing the prefix filter.
 //
 // A nil sandbox results in a nil map. The returned map is never nil when the
-// sandbox is non-nil, even if no matching labels exist, so providers can safely
-// iterate over it.
+// sandbox is non-nil, even if no matching annotations exist, so providers can
+// safely iterate over it.
 func ExtractSecurityMetadata(sbx *agentsv1alpha1.Sandbox) map[string]string {
 	if sbx == nil {
 		return nil
 	}
+	return ExtractSecurityMetadataFromMap(sbx.GetAnnotations())
+}
+
+// ExtractSecurityMetadataFromMap returns a new map containing only the entries
+// of in whose keys are prefixed with SecurityMetadataPrefix. It is the single
+// source of truth for the security-prefix filter, shared by the
+// Sandbox-annotations path (ExtractSecurityMetadata) and caller-supplied inputs
+// such as the E2B API request. The returned map is never nil, so callers can
+// safely iterate over it even when no entry matches.
+func ExtractSecurityMetadataFromMap(in map[string]string) map[string]string {
 	metadata := make(map[string]string)
-	for k, v := range sbx.GetLabels() {
+	for k, v := range in {
 		if strings.HasPrefix(k, SecurityMetadataPrefix) {
 			metadata[k] = v
 		}
@@ -74,7 +84,7 @@ func ExtractSecurityMetadata(sbx *agentsv1alpha1.Sandbox) map[string]string {
 //
 // It builds a TokenRequest of type TokenTypeAgent, forwarding the sandbox and
 // claim objects verbatim to the provider. Metadata extraction is intentionally
-// left to the provider: implementations that need security labels can call
+// left to the provider: implementations that need security metadata can call
 // ExtractSecurityMetadata(sbx), and those that need storage-auth or other
 // annotations can read them directly from sbx.GetAnnotations().
 //

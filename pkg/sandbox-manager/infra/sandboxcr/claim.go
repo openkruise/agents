@@ -40,7 +40,6 @@ import (
 	infracache "github.com/openkruise/agents/pkg/cache"
 	cacheutils "github.com/openkruise/agents/pkg/cache/utils"
 	"github.com/openkruise/agents/pkg/controller/sandboxset"
-	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/identity"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
@@ -48,7 +47,6 @@ import (
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
-	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 	"github.com/openkruise/agents/pkg/utils/runtime"
 	timeoututils "github.com/openkruise/agents/pkg/utils/timeout"
 )
@@ -357,9 +355,9 @@ func runClaimPostProcesses(ctx context.Context, sbx *Sandbox, lockType infra.Loc
 }
 
 // processSecurityToken issues and propagates a sandbox security token when the
-// identity provider feature gate and sandbox annotations request it.
+// sandbox annotations opt into the identity provider path.
 func processSecurityToken(ctx context.Context, opts infra.ClaimSandboxOptions, sbx *Sandbox, cache infracache.Provider, metrics *infra.ClaimMetrics) error {
-	if !utilfeature.DefaultFeatureGate.Enabled(features.SecurityIdentityProviderGate) || !identity.IsIdentityProviderRequested(sbx.Sandbox) {
+	if !identity.IsIdentityProviderRequested(sbx.Sandbox) {
 		return nil
 	}
 

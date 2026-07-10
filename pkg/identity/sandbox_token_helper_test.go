@@ -116,8 +116,8 @@ func TestIssueSandboxToken_Success(t *testing.T) {
 }
 
 // TestExtractSecurityMetadata verifies the prefix filter used to collect
-// security-prefixed labels into a metadata map. Providers call this helper when
-// they want to include security labels in token issuance requests.
+// security-prefixed annotations into a metadata map. Providers call this helper
+// when they want to include security metadata in token issuance requests.
 func TestExtractSecurityMetadata(t *testing.T) {
 	const tenantKey = SecurityMetadataPrefix + "tenant"
 	const projectKey = SecurityMetadataPrefix + "project"
@@ -134,19 +134,19 @@ func TestExtractSecurityMetadata(t *testing.T) {
 			want: nil,
 		},
 		{
-			name: "sandbox without labels returns empty map",
+			name: "sandbox without annotations returns empty map",
 			sbx: &agentsv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{Name: "sbx", Namespace: "ns"},
 			},
 			want: map[string]string{},
 		},
 		{
-			name: "only security-prefixed labels are collected",
+			name: "only security-prefixed annotations are collected",
 			sbx: &agentsv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "sbx",
 					Namespace: "ns",
-					Labels: map[string]string{
+					Annotations: map[string]string{
 						tenantKey:  "t1",
 						projectKey: "p1",
 						"app":      "demo",
@@ -164,7 +164,7 @@ func TestExtractSecurityMetadata(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "sbx",
 					Namespace: "ns",
-					Labels: map[string]string{
+					Annotations: map[string]string{
 						"agents.kruise.io/team":          "infra",
 						"security-fake.agents.kruise.io": "no",
 						"x-security.agents.kruise.io/y":  "no",
@@ -183,6 +183,55 @@ func TestExtractSecurityMetadata(t *testing.T) {
 				return
 			}
 			require.NotNil(t, got)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// TestExtractSecurityMetadataFromMap verifies the prefix filter that backs both
+// ExtractSecurityMetadata and the caller-supplied E2B input path. The returned
+// map must be non-nil even when no entry matches, and must contain only
+// security-prefixed keys.
+func TestExtractSecurityMetadataFromMap(t *testing.T) {
+	const agentKey = SecurityMetadataPrefix + "agent-name"
+	const tenantKey = SecurityMetadataPrefix + "tenant"
+
+	tests := []struct {
+		name string
+		in   map[string]string
+		want map[string]string
+	}{
+		{
+			name: "nil map returns empty map",
+			in:   nil,
+			want: map[string]string{},
+		},
+		{
+			name: "only security-prefixed keys are collected",
+			in: map[string]string{
+				agentKey:  "agent-a",
+				tenantKey: "t1",
+				"app":     "demo",
+			},
+			want: map[string]string{
+				agentKey:  "agent-a",
+				tenantKey: "t1",
+			},
+		},
+		{
+			name: "near-miss keys are rejected",
+			in: map[string]string{
+				"agents.kruise.io/team":         "infra",
+				"x-security.agents.kruise.io/y": "no",
+			},
+			want: map[string]string{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ExtractSecurityMetadataFromMap(tt.in)
+			require.NotNil(t, got, "returned map must never be nil")
 			assert.Equal(t, tt.want, got)
 		})
 	}
@@ -445,9 +494,9 @@ func TestPropagateSandboxToken(t *testing.T) {
 
 // TestIsIdentityProviderRequested verifies the opt-in predicate that gates the
 // identity provider issuance path. The contract is: a sandbox opts in iff its
-// Labels carry a non-empty value under LabelAgentName; every other shape
-// (nil sandbox, missing Labels map, absent key, empty value, near-miss key)
-// must collapse to false so callers can safely short-circuit.
+// Annotations carry a non-empty value under AnnotationAgentName; every other
+// shape (nil sandbox, missing Annotations map, absent key, empty value,
+// near-miss key) must collapse to false so callers can safely short-circuit.
 func TestIsIdentityProviderRequested(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -462,48 +511,48 @@ func TestIsIdentityProviderRequested(t *testing.T) {
 			reason: "a nil sandbox must never trigger the provider path",
 		},
 		{
-			name: "sandbox without Labels map returns false",
+			name: "sandbox without Annotations map returns false",
 			sbx: &agentsv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{Name: "sbx", Namespace: "ns"},
 			},
 			want:   false,
-			reason: "GetLabels() on a sandbox without ObjectMeta.Labels yields a nil map; lookup must be false",
+			reason: "GetAnnotations() on a sandbox without ObjectMeta.Annotations yields a nil map; lookup must be false",
 		},
 		{
-			name: "empty Labels map returns false",
+			name: "empty Annotations map returns false",
 			sbx: &agentsv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "sbx",
-					Namespace: "ns",
-					Labels:    map[string]string{},
+					Name:        "sbx",
+					Namespace:   "ns",
+					Annotations: map[string]string{},
 				},
 			},
 			want:   false,
 			reason: "an explicitly empty map carries no opt-in signal",
 		},
 		{
-			name: "agent-name label absent returns false",
+			name: "agent-name annotation absent returns false",
 			sbx: &agentsv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "sbx",
 					Namespace: "ns",
-					Labels: map[string]string{
+					Annotations: map[string]string{
 						"app":                             "demo",
 						SecurityMetadataPrefix + "tenant": "t1",
 					},
 				},
 			},
 			want:   false,
-			reason: "other security-prefixed labels must not opt the sandbox into the provider path",
+			reason: "other security-prefixed annotations must not opt the sandbox into the provider path",
 		},
 		{
-			name: "agent-name label present but empty returns false",
+			name: "agent-name annotation present but empty returns false",
 			sbx: &agentsv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "sbx",
 					Namespace: "ns",
-					Labels: map[string]string{
-						LabelAgentName: "",
+					Annotations: map[string]string{
+						AnnotationAgentName: "",
 					},
 				},
 			},
@@ -516,7 +565,7 @@ func TestIsIdentityProviderRequested(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "sbx",
 					Namespace: "ns",
-					Labels: map[string]string{
+					Annotations: map[string]string{
 						SecurityMetadataPrefix + "agent-name-suffix": "foo",
 						"agent-name": "bar",
 					},
@@ -526,13 +575,13 @@ func TestIsIdentityProviderRequested(t *testing.T) {
 			reason: "the predicate matches the FQ key exactly; near-miss keys must not trigger the path",
 		},
 		{
-			name: "agent-name label present with value returns true",
+			name: "agent-name annotation present with value returns true",
 			sbx: &agentsv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "sbx",
 					Namespace: "ns",
-					Labels: map[string]string{
-						LabelAgentName: "my-agent",
+					Annotations: map[string]string{
+						AnnotationAgentName: "my-agent",
 					},
 				},
 			},
@@ -540,20 +589,20 @@ func TestIsIdentityProviderRequested(t *testing.T) {
 			reason: "the canonical opt-in: a non-empty agent-name value",
 		},
 		{
-			name: "agent-name label coexisting with unrelated labels returns true",
+			name: "agent-name annotation coexisting with unrelated annotations returns true",
 			sbx: &agentsv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "sbx",
 					Namespace: "ns",
-					Labels: map[string]string{
-						LabelAgentName:                    "agent-x",
+					Annotations: map[string]string{
+						AnnotationAgentName:               "agent-x",
 						SecurityMetadataPrefix + "tenant": "t1",
 						"app":                             "demo",
 					},
 				},
 			},
 			want:   true,
-			reason: "presence of other labels must not interfere with the opt-in decision",
+			reason: "presence of other annotations must not interfere with the opt-in decision",
 		},
 	}
 
