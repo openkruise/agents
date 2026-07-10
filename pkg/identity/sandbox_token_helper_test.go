@@ -30,19 +30,23 @@ import (
 )
 
 // fakeIdentityProvider is a minimal IdentityProvider stub used to capture the
-// TokenRequest passed to IssueToken and to deterministically control the
-// returned TokenResponse / error. Only the IssueToken path is exercised by
+// arguments passed to IssueToken and to deterministically control the returned
+// TokenResponse / error. Only the IssueToken path is exercised by
 // IssueSandboxToken; PropagateSecurityToken is implemented as a no-op.
 type fakeIdentityProvider struct {
-	gotReq TokenRequest
-	called int
+	gotReq   TokenRequest
+	gotSbx   *agentsv1alpha1.Sandbox
+	gotClaim *agentsv1alpha1.SandboxClaim
+	called   int
 
 	resp *TokenResponse
 	err  error
 }
 
-func (f *fakeIdentityProvider) IssueToken(_ context.Context, req TokenRequest) (*TokenResponse, error) {
+func (f *fakeIdentityProvider) IssueToken(_ context.Context, sbx *agentsv1alpha1.Sandbox, claim *agentsv1alpha1.SandboxClaim, req TokenRequest) (*TokenResponse, error) {
 	f.gotReq = req
+	f.gotSbx = sbx
+	f.gotClaim = claim
 	f.called++
 	return f.resp, f.err
 }
@@ -61,9 +65,9 @@ func withFakeProvider(t *testing.T, fake *fakeIdentityProvider) {
 }
 
 // TestIssueSandboxToken_Success exercises the happy path: the helper must
-// project the sandbox identity into the TokenRequest, propagate security-prefixed
-// labels into Metadata, and return the provider's response unchanged together
-// with a non-negative cost and a nil error.
+// project the sandbox identity into the TokenRequest.Sandbox field and return
+// the provider's response unchanged together with a non-negative cost and a
+// nil error. Metadata extraction is left to the provider.
 func TestIssueSandboxToken_Success(t *testing.T) {
 	wantResp := &TokenResponse{
 		RequestID:             "req-1",
@@ -88,7 +92,7 @@ func TestIssueSandboxToken_Success(t *testing.T) {
 		},
 	}
 
-	gotResp, cost, err := IssueSandboxToken(context.Background(), sbx)
+	gotResp, cost, err := IssueSandboxToken(context.Background(), sbx, nil)
 	require.NoError(t, err)
 	require.NotNil(t, gotResp)
 	assert.Same(t, wantResp, gotResp, "response must be returned as-is from the provider")
@@ -106,59 +110,182 @@ func TestIssueSandboxToken_Success(t *testing.T) {
 	assert.Equal(t, "sbx-a", gotReq.Sandbox.SandboxName)
 	assert.Equal(t, "uid-a", gotReq.Sandbox.SandboxUID)
 
-	// Only labels prefixed with SecurityMetadataPrefix must flow into Metadata.
-	assert.Equal(t, map[string]string{
-		SecurityMetadataPrefix + "tenant":  "t1",
-		SecurityMetadataPrefix + "project": "p1",
-	}, gotReq.Metadata)
+	// Metadata is intentionally left empty by the helper; providers decide what
+	// to include by reading sbx/claim directly or calling ExtractSecurityMetadata.
+	assert.Nil(t, gotReq.Metadata, "helper must not pre-populate Metadata")
 }
 
-// TestIssueSandboxToken_NoLabels guarantees that a sandbox without any labels
-// still produces a non-nil (empty) Metadata map. This matters because downstream
-// providers may type-assert on a non-nil map and the helper documents that the
-// caller does not need to pre-populate Metadata.
-func TestIssueSandboxToken_NoLabels(t *testing.T) {
-	fake := &fakeIdentityProvider{resp: &TokenResponse{AccessToken: "tok"}}
-	withFakeProvider(t, fake)
+// TestExtractSecurityMetadata verifies the prefix filter used to collect
+// security-prefixed labels into a metadata map. Providers call this helper when
+// they want to include security labels in token issuance requests.
+func TestExtractSecurityMetadata(t *testing.T) {
+	const tenantKey = SecurityMetadataPrefix + "tenant"
+	const projectKey = SecurityMetadataPrefix + "project"
 
-	sbx := &agentsv1alpha1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "sbx-empty",
-			Namespace: "ns",
-			UID:       types.UID("uid-empty"),
+	tests := []struct {
+		name    string
+		sbx     *agentsv1alpha1.Sandbox
+		want    map[string]string
+		wantNil bool
+	}{
+		{
+			name: "nil sandbox returns nil",
+			sbx:  nil,
+			want: nil,
+		},
+		{
+			name: "sandbox without labels returns empty map",
+			sbx: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "sbx", Namespace: "ns"},
+			},
+			want: map[string]string{},
+		},
+		{
+			name: "only security-prefixed labels are collected",
+			sbx: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "sbx",
+					Namespace: "ns",
+					Labels: map[string]string{
+						tenantKey:  "t1",
+						projectKey: "p1",
+						"app":      "demo",
+					},
+				},
+			},
+			want: map[string]string{
+				tenantKey:  "t1",
+				projectKey: "p1",
+			},
+		},
+		{
+			name: "near-miss keys are rejected",
+			sbx: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "sbx",
+					Namespace: "ns",
+					Labels: map[string]string{
+						"agents.kruise.io/team":          "infra",
+						"security-fake.agents.kruise.io": "no",
+						"x-security.agents.kruise.io/y":  "no",
+					},
+				},
+			},
+			want: map[string]string{},
 		},
 	}
 
-	_, _, err := IssueSandboxToken(context.Background(), sbx)
-	require.NoError(t, err)
-	require.NotNil(t, fake.gotReq.Metadata, "Metadata must be a non-nil map even when no labels are present")
-	assert.Empty(t, fake.gotReq.Metadata)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ExtractSecurityMetadata(tt.sbx)
+			if tt.want == nil {
+				assert.Nil(t, got)
+				return
+			}
+			require.NotNil(t, got)
+			assert.Equal(t, tt.want, got)
+		})
+	}
 }
 
-// TestIssueSandboxToken_OnlyNonSecurityLabels verifies the prefix filter rejects
-// every label that is not under identity.SecurityMetadataPrefix, even when label
-// values look plausible (e.g. share a substring with the prefix).
-func TestIssueSandboxToken_OnlyNonSecurityLabels(t *testing.T) {
-	fake := &fakeIdentityProvider{resp: &TokenResponse{AccessToken: "tok"}}
-	withFakeProvider(t, fake)
+// TestIssueSandboxToken_ClaimPassedThrough verifies that a non-nil SandboxClaim
+// is forwarded verbatim to the registered IdentityProvider, while nil claims
+// (e.g. refresh or E2B paths) are also forwarded as nil.
+func TestIssueSandboxToken_ClaimPassedThrough(t *testing.T) {
+	claim := &agentsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "claim-a",
+			Namespace: "ns-a",
+			UID:       types.UID("claim-uid-a"),
+		},
+	}
+
+	tests := []struct {
+		name     string
+		claim    *agentsv1alpha1.SandboxClaim
+		wantSame *agentsv1alpha1.SandboxClaim
+	}{
+		{
+			name:     "claim is forwarded to provider",
+			claim:    claim,
+			wantSame: claim,
+		},
+		{
+			name:     "nil claim is forwarded as nil",
+			claim:    nil,
+			wantSame: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := &fakeIdentityProvider{resp: &TokenResponse{AccessToken: "tok"}}
+			withFakeProvider(t, fake)
+
+			sbx := &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "sbx-claim",
+					Namespace: "ns-a",
+					UID:       types.UID("uid-claim"),
+				},
+			}
+
+			_, _, err := IssueSandboxToken(context.Background(), sbx, tt.claim)
+			require.NoError(t, err)
+			assert.Same(t, sbx, fake.gotSbx, "sandbox pointer must be forwarded unchanged")
+			assert.Same(t, tt.wantSame, fake.gotClaim, "claim pointer must be forwarded unchanged")
+		})
+	}
+}
+
+// annotationReadingProvider is an IdentityProvider that extracts a specific
+// annotation from the sandbox and records it so tests can verify the sandbox
+// object forwarded to the provider is complete and readable.
+type annotationReadingProvider struct {
+	storageAuthKey string
+	gotValue       string
+}
+
+func (p *annotationReadingProvider) IssueToken(_ context.Context, sbx *agentsv1alpha1.Sandbox, _ *agentsv1alpha1.SandboxClaim, _ TokenRequest) (*TokenResponse, error) {
+	p.gotValue = sbx.GetAnnotations()[p.storageAuthKey]
+	return &TokenResponse{AccessToken: "tok"}, nil
+}
+
+func (p *annotationReadingProvider) PropagateSecurityToken(_ context.Context, _ *agentsv1alpha1.Sandbox, _ *TokenResponse) error {
+	return nil
+}
+
+var _ IdentityProvider = (*annotationReadingProvider)(nil)
+
+// TestIssueSandboxToken_ProviderCanReadSandboxAnnotations verifies that the
+// sandbox pointer forwarded to IdentityProvider carries annotations injected by
+// upstream callers (e.g. storage-auth metadata for RRSA-based storage mounts).
+// This replaces the legacy ExtractStorageAuthMetadata hook: providers now read
+// annotations directly from the sandbox object instead of receiving a second
+// metadata map.
+func TestIssueSandboxToken_ProviderCanReadSandboxAnnotations(t *testing.T) {
+	const storageAuthAnnotationKey = SecurityMetadataPrefix + "storage-auth"
+
+	saved := provider
+	reader := &annotationReadingProvider{storageAuthKey: storageAuthAnnotationKey}
+	RegisterProvider(reader)
+	t.Cleanup(func() { RegisterProvider(saved) })
 
 	sbx := &agentsv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "sbx",
+			Name:      "sbx-annotation",
 			Namespace: "ns",
-			UID:       types.UID("uid"),
-			Labels: map[string]string{
-				"app":                            "demo",
-				"agents.kruise.io/team":          "infra", // shares root domain but lacks "security." prefix
-				"security-fake.agents.kruise.io": "no",    // close-but-not-equal prefix
-				"x-security.agents.kruise.io/y":  "no",    // prefix is not at the start
+			UID:       types.UID("uid-annotation"),
+			Annotations: map[string]string{
+				storageAuthAnnotationKey: `[{"credentialProviderName":"my-provider"}]`,
 			},
 		},
 	}
 
-	_, _, err := IssueSandboxToken(context.Background(), sbx)
+	_, _, err := IssueSandboxToken(context.Background(), sbx, nil)
 	require.NoError(t, err)
-	assert.Empty(t, fake.gotReq.Metadata, "labels without the SecurityMetadataPrefix must be filtered out")
+	assert.Equal(t, `[{"credentialProviderName":"my-provider"}]`, reader.gotValue,
+		"provider must be able to read annotations directly from the forwarded sandbox")
 }
 
 // TestIssueSandboxToken_ProviderError guarantees the helper surfaces provider
@@ -177,7 +304,7 @@ func TestIssueSandboxToken_ProviderError(t *testing.T) {
 		},
 	}
 
-	gotResp, cost, err := IssueSandboxToken(context.Background(), sbx)
+	gotResp, cost, err := IssueSandboxToken(context.Background(), sbx, nil)
 	require.Error(t, err)
 	assert.Nil(t, gotResp, "response must be nil on error to prevent persisting a zero-value token")
 	assert.GreaterOrEqual(t, int64(cost), int64(0), "cost must still be reported even on failure for metric accounting")
@@ -206,7 +333,7 @@ func TestIssueSandboxToken_DefaultProviderIntegration(t *testing.T) {
 		},
 	}
 
-	resp, _, err := IssueSandboxToken(context.Background(), sbx)
+	resp, _, err := IssueSandboxToken(context.Background(), sbx, nil)
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 	assert.NotEmpty(t, resp.AccessToken, "default provider must mint a non-empty access token")
@@ -230,7 +357,7 @@ type propagatingFakeProvider struct {
 	err error
 }
 
-func (p *propagatingFakeProvider) IssueToken(_ context.Context, _ TokenRequest) (*TokenResponse, error) {
+func (p *propagatingFakeProvider) IssueToken(_ context.Context, _ *agentsv1alpha1.Sandbox, _ *agentsv1alpha1.SandboxClaim, _ TokenRequest) (*TokenResponse, error) {
 	p.issueCalls++
 	return nil, nil
 }
@@ -419,7 +546,7 @@ func TestIsIdentityProviderRequested(t *testing.T) {
 					Name:      "sbx",
 					Namespace: "ns",
 					Labels: map[string]string{
-						LabelAgentName:                     "agent-x",
+						LabelAgentName:                    "agent-x",
 						SecurityMetadataPrefix + "tenant": "t1",
 						"app":                             "demo",
 					},

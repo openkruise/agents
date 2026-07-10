@@ -262,6 +262,10 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 		reserveFailedSandboxFor = ptr.To(consts.ReserveFailedSandboxForever)
 	}
 
+	// storageAuthAnnotation holds the annotation key-value pair built by the
+	// BuildStorageAuthAnnotation hook (populated later, captured by reference).
+	var storageAuthKey, storageAuthValue string
+
 	opts := infra.ClaimSandboxOptions{
 		User:     string(claim.UID), // Use UID to ensure uniqueness across claim recreations
 		Template: sandboxSet.Name,
@@ -275,6 +279,16 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 				for k, v := range claim.Spec.Annotations {
 					annotations[k] = v
 				}
+				sbx.SetAnnotations(annotations)
+			}
+
+			// inject storage-auth annotation for RRSA-based storage mounts
+			if storageAuthKey != "" && storageAuthValue != "" {
+				annotations := sbx.GetAnnotations()
+				if annotations == nil {
+					annotations = make(map[string]string)
+				}
+				annotations[storageAuthKey] = storageAuthValue
 				sbx.SetAnnotations(annotations)
 			}
 
@@ -311,6 +325,7 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 		ReserveFailedSandboxFor: reserveFailedSandboxFor,
 		CreateOnNoStock:         claim.Spec.CreateOnNoStock,
 		UserMetadataKeys:        sandboxcr.BuildUserMetadataKeys(claim.Spec.Labels, claim.Spec.Annotations),
+		Claim:                   claim,
 	}
 
 	if claim.Spec.InplaceUpdate != nil {
@@ -371,31 +386,11 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 		}
 	}
 	if len(claim.Spec.DynamicVolumesMount) > 0 {
-		csiMountOptions := make([]config.MountConfig, 0, len(claim.Spec.DynamicVolumesMount))
-		csiClient := csiutils.NewCSIMountHandler(c.cache.GetClient(), c.cache.GetAPIReader(), c.storageRegistry, utils.DefaultSandboxDeployNamespace)
-		for _, mountConfig := range claim.Spec.DynamicVolumesMount {
-			driverName, csiReqConfigRaw, genErr := csiClient.CSIMountOptionsConfig(ctx, mountConfig)
-			if genErr != nil {
-				errMsg := "failed to generate csi mount options config for sandbox"
-				logger.Error(genErr, errMsg, "mountConfigRequest", mountConfig)
-				return opts, fmt.Errorf("%s, err: %v", errMsg, genErr)
-			}
-			csiMountOptions = append(csiMountOptions, config.MountConfig{
-				Driver:     driverName,
-				RequestRaw: csiReqConfigRaw,
-			})
-		}
-		opts.CSIMount = &config.CSIMountOptions{
-			MountOptionList: csiMountOptions,
-		}
-
-		// json marshal csi mount config to raw string
-		csiMountOptionsRaw, err := json.Marshal(claim.Spec.DynamicVolumesMount)
+		var err error
+		opts.CSIMount, storageAuthKey, storageAuthValue, err = c.buildCSIMountOptions(ctx, claim.Spec.DynamicVolumesMount)
 		if err != nil {
-			logger.Error(err, "failed to marshal csi mount config")
-			return opts, fmt.Errorf("failed to marshal csi mount config, err: %v", err)
+			return opts, err
 		}
-		opts.CSIMount.MountOptionListRaw = string(csiMountOptionsRaw)
 	}
 
 	if len(claim.Spec.Runtimes) > 0 {
@@ -403,6 +398,51 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 	}
 
 	return sandboxcr.ValidateAndInitClaimOptions(opts)
+}
+
+// buildCSIMountOptions generates CSI mount options and storage-auth annotation
+// metadata from the given mount configurations.
+func (c *commonControl) buildCSIMountOptions(ctx context.Context, mounts []agentsv1alpha1.CSIMountConfig) (*config.CSIMountOptions, string, string, error) {
+	logger := logf.FromContext(ctx)
+	csiMountOptions := make([]config.MountConfig, 0, len(mounts))
+	csiClient := csiutils.NewCSIMountHandler(c.cache.GetClient(), c.cache.GetAPIReader(), c.storageRegistry, utils.DefaultSandboxDeployNamespace)
+	for _, mountConfig := range mounts {
+		driverName, csiReqConfigRaw, genErr := csiClient.CSIMountOptionsConfig(ctx, mountConfig)
+		if genErr != nil {
+			errMsg := "failed to generate csi mount options config for sandbox"
+			logger.Error(genErr, errMsg, "mountConfigRequest", mountConfig)
+			return nil, "", "", fmt.Errorf("%s, err: %v", errMsg, genErr)
+		}
+		csiMountOptions = append(csiMountOptions, config.MountConfig{
+			Driver:     driverName,
+			RequestRaw: csiReqConfigRaw,
+		})
+	}
+
+	opts := &config.CSIMountOptions{
+		MountOptionList: csiMountOptions,
+	}
+
+	// json marshal csi mount config to raw string
+	csiMountOptionsRaw, err := json.Marshal(mounts)
+	if err != nil {
+		logger.Error(err, "failed to marshal csi mount config")
+		return nil, "", "", fmt.Errorf("failed to marshal csi mount config, err: %v", err)
+	}
+	opts.MountOptionListRaw = string(csiMountOptionsRaw)
+
+	// Build storage-auth annotation via hook when enterprise RRSA-based
+	// storage authentication is enabled.
+	var storageAuthKey, storageAuthValue string
+	if csiutils.BuildStorageAuthAnnotation != nil {
+		storageAuthKey, storageAuthValue, err = csiutils.BuildStorageAuthAnnotation(ctx, c.cache.GetClient(), mounts)
+		if err != nil {
+			logger.Error(err, "failed to build storage auth annotation")
+			return nil, "", "", fmt.Errorf("failed to build storage auth annotation: %v", err)
+		}
+	}
+
+	return opts, storageAuthKey, storageAuthValue, nil
 }
 
 // countClaimedSandboxes counts active sandboxes claimed by this claim.

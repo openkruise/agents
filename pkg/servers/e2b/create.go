@@ -143,6 +143,11 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 	log := klog.FromContext(ctx)
 	claimStart := time.Now()
 	var accessToken string
+
+	// storageAuthAnnotation holds the annotation key-value pair built by the
+	// BuildStorageAuthAnnotation hook (populated later, captured by reference).
+	var storageAuthKey, storageAuthValue string
+
 	infraOpts := infra.ClaimSandboxOptions{
 		Namespace:    sc.getNamespaceOfUser(user),
 		Template:     request.TemplateID,
@@ -150,8 +155,8 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 		ClaimTimeout: resolveServerTimeout(request.Extensions.TimeoutSeconds),
 		Modifier: func(sbx infra.Sandbox) {
 			sc.basicSandboxCreateModifier(ctx, sbx, request)
-			// record the basic csi mount persistent volume config to sandbox
 			sc.csiMountOptionsConfigRecord(ctx, sbx, request)
+			sc.injectStorageAuthAnnotation(sbx, storageAuthKey, storageAuthValue)
 		},
 		ReserveFailedSandboxFor: request.Extensions.ReserveFailedSandboxFor,
 		CreateOnNoStock:         request.Extensions.CreateOnNoStock,
@@ -198,6 +203,20 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 		}
 		infraOpts.CSIMount = &config.CSIMountOptions{
 			MountOptionList: csiMountOptions,
+		}
+
+		// Build storage-auth annotation via hook when internal RRSA-based
+		// storage authentication is enabled.
+		if csiutils.BuildStorageAuthAnnotation != nil {
+			var authErr error
+			storageAuthKey, storageAuthValue, authErr = csiutils.BuildStorageAuthAnnotation(ctx, sc.cache.GetClient(), request.Extensions.CSIMount.MountConfigs)
+			if authErr != nil {
+				log.Error(authErr, "failed to build storage auth annotation")
+				return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
+					Code:    http.StatusInternalServerError,
+					Message: authErr.Error(),
+				}
+			}
 		}
 	}
 
@@ -407,5 +426,19 @@ func (sc *Controller) csiMountOptionsConfigRecord(ctx context.Context, sbx infra
 	}
 	// record the csi mount config to annotation
 	annotations[models.ExtensionKeyClaimWithCSIMount_MountConfig] = string(csiMountConfigRaw)
+	sbx.SetAnnotations(annotations)
+}
+
+// injectStorageAuthAnnotation injects the storage-auth annotation into the sandbox
+// when enterprise RRSA-based credential metadata is available.
+func (sc *Controller) injectStorageAuthAnnotation(sbx infra.Sandbox, key, value string) {
+	if key == "" || value == "" {
+		return
+	}
+	annotations := sbx.GetAnnotations()
+	if annotations == nil {
+		annotations = make(map[string]string)
+	}
+	annotations[key] = value
 	sbx.SetAnnotations(annotations)
 }

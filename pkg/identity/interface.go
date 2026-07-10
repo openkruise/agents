@@ -35,18 +35,16 @@ import (
 //   - PropagateSecurityToken: executes registered propagators (e.g., write credential files).
 type IdentityProvider interface {
 	// IssueToken generates an access token for the given token request.
-	IssueToken(ctx context.Context, req TokenRequest) (*TokenResponse, error)
+	// The sbx parameter carries the sandbox workload metadata; it may be nil in
+	// future principal-token paths, so implementations must guard against nil.
+	// The claim parameter is the SandboxClaim that triggered the issuance when
+	// called from the SandboxClaim controller, and nil for refresh or E2B paths.
+	// Implementations that need extra context (e.g. storage-auth annotations)
+	// should read it directly from sbx.GetAnnotations() rather than relying on
+	// caller-side metadata hooks.
+	IssueToken(ctx context.Context, sbx *agentsv1alpha1.Sandbox, claim *agentsv1alpha1.SandboxClaim, req TokenRequest) (*TokenResponse, error)
 
 	// PropagateSecurityToken executes post-token processing after a token is issued,
 	// such as writing credentials into the sandbox runtime.
 	PropagateSecurityToken(ctx context.Context, sbx *agentsv1alpha1.Sandbox, tokenResp *TokenResponse) error
-}
-
-// TokenProvider is the low-level interface for issuing sandbox access tokens.
-// Implementations can provide default random tokens or identity-aware tokens
-// from an external identity provider service.
-type TokenProvider interface {
-	// IssueToken generates an access token for the given token request.
-	// The context can carry deadlines and cancellation signals.
-	IssueToken(ctx context.Context, req TokenRequest) (*TokenResponse, error)
 }
