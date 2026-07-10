@@ -37,7 +37,7 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/controller/commit/core"
-	jobutil "github.com/openkruise/agents/pkg/controller/commit/job"
+	commitutil "github.com/openkruise/agents/pkg/utils/commit"
 	"github.com/openkruise/agents/pkg/discovery"
 	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/utils"
@@ -156,7 +156,7 @@ func (r *CommitReconciler) Reconcile(ctx context.Context, req ctrl.Request) (res
 	case agentsv1alpha1.CommitPhasePending, "":
 		// Observe expectations in reconcile loop instead of event handler to avoid lock contention.
 		jobList := &batchv1.JobList{}
-		if err := r.List(ctx, jobList, client.InNamespace(commit.Namespace), client.MatchingFields{jobutil.IndexFieldCommitUID: string(commit.UID)}); err != nil {
+		if err := r.List(ctx, jobList, client.InNamespace(commit.Namespace), client.MatchingFields{commitutil.IndexFieldCommitUID: string(commit.UID)}); err != nil {
 			return ctrl.Result{}, err
 		}
 		args.JobList = jobList

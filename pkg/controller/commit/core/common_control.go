@@ -129,7 +129,7 @@ func (r *commonControl) EnsureCommitUpdated(ctx context.Context, args *EnsureFun
 
 	// List Jobs by LabelCommitUID since GenerateName produces a non-deterministic name.
 	jobList := &batchv1.JobList{}
-	if err := r.Client.List(ctx, jobList, client.InNamespace(commit.Namespace), client.MatchingFields{jobutil.IndexFieldCommitUID: string(commit.UID)}); err != nil {
+	if err := r.Client.List(ctx, jobList, client.InNamespace(commit.Namespace), client.MatchingFields{commitutil.IndexFieldCommitUID: string(commit.UID)}); err != nil {
 		return 0, fmt.Errorf("failed to list jobs: %w", err)
 	}
 	if len(jobList.Items) == 0 {
@@ -212,7 +212,7 @@ func (r *commonControl) listCRJobPods(ctx context.Context, commit *agentsv1alpha
 	// relying on the batch.kubernetes.io/job-name label which requires knowing
 	// the generated name.
 	matchingFields := client.MatchingFields{
-		jobutil.IndexFieldCommitUID: string(commit.UID),
+		commitutil.IndexFieldCommitUID: string(commit.UID),
 	}
 	if err := r.Client.List(ctx, jobPods, client.InNamespace(commit.Namespace), matchingFields); err != nil {
 		return nil, err

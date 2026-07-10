@@ -35,7 +35,6 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/controller/commit/core"
-	jobutil "github.com/openkruise/agents/pkg/controller/commit/job"
 	commitutil "github.com/openkruise/agents/pkg/utils/commit"
 )
 
@@ -84,15 +83,15 @@ func (m *mockControl) EnsureCommitDeleted(_ context.Context, _ *core.EnsureFuncA
 func newTestReconciler(objs ...client.Object) (*CommitReconciler, *mockControl) {
 	scheme := newTestScheme()
 	commitUIDIndex := func(obj client.Object) []string {
-		if uid, ok := obj.GetLabels()[jobutil.LabelCommitUID]; ok {
+		if uid, ok := obj.GetLabels()[commitutil.LabelCommitUID]; ok {
 			return []string{uid}
 		}
 		return nil
 	}
 	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).
 		WithStatusSubresource(&agentsv1alpha1.Commit{}).
-		WithIndex(&batchv1.Job{}, jobutil.IndexFieldCommitUID, commitUIDIndex).
-		WithIndex(&corev1.Pod{}, jobutil.IndexFieldCommitUID, commitUIDIndex).
+		WithIndex(&batchv1.Job{}, commitutil.IndexFieldCommitUID, commitUIDIndex).
+		WithIndex(&corev1.Pod{}, commitutil.IndexFieldCommitUID, commitUIDIndex).
 		Build()
 	mock := &mockControl{}
 	r := &CommitReconciler{

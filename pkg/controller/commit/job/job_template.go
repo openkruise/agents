@@ -26,6 +26,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/openkruise/agents/api/v1alpha1"
+	commitutil "github.com/openkruise/agents/pkg/utils/commit"
 )
 
 var backoffLimit = 1
@@ -58,8 +59,8 @@ func (g *JobGenerator) commitContainerID() string {
 
 func (g *JobGenerator) commitLabels() map[string]string {
 	return map[string]string{
-		LabelCommitName: g.Commit.Name,
-		LabelCommitUID:  string(g.Commit.UID),
+		commitutil.LabelCommitName: g.Commit.Name,
+		commitutil.LabelCommitUID:  string(g.Commit.UID),
 	}
 }
 

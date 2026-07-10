@@ -31,7 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	jobutil "github.com/openkruise/agents/pkg/controller/commit/job"
+	commitutil "github.com/openkruise/agents/pkg/utils/commit"
 )
 
 var commitSandboxImage = func() string {
@@ -224,7 +224,7 @@ func verifyCommitJobCompleted(ctx context.Context, namespace, commitName string)
 	jobList := &batchv1.JobList{}
 	Expect(k8sClient.List(ctx, jobList,
 		client.InNamespace(namespace),
-		client.MatchingLabels{jobutil.LabelCommitUID: string(commitGot.UID)},
+		client.MatchingLabels{commitutil.LabelCommitUID: string(commitGot.UID)},
 	)).To(Succeed())
 	Expect(jobList.Items).NotTo(BeEmpty())
 

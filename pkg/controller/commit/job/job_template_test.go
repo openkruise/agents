@@ -23,6 +23,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/openkruise/agents/api/v1alpha1"
+	commitutil "github.com/openkruise/agents/pkg/utils/commit"
 )
 
 func newTestJobGenerator() *JobGenerator {
@@ -83,11 +84,11 @@ func TestJobGenerator_commitContainerID(t *testing.T) {
 func TestJobGenerator_commitLabels(t *testing.T) {
 	g := newTestJobGenerator()
 	labels := g.commitLabels()
-	if labels[LabelCommitName] != "test-commit" {
-		t.Errorf("LabelCommitName=%q, want %q", labels[LabelCommitName], "test-commit")
+	if labels[commitutil.LabelCommitName] != "test-commit" {
+		t.Errorf("LabelCommitName=%q, want %q", labels[commitutil.LabelCommitName], "test-commit")
 	}
-	if labels[LabelCommitUID] != "test-uid" {
-		t.Errorf("LabelCommitUID=%q, want %q", labels[LabelCommitUID], "test-uid")
+	if labels[commitutil.LabelCommitUID] != "test-uid" {
+		t.Errorf("LabelCommitUID=%q, want %q", labels[commitutil.LabelCommitUID], "test-uid")
 	}
 }
 
