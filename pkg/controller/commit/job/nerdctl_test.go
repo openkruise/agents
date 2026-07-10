@@ -24,12 +24,12 @@ import (
 )
 
 func TestNerdctlExec_BinaryNotFound(t *testing.T) {
-	// nerdctl binary doesn't exist in test env, should fail with "start cmd failed"
+	// nerdctl binary doesn't exist in test env, should fail with "nerdctl binary not found"
 	err := NerdctlExec(context.Background(), WithArgs("version"))
 	if err == nil {
 		t.Fatal("expected error when nerdctl binary not found")
 	}
-	if !strings.Contains(err.Error(), "start cmd failed") {
+	if !strings.Contains(err.Error(), "nerdctl binary not found") {
 		t.Errorf("unexpected error: %v", err)
 	}
 }

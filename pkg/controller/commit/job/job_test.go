@@ -23,116 +23,122 @@ import (
 	"testing"
 )
 
-func TestDoCommitWith_Success(t *testing.T) {
-	opts := CommitOptions{ContainerID: "test-container-id", Image: "registry.example.com/app:v1"}
+func TestDoCommitWith(t *testing.T) {
+	tests := []struct {
+		name      string
+		opts      CommitOptions
+		executor  Executor
+		wantCode  int
+		wantCalls int // expected number of executor invocations; -1 means skip check
+		// verifyArgs is called after a successful run to inspect the captured args.
+		verifyArgs func(t *testing.T, calls [][]string)
+	}{
+		{
+			name: "success",
+			opts: CommitOptions{ContainerID: "test-container-id", Image: "registry.example.com/app:v1"},
+			executor: func(ctx context.Context, opts ...CmdOpt) error {
+				return nil
+			},
+			wantCode:  ExitCodeSuccess,
+			wantCalls: 2,
+		},
+		{
+			name: "commit fails",
+			opts: CommitOptions{ContainerID: "test-container-id", Image: "registry.example.com/app:v1"},
+			executor: func() Executor {
+				callCount := 0
+				return func(ctx context.Context, opts ...CmdOpt) error {
+					callCount++
+					if callCount == 1 {
+						return fmt.Errorf("commit error")
+					}
+					return nil
+				}
+			}(),
+			wantCode:  ExitCodeCommitFailed,
+			wantCalls: 1,
+		},
+		{
+			name: "push fails",
+			opts: CommitOptions{ContainerID: "test-container-id", Image: "registry.example.com/app:v1"},
+			executor: func() Executor {
+				callCount := 0
+				return func(ctx context.Context, opts ...CmdOpt) error {
+					callCount++
+					if callCount == 2 {
+						return fmt.Errorf("push error")
+					}
+					return nil
+				}
+			}(),
+			wantCode:  ExitCodePushFailed,
+			wantCalls: 2,
+		},
+		{
+			name:     "empty container ID",
+			opts:     CommitOptions{Image: "registry.example.com/app:v1"},
+			executor: func(ctx context.Context, opts ...CmdOpt) error { return nil },
+			wantCode:  ExitCodeCommitFailed,
+			wantCalls: 0,
+		},
+		{
+			name:     "empty image",
+			opts:     CommitOptions{ContainerID: "test-container-id"},
+			executor: func(ctx context.Context, opts ...CmdOpt) error { return nil },
+			wantCode:  ExitCodeCommitFailed,
+			wantCalls: 0,
+		},
+		{
+			name: "args passed correctly",
+			opts: CommitOptions{ContainerID: "ctr-123", Image: "reg.io/img:v2"},
+			executor: func(ctx context.Context, opts ...CmdOpt) error {
+				return nil
+			},
+			wantCode:  ExitCodeSuccess,
+			wantCalls: 2,
+			verifyArgs: func(t *testing.T, calls [][]string) {
+				t.Helper()
+				if len(calls) != 2 {
+					t.Fatalf("expected 2 calls, got %d", len(calls))
+				}
+				commitArgs := calls[0]
+				if commitArgs[len(commitArgs)-2] != "ctr-123" || commitArgs[len(commitArgs)-1] != "reg.io/img:v2" {
+					t.Errorf("commit args = %v", commitArgs)
+				}
+				pushArgs := calls[1]
+				if pushArgs[len(pushArgs)-1] != "reg.io/img:v2" {
+					t.Errorf("push args = %v", pushArgs)
+				}
+			},
+		},
+	}
 
-	fakeExec := func(ctx context.Context, opts ...CmdOpt) error {
-		return nil
-	}
-	code := doCommitWith(context.Background(), opts, fakeExec)
-	if code != ExitCodeSuccess {
-		t.Errorf("expected ExitCodeSuccess (%d), got %d", ExitCodeSuccess, code)
-	}
-}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			callCount := 0
+			var capturedCalls [][]string
+			wrappedExec := func(ctx context.Context, opts ...CmdOpt) error {
+				callCount++
+				// Capture args by applying opts to a dummy cmd.
+				cmd := exec.Command("echo")
+				cmd.Args = []string{"nerdctl"}
+				for _, opt := range opts {
+					opt(cmd)
+				}
+				capturedCalls = append(capturedCalls, cmd.Args)
+				return tt.executor(ctx, opts...)
+			}
 
-func TestDoCommitWith_CommitFailed(t *testing.T) {
-	opts := CommitOptions{ContainerID: "test-container-id", Image: "registry.example.com/app:v1"}
-
-	callCount := 0
-	fakeExec := func(ctx context.Context, opts ...CmdOpt) error {
-		callCount++
-		// First call is commit, make it fail
-		if callCount == 1 {
-			return fmt.Errorf("commit error")
-		}
-		return nil
-	}
-	code := doCommitWith(context.Background(), opts, fakeExec)
-	if code != ExitCodeCommitFailed {
-		t.Errorf("expected ExitCodeCommitFailed (%d), got %d", ExitCodeCommitFailed, code)
-	}
-}
-
-func TestDoCommitWith_PushFailed(t *testing.T) {
-	opts := CommitOptions{ContainerID: "test-container-id", Image: "registry.example.com/app:v1"}
-
-	callCount := 0
-	fakeExec := func(ctx context.Context, opts ...CmdOpt) error {
-		callCount++
-		// Second call is push, make it fail
-		if callCount == 2 {
-			return fmt.Errorf("push error")
-		}
-		return nil
-	}
-	code := doCommitWith(context.Background(), opts, fakeExec)
-	if code != ExitCodePushFailed {
-		t.Errorf("expected ExitCodePushFailed (%d), got %d", ExitCodePushFailed, code)
-	}
-}
-
-func TestDoCommitWith_EmptyContainerID(t *testing.T) {
-	opts := CommitOptions{Image: "registry.example.com/app:v1"}
-
-	called := false
-	fakeExec := func(ctx context.Context, opts ...CmdOpt) error {
-		called = true
-		return nil
-	}
-	code := doCommitWith(context.Background(), opts, fakeExec)
-	if code != ExitCodeCommitFailed {
-		t.Errorf("expected ExitCodeCommitFailed (%d), got %d", ExitCodeCommitFailed, code)
-	}
-	if called {
-		t.Error("executor should not be called when container ID is empty")
-	}
-}
-
-func TestDoCommitWith_EmptyImage(t *testing.T) {
-	opts := CommitOptions{ContainerID: "test-container-id"}
-
-	called := false
-	fakeExec := func(ctx context.Context, opts ...CmdOpt) error {
-		called = true
-		return nil
-	}
-	code := doCommitWith(context.Background(), opts, fakeExec)
-	if code != ExitCodeCommitFailed {
-		t.Errorf("expected ExitCodeCommitFailed (%d), got %d", ExitCodeCommitFailed, code)
-	}
-	if called {
-		t.Error("executor should not be called when image is empty")
-	}
-}
-
-func TestDoCommitWith_ArgsPassedCorrectly(t *testing.T) {
-	opts := CommitOptions{ContainerID: "ctr-123", Image: "reg.io/img:v2"}
-
-	var capturedCalls [][]string
-	fakeExec := func(ctx context.Context, opts ...CmdOpt) error {
-		cmd := exec.Command("echo")
-		cmd.Args = []string{"nerdctl"}
-		for _, opt := range opts {
-			opt(cmd)
-		}
-		capturedCalls = append(capturedCalls, cmd.Args)
-		return nil
-	}
-	code := doCommitWith(context.Background(), opts, fakeExec)
-	if code != ExitCodeSuccess {
-		t.Fatalf("expected success, got %d", code)
-	}
-	if len(capturedCalls) != 2 {
-		t.Fatalf("expected 2 calls, got %d", len(capturedCalls))
-	}
-	// Verify commit args
-	commitArgs := capturedCalls[0]
-	if commitArgs[len(commitArgs)-2] != "ctr-123" || commitArgs[len(commitArgs)-1] != "reg.io/img:v2" {
-		t.Errorf("commit args = %v", commitArgs)
-	}
-	// Verify push args
-	pushArgs := capturedCalls[1]
-	if pushArgs[len(pushArgs)-1] != "reg.io/img:v2" {
-		t.Errorf("push args = %v", pushArgs)
+			code := doCommitWith(context.Background(), tt.opts, wrappedExec)
+			if code != tt.wantCode {
+				t.Errorf("expected exit code %d, got %d", tt.wantCode, code)
+			}
+			if tt.wantCalls >= 0 && callCount != tt.wantCalls {
+				t.Errorf("expected %d executor calls, got %d", tt.wantCalls, callCount)
+			}
+			if tt.verifyArgs != nil {
+				tt.verifyArgs(t, capturedCalls)
+			}
+		})
 	}
 }

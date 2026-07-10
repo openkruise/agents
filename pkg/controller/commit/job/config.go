@@ -26,24 +26,10 @@ const (
 	// EnvAgentJobImage is the environment variable name for the agent job self-image.
 	EnvAgentJobImage = "AGENT_JOB_IMAGE"
 
-	// EnvContainerName is the environment variable name for the commit target container name.
-	EnvContainerName = "COMMIT_CONTAINER_NAME"
 	// EnvContainerdSock is the environment variable name for the containerd socket path.
 	EnvContainerdSock = "COMMIT_CONTAINERD_SOCK"
 	// EnvContainerdSockPath is the environment variable name for the containerd socket dir.
 	EnvContainerdSockPath = "COMMIT_CONTAINERD_SOCK_PATH"
-
-	// EnvCommitNamespace is the environment variable name for the commit cr namespace.
-	EnvCommitNamespace = "COMMIT_NAMESPACE"
-	// EnvCommitName is the environment variable name for the commit cr name.
-	EnvCommitName = "COMMIT_NAME"
-
-	// EnvCommitPodName is the environment variable name for the commit pod name.
-	EnvCommitPodName = "COMMIT_POD_NAME"
-	// EnvCommitPodNamespace is the environment variable name for the commit pod namespace.
-	EnvCommitPodNamespace = "COMMIT_POD_NAMESPACE"
-	// EnvCommitPodUID is the environment variable name for the commit pod uid.
-	EnvCommitPodUID = "COMMIT_POD_UID"
 
 	// ArgContainerID is the CLI argument name for the commit target container ID.
 	ArgContainerID = "container-id"
@@ -60,13 +46,6 @@ const (
 
 // EnvConfig reads configuration from environment variables.
 type EnvConfig struct{}
-
-func (c *EnvConfig) ContainerName() string      { return os.Getenv(EnvContainerName) }
-func (c *EnvConfig) CommitNamespace() string    { return os.Getenv(EnvCommitNamespace) }
-func (c *EnvConfig) CommitName() string         { return os.Getenv(EnvCommitName) }
-func (c *EnvConfig) CommitPodName() string      { return os.Getenv(EnvCommitPodName) }
-func (c *EnvConfig) CommitPodNamespace() string { return os.Getenv(EnvCommitPodNamespace) }
-func (c *EnvConfig) CommitPodUID() string       { return os.Getenv(EnvCommitPodUID) }
 
 func (c *EnvConfig) AgentJobImage() string { return os.Getenv(EnvAgentJobImage) }
 

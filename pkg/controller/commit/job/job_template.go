@@ -63,17 +63,6 @@ func (g *JobGenerator) commitLabels() map[string]string {
 	}
 }
 
-func (g *JobGenerator) commitEnvs() []corev1.EnvVar {
-	return []corev1.EnvVar{
-		{Name: EnvCommitNamespace, Value: g.Commit.Namespace},
-		{Name: EnvCommitName, Value: g.Commit.Name},
-		{Name: EnvContainerName, Value: g.Commit.Spec.ContainerName},
-		{Name: EnvCommitPodName, Value: g.Commit.Spec.PodName},
-		{Name: EnvCommitPodNamespace, Value: g.Pod.Namespace},
-		{Name: EnvCommitPodUID, Value: string(g.Pod.UID)},
-	}
-}
-
 func (g *JobGenerator) commitArgs() []string {
 	return []string{
 		fmt.Sprintf("--%s=%s", ArgContainerID, g.commitContainerID()),
@@ -229,7 +218,6 @@ func (g *JobGenerator) GenerateCommitJob() (*batchv1.Job, error) {
 							VolumeMounts:    volumeMounts,
 							ImagePullPolicy: Config().ImagePullPolicy(),
 							Args:            g.commitArgs(),
-							Env:             g.commitEnvs(),
 							SecurityContext: &corev1.SecurityContext{
 								RunAsUser: &rootUID,
 							},

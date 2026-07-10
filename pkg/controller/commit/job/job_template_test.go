@@ -91,29 +91,6 @@ func TestJobGenerator_commitLabels(t *testing.T) {
 	}
 }
 
-func TestJobGenerator_commitEnvs(t *testing.T) {
-	g := newTestJobGenerator()
-	envs := g.commitEnvs()
-	envMap := make(map[string]string, len(envs))
-	for _, e := range envs {
-		envMap[e.Name] = e.Value
-	}
-
-	expected := map[string]string{
-		EnvCommitNamespace:    "test-ns",
-		EnvCommitName:         "test-commit",
-		EnvContainerName:      "test-container",
-		EnvCommitPodName:      "test-pod",
-		EnvCommitPodNamespace: "test-ns",
-		EnvCommitPodUID:       "pod-uid",
-	}
-	for key, want := range expected {
-		if got := envMap[key]; got != want {
-			t.Errorf("env[%s]=%q, want %q", key, got, want)
-		}
-	}
-}
-
 func TestJobGenerator_commitArgs(t *testing.T) {
 	g := newTestJobGenerator()
 	args := g.commitArgs()

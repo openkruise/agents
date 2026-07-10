@@ -67,7 +67,7 @@ func NerdctlExec(ctx context.Context, opts ...CmdOpt) error {
 	if cmd.Path == "" {
 		p, err := exec.LookPath("nerdctl")
 		if err != nil {
-			return fmt.Errorf("start cmd failed: %w", err)
+			return fmt.Errorf("nerdctl binary not found: %w", err)
 		}
 		cmd.Path = p
 	}
