@@ -96,6 +96,10 @@ type ClaimSandboxOptions struct {
 	// added during claim (from SandboxClaim.Spec or E2B request). Used by the
 	// cleanup flow to clean up user metadata when returning the sandbox to the pool.
 	UserMetadataKeys *v1alpha1.UpdatedMetadataInClaim `json:"-"`
+	// Claim is the SandboxClaim that triggers this claim. May be nil for
+	// non-CRD paths such as the E2B API. IdentityProvider implementations must
+	// handle a nil Claim gracefully.
+	Claim *v1alpha1.SandboxClaim `json:"-"`
 }
 
 type CloneSandboxOptions struct {

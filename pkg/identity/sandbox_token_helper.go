@@ -48,31 +48,49 @@ func IsIdentityProviderRequested(sbx *agentsv1alpha1.Sandbox) bool {
 	return sbx.GetLabels()[LabelAgentName] != ""
 }
 
-// IssueSandboxToken issues a security token for the given sandbox using the
-// registered identity provider.
+// ExtractSecurityMetadata returns a map containing only the sandbox labels
+// whose keys are prefixed with SecurityMetadataPrefix. Providers that want to
+// include security labels in token issuance requests should call this helper
+// instead of re-implementing the prefix filter.
 //
-// It collects all sandbox labels prefixed with identity.SecurityMetadataPrefix as
-// request metadata, builds a TokenRequest of type TokenTypeAgent, and delegates
-// to the package-level IssueToken entry. The returned cost reflects the total
-// duration spent issuing the token (including metadata collection), which
-// callers can record on their own metrics structures.
-//
-// The function is intentionally side-effect free: it does NOT mutate the
-// sandbox object or persist the response. Callers are responsible for
-// persisting the returned TokenResponse into the appropriate place
-// (e.g. ClaimSandboxOptions, sandbox annotations, or runtime credentials).
-func IssueSandboxToken(ctx context.Context, sbx *agentsv1alpha1.Sandbox) (*TokenResponse, time.Duration, error) {
-	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx), "action", "IssueSandboxToken")
-	start := time.Now()
-
+// A nil sandbox results in a nil map. The returned map is never nil when the
+// sandbox is non-nil, even if no matching labels exist, so providers can safely
+// iterate over it.
+func ExtractSecurityMetadata(sbx *agentsv1alpha1.Sandbox) map[string]string {
+	if sbx == nil {
+		return nil
+	}
 	metadata := make(map[string]string)
 	for k, v := range sbx.GetLabels() {
 		if strings.HasPrefix(k, SecurityMetadataPrefix) {
 			metadata[k] = v
 		}
 	}
+	return metadata
+}
 
-	tokenResp, err := IssueToken(ctx, TokenRequest{
+// IssueSandboxToken issues a security token for the given sandbox using the
+// registered identity provider.
+//
+// It builds a TokenRequest of type TokenTypeAgent, forwarding the sandbox and
+// claim objects verbatim to the provider. Metadata extraction is intentionally
+// left to the provider: implementations that need security labels can call
+// ExtractSecurityMetadata(sbx), and those that need storage-auth or other
+// annotations can read them directly from sbx.GetAnnotations().
+//
+// The claim parameter may be nil for non-CRD issuance paths (e.g. token refresh
+// or the E2B API). IdentityProvider implementations must handle a nil claim
+// gracefully.
+//
+// The function is intentionally side-effect free: it does NOT mutate the
+// sandbox object or persist the response. Callers are responsible for
+// persisting the returned TokenResponse into the appropriate place
+// (e.g. ClaimSandboxOptions, sandbox annotations, or runtime credentials).
+func IssueSandboxToken(ctx context.Context, sbx *agentsv1alpha1.Sandbox, claim *agentsv1alpha1.SandboxClaim) (*TokenResponse, time.Duration, error) {
+	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx), "action", "IssueSandboxToken")
+	start := time.Now()
+
+	tokenResp, err := IssueToken(ctx, sbx, claim, TokenRequest{
 		TokenType: TokenTypeAgent,
 		Sandbox: &SandboxInfo{
 			PodName:      sbx.Name,
@@ -81,7 +99,6 @@ func IssueSandboxToken(ctx context.Context, sbx *agentsv1alpha1.Sandbox) (*Token
 			SandboxName:  sbx.Name,
 			SandboxUID:   string(sbx.UID),
 		},
-		Metadata: metadata,
 	})
 	cost := time.Since(start)
 	if err != nil {

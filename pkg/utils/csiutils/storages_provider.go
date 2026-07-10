@@ -77,8 +77,11 @@ func (h *CSIMountHandler) GenerateNodePublishVolumeRequest(ctx context.Context, 
 	}
 
 	// to fetch secret object
+	// Skip secret lookup when the PV declares agent-identity authentication;
+	// in this mode the CSI binary authenticates via RRSA token rather than a K8s Secret.
+	isAgentIdentityAuth := persistentVolumeObj.Spec.CSI.VolumeAttributes["authType"] == "agent-identity"
 	var secretObj *corev1.Secret
-	if persistentVolumeObj.Spec.CSI.NodePublishSecretRef != nil {
+	if !isAgentIdentityAuth && persistentVolumeObj.Spec.CSI.NodePublishSecretRef != nil {
 		nodePublishSecretRef := persistentVolumeObj.Spec.CSI.NodePublishSecretRef
 		secretNamespace := nodePublishSecretRef.Namespace
 		if secretNamespace == "" {
@@ -93,12 +96,18 @@ func (h *CSIMountHandler) GenerateNodePublishVolumeRequest(ctx context.Context, 
 		}
 	}
 
-	// to add access point sub path
-	if mountRequest.SubPath != "" {
+	// Deep copy the PV when we need to modify VolumeAttributes (sub-path merging
+	// or hook enrichment) to avoid mutating the cached object.
+	needsCopy := mountRequest.SubPath != "" || NodePublishVolumeEnricher != nil
+	if needsCopy {
 		persistentVolumeObj = persistentVolumeObj.DeepCopy()
 		if persistentVolumeObj.Spec.CSI.VolumeAttributes == nil {
 			persistentVolumeObj.Spec.CSI.VolumeAttributes = make(map[string]string)
 		}
+	}
+
+	// to add access point sub path
+	if mountRequest.SubPath != "" {
 		basePath, exist := persistentVolumeObj.Spec.CSI.VolumeAttributes["path"]
 		if !exist {
 			basePath = "/"
@@ -107,8 +116,13 @@ func (h *CSIMountHandler) GenerateNodePublishVolumeRequest(ctx context.Context, 
 		if err != nil {
 			return "", nil, fmt.Errorf("failed to merge and validate paths: base path=%s, sub path=%s, err: %v", basePath, mountRequest.SubPath, err)
 		}
-		// Use a copy to avoid modifying the original PV object
 		persistentVolumeObj.Spec.CSI.VolumeAttributes["path"] = mergedPath
+	}
+
+	// Allow internal implementations to inject provider-specific VolumeAttributes
+	// (e.g., sandboxCredentialProviderName for RRSA authentication) via the hook.
+	if NodePublishVolumeEnricher != nil {
+		NodePublishVolumeEnricher(ctx, mountRequest, persistentVolumeObj.Spec.CSI.VolumeAttributes)
 	}
 
 	// to generate csi node publish volume request
@@ -133,6 +147,31 @@ func (h *CSIMountHandler) CSIMountOptionsConfig(ctx context.Context, mountReques
 	log.Info("generate csi mount options config for sandbox", "mountCost", time.Since(startTime))
 	return driverName, base64.StdEncoding.EncodeToString(jsonBytes), nil
 }
+
+// NodePublishVolumeEnricher is an optional hook that enriches PV VolumeAttributes
+// before generating the CSI NodePublishVolume request. It is nil by default in
+// community builds; enterprise deployments register an implementation via init()
+// to inject provider-specific attributes (e.g., sandboxCredentialProviderName
+// for RRSA authentication).
+//
+// The hook receives the mount request and the PV's VolumeAttributes map (already
+// a deep copy). It may modify volumeAttributes in place.
+var NodePublishVolumeEnricher func(ctx context.Context, mountRequest v1alpha1.CSIMountConfig, volumeAttributes map[string]string)
+
+// BuildStorageAuthAnnotation is an optional hook that constructs storage
+// authentication metadata from CSI mount configurations and returns the
+// annotation key-value pair to inject on the sandbox. When nil, no storage-auth
+// annotations are injected (community default behavior).
+//
+// Enterprise deployments register an implementation via init() to provide
+// RRSA-based storage authentication (credential metadata construction,
+// enrichment, and serialization).
+//
+// Returns:
+//   - annotationKey: the annotation key to set on the sandbox (e.g., "security.agents.kruise.io/storage-auth")
+//   - annotationValue: the serialized annotation value (JSON-encoded credential metadata)
+//   - err: any error encountered during construction
+var BuildStorageAuthAnnotation func(ctx context.Context, client ctrlclient.Client, mounts []v1alpha1.CSIMountConfig) (annotationKey string, annotationValue string, err error)
 
 func mergeAndValidatePaths(basePath, subPath string) (string, error) {
 	if basePath == "" {
