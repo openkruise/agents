@@ -135,7 +135,10 @@ func TestResolveRegistrySecretName_Tier1(t *testing.T) {
 		"push-secret",
 	}}
 
-	name := ctrl.resolveRegistrySecretName(context.TODO(), commit)
+	name, err := ctrl.resolveRegistrySecretName(context.TODO(), commit)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if name != "push-secret" {
 		t.Errorf("expected 'push-secret', got %q", name)
 	}
@@ -151,7 +154,10 @@ func TestResolveRegistrySecretName_Tier1_NotFound(t *testing.T) {
 		"nonexistent-secret",
 	}}
 
-	name := ctrl.resolveRegistrySecretName(context.TODO(), commit)
+	name, err := ctrl.resolveRegistrySecretName(context.TODO(), commit)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if name != "" {
 		t.Errorf("expected empty, got %q", name)
 	}
@@ -171,7 +177,10 @@ func TestResolveRegistrySecretName_Tier1_WrongType(t *testing.T) {
 		"opaque-secret",
 	}}
 
-	name := ctrl.resolveRegistrySecretName(context.TODO(), commit)
+	name, err := ctrl.resolveRegistrySecretName(context.TODO(), commit)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if name != "" {
 		t.Errorf("expected empty for wrong secret type, got %q", name)
 	}
@@ -184,7 +193,10 @@ func TestResolveRegistrySecretName_NoSecret(t *testing.T) {
 
 	commit := newTestCommit("test-commit", "default")
 
-	name := ctrl.resolveRegistrySecretName(context.TODO(), commit)
+	name, err := ctrl.resolveRegistrySecretName(context.TODO(), commit)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if name != "" {
 		t.Errorf("expected empty when no secret specified, got %q", name)
 	}
