@@ -37,10 +37,10 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/controller/commit/core"
-	commitutil "github.com/openkruise/agents/pkg/utils/commit"
 	"github.com/openkruise/agents/pkg/discovery"
 	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/utils"
+	commitutil "github.com/openkruise/agents/pkg/utils/commit"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 )
