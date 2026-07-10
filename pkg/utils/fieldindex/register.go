@@ -27,13 +27,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	commitutil "github.com/openkruise/agents/pkg/utils/commit"
 )
 
 const (
 	IndexNameForOwnerRefUID = "ownerRefUID"
-
-	labelCommitUID      = "agents.kruise.io/commit-uid"
-	indexFieldCommitUID = "metadata.commit-uid"
 )
 
 var (
@@ -48,9 +46,8 @@ var OwnerIndexFunc = func(obj client.Object) []string {
 	return owners
 }
 
-// commitUIDIndexFunc indexes Jobs/Pods by the commit-uid label.
 var commitUIDIndexFunc = func(obj client.Object) []string {
-	if uid, ok := obj.GetLabels()[labelCommitUID]; ok {
+	if uid, ok := obj.GetLabels()[commitutil.LabelCommitUID]; ok {
 		return []string{uid}
 	}
 	return nil
@@ -72,10 +69,10 @@ func RegisterFieldIndexes(c cache.Cache) error {
 			return
 		}
 		// commit job/pod label
-		if err = c.IndexField(context.TODO(), &batchv1.Job{}, indexFieldCommitUID, commitUIDIndexFunc); err != nil {
+		if err = c.IndexField(context.TODO(), &batchv1.Job{}, commitutil.IndexFieldCommitUID, commitUIDIndexFunc); err != nil {
 			return
 		}
-		if err = c.IndexField(context.TODO(), &corev1.Pod{}, indexFieldCommitUID, commitUIDIndexFunc); err != nil {
+		if err = c.IndexField(context.TODO(), &corev1.Pod{}, commitutil.IndexFieldCommitUID, commitUIDIndexFunc); err != nil {
 			return
 		}
 	})

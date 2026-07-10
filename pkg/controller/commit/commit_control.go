@@ -5,11 +5,11 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/controller/commit/core"
-	"github.com/openkruise/agents/pkg/utils"
+	commitutil "github.com/openkruise/agents/pkg/utils/commit"
 )
 
 func (r *CommitReconciler) getControl(commit *agentsv1alpha1.Commit) (core.CommitControl, error) {
-	if mode, ok := commit.Annotations[utils.CommitAnnotationModeKey]; ok && mode != "" {
+	if mode, ok := commit.Annotations[commitutil.AnnotationModeKey]; ok && mode != "" {
 		control, ok := r.controls[mode]
 		if !ok {
 			return nil, fmt.Errorf("commit mode(%s) control not found", mode)

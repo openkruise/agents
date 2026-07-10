@@ -36,7 +36,7 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/controller/commit/core"
 	jobutil "github.com/openkruise/agents/pkg/controller/commit/job"
-	"github.com/openkruise/agents/pkg/utils"
+	commitutil "github.com/openkruise/agents/pkg/utils/commit"
 )
 
 func newTestScheme() *runtime.Scheme {
@@ -500,7 +500,7 @@ func TestGetControl_AnnotationMode(t *testing.T) {
 	}
 	commit := newCommit("test", "default", agentsv1alpha1.CommitPhasePending)
 	commit.Annotations = map[string]string{
-		utils.CommitAnnotationModeKey: "custom",
+		commitutil.AnnotationModeKey: "custom",
 	}
 
 	ctrl, err := r.getControl(commit)
@@ -520,7 +520,7 @@ func TestGetControl_UnknownMode(t *testing.T) {
 	}
 	commit := newCommit("test", "default", agentsv1alpha1.CommitPhasePending)
 	commit.Annotations = map[string]string{
-		utils.CommitAnnotationModeKey: "nonexistent",
+		commitutil.AnnotationModeKey: "nonexistent",
 	}
 
 	_, err := r.getControl(commit)
@@ -623,7 +623,7 @@ func TestGetControl_AnnotationModeEmptyValue(t *testing.T) {
 	}
 	commit := newCommit("test", "default", agentsv1alpha1.CommitPhasePending)
 	commit.Annotations = map[string]string{
-		utils.CommitAnnotationModeKey: "",
+		commitutil.AnnotationModeKey: "",
 	}
 
 	ctrl, err := r.getControl(commit)

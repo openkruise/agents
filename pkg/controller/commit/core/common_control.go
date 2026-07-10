@@ -35,6 +35,7 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	jobutil "github.com/openkruise/agents/pkg/controller/commit/job"
 	"github.com/openkruise/agents/pkg/utils"
+	commitutil "github.com/openkruise/agents/pkg/utils/commit"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 )
 
@@ -64,8 +65,8 @@ func (r *commonControl) EnsureCommitRunning(ctx context.Context, args *EnsureFun
 
 	log.Info("EnsureCommitRunning", "name", commit.Name, "namespace", commit.Namespace, "phase", commit.Status.Phase)
 
-	if _, ok := commit.Annotations[utils.CommitAnnotationModeKey]; !ok {
-		patch := fmt.Sprintf(`{"metadata":{"annotations":{"%s":"%s"}}}`, utils.CommitAnnotationModeKey, CommonControlName)
+	if _, ok := commit.Annotations[commitutil.AnnotationModeKey]; !ok {
+		patch := fmt.Sprintf(`{"metadata":{"annotations":{"%s":"%s"}}}`, commitutil.AnnotationModeKey, CommonControlName)
 		rcvObject := &agentsv1alpha1.Commit{ObjectMeta: metav1.ObjectMeta{Namespace: commit.Namespace, Name: commit.Name}}
 		if err := r.Patch(ctx, rcvObject, client.RawPatch(types.MergePatchType, []byte(patch))); err != nil {
 			log.Error(err, "patch annotations failed", "commit", klog.KObj(commit))

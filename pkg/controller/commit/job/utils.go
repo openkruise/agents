@@ -24,15 +24,15 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	commitutil "github.com/openkruise/agents/pkg/utils/commit"
 )
 
+// Aliases to pkg/utils/commit for backward compatibility within this package.
 const (
-	LabelCommitName = "agents.kruise.io/commit-name"
-	LabelCommitUID  = "agents.kruise.io/commit-uid"
-
-	// IndexFieldCommitUID is the field index name for LabelCommitUID, used to speed
-	// up List queries that filter by commit UID.
-	IndexFieldCommitUID = "metadata.commit-uid"
+	LabelCommitName     = commitutil.LabelCommitName
+	LabelCommitUID      = commitutil.LabelCommitUID
+	IndexFieldCommitUID = commitutil.IndexFieldCommitUID
 )
 
 // AgentJobContainerName is the name of the single container inside the commit
