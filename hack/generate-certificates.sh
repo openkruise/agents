@@ -7,6 +7,8 @@ set -euo pipefail
 DOMAINS=()
 DAYS=365
 OUTPUT_DIR="."
+CA_KEY=""
+CA_CERT=""
 
 show_help() {
     echo "Usage: $0 [OPTIONS]"
@@ -16,11 +18,14 @@ show_help() {
     echo "                          DOMAIN and *.DOMAIN will both be added"
     echo "  -o, --output DIR        Specify output directory (default: .)"
     echo "  -D, --days DAYS         Specify certificate validity days (default: 365)"
+    echo "      --ca-key PATH       Reuse an existing CA private key"
+    echo "      --ca-cert PATH      Reuse the matching existing CA certificate"
     echo "  -h, --help              Show this help message"
     echo ""
     echo "Examples:"
     echo "  $0 -d example1.com -d example2.com"
     echo "  $0 --domain example1.com --domain example2.com --days 730"
+    echo "  $0 -d example.com --ca-key ca-key.pem --ca-cert ca-cert.pem"
 }
 
 add_domain() {
@@ -79,6 +84,26 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
 
+        --ca-key)
+            if [[ $# -lt 2 ]]; then
+                echo "Missing value for $1" >&2
+                exit 1
+            fi
+
+            CA_KEY="$2"
+            shift 2
+            ;;
+
+        --ca-cert)
+            if [[ $# -lt 2 ]]; then
+                echo "Missing value for $1" >&2
+                exit 1
+            fi
+
+            CA_CERT="$2"
+            shift 2
+            ;;
+
         -h|--help)
             show_help
             exit 0
@@ -100,6 +125,39 @@ fi
 if ! [[ "$DAYS" =~ ^[1-9][0-9]*$ ]]; then
     echo "Invalid validity period: $DAYS" >&2
     exit 1
+fi
+
+if [[ -n "$CA_KEY" && -z "$CA_CERT" ]] || [[ -z "$CA_KEY" && -n "$CA_CERT" ]]; then
+    echo "--ca-key and --ca-cert must be provided together" >&2
+    exit 1
+fi
+
+REUSE_CA=false
+
+if [[ -n "$CA_KEY" ]]; then
+    REUSE_CA=true
+
+    if [[ ! -f "$CA_KEY" || ! -r "$CA_KEY" ]]; then
+        echo "CA private key is not a readable file: $CA_KEY" >&2
+        exit 1
+    fi
+
+    if [[ ! -f "$CA_CERT" || ! -r "$CA_CERT" ]]; then
+        echo "CA certificate is not a readable file: $CA_CERT" >&2
+        exit 1
+    fi
+
+    if ! openssl x509 -in "$CA_CERT" -noout -checkend 0 >/dev/null 2>&1; then
+        echo "CA certificate is invalid or expired: $CA_CERT" >&2
+        exit 1
+    fi
+
+    if ! cmp -s \
+        <(openssl pkey -in "$CA_KEY" -pubout 2>/dev/null) \
+        <(openssl x509 -in "$CA_CERT" -pubkey -noout 2>/dev/null); then
+        echo "CA private key does not match CA certificate" >&2
+        exit 1
+    fi
 fi
 
 mkdir -p "$OUTPUT_DIR"
@@ -152,17 +210,20 @@ done
 echo "Validity period: $DAYS days"
 echo "Output directory: $OUTPUT_DIR"
 
-# Generate CA private key
-echo "Generating CA private key..."
+# Generate a CA unless existing CA files were explicitly provided.
+if [[ "$REUSE_CA" == false ]]; then
+    CA_KEY="$OUTPUT_DIR/ca-privkey.pem"
+    CA_CERT="$OUTPUT_DIR/ca-fullchain.pem"
 
-openssl genrsa \
-    -out "$OUTPUT_DIR/ca-privkey.pem" \
-    2048
+    echo "Generating CA private key..."
 
-# Generate CA certificate configuration
-echo "Generating CA certificate..."
+    openssl genrsa \
+        -out "$CA_KEY" \
+        2048
 
-cat > "$OUTPUT_DIR/ca.conf" <<EOF
+    echo "Generating CA certificate..."
+
+    cat > "$OUTPUT_DIR/ca.conf" <<EOF
 [req]
 default_bits = 2048
 prompt = no
@@ -184,15 +245,19 @@ basicConstraints = critical,CA:true
 keyUsage = critical,digitalSignature,keyCertSign,cRLSign
 EOF
 
-openssl req \
-    -new \
-    -x509 \
-    -sha256 \
-    -key "$OUTPUT_DIR/ca-privkey.pem" \
-    -config "$OUTPUT_DIR/ca.conf" \
-    -extensions v3_ca \
-    -days "$DAYS" \
-    -out "$OUTPUT_DIR/ca-fullchain.pem"
+    openssl req \
+        -new \
+        -x509 \
+        -sha256 \
+        -key "$CA_KEY" \
+        -config "$OUTPUT_DIR/ca.conf" \
+        -extensions v3_ca \
+        -days "$DAYS" \
+        -out "$CA_CERT"
+else
+    echo "Reusing CA private key: $CA_KEY"
+    echo "Reusing CA certificate: $CA_CERT"
+fi
 
 # Generate server private key
 echo "Generating server private key..."
@@ -251,8 +316,8 @@ default_ca = CA_default
 dir = $OUTPUT_DIR
 database = \$dir/index.txt
 serial = \$dir/serial
-private_key = $OUTPUT_DIR/ca-privkey.pem
-certificate = $OUTPUT_DIR/ca-fullchain.pem
+private_key = $CA_KEY
+certificate = $CA_CERT
 new_certs_dir = \$dir
 default_days = $DAYS
 default_md = sha256
@@ -301,17 +366,18 @@ openssl x509 \
 # Build the full certificate chain
 cat \
     "$OUTPUT_DIR/server-clean.crt" \
-    "$OUTPUT_DIR/ca-fullchain.pem" \
+    "$CA_CERT" \
     > "$OUTPUT_DIR/fullchain.pem"
 
 # Set reasonable permissions
-chmod 600 \
-    "$OUTPUT_DIR/privkey.pem" \
-    "$OUTPUT_DIR/ca-privkey.pem"
+chmod 600 "$OUTPUT_DIR/privkey.pem"
 
-chmod 644 \
-    "$OUTPUT_DIR/fullchain.pem" \
-    "$OUTPUT_DIR/ca-fullchain.pem"
+chmod 644 "$OUTPUT_DIR/fullchain.pem"
+
+if [[ "$REUSE_CA" == false ]]; then
+    chmod 600 "$CA_KEY"
+    chmod 644 "$CA_CERT"
+fi
 
 echo ""
 echo "=========================================="
@@ -320,8 +386,15 @@ echo "=========================================="
 echo "Files created:"
 echo "  Server private key:     $OUTPUT_DIR/privkey.pem"
 echo "  Full certificate chain: $OUTPUT_DIR/fullchain.pem"
-echo "  CA private key:         $OUTPUT_DIR/ca-privkey.pem"
-echo "  CA certificate:         $OUTPUT_DIR/ca-fullchain.pem"
+
+if [[ "$REUSE_CA" == true ]]; then
+    echo "CA files reused:"
+else
+    echo "CA files created:"
+fi
+
+echo "  CA private key:         $CA_KEY"
+echo "  CA certificate:         $CA_CERT"
 echo ""
 echo "Certificate subject:"
 
