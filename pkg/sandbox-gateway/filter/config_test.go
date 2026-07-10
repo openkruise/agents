@@ -148,6 +148,57 @@ func TestDefaultConfig(t *testing.T) {
 	}
 }
 
+func TestGetDefaultPort(t *testing.T) {
+	tests := []struct {
+		name        string
+		defaultPort string
+		want        int
+	}{
+		{
+			name:        "valid port",
+			defaultPort: "8080",
+			want:        8080,
+		},
+		{
+			name:        "empty port falls back to default",
+			defaultPort: "",
+			want:        49983,
+		},
+		{
+			name:        "invalid port falls back to default",
+			defaultPort: "invalid",
+			want:        49983,
+		},
+		{
+			name:        "zero port falls back to default",
+			defaultPort: "0",
+			want:        49983,
+		},
+		{
+			name:        "negative port falls back to default",
+			defaultPort: "-1",
+			want:        49983,
+		},
+		{
+			name:        "above max port falls back to default",
+			defaultPort: "70000",
+			want:        49983,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{
+				DefaultPort: tt.defaultPort,
+			}
+			got := cfg.GetDefaultPort()
+			if got != tt.want {
+				t.Errorf("GetDefaultPort() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestConfigParserParse(t *testing.T) {
 	parser := &ConfigParser{}
 
