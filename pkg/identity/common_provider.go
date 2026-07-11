@@ -36,7 +36,7 @@ func NewDefaultIdentityProvider() IdentityProvider {
 	return &defaultTokenProvider{}
 }
 
-func (u *defaultTokenProvider) IssueToken(_ context.Context, _ *agentsv1alpha1.Sandbox, _ *agentsv1alpha1.SandboxClaim, _ TokenRequest) (*TokenResponse, error) {
+func (u *defaultTokenProvider) IssueToken(_ context.Context, _ *agentsv1alpha1.Sandbox, _ *agentsv1alpha1.SandboxClaim) (*TokenResponse, error) {
 	return &TokenResponse{
 		RequestID:             uuid.NewString(),
 		AccessToken:           uuid.NewString(),
