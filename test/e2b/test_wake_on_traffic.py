@@ -10,8 +10,9 @@ from e2b_code_interpreter import Sandbox, SandboxState
 
 GATEWAY_URL = "http://localhost:80"
 # Health-check path routed to manager_cluster by Envoy (prefix: /kruise/api).
+# GET /health is the manager's dedicated health endpoint (returns 200 OK).
 # A 200 here confirms the port-forward and Envoy are both alive.
-_HEALTH_PATH = "/kruise/api/sandboxes"
+_HEALTH_PATH = "/kruise/api/health"
 
 # Annotation keys used by the wake-on-traffic feature.
 _ANN_WAKE_ON_TRAFFIC = "agents.kruise.io/wake-on-traffic"
