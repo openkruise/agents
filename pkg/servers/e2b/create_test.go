@@ -846,60 +846,6 @@ func TestParseCreateSandboxRequest(t *testing.T) {
 		require.Len(t, got.VolumeMounts, 1)
 		assert.Equal(t, "volume-pv", got.VolumeMounts[0].Name)
 	})
-	t.Run("autoResume with autoPause succeeds", func(t *testing.T) {
-		raw, err := json.Marshal(models.NewSandboxRequest{
-			TemplateID: "t1",
-			Timeout:    300,
-			AutoPause:  true,
-			AutoResume: models.AutoResumeConfig{Enabled: true},
-		})
-		require.NoError(t, err)
-		req := httptest.NewRequest(http.MethodPost, "/sandboxes", bytes.NewReader(raw))
-
-		got, apiErr := ctrl.parseCreateSandboxRequest(req)
-		require.Nil(t, apiErr)
-		assert.True(t, got.AutoResume.Enabled)
-		assert.True(t, got.Extensions.AutoResume, "Extensions.AutoResume should be propagated")
-	})
-
-	t.Run("autoResume without autoPause returns 400", func(t *testing.T) {
-		raw, err := json.Marshal(models.NewSandboxRequest{
-			TemplateID: "t1",
-			Timeout:    300,
-			AutoResume: models.AutoResumeConfig{Enabled: true},
-		})
-		require.NoError(t, err)
-		req := httptest.NewRequest(http.MethodPost, "/sandboxes", bytes.NewReader(raw))
-
-		_, apiErr := ctrl.parseCreateSandboxRequest(req)
-		require.NotNil(t, apiErr)
-		assert.Equal(t, http.StatusBadRequest, apiErr.Code)
-		assert.Contains(t, apiErr.Message, "autoResume requires autoPause")
-	})
-
-	t.Run("autoResume false is always valid", func(t *testing.T) {
-		raw, err := json.Marshal(models.NewSandboxRequest{
-			TemplateID: "t1",
-			Timeout:    300,
-			AutoResume: models.AutoResumeConfig{Enabled: false},
-		})
-		require.NoError(t, err)
-		req := httptest.NewRequest(http.MethodPost, "/sandboxes", bytes.NewReader(raw))
-
-		_, apiErr := ctrl.parseCreateSandboxRequest(req)
-		require.Nil(t, apiErr)
-	})
-
-	t.Run("autoResume SDK object format decodes correctly", func(t *testing.T) {
-		// The E2B SDK sends autoResume as {"enabled": true}, not a plain bool.
-		body := `{"templateID":"t1","timeout":300,"autoPause":true,"autoResume":{"enabled":true}}`
-		req := httptest.NewRequest(http.MethodPost, "/sandboxes", strings.NewReader(body))
-
-		got, apiErr := ctrl.parseCreateSandboxRequest(req)
-		require.Nil(t, apiErr)
-		assert.True(t, got.AutoResume.Enabled)
-		assert.True(t, got.Extensions.AutoResume)
-	})
 }
 
 func TestBasicSandboxCreateModifier(t *testing.T) {
@@ -913,34 +859,6 @@ func TestBasicSandboxCreateModifier(t *testing.T) {
 		expectNoAnnotations []string
 		expectLabels        map[string]string
 	}{
-		{
-			name: "autoResume sets wake annotations",
-			request: models.NewSandboxRequest{
-				TemplateID: "t1",
-				Timeout:    300,
-				AutoPause:  true,
-				AutoResume: models.AutoResumeConfig{Enabled: true},
-			},
-			maxTimeout: 3600,
-			expectAnnotations: map[string]string{
-				agentsv1alpha1.AnnotationWakeOnTraffic:      agentsv1alpha1.True,
-				agentsv1alpha1.AnnotationWakeTimeoutSeconds: "300",
-			},
-		},
-		{
-			name: "autoResume false does not set wake annotations",
-			request: models.NewSandboxRequest{
-				TemplateID: "t1",
-				Timeout:    300,
-				AutoPause:  true,
-				AutoResume: models.AutoResumeConfig{Enabled: false},
-			},
-			maxTimeout: 3600,
-			expectNoAnnotations: []string{
-				agentsv1alpha1.AnnotationWakeOnTraffic,
-				agentsv1alpha1.AnnotationWakeTimeoutSeconds,
-			},
-		},
 		{
 			name: "metadata propagated to annotations",
 			request: models.NewSandboxRequest{
@@ -974,22 +892,6 @@ func TestBasicSandboxCreateModifier(t *testing.T) {
 			},
 			maxTimeout:     3600,
 			expectLabels:   map[string]string{"env": "test"},
-		},
-		{
-			name: "wake annotations coexist with metadata",
-			request: models.NewSandboxRequest{
-				TemplateID: "t1",
-				Timeout:    600,
-				AutoPause:  true,
-				AutoResume: models.AutoResumeConfig{Enabled: true},
-				Metadata:   map[string]string{"app": "myapp"},
-			},
-			maxTimeout: 3600,
-			expectAnnotations: map[string]string{
-				agentsv1alpha1.AnnotationWakeOnTraffic:      agentsv1alpha1.True,
-				agentsv1alpha1.AnnotationWakeTimeoutSeconds: "600",
-				"app": "myapp",
-			},
 		},
 	}
 

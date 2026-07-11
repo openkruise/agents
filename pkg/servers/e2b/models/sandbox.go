@@ -48,18 +48,11 @@ type Sandbox struct {
 	State           string            `json:"state"`
 }
 
-// AutoResumeConfig is the auto-resume configuration for paused sandboxes.
-// The E2B SDK sends this as a JSON object: {"enabled": true}.
-type AutoResumeConfig struct {
-	Enabled bool `json:"enabled"`
-}
-
 // NewSandboxRequest represents a request to create a new sandbox
 type NewSandboxRequest struct {
 	TemplateID   string            `json:"templateID"`
 	Timeout      int               `json:"timeout,omitempty"`
 	AutoPause    bool              `json:"autoPause,omitempty"`
-	AutoResume   AutoResumeConfig  `json:"autoResume,omitempty"`
 	Metadata     map[string]string `json:"metadata,omitempty"`
 	EnvVars      EnvVars           `json:"envVars,omitempty"`
 	VolumeMounts []VolumeMount     `json:"volumeMounts,omitempty"`
@@ -87,7 +80,6 @@ type NewSandboxRequestExtension struct {
 	Labels                       map[string]string
 	Name                         string
 	GenerateName                 string
-	AutoResume                   bool
 }
 
 type InplaceUpdateExtension struct {
@@ -111,8 +103,7 @@ type SandboxMetadata map[string]string
 type EnvVars map[string]string
 
 type SetTimeoutRequest struct {
-	TimeoutSeconds int  `json:"timeout"`
-	AutoResume     bool `json:"autoResume,omitempty"`
+	TimeoutSeconds int `json:"timeout"`
 }
 
 type NewSnapshotRequest struct {

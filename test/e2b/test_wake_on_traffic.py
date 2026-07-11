@@ -50,6 +50,22 @@ def _get_sandbox_annotations(sandbox_id: str) -> dict:
     return cr.get("metadata", {}).get("annotations", {})
 
 
+def _set_wake_annotations(sandbox_id: str, timeout_seconds: int):
+    """Set wake-on-traffic annotations on the Sandbox CR via kubectl."""
+    name = sandbox_id.split("--")[1] if "--" in sandbox_id else sandbox_id
+    subprocess.run(
+        [
+            "kubectl", "annotate", "sandbox", name,
+            "--overwrite",
+            f"{_ANN_WAKE_ON_TRAFFIC}=true",
+            f"{_ANN_WAKE_TIMEOUT_SECONDS}={timeout_seconds}",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+
 def _request_gateway_until_forwarded(headers: dict, timeout_sec: int = 120) -> requests.Response:
     """Send requests to the gateway until we get a non-502/503 response.
 
@@ -80,15 +96,15 @@ def _request_gateway_until_forwarded(headers: dict, timeout_sec: int = 120) -> r
 @pytest.mark.skipif(_SDK_LACKS_AUTO_PAUSE, reason="SDK lacks lifecycle on_timeout pause")
 def test_wake_on_traffic(sandbox_context):
     """Traffic to a paused sandbox with wake-on-traffic should resume it."""
-    # Step 1: Create sandbox with auto-pause and auto-resume (wake-on-traffic).
-    # lifecycle.auto_resume=True makes the server set the wake-on-traffic
-    # annotation at creation time, so no post-create kubectl annotate is needed.
+    # Step 1: Create sandbox with auto-pause enabled.
+    # Wake-on-traffic annotations are set via kubectl after creation
+    # (the API no longer accepts an autoResume parameter).
     # Use a longer timeout (120s) to give enough time for the auto-pause wait
     # and the wake test to complete before ShutdownTime triggers deletion.
     sbx: Sandbox = sandbox_context.add(Sandbox.create(
         template="code-interpreter",
         timeout=120,
-        lifecycle={"on_timeout": "pause", "auto_resume": True},
+        lifecycle={"on_timeout": "pause"},
         metadata={"test_case": "test_wake_on_traffic"},
         headers={"x-request-id": sandbox_context.request_id},
     ))
@@ -96,7 +112,8 @@ def test_wake_on_traffic(sandbox_context):
     print(f"sandbox-id: {sandbox_id}")
     assert sbx.get_info().state == SandboxState.RUNNING
 
-    # Step 2: Verify wake-on-traffic annotation was set on the CR at creation.
+    # Step 2: Set wake-on-traffic annotations on the CR via kubectl.
+    _set_wake_annotations(sandbox_id, timeout_seconds=120)
     annotations = _get_sandbox_annotations(sandbox_id)
     assert annotations.get(_ANN_WAKE_ON_TRAFFIC) == "true", (
         f"expected wake-on-traffic=true annotation, got: {annotations}"
@@ -129,7 +146,7 @@ def test_wake_on_traffic(sandbox_context):
     )
 
     # Step 5: Send traffic through the gateway (triggers wake).
-    # The wake-on-traffic annotation was set at creation time, so the
+    # The wake-on-traffic annotation was set via kubectl, so the
     # gateway registry already has WakeOnTraffic=true.
     #
     # The access token is required by the agent-runtime sidecar inside
