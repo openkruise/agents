@@ -34,7 +34,6 @@ import (
 // TokenResponse / error. Only the IssueToken path is exercised by
 // IssueSandboxToken; PropagateSecurityToken is implemented as a no-op.
 type fakeIdentityProvider struct {
-	gotReq   TokenRequest
 	gotSbx   *agentsv1alpha1.Sandbox
 	gotClaim *agentsv1alpha1.SandboxClaim
 	called   int
@@ -43,8 +42,7 @@ type fakeIdentityProvider struct {
 	err  error
 }
 
-func (f *fakeIdentityProvider) IssueToken(_ context.Context, sbx *agentsv1alpha1.Sandbox, claim *agentsv1alpha1.SandboxClaim, req TokenRequest) (*TokenResponse, error) {
-	f.gotReq = req
+func (f *fakeIdentityProvider) IssueToken(_ context.Context, sbx *agentsv1alpha1.Sandbox, claim *agentsv1alpha1.SandboxClaim) (*TokenResponse, error) {
 	f.gotSbx = sbx
 	f.gotClaim = claim
 	f.called++
@@ -65,9 +63,9 @@ func withFakeProvider(t *testing.T, fake *fakeIdentityProvider) {
 }
 
 // TestIssueSandboxToken_Success exercises the happy path: the helper must
-// project the sandbox identity into the TokenRequest.Sandbox field and return
-// the provider's response unchanged together with a non-negative cost and a
-// nil error. Metadata extraction is left to the provider.
+// forward the sandbox and claim to the provider unchanged and return the
+// provider's response together with a non-negative cost and a nil error.
+// Building the TokenRequest is left entirely to the provider.
 func TestIssueSandboxToken_Success(t *testing.T) {
 	wantResp := &TokenResponse{
 		RequestID:             "req-1",
@@ -83,12 +81,6 @@ func TestIssueSandboxToken_Success(t *testing.T) {
 			Name:      "sbx-a",
 			Namespace: "ns-a",
 			UID:       types.UID("uid-a"),
-			Labels: map[string]string{
-				SecurityMetadataPrefix + "tenant":  "t1",
-				SecurityMetadataPrefix + "project": "p1",
-				"app":                              "demo",        // non-security label, must be filtered out
-				"kubernetes.io/managed-by":         "sandbox-mgr", // non-security label, must be filtered out
-			},
 		},
 	}
 
@@ -98,21 +90,7 @@ func TestIssueSandboxToken_Success(t *testing.T) {
 	assert.Same(t, wantResp, gotResp, "response must be returned as-is from the provider")
 	assert.GreaterOrEqual(t, int64(cost), int64(0), "cost should be non-negative")
 	assert.Equal(t, 1, fake.called, "underlying provider must be called exactly once")
-
-	// Verify the TokenRequest projection.
-	gotReq := fake.gotReq
-	assert.Equal(t, TokenTypeAgent, gotReq.TokenType, "TokenType must be Agent for sandbox issuance")
-	require.NotNil(t, gotReq.Sandbox)
-	assert.Equal(t, "sbx-a", gotReq.Sandbox.PodName)
-	assert.Equal(t, "ns-a", gotReq.Sandbox.PodNamespace)
-	assert.Equal(t, "ns-a/sbx-a/uid-a", gotReq.Sandbox.SandboxID,
-		"SandboxID must follow the canonical namespace/name/uid layout")
-	assert.Equal(t, "sbx-a", gotReq.Sandbox.SandboxName)
-	assert.Equal(t, "uid-a", gotReq.Sandbox.SandboxUID)
-
-	// Metadata is intentionally left empty by the helper; providers decide what
-	// to include by reading sbx/claim directly or calling ExtractSecurityMetadata.
-	assert.Nil(t, gotReq.Metadata, "helper must not pre-populate Metadata")
+	assert.Same(t, sbx, fake.gotSbx, "sandbox pointer must be forwarded unchanged to the provider")
 }
 
 // TestExtractSecurityMetadata verifies the prefix filter used to collect
@@ -295,7 +273,7 @@ type annotationReadingProvider struct {
 	gotValue       string
 }
 
-func (p *annotationReadingProvider) IssueToken(_ context.Context, sbx *agentsv1alpha1.Sandbox, _ *agentsv1alpha1.SandboxClaim, _ TokenRequest) (*TokenResponse, error) {
+func (p *annotationReadingProvider) IssueToken(_ context.Context, sbx *agentsv1alpha1.Sandbox, _ *agentsv1alpha1.SandboxClaim) (*TokenResponse, error) {
 	p.gotValue = sbx.GetAnnotations()[p.storageAuthKey]
 	return &TokenResponse{AccessToken: "tok"}, nil
 }
@@ -406,7 +384,7 @@ type propagatingFakeProvider struct {
 	err error
 }
 
-func (p *propagatingFakeProvider) IssueToken(_ context.Context, _ *agentsv1alpha1.Sandbox, _ *agentsv1alpha1.SandboxClaim, _ TokenRequest) (*TokenResponse, error) {
+func (p *propagatingFakeProvider) IssueToken(_ context.Context, _ *agentsv1alpha1.Sandbox, _ *agentsv1alpha1.SandboxClaim) (*TokenResponse, error) {
 	p.issueCalls++
 	return nil, nil
 }

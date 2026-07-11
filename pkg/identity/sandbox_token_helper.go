@@ -82,11 +82,12 @@ func ExtractSecurityMetadataFromMap(in map[string]string) map[string]string {
 // IssueSandboxToken issues a security token for the given sandbox using the
 // registered identity provider.
 //
-// It builds a TokenRequest of type TokenTypeAgent, forwarding the sandbox and
-// claim objects verbatim to the provider. Metadata extraction is intentionally
-// left to the provider: implementations that need security metadata can call
-// ExtractSecurityMetadata(sbx), and those that need storage-auth or other
-// annotations can read them directly from sbx.GetAnnotations().
+// It forwards the sandbox and claim objects verbatim to the provider. The
+// provider owns the composition of the concrete wire request (SandboxInfo
+// projection, security metadata, token type): it derives everything it needs
+// directly from the sandbox object. The community baseline therefore carries no
+// request-shaping policy here, and enterprise providers assemble exactly the
+// atomic request their backend expects.
 //
 // The claim parameter may be nil for non-CRD issuance paths (e.g. token refresh
 // or the E2B API). IdentityProvider implementations must handle a nil claim
@@ -100,16 +101,7 @@ func IssueSandboxToken(ctx context.Context, sbx *agentsv1alpha1.Sandbox, claim *
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx), "action", "IssueSandboxToken")
 	start := time.Now()
 
-	tokenResp, err := IssueToken(ctx, sbx, claim, TokenRequest{
-		TokenType: TokenTypeAgent,
-		Sandbox: &SandboxInfo{
-			PodName:      sbx.Name,
-			PodNamespace: sbx.Namespace,
-			SandboxID:    fmt.Sprintf("%s/%s/%s", sbx.Namespace, sbx.Name, sbx.UID),
-			SandboxName:  sbx.Name,
-			SandboxUID:   string(sbx.UID),
-		},
-	})
+	tokenResp, err := IssueToken(ctx, sbx, claim)
 	cost := time.Since(start)
 	if err != nil {
 		log.Error(err, "failed to issue sandbox security token", "cost", cost)
