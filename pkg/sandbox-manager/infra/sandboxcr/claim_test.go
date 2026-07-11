@@ -2367,19 +2367,15 @@ func TestModifyPickedSandbox_CSIMount(t *testing.T) {
 func TestRecordSecurityTokenRefreshStatus(t *testing.T) {
 	tests := []struct {
 		name             string
-		opts             infra.ClaimSandboxOptions
+		securityToken    *identity.TokenResponse
 		expectedAnnos    map[string]string
 		notExpectedAnnos []string
 	}{
 		{
 			name: "with security token and expiration",
-			opts: infra.ClaimSandboxOptions{
-				SecurityToken: &infra.SecurityTokenOptions{
-					TokenResponse: identity.TokenResponse{
-						AccessToken:           "security-access-token",
-						AccessTokenExpiration: "2026-12-31T23:59:59Z",
-					},
-				},
+			securityToken: &identity.TokenResponse{
+				AccessToken:           "security-access-token",
+				AccessTokenExpiration: "2026-12-31T23:59:59Z",
 			},
 			expectedAnnos: map[string]string{
 				identity.AgentKeyTokenRefreshStatus: `{"accessTokenExpiration":"2026-12-31T23:59:59Z"}`,
@@ -2387,12 +2383,8 @@ func TestRecordSecurityTokenRefreshStatus(t *testing.T) {
 		},
 		{
 			name: "with security token without expiration",
-			opts: infra.ClaimSandboxOptions{
-				SecurityToken: &infra.SecurityTokenOptions{
-					TokenResponse: identity.TokenResponse{
-						AccessToken: "at-456",
-					},
-				},
+			securityToken: &identity.TokenResponse{
+				AccessToken: "at-456",
 			},
 			expectedAnnos: map[string]string{
 				// AccessTokenExpiration is omitempty, so empty value produces "{}"
@@ -2400,10 +2392,8 @@ func TestRecordSecurityTokenRefreshStatus(t *testing.T) {
 			},
 		},
 		{
-			name: "without security token",
-			opts: infra.ClaimSandboxOptions{
-				SecurityToken: nil,
-			},
+			name:          "without security token",
+			securityToken: nil,
 			notExpectedAnnos: []string{
 				identity.AgentKeyTokenRefreshStatus,
 			},
@@ -2428,7 +2418,7 @@ func TestRecordSecurityTokenRefreshStatus(t *testing.T) {
 
 			fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(sbx.Sandbox.DeepCopy()).Build()
 
-			err := recordSecurityTokenRefreshStatus(t.Context(), fakeClient, sbx, tt.opts)
+			err := recordSecurityTokenRefreshStatus(t.Context(), fakeClient, sbx, tt.securityToken)
 			require.NoError(t, err)
 
 			annotations := sbx.GetAnnotations()
@@ -2469,19 +2459,15 @@ func TestRecordSecurityTokenRefreshStatus_NilAnnotations(t *testing.T) {
 	tests := []struct {
 		name          string
 		initialAnnos  map[string]string
-		opts          infra.ClaimSandboxOptions
+		securityToken *identity.TokenResponse
 		expectedValue string
 	}{
 		{
 			name:         "nil annotations map is created",
 			initialAnnos: nil,
-			opts: infra.ClaimSandboxOptions{
-				SecurityToken: &infra.SecurityTokenOptions{
-					TokenResponse: identity.TokenResponse{
-						AccessToken:           "token-1",
-						AccessTokenExpiration: "2026-06-01T00:00:00Z",
-					},
-				},
+			securityToken: &identity.TokenResponse{
+				AccessToken:           "token-1",
+				AccessTokenExpiration: "2026-06-01T00:00:00Z",
 			},
 			expectedValue: `{"accessTokenExpiration":"2026-06-01T00:00:00Z"}`,
 		},
@@ -2490,22 +2476,16 @@ func TestRecordSecurityTokenRefreshStatus_NilAnnotations(t *testing.T) {
 			initialAnnos: map[string]string{
 				"existing-key": "existing-value",
 			},
-			opts: infra.ClaimSandboxOptions{
-				SecurityToken: &infra.SecurityTokenOptions{
-					TokenResponse: identity.TokenResponse{
-						AccessToken:           "token-2",
-						AccessTokenExpiration: "2026-07-01T00:00:00Z",
-					},
-				},
+			securityToken: &identity.TokenResponse{
+				AccessToken:           "token-2",
+				AccessTokenExpiration: "2026-07-01T00:00:00Z",
 			},
 			expectedValue: `{"accessTokenExpiration":"2026-07-01T00:00:00Z"}`,
 		},
 		{
-			name:         "nil security token is no-op with nil annotations",
-			initialAnnos: nil,
-			opts: infra.ClaimSandboxOptions{
-				SecurityToken: nil,
-			},
+			name:          "nil security token is no-op with nil annotations",
+			initialAnnos:  nil,
+			securityToken: nil,
 			expectedValue: "",
 		},
 	}
@@ -2528,7 +2508,7 @@ func TestRecordSecurityTokenRefreshStatus_NilAnnotations(t *testing.T) {
 
 			fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(sbx.Sandbox.DeepCopy()).Build()
 
-			err := recordSecurityTokenRefreshStatus(t.Context(), fakeClient, sbx, tt.opts)
+			err := recordSecurityTokenRefreshStatus(t.Context(), fakeClient, sbx, tt.securityToken)
 			require.NoError(t, err)
 
 			annotations := sbx.GetAnnotations()
@@ -2623,16 +2603,12 @@ func TestRecordSecurityTokenRefreshStatus_PatchErrors(t *testing.T) {
 			}
 			fakeClient := builder.Build()
 
-			opts := infra.ClaimSandboxOptions{
-				SecurityToken: &infra.SecurityTokenOptions{
-					TokenResponse: identity.TokenResponse{
-						AccessToken:           "at-err",
-						AccessTokenExpiration: "2027-01-01T00:00:00Z",
-					},
-				},
+			securityToken := &identity.TokenResponse{
+				AccessToken:           "at-err",
+				AccessTokenExpiration: "2027-01-01T00:00:00Z",
 			}
 
-			err := recordSecurityTokenRefreshStatus(t.Context(), fakeClient, sbx, opts)
+			err := recordSecurityTokenRefreshStatus(t.Context(), fakeClient, sbx, securityToken)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.expectErrSubstring)
 
@@ -2675,16 +2651,12 @@ func TestRecordSecurityTokenRefreshStatus_Overwrite(t *testing.T) {
 	originalSbxRef := sbx.Sandbox
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(sbx.Sandbox.DeepCopy()).Build()
 
-	opts := infra.ClaimSandboxOptions{
-		SecurityToken: &infra.SecurityTokenOptions{
-			TokenResponse: identity.TokenResponse{
-				AccessToken:           "at-new",
-				AccessTokenExpiration: "2027-06-01T00:00:00Z",
-			},
-		},
+	securityToken := &identity.TokenResponse{
+		AccessToken:           "at-new",
+		AccessTokenExpiration: "2027-06-01T00:00:00Z",
 	}
 
-	err := recordSecurityTokenRefreshStatus(t.Context(), fakeClient, sbx, opts)
+	err := recordSecurityTokenRefreshStatus(t.Context(), fakeClient, sbx, securityToken)
 	require.NoError(t, err)
 
 	// Annotation is overwritten with the newly issued status.
@@ -4464,13 +4436,13 @@ func TestNewSandboxFromSandboxSet_TemplateRef(t *testing.T) {
 
 // mockIdentityProvider is a configurable mock for testing TryClaimSandbox security token flows.
 type mockIdentityProvider struct {
-	issueTokenFunc func(ctx context.Context, sbx *v1alpha1.Sandbox, claim *v1alpha1.SandboxClaim) (*identity.TokenResponse, error)
+	issueTokenFunc func(ctx context.Context, sbx *v1alpha1.Sandbox) (*identity.TokenResponse, error)
 	propagateFunc  func(ctx context.Context, sbx *v1alpha1.Sandbox, tokenResp *identity.TokenResponse) error
 }
 
-func (m *mockIdentityProvider) IssueToken(ctx context.Context, sbx *v1alpha1.Sandbox, claim *v1alpha1.SandboxClaim) (*identity.TokenResponse, error) {
+func (m *mockIdentityProvider) IssueToken(ctx context.Context, sbx *v1alpha1.Sandbox) (*identity.TokenResponse, error) {
 	if m.issueTokenFunc != nil {
-		return m.issueTokenFunc(ctx, sbx, claim)
+		return m.issueTokenFunc(ctx, sbx)
 	}
 	return &identity.TokenResponse{AccessToken: uuid.NewString()}, nil
 }
@@ -4511,12 +4483,9 @@ func TestTryClaimSandbox_SecurityToken(t *testing.T) {
 				InitRuntime: &config.InitRuntimeOptions{
 					AccessToken: "original-uuid-token",
 				},
-				SecurityToken: &infra.SecurityTokenOptions{
-					TokenResponse: identity.TokenResponse{AccessToken: "placeholder"},
-				},
 			},
 			mockProvider: &mockIdentityProvider{
-				issueTokenFunc: func(ctx context.Context, sbx *v1alpha1.Sandbox, claim *v1alpha1.SandboxClaim) (*identity.TokenResponse, error) {
+				issueTokenFunc: func(ctx context.Context, sbx *v1alpha1.Sandbox) (*identity.TokenResponse, error) {
 					return &identity.TokenResponse{AccessToken: "secure-token-123"}, nil
 				},
 				propagateFunc: func(ctx context.Context, sbx *v1alpha1.Sandbox, tokenResp *identity.TokenResponse) error {
@@ -4544,12 +4513,9 @@ func TestTryClaimSandbox_SecurityToken(t *testing.T) {
 				InitRuntime: &config.InitRuntimeOptions{
 					AccessToken: "original-uuid-token",
 				},
-				SecurityToken: &infra.SecurityTokenOptions{
-					TokenResponse: identity.TokenResponse{AccessToken: "placeholder"},
-				},
 			},
 			mockProvider: &mockIdentityProvider{
-				issueTokenFunc: func(ctx context.Context, sbx *v1alpha1.Sandbox, claim *v1alpha1.SandboxClaim) (*identity.TokenResponse, error) {
+				issueTokenFunc: func(ctx context.Context, sbx *v1alpha1.Sandbox) (*identity.TokenResponse, error) {
 					return nil, fmt.Errorf("identity provider unavailable")
 				},
 				propagateFunc: func(ctx context.Context, sbx *v1alpha1.Sandbox, tokenResp *identity.TokenResponse) error {
@@ -4557,7 +4523,7 @@ func TestTryClaimSandbox_SecurityToken(t *testing.T) {
 					return nil
 				},
 			},
-			expectError: "security token issuance failed",
+			expectError: "failed to issue security token",
 		},
 		{
 			name: "propagate security token failure returns retriable error",
@@ -4567,19 +4533,16 @@ func TestTryClaimSandbox_SecurityToken(t *testing.T) {
 				InitRuntime: &config.InitRuntimeOptions{
 					AccessToken: "original-uuid-token",
 				},
-				SecurityToken: &infra.SecurityTokenOptions{
-					TokenResponse: identity.TokenResponse{AccessToken: "placeholder"},
-				},
 			},
 			mockProvider: &mockIdentityProvider{
-				issueTokenFunc: func(ctx context.Context, sbx *v1alpha1.Sandbox, claim *v1alpha1.SandboxClaim) (*identity.TokenResponse, error) {
+				issueTokenFunc: func(ctx context.Context, sbx *v1alpha1.Sandbox) (*identity.TokenResponse, error) {
 					return &identity.TokenResponse{AccessToken: "secure-token-456"}, nil
 				},
 				propagateFunc: func(ctx context.Context, sbx *v1alpha1.Sandbox, tokenResp *identity.TokenResponse) error {
 					return fmt.Errorf("propagation failed")
 				},
 			},
-			expectError: "security token propagation failed",
+			expectError: "propagation failed",
 		},
 		{
 			name: "security token is issued even when access token is not UUID",
@@ -4591,7 +4554,7 @@ func TestTryClaimSandbox_SecurityToken(t *testing.T) {
 				},
 			},
 			mockProvider: &mockIdentityProvider{
-				issueTokenFunc: func(ctx context.Context, sbx *v1alpha1.Sandbox, claim *v1alpha1.SandboxClaim) (*identity.TokenResponse, error) {
+				issueTokenFunc: func(ctx context.Context, sbx *v1alpha1.Sandbox) (*identity.TokenResponse, error) {
 					return &identity.TokenResponse{AccessToken: "issued-token"}, nil
 				},
 			},
@@ -4610,7 +4573,7 @@ func TestTryClaimSandbox_SecurityToken(t *testing.T) {
 				Template: existTemplate,
 			},
 			mockProvider: &mockIdentityProvider{
-				issueTokenFunc: func(ctx context.Context, sbx *v1alpha1.Sandbox, claim *v1alpha1.SandboxClaim) (*identity.TokenResponse, error) {
+				issueTokenFunc: func(ctx context.Context, sbx *v1alpha1.Sandbox) (*identity.TokenResponse, error) {
 					return &identity.TokenResponse{AccessToken: "issued-token"}, nil
 				},
 			},
@@ -4643,7 +4606,7 @@ func TestTryClaimSandbox_SecurityToken(t *testing.T) {
 				delete(sbx.Annotations, identity.AnnotationAgentName)
 			},
 			mockProvider: &mockIdentityProvider{
-				issueTokenFunc: func(ctx context.Context, sbx *v1alpha1.Sandbox, claim *v1alpha1.SandboxClaim) (*identity.TokenResponse, error) {
+				issueTokenFunc: func(ctx context.Context, sbx *v1alpha1.Sandbox) (*identity.TokenResponse, error) {
 					t.Fatalf("IssueToken must not be called when agent-name annotation is absent")
 					return nil, nil
 				},

@@ -34,17 +34,15 @@ import (
 // TokenResponse / error. Only the IssueToken path is exercised by
 // IssueSandboxToken; PropagateSecurityToken is implemented as a no-op.
 type fakeIdentityProvider struct {
-	gotSbx   *agentsv1alpha1.Sandbox
-	gotClaim *agentsv1alpha1.SandboxClaim
-	called   int
+	gotSbx *agentsv1alpha1.Sandbox
+	called int
 
 	resp *TokenResponse
 	err  error
 }
 
-func (f *fakeIdentityProvider) IssueToken(_ context.Context, sbx *agentsv1alpha1.Sandbox, claim *agentsv1alpha1.SandboxClaim) (*TokenResponse, error) {
+func (f *fakeIdentityProvider) IssueToken(_ context.Context, sbx *agentsv1alpha1.Sandbox) (*TokenResponse, error) {
 	f.gotSbx = sbx
-	f.gotClaim = claim
 	f.called++
 	return f.resp, f.err
 }
@@ -63,9 +61,9 @@ func withFakeProvider(t *testing.T, fake *fakeIdentityProvider) {
 }
 
 // TestIssueSandboxToken_Success exercises the happy path: the helper must
-// forward the sandbox and claim to the provider unchanged and return the
-// provider's response together with a non-negative cost and a nil error.
-// Building the TokenRequest is left entirely to the provider.
+// forward the sandbox to the provider unchanged and return the provider's
+// response together with a nil error. Building the TokenRequest is left
+// entirely to the provider.
 func TestIssueSandboxToken_Success(t *testing.T) {
 	wantResp := &TokenResponse{
 		RequestID:             "req-1",
@@ -84,11 +82,10 @@ func TestIssueSandboxToken_Success(t *testing.T) {
 		},
 	}
 
-	gotResp, cost, err := IssueSandboxToken(context.Background(), sbx, nil)
+	gotResp, err := IssueSandboxToken(context.Background(), sbx)
 	require.NoError(t, err)
 	require.NotNil(t, gotResp)
 	assert.Same(t, wantResp, gotResp, "response must be returned as-is from the provider")
-	assert.GreaterOrEqual(t, int64(cost), int64(0), "cost should be non-negative")
 	assert.Equal(t, 1, fake.called, "underlying provider must be called exactly once")
 	assert.Same(t, sbx, fake.gotSbx, "sandbox pointer must be forwarded unchanged to the provider")
 }
@@ -215,56 +212,6 @@ func TestExtractSecurityMetadataFromMap(t *testing.T) {
 	}
 }
 
-// TestIssueSandboxToken_ClaimPassedThrough verifies that a non-nil SandboxClaim
-// is forwarded verbatim to the registered IdentityProvider, while nil claims
-// (e.g. refresh or E2B paths) are also forwarded as nil.
-func TestIssueSandboxToken_ClaimPassedThrough(t *testing.T) {
-	claim := &agentsv1alpha1.SandboxClaim{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "claim-a",
-			Namespace: "ns-a",
-			UID:       types.UID("claim-uid-a"),
-		},
-	}
-
-	tests := []struct {
-		name     string
-		claim    *agentsv1alpha1.SandboxClaim
-		wantSame *agentsv1alpha1.SandboxClaim
-	}{
-		{
-			name:     "claim is forwarded to provider",
-			claim:    claim,
-			wantSame: claim,
-		},
-		{
-			name:     "nil claim is forwarded as nil",
-			claim:    nil,
-			wantSame: nil,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			fake := &fakeIdentityProvider{resp: &TokenResponse{AccessToken: "tok"}}
-			withFakeProvider(t, fake)
-
-			sbx := &agentsv1alpha1.Sandbox{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "sbx-claim",
-					Namespace: "ns-a",
-					UID:       types.UID("uid-claim"),
-				},
-			}
-
-			_, _, err := IssueSandboxToken(context.Background(), sbx, tt.claim)
-			require.NoError(t, err)
-			assert.Same(t, sbx, fake.gotSbx, "sandbox pointer must be forwarded unchanged")
-			assert.Same(t, tt.wantSame, fake.gotClaim, "claim pointer must be forwarded unchanged")
-		})
-	}
-}
-
 // annotationReadingProvider is an IdentityProvider that extracts a specific
 // annotation from the sandbox and records it so tests can verify the sandbox
 // object forwarded to the provider is complete and readable.
@@ -273,7 +220,7 @@ type annotationReadingProvider struct {
 	gotValue       string
 }
 
-func (p *annotationReadingProvider) IssueToken(_ context.Context, sbx *agentsv1alpha1.Sandbox, _ *agentsv1alpha1.SandboxClaim) (*TokenResponse, error) {
+func (p *annotationReadingProvider) IssueToken(_ context.Context, sbx *agentsv1alpha1.Sandbox) (*TokenResponse, error) {
 	p.gotValue = sbx.GetAnnotations()[p.storageAuthKey]
 	return &TokenResponse{AccessToken: "tok"}, nil
 }
@@ -309,7 +256,7 @@ func TestIssueSandboxToken_ProviderCanReadSandboxAnnotations(t *testing.T) {
 		},
 	}
 
-	_, _, err := IssueSandboxToken(context.Background(), sbx, nil)
+	_, err := IssueSandboxToken(context.Background(), sbx)
 	require.NoError(t, err)
 	assert.Equal(t, `[{"credentialProviderName":"my-provider"}]`, reader.gotValue,
 		"provider must be able to read annotations directly from the forwarded sandbox")
@@ -331,10 +278,9 @@ func TestIssueSandboxToken_ProviderError(t *testing.T) {
 		},
 	}
 
-	gotResp, cost, err := IssueSandboxToken(context.Background(), sbx, nil)
+	gotResp, err := IssueSandboxToken(context.Background(), sbx)
 	require.Error(t, err)
 	assert.Nil(t, gotResp, "response must be nil on error to prevent persisting a zero-value token")
-	assert.GreaterOrEqual(t, int64(cost), int64(0), "cost must still be reported even on failure for metric accounting")
 
 	// Wrap message must remain stable; downstream code matches against this prefix.
 	assert.Contains(t, err.Error(), "failed to issue security token")
@@ -360,7 +306,7 @@ func TestIssueSandboxToken_DefaultProviderIntegration(t *testing.T) {
 		},
 	}
 
-	resp, _, err := IssueSandboxToken(context.Background(), sbx, nil)
+	resp, err := IssueSandboxToken(context.Background(), sbx)
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 	assert.NotEmpty(t, resp.AccessToken, "default provider must mint a non-empty access token")
@@ -384,7 +330,7 @@ type propagatingFakeProvider struct {
 	err error
 }
 
-func (p *propagatingFakeProvider) IssueToken(_ context.Context, _ *agentsv1alpha1.Sandbox, _ *agentsv1alpha1.SandboxClaim) (*TokenResponse, error) {
+func (p *propagatingFakeProvider) IssueToken(_ context.Context, _ *agentsv1alpha1.Sandbox) (*TokenResponse, error) {
 	p.issueCalls++
 	return nil, nil
 }

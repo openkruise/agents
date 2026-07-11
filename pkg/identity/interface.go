@@ -37,8 +37,6 @@ type IdentityProvider interface {
 	// IssueToken generates an access token for the given sandbox.
 	// The sbx parameter carries the sandbox workload metadata; it may be nil in
 	// future principal-token paths, so implementations must guard against nil.
-	// The claim parameter is the SandboxClaim that triggered the issuance when
-	// called from the SandboxClaim controller, and nil for refresh or E2B paths.
 	//
 	// Implementations own the composition of the concrete wire request: they
 	// derive the SandboxInfo projection and any security metadata directly from
@@ -46,7 +44,7 @@ type IdentityProvider interface {
 	// pre-built TokenRequest. This keeps the community baseline free of
 	// enterprise-only request-shaping policy while letting each provider assemble
 	// exactly the atomic request its backend expects.
-	IssueToken(ctx context.Context, sbx *agentsv1alpha1.Sandbox, claim *agentsv1alpha1.SandboxClaim) (*TokenResponse, error)
+	IssueToken(ctx context.Context, sbx *agentsv1alpha1.Sandbox) (*TokenResponse, error)
 
 	// PropagateSecurityToken executes post-token processing after a token is issued,
 	// such as writing credentials into the sandbox runtime.

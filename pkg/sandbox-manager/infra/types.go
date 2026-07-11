@@ -25,20 +25,9 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/identity"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/utils/timeout"
 )
-
-// SecurityTokenOptions wraps the issued security token response for downstream
-// consumers in the claim pipeline. It lives here (rather than in
-// pkg/sandbox-manager/config) to avoid an import cycle:
-// pkg/identity -> pkg/utils/runtime -> pkg/sandbox-manager/config -> pkg/identity.
-// pkg/sandbox-manager/infra is allowed to depend on pkg/identity because it is
-// not transitively imported by pkg/identity.
-type SecurityTokenOptions struct {
-	identity.TokenResponse
-}
 
 type SaveTimeoutOptions struct {
 	Timeout          timeout.Options
@@ -81,8 +70,6 @@ type ClaimSandboxOptions struct {
 	InitRuntime *config.InitRuntimeOptions `json:"initRuntime"`
 	// Set CSIMount to non-nil value to mount a CSI volume
 	CSIMount *config.CSIMountOptions `json:"CSIMount"`
-	// Set SecurityToken value in runtime
-	SecurityToken *SecurityTokenOptions `json:"securityToken"`
 	// Max ClaimTimeout duration
 	ClaimTimeout time.Duration `json:"claimTimeout"`
 	// Max WaitReadyTimeout duration
@@ -218,6 +205,7 @@ type CloneMetrics struct {
 	CreateSandbox time.Duration
 	WaitReady     time.Duration
 	InitRuntime   time.Duration
+	SecurityToken time.Duration
 	CSIMount      time.Duration
 	Total         time.Duration
 	LastError     error
@@ -228,8 +216,8 @@ func (m *CloneMetrics) String() string {
 	if m.LastError != nil {
 		lastErrStr = sanitizeErrorMessage(m.LastError)
 	}
-	return fmt.Sprintf("CloneMetrics{Retries: %d, Wait: %v, GetTemplate: %v, CreateSandbox: %v, WaitReady: %v, InitRuntime: %v, CSIMount: %v, Total: %v, LastError: %v}",
-		m.Retries, m.Wait, m.GetTemplate, m.CreateSandbox, m.WaitReady, m.InitRuntime, m.CSIMount, m.Total, lastErrStr)
+	return fmt.Sprintf("CloneMetrics{Retries: %d, Wait: %v, GetTemplate: %v, CreateSandbox: %v, WaitReady: %v, InitRuntime: %v, SecurityToken: %v, CSIMount: %v, Total: %v, LastError: %v}",
+		m.Retries, m.Wait, m.GetTemplate, m.CreateSandbox, m.WaitReady, m.InitRuntime, m.SecurityToken, m.CSIMount, m.Total, lastErrStr)
 }
 
 // Merge accumulates per-attempt durations from src into m. Retries and
@@ -241,6 +229,7 @@ func (m *CloneMetrics) Merge(src CloneMetrics) {
 	m.CreateSandbox += src.CreateSandbox
 	m.WaitReady += src.WaitReady
 	m.InitRuntime += src.InitRuntime
+	m.SecurityToken += src.SecurityToken
 	m.CSIMount += src.CSIMount
 	m.Total += src.Total
 }

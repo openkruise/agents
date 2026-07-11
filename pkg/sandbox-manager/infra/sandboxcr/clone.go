@@ -32,6 +32,7 @@ import (
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	infracache "github.com/openkruise/agents/pkg/cache"
+	"github.com/openkruise/agents/pkg/identity"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
@@ -162,7 +163,21 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 		return
 	}
 
-	// Step 6: csi mount
+	// Step 6: process security token
+	// Issue and propagate the identity-provider security token before performing
+	// CSI mounts, mirroring the claim flow ordering.
+	if identity.IsIdentityProviderRequested(sbx.Sandbox) {
+		metrics.SecurityToken, err = processSecurityToken(ctx, sbx, cache)
+		if err != nil {
+			if !wait.Interrupted(err) {
+				err = retriableError{Message: fmt.Sprintf("security token processing failed: %s", err)}
+			}
+			return
+		}
+		metrics.Total += metrics.SecurityToken
+	}
+
+	// Step 7: csi mount
 	// If opts.CSIMount is not provided from request, try to resolve mount options from sandbox annotation.
 	if opts.CSIMount == nil {
 		var resolveErr error

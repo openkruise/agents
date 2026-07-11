@@ -82,33 +82,29 @@ func ExtractSecurityMetadataFromMap(in map[string]string) map[string]string {
 // IssueSandboxToken issues a security token for the given sandbox using the
 // registered identity provider.
 //
-// It forwards the sandbox and claim objects verbatim to the provider. The
-// provider owns the composition of the concrete wire request (SandboxInfo
-// projection, security metadata, token type): it derives everything it needs
-// directly from the sandbox object. The community baseline therefore carries no
+// It forwards the sandbox object verbatim to the provider. The provider owns
+// the composition of the concrete wire request (SandboxInfo projection,
+// security metadata, token type): it derives everything it needs directly from
+// the sandbox object. The community baseline therefore carries no
 // request-shaping policy here, and enterprise providers assemble exactly the
 // atomic request their backend expects.
-//
-// The claim parameter may be nil for non-CRD issuance paths (e.g. token refresh
-// or the E2B API). IdentityProvider implementations must handle a nil claim
-// gracefully.
 //
 // The function is intentionally side-effect free: it does NOT mutate the
 // sandbox object or persist the response. Callers are responsible for
 // persisting the returned TokenResponse into the appropriate place
 // (e.g. ClaimSandboxOptions, sandbox annotations, or runtime credentials).
-func IssueSandboxToken(ctx context.Context, sbx *agentsv1alpha1.Sandbox, claim *agentsv1alpha1.SandboxClaim) (*TokenResponse, time.Duration, error) {
+func IssueSandboxToken(ctx context.Context, sbx *agentsv1alpha1.Sandbox) (*TokenResponse, error) {
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx), "action", "IssueSandboxToken")
 	start := time.Now()
 
-	tokenResp, err := IssueToken(ctx, sbx, claim)
+	tokenResp, err := IssueToken(ctx, sbx)
 	cost := time.Since(start)
 	if err != nil {
 		log.Error(err, "failed to issue sandbox security token", "cost", cost)
-		return nil, cost, fmt.Errorf("failed to issue security token: %w", err)
+		return nil, fmt.Errorf("failed to issue security token: %w", err)
 	}
 	log.Info("sandbox security token issued", "cost", cost)
-	return tokenResp, cost, nil
+	return tokenResp, nil
 }
 
 // PropagateSandboxToken propagates the freshly issued security token to the
