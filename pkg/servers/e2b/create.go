@@ -185,37 +185,23 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 
 	infraOpts.WaitReadyTimeout = resolveServerTimeout(request.Extensions.WaitReadySeconds)
 
-	if len(request.Extensions.CSIMount.MountConfigs) != 0 {
-		csiMountOptions := make([]config.MountConfig, 0, len(request.Extensions.CSIMount.MountConfigs))
-		csiClient := csiutils.NewCSIMountHandler(sc.cache.GetClient(), sc.cache.GetAPIReader(), sc.storageRegistry, utils.DefaultSandboxDeployNamespace)
-		for _, mountConfig := range request.Extensions.CSIMount.MountConfigs {
-			driverName, csiReqConfigRaw, err := csiClient.CSIMountOptionsConfig(ctx, mountConfig)
-			if err != nil {
-				return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
-					Code:    http.StatusBadRequest,
-					Message: err.Error(),
-				}
-			}
-			csiMountOptions = append(csiMountOptions, config.MountConfig{
-				Driver:     driverName,
-				RequestRaw: csiReqConfigRaw,
-			})
+	csiMount, err := sc.buildCSIMountOptions(ctx, request)
+	if err != nil {
+		return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
+			Code:    http.StatusBadRequest,
+			Message: err.Error(),
 		}
-		infraOpts.CSIMount = &config.CSIMountOptions{
-			MountOptionList: csiMountOptions,
-		}
+	}
+	infraOpts.CSIMount = csiMount
 
-		// Build storage-auth annotation via hook when internal agent-identity
-		// storage authentication is enabled.
-		if csiutils.BuildStorageAuthAnnotation != nil {
-			var authErr error
-			storageAuthKey, storageAuthValue, authErr = csiutils.BuildStorageAuthAnnotation(ctx, sc.cache.GetClient(), request.Extensions.CSIMount.MountConfigs)
-			if authErr != nil {
-				log.Error(authErr, "failed to build storage auth annotation")
-				return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
-					Code:    http.StatusInternalServerError,
-					Message: authErr.Error(),
-				}
+	if csiMount != nil && csiutils.BuildStorageAuthAnnotation != nil {
+		var authErr error
+		storageAuthKey, storageAuthValue, authErr = csiutils.BuildStorageAuthAnnotation(ctx, sc.cache.GetClient(), request.Extensions.CSIMount.MountConfigs)
+		if authErr != nil {
+			log.Error(authErr, "failed to build storage auth annotation")
+			return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
+				Code:    http.StatusInternalServerError,
+				Message: authErr.Error(),
 			}
 		}
 	}
@@ -249,6 +235,10 @@ func (sc *Controller) createSandboxWithClone(ctx context.Context, request models
 		}
 	}
 
+	// storageAuthKey/Value holds the annotation key-value pair built by the
+	// BuildStorageAuthAnnotation hook (populated later, captured by reference).
+	var storageAuthKey, storageAuthValue string
+
 	infraOpts := infra.CloneSandboxOptions{
 		Namespace:    sc.getNamespaceOfUser(user),
 		User:         user.ID.String(),
@@ -256,6 +246,7 @@ func (sc *Controller) createSandboxWithClone(ctx context.Context, request models
 		CloneTimeout: resolveServerTimeout(request.Extensions.TimeoutSeconds),
 		Modifier: func(sbx infra.Sandbox) {
 			sc.basicSandboxCreateModifier(ctx, sbx, request)
+			sc.injectStorageAuthAnnotation(sbx, storageAuthKey, storageAuthValue)
 		},
 		ReserveFailedSandboxFor: request.Extensions.ReserveFailedSandboxFor,
 		Name:                    request.Extensions.Name,
@@ -263,27 +254,20 @@ func (sc *Controller) createSandboxWithClone(ctx context.Context, request models
 	}
 	infraOpts.WaitReadyTimeout = resolveServerTimeout(request.Extensions.WaitReadySeconds)
 
-	if len(request.Extensions.CSIMount.MountConfigs) != 0 {
-		csiMountOptions := make([]config.MountConfig, 0, len(request.Extensions.CSIMount.MountConfigs))
-		csiClient := csiutils.NewCSIMountHandler(sc.cache.GetClient(), sc.cache.GetAPIReader(), sc.storageRegistry, utils.DefaultSandboxDeployNamespace)
-		for _, mountConfigRequest := range request.Extensions.CSIMount.MountConfigs {
-			driverName, csiReqConfigRaw, err := csiClient.CSIMountOptionsConfig(ctx, mountConfigRequest)
-			if err != nil {
-				return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
-					Code:    http.StatusBadRequest,
-					Message: err.Error(),
-				}
-			}
-			csiMountOptions = append(csiMountOptions, config.MountConfig{
-				Driver:     driverName,
-				RequestRaw: csiReqConfigRaw,
-			})
+	csiMount, err := sc.buildCSIMountOptions(ctx, request)
+	if err != nil {
+		return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
+			Code:    http.StatusBadRequest,
+			Message: err.Error(),
 		}
-		// Persist the user-provided CSI mount config as raw JSON. During clone this
-		// lets the request-supplied csi mount config take precedence over the
-		// csi-volume-config restored from the checkpoint (see
-		// prepareSandboxFromCheckpoint), keeping the persisted annotation consistent
-		// with the mount actually performed so later re-mounts reuse the same config.
+	}
+
+	// Persist the user-provided CSI mount config as raw JSON. During clone this
+	// lets the request-supplied csi mount config take precedence over the
+	// csi-volume-config restored from the checkpoint (see
+	// prepareSandboxFromCheckpoint), keeping the persisted annotation consistent
+	// with the mount actually performed so later re-mounts reuse the same config.
+	if csiMount != nil {
 		csiMountConfigRaw, err := json.Marshal(request.Extensions.CSIMount.MountConfigs)
 		if err != nil {
 			return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
@@ -291,9 +275,19 @@ func (sc *Controller) createSandboxWithClone(ctx context.Context, request models
 				Message: fmt.Sprintf("failed to marshal csi mount config: %s", err.Error()),
 			}
 		}
-		infraOpts.CSIMount = &config.CSIMountOptions{
-			MountOptionList:    csiMountOptions,
-			MountOptionListRaw: string(csiMountConfigRaw),
+		csiMount.MountOptionListRaw = string(csiMountConfigRaw)
+	}
+	infraOpts.CSIMount = csiMount
+
+	if csiMount != nil && csiutils.BuildStorageAuthAnnotation != nil {
+		var authErr error
+		storageAuthKey, storageAuthValue, authErr = csiutils.BuildStorageAuthAnnotation(ctx, sc.cache.GetClient(), request.Extensions.CSIMount.MountConfigs)
+		if authErr != nil {
+			log.Error(authErr, "failed to build storage auth annotation")
+			return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
+				Code:    http.StatusInternalServerError,
+				Message: authErr.Error(),
+			}
 		}
 	}
 
@@ -440,6 +434,31 @@ func (sc *Controller) csiMountOptionsConfigRecord(ctx context.Context, sbx infra
 	// record the csi mount config to annotation
 	annotations[models.ExtensionKeyClaimWithCSIMount_MountConfig] = string(csiMountConfigRaw)
 	sbx.SetAnnotations(annotations)
+}
+
+// buildCSIMountOptions builds CSI mount options from the request's CSI mount
+// configurations. Returns nil if no mounts are configured.
+func (sc *Controller) buildCSIMountOptions(ctx context.Context, request models.NewSandboxRequest) (*config.CSIMountOptions, error) {
+	if len(request.Extensions.CSIMount.MountConfigs) == 0 {
+		return nil, nil
+	}
+
+	csiMountOptions := make([]config.MountConfig, 0, len(request.Extensions.CSIMount.MountConfigs))
+	csiClient := csiutils.NewCSIMountHandler(sc.cache.GetClient(), sc.cache.GetAPIReader(), sc.storageRegistry, utils.DefaultSandboxDeployNamespace)
+	for _, mountConfig := range request.Extensions.CSIMount.MountConfigs {
+		driverName, csiReqConfigRaw, err := csiClient.CSIMountOptionsConfig(ctx, mountConfig)
+		if err != nil {
+			return nil, err
+		}
+		csiMountOptions = append(csiMountOptions, config.MountConfig{
+			Driver:     driverName,
+			RequestRaw: csiReqConfigRaw,
+		})
+	}
+
+	return &config.CSIMountOptions{
+		MountOptionList: csiMountOptions,
+	}, nil
 }
 
 // injectStorageAuthAnnotation injects the storage-auth annotation into the sandbox

@@ -41,6 +41,7 @@ import (
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/agent-runtime/storages"
 	"github.com/openkruise/agents/pkg/cache"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
@@ -48,6 +49,7 @@ import (
 	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
+	"github.com/openkruise/agents/pkg/utils/csiutils"
 )
 
 type fakeQuotaManager struct {
@@ -1163,4 +1165,256 @@ func TestInjectStorageAuthAnnotation(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestBuildCSIMountOptions verifies that buildCSIMountOptions correctly handles
+// empty mount configs, errors from CSI mount config building, and successful
+// CSI mount option construction.
+func TestBuildCSIMountOptions(t *testing.T) {
+	controller, fc, teardown := Setup(t)
+	defer teardown()
+
+	// Register a test CSI driver
+	controller.storageRegistry.RegisterProvider("test-csi-driver", &storages.MountProvider{})
+
+	// Create a PersistentVolume with CSI info
+	pv := &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-build-csi-pv",
+		},
+		Spec: corev1.PersistentVolumeSpec{
+			PersistentVolumeSource: corev1.PersistentVolumeSource{
+				CSI: &corev1.CSIPersistentVolumeSource{
+					Driver:       "test-csi-driver",
+					VolumeHandle: "test-volume-handle",
+				},
+			},
+		},
+	}
+	require.NoError(t, fc.Create(t.Context(), pv))
+
+	tests := []struct {
+		name           string
+		request        models.NewSandboxRequest
+		expectErr      string
+		expectNilMount bool
+		expectDriver   string
+	}{
+		{
+			name: "no mount configs returns nil",
+			request: models.NewSandboxRequest{
+				TemplateID: "test-template",
+			},
+			expectNilMount: true,
+		},
+		{
+			name: "pv not found returns error",
+			request: models.NewSandboxRequest{
+				TemplateID: "test-template",
+				Extensions: models.NewSandboxRequestExtension{
+					CSIMount: models.CSIMountExtension{
+						MountConfigs: []v1alpha1.CSIMountConfig{
+							{
+								PvName:    "non-existent-pv",
+								MountPath: "/mnt/data",
+							},
+						},
+					},
+				},
+			},
+			expectErr: "failed to get persistent volume object by name",
+		},
+		{
+			name: "valid csi mount returns options",
+			request: models.NewSandboxRequest{
+				TemplateID: "test-template",
+				Extensions: models.NewSandboxRequestExtension{
+					CSIMount: models.CSIMountExtension{
+						MountConfigs: []v1alpha1.CSIMountConfig{
+							{
+								PvName:    "test-build-csi-pv",
+								MountPath: "/mnt/data",
+							},
+						},
+					},
+				},
+			},
+			expectNilMount: false,
+			expectDriver:   "test-csi-driver",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			csiMount, err := controller.buildCSIMountOptions(t.Context(), tt.request)
+			if tt.expectErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectErr)
+				assert.Nil(t, csiMount)
+				return
+			}
+
+			require.NoError(t, err)
+			if tt.expectNilMount {
+				assert.Nil(t, csiMount)
+				return
+			}
+
+			require.NotNil(t, csiMount)
+			require.Len(t, csiMount.MountOptionList, 1)
+			assert.Equal(t, tt.expectDriver, csiMount.MountOptionList[0].Driver)
+			assert.NotEmpty(t, csiMount.MountOptionList[0].RequestRaw)
+		})
+	}
+}
+
+// TestCreateSandboxWithClone_StorageAuthHook verifies that the
+// BuildStorageAuthAnnotation hook is invoked during clone when CSI mounts
+// are present, that errors from the hook yield a 500 response, and that
+// successful hook results inject the annotation onto the sandbox.
+func TestCreateSandboxWithClone_StorageAuthHook(t *testing.T) {
+	controller, fc, teardown := Setup(t)
+	defer teardown()
+
+	// Register a CSI driver and create a PV
+	controller.storageRegistry.RegisterProvider("test-auth-csi-driver", &storages.MountProvider{})
+	pv := &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-auth-pv",
+		},
+		Spec: corev1.PersistentVolumeSpec{
+			PersistentVolumeSource: corev1.PersistentVolumeSource{
+				CSI: &corev1.CSIPersistentVolumeSource{
+					Driver:       "test-auth-csi-driver",
+					VolumeHandle: "test-auth-volume-handle",
+				},
+			},
+		},
+	}
+	require.NoError(t, fc.Create(t.Context(), pv))
+
+	// Create checkpoint + template for clone
+	cleanupCP := CreateCheckpointAndTemplateInNamespace(
+		t, controller, "team-a", "auth-tmpl", "auth-cp-id",
+		uuid.NewString(), "src-sbx", "2024-07-01T00:00:01Z",
+	)
+	defer cleanupCP()
+
+	user := &models.CreatedTeamAPIKey{
+		ID:   uuid.New(),
+		Name: "auth-team-user",
+		Team: &models.Team{Name: "team-a"},
+	}
+
+	// Override DefaultCreateSandbox to capture annotations and simulate success
+	var capturedAnnotations map[string]string
+	origCreateSandbox := sandboxcr.DefaultCreateSandbox
+	sandboxcr.DefaultCreateSandbox = func(ctx context.Context, sbx *agentsv1alpha1.Sandbox, c ctrlclient.Client) (*agentsv1alpha1.Sandbox, error) {
+		capturedAnnotations = sbx.Annotations
+		if sbx.Name == "" {
+			sbx.Name = sbx.GenerateName + uuid.NewString()[:8]
+		}
+		created, err := origCreateSandbox(ctx, sbx, c)
+		if err != nil {
+			return nil, err
+		}
+		created.Status = agentsv1alpha1.SandboxStatus{
+			Phase:              agentsv1alpha1.SandboxRunning,
+			ObservedGeneration: created.Generation,
+			Conditions: []metav1.Condition{
+				{
+					Type:   string(agentsv1alpha1.SandboxConditionReady),
+					Status: metav1.ConditionTrue,
+					Reason: agentsv1alpha1.SandboxReadyReasonPodReady,
+				},
+			},
+			PodInfo: agentsv1alpha1.PodInfo{PodIP: "1.2.3.4"},
+		}
+		if err := c.Status().Update(ctx, created); err != nil {
+			return nil, err
+		}
+		return created, nil
+	}
+	t.Cleanup(func() { sandboxcr.DefaultCreateSandbox = origCreateSandbox })
+
+	baseRequest := models.NewSandboxRequest{
+		TemplateID: "auth-cp-id",
+		Timeout:    600,
+		Extensions: models.NewSandboxRequestExtension{
+			CSIMount: models.CSIMountExtension{
+				MountConfigs: []v1alpha1.CSIMountConfig{
+					{
+						PvName:    "test-auth-pv",
+						MountPath: "/mnt/data",
+					},
+				},
+			},
+			CreateOnNoStock: true,
+		},
+	}
+
+	t.Run("hook returns error yields 500", func(t *testing.T) {
+		origHook := csiutils.BuildStorageAuthAnnotation
+		csiutils.BuildStorageAuthAnnotation = func(ctx context.Context, client ctrlclient.Client, mounts []v1alpha1.CSIMountConfig) (string, string, error) {
+			return "", "", fmt.Errorf("mock auth build failure")
+		}
+		t.Cleanup(func() { csiutils.BuildStorageAuthAnnotation = origHook })
+
+		_, apiErr := controller.createSandboxWithClone(t.Context(), baseRequest, user)
+		require.NotNil(t, apiErr)
+		assert.Equal(t, http.StatusInternalServerError, apiErr.Code)
+		assert.Contains(t, apiErr.Message, "mock auth build failure")
+	})
+
+	t.Run("buildCSIMountOptions error yields 400", func(t *testing.T) {
+		// Use a non-existent PV so buildCSIMountOptions returns an error,
+		// exercising the error-wrapping path in createSandboxWithClone.
+		errRequest := baseRequest
+		errRequest.Extensions.CSIMount.MountConfigs = []v1alpha1.CSIMountConfig{
+			{
+				PvName:    "non-existent-pv",
+				MountPath: "/mnt/data",
+			},
+		}
+
+		_, apiErr := controller.createSandboxWithClone(t.Context(), errRequest, user)
+		require.NotNil(t, apiErr)
+		assert.Equal(t, http.StatusBadRequest, apiErr.Code)
+		assert.Contains(t, apiErr.Message, "failed to get persistent volume object by name")
+	})
+
+	t.Run("hook succeeds injects annotation", func(t *testing.T) {
+		capturedAnnotations = nil
+		origHook := csiutils.BuildStorageAuthAnnotation
+		csiutils.BuildStorageAuthAnnotation = func(ctx context.Context, client ctrlclient.Client, mounts []v1alpha1.CSIMountConfig) (string, string, error) {
+			return "security.agents.kruise.io/storage-auth", `[{"provider":"test"}]`, nil
+		}
+		t.Cleanup(func() { csiutils.BuildStorageAuthAnnotation = origHook })
+
+		// The clone will fail at the CSI mount step (no real agent-runtime sidecar),
+		// but the Modifier runs during sandbox creation — before CSI mount — so the
+		// annotation is already captured in DefaultCreateSandbox.
+		_, _ = controller.createSandboxWithClone(t.Context(), baseRequest, user)
+
+		require.NotNil(t, capturedAnnotations, "annotations should not be nil after clone with auth hook")
+		val, exists := capturedAnnotations["security.agents.kruise.io/storage-auth"]
+		assert.True(t, exists, "storage-auth annotation should be present on sandbox")
+		assert.Equal(t, `[{"provider":"test"}]`, val)
+	})
+
+	t.Run("hook nil does not inject annotation", func(t *testing.T) {
+		capturedAnnotations = nil
+		origHook := csiutils.BuildStorageAuthAnnotation
+		csiutils.BuildStorageAuthAnnotation = nil
+		t.Cleanup(func() { csiutils.BuildStorageAuthAnnotation = origHook })
+
+		// Same as above: clone fails at CSI mount, but Modifier has already run.
+		_, _ = controller.createSandboxWithClone(t.Context(), baseRequest, user)
+
+		// The storage-auth annotation should not be present
+		if capturedAnnotations != nil {
+			_, exists := capturedAnnotations["security.agents.kruise.io/storage-auth"]
+			assert.False(t, exists, "storage-auth annotation should not be present when hook is nil")
+		}
+	})
 }
