@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"k8s.io/klog/v2"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 )
@@ -129,5 +130,81 @@ func PropagateSandboxToken(ctx context.Context, sbx *agentsv1alpha1.Sandbox, tok
 		return err
 	}
 	log.Info("sandbox security token propagated", "cost", time.Since(start))
+	return nil
+}
+
+// ProcessSandboxToken runs the full security-token lifecycle for a sandbox: it
+// issues a fresh token, propagates it to the runtime, and only then records the
+// new expiration into the AgentKeyTokenRefreshStatus annotation via a MergeFrom
+// patch.
+//
+// It is the single source of truth shared by the claim/clone flows
+// (called directly by the sandboxcr reconcilers) and the post-resume
+// reinitializer (sandboxcore.reinitSecurityToken), so both paths stay behaviourally
+// identical and follow the same issue -> propagate -> record invariant used by
+// the security-token-refresh controller. Recording only after a successful
+// propagation guarantees a failed delivery never persists a misleading "fresh"
+// expiration that would suppress the refresh controller's retry.
+//
+// Callers gate on IsIdentityProviderRequested before invoking this function (the
+// claim, clone and post-resume paths all do so), so it performs no opt-in check
+// itself and always drives the full lifecycle.
+//
+// Providers assemble their own issuance request from the sandbox annotations,
+// so no claim is required and the same lifecycle serves the claim, clone and
+// post-resume paths identically. On success the total lifecycle cost
+// (issue + propagate + record) is returned so callers can record metrics; on
+// failure the returned cost still reflects the elapsed time up to the failing
+// phase.
+func ProcessSandboxToken(ctx context.Context, c client.Client, sbx *agentsv1alpha1.Sandbox) (time.Duration, error) {
+	// Measure the whole issue -> propagate -> record lifecycle so callers record
+	// the total cost of the security-token step, not just token issuance.
+	start := time.Now()
+
+	// IssueSandboxToken already wraps its failure as
+	// "failed to issue security token: %w", so callers can classify the phase.
+	tokenResp, err := IssueSandboxToken(ctx, sbx)
+	if err != nil {
+		return time.Since(start), err
+	}
+
+	if err := PropagateSandboxToken(ctx, sbx, tokenResp); err != nil {
+		return time.Since(start), fmt.Errorf("failed to propagate security token: %w", err)
+	}
+
+	if err := recordTokenRefreshStatus(ctx, c, sbx, tokenResp); err != nil {
+		return time.Since(start), fmt.Errorf("failed to record security token refresh status: %w", err)
+	}
+	return time.Since(start), nil
+}
+
+// recordTokenRefreshStatus persists the freshly issued token's expiration into
+// the sandbox annotation AgentKeyTokenRefreshStatus via a MergeFrom patch, so
+// the security-token-refresh controller re-arms its schedule from the new
+// expiry without stomping concurrent updates to unrelated fields.
+//
+// MergeFrom is lazy: it only reads the base object to compute the diff at Patch
+// time, so cloning `updated` alone keeps the caller's object untouched until the
+// patch succeeds. On success the annotation is mirrored back onto the caller's
+// sandbox in place, so callers holding the same pointer observe the new value
+// without an extra apiserver read; on failure the caller's object is left
+// unchanged so the caller can decide how to recover.
+func recordTokenRefreshStatus(ctx context.Context, c client.Client, sbx *agentsv1alpha1.Sandbox, tokenResp *TokenResponse) error {
+	raw, err := EncodeTokenRefreshStatus(BuildTokenRefreshStatus(tokenResp))
+	if err != nil {
+		return fmt.Errorf("failed to marshal token refresh status: %w", err)
+	}
+	updated := sbx.DeepCopy()
+	if updated.Annotations == nil {
+		updated.Annotations = make(map[string]string, 1)
+	}
+	updated.Annotations[AgentKeyTokenRefreshStatus] = raw
+	if err := c.Patch(ctx, updated, client.MergeFrom(sbx)); err != nil {
+		return fmt.Errorf("failed to patch token refresh status annotation: %w", err)
+	}
+	if sbx.Annotations == nil {
+		sbx.Annotations = make(map[string]string, 1)
+	}
+	sbx.Annotations[AgentKeyTokenRefreshStatus] = raw
 	return nil
 }

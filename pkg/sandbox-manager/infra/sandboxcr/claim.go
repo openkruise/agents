@@ -334,7 +334,7 @@ func runClaimPostProcesses(ctx context.Context, sbx *Sandbox, lockType infra.Loc
 	// injected by modifyPickedSandbox.
 	if identity.IsIdentityProviderRequested(sbx.Sandbox) {
 		var err error
-		metrics.SecurityToken, err = processSecurityToken(ctx, sbx, cache)
+		metrics.SecurityToken, err = identity.ProcessSandboxToken(ctx, cache.GetClient(), sbx.Sandbox)
 		if err != nil {
 			return retriableError{Message: fmt.Sprintf("failed to process security token: %s", err)}
 		}
@@ -354,38 +354,6 @@ func runClaimPostProcesses(ctx context.Context, sbx *Sandbox, lockType infra.Loc
 	}
 
 	return nil
-}
-
-// processSecurityToken issues and propagates a sandbox security token.
-// It persists the token refresh status via recordSecurityTokenRefreshStatus
-// and propagates the token to the runtime.
-// Returns the total duration of the function execution so callers can record metrics.
-// Callers are responsible for gating on identity.IsIdentityProviderRequested before
-// calling this function.
-func processSecurityToken(ctx context.Context, sbx *Sandbox, cache infracache.Provider) (time.Duration, error) {
-	start := time.Now()
-	log := klog.FromContext(ctx)
-	log.Info("starting to issue security token via identity provider")
-
-	securityToken, err := identity.IssueSandboxToken(ctx, sbx.Sandbox)
-	if err != nil {
-		log.Error(err, "failed to issue security token")
-		return time.Since(start), err
-	}
-
-	// At this point modifyPickedSandbox has already persisted the locking patch,
-	// so additional annotation mutations on sbx.Sandbox would only live in memory.
-	// Patch via the apiserver here to persist the refresh status and keep
-	// sbx.Sandbox in sync with the patched object.
-	if err := recordSecurityTokenRefreshStatus(ctx, cache.GetClient(), sbx, securityToken); err != nil {
-		log.Error(err, "failed to modify picked sandbox for security token status")
-		return time.Since(start), err
-	}
-
-	if err := identity.PropagateSandboxToken(ctx, sbx.Sandbox, securityToken); err != nil {
-		return time.Since(start), err
-	}
-	return time.Since(start), nil
 }
 
 // clearFailedSandbox cleans up (or reserves) a failed sandbox according to
@@ -726,38 +694,6 @@ func modifyPickedSandbox(sbx *Sandbox, lockType infra.LockType, opts infra.Claim
 	}
 
 	sbx.SetAnnotations(annotations)
-	return nil
-}
-
-// recordSecurityTokenRefreshStatus persists the security token refresh status into the sandbox
-// annotation identity.AgentKeyTokenRefreshStatus via a MergeFrom patch, so that the change does not
-// stomp on concurrent updates to unrelated fields and is not overwritten by later InplaceRefresh
-// calls. The serialization is delegated to identity.EncodeTokenRefreshStatus so the claim flow and
-// the standalone refresh controller share the exact same annotation payload format.
-//
-// On success, the local sbx.Sandbox is replaced with the patched object so subsequent in-memory
-// reads observe the new annotation.
-func recordSecurityTokenRefreshStatus(ctx context.Context, c client.Client, sbx *Sandbox, securityToken *identity.TokenResponse) error {
-	if securityToken == nil {
-		return nil
-	}
-	raw, err := identity.EncodeTokenRefreshStatus(identity.BuildTokenRefreshStatus(securityToken))
-	if err != nil {
-		return fmt.Errorf("failed to marshal token refresh expiration status: %w", err)
-	}
-	// MergeFrom is lazy: it only holds a reference to the base object and computes
-	// the diff against `updated` at Patch time. Since we never mutate sbx.Sandbox
-	// here (only `updated`, which is an independent DeepCopy), passing sbx.Sandbox
-	// directly as the base is safe and avoids a redundant DeepCopy.
-	updated := sbx.Sandbox.DeepCopy()
-	if updated.Annotations == nil {
-		updated.Annotations = make(map[string]string, 1)
-	}
-	updated.Annotations[identity.AgentKeyTokenRefreshStatus] = raw
-	if err := c.Patch(ctx, updated, client.MergeFrom(sbx.Sandbox)); err != nil {
-		return fmt.Errorf("failed to patch token refresh status annotation: %w", err)
-	}
-	sbx.Sandbox = updated
 	return nil
 }
 
