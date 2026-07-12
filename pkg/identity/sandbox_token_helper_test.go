@@ -233,7 +233,7 @@ var _ IdentityProvider = (*annotationReadingProvider)(nil)
 
 // TestIssueSandboxToken_ProviderCanReadSandboxAnnotations verifies that the
 // sandbox pointer forwarded to IdentityProvider carries annotations injected by
-// upstream callers (e.g. storage-auth metadata for RRSA-based storage mounts).
+// upstream callers (e.g. storage-auth metadata for agent-identity storage mounts).
 // This replaces the legacy ExtractStorageAuthMetadata hook: providers now read
 // annotations directly from the sandbox object instead of receiving a second
 // metadata map.

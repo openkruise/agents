@@ -19,9 +19,9 @@ package identity
 import "encoding/json"
 
 // BuildTokenRefreshStatus derives the persisted refresh status from a successful
-// token issuance response. It centralises the projection so that the claim flow
-// (sandboxcr.recordSecurityTokenRefreshStatus) and the standalone refresh
-// controller produce the exact same payload.
+// token issuance response. It centralises the projection so that the
+// ProcessSandboxToken lifecycle and the standalone refresh controller
+// produce the exact same payload.
 //
 // A nil resp results in a zero-value TokenRefreshStatus, which serialises to "{}".
 func BuildTokenRefreshStatus(resp *TokenResponse) TokenRefreshStatus {

@@ -28,6 +28,7 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
+	"github.com/openkruise/agents/pkg/identity"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/utils"
 	csimountutils "github.com/openkruise/agents/pkg/utils/csiutils"
@@ -94,6 +95,14 @@ func Initialize(ctx context.Context, box *agentsv1alpha1.Sandbox, newStatus *age
 		return err
 	}
 
+	// Re-issue and propagate the security token before re-mounting CSI storage.
+	// Ordering mirrors the claim flow (InitRuntime -> SecurityToken -> CSIMount):
+	// the freshly recreated runtime holds no token, so the credential must be
+	// delivered before agent-identity CSI mounts below rely on it.
+	if err := reinitSecurityToken(ctx, client, sbxForInit); err != nil {
+		return err
+	}
+
 	// Re-mount CSI storage (concurrent)
 	csiMountConfigRequests, err := utilruntime.GetCsiMountExtensionRequest(box)
 	if err != nil {
@@ -148,5 +157,37 @@ func reinitRuntime(ctx context.Context, logger klog.Logger, box *agentsv1alpha1.
 		}
 		logger.Info("re-init completed after resume")
 	}
+	return nil
+}
+
+// reinitSecurityToken re-issues and propagates a sandbox's security token during
+// post-resume/recreate initialization. When a sandbox pod is recreated the
+// runtime sidecar starts fresh and no longer holds the token file previously
+// delivered by the identity provider; a long hibernation may additionally have
+// let the token expire. It therefore mints a new token and pushes it to the
+// fresh runtime before any CSI re-mount runs, so agent-identity mounts observe a
+// valid credential.
+//
+// It delegates to identity.ProcessSandboxToken so the post-resume path shares
+// the exact issue -> propagate -> record implementation used by the claim flow,
+// rather than re-deriving it here.
+//
+// The opt-in gate (IsIdentityProviderRequested) is checked here before invoking
+// ProcessSandboxToken, mirroring the claim/clone flows so all three call sites
+// share the same explicit gating and keep the community baseline inert for
+// non-identity sandboxes. sbxForInit carries the freshly recreated runtime
+// status so the provider can resolve the runtime URL during propagation, while
+// sharing the original sandbox ObjectMeta (annotations, name), so the opt-in
+// gate and the annotation patch behave identically to operating on the original
+// sandbox.
+func reinitSecurityToken(ctx context.Context, c client.Client, sbxForInit *agentsv1alpha1.Sandbox) error {
+	if !identity.IsIdentityProviderRequested(sbxForInit) {
+		return nil
+	}
+	logger := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbxForInit))
+	if _, err := identity.ProcessSandboxToken(ctx, c, sbxForInit); err != nil {
+		return fmt.Errorf("failed to reinitialize security token after resume: %w", err)
+	}
+	logger.Info("security token re-issued after resume or upgrade")
 	return nil
 }

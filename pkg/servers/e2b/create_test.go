@@ -347,7 +347,7 @@ func TestCreateSandboxWithClaim_CSIMount(t *testing.T) {
 			expectedMountCount: 3,
 		},
 		{
-			name: "csi mount with credentialProviderName attribute for RRSA storage auth",
+			name: "csi mount with credentialProviderName attribute for agent-identity storage auth",
 			request: models.NewSandboxRequest{
 				TemplateID: "test-template",
 				Extensions: models.NewSandboxRequestExtension{

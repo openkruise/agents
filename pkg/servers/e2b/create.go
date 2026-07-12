@@ -205,7 +205,7 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 			MountOptionList: csiMountOptions,
 		}
 
-		// Build storage-auth annotation via hook when internal RRSA-based
+		// Build storage-auth annotation via hook when internal agent-identity
 		// storage authentication is enabled.
 		if csiutils.BuildStorageAuthAnnotation != nil {
 			var authErr error
@@ -430,7 +430,7 @@ func (sc *Controller) csiMountOptionsConfigRecord(ctx context.Context, sbx infra
 }
 
 // injectStorageAuthAnnotation injects the storage-auth annotation into the sandbox
-// when enterprise RRSA-based credential metadata is available.
+// when enterprise agent-identity credential metadata is available.
 func (sc *Controller) injectStorageAuthAnnotation(sbx infra.Sandbox, key, value string) {
 	if key == "" || value == "" {
 		return
