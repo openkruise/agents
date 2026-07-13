@@ -19,36 +19,20 @@ package e2b
 import (
 	"encoding/json"
 	"fmt"
-	"net"
 	"net/http"
 
 	"k8s.io/klog/v2"
 
-	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
+	"github.com/openkruise/agents/pkg/utils/network"
 )
-
-// labelSandboxID is the label key used to associate TrafficPolicy CRs with sandbox.
-const labelSandboxID = agentsv1alpha1.AnnotationSandboxID
-
-// allTrafficCIDR represents all IPv4 addresses, used when allowInternetAccess
-// is set to false (equivalent to denyOut: ["0.0.0.0/0"]).
-const allTrafficCIDR = "0.0.0.0/0"
-
-// isCIDROrIP returns true if the entry is a valid CIDR or bare IP address.
-func isCIDROrIP(entry string) bool {
-	if _, _, err := net.ParseCIDR(entry); err == nil {
-		return true
-	}
-	return net.ParseIP(entry) != nil
-}
 
 // validateDenyOut checks that all denyOut entries are valid CIDR or bare IP addresses.
 func validateDenyOut(denyOut []string) error {
 	for _, entry := range denyOut {
-		if !isCIDROrIP(entry) {
+		if !network.IsCIDROrIP(entry) {
 			return fmt.Errorf("domains are not supported in denyOut: %q is not a valid CIDR or IP address", entry)
 		}
 	}
@@ -61,11 +45,11 @@ func applyAllowInternetAccess(allowInternetAccess *bool, denyOut []string) []str
 		return denyOut
 	}
 	for _, entry := range denyOut {
-		if entry == allTrafficCIDR {
+		if entry == network.AllTrafficCIDR {
 			return denyOut
 		}
 	}
-	return append(denyOut, allTrafficCIDR)
+	return append(denyOut, network.AllTrafficCIDR)
 }
 
 // validateAndBuildNetworkConfig is the single entry point for validating raw
@@ -107,7 +91,10 @@ func (sc *Controller) UpdateSandboxNetwork(r *http.Request) (web.ApiResponse[str
 	}
 
 	// Validate and build the network config in one step.
-	network, err := validateAndBuildNetworkConfig(req.AllowInternetAccess, req.SandboxNetworkConfig)
+	network, err := validateAndBuildNetworkConfig(req.AllowInternetAccess, &models.SandboxNetworkConfig{
+		AllowOut: req.AllowOut,
+		DenyOut:  req.DenyOut,
+	})
 	if err != nil {
 		return web.ApiResponse[struct{}]{}, &web.ApiError{
 			Code:    http.StatusBadRequest,
@@ -120,25 +107,18 @@ func (sc *Controller) UpdateSandboxNetwork(r *http.Request) (web.ApiResponse[str
 		return web.ApiResponse[struct{}]{}, apiErr
 	}
 
-	if network == nil {
-		// No network rules: delete any existing CRs (replace-semantics).
-		if err := sbx.DeleteSandboxNetwork(ctx); err != nil {
-			log.Error(err, "failed to delete network CRs")
-			return web.ApiResponse[struct{}]{}, &web.ApiError{
-				Code:    http.StatusInternalServerError,
-				Message: fmt.Sprintf("Failed to update network: %v", err),
-			}
-		}
-	} else {
-		if err := sbx.UpdateSandboxNetwork(ctx, infra.SandboxNetworkConfig{
+	var cfg infra.SandboxNetworkConfig
+	if network != nil {
+		cfg = infra.SandboxNetworkConfig{
 			AllowOut: network.AllowOut,
 			DenyOut:  network.DenyOut,
-		}); err != nil {
-			log.Error(err, "failed to reconcile network CRs")
-			return web.ApiResponse[struct{}]{}, &web.ApiError{
-				Code:    http.StatusInternalServerError,
-				Message: fmt.Sprintf("Failed to update network: %v", err),
-			}
+		}
+	}
+	if err := sbx.UpdateNetworkPolicy(ctx, cfg); err != nil {
+		log.Error(err, "failed to reconcile network CRs")
+		return web.ApiResponse[struct{}]{}, &web.ApiError{
+			Code:    http.StatusInternalServerError,
+			Message: fmt.Sprintf("Failed to update network: %v", err),
 		}
 	}
 

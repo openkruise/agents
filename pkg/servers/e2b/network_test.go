@@ -25,31 +25,6 @@ import (
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 )
 
-func TestIsCIDROrIP(t *testing.T) {
-	tests := []struct {
-		name  string
-		entry string
-		want  bool
-	}{
-		{name: "IPv4 CIDR", entry: "10.0.0.0/8", want: true},
-		{name: "IPv4 CIDR /32", entry: "8.8.8.8/32", want: true},
-		{name: "bare IPv4", entry: "8.8.8.8", want: true},
-		{name: "IPv6 CIDR", entry: "::1/128", want: true},
-		{name: "bare IPv6", entry: "::1", want: true},
-		{name: "plain domain", entry: "example.com", want: false},
-		{name: "wildcard domain", entry: "*.example.com", want: false},
-		{name: "multi-level domain", entry: "api.openai.com", want: false},
-		{name: "empty string", entry: "", want: false},
-		{name: "invalid CIDR", entry: "10.0.0.0/33", want: false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, isCIDROrIP(tt.entry))
-		})
-	}
-}
-
 func TestValidateDenyOut(t *testing.T) {
 	tests := []struct {
 		name        string

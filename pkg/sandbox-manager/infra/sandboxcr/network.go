@@ -19,19 +19,16 @@ package sandboxcr
 import (
 	"context"
 	"fmt"
-	"net"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	"github.com/openkruise/agents/pkg/utils/network"
 )
-
-const labelSandboxID = agentsv1alpha1.AnnotationSandboxID
-
-const defaultDenyCIDR = "0.0.0.0/0"
 
 // sandboxOwnerRef returns an OwnerReference that points to the given Sandbox CR.
 // Setting this on TrafficPolicy CRs ensures they are garbage-collected
@@ -49,57 +46,15 @@ func sandboxOwnerRef(owner *agentsv1alpha1.Sandbox) metav1.OwnerReference {
 	}
 }
 
-// isCIDROrIP returns true if the entry is a valid CIDR or bare IP address.
-func isCIDROrIP(entry string) bool {
-	if _, _, err := net.ParseCIDR(entry); err == nil {
-		return true
-	}
-	return net.ParseIP(entry) != nil
-}
-
-// normalizeToCIDR converts a bare IP to CIDR notation.
-// IPv4 becomes /32, IPv6 becomes /128.
-// If the entry is already a CIDR, it is returned as-is.
-func normalizeToCIDR(entry string) string {
-	if _, _, err := net.ParseCIDR(entry); err == nil {
-		return entry
-	}
-	if ip := net.ParseIP(entry); ip != nil {
-		if ip.To4() != nil {
-			return entry + "/32"
-		}
-		return entry + "/128"
-	}
-	return entry
-}
-
-// splitAllowOut separates allowOut entries into CIDR/IP entries and domain entries.
-func splitAllowOut(allowOut []string) (cidrs, domains []string) {
-	for _, entry := range allowOut {
-		if isCIDROrIP(entry) {
-			cidrs = append(cidrs, normalizeToCIDR(entry))
-		} else {
-			domains = append(domains, entry)
-		}
-	}
-	return cidrs, domains
-}
-
-// containsAllTrafficCIDR returns true if the CIDR list contains 0.0.0.0/0
-func containsAllTrafficCIDR(cidrs []string) bool {
-	for _, cidr := range cidrs {
-		if cidr == defaultDenyCIDR || cidr == "::/0" {
-			return true
-		}
-	}
-	return false
-}
-
 // buildTrafficPolicy builds a TrafficPolicy CR that encodes both CIDR/IP and
 // domain rules. Domain entries use the FQDN peer field
-func buildTrafficPolicy(allowOutCIDRs, allowOutDomains, denyOut []string, namespace, sandboxID string, owner *agentsv1alpha1.Sandbox) *agentsv1alpha1.TrafficPolicy {
+func buildTrafficPolicy(allowOutCIDRs, allowOutDomains, denyOut []string, namespace, sandboxID string, sandbox *agentsv1alpha1.Sandbox) *agentsv1alpha1.TrafficPolicy {
 	if len(allowOutCIDRs) == 0 && len(allowOutDomains) == 0 && len(denyOut) == 0 {
 		return nil
+	}
+
+	if len(allowOutDomains) > 0 && !network.ContainsCIDR(allowOutCIDRs, network.DNSServerCIDR) {
+		allowOutCIDRs = append(allowOutCIDRs, network.DNSServerCIDR)
 	}
 
 	hasAllowOut := len(allowOutCIDRs) > 0 || len(allowOutDomains) > 0
@@ -122,24 +77,24 @@ func buildTrafficPolicy(allowOutCIDRs, allowOutDomains, denyOut []string, namesp
 		if len(denyOut) > 0 {
 			denyPeers := make([]agentsv1alpha1.TrafficPolicyPeer, 0, len(denyOut))
 			for _, entry := range denyOut {
-				denyPeers = append(denyPeers, agentsv1alpha1.TrafficPolicyPeer{CIDR: normalizeToCIDR(entry)})
+				denyPeers = append(denyPeers, agentsv1alpha1.TrafficPolicyPeer{CIDR: network.NormalizeToCIDR(entry)})
 			}
 			rules = append(rules, agentsv1alpha1.TrafficPolicyRule{
 				Action: agentsv1alpha1.RuleActionReject,
 				To:     denyPeers,
 			})
 		}
-		if !containsAllTrafficCIDR(allowOutCIDRs) {
+		if !network.ContainsAllTrafficCIDR(allowOutCIDRs) {
 			rules = append(rules, agentsv1alpha1.TrafficPolicyRule{
 				Action: agentsv1alpha1.RuleActionReject,
-				To:     []agentsv1alpha1.TrafficPolicyPeer{{CIDR: defaultDenyCIDR}},
+				To:     []agentsv1alpha1.TrafficPolicyPeer{{CIDR: network.AllTrafficCIDR}},
 			})
 		}
 	} else {
 		// Blacklist mode: reject denyOut entries only
 		denyPeers := make([]agentsv1alpha1.TrafficPolicyPeer, 0, len(denyOut))
 		for _, entry := range denyOut {
-			denyPeers = append(denyPeers, agentsv1alpha1.TrafficPolicyPeer{CIDR: normalizeToCIDR(entry)})
+			denyPeers = append(denyPeers, agentsv1alpha1.TrafficPolicyPeer{CIDR: network.NormalizeToCIDR(entry)})
 		}
 		rules = append(rules, agentsv1alpha1.TrafficPolicyRule{
 			Action: agentsv1alpha1.RuleActionReject,
@@ -149,16 +104,18 @@ func buildTrafficPolicy(allowOutCIDRs, allowOutDomains, denyOut []string, namesp
 
 	return &agentsv1alpha1.TrafficPolicy{
 		ObjectMeta: metav1.ObjectMeta{
-			GenerateName:    "tp-",
-			Namespace:       namespace,
-			Labels:          map[string]string{labelSandboxID: sandboxID},
-			OwnerReferences: []metav1.OwnerReference{sandboxOwnerRef(owner)},
+			GenerateName: "tp-",
+			Namespace:    namespace,
+			Annotations: map[string]string{
+				agentsv1alpha1.AnnotationSandboxID: sandboxID,
+			},
+			OwnerReferences: []metav1.OwnerReference{sandboxOwnerRef(sandbox)},
 		},
 		Spec: agentsv1alpha1.TrafficPolicySpec{
 			Priority: 1000,
 			Selector: metav1.LabelSelector{
 				MatchLabels: map[string]string{
-					labelSandboxID: sandboxID,
+					agentsv1alpha1.LabelSandboxUID: string(sandbox.UID),
 				},
 			},
 			Egress: &agentsv1alpha1.TrafficPolicyDirection{
@@ -168,9 +125,19 @@ func buildTrafficPolicy(allowOutCIDRs, allowOutDomains, denyOut []string, namesp
 	}
 }
 
-// CreateSandboxNetwork creates a TrafficPolicy CR for the sandbox.
-func (s *Sandbox) CreateSandboxNetwork(ctx context.Context, network infra.SandboxNetworkConfig) error {
-	if len(network.AllowOut) == 0 && len(network.DenyOut) == 0 {
+// ensureSandboxUIDLabel patches the sandbox UID label into the pod template
+// so that TrafficPolicy Spec.Selector can match this pod.
+func (s *Sandbox) ensureSandboxUIDLabel(ctx context.Context) error {
+	patch := client.MergeFrom(s.Sandbox.DeepCopy())
+	infra.MergePodLabels(s, map[string]string{
+		agentsv1alpha1.LabelSandboxUID: string(s.GetUID()),
+	})
+	return s.Cache.GetClient().Patch(ctx, s.Sandbox, patch)
+}
+
+// CreateNetworkPolicy creates a TrafficPolicy CR for the sandbox.
+func (s *Sandbox) CreateNetworkPolicy(ctx context.Context, netConfig infra.SandboxNetworkConfig) error {
+	if len(netConfig.AllowOut) == 0 && len(netConfig.DenyOut) == 0 {
 		return nil
 	}
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(s))
@@ -178,9 +145,13 @@ func (s *Sandbox) CreateSandboxNetwork(ctx context.Context, network infra.Sandbo
 	sandboxID := s.GetSandboxID()
 	namespace := s.GetNamespace()
 
-	allowCIDRs, allowDomains := splitAllowOut(network.AllowOut)
+	allowCIDRs, allowDomains := network.SplitAllowOut(netConfig.AllowOut)
 
-	tp := buildTrafficPolicy(allowCIDRs, allowDomains, network.DenyOut, namespace, sandboxID, s.Sandbox)
+	if err := s.ensureSandboxUIDLabel(ctx); err != nil {
+		return fmt.Errorf("failed to patch sandbox with UID label: %w", err)
+	}
+
+	tp := buildTrafficPolicy(allowCIDRs, allowDomains, netConfig.DenyOut, namespace, sandboxID, s.Sandbox)
 	if tp != nil {
 		if err := k8sClient.Create(ctx, tp); err != nil {
 			log.Error(err, "failed to create TrafficPolicy for sandbox")
@@ -192,25 +163,29 @@ func (s *Sandbox) CreateSandboxNetwork(ctx context.Context, network infra.Sandbo
 	return nil
 }
 
-// UpdateSandboxNetwork updates the TrafficPolicy CR for the sandbox.
-func (s *Sandbox) UpdateSandboxNetwork(ctx context.Context, network infra.SandboxNetworkConfig) error {
+// UpdateNetworkPolicy updates the TrafficPolicy CR for the sandbox.
+func (s *Sandbox) UpdateNetworkPolicy(ctx context.Context, netConfig infra.SandboxNetworkConfig) error {
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(s))
 	k8sClient := s.Cache.GetClient()
 	sandboxID := s.GetSandboxID()
 	namespace := s.GetNamespace()
 
-	allowCIDRs, allowDomains := splitAllowOut(network.AllowOut)
+	allowCIDRs, allowDomains := network.SplitAllowOut(netConfig.AllowOut)
+
+	if err := s.ensureSandboxUIDLabel(ctx); err != nil {
+		return fmt.Errorf("failed to patch sandbox with UID label: %w", err)
+	}
 
 	// --- Reconcile TrafficPolicy ---
 	tpList := &agentsv1alpha1.TrafficPolicyList{}
 	if err := k8sClient.List(ctx, tpList,
 		client.InNamespace(namespace),
-		client.MatchingLabels{labelSandboxID: sandboxID},
+		client.MatchingFields{cache.IndexTrafficPolicySandboxID: sandboxID},
 	); err != nil {
 		return fmt.Errorf("failed to list TrafficPolicies: %w", err)
 	}
 
-	newTP := buildTrafficPolicy(allowCIDRs, allowDomains, network.DenyOut, namespace, sandboxID, s.Sandbox)
+	newTP := buildTrafficPolicy(allowCIDRs, allowDomains, netConfig.DenyOut, namespace, sandboxID, s.Sandbox)
 
 	if newTP == nil {
 		// No network rules needed, delete existing CRs
@@ -227,6 +202,7 @@ func (s *Sandbox) UpdateSandboxNetwork(ctx context.Context, network infra.Sandbo
 		existing := &tpList.Items[0]
 		existing.Spec = newTP.Spec
 		existing.OwnerReferences = newTP.OwnerReferences
+		existing.Annotations = newTP.Annotations
 		if err := k8sClient.Update(ctx, existing); err != nil {
 			return fmt.Errorf("failed to update TrafficPolicy %s: %w", existing.Name, err)
 		}
@@ -250,10 +226,10 @@ func (s *Sandbox) UpdateSandboxNetwork(ctx context.Context, network infra.Sandbo
 	return nil
 }
 
-// SelectSandboxNetwork queries the existing TrafficPolicy CR and returns the
+// SelectNetworkPolicy queries the existing TrafficPolicy CR and returns the
 // effective network configuration. Both CIDR and FQDN entries are read back
 // from the single TrafficPolicy CR.
-func (s *Sandbox) SelectSandboxNetwork(ctx context.Context) (*infra.SandboxNetworkConfig, error) {
+func (s *Sandbox) SelectNetworkPolicy(ctx context.Context) (*infra.SandboxNetworkConfig, error) {
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(s))
 	k8sClient := s.Cache.GetClient()
 	sandboxID := s.GetSandboxID()
@@ -265,7 +241,7 @@ func (s *Sandbox) SelectSandboxNetwork(ctx context.Context) (*infra.SandboxNetwo
 	tpList := &agentsv1alpha1.TrafficPolicyList{}
 	if err := k8sClient.List(ctx, tpList,
 		client.InNamespace(namespace),
-		client.MatchingLabels{labelSandboxID: sandboxID},
+		client.MatchingFields{cache.IndexTrafficPolicySandboxID: sandboxID},
 	); err != nil {
 		return nil, fmt.Errorf("failed to list TrafficPolicies: %w", err)
 	}
@@ -275,8 +251,22 @@ func (s *Sandbox) SelectSandboxNetwork(ctx context.Context) (*infra.SandboxNetwo
 			for _, rule := range tp.Spec.Egress.Rules {
 				switch rule.Action {
 				case agentsv1alpha1.RuleActionAllow:
+					// Check if the rule contains FQDN entries, which means the
+					// DNS server CIDR may have been auto-injected by buildTrafficPolicy.
+					hasFQDN := false
+					for _, peer := range rule.To {
+						if peer.FQDN != "" {
+							hasFQDN = true
+							break
+						}
+					}
 					for _, peer := range rule.To {
 						if peer.CIDR != "" {
+							// Skip the auto-injected DNS server CIDR so the read-back
+							// is transparent to the user.
+							if hasFQDN && peer.CIDR == network.DNSServerCIDR {
+								continue
+							}
 							config.AllowOut = append(config.AllowOut, peer.CIDR)
 						}
 						if peer.FQDN != "" {
@@ -285,7 +275,7 @@ func (s *Sandbox) SelectSandboxNetwork(ctx context.Context) (*infra.SandboxNetwo
 					}
 				case agentsv1alpha1.RuleActionReject:
 					for _, peer := range rule.To {
-						if peer.CIDR == defaultDenyCIDR && len(rule.To) == 1 {
+						if peer.CIDR == network.AllTrafficCIDR && len(rule.To) == 1 {
 							continue
 						}
 						if peer.CIDR != "" {
@@ -303,32 +293,4 @@ func (s *Sandbox) SelectSandboxNetwork(ctx context.Context) (*infra.SandboxNetwo
 	}
 
 	return config, nil
-}
-
-// DeleteSandboxNetwork deletes the TrafficPolicy CR associated with the sandbox.
-func (s *Sandbox) DeleteSandboxNetwork(ctx context.Context) error {
-	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(s))
-	k8sClient := s.Cache.GetClient()
-	sandboxID := s.GetSandboxID()
-	namespace := s.GetNamespace()
-
-	// Delete TrafficPolicies
-	tpList := &agentsv1alpha1.TrafficPolicyList{}
-	if err := k8sClient.List(ctx, tpList,
-		client.InNamespace(namespace),
-		client.MatchingLabels{labelSandboxID: sandboxID},
-	); err != nil {
-		log.Error(err, "failed to list TrafficPolicies for cleanup")
-	} else {
-		for i := range tpList.Items {
-			tp := &tpList.Items[i]
-			if err := client.IgnoreNotFound(k8sClient.Delete(ctx, tp)); err != nil {
-				log.Error(err, "failed to delete TrafficPolicy", "name", tp.Name)
-			} else {
-				log.Info("TrafficPolicy deleted during cleanup", "name", tp.Name)
-			}
-		}
-	}
-
-	return nil
 }

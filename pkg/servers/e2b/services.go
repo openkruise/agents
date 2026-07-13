@@ -57,7 +57,7 @@ func (sc *Controller) DescribeSandbox(r *http.Request) (web.ApiResponse[*models.
 
 	// Query current network CRs and populate allowOut/denyOut.
 	// Errors are logged but do not fail the describe request.
-	if netConfig, netErr := sbx.SelectSandboxNetwork(r.Context()); netErr != nil {
+	if netConfig, netErr := sbx.SelectNetworkPolicy(r.Context()); netErr != nil {
 		log.Error(netErr, "failed to query network config", "id", id)
 	} else if netConfig != nil {
 		sandbox.Network = &models.SandboxNetworkConfig{
@@ -107,12 +107,6 @@ func (sc *Controller) DeleteSandbox(r *http.Request) (web.ApiResponse[struct{}],
 	}
 
 	log.Info("sandbox deleted", "id", id)
-
-	// Cleanup network CRs (TrafficPolicy) associated with the sandbox.
-	if err := sbx.DeleteSandboxNetwork(r.Context()); err != nil {
-		log.Error(err, "failed to cleanup network CRs")
-	}
-
 	return web.ApiResponse[struct{}]{
 		Code: http.StatusNoContent,
 	}, nil

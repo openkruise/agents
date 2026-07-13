@@ -269,10 +269,9 @@ type Sandbox interface {
 	Request(ctx context.Context, method, path string, port int, body io.Reader) (*http.Response, error) // Make a request to the Sandbox
 	CSIMount(ctx context.Context, driver string, request string) error                                  // request is string config for csi.NodePublishVolumeRequest
 	CreateCheckpoint(ctx context.Context, opts CreateCheckpointOptions) (string, error)
-	CreateSandboxNetwork(ctx context.Context, network SandboxNetworkConfig) error // Create TrafficPolicy CR for the sandbox
-	UpdateSandboxNetwork(ctx context.Context, network SandboxNetworkConfig) error // Update (replace) existing TrafficPolicy CR with new config
-	SelectSandboxNetwork(ctx context.Context) (*SandboxNetworkConfig, error)      // Query current TrafficPolicy CR and return the effective config
-	DeleteSandboxNetwork(ctx context.Context) error                               // Delete the TrafficPolicy CR associated with the sandbox
+	CreateNetworkPolicy(ctx context.Context, network SandboxNetworkConfig) error // Create TrafficPolicy CR for the sandbox
+	UpdateNetworkPolicy(ctx context.Context, network SandboxNetworkConfig) error // Update (replace) existing TrafficPolicy CR with new config
+	SelectNetworkPolicy(ctx context.Context) (*SandboxNetworkConfig, error)      // Query current TrafficPolicy CR and return the effective config
 }
 
 // MergePodLabels merges the given labels into the sandbox's pod template labels.

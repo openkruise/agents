@@ -71,8 +71,9 @@ type SandboxNetworkConfig struct {
 }
 
 type SandboxNetworkUpdateConfig struct {
-	AllowInternetAccess *bool `json:"allow_internet_access,omitempty"`
-	*SandboxNetworkConfig
+	AllowInternetAccess *bool    `json:"allow_internet_access,omitempty"`
+	AllowOut            []string `json:"allowOut,omitempty"`
+	DenyOut             []string `json:"denyOut,omitempty"`
 }
 
 // VolumeMount represents a volume mount configuration for the sandbox

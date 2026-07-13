@@ -27,69 +27,8 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/utils"
+	"github.com/openkruise/agents/pkg/utils/network"
 )
-
-func TestNormalizeToCIDR(t *testing.T) {
-	tests := []struct {
-		name   string
-		entry  string
-		expect string
-	}{
-		{name: "IPv4 bare address becomes /32", entry: "1.2.3.4", expect: "1.2.3.4/32"},
-		{name: "IPv6 bare address becomes /128", entry: "::1", expect: "::1/128"},
-		{name: "already CIDR v4 returned as-is", entry: "10.0.0.0/8", expect: "10.0.0.0/8"},
-		{name: "already CIDR v6 returned as-is", entry: "fe80::/64", expect: "fe80::/64"},
-		{name: "invalid string returned as-is", entry: "not-an-ip", expect: "not-an-ip"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.expect, normalizeToCIDR(tt.entry))
-		})
-	}
-}
-
-func TestSplitAllowOut(t *testing.T) {
-	tests := []struct {
-		name         string
-		allowOut     []string
-		expectCIDRs  []string
-		expectDomain []string
-	}{
-		{
-			name:         "mixed CIDRs IPs and domains",
-			allowOut:     []string{"1.2.3.4", "10.0.0.0/8", "api.example.com", "*.github.com"},
-			expectCIDRs:  []string{"1.2.3.4/32", "10.0.0.0/8"},
-			expectDomain: []string{"api.example.com", "*.github.com"},
-		},
-		{
-			name:         "only domains",
-			allowOut:     []string{"api.example.com", "*.github.com"},
-			expectCIDRs:  nil,
-			expectDomain: []string{"api.example.com", "*.github.com"},
-		},
-		{
-			name:         "only CIDRs and IPs",
-			allowOut:     []string{"1.2.3.4", "10.0.0.0/8"},
-			expectCIDRs:  []string{"1.2.3.4/32", "10.0.0.0/8"},
-			expectDomain: nil,
-		},
-		{
-			name:         "empty input",
-			allowOut:     nil,
-			expectCIDRs:  nil,
-			expectDomain: nil,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cidrs, domains := splitAllowOut(tt.allowOut)
-			assert.Equal(t, tt.expectCIDRs, cidrs)
-			assert.Equal(t, tt.expectDomain, domains)
-		})
-	}
-}
 
 func TestBuildTrafficPolicy(t *testing.T) {
 	owner := &agentsv1alpha1.Sandbox{
@@ -117,7 +56,7 @@ func TestBuildTrafficPolicy(t *testing.T) {
 			expectNil:       false,
 			expectRuleCount: 2,
 			ruleChecks:      []agentsv1alpha1.RuleAction{agentsv1alpha1.RuleActionAllow, agentsv1alpha1.RuleActionReject},
-			peerChecks:      [][]string{{"1.2.3.4/32"}, {defaultDenyCIDR}},
+			peerChecks:      [][]string{{"1.2.3.4/32"}, {network.AllTrafficCIDR}},
 			fqdnChecks:      [][]string{nil, nil},
 		},
 		{
@@ -135,20 +74,31 @@ func TestBuildTrafficPolicy(t *testing.T) {
 			peerChecks: [][]string{
 				{"1.2.3.4/32"},
 				{"10.0.0.0/8", "172.16.0.0/12"},
-				{defaultDenyCIDR},
+				{network.AllTrafficCIDR},
 			},
 			fqdnChecks: [][]string{nil, nil, nil},
 		},
 		{
-			name:            "whitelist FQDN only — allow FQDN + default deny",
+			name:            "whitelist FQDN only — auto-inject DNS CIDR + default deny",
 			allowOutCIDRs:   nil,
 			allowOutDomains: []string{"api.example.com", "*.github.com"},
 			denyOut:         nil,
 			expectNil:       false,
 			expectRuleCount: 2,
 			ruleChecks:      []agentsv1alpha1.RuleAction{agentsv1alpha1.RuleActionAllow, agentsv1alpha1.RuleActionReject},
-			peerChecks:      [][]string{nil, {defaultDenyCIDR}},
+			peerChecks:      [][]string{{network.DNSServerCIDR}, {network.AllTrafficCIDR}},
 			fqdnChecks:      [][]string{{"api.example.com", "*.github.com"}, nil},
+		},
+		{
+			name:            "whitelist FQDN with explicit DNS CIDR — no duplicate",
+			allowOutCIDRs:   []string{"8.8.8.8/32"},
+			allowOutDomains: []string{"api.example.com"},
+			denyOut:         nil,
+			expectNil:       false,
+			expectRuleCount: 2,
+			ruleChecks:      []agentsv1alpha1.RuleAction{agentsv1alpha1.RuleActionAllow, agentsv1alpha1.RuleActionReject},
+			peerChecks:      [][]string{{"8.8.8.8/32"}, {network.AllTrafficCIDR}},
+			fqdnChecks:      [][]string{{"api.example.com"}, nil},
 		},
 		{
 			name:            "whitelist CIDR + FQDN + denyOut — allow (mixed peers) + explicit deny + default deny",
@@ -163,9 +113,9 @@ func TestBuildTrafficPolicy(t *testing.T) {
 				agentsv1alpha1.RuleActionReject,
 			},
 			peerChecks: [][]string{
-				{"1.2.3.4/32"},
+				{"1.2.3.4/32", network.DNSServerCIDR},
 				{"10.0.0.0/8"},
-				{defaultDenyCIDR},
+				{network.AllTrafficCIDR},
 			},
 			fqdnChecks: [][]string{
 				{"api.example.com"},
@@ -207,7 +157,7 @@ func TestBuildTrafficPolicy(t *testing.T) {
 			peerChecks: [][]string{
 				{"8.8.8.8/32"},
 				{"8.8.4.4/32"},
-				{defaultDenyCIDR},
+				{network.AllTrafficCIDR},
 			},
 			fqdnChecks: [][]string{nil, nil, nil},
 		},
@@ -290,8 +240,7 @@ func TestBuildTrafficPolicy(t *testing.T) {
 			// Verify metadata
 			assert.Equal(t, "tp-", tp.GenerateName)
 			assert.Equal(t, "default", tp.Namespace)
-			assert.Equal(t, "test-sandbox-id", tp.Labels[labelSandboxID])
-			assert.Equal(t, "test-sandbox-id", tp.Spec.Selector.MatchLabels[labelSandboxID])
+			assert.Equal(t, "test-uid", tp.Spec.Selector.MatchLabels[agentsv1alpha1.LabelSandboxUID])
 			assert.Equal(t, int32(1000), tp.Spec.Priority)
 			// Verify OwnerReference is set
 			require.Len(t, tp.OwnerReferences, 1)
@@ -302,32 +251,11 @@ func TestBuildTrafficPolicy(t *testing.T) {
 	}
 }
 
-func TestContainsAllTrafficCIDR(t *testing.T) {
-	tests := []struct {
-		name   string
-		cidrs  []string
-		expect bool
-	}{
-		{name: "contains 0.0.0.0/0", cidrs: []string{"0.0.0.0/0"}, expect: true},
-		{name: "contains ::/0", cidrs: []string{"::/0"}, expect: true},
-		{name: "contains 0.0.0.0/0 among others", cidrs: []string{"1.2.3.4/32", "0.0.0.0/0"}, expect: true},
-		{name: "does not contain all-traffic CIDR", cidrs: []string{"1.2.3.4/32", "10.0.0.0/8"}, expect: false},
-		{name: "empty list", cidrs: nil, expect: false},
-		{name: "nil list", cidrs: []string{}, expect: false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.expect, containsAllTrafficCIDR(tt.cidrs))
-		})
-	}
-}
-
-// TestCreateSelectSandboxNetwork_RoundTrip verifies that network config
-// written via CreateSandboxNetwork can be fully read back via
-// SelectSandboxNetwork, including denyOut entries in whitelist mode
+// TestCreateSelectNetworkPolicy_RoundTrip verifies that network config
+// written via CreateNetworkPolicy can be fully read back via
+// SelectNetworkPolicy, including denyOut entries in whitelist mode
 // and FQDN domain entries.
-func TestCreateSelectSandboxNetwork_RoundTrip(t *testing.T) {
+func TestCreateSelectNetworkPolicy_RoundTrip(t *testing.T) {
 	tests := []struct {
 		name           string
 		network        infra.SandboxNetworkConfig
@@ -414,12 +342,12 @@ func TestCreateSelectSandboxNetwork_RoundTrip(t *testing.T) {
 			}, time.Second, 10*time.Millisecond)
 
 			// Create network CRs
-			require.NoError(t, sandbox.CreateSandboxNetwork(t.Context(), tt.network))
+			require.NoError(t, sandbox.CreateNetworkPolicy(t.Context(), tt.network))
 
 			// Read back
-			result, err := sandbox.SelectSandboxNetwork(t.Context())
+			result, err := sandbox.SelectNetworkPolicy(t.Context())
 			require.NoError(t, err)
-			require.NotNil(t, result, "SelectSandboxNetwork should return non-nil config")
+			require.NotNil(t, result, "SelectNetworkPolicy should return non-nil config")
 
 			assert.ElementsMatch(t, tt.expectAllowOut, result.AllowOut)
 			assert.ElementsMatch(t, tt.expectDenyOut, result.DenyOut)
@@ -427,9 +355,9 @@ func TestCreateSelectSandboxNetwork_RoundTrip(t *testing.T) {
 	}
 }
 
-// TestUpdateSelectSandboxNetwork_RoundTrip verifies that UpdateSandboxNetwork
+// TestUpdateSelectNetworkPolicy_RoundTrip verifies that UpdateNetworkPolicy
 // (replace semantics) also preserves denyOut in whitelist mode and FQDN entries.
-func TestUpdateSelectSandboxNetwork_RoundTrip(t *testing.T) {
+func TestUpdateSelectNetworkPolicy_RoundTrip(t *testing.T) {
 	infraInstance, fc := NewTestInfra(t)
 
 	sbx := createTestSandbox("network-update-sandbox", "test-user", agentsv1alpha1.SandboxRunning, true)
@@ -446,81 +374,44 @@ func TestUpdateSelectSandboxNetwork_RoundTrip(t *testing.T) {
 	}, time.Second, 10*time.Millisecond)
 
 	// Step 1: Create with allowOut only
-	require.NoError(t, sandbox.CreateSandboxNetwork(t.Context(), infra.SandboxNetworkConfig{
+	require.NoError(t, sandbox.CreateNetworkPolicy(t.Context(), infra.SandboxNetworkConfig{
 		AllowOut: []string{"1.2.3.4"},
 	}))
 
-	result, err := sandbox.SelectSandboxNetwork(t.Context())
+	result, err := sandbox.SelectNetworkPolicy(t.Context())
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	assert.Equal(t, []string{"1.2.3.4/32"}, result.AllowOut)
 	assert.Empty(t, result.DenyOut)
 
 	// Step 2: Update to allowOut + denyOut (whitelist mode with deny)
-	require.NoError(t, sandbox.UpdateSandboxNetwork(t.Context(), infra.SandboxNetworkConfig{
+	require.NoError(t, sandbox.UpdateNetworkPolicy(t.Context(), infra.SandboxNetworkConfig{
 		AllowOut: []string{"1.2.3.4"},
 		DenyOut:  []string{"10.0.0.0/8"},
 	}))
 
-	result, err = sandbox.SelectSandboxNetwork(t.Context())
+	result, err = sandbox.SelectNetworkPolicy(t.Context())
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	assert.Equal(t, []string{"1.2.3.4/32"}, result.AllowOut)
 	assert.Equal(t, []string{"10.0.0.0/8"}, result.DenyOut)
 
 	// Step 3: Update to add FQDN entries
-	require.NoError(t, sandbox.UpdateSandboxNetwork(t.Context(), infra.SandboxNetworkConfig{
+	require.NoError(t, sandbox.UpdateNetworkPolicy(t.Context(), infra.SandboxNetworkConfig{
 		AllowOut: []string{"1.2.3.4", "api.example.com"},
 		DenyOut:  []string{"10.0.0.0/8"},
 	}))
 
-	result, err = sandbox.SelectSandboxNetwork(t.Context())
+	result, err = sandbox.SelectNetworkPolicy(t.Context())
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	assert.ElementsMatch(t, []string{"1.2.3.4/32", "api.example.com"}, result.AllowOut)
 	assert.Equal(t, []string{"10.0.0.0/8"}, result.DenyOut)
 
 	// Step 4: Update to clear all (empty config)
-	require.NoError(t, sandbox.UpdateSandboxNetwork(t.Context(), infra.SandboxNetworkConfig{}))
+	require.NoError(t, sandbox.UpdateNetworkPolicy(t.Context(), infra.SandboxNetworkConfig{}))
 
-	result, err = sandbox.SelectSandboxNetwork(t.Context())
+	result, err = sandbox.SelectNetworkPolicy(t.Context())
 	require.NoError(t, err)
-	assert.Nil(t, result, "after clearing all rules, SelectSandboxNetwork should return nil")
-}
-
-// TestDeleteSandboxNetwork verifies that DeleteSandboxNetwork removes all CRs.
-func TestDeleteSandboxNetwork(t *testing.T) {
-	infraInstance, fc := NewTestInfra(t)
-
-	sbx := createTestSandbox("network-delete-sandbox", "test-user", agentsv1alpha1.SandboxRunning, true)
-	CreateSandboxWithStatus(t, fc, sbx)
-
-	var sandbox infra.Sandbox
-	require.Eventually(t, func() bool {
-		var err error
-		sandbox, err = infraInstance.GetSandbox(t.Context(), infra.GetSandboxOptions{
-			SandboxID: utils.GetSandboxID(sbx),
-			Namespace: sbx.Namespace,
-		})
-		return err == nil
-	}, time.Second, 10*time.Millisecond)
-
-	// Create network CRs
-	require.NoError(t, sandbox.CreateSandboxNetwork(t.Context(), infra.SandboxNetworkConfig{
-		AllowOut: []string{"1.2.3.4", "api.example.com"},
-		DenyOut:  []string{"10.0.0.0/8"},
-	}))
-
-	// Verify CRs exist
-	result, err := sandbox.SelectSandboxNetwork(t.Context())
-	require.NoError(t, err)
-	require.NotNil(t, result)
-
-	// Delete
-	require.NoError(t, sandbox.DeleteSandboxNetwork(t.Context()))
-
-	// Verify CRs are gone
-	result, err = sandbox.SelectSandboxNetwork(t.Context())
-	require.NoError(t, err)
-	assert.Nil(t, result)
+	assert.Nil(t, result, "after clearing all rules, SelectNetworkPolicy should return nil")
 }
