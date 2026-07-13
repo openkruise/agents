@@ -1542,6 +1542,18 @@ func TestSandboxPodEventHandler_Update(t *testing.T) {
 			expectEnqueue:      false,
 		},
 		{
+			name:               "feature gate enabled - deletion started with no status change enqueued",
+			featureGateEnabled: true,
+			oldPod:             newAgentPod("sbx-1", "default"),
+			newPod: func() *corev1.Pod {
+				p := newAgentPod("sbx-1", "default")
+				now := metav1.Now()
+				p.DeletionTimestamp = &now
+				return p
+			}(),
+			expectEnqueue: true,
+		},
+		{
 			name:               "feature gate disabled - non-agent pod skipped",
 			featureGateEnabled: false,
 			oldPod:             newNonAgentPod("random-pod", "default"),
