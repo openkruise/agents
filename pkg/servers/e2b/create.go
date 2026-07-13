@@ -278,9 +278,22 @@ func (sc *Controller) createSandboxWithClone(ctx context.Context, request models
 				Driver:     driverName,
 				RequestRaw: csiReqConfigRaw,
 			})
-			infraOpts.CSIMount = &config.CSIMountOptions{
-				MountOptionList: csiMountOptions,
+		}
+		// Persist the user-provided CSI mount config as raw JSON. During clone this
+		// lets the request-supplied csi mount config take precedence over the
+		// csi-volume-config restored from the checkpoint (see
+		// prepareSandboxFromCheckpoint), keeping the persisted annotation consistent
+		// with the mount actually performed so later re-mounts reuse the same config.
+		csiMountConfigRaw, err := json.Marshal(request.Extensions.CSIMount.MountConfigs)
+		if err != nil {
+			return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
+				Code:    http.StatusInternalServerError,
+				Message: fmt.Sprintf("failed to marshal csi mount config: %s", err.Error()),
 			}
+		}
+		infraOpts.CSIMount = &config.CSIMountOptions{
+			MountOptionList:    csiMountOptions,
+			MountOptionListRaw: string(csiMountConfigRaw),
 		}
 	}
 

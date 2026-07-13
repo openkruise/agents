@@ -380,6 +380,84 @@ func TestNewSandboxFromTemplate_StampsCloneLockString(t *testing.T) {
 	assert.Equal(t, "lock-1", sbx.Annotations[v1alpha1.AnnotationLock])
 }
 
+// TestPrepareSandboxFromCheckpoint_CSIMountConfigPrecedence verifies that a
+// request-supplied CSI mount config (opts.CSIMount.MountOptionListRaw) overrides
+// the csi-volume-config annotation restored from the checkpoint, while an absent
+// or empty request config leaves the checkpoint-restored annotation untouched.
+func TestPrepareSandboxFromCheckpoint_CSIMountConfigPrecedence(t *testing.T) {
+	const (
+		checkpointCSIConfig = `[{"pvName":"oss-pv","mountPath":"/oss-data/sub3","subPath":"read-write-01"}]`
+		userCSIConfig       = `[{"pvName":"oss-pv","mountPath":"/oss-data/sub3","subPath":"read-write-01","attributes":{"credentialProviderName":"oss-rw"}}]`
+	)
+
+	tmpl := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "cp-1", Namespace: "default"},
+		Spec: v1alpha1.SandboxTemplateSpec{
+			Template: &corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "main", Image: "test-image"}},
+				},
+			},
+		},
+	}
+
+	tests := []struct {
+		name              string
+		csiMount          *config.CSIMountOptions
+		checkpointCSIAnno string
+		expectCSIAnno     string
+	}{
+		{
+			name:              "user-provided csi mount config overrides checkpoint",
+			csiMount:          &config.CSIMountOptions{MountOptionListRaw: userCSIConfig},
+			checkpointCSIAnno: checkpointCSIConfig,
+			expectCSIAnno:     userCSIConfig,
+		},
+		{
+			name:              "no user csi mount config keeps checkpoint",
+			csiMount:          nil,
+			checkpointCSIAnno: checkpointCSIConfig,
+			expectCSIAnno:     checkpointCSIConfig,
+		},
+		{
+			name:              "empty user raw keeps checkpoint",
+			csiMount:          &config.CSIMountOptions{MountOptionListRaw: ""},
+			checkpointCSIAnno: checkpointCSIConfig,
+			expectCSIAnno:     checkpointCSIConfig,
+		},
+		{
+			name:              "user-provided csi mount config with no checkpoint annotation",
+			csiMount:          &config.CSIMountOptions{MountOptionListRaw: userCSIConfig},
+			checkpointCSIAnno: "",
+			expectCSIAnno:     userCSIConfig,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cp := &v1alpha1.Checkpoint{
+				ObjectMeta: metav1.ObjectMeta{Name: "cp-1", Namespace: "default"},
+			}
+			if tt.checkpointCSIAnno != "" {
+				cp.Annotations = map[string]string{
+					v1alpha1.AnnotationCSIVolumeConfig: tt.checkpointCSIAnno,
+				}
+			}
+
+			opts := infra.CloneSandboxOptions{
+				User:         "test-user",
+				CheckPointID: "cp-1",
+				CSIMount:     tt.csiMount,
+			}
+
+			sbx, _, err := prepareSandboxFromCheckpoint(t.Context(), opts, tmpl, cp, nil)
+			require.NoError(t, err)
+			require.NotNil(t, sbx)
+			assert.Equal(t, tt.expectCSIAnno, sbx.GetAnnotations()[v1alpha1.AnnotationCSIVolumeConfig])
+		})
+	}
+}
+
 func TestFindCheckpointAndTemplateById_NamespaceScoped(t *testing.T) {
 	objects := []client.Object{
 		&v1alpha1.SandboxTemplate{
