@@ -13,7 +13,7 @@ permissions: read-all
 
 env:
   # Common versions
-  GO_VERSION: '1.23'
+  GO_VERSION: '1.25'
   KIND_VERSION: 'v0.22.0'
   KIND_IMAGE: 'kindest/node:v1.32.0'
   KIND_CLUSTER_NAME: 'ci-testing'
@@ -41,6 +41,10 @@ jobs:
           export IMAGE="agent-sandbox-controller:latest"
           docker build -f dockerfiles/agent-sandbox-controller.Dockerfile  --pull --no-cache . -t $IMAGE
           kind load docker-image --name=${KIND_CLUSTER_NAME} $IMAGE || { echo >&2 "kind not installed or error loading image: $IMAGE"; exit 1; }
+          # Build and load commit-job image for Commit E2E tests
+          export COMMIT_JOB_IMAGE="commit-job:latest"
+          docker build -f dockerfiles/commit-job.Dockerfile --build-arg NERDCTL_BRANCH=v2.0.0 . -t $COMMIT_JOB_IMAGE
+          kind load docker-image --name=${KIND_CLUSTER_NAME} $COMMIT_JOB_IMAGE || { echo >&2 "kind not installed or error loading image: $COMMIT_JOB_IMAGE"; exit 1; }
           # Build and load agent-runtime so the reuse E2E can exercise the real
           # agent-runtime files API, which the controller uses to write the CSI
           # reset signal before returning a sandbox to the pool.
@@ -55,12 +59,15 @@ jobs:
           # the controller writes the signal through the agent-runtime files API.
           kubectl -n sandbox-system patch deployment sandbox-controller-manager \
             --type=json \
-            -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--feature-gates=SandboxPauseCheckpoint=true"},{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--csi-reset-signal-dir=/tmp"}]'
+            -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--feature-gates=SandboxPauseCheckpoint=true,Commit=true"},{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--csi-reset-signal-dir=/tmp"},{"op":"add","path":"/spec/template/spec/containers/0/env/-","value":{"name":"AGENT_JOB_IMAGE","value":"commit-job:latest"}}]'
           # Wait for the rolling update triggered by the patch to complete before
           # running wait-agent-sandbox-controller.sh, which only checks pod readiness
           # and can falsely pass by seeing the OLD (pre-patch) pod.
           kubectl -n sandbox-system rollout status deployment/sandbox-controller-manager --timeout=120s
           bash hack/wait-agent-sandbox-controller.sh
+      - name: Setup TLS Registry
+        run: |
+          KIND_CLUSTER=${{ env.KIND_CLUSTER_NAME }} bash hack/setup-local-registry.sh
       - name: Run E2E Tests
         run: |
           export KUBECONFIG=/home/runner/.kube/config

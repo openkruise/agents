@@ -19,7 +19,6 @@ package commit
 import (
 	"context"
 	"flag"
-	"fmt"
 	"reflect"
 	"time"
 
@@ -38,10 +37,10 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/controller/commit/core"
-	jobutil "github.com/openkruise/agents/pkg/controller/commit/job"
 	"github.com/openkruise/agents/pkg/discovery"
 	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/utils"
+	commitutil "github.com/openkruise/agents/pkg/utils/commit"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 )
@@ -71,20 +70,6 @@ func Add(mgr ctrl.Manager) error {
 	recorder := mgr.GetEventRecorderFor(controllerName)
 	controls, err := core.NewCommitControl(mgr.GetClient(), recorder)
 	if err != nil {
-		return err
-	}
-
-	// Register field indexes for LabelCommitUID to speed up List queries.
-	commitUIDIndex := func(obj client.Object) []string {
-		if uid, ok := obj.GetLabels()[jobutil.LabelCommitUID]; ok {
-			return []string{uid}
-		}
-		return nil
-	}
-	if err = mgr.GetFieldIndexer().IndexField(context.Background(), &batchv1.Job{}, jobutil.IndexFieldCommitUID, commitUIDIndex); err != nil {
-		return err
-	}
-	if err = mgr.GetFieldIndexer().IndexField(context.Background(), &corev1.Pod{}, jobutil.IndexFieldCommitUID, commitUIDIndex); err != nil {
 		return err
 	}
 
@@ -171,10 +156,12 @@ func (r *CommitReconciler) Reconcile(ctx context.Context, req ctrl.Request) (res
 	case agentsv1alpha1.CommitPhasePending, "":
 		// Observe expectations in reconcile loop instead of event handler to avoid lock contention.
 		jobList := &batchv1.JobList{}
-		if err := r.List(ctx, jobList, client.InNamespace(commit.Namespace), client.MatchingFields{jobutil.IndexFieldCommitUID: string(commit.UID)}); err == nil {
-			for _, j := range jobList.Items {
-				core.ScaleExpectations.ObserveScale(utils.GetControllerKey(commit), expectations.Create, j.Name)
-			}
+		if err := r.List(ctx, jobList, client.InNamespace(commit.Namespace), client.MatchingFields{commitutil.IndexFieldCommitUID: string(commit.UID)}); err != nil {
+			return ctrl.Result{}, err
+		}
+		args.JobList = jobList
+		for _, j := range jobList.Items {
+			core.ScaleExpectations.ObserveScale(utils.GetControllerKey(commit), expectations.Create, j.Name)
 		}
 		// Check ScaleExpectations to avoid duplicated Job creation due to stale cache.
 		if isSatisfied, unsatisfiedDuration, _ := core.ScaleExpectations.SatisfiedExpectations(utils.GetControllerKey(commit)); !isSatisfied {
@@ -192,21 +179,6 @@ func (r *CommitReconciler) Reconcile(ctx context.Context, req ctrl.Request) (res
 		log.Info("Unknown commit phase", "commit", klog.KObj(commit), "phase", commit.Status.Phase)
 		return ctrl.Result{}, nil
 	}
-}
-
-func (r *CommitReconciler) getControl(commit *agentsv1alpha1.Commit) (core.CommitControl, error) {
-	if mode, ok := commit.Annotations[utils.CommitAnnotationModeKey]; ok && mode != "" {
-		control, ok := r.controls[mode]
-		if !ok {
-			return nil, fmt.Errorf("commit mode(%s) control not found", mode)
-		}
-		return control, nil
-	}
-	control, ok := r.controls[core.CommonControlName]
-	if !ok {
-		return nil, fmt.Errorf("commit mode(%s) control not found", core.CommonControlName)
-	}
-	return control, nil
 }
 
 func (r *CommitReconciler) handleCommitDelete(ctx context.Context, args *core.EnsureFuncArgs, control core.CommitControl) (ctrl.Result, error) {

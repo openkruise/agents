@@ -35,8 +35,7 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/controller/commit/core"
-	jobutil "github.com/openkruise/agents/pkg/controller/commit/job"
-	"github.com/openkruise/agents/pkg/utils"
+	commitutil "github.com/openkruise/agents/pkg/utils/commit"
 )
 
 func newTestScheme() *runtime.Scheme {
@@ -84,15 +83,15 @@ func (m *mockControl) EnsureCommitDeleted(_ context.Context, _ *core.EnsureFuncA
 func newTestReconciler(objs ...client.Object) (*CommitReconciler, *mockControl) {
 	scheme := newTestScheme()
 	commitUIDIndex := func(obj client.Object) []string {
-		if uid, ok := obj.GetLabels()[jobutil.LabelCommitUID]; ok {
+		if uid, ok := obj.GetLabels()[commitutil.LabelCommitUID]; ok {
 			return []string{uid}
 		}
 		return nil
 	}
 	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).
 		WithStatusSubresource(&agentsv1alpha1.Commit{}).
-		WithIndex(&batchv1.Job{}, jobutil.IndexFieldCommitUID, commitUIDIndex).
-		WithIndex(&corev1.Pod{}, jobutil.IndexFieldCommitUID, commitUIDIndex).
+		WithIndex(&batchv1.Job{}, commitutil.IndexFieldCommitUID, commitUIDIndex).
+		WithIndex(&corev1.Pod{}, commitutil.IndexFieldCommitUID, commitUIDIndex).
 		Build()
 	mock := &mockControl{}
 	r := &CommitReconciler{
@@ -500,7 +499,7 @@ func TestGetControl_AnnotationMode(t *testing.T) {
 	}
 	commit := newCommit("test", "default", agentsv1alpha1.CommitPhasePending)
 	commit.Annotations = map[string]string{
-		utils.CommitAnnotationModeKey: "custom",
+		commitutil.AnnotationModeKey: "custom",
 	}
 
 	ctrl, err := r.getControl(commit)
@@ -520,7 +519,7 @@ func TestGetControl_UnknownMode(t *testing.T) {
 	}
 	commit := newCommit("test", "default", agentsv1alpha1.CommitPhasePending)
 	commit.Annotations = map[string]string{
-		utils.CommitAnnotationModeKey: "nonexistent",
+		commitutil.AnnotationModeKey: "nonexistent",
 	}
 
 	_, err := r.getControl(commit)
@@ -623,7 +622,7 @@ func TestGetControl_AnnotationModeEmptyValue(t *testing.T) {
 	}
 	commit := newCommit("test", "default", agentsv1alpha1.CommitPhasePending)
 	commit.Annotations = map[string]string{
-		utils.CommitAnnotationModeKey: "",
+		commitutil.AnnotationModeKey: "",
 	}
 
 	ctrl, err := r.getControl(commit)

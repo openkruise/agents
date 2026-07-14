@@ -26,6 +26,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/openkruise/agents/api/v1alpha1"
+	commitutil "github.com/openkruise/agents/pkg/utils/commit"
 )
 
 var backoffLimit = 1
@@ -58,22 +59,15 @@ func (g *JobGenerator) commitContainerID() string {
 
 func (g *JobGenerator) commitLabels() map[string]string {
 	return map[string]string{
-		LabelCommitName: g.Commit.Name,
-		LabelCommitUID:  string(g.Commit.UID),
+		commitutil.LabelCommitName: g.Commit.Name,
+		commitutil.LabelCommitUID:  string(g.Commit.UID),
 	}
 }
 
-func (g *JobGenerator) commitEnvs() []corev1.EnvVar {
-	return []corev1.EnvVar{
-		{Name: EnvContainerID, Value: g.commitContainerID()},
-		{Name: EnvCommitNamespace, Value: g.Commit.Namespace},
-		{Name: EnvCommitName, Value: g.Commit.Name},
-		{Name: EnvCommitImage, Value: g.Commit.Spec.Image},
-		{Name: EnvContainerName, Value: g.Commit.Spec.ContainerName},
-		{Name: EnvAgentJobActionKey, Value: EnvAgentJobActionCommit},
-		{Name: EnvCommitPodName, Value: g.Commit.Spec.PodName},
-		{Name: EnvCommitPodNamespace, Value: g.Pod.Namespace},
-		{Name: EnvCommitPodUID, Value: string(g.Pod.UID)},
+func (g *JobGenerator) commitArgs() []string {
+	return []string{
+		fmt.Sprintf("--%s=%s", ArgContainerID, g.commitContainerID()),
+		fmt.Sprintf("--%s=%s", ArgImage, g.Commit.Spec.Image),
 	}
 }
 
@@ -82,6 +76,8 @@ func (g *JobGenerator) volumes() ([]corev1.Volume, []corev1.VolumeMount) {
 	containerdPath := Config().ContainerdSockPath()
 	volumes := []corev1.Volume{
 		{
+			// Mount the host containerd runtime directory so commit-job can access
+			// the containerd socket and run nerdctl against the source container.
 			Name: "host-containerd-run",
 			VolumeSource: corev1.VolumeSource{
 				HostPath: &corev1.HostPathVolumeSource{
@@ -91,6 +87,8 @@ func (g *JobGenerator) volumes() ([]corev1.Volume, []corev1.VolumeMount) {
 			},
 		},
 		{
+			// Mount containerd registry configuration so nerdctl can load hosts.toml
+			// and TLS settings consistently with the host containerd runtime.
 			Name: "host-containerd-certs",
 			VolumeSource: corev1.VolumeSource{
 				HostPath: &corev1.HostPathVolumeSource{
@@ -110,6 +108,26 @@ func (g *JobGenerator) volumes() ([]corev1.Volume, []corev1.VolumeMount) {
 			MountPath: "/etc/containerd/certs.d",
 			ReadOnly:  true,
 		},
+	}
+	if g.DockerConfigSecretName != "" {
+		volumes = append(volumes, corev1.Volume{
+			// Mount the optional dockerconfigjson Secret as a Docker config file so
+			// nerdctl push can authenticate to the target registry.
+			Name: "docker-config",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: g.DockerConfigSecretName,
+					Items: []corev1.KeyToPath{
+						{Key: ".dockerconfigjson", Path: "config.json"},
+					},
+				},
+			},
+		})
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name:      "docker-config",
+			MountPath: "/var/run/secrets/registry",
+			ReadOnly:  true,
+		})
 	}
 	return volumes, volumeMounts
 }
@@ -135,26 +153,6 @@ func (g *JobGenerator) GenerateCommitJob() (*batchv1.Job, error) {
 	}
 
 	volumes, volumeMounts := g.volumes()
-
-	// Mount registry auth secret for pushing (nerdctl push)
-	if g.DockerConfigSecretName != "" {
-		volumes = append(volumes, corev1.Volume{
-			Name: "docker-config",
-			VolumeSource: corev1.VolumeSource{
-				Secret: &corev1.SecretVolumeSource{
-					SecretName: g.DockerConfigSecretName,
-					Items: []corev1.KeyToPath{
-						{Key: ".dockerconfigjson", Path: "config.json"},
-					},
-				},
-			},
-		})
-		volumeMounts = append(volumeMounts, corev1.VolumeMount{
-			Name:      "docker-config",
-			MountPath: "/var/run/secrets/registry",
-			ReadOnly:  true,
-		})
-	}
 
 	rootUID := int64(0)
 	trueVal := true
@@ -220,7 +218,7 @@ func (g *JobGenerator) GenerateCommitJob() (*batchv1.Job, error) {
 							Image:           jobImage,
 							VolumeMounts:    volumeMounts,
 							ImagePullPolicy: Config().ImagePullPolicy(),
-							Env:             g.commitEnvs(),
+							Args:            g.commitArgs(),
 							SecurityContext: &corev1.SecurityContext{
 								RunAsUser: &rootUID,
 							},

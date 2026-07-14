@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"k8s.io/klog/v2"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 )
@@ -31,37 +32,47 @@ import (
 // identity provider issuance path.
 //
 // The opt-in signal is the presence of a non-empty
-// "security.agents.kruise.io/agent-name" label on the sandbox: setting this
-// label expresses the user's intent to bind the sandbox to a logical agent
-// identity, which is the precondition for the identity provider to mint a
-// security token. A nil sandbox, a sandbox without Labels, or one whose value
-// for that key is empty all collapse to "not requested", letting callers
+// "security.agents.kruise.io/agent-name" annotation on the sandbox: setting
+// this annotation expresses the user's intent to bind the sandbox to a logical
+// agent identity, which is the precondition for the identity provider to mint a
+// security token. A nil sandbox, a sandbox without Annotations, or one whose
+// value for that key is empty all collapse to "not requested", letting callers
 // short-circuit the issuance path without paying any provider cost.
 //
-// The check is intentionally label-only and value-presence-only: it does NOT
-// validate the label value against any naming convention, since the identity
+// The check is intentionally annotation-only and value-presence-only: it does
+// NOT validate the value against any naming convention, since the identity
 // provider is the authoritative source of truth for agent-name semantics.
 func IsIdentityProviderRequested(sbx *agentsv1alpha1.Sandbox) bool {
 	if sbx == nil {
 		return false
 	}
-	return sbx.GetLabels()[LabelAgentName] != ""
+	return sbx.GetAnnotations()[AnnotationAgentName] != ""
 }
 
-// ExtractSecurityMetadata returns a map containing only the sandbox labels
+// ExtractSecurityMetadata returns a map containing only the sandbox annotations
 // whose keys are prefixed with SecurityMetadataPrefix. Providers that want to
-// include security labels in token issuance requests should call this helper
+// include security metadata in token issuance requests should call this helper
 // instead of re-implementing the prefix filter.
 //
 // A nil sandbox results in a nil map. The returned map is never nil when the
-// sandbox is non-nil, even if no matching labels exist, so providers can safely
-// iterate over it.
+// sandbox is non-nil, even if no matching annotations exist, so providers can
+// safely iterate over it.
 func ExtractSecurityMetadata(sbx *agentsv1alpha1.Sandbox) map[string]string {
 	if sbx == nil {
 		return nil
 	}
+	return ExtractSecurityMetadataFromMap(sbx.GetAnnotations())
+}
+
+// ExtractSecurityMetadataFromMap returns a new map containing only the entries
+// of in whose keys are prefixed with SecurityMetadataPrefix. It is the single
+// source of truth for the security-prefix filter, shared by the
+// Sandbox-annotations path (ExtractSecurityMetadata) and caller-supplied inputs
+// such as the E2B API request. The returned map is never nil, so callers can
+// safely iterate over it even when no entry matches.
+func ExtractSecurityMetadataFromMap(in map[string]string) map[string]string {
 	metadata := make(map[string]string)
-	for k, v := range sbx.GetLabels() {
+	for k, v := range in {
 		if strings.HasPrefix(k, SecurityMetadataPrefix) {
 			metadata[k] = v
 		}
@@ -72,41 +83,29 @@ func ExtractSecurityMetadata(sbx *agentsv1alpha1.Sandbox) map[string]string {
 // IssueSandboxToken issues a security token for the given sandbox using the
 // registered identity provider.
 //
-// It builds a TokenRequest of type TokenTypeAgent, forwarding the sandbox and
-// claim objects verbatim to the provider. Metadata extraction is intentionally
-// left to the provider: implementations that need security labels can call
-// ExtractSecurityMetadata(sbx), and those that need storage-auth or other
-// annotations can read them directly from sbx.GetAnnotations().
-//
-// The claim parameter may be nil for non-CRD issuance paths (e.g. token refresh
-// or the E2B API). IdentityProvider implementations must handle a nil claim
-// gracefully.
+// It forwards the sandbox object verbatim to the provider. The provider owns
+// the composition of the concrete wire request (SandboxInfo projection,
+// security metadata, token type): it derives everything it needs directly from
+// the sandbox object. The community baseline therefore carries no
+// request-shaping policy here, and enterprise providers assemble exactly the
+// atomic request their backend expects.
 //
 // The function is intentionally side-effect free: it does NOT mutate the
 // sandbox object or persist the response. Callers are responsible for
 // persisting the returned TokenResponse into the appropriate place
 // (e.g. ClaimSandboxOptions, sandbox annotations, or runtime credentials).
-func IssueSandboxToken(ctx context.Context, sbx *agentsv1alpha1.Sandbox, claim *agentsv1alpha1.SandboxClaim) (*TokenResponse, time.Duration, error) {
+func IssueSandboxToken(ctx context.Context, sbx *agentsv1alpha1.Sandbox) (*TokenResponse, error) {
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx), "action", "IssueSandboxToken")
 	start := time.Now()
 
-	tokenResp, err := IssueToken(ctx, sbx, claim, TokenRequest{
-		TokenType: TokenTypeAgent,
-		Sandbox: &SandboxInfo{
-			PodName:      sbx.Name,
-			PodNamespace: sbx.Namespace,
-			SandboxID:    fmt.Sprintf("%s/%s/%s", sbx.Namespace, sbx.Name, sbx.UID),
-			SandboxName:  sbx.Name,
-			SandboxUID:   string(sbx.UID),
-		},
-	})
+	tokenResp, err := IssueToken(ctx, sbx)
 	cost := time.Since(start)
 	if err != nil {
 		log.Error(err, "failed to issue sandbox security token", "cost", cost)
-		return nil, cost, fmt.Errorf("failed to issue security token: %w", err)
+		return nil, fmt.Errorf("failed to issue security token: %w", err)
 	}
 	log.Info("sandbox security token issued", "cost", cost)
-	return tokenResp, cost, nil
+	return tokenResp, nil
 }
 
 // PropagateSandboxToken propagates the freshly issued security token to the
@@ -131,5 +130,81 @@ func PropagateSandboxToken(ctx context.Context, sbx *agentsv1alpha1.Sandbox, tok
 		return err
 	}
 	log.Info("sandbox security token propagated", "cost", time.Since(start))
+	return nil
+}
+
+// ProcessSandboxToken runs the full security-token lifecycle for a sandbox: it
+// issues a fresh token, propagates it to the runtime, and only then records the
+// new expiration into the AgentKeyTokenRefreshStatus annotation via a MergeFrom
+// patch.
+//
+// It is the single source of truth shared by the claim/clone flows
+// (called directly by the sandboxcr reconcilers) and the post-resume
+// reinitializer (sandboxcore.reinitSecurityToken), so both paths stay behaviourally
+// identical and follow the same issue -> propagate -> record invariant used by
+// the security-token-refresh controller. Recording only after a successful
+// propagation guarantees a failed delivery never persists a misleading "fresh"
+// expiration that would suppress the refresh controller's retry.
+//
+// Callers gate on IsIdentityProviderRequested before invoking this function (the
+// claim, clone and post-resume paths all do so), so it performs no opt-in check
+// itself and always drives the full lifecycle.
+//
+// Providers assemble their own issuance request from the sandbox annotations,
+// so no claim is required and the same lifecycle serves the claim, clone and
+// post-resume paths identically. On success the total lifecycle cost
+// (issue + propagate + record) is returned so callers can record metrics; on
+// failure the returned cost still reflects the elapsed time up to the failing
+// phase.
+func ProcessSandboxToken(ctx context.Context, c client.Client, sbx *agentsv1alpha1.Sandbox) (time.Duration, error) {
+	// Measure the whole issue -> propagate -> record lifecycle so callers record
+	// the total cost of the security-token step, not just token issuance.
+	start := time.Now()
+
+	// IssueSandboxToken already wraps its failure as
+	// "failed to issue security token: %w", so callers can classify the phase.
+	tokenResp, err := IssueSandboxToken(ctx, sbx)
+	if err != nil {
+		return time.Since(start), err
+	}
+
+	if err := PropagateSandboxToken(ctx, sbx, tokenResp); err != nil {
+		return time.Since(start), fmt.Errorf("failed to propagate security token: %w", err)
+	}
+
+	if err := recordTokenRefreshStatus(ctx, c, sbx, tokenResp); err != nil {
+		return time.Since(start), fmt.Errorf("failed to record security token refresh status: %w", err)
+	}
+	return time.Since(start), nil
+}
+
+// recordTokenRefreshStatus persists the freshly issued token's expiration into
+// the sandbox annotation AgentKeyTokenRefreshStatus via a MergeFrom patch, so
+// the security-token-refresh controller re-arms its schedule from the new
+// expiry without stomping concurrent updates to unrelated fields.
+//
+// MergeFrom is lazy: it only reads the base object to compute the diff at Patch
+// time, so cloning `updated` alone keeps the caller's object untouched until the
+// patch succeeds. On success the annotation is mirrored back onto the caller's
+// sandbox in place, so callers holding the same pointer observe the new value
+// without an extra apiserver read; on failure the caller's object is left
+// unchanged so the caller can decide how to recover.
+func recordTokenRefreshStatus(ctx context.Context, c client.Client, sbx *agentsv1alpha1.Sandbox, tokenResp *TokenResponse) error {
+	raw, err := EncodeTokenRefreshStatus(BuildTokenRefreshStatus(tokenResp))
+	if err != nil {
+		return fmt.Errorf("failed to marshal token refresh status: %w", err)
+	}
+	updated := sbx.DeepCopy()
+	if updated.Annotations == nil {
+		updated.Annotations = make(map[string]string, 1)
+	}
+	updated.Annotations[AgentKeyTokenRefreshStatus] = raw
+	if err := c.Patch(ctx, updated, client.MergeFrom(sbx)); err != nil {
+		return fmt.Errorf("failed to patch token refresh status annotation: %w", err)
+	}
+	if sbx.Annotations == nil {
+		sbx.Annotations = make(map[string]string, 1)
+	}
+	sbx.Annotations[AgentKeyTokenRefreshStatus] = raw
 	return nil
 }

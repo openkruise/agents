@@ -22,10 +22,13 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	"github.com/openkruise/agents/pkg/proxy"
+	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 )
 
 func TestSandboxManager_DebugMaskAccessToken(t *testing.T) {
-	manager, _ := setupTestManager(t)
+	// Disable route reconciliation to prevent the background reconciler from
+	// deleting test routes as orphaned between SetRoute and GetDebugInfo.
+	manager, _ := setupTestManager(t, config.SandboxManagerOptions{DisableRouteReconciliation: true})
 
 	tests := []struct {
 		name        string

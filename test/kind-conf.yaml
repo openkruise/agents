@@ -6,6 +6,10 @@ kubeadmConfigPatches:
     apiServer:
       extraArgs:
         feature-gates: InPlacePodVerticalScaling=true
+containerdConfigPatches:
+  - |-
+    [plugins."io.containerd.grpc.v1.cri".registry]
+      config_path = "/etc/containerd/certs.d"
 nodes:
   - role: control-plane
     kubeadmConfigPatches:

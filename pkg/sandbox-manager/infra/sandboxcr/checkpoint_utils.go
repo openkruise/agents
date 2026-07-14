@@ -17,13 +17,55 @@ limitations under the License.
 package sandboxcr
 
 import (
+	"strings"
+
 	"github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/identity"
 )
 
-// necessaryAnnotationKeys defines the list of annotation keys that need to be
-// preserved when converting between Sandbox and SandboxTemplate.
+// necessaryAnnotationKeys defines the exact annotation keys that need to be
+// preserved when converting between Sandbox and Checkpoint.
 var necessaryAnnotationKeys = []string{
 	v1alpha1.AnnotationCSIVolumeConfig,
+}
+
+// necessaryAnnotationKeyPrefixes defines annotation key prefixes whose matching
+// keys need to be preserved when converting between Sandbox and Checkpoint.
+// All security-related annotations (identity provider integration) share the
+// SecurityMetadataPrefix and must travel together with the checkpoint.
+var necessaryAnnotationKeyPrefixes = []string{
+	identity.SecurityMetadataPrefix,
+}
+
+// shouldPreserveAnnotation reports whether the given annotation key should be
+// preserved, either because it exactly matches one of necessaryAnnotationKeys
+// or because it carries one of necessaryAnnotationKeyPrefixes.
+func shouldPreserveAnnotation(key string) bool {
+	for _, k := range necessaryAnnotationKeys {
+		if key == k {
+			return true
+		}
+	}
+	for _, prefix := range necessaryAnnotationKeyPrefixes {
+		if strings.HasPrefix(key, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// copyPreservedAnnotations copies every preserved annotation with a non-empty
+// value from src into dst, allocating dst when it is nil, and returns dst.
+func copyPreservedAnnotations(src, dst map[string]string) map[string]string {
+	if dst == nil {
+		dst = make(map[string]string, len(necessaryAnnotationKeys))
+	}
+	for key, val := range src {
+		if val != "" && shouldPreserveAnnotation(key) {
+			dst[key] = val
+		}
+	}
+	return dst
 }
 
 func PropagateAnnotationsToCheckpoint(sbx *v1alpha1.Sandbox, cp *v1alpha1.Checkpoint) {
@@ -31,16 +73,7 @@ func PropagateAnnotationsToCheckpoint(sbx *v1alpha1.Sandbox, cp *v1alpha1.Checkp
 	if sbxAnnotations == nil {
 		return
 	}
-	cpAnnotations := cp.GetAnnotations()
-	if cpAnnotations == nil {
-		cpAnnotations = make(map[string]string, len(necessaryAnnotationKeys))
-	}
-	for _, key := range necessaryAnnotationKeys {
-		if val, ok := sbxAnnotations[key]; ok && val != "" {
-			cpAnnotations[key] = val
-		}
-	}
-	cp.SetAnnotations(cpAnnotations)
+	cp.SetAnnotations(copyPreservedAnnotations(sbxAnnotations, cp.GetAnnotations()))
 }
 
 // RestoreAnnotationsFromCheckpoint copies necessary annotations from a Checkpoint back to a Sandbox.
@@ -51,14 +84,5 @@ func RestoreAnnotationsFromCheckpoint(cp *v1alpha1.Checkpoint, sbx *v1alpha1.San
 	if cpAnnotations == nil {
 		return
 	}
-	sbxAnnotations := sbx.GetAnnotations()
-	if sbxAnnotations == nil {
-		sbxAnnotations = make(map[string]string, len(necessaryAnnotationKeys))
-	}
-	for _, key := range necessaryAnnotationKeys {
-		if val, ok := cpAnnotations[key]; ok && val != "" {
-			sbxAnnotations[key] = val
-		}
-	}
-	sbx.SetAnnotations(sbxAnnotations)
+	sbx.SetAnnotations(copyPreservedAnnotations(cpAnnotations, sbx.GetAnnotations()))
 }

@@ -36,16 +36,17 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/openkruise/agents/pkg/utils/runtime"
-
 	"github.com/openkruise/agents/api/v1alpha1"
 	infracache "github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/cache/cachetest"
+	"github.com/openkruise/agents/pkg/identity"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
+	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
+	"github.com/openkruise/agents/pkg/utils/runtime"
 	utestutils "github.com/openkruise/agents/pkg/utils/testutils"
 	testutils "github.com/openkruise/agents/test/utils"
 )
@@ -377,6 +378,84 @@ func TestNewSandboxFromTemplate_StampsCloneLockString(t *testing.T) {
 	require.NotNil(t, sbx.Annotations)
 	assert.Equal(t, "user-1", sbx.Annotations[v1alpha1.AnnotationOwner])
 	assert.Equal(t, "lock-1", sbx.Annotations[v1alpha1.AnnotationLock])
+}
+
+// TestPrepareSandboxFromCheckpoint_CSIMountConfigPrecedence verifies that a
+// request-supplied CSI mount config (opts.CSIMount.MountOptionListRaw) overrides
+// the csi-volume-config annotation restored from the checkpoint, while an absent
+// or empty request config leaves the checkpoint-restored annotation untouched.
+func TestPrepareSandboxFromCheckpoint_CSIMountConfigPrecedence(t *testing.T) {
+	const (
+		checkpointCSIConfig = `[{"pvName":"oss-pv","mountPath":"/oss-data/sub3","subPath":"read-write-01"}]`
+		userCSIConfig       = `[{"pvName":"oss-pv","mountPath":"/oss-data/sub3","subPath":"read-write-01","attributes":{"credentialProviderName":"oss-rw"}}]`
+	)
+
+	tmpl := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "cp-1", Namespace: "default"},
+		Spec: v1alpha1.SandboxTemplateSpec{
+			Template: &corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "main", Image: "test-image"}},
+				},
+			},
+		},
+	}
+
+	tests := []struct {
+		name              string
+		csiMount          *config.CSIMountOptions
+		checkpointCSIAnno string
+		expectCSIAnno     string
+	}{
+		{
+			name:              "user-provided csi mount config overrides checkpoint",
+			csiMount:          &config.CSIMountOptions{MountOptionListRaw: userCSIConfig},
+			checkpointCSIAnno: checkpointCSIConfig,
+			expectCSIAnno:     userCSIConfig,
+		},
+		{
+			name:              "no user csi mount config keeps checkpoint",
+			csiMount:          nil,
+			checkpointCSIAnno: checkpointCSIConfig,
+			expectCSIAnno:     checkpointCSIConfig,
+		},
+		{
+			name:              "empty user raw keeps checkpoint",
+			csiMount:          &config.CSIMountOptions{MountOptionListRaw: ""},
+			checkpointCSIAnno: checkpointCSIConfig,
+			expectCSIAnno:     checkpointCSIConfig,
+		},
+		{
+			name:              "user-provided csi mount config with no checkpoint annotation",
+			csiMount:          &config.CSIMountOptions{MountOptionListRaw: userCSIConfig},
+			checkpointCSIAnno: "",
+			expectCSIAnno:     userCSIConfig,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cp := &v1alpha1.Checkpoint{
+				ObjectMeta: metav1.ObjectMeta{Name: "cp-1", Namespace: "default"},
+			}
+			if tt.checkpointCSIAnno != "" {
+				cp.Annotations = map[string]string{
+					v1alpha1.AnnotationCSIVolumeConfig: tt.checkpointCSIAnno,
+				}
+			}
+
+			opts := infra.CloneSandboxOptions{
+				User:         "test-user",
+				CheckPointID: "cp-1",
+				CSIMount:     tt.csiMount,
+			}
+
+			sbx, _, err := prepareSandboxFromCheckpoint(t.Context(), opts, tmpl, cp, nil)
+			require.NoError(t, err)
+			require.NotNil(t, sbx)
+			assert.Equal(t, tt.expectCSIAnno, sbx.GetAnnotations()[v1alpha1.AnnotationCSIVolumeConfig])
+		})
+	}
 }
 
 func TestFindCheckpointAndTemplateById_NamespaceScoped(t *testing.T) {
@@ -2150,4 +2229,217 @@ func TestCloneSandboxAdmissionUsesPersistedLockString(t *testing.T) {
 	require.NotNil(t, sbx)
 	require.NotEmpty(t, acquired)
 	assert.Equal(t, acquired, sbx.GetAnnotations()[v1alpha1.AnnotationLock])
+}
+
+//goland:noinspection GoDeprecation
+func TestCloneSandbox_SecurityToken(t *testing.T) {
+	utestutils.InitLogOutput()
+
+	// Enable SecurityIdentityProviderGate for all sub-tests
+	require.NoError(t, utilfeature.DefaultMutableFeatureGate.Set("SecurityIdentityProvider=true"))
+	t.Cleanup(func() {
+		require.NoError(t, utilfeature.DefaultMutableFeatureGate.Set("SecurityIdentityProvider=false"))
+	})
+
+	checkpointID := "clone-sec-token-cp"
+	user := "test-user"
+
+	tests := []struct {
+		name         string
+		mockProvider *mockIdentityProvider
+		addAgentName bool
+		expectError  string
+		postCheck    func(t *testing.T, sbx infra.Sandbox, metrics infra.CloneMetrics)
+	}{
+		{
+			name: "issue security token success and propagate",
+			mockProvider: &mockIdentityProvider{
+				issueTokenFunc: func(ctx context.Context, sbx *v1alpha1.Sandbox) (*identity.TokenResponse, error) {
+					return &identity.TokenResponse{AccessToken: "clone-secure-token-123"}, nil
+				},
+				propagateFunc: func(ctx context.Context, sbx *v1alpha1.Sandbox, tokenResp *identity.TokenResponse) error {
+					return nil
+				},
+			},
+			addAgentName: true,
+			postCheck: func(t *testing.T, sbx infra.Sandbox, metrics infra.CloneMetrics) {
+				annotations := sbx.GetAnnotations()
+				// SecurityToken metrics should be recorded
+				assert.Greater(t, metrics.SecurityToken, time.Duration(0))
+				// TokenRefreshStatus annotation should be set
+				raw := annotations[identity.AgentKeyTokenRefreshStatus]
+				assert.NotEmpty(t, raw)
+				var decoded identity.TokenRefreshStatus
+				require.NoError(t, json.Unmarshal([]byte(raw), &decoded))
+			},
+		},
+		{
+			name: "issue security token failure returns retriable error",
+			mockProvider: &mockIdentityProvider{
+				issueTokenFunc: func(ctx context.Context, sbx *v1alpha1.Sandbox) (*identity.TokenResponse, error) {
+					return nil, fmt.Errorf("identity provider unavailable")
+				},
+				propagateFunc: func(ctx context.Context, sbx *v1alpha1.Sandbox, tokenResp *identity.TokenResponse) error {
+					t.Fatalf("PropagateSecurityToken must not be called when IssueToken fails")
+					return nil
+				},
+			},
+			addAgentName: true,
+			expectError:  "failed to issue security token",
+		},
+		{
+			name: "propagate security token failure returns retriable error",
+			mockProvider: &mockIdentityProvider{
+				issueTokenFunc: func(ctx context.Context, sbx *v1alpha1.Sandbox) (*identity.TokenResponse, error) {
+					return &identity.TokenResponse{AccessToken: "clone-secure-token-456"}, nil
+				},
+				propagateFunc: func(ctx context.Context, sbx *v1alpha1.Sandbox, tokenResp *identity.TokenResponse) error {
+					return fmt.Errorf("propagation failed")
+				},
+			},
+			addAgentName: true,
+			expectError:  "propagation failed",
+		},
+		{
+			name: "skips security token issuance when agent-name annotation is absent",
+			mockProvider: &mockIdentityProvider{
+				issueTokenFunc: func(ctx context.Context, sbx *v1alpha1.Sandbox) (*identity.TokenResponse, error) {
+					t.Fatalf("IssueToken must not be called when agent-name annotation is absent")
+					return nil, nil
+				},
+				propagateFunc: func(ctx context.Context, sbx *v1alpha1.Sandbox, tokenResp *identity.TokenResponse) error {
+					t.Fatalf("PropagateSecurityToken must not be called when agent-name annotation is absent")
+					return nil
+				},
+			},
+			addAgentName: false,
+			postCheck: func(t *testing.T, sbx infra.Sandbox, metrics infra.CloneMetrics) {
+				annotations := sbx.GetAnnotations()
+				assert.Empty(t, annotations[identity.AgentKeyTokenRefreshStatus],
+					"TokenRefreshStatus annotation must NOT be written when the provider branch is skipped")
+				assert.Equal(t, time.Duration(0), metrics.SecurityToken,
+					"SecurityToken metric must remain zero when the provider branch is skipped")
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Setup runtime server for InitRuntime
+			server := testutils.NewTestRuntimeServer(testutils.TestRuntimeServerOptions{
+				RunCommandResult:      runtime.RunCommandResult{PID: 1, Exited: true},
+				RunCommandImmediately: true,
+			})
+			defer server.Close()
+
+			// Save and restore the registered provider
+			identity.RegisterProvider(tt.mockProvider)
+			t.Cleanup(func() { identity.RegisterProvider(identity.NewDefaultIdentityProvider()) })
+
+			cache, fc, err := cachetest.NewTestCache(t)
+			require.NoError(t, err)
+			require.NoError(t, cache.Run(t.Context()))
+			defer cache.Stop(t.Context())
+
+			// Create SandboxTemplate with same name as checkpoint
+			sbt := &v1alpha1.SandboxTemplate{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      checkpointID,
+					Namespace: "default",
+				},
+				Spec: v1alpha1.SandboxTemplateSpec{
+					Template: &corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{Name: "main", Image: "test-image"},
+							},
+						},
+					},
+				},
+			}
+			require.NoError(t, fc.Create(t.Context(), sbt))
+
+			// Create Checkpoint
+			cp := &v1alpha1.Checkpoint{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      checkpointID,
+					Namespace: "default",
+					Labels: map[string]string{
+						v1alpha1.LabelSandboxTemplate: checkpointID,
+					},
+				},
+				Status: v1alpha1.CheckpointStatus{
+					CheckpointId: checkpointID,
+				},
+			}
+			require.NoError(t, fc.Create(t.Context(), cp))
+			require.Eventually(t, func() bool {
+				_, err := cache.GetCheckpoint(t.Context(), infracache.GetCheckpointOptions{CheckpointID: checkpointID})
+				return err == nil
+			}, time.Second, 10*time.Millisecond)
+
+			// Decorator: DefaultCreateSandbox - set sandbox ready after creation and
+			// optionally add the agent-name annotation to opt into the identity provider path.
+			origCreateSandbox := DefaultCreateSandbox
+			DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client) (*v1alpha1.Sandbox, error) {
+				if sbx.Annotations == nil {
+					sbx.Annotations = map[string]string{}
+				}
+				sbx.Annotations[v1alpha1.AnnotationRuntimeURL] = server.URL
+				if tt.addAgentName {
+					sbx.Annotations[identity.AnnotationAgentName] = "test-agent"
+				}
+				created, err := origCreateSandbox(ctx, sbx, c)
+				if err != nil {
+					return nil, err
+				}
+				// Update Sandbox status to Ready
+				created.Status = v1alpha1.SandboxStatus{
+					Phase:              v1alpha1.SandboxRunning,
+					ObservedGeneration: created.Generation,
+					Conditions: []metav1.Condition{
+						{
+							Type:   string(v1alpha1.SandboxConditionReady),
+							Status: metav1.ConditionTrue,
+							Reason: v1alpha1.SandboxReadyReasonPodReady,
+						},
+					},
+					PodInfo: v1alpha1.PodInfo{
+						PodIP: "1.2.3.4",
+					},
+				}
+				if err = c.Status().Update(ctx, created); err != nil {
+					return nil, err
+				}
+				return created, nil
+			}
+			t.Cleanup(func() { DefaultCreateSandbox = origCreateSandbox })
+
+			opts := infra.CloneSandboxOptions{
+				User:             user,
+				CheckPointID:     checkpointID,
+				WaitReadyTimeout: 30 * time.Second,
+				CloneTimeout:     500 * time.Millisecond,
+			}
+
+			ctx, cancel := context.WithTimeout(t.Context(), opts.CloneTimeout)
+			defer cancel()
+
+			sbx, metrics, cloneErr := CloneSandbox(ctx, opts, cache)
+
+			if tt.expectError != "" {
+				require.Error(t, cloneErr)
+				assert.Contains(t, cloneErr.Error(), tt.expectError)
+				var retryErr retriableError
+				assert.True(t, errors.As(cloneErr, &retryErr), "error should be a retriableError")
+			} else {
+				require.NoError(t, cloneErr)
+				require.NotNil(t, sbx)
+			}
+
+			if tt.postCheck != nil {
+				tt.postCheck(t, sbx, metrics)
+			}
+		})
+	}
 }

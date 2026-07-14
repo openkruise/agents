@@ -17,12 +17,14 @@ limitations under the License.
 package securitytokenrefresh
 
 import (
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/identity"
+	"github.com/openkruise/agents/pkg/utils"
 )
 
 // needsRefreshPredicate filters Sandbox events down to the subset that this controller
@@ -46,6 +48,15 @@ func needsRefreshPredicate() predicate.Predicate {
 		UpdateFunc: func(e event.UpdateEvent) bool {
 			if !isRefreshTarget(e.ObjectNew) {
 				return false
+			}
+			// Re-enqueue when a serving runtime appears (no runtime -> serving
+			// runtime). While there is no serving runtime the reconciler defers
+			// refresh, so we must re-evaluate promptly on that edge rather than
+			// depend on the resume flow's annotation rewrite to wake us up; this
+			// keeps the refresh controller self-sufficient and guarantees an
+			// overdue token is refreshed as soon as a serving runtime exists.
+			if !hasServingRuntime(e.ObjectOld) && hasServingRuntime(e.ObjectNew) {
+				return true
 			}
 			oldRaw := tokenStatusAnnotation(e.ObjectOld)
 			newRaw := tokenStatusAnnotation(e.ObjectNew)
@@ -87,6 +98,45 @@ func isRefreshTarget(obj client.Object) bool {
 		return true
 	}
 	return status != nil && status.AccessTokenExpiration != ""
+}
+
+// hasServingRuntime reports whether the sandbox currently has a live runtime
+// pod that has finished initialization and can therefore receive a propagated
+// token. It is deliberately token-INDEPENDENT: it looks only at the sandbox
+// Phase and the RuntimeInitialized condition, never at readiness.
+//
+// This independence is the whole point. The aggregate SandboxConditionReady
+// tracks the Pod's PodReady, which is the AND of every container's readiness
+// probe including the business container. When the business container consumes
+// our security token, its readiness probe can fail once the token expires;
+// gating refresh on Ready would then close a deadlock loop:
+//
+//	expired token -> business container not ready -> Pod not ready ->
+//	Sandbox not Ready -> refresh deferred -> token never refreshed.
+//
+// Neither Phase nor RuntimeInitialized can be pulled down by token expiry, so
+// gating on them lets the refresh always fire while a serving runtime exists,
+// breaking the loop.
+//
+// A serving runtime requires BOTH:
+//   - Phase == Running: a bound pod whose containers have started. This excludes
+//     Paused (pod deleted), Resuming, Pending/creating and recreate-Upgrading,
+//     where there is no reachable runtime and a propagate would fail.
+//   - RuntimeInitialized == True: the agent-runtime sidecar finished
+//     (re-)initialization and can accept a token. Resume resets this to False,
+//     so a resuming pod is correctly excluded until its runtime is re-inited.
+//
+// A non-Sandbox object (which never reaches this controller) reports false.
+func hasServingRuntime(obj client.Object) bool {
+	box, ok := obj.(*agentsv1alpha1.Sandbox)
+	if !ok {
+		return false
+	}
+	if box.Status.Phase != agentsv1alpha1.SandboxRunning {
+		return false
+	}
+	cond := utils.GetSandboxCondition(&box.Status, string(agentsv1alpha1.RuntimeInitialized))
+	return cond != nil && cond.Status == metav1.ConditionTrue
 }
 
 // tokenStatusAnnotation returns the raw value of the token-status annotation,

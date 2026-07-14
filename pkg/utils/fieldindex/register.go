@@ -20,11 +20,14 @@ import (
 	"context"
 	"sync"
 
+	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	commitutil "github.com/openkruise/agents/pkg/utils/commit"
 )
 
 const (
@@ -43,6 +46,13 @@ var OwnerIndexFunc = func(obj client.Object) []string {
 	return owners
 }
 
+var commitUIDIndexFunc = func(obj client.Object) []string {
+	if uid, ok := obj.GetLabels()[commitutil.LabelCommitUID]; ok {
+		return []string{uid}
+	}
+	return nil
+}
+
 func RegisterFieldIndexes(c cache.Cache) error {
 	var err error
 	registerOnce.Do(func() {
@@ -56,6 +66,13 @@ func RegisterFieldIndexes(c cache.Cache) error {
 		}
 		// checkpoint ownerReference
 		if err = c.IndexField(context.TODO(), &agentsv1alpha1.Checkpoint{}, IndexNameForOwnerRefUID, OwnerIndexFunc); err != nil {
+			return
+		}
+		// commit job/pod label
+		if err = c.IndexField(context.TODO(), &batchv1.Job{}, commitutil.IndexFieldCommitUID, commitUIDIndexFunc); err != nil {
+			return
+		}
+		if err = c.IndexField(context.TODO(), &corev1.Pod{}, commitutil.IndexFieldCommitUID, commitUIDIndexFunc); err != nil {
 			return
 		}
 	})

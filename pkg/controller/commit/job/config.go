@@ -17,7 +17,6 @@ limitations under the License.
 package job
 
 import (
-	"flag"
 	"os"
 
 	corev1 "k8s.io/api/core/v1"
@@ -27,55 +26,28 @@ const (
 	// EnvAgentJobImage is the environment variable name for the agent job self-image.
 	EnvAgentJobImage = "AGENT_JOB_IMAGE"
 
-	// EnvContainerID is the environment variable name for the commit target container ID.
-	EnvContainerID = "COMMIT_CONTAINER_ID"
-	// EnvContainerName is the environment variable name for the commit target container name.
-	EnvContainerName = "COMMIT_CONTAINER_NAME"
-	// EnvCommitImage is the environment variable name for the commit target image.
-	EnvCommitImage = "COMMIT_IMAGE"
 	// EnvContainerdSock is the environment variable name for the containerd socket path.
 	EnvContainerdSock = "COMMIT_CONTAINERD_SOCK"
 	// EnvContainerdSockPath is the environment variable name for the containerd socket dir.
 	EnvContainerdSockPath = "COMMIT_CONTAINERD_SOCK_PATH"
 
-	// EnvCommitNamespace is the environment variable name for the commit cr namespace.
-	EnvCommitNamespace = "COMMIT_NAMESPACE"
-	// EnvCommitName is the environment variable name for the commit cr name.
-	EnvCommitName = "COMMIT_NAME"
-
-	// EnvCommitPodName is the environment variable name for the commit pod name.
-	EnvCommitPodName = "COMMIT_POD_NAME"
-	// EnvCommitPodNamespace is the environment variable name for the commit pod namespace.
-	EnvCommitPodNamespace = "COMMIT_POD_NAMESPACE"
-	// EnvCommitPodUID is the environment variable name for the commit pod uid.
-	EnvCommitPodUID = "COMMIT_POD_UID"
-
-	// EnvAgentJobActionKey is the environment variable name for the job action.
-	EnvAgentJobActionKey = "ACTION"
-	// EnvAgentJobActionCommit is the environment variable value for the commit job action.
-	EnvAgentJobActionCommit = "COMMIT"
+	// ArgContainerID is the CLI argument name for the commit target container ID.
+	ArgContainerID = "container-id"
+	// ArgImage is the CLI argument name for the commit target image.
+	ArgImage = "image"
 
 	// EnvAgentJobImagePullPolicy is the environment variable name for the agent job image pull policy.
 	EnvAgentJobImagePullPolicy = "AGENT_JOB_IMAGE_PULL_POLICY"
+
+	// DefaultNerdctlHostsDir is the directory nerdctl loads containerd hosts.toml
+	// registry configs from (passed as --hosts-dir).
+	DefaultNerdctlHostsDir = "/etc/containerd/certs.d"
 )
-
-var agentJobImage string
-
-func init() {
-	flag.StringVar(&agentJobImage, "agent-job-image", "", "Image for commit job pods. Defaults to AGENT_JOB_IMAGE env.")
-}
 
 // EnvConfig reads configuration from environment variables.
 type EnvConfig struct{}
 
-func (c *EnvConfig) ContainerID() string { return os.Getenv(EnvContainerID) }
-func (c *EnvConfig) CommitImage() string { return os.Getenv(EnvCommitImage) }
-func (c *EnvConfig) AgentJobImage() string {
-	if agentJobImage != "" {
-		return agentJobImage
-	}
-	return os.Getenv(EnvAgentJobImage)
-}
+func (c *EnvConfig) AgentJobImage() string { return os.Getenv(EnvAgentJobImage) }
 
 func (c *EnvConfig) ContainerdSockPath() string {
 	if sock := os.Getenv(EnvContainerdSockPath); sock != "" {

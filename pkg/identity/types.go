@@ -30,15 +30,17 @@ const (
 )
 
 const (
-	// SecurityMetadataPrefix is the prefix for all security-related label/annotations.
+	// SecurityMetadataPrefix is the prefix for all security-related annotations.
 	SecurityMetadataPrefix = "security.agents.kruise.io/"
 	// AgentKeyTokenRefreshStatus is the Sandbox Annotation Key,
 	// used to store the JSON serialized result of TokenRefreshStatus.
 	AgentKeyTokenRefreshStatus = SecurityMetadataPrefix + "token-status"
-	// LabelAgentName is the sandbox Label Key whose presence opts the sandbox
-	// into the identity provider issuance path. Its value carries the logical
-	// agent name that the identity provider uses to mint the security token.
-	LabelAgentName = SecurityMetadataPrefix + "agent-name"
+	// AnnotationAgentName is the sandbox Annotation Key whose presence opts the
+	// sandbox into the identity provider issuance path. Its value carries the
+	// logical agent name that the identity provider uses to mint the security
+	// token. An annotation is used instead of a label so the value is free of
+	// the 63-char / DNS-label constraints and can express richer content.
+	AnnotationAgentName = SecurityMetadataPrefix + "agent-name"
 )
 
 // TokenRequest represents a request to issue an identity-aware access token.

@@ -20,6 +20,7 @@ import (
 	"context"
 	"time"
 
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
@@ -41,6 +42,7 @@ type EnsureFuncArgs struct {
 	Pod       *corev1.Pod
 	Commit    *agentsv1alpha1.Commit
 	NewStatus *agentsv1alpha1.CommitStatus
+	JobList   *batchv1.JobList
 }
 
 type CommitControl interface {
