@@ -114,61 +114,36 @@ func (f *sandboxFilter) DecodeHeaders(header api.RequestHeaderMap, endStream boo
 	}
 
 	if route.State != agentsv1alpha1.SandboxStateRunning {
-		// Check if wake-on-traffic should be attempted for this sandbox.
-		// route.WakeOnTraffic is the primary check (fast, from registry).
-		// HasWakeAnnotation is a fallback that reads the informer cache
-		// directly, covering the window between kubectl annotate and the
-		// gateway controller reconciling the change into the route registry.
 		waker := wake.GetWaker()
-		parts := strings.SplitN(sandboxID, "--", 2)
-		shouldWake := route.WakeOnTraffic
-		if !shouldWake && f.config.EnableWakeOnTraffic && waker != nil &&
-			len(parts) == 2 && route.State == agentsv1alpha1.SandboxStatePaused {
-			shouldWake = waker.HasWakeAnnotation(context.Background(), parts[0], parts[1])
-		}
-		logger.Info("Wake eligibility check",
-			zap.String("sandboxID", sandboxID),
-			zap.String("state", route.State),
-			zap.Bool("wakeOnTraffic", route.WakeOnTraffic),
-			zap.Bool("shouldWake", shouldWake),
-			zap.Bool("enableWakeOnTraffic", f.config.EnableWakeOnTraffic),
-			zap.Bool("wakerInitialized", waker != nil))
-		if f.config.EnableWakeOnTraffic && shouldWake && route.State == agentsv1alpha1.SandboxStatePaused {
-			if waker != nil {
-				if len(parts) == 2 {
-					// Apply extra headers before returning Running so they
-					// are visible to subsequent filter phases.
-					for k, v := range extraHeaders {
-						header.Set(k, v)
-					}
-					// Launch async wake with a detached context. The filter
-					// returns Running to tell Envoy to suspend request
-					// processing. wakeAndContinue will call Continue or
-					// SendLocalReply when the wake completes.
-					waitTimeout := time.Duration(f.config.GetWakeTimeoutSeconds()) * time.Second
-					ctx, cancel := context.WithTimeout(context.Background(), waitTimeout)
-					f.mu.Lock()
-					f.cancel = cancel
-					f.mu.Unlock()
-					go f.wakeAndContinue(ctx, waker, parts[0], parts[1], sandboxID, sandboxPort, waitTimeout)
-					return api.Running
-				}
-				logger.Warn("Invalid sandbox ID format for wake",
-					zap.String("sandboxID", sandboxID))
+		if f.shouldWakeSandbox(route, sandboxID, waker) {
+			parts := strings.SplitN(sandboxID, "--", 2)
+			// Apply extra headers before returning Running so they
+			// are visible to subsequent filter phases.
+			for k, v := range extraHeaders {
+				header.Set(k, v)
 			}
+			// Launch async wake with a detached context. The filter
+			// returns Running to tell Envoy to suspend request
+			// processing. wakeAndContinue will call Continue or
+			// SendLocalReply when the wake completes.
+			waitTimeout := time.Duration(f.config.GetWakeTimeoutSeconds()) * time.Second
+			ctx, cancel := context.WithTimeout(context.Background(), waitTimeout)
+			f.mu.Lock()
+			f.cancel = cancel
+			f.mu.Unlock()
+			go f.wakeAndContinue(ctx, waker, parts[0], parts[1], sandboxID, sandboxPort, waitTimeout)
+			return api.Running
 		}
 		// Not running and not wakeable -> 502 (existing behavior)
-		if route.State != agentsv1alpha1.SandboxStateRunning {
-			logger.Warn("Sandbox is not running", zap.String("sandboxID", sandboxID), zap.String("state", route.State))
-			f.callbacks.DecoderFilterCallbacks().SendLocalReply(
-				502,
-				"healthy sandbox not found: "+sandboxID,
-				nil,
-				-1,
-				"sandbox_not_running",
-			)
-			return api.LocalReply
-		}
+		logger.Warn("Sandbox is not running", zap.String("sandboxID", sandboxID), zap.String("state", route.State))
+		f.callbacks.DecoderFilterCallbacks().SendLocalReply(
+			502,
+			"healthy sandbox not found: "+sandboxID,
+			nil,
+			-1,
+			"sandbox_not_running",
+		)
+		return api.LocalReply
 	}
 
 	// Authenticate the request if auth is enabled and the sandbox has an access token configured.
@@ -199,6 +174,35 @@ func (f *sandboxFilter) DecodeHeaders(header api.RequestHeaderMap, endStream boo
 
 	logger.Debug("Upstream override set successfully", zap.String("upstreamHost", upstreamHost))
 	return api.Continue
+}
+
+// shouldWakeSandbox determines whether a non-Running sandbox should be woken
+// by traffic. Returns true only when wake-on-traffic is enabled, the sandbox
+// is Paused, the waker is initialized, the sandbox ID has a valid namespace--name
+// format, and either the route registry already has WakeOnTraffic set or the
+// annotation fallback check succeeds.
+func (f *sandboxFilter) shouldWakeSandbox(route proxy.Route, sandboxID string, waker *wake.Waker) bool {
+	if route.State != agentsv1alpha1.SandboxStatePaused {
+		return false
+	}
+	if !f.config.EnableWakeOnTraffic {
+		return false
+	}
+	if waker == nil {
+		return false
+	}
+	parts := strings.SplitN(sandboxID, "--", 2)
+	if len(parts) != 2 {
+		return false
+	}
+	// route.WakeOnTraffic is the primary check (fast, from registry).
+	if route.WakeOnTraffic {
+		return true
+	}
+	// HasWakeAnnotation is a fallback that reads the informer cache
+	// directly, covering the window between kubectl annotate and the
+	// gateway controller reconciling the change into the route registry.
+	return waker.HasWakeAnnotation(context.Background(), parts[0], parts[1])
 }
 
 // wakeAndContinue runs the wake operation asynchronously. On success it sets
