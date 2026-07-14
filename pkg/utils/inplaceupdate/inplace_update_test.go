@@ -1358,21 +1358,14 @@ func TestDefaultGeneratePatchBodyFunc_ImageOnly(t *testing.T) {
 	}
 }
 
-func TestDefaultGeneratePatchBodyFunc_IgnoresInjectedOrEquivalentResources(t *testing.T) {
+func TestDefaultBuildResizeContainers_IgnoresInjectedOrEquivalentResources(t *testing.T) {
 	tests := []struct {
-		name                string
-		templateImage       string
-		podImage            string
-		templateResources   corev1.ResourceRequirements
-		podResources        corev1.ResourceRequirements
-		wantPatch           bool
-		wantUpdateImages    bool
-		wantUpdateResources bool
+		name              string
+		templateResources corev1.ResourceRequirements
+		podResources      corev1.ResourceRequirements
 	}{
 		{
-			name:          "extra ephemeral storage does not trigger resource update",
-			templateImage: "img:1",
-			podImage:      "img:1",
+			name: "extra ephemeral storage does not trigger resource update",
 			templateResources: corev1.ResourceRequirements{
 				Requests: corev1.ResourceList{
 					corev1.ResourceCPU: resource.MustParse("500m"),
@@ -1386,9 +1379,7 @@ func TestDefaultGeneratePatchBodyFunc_IgnoresInjectedOrEquivalentResources(t *te
 			},
 		},
 		{
-			name:          "equivalent cpu quantity does not trigger resource update",
-			templateImage: "img:1",
-			podImage:      "img:1",
+			name: "equivalent cpu quantity does not trigger resource update",
 			templateResources: corev1.ResourceRequirements{
 				Requests: corev1.ResourceList{
 					corev1.ResourceCPU: resource.MustParse("1000m"),
@@ -1400,30 +1391,11 @@ func TestDefaultGeneratePatchBodyFunc_IgnoresInjectedOrEquivalentResources(t *te
 				},
 			},
 		},
-		{
-			name:          "image change with injected resource does not set resource update",
-			templateImage: "img:2",
-			podImage:      "img:1",
-			templateResources: corev1.ResourceRequirements{
-				Requests: corev1.ResourceList{
-					corev1.ResourceCPU: resource.MustParse("500m"),
-				},
-			},
-			podResources: corev1.ResourceRequirements{
-				Requests: corev1.ResourceList{
-					corev1.ResourceCPU:              resource.MustParse("500m"),
-					corev1.ResourceEphemeralStorage: resource.MustParse("1Gi"),
-				},
-			},
-			wantPatch:        true,
-			wantUpdateImages: true,
-		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			const revision = "rev-current"
-			body := DefaultGeneratePatchBodyFunc(InPlaceUpdateOptions{
+			resizeContainers := DefaultBuildResizeContainers(InPlaceUpdateOptions{
 				Box: &agentsv1alpha1.Sandbox{
 					Spec: agentsv1alpha1.SandboxSpec{
 						EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
@@ -1432,7 +1404,6 @@ func TestDefaultGeneratePatchBodyFunc_IgnoresInjectedOrEquivalentResources(t *te
 									Containers: []corev1.Container{
 										{
 											Name:      "main",
-											Image:     tt.templateImage,
 											Resources: tt.templateResources,
 										},
 									},
@@ -1442,60 +1413,175 @@ func TestDefaultGeneratePatchBodyFunc_IgnoresInjectedOrEquivalentResources(t *te
 					},
 				},
 				Pod: &corev1.Pod{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "p",
-						Namespace: "default",
-						Labels: map[string]string{
-							agentsv1alpha1.PodLabelTemplateHash: revision,
-						},
-					},
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{
 							{
 								Name:      "main",
-								Image:     tt.podImage,
 								Resources: tt.podResources,
 							},
 						},
 					},
-					Status: corev1.PodStatus{
-						ContainerStatuses: []corev1.ContainerStatus{
-							{Name: "main", ImageID: "img:1@sha256:old"},
+				},
+			})
+			if resizeContainers != nil {
+				t.Fatalf("expected no resize containers, got %+v", resizeContainers)
+			}
+		})
+	}
+}
+
+func TestDefaultGeneratePatchBodyFunc_ImageOnlyWithInjectedResource(t *testing.T) {
+	const revision = "rev-current"
+	body := DefaultGeneratePatchBodyFunc(InPlaceUpdateOptions{
+		Box: &agentsv1alpha1.Sandbox{
+			Spec: agentsv1alpha1.SandboxSpec{
+				EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+					Template: &corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{
+								Name:  "main",
+								Image: "img:2",
+								Resources: corev1.ResourceRequirements{
+									Requests: corev1.ResourceList{
+										corev1.ResourceCPU: resource.MustParse("500m"),
+									},
+								},
+							}},
 						},
 					},
 				},
-				Revision: revision,
-			})
+			},
+		},
+		Pod: &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Labels: map[string]string{
+					agentsv1alpha1.PodLabelTemplateHash: revision,
+				},
+			},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{
+					Name:  "main",
+					Image: "img:1",
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceCPU:              resource.MustParse("500m"),
+							corev1.ResourceEphemeralStorage: resource.MustParse("1Gi"),
+						},
+					},
+				}},
+			},
+			Status: corev1.PodStatus{
+				ContainerStatuses: []corev1.ContainerStatus{{
+					Name:    "main",
+					ImageID: "img:1@sha256:old",
+				}},
+			},
+		},
+		Revision: revision,
+	})
+	if body == "" {
+		t.Fatalf("expected non-empty patch body")
+	}
 
-			if !tt.wantPatch {
-				if body != "" {
-					t.Fatalf("expected empty patch body, got %s", body)
-				}
-				return
-			}
-			if body == "" {
-				t.Fatalf("expected non-empty patch body")
-			}
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(body), &decoded); err != nil {
+		t.Fatalf("unmarshal patch: %v", err)
+	}
+	metadata, _ := decoded["metadata"].(map[string]any)
+	annotations, _ := metadata["annotations"].(map[string]any)
+	stateRaw, ok := annotations[PodAnnotationInPlaceUpdateStateKey].(string)
+	if !ok || stateRaw == "" {
+		t.Fatalf("expected inplace update state annotation, got %v", annotations)
+	}
+	state := &InPlaceUpdateState{}
+	if err := json.Unmarshal([]byte(stateRaw), state); err != nil {
+		t.Fatalf("decode state: %v", err)
+	}
+	if !state.UpdateImages || state.UpdateResources {
+		t.Fatalf("expected only UpdateImages=true, got %+v", state)
+	}
+}
 
-			var decoded map[string]any
-			if err := json.Unmarshal([]byte(body), &decoded); err != nil {
-				t.Fatalf("unmarshal patch: %v", err)
-			}
-			metadata, _ := decoded["metadata"].(map[string]any)
-			annotations, _ := metadata["annotations"].(map[string]any)
-			stateRaw, ok := annotations[PodAnnotationInPlaceUpdateStateKey].(string)
-			if !ok || stateRaw == "" {
-				t.Fatalf("expected inplace update state annotation, got %v", annotations)
-			}
-			state := &InPlaceUpdateState{}
-			if err := json.Unmarshal([]byte(stateRaw), state); err != nil {
-				t.Fatalf("decode state: %v", err)
-			}
-			if state.UpdateImages != tt.wantUpdateImages || state.UpdateResources != tt.wantUpdateResources {
-				t.Fatalf("unexpected update state: got images=%v resources=%v, want images=%v resources=%v",
-					state.UpdateImages, state.UpdateResources, tt.wantUpdateImages, tt.wantUpdateResources)
-			}
-		})
+func TestDefaultGeneratePatchBodyFunc_UsesExplicitResourceUpdateIntent(t *testing.T) {
+	const revision = "rev-current"
+	box := &agentsv1alpha1.Sandbox{
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{
+							Name:  "main",
+							Image: "img:1",
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceCPU: resource.MustParse("1"),
+								},
+							},
+						}},
+					},
+				},
+			},
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Labels: map[string]string{
+				agentsv1alpha1.PodLabelTemplateHash: revision,
+			},
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:  "main",
+				Image: "img:1",
+				Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{
+						corev1.ResourceCPU: resource.MustParse("500m"),
+					},
+				},
+			}},
+		},
+	}
+
+	withoutIntent := DefaultGeneratePatchBodyFunc(InPlaceUpdateOptions{
+		Box:      box,
+		Pod:      pod,
+		Revision: revision,
+	})
+	if withoutIntent != "" {
+		t.Fatalf("expected resource differences alone not to generate a patch, got %s", withoutIntent)
+	}
+
+	postResizePod := pod.DeepCopy()
+	postResizePod.Spec.Containers[0].Resources = box.Spec.Template.Spec.Containers[0].Resources
+	withIntent := DefaultGeneratePatchBodyFunc(InPlaceUpdateOptions{
+		Box:                    box,
+		Pod:                    postResizePod,
+		Revision:               revision,
+		ResourceUpdateRequired: true,
+	})
+	if withIntent == "" {
+		t.Fatalf("expected explicit resource update intent to generate a patch")
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(withIntent), &decoded); err != nil {
+		t.Fatalf("unmarshal patch: %v", err)
+	}
+	metadata, _ := decoded["metadata"].(map[string]any)
+	annotations, _ := metadata["annotations"].(map[string]any)
+	stateRaw, ok := annotations[PodAnnotationInPlaceUpdateStateKey].(string)
+	if !ok || stateRaw == "" {
+		t.Fatalf("expected inplace update state annotation, got %v", annotations)
+	}
+	state := &InPlaceUpdateState{}
+	if err := json.Unmarshal([]byte(stateRaw), state); err != nil {
+		t.Fatalf("decode state: %v", err)
+	}
+	if state.UpdateImages || !state.UpdateResources {
+		t.Fatalf("expected only UpdateResources=true, got %+v", state)
+	}
+	if _, exists := decoded["spec"]; exists {
+		t.Fatalf("resource update intent patch should not contain spec, got %s", withIntent)
 	}
 }
 
@@ -1830,6 +1916,7 @@ func TestIsInplaceUpdateCompleted(t *testing.T) {
 }
 
 func TestResourceOnlyUpdatePayloads(t *testing.T) {
+	const revision = "rev-resource-only"
 	opts := InPlaceUpdateOptions{
 		Box: &agentsv1alpha1.Sandbox{
 			Spec: agentsv1alpha1.SandboxSpec{
@@ -1856,6 +1943,9 @@ func TestResourceOnlyUpdatePayloads(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "p1",
 				Namespace: "default",
+				Labels: map[string]string{
+					agentsv1alpha1.PodLabelTemplateHash: revision,
+				},
 			},
 			Spec: corev1.PodSpec{
 				Containers: []corev1.Container{
@@ -1871,24 +1961,47 @@ func TestResourceOnlyUpdatePayloads(t *testing.T) {
 				},
 			},
 		},
-		Revision: "rev-resource-only",
+		Revision: revision,
 	}
+
+	resizeContainers := DefaultBuildResizeContainers(opts)
+	if len(resizeContainers) != 1 {
+		t.Fatalf("expected one resize container, got %+v", resizeContainers)
+	}
+	got := resizeContainers[0].Resources.Requests[corev1.ResourceCPU]
+	if got.MilliValue() != 1000 {
+		t.Fatalf("expected cpu request=1000m, got=%dm", got.MilliValue())
+	}
+
+	postResizePod := opts.Pod.DeepCopy()
+	postResizePod.Spec.Containers[0].Resources = resizeContainers[0].Resources
+	opts.Pod = postResizePod
+	opts.ResourceUpdateRequired = true
 
 	patchBody := DefaultGeneratePatchBodyFunc(opts)
 	if patchBody == "" {
 		t.Fatalf("expected patch body for resource-only update")
 	}
-	if strings.Contains(patchBody, `"spec"`) {
-		t.Fatalf("resource-only patch should not contain spec, got: %s", patchBody)
-	}
 
-	resizeContainers := DefaultBuildResizeContainers(opts)
-	if len(resizeContainers) == 0 {
-		t.Fatalf("expected resize containers")
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(patchBody), &decoded); err != nil {
+		t.Fatalf("unmarshal patch: %v", err)
 	}
-	got := resizeContainers[0].Resources.Requests[corev1.ResourceCPU]
-	if got.MilliValue() != 1000 {
-		t.Fatalf("expected cpu request=1000m, got=%dm", got.MilliValue())
+	if _, exists := decoded["spec"]; exists {
+		t.Fatalf("resource-only metadata patch should not contain spec, got: %s", patchBody)
+	}
+	metadata, _ := decoded["metadata"].(map[string]any)
+	annotations, _ := metadata["annotations"].(map[string]any)
+	stateRaw, ok := annotations[PodAnnotationInPlaceUpdateStateKey].(string)
+	if !ok || stateRaw == "" {
+		t.Fatalf("expected inplace update state annotation, got %v", annotations)
+	}
+	state := &InPlaceUpdateState{}
+	if err := json.Unmarshal([]byte(stateRaw), state); err != nil {
+		t.Fatalf("decode state: %v", err)
+	}
+	if state.UpdateImages || !state.UpdateResources {
+		t.Fatalf("expected only UpdateResources=true, got %+v", state)
 	}
 }
 

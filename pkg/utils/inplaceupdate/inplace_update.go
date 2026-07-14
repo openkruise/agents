@@ -104,10 +104,10 @@ type InPlaceUpdateOptions struct {
 	Pod      *corev1.Pod
 	// for future extensions of pod update behavior
 	ExtensionAnnotations map[string]string
-	// ResourceUpdateRequired records that this in-place update has requested
-	// a resource resize even if the current pod spec already matches the
-	// sandbox template after the resize patch. The completion check still
-	// needs this signal so it waits for kubelet status.resources to catch up.
+	// ResourceUpdateRequired carries the resource resize intent determined before
+	// the resize operation. It must not be inferred from the post-resize Pod spec,
+	// which may already match the Sandbox template. The update state needs this
+	// intent to wait for kubelet status.resources to catch up.
 	ResourceUpdateRequired bool
 }
 
@@ -180,26 +180,15 @@ func DefaultGeneratePatchBodyFunc(opts InPlaceUpdateOptions) string {
 		if !ok {
 			continue
 		}
-		imageChanged := origin.Image != container.Image
-		resourceChanged := !ResourcesEqual(origin.Resources, container.Resources)
-		if !imageChanged && !resourceChanged {
+		if origin.Image == container.Image {
 			continue
 		}
-		patchContainer := corev1.Container{
-			Name: container.Name,
-		}
-		if imageChanged {
-			patchContainer.Image = origin.Image
-			patchSpec.Containers = append(patchSpec.Containers, patchContainer)
-			state.UpdateImages = true
-			imageId := originStatus[container.Name]
-			state.LastContainerStatuses[container.Name] = InPlaceUpdateContainerStatus{
-				ImageID: imageId,
-			}
-		}
-		if resourceChanged {
-			state.UpdateResources = true
-		}
+		patchContainer := corev1.Container{Name: container.Name}
+		patchContainer.Image = origin.Image
+		patchSpec.Containers = append(patchSpec.Containers, patchContainer)
+		state.UpdateImages = true
+		imageId := originStatus[container.Name]
+		state.LastContainerStatuses[container.Name] = InPlaceUpdateContainerStatus{ImageID: imageId}
 	}
 	annotationsPatch := map[string]string{}
 	if state.UpdateImages || state.UpdateResources {
