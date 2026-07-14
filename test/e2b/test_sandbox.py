@@ -573,7 +573,19 @@ def test_is_running(sandbox_context, config):
     assert sbx.is_running()  # Returns True
 
     sbx.kill()
-    assert not sbx.is_running()  # Returns False
+    # kill() sends a DELETE request that returns immediately, but the
+    # underlying pod deletion is asynchronous — the gateway's informer
+    # cache may still serve the route for a few hundred milliseconds.
+    # Poll until is_running() returns False.
+    max_wait = 30
+    interval = 1
+    deadline = time.time() + max_wait
+    while time.time() < deadline:
+        if not sbx.is_running():
+            break
+        time.sleep(interval)
+    assert not sbx.is_running(), \
+        f"Sandbox was still running {max_wait}s after kill()"
 
 
 zero_time = datetime(1, 1, 1, 0, 0, tzinfo=tzutc())
