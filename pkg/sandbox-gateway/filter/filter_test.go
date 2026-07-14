@@ -1599,3 +1599,122 @@ func TestWakeAndContinueSuccess(t *testing.T) {
 	assert.NotNil(t, metadata)
 	assert.Equal(t, "10.0.0.1:49983", metadata["host"])
 }
+
+// TestShouldWakeSandbox tests the pure branches of shouldWakeSandbox that
+// do not require a real cache provider.
+func TestShouldWakeSandbox(t *testing.T) {
+	// Create a non-nil waker with nil cache for cases that return before
+	// reaching HasWakeAnnotation.
+	wake.InitWaker(nil)
+	t.Cleanup(func() { wake.InitWaker(nil) })
+	waker := wake.GetWaker()
+
+	tests := []struct {
+		name       string
+		route      proxy.Route
+		sandboxID  string
+		enableWake bool
+		waker      *wake.Waker
+		want       bool
+	}{
+		{
+			name:       "state not paused returns false",
+			route:      proxy.Route{State: agentsv1alpha1.SandboxStateCreating, WakeOnTraffic: true},
+			sandboxID:  "default--sbx",
+			enableWake: true,
+			waker:      waker,
+			want:       false,
+		},
+		{
+			name:       "wake on traffic disabled returns false",
+			route:      proxy.Route{State: agentsv1alpha1.SandboxStatePaused, WakeOnTraffic: true},
+			sandboxID:  "default--sbx",
+			enableWake: false,
+			waker:      waker,
+			want:       false,
+		},
+		{
+			name:       "nil waker returns false",
+			route:      proxy.Route{State: agentsv1alpha1.SandboxStatePaused, WakeOnTraffic: true},
+			sandboxID:  "default--sbx",
+			enableWake: true,
+			waker:      nil,
+			want:       false,
+		},
+		{
+			name:       "invalid sandbox ID returns false",
+			route:      proxy.Route{State: agentsv1alpha1.SandboxStatePaused, WakeOnTraffic: true},
+			sandboxID:  "no-separator",
+			enableWake: true,
+			waker:      waker,
+			want:       false,
+		},
+		{
+			name:       "route wake on traffic true returns true",
+			route:      proxy.Route{State: agentsv1alpha1.SandboxStatePaused, WakeOnTraffic: true},
+			sandboxID:  "default--sbx",
+			enableWake: true,
+			waker:      waker,
+			want:       true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.EnableWakeOnTraffic = tt.enableWake
+			f := &sandboxFilter{config: cfg}
+			got := f.shouldWakeSandbox(tt.route, tt.sandboxID, tt.waker)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// TestShouldWakeSandboxAnnotationFallback tests the HasWakeAnnotation fallback
+// path in shouldWakeSandbox using a real informer cache.
+func TestShouldWakeSandboxAnnotationFallback(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.EnableWakeOnTraffic = true
+
+	route := proxy.Route{
+		State:         agentsv1alpha1.SandboxStatePaused,
+		WakeOnTraffic: false, // Force annotation fallback
+	}
+
+	t.Run("annotation present returns true", func(t *testing.T) {
+		sbx := &agentsv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "with-annot",
+				Namespace: "default",
+				Annotations: map[string]string{
+					agentsv1alpha1.AnnotationWakeOnTraffic: agentsv1alpha1.True,
+				},
+			},
+		}
+		cacheProvider, _, err := cachetest.NewTestCache(t, sbx)
+		require.NoError(t, err)
+
+		wake.InitWaker(cacheProvider)
+		t.Cleanup(func() { wake.InitWaker(nil) })
+
+		f := &sandboxFilter{config: cfg}
+		assert.True(t, f.shouldWakeSandbox(route, "default--with-annot", wake.GetWaker()))
+	})
+
+	t.Run("annotation absent returns false", func(t *testing.T) {
+		sbx := &agentsv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "no-annot",
+				Namespace: "default",
+			},
+		}
+		cacheProvider, _, err := cachetest.NewTestCache(t, sbx)
+		require.NoError(t, err)
+
+		wake.InitWaker(cacheProvider)
+		t.Cleanup(func() { wake.InitWaker(nil) })
+
+		f := &sandboxFilter{config: cfg}
+		assert.False(t, f.shouldWakeSandbox(route, "default--no-annot", wake.GetWaker()))
+	})
+}
