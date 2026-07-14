@@ -94,15 +94,16 @@ func (f *sandboxFilter) DecodeHeaders(header api.RequestHeaderMap, endStream boo
 		return api.Continue
 	}
 
-	logger.Debug("DecodeHeaders: adapter mapped request",
-		zap.String("sandboxID", sandboxID),
+	log := logger.With(zap.String("sandboxID", sandboxID))
+
+	log.Debug("DecodeHeaders: adapter mapped request",
 		zap.Int("sandboxPort", sandboxPort),
 		zap.Any("extraHeaders", extraHeaders))
 
 	// Look up the pod IP from registry
 	route, ok := registry.GetRegistry().Get(sandboxID)
 	if !ok {
-		logger.Warn("Sandbox not found in registry", zap.String("sandboxID", sandboxID))
+		log.Warn("Sandbox not found in registry")
 		f.callbacks.DecoderFilterCallbacks().SendLocalReply(
 			502,
 			"sandbox not found: "+sandboxID,
@@ -135,7 +136,7 @@ func (f *sandboxFilter) DecodeHeaders(header api.RequestHeaderMap, endStream boo
 			return api.Running
 		}
 		// Not running and not wakeable -> 502 (existing behavior)
-		logger.Warn("Sandbox is not running", zap.String("sandboxID", sandboxID), zap.String("state", route.State))
+		log.Warn("Sandbox is not running", zap.String("state", route.State))
 		f.callbacks.DecoderFilterCallbacks().SendLocalReply(
 			502,
 			"healthy sandbox not found: "+sandboxID,
@@ -151,8 +152,7 @@ func (f *sandboxFilter) DecodeHeaders(header api.RequestHeaderMap, endStream boo
 	if f.config.EnableAuth && route.AccessToken != "" {
 		requestToken, _ := header.Get(accessTokenHeader)
 		if subtle.ConstantTimeCompare([]byte(requestToken), []byte(route.AccessToken)) != 1 {
-			logger.Warn("Access token mismatch",
-				zap.String("sandboxID", sandboxID))
+			log.Warn("Access token mismatch")
 			f.callbacks.DecoderFilterCallbacks().SendLocalReply(
 				401,
 				"unauthorized: invalid or missing access token",
@@ -172,7 +172,7 @@ func (f *sandboxFilter) DecodeHeaders(header api.RequestHeaderMap, endStream boo
 	upstreamHost := fmt.Sprintf("%s:%d", route.IP, sandboxPort)
 	f.callbacks.StreamInfo().DynamicMetadata().Set("envoy.lb.original_dst", "host", upstreamHost)
 
-	logger.Debug("Upstream override set successfully", zap.String("upstreamHost", upstreamHost))
+	log.Debug("Upstream override set successfully", zap.String("upstreamHost", upstreamHost))
 	return api.Continue
 }
 
@@ -216,13 +216,14 @@ func (f *sandboxFilter) wakeAndContinue(
 	sandboxPort int,
 	waitTimeout time.Duration,
 ) {
+	log := logger.With(zap.String("sandboxID", sandboxID))
+
 	defer func() {
 		if r := recover(); r != nil {
 			if isEnvoyStreamGonePanic(r) {
 				return
 			}
-			logger.Error("panic during async wake",
-				zap.String("sandboxID", sandboxID), zap.Any("recover", r))
+			log.Error("panic during async wake", zap.Any("recover", r))
 			f.sendLocalReplyOnce(500, "wake failed", "wake_panic")
 		}
 	}()
@@ -233,8 +234,7 @@ func (f *sandboxFilter) wakeAndContinue(
 			// Filter was destroyed; do nothing.
 			return
 		}
-		logger.Warn("Sandbox wake failed",
-			zap.String("sandboxID", sandboxID), zap.Error(err))
+		log.Warn("Sandbox wake failed", zap.Error(err))
 		f.sendLocalReplyOnce(503, "sandbox wake failed: "+err.Error(), "sandbox_wake_failed")
 		return
 	}
@@ -242,12 +242,12 @@ func (f *sandboxFilter) wakeAndContinue(
 	// Wake succeeded — verify the sandbox is now Running in the registry.
 	route, ok := registry.GetRegistry().Get(sandboxID)
 	if !ok || route.State != agentsv1alpha1.SandboxStateRunning {
-		logger.Warn("Sandbox not running after wake", zap.String("sandboxID", sandboxID))
+		log.Warn("Sandbox not running after wake")
 		f.sendLocalReplyOnce(502, "healthy sandbox not found: "+sandboxID, "sandbox_not_running")
 		return
 	}
 
-	logger.Info("Sandbox woken successfully", zap.String("sandboxID", sandboxID))
+	log.Info("Sandbox woken successfully")
 	f.completeWithContinue(route, sandboxPort)
 }
 
