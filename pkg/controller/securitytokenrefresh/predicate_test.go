@@ -134,6 +134,18 @@ func TestNeedsRefreshPredicate(t *testing.T) {
 	unrelatedUpdate := newSandbox("a", true, sampleStatus, false)
 	unrelatedUpdate.Spec.Paused = true // a non-annotation mutation
 
+	// notServing/serving pair share the same (unchanged) annotation so only the
+	// serving-runtime transition can drive the predicate decision. A serving
+	// runtime requires BOTH Phase==Running and RuntimeInitialized==True; the gate
+	// is intentionally token-independent (never the aggregate Ready condition).
+	notServing := newSandbox("a", true, sampleStatus, false)
+	serving := newSandbox("a", true, sampleStatus, false)
+	serving.Status.Phase = agentsv1alpha1.SandboxRunning
+	serving.Status.Conditions = []metav1.Condition{{
+		Type:   string(agentsv1alpha1.RuntimeInitialized),
+		Status: metav1.ConditionTrue,
+	}}
+
 	p := needsRefreshPredicate()
 
 	t.Run("create on refresh target", func(t *testing.T) {
@@ -156,6 +168,12 @@ func TestNeedsRefreshPredicate(t *testing.T) {
 	})
 	t.Run("update onto deleting sandbox", func(t *testing.T) {
 		assert.False(t, p.Update(event.UpdateEvent{ObjectOld: target, ObjectNew: deleting}))
+	})
+	t.Run("gain serving runtime (none -> serving) with unchanged annotation re-enqueues", func(t *testing.T) {
+		assert.True(t, p.Update(event.UpdateEvent{ObjectOld: notServing, ObjectNew: serving}))
+	})
+	t.Run("lose serving runtime (serving -> none) with unchanged annotation is dropped", func(t *testing.T) {
+		assert.False(t, p.Update(event.UpdateEvent{ObjectOld: serving, ObjectNew: notServing}))
 	})
 }
 

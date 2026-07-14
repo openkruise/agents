@@ -27,6 +27,7 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -134,7 +135,12 @@ func TestReconcile(t *testing.T) {
 		// claimed toggles the LabelSandboxIsClaimed=true label.
 		claimed       bool
 		objectMissing bool
-		refresher     *fakeRefresher
+		// notServing leaves Phase/RuntimeInitialized unset so the sandbox is treated
+		// as having no serving runtime; by default cases set Phase=Running and
+		// RuntimeInitialized=True so the timing branches run. The gate is
+		// token-independent (never the aggregate Ready condition).
+		notServing bool
+		refresher  *fakeRefresher
 		// expected outcomes
 		expectErr        string
 		expectRequeueMin time.Duration
@@ -318,6 +324,22 @@ func TestReconcile(t *testing.T) {
 			expectCalls:      1,
 			expectEvent:      "TokenRefreshed",
 		},
+		{
+			// A sandbox with no serving runtime (e.g. paused/resuming) has no pod
+			// to receive the token, so the reconciler must defer the refresh
+			// entirely: no refresher call, no requeue and no event, even though the
+			// token is already inside the lead window. The refresh is picked up
+			// again on the no-runtime->serving predicate transition (and the resume
+			// flow's annotation rewrite).
+			name:                      "sandbox with no serving runtime defers refresh even when due",
+			status:                    `{"accessTokenExpiration":"` + expireNow + `"}`,
+			claimed:                   true,
+			notServing:                true,
+			refresher:                 &fakeRefresher{},
+			expectErr:                 "",
+			expectCalls:               0,
+			expectAnnotationUnchanged: true,
+		},
 	}
 
 	cleanup := withFlags(defaultRefreshLeadTime, 0, defaultRefreshRetryAfter)
@@ -329,6 +351,13 @@ func TestReconcile(t *testing.T) {
 			if !tt.objectMissing {
 				sbx = newSandbox(sandboxName, tt.claimed, tt.status, false)
 				sbx.Namespace = sandboxNs
+				if !tt.notServing {
+					sbx.Status.Phase = agentsv1alpha1.SandboxRunning
+					sbx.Status.Conditions = []metav1.Condition{{
+						Type:   string(agentsv1alpha1.RuntimeInitialized),
+						Status: metav1.ConditionTrue,
+					}}
+				}
 			}
 			r, rec, c := newReconciler(t, tt.refresher, now, sbx)
 
