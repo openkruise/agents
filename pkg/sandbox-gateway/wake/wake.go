@@ -22,7 +22,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"golang.org/x/sync/singleflight"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -41,11 +40,6 @@ import (
 // route locally and to peer gateways.
 type Waker struct {
 	cache cache.Provider
-
-	// flight coalesces concurrent Wake calls for the same sandbox so only
-	// one Resume is issued to the API server. Additional callers receive
-	// the shared result via DoChan.
-	flight singleflight.Group
 }
 
 var defaultWaker atomic.Pointer[Waker]
@@ -79,37 +73,17 @@ func (w *Waker) HasWakeAnnotation(ctx context.Context, namespace, name string) b
 }
 
 // Wake resumes a paused sandbox by delegating to sandboxcr.Sandbox.Resume().
-// Concurrent calls for the same sandbox (identified by namespace/name) are
-// coalesced via singleflight so only one Resume is issued to the API server.
-// The caller's context is used only for the wait deadline; the actual Resume
-// runs under a detached context so it survives individual caller cancellation.
+// The caller's context is used directly so that cancellation stops the wait
+// for this caller only, without affecting other concurrent or future callers.
+// Resume itself provides first-writer-wins dedup via retryUpdate.
 //
 // defaultWakeTimeout must be positive.  The caller (typically the filter) is
 // responsible for providing a valid timeout via Config.GetWakeTimeoutSeconds()
 // which defaults to 60s when the configured value is <= 0.
 func (w *Waker) Wake(ctx context.Context, namespace, name string, defaultWakeTimeout time.Duration) error {
-	key := namespace + "/" + name
-
-	// Use a detached context so the shared Resume is not tied to any single
-	// caller's context.  When the caller's ctx has a shorter deadline it can
-	// still bail out via DoChan + select.
-	wakeCtx, wakeCancel := context.WithTimeout(context.Background(), defaultWakeTimeout)
+	wakeCtx, wakeCancel := context.WithTimeout(ctx, defaultWakeTimeout)
 	defer wakeCancel()
-
-	type result struct{ err error }
-	ch := w.flight.DoChan(key, func() (interface{}, error) {
-		err := w.wakeInternal(wakeCtx, namespace, name, defaultWakeTimeout)
-		return result{err: err}, nil
-	})
-
-	select {
-	case r := <-ch:
-		// singleflight delivers the (possibly shared) result.
-		return r.Val.(result).err
-	case <-ctx.Done():
-		// Caller gave up; the shared work continues in the background.
-		return ctx.Err()
-	}
+	return w.wakeInternal(wakeCtx, namespace, name, defaultWakeTimeout)
 }
 
 // wakeInternal performs the actual wake work: reads annotations from cache,
