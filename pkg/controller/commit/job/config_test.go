@@ -52,8 +52,6 @@ func TestEnvConfig(t *testing.T) {
 		getFunc  func(*EnvConfig) string
 		want     string
 	}{
-		{name: "ContainerID", envKey: EnvContainerID, envValue: "abc123", getFunc: func(c *EnvConfig) string { return c.ContainerID() }, want: "abc123"},
-		{name: "CommitImage", envKey: EnvCommitImage, envValue: "registry.example.com/app:v1", getFunc: func(c *EnvConfig) string { return c.CommitImage() }, want: "registry.example.com/app:v1"},
 		{name: "AgentJobImage", envKey: EnvAgentJobImage, envValue: "agent-job:latest", getFunc: func(c *EnvConfig) string { return c.AgentJobImage() }, want: "agent-job:latest"},
 		{name: "ContainerdSockPath default", envKey: EnvContainerdSockPath, envValue: "", getFunc: func(c *EnvConfig) string { return c.ContainerdSockPath() }, want: "/run/containerd/"},
 		{name: "ContainerdSockPath override", envKey: EnvContainerdSockPath, envValue: "/var/run/custom/", getFunc: func(c *EnvConfig) string { return c.ContainerdSockPath() }, want: "/var/run/custom/"},

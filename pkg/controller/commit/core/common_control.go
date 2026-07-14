@@ -35,6 +35,7 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	jobutil "github.com/openkruise/agents/pkg/controller/commit/job"
 	"github.com/openkruise/agents/pkg/utils"
+	commitutil "github.com/openkruise/agents/pkg/utils/commit"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 )
 
@@ -64,8 +65,8 @@ func (r *commonControl) EnsureCommitRunning(ctx context.Context, args *EnsureFun
 
 	log.Info("EnsureCommitRunning", "name", commit.Name, "namespace", commit.Namespace, "phase", commit.Status.Phase)
 
-	if _, ok := commit.Annotations[utils.CommitAnnotationModeKey]; !ok {
-		patch := fmt.Sprintf(`{"metadata":{"annotations":{"%s":"%s"}}}`, utils.CommitAnnotationModeKey, CommonControlName)
+	if _, ok := commit.Annotations[commitutil.AnnotationModeKey]; !ok {
+		patch := fmt.Sprintf(`{"metadata":{"annotations":{"%s":"%s"}}}`, commitutil.AnnotationModeKey, CommonControlName)
 		rcvObject := &agentsv1alpha1.Commit{ObjectMeta: metav1.ObjectMeta{Namespace: commit.Namespace, Name: commit.Name}}
 		if err := r.Patch(ctx, rcvObject, client.RawPatch(types.MergePatchType, []byte(patch))); err != nil {
 			log.Error(err, "patch annotations failed", "commit", klog.KObj(commit))
@@ -74,11 +75,7 @@ func (r *commonControl) EnsureCommitRunning(ctx context.Context, args *EnsureFun
 	}
 
 	// If a Job already exists for this commit, do not create a duplicate.
-	jobList := &batchv1.JobList{}
-	if err := r.Client.List(ctx, jobList, client.InNamespace(commit.Namespace), client.MatchingFields{jobutil.IndexFieldCommitUID: string(commit.UID)}); err != nil {
-		return 0, fmt.Errorf("failed to list commit jobs: %w", err)
-	}
-	if len(jobList.Items) > 0 {
+	if len(args.JobList.Items) > 0 {
 		log.Info("commit job already exists, transitioning to Running", "commit", klog.KObj(commit))
 		setCommitRunning(args.NewStatus, commit)
 		return 0, nil
@@ -136,7 +133,7 @@ func (r *commonControl) EnsureCommitUpdated(ctx context.Context, args *EnsureFun
 
 	// List Jobs by LabelCommitUID since GenerateName produces a non-deterministic name.
 	jobList := &batchv1.JobList{}
-	if err := r.Client.List(ctx, jobList, client.InNamespace(commit.Namespace), client.MatchingFields{jobutil.IndexFieldCommitUID: string(commit.UID)}); err != nil {
+	if err := r.Client.List(ctx, jobList, client.InNamespace(commit.Namespace), client.MatchingFields{commitutil.IndexFieldCommitUID: string(commit.UID)}); err != nil {
 		return 0, fmt.Errorf("failed to list jobs: %w", err)
 	}
 	if len(jobList.Items) == 0 {
@@ -224,7 +221,7 @@ func (r *commonControl) listCRJobPods(ctx context.Context, commit *agentsv1alpha
 	// relying on the batch.kubernetes.io/job-name label which requires knowing
 	// the generated name.
 	matchingFields := client.MatchingFields{
-		jobutil.IndexFieldCommitUID: string(commit.UID),
+		commitutil.IndexFieldCommitUID: string(commit.UID),
 	}
 	if err := r.Client.List(ctx, jobPods, client.InNamespace(commit.Namespace), matchingFields); err != nil {
 		return nil, err

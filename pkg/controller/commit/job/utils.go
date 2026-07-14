@@ -26,20 +26,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-const (
-	LabelCommitName = "agents.kruise.io/commit-name"
-	LabelCommitUID  = "agents.kruise.io/commit-uid"
-
-	// IndexFieldCommitUID is the field index name for LabelCommitUID, used to speed
-	// up List queries that filter by commit UID.
-	IndexFieldCommitUID = "metadata.commit-uid"
-)
-
 // AgentJobContainerName is the name of the single container inside the commit
 // Job pod. Both the Job spec generator and downstream container-status readers
 // must reference this constant so that injected sidecars (e.g. service mesh
 // proxies) cannot accidentally pollute exit-code lookups.
-const AgentJobContainerName = "agent-job"
+const AgentJobContainerName = "commit-job"
 
 const (
 	ExitCodeSuccess              = 0

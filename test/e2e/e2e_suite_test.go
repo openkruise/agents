@@ -23,6 +23,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
@@ -49,6 +50,7 @@ func init() {
 	_ = corev1.AddToScheme(scheme)
 	_ = agentsv1alpha1.AddToScheme(scheme)
 	_ = appsv1.AddToScheme(scheme)
+	_ = batchv1.AddToScheme(scheme)
 
 	cfg := config.GetConfigOrDie()
 	c, err := client.New(cfg, client.Options{Scheme: scheme})

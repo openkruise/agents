@@ -83,6 +83,8 @@ spec:
         imagePullPolicy: IfNotPresent
         name: manager
         env:
+          - name: AGENT_JOB_IMAGE
+            value: commit-job:latest
           - name: CLUSTER_ID
             value: "e2e-cluster"
         ports: []

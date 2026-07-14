@@ -35,6 +35,7 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	jobutil "github.com/openkruise/agents/pkg/controller/commit/job"
+	commitutil "github.com/openkruise/agents/pkg/utils/commit"
 )
 
 func newTestScheme() *runtime.Scheme {
@@ -112,14 +113,14 @@ func newCommonControlForTest(c client.Client) *commonControl {
 // newFakeClientBuilder returns a fake client builder with the commit-UID field index pre-registered.
 func newFakeClientBuilder(scheme *runtime.Scheme) *fake.ClientBuilder {
 	commitUIDIndex := func(obj client.Object) []string {
-		if uid, ok := obj.GetLabels()[jobutil.LabelCommitUID]; ok {
+		if uid, ok := obj.GetLabels()[commitutil.LabelCommitUID]; ok {
 			return []string{uid}
 		}
 		return nil
 	}
 	return fake.NewClientBuilder().WithScheme(scheme).
-		WithIndex(&batchv1.Job{}, jobutil.IndexFieldCommitUID, commitUIDIndex).
-		WithIndex(&corev1.Pod{}, jobutil.IndexFieldCommitUID, commitUIDIndex)
+		WithIndex(&batchv1.Job{}, commitutil.IndexFieldCommitUID, commitUIDIndex).
+		WithIndex(&corev1.Pod{}, commitutil.IndexFieldCommitUID, commitUIDIndex)
 }
 
 // --- resolveRegistrySecret tests ---
@@ -214,7 +215,7 @@ func TestEnsureCommitUpdated_JobCompleted(t *testing.T) {
 			Name:      jobName,
 			Namespace: "default",
 			Labels: map[string]string{
-				jobutil.LabelCommitUID: string(commit.UID),
+				commitutil.LabelCommitUID: string(commit.UID),
 			},
 		},
 		Status: batchv1.JobStatus{
@@ -251,7 +252,7 @@ func TestEnsureCommitUpdated_JobFailed(t *testing.T) {
 			Name:      jobName,
 			Namespace: "default",
 			Labels: map[string]string{
-				jobutil.LabelCommitUID: string(commit.UID),
+				commitutil.LabelCommitUID: string(commit.UID),
 			},
 		},
 		Status: batchv1.JobStatus{
@@ -303,7 +304,7 @@ func TestEnsureCommitUpdated_JobStillRunning(t *testing.T) {
 			Name:      jobName,
 			Namespace: "default",
 			Labels: map[string]string{
-				jobutil.LabelCommitUID: string(commit.UID),
+				commitutil.LabelCommitUID: string(commit.UID),
 			},
 		},
 		Status: batchv1.JobStatus{
@@ -342,7 +343,7 @@ func TestEnsureCommitRunning_Success(t *testing.T) {
 	ctrl := newCommonControlForTest(fc)
 
 	newStatus := commit.Status.DeepCopy()
-	args := &EnsureFuncArgs{Pod: pod, Commit: commit, NewStatus: newStatus}
+	args := &EnsureFuncArgs{Pod: pod, Commit: commit, NewStatus: newStatus, JobList: &batchv1.JobList{}}
 
 	_, err := ctrl.EnsureCommitRunning(context.TODO(), args)
 	if err != nil {
@@ -360,7 +361,7 @@ func TestEnsureCommitRunning_Success(t *testing.T) {
 
 	// Verify Job was created (by label since GenerateName produces a random name)
 	jobList := &batchv1.JobList{}
-	if err := fc.List(context.TODO(), jobList, client.InNamespace("default"), client.MatchingFields{jobutil.IndexFieldCommitUID: string(commit.UID)}); err != nil {
+	if err := fc.List(context.TODO(), jobList, client.InNamespace("default"), client.MatchingFields{commitutil.IndexFieldCommitUID: string(commit.UID)}); err != nil {
 		t.Fatalf("failed to list jobs: %v", err)
 	}
 	if len(jobList.Items) != 1 {
@@ -379,7 +380,7 @@ func TestEnsureCommitRunning_MissingJobImage(t *testing.T) {
 	ctrl := newCommonControlForTest(fc)
 
 	newStatus := commit.Status.DeepCopy()
-	args := &EnsureFuncArgs{Pod: pod, Commit: commit, NewStatus: newStatus}
+	args := &EnsureFuncArgs{Pod: pod, Commit: commit, NewStatus: newStatus, JobList: &batchv1.JobList{}}
 
 	_, err := ctrl.EnsureCommitRunning(context.TODO(), args)
 	if err != nil {
@@ -404,7 +405,7 @@ func TestEnsureCommitRunning_JobPodAlreadyExists(t *testing.T) {
 			Name:      "existing-job-pod",
 			Namespace: "default",
 			Labels: map[string]string{
-				jobutil.LabelCommitUID: string(commit.UID),
+				commitutil.LabelCommitUID: string(commit.UID),
 			},
 		},
 		Status: corev1.PodStatus{Phase: corev1.PodRunning},
@@ -414,7 +415,7 @@ func TestEnsureCommitRunning_JobPodAlreadyExists(t *testing.T) {
 	ctrl := newCommonControlForTest(fc)
 
 	newStatus := commit.Status.DeepCopy()
-	args := &EnsureFuncArgs{Pod: pod, Commit: commit, NewStatus: newStatus}
+	args := &EnsureFuncArgs{Pod: pod, Commit: commit, NewStatus: newStatus, JobList: &batchv1.JobList{}}
 
 	_, err := ctrl.EnsureCommitRunning(context.TODO(), args)
 	if err != nil {
@@ -426,6 +427,48 @@ func TestEnsureCommitRunning_JobPodAlreadyExists(t *testing.T) {
 	}
 	if newStatus.StartTime == nil {
 		t.Error("expected StartTime to be set")
+	}
+}
+
+func TestEnsureCommitRunning_UsesJobListFromArgs(t *testing.T) {
+	scheme := newTestScheme()
+	commit := newTestCommit("test-commit", "default")
+	pod := newTestPod("test-pod", "default", "node-1")
+	existingJob := batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "existing-job",
+			Namespace: "default",
+			Labels: map[string]string{
+				commitutil.LabelCommitUID: string(commit.UID),
+			},
+		},
+	}
+
+	fc := newFakeClientBuilder(scheme).WithObjects(commit, pod).Build()
+	ctrl := newCommonControlForTest(fc)
+
+	newStatus := commit.Status.DeepCopy()
+	args := &EnsureFuncArgs{
+		Pod:       pod,
+		Commit:    commit,
+		NewStatus: newStatus,
+		JobList:   &batchv1.JobList{Items: []batchv1.Job{existingJob}},
+	}
+
+	_, err := ctrl.EnsureCommitRunning(context.TODO(), args)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if newStatus.Phase != agentsv1alpha1.CommitPhaseRunning {
+		t.Errorf("expected phase to be Running, got %s", newStatus.Phase)
+	}
+
+	jobList := &batchv1.JobList{}
+	if err := fc.List(context.TODO(), jobList, client.InNamespace("default"), client.MatchingFields{commitutil.IndexFieldCommitUID: string(commit.UID)}); err != nil {
+		t.Fatalf("failed to list jobs: %v", err)
+	}
+	if len(jobList.Items) != 0 {
+		t.Fatalf("expected no new Job to be created, got %d", len(jobList.Items))
 	}
 }
 
@@ -449,7 +492,7 @@ func TestEnsureCommitRunning_WithDockerSecret(t *testing.T) {
 	ctrl := newCommonControlForTest(fc)
 
 	newStatus := commit.Status.DeepCopy()
-	args := &EnsureFuncArgs{Pod: pod, Commit: commit, NewStatus: newStatus}
+	args := &EnsureFuncArgs{Pod: pod, Commit: commit, NewStatus: newStatus, JobList: &batchv1.JobList{}}
 
 	_, err := ctrl.EnsureCommitRunning(context.TODO(), args)
 	if err != nil {
@@ -458,7 +501,7 @@ func TestEnsureCommitRunning_WithDockerSecret(t *testing.T) {
 
 	// Verify Job has docker-config volume (by label since GenerateName produces a random name)
 	jobList := &batchv1.JobList{}
-	if err := fc.List(context.TODO(), jobList, client.InNamespace("default"), client.MatchingFields{jobutil.IndexFieldCommitUID: string(commit.UID)}); err != nil {
+	if err := fc.List(context.TODO(), jobList, client.InNamespace("default"), client.MatchingFields{commitutil.IndexFieldCommitUID: string(commit.UID)}); err != nil {
 		t.Fatalf("failed to list jobs: %v", err)
 	}
 	if len(jobList.Items) != 1 {
@@ -537,14 +580,14 @@ func TestGetLatestJobPodExitCode(t *testing.T) {
 						Name:      "job-pod-1",
 						Namespace: "default",
 						Labels: map[string]string{
-							jobutil.LabelCommitUID: "test-uid-1234",
+							commitutil.LabelCommitUID: "test-uid-1234",
 						},
 						CreationTimestamp: metav1.Now(),
 					},
 					Status: corev1.PodStatus{
 						ContainerStatuses: []corev1.ContainerStatus{
 							{
-								Name:        "agent-job",
+								Name:        "commit-job",
 								ContainerID: "containerd://abc",
 								State: corev1.ContainerState{
 									Terminated: &corev1.ContainerStateTerminated{ExitCode: 0},
@@ -567,14 +610,14 @@ func TestGetLatestJobPodExitCode(t *testing.T) {
 						Name:      "job-pod-1",
 						Namespace: "default",
 						Labels: map[string]string{
-							jobutil.LabelCommitUID: "test-uid-1234",
+							commitutil.LabelCommitUID: "test-uid-1234",
 						},
 						CreationTimestamp: metav1.Now(),
 					},
 					Status: corev1.PodStatus{
 						ContainerStatuses: []corev1.ContainerStatus{
 							{
-								Name:        "agent-job",
+								Name:        "commit-job",
 								ContainerID: "containerd://abc",
 								State: corev1.ContainerState{
 									Terminated: &corev1.ContainerStateTerminated{ExitCode: 1},
@@ -597,14 +640,14 @@ func TestGetLatestJobPodExitCode(t *testing.T) {
 						Name:      "job-pod-1",
 						Namespace: "default",
 						Labels: map[string]string{
-							jobutil.LabelCommitUID: "test-uid-1234",
+							commitutil.LabelCommitUID: "test-uid-1234",
 						},
 						CreationTimestamp: metav1.Now(),
 					},
 					Status: corev1.PodStatus{
 						ContainerStatuses: []corev1.ContainerStatus{
 							{
-								Name:        "agent-job",
+								Name:        "commit-job",
 								ContainerID: "containerd://abc",
 								State: corev1.ContainerState{
 									Terminated: &corev1.ContainerStateTerminated{ExitCode: 2},
@@ -627,14 +670,14 @@ func TestGetLatestJobPodExitCode(t *testing.T) {
 						Name:      "job-pod-1",
 						Namespace: "default",
 						Labels: map[string]string{
-							jobutil.LabelCommitUID: "test-uid-1234",
+							commitutil.LabelCommitUID: "test-uid-1234",
 						},
 						CreationTimestamp: metav1.Now(),
 					},
 					Status: corev1.PodStatus{
 						ContainerStatuses: []corev1.ContainerStatus{
 							{
-								Name:        "agent-job",
+								Name:        "commit-job",
 								ContainerID: "containerd://abc",
 								State: corev1.ContainerState{
 									Terminated: &corev1.ContainerStateTerminated{ExitCode: 6},
@@ -654,14 +697,14 @@ func TestGetLatestJobPodExitCode(t *testing.T) {
 						Name:      "job-pod-1",
 						Namespace: "default",
 						Labels: map[string]string{
-							jobutil.LabelCommitUID: "test-uid-1234",
+							commitutil.LabelCommitUID: "test-uid-1234",
 						},
 						CreationTimestamp: metav1.Now(),
 					},
 					Status: corev1.PodStatus{
 						ContainerStatuses: []corev1.ContainerStatus{
 							{
-								Name:        "agent-job",
+								Name:        "commit-job",
 								ContainerID: "containerd://abc",
 								State: corev1.ContainerState{
 									Running: &corev1.ContainerStateRunning{},
@@ -755,7 +798,7 @@ func TestEnsureCommitRunning_EmptyContainerID(t *testing.T) {
 	ctrl := newCommonControlForTest(fc)
 
 	newStatus := commit.Status.DeepCopy()
-	args := &EnsureFuncArgs{Pod: pod, Commit: commit, NewStatus: newStatus}
+	args := &EnsureFuncArgs{Pod: pod, Commit: commit, NewStatus: newStatus, JobList: &batchv1.JobList{}}
 
 	_, err := ctrl.EnsureCommitRunning(context.TODO(), args)
 	// Permanent error: nil returned (no retry), status marked Failed.
@@ -781,7 +824,7 @@ func TestEnsureCommitRunning_CreateTransientError(t *testing.T) {
 	ctrl := newCommonControlForTest(errClient)
 
 	newStatus := commit.Status.DeepCopy()
-	args := &EnsureFuncArgs{Pod: pod, Commit: commit, NewStatus: newStatus}
+	args := &EnsureFuncArgs{Pod: pod, Commit: commit, NewStatus: newStatus, JobList: &batchv1.JobList{}}
 
 	_, err := ctrl.EnsureCommitRunning(context.TODO(), args)
 	// Transient error: error returned for backoff retry, status NOT marked Failed.
@@ -810,7 +853,7 @@ func TestEnsureCommitUpdated_MultipleJobs(t *testing.T) {
 			Namespace:         "default",
 			CreationTimestamp: earlier,
 			Labels: map[string]string{
-				jobutil.LabelCommitUID: string(commit.UID),
+				commitutil.LabelCommitUID: string(commit.UID),
 			},
 		},
 		Status: batchv1.JobStatus{
@@ -825,7 +868,7 @@ func TestEnsureCommitUpdated_MultipleJobs(t *testing.T) {
 			Namespace:         "default",
 			CreationTimestamp: later,
 			Labels: map[string]string{
-				jobutil.LabelCommitUID: string(commit.UID),
+				commitutil.LabelCommitUID: string(commit.UID),
 			},
 		},
 		Status: batchv1.JobStatus{

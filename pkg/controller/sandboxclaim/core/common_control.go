@@ -282,7 +282,7 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 				sbx.SetAnnotations(annotations)
 			}
 
-			// inject storage-auth annotation for RRSA-based storage mounts
+			// inject storage-auth annotation for agent-identity storage mounts
 			if storageAuthKey != "" && storageAuthValue != "" {
 				annotations := sbx.GetAnnotations()
 				if annotations == nil {
@@ -431,7 +431,7 @@ func (c *commonControl) buildCSIMountOptions(ctx context.Context, mounts []agent
 	}
 	opts.MountOptionListRaw = string(csiMountOptionsRaw)
 
-	// Build storage-auth annotation via hook when enterprise RRSA-based
+	// Build storage-auth annotation via hook when enterprise agent-identity
 	// storage authentication is enabled.
 	var storageAuthKey, storageAuthValue string
 	if csiutils.BuildStorageAuthAnnotation != nil {

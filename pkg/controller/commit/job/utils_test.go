@@ -124,7 +124,7 @@ func TestGetCommitCondition(t *testing.T) {
 	}{
 		{
 			name:          "exit code 0 - success",
-			containerName: "agent-job",
+			containerName: "commit-job",
 			exitCode:      ExitCodeSuccess,
 			terminated:    true,
 			expectNil:     false,
@@ -134,7 +134,7 @@ func TestGetCommitCondition(t *testing.T) {
 		},
 		{
 			name:          "exit code 1 - commit failed",
-			containerName: "agent-job",
+			containerName: "commit-job",
 			exitCode:      ExitCodeCommitFailed,
 			terminated:    true,
 			expectNil:     false,
@@ -144,14 +144,14 @@ func TestGetCommitCondition(t *testing.T) {
 		},
 		{
 			name:          "unknown exit code returns nil",
-			containerName: "agent-job",
+			containerName: "commit-job",
 			exitCode:      999,
 			terminated:    true,
 			expectNil:     true,
 		},
 		{
 			name:          "running container returns nil",
-			containerName: "agent-job",
+			containerName: "commit-job",
 			terminated:    false,
 			expectNil:     true,
 		},

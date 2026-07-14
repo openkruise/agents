@@ -78,7 +78,7 @@ func (h *CSIMountHandler) GenerateNodePublishVolumeRequest(ctx context.Context, 
 
 	// to fetch secret object
 	// Skip secret lookup when the PV declares agent-identity authentication;
-	// in this mode the CSI binary authenticates via RRSA token rather than a K8s Secret.
+	// in this mode the CSI binary authenticates via an agent-identity token rather than a K8s Secret.
 	isAgentIdentityAuth := persistentVolumeObj.Spec.CSI.VolumeAttributes["authType"] == "agent-identity"
 	var secretObj *corev1.Secret
 	if !isAgentIdentityAuth && persistentVolumeObj.Spec.CSI.NodePublishSecretRef != nil {
@@ -120,7 +120,7 @@ func (h *CSIMountHandler) GenerateNodePublishVolumeRequest(ctx context.Context, 
 	}
 
 	// Allow internal implementations to inject provider-specific VolumeAttributes
-	// (e.g., sandboxCredentialProviderName for RRSA authentication) via the hook.
+	// (e.g., sandboxCredentialProviderName for agent-identity authentication) via the hook.
 	if NodePublishVolumeEnricher != nil {
 		NodePublishVolumeEnricher(ctx, mountRequest, persistentVolumeObj.Spec.CSI.VolumeAttributes)
 	}
@@ -152,7 +152,7 @@ func (h *CSIMountHandler) CSIMountOptionsConfig(ctx context.Context, mountReques
 // before generating the CSI NodePublishVolume request. It is nil by default in
 // community builds; enterprise deployments register an implementation via init()
 // to inject provider-specific attributes (e.g., sandboxCredentialProviderName
-// for RRSA authentication).
+// for agent-identity authentication).
 //
 // The hook receives the mount request and the PV's VolumeAttributes map (already
 // a deep copy). It may modify volumeAttributes in place.
@@ -164,7 +164,7 @@ var NodePublishVolumeEnricher func(ctx context.Context, mountRequest v1alpha1.CS
 // annotations are injected (community default behavior).
 //
 // Enterprise deployments register an implementation via init() to provide
-// RRSA-based storage authentication (credential metadata construction,
+// agent-identity storage authentication (credential metadata construction,
 // enrichment, and serialization).
 //
 // Returns:

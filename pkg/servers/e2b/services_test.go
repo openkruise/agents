@@ -2256,10 +2256,12 @@ func TestDescribeSandboxDeadClaimedSandbox(t *testing.T) {
 		"sandboxID": sandboxID,
 	}, user))
 
-	require.Nil(t, apiErr)
-	require.NotNil(t, describeResp.Body)
-	assert.Equal(t, sandboxID, describeResp.Body.SandboxID)
-	assert.Equal(t, v1alpha1.SandboxStateDead, describeResp.Body.State)
+	// A dead sandbox should be treated as not found from the E2B API perspective,
+	// because the E2B SDK cannot parse the "dead" state. Returning 404 allows
+	// clients to detect sandbox removal via SandboxNotFoundException.
+	assert.Nil(t, describeResp.Body)
+	require.NotNil(t, apiErr)
+	assert.Equal(t, http.StatusNotFound, apiErr.Code)
 }
 
 func TestDescribeSandboxReservedFailedSandboxReturnsNotFound(t *testing.T) {

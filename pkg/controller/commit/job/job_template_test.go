@@ -23,6 +23,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/openkruise/agents/api/v1alpha1"
+	commitutil "github.com/openkruise/agents/pkg/utils/commit"
 )
 
 func newTestJobGenerator() *JobGenerator {
@@ -83,36 +84,27 @@ func TestJobGenerator_commitContainerID(t *testing.T) {
 func TestJobGenerator_commitLabels(t *testing.T) {
 	g := newTestJobGenerator()
 	labels := g.commitLabels()
-	if labels[LabelCommitName] != "test-commit" {
-		t.Errorf("LabelCommitName=%q, want %q", labels[LabelCommitName], "test-commit")
+	if labels[commitutil.LabelCommitName] != "test-commit" {
+		t.Errorf("LabelCommitName=%q, want %q", labels[commitutil.LabelCommitName], "test-commit")
 	}
-	if labels[LabelCommitUID] != "test-uid" {
-		t.Errorf("LabelCommitUID=%q, want %q", labels[LabelCommitUID], "test-uid")
+	if labels[commitutil.LabelCommitUID] != "test-uid" {
+		t.Errorf("LabelCommitUID=%q, want %q", labels[commitutil.LabelCommitUID], "test-uid")
 	}
 }
 
-func TestJobGenerator_commitEnvs(t *testing.T) {
+func TestJobGenerator_commitArgs(t *testing.T) {
 	g := newTestJobGenerator()
-	envs := g.commitEnvs()
-	envMap := make(map[string]string, len(envs))
-	for _, e := range envs {
-		envMap[e.Name] = e.Value
+	args := g.commitArgs()
+	expected := []string{
+		"--container-id=abc123",
+		"--image=registry.example.com/app:v1",
 	}
-
-	expected := map[string]string{
-		EnvContainerID:        "abc123",
-		EnvCommitNamespace:    "test-ns",
-		EnvCommitName:         "test-commit",
-		EnvCommitImage:        "registry.example.com/app:v1",
-		EnvContainerName:      "test-container",
-		EnvAgentJobActionKey:  EnvAgentJobActionCommit,
-		EnvCommitPodName:      "test-pod",
-		EnvCommitPodNamespace: "test-ns",
-		EnvCommitPodUID:       "pod-uid",
+	if len(args) != len(expected) {
+		t.Fatalf("expected %d args, got %d: %v", len(expected), len(args), args)
 	}
-	for key, want := range expected {
-		if got := envMap[key]; got != want {
-			t.Errorf("env[%s]=%q, want %q", key, got, want)
+	for i, want := range expected {
+		if args[i] != want {
+			t.Errorf("args[%d]=%q, want %q", i, args[i], want)
 		}
 	}
 }
@@ -241,11 +233,20 @@ func TestGenerateCommitJob_Success(t *testing.T) {
 		t.Fatalf("expected 1 container, got %d", len(podSpec.Containers))
 	}
 	c := podSpec.Containers[0]
-	if c.Name != "agent-job" || c.Image != "agent-job:latest" {
+	if c.Name != "commit-job" || c.Image != "agent-job:latest" {
 		t.Errorf("unexpected container basics: name=%q image=%q", c.Name, c.Image)
 	}
 	if c.SecurityContext == nil || c.SecurityContext.RunAsUser == nil || *c.SecurityContext.RunAsUser != 0 {
 		t.Error("container must run as uid 0")
+	}
+	expectedArgs := []string{"--container-id=abc123", "--image=registry.example.com/app:v1"}
+	if len(c.Args) != len(expectedArgs) {
+		t.Fatalf("expected args %v, got %v", expectedArgs, c.Args)
+	}
+	for i, want := range expectedArgs {
+		if c.Args[i] != want {
+			t.Errorf("args[%d]=%q, want %q", i, c.Args[i], want)
+		}
 	}
 }
 
