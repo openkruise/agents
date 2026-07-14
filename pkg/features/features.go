@@ -65,6 +65,13 @@ const (
 
 	// CommitGate enables the Commit controller to commit container images from Sandbox pods.
 	CommitGate featuregate.Feature = "Commit"
+
+	// AutoPauseControllerGate enables probe-driven auto-pause/resume logic
+	// in the sandbox controller. When enabled, the controller reads probe
+	// results from Pod.Status.Conditions (populated by agent-runtime via
+	// PodProbeMarker Serverless protocol) and evaluates AutoPausePolicy
+	// to automatically pause/resume sandboxes.
+	AutoPauseControllerGate featuregate.Feature = "AutoPauseController"
 )
 
 var defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
@@ -80,6 +87,7 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
 	SecurityIdentityProviderGate:           {Default: false, PreRelease: featuregate.Alpha},
 	SandboxPauseCheckpointGate:             {Default: false, PreRelease: featuregate.Alpha},
 	CommitGate:                             {Default: false, PreRelease: featuregate.Alpha},
+	AutoPauseControllerGate:                {Default: true, PreRelease: featuregate.Alpha},
 }
 
 func init() {

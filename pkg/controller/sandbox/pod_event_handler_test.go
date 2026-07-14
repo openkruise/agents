@@ -1632,3 +1632,236 @@ func TestSandboxPodEventHandler_Delete(t *testing.T) {
 		})
 	}
 }
+
+func TestSandboxPodEventHandler_Update_DeletionTimestamp(t *testing.T) {
+	// When the deletion timestamp is set on the new pod but not on the old pod,
+	// the handler should call ScaleExpectation.ObserveScale. If isActivePodUpdate
+	// also returns true, the pod should be enqueued.
+	_ = utilfeature.DefaultMutableFeatureGate.Set("CachePodLabelSelector=true")
+	t.Cleanup(func() {
+		_ = utilfeature.DefaultMutableFeatureGate.Set("CachePodLabelSelector=true")
+	})
+
+	oldPod := newAgentPod("sbx-del", "default")
+	oldPod.Status.Phase = corev1.PodRunning
+
+	newPod := newAgentPod("sbx-del", "default")
+	newPod.Status.Phase = corev1.PodRunning
+	deletionTime := metav1.Now()
+	newPod.DeletionTimestamp = &deletionTime
+
+	q := workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[reconcile.Request]())
+	defer q.ShutDown()
+
+	handler := &SandboxPodEventHandler{}
+	handler.Update(context.Background(), event.TypedUpdateEvent[client.Object]{
+		ObjectOld: oldPod,
+		ObjectNew: newPod,
+	}, q)
+
+	// The pods are otherwise identical (same phase, same conditions), so
+	// isActivePodUpdate returns false and nothing should be enqueued.
+	assert.False(t, q.Len() > 0)
+}
+
+func TestSandboxPodEventHandler_Generic(t *testing.T) {
+	// Generic is a no-op handler; it should not enqueue anything.
+	q := workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[reconcile.Request]())
+	defer q.ShutDown()
+
+	handler := &SandboxPodEventHandler{}
+	handler.Generic(context.Background(), event.TypedGenericEvent[client.Object]{
+		Object: newAgentPod("sbx-1", "default"),
+	}, q)
+
+	assert.Equal(t, 0, q.Len())
+}
+
+func TestIsActivePodUpdate_ResetComplete(t *testing.T) {
+	tests := []struct {
+		name     string
+		oldPod   *corev1.Pod
+		newPod   *corev1.Pod
+		expected bool
+	}{
+		{
+			name: "ResetComplete condition added",
+			oldPod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					Phase:      corev1.PodRunning,
+					Conditions: []corev1.PodCondition{},
+				},
+			},
+			newPod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					Phase: corev1.PodRunning,
+					Conditions: []corev1.PodCondition{
+						{
+							Type:   core.PodConditionResetComplete,
+							Status: corev1.ConditionTrue,
+						},
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "ResetComplete condition status changed",
+			oldPod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					Phase: corev1.PodRunning,
+					Conditions: []corev1.PodCondition{
+						{
+							Type:   core.PodConditionResetComplete,
+							Status: corev1.ConditionFalse,
+						},
+					},
+				},
+			},
+			newPod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					Phase: corev1.PodRunning,
+					Conditions: []corev1.PodCondition{
+						{
+							Type:   core.PodConditionResetComplete,
+							Status: corev1.ConditionTrue,
+						},
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "ResetComplete condition unchanged",
+			oldPod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					Phase: corev1.PodRunning,
+					Conditions: []corev1.PodCondition{
+						{
+							Type:   core.PodConditionResetComplete,
+							Status: corev1.ConditionTrue,
+						},
+					},
+				},
+			},
+			newPod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					Phase: corev1.PodRunning,
+					Conditions: []corev1.PodCondition{
+						{
+							Type:   core.PodConditionResetComplete,
+							Status: corev1.ConditionTrue,
+						},
+					},
+				},
+			},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := isActivePodUpdate(tt.oldPod, tt.newPod)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestIsActivePodUpdate_ResizeConditionsUnchanged(t *testing.T) {
+	// Both PodResizePending and PodResizeInProgress exist and are identical.
+	// This should not trigger an update.
+	oldPod := &corev1.Pod{
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			Conditions: []corev1.PodCondition{
+				{
+					Type:   corev1.PodResizePending,
+					Status: corev1.ConditionTrue,
+					Reason: "Deferred",
+				},
+				{
+					Type:   corev1.PodResizeInProgress,
+					Status: corev1.ConditionTrue,
+					Reason: "Resizing",
+				},
+			},
+		},
+	}
+	newPod := &corev1.Pod{
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			Conditions: []corev1.PodCondition{
+				{
+					Type:   corev1.PodResizePending,
+					Status: corev1.ConditionTrue,
+					Reason: "Deferred",
+				},
+				{
+					Type:   corev1.PodResizeInProgress,
+					Status: corev1.ConditionTrue,
+					Reason: "Resizing",
+				},
+			},
+		},
+	}
+	result := isActivePodUpdate(oldPod, newPod)
+	assert.False(t, result)
+}
+
+func TestIsActivePodUpdate_ProbeConditions(t *testing.T) {
+	probeCondType := corev1.PodConditionType("agents.kruise.io/activity")
+	tests := []struct {
+		name     string
+		oldPod   *corev1.Pod
+		newPod   *corev1.Pod
+		expected bool
+	}{
+		{
+			name: "probe condition changed - status changed",
+			oldPod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					Phase: corev1.PodRunning,
+					Conditions: []corev1.PodCondition{
+						{Type: probeCondType, Status: corev1.ConditionTrue, Reason: "Active", Message: "agent is active"},
+					},
+				},
+			},
+			newPod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					Phase: corev1.PodRunning,
+					Conditions: []corev1.PodCondition{
+						{Type: probeCondType, Status: corev1.ConditionFalse, Reason: "Idle", Message: "agent is idle"},
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "probe condition unchanged",
+			oldPod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					Phase: corev1.PodRunning,
+					Conditions: []corev1.PodCondition{
+						{Type: probeCondType, Status: corev1.ConditionTrue, Reason: "Active", Message: "agent is active"},
+					},
+				},
+			},
+			newPod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					Phase: corev1.PodRunning,
+					Conditions: []corev1.PodCondition{
+						{Type: probeCondType, Status: corev1.ConditionTrue, Reason: "Active", Message: "agent is active"},
+					},
+				},
+			},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := isActivePodUpdate(tt.oldPod, tt.newPod)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}

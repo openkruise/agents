@@ -88,9 +88,27 @@ type SandboxSpec struct {
 	// +kubebuilder:validation:Format="date-time"
 	PauseTime *metav1.Time `json:"pauseTime,omitempty"`
 
-	// Lifecycle defines lifecycle hooks for sandbox upgrade.
+	// Lifecycle defines lifecycle hooks for sandbox.
 	// +optional
 	Lifecycle *SandboxLifecycle `json:"lifecycle,omitempty"`
+
+	// Probes defines a list of named probes that run periodically while the sandbox
+	// is Running. Each probe writes its result to a Pod Status Condition with
+	// type "agents.kruise.io/<name>". Probes are generic — their semantics (e.g.,
+	// "activity detection" vs "cron task detection") are defined by
+	// AutoPausePolicy.Pause/Resume, not by the probe itself.
+	//
+	// Probe execution is delegated to the agent-runtime sidecar via the
+	// PodProbeMarker Serverless protocol (kruise.io/podprobe annotation).
+	// The controller reads results from Pod.Status.Conditions and mirrors
+	// them to SandboxStatus.Conditions for observability.
+	// +optional
+	Probes []Probe `json:"probes,omitempty"`
+
+	// AutoPausePolicy defines pause/resume decision rules based on probe
+	// Conditions. Probes are defined in Spec.Probes.
+	// +optional
+	AutoPausePolicy *AutoPausePolicy `json:"autoPausePolicy,omitempty"`
 
 	// UpgradePolicy defines the upgrade strategy for the sandbox.
 	// +optional
@@ -155,7 +173,7 @@ type SandboxUpgradePolicy struct {
 	Type SandboxUpgradePolicyType `json:"type,omitempty"`
 }
 
-// SandboxLifecycle defines lifecycle hooks for sandbox upgrade.
+// SandboxLifecycle defines lifecycle hooks for sandbox.
 type SandboxLifecycle struct {
 	// PreUpgrade is the action executed before the upgrade.
 	// It is typically used to backup workspace data.
@@ -166,6 +184,138 @@ type SandboxLifecycle struct {
 	// It is typically used to restore workspace data.
 	// +optional
 	PostUpgrade *UpgradeAction `json:"postUpgrade,omitempty"`
+}
+
+// Probe defines a named probe that writes its result to a Pod Condition.
+// Embeds corev1.Probe inline so that exec/periodSeconds/timeoutSeconds/etc.
+// are directly accessible. Currently only exec probes are supported;
+// other corev1.Probe fields (httpGet, tcpSocket, grpc) may be supported
+// in the future as needed.
+type Probe struct {
+	// Name is the unique identifier for this probe within the sandbox.
+	// Probe results are written to a Condition with type "agents.kruise.io/<Name>".
+	// +kubebuilder:validation:Required
+	Name string `json:"name"`
+
+	// ContainerName specifies which container to execute the probe in.
+	// If empty, defaults to the first container in the pod spec.
+	// +optional
+	ContainerName string `json:"containerName,omitempty"`
+
+	// Probe embeds corev1.Probe inline. Currently only exec, periodSeconds,
+	// timeoutSeconds, and failureThreshold are actively used.
+	// +optional
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:Schemaless
+	v1.Probe `json:",inline"`
+}
+
+// AutoPausePolicy defines pause/resume decision rules based on probe
+// Conditions. Probes are defined separately in Spec.Probes.
+// When set, the sandbox controller evaluates pause/resume rules.
+// Probe results (from Spec.Probes) are read via Pod.Status.Conditions
+// and mirrored to SandboxStatus.Conditions.
+// +optional
+type AutoPausePolicy struct {
+	// Pause defines the pause policy for the sandbox.
+	// +optional
+	Pause *PausePolicy `json:"pause,omitempty"`
+
+	// Resume defines the resume policy for the sandbox.
+	// +optional
+	Resume *ResumePolicy `json:"resume,omitempty"`
+}
+
+// PausePolicy defines when to pause the sandbox based on probe results.
+type PausePolicy struct {
+	// WhenProbedIdleState pauses the sandbox when a probe's Condition message
+	// matches MessageRegex for at least ThresholdDuration.
+	// +optional
+	WhenProbedIdleState *ProbedIdleStateRule `json:"whenProbedIdleState,omitempty"`
+}
+
+// ResumePolicy defines when to resume the sandbox based on probe results.
+type ResumePolicy struct {
+	// WhenProbedScheduleTime resumes the sandbox before a scheduled task
+	// by parsing the probe's Condition message as a timestamp.
+	// +optional
+	WhenProbedScheduleTime *ProbedScheduleTimeRule `json:"whenProbedScheduleTime,omitempty"`
+}
+
+// ProbedIdleStateRule defines the rule for pausing when a probe reports
+// an idle state. The controller reads the referenced probe's Condition and
+// matches its message against MessageRegex. When the match persists for at
+// least ThresholdDuration (measured from the Condition's lastTransitionTime),
+// the sandbox is paused.
+type ProbedIdleStateRule struct {
+	// Probe is the name of the probe to evaluate for pause decisions.
+	// Must match a probe name in Spec.Probes.
+	// +kubebuilder:validation:Required
+	Probe string `json:"probe"`
+
+	// MessageRegex is a regular expression matched against the probe's
+	// Condition message (stdout). When the message matches, the Agent is
+	// considered inactive. When it does not match, the Agent is considered
+	// active and the sandbox stays Running.
+	// +kubebuilder:validation:Required
+	MessageRegex string `json:"messageRegex"`
+
+	// ThresholdDuration is the minimum time the probe's Condition message
+	// must continuously match MessageRegex before the sandbox is paused.
+	// Measured from the Condition's lastTransitionTime.
+	// If nil, the sandbox is paused immediately when the message matches.
+	// +optional
+	ThresholdDuration *metav1.Duration `json:"thresholdDuration,omitempty"`
+}
+
+// ProbedScheduleTimeRule defines the rule for resuming based on a probed
+// schedule time. The controller reads the referenced probe's Condition and,
+// when TimeFormat is "unix", parses its message as a Unix timestamp
+// (next event time). The sandbox is resumed LeadTime before the parsed timestamp.
+type ProbedScheduleTimeRule struct {
+	// Probe is the name of the probe to evaluate for resume decisions.
+	// Must match a probe name in Spec.Probes.
+	// +kubebuilder:validation:Required
+	Probe string `json:"probe"`
+
+	// TimeFormat indicates the format of the probe's Condition message for
+	// parsing as a timestamp. When set to "unix", the controller parses the
+	// message as a Unix timestamp (seconds since epoch) and sets NextResumeTime
+	// to timestamp - LeadTime.
+	// +optional
+	// +kubebuilder:validation:Enum=unix
+	TimeFormat string `json:"timeFormat,omitempty"`
+
+	// LeadTime is the duration before the parsed timestamp at which the
+	// sandbox should be resumed. For example, if the probe reports the
+	// next scheduled task at time T and LeadTime is 5m, the sandbox is
+	// resumed at T - 5m.
+	// +optional
+	// +kubebuilder:default="5m"
+	LeadTime *metav1.Duration `json:"leadTime,omitempty"`
+}
+
+// Schedule tracks the upcoming pause/resume timing for the auto-pause controller.
+// Reason indicates which rule produced the current schedule, NextPauseTime is the
+// next expected pause time, and NextResumeTime is the next expected resume time.
+// Both times are cleared once the corresponding action is triggered.
+type Schedule struct {
+	// Reason indicates which auto-pause rule triggered this schedule entry.
+	// Examples: "probedIdle" (pause triggered by WhenProbedIdleState),
+	// "probedSchedule" (resume triggered by WhenProbedScheduleTime).
+	// +optional
+	Reason string `json:"reason,omitempty"`
+
+	// NextPauseTime is when the sandbox is expected to be paused, computed from
+	// the pause policy once the probed idle threshold is about to be reached.
+	// It is cleared after a pause is triggered.
+	// +optional
+	NextPauseTime *metav1.Time `json:"nextPauseTime,omitempty"`
+
+	// NextResumeTime is when the sandbox is expected to be resumed, computed from
+	// the resume policy's probed schedule time. It is cleared after a resume is triggered.
+	// +optional
+	NextResumeTime *metav1.Time `json:"nextResumeTime,omitempty"`
 }
 
 // UpgradeAction defines an action to execute during sandbox upgrade.
@@ -235,6 +385,13 @@ type SandboxStatus struct {
 	// RecycledCount records the number of times this sandbox has been recycled.
 	// +optional
 	RecycledCount int32 `json:"recycledCount,omitempty"`
+
+	// Schedules contains upcoming scheduled pause/resume events.
+	// Only populated when Spec.AutoPausePolicy.Pause/Resume is configured.
+	// +optional
+	// +patchMergeKey=reason
+	// +patchStrategy=merge
+	Schedules []Schedule `json:"schedules,omitempty"`
 }
 
 // SandboxPhase is a label for the condition of a pod at the current time.
@@ -312,6 +469,36 @@ const (
 
 	// SandboxConditionRecycling tracks recycling progress.
 	SandboxConditionRecycling SandboxConditionType = "Recycling"
+
+	// SandboxConditionProbeValid indicates whether the probe configurations in
+	// Spec.Probes are valid. Invalid probes are skipped (not injected into the Pod)
+	// and the condition is set to False with the validation error details.
+	SandboxConditionProbeValid SandboxConditionType = "ProbeValid"
+)
+
+const (
+	// ProbeConditionPrefix is the prefix for probe Conditions written to
+	// SandboxStatus.Conditions. The full type is "agents.kruise.io/<probe-name>".
+	ProbeConditionPrefix = "agents.kruise.io/"
+
+	// Probe reason constants (written to Pod/Sandbox Conditions by the probe executor).
+	ProbeReasonSucceeded = "Succeeded"
+	ProbeReasonTimeout   = "Timeout"
+	ProbeReasonError     = "Error"
+	ProbeReasonUnhealthy = "Unhealthy"
+	ProbeReasonPending   = "Pending"
+
+	// Auto-pause decision reason constants (used for logging and events).
+	PauseReasonScheduledResume = "ScheduledResume"
+	PauseReasonProbePaused     = "ProbePaused"
+	PauseReasonAgentActive     = "AgentActive"
+	PauseReasonInactivePending = "InactivePending"
+	PauseReasonProbeFailed     = "ProbeFailed"
+	PauseReasonProbeUnhealthy  = "ProbeUnhealthy"
+
+	// Schedule reason constants (written to SandboxStatus.Schedules).
+	ScheduleReasonProbedIdle     = "probedIdle"
+	ScheduleReasonProbedSchedule = "probedSchedule"
 )
 
 const (
@@ -361,6 +548,10 @@ const (
 	SandboxRecyclingReasonFailed    = "RecyclingFailed"
 	SandboxRecyclingReasonTimeout   = "RecyclingTimeout"
 	SandboxRecyclingReasonRejected  = "RecyclingRejected"
+
+	// SandboxConditionProbeValid Reason
+	SandboxProbeValidReasonValidationPassed = "ValidationPassed"
+	SandboxProbeValidReasonValidationFailed = "ValidationFailed"
 )
 
 // +genclient

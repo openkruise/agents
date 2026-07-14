@@ -63,8 +63,80 @@ spec:
           spec:
             description: spec defines the desired state of Sandbox
             properties:
+              autoPausePolicy:
+                description: |-
+                  AutoPausePolicy defines pause/resume decision rules based on probe
+                  Conditions. Probes are defined in Spec.Probes.
+                properties:
+                  pause:
+                    description: Pause defines the pause policy for the sandbox.
+                    properties:
+                      whenProbedIdleState:
+                        description: |-
+                          WhenProbedIdleState pauses the sandbox when a probe's Condition message
+                          matches MessageRegex for at least ThresholdDuration.
+                        properties:
+                          messageRegex:
+                            description: |-
+                              MessageRegex is a regular expression matched against the probe's
+                              Condition message (stdout). When the message matches, the Agent is
+                              considered inactive. When it does not match, the Agent is considered
+                              active and the sandbox stays Running.
+                            type: string
+                          probe:
+                            description: |-
+                              Probe is the name of the probe to evaluate for pause decisions.
+                              Must match a probe name in Spec.Probes.
+                            type: string
+                          thresholdDuration:
+                            description: |-
+                              ThresholdDuration is the minimum time the probe's Condition message
+                              must continuously match MessageRegex before the sandbox is paused.
+                              Measured from the Condition's lastTransitionTime.
+                              If nil, the sandbox is paused immediately when the message matches.
+                            type: string
+                        required:
+                        - messageRegex
+                        - probe
+                        type: object
+                    type: object
+                  resume:
+                    description: Resume defines the resume policy for the sandbox.
+                    properties:
+                      whenProbedScheduleTime:
+                        description: |-
+                          WhenProbedScheduleTime resumes the sandbox before a scheduled task
+                          by parsing the probe's Condition message as a timestamp.
+                        properties:
+                          leadTime:
+                            default: 5m
+                            description: |-
+                              LeadTime is the duration before the parsed timestamp at which the
+                              sandbox should be resumed. For example, if the probe reports the
+                              next scheduled task at time T and LeadTime is 5m, the sandbox is
+                              resumed at T - 5m.
+                            type: string
+                          probe:
+                            description: |-
+                              Probe is the name of the probe to evaluate for resume decisions.
+                              Must match a probe name in Spec.Probes.
+                            type: string
+                          timeFormat:
+                            description: |-
+                              TimeFormat indicates the format of the probe's Condition message for
+                              parsing as a timestamp. When set to "unix", the controller parses the
+                              message as a Unix timestamp (seconds since epoch) and sets NextResumeTime
+                              to timestamp - LeadTime.
+                            enum:
+                            - unix
+                            type: string
+                        required:
+                        - probe
+                        type: object
+                    type: object
+                type: object
               lifecycle:
-                description: Lifecycle defines lifecycle hooks for sandbox upgrade.
+                description: Lifecycle defines lifecycle hooks for sandbox.
                 properties:
                   postUpgrade:
                     description: |-
@@ -142,6 +214,41 @@ spec:
                   type: string
                 type: array
                 x-kubernetes-list-type: atomic
+              probes:
+                description: |-
+                  Probes defines a list of named probes that run periodically while the sandbox
+                  is Running. Each probe writes its result to a Pod Status Condition with
+                  type "agents.kruise.io/<name>". Probes are generic — their semantics (e.g.,
+                  "activity detection" vs "cron task detection") are defined by
+                  AutoPausePolicy.Pause/Resume, not by the probe itself.
+
+                  Probe execution is delegated to the agent-runtime sidecar via the
+                  PodProbeMarker Serverless protocol (kruise.io/podprobe annotation).
+                  The controller reads results from Pod.Status.Conditions and mirrors
+                  them to SandboxStatus.Conditions for observability.
+                items:
+                  description: |-
+                    Probe defines a named probe that writes its result to a Pod Condition.
+                    Embeds corev1.Probe inline so that exec/periodSeconds/timeoutSeconds/etc.
+                    are directly accessible. Currently only exec probes are supported;
+                    other corev1.Probe fields (httpGet, tcpSocket, grpc) may be supported
+                    in the future as needed.
+                  properties:
+                    containerName:
+                      description: |-
+                        ContainerName specifies which container to execute the probe in.
+                        If empty, defaults to the first container in the pod spec.
+                      type: string
+                    name:
+                      description: |-
+                        Name is the unique identifier for this probe within the sandbox.
+                        Probe results are written to a Condition with type "agents.kruise.io/<Name>".
+                      type: string
+                  required:
+                  - name
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                type: array
               runtimes:
                 description: Runtimes - Runtime configuration for sandbox object
                 items:
@@ -202,11 +309,6 @@ spec:
           status:
             description: status defines the observed state of Sandbox
             properties:
-              recycledCount:
-                description: RecycledCount records the number of times this sandbox
-                  has been recycled.
-                format: int32
-                type: integer
               conditions:
                 description: |-
                   conditions represent the current state of the Sandbox resource.
@@ -310,9 +412,46 @@ spec:
                     description: PodUID is pod uid.
                     type: string
                 type: object
+              recycledCount:
+                description: RecycledCount records the number of times this sandbox
+                  has been recycled.
+                format: int32
+                type: integer
               sandboxIp:
                 description: SandboxIp is the ip address allocated to the sandbox.
                 type: string
+              schedules:
+                description: |-
+                  Schedules contains upcoming scheduled pause/resume events.
+                  Only populated when Spec.AutoPausePolicy.Pause/Resume is configured.
+                items:
+                  description: |-
+                    Schedule tracks the upcoming pause/resume timing for the auto-pause controller.
+                    Reason indicates which rule produced the current schedule, NextPauseTime is the
+                    next expected pause time, and NextResumeTime is the next expected resume time.
+                    Both times are cleared once the corresponding action is triggered.
+                  properties:
+                    nextPauseTime:
+                      description: |-
+                        NextPauseTime is when the sandbox is expected to be paused, computed from
+                        the pause policy once the probed idle threshold is about to be reached.
+                        It is cleared after a pause is triggered.
+                      format: date-time
+                      type: string
+                    nextResumeTime:
+                      description: |-
+                        NextResumeTime is when the sandbox is expected to be resumed, computed from
+                        the resume policy's probed schedule time. It is cleared after a resume is triggered.
+                      format: date-time
+                      type: string
+                    reason:
+                      description: |-
+                        Reason indicates which auto-pause rule triggered this schedule entry.
+                        Examples: "probedIdle" (pause triggered by WhenProbedIdleState),
+                        "probedSchedule" (resume triggered by WhenProbedScheduleTime).
+                      type: string
+                  type: object
+                type: array
               updateRevision:
                 description: UpdateRevision is the template-hash calculated from `spec.template`.
                 type: string

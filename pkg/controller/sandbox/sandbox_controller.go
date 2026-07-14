@@ -293,6 +293,21 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 	if newStatus.Phase != phaseBefore {
 		klog.InfoS("Sandbox phase finished", "sandbox", klog.KObj(box), "phase", string(phaseBefore), "nextPhase", string(newStatus.Phase))
 	}
+
+	// Handle auto-pause policy (probe-driven pause/resume decisions).
+	// Evaluated after calculateStatus and Ensure* so that probe conditions
+	// synced in the current reconcile cycle are available. Phase transitions
+	// triggered by Spec.Paused patching take effect in the next reconcile.
+	if utilfeature.DefaultFeatureGate.Enabled(features.AutoPauseControllerGate) && hasActiveAutoPausePolicy(box) {
+		autoPauseRequeue, err := r.handleAutoPause(ctx, box, newStatus)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if autoPauseRequeue > 0 && (requeueAfter == 0 || autoPauseRequeue < requeueAfter) {
+			requeueAfter = autoPauseRequeue
+		}
+	}
+
 	return ctrl.Result{RequeueAfter: requeueAfter}, r.updateSandboxStatus(ctx, *newStatus, box)
 }
 
@@ -645,7 +660,13 @@ func (r *SandboxReconciler) checkTimers(ctx context.Context, box *agentsv1alpha1
 		requeueAfter = box.Spec.ShutdownTime.Sub(now.Time)
 	}
 	if box.Spec.PauseTime != nil && !box.Spec.Paused {
-		if pauseTimeReached(box.Spec.PauseTime, now) {
+		// When AutoPausePolicy with Pause/Resume is active,
+		// the controller takes over pause decisions based on probe results.
+		// Skip the one-shot PauseTime timer to avoid conflicts.
+		if hasActiveAutoPausePolicy(box) {
+			klog.V(4).InfoS("skipping PauseTime timer; AutoPausePolicy is active",
+				"sandbox", klog.KObj(box))
+		} else if pauseTimeReached(box.Spec.PauseTime, now) {
 			klog.InfoS("sandbox pause time reached", "sandbox", klog.KObj(box))
 			modified := box.DeepCopy()
 			// Optimistic-lock so concurrent writers surface as 409 instead of

@@ -66,6 +66,7 @@ type commonControl struct {
 	rateLimiter          *RateLimiter
 	checkpointControl    *CheckpointControl
 	podControl           *PodControl
+	probeManager         *PodProbeManager
 	lifecycleHookFunc    LifecycleHookFunc
 	initializer          SandboxInitializer
 	recycleControl       *SandboxRecycleControl
@@ -79,6 +80,7 @@ func NewCommonControl(args SandboxControlArgs) SandboxControl {
 		rateLimiter:          args.RateLimiter,
 		checkpointControl:    args.CheckpointControl,
 		podControl:           args.PodControl,
+		probeManager:         NewPodProbeManager(args.Client, args.Recorder),
 		lifecycleHookFunc:    ExecuteLifecycleHook,
 		initializer: &defaultSandboxInitializer{
 			client:          args.Client,
@@ -148,6 +150,12 @@ func (r *commonControl) EnsureSandboxUpdated(ctx context.Context, args EnsureFun
 			return nil
 		}
 	}
+	// Ensure probe configurations are valid and take effect on the pod.
+	if err := r.probeManager.EnsureProbe(ctx, box, pod, newStatus); err != nil {
+		klog.ErrorS(err, "failed to ensure pod probe", "sandbox", klog.KObj(box))
+		return err
+	}
+
 	syncSandboxStatusFromPod(pod, newStatus)
 	return nil
 }

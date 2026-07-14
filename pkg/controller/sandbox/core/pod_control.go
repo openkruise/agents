@@ -40,9 +40,10 @@ import (
 
 // PodGenerateArgs holds the arguments for PodGenerateFunc.
 type PodGenerateArgs struct {
-	Client    client.Client
-	Box       *agentsv1alpha1.Sandbox
-	NewStatus *agentsv1alpha1.SandboxStatus
+	Client       client.Client
+	Box          *agentsv1alpha1.Sandbox
+	NewStatus    *agentsv1alpha1.SandboxStatus
+	ProbeManager *PodProbeManager
 }
 
 // PodGenerateFunc generates a Pod from a Sandbox spec.
@@ -58,13 +59,14 @@ type CreatePodArgs struct {
 // PodControl manages Pod creation for sandbox controllers.
 type PodControl struct {
 	client.Client
-	recorder    record.EventRecorder
-	generatePod PodGenerateFunc
+	recorder     record.EventRecorder
+	generatePod  PodGenerateFunc
+	probeManager *PodProbeManager
 }
 
 // NewPodControl creates a new PodControl.
 func NewPodControl(cli client.Client, recorder record.EventRecorder, genFn PodGenerateFunc) *PodControl {
-	return &PodControl{Client: cli, recorder: recorder, generatePod: genFn}
+	return &PodControl{Client: cli, recorder: recorder, generatePod: genFn, probeManager: NewPodProbeManager(cli, recorder)}
 }
 
 // CreatePod generates and creates a Pod for the given sandbox.
@@ -78,7 +80,7 @@ func (c *PodControl) CreatePod(ctx context.Context, args CreatePodArgs) (*corev1
 		}
 	}
 
-	pod, err := c.generatePod(ctx, PodGenerateArgs{Client: c.Client, Box: box, NewStatus: args.NewStatus})
+	pod, err := c.generatePod(ctx, PodGenerateArgs{Client: c.Client, Box: box, NewStatus: args.NewStatus, ProbeManager: c.probeManager})
 	if err != nil {
 		return nil, err
 	}
@@ -205,5 +207,13 @@ func generateBasePodFromSandbox(ctx context.Context, args PodGenerateArgs) (*cor
 		})
 	}
 	pod.Spec.Volumes = append(pod.Spec.Volumes, volumes...)
+
+	// Inject lifecycle probes as kruise.io/podprobe annotation (PodProbeMarker
+	// Serverless protocol). The agent-runtime sidecar reads this annotation,
+	// executes probes periodically, and writes results to Pod.Status.Conditions.
+	if args.ProbeManager != nil {
+		args.ProbeManager.InjectProbe(box, pod)
+	}
+
 	return pod, nil
 }
