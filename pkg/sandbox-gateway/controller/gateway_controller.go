@@ -21,13 +21,16 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/sandbox-gateway/jwtauth"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/registry"
 	proxyutils "github.com/openkruise/agents/pkg/utils/proxyutils"
 )
@@ -64,10 +67,11 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	return ctrl.Result{}, nil
 }
 
-func StartManager(ctx context.Context) error {
+func StartManager(ctx context.Context, jwtAuthManager *jwtauth.Manager) error {
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
 
 	scheme := runtime.NewScheme()
+	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(agentsv1alpha1.AddToScheme(scheme))
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
@@ -90,6 +94,22 @@ func StartManager(ctx context.Context) error {
 		}); err != nil {
 		return fmt.Errorf("unable to create controller: %w", err)
 	}
+	if err := addJWTAuthManager(mgr.GetAPIReader(), mgr.Add, jwtAuthManager); err != nil {
+		return err
+	}
 
 	return mgr.Start(ctx)
+}
+
+func addJWTAuthManager(reader client.Reader, add func(manager.Runnable) error, jwtAuthManager *jwtauth.Manager) error {
+	if jwtAuthManager == nil {
+		return nil
+	}
+	if err := jwtAuthManager.SetReader(reader); err != nil {
+		return fmt.Errorf("unable to configure JWT authentication reader: %w", err)
+	}
+	if err := add(jwtAuthManager); err != nil {
+		return fmt.Errorf("unable to add JWT authentication manager: %w", err)
+	}
+	return nil
 }

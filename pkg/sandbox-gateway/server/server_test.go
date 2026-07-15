@@ -19,6 +19,7 @@ package server
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -32,6 +33,41 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-gateway/registry"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 )
+
+func TestHealthHandlers(t *testing.T) {
+	tests := []struct {
+		name         string
+		path         string
+		method       string
+		readinessErr error
+		expectStatus int
+	}{
+		{name: "health ready", path: HealthAPI, method: http.MethodGet, expectStatus: http.StatusOK},
+		{name: "health method rejected", path: HealthAPI, method: http.MethodPost, expectStatus: http.StatusMethodNotAllowed},
+		{name: "readiness defaults ready", path: ReadyAPI, method: http.MethodGet, expectStatus: http.StatusOK},
+		{name: "readiness succeeds", path: ReadyAPI, method: http.MethodGet, readinessErr: nil, expectStatus: http.StatusOK},
+		{name: "readiness fails", path: ReadyAPI, method: http.MethodGet, readinessErr: errors.New("initializing"), expectStatus: http.StatusServiceUnavailable},
+		{name: "readiness method rejected", path: ReadyAPI, method: http.MethodPost, expectStatus: http.StatusMethodNotAllowed},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var checks []ReadinessCheck
+			if tt.name != "readiness defaults ready" && tt.path == ReadyAPI {
+				checks = append(checks, func() error { return tt.readinessErr })
+			}
+			server := NewServer(nil, 0, checks...)
+			request := httptest.NewRequest(tt.method, tt.path, nil)
+			response := httptest.NewRecorder()
+			if tt.path == HealthAPI {
+				server.handleHealth(response, request)
+			} else {
+				server.handleReady(response, request)
+			}
+			assert.Equal(t, tt.expectStatus, response.Code)
+		})
+	}
+}
 
 func TestGetMemberlistBindPort(t *testing.T) {
 	tests := []struct {

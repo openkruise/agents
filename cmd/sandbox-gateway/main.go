@@ -32,18 +32,20 @@ import (
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/controller"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/filter"
+	"github.com/openkruise/agents/pkg/sandbox-gateway/jwtauth"
 	peerserver "github.com/openkruise/agents/pkg/sandbox-gateway/server"
 )
 
 func init() {
+	jwtAuthManager := jwtauth.NewManager()
 	envoyhttp.RegisterHttpFilterFactoryAndConfigParser(
 		"sandbox-gateway",
 		filter.FilterFactory,
-		&filter.ConfigParser{},
+		filter.NewConfigParser(jwtAuthManager),
 	)
 
 	go func() {
-		if err := controller.StartManager(context.Background()); err != nil {
+		if err := controller.StartManager(context.Background(), jwtAuthManager); err != nil {
 			api.LogErrorf("sandbox controller manager exited with error: %v", err)
 		}
 	}()
@@ -69,7 +71,7 @@ func init() {
 			os.Exit(1)
 		}
 
-		peerServer := peerserver.NewServer(client, proxy.SystemPort)
+		peerServer := peerserver.NewServer(client, proxy.SystemPort, jwtAuthManager.Ready)
 		if err := peerServer.Start(ctx); err != nil {
 			api.LogErrorf("failed to start peer server: %v", err)
 			os.Exit(1)

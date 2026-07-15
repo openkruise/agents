@@ -65,7 +65,10 @@ spec:
               containerPort: 7788
               protocol: TCP
             - name: metrics
-              containerPort: 9090
+              containerPort: 9902
+              protocol: TCP
+            - name: system
+              containerPort: 7789
               protocol: TCP
           livenessProbe:
             tcpSocket:
@@ -75,8 +78,9 @@ spec:
             timeoutSeconds: 5
             failureThreshold: 3
           readinessProbe:
-            tcpSocket:
-              port: 7788
+            httpGet:
+              path: /readyz
+              port: system
             initialDelaySeconds: 5
             periodSeconds: 5
             timeoutSeconds: 3

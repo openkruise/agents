@@ -27,6 +27,7 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/registry"
 	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
+	proxyutils "github.com/openkruise/agents/pkg/utils/proxyutils"
 )
 
 var logger *zap.Logger
@@ -46,17 +47,19 @@ const (
 func FilterFactory(c interface{}, callbacks api.FilterCallbackHandler) api.StreamFilter {
 	cfg := c.(*FilterConfig)
 	return &sandboxFilter{
-		callbacks: callbacks,
-		config:    cfg.Config,
-		adapter:   cfg.Adapter,
+		callbacks:      callbacks,
+		config:         cfg.Config,
+		adapter:        cfg.Adapter,
+		jwtAuthManager: cfg.jwtAuthManager,
 	}
 }
 
 type sandboxFilter struct {
 	api.PassThroughStreamFilter
-	callbacks api.FilterCallbackHandler
-	config    *Config
-	adapter   *adapters.E2BAdapter
+	callbacks      api.FilterCallbackHandler
+	config         *Config
+	adapter        *adapters.E2BAdapter
+	jwtAuthManager JWTAuthManager
 }
 
 func (f *sandboxFilter) DecodeHeaders(header api.RequestHeaderMap, endStream bool) api.StatusType {
@@ -111,21 +114,9 @@ func (f *sandboxFilter) DecodeHeaders(header api.RequestHeaderMap, endStream boo
 		return api.LocalReply
 	}
 
-	// Authenticate the request if auth is enabled and the sandbox has an access token configured.
-	// When EnableAuth is false (default), the gateway skips token validation for backward compatibility.
-	if f.config.EnableAuth && route.AccessToken != "" {
-		requestToken, _ := header.Get(accessTokenHeader)
-		if subtle.ConstantTimeCompare([]byte(requestToken), []byte(route.AccessToken)) != 1 {
-			logger.Warn("Access token mismatch",
-				zap.String("sandboxID", sandboxID))
-			f.callbacks.DecoderFilterCallbacks().SendLocalReply(
-				401,
-				"unauthorized: invalid or missing access token",
-				nil,
-				-1,
-				"unauthorized",
-			)
-			return api.LocalReply
+	if f.config.EnableAuth {
+		if status := f.authenticate(header, route); status != api.Continue {
+			return status
 		}
 	}
 
@@ -139,4 +130,75 @@ func (f *sandboxFilter) DecodeHeaders(header api.RequestHeaderMap, endStream boo
 
 	logger.Debug("Upstream override set successfully", zap.String("upstreamHost", upstreamHost))
 	return api.Continue
+}
+
+func (f *sandboxFilter) authenticate(header api.RequestHeaderMap, route proxyutils.Route) api.StatusType {
+	if f.config.EnableJWTAuth {
+		return f.authenticateJWT(header, route)
+	}
+	if route.AccessToken == "" {
+		return api.Continue
+	}
+	requestToken, _ := header.Get(accessTokenHeader)
+	if subtle.ConstantTimeCompare([]byte(requestToken), []byte(route.AccessToken)) == 1 {
+		return api.Continue
+	}
+	logger.Warn("Access token mismatch", zap.String("sandboxID", route.ID))
+	f.callbacks.DecoderFilterCallbacks().SendLocalReply(
+		401,
+		"unauthorized: invalid or missing access token",
+		nil,
+		-1,
+		"unauthorized",
+	)
+	return api.LocalReply
+}
+
+func (f *sandboxFilter) authenticateJWT(header api.RequestHeaderMap, route proxyutils.Route) api.StatusType {
+	if f.jwtAuthManager == nil {
+		return f.verifierUnavailable(route.ID)
+	}
+	verifier := f.jwtAuthManager.Current()
+	if verifier == nil {
+		return f.verifierUnavailable(route.ID)
+	}
+	headerName := f.config.GetTrafficAccessTokenHeader()
+	rawJWT, _ := header.Get(headerName)
+	claims, err := verifier.Verify(rawJWT)
+	if err != nil {
+		logger.Warn("Traffic access token verification failed", zap.String("sandboxID", route.ID), zap.Error(err))
+		f.callbacks.DecoderFilterCallbacks().SendLocalReply(
+			401,
+			"unauthorized: invalid or missing traffic access token",
+			nil,
+			-1,
+			"unauthorized",
+		)
+		return api.LocalReply
+	}
+	if claims.Sandbox.SandboxID != route.ID || claims.Sandbox.SandboxUID != string(route.UID) {
+		logger.Warn("Traffic access token sandbox mismatch", zap.String("sandboxID", route.ID))
+		f.callbacks.DecoderFilterCallbacks().SendLocalReply(
+			401,
+			"unauthorized: traffic access token does not match sandbox",
+			nil,
+			-1,
+			"unauthorized",
+		)
+		return api.LocalReply
+	}
+	header.Del(headerName)
+	return api.Continue
+}
+
+func (f *sandboxFilter) verifierUnavailable(sandboxID string) api.StatusType {
+	logger.Warn("Traffic access token verifier is unavailable", zap.String("sandboxID", sandboxID))
+	f.callbacks.DecoderFilterCallbacks().SendLocalReply(
+		503,
+		"service unavailable: traffic access token verifier is not ready",
+		nil,
+		-1,
+		"jwt_verifier_not_ready",
+	)
+	return api.LocalReply
 }
