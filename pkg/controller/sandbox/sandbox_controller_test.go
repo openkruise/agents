@@ -3466,7 +3466,7 @@ func TestCalculateStatus(t *testing.T) {
 	}
 }
 
-func TestSandboxReconciler_AddSandboxFinalizerAndHash(t *testing.T) {
+func TestSandboxReconciler_AddSandboxHashAnnotation(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)
 	_ = agentsv1alpha1.AddToScheme(scheme)
@@ -3475,13 +3475,12 @@ func TestSandboxReconciler_AddSandboxFinalizerAndHash(t *testing.T) {
 		name                 string
 		sandbox              *agentsv1alpha1.Sandbox
 		expectErr            bool
-		expectFinalizerAdded bool
 		expectHashAnnotation bool
 		expectPatchCalled    bool
 		checkResult          func(t *testing.T, result *agentsv1alpha1.Sandbox, original *agentsv1alpha1.Sandbox)
 	}{
 		{
-			name: "sandbox without finalizer and hash - should add both",
+			name: "sandbox without hash annotation - should add hash annotation",
 			sandbox: &agentsv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-sandbox",
@@ -3503,23 +3502,11 @@ func TestSandboxReconciler_AddSandboxFinalizerAndHash(t *testing.T) {
 				},
 			},
 			expectErr:            false,
-			expectFinalizerAdded: true,
 			expectHashAnnotation: true,
 			expectPatchCalled:    true,
 			checkResult: func(t *testing.T, result *agentsv1alpha1.Sandbox, original *agentsv1alpha1.Sandbox) {
 				if result == nil {
 					t.Fatalf("Result sandbox should not be nil")
-				}
-				// Check finalizer
-				hasFinalizerInResult := false
-				for _, f := range result.Finalizers {
-					if f == core.SandboxFinalizer {
-						hasFinalizerInResult = true
-						break
-					}
-				}
-				if !hasFinalizerInResult {
-					t.Errorf("Finalizer should be added to result sandbox")
 				}
 				// Check hash annotation
 				if result.Annotations == nil {
@@ -3531,12 +3518,14 @@ func TestSandboxReconciler_AddSandboxFinalizerAndHash(t *testing.T) {
 			},
 		},
 		{
-			name: "sandbox with existing finalizer - should return without patching",
+			name: "sandbox with existing hash annotation - should return without patching",
 			sandbox: &agentsv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:       "test-sandbox-with-finalizer",
-					Namespace:  "default",
-					Finalizers: []string{core.SandboxFinalizer},
+					Name:      "test-sandbox-with-hash",
+					Namespace: "default",
+					Annotations: map[string]string{
+						agentsv1alpha1.SandboxHashImmutablePart: "existing-hash",
+					},
 				},
 				Spec: agentsv1alpha1.SandboxSpec{
 					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
@@ -3549,7 +3538,6 @@ func TestSandboxReconciler_AddSandboxFinalizerAndHash(t *testing.T) {
 				},
 			},
 			expectErr:            false,
-			expectFinalizerAdded: false,
 			expectHashAnnotation: false,
 			expectPatchCalled:    false,
 			checkResult: func(t *testing.T, result *agentsv1alpha1.Sandbox, original *agentsv1alpha1.Sandbox) {
@@ -3582,7 +3570,6 @@ func TestSandboxReconciler_AddSandboxFinalizerAndHash(t *testing.T) {
 				},
 			},
 			expectErr:            false,
-			expectFinalizerAdded: false,
 			expectHashAnnotation: false,
 			expectPatchCalled:    false,
 			checkResult: func(t *testing.T, result *agentsv1alpha1.Sandbox, original *agentsv1alpha1.Sandbox) {
@@ -3614,7 +3601,6 @@ func TestSandboxReconciler_AddSandboxFinalizerAndHash(t *testing.T) {
 				},
 			},
 			expectErr:            false,
-			expectFinalizerAdded: true,
 			expectHashAnnotation: true,
 			expectPatchCalled:    true,
 			checkResult: func(t *testing.T, result *agentsv1alpha1.Sandbox, original *agentsv1alpha1.Sandbox) {
@@ -3652,7 +3638,6 @@ func TestSandboxReconciler_AddSandboxFinalizerAndHash(t *testing.T) {
 				},
 			},
 			expectErr:            false,
-			expectFinalizerAdded: true,
 			expectHashAnnotation: true,
 			expectPatchCalled:    true,
 			checkResult: func(t *testing.T, result *agentsv1alpha1.Sandbox, original *agentsv1alpha1.Sandbox) {
@@ -3685,7 +3670,7 @@ func TestSandboxReconciler_AddSandboxFinalizerAndHash(t *testing.T) {
 			ctx := context.Background()
 
 			// Call the method
-			result, err := reconciler.addSandboxFinalizerAndHash(ctx, tt.sandbox)
+			result, err := reconciler.addSandboxHashAnnotation(ctx, tt.sandbox)
 
 			// Check error expectation
 			if tt.expectErr && err == nil {
@@ -3709,20 +3694,6 @@ func TestSandboxReconciler_AddSandboxFinalizerAndHash(t *testing.T) {
 				}, updatedSandbox)
 				if err != nil {
 					t.Fatalf("Failed to get updated sandbox: %v", err)
-				}
-
-				// Verify finalizer in persisted object
-				if tt.expectFinalizerAdded {
-					hasFinalizer := false
-					for _, f := range updatedSandbox.Finalizers {
-						if f == core.SandboxFinalizer {
-							hasFinalizer = true
-							break
-						}
-					}
-					if !hasFinalizer {
-						t.Errorf("Finalizer should be added to persisted sandbox")
-					}
 				}
 
 				// Verify hash annotation in persisted object
@@ -3871,6 +3842,7 @@ func TestReconcile_SandboxLifecycle_ClearSpecThenDelete(t *testing.T) {
 		}),
 		checkpointControl: core.NewCheckpointControl(fakeClient, fakeRecorder),
 		rateLimiter:       rl,
+		metricsCleanup:    &fakeEnqueuer{},
 	}
 
 	req := ctrl.Request{
@@ -3880,8 +3852,8 @@ func TestReconcile_SandboxLifecycle_ClearSpecThenDelete(t *testing.T) {
 		},
 	}
 
-	// Step 1: Create a Sandbox with Template, trigger reconcile, verify finalizer is added
-	t.Run("step1_create_sandbox_and_add_finalizer", func(t *testing.T) {
+	// Step 1: Create a Sandbox with Template, trigger reconcile, verify hash annotation is added
+	t.Run("step1_create_sandbox_and_add_hash_annotation", func(t *testing.T) {
 		sandbox := &agentsv1alpha1.Sandbox{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:       sbxName,
@@ -3911,20 +3883,13 @@ func TestReconcile_SandboxLifecycle_ClearSpecThenDelete(t *testing.T) {
 			t.Errorf("Expected no requeue, got requeue = %v", result.Requeue)
 		}
 
-		// Verify finalizer was added
+		// Verify hash annotation was added (finalizer is no longer added by default)
 		updatedSandbox := &agentsv1alpha1.Sandbox{}
 		if err := fakeClient.Get(ctx, req.NamespacedName, updatedSandbox); err != nil {
 			t.Fatalf("Failed to get sandbox: %v", err)
 		}
-		hasFinalizer := false
-		for _, f := range updatedSandbox.Finalizers {
-			if f == core.SandboxFinalizer {
-				hasFinalizer = true
-				break
-			}
-		}
-		if !hasFinalizer {
-			t.Errorf("Expected finalizer %s to be added", core.SandboxFinalizer)
+		if updatedSandbox.Annotations[agentsv1alpha1.SandboxHashImmutablePart] == "" {
+			t.Errorf("Expected hash annotation %s to be added", agentsv1alpha1.SandboxHashImmutablePart)
 		}
 	})
 
@@ -3990,11 +3955,7 @@ func TestReconcile_SandboxLifecycle_ClearSpecThenDelete(t *testing.T) {
 			if updatedSandbox.DeletionTimestamp.IsZero() {
 				t.Errorf("Expected DeletionTimestamp to be set")
 			}
-			for _, f := range updatedSandbox.Finalizers {
-				if f == core.SandboxFinalizer {
-					t.Errorf("Expected finalizer to be removed, but it still exists")
-				}
-			}
+			assert.NotContains(t, updatedSandbox.Finalizers, core.SandboxFinalizer)
 		} else {
 			// If sandbox is not found, it means finalizer was removed and sandbox was garbage collected - this is expected behavior
 			if !apierrors.IsNotFound(err) {
@@ -5124,7 +5085,7 @@ func TestEnsureVolumeClaimTemplates_CreateAlreadyExists(t *testing.T) {
 	}
 }
 
-func TestAddSandboxFinalizerAndHash_PatchError(t *testing.T) {
+func TestAddSandboxHashAnnotation_PatchError(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)
 	_ = agentsv1alpha1.AddToScheme(scheme)
@@ -5160,7 +5121,7 @@ func TestAddSandboxFinalizerAndHash_PatchError(t *testing.T) {
 		Scheme: scheme,
 	}
 
-	result, err := reconciler.addSandboxFinalizerAndHash(context.Background(), sandbox)
+	result, err := reconciler.addSandboxHashAnnotation(context.Background(), sandbox)
 	if err == nil {
 		t.Error("Expected error from Patch, got nil")
 	}

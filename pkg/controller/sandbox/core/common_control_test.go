@@ -31,6 +31,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/identity"
@@ -781,11 +782,65 @@ func TestCommonControl_EnsureSandboxPaused(t *testing.T) {
 			podExists: true,
 			wantErr:   false,
 		},
+		{
+			name: "re-pause after resume, finalizer already present, no Paused condition",
+			args: EnsureFuncArgs{
+				Pod: nil,
+				Box: &agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:       "test-sandbox",
+						Namespace:  "default",
+						Finalizers: []string{SandboxFinalizer},
+					},
+				},
+				NewStatus: &agentsv1alpha1.SandboxStatus{
+					// No Paused condition — simulates state after resume
+					// where calculateStatus removed the Paused condition.
+					Conditions: []metav1.Condition{
+						{
+							Type:               string(agentsv1alpha1.SandboxConditionReady),
+							Status:             metav1.ConditionTrue,
+							LastTransitionTime: metav1.Now(),
+							Reason:             agentsv1alpha1.SandboxReadyReasonPodReady,
+						},
+					},
+				},
+			},
+			podExists: false,
+			wantErr:   false,
+		},
+		{
+			name: "re-reconcile during pausing, finalizer already present, Paused condition exists",
+			args: EnsureFuncArgs{
+				Pod: nil,
+				Box: &agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:       "test-sandbox",
+						Namespace:  "default",
+						Finalizers: []string{SandboxFinalizer},
+					},
+				},
+				NewStatus: &agentsv1alpha1.SandboxStatus{
+					// Paused condition exists with Status=False — pausing in progress.
+					// The cond != nil branch should NOT attempt to add the finalizer.
+					Conditions: []metav1.Condition{
+						{
+							Type:               string(agentsv1alpha1.SandboxConditionPaused),
+							Status:             metav1.ConditionFalse,
+							Reason:             agentsv1alpha1.SandboxPausedReasonPausing,
+							LastTransitionTime: metav1.Now(),
+						},
+					},
+				},
+			},
+			podExists: false,
+			wantErr:   false,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			objects := []client.Object{}
+			objects := []client.Object{tt.args.Box}
 			if tt.args.Pod != nil {
 				objects = append(objects, tt.args.Pod)
 			}
@@ -796,12 +851,24 @@ func TestCommonControl_EnsureSandboxPaused(t *testing.T) {
 				recorder:             record.NewFakeRecorder(10),
 				inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fc, inplaceupdate.DefaultGeneratePatchBodyFunc),
 				podControl:           NewPodControl(fc, record.NewFakeRecorder(10), GeneratePodFromSandbox),
+				checkpointControl:    NewCheckpointControl(fc, record.NewFakeRecorder(10)),
 			}
 
 			err := control.EnsureSandboxPaused(context.TODO(), tt.args)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("EnsureSandboxPaused() error = %v, wantErr %v", err, tt.wantErr)
 				return
+			}
+
+			// Verify finalizer was added (first entry into paused state has no Paused condition)
+			if !tt.wantErr {
+				updatedBox := &agentsv1alpha1.Sandbox{}
+				if getErr := fc.Get(context.TODO(), types.NamespacedName{Name: tt.args.Box.Name, Namespace: tt.args.Box.Namespace}, updatedBox); getErr != nil {
+					t.Fatalf("Failed to get updated sandbox: %v", getErr)
+				}
+				if !controllerutil.ContainsFinalizer(updatedBox, SandboxFinalizer) {
+					t.Errorf("Expected finalizer %q to be added to sandbox", SandboxFinalizer)
+				}
 			}
 
 			// Verify pod was deleted if it existed initially
@@ -2426,6 +2493,66 @@ func TestCommonControl_EnsureSandboxResumed_LegacyBackfill(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCommonControl_EnsureSandboxResumed_RemovesFinalizer(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-sandbox",
+			Namespace: "default",
+		},
+		Spec: corev1.PodSpec{NodeName: "node1"},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.0.0.1",
+		},
+	}
+
+	box := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test-sandbox",
+			Namespace:  "default",
+			Finalizers: []string{SandboxFinalizer},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(box, pod).Build()
+	control := &commonControl{
+		Client:               fakeClient,
+		recorder:             record.NewFakeRecorder(10),
+		inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
+		podControl:           NewPodControl(fakeClient, record.NewFakeRecorder(10), GeneratePodFromSandbox),
+		checkpointControl:    NewCheckpointControl(fakeClient, record.NewFakeRecorder(10)),
+	}
+
+	now := metav1.Now()
+	newStatus := &agentsv1alpha1.SandboxStatus{
+		Phase: agentsv1alpha1.SandboxResuming,
+		Conditions: []metav1.Condition{
+			{
+				Type:               string(agentsv1alpha1.SandboxConditionResumed),
+				Status:             metav1.ConditionFalse,
+				LastTransitionTime: now,
+				Reason:             agentsv1alpha1.SandboxResumeReasonCreatePod,
+			},
+		},
+	}
+
+	err := control.EnsureSandboxResumed(context.TODO(), EnsureFuncArgs{Pod: pod, Box: box, NewStatus: newStatus})
+	assert.NoError(t, err)
+
+	// Phase should transition to Running
+	assert.Equal(t, agentsv1alpha1.SandboxRunning, newStatus.Phase)
+
+	// Finalizer should be removed from the persisted sandbox
+	updatedBox := &agentsv1alpha1.Sandbox{}
+	err = fakeClient.Get(context.TODO(), types.NamespacedName{Name: box.Name, Namespace: box.Namespace}, updatedBox)
+	assert.NoError(t, err)
+	assert.NotContains(t, updatedBox.Finalizers, SandboxFinalizer)
 }
 
 func TestCommonControl_EnsureSandboxTerminated_PodNotExist_NoFinalizer(t *testing.T) {

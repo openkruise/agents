@@ -574,11 +574,11 @@ following early return paths:
 3. ✅ Terminal state (Failed/Succeeded) → return (no Span needed)
 4. ✅ Empty template (after termination handling) → return (no Span needed)
 
-Specifically, the placement is after `addSandboxFinalizerAndHash` and before `calculateStatus`:
+Specifically, the placement is after `addSandboxHashAnnotation` and before `calculateStatus`:
 
 ```go
 // sandbox_controller.go Reconcile():
-box, err = r.addSandboxFinalizerAndHash(ctx, box)
+box, err = r.addSandboxHashAnnotation(ctx, box)
 if err != nil { return reconcile.Result{}, err }
 
 // --- Tracing: create Reconcile Span ---

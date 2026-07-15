@@ -192,6 +192,12 @@ func (r *commonControl) EnsureSandboxPaused(ctx context.Context, args EnsureFunc
 	pod, box, newStatus := args.Pod, args.Box, args.NewStatus
 	cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
 	if cond == nil {
+		// Add finalizer on first entry into paused state to ensure
+		// controller-mediated cleanup if the sandbox is deleted while paused.
+		if _, err := utils.PatchFinalizer(ctx, r.Client, box, utils.AddFinalizerOpType, SandboxFinalizer); err != nil {
+			return fmt.Errorf("failed to add finalizer for paused sandbox: %w", err)
+		}
+		klog.InfoS("Add finalizer for paused sandbox", "sandbox", klog.KObj(box))
 		cond = &metav1.Condition{
 			Type:               string(agentsv1alpha1.SandboxConditionPaused),
 			Status:             metav1.ConditionFalse,
@@ -265,6 +271,14 @@ func (r *commonControl) EnsureSandboxResumed(ctx context.Context, args EnsureFun
 
 	// when pod is running, transition sandbox from resuming to running
 	if pod.Status.Phase == corev1.PodRunning && isContainersConsistent(pod, box) {
+		// Remove finalizer on successful resume. The finalizer was added
+		// during pause; now that the pod is running again, it is no longer
+		// needed. If removal fails, return without transitioning the phase
+		// so the next reconcile retries.
+		if _, err := utils.PatchFinalizer(ctx, r.Client, box, utils.RemoveFinalizerOpType, SandboxFinalizer); err != nil {
+			return fmt.Errorf("failed to remove finalizer after resume: %w", err)
+		}
+		klog.InfoS("Remove finalizer after resume", "sandbox", klog.KObj(box))
 		newStatus.Phase = agentsv1alpha1.SandboxRunning
 		newStatus.NodeName = pod.Spec.NodeName
 		newStatus.SandboxIp = pod.Status.PodIP

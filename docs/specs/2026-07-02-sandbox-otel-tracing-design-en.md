@@ -184,7 +184,7 @@ In `pkg/controller/sandbox/sandbox_controller.go`'s `Reconcile` method:
 func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (crl ctrl.Result, err error) {
     // ... existing early return paths (Sandbox not found, expectation, terminal state, etc.) ...
 
-    box, err = r.addSandboxFinalizerAndHash(ctx, box)
+    box, err = r.addSandboxHashAnnotation(ctx, box)
     if err != nil { return reconcile.Result{}, err }
 
     // --- Tracing: create Reconcile Span ---
