@@ -23,6 +23,26 @@ The two deployment shapes the resolver must cover:
 `BrowserUse` returns a websocket URL that points at the sandbox, so its URL
 shape must follow the same native vs. customized split.
 
+## Architecture Decision Update
+
+The initial implementation kept domain resolution in `Controller` and left
+`pkg/servers/e2b/adapters` unchanged. This decision is superseded: interpreting
+native versus customized request shapes is adapter protocol knowledge and must
+not leak into HTTP handlers. The unified `E2BAdapter` selects the protocol shape,
+while `NativeE2BAdapter` and `CustomizedE2BAdapter` own their respective domain
+resolution and sandbox-address formatting rules.
+
+The shared `E2BMapper` interface gains domain resolution and sandbox-address
+formatting methods so the unified adapter can delegate all shape-specific work
+through `ChooseAdapter`. The data-plane `proxy.RequestAdapter` contract remains
+unchanged, and sandbox-gateway continues to call only `Map` and
+`IsSandboxRequest`.
+
+Static configuration precedence is not adapter protocol knowledge. The
+Controller short-circuits on a non-empty `--e2b-domain`; otherwise it asks the
+adapter to resolve the request authority. `BrowserUse` then passes the resolved
+domain back to the adapter for shape-specific address formatting.
+
 ## Goals
 
 - Return a `domain` derived from the current HTTP request when no static
@@ -32,9 +52,8 @@ shape must follow the same native vs. customized split.
   bit-for-bit.
 - Cover both deployment shapes (native and customized) for both the response
   `domain` field and the `BrowserUse` websocket URL.
-- Keep `pkg/proxy` and `pkg/servers/e2b/adapters` unchanged. Domain
-  resolution is a Controller-layer concern and uses the inbound request
-  `Host` and path directly.
+- Keep native/customized request-shape knowledge inside the adapter package;
+  handlers receive only resolved strings from the unified `E2BAdapter` facade.
 - Make the default `make deploy-sandbox-manager` path produce a deployment
   that uses dynamic resolution out of the box; manifests must not contradict
   the new default.
@@ -45,22 +64,27 @@ shape must follow the same native vs. customized split.
   trust / allowlist config and is left for a follow-up PR.
 - Do not persist `domain` anywhere on the Sandbox CR, annotations, labels,
   or runtime state.
-- Do not change the `proxy.RequestAdapter` interface or the
-  `adapters.E2BAdapter` public surface.
+- Do not change the `proxy.RequestAdapter` interface or data-plane routing
+  behavior.
 
 ## Resolution Rules
 
-When a handler is about to return a `models.Sandbox` (or wires a sandbox URL
-into a response, as `BrowserUse` does), the Controller derives the domain as
-follows:
+When a handler is about to return a `models.Sandbox`, the Controller and unified
+`E2BAdapter` derive the domain as follows:
 
-1. If `sc.domain` (set from `--e2b-domain`) is non-empty, return it as is.
-2. If `r.Host` is empty, return HTTP 400 with
+1. If the configured domain (set from `--e2b-domain`) is non-empty, return it
+   as is.
+2. If the request authority is empty, return an error with
    `cannot resolve sandbox domain: empty host`.
-3. If `r.URL.Path` starts with `adapters.CustomPrefix` (`/kruise`), the
-   customized adapter is in use. Return `r.Host` unchanged — host
-   case is preserved because customized routing is path-based, and the
-   response must echo the client's request host verbatim.
+3. If the request path starts with `adapters.CustomPrefix` (`/kruise`), the
+   customized adapter is in use:
+   1. Split `host[:port]` with the shared authority helper.
+   2. Preserve host case and any leading `api.` segment because customized
+      routing is path-based.
+   3. Strip one trailing dot from the host.
+   4. If the resulting host is empty, return HTTP 400 with
+      `cannot resolve sandbox domain: empty host`.
+   5. Rejoin `host` and `port` (omitting `:` when port is empty).
 4. Otherwise (native adapter shape):
    1. Split `host[:port]` while preserving bracketed IPv6. Inputs without an
       explicit port, including bracketed IPv6 such as `[::1]`, are valid.
@@ -103,9 +127,12 @@ yield response `API.example.com`. The constructed sandbox subdomain
 | Input `r.Host` | `r.URL.Path` | Output |
 |---|---|---|
 | `gateway.example.com` | `/kruise/api/sandboxes` | `gateway.example.com` |
+| `gateway.example.com:8443` | `/kruise/api/sandboxes` | `gateway.example.com:8443` |
 | `api.gateway.example.com` | `/kruise/api/sandboxes` | `api.gateway.example.com` |
 | `Gateway.example.com` | `/kruise/api/sandboxes` | `Gateway.example.com` |
-| `gateway.example.com.` | `/kruise/api/sandboxes` | `gateway.example.com.` |
+| `gateway.example.com.` | `/kruise/api/sandboxes` | `gateway.example.com` |
+| `gateway.example.com.:8443` | `/kruise/api/sandboxes` | `gateway.example.com:8443` |
+| `:8443` | `/kruise/api/sandboxes` | HTTP 400 |
 | `""` | `/kruise/api/sandboxes` | HTTP 400 |
 
 ## BrowserUse Websocket Shape
@@ -121,14 +148,12 @@ style of the inbound request:
 
 This requires:
 
-- A second URL builder for the customized shape. Add
-  `GetCustomizedSandboxAddress(sandboxID, domain string, port int32) string`
-  in `pkg/utils/sandbox-manager/e2b.go`. The existing `GetSandboxAddress`
-  keeps the native shape unchanged.
-- A small Controller helper `isCustomizedRequest(r *http.Request) bool` that
-  returns `strings.HasPrefix(r.URL.Path, adapters.CustomPrefix)` — the same
-  check used inside `resolveSandboxDomain`.
-- `BrowserUse` picks the address builder based on `isCustomizedRequest(r)`.
+- `resolveSandboxDomain` returns the configured domain as-is when it is
+  non-empty; otherwise it calls `E2BAdapter.GetDomain(authority, path)`.
+- `E2BAdapter.GetSandboxAddress` accepts the resolved domain, path, sandbox ID,
+  and port, selects the shape, and returns the final address as a string.
+- Native and customized adapters implement their own address formatters; the
+  Controller does not branch on request shape.
 - The websocket URL replacer matches both `ws://` and `wss://` upstream
   `webSocketDebuggerUrl` values.
 
@@ -139,55 +164,50 @@ non-routable native-style URL — a latent bug that this design fixes.
 
 ### `pkg/servers/e2b/core.go`
 
-`Controller` does not store the request adapter. `Init()` constructs the
-adapter locally for the sandbox manager:
+`Controller` stores the unified adapter created by `NewController`. `Init()`
+passes the same instance to the sandbox manager so both the HTTP handlers and
+data plane use the same adapter configuration:
 
 ```go
 func (sc *Controller) Init() error {
-    // ...
-    adapter := adapters.DefaultAdapterFactory(sc.port)
     sandboxManager, err := sandboxmanager.NewSandboxManagerBuilder(sc.sandboxManagerOptions()).
         WithSandboxInfra().
         WithMemberlistPeers().
-        WithRequestAdapter(adapter).
+        WithRequestAdapter(sc.adapter).
         Build()
-    // ...
 }
 ```
 
 ### `pkg/servers/e2b/sandbox.go`
 
-- Add `resolveSandboxDomain(r *http.Request) (string, *web.ApiError)`
-  implementing the rules above. Empty-host surfaces as `*web.ApiError`
-  with `Code: http.StatusBadRequest`.
-- Add `splitHostPort(authority string) (host, port string)` as a local
-  helper: split on the last `:`; return `(authority, "")` when no colon is
-  present. `net.SplitHostPort` is rejected because it errors on inputs like
-  `example.com` (no port), which is a normal case here.
-- Add `isCustomizedRequest(r *http.Request) bool` returning
-  `strings.HasPrefix(r.URL.Path, adapters.CustomPrefix)`.
+- Keep `resolveSandboxDomain(r *http.Request) (string, *web.ApiError)` as a
+  thin HTTP boundary. It returns `sc.domain` immediately when configured;
+  otherwise it delegates to `sc.adapter.GetDomain` and maps adapter errors to
+  HTTP 400.
 - Change `convertToE2BSandbox` to
   `func (sc *Controller) convertToE2BSandbox(sbx infra.Sandbox, accessToken, domain string) *models.Sandbox`.
-  The body uses the `domain` parameter instead of `sc.domain`; no other
-  change.
+  The body uses the `domain` parameter instead of `sc.domain`; no other change.
 
-### `pkg/utils/sandbox-manager/e2b.go`
+### `pkg/servers/e2b/services.go`
 
-Add a customized-shape builder alongside the existing native builder:
+`BrowserUse` calls `resolveSandboxDomain` before proxying to the sandbox, then
+passes the resolved domain to `sc.adapter.GetSandboxAddress`. The previous
+package-level native/customized address helpers are removed.
 
-```go
-// GetSandboxAddress returns the native E2B subdomain address:
-// "<port>-<sid>.<domain>".
-func GetSandboxAddress(sandboxId, domain string, port int32) string {
-    return fmt.Sprintf("%d-%s.%s", port, sandboxId, domain)
-}
+### `pkg/servers/e2b/adapters`
 
-// GetCustomizedSandboxAddress returns the customized path-style address:
-// "<domain>/kruise/<sid>/<port>".
-func GetCustomizedSandboxAddress(sandboxId, domain string, port int32) string {
-    return fmt.Sprintf("%s/kruise/%s/%d", domain, sandboxId, port)
-}
-```
+- Add `GetDomain(authority, path string) (string, error)` to the concrete
+  unified adapter. It delegates through `ChooseAdapter(path)`.
+- Add `GetSandboxAddress(domain, path, sandboxID string, port int32) string` to
+  the unified adapter. The domain is already resolved, so formatting cannot
+  fail.
+- Extend `E2BMapper` with path-free `GetDomain(authority string)` and
+  `GetSandboxAddress(domain, sandboxID, port)` methods implemented by
+  `NativeE2BAdapter` and `CustomizedE2BAdapter`.
+- Keep `proxy.RequestAdapter` unchanged. Sandbox-gateway does not call the new
+  `E2BMapper` methods.
+- Move optional-port and IPv6-aware authority splitting from the Controller to
+  `NativeE2BAdapter`, the only protocol shape that uses it.
 
 ### Handler Call Sites
 
@@ -203,7 +223,7 @@ preserves the API's error precedence.
 | `create.go` | `createSandboxWithClaim` | Accept new `domain string` parameter; forward to `convertToE2BSandbox`. |
 | `create.go` | `createSandboxWithClone` | Accept new `domain string` parameter; forward to `convertToE2BSandbox`. |
 | `services.go` | `DescribeSandbox` | Get the sandbox first so missing sandbox remains 404, then resolve domain and pass it to `convertToE2BSandbox`. |
-| `services.go` | `BrowserUse` | Parse `cdpPort` and get the sandbox first, then resolve domain before proxying to the sandbox. Branch on `isCustomizedRequest(r)` to pick `GetSandboxAddress` (native) or `GetCustomizedSandboxAddress`. |
+| `services.go` | `BrowserUse` | Parse `cdpPort` and get the sandbox first, resolve the domain, then ask the adapter to format the final sandbox address before proxying. |
 | `list.go` | `ListSandboxes` | Parse and validate query parameters first, then resolve once before manager list and reuse for every entry. |
 | `pause_resume.go` | `ConnectSandbox` | Parse and validate the timeout request, then resolve domain before `ResumeSandbox` / `updateConnectTimeout` runs; bail with 400 on empty host. Pass to `convertToE2BSandbox`. |
 
@@ -258,9 +278,10 @@ own overlay setting `--e2b-domain=localhost`.
 ingress host names (a deployment-level concern), not the sandbox-manager
 process.
 
-### `pkg/proxy` and `pkg/servers/e2b/adapters`
+### `pkg/proxy`
 
-No changes.
+No changes. `proxy.RequestAdapter` remains unchanged; sandbox-gateway continues
+using only `Map` and `IsSandboxRequest` on the concrete unified adapter.
 
 ## Error Handling
 
@@ -272,60 +293,41 @@ No changes.
 
 ## Testing
 
-### Unit Tests — `pkg/servers/e2b/sandbox_test.go`
+### Unit Tests — `pkg/servers/e2b/adapters/domain_test.go`
 
-Add `TestResolveSandboxDomain`, table-driven. Cases mirror the resolution
-tables plus the static override and case-insensitivity:
-
-| name | sc.domain | r.Host | r.URL.Path | expect (string) | expectError |
-|---|---|---|---|---|---|
-| static configured wins | `example.com` | `api.foo.com` | `/sandboxes` | `example.com` | `""` |
-| native strip api with port | `""` | `api.example.com:8443` | `/sandboxes` | `example.com:8443` | `""` |
-| native strip api no port | `""` | `api.example.com` | `/sandboxes` | `example.com` | `""` |
-| native strip uppercase api | `""` | `API.example.com` | `/sandboxes` | `example.com` | `""` |
-| native strip uppercase with port | `""` | `API.example.com:8443` | `/sandboxes` | `example.com:8443` | `""` |
-| native no api prefix | `""` | `example.com` | `/sandboxes` | `example.com` | `""` |
-| native trailing dot | `""` | `api.example.com.` | `/sandboxes` | `example.com` | `""` |
-| native bracketed ipv6 without port | `""` | `[::1]` | `/sandboxes` | `[::1]` | `""` |
-| native bracketed ipv6 with port | `""` | `[::1]:8443` | `/sandboxes` | `[::1]:8443` | `""` |
-| native localhost with port | `""` | `localhost:7788` | `/sandboxes` | `localhost:7788` | `""` |
-| native apiserver not stripped | `""` | `apiserver.example.com` | `/sandboxes` | `apiserver.example.com` | `""` |
-| customized host as-is | `""` | `gateway.example.com` | `/kruise/api/sandboxes` | `gateway.example.com` | `""` |
-| customized api host not stripped | `""` | `api.gateway.example.com` | `/kruise/api/sandboxes` | `api.gateway.example.com` | `""` |
-| customized case preserved | `""` | `Gateway.example.com` | `/kruise/api/sandboxes` | `Gateway.example.com` | `""` |
-| customized trailing dot preserved | `""` | `gateway.example.com.` | `/kruise/api/sandboxes` | `gateway.example.com.` | `""` |
-| empty host returns 400 | `""` | `""` | `/sandboxes` | — | `empty host` |
-| native api dot returns 400 | `""` | `api.` | `/sandboxes` | — | `empty host` |
+Add table-driven `TestNativeE2BAdapter_GetDomain` and
+`TestCustomizedE2BAdapter_GetDomain` tests. Together their cases mirror the
+resolution tables and native case-insensitivity. Static override behavior is a
+Controller policy and is tested at the Controller boundary, not in adapters.
 
 The `expectError` column follows the project convention (empty string = no
-error, non-empty = `assert.Contains(err.Message, expectError)`).
+error, non-empty = `assert.Contains(err.Error(), expectError)`).
 
-Add `TestIsCustomizedRequest`, table-driven: native path returns `false`,
-`/kruise/...` returns `true`, empty path returns `false`.
+Add table-driven `TestNativeE2BAdapter_GetSandboxAddress` and
+`TestCustomizedE2BAdapter_GetSandboxAddress` tests covering formatting of an
+already resolved domain, including preservation of case and trailing dots. Keep
+small unified-adapter tests for native/customized path dispatch only. Expected
+addresses are literal values rather than values built by production helpers.
 
-### Integration Tests
+### Adapter Package
 
-Every response-affecting handler gets coverage for: static configured,
-dynamic resolution success, and dynamic resolution failure. The failure
-rows additionally assert that no state mutation occurred where the handler
-would otherwise mutate sandbox state.
+Path-shape detection is private to `adapters`. Concrete-adapter tests own the
+protocol-specific behavior matrix, while unified-adapter tests cover only
+dispatch outcomes instead of directly testing the internal selector.
+Controller-level resolver tests own static override precedence and HTTP error
+mapping.
 
-| Test file | Handler | Added cases |
+### Integration Tests (minimum contract)
+
+| Test file | Handler | Cases |
 |---|---|---|
-| `services_test.go` | `DescribeSandbox` | static → body `Domain` matches configured; dynamic success → body `Domain` matches resolved; empty host → 400; missing sandbox plus empty host → 404 |
-| `create_test.go` | `CreateSandbox` (claim path) | dynamic success → body `Domain` matches; empty host → 400 **and** `ClaimSandbox` was not invoked |
-| `pause_resume_test.go` | `ConnectSandbox` | dynamic success → body `Domain` matches; empty host → 400 **and** `ResumeSandbox` / sandbox timeout writes were not invoked; invalid timeout plus empty host preserves timeout validation 400 |
-| `list_test.go` | `ListSandboxes` | dynamic success → every returned entry's `Domain` matches the resolved value; invalid query plus empty host → query validation 400 |
-| `services_test.go` | `BrowserUse` | native path → URL is `wss://<port>-<sid>.<domain>`; customized path (`/kruise/api/browser/...`) → URL is `wss://<domain>/kruise/<sid>/<port>`; empty host → 400 **and** no upstream request was sent to the sandbox; invalid `cdpPort` or missing sandbox plus empty host preserve their earlier errors |
+| `sandbox_test.go` | `resolveSandboxDomain` | configured domain bypasses an empty Host and is returned as-is; dynamic native/customized resolution; dynamic empty Host → 400 |
+| `services_test.go` | `CreateSandbox` | empty host → 400 **and** pooled sandbox is not claimed; subsequent create with a valid host succeeds and `Domain` matches the resolved value |
+| `services_test.go` | `BrowserUse` | configured native/customized domains bypass an empty Host and remain unchanged; dynamic native/customized URL shapes; dynamic empty Host → 400 **and** no upstream request was sent to the sandbox |
 
 Each test uses `httptest.NewRequest` with an explicit `req.Host` and an
 `r.URL.Path` consistent with the shape under test. The "no state mutation
 on 400" assertions are the central regression guard for P2.
-
-### Adapter Package
-
-Unchanged. Controller routing shape detection uses the same path prefix as
-the adapter.
 
 ## Compatibility
 
@@ -341,26 +343,6 @@ the adapter.
   even in customized deployments — a latent bug. After this change the
   returned URL matches the actually reachable address. Captured in the
   changelog under behavioral fixes.
+- `sandbox-gateway` continues using only `Map` and `IsSandboxRequest`; its
+  configuration and request-routing behavior are unchanged.
 - No CRD, annotation, label, or runtime state is added or read.
-
-## Implementation Order
-
-1. Add `GetCustomizedSandboxAddress` to `pkg/utils/sandbox-manager/e2b.go`.
-2. Change `convertToE2BSandbox` signature; thread `domain` through every
-   handler call site (still using `sc.domain` as the value at this step);
-   add `isCustomizedRequest` and split `BrowserUse` URL builder per shape.
-   Tests continue to pass.
-3. Keep adapter construction local to `Init()` for the sandbox-manager
-   builder; domain resolution does not depend on it.
-4. Implement `resolveSandboxDomain` and `splitHostPort`; switch handlers
-   from `sc.domain` to `resolveSandboxDomain(r)`, resolving before any
-   mutating call or upstream request while preserving handler-specific
-   validation precedence.
-5. Flip the `--e2b-domain` default to `""` in `main.go`.
-6. Update `config/sandbox-manager/deployment.yaml` (drop the args entry)
-   and `configuration_patch.yaml` (drop the domain patch, renumber the
-   admin-key patch path).
-7. Add `TestResolveSandboxDomain` and `TestIsCustomizedRequest` in
-   `pkg/servers/e2b/sandbox_test.go`.
-8. Add integration test rows in `services_test.go`, `create_test.go`,
-   `pause_resume_test.go`, and `list_test.go` per the table above.

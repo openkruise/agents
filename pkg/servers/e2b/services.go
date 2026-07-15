@@ -32,16 +32,6 @@ import (
 	"github.com/openkruise/agents/pkg/utils"
 )
 
-// GetSandboxAddress returns the sandbox address in the format "{port}-{sandboxId}.{domain}".
-func GetSandboxAddress(sandboxID, domain string, port int32) string {
-	return fmt.Sprintf("%d-%s.%s", port, sandboxID, domain)
-}
-
-// GetCustomizedSandboxAddress returns the customized path-style sandbox address.
-func GetCustomizedSandboxAddress(sandboxID, domain string, port int32) string {
-	return fmt.Sprintf("%s/kruise/%s/%d", domain, sandboxID, port)
-}
-
 // DescribeSandbox returns details of a specific sandbox
 func (sc *Controller) DescribeSandbox(r *http.Request) (web.ApiResponse[*models.Sandbox], *web.ApiError) {
 	id := r.PathValue("sandboxID")
@@ -139,10 +129,11 @@ func (sc *Controller) BrowserUse(r *http.Request) (web.ApiResponse[*browserHandS
 	if apiErr != nil {
 		return web.ApiResponse[*browserHandShake]{}, apiErr
 	}
-	domain, resolveErr := sc.resolveSandboxDomain(r)
-	if resolveErr != nil {
-		return web.ApiResponse[*browserHandShake]{}, resolveErr
+	domain, apiErr := sc.resolveSandboxDomain(r)
+	if apiErr != nil {
+		return web.ApiResponse[*browserHandShake]{}, apiErr
 	}
+	sandboxAddr := sc.adapter.GetSandboxAddress(domain, r.URL.Path, sandboxID, int32(cdpPort)) // #nosec G115 -- port range
 
 	resp, err := sbx.Request(r.Context(), r.Method, "/json/version", cdpPort, r.Body)
 	if err != nil {
@@ -163,14 +154,8 @@ func (sc *Controller) BrowserUse(r *http.Request) (web.ApiResponse[*browserHandS
 		}
 	}
 
-	var sandboxAddr string
-	if sc.isCustomizedRequest(r) {
-		sandboxAddr = GetCustomizedSandboxAddress(sandboxID, domain, int32(cdpPort))
-	} else {
-		sandboxAddr = GetSandboxAddress(sandboxID, domain, int32(cdpPort))
-	}
 	h.WebSocketDebuggerURL = browserWebSocketReplacer.ReplaceAllString(h.WebSocketDebuggerURL,
-		fmt.Sprintf("wss://%s", sandboxAddr)) // #nosec G115 -- port range
+		fmt.Sprintf("wss://%s", sandboxAddr))
 	return web.ApiResponse[*browserHandShake]{
 		Code: resp.StatusCode,
 		Body: &h,

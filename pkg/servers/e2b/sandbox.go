@@ -29,7 +29,6 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
-	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
@@ -163,76 +162,19 @@ func ParseTimeout(sbx infra.Sandbox) (autoPause bool, timeoutAt time.Time) {
 	return true, timeout.PauseTime
 }
 
-// isCustomizedRequest reports whether the inbound request uses the customized
-// path-prefix adapter (e.g. /kruise/api/...). It mirrors
-// adapters.E2BAdapter.ChooseAdapter so that resolveSandboxDomain and BrowserUse
-// agree on the deployment shape for the same request.
-func (sc *Controller) isCustomizedRequest(r *http.Request) bool {
-	return strings.HasPrefix(r.URL.Path, adapters.CustomPrefix)
-}
-
-// splitHostPort splits a "host[:port]" authority without requiring a port.
-// It preserves bracketed IPv6 hosts and treats raw IPv6 as a host without
-// an explicit port.
-func splitHostPort(authority string) (host, port string) {
-	if strings.HasPrefix(authority, "[") {
-		end := strings.Index(authority, "]")
-		if end < 0 {
-			return authority, ""
-		}
-		host = authority[:end+1]
-		if len(authority) > end+1 && authority[end+1] == ':' {
-			return host, authority[end+2:]
-		}
-		return authority, ""
-	}
-	if strings.Count(authority, ":") > 1 {
-		return authority, ""
-	}
-	idx := strings.LastIndex(authority, ":")
-	if idx < 0 {
-		return authority, ""
-	}
-	return authority[:idx], authority[idx+1:]
-}
-
-// resolveSandboxDomain derives the user-facing E2B domain for the response
-// body or sandbox URL. When --e2b-domain is configured (sc.domain != ""),
-// that static value is returned as-is. Otherwise the resolver reads the
-// inbound Host header and applies native vs. customized rules per
-// docs/specs/2026-05-27-dynamic-sandbox-domain-design.md.
-//
-// Returns *web.ApiError with HTTP 400 when no domain can be derived from the
-// inbound request host. The
-// resolver never mutates server state; callers must invoke it before any
-// state-changing operation so that a 400 cannot leave behind a partially
-// created or resumed sandbox.
+// resolveSandboxDomain maps adapter domain-resolution errors to the E2B HTTP
+// boundary. Callers must invoke it before state-changing operations so that a
+// bad request cannot leave behind a partially created or resumed sandbox.
 func (sc *Controller) resolveSandboxDomain(r *http.Request) (string, *web.ApiError) {
 	if sc.domain != "" {
 		return sc.domain, nil
 	}
-	authority := r.Host
-	if authority == "" {
+	domain, err := sc.adapter.GetDomain(r.Host, r.URL.Path)
+	if err != nil {
 		return "", &web.ApiError{
 			Code:    http.StatusBadRequest,
-			Message: "cannot resolve sandbox domain: empty host",
+			Message: err.Error(),
 		}
 	}
-	if sc.isCustomizedRequest(r) {
-		return authority, nil
-	}
-	host, port := splitHostPort(authority)
-	host = strings.ToLower(host)
-	host = strings.TrimPrefix(host, "api.")
-	host = strings.TrimSuffix(host, ".")
-	if host == "" {
-		return "", &web.ApiError{
-			Code:    http.StatusBadRequest,
-			Message: "cannot resolve sandbox domain: empty host",
-		}
-	}
-	if port == "" {
-		return host, nil
-	}
-	return host + ":" + port, nil
+	return domain, nil
 }

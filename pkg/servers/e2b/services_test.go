@@ -2498,7 +2498,182 @@ func TestBrowserUseCDPPort(t *testing.T) {
 			assert.Equal(t, http.StatusOK, resp.Code)
 			assert.Equal(t, "Chrome", resp.Body.Browser)
 			assert.Contains(t, resp.Body.WebSocketDebuggerURL,
-				fmt.Sprintf("wss://%s", GetSandboxAddress(sandboxID, controller.domain, int32(tt.expectedPort))))
+				fmt.Sprintf("wss://%d-%s.%s", tt.expectedPort, sandboxID, controller.domain))
+		})
+	}
+}
+
+func TestCreateSandbox_EmptyHostDoesNotClaim(t *testing.T) {
+	controller, _, teardown := Setup(t)
+	defer teardown()
+
+	templateName := "empty-host-template"
+	cleanup := CreateSandboxPool(t, controller, templateName, 1, CreateSandboxPoolOptions{
+		AccessToken: "token",
+	})
+	defer cleanup()
+	require.Eventually(t, func() bool {
+		list, err := controller.cache.ListSandboxesInPool(t.Context(), cache.ListSandboxesInPoolOptions{
+			Pool: templateName,
+		})
+		return err == nil && len(list) == 1
+	}, time.Second, 50*time.Millisecond)
+
+	user := &models.CreatedTeamAPIKey{
+		ID:   keys.AdminKeyID,
+		Key:  InitKey,
+		Name: "test-user",
+	}
+	origDomain := controller.domain
+	controller.domain = ""
+	t.Cleanup(func() { controller.domain = origDomain })
+
+	req := NewRequest(t, nil, models.NewSandboxRequest{
+		TemplateID: templateName,
+		Timeout:    600,
+		Metadata: map[string]string{
+			models.ExtensionKeySkipInitRuntime: v1alpha1.True,
+			models.ExtensionKeyClaimTimeout:    "1",
+		},
+	}, nil, user)
+	req.Host = ""
+
+	_, apiErr := controller.CreateSandbox(req)
+	require.NotNil(t, apiErr)
+	assert.Equal(t, http.StatusBadRequest, apiErr.Code)
+	assert.Contains(t, apiErr.Message, "empty host")
+
+	list, err := controller.cache.ListSandboxesInPool(t.Context(), cache.ListSandboxesInPoolOptions{
+		Pool: templateName,
+	})
+	require.NoError(t, err)
+	assert.Len(t, list, 1, "empty host must not claim a pooled sandbox")
+
+	okReq := NewRequest(t, nil, models.NewSandboxRequest{
+		TemplateID: templateName,
+		Timeout:    600,
+		Metadata: map[string]string{
+			models.ExtensionKeySkipInitRuntime: v1alpha1.True,
+			models.ExtensionKeyClaimTimeout:    "1",
+		},
+	}, nil, user)
+	okReq.Host = "api.example.com"
+	resp, apiErr := controller.CreateSandbox(okReq)
+	require.Nil(t, apiErr)
+	require.NotNil(t, resp.Body)
+	assert.Equal(t, "example.com", resp.Body.Domain)
+}
+
+func TestBrowserUse_DomainResolution(t *testing.T) {
+	controller, _, teardown := Setup(t)
+	defer teardown()
+
+	user := &models.CreatedTeamAPIKey{
+		ID:   keys.AdminKeyID,
+		Key:  InitKey,
+		Name: "test-user",
+	}
+
+	templateName := "browseruse-domain-template"
+	cleanup := CreateSandboxPool(t, controller, templateName, 1)
+	defer cleanup()
+
+	createResp, createErr := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
+		TemplateID: templateName,
+		Metadata: map[string]string{
+			models.ExtensionKeySkipInitRuntime: v1alpha1.True,
+		},
+	}, nil, user))
+	require.Nil(t, createErr)
+	sandboxID := createResp.Body.SandboxID
+
+	expectedBody := `{"Browser":"Chrome","Protocol-Version":"1.3","User-Agent":"Test","V8-Version":"12.0","WebKit-Version":"537.36","webSocketDebuggerUrl":"ws://127.0.0.1:9222/devtools/browser/abc"}`
+
+	origRequest := proxyutils.DefaultRequestFunc
+	t.Cleanup(func() {
+		proxyutils.DefaultRequestFunc = origRequest
+	})
+
+	tests := []struct {
+		name            string
+		domain          string
+		host            string
+		path            string
+		wantURLContains string
+		expectError     string
+		expectUpstream  bool
+	}{
+		{
+			name:            "static native domain bypasses empty host and is preserved",
+			domain:          "API.Static.example.com.",
+			host:            "",
+			path:            "/sandboxes/" + sandboxID + "/connect",
+			wantURLContains: fmt.Sprintf("wss://%d-%s.API.Static.example.com.", models.CDPPort, sandboxID),
+			expectUpstream:  true,
+		},
+		{
+			name:            "static customized domain bypasses empty host and is preserved",
+			domain:          "Gateway.Static.example.com.",
+			host:            "",
+			path:            "/kruise/api/sandboxes/" + sandboxID + "/connect",
+			wantURLContains: fmt.Sprintf("wss://Gateway.Static.example.com./kruise/%s/%d", sandboxID, models.CDPPort),
+			expectUpstream:  true,
+		},
+		{
+			name:            "dynamic native domain uses subdomain address",
+			domain:          "",
+			host:            "api.example.com",
+			path:            "/sandboxes/" + sandboxID + "/connect",
+			wantURLContains: fmt.Sprintf("wss://%d-%s.example.com", models.CDPPort, sandboxID),
+			expectUpstream:  true,
+		},
+		{
+			name:            "dynamic customized domain uses path-style address",
+			domain:          "",
+			host:            "Gateway.example.com.:8443",
+			path:            "/kruise/api/sandboxes/" + sandboxID + "/connect",
+			wantURLContains: fmt.Sprintf("wss://Gateway.example.com:8443/kruise/%s/%d", sandboxID, models.CDPPort),
+			expectUpstream:  true,
+		},
+		{
+			name:           "empty host returns 400 without upstream",
+			domain:         "",
+			host:           "",
+			path:           "/sandboxes/" + sandboxID + "/connect",
+			expectError:    "empty host",
+			expectUpstream: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			controller.domain = tt.domain
+			upstreamCalled := false
+			proxyutils.DefaultRequestFunc = func(ctx context.Context, sbx *v1alpha1.Sandbox, method, path string, port int, body io.Reader) (*http.Response, error) {
+				upstreamCalled = true
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(expectedBody)),
+				}, nil
+			}
+
+			req := NewRequest(t, nil, nil, map[string]string{
+				"sandboxID": sandboxID,
+			}, user)
+			req.Host = tt.host
+			req.URL.Path = tt.path
+
+			resp, apiErr := controller.BrowserUse(req)
+			assert.Equal(t, tt.expectUpstream, upstreamCalled)
+			if tt.expectError != "" {
+				require.NotNil(t, apiErr)
+				assert.Equal(t, http.StatusBadRequest, apiErr.Code)
+				assert.Contains(t, apiErr.Message, tt.expectError)
+				return
+			}
+			require.Nil(t, apiErr)
+			require.NotNil(t, resp.Body)
+			assert.Contains(t, resp.Body.WebSocketDebuggerURL, tt.wantURLContains)
 		})
 	}
 }

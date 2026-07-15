@@ -65,6 +65,7 @@ type Controller struct {
 	storageRegistry storages.VolumeMountProviderRegistry
 	clientConfig    *rest.Config
 	domain          string
+	adapter         *adapters.E2BAdapter
 	manager         *sandboxmanager.SandboxManager
 	keys            keys.KeyStorage
 }
@@ -74,6 +75,7 @@ func NewController(domain, sysNs, peerSelector, sandboxNamespace, sandboxLabelSe
 	sc := &Controller{
 		mux:                   http.NewServeMux(),
 		domain:                domain,
+		adapter:               adapters.DefaultAdapterFactory(port),
 		clientConfig:          clientConfig,
 		port:                  port,
 		maxTimeout:            maxTimeout,
@@ -104,11 +106,10 @@ func (sc *Controller) Init() error {
 	log := klog.FromContext(ctx)
 	log.Info("init controller")
 
-	adapter := adapters.DefaultAdapterFactory(sc.port)
 	sandboxManager, err := sandboxmanager.NewSandboxManagerBuilder(sc.sandboxManagerOptions()).
 		WithSandboxInfra().
 		WithMemberlistPeers().
-		WithRequestAdapter(adapter).
+		WithRequestAdapter(sc.adapter).
 		Build()
 
 	if err != nil {

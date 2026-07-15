@@ -19,7 +19,8 @@ show_help() {
     echo "  -o, --output DIR        Specify output directory (default: .)"
     echo "  -D, --days DAYS         Specify certificate validity days (default: 365)"
     echo "      --ca-key PATH       Reuse an existing CA private key"
-    echo "      --ca-cert PATH      Reuse the matching existing CA certificate"
+    echo "      --ca-cert PATH      Reuse the matching existing CA certificate; it must"
+    echo "                          be authorized to sign and valid for --days"
     echo "  -h, --help              Show this help message"
     echo ""
     echo "Examples:"
@@ -147,8 +148,27 @@ if [[ -n "$CA_KEY" ]]; then
         exit 1
     fi
 
-    if ! openssl x509 -in "$CA_CERT" -noout -checkend 0 >/dev/null 2>&1; then
-        echo "CA certificate is invalid or expired: $CA_CERT" >&2
+    if ! openssl x509 -in "$CA_CERT" -noout >/dev/null 2>&1; then
+        echo "CA certificate is invalid: $CA_CERT" >&2
+        exit 1
+    fi
+
+    if ! CA_BASIC_CONSTRAINTS="$(openssl x509 -in "$CA_CERT" -noout -ext basicConstraints 2>/dev/null)" ||
+        [[ "$CA_BASIC_CONSTRAINTS" != *"CA:TRUE"* ]]; then
+        echo "CA certificate cannot sign certificates: basicConstraints must contain CA:TRUE" >&2
+        exit 1
+    fi
+
+    if ! CA_KEY_USAGE="$(openssl x509 -in "$CA_CERT" -noout -ext keyUsage 2>/dev/null)" ||
+        [[ "$CA_KEY_USAGE" != *"Certificate Sign"* ]]; then
+        echo "CA certificate cannot sign certificates: keyUsage must contain Certificate Sign" >&2
+        exit 1
+    fi
+
+    VALIDITY_SECONDS=$((10#$DAYS * 24 * 60 * 60))
+
+    if ! openssl x509 -in "$CA_CERT" -noout -checkend "$VALIDITY_SECONDS" >/dev/null 2>&1; then
+        echo "CA certificate expires before the requested validity period of $DAYS days: $CA_CERT" >&2
         exit 1
     fi
 

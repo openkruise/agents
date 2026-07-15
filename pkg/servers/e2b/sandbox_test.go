@@ -17,25 +17,102 @@ limitations under the License.
 package e2b
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
+	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 )
 
 func TestReplacer(t *testing.T) {
-	url := "ws://localhost:9222/devtools/browser/12345678-1234-1234-1234-123456789012"
-	url = browserWebSocketReplacer.ReplaceAllString(url, "ws://hello-world")
-	if url != "ws://hello-world/devtools/browser/12345678-1234-1234-1234-123456789012" {
-		t.Errorf("Expected %s, got %s", "ws://hello-world/devtools/browser/12345678-1234-1234-1234-123456789012", url)
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "replaces ws scheme",
+			in:   "ws://localhost:9222/devtools/browser/12345678-1234-1234-1234-123456789012",
+			want: "ws://hello-world/devtools/browser/12345678-1234-1234-1234-123456789012",
+		},
+		{
+			name: "replaces wss scheme",
+			in:   "wss://localhost:9222/devtools/browser/12345678-1234-1234-1234-123456789012",
+			want: "ws://hello-world/devtools/browser/12345678-1234-1234-1234-123456789012",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := browserWebSocketReplacer.ReplaceAllString(tt.in, "ws://hello-world")
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestResolveSandboxDomain(t *testing.T) {
+	tests := []struct {
+		name             string
+		configuredDomain string
+		host             string
+		path             string
+		expect           string
+		expectError      string
+	}{
+		{
+			name:             "configured domain bypasses empty host and is preserved",
+			configuredDomain: "API.Static.example.com.",
+			path:             "/sandboxes",
+			expect:           "API.Static.example.com.",
+		},
+		{
+			name:   "native request resolves domain",
+			host:   "API.example.com:8443",
+			path:   "/sandboxes",
+			expect: "example.com:8443",
+		},
+		{
+			name:   "customized request removes trailing dot and preserves port",
+			host:   "Gateway.example.com.:8443",
+			path:   "/kruise/api/sandboxes",
+			expect: "Gateway.example.com:8443",
+		},
+		{
+			name:        "dynamic domain rejects empty host",
+			path:        "/sandboxes",
+			expectError: "cannot resolve sandbox domain: empty host",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			controller := &Controller{
+				domain:  tt.configuredDomain,
+				adapter: adapters.NewE2BAdapter(0),
+			}
+			req := httptest.NewRequest(http.MethodGet, tt.path, nil)
+			req.Host = tt.host
+
+			got, apiErr := controller.resolveSandboxDomain(req)
+			if tt.expectError != "" {
+				require.NotNil(t, apiErr)
+				assert.Equal(t, http.StatusBadRequest, apiErr.Code)
+				assert.Contains(t, apiErr.Message, tt.expectError)
+				return
+			}
+			require.Nil(t, apiErr)
+			assert.Equal(t, tt.expect, got)
+		})
 	}
 }
 

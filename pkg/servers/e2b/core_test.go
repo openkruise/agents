@@ -54,7 +54,6 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
-	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/utils/testutils"
@@ -144,7 +143,7 @@ func setupWithMinResumeTimeoutAndQuota(t *testing.T, minResumeTimeout int, quota
 	require.NoError(t, infraInstance.Run(t.Context()))
 
 	sandboxManager, err := sandboxmanager.NewSandboxManagerBuilder(opts).
-		WithRequestAdapter(adapters.DefaultAdapterFactory(controller.port)).
+		WithRequestAdapter(controller.adapter).
 		WithQuotaEnforcer(quotaEnforcer).
 		WithCustomInfra(func() (infra.Builder, error) {
 			return sandboxcr.NewInfraBuilder(opts).

@@ -123,3 +123,23 @@ func (a *NativeE2BAdapter) Map(req *ParsedRequest) (
 func (a *NativeE2BAdapter) IsSandboxRequest(authority, _ string, _ int) bool {
 	return !strings.HasPrefix(authority, "api.")
 }
+
+// GetDomain resolves a native E2B domain from the request authority.
+func (a *NativeE2BAdapter) GetDomain(authority string) (string, error) {
+	host, port := splitDomainHostPort(authority)
+	host = strings.ToLower(host)
+	host = strings.TrimPrefix(host, "api.")
+	host = strings.TrimSuffix(host, ".")
+	if host == "" {
+		return "", errEmptySandboxDomain
+	}
+	if port == "" {
+		return host, nil
+	}
+	return host + ":" + port, nil
+}
+
+// GetSandboxAddress returns the native subdomain address for a sandbox port.
+func (a *NativeE2BAdapter) GetSandboxAddress(domain, sandboxID string, port int32) string {
+	return fmt.Sprintf("%d-%s.%s", port, sandboxID, domain)
+}
