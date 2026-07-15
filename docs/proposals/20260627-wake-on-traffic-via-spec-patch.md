@@ -39,9 +39,12 @@ Traffic -> Envoy Filter -> Registry lookup
 ### Annotation Lifecycle
 
 - `AnnotationWakeOnTraffic` ("agents.kruise.io/wake-on-traffic"): Set to "true"
-  manually via `kubectl annotate` (or any out-of-band tooling). There is no
-  in-process API that writes this annotation; enabling wake-on-traffic is an
-  operational decision made per-sandbox.
+  in one of two ways:
+  1. **Via the E2B create API**: pass `"autoResume": {"enabled": true}` in the
+     request body. The sandbox-manager's `basicSandboxCreateModifier` writes the
+     annotation at sandbox creation time.
+  2. **Manually via `kubectl annotate`** (or any out-of-band tooling) for
+     sandboxes that were created without `autoResume`.
 - `AnnotationWakeTimeoutSeconds` ("agents.kruise.io/wake-timeout-seconds"): Stores the
   auto-pause timeout (in seconds) to apply when the sandbox is woken by traffic. The
   gateway reads this to set `ResumeOptions.Timeout.PauseTime`, re-arming auto-pause

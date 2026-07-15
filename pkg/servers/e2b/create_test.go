@@ -740,6 +740,25 @@ func TestParseCreateSandboxRequest(t *testing.T) {
 		assert.Equal(t, "/models", got.Extensions.CSIMount.MountConfigs[1].MountPath)
 	})
 
+	t.Run("autoResume parsed from JSON body", func(t *testing.T) {
+		body := `{
+			"templateID":"t1",
+			"autoResume":{"enabled":true}
+		}`
+		req := httptest.NewRequest(http.MethodPost, "/sandboxes", strings.NewReader(body))
+		got, apiErr := ctrl.parseCreateSandboxRequest(req)
+		require.Nil(t, apiErr)
+		assert.True(t, got.AutoResume.Enabled)
+	})
+
+	t.Run("autoResume absent defaults to disabled", func(t *testing.T) {
+		body := `{"templateID":"t1"}`
+		req := httptest.NewRequest(http.MethodPost, "/sandboxes", strings.NewReader(body))
+		got, apiErr := ctrl.parseCreateSandboxRequest(req)
+		require.Nil(t, apiErr)
+		assert.False(t, got.AutoResume.Enabled)
+	})
+
 	t.Run("volumeMounts with empty name", func(t *testing.T) {
 		body := `{
 			"templateID":"t1",
@@ -890,8 +909,39 @@ func TestBasicSandboxCreateModifier(t *testing.T) {
 					Labels: map[string]string{"env": "test"},
 				},
 			},
-			maxTimeout:     3600,
-			expectLabels:   map[string]string{"env": "test"},
+			maxTimeout:   3600,
+			expectLabels: map[string]string{"env": "test"},
+		},
+		{
+			name: "autoResume enabled sets wake-on-traffic annotation",
+			request: models.NewSandboxRequest{
+				TemplateID: "t1",
+				Timeout:    300,
+				AutoResume: models.SandboxAutoResumeConfig{Enabled: true},
+			},
+			maxTimeout: 3600,
+			expectAnnotations: map[string]string{
+				agentsv1alpha1.AnnotationWakeOnTraffic: agentsv1alpha1.True,
+			},
+		},
+		{
+			name: "autoResume disabled does not set wake-on-traffic annotation",
+			request: models.NewSandboxRequest{
+				TemplateID: "t1",
+				Timeout:    300,
+				AutoResume: models.SandboxAutoResumeConfig{Enabled: false},
+			},
+			maxTimeout:          3600,
+			expectNoAnnotations: []string{agentsv1alpha1.AnnotationWakeOnTraffic},
+		},
+		{
+			name: "autoResume absent does not set wake-on-traffic annotation",
+			request: models.NewSandboxRequest{
+				TemplateID: "t1",
+				Timeout:    300,
+			},
+			maxTimeout:          3600,
+			expectNoAnnotations: []string{agentsv1alpha1.AnnotationWakeOnTraffic},
 		},
 	}
 

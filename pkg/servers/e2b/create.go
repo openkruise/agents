@@ -396,6 +396,9 @@ func (sc *Controller) basicSandboxCreateModifier(ctx context.Context, sbx infra.
 	if request.Extensions.ReturnPodIP {
 		annotations[models.ExtensionKeyReturnPodIP] = agentsv1alpha1.True
 	}
+	if request.AutoResume.Enabled {
+		annotations[agentsv1alpha1.AnnotationWakeOnTraffic] = agentsv1alpha1.True
+	}
 	sbx.SetAnnotations(annotations)
 
 	// propagate labels to sandbox metadata (does not affect pod template hash)

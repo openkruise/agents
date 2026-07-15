@@ -48,14 +48,23 @@ type Sandbox struct {
 	State           string            `json:"state"`
 }
 
+// SandboxAutoResumeConfig mirrors the E2B API's autoResume field.
+// When Enabled is true, the sandbox is annotated with
+// agents.kruise.io/wake-on-traffic so the sandbox-gateway will auto-resume
+// it on incoming traffic after it is paused.
+type SandboxAutoResumeConfig struct {
+	Enabled bool `json:"enabled"`
+}
+
 // NewSandboxRequest represents a request to create a new sandbox
 type NewSandboxRequest struct {
-	TemplateID   string            `json:"templateID"`
-	Timeout      int               `json:"timeout,omitempty"`
-	AutoPause    bool              `json:"autoPause,omitempty"`
-	Metadata     map[string]string `json:"metadata,omitempty"`
-	EnvVars      EnvVars           `json:"envVars,omitempty"`
-	VolumeMounts []VolumeMount     `json:"volumeMounts,omitempty"`
+	TemplateID   string                  `json:"templateID"`
+	Timeout      int                     `json:"timeout,omitempty"`
+	AutoPause    bool                    `json:"autoPause,omitempty"`
+	AutoResume   SandboxAutoResumeConfig `json:"autoResume,omitempty"`
+	Metadata     map[string]string       `json:"metadata,omitempty"`
+	EnvVars      EnvVars                 `json:"envVars,omitempty"`
+	VolumeMounts []VolumeMount           `json:"volumeMounts,omitempty"`
 
 	Extensions NewSandboxRequestExtension `json:"-"`
 }
