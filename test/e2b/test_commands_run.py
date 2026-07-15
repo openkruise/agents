@@ -102,24 +102,25 @@ def test_commands_background_execution(sandbox_context, config):
         }
     ))
 
-    # Start a long-running command in background
-    command = sbx.commands.run('echo start; sleep 5; echo end', background=True)
+    # Keep the process alive until kill(). A short sleep + full stream drain races
+    # natural exit: SendSignal then fails with "os: process already finished".
+    command = sbx.commands.run('echo start; sleep 60; echo end', background=True)
 
-    # Collect output through iteration
     stdout_output = []
     stderr_output = []
+    saw_start = False
 
-    try:
-        for stdout, stderr, _ in command:
-            if stdout:
-                stdout_output.append(stdout)
-            if stderr:
-                stderr_output.append(stderr)
-    except Exception:
-        pass  # Command might be killed
+    for stdout, stderr, _ in command:
+        if stdout:
+            stdout_output.append(stdout)
+            if "start" in stdout:
+                saw_start = True
+                break
+        if stderr:
+            stderr_output.append(stderr)
 
-    # Kill the command
-    command.kill()
+    assert saw_start, "expected background command to emit start before kill"
+    assert command.kill(), "expected kill() to succeed while the process is still running"
 
 
 def test_commands_realtime_callbacks(sandbox_context, config):
