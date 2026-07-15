@@ -1224,6 +1224,7 @@ func countTypesByCategory(byObject map[ctrlclient.Object]ctrlcache.ByObject) (cu
 		reflect.TypeOf(&agentsv1alpha1.SandboxSet{}),
 		reflect.TypeOf(&agentsv1alpha1.Checkpoint{}),
 		reflect.TypeOf(&agentsv1alpha1.SandboxTemplate{}),
+		reflect.TypeOf(&agentsv1alpha1.TrafficPolicy{}),
 	}
 	systemTypes := []reflect.Type{
 		reflect.TypeOf(&corev1.Secret{}),
@@ -1274,7 +1275,7 @@ func TestBuildCacheConfig(t *testing.T) {
 			name:            "empty options - only custom resources and PersistentVolume",
 			opts:            config.SandboxManagerOptions{},
 			wantErr:         false,
-			wantCustom:      4, // Sandbox, SandboxSet, Checkpoint, SandboxTemplate
+			wantCustom:      5, // Sandbox, SandboxSet, Checkpoint, SandboxTemplate, TrafficPolicy
 			wantSystem:      0,
 			wantPV:          1,
 			wantCustomNs:    "",
@@ -1287,7 +1288,7 @@ func TestBuildCacheConfig(t *testing.T) {
 				SandboxNamespace: "team-a",
 			},
 			wantErr:         false,
-			wantCustom:      4,
+			wantCustom:      5,
 			wantSystem:      0,
 			wantPV:          1,
 			wantCustomNs:    "team-a",
@@ -1300,7 +1301,7 @@ func TestBuildCacheConfig(t *testing.T) {
 				SandboxLabelSelector: "env=prod",
 			},
 			wantErr:         false,
-			wantCustom:      4,
+			wantCustom:      5,
 			wantSystem:      0,
 			wantPV:          1,
 			wantCustomNs:    "",
@@ -1320,7 +1321,7 @@ func TestBuildCacheConfig(t *testing.T) {
 				SandboxLabelSelector: "env=prod",
 			},
 			wantErr:         false,
-			wantCustom:      4,
+			wantCustom:      5,
 			wantSystem:      0,
 			wantPV:          1,
 			wantCustomNs:    "team-a",
@@ -1333,7 +1334,7 @@ func TestBuildCacheConfig(t *testing.T) {
 				SystemNamespace: "sandbox-system",
 			},
 			wantErr:         false,
-			wantCustom:      4,
+			wantCustom:      5,
 			wantSystem:      2, // Secret + ConfigMap
 			wantPV:          1,
 			wantCustomNs:    "",
@@ -1347,7 +1348,7 @@ func TestBuildCacheConfig(t *testing.T) {
 				SandboxNamespace: "team-a",
 			},
 			wantErr:         false,
-			wantCustom:      4,
+			wantCustom:      5,
 			wantSystem:      2,
 			wantPV:          1,
 			wantCustomNs:    "team-a",
@@ -1362,7 +1363,7 @@ func TestBuildCacheConfig(t *testing.T) {
 				SandboxLabelSelector: "env=prod",
 			},
 			wantErr:         false,
-			wantCustom:      4,
+			wantCustom:      5,
 			wantSystem:      2,
 			wantPV:          1,
 			wantCustomNs:    "team-a",
@@ -1373,7 +1374,7 @@ func TestBuildCacheConfig(t *testing.T) {
 			name:            "complex valid label selector",
 			opts:            config.SandboxManagerOptions{SandboxLabelSelector: "app=myapp,version in (v1,v2),!deprecated"},
 			wantErr:         false,
-			wantCustom:      4,
+			wantCustom:      5,
 			wantSystem:      0,
 			wantPV:          1,
 			wantCustomLabel: "app=myapp", // Partial match - selector is normalized internally
@@ -1403,12 +1404,13 @@ func TestBuildCacheConfig(t *testing.T) {
 			assert.Equal(t, tt.wantSystem, system, "system resource count mismatch")
 			assert.Equal(t, tt.wantPV, clusterScoped, "cluster-scoped resource count mismatch")
 
-			// Verify custom resources (Sandbox, SandboxSet, Checkpoint, SandboxTemplate)
+			// Verify custom resources (Sandbox, SandboxSet, Checkpoint, SandboxTemplate, TrafficPolicy)
 			customObjs := []ctrlclient.Object{
 				&agentsv1alpha1.Sandbox{},
 				&agentsv1alpha1.SandboxSet{},
 				&agentsv1alpha1.Checkpoint{},
 				&agentsv1alpha1.SandboxTemplate{},
+				&agentsv1alpha1.TrafficPolicy{},
 			}
 			for _, obj := range customObjs {
 				cfg, ok := getConfigByType(byObject, obj)

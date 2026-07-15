@@ -101,6 +101,87 @@ func TestValidateDenyOut(t *testing.T) {
 	}
 }
 
+func TestValidateAllowOut(t *testing.T) {
+	tests := []struct {
+		name        string
+		allowOut    []string
+		expectError string
+	}{
+		{
+			name:        "valid CIDR entries",
+			allowOut:    []string{"10.0.0.0/8", "192.168.1.0/24"},
+			expectError: "",
+		},
+		{
+			name:        "valid bare IP entries",
+			allowOut:    []string{"8.8.8.8", "1.1.1.1"},
+			expectError: "",
+		},
+		{
+			name:        "valid domain entries",
+			allowOut:    []string{"example.com", "api.openai.com"},
+			expectError: "",
+		},
+		{
+			name:        "valid wildcard domain entries",
+			allowOut:    []string{"*.example.com", "*.openai.com"},
+			expectError: "",
+		},
+		{
+			name:        "valid mixed CIDR IP and domain",
+			allowOut:    []string{"10.0.0.0/8", "8.8.8.8", "api.example.com", "*.github.com"},
+			expectError: "",
+		},
+		{
+			name:        "empty list is valid",
+			allowOut:    []string{},
+			expectError: "",
+		},
+		{
+			name:        "nil list is valid",
+			allowOut:    nil,
+			expectError: "",
+		},
+		{
+			name:        "garbage string rejected",
+			allowOut:    []string{">>>invalid"},
+			expectError: "invalid allowOut entry",
+		},
+		{
+			name:        "single label rejected",
+			allowOut:    []string{"localhost"},
+			expectError: "invalid allowOut entry",
+		},
+		{
+			name:        "empty string rejected",
+			allowOut:    []string{""},
+			expectError: "invalid allowOut entry",
+		},
+		{
+			name:        "TLD too short rejected",
+			allowOut:    []string{"example.a"},
+			expectError: "invalid allowOut entry",
+		},
+		{
+			name:        "invalid entry mixed with valid rejected",
+			allowOut:    []string{"10.0.0.0/8", ">>>bad"},
+			expectError: "invalid allowOut entry",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateAllowOut(tt.allowOut)
+			if tt.expectError == "" {
+				assert.NoError(t, err)
+			} else {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
+			}
+		})
+	}
+}
+
 func TestValidateAndBuildNetworkConfig_DenyOutDomainError(t *testing.T) {
 	// Validation is centralized in validateAndBuildNetworkConfig.
 	_, err := validateAndBuildNetworkConfig(nil, &models.SandboxNetworkConfig{
@@ -315,6 +396,34 @@ func TestValidateAndBuildNetworkConfig(t *testing.T) {
 			},
 			wantNil:     true,
 			expectError: "domains are not supported in denyOut",
+		},
+		{
+			name:                "invalid allowOut entry rejected",
+			allowInternetAccess: nil,
+			network: &models.SandboxNetworkConfig{
+				AllowOut: []string{">>>invalid"},
+			},
+			wantNil:     true,
+			expectError: "invalid allowOut entry",
+		},
+		{
+			name:                "single label in allowOut rejected",
+			allowInternetAccess: nil,
+			network: &models.SandboxNetworkConfig{
+				AllowOut: []string{"localhost"},
+			},
+			wantNil:     true,
+			expectError: "invalid allowOut entry",
+		},
+		{
+			name:                "invalid allowOut mixed with valid CIDR rejected",
+			allowInternetAccess: nil,
+			network: &models.SandboxNetworkConfig{
+				AllowOut: []string{"10.0.0.0/8", ">>>bad"},
+				DenyOut:  []string{"8.8.8.8"},
+			},
+			wantNil:     true,
+			expectError: "invalid allowOut entry",
 		},
 	}
 

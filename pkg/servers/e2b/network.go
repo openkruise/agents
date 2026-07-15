@@ -29,6 +29,16 @@ import (
 	"github.com/openkruise/agents/pkg/utils/network"
 )
 
+// validateAllowOut checks that all allowOut entries are valid CIDR, IP, or FQDN.
+func validateAllowOut(allowOut []string) error {
+	for _, entry := range allowOut {
+		if !network.IsCIDROrIP(entry) && !network.IsFQDN(entry) {
+			return fmt.Errorf("invalid allowOut entry: %q is not a valid CIDR, IP, or domain", entry)
+		}
+	}
+	return nil
+}
+
 // validateDenyOut checks that all denyOut entries are valid CIDR or bare IP addresses.
 func validateDenyOut(denyOut []string) error {
 	for _, entry := range denyOut {
@@ -54,26 +64,31 @@ func applyAllowInternetAccess(allowInternetAccess *bool, denyOut []string) []str
 
 // validateAndBuildNetworkConfig is the single entry point for validating raw
 // network parameters and producing a normalized SandboxNetworkConfig ready for CR creation.
-func validateAndBuildNetworkConfig(allowInternetAccess *bool, network *models.SandboxNetworkConfig) (*models.SandboxNetworkConfig, error) {
+func validateAndBuildNetworkConfig(allowInternetAccess *bool, netConfig *models.SandboxNetworkConfig) (*models.SandboxNetworkConfig, error) {
 	// Step 1: Merge allowInternetAccess: false → denyOut: ["0.0.0.0/0"]
 	if allowInternetAccess != nil && !*allowInternetAccess {
-		if network == nil {
-			network = &models.SandboxNetworkConfig{}
+		if netConfig == nil {
+			netConfig = &models.SandboxNetworkConfig{}
 		}
-		network.DenyOut = applyAllowInternetAccess(allowInternetAccess, network.DenyOut)
+		netConfig.DenyOut = applyAllowInternetAccess(allowInternetAccess, netConfig.DenyOut)
 	}
 
 	// Step 2: Return nil if no network rules are needed
-	if network == nil || (len(network.AllowOut) == 0 && len(network.DenyOut) == 0) {
+	if netConfig == nil || (len(netConfig.AllowOut) == 0 && len(netConfig.DenyOut) == 0) {
 		return nil, nil
 	}
 
-	// Step 3: Validate denyOut — domains are not supported in deny lists
-	if err := validateDenyOut(network.DenyOut); err != nil {
+	// Step 3: Validate allowOut — entries must be CIDR, IP, or FQDN
+	if err := validateAllowOut(netConfig.AllowOut); err != nil {
 		return nil, err
 	}
 
-	return network, nil
+	// Step 4: Validate denyOut — domains are not supported in deny lists
+	if err := validateDenyOut(netConfig.DenyOut); err != nil {
+		return nil, err
+	}
+
+	return netConfig, nil
 }
 
 // UpdateSandboxNetwork replaces the sandbox's network rules with the new configuration.
@@ -91,7 +106,7 @@ func (sc *Controller) UpdateSandboxNetwork(r *http.Request) (web.ApiResponse[str
 	}
 
 	// Validate and build the network config in one step.
-	network, err := validateAndBuildNetworkConfig(req.AllowInternetAccess, &models.SandboxNetworkConfig{
+	netConfig, err := validateAndBuildNetworkConfig(req.AllowInternetAccess, &models.SandboxNetworkConfig{
 		AllowOut: req.AllowOut,
 		DenyOut:  req.DenyOut,
 	})
@@ -108,10 +123,10 @@ func (sc *Controller) UpdateSandboxNetwork(r *http.Request) (web.ApiResponse[str
 	}
 
 	var cfg infra.SandboxNetworkConfig
-	if network != nil {
+	if netConfig != nil {
 		cfg = infra.SandboxNetworkConfig{
-			AllowOut: network.AllowOut,
-			DenyOut:  network.DenyOut,
+			AllowOut: netConfig.AllowOut,
+			DenyOut:  netConfig.DenyOut,
 		}
 	}
 	if err := sbx.UpdateNetworkPolicy(ctx, cfg); err != nil {

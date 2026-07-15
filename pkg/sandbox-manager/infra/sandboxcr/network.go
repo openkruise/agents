@@ -84,7 +84,7 @@ func buildTrafficPolicy(allowOutCIDRs, allowOutDomains, denyOut []string, namesp
 				To:     denyPeers,
 			})
 		}
-		if !network.ContainsAllTrafficCIDR(allowOutCIDRs) {
+		if !network.ContainsAllTrafficCIDR(allowOutCIDRs) && !network.ContainsAllTrafficCIDR(denyOut) {
 			rules = append(rules, agentsv1alpha1.TrafficPolicyRule{
 				Action: agentsv1alpha1.RuleActionReject,
 				To:     []agentsv1alpha1.TrafficPolicyPeer{{CIDR: network.AllTrafficCIDR}},
@@ -245,43 +245,47 @@ func (s *Sandbox) SelectNetworkPolicy(ctx context.Context) (*infra.SandboxNetwor
 	); err != nil {
 		return nil, fmt.Errorf("failed to list TrafficPolicies: %w", err)
 	}
-	if len(tpList.Items) > 0 {
-		tp := &tpList.Items[0]
-		if tp.Spec.Egress != nil {
-			for _, rule := range tp.Spec.Egress.Rules {
-				switch rule.Action {
-				case agentsv1alpha1.RuleActionAllow:
-					// Check if the rule contains FQDN entries, which means the
-					// DNS server CIDR may have been auto-injected by buildTrafficPolicy.
-					hasFQDN := false
-					for _, peer := range rule.To {
-						if peer.FQDN != "" {
-							hasFQDN = true
-							break
-						}
+	if len(tpList.Items) == 0 {
+		log.Info("no network CRs found for sandbox")
+		return nil, nil
+	}
+	tp := &tpList.Items[0]
+	if tp.Spec.Egress == nil {
+		log.Info("no network CRs found for sandbox")
+		return nil, nil
+	}
+	for _, rule := range tp.Spec.Egress.Rules {
+		switch rule.Action {
+		case agentsv1alpha1.RuleActionAllow:
+			// Check if the rule contains FQDN entries, which means the
+			// DNS server CIDR may have been auto-injected by buildTrafficPolicy.
+			hasFQDN := false
+			for _, peer := range rule.To {
+				if peer.FQDN != "" {
+					hasFQDN = true
+					break
+				}
+			}
+			for _, peer := range rule.To {
+				if peer.CIDR != "" {
+					// Skip the auto-injected DNS server CIDR so the read-back
+					// is transparent to the user.
+					if hasFQDN && peer.CIDR == network.DNSServerCIDR {
+						continue
 					}
-					for _, peer := range rule.To {
-						if peer.CIDR != "" {
-							// Skip the auto-injected DNS server CIDR so the read-back
-							// is transparent to the user.
-							if hasFQDN && peer.CIDR == network.DNSServerCIDR {
-								continue
-							}
-							config.AllowOut = append(config.AllowOut, peer.CIDR)
-						}
-						if peer.FQDN != "" {
-							config.AllowOut = append(config.AllowOut, peer.FQDN)
-						}
-					}
-				case agentsv1alpha1.RuleActionReject:
-					for _, peer := range rule.To {
-						if peer.CIDR == network.AllTrafficCIDR && len(rule.To) == 1 {
-							continue
-						}
-						if peer.CIDR != "" {
-							config.DenyOut = append(config.DenyOut, peer.CIDR)
-						}
-					}
+					config.AllowOut = append(config.AllowOut, peer.CIDR)
+				}
+				if peer.FQDN != "" {
+					config.AllowOut = append(config.AllowOut, peer.FQDN)
+				}
+			}
+		case agentsv1alpha1.RuleActionReject:
+			for _, peer := range rule.To {
+				if peer.CIDR == network.AllTrafficCIDR && len(rule.To) == 1 {
+					continue
+				}
+				if peer.CIDR != "" {
+					config.DenyOut = append(config.DenyOut, peer.CIDR)
 				}
 			}
 		}

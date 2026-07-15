@@ -18,7 +18,10 @@ limitations under the License.
 // and normalization used by the e2b API layer and the sandbox-manager infra layer.
 package network
 
-import "net"
+import (
+	"net"
+	"regexp"
+)
 
 // AllTrafficCIDR represents all IPv4 addresses (0.0.0.0/0). It is used both
 // as the default deny rule in TrafficPolicy whitelist mode and as the
@@ -57,6 +60,18 @@ func ContainsAllTrafficCIDR(cidrs []string) bool {
 		}
 	}
 	return false
+}
+
+// fqdnRegex matches fully qualified domain names with an optional wildcard prefix.
+// Each label must start and end with an alphanumeric character and may contain
+// hyphens in between (max 63 chars per label). The TLD must be at least 2
+// alphabetic characters.
+var fqdnRegex = regexp.MustCompile(`^(\*\.)?([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$`)
+
+// IsFQDN returns true if the entry is a valid fully qualified domain name.
+// Supports wildcard domains with a "*." prefix (e.g., "*.example.com").
+func IsFQDN(entry string) bool {
+	return fqdnRegex.MatchString(entry)
 }
 
 // SplitAllowOut separates allowOut entries into CIDR/IP entries and domain entries.

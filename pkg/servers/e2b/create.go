@@ -223,19 +223,9 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 		"resourceVersion", sbx.GetResourceVersion(), "totalCost", time.Since(claimStart))
 
 	// Create network CRs (TrafficPolicy) if network config is provided.
-	// Network policy creation failure must fail the sandbox creation
-	if request.Network != nil {
-		if netErr := sbx.CreateNetworkPolicy(ctx, infra.SandboxNetworkConfig{
-			AllowOut: request.Network.AllowOut,
-			DenyOut:  request.Network.DenyOut,
-		}); netErr != nil {
-			log.Error(netErr, "failed to create network policy, sandbox creation failed",
-				"sandboxID", sbx.GetSandboxID())
-			return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
-				Code:    http.StatusInternalServerError,
-				Message: fmt.Sprintf("failed to create network policy: %v", netErr),
-			}
-		}
+	// Network policy creation failure must fail the sandbox creation and killed the sandbox.
+	if apiErr := createNetworkPolicyForSandbox(ctx, sbx, request, log); apiErr != nil {
+		return web.ApiResponse[*models.Sandbox]{}, apiErr
 	}
 
 	return web.ApiResponse[*models.Sandbox]{
@@ -325,19 +315,9 @@ func (sc *Controller) createSandboxWithClone(ctx context.Context, request models
 		"resourceVersion", sbx.GetResourceVersion(), "totalCost", time.Since(start))
 
 	// Create network CRs (TrafficPolicy) if network config is provided.
-	// Network policy creation failure must fail the sandbox creation
-	if request.Network != nil {
-		if netErr := sbx.CreateNetworkPolicy(ctx, infra.SandboxNetworkConfig{
-			AllowOut: request.Network.AllowOut,
-			DenyOut:  request.Network.DenyOut,
-		}); netErr != nil {
-			log.Error(netErr, "failed to create network policy, sandbox creation failed",
-				"sandboxID", sbx.GetSandboxID())
-			return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
-				Code:    http.StatusInternalServerError,
-				Message: fmt.Sprintf("failed to create network policy: %v", netErr),
-			}
-		}
+	// Network policy creation failure must fail the sandbox creation and killed the sandbox.
+	if apiErr := createNetworkPolicyForSandbox(ctx, sbx, request, log); apiErr != nil {
+		return web.ApiResponse[*models.Sandbox]{}, apiErr
 	}
 
 	return web.ApiResponse[*models.Sandbox]{
@@ -520,4 +500,47 @@ func (sc *Controller) injectStorageAuthAnnotation(sbx infra.Sandbox, key, value 
 	}
 	annotations[key] = value
 	sbx.SetAnnotations(annotations)
+}
+
+// createNetworkPolicyForSandbox creates the TrafficPolicy CR for the sandbox
+// based on the request network config. On failure, the sandbox is killed to
+// prevent it from running without network policies, and an ApiError is returned.
+// Returns nil if no network config is provided or creation succeeds.
+func createNetworkPolicyForSandbox(ctx context.Context, sbx infra.Sandbox, request models.NewSandboxRequest, log klog.Logger) *web.ApiError {
+	if request.Network == nil {
+		return nil
+	}
+	if netErr := sbx.CreateNetworkPolicy(ctx, infra.SandboxNetworkConfig{
+		AllowOut: request.Network.AllowOut,
+		DenyOut:  request.Network.DenyOut,
+	}); netErr != nil {
+		log.Error(netErr, "failed to create network policy, sandbox creation failed",
+			"sandboxID", sbx.GetSandboxID())
+		killed := killSandboxAfterFailure(ctx, sbx, log)
+		return &web.ApiError{
+			Code:    http.StatusInternalServerError,
+			Message: fmt.Sprintf("failed to create network policy: %v; clean up sandbox: %v", netErr, killed),
+		}
+	}
+	return nil
+}
+
+// killSandboxAfterFailure attempts to delete a sandbox when a post-creation step
+// (e.g., network policy creation) fails, preventing orphaned sandboxes from
+// running without the intended security configuration. A fresh context with a
+// timeout is used when the original request context is already canceled.
+func killSandboxAfterFailure(ctx context.Context, sbx infra.Sandbox, log klog.Logger) bool {
+	cleanupCtx := ctx
+	if ctx.Err() != nil {
+		var cancel context.CancelFunc
+		cleanupCtx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+	}
+	if killErr := sbx.Kill(cleanupCtx); killErr != nil {
+		log.Error(killErr, "failed to kill sandbox after post-creation failure",
+			"sandboxID", sbx.GetSandboxID())
+		return false
+	}
+	log.Info("sandbox killed after post-creation failure", "sandboxID", sbx.GetSandboxID())
+	return true
 }
