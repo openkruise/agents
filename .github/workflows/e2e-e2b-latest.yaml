@@ -113,28 +113,53 @@ jobs:
             echo "Cached inplace-update image"
           fi
 
+      # Retry transient GitHub runner resource failures (OOM / disk pressure) during image builds.
       - name: Build image
-        run: |
-           make docker-build-manager
-           make docker-build-controller
-           make docker-build-runtime
-           kind load docker-image --name=${KIND_CLUSTER_NAME} ${CONTROLLER_IMG} || { echo >&2 "kind not installed or error loading image: ${CONTROLLER_IMG}"; exit 1; }
-           docker rmi ${CONTROLLER_IMG}
-           kind load docker-image --name=${KIND_CLUSTER_NAME} ${MANAGER_IMG} || { echo >&2 "kind not installed or error loading image: ${MANAGER_IMG}"; exit 1; }
-           docker rmi ${MANAGER_IMG}
-           kind load docker-image --name=${KIND_CLUSTER_NAME} ${RUNTIME_IMG} || { echo >&2 "kind not installed or error loading image: ${RUNTIME_IMG}"; exit 1; }
-           docker rmi ${RUNTIME_IMG}
-           kind load docker-image --name=${KIND_CLUSTER_NAME} ${CODE_INTERPRETER_IMG} || { echo >&2 "kind not installed or error loading image: ${CODE_INTERPRETER_IMG}"; exit 1; }
-           docker rmi ${CODE_INTERPRETER_IMG}
-           kind load docker-image --name=${KIND_CLUSTER_NAME} ${INPLACE_UPDATE_IMG} || { echo >&2 "kind not installed or error loading image: ${INPLACE_UPDATE_IMG}"; exit 1; }
-           docker rmi ${INPLACE_UPDATE_IMG}
+        uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4.0.0
+        with:
+          timeout_minutes: 45
+          max_attempts: 3
+          retry_wait_seconds: 60
+          retry_on: error
+          shell: bash
+          on_retry_command: |
+            echo "Build image failed; pruning Docker state before retry..."
+            docker builder prune -af || true
+            docker system prune -f || true
+            df -h || true
+          command: |
+            make docker-build-manager
+            make docker-build-controller
+            make docker-build-runtime
+            kind load docker-image --name=${KIND_CLUSTER_NAME} ${CONTROLLER_IMG} || { echo >&2 "kind not installed or error loading image: ${CONTROLLER_IMG}"; exit 1; }
+            docker rmi ${CONTROLLER_IMG}
+            kind load docker-image --name=${KIND_CLUSTER_NAME} ${MANAGER_IMG} || { echo >&2 "kind not installed or error loading image: ${MANAGER_IMG}"; exit 1; }
+            docker rmi ${MANAGER_IMG}
+            kind load docker-image --name=${KIND_CLUSTER_NAME} ${RUNTIME_IMG} || { echo >&2 "kind not installed or error loading image: ${RUNTIME_IMG}"; exit 1; }
+            docker rmi ${RUNTIME_IMG}
+            kind load docker-image --name=${KIND_CLUSTER_NAME} ${CODE_INTERPRETER_IMG} || { echo >&2 "kind not installed or error loading image: ${CODE_INTERPRETER_IMG}"; exit 1; }
+            docker rmi ${CODE_INTERPRETER_IMG}
+            kind load docker-image --name=${KIND_CLUSTER_NAME} ${INPLACE_UPDATE_IMG} || { echo >&2 "kind not installed or error loading image: ${INPLACE_UPDATE_IMG}"; exit 1; }
+            docker rmi ${INPLACE_UPDATE_IMG}
 
       - name: Build sandbox-gateway image
         if: matrix.with_gateway
-        run: |
-           make docker-build-sandbox-gateway
-           kind load docker-image --name=${KIND_CLUSTER_NAME} ${GATEWAY_IMG} || { echo >&2 "kind not installed or error loading image: ${GATEWAY_IMG}"; exit 1; }
-           docker rmi ${GATEWAY_IMG}
+        uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4.0.0
+        with:
+          timeout_minutes: 20
+          max_attempts: 3
+          retry_wait_seconds: 60
+          retry_on: error
+          shell: bash
+          on_retry_command: |
+            echo "Build sandbox-gateway image failed; pruning Docker state before retry..."
+            docker builder prune -af || true
+            docker system prune -f || true
+            df -h || true
+          command: |
+            make docker-build-sandbox-gateway
+            kind load docker-image --name=${KIND_CLUSTER_NAME} ${GATEWAY_IMG} || { echo >&2 "kind not installed or error loading image: ${GATEWAY_IMG}"; exit 1; }
+            docker rmi ${GATEWAY_IMG}
 
       - name: Install Kruise Agents
         run: |
