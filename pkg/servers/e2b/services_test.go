@@ -955,8 +955,8 @@ func TestCreateSandboxRetentionSemantics(t *testing.T) {
 					assert.Nil(t, preReadySbx.Spec.ShutdownTime)
 				} else {
 					require.NotNil(t, preReadySbx.Spec.ShutdownTime)
-					assert.WithinDuration(t, beforeGuard.Add(createTimeoutGuard), preReadySbx.Spec.ShutdownTime.Time, time.Second)
-					assert.WithinDuration(t, afterGuard.Add(createTimeoutGuard), preReadySbx.Spec.ShutdownTime.Time, time.Second)
+					assert.WithinDuration(t, beforeGuard.Add(time.Duration(request.Timeout)*time.Second), preReadySbx.Spec.ShutdownTime.Time, time.Second)
+					assert.WithinDuration(t, afterGuard.Add(time.Duration(request.Timeout)*time.Second), preReadySbx.Spec.ShutdownTime.Time, time.Second)
 				}
 
 				cleanup := CreateSandboxPool(t, controller, templateName, 1)

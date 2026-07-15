@@ -51,9 +51,6 @@ import (
 // request and stays well within time.Duration's int64 range (max ~292 years).
 const noServerTimeout = 100 * 365 * 24 * time.Hour
 
-// createTimeoutGuard bounds the pre-ready crash window for timed creates.
-const createTimeoutGuard = 10 * time.Minute
-
 // mapInfraErrorToApiError converts an infra-layer error to an ApiError with the
 // appropriate HTTP status code based on managererrors.ErrorCode.
 func mapInfraErrorToApiError(err error) *web.ApiError {
@@ -385,15 +382,17 @@ func (sc *Controller) basicSandboxCreateModifier(ctx context.Context, sbx infra.
 	// E2B-managed sandboxes persist paused-retention preference so later timeout
 	// writes and controller auto-pause use the same policy. Claim/clone
 	// post-process saves the final create timeout after wait-ready, so wait-ready
-	// time is not counted against the sandbox lifetime. Timed creates still get a
-	// short shutdown guard so leaked not-ready objects can be collected.
+	// time is not counted against the sandbox lifetime. Pre-ready timed creates
+	// set only ShutdownTime from the request timeout (no PauseTime) so leaked
+	// not-ready objects can be collected without triggering auto-pause.
 	if request.Extensions.NeverTimeout {
 		sbx.SetTimeout(infra.SetTimeoutOptions{Timeout: timeout.Options{}})
 		log.V(utils.DebugLogLevel).Info("timeout options cleared before create")
 	} else {
-		// Keep a bounded shutdown backstop until the final timeout is saved after readiness.
-		sbx.SetTimeout(infra.SetTimeoutOptions{Timeout: timeout.Options{ShutdownTime: time.Now().Add(createTimeoutGuard)}})
-		log.V(utils.DebugLogLevel).Info("timeout guard set before create")
+		sbx.SetTimeout(infra.SetTimeoutOptions{Timeout: timeout.Options{
+			ShutdownTime: TimeAfterSeconds(time.Now(), request.Timeout),
+		}})
+		log.V(utils.DebugLogLevel).Info("pre-ready shutdown timeout set before create", "timeoutSeconds", request.Timeout)
 	}
 
 	// propagate annotations to sandbox
