@@ -31,14 +31,12 @@ import (
 
 func TestManagerRouteProjectorObservability(t *testing.T) {
 	tests := []struct {
-		name               string
-		labels             map[string]string
-		expectID           string
-		format             string
-		expectLegacyMetric float64
+		name     string
+		labels   map[string]string
+		expectID string
 	}{
-		{name: "legacy fallback is counted", expectID: "team-a--sandbox-a", format: sandboxid.FormatLegacy, expectLegacyMetric: 1},
-		{name: "short resolution is not a fallback", labels: map[string]string{sandboxid.LabelKey: "short-id"}, expectID: "short-id", format: sandboxid.FormatShort},
+		{name: "legacy projection is not a delete fallback", expectID: "team-a--sandbox-a"},
+		{name: "short projection is not a delete fallback", labels: map[string]string{sandboxid.LabelKey: "short-id"}, expectID: "short-id"},
 	}
 
 	for _, tt := range tests {
@@ -50,15 +48,12 @@ func TestManagerRouteProjectorObservability(t *testing.T) {
 				Labels:    tt.labels,
 			}}
 			fallbackLabels := map[string]string{"surface": string(sandboxroute.SurfaceManager)}
-			resolvedLabels := map[string]string{"format": tt.format, "surface": "e2b"}
 			fallbackBefore := registeredCounterValue(t, "sandbox_route_legacy_fallback_total", fallbackLabels)
-			resolvedBefore := registeredCounterValue(t, "sandbox_id_resolved_total", resolvedLabels)
 
 			route, err := newManagerRouteProjector().Project(sandboxroute.ProjectionInput{Object: object})
 			require.NoError(t, err)
 			assert.Equal(t, tt.expectID, route.ID)
-			assert.Equal(t, fallbackBefore+tt.expectLegacyMetric, registeredCounterValue(t, "sandbox_route_legacy_fallback_total", fallbackLabels))
-			assert.Equal(t, resolvedBefore, registeredCounterValue(t, "sandbox_id_resolved_total", resolvedLabels))
+			assert.Equal(t, fallbackBefore, registeredCounterValue(t, "sandbox_route_legacy_fallback_total", fallbackLabels))
 		})
 	}
 }

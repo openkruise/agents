@@ -30,21 +30,19 @@ import (
 
 func TestRouteProjectorObservability(t *testing.T) {
 	tests := []struct {
-		name               string
-		resolver           FormattedResolver
-		format             string
-		expectID           string
-		expectLegacyMetric float64
-		expectResolution   float64
-		expectError        string
+		name             string
+		resolver         FormattedResolver
+		format           string
+		expectID         string
+		expectResolution float64
+		expectError      string
 	}{
 		{
-			name:               "legacy resolution records gateway and fallback",
-			resolver:           func(metav1.Object) (string, string) { return "ns--sandbox", "legacy" },
-			format:             "legacy",
-			expectID:           "ns--sandbox",
-			expectLegacyMetric: 1,
-			expectResolution:   1,
+			name:             "legacy resolution records gateway without delete fallback",
+			resolver:         func(metav1.Object) (string, string) { return "ns--sandbox", "legacy" },
+			format:           "legacy",
+			expectID:         "ns--sandbox",
+			expectResolution: 1,
 		},
 		{
 			name:             "short resolution records gateway only",
@@ -77,7 +75,7 @@ func TestRouteProjectorObservability(t *testing.T) {
 				require.NoError(t, err)
 				assert.Equal(t, tt.expectID, route.ID)
 			}
-			assert.Equal(t, fallbackBefore+tt.expectLegacyMetric, gatewayCounterValue(t, "sandbox_route_legacy_fallback_total", fallbackLabels))
+			assert.Equal(t, fallbackBefore, gatewayCounterValue(t, "sandbox_route_legacy_fallback_total", fallbackLabels))
 			assert.Equal(t, resolutionBefore+tt.expectResolution, gatewayCounterValue(t, "sandbox_id_resolved_total", resolutionLabels))
 		})
 	}

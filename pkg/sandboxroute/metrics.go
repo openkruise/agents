@@ -63,7 +63,7 @@ var (
 	routeLegacyFallbackTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "sandbox_route_legacy_fallback_total",
-			Help: "Total legacy Sandbox ID fallbacks used for route projection.",
+			Help: "Total successful legacy delete fallbacks that removed an ID-only route.",
 		},
 		[]string{"surface"},
 	)
@@ -115,8 +115,7 @@ func init() {
 	)
 }
 
-// RecordLegacyFallback records one route projection using a legacy Sandbox ID.
-func RecordLegacyFallback(surface Surface) {
+func recordLegacyDeleteFallback(surface Surface) {
 	routeLegacyFallbackTotal.WithLabelValues(string(surface)).Inc()
 }
 

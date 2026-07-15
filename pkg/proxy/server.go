@@ -37,6 +37,7 @@ import (
 	"github.com/openkruise/agents/pkg/peers"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
+	"github.com/openkruise/agents/pkg/sandboxidmetrics"
 	"github.com/openkruise/agents/pkg/sandboxroute"
 	"github.com/openkruise/agents/pkg/utils"
 )
@@ -88,7 +89,12 @@ type Server struct {
 }
 
 func NewServer(opts config.SandboxManagerOptions) *Server {
-	store, err := sandboxroute.NewStore(sandboxroute.SurfaceManager)
+	store, err := sandboxroute.NewStoreWithOptions(
+		sandboxroute.SurfaceManager,
+		sandboxroute.StoreOptions{CollisionRecorder: func() {
+			sandboxidmetrics.RecordCollision("manager_route")
+		}},
+	)
 	if err != nil {
 		panic(fmt.Sprintf("failed to create manager route store: %v", err))
 	}
@@ -184,11 +190,8 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("failed to unmarshal body: %s", err.Error()), http.StatusBadRequest)
 		return
 	}
-	shape, err := route.Shape()
-	if err != nil || route.Validate() != nil {
-		if err == nil {
-			err = route.Validate()
-		}
+	shape, err := validateRouteShape(route)
+	if err != nil {
 		log.Error(err, "invalid route refresh payload")
 		http.Error(w, fmt.Sprintf("invalid route refresh payload: %v", err), http.StatusBadRequest)
 		return

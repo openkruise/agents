@@ -29,6 +29,7 @@ import (
 
 	"github.com/openkruise/agents/pkg/peers"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	"github.com/openkruise/agents/pkg/sandboxroute"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -145,6 +146,45 @@ func TestSetRoute_ConcurrentWrites(t *testing.T) {
 	assert.NotEmpty(t, got.IP)
 }
 
+func TestSetRouteValidationAndShapeDispatch(t *testing.T) {
+	validIDOnly := testProxyRoute("id-only", "1.1.1.1", "1")
+	validFull := testProxyRoute("full", "2.2.2.2", "1")
+	validFull.Namespace = "ns"
+	validFull.Name = "full"
+
+	tests := []struct {
+		name         string
+		route        Route
+		expectResult sandboxroute.EventResult
+		expectStored bool
+	}{
+		{name: "ID-only route", route: validIDOnly, expectResult: sandboxroute.EventResultApplied, expectStored: true},
+		{name: "full route", route: validFull, expectResult: sandboxroute.EventResultApplied, expectStored: true},
+		{name: "missing ID", route: Route{UID: "uid", ResourceVersion: "1"}, expectResult: sandboxroute.EventResultInvalid},
+		{name: "missing UID", route: Route{ID: "id", ResourceVersion: "1"}, expectResult: sandboxroute.EventResultInvalid},
+		{name: "missing resource version", route: Route{ID: "id", UID: "uid"}, expectResult: sandboxroute.EventResultInvalid},
+		{name: "partial ObjectKey", route: Route{ID: "id", Namespace: "ns", UID: "uid", ResourceVersion: "1"}, expectResult: sandboxroute.EventResultInvalid},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newTestServer(nil)
+			enqueued := 0
+			s.SetRepairEnqueuer(func(sandboxroute.MutationResult) { enqueued++ })
+
+			result := s.SetRoute(t.Context(), tt.route)
+
+			assert.Equal(t, tt.expectResult, result.Result)
+			_, stored := s.LoadRoute(tt.route.ID)
+			assert.Equal(t, tt.expectStored, stored)
+			if tt.expectResult == sandboxroute.EventResultInvalid {
+				assert.Equal(t, sandboxroute.ReasonInvalidRoute, result.Reason)
+				assert.Zero(t, enqueued)
+			}
+		})
+	}
+}
+
 // ---- LoadRoute tests ----
 
 func TestLoadRoute_NotFound(t *testing.T) {
@@ -184,20 +224,35 @@ func TestListRoutes_MultipleRoutes(t *testing.T) {
 // ---- DeleteRoute tests ----
 
 func TestDeleteRoute(t *testing.T) {
-	s := newTestServer(nil)
-	ctx := context.Background()
-	s.SetRoute(ctx, testProxyRoute("sb-1", "1.1.1.1", "1"))
+	idOnly := testProxyRoute("id-only", "1.1.1.1", "1")
+	full := testProxyRoute("full", "2.2.2.2", "1")
+	full.Namespace = "ns"
+	full.Name = "full"
 
-	s.DeleteRoute("sb-1")
+	tests := []struct {
+		name     string
+		route    *Route
+		deleteID string
+	}{
+		{name: "ID-only route", route: &idOnly, deleteID: idOnly.ID},
+		{name: "full route", route: &full, deleteID: full.ID},
+		{name: "absent route", deleteID: "nonexistent"},
+	}
 
-	_, ok := s.LoadRoute("sb-1")
-	assert.False(t, ok)
-}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newTestServer(nil)
+			if tt.route != nil {
+				result := s.SetRoute(t.Context(), *tt.route)
+				require.Equal(t, sandboxroute.EventResultApplied, result.Result)
+			}
 
-func TestDeleteRoute_NonExistent(t *testing.T) {
-	s := newTestServer(nil)
-	// Should not panic
-	s.DeleteRoute("nonexistent")
+			s.DeleteRoute(tt.deleteID)
+
+			_, ok := s.LoadRoute(tt.deleteID)
+			assert.False(t, ok)
+		})
+	}
 }
 
 // ---- ListPeers tests ----

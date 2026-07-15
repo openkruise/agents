@@ -41,11 +41,16 @@ type Route = sandboxroute.Route
 func (s *Server) SetRoute(ctx context.Context, route Route) sandboxroute.MutationResult {
 	log := klog.FromContext(ctx)
 	log.Info("try to set route", "new", route)
-	shape, err := route.Shape()
-	var result sandboxroute.MutationResult
+	shape, err := validateRouteShape(route)
 	if err != nil {
-		result = s.store.UpsertFull(route)
-	} else if shape == sandboxroute.ShapeFull {
+		log.Error(err, "rejected invalid route mutation")
+		return sandboxroute.MutationResult{
+			Result: sandboxroute.EventResultInvalid,
+			Reason: sandboxroute.ReasonInvalidRoute,
+		}
+	}
+	var result sandboxroute.MutationResult
+	if shape == sandboxroute.ShapeFull {
 		result = s.store.UpsertFull(route)
 	} else {
 		result = s.store.UpsertIDOnly(route)
@@ -136,7 +141,7 @@ func (s *Server) DeleteRoute(id string) {
 	if !ok {
 		return
 	}
-	shape, err := route.Shape()
+	shape, err := validateRouteShape(route)
 	if err != nil {
 		return
 	}
@@ -149,6 +154,13 @@ func (s *Server) DeleteRoute(id string) {
 	}
 	s.enqueueMutation(result)
 	s.updateRouteCount()
+}
+
+func validateRouteShape(route Route) (sandboxroute.Shape, error) {
+	if err := route.Validate(); err != nil {
+		return "", err
+	}
+	return route.Shape()
 }
 
 // DeleteAuthoritativeByObjectKey removes the current full route for a locally

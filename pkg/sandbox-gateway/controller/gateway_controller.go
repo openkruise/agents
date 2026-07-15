@@ -56,9 +56,6 @@ func NewRouteProjector(resolve FormattedResolver) *sandboxroute.Projector {
 	return sandboxroute.NewProjector(func(object metav1.Object) string {
 		id, format := resolve(object)
 		sandboxidmetrics.RecordResolved(format, "gateway")
-		if format == "legacy" {
-			sandboxroute.RecordLegacyFallback(sandboxroute.SurfaceGateway)
-		}
 		return id
 	})
 }

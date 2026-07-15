@@ -23,6 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/openkruise/agents/pkg/proxy"
+	"github.com/openkruise/agents/pkg/sandboxidmetrics"
 	"github.com/openkruise/agents/pkg/sandboxroute"
 )
 
@@ -39,7 +40,7 @@ type Registry struct {
 var registryInstance = mustNewRegistry()
 
 func mustNewRegistry() *Registry {
-	store, err := sandboxroute.NewStore(sandboxroute.SurfaceGateway)
+	store, err := newGatewayStore()
 	if err != nil {
 		panic(err)
 	}
@@ -48,6 +49,15 @@ func mustNewRegistry() *Registry {
 		panic(err)
 	}
 	return registry
+}
+
+func newGatewayStore() (*sandboxroute.Store, error) {
+	return sandboxroute.NewStoreWithOptions(
+		sandboxroute.SurfaceGateway,
+		sandboxroute.StoreOptions{CollisionRecorder: func() {
+			sandboxidmetrics.RecordCollision("gateway_route")
+		}},
+	)
 }
 
 // NewRegistry creates a gateway Registry around the supplied shared Store.
@@ -166,7 +176,7 @@ func (r *Registry) mutate(
 
 // Clear resets the process-local Store. It is intended for isolated tests only.
 func (r *Registry) Clear() {
-	store, err := sandboxroute.NewStore(sandboxroute.SurfaceGateway)
+	store, err := newGatewayStore()
 	if err != nil {
 		panic(err)
 	}

@@ -39,11 +39,7 @@ import (
 
 func newManagerRouteProjector() *sandboxroute.Projector {
 	return sandboxroute.NewProjector(func(object metav1.Object) string {
-		id, format := sandboxid.ResolveWithFormat(object)
-		if format == sandboxid.FormatLegacy {
-			sandboxroute.RecordLegacyFallback(sandboxroute.SurfaceManager)
-		}
-		return id
+		return sandboxid.Resolve(object)
 	})
 }
 

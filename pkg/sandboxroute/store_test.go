@@ -656,6 +656,62 @@ func TestApplyAuthoritativeRepairValidation(t *testing.T) {
 	}
 }
 
+func TestStoreCollisionRecorder(t *testing.T) {
+	tests := []struct {
+		name        string
+		run         func(*testing.T, *Store)
+		expectCalls int
+	}{
+		{
+			name: "event collision",
+			run: func(t *testing.T, store *Store) {
+				store.UpsertFull(fullRoute("same", "ns", "one", "uid-a", "1"))
+				result := store.UpsertFull(fullRoute("same", "ns", "two", "uid-b", "1"))
+				assert.Equal(t, EventResultCollision, result.Result)
+			},
+			expectCalls: 1,
+		},
+		{
+			name: "repair collision preserves counting boundary",
+			run: func(t *testing.T, store *Store) {
+				first := fullRoute("same", "ns", "one", "uid-a", "1")
+				second := fullRoute("same", "ns", "two", "uid-a", "2")
+				store.UpsertFull(first)
+				collision := store.UpsertFull(second)
+				require.Len(t, collision.RepairRequests, 2)
+				result := store.ApplyAuthoritativeRepair(
+					collision.RepairRequests[0],
+					AuthoritativeObservation{Present: true, Route: first},
+				)
+				assert.Equal(t, EventResultCollision, result.Result)
+			},
+			expectCalls: 2,
+		},
+		{
+			name: "repair required is not collision result",
+			run: func(t *testing.T, store *Store) {
+				store.UpsertFull(fullRoute("old", "ns", "one", "uid-a", "1"))
+				result := store.UpsertFull(fullRoute("new", "ns", "one", "uid-b", "1"))
+				assert.Equal(t, EventResultRepairRequired, result.Result)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			calls := 0
+			store, err := NewStoreWithOptions(SurfaceManager, StoreOptions{
+				CollisionRecorder: func() { calls++ },
+			})
+			require.NoError(t, err)
+
+			tt.run(t, store)
+
+			assert.Equal(t, tt.expectCalls, calls)
+		})
+	}
+}
+
 func newTestStore(t *testing.T, now func() time.Time, drainWindow time.Duration) *Store {
 	t.Helper()
 	store, err := NewStoreWithOptions(SurfaceManager, StoreOptions{Now: now, DrainWindow: drainWindow})

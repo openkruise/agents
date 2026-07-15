@@ -161,6 +161,24 @@ func TestServer_handleRefresh(t *testing.T) {
 			expectedCode: http.StatusBadRequest,
 		},
 		{
+			name: "partial ObjectKey is rejected",
+			body: mustMarshal(Route{
+				ID:              "partial",
+				Namespace:       "ns",
+				UID:             "uid-partial",
+				ResourceVersion: "1",
+			}),
+			expectedCode: http.StatusBadRequest,
+		},
+		{
+			name: "missing required metadata is rejected",
+			body: mustMarshal(Route{
+				ID:              "missing-uid",
+				ResourceVersion: "1",
+			}),
+			expectedCode: http.StatusBadRequest,
+		},
+		{
 			name:          "dead state should delete route",
 			body:          mustMarshal(testIDOnlyRoute("sandbox-1", v1alpha1.SandboxStateDead, "1")),
 			expectedCode:  http.StatusNoContent,
