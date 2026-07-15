@@ -1450,9 +1450,9 @@ func TestIsEnvoyStreamGonePanic(t *testing.T) {
 	}
 }
 
-// TestDestroyCancelsContext verifies that Destroy() cancels the in-flight
+// TestOnDestroyCancelsContext verifies that OnDestroy() cancels the in-flight
 // wake context, causing the async goroutine to exit via context.Canceled.
-func TestDestroyCancelsContext(t *testing.T) {
+func TestOnDestroyCancelsContext(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.EnableWakeOnTraffic = true
 	mockCallbacks := newMockFilterCallbackHandler()
@@ -1467,19 +1467,19 @@ func TestDestroyCancelsContext(t *testing.T) {
 	// Verify context is not yet canceled
 	select {
 	case <-ctx.Done():
-		t.Fatal("context should not be canceled before Destroy")
+		t.Fatal("context should not be canceled before OnDestroy")
 	default:
 	}
 
-	// Call Destroy
-	filter.Destroy()
+	// Call OnDestroy (simulates Envoy destroying the filter/stream)
+	filter.OnDestroy(api.Normal)
 
 	// Verify context is now canceled
 	select {
 	case <-ctx.Done():
 		// expected
 	default:
-		t.Fatal("context should be canceled after Destroy")
+		t.Fatal("context should be canceled after OnDestroy")
 	}
 
 	// Verify destroyed flag is set

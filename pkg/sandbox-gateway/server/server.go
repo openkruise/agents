@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 
 	"k8s.io/klog/v2"
@@ -47,11 +48,24 @@ const (
 // globalPeerManager is set when server.Start() creates the peerManager.
 // It allows other packages (e.g. wake) to access the peer manager for
 // SyncRouteWithPeers without creating a full Server instance.
-var globalPeerManager peers.Peers
+// Protected by globalPeerManagerMu for concurrent read/write safety.
+var (
+	globalPeerManagerMu sync.RWMutex
+	globalPeerManager   peers.Peers
+)
+
+// setPeerManager sets the global peer manager. Called during Start.
+func setPeerManager(pm peers.Peers) {
+	globalPeerManagerMu.Lock()
+	defer globalPeerManagerMu.Unlock()
+	globalPeerManager = pm
+}
 
 // GetPeerManager returns the peer manager for use by the wake package.
 // Returns nil if the server has not been started yet.
 func GetPeerManager() peers.Peers {
+	globalPeerManagerMu.RLock()
+	defer globalPeerManagerMu.RUnlock()
 	return globalPeerManager
 }
 
@@ -125,7 +139,7 @@ func (s *Server) Start(ctx context.Context) error {
 	labelSelector := os.Getenv(EnvLabelSelector)
 
 	s.peerManager = peers.NewMemberlistPeers(s.client, peers.NodePrefixSandboxGateway+nodeName, namespace, labelSelector)
-	globalPeerManager = s.peerManager
+	setPeerManager(s.peerManager)
 
 	if err := s.peerManager.Start(ctx, s.memberlistBindPort); err != nil {
 		return err
@@ -152,6 +166,7 @@ func (s *Server) Stop(ctx context.Context) error {
 		if err := s.peerManager.Stop(); err != nil {
 			errs = append(errs, err)
 		}
+		setPeerManager(nil)
 	}
 	if len(errs) > 0 {
 		return errors.Join(errs...)
@@ -178,17 +193,21 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 
 	log.V(utils.DebugLogLevel).Info("Received route refresh", "route", route)
 
-	// Handle based on state
-	if route.State == v1alpha1.SandboxStateRunning {
-		// Update the route
+	// Handle based on state.
+	// Retain routes for all states except Dead and empty (unset).
+	// This includes Running, Paused, Creating, and Available — wake-on-traffic
+	// depends on Paused routes surviving peer sync.
+	switch route.State {
+	case v1alpha1.SandboxStateDead, "":
+		registry.GetRegistry().Delete(route.ID)
+		log.V(utils.DebugLogLevel).Info("Route deleted via refresh", "id", route.ID, "state", route.State)
+	default:
+		// Update the route (resourceVersion guarded)
 		if registry.GetRegistry().Update(route.ID, route) {
-			log.Info("Route updated via refresh", "id", route.ID, "ip", route.IP)
+			log.V(utils.DebugLogLevel).Info("Route updated via refresh", "id", route.ID, "ip", route.IP, "state", route.State)
 		} else {
 			log.V(utils.DebugLogLevel).Info("Route update skipped due to older resourceVersion", "id", route.ID)
 		}
-	} else {
-		// Delete the route if the sandbox is dead
-		registry.GetRegistry().Delete(route.ID)
 	}
 
 	w.WriteHeader(http.StatusNoContent)

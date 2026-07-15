@@ -235,7 +235,7 @@ func TestHandleRefresh_AvailableState(t *testing.T) {
 
 	s := &Server{}
 
-	// Available state is treated as non-running and will delete the route
+	// Available state is retained (updated) — only Dead/empty states trigger deletion.
 	route := proxy.Route{
 		ID:              "test-sandbox-3",
 		IP:              "10.0.0.3",
@@ -251,9 +251,10 @@ func TestHandleRefresh_AvailableState(t *testing.T) {
 
 	assert.Equal(t, http.StatusNoContent, rr.Code)
 
-	// Verify route was deleted (only Running state keeps routes)
-	_, ok := registry.GetRegistry().Get("test-sandbox-3")
-	assert.False(t, ok)
+	// Verify route was updated (non-Dead states are retained for wake-on-traffic)
+	updated, ok := registry.GetRegistry().Get("test-sandbox-3")
+	assert.True(t, ok)
+	assert.Equal(t, v1alpha1.SandboxStateAvailable, updated.State)
 }
 
 func TestHandleRefresh_UpdateExistingRoute(t *testing.T) {

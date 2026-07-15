@@ -50,6 +50,12 @@ const (
 	accessTokenHeader = "x-access-token"
 )
 
+// Compile-time assertion that sandboxFilter implements the api.StreamFilter interface.
+// This catches mismatches like implementing Destroy() (Config interface) instead of
+// OnDestroy(DestroyReason) (StreamFilter interface).
+var _ api.StreamFilter = (*sandboxFilter)(nil)
+
+// FilterFactory creates a new sandbox filter instance for each stream.
 func FilterFactory(c interface{}, callbacks api.FilterCallbackHandler) api.StreamFilter {
 	cfg := c.(*FilterConfig)
 	return &sandboxFilter{
@@ -114,6 +120,25 @@ func (f *sandboxFilter) DecodeHeaders(header api.RequestHeaderMap, endStream boo
 		return api.LocalReply
 	}
 
+	// Authenticate the request if auth is enabled and the sandbox has an access token configured.
+	// This runs before any state/wake handling so that paused sandboxes are not woken
+	// by unauthorized requests. When EnableAuth is false (default), the gateway skips
+	// token validation for backward compatibility.
+	if f.config.EnableAuth && route.AccessToken != "" {
+		requestToken, _ := header.Get(accessTokenHeader)
+		if subtle.ConstantTimeCompare([]byte(requestToken), []byte(route.AccessToken)) != 1 {
+			log.Warn("Access token mismatch")
+			f.callbacks.DecoderFilterCallbacks().SendLocalReply(
+				401,
+				"unauthorized: invalid or missing access token",
+				nil,
+				-1,
+				"unauthorized",
+			)
+			return api.LocalReply
+		}
+	}
+
 	if route.State != agentsv1alpha1.SandboxStateRunning {
 		waker := wake.GetWaker()
 		if f.shouldWakeSandbox(route, sandboxID, waker) {
@@ -145,23 +170,6 @@ func (f *sandboxFilter) DecodeHeaders(header api.RequestHeaderMap, endStream boo
 			"sandbox_not_running",
 		)
 		return api.LocalReply
-	}
-
-	// Authenticate the request if auth is enabled and the sandbox has an access token configured.
-	// When EnableAuth is false (default), the gateway skips token validation for backward compatibility.
-	if f.config.EnableAuth && route.AccessToken != "" {
-		requestToken, _ := header.Get(accessTokenHeader)
-		if subtle.ConstantTimeCompare([]byte(requestToken), []byte(route.AccessToken)) != 1 {
-			log.Warn("Access token mismatch")
-			f.callbacks.DecoderFilterCallbacks().SendLocalReply(
-				401,
-				"unauthorized: invalid or missing access token",
-				nil,
-				-1,
-				"unauthorized",
-			)
-			return api.LocalReply
-		}
 	}
 
 	// Apply extra headers from the adapter (e.g., :path rewrite for kruise custom protocol)
@@ -354,9 +362,9 @@ func (f *sandboxFilter) abortCompletion(markDestroyed bool) bool {
 	return !f.destroyed && !f.completed
 }
 
-// Destroy cancels any in-flight async wake context. Called by Envoy when
-// the filter is destroyed (e.g., stream reset).
-func (f *sandboxFilter) Destroy() {
+// OnDestroy cancels any in-flight async wake context. Called by Envoy when
+// the filter/stream is destroyed (e.g., stream reset, connection close).
+func (f *sandboxFilter) OnDestroy(reason api.DestroyReason) {
 	f.mu.Lock()
 	cancel := f.cancel
 	f.destroyed = true
