@@ -45,7 +45,8 @@ type Waker struct {
 var defaultWaker atomic.Pointer[Waker]
 
 // InitWaker initializes the package-level Waker with the given cache provider.
-// Must be called once during gateway startup before any Wake calls.
+// The cacheProvider argument is guaranteed to be non-nil by gateway startup
+// after cache.NewCache succeeds.
 func InitWaker(cacheProvider cache.Provider) {
 	defaultWaker.Store(&Waker{cache: cacheProvider})
 }

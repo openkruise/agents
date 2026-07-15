@@ -36,37 +36,28 @@ def _gateway_health_check():
         return False
 
 
+def _split_sandbox_id(sandbox_id: str) -> tuple[str | None, str]:
+    """Split a sandbox ID into namespace and resource name."""
+    if "--" not in sandbox_id:
+        return None, sandbox_id
+    namespace, name = sandbox_id.split("--", 1)
+    return namespace, name
+
+
 def _get_sandbox_annotations(sandbox_id: str) -> dict:
     """Fetch the annotations of a Sandbox CR via kubectl."""
-    # sandbox_id format: "<namespace>--<name>" or just "<name>"
-    name = sandbox_id.split("--")[1] if "--" in sandbox_id else sandbox_id
+    namespace, name = _split_sandbox_id(sandbox_id)
+    cmd = ["kubectl", "get", "sandbox", name, "-o", "json"]
+    if namespace:
+        cmd.extend(["-n", namespace])
     result = subprocess.run(
-        ["kubectl", "get", "sandbox", name, "-o", "json"],
+        cmd,
         capture_output=True,
         text=True,
         check=True,
     )
     cr = json.loads(result.stdout)
     return cr.get("metadata", {}).get("annotations", {})
-
-
-def _set_wake_timeout_annotation(sandbox_id: str, timeout_seconds: int):
-    """Set the wake-timeout-seconds annotation on the Sandbox CR via kubectl.
-
-    The wake-on-traffic annotation is set automatically by the API when
-    autoResume=true, so only the timeout needs to be set out-of-band.
-    """
-    name = sandbox_id.split("--")[1] if "--" in sandbox_id else sandbox_id
-    subprocess.run(
-        [
-            "kubectl", "annotate", "sandbox", name,
-            "--overwrite",
-            f"{_ANN_WAKE_TIMEOUT_SECONDS}={timeout_seconds}",
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
 
 
 def _request_gateway_until_forwarded(headers: dict, timeout_sec: int = 120) -> requests.Response:
@@ -115,24 +106,21 @@ def test_wake_on_traffic(sandbox_context):
     print(f"sandbox-id: {sandbox_id}")
     assert sbx.get_info().state == SandboxState.RUNNING
 
-    # Step 2: Verify wake-on-traffic annotation was set by the API.
+    # Step 2: Verify wake annotations were set by the API.
     annotations = _get_sandbox_annotations(sandbox_id)
     assert annotations.get(_ANN_WAKE_ON_TRAFFIC) == "true", (
         f"autoResume=true should set wake-on-traffic annotation, got: {annotations}"
     )
-    print(f"wake-on-traffic annotation verified (set by API): {annotations.get(_ANN_WAKE_ON_TRAFFIC)}")
-
-    # Step 3: Set the wake-timeout-seconds annotation via kubectl
-    # (the API only sets wake-on-traffic, not the timeout).
-    _set_wake_timeout_annotation(sandbox_id, timeout_seconds=120)
-    annotations = _get_sandbox_annotations(sandbox_id)
     wake_timeout_ann = annotations.get(_ANN_WAKE_TIMEOUT_SECONDS)
-    assert wake_timeout_ann is not None, (
-        f"expected wake-timeout-seconds annotation, got: {annotations}"
+    assert wake_timeout_ann == "120", (
+        f"autoResume=true should set wake-timeout-seconds annotation, got: {annotations}"
     )
-    print(f"wake annotations verified: wake-on-traffic=true, wake-timeout-seconds={wake_timeout_ann}")
+    print(
+        "wake annotations verified: "
+        f"wake-on-traffic=true, wake-timeout-seconds={wake_timeout_ann}"
+    )
 
-    # Step 4: Wait for auto-pause.
+    # Step 3: Wait for auto-pause.
     # The sandbox timeout is 120s, but the E2B SDK's auto-pause is triggered
     # by the server-side timeout handler. The server may use a shorter internal
     # pause deadline. Poll until the sandbox reports PAUSED state.
@@ -147,13 +135,13 @@ def test_wake_on_traffic(sandbox_context):
         time.sleep(2)
     assert paused, f"sandbox {sandbox_id} did not auto-pause within deadline"
 
-    # Step 5: Verify gateway connectivity before sending wake traffic.
+    # Step 4: Verify gateway connectivity before sending wake traffic.
     assert _gateway_health_check(), (
         "Gateway port-forward is not alive before wake request. "
         "The port-forward may have dropped during the auto-pause wait."
     )
 
-    # Step 6: Send traffic through the gateway (triggers wake).
+    # Step 5: Send traffic through the gateway (triggers wake).
     # The wake-on-traffic annotation was set by the API (autoResume=true),
     # so the gateway registry already has WakeOnTraffic=true.
     #
@@ -175,7 +163,7 @@ def test_wake_on_traffic(sandbox_context):
     print(f"wake response: status={resp.status_code} body={resp.text[:200]!r}")
     print(f"wake response headers: {dict(resp.headers)}")
 
-    # Step 7: Assert wake succeeded (not 502/503)
+    # Step 6: Assert wake succeeded (not 502/503)
     assert resp.status_code != 502, (
         f"Gateway 502: sandbox {sandbox_id} not found or not running after wake"
     )
@@ -183,7 +171,7 @@ def test_wake_on_traffic(sandbox_context):
         f"Gateway 503: sandbox {sandbox_id} wake failed or timed out"
     )
 
-    # Step 8: Verify sandbox is Running (poll with retry for controller
+    # Step 7: Verify sandbox is Running (poll with retry for controller
     # reconciliation — the gateway wake triggers an async controller
     # reconcile to update Status.Phase from Paused to Running).
     running_deadline = time.time() + 60
@@ -202,7 +190,7 @@ def test_wake_on_traffic(sandbox_context):
     )
     print(f"wake-on-traffic succeeded: {sandbox_id} is running")
 
-    # Step 9: Verify wake-on-traffic annotation persists after wake.
+    # Step 8: Verify wake-on-traffic annotation persists after wake.
     # The Resume operation should preserve the wake annotations (they are
     # part of the sandbox metadata, not stripped by Resume).
     post_wake_annotations = _get_sandbox_annotations(sandbox_id)

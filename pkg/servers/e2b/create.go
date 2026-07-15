@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -398,6 +399,11 @@ func (sc *Controller) basicSandboxCreateModifier(ctx context.Context, sbx infra.
 	}
 	if request.AutoResume.Enabled {
 		annotations[agentsv1alpha1.AnnotationWakeOnTraffic] = agentsv1alpha1.True
+		if !request.Extensions.NeverTimeout && request.Timeout > 0 {
+			if _, exists := annotations[agentsv1alpha1.AnnotationWakeTimeoutSeconds]; !exists {
+				annotations[agentsv1alpha1.AnnotationWakeTimeoutSeconds] = strconv.Itoa(request.Timeout)
+			}
+		}
 	}
 	sbx.SetAnnotations(annotations)
 

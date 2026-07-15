@@ -913,7 +913,7 @@ func TestBasicSandboxCreateModifier(t *testing.T) {
 			expectLabels: map[string]string{"env": "test"},
 		},
 		{
-			name: "autoResume enabled sets wake-on-traffic annotation",
+			name: "autoResume enabled sets wake annotations",
 			request: models.NewSandboxRequest{
 				TemplateID: "t1",
 				Timeout:    300,
@@ -921,7 +921,24 @@ func TestBasicSandboxCreateModifier(t *testing.T) {
 			},
 			maxTimeout: 3600,
 			expectAnnotations: map[string]string{
-				agentsv1alpha1.AnnotationWakeOnTraffic: agentsv1alpha1.True,
+				agentsv1alpha1.AnnotationWakeOnTraffic:      agentsv1alpha1.True,
+				agentsv1alpha1.AnnotationWakeTimeoutSeconds: "300",
+			},
+		},
+		{
+			name: "autoResume enabled preserves explicit wake timeout annotation",
+			request: models.NewSandboxRequest{
+				TemplateID: "t1",
+				Timeout:    300,
+				Metadata: map[string]string{
+					agentsv1alpha1.AnnotationWakeTimeoutSeconds: "180",
+				},
+				AutoResume: models.SandboxAutoResumeConfig{Enabled: true},
+			},
+			maxTimeout: 3600,
+			expectAnnotations: map[string]string{
+				agentsv1alpha1.AnnotationWakeOnTraffic:      agentsv1alpha1.True,
+				agentsv1alpha1.AnnotationWakeTimeoutSeconds: "180",
 			},
 		},
 		{
