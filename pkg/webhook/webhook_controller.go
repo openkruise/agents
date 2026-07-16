@@ -154,6 +154,13 @@ func (c *Controller) Start(ctx context.Context) {
 	}
 	log.Info("informer factory started")
 
+	// Bootstrap: enqueue an initial sync so that the first-ever startup
+	// (when neither the Secret nor the WebhookConfiguration exists yet)
+	// can proceed without waiting for an informer Add event.
+	// This is safe for multi-replica deployments because sync() operations
+	// (EnsureCert, WriteCertsToDir, Ensure configuration) are all idempotent.
+	c.queue.Add("")
+
 	go wait.Until(func() {
 		log.Info("start to process work item")
 		for c.processNextWorkItem(ctx) {
