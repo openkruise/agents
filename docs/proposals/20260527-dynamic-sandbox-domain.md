@@ -7,8 +7,6 @@ reviewers:
 creation-date: 2026-05-27
 last-updated: 2026-07-16
 status: implemented
-see-also:
-  - "/docs/specs/2026-05-27-dynamic-sandbox-domain-design.md"
 ---
 
 # Dynamic Sandbox Domain Resolution
@@ -40,7 +38,7 @@ The Browser debugger URL is rewritten to `wss://<sandbox-address>` whether its u
 ## Implementation
 
 - `Controller` owns one unified `E2BAdapter`, passes the same instance to `sandbox-manager`, and applies static-override precedence at the HTTP boundary.
-- `E2BAdapter` chooses by request path; `NativeE2BAdapter` and `CustomizedE2BAdapter` own domain resolution and address formatting. The existing `E2BMapper` and data-plane `proxy.RequestAdapter` contracts remain unchanged. Native API classification recognizes the raw `api.` authority prefix case-insensitively.
+- `E2BAdapter` chooses by request path; `NativeE2BAdapter` and `CustomizedE2BAdapter` own domain resolution and address formatting. `E2BMapper` is extended with `GetDomain` and `GetSandboxAddress`, while the data-plane `proxy.RequestAdapter` contract remains unchanged. Native API classification recognizes the raw `api.` authority prefix case-insensitively.
 - `convertToE2BSandbox` receives the already resolved domain instead of reading controller configuration.
 - Domain resolution is inserted before every state-changing or upstream operation. Each flow keeps the ordering listed below; there is no blanket guarantee that all combined validation errors retain their former priority:
 
@@ -67,5 +65,5 @@ The Browser debugger URL is rewritten to `wss://<sandbox-address>` whether its u
 
 - Existing explicit `--e2b-domain=<value>` deployments are unchanged. To retain the former default, set `--e2b-domain=localhost` explicitly; fresh standard deployments resolve dynamically.
 - Customized `BrowserUse` changes intentionally from an unreachable native-style subdomain to its routable `/kruise/<sandboxID>/<port>` form.
-- No domain is persisted in CRDs, annotations, labels, or runtime state. There is no CRD, Envoy configuration, or public interface change; the data-plane behavior change is limited to classifying uppercase native `API.` requests as API traffic.
+- No domain is persisted in CRDs, annotations, labels, or runtime state. There is no CRD or Envoy configuration change. The public interface change is limited to the two new `E2BMapper` methods, and the data-plane behavior change is limited to classifying uppercase native `API.` requests as API traffic.
 - Trusted forwarded-host handling is deferred because it requires an explicit proxy trust/allowlist model.
