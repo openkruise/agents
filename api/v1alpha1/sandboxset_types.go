@@ -36,6 +36,8 @@ const (
 	LabelTemplateHash     = InternalPrefix + "template-hash"
 	// LabelSandboxReservedFailed marks a failed sandbox retained for debugging.
 	LabelSandboxReservedFailed = InternalPrefix + "reserved-failed-sandbox"
+	// LabelSandboxID is the label key containing the resolved short sandbox ID.
+	LabelSandboxID = InternalPrefix + "sandbox-id"
 
 	AnnotationLock               = InternalPrefix + "lock"
 	AnnotationOwner              = InternalPrefix + "owner"
