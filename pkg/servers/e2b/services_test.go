@@ -591,6 +591,178 @@ func TestCreateSandboxReturnsImmediatelyWhenCreateOnNoStockHitsQuota(t *testing.
 	assert.Less(t, elapsed, sandboxcr.CreateRetryInterval, "terminal quota denial must return before retry backoff")
 }
 
+func TestCreateSandboxRejectsDeletedAPIKeyTombstone(t *testing.T) {
+	controller, _, teardown := Setup(t)
+	defer teardown()
+
+	user := &models.CreatedTeamAPIKey{
+		ID:   uuid.New(),
+		Key:  "deleted-key",
+		Name: "deleted-key",
+		Team: &models.Team{Name: "team-a"},
+	}
+	controller.deletedAPIKeys.Add(user.ID.String())
+
+	resp, apiError := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
+		TemplateID: "any-template",
+	}, nil, user))
+
+	require.NotNil(t, apiError)
+	assert.Nil(t, resp.Body)
+	assert.Equal(t, http.StatusUnauthorized, apiError.Code)
+	assert.Contains(t, apiError.Message, "no longer active")
+}
+
+func TestCreateSandboxCleansUpWhenAPIKeyDeletedDuringCreate(t *testing.T) {
+	controller, fc, teardown := Setup(t)
+	defer teardown()
+
+	templateName := "deleted-key-race-template"
+	user := &models.CreatedTeamAPIKey{
+		ID:   uuid.New(),
+		Key:  "soon-deleted-key",
+		Name: "soon-deleted-key",
+		Team: &models.Team{Name: "team-a"},
+	}
+	cleanup := CreateSandboxPool(t, controller, templateName, 0, CreateSandboxPoolOptions{Namespace: user.Team.Name})
+	defer cleanup()
+
+	origCreateSandbox := sandboxcr.DefaultCreateSandbox
+	t.Cleanup(func() { sandboxcr.DefaultCreateSandbox = origCreateSandbox })
+	sandboxcr.DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c ctrlclient.Client) (*v1alpha1.Sandbox, error) {
+		if sbx.Name == "" && sbx.GenerateName != "" {
+			sbx.Name = sbx.GenerateName + rand.String(5)
+		}
+		created, err := origCreateSandbox(ctx, sbx, c)
+		if err != nil {
+			return nil, err
+		}
+		created.Status = v1alpha1.SandboxStatus{
+			Phase:              v1alpha1.SandboxRunning,
+			ObservedGeneration: created.Generation,
+			Conditions: []metav1.Condition{
+				{
+					Type:               string(v1alpha1.SandboxConditionReady),
+					Status:             metav1.ConditionTrue,
+					LastTransitionTime: metav1.Now(),
+					Reason:             "Ready",
+				},
+			},
+			PodInfo: v1alpha1.PodInfo{
+				PodIP: "1.2.3.4",
+			},
+		}
+		if err = c.Status().Update(ctx, created); err != nil {
+			return nil, err
+		}
+		controller.deletedAPIKeys.Add(user.ID.String())
+		return created, nil
+	}
+
+	resp, apiError := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
+		TemplateID: templateName,
+		Metadata: map[string]string{
+			models.ExtensionKeyCreateOnNoStock: v1alpha1.True,
+			models.ExtensionKeySkipInitRuntime: v1alpha1.True,
+		},
+	}, nil, user))
+
+	require.NotNil(t, apiError)
+	assert.Nil(t, resp.Body)
+	assert.Equal(t, http.StatusUnauthorized, apiError.Code)
+	require.Eventually(t, func() bool {
+		var list v1alpha1.SandboxList
+		require.NoError(t, fc.List(t.Context(), &list))
+		for _, sbx := range list.Items {
+			if sbx.Annotations[v1alpha1.AnnotationOwner] == user.ID.String() {
+				return false
+			}
+		}
+		return true
+	}, time.Second, 10*time.Millisecond)
+}
+
+func TestCreateSandboxCleanupDeletedAPIKeyIgnoresNilSandbox(t *testing.T) {
+	controller, _, teardown := Setup(t)
+	defer teardown()
+
+	controller.cleanupSandboxForDeletedAPIKey(t.Context(), nil, nil)
+}
+
+func TestCreateSandboxReturnsUnauthorizedWhenDeletedKeyCleanupFails(t *testing.T) {
+	controller, fc, teardown := Setup(t)
+	defer teardown()
+
+	templateName := "deleted-key-cleanup-error-template"
+	user := &models.CreatedTeamAPIKey{
+		ID:   uuid.New(),
+		Key:  "cleanup-error-key",
+		Name: "cleanup-error-key",
+		Team: &models.Team{Name: "team-a"},
+	}
+	cleanup := CreateSandboxPool(t, controller, templateName, 0, CreateSandboxPoolOptions{Namespace: user.Team.Name})
+	defer cleanup()
+
+	origCreateSandbox := sandboxcr.DefaultCreateSandbox
+	t.Cleanup(func() { sandboxcr.DefaultCreateSandbox = origCreateSandbox })
+	sandboxcr.DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c ctrlclient.Client) (*v1alpha1.Sandbox, error) {
+		if sbx.Name == "" && sbx.GenerateName != "" {
+			sbx.Name = sbx.GenerateName + rand.String(5)
+		}
+		created, err := origCreateSandbox(ctx, sbx, c)
+		if err != nil {
+			return nil, err
+		}
+		created.Status = v1alpha1.SandboxStatus{
+			Phase:              v1alpha1.SandboxRunning,
+			ObservedGeneration: created.Generation,
+			Conditions: []metav1.Condition{
+				{
+					Type:               string(v1alpha1.SandboxConditionReady),
+					Status:             metav1.ConditionTrue,
+					LastTransitionTime: metav1.Now(),
+					Reason:             "Ready",
+				},
+			},
+			PodInfo: v1alpha1.PodInfo{
+				PodIP: "1.2.3.4",
+			},
+		}
+		if err = c.Status().Update(ctx, created); err != nil {
+			return nil, err
+		}
+		controller.deletedAPIKeys.Add(user.ID.String())
+		return created, nil
+	}
+
+	origDeleteSandbox := sandboxcr.DefaultDeleteSandbox
+	sandboxcr.DefaultDeleteSandbox = func(context.Context, *v1alpha1.Sandbox, ctrlclient.Client) error {
+		return fmt.Errorf("cleanup failed")
+	}
+	t.Cleanup(func() { sandboxcr.DefaultDeleteSandbox = origDeleteSandbox })
+
+	resp, apiError := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
+		TemplateID: templateName,
+		Metadata: map[string]string{
+			models.ExtensionKeyCreateOnNoStock: v1alpha1.True,
+			models.ExtensionKeySkipInitRuntime: v1alpha1.True,
+		},
+	}, nil, user))
+
+	require.NotNil(t, apiError)
+	assert.Nil(t, resp.Body)
+	assert.Equal(t, http.StatusUnauthorized, apiError.Code)
+
+	sandboxcr.DefaultDeleteSandbox = origDeleteSandbox
+	var list v1alpha1.SandboxList
+	require.NoError(t, fc.List(t.Context(), &list))
+	for i := range list.Items {
+		if list.Items[i].Annotations[v1alpha1.AnnotationOwner] == user.ID.String() {
+			assert.NoError(t, fc.Delete(t.Context(), &list.Items[i]))
+		}
+	}
+}
+
 func TestCreateSandbox_QuotaExceededReturns403WithoutRetry(t *testing.T) {
 	fakeQuota := &fakeQuotaManager{acquireErr: quota.ErrQuotaExceeded}
 	controller, _, teardown := SetupWithQuota(t, fakeQuota)
@@ -1511,6 +1683,74 @@ func TestCloneSandbox(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCloneSandboxCleansUpWhenAPIKeyDeletedDuringClone(t *testing.T) {
+	controller, fc, teardown := Setup(t)
+	defer teardown()
+
+	checkpointID := "deleted-key-race-checkpoint"
+	user := &models.CreatedTeamAPIKey{
+		ID:   uuid.New(),
+		Key:  "soon-deleted-clone-key",
+		Name: "soon-deleted-clone-key",
+		Team: &models.Team{Name: "team-a"},
+	}
+	cleanup := CreateCheckpointAndTemplateInNamespace(t, controller, user.Team.Name, checkpointID, checkpointID, user.ID.String(), "source-sandbox", "2024-07-01T00:00:01Z")
+	defer cleanup()
+
+	origCreateSandbox := sandboxcr.DefaultCreateSandbox
+	t.Cleanup(func() { sandboxcr.DefaultCreateSandbox = origCreateSandbox })
+	sandboxcr.DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c ctrlclient.Client) (*v1alpha1.Sandbox, error) {
+		if sbx.Name == "" && sbx.GenerateName != "" {
+			sbx.Name = sbx.GenerateName + rand.String(5)
+		}
+		created, err := origCreateSandbox(ctx, sbx, c)
+		if err != nil {
+			return nil, err
+		}
+		created.Status = v1alpha1.SandboxStatus{
+			Phase:              v1alpha1.SandboxRunning,
+			ObservedGeneration: created.Generation,
+			Conditions: []metav1.Condition{
+				{
+					Type:               string(v1alpha1.SandboxConditionReady),
+					Status:             metav1.ConditionTrue,
+					LastTransitionTime: metav1.Now(),
+					Reason:             "Ready",
+				},
+			},
+			PodInfo: v1alpha1.PodInfo{
+				PodIP: "1.2.3.4",
+			},
+		}
+		if err = c.Status().Update(ctx, created); err != nil {
+			return nil, err
+		}
+		controller.deletedAPIKeys.Add(user.ID.String())
+		return created, nil
+	}
+
+	resp, apiError := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
+		TemplateID: checkpointID,
+		Metadata: map[string]string{
+			models.ExtensionKeySkipInitRuntime: v1alpha1.True,
+		},
+	}, nil, user))
+
+	require.NotNil(t, apiError)
+	assert.Nil(t, resp.Body)
+	assert.Equal(t, http.StatusUnauthorized, apiError.Code)
+	require.Eventually(t, func() bool {
+		var list v1alpha1.SandboxList
+		require.NoError(t, fc.List(t.Context(), &list))
+		for _, sbx := range list.Items {
+			if sbx.Annotations[v1alpha1.AnnotationOwner] == user.ID.String() {
+				return false
+			}
+		}
+		return true
+	}, time.Second, 10*time.Millisecond)
 }
 
 func TestCloneSandboxWithCSIMountFromCheckpointAnnotation(t *testing.T) {

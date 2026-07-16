@@ -660,6 +660,7 @@ func TestDeleteAPIKeyPermissionMiddleware(t *testing.T) {
 			}
 			require.Nil(t, apiError)
 			assert.Equal(t, tt.expectCode, resp.Code)
+			assert.True(t, controller.deletedAPIKeys.Contains(tt.targetID))
 		})
 	}
 }

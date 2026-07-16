@@ -35,6 +35,8 @@ import (
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
+	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
+	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
 	"github.com/openkruise/agents/pkg/utils"
@@ -111,6 +113,9 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 	if validateErr := validateCreateResourceOverride(request); validateErr != nil {
 		return web.ApiResponse[*models.Sandbox]{}, validateErr
 	}
+	if apiErr := sc.ensureCreateAPIKeyActive(user); apiErr != nil {
+		return web.ApiResponse[*models.Sandbox]{}, apiErr
+	}
 	namespace := sc.getNamespaceOfUser(user)
 	log.Info("create sandbox request received", "request", request)
 	if sc.manager.GetInfra().HasTemplate(ctx, infra.HasTemplateOptions{
@@ -129,6 +134,45 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 	return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
 		Code:    http.StatusBadRequest,
 		Message: "Template or Checkpoint not found",
+	}
+}
+
+func (sc *Controller) ensureCreateAPIKeyActive(user *models.CreatedTeamAPIKey) *web.ApiError {
+	if sc.keys == nil || user == nil || user.ID == keys.AdminKeyID {
+		return nil
+	}
+	if sc.deletedAPIKeys.Contains(user.ID.String()) {
+		return &web.ApiError{
+			Code:    http.StatusUnauthorized,
+			Message: "API key is no longer active",
+		}
+	}
+	return nil
+}
+
+func (sc *Controller) cleanupSandboxForDeletedAPIKey(ctx context.Context, sbx infra.Sandbox, user *models.CreatedTeamAPIKey) {
+	if sbx == nil {
+		return
+	}
+	var userID string
+	var quotaSpec *quotaspec.QuotaSpec
+	if user != nil {
+		userID = user.ID.String()
+		quotaSpec = user.QuotaSpec
+		if quotaSpec != nil {
+			quotaSpec = quotaSpec.DeepCopy()
+		}
+	}
+	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cleanupCtx = klog.NewContext(cleanupCtx, log)
+	if err := sc.manager.DeleteSandbox(cleanupCtx, sandboxmanager.DeleteSandboxOptions{
+		Sandbox: sbx,
+		User:    userID,
+		Quota:   quotaSpec,
+	}); err != nil {
+		log.Error(err, "failed to cleanup sandbox after API key deletion")
 	}
 }
 
@@ -216,6 +260,11 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 		log.Error(err, "sandbox creation failed")
 		return web.ApiResponse[*models.Sandbox]{}, mapInfraErrorToApiError(err)
 	}
+	if apiErr := sc.ensureCreateAPIKeyActive(user); apiErr != nil {
+		log.Info("API key was deleted while sandbox was being created, cleaning up sandbox", "id", sbx.GetSandboxID())
+		sc.cleanupSandboxForDeletedAPIKey(ctx, sbx, user)
+		return web.ApiResponse[*models.Sandbox]{}, apiErr
+	}
 	log.Info("sandbox created", "id", sbx.GetSandboxID(), "sbx", klog.KObj(sbx),
 		"resourceVersion", sbx.GetResourceVersion(), "totalCost", time.Since(claimStart))
 	return web.ApiResponse[*models.Sandbox]{
@@ -300,6 +349,11 @@ func (sc *Controller) createSandboxWithClone(ctx context.Context, request models
 	if err != nil {
 		log.Error(err, "sandbox clone failed")
 		return web.ApiResponse[*models.Sandbox]{}, mapInfraErrorToApiError(err)
+	}
+	if apiErr := sc.ensureCreateAPIKeyActive(user); apiErr != nil {
+		log.Info("API key was deleted while sandbox was being cloned, cleaning up sandbox", "id", sbx.GetSandboxID())
+		sc.cleanupSandboxForDeletedAPIKey(ctx, sbx, user)
+		return web.ApiResponse[*models.Sandbox]{}, apiErr
 	}
 	log.Info("sandbox cloned", "id", sbx.GetSandboxID(), "sbx", klog.KObj(sbx),
 		"resourceVersion", sbx.GetResourceVersion(), "totalCost", time.Since(start))
