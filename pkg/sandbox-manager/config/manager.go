@@ -51,11 +51,9 @@ type SandboxManagerOptions struct {
 	MaxCreateQPS          int
 	ExtProcMaxConcurrency uint32
 	MemberlistBindPort    int
-	// Deprecated: route reconciliation is always enabled. This field is a no-op.
-	DisableRouteReconciliation bool
-	EnableShortSandboxID       bool
-	RestConfig                 *rest.Config
-	Quota                      QuotaOptions
+	EnableShortSandboxID  bool
+	RestConfig            *rest.Config
+	Quota                 QuotaOptions
 }
 
 func InitOptions(opts SandboxManagerOptions) SandboxManagerOptions {

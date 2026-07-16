@@ -121,6 +121,9 @@ func (s *Store) DeleteIDOnlyConditionally(route Route) MutationResult {
 	}
 
 	delete(s.compatByUID, route.UID)
+	// Advance the generation to mark this active-view change, mirroring the
+	// changedView bump in Maintenance. The value is intentionally unused here
+	// since retiredFence no longer carries a generation.
 	s.nextGenerationLocked()
 	s.retiredByUID[route.UID] = retiredFence{
 		createdAt: s.now(),

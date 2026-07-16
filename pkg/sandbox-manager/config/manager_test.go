@@ -182,11 +182,10 @@ func TestInitOptions(t *testing.T) {
 		{
 			name: "non-configurable fields should be preserved",
 			input: SandboxManagerOptions{
-				PeerSelector:               "app=test",
-				SandboxNamespace:           "sandbox-ns",
-				SandboxLabelSelector:       "env=prod",
-				DisableRouteReconciliation: true,
-				EnableShortSandboxID:       true,
+				PeerSelector:         "app=test",
+				SandboxNamespace:     "sandbox-ns",
+				SandboxLabelSelector: "env=prod",
+				EnableShortSandboxID: true,
 			},
 			expectSystemNamespace:    utils.DefaultSandboxDeployNamespace,
 			expectMaxClaimWorkers:    consts.DefaultClaimWorkers,
@@ -217,9 +216,6 @@ func TestInitOptions(t *testing.T) {
 			}
 			if tt.input.SandboxLabelSelector != "" {
 				assert.Equal(t, tt.input.SandboxLabelSelector, result.SandboxLabelSelector)
-			}
-			if tt.input.DisableRouteReconciliation {
-				assert.True(t, result.DisableRouteReconciliation)
 			}
 		})
 	}
