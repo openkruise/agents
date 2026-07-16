@@ -52,12 +52,12 @@ import (
 
 func init() {
 	flag.IntVar(&concurrentReconciles, "sandboxclaim-workers", concurrentReconciles, "Max concurrent workers for SandboxClaim controller.")
-	flag.IntVar(&maxClaimBatchSize, "sandboxclaim-max-batch-size", maxClaimBatchSize, "Maximum batch size for claiming sandboxes in a single reconcile cycle")
+	flag.IntVar(&core.MaxClaimBatchSize, "sandboxclaim-max-batch-size", core.MaxClaimBatchSize, "Maximum batch size for claiming sandboxes in a single reconcile cycle")
+	flag.IntVar(&core.InitialClaimBatchSize, "sandboxclaim-initial-batch-size", core.InitialClaimBatchSize, "Initial batch size for concurrent claim operations")
 }
 
 var (
 	concurrentReconciles = 500
-	maxClaimBatchSize    = 10
 	controllerKind       = agentsv1alpha1.GroupVersion.WithKind("SandboxClaim")
 )
 
