@@ -121,13 +121,9 @@ func (s *Store) DeleteIDOnlyConditionally(route Route) MutationResult {
 	}
 
 	delete(s.compatByUID, route.UID)
-	generation := s.nextGenerationLocked()
+	s.nextGenerationLocked()
 	s.retiredByUID[route.UID] = retiredFence{
-		uid:             route.UID,
-		id:              route.ID,
-		resourceVersion: route.ResourceVersion,
-		generation:      generation,
-		createdAt:       s.now(),
+		createdAt: s.now(),
 	}
 	s.recomputeActiveViewLocked()
 	return s.finishLocked(OperationDelete, ShapeIDOnly, EventResultApplied, ReasonNone, nil)
@@ -170,7 +166,6 @@ func (s *Store) installDeletionFencesLocked(
 ) {
 	now := s.now()
 	deletion := deletionFence{
-		key:                key,
 		uid:                deleted.UID,
 		id:                 deleted.ID,
 		resourceVersion:    fenceResourceVersion,
@@ -190,10 +185,6 @@ func (s *Store) installDeletionFencesLocked(
 	}
 	s.deletionByObject[key] = deletion
 	s.retiredByUID[deleted.UID] = retiredFence{
-		uid:             deleted.UID,
-		id:              deleted.ID,
-		resourceVersion: fenceResourceVersion,
-		generation:      generation,
-		createdAt:       now,
+		createdAt: now,
 	}
 }

@@ -391,9 +391,7 @@ func TestSandbox_SaveTimeoutWithPolicy_OnConflict(t *testing.T) {
 	require.NoError(t, err)
 	mgr.SetWaitHooks(testCache.GetWaitHooks())
 
-	options := config.InitOptions(config.SandboxManagerOptions{
-		DisableRouteReconciliation: true,
-	})
+	options := config.InitOptions(config.SandboxManagerOptions{})
 	infraInstance := NewInfraBuilder(options).
 		WithCache(testCache).
 		WithAPIReader(fc).

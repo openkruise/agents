@@ -30,12 +30,15 @@ import (
 	"github.com/openkruise/agents/pkg/peers"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandboxroute"
+	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/metrics"
 )
 
 // mockPeers is a simple in-memory Peers implementation for testing
@@ -182,6 +185,75 @@ func TestSetRouteValidationAndShapeDispatch(t *testing.T) {
 				assert.Zero(t, enqueued)
 			}
 		})
+	}
+}
+
+func TestSetRouteInvalidMetric(t *testing.T) {
+	tests := []struct {
+		name  string
+		route Route
+		shape sandboxroute.Shape
+	}{
+		{name: "ID-only", route: Route{}, shape: sandboxroute.ShapeIDOnly},
+		{name: "full attempt", route: Route{Namespace: "ns"}, shape: sandboxroute.ShapeFull},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newTestServer(nil)
+			enqueued := 0
+			s.SetRepairEnqueuer(func(sandboxroute.MutationResult) { enqueued++ })
+			labels := routeEventLabels(sandboxroute.SurfaceManager, tt.shape, sandboxroute.OperationUpsert)
+			before := proxyCounterValue(t, "sandbox_route_event_total", labels)
+			beforeRouteCount := testutil.ToFloat64(routeCount)
+
+			result := s.SetRoute(t.Context(), tt.route)
+
+			assert.Equal(t, sandboxroute.EventResultInvalid, result.Result)
+			assert.Equal(t, before+1, proxyCounterValue(t, "sandbox_route_event_total", labels))
+			assert.Empty(t, s.ListRoutes())
+			assert.Equal(t, sandboxroute.StoreStats{}, s.Store().Stats())
+			assert.Equal(t, beforeRouteCount, testutil.ToFloat64(routeCount))
+			assert.Zero(t, enqueued)
+		})
+	}
+}
+
+func proxyCounterValue(t *testing.T, name string, expectedLabels map[string]string) float64 {
+	t.Helper()
+	families, err := metrics.Registry.Gather()
+	require.NoError(t, err)
+	for _, family := range families {
+		if family.GetName() != name {
+			continue
+		}
+		for _, metric := range family.Metric {
+			if proxyMetricLabelsMatch(metric, expectedLabels) {
+				return metric.GetCounter().GetValue()
+			}
+		}
+	}
+	return 0
+}
+
+func proxyMetricLabelsMatch(metric *dto.Metric, expected map[string]string) bool {
+	if len(metric.Label) != len(expected) {
+		return false
+	}
+	for _, label := range metric.Label {
+		if expected[label.GetName()] != label.GetValue() {
+			return false
+		}
+	}
+	return true
+}
+
+func routeEventLabels(surface sandboxroute.Surface, shape sandboxroute.Shape, operation sandboxroute.Operation) map[string]string {
+	return map[string]string{
+		"surface":   string(surface),
+		"shape":     string(shape),
+		"operation": string(operation),
+		"result":    string(sandboxroute.EventResultInvalid),
 	}
 }
 

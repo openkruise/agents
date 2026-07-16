@@ -232,9 +232,7 @@ func TestValidateAndInitClaimOptions_ReserveFailedSandboxFor(t *testing.T) {
 }
 
 func TestTryClaimSandbox_QuotaDeniedCreateOnNoStockConsumesCreateLimiterBeforeAdmission(t *testing.T) {
-	testInfra, fc := NewTestInfra(t, config.SandboxManagerOptions{
-		DisableRouteReconciliation: true,
-	})
+	testInfra, fc := NewTestInfra(t, config.SandboxManagerOptions{})
 
 	const template = "quota-create-on-no-stock"
 	require.NoError(t, fc.Create(t.Context(), sandboxSetForTest(template, "default")))
@@ -2254,9 +2252,7 @@ func TestTryClaimSandbox_CreateOnNoStockRateLimitExceeded(t *testing.T) {
 	limiter := rate.NewLimiter(rate.Every(time.Hour), 1)
 	require.True(t, limiter.Allow(), "test setup must exhaust the create limiter before claiming")
 
-	testInfra, fc := NewTestInfra(t, config.SandboxManagerOptions{
-		DisableRouteReconciliation: true,
-	})
+	testInfra, fc := NewTestInfra(t, config.SandboxManagerOptions{})
 
 	template := "test-template"
 
@@ -2508,10 +2504,7 @@ func TestTryClaimSandbox_LockConflict(t *testing.T) {
 			require.NoError(t, err)
 			mgr.SetWaitHooks(testCache.GetWaitHooks())
 
-			// Build infra with route reconciliation disabled (not needed for this test)
-			options := config.InitOptions(config.SandboxManagerOptions{
-				DisableRouteReconciliation: true,
-			})
+			options := config.InitOptions(config.SandboxManagerOptions{})
 			infraInstance := NewInfraBuilder(options).
 				WithCache(testCache).
 				WithAPIReader(fc).
@@ -2658,9 +2651,7 @@ func TestInfraClaimSandboxReturnsErrorWhenLockContextCanceled(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			testInfra, fc := NewTestInfra(t, config.SandboxManagerOptions{
-				DisableRouteReconciliation: true,
-			})
+			testInfra, fc := NewTestInfra(t, config.SandboxManagerOptions{})
 
 			origCreateSandbox := DefaultCreateSandbox
 			DefaultCreateSandbox = func(context.Context, *v1alpha1.Sandbox, client.Client) (*v1alpha1.Sandbox, error) {
@@ -2959,7 +2950,7 @@ func TestTryClaimSandbox_ModifierErrorStopsBeforeLock(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			testInfra, fc := NewTestInfra(t, config.SandboxManagerOptions{DisableRouteReconciliation: true})
+			testInfra, fc := NewTestInfra(t, config.SandboxManagerOptions{})
 			const template = "modifier-error-pooled"
 			createAvailableSandboxForFailureRecord(t, fc, template, nil)
 
@@ -3028,7 +3019,7 @@ func TestInfraClaimSandbox_ModifierErrorDoesNotRetryCreate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			testInfra, fc := NewTestInfra(t, config.SandboxManagerOptions{DisableRouteReconciliation: true})
+			testInfra, fc := NewTestInfra(t, config.SandboxManagerOptions{})
 			const template = "modifier-error-create"
 			require.NoError(t, fc.Create(t.Context(), sandboxSetForTest(template, "default")))
 			require.Eventually(t, func() bool {
@@ -3197,7 +3188,7 @@ func TestTryClaimSandbox_ReleasesAdmissionOnRejectedLockWrite(t *testing.T) {
 				require.NoError(t, err)
 				mgr.SetWaitHooks(testCache.GetWaitHooks())
 
-				options := config.InitOptions(config.SandboxManagerOptions{DisableRouteReconciliation: true})
+				options := config.InitOptions(config.SandboxManagerOptions{})
 				infraInstance := NewInfraBuilder(options).
 					WithCache(testCache).
 					WithAPIReader(fc).

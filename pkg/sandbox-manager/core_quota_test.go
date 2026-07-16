@@ -122,9 +122,8 @@ func (*quotaInitSubjectLister) Load(context.Context, string) (quotaspec.Subject,
 func buildQuotaTestManager(t *testing.T, spyCache *quotaInitCache) *SandboxManager {
 	t.Helper()
 	opts := config.InitOptions(config.SandboxManagerOptions{
-		SystemNamespace:            "sandbox-system",
-		MemberlistBindPort:         config.DefaultMemberlistBindPort,
-		DisableRouteReconciliation: true,
+		SystemNamespace:    "sandbox-system",
+		MemberlistBindPort: config.DefaultMemberlistBindPort,
 	})
 	proxyServer := proxy.NewServer(opts)
 	mgr, err := NewSandboxManagerBuilder(opts).

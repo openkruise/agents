@@ -29,10 +29,11 @@ import (
 
 type checkpointSandboxStub struct {
 	infra.Sandbox
-	namespace string
-	name      string
-	labels    map[string]string
-	received  infra.CreateCheckpointOptions
+	namespace   string
+	name        string
+	labels      map[string]string
+	annotations map[string]string
+	received    []infra.CreateCheckpointOptions
 }
 
 func (s *checkpointSandboxStub) GetNamespace() string {
@@ -47,30 +48,60 @@ func (s *checkpointSandboxStub) GetLabels() map[string]string {
 	return s.labels
 }
 
+func (s *checkpointSandboxStub) GetAnnotations() map[string]string {
+	return s.annotations
+}
+
 func (s *checkpointSandboxStub) CreateCheckpoint(_ context.Context, opts infra.CreateCheckpointOptions) (string, error) {
-	s.received = opts
+	s.received = append(s.received, opts)
 	return "checkpoint-id", nil
 }
 
 func TestSandboxManagerCreateCheckpoint(t *testing.T) {
 	tests := []struct {
-		name     string
-		labels   map[string]string
-		expectID string
+		name         string
+		labels       map[string]string
+		annotations  map[string]string
+		transitionTo map[string]string
+		expectedIDs  []string
 	}{
-		{name: "legacy fallback", expectID: "team-a--sandbox-a"},
-		{name: "empty label falls back", labels: map[string]string{agentsv1alpha1.LabelSandboxID: ""}, expectID: "team-a--sandbox-a"},
-		{name: "short label is preserved", labels: map[string]string{agentsv1alpha1.LabelSandboxID: "opaque-short-id"}, expectID: "opaque-short-id"},
+		{name: "legacy fallback", expectedIDs: []string{"team-a--sandbox-a"}},
+		{name: "empty label falls back", labels: map[string]string{agentsv1alpha1.LabelSandboxID: ""}, expectedIDs: []string{"team-a--sandbox-a"}},
+		{name: "short label is preserved", labels: map[string]string{agentsv1alpha1.LabelSandboxID: "opaque-short-id"}, expectedIDs: []string{"opaque-short-id"}},
+		{
+			name:        "Sandbox annotation with shared key does not affect resolution",
+			annotations: map[string]string{agentsv1alpha1.AnnotationSandboxID: "annotation-must-be-ignored"},
+			expectedIDs: []string{"team-a--sandbox-a"},
+		},
+		{
+			name:         "old Checkpoint identity stays legacy after Sandbox transitions",
+			transitionTo: map[string]string{agentsv1alpha1.LabelSandboxID: "opaque-short-id"},
+			expectedIDs:  []string{"team-a--sandbox-a", "opaque-short-id"},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			sandbox := &checkpointSandboxStub{namespace: "team-a", name: "sandbox-a", labels: tt.labels}
+			sandbox := &checkpointSandboxStub{
+				namespace:   "team-a",
+				name:        "sandbox-a",
+				labels:      tt.labels,
+				annotations: tt.annotations,
+			}
 			manager := &SandboxManager{}
 			checkpointID, err := manager.CreateCheckpoint(t.Context(), sandbox, infra.CreateCheckpointOptions{SandboxID: "caller-spoofed-id"})
 			require.NoError(t, err)
 			assert.Equal(t, "checkpoint-id", checkpointID)
-			assert.Equal(t, tt.expectID, sandbox.received.SandboxID)
+			if tt.transitionTo != nil {
+				sandbox.labels = tt.transitionTo
+				checkpointID, err = manager.CreateCheckpoint(t.Context(), sandbox, infra.CreateCheckpointOptions{SandboxID: "second-spoofed-id"})
+				require.NoError(t, err)
+				assert.Equal(t, "checkpoint-id", checkpointID)
+			}
+			require.Len(t, sandbox.received, len(tt.expectedIDs))
+			for i := range tt.expectedIDs {
+				assert.Equal(t, tt.expectedIDs[i], sandbox.received[i].SandboxID)
+			}
 		})
 	}
 }

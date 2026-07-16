@@ -20,5 +20,7 @@ contracts.
   `infra.QuotaSandboxEvent`, and `infra.SandboxResource` values at this
   boundary. Running quota membership is live and not paused; malformed
   informer tombstones are dropped and observed.
+- Keep route projection and targeted repair in Manager composition; do not
+  reintroduce a local proxy route model in this implementation.
 - Do not add API models, HTTP/auth semantics, quota limit evaluation, Redis
   behavior, or Manager admission/release policy here.

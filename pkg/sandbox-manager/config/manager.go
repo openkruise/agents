@@ -43,14 +43,15 @@ type QuotaOptions struct {
 }
 
 type SandboxManagerOptions struct {
-	SystemNamespace            string
-	PeerSelector               string
-	SandboxNamespace           string
-	SandboxLabelSelector       string
-	MaxClaimWorkers            int
-	MaxCreateQPS               int
-	ExtProcMaxConcurrency      uint32
-	MemberlistBindPort         int
+	SystemNamespace       string
+	PeerSelector          string
+	SandboxNamespace      string
+	SandboxLabelSelector  string
+	MaxClaimWorkers       int
+	MaxCreateQPS          int
+	ExtProcMaxConcurrency uint32
+	MemberlistBindPort    int
+	// Deprecated: route reconciliation is always enabled. This field is a no-op.
 	DisableRouteReconciliation bool
 	EnableShortSandboxID       bool
 	RestConfig                 *rest.Config

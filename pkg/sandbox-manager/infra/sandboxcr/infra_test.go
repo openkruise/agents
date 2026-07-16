@@ -335,7 +335,7 @@ func TestInfra_GetClaimedSandbox_CacheMiss_WaitsUntilCacheHit(t *testing.T) {
 				sandbox:      apiSbx,
 				succeedAfter: 3,
 			}
-			options := config.InitOptions(config.SandboxManagerOptions{DisableRouteReconciliation: true})
+			options := config.InitOptions(config.SandboxManagerOptions{})
 			infraInstance := NewInfraBuilder(options).
 				WithCache(retryCache).
 				WithAPIReader(stub).
@@ -392,7 +392,7 @@ func TestInfra_GetClaimedSandbox_SharedContextError_RetriesWhileContextLive(t *t
 				succeedAfter:    2,
 				transientErrors: []error{tt.injectedError},
 			}
-			options := config.InitOptions(config.SandboxManagerOptions{DisableRouteReconciliation: true})
+			options := config.InitOptions(config.SandboxManagerOptions{})
 			infraInstance := NewInfraBuilder(options).
 				WithCache(retryCache).
 				WithAPIReader(stub).
@@ -1241,7 +1241,7 @@ func setRouteResourceVersion(infraInstance *Infra, sandboxID, resourceVersion st
 
 func newInfraWithStubAPIReader(t *testing.T, apiObjects ...*v1alpha1.Sandbox) (*Infra, client.Client, *stubAPIReader) {
 	t.Helper()
-	options := config.InitOptions(config.SandboxManagerOptions{DisableRouteReconciliation: true})
+	options := config.InitOptions(config.SandboxManagerOptions{})
 	c, fc, err := cachetest.NewTestCache(t)
 	require.NoError(t, err)
 

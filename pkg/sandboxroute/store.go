@@ -94,15 +94,10 @@ type routeRecord struct {
 }
 
 type retiredFence struct {
-	uid             types.UID
-	id              string
-	resourceVersion string
-	generation      uint64
-	createdAt       time.Time
+	createdAt time.Time
 }
 
 type deletionFence struct {
-	key                types.NamespacedName
 	uid                types.UID
 	id                 string
 	resourceVersion    string
@@ -192,6 +187,16 @@ func (s *Store) recordWithoutMutation(
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.finishLocked(operation, shape, result, reason, nil)
+}
+
+// RecordInvalid records a decoded route that was rejected before Store dispatch.
+// A route with no ObjectKey fields is ID-only; any attempted ObjectKey is full.
+func (s *Store) RecordInvalid(operation Operation, route Route) MutationResult {
+	shape := ShapeIDOnly
+	if route.Namespace != "" || route.Name != "" {
+		shape = ShapeFull
+	}
+	return s.recordWithoutMutation(operation, shape, EventResultInvalid, ReasonInvalidRoute)
 }
 
 func (s *Store) finishLocked(

@@ -94,3 +94,45 @@ func TestLegacyDeleteFallbackMetric(t *testing.T) {
 		})
 	}
 }
+
+func TestRecordInvalidMetric(t *testing.T) {
+	tests := []struct {
+		name      string
+		surface   Surface
+		operation Operation
+		route     Route
+		shape     Shape
+	}{
+		{name: "manager ID-only upsert", surface: SurfaceManager, operation: OperationUpsert, route: Route{}, shape: ShapeIDOnly},
+		{name: "manager full upsert", surface: SurfaceManager, operation: OperationUpsert, route: Route{Namespace: "ns"}, shape: ShapeFull},
+		{name: "manager ID-only delete", surface: SurfaceManager, operation: OperationDelete, route: Route{}, shape: ShapeIDOnly},
+		{name: "manager full delete", surface: SurfaceManager, operation: OperationDelete, route: Route{Name: "sandbox"}, shape: ShapeFull},
+		{name: "gateway ID-only upsert", surface: SurfaceGateway, operation: OperationUpsert, route: Route{}, shape: ShapeIDOnly},
+		{name: "gateway full upsert", surface: SurfaceGateway, operation: OperationUpsert, route: Route{Namespace: "ns"}, shape: ShapeFull},
+		{name: "gateway ID-only delete", surface: SurfaceGateway, operation: OperationDelete, route: Route{}, shape: ShapeIDOnly},
+		{name: "gateway full delete", surface: SurfaceGateway, operation: OperationDelete, route: Route{Name: "sandbox"}, shape: ShapeFull},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store, err := NewStore(tt.surface)
+			require.NoError(t, err)
+			metric := routeEventTotal.WithLabelValues(
+				string(tt.surface),
+				string(tt.shape),
+				string(tt.operation),
+				string(EventResultInvalid),
+			)
+			before := testutil.ToFloat64(metric)
+
+			result := store.RecordInvalid(tt.operation, tt.route)
+
+			assert.Equal(t, EventResultInvalid, result.Result)
+			assert.Equal(t, ReasonInvalidRoute, result.Reason)
+			assert.Empty(t, result.RepairRequests)
+			assert.Equal(t, before+1, testutil.ToFloat64(metric))
+			assert.Empty(t, store.List())
+			assert.Equal(t, StoreStats{}, store.Stats())
+		})
+	}
+}

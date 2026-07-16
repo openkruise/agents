@@ -654,9 +654,8 @@ func TestCloneSandbox_AdmissionReceivesPreparedResource(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			testInfra, fc := NewTestInfra(t, config.SandboxManagerOptions{
-				MaxClaimWorkers:            1,
-				MaxCreateQPS:               1000,
-				DisableRouteReconciliation: true,
+				MaxClaimWorkers: 1,
+				MaxCreateQPS:    1000,
 			})
 			checkpointID := "clone-admission-resource"
 			sbt := &v1alpha1.SandboxTemplate{
@@ -728,9 +727,8 @@ func TestCloneSandbox_AdmissionReceivesPreparedResource(t *testing.T) {
 
 func TestCloneSandbox_AdmissionQuotaExceededIsTerminalBeforeCreate(t *testing.T) {
 	testInfra, fc := NewTestInfra(t, config.SandboxManagerOptions{
-		MaxClaimWorkers:            1,
-		MaxCreateQPS:               1000,
-		DisableRouteReconciliation: true,
+		MaxClaimWorkers: 1,
+		MaxCreateQPS:    1000,
 	})
 	checkpointID := "clone-admission-terminal"
 	createCloneTestCheckpoint(t, fc, testInfra.Cache, checkpointID)
@@ -781,7 +779,7 @@ func TestInfraCloneSandbox_ModifierErrorStopsBeforeCreate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			testInfra, fc := NewTestInfra(t, config.SandboxManagerOptions{DisableRouteReconciliation: true})
+			testInfra, fc := NewTestInfra(t, config.SandboxManagerOptions{})
 			const checkpointID = "modifier-error-clone"
 			createCloneTestCheckpoint(t, fc, testInfra.Cache, checkpointID)
 
@@ -836,7 +834,7 @@ func TestInfraCloneSandbox_PostModifierErrorUsesCleanup(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			testInfra, fc := NewTestInfra(t, config.SandboxManagerOptions{DisableRouteReconciliation: true})
+			testInfra, fc := NewTestInfra(t, config.SandboxManagerOptions{})
 			const (
 				checkpointID = "post-modifier-error-clone"
 				sandboxName  = "failed-post-modifier-clone"
@@ -902,9 +900,8 @@ func TestCloneSandbox_ReleasesQuotaAfterKilledFailedCloneAllowsRetryWithFreshLoc
 	setFastCloneRetryForTest(t)
 
 	testInfra, fc := NewTestInfra(t, config.SandboxManagerOptions{
-		MaxClaimWorkers:            1,
-		MaxCreateQPS:               1000,
-		DisableRouteReconciliation: true,
+		MaxClaimWorkers: 1,
+		MaxCreateQPS:    1000,
 	})
 	checkpointID := "clone-quota-release-retry"
 	createCloneTestCheckpoint(t, fc, testInfra.Cache, checkpointID)
@@ -978,9 +975,8 @@ func TestCloneSandbox_ForeverReserveRetainsQuotaOnWaitReadyFailure(t *testing.T)
 	setFastCloneRetryForTest(t)
 
 	testInfra, fc := NewTestInfra(t, config.SandboxManagerOptions{
-		MaxClaimWorkers:            1,
-		MaxCreateQPS:               1000,
-		DisableRouteReconciliation: true,
+		MaxClaimWorkers: 1,
+		MaxCreateQPS:    1000,
 	})
 	checkpointID := "clone-quota-default-reserve"
 	createCloneTestCheckpoint(t, fc, testInfra.Cache, checkpointID)
@@ -1029,9 +1025,8 @@ func TestCloneSandbox_AmbiguousCreateFailureRetainsAdmissionAndStopsRetry(t *tes
 	setFastCloneRetryForTest(t)
 
 	testInfra, fc := NewTestInfra(t, config.SandboxManagerOptions{
-		MaxClaimWorkers:            1,
-		MaxCreateQPS:               1000,
-		DisableRouteReconciliation: true,
+		MaxClaimWorkers: 1,
+		MaxCreateQPS:    1000,
 	})
 	checkpointID := "clone-transient-create-failure"
 	createCloneTestCheckpoint(t, fc, testInfra.Cache, checkpointID)
@@ -2371,9 +2366,8 @@ func TestCreateCheckPoint(t *testing.T) {
 
 func TestCloneSandboxAdmissionUsesPersistedLockString(t *testing.T) {
 	testInfra, fc := NewTestInfra(t, config.SandboxManagerOptions{
-		MaxClaimWorkers:            1,
-		MaxCreateQPS:               1000,
-		DisableRouteReconciliation: true,
+		MaxClaimWorkers: 1,
+		MaxCreateQPS:    1000,
 	})
 	checkpointID := "clone-lockstring-precondition"
 	createCloneTestCheckpoint(t, fc, testInfra.Cache, checkpointID)

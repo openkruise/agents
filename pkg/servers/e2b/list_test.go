@@ -958,6 +958,44 @@ func TestListSnapshots(t *testing.T) {
 			expectedTotal: 2,
 		},
 		{
+			name: "historical Checkpoint annotation survives later short ID and ignores Checkpoint label",
+			setup: func() func() {
+				legacyID := Namespace + "--history-sandbox"
+				oldCheckpoint := createCheckpoint(
+					"cp-history-legacy",
+					adminUser.ID.String(),
+					legacyID,
+					"history-cp-legacy",
+					"2024-04-03T00:00:01Z",
+				)
+				oldCheckpoint.Labels = map[string]string{
+					agentsv1alpha1.LabelSandboxID: "opaque-current-id",
+				}
+				require.NoError(t, fc.Update(t.Context(), oldCheckpoint))
+				createCheckpoint(
+					"cp-history-short",
+					adminUser.ID.String(),
+					"opaque-current-id",
+					"history-cp-short",
+					"2024-04-03T00:00:02Z",
+				)
+				return func() {
+					for _, name := range []string{"cp-history-legacy", "cp-history-short"} {
+						cp := &agentsv1alpha1.Checkpoint{}
+						cp.Name = name
+						cp.Namespace = Namespace
+						_ = fc.Delete(context.Background(), cp)
+					}
+				}
+			},
+			user:  adminUser,
+			query: map[string]string{"sandboxID": Namespace + "--history-sandbox"},
+			pages: []pageExpectation{
+				{count: 1, hasNextToken: false},
+			},
+			expectedIDs: []string{"history-cp-legacy"},
+		},
+		{
 			name: "no sandboxID filter returns all",
 			setup: func() func() {
 				createCheckpoint("cp-nofilter-1", adminUser.ID.String(), "sandbox-a", "nofilter-cp-1", "2024-05-01T00:00:01Z")

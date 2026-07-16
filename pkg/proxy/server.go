@@ -98,16 +98,10 @@ func NewServer(opts config.SandboxManagerOptions) *Server {
 	if err != nil {
 		panic(fmt.Sprintf("failed to create manager route store: %v", err))
 	}
-	return NewServerWithStore(opts, store)
-}
-
-// NewServerWithStore creates a proxy backed by the supplied manager-local Store.
-func NewServerWithStore(opts config.SandboxManagerOptions, store *sandboxroute.Store) *Server {
-	s := &Server{
+	return &Server{
 		extProcMaxConcurrentStreams: opts.ExtProcMaxConcurrency,
 		store:                       store,
 	}
-	return s
 }
 
 // SetRepairEnqueuer installs the non-blocking adapter for Store repair requests.
@@ -193,6 +187,11 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	shape, err := validateRouteShape(route)
 	if err != nil {
 		log.Error(err, "invalid route refresh payload")
+		operation := sandboxroute.OperationUpsert
+		if route.State == v1alpha1.SandboxStateDead {
+			operation = sandboxroute.OperationDelete
+		}
+		s.store.RecordInvalid(operation, route)
 		http.Error(w, fmt.Sprintf("invalid route refresh payload: %v", err), http.StatusBadRequest)
 		return
 	}

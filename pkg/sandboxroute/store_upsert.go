@@ -163,11 +163,7 @@ func (s *Store) installFullLocked(
 		s.removeFullUIDOwnerLocked(current.route.UID, key)
 		if !s.uidHasFullOwnerLocked(current.route.UID) {
 			s.retiredByUID[current.route.UID] = retiredFence{
-				uid:             current.route.UID,
-				id:              current.route.ID,
-				resourceVersion: current.route.ResourceVersion,
-				generation:      generation,
-				createdAt:       now,
+				createdAt: now,
 			}
 		}
 	}
@@ -182,11 +178,7 @@ func (s *Store) installFullLocked(
 			}
 			delete(s.compatByUID, uid)
 			s.retiredByUID[uid] = retiredFence{
-				uid:             uid,
-				id:              record.route.ID,
-				resourceVersion: record.route.ResourceVersion,
-				generation:      generation,
-				createdAt:       now,
+				createdAt: now,
 			}
 		}
 	}
