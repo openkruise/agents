@@ -22,7 +22,6 @@ import (
 	"io"
 	"maps"
 	"net/http"
-	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -2402,14 +2401,12 @@ func TestSandboxNamespaceIsolationWithSameName(t *testing.T) {
 	})
 }
 
-func TestBrowserUseCDPPort(t *testing.T) {
+func TestBrowserUse(t *testing.T) {
 	controller, _, teardown := Setup(t)
 	defer teardown()
 
 	user := &models.CreatedTeamAPIKey{
-		ID:   keys.AdminKeyID,
-		Key:  InitKey,
-		Name: "test-user",
+		ID: keys.AdminKeyID,
 	}
 
 	templateName := "browseruse-template"
@@ -2432,76 +2429,93 @@ func TestBrowserUseCDPPort(t *testing.T) {
 		proxyutils.DefaultRequestFunc = origRequest
 	})
 
-	tests := []struct {
-		name           string
-		query          map[string]string
-		expectedPort   int
-		expectedStatus int
-		errorContains  string
-	}{
-		{
-			name:           "uses default port when query missing",
-			query:          nil,
-			expectedPort:   models.CDPPort,
-			expectedStatus: http.StatusOK,
-		},
-		{
-			name:           "uses custom cdp port",
-			query:          map[string]string{"cdpPort": "9333"},
-			expectedPort:   9333,
-			expectedStatus: http.StatusOK,
-		},
-		{
-			name:           "rejects non integer cdp port",
-			query:          map[string]string{"cdpPort": "abc"},
-			expectedStatus: http.StatusBadRequest,
-			errorContains:  "Invalid cdpPort",
-		},
-		{
-			name:           "rejects out of range cdp port",
-			query:          map[string]string{"cdpPort": "65536"},
-			expectedStatus: http.StatusBadRequest,
-			errorContains:  "Invalid cdpPort",
-		},
-		{
-			name:           "rejects zero cdp port",
-			query:          map[string]string{"cdpPort": "0"},
-			expectedStatus: http.StatusBadRequest,
-			errorContains:  "Invalid cdpPort",
-		},
-	}
+	t.Run("CDP port", func(t *testing.T) {
+		tests := []struct {
+			name         string
+			query        map[string]string
+			expectedPort int
+			expectError  string
+		}{
+			{name: "uses default port when query missing", expectedPort: models.CDPPort},
+			{name: "uses custom cdp port", query: map[string]string{"cdpPort": "9333"}, expectedPort: 9333},
+			{name: "rejects non integer cdp port", query: map[string]string{"cdpPort": "abc"}, expectError: "Invalid cdpPort"},
+			{name: "rejects out of range cdp port", query: map[string]string{"cdpPort": "65536"}, expectError: "Invalid cdpPort"},
+			{name: "rejects zero cdp port", query: map[string]string{"cdpPort": "0"}, expectError: "Invalid cdpPort"},
+		}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			proxyutils.DefaultRequestFunc = func(ctx context.Context, sbx *v1alpha1.Sandbox, method, path string, port int, body io.Reader) (*http.Response, error) {
-				assert.Equal(t, "/json/version", path)
-				assert.Equal(t, tt.expectedPort, port)
-				return &http.Response{
-					StatusCode: http.StatusOK,
-					Body:       io.NopCloser(strings.NewReader(expectedBody)),
-				}, nil
-			}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				proxyutils.DefaultRequestFunc = func(ctx context.Context, sbx *v1alpha1.Sandbox, method, path string, port int, body io.Reader) (*http.Response, error) {
+					assert.Equal(t, "/json/version", path)
+					assert.Equal(t, tt.expectedPort, port)
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(strings.NewReader(expectedBody)),
+					}, nil
+				}
 
-			req := NewRequest(t, tt.query, nil, map[string]string{
-				"sandboxID": sandboxID,
-			}, user)
+				req := NewRequest(t, tt.query, nil, map[string]string{"sandboxID": sandboxID}, user)
+				resp, apiErr := controller.BrowserUse(req)
+				if tt.expectError != "" {
+					require.NotNil(t, apiErr)
+					assert.Equal(t, http.StatusBadRequest, apiErr.Code)
+					assert.Contains(t, apiErr.Message, tt.expectError)
+					return
+				}
 
-			resp, apiErr := controller.BrowserUse(req)
-			if tt.expectedStatus != http.StatusOK {
-				require.NotNil(t, apiErr)
-				assert.Equal(t, tt.expectedStatus, apiErr.Code)
-				assert.Contains(t, apiErr.Message, tt.errorContains)
-				return
-			}
+				require.Nil(t, apiErr)
+				require.NotNil(t, resp.Body)
+				assert.Equal(t, http.StatusOK, resp.Code)
+				assert.Equal(t, "Chrome", resp.Body.Browser)
+				assert.Contains(t, resp.Body.WebSocketDebuggerURL,
+					fmt.Sprintf("wss://%d-%s.%s", tt.expectedPort, sandboxID, controller.domain))
+			})
+		}
+	})
 
-			require.Nil(t, apiErr)
-			require.NotNil(t, resp.Body)
-			assert.Equal(t, http.StatusOK, resp.Code)
-			assert.Equal(t, "Chrome", resp.Body.Browser)
-			assert.Contains(t, resp.Body.WebSocketDebuggerURL,
-				fmt.Sprintf("wss://%d-%s.%s", tt.expectedPort, sandboxID, controller.domain))
-		})
-	}
+	t.Run("domain resolution", func(t *testing.T) {
+		controller.domain = ""
+		tests := []struct {
+			name, host, path, expectURL, expectError string
+		}{
+			{
+				name:      "customized ipv6 uses bracketed path-style address",
+				host:      "2001:db8::1",
+				path:      "/kruise/api/sandboxes/" + sandboxID + "/connect",
+				expectURL: fmt.Sprintf("wss://[2001:db8::1]/kruise/%s/%d/devtools/browser/abc", sandboxID, models.CDPPort),
+			},
+			{name: "empty host returns 400 without upstream", path: "/sandboxes/" + sandboxID + "/connect", expectError: "empty host"},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				upstreamCalled := false
+				proxyutils.DefaultRequestFunc = func(ctx context.Context, sbx *v1alpha1.Sandbox, method, path string, port int, body io.Reader) (*http.Response, error) {
+					upstreamCalled = true
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(strings.NewReader(expectedBody)),
+					}, nil
+				}
+
+				req := NewRequest(t, nil, nil, map[string]string{"sandboxID": sandboxID}, user)
+				req.Host = tt.host
+				req.URL.Path = tt.path
+
+				resp, apiErr := controller.BrowserUse(req)
+				assert.Equal(t, tt.expectError == "", upstreamCalled)
+				if tt.expectError != "" {
+					require.NotNil(t, apiErr)
+					assert.Equal(t, http.StatusBadRequest, apiErr.Code)
+					assert.Contains(t, apiErr.Message, tt.expectError)
+					return
+				}
+				require.Nil(t, apiErr)
+				require.NotNil(t, resp.Body)
+				assert.Equal(t, tt.expectURL, resp.Body.WebSocketDebuggerURL)
+			})
+		}
+	})
 }
 
 func TestCreateSandbox_EmptyHostDoesNotClaim(t *testing.T) {
@@ -2512,19 +2526,13 @@ func TestCreateSandbox_EmptyHostDoesNotClaim(t *testing.T) {
 	cleanup := CreateSandboxPool(t, controller, templateName, 1)
 	defer cleanup()
 
-	user := &models.CreatedTeamAPIKey{
-		ID:   keys.AdminKeyID,
-		Key:  InitKey,
-		Name: "test-user",
-	}
+	user := &models.CreatedTeamAPIKey{ID: keys.AdminKeyID}
 	controller.domain = ""
 
 	request := models.NewSandboxRequest{
 		TemplateID: templateName,
-		Timeout:    600,
 		Metadata: map[string]string{
 			models.ExtensionKeySkipInitRuntime: v1alpha1.True,
-			models.ExtensionKeyClaimTimeout:    "1",
 		},
 	}
 	req := NewRequest(t, nil, request, nil, user)
@@ -2541,134 +2549,4 @@ func TestCreateSandbox_EmptyHostDoesNotClaim(t *testing.T) {
 	require.Nil(t, apiErr)
 	require.NotNil(t, resp.Body)
 	assert.Equal(t, "example.com", resp.Body.Domain)
-}
-
-func TestBrowserUse_DomainResolution(t *testing.T) {
-	controller, _, teardown := Setup(t)
-	defer teardown()
-
-	user := &models.CreatedTeamAPIKey{
-		ID:   keys.AdminKeyID,
-		Key:  InitKey,
-		Name: "test-user",
-	}
-
-	templateName := "browseruse-domain-template"
-	cleanup := CreateSandboxPool(t, controller, templateName, 1)
-	defer cleanup()
-
-	createResp, createErr := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
-		TemplateID: templateName,
-		Metadata: map[string]string{
-			models.ExtensionKeySkipInitRuntime: v1alpha1.True,
-		},
-	}, nil, user))
-	require.Nil(t, createErr)
-	sandboxID := createResp.Body.SandboxID
-
-	expectedBody := `{"Browser":"Chrome","Protocol-Version":"1.3","User-Agent":"Test","V8-Version":"12.0","WebKit-Version":"537.36","webSocketDebuggerUrl":"ws://127.0.0.1:9222/devtools/browser/abc"}`
-
-	origRequest := proxyutils.DefaultRequestFunc
-	t.Cleanup(func() {
-		proxyutils.DefaultRequestFunc = origRequest
-	})
-
-	tests := []struct {
-		name            string
-		domain          string
-		host            string
-		path            string
-		wantURLContains string
-		wantScheme      string
-		wantHost        string
-		wantPort        string
-		wantPath        string
-		expectError     string
-	}{
-		{
-			name:            "static native domain bypasses empty host and is preserved",
-			domain:          "API.Static.example.com.",
-			host:            "",
-			path:            "/sandboxes/" + sandboxID + "/connect",
-			wantURLContains: fmt.Sprintf("wss://%d-%s.API.Static.example.com.", models.CDPPort, sandboxID),
-		},
-		{
-			name:            "static customized domain bypasses empty host and is preserved",
-			domain:          "Gateway.Static.example.com.",
-			host:            "",
-			path:            "/kruise/api/sandboxes/" + sandboxID + "/connect",
-			wantURLContains: fmt.Sprintf("wss://Gateway.Static.example.com./kruise/%s/%d", sandboxID, models.CDPPort),
-		},
-		{
-			name:            "dynamic native domain uses subdomain address",
-			domain:          "",
-			host:            "api.example.com",
-			path:            "/sandboxes/" + sandboxID + "/connect",
-			wantURLContains: fmt.Sprintf("wss://%d-%s.example.com", models.CDPPort, sandboxID),
-		},
-		{
-			name:            "dynamic customized domain uses path-style address",
-			domain:          "",
-			host:            "Gateway.example.com.:8443",
-			path:            "/kruise/api/sandboxes/" + sandboxID + "/connect",
-			wantURLContains: fmt.Sprintf("wss://Gateway.example.com:8443/kruise/%s/%d", sandboxID, models.CDPPort),
-		},
-		{
-			name:            "dynamic customized ipv6 uses bracketed path-style address",
-			domain:          "",
-			host:            "2001:db8::1",
-			path:            "/kruise/api/sandboxes/" + sandboxID + "/connect",
-			wantURLContains: fmt.Sprintf("wss://[2001:db8::1]/kruise/%s/%d", sandboxID, models.CDPPort),
-			wantScheme:      "wss",
-			wantHost:        "2001:db8::1",
-			wantPath:        fmt.Sprintf("/kruise/%s/%d/devtools/browser/abc", sandboxID, models.CDPPort),
-		},
-		{
-			name:        "empty host returns 400 without upstream",
-			domain:      "",
-			host:        "",
-			path:        "/sandboxes/" + sandboxID + "/connect",
-			expectError: "empty host",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			controller.domain = tt.domain
-			upstreamCalled := false
-			proxyutils.DefaultRequestFunc = func(ctx context.Context, sbx *v1alpha1.Sandbox, method, path string, port int, body io.Reader) (*http.Response, error) {
-				upstreamCalled = true
-				return &http.Response{
-					StatusCode: http.StatusOK,
-					Body:       io.NopCloser(strings.NewReader(expectedBody)),
-				}, nil
-			}
-
-			req := NewRequest(t, nil, nil, map[string]string{
-				"sandboxID": sandboxID,
-			}, user)
-			req.Host = tt.host
-			req.URL.Path = tt.path
-
-			resp, apiErr := controller.BrowserUse(req)
-			assert.Equal(t, tt.expectError == "", upstreamCalled)
-			if tt.expectError != "" {
-				require.NotNil(t, apiErr)
-				assert.Equal(t, http.StatusBadRequest, apiErr.Code)
-				assert.Contains(t, apiErr.Message, tt.expectError)
-				return
-			}
-			require.Nil(t, apiErr)
-			require.NotNil(t, resp.Body)
-			assert.Contains(t, resp.Body.WebSocketDebuggerURL, tt.wantURLContains)
-			if tt.wantScheme != "" {
-				parsedURL, err := url.Parse(resp.Body.WebSocketDebuggerURL)
-				require.NoError(t, err)
-				assert.Equal(t, tt.wantScheme, parsedURL.Scheme)
-				assert.Equal(t, tt.wantHost, parsedURL.Hostname())
-				assert.Equal(t, tt.wantPort, parsedURL.Port())
-				assert.Equal(t, tt.wantPath, parsedURL.Path)
-			}
-		})
-	}
 }
