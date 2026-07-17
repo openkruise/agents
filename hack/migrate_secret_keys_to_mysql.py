@@ -20,6 +20,12 @@ is a base64-encoded JSON payload used by secretKeyStorage, then emits a SQL file
 1) DDL for `teams` and `team_api_keys`
 2) Upserts for all teams referenced by the API keys
 3) Upserts for all valid API keys with key_hash = HMAC-SHA256(pepper, raw_key)
+
+Usage:
+    python hack/migrate_secret_keys_to_mysql.py \
+        --namespace sandbox-system --pepper mysecret
+    E2B_KEY_HASH_PEPPER=mysecret python hack/migrate_secret_keys_to_mysql.py \
+        --namespace sandbox-system --output - | mysql e2b
 """
 
 from __future__ import annotations
@@ -83,7 +89,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output",
         default=DEFAULT_OUTPUT,
-        help=f"Output SQL path (default: {DEFAULT_OUTPUT})",
+        help=f"Output SQL path, or - for stdout (default: {DEFAULT_OUTPUT})",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Validate entries without rendering or writing SQL output",
+    )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Suppress success messages",
     )
     return parser.parse_args()
 
@@ -411,7 +427,7 @@ def render_sql(admin_team_uid: str, pepper: str, rows: list[ParsedAPIKey]) -> st
 def main() -> int:
     args = parse_args()
 
-    if not args.pepper:
+    if not args.dry_run and not args.pepper:
         print(
             "ERROR: pepper is required. Pass --pepper or set E2B_KEY_HASH_PEPPER.",
             file=sys.stderr,
@@ -431,14 +447,29 @@ def main() -> int:
         print(f"ERROR: {err}", file=sys.stderr)
         return 1
 
-    sql = render_sql(admin_team_uid=admin_team_uid, pepper=args.pepper, rows=rows)
-    with open(args.output, "w", encoding="utf-8") as fp:
-        fp.write(sql)
-        if not sql.endswith("\n"):
-            fp.write("\n")
+    if args.dry_run:
+        if not args.quiet:
+            print(f"Validated keys: {len(rows)}")
+        return 0
 
-    print(f"Wrote SQL: {args.output}")
-    print(f"Migrated keys: {len(rows)}")
+    sql = render_sql(admin_team_uid=admin_team_uid, pepper=args.pepper, rows=rows)
+    if args.output == "-":
+        sys.stdout.write(sql)
+        if not sql.endswith("\n"):
+            sys.stdout.write("\n")
+        status_stream = sys.stderr
+        output_name = "stdout"
+    else:
+        with open(args.output, "w", encoding="utf-8") as fp:
+            fp.write(sql)
+            if not sql.endswith("\n"):
+                fp.write("\n")
+        status_stream = sys.stdout
+        output_name = args.output
+
+    if not args.quiet:
+        print(f"Wrote SQL: {output_name}", file=status_stream)
+        print(f"Migrated keys: {len(rows)}", file=status_stream)
     return 0
 
 
