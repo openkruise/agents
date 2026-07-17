@@ -24,6 +24,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	_ "time/tzdata" // Embed timezone database for scratch-based container images
 
 	"github.com/spf13/pflag"
 	corev1 "k8s.io/api/core/v1"

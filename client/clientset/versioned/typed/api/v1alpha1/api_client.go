@@ -30,6 +30,7 @@ type ApiV1alpha1Interface interface {
 	CheckpointsGetter
 	CommitsGetter
 	GlobalTrafficPoliciesGetter
+	PoolAutoscalersGetter
 	SandboxesGetter
 	SandboxClaimsGetter
 	SandboxSetsGetter
@@ -54,6 +55,10 @@ func (c *ApiV1alpha1Client) Commits(namespace string) CommitInterface {
 
 func (c *ApiV1alpha1Client) GlobalTrafficPolicies() GlobalTrafficPolicyInterface {
 	return newGlobalTrafficPolicies(c)
+}
+
+func (c *ApiV1alpha1Client) PoolAutoscalers(namespace string) PoolAutoscalerInterface {
+	return newPoolAutoscalers(c, namespace)
 }
 
 func (c *ApiV1alpha1Client) Sandboxes(namespace string) SandboxInterface {
