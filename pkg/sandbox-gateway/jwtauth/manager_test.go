@@ -55,6 +55,27 @@ func (r *fakeReader) List(context.Context, client.ObjectList, ...client.ListOpti
 	return nil
 }
 
+type alternateReader struct{}
+
+func (alternateReader) Get(context.Context, client.ObjectKey, client.Object, ...client.GetOption) error {
+	return nil
+}
+
+func (alternateReader) List(context.Context, client.ObjectList, ...client.ListOption) error {
+	return nil
+}
+
+type observingContext struct {
+	context.Context
+	doneCalled chan struct{}
+	once       sync.Once
+}
+
+func (c *observingContext) Done() <-chan struct{} {
+	c.once.Do(func() { close(c.doneCalled) })
+	return c.Context.Done()
+}
+
 func testOptions(name string) oidc.Options {
 	return oidc.Options{DiscoveryURL: "https://" + name + ".example.test/.well-known/openid-configuration"}
 }
@@ -63,6 +84,35 @@ func newTestManager(options oidc.Options, loader VerifierLoader) *Manager {
 	return NewManagerWithDependencies(func() (oidc.Options, error) {
 		return options, nil
 	}, loader, time.Millisecond, 4*time.Millisecond)
+}
+
+func TestManagerConstruction(t *testing.T) {
+	tests := []struct {
+		name           string
+		construct      func() *Manager
+		expectInitial  time.Duration
+		expectMaximum  time.Duration
+		expectDefaults bool
+	}{
+		{name: "production defaults", construct: NewManager, expectInitial: defaultInitialBackoff, expectMaximum: defaultMaxBackoff, expectDefaults: true},
+		{name: "negative initial", construct: func() *Manager { return NewManagerWithDependencies(nil, nil, -time.Second, 4*time.Second) }, expectMaximum: 4 * time.Second},
+		{name: "negative maximum", construct: func() *Manager { return NewManagerWithDependencies(nil, nil, 4*time.Second, -time.Second) }},
+		{name: "maximum below initial", construct: func() *Manager { return NewManagerWithDependencies(nil, nil, 4*time.Second, time.Second) }, expectInitial: time.Second, expectMaximum: time.Second},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			manager := tt.construct()
+			assert.Equal(t, tt.expectInitial, manager.initialBackoff)
+			assert.Equal(t, tt.expectMaximum, manager.maxBackoff)
+			assert.Equal(t, AwaitingConfig, manager.State())
+			assert.NotNil(t, manager.wake)
+			if tt.expectDefaults {
+				assert.NotNil(t, manager.optionsSource)
+				assert.NotNil(t, manager.loader)
+			}
+		})
+	}
 }
 
 func startManager(t *testing.T, manager *Manager) (context.CancelFunc, <-chan error) {
@@ -132,7 +182,6 @@ func TestManagerReadiness(t *testing.T) {
 			if tt.configure {
 				require.NoError(t, manager.Configure(tt.enabled))
 			}
-
 			assert.Equal(t, tt.expectState, manager.State())
 			assert.Nil(t, manager.Current())
 			assert.False(t, manager.NeedLeaderElection())
@@ -143,6 +192,30 @@ func TestManagerReadiness(t *testing.T) {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.expectError)
 			}
+		})
+	}
+}
+
+func TestManagerConfigureNilOptionsSource(t *testing.T) {
+	tests := []struct {
+		name        string
+		enabled     bool
+		expectError string
+	}{
+		{name: "enabled requires options source", enabled: true, expectError: "options source is nil"},
+		{name: "disabled does not require options source"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			manager := NewManagerWithDependencies(nil, nil, time.Millisecond, time.Millisecond)
+			err := manager.Configure(tt.enabled)
+			if tt.expectError == "" {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.expectError)
 		})
 	}
 }
@@ -563,6 +636,64 @@ func TestManagerCancellationAndDisabledStart(t *testing.T) {
 	}
 }
 
+func TestManagerStartTerminalState(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "disabled waits for cancellation"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			manager := newTestManager(testOptions("terminal"), nil)
+			require.NoError(t, manager.Configure(false))
+			base, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			ctx := &observingContext{Context: base, doneCalled: make(chan struct{})}
+			done := make(chan error, 1)
+			go func() { done <- manager.Start(ctx) }()
+
+			select {
+			case <-ctx.doneCalled:
+			case <-time.After(testTimeout):
+				t.Fatal("manager did not wait for terminal-state cancellation")
+			}
+			cancel()
+			select {
+			case err := <-done:
+				require.NoError(t, err)
+			case <-time.After(testTimeout):
+				t.Fatal("manager did not stop")
+			}
+		})
+	}
+}
+
+func TestManagerNilLoader(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "nil loader is reported"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			manager := NewManagerWithDependencies(func() (oidc.Options, error) {
+				return testOptions("nil-loader"), nil
+			}, nil, time.Hour, time.Hour)
+			require.NoError(t, manager.Configure(true))
+			require.NoError(t, manager.SetReader(&fakeReader{name: tt.name}))
+			cancel, done := startManager(t, manager)
+			defer cancel()
+			require.Eventually(t, func() bool {
+				err := manager.Ready()
+				return err != nil && strings.Contains(err.Error(), "verifier loader is nil")
+			}, testTimeout, time.Millisecond)
+			stopManager(t, cancel, done)
+		})
+	}
+}
+
 func TestManagerStartValidation(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -590,6 +721,23 @@ func TestManagerStartValidation(t *testing.T) {
 	}
 }
 
+func TestManagerStartCanceled(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "canceled before start"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			manager := newTestManager(testOptions("canceled"), nil)
+			require.NoError(t, manager.Start(ctx))
+		})
+	}
+}
+
 func TestBackoff(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -606,6 +754,39 @@ func TestBackoff(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.expectResult, nextBackoff(tt.current, tt.maximum), fmt.Sprintf("backoff for %s", tt.name))
+		})
+	}
+}
+
+func TestReaderReflectionHelpers(t *testing.T) {
+	tests := []struct {
+		name     string
+		left     client.Reader
+		right    client.Reader
+		expected bool
+	}{
+		{name: "different concrete types", left: &fakeReader{name: "left"}, right: alternateReader{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, sameReader(tt.left, tt.right))
+		})
+	}
+}
+
+func TestNilInterfaceScalar(t *testing.T) {
+	tests := []struct {
+		name     string
+		value    any
+		expected bool
+	}{
+		{name: "integer is not nil", value: 42},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, isNilInterface(tt.value))
 		})
 	}
 }

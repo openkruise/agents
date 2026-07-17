@@ -230,6 +230,13 @@ func TestConfigParserJWT(t *testing.T) {
 			expectHeader:     DefaultTrafficAccessTokenHeader,
 		},
 		{
+			name:             "global nil value reports manager error",
+			nilValue:         true,
+			manager:          &fakeJWTAuthManager{configureErr: errors.New("conflict")},
+			expectError:      "conflict",
+			expectConfigured: []bool{false},
+		},
+		{
 			name:             "JWT enabled",
 			values:           map[string]any{"enable-auth": true, "enable-jwt-auth": true},
 			manager:          &fakeJWTAuthManager{},
@@ -243,6 +250,13 @@ func TestConfigParserJWT(t *testing.T) {
 			manager:          &fakeJWTAuthManager{},
 			expectConfigured: []bool{false},
 			expectHeader:     DefaultTrafficAccessTokenHeader,
+		},
+		{
+			name:         "JWT requires authentication",
+			values:       map[string]any{"enable-jwt-auth": true},
+			manager:      &fakeJWTAuthManager{},
+			expectError:  "requires enable-auth",
+			expectHeader: DefaultTrafficAccessTokenHeader,
 		},
 		{
 			name:        "missing manager",
@@ -419,7 +433,7 @@ func TestConfigParserParse(t *testing.T) {
 	tests := []struct {
 		name              string
 		input             *anypb.Any
-		wantErr           bool
+		expectError       string
 		wantSandboxHeader string
 		wantHostHeader    string
 		wantPortHeader    string
@@ -433,7 +447,6 @@ func TestConfigParserParse(t *testing.T) {
 				a, _ := anypb.New(ts)
 				return a
 			}(),
-			wantErr:           false,
 			wantSandboxHeader: DefaultSandboxHeaderName,
 			wantHostHeader:    DefaultHostHeaderName,
 			wantPortHeader:    DefaultSandboxPortHeader,
@@ -447,7 +460,6 @@ func TestConfigParserParse(t *testing.T) {
 				a, _ := anypb.New(ts)
 				return a
 			}(),
-			wantErr:           false,
 			wantSandboxHeader: DefaultSandboxHeaderName,
 			wantHostHeader:    DefaultHostHeaderName,
 			wantPortHeader:    DefaultSandboxPortHeader,
@@ -463,7 +475,6 @@ func TestConfigParserParse(t *testing.T) {
 				a, _ := anypb.New(ts)
 				return a
 			}(),
-			wantErr:           false,
 			wantSandboxHeader: "x-custom-sandbox",
 			wantHostHeader:    DefaultHostHeaderName,
 			wantPortHeader:    DefaultSandboxPortHeader,
@@ -482,7 +493,6 @@ func TestConfigParserParse(t *testing.T) {
 				a, _ := anypb.New(ts)
 				return a
 			}(),
-			wantErr:           false,
 			wantSandboxHeader: "x-sandbox",
 			wantHostHeader:    "X-Forwarded-Host",
 			wantPortHeader:    "x-port",
@@ -498,24 +508,28 @@ func TestConfigParserParse(t *testing.T) {
 				a, _ := anypb.New(ts)
 				return a
 			}(),
-			wantErr:           false,
 			wantSandboxHeader: DefaultSandboxHeaderName,
 			wantHostHeader:    DefaultHostHeaderName,
 			wantPortHeader:    DefaultSandboxPortHeader,
 			wantDefaultPort:   DefaultSandboxPort,
 			wantEnableAuth:    true,
 		},
+		{
+			name:        "invalid field type",
+			input:       typedFilterConfig(t, map[string]any{"default-port": true}),
+			expectError: "failed to parse config",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result, err := parser.Parse(tt.input, nil)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("Parse() error = %v, wantErr %v", err, tt.wantErr)
-			}
-			if tt.wantErr {
+			if tt.expectError != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
 				return
 			}
+			require.NoError(t, err)
 			fc, ok := result.(*FilterConfig)
 			if !ok {
 				t.Fatalf("Parse() returned %T, want *FilterConfig", result)

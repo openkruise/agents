@@ -163,10 +163,6 @@ func (m *Manager) validateRepeatedConfiguration(enabled bool) error {
 	if !enabled {
 		return nil
 	}
-	if m.optionsSource == nil {
-		return errors.New("reconfigure JWT authentication: options source is nil")
-	}
-
 	options, err := m.optionsSource()
 	if err != nil {
 		return fmt.Errorf("reconfigure JWT authentication: %w", err)
@@ -264,12 +260,7 @@ func (m *Manager) loadUntilReady(ctx context.Context, reader client.Reader, opti
 		timer := time.NewTimer(backoff)
 		select {
 		case <-ctx.Done():
-			if !timer.Stop() {
-				select {
-				case <-timer.C:
-				default:
-				}
-			}
+			timer.Stop()
 			return nil
 		case <-timer.C:
 		}

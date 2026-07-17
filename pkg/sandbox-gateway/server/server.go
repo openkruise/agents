@@ -92,10 +92,7 @@ func NewServer(client client.Client, port int, readinessChecks ...ReadinessCheck
 
 // Start starts the HTTP server for handling refresh requests from peers
 func (s *Server) Start(ctx context.Context) error {
-	mux := http.NewServeMux()
-	mux.HandleFunc(proxy.RefreshAPI, s.handleRefresh)
-	mux.HandleFunc(HealthAPI, s.handleHealth)
-	mux.HandleFunc(ReadyAPI, s.handleReady)
+	mux := s.newServeMux()
 
 	s.httpServer = &http.Server{
 		Addr:              fmt.Sprintf(":%d", normalizePort(s.port, proxy.SystemPort)),
@@ -139,6 +136,14 @@ func (s *Server) Start(ctx context.Context) error {
 	}()
 
 	return nil
+}
+
+func (s *Server) newServeMux() *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc(proxy.RefreshAPI, s.handleRefresh)
+	mux.HandleFunc(HealthAPI, s.handleHealth)
+	mux.HandleFunc(ReadyAPI, s.handleReady)
+	return mux
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
