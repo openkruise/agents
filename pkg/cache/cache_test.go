@@ -263,7 +263,7 @@ func TestClaimedSandboxIndexUsesOneResolvedKey(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var extract func(ctrlclient.Object) []string
-			for _, index := range cache.GetIndexFuncsWithOptions(tt.options) {
+			for _, index := range cache.GetIndexFuncs(tt.options) {
 				if index.FieldName == cache.IndexClaimedSandboxID {
 					extract = index.Extract
 					break
@@ -1412,17 +1412,17 @@ func TestRegression_SameActionConcurrentWaitsConverge(t *testing.T) {
 func TestCache_GetSandboxController(t *testing.T) {
 	c, _, err := cachetest.NewTestCache(t)
 	require.NoError(t, err)
-	// Controllers are initialized by SetupCacheControllersWithManager in NewCache
+	// Controllers are initialized by SetupCacheControllersWithManager in NewCacheWithOptions
 	sbxCtrl := c.GetSandboxController()
-	assert.NotNil(t, sbxCtrl, "sandbox controller should be initialized in NewCache")
+	assert.NotNil(t, sbxCtrl, "sandbox controller should be initialized in NewCacheWithOptions")
 }
 
 func TestCache_GetSandboxSetController(t *testing.T) {
 	c, _, err := cachetest.NewTestCache(t)
 	require.NoError(t, err)
-	// Controllers are initialized by SetupCacheControllersWithManager in NewCache
+	// Controllers are initialized by SetupCacheControllersWithManager in NewCacheWithOptions
 	sbsCtrl := c.GetSandboxSetController()
-	assert.NotNil(t, sbsCtrl, "sandboxset controller should be initialized in NewCache")
+	assert.NotNil(t, sbsCtrl, "sandboxset controller should be initialized in NewCacheWithOptions")
 }
 
 // --- BuildCacheConfig tests ---

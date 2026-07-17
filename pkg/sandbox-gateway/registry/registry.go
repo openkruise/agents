@@ -22,8 +22,8 @@ import (
 
 	"k8s.io/apimachinery/pkg/types"
 
+	"github.com/openkruise/agents/pkg/metrics"
 	"github.com/openkruise/agents/pkg/proxy"
-	"github.com/openkruise/agents/pkg/sandboxidmetrics"
 	"github.com/openkruise/agents/pkg/sandboxroute"
 )
 
@@ -55,7 +55,7 @@ func newGatewayStore() (*sandboxroute.Store, error) {
 	return sandboxroute.NewStoreWithOptions(
 		sandboxroute.SurfaceGateway,
 		sandboxroute.StoreOptions{CollisionRecorder: func() {
-			sandboxidmetrics.RecordCollision("gateway_route")
+			metrics.RecordSandboxIDCollision(metrics.CollisionSurfaceGatewayRoute)
 		}},
 	)
 }

@@ -27,6 +27,7 @@ import (
 	"golang.org/x/sync/singleflight"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -42,8 +43,8 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/cache/controllers"
+	"github.com/openkruise/agents/pkg/metrics"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
-	"github.com/openkruise/agents/pkg/sandboxidmetrics"
 )
 
 // watchErrorSettle is how long sandbox informer health stays conservative after
@@ -234,28 +235,28 @@ func newControllerManager(cfg *rest.Config, opts config.SandboxManagerOptions, h
 	return mgr, nil
 }
 
-// NewCache creates a new Cache instance from a pre-configured controller manager.
-// The metadata must have been returned by NewControllerManager.
-func NewCache(mgr ctrl.Manager) (*Cache, error) {
-	return NewCacheWithHealth(mgr, nil)
+// SandboxIDResolver returns the single claimed-Sandbox index key for an object.
+type SandboxIDResolver func(metav1.Object) string
+
+// Options configures optional cache behavior while preserving legacy defaults.
+type Options struct {
+	// Health is the informer health gate shared with the controller-runtime
+	// manager. Nil disables SandboxInformerHealthy gating.
+	Health *InformerHealth
+
+	SandboxIDResolver SandboxIDResolver
 }
 
-// NewCacheWithHealth creates a cache backed by the given manager and informer
-// health gate.
-func NewCacheWithHealth(mgr ctrl.Manager, health *InformerHealth) (*Cache, error) {
-	return NewCacheWithOptions(mgr, health, Options{})
-}
-
-// NewCacheWithOptions creates a cache backed by the given manager, informer
-// health gate, and optional behavior overrides.
-func NewCacheWithOptions(mgr ctrl.Manager, health *InformerHealth, options Options) (*Cache, error) {
+// NewCacheWithOptions creates a cache backed by the given manager and optional
+// behavior overrides (including the informer health gate).
+func NewCacheWithOptions(mgr ctrl.Manager, options Options) (*Cache, error) {
 	waitHooks := &sync.Map{}
 	handlers, err := controllers.SetupCacheControllersWithManager(mgr, waitHooks)
 	if err != nil {
 		return nil, fmt.Errorf("failed to setup cache controllers: %w", err)
 	}
 	// Register field indexes
-	if err := AddIndexesToCacheWithOptions(mgr.GetCache(), options); err != nil {
+	if err := AddIndexesToCache(mgr.GetCache(), options); err != nil {
 		return nil, fmt.Errorf("failed to add indexes to cache: %w", err)
 	}
 
@@ -265,7 +266,7 @@ func NewCacheWithOptions(mgr ctrl.Manager, health *InformerHealth, options Optio
 		mgr:         mgr,
 		waitHooks:   waitHooks,
 		controllers: handlers,
-		health:      health,
+		health:      options.Health,
 	}, nil
 }
 
@@ -312,7 +313,7 @@ func (c *Cache) GetClaimedSandbox(ctx context.Context, opts GetClaimedSandboxOpt
 			return nil, fmt.Errorf("%w: sandbox %s not found in cache", ErrSandboxNotFound, opts.SandboxID)
 		}
 		if len(list.Items) > 1 {
-			sandboxidmetrics.RecordCollision("cache")
+			metrics.RecordSandboxIDCollision(metrics.CollisionSurfaceCache)
 			objectKeys := make([]ctrlclient.ObjectKey, 0, len(list.Items))
 			for index := range list.Items {
 				objectKeys = append(objectKeys, ctrlclient.ObjectKeyFromObject(&list.Items[index]))

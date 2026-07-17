@@ -44,7 +44,7 @@ func (s *Server) SetRoute(ctx context.Context, route Route) sandboxroute.Mutatio
 	shape, err := validateRouteShape(route)
 	if err != nil {
 		log.Error(err, "rejected invalid route mutation")
-		return s.store.RecordInvalid(sandboxroute.OperationUpsert, route)
+		return s.store.RecordInvalid()
 	}
 	var result sandboxroute.MutationResult
 	if shape == sandboxroute.ShapeFull {

@@ -173,11 +173,6 @@ func (s *Sandbox) applyPostModifier(ctx context.Context, modifier func(metav1.Ob
 	if modifier == nil {
 		return nil
 	}
-	startedAt := time.Now()
-	defer func() {
-		observePostModifierDuration(time.Since(startedAt))
-	}()
-
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(s.Sandbox))
 	objectKey := client.ObjectKeyFromObject(s.Sandbox)
 	var lastConflict error
@@ -188,7 +183,6 @@ func (s *Sandbox) applyPostModifier(ctx context.Context, modifier func(metav1.Ob
 
 		latest := &agentsv1alpha1.Sandbox{}
 		getErr := s.Cache.GetAPIReader().Get(ctx, objectKey, latest)
-		recordPostModifierGet(getErr)
 		if getErr != nil {
 			return false, getErr
 		}
@@ -213,11 +207,9 @@ func (s *Sandbox) applyPostModifier(ctx context.Context, modifier func(metav1.Ob
 		}
 
 		updateErr := s.Cache.GetClient().Update(ctx, copied)
-		recordPostModifierUpdate(updateErr)
 		if updateErr != nil {
 			if apierrors.IsConflict(updateErr) {
 				lastConflict = updateErr
-				recordPostModifierConflictRetry()
 				return false, nil
 			}
 			return false, updateErr

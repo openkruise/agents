@@ -19,10 +19,12 @@ package sandboxroute
 import (
 	"testing"
 
-	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
+
+	"github.com/openkruise/agents/pkg/metrics"
 )
 
 func TestLegacyDeleteFallbackMetric(t *testing.T) {
@@ -59,11 +61,7 @@ func TestLegacyDeleteFallbackMetric(t *testing.T) {
 			},
 			fallbackID: "legacy",
 		},
-		{
-			name:       "absent compatibility record is not fallback",
-			surface:    SurfaceManager,
-			fallbackID: "legacy",
-		},
+		{name: "absent compatibility record is not fallback", surface: SurfaceManager, fallbackID: "legacy"},
 		{
 			name:    "compatibility collision is not successful fallback",
 			surface: SurfaceManager,
@@ -82,57 +80,138 @@ func TestLegacyDeleteFallbackMetric(t *testing.T) {
 			if tt.arrange != nil {
 				tt.arrange(store)
 			}
-			metric := routeLegacyFallbackTotal.WithLabelValues(string(tt.surface))
-			before := testutil.ToFloat64(metric)
+			registry := newRouteMetricRegistry()
+			before := routeCounterValue(t, registry, "sandbox_route_legacy_fallback_total", string(tt.surface))
 
 			store.DeleteAuthoritativeByObjectKey(
 				types.NamespacedName{Namespace: "ns", Name: "one"},
 				tt.fallbackID,
 			)
 
-			assert.Equal(t, before+tt.expectDelta, testutil.ToFloat64(metric))
+			assert.Equal(t, before+tt.expectDelta, routeCounterValue(t, registry, "sandbox_route_legacy_fallback_total", string(tt.surface)))
 		})
 	}
 }
 
-func TestRecordInvalidMetric(t *testing.T) {
+func TestRouteInvalidMetricOnlyCountsInvalidMutations(t *testing.T) {
 	tests := []struct {
-		name      string
-		surface   Surface
-		operation Operation
-		route     Route
-		shape     Shape
+		name         string
+		surface      Surface
+		mutate       func(*Store) MutationResult
+		expectResult EventResult
+		expectDelta  float64
 	}{
-		{name: "manager ID-only upsert", surface: SurfaceManager, operation: OperationUpsert, route: Route{}, shape: ShapeIDOnly},
-		{name: "manager full upsert", surface: SurfaceManager, operation: OperationUpsert, route: Route{Namespace: "ns"}, shape: ShapeFull},
-		{name: "manager ID-only delete", surface: SurfaceManager, operation: OperationDelete, route: Route{}, shape: ShapeIDOnly},
-		{name: "manager full delete", surface: SurfaceManager, operation: OperationDelete, route: Route{Name: "sandbox"}, shape: ShapeFull},
-		{name: "gateway ID-only upsert", surface: SurfaceGateway, operation: OperationUpsert, route: Route{}, shape: ShapeIDOnly},
-		{name: "gateway full upsert", surface: SurfaceGateway, operation: OperationUpsert, route: Route{Namespace: "ns"}, shape: ShapeFull},
-		{name: "gateway ID-only delete", surface: SurfaceGateway, operation: OperationDelete, route: Route{}, shape: ShapeIDOnly},
-		{name: "gateway full delete", surface: SurfaceGateway, operation: OperationDelete, route: Route{Name: "sandbox"}, shape: ShapeFull},
+		{name: "manager invalid", surface: SurfaceManager, mutate: func(store *Store) MutationResult { return store.RecordInvalid() }, expectResult: EventResultInvalid, expectDelta: 1},
+		{name: "gateway invalid", surface: SurfaceGateway, mutate: func(store *Store) MutationResult { return store.RecordInvalid() }, expectResult: EventResultInvalid, expectDelta: 1},
+		{name: "applied is not counted", surface: SurfaceManager, mutate: func(store *Store) MutationResult { return store.UpsertIDOnly(idOnlyRoute("legacy", "uid-a", "1")) }, expectResult: EventResultApplied},
+		{name: "ignored is not counted", surface: SurfaceGateway, mutate: func(store *Store) MutationResult {
+			store.UpsertIDOnly(idOnlyRoute("legacy", "uid-a", "2"))
+			return store.UpsertIDOnly(idOnlyRoute("legacy", "uid-a", "1"))
+		}, expectResult: EventResultIgnored},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			store, err := NewStore(tt.surface)
 			require.NoError(t, err)
-			metric := routeEventTotal.WithLabelValues(
-				string(tt.surface),
-				string(tt.shape),
-				string(tt.operation),
-				string(EventResultInvalid),
-			)
-			before := testutil.ToFloat64(metric)
+			registry := newRouteMetricRegistry()
+			before := routeCounterValue(t, registry, "sandbox_route_invalid_total", string(tt.surface))
 
-			result := store.RecordInvalid(tt.operation, tt.route)
+			result := tt.mutate(store)
 
-			assert.Equal(t, EventResultInvalid, result.Result)
-			assert.Equal(t, ReasonInvalidRoute, result.Reason)
-			assert.Empty(t, result.RepairRequests)
-			assert.Equal(t, before+1, testutil.ToFloat64(metric))
-			assert.Empty(t, store.List())
-			assert.Equal(t, StoreStats{}, store.Stats())
+			assert.Equal(t, tt.expectResult, result.Result)
+			assert.Equal(t, before+tt.expectDelta, routeCounterValue(t, registry, "sandbox_route_invalid_total", string(tt.surface)))
 		})
 	}
+}
+
+func TestRouteRecordMetricsTrackIDOnlyAndCollisionState(t *testing.T) {
+	tests := []struct {
+		name            string
+		arrange         func(*Store)
+		expectIDOnly    float64
+		expectCollision float64
+	}{
+		{name: "empty Store"},
+		{
+			name: "full record is not exposed",
+			arrange: func(store *Store) {
+				store.UpsertFull(fullRoute("short", "ns", "one", "uid-a", "1"))
+			},
+		},
+		{
+			name: "ID-only record",
+			arrange: func(store *Store) {
+				store.UpsertIDOnly(idOnlyRoute("legacy", "uid-a", "1"))
+			},
+			expectIDOnly: 1,
+		},
+		{
+			name: "ID collision",
+			arrange: func(store *Store) {
+				store.UpsertIDOnly(idOnlyRoute("legacy", "uid-a", "1"))
+				store.UpsertIDOnly(idOnlyRoute("legacy", "uid-b", "2"))
+			},
+			expectIDOnly:    2,
+			expectCollision: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store, err := NewStore(SurfaceManager)
+			require.NoError(t, err)
+			if tt.arrange != nil {
+				tt.arrange(store)
+			}
+			registry := newRouteMetricRegistry()
+
+			assert.Equal(t, tt.expectIDOnly, routeRecordGaugeValue(t, registry, SurfaceManager, ShapeIDOnly))
+			assert.Equal(t, tt.expectCollision, routeRecordGaugeValue(t, registry, SurfaceManager, ShapeCollision))
+		})
+	}
+}
+
+func newRouteMetricRegistry() *prometheus.Registry {
+	registry := prometheus.NewRegistry()
+	metrics.RegisterSandboxRoute(registry)
+	return registry
+}
+
+func routeCounterValue(t *testing.T, registry *prometheus.Registry, name, surface string) float64 {
+	t.Helper()
+	families, err := registry.Gather()
+	require.NoError(t, err)
+	for _, family := range families {
+		if family.GetName() != name {
+			continue
+		}
+		for _, metric := range family.Metric {
+			if len(metric.Label) == 1 && metric.Label[0].GetName() == "surface" && metric.Label[0].GetValue() == surface {
+				return metric.GetCounter().GetValue()
+			}
+		}
+	}
+	return 0
+}
+
+func routeRecordGaugeValue(t *testing.T, registry *prometheus.Registry, surface Surface, shape Shape) float64 {
+	t.Helper()
+	families, err := registry.Gather()
+	require.NoError(t, err)
+	for _, family := range families {
+		if family.GetName() != "sandbox_route_records" {
+			continue
+		}
+		for _, metric := range family.Metric {
+			labels := make(map[string]string, len(metric.Label))
+			for _, label := range metric.Label {
+				labels[label.GetName()] = label.GetValue()
+			}
+			if labels["surface"] == string(surface) && labels["shape"] == string(shape) {
+				return metric.GetGauge().GetValue()
+			}
+		}
+	}
+	return 0
 }

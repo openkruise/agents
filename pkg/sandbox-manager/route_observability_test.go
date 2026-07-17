@@ -19,12 +19,13 @@ package sandbox_manager
 import (
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
+	"github.com/openkruise/agents/pkg/metrics"
 	"github.com/openkruise/agents/pkg/sandbox-manager/sandboxid"
 	"github.com/openkruise/agents/pkg/sandboxroute"
 )
@@ -58,9 +59,37 @@ func TestManagerRouteProjectorObservability(t *testing.T) {
 	}
 }
 
+func TestResolveSandboxIDRecordsOnlyLegacyResolution(t *testing.T) {
+	tests := []struct {
+		name        string
+		labels      map[string]string
+		expectID    string
+		expectDelta float64
+	}{
+		{name: "legacy resolution", expectID: "team-a--sandbox-a", expectDelta: 1},
+		{name: "short resolution", labels: map[string]string{sandboxid.LabelKey: "short-id"}, expectID: "short-id"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			registry := prometheus.NewRegistry()
+			metrics.RegisterSandboxID(registry)
+			before := sandboxIDMetricCounterValue(t, registry, "sandbox_id_legacy_resolution_total", "surface", metrics.LegacyResolutionSurfaceE2B)
+			object := &metav1.PartialObjectMetadata{ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "sandbox-a", Labels: tt.labels}}
+
+			id := (&SandboxManager{}).ResolveSandboxID(object)
+
+			assert.Equal(t, tt.expectID, id)
+			assert.Equal(t, before+tt.expectDelta, sandboxIDMetricCounterValue(t, registry, "sandbox_id_legacy_resolution_total", "surface", metrics.LegacyResolutionSurfaceE2B))
+		})
+	}
+}
+
 func registeredCounterValue(t *testing.T, name string, expectedLabels map[string]string) float64 {
 	t.Helper()
-	families, err := metrics.Registry.Gather()
+	registry := prometheus.NewRegistry()
+	metrics.RegisterSandboxRoute(registry)
+	families, err := registry.Gather()
 	require.NoError(t, err)
 	for _, family := range families {
 		if family.GetName() != name {

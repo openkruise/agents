@@ -16,7 +16,11 @@ limitations under the License.
 
 package sandboxroute
 
-import "k8s.io/apimachinery/pkg/types"
+import (
+	"k8s.io/apimachinery/pkg/types"
+
+	"github.com/openkruise/agents/pkg/metrics"
+)
 
 // DeleteAuthoritativeByObjectKey removes the current local ObjectKey incarnation.
 // When no full record exists, legacyFallbackID may identify compatibility records only.
@@ -25,33 +29,32 @@ func (s *Store) DeleteAuthoritativeByObjectKey(
 	legacyFallbackID string,
 ) MutationResult {
 	if key.Namespace == "" || key.Name == "" {
-		return s.recordWithoutMutation(OperationDelete, ShapeFull, EventResultInvalid, ReasonInvalidObjectKey)
+		return s.recordWithoutMutation(EventResultInvalid, ReasonInvalidObjectKey)
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if current, exists := s.fullByObject[key]; exists {
-		return s.deleteFullLocked(OperationDelete, key, current, current.route.ResourceVersion)
+		return s.deleteFullLocked(key, current, current.route.ResourceVersion)
 	}
 	if legacyFallbackID == "" {
-		return s.finishLocked(OperationDelete, ShapeFull, EventResultIgnored, ReasonAbsent, nil)
+		return s.finishLocked(EventResultIgnored, ReasonAbsent, nil)
 	}
 
 	participants := s.compatibilityClaimsLocked(legacyFallbackID, "")
 	switch len(participants) {
 	case 0:
-		return s.finishLocked(OperationDelete, ShapeIDOnly, EventResultIgnored, ReasonAbsent, nil)
+		return s.finishLocked(EventResultIgnored, ReasonAbsent, nil)
 	case 1:
-		recordLegacyDeleteFallback(s.surface)
+		metrics.RecordSandboxRouteLegacyFallback(string(s.surface))
 		return s.deleteCompatibilityForObjectLocked(
-			OperationDelete,
 			key,
 			participants[0],
 			participants[0].route.ResourceVersion,
 		)
 	default:
-		return s.finishLocked(OperationDelete, ShapeIDOnly, EventResultCollision, ReasonIDCollision, nil)
+		return s.finishLocked(EventResultCollision, ReasonIDCollision, nil)
 	}
 }
 
@@ -60,7 +63,7 @@ func (s *Store) DeleteAuthoritativeByObjectKey(
 // participant when no full ObjectKey record exists.
 func (s *Store) DeleteFullConditionally(route Route) MutationResult {
 	if !hasExpectedShape(route, ShapeFull) {
-		return s.recordWithoutMutation(OperationDelete, ShapeFull, EventResultInvalid, ReasonInvalidRoute)
+		return s.recordWithoutMutation(EventResultInvalid, ReasonInvalidRoute)
 	}
 
 	s.mu.Lock()
@@ -69,35 +72,35 @@ func (s *Store) DeleteFullConditionally(route Route) MutationResult {
 	key, _ := route.ObjectKey()
 	if current, exists := s.fullByObject[key]; exists {
 		if current.route.ID != route.ID || current.route.UID != route.UID {
-			return s.finishLocked(OperationDelete, ShapeFull, EventResultIgnored, ReasonIdentityMismatch, nil)
+			return s.finishLocked(EventResultIgnored, ReasonIdentityMismatch, nil)
 		}
 		if !equalOrNewer(current.route.ResourceVersion, route.ResourceVersion) {
-			return s.finishLocked(OperationDelete, ShapeFull, EventResultIgnored, ReasonStaleResourceVersion, nil)
+			return s.finishLocked(EventResultIgnored, ReasonStaleResourceVersion, nil)
 		}
-		return s.deleteFullLocked(OperationDelete, key, current, route.ResourceVersion)
+		return s.deleteFullLocked(key, current, route.ResourceVersion)
 	}
 
 	if compatibility, exists := s.compatByUID[route.UID]; exists {
 		if compatibility.route.ID != route.ID {
-			return s.finishLocked(OperationDelete, ShapeIDOnly, EventResultIgnored, ReasonIdentityMismatch, nil)
+			return s.finishLocked(EventResultIgnored, ReasonIdentityMismatch, nil)
 		}
 		if !equalOrNewer(compatibility.route.ResourceVersion, route.ResourceVersion) {
-			return s.finishLocked(OperationDelete, ShapeIDOnly, EventResultIgnored, ReasonStaleResourceVersion, nil)
+			return s.finishLocked(EventResultIgnored, ReasonStaleResourceVersion, nil)
 		}
-		return s.deleteCompatibilityForObjectLocked(OperationDelete, key, compatibility, route.ResourceVersion)
+		return s.deleteCompatibilityForObjectLocked(key, compatibility, route.ResourceVersion)
 	}
 	if s.uidHasFullOwnerLocked(route.UID) ||
 		s.idHasFullOwnerLocked(route.ID) || s.idHasCompatibilityOwnerLocked(route.ID) {
-		return s.finishLocked(OperationDelete, ShapeFull, EventResultIgnored, ReasonIdentityMismatch, nil)
+		return s.finishLocked(EventResultIgnored, ReasonIdentityMismatch, nil)
 	}
-	return s.finishLocked(OperationDelete, ShapeFull, EventResultIgnored, ReasonAbsent, nil)
+	return s.finishLocked(EventResultIgnored, ReasonAbsent, nil)
 }
 
 // DeleteIDOnlyConditionally removes only an exact compatibility identity when
 // its delete resource version is equal or newer and comparable.
 func (s *Store) DeleteIDOnlyConditionally(route Route) MutationResult {
 	if !hasExpectedShape(route, ShapeIDOnly) {
-		return s.recordWithoutMutation(OperationDelete, ShapeIDOnly, EventResultInvalid, ReasonInvalidRoute)
+		return s.recordWithoutMutation(EventResultInvalid, ReasonInvalidRoute)
 	}
 
 	s.mu.Lock()
@@ -106,18 +109,18 @@ func (s *Store) DeleteIDOnlyConditionally(route Route) MutationResult {
 	current, exists := s.compatByUID[route.UID]
 	if !exists {
 		if s.uidHasFullOwnerLocked(route.UID) || s.idHasFullOwnerLocked(route.ID) {
-			return s.finishLocked(OperationDelete, ShapeIDOnly, EventResultIgnored, ReasonDominatedByFull, nil)
+			return s.finishLocked(EventResultIgnored, ReasonDominatedByFull, nil)
 		}
 		if s.idHasCompatibilityOwnerLocked(route.ID) {
-			return s.finishLocked(OperationDelete, ShapeIDOnly, EventResultIgnored, ReasonIdentityMismatch, nil)
+			return s.finishLocked(EventResultIgnored, ReasonIdentityMismatch, nil)
 		}
-		return s.finishLocked(OperationDelete, ShapeIDOnly, EventResultIgnored, ReasonAbsent, nil)
+		return s.finishLocked(EventResultIgnored, ReasonAbsent, nil)
 	}
 	if current.route.ID != route.ID {
-		return s.finishLocked(OperationDelete, ShapeIDOnly, EventResultIgnored, ReasonIdentityMismatch, nil)
+		return s.finishLocked(EventResultIgnored, ReasonIdentityMismatch, nil)
 	}
 	if !equalOrNewer(current.route.ResourceVersion, route.ResourceVersion) {
-		return s.finishLocked(OperationDelete, ShapeIDOnly, EventResultIgnored, ReasonStaleResourceVersion, nil)
+		return s.finishLocked(EventResultIgnored, ReasonStaleResourceVersion, nil)
 	}
 
 	delete(s.compatByUID, route.UID)
@@ -129,11 +132,10 @@ func (s *Store) DeleteIDOnlyConditionally(route Route) MutationResult {
 		createdAt: s.now(),
 	}
 	s.recomputeActiveViewLocked()
-	return s.finishLocked(OperationDelete, ShapeIDOnly, EventResultApplied, ReasonNone, nil)
+	return s.finishLocked(EventResultApplied, ReasonNone, nil)
 }
 
 func (s *Store) deleteFullLocked(
-	operation Operation,
 	key types.NamespacedName,
 	current routeRecord,
 	fenceResourceVersion string,
@@ -144,11 +146,10 @@ func (s *Store) deleteFullLocked(
 	s.installDeletionFencesLocked(key, current.route, fenceResourceVersion, generation, false)
 	requests := s.refreshQuarantinedUIDClaimsLocked(current.route.UID)
 	s.recomputeActiveViewLocked()
-	return s.finishLocked(operation, ShapeFull, EventResultApplied, ReasonNone, requests)
+	return s.finishLocked(EventResultApplied, ReasonNone, requests)
 }
 
 func (s *Store) deleteCompatibilityForObjectLocked(
-	operation Operation,
 	key types.NamespacedName,
 	current routeRecord,
 	fenceResourceVersion string,
@@ -157,7 +158,7 @@ func (s *Store) deleteCompatibilityForObjectLocked(
 	generation := s.nextGenerationLocked()
 	s.installDeletionFencesLocked(key, current.route, fenceResourceVersion, generation, false)
 	s.recomputeActiveViewLocked()
-	return s.finishLocked(operation, ShapeIDOnly, EventResultApplied, ReasonNone, nil)
+	return s.finishLocked(EventResultApplied, ReasonNone, nil)
 }
 
 func (s *Store) installDeletionFencesLocked(

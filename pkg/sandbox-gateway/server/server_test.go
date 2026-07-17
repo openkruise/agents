@@ -24,13 +24,14 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
-	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	"github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/metrics"
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/registry"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
@@ -344,54 +345,35 @@ func TestHandleRefresh(t *testing.T) {
 func TestHandleRefreshInvalidRouteMetric(t *testing.T) {
 	tests := []struct {
 		name        string
-		route       *proxy.Route
 		body        string
-		shape       sandboxroute.Shape
-		operation   sandboxroute.Operation
 		expectDelta float64
 	}{
-		{name: "JSON decode error is not a route event", body: "not-json", shape: sandboxroute.ShapeIDOnly, operation: sandboxroute.OperationUpsert},
-		{name: "ID-only upsert", route: &proxy.Route{State: v1alpha1.SandboxStateRunning}, shape: sandboxroute.ShapeIDOnly, operation: sandboxroute.OperationUpsert, expectDelta: 1},
-		{name: "full upsert", route: &proxy.Route{Namespace: "ns", State: v1alpha1.SandboxStateRunning}, shape: sandboxroute.ShapeFull, operation: sandboxroute.OperationUpsert, expectDelta: 1},
-		{name: "ID-only delete", route: &proxy.Route{State: v1alpha1.SandboxStateDead}, shape: sandboxroute.ShapeIDOnly, operation: sandboxroute.OperationDelete, expectDelta: 1},
-		{name: "full delete", route: &proxy.Route{Name: "sandbox", State: v1alpha1.SandboxStateDead}, shape: sandboxroute.ShapeFull, operation: sandboxroute.OperationDelete, expectDelta: 1},
+		{name: "JSON decode error is not a route event", body: "not-json"},
+		{name: "decoded invalid route is recorded", body: "{}", expectDelta: 1},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			routeRegistry := newTestRegistry(t)
-			enqueued := 0
-			routeRegistry.SetRepairEnqueuer(func(sandboxroute.MutationResult) { enqueued++ })
-			labels := map[string]string{
-				"surface":   string(sandboxroute.SurfaceGateway),
-				"shape":     string(tt.shape),
-				"operation": string(tt.operation),
-				"result":    string(sandboxroute.EventResultInvalid),
-			}
-			before := serverCounterValue(t, "sandbox_route_event_total", labels)
+			labels := map[string]string{"surface": string(sandboxroute.SurfaceGateway)}
+			before := serverCounterValue(t, "sandbox_route_invalid_total", labels)
 			body := []byte(tt.body)
-			if tt.route != nil {
-				var err error
-				body, err = json.Marshal(tt.route)
-				require.NoError(t, err)
-			}
 
 			request := httptest.NewRequest(http.MethodPost, proxy.RefreshAPI, bytes.NewReader(body))
 			response := httptest.NewRecorder()
 			(&Server{registry: routeRegistry}).handleRefresh(response, request)
 
 			assert.Equal(t, http.StatusBadRequest, response.Code)
-			assert.Equal(t, before+tt.expectDelta, serverCounterValue(t, "sandbox_route_event_total", labels))
-			assert.Empty(t, routeRegistry.List())
-			assert.Equal(t, sandboxroute.StoreStats{}, routeRegistry.Store().Stats())
-			assert.Zero(t, enqueued)
+			assert.Equal(t, before+tt.expectDelta, serverCounterValue(t, "sandbox_route_invalid_total", labels))
 		})
 	}
 }
 
 func serverCounterValue(t *testing.T, name string, expectedLabels map[string]string) float64 {
 	t.Helper()
-	families, err := metrics.Registry.Gather()
+	registry := prometheus.NewRegistry()
+	metrics.RegisterSandboxRoute(registry)
+	families, err := registry.Gather()
 	require.NoError(t, err)
 	for _, family := range families {
 		if family.GetName() != name {

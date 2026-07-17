@@ -40,7 +40,6 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
-	"github.com/openkruise/agents/pkg/sandboxidmetrics"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/csiutils"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
@@ -258,7 +257,6 @@ func (c *commonControl) claimSandboxes(ctx context.Context, claim *agentsv1alpha
 // buildClaimOptions constructs ClaimSandboxOptions for TryClaimSandbox
 func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1alpha1.SandboxClaim, sandboxSet *agentsv1alpha1.SandboxSet) (infra.ClaimSandboxOptions, error) {
 	if _, exists := claim.Spec.Labels[agentsv1alpha1.LabelSandboxID]; exists {
-		sandboxidmetrics.RecordReservedMutationRejected("sandboxclaim")
 		return infra.ClaimSandboxOptions{}, fmt.Errorf("label %q is reserved and cannot be set by SandboxClaim", agentsv1alpha1.LabelSandboxID)
 	}
 	logger := logf.FromContext(ctx).WithValues("SandboxClaim", klog.KObj(claim))

@@ -74,7 +74,7 @@ func newHealthCacheForTest(t *testing.T) (*Cache, *InformerHealth) {
 	require.NoError(t, err)
 
 	health := NewInformerHealth()
-	c, err := NewCacheWithHealth(mgrBuilder.Build(), health)
+	c, err := NewCacheWithOptions(mgrBuilder.Build(), Options{Health: health})
 	require.NoError(t, err)
 	return c, health
 }

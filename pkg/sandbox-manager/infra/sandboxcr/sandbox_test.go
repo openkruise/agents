@@ -28,8 +28,6 @@ import (
 	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
-	"github.com/prometheus/client_golang/prometheus/testutil"
-	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -59,43 +57,6 @@ import (
 	"github.com/openkruise/agents/pkg/utils/timeout"
 	testutils "github.com/openkruise/agents/test/utils"
 )
-
-type postModifierMetricSnapshot struct {
-	getSuccess     float64
-	getError       float64
-	updateSuccess  float64
-	updateError    float64
-	updateConflict float64
-	conflictRetry  float64
-	durationCount  float64
-}
-
-func capturePostModifierMetrics(t *testing.T) postModifierMetricSnapshot {
-	t.Helper()
-	metric := &dto.Metric{}
-	require.NoError(t, postModifierDuration.Write(metric))
-	return postModifierMetricSnapshot{
-		getSuccess:     testutil.ToFloat64(postModifierGetTotal.WithLabelValues(postModifierResultSuccess)),
-		getError:       testutil.ToFloat64(postModifierGetTotal.WithLabelValues(postModifierResultError)),
-		updateSuccess:  testutil.ToFloat64(postModifierUpdateTotal.WithLabelValues(postModifierResultSuccess)),
-		updateError:    testutil.ToFloat64(postModifierUpdateTotal.WithLabelValues(postModifierResultError)),
-		updateConflict: testutil.ToFloat64(postModifierUpdateTotal.WithLabelValues(postModifierResultConflict)),
-		conflictRetry:  testutil.ToFloat64(postModifierConflictRetriesTotal),
-		durationCount:  float64(metric.GetHistogram().GetSampleCount()),
-	}
-}
-
-func (s postModifierMetricSnapshot) subtract(previous postModifierMetricSnapshot) postModifierMetricSnapshot {
-	return postModifierMetricSnapshot{
-		getSuccess:     s.getSuccess - previous.getSuccess,
-		getError:       s.getError - previous.getError,
-		updateSuccess:  s.updateSuccess - previous.updateSuccess,
-		updateError:    s.updateError - previous.updateError,
-		updateConflict: s.updateConflict - previous.updateConflict,
-		conflictRetry:  s.conflictRetry - previous.conflictRetry,
-		durationCount:  s.durationCount - previous.durationCount,
-	}
-}
 
 func ConvertPodToSandboxCR(pod *corev1.Pod) *v1alpha1.Sandbox {
 	sbx := &v1alpha1.Sandbox{
@@ -362,7 +323,7 @@ func TestSandbox_SaveTimeoutWithPolicy_OnConflict(t *testing.T) {
 	releaseUpdates := make(chan struct{})
 
 	builder := fake.NewClientBuilder().WithScheme(scheme)
-	for _, idx := range infracache.GetIndexFuncs() {
+	for _, idx := range infracache.GetIndexFuncs(infracache.Options{}) {
 		builder = builder.WithIndex(idx.Obj, idx.FieldName, idx.Extract)
 	}
 	builder = builder.WithStatusSubresource(&v1alpha1.Sandbox{})
@@ -387,7 +348,7 @@ func TestSandbox_SaveTimeoutWithPolicy_OnConflict(t *testing.T) {
 		WithWaitSimulation().
 		Build()
 
-	testCache, err := infracache.NewCache(mgr)
+	testCache, err := infracache.NewCacheWithOptions(mgr, infracache.Options{})
 	require.NoError(t, err)
 	mgr.SetWaitHooks(testCache.GetWaitHooks())
 
@@ -522,7 +483,7 @@ func newRetryUpdateTestCache(
 	utilruntime.Must(v1alpha1.AddToScheme(scheme))
 
 	builder := fake.NewClientBuilder().WithScheme(scheme)
-	for _, idx := range infracache.GetIndexFuncs() {
+	for _, idx := range infracache.GetIndexFuncs(infracache.Options{}) {
 		builder = builder.WithIndex(idx.Obj, idx.FieldName, idx.Extract)
 	}
 	builder = builder.WithStatusSubresource(&v1alpha1.Sandbox{})
@@ -709,7 +670,6 @@ func TestSandbox_applyPostModifier(t *testing.T) {
 		expectWrapperSource  string
 		expectWrapperPost    string
 		expectStoredPost     string
-		expectMetrics        postModifierMetricSnapshot
 	}{
 		{
 			name:                "nil modifier performs no work",
@@ -721,7 +681,6 @@ func TestSandbox_applyPostModifier(t *testing.T) {
 			expectReaderGets:    1,
 			expectCallbackCalls: 1,
 			expectWrapperSource: "fresh",
-			expectMetrics:       postModifierMetricSnapshot{getSuccess: 1, durationCount: 1},
 		},
 		{
 			name:                "changed persists and refreshes wrapper",
@@ -732,7 +691,6 @@ func TestSandbox_applyPostModifier(t *testing.T) {
 			expectWrapperSource: "fresh",
 			expectWrapperPost:   "applied",
 			expectStoredPost:    "applied",
-			expectMetrics:       postModifierMetricSnapshot{getSuccess: 1, updateSuccess: 1, durationCount: 1},
 		},
 		{
 			name:                "callback error aborts update",
@@ -742,7 +700,6 @@ func TestSandbox_applyPostModifier(t *testing.T) {
 			expectReaderGets:    1,
 			expectCallbackCalls: 1,
 			expectWrapperSource: "wrapper",
-			expectMetrics:       postModifierMetricSnapshot{getSuccess: 1, durationCount: 1},
 		},
 		{
 			name:                "update error preserves cause",
@@ -754,7 +711,6 @@ func TestSandbox_applyPostModifier(t *testing.T) {
 			expectUpdateCalls:   1,
 			expectCallbackCalls: 1,
 			expectWrapperSource: "wrapper",
-			expectMetrics:       postModifierMetricSnapshot{getSuccess: 1, updateError: 1, durationCount: 1},
 		},
 		{
 			name:                "canceled context stops before direct read",
@@ -762,7 +718,6 @@ func TestSandbox_applyPostModifier(t *testing.T) {
 			expectError:         context.Canceled.Error(),
 			expectCause:         context.Canceled,
 			expectWrapperSource: "wrapper",
-			expectMetrics:       postModifierMetricSnapshot{durationCount: 1},
 		},
 		{
 			name:                 "cancellation during callback prevents success",
@@ -772,7 +727,6 @@ func TestSandbox_applyPostModifier(t *testing.T) {
 			expectReaderGets:     1,
 			expectCallbackCalls:  1,
 			expectWrapperSource:  "wrapper",
-			expectMetrics:        postModifierMetricSnapshot{getSuccess: 1, durationCount: 1},
 		},
 		{
 			name:                "not found direct read fails operation",
@@ -780,13 +734,11 @@ func TestSandbox_applyPostModifier(t *testing.T) {
 			expectError:         "not found",
 			expectReaderGets:    1,
 			expectWrapperSource: "wrapper",
-			expectMetrics:       postModifierMetricSnapshot{getError: 1, durationCount: 1},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			metricsBefore := capturePostModifierMetrics(t)
 			var updateCalls atomic.Int32
 			var callbackCalls atomic.Int32
 			sbx := createTestSandboxWithDefaults("test-sandbox", "default")
@@ -843,7 +795,6 @@ func TestSandbox_applyPostModifier(t *testing.T) {
 			assert.Equal(t, tt.expectCallbackCalls, callbackCalls.Load())
 			assert.Equal(t, tt.expectWrapperSource, sandbox.Labels["source"])
 			assert.Equal(t, tt.expectWrapperPost, sandbox.Labels["post"])
-			assert.Equal(t, tt.expectMetrics, capturePostModifierMetrics(t).subtract(metricsBefore))
 
 			if tt.deleteBefore {
 				return
@@ -867,7 +818,6 @@ func TestSandbox_applyPostModifier_Conflict(t *testing.T) {
 		expectReaderGets         int32
 		expectGenerations        []string
 		expectStoredPost         string
-		expectMetrics            postModifierMetricSnapshot
 	}{
 		{
 			name:                 "conflict re-reads and re-runs callback",
@@ -875,9 +825,6 @@ func TestSandbox_applyPostModifier_Conflict(t *testing.T) {
 			expectReaderGets:     2,
 			expectGenerations:    []string{"0", "1"},
 			expectStoredPost:     "applied",
-			expectMetrics: postModifierMetricSnapshot{
-				getSuccess: 2, updateSuccess: 1, updateConflict: 1, conflictRetry: 1, durationCount: 1,
-			},
 		},
 		{
 			name:                 "cancellation stops conflict retry",
@@ -887,9 +834,6 @@ func TestSandbox_applyPostModifier_Conflict(t *testing.T) {
 			expectUpdateAttempts: 1,
 			expectReaderGets:     1,
 			expectGenerations:    []string{"0"},
-			expectMetrics: postModifierMetricSnapshot{
-				getSuccess: 1, updateConflict: 1, conflictRetry: 1, durationCount: 1,
-			},
 		},
 		{
 			name:                     "callback error after conflict preserves latest cause",
@@ -899,9 +843,6 @@ func TestSandbox_applyPostModifier_Conflict(t *testing.T) {
 			expectUpdateAttempts:     1,
 			expectReaderGets:         2,
 			expectGenerations:        []string{"0", "1"},
-			expectMetrics: postModifierMetricSnapshot{
-				getSuccess: 2, updateConflict: 1, conflictRetry: 1, durationCount: 1,
-			},
 		},
 		{
 			name:                     "callback context error after conflict preserves latest cause",
@@ -911,15 +852,11 @@ func TestSandbox_applyPostModifier_Conflict(t *testing.T) {
 			expectUpdateAttempts:     1,
 			expectReaderGets:         2,
 			expectGenerations:        []string{"0", "1"},
-			expectMetrics: postModifierMetricSnapshot{
-				getSuccess: 2, updateConflict: 1, conflictRetry: 1, durationCount: 1,
-			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			metricsBefore := capturePostModifierMetrics(t)
 			sbx := createTestSandboxWithDefaults("test-sandbox", "default")
 			sbx.Labels = map[string]string{"generation": "0"}
 			key := client.ObjectKeyFromObject(sbx)
@@ -971,7 +908,6 @@ func TestSandbox_applyPostModifier_Conflict(t *testing.T) {
 			assert.Equal(t, tt.expectReaderGets, testCache.apiReader.Calls())
 			assert.Equal(t, int32(0), testCache.clientGetCalls.Load())
 			assert.Equal(t, tt.expectGenerations, generations)
-			assert.Equal(t, tt.expectMetrics, capturePostModifierMetrics(t).subtract(metricsBefore))
 
 			stored := &v1alpha1.Sandbox{}
 			require.NoError(t, fc.Get(t.Context(), key, stored))
@@ -1714,7 +1650,7 @@ func TestSandbox_TriggerRecycle(t *testing.T) {
 			utilruntime.Must(v1alpha1.AddToScheme(scheme))
 
 			builder := fake.NewClientBuilder().WithScheme(scheme)
-			for _, idx := range infracache.GetIndexFuncs() {
+			for _, idx := range infracache.GetIndexFuncs(infracache.Options{}) {
 				builder = builder.WithIndex(idx.Obj, idx.FieldName, idx.Extract)
 			}
 			builder = builder.WithStatusSubresource(&v1alpha1.Sandbox{})

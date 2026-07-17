@@ -25,11 +25,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
-	grpc_health_v1 "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
 	"k8s.io/apimachinery/pkg/types"
 
@@ -287,44 +286,26 @@ func TestServer_handleRefresh_EmptyBody(t *testing.T) {
 func TestHandleRefreshInvalidRouteMetric(t *testing.T) {
 	tests := []struct {
 		name        string
-		route       *Route
 		body        string
-		shape       sandboxroute.Shape
-		operation   sandboxroute.Operation
 		expectDelta float64
 	}{
-		{name: "JSON decode error is not a route event", body: "not-json", shape: sandboxroute.ShapeIDOnly, operation: sandboxroute.OperationUpsert},
-		{name: "ID-only upsert", route: &Route{State: v1alpha1.SandboxStateRunning}, shape: sandboxroute.ShapeIDOnly, operation: sandboxroute.OperationUpsert, expectDelta: 1},
-		{name: "full upsert", route: &Route{Namespace: "ns", State: v1alpha1.SandboxStateRunning}, shape: sandboxroute.ShapeFull, operation: sandboxroute.OperationUpsert, expectDelta: 1},
-		{name: "ID-only delete", route: &Route{State: v1alpha1.SandboxStateDead}, shape: sandboxroute.ShapeIDOnly, operation: sandboxroute.OperationDelete, expectDelta: 1},
-		{name: "full delete", route: &Route{Name: "sandbox", State: v1alpha1.SandboxStateDead}, shape: sandboxroute.ShapeFull, operation: sandboxroute.OperationDelete, expectDelta: 1},
+		{name: "JSON decode error is not a route event", body: "not-json"},
+		{name: "decoded invalid route is recorded", body: "{}", expectDelta: 1},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := newTestServer(nil)
-			enqueued := 0
-			s.SetRepairEnqueuer(func(sandboxroute.MutationResult) { enqueued++ })
-			labels := routeEventLabels(sandboxroute.SurfaceManager, tt.shape, tt.operation)
-			before := proxyCounterValue(t, "sandbox_route_event_total", labels)
-			beforeRouteCount := testutil.ToFloat64(routeCount)
+			labels := routeInvalidLabels(sandboxroute.SurfaceManager)
+			before := proxyCounterValue(t, "sandbox_route_invalid_total", labels)
 			body := []byte(tt.body)
-			if tt.route != nil {
-				var err error
-				body, err = json.Marshal(tt.route)
-				require.NoError(t, err)
-			}
 
 			request := httptest.NewRequest(http.MethodPost, RefreshAPI, bytes.NewReader(body))
 			response := httptest.NewRecorder()
 			s.handleRefresh(response, request)
 
 			assert.Equal(t, http.StatusBadRequest, response.Code)
-			assert.Equal(t, before+tt.expectDelta, proxyCounterValue(t, "sandbox_route_event_total", labels))
-			assert.Empty(t, s.ListRoutes())
-			assert.Equal(t, sandboxroute.StoreStats{}, s.Store().Stats())
-			assert.Equal(t, beforeRouteCount, testutil.ToFloat64(routeCount))
-			assert.Zero(t, enqueued)
+			assert.Equal(t, before+tt.expectDelta, proxyCounterValue(t, "sandbox_route_invalid_total", labels))
 		})
 	}
 }

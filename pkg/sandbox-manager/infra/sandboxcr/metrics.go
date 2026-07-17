@@ -17,20 +17,13 @@ limitations under the License.
 package sandboxcr
 
 import (
-	"time"
-
 	"github.com/prometheus/client_golang/prometheus"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 )
 
 const (
 	fallbackReasonRVExpectation = "rv_expectation_unsatisfied"
 	fallbackReasonCacheLagging  = "cache_lagging_behind_route"
-
-	postModifierResultSuccess  = "success"
-	postModifierResultError    = "error"
-	postModifierResultConflict = "conflict"
 )
 
 var sandboxFallbackTotal = prometheus.NewCounterVec(
@@ -50,71 +43,9 @@ var quotaSourceEventDropTotal = prometheus.NewCounterVec(
 	[]string{"reason"},
 )
 
-var postModifierGetTotal = prometheus.NewCounterVec(
-	prometheus.CounterOpts{
-		Name: "sandbox_post_modifier_get_total",
-		Help: "Total final PostModifier direct API-server Get attempts by result.",
-	},
-	[]string{"result"},
-)
-
-var postModifierUpdateTotal = prometheus.NewCounterVec(
-	prometheus.CounterOpts{
-		Name: "sandbox_post_modifier_update_total",
-		Help: "Total final PostModifier Update attempts by result.",
-	},
-	[]string{"result"},
-)
-
-var postModifierConflictRetriesTotal = prometheus.NewCounter(
-	prometheus.CounterOpts{
-		Name: "sandbox_post_modifier_conflict_retries_total",
-		Help: "Total final PostModifier retries requested after Update conflicts.",
-	},
-)
-
-var postModifierDuration = prometheus.NewHistogram(
-	prometheus.HistogramOpts{
-		Name:    "sandbox_post_modifier_duration_seconds",
-		Help:    "Duration of final PostModifier execution in seconds.",
-		Buckets: prometheus.ExponentialBuckets(0.005, 2, 14),
-	},
-)
-
 func init() {
 	metrics.Registry.MustRegister(
 		sandboxFallbackTotal,
 		quotaSourceEventDropTotal,
-		postModifierGetTotal,
-		postModifierUpdateTotal,
-		postModifierConflictRetriesTotal,
-		postModifierDuration,
 	)
-}
-
-func recordPostModifierGet(err error) {
-	result := postModifierResultSuccess
-	if err != nil {
-		result = postModifierResultError
-	}
-	postModifierGetTotal.WithLabelValues(result).Inc()
-}
-
-func recordPostModifierUpdate(err error) {
-	result := postModifierResultSuccess
-	if err != nil {
-		result = postModifierResultError
-		if apierrors.IsConflict(err) {
-			result = postModifierResultConflict
-		}
-	}
-	postModifierUpdateTotal.WithLabelValues(result).Inc()
-}
-
-func recordPostModifierConflictRetry() {
-	postModifierConflictRetriesTotal.Inc()
-}
-
-func observePostModifierDuration(duration time.Duration) {
-	postModifierDuration.Observe(duration.Seconds())
 }

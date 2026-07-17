@@ -618,25 +618,20 @@ If compatibility is eventually removed, that is a separate code change after ope
 Add aggregate metrics without namespace, name, UID, or sandbox-ID labels:
 
 ```text
-sandbox_id_resolved_total{format="legacy|short",surface="e2b|gateway"}
-sandbox_id_assigned_total{format="short"}
-sandbox_id_assignment_errors_total{reason="invalid_uid|read_failed|update_failed|context_done"}
-sandbox_id_assignment_duration_seconds
-sandbox_id_reserved_mutation_rejected_total{surface="e2b|sandboxclaim|manager_pre|manager_post"}
+sandbox_id_legacy_resolution_total{surface="e2b|gateway"}
+sandbox_id_assignment_total{result="success|failure"}
 sandbox_id_collision_total{surface="cache|manager_route|gateway_route"}
 sandbox_route_legacy_fallback_total{surface="manager|gateway"}
-sandbox_route_event_total{surface="manager|gateway",shape="full|id_only",operation="upsert|delete",result="applied|ignored|invalid|collision|repair_required"}
-sandbox_route_records{surface="manager|gateway",shape="full|id_only|retired|collision"}
-sandbox_route_repair_total{surface="manager|gateway",result="enqueued|success|get_error|projection_error|stale"}
+sandbox_route_invalid_total{surface="manager|gateway"}
+sandbox_route_records{surface="manager|gateway",shape="id_only|collision"}
 sandbox_route_repair_queue_depth{surface="manager|gateway"}
-sandbox_route_repair_retries_total{surface="manager|gateway"}
 ```
 
 Structured logs for assignment/update failures include namespace and name. Successful assignment is debug-level to avoid noisy per-Sandbox info logs.
 
-Claim/clone metrics expose the final post-modifier stage so operators can distinguish readiness/runtime work from the added direct Get, first-assignment Update, and conflict retries. Route event and repair reasons are fixed enums in structured logs/metrics; identities appear only in structured logs. Repair metrics report aggregate queue and outcome counts without using resource identity as a metric label.
+Claim/clone metrics continue to expose total duration. Post-modifier stage Prometheus series are removed; conflict and failure details stay in structured logs. Assignment metrics expose only `sandbox_id_assignment_total{result=success|failure}`; assignment failure reasons, valid route mutation outcomes, repair outcomes, stale results, and retry details remain fixed fields in structured logs instead of Prometheus labels. The metric package uses explicit component-level registration: controller registers Sandbox ID metrics, while sandbox-manager and sandbox-gateway register both Sandbox ID and route metrics.
 
-Metrics report the resolution result; they do not trigger validation of non-empty labels.
+Metrics report only legacy resolution; they do not trigger validation of non-empty labels.
 
 ## 16. Repository Impact and Migration Inventory
 

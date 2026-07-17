@@ -14,9 +14,13 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package proxyutils
+package metrics
 
-import "github.com/openkruise/agents/pkg/sandboxroute"
-
-// Route is a compatibility alias for the neutral route contract.
-type Route = sandboxroute.Route
+func allowedLabel(value string, allowed ...string) bool {
+	for _, candidate := range allowed {
+		if value == candidate {
+			return true
+		}
+	}
+	return false
+}

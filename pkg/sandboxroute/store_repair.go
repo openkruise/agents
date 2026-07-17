@@ -47,7 +47,7 @@ func (s *Store) ApplyAuthoritativeRepair(
 
 	generation, exists := s.affectedGenerationLocked(request.ObjectKey)
 	if !exists || generation != request.Generation {
-		return s.finishRepairLocked(EventResultIgnored, ReasonStaleRepairGeneration, nil)
+		return s.finishLocked(EventResultIgnored, ReasonStaleRepairGeneration, nil)
 	}
 	if !observation.Present {
 		return s.applyAuthoritativeAbsenceLocked(request.ObjectKey)
@@ -113,12 +113,12 @@ func (s *Store) applyAuthoritativePresenceLocked(
 			uidCollisionRequests = nil
 		}
 		requests := deduplicateRepairRequests(append(displacedRequests, uidCollisionRequests...))
-		return s.finishRepairLocked(EventResultCollision, ReasonUIDCollision, requests)
+		return s.finishLocked(EventResultCollision, ReasonUIDCollision, requests)
 	}
 	if s.idCollidedLocked(route.ID) {
-		return s.finishRepairLocked(EventResultCollision, ReasonIDCollision, displacedRequests)
+		return s.finishLocked(EventResultCollision, ReasonIDCollision, displacedRequests)
 	}
-	return s.finishRepairLocked(EventResultApplied, ReasonAuthoritativePresent, displacedRequests)
+	return s.finishLocked(EventResultApplied, ReasonAuthoritativePresent, displacedRequests)
 }
 
 func (s *Store) applyAuthoritativeAbsenceLocked(key types.NamespacedName) MutationResult {
@@ -130,7 +130,7 @@ func (s *Store) applyAuthoritativeAbsenceLocked(key types.NamespacedName) Mutati
 		s.installDeletionFencesLocked(key, current.route, current.route.ResourceVersion, generation, true)
 		requests := s.refreshQuarantinedUIDClaimsLocked(current.route.UID)
 		s.recomputeActiveViewLocked()
-		return s.finishRepairLocked(EventResultApplied, ReasonAuthoritativeAbsent, requests)
+		return s.finishLocked(EventResultApplied, ReasonAuthoritativeAbsent, requests)
 	}
 
 	fence := s.deletionByObject[key]
@@ -138,13 +138,13 @@ func (s *Store) applyAuthoritativeAbsenceLocked(key types.NamespacedName) Mutati
 		delete(s.deletionByObject, key)
 		s.pruneRetiredUIDLocked(fence.uid, now)
 		s.nextGenerationLocked()
-		return s.finishRepairLocked(EventResultApplied, ReasonAuthoritativeAbsent, nil)
+		return s.finishLocked(EventResultApplied, ReasonAuthoritativeAbsent, nil)
 	}
 	fence.confirmed = true
 	fence.confirmationQueued = true
 	fence.generation = s.nextGenerationLocked()
 	s.deletionByObject[key] = fence
-	return s.finishRepairLocked(EventResultApplied, ReasonAuthoritativeAbsent, nil)
+	return s.finishLocked(EventResultApplied, ReasonAuthoritativeAbsent, nil)
 }
 
 func (s *Store) expireCompatibilityLocked(now time.Time) (bool, []RepairRequest) {

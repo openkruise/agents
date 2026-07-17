@@ -22,12 +22,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/metrics"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/sandbox-manager/sandboxid"
@@ -316,4 +318,50 @@ func TestSandboxIDAssignmentErrorReason(t *testing.T) {
 			assert.Equal(t, tt.expect, sandboxIDAssignmentErrorReason(tt.state, tt.duration, tt.err))
 		})
 	}
+}
+
+func TestRecordSandboxIDAssignmentMetric(t *testing.T) {
+	operationErr := errors.New("assignment failed")
+	tests := []struct {
+		name        string
+		state       *sandboxIDAssignmentState
+		duration    time.Duration
+		err         error
+		result      string
+		expectDelta float64
+	}{
+		{name: "assigned success", state: &sandboxIDAssignmentState{enabled: true, assigned: true}, result: metrics.SandboxIDAssignmentResultSuccess, expectDelta: 1},
+		{name: "assignment failure", state: &sandboxIDAssignmentState{enabled: true, assignmentRan: true}, duration: time.Nanosecond, err: operationErr, result: metrics.SandboxIDAssignmentResultFailure, expectDelta: 1},
+		{name: "successful no-op", state: &sandboxIDAssignmentState{enabled: true}, result: metrics.SandboxIDAssignmentResultSuccess},
+		{name: "pre-assignment operation failure", state: &sandboxIDAssignmentState{enabled: true}, err: operationErr, result: metrics.SandboxIDAssignmentResultFailure},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			registry := prometheus.NewRegistry()
+			metrics.RegisterSandboxID(registry)
+			before := sandboxIDMetricCounterValue(t, registry, "sandbox_id_assignment_total", "result", tt.result)
+
+			recordSandboxIDAssignment(t.Context(), tt.state, tt.duration, tt.err)
+
+			assert.Equal(t, before+tt.expectDelta, sandboxIDMetricCounterValue(t, registry, "sandbox_id_assignment_total", "result", tt.result))
+		})
+	}
+}
+
+func sandboxIDMetricCounterValue(t *testing.T, registry *prometheus.Registry, name, labelName, labelValue string) float64 {
+	t.Helper()
+	families, err := registry.Gather()
+	require.NoError(t, err)
+	for _, family := range families {
+		if family.GetName() != name {
+			continue
+		}
+		for _, metric := range family.Metric {
+			if len(metric.Label) == 1 && metric.Label[0].GetName() == labelName && metric.Label[0].GetValue() == labelValue {
+				return metric.GetCounter().GetValue()
+			}
+		}
+	}
+	return 0
 }

@@ -18,6 +18,7 @@ package sandboxroute
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -67,18 +68,21 @@ func TestRouteSecurityAndJSONCompatibility(t *testing.T) {
 		route         Route
 		expectObject  bool
 		expectJSONKey bool
+		expectAuth    bool
 	}{
-		{name: "full token", route: fullRoute("id", "ns", "name", "uid", "1"), expectObject: true, expectJSONKey: true},
+		{name: "full token", route: fullRoute("id", "ns", "name", "uid", "1"), expectObject: true, expectJSONKey: true, expectAuth: true},
 		{name: "id only empty token", route: idOnlyRoute("id", "uid", "1")},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			tt.route.AccessToken = "secret-value"
+			tt.route.RequireTrafficAuth = tt.expectAuth
 			if strings.Contains(tt.name, "empty token") {
 				tt.route.AccessToken = ""
 			}
 			rendered := tt.route.String()
 			assert.Contains(t, rendered, "AccessToken:***")
+			assert.Contains(t, rendered, fmt.Sprintf("RequireTrafficAuth:%t", tt.expectAuth))
 			assert.NotContains(t, rendered, "secret-value")
 
 			key, ok := tt.route.ObjectKey()
@@ -115,7 +119,7 @@ func TestProjector(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			route, err := tt.projector.Project(ProjectionInput{
-				Object: tt.object, IP: "10.0.0.1", State: "running", Owner: "owner", AccessToken: "token",
+				Object: tt.object, IP: "10.0.0.1", State: "running", Owner: "owner", AccessToken: "token", RequireTrafficAuth: true,
 			})
 			if tt.expectError != "" {
 				require.Error(t, err)
@@ -130,6 +134,7 @@ func TestProjector(t *testing.T) {
 			assert.Equal(t, "running", route.State)
 			assert.Equal(t, "owner", route.Owner)
 			assert.Equal(t, "token", route.AccessToken)
+			assert.True(t, route.RequireTrafficAuth)
 		})
 	}
 }

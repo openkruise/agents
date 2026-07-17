@@ -31,7 +31,9 @@ import (
 	"go.uber.org/zap/zapcore"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	controllermetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
+	"github.com/openkruise/agents/pkg/metrics"
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
@@ -66,6 +68,9 @@ func validateE2BTimeoutFlags(minResumeTimeout, maxTimeout int) error {
 }
 
 func main() {
+	metrics.RegisterSandboxID(controllermetrics.Registry)
+	metrics.RegisterSandboxRoute(controllermetrics.Registry)
+
 	// Define variables for pprof configuration
 	var enablePprof bool
 	var pprofAddr string

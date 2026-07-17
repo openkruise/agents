@@ -404,8 +404,6 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 			postCheck: func(t *testing.T, sbx infra.Sandbox) {
 				assert.Equal(t, "applied", sbx.GetLabels()["test.example/post-modifier"])
 				assert.Equal(t, user, sbx.GetAnnotations()[v1alpha1.AnnotationOwner])
-				metrics := GetMetricsFromSandbox(t, sbx)
-				assert.GreaterOrEqual(t, metrics.PostModifier, time.Duration(0))
 			},
 		},
 		{
@@ -2475,7 +2473,7 @@ func TestTryClaimSandbox_LockConflict(t *testing.T) {
 			// This simulates a conflict (or other error) during the lock step without affecting Create or Status updates.
 			updateErr := tt.updateError
 			builder := fake.NewClientBuilder().WithScheme(scheme)
-			for _, idx := range infracache.GetIndexFuncs() {
+			for _, idx := range infracache.GetIndexFuncs(infracache.Options{}) {
 				builder = builder.WithIndex(idx.Obj, idx.FieldName, idx.Extract)
 			}
 			builder = builder.WithStatusSubresource(
@@ -2500,7 +2498,7 @@ func TestTryClaimSandbox_LockConflict(t *testing.T) {
 				WithClient(fc).
 				WithWaitSimulation().
 				Build()
-			testCache, err := infracache.NewCache(mgr)
+			testCache, err := infracache.NewCacheWithOptions(mgr, infracache.Options{})
 			require.NoError(t, err)
 			mgr.SetWaitHooks(testCache.GetWaitHooks())
 
@@ -3167,7 +3165,7 @@ func TestTryClaimSandbox_ReleasesAdmissionOnRejectedLockWrite(t *testing.T) {
 				utilruntime.Must(v1alpha1.AddToScheme(scheme))
 
 				builder := fake.NewClientBuilder().WithScheme(scheme)
-				for _, idx := range infracache.GetIndexFuncs() {
+				for _, idx := range infracache.GetIndexFuncs(infracache.Options{}) {
 					builder = builder.WithIndex(idx.Obj, idx.FieldName, idx.Extract)
 				}
 				builder = builder.WithStatusSubresource(&v1alpha1.Sandbox{}, &v1alpha1.SandboxSet{})
@@ -3184,7 +3182,7 @@ func TestTryClaimSandbox_ReleasesAdmissionOnRejectedLockWrite(t *testing.T) {
 				mgrBuilder, err := controllers.NewMockManagerBuilder(t)
 				require.NoError(t, err)
 				mgr := mgrBuilder.WithScheme(scheme).WithClient(fc).WithWaitSimulation().Build()
-				testCache, err := infracache.NewCache(mgr)
+				testCache, err := infracache.NewCacheWithOptions(mgr, infracache.Options{})
 				require.NoError(t, err)
 				mgr.SetWaitHooks(testCache.GetWaitHooks())
 

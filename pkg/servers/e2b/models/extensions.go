@@ -27,7 +27,6 @@ import (
 	"github.com/distribution/reference"
 	"github.com/openkruise/agents/pkg/pausedretention"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
-	"github.com/openkruise/agents/pkg/sandboxidmetrics"
 	"github.com/openkruise/agents/pkg/utils/timeout"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -153,7 +152,6 @@ func (r *NewSandboxRequest) parseExtensionLabels() error {
 			continue
 		}
 		if key == v1alpha1.LabelSandboxID || key == MetadataKeySandboxResource {
-			sandboxidmetrics.RecordReservedMutationRejected("e2b")
 			return fmt.Errorf("label name [%s] is reserved", key)
 		}
 		if r.Extensions.Labels == nil {

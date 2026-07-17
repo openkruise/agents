@@ -51,7 +51,7 @@ func NewTestCacheWithOptions(t *testing.T, options cache.Options, initObjs ...ct
 	builder := fake.NewClientBuilder().WithScheme(scheme)
 
 	// Apply indexes from GetIndexFuncs (single source of truth)
-	for _, idx := range cache.GetIndexFuncsWithOptions(options) {
+	for _, idx := range cache.GetIndexFuncs(options) {
 		builder = builder.WithIndex(idx.Obj, idx.FieldName, idx.Extract)
 	}
 
@@ -80,8 +80,10 @@ func NewTestCacheWithOptions(t *testing.T, options cache.Options, initObjs ...ct
 		WithWaitSimulation(). // enable wait simulation by default
 		Build()
 
-	health := cache.NewInformerHealth()
-	c, err := cache.NewCacheWithOptions(mgr, health, options)
+	if options.Health == nil {
+		options.Health = cache.NewInformerHealth()
+	}
+	c, err := cache.NewCacheWithOptions(mgr, options)
 	if err != nil {
 		return nil, nil, err
 	}

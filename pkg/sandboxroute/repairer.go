@@ -28,6 +28,7 @@ import (
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
 
+	"github.com/openkruise/agents/pkg/metrics"
 	"github.com/openkruise/agents/pkg/utils"
 )
 
@@ -154,7 +155,7 @@ func NewRepairer(store *Store, observe ObserveFunc, options RepairerOptions) (*R
 		requestLimiter:      rate.NewLimiter(rate.Limit(qps), burst),
 		pending:             make(map[types.NamespacedName]uint64),
 	}
-	setRepairQueueDepth(store.surface, 0)
+	metrics.SetSandboxRouteRepairQueueDepth(string(store.surface), 0)
 	return repairer, nil
 }
 
@@ -182,11 +183,10 @@ func (r *Repairer) EnqueueRequest(request RepairRequest) {
 		return
 	}
 	r.pending[request.ObjectKey] = request.Generation
-	setRepairQueueDepth(r.store.surface, len(r.pending))
+	metrics.SetSandboxRouteRepairQueueDepth(string(r.store.surface), len(r.pending))
 	r.mu.Unlock()
 
 	r.queue.Add(request.ObjectKey)
-	recordRepair(r.store.surface, RepairResultEnqueued)
 }
 
 // Pending returns the number of deduplicated ObjectKeys awaiting completion.
@@ -245,7 +245,6 @@ func (r *Repairer) processNext(ctx context.Context) bool {
 			r.queue.Forget(key)
 			return true
 		}
-		recordRepair(r.store.surface, RepairResultGetError)
 		r.logRepair(ctx, key, generation, RepairResultGetError, repairLogReasonRateLimit, MutationResult{}, true, err)
 		r.retry(key, generation)
 		return true
@@ -257,13 +256,12 @@ func (r *Repairer) processNext(ctx context.Context) bool {
 		return true
 	}
 	if err != nil {
-		repairResult, reason := r.recordObservationError(err)
+		repairResult, reason := classifyObservationError(err)
 		r.logRepair(ctx, key, generation, repairResult, reason, MutationResult{}, true, err)
 		r.retry(key, generation)
 		return true
 	}
 	if err := validateObservation(key, observation); err != nil {
-		recordRepair(r.store.surface, RepairResultProjectionError)
 		r.logRepair(ctx, key, generation, RepairResultProjectionError, repairLogReasonInvalidObservation, MutationResult{}, true, err)
 		r.retry(key, generation)
 		return true
@@ -276,15 +274,12 @@ func (r *Repairer) processNext(ctx context.Context) bool {
 	r.Enqueue(result)
 	switch {
 	case result.Result == EventResultInvalid:
-		recordRepair(r.store.surface, RepairResultProjectionError)
 		r.logRepair(ctx, key, generation, RepairResultProjectionError, normalizedRepairReason(result.Reason), result, true, nil)
 		r.retry(key, generation)
 	case result.Reason == ReasonStaleRepairGeneration:
-		recordRepair(r.store.surface, RepairResultStale)
 		r.logRepair(ctx, key, generation, RepairResultStale, normalizedRepairReason(result.Reason), result, false, nil)
 		r.complete(key, generation)
 	default:
-		recordRepair(r.store.surface, RepairResultSuccess)
 		r.logRepair(ctx, key, generation, RepairResultSuccess, normalizedRepairReason(result.Reason), result, false, nil)
 		r.complete(key, generation)
 	}
@@ -305,7 +300,7 @@ func (r *Repairer) complete(key types.NamespacedName, generation uint64) {
 		delete(r.pending, key)
 	}
 	newerPending := exists && current > generation
-	setRepairQueueDepth(r.store.surface, len(r.pending))
+	metrics.SetSandboxRouteRepairQueueDepth(string(r.store.surface), len(r.pending))
 	r.mu.Unlock()
 
 	r.queue.Forget(key)
@@ -317,7 +312,7 @@ func (r *Repairer) complete(key types.NamespacedName, generation uint64) {
 func (r *Repairer) syncPendingDepth() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	setRepairQueueDepth(r.store.surface, len(r.pending))
+	metrics.SetSandboxRouteRepairQueueDepth(string(r.store.surface), len(r.pending))
 }
 
 func (r *Repairer) retry(key types.NamespacedName, generation uint64) {
@@ -330,17 +325,14 @@ func (r *Repairer) retry(key types.NamespacedName, generation uint64) {
 		r.queue.Add(key)
 		return
 	}
-	recordRepairRetry(r.store.surface)
 	r.queue.AddRateLimited(key)
 }
 
-func (r *Repairer) recordObservationError(err error) (RepairResult, string) {
+func classifyObservationError(err error) (RepairResult, string) {
 	var observationError *ObservationError
 	if errors.As(err, &observationError) && observationError.Kind == ObservationErrorProjection {
-		recordRepair(r.store.surface, RepairResultProjectionError)
 		return RepairResultProjectionError, repairLogReasonObservationProjection
 	}
-	recordRepair(r.store.surface, RepairResultGetError)
 	return RepairResultGetError, repairLogReasonObservationGet
 }
 

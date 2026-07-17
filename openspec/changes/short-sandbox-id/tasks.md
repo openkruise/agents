@@ -89,9 +89,9 @@
 
 ## 11. Observability
 
-- [x] 11.1 Add bounded metrics for legacy/short resolution, assignment results and duration, and reserved-key rejection without namespace, name, UID, or Sandbox-ID labels (design §15).
-- [x] 11.2 Add bounded Store and peer-event metrics for full/ID-only records, operation results, collisions, and legacy fallback usage (design §15).
-- [x] 11.3 Add targeted-repair queue depth, retry, stale-result, and outcome metrics plus final PostModifier Get/Update/conflict/duration metrics (design §15).
+- [x] 11.1 Add bounded metrics for legacy resolution, assignment success/failure, and collisions without namespace, name, UID, or Sandbox-ID labels (design §15).
+- [x] 11.2 Add bounded route metrics for invalid mutations, ID-only/collision records, and legacy fallback usage (design §15).
+- [x] 11.3 Expose targeted-repair queue depth while keeping repair outcomes, stale results, retries, and PostModifier details in existing structured logs and operation-stage timings (design §15).
 - [x] 11.4 Add structured assignment, collision, fencing, and repair logs with fixed reason enums; keep successful assignment at debug level and preserve access-token redaction (design §15).
 
 ## 12. Verification and Boundary Audit

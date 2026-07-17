@@ -30,19 +30,21 @@ import (
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/cache"
+	"github.com/openkruise/agents/pkg/metrics"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/quota"
 	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
 	"github.com/openkruise/agents/pkg/sandbox-manager/sandboxid"
-	"github.com/openkruise/agents/pkg/sandboxidmetrics"
 	"github.com/openkruise/agents/pkg/utils/pagination"
 )
 
 // ResolveSandboxID returns the final public ID of a Sandbox for server-facing use.
 func (m *SandboxManager) ResolveSandboxID(sandbox metav1.Object) string {
 	id, format := sandboxid.ResolveWithFormat(sandbox)
-	sandboxidmetrics.RecordResolved(format, "e2b")
+	if format == sandboxid.FormatLegacy {
+		metrics.RecordSandboxIDLegacyResolution(metrics.LegacyResolutionSurfaceE2B)
+	}
 	return id
 }
 

@@ -213,11 +213,11 @@ Operators MUST roll out label-aware manager and gateway binaries with assignment
 - **THEN** new assignments stop but existing labels remain authoritative and rolling back to label-unaware binaries remains unsafe
 
 ### Requirement: Bounded identity observability
-The implementation SHALL report resolution, assignment, reserved-mutation rejection, collision, route compatibility, and targeted-repair health with bounded metric labels that exclude namespace, name, UID, and Sandbox ID.
+The implementation SHALL report legacy resolution, assignment success/failure, collision, invalid route mutations, route compatibility, and targeted-repair queue health with bounded metric labels that exclude namespace, name, UID, and Sandbox ID.
 
 #### Scenario: Identity event is measured
-- **WHEN** assignment, resolution, collision, route compatibility, or targeted repair produces an observable result
-- **THEN** aggregate metrics use fixed result dimensions and omit resource identity from metric labels
+- **WHEN** legacy resolution, assignment, collision, invalid routing, route compatibility, or targeted repair backlog produces an observable result
+- **THEN** aggregate metrics use fixed dimensions and omit resource identity from metric labels while normal event and retry details remain in structured logs
 
 #### Scenario: Internal diagnostic is logged
 - **WHEN** assignment, collision, or repair requires resource-specific diagnosis

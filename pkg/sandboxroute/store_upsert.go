@@ -21,7 +21,7 @@ import "k8s.io/apimachinery/pkg/types"
 // UpsertFull applies an ObjectKey-backed route event.
 func (s *Store) UpsertFull(route Route) MutationResult {
 	if !hasExpectedShape(route, ShapeFull) {
-		return s.recordWithoutMutation(OperationUpsert, ShapeFull, EventResultInvalid, ReasonInvalidRoute)
+		return s.recordWithoutMutation(EventResultInvalid, ReasonInvalidRoute)
 	}
 
 	s.mu.Lock()
@@ -34,24 +34,24 @@ func (s *Store) UpsertFull(route Route) MutationResult {
 		switch {
 		case current.route.UID == route.UID && current.route.ID == route.ID:
 			if comparison != ResourceVersionEqual && comparison != ResourceVersionNewer {
-				return s.finishLocked(OperationUpsert, ShapeFull, EventResultIgnored, ReasonStaleResourceVersion, nil)
+				return s.finishLocked(EventResultIgnored, ReasonStaleResourceVersion, nil)
 			}
 		case current.route.UID == route.UID:
 			if comparison != ResourceVersionNewer {
-				return s.finishLocked(OperationUpsert, ShapeFull, EventResultIgnored, ReasonStaleResourceVersion, nil)
+				return s.finishLocked(EventResultIgnored, ReasonStaleResourceVersion, nil)
 			}
 		default:
 			switch comparison {
 			case ResourceVersionNewer:
 			case ResourceVersionOlder:
-				return s.finishLocked(OperationUpsert, ShapeFull, EventResultIgnored, ReasonStaleResourceVersion, nil)
+				return s.finishLocked(EventResultIgnored, ReasonStaleResourceVersion, nil)
 			default:
 				current.generation = s.nextGenerationLocked()
 				current.quarantined = true
 				s.fullByObject[key] = current
 				s.recomputeActiveViewLocked()
 				request := RepairRequest{ObjectKey: key, Generation: current.generation}
-				return s.finishLocked(OperationUpsert, ShapeFull, EventResultRepairRequired, ReasonAmbiguousResourceVersion, []RepairRequest{request})
+				return s.finishLocked(EventResultRepairRequired, ReasonAmbiguousResourceVersion, []RepairRequest{request})
 			}
 		}
 	}
@@ -62,19 +62,19 @@ func (s *Store) UpsertFull(route Route) MutationResult {
 		switch comparison {
 		case ResourceVersionNewer:
 		case ResourceVersionOlder:
-			return s.finishLocked(OperationUpsert, ShapeFull, EventResultIgnored, ReasonStaleResourceVersion, nil)
+			return s.finishLocked(EventResultIgnored, ReasonStaleResourceVersion, nil)
 		default:
 			deletion.generation = s.nextGenerationLocked()
 			deletion.confirmationQueued = true
 			s.deletionByObject[key] = deletion
 			request := RepairRequest{ObjectKey: key, Generation: deletion.generation}
-			return s.finishLocked(OperationUpsert, ShapeFull, EventResultRepairRequired, ReasonAmbiguousResourceVersion, []RepairRequest{request})
+			return s.finishLocked(EventResultRepairRequired, ReasonAmbiguousResourceVersion, []RepairRequest{request})
 		}
 	}
 
 	if compatibility, exists := s.compatByUID[route.UID]; exists &&
 		!equalOrNewer(compatibility.route.ResourceVersion, route.ResourceVersion) {
-		return s.finishLocked(OperationUpsert, ShapeFull, EventResultIgnored, ReasonStaleResourceVersion, nil)
+		return s.finishLocked(EventResultIgnored, ReasonStaleResourceVersion, nil)
 	}
 
 	targetCompatibility := s.compatibilityClaimsLocked(route.ID, route.UID)
@@ -92,8 +92,6 @@ func (s *Store) UpsertFull(route Route) MutationResult {
 	s.recomputeActiveViewLocked()
 	if len(uidCollisionRequests) > 0 {
 		return s.finishLocked(
-			OperationUpsert,
-			ShapeFull,
 			EventResultCollision,
 			ReasonUIDCollision,
 			deduplicateRepairRequests(append(displacedRequests, uidCollisionRequests...)),
@@ -102,40 +100,38 @@ func (s *Store) UpsertFull(route Route) MutationResult {
 	if compatibilityCollision || s.idCollidedLocked(route.ID) {
 		requests := append(displacedRequests, s.repairRequestsForIDLocked(route.ID)...)
 		return s.finishLocked(
-			OperationUpsert,
-			ShapeFull,
 			EventResultCollision,
 			ReasonIDCollision,
 			deduplicateRepairRequests(requests),
 		)
 	}
-	return s.finishLocked(OperationUpsert, ShapeFull, EventResultApplied, ReasonNone, displacedRequests)
+	return s.finishLocked(EventResultApplied, ReasonNone, displacedRequests)
 }
 
 // UpsertIDOnly applies a compatibility route event without an ObjectKey.
 func (s *Store) UpsertIDOnly(route Route) MutationResult {
 	if !hasExpectedShape(route, ShapeIDOnly) {
-		return s.recordWithoutMutation(OperationUpsert, ShapeIDOnly, EventResultInvalid, ReasonInvalidRoute)
+		return s.recordWithoutMutation(EventResultInvalid, ReasonInvalidRoute)
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if s.idHasDeletionFenceLocked(route.ID) {
-		return s.finishLocked(OperationUpsert, ShapeIDOnly, EventResultIgnored, ReasonDeletionFence, nil)
+		return s.finishLocked(EventResultIgnored, ReasonDeletionFence, nil)
 	}
 	if _, retired := s.retiredByUID[route.UID]; retired {
-		return s.finishLocked(OperationUpsert, ShapeIDOnly, EventResultIgnored, ReasonRetiredUID, nil)
+		return s.finishLocked(EventResultIgnored, ReasonRetiredUID, nil)
 	}
 	if s.uidHasFullOwnerLocked(route.UID) || s.idHasFullOwnerLocked(route.ID) {
-		return s.finishLocked(OperationUpsert, ShapeIDOnly, EventResultIgnored, ReasonDominatedByFull, nil)
+		return s.finishLocked(EventResultIgnored, ReasonDominatedByFull, nil)
 	}
 	if current, exists := s.compatByUID[route.UID]; exists {
 		if current.route.ID != route.ID {
-			return s.finishLocked(OperationUpsert, ShapeIDOnly, EventResultCollision, ReasonUIDCollision, nil)
+			return s.finishLocked(EventResultCollision, ReasonUIDCollision, nil)
 		}
 		if !equalOrNewer(current.route.ResourceVersion, route.ResourceVersion) {
-			return s.finishLocked(OperationUpsert, ShapeIDOnly, EventResultIgnored, ReasonStaleResourceVersion, nil)
+			return s.finishLocked(EventResultIgnored, ReasonStaleResourceVersion, nil)
 		}
 	}
 
@@ -146,9 +142,9 @@ func (s *Store) UpsertIDOnly(route Route) MutationResult {
 	}
 	s.recomputeActiveViewLocked()
 	if s.idCollidedLocked(route.ID) {
-		return s.finishLocked(OperationUpsert, ShapeIDOnly, EventResultCollision, ReasonIDCollision, nil)
+		return s.finishLocked(EventResultCollision, ReasonIDCollision, nil)
 	}
-	return s.finishLocked(OperationUpsert, ShapeIDOnly, EventResultApplied, ReasonNone, nil)
+	return s.finishLocked(EventResultApplied, ReasonNone, nil)
 }
 
 func (s *Store) installFullLocked(

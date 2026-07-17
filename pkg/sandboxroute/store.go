@@ -22,10 +22,41 @@ import (
 	"time"
 
 	"k8s.io/apimachinery/pkg/types"
+
+	"github.com/openkruise/agents/pkg/metrics"
 )
 
 // CompatibilityDrainWindow is the default old-peer retry and drain window.
 const CompatibilityDrainWindow = 2 * time.Second
+
+// Surface identifies the component that owns a route Store.
+type Surface string
+
+const (
+	SurfaceManager Surface = metrics.RouteSurfaceManager
+	SurfaceGateway Surface = metrics.RouteSurfaceGateway
+)
+
+// EventResult identifies the result of a route mutation event.
+type EventResult string
+
+const (
+	EventResultApplied        EventResult = "applied"
+	EventResultIgnored        EventResult = "ignored"
+	EventResultInvalid        EventResult = "invalid"
+	EventResultCollision      EventResult = "collision"
+	EventResultRepairRequired EventResult = "repair_required"
+)
+
+// RepairResult identifies a targeted repair outcome for structured logs.
+type RepairResult string
+
+const (
+	RepairResultSuccess         RepairResult = "success"
+	RepairResultGetError        RepairResult = "get_error"
+	RepairResultProjectionError RepairResult = "projection_error"
+	RepairResultStale           RepairResult = "stale"
+)
 
 // Reason identifies a fixed explanation for a mutation result.
 type Reason string
@@ -178,51 +209,25 @@ func equalOrNewer(current, incoming string) bool {
 	return comparison == ResourceVersionEqual || comparison == ResourceVersionNewer
 }
 
-func (s *Store) recordWithoutMutation(
-	operation Operation,
-	shape Shape,
-	result EventResult,
-	reason Reason,
-) MutationResult {
+func (s *Store) recordWithoutMutation(result EventResult, reason Reason) MutationResult {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.finishLocked(operation, shape, result, reason, nil)
+	return s.finishLocked(result, reason, nil)
 }
 
 // RecordInvalid records a decoded route that was rejected before Store dispatch.
-// A route with no ObjectKey fields is ID-only; any attempted ObjectKey is full.
-func (s *Store) RecordInvalid(operation Operation, route Route) MutationResult {
-	shape := ShapeIDOnly
-	if route.Namespace != "" || route.Name != "" {
-		shape = ShapeFull
-	}
-	return s.recordWithoutMutation(operation, shape, EventResultInvalid, ReasonInvalidRoute)
+func (s *Store) RecordInvalid() MutationResult {
+	return s.recordWithoutMutation(EventResultInvalid, ReasonInvalidRoute)
 }
 
 func (s *Store) finishLocked(
-	operation Operation,
-	shape Shape,
 	result EventResult,
 	reason Reason,
 	requests []RepairRequest,
 ) MutationResult {
-	recordEvent(s.surface, shape, operation, result)
-	if result == EventResultCollision && s.recordCollision != nil {
-		s.recordCollision()
+	if result == EventResultInvalid {
+		metrics.RecordSandboxRouteInvalid(string(s.surface))
 	}
-	s.setRecordMetricsLocked()
-	return MutationResult{
-		Result:         result,
-		Reason:         reason,
-		RepairRequests: append([]RepairRequest(nil), requests...),
-	}
-}
-
-func (s *Store) finishRepairLocked(
-	result EventResult,
-	reason Reason,
-	requests []RepairRequest,
-) MutationResult {
 	if result == EventResultCollision && s.recordCollision != nil {
 		s.recordCollision()
 	}

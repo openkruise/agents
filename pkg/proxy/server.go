@@ -34,10 +34,10 @@ import (
 	"k8s.io/klog/v2"
 
 	"github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/metrics"
 	"github.com/openkruise/agents/pkg/peers"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
-	"github.com/openkruise/agents/pkg/sandboxidmetrics"
 	"github.com/openkruise/agents/pkg/sandboxroute"
 	"github.com/openkruise/agents/pkg/utils"
 )
@@ -92,7 +92,7 @@ func NewServer(opts config.SandboxManagerOptions) *Server {
 	store, err := sandboxroute.NewStoreWithOptions(
 		sandboxroute.SurfaceManager,
 		sandboxroute.StoreOptions{CollisionRecorder: func() {
-			sandboxidmetrics.RecordCollision("manager_route")
+			metrics.RecordSandboxIDCollision(metrics.CollisionSurfaceManagerRoute)
 		}},
 	)
 	if err != nil {
@@ -187,11 +187,7 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	shape, err := validateRouteShape(route)
 	if err != nil {
 		log.Error(err, "invalid route refresh payload")
-		operation := sandboxroute.OperationUpsert
-		if route.State == v1alpha1.SandboxStateDead {
-			operation = sandboxroute.OperationDelete
-		}
-		s.store.RecordInvalid(operation, route)
+		s.store.RecordInvalid()
 		http.Error(w, fmt.Sprintf("invalid route refresh payload: %v", err), http.StatusBadRequest)
 		return
 	}

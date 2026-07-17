@@ -25,7 +25,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
@@ -320,8 +320,9 @@ func TestRepairerRechecksRemainingSameUIDClaimant(t *testing.T) {
 }
 
 func TestRepairQueueDepthTracksDeduplicatedPending(t *testing.T) {
+	registry := newRouteMetricRegistry()
 	depth := func() float64 {
-		return testutil.ToFloat64(routeRepairQueueDepth.WithLabelValues(string(SurfaceManager)))
+		return routeGaugeValue(t, registry, "sandbox_route_repair_queue_depth", string(SurfaceManager))
 	}
 	tests := []struct {
 		name string
@@ -378,9 +379,7 @@ func TestRepairQueueDepthTracksDeduplicatedPending(t *testing.T) {
 				<-firstDone
 
 				assert.Equal(t, 2, repairer.Pending())
-				assert.Equal(t, float64(2), testutil.ToFloat64(
-					routeRepairQueueDepth.WithLabelValues(string(SurfaceGateway)),
-				))
+				assert.Equal(t, float64(2), routeGaugeValue(t, registry, "sandbox_route_repair_queue_depth", string(SurfaceGateway)))
 			},
 		},
 		{
@@ -482,6 +481,23 @@ func TestRepairQueueDepthTracksDeduplicatedPending(t *testing.T) {
 			tt.run(t)
 		})
 	}
+}
+
+func routeGaugeValue(t *testing.T, gatherer prometheus.Gatherer, name, surface string) float64 {
+	t.Helper()
+	families, err := gatherer.Gather()
+	require.NoError(t, err)
+	for _, family := range families {
+		if family.GetName() != name {
+			continue
+		}
+		for _, metric := range family.Metric {
+			if len(metric.Label) == 1 && metric.Label[0].GetName() == "surface" && metric.Label[0].GetValue() == surface {
+				return metric.GetGauge().GetValue()
+			}
+		}
+	}
+	return 0
 }
 
 func TestRepairerStartRunsMaintenanceAndStops(t *testing.T) {

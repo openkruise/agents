@@ -529,7 +529,7 @@ unlabeled Sandboxes remain.
 
 | Risk | Mitigation |
 |---|---|
-| Final assignment adds API traffic and a new failure point | Disabled by default; one direct Get per enabled operation, one Update only on first assignment; expose stage metrics |
+| Final assignment adds API traffic and a new failure point | Disabled by default; one direct Get per enabled operation, one Update only on first assignment; retain operation-stage timing and error logs |
 | Client receives short ID before every informer sees the label | Return only after persistence; keep existing eventual-consistency retries; do not create a second alias |
 | Late peer events delete or revive a newer route | Full/ID-only authority separation, UID/RV fencing, retired/deletion fences, and targeted authoritative repair |
 | Ambiguities accumulate faster than they can be verified | Deduplicate by ObjectKey, bound repair concurrency/QPS, retry with backoff, quarantine until verified, and expose queue health |
@@ -542,15 +542,11 @@ unlabeled Sandboxes remain.
 ## Observability
 
 Metrics use only bounded labels; namespace, name, UID, and Sandbox ID are excluded from metric
-dimensions. The implementation reports:
-
-- legacy versus labeled resolution and short assignment success/failure;
-- rejected reserved-label mutations by input boundary;
-- cache and route ID collisions;
-- full versus ID-only route events, results, and current record counts;
-- legacy delete fallback usage;
-- targeted repair queue depth, retries, stale results, and outcomes;
-- final post-modifier Get, Update, conflict retry, and duration.
+dimensions. The implementation reports seven metrics covering legacy resolution, short assignment
+success/failure, cache and route collisions, legacy delete fallback usage, invalid route mutations,
+current ID-only or collision records, and targeted-repair queue depth. Normal route events,
+assignment error reasons, repair outcomes/retries, reserved-label validation failures, and
+PostModifier details remain in structured logs or existing claim/clone operation-stage timings.
 
 Structured logs include namespace/name for internal assignment, collision, and route-repair
 diagnostics. Successful assignment is debug-level to avoid per-Sandbox info-log volume. E2B-visible

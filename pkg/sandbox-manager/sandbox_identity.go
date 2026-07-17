@@ -25,9 +25,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog/v2"
 
+	agentmetrics "github.com/openkruise/agents/pkg/metrics"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/sandboxid"
-	"github.com/openkruise/agents/pkg/sandboxidmetrics"
 	"github.com/openkruise/agents/pkg/utils"
 )
 
@@ -44,12 +44,11 @@ func snapshotReservedLabel(object metav1.Object) reservedLabelSnapshot {
 	return reservedLabelSnapshot{present: present, value: value}
 }
 
-func ensureReservedLabelUnchanged(object metav1.Object, before reservedLabelSnapshot, surface string) error {
+func ensureReservedLabelUnchanged(object metav1.Object, before reservedLabelSnapshot) error {
 	after := snapshotReservedLabel(object)
 	if before == after {
 		return nil
 	}
-	sandboxidmetrics.RecordReservedMutationRejected(surface)
 	return fmt.Errorf("%w: %s is managed by sandbox-manager core", ErrReservedSandboxIDMutation, sandboxid.LabelKey)
 }
 
@@ -62,7 +61,7 @@ func guardPreModifier(modifier func(infra.Sandbox) error) func(infra.Sandbox) er
 		if err := modifier(sandbox); err != nil {
 			return err
 		}
-		return ensureReservedLabelUnchanged(sandbox, before, "manager_pre")
+		return ensureReservedLabelUnchanged(sandbox, before)
 	}
 }
 
@@ -113,7 +112,7 @@ func composePostModifier(
 				state.callerFailed = true
 				return false, err
 			}
-			if err := ensureReservedLabelUnchanged(sandbox, before, "manager_post"); err != nil {
+			if err := ensureReservedLabelUnchanged(sandbox, before); err != nil {
 				state.callerFailed = true
 				return false, err
 			}
@@ -155,12 +154,9 @@ func recordSandboxIDAssignment(ctx context.Context, state *sandboxIDAssignmentSt
 	if state == nil || !state.enabled {
 		return
 	}
-	if duration > 0 {
-		sandboxidmetrics.ObserveAssignmentDuration(duration)
-	}
 	if operationErr == nil {
 		if state.assigned {
-			sandboxidmetrics.RecordAssigned()
+			agentmetrics.RecordSandboxIDAssignment(agentmetrics.SandboxIDAssignmentResultSuccess)
 			klog.FromContext(ctx).V(utils.DebugLogLevel).Info("assigned short Sandbox ID", "namespace", state.namespace, "name", state.name)
 		}
 		return
@@ -169,7 +165,7 @@ func recordSandboxIDAssignment(ctx context.Context, state *sandboxIDAssignmentSt
 	if reason == "" {
 		return
 	}
-	sandboxidmetrics.RecordAssignmentError(reason)
+	agentmetrics.RecordSandboxIDAssignment(agentmetrics.SandboxIDAssignmentResultFailure)
 	klog.FromContext(ctx).Error(operationErr, "failed to assign short Sandbox ID", "reason", reason, "namespace", state.namespace, "name", state.name)
 }
 

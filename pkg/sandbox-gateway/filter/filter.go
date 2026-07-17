@@ -26,9 +26,9 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/registry"
+	"github.com/openkruise/agents/pkg/sandboxroute"
 	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
 	"github.com/openkruise/agents/pkg/utils"
-	proxyutils "github.com/openkruise/agents/pkg/utils/proxyutils"
 )
 
 var logger *zap.Logger
@@ -149,7 +149,7 @@ func (f *sandboxFilter) DecodeHeaders(header api.RequestHeaderMap, endStream boo
 	return api.Continue
 }
 
-func (f *sandboxFilter) authenticate(header api.RequestHeaderMap, route proxyutils.Route) api.StatusType {
+func (f *sandboxFilter) authenticate(header api.RequestHeaderMap, route sandboxroute.Route) api.StatusType {
 	if route.RequireTrafficAuth {
 		if !f.config.EnableJWTAuth {
 			return f.verifierUnavailable(route.ID)
@@ -181,7 +181,7 @@ func (f *sandboxFilter) authenticate(header api.RequestHeaderMap, route proxyuti
 	return api.LocalReply
 }
 
-func (f *sandboxFilter) authenticateJWT(header api.RequestHeaderMap, route proxyutils.Route) api.StatusType {
+func (f *sandboxFilter) authenticateJWT(header api.RequestHeaderMap, route sandboxroute.Route) api.StatusType {
 	if f.jwtAuthManager == nil {
 		return f.verifierUnavailable(route.ID)
 	}

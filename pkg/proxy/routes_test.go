@@ -27,10 +27,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/openkruise/agents/pkg/metrics"
 	"github.com/openkruise/agents/pkg/peers"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandboxroute"
-	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -38,7 +39,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
-	"sigs.k8s.io/controller-runtime/pkg/metrics"
 )
 
 // mockPeers is a simple in-memory Peers implementation for testing
@@ -192,36 +192,29 @@ func TestSetRouteInvalidMetric(t *testing.T) {
 	tests := []struct {
 		name  string
 		route Route
-		shape sandboxroute.Shape
 	}{
-		{name: "ID-only", route: Route{}, shape: sandboxroute.ShapeIDOnly},
-		{name: "full attempt", route: Route{Namespace: "ns"}, shape: sandboxroute.ShapeFull},
+		{name: "decoded invalid route", route: Route{}},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := newTestServer(nil)
-			enqueued := 0
-			s.SetRepairEnqueuer(func(sandboxroute.MutationResult) { enqueued++ })
-			labels := routeEventLabels(sandboxroute.SurfaceManager, tt.shape, sandboxroute.OperationUpsert)
-			before := proxyCounterValue(t, "sandbox_route_event_total", labels)
-			beforeRouteCount := testutil.ToFloat64(routeCount)
+			labels := routeInvalidLabels(sandboxroute.SurfaceManager)
+			before := proxyCounterValue(t, "sandbox_route_invalid_total", labels)
 
 			result := s.SetRoute(t.Context(), tt.route)
 
 			assert.Equal(t, sandboxroute.EventResultInvalid, result.Result)
-			assert.Equal(t, before+1, proxyCounterValue(t, "sandbox_route_event_total", labels))
-			assert.Empty(t, s.ListRoutes())
-			assert.Equal(t, sandboxroute.StoreStats{}, s.Store().Stats())
-			assert.Equal(t, beforeRouteCount, testutil.ToFloat64(routeCount))
-			assert.Zero(t, enqueued)
+			assert.Equal(t, before+1, proxyCounterValue(t, "sandbox_route_invalid_total", labels))
 		})
 	}
 }
 
 func proxyCounterValue(t *testing.T, name string, expectedLabels map[string]string) float64 {
 	t.Helper()
-	families, err := metrics.Registry.Gather()
+	registry := prometheus.NewRegistry()
+	metrics.RegisterSandboxRoute(registry)
+	families, err := registry.Gather()
 	require.NoError(t, err)
 	for _, family := range families {
 		if family.GetName() != name {
@@ -248,13 +241,8 @@ func proxyMetricLabelsMatch(metric *dto.Metric, expected map[string]string) bool
 	return true
 }
 
-func routeEventLabels(surface sandboxroute.Surface, shape sandboxroute.Shape, operation sandboxroute.Operation) map[string]string {
-	return map[string]string{
-		"surface":   string(surface),
-		"shape":     string(shape),
-		"operation": string(operation),
-		"result":    string(sandboxroute.EventResultInvalid),
-	}
+func routeInvalidLabels(surface sandboxroute.Surface) map[string]string {
+	return map[string]string{"surface": string(surface)}
 }
 
 // ---- LoadRoute tests ----

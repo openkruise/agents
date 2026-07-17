@@ -35,9 +35,9 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/identity"
+	"github.com/openkruise/agents/pkg/metrics"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/jwtauth"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/registry"
-	"github.com/openkruise/agents/pkg/sandboxidmetrics"
 	"github.com/openkruise/agents/pkg/sandboxroute"
 	"github.com/openkruise/agents/pkg/utils"
 )
@@ -48,6 +48,8 @@ type LegacyFallback func(namespace, name string) string
 // FormattedResolver returns an opaque Sandbox ID and its bounded format.
 type FormattedResolver func(metav1.Object) (id, format string)
 
+const legacySandboxIDFormat = "legacy"
+
 // NewRouteProjector wires gateway resolution observability around a neutral Projector.
 func NewRouteProjector(resolve FormattedResolver) *sandboxroute.Projector {
 	if resolve == nil {
@@ -55,7 +57,9 @@ func NewRouteProjector(resolve FormattedResolver) *sandboxroute.Projector {
 	}
 	return sandboxroute.NewProjector(func(object metav1.Object) string {
 		id, format := resolve(object)
-		sandboxidmetrics.RecordResolved(format, "gateway")
+		if format == legacySandboxIDFormat {
+			metrics.RecordSandboxIDLegacyResolution(metrics.LegacyResolutionSurfaceGateway)
+		}
 		return id
 	})
 }

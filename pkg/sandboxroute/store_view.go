@@ -20,6 +20,8 @@ import (
 	"sort"
 
 	"k8s.io/apimachinery/pkg/types"
+
+	"github.com/openkruise/agents/pkg/metrics"
 )
 
 // Get returns the unique active route for id.
@@ -194,10 +196,8 @@ func (s *Store) recomputeActiveViewLocked() {
 
 func (s *Store) setRecordMetricsLocked() {
 	stats := s.statsLocked()
-	setRecords(s.surface, ShapeFull, stats.Full)
-	setRecords(s.surface, ShapeIDOnly, stats.IDOnly)
-	setRecords(s.surface, ShapeRetired, stats.Retired)
-	setRecords(s.surface, ShapeCollision, stats.Collision)
+	metrics.SetSandboxRouteRecords(string(s.surface), metrics.RouteRecordShapeIDOnly, stats.IDOnly)
+	metrics.SetSandboxRouteRecords(string(s.surface), metrics.RouteRecordShapeCollision, stats.Collision)
 }
 
 func (s *Store) statsLocked() StoreStats {

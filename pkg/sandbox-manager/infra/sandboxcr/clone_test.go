@@ -887,7 +887,6 @@ func TestInfraCloneSandbox_PostModifierErrorUsesCleanup(t *testing.T) {
 			assert.Equal(t, 1, createCalls)
 			assert.Equal(t, 1, modifierCalls)
 			assert.Zero(t, metrics.Retries)
-			assert.GreaterOrEqual(t, metrics.PostModifier, time.Duration(0))
 
 			persisted := &v1alpha1.Sandbox{}
 			err = fc.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: sandboxName}, persisted)
@@ -1341,10 +1340,9 @@ func TestCloneSandbox(t *testing.T) {
 				RunCommandImmediately: true,
 			},
 			sbxOverride: sbxOverride{Name: "test-sandbox-clone-post-modifier"},
-			postCheck: func(t *testing.T, sbx infra.Sandbox, metrics infra.CloneMetrics) {
+			postCheck: func(t *testing.T, sbx infra.Sandbox, _ infra.CloneMetrics) {
 				assert.Equal(t, "applied", sbx.GetLabels()["test.example/post-modifier"])
 				assert.Equal(t, user, sbx.GetAnnotations()[v1alpha1.AnnotationOwner])
-				assert.GreaterOrEqual(t, metrics.PostModifier, time.Duration(0))
 			},
 		},
 		{

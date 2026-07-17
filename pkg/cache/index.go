@@ -45,24 +45,10 @@ type IndexFunc struct {
 	Extract   func(obj client.Object) []string
 }
 
-// SandboxIDResolver returns the single claimed-Sandbox index key for an object.
-type SandboxIDResolver func(metav1.Object) string
-
-// Options configures optional cache behavior while preserving legacy defaults.
-type Options struct {
-	SandboxIDResolver SandboxIDResolver
-}
-
 // GetIndexFuncs returns all field index functions used by the cache.
 // This is the single source of truth for index definitions, shared between
 // AddIndexesToCache (production) and NewTestCache (testing).
-func GetIndexFuncs() []IndexFunc {
-	return GetIndexFuncsWithOptions(Options{})
-}
-
-// GetIndexFuncsWithOptions returns all field index functions with optional
-// behavior overrides.
-func GetIndexFuncsWithOptions(options Options) []IndexFunc {
+func GetIndexFuncs(options Options) []IndexFunc {
 	sandboxIDResolver := getSandboxIDResolver(options)
 	return []IndexFunc{
 		{
@@ -197,17 +183,11 @@ func legacySandboxIDResolver(obj metav1.Object) string {
 }
 
 // AddIndexesToCache registers all required field indexes on the controller-runtime cache.
-func AddIndexesToCache(c ctrlcache.Cache) error {
-	return AddIndexesToCacheWithOptions(c, Options{})
-}
-
-// AddIndexesToCacheWithOptions registers all required field indexes with
-// optional behavior overrides.
-func AddIndexesToCacheWithOptions(c ctrlcache.Cache, options Options) error {
+func AddIndexesToCache(c ctrlcache.Cache, options Options) error {
 	if c == nil {
 		return nil
 	}
-	for _, idx := range GetIndexFuncsWithOptions(options) {
+	for _, idx := range GetIndexFuncs(options) {
 		if err := c.IndexField(context.Background(), idx.Obj, idx.FieldName, idx.Extract); err != nil {
 			return err
 		}

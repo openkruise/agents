@@ -228,11 +228,7 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	log.V(utils.DebugLogLevel).Info("Received route refresh", "route", route)
 	if err := route.Validate(); err != nil {
 		log.Error(err, "Rejected malformed route refresh")
-		operation := sandboxroute.OperationDelete
-		if route.State == v1alpha1.SandboxStateRunning {
-			operation = sandboxroute.OperationUpsert
-		}
-		s.routeRegistry().Store().RecordInvalid(operation, route)
+		s.routeRegistry().Store().RecordInvalid()
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
