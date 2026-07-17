@@ -18,6 +18,7 @@ package oidc
 
 import (
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
@@ -69,6 +70,12 @@ func TestVerifierVerify(t *testing.T) {
 			name: "valid ECDSA token",
 			rawJWT: func(t *testing.T) string {
 				return signToken(t, jose.ES256, ecdsaKey, "ecdsa", validClaims)
+			},
+		},
+		{
+			name: "valid RSA token without JWK algorithm",
+			rawJWT: func(t *testing.T) string {
+				return signToken(t, jose.RS256, rsaKey, "rsa-no-alg", validClaims)
 			},
 		},
 		{
@@ -152,6 +159,22 @@ func TestVerifierVerify(t *testing.T) {
 				return signToken(t, jose.PS256, rsaKey, "rsa", validClaims)
 			},
 			expectError: "does not match JWK algorithm",
+		},
+		{
+			name: "key type incompatible with algorithm",
+			rawJWT: func(t *testing.T) string {
+				return signToken(t, jose.ES256, ecdsaKey, "rsa-no-alg", validClaims)
+			},
+			expectError: "incompatible with key",
+		},
+		{
+			name: "invalid claim type",
+			rawJWT: func(t *testing.T) string {
+				claims := cloneClaims(validClaims)
+				claims["exp"] = "invalid"
+				return signToken(t, jose.RS256, rsaKey, "rsa", claims)
+			},
+			expectError: "decode claims",
 		},
 		{
 			name: "missing exp",
@@ -244,6 +267,9 @@ func TestVerifierVerify(t *testing.T) {
 					"ecdsa": {
 						Key: &ecdsaKey.PublicKey, KeyID: "ecdsa", Algorithm: string(jose.ES256), Use: "sig",
 					},
+					"rsa-no-alg": {
+						Key: &rsaKey.PublicKey, KeyID: "rsa-no-alg", Use: "sig",
+					},
 				},
 				clockSkew:    time.Minute,
 				maxTokenSize: maxTokenSize,
@@ -265,9 +291,41 @@ func TestVerifierVerify(t *testing.T) {
 	}
 }
 
+func TestDecodeJWKs(t *testing.T) {
+	rsaKey := mustRSAKey(t)
+	publicJWK := jose.JSONWebKey{Key: &rsaKey.PublicKey, KeyID: "rsa", Use: "sig", Algorithm: string(jose.RS256)}
+	withVerifyOperation := json.RawMessage(strings.TrimSuffix(mustJSON(t, publicJWK), "}") + `,"key_ops":["sign","verify"]}`)
+
+	tests := []struct {
+		name        string
+		rawKeys     []json.RawMessage
+		expectCount int
+		expectError string
+	}{
+		{name: "verify operation permitted", rawKeys: []json.RawMessage{withVerifyOperation}, expectCount: 1},
+		{name: "malformed metadata", rawKeys: []json.RawMessage{json.RawMessage(`{`)}, expectError: "decode key 0 metadata"},
+		{name: "invalid JWK", rawKeys: []json.RawMessage{json.RawMessage(`{"kty":"unsupported","kid":"bad"}`)}, expectError: "decode key 0"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			keys, err := decodeJWKs(tt.rawKeys)
+			if tt.expectError != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
+				return
+			}
+			require.NoError(t, err)
+			assert.Len(t, keys, tt.expectCount)
+		})
+	}
+}
+
 func TestValidateKeys(t *testing.T) {
 	rsaKey := mustRSAKey(t)
 	ecdsaKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	ed25519PublicKey, _, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
 	validRSA := jose.JSONWebKey{Key: &rsaKey.PublicKey, KeyID: "rsa", Use: "sig", Algorithm: string(jose.RS256)}
 
@@ -278,8 +336,10 @@ func TestValidateKeys(t *testing.T) {
 		expectError string
 	}{
 		{name: "RSA and ECDSA public keys", keys: []jose.JSONWebKey{validRSA, {Key: &ecdsaKey.PublicKey, KeyID: "ec"}}, expectCount: 2},
+		{name: "Ed25519 public key", keys: []jose.JSONWebKey{{Key: ed25519PublicKey, KeyID: "ed25519", Use: "sig", Algorithm: string(jose.EdDSA)}}, expectCount: 1},
 		{name: "empty set", expectError: "at least one key"},
 		{name: "invalid key", keys: []jose.JSONWebKey{{KeyID: "bad"}}, expectError: "invalid"},
+		{name: "invalid RSA parameters", keys: []jose.JSONWebKey{{Key: &rsa.PublicKey{}, KeyID: "invalid-rsa"}}, expectError: "invalid"},
 		{name: "empty kid", keys: []jose.JSONWebKey{{Key: &rsaKey.PublicKey}}, expectError: "empty kid"},
 		{name: "encryption use", keys: []jose.JSONWebKey{{Key: &rsaKey.PublicKey, KeyID: "enc", Use: "enc"}}, expectError: "unsupported use"},
 		{name: "symmetric key", keys: []jose.JSONWebKey{{Key: []byte(strings.Repeat("x", 32)), KeyID: "symmetric"}}, expectError: "asymmetric public key"},
@@ -298,6 +358,44 @@ func TestValidateKeys(t *testing.T) {
 			}
 			require.NoError(t, err)
 			assert.Len(t, keys, tt.expectCount)
+		})
+	}
+}
+
+func TestAlgorithmSupportsKey(t *testing.T) {
+	rsaKey := mustRSAKey(t)
+	p384Key, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	require.NoError(t, err)
+	p521Key, err := ecdsa.GenerateKey(elliptic.P521(), rand.Reader)
+	require.NoError(t, err)
+	ed25519PublicKey, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name      string
+		algorithm jose.SignatureAlgorithm
+		key       interface{}
+		expected  bool
+	}{
+		{name: "RSA RS384", algorithm: jose.RS384, key: &rsaKey.PublicKey, expected: true},
+		{name: "RSA RS512", algorithm: jose.RS512, key: &rsaKey.PublicKey, expected: true},
+		{name: "RSA PS256", algorithm: jose.PS256, key: &rsaKey.PublicKey, expected: true},
+		{name: "RSA PS384", algorithm: jose.PS384, key: &rsaKey.PublicKey, expected: true},
+		{name: "RSA PS512", algorithm: jose.PS512, key: &rsaKey.PublicKey, expected: true},
+		{name: "RSA rejects ECDSA", algorithm: jose.ES256, key: &rsaKey.PublicKey},
+		{name: "P-384 accepts ES384", algorithm: jose.ES384, key: &p384Key.PublicKey, expected: true},
+		{name: "P-384 rejects ES256", algorithm: jose.ES256, key: &p384Key.PublicKey},
+		{name: "P-521 accepts ES512", algorithm: jose.ES512, key: &p521Key.PublicKey, expected: true},
+		{name: "P-521 rejects ES384", algorithm: jose.ES384, key: &p521Key.PublicKey},
+		{name: "unsupported ECDSA curve", algorithm: jose.ES256, key: &ecdsa.PublicKey{Curve: elliptic.P224()}},
+		{name: "Ed25519 accepts EdDSA", algorithm: jose.EdDSA, key: ed25519PublicKey, expected: true},
+		{name: "Ed25519 rejects RSA", algorithm: jose.RS256, key: ed25519PublicKey},
+		{name: "unsupported key type", algorithm: jose.HS256, key: []byte("symmetric")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, algorithmSupportsKey(tt.algorithm, tt.key))
 		})
 	}
 }

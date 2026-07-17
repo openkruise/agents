@@ -69,6 +69,30 @@ func TestHealthHandlers(t *testing.T) {
 	}
 }
 
+func TestStartRegistersHealthHandlers(t *testing.T) {
+	server := NewServer(nil, 0)
+	mux := server.newServeMux()
+
+	tests := []struct {
+		name         string
+		path         string
+		method       string
+		expectStatus int
+	}{
+		{name: "health route", path: HealthAPI, method: http.MethodGet, expectStatus: http.StatusOK},
+		{name: "readiness route", path: ReadyAPI, method: http.MethodGet, expectStatus: http.StatusOK},
+		{name: "refresh route", path: proxy.RefreshAPI, method: http.MethodGet, expectStatus: http.StatusMethodNotAllowed},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			request := httptest.NewRequest(tt.method, tt.path, nil)
+			response := httptest.NewRecorder()
+			mux.ServeHTTP(response, request)
+			assert.Equal(t, tt.expectStatus, response.Code)
+		})
+	}
+}
+
 func TestGetMemberlistBindPort(t *testing.T) {
 	tests := []struct {
 		name     string

@@ -19,7 +19,9 @@ package oidc
 import (
 	"context"
 	"encoding/pem"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -43,12 +45,14 @@ const (
 )
 
 type loaderFixture struct {
-	discoveryStatus int
-	discoveryBody   string
-	jwksStatus      int
-	jwksBody        string
-	discoveryCalls  int
-	jwksCalls       int
+	discoveryStatus   int
+	discoveryBody     string
+	jwksStatus        int
+	jwksBody          string
+	discoveryCalls    int
+	jwksCalls         int
+	discoveryLocation string
+	redirectCalls     int
 }
 
 func TestNewVerifier(t *testing.T) {
@@ -68,8 +72,13 @@ func TestNewVerifier(t *testing.T) {
 		{name: "valid flow and immutable key snapshot", assertVerifier: true, expectDiscovery: 1, expectJWKS: 1},
 		{name: "ConfigMap missing", configMap: "missing", expectError: "get CA ConfigMap"},
 		{name: "CA key missing", configMap: "key-missing", expectError: "does not contain non-empty key"},
+		{name: "CA key empty", configMap: "key-empty", expectError: "does not contain non-empty key"},
 		{name: "CA PEM invalid", configMap: "bad-ca", expectError: "contains no valid PEM certificates"},
 		{name: "discovery non-200", configure: func(f *loaderFixture, _ *httptest.Server) { f.discoveryStatus = http.StatusServiceUnavailable }, expectDiscovery: 1, expectError: "unexpected HTTP status"},
+		{name: "discovery redirect is not followed", configure: func(f *loaderFixture, server *httptest.Server) {
+			f.discoveryStatus = http.StatusFound
+			f.discoveryLocation = server.URL + "/redirected"
+		}, expectDiscovery: 1, expectError: "unexpected HTTP status"},
 		{name: "discovery malformed", configure: func(f *loaderFixture, _ *httptest.Server) { f.discoveryBody = "{" }, expectDiscovery: 1, expectError: "decode JSON response"},
 		{name: "discovery missing issuer", configure: func(f *loaderFixture, server *httptest.Server) {
 			f.discoveryBody = fmt.Sprintf(`{"jwks_uri":%q}`, server.URL+"/jwks")
@@ -100,12 +109,18 @@ func TestNewVerifier(t *testing.T) {
 				switch request.URL.Path {
 				case "/discovery":
 					fixture.discoveryCalls++
+					if fixture.discoveryLocation != "" {
+						response.Header().Set("Location", fixture.discoveryLocation)
+					}
 					response.WriteHeader(fixture.discoveryStatus)
 					_, _ = response.Write([]byte(fixture.discoveryBody))
 				case "/jwks":
 					fixture.jwksCalls++
 					response.WriteHeader(fixture.jwksStatus)
 					_, _ = response.Write([]byte(fixture.jwksBody))
+				case "/redirected":
+					fixture.redirectCalls++
+					response.WriteHeader(http.StatusOK)
 				default:
 					response.WriteHeader(http.StatusNotFound)
 				}
@@ -152,6 +167,7 @@ func TestNewVerifier(t *testing.T) {
 			}
 			assert.Equal(t, tt.expectDiscovery, fixture.discoveryCalls)
 			assert.Equal(t, tt.expectJWKS, fixture.jwksCalls)
+			assert.Zero(t, fixture.redirectCalls)
 		})
 	}
 }
@@ -192,6 +208,8 @@ func loaderReader(t *testing.T, server *httptest.Server, configMapMode string) c
 	switch configMapMode {
 	case "key-missing":
 		data = map[string]string{}
+	case "key-empty":
+		data[testCAKey] = ""
 	case "bad-ca":
 		data[testCAKey] = "not a certificate"
 	}
@@ -200,6 +218,58 @@ func loaderReader(t *testing.T, server *httptest.Server, configMapMode string) c
 		Data:       data,
 	}
 	return builder.WithObjects(configMap).Build()
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
+
+type errorReader struct {
+	err error
+}
+
+func (r errorReader) Read([]byte) (int, error) {
+	return 0, r.err
+}
+
+func TestFetchJSONFailures(t *testing.T) {
+	tests := []struct {
+		name        string
+		run         func() error
+		expectError string
+	}{
+		{
+			name: "invalid request URL",
+			run: func() error {
+				return fetchJSON(context.Background(), http.DefaultClient, "\x00", 1024, &map[string]string{})
+			},
+			expectError: "create request",
+		},
+		{
+			name: "response body read failure",
+			run: func() error {
+				client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Status:     "200 OK",
+						Body:       io.NopCloser(errorReader{err: errors.New("read failed")}),
+					}, nil
+				})}
+				return fetchJSON(context.Background(), client, "https://issuer.example", 1024, &map[string]string{})
+			},
+			expectError: "read response body",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.run()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.expectError)
+		})
+	}
 }
 
 func TestFetchJSON(t *testing.T) {

@@ -187,9 +187,6 @@ func (v *verifier) Verify(rawJWT string) (*TrafficAccessTokenClaims, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse signed token: %w", err)
 	}
-	if len(token.Headers) != 1 {
-		return nil, fmt.Errorf("token must contain exactly one signature")
-	}
 	header := token.Headers[0]
 	if header.KeyID == "" {
 		return nil, fmt.Errorf("token header must contain a kid")
